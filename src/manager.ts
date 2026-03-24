@@ -26,6 +26,18 @@ const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const WORKER_PREFIX = "worker-";
 const CATEGORY_NAME = "agents";
+// 危险操作黑名单
+const DISALLOWED_TOOLS = [
+  'Bash(rm -rf:*)',
+  'Bash(rm -r:*)',
+  'Bash(rmdir:*)',
+  'Bash(git push --force:*)',
+  'Bash(git reset --hard:*)',
+  'Bash(git clean -f:*)',
+  'Bash(chmod 777:*)',
+  'Bash(:(){ :|:&};:)',   // fork bomb
+].join(' ');
+const CLAUDE_BASE_FLAGS = `--dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions --disallowedTools "${DISALLOWED_TOOLS}"`;
 
 // ============================================================
 // Registry
@@ -421,7 +433,7 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
   // 3. 启动 Claude Code
   const target = windowTarget(tmuxName);
   const sessionId = crypto.randomUUID();
-  const cmd = `DISCORD_CHANNEL_ID=${channelId} BRIDGE_URL=${BRIDGE_URL} claude --session-id ${sessionId} --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
+  const cmd = `DISCORD_CHANNEL_ID=${channelId} BRIDGE_URL=${BRIDGE_URL} claude --session-id ${sessionId} ${CLAUDE_BASE_FLAGS}`;
   await tmuxRaw(["send-keys", "-t", target, "-l", "--", cmd]);
   await Bun.sleep(100);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
@@ -523,7 +535,7 @@ async function cmdResume(
   // 启动 Claude Code（resume 模式）
   const target = windowTarget(tmuxName);
   const displayName = channelName;
-  const cmd = `DISCORD_CHANNEL_ID=${channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${sessionId} --name "${displayName}" --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
+  const cmd = `DISCORD_CHANNEL_ID=${channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${sessionId} --name "${displayName}" ${CLAUDE_BASE_FLAGS}`;
   await tmuxRaw(["send-keys", "-t", target, "-l", "--", cmd]);
   await Bun.sleep(100);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
@@ -760,7 +772,7 @@ async function cmdRestart(name?: string) {
 
     // 3. 重新启动 Claude Code
     const displayName = info.displayName || tmuxName.replace(WORKER_PREFIX, "");
-    const cmd = `DISCORD_CHANNEL_ID=${info.channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${info.sessionId} --name "${displayName}" --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
+    const cmd = `DISCORD_CHANNEL_ID=${info.channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${info.sessionId} --name "${displayName}" ${CLAUDE_BASE_FLAGS}`;
 
     const started = await startClaudeInWindow(tmuxName, cmd);
     results.push({

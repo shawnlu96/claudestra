@@ -166,6 +166,16 @@ Mobile-friendly guidelines:
 - Use inline \`code\` for short references, code blocks only for actual code.
 - Keep replies focused — don't over-explain.
 
+File attachments:
+Use the "files" parameter in the reply tool to send files: reply(chat_id, text, files=["/abs/path.png"]).
+Useful for screenshots, generated images, logs, diffs, etc.
+
+Progress updates with edit_message:
+For multi-step tasks, you can send one progress message and keep editing it instead of sending many messages:
+1. Send initial: reply(chat_id, "⏳ Step 1/3...") → save the returned message_id
+2. Update: edit_message(chat_id, message_id, "⏳ Step 2/3...")
+3. Final: send a NEW reply with [DONE] (new message triggers phone notification, edits don't)
+
 CRITICAL — Progress reporting for Discord messages:
 Every <channel> message that requires ANY work (even a one-line edit) MUST follow this pattern:
 1. IMMEDIATELY reply what you're about to do BEFORE doing it
@@ -219,6 +229,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 - Select menu: { "type": "select", "id": "unique_id", "placeholder": "Choose...", "options": [{ "label": "Option 1", "value": "val1", "description": "optional" }] }
 When a user clicks a button, you'll receive a channel message: [button:unique_id]
 When a user selects from a menu, you'll receive: [select:unique_id:selected_value]`,
+          },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description: "Absolute file paths to attach (images, logs, etc). Max 10 files, 25MB each.",
           },
         },
         required: ["chat_id", "text"],
@@ -287,6 +302,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         text: args?.text || "",
         replyTo: args?.reply_to,
         components: args?.components,
+        files: args?.files,
       });
       return {
         content: [

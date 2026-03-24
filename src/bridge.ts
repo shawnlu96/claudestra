@@ -484,7 +484,8 @@ async function discordReply(
   chatId: string,
   text: string,
   replyTo?: string,
-  components?: any[]
+  components?: any[],
+  files?: string[]
 ): Promise<string[]> {
   const channel = await discord.channels.fetch(chatId);
   if (!channel || !("send" in channel)) {
@@ -505,9 +506,12 @@ async function discordReply(
     if (i === 0 && replyTo) {
       options.reply = { messageId: replyTo };
     }
-    // 只有最后一块带组件
+    // 只有最后一块带组件和文件
     if (isLast && discordComponents?.length) {
       options.components = discordComponents;
+    }
+    if (isLast && files?.length) {
+      options.files = files.map((f) => ({ attachment: f }));
     }
     const sent = await textChannel.send(options);
     messageIds.push(sent.id);
@@ -656,7 +660,7 @@ async function handleClientMessage(
         } else {
           ensureTyping(msg.chatId);
         }
-        const ids = await discordReply(msg.chatId, text, msg.replyTo, msg.components);
+        const ids = await discordReply(msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(
           JSON.stringify({
             type: "response",
