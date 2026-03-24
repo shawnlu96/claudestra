@@ -228,6 +228,28 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 // ============================================================
 
 const MANAGER_PATH = `${import.meta.dir}/manager.ts`;
+const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
+
+async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
+  const target = windowName === "master" ? "master:0" : `master:${windowName}`;
+  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.trim();
+}
+
+async function tmuxScreenshot(windowName: string): Promise<string | null> {
+  const content = await tmuxCapture(windowName, 60);
+  if (!content) return null;
+
+  // 写成文本文件发送（Discord 会渲染为附件）
+  const filePath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.txt`;
+  await Bun.write(filePath, content);
+  return filePath;
+}
 
 async function runManager(...args: string[]): Promise<any> {
   const proc = Bun.spawn(["bun", "run", MANAGER_PATH, ...args], {
@@ -275,6 +297,7 @@ async function handleMgmtButton(
     const buttons: any[] = [];
     if (activeWorkers.length > 0) {
       buttons.push(
+        { id: "show_peek_menu", label: "监工", emoji: "👁", style: "primary" },
         { id: "restart_all", label: "全部重启", emoji: "🔄", style: "secondary" },
         { id: "show_kill_menu", label: "销毁 Agent", emoji: "🗑", style: "danger" },
       );
@@ -304,6 +327,29 @@ async function handleMgmtButton(
           label: w.name,
           value: w.name.replace("worker-", ""),
         })),
+      }],
+    };
+  }
+
+  if (id === "show_peek_menu") {
+    const result = await runManager("list");
+    if (!result.ok) return { text: `❌ ${result.error}` };
+    const activeWorkers = (result.workers || []).filter((w: any) => w.status === "active");
+    // 加上大总管自己
+    const options = [
+      { label: "🎛 大总管 (master)", value: "master" },
+      ...activeWorkers.map((w: any) => ({
+        label: w.name,
+        value: w.name,
+      })),
+    ];
+    return {
+      text: "**👁 选择要查看的 Agent：**",
+      components: [{
+        type: "select",
+        id: "peek_worker",
+        placeholder: "选择 Agent",
+        options,
       }],
     };
   }
@@ -363,6 +409,25 @@ async function handleMgmtSelect(
         { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
         { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
         { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
+      ]}],
+    };
+  }
+
+  if (id === "peek_worker") {
+    const windowName = value;
+    const filePath = await tmuxScreenshot(windowName);
+    if (!filePath) {
+      return { text: `❌ 无法截取 \`${windowName}\` 的终端内容` };
+    }
+    // 同时发送文本预览（最后 15 行）和完整文件
+    const preview = await tmuxCapture(windowName, 15);
+    // 清理 ANSI 码
+    const cleaned = preview.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+    return {
+      text: `**👁 ${windowName} 终端截取**\n\`\`\`\n${cleaned.slice(0, 1800)}\n\`\`\``,
+      components: [{ type: "buttons", buttons: [
+        { id: "show_peek_menu", label: "再看一个", emoji: "👁", style: "primary" },
+        { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "secondary" },
       ]}],
     };
   }
