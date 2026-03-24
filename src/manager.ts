@@ -624,60 +624,93 @@ async function cmdKill(name: string) {
 // 优雅退出 + 重启
 // ============================================================
 
-/** 等待 tmux window 到达 shell 提示符（$ 或 %） */
-async function waitForShell(name: string, timeoutMs = 15000): Promise<boolean> {
-  const target = windowTarget(name);
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const pane = await captureLast(name, 5);
-    // macOS zsh 提示符通常以 % 结尾，bash 以 $ 结尾
-    if (/[%$]\s*$/.test(pane)) return true;
-    await Bun.sleep(500);
-  }
-  return false;
+/** 检查 tmux pane 是否在 shell 提示符 */
+function isAtShell(pane: string): boolean {
+  const lastLine = pane.split("\n").filter((l) => l.trim()).pop() || "";
+  return /[%$]\s*$/.test(lastLine);
 }
 
-/** 优雅退出一个 Claude Code worker，处理所有确认弹窗 */
+/** 检查是否有需要按 Enter 的提示 */
+function hasPromptToConfirm(pane: string): boolean {
+  return (
+    pane.includes("Enter to confirm") ||
+    pane.includes("Esc to cancel") ||
+    pane.includes("Do you want") ||
+    pane.includes("Are you sure") ||
+    pane.includes("I am using this for local development") ||
+    pane.includes("trust the files") ||
+    pane.includes("Trust the files") ||
+    pane.includes("Do you trust") ||
+    (pane.includes("❯ 1.") && pane.includes("Yes"))
+  );
+}
+
+/** 优雅退出一个 Claude Code agent，处理所有确认弹窗 */
 async function gracefulExit(name: string): Promise<boolean> {
   const target = windowTarget(name);
 
-  // 先发 Ctrl+C 打断任何正在进行的操作
-  await tmuxRaw(["send-keys", "-t", target, "C-c"]);
-  await Bun.sleep(1000);
+  // 阶段 1: 多次 Ctrl+C 确保打断当前操作
+  for (let i = 0; i < 3; i++) {
+    await tmuxRaw(["send-keys", "-t", target, "C-c"]);
+    await Bun.sleep(800);
+    const pane = await captureLast(name, 5);
+    if (isAtShell(pane)) return true;
+    // 如果出现了 ❯ 提示符（Claude Code 空闲），可以继续退出
+    if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) break;
+  }
 
-  // 再发一次 Ctrl+C 以防第一次没打断
-  await tmuxRaw(["send-keys", "-t", target, "C-c"]);
-  await Bun.sleep(1000);
+  // 阶段 2: 发 Escape 清除任何菜单/弹窗
+  await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+  await Bun.sleep(500);
 
-  // 发 /exit
+  // 阶段 3: 发 /exit
   await tmuxRaw(["send-keys", "-t", target, "-l", "--", "/exit"]);
   await Bun.sleep(100);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 
-  // 轮询处理各种确认提示，最多等 20 秒
-  for (let i = 0; i < 40; i++) {
+  // 阶段 4: 轮询处理各种确认提示，最多等 30 秒
+  for (let i = 0; i < 60; i++) {
     await Bun.sleep(500);
-    const pane = await captureLast(name, 8);
+    const pane = await captureLast(name, 10);
 
     // 已经回到 shell
-    if (/[%$]\s*$/.test(pane)) return true;
+    if (isAtShell(pane)) return true;
 
-    // Claude Code 退出确认 ("has unsaved changes" 等)
-    if (pane.includes("Yes") && (pane.includes("Do you want") || pane.includes("Are you sure"))) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+    // Goodbye! 表示 Claude Code 正在退出
+    if (pane.includes("Goodbye!")) {
+      await Bun.sleep(1000);
       continue;
     }
 
-    // 任何 "Enter to confirm" 类型的提示
-    if (pane.includes("Enter to confirm") || pane.includes("确认")) {
+    // 有确认提示 → 按 Enter
+    if (hasPromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      await Bun.sleep(500);
+      continue;
+    }
+
+    // /exit 可能出现在自动补全列表里，需要再按一次 Enter
+    if (pane.includes("/exit") && pane.includes("Exit the REPL")) {
+      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      await Bun.sleep(500);
       continue;
     }
   }
 
-  // 最后检查
-  const finalPane = await captureLast(name, 3);
-  return /[%$]\s*$/.test(finalPane);
+  // 阶段 5: 最后手段 — 强制杀进程
+  const finalPane = await captureLast(name, 5);
+  if (!isAtShell(finalPane)) {
+    // 发 Ctrl+C 多次 + Ctrl+D
+    await tmuxRaw(["send-keys", "-t", target, "C-c"]);
+    await Bun.sleep(300);
+    await tmuxRaw(["send-keys", "-t", target, "C-c"]);
+    await Bun.sleep(300);
+    await tmuxRaw(["send-keys", "-t", target, "C-d"]);
+    await Bun.sleep(2000);
+  }
+
+  const check = await captureLast(name, 3);
+  return isAtShell(check);
 }
 
 /** 在已有的 tmux window 里启动 Claude Code，处理所有确认弹窗 */
@@ -687,39 +720,41 @@ async function startClaudeInWindow(
 ): Promise<boolean> {
   const target = windowTarget(name);
 
+  // 确保在 shell 提示符
+  const preLaunch = await captureLast(name, 3);
+  if (!isAtShell(preLaunch)) {
+    // 等一下 shell
+    await Bun.sleep(2000);
+    const retry = await captureLast(name, 3);
+    if (!isAtShell(retry)) return false;
+  }
+
   // 发送启动命令
   await tmuxRaw(["send-keys", "-t", target, "-l", "--", claudeCmd]);
   await Bun.sleep(100);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 
-  // 轮询处理各种确认提示，最多等 45 秒
-  for (let i = 0; i < 90; i++) {
+  // 轮询处理各种确认提示，最多等 60 秒
+  for (let i = 0; i < 120; i++) {
     await Bun.sleep(500);
     const pane = await captureLast(name, 10);
 
     // Claude Code 就绪
-    if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) return true;
-
-    // development channel 确认
-    if (pane.includes("I am using this for local development")) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-      continue;
+    if (/❯/.test(pane.split("\n").slice(-5).join("\n")) && pane.includes("bypass permissions")) {
+      return true;
     }
 
-    // 信任目录确认 ("Do you trust the files in this folder?")
-    if (pane.includes("trust") || pane.includes("Trust")) {
+    // 有确认提示 → 按 Enter
+    if (hasPromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-      continue;
-    }
-
-    // 任何 Yes/No 选择默认选 Yes
-    if (pane.includes("❯") && pane.includes("Yes") && !pane.includes("❯ ")) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      await Bun.sleep(500);
       continue;
     }
   }
 
-  return false;
+  // 最后检查一次
+  const final = await captureLast(name, 5);
+  return /❯/.test(final.split("\n").slice(-5).join("\n"));
 }
 
 async function cmdRestart(name?: string) {
@@ -753,24 +788,14 @@ async function cmdRestart(name?: string) {
       continue;
     }
 
-    // 1. 优雅退出
+    // 1. 优雅退出（包含强制退出兜底）
     const exited = await gracefulExit(tmuxName);
     if (!exited) {
-      // 强制：杀掉 window 里的进程
-      await tmuxRaw(["send-keys", "-t", windowTarget(tmuxName), "C-c"]);
-      await Bun.sleep(500);
-      await tmuxRaw(["send-keys", "-t", windowTarget(tmuxName), "C-c"]);
-      await Bun.sleep(1000);
-    }
-
-    // 2. 确保回到 shell
-    const atShell = await waitForShell(tmuxName, 5000);
-    if (!atShell) {
-      results.push({ name: tmuxName, ok: false, error: "无法回到 shell 提示符" });
+      results.push({ name: tmuxName, ok: false, error: "无法退出 Claude Code" });
       continue;
     }
 
-    // 3. 重新启动 Claude Code
+    // 2. 重新启动 Claude Code
     const displayName = info.displayName || tmuxName.replace(WORKER_PREFIX, "");
     const cmd = `DISCORD_CHANNEL_ID=${info.channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${info.sessionId} --name "${displayName}" ${CLAUDE_BASE_FLAGS}`;
 
