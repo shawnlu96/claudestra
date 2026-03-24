@@ -32,13 +32,15 @@ async function sessionExists(): Promise<boolean> {
   return out.split("\n").includes(SESSION_NAME);
 }
 
+const MASTER_WINDOW = `${SESSION_NAME}:0`;
+
 async function isIdle(): Promise<boolean> {
-  const tail = await tmux("capture-pane", "-t", SESSION_NAME, "-p");
+  const tail = await tmux("capture-pane", "-t", MASTER_WINDOW, "-p");
   return /❯/.test(tail.split("\n").slice(-5).join("\n"));
 }
 
 async function captureLast(lines = 10): Promise<string> {
-  return tmux("capture-pane", "-t", SESSION_NAME, "-p", "-J", "-S", `-${lines}`);
+  return tmux("capture-pane", "-t", MASTER_WINDOW, "-p", "-J", "-S", `-${lines}`);
 }
 
 async function startMaster() {
@@ -53,9 +55,9 @@ async function startMaster() {
 
   // 启动 Claude Code
   const cmd = `DISCORD_CHANNEL_ID=${CONTROL_CHANNEL_ID} BRIDGE_URL=${BRIDGE_URL} claude --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
-  await tmux("send-keys", "-t", SESSION_NAME, "-l", "--", cmd);
+  await tmux("send-keys", "-t", MASTER_WINDOW, "-l", "--", cmd);
   await Bun.sleep(100);
-  await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+  await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
 
   // 等待并自动确认各种提示（dev channel、trust、etc）
   for (let i = 0; i < 60; i++) {
@@ -76,7 +78,7 @@ async function startMaster() {
       pane.includes("trust the files") ||
       (pane.includes("❯ 1.") && pane.includes("Yes"))
     ) {
-      await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+      await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
       continue;
     }
   }
@@ -120,9 +122,9 @@ async function main() {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
       // 直接在现有 window 里重新启动
       const cmd = `DISCORD_CHANNEL_ID=${CONTROL_CHANNEL_ID} BRIDGE_URL=${BRIDGE_URL} claude --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
-      await tmux("send-keys", "-t", SESSION_NAME, "-l", "--", cmd);
+      await tmux("send-keys", "-t", MASTER_WINDOW, "-l", "--", cmd);
       await Bun.sleep(100);
-      await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+      await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
       // 等待确认
       for (let i = 0; i < 60; i++) {
         await Bun.sleep(1000);
@@ -138,7 +140,7 @@ async function main() {
           p.includes("Do you trust") ||
           (p.includes("❯ 1.") && p.includes("Yes"))
         ) {
-          await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+          await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
         }
       }
     }
