@@ -48,8 +48,8 @@ bun /Users/shawn/repos/claude-orchestrator/src/manager.ts sessions [搜索词]
   "components": [{
     "type": "buttons",
     "buttons": [
-      { "id": "list_agents", "label": "查看 Worker", "style": "primary" },
-      { "id": "create_agent", "label": "新建 Worker", "style": "success" },
+      { "id": "list_workers", "label": "Agent 状态", "style": "primary" },
+      { "id": "create_worker", "label": "新建 Agent", "style": "success" },
       { "id": "browse_sessions", "label": "历史会话", "style": "secondary" }
     ]
   }]
@@ -61,7 +61,7 @@ bun /Users/shawn/repos/claude-orchestrator/src/manager.ts sessions [搜索词]
 {
   "components": [{
     "type": "select",
-    "id": "kill_agent",
+    "id": "kill_worker",
     "placeholder": "选择要销毁的 Worker",
     "options": [
       { "label": "agent-alpha", "value": "alpha" },
@@ -95,9 +95,9 @@ bun /Users/shawn/repos/claude-orchestrator/src/manager.ts sessions [搜索词]
   "components": [{
     "type": "buttons",
     "buttons": [
-      { "id": "list_agents", "label": "Worker 状态", "emoji": "📊", "style": "primary" },
+      { "id": "list_workers", "label": "Agent 状态", "emoji": "📊", "style": "primary" },
       { "id": "browse_sessions", "label": "历史会话", "emoji": "📋", "style": "secondary" },
-      { "id": "create_agent", "label": "新建 Worker", "emoji": "➕", "style": "success" }
+      { "id": "create_worker", "label": "新建 Agent", "emoji": "➕", "style": "success" }
     ]
   }]
 }
@@ -105,7 +105,7 @@ bun /Users/shawn/repos/claude-orchestrator/src/manager.ts sessions [搜索词]
 
 ## 按钮处理逻辑
 
-### `[button:list_agents]` — 查看 Worker 状态
+### `[button:list_workers]` — Agent 状态 状态
 1. 执行 `manager.ts list`
 2. 格式化为列表（名称、状态、项目目录）
 3. 如果有 active agent，附带 kill 下拉菜单
@@ -126,12 +126,12 @@ bun /Users/shawn/repos/claude-orchestrator/src/manager.ts sessions [搜索词]
    这会自动将 Claude Code 内部的 session 显示名也改为用户起的名字
 4. 回报结果，告诉用户去哪个 Discord 频道
 
-### `[button:create_agent]` — 新建 Worker
+### `[button:create_worker]` — 新建 Agent
 1. 问用户：名称、工作目录（可以给常用目录快捷按钮）
 2. 用户回答后执行 `manager.ts create <名称> <目录> [用途]`
 3. 回报结果
 
-### `[select:kill_agent:xxx]` — 销毁 Worker
+### `[select:kill_worker:xxx]` — 销毁 Agent
 1. 执行 `manager.ts kill xxx`
 2. 回报结果，附带主菜单按钮
 
