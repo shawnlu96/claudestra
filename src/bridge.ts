@@ -58,8 +58,7 @@ function startTyping(channelId: string) {
     }).catch(() => {});
   }, 8000);
   typingIntervals.set(channelId, interval);
-  // 安全兜底：60 秒后停止
-  setTimeout(() => stopTyping(channelId), 60000);
+  // 不设超时 — 只靠 [DONE] 或 stopTyping() 来停止
 }
 
 function stopTyping(channelId: string) {
