@@ -77,21 +77,11 @@ function stopTyping(channelId: string) {
 
 const typingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** reply 后重新开始 typing，timeout 毫秒内没有新 reply 则停止 */
-function restartTypingWithTimeout(channelId: string, timeout: number) {
-  // 清掉旧的超时
-  const oldTimeout = typingTimeouts.get(channelId);
-  if (oldTimeout) clearTimeout(oldTimeout);
-
-  // 确保 typing 在跑
+/** reply 后确保 typing 继续（等待 [DONE] 才停止） */
+function ensureTyping(channelId: string) {
   if (!typingIntervals.has(channelId)) {
     startTyping(channelId);
   }
-
-  // 设置新超时
-  typingTimeouts.set(channelId, setTimeout(() => {
-    stopTyping(channelId);
-  }, timeout));
 }
 
 // ============================================================
@@ -272,10 +262,10 @@ async function handleMgmtButton(
     if (!result.ok) return { text: `❌ ${result.error}` };
     const workers = result.workers || [];
     if (workers.length === 0) return {
-      text: "📭 当前没有活跃的 worker。",
+      text: "📭 当前没有活跃的 Agent。",
       components: [{ type: "buttons", buttons: [
         { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
-        { id: "create_worker", label: "新建 Worker", emoji: "➕", style: "success" },
+        { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
       ]}],
     };
     const lines = workers.map((w: any) => {
@@ -287,15 +277,15 @@ async function handleMgmtButton(
     if (activeWorkers.length > 0) {
       buttons.push(
         { id: "restart_all", label: "全部重启", emoji: "🔄", style: "secondary" },
-        { id: "show_kill_menu", label: "销毁 Worker", emoji: "🗑", style: "danger" },
+        { id: "show_kill_menu", label: "销毁 Agent", emoji: "🗑", style: "danger" },
       );
     }
     buttons.push(
       { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
-      { id: "create_worker", label: "新建 Worker", emoji: "➕", style: "success" },
+      { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
     );
     return {
-      text: "**📊 Worker 状态**\n\n" + lines.join("\n\n"),
+      text: "**📊 Agent 状态**\n\n" + lines.join("\n\n"),
       components: [{ type: "buttons", buttons }],
     };
   }
@@ -304,13 +294,13 @@ async function handleMgmtButton(
     const result = await runManager("list");
     if (!result.ok) return { text: `❌ ${result.error}` };
     const activeWorkers = (result.workers || []).filter((w: any) => w.status === "active");
-    if (activeWorkers.length === 0) return { text: "📭 没有可销毁的 worker。" };
+    if (activeWorkers.length === 0) return { text: "📭 没有可销毁的 Agent。" };
     return {
-      text: "**🗑 选择要销毁的 Worker：**",
+      text: "**🗑 选择要销毁的 Agent：**",
       components: [{
         type: "select",
         id: "kill_worker",
-        placeholder: "选择 Worker",
+        placeholder: "选择 Agent",
         options: activeWorkers.map((w: any) => ({
           label: w.name,
           value: w.name.replace("worker-", ""),
@@ -328,7 +318,7 @@ async function handleMgmtButton(
     return {
       text: `**🔄 重启结果**\n\n${msg}`,
       components: [{ type: "buttons", buttons: [
-        { id: "list_workers", label: "Worker 状态", emoji: "📊", style: "primary" },
+        { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
       ]}],
     };
   }
@@ -371,9 +361,9 @@ async function handleMgmtSelect(
     return {
       text: `🗑️ \`${result.worker}\` 已销毁。`,
       components: [{ type: "buttons", buttons: [
-        { id: "list_workers", label: "Worker 状态", emoji: "📊", style: "primary" },
+        { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
         { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
-        { id: "create_worker", label: "新建 Worker", emoji: "➕", style: "success" },
+        { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
       ]}],
     };
   }
@@ -665,7 +655,7 @@ async function handleClientMessage(
         if (isDone) {
           stopTyping(msg.chatId);
         } else {
-          restartTypingWithTimeout(msg.chatId, 180_000);
+          ensureTyping(msg.chatId);
         }
         const ids = await discordReply(msg.chatId, text, msg.replyTo, msg.components);
         ws.send(

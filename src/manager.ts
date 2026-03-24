@@ -25,7 +25,7 @@ const SOCK = "/tmp/claude-orchestrator/master.sock";
 const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const WORKER_PREFIX = "worker-";
-const CATEGORY_NAME = "workers";
+const CATEGORY_NAME = "agents";
 
 // ============================================================
 // Registry
@@ -464,8 +464,8 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
     sessionId,
     ready,
     message: ready
-      ? `Worker ${tmuxName} 已创建，Discord 频道 #${channelName} 已就绪`
-      : `Worker ${tmuxName} 已创建，但 Claude Code 可能还在启动中`,
+      ? `Agent ${tmuxName} 已创建，Discord 频道 #${channelName} 已就绪`
+      : `Agent ${tmuxName} 已创建，但 Claude Code 可能还在启动中`,
   });
 }
 
@@ -566,8 +566,8 @@ async function cmdResume(
     sessionId,
     ready,
     message: ready
-      ? `Worker ${tmuxName} 已恢复，Discord 频道 #${channelName} 已就绪`
-      : `Worker ${tmuxName} 已恢复，但 Claude Code 可能还在启动中`,
+      ? `Agent ${tmuxName} 已恢复，Discord 频道 #${channelName} 已就绪`
+      : `Agent ${tmuxName} 已恢复，但 Claude Code 可能还在启动中`,
   });
 }
 
@@ -728,7 +728,7 @@ async function cmdRestart(name?: string) {
   }
 
   if (targets.length === 0) {
-    output({ ok: false, error: "没有需要重启的 worker" });
+    output({ ok: false, error: "没有需要重启的 agent" });
     return;
   }
 
@@ -901,11 +901,11 @@ switch (cmd) {
       ok: false,
       error: `未知命令: ${cmd || "(空)"}`,
       usage: [
-        "create <name> <dir> [purpose]  — 新建 worker",
+        "create <name> <dir> [purpose]  — 新建 agent",
         "resume <name> <sessionId> [dir] — 恢复历史 session",
-        "kill <name>                     — 销毁 worker",
-        "restart [name]                  — 重启 worker（不指定则重启所有）",
-        "list                            — 列出所有 worker",
+        "kill <name>                     — 销毁 agent",
+        "restart [name]                  — 重启 agent（不指定则重启所有）",
+        "list                            — 列出所有 agent",
         "sessions [search]               — 浏览历史 Claude Code 会话",
       ],
     });
