@@ -57,17 +57,27 @@ async function startMaster() {
   await Bun.sleep(100);
   await tmux("send-keys", "-t", SESSION_NAME, "Enter");
 
-  // 等待并自动确认 development channel 提示
-  for (let i = 0; i < 30; i++) {
+  // 等待并自动确认各种提示（dev channel、trust、etc）
+  for (let i = 0; i < 60; i++) {
     await Bun.sleep(1000);
     const pane = await captureLast(10);
-    if (pane.includes("I am using this for local development")) {
-      await tmux("send-keys", "-t", SESSION_NAME, "Enter");
-      continue;
-    }
+
     if (await isIdle()) {
       console.log("✅ 大总管已就绪");
       return true;
+    }
+
+    // 各种需要按 Enter 的提示
+    if (
+      pane.includes("I am using this for local development") ||
+      pane.includes("Enter to confirm") ||
+      pane.includes("Esc to cancel") ||
+      pane.includes("Do you trust") ||
+      pane.includes("trust the files") ||
+      (pane.includes("❯ 1.") && pane.includes("Yes"))
+    ) {
+      await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+      continue;
     }
   }
 
@@ -98,8 +108,39 @@ async function main() {
     await Bun.sleep(CHECK_INTERVAL_MS);
 
     if (!(await sessionExists())) {
-      console.log("💀 大总管 session 已死，正在重启...");
+      console.log("💀 大总管 tmux session 不存在，正在重启...");
       await startMaster();
+      continue;
+    }
+
+    // 检查 Claude Code 是否还活着（不是退回了 shell）
+    const pane = await captureLast(5);
+    const atShell = /[%$]\s*$/.test(pane.split("\n").filter((l) => l.trim()).pop() || "");
+    if (atShell) {
+      console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
+      // 直接在现有 window 里重新启动
+      const cmd = `DISCORD_CHANNEL_ID=${CONTROL_CHANNEL_ID} BRIDGE_URL=${BRIDGE_URL} claude --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
+      await tmux("send-keys", "-t", SESSION_NAME, "-l", "--", cmd);
+      await Bun.sleep(100);
+      await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+      // 等待确认
+      for (let i = 0; i < 60; i++) {
+        await Bun.sleep(1000);
+        const p = await captureLast(10);
+        if (await isIdle()) {
+          console.log("✅ 大总管已重新就绪");
+          break;
+        }
+        if (
+          p.includes("I am using this for local development") ||
+          p.includes("Enter to confirm") ||
+          p.includes("Esc to cancel") ||
+          p.includes("Do you trust") ||
+          (p.includes("❯ 1.") && p.includes("Yes"))
+        ) {
+          await tmux("send-keys", "-t", SESSION_NAME, "Enter");
+        }
+      }
     }
   }
 }
