@@ -1,0 +1,13 @@
+{
+  "name": "claude-orchestrator",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/bot.ts",
+    "dev": "bun run --watch src/bot.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "discord.js": "^14.18.0"
+  }
+}
