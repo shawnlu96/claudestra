@@ -608,6 +608,175 @@ async function cmdKill(name: string) {
   });
 }
 
+// ============================================================
+// 优雅退出 + 重启
+// ============================================================
+
+/** 等待 tmux window 到达 shell 提示符（$ 或 %） */
+async function waitForShell(name: string, timeoutMs = 15000): Promise<boolean> {
+  const target = windowTarget(name);
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const pane = await captureLast(name, 5);
+    // macOS zsh 提示符通常以 % 结尾，bash 以 $ 结尾
+    if (/[%$]\s*$/.test(pane)) return true;
+    await Bun.sleep(500);
+  }
+  return false;
+}
+
+/** 优雅退出一个 Claude Code worker，处理所有确认弹窗 */
+async function gracefulExit(name: string): Promise<boolean> {
+  const target = windowTarget(name);
+
+  // 先发 Ctrl+C 打断任何正在进行的操作
+  await tmuxRaw(["send-keys", "-t", target, "C-c"]);
+  await Bun.sleep(1000);
+
+  // 再发一次 Ctrl+C 以防第一次没打断
+  await tmuxRaw(["send-keys", "-t", target, "C-c"]);
+  await Bun.sleep(1000);
+
+  // 发 /exit
+  await tmuxRaw(["send-keys", "-t", target, "-l", "--", "/exit"]);
+  await Bun.sleep(100);
+  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+
+  // 轮询处理各种确认提示，最多等 20 秒
+  for (let i = 0; i < 40; i++) {
+    await Bun.sleep(500);
+    const pane = await captureLast(name, 8);
+
+    // 已经回到 shell
+    if (/[%$]\s*$/.test(pane)) return true;
+
+    // Claude Code 退出确认 ("has unsaved changes" 等)
+    if (pane.includes("Yes") && (pane.includes("Do you want") || pane.includes("Are you sure"))) {
+      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      continue;
+    }
+
+    // 任何 "Enter to confirm" 类型的提示
+    if (pane.includes("Enter to confirm") || pane.includes("确认")) {
+      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      continue;
+    }
+  }
+
+  // 最后检查
+  const finalPane = await captureLast(name, 3);
+  return /[%$]\s*$/.test(finalPane);
+}
+
+/** 在已有的 tmux window 里启动 Claude Code，处理所有确认弹窗 */
+async function startClaudeInWindow(
+  name: string,
+  claudeCmd: string
+): Promise<boolean> {
+  const target = windowTarget(name);
+
+  // 发送启动命令
+  await tmuxRaw(["send-keys", "-t", target, "-l", "--", claudeCmd]);
+  await Bun.sleep(100);
+  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+
+  // 轮询处理各种确认提示，最多等 45 秒
+  for (let i = 0; i < 90; i++) {
+    await Bun.sleep(500);
+    const pane = await captureLast(name, 10);
+
+    // Claude Code 就绪
+    if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) return true;
+
+    // development channel 确认
+    if (pane.includes("I am using this for local development")) {
+      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      continue;
+    }
+
+    // 信任目录确认 ("Do you trust the files in this folder?")
+    if (pane.includes("trust") || pane.includes("Trust")) {
+      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      continue;
+    }
+
+    // 任何 Yes/No 选择默认选 Yes
+    if (pane.includes("❯") && pane.includes("Yes") && !pane.includes("❯ ")) {
+      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      continue;
+    }
+  }
+
+  return false;
+}
+
+async function cmdRestart(name?: string) {
+  const reg = await loadRegistry();
+
+  // 确定要重启的 worker 列表
+  let targets: string[];
+  if (name) {
+    const tmuxName = normalizeName(name);
+    if (!(await windowExists(tmuxName))) {
+      output({ ok: false, error: `${tmuxName} 不存在` });
+      return;
+    }
+    targets = [tmuxName];
+  } else {
+    // 重启所有 worker
+    targets = await listWorkerWindows();
+  }
+
+  if (targets.length === 0) {
+    output({ ok: false, error: "没有需要重启的 worker" });
+    return;
+  }
+
+  const results: { name: string; ok: boolean; error?: string }[] = [];
+
+  for (const tmuxName of targets) {
+    const info = reg.workers[tmuxName];
+    if (!info || !info.sessionId || !info.channelId) {
+      results.push({ name: tmuxName, ok: false, error: "registry 中缺少 sessionId 或 channelId" });
+      continue;
+    }
+
+    // 1. 优雅退出
+    const exited = await gracefulExit(tmuxName);
+    if (!exited) {
+      // 强制：杀掉 window 里的进程
+      await tmuxRaw(["send-keys", "-t", windowTarget(tmuxName), "C-c"]);
+      await Bun.sleep(500);
+      await tmuxRaw(["send-keys", "-t", windowTarget(tmuxName), "C-c"]);
+      await Bun.sleep(1000);
+    }
+
+    // 2. 确保回到 shell
+    const atShell = await waitForShell(tmuxName, 5000);
+    if (!atShell) {
+      results.push({ name: tmuxName, ok: false, error: "无法回到 shell 提示符" });
+      continue;
+    }
+
+    // 3. 重新启动 Claude Code
+    const displayName = info.displayName || tmuxName.replace(WORKER_PREFIX, "");
+    const cmd = `DISCORD_CHANNEL_ID=${info.channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${info.sessionId} --name "${displayName}" --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
+
+    const started = await startClaudeInWindow(tmuxName, cmd);
+    results.push({
+      name: tmuxName,
+      ok: started,
+      error: started ? undefined : "启动超时",
+    });
+  }
+
+  output({
+    ok: results.every((r) => r.ok),
+    results,
+    message: results.map((r) => `${r.name}: ${r.ok ? "✅" : `❌ ${r.error}`}`).join("\n"),
+  });
+}
+
 async function cmdList() {
   const tmuxWindows = await listWorkerWindows();
   const reg = await loadRegistry();
@@ -721,6 +890,12 @@ switch (cmd) {
     await cmdSessions(args.join(" ") || undefined);
     break;
 
+  case "restart": {
+    const [name] = args;
+    await cmdRestart(name || undefined);
+    break;
+  }
+
   default:
     output({
       ok: false,
@@ -729,6 +904,7 @@ switch (cmd) {
         "create <name> <dir> [purpose]  — 新建 worker",
         "resume <name> <sessionId> [dir] — 恢复历史 session",
         "kill <name>                     — 销毁 worker",
+        "restart [name]                  — 重启 worker（不指定则重启所有）",
         "list                            — 列出所有 worker",
         "sessions [search]               — 浏览历史 Claude Code 会话",
       ],

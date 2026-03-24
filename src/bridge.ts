@@ -285,7 +285,10 @@ async function handleMgmtButton(
     const activeWorkers = workers.filter((w: any) => w.status === "active");
     const buttons: any[] = [];
     if (activeWorkers.length > 0) {
-      buttons.push({ id: "show_kill_menu", label: "销毁 Worker", emoji: "🗑", style: "danger" });
+      buttons.push(
+        { id: "restart_all", label: "全部重启", emoji: "🔄", style: "secondary" },
+        { id: "show_kill_menu", label: "销毁 Worker", emoji: "🗑", style: "danger" },
+      );
     }
     buttons.push(
       { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
@@ -313,6 +316,20 @@ async function handleMgmtButton(
           value: w.name.replace("worker-", ""),
         })),
       }],
+    };
+  }
+
+  if (id === "restart_all") {
+    const result = await runManager("restart");
+    if (!result.ok) return { text: `❌ ${result.error || "重启失败"}` };
+    const msg = (result.results || [])
+      .map((r: any) => `${r.name}: ${r.ok ? "✅" : `❌ ${r.error}`}`)
+      .join("\n");
+    return {
+      text: `**🔄 重启结果**\n\n${msg}`,
+      components: [{ type: "buttons", buttons: [
+        { id: "list_workers", label: "Worker 状态", emoji: "📊", style: "primary" },
+      ]}],
     };
   }
 
