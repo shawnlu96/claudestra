@@ -6,11 +6,9 @@
  *   bun src/discord-reply.ts <channel_id> <message>
  *   bun src/discord-reply.ts <channel_id> <message> --reply-to <message_id>
  *   bun src/discord-reply.ts <channel_id> <message> --components '<json>'
- *
- * 当 MCP reply tool 不可用时（如 resumed session），用此脚本代替。
  */
 
-const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
+import { bridgeRequest } from "./lib/bridge-client.js";
 
 const args = process.argv.slice(2);
 const chatId = args[0];
@@ -37,40 +35,16 @@ for (let i = 2; i < args.length; i++) {
   }
 }
 
-const ws = new WebSocket(BRIDGE_URL);
-const requestId = `reply_${Date.now()}`;
-
-ws.onopen = () => {
-  ws.send(JSON.stringify({
+try {
+  const result = await bridgeRequest({
     type: "reply",
-    requestId,
     chatId,
     text,
     replyTo,
     components,
-  }));
-};
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(typeof event.data === "string" ? event.data : "");
-  if (data.requestId === requestId) {
-    if (data.error) {
-      console.error("发送失败:", data.error);
-      process.exit(1);
-    } else {
-      console.log(JSON.stringify(data.result));
-    }
-    ws.close();
-    process.exit(0);
-  }
-};
-
-ws.onerror = () => {
-  console.error("无法连接 Bridge");
+  });
+  console.log(JSON.stringify(result));
+} catch (err) {
+  console.error((err as Error).message);
   process.exit(1);
-};
-
-setTimeout(() => {
-  console.error("超时");
-  process.exit(1);
-}, 10000);
+}
