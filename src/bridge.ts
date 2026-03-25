@@ -302,7 +302,7 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
     }
   } catch {}
 
-  // 锁屏或截图失败：用 tmux capture-pane + canvas 渲染
+  // 锁屏或截图失败：用 tmux capture-pane → HTML → qlmanage PNG
   try {
     const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
       stdout: "pipe", stderr: "pipe",
@@ -311,16 +311,43 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
     await proc.exited;
     if (!content.trim()) return null;
 
-    const captureFile = `/tmp/claude-orchestrator/capture_${Date.now()}.txt`;
-    await Bun.write(captureFile, content);
-    const render = Bun.spawn(
-      ["bun", "run", `${import.meta.dir}/term-screenshot.ts`, pngPath],
-      { stdin: Bun.file(captureFile), stdout: "pipe", stderr: "pipe" }
-    );
-    await render.exited;
+    // 转义 HTML 特殊字符，保留空格和换行
+    const escaped = content
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/ /g, "&nbsp;")
+      .split("\n")
+      .join("<br>\n");
 
-    const { existsSync } = await import("fs");
-    return existsSync(pngPath) ? pngPath : null;
+    const htmlContent = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  font-family: 'Menlo', 'Monaco', monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 10px;
+  margin: 0;
+  white-space: pre;
+}
+</style></head><body>${escaped}</body></html>`;
+
+    const htmlPath = `/tmp/claude-orchestrator/peek_${Date.now()}.html`;
+    await Bun.write(htmlPath, htmlContent);
+
+    await Bun.spawn(["qlmanage", "-t", "-s", "1512", "-o", "/tmp/claude-orchestrator/", htmlPath], {
+      stdout: "pipe", stderr: "pipe",
+    }).exited;
+
+    const qlPngPath = htmlPath + ".png";
+    const { existsSync, renameSync } = await import("fs");
+    if (existsSync(qlPngPath)) {
+      renameSync(qlPngPath, pngPath);
+      try { await Bun.spawn(["rm", htmlPath]).exited; } catch {}
+      return pngPath;
+    }
   } catch {}
 
   return null;
