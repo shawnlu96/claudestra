@@ -125,7 +125,7 @@ async function flushPending(state: WatcherState, discord: Client) {
   } catch { /* non-critical */ }
 }
 
-/** tool 完成时 edit 对应的消息（⏳ → ✅） */
+/** tool 完成时：先改 pending 队列，如果已发出则 edit 消息 */
 async function markToolComplete(
   state: WatcherState,
   discord: Client,
@@ -136,6 +136,16 @@ async function markToolComplete(
   if (!summary) return;
   state.activeTools.delete(toolId);
 
+  const icon = isError ? "❌" : "✅";
+
+  // 先看 pending 队列里有没有（还没 flush 到 Discord）
+  const pendingIdx = state.pendingItems.findIndex((t) => t === `⏳ ${summary}`);
+  if (pendingIdx >= 0) {
+    state.pendingItems[pendingIdx] = `${icon} ${summary}`;
+    return;
+  }
+
+  // 已经发出到 Discord → edit 消息
   if (!state.lastToolMsgId) return;
 
   try {
@@ -143,9 +153,8 @@ async function markToolComplete(
     if (!channel || !("messages" in channel)) return;
     const msg = await (channel as TextChannel).messages.fetch(state.lastToolMsgId);
 
-    // 替换 ⏳ summary → ✅/❌ summary
     const oldLine = `-# ⏳ ${summary}`;
-    const newLine = `-# ${isError ? "❌" : "✅"} ${summary}`;
+    const newLine = `-# ${icon} ${summary}`;
     const updated = state.lastToolMsgContent.replace(oldLine, newLine);
 
     if (updated !== state.lastToolMsgContent) {
