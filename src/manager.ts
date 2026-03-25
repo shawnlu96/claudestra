@@ -521,12 +521,6 @@ async function cmdResume(
     return;
   }
 
-  // 发送对话历史到新频道
-  const chatHistory = await extractRecentChat(resolvedDir, sessionId, 5);
-  if (chatHistory.length > 0) {
-    await sendChatHistory(channelId, chatHistory);
-  }
-
   // 创建 tmux window（在 master session 里）
   await ensureSocket();
   await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", resolvedDir]);
@@ -569,6 +563,46 @@ async function cmdResume(
     displayName: channelName,
   };
   await saveRegistry(reg);
+
+  // 截图发到新频道作为上下文预览
+  if (ready) {
+    try {
+      const bunPath = `${process.env.HOME}/.bun/bin/bun`;
+      const srcDir = import.meta.dir;
+      const htmlPath = `/tmp/claude-orchestrator/resume_${Date.now()}.html`;
+      const pngPath = `/tmp/claude-orchestrator/resume_${Date.now()}.png`;
+
+      // tmux capture-pane -e → ansi2html → HTML
+      const capture = Bun.spawn(
+        ["tmux", "-S", SOCK, "capture-pane", "-t", windowTarget(tmuxName), "-p", "-e", "-S", "-50"],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      const ansi2html = Bun.spawn(
+        [bunPath, "run", `${srcDir}/ansi2html.ts`, htmlPath],
+        { stdin: capture.stdout, stdout: "pipe", stderr: "pipe" }
+      );
+      await ansi2html.exited;
+
+      // HTML → PNG
+      await Bun.spawn(
+        [bunPath, "run", `${srcDir}/html2png.ts`, htmlPath, pngPath, "1200"],
+        { stdout: "pipe", stderr: "pipe" }
+      ).exited;
+
+      // 发图片到 Discord
+      const { existsSync } = await import("fs");
+      if (existsSync(pngPath)) {
+        await bridgeRequest({
+          type: "reply",
+          chatId: channelId,
+          text: "**📜 恢复的会话终端预览**",
+          files: [pngPath],
+        });
+      }
+      // 清理
+      try { await Bun.spawn(["rm", htmlPath, pngPath]).exited; } catch {}
+    } catch {}
+  }
 
   output({
     ok: true,
