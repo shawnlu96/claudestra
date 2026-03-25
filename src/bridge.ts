@@ -22,6 +22,9 @@ import {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   type Message as DiscordMessage,
   type Interaction,
   type MessageActionRowComponentBuilder,
@@ -144,11 +147,25 @@ const discord = new Client({
   ],
 });
 
-discord.once("ready", () => {
+discord.once("ready", async () => {
   botUserId = discord.user?.id || null;
   console.log(`✅ Discord 已连接: ${discord.user?.tag}`);
   console.log(`📡 Bridge WebSocket: ws://localhost:${BRIDGE_PORT}`);
   console.log(`🔗 已注册频道: ${clients.size}`);
+
+  // 注册 Slash Commands
+  try {
+    const rest = new REST().setToken(DISCORD_TOKEN);
+    const commands = [
+      new SlashCommandBuilder().setName("screenshot").setDescription("截取当前 agent 的终端画面"),
+      new SlashCommandBuilder().setName("interrupt").setDescription("打断当前 agent 的操作 (Ctrl+C)"),
+      new SlashCommandBuilder().setName("status").setDescription("查看所有 agent 的状态"),
+    ].map((c) => c.toJSON());
+    await rest.put(Routes.applicationCommands(discord.user!.id), { body: commands });
+    console.log("📝 Slash Commands 已注册");
+  } catch (err) {
+    console.error("Slash Commands 注册失败:", err);
+  }
 });
 
 discord.on("messageCreate", async (msg: DiscordMessage) => {
@@ -489,15 +506,67 @@ async function handleMgmtSelect(
   return null; // resume_session 和 create_worker 需要用户输入，交给 LLM
 }
 
-// 处理按钮点击和下拉菜单选择
+// 处理按钮点击、下拉菜单和 Slash Commands
 discord.on("interactionCreate", async (interaction: Interaction) => {
   try {
   const channelId = interaction.channelId;
   if (!channelId) return;
-  console.log(`🔘 Interaction: ${interaction.isButton() ? 'button' : 'select'} ${interaction.isButton() ? (interaction as any).customId : (interaction as any).customId} in ${channelId}`);
 
   // 用户白名单
   if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(interaction.user.id)) {
+    return;
+  }
+
+  // ── Slash Commands ──
+  if (interaction.isChatInputCommand()) {
+    const cmd = interaction.commandName;
+
+    if (cmd === "screenshot") {
+      await interaction.deferReply();
+      // 找当前频道对应的 worker
+      const listResult = await runManager("list");
+      const worker = (listResult.workers || []).find((w: any) => w.channelId === channelId);
+      const windowName = worker ? worker.name : "master";
+      const pngPath = await tmuxScreenshot(windowName);
+      if (pngPath) {
+        await interaction.editReply({ content: "**📸 终端截图**", files: [{ attachment: pngPath }] });
+      } else {
+        await interaction.editReply("❌ 截图失败");
+      }
+      return;
+    }
+
+    if (cmd === "interrupt") {
+      const listResult = await runManager("list");
+      const worker = (listResult.workers || []).find((w: any) => w.channelId === channelId);
+      if (worker) {
+        const target = `master:${worker.name}`;
+        Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", target, "C-c"]);
+        stopTyping(channelId);
+        const statusMsgId = activeStatusMessages.get(channelId);
+        if (statusMsgId) {
+          try {
+            const ch = await discord.channels.fetch(channelId) as TextChannel;
+            const statusMsg = await ch.messages.fetch(statusMsgId);
+            await statusMsg.edit({ content: "⚡ 已打断", components: [] });
+          } catch {}
+          activeStatusMessages.delete(channelId);
+        }
+        await interaction.reply("⚡ 已发送 Ctrl+C");
+      } else {
+        await interaction.reply("⚠️ 当前频道没有关联的 agent");
+      }
+      return;
+    }
+
+    if (cmd === "status") {
+      await interaction.deferReply();
+      const panel = await buildStatusPanel();
+      const components = panel.components ? buildComponents(panel.components) : undefined;
+      await interaction.editReply({ content: panel.text, components });
+      return;
+    }
+
     return;
   }
 
@@ -507,27 +576,6 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       // deferUpdate 可能失败（非 bot 消息上的按钮），回退到 deferReply
       await interaction.deferReply({ ephemeral: true }).catch(() => {});
     });
-
-    // 置顶截图按钮：peek_self:<channelId>
-    if (id.startsWith("peek_self:")) {
-      const targetChannelId = id.slice("peek_self:".length);
-      // 从 registry 找 worker name
-      const listResult = await runManager("list");
-      const worker = (listResult.workers || []).find((w: any) => w.channelId === targetChannelId);
-      const windowName = worker ? worker.name : "master";
-      const pngPath = await tmuxScreenshot(windowName);
-      if (pngPath) {
-        const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
-        await ch.send({
-          content: `**📸 终端截图**`,
-          files: [{ attachment: pngPath }],
-        });
-      } else {
-        const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
-        await ch.send("❌ 截图失败");
-      }
-      return;
-    }
 
     // 打断按钮：interrupt:<channelId>
     if (id.startsWith("interrupt:")) {
@@ -832,29 +880,6 @@ async function handleClientMessage(
       });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
-
-      // 发送/更新置顶控制面板
-      try {
-        const ch = await discord.channels.fetch(msg.channelId) as TextChannel;
-        if (ch) {
-          // 检查是否已有置顶的控制面板
-          const pins = await ch.messages.fetchPinned();
-          const existingPanel = pins.find((m) => m.author.id === botUserId && m.content.includes("📌 控制面板"));
-          if (!existingPanel) {
-            const panel = await ch.send({
-              content: "**📌 控制面板**",
-              components: buildComponents([
-                { type: "buttons", buttons: [
-                  { id: `peek_self:${msg.channelId}`, label: "截图", emoji: "📸", style: "primary" },
-                  { id: `interrupt:${msg.channelId}`, label: "打断", emoji: "⚡", style: "danger" },
-                ]},
-              ]),
-            });
-            recentBotMessageIds.add(panel.id);
-            await panel.pin().catch(() => {});
-          }
-        }
-      } catch {}
 
       break;
     }
