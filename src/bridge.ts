@@ -267,10 +267,8 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
   const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
   const target = windowName === "master" ? "master:0" : `master:${windowName}`;
 
-  // 锁屏时直接返回 null
-  if (await isScreenLocked()) return null;
-
-  try {
+  // 未锁屏：用 ScreenCaptureKit 真实截图
+  if (!(await isScreenLocked())) try {
     // 1. 切到目标 tmux window
     await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
     await Bun.sleep(300);
@@ -302,6 +300,27 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
       const { existsSync } = await import("fs");
       if (existsSync(pngPath)) return pngPath;
     }
+  } catch {}
+
+  // 锁屏或截图失败：用 tmux capture-pane + canvas 渲染
+  try {
+    const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    const content = await new Response(proc.stdout).text();
+    await proc.exited;
+    if (!content.trim()) return null;
+
+    const captureFile = `/tmp/claude-orchestrator/capture_${Date.now()}.txt`;
+    await Bun.write(captureFile, content);
+    const render = Bun.spawn(
+      ["bun", "run", `${import.meta.dir}/term-screenshot.ts`, pngPath],
+      { stdin: Bun.file(captureFile), stdout: "pipe", stderr: "pipe" }
+    );
+    await render.exited;
+
+    const { existsSync } = await import("fs");
+    return existsSync(pngPath) ? pngPath : null;
   } catch {}
 
   return null;

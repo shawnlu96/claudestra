@@ -27,9 +27,9 @@ const COLORS: Record<number, string> = {
 const BG_COLOR = "#1e1e2e";
 const FG_COLOR = "#cdd6f4";
 const FONT_SIZE = 13;
-const LINE_HEIGHT = 18;
+const LINE_HEIGHT = 15;
 const CHAR_WIDTH = 7.8;
-const PADDING = 16;
+const PADDING = 12;
 
 interface TextSpan {
   text: string;
