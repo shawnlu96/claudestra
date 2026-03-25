@@ -128,6 +128,8 @@ const clients = new Map<string, ClientInfo>();
 // 跟踪 bot 发送的消息 ID，避免自己触发自己
 const recentBotMessageIds = new Set<string>();
 let botUserId: string | null = null;
+// channelId → 当前状态消息 ID（带打断按钮的那条）
+const activeStatusMessages = new Map<string, string>();
 
 // ============================================================
 // Discord Client
@@ -194,8 +196,18 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
-  // 显示 "正在输入..."
+  // 显示 "正在输入..." + 发送打断按钮状态消息
   startTyping(channelId);
+  const statusMsg = await (msg.channel as TextChannel).send({
+    content: "⏳ 处理中...",
+    components: buildComponents([{
+      type: "buttons",
+      buttons: [{ id: `interrupt:${channelId}`, label: "打断", emoji: "⚡", style: "danger" }],
+    }]),
+  });
+  recentBotMessageIds.add(statusMsg.id);
+  // 跟踪此频道的状态消息 ID
+  activeStatusMessages.set(channelId, statusMsg.id);
 
   // 发送给注册的 channel-server
   const meta: Record<string, string> = {
@@ -309,7 +321,16 @@ async function handleMgmtButton(
       ]}],
     };
     const lines = workers.map((w: any) => {
-      const status = w.status === "active" ? (w.idle ? "🟢 空闲" : "🔵 执行中") : "💀 已断开";
+      let status: string;
+      if (w.status !== "active") {
+        status = "💀 已断开";
+      } else if (w.channelId && typingIntervals.has(w.channelId)) {
+        status = "🔵 工作中";
+      } else if (w.idle) {
+        status = "🟢 空闲";
+      } else {
+        status = "🔵 执行中";
+      }
       return `**${w.name}** — ${status}\n📁 \`${w.project}\``;
     });
     const activeWorkers = workers.filter((w: any) => w.status === "active");
@@ -467,6 +488,39 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
   if (interaction.isButton()) {
     const id = interaction.customId;
     await interaction.deferUpdate().catch(() => {});
+
+    // 打断按钮：interrupt:<channelId>
+    if (id.startsWith("interrupt:")) {
+      const targetChannelId = id.slice("interrupt:".length);
+      // 找到对应的 tmux window 并发 Ctrl+C
+      // 从 registry 或 clients 反查 window name
+      const proc = Bun.spawn(["bun", "run", MANAGER_PATH, "list"], {
+        stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}` },
+      });
+      const listOut = await new Response(proc.stdout).text();
+      await proc.exited;
+      try {
+        const listResult = JSON.parse(listOut.trim());
+        const worker = (listResult.workers || []).find((w: any) => w.channelId === targetChannelId);
+        if (worker) {
+          const target = `master:${worker.name}`;
+          Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", target, "C-c"]);
+          // 更新状态消息
+          const statusMsgId = activeStatusMessages.get(targetChannelId);
+          if (statusMsgId) {
+            try {
+              const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
+              const statusMsg = await ch.messages.fetch(statusMsgId);
+              await statusMsg.edit({ content: "⚡ 已打断", components: [] });
+            } catch {}
+            activeStatusMessages.delete(targetChannelId);
+          }
+          stopTyping(targetChannelId);
+        }
+      } catch {}
+      return;
+    }
 
     // 尝试直接处理管理按钮
     const mgmtResult = await handleMgmtButton(id, channelId);
@@ -743,8 +797,34 @@ async function handleClientMessage(
         const text = isDone ? msg.text.replace(/\s*\[DONE\]\s*$/, "") : msg.text;
         if (isDone) {
           stopTyping(msg.chatId);
+          // 更新状态消息为"已完成"
+          const statusMsgId = activeStatusMessages.get(msg.chatId);
+          if (statusMsgId) {
+            try {
+              const ch = await discord.channels.fetch(msg.chatId) as TextChannel;
+              const statusMsg = await ch.messages.fetch(statusMsgId);
+              await statusMsg.edit({ content: "✅ 完成", components: [] });
+            } catch {}
+            activeStatusMessages.delete(msg.chatId);
+          }
         } else {
           ensureTyping(msg.chatId);
+          // 更新状态消息显示最新进度
+          const statusMsgId = activeStatusMessages.get(msg.chatId);
+          if (statusMsgId) {
+            try {
+              const ch = await discord.channels.fetch(msg.chatId) as TextChannel;
+              const statusMsg = await ch.messages.fetch(statusMsgId);
+              const preview = text.length > 100 ? text.slice(0, 97) + "..." : text;
+              await statusMsg.edit({
+                content: `⏳ ${preview}`,
+                components: buildComponents([{
+                  type: "buttons",
+                  buttons: [{ id: `interrupt:${msg.chatId}`, label: "打断", emoji: "⚡", style: "danger" }],
+                }]),
+              });
+            } catch {}
+          }
         }
         const ids = await discordReply(msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(
