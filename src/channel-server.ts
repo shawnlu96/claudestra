@@ -146,7 +146,6 @@ const mcp = new Server(
 Reply rules:
 - Use the "reply" tool with chat_id from the <channel> tag.
 - If reply tool unavailable, use: bun /Users/shawn/repos/claude-orchestrator/src/discord-reply.ts "<chat_id>" "<text>"
-- Append [DONE] to your FINAL reply only. This stops the typing indicator.
 - Never use markdown tables (Discord doesn't support them). Use bullet lists.
 - Keep lines under 60 chars in code blocks. Max 2000 chars per message.
 - Be concise — user is reading on a small screen.

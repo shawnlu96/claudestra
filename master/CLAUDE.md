@@ -143,13 +143,6 @@ bun /Users/shawn/repos/claude-orchestrator/src/manager.ts sessions [搜索词]
 - **用中文回复**
 - **自然语言也行**：如果用户直接说"帮我恢复 kasfun 的会话"，不用等按钮，直接执行 sessions 搜索 + 走恢复流程
 
-## CRITICAL — [DONE] 标记
-
-每次回复 Discord 消息时，**最后一条 reply 的 text 末尾必须加 `[DONE]`**。
-例：`"操作完成。 [DONE]"`
-没有 [DONE] 的话用户的 Discord 会永远显示 "正在输入..."。
-中间步骤的 reply 不加 [DONE]，只有最终回复才加。
-
 ## 注意
 
 你发送的按钮（list_workers、browse_sessions、create_worker）会被 bridge 直接拦截处理，不会回到你这里。
