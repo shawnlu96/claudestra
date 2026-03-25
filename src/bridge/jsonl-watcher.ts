@@ -217,8 +217,9 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // 任何 entry 都标记 Claude 已开始工作
-          if (entry.type === "assistant" || entry.type === "user") {
+          // 只有 assistant entry 才标记 Claude 开始工作
+          // user entry 是输入被记录，不代表 Claude 在处理
+          if (entry.type === "assistant") {
             state.hasSeenActivity = true;
           }
 
