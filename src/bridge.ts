@@ -186,7 +186,10 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       });
       const out = await new Response(proc.stdout).text();
       await proc.exited;
-      return /❯/.test(out.split("\n").slice(-5).join("\n"));
+      // "bypass permissions" 只在 Claude Code 真正空闲时出现在最后几行
+      // 比 ❯ 更可靠（❯ 可能残留在滚动区域）
+      const lastLines = out.split("\n").slice(-3).join("\n");
+      return lastLines.includes("bypass permissions") || lastLines.includes("esc to interrupt");
     };
 
     // 阶段 1：等 ❯ 消失（Claude 开始处理）
