@@ -253,21 +253,54 @@ async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
   return out.trim();
 }
 
-const SCREENSHOT_PORT = 47471;
+const SCREENSHOT_APP = `${import.meta.dir}/../Screenshot.app/Contents/MacOS/screenshot`;
+const IT2API = "/Applications/iTerm.app/Contents/Resources/utilities/it2api";
+
+async function isScreenLocked(): Promise<boolean> {
+  const proc = Bun.spawn(["ioreg", "-n", "Root", "-d1"], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.includes('"CGSSessionScreenIsLocked"=Yes');
+}
 
 async function tmuxScreenshot(windowName: string): Promise<string | null> {
   const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
-  const searchName = windowName === "master" ? "Claude Code" : windowName.replace("worker-", "");
+  const target = windowName === "master" ? "master:0" : `master:${windowName}`;
+
+  // 锁屏时直接返回 null
+  if (await isScreenLocked()) return null;
 
   try {
-    // 用 iTerm2 截图插件（不依赖屏幕状态，锁屏也能用）
-    const resp = await fetch(
-      `http://127.0.0.1:${SCREENSHOT_PORT}/screenshot?session=${encodeURIComponent(searchName)}`
-    );
-    if (resp.ok) {
-      const buf = await resp.arrayBuffer();
-      await Bun.write(pngPath, buf);
-      return pngPath;
+    // 1. 切到目标 tmux window
+    await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
+    await Bun.sleep(300);
+
+    // 2. 用 it2api 切到对应的 iTerm2 tab
+    const searchName = windowName === "master" ? "Claude Code" : windowName.replace("worker-", "");
+    const listProc = Bun.spawn([IT2API, "list-sessions"], { stdout: "pipe", stderr: "pipe" });
+    const listOut = await new Response(listProc.stdout).text();
+    await listProc.exited;
+    for (const line of listOut.split("\n")) {
+      if (line.toLowerCase().includes(searchName.toLowerCase()) && line.includes("id=")) {
+        const idMatch = line.match(/id=([A-F0-9-]+)/);
+        if (idMatch) {
+          await Bun.spawn([IT2API, "activate", "session", idMatch[1]]).exited;
+          break;
+        }
+      }
+    }
+    await Bun.sleep(500);
+
+    // 3. 用 ScreenCaptureKit 截图
+    const proc = Bun.spawn([SCREENSHOT_APP, pngPath], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    if (out.includes("OK")) {
+      const { existsSync } = await import("fs");
+      if (existsSync(pngPath)) return pngPath;
     }
   } catch {}
 
@@ -477,7 +510,7 @@ async function handleMgmtSelect(
     const windowName = value;
     const pngPath = await tmuxScreenshot(windowName);
     if (!pngPath) {
-      return { text: `❌ 无法截取 \`${windowName}\` 的终端内容` };
+      return { text: `❌ 无法截取 \`${windowName}\` — 可能电脑锁屏了` };
     }
     // 发送截图
     const channel = await discord.channels.fetch(chatId) as TextChannel;
