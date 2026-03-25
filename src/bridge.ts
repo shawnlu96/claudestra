@@ -60,6 +60,8 @@ interface ClientInfo {
 // ============================================================
 
 const clients = new Map<string, ClientInfo>();
+// 追踪哪些频道已收到 reply（用于跳过 Phase 1）
+const gotReply = new Set<string>();
 const activeStatusMessages = new Map<string, string>();
 
 // ============================================================
@@ -194,11 +196,14 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       return /❯/.test(lastLines);
     };
 
-    // 阶段 1：等 ❯ 消失（Claude 开始处理）
+    // 阶段 1：等 Claude 开始处理
+    // 检测 ❯ 消失 OR 收到 reply（快速回复可能跳过 ❯ 消失阶段）
+    gotReply.delete(channelId);
     for (let i = 0; i < 60; i++) {
-      await Bun.sleep(1000);
-      if (!(await checkIdle())) break; // ❯ 消失了
-      if (!activeStatusMessages.has(channelId)) return; // 已被打断
+      await Bun.sleep(500);
+      if (gotReply.has(channelId)) break; // 收到 reply = Claude 已在处理
+      if (!(await checkIdle())) break;     // ❯ 消失了
+      if (!activeStatusMessages.has(channelId)) return;
     }
 
     // 阶段 2：等 ❯ 重新出现（Claude 完成）
@@ -409,6 +414,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "reply": {
       try {
+        gotReply.add(msg.chatId);
         const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
