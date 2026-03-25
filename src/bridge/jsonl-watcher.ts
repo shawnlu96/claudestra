@@ -11,7 +11,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
-import { TMUX_SOCK } from "./config.js";
+import { TMUX_SOCK, WATCHER_CONFIG } from "./config.js";
 import { typingIntervals } from "./components.js";
 
 interface WatcherState {
@@ -20,10 +20,11 @@ interface WatcherState {
   channelId: string;
   jsonlPath: string;
   workerName: string;
-  pendingTools: string[];
+  pendingItems: string[];  // 待发送的所有项（tool use + text + tool result）
   flushTimer: ReturnType<typeof setTimeout> | null;
   idleChecker: ReturnType<typeof setInterval> | null;
-  onIdle?: () => void; // idle 回调
+  activeTools: Map<string, string>; // tool_use_id → summary（跟踪运行中的 tool）
+  onIdle?: () => void;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -88,18 +89,16 @@ function formatToolSummary(name: string, input: any): string {
   }
 }
 
-/** 发送积攒的 tool summaries 到 Discord */
+/** 发送积攒的项到 Discord */
 async function flushPending(state: WatcherState, discord: Client) {
-  if (state.pendingTools.length === 0) return;
+  if (state.pendingItems.length === 0) return;
 
-  const tools = state.pendingTools.splice(0);
+  const items = state.pendingItems.splice(0);
 
   try {
     const channel = await discord.channels.fetch(state.channelId);
     if (channel && "send" in channel) {
-      // 用灰色引用格式，紧凑一行
-      // 每行都加 -# 前缀保持小字格式
-      const formatted = tools.map((t) => `-# ${t}`).join("\n");
+      const formatted = items.map((t) => `-# ${t}`).join("\n");
       await (channel as TextChannel).send(formatted);
     }
   } catch { /* non-critical */ }
@@ -140,9 +139,10 @@ export async function startWatching(
     channelId,
     jsonlPath,
     workerName,
-    pendingTools: [],
+    pendingItems: [],
     flushTimer: null,
     idleChecker: null,
+    activeTools: new Map(),
     onIdle,
   };
 
@@ -161,23 +161,56 @@ export async function startWatching(
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
-          if (entry.type !== "assistant") continue;
 
-          const content = entry.message?.content;
-          if (!Array.isArray(content)) continue;
+          // assistant 消息：text blocks + tool_use blocks
+          if (entry.type === "assistant") {
+            const content = entry.message?.content;
+            if (!Array.isArray(content)) continue;
 
-          for (const block of content) {
-            if (block.type === "tool_use" && block.name && !isHiddenTool(block.name)) {
-              state.pendingTools.push(formatToolSummary(block.name, block.input));
+            // 检查这条消息是否包含 reply tool（如果是，text 是回复内容，不重复显示）
+            const hasReplyTool = content.some(
+              (b: any) => b.type === "tool_use" && isHiddenTool(b.name)
+            );
+
+            for (const block of content) {
+              // Claude 说的话（非 reply 前缀）
+              if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReplyTool) {
+                const text = block.text.trim();
+                if (text.length > 3 && text.length < 500) {
+                  state.pendingItems.push(`💬 ${text.slice(0, 150)}`);
+                }
+              }
+              // Tool use 开始
+              if (block.type === "tool_use" && block.name && !isHiddenTool(block.name) && WATCHER_CONFIG.showToolUse) {
+                const summary = formatToolSummary(block.name, block.input);
+                state.pendingItems.push(`⏳ ${summary}`);
+                if (block.id) state.activeTools.set(block.id, summary);
+              }
+            }
+          }
+
+          // tool_result：标记工具完成
+          if (entry.type === "user" && WATCHER_CONFIG.showToolResult) {
+            const content = entry.message?.content;
+            if (!Array.isArray(content)) continue;
+            for (const block of content) {
+              if (block.type === "tool_result" && block.tool_use_id) {
+                const summary = state.activeTools.get(block.tool_use_id);
+                if (summary) {
+                  state.activeTools.delete(block.tool_use_id);
+                  const isError = block.is_error;
+                  state.pendingItems.push(`${isError ? "❌" : "✅"} ${summary}`);
+                }
+              }
             }
           }
         } catch { /* non-critical */ }
       }
 
-      // Debounce: 1.5 秒内的 tool calls 合并成一条消息
-      if (state.pendingTools.length > 0) {
+      // Debounce
+      if (state.pendingItems.length > 0) {
         if (state.flushTimer) clearTimeout(state.flushTimer);
-        state.flushTimer = setTimeout(() => flushPending(state, discord), 1500);
+        state.flushTimer = setTimeout(() => flushPending(state, discord), WATCHER_CONFIG.debounceMs);
       }
     } catch { /* non-critical */ }
   });
@@ -192,8 +225,7 @@ export async function startWatching(
     }
     // 记录 typing 开始时间
     if (typingStartedAt === 0) typingStartedAt = Date.now();
-    // 前 8 秒不检查
-    if (Date.now() - typingStartedAt < 8000) return;
+    if (Date.now() - typingStartedAt < WATCHER_CONFIG.idleGracePeriodMs) return;
     try {
       const idle = await checkTmuxIdle(workerName);
       if (idle && state.onIdle) state.onIdle();
