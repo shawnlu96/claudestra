@@ -337,17 +337,16 @@ body {
     const htmlPath = `/tmp/claude-orchestrator/peek_${Date.now()}.html`;
     await Bun.write(htmlPath, htmlContent);
 
-    await Bun.spawn(["qlmanage", "-t", "-s", "2048", "-o", "/tmp/claude-orchestrator/", htmlPath], {
-      stdout: "pipe", stderr: "pipe",
-    }).exited;
+    const renderProc = Bun.spawn(
+      ["bun", "run", `${import.meta.dir}/html2png.ts`, htmlPath, pngPath, "1200"],
+      { stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}` } }
+    );
+    await renderProc.exited;
 
-    const qlPngPath = htmlPath + ".png";
-    const { existsSync, renameSync } = await import("fs");
-    if (existsSync(qlPngPath)) {
-      renameSync(qlPngPath, pngPath);
-      try { await Bun.spawn(["rm", htmlPath]).exited; } catch {}
-      return pngPath;
-    }
+    const { existsSync } = await import("fs");
+    try { await Bun.spawn(["rm", htmlPath]).exited; } catch {}
+    if (existsSync(pngPath)) return pngPath;
   } catch {}
 
   return null;
