@@ -265,9 +265,21 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
     await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
     await Bun.sleep(300);
 
-    // 2. 用 it2api 激活目标 session（如果能找到的话）
-    await Bun.spawn([IT2API, "activate-app"]).exited;
-    await Bun.sleep(300);
+    // 2. 用 it2api 切到对应的 iTerm2 tab
+    const searchName = windowName === "master" ? "Claude Code" : windowName.replace("worker-", "");
+    const listProc = Bun.spawn([IT2API, "list-sessions"], { stdout: "pipe", stderr: "pipe" });
+    const listOut = await new Response(listProc.stdout).text();
+    await listProc.exited;
+    for (const line of listOut.split("\n")) {
+      if (line.toLowerCase().includes(searchName.toLowerCase()) && line.includes("id=")) {
+        const idMatch = line.match(/id=([A-F0-9-]+)/);
+        if (idMatch) {
+          await Bun.spawn([IT2API, "activate", "session", idMatch[1]]).exited;
+          break;
+        }
+      }
+    }
+    await Bun.sleep(500);
 
     // 3. 用 ScreenCaptureKit 截图（会隐藏其他应用，截完恢复）
     const proc = Bun.spawn([SCREENSHOT_APP, pngPath], {
