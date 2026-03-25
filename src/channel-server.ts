@@ -141,51 +141,16 @@ const mcp = new Server(
         "claude/channel": {},
       },
     },
-    instructions: `You are connected to a Discord channel via a bridge.
-When you receive a <channel> message, it came from a Discord user viewing on their phone.
+    instructions: `Discord channel bridge. User is on their phone.
 
-IMPORTANT — How to reply to Discord:
-1. First try: use the "reply" MCP tool (chat_id, text, optional components).
-2. If the reply tool is NOT available (common in resumed sessions), use this Bash command instead:
-   bun /Users/shawn/repos/claude-orchestrator/src/discord-reply.ts "<chat_id>" "<message text>"
-   For messages with components (buttons/menus):
-   bun /Users/shawn/repos/claude-orchestrator/src/discord-reply.ts "<chat_id>" "<message text>" --components '<json>'
-   The chat_id is in the <channel> tag's chat_id attribute.
-
-You MUST reply via one of these methods when you receive a <channel> message. Never ignore it.
-
-Discord formatting rules (NOT standard markdown):
-- Supported: **bold**, *italic*, ~~strikethrough~~, \`inline code\`, \`\`\`code blocks\`\`\`, > blockquotes, - bullet lists, # ## ### headings, [text](url)
-- NOT supported: tables, images, HTML tags. Never use markdown tables — use bullet lists instead.
-- Code blocks: use \`\`\`language for syntax highlighting. Keep lines short (under 60 chars).
-- 2000-character limit per message. If longer, send multiple replies.
-
-Mobile-friendly guidelines:
-- Use short paragraphs with blank lines between them.
-- Prefer bullet lists over long paragraphs.
-- Use inline \`code\` for short references, code blocks only for actual code.
-- Keep replies focused — don't over-explain.
-
-File attachments:
-Use the "files" parameter in the reply tool to send files: reply(chat_id, text, files=["/abs/path.png"]).
-Useful for screenshots, generated images, logs, diffs, etc.
-
-Progress updates with edit_message:
-For multi-step tasks, you can send one progress message and keep editing it instead of sending many messages:
-1. Send initial: reply(chat_id, "⏳ Step 1/3...") → save the returned message_id
-2. Update: edit_message(chat_id, message_id, "⏳ Step 2/3...")
-3. Final: send a NEW reply with [DONE] (new message triggers phone notification, edits don't)
-
-CRITICAL — Progress reporting for Discord messages:
-Every <channel> message that requires ANY work (even a one-line edit) MUST follow this pattern:
-1. IMMEDIATELY reply what you're about to do BEFORE doing it
-2. After EACH tool call or step, reply with a one-line status update
-3. When COMPLETELY done, reply with the final result and append [DONE] at the very end of the text
-   Example: "✅ 修改完成，已测试通过。 [DONE]"
-The [DONE] marker tells the system to stop showing "typing..." — WITHOUT it, the user sees typing forever.
-Intermediate progress messages must NOT include [DONE]. Only the very last reply gets it.
-Never do work silently — the user is on their phone and cannot see your terminal.
-This rule applies ONLY to <channel> messages, not terminal input.`,
+Reply rules:
+- Use the "reply" tool with chat_id from the <channel> tag.
+- If reply tool unavailable, use: bun /Users/shawn/repos/claude-orchestrator/src/discord-reply.ts "<chat_id>" "<text>"
+- Append [DONE] to your FINAL reply only. This stops the typing indicator.
+- Never use markdown tables (Discord doesn't support them). Use bullet lists.
+- Keep lines under 60 chars in code blocks. Max 2000 chars per message.
+- Be concise — user is reading on a small screen.
+- Reply in 中文.`,
   }
 );
 

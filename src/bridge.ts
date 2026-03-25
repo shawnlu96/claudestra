@@ -43,6 +43,7 @@ import {
   handleMgmtSelect,
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
+import { startWatching, stopWatching } from "./bridge/jsonl-watcher.js";
 
 // ============================================================
 // 类型定义
@@ -342,6 +343,17 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       clients.set(msg.channelId, { ws, channelId: msg.channelId, userId: msg.userId });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
+
+      // 启动 JSONL watcher（从 registry 查 sessionId 和 cwd）
+      try {
+        const regResult = await runManager("list");
+        const worker = (regResult.workers || []).find((w: any) => w.channelId === msg.channelId);
+        if (worker?.sessionId && worker?.project) {
+          const cwd = worker.project.replace(/^~/, process.env.HOME || "~");
+          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord);
+        }
+      } catch { /* non-critical */ }
+
       break;
     }
 
@@ -444,6 +456,11 @@ const server = Bun.serve({
       for (const [channelId, info] of clients.entries()) {
         if (info.ws === ws) {
           clients.delete(channelId);
+          // 查找并停止对应的 JSONL watcher
+          runManager("list").then((r) => {
+            const worker = (r.workers || []).find((w: any) => w.channelId === channelId);
+            if (worker) stopWatching(worker.name);
+          }).catch(() => {});
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
         }
       }
