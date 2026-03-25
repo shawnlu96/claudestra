@@ -115,8 +115,20 @@ async function main() {
       continue;
     }
 
+    // 检查是否卡在确认弹窗
+    const pane = await captureLast(10);
+    if (
+      pane.includes("I am using this for local development") ||
+      pane.includes("Enter to confirm") ||
+      pane.includes("Esc to cancel") ||
+      pane.includes("Do you trust") ||
+      (pane.includes("❯ 1.") && pane.includes("Yes"))
+    ) {
+      console.log("⚠️ 大总管卡在确认弹窗，自动确认...");
+      await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
+    }
+
     // 检查 Claude Code 是否还活着（不是退回了 shell）
-    const pane = await captureLast(5);
     const atShell = /[%$]\s*$/.test(pane.split("\n").filter((l) => l.trim()).pop() || "");
     if (atShell) {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
