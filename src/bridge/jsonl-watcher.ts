@@ -23,8 +23,11 @@ interface WatcherState {
   pendingItems: string[];  // 待发送的所有项（tool use + text + tool result）
   flushTimer: ReturnType<typeof setTimeout> | null;
   idleChecker: ReturnType<typeof setInterval> | null;
-  activeTools: Map<string, string>; // tool_use_id → summary（跟踪运行中的 tool）
-  hasSeenActivity: boolean; // Claude 是否已经开始工作（JSONL 有新 entry）
+  activeTools: Map<string, string>; // tool_use_id → summary
+  toolMsgIds: Map<string, string>; // tool_use_id → Discord message ID（用于 edit）
+  lastToolMsgId: string | null; // 最后一条 tool 状态消息的 Discord ID
+  lastToolMsgContent: string; // 最后一条 tool 状态消息的内容
+  hasSeenActivity: boolean;
   onIdle?: () => void;
 }
 
@@ -90,17 +93,64 @@ function formatToolSummary(name: string, input: any): string {
   }
 }
 
-/** 发送积攒的项到 Discord */
+/** 发送积攒的项到 Discord，记录消息 ID 用于后续 edit */
 async function flushPending(state: WatcherState, discord: Client) {
   if (state.pendingItems.length === 0) return;
 
   const items = state.pendingItems.splice(0);
+  const formatted = items.map((t) => `-# ${t}`).join("\n");
 
   try {
     const channel = await discord.channels.fetch(state.channelId);
-    if (channel && "send" in channel) {
-      const formatted = items.map((t) => `-# ${t}`).join("\n");
-      await (channel as TextChannel).send(formatted);
+    if (!channel || !("send" in channel)) return;
+    const tc = channel as TextChannel;
+
+    // 如果有上一条 tool 消息且内容可以追加，edit 它
+    if (state.lastToolMsgId) {
+      try {
+        const msg = await tc.messages.fetch(state.lastToolMsgId);
+        const newContent = state.lastToolMsgContent + "\n" + formatted;
+        if (newContent.length < 1900) {
+          await msg.edit(newContent);
+          state.lastToolMsgContent = newContent;
+          return;
+        }
+      } catch { /* non-critical: msg deleted or too old */ }
+    }
+
+    // 发新消息
+    const sent = await tc.send(formatted);
+    state.lastToolMsgId = sent.id;
+    state.lastToolMsgContent = formatted;
+  } catch { /* non-critical */ }
+}
+
+/** tool 完成时 edit 对应的消息（⏳ → ✅） */
+async function markToolComplete(
+  state: WatcherState,
+  discord: Client,
+  toolId: string,
+  isError: boolean
+) {
+  const summary = state.activeTools.get(toolId);
+  if (!summary) return;
+  state.activeTools.delete(toolId);
+
+  if (!state.lastToolMsgId) return;
+
+  try {
+    const channel = await discord.channels.fetch(state.channelId);
+    if (!channel || !("messages" in channel)) return;
+    const msg = await (channel as TextChannel).messages.fetch(state.lastToolMsgId);
+
+    // 替换 ⏳ summary → ✅/❌ summary
+    const oldLine = `-# ⏳ ${summary}`;
+    const newLine = `-# ${isError ? "❌" : "✅"} ${summary}`;
+    const updated = state.lastToolMsgContent.replace(oldLine, newLine);
+
+    if (updated !== state.lastToolMsgContent) {
+      await msg.edit(updated);
+      state.lastToolMsgContent = updated;
     }
   } catch { /* non-critical */ }
 }
@@ -144,6 +194,9 @@ export async function startWatching(
     flushTimer: null,
     idleChecker: null,
     activeTools: new Map(),
+    toolMsgIds: new Map(),
+    lastToolMsgId: null,
+    lastToolMsgContent: "",
     hasSeenActivity: false,
     onIdle,
   };
@@ -196,18 +249,13 @@ export async function startWatching(
             }
           }
 
-          // tool_result：标记工具完成
+          // tool_result：edit 消息标记完成
           if (entry.type === "user" && WATCHER_CONFIG.showToolResult) {
             const content = entry.message?.content;
             if (!Array.isArray(content)) continue;
             for (const block of content) {
               if (block.type === "tool_result" && block.tool_use_id) {
-                const summary = state.activeTools.get(block.tool_use_id);
-                if (summary) {
-                  state.activeTools.delete(block.tool_use_id);
-                  const isError = block.is_error;
-                  state.pendingItems.push(`${isError ? "❌" : "✅"} ${summary}`);
-                }
+                await markToolComplete(state, discord, block.tool_use_id, !!block.is_error);
               }
             }
           }
@@ -225,9 +273,12 @@ export async function startWatching(
   // 定期检查 tmux idle 状态（每 3 秒）
   // 只有 JSONL 检测到 Claude 开始工作后才检查 idle
   state.idleChecker = setInterval(async () => {
-    // 没有在 typing → 重置活动标记
+    // 没有在 typing → 重置状态
     if (!typingIntervals.has(state.channelId)) {
       state.hasSeenActivity = false;
+      state.lastToolMsgId = null;
+      state.lastToolMsgContent = "";
+      state.activeTools.clear();
       return;
     }
     // Claude 还没开始工作 → 不检查（避免误判）
