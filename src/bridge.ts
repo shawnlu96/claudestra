@@ -253,48 +253,33 @@ async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
   return out.trim();
 }
 
+const SCREENSHOT_APP = `${import.meta.dir}/../Screenshot.app/Contents/MacOS/screenshot`;
+const IT2API = "/Applications/iTerm.app/Contents/Resources/utilities/it2api";
+
 async function tmuxScreenshot(windowName: string): Promise<string | null> {
   const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
+  const target = windowName === "master" ? "master:0" : `master:${windowName}`;
 
-  // 方法 1: 尝试用 screencapture 截取 iTerm2 窗口
   try {
-    // 先切到目标 window 让 iTerm2 显示它
-    const target = windowName === "master" ? "master:0" : `master:${windowName}`;
+    // 1. 切到目标 tmux window
     await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
-    await Bun.sleep(300);
+    await Bun.sleep(500);
 
-    // select-window 后 iTerm2 会自动显示目标 window
-    // 找任意一个带 [tmux] 的 iTerm2 窗口截图
-    await Bun.sleep(500); // 等 iTerm2 刷新
-    const findWindow = Bun.spawn(["swift", "-e", `
-import CoreGraphics
-let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as! [[String: Any]]
-for w in windows {
-    let owner = w[kCGWindowOwnerName as String] as? String ?? ""
-    if !owner.contains("iTerm") { continue }
-    let title = w[kCGWindowName as String] as? String ?? ""
-    let num = w[kCGWindowNumber as String] as? Int ?? 0
-    if title.contains("[tmux]") {
-        print(num)
-        break
-    }
-}
-`], { stdout: "pipe", stderr: "pipe" });
-    const windowId = (await new Response(findWindow.stdout).text()).trim();
-    await findWindow.exited;
+    // 2. 用 ScreenCaptureKit 截取 iTerm2 窗口（支持其他 Space/不可见窗口）
+    const proc = Bun.spawn([SCREENSHOT_APP, pngPath, "[tmux]"], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
 
-    if (windowId) {
-      const sc = await Bun.spawn(["screencapture", "-l", windowId, pngPath]).exited;
-      if (sc === 0) {
-        const { existsSync } = await import("fs");
-        if (existsSync(pngPath)) return pngPath;
-      }
+    if (out.includes("OK")) {
+      const { existsSync } = await import("fs");
+      if (existsSync(pngPath)) return pngPath;
     }
   } catch {}
 
-  // 方法 2: 回退到 canvas 渲染
+  // 回退：canvas 渲染
   try {
-    const target = windowName === "master" ? "master:0" : `master:${windowName}`;
     const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
       stdout: "pipe", stderr: "pipe",
     });
