@@ -242,17 +242,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 const MANAGER_PATH = `${import.meta.dir}/manager.ts`;
 const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 
-async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
-  const target = windowName === "master" ? "master:0" : `master:${windowName}`;
-  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out.trim();
-}
-
 async function tmuxScreenshot(windowName: string): Promise<string | null> {
   const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
   const target = windowName === "master" ? "master:0" : `master:${windowName}`;
@@ -300,14 +289,6 @@ async function runManager(...args: string[]): Promise<any> {
   } catch {
     return { ok: false, error: out.trim() || "manager 执行失败" };
   }
-}
-
-function formatAge(ms: number): string {
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 60) return `${mins}分钟前`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}小时前`;
-  return `${Math.floor(hours / 24)}天前`;
 }
 
 /** 构建 Agent 状态面板内容 */

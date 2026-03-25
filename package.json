@@ -3,12 +3,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "bun run src/bot.ts",
-    "dev": "bun run --watch src/bot.ts"
+    "bridge": "bun run src/bridge.ts",
+    "manager": "bun run src/manager.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "@napi-rs/canvas": "^0.1.97",
     "discord.js": "^14.18.0",
     "playwright-core": "^1.58.2"
   }
