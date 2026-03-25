@@ -326,8 +326,8 @@ body {
   background: #1e1e2e;
   color: #cdd6f4;
   font-family: 'Menlo', 'Monaco', monospace;
-  font-size: 12px;
-  line-height: 1.3;
+  font-size: 13px;
+  line-height: 1.2;
   padding: 10px;
   margin: 0;
   white-space: pre;
@@ -337,7 +337,7 @@ body {
     const htmlPath = `/tmp/claude-orchestrator/peek_${Date.now()}.html`;
     await Bun.write(htmlPath, htmlContent);
 
-    await Bun.spawn(["qlmanage", "-t", "-s", "1512", "-o", "/tmp/claude-orchestrator/", htmlPath], {
+    await Bun.spawn(["qlmanage", "-t", "-s", "2048", "-o", "/tmp/claude-orchestrator/", htmlPath], {
       stdout: "pipe", stderr: "pipe",
     }).exited;
 
