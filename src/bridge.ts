@@ -256,45 +256,55 @@ async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
 const SCREENSHOT_APP = `${import.meta.dir}/../Screenshot.app/Contents/MacOS/screenshot`;
 const IT2API = "/Applications/iTerm.app/Contents/Resources/utilities/it2api";
 
+async function isScreenLocked(): Promise<boolean> {
+  const proc = Bun.spawn(["ioreg", "-n", "Root", "-d1"], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.includes('"CGSSessionScreenIsLocked"=Yes');
+}
+
 async function tmuxScreenshot(windowName: string): Promise<string | null> {
   const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
   const target = windowName === "master" ? "master:0" : `master:${windowName}`;
 
-  try {
-    // 1. 切到目标 tmux window
-    await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
-    await Bun.sleep(300);
+  // 未锁屏时用真实截图
+  if (!(await isScreenLocked())) {
+    try {
+      // 1. 切到目标 tmux window
+      await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
+      await Bun.sleep(300);
 
-    // 2. 用 it2api 切到对应的 iTerm2 tab
-    const searchName = windowName === "master" ? "Claude Code" : windowName.replace("worker-", "");
-    const listProc = Bun.spawn([IT2API, "list-sessions"], { stdout: "pipe", stderr: "pipe" });
-    const listOut = await new Response(listProc.stdout).text();
-    await listProc.exited;
-    for (const line of listOut.split("\n")) {
-      if (line.toLowerCase().includes(searchName.toLowerCase()) && line.includes("id=")) {
-        const idMatch = line.match(/id=([A-F0-9-]+)/);
-        if (idMatch) {
-          await Bun.spawn([IT2API, "activate", "session", idMatch[1]]).exited;
-          break;
+      // 2. 用 it2api 切到对应的 iTerm2 tab
+      const searchName = windowName === "master" ? "Claude Code" : windowName.replace("worker-", "");
+      const listProc = Bun.spawn([IT2API, "list-sessions"], { stdout: "pipe", stderr: "pipe" });
+      const listOut = await new Response(listProc.stdout).text();
+      await listProc.exited;
+      for (const line of listOut.split("\n")) {
+        if (line.toLowerCase().includes(searchName.toLowerCase()) && line.includes("id=")) {
+          const idMatch = line.match(/id=([A-F0-9-]+)/);
+          if (idMatch) {
+            await Bun.spawn([IT2API, "activate", "session", idMatch[1]]).exited;
+            break;
+          }
         }
       }
-    }
-    await Bun.sleep(500);
+      await Bun.sleep(500);
 
-    // 3. 用 ScreenCaptureKit 截图（会隐藏其他应用，截完恢复）
-    const proc = Bun.spawn([SCREENSHOT_APP, pngPath], {
-      stdout: "pipe", stderr: "pipe",
-    });
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
+      // 3. 用 ScreenCaptureKit 截图
+      const proc = Bun.spawn([SCREENSHOT_APP, pngPath], {
+        stdout: "pipe", stderr: "pipe",
+      });
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
 
-    if (out.includes("OK")) {
-      const { existsSync } = await import("fs");
-      if (existsSync(pngPath)) return pngPath;
-    }
-  } catch {}
+      if (out.includes("OK")) {
+        const { existsSync } = await import("fs");
+        if (existsSync(pngPath)) return pngPath;
+      }
+    } catch {}
+  }
 
-  // 回退：canvas 渲染
+  // 锁屏或截图失败时：canvas 渲染
   try {
     const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
       stdout: "pipe", stderr: "pipe",
