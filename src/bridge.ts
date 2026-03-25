@@ -43,7 +43,7 @@ import {
   handleMgmtSelect,
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
-import { startWatching, stopWatching } from "./bridge/jsonl-watcher.js";
+import { startWatching, stopWatching, markChannelActivity } from "./bridge/jsonl-watcher.js";
 
 // ============================================================
 // 类型定义
@@ -375,6 +375,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       try {
         // 去掉 [DONE] 标记（不显示给用户），状态完成由 idle 检测处理
         const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
+        // 标记活动（告诉 idle 检测器 Claude 已经在工作了）
+        markChannelActivity(msg.chatId);
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
       } catch (err) {

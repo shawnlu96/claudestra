@@ -24,6 +24,7 @@ interface WatcherState {
   flushTimer: ReturnType<typeof setTimeout> | null;
   idleChecker: ReturnType<typeof setInterval> | null;
   activeTools: Map<string, string>; // tool_use_id → summary（跟踪运行中的 tool）
+  hasSeenActivity: boolean; // Claude 是否已经开始工作（JSONL 有新 entry）
   onIdle?: () => void;
 }
 
@@ -143,6 +144,7 @@ export async function startWatching(
     flushTimer: null,
     idleChecker: null,
     activeTools: new Map(),
+    hasSeenActivity: false,
     onIdle,
   };
 
@@ -161,6 +163,11 @@ export async function startWatching(
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
+
+          // 任何 entry 都标记 Claude 已开始工作
+          if (entry.type === "assistant" || entry.type === "user") {
+            state.hasSeenActivity = true;
+          }
 
           // assistant 消息：text blocks + tool_use blocks
           if (entry.type === "assistant") {
@@ -216,19 +223,21 @@ export async function startWatching(
   });
 
   // 定期检查 tmux idle 状态（每 3 秒）
-  // 记录 typing 开始时间，前 8 秒不检查（给 Claude 启动时间）
-  let typingStartedAt = 0;
+  // 只有 JSONL 检测到 Claude 开始工作后才检查 idle
   state.idleChecker = setInterval(async () => {
+    // 没有在 typing → 重置活动标记
     if (!typingIntervals.has(state.channelId)) {
-      typingStartedAt = 0;
+      state.hasSeenActivity = false;
       return;
     }
-    // 记录 typing 开始时间
-    if (typingStartedAt === 0) typingStartedAt = Date.now();
-    if (Date.now() - typingStartedAt < WATCHER_CONFIG.idleGracePeriodMs) return;
+    // Claude 还没开始工作 → 不检查（避免误判）
+    if (!state.hasSeenActivity) return;
     try {
       const idle = await checkTmuxIdle(workerName);
-      if (idle && state.onIdle) state.onIdle();
+      if (idle && state.onIdle) {
+        state.hasSeenActivity = false; // 重置
+        state.onIdle();
+      }
     } catch { /* non-critical */ }
   }, 3000);
 
@@ -244,6 +253,15 @@ export function stopWatching(workerName: string) {
     if (state.flushTimer) clearTimeout(state.flushTimer);
     if (state.idleChecker) clearInterval(state.idleChecker);
     watchers.delete(workerName);
+  }
+}
+
+/** 标记某个频道有活动（由 bridge reply handler 调用） */
+export function markChannelActivity(channelId: string) {
+  for (const state of watchers.values()) {
+    if (state.channelId === channelId) {
+      state.hasSeenActivity = true;
+    }
   }
 }
 
