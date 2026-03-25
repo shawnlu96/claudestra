@@ -263,7 +263,9 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
     await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
     await Bun.sleep(300);
 
-    // 查找匹配的 iTerm2 窗口
+    // select-window 后 iTerm2 会自动显示目标 window
+    // 找任意一个带 [tmux] 的 iTerm2 窗口截图
+    await Bun.sleep(500); // 等 iTerm2 刷新
     const findWindow = Bun.spawn(["swift", "-e", `
 import CoreGraphics
 let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as! [[String: Any]]
@@ -272,9 +274,7 @@ for w in windows {
     if !owner.contains("iTerm") { continue }
     let title = w[kCGWindowName as String] as? String ?? ""
     let num = w[kCGWindowNumber as String] as? Int ?? 0
-    // 匹配 window 名或包含 tmux 标记
-    let target = "${windowName}"
-    if title.contains(target) || title.contains("[tmux]") {
+    if title.contains("[tmux]") {
         print(num)
         break
     }
