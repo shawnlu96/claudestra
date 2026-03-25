@@ -199,7 +199,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 显示 "正在输入..." + 发送打断按钮状态消息
   startTyping(channelId);
   const statusMsg = await (msg.channel as TextChannel).send({
-    content: "⏳ 处理中...",
+    content: "🧠 大聪明深度思考中...",
     components: buildComponents([{
       type: "buttons",
       buttons: [{ id: `interrupt:${channelId}`, label: "打断", emoji: "⚡", style: "danger" }],
