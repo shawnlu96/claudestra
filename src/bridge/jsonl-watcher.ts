@@ -12,6 +12,7 @@ import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import { TMUX_SOCK } from "./config.js";
+import { typingIntervals } from "./components.js";
 
 interface WatcherState {
   watcher: FSWatcher;
@@ -22,7 +23,6 @@ interface WatcherState {
   pendingTools: string[];
   flushTimer: ReturnType<typeof setTimeout> | null;
   idleChecker: ReturnType<typeof setInterval> | null;
-  wasActive: boolean; // 是否在工作中（检测到 tool use 后变 true）
   onIdle?: () => void; // idle 回调
 }
 
@@ -143,7 +143,6 @@ export async function startWatching(
     pendingTools: [],
     flushTimer: null,
     idleChecker: null,
-    wasActive: false,
     onIdle,
   };
 
@@ -170,7 +169,6 @@ export async function startWatching(
           for (const block of content) {
             if (block.type === "tool_use" && block.name && !isHiddenTool(block.name)) {
               state.pendingTools.push(formatToolSummary(block.name, block.input));
-              state.wasActive = true;
             }
           }
         } catch { /* non-critical */ }
@@ -185,14 +183,13 @@ export async function startWatching(
   });
 
   // 定期检查 tmux idle 状态（每 3 秒）
+  // 只在 typing 活跃时检查，idle 了就触发回调
   state.idleChecker = setInterval(async () => {
-    if (!state.wasActive) return; // 没检测到活动就不检查
+    // 只有当前频道在 typing 时才检查
+    if (!typingIntervals.has(state.channelId)) return;
     try {
       const idle = await checkTmuxIdle(workerName);
-      if (idle) {
-        state.wasActive = false;
-        if (state.onIdle) state.onIdle();
-      }
+      if (idle && state.onIdle) state.onIdle();
     } catch { /* non-critical */ }
   }, 3000);
 
