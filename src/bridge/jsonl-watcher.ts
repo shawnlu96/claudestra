@@ -28,6 +28,7 @@ interface WatcherState {
   lastToolMsgId: string | null; // 最后一条 tool 状态消息的 Discord ID
   lastToolMsgContent: string; // 最后一条 tool 状态消息的内容
   hasSeenActivity: boolean;
+  lastActivityAt: number; // 最后一次活动的时间戳
   onIdle?: () => void;
 }
 
@@ -207,6 +208,7 @@ export async function startWatching(
     lastToolMsgId: null,
     lastToolMsgContent: "",
     hasSeenActivity: false,
+    lastActivityAt: 0,
     onIdle,
   };
 
@@ -227,9 +229,9 @@ export async function startWatching(
           const entry = JSON.parse(line);
 
           // 只有 assistant entry 才标记 Claude 开始工作
-          // user entry 是输入被记录，不代表 Claude 在处理
           if (entry.type === "assistant") {
             state.hasSeenActivity = true;
+            state.lastActivityAt = Date.now();
           }
 
           // assistant 消息：text blocks + tool_use blocks
@@ -293,10 +295,12 @@ export async function startWatching(
     }
     // Claude 还没开始工作 → 不检查（避免误判）
     if (!state.hasSeenActivity) return;
+    // 最后一次活动后 10 秒内不检查（Claude 可能在两步之间短暂空闲）
+    if (Date.now() - state.lastActivityAt < 10000) return;
     try {
       const idle = await checkTmuxIdle(workerName);
       if (idle && state.onIdle) {
-        state.hasSeenActivity = false; // 重置
+        state.hasSeenActivity = false;
         state.onIdle();
       }
     } catch { /* non-critical */ }
@@ -322,6 +326,7 @@ export function markChannelActivity(channelId: string) {
   for (const state of watchers.values()) {
     if (state.channelId === channelId) {
       state.hasSeenActivity = true;
+      state.lastActivityAt = Date.now();
     }
   }
 }
