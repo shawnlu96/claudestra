@@ -508,6 +508,27 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       await interaction.deferReply({ ephemeral: true }).catch(() => {});
     });
 
+    // 置顶截图按钮：peek_self:<channelId>
+    if (id.startsWith("peek_self:")) {
+      const targetChannelId = id.slice("peek_self:".length);
+      // 从 registry 找 worker name
+      const listResult = await runManager("list");
+      const worker = (listResult.workers || []).find((w: any) => w.channelId === targetChannelId);
+      const windowName = worker ? worker.name : "master";
+      const pngPath = await tmuxScreenshot(windowName);
+      if (pngPath) {
+        const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
+        await ch.send({
+          content: `**📸 终端截图**`,
+          files: [{ attachment: pngPath }],
+        });
+      } else {
+        const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
+        await ch.send("❌ 截图失败");
+      }
+      return;
+    }
+
     // 打断按钮：interrupt:<channelId>
     if (id.startsWith("interrupt:")) {
       const targetChannelId = id.slice("interrupt:".length);
@@ -811,6 +832,30 @@ async function handleClientMessage(
       });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
+
+      // 发送/更新置顶控制面板
+      try {
+        const ch = await discord.channels.fetch(msg.channelId) as TextChannel;
+        if (ch) {
+          // 检查是否已有置顶的控制面板
+          const pins = await ch.messages.fetchPinned();
+          const existingPanel = pins.find((m) => m.author.id === botUserId && m.content.includes("📌 控制面板"));
+          if (!existingPanel) {
+            const panel = await ch.send({
+              content: "**📌 控制面板**",
+              components: buildComponents([
+                { type: "buttons", buttons: [
+                  { id: `peek_self:${msg.channelId}`, label: "截图", emoji: "📸", style: "primary" },
+                  { id: `interrupt:${msg.channelId}`, label: "打断", emoji: "⚡", style: "danger" },
+                ]},
+              ]),
+            });
+            recentBotMessageIds.add(panel.id);
+            await panel.pin().catch(() => {});
+          }
+        }
+      } catch {}
+
       break;
     }
 
