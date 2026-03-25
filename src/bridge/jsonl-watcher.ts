@@ -84,13 +84,14 @@ async function flushPending(state: WatcherState, discord: Client) {
   if (state.pendingTools.length === 0) return;
 
   const tools = state.pendingTools.splice(0);
-  const text = tools.join("  ·  ");
 
   try {
     const channel = await discord.channels.fetch(state.channelId);
     if (channel && "send" in channel) {
       // 用灰色引用格式，紧凑一行
-      await (channel as TextChannel).send(`-# ${text}`);
+      // 每行都加 -# 前缀保持小字格式
+      const formatted = tools.map((t) => `-# ${t}`).join("\n");
+      await (channel as TextChannel).send(formatted);
     }
   } catch { /* non-critical */ }
 }
