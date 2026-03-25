@@ -847,22 +847,7 @@ async function handleClientMessage(
           }
         } else {
           ensureTyping(msg.chatId);
-          // 更新状态消息显示最新进度
-          const statusMsgId = activeStatusMessages.get(msg.chatId);
-          if (statusMsgId) {
-            try {
-              const ch = await discord.channels.fetch(msg.chatId) as TextChannel;
-              const statusMsg = await ch.messages.fetch(statusMsgId);
-              const preview = text.length > 100 ? text.slice(0, 97) + "..." : text;
-              await statusMsg.edit({
-                content: `⏳ ${preview}`,
-                components: buildComponents([{
-                  type: "buttons",
-                  buttons: [{ id: `interrupt:${msg.chatId}`, label: "打断", emoji: "⚡", style: "danger" }],
-                }]),
-              });
-            } catch {}
-          }
+          // 状态消息保持不变（不更新内容，避免刷屏）
         }
         const ids = await discordReply(msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(
