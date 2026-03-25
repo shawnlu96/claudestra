@@ -305,51 +305,76 @@ function formatAge(ms: number): string {
   return `${Math.floor(hours / 24)}天前`;
 }
 
-async function handleMgmtButton(
-  id: string,
-  chatId: string
-): Promise<{ text: string; components?: any[] } | null> {
-  if (id === "list_workers") {
-    const result = await runManager("list");
-    if (!result.ok) return { text: `❌ ${result.error}` };
-    const workers = result.workers || [];
-    if (workers.length === 0) return {
-      text: "📭 当前没有活跃的 Agent。",
-      components: [{ type: "buttons", buttons: [
-        { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
-        { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
-      ]}],
-    };
-    const lines = workers.map((w: any) => {
-      let status: string;
-      if (w.status !== "active") {
-        status = "💀 已断开";
-      } else if (w.channelId && typingIntervals.has(w.channelId)) {
-        status = "🔵 工作中";
-      } else if (w.idle) {
-        status = "🟢 空闲";
-      } else {
-        status = "🔵 执行中";
-      }
-      return `**${w.name}** — ${status}\n📁 \`${w.project}\``;
-    });
-    const activeWorkers = workers.filter((w: any) => w.status === "active");
-    const buttons: any[] = [];
-    if (activeWorkers.length > 0) {
-      buttons.push(
-        { id: "show_peek_menu", label: "监工", emoji: "👁", style: "primary" },
-        { id: "restart_all", label: "全部重启", emoji: "🔄", style: "secondary" },
-        { id: "show_kill_menu", label: "销毁 Agent", emoji: "🗑", style: "danger" },
-      );
-    }
-    buttons.push(
+/** 构建 Agent 状态面板内容 */
+async function buildStatusPanel(): Promise<{ text: string; components: any[] }> {
+  const result = await runManager("list");
+  if (!result.ok) return { text: `❌ ${result.error}`, components: [] };
+  const workers = result.workers || [];
+  if (workers.length === 0) return {
+    text: "📭 当前没有活跃的 Agent。",
+    components: [{ type: "buttons", buttons: [
       { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
       { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
+    ]}],
+  };
+  const lines = workers.map((w: any) => {
+    let status: string;
+    if (w.status !== "active") {
+      status = "💀 已断开";
+    } else if (w.channelId && typingIntervals.has(w.channelId)) {
+      status = "🔵 工作中";
+    } else if (w.idle) {
+      status = "🟢 空闲";
+    } else {
+      status = "🔵 执行中";
+    }
+    return `**${w.name}** — ${status}\n📁 \`${w.project}\``;
+  });
+  const activeWorkers = workers.filter((w: any) => w.status === "active");
+  const buttons: any[] = [
+    { id: "refresh_status", label: "刷新", emoji: "🔄", style: "primary" },
+  ];
+  if (activeWorkers.length > 0) {
+    buttons.push(
+      { id: "show_peek_menu", label: "监工", emoji: "👁", style: "secondary" },
+      { id: "restart_all", label: "全部重启", emoji: "🔄", style: "secondary" },
+      { id: "show_kill_menu", label: "销毁 Agent", emoji: "🗑", style: "danger" },
     );
-    return {
-      text: "**📊 Agent 状态**\n\n" + lines.join("\n\n"),
-      components: [{ type: "buttons", buttons }],
-    };
+  }
+  buttons.push(
+    { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
+    { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
+  );
+  return {
+    text: "**📊 Agent 状态**\n\n" + lines.join("\n\n"),
+    components: [{ type: "buttons", buttons }],
+  };
+}
+
+async function handleMgmtButton(
+  id: string,
+  chatId: string,
+  messageId?: string
+): Promise<{ text: string; components?: any[] } | null> {
+  if (id === "list_workers") {
+    return await buildStatusPanel();
+  }
+
+  if (id === "refresh_status") {
+    // 用 edit_message 更新原消息而不是发新消息
+    if (messageId) {
+      const panel = await buildStatusPanel();
+      try {
+        const ch = await discord.channels.fetch(chatId) as TextChannel;
+        const msg = await ch.messages.fetch(messageId);
+        await msg.edit({
+          content: panel.text,
+          components: panel.components ? buildComponents(panel.components) : [],
+        });
+      } catch {}
+      return { text: "__HANDLED__" };
+    }
+    return await buildStatusPanel();
   }
 
   if (id === "show_kill_menu") {
@@ -523,11 +548,13 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
     }
 
     // 尝试直接处理管理按钮
-    const mgmtResult = await handleMgmtButton(id, channelId);
+    const mgmtResult = await handleMgmtButton(id, channelId, interaction.message?.id);
     if (mgmtResult) {
-      const components = mgmtResult.components ? buildComponents(mgmtResult.components) : undefined;
-      const channel = await discord.channels.fetch(channelId) as TextChannel;
-      await channel.send({ content: mgmtResult.text, components });
+      if (mgmtResult.text !== "__HANDLED__") {
+        const components = mgmtResult.components ? buildComponents(mgmtResult.components) : undefined;
+        const channel = await discord.channels.fetch(channelId) as TextChannel;
+        await channel.send({ content: mgmtResult.text, components });
+      }
       return;
     }
 
