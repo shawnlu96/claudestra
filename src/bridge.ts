@@ -350,7 +350,21 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const worker = (regResult.workers || []).find((w: any) => w.channelId === msg.channelId);
         if (worker?.sessionId && worker?.project) {
           const cwd = worker.project.replace(/^~/, process.env.HOME || "~");
-          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord);
+          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord, () => {
+            // Agent 回到 idle → 更新状态消息为完成 + 停止 typing
+            stopTyping(msg.channelId);
+            const statusMsgId = activeStatusMessages.get(msg.channelId);
+            if (statusMsgId) {
+              discord.channels.fetch(msg.channelId).then((ch) => {
+                if (ch && "messages" in ch) {
+                  (ch as TextChannel).messages.fetch(statusMsgId).then((sm) => {
+                    sm.edit({ content: "✅ 完成", components: [] }).catch(() => {});
+                  }).catch(() => {});
+                }
+              }).catch(() => {});
+              activeStatusMessages.delete(msg.channelId);
+            }
+          });
         }
       } catch { /* non-critical */ }
 
@@ -359,22 +373,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "reply": {
       try {
-        const isDone = msg.text?.endsWith("[DONE]");
-        const text = isDone ? msg.text.replace(/\s*\[DONE\]\s*$/, "") : msg.text;
-        if (isDone) {
-          stopTyping(msg.chatId);
-          const statusMsgId = activeStatusMessages.get(msg.chatId);
-          if (statusMsgId) {
-            try {
-              const ch = await discord.channels.fetch(msg.chatId) as TextChannel;
-              const sm = await ch.messages.fetch(statusMsgId);
-              await sm.edit({ content: "✅ 完成", components: [] });
-            } catch { /* non-critical */ }
-            activeStatusMessages.delete(msg.chatId);
-          }
-        } else {
-          ensureTyping(msg.chatId, discord);
-        }
+        // 去掉 [DONE] 标记（不显示给用户），状态完成由 idle 检测处理
+        const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
       } catch (err) {

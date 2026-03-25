@@ -11,14 +11,19 @@ import { existsSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
+import { TMUX_SOCK } from "./config.js";
 
 interface WatcherState {
   watcher: FSWatcher;
   lastSize: number;
   channelId: string;
   jsonlPath: string;
+  workerName: string;
   pendingTools: string[];
   flushTimer: ReturnType<typeof setTimeout> | null;
+  idleChecker: ReturnType<typeof setInterval> | null;
+  wasActive: boolean; // 是否在工作中（检测到 tool use 后变 true）
+  onIdle?: () => void; // idle 回调
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -100,13 +105,24 @@ async function flushPending(state: WatcherState, discord: Client) {
   } catch { /* non-critical */ }
 }
 
+async function checkTmuxIdle(workerName: string): Promise<boolean> {
+  const target = `master:${workerName}`;
+  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p"], {
+    stdout: "pipe", stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return /❯/.test(out.split("\n").slice(-5).join("\n"));
+}
+
 /** 开始监听一个 agent 的 JSONL 文件 */
 export async function startWatching(
   workerName: string,
   cwd: string,
   sessionId: string,
   channelId: string,
-  discord: Client
+  discord: Client,
+  onIdle?: () => void
 ) {
   stopWatching(workerName);
 
@@ -123,8 +139,12 @@ export async function startWatching(
     lastSize: fileStat.size,
     channelId,
     jsonlPath,
+    workerName,
     pendingTools: [],
     flushTimer: null,
+    idleChecker: null,
+    wasActive: false,
+    onIdle,
   };
 
   state.watcher = watch(jsonlPath, async (eventType) => {
@@ -150,6 +170,7 @@ export async function startWatching(
           for (const block of content) {
             if (block.type === "tool_use" && block.name && !isHiddenTool(block.name)) {
               state.pendingTools.push(formatToolSummary(block.name, block.input));
+              state.wasActive = true;
             }
           }
         } catch { /* non-critical */ }
@@ -163,6 +184,18 @@ export async function startWatching(
     } catch { /* non-critical */ }
   });
 
+  // 定期检查 tmux idle 状态（每 3 秒）
+  state.idleChecker = setInterval(async () => {
+    if (!state.wasActive) return; // 没检测到活动就不检查
+    try {
+      const idle = await checkTmuxIdle(workerName);
+      if (idle) {
+        state.wasActive = false;
+        if (state.onIdle) state.onIdle();
+      }
+    } catch { /* non-critical */ }
+  }, 3000);
+
   watchers.set(workerName, state);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
 }
@@ -173,6 +206,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.flushTimer) clearTimeout(state.flushTimer);
+    if (state.idleChecker) clearInterval(state.idleChecker);
     watchers.delete(workerName);
   }
 }
