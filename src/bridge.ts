@@ -263,10 +263,14 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
   try {
     // 1. 切到目标 tmux window
     await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
-    await Bun.sleep(500);
+    await Bun.sleep(300);
 
-    // 2. 用 ScreenCaptureKit 截取 iTerm2 窗口（支持其他 Space/不可见窗口）
-    const proc = Bun.spawn([SCREENSHOT_APP, pngPath, "[tmux]"], {
+    // 2. 用 it2api 激活目标 session（如果能找到的话）
+    await Bun.spawn([IT2API, "activate-app"]).exited;
+    await Bun.sleep(300);
+
+    // 3. 用 ScreenCaptureKit 截图（会隐藏其他应用，截完恢复）
+    const proc = Bun.spawn([SCREENSHOT_APP, pngPath], {
       stdout: "pipe", stderr: "pipe",
     });
     const out = await new Response(proc.stdout).text();
