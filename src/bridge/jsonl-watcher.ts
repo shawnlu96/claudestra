@@ -20,7 +20,7 @@ interface WatcherState {
   channelId: string;
   jsonlPath: string;
   workerName: string;
-  pendingItems: string[];  // 待发送的所有项（tool use + text + tool result）
+  pendingItems: { text: string; toolId?: string }[];  // 待发送项
   flushTimer: ReturnType<typeof setTimeout> | null;
   idleChecker: ReturnType<typeof setInterval> | null;
   activeTools: Map<string, string>; // tool_use_id → summary
@@ -99,7 +99,7 @@ async function flushPending(state: WatcherState, discord: Client) {
   if (state.pendingItems.length === 0) return;
 
   const items = state.pendingItems.splice(0);
-  const formatted = items.map((t) => `-# ${t}`).join("\n");
+  const formatted = items.map((t) => `-# ${t.text}`).join("\n");
 
   try {
     const channel = await discord.channels.fetch(state.channelId);
@@ -140,9 +140,9 @@ async function markToolComplete(
   const icon = isError ? "❌" : "✅";
 
   // 先看 pending 队列里有没有（还没 flush 到 Discord）
-  const pendingIdx = state.pendingItems.findIndex((t) => t === `⏳ ${summary}`);
+  const pendingIdx = state.pendingItems.findIndex((t) => t.toolId === toolId);
   if (pendingIdx >= 0) {
-    state.pendingItems[pendingIdx] = `${icon} ${summary}`;
+    state.pendingItems[pendingIdx] = { text: `${icon} ${summary}` };
     return;
   }
 
@@ -249,13 +249,13 @@ export async function startWatching(
               if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReplyTool) {
                 const text = block.text.trim();
                 if (text.length > 3 && text.length < 500) {
-                  state.pendingItems.push(`💬 ${text.slice(0, 150)}`);
+                  state.pendingItems.push({ text: `💬 ${text.slice(0, 150)}` });
                 }
               }
               // Tool use 开始
               if (block.type === "tool_use" && block.name && !isHiddenTool(block.name) && WATCHER_CONFIG.showToolUse) {
                 const summary = formatToolSummary(block.name, block.input);
-                state.pendingItems.push(`⏳ ${summary}`);
+                state.pendingItems.push({ text: `⏳ ${summary}`, toolId: block.id });
                 if (block.id) state.activeTools.set(block.id, summary);
               }
             }
