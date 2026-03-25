@@ -93,6 +93,9 @@ async function flushText(state: WatcherState, discord: Client) {
   try {
     const ch = await discord.channels.fetch(state.channelId) as TextChannel;
     await ch.send(items.map((t) => `-# ${t}`).join("\n"));
+    // text 发出后重置 tool 消息，后续 tool 会创建新消息（保持顺序）
+    state.toolMsgId = null;
+    state.tools = [];
   } catch { /* non-critical */ }
 }
 
@@ -177,8 +180,12 @@ export async function startWatching(
         } catch { /* non-critical */ }
       }
 
-      // tool 有变化 → 立即同步到 Discord
+      // tool 有变化 → 先 flush text（保持顺序），再同步 tool
       if (toolsChanged) {
+        if (state.textQueue.length > 0) {
+          if (state.textTimer) { clearTimeout(state.textTimer); state.textTimer = null; }
+          await flushText(state, discord);
+        }
         await syncToolMsg(state, discord);
       }
 
