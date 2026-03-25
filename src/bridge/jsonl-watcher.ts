@@ -61,19 +61,19 @@ function formatToolSummary(name: string, input: any): string {
 
   switch (name) {
     case "Read":
-      return `${emoji} Read \`${input?.file_path?.split("/").pop() || ""}\``;
+      return `${emoji} Read ${input?.file_path?.split("/").pop() || ""}`;
     case "Edit":
-      return `${emoji} Edit \`${input?.file_path?.split("/").pop() || ""}\``;
+      return `${emoji} Edit ${input?.file_path?.split("/").pop() || ""}`;
     case "Write":
-      return `${emoji} Write \`${input?.file_path?.split("/").pop() || ""}\``;
+      return `${emoji} Write ${input?.file_path?.split("/").pop() || ""}`;
     case "Bash": {
       const cmd = input?.command || "";
-      return `${emoji} \`${cmd.length > 50 ? cmd.slice(0, 47) + "..." : cmd}\``;
+      return `${emoji} ${cmd.length > 50 ? cmd.slice(0, 47) + "..." : cmd}`;
     }
     case "Glob":
-      return `${emoji} Glob \`${input?.pattern || ""}\``;
+      return `${emoji} Glob ${input?.pattern || ""}`;
     case "Grep":
-      return `${emoji} Grep \`${input?.pattern || ""}\``;
+      return `${emoji} Grep ${input?.pattern || ""}`;
     default:
       return `${emoji} ${name}`;
   }
