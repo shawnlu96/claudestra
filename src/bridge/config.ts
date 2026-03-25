@@ -22,5 +22,4 @@ export const WATCHER_CONFIG = {
   showClaudeText: true,    // 显示 Claude 说的话（非 reply 的文本）
   showToolResult: true,    // 显示 tool 完成状态（✅ Read file.ts）
   debounceMs: 1500,        // tool 合并等待时间
-  idleGracePeriodMs: 8000, // typing 开始后多久才检查 idle
 };

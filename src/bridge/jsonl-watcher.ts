@@ -11,8 +11,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
-import { TMUX_SOCK, WATCHER_CONFIG } from "./config.js";
-import { typingIntervals } from "./components.js";
+import { WATCHER_CONFIG } from "./config.js";
 
 interface WatcherState {
   watcher: FSWatcher;
@@ -22,14 +21,10 @@ interface WatcherState {
   workerName: string;
   pendingItems: { text: string; toolId?: string }[];  // 待发送项
   flushTimer: ReturnType<typeof setTimeout> | null;
-  idleChecker: ReturnType<typeof setInterval> | null;
-  activeTools: Map<string, string>; // tool_use_id → summary
-  toolMsgIds: Map<string, string>; // tool_use_id → Discord message ID（用于 edit）
-  lastToolMsgId: string | null; // 最后一条 tool 状态消息的 Discord ID
-  lastToolMsgContent: string; // 最后一条 tool 状态消息的内容
-  hasSeenActivity: boolean;
-  lastActivityAt: number; // 最后一次活动的时间戳
-  onIdle?: () => void;
+  activeTools: Map<string, string>;
+  toolMsgIds: Map<string, string>;
+  lastToolMsgId: string | null;
+  lastToolMsgContent: string;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -165,24 +160,13 @@ async function markToolComplete(
   } catch { /* non-critical */ }
 }
 
-async function checkTmuxIdle(workerName: string): Promise<boolean> {
-  const target = `master:${workerName}`;
-  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p"], {
-    stdout: "pipe", stderr: "pipe",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return /❯/.test(out.split("\n").slice(-5).join("\n"));
-}
-
 /** 开始监听一个 agent 的 JSONL 文件 */
 export async function startWatching(
   workerName: string,
   cwd: string,
   sessionId: string,
   channelId: string,
-  discord: Client,
-  onIdle?: () => void
+  discord: Client
 ) {
   stopWatching(workerName);
 
@@ -207,9 +191,6 @@ export async function startWatching(
     toolMsgIds: new Map(),
     lastToolMsgId: null,
     lastToolMsgContent: "",
-    hasSeenActivity: false,
-    lastActivityAt: 0,
-    onIdle,
   };
 
   state.watcher = watch(jsonlPath, async (eventType) => {
@@ -227,12 +208,6 @@ export async function startWatching(
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
-
-          // 只有 assistant entry 才标记 Claude 开始工作
-          if (entry.type === "assistant") {
-            state.hasSeenActivity = true;
-            state.lastActivityAt = Date.now();
-          }
 
           // assistant 消息：text blocks + tool_use blocks
           if (entry.type === "assistant") {
@@ -282,30 +257,6 @@ export async function startWatching(
     } catch { /* non-critical */ }
   });
 
-  // 定期检查 tmux idle 状态（每 3 秒）
-  // 只有 JSONL 检测到 Claude 开始工作后才检查 idle
-  state.idleChecker = setInterval(async () => {
-    // 没有在 typing → 重置状态
-    if (!typingIntervals.has(state.channelId)) {
-      state.hasSeenActivity = false;
-      state.lastToolMsgId = null;
-      state.lastToolMsgContent = "";
-      state.activeTools.clear();
-      return;
-    }
-    // Claude 还没开始工作 → 不检查（避免误判）
-    if (!state.hasSeenActivity) return;
-    // 最后一次活动后 10 秒内不检查（Claude 可能在两步之间短暂空闲）
-    if (Date.now() - state.lastActivityAt < 10000) return;
-    try {
-      const idle = await checkTmuxIdle(workerName);
-      if (idle && state.onIdle) {
-        state.hasSeenActivity = false;
-        state.onIdle();
-      }
-    } catch { /* non-critical */ }
-  }, 3000);
-
   watchers.set(workerName, state);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
 }
@@ -316,18 +267,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.flushTimer) clearTimeout(state.flushTimer);
-    if (state.idleChecker) clearInterval(state.idleChecker);
     watchers.delete(workerName);
-  }
-}
-
-/** 标记某个频道有活动（由 bridge reply handler 调用） */
-export function markChannelActivity(channelId: string) {
-  for (const state of watchers.values()) {
-    if (state.channelId === channelId) {
-      state.hasSeenActivity = true;
-      state.lastActivityAt = Date.now();
-    }
   }
 }
 
