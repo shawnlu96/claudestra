@@ -254,32 +254,67 @@ async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
 }
 
 async function tmuxScreenshot(windowName: string): Promise<string | null> {
-  const target = windowName === "master" ? "master:0" : `master:${windowName}`;
-  // 捕获终端内容到文件
-  const captureFile = `/tmp/claude-orchestrator/capture_${Date.now()}.txt`;
-  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const content = await new Response(proc.stdout).text();
-  await proc.exited;
-  if (!content.trim()) return null;
-
-  await Bun.write(captureFile, content);
-
-  // 渲染成 PNG
   const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
-  const render = Bun.spawn(
-    ["bun", "run", `${import.meta.dir}/term-screenshot.ts`, pngPath],
-    { stdin: Bun.file(captureFile), stdout: "pipe", stderr: "pipe" }
-  );
-  await render.exited;
 
-  // 清理临时文件
-  try { await Bun.write(captureFile, ""); } catch {}
+  // 方法 1: 尝试用 screencapture 截取 iTerm2 窗口
+  try {
+    // 先切到目标 window 让 iTerm2 显示它
+    const target = windowName === "master" ? "master:0" : `master:${windowName}`;
+    await Bun.spawn(["tmux", "-S", TMUX_SOCK, "select-window", "-t", target]).exited;
+    await Bun.sleep(300);
 
-  const { existsSync } = await import("fs");
-  return existsSync(pngPath) ? pngPath : null;
+    // 查找匹配的 iTerm2 窗口
+    const findWindow = Bun.spawn(["swift", "-e", `
+import CoreGraphics
+let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as! [[String: Any]]
+for w in windows {
+    let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+    if !owner.contains("iTerm") { continue }
+    let title = w[kCGWindowName as String] as? String ?? ""
+    let num = w[kCGWindowNumber as String] as? Int ?? 0
+    // 匹配 window 名或包含 tmux 标记
+    let target = "${windowName}"
+    if title.contains(target) || title.contains("[tmux]") {
+        print(num)
+        break
+    }
+}
+`], { stdout: "pipe", stderr: "pipe" });
+    const windowId = (await new Response(findWindow.stdout).text()).trim();
+    await findWindow.exited;
+
+    if (windowId) {
+      const sc = await Bun.spawn(["screencapture", "-l", windowId, pngPath]).exited;
+      if (sc === 0) {
+        const { existsSync } = await import("fs");
+        if (existsSync(pngPath)) return pngPath;
+      }
+    }
+  } catch {}
+
+  // 方法 2: 回退到 canvas 渲染
+  try {
+    const target = windowName === "master" ? "master:0" : `master:${windowName}`;
+    const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    const content = await new Response(proc.stdout).text();
+    await proc.exited;
+    if (!content.trim()) return null;
+
+    const captureFile = `/tmp/claude-orchestrator/capture_${Date.now()}.txt`;
+    await Bun.write(captureFile, content);
+    const render = Bun.spawn(
+      ["bun", "run", `${import.meta.dir}/term-screenshot.ts`, pngPath],
+      { stdin: Bun.file(captureFile), stdout: "pipe", stderr: "pipe" }
+    );
+    await render.exited;
+
+    const { existsSync } = await import("fs");
+    return existsSync(pngPath) ? pngPath : null;
+  } catch {}
+
+  return null;
 }
 
 async function runManager(...args: string[]): Promise<any> {
