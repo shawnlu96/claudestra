@@ -143,7 +143,7 @@ export async function handleMgmtButton(
             ? buildComponents(panel.components)
             : [],
         });
-      } catch {}
+      } catch { /* non-critical */ }
       return { text: "__HANDLED__" };
     }
     return await buildStatusPanel();

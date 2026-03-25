@@ -17,7 +17,7 @@ import {
 } from "discord.js";
 import type { ServerWebSocket } from "bun";
 
-import { DISCORD_TOKEN, BRIDGE_PORT, ALLOWED_USER_IDS, TMUX_SOCK } from "./bridge/config.js";
+import { DISCORD_TOKEN, BRIDGE_PORT, ALLOWED_USER_IDS, TMUX_SOCK, TMP_DIR } from "./bridge/config.js";
 import {
   startTyping,
   stopTyping,
@@ -118,7 +118,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 处理附件
   const attachmentPaths: string[] = [];
   if (msg.attachments.size > 0) {
-    const inboxDir = `/tmp/claude-orchestrator/inbox`;
+    const inboxDir = `${TMP_DIR}/inbox`;
     await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
     for (const [, att] of msg.attachments) {
       try {
@@ -215,7 +215,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
               const ch = await discord.channels.fetch(channelId) as TextChannel;
               const sm = await ch.messages.fetch(statusMsgId);
               await sm.edit({ content: "⚡ 已打断", components: [] });
-            } catch {}
+            } catch { /* non-critical */ }
             activeStatusMessages.delete(channelId);
           }
           await interaction.reply("⚡ 已发送 Ctrl+C");
@@ -257,12 +257,12 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
                 const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
                 const sm = await ch.messages.fetch(statusMsgId);
                 await sm.edit({ content: "⚡ 已打断", components: [] });
-              } catch {}
+              } catch { /* non-critical */ }
               activeStatusMessages.delete(targetChannelId);
             }
             stopTyping(targetChannelId);
           }
-        } catch {}
+        } catch { /* non-critical */ }
         return;
       }
 
@@ -357,7 +357,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               const ch = await discord.channels.fetch(msg.chatId) as TextChannel;
               const sm = await ch.messages.fetch(statusMsgId);
               await sm.edit({ content: "✅ 完成", components: [] });
-            } catch {}
+            } catch { /* non-critical */ }
             activeStatusMessages.delete(msg.chatId);
           }
         } else {

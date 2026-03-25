@@ -153,7 +153,7 @@ async function bridgeRequest(msg: Record<string, unknown>): Promise<any> {
           if (data.error) reject(new Error(data.error));
           else resolve(data.result);
         }
-      } catch {}
+      } catch { /* non-critical */ }
     };
 
     ws.onerror = () => {
@@ -213,7 +213,7 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
             if (obj.cwd && !cwd) cwd = obj.cwd;
             if (obj.slug && !slug) slug = obj.slug;
             if (cwd && slug) break;
-          } catch {}
+          } catch { /* non-critical */ }
         }
 
         if (!cwd) continue;
@@ -252,12 +252,12 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
                 lastUserMessage = text.replace(/\n/g, " ").slice(0, 80);
                 break;
               }
-            } catch {}
+            } catch { /* non-critical */ }
           }
-        } catch {}
+        } catch { /* non-critical */ }
 
         sessions.push({ sessionId, cwd, slug, modifiedAt: fileStat.mtime, lastUserMessage });
-      } catch {}
+      } catch { /* non-critical */ }
     }
   }
 
@@ -491,8 +491,8 @@ async function cmdResume(
         });
       }
       // 清理
-      try { await Bun.spawn(["rm", htmlPath, pngPath]).exited; } catch {}
-    } catch {}
+      try { await Bun.spawn(["rm", htmlPath, pngPath]).exited; } catch { /* non-critical */ }
+    } catch { /* non-critical */ }
   }
 
   output({
@@ -524,7 +524,7 @@ async function cmdKill(name: string) {
   if (info?.channelId) {
     try {
       await bridgeRequest({ type: "delete_channel", channelId: info.channelId });
-    } catch {}
+    } catch { /* non-critical */ }
   }
   if (reg.workers[tmuxName]) {
     reg.workers[tmuxName].status = "stopped";
