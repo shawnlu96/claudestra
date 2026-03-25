@@ -183,10 +183,17 @@ export async function startWatching(
   });
 
   // 定期检查 tmux idle 状态（每 3 秒）
-  // 只在 typing 活跃时检查，idle 了就触发回调
+  // 记录 typing 开始时间，前 8 秒不检查（给 Claude 启动时间）
+  let typingStartedAt = 0;
   state.idleChecker = setInterval(async () => {
-    // 只有当前频道在 typing 时才检查
-    if (!typingIntervals.has(state.channelId)) return;
+    if (!typingIntervals.has(state.channelId)) {
+      typingStartedAt = 0;
+      return;
+    }
+    // 记录 typing 开始时间
+    if (typingStartedAt === 0) typingStartedAt = Date.now();
+    // 前 8 秒不检查
+    if (Date.now() - typingStartedAt < 8000) return;
     try {
       const idle = await checkTmuxIdle(workerName);
       if (idle && state.onIdle) state.onIdle();
