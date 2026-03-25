@@ -331,23 +331,26 @@ async function buildStatusPanel(): Promise<{ text: string; components: any[] }> 
     return `**${w.name}** — ${status}\n📁 \`${w.project}\``;
   });
   const activeWorkers = workers.filter((w: any) => w.status === "active");
-  const buttons: any[] = [
+  const row1: any[] = [
     { id: "refresh_status", label: "刷新", emoji: "🔄", style: "primary" },
   ];
   if (activeWorkers.length > 0) {
-    buttons.push(
+    row1.push(
       { id: "show_peek_menu", label: "监工", emoji: "👁", style: "secondary" },
       { id: "restart_all", label: "全部重启", emoji: "🔄", style: "secondary" },
-      { id: "show_kill_menu", label: "销毁 Agent", emoji: "🗑", style: "danger" },
+      { id: "show_kill_menu", label: "销毁", emoji: "🗑", style: "danger" },
     );
   }
-  buttons.push(
+  const row2: any[] = [
     { id: "browse_sessions", label: "历史会话", emoji: "📋", style: "secondary" },
     { id: "create_worker", label: "新建 Agent", emoji: "➕", style: "success" },
-  );
+  ];
   return {
     text: "**📊 Agent 状态**\n\n" + lines.join("\n\n"),
-    components: [{ type: "buttons", buttons }],
+    components: [
+      { type: "buttons", buttons: row1 },
+      { type: "buttons", buttons: row2 },
+    ],
   };
 }
 
@@ -502,8 +505,10 @@ async function handleMgmtSelect(
 
 // 处理按钮点击和下拉菜单选择
 discord.on("interactionCreate", async (interaction: Interaction) => {
+  try {
   const channelId = interaction.channelId;
   if (!channelId) return;
+  console.log(`🔘 Interaction: ${interaction.isButton() ? 'button' : 'select'} ${interaction.isButton() ? (interaction as any).customId : (interaction as any).customId} in ${channelId}`);
 
   // 用户白名单
   if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(interaction.user.id)) {
@@ -512,7 +517,10 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
 
   if (interaction.isButton()) {
     const id = interaction.customId;
-    await interaction.deferUpdate().catch(() => {});
+    await interaction.deferUpdate().catch(async () => {
+      // deferUpdate 可能失败（非 bot 消息上的按钮），回退到 deferReply
+      await interaction.deferReply({ ephemeral: true }).catch(() => {});
+    });
 
     // 打断按钮：interrupt:<channelId>
     if (id.startsWith("interrupt:")) {
@@ -596,6 +604,9 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       meta: { chat_id: channelId, message_id: interaction.message?.id || "", user: interaction.user.username, user_id: interaction.user.id, ts: new Date().toISOString() },
     }));
     return;
+  }
+  } catch (err) {
+    console.error("❌ Interaction error:", err);
   }
 });
 
