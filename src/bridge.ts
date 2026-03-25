@@ -302,45 +302,25 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
     }
   } catch {}
 
-  // 锁屏或截图失败：用 tmux capture-pane → HTML → qlmanage PNG
+  // 锁屏或截图失败：tmux capture-pane (ANSI) → HTML → Playwright PNG
   try {
-    const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
+    const htmlPath = `/tmp/claude-orchestrator/peek_${Date.now()}.html`;
+    const bunPath = `${process.env.HOME}/.bun/bin/bun`;
+    const env = { ...process.env, PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}` };
+
+    // capture with ANSI colors → pipe to ansi2html
+    const capture = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-e", "-S", "-50"], {
       stdout: "pipe", stderr: "pipe",
     });
-    const content = await new Response(proc.stdout).text();
-    await proc.exited;
-    if (!content.trim()) return null;
+    const ansi2html = Bun.spawn([bunPath, "run", `${import.meta.dir}/ansi2html.ts`, htmlPath], {
+      stdin: capture.stdout, stdout: "pipe", stderr: "pipe", env,
+    });
+    await ansi2html.exited;
 
-    // 转义 HTML 特殊字符，保留空格和换行
-    const escaped = content
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/ /g, "&nbsp;")
-      .split("\n")
-      .join("<br>\n");
-
-    const htmlContent = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><style>
-body {
-  background: #1e1e2e;
-  color: #cdd6f4;
-  font-family: 'Menlo', 'Monaco', monospace;
-  font-size: 13px;
-  line-height: 1.2;
-  padding: 10px;
-  margin: 0;
-  white-space: pre;
-}
-</style></head><body>${escaped}</body></html>`;
-
-    const htmlPath = `/tmp/claude-orchestrator/peek_${Date.now()}.html`;
-    await Bun.write(htmlPath, htmlContent);
-
+    // HTML → PNG
     const renderProc = Bun.spawn(
-      ["bun", "run", `${import.meta.dir}/html2png.ts`, htmlPath, pngPath, "1200"],
-      { stdout: "pipe", stderr: "pipe",
-        env: { ...process.env, PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}` } }
+      [bunPath, "run", `${import.meta.dir}/html2png.ts`, htmlPath, pngPath, "1200"],
+      { stdout: "pipe", stderr: "pipe", env }
     );
     await renderProc.exited;
 
