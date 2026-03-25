@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: "claude-orchestrator",
-      script: "src/bot.ts",
+      script: "legacy/bot.ts",
       interpreter: process.env.HOME + "/.bun/bin/bun",
       cwd: __dirname,
       env_file: ".env",
