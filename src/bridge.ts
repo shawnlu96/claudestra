@@ -304,25 +304,31 @@ async function tmuxScreenshot(windowName: string): Promise<string | null> {
     } catch {}
   }
 
-  // 锁屏或截图失败时：canvas 渲染
+  // 锁屏时用 iTerm2 Python API 获取内容 → HTML → PNG
   try {
-    const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
-      stdout: "pipe", stderr: "pipe",
-    });
-    const content = await new Response(proc.stdout).text();
-    await proc.exited;
-    if (!content.trim()) return null;
-
-    const captureFile = `/tmp/claude-orchestrator/capture_${Date.now()}.txt`;
-    await Bun.write(captureFile, content);
-    const render = Bun.spawn(
-      ["bun", "run", `${import.meta.dir}/term-screenshot.ts`, pngPath],
-      { stdin: Bun.file(captureFile), stdout: "pipe", stderr: "pipe" }
+    const searchName = windowName === "master" ? "Claude Code" : windowName.replace("worker-", "");
+    const htmlPath = `/tmp/claude-orchestrator/capture_${Date.now()}.html`;
+    const captureProc = Bun.spawn(
+      ["python3", `${import.meta.dir}/iterm-capture.py`, searchName, htmlPath],
+      { stdout: "pipe", stderr: "pipe" }
     );
-    await render.exited;
+    const captureOut = await new Response(captureProc.stdout).text();
+    await captureProc.exited;
 
-    const { existsSync } = await import("fs");
-    return existsSync(pngPath) ? pngPath : null;
+    if (captureOut.includes("OK")) {
+      // HTML → PNG via qlmanage
+      await Bun.spawn(["qlmanage", "-t", "-s", "1512", "-o", "/tmp/claude-orchestrator/", htmlPath]).exited;
+      const qlPngPath = htmlPath + ".png";
+      const { existsSync } = await import("fs");
+      if (existsSync(qlPngPath)) {
+        // 重命名到期望路径
+        const { renameSync } = await import("fs");
+        renameSync(qlPngPath, pngPath);
+        // 清理 HTML
+        try { await Bun.spawn(["rm", htmlPath]).exited; } catch {}
+        return pngPath;
+      }
+    }
   } catch {}
 
   return null;
