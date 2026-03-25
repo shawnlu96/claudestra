@@ -2,12 +2,11 @@
  * JSONL Session File Watcher
  *
  * 监听 Claude Code 的 JSONL session 文件，实时提取 tool use 过程推送到 Discord。
- * 作为 Channel reply 的补充——Claude 的正式回复走 reply tool，
- * 中间过程（tool 调用、执行结果）走 JSONL 监听。
+ * 批量合并连续 tool calls，避免刷屏。
  */
 
 import { watch, type FSWatcher } from "fs";
-import { readFile, stat } from "fs/promises";
+import { stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
@@ -18,9 +17,24 @@ interface WatcherState {
   lastSize: number;
   channelId: string;
   jsonlPath: string;
+  pendingTools: string[];
+  flushTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const watchers = new Map<string, WatcherState>();
+
+// MCP 和 Discord 相关的 tool，不展示
+const HIDDEN_TOOLS = new Set([
+  "reply", "react", "edit_message", "fetch_messages", "download_attachment",
+  // MCP 工具前缀
+]);
+
+function isHiddenTool(name: string): boolean {
+  if (HIDDEN_TOOLS.has(name)) return true;
+  // 过滤所有 mcp__ 前缀的工具（MCP server 调用）
+  if (name.startsWith("mcp__")) return true;
+  return false;
+}
 
 function cwdToProjectDir(cwd: string): string {
   return "-" + cwd.replace(/^\//, "").replace(/\//g, "-");
@@ -37,11 +51,11 @@ function getJsonlPath(cwd: string, sessionId: string): string {
   );
 }
 
-/** 格式化 tool use 为简短摘要 */
 function formatToolSummary(name: string, input: any): string {
   const EMOJI: Record<string, string> = {
     Read: "📖", Edit: "✏️", Write: "📝", Bash: "💻",
     Glob: "🔍", Grep: "🔎", Agent: "🤖", WebSearch: "🌐",
+    WebFetch: "🌐", Skill: "⚡",
   };
   const emoji = EMOJI[name] || "🔧";
 
@@ -65,6 +79,22 @@ function formatToolSummary(name: string, input: any): string {
   }
 }
 
+/** 发送积攒的 tool summaries 到 Discord */
+async function flushPending(state: WatcherState, discord: Client) {
+  if (state.pendingTools.length === 0) return;
+
+  const tools = state.pendingTools.splice(0);
+  const text = tools.join("  ·  ");
+
+  try {
+    const channel = await discord.channels.fetch(state.channelId);
+    if (channel && "send" in channel) {
+      // 用灰色引用格式，紧凑一行
+      await (channel as TextChannel).send(`-# ${text}`);
+    }
+  } catch { /* non-critical */ }
+}
+
 /** 开始监听一个 agent 的 JSONL 文件 */
 export async function startWatching(
   workerName: string,
@@ -73,7 +103,6 @@ export async function startWatching(
   channelId: string,
   discord: Client
 ) {
-  // 停止旧的 watcher
   stopWatching(workerName);
 
   const jsonlPath = getJsonlPath(cwd, sessionId);
@@ -83,32 +112,53 @@ export async function startWatching(
   }
 
   const fileStat = await stat(jsonlPath);
-  let lastSize = fileStat.size;
 
-  const watcher = watch(jsonlPath, async (eventType) => {
+  const state: WatcherState = {
+    watcher: null as any,
+    lastSize: fileStat.size,
+    channelId,
+    jsonlPath,
+    pendingTools: [],
+    flushTimer: null,
+  };
+
+  state.watcher = watch(jsonlPath, async (eventType) => {
     if (eventType !== "change") return;
 
     try {
       const newStat = await stat(jsonlPath);
-      if (newStat.size <= lastSize) return;
+      if (newStat.size <= state.lastSize) return;
 
-      // 读取新增部分
       const fd = Bun.file(jsonlPath);
-      const newData = await fd.slice(lastSize, newStat.size).text();
-      lastSize = newStat.size;
+      const newData = await fd.slice(state.lastSize, newStat.size).text();
+      state.lastSize = newStat.size;
 
-      // 解析新行
       const lines = newData.split("\n").filter((l) => l.trim());
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
-          await handleEntry(entry, channelId, discord);
-        } catch { /* non-critical: malformed JSON line */ }
+          if (entry.type !== "assistant") continue;
+
+          const content = entry.message?.content;
+          if (!Array.isArray(content)) continue;
+
+          for (const block of content) {
+            if (block.type === "tool_use" && block.name && !isHiddenTool(block.name)) {
+              state.pendingTools.push(formatToolSummary(block.name, block.input));
+            }
+          }
+        } catch { /* non-critical */ }
       }
-    } catch { /* non-critical: file read error */ }
+
+      // Debounce: 1.5 秒内的 tool calls 合并成一条消息
+      if (state.pendingTools.length > 0) {
+        if (state.flushTimer) clearTimeout(state.flushTimer);
+        state.flushTimer = setTimeout(() => flushPending(state, discord), 1500);
+      }
+    } catch { /* non-critical */ }
   });
 
-  watchers.set(workerName, { watcher, lastSize, channelId, jsonlPath });
+  watchers.set(workerName, state);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
 }
 
@@ -117,45 +167,9 @@ export function stopWatching(workerName: string) {
   const state = watchers.get(workerName);
   if (state) {
     state.watcher.close();
+    if (state.flushTimer) clearTimeout(state.flushTimer);
     watchers.delete(workerName);
   }
-}
-
-/** 处理一条 JSONL entry */
-async function handleEntry(
-  entry: any,
-  channelId: string,
-  discord: Client
-) {
-  // 只处理 assistant 消息中的 tool_use
-  if (entry.type !== "assistant") return;
-
-  const content = entry.message?.content;
-  if (!Array.isArray(content)) return;
-
-  const toolSummaries: string[] = [];
-  for (const block of content) {
-    if (block.type === "tool_use" && block.name) {
-      // 跳过 reply/react/edit_message/fetch_messages（这些是 Discord 操作，不需要展示）
-      if (["reply", "react", "edit_message", "fetch_messages", "download_attachment"].includes(block.name)) {
-        continue;
-      }
-      toolSummaries.push(formatToolSummary(block.name, block.input));
-    }
-  }
-
-  if (toolSummaries.length === 0) return;
-
-  // 发到 Discord（灰色小字，不打扰）
-  try {
-    const channel = await discord.channels.fetch(channelId);
-    if (channel && "send" in channel) {
-      const text = toolSummaries.join("\n");
-      await (channel as TextChannel).send({
-        content: `> ${text.replace(/\n/g, "\n> ")}`,
-      });
-    }
-  } catch { /* non-critical */ }
 }
 
 /** 获取所有活跃的 watcher 名 */
