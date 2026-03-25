@@ -242,13 +242,32 @@ async function tmuxCapture(windowName: string, lines = 50): Promise<string> {
 }
 
 async function tmuxScreenshot(windowName: string): Promise<string | null> {
-  const content = await tmuxCapture(windowName, 60);
-  if (!content) return null;
+  const target = windowName === "master" ? "master:0" : `master:${windowName}`;
+  // 捕获终端内容到文件
+  const captureFile = `/tmp/claude-orchestrator/capture_${Date.now()}.txt`;
+  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p", "-S", "-50"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const content = await new Response(proc.stdout).text();
+  await proc.exited;
+  if (!content.trim()) return null;
 
-  // 写成文本文件发送（Discord 会渲染为附件）
-  const filePath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.txt`;
-  await Bun.write(filePath, content);
-  return filePath;
+  await Bun.write(captureFile, content);
+
+  // 渲染成 PNG
+  const pngPath = `/tmp/claude-orchestrator/peek_${windowName}_${Date.now()}.png`;
+  const render = Bun.spawn(
+    ["bun", "run", `${import.meta.dir}/term-screenshot.ts`, pngPath],
+    { stdin: Bun.file(captureFile), stdout: "pipe", stderr: "pipe" }
+  );
+  await render.exited;
+
+  // 清理临时文件
+  try { await Bun.write(captureFile, ""); } catch {}
+
+  const { existsSync } = await import("fs");
+  return existsSync(pngPath) ? pngPath : null;
 }
 
 async function runManager(...args: string[]): Promise<any> {
@@ -415,21 +434,21 @@ async function handleMgmtSelect(
 
   if (id === "peek_worker") {
     const windowName = value;
-    const filePath = await tmuxScreenshot(windowName);
-    if (!filePath) {
+    const pngPath = await tmuxScreenshot(windowName);
+    if (!pngPath) {
       return { text: `❌ 无法截取 \`${windowName}\` 的终端内容` };
     }
-    // 同时发送文本预览（最后 15 行）和完整文件
-    const preview = await tmuxCapture(windowName, 15);
-    // 清理 ANSI 码
-    const cleaned = preview.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
-    return {
-      text: `**👁 ${windowName} 终端截取**\n\`\`\`\n${cleaned.slice(0, 1800)}\n\`\`\``,
-      components: [{ type: "buttons", buttons: [
+    // 发送截图
+    const channel = await discord.channels.fetch(chatId) as TextChannel;
+    await channel.send({
+      content: `**👁 ${windowName} 终端截图**`,
+      files: [{ attachment: pngPath }],
+      components: buildComponents([{ type: "buttons", buttons: [
         { id: "show_peek_menu", label: "再看一个", emoji: "👁", style: "primary" },
         { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "secondary" },
-      ]}],
-    };
+      ]}]),
+    });
+    return { text: "__HANDLED__" }; // 已直接发送
   }
 
   return null; // resume_session 和 create_worker 需要用户输入，交给 LLM
@@ -478,9 +497,11 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
     // 尝试直接处理管理下拉菜单
     const mgmtResult = await handleMgmtSelect(id, value, channelId);
     if (mgmtResult) {
-      const components = mgmtResult.components ? buildComponents(mgmtResult.components) : undefined;
-      const channel = await discord.channels.fetch(channelId) as TextChannel;
-      await channel.send({ content: mgmtResult.text, components });
+      if (mgmtResult.text !== "__HANDLED__") {
+        const components = mgmtResult.components ? buildComponents(mgmtResult.components) : undefined;
+        const channel = await discord.channels.fetch(channelId) as TextChannel;
+        await channel.send({ content: mgmtResult.text, components });
+      }
       return;
     }
 
