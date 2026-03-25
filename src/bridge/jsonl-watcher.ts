@@ -1,8 +1,8 @@
 /**
  * JSONL Session File Watcher
  *
- * 监听 Claude Code 的 JSONL session 文件，tool use 和 Claude 文本实时推送到 Discord。
- * 简单设计：只显示，不追踪状态。
+ * 监听 Claude Code 的 JSONL session 文件。
+ * Tool use 实时推送到 Discord，一条消息持续 edit 更新状态。
  */
 
 import { watch, type FSWatcher } from "fs";
@@ -13,12 +13,21 @@ import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import { WATCHER_CONFIG } from "./config.js";
 
+interface ToolEntry {
+  id: string;
+  summary: string;
+  done: boolean;
+  error: boolean;
+}
+
 interface WatcherState {
   watcher: FSWatcher;
   lastSize: number;
   channelId: string;
-  pending: string[];
-  flushTimer: ReturnType<typeof setTimeout> | null;
+  tools: ToolEntry[];
+  toolMsgId: string | null; // 当前 tool 消息的 Discord ID
+  textQueue: string[];      // Claude 说的话（debounce 后发）
+  textTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -50,14 +59,40 @@ function formatTool(name: string, input: any): string {
   }
 }
 
-async function flush(state: WatcherState, discord: Client) {
-  if (state.pending.length === 0) return;
-  const items = state.pending.splice(0);
+/** 渲染 tool 列表为 Discord 消息 */
+function renderToolMsg(tools: ToolEntry[]): string {
+  return tools.map((t) => {
+    const icon = t.done ? (t.error ? "❌" : "✅") : "⏳";
+    return `-# ${icon} ${t.summary}`;
+  }).join("\n");
+}
+
+/** 发送或编辑 tool 消息 */
+async function syncToolMsg(state: WatcherState, discord: Client) {
+  if (state.tools.length === 0) return;
+  const content = renderToolMsg(state.tools);
+
   try {
-    const ch = await discord.channels.fetch(state.channelId);
-    if (ch && "send" in ch) {
-      await (ch as TextChannel).send(items.map((t) => `-# ${t}`).join("\n"));
+    const ch = await discord.channels.fetch(state.channelId) as TextChannel;
+    if (state.toolMsgId) {
+      // edit 已有消息
+      const msg = await ch.messages.fetch(state.toolMsgId);
+      await msg.edit(content);
+    } else {
+      // 发新消息
+      const msg = await ch.send(content);
+      state.toolMsgId = msg.id;
     }
+  } catch { /* non-critical */ }
+}
+
+/** 发 Claude 的文本 */
+async function flushText(state: WatcherState, discord: Client) {
+  if (state.textQueue.length === 0) return;
+  const items = state.textQueue.splice(0);
+  try {
+    const ch = await discord.channels.fetch(state.channelId) as TextChannel;
+    await ch.send(items.map((t) => `-# ${t}`).join("\n"));
   } catch { /* non-critical */ }
 }
 
@@ -79,8 +114,10 @@ export async function startWatching(
     watcher: null as any,
     lastSize: fileStat.size,
     channelId,
-    pending: [],
-    flushTimer: null,
+    tools: [],
+    toolMsgId: null,
+    textQueue: [],
+    textTimer: null,
   };
 
   state.watcher = watch(jsonlPath, async (eventType) => {
@@ -91,32 +128,64 @@ export async function startWatching(
       const newData = await Bun.file(jsonlPath).slice(state.lastSize, newStat.size).text();
       state.lastSize = newStat.size;
 
+      let toolsChanged = false;
+
       for (const line of newData.split("\n").filter((l) => l.trim())) {
         try {
           const entry = JSON.parse(line);
-          if (entry.type !== "assistant") continue;
-          const content = entry.message?.content;
-          if (!Array.isArray(content)) continue;
 
-          const hasReply = content.some((b: any) => b.type === "tool_use" && isHiddenTool(b.name));
+          // assistant 消息：tool_use + text
+          if (entry.type === "assistant") {
+            const content = entry.message?.content;
+            if (!Array.isArray(content)) continue;
+            const hasReply = content.some((b: any) => b.type === "tool_use" && isHiddenTool(b.name));
 
-          for (const block of content) {
-            if (block.type === "tool_use" && block.name && !isHiddenTool(block.name) && WATCHER_CONFIG.showToolUse) {
-              state.pending.push(formatTool(block.name, block.input));
+            for (const block of content) {
+              if (block.type === "tool_use" && block.name && !isHiddenTool(block.name) && WATCHER_CONFIG.showToolUse) {
+                state.tools.push({
+                  id: block.id,
+                  summary: formatTool(block.name, block.input),
+                  done: false,
+                  error: false,
+                });
+                toolsChanged = true;
+              }
+              if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
+                const t = block.text.trim();
+                if (t.length > 3 && t.length < 500) {
+                  state.textQueue.push(`💬 ${t.slice(0, 150)}`);
+                }
+              }
             }
-            if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
-              const t = block.text.trim();
-              if (t.length > 3 && t.length < 500) {
-                state.pending.push(`💬 ${t.slice(0, 150)}`);
+          }
+
+          // tool_result
+          if (entry.type === "user") {
+            const content = entry.message?.content;
+            if (!Array.isArray(content)) continue;
+            for (const block of content) {
+              if (block.type === "tool_result" && block.tool_use_id) {
+                const tool = state.tools.find((t) => t.id === block.tool_use_id);
+                if (tool && !tool.done) {
+                  tool.done = true;
+                  tool.error = !!block.is_error;
+                  toolsChanged = true;
+                }
               }
             }
           }
         } catch { /* non-critical */ }
       }
 
-      if (state.pending.length > 0) {
-        if (state.flushTimer) clearTimeout(state.flushTimer);
-        state.flushTimer = setTimeout(() => flush(state, discord), WATCHER_CONFIG.debounceMs);
+      // tool 有变化 → 立即同步到 Discord
+      if (toolsChanged) {
+        await syncToolMsg(state, discord);
+      }
+
+      // text 用 debounce
+      if (state.textQueue.length > 0) {
+        if (state.textTimer) clearTimeout(state.textTimer);
+        state.textTimer = setTimeout(() => flushText(state, discord), WATCHER_CONFIG.debounceMs);
       }
     } catch { /* non-critical */ }
   });
@@ -129,7 +198,17 @@ export function stopWatching(workerName: string) {
   const state = watchers.get(workerName);
   if (state) {
     state.watcher.close();
-    if (state.flushTimer) clearTimeout(state.flushTimer);
+    if (state.textTimer) clearTimeout(state.textTimer);
     watchers.delete(workerName);
+  }
+}
+
+/** 重置 tool 追踪（新一轮对话开始时调用） */
+export function resetToolTracking(channelId: string) {
+  for (const state of watchers.values()) {
+    if (state.channelId === channelId) {
+      state.tools = [];
+      state.toolMsgId = null;
+    }
   }
 }

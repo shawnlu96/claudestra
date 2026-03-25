@@ -43,7 +43,7 @@ import {
   handleMgmtSelect,
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
-import { startWatching, stopWatching } from "./bridge/jsonl-watcher.js";
+import { startWatching, stopWatching, resetToolTracking } from "./bridge/jsonl-watcher.js";
 
 // ============================================================
 // 类型定义
@@ -141,7 +141,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
-  // 显示 typing + 发送打断按钮
+  // 重置 tool 追踪 + 显示 typing + 发送打断按钮
+  resetToolTracking(channelId);
   startTyping(channelId, discord);
   const statusMsg = await (msg.channel as TextChannel).send({
     content: "💭 大聪明思考中...",
@@ -186,10 +187,11 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       });
       const out = await new Response(proc.stdout).text();
       await proc.exited;
-      // "bypass permissions" 只在 Claude Code 真正空闲时出现在最后几行
-      // 比 ❯ 更可靠（❯ 可能残留在滚动区域）
       const lastLines = out.split("\n").slice(-3).join("\n");
-      return lastLines.includes("bypass permissions") || lastLines.includes("esc to interrupt");
+      // "esc to interrupt" 只在工作时出现 → 如果有就不是 idle
+      if (lastLines.includes("esc to interrupt")) return false;
+      // ❯ 在最后几行 + 没有 "esc to interrupt" → 真正空闲
+      return /❯/.test(lastLines);
     };
 
     // 阶段 1：等 ❯ 消失（Claude 开始处理）
