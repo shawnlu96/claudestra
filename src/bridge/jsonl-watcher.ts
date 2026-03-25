@@ -67,8 +67,10 @@ function formatToolSummary(name: string, input: any): string {
     case "Write":
       return `${emoji} Write ${input?.file_path?.split("/").pop() || ""}`;
     case "Bash": {
-      const cmd = input?.command || "";
-      return `${emoji} ${cmd.length > 50 ? cmd.slice(0, 47) + "..." : cmd}`;
+      // 优先用 description（简短描述），没有则取命令第一行
+      if (input?.description) return `${emoji} ${input.description}`;
+      const cmd = (input?.command || "").split("\n")[0].split("&&")[0].trim();
+      return `${emoji} ${cmd}`;
     }
     case "Glob":
       return `${emoji} Glob ${input?.pattern || ""}`;
