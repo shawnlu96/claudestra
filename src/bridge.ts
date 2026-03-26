@@ -189,7 +189,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       });
       const out = await new Response(proc.stdout).text();
       await proc.exited;
-      const lastLines = out.split("\n").slice(-3).join("\n");
+      const lastLines = out.split("\n").slice(-6).join("\n");
       // "esc to interrupt" 只在工作时出现 → 如果有就不是 idle
       if (lastLines.includes("esc to interrupt")) return false;
       // ❯ 在最后几行 + 没有 "esc to interrupt" → 真正空闲
