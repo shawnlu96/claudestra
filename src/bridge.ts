@@ -218,7 +218,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
           try {
             const ch = await discord.channels.fetch(channelId) as TextChannel;
             const sm = await ch.messages.fetch(statusMsgId);
-            await sm.edit({ content: "✅ 完成", components: [] });
+            const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
+            await sm.edit({ content: `✅ 完成${mention}`, components: [] });
           } catch { /* non-critical */ }
           activeStatusMessages.delete(channelId);
         }
