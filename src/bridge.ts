@@ -189,11 +189,15 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       });
       const out = await new Response(proc.stdout).text();
       await proc.exited;
-      const lastLines = out.split("\n").slice(-6).join("\n");
-      // "esc to interrupt" 只在工作时出现 → 如果有就不是 idle
-      if (lastLines.includes("esc to interrupt")) return false;
-      // ❯ 在最后几行 + 没有 "esc to interrupt" → 真正空闲
-      return /❯/.test(lastLines);
+      const lines = out.split("\n");
+      const lastLines = lines.slice(-6).join("\n");
+      // ❯ 在最后几行 = 空闲（提示符出现）
+      if (!/❯/.test(lastLines)) return false;
+      // 检查终端里有没有活跃的 spinner（✻ = Claude 正在处理）
+      // spinner 通常在倒数 8-15 行的区域
+      const recentArea = lines.slice(-15).join("\n");
+      if (/✻|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/.test(recentArea.split("❯").pop() || "")) return false;
+      return true;
     };
 
     // 阶段 1：等 Claude 开始处理
