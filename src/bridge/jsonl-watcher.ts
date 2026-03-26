@@ -131,8 +131,8 @@ export async function startWatching(
     textTimer: null,
   };
 
-  state.watcher = watch(jsonlPath, async (eventType) => {
-    if (eventType !== "change") return;
+  // 处理新增的 JSONL 数据
+  const processNewData = async () => {
     try {
       const newStat = await stat(jsonlPath);
       if (newStat.size <= state.lastSize) return;
@@ -145,7 +145,6 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // assistant 消息：tool_use + text
           if (entry.type === "assistant") {
             const content = entry.message?.content;
             if (!Array.isArray(content)) continue;
@@ -170,7 +169,6 @@ export async function startWatching(
             }
           }
 
-          // tool_result
           if (entry.type === "user") {
             const content = entry.message?.content;
             if (!Array.isArray(content)) continue;
@@ -188,7 +186,6 @@ export async function startWatching(
         } catch { /* non-critical */ }
       }
 
-      // tool 有变化 → 先 flush text（保持顺序），再同步 tool
       if (toolsChanged) {
         if (state.textQueue.length > 0) {
           if (state.textTimer) { clearTimeout(state.textTimer); state.textTimer = null; }
@@ -197,15 +194,22 @@ export async function startWatching(
         await syncToolMsg(state, discord);
       }
 
-      // text 用 debounce
       if (state.textQueue.length > 0) {
         if (state.textTimer) clearTimeout(state.textTimer);
         state.textTimer = setTimeout(() => flushText(state, discord), WATCHER_CONFIG.debounceMs);
       }
     } catch { /* non-critical */ }
+  };
+
+  // fs.watch 主监听
+  state.watcher = watch(jsonlPath, (eventType) => {
+    if (eventType === "change") processNewData();
   });
 
-  watchers.set(workerName, state);
+  // 2 秒轮询兜底（macOS fs.watch 偶尔丢事件）
+  const pollInterval = setInterval(processNewData, 2000);
+
+  watchers.set(workerName, { ...state, _pollInterval: pollInterval } as any);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
 }
 
@@ -214,6 +218,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
+    if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }
 }
