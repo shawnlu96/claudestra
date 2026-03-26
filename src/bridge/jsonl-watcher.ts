@@ -25,9 +25,11 @@ interface WatcherState {
   lastSize: number;
   channelId: string;
   tools: ToolEntry[];
-  toolMsgId: string | null; // 当前 tool 消息的 Discord ID
-  textQueue: string[];      // Claude 说的话（debounce 后发）
+  toolMsgId: string | null;
+  textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
+  idleTimer: ReturnType<typeof setTimeout> | null; // 静默超时 → 标记完成
+  onIdle?: () => void;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -124,7 +126,7 @@ function getJsonlPath(cwd: string, sessionId: string): string {
 
 export async function startWatching(
   workerName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client
+  channelId: string, discord: Client, onIdle?: () => void
 ) {
   stopWatching(workerName);
   const jsonlPath = getJsonlPath(cwd, sessionId);
@@ -139,6 +141,8 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
+    idleTimer: null,
+    onIdle,
   };
 
   // 处理新增的 JSONL 数据
@@ -154,6 +158,14 @@ export async function startWatching(
       for (const line of newData.split("\n").filter((l) => l.trim())) {
         try {
           const entry = JSON.parse(line);
+
+          // 任何活动都重置静默计时器
+          if (entry.type === "assistant" || entry.type === "user") {
+            if (state.idleTimer) clearTimeout(state.idleTimer);
+            state.idleTimer = setTimeout(() => {
+              if (state.onIdle) state.onIdle();
+            }, WATCHER_CONFIG.idleSilenceMs);
+          }
 
           if (entry.type === "assistant") {
             const content = entry.message?.content;
@@ -228,6 +240,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
+    if (state.idleTimer) clearTimeout(state.idleTimer);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }

@@ -17,7 +17,7 @@ import {
 } from "discord.js";
 import type { ServerWebSocket } from "bun";
 
-import { DISCORD_TOKEN, BRIDGE_PORT, ALLOWED_USER_IDS, TMUX_SOCK, TMP_DIR } from "./bridge/config.js";
+import { DISCORD_TOKEN, BRIDGE_PORT, ALLOWED_USER_IDS, TMP_DIR, TMUX_SOCK } from "./bridge/config.js";
 import {
   startTyping,
   stopTyping,
@@ -60,8 +60,6 @@ interface ClientInfo {
 // ============================================================
 
 const clients = new Map<string, ClientInfo>();
-// 追踪哪些频道已收到 reply（用于跳过 Phase 1）
-const gotReply = new Set<string>();
 const activeStatusMessages = new Map<string, string>();
 
 // ============================================================
@@ -175,67 +173,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     console.error(`发送消息到 client (channel ${channelId}) 失败:`, err);
   }
 
-  // 两阶段 idle 检测（后台运行，不阻塞）
-  (async () => {
-    // 找 worker name
-    const listResult = await runManager("list");
-    const worker = (listResult.workers || []).find((w: any) => w.channelId === channelId);
-    if (!worker) return;
-    const target = `master:${worker.name}`;
-
-    const checkIdle = async () => {
-      const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p"], {
-        stdout: "pipe", stderr: "pipe",
-      });
-      const out = await new Response(proc.stdout).text();
-      await proc.exited;
-      const lines = out.split("\n");
-      const lastLines = lines.slice(-6).join("\n");
-      // ❯ 在最后几行 = 空闲（提示符出现）
-      if (!/❯/.test(lastLines)) return false;
-      // 检查终端里有没有活跃的 spinner（✻ = Claude 正在处理）
-      // spinner 通常在倒数 8-15 行的区域
-      const recentArea = lines.slice(-15).join("\n");
-      if (/✻|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/.test(recentArea.split("❯").pop() || "")) return false;
-      return true;
-    };
-
-    // 阶段 1：等 Claude 开始处理
-    // 检测 ❯ 消失 OR 收到 reply（快速回复可能跳过 ❯ 消失阶段）
-    gotReply.delete(channelId);
-    for (let i = 0; i < 60; i++) {
-      await Bun.sleep(500);
-      if (gotReply.has(channelId)) break; // 收到 reply = Claude 已在处理
-      if (!(await checkIdle())) break;     // ❯ 消失了
-      if (!activeStatusMessages.has(channelId)) return;
-    }
-
-    // 阶段 2：等 ❯ 重新出现（Claude 完成）
-    const markDone = async () => {
-      stopTyping(channelId);
-      const statusMsgId = activeStatusMessages.get(channelId);
-      if (statusMsgId) {
-        try {
-          const ch = await discord.channels.fetch(channelId) as TextChannel;
-          const sm = await ch.messages.fetch(statusMsgId);
-          const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
-          await sm.edit({ content: `✅ 完成${mention}`, components: [] });
-        } catch { /* non-critical */ }
-        activeStatusMessages.delete(channelId);
-      }
-    };
-
-    for (let i = 0; i < 900; i++) { // 最多等 30 分钟
-      await Bun.sleep(2000);
-      if (!activeStatusMessages.has(channelId)) return; // 已被打断
-      if (await checkIdle()) {
-        await markDone();
-        return;
-      }
-    }
-    // 超时也要清理
-    await markDone();
-  })();
+  // idle 检测由 JSONL watcher 的静默超时控制（不再用 tmux 轮询）
 });
 
 // ============================================================
@@ -415,7 +353,22 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const worker = (regResult.workers || []).find((w: any) => w.channelId === msg.channelId);
         if (worker?.sessionId && worker?.project) {
           const cwd = worker.project.replace(/^~/, process.env.HOME || "~");
-          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord);
+          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord, () => {
+            // JSONL 静默超时 → 标记完成
+            stopTyping(msg.channelId);
+            const statusMsgId = activeStatusMessages.get(msg.channelId);
+            if (statusMsgId) {
+              discord.channels.fetch(msg.channelId).then((ch) => {
+                if (ch && "messages" in ch) {
+                  const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
+                  (ch as TextChannel).messages.fetch(statusMsgId).then((sm) => {
+                    sm.edit({ content: `✅ 完成${mention}`, components: [] }).catch(() => {});
+                  }).catch(() => {});
+                }
+              }).catch(() => {});
+              activeStatusMessages.delete(msg.channelId);
+            }
+          });
         }
       } catch { /* non-critical */ }
 
@@ -424,7 +377,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "reply": {
       try {
-        gotReply.add(msg.chatId);
         const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
