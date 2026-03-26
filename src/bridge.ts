@@ -207,25 +207,30 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
 
     // 阶段 2：等 ❯ 重新出现（Claude 完成）
-    for (let i = 0; i < 600; i++) { // 最多等 10 分钟
+    const markDone = async () => {
+      stopTyping(channelId);
+      const statusMsgId = activeStatusMessages.get(channelId);
+      if (statusMsgId) {
+        try {
+          const ch = await discord.channels.fetch(channelId) as TextChannel;
+          const sm = await ch.messages.fetch(statusMsgId);
+          const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
+          await sm.edit({ content: `✅ 完成${mention}`, components: [] });
+        } catch { /* non-critical */ }
+        activeStatusMessages.delete(channelId);
+      }
+    };
+
+    for (let i = 0; i < 900; i++) { // 最多等 30 分钟
       await Bun.sleep(2000);
       if (!activeStatusMessages.has(channelId)) return; // 已被打断
       if (await checkIdle()) {
-        // 完成！
-        stopTyping(channelId);
-        const statusMsgId = activeStatusMessages.get(channelId);
-        if (statusMsgId) {
-          try {
-            const ch = await discord.channels.fetch(channelId) as TextChannel;
-            const sm = await ch.messages.fetch(statusMsgId);
-            const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
-            await sm.edit({ content: `✅ 完成${mention}`, components: [] });
-          } catch { /* non-critical */ }
-          activeStatusMessages.delete(channelId);
-        }
+        await markDone();
         return;
       }
     }
+    // 超时也要清理
+    await markDone();
   })();
 });
 
