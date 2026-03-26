@@ -100,8 +100,18 @@ async function flushText(state: WatcherState, discord: Client) {
   const items = state.textQueue.splice(0);
   try {
     const ch = await discord.channels.fetch(state.channelId) as TextChannel;
-    await ch.send(items.map((t) => `-# ${t}`).join("\n"));
-    // text 发出后重置 tool 消息，后续 tool 会创建新消息（保持顺序）
+    // 每条文本加 -# 前缀，拼接后按 1900 字符分块发送
+    let buf = "";
+    for (const item of items) {
+      const line = `-# ${item}`;
+      if (buf.length + line.length + 1 > 1900) {
+        if (buf) await ch.send(buf);
+        buf = line;
+      } else {
+        buf = buf ? buf + "\n" + line : line;
+      }
+    }
+    if (buf) await ch.send(buf);
     state.toolMsgId = null;
     state.tools = [];
   } catch { /* non-critical */ }
@@ -162,8 +172,8 @@ export async function startWatching(
               }
               if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
                 const t = block.text.trim();
-                if (t.length > 3 && t.length < 500) {
-                  state.textQueue.push(`💬 ${t.slice(0, 150)}`);
+                if (t.length > 3) {
+                  state.textQueue.push(`💬 ${t}`);
                 }
               }
             }
