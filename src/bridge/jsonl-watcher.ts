@@ -37,7 +37,11 @@ const HIDDEN_TOOLS = new Set([
 ]);
 
 function isHiddenTool(name: string): boolean {
-  return HIDDEN_TOOLS.has(name) || name.startsWith("mcp__");
+  if (HIDDEN_TOOLS.has(name)) return true;
+  // 只隐藏 Discord 通信相关的 MCP 工具
+  if (name.startsWith("mcp__discord-bridge__")) return true;
+  if (name.startsWith("mcp__plugin_discord_discord__")) return true;
+  return false;
 }
 
 function formatTool(name: string, input: any): string {
@@ -55,7 +59,11 @@ function formatTool(name: string, input: any): string {
       return `${e} ${(input?.command || "").split("\n")[0].split("&&")[0].trim()}`;
     case "Glob": return `${e} Glob ${input?.pattern || ""}`;
     case "Grep": return `${e} Grep ${input?.pattern || ""}`;
-    default: return `${e} ${name}`;
+    default: {
+      // mcp__server__tool → server/tool
+      const short = name.startsWith("mcp__") ? name.replace("mcp__", "").replace("__", "/") : name;
+      return `${e} ${short}`;
+    }
   }
 }
 
