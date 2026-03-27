@@ -271,6 +271,7 @@ export function resetToolTracking(channelId: string) {
     if (state.channelId === channelId) {
       state.tools = [];
       state.toolMsgId = null;
+      if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
     }
   }
 }
