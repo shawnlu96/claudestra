@@ -184,10 +184,7 @@ export async function startWatching(
               }, 8000);
             }
           }
-          // tool_result → 取消 timer
-          if (entry.type === "user" && state.idleTimer) {
-            if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
-          }
+          // tool_result 不取消 timer（reply 的 tool_result 会误取消）
 
           if (entry.type === "assistant") {
             const content = entry.message?.content;
