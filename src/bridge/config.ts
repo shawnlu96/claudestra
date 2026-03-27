@@ -21,5 +21,4 @@ export const WATCHER_CONFIG = {
   showToolUse: true,       // 显示 tool 调用（📖 Read file.ts）
   showClaudeText: true,    // 显示 Claude 说的话（非 reply 的文本）
   debounceMs: 1500,        // tool 合并等待时间
-  idleSilenceMs: 8000,     // JSONL 静默多久判定完成（8 秒，误判会被 onResume 修正）
 };

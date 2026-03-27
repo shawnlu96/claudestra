@@ -28,7 +28,6 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
-  idleTimer: ReturnType<typeof setTimeout> | null;
   onIdle?: () => void;
 }
 
@@ -141,7 +140,6 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
-    idleTimer: null,
     onIdle,
   };
 
@@ -159,34 +157,9 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // 完成检测：reply 后启动 timer，任何后续活动取消 timer
-          if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
-            const hasReplyCall = entry.message.content.some(
-              (b: any) => b.type === "tool_use" && isHiddenTool(b.name)
-            );
-            const hasWorkActivity = entry.message.content.some(
-              (b: any) => (b.type === "tool_use" && !isHiddenTool(b.name)) || b.type === "text"
-            );
-
-            if (hasWorkActivity) {
-              // 有工作活动（tool_use 或 text）→ 取消 timer（Claude 还在干活）
-              if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
-            }
-            if (hasReplyCall) {
-              // 发了 reply → 启动/重置 timer
-              if (state.idleTimer) clearTimeout(state.idleTimer);
-              state.idleTimer = setTimeout(() => {
-                if (state.onIdle) state.onIdle();
-              }, WATCHER_CONFIG.idleSilenceMs);
-            }
-          }
-          // tool_result 也算活动 → 取消 timer
-          if (entry.type === "user" && state.idleTimer) {
-            const content = entry.message?.content;
-            if (Array.isArray(content) && content.some((b: any) => b.type === "tool_result")) {
-              clearTimeout(state.idleTimer);
-              state.idleTimer = null;
-            }
+          // 完成检测：system entry with subtype "turn_duration" = 回合结束
+          if (entry.type === "system" && entry.subtype === "turn_duration") {
+            if (state.onIdle) state.onIdle();
           }
 
           if (entry.type === "assistant") {
@@ -262,7 +235,6 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
-    if (state.idleTimer) clearTimeout(state.idleTimer);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }
