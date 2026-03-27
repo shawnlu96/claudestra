@@ -28,8 +28,10 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
-  idleTimer: ReturnType<typeof setTimeout> | null; // 静默超时 → 标记完成
-  onIdle?: () => void;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  isIdle: boolean;
+  onIdle?: () => void;    // 静默超时 → 标记完成
+  onResume?: () => void;  // 完成后又有新活动 → 恢复进行中
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -126,7 +128,8 @@ function getJsonlPath(cwd: string, sessionId: string): string {
 
 export async function startWatching(
   workerName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client, onIdle?: () => void
+  channelId: string, discord: Client,
+  onIdle?: () => void, onResume?: () => void
 ) {
   stopWatching(workerName);
   const jsonlPath = getJsonlPath(cwd, sessionId);
@@ -142,7 +145,9 @@ export async function startWatching(
     textQueue: [],
     textTimer: null,
     idleTimer: null,
+    isIdle: false,
     onIdle,
+    onResume,
   };
 
   // 处理新增的 JSONL 数据
@@ -161,8 +166,14 @@ export async function startWatching(
 
           // 任何活动都重置静默计时器
           if (entry.type === "assistant" || entry.type === "user") {
+            // 已完成状态下有新活动 → 恢复进行中
+            if (state.isIdle && state.onResume) {
+              state.isIdle = false;
+              state.onResume();
+            }
             if (state.idleTimer) clearTimeout(state.idleTimer);
             state.idleTimer = setTimeout(() => {
+              state.isIdle = true;
               if (state.onIdle) state.onIdle();
             }, WATCHER_CONFIG.idleSilenceMs);
           }

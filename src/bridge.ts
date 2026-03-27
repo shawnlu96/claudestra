@@ -353,22 +353,43 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const worker = (regResult.workers || []).find((w: any) => w.channelId === msg.channelId);
         if (worker?.sessionId && worker?.project) {
           const cwd = worker.project.replace(/^~/, process.env.HOME || "~");
-          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord, () => {
-            // JSONL 静默超时 → 标记完成
-            stopTyping(msg.channelId);
-            const statusMsgId = activeStatusMessages.get(msg.channelId);
-            if (statusMsgId) {
-              discord.channels.fetch(msg.channelId).then((ch) => {
-                if (ch && "messages" in ch) {
-                  const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
-                  (ch as TextChannel).messages.fetch(statusMsgId).then((sm) => {
-                    sm.edit({ content: `✅ 完成${mention}`, components: [] }).catch(() => {});
-                  }).catch(() => {});
+          const chId = msg.channelId;
+          startWatching(worker.name, cwd, worker.sessionId, chId, discord,
+            // onIdle: JSONL 静默超时 → 标记完成
+            () => {
+              stopTyping(chId);
+              const statusMsgId = activeStatusMessages.get(chId);
+              if (statusMsgId) {
+                discord.channels.fetch(chId).then((ch) => {
+                  if (ch && "messages" in ch) {
+                    const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
+                    (ch as TextChannel).messages.fetch(statusMsgId).then((sm) => {
+                      sm.edit({ content: `✅ 完成${mention}`, components: [] }).catch(() => {});
+                    }).catch(() => {});
+                  }
+                }).catch(() => {});
+                activeStatusMessages.delete(chId);
+              }
+            },
+            // onResume: 完成后又有新活动 → 恢复进行中
+            () => {
+              startTyping(chId, discord);
+              // 重新发打断按钮
+              discord.channels.fetch(chId).then(async (ch) => {
+                if (ch && "send" in ch) {
+                  const sm = await (ch as TextChannel).send({
+                    content: "💭 大聪明思考中...",
+                    components: buildComponents([{
+                      type: "buttons",
+                      buttons: [{ id: `interrupt:${chId}`, label: "打断", emoji: "⚡", style: "danger" }],
+                    }]),
+                  });
+                  trackSentMessage(sm.id);
+                  activeStatusMessages.set(chId, sm.id);
                 }
               }).catch(() => {});
-              activeStatusMessages.delete(msg.channelId);
-            }
-          });
+            },
+          );
         }
       } catch { /* non-critical */ }
 
