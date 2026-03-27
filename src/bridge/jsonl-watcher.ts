@@ -28,6 +28,7 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
+  idleTimer: ReturnType<typeof setTimeout> | null;
   onIdle?: () => void;
 }
 
@@ -140,6 +141,7 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
+    idleTimer: null,
     onIdle,
   };
 
@@ -157,9 +159,34 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // 完成检测：system entry with subtype "turn_duration" = 回合结束
+          // 完成检测 1：turn_duration = 回合结束（最可靠）
           if (entry.type === "system" && entry.subtype === "turn_duration") {
+            if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
             if (state.onIdle) state.onIdle();
+          }
+
+          // 完成检测 2：reply 后启动 8 秒 fallback timer
+          // （快速对话可能不写 turn_duration）
+          if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
+            const hasReply = entry.message.content.some(
+              (b: any) => b.type === "tool_use" && isHiddenTool(b.name)
+            );
+            const hasWork = entry.message.content.some(
+              (b: any) => (b.type === "tool_use" && !isHiddenTool(b.name))
+            );
+            // 有工作 tool → 取消 timer
+            if (hasWork && state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+            // 有 reply → 启动/重置 timer
+            if (hasReply) {
+              if (state.idleTimer) clearTimeout(state.idleTimer);
+              state.idleTimer = setTimeout(() => {
+                if (state.onIdle) state.onIdle();
+              }, 8000);
+            }
+          }
+          // tool_result → 取消 timer
+          if (entry.type === "user" && state.idleTimer) {
+            if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
           }
 
           if (entry.type === "assistant") {
@@ -235,6 +262,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
+    if (state.idleTimer) clearTimeout(state.idleTimer);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }
