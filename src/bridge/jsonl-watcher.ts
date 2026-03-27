@@ -29,9 +29,7 @@ interface WatcherState {
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
-  isIdle: boolean;
-  onIdle?: () => void;    // 静默超时 → 标记完成
-  onResume?: () => void;  // 完成后又有新活动 → 恢复进行中
+  onIdle?: () => void;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -128,8 +126,7 @@ function getJsonlPath(cwd: string, sessionId: string): string {
 
 export async function startWatching(
   workerName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client,
-  onIdle?: () => void, onResume?: () => void
+  channelId: string, discord: Client, onIdle?: () => void
 ) {
   stopWatching(workerName);
   const jsonlPath = getJsonlPath(cwd, sessionId);
@@ -145,9 +142,7 @@ export async function startWatching(
     textQueue: [],
     textTimer: null,
     idleTimer: null,
-    isIdle: false,
     onIdle,
-    onResume,
   };
 
   // 处理新增的 JSONL 数据
@@ -164,18 +159,18 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // 任何活动都重置静默计时器
-          if (entry.type === "assistant" || entry.type === "user") {
-            // 已完成状态下有新活动 → 恢复进行中
-            if (state.isIdle && state.onResume) {
-              state.isIdle = false;
-              state.onResume();
+          // 只在 reply tool 调用后才启动静默计时
+          // （思考和工具调用不触发，避免来回切状态）
+          if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
+            const hasReplyCall = entry.message.content.some(
+              (b: any) => b.type === "tool_use" && isHiddenTool(b.name)
+            );
+            if (hasReplyCall) {
+              if (state.idleTimer) clearTimeout(state.idleTimer);
+              state.idleTimer = setTimeout(() => {
+                if (state.onIdle) state.onIdle();
+              }, WATCHER_CONFIG.idleSilenceMs);
             }
-            if (state.idleTimer) clearTimeout(state.idleTimer);
-            state.idleTimer = setTimeout(() => {
-              state.isIdle = true;
-              if (state.onIdle) state.onIdle();
-            }, WATCHER_CONFIG.idleSilenceMs);
           }
 
           if (entry.type === "assistant") {
