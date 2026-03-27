@@ -159,17 +159,33 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // 只在 reply tool 调用后才启动静默计时
-          // （思考和工具调用不触发，避免来回切状态）
+          // 完成检测：reply 后启动 timer，任何后续活动取消 timer
           if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
             const hasReplyCall = entry.message.content.some(
               (b: any) => b.type === "tool_use" && isHiddenTool(b.name)
             );
+            const hasWorkActivity = entry.message.content.some(
+              (b: any) => (b.type === "tool_use" && !isHiddenTool(b.name)) || b.type === "text"
+            );
+
+            if (hasWorkActivity) {
+              // 有工作活动（tool_use 或 text）→ 取消 timer（Claude 还在干活）
+              if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+            }
             if (hasReplyCall) {
+              // 发了 reply → 启动/重置 timer
               if (state.idleTimer) clearTimeout(state.idleTimer);
               state.idleTimer = setTimeout(() => {
                 if (state.onIdle) state.onIdle();
               }, WATCHER_CONFIG.idleSilenceMs);
+            }
+          }
+          // tool_result 也算活动 → 取消 timer
+          if (entry.type === "user" && state.idleTimer) {
+            const content = entry.message?.content;
+            if (Array.isArray(content) && content.some((b: any) => b.type === "tool_result")) {
+              clearTimeout(state.idleTimer);
+              state.idleTimer = null;
             }
           }
 
