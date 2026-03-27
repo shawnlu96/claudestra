@@ -368,26 +368,29 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
                     }).catch(() => {});
                   }
                 }).catch(() => {});
-                activeStatusMessages.delete(chId);
+                // 不删 activeStatusMessages，onResume 需要它来 edit 回打断状态
               }
             },
             // onResume: 完成后又有新活动 → 恢复进行中
             () => {
               startTyping(chId, discord);
-              // 重新发打断按钮
-              discord.channels.fetch(chId).then(async (ch) => {
-                if (ch && "send" in ch) {
-                  const sm = await (ch as TextChannel).send({
-                    content: "💭 大聪明思考中...",
-                    components: buildComponents([{
-                      type: "buttons",
-                      buttons: [{ id: `interrupt:${chId}`, label: "打断", emoji: "⚡", style: "danger" }],
-                    }]),
-                  });
-                  trackSentMessage(sm.id);
-                  activeStatusMessages.set(chId, sm.id);
-                }
-              }).catch(() => {});
+              // edit 已有的完成消息回到打断状态（不发新消息）
+              const existingId = activeStatusMessages.get(chId);
+              if (existingId) {
+                discord.channels.fetch(chId).then((ch) => {
+                  if (ch && "messages" in ch) {
+                    (ch as TextChannel).messages.fetch(existingId).then((sm) => {
+                      sm.edit({
+                        content: "💭 大聪明思考中...",
+                        components: buildComponents([{
+                          type: "buttons",
+                          buttons: [{ id: `interrupt:${chId}`, label: "打断", emoji: "⚡", style: "danger" }],
+                        }]),
+                      }).catch(() => {});
+                    }).catch(() => {});
+                  }
+                }).catch(() => {});
+              }
             },
           );
         }
