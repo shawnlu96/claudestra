@@ -28,6 +28,7 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
+  idleTimer: ReturnType<typeof setTimeout> | null;
   onIdle?: () => void;
 }
 
@@ -140,6 +141,7 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
+    idleTimer: null,
     onIdle,
   };
 
@@ -157,9 +159,17 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // 完成检测：turn_duration = 回合结束（唯一可靠信号）
+          // turn_duration → 5 秒后完成（留时间给尾部 reply）
           if (entry.type === "system" && entry.subtype === "turn_duration") {
-            if (state.onIdle) state.onIdle();
+            if (state.idleTimer) clearTimeout(state.idleTimer);
+            state.idleTimer = setTimeout(() => {
+              if (state.onIdle) state.onIdle();
+            }, 5000);
+          }
+          // assistant entry 取消 turn_duration 的 timer（还在输出）
+          if (entry.type === "assistant" && state.idleTimer) {
+            clearTimeout(state.idleTimer);
+            state.idleTimer = null;
           }
 
           if (entry.type === "assistant") {
@@ -235,6 +245,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
+    if (state.idleTimer) clearTimeout(state.idleTimer);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }
@@ -246,6 +257,7 @@ export function resetToolTracking(channelId: string) {
     if (state.channelId === channelId) {
       state.tools = [];
       state.toolMsgId = null;
+      if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
     }
   }
 }
