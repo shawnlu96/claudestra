@@ -161,8 +161,11 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // turn_duration 或 JSONL 静默后由 tmux 屏幕比较法判断空闲
-          // （见下方 tmuxChecker）
+          // 显示思考时长（仅展示，不用于完成判断）
+          if (entry.type === "system" && entry.subtype === "turn_duration" && entry.durationMs) {
+            const secs = (entry.durationMs / 1000).toFixed(0);
+            state.textQueue.push(`⏱ 思考了 ${secs} 秒`);
+          }
 
           if (entry.type === "assistant") {
             const content = entry.message?.content;
