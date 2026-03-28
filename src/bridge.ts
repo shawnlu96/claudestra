@@ -141,7 +141,17 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
-  // 重置 tool 追踪 + 显示 typing + 发送打断按钮
+  // 清理上一轮状态 + 重置 tool 追踪
+  stopTyping(channelId);
+  const oldStatusId = activeStatusMessages.get(channelId);
+  if (oldStatusId) {
+    try {
+      const ch = await discord.channels.fetch(channelId) as TextChannel;
+      const sm = await ch.messages.fetch(oldStatusId);
+      await sm.edit({ content: "✅ 完成", components: [] });
+    } catch { /* non-critical */ }
+    activeStatusMessages.delete(channelId);
+  }
   resetToolTracking(channelId);
   startTyping(channelId, discord);
   const statusMsg = await (msg.channel as TextChannel).send({
