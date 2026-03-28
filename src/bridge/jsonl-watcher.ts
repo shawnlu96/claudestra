@@ -11,7 +11,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
-import { WATCHER_CONFIG } from "./config.js";
+import { WATCHER_CONFIG, TMUX_SOCK } from "./config.js";
 
 interface ToolEntry {
   id: string;
@@ -28,7 +28,8 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
-  idleTimer: ReturnType<typeof setTimeout> | null;
+  tmuxChecker: ReturnType<typeof setInterval> | null;
+  workerName: string;
   onIdle?: () => void;
 }
 
@@ -141,7 +142,8 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
-    idleTimer: null,
+    tmuxChecker: null,
+    workerName,
     onIdle,
   };
 
@@ -159,18 +161,8 @@ export async function startWatching(
         try {
           const entry = JSON.parse(line);
 
-          // turn_duration → 5 秒后完成（留时间给尾部 reply）
-          if (entry.type === "system" && entry.subtype === "turn_duration") {
-            if (state.idleTimer) clearTimeout(state.idleTimer);
-            state.idleTimer = setTimeout(() => {
-              if (state.onIdle) state.onIdle();
-            }, 5000);
-          }
-          // assistant entry 取消 turn_duration 的 timer（还在输出）
-          if (entry.type === "assistant" && state.idleTimer) {
-            clearTimeout(state.idleTimer);
-            state.idleTimer = null;
-          }
+          // turn_duration 或 JSONL 静默后由 tmux 屏幕比较法判断空闲
+          // （见下方 tmuxChecker）
 
           if (entry.type === "assistant") {
             const content = entry.message?.content;
@@ -236,6 +228,26 @@ export async function startWatching(
   // 2 秒轮询兜底（macOS fs.watch 偶尔丢事件）
   const pollInterval = setInterval(processNewData, 2000);
 
+  // tmux 屏幕比较法：连续两次截取相同 = 空闲（spinner/计时器停了）
+  let lastCapture = "";
+  state.tmuxChecker = setInterval(async () => {
+    if (!state.onIdle) return;
+    try {
+      const target = `master:${state.workerName}`;
+      const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p"], {
+        stdout: "pipe", stderr: "pipe",
+      });
+      const capture = await new Response(proc.stdout).text();
+      await proc.exited;
+      if (lastCapture && capture === lastCapture) {
+        state.onIdle();
+        lastCapture = ""; // 重置避免重复触发
+      } else {
+        lastCapture = capture;
+      }
+    } catch { /* non-critical */ }
+  }, 3000);
+
   watchers.set(workerName, { ...state, _pollInterval: pollInterval } as any);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
 }
@@ -245,7 +257,7 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
-    if (state.idleTimer) clearTimeout(state.idleTimer);
+    if (state.tmuxChecker) clearInterval(state.tmuxChecker);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }
@@ -257,7 +269,6 @@ export function resetToolTracking(channelId: string) {
     if (state.channelId === channelId) {
       state.tools = [];
       state.toolMsgId = null;
-      if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
     }
   }
 }
