@@ -115,8 +115,8 @@ async function flushText(state: WatcherState, discord: Client) {
       }
     }
     if (buf) await ch.send(buf);
+    // 只重置 toolMsgId（后续 tool 会发新消息），不清空 tools（tool_result 还需要匹配）
     state.toolMsgId = null;
-    state.tools = [];
   } catch { /* non-critical */ }
 }
 
@@ -164,7 +164,7 @@ export async function startWatching(
           // 显示思考时长（仅展示，不用于完成判断）
           if (entry.type === "system" && entry.subtype === "turn_duration" && entry.durationMs) {
             const secs = (entry.durationMs / 1000).toFixed(0);
-            state.textQueue.push(`⏱ 思考了 ${secs} 秒`);
+            state.textQueue.push(`⏱ 尼了 ${secs} 秒`);
           }
 
           if (entry.type === "assistant") {
