@@ -147,8 +147,11 @@ export async function startWatching(
     onIdle,
   };
 
-  // 处理新增的 JSONL 数据
+  // 处理新增的 JSONL 数据（加锁防止并发重复处理）
+  let processing = false;
   const processNewData = async () => {
+    if (processing) return;
+    processing = true;
     try {
       const newStat = await stat(jsonlPath);
       if (newStat.size <= state.lastSize) return;
@@ -221,6 +224,7 @@ export async function startWatching(
         state.textTimer = setTimeout(() => flushText(state, discord), WATCHER_CONFIG.debounceMs);
       }
     } catch { /* non-critical */ }
+    processing = false;
   };
 
   // fs.watch 主监听
