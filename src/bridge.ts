@@ -360,27 +360,46 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       try {
         const regResult = await runManager("list");
         const worker = (regResult.workers || []).find((w: any) => w.channelId === msg.channelId);
+        const chId = msg.channelId;
+        const onIdleCb = () => {
+          stopTyping(chId);
+          const statusMsgId = activeStatusMessages.get(chId);
+          if (statusMsgId) {
+            discord.channels.fetch(chId).then((ch) => {
+              if (ch && "messages" in ch) {
+                const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
+                (ch as TextChannel).messages.fetch(statusMsgId).then((sm) => {
+                  sm.edit({ content: `✅ 完成${mention}`, components: [] }).catch(() => {});
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+            activeStatusMessages.delete(chId);
+          }
+        };
+
         if (worker?.sessionId && worker?.project) {
           const cwd = worker.project.replace(/^~/, process.env.HOME || "~");
-          const chId = msg.channelId;
-          startWatching(worker.name, cwd, worker.sessionId, chId, discord,
-            // onIdle: reply 后 8 秒静默 → 标记完成
-            () => {
-              stopTyping(chId);
-              const statusMsgId = activeStatusMessages.get(chId);
-              if (statusMsgId) {
-                discord.channels.fetch(chId).then((ch) => {
-                  if (ch && "messages" in ch) {
-                    const mention = ALLOWED_USER_IDS.length > 0 ? ` <@${ALLOWED_USER_IDS[0]}>` : "";
-                    (ch as TextChannel).messages.fetch(statusMsgId).then((sm) => {
-                      sm.edit({ content: `✅ 完成${mention}`, components: [] }).catch(() => {});
-                    }).catch(() => {});
-                  }
-                }).catch(() => {});
-                activeStatusMessages.delete(chId);
-              }
-            },
-          );
+          startWatching(worker.name, cwd, worker.sessionId, chId, discord, onIdleCb);
+        } else {
+          // 大总管等不在 registry 的频道：只用 tmux 屏幕比较检测
+          const tmuxTarget = "master:0";
+          let lastCap = "";
+          let sameN = 0;
+          const checker = setInterval(async () => {
+            try {
+              const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", tmuxTarget, "-p"], {
+                stdout: "pipe", stderr: "pipe",
+              });
+              const cap = await new Response(proc.stdout).text();
+              await proc.exited;
+              if (cap === lastCap) {
+                sameN++;
+                if (sameN >= 3) { onIdleCb(); sameN = 0; lastCap = ""; }
+              } else { sameN = 0; lastCap = cap; }
+            } catch { /* non-critical */ }
+          }, 1000);
+          // 存到 clients 里方便清理
+          (clients.get(chId) as any)._masterChecker = checker;
         }
       } catch { /* non-critical */ }
 
