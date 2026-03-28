@@ -228,8 +228,9 @@ export async function startWatching(
   // 2 秒轮询兜底（macOS fs.watch 偶尔丢事件）
   const pollInterval = setInterval(processNewData, 2000);
 
-  // tmux 屏幕比较法：连续两次截取相同 = 空闲（spinner/计时器停了）
+  // tmux 屏幕比较法：连续 3 次截取相同 = 空闲
   let lastCapture = "";
+  let sameCount = 0;
   state.tmuxChecker = setInterval(async () => {
     if (!state.onIdle) return;
     try {
@@ -239,14 +240,19 @@ export async function startWatching(
       });
       const capture = await new Response(proc.stdout).text();
       await proc.exited;
-      if (lastCapture && capture === lastCapture) {
-        state.onIdle();
-        lastCapture = ""; // 重置避免重复触发
+      if (capture === lastCapture) {
+        sameCount++;
+        if (sameCount >= 3) {
+          state.onIdle();
+          sameCount = 0;
+          lastCapture = "";
+        }
       } else {
+        sameCount = 0;
         lastCapture = capture;
       }
     } catch { /* non-critical */ }
-  }, 3000);
+  }, 1000);
 
   watchers.set(workerName, { ...state, _pollInterval: pollInterval } as any);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);

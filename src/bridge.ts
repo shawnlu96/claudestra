@@ -21,7 +21,6 @@ import { DISCORD_TOKEN, BRIDGE_PORT, ALLOWED_USER_IDS, TMP_DIR, TMUX_SOCK } from
 import {
   startTyping,
   stopTyping,
-  ensureTyping,
   buildComponents,
 } from "./bridge/components.js";
 import {
