@@ -11,6 +11,7 @@
 import { readFile, writeFile, access } from "fs/promises";
 import { constants } from "fs";
 import { resolve } from "path";
+import { printTmuxGuide } from "./lib/tmux-guide.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
@@ -182,39 +183,220 @@ async function run(cmd: string[], opts: { cwd?: string } = {}): Promise<{ ok: bo
 }
 
 // ============================================================
-// 步骤 1：依赖检查
+// 步骤 1：依赖检查 + 自动安装
 // ============================================================
 
-async function stepCheckDeps(): Promise<void> {
-  header(1, "检查系统依赖");
+type InstallerKind = "brew" | "apt" | "npm" | "curl-bun";
 
-  print("Claudestra 需要以下 5 个工具才能跑起来：");
+interface DepSpec {
+  cmd: string;
+  label: string;
+  /** 平台 → 安装方式 */
+  installers: Partial<Record<"darwin" | "linux", { kind: InstallerKind; pkg?: string; script?: string }>>;
+  /** 给不支持自动安装的用户看的手动命令 */
+  manual: string;
+}
+
+const DEPS: DepSpec[] = [
+  {
+    cmd: "git",
+    label: "git",
+    installers: {
+      darwin: { kind: "brew", pkg: "git" },
+      linux: { kind: "apt", pkg: "git" },
+    },
+    manual: "brew install git （或系统自带）",
+  },
+  {
+    cmd: "tmux",
+    label: "tmux",
+    installers: {
+      darwin: { kind: "brew", pkg: "tmux" },
+      linux: { kind: "apt", pkg: "tmux" },
+    },
+    manual: "brew install tmux",
+  },
+  {
+    cmd: "node",
+    label: "node (npm 的前置)",
+    installers: {
+      darwin: { kind: "brew", pkg: "node" },
+      linux: { kind: "apt", pkg: "nodejs" },
+    },
+    manual: "brew install node",
+  },
+  {
+    cmd: "bun",
+    label: "bun",
+    installers: {
+      darwin: { kind: "curl-bun" },
+      linux: { kind: "curl-bun" },
+    },
+    manual: "curl -fsSL https://bun.sh/install | bash",
+  },
+  {
+    cmd: "pm2",
+    label: "pm2",
+    installers: {
+      darwin: { kind: "npm", pkg: "pm2" },
+      linux: { kind: "npm", pkg: "pm2" },
+    },
+    manual: "npm install -g pm2",
+  },
+  {
+    cmd: "claude",
+    label: "claude (Claude Code CLI)",
+    installers: {
+      darwin: { kind: "npm", pkg: "@anthropic-ai/claude-code" },
+      linux: { kind: "npm", pkg: "@anthropic-ai/claude-code" },
+    },
+    manual: "npm install -g @anthropic-ai/claude-code",
+  },
+];
+
+async function runInstaller(installer: { kind: InstallerKind; pkg?: string; script?: string }): Promise<boolean> {
+  switch (installer.kind) {
+    case "brew": {
+      const proc = Bun.spawn(["brew", "install", installer.pkg!], { stdout: "inherit", stderr: "inherit" });
+      return (await proc.exited) === 0;
+    }
+    case "apt": {
+      const proc = Bun.spawn(["sudo", "apt-get", "install", "-y", installer.pkg!], { stdout: "inherit", stderr: "inherit" });
+      return (await proc.exited) === 0;
+    }
+    case "npm": {
+      const proc = Bun.spawn(["npm", "install", "-g", installer.pkg!], { stdout: "inherit", stderr: "inherit" });
+      return (await proc.exited) === 0;
+    }
+    case "curl-bun": {
+      // 用 bash -c 执行 curl | bash，然后把 ~/.bun/bin 加到 PATH（仅当前进程）
+      const script = 'curl -fsSL https://bun.sh/install | bash';
+      const proc = Bun.spawn(["bash", "-c", script], { stdout: "inherit", stderr: "inherit" });
+      const code = await proc.exited;
+      if (code === 0) {
+        process.env.PATH = `${process.env.HOME}/.bun/bin:${process.env.PATH || ""}`;
+      }
+      return code === 0;
+    }
+  }
+}
+
+async function stepCheckDeps(): Promise<void> {
+  header(1, "检查系统依赖 + 自动安装");
+
+  const platform = process.platform === "darwin" ? "darwin" : process.platform === "linux" ? "linux" : null;
+  if (!platform) {
+    fail(`不支持的系统: ${process.platform}。Claudestra 只支持 macOS 和 Linux`);
+    process.exit(1);
+  }
+
+  // 先扫一遍
+  print("扫描依赖:");
   br();
 
-  const deps: Array<{ cmd: string; install: string; required: boolean }> = [
-    { cmd: "git", install: "brew install git（或系统自带）", required: true },
-    { cmd: "tmux", install: "brew install tmux", required: true },
-    { cmd: "bun", install: "curl -fsSL https://bun.sh/install | bash", required: true },
-    { cmd: "pm2", install: "npm install -g pm2", required: true },
-    { cmd: "claude", install: "npm install -g @anthropic-ai/claude-code", required: true },
-  ];
+  const status: Array<{ dep: DepSpec; has: boolean }> = [];
+  for (const dep of DEPS) {
+    const has = await which(dep.cmd);
+    status.push({ dep, has });
+    if (has) ok(`${c.bold}${dep.label}${c.reset}`);
+    else fail(`${c.bold}${dep.label}${c.reset} — 未安装`);
+  }
 
-  let missing = 0;
-  for (const d of deps) {
-    const has = await which(d.cmd);
-    if (has) {
-      ok(`${c.bold}${d.cmd}${c.reset}`);
-    } else {
-      fail(`${c.bold}${d.cmd}${c.reset} — 未安装`);
-      hint(`安装命令: ${c.cyan}${d.install}${c.reset}`);
-      missing++;
+  const missing = status.filter((s) => !s.has);
+  if (missing.length === 0) {
+    br();
+    ok("所有依赖就绪 ✨");
+    return;
+  }
+
+  br();
+  warn(`缺少 ${missing.length} 个依赖。我可以帮你装。`);
+  br();
+
+  // 前置检查：macOS 需要 brew；Linux 需要 apt + sudo
+  if (platform === "darwin") {
+    const hasBrew = await which("brew");
+    const needsBrew = missing.some((m) => m.dep.installers.darwin?.kind === "brew");
+    if (needsBrew && !hasBrew) {
+      fail("macOS 自动安装需要 Homebrew，但你没装。");
+      hint("先装 Homebrew:");
+      print(`  ${c.cyan}/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"${c.reset}`);
+      br();
+      hint("装完 brew 后重跑: bun run setup");
+      process.exit(1);
+    }
+  } else {
+    const hasApt = await which("apt-get");
+    const needsApt = missing.some((m) => m.dep.installers.linux?.kind === "apt");
+    if (needsApt && !hasApt) {
+      fail("Linux 自动安装目前只支持 apt-get (Debian/Ubuntu)。");
+      hint("你的系统上请手动安装：");
+      for (const m of missing) hint(`  ${m.dep.label}: ${m.dep.manual}`);
+      process.exit(1);
     }
   }
 
-  if (missing > 0) {
+  print(`${c.bold}计划安装：${c.reset}`);
+  for (const m of missing) {
+    const installer = m.dep.installers[platform];
+    const how = installer?.kind === "brew" ? `brew install ${installer.pkg}` :
+                installer?.kind === "apt" ? `sudo apt-get install -y ${installer.pkg}` :
+                installer?.kind === "npm" ? `npm install -g ${installer.pkg}` :
+                installer?.kind === "curl-bun" ? "curl -fsSL https://bun.sh/install | bash" :
+                m.dep.manual;
+    print(`  ${c.dim}•${c.reset} ${c.bold}${m.dep.label}${c.reset}  ${c.dim}→ ${how}${c.reset}`);
+  }
+  br();
+
+  if (!(await confirm("开始安装？", true))) {
+    warn("已取消。你可以手动跑上面的命令，然后重跑 bun run setup");
+    process.exit(1);
+  }
+
+  br();
+  // 逐个安装。node 必须在 npm 类依赖之前，DEPS 已排好序
+  for (const m of missing) {
+    const installer = m.dep.installers[platform];
+    if (!installer) {
+      fail(`${m.dep.label}: 当前系统不支持自动安装，手动跑: ${m.dep.manual}`);
+      continue;
+    }
+
     br();
-    warn(`缺少 ${missing} 个依赖。`);
-    hint("装好上面缺的工具后重跑: bun run setup");
+    print(`${c.cyan}▶${c.reset} 安装 ${c.bold}${m.dep.label}${c.reset}…`);
+    const success = await runInstaller(installer);
+    if (success) {
+      // 重新验证 which 能不能找到（PATH 可能刚更新）
+      const nowHas = await which(m.dep.cmd);
+      if (nowHas) {
+        ok(`${m.dep.label} 安装成功`);
+      } else {
+        warn(`${m.dep.label} 安装返回成功但 shell 找不到命令`);
+        hint(`可能需要新开一个终端让 PATH 生效，或重跑 bun run setup`);
+      }
+    } else {
+      fail(`${m.dep.label} 安装失败`);
+      hint(`手动跑: ${m.dep.manual}`);
+    }
+  }
+
+  // 最后再验证一次
+  br();
+  print("复查依赖:");
+  let stillMissing = 0;
+  for (const dep of DEPS) {
+    const has = await which(dep.cmd);
+    if (has) ok(`${c.bold}${dep.label}${c.reset}`);
+    else {
+      fail(`${c.bold}${dep.label}${c.reset} — 仍然没装上`);
+      stillMissing++;
+    }
+  }
+
+  if (stillMissing > 0) {
+    br();
+    fail(`${stillMissing} 个依赖没装上，向导没法继续`);
+    hint("检查上面的错误，手动装完后重跑 bun run setup");
     process.exit(1);
   }
 
@@ -550,6 +732,10 @@ function stepDone(cfg: Config): void {
   print(`  ${c.cyan}pm2 startup${c.reset}  ${c.dim}(它会打印一条 sudo 命令，复制跑一下)${c.reset}`);
   print(`  ${c.cyan}pm2 save${c.reset}`);
   br();
+
+  // tmux 教程
+  printTmuxGuide();
+
   print(`祝你玩得愉快 ${c.yellow}🎉${c.reset}`);
   br();
 }

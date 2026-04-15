@@ -41,6 +41,7 @@ import {
   DISALLOWED_PRESETS,
   DEFAULT_PRESET,
 } from "./lib/claude-launch.js";
+import { printTmuxGuide } from "./lib/tmux-guide.js";
 
 const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
@@ -1348,6 +1349,11 @@ switch (cmd) {
     break;
   }
 
+  case "tmux-help":
+  case "tmux":
+    printTmuxGuide();
+    break;
+
   default:
     output({
       ok: false,
@@ -1369,6 +1375,7 @@ switch (cmd) {
         "permissions get <name>          — 查看单个 agent 的详细权限",
         'permissions set <name> --preset <preset>｜--disallowed "..."',
         "permissions reset <name>        — 恢复默认预设",
+        "tmux-help                       — 打印 tmux 快速教程（含 iTerm2 -CC 模式）",
         "version                         — 显示当前版本 + 是否有更新",
         "update                          — 拉取最新代码并重启 pm2 服务",
       ],
