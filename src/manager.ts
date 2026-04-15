@@ -32,6 +32,7 @@ import {
   isIdle,
   listWorkerWindows as listWorkerWindowsShared,
   ensureSocketDir,
+  hasClaudePromptToConfirm,
 } from "./lib/tmux-helper.js";
 import {
   buildClaudeCommand,
@@ -341,14 +342,15 @@ async function cmdCreate(
   });
   await tmuxSendLine(target, cmd);
 
-  // 4. 轮询等待就绪，遇到确认提示自动按 Enter
+  // 4. 轮询等待就绪，遇到任何确认弹窗自动按 Enter
+  //    用 hasPromptToConfirm 统一处理 dev-channel / trust files / "❯ 1. Yes" 等多种提示
   let ready = false;
-  for (let i = 0; i < 30; i++) {
-    await Bun.sleep(1000);
+  for (let i = 0; i < 60; i++) {
+    await Bun.sleep(500);
     const pane = await captureLast(tmuxName, 10);
-    // 检查 development channels 确认提示
-    if (pane.includes("I am using this for local development")) {
+    if (hasPromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      await Bun.sleep(500);
       continue;
     }
     if (await isWorkerIdle(tmuxName)) {
@@ -460,13 +462,14 @@ async function cmdResume(
   });
   await tmuxSendLine(target, cmd);
 
-  // 轮询等待，遇到确认提示自动按 Enter
+  // 轮询等待，用 hasPromptToConfirm 统一处理所有确认弹窗
   let ready = false;
-  for (let i = 0; i < 30; i++) {
-    await Bun.sleep(1000);
+  for (let i = 0; i < 60; i++) {
+    await Bun.sleep(500);
     const pane = await captureLast(tmuxName, 10);
-    if (pane.includes("I am using this for local development")) {
+    if (hasPromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+      await Bun.sleep(500);
       continue;
     }
     if (await isWorkerIdle(tmuxName)) {
@@ -592,20 +595,8 @@ function isAtShell(pane: string): boolean {
   return /[%$]\s*$/.test(lastLine);
 }
 
-/** 检查是否有需要按 Enter 的提示 */
-function hasPromptToConfirm(pane: string): boolean {
-  return (
-    pane.includes("Enter to confirm") ||
-    pane.includes("Esc to cancel") ||
-    pane.includes("Do you want") ||
-    pane.includes("Are you sure") ||
-    pane.includes("I am using this for local development") ||
-    pane.includes("trust the files") ||
-    pane.includes("Trust the files") ||
-    pane.includes("Do you trust") ||
-    (pane.includes("❯ 1.") && pane.includes("Yes"))
-  );
-}
+/** 检查是否有需要按 Enter 的提示（转发到共享实现） */
+const hasPromptToConfirm = hasClaudePromptToConfirm;
 
 /** 优雅退出一个 Claude Code agent，处理所有确认弹窗 */
 async function gracefulExit(name: string): Promise<boolean> {

@@ -12,6 +12,7 @@ import {
   isIdle as tmuxIsIdle,
   tmuxCapture,
   tmuxSendLine,
+  hasClaudePromptToConfirm,
   MASTER_SESSION as SESSION_NAME,
 } from "./lib/tmux-helper.js";
 import { buildClaudeCommand } from "./lib/claude-launch.js";
@@ -58,9 +59,9 @@ async function startMaster() {
   });
   await tmuxSendLine(MASTER_WINDOW, cmd);
 
-  // 等待并自动确认各种提示（dev channel、trust、etc）
-  for (let i = 0; i < 60; i++) {
-    await Bun.sleep(1000);
+  // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
+  for (let i = 0; i < 120; i++) {
+    await Bun.sleep(500);
     const pane = await captureLast(10);
 
     if (await isIdle()) {
@@ -68,16 +69,9 @@ async function startMaster() {
       return true;
     }
 
-    // 各种需要按 Enter 的提示
-    if (
-      pane.includes("I am using this for local development") ||
-      pane.includes("Enter to confirm") ||
-      pane.includes("Esc to cancel") ||
-      pane.includes("Do you trust") ||
-      pane.includes("trust the files") ||
-      (pane.includes("❯ 1.") && pane.includes("Yes"))
-    ) {
+    if (hasClaudePromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
+      await Bun.sleep(500);
       continue;
     }
   }
@@ -115,13 +109,7 @@ async function main() {
 
     // 检查是否卡在确认弹窗
     const pane = await captureLast(10);
-    if (
-      pane.includes("I am using this for local development") ||
-      pane.includes("Enter to confirm") ||
-      pane.includes("Esc to cancel") ||
-      pane.includes("Do you trust") ||
-      (pane.includes("❯ 1.") && pane.includes("Yes"))
-    ) {
+    if (hasClaudePromptToConfirm(pane)) {
       console.log("⚠️ 大总管卡在确认弹窗，自动确认...");
       await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
     }
@@ -136,21 +124,16 @@ async function main() {
       });
       await tmuxSendLine(MASTER_WINDOW, cmd);
       // 等待确认
-      for (let i = 0; i < 60; i++) {
-        await Bun.sleep(1000);
+      for (let i = 0; i < 120; i++) {
+        await Bun.sleep(500);
         const p = await captureLast(10);
         if (await isIdle()) {
           console.log("✅ 大总管已重新就绪");
           break;
         }
-        if (
-          p.includes("I am using this for local development") ||
-          p.includes("Enter to confirm") ||
-          p.includes("Esc to cancel") ||
-          p.includes("Do you trust") ||
-          (p.includes("❯ 1.") && p.includes("Yes"))
-        ) {
+        if (hasClaudePromptToConfirm(p)) {
           await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
+          await Bun.sleep(500);
         }
       }
     }

@@ -61,6 +61,31 @@ export async function isIdle(target: string): Promise<boolean> {
   return /❯/.test(last5);
 }
 
+/**
+ * 检测一段 tmux pane 里是否存在 Claude Code 的确认弹窗。
+ * 覆盖启动时的 dev-channel / trust files / skip permissions / 选项菜单 等。
+ * 共用同一份列表，避免 manager/launcher 之间漂移。
+ *
+ * 注意：不要匹配 "bypass permissions mode" 或 "bypass permissions" —
+ * 这些是 Claude Code 启动完成后的横幅文字，不是需要确认的提示。
+ */
+export function hasClaudePromptToConfirm(pane: string): boolean {
+  return (
+    pane.includes("Enter to confirm") ||
+    pane.includes("Esc to cancel") ||
+    pane.includes("Do you want") ||
+    pane.includes("Are you sure") ||
+    pane.includes("I am using this for local development") ||
+    pane.includes("trust the files") ||
+    pane.includes("Trust the files") ||
+    pane.includes("Do you trust") ||
+    pane.includes("Yes, proceed") ||
+    pane.includes("skip all permission") ||
+    pane.includes("Skip all permission") ||
+    (pane.includes("❯ 1.") && pane.includes("Yes"))
+  );
+}
+
 /** 列出 master session 下所有 window 名 */
 export async function listWindows(): Promise<string[]> {
   const out = await tmuxRaw([
