@@ -1,10 +1,11 @@
 {
-  "name": "claude-orchestrator",
+  "name": "claudestra",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "bridge": "bun run src/bridge.ts",
-    "manager": "bun run src/manager.ts"
+    "manager": "bun run src/manager.ts",
+    "setup": "bun run src/setup.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

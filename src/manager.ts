@@ -21,23 +21,23 @@ import { join } from "path";
 // 配置
 // ============================================================
 
-const SOCK = "/tmp/claude-orchestrator/master.sock";
+import {
+  TMUX_SOCK as SOCK,
+  MASTER_SESSION,
+  WORKER_PREFIX,
+  tmuxRaw,
+  windowTarget,
+  tmuxSendLine,
+  tmuxCapture,
+  isIdle,
+  listWorkerWindows as listWorkerWindowsShared,
+  ensureSocketDir,
+} from "./lib/tmux-helper.js";
+import { buildClaudeCommand } from "./lib/claude-launch.js";
+
 const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
-const WORKER_PREFIX = "worker-";
 const CATEGORY_NAME = "agents";
-// 危险操作黑名单
-const DISALLOWED_TOOLS = [
-  'Bash(rm -rf:*)',
-  'Bash(rm -r:*)',
-  'Bash(rmdir:*)',
-  'Bash(git push --force:*)',
-  'Bash(git reset --hard:*)',
-  'Bash(git clean -f:*)',
-  'Bash(chmod 777:*)',
-  'Bash(:(){ :|:&};:)',   // fork bomb
-].join(' ');
-const CLAUDE_BASE_FLAGS = `--dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions --disallowedTools "${DISALLOWED_TOOLS}"`;
 
 // ============================================================
 // Registry
@@ -74,59 +74,25 @@ async function saveRegistry(reg: Registry) {
   await writeFile(REGISTRY_PATH, JSON.stringify(reg, null, 2));
 }
 
-// ============================================================
-// tmux 工具函数
-// 所有 worker 是 master session 里的 window（不是独立 session）
-// 这样 iTerm2 -CC 模式下每个 worker 都是一个 tab
-// ============================================================
-
-const MASTER_SESSION = "master";
-
-async function tmuxRaw(args: string[]): Promise<string> {
-  const proc = Bun.spawn(["tmux", "-S", SOCK, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out.trim();
-}
-
-async function ensureSocket() {
-  await mkdir("/tmp/claude-orchestrator", { recursive: true });
-}
-
-/** tmux window target: master:worker-xxx */
-function windowTarget(name: string): string {
-  return `${MASTER_SESSION}:${name}`;
-}
-
-async function listWorkerWindows(): Promise<string[]> {
-  const out = await tmuxRaw([
-    "list-windows",
-    "-t", MASTER_SESSION,
-    "-F", "#{window_name}",
-  ]);
-  if (!out) return [];
-  return out.split("\n").filter((w) => w.startsWith(WORKER_PREFIX));
-}
+import { bridgeRequest } from "./lib/bridge-client.js";
 
 async function windowExists(name: string): Promise<boolean> {
-  const windows = await listWorkerWindows();
+  const windows = await listWorkerWindowsShared();
   return windows.includes(name);
 }
 
 async function isWorkerIdle(name: string): Promise<boolean> {
-  const tail = await tmuxRaw(["capture-pane", "-t", windowTarget(name), "-p"]);
-  const last5 = tail.split("\n").slice(-5).join("\n");
-  return /❯/.test(last5);
+  return isIdle(windowTarget(name));
 }
 
 async function captureLast(name: string, lines = 40): Promise<string> {
-  return tmuxRaw(["capture-pane", "-t", windowTarget(name), "-p", "-J", "-S", `-${lines}`]);
+  return tmuxCapture(windowTarget(name), lines);
 }
 
-import { bridgeRequest } from "./lib/bridge-client.js";
+// mkdir 等原本内联的工具
+async function ensureSocket() {
+  await ensureSocketDir();
+}
 
 // ============================================================
 // Claude Code Session 扫描
@@ -234,8 +200,28 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
 // 辅助
 // ============================================================
 
+// 拒绝空白、shell 元字符、控制字符。CJK 和其他 Unicode 字母允许。
+// 长度上限 48 — Discord 频道名上限 100，tmux window 名没硬限制，48 足够宽。
+const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\\x00-\x1f\x7f]/;
+
 function normalizeName(raw: string): string {
-  return `${WORKER_PREFIX}${raw.replace(WORKER_PREFIX, "")}`.toLowerCase();
+  return `${WORKER_PREFIX}${raw.replace(WORKER_PREFIX, "").toLowerCase()}`;
+}
+
+/**
+ * 校验：只用于新建/resume。拒绝空白和 shell 元字符，防止命令注入。
+ * 允许 CJK 等 Unicode 字符（Discord 频道名支持，tmux 也支持）。
+ */
+function assertValidNewName(raw: string): void {
+  const cleaned = raw.replace(WORKER_PREFIX, "");
+  if (cleaned.length === 0 || cleaned.length > 48) {
+    throw new Error(`agent 名称长度必须在 1~48 之间: "${raw}"`);
+  }
+  if (NAME_BLOCKLIST_RE.test(cleaned)) {
+    throw new Error(
+      `agent 名称含非法字符: "${raw}"（不能包含空白或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { } \\）`
+    );
+  }
 }
 
 function formatAge(date: Date): string {
@@ -257,6 +243,7 @@ function output(data: Record<string, unknown>) {
 // ============================================================
 
 async function cmdCreate(name: string, dir: string, purpose: string = "") {
+  assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(WORKER_PREFIX, "");
 
@@ -289,10 +276,8 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
   // 3. 启动 Claude Code
   const target = windowTarget(tmuxName);
   const sessionId = crypto.randomUUID();
-  const cmd = `DISCORD_CHANNEL_ID=${channelId} BRIDGE_URL=${BRIDGE_URL} claude --session-id ${sessionId} ${CLAUDE_BASE_FLAGS}`;
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", cmd]);
-  await Bun.sleep(100);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+  const cmd = buildClaudeCommand({ channelId, bridgeUrl: BRIDGE_URL, sessionId });
+  await tmuxSendLine(target, cmd);
 
   // 4. 轮询等待就绪，遇到确认提示自动按 Enter
   let ready = false;
@@ -337,11 +322,17 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
   });
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function cmdResume(
   name: string,
   sessionId: string,
   dir?: string
 ) {
+  if (!UUID_RE.test(sessionId)) {
+    throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式）`);
+  }
+  assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(WORKER_PREFIX, "");
 
@@ -385,10 +376,13 @@ async function cmdResume(
   // 启动 Claude Code（resume 模式）
   const target = windowTarget(tmuxName);
   const displayName = channelName;
-  const cmd = `DISCORD_CHANNEL_ID=${channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${sessionId} --name "${displayName}" ${CLAUDE_BASE_FLAGS}`;
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", cmd]);
-  await Bun.sleep(100);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+  const cmd = buildClaudeCommand({
+    channelId,
+    bridgeUrl: BRIDGE_URL,
+    resumeId: sessionId,
+    displayName,
+  });
+  await tmuxSendLine(target, cmd);
 
   // 轮询等待，遇到确认提示自动按 Enter
   let ready = false;
@@ -620,9 +614,7 @@ async function startClaudeInWindow(
   }
 
   // 发送启动命令
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", claudeCmd]);
-  await Bun.sleep(100);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+  await tmuxSendLine(target, claudeCmd);
 
   // 轮询处理各种确认提示，最多等 60 秒
   for (let i = 0; i < 120; i++) {
@@ -661,7 +653,7 @@ async function cmdRestart(name?: string) {
     targets = [tmuxName];
   } else {
     // 重启所有 worker
-    targets = await listWorkerWindows();
+    targets = await listWorkerWindowsShared();
   }
 
   if (targets.length === 0) {
@@ -687,7 +679,12 @@ async function cmdRestart(name?: string) {
 
     // 2. 重新启动 Claude Code
     const displayName = info.displayName || tmuxName.replace(WORKER_PREFIX, "");
-    const cmd = `DISCORD_CHANNEL_ID=${info.channelId} BRIDGE_URL=${BRIDGE_URL} claude --resume ${info.sessionId} --name "${displayName}" ${CLAUDE_BASE_FLAGS}`;
+    const cmd = buildClaudeCommand({
+      channelId: info.channelId,
+      bridgeUrl: BRIDGE_URL,
+      resumeId: info.sessionId,
+      displayName,
+    });
 
     const started = await startClaudeInWindow(tmuxName, cmd);
     results.push({
@@ -705,7 +702,7 @@ async function cmdRestart(name?: string) {
 }
 
 async function cmdList() {
-  const tmuxWindows = await listWorkerWindows();
+  const tmuxWindows = await listWorkerWindowsShared();
   const reg = await loadRegistry();
 
   const workers: Record<string, unknown>[] = [];
@@ -773,11 +770,235 @@ async function cmdSessions(search?: string) {
 }
 
 // ============================================================
+// Cron 管理命令
+// ============================================================
+
+import { loadJobs, saveJobs, parseCronExpression, nextCronTime, type CronJob } from "./cron.js";
+
+async function cmdCronAdd(name: string, schedule: string, dir: string, prompt: string) {
+  // 验证 cron 表达式
+  try {
+    parseCronExpression(schedule);
+  } catch (err) {
+    output({ ok: false, error: (err as Error).message });
+    return;
+  }
+
+  const jobs = await loadJobs();
+
+  // 检查同名
+  if (jobs.some((j) => j.name === name)) {
+    output({ ok: false, error: `已存在同名任务: "${name}"` });
+    return;
+  }
+
+  const job: CronJob = {
+    id: `cron_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    schedule,
+    prompt,
+    dir: dir.replace(/^~/, process.env.HOME || "~"),
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  };
+
+  try {
+    job.nextRun = nextCronTime(schedule).toISOString();
+  } catch { /* non-critical */ }
+
+  jobs.push(job);
+  await saveJobs(jobs);
+
+  output({
+    ok: true,
+    job: { id: job.id, name: job.name, schedule: job.schedule, nextRun: job.nextRun },
+    message: `定时任务 "${name}" 已创建 (${schedule})`,
+  });
+}
+
+async function cmdCronList() {
+  const jobs = await loadJobs();
+  output({
+    ok: true,
+    total: jobs.length,
+    jobs: jobs.map((j) => ({
+      id: j.id,
+      name: j.name,
+      schedule: j.schedule,
+      dir: j.dir.replace(process.env.HOME || "", "~"),
+      prompt: j.prompt.slice(0, 80),
+      enabled: j.enabled,
+      lastRun: j.lastRun || null,
+      nextRun: j.nextRun || null,
+    })),
+  });
+}
+
+async function cmdCronRemove(nameOrId: string) {
+  const jobs = await loadJobs();
+  const idx = jobs.findIndex((j) => j.name === nameOrId || j.id === nameOrId);
+  if (idx < 0) {
+    output({ ok: false, error: `找不到任务: "${nameOrId}"` });
+    return;
+  }
+  const removed = jobs.splice(idx, 1)[0];
+  await saveJobs(jobs);
+  output({ ok: true, removed: removed.name, message: `定时任务 "${removed.name}" 已删除` });
+}
+
+async function cmdCronToggle(nameOrId: string) {
+  const jobs = await loadJobs();
+  const job = jobs.find((j) => j.name === nameOrId || j.id === nameOrId);
+  if (!job) {
+    output({ ok: false, error: `找不到任务: "${nameOrId}"` });
+    return;
+  }
+  job.enabled = !job.enabled;
+  if (job.enabled) {
+    try { job.nextRun = nextCronTime(job.schedule).toISOString(); } catch { /* non-critical */ }
+  } else {
+    job.nextRun = undefined;
+  }
+  await saveJobs(jobs);
+  output({
+    ok: true,
+    name: job.name,
+    enabled: job.enabled,
+    message: `定时任务 "${job.name}" 已${job.enabled ? "启用" : "暂停"}`,
+  });
+}
+
+async function cmdCronHistory(nameOrId?: string) {
+  const historyPath = `${process.env.HOME}/.claude-orchestrator/cron-history.json`;
+  let history: any[] = [];
+  if (existsSync(historyPath)) {
+    try {
+      history = JSON.parse(await readFile(historyPath, "utf-8"));
+    } catch { /* non-critical */ }
+  }
+  if (nameOrId) {
+    history = history.filter((h) => h.jobName === nameOrId || h.jobId === nameOrId);
+  }
+  output({
+    ok: true,
+    total: history.length,
+    records: history.slice(-20).reverse(),
+  });
+}
+
+// ============================================================
+// 版本检查 / 自动更新
+// ============================================================
+
+const REPO_ROOT = `${import.meta.dir}/..`;
+
+async function git(...args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
+  const proc = Bun.spawn(["git", "-C", REPO_ROOT, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  const err = await new Response(proc.stderr).text();
+  const code = await proc.exited;
+  return { ok: code === 0, out: out.trim(), err: err.trim() };
+}
+
+async function cmdVersion() {
+  const pkgPath = `${REPO_ROOT}/package.json`;
+  const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
+
+  const head = (await git("rev-parse", "HEAD")).out.slice(0, 7);
+  const branch = (await git("rev-parse", "--abbrev-ref", "HEAD")).out;
+
+  // fetch 远端（可能网络失败，允许）
+  const fetchResult = await git("fetch", "--quiet", "origin");
+  let behind = 0;
+  let ahead = 0;
+  let remoteHead = "";
+  let latestMessage = "";
+
+  if (fetchResult.ok) {
+    const counts = (await git("rev-list", "--left-right", "--count", `HEAD...origin/${branch}`)).out;
+    const [a, b] = counts.split(/\s+/).map((n) => parseInt(n) || 0);
+    ahead = a;
+    behind = b;
+    remoteHead = (await git("rev-parse", `origin/${branch}`)).out.slice(0, 7);
+    if (behind > 0) {
+      latestMessage = (await git("log", "-1", "--format=%s", `origin/${branch}`)).out;
+    }
+  }
+
+  output({
+    ok: true,
+    name: pkg.name,
+    version: pkg.version,
+    branch,
+    head,
+    remoteHead,
+    ahead,
+    behind,
+    upToDate: behind === 0,
+    latestMessage,
+    fetched: fetchResult.ok,
+    summary: fetchResult.ok
+      ? behind === 0
+        ? `已是最新版本 (${pkg.name} ${pkg.version} · ${branch}@${head})`
+        : `有 ${behind} 个新提交可更新 · 最新: ${latestMessage}`
+      : `无法 fetch 远端（可能离线）: ${fetchResult.err}`,
+  });
+}
+
+async function cmdUpdate() {
+  // 1. 确认是 git 仓库
+  const status = await git("status", "--porcelain");
+  if (!status.ok) {
+    output({ ok: false, error: "不是 git 仓库，无法自动更新" });
+    return;
+  }
+  if (status.out) {
+    output({
+      ok: false,
+      error: "仓库有未提交的改动，请先 commit/stash 后再更新",
+      dirty: status.out,
+    });
+    return;
+  }
+
+  // 2. git pull
+  const pull = await git("pull", "--ff-only");
+  if (!pull.ok) {
+    output({ ok: false, error: `git pull 失败: ${pull.err || pull.out}` });
+    return;
+  }
+
+  // 3. pm2 restart（bridge + launcher + cron-scheduler）
+  const pm2Proc = Bun.spawn(["pm2", "restart", "ecosystem.config.cjs"], {
+    cwd: REPO_ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const pm2Out = await new Response(pm2Proc.stdout).text();
+  const pm2Err = await new Response(pm2Proc.stderr).text();
+  await pm2Proc.exited;
+
+  const newHead = (await git("rev-parse", "HEAD")).out.slice(0, 7);
+
+  output({
+    ok: true,
+    newHead,
+    pullOutput: pull.out,
+    pm2Output: pm2Out + pm2Err,
+    message: `已更新到 ${newHead} 并重启 pm2 服务`,
+  });
+}
+
+// ============================================================
 // CLI 入口
 // ============================================================
 
 const [cmd, ...args] = process.argv.slice(2);
 
+try {
 switch (cmd) {
   case "create": {
     const [name, dir, ...rest] = args;
@@ -823,6 +1044,52 @@ switch (cmd) {
     break;
   }
 
+  case "cron-add": {
+    const [name, schedule, dir, ...rest] = args;
+    if (!name || !schedule || !dir || rest.length === 0) {
+      output({ ok: false, error: '用法: cron-add <name> "<cron>" <dir> <prompt...>' });
+      break;
+    }
+    await cmdCronAdd(name, schedule, dir, rest.join(" "));
+    break;
+  }
+
+  case "cron-list":
+    await cmdCronList();
+    break;
+
+  case "cron-remove": {
+    const [nameOrId] = args;
+    if (!nameOrId) {
+      output({ ok: false, error: "用法: cron-remove <name|id>" });
+      break;
+    }
+    await cmdCronRemove(nameOrId);
+    break;
+  }
+
+  case "cron-toggle": {
+    const [nameOrId] = args;
+    if (!nameOrId) {
+      output({ ok: false, error: "用法: cron-toggle <name|id>" });
+      break;
+    }
+    await cmdCronToggle(nameOrId);
+    break;
+  }
+
+  case "cron-history":
+    await cmdCronHistory(args[0] || undefined);
+    break;
+
+  case "version":
+    await cmdVersion();
+    break;
+
+  case "update":
+    await cmdUpdate();
+    break;
+
   default:
     output({
       ok: false,
@@ -834,6 +1101,17 @@ switch (cmd) {
         "restart [name]                  — 重启 agent（不指定则重启所有）",
         "list                            — 列出所有 agent",
         "sessions [search]               — 浏览历史 Claude Code 会话",
+        'cron-add <name> "<cron>" <dir> <prompt...> — 添加定时任务',
+        "cron-list                       — 列出所有定时任务",
+        "cron-remove <name|id>           — 删除定时任务",
+        "cron-toggle <name|id>           — 启用/暂停定时任务",
+        "cron-history [name|id]          — 查看执行历史",
+        "version                         — 显示当前版本 + 是否有更新",
+        "update                          — 拉取最新代码并重启 pm2 服务",
       ],
     });
+}
+} catch (err) {
+  output({ ok: false, error: (err as Error).message });
+  process.exit(1);
 }

@@ -11,7 +11,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
-import { WATCHER_CONFIG, TMUX_SOCK } from "./config.js";
+import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 
 interface ToolEntry {
   id: string;
@@ -28,9 +28,7 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
-  tmuxChecker: ReturnType<typeof setInterval> | null;
   workerName: string;
-  onIdle?: () => void;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -42,7 +40,7 @@ const HIDDEN_TOOLS = new Set([
 function isHiddenTool(name: string): boolean {
   if (HIDDEN_TOOLS.has(name)) return true;
   // 只隐藏 Discord 通信相关的 MCP 工具
-  if (name.startsWith("mcp__discord-bridge__")) return true;
+  if (name.startsWith(MCP_TOOL_PREFIX)) return true;
   if (name.startsWith("mcp__plugin_discord_discord__")) return true;
   return false;
 }
@@ -115,8 +113,8 @@ async function flushText(state: WatcherState, discord: Client) {
       }
     }
     if (buf) await ch.send(buf);
-    // 只重置 toolMsgId（后续 tool 会发新消息），不清空 tools（tool_result 还需要匹配）
     state.toolMsgId = null;
+    state.tools = state.tools.filter(t => !t.done);
   } catch { /* non-critical */ }
 }
 
@@ -127,7 +125,7 @@ function getJsonlPath(cwd: string, sessionId: string): string {
 
 export async function startWatching(
   workerName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client, onIdle?: () => void
+  channelId: string, discord: Client
 ) {
   stopWatching(workerName);
   const jsonlPath = getJsonlPath(cwd, sessionId);
@@ -142,9 +140,7 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
-    tmuxChecker: null,
     workerName,
-    onIdle,
   };
 
   // 处理新增的 JSONL 数据（加锁防止并发重复处理）
@@ -224,7 +220,7 @@ export async function startWatching(
         state.textTimer = setTimeout(() => flushText(state, discord), WATCHER_CONFIG.debounceMs);
       }
     } catch { /* non-critical */ }
-    processing = false;
+    finally { processing = false; }
   };
 
   // fs.watch 主监听
@@ -235,31 +231,7 @@ export async function startWatching(
   // 2 秒轮询兜底（macOS fs.watch 偶尔丢事件）
   const pollInterval = setInterval(processNewData, 2000);
 
-  // tmux 屏幕比较法：连续 3 次截取相同 = 空闲
-  let lastCapture = "";
-  let sameCount = 0;
-  state.tmuxChecker = setInterval(async () => {
-    if (!state.onIdle) return;
-    try {
-      const target = `master:${state.workerName}`;
-      const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, "capture-pane", "-t", target, "-p"], {
-        stdout: "pipe", stderr: "pipe",
-      });
-      const capture = await new Response(proc.stdout).text();
-      await proc.exited;
-      if (capture === lastCapture) {
-        sameCount++;
-        if (sameCount >= 3) {
-          state.onIdle();
-          sameCount = 0;
-          lastCapture = "";
-        }
-      } else {
-        sameCount = 0;
-        lastCapture = capture;
-      }
-    } catch { /* non-critical */ }
-  }, 1000);
+  // 空闲检测由 Claude Code hooks (Stop/Notification) 处理，不再用 tmux 屏幕比较
 
   watchers.set(workerName, { ...state, _pollInterval: pollInterval } as any);
   console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
@@ -270,10 +242,20 @@ export function stopWatching(workerName: string) {
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
-    if (state.tmuxChecker) clearInterval(state.tmuxChecker);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
     watchers.delete(workerName);
   }
+}
+
+/** 根据 channelId 查找并停止 watcher（websocket 断开时兜底用） */
+export function stopWatchingByChannel(channelId: string): boolean {
+  for (const [workerName, state] of watchers.entries()) {
+    if (state.channelId === channelId) {
+      stopWatching(workerName);
+      return true;
+    }
+  }
+  return false;
 }
 
 /** 重置 tool 追踪（新一轮对话开始时调用） */

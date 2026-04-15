@@ -5,9 +5,19 @@
  * 如果 session 死了自动重启。
  */
 
-const SOCK = "/tmp/claude-orchestrator/master.sock";
-const SESSION_NAME = "master";
-const MASTER_DIR = `${process.env.HOME}/repos/claude-orchestrator/master`;
+import {
+  tmuxRaw,
+  masterSessionExists,
+  ensureSocketDir,
+  isIdle as tmuxIsIdle,
+  tmuxCapture,
+  tmuxSendLine,
+  MASTER_SESSION as SESSION_NAME,
+} from "./lib/tmux-helper.js";
+import { buildClaudeCommand } from "./lib/claude-launch.js";
+
+// 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
+const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
@@ -17,47 +27,36 @@ if (!CONTROL_CHANNEL_ID) {
   process.exit(1);
 }
 
-async function tmux(...args: string[]): Promise<string> {
-  const proc = Bun.spawn(["tmux", "-S", SOCK, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out.trim();
-}
-
-async function sessionExists(): Promise<boolean> {
-  const out = await tmux("list-sessions", "-F", "#{session_name}");
-  return out.split("\n").includes(SESSION_NAME);
-}
-
 const MASTER_WINDOW = `${SESSION_NAME}:0`;
 
+async function sessionExists(): Promise<boolean> {
+  return masterSessionExists();
+}
+
 async function isIdle(): Promise<boolean> {
-  const tail = await tmux("capture-pane", "-t", MASTER_WINDOW, "-p");
-  return /❯/.test(tail.split("\n").slice(-5).join("\n"));
+  return tmuxIsIdle(MASTER_WINDOW);
 }
 
 async function captureLast(lines = 10): Promise<string> {
-  return tmux("capture-pane", "-t", MASTER_WINDOW, "-p", "-J", "-S", `-${lines}`);
+  return tmuxCapture(MASTER_WINDOW, lines);
 }
 
 async function startMaster() {
   console.log("🚀 启动大总管 session...");
 
   // 确保 socket 目录存在
-  await Bun.spawn(["mkdir", "-p", "/tmp/claude-orchestrator"]).exited;
+  await ensureSocketDir();
 
   // 创建 tmux session
-  await tmux("new-session", "-d", "-s", SESSION_NAME, "-c", MASTER_DIR);
+  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-c", MASTER_DIR]);
   await Bun.sleep(500);
 
-  // 启动 Claude Code
-  const cmd = `DISCORD_CHANNEL_ID=${CONTROL_CHANNEL_ID} BRIDGE_URL=${BRIDGE_URL} claude --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
-  await tmux("send-keys", "-t", MASTER_WINDOW, "-l", "--", cmd);
-  await Bun.sleep(100);
-  await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
+  // 启动 Claude Code（用统一的命令构造器）
+  const cmd = buildClaudeCommand({
+    channelId: CONTROL_CHANNEL_ID,
+    bridgeUrl: BRIDGE_URL,
+  });
+  await tmuxSendLine(MASTER_WINDOW, cmd);
 
   // 等待并自动确认各种提示（dev channel、trust、etc）
   for (let i = 0; i < 60; i++) {
@@ -78,7 +77,7 @@ async function startMaster() {
       pane.includes("trust the files") ||
       (pane.includes("❯ 1.") && pane.includes("Yes"))
     ) {
-      await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
+      await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
       continue;
     }
   }
@@ -93,7 +92,6 @@ async function startMaster() {
 
 async function main() {
   console.log(`📡 Launcher 启动`);
-  console.log(`   tmux socket: ${SOCK}`);
   console.log(`   session: ${SESSION_NAME}`);
   console.log(`   control channel: ${CONTROL_CHANNEL_ID}`);
   console.log(`   检查间隔: ${CHECK_INTERVAL_MS / 1000}s`);
@@ -125,18 +123,18 @@ async function main() {
       (pane.includes("❯ 1.") && pane.includes("Yes"))
     ) {
       console.log("⚠️ 大总管卡在确认弹窗，自动确认...");
-      await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
+      await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
     }
 
     // 检查 Claude Code 是否还活着（不是退回了 shell）
     const atShell = /[%$]\s*$/.test(pane.split("\n").filter((l) => l.trim()).pop() || "");
     if (atShell) {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
-      // 直接在现有 window 里重新启动
-      const cmd = `DISCORD_CHANNEL_ID=${CONTROL_CHANNEL_ID} BRIDGE_URL=${BRIDGE_URL} claude --dangerously-load-development-channels server:discord-bridge --dangerously-skip-permissions`;
-      await tmux("send-keys", "-t", MASTER_WINDOW, "-l", "--", cmd);
-      await Bun.sleep(100);
-      await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
+      const cmd = buildClaudeCommand({
+        channelId: CONTROL_CHANNEL_ID,
+        bridgeUrl: BRIDGE_URL,
+      });
+      await tmuxSendLine(MASTER_WINDOW, cmd);
       // 等待确认
       for (let i = 0; i < 60; i++) {
         await Bun.sleep(1000);
@@ -152,7 +150,7 @@ async function main() {
           p.includes("Do you trust") ||
           (p.includes("❯ 1.") && p.includes("Yes"))
         ) {
-          await tmux("send-keys", "-t", MASTER_WINDOW, "Enter");
+          await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
         }
       }
     }

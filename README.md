@@ -1,158 +1,210 @@
-# Claude Orchestrator
+# Claudestra
 
-从手机 Discord 管理多个本地 Claude Code session。在 Mac 前用终端，离开时用手机，无缝切换。
+**English** · [简体中文](./README.zh-CN.md)
 
-## 它解决什么问题
+> Manage multiple local Claude Code sessions from Discord.
 
-Claude Code 是一个终端工具——你得坐在电脑前才能用。Claude Orchestrator 让你可以：
+Claudestra lets you run Claude Code on your workstation and drive it from anywhere — phone, tablet, or another machine — through Discord. Each session lives in tmux, so the moment you're back at your desk you can attach and keep going in the same process.
 
-- 在手机 Discord 上跟任意 Claude Code session 对话
-- 同时管理多个 session（每个有独立 Discord 频道）
-- 回到 Mac 时在 iTerm2 里直接继续（同一个进程）
-- 实时看到 Claude 在做什么（tool use 流式推送）
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
+[![Claude Code](https://img.shields.io/badge/requires-claude--code_2.1.80%2B-d97757.svg)](https://claude.com/claude-code)
 
-## 架构
+---
+
+## Why
+
+Claude Code is a terminal-only tool: if you aren't at your computer, you aren't using it. Claudestra puts a persistent Discord front door in front of your local sessions so you can:
+
+- Chat with any active Claude Code session from your phone.
+- Run several sessions in parallel — one Discord channel per session.
+- Return to your desk and attach to the **same** running process via `tmux`.
+- Watch tool calls stream in real time (Read / Edit / Bash / Grep).
+- Schedule recurring tasks that spin up a temporary agent and report back.
+
+## How it works
 
 ```
-你的手机 (Discord)
-    ↕
-Discord Bot（一个 token，多个频道）
-    ↕
-Bridge（Bun 进程，pm2 管理）
-    ↕ WebSocket
-    ├── channel-server ↔ Claude Code (session A)
-    ├── channel-server ↔ Claude Code (session B)  ← 每个是 tmux 里的一个 window
-    └── channel-server ↔ Claude Code (session C)
-    ↕ JSONL Watcher
-    └── 监听 session 文件，tool use 实时推到 Discord
+ Your phone (Discord)
+        │
+        ▼
+ Discord Bot  ──  one token, many channels
+        │
+        ▼
+ Bridge (Bun, pm2)            ws://localhost:3847
+        │
+        │  WebSocket  ├──  channel-server ◄─► Claude Code (session A)
+        │             ├──  channel-server ◄─► Claude Code (session B)
+        │             └──  channel-server ◄─► Claude Code (session C)
+        │
+        │  JSONL watcher
+        └──  tails each session file and pushes tool calls to Discord
 
-你的 Mac (iTerm2)
-    ↕ tmux -CC attach
-    └── 看到所有 session 的终端，直接打字交互
+ Your Mac (iTerm2)
+        │  tmux -CC attach
+        └──  every session shows up as a native tab
 ```
 
-**关键设计**：基于 Claude Code 原生 Channel 协议（MCP），不是屏幕截取。Bridge 解决了官方插件一个 token 只能绑一个 session 的限制。
+Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than scraping terminal output. The Bridge process acts as a fan-out layer that routes Discord messages to the correct `channel-server` instance, working around the official plugin's one-token-one-session limitation.
 
-## 前置要求
+## Features
 
-- macOS + [Bun](https://bun.sh) + [tmux](https://github.com/tmux/tmux)
-- [Claude Code](https://claude.ai/claude-code) v2.1.80+（需要 Channel 支持）
-- Discord Bot（[创建指南](https://discord.com/developers/applications)）
-- [pm2](https://pm2.io) 进程管理
+- **Multi-agent orchestration** — create, resume, kill, restart, list, and browse session history.
+- **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
+- **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
+- **Interactive Discord UI** — buttons, select menus, slash commands (`/status`, `/screenshot`, `/interrupt`, `/cron`).
+- **LLM-free management** — state/kill/restart/cron buttons execute directly on the Bridge, zero-token overhead and near-instant response.
+- **Streaming tool output** — JSONL watcher pushes `Read · Edit · Write · Bash · Grep` calls to Discord as they happen.
+- **Terminal screenshots** — ANSI-to-PNG rendering so you can peek at any session even with the screen locked.
+- **One-click interrupt** — a button in Discord sends `Ctrl+C` to the target session.
+- **Idle detection** — Claude Code `Stop` / `Notification` hooks drive Discord typing indicators precisely.
+- **Self-updating** — `bun src/manager.ts update` does `git pull` + `pm2 restart all` via natural language in Discord.
+- **Safety rails** — `--disallowedTools` blocks `rm -rf`, `git push --force`, `chmod 777`, and other destructive commands.
 
-## 安装
+## Requirements
+
+| Tool | Minimum | Install |
+|------|---------|---------|
+| macOS or Linux | — | — |
+| [Bun](https://bun.sh) | 1.x | `curl -fsSL https://bun.sh/install \| bash` |
+| [tmux](https://github.com/tmux/tmux) | 3.x | `brew install tmux` |
+| [pm2](https://pm2.keymetrics.io/) | 5.x | `npm install -g pm2` |
+| [Claude Code](https://claude.com/claude-code) | 2.1.80+ | `npm install -g @anthropic-ai/claude-code` |
+| Discord Bot | — | [Developer Portal](https://discord.com/developers/applications) |
+
+## Installation
+
+### One-liner
 
 ```bash
-git clone <repo-url> ~/repos/claude-orchestrator
-cd ~/repos/claude-orchestrator
+curl -fsSL https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh | bash
+```
+
+The installer checks prerequisites, clones the repository, and runs `bun install` + `playwright install`. Afterwards, run the interactive setup wizard:
+
+```bash
+cd ~/repos/claudestra
+bun run setup
+```
+
+### Manual
+
+```bash
+git clone https://github.com/shawnlu96/claudestra.git ~/repos/claudestra
+cd ~/repos/claudestra
 bun install
-
-# 安装 Playwright 浏览器（用于终端截图渲染）
 npx playwright install chromium
-
-# 安装 Claude Code Discord channel 插件
-claude plugin install discord@claude-plugins-official
+bun run setup
 ```
 
-## 配置
+For a step-by-step walkthrough — creating a Discord application, enabling privileged intents, collecting IDs — see **[SETUP.md](./SETUP.md)**.
+
+## Daily use
+
+### From Discord (phone)
+
+In your control channel:
+
+| Command | What it does |
+|---------|--------------|
+| `/status` | List every agent and its state |
+| `/screenshot` | Render the current channel's terminal as PNG |
+| `/interrupt` | Send `Ctrl+C` to the current agent |
+| `/cron` | Open the cron-job management panel |
+
+In any agent channel, just type — your message goes straight to that Claude Code session. Tool calls stream back as they execute.
+
+### From your terminal
 
 ```bash
-cp .env.example .env
-# 编辑 .env，填入：
-# DISCORD_BOT_TOKEN=你的bot-token
-# DISCORD_GUILD_ID=你的server-id
-# ALLOWED_USER_IDS=你的discord-user-id
-# BRIDGE_PORT=3847
-# CONTROL_CHANNEL_ID=control频道id
-```
-
-Discord Bot 需要以下权限：
-- Send Messages, Manage Channels, Read Message History
-- Privileged Intents: Message Content, Server Members, Presence
-
-将 channel-server 注册为全局 MCP server：
-```bash
-claude mcp add discord-bridge -s user -- bun run ~/repos/claude-orchestrator/src/channel-server.ts
-```
-
-## 启动
-
-```bash
-# 启动 Bridge + 大总管守护
-pm2 start ecosystem.config.cjs
-pm2 save
-
-# 开机自启（首次需要）
-pm2 startup
-```
-
-## 使用
-
-### 手机 Discord
-
-在 `#agent-大总管` 频道：
-- 发消息或点按钮管理 agent
-- `/status` — 查看所有 agent 状态
-- `/screenshot` — 截取当前频道 agent 的终端
-- `/interrupt` — 打断当前 agent
-
-在 agent 频道（如 `#orchestrator`）：
-- 直接发消息跟 Claude Code 对话
-- 实时看到 tool use 流式输出
-
-### Mac 终端
-
-```bash
-# 连接所有 session（iTerm2 原生 tab）
+# Attach with iTerm2 native tabs
 tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 
-# 或普通模式（Ctrl+B, S 切换 session）
+# Or plain tmux
 tmux -S /tmp/claude-orchestrator/master.sock attach
 ```
 
-### Agent 管理 CLI
+Every agent is a window inside the `master` session. Switch with `Ctrl-B n/p` or click the iTerm2 tab.
+
+### CLI reference
 
 ```bash
-bun src/manager.ts create <name> <dir> [purpose]    # 新建 agent
-bun src/manager.ts resume <name> <sessionId> [dir]   # 恢复历史会话
-bun src/manager.ts kill <name>                        # 销毁 agent
-bun src/manager.ts restart [name]                     # 重启 agent
-bun src/manager.ts list                               # 列出所有 agent
-bun src/manager.ts sessions [search]                  # 浏览历史会话
+# Agent lifecycle
+bun src/manager.ts create   <name> <dir> [purpose]
+bun src/manager.ts resume   <name> <sessionId> [dir]
+bun src/manager.ts kill     <name>
+bun src/manager.ts restart  [name]
+bun src/manager.ts list
+bun src/manager.ts sessions [search]
+
+# Cron jobs
+bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>
+bun src/manager.ts cron-list
+bun src/manager.ts cron-remove  <name|id>
+bun src/manager.ts cron-toggle  <name|id>
+bun src/manager.ts cron-history [name|id]
+
+# Versioning
+bun src/manager.ts version   # show current version and whether an update is available
+bun src/manager.ts update    # git pull && pm2 restart all
 ```
 
-## 项目结构
+## Configuration
+
+All runtime configuration lives in `.env` (created by `bun run setup`).
+
+| Variable | Purpose |
+|----------|---------|
+| `DISCORD_BOT_TOKEN` | Your Discord bot token |
+| `DISCORD_GUILD_ID` | Discord server (guild) ID |
+| `ALLOWED_USER_IDS` | Comma-separated list of Discord user IDs allowed to talk to the bot |
+| `CONTROL_CHANNEL_ID` | Channel ID of your control (master) channel |
+| `BRIDGE_PORT` | WebSocket port (default `3847`) |
+| `USER_NAME` | How the master agent addresses you in replies |
+| `MCP_NAME` | MCP server name used by `claude mcp add` (default `claudestra`) |
+
+## Project layout
 
 ```
 src/
-  bridge.ts              Discord 网关 + WebSocket 路由 + 事件处理
+  bridge.ts              Discord gateway + WebSocket router + event dispatcher
   bridge/
-    config.ts            共享配置
-    components.ts        Discord UI 组件 + typing indicator
-    discord-api.ts       Discord API 操作
-    management.ts        管理按钮处理（跳过 LLM）
-    screenshot.ts        终端截图（ANSI → HTML → PNG）
-    jsonl-watcher.ts     JSONL 监听 → tool use 实时推送
-  channel-server.ts      MCP channel 代理
-  manager.ts             Agent 生命周期 CLI
-  launcher.ts            大总管 tmux 守护
+    config.ts            Shared runtime constants
+    components.ts        Discord UI components + typing indicators
+    discord-api.ts       Discord API wrappers
+    management.ts        Direct-execution handlers for admin buttons
+    screenshot.ts        Terminal screenshot (ANSI → HTML → PNG)
+    jsonl-watcher.ts     JSONL session tailer → streaming tool calls
+  channel-server.ts      Per-agent MCP proxy (one per Claude Code process)
+  manager.ts             Agent lifecycle + cron + version/update CLI
+  cron.ts                Cron scheduler daemon (pm2-managed)
+  launcher.ts            Master tmux session guardian (pm2-managed)
+  setup.ts               Interactive installation wizard
+  hooks/
+    typing-hook.ts       Claude Code Stop/Notification hook → typing indicator
   lib/
-    bridge-client.ts     Bridge WebSocket 请求工具
-  ansi2html.ts           ANSI → HTML
-  html2png.ts            HTML → PNG (Playwright)
-  discord-reply.ts       Bash fallback 回复工具
+    bridge-client.ts     Shared WebSocket request helper
+    tmux-helper.ts       Shared tmux command wrappers
+    claude-launch.ts     Unified Claude Code launch-command builder
+  ansi2html.ts           ANSI escape codes → coloured HTML
+  html2png.ts            HTML → PNG (Playwright headless Chromium)
+  discord-reply.ts       Bash fallback for sending messages via Bridge
 master/
-  CLAUDE.md              大总管行为指令
+  CLAUDE.md.template     Master agent behaviour template (rendered by setup)
+tests/
+  cron.test.ts           Cron parser + scheduler tests (46 cases)
+install.sh               One-line installer
+SETUP.md                 Full installation guide
 ```
 
-## 工作原理
+## Contributing
 
-1. **Bridge** 持有唯一的 Discord 网关连接，多个 channel-server 通过 WebSocket 注册各自的频道 ID
-2. Discord 消息到达 → Bridge 路由到对应的 channel-server → MCP notification 推送给 Claude Code
-3. Claude Code 调用 reply MCP tool → channel-server → Bridge → Discord 回复
-4. JSONL watcher 监听 session 文件，tool use 事件实时转发到 Discord（补充 reply 的正式回复）
-5. 管理按钮（状态、监工、销毁、重启）直接由 Bridge 执行 manager.ts，不经过 LLM
+Issues and pull requests welcome. The core idea is simple; the hard parts are edge cases in tmux, Discord rate limits, and Claude Code channel lifecycle. Before submitting a PR:
+
+1. `bun test` — keep the cron test suite green.
+2. `bun build src/bridge.ts --target=bun` (and the same for each entry point) — catches most type issues fast.
+3. Test the actual user flow end-to-end in a sandbox Discord server.
 
 ## License
 
-MIT
+[MIT](./LICENSE)

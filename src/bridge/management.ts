@@ -3,7 +3,7 @@
  */
 
 import { TextChannel, type Client } from "discord.js";
-import { MANAGER_PATH, TMUX_SOCK, ENV_WITH_BUN } from "./config.js";
+import { MANAGER_PATH, ENV_WITH_BUN } from "./config.js";
 import { typingIntervals } from "./components.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -49,6 +49,12 @@ export async function buildStatusPanel(): Promise<{
               label: "新建 Agent",
               emoji: "➕",
               style: "success",
+            },
+            {
+              id: "show_cron_menu",
+              label: "定时任务",
+              emoji: "⏰",
+              style: "secondary",
             },
           ],
         },
@@ -110,6 +116,12 @@ export async function buildStatusPanel(): Promise<{
       label: "新建 Agent",
       emoji: "➕",
       style: "success",
+    },
+    {
+      id: "show_cron_menu",
+      label: "定时任务",
+      emoji: "⏰",
+      style: "secondary",
     },
   ];
   return {
@@ -223,6 +235,111 @@ export async function handleMgmtButton(
     };
   }
 
+  if (id === "show_cron_menu") {
+    const result = await runManager("cron-list");
+    if (!result.ok) return { text: `❌ ${result.error}` };
+    const jobs = result.jobs || [];
+    if (jobs.length === 0) {
+      return {
+        text: "📭 没有定时任务。\n\n通过大总管或命令行添加：\n`bun src/manager.ts cron-add <名称> \"<cron>\" <目录> <指令>`",
+        components: [{
+          type: "buttons",
+          buttons: [
+            { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
+          ],
+        }],
+      };
+    }
+    const lines = jobs.map((j: any) => {
+      const status = j.enabled ? "✅" : "⏸";
+      const next = j.nextRun ? new Date(j.nextRun).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+      const last = j.lastRun ? new Date(j.lastRun).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "从未";
+      return `${status} **${j.name}** — \`${j.schedule}\`\n📁 \`${j.dir}\`\n💬 ${j.prompt}\n-# 上次: ${last} · 下次: ${next}`;
+    });
+
+    const components: any[] = [];
+
+    // 启用/暂停下拉菜单
+    if (jobs.length > 0) {
+      components.push({
+        type: "select",
+        id: "cron_toggle",
+        placeholder: "⏯ 启用/暂停任务",
+        options: jobs.map((j: any) => ({
+          label: `${j.enabled ? "⏸ 暂停" : "▶ 启用"} ${j.name}`,
+          value: j.name,
+          description: j.schedule,
+        })),
+      });
+    }
+
+    // 删除下拉菜单
+    if (jobs.length > 0) {
+      components.push({
+        type: "select",
+        id: "cron_remove",
+        placeholder: "🗑 删除任务",
+        options: jobs.map((j: any) => ({
+          label: j.name,
+          value: j.name,
+          description: j.schedule,
+        })),
+      });
+    }
+
+    // 底部按钮
+    components.push({
+      type: "buttons",
+      buttons: [
+        { id: "cron_history", label: "执行历史", emoji: "📜", style: "secondary" },
+        { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
+      ],
+    });
+
+    return {
+      text: "**⏰ 定时任务**\n\n" + lines.join("\n\n"),
+      components,
+    };
+  }
+
+  if (id === "cron_history") {
+    const result = await runManager("cron-history");
+    if (!result.ok) return { text: `❌ ${result.error}` };
+    const records = result.records || [];
+    if (records.length === 0) {
+      return {
+        text: "📭 没有执行记录。",
+        components: [{
+          type: "buttons",
+          buttons: [
+            { id: "show_cron_menu", label: "定时任务", emoji: "⏰", style: "primary" },
+          ],
+        }],
+      };
+    }
+    const statusEmoji: Record<string, string> = {
+      success: "✅", error: "❌", timeout: "⏰", running: "🔵",
+    };
+    const lines = records.slice(0, 10).map((r: any) => {
+      const e = statusEmoji[r.status] || "❓";
+      const time = new Date(r.startedAt).toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai", hour12: false,
+        month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      });
+      return `${e} **${r.jobName}** — ${time}${r.error ? `\n-# ${r.error.slice(0, 100)}` : ""}`;
+    });
+    return {
+      text: "**📜 执行历史**（最近 10 条）\n\n" + lines.join("\n\n"),
+      components: [{
+        type: "buttons",
+        buttons: [
+          { id: "show_cron_menu", label: "定时任务", emoji: "⏰", style: "primary" },
+          { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "secondary" },
+        ],
+      }],
+    };
+  }
+
   if (id === "browse_sessions") {
     const result = await runManager("sessions");
     if (!result.ok) return { text: `❌ ${result.error}` };
@@ -289,6 +406,35 @@ export async function handleMgmtSelect(
           ],
         },
       ],
+    };
+  }
+
+  if (id === "cron_toggle") {
+    const result = await runManager("cron-toggle", value);
+    if (!result.ok) return { text: `❌ ${result.error}` };
+    const emoji = result.enabled ? "▶" : "⏸";
+    return {
+      text: `${emoji} 定时任务 **${result.name}** 已${result.enabled ? "启用" : "暂停"}`,
+      components: [{
+        type: "buttons",
+        buttons: [
+          { id: "show_cron_menu", label: "定时任务", emoji: "⏰", style: "primary" },
+        ],
+      }],
+    };
+  }
+
+  if (id === "cron_remove") {
+    const result = await runManager("cron-remove", value);
+    if (!result.ok) return { text: `❌ ${result.error}` };
+    return {
+      text: `🗑 定时任务 **${result.removed}** 已删除`,
+      components: [{
+        type: "buttons",
+        buttons: [
+          { id: "show_cron_menu", label: "定时任务", emoji: "⏰", style: "primary" },
+        ],
+      }],
     };
   }
 

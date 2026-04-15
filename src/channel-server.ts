@@ -24,6 +24,9 @@ import {
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || "";
+const MCP_NAME = process.env.MCP_NAME || "claudestra";
+const CLAUDESTRA_HOME =
+  process.env.CLAUDESTRA_HOME || `${import.meta.dir}/..`;
 
 if (!CHANNEL_ID) {
   console.error("❌ 请设置 DISCORD_CHANNEL_ID 环境变量");
@@ -41,6 +44,8 @@ const pendingRequests = new Map<
   { resolve: (v: any) => void; reject: (e: Error) => void }
 >();
 let requestCounter = 0;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY_MS = 60_000;
 
 function connectBridge(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -48,6 +53,7 @@ function connectBridge(): Promise<void> {
 
     ws.onopen = () => {
       bridgeWs = ws;
+      reconnectAttempts = 0;
       // 注册频道
       ws.send(
         JSON.stringify({
@@ -100,10 +106,20 @@ function connectBridge(): Promise<void> {
     ws.onclose = () => {
       bridgeWs = null;
       registered = false;
-      // 自动重连
+      // 断开时清理所有未完成请求，避免泄漏
+      for (const [id, pending] of pendingRequests.entries()) {
+        pending.reject(new Error("Bridge 连接断开"));
+        pendingRequests.delete(id);
+      }
+      // 指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
+      reconnectAttempts++;
+      const delay = Math.min(
+        3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)),
+        MAX_RECONNECT_DELAY_MS
+      );
       setTimeout(() => {
         connectBridge().catch(() => {});
-      }, 3000);
+      }, delay);
     };
   });
 }
@@ -117,14 +133,20 @@ function bridgeRequest(msg: any): Promise<any> {
     const requestId = `req_${++requestCounter}`;
     msg.requestId = requestId;
     pendingRequests.set(requestId, { resolve, reject });
-    bridgeWs.send(JSON.stringify(msg));
-    // 超时
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       if (pendingRequests.has(requestId)) {
         pendingRequests.delete(requestId);
         reject(new Error("Bridge 请求超时"));
       }
     }, 30000);
+    try {
+      bridgeWs.send(JSON.stringify(msg));
+    } catch (err) {
+      // send 失败时同样清理，防止泄漏
+      clearTimeout(timer);
+      pendingRequests.delete(requestId);
+      reject(err as Error);
+    }
   });
 }
 
@@ -133,7 +155,7 @@ function bridgeRequest(msg: any): Promise<any> {
 // ============================================================
 
 const mcp = new Server(
-  { name: "discord-bridge", version: "1.0.0" },
+  { name: MCP_NAME, version: "1.0.0" },
   {
     capabilities: {
       tools: {},
@@ -145,7 +167,7 @@ const mcp = new Server(
 
 Reply rules:
 - Use the "reply" tool with chat_id from the <channel> tag.
-- If reply tool unavailable, use: bun /Users/shawn/repos/claude-orchestrator/src/discord-reply.ts "<chat_id>" "<text>"
+- If reply tool unavailable, use: bun ${CLAUDESTRA_HOME}/src/discord-reply.ts "<chat_id>" "<text>"
 - Never use markdown tables (Discord doesn't support them). Use bullet lists.
 - Keep lines under 60 chars in code blocks. Max 2000 chars per message.
 - Be concise — user is reading on a small screen.
@@ -251,6 +273,38 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
         required: ["chat_id", "message_id", "text"],
       },
     },
+    {
+      name: "send_to_agent",
+      description: `Send a message to another agent by worker name. Use this for agent-to-agent collaboration.
+
+IMPORTANT — 主动汇报义务（必读）：
+1. 发完消息后，你 **必须** 用 fetch_messages 轮询 targetChannelId 拿对方的回复（首次 sleep 10-15s，之后每 10s 一次，最多 5 次）。
+2. 拿到回复后，**必须** 用 reply 工具把"你对谁说了什么 + 对方的回复摘要"汇报给用户。用户不会自己去别的频道查。
+3. 如果对方超过 1 分钟没回复，也要用 reply 告诉用户"对方暂时没响应"，不要静默。
+4. 如果对方回复中又让你做别的事，按正常流程执行。
+
+收到 inter-agent 消息时（格式为 "[🤖 来自 xxx] ..."）：
+- 按对方的请求正常处理并用 reply 回到自己的频道
+- 同时用户也会看到这次互动，所以要清晰表明是在回应 xxx 的请求
+
+Examples:
+- send_to_agent({ target: "predict", text: "帮我分析 ~/data/sales.csv，返回摘要" })
+- send_to_agent({ target: "worker-researcher", text: "X 的调研结果如何？" })`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          target: {
+            type: "string",
+            description: "Target agent name, e.g. 'predict' or 'worker-predict'",
+          },
+          text: {
+            type: "string",
+            description: "Message text to send",
+          },
+        },
+        required: ["target", "text"],
+      },
+    },
   ],
 }));
 
@@ -310,6 +364,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       });
       return {
         content: [{ type: "text" as const, text: "Message edited." }],
+      };
+    }
+
+    case "send_to_agent": {
+      const result = await bridgeRequest({
+        type: "route_to_agent",
+        targetName: args?.target || "",
+        text: args?.text || "",
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `消息已发送给 ${result.targetName}。如需获取回复，可用 fetch_messages 轮询频道 ${result.targetChannelId}`,
+          },
+        ],
       };
     }
 
