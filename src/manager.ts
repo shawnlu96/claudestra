@@ -703,9 +703,13 @@ async function startClaudeInWindow(
     }
   }
 
-  // 最后检查一次
-  const final = await captureLast(name, 5);
-  return /❯/.test(final.split("\n").slice(-5).join("\n"));
+  // 最后再捕一次，用严格条件：必须同时有 "❯" 和 "bypass permissions" 才算 ready。
+  // 只检 "❯" 会被"❯ 1. I am using this for local development"这类选项菜单
+  // 里的游标字符误判为 shell 提示符，导致卡在对话框还返回成功。
+  const final = await captureLast(name, 10);
+  const hasReadyPrompt = /❯/.test(final.split("\n").slice(-5).join("\n"));
+  const hasBypassBanner = final.includes("bypass permissions");
+  return hasReadyPrompt && hasBypassBanner;
 }
 
 async function cmdRestart(name?: string) {
