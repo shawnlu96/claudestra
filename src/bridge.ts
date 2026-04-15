@@ -559,7 +559,16 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "register": {
       const old = clients.get(msg.channelId);
       if (old && old.ws !== ws) {
-        console.log(`🔄 频道 ${msg.channelId} 重新注册`);
+        console.log(`🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接`);
+        // 主动关闭旧的 ws：发送 "replaced" 通知 + close(1000)。
+        // 旧 channel-server 收到 close code 1000 后会知道是被取代而非异常，
+        // 不会自动重连，直接 exit。这样彻底消除重复注册的 orphan ws。
+        try {
+          old.ws.send(JSON.stringify({ type: "replaced", reason: "channel re-registered" }));
+        } catch { /* non-critical */ }
+        try {
+          old.ws.close(1000, "replaced by newer registration");
+        } catch { /* non-critical */ }
       }
       clients.set(msg.channelId, { ws, channelId: msg.channelId, userId: msg.userId });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);

@@ -39,6 +39,7 @@ if (!CHANNEL_ID) {
 
 let bridgeWs: WebSocket | null = null;
 let registered = false;
+let replaced = false; // bridge 通知此 channel-server 被新连接取代，跳过重连直接退出
 const pendingRequests = new Map<
   string,
   { resolve: (v: any) => void; reject: (e: Error) => void }
@@ -96,6 +97,17 @@ function connectBridge(): Promise<void> {
         handleInboundMessage(msg.content, msg.meta);
         return;
       }
+
+      if (msg.type === "replaced") {
+        // bridge 通知我们已经被新的 channel-server 取代
+        // 这是 claude 同时通过两个 MCP 注册 spawn 双份的情况
+        // 标记为 replaced，下面的 onclose 就不会重连
+        replaced = true;
+        console.error(
+          `❎ 被新连接取代 (${msg.reason || "unknown"})，channel-server 退出`
+        );
+        return;
+      }
     };
 
     ws.onerror = (err) => {
@@ -103,7 +115,7 @@ function connectBridge(): Promise<void> {
       if (!registered) reject(err);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       bridgeWs = null;
       registered = false;
       // 断开时清理所有未完成请求，避免泄漏
@@ -111,7 +123,14 @@ function connectBridge(): Promise<void> {
         pending.reject(new Error("Bridge 连接断开"));
         pendingRequests.delete(id);
       }
-      // 指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
+
+      // 被 bridge 主动关闭（code 1000 + replaced 标记）→ 直接退出，不重连
+      if (replaced || event?.code === 1000) {
+        console.error("👋 channel-server 退出（被 bridge 主动取代）");
+        process.exit(0);
+      }
+
+      // 否则正常的指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
       reconnectAttempts++;
       const delay = Math.min(
         3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)),
