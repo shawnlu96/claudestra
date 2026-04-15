@@ -33,7 +33,14 @@ import {
   listWorkerWindows as listWorkerWindowsShared,
   ensureSocketDir,
 } from "./lib/tmux-helper.js";
-import { buildClaudeCommand } from "./lib/claude-launch.js";
+import {
+  buildClaudeCommand,
+  resolveDisallowed,
+  listPresets,
+  isKnownPreset,
+  DISALLOWED_PRESETS,
+  DEFAULT_PRESET,
+} from "./lib/claude-launch.js";
 
 const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
@@ -53,6 +60,10 @@ interface WorkerInfo {
   sessionId?: string;
   cwd: string;
   displayName?: string;
+  /** 权限预设名（default/strict/readonly/paranoid/自定义） */
+  disallowedPreset?: string;
+  /** 原始 disallowedTools 字符串。如果设置了，优先于 preset */
+  disallowedRaw?: string;
 }
 
 interface Registry {
@@ -238,14 +249,58 @@ function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
 }
 
+/**
+ * 从 argv 残余里提取 --preset <name> 和 --disallowed "<raw>"，
+ * 返回剩余的位置参数。支持 --preset=foo / --disallowed=foo 两种写法。
+ */
+function extractPermFlags(args: string[]): {
+  rest: string[];
+  preset?: string;
+  disallowedRaw?: string;
+} {
+  const rest: string[] = [];
+  let preset: string | undefined;
+  let disallowedRaw: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--preset") {
+      preset = args[++i];
+    } else if (a.startsWith("--preset=")) {
+      preset = a.slice("--preset=".length);
+    } else if (a === "--disallowed") {
+      disallowedRaw = args[++i];
+    } else if (a.startsWith("--disallowed=")) {
+      disallowedRaw = a.slice("--disallowed=".length);
+    } else {
+      rest.push(a);
+    }
+  }
+  return { rest, preset, disallowedRaw };
+}
+
 // ============================================================
 // 命令实现
 // ============================================================
 
-async function cmdCreate(name: string, dir: string, purpose: string = "") {
+async function cmdCreate(
+  name: string,
+  dir: string,
+  purpose: string = "",
+  perms: { preset?: string; disallowedRaw?: string } = {}
+) {
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(WORKER_PREFIX, "");
+
+  // 校验权限预设
+  if (perms.preset && !isKnownPreset(perms.preset)) {
+    output({
+      ok: false,
+      error: `未知的权限预设: "${perms.preset}"。可用: ${listPresets().join(", ")}`,
+    });
+    return;
+  }
 
   // 检查是否已存在
   if (await windowExists(tmuxName)) {
@@ -276,7 +331,13 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
   // 3. 启动 Claude Code
   const target = windowTarget(tmuxName);
   const sessionId = crypto.randomUUID();
-  const cmd = buildClaudeCommand({ channelId, bridgeUrl: BRIDGE_URL, sessionId });
+  const cmd = buildClaudeCommand({
+    channelId,
+    bridgeUrl: BRIDGE_URL,
+    sessionId,
+    disallowedPreset: perms.preset,
+    disallowedRaw: perms.disallowedRaw,
+  });
   await tmuxSendLine(target, cmd);
 
   // 4. 轮询等待就绪，遇到确认提示自动按 Enter
@@ -306,6 +367,8 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
     notes: "",
     sessionId,
     cwd: expandedDir,
+    disallowedPreset: perms.preset,
+    disallowedRaw: perms.disallowedRaw,
   };
   await saveRegistry(reg);
 
@@ -316,6 +379,7 @@ async function cmdCreate(name: string, dir: string, purpose: string = "") {
     channelName,
     sessionId,
     ready,
+    preset: perms.preset || DEFAULT_PRESET,
     message: ready
       ? `Agent ${tmuxName} 已创建，Discord 频道 #${channelName} 已就绪`
       : `Agent ${tmuxName} 已创建，但 Claude Code 可能还在启动中`,
@@ -327,7 +391,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 async function cmdResume(
   name: string,
   sessionId: string,
-  dir?: string
+  dir?: string,
+  perms: { preset?: string; disallowedRaw?: string } = {}
 ) {
   if (!UUID_RE.test(sessionId)) {
     throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式）`);
@@ -335,6 +400,14 @@ async function cmdResume(
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(WORKER_PREFIX, "");
+
+  if (perms.preset && !isKnownPreset(perms.preset)) {
+    output({
+      ok: false,
+      error: `未知的权限预设: "${perms.preset}"。可用: ${listPresets().join(", ")}`,
+    });
+    return;
+  }
 
   if (await windowExists(tmuxName)) {
     output({ ok: false, error: `${tmuxName} 已存在` });
@@ -381,6 +454,8 @@ async function cmdResume(
     bridgeUrl: BRIDGE_URL,
     resumeId: sessionId,
     displayName,
+    disallowedPreset: perms.preset,
+    disallowedRaw: perms.disallowedRaw,
   });
   await tmuxSendLine(target, cmd);
 
@@ -411,6 +486,8 @@ async function cmdResume(
     sessionId,
     cwd: resolvedDir,
     displayName: channelName,
+    disallowedPreset: perms.preset,
+    disallowedRaw: perms.disallowedRaw,
   };
   await saveRegistry(reg);
 
@@ -677,13 +754,15 @@ async function cmdRestart(name?: string) {
       continue;
     }
 
-    // 2. 重新启动 Claude Code
+    // 2. 重新启动 Claude Code — 沿用 registry 中存储的权限配置
     const displayName = info.displayName || tmuxName.replace(WORKER_PREFIX, "");
     const cmd = buildClaudeCommand({
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
       resumeId: info.sessionId,
       displayName,
+      disallowedPreset: info.disallowedPreset,
+      disallowedRaw: info.disallowedRaw,
     });
 
     const started = await startClaudeInWindow(tmuxName, cmd);
@@ -890,6 +969,169 @@ async function cmdCronHistory(nameOrId?: string) {
 // 版本检查 / 自动更新
 // ============================================================
 
+// ============================================================
+// 权限管理
+// ============================================================
+
+function describePerm(info: WorkerInfo): {
+  preset: string;
+  raw?: string;
+  tools: string[];
+} {
+  if (info.disallowedRaw) {
+    return {
+      preset: "(custom)",
+      raw: info.disallowedRaw,
+      tools: info.disallowedRaw.trim().split(/\s+/).filter(Boolean),
+    };
+  }
+  const preset = info.disallowedPreset || DEFAULT_PRESET;
+  return {
+    preset,
+    tools: [...(DISALLOWED_PRESETS[preset] || [])],
+  };
+}
+
+async function cmdPermissions(sub: string, ...rest: string[]) {
+  if (!sub || sub === "list") {
+    // 列出所有 agent 的权限
+    const reg = await loadRegistry();
+    const rows = Object.entries(reg.workers)
+      .filter(([, info]) => info.status === "active")
+      .map(([name, info]) => {
+        const d = describePerm(info);
+        return { name, preset: d.preset, toolCount: d.tools.length };
+      });
+    output({ ok: true, agents: rows });
+    return;
+  }
+
+  if (sub === "presets") {
+    const presets = listPresets().map((name) => ({
+      name,
+      toolCount: DISALLOWED_PRESETS[name].length,
+      tools: [...DISALLOWED_PRESETS[name]],
+    }));
+    output({ ok: true, presets, default: DEFAULT_PRESET });
+    return;
+  }
+
+  if (sub === "get") {
+    const [name] = rest;
+    if (!name) {
+      output({ ok: false, error: "用法: permissions get <name>" });
+      return;
+    }
+    const tmuxName = normalizeName(name);
+    const reg = await loadRegistry();
+    const info = reg.workers[tmuxName];
+    if (!info) {
+      output({ ok: false, error: `找不到 agent: ${tmuxName}` });
+      return;
+    }
+    const d = describePerm(info);
+    output({
+      ok: true,
+      agent: tmuxName,
+      preset: d.preset,
+      disallowedRaw: d.raw,
+      tools: d.tools,
+    });
+    return;
+  }
+
+  if (sub === "set") {
+    // permissions set <name> --preset <name>
+    // permissions set <name> --disallowed "..."
+    const [name] = rest;
+    if (!name) {
+      output({
+        ok: false,
+        error: '用法: permissions set <name> --preset <preset>｜--disallowed "..."',
+      });
+      return;
+    }
+    const { preset, disallowedRaw } = extractPermFlags(rest.slice(1));
+    if (!preset && !disallowedRaw) {
+      output({
+        ok: false,
+        error: '需要指定 --preset 或 --disallowed。可用 preset: ' + listPresets().join(", "),
+      });
+      return;
+    }
+    if (preset && !isKnownPreset(preset)) {
+      output({
+        ok: false,
+        error: `未知预设: "${preset}"。可用: ${listPresets().join(", ")}`,
+      });
+      return;
+    }
+
+    const tmuxName = normalizeName(name);
+    const reg = await loadRegistry();
+    const info = reg.workers[tmuxName];
+    if (!info) {
+      output({ ok: false, error: `找不到 agent: ${tmuxName}` });
+      return;
+    }
+    info.disallowedPreset = preset;
+    info.disallowedRaw = disallowedRaw;
+    await saveRegistry(reg);
+
+    const d = describePerm(info);
+    output({
+      ok: true,
+      agent: tmuxName,
+      preset: d.preset,
+      disallowedRaw: d.raw,
+      tools: d.tools,
+      hint: `新配置已写入 registry。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(WORKER_PREFIX, "")}`,
+    });
+    return;
+  }
+
+  if (sub === "reset") {
+    const [name] = rest;
+    if (!name) {
+      output({ ok: false, error: "用法: permissions reset <name>" });
+      return;
+    }
+    const tmuxName = normalizeName(name);
+    const reg = await loadRegistry();
+    const info = reg.workers[tmuxName];
+    if (!info) {
+      output({ ok: false, error: `找不到 agent: ${tmuxName}` });
+      return;
+    }
+    info.disallowedPreset = undefined;
+    info.disallowedRaw = undefined;
+    await saveRegistry(reg);
+    output({
+      ok: true,
+      agent: tmuxName,
+      preset: DEFAULT_PRESET,
+      hint: `已重置为默认预设。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(WORKER_PREFIX, "")}`,
+    });
+    return;
+  }
+
+  output({
+    ok: false,
+    error: `未知子命令: permissions ${sub}`,
+    usage: [
+      "permissions list                 — 列出所有 agent 的权限预设",
+      "permissions presets              — 列出所有可用预设及其包含的工具",
+      "permissions get <name>           — 查看单个 agent 的详细权限",
+      'permissions set <name> --preset <preset>｜--disallowed "..."',
+      "permissions reset <name>         — 恢复默认预设",
+    ],
+  });
+}
+
+// ============================================================
+// 版本检查 / 自动更新
+// ============================================================
+
 const REPO_ROOT = `${import.meta.dir}/..`;
 
 async function git(...args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
@@ -1001,22 +1243,30 @@ const [cmd, ...args] = process.argv.slice(2);
 try {
 switch (cmd) {
   case "create": {
-    const [name, dir, ...rest] = args;
+    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(args);
+    const [name, dir, ...purposeParts] = posArgs;
     if (!name || !dir) {
-      output({ ok: false, error: "用法: create <name> <dir> [purpose]" });
+      output({
+        ok: false,
+        error: 'create <name> <dir> [purpose] [--preset <preset>] [--disallowed "..."]',
+      });
       break;
     }
-    await cmdCreate(name, dir, rest.join(" "));
+    await cmdCreate(name, dir, purposeParts.join(" "), { preset, disallowedRaw });
     break;
   }
 
   case "resume": {
-    const [name, sessionId, dir] = args;
+    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(args);
+    const [name, sessionId, dir] = posArgs;
     if (!name || !sessionId) {
-      output({ ok: false, error: "用法: resume <name> <sessionId> [dir]" });
+      output({
+        ok: false,
+        error: 'resume <name> <sessionId> [dir] [--preset <preset>] [--disallowed "..."]',
+      });
       break;
     }
-    await cmdResume(name, sessionId, dir);
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw });
     break;
   }
 
@@ -1090,6 +1340,14 @@ switch (cmd) {
     await cmdUpdate();
     break;
 
+  case "permissions":
+  case "perm":
+  case "perms": {
+    const [sub, ...rest] = args;
+    await cmdPermissions(sub || "list", ...rest);
+    break;
+  }
+
   default:
     output({
       ok: false,
@@ -1106,6 +1364,11 @@ switch (cmd) {
         "cron-remove <name|id>           — 删除定时任务",
         "cron-toggle <name|id>           — 启用/暂停定时任务",
         "cron-history [name|id]          — 查看执行历史",
+        "permissions list                — 列出所有 agent 的权限预设",
+        "permissions presets             — 列出所有可用预设",
+        "permissions get <name>          — 查看单个 agent 的详细权限",
+        'permissions set <name> --preset <preset>｜--disallowed "..."',
+        "permissions reset <name>        — 恢复默认预设",
         "version                         — 显示当前版本 + 是否有更新",
         "update                          — 拉取最新代码并重启 pm2 服务",
       ],

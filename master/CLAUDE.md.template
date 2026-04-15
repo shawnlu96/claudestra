@@ -38,6 +38,19 @@ bun ../src/manager.ts cron-history [名称|ID]
 # 版本管理
 bun ../src/manager.ts version   # 显示当前版本 + 是否有更新
 bun ../src/manager.ts update    # 拉取最新代码 + pm2 重启
+
+# 权限管理（每个 agent 独立的 disallowedTools）
+bun ../src/manager.ts permissions list                       # 列出所有 agent 的预设
+bun ../src/manager.ts permissions presets                    # 列出所有可用预设
+bun ../src/manager.ts permissions get <名称>                  # 查看单个 agent 的权限
+bun ../src/manager.ts permissions set <名称> --preset strict  # 应用预设
+bun ../src/manager.ts permissions set <名称> --disallowed "Bash(foo:*) ..."  # 自定义
+bun ../src/manager.ts permissions reset <名称>                # 恢复默认
+# set/reset 后需要 restart 该 agent 生效
+
+# 新建 agent 时也能直接指定权限
+bun ../src/manager.ts create <名称> <目录> [用途] --preset readonly
+bun ../src/manager.ts create <名称> <目录> [用途] --disallowed "Bash(curl:*) Bash(wget:*)"
 ```
 
 ## Discord 交互指南
@@ -193,3 +206,24 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 - "检查一下有没有更新" → `bun ../src/manager.ts version`
 - "升级一下" / "更新代码" → `bun ../src/manager.ts update`
 - 升级会执行 `git pull` + `pm2 restart all`，执行前告诉用户将重启服务
+
+## 权限管理（每个 agent 的 disallowedTools）
+
+每个 agent 可以独立配置被禁止的工具。预设有四种：
+
+- **default** — 只拦截真正不可逆的命令（rm -rf / git push --force / chmod 777 等）。大多数场景用这个
+- **strict** — default + 禁网络/特权命令（sudo / curl / wget / ssh / dd 等），适合跑不可信任务
+- **readonly** — default + 禁文件写入（Write / Edit）+ 禁包管理（npm / bun / pip / cargo 等），适合 review / 分析
+- **paranoid** — default + 禁 Bash / Write / Edit / WebFetch，最小权限
+
+用户的自然语言请求映射：
+
+- "给 xxx 开只读模式" / "xxx 只让它看不让它改" → `permissions set xxx --preset readonly`
+- "给 xxx 禁网" / "xxx 不让联网" → `permissions set xxx --preset strict`
+- "xxx 权限收紧点" → 根据上下文选 strict 或 readonly
+- "xxx 禁用 curl 和 wget" → `permissions set xxx --disallowed "Bash(curl:*) Bash(wget:*)"`
+- "看看 xxx 有哪些权限" → `permissions get xxx`
+- "xxx 权限恢复默认" → `permissions reset xxx`
+- "新建一个只读的 agent" → `create <name> <dir> <purpose> --preset readonly`
+
+set / reset 之后必须 `restart <name>` 才能生效（Claude Code 启动 flag 只在启动时读取一次）。告知用户后再执行 restart。
