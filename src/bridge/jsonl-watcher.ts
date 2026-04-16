@@ -172,12 +172,10 @@ export async function startWatching(
             const hasReply = content.some((b: any) => b.type === "tool_use" && isHiddenTool(b.name));
             const hasNewTools = content.some((b: any) => b.type === "tool_use" && b.name && !isHiddenTool(b.name));
 
-            // 新一批 tool 到来时，把之前残留的 pending tools 强制标完成
-            // （compaction 丢结果、中断、重试等场景会导致旧 tool 永远 pending）
+            // 新一批 tool 到来 → 清空旧 tools，每轮独立一条 Discord 消息
             if (hasNewTools) {
-              for (const t of state.tools) {
-                if (!t.done) { t.done = true; toolsChanged = true; }
-              }
+              state.tools = [];
+              state.toolMsgId = null;
             }
 
             for (const block of content) {
