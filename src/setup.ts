@@ -9,7 +9,7 @@
  */
 
 import { readFile, writeFile, access } from "fs/promises";
-import { constants } from "fs";
+import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 
@@ -83,19 +83,37 @@ function fail(text: string) {
 // 输入
 // ============================================================
 
-const stdin = process.stdin;
+// stdin 如果不是 TTY（curl|bash → bun run 嵌套 spawn 子进程时 stdin 是空 pipe），
+// 直接 openSync("/dev/tty") 拿到控制终端的 fd 来读。
+let INPUT_FD = 0;
+if (!process.stdin.isTTY) {
+  try {
+    INPUT_FD = openSync("/dev/tty", "r");
+  } catch {
+    console.error("❌ 无法打开终端输入，请直接运行: bun run setup");
+    process.exit(1);
+  }
+}
 
+// 同步阻塞读，逐字节到换行符。直接走 POSIX read(2)，不依赖事件循环。
 function readLine(): Promise<string> {
-  return new Promise((resolveFn) => {
-    stdin.resume();
-    stdin.setEncoding("utf-8");
-    const onData = (data: Buffer) => {
-      stdin.pause();
-      stdin.off("data", onData);
-      resolveFn(data.toString().replace(/\n$/, ""));
-    };
-    stdin.on("data", onData);
-  });
+  const buf = Buffer.alloc(1);
+  let line = "";
+  while (true) {
+    let n: number;
+    try {
+      n = readSync(INPUT_FD, buf, 0, 1, null);
+    } catch {
+      break;
+    }
+    if (n === 0) break;
+    const ch = buf.toString("utf-8");
+    if (ch === "\n") return Promise.resolve(line);
+    if (ch !== "\r") line += ch;
+  }
+  if (line.length > 0) return Promise.resolve(line);
+  console.error("\n❌ 输入已关闭（stdin EOF）");
+  process.exit(1);
 }
 
 async function waitEnter(msg = "完成后按 ENTER 继续") {

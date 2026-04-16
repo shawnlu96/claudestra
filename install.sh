@@ -166,6 +166,8 @@ install_bun() {
   export PATH="$BUN_INSTALL/bin:$PATH"
 }
 
+install_failed=0
+
 install_pkg() {
   # $1 = friendly label, $2 = command to verify, $3 = install fn name
   local label="$1"
@@ -178,14 +180,25 @@ install_pkg() {
   fi
 
   say "安装 $label"
+  # 临时关掉 set -e，不让安装失败杀死整个脚本
+  set +e
   "$installer"
+  local rc=$?
+  set -e
+  if [ $rc -ne 0 ]; then
+    warn "$label 安装命令返回了错误码 $rc"
+  fi
+
+  # 刷新 shell 命令缓存，否则刚装的二进制可能找不到
+  hash -r 2>/dev/null || true
 
   if command -v "$cmd" >/dev/null 2>&1; then
     ok "$label 安装成功"
   else
     fail "$label 安装后仍然找不到 '$cmd'，可能需要新开一个终端让 PATH 生效"
-    return 1
+    install_failed=1
   fi
+  return 0
 }
 
 # git
@@ -275,6 +288,12 @@ install_pkg "pm2"    pm2    _install_pm2
 install_pkg "claude" claude _install_claude
 
 printf "\n"
+
+if [ "$install_failed" = "1" ]; then
+  fail "部分依赖没装上。请检查上面的错误，装完后重跑本脚本"
+  exit 1
+fi
+
 ok "所有依赖就绪 ✨"
 
 # ────────────────────────────────────────────
@@ -285,8 +304,11 @@ printf "\n"
 if [ -d "$CLAUDESTRA_DIR/.git" ]; then
   say "检测到已有仓库: $CLAUDESTRA_DIR"
   if confirm "要 git pull 更新到最新吗？" y; then
-    (cd "$CLAUDESTRA_DIR" && git pull --ff-only)
-    ok "代码已更新"
+    if (cd "$CLAUDESTRA_DIR" && git pull --ff-only); then
+      ok "代码已更新"
+    else
+      warn "git pull 失败（可能有本地改动或分支冲突），跳过更新"
+    fi
   else
     ok "保留现有代码"
   fi
@@ -332,6 +354,12 @@ printf "预计 ${BOLD}10 分钟${RESET}。\n\n"
 if confirm "现在跑 ${CYAN}bun run setup${RESET}？" y; then
   printf "\n"
   cd "$CLAUDESTRA_DIR"
+  # curl|bash 下 stdin 是管道。先用 exec 重定向把 shell 自身的 fd 0
+  # 切到 /dev/tty（控制终端），再 exec 替换进程。
+  # 两步 exec 确保子进程继承的 fd 0 一定是终端。
+  if [ -e /dev/tty ]; then
+    exec </dev/tty
+  fi
   exec bun run setup
 else
   printf "\n稍后手动跑：\n"
