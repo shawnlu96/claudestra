@@ -16,12 +16,15 @@ import {
   MASTER_SESSION as SESSION_NAME,
 } from "./lib/tmux-helper.js";
 import { buildClaudeCommand } from "./lib/claude-launch.js";
+import { bridgeRequest } from "./lib/bridge-client.js";
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
+const REPO_ROOT = `${import.meta.dir}/..`;
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次新版本
 
 if (!CONTROL_CHANNEL_ID) {
   console.error("❌ 请设置 CONTROL_CHANNEL_ID（Discord #control 频道 ID）");
@@ -81,6 +84,63 @@ async function startMaster() {
 }
 
 // ============================================================
+// 版本更新检查
+// ============================================================
+
+let lastUpdateCheck = 0;
+let lastNotifiedCommit = "";
+
+async function gitCmd(...args: string[]): Promise<string> {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd: REPO_ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return proc.exitCode === 0 ? out.trim() : "";
+}
+
+async function checkForUpdates() {
+  if (!CONTROL_CHANNEL_ID) return;
+
+  const fetched = await gitCmd("fetch", "--quiet", "origin");
+  if (fetched === "" && !(await gitCmd("remote"))) return; // fetch 失败
+
+  const branch = await gitCmd("rev-parse", "--abbrev-ref", "HEAD");
+  if (!branch) return;
+
+  const countStr = await gitCmd("rev-list", "--count", `HEAD..origin/${branch}`);
+  const behind = parseInt(countStr) || 0;
+  if (behind === 0) return;
+
+  const remoteHash = (await gitCmd("rev-parse", `origin/${branch}`)).slice(0, 7);
+  if (remoteHash === lastNotifiedCommit) return; // 同一个版本不重复通知
+  lastNotifiedCommit = remoteHash;
+
+  const latestMsg = await gitCmd("log", "-1", "--format=%s", `origin/${branch}`);
+
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: [
+        `🆕 **Claudestra 有新版本！**`,
+        ``,
+        `落后 ${behind} 个提交`,
+        `最新: ${latestMsg}`,
+        ``,
+        `更新命令: \`bun src/manager.ts update\``,
+        `或对大总管说 "更新版本"`,
+      ].join("\n"),
+    });
+    console.log(`📢 已通知用户：${behind} 个新提交`);
+  } catch {
+    console.log("⚠️ 版本通知发送失败（bridge 可能还没就绪）");
+  }
+}
+
+// ============================================================
 // 主循环
 // ============================================================
 
@@ -112,6 +172,12 @@ async function main() {
     if (hasClaudePromptToConfirm(pane)) {
       console.log("⚠️ 大总管卡在确认弹窗，自动确认...");
       await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
+    }
+
+    // 定期检查新版本
+    if (Date.now() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL_MS) {
+      lastUpdateCheck = Date.now();
+      checkForUpdates().catch(() => {});
     }
 
     // 检查 Claude Code 是否还活着（不是退回了 shell）
