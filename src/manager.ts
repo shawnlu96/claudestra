@@ -1142,52 +1142,46 @@ async function git(...args: string[]): Promise<{ ok: boolean; out: string; err: 
 }
 
 async function cmdVersion() {
-  const pkgPath = `${REPO_ROOT}/package.json`;
-  const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
+  const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
 
+  const local = await getLocalVersion();
   const head = (await git("rev-parse", "HEAD")).out.slice(0, 7);
-  const branch = (await git("rev-parse", "--abbrev-ref", "HEAD")).out;
+  const release = await getLatestRelease();
 
-  // fetch 远端（可能网络失败，允许）
-  const fetchResult = await git("fetch", "--quiet", "origin");
-  let behind = 0;
-  let ahead = 0;
-  let remoteHead = "";
-  let latestMessage = "";
-
-  if (fetchResult.ok) {
-    const counts = (await git("rev-list", "--left-right", "--count", `HEAD...origin/${branch}`)).out;
-    const [a, b] = counts.split(/\s+/).map((n) => parseInt(n) || 0);
-    ahead = a;
-    behind = b;
-    remoteHead = (await git("rev-parse", `origin/${branch}`)).out.slice(0, 7);
-    if (behind > 0) {
-      latestMessage = (await git("log", "-1", "--format=%s", `origin/${branch}`)).out;
-    }
-  }
+  const hasUpdate = release ? isNewer(release.version, local) : false;
 
   output({
     ok: true,
-    name: pkg.name,
-    version: pkg.version,
-    branch,
+    version: local,
     head,
-    remoteHead,
-    ahead,
-    behind,
-    upToDate: behind === 0,
-    latestMessage,
-    fetched: fetchResult.ok,
-    summary: fetchResult.ok
-      ? behind === 0
-        ? `已是最新版本 (${pkg.name} ${pkg.version} · ${branch}@${head})`
-        : `有 ${behind} 个新提交可更新 · 最新: ${latestMessage}`
-      : `无法 fetch 远端（可能离线）: ${fetchResult.err}`,
+    latestRelease: release?.tag || null,
+    latestVersion: release?.version || null,
+    upToDate: !hasUpdate,
+    summary: !release
+      ? `v${local} @ ${head}（无法查询远端 release）`
+      : hasUpdate
+        ? `v${local} → ${release.tag} 可更新`
+        : `已是最新 v${local} @ ${head}`,
   });
 }
 
 async function cmdUpdate() {
-  // 1. 确认是 git 仓库
+  const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
+
+  // 1. 查询最新 release
+  const release = await getLatestRelease();
+  if (!release) {
+    output({ ok: false, error: "无法查询 GitHub release（网络问题或没有发布过 release）" });
+    return;
+  }
+
+  const local = await getLocalVersion();
+  if (!isNewer(release.version, local)) {
+    output({ ok: true, version: local, message: `已是最新版本 v${local}` });
+    return;
+  }
+
+  // 2. 确认工作目录干净
   const status = await git("status", "--porcelain");
   if (!status.ok) {
     output({ ok: false, error: "不是 git 仓库，无法自动更新" });
@@ -1202,31 +1196,32 @@ async function cmdUpdate() {
     return;
   }
 
-  // 2. git pull
-  const pull = await git("pull", "--ff-only");
-  if (!pull.ok) {
-    output({ ok: false, error: `git pull 失败: ${pull.err || pull.out}` });
+  // 3. fetch tags + checkout release tag
+  await git("fetch", "--tags", "--quiet", "origin");
+  const checkout = await git("checkout", release.tag, "--quiet");
+  if (!checkout.ok) {
+    output({ ok: false, error: `git checkout ${release.tag} 失败: ${checkout.err}` });
     return;
   }
 
-  // 3. pm2 restart（bridge + launcher + cron-scheduler）
+  // 4. bun install（依赖可能变了）
+  const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+  await biProc.exited;
+
+  // 5. pm2 restart（bridge + launcher + cron-scheduler）
   const pm2Proc = Bun.spawn(["pm2", "restart", "ecosystem.config.cjs"], {
     cwd: REPO_ROOT,
     stdout: "pipe",
     stderr: "pipe",
   });
-  const pm2Out = await new Response(pm2Proc.stdout).text();
-  const pm2Err = await new Response(pm2Proc.stderr).text();
+  await new Response(pm2Proc.stdout).text();
   await pm2Proc.exited;
-
-  const newHead = (await git("rev-parse", "HEAD")).out.slice(0, 7);
 
   output({
     ok: true,
-    newHead,
-    pullOutput: pull.out,
-    pm2Output: pm2Out + pm2Err,
-    message: `已更新到 ${newHead} 并重启 pm2 服务`,
+    from: `v${local}`,
+    to: release.tag,
+    message: `已更新到 ${release.tag} 并重启 pm2 服务`,
   });
 }
 

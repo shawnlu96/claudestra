@@ -303,26 +303,30 @@ ok "所有依赖就绪 ✨"
 printf "\n"
 if [ -d "$CLAUDESTRA_DIR/.git" ]; then
   say "检测到已有仓库: $CLAUDESTRA_DIR"
-  if confirm "要 git pull 更新到最新吗？" y; then
-    if (cd "$CLAUDESTRA_DIR" && git pull --ff-only); then
-      ok "代码已更新"
-    else
-      warn "git pull 失败（可能有本地改动或分支冲突），跳过更新"
-    fi
-  else
-    ok "保留现有代码"
-  fi
+  (cd "$CLAUDESTRA_DIR" && git fetch --tags --quiet origin 2>/dev/null) || true
 else
   if [ -e "$CLAUDESTRA_DIR" ]; then
     die "$CLAUDESTRA_DIR 已存在但不是 git 仓库，请先移走或清空"
   fi
   say "克隆 $CLAUDESTRA_REPO → $CLAUDESTRA_DIR"
   mkdir -p "$(dirname "$CLAUDESTRA_DIR")"
-  git clone --branch "$CLAUDESTRA_BRANCH" "$CLAUDESTRA_REPO" "$CLAUDESTRA_DIR"
+  git clone "$CLAUDESTRA_REPO" "$CLAUDESTRA_DIR"
   ok "代码已克隆"
 fi
 
 cd "$CLAUDESTRA_DIR"
+
+# 切换到最新 release 版本（如果有的话）
+GITHUB_API_REPO=$(echo "$CLAUDESTRA_REPO" | sed -n 's|.*github\.com[:/]\(.*\)\.git$|\1|p')
+if [ -n "$GITHUB_API_REPO" ]; then
+  LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_API_REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*"\|"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
+  if [ -n "$LATEST_TAG" ]; then
+    git checkout "$LATEST_TAG" --quiet 2>/dev/null || true
+    ok "版本: $LATEST_TAG"
+  else
+    warn "没有找到 release 版本，使用 main 分支最新代码"
+  fi
+fi
 
 # ────────────────────────────────────────────
 # 装项目依赖

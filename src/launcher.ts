@@ -89,53 +89,36 @@ async function startMaster() {
 // ============================================================
 
 let lastUpdateCheck = 0;
-let lastNotifiedCommit = "";
-
-async function gitCmd(...args: string[]): Promise<string> {
-  const proc = Bun.spawn(["git", ...args], {
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return proc.exitCode === 0 ? out.trim() : "";
-}
+let lastNotifiedVersion = "";
 
 async function checkForUpdates() {
   if (!CONTROL_CHANNEL_ID) return;
 
-  const fetched = await gitCmd("fetch", "--quiet", "origin");
-  if (fetched === "" && !(await gitCmd("remote"))) return; // fetch 失败
+  const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
 
-  const branch = await gitCmd("rev-parse", "--abbrev-ref", "HEAD");
-  if (!branch) return;
+  const release = await getLatestRelease();
+  if (!release) return;
 
-  const countStr = await gitCmd("rev-list", "--count", `HEAD..origin/${branch}`);
-  const behind = parseInt(countStr) || 0;
-  if (behind === 0) return;
-
-  const remoteHash = (await gitCmd("rev-parse", `origin/${branch}`)).slice(0, 7);
-  if (remoteHash === lastNotifiedCommit) return; // 同一个版本不重复通知
-  lastNotifiedCommit = remoteHash;
-
-  const latestMsg = await gitCmd("log", "-1", "--format=%s", `origin/${branch}`);
+  const local = await getLocalVersion();
+  if (!isNewer(release.version, local)) return;
+  if (release.version === lastNotifiedVersion) return;
+  lastNotifiedVersion = release.version;
 
   try {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
       text: [
-        `🆕 **Claudestra 有新版本！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
+        `🆕 **Claudestra ${release.tag} 发布了！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
         ``,
-        `落后 ${behind} 个提交`,
-        `最新: ${latestMsg}`,
+        `当前: v${local} → 最新: ${release.tag}`,
+        release.body ? `\n${release.body.slice(0, 500)}` : "",
         ``,
         `更新命令: \`bun src/manager.ts update\``,
         `或对大总管说 "更新版本"`,
-      ].join("\n"),
+      ].filter(Boolean).join("\n"),
     });
-    console.log(`📢 已通知用户：${behind} 个新提交`);
+    console.log(`📢 已通知用户：新版本 ${release.tag}`);
   } catch {
     console.log("⚠️ 版本通知发送失败（bridge 可能还没就绪）");
   }
