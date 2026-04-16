@@ -170,6 +170,15 @@ export async function startWatching(
             const content = entry.message?.content;
             if (!Array.isArray(content)) continue;
             const hasReply = content.some((b: any) => b.type === "tool_use" && isHiddenTool(b.name));
+            const hasNewTools = content.some((b: any) => b.type === "tool_use" && b.name && !isHiddenTool(b.name));
+
+            // 新一批 tool 到来时，把之前残留的 pending tools 强制标完成
+            // （compaction 丢结果、中断、重试等场景会导致旧 tool 永远 pending）
+            if (hasNewTools) {
+              for (const t of state.tools) {
+                if (!t.done) { t.done = true; toolsChanged = true; }
+              }
+            }
 
             for (const block of content) {
               if (block.type === "tool_use" && block.name && !isHiddenTool(block.name) && WATCHER_CONFIG.showToolUse) {
