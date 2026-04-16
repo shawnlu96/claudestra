@@ -82,6 +82,7 @@ export function hasClaudePromptToConfirm(pane: string): boolean {
     pane.includes("Yes, proceed") ||
     pane.includes("skip all permission") ||
     pane.includes("Skip all permission") ||
+    pane.includes("Resume from summary") ||
     (pane.includes("❯ 1.") && pane.includes("Yes"))
   );
 }
