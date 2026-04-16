@@ -665,6 +665,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
   print(`  ${c.dim}•${c.reset} ${c.cyan}bun install${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}npx playwright install chromium${c.reset}  ${c.dim}(终端截图用)${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}claude mcp add ${cfg.MCP_NAME} ...${c.reset}  ${c.dim}(注册 MCP server)${c.reset}`);
+  print(`  ${c.dim}•${c.reset} ${c.cyan}claude hooks add ...${c.reset}  ${c.dim}(typing 指示器 hook)${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}pm2 start ecosystem.config.cjs${c.reset}  ${c.dim}(启动服务)${c.reset}`);
   br();
 
@@ -675,6 +676,8 @@ async function stepFinalize(cfg: Config): Promise<void> {
     print(`  ${c.cyan}bun install${c.reset}`);
     print(`  ${c.cyan}npx playwright install chromium${c.reset}`);
     print(`  ${c.cyan}claude mcp add ${cfg.MCP_NAME} -s user -- bun run ${REPO_ROOT}/src/channel-server.ts${c.reset}`);
+    print(`  ${c.cyan}claude hooks add Stop "bun ${REPO_ROOT}/src/hooks/typing-hook.ts" -s user${c.reset}`);
+    print(`  ${c.cyan}claude hooks add Notification "bun ${REPO_ROOT}/src/hooks/typing-hook.ts" -s user${c.reset}`);
     print(`  ${c.cyan}pm2 start ecosystem.config.cjs${c.reset}`);
     return;
   }
@@ -714,7 +717,19 @@ async function stepFinalize(cfg: Config): Promise<void> {
     warn("MCP 注册失败，你可能需要手动跑这条命令");
   }
 
-  // 4. pm2 start
+  // 4. hooks (typing indicator)
+  const hookCmd = `bun ${REPO_ROOT}/src/hooks/typing-hook.ts`;
+  write(`${c.dim}▶${c.reset} claude hooks add (Stop + Notification)… `);
+  const h1 = await run(["claude", "hooks", "add", "Stop", hookCmd, "-s", "user"]);
+  const h2 = await run(["claude", "hooks", "add", "Notification", hookCmd, "-s", "user"]);
+  if (h1.ok && h2.ok) print(`${c.green}✓${c.reset}`);
+  else {
+    print(`${c.yellow}⚠${c.reset}`);
+    warn("hook 注册可能失败，typing 指示器可能不会自动停止");
+    hint(`手动跑: claude hooks add Stop "${hookCmd}" -s user`);
+  }
+
+  // 5. pm2 start
   write(`${c.dim}▶${c.reset} pm2 start ecosystem.config.cjs… `);
   const pm2 = await run(["pm2", "start", "ecosystem.config.cjs"], { cwd: REPO_ROOT });
   if (pm2.ok) {
