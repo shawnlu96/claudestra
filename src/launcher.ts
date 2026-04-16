@@ -23,6 +23,7 @@ const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
 const REPO_ROOT = `${import.meta.dir}/..`;
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
+const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次新版本
 
@@ -125,7 +126,7 @@ async function checkForUpdates() {
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
       text: [
-        `🆕 **Claudestra 有新版本！**`,
+        `🆕 **Claudestra 有新版本！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
         ``,
         `落后 ${behind} 个提交`,
         `最新: ${latestMsg}`,
