@@ -145,9 +145,16 @@ export async function discordCreateChannel(
 
   let parentId: string | undefined;
   if (categoryName) {
-    const cat = guild.channels.cache.find(
+    let cat = guild.channels.cache.find(
       (c) => c.name === categoryName && c.type === 4
     );
+    if (!cat) {
+      // category 不存在，自动创建
+      cat = await guild.channels.create({
+        name: categoryName,
+        type: 4, // GuildCategory
+      });
+    }
     parentId = cat?.id;
   }
 
