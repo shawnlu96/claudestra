@@ -349,42 +349,64 @@ async function cmdCreate(
     return;
   }
 
-  // 2. 创建 tmux window（在 master session 里）
-  const expandedDir = dir.replace(/^~/, process.env.HOME || "~");
-  await ensureSocket();
-  await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", expandedDir]);
-  await Bun.sleep(500);
-
-  // 3. 启动 Claude Code
-  const target = windowTarget(tmuxName);
-  const sessionId = crypto.randomUUID();
-  const cmd = buildClaudeCommand({
-    channelId,
-    bridgeUrl: BRIDGE_URL,
-    sessionId,
-    disallowedPreset: perms.preset,
-    disallowedRaw: perms.disallowedRaw,
-  });
-  await tmuxSendLine(target, cmd);
-
-  // 4. 轮询等待就绪，遇到任何确认弹窗自动按 Enter
-  //    用 hasPromptToConfirm 统一处理 dev-channel / trust files / "❯ 1. Yes" 等多种提示
-  let ready = false;
-  for (let i = 0; i < 60; i++) {
-    await Bun.sleep(500);
-    const pane = await captureLast(tmuxName, 10);
-    if (hasPromptToConfirm(pane)) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-      await Bun.sleep(500);
-      continue;
-    }
-    if (await isAgentIdle(tmuxName)) {
-      ready = true;
-      break;
-    }
+  // 频道建好后若后续任何步骤失败，都必须清理孤儿频道 + tmux window
+  async function cleanup(reason: string) {
+    try {
+      await bridgeRequest({ type: "delete_channel", channelId });
+    } catch { /* non-critical */ }
+    try {
+      await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
+    } catch { /* non-critical */ }
+    output({ ok: false, error: `${reason}（已清理残留频道 #${channelName} 和 tmux window）` });
   }
 
-  // 6. 更新 registry
+  let ready = false;
+  let sessionId: string;
+  const expandedDir = dir.replace(/^~/, process.env.HOME || "~");
+
+  try {
+    // 2. 创建 tmux window（在 master session 里）
+    await ensureSocket();
+    await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", expandedDir]);
+    await Bun.sleep(500);
+
+    // 3. 启动 Claude Code
+    const target = windowTarget(tmuxName);
+    sessionId = crypto.randomUUID();
+    const cmd = buildClaudeCommand({
+      channelId,
+      bridgeUrl: BRIDGE_URL,
+      sessionId,
+      disallowedPreset: perms.preset,
+      disallowedRaw: perms.disallowedRaw,
+    });
+    await tmuxSendLine(target, cmd);
+
+    // 4. 轮询等待就绪
+    for (let i = 0; i < 60; i++) {
+      await Bun.sleep(500);
+      const pane = await captureLast(tmuxName, 10);
+      if (hasPromptToConfirm(pane)) {
+        await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+        await Bun.sleep(500);
+        continue;
+      }
+      if (await isAgentIdle(tmuxName)) {
+        ready = true;
+        break;
+      }
+    }
+
+    if (!ready) {
+      await cleanup("Claude Code 启动超时");
+      return;
+    }
+  } catch (err) {
+    await cleanup(`创建失败: ${(err as Error).message}`);
+    return;
+  }
+
+  // 6. 更新 registry（只有启动成功才落盘）
   const reg = await loadRegistry();
   reg.agents[tmuxName] = {
     project: dir,
@@ -469,38 +491,59 @@ async function cmdResume(
     return;
   }
 
-  // 创建 tmux window（在 master session 里）
-  await ensureSocket();
-  await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", resolvedDir]);
-  await Bun.sleep(500);
+  async function cleanup(reason: string) {
+    try {
+      await bridgeRequest({ type: "delete_channel", channelId });
+    } catch { /* non-critical */ }
+    try {
+      await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
+    } catch { /* non-critical */ }
+    output({ ok: false, error: `${reason}（已清理残留频道 #${channelName} 和 tmux window）` });
+  }
 
-  // 启动 Claude Code（resume 模式）
-  const target = windowTarget(tmuxName);
-  const displayName = channelName;
-  const cmd = buildClaudeCommand({
-    channelId,
-    bridgeUrl: BRIDGE_URL,
-    resumeId: sessionId,
-    displayName,
-    disallowedPreset: perms.preset,
-    disallowedRaw: perms.disallowedRaw,
-  });
-  await tmuxSendLine(target, cmd);
-
-  // 轮询等待，用 hasPromptToConfirm 统一处理所有确认弹窗
   let ready = false;
-  for (let i = 0; i < 60; i++) {
+
+  try {
+    // 创建 tmux window（在 master session 里）
+    await ensureSocket();
+    await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", resolvedDir]);
     await Bun.sleep(500);
-    const pane = await captureLast(tmuxName, 10);
-    if (hasPromptToConfirm(pane)) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+
+    // 启动 Claude Code（resume 模式）
+    const target = windowTarget(tmuxName);
+    const displayName = channelName;
+    const cmd = buildClaudeCommand({
+      channelId,
+      bridgeUrl: BRIDGE_URL,
+      resumeId: sessionId,
+      displayName,
+      disallowedPreset: perms.preset,
+      disallowedRaw: perms.disallowedRaw,
+    });
+    await tmuxSendLine(target, cmd);
+
+    // 轮询等待
+    for (let i = 0; i < 60; i++) {
       await Bun.sleep(500);
-      continue;
+      const pane = await captureLast(tmuxName, 10);
+      if (hasPromptToConfirm(pane)) {
+        await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+        await Bun.sleep(500);
+        continue;
+      }
+      if (await isAgentIdle(tmuxName)) {
+        ready = true;
+        break;
+      }
     }
-    if (await isAgentIdle(tmuxName)) {
-      ready = true;
-      break;
+
+    if (!ready) {
+      await cleanup("Claude Code 启动超时");
+      return;
     }
+  } catch (err) {
+    await cleanup(`恢复失败: ${(err as Error).message}`);
+    return;
   }
 
   // 更新 registry
