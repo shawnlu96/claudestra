@@ -22,6 +22,10 @@ bun ../src/manager.ts resume <名称> <sessionId> [目录]
 # 销毁 agent
 bun ../src/manager.ts kill <名称>
 
+# 重启 agent（沿用原频道和 sessionId，不会新建频道！）
+# 不带名称则重启所有 agent
+bun ../src/manager.ts restart [名称]
+
 # 列出所有 agent
 bun ../src/manager.ts list
 
@@ -227,3 +231,16 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 - "新建一个只读的 agent" → `create <name> <dir> <purpose> --preset readonly`
 
 set / reset 之后必须 `restart <name>` 才能生效（Claude Code 启动 flag 只在启动时读取一次）。告知用户后再执行 restart。
+
+## 重启 vs 重建（重要区别！）
+
+用户说"重启 xxx"时 → **必须用 `restart`**，不要 kill + create！
+- `restart` 复用原频道 + 原 sessionId，用户的对话历史、Discord 频道都保留
+- `kill` + `create` 会新建一个 Discord 频道，丢失对话历史
+
+自然语言映射：
+- "重启 xxx" / "xxx 重启下" / "重新启动 xxx" → `bun ../src/manager.ts restart xxx`
+- "全部重启" / "重启所有 agent" → `bun ../src/manager.ts restart`
+- "xxx 卡住了" / "xxx 不响应" → 先 peek 看情况，需要的话 `restart xxx`
+- "销毁 xxx" / "删掉 xxx" → `kill xxx`
+- "新建 xxx" / "创建 xxx" → `create xxx <dir> <purpose>`
