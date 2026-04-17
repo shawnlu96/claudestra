@@ -79,25 +79,32 @@ async function loadRegistry(): Promise<Registry> {
     await saveRegistry(empty);
     return empty;
   }
+  return JSON.parse(await readFile(REGISTRY_PATH, "utf-8")) as Registry;
+}
+
+/** 一次性迁移：worker- → agent-。由 update 命令显式调用。 */
+async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entries: number }> {
+  if (!existsSync(REGISTRY_PATH)) return { migrated: false, entries: 0 };
   const raw = JSON.parse(await readFile(REGISTRY_PATH, "utf-8"));
-  // 迁移：旧版 registry 用 "workers" 字段 + "worker-" 前缀 key
-  if (raw.workers && !raw.agents) {
-    raw.agents = {};
-    for (const [key, val] of Object.entries(raw.workers)) {
-      const newKey = key.replace(/^worker-/, "agent-");
-      raw.agents[newKey] = val;
-    }
-    delete raw.workers;
-    await writeFile(REGISTRY_PATH, JSON.stringify(raw, null, 2));
-    // 同时重命名 tmux window
-    for (const oldName of Object.keys(raw.agents)) {
-      const oldTmux = oldName.replace(/^agent-/, "worker-");
-      if (oldTmux !== oldName) {
-        await tmuxRaw(["rename-window", "-t", `${MASTER_SESSION}:${oldTmux}`, oldName]).catch(() => {});
-      }
+  if (!raw.workers || raw.agents) return { migrated: false, entries: 0 };
+
+  raw.agents = {};
+  for (const [key, val] of Object.entries(raw.workers)) {
+    const newKey = key.replace(/^worker-/, "agent-");
+    raw.agents[newKey] = val;
+  }
+  delete raw.workers;
+  await writeFile(REGISTRY_PATH, JSON.stringify(raw, null, 2));
+
+  // 同步重命名 tmux window（可能因为 tmux 不在运行而失败，忽略即可）
+  for (const newName of Object.keys(raw.agents)) {
+    const oldTmux = newName.replace(/^agent-/, "worker-");
+    if (oldTmux !== newName) {
+      await tmuxRaw(["rename-window", "-t", `${MASTER_SESSION}:${oldTmux}`, newName]).catch(() => {});
     }
   }
-  return raw as Registry;
+
+  return { migrated: true, entries: Object.keys(raw.agents).length };
 }
 
 async function saveRegistry(reg: Registry) {
@@ -1226,7 +1233,15 @@ async function cmdUpdate() {
   const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await biProc.exited;
 
-  // 5. pm2 restart（bridge + launcher + cron-scheduler）
+  // 5. 执行新版 manager 的 migrate 子命令（新版可能带格式迁移逻辑）
+  //    关键：用 subprocess 跑 NEW 版代码，当前进程跑的还是旧版
+  const migrateProc = Bun.spawn(
+    ["bun", "run", `${REPO_ROOT}/src/manager.ts`, "migrate"],
+    { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }
+  );
+  await migrateProc.exited;
+
+  // 6. pm2 restart（bridge + launcher + cron-scheduler）
   const pm2Proc = Bun.spawn(["pm2", "restart", "ecosystem.config.cjs"], {
     cwd: REPO_ROOT,
     stdout: "pipe",
@@ -1348,6 +1363,12 @@ switch (cmd) {
   case "update":
     await cmdUpdate();
     break;
+
+  case "migrate": {
+    const res = await migrateWorkerToAgent();
+    output({ ok: true, ...res });
+    break;
+  }
 
   case "permissions":
   case "perm":
