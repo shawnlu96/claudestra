@@ -467,24 +467,43 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       // 打断按钮
       if (id.startsWith("interrupt:")) {
         const targetChannelId = id.slice("interrupt:".length);
-        const listResult = await runManager("list");
+        console.log(`⚡ 打断按钮点击: channel=${targetChannelId}`);
         try {
+          const listResult = await runManager("list");
           const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
-          if (agent) {
-            Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, "C-c"]);
-            const statusMsgId = activeStatusMessages.get(targetChannelId);
-            if (statusMsgId) {
-              try {
-                const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
-                const sm = await ch.messages.fetch(statusMsgId);
-                await sm.edit({ content: "⚡ 已打断", components: [] });
-              } catch { /* non-critical */ }
-              activeStatusMessages.delete(targetChannelId);
-            }
-            stopTyping(targetChannelId);
-            clearSafetyTimer(targetChannelId);
+          if (!agent) {
+            console.error(`⚡ 打断失败：channel=${targetChannelId} 找不到对应 agent`);
+            await interaction.followUp({ content: "❌ 打断失败：找不到对应 agent", ephemeral: true }).catch(() => {});
+            return;
           }
-        } catch { /* non-critical */ }
+          console.log(`⚡ 发送 C-c 到 tmux window: master:${agent.name}`);
+          const proc = Bun.spawn(
+            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, "C-c"],
+            { stdout: "pipe", stderr: "pipe" }
+          );
+          const stderr = await new Response(proc.stderr).text();
+          await proc.exited;
+          if (proc.exitCode !== 0) {
+            console.error(`⚡ tmux send-keys 失败 (exit=${proc.exitCode}): ${stderr}`);
+            await interaction.followUp({ content: `❌ tmux 发送 C-c 失败: ${stderr}`, ephemeral: true }).catch(() => {});
+            return;
+          }
+          console.log(`⚡ C-c 已发送给 ${agent.name}`);
+
+          const statusMsgId = activeStatusMessages.get(targetChannelId);
+          if (statusMsgId) {
+            try {
+              const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
+              const sm = await ch.messages.fetch(statusMsgId);
+              await sm.edit({ content: "⚡ 已打断", components: [] });
+            } catch { /* non-critical */ }
+            activeStatusMessages.delete(targetChannelId);
+          }
+          stopTyping(targetChannelId);
+          clearSafetyTimer(targetChannelId);
+        } catch (e) {
+          console.error(`⚡ 打断流程异常:`, e);
+        }
         return;
       }
 
@@ -726,25 +745,32 @@ async function handleHookRequest(req: Request): Promise<Response> {
     }
 
     if (event === "stop") {
+      console.log(`🏁 Hook 收到 stop: channel=${channelId}`);
       stopTyping(channelId);
       clearSafetyTimer(channelId);
+
       const statusMsgId = activeStatusMessages.get(channelId);
-      if (statusMsgId) {
-        discord.channels.fetch(channelId).then((ch) => {
-          if (ch && "messages" in ch) {
-            const textCh = ch as TextChannel;
-            // 编辑状态消息（不 @，不触发通知）
-            textCh.messages.fetch(statusMsgId).then((sm) => {
-              sm.edit({ content: "✅ 完成", components: [] }).catch(() => {});
-            }).catch(() => {});
-            // 发新消息（赛马娘风格 + @ 用户，触发推送通知）
-            const mention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
-            if (mention) {
-              textCh.send(`${randomUmaDone()} ${mention}`).catch(() => {});
-            }
+      try {
+        const ch = await discord.channels.fetch(channelId);
+        if (ch && "messages" in ch) {
+          const textCh = ch as TextChannel;
+          // 若有状态消息则编辑
+          if (statusMsgId) {
+            try {
+              const sm = await textCh.messages.fetch(statusMsgId);
+              await sm.edit({ content: "✅ 完成", components: [] });
+            } catch { /* non-critical */ }
+            activeStatusMessages.delete(channelId);
           }
-        }).catch(() => {});
-        activeStatusMessages.delete(channelId);
+          // 始终发完成通知消息 + @ 用户（确保用户手机收到推送）
+          const mention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
+          if (mention) {
+            await textCh.send(`${randomUmaDone()} ${mention}`);
+            console.log(`🏁 完成通知已发送: channel=${channelId}`);
+          }
+        }
+      } catch (e) {
+        console.error(`🏁 完成通知发送失败:`, e);
       }
     }
 
