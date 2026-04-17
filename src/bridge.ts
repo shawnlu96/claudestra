@@ -394,8 +394,8 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         }
         try {
           const listResult = await runManager("list");
-          const worker = (listResult.workers || []).find((w: any) => w.channelId === channelId);
-          const windowName = worker ? worker.name : "master";
+          const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+          const windowName = agent ? agent.name : "master";
           console.log(`📸 截图: window=${windowName} channel=${channelId}`);
           const pngPath = await tmuxScreenshot(windowName);
           if (pngPath) {
@@ -413,9 +413,9 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
 
       if (cmd === "interrupt") {
         const listResult = await runManager("list");
-        const worker = (listResult.workers || []).find((w: any) => w.channelId === channelId);
-        if (worker) {
-          Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${worker.name}`, "C-c"]);
+        const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+        if (agent) {
+          Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, "C-c"]);
           stopTyping(channelId);
           clearSafetyTimer(channelId);
           const statusMsgId = activeStatusMessages.get(channelId);
@@ -469,9 +469,9 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         const targetChannelId = id.slice("interrupt:".length);
         const listResult = await runManager("list");
         try {
-          const worker = (listResult.workers || []).find((w: any) => w.channelId === targetChannelId);
-          if (worker) {
-            Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${worker.name}`, "C-c"]);
+          const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
+          if (agent) {
+            Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, "C-c"]);
             const statusMsgId = activeStatusMessages.get(targetChannelId);
             if (statusMsgId) {
               try {
@@ -577,10 +577,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       // 启动 JSONL watcher（仅用于 tool use 流式展示，空闲检测由 hooks 处理）
       try {
         const regResult = await runManager("list");
-        const worker = (regResult.workers || []).find((w: any) => w.channelId === msg.channelId);
-        if (worker?.sessionId && worker?.project) {
-          const cwd = worker.project.replace(/^~/, process.env.HOME || "~");
-          startWatching(worker.name, cwd, worker.sessionId, msg.channelId, discord);
+        const agent = (regResult.agents || []).find((a: any) => a.channelId === msg.channelId);
+        if (agent?.sessionId && agent?.project) {
+          const cwd = agent.project.replace(/^~/, process.env.HOME || "~");
+          startWatching(agent.name, cwd, agent.sessionId, msg.channelId, discord);
         }
       } catch { /* non-critical */ }
 
@@ -659,19 +659,19 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // 从 registry 找目标 agent
         const regResult = await runManager("list");
-        const workers: any[] = regResult.workers || [];
+        const agents: any[] = regResult.agents || [];
 
         // 补全发送方名字
         if (!fromName && fromChannelId) {
-          const fromWorker = workers.find((w: any) => w.channelId === fromChannelId);
-          fromName = fromWorker?.name || fromChannelId;
+          const fromAgent = agents.find((a: any) => a.channelId === fromChannelId);
+          fromName = fromAgent?.name || fromChannelId;
         }
 
-        // 找目标 worker（支持带或不带 "worker-" 前缀）
-        const targetName = msg.targetName?.startsWith("worker-")
+        // 找目标 agent（支持带或不带 "agent-" 前缀）
+        const targetName = msg.targetName?.startsWith("agent-")
           ? msg.targetName
-          : `worker-${msg.targetName}`;
-        const target = workers.find((w: any) => w.name === targetName);
+          : `agent-${msg.targetName}`;
+        const target = agents.find((a: any) => a.name === targetName);
         if (!target) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中` }));
           break;

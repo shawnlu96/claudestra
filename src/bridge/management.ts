@@ -30,8 +30,8 @@ export async function buildStatusPanel(): Promise<{
 }> {
   const result = await runManager("list");
   if (!result.ok) return { text: `❌ ${result.error}`, components: [] };
-  const workers = result.workers || [];
-  if (workers.length === 0)
+  const agents = result.agents || [];
+  if (agents.length === 0)
     return {
       text: "📭 当前没有活跃的 Agent。",
       components: [
@@ -45,7 +45,7 @@ export async function buildStatusPanel(): Promise<{
               style: "secondary",
             },
             {
-              id: "create_worker",
+              id: "create_agent",
               label: "新建 Agent",
               emoji: "➕",
               style: "success",
@@ -60,7 +60,7 @@ export async function buildStatusPanel(): Promise<{
         },
       ],
     };
-  const lines = workers.map((w: any) => {
+  const lines = agents.map((w: any) => {
     let status: string;
     if (w.status !== "active") {
       status = "💀 已断开";
@@ -73,7 +73,7 @@ export async function buildStatusPanel(): Promise<{
     }
     return `**${w.name}** — ${status}\n📁 \`${w.project}\``;
   });
-  const activeWorkers = workers.filter((w: any) => w.status === "active");
+  const activeAgents = agents.filter((w: any) => w.status === "active");
   const row1: any[] = [
     {
       id: "refresh_status",
@@ -82,7 +82,7 @@ export async function buildStatusPanel(): Promise<{
       style: "primary",
     },
   ];
-  if (activeWorkers.length > 0) {
+  if (activeAgents.length > 0) {
     row1.push(
       {
         id: "show_peek_menu",
@@ -112,7 +112,7 @@ export async function buildStatusPanel(): Promise<{
       style: "secondary",
     },
     {
-      id: "create_worker",
+      id: "create_agent",
       label: "新建 Agent",
       emoji: "➕",
       style: "success",
@@ -139,7 +139,7 @@ export async function handleMgmtButton(
   messageId?: string,
   discord?: Client
 ): Promise<{ text: string; components?: any[] } | null> {
-  if (id === "list_workers") {
+  if (id === "list_agents") {
     return await buildStatusPanel();
   }
 
@@ -164,21 +164,21 @@ export async function handleMgmtButton(
   if (id === "show_kill_menu") {
     const result = await runManager("list");
     if (!result.ok) return { text: `❌ ${result.error}` };
-    const activeWorkers = (result.workers || []).filter(
+    const activeAgents = (result.agents || []).filter(
       (w: any) => w.status === "active"
     );
-    if (activeWorkers.length === 0)
+    if (activeAgents.length === 0)
       return { text: "📭 没有可销毁的 Agent。" };
     return {
       text: "**🗑 选择要销毁的 Agent：**",
       components: [
         {
           type: "select",
-          id: "kill_worker",
+          id: "kill_agent",
           placeholder: "选择 Agent",
-          options: activeWorkers.map((w: any) => ({
+          options: activeAgents.map((w: any) => ({
             label: w.name,
-            value: w.name.replace("worker-", ""),
+            value: w.name.replace("agent-", ""),
           })),
         },
       ],
@@ -188,12 +188,12 @@ export async function handleMgmtButton(
   if (id === "show_peek_menu") {
     const result = await runManager("list");
     if (!result.ok) return { text: `❌ ${result.error}` };
-    const activeWorkers = (result.workers || []).filter(
+    const activeAgents = (result.agents || []).filter(
       (w: any) => w.status === "active"
     );
     const options = [
       { label: "🎛 大总管 (master)", value: "master" },
-      ...activeWorkers.map((w: any) => ({
+      ...activeAgents.map((w: any) => ({
         label: w.name,
         value: w.name,
       })),
@@ -203,7 +203,7 @@ export async function handleMgmtButton(
       components: [
         {
           type: "select",
-          id: "peek_worker",
+          id: "peek_agent",
           placeholder: "选择 Agent",
           options,
         },
@@ -224,7 +224,7 @@ export async function handleMgmtButton(
           type: "buttons",
           buttons: [
             {
-              id: "list_workers",
+              id: "list_agents",
               label: "Agent 状态",
               emoji: "📊",
               style: "primary",
@@ -245,7 +245,7 @@ export async function handleMgmtButton(
         components: [{
           type: "buttons",
           buttons: [
-            { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
+            { id: "list_agents", label: "Agent 状态", emoji: "📊", style: "primary" },
           ],
         }],
       };
@@ -292,7 +292,7 @@ export async function handleMgmtButton(
       type: "buttons",
       buttons: [
         { id: "cron_history", label: "执行历史", emoji: "📜", style: "secondary" },
-        { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "primary" },
+        { id: "list_agents", label: "Agent 状态", emoji: "📊", style: "primary" },
       ],
     });
 
@@ -334,7 +334,7 @@ export async function handleMgmtButton(
         type: "buttons",
         buttons: [
           { id: "show_cron_menu", label: "定时任务", emoji: "⏰", style: "primary" },
-          { id: "list_workers", label: "Agent 状态", emoji: "📊", style: "secondary" },
+          { id: "list_agents", label: "Agent 状态", emoji: "📊", style: "secondary" },
         ],
       }],
     };
@@ -376,17 +376,17 @@ export async function handleMgmtSelect(
   chatId: string,
   discord: Client
 ): Promise<{ text: string; components?: any[] } | null> {
-  if (id === "kill_worker") {
+  if (id === "kill_agent") {
     const result = await runManager("kill", value);
     if (!result.ok) return { text: `❌ ${result.error}` };
     return {
-      text: `🗑️ \`${result.worker}\` 已销毁。`,
+      text: `🗑️ \`${result.agent}\` 已销毁。`,
       components: [
         {
           type: "buttons",
           buttons: [
             {
-              id: "list_workers",
+              id: "list_agents",
               label: "Agent 状态",
               emoji: "📊",
               style: "primary",
@@ -398,7 +398,7 @@ export async function handleMgmtSelect(
               style: "secondary",
             },
             {
-              id: "create_worker",
+              id: "create_agent",
               label: "新建 Agent",
               emoji: "➕",
               style: "success",
@@ -438,7 +438,7 @@ export async function handleMgmtSelect(
     };
   }
 
-  if (id === "peek_worker") {
+  if (id === "peek_agent") {
     const windowName = value;
     const pngPath = await tmuxScreenshot(windowName);
     if (!pngPath) {
@@ -459,7 +459,7 @@ export async function handleMgmtSelect(
               style: "primary",
             },
             {
-              id: "list_workers",
+              id: "list_agents",
               label: "Agent 状态",
               emoji: "📊",
               style: "secondary",

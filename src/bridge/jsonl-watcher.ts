@@ -28,7 +28,7 @@ interface WatcherState {
   toolMsgId: string | null;
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
-  workerName: string;
+  agentName: string;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -124,10 +124,10 @@ function getJsonlPath(cwd: string, sessionId: string): string {
 }
 
 export async function startWatching(
-  workerName: string, cwd: string, sessionId: string,
+  agentName: string, cwd: string, sessionId: string,
   channelId: string, discord: Client
 ) {
-  stopWatching(workerName);
+  stopWatching(agentName);
   const jsonlPath = getJsonlPath(cwd, sessionId);
   if (!existsSync(jsonlPath)) return;
 
@@ -140,7 +140,7 @@ export async function startWatching(
     toolMsgId: null,
     textQueue: [],
     textTimer: null,
-    workerName,
+    agentName,
   };
 
   // 处理新增的 JSONL 数据（加锁防止并发重复处理）
@@ -240,25 +240,25 @@ export async function startWatching(
 
   // 空闲检测由 Claude Code hooks (Stop/Notification) 处理，不再用 tmux 屏幕比较
 
-  watchers.set(workerName, { ...state, _pollInterval: pollInterval } as any);
-  console.log(`👁 开始监听: ${workerName} → ${jsonlPath}`);
+  watchers.set(agentName, { ...state, _pollInterval: pollInterval } as any);
+  console.log(`👁 开始监听: ${agentName} → ${jsonlPath}`);
 }
 
-export function stopWatching(workerName: string) {
-  const state = watchers.get(workerName);
+export function stopWatching(agentName: string) {
+  const state = watchers.get(agentName);
   if (state) {
     state.watcher.close();
     if (state.textTimer) clearTimeout(state.textTimer);
     if ((state as any)._pollInterval) clearInterval((state as any)._pollInterval);
-    watchers.delete(workerName);
+    watchers.delete(agentName);
   }
 }
 
 /** 根据 channelId 查找并停止 watcher（websocket 断开时兜底用） */
 export function stopWatchingByChannel(channelId: string): boolean {
-  for (const [workerName, state] of watchers.entries()) {
+  for (const [agentName, state] of watchers.entries()) {
     if (state.channelId === channelId) {
-      stopWatching(workerName);
+      stopWatching(agentName);
       return true;
     }
   }

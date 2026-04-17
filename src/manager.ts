@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
- * Worker Manager CLI
+ * Agent Manager CLI
  *
- * 管理 Claude Code worker 的生命周期：创建、恢复、销毁、列表。
+ * 管理 Claude Code agent 的生命周期：创建、恢复、销毁、列表。
  * 可被大总管通过 Bash 调用，也可独立命令行使用。
  *
  * Usage:
@@ -24,13 +24,13 @@ import { join } from "path";
 import {
   TMUX_SOCK as SOCK,
   MASTER_SESSION,
-  WORKER_PREFIX,
+  AGENT_PREFIX,
   tmuxRaw,
   windowTarget,
   tmuxSendLine,
   tmuxCapture,
   isIdle,
-  listWorkerWindows as listWorkerWindowsShared,
+  listAgentWindows as listAgentWindowsShared,
   ensureSocketDir,
   hasClaudePromptToConfirm,
 } from "./lib/tmux-helper.js";
@@ -52,7 +52,7 @@ const CATEGORY_NAME = "agents";
 // Registry
 // ============================================================
 
-interface WorkerInfo {
+interface AgentInfo {
   project: string;
   purpose: string;
   created: string;
@@ -70,16 +70,34 @@ interface WorkerInfo {
 
 interface Registry {
   socket: string;
-  workers: Record<string, WorkerInfo>;
+  agents: Record<string, AgentInfo>;
 }
 
 async function loadRegistry(): Promise<Registry> {
   if (!existsSync(REGISTRY_PATH)) {
-    const empty: Registry = { socket: SOCK, workers: {} };
+    const empty: Registry = { socket: SOCK, agents: {} };
     await saveRegistry(empty);
     return empty;
   }
-  return JSON.parse(await readFile(REGISTRY_PATH, "utf-8"));
+  const raw = JSON.parse(await readFile(REGISTRY_PATH, "utf-8"));
+  // 迁移：旧版 registry 用 "workers" 字段 + "worker-" 前缀 key
+  if (raw.workers && !raw.agents) {
+    raw.agents = {};
+    for (const [key, val] of Object.entries(raw.workers)) {
+      const newKey = key.replace(/^worker-/, "agent-");
+      raw.agents[newKey] = val;
+    }
+    delete raw.workers;
+    await writeFile(REGISTRY_PATH, JSON.stringify(raw, null, 2));
+    // 同时重命名 tmux window
+    for (const oldName of Object.keys(raw.agents)) {
+      const oldTmux = oldName.replace(/^agent-/, "worker-");
+      if (oldTmux !== oldName) {
+        await tmuxRaw(["rename-window", "-t", `${MASTER_SESSION}:${oldTmux}`, oldName]).catch(() => {});
+      }
+    }
+  }
+  return raw as Registry;
 }
 
 async function saveRegistry(reg: Registry) {
@@ -90,11 +108,11 @@ async function saveRegistry(reg: Registry) {
 import { bridgeRequest } from "./lib/bridge-client.js";
 
 async function windowExists(name: string): Promise<boolean> {
-  const windows = await listWorkerWindowsShared();
+  const windows = await listAgentWindowsShared();
   return windows.includes(name);
 }
 
-async function isWorkerIdle(name: string): Promise<boolean> {
+async function isAgentIdle(name: string): Promise<boolean> {
   return isIdle(windowTarget(name));
 }
 
@@ -218,7 +236,7 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
 const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\\x00-\x1f\x7f]/;
 
 function normalizeName(raw: string): string {
-  return `${WORKER_PREFIX}${raw.replace(WORKER_PREFIX, "").toLowerCase()}`;
+  return `${AGENT_PREFIX}${raw.replace(AGENT_PREFIX, "").toLowerCase()}`;
 }
 
 /**
@@ -226,7 +244,7 @@ function normalizeName(raw: string): string {
  * 允许 CJK 等 Unicode 字符（Discord 频道名支持，tmux 也支持）。
  */
 function assertValidNewName(raw: string): void {
-  const cleaned = raw.replace(WORKER_PREFIX, "");
+  const cleaned = raw.replace(AGENT_PREFIX, "");
   if (cleaned.length === 0 || cleaned.length > 48) {
     throw new Error(`agent 名称长度必须在 1~48 之间: "${raw}"`);
   }
@@ -293,7 +311,7 @@ async function cmdCreate(
 ) {
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
-  const channelName = tmuxName.replace(WORKER_PREFIX, "");
+  const channelName = tmuxName.replace(AGENT_PREFIX, "");
 
   // 校验权限预设
   if (perms.preset && !isKnownPreset(perms.preset)) {
@@ -353,7 +371,7 @@ async function cmdCreate(
       await Bun.sleep(500);
       continue;
     }
-    if (await isWorkerIdle(tmuxName)) {
+    if (await isAgentIdle(tmuxName)) {
       ready = true;
       break;
     }
@@ -361,7 +379,7 @@ async function cmdCreate(
 
   // 6. 更新 registry
   const reg = await loadRegistry();
-  reg.workers[tmuxName] = {
+  reg.agents[tmuxName] = {
     project: dir,
     purpose,
     created: new Date().toISOString(),
@@ -377,7 +395,7 @@ async function cmdCreate(
 
   output({
     ok: true,
-    worker: tmuxName,
+    agent: tmuxName,
     channelId,
     channelName,
     sessionId,
@@ -402,7 +420,7 @@ async function cmdResume(
   }
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
-  const channelName = tmuxName.replace(WORKER_PREFIX, "");
+  const channelName = tmuxName.replace(AGENT_PREFIX, "");
 
   if (perms.preset && !isKnownPreset(perms.preset)) {
     output({
@@ -472,7 +490,7 @@ async function cmdResume(
       await Bun.sleep(500);
       continue;
     }
-    if (await isWorkerIdle(tmuxName)) {
+    if (await isAgentIdle(tmuxName)) {
       ready = true;
       break;
     }
@@ -480,7 +498,7 @@ async function cmdResume(
 
   // 更新 registry
   const reg = await loadRegistry();
-  reg.workers[tmuxName] = {
+  reg.agents[tmuxName] = {
     project: dir || resolvedDir.replace(process.env.HOME || "", "~"),
     purpose: `resumed: ${sessionId.slice(0, 8)}`,
     created: new Date().toISOString(),
@@ -537,7 +555,7 @@ async function cmdResume(
 
   output({
     ok: true,
-    worker: tmuxName,
+    agent: tmuxName,
     channelId,
     channelName,
     sessionId,
@@ -560,27 +578,27 @@ async function cmdKill(name: string) {
 
   // 删除对应的 Discord 频道
   const reg = await loadRegistry();
-  const info = reg.workers[tmuxName];
+  const info = reg.agents[tmuxName];
   if (info?.channelId) {
     try {
       await bridgeRequest({ type: "delete_channel", channelId: info.channelId });
     } catch { /* non-critical */ }
   }
-  if (reg.workers[tmuxName]) {
-    reg.workers[tmuxName].status = "stopped";
+  if (reg.agents[tmuxName]) {
+    reg.agents[tmuxName].status = "stopped";
   }
 
   // 清理 registry 里同名的大小写变体（历史遗留）
-  for (const key of Object.keys(reg.workers)) {
+  for (const key of Object.keys(reg.agents)) {
     if (key.toLowerCase() === tmuxName && key !== tmuxName) {
-      delete reg.workers[key];
+      delete reg.agents[key];
     }
   }
   await saveRegistry(reg);
 
   output({
     ok: true,
-    worker: tmuxName,
+    agent: tmuxName,
     message: `${tmuxName} 已销毁。`,
   });
 }
@@ -715,7 +733,7 @@ async function startClaudeInWindow(
 async function cmdRestart(name?: string) {
   const reg = await loadRegistry();
 
-  // 确定要重启的 worker 列表
+  // 确定要重启的 agent 列表
   let targets: string[];
   if (name) {
     const tmuxName = normalizeName(name);
@@ -725,8 +743,8 @@ async function cmdRestart(name?: string) {
     }
     targets = [tmuxName];
   } else {
-    // 重启所有 worker
-    targets = await listWorkerWindowsShared();
+    // 重启所有 agent
+    targets = await listAgentWindowsShared();
   }
 
   if (targets.length === 0) {
@@ -737,7 +755,7 @@ async function cmdRestart(name?: string) {
   const results: { name: string; ok: boolean; error?: string }[] = [];
 
   for (const tmuxName of targets) {
-    const info = reg.workers[tmuxName];
+    const info = reg.agents[tmuxName];
     if (!info || !info.sessionId || !info.channelId) {
       results.push({ name: tmuxName, ok: false, error: "registry 中缺少 sessionId 或 channelId" });
       continue;
@@ -751,7 +769,7 @@ async function cmdRestart(name?: string) {
     }
 
     // 2. 重新启动 Claude Code — 沿用 registry 中存储的权限配置
-    const displayName = info.displayName || tmuxName.replace(WORKER_PREFIX, "");
+    const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
     const cmd = buildClaudeCommand({
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
@@ -777,15 +795,15 @@ async function cmdRestart(name?: string) {
 }
 
 async function cmdList() {
-  const tmuxWindows = await listWorkerWindowsShared();
+  const tmuxWindows = await listAgentWindowsShared();
   const reg = await loadRegistry();
 
-  const workers: Record<string, unknown>[] = [];
+  const agents: Record<string, unknown>[] = [];
 
   for (const name of tmuxWindows) {
-    const idle = await isWorkerIdle(name);
-    const info = reg.workers[name];
-    workers.push({
+    const idle = await isAgentIdle(name);
+    const info = reg.agents[name];
+    agents.push({
       name,
       status: "active",
       idle,
@@ -797,9 +815,9 @@ async function cmdList() {
   }
 
   // 也列出 registry 里 active 但 tmux 已死的
-  for (const [name, info] of Object.entries(reg.workers)) {
+  for (const [name, info] of Object.entries(reg.agents)) {
     if (info.status === "active" && !tmuxWindows.includes(name)) {
-      workers.push({
+      agents.push({
         name,
         status: "dead",
         idle: false,
@@ -811,7 +829,7 @@ async function cmdList() {
     }
   }
 
-  output({ ok: true, workers });
+  output({ ok: true, agents });
 }
 
 async function cmdSessions(search?: string) {
@@ -820,7 +838,7 @@ async function cmdSessions(search?: string) {
   // 从 registry 建立 sessionId → displayName 映射
   const reg = await loadRegistry();
   const nameMap = new Map<string, string>();
-  for (const info of Object.values(reg.workers)) {
+  for (const info of Object.values(reg.agents)) {
     if (info.sessionId && info.displayName) {
       nameMap.set(info.sessionId, info.displayName);
     }
@@ -969,7 +987,7 @@ async function cmdCronHistory(nameOrId?: string) {
 // 权限管理
 // ============================================================
 
-function describePerm(info: WorkerInfo): {
+function describePerm(info: AgentInfo): {
   preset: string;
   raw?: string;
   tools: string[];
@@ -992,7 +1010,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
   if (!sub || sub === "list") {
     // 列出所有 agent 的权限
     const reg = await loadRegistry();
-    const rows = Object.entries(reg.workers)
+    const rows = Object.entries(reg.agents)
       .filter(([, info]) => info.status === "active")
       .map(([name, info]) => {
         const d = describePerm(info);
@@ -1020,7 +1038,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
     }
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
-    const info = reg.workers[tmuxName];
+    const info = reg.agents[tmuxName];
     if (!info) {
       output({ ok: false, error: `找不到 agent: ${tmuxName}` });
       return;
@@ -1065,7 +1083,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
 
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
-    const info = reg.workers[tmuxName];
+    const info = reg.agents[tmuxName];
     if (!info) {
       output({ ok: false, error: `找不到 agent: ${tmuxName}` });
       return;
@@ -1081,7 +1099,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
       preset: d.preset,
       disallowedRaw: d.raw,
       tools: d.tools,
-      hint: `新配置已写入 registry。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(WORKER_PREFIX, "")}`,
+      hint: `新配置已写入 registry。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(AGENT_PREFIX, "")}`,
     });
     return;
   }
@@ -1094,7 +1112,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
     }
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
-    const info = reg.workers[tmuxName];
+    const info = reg.agents[tmuxName];
     if (!info) {
       output({ ok: false, error: `找不到 agent: ${tmuxName}` });
       return;
@@ -1106,7 +1124,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
       ok: true,
       agent: tmuxName,
       preset: DEFAULT_PRESET,
-      hint: `已重置为默认预设。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(WORKER_PREFIX, "")}`,
+      hint: `已重置为默认预设。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(AGENT_PREFIX, "")}`,
     });
     return;
   }

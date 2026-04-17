@@ -161,7 +161,7 @@ export async function discordCreateChannel(
   const ch = await guild.channels.create({
     name,
     parent: parentId,
-    topic: `Claude Code worker channel`,
+    topic: `Claude Code agent channel`,
   });
   return ch.id;
 }

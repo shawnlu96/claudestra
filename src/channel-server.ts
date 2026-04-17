@@ -294,7 +294,7 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
     },
     {
       name: "send_to_agent",
-      description: `Send a message to another agent by worker name. Use this for agent-to-agent collaboration.
+      description: `Send a message to another agent by name. Use this for agent-to-agent collaboration.
 
 IMPORTANT — 主动汇报义务（必读）：
 1. 发完消息后，你 **必须** 用 fetch_messages 轮询 targetChannelId 拿对方的回复（首次 sleep 10-15s，之后每 10s 一次，最多 5 次）。
@@ -308,13 +308,13 @@ IMPORTANT — 主动汇报义务（必读）：
 
 Examples:
 - send_to_agent({ target: "predict", text: "帮我分析 ~/data/sales.csv，返回摘要" })
-- send_to_agent({ target: "worker-researcher", text: "X 的调研结果如何？" })`,
+- send_to_agent({ target: "researcher", text: "X 的调研结果如何？" })`,
       inputSchema: {
         type: "object" as const,
         properties: {
           target: {
             type: "string",
-            description: "Target agent name, e.g. 'predict' or 'worker-predict'",
+            description: "Target agent name, e.g. 'predict'",
           },
           text: {
             type: "string",

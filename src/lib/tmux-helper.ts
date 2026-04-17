@@ -1,13 +1,13 @@
 /**
  * tmux helper — 共享工具
  *
- * 所有 worker 都是 `master` session 里的 window（iTerm2 -CC 模式下每个是一个 tab）。
+ * 所有 agent 都是 `master` session 里的 window（iTerm2 -CC 模式下每个是一个 tab）。
  * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
  */
 
 export const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 export const MASTER_SESSION = "master";
-export const WORKER_PREFIX = "worker-";
+export const AGENT_PREFIX = "agent-";
 
 /** 执行 tmux 命令，返回 stdout。失败不抛错，返回空字符串。 */
 export async function tmuxRaw(args: string[]): Promise<string> {
@@ -25,7 +25,7 @@ export function tmuxFire(args: string[]): void {
   Bun.spawn(["tmux", "-S", TMUX_SOCK, ...args]);
 }
 
-/** tmux window target: `master:worker-xxx` */
+/** tmux window target: `master:agent-xxx` */
 export function windowTarget(name: string): string {
   return `${MASTER_SESSION}:${name}`;
 }
@@ -98,10 +98,10 @@ export async function listWindows(): Promise<string[]> {
   return out.split("\n");
 }
 
-/** 列出所有 worker-* window */
-export async function listWorkerWindows(): Promise<string[]> {
+/** 列出所有 agent-* window */
+export async function listAgentWindows(): Promise<string[]> {
   const windows = await listWindows();
-  return windows.filter((w) => w.startsWith(WORKER_PREFIX));
+  return windows.filter((w) => w.startsWith(AGENT_PREFIX));
 }
 
 /** master session 是否存在 */

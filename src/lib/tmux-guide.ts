@@ -48,7 +48,7 @@ export function printTmuxGuide(): void {
   p("");
   p(`${c.dim}发生的事：${c.reset}`);
   p(`  ${c.dim}•${c.reset} iTerm2 弹出一个新窗口，顶部是一排 tab`);
-  p(`  ${c.dim}•${c.reset} 每个 agent 占一个 tab（master / worker-xxx / ...）`);
+  p(`  ${c.dim}•${c.reset} 每个 agent 占一个 tab（master / agent-xxx / ...）`);
   p(`  ${c.dim}•${c.reset} 用 ${c.yellow}⌘⇧[${c.reset} / ${c.yellow}⌘⇧]${c.reset} 或鼠标切换 tab`);
   p(`  ${c.dim}•${c.reset} 关掉窗口 = ${c.bold}detach${c.reset}（不是 kill，agent 继续跑）`);
   p("");
@@ -74,7 +74,7 @@ export function printTmuxGuide(): void {
   p(`  ${c.yellow}Ctrl-B  p${c.reset}      上一个 window`);
   p(`  ${c.yellow}Ctrl-B  w${c.reset}      弹出 window 列表，方向键选，Enter 确认`);
   p(`  ${c.yellow}Ctrl-B  0${c.reset}      跳到 window 0（大总管）`);
-  p(`  ${c.yellow}Ctrl-B  1${c.reset}      跳到 window 1（第一个 worker）`);
+  p(`  ${c.yellow}Ctrl-B  1${c.reset}      跳到 window 1（第一个 agent）`);
   p(`  ${c.yellow}Ctrl-B  ,${c.reset}      重命名当前 window`);
   p(`  ${c.yellow}Ctrl-B  d${c.reset}      ${c.bold}detach${c.reset}（离开 tmux 但 agent 继续跑）`);
   p(`  ${c.yellow}Ctrl-B  [${c.reset}      进入滚动模式（方向键/PgUp 翻历史，q 退出）`);

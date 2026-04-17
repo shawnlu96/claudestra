@@ -267,7 +267,7 @@ async function executeJob(job: CronJob): Promise<void> {
     await Bun.sleep(3000);
 
     // 3. 发送 prompt（通过 tmux send-keys）
-    const tmuxTarget = `master:worker-${agentName}`;
+    const tmuxTarget = `master:agent-${agentName}`;
     await tmuxSendLine(tmuxTarget, job.prompt);
 
     // 4. 等待完成（轮询 idle 状态）
