@@ -786,6 +786,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 // ============================================================
 
 // ── Hook HTTP 处理 ──
+// channelId → 最近一次完成通知时间戳，用于去抖
+const lastCompletionSent = new Map<string, number>();
+const COMPLETION_DEDUPE_MS = 10_000; // 10 秒内不重复发完成通知
+
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
     const body = await req.json() as { channelId: string; event: string };
@@ -794,10 +798,22 @@ async function handleHookRequest(req: Request): Promise<Response> {
       return new Response("Missing channelId or event", { status: 400 });
     }
 
-    if (event === "stop") {
-      console.log(`🏁 Hook 收到 stop: channel=${channelId}`);
+    // 所有 hook 事件都停 typing / 清 safety timer
+    // 兼容旧版 hook 发的 "stop"
+    if (event === "Stop" || event === "StopFailure" || event === "Notification" || event === "stop") {
+      console.log(`🏁 Hook 收到 ${event}: channel=${channelId}`);
       stopTyping(channelId);
       clearSafetyTimer(channelId);
+
+      // 只有 Stop / StopFailure 触发完成通知，Notification 不触发（避免 Stop+Notification 连发两次）
+      // 同时 10 秒内去抖，防止 Claude Code 重复 fire Stop 事件
+      const shouldNotify = event === "Stop" || event === "StopFailure" || event === "stop";
+      const now = Date.now();
+      const last = lastCompletionSent.get(channelId) || 0;
+      if (shouldNotify && now - last < COMPLETION_DEDUPE_MS) {
+        console.log(`🏁 去抖跳过（${Math.round((now - last) / 1000)}s 内已发过）: channel=${channelId}`);
+        return new Response("ok");
+      }
 
       const statusMsgId = activeStatusMessages.get(channelId);
       try {
@@ -812,11 +828,14 @@ async function handleHookRequest(req: Request): Promise<Response> {
             } catch { /* non-critical */ }
             activeStatusMessages.delete(channelId);
           }
-          // 始终发完成通知消息 + @ 用户（确保用户手机收到推送）
-          const mention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
-          if (mention) {
-            await textCh.send(`${randomUmaDone()} ${mention}`);
-            console.log(`🏁 完成通知已发送: channel=${channelId}`);
+          // 发完成通知消息 + @ 用户（仅 Stop/StopFailure）
+          if (shouldNotify) {
+            const mention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
+            if (mention) {
+              await textCh.send(`${randomUmaDone()} ${mention}`);
+              lastCompletionSent.set(channelId, now);
+              console.log(`🏁 完成通知已发送: channel=${channelId}`);
+            }
           }
         }
       } catch (e) {

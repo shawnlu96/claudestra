@@ -32,14 +32,15 @@ async function main() {
 
   const event = data.hook_event_name;
 
-  // Stop — Claude 完成回复
-  // Notification — Claude 等待输入（覆盖 Ctrl+C 打断等场景）
+  // Stop — Claude 完成回复（发完成通知）
+  // StopFailure — Claude 异常退出（也发完成通知）
+  // Notification — Claude 等待输入（只停 typing，不重发完成通知）
   if (event === "Stop" || event === "StopFailure" || event === "Notification") {
     try {
       await fetch(`http://localhost:${BRIDGE_PORT}/hook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId, event: "stop" }),
+        body: JSON.stringify({ channelId, event }), // 传递原事件名，不再硬编码 "stop"
       });
     } catch { /* bridge 可能未运行 */ }
   }
