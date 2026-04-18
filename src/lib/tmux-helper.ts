@@ -87,7 +87,30 @@ export function hasClaudePromptToConfirm(pane: string): boolean {
   );
 }
 
-/** 列出 master session 下所有 window 名 */
+/**
+ * 检测运行时权限弹窗（区别于启动时的确认弹窗）。
+ * 运行时的弹窗需要用户主动判断是否允许，不能自动确认。
+ * 典型 pattern: "Do you want to ..." + "❯ 1." 选项菜单。
+ *
+ * 返回弹窗的描述（供 Discord 显示），没有返回 null。
+ */
+export function detectRuntimePermissionPrompt(pane: string): string | null {
+  // 必须有选项菜单才算弹窗
+  if (!pane.includes("❯ 1.")) return null;
+
+  const patterns = [
+    { re: /Do you want to make this edit to (.+?)\?/, label: "Edit 文件" },
+    { re: /Do you want to create (.+?)\?/, label: "创建文件" },
+    { re: /Do you want to (?:run|execute|proceed with) (.+?)\?/, label: "执行命令" },
+    { re: /Do you want to allow (.+?)\?/, label: "允许操作" },
+    { re: /Do you want to proceed\?/, label: "执行操作" },
+  ];
+  for (const { re, label } of patterns) {
+    const m = pane.match(re);
+    if (m) return m[1] ? `${label}: ${m[1].slice(0, 100)}` : label;
+  }
+  return null;
+}
 export async function listWindows(): Promise<string[]> {
   const out = await tmuxRaw([
     "list-windows",

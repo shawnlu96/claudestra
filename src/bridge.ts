@@ -43,6 +43,7 @@ import {
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking } from "./bridge/jsonl-watcher.js";
+import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
 
 // ============================================================
 // 类型定义
@@ -272,6 +273,9 @@ discord.once("ready", async () => {
   } catch (err) {
     console.error("Slash Commands 注册失败:", err);
   }
+
+  // 启动权限弹窗 watcher
+  startPermissionWatcher(ALLOWED_USER_IDS, discord);
 });
 
 // ============================================================
@@ -503,6 +507,52 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
           clearSafetyTimer(targetChannelId);
         } catch (e) {
           console.error(`⚡ 打断流程异常:`, e);
+        }
+        return;
+      }
+
+      // 权限弹窗响应按钮
+      if (id.startsWith("perm_allow:") || id.startsWith("perm_allow_session:") || id.startsWith("perm_deny:")) {
+        const [action, targetChannelId] = id.split(":");
+        // Claude Code 权限弹窗的选项键：1=允许 2=允许+不再问 3=拒绝
+        const key = action === "perm_allow" ? "1"
+                  : action === "perm_allow_session" ? "2"
+                  : "3";
+        const labelMap: Record<string, string> = {
+          perm_allow: "✅ 已允许",
+          perm_allow_session: "✅ 已允许（本会话不再问）",
+          perm_deny: "❌ 已拒绝",
+        };
+        console.log(`🔔 权限响应: channel=${targetChannelId} action=${action} key=${key}`);
+        try {
+          const listResult = await runManager("list");
+          const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
+          if (!agent) {
+            await interaction.followUp({ content: "❌ 找不到对应 agent", ephemeral: true }).catch(() => {});
+            return;
+          }
+          const proc = Bun.spawn(
+            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, key, "Enter"],
+            { stdout: "pipe", stderr: "pipe" }
+          );
+          await proc.exited;
+          if (proc.exitCode !== 0) {
+            const stderr = await new Response(proc.stderr).text();
+            console.error(`🔔 tmux send-keys 失败: ${stderr}`);
+          }
+
+          // 编辑原消息显示已处理（保留指纹让下次 poll 自然清理，避免竞争条件）
+          const msgId = permissionMessages.get(targetChannelId);
+          if (msgId) {
+            try {
+              const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
+              const sm = await ch.messages.fetch(msgId);
+              await sm.edit({ content: `🔔 ${labelMap[action]}`, components: [] });
+            } catch { /* non-critical */ }
+            permissionMessages.delete(targetChannelId);
+          }
+        } catch (e) {
+          console.error(`🔔 权限响应流程异常:`, e);
         }
         return;
       }
