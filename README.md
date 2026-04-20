@@ -58,7 +58,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 - **Terminal screenshots** — ANSI-to-PNG rendering so you can peek at any session even with the screen locked.
 - **One-click interrupt** — a button in Discord sends `Ctrl+C` to the target session.
 - **Idle detection** — Claude Code `Stop` / `Notification` hooks drive Discord typing indicators precisely.
-- **Self-updating** — `bun src/manager.ts update` does `git pull` + `pm2 restart all` via natural language in Discord.
+- **Self-updating** — `bun src/manager.ts update` does `git pull` + `pm2 restart ecosystem.config.cjs` (only Claudestra's 3 processes; other pm2 apps you run are untouched) via natural language in Discord.
 - **Safety rails** — `--disallowedTools` blocks `rm -rf`, `git push --force`, `chmod 777`, and other destructive commands.
 
 ## Requirements
@@ -146,7 +146,7 @@ bun src/manager.ts cron-history [name|id]
 
 # Versioning
 bun src/manager.ts version   # show current version and whether an update is available
-bun src/manager.ts update    # git pull && pm2 restart all
+bun src/manager.ts update    # git pull && pm2 restart ecosystem.config.cjs (Claudestra's 3 processes only)
 ```
 
 ## Configuration

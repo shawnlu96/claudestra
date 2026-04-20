@@ -105,7 +105,7 @@ bun src/manager.ts cron-history [name|id]
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新
-bun src/manager.ts update    # git pull + pm2 restart all
+bun src/manager.ts update    # git pull + pm2 restart ecosystem.config.cjs（只重启 Claudestra 自己 3 个进程）
 
 # 测试
 bun test

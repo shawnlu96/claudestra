@@ -251,7 +251,7 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 用户可以让你检查版本或升级：
 - "检查一下有没有更新" → `bun ../src/manager.ts version`
 - "升级一下" / "更新代码" → `bun ../src/manager.ts update`
-- 升级会执行 `git pull` + `pm2 restart all`，执行前告诉用户将重启服务
+- 升级会执行 `git pull` + `pm2 restart ecosystem.config.cjs`（只重启 Claudestra 自己的 3 个进程，用户 pm2 里跑的其他服务不受影响），执行前告诉用户将重启服务
 
 自动更新默认开启（Claudestra 每 30 分钟查一次，Claude Code 每周查一次），只在所有 agent 空闲时才会真正升级：
 
