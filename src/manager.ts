@@ -1421,6 +1421,63 @@ async function checkPm2Startup(): Promise<string | null> {
   return `pm2 开机自启未配置。请跑一次下面的 sudo 命令，机器重启后服务才会自动回来：\n${match[1]}`;
 }
 
+async function cmdInviteLink(args: string[]) {
+  const token = process.env.DISCORD_BOT_TOKEN || "";
+  if (!token) {
+    output({ ok: false, error: "DISCORD_BOT_TOKEN 未设置，无法生成邀请链接" });
+    return;
+  }
+
+  // Bot token 第一段是 base64(appId)。appId === bot user ID === client_id
+  let appId = "";
+  try {
+    const firstSeg = token.split(".")[0];
+    appId = Buffer.from(firstSeg, "base64").toString("utf-8");
+    if (!/^\d{17,20}$/.test(appId)) throw new Error("decoded not snowflake");
+  } catch {
+    output({ ok: false, error: "从 DISCORD_BOT_TOKEN 解出 App ID 失败。token 格式可能不对" });
+    return;
+  }
+
+  const isPeer = args.includes("--peer");
+
+  // Discord 权限 bitfield：https://discord.com/developers/docs/topics/permissions
+  // Owner 完整权限（建频道、发消息、附件、反应等）
+  const OWNER_PERMS =
+    (1 << 10) +   // VIEW_CHANNEL       = 1024
+    (1 << 11) +   // SEND_MESSAGES      = 2048
+    (1 << 16) +   // READ_MESSAGE_HISTORY = 65536
+    (1 <<  4) +   // MANAGE_CHANNELS    = 16
+    (1 << 15) +   // ATTACH_FILES       = 32768
+    (1 <<  6) +   // ADD_REACTIONS      = 64
+    (1 << 14);    // EMBED_LINKS        = 16384
+  // Peer 最小权限（只够读 + 发消息）
+  const PEER_PERMS =
+    (1 << 10) + (1 << 11) + (1 << 16); // VIEW + SEND + READ_HISTORY
+
+  const perms = isPeer ? PEER_PERMS : OWNER_PERMS;
+  const scopes = ["bot", "applications.commands"];
+
+  const params = new URLSearchParams({
+    client_id: appId,
+    permissions: String(perms),
+    scope: scopes.join(" "),
+  });
+  const url = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
+
+  output({
+    ok: true,
+    kind: isPeer ? "peer" : "owner",
+    appId,
+    permissions: perms,
+    scopes,
+    url,
+    message: isPeer
+      ? `这是一个 **peer 最小权限** 邀请链接。把它发给朋友，他点一下就能把你的 bot 加到他的服务器（只能看被邀请进去的频道、发消息、读历史）。`
+      : `这是一个 **owner 完整权限** 邀请链接（含 Manage Channels 等）。你自己安装 bot 到你服务器用这个；别给朋友用它（权限太大）。`,
+  });
+}
+
 async function cmdCost(args: string[]) {
   const { rollupJsonl, projectJsonlPath, findJsonlBySessionId, mergeByModel } =
     await import("./lib/jsonl-cost.js");
@@ -1798,6 +1855,11 @@ switch (cmd) {
     break;
   }
 
+  case "invite-link": {
+    await cmdInviteLink(args);
+    break;
+  }
+
   case "metrics": {
     await cmdMetrics(args);
     break;
@@ -1880,6 +1942,7 @@ switch (cmd) {
         "auto-update claudestra on|off   — Claudestra 自动更新开关（默认 on）",
         "auto-update claude on|off       — Claude Code 自动更新开关（默认 on）",
         "cost [--agent <name>] [--today|--week]  — 统计 agent / 全部 token 用量",
+        "invite-link [--peer]            — 生成 Discord bot 邀请 URL（--peer 最小权限给朋友；不带参数给自己用）",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — 汇总 bridge 事件日志",
         "tmux-screenshot <agent>         — 截图某 agent 的 tmux window（返回 PNG 路径）",
         "tmux-send-keys <agent> <keys...>  — 发按键/文本到 agent（支持 Enter/Escape/Left/C-c 等）",

@@ -61,6 +61,10 @@ bun ../src/manager.ts metrics --today                 # 今天
 bun ../src/manager.ts metrics --agent <name>          # 按 agent 过滤
 bun ../src/manager.ts metrics --raw                   # dump 原始记录（大）
 
+# 生成 Discord bot 邀请链接（v1.8.0+ 跨 Claudestra 协作用）
+bun ../src/manager.ts invite-link --peer     # 给朋友的最小权限链接（只 View / Send / ReadHistory）
+bun ../src/manager.ts invite-link            # 给自己用的完整权限链接（含 Manage Channels）
+
 # Agent tmux 直接控制（给你处理 bridge 识别不了的 TUI modal 时用）
 bun ../src/manager.ts tmux-screenshot <agent>         # 截图 → 返回 PNG 路径，用 Read 工具看
 bun ../src/manager.ts tmux-capture <agent> [lines]    # 读文本 pane 最后 N 行

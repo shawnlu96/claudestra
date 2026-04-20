@@ -520,34 +520,31 @@ async function stepIntents(appId: string): Promise<void> {
 async function stepInviteBot(appId: string): Promise<void> {
   header(5, "邀请 Bot 到你的服务器");
 
-  print("生成一个邀请链接，把 bot 拉进你要管理的 Discord 服务器。");
-  br();
   hint(`还没有 Discord 服务器？先在 Discord 主界面左边 ${c.bold}+${c.reset} 号点一下 → ${c.bold}亲自创建${c.reset} / ${c.bold}Create My Own${c.reset} → 给自己和朋友 → 起个名字。下面再回来继续。`);
   br();
 
-  step("①", `直接点深链到 URL Generator: ${url(`https://discord.com/developers/applications/${appId}/oauth2/url-generator`)}`);
+  // 直接拼好邀请 URL（完整权限：View / Send / ReadHistory / ManageChannels / AttachFiles / AddReactions / EmbedLinks）
+  const OWNER_PERMS =
+    (1 << 10) + (1 << 11) + (1 << 16) + (1 << 4) + (1 << 15) + (1 << 6) + (1 << 14);
+  const params = new URLSearchParams({
+    client_id: appId,
+    permissions: String(OWNER_PERMS),
+    scope: "bot applications.commands",
+  });
+  const inviteUrl = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
 
+  print(`直接给你拼好了邀请链接（已经把需要的 scopes 和权限都勾上了）：`);
   br();
-  step("②", `${c.bold}SCOPES${c.reset} / ${c.bold}范围${c.reset} 勾选这两个：`);
-  print(`     ${c.green}▣${c.reset} bot`);
-  print(`     ${c.green}▣${c.reset} applications.commands`);
-
+  print(`  ${url(inviteUrl)}`);
   br();
-  step("③", `${c.bold}BOT PERMISSIONS${c.reset} / ${c.bold}机器人权限${c.reset} 勾选这 7 个（中文 UI 名字写在括号里）：`);
-  print(`     ${c.green}▣${c.reset} View Channels ${c.dim}(查看频道)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} Send Messages ${c.dim}(发送消息)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} Read Message History ${c.dim}(阅读消息历史)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} ${c.yellow}Manage Channels${c.reset} ${c.dim}(管理频道 — bridge 要自动建 agent 频道)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} Attach Files ${c.dim}(附加文件)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} Add Reactions ${c.dim}(添加反应)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} Embed Links ${c.dim}(嵌入链接)${c.reset}`);
-
-  br();
-  step("④", `复制页面最底部的 ${c.bold}GENERATED URL${c.reset} / ${c.bold}生成的 URL${c.reset}`);
-  step("⑤", `在浏览器打开那个 URL → 选择你的服务器 → ${c.bold}${c.green}授权${c.reset} / ${c.green}Authorize${c.reset}`);
+  step("①", `点上面那个链接（或复制到浏览器）`);
+  step("②", `${c.bold}ADD TO SERVER${c.reset} / ${c.bold}添加到服务器${c.reset} 下拉 → 选择你的服务器`);
+  step("③", `${c.bold}${c.green}Authorize${c.reset} / ${c.green}授权${c.reset}（页面底部）`);
 
   br();
   hint("授权成功后，bot 会出现在服务器成员列表里（离线状态，正常）");
+  hint(`跨 Claudestra 协作（v1.8.0+）：给朋友的最小权限邀请链接，可以事后用 ${c.cyan}bun src/manager.ts invite-link --peer${c.reset} 一键生成`);
+  br();
   await waitEnter();
 }
 
