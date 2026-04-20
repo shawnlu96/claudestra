@@ -52,8 +52,22 @@ export function printTmuxGuide(): void {
   p(`  ${c.dim}•${c.reset} 用 ${c.yellow}⌘⇧[${c.reset} / ${c.yellow}⌘⇧]${c.reset} 或鼠标切换 tab`);
   p(`  ${c.dim}•${c.reset} 关掉窗口 = ${c.bold}detach${c.reset}（不是 kill，agent 继续跑）`);
   p("");
-  p(`${c.dim}前置：iTerm2 → Settings → Profiles → Advanced → Semantic History${c.reset}`);
-  p(`${c.dim}旁边有个 "tmux" section，确保 "tmux integration" 没禁用（默认就是开的）${c.reset}`);
+  p(`${c.bold}${c.yellow}推荐 iTerm2 设置（一次配完，体验最佳）${c.reset}`);
+  p(`打开 ${c.cyan}iTerm2 → Settings → General → tmux${c.reset} 标签页，按下面勾选：`);
+  p("");
+  p(`  ${c.green}☑${c.reset} ${c.bold}Attaching${c.reset}: ${c.cyan}Tabs in the attaching window${c.reset}`);
+  p(`      ${c.dim}(每个 agent 是当前窗口的一个 tab，不另开窗口)${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Automatically bury the tmux client session after connecting${c.reset}`);
+  p(`      ${c.dim}(attach 完把控制会话藏起来，不干扰)${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Use "tmux" profile rather than profile of the connecting session${c.reset}`);
+  p(`      ${c.dim}(tab 用 tmux 专属 profile，字体/配色独立)${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Status bar shows tmux status bar content${c.reset}`);
+  p(`      ${c.dim}(状态栏显示 tmux 的内容而不是 iTerm2 原生)${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Pausing${c.reset}: Pause a pane if it would take more than ${c.yellow}120${c.reset} seconds`);
+  p(`      ${c.dim}(长时间没看的 tab 自动 pause，防止刷屏卡死)${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Warn before pausing${c.reset} + ${c.bold}Unpause automatically${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Mirror tmux paste buffer to local clipboard${c.reset}`);
+  p(`      ${c.dim}(tmux 里复制的东西同步到系统剪贴板)${c.reset}`);
   p("");
 
   // ──────────────────────────────────────────

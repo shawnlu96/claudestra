@@ -121,11 +121,24 @@ async function waitEnter(msg = "完成后按 ENTER 继续") {
   await readLine();
 }
 
-async function prompt(label: string, defaultValue?: string): Promise<string> {
-  const hint = defaultValue ? ` ${c.dim}[${defaultValue}]${c.reset}` : "";
-  write(`${c.bold}${label}${c.reset}${hint}: `);
-  const answer = (await readLine()).trim();
-  return answer || defaultValue || "";
+async function prompt(
+  label: string,
+  defaultValue?: string,
+  validator?: (v: string) => string | null
+): Promise<string> {
+  while (true) {
+    const hint = defaultValue ? ` ${c.dim}[${defaultValue}]${c.reset}` : "";
+    write(`${c.bold}${label}${c.reset}${hint}: `);
+    const answer = (await readLine()).trim() || defaultValue || "";
+    if (validator) {
+      const err = validator(answer);
+      if (err) {
+        fail(err);
+        continue;
+      }
+    }
+    return answer;
+  }
 }
 
 async function promptRequired(label: string, validator?: (v: string) => string | null): Promise<string> {
@@ -607,8 +620,16 @@ async function stepPreferences(existing: Partial<Config>): Promise<{
   br();
 
   const userName = await promptRequired(`${kbd("你的称呼")} ${c.dim}(大总管在 Discord 里怎么叫你)${c.reset}`);
-  const mcpName = await prompt(`${kbd("MCP 服务名")}`, existing.MCP_NAME || "claudestra");
-  const bridgePort = await prompt(`${kbd("Bridge 端口")}`, existing.BRIDGE_PORT || "3847");
+  const mcpName = await prompt(
+    `${kbd("MCP 服务名")} ${c.dim}(只能用英文字母/数字/-/_；不能用中文，claude mcp add 会拒绝)${c.reset}`,
+    existing.MCP_NAME || "claudestra",
+    (v) => /^[A-Za-z0-9_-]+$/.test(v) ? null : "非法：只能用英文字母、数字、- 和 _，不能有中文/空格/其他字符"
+  );
+  const bridgePort = await prompt(
+    `${kbd("Bridge 端口")}`,
+    existing.BRIDGE_PORT || "3847",
+    (v) => /^\d{1,5}$/.test(v) && +v > 0 && +v < 65536 ? null : "端口必须是 1-65535 的整数"
+  );
 
   return { userName, mcpName, bridgePort };
 }
