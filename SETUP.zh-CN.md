@@ -27,6 +27,12 @@ cd ~/repos/claudestra
 bun run setup
 ```
 
+> **提示：** `raw.githubusercontent.com` 有 ~5 分钟缓存。刚发完新版本立即拉安装脚本，建议带个时间戳绕过 CDN 缓存：
+>
+> ```bash
+> curl -fsSL "https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh?t=$(date +%s)" | bash
+> ```
+
 就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、启动 pm2。
 
 ### 装完有什么

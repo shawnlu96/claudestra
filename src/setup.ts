@@ -650,7 +650,7 @@ async function registerHooks(hookCmd: string): Promise<void> {
     hooks: [{ type: "command", command: hookCmd }],
   };
 
-  for (const event of ["Stop", "Notification"]) {
+  for (const event of ["Stop", "StopFailure", "Notification"]) {
     const existing: any[] = settings.hooks[event] || [];
     // 如果已有相同命令的 hook，跳过
     const alreadyRegistered = existing.some((e: any) =>

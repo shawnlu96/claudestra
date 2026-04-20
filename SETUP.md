@@ -27,6 +27,12 @@ cd ~/repos/claudestra
 bun run setup
 ```
 
+> **Tip:** `raw.githubusercontent.com` caches responses for ~5 minutes. If you're grabbing the installer right after a new release, add a cache-busting query string so you definitely get the latest script:
+>
+> ```bash
+> curl -fsSL "https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh?t=$(date +%s)" | bash
+> ```
+
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and starts pm2.
 
 ### What you get out of the box
