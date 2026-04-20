@@ -29,6 +29,17 @@ bun run setup
 
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and starts pm2.
 
+### What you get out of the box
+
+- **Multi-agent orchestration** — the master in `#control` spawns per-agent Discord channels, routes messages, attaches screenshots, handles interrupts.
+- **Auto-update** — Claudestra itself polls for new releases every 30 min; Claude Code CLI every 7 days. Both are toggleable via `bun src/manager.ts auto-update status|<target> on|off`.
+- **Discord slash autocomplete** — every skill in `~/.claude/skills/`, installed plugins, each agent's project-level `<cwd>/.claude/skills/`, plus a curated set of Claude Code built-ins (`/cost`, `/context`, `/compact`, `/mcp`, `/review`, …) show up as Discord slash commands. Rescanned every 30 min.
+- **TUI modal adaptation** — numbered menus (`/model`) and arrow sliders (`/effort`) render as Discord buttons. Anything bridge can't parse → 🤖 button escalates to the master agent.
+- **Cron scheduling** — `cron-add` / `cron-list` / `cron-history`; temporary agents spin up, run a prompt, report, and clean up.
+- **Wedge detection** — if an agent's tmux pane stays unchanged for 30+ min while not idle, you get an @mention with one-click Esc / Ctrl+C rescue buttons.
+- **`manager.ts cost` + `metrics`** — token-usage rollup from JSONL files + bridge event log summary.
+- **Auto-interrupt on new message** — sending a Discord text while Claude is mid-task auto-injects Ctrl+C so the new message redirects instead of queuing.
+
 ---
 
 ## What the wizard actually does
@@ -64,6 +75,16 @@ The wizard writes `.env` with seven variables:
 
 Edit `.env` directly and `pm2 restart discord-bridge` to apply changes.
 
+Runtime-mutable toggles live in a separate file — `~/.claude-orchestrator/config.json` — and are managed via `bun src/manager.ts auto-update ...`:
+
+```bash
+bun src/manager.ts auto-update status              # inspect current flags
+bun src/manager.ts auto-update claudestra on|off   # this project's self-update (30-min poll)
+bun src/manager.ts auto-update claude on|off       # Claude Code CLI auto-update (weekly poll)
+```
+
+Both default to `on`. The config file is lazily created on first write; you don't need to seed it manually.
+
 ---
 
 ## Manual installation (without the wizard)
@@ -91,6 +112,17 @@ pm2 save
 
 ## Upgrading
 
+By default both Claudestra and Claude Code auto-update in the background — you don't need to do anything. Claudestra polls every 30 min, Claude Code weekly, and the upgrade only fires while every agent is idle. You get an @mention in `#control` before and after.
+
+**To disable auto-update:**
+
+```bash
+bun src/manager.ts auto-update claudestra off   # stop updating this project
+bun src/manager.ts auto-update claude off       # stop updating Claude Code CLI
+```
+
+**To trigger a manual upgrade:**
+
 From Discord, ask the master agent:
 
 > check for updates
@@ -99,14 +131,14 @@ or
 
 > upgrade the code
 
-This runs:
+That runs:
 
 ```bash
 bun src/manager.ts version   # show status
 bun src/manager.ts update    # git pull + pm2 restart
 ```
 
-Or do it by hand:
+Or by hand:
 
 ```bash
 cd ~/repos/claudestra
@@ -123,6 +155,8 @@ pm2 delete discord-bridge master-launcher cron-scheduler
 claude mcp remove claudestra -s user
 trash ~/repos/claudestra ~/.claude-orchestrator /tmp/claude-orchestrator
 ```
+
+The `~/.claude-orchestrator` directory contains registry, config (auto-update toggles), cron jobs, and the metrics log — deleting it wipes all runtime state. If you only want to pause the bot without forgetting its state, `pm2 stop` everything and skip the `trash` line.
 
 To remove the bot from Discord, kick it from your server. To delete it entirely, revoke the application in the Developer Portal.
 
@@ -168,9 +202,14 @@ pm2 logs discord-bridge --err --lines 100
 
 Usually means the bot token is wrong or `.env` has a typo. Regenerate the token in the Developer Portal and re-run `bun run setup`.
 
-### Screenshot command fails on mobile Discord
+### Slash commands missing or stale
 
-Discord caches slash commands per client for up to an hour. Restart the Discord mobile app to clear it.
+Discord caches slash commands per client for up to an hour. If you've just installed a new Claude Code plugin or added a skill to `~/.claude/skills/` and the command isn't showing up in Discord autocomplete:
+
+1. Wait up to 30 min (bridge rescans + re-registers automatically) **or** `pm2 restart discord-bridge` to force an immediate rescan.
+2. Then restart the Discord mobile/desktop app to clear its client-side cache.
+
+The same applies if Discord is still showing an old command list after a Claudestra upgrade.
 
 ---
 
@@ -182,10 +221,12 @@ Discord caches slash commands per client for up to an hour. Restart the Discord 
 | `~/repos/claudestra/.env` | Runtime configuration (git-ignored) |
 | `~/repos/claudestra/master/CLAUDE.md` | Rendered master agent instructions (git-ignored) |
 | `~/.claude-orchestrator/registry.json` | Active agent registry |
+| `~/.claude-orchestrator/config.json` | Auto-update toggles (created lazily on first `auto-update` call) |
 | `~/.claude-orchestrator/cron.json` | Scheduled jobs |
 | `~/.claude-orchestrator/cron-history.json` | Recent cron execution records |
+| `~/.claude-orchestrator/metrics.jsonl` | Append-only bridge event log (summarised via `manager.ts metrics`) |
 | `/tmp/claude-orchestrator/master.sock` | Private tmux socket |
-| `~/.claude/projects/` | Claude Code session JSONL files |
+| `~/.claude/projects/` | Claude Code session JSONL files (source of `manager.ts cost`) |
 
 ---
 
