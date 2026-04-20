@@ -1365,6 +1365,9 @@ async function cmdUpdate() {
   const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await biProc.exited;
 
+  // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
+  const rendered = await renderMasterClaude();
+
   // 5. 执行新版 manager 的 migrate 子命令（新版可能带格式迁移逻辑）
   //    关键：用 subprocess 跑 NEW 版代码，当前进程跑的还是旧版
   const migrateProc = Bun.spawn(
@@ -1382,6 +1385,12 @@ async function cmdUpdate() {
   await new Response(pm2Proc.stdout).text();
   await pm2Proc.exited;
 
+  // 6b. 告诉正在跑的 master Claude Code 退出，launcher 会用新 CLAUDE.md 重启它
+  //     （pm2 restart 只重启 bridge/launcher/cron 三个后台进程，不会动 tmux 里的 master session —
+  //      不这么做的话老 master 会继续跑着旧的 CLAUDE.md 上下文）
+  await Bun.sleep(1500); // 给 launcher 稳定
+  await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
+
   // 7. pm2 save — 让当前进程列表持久化（开机自启时 pm2 resurrect 会读它）
   await Bun.spawn(["pm2", "save"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }).exited;
 
@@ -1393,8 +1402,40 @@ async function cmdUpdate() {
     from: `v${local}`,
     to: release.tag,
     message: `已更新到 ${release.tag} 并重启 pm2 服务`,
+    masterReRendered: rendered,
     pm2StartupWarning: startupWarning,
   });
+}
+
+/**
+ * 用当前 .env 里的 USER_NAME 重新渲染 master/CLAUDE.md from template。
+ * 新版本可能更新了 master prompt（新工具、新命令），不重渲染的话 master 启动时读的还是旧 CLAUDE.md。
+ */
+async function renderMasterClaude(): Promise<{ rendered: boolean; reason?: string }> {
+  const { existsSync } = await import("fs");
+  const templatePath = `${REPO_ROOT}/master/CLAUDE.md.template`;
+  const renderedPath = `${REPO_ROOT}/master/CLAUDE.md`;
+  if (!existsSync(templatePath)) return { rendered: false, reason: "template 不存在" };
+
+  // 从 .env 读 USER_NAME
+  let userName = process.env.USER_NAME || "";
+  if (!userName && existsSync(`${REPO_ROOT}/.env`)) {
+    try {
+      const envText = await Bun.file(`${REPO_ROOT}/.env`).text();
+      const m = envText.match(/^USER_NAME\s*=\s*(.+)$/m);
+      if (m) userName = m[1].trim().replace(/^["']|["']$/g, "");
+    } catch { /* non-critical */ }
+  }
+  if (!userName) userName = "User";
+
+  try {
+    let tpl = await Bun.file(templatePath).text();
+    tpl = tpl.replaceAll("{{USER_NAME}}", userName);
+    await Bun.write(renderedPath, tpl);
+    return { rendered: true };
+  } catch (e) {
+    return { rendered: false, reason: (e as Error).message };
+  }
 }
 
 /**
