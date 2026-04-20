@@ -1435,6 +1435,139 @@ async function cmdCost(args: string[]) {
   });
 }
 
+async function cmdMetrics(args: string[]) {
+  const { readMetrics } = await import("./lib/metrics.js");
+
+  // 参数
+  let sinceTs = 0;
+  let agentFilter: string | null = null;
+  let rawOutput = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--today") {
+      const d = new Date(); d.setHours(0, 0, 0, 0);
+      sinceTs = d.getTime();
+    } else if (a === "--week") {
+      sinceTs = Date.now() - 7 * 24 * 3600_000;
+    } else if (a === "--since" && args[i + 1]) {
+      sinceTs = new Date(args[++i]).getTime();
+    } else if (a === "--agent" && args[i + 1]) {
+      agentFilter = args[++i];
+    } else if (a === "--raw") {
+      rawOutput = true;
+    }
+  }
+
+  let records = await readMetrics(sinceTs);
+  if (agentFilter) {
+    records = records.filter((r) => r.agent === agentFilter || r.meta?.agent === agentFilter);
+  }
+
+  if (rawOutput) {
+    output({ ok: true, records });
+    return;
+  }
+
+  // 按 event 汇总
+  const byEvent = new Map<string, number>();
+  const byAgent = new Map<string, { [k: string]: number }>();
+  for (const r of records) {
+    byEvent.set(r.event, (byEvent.get(r.event) || 0) + 1);
+    const key = r.agent || r.channelId || "unknown";
+    const cur = byAgent.get(key) || {};
+    cur[r.event] = (cur[r.event] || 0) + 1;
+    byAgent.set(key, cur);
+  }
+
+  output({
+    ok: true,
+    total: records.length,
+    period: sinceTs ? `since ${new Date(sinceTs).toISOString()}` : "all-time",
+    byEvent: Object.fromEntries(byEvent),
+    byAgent: Object.fromEntries(byAgent),
+  });
+}
+
+async function cmdTmuxScreenshot(name: string) {
+  const tmuxName = normalizeName(name);
+  if (!(await windowExists(tmuxName))) {
+    output({ ok: false, error: `${tmuxName} 不存在` });
+    return;
+  }
+  const bunPath = `${process.env.HOME}/.bun/bin/bun`;
+  const srcDir = import.meta.dir;
+  const ts = Date.now();
+  const htmlPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.html`;
+  const pngPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.png`;
+  await mkdir("/tmp/claude-orchestrator", { recursive: true }).catch(() => {});
+
+  const capture = Bun.spawn(
+    ["tmux", "-S", SOCK, "capture-pane", "-t", windowTarget(tmuxName), "-p", "-e", "-S", "-50"],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const a2h = Bun.spawn(
+    [bunPath, "run", `${srcDir}/ansi2html.ts`, htmlPath],
+    { stdin: capture.stdout, stdout: "pipe", stderr: "pipe" }
+  );
+  await a2h.exited;
+  await Bun.spawn(
+    [bunPath, "run", `${srcDir}/html2png.ts`, htmlPath, pngPath, "1200"],
+    { stdout: "pipe", stderr: "pipe" }
+  ).exited;
+
+  const { existsSync } = await import("fs");
+  if (!existsSync(pngPath)) {
+    output({ ok: false, error: "截图生成失败" });
+    return;
+  }
+  output({ ok: true, agent: tmuxName, path: pngPath });
+}
+
+async function cmdTmuxSendKeys(name: string, keys: string[]) {
+  const tmuxName = normalizeName(name);
+  if (!(await windowExists(tmuxName))) {
+    output({ ok: false, error: `${tmuxName} 不存在` });
+    return;
+  }
+  // keys 可以是 "Enter" "Escape" "Left" "C-c" 或普通字符串（用 -l 字面模式）
+  for (const k of keys) {
+    const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
+    const args = special
+      ? ["send-keys", "-t", windowTarget(tmuxName), k]
+      : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
+    await tmuxRaw(args);
+    await Bun.sleep(50);
+  }
+  output({ ok: true, agent: tmuxName, keys });
+}
+
+async function cmdTmuxCapture(name: string, lines: number) {
+  const tmuxName = normalizeName(name);
+  if (!(await windowExists(tmuxName))) {
+    output({ ok: false, error: `${tmuxName} 不存在` });
+    return;
+  }
+  const pane = await tmuxCapture(windowTarget(tmuxName), lines);
+  output({ ok: true, agent: tmuxName, lines, pane });
+}
+
+async function cmdTmuxWaitIdle(name: string, timeoutMs: number) {
+  const tmuxName = normalizeName(name);
+  if (!(await windowExists(tmuxName))) {
+    output({ ok: false, error: `${tmuxName} 不存在` });
+    return;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isAgentIdle(tmuxName)) {
+      output({ ok: true, agent: tmuxName, idle: true, waitedMs: timeoutMs - (deadline - Date.now()) });
+      return;
+    }
+    await Bun.sleep(500);
+  }
+  output({ ok: false, agent: tmuxName, idle: false, error: `等待 ${timeoutMs}ms 超时`, timedOut: true });
+}
+
 async function cmdAutoUpdate(sub: string, ...rest: string[]) {
   const { readConfig, setAutoUpdate } = await import("./lib/config-store.js");
 
@@ -1593,6 +1726,41 @@ switch (cmd) {
     break;
   }
 
+  case "metrics": {
+    await cmdMetrics(args);
+    break;
+  }
+
+  case "tmux-screenshot": {
+    const [name] = args;
+    if (!name) { output({ ok: false, error: "用法: tmux-screenshot <agent>" }); break; }
+    await cmdTmuxScreenshot(name);
+    break;
+  }
+
+  case "tmux-send-keys": {
+    const [name, ...rest] = args;
+    if (!name || rest.length === 0) { output({ ok: false, error: "用法: tmux-send-keys <agent> <keys...>" }); break; }
+    await cmdTmuxSendKeys(name, rest);
+    break;
+  }
+
+  case "tmux-capture": {
+    const [name, linesArg] = args;
+    if (!name) { output({ ok: false, error: "用法: tmux-capture <agent> [lines]" }); break; }
+    const lines = parseInt(linesArg || "40", 10);
+    await cmdTmuxCapture(name, lines);
+    break;
+  }
+
+  case "tmux-wait-idle": {
+    const [name, timeoutArg] = args;
+    if (!name) { output({ ok: false, error: "用法: tmux-wait-idle <agent> [timeout_ms]" }); break; }
+    const timeout = parseInt(timeoutArg || "30000", 10);
+    await cmdTmuxWaitIdle(name, timeout);
+    break;
+  }
+
   case "migrate": {
     const res = await migrateWorkerToAgent();
     output({ ok: true, ...res });
@@ -1640,6 +1808,11 @@ switch (cmd) {
         "auto-update claudestra on|off   — Claudestra 自动更新开关（默认 on）",
         "auto-update claude on|off       — Claude Code 自动更新开关（默认 on）",
         "cost [--agent <name>] [--today|--week]  — 统计 agent / 全部 token 用量",
+        "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — 汇总 bridge 事件日志",
+        "tmux-screenshot <agent>         — 截图某 agent 的 tmux window（返回 PNG 路径）",
+        "tmux-send-keys <agent> <keys...>  — 发按键/文本到 agent（支持 Enter/Escape/Left/C-c 等）",
+        "tmux-capture <agent> [lines]    — 读 agent pane 最后 N 行",
+        "tmux-wait-idle <agent> [ms]     — 阻塞直到 agent 回到 idle 状态（默认 30s）",
       ],
     });
 }

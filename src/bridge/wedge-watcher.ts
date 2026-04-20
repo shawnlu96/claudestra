@@ -16,6 +16,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { recordMetric } from "../lib/metrics.js";
 
 const POLL_INTERVAL_MS = 5 * 60_000;     // 每 5 分钟扫一次
 const WEDGE_THRESHOLD_MS = 30 * 60_000;  // 30 分钟没变 + 非 idle → 判定卡死
@@ -65,6 +66,7 @@ async function checkAgent(
 
   console.log(`⚠️ 检测到 agent ${agentName} 可能卡死了（${Math.round(stuckMs / 60_000)} 分钟无变化）`);
   prev.notifiedAt = now;
+  recordMetric("agent_wedged", { channelId, agent: agentName, durationMs: stuckMs });
 
   try {
     const ch = (await discord.channels.fetch(channelId)) as TextChannel;

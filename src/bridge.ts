@@ -45,6 +45,7 @@ import { tmuxScreenshot } from "./bridge/screenshot.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking } from "./bridge/jsonl-watcher.js";
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
+import { recordMetric } from "./lib/metrics.js";
 import {
   tmuxCapture,
   windowTarget,
@@ -290,6 +291,7 @@ discord.once("ready", async () => {
 
   // 启动 wedge watcher — 检测长时间没动静但又不 idle 的 agent
   startWedgeWatcher(discord);
+  recordMetric("bridge_start", { meta: { channels: clients.size } });
 
   // 每 30 分钟自动重扫 skill（新装 plugin / 新建 user skill 不需要 restart bridge 就能出现在 /）
   setInterval(async () => {
@@ -413,6 +415,7 @@ async function presentSlashResult(
   const baseContent = `⚡ **${targetLabel}** ← \`${ccText}\``;
 
   // 无 modal → 截图 + Esc 兜底按钮（防止偶发 modal 没被检测到导致 session 卡住）
+  // 兜底按钮（没有 modal 时）：Esc + 🤖 让大总管处理
   if (!options && !arrowNav) {
     const payload: any = {
       content: baseContent,
@@ -420,7 +423,8 @@ async function presentSlashResult(
         {
           type: "buttons",
           buttons: [
-            { id: `modal:${targetWindow}:esc`, label: "Esc (兜底，万一卡住)", emoji: "❌", style: "secondary" },
+            { id: `modal:${targetWindow}:esc`, label: "Esc (兜底)", emoji: "❌", style: "secondary" },
+            { id: `escalate:${targetWindow}:${encodeURIComponent(ccText)}`, label: "让大总管处理", emoji: "🤖", style: "primary" },
           ],
         },
       ]),
@@ -431,14 +435,14 @@ async function presentSlashResult(
     return;
   }
 
-  // 有 modal → 截图 + 按钮
+  // 有 modal → 截图 + 按钮（按钮组里已含 🤖 升级按钮）
   const header = options
     ? `🎛 **${targetLabel}** 的 TUI 选项（\`${ccText}\`）：`
     : `🎛 **${targetLabel}** 的 ${arrowNav} 箭头 modal（\`${ccText}\`），用按钮导航 + 点 ✅ 确认：`;
-  const components = options
-    ? buildModalComponents(targetWindow, options)
-    : buildArrowModalComponents(targetWindow, arrowNav!);
-  const payload: any = { content: header, components };
+  const modalRows = options
+    ? buildModalComponents(targetWindow, options, ccText)
+    : buildArrowModalComponents(targetWindow, arrowNav!, ccText);
+  const payload: any = { content: header, components: modalRows };
   if (pngPath) payload.files = [{ attachment: pngPath }];
   await interaction.editReply(payload).catch(() => {});
 }
@@ -446,11 +450,12 @@ async function presentSlashResult(
 /**
  * 把 modal 选项渲染成 Discord components。
  * ≤5 项 → 按钮行；>5 项 → string select menu。
- * 再追加一个 "❌ 取消 (Esc)" 按钮。
+ * 再追加一个 "❌ 取消 (Esc)" + 🤖 升级按钮。
  */
-function buildModalComponents(targetWindow: string, options: { key: string; label: string; selected: boolean }[]) {
+function buildModalComponents(targetWindow: string, options: { key: string; label: string; selected: boolean }[], ccText = "") {
   const rows: any[] = [];
   const escId = `modal:${targetWindow}:esc`;
+  const escalateId = `escalate:${targetWindow}:${encodeURIComponent(ccText)}`;
 
   if (options.length <= 5) {
     const buttons = options.map((o) => ({
@@ -459,10 +464,6 @@ function buildModalComponents(targetWindow: string, options: { key: string; labe
       style: o.selected ? "success" : "primary",
     }));
     rows.push({ type: "buttons" as const, buttons });
-    rows.push({
-      type: "buttons" as const,
-      buttons: [{ id: escId, label: "取消 (Esc)", style: "secondary", emoji: "❌" }],
-    });
   } else {
     rows.push({
       type: "select" as const,
@@ -474,18 +475,21 @@ function buildModalComponents(targetWindow: string, options: { key: string; labe
         description: o.selected ? "当前选中" : undefined,
       })),
     });
-    rows.push({
-      type: "buttons" as const,
-      buttons: [{ id: escId, label: "取消 (Esc)", style: "secondary", emoji: "❌" }],
-    });
   }
+  rows.push({
+    type: "buttons" as const,
+    buttons: [
+      { id: escId, label: "取消 (Esc)", style: "secondary", emoji: "❌" },
+      { id: escalateId, label: "让大总管处理", style: "primary", emoji: "🤖" },
+    ],
+  });
   return buildComponents(rows);
 }
 
 /**
- * 把箭头导航 modal 渲染成上下左右 + Enter + Esc 按钮。
+ * 把箭头导航 modal 渲染成上下左右 + Enter + Esc + 🤖 升级按钮。
  */
-function buildArrowModalComponents(targetWindow: string, kind: ArrowNavKind) {
+function buildArrowModalComponents(targetWindow: string, kind: ArrowNavKind, ccText = "") {
   const rows: any[] = [];
   const navButtons: any[] = [];
   if (kind === "vertical" || kind === "both") {
@@ -502,6 +506,7 @@ function buildArrowModalComponents(targetWindow: string, kind: ArrowNavKind) {
     buttons: [
       { id: `modal:${targetWindow}:enter`, label: "确认 (Enter)", emoji: "✅", style: "success" },
       { id: `modal:${targetWindow}:esc`, label: "取消 (Esc)", emoji: "❌", style: "secondary" },
+      { id: `escalate:${targetWindow}:${encodeURIComponent(ccText)}`, label: "让大总管处理", emoji: "🤖", style: "primary" },
     ],
   });
   return buildComponents(rows);
@@ -516,6 +521,7 @@ async function handleModalInteraction(
   key: string
 ): Promise<void> {
   await interaction.deferUpdate().catch(() => {});
+  recordMetric("modal_button", { agent: targetWindow.replace(/^master:/, ""), meta: { key } });
   try {
     const keyMap: Record<string, string> = {
       esc: "Escape",
@@ -652,8 +658,10 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   try {
     client.ws.send(JSON.stringify({ type: "message", content, meta }));
+    recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length } });
   } catch (err) {
     console.error(`发送消息到 client (channel ${channelId}) 失败:`, err);
+    recordMetric("error", { channelId, meta: { phase: "forward_to_client", err: String(err) } });
   }
 
   // idle 检测由 JSONL watcher 的静默超时控制（不再用 tmux 轮询）
@@ -678,6 +686,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
       console.log(`⚡ Slash command: /${cmd} in ${channelId}`);
+      recordMetric("slash_invoked", { channelId, meta: { cmd } });
 
       if (cmd === "screenshot") {
         try {
@@ -820,6 +829,45 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         return;
       }
 
+      // 升级到大总管处理 — 把当前 agent 状态 + 截图 post 到 control 频道，master 自己 LLM 处理
+      if (id.startsWith("escalate:")) {
+        const rest = id.slice("escalate:".length);
+        const idx = rest.indexOf(":");
+        if (idx < 0) return;
+        const targetWindow = rest.slice(0, idx);
+        const ccText = decodeURIComponent(rest.slice(idx + 1));
+        const agentName = targetWindow.replace(/^master:/, "");
+        const controlChannelId = process.env.CONTROL_CHANNEL_ID || "";
+        if (!controlChannelId) {
+          await interaction.followUp({ content: "❌ 未配置 CONTROL_CHANNEL_ID，无法升级", ephemeral: true }).catch(() => {});
+          return;
+        }
+        try {
+          const pngPath = await tmuxScreenshot(agentName);
+          const ctrlCh = (await discord.channels.fetch(controlChannelId)) as TextChannel;
+          const msg = [
+            `🤖 **需要你帮忙：** agent **${agentName}** 上的 \`${ccText}\` 的 TUI bridge 认不出，user 升级给你处理。`,
+            ``,
+            `你可以用这些 Bash 子命令控制这个 agent 的 tmux window：`,
+            `- \`bun ../src/manager.ts tmux-screenshot ${agentName}\` — 截图（返回 PNG 路径，可用 Read 工具看）`,
+            `- \`bun ../src/manager.ts tmux-capture ${agentName} [lines]\` — 读文本 pane`,
+            `- \`bun ../src/manager.ts tmux-send-keys ${agentName} <keys...>\` — 发键（Enter/Escape/Left/Right/C-c/数字/字符串）`,
+            `- \`bun ../src/manager.ts tmux-wait-idle ${agentName} [ms]\` — 等回到 idle`,
+            ``,
+            `请先截图看看现在 pane 什么状态，再决定怎么操作 + 用 reply 告诉原频道结果。原频道 channel_id=\`${interaction.channelId}\`。`,
+          ].join("\n");
+          await ctrlCh.send({
+            content: msg,
+            files: pngPath ? [{ attachment: pngPath }] : undefined,
+          });
+          await interaction.followUp({ content: `🤖 已升级到大总管（#control 频道），他会接手`, ephemeral: true }).catch(() => {});
+          recordMetric("modal_button", { channelId: interaction.channelId, agent: agentName, meta: { action: "escalate", ccText } });
+        } catch (e) {
+          await interaction.followUp({ content: `❌ 升级失败：${(e as Error).message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
       // Wedge Esc 救回按钮
       if (id.startsWith("wedge_esc:")) {
         const agentName = id.slice("wedge_esc:".length);
@@ -858,6 +906,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             return;
           }
           console.log(`⚡ C-c 已发送给 ${agent.name}`);
+          recordMetric("agent_interrupt", { channelId: targetChannelId, agent: agent.name, meta: { trigger: "button" } });
 
           const statusMsgId = activeStatusMessages.get(targetChannelId);
           if (statusMsgId) {
@@ -1257,6 +1306,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
               await textCh.send(`${randomUmaDone()} ${mention}`);
               lastCompletionSent.set(channelId, now);
               console.log(`🏁 完成通知已发送: channel=${channelId}`);
+              recordMetric("agent_completed", { channelId });
             }
           }
         }
