@@ -1271,16 +1271,29 @@ async function handleHookRequest(req: Request): Promise<Response> {
         return new Response("ok");
       }
 
-      // 防御性：若此时 pane 上还有权限 / session-idle 弹窗，说明 agent 还在等输入，不是真的完成
+      // 防御性：等 Claude Code TUI 稳定下来（~1.5s），再看 pane 状态确认真的"完成"。
+      // 有几种场景 Stop 会提前触发：
+      //   - pane 上有权限/session-idle 弹窗 → Claude 实际在等用户输入
+      //   - pane 不在 ❯ idle 提示符 → Claude 可能在下一步（工具调用流转等）
+      // 这两种都应该跳过完成通知，等真正 idle 时的下一个 Stop 事件再发。
       if (shouldNotify) {
+        await Bun.sleep(1500);
         try {
           const listResult = await runManager("list");
           const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
           if (agent) {
-            const pane = await tmuxCapture(windowTarget(agent.name), 30);
+            const target = windowTarget(agent.name);
+            const pane = await tmuxCapture(target, 30);
             if (detectRuntimePermissionPrompt(pane) || detectSessionIdlePrompt(pane)) {
-              console.log(`🏁 pane 仍有弹窗，跳过完成通知: channel=${channelId} agent=${agent.name}`);
+              console.log(`🏁 pane 有弹窗，跳过完成通知: channel=${channelId} agent=${agent.name}`);
               shouldNotify = false;
+            } else {
+              const { isIdle } = await import("./lib/tmux-helper.js");
+              const idle = await isIdle(target);
+              if (!idle) {
+                console.log(`🏁 Stop 触发但 pane 不是 ❯ idle 状态，Claude 还在工作 → 跳过这次通知，等下一个 Stop: channel=${channelId} agent=${agent.name}`);
+                shouldNotify = false;
+              }
             }
           }
         } catch { /* non-critical */ }
