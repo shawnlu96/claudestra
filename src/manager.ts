@@ -115,6 +115,27 @@ async function saveRegistry(reg: Registry) {
 
 import { bridgeRequest } from "./lib/bridge-client.js";
 
+/**
+ * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
+ * agent 生命周期变化（create/resume/kill/restart）时调用。
+ * bridge 没运行也无所谓 —— 失败静默。
+ */
+async function triggerSkillsRescan(
+  action: "add" | "remove" | "full",
+  agent?: string,
+  cwd?: string
+): Promise<void> {
+  const port = process.env.BRIDGE_PORT || "3847";
+  try {
+    await fetch(`http://localhost:${port}/skills/rescan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, agent, cwd }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch { /* bridge 可能未运行 */ }
+}
+
 async function windowExists(name: string): Promise<boolean> {
   const windows = await listAgentWindowsShared();
   return windows.includes(name);
@@ -428,6 +449,8 @@ async function cmdCreate(
   };
   await saveRegistry(reg);
 
+  await triggerSkillsRescan("add", tmuxName, expandedDir);
+
   output({
     ok: true,
     agent: tmuxName,
@@ -625,6 +648,7 @@ async function cmdResume(
       ? `Agent ${tmuxName} 已恢复，Discord 频道 #${channelName} 已就绪`
       : `Agent ${tmuxName} 已恢复，但 Claude Code 可能还在启动中`,
   });
+  await triggerSkillsRescan("add", tmuxName, resolvedDir);
 }
 
 async function cmdKill(name: string) {
@@ -656,6 +680,8 @@ async function cmdKill(name: string) {
     }
   }
   await saveRegistry(reg);
+
+  await triggerSkillsRescan("remove", tmuxName);
 
   output({
     ok: true,
@@ -854,6 +880,9 @@ async function cmdRestart(name?: string) {
     });
   }
 
+  // 重启后做一次完整 skill 重扫（每个 agent cwd 可能项目级 skill 有变动）
+  await triggerSkillsRescan("full");
+
   output({
     ok: results.every((r) => r.ok),
     results,
@@ -875,6 +904,7 @@ async function cmdList() {
       status: "active",
       idle,
       project: info?.project || "unknown",
+      cwd: info?.cwd || "",
       purpose: info?.purpose || "",
       channelId: info?.channelId || "",
       sessionId: info?.sessionId || "",
@@ -889,6 +919,7 @@ async function cmdList() {
         status: "dead",
         idle: false,
         project: info.project,
+        cwd: info.cwd || "",
         purpose: info.purpose,
         channelId: info.channelId,
         sessionId: info.sessionId,

@@ -104,6 +104,64 @@ export function detectSessionIdlePrompt(pane: string): string | null {
 }
 
 /**
+ * 解析 Claude Code TUI 里的数字选项 modal（/model 选择器、/mcp 菜单等）。
+ * 返回所有可见选项 + 它们对应的按键。超过 25 项会截断（Discord select menu 上限）。
+ * 没有检测到选项 modal 返回 null。
+ */
+export interface ModalOption {
+  key: string;       // 发给 tmux 的字符（通常是 "1" / "2" ...）
+  label: string;     // ≤80 字符，喂给 Discord button/select 的显示文本
+  selected: boolean; // 是否当前高亮（❯ 前缀）
+}
+
+export function parseModalOptions(pane: string): ModalOption[] | null {
+  // 只看 pane 最后 30 行（modal 总在底部）
+  const tail = pane.split("\n").slice(-30);
+  const seen = new Set<string>();
+  const options: ModalOption[] = [];
+  for (const raw of tail) {
+    // 匹配 "❯ 1. 文本" 或 "  1. 文本"
+    const m = raw.match(/^\s*(❯)?\s*(\d{1,2})\.\s+(.+?)\s*$/);
+    if (!m) continue;
+    const key = m[2];
+    if (seen.has(key)) continue;
+    const label = m[3].replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!label) continue;
+    seen.add(key);
+    options.push({ key, label, selected: !!m[1] });
+  }
+  if (options.length < 2) return null;
+  // 关键：真 modal 一定有一个选中标记 ❯，否则就是 Claude 回复里普通的编号列表
+  if (!options.some((o) => o.selected)) return null;
+  return options.slice(0, 25);
+}
+
+/**
+ * 检测箭头导航 modal（如 /effort 的 slider）。
+ * 通过底部提示文字 "←/→ to change" 或 "↑/↓ to change" 识别。
+ * 返回：
+ *   - "horizontal" → 只有左右
+ *   - "vertical"   → 只有上下
+ *   - "both"       → 上下左右都能动
+ *   - null         → 不是箭头 modal
+ */
+export type ArrowNavKind = "horizontal" | "vertical" | "both";
+
+export function detectArrowNavModal(pane: string): ArrowNavKind | null {
+  // 只看最后 20 行
+  const tail = pane.split("\n").slice(-20).join("\n");
+  const hasHoriz = /←\/→|◀\/▶|[^\s]→ to/.test(tail) || /to change/.test(tail) && /←/.test(tail);
+  const hasVert = /↑\/↓|▲\/▼/.test(tail);
+  // 还必须有 "Enter to confirm" 或 "Enter to" 暗示确认流程
+  const hasEnter = /[Ee]nter to (confirm|select|continue|accept)/.test(tail);
+  if (!hasEnter) return null;
+  if (hasHoriz && hasVert) return "both";
+  if (hasHoriz) return "horizontal";
+  if (hasVert) return "vertical";
+  return null;
+}
+
+/**
  * 检测运行时权限弹窗（区别于启动时的确认弹窗）。
  * 运行时的弹窗需要用户主动判断是否允许，不能自动确认。
  * 典型 pattern: "Do you want to ..." + "❯ 1." 选项菜单。

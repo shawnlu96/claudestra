@@ -42,6 +42,8 @@ src/
     management.ts        Admin button/select handlers that bypass the LLM
     screenshot.ts        Terminal screenshot pipeline (ANSI → HTML → PNG)
     jsonl-watcher.ts     JSONL session tailer → streaming tool summaries
+    slash-catalog.ts     Hardcoded list of CC built-in slash commands (Discord-friendly subset)
+    slash-registry.ts    Runtime registry of discovered skills per scope + per-channel resolver
   channel-server.ts      Per-session MCP proxy (stdio MCP ↔ Bridge WebSocket)
   manager.ts             Agent lifecycle + cron + version/update CLI (JSON output)
   cron.ts                Cron scheduler daemon (pm2-managed)
@@ -53,6 +55,8 @@ src/
     bridge-client.ts     Shared Bridge WebSocket request helper
     tmux-helper.ts       Shared tmux command wrappers (tmuxRaw, isIdle, sendLine, …)
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
+    config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
+    skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
   ansi2html.ts           ANSI escape codes → coloured HTML
   html2png.ts            HTML → PNG via Playwright headless Chromium
   discord-reply.ts       Bash fallback: send a message through the Bridge directly
@@ -78,6 +82,7 @@ SETUP.md                 User-facing installation guide
 - **Idle detection** — Claude Code `Stop` / `Notification` hooks drive Discord typing indicators precisely; a 30-minute safety timeout catches edge cases.
 - **Master guardian** — pm2-managed launcher keeps the master tmux session alive and auto-dismisses Claude Code confirmation prompts.
 - **Safety rails** — `--disallowedTools` blocks `rm -rf`, `git push --force`, `git reset --hard`, `chmod 777`, and other destructive commands for every spawned agent.
+- **Discord slash autocomplete for skills + built-ins** — on startup, the Bridge discovers every available slash command from four sources (user-level `~/.claude/skills/`, installed plugins in `~/.claude/plugins/cache/…`, per-agent `<cwd>/.claude/skills/`, and a curated set of Claude Code built-ins like `/cost`, `/mcp`, `/context`, `/compact`) and registers them as Discord slash commands. Invocations are re-scanned on every `manager.ts create|resume|kill|restart` via the `/skills/rescan` HTTP endpoint. When a user types a registered `/cmd args` in Discord, the bridge forwards the literal text to the channel's agent via `tmux send-keys`, so Claude Code interprets it natively. Project-level skills are filtered: typing a skill that only exists in another agent's cwd yields an ephemeral explanation instead of going through.
 
 ## Runtime commands
 

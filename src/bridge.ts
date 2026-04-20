@@ -49,7 +49,20 @@ import {
   windowTarget,
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
+  tmuxSendLine,
+  tmuxRaw,
+  parseModalOptions,
+  detectArrowNavModal,
+  type ArrowNavKind,
 } from "./lib/tmux-helper.js";
+import {
+  scanGlobal as scanGlobalSkills,
+  scanProject as scanProjectSkills,
+  clearProject as clearProjectSkills,
+  allRegistrableCommands,
+  resolveInvocation,
+  isProjectSkillForOtherAgent,
+} from "./bridge/slash-registry.js";
 
 // ============================================================
 // 类型定义
@@ -257,32 +270,270 @@ discord.once("ready", async () => {
   console.log(`📡 Bridge WebSocket: ws://localhost:${BRIDGE_PORT}`);
   console.log(`🔗 已注册频道: ${clients.size}`);
 
-  // 注册 Slash Commands
+  // 扫 skill + 为已有 active agent 扫项目级
+  await scanGlobalSkills();
   try {
-    const rest = new REST().setToken(DISCORD_TOKEN);
-    const commands = [
-      new SlashCommandBuilder().setName("screenshot").setDescription("截取当前 agent 的终端画面"),
-      new SlashCommandBuilder().setName("interrupt").setDescription("打断当前 agent 的操作 (Ctrl+C)"),
-      new SlashCommandBuilder().setName("status").setDescription("查看所有 agent 的状态"),
-      new SlashCommandBuilder().setName("cron").setDescription("查看和管理定时任务"),
-    ].map((c) => c.toJSON());
-    if (DISCORD_GUILD_ID) {
-      // 注册 guild 命令（秒生效）
-      await rest.put(Routes.applicationGuildCommands(discord.user!.id, DISCORD_GUILD_ID), { body: commands });
-      // 清除旧的全局命令（避免移动端缓存冲突）
-      await rest.put(Routes.applicationCommands(discord.user!.id), { body: [] });
-      console.log("📝 Slash Commands 已注册 (guild) + 清除全局命令");
-    } else {
-      await rest.put(Routes.applicationCommands(discord.user!.id), { body: commands });
-      console.log("📝 Slash Commands 已注册 (global)");
+    const listResult = await runManager("list");
+    for (const a of listResult.agents || []) {
+      if (a.status === "active" && a.cwd) {
+        await scanProjectSkills(a.name, a.cwd);
+      }
     }
-  } catch (err) {
-    console.error("Slash Commands 注册失败:", err);
-  }
+  } catch { /* non-critical */ }
+
+  // 注册 Slash Commands
+  await registerSlashCommands();
 
   // 启动权限弹窗 watcher
   startPermissionWatcher(ALLOWED_USER_IDS, discord);
 });
+
+// ────────────────────────────────────────────────
+// Slash command 构建 + 注册（可重入）
+// ────────────────────────────────────────────────
+let lastRegisteredHash = "";
+
+function truncateDesc(desc: string, fallback: string): string {
+  const s = (desc || fallback || "").replace(/\s+/g, " ").trim();
+  return s ? s.slice(0, 100) : fallback.slice(0, 100);
+}
+
+/**
+ * 构建完整的 Discord slash command 列表（内置 bridge 命令 + CC built-in + 所有 skill）。
+ */
+function buildAllSlashCommands(): any[] {
+  const commands: any[] = [
+    // bridge 自己的 4 个
+    new SlashCommandBuilder().setName("screenshot").setDescription("截取当前 agent 的终端画面").toJSON(),
+    new SlashCommandBuilder().setName("interrupt").setDescription("打断当前 agent 的操作 (Ctrl+C)").toJSON(),
+    new SlashCommandBuilder().setName("status").setDescription("查看所有 agent 的状态").toJSON(),
+    new SlashCommandBuilder().setName("cron").setDescription("查看和管理定时任务").toJSON(),
+  ];
+  const bridgeNames = new Set(["screenshot", "interrupt", "status", "cron"]);
+
+  for (const item of allRegistrableCommands()) {
+    if (item.kind === "builtin") {
+      const c = item.cmd;
+      if (bridgeNames.has(c.name)) continue; // 优先 bridge 自己的
+      const b = new SlashCommandBuilder()
+        .setName(c.name)
+        .setDescription(truncateDesc(c.description, `Claude Code ${c.name}`));
+      for (const opt of c.options) {
+        if (opt.type === "choices") {
+          b.addStringOption((o) => {
+            o.setName(opt.name).setDescription(truncateDesc(opt.description, opt.name)).setRequired(!!opt.required);
+            for (const ch of opt.choices || []) o.addChoices({ name: ch, value: ch });
+            return o;
+          });
+        } else {
+          b.addStringOption((o) =>
+            o.setName(opt.name).setDescription(truncateDesc(opt.description, opt.name)).setRequired(!!opt.required)
+          );
+        }
+      }
+      commands.push(b.toJSON());
+    } else {
+      const s = item.skill;
+      if (bridgeNames.has(s.discordName)) continue;
+      const b = new SlashCommandBuilder()
+        .setName(s.discordName)
+        .setDescription(truncateDesc(s.description, `skill: ${s.invokeName}`))
+        .addStringOption((o) =>
+          o.setName("args").setDescription(truncateDesc(`参数（可选）会原样附加到 /${s.invokeName} 后面`, "参数"))
+        );
+      commands.push(b.toJSON());
+    }
+  }
+  return commands;
+}
+
+async function registerSlashCommands(): Promise<void> {
+  try {
+    const commands = buildAllSlashCommands();
+    // 用 hash 去重 — 命令列表没变就不 REST PUT，省 Discord 配额
+    const hash = JSON.stringify(commands);
+    if (hash === lastRegisteredHash) {
+      console.log(`📝 Slash Commands 未变 (${commands.length} 条)，跳过重注册`);
+      return;
+    }
+    const rest = new REST().setToken(DISCORD_TOKEN);
+    if (DISCORD_GUILD_ID) {
+      await rest.put(Routes.applicationGuildCommands(discord.user!.id, DISCORD_GUILD_ID), { body: commands });
+      await rest.put(Routes.applicationCommands(discord.user!.id), { body: [] });
+      console.log(`📝 Slash Commands 已注册 (guild, ${commands.length} 条) + 清除全局`);
+    } else {
+      await rest.put(Routes.applicationCommands(discord.user!.id), { body: commands });
+      console.log(`📝 Slash Commands 已注册 (global, ${commands.length} 条)`);
+    }
+    lastRegisteredHash = hash;
+  } catch (err) {
+    console.error("Slash Commands 注册失败:", err);
+  }
+}
+
+// ────────────────────────────────────────────────
+// Slash 结果呈现（支持 TUI modal 适配 → Discord 按钮/菜单）
+// ────────────────────────────────────────────────
+
+/**
+ * 发完 slash 命令 + 等 2.5s 之后调。
+ * 截一张图；如果 pane 上有数字选项 modal，就把选项以 Discord 按钮/select 的形式暴露给用户。
+ * 否则就只发截图。
+ */
+async function presentSlashResult(
+  interaction: any,
+  targetWindow: string,
+  targetLabel: string,
+  ccText: string
+): Promise<void> {
+  const pane = await tmuxCapture(targetWindow, 40);
+  const options = parseModalOptions(pane);
+  const arrowNav = options ? null : detectArrowNavModal(pane);
+  const pngPath = await tmuxScreenshot(targetLabel);
+  const baseContent = `⚡ **${targetLabel}** ← \`${ccText}\``;
+
+  // 无 modal → 截图 + Esc 兜底按钮（防止偶发 modal 没被检测到导致 session 卡住）
+  if (!options && !arrowNav) {
+    const payload: any = {
+      content: baseContent,
+      components: buildComponents([
+        {
+          type: "buttons",
+          buttons: [
+            { id: `modal:${targetWindow}:esc`, label: "Esc (兜底，万一卡住)", emoji: "❌", style: "secondary" },
+          ],
+        },
+      ]),
+    };
+    if (pngPath) payload.files = [{ attachment: pngPath }];
+    else payload.content = `${baseContent}（截图失败）`;
+    await interaction.editReply(payload).catch(() => {});
+    return;
+  }
+
+  // 有 modal → 截图 + 按钮
+  const header = options
+    ? `🎛 **${targetLabel}** 的 TUI 选项（\`${ccText}\`）：`
+    : `🎛 **${targetLabel}** 的 ${arrowNav} 箭头 modal（\`${ccText}\`），用按钮导航 + 点 ✅ 确认：`;
+  const components = options
+    ? buildModalComponents(targetWindow, options)
+    : buildArrowModalComponents(targetWindow, arrowNav!);
+  const payload: any = { content: header, components };
+  if (pngPath) payload.files = [{ attachment: pngPath }];
+  await interaction.editReply(payload).catch(() => {});
+}
+
+/**
+ * 把 modal 选项渲染成 Discord components。
+ * ≤5 项 → 按钮行；>5 项 → string select menu。
+ * 再追加一个 "❌ 取消 (Esc)" 按钮。
+ */
+function buildModalComponents(targetWindow: string, options: { key: string; label: string; selected: boolean }[]) {
+  const rows: any[] = [];
+  const escId = `modal:${targetWindow}:esc`;
+
+  if (options.length <= 5) {
+    const buttons = options.map((o) => ({
+      id: `modal:${targetWindow}:${o.key}`,
+      label: `${o.key}. ${o.label}`.slice(0, 80),
+      style: o.selected ? "success" : "primary",
+    }));
+    rows.push({ type: "buttons" as const, buttons });
+    rows.push({
+      type: "buttons" as const,
+      buttons: [{ id: escId, label: "取消 (Esc)", style: "secondary", emoji: "❌" }],
+    });
+  } else {
+    rows.push({
+      type: "select" as const,
+      id: `modal:${targetWindow}:select`,
+      placeholder: "选一个选项",
+      options: options.map((o) => ({
+        label: `${o.key}. ${o.label}`.slice(0, 100),
+        value: o.key,
+        description: o.selected ? "当前选中" : undefined,
+      })),
+    });
+    rows.push({
+      type: "buttons" as const,
+      buttons: [{ id: escId, label: "取消 (Esc)", style: "secondary", emoji: "❌" }],
+    });
+  }
+  return buildComponents(rows);
+}
+
+/**
+ * 把箭头导航 modal 渲染成上下左右 + Enter + Esc 按钮。
+ */
+function buildArrowModalComponents(targetWindow: string, kind: ArrowNavKind) {
+  const rows: any[] = [];
+  const navButtons: any[] = [];
+  if (kind === "vertical" || kind === "both") {
+    navButtons.push({ id: `modal:${targetWindow}:up`, label: "Up", emoji: "⬆️", style: "primary" });
+    navButtons.push({ id: `modal:${targetWindow}:down`, label: "Down", emoji: "⬇️", style: "primary" });
+  }
+  if (kind === "horizontal" || kind === "both") {
+    navButtons.push({ id: `modal:${targetWindow}:left`, label: "Left", emoji: "⬅️", style: "primary" });
+    navButtons.push({ id: `modal:${targetWindow}:right`, label: "Right", emoji: "➡️", style: "primary" });
+  }
+  rows.push({ type: "buttons" as const, buttons: navButtons });
+  rows.push({
+    type: "buttons" as const,
+    buttons: [
+      { id: `modal:${targetWindow}:enter`, label: "确认 (Enter)", emoji: "✅", style: "success" },
+      { id: `modal:${targetWindow}:esc`, label: "取消 (Esc)", emoji: "❌", style: "secondary" },
+    ],
+  });
+  return buildComponents(rows);
+}
+
+/**
+ * 按钮 / select 点击后，把按键发给 tmux，等 1.5s，再次截图 + 可能再出 modal。
+ */
+async function handleModalInteraction(
+  interaction: any,
+  targetWindow: string,
+  key: string
+): Promise<void> {
+  await interaction.deferUpdate().catch(() => {});
+  try {
+    const keyMap: Record<string, string> = {
+      esc: "Escape",
+      enter: "Enter",
+      left: "Left",
+      right: "Right",
+      up: "Up",
+      down: "Down",
+    };
+    const tmuxKey = keyMap[key] ?? key; // 数字键保持原样
+    await tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey]);
+    await Bun.sleep(1500);
+    const pane = await tmuxCapture(targetWindow, 40);
+    const options = parseModalOptions(pane);
+    const arrowNav = options ? null : detectArrowNavModal(pane);
+    const pngPath = await tmuxScreenshot(targetWindow.replace(/^master:/, ""));
+    const label = targetWindow.replace(/^master:/, "");
+
+    const payload: any = {};
+    if (options) {
+      payload.content = `🎛 **${label}** 的 TUI 选项（继续）：`;
+      payload.components = buildModalComponents(targetWindow, options);
+    } else if (arrowNav) {
+      payload.content = `🎛 **${label}** 的 ${arrowNav} 箭头 modal（继续，用 ✅ 确认）：`;
+      payload.components = buildArrowModalComponents(targetWindow, arrowNav);
+    } else {
+      payload.content = `✅ **${label}** 已执行（key=${key}）`;
+      payload.components = [];
+    }
+    if (pngPath) payload.files = [{ attachment: pngPath }];
+    await interaction.editReply(payload).catch(() => {});
+  } catch (e) {
+    await interaction.editReply({
+      content: `❌ Modal 交互失败：${(e as Error).message}`,
+      components: [],
+    }).catch(() => {});
+  }
+}
 
 // ============================================================
 // 入站消息处理
@@ -328,6 +579,19 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   }
 
   if (!content) return;
+
+  // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
+  try {
+    const listResult = await runManager("list");
+    const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+    const targetWindow = agent ? `master:${agent.name}` : `master:0`;
+    const { isIdle } = await import("./lib/tmux-helper.js");
+    if (!(await isIdle(targetWindow))) {
+      console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，发 Ctrl+C 打断`);
+      await tmuxRaw(["send-keys", "-t", targetWindow, "C-c"]).catch(() => {});
+      await Bun.sleep(400);
+    }
+  } catch { /* non-critical */ }
 
   // 清理上一轮状态 + 重置 tool 追踪
   stopTyping(channelId);
@@ -464,7 +728,58 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         return;
       }
 
-      return;
+      // ── 转发给 Claude Code 的 slash（built-in / skill） ──
+      {
+        // 立即 defer，防止 3s Discord token 过期（lookup 可能耗时）
+        await interaction.deferReply().catch(() => {});
+
+        // 找 channel 对应的 agent
+        let agentName: string | null = null;
+        try {
+          const listResult = await runManager("list");
+          const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+          if (agent) agentName = agent.name;
+        } catch { /* non-critical */ }
+
+        // 如果没找到 agent，就是 master channel（control channel）
+        const targetWindow = agentName ? `master:${agentName}` : `master:0`;
+        const targetLabel = agentName || "master";
+
+        // 收集 option 值
+        const vals: Record<string, string> = {};
+        for (const opt of interaction.options.data) {
+          if (typeof opt.value === "string") vals[opt.name] = opt.value;
+        }
+
+        // 先检查是不是其他 agent 的 project skill
+        const otherOwner = isProjectSkillForOtherAgent(cmd, agentName);
+        if (otherOwner) {
+          await interaction.editReply({
+            content: `⚠️ \`/${cmd}\` 是 **${otherOwner}** 的项目级 skill，在当前频道（${targetLabel}）不可用。切到 ${otherOwner} 的频道再试。`,
+          }).catch(() => {});
+          return;
+        }
+
+        const resolved = resolveInvocation(cmd, agentName, vals);
+        if (!resolved.ok) {
+          await interaction.editReply({ content: `⚠️ ${resolved.reason}` }).catch(() => {});
+          return;
+        }
+
+        console.log(`⚡ 转发 slash: /${cmd} → window=${targetWindow} text="${resolved.ccText}"`);
+        try {
+          await tmuxSendLine(targetWindow, resolved.ccText);
+          // TUI 渲染需要几秒，截图作为反馈（否则像 /context 这类纯 TUI 命令 Discord 端完全没响应）
+          await Bun.sleep(2500);
+          await presentSlashResult(interaction, targetWindow, targetLabel, resolved.ccText);
+        } catch (e) {
+          console.error(`⚡ tmux 发送失败:`, e);
+          await interaction.editReply({
+            content: `❌ 发送失败：${(e as Error).message}`,
+          }).catch(() => {});
+        }
+        return;
+      }
     }
 
     // ── Buttons ──
@@ -473,6 +788,17 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       await interaction.deferUpdate().catch(async () => {
         await interaction.deferReply({ ephemeral: true }).catch(() => {});
       });
+
+      // TUI modal 选项按钮 — 把键转发给 tmux，再截图 + 可能再出菜单
+      if (id.startsWith("modal:")) {
+        const rest = id.slice("modal:".length);
+        const idx = rest.lastIndexOf(":");
+        if (idx < 0) return;
+        const targetWindow = rest.slice(0, idx);
+        const key = rest.slice(idx + 1);
+        await handleModalInteraction(interaction, targetWindow, key);
+        return;
+      }
 
       // 打断按钮
       if (id.startsWith("interrupt:")) {
@@ -623,6 +949,16 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       const id = interaction.customId;
       const value = interaction.values[0];
       await interaction.deferUpdate().catch(() => {});
+
+      // TUI modal 选择器
+      if (id.startsWith("modal:")) {
+        const rest = id.slice("modal:".length);
+        // 格式：modal:<targetWindow>:select  —— 最后一段固定是 "select"
+        const parts = rest.split(":");
+        const targetWindow = parts.slice(0, -1).join(":");
+        await handleModalInteraction(interaction, targetWindow, value);
+        return;
+      }
 
       const mgmtResult = await handleMgmtSelect(id, value, channelId, discord);
       if (mgmtResult) {
@@ -911,6 +1247,45 @@ const server = Bun.serve({
     const url = new URL(req.url);
     if (url.pathname === "/hook" && req.method === "POST") {
       return handleHookRequest(req);
+    }
+
+    // Skills 重新扫描（manager 在 create/resume/kill 后调）
+    if (url.pathname === "/skills/rescan" && req.method === "POST") {
+      try {
+        const body = (await req.json().catch(() => ({}))) as {
+          agent?: string;
+          cwd?: string;
+          action?: "add" | "remove" | "full";
+        };
+        const action = body.action || "full";
+        if (action === "remove" && body.agent) {
+          clearProjectSkills(body.agent);
+        } else if (action === "add" && body.agent && body.cwd) {
+          await scanProjectSkills(body.agent, body.cwd);
+        } else {
+          // full rescan
+          await scanGlobalSkills();
+          try {
+            const listResult = await runManager("list");
+            for (const a of listResult.agents || []) {
+              if (a.status === "active" && a.cwd) {
+                await scanProjectSkills(a.name, a.cwd);
+              } else {
+                clearProjectSkills(a.name);
+              }
+            }
+          } catch { /* non-critical */ }
+        }
+        await registerSlashCommands();
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: (e as Error).message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
 
     return new Response("Claude Orchestrator Bridge", { status: 200 });

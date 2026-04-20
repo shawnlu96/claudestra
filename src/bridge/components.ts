@@ -76,13 +76,12 @@ export function buildComponents(
               : btn.style === "success"
                 ? ButtonStyle.Success
                 : ButtonStyle.Secondary;
-        row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(btn.id)
-            .setLabel(btn.label)
-            .setStyle(style)
-            .setEmoji(btn.emoji || null)
-        );
+        const button = new ButtonBuilder()
+          .setCustomId(btn.id)
+          .setLabel(btn.label)
+          .setStyle(style);
+        if (btn.emoji) button.setEmoji(btn.emoji);
+        row.addComponents(button);
       }
       rows.push(row);
     } else if (comp.type === "select") {
