@@ -190,7 +190,8 @@ Reply rules:
 - Never use markdown tables (Discord doesn't support them). Use bullet lists.
 - Keep lines under 60 chars in code blocks. Max 2000 chars per message.
 - Be concise — user is reading on a small screen.
-- Reply in 中文.`,
+- Reply in 中文.
+- Do NOT @ the user in your reply body. The system adds one @mention automatically when your turn ends, so adding your own (\`<@id>\` or \`@username\`) causes double-notification.`,
   }
 );
 

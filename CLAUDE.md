@@ -44,6 +44,7 @@ src/
     jsonl-watcher.ts     JSONL session tailer → streaming tool summaries
     slash-catalog.ts     Hardcoded list of CC built-in slash commands (Discord-friendly subset)
     slash-registry.ts    Runtime registry of discovered skills per scope + per-channel resolver
+    wedge-watcher.ts     Detects agents stuck >30min with no pane change + not idle → Discord alert
   channel-server.ts      Per-session MCP proxy (stdio MCP ↔ Bridge WebSocket)
   manager.ts             Agent lifecycle + cron + version/update CLI (JSON output)
   cron.ts                Cron scheduler daemon (pm2-managed)
@@ -57,6 +58,7 @@ src/
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
+    jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
   ansi2html.ts           ANSI escape codes → coloured HTML
   html2png.ts            HTML → PNG via Playwright headless Chromium
   discord-reply.ts       Bash fallback: send a message through the Bridge directly
@@ -116,6 +118,9 @@ bun src/manager.ts update    # git pull + pm2 restart all
 bun src/manager.ts auto-update status
 bun src/manager.ts auto-update claudestra on|off   # Claudestra self-update (30 min poll)
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly poll)
+
+# Token usage aggregation (parses ~/.claude/projects/<slug>/<sessionId>.jsonl)
+bun src/manager.ts cost [--agent <name>] [--today|--week]
 
 # Tests
 bun test

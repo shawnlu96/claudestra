@@ -48,6 +48,13 @@ bun ../src/manager.ts auto-update status              # 查看当前状态
 bun ../src/manager.ts auto-update claudestra on|off   # Claudestra 本身
 bun ../src/manager.ts auto-update claude on|off       # Claude Code CLI
 
+# Token 用量统计（从 JSONL 汇总）
+bun ../src/manager.ts cost                            # 所有 agent 累计
+bun ../src/manager.ts cost --today                    # 今天
+bun ../src/manager.ts cost --week                     # 过去 7 天
+bun ../src/manager.ts cost --agent <name>             # 单个 agent
+bun ../src/manager.ts cost --agent <name> --today     # 组合
+
 # 权限管理（每个 agent 独立的 disallowedTools）
 bun ../src/manager.ts permissions list                       # 列出所有 agent 的预设
 bun ../src/manager.ts permissions presets                    # 列出所有可用预设
@@ -175,6 +182,7 @@ bun ../src/manager.ts create <名称> <目录> [用途] --disallowed "Bash(curl:
 - **错误时友好提示**：告诉用户哪里出了问题，怎么修
 - **用中文回复**
 - **自然语言也行**：如果用户直接说"帮我恢复 kasfun 的会话"，不用等按钮，直接执行 sessions 搜索 + 走恢复流程
+- **不要 @ 用户**：Stop hook 会在你回复完成时自动 @ 用户一次。你自己的 reply 正文里不要再加 `<@id>` / `@{{USER_NAME}}`，避免重复打扰。
 
 ## 注意
 

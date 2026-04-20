@@ -44,6 +44,7 @@ import {
 import { tmuxScreenshot } from "./bridge/screenshot.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking } from "./bridge/jsonl-watcher.js";
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
+import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
 import {
   tmuxCapture,
   windowTarget,
@@ -286,6 +287,25 @@ discord.once("ready", async () => {
 
   // 启动权限弹窗 watcher
   startPermissionWatcher(ALLOWED_USER_IDS, discord);
+
+  // 启动 wedge watcher — 检测长时间没动静但又不 idle 的 agent
+  startWedgeWatcher(discord);
+
+  // 每 30 分钟自动重扫 skill（新装 plugin / 新建 user skill 不需要 restart bridge 就能出现在 /）
+  setInterval(async () => {
+    try {
+      await scanGlobalSkills();
+      const listResult = await runManager("list");
+      for (const a of listResult.agents || []) {
+        if (a.status === "active" && a.cwd) {
+          await scanProjectSkills(a.name, a.cwd);
+        }
+      }
+      await registerSlashCommands();
+    } catch (e) {
+      console.error("定时 skill 重扫失败:", e);
+    }
+  }, 30 * 60_000);
 });
 
 // ────────────────────────────────────────────────
@@ -800,6 +820,19 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         return;
       }
 
+      // Wedge Esc 救回按钮
+      if (id.startsWith("wedge_esc:")) {
+        const agentName = id.slice("wedge_esc:".length);
+        try {
+          await tmuxRaw(["send-keys", "-t", `master:${agentName}`, "Escape"]);
+          clearWedgeState(agentName);
+          await interaction.followUp({ content: `✅ 已发 Esc 到 ${agentName}`, ephemeral: true }).catch(() => {});
+        } catch (e) {
+          await interaction.followUp({ content: `❌ 发 Esc 失败: ${(e as Error).message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+      }
+
       // 打断按钮
       if (id.startsWith("interrupt:")) {
         const targetChannelId = id.slice("interrupt:".length);
@@ -1260,6 +1293,7 @@ const server = Bun.serve({
         const action = body.action || "full";
         if (action === "remove" && body.agent) {
           clearProjectSkills(body.agent);
+          clearWedgeState(body.agent);
         } else if (action === "add" && body.agent && body.cwd) {
           await scanProjectSkills(body.agent, body.cwd);
         } else {
