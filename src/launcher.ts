@@ -370,7 +370,13 @@ async function main() {
     }
 
     // 检查 Claude Code 是否还活着（不是退回了 shell）
-    const atShell = /[%$]\s*$/.test(pane.split("\n").filter((l) => l.trim()).pop() || "");
+    // 与 manager.ts isAtShell 保持一致：支持 $ % # > ➜ » λ 等主流 shell prompt 字符
+    // 先排除 Claude Code TUI 的标志（bypass permissions / esc to interrupt）
+    const nonEmpty = pane.split("\n").filter((l) => l.trim());
+    const tail = nonEmpty.slice(-5).join("\n");
+    const hasClaudeTui = /bypass permissions|esc to interrupt/i.test(tail);
+    const lastLine = nonEmpty.pop() || "";
+    const atShell = !hasClaudeTui && /[%$#>➜»λ]\s*$/.test(lastLine);
     if (atShell) {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
       const cmd = buildClaudeCommand({

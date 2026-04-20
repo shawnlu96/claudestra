@@ -694,10 +694,29 @@ async function cmdKill(name: string) {
 // 优雅退出 + 重启
 // ============================================================
 
-/** 检查 tmux pane 是否在 shell 提示符 */
+/**
+ * 检查 tmux pane 是否回到 shell 提示符。
+ *
+ * 策略：
+ * 1. 排除法：pane 含 Claude Code TUI 的标志文字（"bypass permissions" / "esc to interrupt" /
+ *    选项菜单 "❯ 1." ... 这些只在 Claude Code 运行时出现）→ 不是 shell
+ * 2. 最后非空行结尾匹配常见 shell 提示符字符：$、%、#、>、➜、»、λ
+ *    （注意：❯ 是 Claude Code 的输入提示符，也被 starship 等 shell 主题用，
+ *     所以要配合排除法才能区分）
+ *
+ * 用户反馈 v1.7.4 的坑：oh-my-zsh "robbyrussell" 主题用 ➜，原来的
+ * /[%$]/ 正则认不出来导致 restart 永远"启动超时"。
+ */
 function isAtShell(pane: string): boolean {
-  const lastLine = pane.split("\n").filter((l) => l.trim()).pop() || "";
-  return /[%$]\s*$/.test(lastLine);
+  const nonEmpty = pane.split("\n").filter((l) => l.trim());
+  const tail = nonEmpty.slice(-5).join("\n");
+  // 如果底部有 Claude Code TUI 标志，肯定不在 shell
+  if (/bypass permissions|esc to interrupt|esc to cancel/i.test(tail)) return false;
+  if (/^\s*❯\s*\d+\./m.test(tail)) return false;
+  const lastLine = nonEmpty.pop() || "";
+  // 常见 shell prompt 收尾字符：$ (bash/sh)、% (zsh default)、# (root)、> (fish/cmd)、
+  // ➜ (oh-my-zsh robbyrussell)、» (pure prompt)、λ (lambda prompt)
+  return /[%$#>➜»λ]\s*$/.test(lastLine);
 }
 
 /** 检查是否有需要按 Enter 的提示（转发到共享实现） */
