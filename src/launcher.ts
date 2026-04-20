@@ -213,6 +213,45 @@ async function allAgentsIdle(): Promise<boolean> {
   return true;
 }
 
+/**
+ * 开机/pm2 拉起来时：registry 里 active 但没 tmux window 的 agent 都 resume 回来。
+ * 依赖 manager.ts restart 的"检测到 dead agent 就 kill-window + new-window + resume"路径（v1.7.4+）。
+ */
+async function restoreDeadAgents() {
+  try {
+    const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
+    if (!list.ok) return;
+    const parsed = JSON.parse(list.out || "{}");
+    const agents: any[] = parsed.agents || [];
+    const dead = agents.filter((a) => a.status === "active" && a.idle === false);
+    // 注意：manager list 对 dead agent 的 idle 字段是 false（因为 isAgentIdle 拿不到 pane）；
+    // 更可靠的判据是 "active 但在 tmux window 列表里没有"
+    const liveWindowNames = new Set(
+      agents.filter((a) => a.status === "active").map((a) => a.name)
+    );
+    const stillDead = dead.filter((a) => liveWindowNames.has(a.name)) || [];
+    // ↑ 注意 manager.ts list 会把 "registry active 但 window 丢了" 的记为 status="dead"，
+    // 所以 "active" 里都是还活着的。真正 dead 的在 status="dead" 条目里。
+    const reallyDead = agents.filter((a) => a.status === "dead");
+    if (reallyDead.length === 0) {
+      console.log("🔁 开机自检：没有需要恢复的 dead agent");
+      return;
+    }
+    console.log(`🔁 开机自检：发现 ${reallyDead.length} 个 dead agent，调 manager.ts restart 恢复`);
+    try {
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
+      });
+    } catch { /* non-critical */ }
+    await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+    console.log("🔁 开机自检：restart 调用完成");
+  } catch (e) {
+    console.error("🔁 开机自检失败:", e);
+  }
+}
+
 async function restartAgentsAndMaster() {
   // 所有 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
@@ -290,10 +329,15 @@ async function main() {
   console.log(`   检查间隔: ${CHECK_INTERVAL_MS / 1000}s`);
 
   // 首次检查
-  if (await sessionExists()) {
+  const masterWasAlreadyUp = await sessionExists();
+  if (masterWasAlreadyUp) {
     console.log("✅ 大总管 session 已存在，进入监控模式");
   } else {
     await startMaster();
+    // master 是刚起的 → 说明可能是机器重启后 pm2 拉起来的
+    // 如果 registry 里有标记 active 但 tmux 没 window 的 agent（因为 tmux server 随重启一起死了），
+    // 主动调 manager.ts restart 把它们 resume 回来
+    setTimeout(() => restoreDeadAgents().catch(() => {}), 3000);
   }
 
   // 持续监控

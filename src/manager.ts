@@ -1363,12 +1363,43 @@ async function cmdUpdate() {
   await new Response(pm2Proc.stdout).text();
   await pm2Proc.exited;
 
+  // 7. pm2 save — 让当前进程列表持久化（开机自启时 pm2 resurrect 会读它）
+  await Bun.spawn(["pm2", "save"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }).exited;
+
+  // 8. 检查 pm2 startup 是否已经配过（开机自启的 init 脚本）；没配给 hint
+  const startupWarning = await checkPm2Startup();
+
   output({
     ok: true,
     from: `v${local}`,
     to: release.tag,
     message: `已更新到 ${release.tag} 并重启 pm2 服务`,
+    pm2StartupWarning: startupWarning,
   });
+}
+
+/**
+ * 检测 pm2 startup 是不是已经配置好（开机自启）。
+ * macOS 看 ~/Library/LaunchAgents/pm2.<user>.plist；
+ * Linux 看 /etc/systemd/system/pm2-<user>.service。
+ * 没有就返回一条给用户的 hint 字符串，已有返回 null。
+ */
+async function checkPm2Startup(): Promise<string | null> {
+  const { existsSync } = await import("fs");
+  const user = process.env.USER || "";
+  const home = process.env.HOME || "";
+  const macosPath = `${home}/Library/LaunchAgents/pm2.${user}.plist`;
+  const linuxPath = `/etc/systemd/system/pm2-${user}.service`;
+  if (existsSync(macosPath) || existsSync(linuxPath)) return null;
+
+  // 跑一次 pm2 startup 看看它会打什么 sudo 命令，喂给用户
+  const proc = Bun.spawn(["pm2", "startup"], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  const err = await new Response(proc.stderr).text();
+  await proc.exited;
+  const match = (out + "\n" + err).match(/^\s*(sudo [^\n]+)$/m);
+  if (!match) return null;
+  return `pm2 开机自启未配置。请跑一次下面的 sudo 命令，机器重启后服务才会自动回来：\n${match[1]}`;
 }
 
 async function cmdCost(args: string[]) {

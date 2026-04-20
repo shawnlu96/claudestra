@@ -802,6 +802,42 @@ async function stepFinalize(cfg: Config): Promise<void> {
     print(`${c.red}✗${c.reset}`);
     print(pm2.err || pm2.out);
     warn("pm2 启动失败，试试: pm2 logs");
+    return;
+  }
+
+  // 6. pm2 startup — 开机自启。需要 sudo，捕获 pm2 输出里的 sudo 命令后问用户要不要自动跑。
+  write(`${c.dim}▶${c.reset} 配置 pm2 开机自启… `);
+  const startupProbe = await run(["pm2", "startup"]);
+  // pm2 startup 会输出一条 "sudo env PATH=... pm2 startup <init>" 命令
+  const sudoMatch = (startupProbe.out + "\n" + (startupProbe.err || "")).match(/^\s*(sudo [^\n]+)$/m);
+  if (!sudoMatch) {
+    // 可能已经配置过了，或者 pm2 没给出 sudo 命令
+    print(`${c.green}✓${c.reset}  ${c.dim}(已配置或无需配置)${c.reset}`);
+    await run(["pm2", "save"], { cwd: REPO_ROOT });
+    return;
+  }
+  print(`${c.yellow}需要 sudo${c.reset}`);
+  br();
+  print(`${c.dim}pm2 要写一个开机自启脚本，需要 sudo 密码。命令如下：${c.reset}`);
+  print(`  ${c.cyan}${sudoMatch[1]}${c.reset}`);
+  br();
+  if (await confirm("要我帮你跑这条 sudo 命令吗？", true)) {
+    // 直接用 shell 跑（继承当前 TTY 让 sudo 能提示密码）
+    const proc = Bun.spawn(["/bin/bash", "-c", sudoMatch[1]], {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    await proc.exited;
+    if (proc.exitCode === 0) {
+      ok("pm2 开机自启已配置");
+      await run(["pm2", "save"], { cwd: REPO_ROOT });
+    } else {
+      warn("sudo 命令没成功，可以以后手工跑上面那条（或重跑 bun run setup）");
+    }
+  } else {
+    hint(`稍后手工跑：${c.cyan}${sudoMatch[1]}${c.reset}`);
+    hint(`然后再跑：${c.cyan}pm2 save${c.reset}`);
   }
 }
 

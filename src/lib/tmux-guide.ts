@@ -27,99 +27,43 @@ export function printTmuxGuide(): void {
 
   p("");
   p(`${c.cyan}${bar}${c.reset}`);
-  p(`${c.bold}${c.cyan}  tmux 快速上手（3 分钟）${c.reset}`);
+  p(`${c.bold}${c.cyan}  tmux × iTerm2 attach（1 分钟）${c.reset}`);
   p(`${c.cyan}${bar}${c.reset}`);
   p("");
-
-  p(`${c.dim}tmux 是一个终端复用器。Claudestra 把所有 agent 都塞进${c.reset}`);
-  p(`${c.dim}同一个 tmux session（叫 ${c.bold}master${c.reset}${c.dim}），每个 agent 是其中一个 window。${c.reset}`);
-  p(`${c.dim}你回到电脑后，通过 tmux 直接进到任意 agent 的终端跟它对话。${c.reset}`);
+  p(`${c.dim}Claudestra 把所有 agent 放进一个 tmux session（叫 ${c.bold}master${c.reset}${c.dim}），${c.reset}`);
+  p(`${c.dim}每个 agent 是其中一个 window。用 iTerm2 的 tmux 集成（-CC 模式）${c.reset}`);
+  p(`${c.dim}attach 后，每个 window 就是一个 iTerm2 tab，鼠标点、⌘T 都能用。${c.reset}`);
   p("");
 
-  // ──────────────────────────────────────────
-  // 方案 A: iTerm2 -CC 模式
-  // ──────────────────────────────────────────
-  p(`${c.bold}${c.green}━━━ 方案 A：iTerm2 -CC 模式（最推荐）${c.reset}`);
+  p(`${c.bold}${c.yellow}第 1 步：配置 iTerm2（先做，一次配完永远受益）${c.reset}`);
+  p(`${c.cyan}iTerm2 → Settings → General → tmux${c.reset} 标签页，按下面勾选：`);
   p("");
-  p(`如果你用 ${c.bold}iTerm2${c.reset}（macOS 默认推荐的终端），用这个。`);
-  p(`每个 agent 会变成 iTerm2 原生 tab，可以直接用鼠标点、${c.bold}⌘T${c.reset} 开新 tab 一样自然。`);
-  p("");
-  p(`${c.cyan}tmux -S ${SOCK} -CC attach${c.reset}`);
-  p("");
-  p(`${c.dim}发生的事：${c.reset}`);
-  p(`  ${c.dim}•${c.reset} iTerm2 弹出一个新窗口，顶部是一排 tab`);
-  p(`  ${c.dim}•${c.reset} 每个 agent 占一个 tab（master / agent-xxx / ...）`);
-  p(`  ${c.dim}•${c.reset} 用 ${c.yellow}⌘⇧[${c.reset} / ${c.yellow}⌘⇧]${c.reset} 或鼠标切换 tab`);
-  p(`  ${c.dim}•${c.reset} 关掉窗口 = ${c.bold}detach${c.reset}（不是 kill，agent 继续跑）`);
-  p("");
-  p(`${c.bold}${c.yellow}推荐 iTerm2 设置（一次配完，体验最佳）${c.reset}`);
-  p(`打开 ${c.cyan}iTerm2 → Settings → General → tmux${c.reset} 标签页，按下面勾选：`);
-  p("");
-  p(`  ${c.green}☑${c.reset} ${c.bold}Attaching${c.reset}: ${c.cyan}Tabs in the attaching window${c.reset}`);
-  p(`      ${c.dim}(每个 agent 是当前窗口的一个 tab，不另开窗口)${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Attaching${c.reset}: ${c.cyan}Tabs in the attaching window${c.reset}  ${c.dim}(agent 变 tab，不另开窗口)${c.reset}`);
   p(`  ${c.green}☑${c.reset} ${c.bold}Automatically bury the tmux client session after connecting${c.reset}`);
-  p(`      ${c.dim}(attach 完把控制会话藏起来，不干扰)${c.reset}`);
   p(`  ${c.green}☑${c.reset} ${c.bold}Use "tmux" profile rather than profile of the connecting session${c.reset}`);
-  p(`      ${c.dim}(tab 用 tmux 专属 profile，字体/配色独立)${c.reset}`);
   p(`  ${c.green}☑${c.reset} ${c.bold}Status bar shows tmux status bar content${c.reset}`);
-  p(`      ${c.dim}(状态栏显示 tmux 的内容而不是 iTerm2 原生)${c.reset}`);
-  p(`  ${c.green}☑${c.reset} ${c.bold}Pausing${c.reset}: Pause a pane if it would take more than ${c.yellow}120${c.reset} seconds`);
-  p(`      ${c.dim}(长时间没看的 tab 自动 pause，防止刷屏卡死)${c.reset}`);
-  p(`  ${c.green}☑${c.reset} ${c.bold}Warn before pausing${c.reset} + ${c.bold}Unpause automatically${c.reset}`);
+  p(`  ${c.green}☑${c.reset} ${c.bold}Pausing${c.reset}: Pause a pane if it would take more than ${c.yellow}120${c.reset} seconds  ${c.dim}(+ Warn + Unpause)${c.reset}`);
   p(`  ${c.green}☑${c.reset} ${c.bold}Mirror tmux paste buffer to local clipboard${c.reset}`);
-  p(`      ${c.dim}(tmux 里复制的东西同步到系统剪贴板)${c.reset}`);
   p("");
 
-  // ──────────────────────────────────────────
-  // 方案 B: 普通 tmux
-  // ──────────────────────────────────────────
-  p(`${c.bold}${c.green}━━━ 方案 B：普通 tmux 模式${c.reset}`);
+  p(`${c.bold}${c.green}第 2 步：attach${c.reset}`);
   p("");
-  p(`iTerm2 以外的终端（Alacritty / kitty / Warp / Linux 终端）用这个。`);
+  p(`  ${c.cyan}tmux -S ${SOCK} -CC attach${c.reset}`);
   p("");
-  p(`${c.cyan}tmux -S ${SOCK} attach${c.reset}`);
-  p("");
-  p(`你会看到当前焦点 agent 的全屏终端，底部有状态栏列出所有 window。`);
+  p(`${c.dim}每个 agent 变成一个 iTerm2 tab，可以鼠标点、⌘⇧[ / ⌘⇧] 切换。${c.reset}`);
+  p(`${c.dim}关闭窗口 = detach（agent 继续跑），下次 attach 回来状态还在。${c.reset}`);
   p("");
 
-  p(`${c.bold}${c.yellow}必须记住的快捷键${c.reset}  ${c.dim}(tmux 前缀键是 Ctrl-B，先按 Ctrl-B 松开，再按下面的键)${c.reset}`);
+  p(`${c.bold}${c.magenta}可选：shell alias${c.reset}`);
+  p(`${c.dim}写到 ~/.zshrc 或 ~/.bashrc，以后 ${c.bold}ca${c.reset}${c.dim} 一键 attach：${c.reset}`);
   p("");
-  p(`  ${c.yellow}Ctrl-B  n${c.reset}      下一个 window（下一个 agent）`);
-  p(`  ${c.yellow}Ctrl-B  p${c.reset}      上一个 window`);
-  p(`  ${c.yellow}Ctrl-B  w${c.reset}      弹出 window 列表，方向键选，Enter 确认`);
-  p(`  ${c.yellow}Ctrl-B  0${c.reset}      跳到 window 0（大总管）`);
-  p(`  ${c.yellow}Ctrl-B  1${c.reset}      跳到 window 1（第一个 agent）`);
-  p(`  ${c.yellow}Ctrl-B  ,${c.reset}      重命名当前 window`);
-  p(`  ${c.yellow}Ctrl-B  d${c.reset}      ${c.bold}detach${c.reset}（离开 tmux 但 agent 继续跑）`);
-  p(`  ${c.yellow}Ctrl-B  [${c.reset}      进入滚动模式（方向键/PgUp 翻历史，q 退出）`);
-  p("");
-
-  // ──────────────────────────────────────────
-  // 几个要懂的概念
-  // ──────────────────────────────────────────
-  p(`${c.bold}${c.magenta}几个坑${c.reset}`);
-  p("");
-  p(`  ${c.red}1.${c.reset} ${c.bold}detach 不是 kill${c.reset}`);
-  p(`     ${c.dim}关掉 iTerm2 窗口或按 Ctrl-B d，agent 继续在后台跑。下次 attach 回来状态还在。${c.reset}`);
-  p("");
-  p(`  ${c.red}2.${c.reset} ${c.bold}不要 Ctrl-C 退 tmux${c.reset}`);
-  p(`     ${c.dim}Ctrl-C 会被传到当前 agent（Claude Code 里就是打断它）。${c.reset}`);
-  p(`     ${c.dim}要离开 tmux，用 Ctrl-B d 或直接关窗口。${c.reset}`);
-  p("");
-  p(`  ${c.red}3.${c.reset} ${c.bold}私有 socket${c.reset}`);
-  p(`     ${c.dim}Claudestra 的 tmux 跑在 ${c.cyan}${SOCK}${c.reset}${c.dim} 上，不跟你平时的 tmux 混。${c.reset}`);
-  p(`     ${c.dim}每次都要加 ${c.cyan}-S ${SOCK}${c.reset}${c.dim}。可以做个 shell alias：${c.reset}`);
-  p("");
-  p(`     ${c.cyan}alias ca='tmux -S ${SOCK} -CC attach'${c.reset}`);
-  p("");
-  p(`     ${c.dim}写到 ~/.zshrc 或 ~/.bashrc 里，以后 ${c.bold}ca${c.reset}${c.dim} 一个字母就能 attach。${c.reset}`);
-  p("");
-  p(`  ${c.red}4.${c.reset} ${c.bold}多个人同时 attach${c.reset}`);
-  p(`     ${c.dim}可以。两个终端同时 attach 会看到同一个画面，一个动另一个也动。${c.reset}`);
+  p(`  ${c.cyan}alias ca='tmux -S ${SOCK} -CC attach'${c.reset}`);
   p("");
 
   p(`${c.cyan}${bar}${c.reset}`);
   p("");
-  p(`${c.dim}想再看这份教程？跑: ${c.cyan}bun src/manager.ts tmux-help${c.reset}`);
+  p(`${c.dim}再看这份教程：${c.cyan}bun src/manager.ts tmux-help${c.reset}`);
+  p(`${c.dim}非 iTerm2 用户（Alacritty / kitty / Warp / Linux 终端）需要普通 tmux 模式${c.reset}`);
+  p(`${c.dim}+ 快捷键，参考 ${c.cyan}man tmux${c.reset}${c.dim} 或搜 "tmux cheatsheet"。${c.reset}`);
   p("");
 }
