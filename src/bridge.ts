@@ -718,6 +718,42 @@ discord.on("guildCreate", async (guild) => {
   );
 });
 
+// 我方 bot 在外部 guild 拿到新频道访问权限（对方给我们 allow View Channel）
+discord.on("channelCreate", async (channel) => {
+  // 只通知外部 guild（peer 邀请我们进去的那些），自己 guild 里建频道是我们自己在创建 agent 不通知
+  if (!("guild" in channel) || !channel.guild) return;
+  if (channel.guild.id === DISCORD_GUILD_ID) return;
+  const textCh = channel as TextChannel;
+  if (typeof textCh.isTextBased !== "function" || !textCh.isTextBased()) return;
+  console.log(`🎉 外部 guild 新频道访问: #${textCh.name} in ${textCh.guild?.name}`);
+  await notifyMaster(
+    [
+      `🎉 **你 bot 在对方 Claudestra 服务器拿到新频道访问**`,
+      ``,
+      `频道：**#${textCh.name}**（id: \`${textCh.id}\`，topic: ${textCh.topic || "(无)"}）`,
+      `服务器：${textCh.guild?.name ?? "(未知)"}`,
+      ``,
+      `你可以在这个频道 @ 对方 bot 发起对话：\`reply(chat_id="${textCh.id}", text="<@对方bot_id> ...")\``,
+      `或者先调 \`list_shared_channels\` 看一下你当前的全部外部频道列表。`,
+    ].join("\n")
+  );
+});
+
+// 我方 bot 在外部 guild 失去频道访问（对方撤回 allow 或删了频道）
+discord.on("channelDelete", async (channel) => {
+  if (!("guild" in channel) || !channel.guild) return;
+  if (channel.guild.id === DISCORD_GUILD_ID) return;
+  const textCh = channel as TextChannel;
+  if (typeof textCh.isTextBased !== "function" || !textCh.isTextBased()) return;
+  console.log(`💨 外部 guild 失去频道访问: #${textCh.name} in ${textCh.guild?.name}`);
+  await notifyMaster(
+    [
+      `💨 **你 bot 在 ${textCh.guild?.name ?? "外部 guild"} 失去了 #${textCh.name} 的访问权限**`,
+      `（对方撤回了 allow View Channel，或者这个频道被删了）`,
+    ].join("\n")
+  );
+});
+
 // 别的 bot（不是我方）加入了我的 guild
 discord.on("guildMemberAdd", async (member) => {
   if (!member.user?.bot) return;
@@ -727,6 +763,8 @@ discord.on("guildMemberAdd", async (member) => {
   // v1.8.5+: 自动 scope — 对所有现有频道加 "deny View Channel for peer bot's role" 的 override，
   // 默认它什么频道都看不到。用户只需要在想共享的频道上手动把 View Channel 改成 allow。
   // 需要我方 bot 有 MANAGE_ROLES + MANAGE_CHANNELS 权限。老用户邀请链接没给这俩就会失败，走文字提示兜底。
+  // 等一下再 scope，让 Discord 把 peer bot 的 managed role 同步完
+  await Bun.sleep(1500);
   const scopeResult = await autoScopePeerBot(member).catch((e) => ({
     ok: false, reason: (e as Error).message, modified: 0, total: 0,
   }));
@@ -774,11 +812,20 @@ async function autoScopePeerBot(
     if (!guild) return { ok: false, modified: 0, total: 0, reason: "没有 guild 上下文" };
 
     // peer bot 的 managed role 就是它自己名字那个 role（每个 bot 加入会自动建一个）
-    const peerBotRole = member.roles.cache.find(
+    // 注意：用 guild.roles.cache 不用 member.roles.cache，因为 guildMemberAdd 触发时
+    // member 的 roles 可能还没同步
+    let peerBotRole = guild.roles.cache.find(
       (r: any) => r.managed && r.tags?.botId === member.id
     );
     if (!peerBotRole) {
-      return { ok: false, modified: 0, total: 0, reason: "找不到 peer bot 的 managed role" };
+      // 再 fetch 一次 guild 的 roles，有可能 cache 还没填
+      try { await guild.roles.fetch(); } catch { /* non-critical */ }
+      peerBotRole = guild.roles.cache.find(
+        (r: any) => r.managed && r.tags?.botId === member.id
+      );
+    }
+    if (!peerBotRole) {
+      return { ok: false, modified: 0, total: 0, reason: "找不到 peer bot 的 managed role（可能 role 还在创建中，稍后再试）" };
     }
 
     // 检查我方 bot 是否有 Manage Roles 权限
