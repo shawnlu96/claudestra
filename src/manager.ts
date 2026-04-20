@@ -33,6 +33,7 @@ import {
   listAgentWindows as listAgentWindowsShared,
   ensureSocketDir,
   hasClaudePromptToConfirm,
+  detectSessionIdlePrompt,
 } from "./lib/tmux-helper.js";
 import {
   buildClaudeCommand,
@@ -386,6 +387,11 @@ async function cmdCreate(
     for (let i = 0; i < 60; i++) {
       await Bun.sleep(500);
       const pane = await captureLast(tmuxName, 10);
+      // Session 闲置弹窗 → watcher 会通知用户，这里当成就绪返回
+      if (detectSessionIdlePrompt(pane)) {
+        ready = true;
+        break;
+      }
       if (hasPromptToConfirm(pane)) {
         await tmuxRaw(["send-keys", "-t", target, "Enter"]);
         await Bun.sleep(500);
@@ -526,6 +532,11 @@ async function cmdResume(
     for (let i = 0; i < 60; i++) {
       await Bun.sleep(500);
       const pane = await captureLast(tmuxName, 10);
+      // Session 闲置弹窗 → watcher 会通知用户，这里当成就绪返回
+      if (detectSessionIdlePrompt(pane)) {
+        ready = true;
+        break;
+      }
       if (hasPromptToConfirm(pane)) {
         await tmuxRaw(["send-keys", "-t", target, "Enter"]);
         await Bun.sleep(500);
@@ -760,6 +771,12 @@ async function startClaudeInWindow(
 
     // Claude Code 就绪
     if (/❯/.test(pane.split("\n").slice(-5).join("\n")) && pane.includes("bypass permissions")) {
+      return true;
+    }
+
+    // Session 闲置弹窗 → 不自动确认，交给 permission-watcher 通知用户
+    // 当作"就绪"返回，cmdCreate/cmdResume 会保存 registry，watcher 会发 Discord 按钮
+    if (detectSessionIdlePrompt(pane)) {
       return true;
     }
 

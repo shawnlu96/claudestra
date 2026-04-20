@@ -13,6 +13,7 @@ import {
   tmuxCapture,
   windowTarget,
   detectRuntimePermissionPrompt,
+  detectSessionIdlePrompt,
 } from "../lib/tmux-helper.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -38,48 +39,75 @@ async function checkAgent(
   discord: Client
 ) {
   const pane = await tmuxCapture(windowTarget(agentName), 30);
-  const promptDesc = detectRuntimePermissionPrompt(pane);
-  if (!promptDesc) {
-    // 弹窗消失了，清掉指纹让下次新弹窗能再次通知
+
+  // 两种弹窗共用一个 channel 级别的 slot，同时只会有一种出现
+  const sessionIdleDesc = detectSessionIdlePrompt(pane);
+  const permissionDesc = sessionIdleDesc ? null : detectRuntimePermissionPrompt(pane);
+
+  if (!sessionIdleDesc && !permissionDesc) {
     lastNotified.delete(channelId);
     return;
   }
 
   const fp = fingerprint(pane);
-  if (lastNotified.get(channelId) === fp) return; // 同一弹窗，已通知过
+  if (lastNotified.get(channelId) === fp) return;
   lastNotified.set(channelId, fp);
 
-  // 截图
   const pngPath = await tmuxScreenshot(agentName);
+  const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
 
-  // 通知
   try {
     const ch = (await discord.channels.fetch(channelId)) as TextChannel;
-    const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
-    const text = [
-      `🔔 **${agentName}** 需要授权`,
-      `${promptDesc}`,
-      mention,
-    ].filter(Boolean).join("\n");
-    const components = buildComponents([
-      {
-        type: "buttons",
-        buttons: [
-          { id: `perm_allow:${channelId}`, label: "允许", emoji: "✅", style: "success" },
-          { id: `perm_allow_session:${channelId}`, label: "允许 + 本会话不再问", emoji: "✅", style: "primary" },
-          { id: `perm_deny:${channelId}`, label: "拒绝", emoji: "❌", style: "danger" },
-        ],
-      },
-    ]);
+
+    let text: string;
+    let components: any;
+    let logLabel: string;
+
+    if (sessionIdleDesc) {
+      text = [
+        `💤 **${agentName}** session 已闲置，Claude Code 询问如何继续`,
+        sessionIdleDesc,
+        mention,
+      ].filter(Boolean).join("\n");
+      components = buildComponents([
+        {
+          type: "buttons",
+          buttons: [
+            { id: `session_summary:${channelId}`, label: "从摘要恢复", emoji: "✨", style: "success" },
+            { id: `session_full:${channelId}`, label: "恢复完整会话", emoji: "📜", style: "primary" },
+            { id: `session_noask:${channelId}`, label: "不再询问", emoji: "🔕", style: "secondary" },
+          ],
+        },
+      ]);
+      logLabel = `session-idle desc="${sessionIdleDesc}"`;
+    } else {
+      text = [
+        `🔔 **${agentName}** 需要授权`,
+        permissionDesc,
+        mention,
+      ].filter(Boolean).join("\n");
+      components = buildComponents([
+        {
+          type: "buttons",
+          buttons: [
+            { id: `perm_allow:${channelId}`, label: "允许", emoji: "✅", style: "success" },
+            { id: `perm_allow_session:${channelId}`, label: "允许 + 本会话不再问", emoji: "✅", style: "primary" },
+            { id: `perm_deny:${channelId}`, label: "拒绝", emoji: "❌", style: "danger" },
+          ],
+        },
+      ]);
+      logLabel = `permission desc="${permissionDesc}"`;
+    }
+
     const msg = await ch.send({
       content: text,
       components,
       files: pngPath ? [{ attachment: pngPath }] : undefined,
     });
     permissionMessages.set(channelId, msg.id);
-    console.log(`🔔 权限弹窗通知: agent=${agentName} desc="${promptDesc}"`);
+    console.log(`🔔 弹窗通知 agent=${agentName} ${logLabel}`);
   } catch (e) {
-    console.error(`🔔 权限弹窗通知发送失败:`, e);
+    console.error(`🔔 弹窗通知发送失败:`, e);
   }
 }
 

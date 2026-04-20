@@ -82,9 +82,25 @@ export function hasClaudePromptToConfirm(pane: string): boolean {
     pane.includes("Yes, proceed") ||
     pane.includes("skip all permission") ||
     pane.includes("Skip all permission") ||
-    pane.includes("Resume from summary") ||
     (pane.includes("❯ 1.") && pane.includes("Yes"))
   );
+}
+
+/**
+ * 检测 session 闲置弹窗（resume 时 Claude Code 可能弹这个让用户选）。
+ * 区别于 hasClaudePromptToConfirm — 这个弹窗必须让用户主动选，不能自动确认。
+ * 返回弹窗描述，没有返回 null。
+ */
+export function detectSessionIdlePrompt(pane: string): string | null {
+  if (!pane.includes("❯ 1.")) return null;
+  // Claude Code 的 session resume 提示特征文字
+  if (pane.includes("Resume from summary") || pane.includes("Resuming the full session")) {
+    // 提取说明行（"This session is 21h 6m old and 913.2k tokens"）
+    const m = pane.match(/This session is ([\s\S]+?tokens?)\./i)
+      || pane.match(/This session is ([^\n]+)/i);
+    return m ? m[1].trim().slice(0, 150) : "Session 闲置提示";
+  }
+  return null;
 }
 
 /**

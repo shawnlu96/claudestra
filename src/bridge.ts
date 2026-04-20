@@ -511,19 +511,28 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         return;
       }
 
-      // 权限弹窗响应按钮
-      if (id.startsWith("perm_allow:") || id.startsWith("perm_allow_session:") || id.startsWith("perm_deny:")) {
+      // 权限弹窗 + session-idle 弹窗响应按钮
+      const promptBtnPrefixes = [
+        "perm_allow:", "perm_allow_session:", "perm_deny:",
+        "session_summary:", "session_full:", "session_noask:",
+      ];
+      if (promptBtnPrefixes.some((p) => id.startsWith(p))) {
         const [action, targetChannelId] = id.split(":");
-        // Claude Code 权限弹窗的选项键：1=允许 2=允许+不再问 3=拒绝
-        const key = action === "perm_allow" ? "1"
-                  : action === "perm_allow_session" ? "2"
-                  : "3";
+        // 按钮对应的 Claude Code 选项键
+        const keyMap: Record<string, string> = {
+          perm_allow: "1", perm_allow_session: "2", perm_deny: "3",
+          session_summary: "1", session_full: "2", session_noask: "3",
+        };
         const labelMap: Record<string, string> = {
           perm_allow: "✅ 已允许",
           perm_allow_session: "✅ 已允许（本会话不再问）",
           perm_deny: "❌ 已拒绝",
+          session_summary: "✨ 从摘要恢复",
+          session_full: "📜 恢复完整会话",
+          session_noask: "🔕 不再询问",
         };
-        console.log(`🔔 权限响应: channel=${targetChannelId} action=${action} key=${key}`);
+        const key = keyMap[action];
+        console.log(`🔔 弹窗响应: channel=${targetChannelId} action=${action} key=${key}`);
         try {
           const listResult = await runManager("list");
           const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);

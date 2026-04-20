@@ -13,8 +13,20 @@ import {
   tmuxCapture,
   tmuxSendLine,
   hasClaudePromptToConfirm,
+  detectSessionIdlePrompt,
+  listAgentWindows,
+  windowTarget,
   MASTER_SESSION as SESSION_NAME,
 } from "./lib/tmux-helper.js";
+
+/**
+ * Master 专用确认检测：除了 hasClaudePromptToConfirm 覆盖的弹窗，
+ * session-idle 也自动选"从摘要恢复"（按 Enter 选默认的 1）。
+ * agent 的 session-idle 由 permission-watcher 给用户按钮，master 则总是自动处理。
+ */
+function masterShouldAutoConfirm(pane: string): boolean {
+  return hasClaudePromptToConfirm(pane) || detectSessionIdlePrompt(pane) !== null;
+}
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 
@@ -26,6 +38,7 @@ const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次新版本
+const CLAUDE_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60_000; // 每 6 小时检查一次 Claude Code 更新
 
 if (!CONTROL_CHANNEL_ID) {
   console.error("❌ 请设置 CONTROL_CHANNEL_ID（Discord #control 频道 ID）");
@@ -73,7 +86,7 @@ async function startMaster() {
       return true;
     }
 
-    if (hasClaudePromptToConfirm(pane)) {
+    if (masterShouldAutoConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
       await Bun.sleep(500);
       continue;
@@ -125,6 +138,105 @@ async function checkForUpdates() {
 }
 
 // ============================================================
+// Claude Code 版本自动更新
+// ============================================================
+
+let lastClaudeUpdateCheck = 0;
+
+async function runCmd(cmd: string[]): Promise<{ ok: boolean; out: string }> {
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return { ok: proc.exitCode === 0, out: out.trim() };
+}
+
+async function getClaudeVersion(): Promise<string | null> {
+  const { ok, out } = await runCmd(["claude", "--version"]);
+  if (!ok) return null;
+  const m = out.match(/(\d+\.\d+\.\d+)/);
+  return m ? m[1] : null;
+}
+
+async function getClaudeLatestVersion(): Promise<string | null> {
+  const { ok, out } = await runCmd(["npm", "view", "@anthropic-ai/claude-code", "version"]);
+  if (!ok) return null;
+  const m = out.match(/(\d+\.\d+\.\d+)/);
+  return m ? m[1] : null;
+}
+
+/** 所有 agent + master 是否都空闲 */
+async function allAgentsIdle(): Promise<boolean> {
+  if (!(await tmuxIsIdle(MASTER_WINDOW))) return false;
+  const agents = await listAgentWindows();
+  for (const name of agents) {
+    if (!(await tmuxIsIdle(windowTarget(name)))) return false;
+  }
+  return true;
+}
+
+async function restartAgentsAndMaster() {
+  // 所有 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
+  const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+  console.log(`🆙 bun manager restart 结果: ok=${ok}`);
+  if (!ok) console.log(out);
+
+  // master 通过发送 /exit 让其退出，主循环会自动重启
+  await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "/exit", "Enter"]).catch(() => {});
+}
+
+async function checkClaudeCodeUpdate() {
+  const current = await getClaudeVersion();
+  if (!current) return;
+  const latest = await getClaudeLatestVersion();
+  if (!latest) return;
+  if (current === latest) return;
+
+  console.log(`🆙 Claude Code 有新版本: ${current} → ${latest}`);
+
+  // 等所有 agent 空闲再更新（避免打断正在进行的任务）
+  if (!(await allAgentsIdle())) {
+    console.log(`🆙 有 agent 在忙，跳过本次，下次再试`);
+    return;
+  }
+
+  console.log(`🆙 所有 agent 空闲，开始更新 Claude Code`);
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: `🆙 **检测到 Claude Code 新版本** ${current} → ${latest}，所有 agent 当前空闲，开始更新 + 重启...`,
+    });
+  } catch { /* non-critical */ }
+
+  const install = await runCmd(["npm", "install", "-g", "@anthropic-ai/claude-code"]);
+  if (!install.ok) {
+    console.log(`🆙 npm install 失败: ${install.out}`);
+    try {
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: `⚠️ Claude Code 更新失败（npm install 返回错误），详见 launcher 日志`,
+      });
+    } catch { /* non-critical */ }
+    return;
+  }
+
+  // 确认版本
+  const afterVersion = await getClaudeVersion();
+  console.log(`🆙 Claude Code 已更新到 ${afterVersion}`);
+
+  await restartAgentsAndMaster();
+
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+    });
+  } catch { /* non-critical */ }
+}
+
+// ============================================================
 // 主循环
 // ============================================================
 
@@ -153,15 +265,21 @@ async function main() {
 
     // 检查是否卡在确认弹窗
     const pane = await captureLast(10);
-    if (hasClaudePromptToConfirm(pane)) {
+    if (masterShouldAutoConfirm(pane)) {
       console.log("⚠️ 大总管卡在确认弹窗，自动确认...");
       await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
     }
 
-    // 定期检查新版本
+    // 定期检查 Claudestra 新版本（Release）
     if (Date.now() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL_MS) {
       lastUpdateCheck = Date.now();
       checkForUpdates().catch(() => {});
+    }
+
+    // 定期检查 Claude Code 更新
+    if (Date.now() - lastClaudeUpdateCheck >= CLAUDE_UPDATE_CHECK_INTERVAL_MS) {
+      lastClaudeUpdateCheck = Date.now();
+      checkClaudeCodeUpdate().catch((e) => console.error("Claude Code 更新检查异常:", e));
     }
 
     // 检查 Claude Code 是否还活着（不是退回了 shell）
@@ -181,7 +299,7 @@ async function main() {
           console.log("✅ 大总管已重新就绪");
           break;
         }
-        if (hasClaudePromptToConfirm(p)) {
+        if (masterShouldAutoConfirm(p)) {
           await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
           await Bun.sleep(500);
         }
