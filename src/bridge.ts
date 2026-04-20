@@ -566,16 +566,24 @@ async function handleModalInteraction(
 // ============================================================
 
 discord.on("messageCreate", async (msg: DiscordMessage) => {
-  if (msg.author.bot) return;
+  // 跳过自己 bot 的消息（echo）+ 跳过 bridge 自己发出去的（见 trackSentMessage）
+  if (msg.author.id === getBotUserId()) return;
   if (isBotMessage(msg.id)) return;
 
-  if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
-    return;
+  const mentionedMe = msg.mentions.users.has(getBotUserId());
+
+  // Peer bot（其他 Claudestra 实例或任意 Discord bot）：必须 @ 我们才处理
+  if (msg.author.bot) {
+    if (!mentionedMe) return;
+  } else if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
+    // 人类但不在 allowlist：只有 @ 了我们才处理（对方 Claudestra 管理员跨服来 @ 的场景）
+    if (!mentionedMe) return;
   }
 
   const channelId = msg.channelId;
   const client = clients.get(channelId);
   if (!client) return;
+  const isPeer = msg.author.bot;
 
   let content = msg.content
     .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
@@ -607,17 +615,20 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   if (!content) return;
 
   // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
-  try {
-    const listResult = await runManager("list");
-    const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
-    const targetWindow = agent ? `master:${agent.name}` : `master:0`;
-    const { isIdle } = await import("./lib/tmux-helper.js");
-    if (!(await isIdle(targetWindow))) {
-      console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，发 Ctrl+C 打断`);
-      await tmuxRaw(["send-keys", "-t", targetWindow, "C-c"]).catch(() => {});
-      await Bun.sleep(400);
-    }
-  } catch { /* non-critical */ }
+  // 注意：peer bot 来的消息不走这个打断（agent-to-agent 的交流不应该打断本地 agent 的工作）
+  if (!isPeer) {
+    try {
+      const listResult = await runManager("list");
+      const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+      const targetWindow = agent ? `master:${agent.name}` : `master:0`;
+      const { isIdle } = await import("./lib/tmux-helper.js");
+      if (!(await isIdle(targetWindow))) {
+        console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，发 Ctrl+C 打断`);
+        await tmuxRaw(["send-keys", "-t", targetWindow, "C-c"]).catch(() => {});
+        await Bun.sleep(400);
+      }
+    } catch { /* non-critical */ }
+  }
 
   // 清理上一轮状态 + 重置 tool 追踪
   stopTyping(channelId);
@@ -654,6 +665,12 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   if (attachmentPaths.length > 0) {
     meta.attachment_count = String(attachmentPaths.length);
     meta.attachments = attachmentPaths.join(";");
+  }
+  if (isPeer) {
+    // 对接另一个 Claudestra 的 bot / 其他外部 bot。agent 需要知道"这是 peer"才能正确响应
+    meta.peer = "true";
+    meta.peer_bot_name = msg.author.username;
+    meta.peer_bot_id = msg.author.id;
   }
 
   try {
@@ -1167,6 +1184,30 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       try {
         await discordDeleteChannel(discord, msg.channelId);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
+    case "list_channels": {
+      // 列出本 bot 能看到的所有文字频道。用于跨 Claudestra 场景：
+      // peer 的 agent 自己看我这边有哪些频道、topic 是什么、该去哪里 @ 我的 bot。
+      try {
+        const channels: any[] = [];
+        for (const [_, ch] of discord.channels.cache) {
+          // 只要能发消息的文字频道（TextChannel type = 0）
+          if (ch.type !== 0) continue;
+          const textCh = ch as TextChannel;
+          channels.push({
+            id: textCh.id,
+            name: textCh.name,
+            topic: textCh.topic || "",
+            guild: textCh.guild?.name || "",
+            guild_id: textCh.guild?.id || "",
+          });
+        }
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { channels } }));
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }

@@ -35,6 +35,18 @@ bun run setup
 
 就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、启动 pm2。
 
+### 跨 Claudestra 协作（v1.8.0+）
+
+两个 Claudestra 实例之间，agent 可以直接聊，不用额外配置：
+
+1. **朋友在他的 Discord Developer Portal 生成 bot 邀请链接**（OAuth2 → URL Generator；scopes 勾 `bot` + `applications.commands`；权限勾 `View Channels` + `Send Messages` + `Read Message History`）。把链接发给你。
+2. **你点链接** → 选你的服务器加进去。
+3. **Discord 频道权限 = 访问控制**：右键你想跟朋友共享的频道 → 编辑频道 → 权限 → 把他的 bot 设成只能看这个频道。其他频道默认对他 bot 不可见。
+4. 朋友同样操作邀请你的 bot。
+5. **好了。** 他 agent 调 `list_shared_channels` 看你这边开放了哪些频道（按频道名 / topic 判断用途），然后 `reply(chat_id=<你的频道>, text="@你的bot ...")` 直接 @ 你 bot 提问。你 bridge 看到 @ 了自己，路由给该频道对应的 agent（比如 `#alipan-resource` 路由到你的 `agent-alipan-resource`）。回复在同一频道出现，对方 bot 看到转回。
+
+没有任何 CLI，全靠 Discord 频道权限管边界。
+
 ### 装完有什么
 
 - **多 agent 编排** — `#control` 里的大总管给每个 agent 开独立 Discord 频道、路由消息、挂截图、处理打断。

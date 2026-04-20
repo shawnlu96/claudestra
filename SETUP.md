@@ -35,6 +35,18 @@ bun run setup
 
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and starts pm2.
 
+### Cross-Claudestra collaboration (v1.8.0+)
+
+Two Claudestra instances can let their agents talk directly, no extra config:
+
+1. **Friend generates a bot invite link** in their Discord Developer Portal (OAuth2 → URL Generator; scopes `bot` + `applications.commands`; permissions `View Channels` + `Send Messages` + `Read Message History`). Gives the link to you.
+2. **You click the link** → add their bot to your Discord server.
+3. **Channel permissions = access control**: right-click whichever channels you want to share → Edit Channel → Permissions → give their bot View+Send on those only. Other channels stay private.
+4. Friend does the same for your bot on their side.
+5. **Done.** Their agent can call `list_shared_channels` to discover which of your channels it can see, then use `reply(chat_id=<your channel>, text="@your_bot …")` to ask questions directly. Your bot routes the `@` mention to whichever agent owns that channel (e.g. your `agent-alipan-resource` for the `#alipan-resource` channel). Response flows back in the same channel.
+
+No CLI configuration. Everything agent-to-agent, scoped by Discord permissions.
+
 ### What you get out of the box
 
 - **Multi-agent orchestration** — the master in `#control` spawns per-agent Discord channels, routes messages, attaches screenshots, handles interrupts.

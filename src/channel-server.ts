@@ -191,7 +191,18 @@ Reply rules:
 - Keep lines under 60 chars in code blocks. Max 2000 chars per message.
 - Be concise — user is reading on a small screen.
 - Reply in 中文.
-- Do NOT @ the user in your reply body. The system adds one @mention automatically when your turn ends, so adding your own (\`<@id>\` or \`@username\`) causes double-notification.`,
+- Do NOT @ the user in your reply body. The system adds one @mention automatically when your turn ends, so adding your own (\`<@id>\` or \`@username\`) causes double-notification.
+
+跨 Claudestra 协作（peer 消息）：
+- 当你收到的 <channel> tag 里 meta 含 \`peer="true"\`，说明这条消息是**另一个 Claudestra 实例的 bot** 发过来的（peer agent 用 @ 来找你）。\`peer_bot_name\` / \`peer_bot_id\` 告诉你是谁。
+- 按消息内容正常响应 + 用 reply(chat_id=当前 channel) 回答。Discord 频道的权限配置保证了你只会在被邀请进的频道里看到这种消息。
+- 回答时 **正文里 @ 一下 peer bot**（用 \`<@peer_bot_id>\`）方便对方的 bridge 识别你在给它回话。
+
+主动联系另一个 Claudestra：
+- 调 \`list_shared_channels\` 看你能访问到的所有频道。对方 Claudestra 的管理员如果把他们的 bot 邀请到了你这边的频道，你能在列表里看到；反过来他们邀请了你的 bot 到他们的频道，你也能看到（guild 名字跟你自己服务器不同的那些）。
+- 按频道的 \`name\` 和 \`topic\` 判断应该去哪个频道提问（比如想问阿里云盘相关就找 \`alipan-resource\` topic 的那个频道）。
+- 用 \`reply(chat_id=<对方频道id>, text="<@对方bot> 我遇到了 ...")\` 在对方频道 @ 他们的 bot 提问。对方 bridge 会转给对方合适的 agent，回复会在同一个频道出现。
+- 你可以继续 fetch_messages 那个 channel_id 轮询等回复（跟 send_to_agent 类似的主动汇报义务）。`,
   }
 );
 
@@ -294,6 +305,32 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
       },
     },
     {
+      name: "list_shared_channels",
+      description: `列出你所在的 Discord bot 能访问的所有文字频道（含频道名、topic、所属 guild）。
+
+用于**跨 Claudestra 协作**：如果你发现对方 Claudestra 的用户把他们的 bot 邀请到了你这边的某些频道，你就能看到对应频道；反过来，当你这边的 bot 被对方邀请到了他们的频道，你也能看到。
+
+**什么时候用：**
+- 你遇到一个问题需要对方 Claudestra 的某类 agent（比如阿里云盘 / 加密货币追踪 / Claudestra 本身的 bug）协助
+- 你想知道"对方开放了哪些频道给我"，按频道名或 topic 判断应该去哪个频道提问
+- 然后用 \`reply(chat_id=<那个频道 id>, text="@对方bot xxx")\` 在那个频道 @ 对方 bot 提问
+
+**返回示例：**
+\`\`\`json
+[
+  { "id": "123", "name": "alipan-resource", "topic": "阿里云盘资源管理", "guild": "Shawn's" },
+  { "id": "456", "name": "predict", "topic": "量化预测", "guild": "Shawn's" },
+  { "id": "789", "name": "general", "topic": "", "guild": "My Own Server" }
+]
+\`\`\`
+
+自己的 guild 里的频道也会出现在列表里，过滤时看 guild 名字 / id 区分。`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+      },
+    },
+    {
       name: "send_to_agent",
       description: `Send a message to another agent by name. Use this for agent-to-agent collaboration.
 
@@ -384,6 +421,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       });
       return {
         content: [{ type: "text" as const, text: "Message edited." }],
+      };
+    }
+
+    case "list_shared_channels": {
+      const result = await bridgeRequest({ type: "list_channels" });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result.channels || [], null, 2),
+          },
+        ],
       };
     }
 
