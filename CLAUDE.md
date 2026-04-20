@@ -153,7 +153,12 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 
 ## Contributing tips
 
-- **Release process**: commits and `git push` to `main` are fine to do autonomously. Creating a `git tag v*` and a GitHub Release (`gh release create`) requires **explicit owner approval** every time — never tag-and-release on your own initiative. Only the latest release is kept on GitHub; older ones are considered incompatible and deleted.
+- **Release process**: commits and `git push` to `main` are fine to do autonomously. Creating a `git tag v*` and a GitHub Release (`gh release create`) requires **explicit owner approval** every time — never tag-and-release on your own initiative.
+- **Version bump + release cleanup rules** (owner-mandated):
+  - **Bug fix** → bump *patch* (e.g. `1.3.0 → 1.3.1`) and **delete the buggy release** from GitHub (`gh release delete v1.3.0 --yes --cleanup-tag`). No buggy versions should linger in the Releases list.
+  - **New feature** → bump *minor* (e.g. `1.3.0 → 1.4.0`) and **keep** older releases as history.
+  - **Major** bumps are decided by the owner; never bump major unilaterally.
+  - Goal: release notes stay clear and no broken version is discoverable via Releases.
 - `tmux-helper.ts` and `claude-launch.ts` are the canonical places for tmux commands and Claude Code launch flags. Don't inline these in new files.
 - Admin buttons that should skip the LLM go in `bridge/management.ts`. Add the `id` to both `handleMgmtButton` and the relevant panel builder.
 - Before shipping, run `bun test` and `bun build src/<entry>.ts --target=bun` for each entry point (`bridge`, `channel-server`, `manager`, `launcher`, `cron`, `setup`) to catch type errors quickly.

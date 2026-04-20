@@ -44,6 +44,12 @@ import {
 import { tmuxScreenshot } from "./bridge/screenshot.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking } from "./bridge/jsonl-watcher.js";
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
+import {
+  tmuxCapture,
+  windowTarget,
+  detectRuntimePermissionPrompt,
+  detectSessionIdlePrompt,
+} from "./lib/tmux-helper.js";
 
 // ============================================================
 // 类型定义
@@ -532,6 +538,8 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
           session_noask: "🔕 不再询问",
         };
         const key = keyMap[action];
+        const isPermBtn = action.startsWith("perm_");
+        const isIdleBtn = action.startsWith("session_");
         console.log(`🔔 弹窗响应: channel=${targetChannelId} action=${action} key=${key}`);
         try {
           const listResult = await runManager("list");
@@ -540,6 +548,27 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             await interaction.followUp({ content: "❌ 找不到对应 agent", ephemeral: true }).catch(() => {});
             return;
           }
+
+          // 发键前再确认弹窗还在，避免把 digit+Enter 当成普通消息提交给 Claude
+          const pane = await tmuxCapture(windowTarget(agent.name), 30);
+          const hasPerm = detectRuntimePermissionPrompt(pane) !== null;
+          const hasIdle = detectSessionIdlePrompt(pane) !== null;
+          const dialogStillActive = (isPermBtn && hasPerm) || (isIdleBtn && hasIdle);
+
+          if (!dialogStillActive) {
+            console.log(`🔔 弹窗已关闭，跳过发键: channel=${targetChannelId} hasPerm=${hasPerm} hasIdle=${hasIdle}`);
+            const msgId = permissionMessages.get(targetChannelId);
+            if (msgId) {
+              try {
+                const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
+                const sm = await ch.messages.fetch(msgId);
+                await sm.edit({ content: `🔕 弹窗已自动关闭，无需操作`, components: [] });
+              } catch { /* non-critical */ }
+              clearPermissionMessage(targetChannelId);
+            }
+            return;
+          }
+
           const proc = Bun.spawn(
             ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, key, "Enter"],
             { stdout: "pipe", stderr: "pipe" }
@@ -816,12 +845,27 @@ async function handleHookRequest(req: Request): Promise<Response> {
 
       // 只有 Stop / StopFailure 触发完成通知，Notification 不触发（避免 Stop+Notification 连发两次）
       // 同时 10 秒内去抖，防止 Claude Code 重复 fire Stop 事件
-      const shouldNotify = event === "Stop" || event === "StopFailure" || event === "stop";
+      let shouldNotify = event === "Stop" || event === "StopFailure" || event === "stop";
       const now = Date.now();
       const last = lastCompletionSent.get(channelId) || 0;
       if (shouldNotify && now - last < COMPLETION_DEDUPE_MS) {
         console.log(`🏁 去抖跳过（${Math.round((now - last) / 1000)}s 内已发过）: channel=${channelId}`);
         return new Response("ok");
+      }
+
+      // 防御性：若此时 pane 上还有权限 / session-idle 弹窗，说明 agent 还在等输入，不是真的完成
+      if (shouldNotify) {
+        try {
+          const listResult = await runManager("list");
+          const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+          if (agent) {
+            const pane = await tmuxCapture(windowTarget(agent.name), 30);
+            if (detectRuntimePermissionPrompt(pane) || detectSessionIdlePrompt(pane)) {
+              console.log(`🏁 pane 仍有弹窗，跳过完成通知: channel=${channelId} agent=${agent.name}`);
+              shouldNotify = false;
+            }
+          }
+        } catch { /* non-critical */ }
       }
 
       const statusMsgId = activeStatusMessages.get(channelId);
