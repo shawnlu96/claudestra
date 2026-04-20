@@ -54,11 +54,14 @@ export async function tmuxCapture(
   return tmuxRaw(["capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`]);
 }
 
-/** 基于 "❯" 提示符检测是否空闲 */
+/** 基于 "❯" 提示符检测是否空闲。
+ * 注意：Claude Code 的选项菜单也用 "❯ 1. xxx" 标记选中项，所以不能简单检测 "❯" 存在，
+ * 必须是一行只有 "❯"（可带空格）才算 idle prompt。 */
 export async function isIdle(target: string): Promise<boolean> {
   const tail = await tmuxRaw(["capture-pane", "-t", target, "-p"]);
-  const last5 = tail.split("\n").slice(-5).join("\n");
-  return /❯/.test(last5);
+  const last5 = tail.split("\n").slice(-5);
+  // 行匹配：^\s*❯\s*$ — 只有 prompt，没有后续文本
+  return last5.some((line) => /^\s*❯\s*$/.test(line));
 }
 
 /**
