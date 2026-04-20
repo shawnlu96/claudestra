@@ -107,6 +107,11 @@ bun src/manager.ts cron-history [name|id]
 bun src/manager.ts version   # current version + whether an update is available
 bun src/manager.ts update    # git pull + pm2 restart all
 
+# Auto-update toggles (both default on; launcher polls on a schedule and only upgrades when all agents are idle)
+bun src/manager.ts auto-update status
+bun src/manager.ts auto-update claudestra on|off   # Claudestra self-update (30 min poll)
+bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly poll)
+
 # Tests
 bun test
 ```

@@ -1318,6 +1318,47 @@ async function cmdUpdate() {
   });
 }
 
+async function cmdAutoUpdate(sub: string, ...rest: string[]) {
+  const { readConfig, setAutoUpdate } = await import("./lib/config-store.js");
+
+  if (sub === "status" || sub === "" || sub === "get") {
+    const cfg = await readConfig();
+    output({
+      ok: true,
+      autoUpdate: cfg.autoUpdate,
+      message: `Claudestra: ${cfg.autoUpdate.claudestra ? "on" : "off"} · Claude Code: ${cfg.autoUpdate.claudeCode ? "on" : "off"}`,
+    });
+    return;
+  }
+
+  // auto-update claudestra on|off  |  auto-update claude on|off
+  const targetAlias: Record<string, "claudestra" | "claudeCode"> = {
+    claudestra: "claudestra",
+    self: "claudestra",
+    claude: "claudeCode",
+    "claude-code": "claudeCode",
+    claudecode: "claudeCode",
+    cc: "claudeCode",
+  };
+  const target = targetAlias[sub.toLowerCase()];
+  const state = rest[0]?.toLowerCase();
+
+  if (!target || (state !== "on" && state !== "off")) {
+    output({
+      ok: false,
+      error: `用法: auto-update <claudestra|claude> <on|off>  |  auto-update status`,
+    });
+    return;
+  }
+
+  const cfg = await setAutoUpdate(target, state === "on");
+  output({
+    ok: true,
+    autoUpdate: cfg.autoUpdate,
+    message: `${target} 自动更新已${state === "on" ? "开启" : "关闭"}`,
+  });
+}
+
 // ============================================================
 // CLI 入口
 // ============================================================
@@ -1424,6 +1465,12 @@ switch (cmd) {
     await cmdUpdate();
     break;
 
+  case "auto-update": {
+    const [sub, ...rest] = args;
+    await cmdAutoUpdate(sub || "status", ...rest);
+    break;
+  }
+
   case "migrate": {
     const res = await migrateWorkerToAgent();
     output({ ok: true, ...res });
@@ -1467,6 +1514,9 @@ switch (cmd) {
         "tmux-help                       — 打印 tmux 快速教程（含 iTerm2 -CC 模式）",
         "version                         — 显示当前版本 + 是否有更新",
         "update                          — 拉取最新代码并重启 pm2 服务",
+        "auto-update status              — 查看自动更新开关",
+        "auto-update claudestra on|off   — Claudestra 自动更新开关（默认 on）",
+        "auto-update claude on|off       — Claude Code 自动更新开关（默认 on）",
       ],
     });
 }

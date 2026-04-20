@@ -29,6 +29,7 @@ function masterShouldAutoConfirm(pane: string): boolean {
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
+import { readConfig } from "./lib/config-store.js";
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
@@ -37,8 +38,8 @@ const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
-const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次新版本
-const CLAUDE_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60_000; // 每 6 小时检查一次 Claude Code 更新
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次 Claudestra 新版本
+const CLAUDE_UPDATE_CHECK_INTERVAL_MS = 7 * 24 * 60 * 60_000; // 每 1 周检查一次 Claude Code 更新
 
 if (!CONTROL_CHANNEL_ID) {
   console.error("❌ 请设置 CONTROL_CHANNEL_ID（Discord #control 频道 ID）");
@@ -117,24 +118,62 @@ async function checkForUpdates() {
   if (release.version === lastNotifiedVersion) return;
   lastNotifiedVersion = release.version;
 
+  const cfg = await readConfig();
+
+  if (!cfg.autoUpdate.claudestra) {
+    // 关闭自动更新 → 只通知
+    try {
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: [
+          `🆕 **Claudestra ${release.tag} 发布了！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
+          ``,
+          `当前: v${local} → 最新: ${release.tag}`,
+          release.body ? `\n${release.body.slice(0, 500)}` : "",
+          ``,
+          `自动更新已关闭。更新命令: \`bun src/manager.ts update\``,
+          `（开启自动更新: \`bun src/manager.ts auto-update claudestra on\`）`,
+        ].filter(Boolean).join("\n"),
+      });
+      console.log(`📢 已通知用户：新版本 ${release.tag}（自动更新 off）`);
+    } catch {
+      console.log("⚠️ 版本通知发送失败（bridge 可能还没就绪）");
+    }
+    return;
+  }
+
+  // 自动更新开启 → 等所有 agent 空闲再更新
+  if (!(await allAgentsIdle())) {
+    console.log(`🆙 Claudestra ${release.tag} 有新版本，但有 agent 在忙，下次再试`);
+    lastNotifiedVersion = ""; // 让下次 poll 重新进入这个分支
+    return;
+  }
+
+  console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲）`);
+  const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
   try {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
-      text: [
-        `🆕 **Claudestra ${release.tag} 发布了！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
-        ``,
-        `当前: v${local} → 最新: ${release.tag}`,
-        release.body ? `\n${release.body.slice(0, 500)}` : "",
-        ``,
-        `更新命令: \`bun src/manager.ts update\``,
-        `或对大总管说 "更新版本"`,
-      ].filter(Boolean).join("\n"),
+      text: `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + pm2 restart...`,
     });
-    console.log(`📢 已通知用户：新版本 ${release.tag}`);
-  } catch {
-    console.log("⚠️ 版本通知发送失败（bridge 可能还没就绪）");
-  }
+  } catch { /* non-critical */ }
+
+  // 关键：manager.ts update 会执行 pm2 restart，会杀掉本 launcher 自己
+  // 用 detached + 重定向 stdio 让子进程脱离 launcher 生命周期
+  Bun.spawn(
+    ["bun", "run", `${REPO_ROOT}/src/manager.ts`, "update"],
+    {
+      cwd: REPO_ROOT,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      // @ts-ignore Bun 支持 detached
+      detached: true,
+    }
+  );
+  // 不 await exited — pm2 会马上杀掉我们；新 launcher 进程启动后通过 github-release 判断已是最新版
 }
 
 // ============================================================
@@ -185,6 +224,9 @@ async function restartAgentsAndMaster() {
 }
 
 async function checkClaudeCodeUpdate() {
+  const cfg = await readConfig();
+  if (!cfg.autoUpdate.claudeCode) return; // 开关关闭 → 跳过
+
   const current = await getClaudeVersion();
   if (!current) return;
   const latest = await getClaudeLatestVersion();
@@ -201,10 +243,11 @@ async function checkClaudeCodeUpdate() {
 
   console.log(`🆙 所有 agent 空闲，开始更新 Claude Code`);
   try {
+    const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
-      text: `🆙 **检测到 Claude Code 新版本** ${current} → ${latest}，所有 agent 当前空闲，开始更新 + 重启...`,
+      text: `🆙 **Claude Code 新版本** ${current} → ${latest} ${mention}\n\n所有 agent 当前空闲，开始 npm install + 重启...`,
     });
   } catch { /* non-critical */ }
 

@@ -43,6 +43,11 @@ bun ../src/manager.ts cron-history [名称|ID]
 bun ../src/manager.ts version   # 显示当前版本 + 是否有更新
 bun ../src/manager.ts update    # 拉取最新代码 + pm2 重启
 
+# 自动更新开关（默认两个都开）
+bun ../src/manager.ts auto-update status              # 查看当前状态
+bun ../src/manager.ts auto-update claudestra on|off   # Claudestra 本身
+bun ../src/manager.ts auto-update claude on|off       # Claude Code CLI
+
 # 权限管理（每个 agent 独立的 disallowedTools）
 bun ../src/manager.ts permissions list                       # 列出所有 agent 的预设
 bun ../src/manager.ts permissions presets                    # 列出所有可用预设
@@ -210,6 +215,14 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 - "检查一下有没有更新" → `bun ../src/manager.ts version`
 - "升级一下" / "更新代码" → `bun ../src/manager.ts update`
 - 升级会执行 `git pull` + `pm2 restart all`，执行前告诉用户将重启服务
+
+自动更新默认开启（Claudestra 每 30 分钟查一次，Claude Code 每周查一次），只在所有 agent 空闲时才会真正升级：
+
+- "关掉自动更新" / "不要自动更新" → `bun ../src/manager.ts auto-update claudestra off`（看具体指谁，Claude Code 就传 `claude off`）
+- "自动更新打开" → `auto-update claudestra on` / `auto-update claude on`
+- "看看自动更新开没开" → `auto-update status`
+
+映射时注意区分：用户说 "Claude 不自动更新" 一般指 Claude Code；说 "更新不要自动" 一般指 Claudestra 本身。含糊时先问清楚。
 
 ## 权限管理（每个 agent 的 disallowedTools）
 
