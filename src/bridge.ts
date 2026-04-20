@@ -261,6 +261,7 @@ const discord = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers,       // v1.8.4+: guildMemberAdd 事件，peer bot 加入通知
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
@@ -682,6 +683,59 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   }
 
   // idle 检测由 JSONL watcher 的静默超时控制（不再用 tmux 轮询）
+});
+
+// ============================================================
+// Peer 发现：bot 被邀请 / 别的 bot 加入
+// ============================================================
+
+// 工具：往 master 控制频道发一条通知
+async function notifyMaster(content: string): Promise<void> {
+  const controlChannelId = process.env.CONTROL_CHANNEL_ID || "";
+  if (!controlChannelId) return;
+  try {
+    const ch = await discord.channels.fetch(controlChannelId);
+    if (ch && "messages" in ch) {
+      await (ch as TextChannel).send({ content });
+    }
+  } catch { /* non-critical */ }
+}
+
+// 我方 bot 被邀请加入新 guild
+discord.on("guildCreate", async (guild) => {
+  console.log(`🎉 我方 bot 被加到新 guild: ${guild.name} (${guild.id})`);
+  await notifyMaster(
+    [
+      `🎉 **跨 Claudestra 协作：你的 bot 被邀请到新服务器**`,
+      ``,
+      `服务器：**${guild.name}**（id: \`${guild.id}\`，${guild.memberCount} 成员）`,
+      ``,
+      `接下来可以：`,
+      `• 调 \`list_shared_channels\` MCP 工具，看这个 guild 里哪些频道你能进。`,
+      `• 按频道名字 / topic 判断用途；需要时 reply 到对应 chat_id @ 对方 bot 发起对话。`,
+      `• 你也可以先不动；等对方 agent 主动 @ 我们。`,
+    ].join("\n")
+  );
+});
+
+// 别的 bot（不是我方）加入了我的 guild
+discord.on("guildMemberAdd", async (member) => {
+  if (!member.user?.bot) return;
+  if (member.user.id === getBotUserId()) return; // 自己
+  console.log(`🎉 Peer bot 加入: ${member.user.tag} (${member.user.id}) in ${member.guild?.name}`);
+  await notifyMaster(
+    [
+      `🎉 **跨 Claudestra 协作：对方 Claudestra 的 bot 刚刚加入你的服务器**`,
+      ``,
+      `Peer bot：**${member.user.tag}**（id: \`${member.user.id}\`）`,
+      `服务器：${member.guild?.name ?? "(未知)"}`,
+      ``,
+      `接下来该做的：`,
+      `• 给这个 bot 设频道权限 — 你不想让对方看的频道都默认不允许 View Channel。`,
+      `• 如果这个 bot 对应的是某个本地 agent 频道的对口 peer，告诉用户。`,
+      `• 之后对方 agent 会通过他的 bot 在共享频道 @ 你的 bot 发起对话，你按正常流程响应即可。`,
+    ].join("\n")
+  );
 });
 
 // ============================================================
