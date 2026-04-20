@@ -825,19 +825,24 @@ async function startClaudeInWindow(
 
 async function cmdRestart(name?: string) {
   const reg = await loadRegistry();
+  const liveWindows = await listAgentWindowsShared();
 
-  // 确定要重启的 agent 列表
+  // 确定要重启的 agent 列表（不指定名字时，既包括活着的 window，也包括 registry 里 active 但 window 没了的 dead agent —
+  // 这样 gracefulExit 超时导致 window 被杀的情况也能通过重启救回）
   let targets: string[];
   if (name) {
     const tmuxName = normalizeName(name);
-    if (!(await windowExists(tmuxName))) {
+    const inReg = !!reg.agents[tmuxName];
+    if (!liveWindows.includes(tmuxName) && !inReg) {
       output({ ok: false, error: `${tmuxName} 不存在` });
       return;
     }
     targets = [tmuxName];
   } else {
-    // 重启所有 agent
-    targets = await listAgentWindowsShared();
+    const deadButInReg = Object.keys(reg.agents).filter(
+      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n)
+    );
+    targets = [...liveWindows, ...deadButInReg];
   }
 
   if (targets.length === 0) {
@@ -845,7 +850,7 @@ async function cmdRestart(name?: string) {
     return;
   }
 
-  const results: { name: string; ok: boolean; error?: string }[] = [];
+  const results: { name: string; ok: boolean; error?: string; recreated?: boolean }[] = [];
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
@@ -854,14 +859,30 @@ async function cmdRestart(name?: string) {
       continue;
     }
 
-    // 1. 优雅退出（包含强制退出兜底）
-    const exited = await gracefulExit(tmuxName);
-    if (!exited) {
-      results.push({ name: tmuxName, ok: false, error: "无法退出 Claude Code" });
-      continue;
+    // 1. 如果 window 还活着，先尝试优雅退出；失败/window 不存在时强制 kill-window + 重建
+    //    关键：永远不创建新 Discord 频道，复用 info.channelId
+    let recreated = false;
+    const windowAlive = liveWindows.includes(tmuxName) || (await windowExists(tmuxName));
+    if (windowAlive) {
+      const exited = await gracefulExit(tmuxName);
+      if (!exited) {
+        console.log(`[restart] ${tmuxName} 优雅退出超时，kill-window + 重建 tmux window`);
+        await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]).catch(() => {});
+        await Bun.sleep(500);
+        recreated = true;
+      }
+    } else {
+      // window 已经不存在（之前可能被 gracefulExit 或其他原因杀掉了） → 直接重建
+      recreated = true;
     }
 
-    // 2. 重新启动 Claude Code — 沿用 registry 中存储的权限配置
+    if (recreated) {
+      const cwd = info.cwd || process.env.HOME || "/";
+      await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", cwd]);
+      await Bun.sleep(500);
+    }
+
+    // 2. 重新启动 Claude Code — 沿用 registry 中存储的 channelId + 权限配置
     const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
     const cmd = buildClaudeCommand({
       channelId: info.channelId,
@@ -877,6 +898,7 @@ async function cmdRestart(name?: string) {
       name: tmuxName,
       ok: started,
       error: started ? undefined : "启动超时",
+      recreated: recreated || undefined,
     });
   }
 
