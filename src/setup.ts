@@ -523,9 +523,10 @@ async function stepInviteBot(appId: string): Promise<void> {
   hint(`还没有 Discord 服务器？先在 Discord 主界面左边 ${c.bold}+${c.reset} 号点一下 → ${c.bold}亲自创建${c.reset} / ${c.bold}Create My Own${c.reset} → 给自己和朋友 → 起个名字。下面再回来继续。`);
   br();
 
-  // 直接拼好邀请 URL（完整权限：View / Send / ReadHistory / ManageChannels / AttachFiles / AddReactions / EmbedLinks）
+  // 直接拼好邀请 URL（完整权限：View / Send / ReadHistory / ManageChannels / ManageRoles / AttachFiles / AddReactions / EmbedLinks）
+  // ManageRoles (v1.8.5+) 让我方 bot 能自动收紧 peer bot 的 role 权限，防止它默认看到所有公开频道
   const OWNER_PERMS =
-    (1 << 10) + (1 << 11) + (1 << 16) + (1 << 4) + (1 << 15) + (1 << 6) + (1 << 14);
+    (1 << 10) + (1 << 11) + (1 << 16) + (1 << 4) + (1 << 28) + (1 << 15) + (1 << 6) + (1 << 14);
   const params = new URLSearchParams({
     client_id: appId,
     permissions: String(OWNER_PERMS),

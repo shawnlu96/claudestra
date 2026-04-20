@@ -723,6 +723,28 @@ discord.on("guildMemberAdd", async (member) => {
   if (!member.user?.bot) return;
   if (member.user.id === getBotUserId()) return; // 自己
   console.log(`🎉 Peer bot 加入: ${member.user.tag} (${member.user.id}) in ${member.guild?.name}`);
+
+  // v1.8.5+: 自动 scope — 对所有现有频道加 "deny View Channel for peer bot's role" 的 override，
+  // 默认它什么频道都看不到。用户只需要在想共享的频道上手动把 View Channel 改成 allow。
+  // 需要我方 bot 有 MANAGE_ROLES + MANAGE_CHANNELS 权限。老用户邀请链接没给这俩就会失败，走文字提示兜底。
+  const scopeResult = await autoScopePeerBot(member).catch((e) => ({
+    ok: false, reason: (e as Error).message, modified: 0, total: 0,
+  }));
+
+  const scopeNote = scopeResult.ok
+    ? [
+        `✅ **我已自动把 ${scopeResult.modified}/${scopeResult.total} 个频道对这个 bot 设为不可见**`,
+        `（加了频道级 Deny View Channel override）`,
+        ``,
+        `要和它共享某个频道：右键该频道 → Edit Channel → Permissions → 找到这个 bot role → 把 View Channel 改成 ✓ allow 即可。`,
+      ].join("\n")
+    : [
+        `⚠️ **自动 scope 没成功**（${scopeResult.reason || "权限/API 问题"}），bot 现在能看到所有公开频道`,
+        ``,
+        `手动收紧：服务器设置 → Roles → 对方 bot 的 role → 关 View Channels；然后共享频道上加 allow override。`,
+        `或者升级邀请链接：跑 \`bun src/manager.ts invite-link\` 重新邀请你自己的 bot（带 Manage Roles 权限），下次 peer 加入就会自动 scope。`,
+      ].join("\n");
+
   await notifyMaster(
     [
       `🎉 **跨 Claudestra 协作：对方 Claudestra 的 bot 刚刚加入你的服务器**`,
@@ -730,13 +752,59 @@ discord.on("guildMemberAdd", async (member) => {
       `Peer bot：**${member.user.tag}**（id: \`${member.user.id}\`）`,
       `服务器：${member.guild?.name ?? "(未知)"}`,
       ``,
-      `接下来该做的：`,
-      `• 给这个 bot 设频道权限 — 你不想让对方看的频道都默认不允许 View Channel。`,
-      `• 如果这个 bot 对应的是某个本地 agent 频道的对口 peer，告诉用户。`,
-      `• 之后对方 agent 会通过他的 bot 在共享频道 @ 你的 bot 发起对话，你按正常流程响应即可。`,
+      scopeNote,
+      ``,
+      `之后对方 agent 会通过他的 bot 在共享频道 @ 你的 bot 发起对话，你按正常流程响应即可。`,
     ].join("\n")
   );
 });
+
+/**
+ * 对新加入的 peer bot 自动 scope — 对所有现有文字频道加一个频道级 DENY View Channel override。
+ * 之后该 bot 看不到任何频道，除非用户在具体频道上明确加 ALLOW。
+ *
+ * Discord 权限模型不支持 role 级 DENY（role 只能 ALLOW），所以要在每个频道上放 override。
+ * 需要我方 bot 有 Manage Roles + Manage Channels 权限才能改 channel permission overwrites。
+ */
+async function autoScopePeerBot(
+  member: any
+): Promise<{ ok: boolean; modified: number; total: number; reason?: string }> {
+  try {
+    const guild = member.guild;
+    if (!guild) return { ok: false, modified: 0, total: 0, reason: "没有 guild 上下文" };
+
+    // peer bot 的 managed role 就是它自己名字那个 role（每个 bot 加入会自动建一个）
+    const peerBotRole = member.roles.cache.find(
+      (r: any) => r.managed && r.tags?.botId === member.id
+    );
+    if (!peerBotRole) {
+      return { ok: false, modified: 0, total: 0, reason: "找不到 peer bot 的 managed role" };
+    }
+
+    // 检查我方 bot 是否有 Manage Roles 权限
+    const me = guild.members.me;
+    if (!me?.permissions?.has("ManageRoles") || !me.permissions.has("ManageChannels")) {
+      return { ok: false, modified: 0, total: 0, reason: "我方 bot 缺 Manage Roles / Manage Channels 权限" };
+    }
+
+    // 遍历文字频道 + categories（category 的 override 也会级联到子频道）
+    const channels = guild.channels.cache.filter((c: any) =>
+      c.type === 0 /* Text */ || c.type === 4 /* Category */ || c.type === 5 /* Announcement */
+    );
+    let modified = 0;
+    for (const [, ch] of channels) {
+      try {
+        await (ch as any).permissionOverwrites.edit(peerBotRole, { ViewChannel: false });
+        modified++;
+      } catch {
+        // 单个频道失败不阻塞；常见是我方 bot 在该频道权限不够
+      }
+    }
+    return { ok: true, modified, total: channels.size };
+  } catch (e) {
+    return { ok: false, modified: 0, total: 0, reason: (e as Error).message };
+  }
+}
 
 // ============================================================
 // Interaction 处理（按钮、菜单、Slash Commands）

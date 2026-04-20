@@ -1483,12 +1483,13 @@ async function cmdInviteLink(args: string[]) {
   const isPeer = args.includes("--peer");
 
   // Discord 权限 bitfield：https://discord.com/developers/docs/topics/permissions
-  // Owner 完整权限（建频道、发消息、附件、反应等）
+  // Owner 完整权限（建频道、发消息、附件、反应、改 role 等）
   const OWNER_PERMS =
     (1 << 10) +   // VIEW_CHANNEL       = 1024
     (1 << 11) +   // SEND_MESSAGES      = 2048
     (1 << 16) +   // READ_MESSAGE_HISTORY = 65536
     (1 <<  4) +   // MANAGE_CHANNELS    = 16
+    (1 << 28) +   // MANAGE_ROLES       = 268435456  (v1.8.5+: 自动收紧 peer bot role 用)
     (1 << 15) +   // ATTACH_FILES       = 32768
     (1 <<  6) +   // ADD_REACTIONS      = 64
     (1 << 14);    // EMBED_LINKS        = 16384
