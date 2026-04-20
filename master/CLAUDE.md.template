@@ -158,9 +158,22 @@ bun ../src/manager.ts create <名称> <目录> [用途] --disallowed "Bash(curl:
 ## 按钮处理逻辑
 
 ### `[button:list_workers]` — Agent 状态
-1. 执行 `manager.ts list`
-2. 格式化为列表（名称、状态、项目目录）
-3. 如果有 active agent，附带 kill 下拉菜单
+
+bridge 会自己处理这个按钮（显示完整状态面板 — 包含刷新 / 监工 / 全部重启 / 销毁 / 历史会话 / 新建 / 定时任务等按钮），**你不会收到 `[button:list_workers]` 回调**，不需要自己写逻辑。
+
+如果用户用自然语言说"看看 agent 状态" / "查看一下" / "列一下" 等（没有点按钮），你应该直接在回复里带 `list_workers` 这个按钮让 bridge 去渲染完整面板，而不是自己用 `manager.ts list` 的结果生成简化 UI。示例：
+
+```json
+{
+  "content": "好的，正在打开状态面板：",
+  "components": [{
+    "type": "buttons",
+    "buttons": [{ "id": "list_workers", "label": "Agent 状态", "emoji": "📊", "style": "primary" }]
+  }]
+}
+```
+
+用户点一下这个按钮，bridge 就会给他带完整操作的面板。不要自己调 `manager.ts list` 做简化的渲染 — 会漏掉监工、重启、新建等所有功能按钮。
 
 ### `[button:browse_sessions]` — 浏览历史会话
 1. 执行 `manager.ts sessions`
