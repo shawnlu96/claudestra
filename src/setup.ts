@@ -426,34 +426,46 @@ async function stepCheckDeps(): Promise<void> {
 // 步骤 2：创建 Discord 应用
 // ============================================================
 
-async function stepCreateApp(): Promise<void> {
+async function stepCreateApp(): Promise<string> {
   header(2, "创建 Discord 应用");
 
   print("要让 bot 进你的服务器，先在 Discord 开发者门户创建一个应用。");
   br();
+  hint("开发者门户按 Discord 账号语言显示。下面英文按钮后面带的 / 中文 是中文 UI 里对应的名字。");
+  br();
 
   step("①", `打开浏览器: ${url("https://discord.com/developers/applications")}`);
-  step("②", `点右上角 ${c.bold}${c.green}New Application${c.reset}（绿色按钮）`);
+  step("②", `点右上角 ${c.bold}${c.green}New Application${c.reset} / ${c.green}新建应用${c.reset}（绿色按钮）`);
   step("③", `起个名字 —— ${c.yellow}claudestra${c.reset} 或你喜欢的任何名字`);
-  step("④", `勾选同意条款 → 点 ${c.bold}Create${c.reset}`);
+  step("④", `勾选同意条款 → 点 ${c.bold}Create${c.reset} / ${c.bold}创建${c.reset}`);
 
   br();
-  await waitEnter();
+  print(`创建成功后，浏览器地址栏会像这样：`);
+  print(`  ${c.dim}https://discord.com/developers/applications/${c.cyan}1485860782322356244${c.reset}${c.dim}/information${c.reset}`);
+  print(`中间那一串 18-20 位数字就是 ${c.bold}Application ID${c.reset}。下面直接给你生成深链，少点几步。`);
+  br();
+
+  const raw = await promptRequired(`${kbd("粘贴 Application ID 或整条 URL")}`, (v) => {
+    return /\d{17,20}/.test(v) ? null : "没找到 17-20 位的 Application ID";
+  });
+  const appId = raw.match(/\d{17,20}/)![0];
+  ok(`Application ID 收到: ${appId}`);
+  return appId;
 }
 
 // ============================================================
 // 步骤 3：获取 Bot Token
 // ============================================================
 
-async function stepGetToken(): Promise<string> {
+async function stepGetToken(appId: string): Promise<string> {
   header(3, "获取 Bot Token");
 
   print("Bot token 是 bot 的身份凭证。别告诉任何人，更别传到 GitHub。");
   br();
 
-  step("①", `在左边栏点 ${c.bold}Bot${c.reset}（机器人图标）`);
-  step("②", `如果提示 Add Bot，点 ${c.bold}Yes, do it!${c.reset}`);
-  step("③", `点 ${c.bold}${c.red}Reset Token${c.reset}（可能需要 2FA 确认）`);
+  step("①", `直接点这个深链打开 Bot 页面: ${url(`https://discord.com/developers/applications/${appId}/bot`)}`);
+  step("②", `如果提示 Add Bot / 添加机器人，点 ${c.bold}Yes, do it!${c.reset} / ${c.bold}好的${c.reset}`);
+  step("③", `点 ${c.bold}${c.red}Reset Token${c.reset} / ${c.red}重置令牌${c.reset}（可能需要 2FA 确认）`);
   step("④", `${c.bold}${c.green}立即复制${c.reset}弹出的 token —— 它只显示一次！`);
 
   br();
@@ -469,18 +481,18 @@ async function stepGetToken(): Promise<string> {
 // 步骤 4：开启 Privileged Intents
 // ============================================================
 
-async function stepIntents(): Promise<void> {
+async function stepIntents(appId: string): Promise<void> {
   header(4, "开启 Privileged Intents");
 
   print("Discord 对敏感 API 有三个 intent 开关，bot 必须全部打开才能正常工作。");
   br();
 
-  step("①", `你应该还在 Bot 页面。往下滚到 ${c.bold}Privileged Gateway Intents${c.reset} 区块`);
-  step("②", `把这三个开关全部打开：`);
+  step("①", `直接点这个深链回到 Bot 页面: ${url(`https://discord.com/developers/applications/${appId}/bot`)}，往下滚到 ${c.bold}Privileged Gateway Intents${c.reset} / ${c.bold}特权网关 Intent${c.reset} 区块`);
+  step("②", `把这三个开关全部打开（这三个名字 Discord 中英文 UI 都是英文）：`);
   print(`     ${c.green}▢${c.reset} → ${c.green}▣${c.reset} ${c.bold}PRESENCE INTENT${c.reset}`);
   print(`     ${c.green}▢${c.reset} → ${c.green}▣${c.reset} ${c.bold}SERVER MEMBERS INTENT${c.reset}`);
   print(`     ${c.green}▢${c.reset} → ${c.green}▣${c.reset} ${c.bold}MESSAGE CONTENT INTENT${c.reset}`);
-  step("③", `点页面底部的 ${c.bold}${c.green}Save Changes${c.reset}`);
+  step("③", `点页面底部的 ${c.bold}${c.green}Save Changes${c.reset} / ${c.green}保存更改${c.reset}`);
 
   br();
   warn("少一个 intent，bot 都会静默忽略消息 —— 不会报错，只是没反应");
@@ -492,32 +504,34 @@ async function stepIntents(): Promise<void> {
 // 步骤 5：邀请 Bot 到服务器
 // ============================================================
 
-async function stepInviteBot(): Promise<void> {
+async function stepInviteBot(appId: string): Promise<void> {
   header(5, "邀请 Bot 到你的服务器");
 
   print("生成一个邀请链接，把 bot 拉进你要管理的 Discord 服务器。");
   br();
+  hint(`还没有 Discord 服务器？先在 Discord 主界面左边 ${c.bold}+${c.reset} 号点一下 → ${c.bold}亲自创建${c.reset} / ${c.bold}Create My Own${c.reset} → 给自己和朋友 → 起个名字。下面再回来继续。`);
+  br();
 
-  step("①", `左边栏 → ${c.bold}OAuth2${c.reset} → ${c.bold}URL Generator${c.reset}`);
+  step("①", `直接点深链到 URL Generator: ${url(`https://discord.com/developers/applications/${appId}/oauth2/url-generator`)}`);
 
   br();
-  step("②", `${c.bold}SCOPES${c.reset} 勾选这两个：`);
+  step("②", `${c.bold}SCOPES${c.reset} / ${c.bold}范围${c.reset} 勾选这两个：`);
   print(`     ${c.green}▣${c.reset} bot`);
   print(`     ${c.green}▣${c.reset} applications.commands`);
 
   br();
-  step("③", `${c.bold}BOT PERMISSIONS${c.reset} 勾选这 7 个：`);
-  print(`     ${c.green}▣${c.reset} View Channels`);
-  print(`     ${c.green}▣${c.reset} Send Messages`);
-  print(`     ${c.green}▣${c.reset} Read Message History`);
-  print(`     ${c.green}▣${c.reset} ${c.yellow}Manage Channels${c.reset}  ${c.dim}(bridge 要自动建 agent 频道)${c.reset}`);
-  print(`     ${c.green}▣${c.reset} Attach Files`);
-  print(`     ${c.green}▣${c.reset} Add Reactions`);
-  print(`     ${c.green}▣${c.reset} Embed Links`);
+  step("③", `${c.bold}BOT PERMISSIONS${c.reset} / ${c.bold}机器人权限${c.reset} 勾选这 7 个（中文 UI 名字写在括号里）：`);
+  print(`     ${c.green}▣${c.reset} View Channels ${c.dim}(查看频道)${c.reset}`);
+  print(`     ${c.green}▣${c.reset} Send Messages ${c.dim}(发送消息)${c.reset}`);
+  print(`     ${c.green}▣${c.reset} Read Message History ${c.dim}(阅读消息历史)${c.reset}`);
+  print(`     ${c.green}▣${c.reset} ${c.yellow}Manage Channels${c.reset} ${c.dim}(管理频道 — bridge 要自动建 agent 频道)${c.reset}`);
+  print(`     ${c.green}▣${c.reset} Attach Files ${c.dim}(附加文件)${c.reset}`);
+  print(`     ${c.green}▣${c.reset} Add Reactions ${c.dim}(添加反应)${c.reset}`);
+  print(`     ${c.green}▣${c.reset} Embed Links ${c.dim}(嵌入链接)${c.reset}`);
 
   br();
-  step("④", `复制页面最底部的 ${c.bold}GENERATED URL${c.reset}`);
-  step("⑤", `在浏览器打开那个 URL → 选择你的服务器 → ${c.bold}${c.green}授权${c.reset}`);
+  step("④", `复制页面最底部的 ${c.bold}GENERATED URL${c.reset} / ${c.bold}生成的 URL${c.reset}`);
+  step("⑤", `在浏览器打开那个 URL → 选择你的服务器 → ${c.bold}${c.green}授权${c.reset} / ${c.green}Authorize${c.reset}`);
 
   br();
   hint("授权成功后，bot 会出现在服务器成员列表里（离线状态，正常）");
@@ -824,10 +838,10 @@ async function main() {
   }
 
   await stepCheckDeps();
-  await stepCreateApp();
-  const token = await stepGetToken();
-  await stepIntents();
-  await stepInviteBot();
+  const appId = await stepCreateApp();
+  const token = await stepGetToken(appId);
+  await stepIntents(appId);
+  await stepInviteBot(appId);
   const { guildId, userId, controlChannelId } = await stepCollectIds();
   const { userName, mcpName, bridgePort } = await stepPreferences(existing);
 
