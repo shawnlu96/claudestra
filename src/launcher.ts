@@ -435,14 +435,18 @@ async function main() {
     }
 
     // 检查 Claude Code 是否还活着（不是退回了 shell）
-    // 与 manager.ts isAtShell 保持一致：支持 $ % # > ➜ » λ 等主流 shell prompt 字符
-    // 先排除 Claude Code TUI 的标志（bypass permissions / esc to interrupt）
+    // 与 manager.ts isAtShell 保持一致：先排除 Claude Code TUI 标志，再识别 shell prompt。
+    // 支持两类 prompt：
+    //   (1) 结尾是 prompt 字符 —— $ % # > ❯ » λ（bash/zsh/starship/pure/lambda）
+    //   (2) oh-my-zsh robbyrussell 主题 —— 形如 "➜  dir git:(branch) ✗"，结尾不一定是 prompt 字符，
+    //       但一定能看到 "➜<空格><路径>" 这个典型片段（v1.9.15 修：peer 就是这个主题挂掉的）
     const nonEmpty = pane.split("\n").filter((l) => l.trim());
     const tail = nonEmpty.slice(-5).join("\n");
     const hasClaudeTui = /bypass permissions|esc to interrupt/i.test(tail);
     const lastLine = nonEmpty.pop() || "";
-    // 多一个 ❯：starship / pure 主题常见结尾。Claude Code 的输入框也是 ❯，但靠 hasClaudeTui 先排除
-    const atShell = !hasClaudeTui && /[%$#>➜»λ❯]\s*$/.test(lastLine);
+    const atShell =
+      !hasClaudeTui &&
+      (/[%$#>❯»λ]\s*$/.test(lastLine) || /➜\s+\S/.test(lastLine));
     if (atShell) {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
       // 复用 bringUpClaudeInMasterWindow —— 自带 effort 设置 + 弹窗自动确认，

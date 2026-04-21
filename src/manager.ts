@@ -786,9 +786,14 @@ function isAtShell(pane: string): boolean {
   if (/^\s*❯\s*\d+\./m.test(tail)) return false;
   const lastLine = nonEmpty.pop() || "";
   // 常见 shell prompt 收尾字符：$ (bash/sh)、% (zsh default)、# (root)、> (fish/cmd)、
-  // ➜ (oh-my-zsh robbyrussell)、» (pure prompt)、λ (lambda prompt)、
-  // ❯ (starship / pure 某些主题 — 依赖上面的 Claude TUI exclusion 判断不是 Claude 的输入框)
-  return /[%$#>➜»λ❯]\s*$/.test(lastLine);
+  // ❯ (starship / pure 主题 — 依赖上面的 Claude TUI exclusion 判断不是 Claude 的输入框)、
+  // » (pure)、λ (lambda prompt)
+  if (/[%$#>❯»λ]\s*$/.test(lastLine)) return true;
+  // oh-my-zsh robbyrussell 主题：prompt 不一定以 ➜ 结尾，常见形式是
+  // "➜  <dir> git:(<branch>) ✗" 之类，结尾是 `)` / `✗` / 路径文字。
+  // 只要最后一行里包含 `➜  <非空>`（箭头+空格+目录），就当作在 shell。
+  if (/➜\s+\S/.test(lastLine)) return true;
+  return false;
 }
 
 /** 检查是否有需要按 Enter 的提示（转发到共享实现） */
