@@ -62,7 +62,16 @@ async function captureLast(lines = 10): Promise<string> {
   return tmuxCapture(MASTER_WINDOW, lines);
 }
 
-/** master 默认 effort（可 env 覆盖）。master 多数是路由调度而非推理，low 最快响应、token 最省；要更"聪明"的 master 用 MASTER_EFFORT=medium/high 覆盖。 */
+/**
+ * master 的 session-scoped effort（通过 `--effort <level>` CLI flag 传给 Claude Code）。
+ *
+ * master 绝大多数 turn 是路由调度，low 就够了、响应更快、token 更省。
+ * 这个设置只影响 master 这一个 Claude Code 进程，agent 不传 `--effort` →
+ * 继承全局 `~/.claude/settings.json` 的 effortLevel（通常是 xhigh/max）。
+ *
+ * 用 env MASTER_EFFORT=<level> 覆盖。`default` 或空字符串 → 不加 flag，
+ * master 也跟着全局 effortLevel 走。
+ */
 const MASTER_EFFORT = (process.env.MASTER_EFFORT || "low").trim();
 
 /**
@@ -73,19 +82,18 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
   const cmd = buildClaudeCommand({
     channelId: CONTROL_CHANNEL_ID,
     bridgeUrl: BRIDGE_URL,
+    effort: MASTER_EFFORT,
   });
   await tmuxSendLine(MASTER_WINDOW, cmd);
 
   // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
-  let ready = false;
   for (let i = 0; i < 120; i++) {
     await Bun.sleep(500);
     const pane = await captureLast(10);
 
     if (await isIdle()) {
-      console.log("✅ 大总管已就绪");
-      ready = true;
-      break;
+      console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
+      return true;
     }
 
     if (masterShouldAutoConfirm(pane)) {
@@ -95,28 +103,8 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
     }
   }
 
-  if (ready) {
-    await applyMasterEffort();
-    return true;
-  }
-
   console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
   return await masterWindowExists();
-}
-
-/**
- * master 就绪后把 effort 设到 MASTER_EFFORT。Claude Code 的 `/effort <level>`
- * 一行能直接生效（不用操纵 slider modal）。
- * 失败不影响主流程 —— 大不了就用默认 effort。
- */
-async function applyMasterEffort() {
-  if (!MASTER_EFFORT || MASTER_EFFORT === "default") return;
-  try {
-    await tmuxSendLine(MASTER_WINDOW, `/effort ${MASTER_EFFORT}`);
-    console.log(`⚙️  已把 master effort 设为 ${MASTER_EFFORT}`);
-  } catch (e) {
-    console.log(`⚙️  设置 master effort 失败:`, e);
-  }
 }
 
 async function startMaster() {

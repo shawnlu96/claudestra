@@ -130,6 +130,12 @@ export interface LaunchOptions {
   disallowedPreset?: string;
   /** 原始字符串覆盖（空格分隔的 entries） */
   disallowedRaw?: string;
+  /**
+   * Session-scoped effort level（`--effort <level>`，只影响本 Claude Code session，
+   * 不写到全局 user config）。支持 low / medium / high / xhigh / max。
+   * 没传就不加 flag → Claude Code 用 `~/.claude/settings.json` 的全局 effortLevel。
+   */
+  effort?: string;
 }
 
 /** POSIX 单引号 shell 转义 */
@@ -173,6 +179,10 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
     if (opts.displayName) parts.push("--name", shellEscape(opts.displayName));
   } else if (opts.sessionId) {
     parts.push("--session-id", shellEscape(opts.sessionId));
+  }
+
+  if (opts.effort && opts.effort.trim() && opts.effort !== "default") {
+    parts.push("--effort", shellEscape(opts.effort.trim()));
   }
 
   if (disallowed.length > 0) {
