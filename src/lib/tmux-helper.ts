@@ -9,9 +9,15 @@ export const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 export const MASTER_SESSION = "master";
 export const AGENT_PREFIX = "agent-";
 
-/** 执行 tmux 命令，返回 stdout。失败不抛错，返回空字符串。 */
+/**
+ * 执行 tmux 命令，返回 stdout。失败不抛错，返回空字符串。
+ *
+ * `-f /dev/null` 绕开用户 ~/.tmux.conf：私有 socket 启动的 tmux server
+ * 默认仍会读用户配置，如果用户设了 `set -g base-index 1`，我们假定 master:0
+ * 存在的代码就会全挂。禁掉配置就强制用默认 base-index=0。
+ */
 export async function tmuxRaw(args: string[]): Promise<string> {
-  const proc = Bun.spawn(["tmux", "-S", TMUX_SOCK, ...args], {
+  const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -22,7 +28,7 @@ export async function tmuxRaw(args: string[]): Promise<string> {
 
 /** 非阻塞 fire-and-forget 发送（用于 C-c 等不需要等待的操作） */
 export function tmuxFire(args: string[]): void {
-  Bun.spawn(["tmux", "-S", TMUX_SOCK, ...args]);
+  Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]);
 }
 
 /** tmux window target: `master:agent-xxx` */
@@ -73,9 +79,16 @@ export async function isIdle(target: string): Promise<boolean> {
  * 这些是 Claude Code 启动完成后的横幅文字，不是需要确认的提示。
  */
 export function hasClaudePromptToConfirm(pane: string): boolean {
-  return (
+  // 强 UI 信号：必须先有 Claude Code modal 的几何特征，否则 Claude 回复正文里
+  // 出现 "Do you want..." / "Are you sure..." 也会被误判为弹窗，launcher
+  // 就会把 Enter 无脑打到 master 上，破坏 Claude 正在输入的内容。
+  const hasMenuMarker =
     pane.includes("Enter to confirm") ||
     pane.includes("Esc to cancel") ||
+    pane.includes("❯ 1.");
+  if (!hasMenuMarker) return false;
+
+  return (
     pane.includes("Do you want") ||
     pane.includes("Are you sure") ||
     pane.includes("I am using this for local development") ||
@@ -85,7 +98,8 @@ export function hasClaudePromptToConfirm(pane: string): boolean {
     pane.includes("Yes, proceed") ||
     pane.includes("skip all permission") ||
     pane.includes("Skip all permission") ||
-    (pane.includes("❯ 1.") && pane.includes("Yes"))
+    // 兜底：菜单首选项是 Yes 的 Yes/No 风格确认
+    pane.includes("❯ 1. Yes")
   );
 }
 
@@ -208,6 +222,13 @@ export async function listAgentWindows(): Promise<string[]> {
 export async function masterSessionExists(): Promise<boolean> {
   const out = await tmuxRaw(["list-sessions", "-F", "#{session_name}"]);
   return out.split("\n").includes(MASTER_SESSION);
+}
+
+/** master:0 这个窗口是否存在（区别于 master session 本身存在） */
+export async function masterWindowExists(): Promise<boolean> {
+  const out = await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_index}"]);
+  if (!out) return false;
+  return out.split("\n").some((w) => w.trim() === "0");
 }
 
 /** 确保 tmux socket 目录存在 */

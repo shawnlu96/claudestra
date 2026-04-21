@@ -8,6 +8,7 @@
 import {
   tmuxRaw,
   masterSessionExists,
+  masterWindowExists,
   ensureSocketDir,
   isIdle as tmuxIsIdle,
   tmuxCapture,
@@ -60,17 +61,11 @@ async function captureLast(lines = 10): Promise<string> {
   return tmuxCapture(MASTER_WINDOW, lines);
 }
 
-async function startMaster() {
-  console.log("🚀 启动大总管 session...");
-
-  // 确保 socket 目录存在
-  await ensureSocketDir();
-
-  // 创建 tmux session
-  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-c", MASTER_DIR]);
-  await Bun.sleep(500);
-
-  // 启动 Claude Code（用统一的命令构造器）
+/**
+ * 在 master:0 窗口里启动 Claude Code 并等它就绪。
+ * 假定 session 已存在、window:0 已存在（或调用方保证会被创建）。
+ */
+async function bringUpClaudeInMasterWindow(): Promise<boolean> {
   const cmd = buildClaudeCommand({
     channelId: CONTROL_CHANNEL_ID,
     bridgeUrl: BRIDGE_URL,
@@ -94,8 +89,42 @@ async function startMaster() {
     }
   }
 
-  console.log("⚠️ 大总管启动超时，但 session 可能仍在初始化");
-  return await sessionExists();
+  console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
+  return await masterWindowExists();
+}
+
+async function startMaster() {
+  console.log("🚀 启动大总管 session...");
+
+  // 确保 socket 目录存在
+  await ensureSocketDir();
+
+  // 创建 tmux session；base-index=0 显式设一下，防止私有 socket 的 tmux
+  // server 意外继承到非 0 的 base-index（-f /dev/null 在 tmuxRaw 已经处理，
+  // 这里是 belt-and-suspenders）。
+  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-c", MASTER_DIR]);
+  await tmuxRaw(["set-option", "-t", SESSION_NAME, "base-index", "0"]).catch(() => {});
+  await Bun.sleep(500);
+
+  return bringUpClaudeInMasterWindow();
+}
+
+/**
+ * Session 存在但 window:0 丢了（罕见但可能：用户手动 kill-window 或 pm2 重启
+ * 时序问题）。这个 helper 负责补一个 window:0 回来，然后在里面起 Claude。
+ */
+async function recoverMasterWindow(): Promise<boolean> {
+  console.log("🔧 master session 存在但 window:0 丢了，重建 window:0...");
+  await tmuxRaw(["new-window", "-t", SESSION_NAME, "-k", "-c", MASTER_DIR]);
+  await Bun.sleep(500);
+  // 上面的 new-window 不带 index，会按 base-index 自动分配；强制挪到 0
+  await tmuxRaw(["move-window", "-s", SESSION_NAME, "-t", MASTER_WINDOW]).catch(() => {});
+  await Bun.sleep(200);
+  if (!(await masterWindowExists())) {
+    console.log("⚠️ 创建 window:0 失败");
+    return false;
+  }
+  return bringUpClaudeInMasterWindow();
 }
 
 // ============================================================
@@ -347,6 +376,15 @@ async function main() {
     if (!(await sessionExists())) {
       console.log("💀 大总管 tmux session 不存在，正在重启...");
       await startMaster();
+      continue;
+    }
+
+    // session 活着但 window:0 可能没了（被手动 kill-window 或 tmux 异常）。
+    // 这种情况 captureLast 会抓到隔壁 agent 的 pane 然后把 Enter 发去瞎戳，
+    // 必须先补上 window:0。
+    if (!(await masterWindowExists())) {
+      console.log("💀 master:0 窗口不存在，正在恢复...");
+      await recoverMasterWindow();
       continue;
     }
 
