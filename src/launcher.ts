@@ -61,6 +61,9 @@ async function captureLast(lines = 10): Promise<string> {
   return tmuxCapture(MASTER_WINDOW, lines);
 }
 
+/** master 默认 effort（可 env 覆盖）。master 回消息频率高、多数是调度而非长推理，medium 就够且快。 */
+const MASTER_EFFORT = (process.env.MASTER_EFFORT || "medium").trim();
+
 /**
  * 在 master:0 窗口里启动 Claude Code 并等它就绪。
  * 假定 session 已存在、window:0 已存在（或调用方保证会被创建）。
@@ -73,13 +76,15 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
   await tmuxSendLine(MASTER_WINDOW, cmd);
 
   // 等待并自动确认各种提示（dev channel、trust、bypass、etc）
+  let ready = false;
   for (let i = 0; i < 120; i++) {
     await Bun.sleep(500);
     const pane = await captureLast(10);
 
     if (await isIdle()) {
       console.log("✅ 大总管已就绪");
-      return true;
+      ready = true;
+      break;
     }
 
     if (masterShouldAutoConfirm(pane)) {
@@ -89,8 +94,28 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
     }
   }
 
+  if (ready) {
+    await applyMasterEffort();
+    return true;
+  }
+
   console.log("⚠️ 大总管启动超时，但 window 可能仍在初始化");
   return await masterWindowExists();
+}
+
+/**
+ * master 就绪后把 effort 设到 MASTER_EFFORT。Claude Code 的 `/effort <level>`
+ * 一行能直接生效（不用操纵 slider modal）。
+ * 失败不影响主流程 —— 大不了就用默认 effort。
+ */
+async function applyMasterEffort() {
+  if (!MASTER_EFFORT || MASTER_EFFORT === "default") return;
+  try {
+    await tmuxSendLine(MASTER_WINDOW, `/effort ${MASTER_EFFORT}`);
+    console.log(`⚙️  已把 master effort 设为 ${MASTER_EFFORT}`);
+  } catch (e) {
+    console.log(`⚙️  设置 master effort 失败:`, e);
+  }
 }
 
 async function startMaster() {
@@ -418,24 +443,9 @@ async function main() {
     const atShell = !hasClaudeTui && /[%$#>➜»λ❯]\s*$/.test(lastLine);
     if (atShell) {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
-      const cmd = buildClaudeCommand({
-        channelId: CONTROL_CHANNEL_ID,
-        bridgeUrl: BRIDGE_URL,
-      });
-      await tmuxSendLine(MASTER_WINDOW, cmd);
-      // 等待确认
-      for (let i = 0; i < 120; i++) {
-        await Bun.sleep(500);
-        const p = await captureLast(10);
-        if (await isIdle()) {
-          console.log("✅ 大总管已重新就绪");
-          break;
-        }
-        if (masterShouldAutoConfirm(p)) {
-          await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Enter"]);
-          await Bun.sleep(500);
-        }
-      }
+      // 复用 bringUpClaudeInMasterWindow —— 自带 effort 设置 + 弹窗自动确认，
+      // update 流程（cmdUpdate 发 /exit 把 Claude 退回 shell）也会走到这条路径。
+      await bringUpClaudeInMasterWindow();
     }
   }
 }
