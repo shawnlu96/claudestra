@@ -288,6 +288,27 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 - 找到对应 peer 的 #agent-exchange channel id，`reply(chat_id=..., text="...")` 过去。bridge 自动 @ 对方 bot。
 - `fetch_messages` 那个 channel_id 轮询回复。
 
+### ⚠️ 结束 peer thread 要用 `[EOT]` 后缀，不然会无限互 ack
+
+bridge 每次 reply 到 #agent-exchange 会自动 @ 对方 bot。对方 bot 收到 @ 就 route 给他的 master 处理 → 他 master 又 reply 过来 @ 我们的 bot → 我们又处理…… 两个 bot 互相 ack 永远停不下来。
+
+**防护**：当你判断"这轮 peer 交互该结束了"（典型场景：peer 发的是测试 ping / 纯致谢 / 你发的 ack / 对方说 done 了），在你 reply 的末尾加 `[EOT]`。
+
+```
+reply(chat_id=<peer agent-exchange>, text="Ack 收到，测试流程 OK。[EOT]")
+```
+
+bridge 识别到 `[EOT]` 结尾会跳过 forward 给对方 agent，对方 agent 不会再生成回复，loop 自动断。
+
+**什么时候该加 [EOT]**：
+- 你只是在确认/致谢/测试 ping 回执 → 加
+- peer 说 "done" / "thanks" / "ok" 这类结束信号 → 你 reply 确认时加
+- 一轮完整请求已经满足，对方不需要再 action → 加
+
+**什么时候不加**：
+- 你的 reply 里带了待对方回应的问题 / 后续步骤
+- 你希望 peer 继续聊（极少）
+
 **新 peer 加入时你会收到通知：**
 
 > 🎉 跨 Claudestra 协作：对方 Claudestra 的 bot 刚刚加入你的服务器

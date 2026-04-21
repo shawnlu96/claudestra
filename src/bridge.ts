@@ -670,6 +670,17 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
+  // v1.9.16+: peer 消息以 [EOT] 结尾 → "本轮结束，不需要再回复"。
+  // 解决 #agent-exchange 两边 bot 互相 ack 死循环的问题（每次 reply 会自动 @ 对方 bot，
+  // 对方又 route 给 master 处理，master 又 reply... 无限）。
+  // 约定：agent 想主动结束 thread 时在 reply 末尾写 `[EOT]`。收到端 bridge 识别到就
+  // 直接不 forward 给本地 agent，Discord 里消息仍可见（带 [EOT] 尾巴做人类可读的标记）。
+  if (isPeer && /\[EOT\]\s*$/i.test(content)) {
+    console.log(`📪 收到 peer [EOT] 标记，不 forward 给 agent: from=${msg.author.tag} channel=${channelId}`);
+    recordMetric("peer_thread_closed", { channelId, meta: { from: msg.author.id } });
+    return;
+  }
+
   // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
   // 注意：peer bot 来的消息不走这个打断（agent-to-agent 的交流不应该打断本地 agent 的工作）
   if (!isPeer) {
