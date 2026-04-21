@@ -779,6 +779,12 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     console.error("agent-exchange header 注入失败:", e);
   }
 
+  // 记录触发源：peer bot / 其他 bot 的消息视为 "agent"（下游 Stop 不发完成 @）；人类视为 "user"
+  // client.channelId 是"处理这条消息的 Claude Code session 主要 channel"，比如 master 的 CONTROL。
+  // Stop hook 查这个 channel 的 source 决定要不要发 @。
+  const triggerSource: "user" | "agent" = isPeer ? "agent" : "user";
+  lastMessageSource.set(client.channelId, triggerSource);
+
   try {
     client.ws.send(JSON.stringify({ type: "message", content, meta }));
     recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length } });
@@ -1691,6 +1697,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: new Date().toISOString(),
           },
         }));
+        // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
+        lastMessageSource.set(target.channelId, "agent");
 
         ws.send(JSON.stringify({
           type: "response",
@@ -1712,6 +1720,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 // ── Hook HTTP 处理 ──
 // channelId → 最近一次完成通知时间戳，用于去抖
 const lastCompletionSent = new Map<string, number>();
+// v1.9.6+: 记录每个 channel 的最近一次消息触发源。如果是 "agent"（peer bot / send_to_agent 转发）
+// 那次 turn 结束时就不发完成 @ — 用户没问问题，不用通知他
+const lastMessageSource = new Map<string, "user" | "agent">();
 const COMPLETION_DEDUPE_MS = 10_000; // 10 秒内不重复发完成通知
 
 async function handleHookRequest(req: Request): Promise<Response> {
@@ -1751,6 +1762,13 @@ async function handleHookRequest(req: Request): Promise<Response> {
       if (shouldNotify && now - last < COMPLETION_DEDUPE_MS) {
         console.log(`🏁 去抖跳过（${Math.round((now - last) / 1000)}s 内已发过）: channel=${channelId}`);
         return new Response("ok");
+      }
+
+      // v1.9.6+: 如果最近一次 message 来自 agent（peer bot / send_to_agent 转发），
+      // 这次 Stop 是"为 agent 工作" — 用户没问过问题，不用 @ 他
+      if (shouldNotify && lastMessageSource.get(channelId) === "agent") {
+        console.log(`🏁 跳过完成通知（上一次消息来自 agent，非 user 触发）: channel=${channelId}`);
+        shouldNotify = false;
       }
 
       // 防御性：等 Claude Code TUI 稳定下来（~1.5s），再看 pane 状态确认真的"完成"。
