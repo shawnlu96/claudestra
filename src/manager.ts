@@ -1469,6 +1469,13 @@ async function cmdUpdate() {
   // 8. 检查 pm2 startup 是否已经配过（开机自启的 init 脚本）；没配给 hint
   const startupWarning = await checkPm2Startup();
 
+  // 8b. 有 warning 就主动推到 #control —— JSON 输出字段几乎没人看（launcher
+  // 的 auto-update 是 detached 子进程，master 里 Bash 调用的 stdout 也经常
+  // 被卷走），只有真把消息送到 Discord，用户才会知道要去跑那条 sudo 命令。
+  if (startupWarning) {
+    await notifyPm2StartupWarning(startupWarning).catch(() => {});
+  }
+
   output({
     ok: true,
     from: `v${local}`,
@@ -1476,7 +1483,37 @@ async function cmdUpdate() {
     message: `已更新到 ${release.tag} 并重启 pm2 服务`,
     masterReRendered: rendered,
     pm2StartupWarning: startupWarning,
+    pm2StartupNotified: !!startupWarning,
   });
+}
+
+/**
+ * 把 pm2 startup 缺失的提示推到 #control 频道。
+ * 关键：前一步刚 pm2 restart 过 bridge，bridge 可能还没完成 Discord login，
+ * 所以需要重试几次（最多 ~24s）而不是单次尝试。
+ */
+async function notifyPm2StartupWarning(warning: string): Promise<void> {
+  const controlChannel = process.env.CONTROL_CHANNEL_ID || "";
+  if (!controlChannel) return;
+
+  const allowed = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
+  const mention = allowed.map((id) => `<@${id}>`).join(" ");
+  const text = [
+    `⚠️ **pm2 开机自启未配置** ${mention}`.trim(),
+    ``,
+    warning,
+    ``,
+    `不跑这个命令的话，机器重启后 Claudestra 服务（bridge/launcher/cron）不会自动回来。`,
+  ].join("\n");
+
+  for (let i = 0; i < 12; i++) {
+    try {
+      await bridgeRequest({ type: "reply", chatId: controlChannel, text });
+      return;
+    } catch {
+      await Bun.sleep(2000);
+    }
+  }
 }
 
 /**
