@@ -21,10 +21,30 @@ export interface PeerBot {
   firstSeen: string;   // ISO 8601
 }
 
+/**
+ * v1.9.21+ 路由模式：
+ *  - "direct": peer 的请求由**我方 bridge** 直接路由给指定的 local agent，
+ *    完全绕过我方 master。agent 直接 reply 到 #agent-exchange @ peer bot。
+ *    链路短（2-3 hops），适合职责明确、不需要 master 中介的能力。
+ *  - "via_master": peer 的请求先 forward 给我方 master，master 用
+ *    send_to_agent 转给 agent，agent 回到自己 channel，master 再 transcribe
+ *    到 #agent-exchange。保留给"多个 agent 可能匹配、需要 LLM 路由决策"场景。
+ *
+ * 兼容：老 exposure / capability 没有 `mode` 字段，effectiveMode 默认
+ * "via_master"（保持旧行为）。新写入的 exposure 默认 "direct"。
+ */
+export type PeerMode = "direct" | "via_master";
+export const DEFAULT_PEER_MODE: PeerMode = "direct";
+
+export function effectivePeerMode(entry: { mode?: string }): PeerMode {
+  return entry.mode === "direct" ? "direct" : "via_master";
+}
+
 export interface Exposure {
   localAgent: string;       // 比如 "orchestrator"
   peerBotId: string | "all"; // 具体 peer bot ID 或 "all"
   purpose?: string;         // 自由描述
+  mode?: PeerMode;          // 路由模式（v1.9.21+）
   grantedAt: string;        // ISO 8601
 }
 
@@ -34,6 +54,7 @@ export interface Capability {
   peerAgentExchangeId?: string; // peer 那边的 #agent-exchange channel id（我方 bot 能看到的）
   peerAgent: string;            // 对方开放的 agent 名
   purpose?: string;
+  mode?: PeerMode;              // 对方声明的路由模式（v1.9.21+，从 PeerEvent 学来）
   learnedAt: string;
 }
 
@@ -163,6 +184,7 @@ export interface PeerEvent {
   peer: string;            // 目标 peer bot ID（或 "all"）
   purpose?: string;
   exchange?: string;       // 我方 #agent-exchange 频道 id，peer 用来知道回哪里
+  mode?: PeerMode;         // v1.9.21+ 路由模式
 }
 
 const EVENT_RE = /<!--\s*CLAUDESTRA_PEER_EVENT\s+(.+?)\s*-->/;
@@ -171,6 +193,7 @@ export function encodePeerEvent(ev: PeerEvent): string {
   const parts = [`kind=${ev.kind}`, `local=${ev.local}`, `peer=${ev.peer}`];
   if (ev.purpose) parts.push(`purpose="${ev.purpose.replace(/"/g, "'")}"`);
   if (ev.exchange) parts.push(`exchange=${ev.exchange}`);
+  if (ev.mode) parts.push(`mode=${ev.mode}`);
   return `<!-- CLAUDESTRA_PEER_EVENT ${parts.join(" ")} -->`;
 }
 
@@ -187,11 +210,13 @@ export function parsePeerEvent(text: string): PeerEvent | null {
   }
   if (!kvs.kind || !kvs.local || !kvs.peer) return null;
   if (kvs.kind !== "grant" && kvs.kind !== "revoke" && kvs.kind !== "hello") return null;
+  const mode = kvs.mode === "direct" || kvs.mode === "via_master" ? kvs.mode : undefined;
   return {
     kind: kvs.kind as PeerEvent["kind"],
     local: kvs.local,
     peer: kvs.peer,
     purpose: kvs.purpose,
     exchange: kvs.exchange,
+    mode,
   };
 }

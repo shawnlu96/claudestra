@@ -78,6 +78,8 @@ interface ClientInfo {
   ws: ServerWebSocket<unknown>;
   channelId: string;
   userId?: string;
+  /** channel-server 所在 Claude Code 进程的 cwd，v1.9.21+ 用来找 jsonl 兜底抽取 */
+  cwd?: string;
 }
 
 // ============================================================
@@ -87,14 +89,28 @@ interface ClientInfo {
 const clients = new Map<string, ClientInfo>();
 const activeStatusMessages = new Map<string, string>();
 
-// v1.9.20+: 记 "master 这个 channel 收到入站消息但还没调 reply"。Stop hook
-// 触发时查这个 map —— 有记录且 nagged=false → 注一条 [SYSTEM NAG] 提示 master
-// 补 reply。reply handler 里每次 reply 到 master-related channel 就把 pending
-// 清掉表示"已回"。只对 master 自己的 channel（CONTROL + #agent-exchange）挂。
+/**
+ * v1.9.20+ / v1.9.21 重构: 记 "Discord 入站消息进到某个 channel-server 但还没回到
+ * Discord" 的 pending，Stop hook 触发时用来做两件事：
+ *   (1) 如果 pending 的 targetWs 就是这次 Stop 的 ws，且该 turn 没调 reply() →
+ *       从 session jsonl 捞最近一条 assistant 文字，**代 post** 到
+ *       intendedReplyChannel（v1.9.21+，比 NAG 更硬兜底）
+ *   (2) 抽不到文字时 fallback 到 [SYSTEM NAG] 注入，让 master/agent 再跑一轮
+ *
+ * intendedReplyChannel 可能跟接收消息的 channel 不同！
+ *   - via_master：消息进 #agent-exchange 但 CONTROL 和 #agent-exchange 都行
+ *     （master 用同一个 ws 处理两个 channel），intended = #agent-exchange
+ *   - direct：peer 消息进 #agent-exchange，路由到 agent 的 ws，agent 应该 reply
+ *     回 #agent-exchange @ peer bot —— intended = #agent-exchange，target 是 agent
+ *
+ * reply handler 命中 intendedReplyChannel 就清掉 pending。
+ */
 interface PendingReply {
   msgId: string;
   ts: number;
   nagged: boolean;
+  intendedReplyChannel: string;
+  targetWs: ServerWebSocket<unknown>;
 }
 const pendingReplies = new Map<string, PendingReply>();
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
@@ -109,6 +125,21 @@ async function getLocalAgentExchangeId(): Promise<string> {
   } catch { /* non-critical */ }
   return _cachedAgentExchangeId;
 }
+
+/**
+ * v1.9.21+ send_to_agent 推回机制：记录一条 outstanding send_to_agent 调用，
+ * 当 target agent 下一次 reply 到自己 channel 时，bridge 自动把那段文字也 push
+ * 回 caller 的 ws 作为"[agent-X 回复] …"合成消息，caller 不再需要 fetch_messages
+ * 轮询。key = target agent 的 channelId。
+ */
+interface PendingAgentCall {
+  callerChannelId: string;   // 谁发起的（master 或某个 agent）
+  callerWs: ServerWebSocket<unknown>;
+  callerName: string;
+  targetName: string;
+  ts: number;
+}
+const pendingAgentCalls = new Map<string, PendingAgentCall>();
 const typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const TYPING_SAFETY_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟
 
@@ -619,6 +650,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
               peerAgentExchangeId: event.exchange,
               peerAgent: event.local,
               purpose: event.purpose,
+              mode: event.mode,
             });
             console.log(`📥 学到能力: peer ${msg.author.tag} 开放 ${event.local}（${event.purpose ?? "无描述"}）`);
             await notifyMaster(
@@ -831,18 +863,89 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v1.9.20+: 挂起一个"这条消息需要 master reply"的 pending 记录。
-  // master 的 Stop hook 触发时会检查：如果这条消息之前没触发过 reply 到本频道，
-  // 就注一条 [SYSTEM NAG] 提醒 master 调 reply。解决 master 偶尔只在 assistant
-  // 正文写答案、不调 reply 工具导致 Discord 只收到空完成通知的问题。
-  // 只对 master 自己的两个 channel 生效（CONTROL + #agent-exchange）。
-  if (channelId === CONTROL_CHANNEL_ID || channelId === (await getLocalAgentExchangeId())) {
-    pendingReplies.set(channelId, { msgId: msg.id, ts: Date.now(), nagged: false });
+  // v1.9.21+ direct mode peer routing：
+  // 如果是 peer bot 在 #agent-exchange 发消息、且 peers.json 里这个 peer 的
+  // exposure 是 mode=direct → 路由**直接到 agent 的 ws**，完全绕过 master。
+  // agent 被要求 reply 回 #agent-exchange @ peer bot。
+  // 找不到匹配 exposure / 多个 candidate / mode=via_master → 回到原路径（forward 给 master）。
+  let routeWs = client.ws;
+  let routeClientChannelId = client.channelId;
+  let directHeaderInjected = false;
+  if (isPeer && channelId === await getLocalAgentExchangeId()) {
+    const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
+    const peers = await readPeers();
+    const directExposures = peers.exposures
+      .filter((e) => (e.peerBotId === msg.author.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct");
+    // 只 auto-pick 唯一一条（多条 → 交给 master 决策，避免误路由）
+    if (directExposures.length === 1) {
+      const targetExp = directExposures[0];
+      try {
+        const listResult = await runManager("list");
+        const agents = (listResult.agents || []) as any[];
+        const targetAgent = agents.find((a: any) =>
+          a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
+        );
+        if (targetAgent && targetAgent.status === "active") {
+          const agentClient = clients.get(targetAgent.channelId);
+          if (agentClient) {
+            // 改写 content：盖掉上面的 master agent-exchange header，插 direct header
+            content = [
+              `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
+              ``,
+              `来源：peer bot **${msg.author.username}** (id: \`${msg.author.id}\`) 在 #agent-exchange (\`${channelId}\`)`,
+              `你被 expose 的理由：${targetExp.purpose || "（无描述）"}`,
+              ``,
+              `**最终动作必须是**：\`reply(chat_id="${channelId}", text="<你的答案>")\``,
+              `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
+              `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
+              `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
+              `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${process.env.USER_NAME || "owner"} 或其 master" 也行`,
+              ``,
+              `---`,
+              `原始消息：`,
+              (msg.content || "").replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "").trim() + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
+            ].join("\n");
+            routeWs = agentClient.ws;
+            routeClientChannelId = agentClient.channelId;
+            directHeaderInjected = true;
+            console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
+            recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
+          } else {
+            console.log(`⚠️ PEER DIRECT fallback: agent ${targetAgent.name} 未连接 bridge，回落 master`);
+          }
+        } else if (targetAgent) {
+          console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} status=${targetAgent.status}，回落 master`);
+        } else {
+          console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} 在 registry 找不到，回落 master`);
+        }
+      } catch (e) {
+        console.error("PEER DIRECT routing 失败，回落 master:", e);
+      }
+    } else if (directExposures.length > 1) {
+      console.log(`🎯 PEER DIRECT 有 ${directExposures.length} 个候选（${directExposures.map((e) => e.localAgent).join("/")}），交给 master 决策`);
+    }
+  }
+
+  // v1.9.20+/v1.9.21: 挂起一个"这条消息需要 reply 回 Discord"的 pending 记录。
+  // Stop hook 触发时 bridge 会：
+  //   (1) 从 session jsonl 捞最近 assistant 文字代 post 到 intendedReplyChannel
+  //   (2) 没文字就 fallback 到 [SYSTEM NAG] 注入
+  // 只对 master 自己的两个 channel (CONTROL + #agent-exchange) 挂 pending。
+  // direct 模式下 intendedReplyChannel 依然是 #agent-exchange，但 targetWs 是 agent。
+  const exchangeId = await getLocalAgentExchangeId();
+  if (channelId === CONTROL_CHANNEL_ID || channelId === exchangeId) {
+    pendingReplies.set(channelId, {
+      msgId: msg.id,
+      ts: Date.now(),
+      nagged: false,
+      intendedReplyChannel: channelId,
+      targetWs: routeWs,
+    });
   }
 
   try {
-    client.ws.send(JSON.stringify({ type: "message", content, meta }));
-    recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length } });
+    routeWs.send(JSON.stringify({ type: "message", content, meta }));
+    recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length, direct: directHeaderInjected } });
   } catch (err) {
     console.error(`发送消息到 client (channel ${channelId}) 失败:`, err);
     recordMetric("error", { channelId, meta: { phase: "forward_to_client", err: String(err) } });
@@ -1591,7 +1694,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           old.ws.close(1000, "replaced by newer registration");
         } catch { /* non-critical */ }
       }
-      clients.set(msg.channelId, { ws, channelId: msg.channelId, userId: msg.userId });
+      clients.set(msg.channelId, { ws, channelId: msg.channelId, userId: msg.userId, cwd: msg.cwd });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 
@@ -1602,7 +1705,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           const { readPeers } = await import("./lib/peers.js");
           const peers = await readPeers();
           if (peers.localAgentExchangeId && peers.localAgentExchangeId !== msg.channelId) {
-            clients.set(peers.localAgentExchangeId, { ws, channelId: peers.localAgentExchangeId, userId: msg.userId });
+            // 注意 cwd 沿用 master 的（因为这一项指向同一个 ws，jsonl 抽取要走同一份）
+            clients.set(peers.localAgentExchangeId, { ws, channelId: peers.localAgentExchangeId, userId: msg.userId, cwd: msg.cwd });
             console.log(`📌 也把 #agent-exchange (${peers.localAgentExchangeId}) 挂到 master ws`);
           }
         } catch { /* non-critical */ }
@@ -1630,9 +1734,40 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         text = await ensurePeerMentions(discord, msg.chatId, text || "");
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
-        // v1.9.20+: master 成功 reply 到一个 pending 的 channel → 清掉 pending，
-        // 免得 Stop hook 时还误以为 master 没回、发 nag。
+
+        // v1.9.20+: 成功 reply 到 pending 的 intendedReplyChannel → 清 pending
         pendingReplies.delete(msg.chatId);
+
+        // v1.9.21+ send_to_agent 推回机制：
+        // 如果 reply 的 chat_id 正好是某个 pending send_to_agent 的 target agent 的
+        // channel，说明 agent 在它自己的 channel 里发了答案（discord 看得到，供审计）；
+        // bridge 同时把这段 text push 回 caller 的 ws 作为合成消息，caller 不用再轮询。
+        const pending = pendingAgentCalls.get(msg.chatId);
+        if (pending) {
+          const agentName = msg.chatId; // 用 channel id 作为 label
+          const pushMsg = {
+            type: "message" as const,
+            content: `[🤖 ${pending.targetName} 回复]\n${text.replace(/<@!?\d+>\s*/g, "").trim()}`,
+            meta: {
+              chat_id: pending.callerChannelId,
+              message_id: `agent_reply_${Date.now()}`,
+              user: pending.targetName,
+              user_id: "agent",
+              is_agent: "true",
+              from_channel_id: msg.chatId,
+              ts: new Date().toISOString(),
+            },
+          };
+          try {
+            pending.callerWs.send(JSON.stringify(pushMsg));
+            lastMessageSource.set(pending.callerChannelId, "agent");
+            console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
+            recordMetric("agent_pushback", { channelId: pending.callerChannelId, meta: { targetName: pending.targetName } });
+          } catch (e) {
+            console.error("AGENT PUSH-BACK 发送失败:", e);
+          }
+          pendingAgentCalls.delete(msg.chatId);
+        }
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }
@@ -1778,10 +1913,27 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 
+        // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
+        // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
+        if (fromChannelId) {
+          pendingAgentCalls.set(target.channelId, {
+            callerChannelId: fromChannelId,
+            callerWs: ws,
+            callerName: fromName,
+            targetName,
+            ts: Date.now(),
+          });
+        }
+
         ws.send(JSON.stringify({
           type: "response",
           requestId: msg.requestId,
-          result: { ok: true, targetChannelId: target.channelId, targetName },
+          result: {
+            ok: true,
+            targetChannelId: target.channelId,
+            targetName,
+            pushBack: true, // v1.9.21+: 告诉 caller "agent 回复会自动 push 给你，不用轮询"
+          },
         }));
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
@@ -1804,54 +1956,98 @@ const lastMessageSource = new Map<string, "user" | "agent">();
 const COMPLETION_DEDUPE_MS = 10_000; // 10 秒内不重复发完成通知
 
 /**
- * v1.9.20+: Stop hook 触发时检查 —— master 这一轮有没有忘了 reply。
- * channelsToClear 包含 Stop hook 的 channelId + 所有同 ws channel（master 在
- * CONTROL 和 #agent-exchange 用同一个 ws）。对每个 pending 且 nagged=false 的
- * channel 发一条 [SYSTEM NAG] 到 master 的 ws，强制再跑一轮让它调 reply。
+ * v1.9.20+/v1.9.21: Stop hook 触发时兜底 master/agent 忘了 reply 的情况。
  *
- * 安全网：只 nag 一次（nagged=true 粘住），避免 LLM 持续不反应时无限循环。
- * pending 过 5 分钟还在就当超时丢掉，免得内存积累。
+ * **v1.9.21 升级**：不再只靠 NAG（NAG 的成功率受 LLM 自觉性影响），而是**优先**
+ * 从 session jsonl 捞最近一条 assistant 文字**代 post** 到 intendedReplyChannel。
+ * 捞不到才 fallback 到 NAG。这样保证"消息进 Discord 就一定有 Discord 回复"。
+ *
+ * stopChannelId: Stop hook 自己带的 channelId（我们据此找到触发 Stop 的那个 ws，
+ *   只处理它名下的 pending，避免在 master Stop 时误清掉别的 agent 的 pending）
+ * channelsToClear: 跟 stopChannelId 同 ws 的所有 channel（master 是
+ *   {CONTROL, #agent-exchange}）
  */
-async function maybeNagMissedReply(channelsToClear: Set<string>): Promise<void> {
+/** v1.9.21+ 每分钟扫一次，清超过 10min 仍未被 agent 回复消化的 pendingAgentCalls。
+ * 正常情况下 agent 会在几十秒内回 → 被 reply handler 清掉。残留条目只会发生在
+ * agent 挂了 / 忘了回 / fetch_messages 被用户取消等极端场景。留太多占内存。 */
+setInterval(() => {
+  const now = Date.now();
+  const STALE_MS = 10 * 60_000;
+  for (const [channelId, pending] of pendingAgentCalls.entries()) {
+    if (now - pending.ts > STALE_MS) {
+      pendingAgentCalls.delete(channelId);
+      console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
+    }
+  }
+}, 60_000).unref();
+
+async function maybeRescueMissedReply(stopChannelId: string, channelsToClear: Set<string>): Promise<void> {
   const now = Date.now();
   const STALE_MS = 5 * 60_000;
+
+  const stopClient = clients.get(stopChannelId);
+  if (!stopClient) return;
+
+  const { findLatestJsonl, extractLatestAssistantText } = await import("./lib/jsonl-extract.js");
 
   for (const cid of channelsToClear) {
     const pending = pendingReplies.get(cid);
     if (!pending) continue;
 
-    // 超时 pending → 直接丢弃，不再处理
+    // 只处理 pending 的 targetWs 属于这次 Stop 的 ws —— 避免 Stop A 误清 Stop B 的 pending
+    if (pending.targetWs !== stopClient.ws) continue;
+
     if (now - pending.ts > STALE_MS) {
       pendingReplies.delete(cid);
       continue;
     }
 
-    if (pending.nagged) continue; // 已经 nag 过一次，不再重复
-
-    const masterClient = clients.get(cid);
-    if (!masterClient) {
-      // ws 找不到 master 的连接 → 无法 nag，留 pending，等下一次 Stop（master 可能正在重连）
-      continue;
+    // 1. 优先抽 jsonl 代 post
+    let rescued = false;
+    if (stopClient.cwd) {
+      try {
+        const jsonlPath = await findLatestJsonl(stopClient.cwd);
+        if (jsonlPath) {
+          const extracted = await extractLatestAssistantText(jsonlPath, { sinceMs: pending.ts - 5_000 });
+          if (extracted && extracted.trim().length > 0) {
+            const rescuedText = `${extracted.trim()}\n\n_📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送_`;
+            try {
+              const textWithMentions = await ensurePeerMentions(discord, pending.intendedReplyChannel, rescuedText);
+              await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
+              console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
+              recordMetric("reply_rescue_posted", { channelId: pending.intendedReplyChannel, meta: { chars: String(extracted.length), source: stopClient.channelId } });
+              pendingReplies.delete(cid);
+              rescued = true;
+            } catch (e) {
+              console.error(`🆘 RESCUE post 失败 channel=${pending.intendedReplyChannel}:`, e);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`🆘 RESCUE jsonl 抽取异常 cwd=${stopClient.cwd}:`, e);
+      }
     }
 
+    if (rescued) continue;
+    if (pending.nagged) continue; // 已 NAG 过，不再重复
+
+    // 2. 捞不到文字（比如这一轮纯 tool_use 没产出 assistant text）→ fallback NAG
     pending.nagged = true;
     const nagContent = [
-      `⚠️ [SYSTEM] 你刚才处理了 Discord channel \`${cid}\` 里的入站消息，但这一轮没调 \`reply()\` 工具。`,
+      `⚠️ [SYSTEM] 你刚才处理了 Discord channel \`${cid}\` 里的入站消息，但这一轮既没调 \`reply()\` 工具、也没产出文字答案（bridge 尝试从 jsonl 抽取代你 post，但没找到 text 内容）。`,
       ``,
-      `纯文字 assistant 输出**不到** Discord —— 只写到你本地 tmux 终端，用户只会看到 Stop hook 的空 "✅ 完成" 通知。`,
+      `立刻补一条：\`reply(chat_id="${cid}", text="<你的答案或'无法处理'的说明>")\``,
       ``,
-      `立刻补一条：\`reply(chat_id="${cid}", text="<你刚才想说的答案>")\``,
-      ``,
-      `（这是 bridge 自动检测到 reply 缺失触发的 NAG，只 nag 一次，如果这次你仍然不调 reply 就不再提醒。）`,
+      `（这是 bridge 自动检测到 reply 缺失触发的 NAG，只 nag 一次，再不调就放弃。）`,
     ].join("\n");
 
     try {
-      masterClient.ws.send(JSON.stringify({
+      stopClient.ws.send(JSON.stringify({
         type: "message",
         content: nagContent,
         meta: { nag: "true", channel_id: cid, missed_msg_id: pending.msgId },
       }));
-      console.log(`📢 NAG: master 忘了 reply 到 channel=${cid} (msg=${pending.msgId})，已注入 SYSTEM NAG 强制再跑一轮`);
+      console.log(`📢 NAG: 没抽到 text，发 SYSTEM NAG 给 channel=${cid} (msg=${pending.msgId})`);
       recordMetric("master_nag_missed_reply", { channelId: cid, meta: { missedMsgId: pending.msgId } });
     } catch (e) {
       console.error(`📢 NAG 注入失败 channel=${cid}:`, e);
@@ -1979,10 +2175,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
         }
       }
 
-      // v1.9.20+: Stop hook 扫 reply 缺失兜底。master 处理了一条 Discord 消息但
-      // 没调 reply() 把答案发出去 → 注一条 [SYSTEM NAG] 到它 channel-server 的
-      // ws，强制再跑一轮让它补 reply。只 nag 一次，避免无限循环。
-      await maybeNagMissedReply(channelsToClear);
+      // v1.9.20+/v1.9.21: Stop hook reply 缺失兜底。master/agent 忘调 reply →
+      // 优先从 session jsonl 抽 assistant 文字代 post；抽不到再 NAG 强制再跑一轮。
+      await maybeRescueMissedReply(channelId, channelsToClear);
     }
 
     return new Response("ok");
@@ -2050,6 +2245,7 @@ const server = Bun.serve({
           local: string;
           peer: string; // peer bot id 或 "all"
           purpose?: string;
+          mode?: "direct" | "via_master";
         };
         const { readPeers, encodePeerEvent } = await import("./lib/peers.js");
         const peers = await readPeers();
@@ -2072,6 +2268,7 @@ const server = Bun.serve({
           peer: body.peer,
           purpose: body.purpose,
           exchange: peers.localAgentExchangeId,
+          mode: body.mode,
         });
         // 找目标 peer 的 @mention（如果是 "all" 就 @ 所有 peer bot）
         let atMentions = "";

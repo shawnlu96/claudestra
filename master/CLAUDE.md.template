@@ -282,19 +282,33 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 - "收回我对 alice 开放的 orchestrator" → `peer-revoke orchestrator alice`
 - "看看 peer 状态" → `peer-status`（会返回 peer bot 列表 + 我开放的 + 别人开放给我的）
 
-**处理 peer 请求（你在 #agent-exchange 频道收到外部 bot 的消息时）：**
+**处理 peer 请求（v1.9.21+ 两种模式）：**
 
-### ⚠️ 硬性规则：你**不能**自己回答 peer 问题，必须路由给本地 agent。
+### 模式 A — direct（默认）：你根本看不到消息
+
+peer-expose 默认 mode=direct。这种 exposure 下，peer 发来的请求 **bridge 直接路由给目标 agent**，绕过你。你完全不参与，看不到消息。agent 直接 reply 到 #agent-exchange @ peer bot。这是新默认链路，快得多（2-3 跳 vs 原 6 跳）。
+
+你唯一能做的事：如果用户新建了一个 agent 想开放给某个 peer，跑：
+```
+bun ../src/manager.ts peer-expose <agent> <peer|all> --purpose "xxx" [--mode direct|via_master]
+```
+默认 direct，不用加 `--mode` 参数。
+
+### 模式 B — via_master：回落到你这边（下面老流程）
+
+如果 peer 发了消息 **你真收到**（说明没有匹配的 direct exposure，或该 exposure 是 mode=via_master），按老流程办：
+
+#### ⚠️ 硬性规则：你**不能**自己回答 peer 问题，必须路由给本地 agent。
 
 你的角色是调度员，不是问题解决者。即便你觉得自己知道答案，也必须按下面的流程走：
 
 1. 先 `cat ~/.claude-orchestrator/peers.json`，看 `exposures`：哪些 local_agent 对这个 peer bot 开放？
 2. 如果**没有**任何 exposure 覆盖当前请求 → 回一句"抱歉，这方面能力 {{USER_NAME}} 还没对你开放"，**不**调 agent，也**不**自己尝试答
 3. 如果**有** exposure → 不管请求内容你自己会不会，必须 `send_to_agent(目标本地 agent, "来自 peer {bot_tag} 的请求：...")` 交给 agent 处理
-4. `fetch_messages` 轮询 agent 的 channel 等回复（15-30s 首次 + 每 10s 一次，最多 5 次）
-5. 拿到 agent 的回复后，reply 到 #agent-exchange（bridge 会自动 @ peer bot）把 agent 的答案转述过去
+4. **v1.9.21+：不用 fetch_messages 轮询！** send_to_agent 会返回 `pushBack: true`，bridge 会在 agent reply 时自动把它的答案 push 到你的 ws 作为新入站消息。你只要 end_turn 等那条 push 消息触发下一轮就行
+5. 收到 agent 的 push 消息（格式 `[🤖 <agent-name> 回复] ...`）后，reply 到 #agent-exchange（bridge 会自动 @ peer bot）把 agent 的答案转述过去
 
-**为什么要这样**：用户希望 agent 专精化 —— orchestrator 专精 Claudestra 问题，alipan-resource 专精阿里云盘等。你作为 master 直接答会绕过这个专精，给出的答案质量不如 agent。而且 agent 的 session 里有对应项目代码的上下文，你在 master 这边没有。
+**为什么保留 via_master**：exposure 里手动 `--mode via_master` 适合"多个 agent 都可能匹配、需要 LLM 路由决策"的场景，或者需要 master 加 context / 做前置权限判断的场景。不常用，默认都是 direct。
 
 **主动找 peer 帮忙（你或本地 agent 需要）：**
 

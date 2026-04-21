@@ -1634,7 +1634,7 @@ async function cmdInviteLink(args: string[]) {
   });
 }
 
-async function cmdPeerExpose(localAgent: string, peer: string, purpose: string) {
+async function cmdPeerExpose(localAgent: string, peer: string, purpose: string, mode: "direct" | "via_master" = "direct") {
   const peers = await import("./lib/peers.js");
   const data = await peers.readPeers();
 
@@ -1652,7 +1652,7 @@ async function cmdPeerExpose(localAgent: string, peer: string, purpose: string) 
     peerBotId = match.id;
   }
 
-  const exp = await peers.addExposure({ localAgent, peerBotId, purpose });
+  const exp = await peers.addExposure({ localAgent, peerBotId, purpose, mode });
 
   // 通过 bridge HTTP 触发通告（bridge 会在 #agent-exchange 发一条带 PeerEvent 的消息）
   const port = process.env.BRIDGE_PORT || "3847";
@@ -1661,18 +1661,22 @@ async function cmdPeerExpose(localAgent: string, peer: string, purpose: string) 
     const resp = await fetch(`http://localhost:${port}/peer/announce`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind: "grant", local: localAgent, peer: peerBotId, purpose }),
+      body: JSON.stringify({ kind: "grant", local: localAgent, peer: peerBotId, purpose, mode }),
     });
     bridgeOk = resp.ok;
   } catch { /* non-critical */ }
+
+  const modeNote = mode === "direct"
+    ? "（direct 模式：peer 请求由 bridge 直接路由给 agent，绕过 master）"
+    : "（via_master 模式：peer 请求先进 master，master 用 send_to_agent 转）";
 
   output({
     ok: true,
     exposure: exp,
     broadcasted: bridgeOk,
     message: bridgeOk
-      ? `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer}，并在 #agent-exchange 通告`
-      : `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer}，但通告失败（bridge 没运行？）peer 侧不会立即知道`,
+      ? `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer} ${modeNote}，并在 #agent-exchange 通告`
+      : `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer} ${modeNote}，但通告失败（bridge 没运行？）peer 侧不会立即知道`,
   });
 }
 
@@ -2120,13 +2124,25 @@ switch (cmd) {
   case "peer-expose": {
     const [agent, peer, ...rest] = args;
     if (!agent || !peer) {
-      output({ ok: false, error: '用法: peer-expose <agent> <peer-name|peer-id|all> [--purpose "..."]' });
+      output({ ok: false, error: '用法: peer-expose <agent> <peer-name|peer-id|all> [--purpose "..."] [--mode direct|via_master]' });
       break;
     }
     let purpose = "";
     const pIdx = rest.findIndex((a) => a === "--purpose");
     if (pIdx >= 0 && rest[pIdx + 1]) purpose = rest[pIdx + 1];
-    await cmdPeerExpose(agent, peer, purpose);
+
+    // v1.9.21+: --mode 默认 direct。老用户想保留旧行为可传 --mode via_master
+    let mode: "direct" | "via_master" = "direct";
+    const mIdx = rest.findIndex((a) => a === "--mode");
+    if (mIdx >= 0 && rest[mIdx + 1]) {
+      const m = rest[mIdx + 1];
+      if (m === "direct" || m === "via_master") mode = m;
+      else {
+        output({ ok: false, error: `未知 mode "${m}"，支持 direct / via_master` });
+        break;
+      }
+    }
+    await cmdPeerExpose(agent, peer, purpose, mode);
     break;
   }
 
