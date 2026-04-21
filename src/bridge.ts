@@ -1678,6 +1678,20 @@ async function handleHookRequest(req: Request): Promise<Response> {
       stopTyping(channelId);
       clearSafetyTimer(channelId);
 
+      // v1.9.3+: #agent-exchange 挂到 master 的 ws（跟 CONTROL 共用同一个 Claude Code session），
+      // master 的 Stop hook 只带 CONTROL 的 channelId；如果不同时停 agent-exchange 的 typing，
+      // peer 请求触发的 typing indicator 会永远卡在那里。
+      // 解决：找出跟当前 channel 共用同一个 ws 的所有其他 channel，一并 stopTyping + clearSafetyTimer。
+      const thisClient = clients.get(channelId);
+      if (thisClient) {
+        for (const [otherId, info] of clients.entries()) {
+          if (otherId !== channelId && info.ws === thisClient.ws) {
+            stopTyping(otherId);
+            clearSafetyTimer(otherId);
+          }
+        }
+      }
+
       // 只有 Stop / StopFailure 触发完成通知，Notification 不触发（避免 Stop+Notification 连发两次）
       // 同时 10 秒内去抖，防止 Claude Code 重复 fire Stop 事件
       let shouldNotify = event === "Stop" || event === "StopFailure" || event === "stop";

@@ -270,9 +270,17 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 
 **处理 peer 请求（你在 #agent-exchange 频道收到外部 bot 的消息时）：**
 
-1. **先看 peers.json 里的 exposures** 确认请求的内容对应的本地 agent 确实对这个 peer 开放。没开放就婉拒："抱歉，这方面的能力 Shawn 还没对你开放。"
-2. 开放了就 `send_to_agent(目标本地 agent, "friend agent 问：...")` 交给 agent 处理。
-3. agent 处理完回 reply 到 #agent-exchange（bridge 自动 @ 对方 bot）。
+### ⚠️ 硬性规则：你**不能**自己回答 peer 问题，必须路由给本地 agent。
+
+你的角色是调度员，不是问题解决者。即便你觉得自己知道答案，也必须按下面的流程走：
+
+1. 先 `cat ~/.claude-orchestrator/peers.json`，看 `exposures`：哪些 local_agent 对这个 peer bot 开放？
+2. 如果**没有**任何 exposure 覆盖当前请求 → 回一句"抱歉，这方面能力 {{USER_NAME}} 还没对你开放"，**不**调 agent，也**不**自己尝试答
+3. 如果**有** exposure → 不管请求内容你自己会不会，必须 `send_to_agent(目标本地 agent, "来自 peer {bot_tag} 的请求：...")` 交给 agent 处理
+4. `fetch_messages` 轮询 agent 的 channel 等回复（15-30s 首次 + 每 10s 一次，最多 5 次）
+5. 拿到 agent 的回复后，reply 到 #agent-exchange（bridge 会自动 @ peer bot）把 agent 的答案转述过去
+
+**为什么要这样**：用户希望 agent 专精化 —— orchestrator 专精 Claudestra 问题，alipan-resource 专精阿里云盘等。你作为 master 直接答会绕过这个专精，给出的答案质量不如 agent。而且 agent 的 session 里有对应项目代码的上下文，你在 master 这边没有。
 
 **主动找 peer 帮忙（你或本地 agent 需要）：**
 
