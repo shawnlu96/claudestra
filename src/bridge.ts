@@ -572,16 +572,19 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   if (isBotMessage(msg.id)) return;
 
   const mentionedMe = msg.mentions.users.has(getBotUserId());
+  const channelId = msg.channelId;
 
-  // Peer bot（其他 Claudestra 实例或任意 Discord bot）：必须 @ 我们才处理
+  // Peer bot（其他 Claudestra / 任意外部 bot）：必须 @ 我们才处理。
+  // @ 是跨 agent 协作的强制语义 —— "这条消息给你，你要响应"。没 @ 就不转发给 agent，
+  // 对方 agent 看到"没回应"就会知道自己忘了 @ 或 bridge 没自动补 @。
+  // 保证：我方 reply() 时 bridge 会自动补 @ peer bot（见 ensurePeerMentions），所以我方不会忘。
   if (msg.author.bot) {
     if (!mentionedMe) return;
   } else if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(msg.author.id)) {
-    // 人类但不在 allowlist：只有 @ 了我们才处理（对方 Claudestra 管理员跨服来 @ 的场景）
+    // 人类但不在 allowlist：只有 @ 了我们才处理（跨服有人找我们的场景）
     if (!mentionedMe) return;
   }
 
-  const channelId = msg.channelId;
   const client = clients.get(channelId);
   if (!client) return;
   const isPeer = msg.author.bot;
@@ -688,6 +691,36 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 // ============================================================
 // Peer 发现：bot 被邀请 / 别的 bot 加入
 // ============================================================
+
+// 工具：reply 到一个跟 peer bot 共享的频道时，自动在消息正文前加上对所有 peer bot 的 @，
+// 保证对方 bridge 能识别"这条是给它的"。已经带上的 id 不重复加。
+async function ensurePeerMentions(discord: Client, channelId: string, text: string): Promise<string> {
+  try {
+    const ch = await discord.channels.fetch(channelId).catch(() => null);
+    if (!ch || !("guild" in ch) || !(ch as any).guild) return text;
+    const guild = (ch as any).guild;
+    const ownBotId = getBotUserId();
+    // 列频道成员里的 peer bot
+    const members = await guild.members.fetch({ cache: true }).catch(() => null);
+    if (!members) return text;
+    const peerBots: string[] = [];
+    for (const [, m] of members) {
+      if (!m.user?.bot) continue;
+      if (m.user.id === ownBotId) continue;
+      // 只有对该频道有 View Channel 权限的 bot 才算真的在场
+      const perms = (ch as any).permissionsFor?.(m);
+      if (perms && !perms.has("ViewChannel")) continue;
+      peerBots.push(m.user.id);
+    }
+    if (peerBots.length === 0) return text;
+    const missing = peerBots.filter((id) => !text.includes(`<@${id}>`) && !text.includes(`<@!${id}>`));
+    if (missing.length === 0) return text;
+    const prefix = missing.map((id) => `<@${id}>`).join(" ");
+    return `${prefix} ${text}`;
+  } catch {
+    return text;
+  }
+}
 
 // 工具：往 master 控制频道发一条通知
 async function notifyMaster(content: string): Promise<void> {
@@ -1334,7 +1367,11 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "reply": {
       try {
-        const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
+        let text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
+        // v1.8.9+: 跨 Claudestra 协作必须 @ peer bot 才能让对方 bridge 可靠识别
+        //（老版本 peer 可能仍要求 @；新版虽然放行了也 @ 让语义明确，谁看到都知道在跟它说话）
+        // 检查这个频道里有没有 peer bot（别的 bot + 不是我方），有就把没 @ 到的补一下
+        text = await ensurePeerMentions(discord, msg.chatId, text || "");
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
       } catch (err) {
