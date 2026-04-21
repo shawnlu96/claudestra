@@ -376,7 +376,8 @@ async function main() {
     const tail = nonEmpty.slice(-5).join("\n");
     const hasClaudeTui = /bypass permissions|esc to interrupt/i.test(tail);
     const lastLine = nonEmpty.pop() || "";
-    const atShell = !hasClaudeTui && /[%$#>➜»λ]\s*$/.test(lastLine);
+    // 多一个 ❯：starship / pure 主题常见结尾。Claude Code 的输入框也是 ❯，但靠 hasClaudeTui 先排除
+    const atShell = !hasClaudeTui && /[%$#>➜»λ❯]\s*$/.test(lastLine);
     if (atShell) {
       console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
       const cmd = buildClaudeCommand({

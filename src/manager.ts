@@ -715,8 +715,9 @@ function isAtShell(pane: string): boolean {
   if (/^\s*❯\s*\d+\./m.test(tail)) return false;
   const lastLine = nonEmpty.pop() || "";
   // 常见 shell prompt 收尾字符：$ (bash/sh)、% (zsh default)、# (root)、> (fish/cmd)、
-  // ➜ (oh-my-zsh robbyrussell)、» (pure prompt)、λ (lambda prompt)
-  return /[%$#>➜»λ]\s*$/.test(lastLine);
+  // ➜ (oh-my-zsh robbyrussell)、» (pure prompt)、λ (lambda prompt)、
+  // ❯ (starship / pure 某些主题 — 依赖上面的 Claude TUI exclusion 判断不是 Claude 的输入框)
+  return /[%$#>➜»λ❯]\s*$/.test(lastLine);
 }
 
 /** 检查是否有需要按 Enter 的提示（转发到共享实现） */
