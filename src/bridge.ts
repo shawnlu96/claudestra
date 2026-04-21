@@ -5,6 +5,9 @@
  * 连接到此 bridge，每个注册一个 Discord 频道 ID。Bridge 负责路由消息。
  */
 
+import { enableTimestampLogs } from "./lib/log-timestamp.js";
+enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
+
 import {
   Client,
   GatewayIntentBits,

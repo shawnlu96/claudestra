@@ -5,6 +5,9 @@
  * 如果 session 死了自动重启。
  */
 
+import { enableTimestampLogs } from "./lib/log-timestamp.js";
+enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
+
 import {
   tmuxRaw,
   masterSessionExists,

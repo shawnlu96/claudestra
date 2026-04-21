@@ -10,6 +10,7 @@
  */
 
 import { readFile, writeFile, mkdir } from "fs/promises";
+import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { existsSync, watchFile } from "fs";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import {
@@ -440,7 +441,10 @@ async function main() {
 }
 
 // 仅在直接运行时启动调度器（不在被 import 时启动）
+// 这里才 enableTimestampLogs() —— manager.ts 会从本文件 import loadJobs 等工具，
+// 不该让它的 console 被 wrap（会污染 JSON 输出）。
 if (import.meta.main) {
+  enableTimestampLogs();
   main().catch((err) => {
     console.error("Cron Scheduler 崩溃:", err);
     process.exit(1);
