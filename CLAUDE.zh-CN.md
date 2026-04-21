@@ -79,6 +79,21 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 - **大总管守护** — pm2 管理的 launcher 保持大总管 tmux session 存活，自动处理 Claude Code 确认弹窗。
 - **安全限制** — 每个 spawn 的 agent 都带 `--disallowedTools`，禁止 `rm -rf`、`git push --force`、`git reset --hard`、`chmod 777` 等破坏性命令。
 
+### 跨 Claudestra peer 协作
+
+其他跑同一套 upstream 的 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。v1.9.x 这条线改得挺多，下面是 v1.9.26 的当前态。
+
+- **Shared `#agent-exchange` 频道** — peer bot 加入你 guild 时 bridge 自动建 `#agent-exchange`，把 peer bot 限死在这一个频道（只给 View/Send，其他频道 Deny）。跨 peer 的所有通信都走这儿。grant / revoke / hello 通告是 HTML-comment 编码的 `PeerEvent` marker，两边 bridge 都解析。
+- **显式 exposure** — `bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."` 把本地 agent 显式开放给指定 peer bot。存在 `~/.claude-orchestrator/peers.json`。peer 侧 bridge 通过广播学到，自动缓存在对方的 `peers.json` 里。
+- **Direct 模式路由（v1.9.21+，新 exposure 默认）** — peer 发请求到 `#agent-exchange`：你的 bridge 查 `exposures[peer].mode === "direct"` → **直接把消息注入目标 agent 的 ws**，绕过 master。agent 直接 reply 到 `#agent-exchange` `@` peer-bot。6 跳老链路变 2-3 跳，两边 master 都退出 happy path。兼容的 `via_master` 模式（v1.8–v1.9.0 行为）用 `--mode via_master` 保留，适合需要 LLM 路由决策的场景。
+- **对称路由（v1.9.22+）** — 你在 `#agent-exchange` `@` peer bot：本地 bridge 识别到你只 @ 对方不 @ 我方，skip 转给 master；peer bridge 在 foreign `#agent-exchange` 收事件后，同样走 direct 路由到对方 agent。两个方向都快。
+- **多候选消歧义（v1.9.26+）** — 多条 direct exposure 匹配时先走关键词（C：消息正文里命中某个 agent 名 ⇒ 路由）；没唯一命中 ⇒ 发 Discord 按钮让用户点（D：零 LLM turn、零 master 介入）。
+- **跨 peer `send_to_agent`** — agent 用 `send_to_agent({ target: "peer:<peer_bot_name>.<agent_name>" })` 或短格式 `target: "<agent>@<peer>"` 调 peer agent。bridge 发消息到 shared `#agent-exchange` `@` peer bot，记 pending；对方回复时 bridge push 回 caller 的 ws 作为合成 `[🤖 peer X/Y 回复] ...` 用户消息。不用再 fetch_messages 轮询。
+- **信任模型** — 简化的"信任传递"：peer bot 被 expose 给某 agent ⇒ 对应 peer 的 human users（已经在对方 `#agent-exchange` 里的）自动受信。没有额外的 allowlist 同步，频道成员身份就是信任边界。
+- **推回代替轮询（v1.9.21+）** — `route_to_agent`（本地）和 `handlePeerRouteToAgent`（跨 peer）都记 `pendingAgentCalls` / `pendingPeerCalls`。target 发 reply 时 bridge 合成内部 "message" 事件推回 caller ws。caller 直接 end_turn 等被 push 唤醒即可。
+- **Reply 兜底（v1.9.21+，v1.9.25 定版）** — 每条 Discord 入站消息 bridge 挂一个按 channel 的 pending。目标 session Stop hook 触发时还没调 `reply()` → bridge 读 JSONL 抽最近一段 assistant text，代它 post 到 Discord（footer `_📋 [bridge 兜底] …_`）。没有 NAG 注入（v1.9.20 的 NAG 方案被弃用 —— 污染 context、误触发）。只在 `Stop` / `StopFailure` 跑，不在 `Notification` 跑，免重复 post。
+- **`[EOT]` 线程结束标记** — agent 在结束性回复末尾加 `[EOT]`；收到端 bridge 识别到就 drop 不 forward，防止两个 bot 在 `#agent-exchange` 里互相 ack 死循环。
+
 ## 运行时命令
 
 ```bash
@@ -102,6 +117,13 @@ bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
+
+# 跨 Claudestra peer 协作（v1.9+）
+bun src/manager.ts peer-status                                             # 看 peer bots / 我开放的 / 对方开放给我的
+bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."          # 默认 mode=direct（bridge 直接路由）
+bun src/manager.ts peer-expose <agent> <peer> --mode via_master --purpose "..." # 走老的 master 路由链路
+bun src/manager.ts peer-revoke <agent> <peer|all>                          # 撤销 exposure
+bun src/manager.ts invite-link --peer                                      # 生成给 peer 的最小权限邀请链接
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新

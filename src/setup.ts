@@ -544,7 +544,7 @@ async function stepInviteBot(appId: string): Promise<void> {
 
   br();
   hint("授权成功后，bot 会出现在服务器成员列表里（离线状态，正常）");
-  hint(`跨 Claudestra 协作（v1.8.0+）：给朋友的最小权限邀请链接，可以事后用 ${c.cyan}bun src/manager.ts invite-link --peer${c.reset} 一键生成`);
+  hint(`跨 Claudestra 协作（v1.8+，v1.9+ 加强版）：朋友 bot 进来后 bridge 会自动建 #agent-exchange 共享频道。${c.cyan}bun src/manager.ts invite-link --peer${c.reset} 生成最小权限邀请链接给朋友；${c.cyan}peer-expose <agent> <peer>${c.reset} 显式开放 agent 给他（默认 direct 路由，绕过 master，2-3 跳）。`);
   br();
   await waitEnter();
 }

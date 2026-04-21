@@ -86,6 +86,21 @@ SETUP.md                 User-facing installation guide
 - **Safety rails** — `--disallowedTools` blocks `rm -rf`, `git push --force`, `git reset --hard`, `chmod 777`, and other destructive commands for every spawned agent.
 - **Discord slash autocomplete for skills + built-ins** — on startup, the Bridge discovers every available slash command from four sources (user-level `~/.claude/skills/`, installed plugins in `~/.claude/plugins/cache/…`, per-agent `<cwd>/.claude/skills/`, and a curated set of Claude Code built-ins like `/cost`, `/mcp`, `/context`, `/compact`) and registers them as Discord slash commands. Invocations are re-scanned on every `manager.ts create|resume|kill|restart` via the `/skills/rescan` HTTP endpoint. When a user types a registered `/cmd args` in Discord, the bridge forwards the literal text to the channel's agent via `tmux send-keys`, so Claude Code interprets it natively. Project-level skills are filtered: typing a skill that only exists in another agent's cwd yields an ephemeral explanation instead of going through.
 
+### Cross-Claudestra peer collaboration
+
+Peers (other Claudestra installs running the same upstream) can share their specialist agents without giving each other SSH / filesystem access. The model evolved significantly in the v1.9.x line; this is the current state as of v1.9.26.
+
+- **Shared `#agent-exchange` channel** — when a peer bot joins your guild, bridge auto-creates a `#agent-exchange` channel and scopes the peer bot to that single channel (View/Send on `#agent-exchange`, Deny View on everything else). All cross-peer communication flows through these shared channels. Broadcast notifications (exposure grant/revoke, hello) travel here as HTML-comment-encoded `PeerEvent` markers that both bridges parse.
+- **Explicit exposure model** — `bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."` selectively opens one of your local agents to a specific peer bot. Stored in `~/.claude-orchestrator/peers.json`. Peer's bridge learns capabilities from the broadcast and caches in its own `peers.json`.
+- **Direct-mode routing (v1.9.21+, default for new exposures)** — peer sends a request to `#agent-exchange`; your bridge looks up `exposures[peer].mode === "direct"` and **injects the message straight into the target agent's WebSocket**, bypassing your master. Agent replies directly to `#agent-exchange` `@ peer-bot`. 6-hop old chain becomes 2-3 hops; both masters drop out of the happy path. Fallback mode `via_master` (the old v1.8–v1.9.0 behavior) is still available via `--mode via_master` for scenarios that need LLM-driven routing.
+- **Symmetric routing (v1.9.22+)** — you `@peer-bot` in `#agent-exchange`: bridge detects you're not `@`-ing our bot, skips forwarding to our master. Peer's bridge receives the event on the foreign `#agent-exchange` and applies the same direct-routing logic on their side. Completes the picture so both directions are fast.
+- **Multi-candidate disambiguation (v1.9.26+)** — if several direct exposures match the peer bot, bridge first tries keyword matching (C: agent name mentioned in message body ⇒ unique match ⇒ route). No unique match ⇒ Discord buttons posted in-channel; user clicks one (D: zero LLM turn, zero master participation).
+- **Cross-peer `send_to_agent`** — agents call `send_to_agent({ target: "peer:<peer_bot_name>.<agent_name>" })` or short `target: "<agent>@<peer>"` to invoke a peer agent. Bridge posts to shared `#agent-exchange` `@ peer bot` and registers a pending-peer-call; peer's reply is push-delivered back to the caller's ws as a synthetic `[🤖 peer X/Y 回复] ...` user message (replacing old fetch-message polling).
+- **Trust model** — simplified "trust transfer": once you `peer-expose` an agent to a peer bot, that peer's humans (who are already in peer's `#agent-exchange`) are trusted transitively. No allowlist sync needed; the peer's channel membership IS the trust boundary.
+- **Push-back replaces polling (v1.9.21+)** — bridge's `route_to_agent` (local) and `handlePeerRouteToAgent` (cross-peer) both record `pendingAgentCalls` / `pendingPeerCalls`. When target posts their reply, bridge synthesizes an internal "message" event to the caller's ws. Callers simply `end_turn` and wait for the synthesized user message, no `fetch_messages` loop needed.
+- **Reply rescue (v1.9.21+, refined through v1.9.25)** — every Discord-inbound message sets a pending entry keyed by channel. If the target Claude Code session ends its turn (Stop hook) without having called `reply()`, the bridge reads that session's JSONL, extracts the latest assistant-text output, and posts it to Discord on the agent's behalf (footer `_📋 [bridge 兜底] …_`). No NAG injection (the v1.9.20 NAG concept was removed — it polluted context and frequently misfired). Only runs on `Stop`/`StopFailure`, not on `Notification`, to prevent duplicate posts.
+- **`[EOT]` end-of-thread marker** — agent appends `[EOT]` to its final reply when closing a conversation; receiving bridge drops rather than forwards, preventing two bots from ack-looping in `#agent-exchange`.
+
 ## Runtime commands
 
 ```bash
@@ -109,6 +124,13 @@ bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
+
+# Cross-Claudestra peer collaboration (v1.9+)
+bun src/manager.ts peer-status                                             # list peer bots + exposures + capabilities
+bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."          # default mode=direct (bridge-level routing)
+bun src/manager.ts peer-expose <agent> <peer> --mode via_master --purpose "..." # legacy: route through master
+bun src/manager.ts peer-revoke <agent> <peer|all>                          # revoke an exposure
+bun src/manager.ts invite-link --peer                                      # generate minimum-permission OAuth URL for peer
 
 # Versioning
 bun src/manager.ts version   # current version + whether an update is available

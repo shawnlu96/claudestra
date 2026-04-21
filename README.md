@@ -53,7 +53,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 - **Multi-agent lifecycle** — create, resume, kill, restart, list, and browse session history.
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
 - **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
-- **Cross-Claudestra collaboration (v1.8+)** — invite your friend's bot into specific channels (Discord permissions = access control). Their agents use `list_shared_channels` to discover your channels and `@mention` your bot to ask questions directly. Zero CLI or config; topic-based routing.
+- **Cross-Claudestra peer collaboration (v1.8+, redesigned v1.9+)** — invite your friend's bot; bridge automatically creates a `#agent-exchange` shared channel. Opt-in `peer-expose <agent> <peer>` selectively exposes specific local agents to each peer. v1.9.21+ `direct` mode: bridge routes peer requests **straight to the target agent, bypassing both masters** — 2-3 hops instead of 6. v1.9.22+ symmetric: you `@peer-bot` in `#agent-exchange` and peer's bridge routes directly to their agent; no master turns either way. v1.9.26+ disambiguation: multi-candidate routes fall back to Discord button picker (no LLM turn). Agents can call `send_to_agent({ target: "peer:alice.future_data" })` to cross-peer invoke by fully-qualified name.
 - **LLM-free management** — status / kill / restart / cron buttons execute directly on the Bridge, zero-token overhead and near-instant response.
 
 ### Discord UI
@@ -186,6 +186,13 @@ bun src/manager.ts permissions reset <name>
 # Bot invite URL (v1.8.1+)
 bun src/manager.ts invite-link           # owner — full permissions
 bun src/manager.ts invite-link --peer    # friend — minimum peer-scope permissions
+
+# Cross-Claudestra peer collaboration (v1.9+)
+bun src/manager.ts peer-status                                     # list peer bots / your exposures / their capabilities
+bun src/manager.ts peer-expose <agent> <peer|all> \
+  --purpose "..."                                                  # expose your agent to peer (mode defaults to "direct")
+bun src/manager.ts peer-expose <agent> <peer> --mode via_master    # legacy: route through master instead of direct
+bun src/manager.ts peer-revoke <agent> <peer|all>                  # revoke exposure (peer's capability auto-removed)
 
 # Low-level tmux control (for master to handle TUI modals bridge can't parse)
 bun src/manager.ts tmux-screenshot <agent>

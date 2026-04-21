@@ -1688,11 +1688,12 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       }
 
       // v1.9.26+: peer direct 消歧义按钮
-      if (id.startsWith("peer_select:")) {
+      if (id.startsWith("peer_select;")) {
         try {
           await interaction.deferUpdate().catch(() => {});
-          // format: peer_select:<local|foreign>:<agentName>:<origChannelId>:<origMsgId>
-          const [, kind, agentName, origChannelId, origMsgId] = id.split(":");
+          // format: peer_select;<local|foreign>;<agentName>;<origChannelId>;<origMsgId>
+          // 用 ; 不用 : 因为 agent 名字里允许 : —— NAME_BLOCKLIST_RE 有 ; 没 :
+          const [, kind, agentName, origChannelId, origMsgId] = id.split(";");
           if (agentName === "__cancel__") {
             await interaction.editReply({
               content: `🚫 已取消。原请求没有路由到任何 agent。想重新请，@ bot 再发一次（可以带 agent 名字走快路径）。`,
@@ -2250,13 +2251,13 @@ async function resolvePeerDirectCandidate(
     if (!ch || !("messages" in ch)) return { kind: "multi_unresolved" };
     // 每个候选一个 button：peer_select:<local|foreign>:<agent>:<origChannelId>:<origMsgId>
     const buttons = candidates.slice(0, 4).map((e) => ({
-      id: `peer_select:${kind}:${e.localAgent}:${postChannelId}:${originalMsgId}`,
+      id: `peer_select;${kind};${e.localAgent};${postChannelId};${originalMsgId}`,
       label: e.localAgent,
       style: "primary" as const,
       emoji: "🎯",
     }));
     buttons.push({
-      id: `peer_select:${kind}:__cancel__:${postChannelId}:${originalMsgId}`,
+      id: `peer_select;${kind};__cancel__;${postChannelId};${originalMsgId}`,
       label: "都不是 / 取消",
       style: "secondary" as any,
       emoji: "🚫",
