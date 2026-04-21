@@ -726,53 +726,57 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     meta.peer = "true";
     meta.peer_bot_name = msg.author.username;
     meta.peer_bot_id = msg.author.id;
+  }
 
-    // v1.9.4+: peer 请求到 master 时，bridge 主动把路由指令 + exposures 列表注入到 content 开头，
-    // 提高 master 按规矩路由（而不是自己答）的可能性。master 的 CLAUDE.md 也教过这条规则，
-    // 但 LLM 容易忽略；这个 header 每次都喂在消息最前面，几乎不可能绕过。
-    try {
-      const { readPeers } = await import("./lib/peers.js");
-      const peers = await readPeers();
-      // 匹配针对这个 peer 的 exposures + "all" exposures
-      const relevant = peers.exposures.filter(
-        (e) => e.peerBotId === msg.author.id || e.peerBotId === "all"
+  // v1.9.4+: 在 #agent-exchange 频道里发的任何消息（peer bot 或我方人类），都注入路由指令给 master。
+  // 这个频道本身就是"agent 之间交流"的设计，master 不该自己答。header 每次都在 content 最前面，
+  // 比纯 CLAUDE.md 指令难被 LLM 忽略。
+  try {
+    const { readPeers } = await import("./lib/peers.js");
+    const peers = await readPeers();
+    if (peers.localAgentExchangeId && channelId === peers.localAgentExchangeId) {
+      const senderKind = isPeer ? `peer bot ${msg.author.username}` : `用户 ${msg.author.username}`;
+      // 如果是 peer 发的：exposures 要匹配该 peer 或 "all"
+      // 如果是用户发的：所有 exposures 都可选（让 master 挑最合适的）
+      const relevant = peers.exposures.filter((e) =>
+        isPeer ? (e.peerBotId === msg.author.id || e.peerBotId === "all") : true
       );
-      if (relevant.length === 0) {
+      if (relevant.length === 0 && isPeer) {
         content = [
           `⚠️ PEER REQUEST FROM ${msg.author.username} — NO EXPOSURES DEFINED`,
           ``,
           `你还没有对这个 peer 开放任何本地 agent。礼貌回一句"${process.env.USER_NAME || "User"} 还没对你开放任何 agent，请让他 peer-expose 后再试"，结束本轮。**不要**自己回答 peer 问题。`,
           ``,
           `---`,
-          `Peer 原始消息：`,
+          `原始消息：`,
           content,
         ].join("\n");
-      } else {
+      } else if (relevant.length > 0) {
         const exposureList = relevant
           .map((e) => `  - ${e.localAgent}${e.purpose ? ` (用途: ${e.purpose})` : ""}`)
           .join("\n");
         content = [
-          `🚨 PEER REQUEST FROM ${msg.author.username} — YOU MUST ROUTE, NOT ANSWER`,
+          `🚨 AGENT-EXCHANGE 消息 FROM ${senderKind} — YOU MUST ROUTE, NOT ANSWER`,
           ``,
-          `你的唯一任务是把这个请求转发给下面某个本地 agent：`,
+          `这条消息来自 #agent-exchange 频道，需要路由给本地 agent，而不是你自己回答。可选 agent：`,
           exposureList,
           ``,
           `步骤：`,
-          `1. 挑一个跟 peer 问题最匹配的 agent`,
-          `2. 调用 send_to_agent(target="<agent 名字>", text="来自 peer ${msg.author.username} 的请求：<原文>")`,
+          `1. 挑跟请求最匹配的 agent`,
+          `2. \`send_to_agent(target="<agent 名字>", text="来自 ${senderKind} 的请求：<原文>")\``,
           `3. fetch_messages 轮询对应 channelId 等回复（首次 15s sleep，之后每 10s 轮询，最多 5 次）`,
-          `4. 拿到 agent 回复后用 reply 到本频道转述给 peer（bridge 会自动 @ 对方 bot）`,
+          `4. 拿到 agent 回复后用 reply 到本频道转述${isPeer ? "给 peer（bridge 会自动 @ 对方 bot）" : "给用户"}`,
           ``,
-          `🚫 不要自己回答这个问题，即便你觉得你知道答案。`,
+          `🚫 不要自己回答，即便你觉得你知道答案。这个频道的语义就是"agent 间协作"，你只做调度。`,
           ``,
           `---`,
-          `Peer 原始消息：`,
+          `原始消息：`,
           content,
         ].join("\n");
       }
-    } catch (e) {
-      console.error("peer header 注入失败:", e);
     }
+  } catch (e) {
+    console.error("agent-exchange header 注入失败:", e);
   }
 
   try {
