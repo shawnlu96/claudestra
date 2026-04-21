@@ -2483,9 +2483,12 @@ async function handleHookRequest(req: Request): Promise<Response> {
         }
       }
 
-      // v1.9.20+/v1.9.21: Stop hook reply 缺失兜底。master/agent 忘调 reply →
-      // 优先从 session jsonl 抽 assistant 文字代 post；抽不到再 NAG 强制再跑一轮。
-      await maybeRescueMissedReply(channelId, channelsToClear);
+      // v1.9.25+: rescue **只在 turn 真结束的 Stop / StopFailure 里跑**。
+      // Notification 每轮可能 fire 多次（工具调用中间 / 权限弹窗等），如果都跑
+      // 会导致同一段 jsonl text 被重复抽取 post 好几份。
+      if (event === "Stop" || event === "StopFailure" || event === "stop") {
+        await maybeRescueMissedReply(channelId, channelsToClear);
+      }
     }
 
     return new Response("ok");
