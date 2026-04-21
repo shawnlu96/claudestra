@@ -41,6 +41,7 @@ const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次 Claudestra 新版本
 const CLAUDE_UPDATE_CHECK_INTERVAL_MS = 7 * 24 * 60 * 60_000; // 每 1 周检查一次 Claude Code 更新
+const DEAD_AGENT_CHECK_INTERVAL_MS = 60_000; // 每 1 分钟扫一次 dead agent 自愈
 
 if (!CONTROL_CHANNEL_ID) {
   console.error("❌ 请设置 CONTROL_CHANNEL_ID（Discord #control 频道 ID）");
@@ -235,6 +236,7 @@ async function checkForUpdates() {
 // ============================================================
 
 let lastClaudeUpdateCheck = 0;
+let lastDeadAgentCheck = 0;
 
 async function runCmd(cmd: string[]): Promise<{ ok: boolean; out: string }> {
   const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
@@ -268,41 +270,45 @@ async function allAgentsIdle(): Promise<boolean> {
 }
 
 /**
- * 开机/pm2 拉起来时：registry 里 active 但没 tmux window 的 agent 都 resume 回来。
- * 依赖 manager.ts restart 的"检测到 dead agent 就 kill-window + new-window + resume"路径（v1.7.4+）。
+ * 扫 registry 找 "active 但 tmux window 丢了" 的 agent，对每个单独调
+ * `manager.ts restart <name>` 让它 resume 回来。
+ *
+ * 这个函数设计成可以周期性调用 —— 没有 dead 就是 no-op，有 dead 就每个
+ * 单独 restart（不churn 健康的 agent）。
+ *
+ * 参数 `source`: "boot"（开机首次自检）或 "periodic"（主循环定期检查）—
+ * 前者有 dead 时才 notify master 频道；后者静默处理，避免刷屏。
  */
-async function restoreDeadAgents() {
+async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
     const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
     if (!list.ok) return;
     const parsed = JSON.parse(list.out || "{}");
     const agents: any[] = parsed.agents || [];
-    const dead = agents.filter((a) => a.status === "active" && a.idle === false);
-    // 注意：manager list 对 dead agent 的 idle 字段是 false（因为 isAgentIdle 拿不到 pane）；
-    // 更可靠的判据是 "active 但在 tmux window 列表里没有"
-    const liveWindowNames = new Set(
-      agents.filter((a) => a.status === "active").map((a) => a.name)
-    );
-    const stillDead = dead.filter((a) => liveWindowNames.has(a.name)) || [];
-    // ↑ 注意 manager.ts list 会把 "registry active 但 window 丢了" 的记为 status="dead"，
-    // 所以 "active" 里都是还活着的。真正 dead 的在 status="dead" 条目里。
+    // manager.ts list 会把 "registry active 但 window 丢了" 的标为 status="dead"
     const reallyDead = agents.filter((a) => a.status === "dead");
     if (reallyDead.length === 0) {
-      console.log("🔁 开机自检：没有需要恢复的 dead agent");
+      if (source === "boot") console.log("🔁 开机自检：没有需要恢复的 dead agent");
       return;
     }
-    console.log(`🔁 开机自检：发现 ${reallyDead.length} 个 dead agent，调 manager.ts restart 恢复`);
-    try {
-      await bridgeRequest({
-        type: "reply",
-        chatId: CONTROL_CHANNEL_ID,
-        text: `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
-      });
-    } catch { /* non-critical */ }
-    await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
-    console.log("🔁 开机自检：restart 调用完成");
+    console.log(`🔁 [${source}] 发现 ${reallyDead.length} 个 dead agent：${reallyDead.map((a: any) => a.name).join(", ")}`);
+    if (source === "boot") {
+      try {
+        await bridgeRequest({
+          type: "reply",
+          chatId: CONTROL_CHANNEL_ID,
+          text: `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
+        });
+      } catch { /* non-critical */ }
+    }
+    // 对每个 dead agent 单独调 restart <name>，不 churn 健康的 agent
+    for (const agent of reallyDead) {
+      console.log(`🔁 [${source}] 重启 ${agent.name}...`);
+      await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name]);
+    }
+    console.log(`🔁 [${source}] restart 调用完成`);
   } catch (e) {
-    console.error("🔁 开机自检失败:", e);
+    console.error(`🔁 [${source}] 自检失败:`, e);
   }
 }
 
@@ -388,11 +394,12 @@ async function main() {
     console.log("✅ 大总管 session 已存在，进入监控模式");
   } else {
     await startMaster();
-    // master 是刚起的 → 说明可能是机器重启后 pm2 拉起来的
-    // 如果 registry 里有标记 active 但 tmux 没 window 的 agent（因为 tmux server 随重启一起死了），
-    // 主动调 manager.ts restart 把它们 resume 回来
-    setTimeout(() => restoreDeadAgents().catch(() => {}), 3000);
   }
+  // v1.9.13+: 无论 master 之前在不在，都跑一次开机自检。之前只在 "master 不在"
+  // 分支跑，导致 cmdUpdate 场景（pm2 restart launcher 时 tmux server 还活着，
+  // session 依然 exists）下任何 registry active 但 window 丢了的 agent 不会被
+  // 恢复 —— 用户看到的就是"Launcher 不拉"。
+  setTimeout(() => restoreDeadAgents("boot").catch(() => {}), 3000);
 
   // 持续监控
   while (true) {
@@ -430,6 +437,13 @@ async function main() {
     if (Date.now() - lastClaudeUpdateCheck >= CLAUDE_UPDATE_CHECK_INTERVAL_MS) {
       lastClaudeUpdateCheck = Date.now();
       checkClaudeCodeUpdate().catch((e) => console.error("Claude Code 更新检查异常:", e));
+    }
+
+    // v1.9.13+: 定期扫 registry 找 dead agent（active 但 tmux window 丢了的）
+    // 有就挨个 restart。没 dead 是 no-op，不 churn 健康 agent。
+    if (Date.now() - lastDeadAgentCheck >= DEAD_AGENT_CHECK_INTERVAL_MS) {
+      lastDeadAgentCheck = Date.now();
+      restoreDeadAgents("periodic").catch(() => {});
     }
 
     // 检查 Claude Code 是否还活着（不是退回了 shell）
