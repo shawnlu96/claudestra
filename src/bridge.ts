@@ -953,53 +953,66 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     const peers = await readPeers();
     const directExposures = peers.exposures
       .filter((e) => (e.peerBotId === msg.author.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct");
-    // 只 auto-pick 唯一一条（多条 → 交给 master 决策，避免误路由）
-    if (directExposures.length === 1) {
-      const targetExp = directExposures[0];
-      try {
-        const listResult = await runManager("list");
-        const agents = (listResult.agents || []) as any[];
-        const targetAgent = agents.find((a: any) =>
-          a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
-        );
-        if (targetAgent && targetAgent.status === "active") {
-          const agentClient = clients.get(targetAgent.channelId);
-          if (agentClient) {
-            // 改写 content：盖掉上面的 master agent-exchange header，插 direct header
-            content = [
-              `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
-              ``,
-              `来源：peer bot **${msg.author.username}** (id: \`${msg.author.id}\`) 在 #agent-exchange (\`${channelId}\`)`,
-              `你被 expose 的理由：${targetExp.purpose || "（无描述）"}`,
-              ``,
-              `**最终动作必须是**：\`reply(chat_id="${channelId}", text="<你的答案>")\``,
-              `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
-              `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
-              `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
-              `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${process.env.USER_NAME || "owner"} 或其 master" 也行`,
-              ``,
-              `---`,
-              `原始消息：`,
-              (msg.content || "").replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "").trim() + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
-            ].join("\n");
-            routeWs = agentClient.ws;
-            routeClientChannelId = agentClient.channelId;
-            directHeaderInjected = true;
-            console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
-            recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
-          } else {
-            console.log(`⚠️ PEER DIRECT fallback: agent ${targetAgent.name} 未连接 bridge，回落 master`);
-          }
-        } else if (targetAgent) {
-          console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} status=${targetAgent.status}，回落 master`);
-        } else {
-          console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} 在 registry 找不到，回落 master`);
-        }
-      } catch (e) {
-        console.error("PEER DIRECT routing 失败，回落 master:", e);
+
+    if (directExposures.length > 0) {
+      // v1.9.26+ D+C 消歧义
+      const decision = await resolvePeerDirectCandidate(
+        directExposures as any,
+        msg.content || "",
+        channelId,
+        msg.id,
+        msg.author.id,
+        "local",
+      );
+      if (decision.kind === "button_posted") {
+        // 按钮已发，此次不 forward —— 等用户点按钮
+        return;
       }
-    } else if (directExposures.length > 1) {
-      console.log(`🎯 PEER DIRECT 有 ${directExposures.length} 个候选（${directExposures.map((e) => e.localAgent).join("/")}），交给 master 决策`);
+      if (decision.kind === "selected") {
+        const targetExp = decision.exposure;
+        try {
+          const listResult = await runManager("list");
+          const agents = (listResult.agents || []) as any[];
+          const targetAgent = agents.find((a: any) =>
+            a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
+          );
+          if (targetAgent && targetAgent.status === "active") {
+            const agentClient = clients.get(targetAgent.channelId);
+            if (agentClient) {
+              // 改写 content：盖掉上面的 master agent-exchange header，插 direct header
+              content = [
+                `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
+                ``,
+                `来源：peer bot **${msg.author.username}** (id: \`${msg.author.id}\`) 在 #agent-exchange (\`${channelId}\`)`,
+                `你被 expose 的理由：${targetExp.purpose || "（无描述）"}`,
+                ``,
+                `**最终动作必须是**：\`reply(chat_id="${channelId}", text="<你的答案>")\``,
+                `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
+                `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
+                `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
+                `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${process.env.USER_NAME || "owner"} 或其 master" 也行`,
+                ``,
+                `---`,
+                `原始消息：`,
+                (msg.content || "").replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "").trim() + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
+              ].join("\n");
+              routeWs = agentClient.ws;
+              routeClientChannelId = agentClient.channelId;
+              directHeaderInjected = true;
+              console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
+              recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
+            } else {
+              console.log(`⚠️ PEER DIRECT fallback: agent ${targetAgent.name} 未连接 bridge，回落 master`);
+            }
+          } else if (targetAgent) {
+            console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} status=${targetAgent.status}，回落 master`);
+          } else {
+            console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} 在 registry 找不到，回落 master`);
+          }
+        } catch (e) {
+          console.error("PEER DIRECT routing 失败，回落 master:", e);
+        }
+      }
     }
   }
 
@@ -1674,6 +1687,49 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         return;
       }
 
+      // v1.9.26+: peer direct 消歧义按钮
+      if (id.startsWith("peer_select:")) {
+        try {
+          await interaction.deferUpdate().catch(() => {});
+          // format: peer_select:<local|foreign>:<agentName>:<origChannelId>:<origMsgId>
+          const [, kind, agentName, origChannelId, origMsgId] = id.split(":");
+          if (agentName === "__cancel__") {
+            await interaction.editReply({
+              content: `🚫 已取消。原请求没有路由到任何 agent。想重新请，@ bot 再发一次（可以带 agent 名字走快路径）。`,
+              components: [],
+            }).catch(() => {});
+            return;
+          }
+          // fetch original msg
+          const origCh = await discord.channels.fetch(origChannelId).catch(() => null);
+          if (!origCh || !("messages" in origCh)) {
+            await interaction.editReply({ content: `⚠️ 原频道已不可访问，取消`, components: [] }).catch(() => {});
+            return;
+          }
+          const origMsg = await (origCh as TextChannel).messages.fetch(origMsgId).catch(() => null);
+          if (!origMsg) {
+            await interaction.editReply({ content: `⚠️ 原消息已删除或找不到`, components: [] }).catch(() => {});
+            return;
+          }
+          const routed = await routePeerDirectWithAgent(origMsg, origChannelId, agentName, kind as "local" | "foreign");
+          if (routed) {
+            await interaction.editReply({
+              content: `🎯 已路由到 **${agentName}** 处理，稍等 agent 回复。`,
+              components: [],
+            }).catch(() => {});
+            recordMetric("peer_disambig_click", { channelId: origChannelId, meta: { agent: agentName, kind } });
+          } else {
+            await interaction.editReply({
+              content: `⚠️ 路由失败（agent **${agentName}** 可能不在线或 exposure 已变）`,
+              components: [],
+            }).catch(() => {});
+          }
+        } catch (e) {
+          console.error("peer_select 处理异常:", e);
+        }
+        return;
+      }
+
       // 管理按钮
       const mgmtResult = await handleMgmtButton(id, channelId, interaction.message?.id, discord);
       if (mgmtResult) {
@@ -2150,6 +2206,202 @@ async function handlePeerRouteToAgent(
   }
 }
 
+/**
+ * v1.9.26+ D+C 组合：peer direct 路由多候选消歧义。
+ *
+ * 从 candidates 里选一个：
+ *   1. 只有 1 个 → 直接选
+ *   2. 多个 → C: 看 msg 里是否提到某个 agent 名字，唯一匹配就选那个
+ *   3. 多个 + 关键词没唯一命中 → D: 在 channelId 频道发按钮让用户点，返回 "posted"
+ */
+type PeerDirectDecision =
+  | { kind: "selected"; exposure: Exposure }
+  | { kind: "button_posted" }
+  | { kind: "multi_unresolved" };
+
+type Exposure = { localAgent: string; peerBotId: string | "all"; purpose?: string; mode?: string; grantedAt: string };
+
+async function resolvePeerDirectCandidate(
+  candidates: Array<Exposure>,
+  content: string,
+  postChannelId: string,
+  originalMsgId: string,
+  senderId: string,
+  kind: "local" | "foreign",
+): Promise<PeerDirectDecision> {
+  if (candidates.length === 1) return { kind: "selected", exposure: candidates[0] };
+
+  // C: 关键词快路径
+  const lower = content.toLowerCase();
+  const nameMatched = candidates.filter((e) => {
+    const n = e.localAgent.toLowerCase();
+    // 完整词或带前缀 agent- 的匹配都算
+    return new RegExp(`\\b${n.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&")}\\b`).test(lower) ||
+      lower.includes(`agent-${n}`);
+  });
+  if (nameMatched.length === 1) {
+    console.log(`🎯 PEER DISAMBIG: C 关键词命中 → ${nameMatched[0].localAgent}`);
+    return { kind: "selected", exposure: nameMatched[0] };
+  }
+
+  // D: 按钮消歧义
+  try {
+    const ch = await discord.channels.fetch(postChannelId);
+    if (!ch || !("messages" in ch)) return { kind: "multi_unresolved" };
+    // 每个候选一个 button：peer_select:<local|foreign>:<agent>:<origChannelId>:<origMsgId>
+    const buttons = candidates.slice(0, 4).map((e) => ({
+      id: `peer_select:${kind}:${e.localAgent}:${postChannelId}:${originalMsgId}`,
+      label: e.localAgent,
+      style: "primary" as const,
+      emoji: "🎯",
+    }));
+    buttons.push({
+      id: `peer_select:${kind}:__cancel__:${postChannelId}:${originalMsgId}`,
+      label: "都不是 / 取消",
+      style: "secondary" as any,
+      emoji: "🚫",
+    });
+    const lines = [
+      `⚠️ <@${senderId}> 你这条请求匹配到 **${candidates.length}** 个候选 agent：`,
+      ``,
+      ...candidates.slice(0, 4).map((e) => `• **${e.localAgent}** — ${e.purpose || "（无描述）"}`),
+      ``,
+      `点一个按钮选一个，或者在原消息里带 agent 名字（比如 "用 ${candidates[0].localAgent} 帮我..."）再发一次走快路径。`,
+    ];
+    const sent = await (ch as TextChannel).send({
+      content: lines.join("\n"),
+      components: buildComponents([{ type: "buttons", buttons }]),
+    });
+    trackSentMessage(sent.id);
+    console.log(`🎯 PEER DISAMBIG: D 按钮发出（${candidates.length} 候选）at channel=${postChannelId}`);
+    recordMetric("peer_disambig_buttons", { channelId: postChannelId, meta: { candidateCount: String(candidates.length) } });
+    return { kind: "button_posted" };
+  } catch (e) {
+    console.error("PEER DISAMBIG 按钮发送失败:", e);
+    return { kind: "multi_unresolved" };
+  }
+}
+
+/**
+ * v1.9.26+ 按钮点击后用指定 agent 名重放 peer direct 路由。
+ * 跟 tryRouteForeignAgentExchange / messageCreate 里的 direct 分支共享
+ * 消息注入逻辑，但跳过消歧义（直接用指定 agent）。
+ */
+async function routePeerDirectWithAgent(
+  origMsg: DiscordMessage,
+  origChannelId: string,
+  agentName: string,
+  kind: "local" | "foreign",
+): Promise<boolean> {
+  try {
+    const { readPeers } = await import("./lib/peers.js");
+    const peers = await readPeers();
+
+    // 验证 exposure 存在（按 agent 名找）
+    const exp = peers.exposures.find((e) => e.localAgent === agentName || `agent-${e.localAgent}` === agentName);
+    if (!exp) {
+      console.log(`🎯 routePeerDirectWithAgent: 找不到 exposure for agent ${agentName}`);
+      return false;
+    }
+
+    // 找 peer bot（local: 就是 orig message 的 author；foreign: 是 peerBots[].agentExchangeId === origChannelId）
+    let peerBotName = "";
+    let peerBotId = "";
+    if (kind === "local") {
+      peerBotName = origMsg.author.username;
+      peerBotId = origMsg.author.id;
+    } else {
+      const peerBot = peers.peerBots.find((p) => p.agentExchangeId === origChannelId);
+      if (!peerBot) {
+        console.log(`🎯 routePeerDirectWithAgent (foreign): 找不到 peer bot for channel ${origChannelId}`);
+        return false;
+      }
+      peerBotName = peerBot.name;
+      peerBotId = peerBot.id;
+    }
+
+    // 找 agent ws
+    const listResult = await runManager("list");
+    const agents = (listResult.agents || []) as any[];
+    const targetAgent = agents.find((a: any) =>
+      a.name === exp.localAgent || a.name === `agent-${exp.localAgent}`
+    );
+    if (!targetAgent || targetAgent.status !== "active") return false;
+    const agentClient = clients.get(targetAgent.channelId);
+    if (!agentClient) return false;
+
+    // 附件
+    const attachmentPaths: string[] = [];
+    if (origMsg.attachments.size > 0) {
+      const inboxDir = `${TMP_DIR}/inbox`;
+      await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
+      for (const [, att] of origMsg.attachments) {
+        try {
+          const resp = await fetch(att.url);
+          const buf = await resp.arrayBuffer();
+          const filePath = `${inboxDir}/${att.id}_${att.name}`;
+          await Bun.write(filePath, buf);
+          attachmentPaths.push(filePath);
+        } catch { /* skip */ }
+      }
+    }
+
+    const rawText = (origMsg.content || "")
+      .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
+      .trim();
+    const senderKind = origMsg.author.bot ? `peer bot ${origMsg.author.username}` : `用户 ${origMsg.author.username}`;
+    const headerLabel = kind === "foreign" ? "(对称路由) " : "";
+    const content = [
+      `🤝 PEER DIRECT REQUEST ${headerLabel}— bridge 按用户按钮选择路由给你处理`,
+      ``,
+      `来源：${senderKind} (id: \`${origMsg.author.id}\`) 在 #agent-exchange (\`${origChannelId}\`)`,
+      `Peer bot: \`${peerBotName}\`（用户主动选中了 **${exp.localAgent}** 这个 agent）`,
+      `你被 expose 的理由：${exp.purpose || "（无描述）"}`,
+      ``,
+      `**最终动作必须是**：\`reply(chat_id="${origChannelId}", text="<你的答案>")\``,
+      `- bridge 自动 @ peer bot，你不用自己加 \`<@id>\``,
+      `- 如果是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
+      `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
+      ``,
+      `---`,
+      `原始消息：`,
+      rawText + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
+    ].join("\n");
+
+    const meta: Record<string, string> = {
+      chat_id: origChannelId,
+      message_id: origMsg.id,
+      user: origMsg.author.username,
+      user_id: origMsg.author.id,
+      ts: origMsg.createdAt.toISOString(),
+      peer_direct: "true",
+      peer_reply_to: origChannelId,
+      peer_bot_name: peerBotName,
+      peer_bot_id: peerBotId,
+    };
+    if (attachmentPaths.length > 0) {
+      meta.attachment_count = String(attachmentPaths.length);
+      meta.attachments = attachmentPaths.join(";");
+    }
+
+    pendingReplies.set(origChannelId, {
+      msgId: origMsg.id,
+      ts: Date.now(),
+      intendedReplyChannel: origChannelId,
+      targetWs: agentClient.ws,
+    });
+    lastMessageSource.set(agentClient.channelId, "agent");
+
+    agentClient.ws.send(JSON.stringify({ type: "message", content, meta }));
+    console.log(`🎯 PEER DIRECT (button): ${senderKind} → ${targetAgent.name} (kind=${kind})`);
+    recordMetric("peer_direct_route_button", { channelId: origChannelId, meta: { agent: targetAgent.name, kind } });
+    return true;
+  } catch (e) {
+    console.error("routePeerDirectWithAgent 异常:", e);
+    return false;
+  }
+}
+
 async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: string): Promise<boolean> {
   try {
     const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
@@ -2170,12 +2422,21 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
       return false;
     }
 
-    if (directExposures.length > 1) {
-      console.log(`🎯 SYMMETRIC: foreign #agent-exchange 有 ${directExposures.length} 个候选（${directExposures.map((e) => e.localAgent).join("/")}），交给默认流程（其实 default 会 drop）`);
+    // v1.9.26+ D+C 消歧义：多候选时先关键词匹配，不唯一就发按钮
+    const decision = await resolvePeerDirectCandidate(
+      directExposures,
+      msg.content || "",
+      channelId,
+      msg.id,
+      msg.author.id,
+      "foreign",
+    );
+    if (decision.kind === "button_posted") return true;
+    if (decision.kind === "multi_unresolved") {
+      console.log(`🎯 SYMMETRIC: ${directExposures.length} 候选无法消歧，按钮也没发成功，放弃`);
       return false;
     }
-
-    const targetExp = directExposures[0];
+    const targetExp = decision.exposure;
 
     // 3. 找 target agent 的 ws
     const listResult = await runManager("list");
