@@ -61,8 +61,8 @@ async function captureLast(lines = 10): Promise<string> {
   return tmuxCapture(MASTER_WINDOW, lines);
 }
 
-/** master 默认 effort（可 env 覆盖）。master 回消息频率高、多数是调度而非长推理，medium 就够且快。 */
-const MASTER_EFFORT = (process.env.MASTER_EFFORT || "medium").trim();
+/** master 默认 effort（可 env 覆盖）。master 多数是路由调度而非推理，low 最快响应、token 最省；要更"聪明"的 master 用 MASTER_EFFORT=medium/high 覆盖。 */
+const MASTER_EFFORT = (process.env.MASTER_EFFORT || "low").trim();
 
 /**
  * 在 master:0 窗口里启动 Claude Code 并等它就绪。
