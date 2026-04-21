@@ -780,10 +780,16 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   }
 
   // 记录触发源：peer bot / 其他 bot 的消息视为 "agent"（下游 Stop 不发完成 @）；人类视为 "user"
-  // client.channelId 是"处理这条消息的 Claude Code session 主要 channel"，比如 master 的 CONTROL。
-  // Stop hook 查这个 channel 的 source 决定要不要发 @。
+  // 必须写给所有共享同一个 ws 的 channel：
+  // 场景：peer 在 #agent-exchange 发消息，client.channelId=#agent-exchange，
+  // 但 master 的 Stop hook 会带 CONTROL_CHANNEL_ID 来查，如果只在 #agent-exchange
+  // 键上存 "agent"，Stop 一查 CONTROL 找不到就当 "user" 发 @。
   const triggerSource: "user" | "agent" = isPeer ? "agent" : "user";
-  lastMessageSource.set(client.channelId, triggerSource);
+  for (const [cid, info] of clients.entries()) {
+    if (info.ws === client.ws) {
+      lastMessageSource.set(cid, triggerSource);
+    }
+  }
 
   try {
     client.ws.send(JSON.stringify({ type: "message", content, meta }));
@@ -1799,21 +1805,39 @@ async function handleHookRequest(req: Request): Promise<Response> {
         } catch { /* non-critical */ }
       }
 
-      const statusMsgId = activeStatusMessages.get(channelId);
-      try {
-        const ch = await discord.channels.fetch(channelId);
-        if (ch && "messages" in ch) {
-          const textCh = ch as TextChannel;
-          // 若有状态消息则编辑
-          if (statusMsgId) {
-            try {
-              const sm = await textCh.messages.fetch(statusMsgId);
-              await sm.edit({ content: "✅ 完成", components: [] });
-            } catch { /* non-critical */ }
-            activeStatusMessages.delete(channelId);
+      // 收集所有需要清状态消息的 channel：Stop hook 本身的 channelId + 所有共享同一个 ws 的其他 channel
+      // （比如 master 的 #agent-exchange）。否则 peer 消息走 #agent-exchange 触发的"💭 大聪明思考中..."
+      // 按钮永远不会变成"✅ 完成"，interrupt 按钮一直挂着。
+      const channelsToClear = new Set<string>([channelId]);
+      const thisClientForStatus = clients.get(channelId);
+      if (thisClientForStatus) {
+        for (const [otherId, info] of clients.entries()) {
+          if (otherId !== channelId && info.ws === thisClientForStatus.ws) {
+            channelsToClear.add(otherId);
           }
-          // 发完成通知消息 + @ 用户（仅 Stop/StopFailure）
-          if (shouldNotify) {
+        }
+      }
+
+      // 把所有相关 channel 的"💭 思考中..."状态消息改成"✅ 完成"并去掉 interrupt 按钮
+      for (const cid of channelsToClear) {
+        const statusMsgId = activeStatusMessages.get(cid);
+        if (!statusMsgId) continue;
+        try {
+          const ch = await discord.channels.fetch(cid);
+          if (ch && "messages" in ch) {
+            const sm = await (ch as TextChannel).messages.fetch(statusMsgId);
+            await sm.edit({ content: "✅ 完成", components: [] });
+          }
+        } catch { /* non-critical */ }
+        activeStatusMessages.delete(cid);
+      }
+
+      // 发完成通知消息 + @ 用户（仅 Stop/StopFailure）
+      if (shouldNotify) {
+        try {
+          const ch = await discord.channels.fetch(channelId);
+          if (ch && "messages" in ch) {
+            const textCh = ch as TextChannel;
             const mention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
             if (mention) {
               await textCh.send(`${randomUmaDone()} ${mention}`);
@@ -1822,9 +1846,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
               recordMetric("agent_completed", { channelId });
             }
           }
+        } catch (e) {
+          console.error(`🏁 完成通知发送失败:`, e);
         }
-      } catch (e) {
-        console.error(`🏁 完成通知发送失败:`, e);
       }
     }
 
