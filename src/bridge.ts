@@ -575,7 +575,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   const channelId = msg.channelId;
 
   // v1.9.0+: PeerEvent 事件解析（grant/revoke 通告）— peer bot 发来的
-  // 如果这条消息正文里有 PeerEvent 标记，解析后更新本地 capabilities 并继续流程（让 master 也看到人类可读部分）
+  // 如果这条消息正文里有 PeerEvent 标记，解析后更新本地 capabilities 并主动 notify master（让用户知道对方新开放/撤销）
   if (msg.author.bot) {
     try {
       const { parsePeerEvent, addCapability, removeCapability } = await import("./lib/peers.js");
@@ -594,9 +594,29 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
               purpose: event.purpose,
             });
             console.log(`📥 学到能力: peer ${msg.author.tag} 开放 ${event.local}（${event.purpose ?? "无描述"}）`);
+            await notifyMaster(
+              [
+                `🤝 **对方 Claudestra 开放了新能力给你**`,
+                ``,
+                `来源：**${msg.author.tag}**（peer bot id \`${msg.author.id}\`）`,
+                `开放 agent：**${event.local}**`,
+                event.purpose ? `用途：${event.purpose}` : "",
+                ``,
+                `你的 \`~/.claude-orchestrator/peers.json\` 里 capabilities 已更新。`,
+                `以后本地 agent 遇到相关问题可以直接去 **#agent-exchange** 频道 @ ${msg.author.tag} 提问。`,
+              ].filter(Boolean).join("\n")
+            );
           } else if (event.kind === "revoke") {
             await removeCapability(msg.author.id, event.local);
             console.log(`📥 撤销能力: peer ${msg.author.tag} 收回 ${event.local}`);
+            await notifyMaster(
+              [
+                `🚫 **对方 Claudestra 撤销了能力**`,
+                ``,
+                `来源：**${msg.author.tag}**`,
+                `撤销 agent：**${event.local}**`,
+              ].join("\n")
+            );
           }
         }
       }
