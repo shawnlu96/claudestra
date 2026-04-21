@@ -348,27 +348,34 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
     },
     {
       name: "send_to_agent",
-      description: `Send a message to another agent by name. Use this for agent-to-agent collaboration.
+      description: `Send a message to another agent. Use for agent-to-agent collaboration — 包括跨 Claudestra peer 调用。
 
-IMPORTANT — 主动汇报义务（必读）：
-1. 发完消息后，你 **必须** 用 fetch_messages 轮询 targetChannelId 拿对方的回复（首次 sleep 10-15s，之后每 10s 一次，最多 5 次）。
-2. 拿到回复后，**必须** 用 reply 工具把"你对谁说了什么 + 对方的回复摘要"汇报给用户。用户不会自己去别的频道查。
-3. 如果对方超过 1 分钟没回复，也要用 reply 告诉用户"对方暂时没响应"，不要静默。
-4. 如果对方回复中又让你做别的事，按正常流程执行。
+**target 格式**（v1.9.22+ 新增 peer 语法）：
+- \`"agent_name"\` 或 \`"predict"\` — 本地 agent（自动补 "agent-" 前缀）
+- \`"peer:claudestra_ahh.future_data"\` — peer claudestra_ahh 的 future_data agent（长格式）
+- \`"future_data@claudestra_ahh"\` — 同上（短格式）
 
-收到 inter-agent 消息时（格式为 "[🤖 来自 xxx] ..."）：
-- 按对方的请求正常处理并用 reply 回到自己的频道
-- 同时用户也会看到这次互动，所以要清晰表明是在回应 xxx 的请求
+**什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`capabilities\` 字段，看看 peer 有没有人开放了相应能力。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
+
+**回复机制（v1.9.21+ 推回，不再轮询）**：
+- send_to_agent 返回的 \`pushBack: true\` 说明对方（本地 agent 或 peer agent）回复时 bridge 会自动把 text 推回你作为新消息 \`[🤖 xxx 回复] ...\`。**不要** fetch_messages 轮询。
+- 只要 end_turn 等那条 push 消息触发下一轮，读它、继续下一步就行。
+- 如果对方超过几分钟没回复，你收到任何消息都没有，可以主动用 reply 告诉用户"对方没响应"。
+
+收到 inter-agent 消息时（格式 \`[🤖 xxx 回复] ...\` 或 \`[🤖 来自 xxx] ...\`）：
+- 按对方的请求或答复处理
+- 最终一定要用 \`reply\` 把处理结果发到自己频道让用户看到（assistant 纯文字到不了 Discord）
 
 Examples:
-- send_to_agent({ target: "predict", text: "帮我分析 ~/data/sales.csv，返回摘要" })
-- send_to_agent({ target: "researcher", text: "X 的调研结果如何？" })`,
+- \`send_to_agent({ target: "predict", text: "分析 ~/data/sales.csv" })\` — 本地
+- \`send_to_agent({ target: "peer:claudestra_ahh.future_data", text: "查 SKYAI 的大户多空比" })\` — 跨 peer
+- \`send_to_agent({ target: "future_data@claudestra_ahh", text: "..." })\` — 跨 peer 短格式`,
       inputSchema: {
         type: "object" as const,
         properties: {
           target: {
             type: "string",
-            description: "Target agent name, e.g. 'predict'",
+            description: "Target agent name. Formats: 'predict' (local), 'peer:claudestra_ahh.future_data' (cross-peer long), 'future_data@claudestra_ahh' (cross-peer short)",
           },
           text: {
             type: "string",
