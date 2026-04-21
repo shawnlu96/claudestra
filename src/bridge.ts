@@ -1004,22 +1004,21 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v1.9.20+/v1.9.21: 挂起一个"这条消息需要 reply 回 Discord"的 pending 记录。
+  // v1.9.20+/v1.9.21/v1.9.23: 挂起一个"这条消息需要 reply 回 Discord"的 pending 记录。
   // Stop hook 触发时 bridge 会：
   //   (1) 从 session jsonl 捞最近 assistant 文字代 post 到 intendedReplyChannel
   //   (2) 没文字就 fallback 到 [SYSTEM NAG] 注入
-  // 只对 master 自己的两个 channel (CONTROL + #agent-exchange) 挂 pending。
-  // direct 模式下 intendedReplyChannel 依然是 #agent-exchange，但 targetWs 是 agent。
-  const exchangeId = await getLocalAgentExchangeId();
-  if (channelId === CONTROL_CHANNEL_ID || channelId === exchangeId) {
-    pendingReplies.set(channelId, {
-      msgId: msg.id,
-      ts: Date.now(),
-      nagged: false,
-      intendedReplyChannel: channelId,
-      targetWs: routeWs,
-    });
-  }
+  //
+  // v1.9.23+：**所有** Discord 入站消息都挂 pending，不再只挂 master 的两个 channel。
+  // 之前只覆盖 master 导致 agent 频道（用户直接找 agent 聊）agent 忘 reply 就没兜底。
+  // 现在任何 user / peer bot 发给 agent 的消息都保证 Discord 一定收到回复。
+  pendingReplies.set(channelId, {
+    msgId: msg.id,
+    ts: Date.now(),
+    nagged: false,
+    intendedReplyChannel: channelId,
+    targetWs: routeWs,
+  });
 
   try {
     routeWs.send(JSON.stringify({ type: "message", content, meta }));
@@ -2299,13 +2298,14 @@ async function maybeRescueMissedReply(stopChannelId: string, channelsToClear: Se
 
   const { findLatestJsonl, extractLatestAssistantText } = await import("./lib/jsonl-extract.js");
 
-  for (const cid of channelsToClear) {
-    const pending = pendingReplies.get(cid);
-    if (!pending) continue;
+  // v1.9.23+: 遍历**所有** pending，找 targetWs 匹配这次 Stop 的 ws 的。
+  // 之前只按 channelsToClear 的 key 查，会漏掉 foreign #agent-exchange 那种
+  // "pending.key 是外部 channel id，但 targetWs 是本地 agent ws"的情况。
+  const pendingForThisWs = [...pendingReplies.entries()].filter(
+    ([, p]) => p.targetWs === stopClient.ws
+  );
 
-    // 只处理 pending 的 targetWs 属于这次 Stop 的 ws —— 避免 Stop A 误清 Stop B 的 pending
-    if (pending.targetWs !== stopClient.ws) continue;
-
+  for (const [cid, pending] of pendingForThisWs) {
     if (now - pending.ts > STALE_MS) {
       pendingReplies.delete(cid);
       continue;
