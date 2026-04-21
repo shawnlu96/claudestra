@@ -55,6 +55,7 @@ import {
   tmuxRaw,
   parseModalOptions,
   detectArrowNavModal,
+  MASTER_SESSION,
   type ArrowNavKind,
 } from "./lib/tmux-helper.js";
 import {
@@ -1313,16 +1314,36 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         const targetChannelId = id.slice("interrupt:".length);
         console.log(`⚡ 打断按钮点击: channel=${targetChannelId}`);
         try {
-          const listResult = await runManager("list");
-          const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
-          if (!agent) {
-            console.error(`⚡ 打断失败：channel=${targetChannelId} 找不到对应 agent`);
-            await interaction.followUp({ content: "❌ 打断失败：找不到对应 agent", ephemeral: true }).catch(() => {});
-            return;
+          // master (CONTROL_CHANNEL_ID) 和 #agent-exchange 都 route 到 master:0，
+          // 但它们不在 registry.json 里 —— 直接认定目标是 master:0，不用查 registry
+          const controlId = process.env.CONTROL_CHANNEL_ID || "";
+          const { readPeers } = await import("./lib/peers.js");
+          const peers = await readPeers().catch(() => ({ localAgentExchangeId: "" } as any));
+          const exchangeId = (peers as any).localAgentExchangeId || "";
+          const isMasterChannel =
+            targetChannelId === controlId ||
+            (exchangeId && targetChannelId === exchangeId);
+
+          let targetWindow: string;
+          let agentLabel: string;
+          if (isMasterChannel) {
+            targetWindow = `${MASTER_SESSION}:0`;
+            agentLabel = "master";
+          } else {
+            const listResult = await runManager("list");
+            const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
+            if (!agent) {
+              console.error(`⚡ 打断失败：channel=${targetChannelId} 找不到对应 agent`);
+              await interaction.followUp({ content: "❌ 打断失败：找不到对应 agent", ephemeral: true }).catch(() => {});
+              return;
+            }
+            targetWindow = `master:${agent.name}`;
+            agentLabel = agent.name;
           }
-          console.log(`⚡ 发送 C-c 到 tmux window: master:${agent.name}`);
+
+          console.log(`⚡ 发送 C-c 到 tmux window: ${targetWindow}`);
           const proc = Bun.spawn(
-            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, "C-c"],
+            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", targetWindow, "C-c"],
             { stdout: "pipe", stderr: "pipe" }
           );
           const stderr = await new Response(proc.stderr).text();
@@ -1332,8 +1353,8 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             await interaction.followUp({ content: `❌ tmux 发送 C-c 失败: ${stderr}`, ephemeral: true }).catch(() => {});
             return;
           }
-          console.log(`⚡ C-c 已发送给 ${agent.name}`);
-          recordMetric("agent_interrupt", { channelId: targetChannelId, agent: agent.name, meta: { trigger: "button" } });
+          console.log(`⚡ C-c 已发送给 ${agentLabel}`);
+          recordMetric("agent_interrupt", { channelId: targetChannelId, agent: agentLabel, meta: { trigger: "button" } });
 
           const statusMsgId = activeStatusMessages.get(targetChannelId);
           if (statusMsgId) {
