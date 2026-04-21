@@ -1521,6 +1521,97 @@ async function cmdInviteLink(args: string[]) {
   });
 }
 
+async function cmdPeerExpose(localAgent: string, peer: string, purpose: string) {
+  const peers = await import("./lib/peers.js");
+  const data = await peers.readPeers();
+
+  // 解析 peer 标识：可以是 name 或 id 或 "all"
+  let peerBotId: string | "all" = "all";
+  if (peer !== "all") {
+    const match = data.peerBots.find((p) => p.id === peer || p.name === peer);
+    if (!match) {
+      output({
+        ok: false,
+        error: `没找到 peer "${peer}"。已知 peer bots: ${data.peerBots.map((p) => p.name).join(", ") || "(无)"}`,
+      });
+      return;
+    }
+    peerBotId = match.id;
+  }
+
+  const exp = await peers.addExposure({ localAgent, peerBotId, purpose });
+
+  // 通过 bridge HTTP 触发通告（bridge 会在 #agent-exchange 发一条带 PeerEvent 的消息）
+  const port = process.env.BRIDGE_PORT || "3847";
+  let bridgeOk = false;
+  try {
+    const resp = await fetch(`http://localhost:${port}/peer/announce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "grant", local: localAgent, peer: peerBotId, purpose }),
+    });
+    bridgeOk = resp.ok;
+  } catch { /* non-critical */ }
+
+  output({
+    ok: true,
+    exposure: exp,
+    broadcasted: bridgeOk,
+    message: bridgeOk
+      ? `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer}，并在 #agent-exchange 通告`
+      : `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer}，但通告失败（bridge 没运行？）peer 侧不会立即知道`,
+  });
+}
+
+async function cmdPeerRevoke(localAgent: string, peer: string) {
+  const peers = await import("./lib/peers.js");
+  const data = await peers.readPeers();
+
+  let peerBotId: string | "all" = "all";
+  if (peer !== "all") {
+    const match = data.peerBots.find((p) => p.id === peer || p.name === peer);
+    if (!match) {
+      output({ ok: false, error: `没找到 peer "${peer}"` });
+      return;
+    }
+    peerBotId = match.id;
+  }
+
+  const removed = await peers.removeExposure(localAgent, peerBotId);
+
+  const port = process.env.BRIDGE_PORT || "3847";
+  let bridgeOk = false;
+  try {
+    const resp = await fetch(`http://localhost:${port}/peer/announce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "revoke", local: localAgent, peer: peerBotId }),
+    });
+    bridgeOk = resp.ok;
+  } catch { /* non-critical */ }
+
+  output({
+    ok: true,
+    removed,
+    broadcasted: bridgeOk,
+    message: removed
+      ? `已撤销 ${localAgent} 对 ${peer === "all" ? "所有 peer" : peer} 的开放` + (bridgeOk ? "（peer 侧已通告）" : "（通告失败）")
+      : `之前没有这条 exposure`,
+  });
+}
+
+async function cmdPeerStatus() {
+  const peers = await import("./lib/peers.js");
+  const data = await peers.readPeers();
+  output({
+    ok: true,
+    localAgentExchangeId: data.localAgentExchangeId,
+    peerBots: data.peerBots,
+    exposures: data.exposures,
+    capabilities: data.capabilities,
+  });
+}
+
 async function cmdCost(args: string[]) {
   const { rollupJsonl, projectJsonlPath, findJsonlBySessionId, mergeByModel } =
     await import("./lib/jsonl-cost.js");
@@ -1900,6 +1991,35 @@ switch (cmd) {
 
   case "invite-link": {
     await cmdInviteLink(args);
+    break;
+  }
+
+  case "peer-expose": {
+    const [agent, peer, ...rest] = args;
+    if (!agent || !peer) {
+      output({ ok: false, error: '用法: peer-expose <agent> <peer-name|peer-id|all> [--purpose "..."]' });
+      break;
+    }
+    let purpose = "";
+    const pIdx = rest.findIndex((a) => a === "--purpose");
+    if (pIdx >= 0 && rest[pIdx + 1]) purpose = rest[pIdx + 1];
+    await cmdPeerExpose(agent, peer, purpose);
+    break;
+  }
+
+  case "peer-revoke": {
+    const [agent, peer] = args;
+    if (!agent || !peer) {
+      output({ ok: false, error: "用法: peer-revoke <agent> <peer-name|peer-id|all>" });
+      break;
+    }
+    await cmdPeerRevoke(agent, peer);
+    break;
+  }
+
+  case "peer-status":
+  case "peer-list": {
+    await cmdPeerStatus();
     break;
   }
 

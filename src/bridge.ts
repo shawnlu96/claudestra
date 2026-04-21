@@ -574,6 +574,37 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   const mentionedMe = msg.mentions.users.has(getBotUserId());
   const channelId = msg.channelId;
 
+  // v1.9.0+: PeerEvent 事件解析（grant/revoke 通告）— peer bot 发来的
+  // 如果这条消息正文里有 PeerEvent 标记，解析后更新本地 capabilities 并继续流程（让 master 也看到人类可读部分）
+  if (msg.author.bot) {
+    try {
+      const { parsePeerEvent, addCapability, removeCapability } = await import("./lib/peers.js");
+      const event = parsePeerEvent(msg.content || "");
+      if (event) {
+        console.log(`📥 PeerEvent 收到: ${JSON.stringify(event)} from ${msg.author.tag}`);
+        const myBotId = getBotUserId();
+        // event.peer 可以是我方 bot id 或 "all"；只处理针对我们的
+        if (event.peer === myBotId || event.peer === "all") {
+          if (event.kind === "grant") {
+            await addCapability({
+              peerBotId: msg.author.id,
+              peerBotName: msg.author.tag,
+              peerAgentExchangeId: event.exchange,
+              peerAgent: event.local,
+              purpose: event.purpose,
+            });
+            console.log(`📥 学到能力: peer ${msg.author.tag} 开放 ${event.local}（${event.purpose ?? "无描述"}）`);
+          } else if (event.kind === "revoke") {
+            await removeCapability(msg.author.id, event.local);
+            console.log(`📥 撤销能力: peer ${msg.author.tag} 收回 ${event.local}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("PeerEvent 处理失败:", e);
+    }
+  }
+
   // Peer bot（其他 Claudestra / 任意外部 bot）：必须 @ 我们才处理。
   // @ 是跨 agent 协作的强制语义 —— "这条消息给你，你要响应"。没 @ 就不转发给 agent，
   // 对方 agent 看到"没回应"就会知道自己忘了 @ 或 bridge 没自动补 @。
@@ -825,93 +856,153 @@ discord.on("channelUpdate", async (oldCh: any, newCh: any) => {
 discord.on("guildMemberAdd", async (member) => {
   if (!member.user?.bot) return;
   if (member.user.id === getBotUserId()) return; // 自己
-  console.log(`🎉 Peer bot 加入: ${member.user.tag} (${member.user.id}) in ${member.guild?.name}`);
+  if (member.guild.id !== DISCORD_GUILD_ID) return; // 不是我方主 guild 不处理
+  console.log(`🎉 Peer bot 加入: ${member.user.tag} (${member.user.id}) in ${member.guild.name}`);
 
-  // v1.8.5+: 自动 scope — 对所有现有频道加 "deny View Channel for peer bot's role" 的 override，
-  // 默认它什么频道都看不到。用户只需要在想共享的频道上手动把 View Channel 改成 allow。
-  // 需要我方 bot 有 MANAGE_ROLES + MANAGE_CHANNELS 权限。老用户邀请链接没给这俩就会失败，走文字提示兜底。
-  // 等一下再 scope，让 Discord 把 peer bot 的 managed role 同步完
+  // v1.9.0+: 新流程
+  // 1. 等 Discord 把 peer bot 的 managed role 同步完
   await Bun.sleep(1500);
-  const scopeResult = await autoScopePeerBot(member).catch((e) => ({
-    ok: false, reason: (e as Error).message, modified: 0, total: 0,
-  }));
+  // 2. 确保 #agent-exchange 频道存在（第一次 peer 加入会自动建）
+  const exchange = await ensureAgentExchangeChannel(member.guild);
+  // 3. 对这个 peer bot：deny 所有频道 view，但 allow #agent-exchange
+  const scope = await scopePeerToAgentExchange(member, exchange);
+  // 4. 记到 peers.json
+  const peersLib = await import("./lib/peers.js");
+  await peersLib.upsertPeerBot({
+    id: member.id,
+    name: member.user.tag,
+    guildId: member.guild.id,
+    agentExchangeId: exchange?.id,
+    firstSeen: new Date().toISOString(),
+  });
+  // 5. master 如果已经连着，把 #agent-exchange 挂到 master ws 上（让 master 收这里的消息）
+  if (exchange) {
+    const controlId = process.env.CONTROL_CHANNEL_ID || "";
+    const master = clients.get(controlId);
+    if (master) {
+      clients.set(exchange.id, { ws: master.ws, channelId: exchange.id, userId: master.userId });
+      console.log(`📌 #agent-exchange (${exchange.id}) 挂到 master ws`);
+    }
+  }
 
-  const scopeNote = scopeResult.ok
-    ? [
-        `✅ **我已自动把 ${scopeResult.modified}/${scopeResult.total} 个频道对这个 bot 设为不可见**`,
-        `（加了频道级 Deny View Channel override）`,
-        ``,
-        `要和它共享某个频道：右键该频道 → Edit Channel → Permissions → 找到这个 bot role → 把 View Channel 改成 ✓ allow 即可。`,
-      ].join("\n")
-    : [
-        `⚠️ **自动 scope 没成功**（${scopeResult.reason || "权限/API 问题"}），bot 现在能看到所有公开频道`,
-        ``,
-        `手动收紧：服务器设置 → Roles → 对方 bot 的 role → 关 View Channels；然后共享频道上加 allow override。`,
-        `或者升级邀请链接：跑 \`bun src/manager.ts invite-link\` 重新邀请你自己的 bot（带 Manage Roles 权限），下次 peer 加入就会自动 scope。`,
-      ].join("\n");
+  const scopeNote = !exchange
+    ? `⚠️ 没能在你 guild 里建或找到 #agent-exchange 频道（权限不足？），peer 通信无处可去`
+    : scope.ok
+      ? `✅ peer bot 现在只能看到 **#${exchange.name}**（id: \`${exchange.id}\`）一个频道，其他全部 deny`
+      : `⚠️ Scope 部分失败: ${scope.reason}. peer bot 可能还能看到一些其他频道，手工 deny 下。`;
 
   await notifyMaster(
     [
       `🎉 **跨 Claudestra 协作：对方 Claudestra 的 bot 刚刚加入你的服务器**`,
       ``,
-      `Peer bot：**${member.user.tag}**（id: \`${member.user.id}\`）`,
-      `服务器：${member.guild?.name ?? "(未知)"}`,
+      `Peer bot：**${member.user.tag}**（id: \`${member.id}\`）`,
+      `服务器：${member.guild.name}`,
       ``,
       scopeNote,
       ``,
-      `之后对方 agent 会通过他的 bot 在共享频道 @ 你的 bot 发起对话，你按正常流程响应即可。`,
+      `目前**没有任何本地 agent** 对这个 peer 开放。要开放，跑：`,
+      `  \`bun src/manager.ts peer-expose <agent-name> ${member.user.username} --purpose "..."\``,
+      `  或开放给所有 peer：\`bun src/manager.ts peer-expose <agent-name> all --purpose "..."\``,
     ].join("\n")
   );
 });
 
 /**
- * 对新加入的 peer bot 自动 scope — 对所有现有文字频道加一个频道级 DENY View Channel override。
- * 之后该 bot 看不到任何频道，除非用户在具体频道上明确加 ALLOW。
- *
- * Discord 权限模型不支持 role 级 DENY（role 只能 ALLOW），所以要在每个频道上放 override。
- * 需要我方 bot 有 Manage Roles + Manage Channels 权限才能改 channel permission overwrites。
+ * 确保 guild 里有一个 #agent-exchange 频道。
+ * 优先用 peers.json 里记录的 id；没有或找不到就新建一个。
  */
-async function autoScopePeerBot(
-  member: any
+async function ensureAgentExchangeChannel(guild: any): Promise<TextChannel | null> {
+  const { readPeers, setLocalAgentExchangeId } = await import("./lib/peers.js");
+  const peers = await readPeers();
+  const EXCHANGE_NAME = process.env.PEER_EXCHANGE_CHANNEL_NAME || "agent-exchange";
+
+  // 1. peers.json 里已有记录 → 确认频道还在
+  if (peers.localAgentExchangeId) {
+    try {
+      const ch = await guild.channels.fetch(peers.localAgentExchangeId).catch(() => null);
+      if (ch) return ch as TextChannel;
+    } catch { /* fall through to create */ }
+  }
+
+  // 2. 搜 guild 看有没有同名频道
+  const existing = guild.channels.cache.find(
+    (c: any) => c.type === 0 && c.name === EXCHANGE_NAME
+  );
+  if (existing) {
+    await setLocalAgentExchangeId(existing.id);
+    return existing as TextChannel;
+  }
+
+  // 3. 建新频道
+  try {
+    const me = guild.members.me;
+    if (!me?.permissions?.has("ManageChannels")) {
+      console.error(`⚠️ 我方 bot 缺 Manage Channels 权限，建不了 #${EXCHANGE_NAME}`);
+      return null;
+    }
+    const ch = await guild.channels.create({
+      name: EXCHANGE_NAME,
+      type: 0,
+      topic: "跨 Claudestra agent 交流专用频道。所有 peer bot 被自动限制只能看到这里。",
+    });
+    await setLocalAgentExchangeId(ch.id);
+    console.log(`✨ 建了 #${EXCHANGE_NAME} (${ch.id})`);
+    return ch as TextChannel;
+  } catch (e) {
+    console.error(`⚠️ 建 #${EXCHANGE_NAME} 失败:`, e);
+    return null;
+  }
+}
+
+/**
+ * 把 peer bot scope 到 #agent-exchange：所有其他文字频道 deny View，agent-exchange allow View/Send/ReadHistory。
+ */
+async function scopePeerToAgentExchange(
+  member: any,
+  exchange: TextChannel | null
 ): Promise<{ ok: boolean; modified: number; total: number; reason?: string }> {
   try {
     const guild = member.guild;
     if (!guild) return { ok: false, modified: 0, total: 0, reason: "没有 guild 上下文" };
 
-    // peer bot 的 managed role 就是它自己名字那个 role（每个 bot 加入会自动建一个）
-    // 注意：用 guild.roles.cache 不用 member.roles.cache，因为 guildMemberAdd 触发时
-    // member 的 roles 可能还没同步
     let peerBotRole = guild.roles.cache.find(
       (r: any) => r.managed && r.tags?.botId === member.id
     );
     if (!peerBotRole) {
-      // 再 fetch 一次 guild 的 roles，有可能 cache 还没填
       try { await guild.roles.fetch(); } catch { /* non-critical */ }
       peerBotRole = guild.roles.cache.find(
         (r: any) => r.managed && r.tags?.botId === member.id
       );
     }
     if (!peerBotRole) {
-      return { ok: false, modified: 0, total: 0, reason: "找不到 peer bot 的 managed role（可能 role 还在创建中，稍后再试）" };
+      return { ok: false, modified: 0, total: 0, reason: "找不到 peer bot 的 managed role" };
     }
 
-    // 检查我方 bot 是否有 Manage Roles 权限
     const me = guild.members.me;
     if (!me?.permissions?.has("ManageRoles") || !me.permissions.has("ManageChannels")) {
       return { ok: false, modified: 0, total: 0, reason: "我方 bot 缺 Manage Roles / Manage Channels 权限" };
     }
 
-    // 遍历文字频道 + categories（category 的 override 也会级联到子频道）
     const channels = guild.channels.cache.filter((c: any) =>
-      c.type === 0 /* Text */ || c.type === 4 /* Category */ || c.type === 5 /* Announcement */
+      c.type === 0 || c.type === 4 || c.type === 5
     );
     let modified = 0;
     for (const [, ch] of channels) {
       try {
-        await (ch as any).permissionOverwrites.edit(peerBotRole, { ViewChannel: false });
+        if (exchange && ch.id === exchange.id) {
+          // agent-exchange：allow View + Send + ReadHistory
+          await (ch as any).permissionOverwrites.edit(peerBotRole, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+          });
+        } else {
+          // 其他频道：deny View
+          await (ch as any).permissionOverwrites.edit(peerBotRole, { ViewChannel: false });
+        }
         modified++;
       } catch {
-        // 单个频道失败不阻塞；常见是我方 bot 在该频道权限不够
+        // 个别失败不阻塞
       }
     }
     return { ok: true, modified, total: channels.size };
@@ -1352,6 +1443,19 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 
+      // v1.9.0+: master 注册 CONTROL_CHANNEL_ID 时，顺便也把 #agent-exchange 指向同一个 ws
+      // 这样 peer 在 #agent-exchange 里说的话也由 master 处理（不额外建 session）
+      if (msg.channelId === (process.env.CONTROL_CHANNEL_ID || "")) {
+        try {
+          const { readPeers } = await import("./lib/peers.js");
+          const peers = await readPeers();
+          if (peers.localAgentExchangeId && peers.localAgentExchangeId !== msg.channelId) {
+            clients.set(peers.localAgentExchangeId, { ws, channelId: peers.localAgentExchangeId, userId: msg.userId });
+            console.log(`📌 也把 #agent-exchange (${peers.localAgentExchangeId}) 挂到 master ws`);
+          }
+        } catch { /* non-critical */ }
+      }
+
       // 启动 JSONL watcher（仅用于 tool use 流式展示，空闲检测由 hooks 处理）
       try {
         const regResult = await runManager("list");
@@ -1655,6 +1759,60 @@ const server = Bun.serve({
           } catch { /* non-critical */ }
         }
         await registerSlashCommands();
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: (e as Error).message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // v1.9.0+: peer-expose / peer-revoke CLI 通过这里触发广播（在 #agent-exchange 发带 PeerEvent 标记的消息）
+    if (url.pathname === "/peer/announce" && req.method === "POST") {
+      try {
+        const body = (await req.json().catch(() => ({}))) as {
+          kind: "grant" | "revoke";
+          local: string;
+          peer: string; // peer bot id 或 "all"
+          purpose?: string;
+        };
+        const { readPeers, encodePeerEvent } = await import("./lib/peers.js");
+        const peers = await readPeers();
+        if (!peers.localAgentExchangeId) {
+          return new Response(JSON.stringify({ ok: false, error: "没找到 #agent-exchange（还没有 peer 加入过？）" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const ch = await discord.channels.fetch(peers.localAgentExchangeId).catch(() => null);
+        if (!ch || !("messages" in ch)) {
+          return new Response(JSON.stringify({ ok: false, error: "agent-exchange 频道不存在" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const event = encodePeerEvent({
+          kind: body.kind,
+          local: body.local,
+          peer: body.peer,
+          purpose: body.purpose,
+          exchange: peers.localAgentExchangeId,
+        });
+        // 找目标 peer 的 @mention（如果是 "all" 就 @ 所有 peer bot）
+        let atMentions = "";
+        if (body.peer === "all") {
+          atMentions = peers.peerBots.map((p) => `<@${p.id}>`).join(" ");
+        } else {
+          atMentions = `<@${body.peer}>`;
+        }
+        const humanMsg =
+          body.kind === "grant"
+            ? `🤝 **开放 agent**: 我这边 **${body.local}** 对 ${atMentions} 开放${body.purpose ? `（${body.purpose}）` : ""}。可以直接在本频道 @ 我 bot 问这 agent 处理的话题。`
+            : `🚫 **撤销**: 我这边 **${body.local}** 对 ${atMentions} 的开放已撤回。`;
+        await (ch as TextChannel).send({ content: `${event}\n${humanMsg}` });
         return new Response(JSON.stringify({ ok: true }), {
           headers: { "Content-Type": "application/json" },
         });

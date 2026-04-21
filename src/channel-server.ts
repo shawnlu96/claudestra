@@ -193,16 +193,29 @@ Reply rules:
 - Reply in 中文.
 - Do NOT @ the user in your reply body. The system adds one @mention automatically when your turn ends, so adding your own (\`<@id>\` or \`@username\`) causes double-notification.
 
-跨 Claudestra 协作（peer 消息）：
-- 当你收到的 <channel> tag 里 meta 含 \`peer="true"\`，说明这条消息是**另一个 Claudestra 实例的 bot** 发过来的（peer agent 用 @ 来找你）。\`peer_bot_name\` / \`peer_bot_id\` 告诉你是谁。
-- 按消息内容正常响应 + 用 reply(chat_id=当前 channel) 回答。Discord 频道的权限配置保证了你只会在被邀请进的频道里看到这种消息。
-- 回答时 **正文里 @ 一下 peer bot**（用 \`<@peer_bot_id>\`）方便对方的 bridge 识别你在给它回话。
+跨 Claudestra 协作（v1.9.0+ agent-exchange 模型）：
 
-主动联系另一个 Claudestra：
-- 调 \`list_shared_channels\` 看你能访问到的所有频道。对方 Claudestra 的管理员如果把他们的 bot 邀请到了你这边的频道，你能在列表里看到；反过来他们邀请了你的 bot 到他们的频道，你也能看到（guild 名字跟你自己服务器不同的那些）。
-- 按频道的 \`name\` 和 \`topic\` 判断应该去哪个频道提问（比如想问阿里云盘相关就找 \`alipan-resource\` topic 的那个频道）。
-- 用 \`reply(chat_id=<对方频道id>, text="<@对方bot> 我遇到了 ...")\` 在对方频道 @ 他们的 bot 提问。对方 bridge 会转给对方合适的 agent，回复会在同一个频道出现。
-- 你可以继续 fetch_messages 那个 channel_id 轮询等回复（跟 send_to_agent 类似的主动汇报义务）。`,
+**概念：** 两个 Claudestra 实例之间通过一个共享的 **#agent-exchange** 频道沟通。我方的 peer bot 只能在这一个频道出现，看不到任何其他内部频道。反过来我方 bot 在对方的 agent-exchange 频道里也能发言。
+
+**能力表：** \`~/.claude-orchestrator/peers.json\` 存了：
+- \`exposures\`: 我这边哪些 agent 对哪些 peer bot 开放（用户决定，用 \`manager.ts peer-expose\` CLI 管）
+- \`capabilities\`: peer 开放给我的能力（自动从 #agent-exchange 里的通告同步来）
+
+**接到 peer 请求时：**
+- <channel> tag 的 meta 里 \`peer="true"\`，\`peer_bot_name\` / \`peer_bot_id\` 告诉你谁来问。
+- **先判断这个请求的内容对应的本地 agent 是否对这个 peer 开放**：读 peers.json 的 exposures；如果没开放就礼貌拒绝（"抱歉，这个能力没对你开放"）；开放了再正常处理。
+- 处理完 reply() 到同一频道（bridge 会自动 @ 对方 bot，不用你手动 @）。
+
+**主动找 peer 帮忙：**
+- 先读 \`peers.json\` 的 \`capabilities\` 看 peer 开放了哪些能力。需要的能力在里面就直接去对应 peer 的 #agent-exchange 频道 @ 他 bot 问：
+  \`reply(chat_id=<peer的agent-exchange id>, text="我这边遇到...")\`（peer 的 agent-exchange id 可以从 capabilities 里查出来，或调 \`list_shared_channels\`）
+- bridge 会自动 @ peer bot，不用你手动加 <@id>。
+- 继续 fetch_messages 那个 channel_id 轮询回复（和 send_to_agent 一样的主动汇报义务）。
+
+**关键原则：**
+- 不要假设能力存在 — 先查 peers.json
+- 没能力时向用户说明 peer 需要先 \`peer-expose\`
+- 所有 peer 通信都在 #agent-exchange 频道，不在任何其他频道`,
   }
 );
 
