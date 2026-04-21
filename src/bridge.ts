@@ -86,6 +86,29 @@ interface ClientInfo {
 
 const clients = new Map<string, ClientInfo>();
 const activeStatusMessages = new Map<string, string>();
+
+// v1.9.20+: 记 "master 这个 channel 收到入站消息但还没调 reply"。Stop hook
+// 触发时查这个 map —— 有记录且 nagged=false → 注一条 [SYSTEM NAG] 提示 master
+// 补 reply。reply handler 里每次 reply 到 master-related channel 就把 pending
+// 清掉表示"已回"。只对 master 自己的 channel（CONTROL + #agent-exchange）挂。
+interface PendingReply {
+  msgId: string;
+  ts: number;
+  nagged: boolean;
+}
+const pendingReplies = new Map<string, PendingReply>();
+const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
+
+let _cachedAgentExchangeId = "";
+async function getLocalAgentExchangeId(): Promise<string> {
+  if (_cachedAgentExchangeId) return _cachedAgentExchangeId;
+  try {
+    const { readPeers } = await import("./lib/peers.js");
+    const p = await readPeers();
+    _cachedAgentExchangeId = p.localAgentExchangeId || "";
+  } catch { /* non-critical */ }
+  return _cachedAgentExchangeId;
+}
 const typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const TYPING_SAFETY_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟
 
@@ -806,6 +829,15 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     if (info.ws === client.ws) {
       lastMessageSource.set(cid, triggerSource);
     }
+  }
+
+  // v1.9.20+: 挂起一个"这条消息需要 master reply"的 pending 记录。
+  // master 的 Stop hook 触发时会检查：如果这条消息之前没触发过 reply 到本频道，
+  // 就注一条 [SYSTEM NAG] 提醒 master 调 reply。解决 master 偶尔只在 assistant
+  // 正文写答案、不调 reply 工具导致 Discord 只收到空完成通知的问题。
+  // 只对 master 自己的两个 channel 生效（CONTROL + #agent-exchange）。
+  if (channelId === CONTROL_CHANNEL_ID || channelId === (await getLocalAgentExchangeId())) {
+    pendingReplies.set(channelId, { msgId: msg.id, ts: Date.now(), nagged: false });
   }
 
   try {
@@ -1598,6 +1630,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         text = await ensurePeerMentions(discord, msg.chatId, text || "");
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
+        // v1.9.20+: master 成功 reply 到一个 pending 的 channel → 清掉 pending，
+        // 免得 Stop hook 时还误以为 master 没回、发 nag。
+        pendingReplies.delete(msg.chatId);
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }
@@ -1768,6 +1803,62 @@ const lastCompletionSent = new Map<string, number>();
 const lastMessageSource = new Map<string, "user" | "agent">();
 const COMPLETION_DEDUPE_MS = 10_000; // 10 秒内不重复发完成通知
 
+/**
+ * v1.9.20+: Stop hook 触发时检查 —— master 这一轮有没有忘了 reply。
+ * channelsToClear 包含 Stop hook 的 channelId + 所有同 ws channel（master 在
+ * CONTROL 和 #agent-exchange 用同一个 ws）。对每个 pending 且 nagged=false 的
+ * channel 发一条 [SYSTEM NAG] 到 master 的 ws，强制再跑一轮让它调 reply。
+ *
+ * 安全网：只 nag 一次（nagged=true 粘住），避免 LLM 持续不反应时无限循环。
+ * pending 过 5 分钟还在就当超时丢掉，免得内存积累。
+ */
+async function maybeNagMissedReply(channelsToClear: Set<string>): Promise<void> {
+  const now = Date.now();
+  const STALE_MS = 5 * 60_000;
+
+  for (const cid of channelsToClear) {
+    const pending = pendingReplies.get(cid);
+    if (!pending) continue;
+
+    // 超时 pending → 直接丢弃，不再处理
+    if (now - pending.ts > STALE_MS) {
+      pendingReplies.delete(cid);
+      continue;
+    }
+
+    if (pending.nagged) continue; // 已经 nag 过一次，不再重复
+
+    const masterClient = clients.get(cid);
+    if (!masterClient) {
+      // ws 找不到 master 的连接 → 无法 nag，留 pending，等下一次 Stop（master 可能正在重连）
+      continue;
+    }
+
+    pending.nagged = true;
+    const nagContent = [
+      `⚠️ [SYSTEM] 你刚才处理了 Discord channel \`${cid}\` 里的入站消息，但这一轮没调 \`reply()\` 工具。`,
+      ``,
+      `纯文字 assistant 输出**不到** Discord —— 只写到你本地 tmux 终端，用户只会看到 Stop hook 的空 "✅ 完成" 通知。`,
+      ``,
+      `立刻补一条：\`reply(chat_id="${cid}", text="<你刚才想说的答案>")\``,
+      ``,
+      `（这是 bridge 自动检测到 reply 缺失触发的 NAG，只 nag 一次，如果这次你仍然不调 reply 就不再提醒。）`,
+    ].join("\n");
+
+    try {
+      masterClient.ws.send(JSON.stringify({
+        type: "message",
+        content: nagContent,
+        meta: { nag: "true", channel_id: cid, missed_msg_id: pending.msgId },
+      }));
+      console.log(`📢 NAG: master 忘了 reply 到 channel=${cid} (msg=${pending.msgId})，已注入 SYSTEM NAG 强制再跑一轮`);
+      recordMetric("master_nag_missed_reply", { channelId: cid, meta: { missedMsgId: pending.msgId } });
+    } catch (e) {
+      console.error(`📢 NAG 注入失败 channel=${cid}:`, e);
+    }
+  }
+}
+
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
     const body = await req.json() as { channelId: string; event: string };
@@ -1887,6 +1978,11 @@ async function handleHookRequest(req: Request): Promise<Response> {
           console.error(`🏁 完成通知发送失败:`, e);
         }
       }
+
+      // v1.9.20+: Stop hook 扫 reply 缺失兜底。master 处理了一条 Discord 消息但
+      // 没调 reply() 把答案发出去 → 注一条 [SYSTEM NAG] 到它 channel-server 的
+      // ws，强制再跑一轮让它补 reply。只 nag 一次，避免无限循环。
+      await maybeNagMissedReply(channelsToClear);
     }
 
     return new Response("ok");
