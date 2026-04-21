@@ -22,6 +22,9 @@ bun ../src/manager.ts resume <名称> <sessionId> [目录]
 # 销毁 agent
 bun ../src/manager.ts kill <名称>
 
+# 重命名 agent（tmux window + registry + Discord 频道名全同步）
+bun ../src/manager.ts rename <旧名称> <新名称>
+
 # 重启 agent（沿用原频道和 sessionId，不会新建频道！）
 # 不带名称则重启所有 agent
 bun ../src/manager.ts restart [名称]

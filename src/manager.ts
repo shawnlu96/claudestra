@@ -690,6 +690,77 @@ async function cmdKill(name: string) {
   });
 }
 
+/**
+ * 重命名一个 agent：tmux window 名 + registry key + Discord 频道名 + displayName 全部同步。
+ * 不重启 Claude Code（内部显示名会在下次 restart 时更新到新名）。
+ */
+async function cmdRename(oldName: string, newName: string) {
+  // 校验新名字合法 + 规范化
+  try {
+    assertValidNewName(newName);
+  } catch (e) {
+    output({ ok: false, error: (e as Error).message });
+    return;
+  }
+  const oldTmux = normalizeName(oldName);
+  const newTmux = normalizeName(newName);
+
+  if (oldTmux === newTmux) {
+    output({ ok: false, error: "新旧名字相同，没啥可改的" });
+    return;
+  }
+
+  const reg = await loadRegistry();
+  const info = reg.agents[oldTmux];
+  if (!info) {
+    output({ ok: false, error: `registry 里没有 ${oldTmux}` });
+    return;
+  }
+  if (reg.agents[newTmux]) {
+    output({ ok: false, error: `${newTmux} 已存在，换个名字` });
+    return;
+  }
+
+  const newChannelName = newTmux.replace(AGENT_PREFIX, "");
+  const steps: any[] = [];
+
+  // 1. tmux window rename（只有 window 还在的时候才做）
+  if (await windowExists(oldTmux)) {
+    const r = await tmuxRaw(["rename-window", "-t", windowTarget(oldTmux), newTmux]).catch((e) => `error: ${e.message}`);
+    steps.push({ step: "tmux rename-window", ok: !r || !r.toString().startsWith("error"), raw: r || "ok" });
+  } else {
+    steps.push({ step: "tmux rename-window", ok: false, skipped: "tmux window 不存在" });
+  }
+
+  // 2. registry 迁移
+  reg.agents[newTmux] = { ...info, displayName: newChannelName };
+  delete reg.agents[oldTmux];
+  await saveRegistry(reg);
+  steps.push({ step: "registry", ok: true });
+
+  // 3. Discord 频道 rename
+  if (info.channelId) {
+    try {
+      await bridgeRequest({ type: "rename_channel", channelId: info.channelId, name: newChannelName });
+      steps.push({ step: "discord channel rename", ok: true });
+    } catch (e) {
+      steps.push({ step: "discord channel rename", ok: false, reason: (e as Error).message });
+    }
+  }
+
+  // 4. 通知 bridge 刷 skill registry（agent 名字变了，skill 映射的 agentName 要同步）
+  await triggerSkillsRescan("full");
+
+  output({
+    ok: true,
+    from: oldTmux,
+    to: newTmux,
+    channelName: newChannelName,
+    steps,
+    hint: "Claude Code 内部 session 的显示名会在下次 restart 时更新到新名（现在仍是旧的，不影响功能）。",
+  });
+}
+
 // ============================================================
 // 优雅退出 + 重启
 // ============================================================
@@ -1918,6 +1989,16 @@ switch (cmd) {
     break;
   }
 
+  case "rename": {
+    const [oldName, newName] = args;
+    if (!oldName || !newName) {
+      output({ ok: false, error: "用法: rename <old-name> <new-name>" });
+      break;
+    }
+    await cmdRename(oldName, newName);
+    break;
+  }
+
   case "list":
     await cmdList();
     break;
@@ -2085,6 +2166,7 @@ switch (cmd) {
         "create <name> <dir> [purpose]  — 新建 agent",
         "resume <name> <sessionId> [dir] — 恢复历史 session",
         "kill <name>                     — 销毁 agent",
+        "rename <old-name> <new-name>    — 重命名 agent（tmux window + registry + Discord 频道）",
         "restart [name]                  — 重启 agent（不指定则重启所有）",
         "list                            — 列出所有 agent",
         "sessions [search]               — 浏览历史 Claude Code 会话",

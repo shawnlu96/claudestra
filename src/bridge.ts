@@ -1534,6 +1534,18 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "rename_channel": {
+      try {
+        const ch = await discord.channels.fetch(msg.channelId);
+        if (!ch || !("setName" in ch)) throw new Error("channel 不存在或不可重命名");
+        await (ch as TextChannel).setName(msg.name);
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
     case "list_channels": {
       // 列出本 bot 能看到的所有文字频道。用于跨 Claudestra 场景：
       // peer 的 agent 自己看我这边有哪些频道、topic 是什么、该去哪里 @ 我的 bot。
