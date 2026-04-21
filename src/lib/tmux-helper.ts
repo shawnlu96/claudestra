@@ -231,6 +231,26 @@ export async function masterWindowExists(): Promise<boolean> {
   return out.split("\n").some((w) => w.trim() === "0");
 }
 
+/**
+ * tmux window 里是不是真的跑着一个 child 进程（判断 Claude Code 还活着）。
+ *
+ * 原理：window pane 的 `#{pane_pid}` 是那个终端的 shell PID（zsh/bash）。
+ * Claude Code 作为子进程跑。`pgrep -P <shell_pid>` 如果有输出就是有子进程
+ * （Claude Code 或别的），空输出就是 shell 在 idle prompt → Claude 已死。
+ *
+ * 完全不看 pane 文本，不会被 prompt 主题 / 版本号覆盖等 tmux title tricks 骗到。
+ * 返回 null 表示查不到 pane pid（window 本身就不存在），调用方按需处理。
+ */
+export async function windowHasChildProcess(target: string): Promise<boolean | null> {
+  const pidRaw = await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_pid}"]);
+  const pid = parseInt(pidRaw.trim().split("\n")[0] || "", 10);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  const proc = Bun.spawn(["pgrep", "-P", String(pid)], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.trim().length > 0;
+}
+
 /** 确保 tmux socket 目录存在 */
 export async function ensureSocketDir(): Promise<void> {
   await Bun.spawn(["mkdir", "-p", "/tmp/claude-orchestrator"]).exited;

@@ -12,6 +12,7 @@ import {
   tmuxRaw,
   masterSessionExists,
   masterWindowExists,
+  windowHasChildProcess,
   ensureSocketDir,
   isIdle as tmuxIsIdle,
   tmuxCapture,
@@ -437,23 +438,28 @@ async function main() {
       restoreDeadAgents("periodic").catch(() => {});
     }
 
-    // 检查 Claude Code 是否还活着（不是退回了 shell）
-    // 与 manager.ts isAtShell 保持一致：先排除 Claude Code TUI 标志，再识别 shell prompt。
-    // 支持两类 prompt：
-    //   (1) 结尾是 prompt 字符 —— $ % # > ❯ » λ（bash/zsh/starship/pure/lambda）
-    //   (2) oh-my-zsh robbyrussell 主题 —— 形如 "➜  dir git:(branch) ✗"，结尾不一定是 prompt 字符，
-    //       但一定能看到 "➜<空格><路径>" 这个典型片段（v1.9.15 修：peer 就是这个主题挂掉的）
-    const nonEmpty = pane.split("\n").filter((l) => l.trim());
-    const tail = nonEmpty.slice(-5).join("\n");
-    const hasClaudeTui = /bypass permissions|esc to interrupt/i.test(tail);
-    const lastLine = nonEmpty.pop() || "";
-    const atShell =
-      !hasClaudeTui &&
-      (/[%$#>❯»λ]\s*$/.test(lastLine) || /➜\s+\S/.test(lastLine));
-    if (atShell) {
-      console.log("💀 大总管退回了 shell，正在重新启动 Claude Code...");
-      // 复用 bringUpClaudeInMasterWindow —— 自带 effort 设置 + 弹窗自动确认，
-      // update 流程（cmdUpdate 发 /exit 把 Claude 退回 shell）也会走到这条路径。
+    // 检查 Claude Code 是否还活着。
+    // v1.9.19+ 优先用进程层检查：master:0 pane 的 shell 有没有子进程。
+    // Claude Code 是 shell 的子进程 —— 有子就活着，没子就挂了。完全不看
+    // pane 文本，和用户 prompt 主题 / Claude 改 tmux title 都无关。
+    // 查不到（null，pane 本身就没了）fallback 回文本检测。
+    const claudeAlive = await windowHasChildProcess(MASTER_WINDOW);
+    let deadAtShell: boolean;
+    if (claudeAlive === null) {
+      // 进程检查失败（window 丢了？），用文本兜底
+      const nonEmpty = pane.split("\n").filter((l) => l.trim());
+      const tail = nonEmpty.slice(-5).join("\n");
+      const hasClaudeTui = /bypass permissions|esc to interrupt/i.test(tail);
+      const lastLine = nonEmpty.pop() || "";
+      deadAtShell =
+        !hasClaudeTui &&
+        (/[%$#>❯»λ]\s*$/.test(lastLine) || /➜\s+\S/.test(lastLine));
+    } else {
+      deadAtShell = !claudeAlive;
+    }
+
+    if (deadAtShell) {
+      console.log("💀 大总管退回了 shell（无子进程），正在重新启动 Claude Code...");
       await bringUpClaudeInMasterWindow();
     }
   }
