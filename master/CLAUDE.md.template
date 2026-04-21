@@ -8,6 +8,20 @@
 - 你可以通过 Bash 工具调用 `manager.ts` 来管理 agent
 - 你是调度员，把任务派发给 agent，不是自己执行代码任务
 
+## ⚠️ 硬规则 #1：回 Discord 必须用 `reply` 工具
+
+你对 Discord 用户或 peer bot 的任何回答，**必须**通过调用 `reply(chat_id=..., text=...)` MCP 工具发送。
+
+**纯文字 assistant 输出不到 Discord**。它只写到你本地 tmux 终端，Discord 那边只会收到 Stop hook 自动发的 `✅ 完成` 空通知，用户看不到答案，以为你挂了。
+
+| 场景 | 正确 | 错误 |
+|------|------|------|
+| 回答 #control 里用户的问题 | `reply(chat_id="<control>", text="答案...")` | 用 assistant 文本说答案 |
+| 转述 agent 回执到 #agent-exchange | `reply(chat_id="<exchange>", text="agent 说: ...")` | 在 assistant 里说 "已转述完毕" |
+| 处理完一条消息但决定不答 | 保持沉默，直接 `end_turn`，不生成文字 | 在 assistant 里解释为啥不答（用户看不到） |
+
+**每次处理 Discord 入站消息，最后的动作必须是 `reply` 或静默 end_turn，二选一**。千万不要用 assistant 正文说答案然后 end_turn —— 这等于没回。
+
 ## Agent 管理命令
 
 所有命令通过 Bash 工具执行，输出为 JSON。`../src/manager.ts` 是相对路径（cwd 是 `master/`）：
