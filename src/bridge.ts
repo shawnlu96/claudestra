@@ -108,7 +108,6 @@ const activeStatusMessages = new Map<string, string>();
 interface PendingReply {
   msgId: string;
   ts: number;
-  nagged: boolean;
   intendedReplyChannel: string;
   targetWs: ServerWebSocket<unknown>;
 }
@@ -1004,18 +1003,14 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v1.9.20+/v1.9.21/v1.9.23: 挂起一个"这条消息需要 reply 回 Discord"的 pending 记录。
-  // Stop hook 触发时 bridge 会：
-  //   (1) 从 session jsonl 捞最近 assistant 文字代 post 到 intendedReplyChannel
-  //   (2) 没文字就 fallback 到 [SYSTEM NAG] 注入
-  //
-  // v1.9.23+：**所有** Discord 入站消息都挂 pending，不再只挂 master 的两个 channel。
-  // 之前只覆盖 master 导致 agent 频道（用户直接找 agent 聊）agent 忘 reply 就没兜底。
-  // 现在任何 user / peer bot 发给 agent 的消息都保证 Discord 一定收到回复。
+  // v1.9.24+: 挂起一个 "这条消息需要 reply 回 Discord" 的 pending 记录。
+  // Stop hook 触发时 bridge 从 session jsonl 捞最近 assistant 文字代 post 到
+  // intendedReplyChannel。捞不到就放弃（v1.9.20/21 的 [SYSTEM NAG] 方案被
+  // owner 拒绝了 —— 太吵、会触发额外 turn，得不偿失）。
+  // 覆盖**所有** Discord 入站消息（v1.9.23 起），不再只 master。
   pendingReplies.set(channelId, {
     msgId: msg.id,
     ts: Date.now(),
-    nagged: false,
     intendedReplyChannel: channelId,
     targetWs: routeWs,
   });
@@ -1803,6 +1798,13 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "reply": {
+      // v1.9.24+: 在任何 await 之前先删 pending。这样即使 Stop hook 在我们还在
+      // 打 Discord API 的时候到达，rescue 也不会误触发（认定"agent 没 reply"）。
+      // 代价：Discord send 如果失败，rescue 也不再兜 —— 但对"用户看不到回复"
+      // 这个失败模式来说，rescue 从 jsonl 抽的也是同样的 text，再 post 还是会失败，
+      // 无论如何这条是 Discord API 层的问题，rescue 救不了。
+      pendingReplies.delete(msg.chatId);
+
       try {
         let text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
         // v1.8.9+: 跨 Claudestra 协作必须 @ peer bot 才能让对方 bridge 可靠识别
@@ -1811,9 +1813,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         text = await ensurePeerMentions(discord, msg.chatId, text || "");
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
-
-        // v1.9.20+: 成功 reply 到 pending 的 intendedReplyChannel → 清 pending
-        pendingReplies.delete(msg.chatId);
 
         // v1.9.21+ send_to_agent 推回机制：
         // 如果 reply 的 chat_id 正好是某个 pending send_to_agent 的 target agent 的
@@ -2289,7 +2288,15 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-async function maybeRescueMissedReply(stopChannelId: string, channelsToClear: Set<string>): Promise<void> {
+/**
+ * v1.9.24: Stop hook 触发时从 session jsonl 抽最近一条 assistant 文字代
+ * post 到 intendedReplyChannel。**没有 NAG 兜底**（v1.9.20/21 的 NAG 方案被
+ * owner 拒了 —— 触发额外 turn、污染 context、骚扰 agent，效果没比抽取好）。
+ *
+ * 失败路径（抽不到 text 等）就放弃 + 清 pending，沉默丢失那条消息，
+ * 不再打扰 agent。
+ */
+async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: Set<string>): Promise<void> {
   const now = Date.now();
   const STALE_MS = 5 * 60_000;
 
@@ -2298,9 +2305,8 @@ async function maybeRescueMissedReply(stopChannelId: string, channelsToClear: Se
 
   const { findLatestJsonl, extractLatestAssistantText } = await import("./lib/jsonl-extract.js");
 
-  // v1.9.23+: 遍历**所有** pending，找 targetWs 匹配这次 Stop 的 ws 的。
-  // 之前只按 channelsToClear 的 key 查，会漏掉 foreign #agent-exchange 那种
-  // "pending.key 是外部 channel id，但 targetWs 是本地 agent ws"的情况。
+  // 遍历所有 pending 找 targetWs 匹配这次 Stop 的 ws 的（包括 foreign
+  // #agent-exchange 场景里 pending.key 是外部 channel id、targetWs 是本地 ws 的）。
   const pendingForThisWs = [...pendingReplies.entries()].filter(
     ([, p]) => p.targetWs === stopClient.ws
   );
@@ -2311,55 +2317,48 @@ async function maybeRescueMissedReply(stopChannelId: string, channelsToClear: Se
       continue;
     }
 
-    // 1. 优先抽 jsonl 代 post
-    let rescued = false;
-    if (stopClient.cwd) {
+    // 确定 cwd：register 带来的优先，没有就从 registry 查，master 用 env
+    let effectiveCwd = stopClient.cwd || "";
+    if (!effectiveCwd) {
       try {
-        const jsonlPath = await findLatestJsonl(stopClient.cwd);
-        if (jsonlPath) {
-          const extracted = await extractLatestAssistantText(jsonlPath, { sinceMs: pending.ts - 5_000 });
-          if (extracted && extracted.trim().length > 0) {
-            const rescuedText = `${extracted.trim()}\n\n_📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送_`;
-            try {
-              const textWithMentions = await ensurePeerMentions(discord, pending.intendedReplyChannel, rescuedText);
-              await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
-              console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
-              recordMetric("reply_rescue_posted", { channelId: pending.intendedReplyChannel, meta: { chars: String(extracted.length), source: stopClient.channelId } });
-              pendingReplies.delete(cid);
-              rescued = true;
-            } catch (e) {
-              console.error(`🆘 RESCUE post 失败 channel=${pending.intendedReplyChannel}:`, e);
-            }
-          }
+        const listResult = await runManager("list");
+        const agentRecord = (listResult.agents || []).find((a: any) => a.channelId === stopClient.channelId);
+        effectiveCwd = agentRecord?.cwd || agentRecord?.project || "";
+        if (effectiveCwd) effectiveCwd = effectiveCwd.replace(/^~/, process.env.HOME || "~");
+        if (!effectiveCwd && stopClient.channelId === CONTROL_CHANNEL_ID) {
+          effectiveCwd = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
         }
-      } catch (e) {
-        console.error(`🆘 RESCUE jsonl 抽取异常 cwd=${stopClient.cwd}:`, e);
-      }
+      } catch { /* non-critical */ }
     }
 
-    if (rescued) continue;
-    if (pending.nagged) continue; // 已 NAG 过，不再重复
-
-    // 2. 捞不到文字（比如这一轮纯 tool_use 没产出 assistant text）→ fallback NAG
-    pending.nagged = true;
-    const nagContent = [
-      `⚠️ [SYSTEM] 你刚才处理了 Discord channel \`${cid}\` 里的入站消息，但这一轮既没调 \`reply()\` 工具、也没产出文字答案（bridge 尝试从 jsonl 抽取代你 post，但没找到 text 内容）。`,
-      ``,
-      `立刻补一条：\`reply(chat_id="${cid}", text="<你的答案或'无法处理'的说明>")\``,
-      ``,
-      `（这是 bridge 自动检测到 reply 缺失触发的 NAG，只 nag 一次，再不调就放弃。）`,
-    ].join("\n");
+    if (!effectiveCwd) {
+      console.log(`🆘 RESCUE skip: 无法确定 channel=${stopClient.channelId} 的 cwd`);
+      pendingReplies.delete(cid);
+      continue;
+    }
 
     try {
-      stopClient.ws.send(JSON.stringify({
-        type: "message",
-        content: nagContent,
-        meta: { nag: "true", channel_id: cid, missed_msg_id: pending.msgId },
-      }));
-      console.log(`📢 NAG: 没抽到 text，发 SYSTEM NAG 给 channel=${cid} (msg=${pending.msgId})`);
-      recordMetric("master_nag_missed_reply", { channelId: cid, meta: { missedMsgId: pending.msgId } });
+      const jsonlPath = await findLatestJsonl(effectiveCwd);
+      if (!jsonlPath) {
+        console.log(`🆘 RESCUE skip: cwd ${effectiveCwd} 下找不到 jsonl`);
+        pendingReplies.delete(cid);
+        continue;
+      }
+      const extracted = await extractLatestAssistantText(jsonlPath, { sinceMs: pending.ts - 5_000 });
+      if (!extracted || !extracted.trim()) {
+        console.log(`🆘 RESCUE skip: jsonl 找到但没抽出 text（可能本轮纯 tool_use 无文字）`);
+        pendingReplies.delete(cid);
+        continue;
+      }
+      const rescuedText = `${extracted.trim()}\n\n_📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送_`;
+      const textWithMentions = await ensurePeerMentions(discord, pending.intendedReplyChannel, rescuedText);
+      await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
+      console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
+      recordMetric("reply_rescue_posted", { channelId: pending.intendedReplyChannel, meta: { chars: String(extracted.length), source: stopClient.channelId } });
+      pendingReplies.delete(cid);
     } catch (e) {
-      console.error(`📢 NAG 注入失败 channel=${cid}:`, e);
+      console.error(`🆘 RESCUE 异常 cwd=${effectiveCwd}:`, e);
+      pendingReplies.delete(cid);
     }
   }
 }
