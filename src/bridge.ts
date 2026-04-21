@@ -739,19 +739,53 @@ discord.on("channelCreate", async (channel) => {
   );
 });
 
-// 我方 bot 在外部 guild 失去频道访问（对方撤回 allow 或删了频道）
+// 我方 bot 在外部 guild 失去频道访问（频道被删了）
 discord.on("channelDelete", async (channel) => {
   if (!("guild" in channel) || !channel.guild) return;
   if (channel.guild.id === DISCORD_GUILD_ID) return;
   const textCh = channel as TextChannel;
   if (typeof textCh.isTextBased !== "function" || !textCh.isTextBased()) return;
-  console.log(`💨 外部 guild 失去频道访问: #${textCh.name} in ${textCh.guild?.name}`);
+  console.log(`💨 外部 guild 频道被删: #${textCh.name} in ${textCh.guild?.name}`);
   await notifyMaster(
     [
-      `💨 **你 bot 在 ${textCh.guild?.name ?? "外部 guild"} 失去了 #${textCh.name} 的访问权限**`,
-      `（对方撤回了 allow View Channel，或者这个频道被删了）`,
+      `💨 **${textCh.guild?.name ?? "外部 guild"} 里 #${textCh.name} 被删了**`,
     ].join("\n")
   );
+});
+
+// 已有频道权限变化：比如对方 grant 或 revoke 我们的 View Channel
+discord.on("channelUpdate", async (oldCh: any, newCh: any) => {
+  if (!newCh.guild || newCh.guild.id === DISCORD_GUILD_ID) return;
+  if (typeof newCh.isTextBased !== "function" || !newCh.isTextBased()) return;
+  const me = newCh.guild.members.me;
+  if (!me) return;
+  try {
+    const oldCanView = oldCh.permissionsFor(me)?.has("ViewChannel") ?? false;
+    const newCanView = newCh.permissionsFor(me)?.has("ViewChannel") ?? false;
+    if (!oldCanView && newCanView) {
+      console.log(`🎉 外部 guild 新获授权: #${newCh.name} in ${newCh.guild.name}`);
+      await notifyMaster(
+        [
+          `🎉 **你 bot 在对方 Claudestra 服务器拿到新频道访问**`,
+          ``,
+          `频道：**#${newCh.name}**（id: \`${newCh.id}\`，topic: ${newCh.topic || "(无)"}）`,
+          `服务器：${newCh.guild.name}`,
+          ``,
+          `你可以在这个频道 @ 对方 bot 发起对话：\`reply(chat_id="${newCh.id}", text="<@对方bot_id> ...")\``,
+          `或者先调 \`list_shared_channels\` 看一下你当前的全部外部频道列表。`,
+        ].join("\n")
+      );
+    } else if (oldCanView && !newCanView) {
+      console.log(`💨 外部 guild 失去授权: #${newCh.name} in ${newCh.guild.name}`);
+      await notifyMaster(
+        [
+          `💨 **你 bot 在 ${newCh.guild.name} 的 #${newCh.name} 被收回了 View Channel 权限**`,
+        ].join("\n")
+      );
+    }
+  } catch (e) {
+    console.error("channelUpdate 处理失败:", e);
+  }
 });
 
 // 别的 bot（不是我方）加入了我的 guild
