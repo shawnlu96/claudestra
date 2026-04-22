@@ -1243,70 +1243,20 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v1.9.21+ direct mode peer routing：
-  // 如果是 peer bot 在 #agent-exchange 发消息、且 peers.json 里这个 peer 的
-  // exposure 是 mode=direct → 路由**直接到 agent 的 ws**，完全绕过 master。
-  // agent 被要求 reply 回 #agent-exchange @ peer bot。
-  // 找不到匹配 exposure / 多个 candidate / mode=via_master → 回到原路径（forward 给 master）。
-  let routeWs = client.ws;
-  let routeClientChannelId = client.channelId;
-  let routeAgentName: string | undefined;
-  let directRouted = false;
-  if (isPeer && channelId === await getLocalAgentExchangeId()) {
-    const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
-    const peers = await readPeers();
-    const directExposures = peers.exposures
-      .filter((e) => (e.peerBotId === msg.author.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct");
-
-    if (directExposures.length > 0) {
-      // v1.9.26+ D+C 消歧义
-      const decision = await resolvePeerDirectCandidate(
-        directExposures as any,
-        msg.content || "",
-        channelId,
-        msg.id,
-        msg.author.id,
-        "local",
-      );
-      if (decision.kind === "button_posted") {
-        // 按钮已发，此次不 forward —— 等用户点按钮
-        return;
-      }
-      if (decision.kind === "selected") {
-        const targetExp = decision.exposure;
-        try {
-          const listResult = await runManager("list");
-          const agents = (listResult.agents || []) as any[];
-          const targetAgent = agents.find((a: any) =>
-            a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
-          );
-          if (targetAgent && targetAgent.status === "active") {
-            const agentClient = clients.get(targetAgent.channelId);
-            if (agentClient) {
-              // Phase 3b2: 不再就地拼 PEER DIRECT header，改成把路由目标写进
-              // envelope 的 to，让 renderContentForLocal 根据 from=peer + 源是
-              // agent-exchange + to 是具体 agent 这组条件自己查 peers.json 拼
-              // header。content 仍然是 agent 看到的原文（带 strip mention）。
-              routeWs = agentClient.ws;
-              routeClientChannelId = agentClient.channelId;
-              routeAgentName = targetAgent.name;
-              directRouted = true;
-              console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
-              recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
-            } else {
-              console.log(`⚠️ PEER DIRECT fallback: agent ${targetAgent.name} 未连接 bridge，回落 master`);
-            }
-          } else if (targetAgent) {
-            console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} status=${targetAgent.status}，回落 master`);
-          } else {
-            console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} 在 registry 找不到，回落 master`);
-          }
-        } catch (e) {
-          console.error("PEER DIRECT routing 失败，回落 master:", e);
-        }
-      }
-    }
+  // v1.9.21+ direct mode peer routing：peer bot 在 #agent-exchange 发消息、
+  // peers.json 里对这个 peer 有 mode=direct 的 exposure → 路由**直接到 agent
+  // 的 ws**，bypass master。找不到 / 模糊 / via_master → 回落 master。
+  const directRoute = isPeer
+    ? await tryPeerDirectRoute(msg, channelId)
+    : { kind: "fallback" as const };
+  if (directRoute.kind === "button_pending") {
+    // 按钮已发，此次不 forward —— 等用户点按钮
+    return;
   }
+  const routeWs = directRoute.kind === "direct" ? directRoute.toClient.ws : client.ws;
+  const routeClientChannelId = directRoute.kind === "direct" ? directRoute.toClient.channelId : client.channelId;
+  const routeAgentName = directRoute.kind === "direct" ? directRoute.agentName : undefined;
+  const directRouted = directRoute.kind === "direct";
 
   // v2.0.0 Phase 3：统一走 deliver(envelope)。所有 header 注入（agent-exchange
   // 调度 / PEER DIRECT / no-exposures 拒绝）都在 renderContentForLocal 里做，
@@ -2618,6 +2568,80 @@ async function resolvePeerDirectCandidate(
   } catch (e) {
     console.error("PEER DISAMBIG 按钮发送失败:", e);
     return { kind: "multi_unresolved" };
+  }
+}
+
+/**
+ * v2.0.0 Phase 3c: messageCreate 里的 direct-route 决策抽成独立函数。
+ * peer bot 在 #agent-exchange 发消息 → 查 peers.json 里 mode=direct 的
+ * exposures → 用 resolvePeerDirectCandidate 挑一个 → 找对应 agentClient。
+ *
+ * 返回：
+ *  - `direct`：选到了具体 agent，routeWs 换成 agentClient.ws
+ *  - `button_pending`：按钮已 post，messageCreate 应直接 return
+ *  - `fallback`：没 direct 命中 / agent 不在线 / 其他异常 → 回落到 master
+ *
+ * 注意：只处理 peer + 我方 #agent-exchange 场景。对称 direct（peer 在自己
+ * guild 的 #agent-exchange @ 我方 bot）走的是 tryRouteForeignAgentExchange，
+ * 不走这里。
+ */
+type DirectRouteResult =
+  | { kind: "direct"; toClient: ClientInfo; agentName: string }
+  | { kind: "button_pending" }
+  | { kind: "fallback" };
+
+async function tryPeerDirectRoute(
+  msg: DiscordMessage,
+  channelId: string,
+): Promise<DirectRouteResult> {
+  const localAgentExchangeId = await getLocalAgentExchangeId();
+  if (!localAgentExchangeId || channelId !== localAgentExchangeId) {
+    return { kind: "fallback" };
+  }
+  const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
+  const peers = await readPeers();
+  const directExposures = peers.exposures.filter(
+    (e) => (e.peerBotId === msg.author.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct"
+  );
+  if (directExposures.length === 0) return { kind: "fallback" };
+
+  const decision = await resolvePeerDirectCandidate(
+    directExposures as any,
+    msg.content || "",
+    channelId,
+    msg.id,
+    msg.author.id,
+    "local",
+  );
+  if (decision.kind === "button_posted") return { kind: "button_pending" };
+  if (decision.kind !== "selected") return { kind: "fallback" };
+
+  const targetExp = decision.exposure;
+  try {
+    const listResult = await runManager("list");
+    const agents = (listResult.agents || []) as any[];
+    const targetAgent = agents.find((a: any) =>
+      a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
+    );
+    if (!targetAgent) {
+      console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} 在 registry 找不到，回落 master`);
+      return { kind: "fallback" };
+    }
+    if (targetAgent.status !== "active") {
+      console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} status=${targetAgent.status}，回落 master`);
+      return { kind: "fallback" };
+    }
+    const agentClient = clients.get(targetAgent.channelId);
+    if (!agentClient) {
+      console.log(`⚠️ PEER DIRECT fallback: agent ${targetAgent.name} 未连接 bridge，回落 master`);
+      return { kind: "fallback" };
+    }
+    console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
+    recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
+    return { kind: "direct", toClient: agentClient, agentName: targetAgent.name };
+  } catch (e) {
+    console.error("PEER DIRECT routing 失败，回落 master:", e);
+    return { kind: "fallback" };
   }
 }
 
