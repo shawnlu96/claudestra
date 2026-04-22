@@ -2375,20 +2375,24 @@ async function routePeerDirectWithAgent(
       return false;
     }
 
-    // 找 peer bot（local: 就是 orig message 的 author；foreign: 是 peerBots[].agentExchangeId === origChannelId）
+    // 找 peer bot：
+    //   local  → origMsg 的 author 就是 peer bot（peer 发消息到我方 exchange）
+    //   foreign → channel 是"对方 guild 的 #agent-exchange"，lookup 用
+    //              capabilities[].peerAgentExchangeId（v1.9.33+ 同 tryRouteForeignAgentExchange 修复）
     let peerBotName = "";
     let peerBotId = "";
     if (kind === "local") {
       peerBotName = origMsg.author.username;
       peerBotId = origMsg.author.id;
     } else {
-      const peerBot = peers.peerBots.find((p) => p.agentExchangeId === origChannelId);
-      if (!peerBot) {
-        console.log(`🎯 routePeerDirectWithAgent (foreign): 找不到 peer bot for channel ${origChannelId}`);
+      const cap = peers.capabilities.find((c) => c.peerAgentExchangeId === origChannelId);
+      if (!cap) {
+        console.log(`🎯 routePeerDirectWithAgent (foreign): 找不到 capability for channel ${origChannelId}`);
         return false;
       }
-      peerBotName = peerBot.name;
-      peerBotId = peerBot.id;
+      peerBotId = cap.peerBotId;
+      const peerBot = peers.peerBots.find((p) => p.id === peerBotId);
+      peerBotName = peerBot?.name || cap.peerBotName;
     }
 
     // 找 agent ws
@@ -2478,11 +2482,25 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
     const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
     const peers = await readPeers();
 
-    // 1. 确认 channelId 是某个 peer 的 foreign #agent-exchange（我们被 invite 进去的）
-    const peerBotForChannel = peers.peerBots.find((p) => p.agentExchangeId === channelId);
-    if (!peerBotForChannel) return false;
+    // v1.9.33+: 修 v1.9.22 的 bug —— 原来查 `peerBots[].agentExchangeId`，那个字段
+    // 存的是"peer bot 在我方 guild 的 local scope channel"（= 我方自己的 exchange）。
+    // 但对称路由触发时 channelId 是**对方 guild** 的 exchange（我方 bot 在对方 guild
+    // 能看到的那个），这个 id 是从 `capabilities[].peerAgentExchangeId` 学来的
+    // （对方 peer-expose 时广播的 PeerEvent 里带 exchange 字段）。
+    // 正确的 lookup：通过 capabilities 反查 "这个 channel 是哪个 peer 的 foreign
+    // exchange"。
+    const capabilityForChannel = peers.capabilities.find((c) => c.peerAgentExchangeId === channelId);
+    if (!capabilityForChannel) {
+      // 这个 channel 不是任何 peer 的 #agent-exchange，交给后续流程（大概率 drop）
+      return false;
+    }
     // 如果是我们自己 guild 的本地 agent-exchange，不走这条（那条走 clients.get 正常路径）
     if (peers.localAgentExchangeId === channelId) return false;
+
+    // 从 capability 拿到这是哪个 peer bot 的 channel，再去 peerBots 拿 bot 名字
+    const peerBotId = capabilityForChannel.peerBotId;
+    const peerBotForChannel = peers.peerBots.find((p) => p.id === peerBotId)
+      ?? { id: peerBotId, name: capabilityForChannel.peerBotName };
 
     // 2. 找这个 peer 的 direct exposure（我们对这个 peer 开放的 agent）
     const directExposures = peers.exposures
