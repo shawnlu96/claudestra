@@ -312,37 +312,51 @@ function resolveReplyBackChannel(env: RouterEnvelope): string {
   return "";
 }
 
-/** 投递到 peer —— 通过共享 #agent-exchange 发消息，@ peer bot 让对方 bridge 能识别 */
+/**
+ * 投递到 peer —— 通过共享 #agent-exchange 发消息。
+ * `env.meta.skipAutoMention === true`（agent 已自己写好 @ 或 [DIRECT] 语境）
+ * 直接发原文；否则 ensurePeerMentions 扫频道里所有 peer bot 自动 @ 它们。
+ * 支持 chunking / reply_to / files / components（通过 meta 透传 discordReply）。
+ */
 async function deliverToPeer(env: RouterEnvelope, to: RouterPeerEndpoint): Promise<RouterDelivery> {
-  const mention = `<@${to.peerBotId}>`;
-  const body = env.content.includes(mention) ? env.content : `${mention} ${env.content}`;
-  const finalSuffix = env.meta.final ? (body.trimEnd().endsWith("[EOT]") ? "" : " [EOT]") : "";
-  const text = `${body}${finalSuffix}`;
+  let text = env.content;
+  if (!env.meta.skipAutoMention) {
+    text = await ensurePeerMentions(discord, to.sharedChannelId, text);
+  }
+  const finalSuffix = env.meta.final ? (text.trimEnd().endsWith("[EOT]") ? "" : " [EOT]") : "";
+  text = `${text}${finalSuffix}`;
   try {
-    const ch = await discord.channels.fetch(to.sharedChannelId);
-    if (!ch || !("messages" in ch)) {
-      return { envelope: env, outcome: { kind: "error", error: new Error(`channel ${to.sharedChannelId} 不可达`) } };
-    }
-    const sent = await (ch as TextChannel).send({ content: text });
-    trackSentMessage(sent.id);
-    return { envelope: env, outcome: { kind: "sent", discordMessageIds: [sent.id] } };
+    const ids = await discordReply(
+      discord,
+      to.sharedChannelId,
+      text,
+      env.meta.replyTo,
+      env.meta.components as any,
+      env.meta.files,
+    );
+    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids } };
   } catch (e) {
     return { envelope: env, outcome: { kind: "error", error: e as Error } };
   }
 }
 
-/** 投递到 Discord 人类用户 —— 发 @ 他的消息到他看得到的 channel */
+/**
+ * 投递到 Discord 人类用户 —— 发到他看得到的 channel。
+ * 支持 chunking / reply_to / files / components（通过 meta 透传 discordReply）。
+ * content 不自动 @ 用户 —— Stop hook 有独立的完成通知负责 @，这里 body 里的
+ * mention 留给调用方自己控制（比如 reply handler 直接发 agent 写的 text）。
+ */
 async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promise<RouterDelivery> {
-  const mention = `<@${to.userId}>`;
-  const body = env.content.includes(mention) ? env.content : `${env.content}\n${mention}`;
   try {
-    const ch = await discord.channels.fetch(to.channelId);
-    if (!ch || !("messages" in ch)) {
-      return { envelope: env, outcome: { kind: "error", error: new Error(`channel ${to.channelId} 不可达`) } };
-    }
-    const sent = await (ch as TextChannel).send({ content: body });
-    trackSentMessage(sent.id);
-    return { envelope: env, outcome: { kind: "sent", discordMessageIds: [sent.id] } };
+    const ids = await discordReply(
+      discord,
+      to.channelId,
+      env.content,
+      env.meta.replyTo,
+      env.meta.components as any,
+      env.meta.files,
+    );
+    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids } };
   } catch (e) {
     return { envelope: env, outcome: { kind: "error", error: e as Error } };
   }
@@ -2187,7 +2201,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "reply": {
       // v1.9.24+: 在任何 await 之前先删 pending。这样即使 Stop hook 在我们还在
-      // 打 Discord API 的时候到达，rescue 也不会误触发（认定"agent 没 reply"）。
+      // 打 Discord API 的时候到达，后面的 cleanup 路径不会误触发。
       pendingReplies.delete(msg.chatId);
 
       try {
@@ -2201,12 +2215,48 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const isDirectReply = /^\s*\[DIRECT\]\s*/i.test(text);
         if (isDirectReply) {
           text = text.replace(/^\s*\[DIRECT\]\s*/i, "");
-        } else {
-          // v1.8.9+: 跨 Claudestra 协作要 @ peer bot 才能让对方 bridge 识别
-          text = await ensurePeerMentions(discord, msg.chatId, text);
         }
 
-        const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
+        // v2.0.0 Phase 4d: reply 从 discordReply 直接调改成构造 envelope 过 deliver。
+        // from=local（发 reply 的这个 agent），to 根据 chat_id 判断 user / peer。
+        // ensurePeerMentions（local exchange 自动 @ 所有 peer bot）移进 deliverToPeer，
+        // reply handler 只负责 strip 标记 + 构造 envelope。isDirectReply → 置
+        // skipAutoMention=true 让 deliverToPeer 跳过自动 @。
+        let fromChannelId = "";
+        for (const [chId, info] of clients.entries()) {
+          if (info.ws === ws) { fromChannelId = chId; break; }
+        }
+        const fromEndpoint: RouterLocalEndpoint = {
+          kind: "local",
+          channelId: fromChannelId,
+          ws,
+        };
+        const toEndpoint = await resolveReplyTarget(msg.chatId);
+        const env: RouterEnvelope = {
+          from: fromEndpoint,
+          to: toEndpoint,
+          intent: "response",
+          content: text,
+          meta: {
+            messageId: `reply_${Date.now()}`,
+            triggerKind: "agent_tool",
+            ts: new Date().toISOString(),
+            threadId: newThreadId(),
+            replyTo: msg.replyTo,
+            components: msg.components,
+            files: msg.files,
+            skipAutoMention: isDirectReply,
+          },
+        };
+        const delivery = await deliver(env);
+        if (delivery.outcome.kind !== "sent") {
+          const errMsg = delivery.outcome.kind === "dropped"
+            ? `reply dropped: ${delivery.outcome.reason}`
+            : (delivery.outcome as any).error?.message || "unknown";
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
+          break;
+        }
+        const ids = delivery.outcome.discordMessageIds || [];
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
 
         // v1.9.21+ send_to_agent 推回机制：
@@ -2653,6 +2703,47 @@ async function resolvePeerDirectCandidate(
     console.error("PEER DISAMBIG 按钮发送失败:", e);
     return { kind: "multi_unresolved" };
   }
+}
+
+/**
+ * v2.0.0 Phase 4d: 根据 agent reply 传的 chat_id 反推该 endpoint 是 user 还
+ * 是 peer。决策树：
+ *   1. chat_id 在 peers.capabilities 里登记过（peerAgentExchangeId）→ 对方 guild
+ *      的 foreign exchange → PeerEndpoint with 对应 peer bot 身份
+ *   2. chat_id 是我方 localAgentExchangeId → 我方 #agent-exchange → PeerEndpoint
+ *      with peerBotId="all"（deliverToPeer 用 ensurePeerMentions 扫频道 @ 所有
+ *      peer bot；具体 bot id 不重要）
+ *   3. 其他（agent 自己频道 / #control）→ UserEndpoint with ALLOWED_USER_IDS[0]
+ *      作为 userId。deliverToUser 不自动 @ user（push 通知在 Stop hook 完成通知
+ *      里另管）。
+ */
+async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | RouterPeerEndpoint> {
+  try {
+    const { readPeers } = await import("./lib/peers.js");
+    const peers = await readPeers();
+    // 1. foreign exchange
+    const foreignCap = peers.capabilities.find((c) => c.peerAgentExchangeId === chatId);
+    if (foreignCap) {
+      return {
+        kind: "peer",
+        peerBotId: foreignCap.peerBotId,
+        peerBotName: foreignCap.peerBotName,
+        sharedChannelId: chatId,
+      };
+    }
+    // 2. local agent-exchange
+    if (peers.localAgentExchangeId === chatId) {
+      return {
+        kind: "peer",
+        peerBotId: "all",
+        peerBotName: "peer",
+        sharedChannelId: chatId,
+      };
+    }
+  } catch { /* non-critical */ }
+  // 3. user channel
+  const userId = ALLOWED_USER_IDS.length > 0 ? ALLOWED_USER_IDS[0] : "";
+  return { kind: "user", userId, channelId: chatId };
 }
 
 /**

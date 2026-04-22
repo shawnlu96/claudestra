@@ -114,6 +114,21 @@ export interface Envelope {
      * 跟"这条消息的原始作者"不一定同人。agent 要用这个 id 做 push 通知 @。
      */
     sourceUserId?: string;
+
+    // ── outbound（response）用的 Discord 特性透传字段 ───────────────────────
+    /** Discord 消息 id：发到这个频道时作为 reply_to（native 引用） */
+    replyTo?: string;
+    /** Discord UI components（按钮 / select 菜单），仅加在最后一 chunk 上 */
+    components?: unknown[];
+    /** 附件绝对路径，仅加在第一 chunk 上，最多 10 个 / 25MB */
+    files?: string[];
+    /**
+     * deliverToPeer 不要自动跑 ensurePeerMentions 扫频道 @ peer bot。
+     * 用于：
+     *   - [DIRECT] 标记的 reply（agent 自己写好了 @ 发起人，不需要 @ peer bot）
+     *   - agent 自己已经在 text 里手动 @ 过对应 peer 了
+     */
+    skipAutoMention?: boolean;
   };
 }
 
