@@ -72,9 +72,22 @@ export type TriggerKind =
   | "bridge_synth"    // bridge 自己合成的（rescue、relay、nag 等 —— 都属于"代表某方发声"）
   | "system";         // 系统提示（clean up 通知、错误提示等）
 
+/**
+ * v2.0.0+ 消息意图。取代老版一堆 heuristic（[EOT] / [DIRECT] / Stop 猜意思 /
+ * randomUmaDone 兜底 @）。bridge 和 agent 都按 intent 行动：
+ *   - request: 需要回应。bridge 挂 pending；接收端 agent 应生成 response
+ *   - response: 对某条 request 的回复（meta.inReplyTo 指向原请求）。
+ *     bridge 清 pending + 不发额外完成 @（用户已经看到 response）
+ *   - notification: fire-and-forget。没 pending，不期望回复
+ *   - broadcast: 通知频道所有人（PeerEvent grant/revoke 等）
+ */
+export type MessageIntent = "request" | "response" | "notification" | "broadcast";
+
 export interface Envelope {
   from: Endpoint;
   to: Endpoint;
+  /** 这条消息的意图，bridge 据此决定路由 + 追踪策略 */
+  intent: MessageIntent;
   content: string;
   meta: {
     /** Discord message id（若来自 Discord）或合成 id */
@@ -82,9 +95,12 @@ export interface Envelope {
     triggerKind: TriggerKind;
     /** 原消息的时间戳（ISO） */
     ts: string;
-    /** 线程追踪 id，同一个 request/reply 链路的消息都挂同一个 threadId，Stop hook 能按 thread 清理状态 */
-    threadId?: string;
-    /** 是否是 thread 的"最后一句"（由 [EOT] 标记、或 bridge 自己判定） */
+    /** 线程追踪 id。同一 request/response 链路的消息都挂同一个 threadId，
+     *  Stop hook 能按 thread 清 pending / status / typing，不再按 channelId 瞎猜 */
+    threadId: string;
+    /** response 专用：指向被回应的原请求 messageId。bridge 据此清对应 pending */
+    inReplyTo?: string;
+    /** 是否是 thread 的"最后一句"（对应老版 [EOT]） */
     final?: boolean;
     /** 附件路径（本地 inbox 绝对路径） */
     attachments?: string[];
@@ -129,5 +145,109 @@ export function endpointLabel(e: Endpoint): string {
 }
 
 export function envelopeLabel(env: Envelope): string {
-  return `${endpointLabel(env.from)} → ${endpointLabel(env.to)}`;
+  return `${endpointLabel(env.from)} → ${endpointLabel(env.to)} [${env.intent}]`;
+}
+
+// ============================================================
+// Address 字符串形式 + parser（agent 端统一用 string 地址，不碰 channel id）
+// ============================================================
+
+/**
+ * agent 端的地址形式（给 MCP tool 用）：
+ *   user:<user_id>                  —— Discord 人类用户
+ *   agent:<name>                    —— 本地 agent（registry 里有）
+ *   peer:<peer_bot_name>            —— 对方整体，让对方 bridge 自行路由
+ *   peer:<peer_bot_name>.<agent>    —— 对方 bridge 指定路由到某 agent
+ *   channel:<channel_id>            —— 脱盖的 escape hatch，直接投递到某 Discord 频道
+ */
+export type AddressString = string;
+
+export interface ParsedAddress {
+  kind: "user" | "agent" | "peer" | "channel";
+  /** kind=user → user id; agent → name; peer → peer bot name; channel → channel id */
+  primary: string;
+  /** kind=peer + 可选 agent 名字（peer:X.Y 的 Y）；其他 kind 不用 */
+  secondary?: string;
+}
+
+/** 解析 agent 输入的 address 字符串。格式错返回 null。 */
+export function parseAddress(s: AddressString): ParsedAddress | null {
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+  // peer:X 或 peer:X.Y
+  if (trimmed.startsWith("peer:")) {
+    const rest = trimmed.slice(5);
+    const dotIdx = rest.indexOf(".");
+    if (dotIdx >= 0) {
+      return { kind: "peer", primary: rest.slice(0, dotIdx), secondary: rest.slice(dotIdx + 1) };
+    }
+    return { kind: "peer", primary: rest };
+  }
+  // 短格式 Y@X → peer:X.Y（agent 用 send({target: "future_data@alice"}) 这种）
+  const atMatch = trimmed.match(/^([^@]+)@([^@]+)$/);
+  if (atMatch && !trimmed.includes(":")) {
+    return { kind: "peer", primary: atMatch[2], secondary: atMatch[1] };
+  }
+  // user:<id>
+  if (trimmed.startsWith("user:")) {
+    return { kind: "user", primary: trimmed.slice(5) };
+  }
+  // agent:<name>
+  if (trimmed.startsWith("agent:")) {
+    return { kind: "agent", primary: trimmed.slice(6) };
+  }
+  // channel:<id>（escape hatch）
+  if (trimmed.startsWith("channel:")) {
+    return { kind: "channel", primary: trimmed.slice(8) };
+  }
+  // 没前缀的，按 v1.x 兼容视为本地 agent 名
+  return { kind: "agent", primary: trimmed };
+}
+
+/** 把 ParsedAddress 格式化回字符串 */
+export function formatAddress(a: ParsedAddress): AddressString {
+  switch (a.kind) {
+    case "peer":
+      return a.secondary ? `peer:${a.primary}.${a.secondary}` : `peer:${a.primary}`;
+    case "user":
+      return `user:${a.primary}`;
+    case "agent":
+      return `agent:${a.primary}`;
+    case "channel":
+      return `channel:${a.primary}`;
+  }
+}
+
+// ============================================================
+// Thread id 生成 + 线程追踪 helper
+// ============================================================
+
+/** 新建一个唯一 threadId。用在 intent=request 的消息上，后续 response 挂同个 threadId */
+export function newThreadId(): string {
+  return `thr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** 新建一条 response 消息的 envelope（继承源 envelope 的 threadId + inReplyTo） */
+export function makeResponseEnvelope(
+  request: Envelope,
+  from: Endpoint,
+  to: Endpoint,
+  content: string,
+  opts: { final?: boolean; messageId?: string; triggerKind?: TriggerKind; attachments?: string[] } = {},
+): Envelope {
+  return {
+    from,
+    to,
+    intent: "response",
+    content,
+    meta: {
+      messageId: opts.messageId ?? `synth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      triggerKind: opts.triggerKind ?? "bridge_synth",
+      ts: new Date().toISOString(),
+      threadId: request.meta.threadId,
+      inReplyTo: request.meta.messageId,
+      final: opts.final,
+      attachments: opts.attachments,
+    },
+  };
 }

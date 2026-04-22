@@ -113,8 +113,17 @@ interface PendingReply {
   ts: number;
   intendedReplyChannel: string;
   targetWs: ServerWebSocket<unknown>;
+  /** v2.0.0+: 跟新 router 里的 threadId 一致。老路径 fallback 用 msgId */
+  threadId?: string;
 }
 const pendingReplies = new Map<string, PendingReply>();
+/** v2.0.0+: thread → request envelope 追踪。response 进来时按 threadId 清，
+ *  Stop hook 按 threadId 收尾。取代老的 "by channelId only" 状态管理。 */
+interface PendingThread {
+  request: RouterEnvelope;
+  ts: number;
+}
+const pendingThreads = new Map<string, PendingThread>();
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
 let _cachedAgentExchangeId = "";
@@ -184,6 +193,16 @@ import { endpointLabel, envelopeLabel } from "./bridge/router.js";
  * 逐个迁进来。每迁一条分支就删 legacy 代码。
  */
 async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
+  // 0. intent-aware 预处理：response 消息先清对应 pending
+  if (env.intent === "response" && env.meta.inReplyTo) {
+    for (const [key, p] of pendingReplies.entries()) {
+      if (p.msgId === env.meta.inReplyTo || p.threadId === env.meta.threadId) {
+        pendingReplies.delete(key);
+      }
+    }
+    pendingThreads.delete(env.meta.threadId);
+  }
+
   // 1. 权限检查：只检查"外面进来要访问本地 agent"这条
   if (env.from.kind === "peer" && env.to.kind === "local") {
     try {
@@ -230,6 +249,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     message_id: env.meta.messageId,
     ts: env.meta.ts,
     trigger: env.meta.triggerKind,
+    intent: env.intent,
+    thread_id: env.meta.threadId,
   };
   if (env.from.kind === "user") {
     meta.user = String((env.from as any).username ?? "");
@@ -252,10 +273,31 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    // intent=request 挂 pending + thread 追踪。response 端到端，不挂新 pending。
+    if (env.intent === "request") {
+      const replyBackChannel = resolveReplyBackChannel(env);
+      pendingReplies.set(replyBackChannel, {
+        msgId: env.meta.messageId,
+        ts: Date.now(),
+        intendedReplyChannel: replyBackChannel,
+        targetWs: to.ws,
+        threadId: env.meta.threadId,
+      });
+      pendingThreads.set(env.meta.threadId, { request: env, ts: Date.now() });
+    }
     return { envelope: env, outcome: { kind: "sent" } };
   } catch (e) {
     return { envelope: env, outcome: { kind: "error", error: e as Error } };
   }
+}
+
+/** 从 envelope 推断 "response 应该发回哪个 channel" —— 用于 pending 的
+ *  intendedReplyChannel + rescue 的代 post 目标 */
+function resolveReplyBackChannel(env: RouterEnvelope): string {
+  if (env.from.kind === "user") return env.from.channelId;
+  if (env.from.kind === "peer") return env.from.sharedChannelId;
+  if (env.from.kind === "local") return env.from.channelId;
+  return "";
 }
 
 /** 投递到 peer —— 通过共享 #agent-exchange 发消息，@ peer bot 让对方 bridge 能识别 */
