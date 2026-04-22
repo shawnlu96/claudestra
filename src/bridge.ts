@@ -2526,7 +2526,41 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
       .filter((e) => (e.peerBotId === peerBotForChannel.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct");
 
     if (directExposures.length === 0) {
-      console.log(`🎯 SYMMETRIC: 收到 foreign #agent-exchange (${channelId}) 的 @ 但我方没对 ${peerBotForChannel.name} 开放任何 direct agent，忽略`);
+      // v1.9.35+: 没有 direct exposure，但是 peer bot 在他自己的 foreign exchange 里
+      // @ 了我们（比如 peer 用旧版 via_master 模式，agent reply 落到他自己 exchange；
+      // 或 peer agent 完成工作后只想通知我们一声）→ 我们要 **relay** 这条消息到
+      // 我方 #agent-exchange，让 user 能看到，避免沉默 drop。
+      if (msg.author.bot && peers.localAgentExchangeId) {
+        const cleanText = (msg.content || "")
+          .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
+          .replace(/<!--\s*CLAUDESTRA_PEER_EVENT[\s\S]*?-->/g, "")
+          .replace(/\s*\[EOT\]\s*$/i, "")
+          .replace(/^\s*\[DIRECT\]\s*/i, "")
+          .trim();
+        if (cleanText) {
+          try {
+            const relayChan = await discord.channels.fetch(peers.localAgentExchangeId).catch(() => null);
+            if (relayChan && "messages" in relayChan) {
+              const userMention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
+              const relayText = [
+                `📬 **来自 peer ${peerBotForChannel.name}**（他在自己 guild 的 #agent-exchange 里 @ 了你）${userMention}`,
+                ``,
+                cleanText,
+                ``,
+                `_bridge relay — peer 没走 direct 路由（mode=via_master 或老版本），消息被原样搬到这里了_`,
+              ].join("\n");
+              const sent = await (relayChan as TextChannel).send({ content: relayText });
+              trackSentMessage(sent.id);
+              console.log(`📬 RELAY: peer ${peerBotForChannel.name} 在 foreign exchange 的消息 relay 到本方 exchange (${cleanText.length} chars)`);
+              recordMetric("peer_relay_foreign_reply", { channelId: peers.localAgentExchangeId, meta: { peer: peerBotForChannel.name, from: channelId } });
+            }
+          } catch (e) {
+            console.error("📬 RELAY 失败:", e);
+          }
+        }
+        return true; // 已处理（relay 完），不 fall through
+      }
+      console.log(`🎯 SYMMETRIC: 收到 foreign #agent-exchange (${channelId}) 的 @ 但我方没对 ${peerBotForChannel.name} 开放任何 direct agent 也无法 relay，忽略`);
       return false;
     }
 
@@ -2829,6 +2863,18 @@ async function handleHookRequest(req: Request): Promise<Response> {
         for (const [otherId, info] of clients.entries()) {
           if (otherId !== channelId && info.ws === thisClientForStatus.ws) {
             channelsToClear.add(otherId);
+          }
+        }
+        // v1.9.35+: 对称 direct 路由的状态消息在 foreign exchange（peer 的）
+        // 里，那个 channel 不在 clients 里也不同 ws（peer 才有它的 ws）。但
+        // pendingReplies 记了 "targetWs 对应哪些 intendedReplyChannel"，补一下
+        // 把这些 channel 也加进来，这样 stopTyping 和 status cleanup 都能覆盖。
+        for (const [, pending] of pendingReplies.entries()) {
+          if (pending.targetWs === thisClientForStatus.ws) {
+            channelsToClear.add(pending.intendedReplyChannel);
+            // 也顺便 stopTyping 那个频道
+            stopTyping(pending.intendedReplyChannel);
+            clearSafetyTimer(pending.intendedReplyChannel);
           }
         }
       }
