@@ -161,6 +161,177 @@ const pendingPeerCalls = new Map<string, PendingPeerCall>();
 const typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const TYPING_SAFETY_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟
 
+// ============================================================
+// v2.0.0+ 路由抽象
+// ============================================================
+import type {
+  Endpoint as RouterEndpoint,
+  LocalEndpoint as RouterLocalEndpoint,
+  PeerEndpoint as RouterPeerEndpoint,
+  UserEndpoint as RouterUserEndpoint,
+  Envelope as RouterEnvelope,
+  Delivery as RouterDelivery,
+} from "./bridge/router.js";
+import { endpointLabel, envelopeLabel } from "./bridge/router.js";
+
+/**
+ * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate / reply /
+ * send_to_agent / rescue / relay）最终都应该走这一个函数。内部按 to.kind 派
+ * 发（local ws inject / peer discord send / user discord send），权限检查 +
+ * 状态追踪 + @ mention 全在一处管。
+ *
+ * 迁移中：目前还有 legacy 分支直接往 ws 或 discord.channel.send 写消息，
+ * 逐个迁进来。每迁一条分支就删 legacy 代码。
+ */
+async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
+  // 1. 权限检查：只检查"外面进来要访问本地 agent"这条
+  if (env.from.kind === "peer" && env.to.kind === "local") {
+    try {
+      const { readPeers } = await import("./lib/peers.js");
+      const peers = await readPeers();
+      const targetAgentName = env.to.agentName;
+      if (!targetAgentName) {
+        return { envelope: env, outcome: { kind: "dropped", reason: "local target has no agentName" } };
+      }
+      const exposed = peers.exposures.some((e) =>
+        (e.localAgent === targetAgentName || `agent-${e.localAgent}` === targetAgentName) &&
+        (e.peerBotId === env.from.peerBotId || e.peerBotId === "all")
+      );
+      if (!exposed) {
+        return { envelope: env, outcome: { kind: "dropped", reason: `${targetAgentName} not exposed to peer ${env.from.peerBotName}` } };
+      }
+    } catch (e) {
+      console.error("deliver permission check 异常:", e);
+      return { envelope: env, outcome: { kind: "error", error: e as Error } };
+    }
+  }
+
+  // 2. 按目标类型派发
+  try {
+    switch (env.to.kind) {
+      case "local":
+        return await deliverToLocal(env, env.to);
+      case "peer":
+        return await deliverToPeer(env, env.to);
+      case "user":
+        return await deliverToUser(env, env.to);
+    }
+  } catch (e) {
+    console.error(`deliver 失败 ${envelopeLabel(env)}:`, e);
+    return { envelope: env, outcome: { kind: "error", error: e as Error } };
+  }
+}
+
+/** 投递到本地 Claude Code session —— 通过 ws 注入一条 "message" 事件 */
+async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Promise<RouterDelivery> {
+  const content = renderContentForLocal(env);
+  const meta: Record<string, string> = {
+    chat_id: to.channelId,
+    message_id: env.meta.messageId,
+    ts: env.meta.ts,
+    trigger: env.meta.triggerKind,
+  };
+  if (env.from.kind === "user") {
+    meta.user = String((env.from as any).username ?? "");
+    meta.user_id = env.from.userId;
+  } else if (env.from.kind === "peer") {
+    meta.user = env.from.peerBotName;
+    meta.user_id = env.from.peerBotId;
+    meta.peer = "true";
+    meta.peer_bot_id = env.from.peerBotId;
+    meta.peer_bot_name = env.from.peerBotName;
+  } else if (env.from.kind === "local") {
+    meta.user = env.from.agentName ?? "agent";
+    meta.user_id = "agent";
+    meta.is_agent = "true";
+    meta.from_channel_id = env.from.channelId;
+  }
+  if (env.meta.attachments && env.meta.attachments.length > 0) {
+    meta.attachment_count = String(env.meta.attachments.length);
+    meta.attachments = env.meta.attachments.join(";");
+  }
+  try {
+    to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    return { envelope: env, outcome: { kind: "sent" } };
+  } catch (e) {
+    return { envelope: env, outcome: { kind: "error", error: e as Error } };
+  }
+}
+
+/** 投递到 peer —— 通过共享 #agent-exchange 发消息，@ peer bot 让对方 bridge 能识别 */
+async function deliverToPeer(env: RouterEnvelope, to: RouterPeerEndpoint): Promise<RouterDelivery> {
+  const mention = `<@${to.peerBotId}>`;
+  const body = env.content.includes(mention) ? env.content : `${mention} ${env.content}`;
+  const finalSuffix = env.meta.final ? (body.trimEnd().endsWith("[EOT]") ? "" : " [EOT]") : "";
+  const text = `${body}${finalSuffix}`;
+  try {
+    const ch = await discord.channels.fetch(to.sharedChannelId);
+    if (!ch || !("messages" in ch)) {
+      return { envelope: env, outcome: { kind: "error", error: new Error(`channel ${to.sharedChannelId} 不可达`) } };
+    }
+    const sent = await (ch as TextChannel).send({ content: text });
+    trackSentMessage(sent.id);
+    return { envelope: env, outcome: { kind: "sent", discordMessageIds: [sent.id] } };
+  } catch (e) {
+    return { envelope: env, outcome: { kind: "error", error: e as Error } };
+  }
+}
+
+/** 投递到 Discord 人类用户 —— 发 @ 他的消息到他看得到的 channel */
+async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promise<RouterDelivery> {
+  const mention = `<@${to.userId}>`;
+  const body = env.content.includes(mention) ? env.content : `${env.content}\n${mention}`;
+  try {
+    const ch = await discord.channels.fetch(to.channelId);
+    if (!ch || !("messages" in ch)) {
+      return { envelope: env, outcome: { kind: "error", error: new Error(`channel ${to.channelId} 不可达`) } };
+    }
+    const sent = await (ch as TextChannel).send({ content: body });
+    trackSentMessage(sent.id);
+    return { envelope: env, outcome: { kind: "sent", discordMessageIds: [sent.id] } };
+  } catch (e) {
+    return { envelope: env, outcome: { kind: "error", error: e as Error } };
+  }
+}
+
+/**
+ * 给本地 agent ws 注入的消息渲染 content。跟 legacy 里的 header 注入逻辑
+ * 对齐（兼容 agent 现有 CLAUDE.md / 回复预期），但内容由 envelope 决定。
+ */
+function renderContentForLocal(env: RouterEnvelope): string {
+  const from = env.from;
+  if (from.kind === "peer") {
+    // peer 请求路由到本地 agent（对应旧 tryRouteForeignAgentExchange /
+    // v1.9.21 inline direct 的 header）
+    const userMention = env.meta.triggerKind === "user_discord" && (from as any).sourceUserId
+      ? `<@${(from as any).sourceUserId}>`
+      : `<@${from.peerBotId}>`;
+    const replyToHint = `reply(chat_id="${(from as RouterPeerEndpoint).sharedChannelId}", text="[DIRECT] ${userMention} <你的答案>")`;
+    return [
+      `🤝 PEER DIRECT REQUEST — bridge 路由一条来自 peer 的请求给你处理`,
+      ``,
+      `来源：peer bot **${from.peerBotName}** (id: \`${from.peerBotId}\`) 通过共享 #agent-exchange (\`${(from as RouterPeerEndpoint).sharedChannelId}\`) 过来`,
+      ``,
+      `**最终动作必须是**：\`${replyToHint}\``,
+      `- text 以 \`[DIRECT]\` 开头 → bridge 识别后 strip 标记 + 跳过自动 @ 对方 bot（避免唤醒对方 LLM）`,
+      `- text 里 ${userMention} 是 push 目标，这样发起人 Discord 会收到通知`,
+      `- 最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
+      `- 不要 reply 到自己 channel / 不 send_to_agent 套娃 / 不找 master`,
+      ``,
+      `---`,
+      `原始消息：`,
+      env.content,
+    ].join("\n");
+  }
+  if (from.kind === "local") {
+    // 本地 agent → agent 转发（send_to_agent 那套）
+    const fromName = (from as RouterLocalEndpoint).agentName ?? "agent";
+    return `[🤖 来自 ${fromName}]\n${env.content}`;
+  }
+  // from.kind === "user": 普通用户消息，原样投递
+  return env.content;
+}
+
 // 任务完成语（只留抽象搞笑的）
 const UMA_DONE_MESSAGES = [
   // 复读机系列
