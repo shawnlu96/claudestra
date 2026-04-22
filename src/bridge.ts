@@ -1866,17 +1866,24 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "reply": {
       // v1.9.24+: 在任何 await 之前先删 pending。这样即使 Stop hook 在我们还在
       // 打 Discord API 的时候到达，rescue 也不会误触发（认定"agent 没 reply"）。
-      // 代价：Discord send 如果失败，rescue 也不再兜 —— 但对"用户看不到回复"
-      // 这个失败模式来说，rescue 从 jsonl 抽的也是同样的 text，再 post 还是会失败，
-      // 无论如何这条是 Discord API 层的问题，rescue 救不了。
       pendingReplies.delete(msg.chatId);
 
       try {
-        let text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text;
-        // v1.8.9+: 跨 Claudestra 协作必须 @ peer bot 才能让对方 bridge 可靠识别
-        //（老版本 peer 可能仍要求 @；新版虽然放行了也 @ 让语义明确，谁看到都知道在跟它说话）
-        // 检查这个频道里有没有 peer bot（别的 bot + 不是我方），有就把没 @ 到的补一下
-        text = await ensurePeerMentions(discord, msg.chatId, text || "");
+        let text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text || "";
+
+        // v1.9.34+: [DIRECT] 标记 = 对称 direct 路由的 agent 回复。
+        // strip 掉标记，**跳过 ensurePeerMentions**（不自动 @ 对方 bot），
+        // 因为这条回复是给 foreign exchange 里的 HUMAN user 看的，对方 bot 不需要
+        // 介入（否则对方 bot 看到 @ 会被唤醒跑一轮 LLM，就是 owner 反馈的 bug）。
+        // agent 会在 text 里自己带 `<@user_id>` 让用户收到 push。
+        const isDirectReply = /^\s*\[DIRECT\]\s*/i.test(text);
+        if (isDirectReply) {
+          text = text.replace(/^\s*\[DIRECT\]\s*/i, "");
+        } else {
+          // v1.8.9+: 跨 Claudestra 协作要 @ peer bot 才能让对方 bridge 识别
+          text = await ensurePeerMentions(discord, msg.chatId, text);
+        }
+
         const ids = await discordReply(discord, msg.chatId, text, msg.replyTo, msg.components, msg.files);
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
 
@@ -2425,7 +2432,22 @@ async function routePeerDirectWithAgent(
       .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
       .trim();
     const senderKind = origMsg.author.bot ? `peer bot ${origMsg.author.username}` : `用户 ${origMsg.author.username}`;
+    const senderMention = `<@${origMsg.author.id}>`;
     const headerLabel = kind === "foreign" ? "(对称路由) " : "";
+    const directInstructions = kind === "foreign"
+      ? [
+          `**最终动作必须是**：\`reply(chat_id="${origChannelId}", text="[DIRECT] ${senderMention} <你的答案>")\``,
+          `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记并跳过自动 @ 对方 bot（否则对方 bot 会被唤醒 LLM 跑一轮没意义）`,
+          `- **一定要在 text 里写 \`${senderMention}\` @ 发起人**，这样 ${origMsg.author.username} 的 Discord 能收到 push`,
+          `- 如果是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
+          `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
+        ]
+      : [
+          `**最终动作必须是**：\`reply(chat_id="${origChannelId}", text="<你的答案>")\``,
+          `- bridge 自动 @ peer bot，你不用自己加 \`<@id>\``,
+          `- 如果是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
+          `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
+        ];
     const content = [
       `🤝 PEER DIRECT REQUEST ${headerLabel}— bridge 按用户按钮选择路由给你处理`,
       ``,
@@ -2433,10 +2455,7 @@ async function routePeerDirectWithAgent(
       `Peer bot: \`${peerBotName}\`（用户主动选中了 **${exp.localAgent}** 这个 agent）`,
       `你被 expose 的理由：${exp.purpose || "（无描述）"}`,
       ``,
-      `**最终动作必须是**：\`reply(chat_id="${origChannelId}", text="<你的答案>")\``,
-      `- bridge 自动 @ peer bot，你不用自己加 \`<@id>\``,
-      `- 如果是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
-      `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
+      ...directInstructions,
       ``,
       `---`,
       `原始消息：`,
@@ -2564,14 +2583,16 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
       .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
       .trim();
     const senderKind = msg.author.bot ? `peer bot ${msg.author.username}` : `用户 ${msg.author.username}`;
+    const senderMention = `<@${msg.author.id}>`;
     const contentLines = [
       `🤝 PEER DIRECT REQUEST (对称路由) — bridge 把这条来自**对方 guild** #agent-exchange 的 peer 请求直接路由给你处理`,
       ``,
       `来源：${senderKind} (id: \`${msg.author.id}\`) 在对方 guild 的 #agent-exchange (\`${channelId}\`)，通过 peer bot \`${peerBotForChannel.name}\` 的 shared 频道过来`,
       `你被 expose 给这个 peer 的理由：${targetExp.purpose || "（无描述）"}`,
       ``,
-      `**最终动作必须是**：\`reply(chat_id="${channelId}", text="<你的答案>")\``,
-      `- bridge 自动 @ peer bot，你不用自己加 \`<@id>\``,
+      `**最终动作必须是**：\`reply(chat_id="${channelId}", text="[DIRECT] ${senderMention} <你的答案>")\``,
+      `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记，并**跳过自动 @ 对方 bot**（否则对方 bot 会被唤醒跑一轮 LLM 没意义）`,
+      `- **一定要在 text 里写 \`${senderMention}\` @ 发起人**（上面已经给了），这样 ${msg.author.username} 的 Discord 能收到 push`,
       `- 如果这是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
       `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
       ``,
