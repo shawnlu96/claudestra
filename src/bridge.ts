@@ -1065,26 +1065,43 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
         .trim();
       if (cleanText) {
         try {
-          pp.callerWs.send(JSON.stringify({
-            type: "message",
-            content: `[🤖 peer ${pp.peerBotName}/${pp.peerAgent} 回复]\n${cleanText}`,
-            meta: {
-              chat_id: pp.callerChannelId,
-              message_id: `peer_reply_${Date.now()}`,
-              user: `${pp.peerBotName}/${pp.peerAgent}`,
-              user_id: "peer_agent",
-              is_agent: "true",
-              from_channel_id: channelId,
-              ts: new Date().toISOString(),
+          // v2.0.0 Phase 4b: 从直接 pp.callerWs.send 改成 deliver(envelope)。
+          // from=local 用 agentName="peer <bot>/<agent>" 标识来源（render 会自动
+          // 拼 "[🤖 来自 peer bot/agent]" 前缀，跟原来 "[🤖 peer X/Y 回复]" 等价）。
+          const pushEnv: RouterEnvelope = {
+            from: {
+              kind: "local",
+              agentName: `peer ${pp.peerBotName}/${pp.peerAgent}`,
+              channelId,
+              ws: pp.callerWs,
             },
-          }));
-          lastMessageSource.set(pp.callerChannelId, "agent");
-          console.log(`📨 PEER PUSH-BACK: ${pp.peerBotName}/${pp.peerAgent} 回复 → push 给 caller=${pp.callerChannelId}（吞掉本条，不走 master/direct）`);
-          recordMetric("peer_pushback", { channelId: pp.callerChannelId, meta: { peer: pp.peerBotName, peerAgent: pp.peerAgent } });
+            to: {
+              kind: "local",
+              agentName: pp.callerName,
+              channelId: pp.callerChannelId,
+              ws: pp.callerWs,
+            },
+            intent: "response",
+            content: cleanText,
+            meta: {
+              messageId: `peer_reply_${Date.now()}`,
+              triggerKind: "peer_discord",
+              ts: new Date().toISOString(),
+              threadId: newThreadId(),
+            },
+          };
+          const delivery = await deliver(pushEnv);
+          if (delivery.outcome.kind === "sent") {
+            lastMessageSource.set(pp.callerChannelId, "agent");
+            console.log(`📨 PEER PUSH-BACK: ${pp.peerBotName}/${pp.peerAgent} 回复 → push 给 caller=${pp.callerChannelId}（吞掉本条，不走 master/direct）`);
+            recordMetric("peer_pushback", { channelId: pp.callerChannelId, meta: { peer: pp.peerBotName, peerAgent: pp.peerAgent } });
+          } else if (delivery.outcome.kind === "error") {
+            console.error("PEER PUSH-BACK 发送失败:", delivery.outcome.error);
+          }
           pendingPeerCalls.delete(channelId);
           return; // 吞掉，不再走下面的流程
         } catch (e) {
-          console.error("PEER PUSH-BACK 失败:", e);
+          console.error("PEER PUSH-BACK 异常:", e);
         }
       }
     }
@@ -2163,29 +2180,47 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 如果 reply 的 chat_id 正好是某个 pending send_to_agent 的 target agent 的
         // channel，说明 agent 在它自己的 channel 里发了答案（discord 看得到，供审计）；
         // bridge 同时把这段 text push 回 caller 的 ws 作为合成消息，caller 不用再轮询。
+        //
+        // v2.0.0 Phase 4b：这条推回从直接 pending.callerWs.send 改成 deliver(envelope)。
+        // from=local(target agent), to=local(caller agent), intent=response。
+        // renderContentForLocal 的 from.kind==="local" 分支会拼 "[🤖 来自 <name>]"
+        // 前缀（原来写的是 "[🤖 target 回复]"，语义等价 —— 都是标识"这条是别的
+        // agent 发来的 response"）。
         const pending = pendingAgentCalls.get(msg.chatId);
         if (pending) {
-          const agentName = msg.chatId; // 用 channel id 作为 label
-          const pushMsg = {
-            type: "message" as const,
-            content: `[🤖 ${pending.targetName} 回复]\n${text.replace(/<@!?\d+>\s*/g, "").trim()}`,
-            meta: {
-              chat_id: pending.callerChannelId,
-              message_id: `agent_reply_${Date.now()}`,
-              user: pending.targetName,
-              user_id: "agent",
-              is_agent: "true",
-              from_channel_id: msg.chatId,
-              ts: new Date().toISOString(),
-            },
-          };
           try {
-            pending.callerWs.send(JSON.stringify(pushMsg));
-            lastMessageSource.set(pending.callerChannelId, "agent");
-            console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
-            recordMetric("agent_pushback", { channelId: pending.callerChannelId, meta: { targetName: pending.targetName } });
+            const pushEnv: RouterEnvelope = {
+              from: {
+                kind: "local",
+                agentName: pending.targetName,
+                channelId: msg.chatId,
+                ws,
+              },
+              to: {
+                kind: "local",
+                agentName: pending.callerName,
+                channelId: pending.callerChannelId,
+                ws: pending.callerWs,
+              },
+              intent: "response",
+              content: text.replace(/<@!?\d+>\s*/g, "").trim(),
+              meta: {
+                messageId: `agent_reply_${Date.now()}`,
+                triggerKind: "agent_tool",
+                ts: new Date().toISOString(),
+                threadId: newThreadId(),
+              },
+            };
+            const delivery = await deliver(pushEnv);
+            if (delivery.outcome.kind === "sent") {
+              lastMessageSource.set(pending.callerChannelId, "agent");
+              console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
+              recordMetric("agent_pushback", { channelId: pending.callerChannelId, meta: { targetName: pending.targetName } });
+            } else if (delivery.outcome.kind === "error") {
+              console.error("AGENT PUSH-BACK 发送失败:", delivery.outcome.error);
+            }
           } catch (e) {
-            console.error("AGENT PUSH-BACK 发送失败:", e);
+            console.error("AGENT PUSH-BACK 异常:", e);
           }
           pendingAgentCalls.delete(msg.chatId);
         }
@@ -3018,7 +3053,6 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
     pendingReplies.set(channelId, {
       msgId: msg.id,
       ts: Date.now(),
-      nagged: false,
       intendedReplyChannel: channelId,
       targetWs: agentClient.ws,
     });
