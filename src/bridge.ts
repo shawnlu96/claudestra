@@ -346,6 +346,12 @@ discord.once("ready", async () => {
   console.log(`📡 Bridge WebSocket: ws://localhost:${BRIDGE_PORT}`);
   console.log(`🔗 已注册频道: ${clients.size}`);
 
+  // v1.9.28+: bridge 重启时会丢失 activeStatusMessages 内存，重启前还在跑的
+  // 任务的"💭 思考中..."按钮消息就卡那儿了，Stop hook 触发时查不到 message id
+  // 没法编辑。启动后扫所有 registered channel 的近期消息，把遗留的思考中消息
+  // 编辑成"bridge 已重启"。
+  cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
+
   // 扫 skill + 为已有 active agent 扫项目级
   await scanGlobalSkills();
   try {
@@ -2280,6 +2286,64 @@ async function resolvePeerDirectCandidate(
   } catch (e) {
     console.error("PEER DISAMBIG 按钮发送失败:", e);
     return { kind: "multi_unresolved" };
+  }
+}
+
+/**
+ * v1.9.28+ bridge 重启后清理残留的"💭 大聪明思考中..."按钮消息。
+ * 在 ready 事件里跑：扫每个 registered channel 的近期消息，把我方 bot 发的
+ * 以 💭 开头、还带 components（interrupt 按钮）的消息编辑成"bridge 重启了"，
+ * 避免用户看到永远转圈的思考中 UI。
+ */
+async function cleanupStaleThinkingMessages(): Promise<void> {
+  try {
+    // 收集需要扫的 channel：master CONTROL + 本地 #agent-exchange + 所有 agent 频道 + peer 的 shared channels
+    const channelIds = new Set<string>();
+    if (CONTROL_CHANNEL_ID) channelIds.add(CONTROL_CHANNEL_ID);
+    try {
+      const { readPeers } = await import("./lib/peers.js");
+      const peers = await readPeers();
+      if (peers.localAgentExchangeId) channelIds.add(peers.localAgentExchangeId);
+      for (const pb of peers.peerBots) {
+        if (pb.agentExchangeId) channelIds.add(pb.agentExchangeId);
+      }
+    } catch { /* non-critical */ }
+    try {
+      const listResult = await runManager("list");
+      for (const a of listResult.agents || []) {
+        if (a.channelId) channelIds.add(a.channelId);
+      }
+    } catch { /* non-critical */ }
+
+    const myBotId = getBotUserId();
+    let cleaned = 0;
+    for (const cid of channelIds) {
+      try {
+        const ch = await discord.channels.fetch(cid).catch(() => null);
+        if (!ch || !("messages" in ch)) continue;
+        const recent = await (ch as TextChannel).messages.fetch({ limit: 20 }).catch(() => null);
+        if (!recent) continue;
+        for (const [, msg] of recent) {
+          // 只改我方 bot 的、以 💭 开头、还带按钮（未 Stop 编辑过）的消息
+          if (msg.author.id !== myBotId) continue;
+          if (!msg.content?.startsWith("💭")) continue;
+          if (!msg.components || msg.components.length === 0) continue; // 已经被 Stop 清了
+          try {
+            await msg.edit({
+              content: "⚠️ bridge 重启了，上一轮任务状态丢失。如果你的请求没完成，重新发一次就好。",
+              components: [],
+            });
+            cleaned++;
+          } catch { /* non-critical */ }
+        }
+      } catch { /* non-critical */ }
+    }
+    if (cleaned > 0) {
+      console.log(`🧹 启动清理：修复了 ${cleaned} 条遗留的"💭 思考中..."消息（bridge 重启前卡住的）`);
+      recordMetric("bridge_start_cleanup", { meta: { cleaned: String(cleaned) } });
+    }
+  } catch (e) {
+    console.error("cleanupStaleThinkingMessages 异常:", e);
   }
 }
 
