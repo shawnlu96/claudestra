@@ -35,17 +35,19 @@ bun run setup
 
 就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、启动 pm2。
 
-### 跨 Claudestra 协作（v1.8.0+）
+### 跨 Claudestra 协作（v1.8+，v1.9 重新设计）
 
-两个 Claudestra 实例之间，agent 可以直接聊，不用额外配置：
+两个 Claudestra 实例之间共享专精 agent，不用彼此给对方文件系统 / SSH 权限：
 
-1. **朋友在他的 Discord Developer Portal 生成 bot 邀请链接**（OAuth2 → URL Generator；scopes 勾 `bot` + `applications.commands`；权限勾 `View Channels` + `Send Messages` + `Read Message History`）。把链接发给你。
-2. **你点链接** → 选你的服务器加进去。
-3. **Discord 频道权限 = 访问控制**：右键你想跟朋友共享的频道 → 编辑频道 → 权限 → 把他的 bot 设成只能看这个频道。其他频道默认对他 bot 不可见。
-4. 朋友同样操作邀请你的 bot。
-5. **好了。** 他 agent 调 `list_shared_channels` 看你这边开放了哪些频道（按频道名 / topic 判断用途），然后 `reply(chat_id=<你的频道>, text="@你的bot ...")` 直接 @ 你 bot 提问。你 bridge 看到 @ 了自己，路由给该频道对应的 agent（比如 `#alipan-resource` 路由到你的 `agent-alipan-resource`）。回复在同一频道出现，对方 bot 看到转回。
+1. **朋友用 CLI 一键生成最小权限邀请链接**：他那边跑 `bun src/manager.ts invite-link --peer`。从 bot token 自动解 Application ID，不用进 Developer Portal 点半天。
+2. **你点链接** → 把他的 bot 加到你 Discord 服务器。bridge 自动建一个 `#agent-exchange` 频道，把他的 bot 限死在这一个频道：只允许 View + Send 这里，其他频道全部 Deny View。
+3. **你显式开放 agent**：`bun src/manager.ts peer-expose <agent> <peer-name|all> --purpose "..."`。默认 `direct` 模式 —— bridge 直接把 peer 请求路由到你指定的 agent，绕过你的 master。`peer-expose` 在 `#agent-exchange` 里用隐藏的 `PeerEvent` marker 广播 capability 通告；朋友 bridge 自动更新他的 `peers.json` capabilities 列表。
+4. **朋友同步操作**：邀请你的 bot、peer-expose 他的 agent 给你。
+5. **使用方式**：
+   - 他的 agent 找你的 agent：`send_to_agent({ target: "peer:你的bot名.agent名", text: "..." })`。bridge 层路由，push 回复，不用轮询。
+   - 他的用户在 `#agent-exchange` `@你的bot`：如果有对他开放的 exposure，bridge 直接路由到你的 agent；多个候选 → Discord 按钮让他点选（零 LLM turn）。
 
-没有任何 CLI，全靠 Discord 频道权限管边界。
+跨 Claudestra 整体链路从老的 6 跳（master 做调度 + 传话）压到 2-3 跳（直接路由）。`peer-status` 看状态 / `peer-revoke` 撤销，所有数据存在 `~/.claude-orchestrator/peers.json`。
 
 ### 装完有什么
 

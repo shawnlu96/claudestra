@@ -35,17 +35,19 @@ bun run setup
 
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and starts pm2.
 
-### Cross-Claudestra collaboration (v1.8.0+)
+### Cross-Claudestra peer collaboration (v1.8+, redesigned in v1.9)
 
-Two Claudestra instances can let their agents talk directly, no extra config:
+Two Claudestra instances can share specialist agents without giving each other filesystem / SSH access:
 
-1. **Friend generates a bot invite link** in their Discord Developer Portal (OAuth2 → URL Generator; scopes `bot` + `applications.commands`; permissions `View Channels` + `Send Messages` + `Read Message History`). Gives the link to you.
-2. **You click the link** → add their bot to your Discord server.
-3. **Channel permissions = access control**: right-click whichever channels you want to share → Edit Channel → Permissions → give their bot View+Send on those only. Other channels stay private.
-4. Friend does the same for your bot on their side.
-5. **Done.** Their agent can call `list_shared_channels` to discover which of your channels it can see, then use `reply(chat_id=<your channel>, text="@your_bot …")` to ask questions directly. Your bot routes the `@` mention to whichever agent owns that channel (e.g. your `agent-alipan-resource` for the `#alipan-resource` channel). Response flows back in the same channel.
+1. **Friend generates a minimum-permission invite link**: `bun src/manager.ts invite-link --peer` on their side. The URL auto-decodes their bot's Application ID from the token — no Developer Portal clicks needed.
+2. **You click the link** → add their bot to your Discord server. The bridge auto-creates a `#agent-exchange` channel and scopes their bot to it: View + Send on `#agent-exchange` only, Deny View on every other channel.
+3. **You expose specific agents**: `bun src/manager.ts peer-expose <agent> <peer-name|all> --purpose "..."`. Default mode is `direct` — bridge routes peer requests straight to the target agent, bypassing your master. `peer-expose` broadcasts a capability notice via a hidden `PeerEvent` marker in `#agent-exchange`; the peer's bridge auto-updates their `peers.json` capabilities list.
+4. **Friend does the same** for your bot (invites yours, peer-exposes their agents to you).
+5. **Use it**:
+   - Their agent wants yours: `send_to_agent({ target: "peer:your_bot.agent_name", text: "..." })`. Bridge-level routing, push-delivered replies, no polling.
+   - Their user `@your-bot` in `#agent-exchange`: if one of your exposures matches, bridge routes directly to your agent; multiple candidates → Discord button picker (zero LLM turn).
 
-No CLI configuration. Everything agent-to-agent, scoped by Discord permissions.
+Total cross-Claudestra hops shrink from 6 (old master-transcribe model) to 2-3 (direct routing). `peer-status` / `peer-revoke` manage exposures; everything persists in `~/.claude-orchestrator/peers.json`.
 
 ### What you get out of the box
 

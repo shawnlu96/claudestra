@@ -310,11 +310,20 @@ bun ../src/manager.ts peer-expose <agent> <peer|all> --purpose "xxx" [--mode dir
 
 **为什么保留 via_master**：exposure 里手动 `--mode via_master` 适合"多个 agent 都可能匹配、需要 LLM 路由决策"的场景，或者需要 master 加 context / 做前置权限判断的场景。不常用，默认都是 direct。
 
-**主动找 peer 帮忙（你或本地 agent 需要）：**
+**主动找 peer 帮忙（v1.9.22+ 推荐方式）：**
 
-- 读 peers.json 的 `capabilities` 看 peer 开放了哪些能力。
-- 找到对应 peer 的 #agent-exchange channel id，`reply(chat_id=..., text="...")` 过去。bridge 自动 @ 对方 bot。
-- `fetch_messages` 那个 channel_id 轮询回复。
+**本地 agent 要调 peer agent**（最常见场景）：直接用 `send_to_agent` MCP 工具，target 写完全限定名 `peer:<peer_bot_name>.<agent_name>` 或短格式 `<agent>@<peer>`：
+```
+send_to_agent({
+  target: "peer:claudestra_ahh.future_data",
+  text: "查 SKYAI 的 OI 变化..."
+})
+```
+bridge 自动把消息发到共享 #agent-exchange @ peer bot，对方回复时 bridge 把 text 推回你的 ws 作为 `[🤖 peer xxx/yyy 回复] ...` 合成消息。不用 fetch_messages 轮询。
+
+**你自己（master）要找 peer**（少见，因为你是调度员）：读 `peers.json` 的 `capabilities` 看对方开放了什么，然后同样用 `send_to_agent({ target: "peer:..." })`。
+
+**⚠️ 不要**再用 `reply(chat_id=<peer-exchange>)` + `fetch_messages` 轮询这种老模式了 —— 已经被 v1.9.22 的 `send_to_agent peer:` 语法 + push-back 取代。
 
 ### ⚠️ 结束 peer thread 要用 `[EOT]` 后缀，不然会无限互 ack
 
