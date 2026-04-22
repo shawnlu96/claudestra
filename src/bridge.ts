@@ -2989,94 +2989,6 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-/**
- * v1.9.24: Stop hook 触发时从 session jsonl 抽最近一条 assistant 文字代
- * post 到 intendedReplyChannel。**没有 NAG 兜底**（v1.9.20/21 的 NAG 方案被
- * owner 拒了 —— 触发额外 turn、污染 context、骚扰 agent，效果没比抽取好）。
- *
- * 失败路径（抽不到 text 等）就放弃 + 清 pending，沉默丢失那条消息，
- * 不再打扰 agent。
- */
-/**
- * v1.9.32+: 返回 Set<channelId> —— 本次 rescue 实际 post 到了哪些 channel。
- * Stop handler 据此跳过那些 channel 的"完成通知 @ user"消息（rescue 已经带
- * @ user 发了有效内容，再发个随机 umadone + @ user 就是重复骚扰）。
- */
-async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: Set<string>): Promise<Set<string>> {
-  const postedTo = new Set<string>();
-  const now = Date.now();
-  const STALE_MS = 5 * 60_000;
-
-  const stopClient = clients.get(stopChannelId);
-  if (!stopClient) return postedTo;
-
-  const { findLatestJsonl, extractLatestAssistantText } = await import("./lib/jsonl-extract.js");
-
-  // 遍历所有 pending 找 targetWs 匹配这次 Stop 的 ws 的（包括 foreign
-  // #agent-exchange 场景里 pending.key 是外部 channel id、targetWs 是本地 ws 的）。
-  const pendingForThisWs = [...pendingReplies.entries()].filter(
-    ([, p]) => p.targetWs === stopClient.ws
-  );
-
-  for (const [cid, pending] of pendingForThisWs) {
-    // v1.9.29+: **立刻删 pending**（在任何 await 之前）作为并发锁。
-    // 之前 delete 放在 post 成功后 → 两个 Stop 事件并发 fire 时（比如 Stop+Notification
-    // 几乎同时进来、或者 Stop 触发两次）第一个 rescue 还在 await 时第二个 rescue 看到
-    // pending 还在 → 两者都抽 jsonl → 两者都 post → 用户看到"bridge 兜底"发两遍。
-    // 先 delete 再 await，重入的 Stop 一定看到 pending 空，直接 skip。
-    pendingReplies.delete(cid);
-
-    if (now - pending.ts > STALE_MS) continue;
-
-    // 确定 cwd：register 带来的优先，没有就从 registry 查，master 用 env
-    let effectiveCwd = stopClient.cwd || "";
-    if (!effectiveCwd) {
-      try {
-        const listResult = await runManager("list");
-        const agentRecord = (listResult.agents || []).find((a: any) => a.channelId === stopClient.channelId);
-        effectiveCwd = agentRecord?.cwd || agentRecord?.project || "";
-        if (effectiveCwd) effectiveCwd = effectiveCwd.replace(/^~/, process.env.HOME || "~");
-        if (!effectiveCwd && stopClient.channelId === CONTROL_CHANNEL_ID) {
-          effectiveCwd = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
-        }
-      } catch { /* non-critical */ }
-    }
-
-    if (!effectiveCwd) {
-      console.log(`🆘 RESCUE skip: 无法确定 channel=${stopClient.channelId} 的 cwd`);
-      continue;
-    }
-
-    try {
-      const jsonlPath = await findLatestJsonl(effectiveCwd);
-      if (!jsonlPath) {
-        console.log(`🆘 RESCUE skip: cwd ${effectiveCwd} 下找不到 jsonl`);
-        continue;
-      }
-      const extracted = await extractLatestAssistantText(jsonlPath, { sinceMs: pending.ts - 5_000 });
-      if (!extracted || !extracted.trim()) {
-        console.log(`🆘 RESCUE skip: jsonl 找到但没抽出 text（可能本轮纯 tool_use 无文字）`);
-        continue;
-      }
-      // v1.9.32+: 带 @ user 让 push 通知能触发（用户不会错过）。
-      // 之前单独的"完成通知 @ user"在 rescue 成功时会被跳过（见 handleHookRequest）
-      const userMention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
-      const rescuedText = `${extracted.trim()}${userMention ? `\n${userMention}` : ""}\n\n_${t(
-        "📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送",
-        "📋 [bridge rescue] agent forgot to call reply() — this text was extracted from the jsonl transcript and posted by the bridge on its behalf",
-      )}_`;
-      const textWithMentions = await ensurePeerMentions(discord, pending.intendedReplyChannel, rescuedText);
-      await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
-      console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
-      recordMetric("reply_rescue_posted", { channelId: pending.intendedReplyChannel, meta: { chars: String(extracted.length), source: stopClient.channelId } });
-      postedTo.add(pending.intendedReplyChannel);
-    } catch (e) {
-      console.error(`🆘 RESCUE 异常 cwd=${effectiveCwd}:`, e);
-    }
-  }
-  return postedTo;
-}
-
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
     const body = await req.json() as { channelId: string; event: string };
@@ -3176,6 +3088,28 @@ async function handleHookRequest(req: Request): Promise<Response> {
         }
       }
 
+      // v1.9.37+: 在"改 ✅ / 发完成通知"前，强制让 watcher 把这条 channel 的
+      // jsonl 读干净 + flush pending textQueue。这样 turn 结束的"agent 只打字
+      // 不 reply" 场景里，watcher debounce 还没 fire 的 `💬 text` 不会丢，也不
+      // 需要再跑一份 rescue 从 jsonl 另外抽一遍（双发源头）。
+      // channelsToClear 里每个 channel 都 drain —— direct route + agent-exchange
+      // 场景可能 ws 在 master 但 intendedReplyChannel 是别的。
+      if (event === "Stop" || event === "StopFailure" || event === "stop") {
+        const { drainChannelWatcher } = await import("./bridge/jsonl-watcher.js");
+        for (const cid of channelsToClear) {
+          try { await drainChannelWatcher(cid, discord); } catch { /* non-critical */ }
+        }
+      }
+
+      // 清所有 pendingReplies（targetWs 匹配这次 Stop ws 的那些）——watcher drain
+      // 完就不再需要 "pending 挂着等 rescue" 这个语义了，留着只会让下次 Stop 误判。
+      const stopClientForPending = clients.get(channelId);
+      if (stopClientForPending && (event === "Stop" || event === "StopFailure" || event === "stop")) {
+        for (const [cid, pending] of pendingReplies.entries()) {
+          if (pending.targetWs === stopClientForPending.ws) pendingReplies.delete(cid);
+        }
+      }
+
       // 把所有相关 channel 的"💭 思考中..."状态消息改成"✅ 完成"并去掉 interrupt 按钮
       for (const cid of channelsToClear) {
         const statusMsgId = activeStatusMessages.get(cid);
@@ -3190,16 +3124,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
         activeStatusMessages.delete(cid);
       }
 
-      // v1.9.32+: 先跑 rescue（只在 turn 真结束时），返回哪些 channel 被 rescue
-      // post 了。rescue 已经带 @ user mention 发了实质内容，就跳过这些 channel
-      // 的完成通知（"随机 umadone + @user" 那条没必要再发，用户看着像重复）。
-      let rescuedChannels = new Set<string>();
-      if (event === "Stop" || event === "StopFailure" || event === "stop") {
-        rescuedChannels = await maybeRescueMissedReply(channelId, channelsToClear);
-      }
-
-      // 发完成通知消息 + @ 用户（仅 Stop/StopFailure，且 rescue 没 post 过这个 channel）
-      if (shouldNotify && !rescuedChannels.has(channelId)) {
+      // 发完成通知 @ user（仅 Stop/StopFailure）。watcher 已经把 agent 的消息推
+      // 到 Discord 了，这条就是纯"活干完了戳你一下"的 push 通知 —— umadone 短语
+      // 不带实质内容，跟 watcher 推的 `💬 text` 不重复。
+      if (shouldNotify) {
         try {
           const ch = await discord.channels.fetch(channelId);
           if (ch && "messages" in ch) {
@@ -3215,9 +3143,6 @@ async function handleHookRequest(req: Request): Promise<Response> {
         } catch (e) {
           console.error(`🏁 完成通知发送失败:`, e);
         }
-      } else if (shouldNotify && rescuedChannels.has(channelId)) {
-        lastCompletionSent.set(channelId, now); // 一样更新 dedupe ts
-        console.log(`🏁 完成通知跳过：rescue 已经 @ 用户发了实质内容 channel=${channelId}`);
       }
     }
 
