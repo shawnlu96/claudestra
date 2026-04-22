@@ -244,7 +244,7 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
 
 /** 投递到本地 Claude Code session —— 通过 ws 注入一条 "message" 事件 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Promise<RouterDelivery> {
-  const content = renderContentForLocal(env);
+  const content = await renderContentForLocal(env);
   // chat_id 是 agent reply() 时要传回的 id：消息从哪个 Discord 频道来，回复就发回那里。
   // direct route 场景下 from 是 peer 在 #agent-exchange，agent 被"偷偷"路由到自己私频，
   // 但 reply 目标必须还是 #agent-exchange，不是 agent 的私频。
@@ -341,44 +341,117 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
 }
 
 /**
- * 给本地 agent ws 注入的消息渲染 content。跟 legacy 里的 header 注入逻辑
- * 对齐（兼容 agent 现有 CLAUDE.md / 回复预期），但内容由 envelope 决定。
+ * 给本地 agent ws 注入的消息渲染 content。根据 envelope 的 from/to +
+ * 频道上下文（是不是 #agent-exchange、是不是指向 master）自动选对应的
+ * header 模板。这一处统一做，messageCreate 不再就地拼 header。
  */
-function renderContentForLocal(env: RouterEnvelope): string {
-  // v2.0.0 Phase 3 迁移期：messageCreate 里还在就地注入 agent-exchange / direct
-  // header（含 peers.json 查询结果），不重复包一层。Phase 3b+ 把 header 逻辑
-  // 移进来之后删掉这个分支。
+async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
+  // v2.0.0 Phase 3 迁移期：`contentPrerendered` 表示调用方已经把 header 拼进
+  // content 了（目前只剩 messageCreate 里的 PEER DIRECT 分支），直接返回。
+  // Phase 3b2 把 PEER DIRECT 也搬进来之后这个 flag 可以删。
   if (env.meta.contentPrerendered) return env.content;
+
   const from = env.from;
-  if (from.kind === "peer") {
-    // peer 请求路由到本地 agent（对应旧 tryRouteForeignAgentExchange /
-    // v1.9.21 inline direct 的 header）
-    const userMention = env.meta.triggerKind === "user_discord" && (from as any).sourceUserId
-      ? `<@${(from as any).sourceUserId}>`
-      : `<@${from.peerBotId}>`;
-    const replyToHint = `reply(chat_id="${(from as RouterPeerEndpoint).sharedChannelId}", text="[DIRECT] ${userMention} <你的答案>")`;
-    return [
-      `🤝 PEER DIRECT REQUEST — bridge 路由一条来自 peer 的请求给你处理`,
-      ``,
-      `来源：peer bot **${from.peerBotName}** (id: \`${from.peerBotId}\`) 通过共享 #agent-exchange (\`${(from as RouterPeerEndpoint).sharedChannelId}\`) 过来`,
-      ``,
-      `**最终动作必须是**：\`${replyToHint}\``,
-      `- text 以 \`[DIRECT]\` 开头 → bridge 识别后 strip 标记 + 跳过自动 @ 对方 bot（避免唤醒对方 LLM）`,
-      `- text 里 ${userMention} 是 push 目标，这样发起人 Discord 会收到通知`,
-      `- 最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
-      `- 不要 reply 到自己 channel / 不 send_to_agent 套娃 / 不找 master`,
-      ``,
-      `---`,
-      `原始消息：`,
-      env.content,
-    ].join("\n");
-  }
+
+  // 本地 agent → agent 转发（send_to_agent 那套）
   if (from.kind === "local") {
-    // 本地 agent → agent 转发（send_to_agent 那套）
-    const fromName = (from as RouterLocalEndpoint).agentName ?? "agent";
+    const fromName = from.agentName ?? "agent";
     return `[🤖 来自 ${fromName}]\n${env.content}`;
   }
-  // from.kind === "user": 普通用户消息，原样投递
+
+  // inbound（user / peer）—— 要不要加 header 取决于两件事：
+  // (1) 源 Discord 频道是不是我们的 #agent-exchange
+  // (2) 目标是不是 master（= 走 send_to_agent 调度）还是具体 agent（= direct）
+  //
+  // master ws 同时注册了 #control 和 #agent-exchange 两个 channel id（都指向同
+  // 一个 ws），所以 to.channelId 是这两个之一都算"到 master"。
+  const fromChannelId = from.kind === "user" ? from.channelId : from.sharedChannelId;
+  const localAgentExchangeId = await getLocalAgentExchangeId();
+  const isAgentExchange = !!localAgentExchangeId && fromChannelId === localAgentExchangeId;
+  const isMaster = env.to.kind === "local" && (
+    env.to.channelId === CONTROL_CHANNEL_ID ||
+    (!!localAgentExchangeId && env.to.channelId === localAgentExchangeId)
+  );
+
+  if (isAgentExchange && isMaster) {
+    // #agent-exchange → master：master 的职责是挑 agent 再 send_to_agent，不是自答
+    return await renderAgentExchangeToMasterHeader(env);
+  }
+
+  // 其他情况（user/peer 在 agent 自己的频道 / direct route 已到具体 agent）
+  // 原样投递
+  return env.content;
+}
+
+/**
+ * 生成 #agent-exchange → master 的调度 header。
+ * - peer 发来但这个 peer 没 exposures：polite refusal 模板
+ * - 有 exposures（peer 匹配的 / user 看全部）：AGENT-EXCHANGE ROUTING 模板 + exposures 列表
+ */
+async function renderAgentExchangeToMasterHeader(env: RouterEnvelope): Promise<string> {
+  const from = env.from;
+  const isPeer = from.kind === "peer";
+  const senderName = isPeer
+    ? (from as RouterPeerEndpoint).peerBotName
+    : (from as RouterUserEndpoint).username || "用户";
+  const senderKind = isPeer ? `peer bot ${senderName}` : `用户 ${senderName}`;
+  const replyChannelId = isPeer
+    ? (from as RouterPeerEndpoint).sharedChannelId
+    : (from as RouterUserEndpoint).channelId;
+
+  try {
+    const { readPeers } = await import("./lib/peers.js");
+    const peers = await readPeers();
+    const relevant = peers.exposures.filter((e) =>
+      isPeer
+        ? (e.peerBotId === (from as RouterPeerEndpoint).peerBotId || e.peerBotId === "all")
+        : true
+    );
+
+    // peer 发来但没对它开放任何 agent：让 master 礼貌拒绝
+    if (relevant.length === 0 && isPeer) {
+      return [
+        `⚠️ PEER REQUEST FROM ${senderName} — NO EXPOSURES DEFINED`,
+        ``,
+        `你还没有对这个 peer 开放任何本地 agent。礼貌回一句"${process.env.USER_NAME || "User"} 还没对你开放任何 agent，请让他 peer-expose 后再试"，结束本轮。**不要**自己回答 peer 问题。`,
+        ``,
+        `---`,
+        `原始消息：`,
+        env.content,
+      ].join("\n");
+    }
+
+    // 有可用 exposures：列出来让 master 挑一个调度
+    if (relevant.length > 0) {
+      const exposureList = relevant
+        .map((e) => `  - ${e.localAgent}${e.purpose ? ` (用途: ${e.purpose})` : ""}`)
+        .join("\n");
+      return [
+        `🚨 AGENT-EXCHANGE 消息 FROM ${senderKind} — YOU MUST ROUTE, NOT ANSWER`,
+        ``,
+        `这条消息来自 #agent-exchange 频道，需要路由给本地 agent，而不是你自己回答。可选 agent：`,
+        exposureList,
+        ``,
+        `步骤：`,
+        `1. 挑跟请求最匹配的 agent`,
+        `2. \`send_to_agent(target="<agent 名字>", text="来自 ${senderKind} 的请求：<原文>")\``,
+        `3. fetch_messages 轮询对应 channelId 等回复（首次 15s sleep，之后每 10s 轮询，最多 5 次）`,
+        `4. 拿到 agent 回复后用 \`reply(chat_id="${replyChannelId}", text="...")\` 转述${isPeer ? "给 peer（bridge 会自动 @ 对方 bot）" : "给用户"}`,
+        ``,
+        `🚫 不要自己回答，即便你觉得你知道答案。这个频道的语义就是"agent 间协作"，你只做调度。`,
+        ``,
+        `⚠️ **最后一步必须是 \`reply\` 工具调用**。纯文字输出只到你本地终端，Discord 看不到，用户只会收到 Stop 的空 "✅ 完成" 通知。没调 reply = 没回。`,
+        ``,
+        `---`,
+        `原始消息：`,
+        env.content,
+      ].join("\n");
+    }
+  } catch (e) {
+    console.error("agent-exchange header 渲染失败:", e);
+  }
+
+  // 失败兜底：原样投递，master 自己看着办
   return env.content;
 }
 
@@ -1105,58 +1178,9 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     meta.peer_bot_id = msg.author.id;
   }
 
-  // v1.9.4+: 在 #agent-exchange 频道里发的任何消息（peer bot 或我方人类），都注入路由指令给 master。
-  // 这个频道本身就是"agent 之间交流"的设计，master 不该自己答。header 每次都在 content 最前面，
-  // 比纯 CLAUDE.md 指令难被 LLM 忽略。
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const peers = await readPeers();
-    if (peers.localAgentExchangeId && channelId === peers.localAgentExchangeId) {
-      const senderKind = isPeer ? `peer bot ${msg.author.username}` : `用户 ${msg.author.username}`;
-      // 如果是 peer 发的：exposures 要匹配该 peer 或 "all"
-      // 如果是用户发的：所有 exposures 都可选（让 master 挑最合适的）
-      const relevant = peers.exposures.filter((e) =>
-        isPeer ? (e.peerBotId === msg.author.id || e.peerBotId === "all") : true
-      );
-      if (relevant.length === 0 && isPeer) {
-        content = [
-          `⚠️ PEER REQUEST FROM ${msg.author.username} — NO EXPOSURES DEFINED`,
-          ``,
-          `你还没有对这个 peer 开放任何本地 agent。礼貌回一句"${process.env.USER_NAME || "User"} 还没对你开放任何 agent，请让他 peer-expose 后再试"，结束本轮。**不要**自己回答 peer 问题。`,
-          ``,
-          `---`,
-          `原始消息：`,
-          content,
-        ].join("\n");
-      } else if (relevant.length > 0) {
-        const exposureList = relevant
-          .map((e) => `  - ${e.localAgent}${e.purpose ? ` (用途: ${e.purpose})` : ""}`)
-          .join("\n");
-        content = [
-          `🚨 AGENT-EXCHANGE 消息 FROM ${senderKind} — YOU MUST ROUTE, NOT ANSWER`,
-          ``,
-          `这条消息来自 #agent-exchange 频道，需要路由给本地 agent，而不是你自己回答。可选 agent：`,
-          exposureList,
-          ``,
-          `步骤：`,
-          `1. 挑跟请求最匹配的 agent`,
-          `2. \`send_to_agent(target="<agent 名字>", text="来自 ${senderKind} 的请求：<原文>")\``,
-          `3. fetch_messages 轮询对应 channelId 等回复（首次 15s sleep，之后每 10s 轮询，最多 5 次）`,
-          `4. 拿到 agent 回复后用 \`reply(chat_id="${channelId}", text="...")\` 转述${isPeer ? "给 peer（bridge 会自动 @ 对方 bot）" : "给用户"}`,
-          ``,
-          `🚫 不要自己回答，即便你觉得你知道答案。这个频道的语义就是"agent 间协作"，你只做调度。`,
-          ``,
-          `⚠️ **最后一步必须是 \`reply\` 工具调用**。纯文字输出只到你本地终端，Discord 看不到，用户只会收到 Stop 的空 "✅ 完成" 通知。没调 reply = 没回。`,
-          ``,
-          `---`,
-          `原始消息：`,
-          content,
-        ].join("\n");
-      }
-    }
-  } catch (e) {
-    console.error("agent-exchange header 注入失败:", e);
-  }
+  // v2.0.0 Phase 3b: #agent-exchange → master 的 header 注入搬进 renderContentForLocal，
+  // 这里不再就地拼 content。direct 路由（peer → 指定 agent）的 PEER DIRECT header 还在
+  // 下面 direct-route 分支里拼，phase 3b2 再搬进去。
 
   // 记录触发源：peer bot / 其他 bot 的消息视为 "agent"（下游 Stop 不发完成 @）；人类视为 "user"
   // 必须写给所有共享同一个 ws 的 channel：
@@ -1255,10 +1279,14 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // - messageCreate 内的权限判断（peer 是否被 expose / agent-exchange 是否开
   //   exposures）已经做完了，用 bypassPermissionCheck 跳过 deliver 里的重复
   //   check——因为 deliver 当前的 check 只处理 "peer → 具体 agent" 的场景，
-  //   无法识别 "peer → master 走 agent-exchange 调度"，两边的契约要在 3b 对齐。
+  //   无法识别 "peer → master 走 agent-exchange 调度"，两边的契约要在 3b3 对齐。
   //
   // deliver 真正接手的：ws.send + intent=request 时的 pendingReplies 挂起 +
   // threadId 生成 + Delivery outcome 汇报。
+  //
+  // v2.0.0 Phase 3b：agent-exchange → master 的 header 注入已经搬进
+  // renderContentForLocal，不再就地拼。PEER DIRECT header 还由 direct-route 分支
+  // 就地拼（directHeaderInjected=true 时走 contentPrerendered 跳过二次包装）。
   const routeClient = clients.get(routeClientChannelId) ||
     (routeWs === client.ws ? client : undefined);
   const from: RouterUserEndpoint | RouterPeerEndpoint = isPeer
@@ -1286,7 +1314,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       ts: msg.createdAt.toISOString(),
       threadId: newThreadId(),
       attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
-      contentPrerendered: true,
+      contentPrerendered: directHeaderInjected,
       bypassPermissionCheck: true,
     },
   };
