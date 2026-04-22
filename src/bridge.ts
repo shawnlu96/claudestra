@@ -1273,8 +1273,15 @@ async function ensurePeerMentions(discord: Client, channelId: string, text: stri
     if (!ch || !("guild" in ch) || !(ch as any).guild) return text;
     const guild = (ch as any).guild;
     const ownBotId = getBotUserId();
-    // 列频道成员里的 peer bot
-    const members = await guild.members.fetch({ cache: true }).catch(() => null);
+    // 列频道成员里的 peer bot。
+    // v1.9.36+: members.fetch 有时在 bridge 刚启动、cache 冷时会卡几十秒/永远（Discord
+    // 响应慢 / rate limit / gateway 还没 ready）。加 3s 超时兜底：fetch 超时就退化成
+    // 用当前 cache，宁可少 @ 一两个 peer bot 也不能让整个 reply handler 卡死。
+    const fetchWithTimeout = Promise.race([
+      guild.members.fetch({ cache: true }).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+    ]);
+    const members = (await fetchWithTimeout) ?? guild.members.cache;
     if (!members) return text;
     const peerBots: string[] = [];
     for (const [, m] of members) {
@@ -2991,6 +2998,7 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
       console.error(`🆘 RESCUE 异常 cwd=${effectiveCwd}:`, e);
     }
   }
+  return postedTo;
 }
 
 async function handleHookRequest(req: Request): Promise<Response> {

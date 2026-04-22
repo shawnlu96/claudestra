@@ -127,13 +127,16 @@ function connectBridge(): Promise<void> {
         pendingRequests.delete(id);
       }
 
-      // 被 bridge 主动关闭（code 1000 + replaced 标记）→ 直接退出，不重连
-      if (replaced || event?.code === 1000) {
-        console.error("👋 channel-server 退出（被 bridge 主动取代）");
+      // 仅当 bridge 明确告诉我们"你被新连接取代了"（replaced 标记）才退出。
+      // code 1000 只意味着对端干净关闭（比如 bridge 重启），这时应该重连而不是退出 ——
+      // 之前 code 1000 也 exit(0) 的逻辑导致 bridge 重启 = 所有 channel-server 集体死亡，
+      // Claude Code 的 MCP 不会自动 respawn，于是 agent 跟 Discord 的连接彻底断掉。
+      if (replaced) {
+        console.error("👋 channel-server 退出（被新连接取代）");
         process.exit(0);
       }
 
-      // 否则正常的指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
+      // 正常的指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
       reconnectAttempts++;
       const delay = Math.min(
         3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)),
