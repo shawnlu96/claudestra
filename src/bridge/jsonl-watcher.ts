@@ -177,10 +177,10 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               toolsChanged = true;
             }
             if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
-              const t = block.text.trim();
-              if (t.length > 3) {
-                state.textQueue.push(`💬 ${t}`);
-              }
+              // 以前有 `t.length > 3` 的 filter 防碎片短 text 刷屏，但那会把 "OK"
+              // "收到" 这种合法短回复也吞掉。现在 rescue 删了 → watcher 是唯一
+              // 文字出口，任何 trim 后非空的 text 都要推出来。
+              state.textQueue.push(`💬 ${block.text.trim()}`);
             }
           }
         }
