@@ -7,21 +7,32 @@
  *
  * 为什么不直接每次读 config 文件？—— `t()` 调用高频（bridge 每条消息都会走），
  * 同步读文件太慢。一次载入内存，进程生命周期内都有效。config 变了要重启服务。
+ *
+ * initLang **同步** 读文件 —— top-level await 在 pm2 fork mode 跑 bundle 时
+ * 不支持（require() 报 "async module unsupported"），所以用 readFileSync。
+ * Config 文件很小（<1KB），同步读启动期只会跑一次，性能无感。
  */
-import { readConfig, type AppLang } from "./config-store.js";
+import { readFileSync, existsSync } from "fs";
+import type { AppLang } from "./config-store.js";
+
+const HOME = process.env.HOME || "";
+const CONFIG_PATH = `${HOME}/.claude-orchestrator/config.json`;
 
 let cachedLang: AppLang = "zh";
 let loaded = false;
 
-/** daemon 启动时调一次（bridge / launcher / cron / manager），从 config.json 载 lang */
-export async function initLang(): Promise<AppLang> {
+/** daemon 启动时调一次（bridge / launcher / cron / manager），从 config.json 载 lang。同步。 */
+export function initLang(): AppLang {
   try {
-    const cfg = await readConfig();
-    cachedLang = cfg.lang;
+    if (existsSync(CONFIG_PATH)) {
+      const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+      if (raw && (raw.lang === "en" || raw.lang === "zh")) {
+        cachedLang = raw.lang;
+      }
+    }
     loaded = true;
   } catch {
-    // config 读失败就用默认
-    cachedLang = "zh";
+    // config 读失败就用默认 zh
     loaded = true;
   }
   return cachedLang;

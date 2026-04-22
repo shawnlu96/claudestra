@@ -9,7 +9,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
-await initLang();
+initLang();
 
 import {
   tmuxRaw,

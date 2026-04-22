@@ -9,8 +9,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
-// 启动时先载一次 lang —— daemon 生命周期内都用这个缓存值
-await initLang();
+initLang(); // 同步载一次 lang（pm2 fork 模式不支持 top-level await）
 
 import {
   Client,

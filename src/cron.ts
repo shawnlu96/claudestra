@@ -446,7 +446,7 @@ async function main() {
 // 不该让它的 console 被 wrap（会污染 JSON 输出）。
 if (import.meta.main) {
   enableTimestampLogs();
-  await initLang();
+  initLang();
   main().catch((err) => {
     console.error("Cron Scheduler 崩溃:", err);
     process.exit(1);
