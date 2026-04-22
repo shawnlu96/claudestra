@@ -93,20 +93,15 @@ const clients = new Map<string, ClientInfo>();
 const activeStatusMessages = new Map<string, string>();
 
 /**
- * v1.9.20+ / v1.9.21 重构: 记 "Discord 入站消息进到某个 channel-server 但还没回到
- * Discord" 的 pending，Stop hook 触发时用来做两件事：
- *   (1) 如果 pending 的 targetWs 就是这次 Stop 的 ws，且该 turn 没调 reply() →
- *       从 session jsonl 捞最近一条 assistant 文字，**代 post** 到
- *       intendedReplyChannel（v1.9.21+，比 NAG 更硬兜底）
- *   (2) 抽不到文字时 fallback 到 [SYSTEM NAG] 注入，让 master/agent 再跑一轮
+ * 记 "Discord 入站消息转发到某个 channel-server，turn 结果还没回到 Discord" 的
+ * pending。deliverToLocal 在 intent=request 时挂一条；reply handler 成功时清对
+ * 应 chatId 的条目；Stop hook 兜底清所有匹配 ws 的残留条目（防止泄漏）。
  *
  * intendedReplyChannel 可能跟接收消息的 channel 不同！
  *   - via_master：消息进 #agent-exchange 但 CONTROL 和 #agent-exchange 都行
  *     （master 用同一个 ws 处理两个 channel），intended = #agent-exchange
  *   - direct：peer 消息进 #agent-exchange，路由到 agent 的 ws，agent 应该 reply
  *     回 #agent-exchange @ peer bot —— intended = #agent-exchange，target 是 agent
- *
- * reply handler 命中 intendedReplyChannel 就清掉 pending。
  */
 interface PendingReply {
   msgId: string;
@@ -117,13 +112,6 @@ interface PendingReply {
   threadId?: string;
 }
 const pendingReplies = new Map<string, PendingReply>();
-/** v2.0.0+: thread → request envelope 追踪。response 进来时按 threadId 清，
- *  Stop hook 按 threadId 收尾。取代老的 "by channelId only" 状态管理。 */
-interface PendingThread {
-  request: RouterEnvelope;
-  ts: number;
-}
-const pendingThreads = new Map<string, PendingThread>();
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
 let _cachedAgentExchangeId = "";
@@ -184,13 +172,10 @@ import type {
 import { endpointLabel, envelopeLabel, newThreadId } from "./bridge/router.js";
 
 /**
- * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate / reply /
- * send_to_agent / rescue / relay）最终都应该走这一个函数。内部按 to.kind 派
- * 发（local ws inject / peer discord send / user discord send），权限检查 +
- * 状态追踪 + @ mention 全在一处管。
- *
- * 迁移中：目前还有 legacy 分支直接往 ws 或 discord.channel.send 写消息，
- * 逐个迁进来。每迁一条分支就删 legacy 代码。
+ * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 /
+ * reply / send_to_agent / pushback / peer direct 的各 variant）都走这一个函数。
+ * 内部按 to.kind 派发（local ws inject / peer discord send / user discord send），
+ * 权限检查 + 状态追踪 + @ mention / header 渲染全在一处管。
  */
 async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
   // 0. intent-aware 预处理：response 消息先清对应 pending
@@ -200,7 +185,6 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
         pendingReplies.delete(key);
       }
     }
-    pendingThreads.delete(env.meta.threadId);
   }
 
   // 1. 权限检查：peer → 本地具体 agent 的情况要查 peers.json exposures。
@@ -295,7 +279,6 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
         targetWs: to.ws,
         threadId: env.meta.threadId,
       });
-      pendingThreads.set(env.meta.threadId, { request: env, ts: Date.now() });
     }
     return { envelope: env, outcome: { kind: "sent" } };
   } catch (e) {
@@ -304,7 +287,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
 }
 
 /** 从 envelope 推断 "response 应该发回哪个 channel" —— 用于 pending 的
- *  intendedReplyChannel + rescue 的代 post 目标 */
+ *  intendedReplyChannel + 生成给 agent 的 meta.chat_id */
 function resolveReplyBackChannel(env: RouterEnvelope): string {
   if (env.from.kind === "user") return env.from.channelId;
   if (env.from.kind === "peer") return env.from.sharedChannelId;
@@ -2524,18 +2507,6 @@ const lastCompletionSent = new Map<string, number>();
 const lastMessageSource = new Map<string, "user" | "agent">();
 const COMPLETION_DEDUPE_MS = 10_000; // 10 秒内不重复发完成通知
 
-/**
- * v1.9.20+/v1.9.21: Stop hook 触发时兜底 master/agent 忘了 reply 的情况。
- *
- * **v1.9.21 升级**：不再只靠 NAG（NAG 的成功率受 LLM 自觉性影响），而是**优先**
- * 从 session jsonl 捞最近一条 assistant 文字**代 post** 到 intendedReplyChannel。
- * 捞不到才 fallback 到 NAG。这样保证"消息进 Discord 就一定有 Discord 回复"。
- *
- * stopChannelId: Stop hook 自己带的 channelId（我们据此找到触发 Stop 的那个 ws，
- *   只处理它名下的 pending，避免在 master Stop 时误清掉别的 agent 的 pending）
- * channelsToClear: 跟 stopChannelId 同 ws 的所有 channel（master 是
- *   {CONTROL, #agent-exchange}）
- */
 /**
  * v1.9.22+ 对称 direct 路由：我方 bot 在对方 guild 的 foreign #agent-exchange 收到 @
  * 时，判断是否该走直接路由到我方 exposed agent。
