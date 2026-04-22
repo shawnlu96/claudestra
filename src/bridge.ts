@@ -2638,10 +2638,14 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
   );
 
   for (const [cid, pending] of pendingForThisWs) {
-    if (now - pending.ts > STALE_MS) {
-      pendingReplies.delete(cid);
-      continue;
-    }
+    // v1.9.29+: **立刻删 pending**（在任何 await 之前）作为并发锁。
+    // 之前 delete 放在 post 成功后 → 两个 Stop 事件并发 fire 时（比如 Stop+Notification
+    // 几乎同时进来、或者 Stop 触发两次）第一个 rescue 还在 await 时第二个 rescue 看到
+    // pending 还在 → 两者都抽 jsonl → 两者都 post → 用户看到"bridge 兜底"发两遍。
+    // 先 delete 再 await，重入的 Stop 一定看到 pending 空，直接 skip。
+    pendingReplies.delete(cid);
+
+    if (now - pending.ts > STALE_MS) continue;
 
     // 确定 cwd：register 带来的优先，没有就从 registry 查，master 用 env
     let effectiveCwd = stopClient.cwd || "";
@@ -2659,7 +2663,6 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
 
     if (!effectiveCwd) {
       console.log(`🆘 RESCUE skip: 无法确定 channel=${stopClient.channelId} 的 cwd`);
-      pendingReplies.delete(cid);
       continue;
     }
 
@@ -2667,13 +2670,11 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
       const jsonlPath = await findLatestJsonl(effectiveCwd);
       if (!jsonlPath) {
         console.log(`🆘 RESCUE skip: cwd ${effectiveCwd} 下找不到 jsonl`);
-        pendingReplies.delete(cid);
         continue;
       }
       const extracted = await extractLatestAssistantText(jsonlPath, { sinceMs: pending.ts - 5_000 });
       if (!extracted || !extracted.trim()) {
         console.log(`🆘 RESCUE skip: jsonl 找到但没抽出 text（可能本轮纯 tool_use 无文字）`);
-        pendingReplies.delete(cid);
         continue;
       }
       const rescuedText = `${extracted.trim()}\n\n_📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送_`;
@@ -2681,10 +2682,8 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
       await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
       console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
       recordMetric("reply_rescue_posted", { channelId: pending.intendedReplyChannel, meta: { chars: String(extracted.length), source: stopClient.channelId } });
-      pendingReplies.delete(cid);
     } catch (e) {
       console.error(`🆘 RESCUE 异常 cwd=${effectiveCwd}:`, e);
-      pendingReplies.delete(cid);
     }
   }
 }
