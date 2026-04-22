@@ -81,7 +81,8 @@ interface ClientInfo {
   ws: ServerWebSocket<unknown>;
   channelId: string;
   userId?: string;
-  /** channel-server 所在 Claude Code 进程的 cwd，v1.9.21+ 用来找 jsonl 兜底抽取 */
+  /** channel-server 所在 Claude Code 进程的 cwd。jsonl-watcher 用它定位
+   *  ~/.claude/projects/<cwd-slug>/<sessionId>.jsonl 监听 tool / text。 */
   cwd?: string;
 }
 
