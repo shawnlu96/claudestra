@@ -3162,6 +3162,19 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+/** 返回跟 channelId 共享同一个 ws 的所有其他 channelId（不含自身）。
+ *  master ws 挂了 #control + #agent-exchange 两个 channel key，任何一端的
+ *  Stop hook 都得同步清另一端的 typing / status message。 */
+function sameWsChannels(channelId: string): string[] {
+  const self = clients.get(channelId);
+  if (!self) return [];
+  const out: string[] = [];
+  for (const [otherId, info] of clients.entries()) {
+    if (otherId !== channelId && info.ws === self.ws) out.push(otherId);
+  }
+  return out;
+}
+
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
     const body = await req.json() as { channelId: string; event: string };
@@ -3174,21 +3187,13 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // 兼容旧版 hook 发的 "stop"
     if (event === "Stop" || event === "StopFailure" || event === "Notification" || event === "stop") {
       console.log(`🏁 Hook 收到 ${event}: channel=${channelId}`);
+      // typing + safety timer：本 channel + 共享 ws 的所有 channel 都停（参见
+      // sameWsChannels 的注释）。
       stopTyping(channelId);
       clearSafetyTimer(channelId);
-
-      // v1.9.3+: #agent-exchange 挂到 master 的 ws（跟 CONTROL 共用同一个 Claude Code session），
-      // master 的 Stop hook 只带 CONTROL 的 channelId；如果不同时停 agent-exchange 的 typing，
-      // peer 请求触发的 typing indicator 会永远卡在那里。
-      // 解决：找出跟当前 channel 共用同一个 ws 的所有其他 channel，一并 stopTyping + clearSafetyTimer。
-      const thisClient = clients.get(channelId);
-      if (thisClient) {
-        for (const [otherId, info] of clients.entries()) {
-          if (otherId !== channelId && info.ws === thisClient.ws) {
-            stopTyping(otherId);
-            clearSafetyTimer(otherId);
-          }
-        }
+      for (const otherId of sameWsChannels(channelId)) {
+        stopTyping(otherId);
+        clearSafetyTimer(otherId);
       }
 
       // 只有 Stop / StopFailure 触发完成通知，Notification 不触发（避免 Stop+Notification 连发两次）
@@ -3236,25 +3241,20 @@ async function handleHookRequest(req: Request): Promise<Response> {
         } catch { /* non-critical */ }
       }
 
-      // 收集所有需要清状态消息的 channel：Stop hook 本身的 channelId + 所有共享同一个 ws 的其他 channel
-      // （比如 master 的 #agent-exchange）。否则 peer 消息走 #agent-exchange 触发的"💭 大聪明思考中..."
-      // 按钮永远不会变成"✅ 完成"，interrupt 按钮一直挂着。
+      // 收集所有需要清状态消息的 channel：Stop 的 channelId + 共享同一个 ws 的
+      // 其他 channel（master 的 #agent-exchange）+ v1.9.35+ 对称 direct 路由的
+      // foreign exchange（那些 channel 不在 clients 里，要从 pendingReplies 的
+      // targetWs 匹配反查 intendedReplyChannel）。否则"💭 思考中..."按钮永远
+      // 不会变成"✅ 完成"。
       const channelsToClear = new Set<string>([channelId]);
       const thisClientForStatus = clients.get(channelId);
       if (thisClientForStatus) {
-        for (const [otherId, info] of clients.entries()) {
-          if (otherId !== channelId && info.ws === thisClientForStatus.ws) {
-            channelsToClear.add(otherId);
-          }
+        for (const otherId of sameWsChannels(channelId)) {
+          channelsToClear.add(otherId);
         }
-        // v1.9.35+: 对称 direct 路由的状态消息在 foreign exchange（peer 的）
-        // 里，那个 channel 不在 clients 里也不同 ws（peer 才有它的 ws）。但
-        // pendingReplies 记了 "targetWs 对应哪些 intendedReplyChannel"，补一下
-        // 把这些 channel 也加进来，这样 stopTyping 和 status cleanup 都能覆盖。
         for (const [, pending] of pendingReplies.entries()) {
           if (pending.targetWs === thisClientForStatus.ws) {
             channelsToClear.add(pending.intendedReplyChannel);
-            // 也顺便 stopTyping 那个频道
             stopTyping(pending.intendedReplyChannel);
             clearSafetyTimer(pending.intendedReplyChannel);
           }
