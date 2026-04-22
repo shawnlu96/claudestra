@@ -346,11 +346,6 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
  * header 模板。这一处统一做，messageCreate 不再就地拼 header。
  */
 async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
-  // v2.0.0 Phase 3 迁移期：`contentPrerendered` 表示调用方已经把 header 拼进
-  // content 了（目前只剩 messageCreate 里的 PEER DIRECT 分支），直接返回。
-  // Phase 3b2 把 PEER DIRECT 也搬进来之后这个 flag 可以删。
-  if (env.meta.contentPrerendered) return env.content;
-
   const from = env.from;
 
   // 本地 agent → agent 转发（send_to_agent 那套）
@@ -378,9 +373,55 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
     return await renderAgentExchangeToMasterHeader(env);
   }
 
-  // 其他情况（user/peer 在 agent 自己的频道 / direct route 已到具体 agent）
-  // 原样投递
+  if (isAgentExchange && from.kind === "peer" && env.to.kind === "local" && env.to.agentName) {
+    // peer → #agent-exchange → direct route 到具体 agent：agent 需要知道这条是
+    // 对方 peer 直接路由给它的、reply 目标是 #agent-exchange（不是它自己频道）
+    return await renderPeerDirectHeader(env, from);
+  }
+
+  // 其他情况（user/peer 在 agent 自己的频道 / 没命中上面的条件）原样投递
   return env.content;
+}
+
+/**
+ * 生成 peer 直连 agent 的 header。agent 要被告知：
+ *  - 这是 peer 直接路由给我的请求（bypass master）
+ *  - reply 的 chat_id 是 #agent-exchange，不是自己的频道
+ *  - purpose 来自 peers.json 里对应的 exposure
+ */
+async function renderPeerDirectHeader(
+  env: RouterEnvelope,
+  from: RouterPeerEndpoint,
+): Promise<string> {
+  const to = env.to as RouterLocalEndpoint;
+  const targetAgentName = to.agentName ?? "agent";
+  let purpose = "（无描述）";
+  try {
+    const { readPeers } = await import("./lib/peers.js");
+    const peers = await readPeers();
+    const exposure = peers.exposures.find((e) =>
+      (e.localAgent === targetAgentName || `agent-${e.localAgent}` === targetAgentName) &&
+      (e.peerBotId === from.peerBotId || e.peerBotId === "all")
+    );
+    if (exposure?.purpose) purpose = exposure.purpose;
+  } catch { /* non-critical */ }
+  const userName = process.env.USER_NAME || "owner";
+  return [
+    `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
+    ``,
+    `来源：peer bot **${from.peerBotName}** (id: \`${from.peerBotId}\`) 在 #agent-exchange (\`${from.sharedChannelId}\`)`,
+    `你被 expose 的理由：${purpose}`,
+    ``,
+    `**最终动作必须是**：\`reply(chat_id="${from.sharedChannelId}", text="<你的答案>")\``,
+    `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
+    `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
+    `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
+    `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${userName} 或其 master" 也行`,
+    ``,
+    `---`,
+    `原始消息：`,
+    env.content,
+  ].join("\n");
 }
 
 /**
@@ -1201,7 +1242,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 找不到匹配 exposure / 多个 candidate / mode=via_master → 回到原路径（forward 给 master）。
   let routeWs = client.ws;
   let routeClientChannelId = client.channelId;
-  let directHeaderInjected = false;
+  let routeAgentName: string | undefined;
+  let directRouted = false;
   if (isPeer && channelId === await getLocalAgentExchangeId()) {
     const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
     const peers = await readPeers();
@@ -1233,26 +1275,14 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
           if (targetAgent && targetAgent.status === "active") {
             const agentClient = clients.get(targetAgent.channelId);
             if (agentClient) {
-              // 改写 content：盖掉上面的 master agent-exchange header，插 direct header
-              content = [
-                `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
-                ``,
-                `来源：peer bot **${msg.author.username}** (id: \`${msg.author.id}\`) 在 #agent-exchange (\`${channelId}\`)`,
-                `你被 expose 的理由：${targetExp.purpose || "（无描述）"}`,
-                ``,
-                `**最终动作必须是**：\`reply(chat_id="${channelId}", text="<你的答案>")\``,
-                `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
-                `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
-                `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
-                `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${process.env.USER_NAME || "owner"} 或其 master" 也行`,
-                ``,
-                `---`,
-                `原始消息：`,
-                (msg.content || "").replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "").trim() + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
-              ].join("\n");
+              // Phase 3b2: 不再就地拼 PEER DIRECT header，改成把路由目标写进
+              // envelope 的 to，让 renderContentForLocal 根据 from=peer + 源是
+              // agent-exchange + to 是具体 agent 这组条件自己查 peers.json 拼
+              // header。content 仍然是 agent 看到的原文（带 strip mention）。
               routeWs = agentClient.ws;
               routeClientChannelId = agentClient.channelId;
-              directHeaderInjected = true;
+              routeAgentName = targetAgent.name;
+              directRouted = true;
               console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
               recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
             } else {
@@ -1270,23 +1300,16 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v2.0.0 Phase 3：统一走 deliver(envelope)。
+  // v2.0.0 Phase 3：统一走 deliver(envelope)。所有 header 注入（agent-exchange
+  // 调度 / PEER DIRECT / no-exposures 拒绝）都在 renderContentForLocal 里做，
+  // messageCreate 不再碰 content。只负责：
+  //   - decide from / to（包括 direct route 时把 to 换成具体 agent、带 agentName）
+  //   - 填原始 content（strip mention 后的纯文本）+ attachments
+  //   - 交给 deliver
   //
-  // 几种上游行为保持不变（留给 Phase 3b+ 往 router 里搬）：
-  // - agent-exchange header 注入 / PEER DIRECT header 注入都已经直接写进了
-  //   `content`，所以 envelope.meta.contentPrerendered = true，跳过 deliver 里
-  //   的 renderContentForLocal 二次包装。
-  // - messageCreate 内的权限判断（peer 是否被 expose / agent-exchange 是否开
-  //   exposures）已经做完了，用 bypassPermissionCheck 跳过 deliver 里的重复
-  //   check——因为 deliver 当前的 check 只处理 "peer → 具体 agent" 的场景，
-  //   无法识别 "peer → master 走 agent-exchange 调度"，两边的契约要在 3b3 对齐。
-  //
-  // deliver 真正接手的：ws.send + intent=request 时的 pendingReplies 挂起 +
-  // threadId 生成 + Delivery outcome 汇报。
-  //
-  // v2.0.0 Phase 3b：agent-exchange → master 的 header 注入已经搬进
-  // renderContentForLocal，不再就地拼。PEER DIRECT header 还由 direct-route 分支
-  // 就地拼（directHeaderInjected=true 时走 contentPrerendered 跳过二次包装）。
+  // bypassPermissionCheck 仍然打开：deliver 里的 "peer→local 必须匹配 exposure"
+  // 硬性检查会把合法的 "peer → master 调度"（from=peer, to=master）误 drop，
+  // Phase 3b3 把权限检查改成只校验 peer→具体 agent 那条路再删这个 flag。
   const routeClient = clients.get(routeClientChannelId) ||
     (routeWs === client.ws ? client : undefined);
   const from: RouterUserEndpoint | RouterPeerEndpoint = isPeer
@@ -1299,6 +1322,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     : { kind: "user", userId: msg.author.id, channelId, username: msg.author.username };
   const to: RouterLocalEndpoint = {
     kind: "local",
+    agentName: routeAgentName,
     channelId: routeClient?.channelId ?? routeClientChannelId,
     ws: routeWs,
     cwd: routeClient?.cwd,
@@ -1314,14 +1338,13 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       ts: msg.createdAt.toISOString(),
       threadId: newThreadId(),
       attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
-      contentPrerendered: directHeaderInjected,
       bypassPermissionCheck: true,
     },
   };
   try {
     const delivery = await deliver(env);
     if (delivery.outcome.kind === "sent") {
-      recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length, direct: directHeaderInjected } });
+      recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length, direct: directRouted } });
     } else if (delivery.outcome.kind === "dropped") {
       console.log(`📪 deliver dropped ${envelopeLabel(env)}: ${delivery.outcome.reason}`);
       recordMetric("message_dropped", { channelId, meta: { reason: delivery.outcome.reason } });
