@@ -377,13 +377,16 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
   );
 
   if (isAgentExchange && isMaster) {
-    // #agent-exchange → master：master 的职责是挑 agent 再 send_to_agent，不是自答
+    // 我方 #agent-exchange → master：master 的职责是挑 agent 再 send_to_agent，不是自答
     return await renderAgentExchangeToMasterHeader(env);
   }
 
-  if (isAgentExchange && from.kind === "peer" && env.to.kind === "local" && env.to.agentName) {
-    // peer → #agent-exchange → direct route 到具体 agent：agent 需要知道这条是
-    // 对方 peer 直接路由给它的、reply 目标是 #agent-exchange（不是它自己频道）
+  if (from.kind === "peer" && env.to.kind === "local" && env.to.agentName && !isMaster) {
+    // peer → 具体 agent（非 master）→ direct route 头。源频道可能是：
+    //   - 我方 #agent-exchange（inline direct / button local 走这条）
+    //   - 对方 guild 的 foreign exchange（对称直连 / button foreign 走这条）
+    // renderPeerDirectHeader 内部根据 sharedChannelId 是否等于 localAgentExchangeId
+    // 决定走 "local reply 回 #agent-exchange" 还是 "foreign reply + [DIRECT] + @发起人"。
     return await renderPeerDirectHeader(env, from);
   }
 
@@ -392,10 +395,14 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
 }
 
 /**
- * 生成 peer 直连 agent 的 header。agent 要被告知：
- *  - 这是 peer 直接路由给我的请求（bypass master）
- *  - reply 的 chat_id 是 #agent-exchange，不是自己的频道
- *  - purpose 来自 peers.json 里对应的 exposure
+ * 生成 peer 直连 agent 的 header。两种 variant：
+ *  - **local**（from.sharedChannelId === 我方 #agent-exchange id）：peer 在我们
+ *    自己的 #agent-exchange @ 我们 → 路由到 exposed agent。reply 直接回到我方
+ *    #agent-exchange，bridge 的 ensurePeerMentions 会自动补 @ peer bot。
+ *  - **foreign**（from.sharedChannelId 来自对方 guild 的 exchange）：我方 bot 在
+ *    对方 guild 被 @，路由到我方 exposed agent。reply 回到对方 exchange，要用
+ *    `[DIRECT]` 标记 + @ 实际发起人（meta.sourceUserId），避免自动 @ 对方 bot
+ *    造成对方 LLM 被唤醒。
  */
 async function renderPeerDirectHeader(
   env: RouterEnvelope,
@@ -403,6 +410,12 @@ async function renderPeerDirectHeader(
 ): Promise<string> {
   const to = env.to as RouterLocalEndpoint;
   const targetAgentName = to.agentName ?? "agent";
+  const localAgentExchangeId = await getLocalAgentExchangeId();
+  const isForeign = !!localAgentExchangeId && from.sharedChannelId !== localAgentExchangeId;
+  const userName = process.env.USER_NAME || "owner";
+  const sourceUserId = env.meta.sourceUserId;
+  const sourceMention = sourceUserId ? `<@${sourceUserId}>` : `<@${from.peerBotId}>`;
+
   let purpose = "（无描述）";
   try {
     const { readPeers } = await import("./lib/peers.js");
@@ -413,7 +426,27 @@ async function renderPeerDirectHeader(
     );
     if (exposure?.purpose) purpose = exposure.purpose;
   } catch { /* non-critical */ }
-  const userName = process.env.USER_NAME || "owner";
+
+  if (isForeign) {
+    return [
+      `🤝 PEER DIRECT REQUEST (对称路由) — bridge 把这条来自**对方 guild** #agent-exchange 的请求直接路由给你处理`,
+      ``,
+      `来源：peer bot **${from.peerBotName}** (id: \`${from.peerBotId}\`) 的 shared 频道 (\`${from.sharedChannelId}\`)`,
+      `你被 expose 的理由：${purpose}`,
+      ``,
+      `**最终动作必须是**：\`reply(chat_id="${from.sharedChannelId}", text="[DIRECT] ${sourceMention} <你的答案>")\``,
+      `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记并跳过自动 @ 对方 bot（否则对方 bot 会被唤醒跑一轮 LLM）`,
+      `- **一定要在 text 里写 ${sourceMention} @ 发起人**，这样发起人的 Discord 能收到 push`,
+      `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
+      `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
+      `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${userName} 或其 master" 也行`,
+      ``,
+      `---`,
+      `原始消息：`,
+      env.content,
+    ].join("\n");
+  }
+
   return [
     `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
     ``,
@@ -2828,63 +2861,47 @@ async function routePeerDirectWithAgent(
     const rawText = (origMsg.content || "")
       .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
       .trim();
-    const senderKind = origMsg.author.bot ? `peer bot ${origMsg.author.username}` : `用户 ${origMsg.author.username}`;
-    const senderMention = `<@${origMsg.author.id}>`;
-    const headerLabel = kind === "foreign" ? "(对称路由) " : "";
-    const directInstructions = kind === "foreign"
-      ? [
-          `**最终动作必须是**：\`reply(chat_id="${origChannelId}", text="[DIRECT] ${senderMention} <你的答案>")\``,
-          `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记并跳过自动 @ 对方 bot（否则对方 bot 会被唤醒 LLM 跑一轮没意义）`,
-          `- **一定要在 text 里写 \`${senderMention}\` @ 发起人**，这样 ${origMsg.author.username} 的 Discord 能收到 push`,
-          `- 如果是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
-          `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
-        ]
-      : [
-          `**最终动作必须是**：\`reply(chat_id="${origChannelId}", text="<你的答案>")\``,
-          `- bridge 自动 @ peer bot，你不用自己加 \`<@id>\``,
-          `- 如果是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
-          `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
-        ];
-    const content = [
-      `🤝 PEER DIRECT REQUEST ${headerLabel}— bridge 按用户按钮选择路由给你处理`,
-      ``,
-      `来源：${senderKind} (id: \`${origMsg.author.id}\`) 在 #agent-exchange (\`${origChannelId}\`)`,
-      `Peer bot: \`${peerBotName}\`（用户主动选中了 **${exp.localAgent}** 这个 agent）`,
-      `你被 expose 的理由：${exp.purpose || "（无描述）"}`,
-      ``,
-      ...directInstructions,
-      ``,
-      `---`,
-      `原始消息：`,
-      rawText + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
-    ].join("\n");
+    const contentWithAttachments = rawText +
+      (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : "");
 
-    const meta: Record<string, string> = {
-      chat_id: origChannelId,
-      message_id: origMsg.id,
-      user: origMsg.author.username,
-      user_id: origMsg.author.id,
-      ts: origMsg.createdAt.toISOString(),
-      peer_direct: "true",
-      peer_reply_to: origChannelId,
-      peer_bot_name: peerBotName,
-      peer_bot_id: peerBotId,
-    };
-    if (attachmentPaths.length > 0) {
-      meta.attachment_count = String(attachmentPaths.length);
-      meta.attachments = attachmentPaths.join(";");
-    }
-
-    pendingReplies.set(origChannelId, {
-      msgId: origMsg.id,
-      ts: Date.now(),
-      intendedReplyChannel: origChannelId,
-      targetWs: agentClient.ws,
-    });
+    // v2.0.0 Phase 4c: 构造 envelope 交给 deliver。
+    // from=peer 用 channel 所属的 peer bot 身份（local 时就是 msg.author，foreign
+    // 时是 capabilities lookup 拿到的）。sourceUserId=origMsg.author.id 给 foreign
+    // 场景 renderPeerDirectHeader 拼 @ 发起人用。
     lastMessageSource.set(agentClient.channelId, "agent");
-
-    agentClient.ws.send(JSON.stringify({ type: "message", content, meta }));
-    console.log(`🎯 PEER DIRECT (button): ${senderKind} → ${targetAgent.name} (kind=${kind})`);
+    const env: RouterEnvelope = {
+      from: {
+        kind: "peer",
+        peerBotId,
+        peerBotName,
+        sharedChannelId: origChannelId,
+      },
+      to: {
+        kind: "local",
+        agentName: targetAgent.name,
+        channelId: agentClient.channelId,
+        ws: agentClient.ws,
+        cwd: agentClient.cwd,
+      },
+      intent: "request",
+      content: contentWithAttachments,
+      meta: {
+        messageId: origMsg.id,
+        triggerKind: origMsg.author.bot ? "peer_discord" : "user_discord",
+        ts: origMsg.createdAt.toISOString(),
+        threadId: newThreadId(),
+        attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
+        sourceUserId: origMsg.author.id,
+      },
+    };
+    const delivery = await deliver(env);
+    if (delivery.outcome.kind !== "sent") {
+      const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
+      console.error(`🎯 PEER DIRECT (button) deliver 失败: ${reason}`);
+      return false;
+    }
+    const senderLabel = origMsg.author.bot ? `peer bot ${origMsg.author.username}` : `用户 ${origMsg.author.username}`;
+    console.log(`🎯 PEER DIRECT (button): ${senderLabel} → ${targetAgent.name} (kind=${kind})`);
     recordMetric("peer_direct_route_button", { channelId: origChannelId, meta: { agent: targetAgent.name, kind } });
     return true;
   } catch (e) {
@@ -3009,58 +3026,52 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
       }
     }
 
-    // 5. 构造消息内容，注入对称 direct header
+    // 5. 原文 strip mention + 附件
     const rawText = (msg.content || "")
       .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
       .trim();
-    const senderKind = msg.author.bot ? `peer bot ${msg.author.username}` : `用户 ${msg.author.username}`;
-    const senderMention = `<@${msg.author.id}>`;
-    const contentLines = [
-      `🤝 PEER DIRECT REQUEST (对称路由) — bridge 把这条来自**对方 guild** #agent-exchange 的 peer 请求直接路由给你处理`,
-      ``,
-      `来源：${senderKind} (id: \`${msg.author.id}\`) 在对方 guild 的 #agent-exchange (\`${channelId}\`)，通过 peer bot \`${peerBotForChannel.name}\` 的 shared 频道过来`,
-      `你被 expose 给这个 peer 的理由：${targetExp.purpose || "（无描述）"}`,
-      ``,
-      `**最终动作必须是**：\`reply(chat_id="${channelId}", text="[DIRECT] ${senderMention} <你的答案>")\``,
-      `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记，并**跳过自动 @ 对方 bot**（否则对方 bot 会被唤醒跑一轮 LLM 没意义）`,
-      `- **一定要在 text 里写 \`${senderMention}\` @ 发起人**（上面已经给了），这样 ${msg.author.username} 的 Discord 能收到 push`,
-      `- 如果这是最后一句在 text 末尾加 \`[EOT]\` 防止互 ack`,
-      `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
-      ``,
-      `---`,
-      `原始消息：`,
-      rawText + (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : ""),
-    ];
-    const content = contentLines.join("\n");
+    const contentWithAttachments = rawText +
+      (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : "");
 
-    const meta: Record<string, string> = {
-      chat_id: channelId,
-      message_id: msg.id,
-      user: msg.author.username,
-      user_id: msg.author.id,
-      ts: msg.createdAt.toISOString(),
-      peer_direct: "true",
-      peer_reply_to: channelId,
-      peer_bot_name: peerBotForChannel.name,
-      peer_bot_id: peerBotForChannel.id,
-    };
-    if (attachmentPaths.length > 0) {
-      meta.attachment_count = String(attachmentPaths.length);
-      meta.attachments = attachmentPaths.join(";");
-    }
-
-    // 6. 设 pending + triggerSource
-    pendingReplies.set(channelId, {
-      msgId: msg.id,
-      ts: Date.now(),
-      intendedReplyChannel: channelId,
-      targetWs: agentClient.ws,
-    });
+    // v2.0.0 Phase 4c: 构造 envelope 交给 deliver。
+    // from=peer 用 peerBotForChannel（对方 peer bot 身份，对应 capabilities lookup）。
+    // sharedChannelId = foreign exchange 的 channelId，deliver 里 renderPeerDirectHeader
+    // 会看到 sharedChannelId ≠ 我方 localAgentExchangeId 就走对称路由 header。
+    // sourceUserId 给 @发起人用（不是 peerBot 身份）。
     lastMessageSource.set(agentClient.channelId, "agent");
-
-    // 7. 发送
-    agentClient.ws.send(JSON.stringify({ type: "message", content, meta }));
-    console.log(`🎯 SYMMETRIC DIRECT: ${senderKind} 在 foreign #agent-exchange (${channelId}) → 路由到 ${targetAgent.name}`);
+    const env: RouterEnvelope = {
+      from: {
+        kind: "peer",
+        peerBotId: peerBotForChannel.id,
+        peerBotName: peerBotForChannel.name,
+        sharedChannelId: channelId,
+      },
+      to: {
+        kind: "local",
+        agentName: targetAgent.name,
+        channelId: agentClient.channelId,
+        ws: agentClient.ws,
+        cwd: agentClient.cwd,
+      },
+      intent: "request",
+      content: contentWithAttachments,
+      meta: {
+        messageId: msg.id,
+        triggerKind: msg.author.bot ? "peer_discord" : "user_discord",
+        ts: msg.createdAt.toISOString(),
+        threadId: newThreadId(),
+        attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
+        sourceUserId: msg.author.id,
+      },
+    };
+    const delivery = await deliver(env);
+    if (delivery.outcome.kind !== "sent") {
+      const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
+      console.error(`🎯 SYMMETRIC deliver 失败: ${reason}`);
+      return false;
+    }
+    const senderLabel = msg.author.bot ? `peer bot ${msg.author.username}` : `用户 ${msg.author.username}`;
+    console.log(`🎯 SYMMETRIC DIRECT: ${senderLabel} 在 foreign #agent-exchange (${channelId}) → 路由到 ${targetAgent.name}`);
     recordMetric("peer_direct_route_symmetric", { channelId, meta: { sender: msg.author.id, agent: targetAgent.name } });
     return true;
   } catch (e) {

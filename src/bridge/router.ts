@@ -108,6 +108,12 @@ export interface Envelope {
     attachments?: string[];
     /** 原始 Discord 消息对象引用（不持久化，只在 router 内部传递） */
     discordMsg?: unknown;
+    /**
+     * 对称路由 / 对方 guild 里的 foreign exchange 场景用：真正的发起人（人类用户或
+     * peer bot）的 Discord user id。from 里的 peerBotId 是信任链路上的 peer bot，
+     * 跟"这条消息的原始作者"不一定同人。agent 要用这个 id 做 push 通知 @。
+     */
+    sourceUserId?: string;
   };
 }
 
