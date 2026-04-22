@@ -57,6 +57,8 @@ export interface UserEndpoint {
   userId: string;
   /** 这个用户看消息的 channel id（通常是 #control 或具体 agent 频道） */
   channelId: string;
+  /** Discord username（显示用，可选 —— 老 bridge `meta.user` 字段对齐） */
+  username?: string;
 }
 
 export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint;
@@ -106,6 +108,20 @@ export interface Envelope {
     attachments?: string[];
     /** 原始 Discord 消息对象引用（不持久化，只在 router 内部传递） */
     discordMsg?: unknown;
+    /**
+     * content 已被调用方完整渲染好（含 header / 附件说明 等），deliverToLocal
+     * 不要再走 renderContentForLocal 包一层。迁移期用：messageCreate 的 agent-exchange
+     * header 注入 / direct route header 注入暂时留在上游，Phase 3b+ 再内联到
+     * renderContentForLocal 里，到那时就可以删掉这个 flag。
+     */
+    contentPrerendered?: boolean;
+    /**
+     * 跳过 deliver 内置的权限检查。迁移期用：messageCreate 已经做完 peer exposure
+     * 判断 + agent-exchange 路由决策了，deliver 里 "peer→local 必须匹配 exposure"
+     * 的硬性检查会把合法的 "peer→master 调度" 误 drop。Phase 3b 把路由决策也
+     * 搬进 deliver 之后，权限模型统一管，这个 flag 可以删。
+     */
+    bypassPermissionCheck?: boolean;
   };
 }
 

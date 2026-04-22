@@ -181,7 +181,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, newThreadId } from "./bridge/router.js";
 
 /**
  * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate / reply /
@@ -203,8 +203,9 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
     pendingThreads.delete(env.meta.threadId);
   }
 
-  // 1. 权限检查：只检查"外面进来要访问本地 agent"这条
-  if (env.from.kind === "peer" && env.to.kind === "local") {
+  // 1. 权限检查：只检查"外面进来要访问本地 agent"这条。
+  // bypassPermissionCheck=true 的时候调用方自己担保权限（messageCreate 迁移期用）。
+  if (env.from.kind === "peer" && env.to.kind === "local" && !env.meta.bypassPermissionCheck) {
     try {
       const { readPeers } = await import("./lib/peers.js");
       const peers = await readPeers();
@@ -244,8 +245,12 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
 /** 投递到本地 Claude Code session —— 通过 ws 注入一条 "message" 事件 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Promise<RouterDelivery> {
   const content = renderContentForLocal(env);
+  // chat_id 是 agent reply() 时要传回的 id：消息从哪个 Discord 频道来，回复就发回那里。
+  // direct route 场景下 from 是 peer 在 #agent-exchange，agent 被"偷偷"路由到自己私频，
+  // 但 reply 目标必须还是 #agent-exchange，不是 agent 的私频。
+  const replyBackChannel = resolveReplyBackChannel(env);
   const meta: Record<string, string> = {
-    chat_id: to.channelId,
+    chat_id: replyBackChannel,
     message_id: env.meta.messageId,
     ts: env.meta.ts,
     trigger: env.meta.triggerKind,
@@ -253,7 +258,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     thread_id: env.meta.threadId,
   };
   if (env.from.kind === "user") {
-    meta.user = String((env.from as any).username ?? "");
+    meta.user = env.from.username ?? "";
     meta.user_id = env.from.userId;
   } else if (env.from.kind === "peer") {
     meta.user = env.from.peerBotName;
@@ -275,7 +280,6 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     // intent=request 挂 pending + thread 追踪。response 端到端，不挂新 pending。
     if (env.intent === "request") {
-      const replyBackChannel = resolveReplyBackChannel(env);
       pendingReplies.set(replyBackChannel, {
         msgId: env.meta.messageId,
         ts: Date.now(),
@@ -341,6 +345,10 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
  * 对齐（兼容 agent 现有 CLAUDE.md / 回复预期），但内容由 envelope 决定。
  */
 function renderContentForLocal(env: RouterEnvelope): string {
+  // v2.0.0 Phase 3 迁移期：messageCreate 里还在就地注入 agent-exchange / direct
+  // header（含 peers.json 查询结果），不重复包一层。Phase 3b+ 把 header 逻辑
+  // 移进来之后删掉这个分支。
+  if (env.meta.contentPrerendered) return env.content;
   const from = env.from;
   if (from.kind === "peer") {
     // peer 请求路由到本地 agent（对应旧 tryRouteForeignAgentExchange /
@@ -1238,24 +1246,64 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v1.9.24+: 挂起一个 "这条消息需要 reply 回 Discord" 的 pending 记录。
-  // Stop hook 触发时 bridge 从 session jsonl 捞最近 assistant 文字代 post 到
-  // intendedReplyChannel。捞不到就放弃（v1.9.20/21 的 [SYSTEM NAG] 方案被
-  // owner 拒绝了 —— 太吵、会触发额外 turn，得不偿失）。
-  // 覆盖**所有** Discord 入站消息（v1.9.23 起），不再只 master。
-  pendingReplies.set(channelId, {
-    msgId: msg.id,
-    ts: Date.now(),
-    intendedReplyChannel: channelId,
-    targetWs: routeWs,
-  });
-
+  // v2.0.0 Phase 3：统一走 deliver(envelope)。
+  //
+  // 几种上游行为保持不变（留给 Phase 3b+ 往 router 里搬）：
+  // - agent-exchange header 注入 / PEER DIRECT header 注入都已经直接写进了
+  //   `content`，所以 envelope.meta.contentPrerendered = true，跳过 deliver 里
+  //   的 renderContentForLocal 二次包装。
+  // - messageCreate 内的权限判断（peer 是否被 expose / agent-exchange 是否开
+  //   exposures）已经做完了，用 bypassPermissionCheck 跳过 deliver 里的重复
+  //   check——因为 deliver 当前的 check 只处理 "peer → 具体 agent" 的场景，
+  //   无法识别 "peer → master 走 agent-exchange 调度"，两边的契约要在 3b 对齐。
+  //
+  // deliver 真正接手的：ws.send + intent=request 时的 pendingReplies 挂起 +
+  // threadId 生成 + Delivery outcome 汇报。
+  const routeClient = clients.get(routeClientChannelId) ||
+    (routeWs === client.ws ? client : undefined);
+  const from: RouterUserEndpoint | RouterPeerEndpoint = isPeer
+    ? {
+        kind: "peer",
+        peerBotId: msg.author.id,
+        peerBotName: msg.author.username,
+        sharedChannelId: channelId,
+      }
+    : { kind: "user", userId: msg.author.id, channelId, username: msg.author.username };
+  const to: RouterLocalEndpoint = {
+    kind: "local",
+    channelId: routeClient?.channelId ?? routeClientChannelId,
+    ws: routeWs,
+    cwd: routeClient?.cwd,
+  };
+  const env: RouterEnvelope = {
+    from,
+    to,
+    intent: "request",
+    content,
+    meta: {
+      messageId: msg.id,
+      triggerKind: isPeer ? "peer_discord" : "user_discord",
+      ts: msg.createdAt.toISOString(),
+      threadId: newThreadId(),
+      attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
+      contentPrerendered: true,
+      bypassPermissionCheck: true,
+    },
+  };
   try {
-    routeWs.send(JSON.stringify({ type: "message", content, meta }));
-    recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length, direct: directHeaderInjected } });
+    const delivery = await deliver(env);
+    if (delivery.outcome.kind === "sent") {
+      recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length, direct: directHeaderInjected } });
+    } else if (delivery.outcome.kind === "dropped") {
+      console.log(`📪 deliver dropped ${envelopeLabel(env)}: ${delivery.outcome.reason}`);
+      recordMetric("message_dropped", { channelId, meta: { reason: delivery.outcome.reason } });
+    } else {
+      console.error(`deliver 失败 ${envelopeLabel(env)}:`, delivery.outcome.error);
+      recordMetric("error", { channelId, meta: { phase: "deliver", err: String(delivery.outcome.error) } });
+    }
   } catch (err) {
-    console.error(`发送消息到 client (channel ${channelId}) 失败:`, err);
-    recordMetric("error", { channelId, meta: { phase: "forward_to_client", err: String(err) } });
+    console.error(`deliver 抛异常 channel=${channelId}:`, err);
+    recordMetric("error", { channelId, meta: { phase: "deliver_throw", err: String(err) } });
   }
 
   // idle 检测由 JSONL watcher 的静默超时控制（不再用 tmux 轮询）
