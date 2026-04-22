@@ -8,6 +8,9 @@
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
+import { initLang, t } from "./lib/i18n.js";
+await initLang();
+
 import {
   tmuxRaw,
   masterSessionExists,
@@ -174,13 +177,22 @@ async function checkForUpdates() {
         type: "reply",
         chatId: CONTROL_CHANNEL_ID,
         text: [
-          `🆕 **Claudestra ${release.tag} 发布了！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
+          t(
+            `🆕 **Claudestra ${release.tag} 发布了！** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
+            `🆕 **Claudestra ${release.tag} has been released!** ${ALLOWED_USER_IDS.map(id => `<@${id}>`).join(" ")}`,
+          ),
           ``,
-          `当前: v${local} → 最新: ${release.tag}`,
+          t(`当前: v${local} → 最新: ${release.tag}`, `Current: v${local} → Latest: ${release.tag}`),
           release.body ? `\n${release.body.slice(0, 500)}` : "",
           ``,
-          `自动更新已关闭。更新命令: \`bun src/manager.ts update\``,
-          `（开启自动更新: \`bun src/manager.ts auto-update claudestra on\`）`,
+          t(
+            `自动更新已关闭。更新命令: \`bun src/manager.ts update\``,
+            `Auto-update is disabled. Update command: \`bun src/manager.ts update\``,
+          ),
+          t(
+            `（开启自动更新: \`bun src/manager.ts auto-update claudestra on\`）`,
+            `(Enable auto-update: \`bun src/manager.ts auto-update claudestra on\`)`,
+          ),
         ].filter(Boolean).join("\n"),
       });
       console.log(`📢 已通知用户：新版本 ${release.tag}（自动更新 off）`);
@@ -203,7 +215,10 @@ async function checkForUpdates() {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
-      text: `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + pm2 restart...`,
+      text: t(
+        `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + pm2 restart...`,
+        `🆕 **Claudestra ${release.tag} auto-updating** ${mention}\n\nv${local} → ${release.tag}, all agents idle, running git pull + pm2 restart...`,
+      ),
     });
   } catch { /* non-critical */ }
 
@@ -289,7 +304,10 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
         await bridgeRequest({
           type: "reply",
           chatId: CONTROL_CHANNEL_ID,
-          text: `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
+          text: t(
+            `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
+            `🔁 Detected ${reallyDead.length} agent(s) need to be restored after boot: ${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\nResuming their sessions — they'll return to their original channels within ~1 min.`,
+          ),
         });
       } catch { /* non-critical */ }
     }
@@ -338,7 +356,10 @@ async function checkClaudeCodeUpdate() {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
-      text: `🆙 **Claude Code 新版本** ${current} → ${latest} ${mention}\n\n所有 agent 当前空闲，开始 npm install + 重启...`,
+      text: t(
+        `🆙 **Claude Code 新版本** ${current} → ${latest} ${mention}\n\n所有 agent 当前空闲，开始 npm install + 重启...`,
+        `🆙 **Claude Code update** ${current} → ${latest} ${mention}\n\nAll agents idle, running npm install + restart...`,
+      ),
     });
   } catch { /* non-critical */ }
 
@@ -349,7 +370,10 @@ async function checkClaudeCodeUpdate() {
       await bridgeRequest({
         type: "reply",
         chatId: CONTROL_CHANNEL_ID,
-        text: `⚠️ Claude Code 更新失败（npm install 返回错误），详见 launcher 日志`,
+        text: t(
+          `⚠️ Claude Code 更新失败（npm install 返回错误），详见 launcher 日志`,
+          `⚠️ Claude Code update failed (npm install returned error) — see launcher logs`,
+        ),
       });
     } catch { /* non-critical */ }
     return;
@@ -365,7 +389,10 @@ async function checkClaudeCodeUpdate() {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
-      text: `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+      text: t(
+        `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+        `✅ **Claude Code updated** to v${afterVersion}, all agents restarted ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+      ),
     });
   } catch { /* non-critical */ }
 }

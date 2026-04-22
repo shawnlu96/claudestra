@@ -8,6 +8,10 @@
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
+import { initLang, t } from "./lib/i18n.js";
+// 启动时先载一次 lang —— daemon 生命周期内都用这个缓存值
+await initLang();
+
 import {
   Client,
   GatewayIntentBits,
@@ -846,17 +850,17 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     try {
       const ch = await discord.channels.fetch(channelId) as TextChannel;
       const sm = await ch.messages.fetch(oldStatusId);
-      await sm.edit({ content: "✅ 完成", components: [] });
+      await sm.edit({ content: t("✅ 完成", "✅ Done"), components: [] });
     } catch { /* non-critical */ }
     activeStatusMessages.delete(channelId);
   }
   resetToolTracking(channelId);
   startTypingWithSafety(channelId);
   const statusMsg = await (msg.channel as TextChannel).send({
-    content: "💭 大聪明思考中...",
+    content: t("💭 大聪明思考中...", "💭 Thinking..."),
     components: buildComponents([{
       type: "buttons",
-      buttons: [{ id: `interrupt:${channelId}`, label: "打断", emoji: "⚡", style: "danger" }],
+      buttons: [{ id: `interrupt:${channelId}`, label: t("打断", "Interrupt"), emoji: "⚡", style: "danger" }],
     }]),
   });
   trackSentMessage(statusMsg.id);
@@ -1396,7 +1400,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             try {
               const ch = await discord.channels.fetch(channelId) as TextChannel;
               const sm = await ch.messages.fetch(statusMsgId);
-              await sm.edit({ content: "⚡ 已打断", components: [] });
+              await sm.edit({ content: t("⚡ 已打断", "⚡ Interrupted"), components: [] });
             } catch { /* non-critical */ }
             activeStatusMessages.delete(channelId);
           }
@@ -1603,7 +1607,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             try {
               const ch = await discord.channels.fetch(targetChannelId) as TextChannel;
               const sm = await ch.messages.fetch(statusMsgId);
-              await sm.edit({ content: "⚡ 已打断", components: [] });
+              await sm.edit({ content: t("⚡ 已打断", "⚡ Interrupted"), components: [] });
             } catch { /* non-critical */ }
             activeStatusMessages.delete(targetChannelId);
           }
@@ -2330,7 +2334,10 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
           if (!msg.components || msg.components.length === 0) continue; // 已经被 Stop 清了
           try {
             await msg.edit({
-              content: "⚠️ bridge 重启了，上一轮任务状态丢失。如果你的请求没完成，重新发一次就好。",
+              content: t(
+                "⚠️ bridge 重启了，上一轮任务状态丢失。如果你的请求没完成，重新发一次就好。",
+                "⚠️ Bridge restarted — previous task state is lost. If your request didn't complete, please send it again.",
+              ),
               components: [],
             });
             cleaned++;
@@ -2677,7 +2684,10 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
         console.log(`🆘 RESCUE skip: jsonl 找到但没抽出 text（可能本轮纯 tool_use 无文字）`);
         continue;
       }
-      const rescuedText = `${extracted.trim()}\n\n_📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送_`;
+      const rescuedText = `${extracted.trim()}\n\n_${t(
+        "📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送",
+        "📋 [bridge rescue] agent forgot to call reply() — this text was extracted from the jsonl transcript and posted by the bridge on its behalf",
+      )}_`;
       const textWithMentions = await ensurePeerMentions(discord, pending.intendedReplyChannel, rescuedText);
       await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
       console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
@@ -2783,7 +2793,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
           const ch = await discord.channels.fetch(cid);
           if (ch && "messages" in ch) {
             const sm = await (ch as TextChannel).messages.fetch(statusMsgId);
-            await sm.edit({ content: "✅ 完成", components: [] });
+            await sm.edit({ content: t("✅ 完成", "✅ Done"), components: [] });
           }
         } catch { /* non-critical */ }
         activeStatusMessages.delete(cid);

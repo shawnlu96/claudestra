@@ -12,11 +12,15 @@ const HOME = process.env.HOME || "";
 const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
 const CONFIG_PATH = `${CONFIG_DIR}/config.json`;
 
+export type AppLang = "zh" | "en";
+
 export interface AppConfig {
   autoUpdate: {
     claudestra: boolean;
     claudeCode: boolean;
   };
+  /** 用户在 setup 里选的默认语言，贯穿整个 app（Discord 消息 / 通知 / 日志）。v1.9.31+ */
+  lang: AppLang;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -24,6 +28,7 @@ const DEFAULT_CONFIG: AppConfig = {
     claudestra: true,
     claudeCode: true,
   },
+  lang: "zh",
 };
 
 function merge(base: AppConfig, raw: any): AppConfig {
@@ -34,6 +39,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
       claudestra: typeof au.claudestra === "boolean" ? au.claudestra : base.autoUpdate.claudestra,
       claudeCode: typeof au.claudeCode === "boolean" ? au.claudeCode : base.autoUpdate.claudeCode,
     },
+    lang: raw.lang === "en" || raw.lang === "zh" ? raw.lang : base.lang,
   };
 }
 
@@ -57,6 +63,13 @@ export async function writeConfig(cfg: AppConfig): Promise<void> {
 export async function setAutoUpdate(target: "claudestra" | "claudeCode", enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoUpdate[target] = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setLang(lang: AppLang): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.lang = lang;
   await writeConfig(cfg);
   return cfg;
 }

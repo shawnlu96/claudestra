@@ -979,13 +979,25 @@ async function stepPickLanguage(): Promise<void> {
     const answer = (await readLine()).trim() || "1";
     if (answer === "1" || answer.toLowerCase() === "zh" || answer.toLowerCase() === "中文") {
       lang = "zh";
-      return;
+      break;
     }
     if (answer === "2" || answer.toLowerCase() === "en" || answer.toLowerCase() === "english") {
       lang = "en";
-      return;
+      break;
     }
     print(`  ${c.red}✗${c.reset}  Please enter 1 or 2. / 请输入 1 或 2。`);
+  }
+
+  // v1.9.31+: 把选的语言写到 ~/.claude-orchestrator/config.json，bridge / launcher /
+  // manager 等 daemon 启动时通过 initLang() 读出来做 app-wide i18n
+  try {
+    const { setLang } = await import("./lib/config-store.js");
+    const { setLangInMemory } = await import("./lib/i18n.js");
+    await setLang(lang);
+    setLangInMemory(lang);
+  } catch (e: any) {
+    // 非关键：即使写配置失败 setup 本身还是按所选语言继续
+    console.error(`warning: failed to persist lang to config: ${e.message}`);
   }
 }
 

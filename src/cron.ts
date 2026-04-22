@@ -11,6 +11,7 @@
 
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import {
@@ -445,6 +446,7 @@ async function main() {
 // 不该让它的 console 被 wrap（会污染 JSON 输出）。
 if (import.meta.main) {
   enableTimestampLogs();
+  await initLang();
   main().catch((err) => {
     console.error("Cron Scheduler 崩溃:", err);
     process.exit(1);
