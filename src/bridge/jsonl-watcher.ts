@@ -34,6 +34,13 @@ interface WatcherState {
   processing: boolean;
   /** 2s poll 兜底的 interval handle */
   pollInterval: ReturnType<typeof setInterval> | null;
+  /**
+   * 本轮是否命中 rate-limit（Claude Code 在 assistant text 里打"You've hit
+   * your limit · resets ..."）。下一条 turn_duration 就不 push 了 —— rate-limit
+   * 的 turn_duration 是"卡住被拒"的时长，对用户没意义，跟 limit 消息一起显
+   * 反而刷屏。读到任何非 limit 的 assistant text 时 reset flag。
+   */
+  rateLimited: boolean;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -150,8 +157,14 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
         // 显示思考时长（仅展示，不用于完成判断）
         if (entry.type === "system" && entry.subtype === "turn_duration" && entry.durationMs) {
-          const secs = (entry.durationMs / 1000).toFixed(0);
-          state.textQueue.push(`⏱ 尼了 ${secs} 秒`);
+          if (state.rateLimited) {
+            // rate-limit 的 turn_duration 不是真的在思考，是 API 拒绝的等待时长。
+            // 跟 "⛔ limit" 消息一起显刷屏，跳过 + reset flag。
+            state.rateLimited = false;
+          } else {
+            const secs = (entry.durationMs / 1000).toFixed(0);
+            state.textQueue.push(`⏱ 尼了 ${secs} 秒`);
+          }
         }
 
         if (entry.type === "assistant") {
@@ -180,7 +193,17 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               // 以前有 `t.length > 3` 的 filter 防碎片短 text 刷屏，但那会把 "OK"
               // "收到" 这种合法短回复也吞掉。现在 rescue 删了 → watcher 是唯一
               // 文字出口，任何 trim 后非空的 text 都要推出来。
-              state.textQueue.push(`💬 ${block.text.trim()}`);
+              const t = block.text.trim();
+              // Claude Code 把 rate-limit 命中的提示当 assistant text 写进 jsonl，
+              // 像 "You've hit your limit · resets 2am (Asia/Shanghai)"。不应该按
+              // 常规 💬 发（会让 agent 看着像正常输出），换成 ⛔ 标记 + 置 flag
+              // 让后面的 turn_duration 也跳过。
+              if (/You['']?ve hit your limit|Hit your (rate )?limit/i.test(t)) {
+                state.textQueue.push(`⛔ ${t}`);
+                state.rateLimited = true;
+              } else {
+                state.textQueue.push(`💬 ${t}`);
+              }
             }
           }
         }
@@ -266,6 +289,7 @@ export async function startWatching(
     agentName,
     processing: false,
     pollInterval: null,
+    rateLimited: false,
   };
 
   // fs.watch 主监听
