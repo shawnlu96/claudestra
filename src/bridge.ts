@@ -2628,12 +2628,18 @@ setInterval(() => {
  * 失败路径（抽不到 text 等）就放弃 + 清 pending，沉默丢失那条消息，
  * 不再打扰 agent。
  */
-async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: Set<string>): Promise<void> {
+/**
+ * v1.9.32+: 返回 Set<channelId> —— 本次 rescue 实际 post 到了哪些 channel。
+ * Stop handler 据此跳过那些 channel 的"完成通知 @ user"消息（rescue 已经带
+ * @ user 发了有效内容，再发个随机 umadone + @ user 就是重复骚扰）。
+ */
+async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: Set<string>): Promise<Set<string>> {
+  const postedTo = new Set<string>();
   const now = Date.now();
   const STALE_MS = 5 * 60_000;
 
   const stopClient = clients.get(stopChannelId);
-  if (!stopClient) return;
+  if (!stopClient) return postedTo;
 
   const { findLatestJsonl, extractLatestAssistantText } = await import("./lib/jsonl-extract.js");
 
@@ -2683,7 +2689,10 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
         console.log(`🆘 RESCUE skip: jsonl 找到但没抽出 text（可能本轮纯 tool_use 无文字）`);
         continue;
       }
-      const rescuedText = `${extracted.trim()}\n\n_${t(
+      // v1.9.32+: 带 @ user 让 push 通知能触发（用户不会错过）。
+      // 之前单独的"完成通知 @ user"在 rescue 成功时会被跳过（见 handleHookRequest）
+      const userMention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
+      const rescuedText = `${extracted.trim()}${userMention ? `\n${userMention}` : ""}\n\n_${t(
         "📋 [bridge 兜底] agent 本轮忘记调用 reply()，这段文字由 bridge 从 jsonl 抽取后代为发送",
         "📋 [bridge rescue] agent forgot to call reply() — this text was extracted from the jsonl transcript and posted by the bridge on its behalf",
       )}_`;
@@ -2691,6 +2700,7 @@ async function maybeRescueMissedReply(stopChannelId: string, _channelsToClear: S
       await discordReply(discord, pending.intendedReplyChannel, textWithMentions);
       console.log(`🆘 RESCUE: 从 jsonl 抽取 assistant 文字代 post 到 channel=${pending.intendedReplyChannel} (${extracted.length} chars)`);
       recordMetric("reply_rescue_posted", { channelId: pending.intendedReplyChannel, meta: { chars: String(extracted.length), source: stopClient.channelId } });
+      postedTo.add(pending.intendedReplyChannel);
     } catch (e) {
       console.error(`🆘 RESCUE 异常 cwd=${effectiveCwd}:`, e);
     }
@@ -2798,8 +2808,16 @@ async function handleHookRequest(req: Request): Promise<Response> {
         activeStatusMessages.delete(cid);
       }
 
-      // 发完成通知消息 + @ 用户（仅 Stop/StopFailure）
-      if (shouldNotify) {
+      // v1.9.32+: 先跑 rescue（只在 turn 真结束时），返回哪些 channel 被 rescue
+      // post 了。rescue 已经带 @ user mention 发了实质内容，就跳过这些 channel
+      // 的完成通知（"随机 umadone + @user" 那条没必要再发，用户看着像重复）。
+      let rescuedChannels = new Set<string>();
+      if (event === "Stop" || event === "StopFailure" || event === "stop") {
+        rescuedChannels = await maybeRescueMissedReply(channelId, channelsToClear);
+      }
+
+      // 发完成通知消息 + @ 用户（仅 Stop/StopFailure，且 rescue 没 post 过这个 channel）
+      if (shouldNotify && !rescuedChannels.has(channelId)) {
         try {
           const ch = await discord.channels.fetch(channelId);
           if (ch && "messages" in ch) {
@@ -2815,13 +2833,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
         } catch (e) {
           console.error(`🏁 完成通知发送失败:`, e);
         }
-      }
-
-      // v1.9.25+: rescue **只在 turn 真结束的 Stop / StopFailure 里跑**。
-      // Notification 每轮可能 fire 多次（工具调用中间 / 权限弹窗等），如果都跑
-      // 会导致同一段 jsonl text 被重复抽取 post 好几份。
-      if (event === "Stop" || event === "StopFailure" || event === "stop") {
-        await maybeRescueMissedReply(channelId, channelsToClear);
+      } else if (shouldNotify && rescuedChannels.has(channelId)) {
+        lastCompletionSent.set(channelId, now); // 一样更新 dedupe ts
+        console.log(`🏁 完成通知跳过：rescue 已经 @ 用户发了实质内容 channel=${channelId}`);
       }
     }
 
