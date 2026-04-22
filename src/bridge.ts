@@ -2298,7 +2298,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const peerMatch = rawTarget.match(/^peer:([^.]+)\.(.+)$/) || rawTarget.match(/^([^@]+)@(.+)$/);
         if (peerMatch) {
           const [, first, second] = peerMatch;
-          // 根据前缀判断：peer:X.Y 是 X=peer name, Y=agent；Y@X 是 Y=agent, X=peer name
           const peerIdentifier = rawTarget.startsWith("peer:") ? first : second;
           const peerAgentName = rawTarget.startsWith("peer:") ? second : first;
           return await handlePeerRouteToAgent(ws, msg, fromChannelId, fromName, peerIdentifier, peerAgentName);
@@ -2314,10 +2313,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           fromName = fromAgent?.name || fromChannelId;
         }
 
-        // 找目标 agent（支持带或不带 "agent-" 前缀）
-        const targetName = rawTarget.startsWith("agent-")
-          ? rawTarget
-          : `agent-${rawTarget}`;
+        const targetName = rawTarget.startsWith("agent-") ? rawTarget : `agent-${rawTarget}`;
         const target = agents.find((a: any) => a.name === targetName);
         if (!target) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中` }));
@@ -2330,21 +2326,41 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           break;
         }
 
-        // 注入消息到目标 channel-server
-        const agentMsg = `[🤖 来自 ${fromName}] ${msg.text}`;
-        targetClient.ws.send(JSON.stringify({
-          type: "message",
-          content: agentMsg,
+        // v2.0.0 Phase 4: 通过 deliver(envelope) 注入消息。
+        // from=local(caller agent), to=local(target agent)。renderContentForLocal
+        // 看到 from.kind=="local" 会自动拼 "[🤖 来自 fromName]" 前缀。
+        const fromEnv: RouterLocalEndpoint = {
+          kind: "local",
+          agentName: fromName,
+          channelId: fromChannelId,
+          ws,
+        };
+        const toEnv: RouterLocalEndpoint = {
+          kind: "local",
+          agentName: targetName,
+          channelId: target.channelId,
+          ws: targetClient.ws,
+          cwd: targetClient.cwd,
+        };
+        const env: RouterEnvelope = {
+          from: fromEnv,
+          to: toEnv,
+          intent: "request",
+          content: msg.text || "",
           meta: {
-            chat_id: target.channelId,
-            message_id: `agent_${Date.now()}`,
-            user: fromName,
-            user_id: "agent",
-            is_agent: "true",
-            from_channel_id: fromChannelId,
+            messageId: `agent_${Date.now()}`,
+            triggerKind: "agent_tool",
             ts: new Date().toISOString(),
+            threadId: newThreadId(),
           },
-        }));
+        };
+        const delivery = await deliver(env);
+        if (delivery.outcome.kind !== "sent") {
+          const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `deliver 失败: ${reason}` }));
+          break;
+        }
+
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 
@@ -2367,7 +2383,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ok: true,
             targetChannelId: target.channelId,
             targetName,
-            pushBack: true, // v1.9.21+: 告诉 caller "agent 回复会自动 push 给你，不用轮询"
+            pushBack: true,
           },
         }));
       } catch (err) {
