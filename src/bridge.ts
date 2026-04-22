@@ -2558,17 +2558,39 @@ async function handlePeerRouteToAgent(
       return;
     }
 
-    // 通过 bridge 的 discord client 发送（不走 MCP reply，因为这是 bridge 主动发起）
-    const textToSend = `<@${peer.id}> ${msg.text || ""}`.trim();
-    const enriched = await ensurePeerMentions(discord, targetChannelId, textToSend);
-    try {
-      const ch = await discord.channels.fetch(targetChannelId);
-      if (ch && "messages" in ch) {
-        const sent = await (ch as TextChannel).send({ content: enriched });
-        trackSentMessage(sent.id);
-      }
-    } catch (e) {
-      ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `发送到 peer 频道失败: ${(e as Error).message}` }));
+    // v2.0.0 Phase 4b': 通过 deliver(envelope) 发给 peer。from=local(caller agent),
+    // to=peer(目标 peer bot, shared channel)。content 里 @ peer bot id 让 bridge
+    // ensurePeerMentions 能识别；deliverToPeer 会再补其他 peer bot 的 @（如果
+    // 频道里还有别的 peer bot，通常没有）。
+    const textWithMention = `<@${peer.id}> ${msg.text || ""}`.trim();
+    const outboundEnv: RouterEnvelope = {
+      from: {
+        kind: "local",
+        agentName: fromName,
+        channelId: fromChannelId,
+        ws,
+      },
+      to: {
+        kind: "peer",
+        peerBotId: peer.id,
+        peerBotName: peer.name,
+        sharedChannelId: targetChannelId,
+      },
+      intent: "request",
+      content: textWithMention,
+      meta: {
+        messageId: `peer_route_${Date.now()}`,
+        triggerKind: "agent_tool",
+        ts: new Date().toISOString(),
+        threadId: newThreadId(),
+      },
+    };
+    const delivery = await deliver(outboundEnv);
+    if (delivery.outcome.kind !== "sent") {
+      const errStr = delivery.outcome.kind === "dropped"
+        ? delivery.outcome.reason
+        : (delivery.outcome as any).error?.message || "unknown";
+      ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `发送到 peer 频道失败: ${errStr}` }));
       return;
     }
 
