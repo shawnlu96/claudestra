@@ -108,13 +108,6 @@ export interface Envelope {
     attachments?: string[];
     /** 原始 Discord 消息对象引用（不持久化，只在 router 内部传递） */
     discordMsg?: unknown;
-    /**
-     * 跳过 deliver 内置的权限检查。迁移期用：messageCreate 已经做完 peer exposure
-     * 判断 + agent-exchange 路由决策了，deliver 里 "peer→local 必须匹配 exposure"
-     * 的硬性检查会把合法的 "peer→master 调度" 误 drop。Phase 3b 把路由决策也
-     * 搬进 deliver 之后，权限模型统一管，这个 flag 可以删。
-     */
-    bypassPermissionCheck?: boolean;
   };
 }
 

@@ -203,26 +203,34 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
     pendingThreads.delete(env.meta.threadId);
   }
 
-  // 1. 权限检查：只检查"外面进来要访问本地 agent"这条。
-  // bypassPermissionCheck=true 的时候调用方自己担保权限（messageCreate 迁移期用）。
-  if (env.from.kind === "peer" && env.to.kind === "local" && !env.meta.bypassPermissionCheck) {
-    try {
-      const { readPeers } = await import("./lib/peers.js");
-      const peers = await readPeers();
-      const targetAgentName = env.to.agentName;
-      if (!targetAgentName) {
-        return { envelope: env, outcome: { kind: "dropped", reason: "local target has no agentName" } };
+  // 1. 权限检查：peer → 本地具体 agent 的情况要查 peers.json exposures。
+  //    peer → master 走 #agent-exchange 调度永远放行 —— master 是网关角色，
+  //    它自己看 agent-exchange header 里的可选 exposures 列表去做调度决策。
+  //    (master 的 client 在 clients 里 channelId 可能是 CONTROL 或 agent-exchange
+  //    id，两个都算 master。)
+  if (env.from.kind === "peer" && env.to.kind === "local") {
+    const localAgentExchangeId = await getLocalAgentExchangeId();
+    const toIsMaster = env.to.channelId === CONTROL_CHANNEL_ID ||
+      (!!localAgentExchangeId && env.to.channelId === localAgentExchangeId);
+    if (!toIsMaster) {
+      try {
+        const { readPeers } = await import("./lib/peers.js");
+        const peers = await readPeers();
+        const targetAgentName = env.to.agentName;
+        if (!targetAgentName) {
+          return { envelope: env, outcome: { kind: "dropped", reason: "local non-master target has no agentName" } };
+        }
+        const exposed = peers.exposures.some((e) =>
+          (e.localAgent === targetAgentName || `agent-${e.localAgent}` === targetAgentName) &&
+          (e.peerBotId === env.from.peerBotId || e.peerBotId === "all")
+        );
+        if (!exposed) {
+          return { envelope: env, outcome: { kind: "dropped", reason: `${targetAgentName} not exposed to peer ${env.from.peerBotName}` } };
+        }
+      } catch (e) {
+        console.error("deliver permission check 异常:", e);
+        return { envelope: env, outcome: { kind: "error", error: e as Error } };
       }
-      const exposed = peers.exposures.some((e) =>
-        (e.localAgent === targetAgentName || `agent-${e.localAgent}` === targetAgentName) &&
-        (e.peerBotId === env.from.peerBotId || e.peerBotId === "all")
-      );
-      if (!exposed) {
-        return { envelope: env, outcome: { kind: "dropped", reason: `${targetAgentName} not exposed to peer ${env.from.peerBotName}` } };
-      }
-    } catch (e) {
-      console.error("deliver permission check 异常:", e);
-      return { envelope: env, outcome: { kind: "error", error: e as Error } };
     }
   }
 
@@ -1306,10 +1314,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   //   - decide from / to（包括 direct route 时把 to 换成具体 agent、带 agentName）
   //   - 填原始 content（strip mention 后的纯文本）+ attachments
   //   - 交给 deliver
-  //
-  // bypassPermissionCheck 仍然打开：deliver 里的 "peer→local 必须匹配 exposure"
-  // 硬性检查会把合法的 "peer → master 调度"（from=peer, to=master）误 drop，
-  // Phase 3b3 把权限检查改成只校验 peer→具体 agent 那条路再删这个 flag。
   const routeClient = clients.get(routeClientChannelId) ||
     (routeWs === client.ws ? client : undefined);
   const from: RouterUserEndpoint | RouterPeerEndpoint = isPeer
@@ -1338,7 +1342,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       ts: msg.createdAt.toISOString(),
       threadId: newThreadId(),
       attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
-      bypassPermissionCheck: true,
     },
   };
   try {
