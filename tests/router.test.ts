@@ -188,6 +188,14 @@ describe("endpointLabel", () => {
     };
     expect(endpointLabel(ep)).toBe("user:u1@c1");
   });
+
+  test("bridge endpoint 带 label", () => {
+    expect(endpointLabel({ kind: "bridge", label: "notifyMaster" })).toBe("bridge:notifyMaster");
+  });
+
+  test("bridge endpoint 无 label 打 ?", () => {
+    expect(endpointLabel({ kind: "bridge" })).toBe("bridge:?");
+  });
 });
 
 describe("envelopeLabel", () => {

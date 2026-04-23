@@ -61,7 +61,21 @@ export interface UserEndpoint {
   username?: string;
 }
 
-export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint;
+/**
+ * bridge 自己发起的消息（不代表任何具体 agent / user / peer）。用于 UI 层的
+ * 通知和系统广播：status 提示（"💭 思考中..."）/ LLM-free 管理按钮的回复 /
+ * PeerEvent 公告 / notifyMaster 广播 / hook 事件文字 / peer relay 兜底。
+ *
+ * 只能做 `from`，不能做 `to`（bridge 不是消息接收者）。deliver 里看到
+ * from=bridge 就跳过 header 渲染、跳过 pending 追踪，只做"内容 → Discord"。
+ */
+export interface BridgeEndpoint {
+  kind: "bridge";
+  /** 描述性标签，调试 / log 用，比如 "status"、"relay"、"peer-event"。 */
+  label?: string;
+}
+
+export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint | BridgeEndpoint;
 
 // ============================================================
 // Envelope：一条待投递的消息
@@ -164,6 +178,8 @@ export function endpointLabel(e: Endpoint): string {
       return `peer:${e.peerBotName}${e.peerAgentName ? `.${e.peerAgentName}` : ""}`;
     case "user":
       return `user:${e.userId}@${e.channelId}`;
+    case "bridge":
+      return `bridge:${e.label ?? "?"}`;
   }
 }
 

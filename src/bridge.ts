@@ -281,6 +281,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     meta.user_id = "agent";
     meta.is_agent = "true";
     meta.from_channel_id = env.from.channelId;
+  } else if (env.from.kind === "bridge") {
+    meta.user = `bridge${env.from.label ? `:${env.from.label}` : ""}`;
+    meta.user_id = "bridge";
+    meta.is_bridge = "true";
   }
   if (env.meta.attachments && env.meta.attachments.length > 0) {
     meta.attachment_count = String(env.meta.attachments.length);
@@ -310,7 +314,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
 }
 
 /** 从 envelope 推断 "response 应该发回哪个 channel" —— 用于 pending 的
- *  intendedReplyChannel + 生成给 agent 的 meta.chat_id */
+ *  intendedReplyChannel + 生成给 agent 的 meta.chat_id。from=bridge 的系统
+ *  消息没有"发回哪里"的语义，返回空串，调用方如果需要 chat_id 自己兜底。*/
 function resolveReplyBackChannel(env: RouterEnvelope): string {
   if (env.from.kind === "user") return env.from.channelId;
   if (env.from.kind === "peer") return env.from.sharedChannelId;
@@ -375,6 +380,12 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
  */
 async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
   const from = env.from;
+
+  // bridge 系统消息（notifyMaster 广播 / hook 事件文字 等）：原样投递，不加
+  // header；agent 看到的是 bridge 写的通知正文本身。
+  if (from.kind === "bridge") {
+    return env.content;
+  }
 
   // 本地 agent → agent 转发（send_to_agent 那套）
   if (from.kind === "local") {
@@ -1268,15 +1279,27 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   }
   resetToolTracking(channelId);
   startTypingWithSafety(channelId);
-  const statusMsg = await (msg.channel as TextChannel).send({
+  // 状态消息走 deliver(bridge → user)。discordReply 内部会 buildComponents +
+  // trackSentMessage，返回的 id 拿来做"✅ 完成"编辑的目标。
+  const statusDelivery = await deliver({
+    from: { kind: "bridge", label: "status" },
+    to: { kind: "user", userId: msg.author.id, channelId },
+    intent: "notification",
     content: t("💭 大聪明思考中...", "💭 Thinking..."),
-    components: buildComponents([{
-      type: "buttons",
-      buttons: [{ id: `interrupt:${channelId}`, label: t("打断", "Interrupt"), emoji: "⚡", style: "danger" }],
-    }]),
+    meta: {
+      messageId: `status_${channelId}_${Date.now()}`,
+      triggerKind: "bridge_synth",
+      ts: new Date().toISOString(),
+      threadId: newThreadId(),
+      components: [{
+        type: "buttons",
+        buttons: [{ id: `interrupt:${channelId}`, label: t("打断", "Interrupt"), emoji: "⚡", style: "danger" }],
+      }],
+    },
   });
-  trackSentMessage(statusMsg.id);
-  activeStatusMessages.set(channelId, statusMsg.id);
+  if (statusDelivery.outcome.kind === "sent" && statusDelivery.outcome.discordMessageIds?.[0]) {
+    activeStatusMessages.set(channelId, statusDelivery.outcome.discordMessageIds[0]);
+  }
 
   // 转发给 channel-server
   const meta: Record<string, string> = {
@@ -1424,15 +1447,27 @@ async function ensurePeerMentions(discord: Client, channelId: string, text: stri
   }
 }
 
-// 工具：往 master 控制频道发一条通知
+// 工具：往 master 控制频道发一条通知（系统广播，bridge → user 信道）
 async function notifyMaster(content: string): Promise<void> {
   const controlChannelId = process.env.CONTROL_CHANNEL_ID || "";
   if (!controlChannelId) return;
   try {
-    const ch = await discord.channels.fetch(controlChannelId);
-    if (ch && "messages" in ch) {
-      await (ch as TextChannel).send({ content });
-    }
+    await deliver({
+      from: { kind: "bridge", label: "notifyMaster" },
+      to: {
+        kind: "user",
+        userId: ALLOWED_USER_IDS[0] || "",
+        channelId: controlChannelId,
+      },
+      intent: "notification",
+      content,
+      meta: {
+        messageId: `notify_${Date.now()}`,
+        triggerKind: "bridge_synth",
+        ts: new Date().toISOString(),
+        threadId: newThreadId(),
+      },
+    });
   } catch { /* non-critical */ }
 }
 
@@ -2086,22 +2121,40 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       const mgmtResult = await handleMgmtButton(id, channelId, interaction.message?.id, discord);
       if (mgmtResult) {
         if (mgmtResult.text !== "__HANDLED__") {
-          const components = mgmtResult.components ? buildComponents(mgmtResult.components) : undefined;
-          const channel = await discord.channels.fetch(channelId) as TextChannel;
-          await channel.send({ content: mgmtResult.text, components });
+          // 走 deliver(bridge → user)：discordReply 内部 buildComponents。
+          await deliver({
+            from: { kind: "bridge", label: "mgmt-button" },
+            to: { kind: "user", userId: interaction.user.id, channelId },
+            intent: "notification",
+            content: mgmtResult.text,
+            meta: {
+              messageId: `mgmt_${Date.now()}`,
+              triggerKind: "bridge_synth",
+              ts: new Date().toISOString(),
+              threadId: newThreadId(),
+              components: mgmtResult.components,
+            },
+          });
         }
         return;
       }
 
-      // 未知按钮 → 转发给 LLM
+      // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
       if (!client) return;
       startTypingWithSafety(channelId);
-      client.ws.send(JSON.stringify({
-        type: "message",
+      await deliver({
+        from: { kind: "user", userId: interaction.user.id, channelId, username: interaction.user.username },
+        to: { kind: "local", channelId: client.channelId, ws: client.ws, cwd: client.cwd },
+        intent: "request",
         content: `[button:${id}]`,
-        meta: { chat_id: channelId, message_id: interaction.message?.id || "", user: interaction.user.username, user_id: interaction.user.id, ts: new Date().toISOString() },
-      }));
+        meta: {
+          messageId: interaction.message?.id || `btn_${Date.now()}`,
+          triggerKind: "user_discord",
+          ts: new Date().toISOString(),
+          threadId: newThreadId(),
+        },
+      });
       return;
     }
 
@@ -2124,9 +2177,19 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       const mgmtResult = await handleMgmtSelect(id, value, channelId, discord);
       if (mgmtResult) {
         if (mgmtResult.text !== "__HANDLED__") {
-          const components = mgmtResult.components ? buildComponents(mgmtResult.components) : undefined;
-          const channel = await discord.channels.fetch(channelId) as TextChannel;
-          await channel.send({ content: mgmtResult.text, components });
+          await deliver({
+            from: { kind: "bridge", label: "mgmt-select" },
+            to: { kind: "user", userId: interaction.user.id, channelId },
+            intent: "notification",
+            content: mgmtResult.text,
+            meta: {
+              messageId: `mgmt_${Date.now()}`,
+              triggerKind: "bridge_synth",
+              ts: new Date().toISOString(),
+              threadId: newThreadId(),
+              components: mgmtResult.components,
+            },
+          });
         }
         return;
       }
@@ -2707,11 +2770,23 @@ async function resolvePeerDirectCandidate(
       ``,
       `点一个按钮选一个，或者在原消息里带 agent 名字（比如 "用 ${candidates[0].localAgent} 帮我..."）再发一次走快路径。`,
     ];
-    const sent = await (ch as TextChannel).send({
+    // 走 deliver(bridge → user) —— UI 按钮的发送方是 bridge 自己，接收方是发起
+    // 消息的人类用户（postChannelId 即他们看消息的 channel）。discordReply 内部
+    // buildComponents + trackSentMessage。
+    const disambigDelivery = await deliver({
+      from: { kind: "bridge", label: "peer-disambig" },
+      to: { kind: "user", userId: senderId, channelId: postChannelId },
+      intent: "notification",
       content: lines.join("\n"),
-      components: buildComponents([{ type: "buttons", buttons }]),
+      meta: {
+        messageId: `disambig_${Date.now()}`,
+        triggerKind: "bridge_synth",
+        ts: new Date().toISOString(),
+        threadId: newThreadId(),
+        components: [{ type: "buttons", buttons }],
+      },
     });
-    trackSentMessage(sent.id);
+    if (disambigDelivery.outcome.kind !== "sent") return { kind: "multi_unresolved" };
     console.log(`🎯 PEER DISAMBIG: D 按钮发出（${candidates.length} 候选）at channel=${postChannelId}`);
     recordMetric("peer_disambig_buttons", { channelId: postChannelId, meta: { candidateCount: String(candidates.length) } });
     return { kind: "button_posted" };
@@ -3060,23 +3135,38 @@ async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: stri
           .trim();
         if (cleanText) {
           try {
-            const relayChan = await discord.channels.fetch(peers.localAgentExchangeId).catch(() => null);
-            if (relayChan && "messages" in relayChan) {
-              const userMention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
-              const relayText = [
-                `📬 **来自 peer ${peerBotForChannel.name}**（他在自己 guild 的 #agent-exchange 里 @ 了你）${userMention}`,
-                ``,
-                cleanText,
-                ``,
-                `_bridge relay — peer 没走 direct 路由（mode=via_master 或老版本），消息被原样搬到这里了_`,
-              ].join("\n");
-              const sent = await (relayChan as TextChannel).send({ content: relayText });
-              trackSentMessage(sent.id);
+            const userMention = ALLOWED_USER_IDS.length > 0 ? `<@${ALLOWED_USER_IDS[0]}>` : "";
+            const relayText = [
+              `📬 **来自 peer ${peerBotForChannel.name}**（他在自己 guild 的 #agent-exchange 里 @ 了你）${userMention}`,
+              ``,
+              cleanText,
+              ``,
+              `_bridge relay — peer 没走 direct 路由（mode=via_master 或老版本），消息被原样搬到这里了_`,
+            ].join("\n");
+            const relayDelivery = await deliver({
+              from: { kind: "bridge", label: "peer-relay" },
+              to: {
+                kind: "user",
+                userId: ALLOWED_USER_IDS[0] || "",
+                channelId: peers.localAgentExchangeId,
+              },
+              intent: "notification",
+              content: relayText,
+              meta: {
+                messageId: `relay_${Date.now()}`,
+                triggerKind: "bridge_synth",
+                ts: new Date().toISOString(),
+                threadId: newThreadId(),
+              },
+            });
+            if (relayDelivery.outcome.kind === "sent") {
               console.log(`📬 RELAY: peer ${peerBotForChannel.name} 在 foreign exchange 的消息 relay 到本方 exchange (${cleanText.length} chars)`);
               recordMetric("peer_relay_foreign_reply", { channelId: peers.localAgentExchangeId, meta: { peer: peerBotForChannel.name, from: channelId } });
+            } else if (relayDelivery.outcome.kind === "error") {
+              console.error("📬 RELAY 失败:", relayDelivery.outcome.error);
             }
           } catch (e) {
-            console.error("📬 RELAY 失败:", e);
+            console.error("📬 RELAY 异常:", e);
           }
         }
         return true; // 已处理（relay 完），不 fall through
@@ -3476,7 +3566,28 @@ const server = Bun.serve({
           body.kind === "grant"
             ? `🤝 **开放 agent**: 我这边 **${body.local}** 对 ${atMentions} 开放${body.purpose ? `（${body.purpose}）` : ""}。可以直接在本频道 @ 我 bot 问这 agent 处理的话题。`
             : `🚫 **撤销**: 我这边 **${body.local}** 对 ${atMentions} 的开放已撤回。`;
-        await (ch as TextChannel).send({ content: `${event}\n${humanMsg}` });
+        // 走 deliver(bridge → peer)。skipAutoMention=true 因为 atMentions 已经
+        // 拼进 content，不走 ensurePeerMentions 避免重复。peerBotId 用 body.peer
+        // 或 "all" sentinel（deliverToPeer 不依赖 peerBotId 做实际 @mention，只
+        // 用来标注 envelope 的"信任目标"）。
+        await deliver({
+          from: { kind: "bridge", label: "peer-event" },
+          to: {
+            kind: "peer",
+            peerBotId: body.peer,
+            peerBotName: body.peer === "all" ? "all" : (peers.peerBots.find((p) => p.id === body.peer)?.name ?? body.peer),
+            sharedChannelId: peers.localAgentExchangeId,
+          },
+          intent: "broadcast",
+          content: `${event}\n${humanMsg}`,
+          meta: {
+            messageId: `peer_event_${Date.now()}`,
+            triggerKind: "bridge_synth",
+            ts: new Date().toISOString(),
+            threadId: newThreadId(),
+            skipAutoMention: true,
+          },
+        });
         return new Response(JSON.stringify({ ok: true }), {
           headers: { "Content-Type": "application/json" },
         });
