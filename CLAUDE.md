@@ -14,19 +14,34 @@ Claudestra is a multi-session orchestrator built on top of Claude Code's native 
         ▼
  Bridge  ── bridge.ts, pm2-managed, ws://localhost:3847
         │
-        ├── WebSocket routing            ├── JSONL watcher                ├── HTTP hooks
-        │                                │                                │
-        │   channel → master             │   tool call → Discord          │   Stop       → stop typing
-        │   channel → agent A            │   claude text → Discord        │   Notification → fallback
-        │   channel → agent B            │   merged + debounced           │   30min safety timeout
-        │   ...                          │                                │
+        ├── deliver(envelope)  ←── v2.0.0 unified routing
+        │      ├─ to=local  (ws.send  → channel-server → Claude Code)
+        │      ├─ to=peer   (discordReply → shared #agent-exchange)
+        │      └─ to=user   (discordReply → user's channel)
+        │
+        ├── JSONL watcher                ├── HTTP hooks
+        │                                │
+        │   tool call → Discord          │   Stop     → drain watcher + complete ping
+        │   claude text → Discord        │   Notification → stop typing only
+        │   merged + debounced           │   30min safety timeout
 ```
 
-**Message flow:**
+**Message flow (all via `deliver(envelope)` since v2.0.0):**
 
-- **Inbound** — Discord → Bridge → channel-server (MCP) → Claude Code session.
-- **Outbound** — Claude Code `reply` tool → channel-server → Bridge → Discord.
-- **Streaming tool calls** — Claude Code writes JSONL → jsonl-watcher tails the file → Bridge pushes formatted tool summaries to Discord.
+- **Inbound** — Discord → Bridge's `messageCreate` handler → builds `Envelope{from, to, intent, content, meta}` → `deliver()` → `deliverToLocal` → ws.send to the right Claude Code session.
+- **Outbound reply** — Claude Code calls `reply` MCP tool → channel-server → Bridge's `reply` handler → builds response envelope → `deliver()` → `deliverToUser` / `deliverToPeer` → `discordReply` (chunking / reply_to / files / components).
+- **Agent↔agent** — `send_to_agent` MCP tool → `route_to_agent` handler → builds local→local envelope → `deliver()` → receiver sees `[🤖 来自 X]` prefix (auto-rendered by `renderContentForLocal`).
+- **Streaming tool calls** — Claude Code writes JSONL → `jsonl-watcher` tails + pushes tool summaries (`📖 Read ...`) and assistant text (`💬 ...`) to Discord with 1.5s debounce. On Stop hook, watcher is **drained synchronously** (`drainChannelWatcher`) before marking the status "✅ 完成", so quick one-liners don't get lost between debounce windows.
+
+**Envelope / Endpoint model (`src/bridge/router.ts`):**
+
+Every message is described as `{ from: Endpoint, to: Endpoint, intent, content, meta }`. `Endpoint` is a discriminated union:
+
+- `LocalEndpoint{ kind: "local", channelId, ws, agentName?, cwd? }` — one of our Claude Code sessions
+- `PeerEndpoint{ kind: "peer", peerBotId, peerBotName, sharedChannelId }` — another Claudestra bot via shared `#agent-exchange`
+- `UserEndpoint{ kind: "user", userId, channelId, username? }` — Discord human
+
+`intent` is `"request" | "response" | "notification" | "broadcast"`. Request envelopes hang a `PendingReply` + `PendingThread` keyed by the reply-back channel / thread id; response envelopes auto-clear those pendings via `inReplyTo` / `threadId` matching. Stop hooks use thread bookkeeping to close residual pendings and log which `thr_*` just ended.
 
 Each Claude Code session has its own `channel-server` subprocess running as a stdio MCP server. The channel-server speaks MCP to Claude Code on one side and a lightweight WebSocket protocol to the Bridge on the other.
 
@@ -34,14 +49,15 @@ Each Claude Code session has its own `channel-server` subprocess running as a st
 
 ```
 src/
-  bridge.ts              Main entry: Discord client, WebSocket server, event dispatcher, slash commands
+  bridge.ts              Main entry: Discord client, WebSocket server, deliver() dispatch, slash commands, Stop hooks
   bridge/
+    router.ts            v2.0.0+ Envelope/Endpoint types + parseAddress + threadId helpers
     config.ts            Shared runtime constants
     components.ts        Discord UI components + typing indicators
-    discord-api.ts       Discord API wrappers (create/delete channel, edit message, etc.)
+    discord-api.ts       Discord API wrappers: discordReply (chunking / reply_to / files / components), channel CRUD, react, edit
     management.ts        Admin button/select handlers that bypass the LLM
     screenshot.ts        Terminal screenshot pipeline (ANSI → HTML → PNG)
-    jsonl-watcher.ts     JSONL session tailer → streaming tool summaries
+    jsonl-watcher.ts     JSONL session tailer → tool summaries + assistant text stream + drain-on-Stop
     slash-catalog.ts     Hardcoded list of CC built-in slash commands (Discord-friendly subset)
     slash-registry.ts    Runtime registry of discovered skills per scope + per-channel resolver
     wedge-watcher.ts     Detects agents stuck >30min with no pane change + not idle → Discord alert
@@ -59,6 +75,7 @@ src/
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
     jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
+    peers.ts             peers.json data model + PeerEvent encode/parse + effective mode
   ansi2html.ts           ANSI escape codes → coloured HTML
   html2png.ts            HTML → PNG via Playwright headless Chromium
   discord-reply.ts       Bash fallback: send a message through the Bridge directly
@@ -66,7 +83,13 @@ master/
   CLAUDE.md.template     Master agent instruction template (rendered by setup.ts)
   CLAUDE.md              Rendered local copy (git-ignored)
 tests/
-  cron.test.ts           Cron parser + scheduler test suite (46 cases)
+  cron.test.ts           Cron parser + scheduler test suite
+  jsonl-cost.test.ts     JSONL token-usage rollup
+  modal-parser.test.ts   Tmux modal detection
+  peers.test.ts          v2.0.0+ PeerEvent encode/parse + effectivePeerMode
+  router.test.ts         v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
+  skills.test.ts         SKILL.md discovery
+  slash-registry.test.ts Slash command registry per-channel resolution
 install.sh               One-line installer
 SETUP.md                 User-facing installation guide
 ```
@@ -98,7 +121,7 @@ Peers (other Claudestra installs running the same upstream) can share their spec
 - **Cross-peer `send_to_agent`** — agents call `send_to_agent({ target: "peer:<peer_bot_name>.<agent_name>" })` or short `target: "<agent>@<peer>"` to invoke a peer agent. Bridge posts to shared `#agent-exchange` `@ peer bot` and registers a pending-peer-call; peer's reply is push-delivered back to the caller's ws as a synthetic `[🤖 peer X/Y 回复] ...` user message (replacing old fetch-message polling).
 - **Trust model** — simplified "trust transfer": once you `peer-expose` an agent to a peer bot, that peer's humans (who are already in peer's `#agent-exchange`) are trusted transitively. No allowlist sync needed; the peer's channel membership IS the trust boundary.
 - **Push-back replaces polling (v1.9.21+)** — bridge's `route_to_agent` (local) and `handlePeerRouteToAgent` (cross-peer) both record `pendingAgentCalls` / `pendingPeerCalls`. When target posts their reply, bridge synthesizes an internal "message" event to the caller's ws. Callers simply `end_turn` and wait for the synthesized user message, no `fetch_messages` loop needed.
-- **Reply rescue (v1.9.21+, refined through v1.9.25)** — every Discord-inbound message sets a pending entry keyed by channel. If the target Claude Code session ends its turn (Stop hook) without having called `reply()`, the bridge reads that session's JSONL, extracts the latest assistant-text output, and posts it to Discord on the agent's behalf (footer `_📋 [bridge 兜底] …_`). No NAG injection (the v1.9.20 NAG concept was removed — it polluted context and frequently misfired). Only runs on `Stop`/`StopFailure`, not on `Notification`, to prevent duplicate posts.
+- **No-reply fallback (v1.9.37+, replaces the old rescue)** — if the agent ends its turn without calling `reply()`, the `jsonl-watcher` has already been streaming any assistant text to Discord as `💬 ...` (debounced 1.5s). On Stop hook, the Bridge synchronously **drains** that watcher (`drainChannelWatcher`): immediately re-polls the jsonl, cancels the debounce timer, and force-flushes the textQueue before marking the status "✅ 完成". The earlier v1.9.21–v1.9.36 "bridge rescue" mechanism (extract text from jsonl + re-post with `[bridge 兜底]` footer) was removed in 1.9.37 because it duplicated whatever the watcher already streamed — they both read the same jsonl and would each post the same text. Rate-limit messages (`You've hit your limit`) are tagged with `⛔` instead of `💬` and the paired `turn_duration` is suppressed so it doesn't look like real thinking time.
 - **`[EOT]` end-of-thread marker** — agent appends `[EOT]` to its final reply when closing a conversation; receiving bridge drops rather than forwards, preventing two bots from ack-looping in `#agent-exchange`.
 
 ## Runtime commands
@@ -187,6 +210,8 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - The MCP server name (`MCP_NAME`) must match between `claude mcp add`, the channel-server's registration, and the JSONL watcher's tool-filter prefix. It is centralised in `src/bridge/config.ts` and `src/lib/claude-launch.ts`.
 - Agent names are validated against a shell-metacharacter blocklist on create/resume but loosely normalised on kill/restart to keep historical CJK names working.
 - Tool call display is debounced through `WATCHER_CONFIG.debounceMs` (default 1500 ms) to avoid Discord rate limits during bursty tool sequences.
+- **Message routing (v2.0.0+)**: every message-semantic bridge operation (inbound to agent / outbound reply / agent→agent forward / pushback from cross-peer calls / peer-direct and symmetric routes) constructs an `Envelope` and calls `deliver(env)`. The only direct `ws.send({type:"message"...})` / `channel.send({content})` calls outside `deliver` are **UI-class** side effects: the "💭 Thinking" status message with the Interrupt button, LLM-free admin button replies, `notifyMaster` broadcasts, `PeerEvent` announcements, peer→local relay fallback in `tryRouteForeignAgentExchange`, and hook-event text notifications. Everything that an agent ends up seeing in its MCP `<channel>` tag goes through `deliver` → `renderContentForLocal`.
+- **`channel-server` reconnect (v1.9.36+)**: on WebSocket close, the channel-server only exits when the bridge sends an explicit "replaced" signal (another connection took over the same channel). Plain `code 1000` (bridge restart) is treated as a transient disconnect and triggers exponential-backoff reconnect, so `pm2 restart discord-bridge` no longer orphans every agent's MCP connection.
 
 ## Contributing tips
 
@@ -199,4 +224,5 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - `tmux-helper.ts` and `claude-launch.ts` are the canonical places for tmux commands and Claude Code launch flags. Don't inline these in new files.
 - Admin buttons that should skip the LLM go in `bridge/management.ts`. Add the `id` to both `handleMgmtButton` and the relevant panel builder.
 - Before shipping, run `bun test` and `bun build src/<entry>.ts --target=bun` for each entry point (`bridge`, `channel-server`, `manager`, `launcher`, `cron`, `setup`) to catch type errors quickly.
-- The cron test suite exercises the parser and next-run computation but does not run real agents — integration testing happens in a sandbox Discord server.
+- Test suite (`bun test`) currently exercises pure logic (cron parser, JSONL cost rollup, tmux modal parser, peers.ts encode/parse, router.ts envelope helpers, skills discovery, slash-registry). `bridge.ts` itself has no isolated unit tests because of its Discord-client + ws + peers.json coupling — live verification through a second Claude Code session in a sandbox Discord server is the coverage there.
+- New outbound Discord messages (reply, notification, forward) should build an `Envelope` and call `deliver()` rather than calling `discordReply` / `channel.send` directly. `renderContentForLocal` + `renderPeerDirectHeader` + `renderAgentExchangeToMasterHeader` centralise header rendering; don't hand-inject headers in call sites.
