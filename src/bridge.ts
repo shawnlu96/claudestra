@@ -152,6 +152,14 @@ interface PendingAgentCall {
   callerWs: ServerWebSocket<unknown>;
   callerName: string;
   targetName: string;
+  /**
+   * caller 发起 send_to_agent 时手头正在处理的 inbound 请求的
+   * intendedReplyChannel —— 常见是 #agent-exchange（user 或 peer 在那里 @ 了
+   * caller），也可能是 caller 自己的频道。target 回来之后，push 给 caller 的
+   * 合成消息 meta.chat_id 用这个值，避免 caller LLM 误用 target 的私频当作
+   * 回复目标。没有正在处理的请求时是 undefined。
+   */
+  originalReplyChannel?: string;
   ts: number;
 }
 const pendingAgentCalls = new Map<string, PendingAgentCall>();
@@ -2341,11 +2349,18 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const pending = pendingAgentCalls.get(msg.chatId);
         if (pending) {
           try {
+            // v2.0.1+: from.channelId 用 originalReplyChannel（caller 手头的
+            // 原 inbound 请求频道，比如 #agent-exchange）而不是 target 的私频。
+            // resolveReplyBackChannel 对 from.kind=local 返回 from.channelId，
+            // pushback 的 meta.chat_id 就会是原频道，caller LLM 顺手回就对了。
+            // 没有 originalReplyChannel 时回退到 msg.chatId（target 私频）—
+            // 这是旧行为，保守兜底。
+            const replyBackHint = pending.originalReplyChannel || msg.chatId;
             const pushEnv: RouterEnvelope = {
               from: {
                 kind: "local",
                 agentName: pending.targetName,
-                channelId: msg.chatId,
+                channelId: replyBackHint,
                 ws,
               },
               to: {
@@ -2494,10 +2509,16 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const regResult = await runManager("list");
         const agents: any[] = regResult.agents || [];
 
-        // 补全发送方名字
+        // 补全发送方名字。CONTROL_CHANNEL_ID 不在 registry（master 不是常规
+        // agent），特判成 "master"；worker 查 registry；都找不到才回退到
+        // channelId（理论上进不到这里，写个兜底）。
         if (!fromName && fromChannelId) {
-          const fromAgent = agents.find((a: any) => a.channelId === fromChannelId);
-          fromName = fromAgent?.name || fromChannelId;
+          if (fromChannelId === CONTROL_CHANNEL_ID) {
+            fromName = "master";
+          } else {
+            const fromAgent = agents.find((a: any) => a.channelId === fromChannelId);
+            fromName = fromAgent?.name || fromChannelId;
+          }
         }
 
         const targetName = rawTarget.startsWith("agent-") ? rawTarget : `agent-${rawTarget}`;
@@ -2553,12 +2574,24 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
+        //
+        // v2.0.1+: 同时推断 originalReplyChannel —— caller 手头正在处理的
+        // inbound 请求的 intendedReplyChannel。pushback 用它做 meta.chat_id，
+        // caller LLM 就不会错用 target 的私频当作回复目标（Bug 2 修复）。
         if (fromChannelId) {
+          let originalReplyChannel: string | undefined;
+          for (const [, p] of pendingReplies.entries()) {
+            if (p.targetWs === ws) {
+              originalReplyChannel = p.intendedReplyChannel;
+              break;
+            }
+          }
           pendingAgentCalls.set(target.channelId, {
             callerChannelId: fromChannelId,
             callerWs: ws,
             callerName: fromName,
             targetName,
+            originalReplyChannel,
             ts: Date.now(),
           });
         }
