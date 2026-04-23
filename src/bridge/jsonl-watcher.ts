@@ -12,6 +12,7 @@ import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
+import { discordReply } from "./discord-api.js";
 
 interface ToolEntry {
   id: string;
@@ -107,27 +108,20 @@ async function syncToolMsg(state: WatcherState, discord: Client) {
   } catch { /* non-critical */ }
 }
 
-/** 发 Claude 的文本 */
+/** 发 Claude 的文本。
+ *  每条文本前缀 `-# `（Discord 的 subtext 样式）。原先手动 buf 拼接在**单条**
+ *  item 超 Discord 2000 char 限制的时候直接塞进 buf 一发就 400，silent catch
+ *  吞错误用户什么都看不到。改用 discordReply 自带的 chunkText，按行切 + 补 2000
+ *  上限自动分段，再加 trackSentMessage 跟原逻辑一致。 */
 async function flushText(state: WatcherState, discord: Client) {
   if (state.textQueue.length === 0) return;
   const items = state.textQueue.splice(0);
+  const body = items.map((item) => `-# ${item}`).join("\n");
   try {
-    const ch = await discord.channels.fetch(state.channelId) as TextChannel;
-    // 每条文本加 -# 前缀，拼接后按 1900 字符分块发送
-    let buf = "";
-    for (const item of items) {
-      const line = `-# ${item}`;
-      if (buf.length + line.length + 1 > 1900) {
-        if (buf) await ch.send(buf);
-        buf = line;
-      } else {
-        buf = buf ? buf + "\n" + line : line;
-      }
-    }
-    if (buf) await ch.send(buf);
-    state.toolMsgId = null;
-    state.tools = state.tools.filter(t => !t.done);
+    await discordReply(discord, state.channelId, body);
   } catch { /* non-critical */ }
+  state.toolMsgId = null;
+  state.tools = state.tools.filter(t => !t.done);
 }
 
 function getJsonlPath(cwd: string, sessionId: string): string {
