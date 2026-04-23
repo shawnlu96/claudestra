@@ -113,6 +113,21 @@ interface PendingReply {
   threadId?: string;
 }
 const pendingReplies = new Map<string, PendingReply>();
+
+/**
+ * thread → 原始请求 envelope 的追踪。deliverToLocal 在 intent=request 时挂一条，
+ * deliver 在对应 response 进来（meta.inReplyTo 或 threadId 匹配）时清一条，
+ * Stop hook 兜底清掉对应 ws 上残留的。提供 per-thread 可观察性（log 里带
+ * threadId 能追出"哪条具体消息结束了"），比单靠按 ws 清要精细一层。
+ */
+interface PendingThread {
+  request: RouterEnvelope;
+  /** 请求被投递到的本地 ws（用于 Stop hook 按 ws 反查本次要清哪些 thread） */
+  targetWs: ServerWebSocket<unknown>;
+  ts: number;
+}
+const pendingThreads = new Map<string, PendingThread>();
+
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
 let _cachedAgentExchangeId = "";
@@ -186,6 +201,8 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
         pendingReplies.delete(key);
       }
     }
+    // 顺手清 thread map（按 threadId 精确清，不误伤别的 thread）
+    pendingThreads.delete(env.meta.threadId);
   }
 
   // 1. 权限检查：peer → 本地具体 agent 的情况要查 peers.json exposures。
@@ -279,6 +296,11 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
         intendedReplyChannel: replyBackChannel,
         targetWs: to.ws,
         threadId: env.meta.threadId,
+      });
+      pendingThreads.set(env.meta.threadId, {
+        request: env,
+        targetWs: to.ws,
+        ts: Date.now(),
       });
     }
     return { envelope: env, outcome: { kind: "sent" } };
@@ -3297,12 +3319,23 @@ async function handleHookRequest(req: Request): Promise<Response> {
         }
       }
 
-      // 清所有 pendingReplies（targetWs 匹配这次 Stop ws 的那些）——watcher drain
-      // 完就不再需要 "pending 挂着等 rescue" 这个语义了，留着只会让下次 Stop 误判。
+      // 清所有 pending*（targetWs 匹配这次 Stop ws 的那些）。watcher drain 完
+      // 就不再需要 "pending 挂着等 rescue" 的语义了，留着只会让下次 Stop 误判。
+      // 同时 pendingThreads 按 threadId 带 log，知道哪些具体 thread 结束了。
       const stopClientForPending = clients.get(channelId);
       if (stopClientForPending && (event === "Stop" || event === "StopFailure" || event === "stop")) {
         for (const [cid, pending] of pendingReplies.entries()) {
           if (pending.targetWs === stopClientForPending.ws) pendingReplies.delete(cid);
+        }
+        const closedThreads: string[] = [];
+        for (const [tid, t] of pendingThreads.entries()) {
+          if (t.targetWs === stopClientForPending.ws) {
+            pendingThreads.delete(tid);
+            closedThreads.push(tid);
+          }
+        }
+        if (closedThreads.length > 0) {
+          console.log(`🧵 Stop 清 pending threads: ${closedThreads.join(", ")} (channel=${channelId})`);
         }
       }
 
