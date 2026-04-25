@@ -304,9 +304,17 @@ bun ../src/manager.ts peer-expose <agent> <peer|all> --purpose "xxx" [--mode dir
 
 1. 先 `cat ~/.claude-orchestrator/peers.json`，看 `exposures`：哪些 local_agent 对这个 peer bot 开放？
 2. 如果**没有**任何 exposure 覆盖当前请求 → 回一句"抱歉，这方面能力 {{USER_NAME}} 还没对你开放"，**不**调 agent，也**不**自己尝试答
-3. 如果**有** exposure → 不管请求内容你自己会不会，必须 `send_to_agent(目标本地 agent, "来自 peer {bot_tag} 的请求：...")` 交给 agent 处理
-4. **v1.9.21+：不用 fetch_messages 轮询！** send_to_agent 会返回 `pushBack: true`，bridge 会在 agent reply 时自动把它的答案 push 到你的 ws 作为新入站消息。你只要 end_turn 等那条 push 消息触发下一轮就行
-5. 收到 agent 的 push 消息（格式 `[🤖 <agent-name> 回复] ...`）后，reply 到 #agent-exchange（bridge 会自动 @ peer bot）把 agent 的答案转述过去
+3. 如果**有** exposure → 不管请求内容你自己会不会，必须 `send_to_agent(目标本地 agent, "...")` 交给 agent 处理。
+   ⚠️ **send_to_agent 的 text 里必须显式带上 peer 的 #agent-exchange channel id**，并明确指示 agent "回复请直接 reply 到 chat_id=<peer-exchange-id>，不要回到我这个频道"。否则 agent 看到的 channel tag 里 chat_id 是你（master）的频道，会顺着 reply_to 默认链路回到 #control，peer 永远收不到。模板示例：
+   ```
+   send_to_agent({
+     target: "<本地agent名>",
+     text: "来自 peer {bot_tag} 在 #agent-exchange 的请求：<原文>。\n\n回复请直接 reply 到 chat_id=\"<我方 #agent-exchange channel id>\"，bridge 会自动 @ {bot_tag}，不需要回到我这边转述。"
+   })
+   ```
+   `<我方 #agent-exchange channel id>` = peer 消息抵达的那个频道，可以从 `~/.claude-orchestrator/peers.json` 的 `localAgentExchangeId` 字段读，或直接用 peer 入站消息 channel tag 里的 `chat_id`。
+4. **v1.9.21+：不用 fetch_messages 轮询！** send_to_agent 会返回 `pushBack: true`，bridge 会在 agent reply 时自动把它的答案 push 到你的 ws 作为新入站消息。但有了第 3 步的显式 channel 注入后，agent 应该会直接发到 #agent-exchange，pushBack 主要用来让你知道这轮已经完成。你 end_turn 等就行
+5. 如果出于某种原因 agent **没**直接发到 #agent-exchange、而是发回了你（比如 agent 误读了指令），你收到 push 消息（格式 `[🤖 <agent-name> 回复] ...`）后兜底 reply 到 #agent-exchange（bridge 会自动 @ peer bot）把答案转述过去
 
 **为什么保留 via_master**：exposure 里手动 `--mode via_master` 适合"多个 agent 都可能匹配、需要 LLM 路由决策"的场景，或者需要 master 加 context / 做前置权限判断的场景。不常用，默认都是 direct。
 
