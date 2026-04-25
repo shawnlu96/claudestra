@@ -6,7 +6,6 @@
  * 检测到新弹窗 → 发 Discord 消息 + 截图 + 按钮，@ 用户响应。
  */
 
-import { createHash } from "crypto";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import {
@@ -21,15 +20,30 @@ import { runManager } from "./management.js";
 
 const POLL_INTERVAL_MS = 8_000;
 
-// channelId → 最近一次通知的弹窗指纹。防止同一弹窗重复推送。
+// channelId → 最近一次通知的 modal key。防止同一弹窗重复推送。
 const lastNotified = new Map<string, string>();
 // channelId → Discord 消息 ID（用于点击按钮后编辑）
 export const permissionMessages = new Map<string, string>();
 
-function fingerprint(pane: string): string {
-  // 取最后 20 行作为指纹（弹窗通常在底部）。这样用户在弹窗界面下不会有新内容进来。
-  const tail = pane.split("\n").slice(-20).join("\n");
-  return createHash("sha1").update(tail).digest("hex").slice(0, 16);
+/**
+ * 给当前 modal 计算一个稳定 dedup key。
+ *
+ * **不要**用 pane 原文 hash —— session-idle modal 文案里有 "This session is
+ * 21h 6m old and 913.2k tokens" 这种**带动态时间**的字段，每分钟跳一次，
+ * 导致 watcher 每分钟重发一次"session 闲置"通知（v2.0.4 之前的 bug）。
+ *
+ * 改成基于语义：
+ * - session-idle 这种单一状态语义就一个 key，时间变化不影响
+ * - 运行时权限弹窗用 detectRuntimePermissionPrompt 返回的稳定描述
+ *   （"Edit /tmp/foo" 之类，和具体权限请求 1:1）
+ */
+export function computeModalKey(
+  sessionIdleDesc: string | null,
+  permissionDesc: string | null
+): string | null {
+  if (sessionIdleDesc) return "session-idle";
+  if (permissionDesc) return `permission|${permissionDesc}`;
+  return null;
 }
 
 async function checkAgent(
@@ -44,14 +58,13 @@ async function checkAgent(
   const sessionIdleDesc = detectSessionIdlePrompt(pane);
   const permissionDesc = sessionIdleDesc ? null : detectRuntimePermissionPrompt(pane);
 
-  if (!sessionIdleDesc && !permissionDesc) {
+  const key = computeModalKey(sessionIdleDesc, permissionDesc);
+  if (!key) {
     lastNotified.delete(channelId);
     return;
   }
-
-  const fp = fingerprint(pane);
-  if (lastNotified.get(channelId) === fp) return;
-  lastNotified.set(channelId, fp);
+  if (lastNotified.get(channelId) === key) return;
+  lastNotified.set(channelId, key);
 
   const pngPath = await tmuxScreenshot(agentName);
   const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
