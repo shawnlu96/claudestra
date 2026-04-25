@@ -67,6 +67,12 @@ interface AgentInfo {
   disallowedPreset?: string;
   /** 原始 disallowedTools 字符串。如果设置了，优先于 preset */
   disallowedRaw?: string;
+  /**
+   * Session-scoped effort level（low/medium/high/xhigh/max/auto），由 launcher 启动 agent 时
+   * 通过 `--effort <level>` CLI flag 传给 Claude Code。空 = 不传 flag → Claude Code 用
+   * `~/.claude/settings.json` 全局 effortLevel。改完要 restart 才生效。
+   */
+  effort?: string;
 }
 
 interface Registry {
@@ -328,6 +334,28 @@ function extractPermFlags(args: string[]): {
   return { rest, preset, disallowedRaw };
 }
 
+const KNOWN_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "auto"] as const;
+function isKnownEffort(e: string): boolean {
+  return (KNOWN_EFFORT_LEVELS as readonly string[]).includes(e);
+}
+
+/** 从 argv 提取 --effort <level>，支持 --effort=foo */
+function extractEffortFlag(args: string[]): { rest: string[]; effort?: string } {
+  const rest: string[] = [];
+  let effort: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--effort") {
+      effort = args[++i];
+    } else if (a.startsWith("--effort=")) {
+      effort = a.slice("--effort=".length);
+    } else {
+      rest.push(a);
+    }
+  }
+  return { rest, effort };
+}
+
 // ============================================================
 // 命令实现
 // ============================================================
@@ -336,7 +364,8 @@ async function cmdCreate(
   name: string,
   dir: string,
   purpose: string = "",
-  perms: { preset?: string; disallowedRaw?: string } = {}
+  perms: { preset?: string; disallowedRaw?: string } = {},
+  effort?: string,
 ) {
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
@@ -347,6 +376,14 @@ async function cmdCreate(
     output({
       ok: false,
       error: `未知的权限预设: "${perms.preset}"。可用: ${listPresets().join(", ")}`,
+    });
+    return;
+  }
+
+  if (effort && !isKnownEffort(effort)) {
+    output({
+      ok: false,
+      error: `未知的 effort level: "${effort}"。可用: ${KNOWN_EFFORT_LEVELS.join(", ")}`,
     });
     return;
   }
@@ -401,6 +438,7 @@ async function cmdCreate(
       sessionId,
       disallowedPreset: perms.preset,
       disallowedRaw: perms.disallowedRaw,
+      effort,
     });
     await tmuxSendLine(target, cmd);
 
@@ -446,6 +484,7 @@ async function cmdCreate(
     cwd: expandedDir,
     disallowedPreset: perms.preset,
     disallowedRaw: perms.disallowedRaw,
+    effort,
   };
   await saveRegistry(reg);
 
@@ -459,6 +498,7 @@ async function cmdCreate(
     sessionId,
     ready,
     preset: perms.preset || DEFAULT_PRESET,
+    effort: effort || "(inherits ~/.claude/settings.json)",
     message: ready
       ? `Agent ${tmuxName} 已创建，Discord 频道 #${channelName} 已就绪`
       : `Agent ${tmuxName} 已创建，但 Claude Code 可能还在启动中`,
@@ -471,7 +511,8 @@ async function cmdResume(
   name: string,
   sessionId: string,
   dir?: string,
-  perms: { preset?: string; disallowedRaw?: string } = {}
+  perms: { preset?: string; disallowedRaw?: string } = {},
+  effort?: string,
 ) {
   if (!UUID_RE.test(sessionId)) {
     throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式）`);
@@ -484,6 +525,14 @@ async function cmdResume(
     output({
       ok: false,
       error: `未知的权限预设: "${perms.preset}"。可用: ${listPresets().join(", ")}`,
+    });
+    return;
+  }
+
+  if (effort && !isKnownEffort(effort)) {
+    output({
+      ok: false,
+      error: `未知的 effort level: "${effort}"。可用: ${KNOWN_EFFORT_LEVELS.join(", ")}`,
     });
     return;
   }
@@ -548,6 +597,7 @@ async function cmdResume(
       displayName,
       disallowedPreset: perms.preset,
       disallowedRaw: perms.disallowedRaw,
+      effort,
     });
     await tmuxSendLine(target, cmd);
 
@@ -594,6 +644,7 @@ async function cmdResume(
     displayName: channelName,
     disallowedPreset: perms.preset,
     disallowedRaw: perms.disallowedRaw,
+    effort,
   };
   await saveRegistry(reg);
 
@@ -990,6 +1041,7 @@ async function cmdRestart(name?: string) {
       displayName,
       disallowedPreset: info.disallowedPreset,
       disallowedRaw: info.disallowedRaw,
+      effort: info.effort,
     });
 
     const started = await startClaudeInWindow(tmuxName, cmd);
@@ -1358,6 +1410,112 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
       'permissions set <name> --preset <preset>｜--disallowed "..."',
       "permissions reset <name>         — 恢复默认预设",
     ],
+  });
+}
+
+// ============================================================
+// Effort level 管理（per-agent --effort）
+// ============================================================
+
+async function cmdEffort(sub: string, ...rest: string[]) {
+  if (!sub || sub === "list") {
+    const reg = await loadRegistry();
+    const rows = Object.entries(reg.agents)
+      .filter(([, info]) => info.status === "active")
+      .map(([name, info]) => ({
+        name,
+        effort: info.effort || "(inherit)",
+      }));
+    output({ ok: true, agents: rows, hint: "(inherit) = 跟随 ~/.claude/settings.json 全局 effortLevel" });
+    return;
+  }
+
+  if (sub === "get") {
+    const [name] = rest;
+    if (!name) {
+      output({ ok: false, error: "用法: effort get <name>" });
+      return;
+    }
+    const tmuxName = normalizeName(name);
+    const reg = await loadRegistry();
+    const info = reg.agents[tmuxName];
+    if (!info) {
+      output({ ok: false, error: `找不到 agent: ${tmuxName}` });
+      return;
+    }
+    output({
+      ok: true,
+      agent: tmuxName,
+      effort: info.effort || "(inherit)",
+    });
+    return;
+  }
+
+  if (sub === "reset") {
+    const [name] = rest;
+    if (!name) {
+      output({ ok: false, error: "用法: effort reset <name>" });
+      return;
+    }
+    const tmuxName = normalizeName(name);
+    const reg = await loadRegistry();
+    const info = reg.agents[tmuxName];
+    if (!info) {
+      output({ ok: false, error: `找不到 agent: ${tmuxName}` });
+      return;
+    }
+    info.effort = undefined;
+    await saveRegistry(reg);
+    output({
+      ok: true,
+      agent: tmuxName,
+      effort: "(inherit)",
+      hint: `已清除。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(AGENT_PREFIX, "")}`,
+    });
+    return;
+  }
+
+  // 默认形式：effort <agent> <level> 或 effort set <agent> <level>
+  let agentName: string;
+  let level: string;
+  if (sub === "set") {
+    [agentName, level] = rest;
+  } else {
+    agentName = sub;
+    level = rest[0];
+  }
+
+  if (!agentName || !level) {
+    output({
+      ok: false,
+      error: "用法: effort <agent> <level>｜effort reset <agent>｜effort list",
+      validLevels: KNOWN_EFFORT_LEVELS,
+    });
+    return;
+  }
+
+  if (!isKnownEffort(level)) {
+    output({
+      ok: false,
+      error: `未知的 effort level: "${level}"。可用: ${KNOWN_EFFORT_LEVELS.join(", ")}`,
+    });
+    return;
+  }
+
+  const tmuxName = normalizeName(agentName);
+  const reg = await loadRegistry();
+  const info = reg.agents[tmuxName];
+  if (!info) {
+    output({ ok: false, error: `找不到 agent: ${tmuxName}` });
+    return;
+  }
+  info.effort = level;
+  await saveRegistry(reg);
+  output({
+    ok: true,
+    agent: tmuxName,
+    effort: level,
+    hint: `已写入 registry。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(AGENT_PREFIX, "")}`,
   });
 }
 
@@ -2001,30 +2159,32 @@ const [cmd, ...args] = process.argv.slice(2);
 try {
 switch (cmd) {
   case "create": {
-    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(args);
+    const { rest: afterEffort, effort } = extractEffortFlag(args);
+    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterEffort);
     const [name, dir, ...purposeParts] = posArgs;
     if (!name || !dir) {
       output({
         ok: false,
-        error: 'create <name> <dir> [purpose] [--preset <preset>] [--disallowed "..."]',
+        error: 'create <name> <dir> [purpose] [--preset <preset>] [--disallowed "..."] [--effort <level>]',
       });
       break;
     }
-    await cmdCreate(name, dir, purposeParts.join(" "), { preset, disallowedRaw });
+    await cmdCreate(name, dir, purposeParts.join(" "), { preset, disallowedRaw }, effort);
     break;
   }
 
   case "resume": {
-    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(args);
+    const { rest: afterEffort, effort } = extractEffortFlag(args);
+    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterEffort);
     const [name, sessionId, dir] = posArgs;
     if (!name || !sessionId) {
       output({
         ok: false,
-        error: 'resume <name> <sessionId> [dir] [--preset <preset>] [--disallowed "..."]',
+        error: 'resume <name> <sessionId> [dir] [--preset <preset>] [--disallowed "..."] [--effort <level>]',
       });
       break;
     }
-    await cmdResume(name, sessionId, dir, { preset, disallowedRaw });
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort);
     break;
   }
 
@@ -2214,6 +2374,12 @@ switch (cmd) {
     break;
   }
 
+  case "effort": {
+    const [sub, ...rest] = args;
+    await cmdEffort(sub || "list", ...rest);
+    break;
+  }
+
   case "tmux-help":
   case "tmux":
     printTmuxGuide();
@@ -2241,6 +2407,10 @@ switch (cmd) {
         "permissions get <name>          — 查看单个 agent 的详细权限",
         'permissions set <name> --preset <preset>｜--disallowed "..."',
         "permissions reset <name>        — 恢复默认预设",
+        "effort list                     — 列出所有 agent 的 effort 设置",
+        "effort get <name>               — 查看单个 agent 的 effort",
+        "effort <name> <low|medium|high|xhigh|max|auto>  — 设置 agent 的 effort（要 restart 生效）",
+        "effort reset <name>             — 清除 agent effort 覆盖（回到 settings.json 全局）",
         "tmux-help                       — 打印 tmux 快速教程（含 iTerm2 -CC 模式）",
         "version                         — 显示当前版本 + 是否有更新",
         "update                          — 拉取最新代码并重启 pm2 服务",

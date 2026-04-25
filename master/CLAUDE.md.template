@@ -102,9 +102,16 @@ bun ../src/manager.ts permissions set <名称> --disallowed "Bash(foo:*) ..."  #
 bun ../src/manager.ts permissions reset <名称>                # 恢复默认
 # set/reset 后需要 restart 该 agent 生效
 
-# 新建 agent 时也能直接指定权限
+# 每个 agent 独立的 effort level（low / medium / high / xhigh / max / auto）
+bun ../src/manager.ts effort list                            # 看所有 agent 的当前 effort
+bun ../src/manager.ts effort get <名称>                       # 看单个 agent 的 effort
+bun ../src/manager.ts effort <名称> xhigh                     # 设置 agent 的 effort（要 restart 生效）
+bun ../src/manager.ts effort reset <名称>                     # 清除 → 跟 ~/.claude/settings.json 全局走
+
+# 新建 agent 时也能直接指定权限 / effort
 bun ../src/manager.ts create <名称> <目录> [用途] --preset readonly
 bun ../src/manager.ts create <名称> <目录> [用途] --disallowed "Bash(curl:*) Bash(wget:*)"
+bun ../src/manager.ts create <名称> <目录> [用途] --effort xhigh
 ```
 
 ## Discord 交互指南
@@ -416,6 +423,28 @@ bridge 识别到 `[EOT]` 结尾会跳过 forward 给对方 agent，对方 agent 
 - "新建一个只读的 agent" → `create <name> <dir> <purpose> --preset readonly`
 
 set / reset 之后必须 `restart <name>` 才能生效（Claude Code 启动 flag 只在启动时读取一次）。告知用户后再执行 restart。
+
+## Effort level（每个 agent 的 reasoning effort）
+
+每个 agent 可以独立配置 effort（low / medium / high / xhigh / max / auto），由 launcher 启动 agent 时通过 `--effort` flag 传给 Claude Code。**不设置** = 跟 `~/.claude/settings.json` 全局 `effortLevel` 走（绝大多数情况下默认行为最好）。
+
+什么时候用：
+- 用户想给某个 agent 单独拉高/降低 thinking budget（比如某个 agent 跑代码审计要 max，另一个跑日常 chore 要 low）
+- 临时排查 Claude Code upstream bug（比如 settings.json `effortLevel` 不被尊重时，强制传 `--effort` 绕开）
+
+用户自然语言映射：
+
+- "把 xxx 的 effort 设成 max" / "xxx 提高思考强度" → `effort xxx max`
+- "给 xxx 用 xhigh" → `effort xxx xhigh`
+- "xxx effort 降到 low" / "xxx 不用想那么多" → `effort xxx low`
+- "看看 xxx 的 effort" / "xxx 思考强度多少" → `effort get xxx`
+- "看看大家的 effort" / "列一下 effort 设置" → `effort list`
+- "xxx effort 恢复默认" / "xxx 不再单独设置 effort" → `effort reset xxx`
+- "新建一个 xhigh 的 agent" → `create <name> <dir> <purpose> --effort xhigh`
+
+⚠️ 改完 effort **必须 restart** 该 agent 才生效（Claude Code 启动 flag 只读一次）。set / reset 后告知用户「需要 restart 生效」，然后执行 restart。
+
+合法 level：`low` / `medium` / `high` / `xhigh` / `max` / `auto`。其他字符串会被 CLI 拒绝。
 
 ## 重启 vs 重建（重要区别！）
 
