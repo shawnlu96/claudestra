@@ -71,36 +71,31 @@ export async function isIdle(target: string): Promise<boolean> {
 }
 
 /**
- * 检测一段 tmux pane 里是否存在 Claude Code 的确认弹窗。
- * 覆盖启动时的 dev-channel / trust files / skip permissions / 选项菜单 等。
- * 共用同一份列表，避免 manager/launcher 之间漂移。
+ * 检测 pane 上是否有"可以安全自动按 Enter 确认"的 modal。
  *
- * 注意：不要匹配 "bypass permissions mode" 或 "bypass permissions" —
- * 这些是 Claude Code 启动完成后的横幅文字，不是需要确认的提示。
+ * 先用 parseModalOptions 做几何识别（必须有 ❯ 标记的选项菜单）。检测到 modal
+ * 之后，再用一个**负向 blacklist** 排除"必须用户决定"的弹窗：
+ * - 运行时权限弹窗（detectRuntimePermissionPrompt）：edit / run / allow ...
+ * - session-idle 弹窗（detectSessionIdlePrompt），除非显式 allowSessionIdle=true
+ *   master 启动时允许（默认从摘要恢复），agent 不允许（permission-watcher 会发按钮）
+ *
+ * 这样 Claude Code 改启动期 modal 文案（dev-channel / trust files / skip
+ * permissions ...）不会再让 launcher 卡住 — 只要修结构稳定的 ❯ + Enter to
+ * confirm 几何特征还在，自动通过。
  */
-export function hasClaudePromptToConfirm(pane: string): boolean {
-  // 强 UI 信号：必须先有 Claude Code modal 的几何特征，否则 Claude 回复正文里
-  // 出现 "Do you want..." / "Are you sure..." 也会被误判为弹窗，launcher
-  // 就会把 Enter 无脑打到 master 上，破坏 Claude 正在输入的内容。
-  const hasMenuMarker =
-    pane.includes("Enter to confirm") ||
-    pane.includes("Esc to cancel") ||
-    pane.includes("❯ 1.");
-  if (!hasMenuMarker) return false;
-
-  return (
-    pane.includes("Do you want") ||
-    pane.includes("Are you sure") ||
-    pane.includes("I am using this for local development") ||
-    pane.includes("trust the files") ||
-    pane.includes("Trust the files") ||
-    pane.includes("Do you trust") ||
-    pane.includes("Yes, proceed") ||
-    pane.includes("skip all permission") ||
-    pane.includes("Skip all permission") ||
-    // 兜底：菜单首选项是 Yes 的 Yes/No 风格确认
-    pane.includes("❯ 1. Yes")
-  );
+export function isAutoConfirmableModal(
+  pane: string,
+  opts: { allowSessionIdle?: boolean } = {}
+): boolean {
+  const modalOpts = parseModalOptions(pane);
+  if (!modalOpts) return false;
+  // parseModalOptions 已经保证至少 1 个 ❯，但显式再校验一次，防未来重构破坏不变量
+  if (!modalOpts.some((o) => o.selected)) return false;
+  // 运行时权限弹窗（Do you want to edit / run / allow ...）必须用户决定
+  if (detectRuntimePermissionPrompt(pane)) return false;
+  // session-idle 弹窗除非显式允许
+  if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
+  return true;
 }
 
 /**

@@ -32,7 +32,7 @@ import {
   isIdle,
   listAgentWindows as listAgentWindowsShared,
   ensureSocketDir,
-  hasClaudePromptToConfirm,
+  isAutoConfirmableModal,
   detectSessionIdlePrompt,
 } from "./lib/tmux-helper.js";
 import {
@@ -796,8 +796,11 @@ function isAtShell(pane: string): boolean {
   return false;
 }
 
-/** 检查是否有需要按 Enter 的提示（转发到共享实现） */
-const hasPromptToConfirm = hasClaudePromptToConfirm;
+/**
+ * Agent 用：几何识别 modal 自动确认；session-idle 不自动按（permission-watcher
+ * 会发 Discord 按钮让用户决定）。
+ */
+const hasPromptToConfirm = (pane: string) => isAutoConfirmableModal(pane);
 
 /** 优雅退出一个 Claude Code agent，处理所有确认弹窗 */
 async function gracefulExit(name: string): Promise<boolean> {

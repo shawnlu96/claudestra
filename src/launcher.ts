@@ -20,20 +20,18 @@ import {
   isIdle as tmuxIsIdle,
   tmuxCapture,
   tmuxSendLine,
-  hasClaudePromptToConfirm,
-  detectSessionIdlePrompt,
+  isAutoConfirmableModal,
   listAgentWindows,
   windowTarget,
   MASTER_SESSION as SESSION_NAME,
 } from "./lib/tmux-helper.js";
 
 /**
- * Master 专用确认检测：除了 hasClaudePromptToConfirm 覆盖的弹窗，
- * session-idle 也自动选"从摘要恢复"（按 Enter 选默认的 1）。
- * agent 的 session-idle 由 permission-watcher 给用户按钮，master 则总是自动处理。
+ * Master 专用：用 isAutoConfirmableModal 做几何识别 + 允许 session-idle 自动按
+ * （默认从摘要恢复）。agent 的 session-idle 由 permission-watcher 给用户按钮。
  */
 function masterShouldAutoConfirm(pane: string): boolean {
-  return hasClaudePromptToConfirm(pane) || detectSessionIdlePrompt(pane) !== null;
+  return isAutoConfirmableModal(pane, { allowSessionIdle: true });
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { bridgeRequest } from "./lib/bridge-client.js";

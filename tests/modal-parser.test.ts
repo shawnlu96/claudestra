@@ -3,7 +3,11 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { parseModalOptions, detectArrowNavModal } from "../src/lib/tmux-helper.js";
+import {
+  parseModalOptions,
+  detectArrowNavModal,
+  isAutoConfirmableModal,
+} from "../src/lib/tmux-helper.js";
 
 describe("parseModalOptions", () => {
   test("识别带 ❯ 选中标记的数字菜单", () => {
@@ -101,5 +105,101 @@ Normal response from Claude.
 No modal here.
 `;
     expect(detectArrowNavModal(pane)).toBeNull();
+  });
+});
+
+describe("isAutoConfirmableModal", () => {
+  test("dev-channel 启动 modal → 自动按", () => {
+    const pane = `
+WARNING: Loading development channels
+
+--dangerously-load-development-channels is for local channel development only.
+
+Channels: server:claudestra
+
+❯ 1. I am using this for local development
+  2. Exit
+
+Enter to confirm · Esc to cancel
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(true);
+  });
+
+  test("trust files modal → 自动按（哪怕文案变了，几何识别就够了）", () => {
+    const pane = `
+Some new wording from upstream we have never seen.
+
+❯ 1. Yes, proceed
+  2. No, cancel
+
+Enter to confirm
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(true);
+  });
+
+  test("运行时权限弹窗（edit）→ 不自动按", () => {
+    const pane = `
+Do you want to make this edit to /etc/passwd?
+
+❯ 1. Yes
+  2. No, deny
+
+Enter to confirm
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(false);
+  });
+
+  test("运行时权限弹窗（run command）→ 不自动按", () => {
+    const pane = `
+Do you want to run rm -rf /tmp/foo?
+
+❯ 1. Yes
+  2. No
+
+Enter to confirm
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(false);
+  });
+
+  test("session-idle 弹窗默认不自动按", () => {
+    const pane = `
+This session is 21h 6m old and 913.2k tokens.
+
+❯ 1. Resume from summary
+  2. Resuming the full session
+
+Enter to confirm
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(false);
+  });
+
+  test("session-idle 弹窗 allowSessionIdle=true 时自动按（master 启动）", () => {
+    const pane = `
+This session is 21h 6m old and 913.2k tokens.
+
+❯ 1. Resume from summary
+  2. Resuming the full session
+
+Enter to confirm
+`;
+    expect(isAutoConfirmableModal(pane, { allowSessionIdle: true })).toBe(true);
+  });
+
+  test("没 modal 几何特征 → false", () => {
+    const pane = `
+Just some Claude output. No modal here.
+Question: Do you want to know more?
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(false);
+  });
+
+  test("有数字列表但无 ❯ → false（不是真 modal）", () => {
+    const pane = `
+Steps:
+  1. First do X
+  2. Then do Y
+Enter to confirm something? (just text)
+`;
+    expect(isAutoConfirmableModal(pane)).toBe(false);
   });
 });
