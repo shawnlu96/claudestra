@@ -140,8 +140,12 @@ export async function discordCreateChannel(
   name: string,
   categoryName?: string
 ): Promise<string> {
-  const guild = discord.guilds.cache.first();
-  if (!guild) throw new Error("Bot 未加入任何 server");
+  const guildId = process.env.DISCORD_GUILD_ID;
+  if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
+  const guild =
+    discord.guilds.cache.get(guildId) ??
+    (await discord.guilds.fetch(guildId).catch(() => null));
+  if (!guild) throw new Error(`Bot 未加入 guild ${guildId}`);
 
   let parentId: string | undefined;
   if (categoryName) {
