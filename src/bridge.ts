@@ -476,7 +476,7 @@ async function renderPeerDirectHeader(
       `**最终动作必须是**：\`reply(chat_id="${from.sharedChannelId}", text="[DIRECT] ${sourceMention} <你的答案>")\``,
       `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记并跳过自动 @ 对方 bot（否则对方 bot 会被唤醒跑一轮 LLM）`,
       `- **一定要在 text 里写 ${sourceMention} @ 发起人**，这样发起人的 Discord 能收到 push`,
-      `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
+      `- **\`[EOT]\` 默认不加**。只有当你这条 reply 是**纯 ack**（致谢/确认/测试回执，无新信息），或对方明显发了结束信号（done/thanks/ok）才在末尾加。提供数据/答案的 reply 一律不加，让发起方决定要不要追问。`,
       `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
       `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${userName} 或其 master" 也行`,
       ``,
@@ -494,7 +494,7 @@ async function renderPeerDirectHeader(
     ``,
     `**最终动作必须是**：\`reply(chat_id="${from.sharedChannelId}", text="<你的答案>")\``,
     `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
-    `- 如果这是最后一句（对方不需要再回应）在 text 末尾加 \`[EOT]\` 防止互 ack 死循环`,
+    `- **\`[EOT]\` 默认不加**。只有当你这条 reply 是**纯 ack**（致谢/确认/测试回执，无新信息），或对方明显发了结束信号（done/thanks/ok）才在末尾加。提供数据/答案的 reply 一律不加，让发起方决定要不要追问。`,
     `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
     `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${userName} 或其 master" 也行`,
     ``,
@@ -2150,6 +2150,18 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
       if (!client) return;
+
+      // UX：点击后清掉所有按钮 + 在原消息底下加一行「已点击」标记，
+      // 让用户能直观看到自己的 click 生效了，也防止重复点。
+      try {
+        const label = (interaction.component as any)?.label || id;
+        const origContent = interaction.message?.content || "";
+        await interaction.editReply({
+          content: `${origContent}\n\n✅ 已点击：**${label}**`,
+          components: [],
+        }).catch(() => {});
+      } catch { /* non-critical */ }
+
       startTypingWithSafety(channelId);
       await deliver({
         from: { kind: "user", userId: interaction.user.id, channelId, username: interaction.user.username },
