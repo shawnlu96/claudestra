@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { useChatStore } from "../chat-store";
+import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 
@@ -53,6 +53,7 @@ function fmtTok(n: number): string {
 const fmtRel = fmtAgo;
 
 export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const store = useChatStoreApi();
   const agents = useChatStore((s) => s.state.agents);
   const [g, setG] = useState<GlobalStats | null>(null);
   const [statAgents, setStatAgents] = useState<StatAgent[]>([]);
@@ -60,6 +61,9 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
 
   const load = (force: boolean) => {
     if (force) setRefreshing(true);
+    // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
+    // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
+    store.refreshAgents();
     fetch(force ? "/api/stats?refresh=1" : "/api/stats")
       .then((r) => r.json())
       .then((j: { global?: GlobalStats; agents?: StatAgent[] }) => {

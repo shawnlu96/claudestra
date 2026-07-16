@@ -13,12 +13,19 @@ import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream"
 import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
 
 /**
- * roster 变化指纹：捕获会影响侧栏渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记）。
- * 轮询用它判断列表是否真的变了，只有变了才更新 state。
+ * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
+ * + busy/contextTokens/lastActivityTs）。轮询用它判断列表是否真的变了，只有变了
+ * 才更新 state。⚠ 后三个易变字段必须入指纹——contextTokens 不入的话，compact 后
+ * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值
+ *（2026-07-16 真机实锤）；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
  */
 function agentsSignature(list: AgentSession[]): string {
   return list
-    .map((a) => `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}`)
+    .map(
+      (a) =>
+        `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
+        `${a.busy ? 1 : 0}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}`
+    )
     .join("");
 }
 
