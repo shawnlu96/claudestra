@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
@@ -58,6 +58,10 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const [g, setG] = useState<GlobalStats | null>(null);
   const [statAgents, setStatAgents] = useState<StatAgent[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  // 冷启动自动补拉只试一次/每次打开(openRef 防面板已关还在拉)
+  const retriedRef = useRef(false);
+  const openRef = useRef(open);
+  openRef.current = open;
 
   const load = (force: boolean) => {
     if (force) setRefreshing(true);
@@ -69,6 +73,14 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
       .then((j: { global?: GlobalStats; agents?: StatAgent[] }) => {
         setG(j.global ?? null);
         setStatAgents(Array.isArray(j.agents) ? j.agents : []);
+        // bridge 刚重启时账号 gauge 缓存为空——本次请求已在服务端触发后台抓取,
+        // ~6.5s 后静默重拉补上,不用用户手点刷新
+        if (!j.global && !retriedRef.current) {
+          retriedRef.current = true;
+          setTimeout(() => {
+            if (openRef.current) load(false);
+          }, 6500);
+        }
       })
       .catch(() => {})
       .finally(() => setRefreshing(false));
@@ -76,6 +88,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
 
   useEffect(() => {
     if (!open) return;
+    retriedRef.current = false;
     load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -132,6 +145,12 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5">
+          {/* 账号 gauge 还没到手(bridge 冷启动首抓中)——给占位而不是整块消失 */}
+          {!g && (
+            <div className="mb-4 rounded-xl bg-base-200 p-3.5 text-xs text-base-content/50">
+              账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓
+            </div>
+          )}
           {/* 全局订阅用量 */}
           {g && (
             <div className="mb-4 space-y-3 rounded-xl bg-base-200 p-3.5">

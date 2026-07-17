@@ -206,22 +206,28 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
  * 关键：整个抓取套一层超时 —— 万一某次 tmux/osascript 卡住，`scraping` 也会在超时后
  * 复位，绝不会永久卡住让 gauge 冻结（这是之前 6h 不更新的根源之一）。
  */
-async function getAccountUsage(): Promise<AccountUsage | null> {
+async function getAccountUsage(block = true): Promise<AccountUsage | null> {
   if (accountCache && Date.now() - accountCache.scrapedAt < ACCOUNT_TTL_MS) return accountCache;
-  if (scraping) return scraping;
-  scraping = Promise.race([
-    scrapeAccountUsage(),
-    // force 模式最多 5×2s 等 idle + 抓取本身 ~4s，超时给足 25s（仍防永久冻结）
-    new Promise<null>((r) => setTimeout(() => r(null), 25000)),
-  ])
-    .then((u) => {
-      if (u) accountCache = u;
-      return accountCache;
-    })
-    .catch(() => accountCache)
-    .finally(() => {
-      scraping = null;
-    });
+  if (!scraping) {
+    scraping = Promise.race([
+      scrapeAccountUsage(),
+      // force 模式最多 5×2s 等 idle + 抓取本身 ~4s，超时给足 25s（仍防永久冻结）
+      new Promise<null>((r) => setTimeout(() => r(null), 25000)),
+    ])
+      .then((u) => {
+        if (u) accountCache = u;
+        return accountCache;
+      })
+      .catch(() => accountCache)
+      .finally(() => {
+        scraping = null;
+      });
+  }
+  // stale-while-revalidate：有旧值且调用方不要求阻塞 → 立刻回旧值，抓取在后台
+  // 继续。Web 面板首开走这里——此前 TTL(3min) 一过就同步等活体抓取(4~25s)，
+  // 把 BFF 非强制路径的 8s 超时拖爆 → 面板顶部大概率空白（2026-07-17 用户实报）。
+  // 旧值的年龄面板有「抓取于 x 分钟前」标注,不会被当成实时。
+  if (!block && accountCache) return accountCache;
   return scraping;
 }
 
@@ -231,10 +237,10 @@ async function listAgents(): Promise<AgentLike[]> {
   return readRegistryAgents(); // RegistryAgent 是 AgentLike 超集（cwd 已归一含 dir 兼容）
 }
 
-export async function buildSnapshot(): Promise<StatsSnapshot> {
+export async function buildSnapshot(blockGauge = true): Promise<StatsSnapshot> {
   const [agents, global] = await Promise.all([
     listAgents().then((list) => computeAgentStats(list)),
-    getAccountUsage(),
+    getAccountUsage(blockGauge),
   ]);
   agents.sort((a, b) => b.contextTokens - a.contextTokens);
   return { global, agents, updatedAt: Date.now() };
@@ -535,13 +541,14 @@ export async function initStatsDashboard(discord: Client): Promise<void> {
 export async function handleStatsRefreshRequest(): Promise<Response> {
   if (accountCache) accountCache.scrapedAt = 0;
   forceNextScrape = true;
-  return handleStatsRequest();
+  return handleStatsRequest(true);
 }
 
-/** GET /stats —— 开放 JSON 接口，给 Web 端。 */
-export async function handleStatsRequest(): Promise<Response> {
+/** GET /stats —— 开放 JSON 接口，给 Web 端。默认不阻塞在账号 gauge 活体抓取上
+ *  （stale-while-revalidate，见 getAccountUsage）；强制刷新路径才阻塞等新值。 */
+export async function handleStatsRequest(blockGauge = false): Promise<Response> {
   try {
-    const snap = await buildSnapshot();
+    const snap = await buildSnapshot(blockGauge);
     return new Response(JSON.stringify(snap, null, 2), {
       headers: { "Content-Type": "application/json; charset=utf-8" },
     });
