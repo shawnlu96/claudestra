@@ -369,7 +369,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           {t("语音识别 · Groq API Key")}
         </label>
         <p className="mb-2 text-xs text-base-content/50">
-          {hint ? `${t("当前:")}${hint}${t("（输入新值覆盖）")}` : t("未配置。console.groq.com 免费注册,API Keys 页生成。")}
+          {hint ? `${t("当前:")}${t(hint)}${t("（输入新值覆盖）")}` : t("未配置。console.groq.com 免费注册,API Keys 页生成。")}
         </p>
         <input
           type="password"

@@ -220,22 +220,23 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
           </div>
           <div className="space-y-3">
             {rows.map((a) => {
-              const t = a.contextTokens!;
-              const pct = (t / CTX_WINDOW) * 100;
+              // tok 不叫 t——外层 t 是翻译函数,遮蔽了 displayName 就没法翻(review 2026-07-18)
+              const tok = a.contextTokens!;
+              const pct = (tok / CTX_WINDOW) * 100;
               // 色阶(owner 定阈值,1M 窗):≥750k 深红(实色) / ≥500k 红 / ≥200k 黄 / 其余绿
               const tone = {
                 deep: "bg-error",
                 high: "bg-error/60",
                 mid: "bg-warning",
                 none: "bg-success",
-              }[ctxLevel(t)];
+              }[ctxLevel(tok)];
               return (
                 <div key={a.name}>
                   <div className="mb-1 flex items-center gap-1.5 text-xs">
                     {a.busy && <span className="size-1.5 rounded-full bg-warning" />}
-                    <span className="truncate">{a.displayName}</span>
+                    <span className="truncate">{t(a.displayName)}</span>
                     <span className="ml-auto font-mono tabular-nums text-base-content/60">
-                      {Math.round(t / 1000)}k
+                      {Math.round(tok / 1000)}k
                     </span>
                     <span className="font-mono text-[10px] tabular-nums text-base-content/35">
                       {fmtRel(a.lastActivityTs)}

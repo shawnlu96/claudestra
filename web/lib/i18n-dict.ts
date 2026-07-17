@@ -67,11 +67,21 @@ export const DICT: Record<string, string> = {
   "Web 端发起的对话有回复时,推送到本设备(页面开着时不打扰)。Discord 发起的照旧走 Discord @。":
     "Get notified on this device when a web conversation gets a reply (quiet while the page is open). Discord conversations still ping via Discord.",
   "语音识别 · Groq API Key": "Speech-to-text · Groq API Key",
-  "当前:": "Current:",
-  "（输入新值覆盖）": "(enter a new key to replace)",
+  "当前:": "Current: ", // 值尾带空格(EN 拼接不粘连)
+  "（输入新值覆盖）": " (enter a new key to replace)", // 值首带空格
   "未配置。console.groq.com 免费注册,API Keys 页生成。":
     "Not configured. Sign up free at console.groq.com and create a key on the API Keys page.",
   "已保存,语音输入即时生效": "Saved — voice input works immediately",
+  // BFF route 下发的固定错误/引导串(渲染点 t() 兜底,2026-07-18 review 补齐)
+  "语音识别未配置——点侧栏 ⚙️ 设置里填入 Groq API Key": "Speech-to-text not configured — add a Groq API Key in Settings (⚙️ in the sidebar)",
+  "音频过大（>20MB）": "Audio too large (>20MB)",
+  "需要 model 或 effort": "model or effort required",
+  "写入失败": "Write failed",
+  "groqApiKey 必须是字符串（空串=清除）": "groqApiKey must be a string (empty = clear)",
+  "key 格式不像有效的 API key": "That doesn't look like a valid API key",
+  "agent/action 非法": "Invalid agent/action",
+  "agent 和 action 不能为空": "agent and action are required",
+  "agent 和内容不能为空": "agent and message are required",
 
   // ── 侧栏 / 会话列表 ──────────────────────────────────
   "会话": "Sessions",
@@ -140,6 +150,7 @@ export const DICT: Record<string, string> = {
   "出错": "Error",
   "已被用户中断": "Interrupted by user",
   "📦 上下文已压缩": "📦 Context compacted",
+  "上下文已压缩": "Context compacted", // history route 的 system 行 fallback(不带 📦)
   "📦 压缩摘要": "📦 Compact summary",
   "选择左侧一个会话开始": "Pick a session on the left to start",
   "消息经 Bridge 投递到对应 Claude Code 会话": "Messages are delivered via the Bridge to the matching Claude Code session",

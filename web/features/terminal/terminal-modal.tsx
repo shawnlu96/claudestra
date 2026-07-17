@@ -5,15 +5,21 @@ import dynamic from "next/dynamic";
 import { t, useT } from "@/lib/i18n";
 
 // xterm 依赖 window，必须 ssr:false 动态加载（设计文档 §前端）
+/** dynamic loading fallback——用 useT 订阅而非模块级 t():chunk 加载窗口里切语言也能跟上 */
+function TermLoading() {
+  const t = useT();
+  return (
+    <div className="grid flex-1 place-items-center bg-[#1e1e2e] text-sm text-[#cdd6f4]/60">
+      {t("加载终端…")}
+    </div>
+  );
+}
+
 const TerminalView = dynamic(
   () => import("./terminal-view").then((m) => m.TerminalView),
   {
     ssr: false,
-    loading: () => (
-      <div className="grid flex-1 place-items-center bg-[#1e1e2e] text-sm text-[#cdd6f4]/60">
-        {t("加载终端…")}
-      </div>
-    ),
+    loading: () => <TermLoading />,
   }
 );
 
@@ -53,7 +59,7 @@ export function TerminalModal({
         <header className="flex shrink-0 items-center gap-2 border-b border-white/10 bg-[#181825] px-3 py-2 text-[#cdd6f4]">
           <span className="text-sm opacity-60">🖥️</span>
           <span className="truncate text-sm font-medium">
-            {displayName} · {t("终端")}
+            {t(displayName)} · {t("终端")}
           </span>
           <span className="text-xs opacity-40">
             {t("实时镜像 tmux 会话 · 关闭即断开（不影响运行）")}

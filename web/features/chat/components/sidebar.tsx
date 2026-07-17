@@ -137,7 +137,7 @@ function AgentRow({
                 if (!r.ok) {
                   setRemoving(false);
                   closeSwipe();
-                  alert(`${t("删除失败:")}${r.error}`);
+                  alert(`${t("删除失败:")}${t(r.error || "操作失败")}`);
                 }
                 // 成功时本行随列表数据一起消失,无需复位
               }}

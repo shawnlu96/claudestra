@@ -4,15 +4,21 @@ import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { t, useT } from "@/lib/i18n";
 
+/** dynamic loading fallback——用 useT 订阅而非模块级 t():chunk 加载窗口里切语言也能跟上 */
+function TermLoading() {
+  const t = useT();
+  return (
+    <div className="grid flex-1 place-items-center bg-[#1e1e2e] text-sm text-[#cdd6f4]/60">
+      {t("加载终端…")}
+    </div>
+  );
+}
+
 const TerminalView = dynamic(
   () => import("./terminal-view").then((m) => m.TerminalView),
   {
     ssr: false,
-    loading: () => (
-      <div className="grid flex-1 place-items-center bg-[#1e1e2e] text-sm text-[#cdd6f4]/60">
-        {t("加载终端…")}
-      </div>
-    ),
+    loading: () => <TermLoading />,
   }
 );
 
@@ -145,7 +151,7 @@ export function TerminalPage({
             </svg>
           </button>
           <span className="truncate text-sm font-medium">
-            {displayName} · {t("终端")}
+            {t(displayName)} · {t("终端")}
           </span>
         </header>
         <TerminalView agent={agent} mobile />
