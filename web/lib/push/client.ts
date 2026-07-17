@@ -1,4 +1,5 @@
 "use client";
+import { t, getLang } from "@/lib/i18n";
 
 /**
  * Web Push 客户端共用逻辑(owner 2026-07-16「引导用户允许推送权限」):
@@ -61,8 +62,8 @@ export async function enablePush(): Promise<{ ok: boolean; msg: string }> {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     // 本地测试通知(不走 APNs):立刻能看到=展示层正常,之后收不到就是投递层
     try {
-      await reg.showNotification("推送已开启 ✅", {
-        body: "这条是本地测试——能看到它,说明通知展示没问题",
+      await reg.showNotification(t("推送已开启 ✅"), {
+        body: t("这条是本地测试——能看到它,说明通知展示没问题"),
         tag: "cstra-local-test",
         icon: "/icons/icon-192.png",
       });
@@ -71,7 +72,13 @@ export async function enablePush(): Promise<{ ok: boolean; msg: string }> {
     }
     return { ok: true, msg: "已开启:应该立刻弹了一条本地测试通知" };
   } catch (e) {
-    return { ok: false, msg: `开启失败:${(e as Error).message}(需要 HTTPS 或安装到主屏幕)` };
+    return {
+      ok: false,
+      msg:
+        getLang() === "zh"
+          ? `开启失败:${(e as Error).message}(需要 HTTPS 或安装到主屏幕)`
+          : `Enable failed: ${(e as Error).message} (requires HTTPS or install to Home Screen)`,
+    };
   }
 }
 
@@ -88,6 +95,12 @@ export async function disablePush(): Promise<{ ok: boolean; msg: string }> {
     await sub.unsubscribe();
     return { ok: true, msg: "已关闭本设备推送" };
   } catch (e) {
-    return { ok: false, msg: `关闭失败:${(e as Error).message}` };
+    return {
+      ok: false,
+      msg:
+        getLang() === "zh"
+          ? `关闭失败:${(e as Error).message}`
+          : `Disable failed: ${(e as Error).message}`,
+    };
   }
 }

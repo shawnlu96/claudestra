@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
+import { useT } from "@/lib/i18n";
 
 /**
  * 清空会话确认弹窗。
@@ -20,6 +21,7 @@ export function ClearAgentModal({
   agent: AgentSession;
   onClose: () => void;
 }) {
+  const t = useT();
   const store = useChatStoreApi();
   const [initMessage, setInitMessage] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -75,43 +77,43 @@ export function ClearAgentModal({
     <dialog className="modal modal-open">
       <div className="modal-box max-w-lg">
         <h3 className="text-base font-semibold">
-          🧹 清空会话 —— {agent.displayName}
+          {t("🧹 清空会话")} —— {agent.displayName}
         </h3>
         <p className="mt-2 text-sm opacity-70">
-          远程执行 Claude Code 原生 <code>/clear</code>：上下文清零、会话轮转
-          （旧会话自动归档，历史仍可回看）。进行中的回合需先「停止」。
+          {t("远程执行 Claude Code 原生")} <code>/clear</code>
+          {t("：上下文清零、会话轮转（旧会话自动归档，历史仍可回看）。进行中的回合需先「停止」。")}
         </p>
 
         <label className="mt-4 block text-sm font-medium">
-          开机指令
+          {t("开机指令")}
           <span className="ml-1 font-normal opacity-60">
-            （clear 后自动作为第一条消息发送；留空则不发）
+            {t("（clear 后自动作为第一条消息发送；留空则不发）")}
           </span>
         </label>
         {agent.pinnedMaster && (
           <p className="mt-1 text-xs opacity-60">
-            大总管的人设由其 CLAUDE.md 自动重载，通常无需开机指令。
+            {t("大总管的人设由其 CLAUDE.md 自动重载，通常无需开机指令。")}
           </p>
         )}
         <textarea
           className="textarea textarea-bordered mt-2 h-40 w-full text-sm leading-relaxed"
-          placeholder={loaded ? "例如：读 xx 文件 / 加载项目上下文…" : "加载中…"}
+          placeholder={loaded ? t("例如：读 xx 文件 / 加载项目上下文…") : t("加载中…")}
           value={initMessage}
           onChange={(e) => setInitMessage(e.target.value)}
           disabled={!loaded || busy}
         />
 
-        {error && <div className="mt-2 text-sm text-error">{error}</div>}
+        {error && <div className="mt-2 text-sm text-error">{t(error)}</div>}
 
         <div className="modal-action">
           <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
-            取消
+            {t("取消")}
           </button>
           <button className="btn btn-error" onClick={confirm} disabled={busy || !loaded}>
             {busy ? (
               <span className="loading loading-spinner loading-xs" />
             ) : (
-              "确认清空"
+              t("确认清空")
             )}
           </button>
         </div>

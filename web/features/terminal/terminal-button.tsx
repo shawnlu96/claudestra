@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { AgentSession } from "../chat/type";
 import { TerminalModal } from "./terminal-modal";
 import { TerminalPage } from "./terminal-page";
+import { useT } from "@/lib/i18n";
 
 /** 终端：>_ 提示符图标 */
 function TerminalIcon() {
@@ -42,6 +43,7 @@ const isNarrow = () =>
  * - 宽屏（桌面）：大模态框。
  */
 export function TerminalButton({ agent }: { agent: AgentSession }) {
+  const t = useT();
   const [openModal, setOpenModal] = useState(false);
   const [openPage, setOpenPage] = useState(false);
 
@@ -98,8 +100,8 @@ export function TerminalButton({ agent }: { agent: AgentSession }) {
       {agent.status === "active" && (
         <button
           className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content"
-          title="打开远程终端（实时镜像 + 可输入）"
-          aria-label="打开远程终端"
+          title={t("打开远程终端（实时镜像 + 可输入）")}
+          aria-label={t("打开远程终端")}
           onClick={open}
         >
           <TerminalIcon />

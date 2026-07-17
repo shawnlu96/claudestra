@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
+import { t, useT } from "@/lib/i18n";
 
 const TerminalView = dynamic(
   () => import("./terminal-view").then((m) => m.TerminalView),
@@ -9,7 +10,7 @@ const TerminalView = dynamic(
     ssr: false,
     loading: () => (
       <div className="grid flex-1 place-items-center bg-[#1e1e2e] text-sm text-[#cdd6f4]/60">
-        加载终端…
+        {t("加载终端…")}
       </div>
     ),
   }
@@ -36,6 +37,7 @@ export function TerminalPage({
   displayName: string;
   onClose: () => void;
 }) {
+  const t = useT();
   const [vp, setVp] = useState<{ h: number; top: number } | null>(null);
   useEffect(() => {
     const vv = window.visualViewport;
@@ -135,7 +137,7 @@ export function TerminalPage({
         >
           <button
             className="btn btn-ghost btn-sm px-2 text-[#cdd6f4]/80"
-            aria-label="返回会话"
+            aria-label={t("返回会话")}
             onClick={onClose}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -143,7 +145,7 @@ export function TerminalPage({
             </svg>
           </button>
           <span className="truncate text-sm font-medium">
-            {displayName} · 终端
+            {displayName} · {t("终端")}
           </span>
         </header>
         <TerminalView agent={agent} mobile />

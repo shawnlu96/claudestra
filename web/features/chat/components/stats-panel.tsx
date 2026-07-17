@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
+import { getLang, t, useT } from "@/lib/i18n";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
@@ -23,9 +24,10 @@ interface GlobalStats {
 
 function fmtAge(ts: number): string {
   const ms = Date.now() - ts;
-  if (ms < 90_000) return "刚刚";
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} 分钟前`;
-  return `${(ms / 3_600_000).toFixed(1)} 小时前`;
+  if (ms < 90_000) return t("刚刚");
+  if (ms < 3_600_000)
+    return getLang() === "en" ? `${Math.round(ms / 60_000)} min ago` : `${Math.round(ms / 60_000)} 分钟前`;
+  return getLang() === "en" ? `${(ms / 3_600_000).toFixed(1)} h ago` : `${(ms / 3_600_000).toFixed(1)} 小时前`;
 }
 
 function Bar({ pct, tone }: { pct: number; tone: string }) {
@@ -53,6 +55,7 @@ function fmtTok(n: number): string {
 const fmtRel = fmtAgo;
 
 export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const t = useT();
   const store = useChatStoreApi();
   const agents = useChatStore((s) => s.state.agents);
   const [g, setG] = useState<GlobalStats | null>(null);
@@ -106,11 +109,11 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center px-5 pb-2 pt-4">
-          <span className="text-base font-semibold">用量看板</span>
+          <span className="text-base font-semibold">{t("用量看板")}</span>
           <button
             className="ml-auto flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content disabled:opacity-40"
-            aria-label="强制刷新账号用量"
-            title="强制重抓账号用量（最长约 20 秒）"
+            aria-label={t("强制刷新账号用量")}
+            title={t("强制重抓账号用量（最长约 20 秒）")}
             disabled={refreshing}
             onClick={() => load(true)}
           >
@@ -134,7 +137,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
           </button>
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content"
-            aria-label="关闭"
+            aria-label={t("关闭")}
             onClick={onClose}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -148,7 +151,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
           {/* 账号 gauge 还没到手(bridge 冷启动首抓中)——给占位而不是整块消失 */}
           {!g && (
             <div className="mb-4 rounded-xl bg-base-200 p-3.5 text-xs text-base-content/50">
-              账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓
+              {t("账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓")}
             </div>
           )}
           {/* 全局订阅用量 */}
@@ -156,20 +159,20 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
             <div className="mb-4 space-y-3 rounded-xl bg-base-200 p-3.5">
               <div>
                 <div className="mb-1 flex justify-between text-xs">
-                  <span className="text-base-content/60">本时段用量</span>
+                  <span className="text-base-content/60">{t("本时段用量")}</span>
                   <span className="font-mono tabular-nums">
                     {g.sessionPct ?? "?"}%
-                    {g.sessionResets && <span className="ml-1.5 opacity-50">重置 {g.sessionResets}</span>}
+                    {g.sessionResets && <span className="ml-1.5 opacity-50">{t("重置")} {g.sessionResets}</span>}
                   </span>
                 </div>
                 <Bar pct={g.sessionPct ?? 0} tone={(g.sessionPct ?? 0) >= 80 ? "bg-error" : "bg-primary"} />
               </div>
               <div>
                 <div className="mb-1 flex justify-between text-xs">
-                  <span className="text-base-content/60">本周用量</span>
+                  <span className="text-base-content/60">{t("本周用量")}</span>
                   <span className="font-mono tabular-nums">
                     {g.weekPct ?? "?"}%
-                    {g.weekResets && <span className="ml-1.5 opacity-50">重置 {g.weekResets}</span>}
+                    {g.weekResets && <span className="ml-1.5 opacity-50">{t("重置")} {g.weekResets}</span>}
                   </span>
                 </div>
                 <Bar pct={g.weekPct ?? 0} tone={(g.weekPct ?? 0) >= 80 ? "bg-error" : "bg-primary"} />
@@ -185,27 +188,27 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
                 return (
                   <>
                     <div className="flex justify-between text-xs">
-                      <span className="text-base-content/60">今日全机用量</span>
+                      <span className="text-base-content/60">{t("今日全机用量")}</span>
                       <span className="font-mono tabular-nums">
                         {fmtTok(tdTok)} tok · ${td.toFixed(2)}
                       </span>
                     </div>
                     <div className="flex justify-between text-xs">
-                      <span className="text-base-content/60">本周全机用量</span>
+                      <span className="text-base-content/60">{t("本周全机用量")}</span>
                       <span className="font-mono tabular-nums">
                         {fmtTok(wkTok)} tok · ${wk.toFixed(2)}
                       </span>
                     </div>
                     <div className="text-[10.5px] text-base-content/35">
-                      成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计
+                      {t("成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计")}
                     </div>
                   </>
                 );
               })()}
               {typeof g.scrapedAt === "number" && g.scrapedAt > 0 && (
                 <div className="text-[10.5px] text-base-content/35">
-                  账号用量抓取于 {fmtAge(g.scrapedAt)}
-                  {Date.now() - g.scrapedAt > 15 * 60_000 && " ⚠️ 数据偏旧"}
+                  {t("账号用量抓取于")} {fmtAge(g.scrapedAt)}
+                  {Date.now() - g.scrapedAt > 15 * 60_000 && ` ${t("⚠️ 数据偏旧")}`}
                 </div>
               )}
             </div>
@@ -213,7 +216,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
 
           {/* 各 agent 上下文占用(1M 参考刻度) */}
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-base-content/40">
-            各会话上下文占用
+            {t("各会话上下文占用")}
           </div>
           <div className="space-y-3">
             {rows.map((a) => {
@@ -243,7 +246,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
               );
             })}
             {rows.length === 0 && (
-              <div className="py-4 text-center text-xs opacity-40">暂无数据</div>
+              <div className="py-4 text-center text-xs opacity-40">{t("暂无数据")}</div>
             )}
           </div>
         </div>

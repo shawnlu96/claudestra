@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { getLang, useT } from "@/lib/i18n";
 
 /** 与 composer 的 SlashCmd 同形（bridge /skills 端点）。 */
 export interface SkillItem {
@@ -81,6 +82,7 @@ export function SkillsSheet({
   onPick: (s: SkillItem) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [prefs, setPrefs] = useState<SkillPrefs>({ pins: [], counts: {} });
   const [manage, setManage] = useState(false);
   const [q, setQ] = useState("");
@@ -123,18 +125,20 @@ export function SkillsSheet({
         className="flex shrink-0 items-center gap-2 border-b border-base-300 px-3 pb-2"
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.5rem)" }}
       >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2" onClick={onClose} aria-label="关闭 Skills">
+        <button className="btn btn-ghost btn-sm -ml-1 px-2" onClick={onClose} aria-label={t("关闭 Skills")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
         </button>
         <span className="text-sm font-semibold">Skills</span>
-        <span className="text-[11px] text-base-content/40">{skills.length} 个</span>
+        <span className="text-[11px] text-base-content/40">
+          {getLang() === "en" ? `${skills.length} total` : `${skills.length} 个`}
+        </span>
         <button
           className={`btn btn-sm ml-auto ${manage ? "btn-primary" : "btn-ghost text-base-content/60"}`}
           onClick={() => setManage((v) => !v)}
         >
-          {manage ? "完成" : "管理"}
+          {manage ? t("完成") : t("管理")}
         </button>
       </div>
       <div className="shrink-0 px-3 py-2">
@@ -147,7 +151,7 @@ export function SkillsSheet({
             type="search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索 skill…"
+            placeholder={t("搜索 skill…")}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
@@ -162,7 +166,11 @@ export function SkillsSheet({
       >
         {shown.length === 0 && (
           <div className="px-3 py-6 text-center text-sm text-base-content/40">
-            {skills.length ? `没有匹配「${q.trim()}」的 skill` : "加载中…"}
+            {skills.length
+              ? getLang() === "en"
+                ? `No skills matching "${q.trim()}"`
+                : `没有匹配「${q.trim()}」的 skill`
+              : t("加载中…")}
           </div>
         )}
         {shown.map((s) => {
@@ -185,11 +193,11 @@ export function SkillsSheet({
                   )}
                   <span className="truncate font-mono text-[13.5px] font-medium">/{s.name}</span>
                   <span className="shrink-0 rounded bg-base-300/80 px-1 text-[10px] text-base-content/45">
-                    {SCOPE_LABEL[s.scope] || s.scope}
+                    {t(SCOPE_LABEL[s.scope] || s.scope)}
                   </span>
                   {count > 0 && (
                     <span className="shrink-0 text-[10px] tabular-nums text-base-content/35">
-                      用过 {count} 次
+                      {getLang() === "en" ? `used ${count}×` : `用过 ${count} 次`}
                     </span>
                   )}
                 </span>
@@ -204,8 +212,8 @@ export function SkillsSheet({
                   className={`grid size-8 shrink-0 place-items-center rounded-lg transition-colors ${
                     pinned ? "bg-primary/15 text-primary" : "text-base-content/35 hover:bg-base-300/60"
                   }`}
-                  title={pinned ? "取消置顶" : "置顶"}
-                  aria-label={pinned ? "取消置顶" : "置顶"}
+                  title={pinned ? t("取消置顶") : t("置顶")}
+                  aria-label={pinned ? t("取消置顶") : t("置顶")}
                   onClick={() => togglePin(s.name)}
                 >
                   <PinIcon filled={pinned} />

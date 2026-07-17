@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
+import { useT } from "@/lib/i18n";
 import { ClearAgentModal } from "./clear-agent-modal";
 
 /** 清空：橡皮擦（lucide eraser，比扫帚干净利落） */
@@ -91,6 +92,7 @@ function MoreIcon() {
  */
 export function AgentActions({ agent }: { agent: AgentSession }) {
   const store = useChatStoreApi();
+  const t = useT();
   const [busy, setBusy] = useState<"" | "kill" | "restart">("");
   const [error, setError] = useState("");
   const [showClear, setShowClear] = useState(false);
@@ -111,12 +113,12 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
         ? await store.killAgent(agent.name)
         : await store.restartAgent(agent.name);
     setBusy("");
-    if (!res.ok) setError(res.error || `${action} 失败`);
+    if (!res.ok) setError(res.error || `${action}${t(" 失败")}`);
   };
 
   const errorBadge = error ? (
-    <span className="mr-1 max-w-40 truncate text-xs text-error" title={error}>
-      {error}
+    <span className="mr-1 max-w-40 truncate text-xs text-error" title={t(error)}>
+      {t(error)}
     </span>
   ) : null;
 
@@ -127,8 +129,8 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
         {errorBadge}
         <button
           className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content"
-          title="重启"
-          aria-label="重启"
+          title={t("重启")}
+          aria-label={t("重启")}
           onClick={() => act("restart")}
           disabled={busy !== ""}
         >
@@ -149,7 +151,7 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
         <div
           tabIndex={0}
           role="button"
-          aria-label="更多操作"
+          aria-label={t("更多操作")}
           className={`btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content ${
             busy ? "btn-disabled" : ""
           }`}
@@ -167,7 +169,7 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
           <li>
             <button onClick={() => act("restart")} disabled={busy !== ""}>
               <RestartIcon />
-              重启
+              {t("重启")}
             </button>
           </li>
           <li>
@@ -177,7 +179,7 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
               disabled={busy !== ""}
             >
               <PowerIcon />
-              停止
+              {t("停止")}
             </button>
           </li>
           {/* 清空放最下（owner 2026-07-11）：破坏性最低但最常误触，远离手指起点 */}
@@ -190,7 +192,7 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
               disabled={busy !== ""}
             >
               <EraserIcon />
-              清空
+              {t("清空")}
             </button>
           </li>
         </ul>

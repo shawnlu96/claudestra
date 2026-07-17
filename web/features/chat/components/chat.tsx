@@ -18,6 +18,7 @@ import { TerminalButton } from "../../terminal/terminal-button";
 import { SessionSearchButton } from "./session-search";
 import { ManagePanel } from "./manage-panel";
 import { ctxLevel } from "../ctx-level";
+import { useT } from "@/lib/i18n";
 
 /** 「会话内容」页的 hash 锚点：存在即处于内容视图，移动端横滑到内容栏 */
 const CONTENT_HASH = "#chat";
@@ -36,6 +37,7 @@ const isManageHash = () =>
   window.location.hash.split("?")[0] === MANAGE_HASH;
 
 function TopBar() {
+  const t = useT();
   const active = useChatStore((s) => s.state.activeAgent);
   const agents = useChatStore((s) => s.state.agents);
   const nav = useChatNav();
@@ -69,21 +71,21 @@ function TopBar() {
       <button
         className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden"
         onClick={nav.toList}
-        aria-label="返回会话列表"
+        aria-label={t("返回会话列表")}
       >
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M15 18l-6-6 6-6" />
         </svg>
       </button>
       <span className="truncate font-semibold">
-        {info?.displayName || active || "Claudestra"}
+        {info ? t(info.displayName) : active || "Claudestra"}
       </span>
       {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)。
           色阶按 1M 窗口(owner 定档):≥200k 黄,≥500k 红,≥750k 深红(实色);
           <200k 不打扰(不显示)。 */}
       {typeof info?.contextTokens === "number" && info.contextTokens >= 200_000 && (
         <span
-          title="当前会话上下文占用(建议在对话里让 agent /compact)"
+          title={t("当前会话上下文占用(建议在对话里让 agent /compact)")}
           className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10.5px] tabular-nums ${
             {
               deep: "bg-error text-error-content",
@@ -109,10 +111,10 @@ function TopBar() {
           {info.pinnedMaster && (
             <button
               className="btn btn-ghost btn-sm px-2 text-[13px]"
-              title="Agent 管理(生命周期操作,不经过 LLM)"
+              title={t("Agent 管理(生命周期操作,不经过 LLM)")}
               onClick={openManage}
             >
-              管理
+              {t("管理")}
             </button>
           )}
           <SessionSearchButton agentName={info.name} />

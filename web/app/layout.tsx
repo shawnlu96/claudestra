@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 // 图片查看器 PhotoSwipe(相册级手势:捏合/双击/下拉关闭)——全局 CSS 只能在根 layout 引
 import "photoswipe/dist/photoswipe.css";
+import { I18nInit } from "@/lib/i18n";
 
 export const metadata: Metadata = {
   title: "Claudestra",
@@ -48,6 +49,7 @@ export default function RootLayout({
       {/* body 不设 bg：iOS 取画布色时 body 的 bg 会盖过 html，画布色跟随（globals.css
           canvas-list）必须落在 html 上。页面自身背景由应用壳根容器/面板各自绘制。 */}
       <body className="min-h-full text-base-content antialiased">
+        <I18nInit />
         {children}
       </body>
     </html>

@@ -2,6 +2,7 @@
 import { memo, useEffect, useRef } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { BgTaskView } from "../type";
+import { useT, getLang } from "@/lib/i18n";
 
 /**
  * 后台任务（subagent / bg shell）跟踪面板 —— Discord 子区在 web 的对应物。
@@ -69,6 +70,7 @@ function cleanLine(s: string): string {
 
 // memo：bg-update 事件只替换被更新任务的对象引用（immer），其余卡不重渲染
 const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
+  const tr = useT(); // 译名用 tr——prop t 是任务对象
   const running = t.status === "running";
   const store = useChatStoreApi();
   return (
@@ -78,7 +80,7 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
         <span className="truncate font-medium text-warning/90 max-w-[55vw] lg:max-w-[30vw]">
           {/* bridge 给的 title 带 🐚/🧵 emoji 前缀(Discord 线程名用)——web 已有
               线性 kind 图标,剥掉免重复 */}
-          {(t.title || (t.kind === "shell" ? "后台命令" : "subagent")).replace(/^[🐚🧵]\s*/u, "")}
+          {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵]\s*/u, "")}
         </span>
         {running ? (
           <span className="loading loading-spinner loading-xs ml-1 text-warning" />
@@ -86,15 +88,15 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
           <span className="ml-1 shrink-0 text-success">✓ {fmtDuration(t.durationMs)}</span>
         )}
         {t.lines.length > 0 && (
-          <span className="ml-auto shrink-0 opacity-40">{t.lines.length} 行</span>
+          <span className="ml-auto shrink-0 opacity-40">{getLang() === "en" ? `${t.lines.length} line${t.lines.length > 1 ? "s" : ""}` : `${t.lines.length} 行`}</span>
         )}
         {/* 停止 = 请 agent 用 TaskStop(bridge 无 kill 权柄);✕ = 收起卡片(纯前端)。
             preventDefault 防触发 details 开合 */}
         {running && (
           <button
             className="grid size-5 shrink-0 place-items-center rounded text-error/70 hover:bg-error/10"
-            title="请求 agent 停止此任务"
-            aria-label="停止任务"
+            title={tr("请求 agent 停止此任务")}
+            aria-label={tr("停止任务")}
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -106,8 +108,8 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
         )}
         <button
           className="grid size-5 shrink-0 place-items-center rounded opacity-40 hover:bg-base-content/10 hover:opacity-80"
-          title="收起"
-          aria-label="收起任务卡"
+          title={tr("收起")}
+          aria-label={tr("收起任务卡")}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -120,7 +122,7 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
       </summary>
       <div className="px-3 pb-2 pt-0.5">
         {t.lines.length === 0 ? (
-          <div className="py-1 text-[11px] opacity-40">等待输出…</div>
+          <div className="py-1 text-[11px] opacity-40">{tr("等待输出…")}</div>
         ) : (
           <BgLines lines={t.lines} />
         )}
@@ -157,6 +159,7 @@ function BgLines({ lines }: { lines: string[] }) {
 }
 
 export function BgTaskPanel() {
+  const tr = useT(); // 同上,map 回调里 t 是任务变量
   const tasks = useChatStore((s) => s.state.bgTasks);
   if (!tasks.length) return null;
   // running 排前，其余按到达序
@@ -167,7 +170,7 @@ export function BgTaskPanel() {
   return (
     <div className="mb-[22px] flex flex-col gap-1.5">
       <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-base-content/35">
-        <span>后台任务</span>
+        <span>{tr("后台任务")}</span>
         <span className="opacity-60">{tasks.length}</span>
       </div>
       {ordered.map((t) => (

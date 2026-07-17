@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../chat-store";
+import { useT } from "@/lib/i18n";
 
 /**
  * 全屏启动页：landing + 加载一体（2026-07-13 owner：进入先卡「暂无会话」很久、
@@ -15,6 +16,7 @@ const MIN_SHOW_MS = 600;
 const FADE_MS = 500;
 
 export function Splash() {
+  const t = useT();
   const ready = useChatStore((s) => s.state.agentsReady);
   const mountedAt = useRef(Date.now());
   const [fading, setFading] = useState(false);
@@ -65,7 +67,7 @@ export function Splash() {
           CLAUDESTRA
         </div>
         <div className="-mr-[0.14em] mt-2 text-xs tracking-[0.14em] text-base-content/40">
-          你的 Claude Code 指挥台
+          {t("你的 Claude Code 指挥台")}
         </div>
         <div className="mt-9 flex gap-1.5">
           {[0, 0.2, 0.4].map((d) => (

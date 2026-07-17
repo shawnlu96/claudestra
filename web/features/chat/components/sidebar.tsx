@@ -8,6 +8,7 @@ import { PushBanner } from "./push-banner";
 import { StatsPanel } from "./stats-panel";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
+import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 
 /** 大总管图标（lucide network,调度/编排语义）——替代 👑(owner 2026-07-15:
@@ -79,6 +80,7 @@ function AgentRow({
   onToggleCheck?: () => void;
 }) {
   const store = useChatStoreApi();
+  const t = useT(); // 也订阅语言切换,保证 fmtAgo 标签随切换重渲
   // 相对时间(owner 2026-07-14):x秒前/x分钟前/x小时x分前/x天前;
   // Sidebar 的 30s tick 让它保鲜
   const lastAt = fmtAgo(a.lastActivityTs);
@@ -120,7 +122,7 @@ function AgentRow({
                 closeSwipe();
               }}
             >
-              {pinned ? "取消置顶" : "置顶"}
+              {pinned ? t("取消置顶") : t("置顶")}
             </button>
             <button
               className="flex flex-1 items-center justify-center bg-error text-[13px] font-medium text-error-content"
@@ -135,12 +137,12 @@ function AgentRow({
                 if (!r.ok) {
                   setRemoving(false);
                   closeSwipe();
-                  alert(`删除失败:${r.error}`);
+                  alert(`${t("删除失败:")}${r.error}`);
                 }
                 // 成功时本行随列表数据一起消失,无需复位
               }}
             >
-              {removing ? "…" : confirmDel ? "确认?" : "删除"}
+              {removing ? "…" : confirmDel ? t("确认?") : t("删除")}
             </button>
           </div>
         )}
@@ -247,10 +249,10 @@ function AgentRow({
           )}
           <span className="min-w-0 flex-1 truncate text-[15px] sm:text-sm">
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
-            {a.displayName}
+            {t(a.displayName)}
             {a.pinnedMaster && (
               <span className="badge badge-primary badge-xs ml-1 align-middle">
-                总控
+                {t("总控")}
               </span>
             )}
             {a.mock && (
@@ -263,7 +265,7 @@ function AgentRow({
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
               期间时间冻结在回合开始前)→ 显示「工作中」更诚实 */}
           {(a.busy || busyLive) ? (
-            <span className="shrink-0 pl-1 text-[11px] text-warning/80">工作中</span>
+            <span className="shrink-0 pl-1 text-[11px] text-warning/80">{t("工作中")}</span>
           ) : (
             lastAt && (
               <span className="shrink-0 pl-1 font-mono text-[11px] tabular-nums text-base-content/35">
@@ -284,6 +286,7 @@ function AgentRow({
  */
 export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const store = useChatStoreApi();
+  const t = useT();
   const agents = useChatStore((s) => s.state.agents);
   const loading = useChatStore((s) => s.state.loadingAgents);
   const ready = useChatStore((s) => s.state.agentsReady);
@@ -353,7 +356,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
     }
     setBatchBusy(false);
     exitManage();
-    if (failed.length) alert(`部分删除失败:${failed.join(", ")}`);
+    if (failed.length) alert(`${t("部分删除失败:")}${failed.join(", ")}`);
   };
   // 聊天记录全局搜索（2026-07-14 owner:「compact 后忘事,模糊记得有件事——
   // 搜聊天记录找回」）。跨会话正文检索,按钮触发不自动搜(全盘扫描,省请求)。
@@ -398,19 +401,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}
       >
         <div className="flex items-center pb-2.5">
-          <span className="font-semibold">会话</span>
+          <span className="font-semibold">{t("会话")}</span>
           <button
             className={`ml-auto flex h-7 items-center justify-center rounded-lg px-1.5 transition-colors ${
               manage
                 ? "text-primary"
                 : "text-base-content/50 hover:bg-base-300 hover:text-base-content"
             }`}
-            title={manage ? "退出多选" : "多选管理（批量删除）"}
-            aria-label={manage ? "退出多选" : "多选管理"}
+            title={manage ? t("退出多选") : t("多选管理（批量删除）")}
+            aria-label={manage ? t("退出多选") : t("多选管理")}
             onClick={() => (manage ? exitManage() : setManage(true))}
           >
             {manage ? (
-              <span className="text-xs font-medium">完成</span>
+              <span className="text-xs font-medium">{t("完成")}</span>
             ) : (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="m3 17 2 2 4-4" />
@@ -423,8 +426,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title="用量看板"
-            aria-label="用量看板"
+            title={t("用量看板")}
+            aria-label={t("用量看板")}
             onClick={() => setShowStats(true)}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -436,8 +439,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title="设置"
-            aria-label="设置"
+            title={t("设置")}
+            aria-label={t("设置")}
             onClick={() => setShowSettings(true)}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -458,7 +461,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               setQuery(e.target.value);
               setChatHits(null); // 换词后旧结果失效
             }}
-            placeholder="搜索会话 / 聊天记录…"
+            placeholder={t("搜索会话 / 聊天记录…")}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
@@ -475,7 +478,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           {query && (
             <button
               className="shrink-0 text-xs text-base-content/40"
-              aria-label="清除搜索"
+              aria-label={t("清除搜索")}
               onClick={() => {
                 setQuery("");
                 setChatHits(null);
@@ -497,7 +500,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             ) : (
               <span className="opacity-60">💬</span>
             )}
-            {searching ? "正在搜聊天记录…" : `搜聊天记录「${query.trim()}」`}
+            {searching ? t("正在搜聊天记录…") : `${t("搜聊天记录「")}${query.trim()}${t("」")}`}
           </button>
         )}
       </div>
@@ -516,19 +519,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
             是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}
         {(!ready || loading) && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">加载中…</div>
+          <div className="px-2 py-4 text-sm opacity-50">{t("加载中…")}</div>
         )}
         {ready && !loading && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">暂无会话</div>
+          <div className="px-2 py-4 text-sm opacity-50">{t("暂无会话")}</div>
         )}
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">
             <div className="flex items-center px-1.5 pb-1 pt-0.5 text-[11px] text-base-content/45">
-              <span>💬 聊天记录 · {chatHits.length ? `${chatHits.length} 条命中` : "无命中"}</span>
+              <span>💬 {t("聊天记录")} · {chatHits.length ? (getLang() === "en" ? `${chatHits.length} hit${chatHits.length > 1 ? "s" : ""}` : `${chatHits.length} 条命中`) : t("无命中")}</span>
               <button
                 className="ml-auto rounded px-1 text-base-content/40 hover:text-base-content/70"
-                aria-label="关闭搜索结果"
+                aria-label={t("关闭搜索结果")}
                 onClick={() => setChatHits(null)}
               >
                 ✕
@@ -536,7 +539,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             </div>
             {chatHits.length === 0 && (
               <div className="px-1.5 pb-1.5 text-xs text-base-content/40">
-                对话正文里没有「{query.trim()}」
+                {t("对话正文里没有「")}{query.trim()}{t("」")}
               </div>
             )}
             <div className="flex flex-col">
@@ -579,8 +582,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               <MasterIcon className="size-[18px]" />
             </span>
             <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-[15px] font-medium sm:text-sm">{master.displayName}</span>
-              <span className="truncate text-[11px] text-base-content/45">总控调度 · 新建会话找它</span>
+              <span className="truncate text-[15px] font-medium sm:text-sm">{t(master.displayName)}</span>
+              <span className="truncate text-[11px] text-base-content/45">{t("总控调度 · 新建会话找它")}</span>
             </span>
             {(master.busy || (active === master.name && streaming)) && (
               <span className="size-2 shrink-0 rounded-full bg-warning" />
@@ -588,7 +591,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
         )}
         {agents.length > 0 && filtered.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">没有匹配「{query.trim()}」的会话</div>
+          <div className="px-2 py-4 text-sm opacity-50">{t("没有匹配「")}{query.trim()}{t("」的会话")}</div>
         )}
         {/* 不用 daisyUI menu 类——它给每行自带 :hover/:active 按压高亮，iOS 上
             手指一碰就闪（滑动时「一直触发 hover 特效」，2026-07-13 真机）；
@@ -618,7 +621,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
         >
           <span className="text-xs text-base-content/50">
-            已选 {sel.size} 个{sel.size > 0 && " · 归档保留"}
+            {getLang() === "en" ? `${sel.size} selected` : `已选 ${sel.size} 个`}{sel.size > 0 && t(" · 归档保留")}
           </span>
           <button
             className={`btn btn-sm ml-auto ${sel.size ? "btn-error" : "btn-disabled"}`}
@@ -628,7 +631,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             {batchBusy ? (
               <span className="loading loading-spinner loading-xs" />
             ) : confirmBatch ? (
-              `确认删除 ${sel.size} 个?`
+              `${t("确认删除 ")}${sel.size}${t(" 个?")}`
+            ) : getLang() === "en" ? (
+              `Delete${sel.size ? ` ${sel.size}` : ""}`
             ) : (
               `删除${sel.size ? ` ${sel.size} 个` : ""}`
             )}

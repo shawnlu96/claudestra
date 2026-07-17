@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
+import { getLang, useT } from "@/lib/i18n";
 
 /**
  * 会话内搜索（owner 2026-07-14:「每个会话右上角加搜索按钮,只搜本 session」）。
@@ -12,13 +13,14 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
  * 容器内 fixed 会定位到屏幕外（页面规矩 5.5）。
  */
 export function SessionSearchButton({ agentName }: { agentName: string }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <>
       <button
         className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content"
-        title="搜索本会话聊天记录"
-        aria-label="搜索本会话聊天记录"
+        title={t("搜索本会话聊天记录")}
+        aria-label={t("搜索本会话聊天记录")}
         onClick={() => setOpen(true)}
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -32,6 +34,7 @@ export function SessionSearchButton({ agentName }: { agentName: string }) {
 }
 
 function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () => void }) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<ChatSearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -61,7 +64,7 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
         className="flex shrink-0 items-center gap-2 border-b border-base-300 px-3 pb-2"
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.5rem)" }}
       >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2" onClick={onClose} aria-label="关闭搜索">
+        <button className="btn btn-ghost btn-sm -ml-1 px-2" onClick={onClose} aria-label={t("关闭搜索")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
@@ -79,7 +82,7 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
               setQuery(e.target.value);
               setHits(null);
             }}
-            placeholder="搜本会话聊天记录…"
+            placeholder={t("搜本会话聊天记录…")}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
@@ -99,7 +102,7 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
           disabled={query.trim().length < 2 || searching}
           onClick={() => void doSearch()}
         >
-          {searching ? <span className="loading loading-spinner loading-xs" /> : "搜索"}
+          {searching ? <span className="loading loading-spinner loading-xs" /> : t("搜索")}
         </button>
       </div>
       {/* 结果区 */}
@@ -109,14 +112,14 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
       >
         {hits === null && !searching && (
           <div className="px-3 py-6 text-center text-sm text-base-content/40">
-            输入关键词搜这个会话的全部历史记录
+            {t("输入关键词搜这个会话的全部历史记录")}
             <br />
-            （包括压缩前和更早轮换的会话）
+            {t("（包括压缩前和更早轮换的会话）")}
           </div>
         )}
         {hits !== null && hits.length === 0 && (
           <div className="px-3 py-6 text-center text-sm text-base-content/40">
-            没搜到「{query.trim()}」
+            {getLang() === "en" ? `No results for "${query.trim()}"` : `没搜到「${query.trim()}」`}
           </div>
         )}
         {hits?.map((h, i) => (

@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { PendingPermission } from "../type";
 import { useChatStoreApi } from "../chat-store";
+import { useT } from "@/lib/i18n";
 
 /** action.style → daisyUI 按钮 class */
 const STYLE_BTN: Record<string, string> = {
@@ -16,6 +17,7 @@ const STYLE_BTN: Record<string, string> = {
  * 对应 tmux 键序列打给 agent 的 Claude Code TUI（复用 bridge 的 keystroke builder）。
  */
 export function PermissionCard({ p }: { p: PendingPermission }) {
+  const t = useT();
   const store = useChatStoreApi();
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -37,11 +39,11 @@ export function PermissionCard({ p }: { p: PendingPermission }) {
           <span className="mt-0.5 text-lg">{isIdle ? "💤" : "🔔"}</span>
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold text-warning">
-              {isIdle ? "会话已闲置，Claude Code 询问如何继续" : "需要授权"}
+              {isIdle ? t("会话已闲置，Claude Code 询问如何继续") : t("需要授权")}
             </div>
             {(p.desc || p.title) && (
               <div className="mt-0.5 whitespace-pre-wrap break-words text-xs opacity-70">
-                {p.desc || p.title}
+                {t(p.desc || p.title || "")}
               </div>
             )}
           </div>
@@ -57,13 +59,13 @@ export function PermissionCard({ p }: { p: PendingPermission }) {
               {busy === a.action ? (
                 <span className="loading loading-spinner loading-xs" />
               ) : (
-                a.label
+                t(a.label)
               )}
             </button>
           ))}
         </div>
         {error && (
-          <div className="px-3 pb-2 text-xs text-error break-words">{error}</div>
+          <div className="px-3 pb-2 text-xs text-error break-words">{t(error)}</div>
         )}
       </div>
     </div>

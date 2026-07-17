@@ -11,6 +11,7 @@ import type {
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
 import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
+import { getLang } from "@/lib/i18n";
 
 /**
  * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
@@ -338,7 +339,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       const json = (await res.json()) as { ok?: boolean; error?: string };
       if (!res.ok || json.ok === false) {
-        return { ok: false, error: json.error || `${action} 失败` };
+        return {
+          ok: false,
+          error:
+            json.error ||
+            (getLang() === "zh" ? `${action} 失败` : `${action} failed`),
+        };
       }
       await this.loadAgents();
       return { ok: true };
@@ -813,7 +819,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           s.messages.push({
             id: this.nextId(),
             role: "assistant",
-            content: `⚠️ 发送失败：${j.error || `HTTP ${res.status}`}`,
+            content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${j.error || `HTTP ${res.status}`}`,
             ts: new Date().toISOString(),
           });
         });
@@ -836,7 +842,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
             s.messages.push({
               id: this.nextId(),
               role: "system",
-              content: `⚡ 已注入 ${j.data?.ccText || "命令"} — 由 Claude Code 原生执行`,
+              content:
+                getLang() === "zh"
+                  ? `⚡ 已注入 ${j.data?.ccText || "命令"} — 由 Claude Code 原生执行`
+                  : `⚡ Injected ${j.data?.ccText || "command"} — run natively by Claude Code`,
               ts: new Date().toISOString(),
             });
           });
@@ -850,7 +859,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         s.messages.push({
           id: this.nextId(),
           role: "assistant",
-          content: `⚠️ 发送失败：${(e as Error).message}`,
+          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${(e as Error).message}`,
           ts: new Date().toISOString(),
         });
       });
@@ -1252,7 +1261,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: this.nextId(),
         role: "system",
-        content: pre ? `📦 上下文已压缩：${fmtK(pre)} → ${fmtK(post)}` : "📦 上下文已压缩",
+        content: pre
+          ? getLang() === "zh"
+            ? `📦 上下文已压缩：${fmtK(pre)} → ${fmtK(post)}`
+            : `📦 Context compacted: ${fmtK(pre)} → ${fmtK(post)}`
+          : "📦 上下文已压缩",
         ts: new Date().toISOString(),
       });
       const a = s.agents.find((x) => x.name === s.activeAgent);

@@ -1,4 +1,5 @@
 "use client";
+import { useT } from "@/lib/i18n";
 
 /**
  * 终端控制键条。
@@ -28,7 +29,7 @@ const KEYS: { label: string; seq: string; title?: string }[] = [
   // 跳到底部(owner 2026-07-14「Command+End 跳到最下面」):发 End——^O 转录视图
   // 的标准 pager 跳底;terminal-view 对这个 seq 还会顺带 xterm.scrollToBottom()。
   // copy-mode 里 End 只到行尾——那里往下滑到底会自动退出,不归这颗键管。
-  { label: "⤓ 底", seq: "\x1b[F", title: "End（跳到最新输出/底部）" },
+  { label: "↓btm", seq: "\x1b[F", title: "End（跳到最新输出/底部）" },
   { label: "⏎", seq: "\r", title: "Enter" },
   { label: "^C", seq: "\x03", title: "Ctrl+C（中断）" },
   // 看更早的转录用 CC 原生 Ctrl+O（进入后配合滑动/↑↓ 可滚完整会话记录）
@@ -46,6 +47,7 @@ export function ControlBar({
   /** 兼容旧调用位；输入统一走 xterm，本参数不再改变行为 */
   mobile?: boolean;
 }) {
+  const t = useT();
   return (
     <div
       className="flex shrink-0 flex-col gap-1.5 border-t border-white/10 bg-[#181825] px-2 py-2"
@@ -64,7 +66,7 @@ export function ControlBar({
         {/* 唤起软键盘：聚焦 xterm 隐藏 textarea（iOS 必须在手势内 focus） */}
         <button
           className="btn btn-sm shrink-0 border-white/10 bg-white/5 font-normal text-[#cdd6f4] hover:bg-white/10"
-          title="唤起键盘输入"
+          title={t("唤起键盘输入")}
           onPointerDown={(e) => e.preventDefault()}
           onClick={() => onFocusTerm()}
           disabled={disabled}
@@ -76,7 +78,7 @@ export function ControlBar({
           <button
             key={k.label}
             className="btn btn-sm shrink-0 border-white/10 bg-white/5 font-mono font-normal text-[#cdd6f4] hover:bg-white/10"
-            title={k.title || k.label}
+            title={k.title ? t(k.title) : k.label}
             onPointerDown={(e) => e.preventDefault()}
             onClick={() => onKeys(k.seq)}
             disabled={disabled}

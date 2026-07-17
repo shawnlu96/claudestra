@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
+import { useT } from "@/lib/i18n";
 import { SkillsSheet } from "./skills-sheet";
 
 const MAX_FILES = 5;
@@ -70,6 +71,7 @@ function PendingFiles({
   files: File[];
   onRemove: (i: number) => void;
 }) {
+  const t = useT();
   if (files.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-2 px-3 pb-1 pt-3">
@@ -99,7 +101,7 @@ function PendingFiles({
               <div className="truncate text-[12px] font-medium text-base-content/85">
                 {f.name}
               </div>
-              <div className="text-[10.5px] text-base-content/40">文件</div>
+              <div className="text-[10.5px] text-base-content/40">{t("文件")}</div>
             </div>
             <RemoveBtn onClick={() => onRemove(i)} />
           </div>
@@ -110,12 +112,13 @@ function PendingFiles({
 }
 
 function RemoveBtn({ onClick }: { onClick: () => void }) {
+  const t = useT();
   return (
     <button
       type="button"
       onClick={onClick}
-      title="移除"
-      aria-label="移除"
+      title={t("移除")}
+      aria-label={t("移除")}
       className="absolute right-0.5 top-0.5 flex size-[18px] items-center justify-center rounded-full bg-black/60 text-[11px] text-white opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100"
     >
       ✕
@@ -140,6 +143,7 @@ const SCOPE_LABEL: Record<string, string> = {
 };
 
 export function Composer() {
+  const t = useT();
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -508,7 +512,7 @@ export function Composer() {
         {showCtxWarn && (
           <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs">
             <span className="min-w-0 truncate">
-              ⚠️ 上下文已 {Math.round(ctxTokens / 1000)}k，建议压缩以保持质量
+              ⚠️ {t("上下文已")} {Math.round(ctxTokens / 1000)}k{t("，建议压缩以保持质量")}
             </span>
             <button
               className="btn btn-warning btn-xs ml-auto shrink-0"
@@ -518,11 +522,11 @@ export function Composer() {
                 void store.send("上下文占用已经很高了，请执行 /save-compact：先抢救关键记忆，然后压缩上下文。");
               }}
             >
-              请求压缩
+              {t("请求压缩")}
             </button>
             <button
               className="shrink-0 px-1 opacity-40 hover:opacity-80"
-              aria-label="本会话不再提示"
+              aria-label={t("本会话不再提示")}
               onClick={() => setCtxDismissedFor(active)}
             >
               ✕
@@ -552,7 +556,7 @@ export function Composer() {
                   {c.description}
                 </span>
                 <span className="shrink-0 rounded bg-base-200 px-1.5 py-0.5 text-[10px] text-base-content/45">
-                  {SCOPE_LABEL[c.scope] || c.scope}
+                  {t(SCOPE_LABEL[c.scope] || c.scope)}
                 </span>
               </button>
             ))}
@@ -576,7 +580,7 @@ export function Composer() {
               <span className="min-w-0 flex-1 truncate text-base-content/55">{quoteDraft}</span>
               <button
                 className="shrink-0 p-0.5 text-base-content/40 hover:text-base-content/70"
-                aria-label="取消引用"
+                aria-label={t("取消引用")}
                 onClick={() => store.clearQuote()}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -593,9 +597,9 @@ export function Composer() {
                 <span className="animate-cstra-breathe absolute inline-flex size-2 rounded-full bg-info" />
                 <span className="relative inline-flex size-1.5 rounded-full bg-info" />
               </span>
-              <span className="font-medium text-base-content/70">正在回复…</span>
+              <span className="font-medium text-base-content/70">{t("正在回复…")}</span>
               <span className="ml-auto text-base-content/40 max-sm:hidden">
-                发送即插入当前会话，将在当前步骤后生效
+                {t("发送即插入当前会话，将在当前步骤后生效")}
               </span>
             </div>
           )}
@@ -628,13 +632,13 @@ export function Composer() {
                     <span className="relative inline-flex size-2 rounded-full bg-error" />
                   </span>
                   <span className="text-[14px] font-medium text-error/90">
-                    正在录音 {recSecs}s · 松开结束
+                    {t("正在录音")} {recSecs}s · {t("松开结束")}
                   </span>
                 </>
               ) : (
                 <>
                   <span className="loading loading-spinner loading-sm text-base-content/60" />
-                  <span className="text-[14px] text-base-content/60">识别中…</span>
+                  <span className="text-[14px] text-base-content/60">{t("识别中…")}</span>
                 </>
               )}
             </div>
@@ -647,14 +651,14 @@ export function Composer() {
             rows={1}
             placeholder={
               disabled
-                ? "先选择一个会话…"
+                ? t("先选择一个会话…")
                 : streaming
                   ? coarse
-                    ? "继续输入，随时插话…"
-                    : "继续输入，随时插话…（Enter 发送）"
+                    ? t("继续输入，随时插话…")
+                    : `${t("继续输入，随时插话…")}${t("（Enter 发送）")}`
                   : coarse
-                    ? `发消息给 ${active}`
-                    : `发消息给 ${active}（Enter 发送）`
+                    ? `${t("发消息给")} ${active}`
+                    : `${t("发消息给")} ${active}${t("（Enter 发送）")}`
             }
             value={text}
             disabled={disabled}
@@ -682,8 +686,8 @@ export function Composer() {
           <div className="flex items-center gap-1.5 px-2.5 pb-[9px] pt-1.5">
             <button
               onClick={() => fileRef.current?.click()}
-              title="添加附件（也可直接粘贴）"
-              aria-label="添加附件"
+              title={t("添加附件（也可直接粘贴）")}
+              aria-label={t("添加附件")}
               disabled={disabled || files.length >= MAX_FILES}
               className="flex size-8 items-center justify-center rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
             >
@@ -691,8 +695,8 @@ export function Composer() {
             </button>
             <button
               onClick={() => setSkillsOpen(true)}
-              title="Skills（斜杠命令面板）"
-              aria-label="打开 Skills 面板"
+              title={t("Skills（斜杠命令面板）")}
+              aria-label={t("打开 Skills 面板")}
               disabled={disabled}
               className="flex size-8 items-center justify-center rounded-[9px] font-mono text-[15px] font-semibold text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
             >
@@ -706,8 +710,8 @@ export function Composer() {
               onPointerUp={holdEnd}
               onPointerCancel={holdEnd}
               onContextMenu={(e) => e.preventDefault()}
-              title="按住说话，松开结束"
-              aria-label="按住说话"
+              title={t("按住说话，松开结束")}
+              aria-label={t("按住说话")}
               disabled={disabled || recState === "busy"}
               style={{ touchAction: "none" }}
               className={`flex size-8 select-none items-center justify-center rounded-[9px] transition-colors disabled:opacity-30 ${
@@ -723,7 +727,7 @@ export function Composer() {
               )}
             </button>
             {recErr && recState === "idle" && (
-              <span className="truncate text-[11px] text-error/70">{recErr}</span>
+              <span className="truncate text-[11px] text-error/70">{t(recErr)}</span>
             )}
 
             <div className="ml-auto flex items-center gap-1.5">
@@ -731,8 +735,8 @@ export function Composer() {
               {streaming && (
                 <button
                   onClick={() => store.interrupt()}
-                  title="暂停（停止当前回复，Ctrl+C）"
-                  aria-label="暂停"
+                  title={t("暂停（停止当前回复，Ctrl+C）")}
+                  aria-label={t("暂停")}
                   className="flex size-[34px] items-center justify-center rounded-[10px] bg-base-content/15 text-base-content transition-colors hover:bg-base-content/25"
                 >
                   <span className="block size-3 rounded-[2px] bg-current" />
@@ -742,9 +746,9 @@ export function Composer() {
                 onClick={submit}
                 disabled={!canSend}
                 title={
-                  streaming ? "插入当前会话（当前步骤后生效）" : "发送"
+                  streaming ? t("插入当前会话（当前步骤后生效）") : t("发送")
                 }
-                aria-label="发送"
+                aria-label={t("发送")}
                 className={`flex size-[34px] items-center justify-center rounded-[10px] transition-[background-color,transform] duration-150 active:scale-90 ${
                   canSend
                     ? "bg-accent text-white"

@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { ControlBar } from "./control-bar";
+import { useT } from "@/lib/i18n";
 
 /**
  * 远程终端视图（仅客户端，经 dynamic ssr:false 加载）。
@@ -41,6 +42,7 @@ export function TerminalView({
   /** 手机端：控制条显示专用输入框（绕开 xterm 吞字的 textarea） */
   mobile?: boolean;
 }) {
+  const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const termIdRef = useRef<string | null>(null);
@@ -272,7 +274,7 @@ export function TerminalView({
         const text = await res.text().catch(() => "");
         if (!disposed) {
           setStatus("error");
-          setErrMsg(text || `连接失败 (${res.status})`);
+          setErrMsg(text || `${t("连接失败")} (${res.status})`);
         }
         return;
       }
@@ -546,13 +548,13 @@ export function TerminalView({
             {status === "connecting" && (
               <span className="flex items-center gap-2 text-sm text-[#cdd6f4]/70">
                 <span className="loading loading-spinner loading-sm" />
-                连接终端…
+                {t("连接终端…")}
               </span>
             )}
             {(status === "exited" || status === "error") && (
               <div className="flex flex-col items-center gap-2">
                 <span className="text-sm text-[#cdd6f4]/70">
-                  {status === "exited" ? "终端会话已结束" : errMsg || "连接出错"}
+                  {status === "exited" ? t("终端会话已结束") : t(errMsg || "连接出错")}
                 </span>
                 {/* pointerup 而非 click：键盘尚未收完时布局还在重排,click 的
                     press-release 配对会因元素位移被 iOS 判废,pointerup 不受影响 */}
@@ -560,7 +562,7 @@ export function TerminalView({
                   className="btn btn-sm"
                   onPointerUp={() => setConnectSeq((n) => n + 1)}
                 >
-                  重新连接
+                  {t("重新连接")}
                 </button>
               </div>
             )}
@@ -621,7 +623,7 @@ export function TerminalView({
               提示行永不半截(2026-07-15,「底部截断」的最终收口) */}
           {status === "connected" && mirror && (
             <p className="shrink-0 pt-2 text-center font-mono text-[10px] text-[#cdd6f4]/25">
-              {mirror.cols}×{mirror.rows} · 跟随桌面端窗口尺寸
+              {mirror.cols}×{mirror.rows} · {t("跟随桌面端窗口尺寸")}
             </p>
           )}
           <div className="min-h-0 flex-1" />

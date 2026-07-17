@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useChatStore } from "../chat-store";
 import type { CcTaskView } from "../type";
+import { useT } from "@/lib/i18n";
 
 /**
  * Claude Code 原生任务清单面板(owner 2026-07-16:「console 里的 todo 适配到
@@ -32,6 +33,7 @@ function StatusIcon({ t }: { t: CcTaskView }) {
 }
 
 export function CcTaskPanel() {
+  const tr = useT(); // 译名用 tr——map 回调里 t 是任务变量
   const tasks = useChatStore((s) => s.state.ccTasks);
   const [open, setOpen] = useState(false);
   if (!tasks.length) return null;
@@ -42,8 +44,8 @@ export function CcTaskPanel() {
   const headline = current
     ? current.activeForm || current.subject
     : nextPending
-      ? `下一项:${nextPending.subject}`
-      : "全部完成";
+      ? `${tr("下一项:")}${nextPending.subject}`
+      : tr("全部完成");
 
   return (
     <div className="chat-msg-in mb-[18px] overflow-hidden rounded-xl border border-base-content/10 bg-base-200/60">
@@ -58,7 +60,7 @@ export function CcTaskPanel() {
           <circle cx="5.5" cy="18" r="1.2" fill="currentColor" stroke="none" />
         </svg>
         <span className="shrink-0 text-[11.5px] font-semibold tabular-nums text-base-content/70">
-          任务 {done}/{tasks.length}
+          {tr("任务")} {done}/{tasks.length}
         </span>
         <span
           className={`min-w-0 flex-1 truncate text-[11.5px] ${
@@ -93,7 +95,7 @@ export function CcTaskPanel() {
               >
                 {t.subject}
                 {t.blockedBy.length > 0 && t.status !== "completed" && (
-                  <span className="ml-1.5 text-[10px] text-warning/80">🔒 待 #{t.blockedBy.join(" #")}</span>
+                  <span className="ml-1.5 text-[10px] text-warning/80">🔒 {tr("待")} #{t.blockedBy.join(" #")}</span>
                 )}
               </span>
               <span className="shrink-0 font-mono text-[10px] tabular-nums text-base-content/25">#{t.id}</span>

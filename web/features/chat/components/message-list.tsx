@@ -9,6 +9,7 @@ import { ReplyComponents } from "./reply-components";
 import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
 import { highlightCode, langForPath } from "../highlight";
+import { useT, getLang } from "@/lib/i18n";
 
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
    user 右对齐圆角矩形，工具调用 active（转圈）/ history（可展开）两态。
@@ -361,6 +362,7 @@ async function shareImage(url: string, name: string): Promise<void> {
  *  隔开、带颜色和 tick 图标」),三态同构:绿=完成 / 黄=已打断 / 红=出错。
  *  横线用 currentColor 低透明度,自动跟随态色。 */
 function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" | "error"; ms?: number; animate?: boolean }) {
+  const t = useT();
   const conf = {
     done: { cls: "text-success", label: "完成", icon: <path d="M8.5 12.5l2.5 2.5 5-5.5" /> },
     interrupted: { cls: "text-warning", label: "已打断", icon: <path d="M5.6 5.6l12.8 12.8" /> },
@@ -374,7 +376,7 @@ function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" |
           <circle cx="12" cy="12" r="9" />
           {conf.icon}
         </svg>
-        {conf.label}
+        {t(conf.label)}
         {kind === "done" && typeof ms === "number" && (
           <span className="font-mono text-[10.5px] font-normal tabular-nums opacity-70">
             · {(ms / 1000).toFixed(ms >= 60_000 ? 0 : 1)}s
@@ -387,6 +389,7 @@ function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" |
 }
 
 function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
+  const t = useT();
   const images = items.filter((a) => a.kind === "image" && a.url);
   const imgEls = useRef(new Map<string, HTMLImageElement>());
 
@@ -427,7 +430,7 @@ function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
         order: 8,
         isButton: true,
         tagName: "button",
-        html: "保存",
+        html: t("保存"),
         onClick: () => {
           const slide = pswp.currSlide?.data;
           if (slide?.src) void shareImage(slide.src, String(slide.alt || "image.png"));
@@ -460,6 +463,7 @@ function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
 /** system 级事件（compact / 斜杠命令 / 中断 / 命令输出）的通用居中分隔条。
  *  与消息气泡视觉解耦：无头像无名字，两侧细线 + 小灰字；点击附带秒级时间。 */
 const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
+  const t = useT();
   const [showTs, setShowTs] = useState(false);
   // 进场动画只给实时新增(本地 id)——历史加载/对账替换的 h{seq} 节点不播,
   // 否则打开会话/切回对齐时整页一起闪一遍(owner 2026-07-16「更丝滑」)
@@ -473,7 +477,7 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
     >
       <span className="h-px flex-1 bg-base-content/10" />
       <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
-        {m.content}
+        {t(m.content)}
         {showTs && m.ts && (
           <span className="ml-1.5 font-mono text-[10px] tabular-nums opacity-70">{fmtTs(m.ts)}</span>
         )}
@@ -485,10 +489,11 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
 
 /** [fork] 过程叙述 ↔ 最终回复 之间的淡分隔线（仅两者都在时出现）。 */
 function ReplyDivider() {
+  const t = useT();
   return (
     <div className="my-2.5 flex items-center gap-2" aria-hidden>
       <span className="h-px flex-1 bg-base-content/10" />
-      <span className="text-[10px] font-medium tracking-wide text-base-content/30">回复</span>
+      <span className="text-[10px] font-medium tracking-wide text-base-content/30">{t("回复")}</span>
       <span className="h-px flex-1 bg-base-content/10" />
     </div>
   );
@@ -813,6 +818,7 @@ const Message = memo(function Message({
 });
 
 export function MessageList() {
+  const t = useT();
   const messages = useChatStore((s) => s.state.messages);
   const awaiting = useChatStore((s) => s.state.awaitingChunk);
   const streaming = useChatStore((s) => s.state.streaming);
@@ -899,8 +905,8 @@ export function MessageList() {
   if (!active) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 opacity-50">
-        <p className="text-lg">选择左侧一个会话开始</p>
-        <p className="text-sm">消息经 Bridge 投递到对应 Claude Code 会话</p>
+        <p className="text-lg">{t("选择左侧一个会话开始")}</p>
+        <p className="text-sm">{t("消息经 Bridge 投递到对应 Claude Code 会话")}</p>
       </div>
     );
   }
@@ -939,20 +945,20 @@ export function MessageList() {
         {loadingHistory && (
           <div className="flex items-center justify-center gap-2 py-6 text-sm opacity-40">
             <span className="loading loading-spinner loading-sm" />
-            加载历史消息…
+            {t("加载历史消息…")}
           </div>
         )}
         {!loadingHistory && messages.length === 0 && historyError && (
           <div className="flex flex-col items-center gap-2 py-8 text-sm opacity-60">
-            <span>历史加载失败</span>
+            <span>{t("历史加载失败")}</span>
             <button className="btn btn-sm" onClick={() => store.reloadHistory()}>
-              重试
+              {t("重试")}
             </button>
           </div>
         )}
         {!loadingHistory && messages.length === 0 && !historyError && (
           <div className="py-8 text-center text-sm opacity-40">
-            向 {active} 发送第一条消息
+            {getLang() === "en" ? `Send the first message to ${active}` : `向 ${active} 发送第一条消息`}
           </div>
         )}
         {hiddenCount > 0 && (
@@ -963,7 +969,7 @@ export function MessageList() {
               setExtraVisible((n) => n + 100);
             }}
           >
-            显示更早的 {hiddenCount} 条
+            {getLang() === "en" ? `Show ${hiddenCount} earlier` : `显示更早的 ${hiddenCount} 条`}
           </button>
         )}
         {/* 本地窗口耗尽 → 继续向服务端翻更早的一页(同 session,seq 向前)。
@@ -979,7 +985,7 @@ export function MessageList() {
             }}
           >
             {loadingOlder && <span className="loading loading-spinner loading-xs" />}
-            加载更早的消息…
+            {t("加载更早的消息…")}
           </button>
         )}
         {visible.map((m, i) => (

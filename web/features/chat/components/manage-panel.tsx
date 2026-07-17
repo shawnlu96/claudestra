@@ -3,6 +3,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { NewAgentModal } from "./new-agent-modal";
+import { useT } from "@/lib/i18n";
 
 /**
  * Agent 管理页（2026-07-14 owner：大总管做成「聊天 + UI」双轨——能点按钮
@@ -15,6 +16,7 @@ import { NewAgentModal } from "./new-agent-modal";
  * terminal-page 同一套治法;窄屏由 chat.tsx 配 #manage hash 伪路由,左滑/返回键退出。
  */
 export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const t = useT();
   const agents = useChatStore((s) => s.state.agents);
   const store = useChatStoreApi();
   const [showNew, setShowNew] = useState(false);
@@ -36,7 +38,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
     setMsg("");
     const r = kind === "restart" ? await store.restartAgent(name) : await store.killAgent(name);
     setBusyKey("");
-    setMsg(r.ok ? `${name} ${kind === "restart" ? "已重启" : "已停止"}` : r.error || "操作失败");
+    setMsg(r.ok ? `${name} ${t(kind === "restart" ? "已重启" : "已停止")}` : r.error || t("操作失败"));
   };
 
   const rows = agents.filter((a) => !a.pinnedMaster);
@@ -48,17 +50,17 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
         className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2" aria-label="返回" onClick={onClose}>
+        <button className="btn btn-ghost btn-sm -ml-1 px-2" aria-label={t("返回")} onClick={onClose}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
         </button>
-        <span className="truncate font-semibold">Agent 管理</span>
+        <span className="truncate font-semibold">{t("Agent 管理")}</span>
         <button className="btn btn-primary btn-sm ml-auto" onClick={() => setShowNew(true)}>
-          ＋ 新建
+          {t("＋ 新建")}
         </button>
       </header>
-      {msg && <div className="px-4 pt-2 text-xs text-base-content/60">{msg}</div>}
+      {msg && <div className="px-4 pt-2 text-xs text-base-content/60">{t(msg)}</div>}
 
       <div
         className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-3 pt-2"
@@ -79,7 +81,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
                     }`}
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm">{a.displayName}</div>
+                    <div className="truncate text-sm">{t(a.displayName)}</div>
                     {a.purpose && (
                       <div className="truncate text-[11px] text-base-content/40">{a.purpose}</div>
                     )}
@@ -97,9 +99,9 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
                     {busyKey === rk ? (
                       <span className="loading loading-spinner loading-xs" />
                     ) : arming === rk ? (
-                      "确认重启?"
+                      t("确认重启?")
                     ) : (
-                      "重启"
+                      t("重启")
                     )}
                   </button>
                   {a.status !== "stopped" && (
@@ -111,9 +113,9 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
                       {busyKey === kk ? (
                         <span className="loading loading-spinner loading-xs" />
                       ) : arming === kk ? (
-                        "确认停止?"
+                        t("确认停止?")
                       ) : (
-                        "停止"
+                        t("停止")
                       )}
                     </button>
                   )}

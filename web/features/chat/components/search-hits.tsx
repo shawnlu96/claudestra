@@ -1,5 +1,6 @@
 "use client";
 import { fmtAgo } from "../fmt-time";
+import { useT } from "@/lib/i18n";
 
 /** 聊天记录搜索命中（/api/chat/search 返回项）——侧栏全局搜索与会话内搜索共用。 */
 export interface ChatSearchHit {
@@ -50,7 +51,8 @@ export function ChatHitRow({
   onOpen?: () => void;
   showAgent?: boolean;
 }) {
-  const agentLabel = hit.agent === "__master__" ? "大总管" : hit.agent;
+  const t = useT();
+  const agentLabel = hit.agent === "__master__" ? t("大总管") : hit.agent;
   return (
     <button
       className={`flex w-full flex-col gap-1 rounded-lg px-2.5 py-2 text-left transition-colors ${
@@ -63,7 +65,7 @@ export function ChatHitRow({
         {showAgent && (
           <span className="truncate font-medium text-base-content/60">{agentLabel}</span>
         )}
-        {hit.compact && <span className="shrink-0 rounded bg-base-300 px-1">📦 压缩摘要</span>}
+        {hit.compact && <span className="shrink-0 rounded bg-base-300 px-1">{t("📦 压缩摘要")}</span>}
         {hit.ts && <span className="ml-auto shrink-0 tabular-nums">{fmtAgo(Date.parse(hit.ts))}</span>}
       </span>
       <span className="line-clamp-3 text-xs leading-relaxed text-base-content/75">

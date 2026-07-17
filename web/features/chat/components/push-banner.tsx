@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { pushSupported, getPushSubscription, enablePush } from "@/lib/push/client";
+import { useT } from "@/lib/i18n";
 
 /**
  * 「开启推送」引导横幅(owner 2026-07-16:「pwa 不能引导用户允许推送权限么」)。
@@ -11,6 +12,7 @@ import { pushSupported, getPushSubscription, enablePush } from "@/lib/push/clien
  * permission=denied 不显示(弹了也没用,设置页开关那里给指引)。
  */
 export function PushBanner() {
+  const t = useT();
   const [show, setShow] = useState(false);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -41,11 +43,11 @@ export function PushBanner() {
     <div className="mx-4 mb-2 flex items-start gap-2 rounded-xl border border-primary/20 bg-primary/[0.07] px-3 py-2.5 text-xs">
       <span className="text-base leading-none">🔔</span>
       <div className="min-w-0 flex-1">
-        <div className="font-medium">开启推送通知</div>
+        <div className="font-medium">{t("开启推送通知")}</div>
         <div className="mt-0.5 leading-relaxed text-base-content/60">
-          Web 端发起的对话有回复时通知你(页面开着时不打扰)
+          {t("Web 端发起的对话有回复时通知你(页面开着时不打扰)")}
         </div>
-        {msg && <div className="mt-1 text-warning">{msg}</div>}
+        {msg && <div className="mt-1 text-warning">{t(msg)}</div>}
         <button
           className="btn btn-primary btn-xs mt-1.5"
           disabled={busy}
@@ -62,10 +64,10 @@ export function PushBanner() {
           }}
         >
           {busy && <span className="loading loading-spinner loading-xs" />}
-          开启
+          {t("开启")}
         </button>
       </div>
-      <button className="shrink-0 px-1 opacity-40 hover:opacity-80" aria-label="不再提示" onClick={dismiss}>
+      <button className="shrink-0 px-1 opacity-40 hover:opacity-80" aria-label={t("不再提示")} onClick={dismiss}>
         ✕
       </button>
     </div>

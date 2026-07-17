@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { PendingAsk } from "../type";
 import { useChatStoreApi } from "../chat-store";
+import { useT } from "@/lib/i18n";
 
 /**
  * AskUserQuestion 交互卡（Claude Code 内建工具的 Web 化）。1-4 题，每题单/多选。
@@ -9,6 +10,7 @@ import { useChatStoreApi } from "../chat-store";
  * 取消 → 给 agent 发 Esc。
  */
 export function AskQuestionCard({ a }: { a: PendingAsk }) {
+  const t = useT();
   const store = useChatStoreApi();
   // sel[qIdx] = 第 qIdx 题选中的 option index 数组（0-based）
   const [sel, setSel] = useState<number[][]>(() => a.questions.map(() => []));
@@ -58,7 +60,7 @@ export function AskQuestionCard({ a }: { a: PendingAsk }) {
       <div className="chat-bubble max-w-[85%] overflow-hidden rounded-xl border border-info/40 bg-info/[0.08] p-0 text-base-content">
         <div className="flex items-center gap-2 px-3 pt-2.5">
           <span className="text-sm">🎛</span>
-          <span className="text-sm font-semibold text-info">agent 在等你选</span>
+          <span className="text-sm font-semibold text-info">{t("agent 在等你选")}</span>
         </div>
         <div className="flex flex-col gap-3 px-3 py-2">
           {a.questions.map((q, qi) => (
@@ -68,7 +70,7 @@ export function AskQuestionCard({ a }: { a: PendingAsk }) {
                   {q.header || `Q${qi + 1}`}
                 </span>
                 <span className="text-[11px] opacity-50">
-                  {q.multiSelect ? "可多选" : "单选"}
+                  {q.multiSelect ? t("可多选") : t("单选")}
                 </span>
               </div>
               <div className="text-[13.5px] font-medium leading-snug opacity-90">
@@ -122,7 +124,7 @@ export function AskQuestionCard({ a }: { a: PendingAsk }) {
             {busy === "submit" ? (
               <span className="loading loading-spinner loading-xs" />
             ) : (
-              "提交"
+              t("提交")
             )}
           </button>
           <button
@@ -133,10 +135,10 @@ export function AskQuestionCard({ a }: { a: PendingAsk }) {
             {busy === "cancel" ? (
               <span className="loading loading-spinner loading-xs" />
             ) : (
-              "取消 (Esc)"
+              t("取消 (Esc)")
             )}
           </button>
-          {error && <span className="truncate text-xs text-error">{error}</span>}
+          {error && <span className="truncate text-xs text-error">{t(error)}</span>}
         </div>
       </div>
     </div>

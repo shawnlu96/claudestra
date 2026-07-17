@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useChatStoreApi } from "../chat-store";
+import { useT } from "@/lib/i18n";
 
 /** 模型选项(值 = manager 侧别名,空 = 跟随全局 settings.json 默认)。 */
 const MODEL_OPTIONS = [
@@ -34,6 +35,7 @@ export function NewAgentModal({
   open: boolean;
   onClose: () => void;
 }) {
+  const t = useT();
   const store = useChatStoreApi();
   const [name, setName] = useState("");
   const [dir, setDir] = useState("");
@@ -65,7 +67,7 @@ export function NewAgentModal({
     const n = name.trim();
     const d = dir.trim();
     if (!n || !d) {
-      setError("name 和 dir 必填");
+      setError(t("name 和 dir 必填"));
       return;
     }
     setBusy(true);
@@ -79,21 +81,21 @@ export function NewAgentModal({
       reset();
       onClose();
     } else {
-      setError(res.error || "创建失败");
+      setError(res.error || t("创建失败"));
     }
   };
 
   return (
     <div className="modal modal-open">
       <div className="modal-box">
-        <h3 className="text-lg font-semibold">新建会话</h3>
+        <h3 className="text-lg font-semibold">{t("新建会话")}</h3>
         <p className="mt-1 text-xs opacity-60">
-          在指定目录起一个 Claude Code agent（经 Bridge）。
+          {t("在指定目录起一个 Claude Code agent（经 Bridge）。")}
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
           <label className="form-control">
-            <span className="label-text mb-1 text-sm">名称</span>
+            <span className="label-text mb-1 text-sm">{t("名称")}</span>
             <input
               className="input input-bordered input-sm w-full"
               placeholder="worker-alpha"
@@ -104,20 +106,20 @@ export function NewAgentModal({
             />
           </label>
           <label className="form-control">
-            <span className="label-text mb-1 text-sm">工作目录</span>
+            <span className="label-text mb-1 text-sm">{t("工作目录")}</span>
             <input
               className="input input-bordered input-sm w-full font-mono"
-              placeholder="~/code/project 或 /abs/path"
+              placeholder={t("~/code/project 或 /abs/path")}
               value={dir}
               disabled={busy}
               onChange={(e) => setDir(e.target.value)}
             />
           </label>
           <label className="form-control">
-            <span className="label-text mb-1 text-sm">用途（可选）</span>
+            <span className="label-text mb-1 text-sm">{t("用途（可选）")}</span>
             <input
               className="input input-bordered input-sm w-full"
-              placeholder="这个 agent 干什么"
+              placeholder={t("这个 agent 干什么")}
               value={purpose}
               disabled={busy}
               onChange={(e) => setPurpose(e.target.value)}
@@ -128,7 +130,7 @@ export function NewAgentModal({
           </label>
           <div className="grid grid-cols-2 gap-3">
             <label className="form-control">
-              <span className="label-text mb-1 text-sm">模型</span>
+              <span className="label-text mb-1 text-sm">{t("模型")}</span>
               <select
                 className="select select-bordered select-sm w-full"
                 value={model}
@@ -137,7 +139,7 @@ export function NewAgentModal({
               >
                 {MODEL_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
-                    {o.label}
+                    {t(o.label)}
                   </option>
                 ))}
               </select>
@@ -152,24 +154,24 @@ export function NewAgentModal({
               >
                 {EFFORT_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
-                    {o.label}
+                    {t(o.label)}
                   </option>
                 ))}
               </select>
             </label>
           </div>
           <p className="-mt-1 text-[11px] leading-snug opacity-45">
-            只钉这个 agent（重启保持），不改全局默认——和终端里 /model、/effort 会写全局不同。
+            {t("只钉这个 agent（重启保持），不改全局默认——和终端里 /model、/effort 会写全局不同。")}
           </p>
         </div>
 
         {error && (
-          <div className="mt-3 text-sm text-error break-words">{error}</div>
+          <div className="mt-3 text-sm text-error break-words">{t(error)}</div>
         )}
 
         <div className="modal-action">
           <button className="btn btn-ghost btn-sm" onClick={close} disabled={busy}>
-            取消
+            {t("取消")}
           </button>
           <button
             className="btn btn-primary btn-sm"
@@ -177,7 +179,7 @@ export function NewAgentModal({
             disabled={busy}
           >
             {busy && <span className="loading loading-spinner loading-xs" />}
-            创建
+            {t("创建")}
           </button>
         </div>
       </div>

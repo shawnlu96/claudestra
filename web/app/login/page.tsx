@@ -2,6 +2,7 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useT } from "@/lib/i18n";
 
 /** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
 const FORM_ERRORS: Record<string, string> = {
@@ -19,6 +20,7 @@ export default function LoginPage() {
 }
 
 function LoginInner() {
+  const t = useT();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -54,7 +56,7 @@ function LoginInner() {
         <div className="card-body">
           <h1 className="text-xl font-bold text-center mb-1">Claudestra</h1>
           <p className="text-xs text-center text-base-content/60 mb-4">
-            本机 SSH 账号登录
+            {t("本机 SSH 账号登录")}
           </p>
 
           {/* action/method：JS 未就绪(冷启动水合慢/失败)时走原生表单 POST——
@@ -68,7 +70,7 @@ function LoginInner() {
             className="space-y-3"
           >
             <label className="form-control">
-              <span className="label-text text-sm mb-1">账号</span>
+              <span className="label-text text-sm mb-1">{t("账号")}</span>
               <input
                 type="text"
                 name="username"
@@ -80,7 +82,7 @@ function LoginInner() {
               />
             </label>
             <label className="form-control">
-              <span className="label-text text-sm mb-1">密码</span>
+              <span className="label-text text-sm mb-1">{t("密码")}</span>
               <input
                 type="password"
                 name="password"
@@ -94,7 +96,7 @@ function LoginInner() {
 
             {(error || urlError) && (
               <div className="alert alert-error alert-sm text-sm py-2">
-                {error || urlError}
+                {t(error || urlError)}
               </div>
             )}
 
@@ -106,7 +108,7 @@ function LoginInner() {
               {loading ? (
                 <span className="loading loading-spinner loading-xs" />
               ) : (
-                "登录"
+                t("登录")
               )}
             </button>
           </form>
