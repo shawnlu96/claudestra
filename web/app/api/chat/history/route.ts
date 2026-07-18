@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import { apiAgentName, bridgeGet } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { st } from "@/lib/server-lang";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "@/lib/chat/events";
 
@@ -298,6 +299,6 @@ export async function GET(request: Request) {
     const msg = (e as Error).message;
     // agent 尚无历史（新建）不是错误
     if (/not found/i.test(msg)) return NextResponse.json({ data: [] });
-    return NextResponse.json({ error: `读取历史失败: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `${await st("读取历史失败", "Failed to read history")}: ${msg}` }, { status: 502 });
   }
 }

@@ -12,6 +12,9 @@ const FILE = `${DIR}/config.json`;
 export interface WebConfig {
   /** Groq API key（语音转写用;界面可配） */
   groqApiKey?: string;
+  /** 界面语言偏好（前端 setLang 时同步落盘,服务端生成文案跟随——单用户
+   *  部署,owner 2026-07-19「从头到尾都是一个用户,完全可以适配」） */
+  lang?: "zh" | "en";
 }
 
 export async function readWebConfig(): Promise<WebConfig> {

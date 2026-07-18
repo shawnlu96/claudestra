@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import { apiAgentName, bridgePost } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { st } from "@/lib/server-lang";
 
 /**
  * 清空会话：代理 Bridge POST /api/v1/agents/:name/clear（fork additive 端点）。
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
     // Bridge 409（回合进行中）原样透传语义，前端提示「先停止再 clear」
     const busy = /回合中|409/.test(msg);
     return NextResponse.json(
-      { ok: false, error: busy ? msg : `clear 失败: ${msg}` },
+      { ok: false, error: busy ? msg : `${await st("clear 失败", "Clear failed")}: ${msg}` },
       { status: busy ? 409 : 502 }
     );
   }

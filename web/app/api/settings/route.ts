@@ -24,7 +24,15 @@ export async function PUT(request: Request) {
   if (!(await isAuthed(request))) {
     return NextResponse.json({ error: "未登录" }, { status: 401 });
   }
-  const body = (await request.json().catch(() => ({}))) as { groqApiKey?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { groqApiKey?: unknown; lang?: unknown };
+  // 语言偏好(前端 setLang 同步落盘,服务端文案跟随;可与 groqApiKey 独立提交)
+  if (body.lang !== undefined) {
+    if (body.lang !== "zh" && body.lang !== "en") {
+      return NextResponse.json({ error: "lang 必须是 zh 或 en" }, { status: 400 });
+    }
+    await writeWebConfig({ lang: body.lang });
+    if (body.groqApiKey === undefined) return NextResponse.json({ ok: true });
+  }
   if (typeof body.groqApiKey !== "string") {
     return NextResponse.json({ error: "groqApiKey 必须是字符串（空串=清除）" }, { status: 400 });
   }

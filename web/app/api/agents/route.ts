@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { loadAgents } from "@/lib/chat/agents";
 import { bridgePost } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { st } from "@/lib/server-lang";
 
 /** agent 列表：代理 Bridge GET /api/v1/agents（master 在 token scope 内时置顶入列）。 */
 export async function GET(request: Request) {
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ data: list });
   } catch (e) {
     return NextResponse.json(
-      { error: `Bridge 不可达: ${(e as Error).message}` },
+      { error: `${await st("Bridge 不可达", "Bridge unreachable")}: ${(e as Error).message}` },
       { status: 502 }
     );
   }

@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { isAuthed } from "@/lib/api-auth";
+import { st } from "@/lib/server-lang";
 import { readWebConfig } from "@/lib/web-config";
 
 /**
@@ -100,7 +101,7 @@ export async function POST(request: Request) {
     const j = (await res.json().catch(() => ({}))) as { text?: string; error?: { message?: string } };
     if (!res.ok) {
       return NextResponse.json(
-        { error: `识别失败: ${j.error?.message || `HTTP ${res.status}`}` },
+        { error: `${await st("识别失败", "Transcription failed")}: ${j.error?.message || `HTTP ${res.status}`}` },
         { status: 502 }
       );
     }
@@ -114,7 +115,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ text });
   } catch (e) {
     return NextResponse.json(
-      { error: `识别服务不可达: ${(e as Error).message}` },
+      { error: `${await st("识别服务不可达", "Transcription service unreachable")}: ${(e as Error).message}` },
       { status: 502 }
     );
   }

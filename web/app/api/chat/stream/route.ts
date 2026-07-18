@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { SSE_DONE, type WebStreamEvent, type AnchoredStreamEvent, type WebAuqQuestion, type WebComponentRow } from "@/lib/chat/events";
 import { apiAgentName, bridgeGet, bridgeAuthHeaders, BRIDGE } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { serverLang } from "@/lib/server-lang";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -59,7 +60,7 @@ function mapAuqQuestions(raw: unknown): WebAuqQuestion[] {
 }
 
 /** BridgeEvent → WebStreamEvent（null = 该事件 v1 不消费）。 */
-function translate(evt: BridgeEvent): WebStreamEvent | null {
+function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
   const d = evt.data || {};
   switch (evt.type) {
     case "agent_status":
@@ -115,7 +116,14 @@ function translate(evt: BridgeEvent): WebStreamEvent | null {
     case "question_cleared":
       return { t: "ask-cleared" };
     case "auto_deny":
-      return { t: "text", text: `🚫 一个操作被 auto 模式拦下${d.reason ? `：${String(d.reason)}` : ""}` };
+      // 服务端按用户语言偏好生成(单用户部署;带变量串前端字典翻不了)
+      return {
+        t: "text",
+        text:
+          lang === "en"
+            ? `🚫 An action was blocked by auto mode${d.reason ? `: ${String(d.reason)}` : ""}`
+            : `🚫 一个操作被 auto 模式拦下${d.reason ? `：${String(d.reason)}` : ""}`,
+      };
     case "bg_task_started":
       return {
         t: "bg-start",
@@ -148,6 +156,7 @@ export async function GET(request: Request) {
   if (!(await isAuthed(request))) {
     return new Response("未登录", { status: 401 });
   }
+  const lang = await serverLang();
   const url = new URL(request.url);
   const agent = url.searchParams.get("agent");
   if (!agent) return new Response("missing agent", { status: 400 });
@@ -170,12 +179,12 @@ export async function GET(request: Request) {
   } catch (e) {
     const cause = (e as { cause?: unknown }).cause;
     console.error(`[stream] Bridge events fetch 失败 agent=${agent}:`, (e as Error).message, "| cause:", cause);
-    return new Response(`Bridge 不可达: ${(e as Error).message}`, { status: 502 });
+    return new Response(`${lang === "en" ? "Bridge unreachable" : "Bridge 不可达"}: ${(e as Error).message}`, { status: 502 });
   }
   if (!upstream.ok || !upstream.body) {
     const body = await upstream.text().catch(() => "");
     console.error(`[stream] Bridge events 非 2xx agent=${agent}: status=${upstream.status} body=${body.slice(0, 200)}`);
-    return new Response("Bridge events 不可用", { status: 502 });
+    return new Response(lang === "en" ? "Bridge events unavailable" : "Bridge events 不可用", { status: 502 });
   }
   const upstreamBody = upstream.body;
 
@@ -260,7 +269,7 @@ export async function GET(request: Request) {
               continue; // 心跳/坏帧
             }
             if (!nameVariants.has(evt.agent)) continue;
-            const mapped = translate(evt);
+            const mapped = translate(evt, lang);
             // eid = bridge seq:前端的断点续传锚(下次重连 ?since=<eid>)
             if (mapped) send({ ...mapped, eid: evt.seq });
           }

@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import { apiAgentName, bridgeGet } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { st } from "@/lib/server-lang";
 
 /**
  * 某 agent 可用的 slash 命令清单（composer 输入 / 弹出的命令面板数据源）。
@@ -22,6 +23,6 @@ export async function GET(request: Request) {
     );
     return NextResponse.json({ commands: r.commands || [] });
   } catch (e) {
-    return NextResponse.json({ error: `Bridge 不可达: ${(e as Error).message}` }, { status: 502 });
+    return NextResponse.json({ error: `${await st("Bridge 不可达", "Bridge unreachable")}: ${(e as Error).message}` }, { status: 502 });
   }
 }

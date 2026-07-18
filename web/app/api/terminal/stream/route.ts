@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { apiAgentName, bridgeAuthHeaders, BRIDGE } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { st } from "@/lib/server-lang";
 
 /**
  * 远程终端输出流（SSE 纯透传）。
@@ -33,11 +34,11 @@ export async function GET(request: Request) {
       }
     );
   } catch (e) {
-    return new Response(`Bridge 不可达: ${(e as Error).message}`, { status: 502 });
+    return new Response(`${await st("Bridge 不可达", "Bridge unreachable")}: ${(e as Error).message}`, { status: 502 });
   }
   if (!upstream.ok || !upstream.body) {
     const body = await upstream.text().catch(() => "");
-    let msg = `Bridge 终端不可用 (${upstream.status})`;
+    let msg = `${await st("Bridge 终端不可用", "Bridge terminal unavailable")} (${upstream.status})`;
     try {
       const parsed = JSON.parse(body) as { error?: string };
       if (parsed.error) msg = parsed.error;

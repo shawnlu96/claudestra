@@ -36,6 +36,15 @@ export function setLang(l: Lang) {
   try {
     document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
   } catch {}
+  // 同步落盘服务端(fire-and-forget):单用户部署,BFF 生成的带变量文案
+  // (识别失败/Bridge 错误/auto 拦截提示等)跟随此偏好(lib/server-lang.ts)
+  try {
+    void fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lang: l }),
+    }).catch(() => {});
+  } catch {}
   subs.forEach((f) => f());
 }
 
@@ -54,6 +63,15 @@ function initLang() {
     } catch {}
     subs.forEach((f) => f());
   }
+  // 把实际生效的语言同步到服务端(幂等 fire-and-forget)——「跟随系统」推断
+  // 出 en 时,服务端 config 若还停在默认 zh,BFF 文案会跟界面错位
+  try {
+    void fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lang }),
+    }).catch(() => {});
+  } catch {}
 }
 
 export function useLang(): Lang {
