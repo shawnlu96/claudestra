@@ -19,7 +19,6 @@ import {
   makeResponseEnvelope,
   type Envelope,
   type UserEndpoint,
-  type PeerEndpoint,
   type LocalEndpoint,
 } from "../src/bridge/router.ts";
 
@@ -159,27 +158,6 @@ describe("endpointLabel", () => {
       ws: {} as any,
     };
     expect(endpointLabel(ep)).toBe("local:?(12345)");
-  });
-
-  test("peer endpoint，无 agent name", () => {
-    const ep: PeerEndpoint = {
-      kind: "peer",
-      peerBotId: "111",
-      peerBotName: "claudestra_ahh",
-      sharedChannelId: "222",
-    };
-    expect(endpointLabel(ep)).toBe("peer:claudestra_ahh");
-  });
-
-  test("peer endpoint 带 agent name", () => {
-    const ep: PeerEndpoint = {
-      kind: "peer",
-      peerBotId: "111",
-      peerBotName: "claudestra_ahh",
-      sharedChannelId: "222",
-      peerAgentName: "future_data",
-    };
-    expect(endpointLabel(ep)).toBe("peer:claudestra_ahh.future_data");
   });
 
   test("user endpoint", () => {

@@ -618,8 +618,8 @@ async function stepInviteBot(appId: string): Promise<void> {
     "After authorization the bot will appear in the member list (offline state, that's normal)",
   ));
   hint(t(
-    `跨 Claudestra 协作（v1.8+，v1.9+ 加强版）：朋友 bot 进来后 bridge 会自动建 #agent-exchange 共享频道。${c.cyan}bun src/manager.ts invite-link --peer${c.reset} 生成最小权限邀请链接给朋友；${c.cyan}peer-expose <agent> <peer>${c.reset} 显式开放 agent 给他（默认 direct 路由，绕过 master，2-3 跳）。`,
-    `Cross-Claudestra peer collaboration (v1.8+, enhanced in v1.9+): when a friend's bot joins, the bridge auto-creates a #agent-exchange channel. Use ${c.cyan}bun src/manager.ts invite-link --peer${c.reset} to generate a minimum-permission invite link for your friend, and ${c.cyan}peer-expose <agent> <peer>${c.reset} to explicitly expose an agent to them (default 'direct' routing bypasses the master, 2-3 hops total).`,
+    `跨 Claudestra 协作（v2.11+ HTTP peer）：两台 Claudestra 通过 HTTP API 互访，不需要共享 Discord 服务器。${c.cyan}bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <你的bridge地址>${c.reset} 发起三步握手（详见 docs/design-http-peers.md）。`,
+    `Cross-Claudestra peer collaboration (v2.11+ HTTP peers): two Claudestra installs talk over HTTP API — no shared Discord server needed. Run ${c.cyan}bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <your bridge url>${c.reset} to start the 3-step handshake (see docs/design-http-peers.md).`,
   ));
   br();
   await waitEnter();

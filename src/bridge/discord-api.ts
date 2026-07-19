@@ -2,7 +2,7 @@
  * Discord API 操作：发消息、获取历史、反应、编辑、创建/删除频道
  */
 
-import { TextChannel, PermissionFlagsBits, OverwriteType, type Client } from "discord.js";
+import { TextChannel, type Client } from "discord.js";
 import { buildComponents } from "./components.js";
 
 let botUserId: string | null = null;
@@ -153,56 +153,21 @@ export async function discordCreateChannel(
       (c) => c.name === categoryName && c.type === 4
     );
     if (!cat) {
-      // category 不存在，自动创建。注意：新建 category 也要 deny 已知的 peer bot，
-      // 否则之后 category 下面的频道继承"无 override" → peer 默认可见。
+      // category 不存在，自动创建
       cat = await guild.channels.create({
         name: categoryName,
         type: 4, // GuildCategory
-        permissionOverwrites: await buildPeerDenyOverrides(guild),
       });
     }
     parentId = cat?.id;
   }
 
-  // v2.0.20+ 新频道创建时直接带 peer bot 的 deny ViewChannel overrides，避免新建的
-  // agent 频道被 peer 可见。之前的 scopePeerToAgentExchange 只在 peer 加入瞬间扫一次
-  // 当时已存在的频道；以后通过 manager.ts create 新建的频道没在那一次循环里、
-  // category 也可能在 peer scope 之后才生 → peer 默认能看到。这里在 create 时
-  // 直接显式 deny 兜住。
   const ch = await guild.channels.create({
     name,
     parent: parentId,
     topic: `Claude Code agent channel`,
-    permissionOverwrites: await buildPeerDenyOverrides(guild),
   });
   return ch.id;
-}
-
-/**
- * 读 peers.json 列出所有已知 peer bot，返回 deny ViewChannel 的 permissionOverwrites，
- * 供 `guild.channels.create({ permissionOverwrites })` 用。peers.json 没条目返回空数组。
- *
- * v2.2.0+ 关键修复：**按 peer bot 的 user id 直接 deny（member overwrite）**，不再去
- * 查它的 managed role。之前查 role 用 `guild.roles.cache.find(... tags.botId ...)`，
- * bridge 刚重启时 guild role 缓存是冷的 → 查不到 role → 返回空 → 新建的 agent 频道
- * 没带 deny → **被 peer bot 看见**（owner 实测：重启后建的测试频道全被 peer 拿到访问）。
- * bot user id 从 peers.json 直接拿，永远可靠，不依赖任何缓存。
- *
- * 只 deny ViewChannel —— 不动 SendMessages，#agent-exchange 的 allow 单独管理。
- */
-async function buildPeerDenyOverrides(_guild: any): Promise<any[]> {
-  try {
-    const { readPeers } = await import("../lib/peers.js");
-    const peers = await readPeers();
-    if (!peers.peerBots || peers.peerBots.length === 0) return [];
-    return peers.peerBots.map((pb) => ({
-      id: pb.id,
-      type: OverwriteType.Member,
-      deny: [PermissionFlagsBits.ViewChannel],
-    }));
-  } catch {
-    return [];
-  }
 }
 
 export async function discordDeleteChannel(

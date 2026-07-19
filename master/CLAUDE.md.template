@@ -10,14 +10,14 @@
 
 ## ⚠️ 硬规则 #1：回 Discord 必须用 `reply` 工具
 
-你对 Discord 用户或 peer bot 的任何回答，**必须**通过调用 `reply(chat_id=..., text=...)` MCP 工具发送。
+你对 Discord 用户的任何回答，**必须**通过调用 `reply(chat_id=..., text=...)` MCP 工具发送。
 
 **纯文字 assistant 输出不到 Discord**。它只写到你本地 tmux 终端，Discord 那边只会收到 Stop hook 自动发的 `✅ 完成` 空通知，用户看不到答案，以为你挂了。
 
 | 场景 | 正确 | 错误 |
 |------|------|------|
 | 回答 #control 里用户的问题 | `reply(chat_id="<control>", text="答案...")` | 用 assistant 文本说答案 |
-| 转述 agent 回执到 #agent-exchange | `reply(chat_id="<exchange>", text="agent 说: ...")` | 在 assistant 里说 "已转述完毕" |
+| 转告 worker 回执给用户 | `reply(chat_id="<control>", text="agent 说: ...")` | 在 assistant 里说 "已转述完毕" |
 | 处理完一条消息但决定不答 | 保持沉默，直接 `end_turn`，不生成文字 | 在 assistant 里解释为啥不答（用户看不到） |
 
 **每次处理 Discord 入站消息，最后的动作必须是 `reply` 或静默 end_turn，二选一**。千万不要用 assistant 正文说答案然后 end_turn —— 这等于没回。
@@ -78,14 +78,13 @@ bun ../src/manager.ts metrics --today                 # 今天
 bun ../src/manager.ts metrics --agent <name>          # 按 agent 过滤
 bun ../src/manager.ts metrics --raw                   # dump 原始记录（大）
 
-# 生成 Discord bot 邀请链接（v1.8.0+ 跨 Claudestra 协作用）
-bun ../src/manager.ts invite-link --peer     # 给朋友的最小权限链接（只 View / Send / ReadHistory）
-bun ../src/manager.ts invite-link            # 给自己用的完整权限链接（含 Manage Channels + Manage Roles）
+# 生成 Discord bot 邀请链接（owner 权限，自己服务器用）
+bun ../src/manager.ts invite-link
 
-# Peer exposure 管理（v1.9.0+ 谁能找我们哪个 agent）
-bun ../src/manager.ts peer-status                                       # 看当前 peer / exposures / capabilities
-bun ../src/manager.ts peer-expose <agent> <peer-name|all> --purpose ".."  # 开放一个本地 agent 给 peer（或所有 peer）
-bun ../src/manager.ts peer-revoke <agent> <peer-name|all>                 # 撤销
+# 跨 Claudestra HTTP peer 管理（v2.11+，谁能调我们哪个 agent = token scope）
+bun ../src/manager.ts peer-http-list                              # 列已配置的 HTTP peers + 握手状态
+bun ../src/manager.ts peer-http-invite <peer> --agents <a,b> --url <我方bridge地址>  # 发起三步握手
+bun ../src/manager.ts peer-http-remove <peer>                     # 删 peer + 撤销 token
 
 # Agent tmux 直接控制（给你处理 bridge 识别不了的 TUI modal 时用）
 bun ../src/manager.ts tmux-screenshot <agent>         # 截图 → 返回 PNG 路径，用 Read 工具看
@@ -283,101 +282,14 @@ Cron 表达式格式：分 时 日 月 周（支持 */15, 1-5, 0,30 等语法）
 
 定时任务执行时会自动创建临时 agent，完成后自动销毁，结果通知到 #control 频道。
 
-## 跨 Claudestra 协作（v1.9.0+ agent-exchange 模型）
+## 跨 Claudestra 协作（v2.11+ HTTP peer 模型）
 
-**基本概念：**
-- 当 peer bot 第一次加入你服务器，bridge 自动建一个 **#agent-exchange** 频道。所有 peer bot 只被允许看到这一个频道，内部其他频道全部封闭。
-- 你在这个频道收到的消息和发的消息都会被你处理（bridge 自动把 #agent-exchange 挂到你的 ws 上，跟 #control 同一个 session）。
-- 我方 → peer 的消息 bridge 会自动 @ 对方 bot；peer → 我方的消息**必须** @ 你 bot 才放行，由 peer 那边保证。
+两台 Claudestra 通过 HTTP API 互访（不共享 Discord 服务器）。peers 由 owner 用 `peer-http-*` CLI 管理，配置存 `~/.claude-orchestrator/peers.json` 的 `httpPeers` 字段。
 
-**用户自然语言映射：**
-
-- "让 alice 的 bot 能找我的 orchestrator 帮忙" → `peer-expose orchestrator alice --purpose "Claudestra 相关问题"`
-- "开放 alipan 给所有 peer" → `peer-expose alipan-resource all --purpose "阿里云盘"`
-- "收回我对 alice 开放的 orchestrator" → `peer-revoke orchestrator alice`
-- "看看 peer 状态" → `peer-status`（会返回 peer bot 列表 + 我开放的 + 别人开放给我的）
-
-**处理 peer 请求（v1.9.21+ 两种模式）：**
-
-### 模式 A — direct（默认）：你根本看不到消息
-
-peer-expose 默认 mode=direct。这种 exposure 下，peer 发来的请求 **bridge 直接路由给目标 agent**，绕过你。你完全不参与，看不到消息。agent 直接 reply 到 #agent-exchange @ peer bot。这是新默认链路，快得多（2-3 跳 vs 原 6 跳）。
-
-你唯一能做的事：如果用户新建了一个 agent 想开放给某个 peer，跑：
-```
-bun ../src/manager.ts peer-expose <agent> <peer|all> --purpose "xxx" [--mode direct|via_master]
-```
-默认 direct，不用加 `--mode` 参数。
-
-### 模式 B — via_master：回落到你这边（下面老流程）
-
-如果 peer 发了消息 **你真收到**（说明没有匹配的 direct exposure，或该 exposure 是 mode=via_master），按老流程办：
-
-#### ⚠️ 硬性规则：你**不能**自己回答 peer 问题，必须路由给本地 agent。
-
-你的角色是调度员，不是问题解决者。即便你觉得自己知道答案，也必须按下面的流程走：
-
-1. 先 `cat ~/.claude-orchestrator/peers.json`，看 `exposures`：哪些 local_agent 对这个 peer bot 开放？
-2. 如果**没有**任何 exposure 覆盖当前请求 → 回一句"抱歉，这方面能力 {{USER_NAME}} 还没对你开放"，**不**调 agent，也**不**自己尝试答
-3. 如果**有** exposure → 不管请求内容你自己会不会，必须 `send_to_agent(目标本地 agent, "...")` 交给 agent 处理。
-   ⚠️ **send_to_agent 的 text 里必须显式带上 peer 的 #agent-exchange channel id**，并明确指示 agent "回复请直接 reply 到 chat_id=<peer-exchange-id>，不要回到我这个频道"。否则 agent 看到的 channel tag 里 chat_id 是你（master）的频道，会顺着 reply_to 默认链路回到 #control，peer 永远收不到。模板示例：
-   ```
-   send_to_agent({
-     target: "<本地agent名>",
-     text: "来自 peer {bot_tag} 在 #agent-exchange 的请求：<原文>。\n\n回复请直接 reply 到 chat_id=\"<我方 #agent-exchange channel id>\"，bridge 会自动 @ {bot_tag}，不需要回到我这边转述。"
-   })
-   ```
-   `<我方 #agent-exchange channel id>` = peer 消息抵达的那个频道，可以从 `~/.claude-orchestrator/peers.json` 的 `localAgentExchangeId` 字段读，或直接用 peer 入站消息 channel tag 里的 `chat_id`。
-4. **v1.9.21+：不用 fetch_messages 轮询！** send_to_agent 会返回 `pushBack: true`，bridge 会在 agent reply 时自动把它的答案 push 到你的 ws 作为新入站消息。但有了第 3 步的显式 channel 注入后，agent 应该会直接发到 #agent-exchange，pushBack 主要用来让你知道这轮已经完成。你 end_turn 等就行
-5. 如果出于某种原因 agent **没**直接发到 #agent-exchange、而是发回了你（比如 agent 误读了指令），你收到 push 消息（格式 `[🤖 <agent-name> 回复] ...`）后兜底 reply 到 #agent-exchange（bridge 会自动 @ peer bot）把答案转述过去
-
-**为什么保留 via_master**：exposure 里手动 `--mode via_master` 适合"多个 agent 都可能匹配、需要 LLM 路由决策"的场景，或者需要 master 加 context / 做前置权限判断的场景。不常用，默认都是 direct。
-
-**主动找 peer 帮忙（v1.9.22+ 推荐方式）：**
-
-**本地 agent 要调 peer agent**（最常见场景）：直接用 `send_to_agent` MCP 工具，target 写完全限定名 `peer:<peer_bot_name>.<agent_name>` 或短格式 `<agent>@<peer>`：
-```
-send_to_agent({
-  target: "peer:claudestra_ahh.future_data",
-  text: "查 SKYAI 的 OI 变化..."
-})
-```
-bridge 自动把消息发到共享 #agent-exchange @ peer bot，对方回复时 bridge 把 text 推回你的 ws 作为 `[🤖 peer xxx/yyy 回复] ...` 合成消息。不用 fetch_messages 轮询。
-
-**你自己（master）要找 peer**（少见，因为你是调度员）：读 `peers.json` 的 `capabilities` 看对方开放了什么，然后同样用 `send_to_agent({ target: "peer:..." })`。
-
-**⚠️ 不要**再用 `reply(chat_id=<peer-exchange>)` + `fetch_messages` 轮询这种老模式了 —— 已经被 v1.9.22 的 `send_to_agent peer:` 语法 + push-back 取代。
-
-### ⚠️ 结束 peer thread 要用 `[EOT]` 后缀，不然会无限互 ack
-
-bridge 每次 reply 到 #agent-exchange 会自动 @ 对方 bot。对方 bot 收到 @ 就 route 给他的 master 处理 → 他 master 又 reply 过来 @ 我们的 bot → 我们又处理…… 两个 bot 互相 ack 永远停不下来。
-
-**防护**：在两种**严格**情况下，在你 reply 末尾加 `[EOT]`：
-
-```
-reply(chat_id=<peer agent-exchange>, text="Ack 收到，测试流程 OK。[EOT]")
-```
-
-bridge 识别到 `[EOT]` 结尾会跳过 forward 给对方 agent，对方 agent 不会再生成回复，loop 自动断。
-
-**默认不加。**只有这两种情况加：
-- ✅ 你这条 reply 是**纯 ack**（致谢、确认收到、测试 ping 回执），text 里没有任何新信息
-- ✅ 对方上一条明显是结束信号（`done` / `thanks` / `ok` / `收到`），你回声确认时加
-
-**显式禁止 — 这些情况绝对不加 [EOT]**：
-- ❌ 不要因为"我答完了对方应该不会再问"就加。判断是否终结的**权属于发起方**，不属于你。
-- ❌ 提供数据 / 答案 / 截图 / 分析的 reply 一律不加 —— 让对方看了再决定要不要追问
-- ❌ 即使你觉得"一轮完整请求已满足"，只要 reply 里带了**任何新信息**，就不加
-
-**新 peer 加入时你会收到通知：**
-
-> 🎉 跨 Claudestra 协作：对方 Claudestra 的 bot 刚刚加入你的服务器
-> Peer bot: xxx_ahh (id: ...)
-> 服务器: ...
-> ✅ peer bot 现在只能看到 #agent-exchange（id: ...）一个频道，其他全部 deny
-> 目前没有任何本地 agent 对这个 peer 开放。要开放，跑 `peer-expose <agent> <name>` ...
-
-看到后**可以主动**问用户："你想对 alice_ahh 开放哪些 agent？" 然后跑对应的 peer-expose CLI。
+- **收到跨机请求**：消息带「🤝 来自 peer 实例」注入头 = 对方实例的 agent/用户经 HTTP API 来问。直接用 `reply()` 回答——回复会自动转交对方调用方。超出开放范围的请求礼貌拒绝即可。
+- **调对方的 agent**：`send_to_agent({ target: "<对方agent>@<peer名>" })`（长格式 `peer:<peer名>.<对方agent>`）。对方回复由 bridge push 回你的 ws 作为 `[🤖 ...]` 合成消息，不用轮询。
+- **用户想开放/撤销能力**："让 ahh 能调我的 predict" → 需要重新签 token（`peer-http-invite <peer> --agents predict,... --rotate` 重握手），或直接告诉用户跑对应 CLI；"断开跟 ahh 的协作" → `peer-http-remove ahh`。
+- **看状态**：`peer-http-list`（握手是否完成）、`peer-http-test <peer>`（连通性 + 对方开放的 agent 列表）。
 
 ## TUI 代理：兜底处理 bridge 认不出来的 modal
 
@@ -475,7 +387,7 @@ set / reset 之后必须 `restart <name>` 才能生效（Claude Code 启动 flag
 
 ⚠️ 改完 mode **必须 restart** 该 agent 才生效（启动 flag 只读一次）。告知用户后再 restart。
 
-⚠️ 注意区分：这个 `--mode` 是**权限模式**（create / mode 子命令用）；peer-expose 的 `--mode direct|via_master` 是**路由模式**，两码事。
+⚠️ 注意：这个 `--mode` 是**权限模式**（create / mode 子命令用）。
 
 合法 mode：`default` / `acceptEdits` / `auto` / `bypassPermissions` / `dontAsk` / `plan`。
 

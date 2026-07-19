@@ -16,8 +16,8 @@ Claudestra is a multi-session orchestrator built on top of Claude Code's native 
         │
         ├── deliver(envelope)  ←── v2.0.0 unified routing
         │      ├─ to=local  (ws.send  → channel-server → Claude Code)
-        │      ├─ to=peer   (discordReply → shared #agent-exchange)
-        │      └─ to=user   (discordReply → user's channel)
+        │      ├─ to=user   (discordReply → user's channel)
+        │      └─ to=api    (resolve HTTP waiter + SSE event)
         │
         ├── JSONL watcher                ├── HTTP hooks
         │                                │
@@ -29,7 +29,7 @@ Claudestra is a multi-session orchestrator built on top of Claude Code's native 
 **Message flow (all via `deliver(envelope)` since v2.0.0):**
 
 - **Inbound** — Discord → Bridge's `messageCreate` handler → builds `Envelope{from, to, intent, content, meta}` → `deliver()` → `deliverToLocal` → ws.send to the right Claude Code session.
-- **Outbound reply** — Claude Code calls `reply` MCP tool → channel-server → Bridge's `reply` handler → builds response envelope → `deliver()` → `deliverToUser` / `deliverToPeer` → `discordReply` (chunking / reply_to / files / components).
+- **Outbound reply** — Claude Code calls `reply` MCP tool → channel-server → Bridge's `reply` handler → builds response envelope → `deliver()` → `deliverToUser` / `deliverToApi` → `discordReply` (chunking / reply_to / files / components) or HTTP-waiter resolution.
 - **Agent↔agent** — `send_to_agent` MCP tool → `route_to_agent` handler → builds local→local envelope → `deliver()` → receiver sees `[🤖 来自 X]` prefix (auto-rendered by `renderContentForLocal`).
 - **Streaming tool calls** — Claude Code writes JSONL → `jsonl-watcher` tails + pushes tool summaries (`📖 Read ...`) and assistant text (`💬 ...`) to Discord with 1.5s debounce. On Stop hook, watcher is **drained synchronously** (`drainChannelWatcher`) before marking the status "✅ 完成", so quick one-liners don't get lost between debounce windows.
 
@@ -38,8 +38,8 @@ Claudestra is a multi-session orchestrator built on top of Claude Code's native 
 Every message is described as `{ from: Endpoint, to: Endpoint, intent, content, meta }`. `Endpoint` is a discriminated union:
 
 - `LocalEndpoint{ kind: "local", channelId, ws, agentName?, cwd? }` — one of our Claude Code sessions
-- `PeerEndpoint{ kind: "peer", peerBotId, peerBotName, sharedChannelId }` — another Claudestra bot via shared `#agent-exchange`
 - `UserEndpoint{ kind: "user", userId, channelId, username? }` — Discord human
+- `ApiUserEndpoint{ kind: "api", tokenId, name, peer? }` — HTTP API user (v2.6.0+; `peer` marks an HTTP peer instance, v2.11+)
 
 `intent` is `"request" | "response" | "notification" | "broadcast"`. Request envelopes hang a `PendingReply` + `PendingThread` keyed by the reply-back channel / thread id; response envelopes auto-clear those pendings via `inReplyTo` / `threadId` matching. Stop hooks use thread bookkeeping to close residual pendings and log which `thr_*` just ended.
 
@@ -81,7 +81,7 @@ src/
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
     jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
-    peers.ts             peers.json data model + PeerEvent encode/parse + effective mode
+    peers.ts             peers.json data model (v2.11+ HTTP peers only) + handshake string encode/parse + atomic writes
     principals.ts        v2.6.0+ transport-scoped identity + API token CRUD/scope/rate-limit (~/.claude-orchestrator/principals.json)
     registry.ts          v2.9+ single reader for ~/.claude-orchestrator/registry.json (field normalization incl. cwd/dir compat); manager.ts stays the sole writer
     bg-jobs.ts           v2.7+ Claude Code bg job cleanup recipe: kill → wait daemon quiescent → quarantine job dir → on respawn, roster root-fix (v2.9.1: daemon's ~/.claude/daemon/roster.json workers list is the respawn authority — kill worker + transient daemon + drop the entry, only when no other worker would be affected)
@@ -97,7 +97,7 @@ tests/
   cron.test.ts           Cron parser + scheduler test suite
   jsonl-cost.test.ts     JSONL token-usage rollup
   modal-parser.test.ts   Tmux modal detection
-  peers.test.ts          v2.0.0+ PeerEvent encode/parse + effectivePeerMode
+  http-peer.test.ts      v2.11+ HTTP peer handshake encode/parse + reply extraction
   router.test.ts         v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
   skills.test.ts         SKILL.md discovery
   slash-registry.test.ts Slash command registry per-channel resolution
@@ -126,20 +126,7 @@ SETUP.md                 User-facing installation guide
 
 ### Cross-Claudestra peer collaboration
 
-**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as Discord peers); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The Discord-based flow below still works and remains the fallback when an HTTP peer name doesn't match.
-
-Peers (other Claudestra installs running the same upstream) can share their specialist agents without giving each other SSH / filesystem access. The model evolved significantly in the v1.9.x line; this is the current state as of v1.9.26.
-
-- **Shared `#agent-exchange` channel** — when a peer bot joins your guild, bridge auto-creates a `#agent-exchange` channel and scopes the peer bot to that single channel (View/Send on `#agent-exchange`, Deny View on everything else). All cross-peer communication flows through these shared channels. Broadcast notifications (exposure grant/revoke, hello) travel here as HTML-comment-encoded `PeerEvent` markers that both bridges parse.
-- **Explicit exposure model** — `bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."` selectively opens one of your local agents to a specific peer bot. Stored in `~/.claude-orchestrator/peers.json`. Peer's bridge learns capabilities from the broadcast and caches in its own `peers.json`.
-- **Direct-mode routing (v1.9.21+, default for new exposures)** — peer sends a request to `#agent-exchange`; your bridge looks up `exposures[peer].mode === "direct"` and **injects the message straight into the target agent's WebSocket**, bypassing your master. Agent replies directly to `#agent-exchange` `@ peer-bot`. 6-hop old chain becomes 2-3 hops; both masters drop out of the happy path. Fallback mode `via_master` (the old v1.8–v1.9.0 behavior) is still available via `--mode via_master` for scenarios that need LLM-driven routing.
-- **Symmetric routing (v1.9.22+)** — you `@peer-bot` in `#agent-exchange`: bridge detects you're not `@`-ing our bot, skips forwarding to our master. Peer's bridge receives the event on the foreign `#agent-exchange` and applies the same direct-routing logic on their side. Completes the picture so both directions are fast.
-- **Multi-candidate disambiguation (v1.9.26+)** — if several direct exposures match the peer bot, bridge first tries keyword matching (C: agent name mentioned in message body ⇒ unique match ⇒ route). No unique match ⇒ Discord buttons posted in-channel; user clicks one (D: zero LLM turn, zero master participation).
-- **Cross-peer `send_to_agent`** — agents call `send_to_agent({ target: "peer:<peer_bot_name>.<agent_name>" })` or short `target: "<agent>@<peer>"` to invoke a peer agent. Bridge posts to shared `#agent-exchange` `@ peer bot` and registers a pending-peer-call; peer's reply is push-delivered back to the caller's ws as a synthetic `[🤖 peer X/Y 回复] ...` user message (replacing old fetch-message polling).
-- **Trust model** — simplified "trust transfer": once you `peer-expose` an agent to a peer bot, that peer's humans (who are already in peer's `#agent-exchange`) are trusted transitively. No allowlist sync needed; the peer's channel membership IS the trust boundary.
-- **Push-back replaces polling (v1.9.21+)** — bridge's `route_to_agent` (local) and `handlePeerRouteToAgent` (cross-peer) both record `pendingAgentCalls` / `pendingPeerCalls`. When target posts their reply, bridge synthesizes an internal "message" event to the caller's ws. Callers simply `end_turn` and wait for the synthesized user message, no `fetch_messages` loop needed.
-- **No-reply fallback (v1.9.37+, replaces the old rescue)** — if the agent ends its turn without calling `reply()`, the `jsonl-watcher` has already been streaming any assistant text to Discord as `💬 ...` (debounced 1.5s). On Stop hook, the Bridge synchronously **drains** that watcher (`drainChannelWatcher`): immediately re-polls the jsonl, cancels the debounce timer, and force-flushes the textQueue before marking the status "✅ 完成". The earlier v1.9.21–v1.9.36 "bridge rescue" mechanism (extract text from jsonl + re-post with `[bridge 兜底]` footer) was removed in 1.9.37 because it duplicated whatever the watcher already streamed — they both read the same jsonl and would each post the same text. Rate-limit messages (`You've hit your limit`) are tagged with `⛔` instead of `💬` and the paired `turn_duration` is suppressed so it doesn't look like real thinking time.
-- **`[EOT]` end-of-thread marker** — agent appends `[EOT]` to its final reply when closing a conversation; receiving bridge drops rather than forwards, preventing two bots from ack-looping in `#agent-exchange`.
+**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as local `send_to_agent`); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The old Discord-based peer mechanism (shared exchange channel, exposures, bot-to-bot routing) was removed in v2.11 — HTTP peers are the only cross-instance transport.
 
 ## Runtime commands
 
@@ -167,22 +154,16 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# Cross-Claudestra peer collaboration (v1.9+)
-bun src/manager.ts peer-status                                             # list peer bots + exposures + capabilities
-# v2.11+ HTTP peers (recommended; no Discord dependency — peers talk over the /api/v1 surface directly.
-# Handshake is 3 steps; strings travel over any private channel. Design: docs/design-http-peers.md)
+# Cross-Claudestra peer collaboration — v2.11+ HTTP peers (no Discord dependency;
+# peers talk over the /api/v1 surface directly. Handshake is 3 steps; strings travel
+# over any private channel. Design: docs/design-http-peers.md)
 bun src/manager.ts peer-http-invite <name> --agents <a,b> --url <my-bridge-url> [--force] [--rotate]  # A: print invite string
 bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> [--force]           # B: store A, print receipt
 bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
-# send_to_agent target syntax is unchanged: "<agent>@<peer>" — httpPeers match first, Discord fallback
-
-bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."          # default mode=direct (bridge-level routing)
-bun src/manager.ts peer-expose <agent> <peer> --mode via_master --purpose "..." # legacy: route through master
-bun src/manager.ts peer-revoke <agent> <peer|all>                          # revoke an exposure
-bun src/manager.ts invite-link --peer                                      # generate minimum-permission OAuth URL for peer
+# send_to_agent target syntax: "<agent>@<peer>" or "peer:<peer>.<agent>"
 
 # Versioning
 bun src/manager.ts version   # current version + whether an update is available
@@ -248,7 +229,7 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - The MCP server name (`MCP_NAME`) must match between `claude mcp add`, the channel-server's registration, and the JSONL watcher's tool-filter prefix. It is centralised in `src/bridge/config.ts` and `src/lib/claude-launch.ts`.
 - Agent names are validated against a shell-metacharacter blocklist on create/resume but loosely normalised on kill/restart to keep historical CJK names working.
 - Tool call display is debounced through `WATCHER_CONFIG.debounceMs` (default 1500 ms) to avoid Discord rate limits during bursty tool sequences.
-- **Message routing (v2.0.0+)**: every message-semantic bridge operation (inbound to agent / outbound reply / agent→agent forward / pushback from cross-peer calls / peer-direct and symmetric routes) constructs an `Envelope` and calls `deliver(env)`. The only direct `ws.send({type:"message"...})` / `channel.send({content})` calls outside `deliver` are **UI-class** side effects: the "💭 Thinking" status message with the Interrupt button, LLM-free admin button replies, `notifyMaster` broadcasts, `PeerEvent` announcements, peer→local relay fallback in `tryRouteForeignAgentExchange`, and hook-event text notifications. Everything that an agent ends up seeing in its MCP `<channel>` tag goes through `deliver` → `renderContentForLocal`.
+- **Message routing (v2.0.0+)**: every message-semantic bridge operation (inbound to agent / outbound reply / agent→agent forward / pushback from HTTP-peer calls) constructs an `Envelope` and calls `deliver(env)`. The only direct `ws.send({type:"message"...})` / `channel.send({content})` calls outside `deliver` are **UI-class** side effects: the "💭 Thinking" status message with the Interrupt button, LLM-free admin button replies, `notifyMaster` broadcasts, and hook-event text notifications. Everything that an agent ends up seeing in its MCP `<channel>` tag goes through `deliver` → `renderContentForLocal`.
 - **`channel-server` reconnect (v1.9.36+)**: on WebSocket close, the channel-server only exits when the bridge sends an explicit "replaced" signal (another connection took over the same channel). Plain `code 1000` (bridge restart) is treated as a transient disconnect and triggers exponential-backoff reconnect, so `pm2 restart discord-bridge` no longer orphans every agent's MCP connection.
 
 ## Contributing tips
@@ -264,4 +245,4 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - Admin buttons that should skip the LLM go in `bridge/management.ts`. Add the `id` to both `handleMgmtButton` and the relevant panel builder.
 - Before shipping, run `bun test` and `bun build src/<entry>.ts --target=bun` for each entry point (`bridge`, `channel-server`, `manager`, `launcher`, `cron`, `setup`) to catch type errors quickly.
 - Test suite (`bun test`) currently exercises pure logic (cron parser, JSONL cost rollup, tmux modal parser, peers.ts encode/parse, router.ts envelope helpers, skills discovery, slash-registry). `bridge.ts` itself has no isolated unit tests because of its Discord-client + ws + peers.json coupling — live verification through a second Claude Code session in a sandbox Discord server is the coverage there.
-- New outbound Discord messages (reply, notification, forward) should build an `Envelope` and call `deliver()` rather than calling `discordReply` / `channel.send` directly. `renderContentForLocal` + `renderPeerDirectHeader` + `renderAgentExchangeToMasterHeader` centralise header rendering; don't hand-inject headers in call sites.
+- New outbound Discord messages (reply, notification, forward) should build an `Envelope` and call `deliver()` rather than calling `discordReply` / `channel.send` directly. `renderContentForLocal` centralises header rendering; don't hand-inject headers in call sites.

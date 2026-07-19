@@ -176,11 +176,7 @@ const clients = new Map<string, ClientInfo>();
  * pending。deliverToLocal 在 intent=request 时挂一条；reply handler 成功时清对
  * 应 chatId 的条目；Stop hook 兜底清所有匹配 ws 的残留条目（防止泄漏）。
  *
- * intendedReplyChannel 可能跟接收消息的 channel 不同！
- *   - via_master：消息进 #agent-exchange 但 CONTROL 和 #agent-exchange 都行
- *     （master 用同一个 ws 处理两个 channel），intended = #agent-exchange
- *   - direct：peer 消息进 #agent-exchange，路由到 agent 的 ws，agent 应该 reply
- *     回 #agent-exchange @ peer bot —— intended = #agent-exchange，target 是 agent
+ * intendedReplyChannel = 回复应该发回的 channel（通常就是消息来源 channel）。
  */
 interface PendingReply {
   msgId: string;
@@ -211,30 +207,15 @@ const pendingThreads = new Map<string, PendingThread>();
 
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
-let _cachedAgentExchangeId = "";
-async function getLocalAgentExchangeId(): Promise<string> {
-  if (_cachedAgentExchangeId) return _cachedAgentExchangeId;
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const p = await readPeers();
-    _cachedAgentExchangeId = p.localAgentExchangeId || "";
-  } catch { /* non-critical */ }
-  return _cachedAgentExchangeId;
-}
-
 // ============================================================
 // v2.6.0+ C2-1：master 身份判断集中（原先 20 处散落的
 // `=== CONTROL_CHANNEL_ID` 比较）。master 的"身份"目前实现为
-// 「#control 频道的 agent」（ws 同时挂 #control 和 #agent-exchange 两个 id）。
-// 将来引入非 Discord 的 master 标识时只改这三个 helper。
+// 「#control 频道的 agent」。将来引入非 Discord 的 master 标识时只改这几个 helper。
 // ============================================================
 
-/** channelId 是否指向 master（#control 或 我方 #agent-exchange） */
-async function isMasterChannel(channelId: string): Promise<boolean> {
-  if (!channelId) return false;
-  if (channelId === CONTROL_CHANNEL_ID) return true;
-  const ex = await getLocalAgentExchangeId();
-  return !!ex && channelId === ex;
+/** channelId 是否指向 master（#control） */
+function isMasterChannel(channelId: string): boolean {
+  return !!channelId && channelId === CONTROL_CHANNEL_ID;
 }
 
 /** 该 ws 是否 master 的连接 */
@@ -260,10 +241,9 @@ interface PendingAgentCall {
   targetName: string;
   /**
    * caller 发起 send_to_agent 时手头正在处理的 inbound 请求的
-   * intendedReplyChannel —— 常见是 #agent-exchange（user 或 peer 在那里 @ 了
-   * caller），也可能是 caller 自己的频道。target 回来之后，push 给 caller 的
-   * 合成消息 meta.chat_id 用这个值，避免 caller LLM 误用 target 的私频当作
-   * 回复目标。没有正在处理的请求时是 undefined。
+   * intendedReplyChannel —— 通常是 caller 自己的频道。target 回来之后，push
+   * 给 caller 的合成消息 meta.chat_id 用这个值，避免 caller LLM 误用 target
+   * 的私频当作回复目标。没有正在处理的请求时是 undefined。
    */
   originalReplyChannel?: string;
   /**
@@ -276,42 +256,6 @@ interface PendingAgentCall {
   ts: number;
 }
 const pendingAgentCalls = new Map<string, PendingAgentCall>();
-
-/**
- * v1.9.22+ 跨 peer 的 send_to_agent：caller 发给 peer agent 后，bridge 需要
- * 在 peer bot 下一次在 shared channel reply 时，把 text push 回 caller ws。
- * 跟 pendingAgentCalls 对称。key = shared channel id（我们发消息过去的 channel）。
- */
-interface PendingPeerCall {
-  callerChannelId: string;
-  callerWs: ServerWebSocket<unknown>;
-  callerName: string;
-  peerBotId: string;
-  peerBotName: string;
-  peerAgent: string;
-  /** v2.0.12+ 跟 PendingAgentCall.expecting 对称，跨 peer 也支持。 */
-  expecting?: string;
-  ts: number;
-}
-const pendingPeerCalls = new Map<string, PendingPeerCall>();
-
-/**
- * v2.0.13+ 跨 peer 入站请求追踪。peer 路由进来一条 #agent-exchange 消息给我方某个
- * agent 处理时（direct mode），记录 (本地 agent channelId) → (peer 共享频道 id +
- * peer 信息)。如果该 agent 这一轮忘了用 reply() 工具答到 peer 的 #agent-exchange，
- * 而是只在 assistant 文字里说了，watcher 会 drain 到本地 agent channel —— peer 完全
- * 看不见。Stop hook 用这个 map 在 drain 后 forward 到 peer 共享频道兜底，避免消息
- * 沉默丢失。reply 工具命中 sharedChannelId 时清掉这个 entry（agent 自己做对了）。
- */
-interface PendingPeerInbound {
-  localAgentName: string;
-  sharedChannelId: string;     // peer 那边的 #agent-exchange channel id
-  peerBotId: string;
-  peerBotName: string;
-  isForeign: boolean;          // foreign exchange (对方 guild) vs local exchange
-  ts: number;
-}
-const pendingPeerInbound = new Map<string, PendingPeerInbound>();
 
 /**
  * v2.0.16+ inter-agent 消息看门狗。每当 bridge 把一条来自**另一个 agent / master**
@@ -335,9 +279,9 @@ interface PendingInterAgentMsg {
 }
 const pendingInterAgentMsg = new Map<string, PendingInterAgentMsg>();
 
-// v2.4.16+ 清掉某个 channel 上挂着的所有 inter-agent / cross-peer pending。
+// v2.4.16+ 清掉某个 channel 上挂着的所有 inter-agent pending。
 // 用户在该 channel 打字（messageCreate）或者 agent 被 kill 时调，避免后续 Stop
-// hook 触发的 drain兜底 / watchdog nudge / peer pushback 把 agent 拉回到无用的
+// hook 触发的 drain兜底 / watchdog nudge / pushback 把 agent 拉回到无用的
 // 互相 ack 链里。返回清掉条数（仅用于日志）。
 function clearInterAgentPendingsForChannel(channelId: string): number {
   let n = 0;
@@ -350,14 +294,6 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
     }
   }
   if (pendingInterAgentMsg.delete(channelId)) n++;
-  // pendingPeerCalls key=对方 shared channel；同时 caller 端也要 match
-  for (const [cid, p] of pendingPeerCalls.entries()) {
-    if (p.callerChannelId === channelId) {
-      pendingPeerCalls.delete(cid);
-      n++;
-    }
-  }
-  if (pendingPeerInbound.delete(channelId)) n++;
   return n;
 }
 
@@ -366,9 +302,7 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
 // v2.0.0+ 路由抽象
 // ============================================================
 import type {
-  Endpoint as RouterEndpoint,
   LocalEndpoint as RouterLocalEndpoint,
-  PeerEndpoint as RouterPeerEndpoint,
   UserEndpoint as RouterUserEndpoint,
   ApiUserEndpoint as RouterApiUserEndpoint,
   Envelope as RouterEnvelope,
@@ -391,9 +325,9 @@ import {
 
 /**
  * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 /
- * reply / send_to_agent / pushback / peer direct 的各 variant）都走这一个函数。
- * 内部按 to.kind 派发（local ws inject / peer discord send / user discord send），
- * 权限检查 + 状态追踪 + @ mention / header 渲染全在一处管。
+ * reply / send_to_agent / pushback）都走这一个函数。
+ * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），
+ * 状态追踪 + @ mention / header 渲染全在一处管。
  */
 async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
   // 0. intent-aware 预处理：response 消息先清对应 pending
@@ -407,43 +341,11 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
     pendingThreads.delete(env.meta.threadId);
   }
 
-  // 1. 权限检查：peer → 本地具体 agent 的情况要查 peers.json exposures。
-  //    peer → master 走 #agent-exchange 调度永远放行 —— master 是网关角色，
-  //    它自己看 agent-exchange header 里的可选 exposures 列表去做调度决策。
-  //    (master 的 client 在 clients 里 channelId 可能是 CONTROL 或 agent-exchange
-  //    id，两个都算 master。)
-  if (env.from.kind === "peer" && env.to.kind === "local") {
-    const toIsMaster = await isMasterChannel(env.to.channelId);
-    if (!toIsMaster) {
-      try {
-        const { readPeers } = await import("./lib/peers.js");
-        const peers = await readPeers();
-        const targetAgentName = env.to.agentName;
-        if (!targetAgentName) {
-          return { envelope: env, outcome: { kind: "dropped", reason: "local non-master target has no agentName" } };
-        }
-        const exposed = peers.exposures.some((e) =>
-          (e.localAgent === targetAgentName || `agent-${e.localAgent}` === targetAgentName) &&
-          (e.peerBotId === env.from.peerBotId || e.peerBotId === "all")
-        );
-        if (!exposed) {
-          return { envelope: env, outcome: { kind: "dropped", reason: `${targetAgentName} not exposed to peer ${env.from.peerBotName}` } };
-        }
-      } catch (e) {
-        console.error("deliver permission check 异常:", e);
-        return { envelope: env, outcome: { kind: "error", error: e as Error } };
-      }
-    }
-  }
-
-  // 2. 按目标类型派发
+  // 1. 按目标类型派发
   try {
     switch (env.to.kind) {
       case "local":
         return await deliverToLocal(env, env.to);
-      case "peer":
-        // v2.11: Discord peer 已移除,PeerEndpoint 仅余类型兼容(commit 2 清理)
-        return { envelope: env, outcome: { kind: "dropped", reason: "discord peer transport removed (v2.11)" } };
       case "user":
         return await deliverToUser(env, env.to);
       case "api":
@@ -557,9 +459,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   // 回复」——Stop 不该 @ 用户(与 Discord peer pushback 的 set "agent" 对齐,
   // review 2026-07-19 #2)
   if (env.meta.triggerKind === "peer_http") lastMessageSource.set(to.channelId, "agent");
-  // chat_id 是 agent reply() 时要传回的 id：消息从哪个 Discord 频道来，回复就发回那里。
-  // direct route 场景下 from 是 peer 在 #agent-exchange，agent 被"偷偷"路由到自己私频，
-  // 但 reply 目标必须还是 #agent-exchange，不是 agent 的私频。
+  // chat_id 是 agent reply() 时要传回的 id：消息从哪个会话来，回复就发回那里。
   const replyBackChannel = resolveReplyBackChannel(env);
   const meta: Record<string, string> = {
     chat_id: replyBackChannel,
@@ -572,12 +472,6 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   if (env.from.kind === "user") {
     meta.user = env.from.username ?? "";
     meta.user_id = env.from.userId;
-  } else if (env.from.kind === "peer") {
-    meta.user = env.from.peerBotName;
-    meta.user_id = env.from.peerBotId;
-    meta.peer = "true";
-    meta.peer_bot_id = env.from.peerBotId;
-    meta.peer_bot_name = env.from.peerBotName;
   } else if (env.from.kind === "local") {
     meta.user = env.from.agentName ?? "agent";
     meta.user_id = "agent";
@@ -667,9 +561,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
       });
     }
     // v2.0.16+: 来自另一个 agent / master 的消息（send_to_agent / pushback /
-    // reply→别agent forward 都经这里），记看门狗 pending。peer 消息（from.kind=peer）
-    // 不记 —— 那走 PEER DIRECT header，有 reply([DIRECT]) 的明确指引，且回路是
-    // pendingPeerInbound 那条线。
+    // reply→别agent forward 都经这里），记看门狗 pending。
     // v2.4.16+: meta.skipInterAgentWatchdog=true 时不挂 watchdog（oneShot 的 fire
     // -and-forget 场景，caller 不期待回应，watchdog 没必要打扰 target）。
     if (
@@ -694,39 +586,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
  *  消息没有"发回哪里"的语义，返回空串，调用方如果需要 chat_id 自己兜底。*/
 function resolveReplyBackChannel(env: RouterEnvelope): string {
   if (env.from.kind === "user") return env.from.channelId;
-  if (env.from.kind === "peer") return env.from.sharedChannelId;
   if (env.from.kind === "local") return env.from.channelId;
   // v2.6.0+ API 用户：虚拟 chat_id（统一 keyspace D7），agent reply 原样回传
   if (env.from.kind === "api") return `api:${env.from.tokenId}`;
   return "";
-}
-
-/**
- * 投递到 peer —— 通过共享 #agent-exchange 发消息。
- * `env.meta.skipAutoMention === true`（agent 已自己写好 @ 或 [DIRECT] 语境）
- * 直接发原文；否则 ensurePeerMentions 扫频道里所有 peer bot 自动 @ 它们。
- * 支持 chunking / reply_to / files / components（通过 meta 透传 discordReply）。
- */
-async function deliverToPeer(env: RouterEnvelope, to: RouterPeerEndpoint): Promise<RouterDelivery> {
-  let text = env.content;
-  if (!env.meta.skipAutoMention) {
-    text = await ensurePeerMentions(discord, to.sharedChannelId, text);
-  }
-  const finalSuffix = env.meta.final ? (text.trimEnd().endsWith("[EOT]") ? "" : " [EOT]") : "";
-  text = `${text}${finalSuffix}`;
-  try {
-    const ids = await discordReply(
-      discord,
-      to.sharedChannelId,
-      text,
-      env.meta.replyTo,
-      env.meta.components as any,
-      env.meta.files,
-    );
-    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids } };
-  } catch (e) {
-    return { envelope: env, outcome: { kind: "error", error: e as Error } };
-  }
 }
 
 /**
@@ -826,9 +689,8 @@ async function forwardReplyToAgentClaude(
 }
 
 /**
- * 给本地 agent ws 注入的消息渲染 content。根据 envelope 的 from/to +
- * 频道上下文（是不是 #agent-exchange、是不是指向 master）自动选对应的
- * header 模板。这一处统一做，messageCreate 不再就地拼 header。
+ * 给本地 agent ws 注入的消息渲染 content。根据 envelope 的 from 类型自动选
+ * 对应的 header 模板。这一处统一做，messageCreate 不再就地拼 header。
  */
 async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
   const from = env.from;
@@ -882,175 +744,7 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
     ].join("\n");
   }
 
-  // inbound（user / peer）—— 要不要加 header 取决于两件事：
-  // (1) 源 Discord 频道是不是我们的 #agent-exchange
-  // (2) 目标是不是 master（= 走 send_to_agent 调度）还是具体 agent（= direct）
-  //
-  // master ws 同时注册了 #control 和 #agent-exchange 两个 channel id（都指向同
-  // 一个 ws），所以 to.channelId 是这两个之一都算"到 master"。
-  const fromChannelId = from.kind === "user" ? from.channelId : from.sharedChannelId;
-  const localAgentExchangeId = await getLocalAgentExchangeId();
-  const isAgentExchange = !!localAgentExchangeId && fromChannelId === localAgentExchangeId;
-  const isMaster = env.to.kind === "local" && (await isMasterChannel(env.to.channelId));
-
-  if (isAgentExchange && isMaster) {
-    // 我方 #agent-exchange → master：master 的职责是挑 agent 再 send_to_agent，不是自答
-    return await renderAgentExchangeToMasterHeader(env);
-  }
-
-  if (from.kind === "peer" && env.to.kind === "local" && env.to.agentName && !isMaster) {
-    // peer → 具体 agent（非 master）→ direct route 头。源频道可能是：
-    //   - 我方 #agent-exchange（inline direct / button local 走这条）
-    //   - 对方 guild 的 foreign exchange（对称直连 / button foreign 走这条）
-    // renderPeerDirectHeader 内部根据 sharedChannelId 是否等于 localAgentExchangeId
-    // 决定走 "local reply 回 #agent-exchange" 还是 "foreign reply + [DIRECT] + @发起人"。
-    return await renderPeerDirectHeader(env, from);
-  }
-
-  // 其他情况（user/peer 在 agent 自己的频道 / 没命中上面的条件）原样投递
-  return env.content;
-}
-
-/**
- * 生成 peer 直连 agent 的 header。两种 variant：
- *  - **local**（from.sharedChannelId === 我方 #agent-exchange id）：peer 在我们
- *    自己的 #agent-exchange @ 我们 → 路由到 exposed agent。reply 直接回到我方
- *    #agent-exchange，bridge 的 ensurePeerMentions 会自动补 @ peer bot。
- *  - **foreign**（from.sharedChannelId 来自对方 guild 的 exchange）：我方 bot 在
- *    对方 guild 被 @，路由到我方 exposed agent。reply 回到对方 exchange，要用
- *    `[DIRECT]` 标记 + @ 实际发起人（meta.sourceUserId），避免自动 @ 对方 bot
- *    造成对方 LLM 被唤醒。
- */
-async function renderPeerDirectHeader(
-  env: RouterEnvelope,
-  from: RouterPeerEndpoint,
-): Promise<string> {
-  const to = env.to as RouterLocalEndpoint;
-  const targetAgentName = to.agentName ?? "agent";
-  const localAgentExchangeId = await getLocalAgentExchangeId();
-  const isForeign = !!localAgentExchangeId && from.sharedChannelId !== localAgentExchangeId;
-  const userName = process.env.USER_NAME || "owner";
-  const sourceUserId = env.meta.sourceUserId;
-  const sourceMention = sourceUserId ? `<@${sourceUserId}>` : `<@${from.peerBotId}>`;
-
-  let purpose = "（无描述）";
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const peers = await readPeers();
-    const exposure = peers.exposures.find((e) =>
-      (e.localAgent === targetAgentName || `agent-${e.localAgent}` === targetAgentName) &&
-      (e.peerBotId === from.peerBotId || e.peerBotId === "all")
-    );
-    if (exposure?.purpose) purpose = exposure.purpose;
-  } catch { /* non-critical */ }
-
-  if (isForeign) {
-    return [
-      `🤝 PEER DIRECT REQUEST (对称路由) — bridge 把这条来自**对方 guild** #agent-exchange 的请求直接路由给你处理`,
-      ``,
-      `来源：peer bot **${from.peerBotName}** (id: \`${from.peerBotId}\`) 的 shared 频道 (\`${from.sharedChannelId}\`)`,
-      `你被 expose 的理由：${purpose}`,
-      ``,
-      `**最终动作必须是**：\`reply(chat_id="${from.sharedChannelId}", text="[DIRECT] ${sourceMention} <你的答案>")\``,
-      `- **text 一定要以 \`[DIRECT]\` 开头** —— bridge 识别到会 strip 掉这个标记并跳过自动 @ 对方 bot（否则对方 bot 会被唤醒跑一轮 LLM）`,
-      `- **一定要在 text 里写 ${sourceMention} @ 发起人**，这样发起人的 Discord 能收到 push`,
-      `- **\`[EOT]\` 默认不加**。只有当你这条 reply 是**纯 ack**（致谢/确认/测试回执，无新信息），或对方明显发了结束信号（done/thanks/ok）才在末尾加。提供数据/答案的 reply 一律不加，让发起方决定要不要追问。`,
-      `- 不要 reply 到自己 channel；不要 send_to_agent 套娃；不要联系 master`,
-      `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${userName} 或其 master" 也行`,
-      ``,
-      `---`,
-      `原始消息：`,
-      env.content,
-    ].join("\n");
-  }
-
-  return [
-    `🤝 PEER DIRECT REQUEST — bridge 直接把这条来自 #agent-exchange 的 peer 请求路由给你处理`,
-    ``,
-    `来源：peer bot **${from.peerBotName}** (id: \`${from.peerBotId}\`) 在 #agent-exchange (\`${from.sharedChannelId}\`)`,
-    `你被 expose 的理由：${purpose}`,
-    ``,
-    `**最终动作必须是**：\`reply(chat_id="${from.sharedChannelId}", text="<你的答案>")\``,
-    `- bridge 会自动在你 reply 前 @ peer bot，不用自己加 \`<@id>\``,
-    `- **\`[EOT]\` 默认不加**。只有当你这条 reply 是**纯 ack**（致谢/确认/测试回执，无新信息），或对方明显发了结束信号（done/thanks/ok）才在末尾加。提供数据/答案的 reply 一律不加，让发起方决定要不要追问。`,
-    `- 不要 reply 到自己 channel，没人读；不要 send_to_agent 套娃，不要找 master`,
-    `- 如果你觉得这个请求你处理不了，reply 一句"请找 ${userName} 或其 master" 也行`,
-    ``,
-    `---`,
-    `原始消息：`,
-    env.content,
-  ].join("\n");
-}
-
-/**
- * 生成 #agent-exchange → master 的调度 header。
- * - peer 发来但这个 peer 没 exposures：polite refusal 模板
- * - 有 exposures（peer 匹配的 / user 看全部）：AGENT-EXCHANGE ROUTING 模板 + exposures 列表
- */
-async function renderAgentExchangeToMasterHeader(env: RouterEnvelope): Promise<string> {
-  const from = env.from;
-  const isPeer = from.kind === "peer";
-  const senderName = isPeer
-    ? (from as RouterPeerEndpoint).peerBotName
-    : (from as RouterUserEndpoint).username || "用户";
-  const senderKind = isPeer ? `peer bot ${senderName}` : `用户 ${senderName}`;
-  const replyChannelId = isPeer
-    ? (from as RouterPeerEndpoint).sharedChannelId
-    : (from as RouterUserEndpoint).channelId;
-
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const peers = await readPeers();
-    const relevant = peers.exposures.filter((e) =>
-      isPeer
-        ? (e.peerBotId === (from as RouterPeerEndpoint).peerBotId || e.peerBotId === "all")
-        : true
-    );
-
-    // peer 发来但没对它开放任何 agent：让 master 礼貌拒绝
-    if (relevant.length === 0 && isPeer) {
-      return [
-        `⚠️ PEER REQUEST FROM ${senderName} — NO EXPOSURES DEFINED`,
-        ``,
-        `你还没有对这个 peer 开放任何本地 agent。礼貌回一句"${process.env.USER_NAME || "User"} 还没对你开放任何 agent，请让他 peer-expose 后再试"，结束本轮。**不要**自己回答 peer 问题。`,
-        ``,
-        `---`,
-        `原始消息：`,
-        env.content,
-      ].join("\n");
-    }
-
-    // 有可用 exposures：列出来让 master 挑一个调度
-    if (relevant.length > 0) {
-      const exposureList = relevant
-        .map((e) => `  - ${e.localAgent}${e.purpose ? ` (用途: ${e.purpose})` : ""}`)
-        .join("\n");
-      return [
-        `🚨 AGENT-EXCHANGE 消息 FROM ${senderKind} — YOU MUST ROUTE, NOT ANSWER`,
-        ``,
-        `这条消息来自 #agent-exchange 频道，需要路由给本地 agent，而不是你自己回答。可选 agent：`,
-        exposureList,
-        ``,
-        `步骤：`,
-        `1. 挑跟请求最匹配的 agent`,
-        `2. \`send_to_agent(target="<agent 名字>", text="来自 ${senderKind} 的请求：<原文>")\``,
-        `3. fetch_messages 轮询对应 channelId 等回复（首次 15s sleep，之后每 10s 轮询，最多 5 次）`,
-        `4. 拿到 agent 回复后用 \`reply(chat_id="${replyChannelId}", text="...")\` 转述${isPeer ? "给 peer（bridge 会自动 @ 对方 bot）" : "给用户"}`,
-        ``,
-        `🚫 不要自己回答，即便你觉得你知道答案。这个频道的语义就是"agent 间协作"，你只做调度。`,
-        ``,
-        `⚠️ **最后一步必须是 \`reply\` 工具调用**。纯文字输出只到你本地终端，Discord 看不到，用户只会收到 Stop 的空 "✅ 完成" 通知。没调 reply = 没回。`,
-        ``,
-        `---`,
-        `原始消息：`,
-        env.content,
-      ].join("\n");
-    }
-  } catch (e) {
-    console.error("agent-exchange header 渲染失败:", e);
-  }
-
-  // 失败兜底：原样投递，master 自己看着办
+  // 其他情况（user 在 agent 自己的频道）原样投递
   return env.content;
 }
 
@@ -1068,7 +762,7 @@ const discord = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,       // v1.8.4+: guildMemberAdd 事件，peer bot 加入通知
+    GatewayIntentBits.GuildMembers,       // v1.8.4+: guildMemberAdd 事件（bot 加入日志）
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
@@ -1513,11 +1207,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
-  // v1.9.16+: peer 消息以 [EOT] 结尾 → "本轮结束，不需要再回复"。
-  // 解决 #agent-exchange 两边 bot 互相 ack 死循环的问题（每次 reply 会自动 @ 对方 bot，
-  // 对方又 route 给 master 处理，master 又 reply... 无限）。
-  // 约定：agent 想主动结束 thread 时在 reply 末尾写 `[EOT]`。收到端 bridge 识别到就
-  // 直接不 forward 给本地 agent，Discord 里消息仍可见（带 [EOT] 尾巴做人类可读的标记）。
   // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
   {
     try {
@@ -1533,9 +1222,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     } catch { /* non-critical */ }
 
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
-    // 的所有 inter-agent / cross-peer pending 一并清掉，否则它们会在下一轮 Stop
-    // hook 触发 drain兜底 / nudge / 跨 peer pushback，把用户刚说的 "停下来" 拽回
-    // agent-to-agent 链里去。
+    // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
+    // drain兜底 / nudge，把用户刚说的 "停下来" 拽回 agent-to-agent 链里去。
     const cleared = clearInterAgentPendingsForChannel(channelId);
     if (cleared > 0) {
       console.log(`🧹 user 消息到达 → 清掉 ${cleared} 条 inter-agent pending (channel=${channelId})`);
@@ -1579,10 +1267,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     meta.attachment_count = String(attachmentPaths.length);
     meta.attachments = attachmentPaths.join(";");
   }
-  // v2.0.0 Phase 3b: #agent-exchange → master 的 header 注入搬进 renderContentForLocal，
-  // 这里不再就地拼 content。direct 路由（peer → 指定 agent）的 PEER DIRECT header 还在
-  // 下面 direct-route 分支里拼，phase 3b2 再搬进去。
-
   // 记录触发源:人类消息 = "user"(下游 Stop 发完成 @)。写给共享同一 ws 的全部 channel。
   for (const [cid, info] of clients.entries()) {
     if (info.ws === client.ws) {
@@ -1590,10 +1274,9 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     }
   }
 
-  // v2.0.0 Phase 3：统一走 deliver(envelope)。所有 header 注入（agent-exchange
-  // 调度 / PEER DIRECT / no-exposures 拒绝）都在 renderContentForLocal 里做，
-  // messageCreate 不再碰 content。只负责：
-  //   - decide from / to（包括 direct route 时把 to 换成具体 agent、带 agentName）
+  // v2.0.0 Phase 3：统一走 deliver(envelope)。header 注入都在
+  // renderContentForLocal 里做，messageCreate 不再碰 content。只负责：
+  //   - decide from / to
   //   - 填原始 content（strip mention 后的纯文本）+ attachments
   //   - 交给 deliver
   const from: RouterUserEndpoint = { kind: "user", userId: msg.author.id, channelId, username: msg.author.username };
@@ -1636,45 +1319,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 });
 
 // ============================================================
-// Peer 发现：bot 被邀请 / 别的 bot 加入
+// 外部 guild 事件通知（bot 被邀请 / 频道权限变化）
 // ============================================================
-
-// 工具：reply 到一个跟 peer bot 共享的频道时，自动在消息正文前加上对所有 peer bot 的 @，
-// 保证对方 bridge 能识别"这条是给它的"。已经带上的 id 不重复加。
-async function ensurePeerMentions(discord: Client, channelId: string, text: string): Promise<string> {
-  try {
-    const ch = await discord.channels.fetch(channelId).catch(() => null);
-    if (!ch || !("guild" in ch) || !(ch as any).guild) return text;
-    const guild = (ch as any).guild;
-    const ownBotId = getBotUserId();
-    // 列频道成员里的 peer bot。
-    // v1.9.36+: members.fetch 有时在 bridge 刚启动、cache 冷时会卡几十秒/永远（Discord
-    // 响应慢 / rate limit / gateway 还没 ready）。加 3s 超时兜底：fetch 超时就退化成
-    // 用当前 cache，宁可少 @ 一两个 peer bot 也不能让整个 reply handler 卡死。
-    const fetchWithTimeout = Promise.race([
-      guild.members.fetch({ cache: true }).catch(() => null),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
-    ]);
-    const members = (await fetchWithTimeout) ?? guild.members.cache;
-    if (!members) return text;
-    const peerBots: string[] = [];
-    for (const [, m] of members) {
-      if (!m.user?.bot) continue;
-      if (m.user.id === ownBotId) continue;
-      // 只有对该频道有 View Channel 权限的 bot 才算真的在场
-      const perms = (ch as any).permissionsFor?.(m);
-      if (perms && !perms.has("ViewChannel")) continue;
-      peerBots.push(m.user.id);
-    }
-    if (peerBots.length === 0) return text;
-    const missing = peerBots.filter((id) => !text.includes(`<@${id}>`) && !text.includes(`<@!${id}>`));
-    if (missing.length === 0) return text;
-    const prefix = missing.map((id) => `<@${id}>`).join(" ");
-    return `${prefix} ${text}`;
-  } catch {
-    return text;
-  }
-}
 
 // 工具：往 master 控制频道发一条通知（系统广播，bridge → user 信道）
 async function notifyMaster(content: string): Promise<void> {
@@ -1806,116 +1452,12 @@ discord.on("channelUpdate", async (oldCh: any, newCh: any) => {
 
 // 别的 bot（不是我方）加入了我的 guild
 discord.on("guildMemberAdd", async (member) => {
-  // v2.11: Discord peer 机制已移除——bot 加入不再建 #agent-exchange/scope 权限。
+  // v2.11: Discord peer 机制已移除——bot 加入不再建共享频道/scope 权限。
   // peer 协作走 HTTP transport(peer-http-invite 三步握手,见 docs/design-http-peers.md)。
   if (!member.user?.bot) return;
   if (member.user.id === getBotUserId()) return;
   console.log(`ℹ️ bot 加入 guild(${member.user.tag})——Discord peer 已移除,如需协作请走 HTTP peer 握手`);
 });
-
-/**
- * 确保 guild 里有一个 #agent-exchange 频道。
- * 优先用 peers.json 里记录的 id；没有或找不到就新建一个。
- */
-async function ensureAgentExchangeChannel(guild: any): Promise<TextChannel | null> {
-  const { readPeers, setLocalAgentExchangeId } = await import("./lib/peers.js");
-  const peers = await readPeers();
-  const EXCHANGE_NAME = process.env.PEER_EXCHANGE_CHANNEL_NAME || "agent-exchange";
-
-  // 1. peers.json 里已有记录 → 确认频道还在
-  if (peers.localAgentExchangeId) {
-    try {
-      const ch = await guild.channels.fetch(peers.localAgentExchangeId).catch(() => null);
-      if (ch) return ch as TextChannel;
-    } catch { /* fall through to create */ }
-  }
-
-  // 2. 搜 guild 看有没有同名频道
-  const existing = guild.channels.cache.find(
-    (c: any) => c.type === 0 && c.name === EXCHANGE_NAME
-  );
-  if (existing) {
-    await setLocalAgentExchangeId(existing.id);
-    return existing as TextChannel;
-  }
-
-  // 3. 建新频道
-  try {
-    const me = guild.members.me;
-    if (!me?.permissions?.has("ManageChannels")) {
-      console.error(`⚠️ 我方 bot 缺 Manage Channels 权限，建不了 #${EXCHANGE_NAME}`);
-      return null;
-    }
-    const ch = await guild.channels.create({
-      name: EXCHANGE_NAME,
-      type: 0,
-      topic: "跨 Claudestra agent 交流专用频道。所有 peer bot 被自动限制只能看到这里。",
-    });
-    await setLocalAgentExchangeId(ch.id);
-    console.log(`✨ 建了 #${EXCHANGE_NAME} (${ch.id})`);
-    return ch as TextChannel;
-  } catch (e) {
-    console.error(`⚠️ 建 #${EXCHANGE_NAME} 失败:`, e);
-    return null;
-  }
-}
-
-/**
- * 把 peer bot scope 到 #agent-exchange：所有其他文字频道 deny View，agent-exchange allow View/Send/ReadHistory。
- */
-async function scopePeerToAgentExchange(
-  member: any,
-  exchange: TextChannel | null
-): Promise<{ ok: boolean; modified: number; total: number; reason?: string }> {
-  try {
-    const guild = member.guild;
-    if (!guild) return { ok: false, modified: 0, total: 0, reason: "没有 guild 上下文" };
-
-    let peerBotRole = guild.roles.cache.find(
-      (r: any) => r.managed && r.tags?.botId === member.id
-    );
-    if (!peerBotRole) {
-      try { await guild.roles.fetch(); } catch { /* non-critical */ }
-      peerBotRole = guild.roles.cache.find(
-        (r: any) => r.managed && r.tags?.botId === member.id
-      );
-    }
-    if (!peerBotRole) {
-      return { ok: false, modified: 0, total: 0, reason: "找不到 peer bot 的 managed role" };
-    }
-
-    const me = guild.members.me;
-    if (!me?.permissions?.has("ManageRoles") || !me.permissions.has("ManageChannels")) {
-      return { ok: false, modified: 0, total: 0, reason: "我方 bot 缺 Manage Roles / Manage Channels 权限" };
-    }
-
-    const channels = guild.channels.cache.filter((c: any) =>
-      c.type === 0 || c.type === 4 || c.type === 5
-    );
-    let modified = 0;
-    for (const [, ch] of channels) {
-      try {
-        if (exchange && ch.id === exchange.id) {
-          // agent-exchange：allow View + Send + ReadHistory
-          await (ch as any).permissionOverwrites.edit(peerBotRole, {
-            ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true,
-          });
-        } else {
-          // 其他频道：deny View
-          await (ch as any).permissionOverwrites.edit(peerBotRole, { ViewChannel: false });
-        }
-        modified++;
-      } catch {
-        // 个别失败不阻塞
-      }
-    }
-    return { ok: true, modified, total: channels.size };
-  } catch (e) {
-    return { ok: false, modified: 0, total: 0, reason: (e as Error).message };
-  }
-}
 
 // ============================================================
 // Interaction 处理（按钮、菜单、Slash Commands）
@@ -2444,19 +1986,13 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         const targetChannelId = id.slice("interrupt:".length);
         console.log(`⚡ 打断按钮点击: channel=${targetChannelId}`);
         try {
-          // master (CONTROL_CHANNEL_ID) 和 #agent-exchange 都 route 到 master:0，
-          // 但它们不在 registry.json 里 —— 直接认定目标是 master:0，不用查 registry
-          const controlId = CONTROL_CHANNEL_ID;
-          const { readPeers } = await import("./lib/peers.js");
-          const peers = await readPeers().catch(() => ({ localAgentExchangeId: "" } as any));
-          const exchangeId = (peers as any).localAgentExchangeId || "";
-          const isMasterChannel =
-            targetChannelId === controlId ||
-            (exchangeId && targetChannelId === exchangeId);
+          // master (CONTROL_CHANNEL_ID) route 到 master:0，
+          // 但它不在 registry.json 里 —— 直接认定目标是 master:0，不用查 registry
+          const isMasterTarget = targetChannelId === CONTROL_CHANNEL_ID;
 
           let targetWindow: string;
           let agentLabel: string;
-          if (isMasterChannel) {
+          if (isMasterTarget) {
             targetWindow = `${MASTER_SESSION}:0`;
             agentLabel = "master";
           } else {
@@ -2579,50 +2115,6 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
           }
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
-        }
-        return;
-      }
-
-      // v1.9.26+: peer direct 消歧义按钮
-      if (id.startsWith("peer_select;")) {
-        try {
-          await interaction.deferUpdate().catch(() => {});
-          // format: peer_select;<local|foreign>;<agentName>;<origChannelId>;<origMsgId>
-          // 用 ; 不用 : 因为 agent 名字里允许 : —— NAME_BLOCKLIST_RE 有 ; 没 :
-          const [, kind, agentName, origChannelId, origMsgId] = id.split(";");
-          if (agentName === "__cancel__") {
-            await interaction.editReply({
-              content: `🚫 已取消。原请求没有路由到任何 agent。想重新请，@ bot 再发一次（可以带 agent 名字走快路径）。`,
-              components: [],
-            }).catch(() => {});
-            return;
-          }
-          // fetch original msg
-          const origCh = await discord.channels.fetch(origChannelId).catch(() => null);
-          if (!origCh || !("messages" in origCh)) {
-            await interaction.editReply({ content: `⚠️ 原频道已不可访问，取消`, components: [] }).catch(() => {});
-            return;
-          }
-          const origMsg = await (origCh as TextChannel).messages.fetch(origMsgId).catch(() => null);
-          if (!origMsg) {
-            await interaction.editReply({ content: `⚠️ 原消息已删除或找不到`, components: [] }).catch(() => {});
-            return;
-          }
-          const routed = await routePeerDirectWithAgent(origMsg, origChannelId, agentName, kind as "local" | "foreign");
-          if (routed) {
-            await interaction.editReply({
-              content: `🎯 已路由到 **${agentName}** 处理，稍等 agent 回复。`,
-              components: [],
-            }).catch(() => {});
-            recordMetric("peer_disambig_click", { channelId: origChannelId, meta: { agent: agentName, kind } });
-          } else {
-            await interaction.editReply({
-              content: `⚠️ 路由失败（agent **${agentName}** 可能不在线或 exposure 已变）`,
-              components: [],
-            }).catch(() => {});
-          }
-        } catch (e) {
-          console.error("peer_select 处理异常:", e);
         }
         return;
       }
@@ -2860,20 +2352,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 
-      // v1.9.0+: master 注册 CONTROL_CHANNEL_ID 时，顺便也把 #agent-exchange 指向同一个 ws
-      // 这样 peer 在 #agent-exchange 里说的话也由 master 处理（不额外建 session）
-      if (msg.channelId === CONTROL_CHANNEL_ID && CONTROL_CHANNEL_ID) {
-        try {
-          const { readPeers } = await import("./lib/peers.js");
-          const peers = await readPeers();
-          if (peers.localAgentExchangeId && peers.localAgentExchangeId !== msg.channelId) {
-            // 注意 cwd 沿用 master 的（因为这一项指向同一个 ws，jsonl 抽取要走同一份）
-            clients.set(peers.localAgentExchangeId, { ws, channelId: peers.localAgentExchangeId, userId: msg.userId, cwd: msg.cwd });
-            console.log(`📌 也把 #agent-exchange (${peers.localAgentExchangeId}) 挂到 master ws`);
-          }
-        } catch { /* non-critical */ }
-      }
-
       // 启动 JSONL watcher（仅用于 tool use 流式展示，空闲检测由 hooks 处理）。
       // create 路径 race：register 先于 manager 落 registry（create 到第 6 步才写），
       // 单次 lookup 必落空且 catch 静默 → 新建 agent 直到下次 bridge/agent 重启都
@@ -2906,38 +2384,17 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       pendingReplies.delete(msg.chatId);
 
       try {
-        let text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text || "";
-
-        // v1.9.34+: [DIRECT] 标记 = 对称 direct 路由的 agent 回复。
-        // strip 掉标记，**跳过 ensurePeerMentions**（不自动 @ 对方 bot），
-        // 因为这条回复是给 foreign exchange 里的 HUMAN user 看的，对方 bot 不需要
-        // 介入（否则对方 bot 看到 @ 会被唤醒跑一轮 LLM，就是 owner 反馈的 bug）。
-        // agent 会在 text 里自己带 `<@user_id>` 让用户收到 push。
-        const isDirectReply = /^\s*\[DIRECT\]\s*/i.test(text);
-        if (isDirectReply) {
-          text = text.replace(/^\s*\[DIRECT\]\s*/i, "");
-        }
+        const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text || "";
 
         // v2.0.0 Phase 4d: reply 从 discordReply 直接调改成构造 envelope 过 deliver。
-        // from=local（发 reply 的这个 agent），to 根据 chat_id 判断 user / peer。
-        // ensurePeerMentions（local exchange 自动 @ 所有 peer bot）移进 deliverToPeer，
-        // reply handler 只负责 strip 标记 + 构造 envelope。isDirectReply → 置
-        // skipAutoMention=true 让 deliverToPeer 跳过自动 @。
+        // from=local（发 reply 的这个 agent），to 根据 chat_id 判断 user / api。
         let fromChannelId = "";
         for (const [chId, info] of clients.entries()) {
           if (info.ws === ws) { fromChannelId = chId; break; }
         }
-        // v2.0.13+: agent 显式 reply() 到 peer 共享频道 = 它自己做对了，
-        // 清掉 pendingPeerInbound 兜底，避免 Stop drain 时双发。
         if (fromChannelId) {
-          const peerInbound = pendingPeerInbound.get(fromChannelId);
-          if (peerInbound && msg.chatId === peerInbound.sharedChannelId) {
-            pendingPeerInbound.delete(fromChannelId);
-            console.log(`✅ peer inbound 已被 agent 正确 reply 到 ${peerInbound.sharedChannelId}，清 pending`);
-          }
           // v2.0.16+: agent 调了 reply()（任意频道）= 它在回应/行动，清掉 inter-agent
-          // 看门狗，Stop hook 不会再 nudge。清这个 ws 名下所有 channel key（master 挂
-          // #control + #agent-exchange 两个）。
+          // 看门狗，Stop hook 不会再 nudge。清这个 ws 名下所有 channel key。
           for (const [chId, info] of clients.entries()) {
             if (info.ws === ws && pendingInterAgentMsg.delete(chId)) {
               console.log(`✅ inter-agent 看门狗清掉（${chId} 调了 reply()）`);
@@ -2963,7 +2420,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             replyTo: msg.replyTo,
             components: msg.components,
             files: msg.files,
-            skipAutoMention: isDirectReply,
           },
         };
         const delivery = await deliver(env);
@@ -2999,7 +2455,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         if (pending) {
           try {
             // v2.0.1+: from.channelId 用 originalReplyChannel（caller 手头的
-            // 原 inbound 请求频道，比如 #agent-exchange）而不是 target 的私频。
+            // 原 inbound 请求频道）而不是 target 的私频。
             // resolveReplyBackChannel 对 from.kind=local 返回 from.channelId，
             // pushback 的 meta.chat_id 就会是原频道，caller LLM 顺手回就对了。
             // 没有 originalReplyChannel 时回退到 msg.chatId（target 私频）—
@@ -3221,7 +2677,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           if (info.ws === ws) { fromChannelId = chId; break; }
         }
         // v2.0.16+: agent 调了 send_to_agent = 它在行动/回应，清掉 inter-agent 看门狗。
-        // 清这个 ws 名下所有 channel key（master 挂 #control + #agent-exchange）。
+        // 清这个 ws 名下所有 channel key。
         for (const [chId, info] of clients.entries()) {
           if (info.ws === ws && pendingInterAgentMsg.delete(chId)) {
             console.log(`✅ inter-agent 看门狗清掉（${chId} 调了 send_to_agent）`);
@@ -3230,21 +2686,20 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // v1.9.22+: 解析 target，支持 peer: 语法：
         //   "future_data"                        → 本地 agent-future_data
-        //   "peer:claudestra_ahh.future_data"    → 跨 peer，经 foreign #agent-exchange
-        //   "future_data@claudestra_ahh"         → 同上（短格式）
+        //   "peer:ahh.future_data"               → 跨 peer（HTTP transport）
+        //   "future_data@ahh"                    → 同上（短格式）
         const rawTarget = (msg.targetName as string) || "";
         const peerMatch = rawTarget.match(/^peer:([^.]+)\.(.+)$/) || rawTarget.match(/^([^@]+)@(.+)$/);
         if (peerMatch) {
           const [, first, second] = peerMatch;
           const peerIdentifier = rawTarget.startsWith("peer:") ? first : second;
           const peerAgentName = rawTarget.startsWith("peer:") ? second : first;
-          // v2.11+: HTTP peer 优先(同名时压过 Discord capability)——peers.json
-          // httpPeers 名字命中即走 HTTP transport,否则落回 Discord 老路
+          // v2.11+: peers.json httpPeers 名字命中即走 HTTP transport
           {
             const { findHttpPeer } = await import("./lib/peers.js");
             const httpPeer = await findHttpPeer(peerIdentifier);
-            // 握手未完成(invite 后等回执的窗口)不硬报错——落回 Discord 老路,
-            // 迁移期同名 Discord peer 继续可用(review 2026-07-19 #6)
+            // 握手未完成(invite 后等回执的窗口,缺 outToken/baseUrl)会落到下面的
+            // 未知 peer 报错,提示里带已配置列表
             if (httpPeer && httpPeer.outToken && httpPeer.baseUrl) {
               const { routeToHttpPeer } = await import("./bridge/http-peer.js");
               const result = routeToHttpPeer(
@@ -3390,7 +2845,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 // ── Hook HTTP 处理 ──
 // channelId → 最近一次完成通知时间戳，用于去抖
 const lastCompletionSent = new Map<string, number>();
-// v1.9.6+: 记录每个 channel 的最近一次消息触发源。如果是 "agent"（peer bot / send_to_agent 转发）
+// v1.9.6+: 记录每个 channel 的最近一次消息触发源。如果是 "agent"（send_to_agent 转发）
 // 那次 turn 结束时就不发完成 @ — 用户没问问题，不用通知他。
 // v2.10+ "api"(owner 2026-07-16「谁发的谁回」):Web 端触发的回合不发 Discord @
 // 推送(内容 mirror 照旧,用户在 Web 上收;未来 Web push 反向同理——Discord 触发
@@ -3449,222 +2904,13 @@ async function inferInboundSourceFromJsonl(channelId: string): Promise<"api" | u
 }
 
 /**
- * v1.9.22+ 对称 direct 路由：我方 bot 在对方 guild 的 foreign #agent-exchange 收到 @
- * 时，判断是否该走直接路由到我方 exposed agent。
- *
- * 信任模型（简化版，按 owner 要求）：
- *   - 消息在"我方 peer bot 能看见的 foreign #agent-exchange"（peerBots[].agentExchangeId）
- *   - @ 了我方 bot
- *   - 我方有唯一匹配 peer 的 direct exposure（按 peerBotId 或 "all"）
- *   - 人类发送者通过"信任传递"合法（peerBots 里登记过这个 peer 的 agentExchangeId，
- *     说明我们之前已经信任这个 peer；peer 在他自己的 #agent-exchange 里放进的人类就
- *     信任是 peer 的 authorized users，不额外鉴权）
- *
- * 返回 true 表示已处理（调用方 early return），false 表示没处理（调用方回到默认流程）。
- */
-/**
- * v1.9.22+ 跨 peer 的 send_to_agent：调用方通过 `peer:X.Y` 或 `Y@X` 把请求
- * 发给 peer 的 agent。bridge 查 peers.json capabilities 验证、reply 到 peer 的
- * #agent-exchange @ 对方 bot 就 OK。同时记 pendingPeerCalls 在 peer bot 回复时
- * 把 text push 回 caller ws（跟 pendingAgentCalls 对称）。
- */
-async function handlePeerRouteToAgent(
-  ws: ServerWebSocket<unknown>,
-  msg: any,
-  fromChannelId: string,
-  fromName: string,
-  peerIdentifier: string,
-  peerAgentName: string,
-) {
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const peers = await readPeers();
-    const peer = peers.peerBots.find((p) => p.id === peerIdentifier || p.name === peerIdentifier || p.name.startsWith(`${peerIdentifier}#`));
-    if (!peer) {
-      ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `未知 peer "${peerIdentifier}"。已登记的 peers: ${peers.peerBots.map((p) => p.name).join(", ") || "(无)"}` }));
-      return;
-    }
-    const cap = peers.capabilities.find((c) => c.peerBotId === peer.id && c.peerAgent === peerAgentName);
-    if (!cap) {
-      ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `peer "${peer.name}" 没有开放 agent "${peerAgentName}"。已开放: ${peers.capabilities.filter((c) => c.peerBotId === peer.id).map((c) => c.peerAgent).join(", ") || "(无)"}` }));
-      return;
-    }
-
-    // peer.agentExchangeId 是**我方 guild** 里的那个 shared #agent-exchange（peer bot 能看到）
-    // —— 跟 peer 通信就发在这。若 capability 带了 peerAgentExchangeId（对方 guild 的），
-    //   优先用那个（更明确），否则 fall back 到 peer.agentExchangeId。
-    const targetChannelId = cap.peerAgentExchangeId || peer.agentExchangeId;
-    if (!targetChannelId) {
-      ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `找不到跟 peer "${peer.name}" 通信的 #agent-exchange channel` }));
-      return;
-    }
-
-    // v2.0.0 Phase 4b': 通过 deliver(envelope) 发给 peer。from=local(caller agent),
-    // to=peer(目标 peer bot, shared channel)。content 里 @ peer bot id 让 bridge
-    // ensurePeerMentions 能识别；deliverToPeer 会再补其他 peer bot 的 @（如果
-    // 频道里还有别的 peer bot，通常没有）。
-    const textWithMention = `<@${peer.id}> ${msg.text || ""}`.trim();
-    const outboundEnv: RouterEnvelope = {
-      from: {
-        kind: "local",
-        agentName: fromName,
-        channelId: fromChannelId,
-        ws,
-      },
-      to: {
-        kind: "peer",
-        peerBotId: peer.id,
-        peerBotName: peer.name,
-        sharedChannelId: targetChannelId,
-      },
-      intent: "request",
-      content: textWithMention,
-      meta: {
-        messageId: `peer_route_${Date.now()}`,
-        triggerKind: "agent_tool",
-        ts: new Date().toISOString(),
-        threadId: newThreadId(),
-      },
-    };
-    const delivery = await deliver(outboundEnv);
-    if (delivery.outcome.kind !== "sent") {
-      const errStr = delivery.outcome.kind === "dropped"
-        ? delivery.outcome.reason
-        : (delivery.outcome as any).error?.message || "unknown";
-      ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `发送到 peer 频道失败: ${errStr}` }));
-      return;
-    }
-
-    // 记 pendingPeerCalls：下次这个 peer 在 shared channel 回复时，bridge push 给 caller
-    pendingPeerCalls.set(targetChannelId, {
-      callerChannelId: fromChannelId,
-      callerWs: ws,
-      callerName: fromName,
-      peerBotId: peer.id,
-      peerBotName: peer.name,
-      peerAgent: peerAgentName,
-      expecting: typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
-      ts: Date.now(),
-    });
-
-    ws.send(JSON.stringify({
-      type: "response",
-      requestId: msg.requestId,
-      result: {
-        ok: true,
-        targetChannelId,
-        targetName: `peer:${peer.name}.${peerAgentName}`,
-        pushBack: true,
-      },
-    }));
-    console.log(`🎯 PEER ROUTE: ${fromName} → peer ${peer.name} agent ${peerAgentName} (channel ${targetChannelId})`);
-    recordMetric("peer_route_send", { channelId: targetChannelId, meta: { peer: peer.name, peerAgent: peerAgentName } });
-  } catch (err) {
-    ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
-  }
-}
-
-/**
- * v1.9.26+ D+C 组合：peer direct 路由多候选消歧义。
- *
- * 从 candidates 里选一个：
- *   1. 只有 1 个 → 直接选
- *   2. 多个 → C: 看 msg 里是否提到某个 agent 名字，唯一匹配就选那个
- *   3. 多个 + 关键词没唯一命中 → D: 在 channelId 频道发按钮让用户点，返回 "posted"
- */
-type PeerDirectDecision =
-  | { kind: "selected"; exposure: Exposure }
-  | { kind: "button_posted" }
-  | { kind: "multi_unresolved" };
-
-type Exposure = { localAgent: string; peerBotId: string | "all"; purpose?: string; mode?: string; grantedAt: string };
-
-async function resolvePeerDirectCandidate(
-  candidates: Array<Exposure>,
-  content: string,
-  postChannelId: string,
-  originalMsgId: string,
-  senderId: string,
-  kind: "local" | "foreign",
-): Promise<PeerDirectDecision> {
-  if (candidates.length === 1) return { kind: "selected", exposure: candidates[0] };
-
-  // C: 关键词快路径
-  const lower = content.toLowerCase();
-  const nameMatched = candidates.filter((e) => {
-    const n = e.localAgent.toLowerCase();
-    // 完整词或带前缀 agent- 的匹配都算
-    return new RegExp(`\\b${n.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&")}\\b`).test(lower) ||
-      lower.includes(`agent-${n}`);
-  });
-  if (nameMatched.length === 1) {
-    console.log(`🎯 PEER DISAMBIG: C 关键词命中 → ${nameMatched[0].localAgent}`);
-    return { kind: "selected", exposure: nameMatched[0] };
-  }
-
-  // D: 按钮消歧义
-  try {
-    const ch = await discord.channels.fetch(postChannelId);
-    if (!ch || !("messages" in ch)) return { kind: "multi_unresolved" };
-    // 每个候选一个 button：peer_select:<local|foreign>:<agent>:<origChannelId>:<origMsgId>
-    const buttons = candidates.slice(0, 4).map((e) => ({
-      id: `peer_select;${kind};${e.localAgent};${postChannelId};${originalMsgId}`,
-      label: e.localAgent,
-      style: "primary" as const,
-      emoji: "🎯",
-    }));
-    buttons.push({
-      id: `peer_select;${kind};__cancel__;${postChannelId};${originalMsgId}`,
-      label: "都不是 / 取消",
-      style: "secondary" as any,
-      emoji: "🚫",
-    });
-    const lines = [
-      `⚠️ <@${senderId}> 你这条请求匹配到 **${candidates.length}** 个候选 agent：`,
-      ``,
-      ...candidates.slice(0, 4).map((e) => `• **${e.localAgent}** — ${e.purpose || "（无描述）"}`),
-      ``,
-      `点一个按钮选一个，或者在原消息里带 agent 名字（比如 "用 ${candidates[0].localAgent} 帮我..."）再发一次走快路径。`,
-    ];
-    // 走 deliver(bridge → user) —— UI 按钮的发送方是 bridge 自己，接收方是发起
-    // 消息的人类用户（postChannelId 即他们看消息的 channel）。discordReply 内部
-    // buildComponents + trackSentMessage。
-    const disambigDelivery = await deliver({
-      from: { kind: "bridge", label: "peer-disambig" },
-      to: { kind: "user", userId: senderId, channelId: postChannelId },
-      intent: "notification",
-      content: lines.join("\n"),
-      meta: {
-        messageId: `disambig_${Date.now()}`,
-        triggerKind: "bridge_synth",
-        ts: new Date().toISOString(),
-        threadId: newThreadId(),
-        components: [{ type: "buttons", buttons }],
-      },
-    });
-    if (disambigDelivery.outcome.kind !== "sent") return { kind: "multi_unresolved" };
-    console.log(`🎯 PEER DISAMBIG: D 按钮发出（${candidates.length} 候选）at channel=${postChannelId}`);
-    recordMetric("peer_disambig_buttons", { channelId: postChannelId, meta: { candidateCount: String(candidates.length) } });
-    return { kind: "button_posted" };
-  } catch (e) {
-    console.error("PEER DISAMBIG 按钮发送失败:", e);
-    return { kind: "multi_unresolved" };
-  }
-}
-
-/**
- * v2.0.0 Phase 4d: 根据 agent reply 传的 chat_id 反推该 endpoint 是 user 还
- * 是 peer。决策树：
- *   1. chat_id 在 peers.capabilities 里登记过（peerAgentExchangeId）→ 对方 guild
- *      的 foreign exchange → PeerEndpoint with 对应 peer bot 身份
- *   2. chat_id 是我方 localAgentExchangeId → 我方 #agent-exchange → PeerEndpoint
- *      with peerBotId="all"（deliverToPeer 用 ensurePeerMentions 扫频道 @ 所有
- *      peer bot；具体 bot id 不重要）
- *   3. 其他（agent 自己频道 / #control）→ UserEndpoint with ALLOWED_USER_IDS[0]
+ * v2.0.0 Phase 4d: 根据 agent reply 传的 chat_id 反推目标 endpoint：
+ *   1. `api:<tokenId>` 前缀 → API 用户
+ *   2. 其他（agent 自己频道 / #control）→ UserEndpoint with ALLOWED_USER_IDS[0]
  *      作为 userId。deliverToUser 不自动 @ user（push 通知在 Stop hook 完成通知
  *      里另管）。
  */
-async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | RouterPeerEndpoint | RouterApiUserEndpoint> {
+async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | RouterApiUserEndpoint> {
   // v2.6.0+ 虚拟 chat_id `api:<tokenId>`（统一 keyspace D7）→ API 用户
   const parsed = parseChatId(chatId);
   if (parsed.transport === "api") {
@@ -3676,106 +2922,9 @@ async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | 
     } catch { /* 名字仅展示用，查不到就用 tokenId */ }
     return { kind: "api", tokenId: parsed.id, name };
   }
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const peers = await readPeers();
-    // 1. foreign exchange
-    const foreignCap = peers.capabilities.find((c) => c.peerAgentExchangeId === chatId);
-    if (foreignCap) {
-      return {
-        kind: "peer",
-        peerBotId: foreignCap.peerBotId,
-        peerBotName: foreignCap.peerBotName,
-        sharedChannelId: chatId,
-      };
-    }
-    // 2. local agent-exchange
-    if (peers.localAgentExchangeId === chatId) {
-      return {
-        kind: "peer",
-        peerBotId: "all",
-        peerBotName: "peer",
-        sharedChannelId: chatId,
-      };
-    }
-  } catch { /* non-critical */ }
-  // 3. user channel
+  // user channel
   const userId = primaryOwnerId();
   return { kind: "user", userId, channelId: chatId };
-}
-
-/**
- * v2.0.0 Phase 3c: messageCreate 里的 direct-route 决策抽成独立函数。
- * peer bot 在 #agent-exchange 发消息 → 查 peers.json 里 mode=direct 的
- * exposures → 用 resolvePeerDirectCandidate 挑一个 → 找对应 agentClient。
- *
- * 返回：
- *  - `direct`：选到了具体 agent，routeWs 换成 agentClient.ws
- *  - `button_pending`：按钮已 post，messageCreate 应直接 return
- *  - `fallback`：没 direct 命中 / agent 不在线 / 其他异常 → 回落到 master
- *
- * 注意：只处理 peer + 我方 #agent-exchange 场景。对称 direct（peer 在自己
- * guild 的 #agent-exchange @ 我方 bot）走的是 tryRouteForeignAgentExchange，
- * 不走这里。
- */
-type DirectRouteResult =
-  | { kind: "direct"; toClient: ClientInfo; agentName: string }
-  | { kind: "button_pending" }
-  | { kind: "fallback" };
-
-async function tryPeerDirectRoute(
-  msg: DiscordMessage,
-  channelId: string,
-): Promise<DirectRouteResult> {
-  const localAgentExchangeId = await getLocalAgentExchangeId();
-  if (!localAgentExchangeId || channelId !== localAgentExchangeId) {
-    return { kind: "fallback" };
-  }
-  const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
-  const peers = await readPeers();
-  const directExposures = peers.exposures.filter(
-    (e) => (e.peerBotId === msg.author.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct"
-  );
-  if (directExposures.length === 0) return { kind: "fallback" };
-
-  const decision = await resolvePeerDirectCandidate(
-    directExposures as any,
-    msg.content || "",
-    channelId,
-    msg.id,
-    msg.author.id,
-    "local",
-  );
-  if (decision.kind === "button_posted") return { kind: "button_pending" };
-  if (decision.kind !== "selected") return { kind: "fallback" };
-
-  const targetExp = decision.exposure;
-  try {
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    const targetAgent = agents.find((a: any) =>
-      a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
-    );
-    if (!targetAgent) {
-      console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} 在 registry 找不到，回落 master`);
-      return { kind: "fallback" };
-    }
-    if (targetAgent.status !== "active") {
-      console.log(`⚠️ PEER DIRECT fallback: agent ${targetExp.localAgent} status=${targetAgent.status}，回落 master`);
-      return { kind: "fallback" };
-    }
-    const agentClient = clients.get(targetAgent.channelId);
-    if (!agentClient) {
-      console.log(`⚠️ PEER DIRECT fallback: agent ${targetAgent.name} 未连接 bridge，回落 master`);
-      return { kind: "fallback" };
-    }
-    console.log(`🎯 PEER DIRECT: ${msg.author.username} → ${targetAgent.name} (bypass master)`);
-    recordMetric("peer_direct_route", { channelId, meta: { peerBotId: msg.author.id, agent: targetAgent.name } });
-    return { kind: "direct", toClient: agentClient, agentName: targetAgent.name };
-  } catch (e) {
-    console.error("PEER DIRECT routing 失败，回落 master:", e);
-    return { kind: "fallback" };
-  }
 }
 
 /**
@@ -3786,17 +2935,9 @@ async function tryPeerDirectRoute(
  */
 async function cleanupStaleThinkingMessages(): Promise<void> {
   try {
-    // 收集需要扫的 channel：master CONTROL + 本地 #agent-exchange + 所有 agent 频道 + peer 的 shared channels
+    // 收集需要扫的 channel：master CONTROL + 所有 agent 频道
     const channelIds = new Set<string>();
     if (CONTROL_CHANNEL_ID) channelIds.add(CONTROL_CHANNEL_ID);
-    try {
-      const { readPeers } = await import("./lib/peers.js");
-      const peers = await readPeers();
-      if (peers.localAgentExchangeId) channelIds.add(peers.localAgentExchangeId);
-      for (const pb of peers.peerBots) {
-        if (pb.agentExchangeId) channelIds.add(pb.agentExchangeId);
-      }
-    } catch { /* non-critical */ }
     try {
       const listResult = await runManager("list");
       for (const a of listResult.agents || []) {
@@ -3839,329 +2980,6 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
   }
 }
 
-/**
- * v1.9.26+ 按钮点击后用指定 agent 名重放 peer direct 路由。
- * 跟 tryRouteForeignAgentExchange / messageCreate 里的 direct 分支共享
- * 消息注入逻辑，但跳过消歧义（直接用指定 agent）。
- */
-async function routePeerDirectWithAgent(
-  origMsg: DiscordMessage,
-  origChannelId: string,
-  agentName: string,
-  kind: "local" | "foreign",
-): Promise<boolean> {
-  try {
-    const { readPeers } = await import("./lib/peers.js");
-    const peers = await readPeers();
-
-    // 验证 exposure 存在（按 agent 名找）
-    const exp = peers.exposures.find((e) => e.localAgent === agentName || `agent-${e.localAgent}` === agentName);
-    if (!exp) {
-      console.log(`🎯 routePeerDirectWithAgent: 找不到 exposure for agent ${agentName}`);
-      return false;
-    }
-
-    // 找 peer bot：
-    //   local  → origMsg 的 author 就是 peer bot（peer 发消息到我方 exchange）
-    //   foreign → channel 是"对方 guild 的 #agent-exchange"，lookup 用
-    //              capabilities[].peerAgentExchangeId（v1.9.33+ 同 tryRouteForeignAgentExchange 修复）
-    let peerBotName = "";
-    let peerBotId = "";
-    if (kind === "local") {
-      peerBotName = origMsg.author.username;
-      peerBotId = origMsg.author.id;
-    } else {
-      const cap = peers.capabilities.find((c) => c.peerAgentExchangeId === origChannelId);
-      if (!cap) {
-        console.log(`🎯 routePeerDirectWithAgent (foreign): 找不到 capability for channel ${origChannelId}`);
-        return false;
-      }
-      peerBotId = cap.peerBotId;
-      const peerBot = peers.peerBots.find((p) => p.id === peerBotId);
-      peerBotName = peerBot?.name || cap.peerBotName;
-    }
-
-    // 找 agent ws
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    const targetAgent = agents.find((a: any) =>
-      a.name === exp.localAgent || a.name === `agent-${exp.localAgent}`
-    );
-    if (!targetAgent || targetAgent.status !== "active") return false;
-    const agentClient = clients.get(targetAgent.channelId);
-    if (!agentClient) return false;
-
-    // 附件
-    const attachmentPaths: string[] = [];
-    if (origMsg.attachments.size > 0) {
-      const inboxDir = INBOX_DIR;
-      await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
-      for (const [, att] of origMsg.attachments) {
-        try {
-          const resp = await fetch(att.url);
-          const buf = await resp.arrayBuffer();
-          const filePath = `${inboxDir}/${att.id}_${att.name}`;
-          await Bun.write(filePath, buf);
-          attachmentPaths.push(filePath);
-        } catch { /* skip */ }
-      }
-    }
-
-    const rawText = (origMsg.content || "")
-      .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
-      .trim();
-    const contentWithAttachments = rawText +
-      (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : "");
-
-    // v2.0.0 Phase 4c: 构造 envelope 交给 deliver。
-    // from=peer 用 channel 所属的 peer bot 身份（local 时就是 msg.author，foreign
-    // 时是 capabilities lookup 拿到的）。sourceUserId=origMsg.author.id 给 foreign
-    // 场景 renderPeerDirectHeader 拼 @ 发起人用。
-    lastMessageSource.set(agentClient.channelId, "agent");
-    const env: RouterEnvelope = {
-      from: {
-        kind: "peer",
-        peerBotId,
-        peerBotName,
-        sharedChannelId: origChannelId,
-      },
-      to: {
-        kind: "local",
-        agentName: targetAgent.name,
-        channelId: agentClient.channelId,
-        ws: agentClient.ws,
-        cwd: agentClient.cwd,
-      },
-      intent: "request",
-      content: contentWithAttachments,
-      meta: {
-        messageId: origMsg.id,
-        triggerKind: origMsg.author.bot ? "peer_discord" : "user_discord",
-        ts: origMsg.createdAt.toISOString(),
-        threadId: newThreadId(),
-        attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
-        sourceUserId: origMsg.author.id,
-      },
-    };
-    const delivery = await deliver(env);
-    if (delivery.outcome.kind !== "sent") {
-      const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
-      console.error(`🎯 PEER DIRECT (button) deliver 失败: ${reason}`);
-      return false;
-    }
-    // v2.0.13+: 记 pendingPeerInbound，Stop hook drain 时如果 agent 忘 reply 就把
-    // 抓到的文字 forward 到 peer 的 #agent-exchange，避免 peer 完全看不见答复。
-    pendingPeerInbound.set(agentClient.channelId, {
-      localAgentName: targetAgent.name,
-      sharedChannelId: origChannelId,
-      peerBotId,
-      peerBotName,
-      isForeign: kind === "foreign",
-      ts: Date.now(),
-    });
-    const senderLabel = origMsg.author.bot ? `peer bot ${origMsg.author.username}` : `用户 ${origMsg.author.username}`;
-    console.log(`🎯 PEER DIRECT (button): ${senderLabel} → ${targetAgent.name} (kind=${kind})`);
-    recordMetric("peer_direct_route_button", { channelId: origChannelId, meta: { agent: targetAgent.name, kind } });
-    return true;
-  } catch (e) {
-    console.error("routePeerDirectWithAgent 异常:", e);
-    return false;
-  }
-}
-
-async function tryRouteForeignAgentExchange(msg: DiscordMessage, channelId: string): Promise<boolean> {
-  try {
-    const { readPeers, effectivePeerMode } = await import("./lib/peers.js");
-    const peers = await readPeers();
-
-    // v1.9.33+: 修 v1.9.22 的 bug —— 原来查 `peerBots[].agentExchangeId`，那个字段
-    // 存的是"peer bot 在我方 guild 的 local scope channel"（= 我方自己的 exchange）。
-    // 但对称路由触发时 channelId 是**对方 guild** 的 exchange（我方 bot 在对方 guild
-    // 能看到的那个），这个 id 是从 `capabilities[].peerAgentExchangeId` 学来的
-    // （对方 peer-expose 时广播的 PeerEvent 里带 exchange 字段）。
-    // 正确的 lookup：通过 capabilities 反查 "这个 channel 是哪个 peer 的 foreign
-    // exchange"。
-    const capabilityForChannel = peers.capabilities.find((c) => c.peerAgentExchangeId === channelId);
-    if (!capabilityForChannel) {
-      // 这个 channel 不是任何 peer 的 #agent-exchange，交给后续流程（大概率 drop）
-      return false;
-    }
-    // 如果是我们自己 guild 的本地 agent-exchange，不走这条（那条走 clients.get 正常路径）
-    if (peers.localAgentExchangeId === channelId) return false;
-
-    // 从 capability 拿到这是哪个 peer bot 的 channel，再去 peerBots 拿 bot 名字
-    const peerBotId = capabilityForChannel.peerBotId;
-    const peerBotForChannel = peers.peerBots.find((p) => p.id === peerBotId)
-      ?? { id: peerBotId, name: capabilityForChannel.peerBotName };
-
-    // 2. 找这个 peer 的 direct exposure（我们对这个 peer 开放的 agent）
-    const directExposures = peers.exposures
-      .filter((e) => (e.peerBotId === peerBotForChannel.id || e.peerBotId === "all") && effectivePeerMode(e) === "direct");
-
-    if (directExposures.length === 0) {
-      // v1.9.35+: 没有 direct exposure，但是 peer bot 在他自己的 foreign exchange 里
-      // @ 了我们（比如 peer 用旧版 via_master 模式，agent reply 落到他自己 exchange；
-      // 或 peer agent 完成工作后只想通知我们一声）→ 我们要 **relay** 这条消息到
-      // 我方 #agent-exchange，让 user 能看到，避免沉默 drop。
-      if (msg.author.bot && peers.localAgentExchangeId) {
-        const cleanText = (msg.content || "")
-          .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
-          .replace(/<!--\s*CLAUDESTRA_PEER_EVENT[\s\S]*?-->/g, "")
-          .replace(/\s*\[EOT\]\s*$/i, "")
-          .replace(/^\s*\[DIRECT\]\s*/i, "")
-          .trim();
-        if (cleanText) {
-          try {
-            const userMention = primaryOwnerId() ? `<@${primaryOwnerId()}>` : "";
-            const relayText = [
-              `📬 **来自 peer ${peerBotForChannel.name}**（他在自己 guild 的 #agent-exchange 里 @ 了你）${userMention}`,
-              ``,
-              cleanText,
-              ``,
-              `_bridge relay — peer 没走 direct 路由（mode=via_master 或老版本），消息被原样搬到这里了_`,
-            ].join("\n");
-            const relayDelivery = await deliver({
-              from: { kind: "bridge", label: "peer-relay" },
-              to: {
-                kind: "user",
-                userId: primaryOwnerId(),
-                channelId: peers.localAgentExchangeId,
-              },
-              intent: "notification",
-              content: relayText,
-              meta: {
-                messageId: `relay_${Date.now()}`,
-                triggerKind: "bridge_synth",
-                ts: new Date().toISOString(),
-                threadId: newThreadId(),
-              },
-            });
-            if (relayDelivery.outcome.kind === "sent") {
-              console.log(`📬 RELAY: peer ${peerBotForChannel.name} 在 foreign exchange 的消息 relay 到本方 exchange (${cleanText.length} chars)`);
-              recordMetric("peer_relay_foreign_reply", { channelId: peers.localAgentExchangeId, meta: { peer: peerBotForChannel.name, from: channelId } });
-            } else if (relayDelivery.outcome.kind === "error") {
-              console.error("📬 RELAY 失败:", relayDelivery.outcome.error);
-            }
-          } catch (e) {
-            console.error("📬 RELAY 异常:", e);
-          }
-        }
-        return true; // 已处理（relay 完），不 fall through
-      }
-      console.log(`🎯 SYMMETRIC: 收到 foreign #agent-exchange (${channelId}) 的 @ 但我方没对 ${peerBotForChannel.name} 开放任何 direct agent 也无法 relay，忽略`);
-      return false;
-    }
-
-    // v1.9.26+ D+C 消歧义：多候选时先关键词匹配，不唯一就发按钮
-    const decision = await resolvePeerDirectCandidate(
-      directExposures,
-      msg.content || "",
-      channelId,
-      msg.id,
-      msg.author.id,
-      "foreign",
-    );
-    if (decision.kind === "button_posted") return true;
-    if (decision.kind === "multi_unresolved") {
-      console.log(`🎯 SYMMETRIC: ${directExposures.length} 候选无法消歧，按钮也没发成功，放弃`);
-      return false;
-    }
-    const targetExp = decision.exposure;
-
-    // 3. 找 target agent 的 ws
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    const targetAgent = agents.find((a: any) =>
-      a.name === targetExp.localAgent || a.name === `agent-${targetExp.localAgent}`
-    );
-    if (!targetAgent || targetAgent.status !== "active") {
-      console.log(`🎯 SYMMETRIC fallback: target agent ${targetExp.localAgent} 不可用 (status=${targetAgent?.status ?? "missing"})`);
-      return false;
-    }
-    const agentClient = clients.get(targetAgent.channelId);
-    if (!agentClient) {
-      console.log(`🎯 SYMMETRIC fallback: target agent ${targetAgent.name} 未连接 bridge`);
-      return false;
-    }
-
-    // 4. 处理附件（跟主流程一样）
-    const attachmentPaths: string[] = [];
-    if (msg.attachments.size > 0) {
-      const inboxDir = INBOX_DIR;
-      await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
-      for (const [, att] of msg.attachments) {
-        try {
-          const resp = await fetch(att.url);
-          const buf = await resp.arrayBuffer();
-          const filePath = `${inboxDir}/${att.id}_${att.name}`;
-          await Bun.write(filePath, buf);
-          attachmentPaths.push(filePath);
-        } catch { /* skip */ }
-      }
-    }
-
-    // 5. 原文 strip mention + 附件
-    const rawText = (msg.content || "")
-      .replace(new RegExp(`<@!?${getBotUserId()}>`, "g"), "")
-      .trim();
-    const contentWithAttachments = rawText +
-      (attachmentPaths.length > 0 ? `\n\n${attachmentPaths.map((p) => `[attachment: ${p}]`).join("\n")}` : "");
-
-    // v2.0.0 Phase 4c: 构造 envelope 交给 deliver。
-    // from=peer 用 peerBotForChannel（对方 peer bot 身份，对应 capabilities lookup）。
-    // sharedChannelId = foreign exchange 的 channelId，deliver 里 renderPeerDirectHeader
-    // 会看到 sharedChannelId ≠ 我方 localAgentExchangeId 就走对称路由 header。
-    // sourceUserId 给 @发起人用（不是 peerBot 身份）。
-    lastMessageSource.set(agentClient.channelId, "agent");
-    const env: RouterEnvelope = {
-      from: {
-        kind: "peer",
-        peerBotId: peerBotForChannel.id,
-        peerBotName: peerBotForChannel.name,
-        sharedChannelId: channelId,
-      },
-      to: {
-        kind: "local",
-        agentName: targetAgent.name,
-        channelId: agentClient.channelId,
-        ws: agentClient.ws,
-        cwd: agentClient.cwd,
-      },
-      intent: "request",
-      content: contentWithAttachments,
-      meta: {
-        messageId: msg.id,
-        triggerKind: msg.author.bot ? "peer_discord" : "user_discord",
-        ts: msg.createdAt.toISOString(),
-        threadId: newThreadId(),
-        attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
-        sourceUserId: msg.author.id,
-      },
-    };
-    const delivery = await deliver(env);
-    if (delivery.outcome.kind !== "sent") {
-      const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
-      console.error(`🎯 SYMMETRIC deliver 失败: ${reason}`);
-      return false;
-    }
-    // v2.0.13+: 记 pendingPeerInbound — Stop drain 兜底 forward 用
-    pendingPeerInbound.set(agentClient.channelId, {
-      localAgentName: targetAgent.name,
-      sharedChannelId: channelId,
-      peerBotId: peerBotForChannel.id,
-      peerBotName: peerBotForChannel.name,
-      isForeign: true,
-      ts: Date.now(),
-    });
-    const senderLabel = msg.author.bot ? `peer bot ${msg.author.username}` : `用户 ${msg.author.username}`;
-    console.log(`🎯 SYMMETRIC DIRECT: ${senderLabel} 在 foreign #agent-exchange (${channelId}) → 路由到 ${targetAgent.name}`);
-    recordMetric("peer_direct_route_symmetric", { channelId, meta: { sender: msg.author.id, agent: targetAgent.name } });
-    return true;
-  } catch (e) {
-    console.error("tryRouteForeignAgentExchange 异常:", e);
-    return false;
-  }
-}
 
 /** v1.9.21+ 每分钟扫一次，清超过 10min 仍未被 agent 回复消化的 pendingAgentCalls。
  * 正常情况下 agent 会在几十秒内回 → 被 reply handler 清掉。残留条目只会发生在
@@ -4173,18 +2991,6 @@ setInterval(() => {
     if (now - pending.ts > STALE_MS) {
       pendingAgentCalls.delete(channelId);
       console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
-    }
-  }
-  for (const [channelId, pending] of pendingPeerCalls.entries()) {
-    if (now - pending.ts > STALE_MS) {
-      pendingPeerCalls.delete(channelId);
-      console.log(`🧹 pendingPeerCalls stale: 清掉 target=${pending.peerBotName}/${pending.peerAgent}`);
-    }
-  }
-  for (const [channelId, pending] of pendingPeerInbound.entries()) {
-    if (now - pending.ts > STALE_MS) {
-      pendingPeerInbound.delete(channelId);
-      console.log(`🧹 pendingPeerInbound stale: 清掉 agent=${pending.localAgentName} (peer=${pending.peerBotName})`);
     }
   }
   // v2.6.0+ API 会话状态 TTL（10min）：pending 请求、轮询结果、附件登记
@@ -4207,8 +3013,8 @@ setInterval(() => {
 }, 60_000).unref();
 
 /** 返回跟 channelId 共享同一个 ws 的所有其他 channelId（不含自身）。
- *  master ws 挂了 #control + #agent-exchange 两个 channel key，任何一端的
- *  Stop hook 都得同步清另一端的 typing / status message。 */
+ *  一个 ws 挂多个 channel key 时，任何一端的 Stop hook 都得同步清另一端的
+ *  typing / status message。 */
 function sameWsChannels(channelId: string): string[] {
   const self = clients.get(channelId);
   if (!self) return [];
@@ -4257,7 +3063,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         return new Response("ok");
       }
 
-      // v1.9.6+: 如果最近一次 message 来自 agent（peer bot / send_to_agent 转发），
+      // v1.9.6+: 如果最近一次 message 来自 agent（send_to_agent 转发），
       // 这次 Stop 是"为 agent 工作" — 用户没问过问题，不用 @ 他。
       // v2.10+ "api" 同跳（owner「谁发的谁回」）:Web 端触发的回合,用户在 Web 上
       // 看回复,Discord 不再 @ 推送(mirror 内容照旧)。
@@ -4316,10 +3122,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
       }
 
       // 收集所有需要清状态消息的 channel：Stop 的 channelId + 共享同一个 ws 的
-      // 其他 channel（master 的 #agent-exchange）+ v1.9.35+ 对称 direct 路由的
-      // foreign exchange（那些 channel 不在 clients 里，要从 pendingReplies 的
-      // targetWs 匹配反查 intendedReplyChannel）。否则"💭 思考中..."按钮永远
-      // 不会变成"✅ 完成"。
+      // 其他 channel + pendingReplies 里 targetWs 匹配的 intendedReplyChannel。
+      // 否则"💭 思考中..."按钮永远不会变成"✅ 完成"。
       const channelsToClear = new Set<string>([channelId]);
       const thisClientForStatus = clients.get(channelId);
       if (thisClientForStatus) {
@@ -4339,8 +3143,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
       // jsonl 读干净 + flush pending textQueue。这样 turn 结束的"agent 只打字
       // 不 reply" 场景里，watcher debounce 还没 fire 的 `💬 text` 不会丢，也不
       // 需要再跑一份 rescue 从 jsonl 另外抽一遍（双发源头）。
-      // channelsToClear 里每个 channel 都 drain —— direct route + agent-exchange
-      // 场景可能 ws 在 master 但 intendedReplyChannel 是别的。
+      // channelsToClear 里每个 channel 都 drain —— ws 与 intendedReplyChannel
+      // 可能不同。
       if (event === "Stop" || event === "StopFailure" || event === "stop") {
         const { drainChannelWatcher } = await import("./bridge/jsonl-watcher.js");
         for (const cid of channelsToClear) {
@@ -4409,38 +3213,6 @@ async function handleHookRequest(req: Request): Promise<Response> {
                   recordMetric("agent_pushback_drain", { channelId: pendingAgent.callerChannelId, meta: { hadText: "yes" } });
                 } catch (e) {
                   console.error("AGENT PUSH-BACK (drain兜底) 失败:", e);
-                }
-              }
-            }
-
-            // v2.0.13+ 兜底 2: 跨 peer 入站请求。peer 的 agent 这轮如果忘了 reply()
-            // 到 peer 的 #agent-exchange，watcher drain 把文字贴到 agent **自己** local
-            // channel，peer 完全看不见。这里 forward 到 peer 共享频道，让 peer 的
-            // bridge 通过 messageCreate 看到 → 老的 pendingPeerCalls pushback 就接力上。
-            const peerInbound = pendingPeerInbound.get(cid);
-            if (peerInbound) {
-              if (!drainedText) {
-                // v2.4.16+ 镜像本地 drain兜底：no-text 静默清掉 pending，**不 forward**
-                // 到 peer 的 #agent-exchange。之前 forward "[⚠️ ...你那边请主动追问或
-                // 换路线]" 等于鼓动 peer 再发一轮 → 跨 peer 死循环（symmetrically 跟
-                // 本地一样的问题）。
-                pendingPeerInbound.delete(cid);
-                console.log(
-                  `🤫 PEER INBOUND DRAIN no-text 静默清: ${peerInbound.localAgentName} (peer=${peerInbound.peerBotName})`
-                );
-                recordMetric("peer_inbound_drain_silent", {
-                  channelId: peerInbound.sharedChannelId,
-                  meta: { agent: peerInbound.localAgentName },
-                });
-              } else {
-                try {
-                  const forwardBody = `[ℹ️ ${peerInbound.localAgentName} 这轮没用 reply() 工具回到 #agent-exchange，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`;
-                  await discordReply(discord, peerInbound.sharedChannelId, forwardBody);
-                  console.log(`📨 PEER INBOUND DRAIN (兜底): ${peerInbound.localAgentName} → ${peerInbound.sharedChannelId}（forwarded ${drainedText.length} chars）`);
-                  recordMetric("peer_inbound_drain", { channelId: peerInbound.sharedChannelId, meta: { agent: peerInbound.localAgentName } });
-                  pendingPeerInbound.delete(cid);
-                } catch (e) {
-                  console.error("PEER INBOUND DRAIN (兜底) 失败:", e);
                 }
               }
             }
@@ -4766,8 +3538,8 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       }
     }
 
-    // v2.4.16+ manager kill 后调用 → 清掉所有引用该 channel 的 inter-agent /
-    // cross-peer pending。避免被 kill 的 agent 复活/被 resume 后被陈年 pushback /
+    // v2.4.16+ manager kill 后调用 → 清掉所有引用该 channel 的 inter-agent
+    // pending。避免被 kill 的 agent 复活/被 resume 后被陈年 pushback /
     // watchdog nudge 轰炸。restart (transient flap) 不调，只在永久 kill 调。
     if (url.pathname === "/agent/cleanup" && req.method === "POST") {
       try {
@@ -4791,9 +3563,8 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       }
     }
 
-    // v1.9.0+: peer-expose / peer-revoke CLI 通过这里触发广播（在 #agent-exchange 发带 PeerEvent 标记的消息）
+    // v2.11: Discord peer 通告端点已移除，留 410 tombstone——peer 协作走 HTTP transport
     if (url.pathname === "/peer/announce" && req.method === "POST") {
-      // v2.11: Discord peer 通告已移除——peer 协作走 HTTP transport
       return new Response(JSON.stringify({ ok: false, error: "discord peer removed (v2.11) — use peer-http-* commands" }), {
         status: 410,
         headers: { "Content-Type": "application/json" },

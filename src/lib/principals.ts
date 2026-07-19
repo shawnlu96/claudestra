@@ -122,7 +122,7 @@ export function findToken(file: PrincipalsFile, idOrName: string): Principal | n
 
 /**
  * scope 检查。registry 名带 "agent-" 前缀（如 "agent-worker"），token 里可能
- * 存的是用户输入的裸名（"worker"）—— 双向兼容（与 peers.ts exposures 同款）。
+ * 存的是用户输入的裸名（"worker"）—— 双向兼容。
  * "*" 只覆盖普通 agent；master（含 "master" 本名）必须显式列出。
  */
 export function agentInScope(p: Principal, agentName: string): boolean {

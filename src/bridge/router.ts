@@ -37,19 +37,6 @@ export interface LocalEndpoint {
   cwd?: string;
 }
 
-/** 远端 peer 的 agent（或其 master，我们区分不了内部拓扑）— 通过共享 #agent-exchange 投递 */
-export interface PeerEndpoint {
-  kind: "peer";
-  /** 对方 Discord bot 的 user id（用来 @mention） */
-  peerBotId: string;
-  /** 对方 Discord bot 的 username（显示用） */
-  peerBotName: string;
-  /** 双方共享的 #agent-exchange channel 的 id（实际投递到这里） */
-  sharedChannelId: string;
-  /** 具体要找的 peer agent 名字（`peer:X.Y` 语法里的 Y，可选 —— 没指定就让对方 bridge 自己路由） */
-  peerAgentName?: string;
-}
-
 /** Discord 里的人类用户。消息最终出口之一（用户看消息 / 收 push） */
 export interface UserEndpoint {
   kind: "user";
@@ -64,14 +51,14 @@ export interface UserEndpoint {
 /**
  * bridge 自己发起的消息（不代表任何具体 agent / user / peer）。用于 UI 层的
  * 通知和系统广播：status 提示（"💭 思考中..."）/ LLM-free 管理按钮的回复 /
- * PeerEvent 公告 / notifyMaster 广播 / hook 事件文字 / peer relay 兜底。
+ * notifyMaster 广播 / hook 事件文字。
  *
  * 只能做 `from`，不能做 `to`（bridge 不是消息接收者）。deliver 里看到
  * from=bridge 就跳过 header 渲染、跳过 pending 追踪，只做"内容 → Discord"。
  */
 export interface BridgeEndpoint {
   kind: "bridge";
-  /** 描述性标签，调试 / log 用，比如 "status"、"relay"、"peer-event"。 */
+  /** 描述性标签，调试 / log 用，比如 "status"、"notifyMaster"。 */
   label?: string;
 }
 
@@ -90,7 +77,7 @@ export interface ApiUserEndpoint {
   peer?: string;
 }
 
-export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint | BridgeEndpoint | ApiUserEndpoint;
+export type Endpoint = LocalEndpoint | UserEndpoint | BridgeEndpoint | ApiUserEndpoint;
 
 // ============================================================
 // Envelope：一条待投递的消息
@@ -98,20 +85,19 @@ export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint | BridgeEndpo
 
 export type TriggerKind =
   | "user_discord"    // 人类用户在 Discord 发的消息
-  | "peer_discord"    // peer bot 在 Discord 发的消息（通常是对方 agent 的回复）
   | "peer_http"       // v2.11+ HTTP peer 的回复/错误（bridge/http-peer.ts pushback）
   | "agent_tool"      // 本地 agent 通过 MCP tool 主动发的（reply / send_to_agent）
   | "bridge_synth"    // bridge 自己合成的（rescue、relay、nag 等 —— 都属于"代表某方发声"）
   | "system";         // 系统提示（clean up 通知、错误提示等）
 
 /**
- * v2.0.0+ 消息意图。取代老版一堆 heuristic（[EOT] / [DIRECT] / Stop 猜意思 /
- * randomUmaDone 兜底 @）。bridge 和 agent 都按 intent 行动：
+ * v2.0.0+ 消息意图。取代老版一堆 heuristic（Stop 猜意思 / randomUmaDone
+ * 兜底 @）。bridge 和 agent 都按 intent 行动：
  *   - request: 需要回应。bridge 挂 pending；接收端 agent 应生成 response
  *   - response: 对某条 request 的回复（meta.inReplyTo 指向原请求）。
  *     bridge 清 pending + 不发额外完成 @（用户已经看到 response）
  *   - notification: fire-and-forget。没 pending，不期望回复
- *   - broadcast: 通知频道所有人（PeerEvent grant/revoke 等）
+ *   - broadcast: 通知频道所有人
  */
 export type MessageIntent = "request" | "response" | "notification" | "broadcast";
 
@@ -132,18 +118,12 @@ export interface Envelope {
     threadId: string;
     /** response 专用：指向被回应的原请求 messageId。bridge 据此清对应 pending */
     inReplyTo?: string;
-    /** 是否是 thread 的"最后一句"（对应老版 [EOT]） */
+    /** 是否是 thread 的"最后一句" */
     final?: boolean;
     /** 附件路径（本地 inbox 绝对路径） */
     attachments?: string[];
     /** 原始 Discord 消息对象引用（不持久化，只在 router 内部传递） */
     discordMsg?: unknown;
-    /**
-     * 对称路由 / 对方 guild 里的 foreign exchange 场景用：真正的发起人（人类用户或
-     * peer bot）的 Discord user id。from 里的 peerBotId 是信任链路上的 peer bot，
-     * 跟"这条消息的原始作者"不一定同人。agent 要用这个 id 做 push 通知 @。
-     */
-    sourceUserId?: string;
 
     // ── outbound（response）用的 Discord 特性透传字段 ───────────────────────
     /** Discord 消息 id：发到这个频道时作为 reply_to（native 引用） */
@@ -152,13 +132,6 @@ export interface Envelope {
     components?: unknown[];
     /** 附件绝对路径，仅加在第一 chunk 上，最多 10 个 / 25MB */
     files?: string[];
-    /**
-     * deliverToPeer 不要自动跑 ensurePeerMentions 扫频道 @ peer bot。
-     * 用于：
-     *   - [DIRECT] 标记的 reply（agent 自己写好了 @ 发起人，不需要 @ peer bot）
-     *   - agent 自己已经在 text 里手动 @ 过对应 peer 了
-     */
-    skipAutoMention?: boolean;
     /**
      * v2.4.16+ deliverToLocal 不要给 target 挂 pendingInterAgentMsg watchdog。
      * 用于 send_to_agent({oneShot:true}) 的 fire-and-forget 路径——caller 不期待
@@ -174,7 +147,7 @@ export interface Envelope {
 
 export type DeliveryOutcome =
   | { kind: "sent"; discordMessageIds?: string[]; note?: string }   // 成功投递
-  | { kind: "dropped"; reason: string }                               // 主动丢弃（信任检查 / [EOT] / 目标离线等）
+  | { kind: "dropped"; reason: string }                               // 主动丢弃（信任检查 / 目标离线等）
   | { kind: "error"; error: Error };                                  // 失败
 
 export interface Delivery {
@@ -196,8 +169,6 @@ export function endpointLabel(e: Endpoint): string {
   switch (e.kind) {
     case "local":
       return `local:${e.agentName ?? "?"}(${e.channelId})`;
-    case "peer":
-      return `peer:${e.peerBotName}${e.peerAgentName ? `.${e.peerAgentName}` : ""}`;
     case "user":
       return `user:${e.userId}@${e.channelId}`;
     case "bridge":
@@ -219,15 +190,15 @@ export function envelopeLabel(env: Envelope): string {
  * agent 端的地址形式（给 MCP tool 用）：
  *   user:<user_id>                  —— Discord 人类用户
  *   agent:<name>                    —— 本地 agent（registry 里有）
- *   peer:<peer_bot_name>            —— 对方整体，让对方 bridge 自行路由
- *   peer:<peer_bot_name>.<agent>    —— 对方 bridge 指定路由到某 agent
+ *   peer:<peer_name>                —— HTTP peer 整体，让对方 bridge 自行路由
+ *   peer:<peer_name>.<agent>        —— HTTP peer 指定路由到某 agent
  *   channel:<channel_id>            —— 脱盖的 escape hatch，直接投递到某 Discord 频道
  */
 export type AddressString = string;
 
 export interface ParsedAddress {
   kind: "user" | "agent" | "peer" | "channel";
-  /** kind=user → user id; agent → name; peer → peer bot name; channel → channel id */
+  /** kind=user → user id; agent → name; peer → peer 名; channel → channel id */
   primary: string;
   /** kind=peer + 可选 agent 名字（peer:X.Y 的 Y）；其他 kind 不用 */
   secondary?: string;

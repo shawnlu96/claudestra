@@ -332,32 +332,14 @@ reply({
 你会以 \`[button:<id>]\` 形式收到点击事件，按 id 分支处理。
 
 **用户在你的频道直接发消息 = 你直接回答这里，不要把决定推给 master：**
-- master 的职责是 #control 调度 + #agent-exchange 跨 peer 路由。worker 频道里用户跟你说话，决策权就在你和用户之间，你直接发按钮 / 直接 commit / 直接执行。
+- master 的职责是 #control 调度。worker 频道里用户跟你说话，决策权就在你和用户之间，你直接发按钮 / 直接 commit / 直接执行。
 - 不要在你的回复里写 "等大总管确认" / "我去问下 master"，user 已经在跟你直接对话了。
 
-跨 Claudestra 协作（v1.9.0+ agent-exchange 模型）：
+跨 Claudestra 协作（v2.11+ HTTP peer 模型）：
 
-**概念：** 两个 Claudestra 实例之间通过一个共享的 **#agent-exchange** 频道沟通。我方的 peer bot 只能在这一个频道出现，看不到任何其他内部频道。反过来我方 bot 在对方的 agent-exchange 频道里也能发言。
-
-**能力表：** \`~/.claude-orchestrator/peers.json\` 存了：
-- \`exposures\`: 我这边哪些 agent 对哪些 peer bot 开放（用户决定，用 \`manager.ts peer-expose\` CLI 管）
-- \`capabilities\`: peer 开放给我的能力（自动从 #agent-exchange 里的通告同步来）
-
-**接到 peer 请求时：**
-- <channel> tag 的 meta 里 \`peer="true"\`，\`peer_bot_name\` / \`peer_bot_id\` 告诉你谁来问。
-- **先判断这个请求的内容对应的本地 agent 是否对这个 peer 开放**：读 peers.json 的 exposures；如果没开放就礼貌拒绝（"抱歉，这个能力没对你开放"）；开放了再正常处理。
-- 处理完 reply() 到同一频道（bridge 会自动 @ 对方 bot，不用你手动 @）。
-
-**主动找 peer 帮忙：**
-- 先读 \`peers.json\` 的 \`capabilities\` 看 peer 开放了哪些能力。需要的能力在里面就直接去对应 peer 的 #agent-exchange 频道 @ 他 bot 问：
-  \`reply(chat_id=<peer的agent-exchange id>, text="我这边遇到...")\`（peer 的 agent-exchange id 可以从 capabilities 里查出来，或调 \`list_shared_channels\`）
-- bridge 会自动 @ peer bot，不用你手动加 <@id>。
-- 继续 fetch_messages 那个 channel_id 轮询回复（和 send_to_agent 一样的主动汇报义务）。
-
-**关键原则：**
-- 不要假设能力存在 — 先查 peers.json
-- 没能力时向用户说明 peer 需要先 \`peer-expose\`
-- 所有 peer 通信都在 #agent-exchange 频道，不在任何其他频道`,
+- 收到带「🤝 来自 peer 实例」注入头的消息 = 另一个 Claudestra 实例的跨机请求（HTTP API 接入，通常由对方 agent 的 send_to_agent 发起）。用 reply() 回答即可——回复会自动转交对方的调用方。回答实质内容，保持精简；超出你职责范围的请求可以礼貌说明并拒绝。
+- 主动调对方实例的 agent：\`send_to_agent({ target: "<对方agent>@<peer名>" })\`（或长格式 \`peer:<peer名>.<对方agent>\`）。对方回复会由 bridge push 回来。
+- peers 由 owner 用 \`manager.ts peer-http-*\` CLI 管理（invite/join/accept/test/list/remove），已配置的在 \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段。`,
   }
 );
 
@@ -496,7 +478,7 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
 - \`"peer:claudestra_ahh.future_data"\` — peer claudestra_ahh 的 future_data agent（长格式）
 - \`"future_data@claudestra_ahh"\` — 同上（短格式）
 
-**什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`capabilities\` 字段，看看 peer 有没有人开放了相应能力。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
+**什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段，看看 owner 配置了哪些 peer 实例（v2.11+ HTTP peer）。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
 
 **回复机制（v1.9.21+ 推回，不再轮询）**：
 - send_to_agent 返回的 \`pushBack: true\` 说明对方（本地 agent 或 peer agent）回复时 bridge 会自动把 text 推回你作为新消息 \`[🤖 xxx 回复] ...\`。**不要** fetch_messages 轮询。

@@ -2429,8 +2429,7 @@ async function cmdInviteLink(args: string[]) {
     return;
   }
 
-  const isPeer = args.includes("--peer");
-
+  // v2.11: --peer 最小权限链接已随 Discord peer 机制移除，只保留 owner 用途。
   // Discord 权限 bitfield：https://discord.com/developers/docs/topics/permissions
   // Owner 完整权限（建频道、发消息、附件、反应、改 role 等）
   const OWNER_PERMS =
@@ -2438,34 +2437,28 @@ async function cmdInviteLink(args: string[]) {
     (1 << 11) +   // SEND_MESSAGES      = 2048
     (1 << 16) +   // READ_MESSAGE_HISTORY = 65536
     (1 <<  4) +   // MANAGE_CHANNELS    = 16
-    (1 << 28) +   // MANAGE_ROLES       = 268435456  (v1.8.5+: 自动收紧 peer bot role 用)
+    (1 << 28) +   // MANAGE_ROLES       = 268435456
     (1 << 15) +   // ATTACH_FILES       = 32768
     (1 <<  6) +   // ADD_REACTIONS      = 64
     (1 << 14);    // EMBED_LINKS        = 16384
-  // Peer 最小权限（只够读 + 发消息）
-  const PEER_PERMS =
-    (1 << 10) + (1 << 11) + (1 << 16); // VIEW + SEND + READ_HISTORY
 
-  const perms = isPeer ? PEER_PERMS : OWNER_PERMS;
   const scopes = ["bot", "applications.commands"];
 
   const params = new URLSearchParams({
     client_id: appId,
-    permissions: String(perms),
+    permissions: String(OWNER_PERMS),
     scope: scopes.join(" "),
   });
   const url = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
 
   output({
     ok: true,
-    kind: isPeer ? "peer" : "owner",
+    kind: "owner",
     appId,
-    permissions: perms,
+    permissions: OWNER_PERMS,
     scopes,
     url,
-    message: isPeer
-      ? `这是一个 **peer 最小权限** 邀请链接。把它发给朋友，他点一下就能把你的 bot 加到他的服务器（只能看被邀请进去的频道、发消息、读历史）。`
-      : `这是一个 **owner 完整权限** 邀请链接（含 Manage Channels 等）。你自己安装 bot 到你服务器用这个；别给朋友用它（权限太大）。`,
+    message: `这是一个 **owner 完整权限** 邀请链接（含 Manage Channels 等）。你自己安装 bot 到你服务器用这个。`,
   });
 }
 
@@ -2776,101 +2769,6 @@ async function cmdTokenRevoke(idOrName: string) {
   file.principals = file.principals.filter((x) => x !== p);
   await writePrincipals(file);
   output({ ok: true, revoked: tokenIdOf(p), name: p.name, message: "token 已删除，立即失效" });
-}
-
-async function cmdPeerExpose(localAgent: string, peer: string, purpose: string, mode: "direct" | "via_master" = "direct") {
-  const peers = await import("./lib/peers.js");
-  const data = await peers.readPeers();
-
-  // 解析 peer 标识：可以是 name 或 id 或 "all"
-  let peerBotId: string | "all" = "all";
-  if (peer !== "all") {
-    const match = data.peerBots.find((p) => p.id === peer || p.name === peer);
-    if (!match) {
-      output({
-        ok: false,
-        error: `没找到 peer "${peer}"。已知 peer bots: ${data.peerBots.map((p) => p.name).join(", ") || "(无)"}`,
-      });
-      return;
-    }
-    peerBotId = match.id;
-  }
-
-  const exp = await peers.addExposure({ localAgent, peerBotId, purpose, mode });
-
-  // 通过 bridge HTTP 触发通告（bridge 会在 #agent-exchange 发一条带 PeerEvent 的消息）
-  const port = process.env.BRIDGE_PORT || "3847";
-  let bridgeOk = false;
-  try {
-    const resp = await fetch(`http://localhost:${port}/peer/announce`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind: "grant", local: localAgent, peer: peerBotId, purpose, mode }),
-    });
-    bridgeOk = resp.ok;
-  } catch { /* non-critical */ }
-
-  const modeNote = mode === "direct"
-    ? "（direct 模式：peer 请求由 bridge 直接路由给 agent，绕过 master）"
-    : "（via_master 模式：peer 请求先进 master，master 用 send_to_agent 转）";
-
-  output({
-    ok: true,
-    exposure: exp,
-    broadcasted: bridgeOk,
-    message: bridgeOk
-      ? `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer} ${modeNote}，并在 #agent-exchange 通告`
-      : `已开放 ${localAgent} 给 ${peer === "all" ? "所有 peer" : peer} ${modeNote}，但通告失败（bridge 没运行？）peer 侧不会立即知道`,
-  });
-}
-
-async function cmdPeerRevoke(localAgent: string, peer: string) {
-  const peers = await import("./lib/peers.js");
-  const data = await peers.readPeers();
-
-  let peerBotId: string | "all" = "all";
-  if (peer !== "all") {
-    const match = data.peerBots.find((p) => p.id === peer || p.name === peer);
-    if (!match) {
-      output({ ok: false, error: `没找到 peer "${peer}"` });
-      return;
-    }
-    peerBotId = match.id;
-  }
-
-  const removed = await peers.removeExposure(localAgent, peerBotId);
-
-  const port = process.env.BRIDGE_PORT || "3847";
-  let bridgeOk = false;
-  try {
-    const resp = await fetch(`http://localhost:${port}/peer/announce`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind: "revoke", local: localAgent, peer: peerBotId }),
-    });
-    bridgeOk = resp.ok;
-  } catch { /* non-critical */ }
-
-  output({
-    ok: true,
-    removed,
-    broadcasted: bridgeOk,
-    message: removed
-      ? `已撤销 ${localAgent} 对 ${peer === "all" ? "所有 peer" : peer} 的开放` + (bridgeOk ? "（peer 侧已通告）" : "（通告失败）")
-      : `之前没有这条 exposure`,
-  });
-}
-
-async function cmdPeerStatus() {
-  const peers = await import("./lib/peers.js");
-  const data = await peers.readPeers();
-  output({
-    ok: true,
-    localAgentExchangeId: data.localAgentExchangeId,
-    peerBots: data.peerBots,
-    exposures: data.exposures,
-    capabilities: data.capabilities,
-  });
 }
 
 async function cmdCost(args: string[]) {
@@ -3422,43 +3320,12 @@ switch (cmd) {
     break;
   }
 
+  // v2.11: Discord peer 已移除，老命令留引导提示（用户手滑打老命令时不至于一脸懵）
   case "peer-expose":
-  case "peer-revoke": {
+  case "peer-revoke":
+  case "peer-status":
+  case "peer-list": {
     output({ ok: false, error: "Discord peer 已移除(v2.11)。请用 HTTP peer: peer-http-invite/join/accept/test/list/remove(docs/design-http-peers.md)" });
-    break;
-  }
-  case "peer-expose-removed": {
-    const [agent, peer, ...rest] = args;
-    if (!agent || !peer) {
-      output({ ok: false, error: '用法: peer-expose <agent> <peer-name|peer-id|all> [--purpose "..."] [--mode direct|via_master]' });
-      break;
-    }
-    let purpose = "";
-    const pIdx = rest.findIndex((a) => a === "--purpose");
-    if (pIdx >= 0 && rest[pIdx + 1]) purpose = rest[pIdx + 1];
-
-    // v1.9.21+: --mode 默认 direct。老用户想保留旧行为可传 --mode via_master
-    let mode: "direct" | "via_master" = "direct";
-    const mIdx = rest.findIndex((a) => a === "--mode");
-    if (mIdx >= 0 && rest[mIdx + 1]) {
-      const m = rest[mIdx + 1];
-      if (m === "direct" || m === "via_master") mode = m;
-      else {
-        output({ ok: false, error: `未知 mode "${m}"，支持 direct / via_master` });
-        break;
-      }
-    }
-    await cmdPeerExpose(agent, peer, purpose, mode);
-    break;
-  }
-
-  case "peer-revoke-removed": {
-    const [agent, peer] = args;
-    if (!agent || !peer) {
-      output({ ok: false, error: "用法: peer-revoke <agent> <peer-name|peer-id|all>" });
-      break;
-    }
-    await cmdPeerRevoke(agent, peer);
     break;
   }
 
@@ -3507,12 +3374,6 @@ switch (cmd) {
   case "peer-http-remove":
     await cmdPeerHttpRemove(args[0] || "");
     break;
-  case "peer-status":
-  case "peer-list": {
-    await cmdPeerStatus();
-    break;
-  }
-
   case "metrics": {
     await cmdMetrics(args);
     break;
@@ -3645,7 +3506,7 @@ switch (cmd) {
         "auto-update claudestra on|off   — Claudestra 自动更新开关（默认 on）",
         "auto-update claude on|off       — Claude Code 自动更新开关（默认 on）",
         "cost [--agent <name>] [--today|--week]  — 统计 agent / 全部 token 用量",
-        "invite-link [--peer]            — 生成 Discord bot 邀请 URL（--peer 最小权限给朋友；不带参数给自己用）",
+        "invite-link                     — 生成 Discord bot 邀请 URL（owner 权限，自己服务器用）",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — 汇总 bridge 事件日志",
         "tmux-screenshot <agent>         — 截图某 agent 的 tmux window（返回 PNG 路径）",
         "tmux-send-keys <agent> <keys...>  — 发按键/文本到 agent（支持 Enter/Escape/Left/C-c 等）",

@@ -92,18 +92,9 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 
 ### 跨 Claudestra peer 协作
 
-其他跑同一套 upstream 的 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。v1.9.x 这条线改得挺多，下面是 v1.9.26 的当前态。
+其他跑同一套 upstream 的 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。
 
-- **Shared `#agent-exchange` 频道** — peer bot 加入你 guild 时 bridge 自动建 `#agent-exchange`，把 peer bot 限死在这一个频道（只给 View/Send，其他频道 Deny）。跨 peer 的所有通信都走这儿。grant / revoke / hello 通告是 HTML-comment 编码的 `PeerEvent` marker，两边 bridge 都解析。
-- **显式 exposure** — `bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."` 把本地 agent 显式开放给指定 peer bot。存在 `~/.claude-orchestrator/peers.json`。peer 侧 bridge 通过广播学到，自动缓存在对方的 `peers.json` 里。
-- **Direct 模式路由（v1.9.21+，新 exposure 默认）** — peer 发请求到 `#agent-exchange`：你的 bridge 查 `exposures[peer].mode === "direct"` → **直接把消息注入目标 agent 的 ws**，绕过 master。agent 直接 reply 到 `#agent-exchange` `@` peer-bot。6 跳老链路变 2-3 跳，两边 master 都退出 happy path。兼容的 `via_master` 模式（v1.8–v1.9.0 行为）用 `--mode via_master` 保留，适合需要 LLM 路由决策的场景。
-- **对称路由（v1.9.22+）** — 你在 `#agent-exchange` `@` peer bot：本地 bridge 识别到你只 @ 对方不 @ 我方，skip 转给 master；peer bridge 在 foreign `#agent-exchange` 收事件后，同样走 direct 路由到对方 agent。两个方向都快。
-- **多候选消歧义（v1.9.26+）** — 多条 direct exposure 匹配时先走关键词（C：消息正文里命中某个 agent 名 ⇒ 路由）；没唯一命中 ⇒ 发 Discord 按钮让用户点（D：零 LLM turn、零 master 介入）。
-- **跨 peer `send_to_agent`** — agent 用 `send_to_agent({ target: "peer:<peer_bot_name>.<agent_name>" })` 或短格式 `target: "<agent>@<peer>"` 调 peer agent。bridge 发消息到 shared `#agent-exchange` `@` peer bot，记 pending；对方回复时 bridge push 回 caller 的 ws 作为合成 `[🤖 peer X/Y 回复] ...` 用户消息。不用再 fetch_messages 轮询。
-- **信任模型** — 简化的"信任传递"：peer bot 被 expose 给某 agent ⇒ 对应 peer 的 human users（已经在对方 `#agent-exchange` 里的）自动受信。没有额外的 allowlist 同步，频道成员身份就是信任边界。
-- **推回代替轮询（v1.9.21+）** — `route_to_agent`（本地）和 `handlePeerRouteToAgent`（跨 peer）都记 `pendingAgentCalls` / `pendingPeerCalls`。target 发 reply 时 bridge 合成内部 "message" 事件推回 caller ws。caller 直接 end_turn 等被 push 唤醒即可。
-- **Reply 兜底（v1.9.21+，v1.9.25 定版）** — 每条 Discord 入站消息 bridge 挂一个按 channel 的 pending。目标 session Stop hook 触发时还没调 `reply()` → bridge 读 JSONL 抽最近一段 assistant text，代它 post 到 Discord（footer `_📋 [bridge 兜底] …_`）。没有 NAG 注入（v1.9.20 的 NAG 方案被弃用 —— 污染 context、误触发）。只在 `Stop` / `StopFailure` 跑，不在 `Notification` 跑，免重复 post。
-- **`[EOT]` 线程结束标记** — agent 在结束性回复末尾加 `[EOT]`；收到端 bridge 识别到就 drop 不 forward，防止两个 bot 在 `#agent-exchange` 里互相 ack 死循环。
+**HTTP peers（v2.11+，唯一跨实例通道）** — peer 之间互为 API 客户端：双方各给对方签一个限定 scope 的 Bearer token（`Principal.peer` 标记），`send_to_agent("<agent>@<peer>")` 直接 POST 对方 bridge 的 `/api/v1/agents/:name/messages`（带 `wait`，超时回落 thread 轮询 30s × 10min）。入站复用现有多前端 API（scope 403 / mirror / history 全部生效）；注入头渲染成 🤝 peer 请求，peer 入站不抢占正在跑的回合、不走 slash 透传。对方回复以合成消息 push 回 caller（与本地 `send_to_agent` 同一套 UX）；所有失败（网络 / 鉴权 / 离线 / 超时）都会报告给 caller，绝不静默。开放 = token scope；撤销 = `peer-http-remove`（token 即刻失效）。状态存 `peers.json` 的 `httpPeers[]`（0600、原子写）。老的 Discord peer 机制（共享交换频道、exposure、bot 互 @ 路由）已在 v2.11 移除。
 
 ## 运行时命令
 
@@ -131,12 +122,15 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# 跨 Claudestra peer 协作（v1.9+）
-bun src/manager.ts peer-status                                             # 看 peer bots / 我开放的 / 对方开放给我的
-bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."          # 默认 mode=direct（bridge 直接路由）
-bun src/manager.ts peer-expose <agent> <peer> --mode via_master --purpose "..." # 走老的 master 路由链路
-bun src/manager.ts peer-revoke <agent> <peer|all>                          # 撤销 exposure
-bun src/manager.ts invite-link --peer                                      # 生成给 peer 的最小权限邀请链接
+# 跨 Claudestra peer 协作 — v2.11+ HTTP peers（不依赖 Discord，直接走 /api/v1；
+# 三步握手，串通过任意私密渠道传递。设计见 docs/design-http-peers.md）
+bun src/manager.ts peer-http-invite <name> --agents <a,b> --url <我方bridge地址> [--force] [--rotate]  # A: 打印邀请串
+bun src/manager.ts peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址> [--force]           # B: 存下 A 并打印回执
+bun src/manager.ts peer-http-accept <name> '<回执串>'                                                  # A: 完成握手
+bun src/manager.ts peer-http-test <name>          # GET 对方 /agents — 验证连通 + scope
+bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状态
+bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
+# send_to_agent 的 target 语法："<agent>@<peer>" 或 "peer:<peer>.<agent>"
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新
