@@ -3422,7 +3422,12 @@ switch (cmd) {
     break;
   }
 
-  case "peer-expose": {
+  case "peer-expose":
+  case "peer-revoke": {
+    output({ ok: false, error: "Discord peer 已移除(v2.11)。请用 HTTP peer: peer-http-invite/join/accept/test/list/remove(docs/design-http-peers.md)" });
+    break;
+  }
+  case "peer-expose-removed": {
     const [agent, peer, ...rest] = args;
     if (!agent || !peer) {
       output({ ok: false, error: '用法: peer-expose <agent> <peer-name|peer-id|all> [--purpose "..."] [--mode direct|via_master]' });
@@ -3447,7 +3452,7 @@ switch (cmd) {
     break;
   }
 
-  case "peer-revoke": {
+  case "peer-revoke-removed": {
     const [agent, peer] = args;
     if (!agent || !peer) {
       output({ ok: false, error: "用法: peer-revoke <agent> <peer-name|peer-id|all>" });
