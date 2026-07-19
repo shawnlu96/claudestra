@@ -44,6 +44,11 @@ export interface Principal {
    * 显式授予，不让一个只读/messaging token 静默拿到 shell。owner 默认允许。
    */
   terminal?: boolean;
+  /**
+   * v2.11+ HTTP peer 标记：此 token 是签给哪个 peer 实例的（peers.json httpPeers
+   * 的 name）。入站注入头据此渲染成「peer 跨机请求」而非「Web 端用户」。
+   */
+  peer?: string;
 }
 
 export interface PrincipalsFile {
@@ -74,7 +79,7 @@ export async function writePrincipals(data: PrincipalsFile, path = PRINCIPALS_PA
 export function newTokenPrincipal(
   name: string,
   agents: string[],
-  opts?: { terminal?: boolean },
+  opts?: { terminal?: boolean; peer?: string },
 ): Principal {
   const tokenId = `tok_${randomBytes(4).toString("hex")}`;
   return {
@@ -87,6 +92,7 @@ export function newTokenPrincipal(
     createdAt: new Date().toISOString(),
     mirror: true,
     ...(opts?.terminal ? { terminal: true } : {}),
+    ...(opts?.peer ? { peer: opts.peer } : {}),
   };
 }
 

@@ -126,6 +126,8 @@ SETUP.md                 User-facing installation guide
 
 ### Cross-Claudestra peer collaboration
 
+**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as Discord peers); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The Discord-based flow below still works and remains the fallback when an HTTP peer name doesn't match.
+
 Peers (other Claudestra installs running the same upstream) can share their specialist agents without giving each other SSH / filesystem access. The model evolved significantly in the v1.9.x line; this is the current state as of v1.9.26.
 
 - **Shared `#agent-exchange` channel** — when a peer bot joins your guild, bridge auto-creates a `#agent-exchange` channel and scopes the peer bot to that single channel (View/Send on `#agent-exchange`, Deny View on everything else). All cross-peer communication flows through these shared channels. Broadcast notifications (exposure grant/revoke, hello) travel here as HTML-comment-encoded `PeerEvent` markers that both bridges parse.
@@ -167,6 +169,16 @@ bun src/manager.ts cron-history [name|id]
 
 # Cross-Claudestra peer collaboration (v1.9+)
 bun src/manager.ts peer-status                                             # list peer bots + exposures + capabilities
+# v2.11+ HTTP peers (recommended; no Discord dependency — peers talk over the /api/v1 surface directly.
+# Handshake is 3 steps; strings travel over any private channel. Design: docs/design-http-peers.md)
+bun src/manager.ts peer-http-invite <name> --agents <a,b> --url <my-bridge-url> [--force] [--rotate]  # A: print invite string
+bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> [--force]           # B: store A, print receipt
+bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
+bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
+bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
+bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
+# send_to_agent target syntax is unchanged: "<agent>@<peer>" — httpPeers match first, Discord fallback
+
 bun src/manager.ts peer-expose <agent> <peer|all> --purpose "..."          # default mode=direct (bridge-level routing)
 bun src/manager.ts peer-expose <agent> <peer> --mode via_master --purpose "..." # legacy: route through master
 bun src/manager.ts peer-revoke <agent> <peer|all>                          # revoke an exposure

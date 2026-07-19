@@ -13,6 +13,7 @@
  *   bun src/manager.ts sessions [search]
  */
 
+import { hostname } from "os";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -2556,6 +2557,196 @@ async function cmdTokenAdd(name: string, agentsCsv: string, force: boolean, noMi
   });
 }
 
+// ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
+
+/** peer 名校验:名字要进 `x@peer` / `peer:name.agent` 寻址语法,"@" "." 空白都会
+ *  撞分隔符(review 2026-07-19 #11) */
+function validPeerName(name: string): boolean {
+  return /^[\w-]{1,32}$/.test(name);
+}
+
+/** 握手串自报名:对方界面上「谁邀请的我」。USER_NAME 是 setup 时配置的称呼。 */
+function selfPeerName(): string {
+  return (process.env.USER_NAME || "").trim().replace(/[^\w-]/g, "") || hostname().split(".")[0];
+}
+
+/** invite/join 共用的 scope 校验（token-add 同款 R1 规则,不动原函数避免回归） */
+async function checkPeerScope(agents: string[], force: boolean): Promise<{ error?: string; warnings: string[] }> {
+  const reg = await loadRegistry();
+  const warnings: string[] = [];
+  for (const a of agents) {
+    if (a === "*") {
+      if (!force) return { error: `--agents "*" 会把全部 agent 开放给 peer（R1 共享上下文风险）。确认请加 --force。`, warnings };
+      warnings.push(`"*" scope：所有普通 agent 都对此 peer 可见`);
+      continue;
+    }
+    if (a === "master") {
+      if (!force) return { error: `把大总管开放给 peer 风险极高（R1）。确认请加 --force。`, warnings };
+      warnings.push(`"master" scope：大总管对此 peer 可见`);
+      continue;
+    }
+    const info = reg.agents[a] || reg.agents[`agent-${a}`];
+    if (!info) return { error: `agent "${a}" 不存在`, warnings };
+    if (!info.external && !force) {
+      return { error: `agent "${a}" 未标 external——peer 可套出其上下文既有内容（R1）。建议为 peer 用途 create --external 专用 agent；确实要开放就加 --force。`, warnings };
+    }
+    if (!info.external) warnings.push(`"${a}" 未标 external，已用 --force 强制开放`);
+  }
+  return { warnings };
+}
+
+/** 为 peer 签 token 并登记 principal。返回 {tokenId, secret} */
+async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tokenId: string; secret: string }> {
+  const { readPrincipals, writePrincipals, newTokenPrincipal, tokenIdOf } = await import("./lib/principals.js");
+  const file = await readPrincipals();
+  // 同名 peer 的旧 token 先禁用（重跑握手不留悬空凭据）
+  for (const p of file.principals) {
+    if (p.peer === peerName && !p.disabled) p.disabled = true;
+  }
+  const p = newTokenPrincipal(`peer-${peerName}`, agents, { peer: peerName });
+  file.principals.push(p);
+  await writePrincipals(file);
+  return { tokenId: tokenIdOf(p), secret: p.secret! };
+}
+
+async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myUrl: string, force: boolean, rotate: boolean) {
+  const { upsertHttpPeer, encodePeerHandshake, findHttpPeer } = await import("./lib/peers.js");
+  const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!peerName || agents.length === 0 || !myUrl) {
+    output({ ok: false, error: "peer-http-invite <peerName> --agents <a,b> --url <我方bridge地址,如 http://100.x.y.z:3847> [--force] [--rotate]" });
+    return;
+  }
+  if (!validPeerName(peerName)) {
+    output({ ok: false, error: `peer 名只能是字母/数字/下划线/连字符(1-32 位)——"@" "." 空格会撞 send_to_agent 的寻址语法` });
+    return;
+  }
+  // 重跑保护:签新 token 会禁用旧 token,已完成握手的 peer 会立刻断联(review #9)
+  {
+    const existing = await findHttpPeer(peerName);
+    if (existing?.outToken && existing?.baseUrl && !rotate) {
+      output({ ok: false, error: `peer "${peerName}" 已完成握手。重新 invite 会作废对方手里的 token(对方立刻断联,需重新走完三步)。确认轮换请加 --rotate。` });
+      return;
+    }
+  }
+  if (!/^https?:\/\//.test(myUrl)) {
+    output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址（Tailscale IP / 内网 IP / 反代域名）` });
+    return;
+  }
+  const check = await checkPeerScope(agents, force);
+  if (check.error) { output({ ok: false, error: check.error }); return; }
+  const { tokenId, secret } = await issuePeerToken(peerName, agents);
+  await upsertHttpPeer({ name: peerName, inTokenId: tokenId });
+  const invite = encodePeerHandshake({ v: 1, name: selfPeerName(), url: myUrl.replace(/\/+$/, ""), token: secret });
+  output({
+    ok: true, peer: peerName, exposedAgents: agents, inTokenId: tokenId, warnings: check.warnings,
+    invite,
+    next: `把 invite 串发给对方 → 对方跑: peer-http-join <你的名字> '<invite串>' --agents <他开放的> --url <他的地址> → 他把回执串发回 → 你跑: peer-http-accept ${peerName} '<回执串>'`,
+  });
+}
+
+async function cmdPeerHttpJoin(peerName: string, handshakeStr: string, agentsCsv: string, myUrl: string, force: boolean, rotate: boolean) {
+  const { upsertHttpPeer, parsePeerHandshake, encodePeerHandshake, findHttpPeer } = await import("./lib/peers.js");
+  const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!peerName || !handshakeStr || agents.length === 0 || !myUrl) {
+    output({ ok: false, error: "peer-http-join <peerName> '<邀请串>' --agents <a,b> --url <我方地址> [--force] [--rotate]" });
+    return;
+  }
+  if (!validPeerName(peerName)) {
+    output({ ok: false, error: `peer 名只能是字母/数字/下划线/连字符(1-32 位)` });
+    return;
+  }
+  {
+    const existing = await findHttpPeer(peerName);
+    if (existing?.outToken && existing?.baseUrl && !rotate) {
+      output({ ok: false, error: `peer "${peerName}" 已完成握手。重新 join 会作废双方 token。确认轮换请加 --rotate。` });
+      return;
+    }
+  }
+  const hs = parsePeerHandshake(handshakeStr);
+  if (!hs) { output({ ok: false, error: "邀请串无法解析（应为 peer-http-invite 输出的 base64 串）" }); return; }
+  const check = await checkPeerScope(agents, force);
+  if (check.error) { output({ ok: false, error: check.error }); return; }
+  const { tokenId, secret } = await issuePeerToken(peerName, agents);
+  await upsertHttpPeer({ name: peerName, baseUrl: hs.url, outToken: hs.token, inTokenId: tokenId });
+  const receipt = encodePeerHandshake({ v: 1, name: selfPeerName(), url: myUrl.replace(/\/+$/, ""), token: secret });
+  output({
+    ok: true, peer: peerName, peerUrl: hs.url, exposedAgents: agents, inTokenId: tokenId, warnings: check.warnings,
+    receipt,
+    next: `把 receipt 串发回对方 → 对方跑: peer-http-accept <你在他那的名字> '<receipt串>'。然后双方各自 peer-http-test 验证。`,
+  });
+}
+
+async function cmdPeerHttpAccept(peerName: string, handshakeStr: string) {
+  const { findHttpPeer, upsertHttpPeer, parsePeerHandshake } = await import("./lib/peers.js");
+  if (!peerName || !handshakeStr) {
+    output({ ok: false, error: "peer-http-accept <peerName> '<回执串>'" });
+    return;
+  }
+  const existing = await findHttpPeer(peerName);
+  if (!existing) {
+    output({ ok: false, error: `HTTP peer "${peerName}" 不存在——先跑 peer-http-invite ${peerName} ...` });
+    return;
+  }
+  const hs = parsePeerHandshake(handshakeStr);
+  if (!hs) { output({ ok: false, error: "回执串无法解析" }); return; }
+  await upsertHttpPeer({ name: peerName, baseUrl: hs.url, outToken: hs.token });
+  output({ ok: true, peer: peerName, peerUrl: hs.url, note: `握手完成。跑 peer-http-test ${peerName} 验证连通。` });
+}
+
+async function cmdPeerHttpTest(peerName: string) {
+  const { findHttpPeer } = await import("./lib/peers.js");
+  const peer = await findHttpPeer(peerName);
+  if (!peer) { output({ ok: false, error: `HTTP peer "${peerName}" 不存在` }); return; }
+  if (!peer.outToken || !peer.baseUrl) {
+    output({ ok: false, error: `握手未完成（${!peer.baseUrl ? "缺对方地址" : "缺 outToken"}）——invite 后要等 accept 回执` });
+    return;
+  }
+  try {
+    const res = await fetch(`${peer.baseUrl}/api/v1/agents`, {
+      headers: { Authorization: `Bearer ${peer.outToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body: any = await res.json().catch(() => null);
+    if (!res.ok) {
+      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: res.status === 401 ? "token 无效/已 revoke——重新握手" : undefined });
+      return;
+    }
+    const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));
+    output({ ok: true, peer: peerName, url: peer.baseUrl, reachable: true, remoteAgents: agents, note: `send_to_agent 用法: target="<对方agent>@${peerName}"` });
+  } catch (e) {
+    output({ ok: false, error: `连接失败: ${(e as Error).message}`, hint: "确认对方 bridge 在线、BRIDGE_BIND 对外可达、URL/端口正确" });
+  }
+}
+
+async function cmdPeerHttpList() {
+  const { readPeers } = await import("./lib/peers.js");
+  const data = await readPeers();
+  const peers = (data.httpPeers || []).map((p) => ({
+    name: p.name,
+    baseUrl: p.baseUrl || "(等待对方回执)",
+    handshakeDone: !!(p.outToken && p.baseUrl),
+    inTokenId: p.inTokenId,
+    disabled: !!p.disabled,
+    addedAt: p.addedAt,
+  }));
+  output({ ok: true, count: peers.length, httpPeers: peers });
+}
+
+async function cmdPeerHttpRemove(peerName: string) {
+  const { removeHttpPeer } = await import("./lib/peers.js");
+  const { readPrincipals, writePrincipals } = await import("./lib/principals.js");
+  const removed = await removeHttpPeer(peerName);
+  if (!removed) { output({ ok: false, error: `HTTP peer "${peerName}" 不存在` }); return; }
+  // 我签出去的 token 一并禁用——对方立刻失去入站能力
+  const file = await readPrincipals();
+  let revoked = 0;
+  for (const p of file.principals) {
+    if (p.peer === peerName && !p.disabled) { p.disabled = true; revoked++; }
+  }
+  if (revoked) await writePrincipals(file);
+  output({ ok: true, removed: peerName, tokensRevoked: revoked, note: "对方持有的 token 已失效;我方存的对方 token 已删除" });
+}
+
 async function cmdTokenList() {
   const { readPrincipals, tokenIdOf } = await import("./lib/principals.js");
   const file = await readPrincipals();
@@ -3266,6 +3457,51 @@ switch (cmd) {
     break;
   }
 
+  // v2.11+ HTTP peer 握手/管理（docs/design-http-peers.md）
+  case "peer-http-invite": {
+    const { rest: afterRotateI, value: rotate } = extractBoolFlag(args, "--rotate");
+    const { rest: afterForce, value: force } = extractBoolFlag(afterRotateI, "--force");
+    let agentsCsv = "", myUrl = "";
+    const pos: string[] = [];
+    for (let i = 0; i < afterForce.length; i++) {
+      const a = afterForce[i];
+      if (a === "--agents") agentsCsv = afterForce[++i] || "";
+      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
+      else if (a === "--url") myUrl = afterForce[++i] || "";
+      else if (a.startsWith("--url=")) myUrl = a.slice(6);
+      else pos.push(a);
+    }
+    await cmdPeerHttpInvite(pos[0] || "", agentsCsv, myUrl, force, rotate);
+    break;
+  }
+  case "peer-http-join": {
+    const { rest: afterRotateJ, value: rotate } = extractBoolFlag(args, "--rotate");
+    const { rest: afterForce, value: force } = extractBoolFlag(afterRotateJ, "--force");
+    let agentsCsv = "", myUrl = "";
+    const pos: string[] = [];
+    for (let i = 0; i < afterForce.length; i++) {
+      const a = afterForce[i];
+      if (a === "--agents") agentsCsv = afterForce[++i] || "";
+      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
+      else if (a === "--url") myUrl = afterForce[++i] || "";
+      else if (a.startsWith("--url=")) myUrl = a.slice(6);
+      else pos.push(a);
+    }
+    await cmdPeerHttpJoin(pos[0] || "", pos[1] || "", agentsCsv, myUrl, force, rotate);
+    break;
+  }
+  case "peer-http-accept":
+    await cmdPeerHttpAccept(args[0] || "", args[1] || "");
+    break;
+  case "peer-http-test":
+    await cmdPeerHttpTest(args[0] || "");
+    break;
+  case "peer-http-list":
+    await cmdPeerHttpList();
+    break;
+  case "peer-http-remove":
+    await cmdPeerHttpRemove(args[0] || "");
+    break;
   case "peer-status":
   case "peer-list": {
     await cmdPeerStatus();

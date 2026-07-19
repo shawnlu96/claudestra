@@ -126,6 +126,7 @@ import { startPermissionWatcher, permissionMessages, clearPermissionMessage } fr
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
+import { initHttpPeer } from "./bridge/http-peer.js";
 import { readRegistryAgents } from "./lib/registry.js";
 import {
   tmuxCapture,
@@ -502,7 +503,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     threadId,
     agent: agentName,
   };
-  apiThreadResults.set(threadId, { result, ts: Date.now() });
+  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: pending?.tokenId ?? (env.to.kind === "api" ? env.to.tokenId : undefined) });
   pending?.resolve?.(result);
 
   emitEvent({
@@ -551,6 +552,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
+  // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer
+  // 回复」——Stop 不该 @ 用户(与 Discord peer pushback 的 set "agent" 对齐,
+  // review 2026-07-19 #2)
+  if (env.meta.triggerKind === "peer_http") lastMessageSource.set(to.channelId, "agent");
   // chat_id 是 agent reply() 时要传回的 id：消息从哪个 Discord 频道来，回复就发回那里。
   // direct route 场景下 from 是 peer 在 #agent-exchange，agent 被"偷偷"路由到自己私频，
   // 但 reply 目标必须还是 #agent-exchange，不是 agent 的私频。
@@ -606,7 +611,9 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   // 4s 冷却隔开了);paneLooksIdle 不用——工作中的空 ❯ 输入行会假阳性。
   // 同频道 4s 冷却,三连发不叠加打断。
   if (
-    (env.from.kind === "user" || env.from.kind === "api") &&
+    // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,
+    // C-c 掐断本机正跑的回合等于让外机打断本机用户的活(review 2026-07-19 #1)
+    (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) &&
     env.intent === "request" &&
     Date.now() - (lastPreemptAt.get(to.channelId) ?? 0) > PREEMPT_COOLDOWN_MS
   ) {
@@ -838,6 +845,16 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
   // 客户端出现后已失真——Web 有完整聊天记录(history API),agent 被误导后会
   // 重复复述用户已看到的上下文。
   if (from.kind === "api") {
+    // v2.11+ HTTP peer 入站:token 带 peer 标记 → 这是另一个 Claudestra 实例的
+    // 跨机请求(通常由对方 agent 的 send_to_agent 发起),不是本机 Web 用户
+    if (from.peer) {
+      return [
+        `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
+        `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
+        ``,
+        env.content,
+      ].join("\n");
+    }
     return [
       `[🌐 来自 Web 端用户「${from.name}」（HTTP API 接入，非 Discord）。`,
       `用 reply() 回答到本 chat_id。对方界面完整渲染 Markdown（表格可用），且能看到本频道完整聊天记录——不要复述上下文；也不要引用与本请求无关的内容。]`,
@@ -3460,6 +3477,25 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           const [, first, second] = peerMatch;
           const peerIdentifier = rawTarget.startsWith("peer:") ? first : second;
           const peerAgentName = rawTarget.startsWith("peer:") ? second : first;
+          // v2.11+: HTTP peer 优先(同名时压过 Discord capability)——peers.json
+          // httpPeers 名字命中即走 HTTP transport,否则落回 Discord 老路
+          {
+            const { findHttpPeer } = await import("./lib/peers.js");
+            const httpPeer = await findHttpPeer(peerIdentifier);
+            // 握手未完成(invite 后等回执的窗口)不硬报错——落回 Discord 老路,
+            // 迁移期同名 Discord peer 继续可用(review 2026-07-19 #6)
+            if (httpPeer && httpPeer.outToken && httpPeer.baseUrl) {
+              const { routeToHttpPeer } = await import("./bridge/http-peer.js");
+              const result = routeToHttpPeer(
+                ws, fromChannelId, fromName, httpPeer, peerAgentName,
+                String(msg.text || ""),
+                typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
+              );
+              ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
+              console.log(`🌐 HTTP PEER ROUTE: ${fromName} → ${httpPeer.name}/${peerAgentName} (${httpPeer.baseUrl})`);
+              return;
+            }
+          }
           return await handlePeerRouteToAgent(ws, msg, fromChannelId, fromName, peerIdentifier, peerAgentName);
         }
 
@@ -4655,7 +4691,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                   agent: p.agentName,
                   viaFallback: true,
                 };
-                apiThreadResults.set(p.threadId, { result, ts: Date.now() });
+                apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
                 p.resolve?.(result);
                 emitEvent({
                   agent: p.agentName,
@@ -4839,6 +4875,9 @@ initApiRoutes({
   // [fork] clear 端点后台轮转收尾（依赖 bridge 本地的 discord/startWatching，注入）
   scheduleClearRotation,
 });
+
+// v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
+initHttpPeer({ deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null });
 
 const CORS_ORIGIN_SETTING = process.env.BRIDGE_CORS_ORIGIN || "";
 const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";

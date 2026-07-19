@@ -86,6 +86,8 @@ export interface ApiUserEndpoint {
   tokenId: string;
   /** token 的人类名，渲染进 agent 看到的 header */
   name: string;
+  /** v2.11+ HTTP peer 标记(principal.peer 透传):入站注入头渲染成 peer 请求 */
+  peer?: string;
 }
 
 export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint | BridgeEndpoint | ApiUserEndpoint;
@@ -97,6 +99,7 @@ export type Endpoint = LocalEndpoint | PeerEndpoint | UserEndpoint | BridgeEndpo
 export type TriggerKind =
   | "user_discord"    // 人类用户在 Discord 发的消息
   | "peer_discord"    // peer bot 在 Discord 发的消息（通常是对方 agent 的回复）
+  | "peer_http"       // v2.11+ HTTP peer 的回复/错误（bridge/http-peer.ts pushback）
   | "agent_tool"      // 本地 agent 通过 MCP tool 主动发的（reply / send_to_agent）
   | "bridge_synth"    // bridge 自己合成的（rescue、relay、nag 等 —— 都属于"代表某方发声"）
   | "system";         // 系统提示（clean up 通知、错误提示等）

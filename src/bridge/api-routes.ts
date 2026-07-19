@@ -121,8 +121,10 @@ export interface ApiReplyResult {
 }
 
 export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
-/** threadId → 已完成结果（轮询兜底用，TTL 清理见 sweepApiState） */
-export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number }>();
+/** threadId → 已完成结果（轮询兜底用，TTL 清理见 sweepApiState）。
+ *  tokenId = 发起请求的 token——GET /threads 校验属主,peer token 发到外部实例后
+ *  threadId 可枚举面变大,不能让它读别的 token 的结果(review 2026-07-19 #4) */
+export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string }>();
 /** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
 export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
 /** per-token 限流器（30 req/min，内存态） */
@@ -504,7 +506,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const threadMatch = path.match(/^\/threads\/([^/]+)$/);
   if (threadMatch && req.method === "GET") {
     const hit = apiThreadResults.get(threadMatch[1]);
-    if (!hit) return apiJson(404, { ok: false, error: "thread not found (not answered yet, or expired)" });
+    // 属主校验:结果只给发起它的 token(老记录无 tokenId 的放行——兼容窗口内的在飞请求)
+    if (!hit || (hit.tokenId && hit.tokenId !== tokenId)) {
+      return apiJson(404, { ok: false, error: "thread not found (not answered yet, or expired)" });
+    }
     return apiJson(200, { ok: true, ...hit.result });
   }
 
@@ -786,7 +791,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的
     // "/xxx" 落回普通消息——用户可能真想发以 / 开头的文本。TUI 类命令没有回合，
     // 响应带 slash:true 让前端不进「正在回复」态。
-    const slashM = attachments.length === 0 ? text.trim().match(/^\/([\w:-]+)(?:\s+([\s\S]+))?$/) : null;
+    // v2.11: peer token 不给 slash 直通——那是 TUI 控制权(/clear 可跨机清上下文),
+    // messaging scope 不该静默升级(review 2026-07-19 #5)。peer 文本一律按普通消息投。
+    const slashM = attachments.length === 0 && !principal.peer ? text.trim().match(/^\/([\w:-]+)(?:\s+([\s\S]+))?$/) : null;
     if (slashM) {
       const regName = agent.name === "master" ? null : agent.name;
       const resolved = resolveWebInvocation(slashM[1], regName, slashM[2] || "");
@@ -813,7 +820,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
     const env: Envelope = {
-      from: { kind: "api", tokenId, name: tokenName },
+      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}) },
       to: { kind: "local", agentName: agent.name, channelId: agent.channelId, ws: client.ws as any, cwd: client.cwd },
       intent: "request",
       content: text,

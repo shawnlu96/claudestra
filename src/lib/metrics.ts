@@ -30,7 +30,15 @@ export type MetricEvent =
   | "error"
   | "cron_run"
   | "api_slash"                 // [fork] Web slash 直通注入
-  | "claude_defaults_updated";  // [fork] 全局默认模型/effort 变更
+  | "claude_defaults_updated"   // [fork] 全局默认模型/effort 变更
+  // peer 系列（v1.9 起就在用,一直漏在 union 外——bun build 不查类型没暴露）
+  | "peer_route_send"
+  | "peer_pushback"
+  | "peer_relay_foreign_reply"
+  // v2.11+ HTTP peer
+  | "http_peer_out_ok"
+  | "http_peer_out_error"
+  | "http_peer_out_timeout";
 
 export interface MetricRecord {
   ts: string;                   // ISO 8601
