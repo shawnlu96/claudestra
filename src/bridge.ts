@@ -52,7 +52,7 @@ import {
 import { tmuxScreenshot } from "./bridge/screenshot.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
-import { existsSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
 import * as fs from "fs/promises";
 // [fork] master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
@@ -2775,7 +2775,47 @@ const lastCompletionSent = new Map<string, number>();
 // v2.10+ "api"(owner 2026-07-16「谁发的谁回」):Web 端触发的回合不发 Discord @
 // 推送(内容 mirror 照旧,用户在 Web 上收;未来 Web push 反向同理——Discord 触发
 // 的回合不打 Web 推送,本 map 就是两边共用的分流依据)。
-const lastMessageSource = new Map<string, "user" | "agent" | "api">();
+/**
+ * v2.11.x: lastMessageSource 持久化——「web 消息 Discord 还 @」第三次根治
+ * (2026-07-20)。此前的 jsonl 尾部推断有 256KB 窗口:一个 25 分钟长回合写了
+ * 271KB 工具结果,把入站消息挤出窗口 → 推断失败 → 回落默认误 @(实锤)。
+ * 持久态与窗口彻底解耦:set 节流 300ms 原子落盘,bridge 重启同步读回;
+ * jsonl 推断降级为「文件丢失/新频道」的兜底。
+ */
+class PersistedSourceMap extends Map<string, "user" | "agent" | "api"> {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly path = `${process.env.HOME}/.claude-orchestrator/msg-source.json`;
+  constructor() {
+    super();
+    try {
+      const raw = JSON.parse(readFileSync(this.path, "utf8")) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(raw)) {
+        if (v === "user" || v === "agent" || v === "api") super.set(k, v);
+      }
+    } catch {
+      /* 首次运行/文件损坏——空表启动,靠推断兜底 */
+    }
+  }
+  override set(k: string, v: "user" | "agent" | "api"): this {
+    super.set(k, v);
+    this.scheduleFlush();
+    return this;
+  }
+  private scheduleFlush() {
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      const tmp = `${this.path}.tmp.${process.pid}`;
+      try {
+        writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.entries())));
+        renameSync(tmp, this.path);
+      } catch {
+        /* best-effort:落盘失败退化回内存态,不影响主流程 */
+      }
+    }, 300);
+  }
+}
+const lastMessageSource = new PersistedSourceMap();
 const COMPLETION_DEDUPE_MS = 10_000; // 10 秒内不重复发完成通知
 
 /**
