@@ -243,7 +243,9 @@ GET  /api/v1/files/:opaqueId          出站附件下载（bridge 登记过的�
 
 ### 5.4 审计镜像（owner 可见性，遗漏补遗 R2）
 
-peer 协作特意让跨界对话过 `#agent-exchange` 以便审计；API 对话若完全不碰 Discord，
+peer 协作特意让跨界对话过 `#agent-exchange` 以便审计（Update v2.11：Discord peer
+已移除，HTTP peer 的审计正是靠本节的镜像机制，见 `docs/design-http-peers.md`）；API
+对话若完全不碰 Discord，
 owner 就失去了「外部人跟我的 agent 聊了什么」的视野。因此 **deliverToApi 默认把
 双向对话镜像到该 agent 的 Discord 频道**（入站 `[🌐 API←张三] ...`、出站
 `[🌐 API→张三] ...`，走 deliver(bridge→user) 的 UI 类通道，不进 agent 上下文）。
@@ -322,6 +324,7 @@ async function deliverToUser(env, to) {
 - **D2→D7 带前缀 chat_id 统一 keyspace**：pending/thread/registry/agent 全部零改动；裸 id = discord 永久兼容。
 - **D3 不改 registry 主键**：agent 仍以 Discord 频道为主会话（Discord 是 primary transport）。「无 Discord 频道的 agent」等真需求出现再引入内部 id。
 - **D4 peer 协作不动**：`#agent-exchange` 的信任模型就是 Discord 频道成员资格，是特性不是耦合。
+  - **Update（v2.11）**：本条已失效——Discord peer 机制（含 `#agent-exchange`）整体移除，跨实例协作改为基于本 API 的 HTTP peer（互签 scoped token），见 `docs/design-http-peers.md`。
 - **D5 无持久化事件存储**：实时走 bus，历史读 jsonl（纯库已有）。网页版历史回放是 future。
 - **D6 管理面不进 API（v1）**：但 principals 授权模型现在就带 role 字段，为 future 管理 API 留位。
 - **D7 路径版本化 `/api/v1/`** + **三个 schema additive-only**（NeutralMessage / NeutralComponent / BridgeEvent）：这是对前端作者的兼容承诺。

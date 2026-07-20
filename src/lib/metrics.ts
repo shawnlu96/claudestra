@@ -31,14 +31,23 @@ export type MetricEvent =
   | "cron_run"
   | "api_slash"                 // [fork] Web slash 直通注入
   | "claude_defaults_updated"   // [fork] 全局默认模型/effort 变更
-  // peer 系列（v1.9 起就在用,一直漏在 union 外——bun build 不查类型没暴露）
-  | "peer_route_send"
-  | "peer_pushback"
-  | "peer_relay_foreign_reply"
-  // v2.11+ HTTP peer
+  // v2.11+ HTTP peer(Discord peer 系列事件已随机制移除)
   | "http_peer_out_ok"
   | "http_peer_out_error"
-  | "http_peer_out_timeout";
+  | "http_peer_out_timeout"
+  // 长期在用但一直漏在 union 外的事件(bun build 不查类型,2026-07-20 审计补齐)
+  | "message_dropped"
+  | "agent_exited"
+  | "agent_link_down"
+  | "agent_pushback"
+  | "agent_pushback_drain"
+  | "agent_pushback_drain_silent"
+  | "bg_activity_started"
+  | "bg_activity_completed"
+  | "bridge_start_cleanup"
+  | "doppelganger_detected"
+  | "ia_watchdog_nudge"
+  | "reply_cross_agent_forward";
 
 export interface MetricRecord {
   ts: string;                   // ISO 8601

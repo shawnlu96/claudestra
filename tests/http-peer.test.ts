@@ -194,3 +194,39 @@ describe("http-peer 出站状态机", () => {
     expect(h.pushed[0]).toContain("数据在此");
   });
 });
+
+// ── 用户接管取消(review 2026-07-20 #3)──────────────────────────────────
+import { cancelHttpPeerCallsForChannel } from "../src/bridge/http-peer";
+
+describe("用户接管取消在飞调用", () => {
+  test("取消后到货的回复被丢弃,不 pushback", async () => {
+    const pushed: string[] = [];
+    let resolveFetch: ((r: Response) => void) | null = null;
+    initHttpPeer({
+      deliver: async (env) => {
+        pushed.push(env.content);
+        return { envelope: env, outcome: { kind: "sent" } };
+      },
+      fetchImpl: (async () =>
+        new Promise<Response>((r) => {
+          resolveFetch = r;
+        })) as unknown as typeof fetch,
+    });
+    routeToHttpPeer(fakeWs, "chan-x", "caller", PEER, "x", "问题");
+    await sleep(20);
+    // 用户接管:取消该频道全部在飞调用
+    expect(cancelHttpPeerCallsForChannel("chan-x")).toBe(1);
+    // 之后 peer 回复才到
+    resolveFetch!(json(200, { ok: true, reply: "迟到的回复", threadId: "t9", agent: "x" }));
+    await sleep(50);
+    expect(pushed.length).toBe(0);
+  });
+
+  test("其它频道的调用不受影响", async () => {
+    const h = makeHarness([() => json(200, { ok: true, reply: "正常回复", threadId: "t10", agent: "x" })]);
+    routeToHttpPeer(fakeWs, "chan-b", "caller", PEER, "x", "问题");
+    expect(cancelHttpPeerCallsForChannel("chan-other")).toBe(0);
+    await sleep(50);
+    expect(h.pushed.length).toBe(1);
+  });
+});

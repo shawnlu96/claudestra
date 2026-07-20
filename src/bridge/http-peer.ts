@@ -53,6 +53,27 @@ interface CallerRef {
 /** 进行中的出站调用数（诊断/测试用） */
 export const inflightHttpPeerCalls = new Set<string>();
 
+/** callId → caller channelId(用户接管/kill 取消用) */
+const inflightByCaller = new Map<string, string>();
+const cancelledCalls = new Set<string>();
+
+/**
+ * 取消某 caller 频道上全部在飞的 HTTP peer 调用(v2.4.16 语义在 HTTP 路径的
+ * 复刻,review 2026-07-20 #3):用户在频道打字接管、或 agent 被 kill 时调——
+ * 之后到货的 peer 回复不再 pushback,避免把 agent 拽回已被用户叫停的线程。
+ * 返回取消条数。
+ */
+export function cancelHttpPeerCallsForChannel(channelId: string): number {
+  let n = 0;
+  for (const [callId, ch] of inflightByCaller.entries()) {
+    if (ch === channelId) {
+      cancelledCalls.add(callId);
+      n++;
+    }
+  }
+  return n;
+}
+
 /**
  * 出站主入口。**同步阶段**只做参数构造——立即给 caller 回 MCP response
  * （ok+pushBack），真正的 HTTP 往返在后台进行，结果一律以合成消息推回。
@@ -70,8 +91,11 @@ export function routeToHttpPeer(
   const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName };
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   inflightHttpPeerCalls.add(callId);
+  inflightByCaller.set(callId, fromChannelId);
   void runCall(callId, caller, peer, peerAgentName, text, expecting).finally(() => {
     inflightHttpPeerCalls.delete(callId);
+    inflightByCaller.delete(callId);
+    cancelledCalls.delete(callId);
   });
   return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: true };
 }
@@ -102,7 +126,7 @@ async function runCall(
       signal: AbortSignal.timeout(POST_TIMEOUT_MS),
     });
   } catch (e) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`, peer, peerAgentName);
+    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`, peer, peerAgentName, false, callId);
     recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "network" } });
     return;
   }
@@ -115,17 +139,17 @@ async function runCall(
   }
 
   if (res.status === 401 || res.status === 403) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${body?.error || "token 无效或 agent 不在授权范围"}）。可能对方已 revoke——联系对方确认或重新握手。`, peer, peerAgentName);
+    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${body?.error || "token 无效或 agent 不在授权范围"}）。可能对方已 revoke——联系对方确认或重新握手。`, peer, peerAgentName, false, callId);
     recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "auth", status: res.status } });
     return;
   }
   if (res.status === 404 || res.status === 409) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label}：${body?.error || `对方 agent 不存在或离线（${res.status}）`}`, peer, peerAgentName);
+    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label}：${body?.error || `对方 agent 不存在或离线（${res.status}）`}`, peer, peerAgentName, false, callId);
     recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "target", status: res.status } });
     return;
   }
   if (!res.ok && res.status !== 202) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 返回 ${res.status}：${body?.error || "未知错误"}`, peer, peerAgentName);
+    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 返回 ${res.status}：${body?.error || "未知错误"}`, peer, peerAgentName, false, callId);
     recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "http", status: res.status } });
     return;
   }
@@ -133,14 +157,14 @@ async function runCall(
   // 同步拿到回复（wait 命中）
   const replyText = extractReplyText(body);
   if (replyText) {
-    await pushReply(caller, peer, peerAgentName, replyText, expecting);
+    await pushReply(caller, peer, peerAgentName, replyText, expecting, callId);
     recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "wait" } });
     return;
   }
   // 200 且 reply 为 null/空串 = 对方回合结束但没有文本回复（罕见）——终止,不空转轮询
   // (空串场景:对方 reply() 只发按钮/附件无文本,ApiReplyResult.reply 是 "")
   if (res.status === 200 && body && body.ok && "reply" in body && !String(body.reply ?? "").trim()) {
-    await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。`, peer, peerAgentName);
+    await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。`, peer, peerAgentName, false, callId);
     recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "wait", empty: true } });
     return;
   }
@@ -148,7 +172,7 @@ async function runCall(
   // 202 / wait 超时未答 → thread 轮询兜底
   const threadId: string | undefined = typeof body?.thread_id === "string" ? body.thread_id : typeof body?.threadId === "string" ? body.threadId : undefined;
   if (!threadId) {
-    await pushToCaller(caller, `[⚠️ peer 调用] ${label} 已接收请求但未返回可追踪的 thread——对方版本可能过旧，回复无法自动送达。`, peer, peerAgentName);
+    await pushToCaller(caller, `[⚠️ peer 调用] ${label} 已接收请求但未返回可追踪的 thread——对方版本可能过旧，回复无法自动送达。`, peer, peerAgentName, false, callId);
     return;
   }
   const pollMs = d.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -164,7 +188,7 @@ async function runCall(
       // 鉴权失败不是瞬时故障——对方 revoke/轮换了 token,继续轮只是空转 10 分钟
       // 再误报「超时」(review 2026-07-19 #7)
       if (pr.status === 401 || pr.status === 403) {
-        await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——对方可能已 revoke,需要重新握手。`, peer, peerAgentName);
+        await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——对方可能已 revoke,需要重新握手。`, peer, peerAgentName, false, callId);
         recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "auth_poll", status: pr.status } });
         return;
       }
@@ -172,19 +196,19 @@ async function runCall(
       const pb: any = await pr.json().catch(() => null);
       const t = extractReplyText(pb);
       if (t) {
-        await pushReply(caller, peer, peerAgentName, t, expecting);
+        await pushReply(caller, peer, peerAgentName, t, expecting, callId);
         recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "poll" } });
         return;
       }
       if (pb && pb.ok && "reply" in pb && !String(pb.reply ?? "").trim()) {
-        await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。`, peer, peerAgentName);
+        await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。`, peer, peerAgentName, false, callId);
         return;
       }
     } catch {
       /* 单轮失败不放弃 */
     }
   }
-  await pushToCaller(caller, `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`, peer, peerAgentName);
+  await pushToCaller(caller, `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`, peer, peerAgentName, false, callId);
   recordMetric("http_peer_out_timeout", { channelId: caller.channelId, meta: { peer: peer.name } });
 }
 
@@ -199,17 +223,22 @@ export function extractReplyText(body: any): string | null {
   return null;
 }
 
-async function pushReply(caller: CallerRef, peer: HttpPeer, peerAgent: string, text: string, expecting?: string) {
+async function pushReply(caller: CallerRef, peer: HttpPeer, peerAgent: string, text: string, expecting?: string, callId?: string) {
   const bodyText = expecting
     ? `[💡 你之前 send_to_agent 给 peer ${peer.name}/${peerAgent} 时填的期望：${expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${text}`
     : text;
-  await pushToCaller(caller, bodyText, peer, peerAgent, true);
+  await pushToCaller(caller, bodyText, peer, peerAgent, true, callId);
 }
 
-/** 以合成消息把文本推回 caller（与 Discord peer pushback 同款 envelope 形态） */
-async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, peerAgent: string, isReply = false) {
+/** 以合成消息把文本推回 caller（与 Discord peer pushback 同款 envelope 形态）。
+ *  调用已被用户接管取消(cancelHttpPeerCallsForChannel)的,静默丢弃不投。 */
+async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, peerAgent: string, isReply = false, callId?: string) {
   const d = deps;
   if (!d) return;
+  if (callId && cancelledCalls.has(callId)) {
+    console.log(`🚫 HTTP peer 调用已被用户接管取消,丢弃 pushback (${peer.name}/${peerAgent} → ${caller.channelId})`);
+    return;
+  }
   const env: Envelope = {
     from: {
       kind: "local",

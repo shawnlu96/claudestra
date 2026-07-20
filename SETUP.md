@@ -42,19 +42,21 @@ bun run setup
 
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and starts pm2.
 
-### Cross-Claudestra peer collaboration (v1.8+, redesigned in v1.9)
+### Cross-Claudestra peer collaboration (v2.11+, HTTP peers)
 
-Two Claudestra instances can share specialist agents without giving each other filesystem / SSH access:
+Two Claudestra instances can share specialist agents without a shared Discord server, a second bot, or filesystem / SSH access — peers are simply API clients of each other, each holding a Bearer token the other side issued and scoped to specific agents. The handshake is three CLI steps; the invite/receipt strings travel over any private channel (DM, Signal, whatever):
 
-1. **Friend generates a minimum-permission invite link**: `bun src/manager.ts invite-link --peer` on their side. The URL auto-decodes their bot's Application ID from the token — no Developer Portal clicks needed.
-2. **You click the link** → add their bot to your Discord server. The bridge auto-creates a `#agent-exchange` channel and scopes their bot to it: View + Send on `#agent-exchange` only, Deny View on every other channel.
-3. **You expose specific agents**: `bun src/manager.ts peer-expose <agent> <peer-name|all> --purpose "..."`. Default mode is `direct` — bridge routes peer requests straight to the target agent, bypassing your master. `peer-expose` broadcasts a capability notice via a hidden `PeerEvent` marker in `#agent-exchange`; the peer's bridge auto-updates their `peers.json` capabilities list.
-4. **Friend does the same** for your bot (invites yours, peer-exposes their agents to you).
-5. **Use it**:
-   - Their agent wants yours: `send_to_agent({ target: "peer:your_bot.agent_name", text: "..." })`. Bridge-level routing, push-delivered replies, no polling.
-   - Their user `@your-bot` in `#agent-exchange`: if one of your exposures matches, bridge routes directly to your agent; multiple candidates → Discord button picker (zero LLM turn).
+1. **A invites**: `bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <A-bridge-url>` prints an invite string (A's URL + a freshly issued token scoped to the listed agents). A sends the string to B.
+2. **B joins**: `bun src/manager.ts peer-http-join <peer> '<invite-string>' --agents <x,y> --url <B-bridge-url>` stores A as a peer and prints a receipt string carrying B's token. B sends the receipt back to A.
+3. **A accepts**: `bun src/manager.ts peer-http-accept <peer> '<receipt-string>'` — handshake complete. Both sides run `bun src/manager.ts peer-http-test <peer>` to verify reachability and see which agents the other opened.
 
-Total cross-Claudestra hops shrink from 6 (old master-transcribe model) to 2-3 (direct routing). `peer-status` / `peer-revoke` manage exposures; everything persists in `~/.claude-orchestrator/peers.json`.
+From then on any agent can call `send_to_agent({ target: "<agent>@<peer>", text: "..." })` — the bridge POSTs the peer's `/api/v1` messages endpoint and pushes the reply back to the caller as a synthetic message, no polling. `peer-http-list` shows peers + handshake state; `peer-http-remove <peer>` deletes the peer and revokes the token you issued, cutting access instantly.
+
+Notes:
+
+- **Token scope is the permission model**: only agents named in `--agents` are callable; anything else gets a 403. To change scope later, redo the handshake with `--rotate`.
+- **`--force` for non-external agents**: issuing a token for an agent not created with `--external` requires `--force` — agents sharing context with your own conversations shouldn't be casually exposed (the R1 guard).
+- **Transport**: prefer Tailscale or a private network for `--url`; over the public internet, put the bridge behind an HTTPS reverse proxy (same guidance as `BRIDGE_BIND`).
 
 ### What you get out of the box
 

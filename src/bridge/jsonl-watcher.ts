@@ -515,7 +515,7 @@ export async function drainChannelWatcher(
     let captured: string | null = null;
     if (state.textQueue.length > 0) {
       // v2.0.13+: 在 flushText splice 掉 textQueue 之前先截一份。Stop hook 兜底
-      // pushback / peer-inbound forward 需要这段原文（不要带 flushText 加的 `-# ` 前缀）。
+      // pushback 需要这段原文（不要带 flushText 加的 `-# ` 前缀）。
       // 只保留 `💬 ` / `⛔ ` 前缀的真 assistant 文字，跳过 ⏱/📖/✏️ 这种 telemetry。
       const assistantOnly = state.textQueue
         .filter((item) => item.startsWith("💬 ") || item.startsWith("⛔ "))

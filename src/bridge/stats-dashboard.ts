@@ -356,7 +356,7 @@ async function ensureChannel(discord: Client): Promise<string | null> {
     const ch = await discord.channels.fetch(cfg.statsDashboard.channelId).catch(() => null);
     if (ch) return cfg.statsDashboard.channelId;
   }
-  // 复用 discordCreateChannel（带 peer-deny），再把 @everyone 设成不可发言（只读）
+  // 复用 discordCreateChannel，再把 @everyone 设成不可发言（只读）
   try {
     const chId = await discordCreateChannel(discord, DASHBOARD_CHANNEL_NAME);
     const ch = (await discord.channels.fetch(chId).catch(() => null)) as TextChannel | null;

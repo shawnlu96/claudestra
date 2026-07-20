@@ -55,7 +55,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 - **Multi-frontend API (v2.6.0+)** — Discord is just the first frontend. `GET /events` streams tool calls / assistant text / agent status over SSE; `POST /api/v1/agents/:name/messages` lets external users talk to a scoped set of agents with a Bearer token (sync `wait`, file upload, audit mirroring back to Discord). Build a web UI or a Telegram bot on the same contracts — see `docs/design-multi-frontend.md`.
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
 - **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
-- **Cross-Claudestra peer collaboration (v1.8+, redesigned v1.9+)** — invite your friend's bot; bridge automatically creates a `#agent-exchange` shared channel. Opt-in `peer-expose <agent> <peer>` selectively exposes specific local agents to each peer. v1.9.21+ `direct` mode: bridge routes peer requests **straight to the target agent, bypassing both masters** — 2-3 hops instead of 6. v1.9.22+ symmetric: you `@peer-bot` in `#agent-exchange` and peer's bridge routes directly to their agent; no master turns either way. v1.9.26+ disambiguation: multi-candidate routes fall back to Discord button picker (no LLM turn). Agents can call `send_to_agent({ target: "peer:alice.future_data" })` to cross-peer invoke by fully-qualified name.
+- **Cross-Claudestra peer collaboration (v2.11+, HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. A three-step CLI handshake (`peer-http-invite` → `peer-http-join` → `peer-http-accept`, then `peer-http-test` / `list` / `remove`) exchanges tokens over any private channel; after that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly.
 - **LLM-free management** — status / kill / restart / cron buttons execute directly on the Bridge, zero-token overhead and near-instant response.
 
 ### Web client (v2.10+)
@@ -95,7 +95,7 @@ Setup + phone remote access (Tailscale / PWA install): **[web/SETUP.md](./web/SE
 
 ### Safety & utilities
 - **`--disallowedTools` safety rails** — blocks `rm -rf`, `git push --force`, `chmod 777`, etc. for every spawned agent; presets (`default` / `strict` / `readonly` / `paranoid`) per-agent via `manager.ts permissions`.
-- **One-click bot invite URL (v1.8.1+)** — `bun src/manager.ts invite-link [--peer]` auto-decodes your Application ID from the bot token and prints the ready-to-click Discord OAuth URL. `--peer` generates a minimum-permission link for a friend.
+- **One-click bot invite URL (v1.8.1+)** — `bun src/manager.ts invite-link` auto-decodes your Application ID from the bot token and prints the ready-to-click Discord OAuth URL.
 
 ## Requirements
 
@@ -200,14 +200,14 @@ bun src/manager.ts permissions reset <name>
 
 # Bot invite URL (v1.8.1+)
 bun src/manager.ts invite-link           # owner — full permissions
-bun src/manager.ts invite-link --peer    # friend — minimum peer-scope permissions
 
-# Cross-Claudestra peer collaboration (v1.9+)
-bun src/manager.ts peer-status                                     # list peer bots / your exposures / their capabilities
-bun src/manager.ts peer-expose <agent> <peer|all> \
-  --purpose "..."                                                  # expose your agent to peer (mode defaults to "direct")
-bun src/manager.ts peer-expose <agent> <peer> --mode via_master    # legacy: route through master instead of direct
-bun src/manager.ts peer-revoke <agent> <peer|all>                  # revoke exposure (peer's capability auto-removed)
+# Cross-Claudestra HTTP peers (v2.11+) — mutual scoped tokens, no shared Discord guild
+bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <my-bridge-url> [--force]    # A: print invite string
+bun src/manager.ts peer-http-join <peer> '<invite>' --agents <x,y> --url <my-url> [--force]  # B: store A, print receipt
+bun src/manager.ts peer-http-accept <peer> '<receipt>'                                       # A: complete handshake
+bun src/manager.ts peer-http-test <peer>          # verify reachability + agents opened to you
+bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
+bun src/manager.ts peer-http-remove <peer>        # delete peer + revoke the token you issued
 
 # Low-level tmux control (for master to handle TUI modals bridge can't parse)
 bun src/manager.ts tmux-screenshot <agent>

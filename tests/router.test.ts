@@ -16,7 +16,6 @@ import {
   newThreadId,
   endpointLabel,
   envelopeLabel,
-  makeResponseEnvelope,
   type Envelope,
   type UserEndpoint,
   type LocalEndpoint,
@@ -196,85 +195,6 @@ describe("envelopeLabel", () => {
   });
 });
 
-describe("makeResponseEnvelope", () => {
-  const request: Envelope = {
-    from: { kind: "user", userId: "u1", channelId: "c1" },
-    to: { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-    intent: "request",
-    content: "what's up",
-    meta: {
-      messageId: "msg_orig",
-      triggerKind: "user_discord",
-      ts: "2026-04-22T00:00:00Z",
-      threadId: "thr_orig",
-    },
-  };
-
-  test("继承 threadId + inReplyTo=请求的 messageId", () => {
-    const resp = makeResponseEnvelope(
-      request,
-      { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-      { kind: "user", userId: "u1", channelId: "c1" },
-      "here you go",
-    );
-    expect(resp.intent).toBe("response");
-    expect(resp.meta.threadId).toBe("thr_orig");
-    expect(resp.meta.inReplyTo).toBe("msg_orig");
-    expect(resp.content).toBe("here you go");
-  });
-
-  test("默认 triggerKind=bridge_synth，可覆盖", () => {
-    const resp1 = makeResponseEnvelope(
-      request,
-      { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-      { kind: "user", userId: "u1", channelId: "c1" },
-      "x",
-    );
-    expect(resp1.meta.triggerKind).toBe("bridge_synth");
-
-    const resp2 = makeResponseEnvelope(
-      request,
-      { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-      { kind: "user", userId: "u1", channelId: "c1" },
-      "x",
-      { triggerKind: "agent_tool" },
-    );
-    expect(resp2.meta.triggerKind).toBe("agent_tool");
-  });
-
-  test("final / attachments 通过 opts 传入", () => {
-    const resp = makeResponseEnvelope(
-      request,
-      { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-      { kind: "user", userId: "u1", channelId: "c1" },
-      "end",
-      { final: true, attachments: ["/tmp/foo.png"] },
-    );
-    expect(resp.meta.final).toBe(true);
-    expect(resp.meta.attachments).toEqual(["/tmp/foo.png"]);
-  });
-
-  test("没传 messageId 自动生成 synth_ 前缀", () => {
-    const resp = makeResponseEnvelope(
-      request,
-      { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-      { kind: "user", userId: "u1", channelId: "c1" },
-      "x",
-    );
-    expect(resp.meta.messageId.startsWith("synth_")).toBe(true);
-  });
-
-  test("传了 messageId 就用传入的", () => {
-    const resp = makeResponseEnvelope(
-      request,
-      { kind: "local", agentName: "a1", channelId: "c2", ws: {} as any },
-      { kind: "user", userId: "u1", channelId: "c1" },
-      "x",
-      { messageId: "my_msg_id" },
-    );
-    expect(resp.meta.messageId).toBe("my_msg_id");
-  });
-});
 
 // ============================================================
 // v2.6.0+ parseChatId / formatChatId（统一 chat_id keyspace，设计 D7）

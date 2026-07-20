@@ -126,7 +126,7 @@ import { startPermissionWatcher, permissionMessages, clearPermissionMessage } fr
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
-import { initHttpPeer } from "./bridge/http-peer.js";
+import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents } from "./lib/registry.js";
 import {
   tmuxCapture,
@@ -213,10 +213,6 @@ const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 // 「#control 频道的 agent」。将来引入非 Discord 的 master 标识时只改这几个 helper。
 // ============================================================
 
-/** channelId 是否指向 master（#control） */
-function isMasterChannel(channelId: string): boolean {
-  return !!channelId && channelId === CONTROL_CHANNEL_ID;
-}
 
 /** 该 ws 是否 master 的连接 */
 function isMasterWs(ws: ServerWebSocket<unknown>): boolean {
@@ -294,6 +290,13 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
     }
   }
   if (pendingInterAgentMsg.delete(channelId)) n++;
+  // v2.11: 在飞的 HTTP peer 调用一并取消——迟到的 peer 回复不再 pushback
+  // (Discord 时代 pendingPeerCalls 的同款保障,review 2026-07-20 #3)
+  try {
+    n += cancelHttpPeerCallsForChannel(channelId);
+  } catch {
+    /* http-peer 未初始化等边缘,不影响主清理 */
+  }
   return n;
 }
 
@@ -762,7 +765,6 @@ const discord = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,       // v1.8.4+: guildMemberAdd 事件（bot 加入日志）
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
@@ -1348,53 +1350,13 @@ async function notifyMaster(content: string): Promise<void> {
 
 // 我方 bot 被邀请加入新 guild
 discord.on("guildCreate", async (guild) => {
-  console.log(`🎉 我方 bot 被加到新 guild: ${guild.name} (${guild.id})`);
-  await notifyMaster(
-    [
-      `🎉 **跨 Claudestra 协作：你的 bot 被邀请到新服务器**`,
-      ``,
-      `服务器：**${guild.name}**（id: \`${guild.id}\`，${guild.memberCount} 成员）`,
-      ``,
-      `接下来可以：`,
-      `• 调 \`list_shared_channels\` MCP 工具，看这个 guild 里哪些频道你能进。`,
-      `• 按频道名字 / topic 判断用途；需要时 reply 到对应 chat_id @ 对方 bot 发起对话。`,
-      `• 你也可以先不动；等对方 agent 主动 @ 我们。`,
-    ].join("\n")
-  );
+  // v2.11: Discord peer 已移除——加入外部 guild 只记日志,不再推「跨实例协作」指引
+  console.log(`ℹ️ 我方 bot 被加到新 guild: ${guild.name} (${guild.id})——Discord peer 已移除,跨实例协作用 HTTP peer`);
 });
 
 // 我方 bot 在外部 guild 拿到新频道访问权限（对方给我们 allow View Channel）
-discord.on("channelCreate", async (channel) => {
-  // 只通知外部 guild（peer 邀请我们进去的那些），自己 guild 里建频道是我们自己在创建 agent 不通知
-  if (!("guild" in channel) || !channel.guild) return;
-  if (channel.guild.id === DISCORD_GUILD_ID) return;
-  const textCh = channel as TextChannel;
-  if (typeof textCh.isTextBased !== "function" || !textCh.isTextBased()) return;
-  // v2.4.8+: 只通知有 bot-specific allow ViewChannel overwrite 的新频道。
-  // 否则对方 guild 里随便建个 #news / #us-stock 频道我们 bot 默认 inherit
-  // @everyone 的 ViewChannel 也能看到 → 误报"对方主动给我们权限"。Claudestra
-  // peer 用 discordCreateChannel 主动 share 时会显式 allow ViewChannel for our
-  // bot id，这种才算真 grant。
-  const me = textCh.guild.members.me;
-  const myOverwrite = me ? textCh.permissionOverwrites.cache.get(me.id) : null;
-  const explicitGrant = !!myOverwrite?.allow.has("ViewChannel");
-  if (!explicitGrant) {
-    console.log(`👀 外部 guild 新频道（无 bot-specific allow，忽略）: #${textCh.name} in ${textCh.guild?.name}`);
-    return;
-  }
-  console.log(`🎉 外部 guild 新频道访问: #${textCh.name} in ${textCh.guild?.name}`);
-  await notifyMaster(
-    [
-      `🎉 **你 bot 在对方 Claudestra 服务器拿到新频道访问**`,
-      ``,
-      `频道：**#${textCh.name}**（id: \`${textCh.id}\`，topic: ${textCh.topic || "(无)"}）`,
-      `服务器：${textCh.guild?.name ?? "(未知)"}`,
-      ``,
-      `你可以在这个频道 @ 对方 bot 发起对话：\`reply(chat_id="${textCh.id}", text="<@对方bot_id> ...")\``,
-      `或者先调 \`list_shared_channels\` 看一下你当前的全部外部频道列表。`,
-    ].join("\n")
-  );
-});
+// v2.11: channelCreate 通知已移除——它只服务「对方 Claudestra 主动 share 频道」
+// 的 Discord peer 流程(现走 HTTP peer,无频道授予概念)。
 
 // 我方 bot 在外部 guild 失去频道访问（频道被删了）
 discord.on("channelDelete", async (channel) => {
@@ -1411,53 +1373,11 @@ discord.on("channelDelete", async (channel) => {
 });
 
 // 已有频道权限变化：比如对方 grant 或 revoke 我们的 View Channel
-discord.on("channelUpdate", async (oldCh: any, newCh: any) => {
-  if (!newCh.guild || newCh.guild.id === DISCORD_GUILD_ID) return;
-  if (typeof newCh.isTextBased !== "function" || !newCh.isTextBased()) return;
-  const me = newCh.guild.members.me;
-  if (!me) return;
-  try {
-    // v2.4.8+: 用 bot-specific overwrite 是否 explicit allow ViewChannel 来判定，
-    // 不再用 effective permissionsFor —— 后者把对方 guild 改 @everyone 全员权限
-    // 也算成"对方 grant 我们 bot"，误报。
-    const oldOw = oldCh.permissionOverwrites?.cache?.get(me.id);
-    const newOw = newCh.permissionOverwrites?.cache?.get(me.id);
-    const oldCanView = !!oldOw?.allow?.has?.("ViewChannel");
-    const newCanView = !!newOw?.allow?.has?.("ViewChannel");
-    if (!oldCanView && newCanView) {
-      console.log(`🎉 外部 guild 新获授权: #${newCh.name} in ${newCh.guild.name}`);
-      await notifyMaster(
-        [
-          `🎉 **你 bot 在对方 Claudestra 服务器拿到新频道访问**`,
-          ``,
-          `频道：**#${newCh.name}**（id: \`${newCh.id}\`，topic: ${newCh.topic || "(无)"}）`,
-          `服务器：${newCh.guild.name}`,
-          ``,
-          `你可以在这个频道 @ 对方 bot 发起对话：\`reply(chat_id="${newCh.id}", text="<@对方bot_id> ...")\``,
-          `或者先调 \`list_shared_channels\` 看一下你当前的全部外部频道列表。`,
-        ].join("\n")
-      );
-    } else if (oldCanView && !newCanView) {
-      console.log(`💨 外部 guild 失去授权: #${newCh.name} in ${newCh.guild.name}`);
-      await notifyMaster(
-        [
-          `💨 **你 bot 在 ${newCh.guild.name} 的 #${newCh.name} 被收回了 View Channel 权限**`,
-        ].join("\n")
-      );
-    }
-  } catch (e) {
-    console.error("channelUpdate 处理失败:", e);
-  }
-});
+// v2.11: channelUpdate 权限变动通知已随 Discord peer 移除。
 
 // 别的 bot（不是我方）加入了我的 guild
-discord.on("guildMemberAdd", async (member) => {
-  // v2.11: Discord peer 机制已移除——bot 加入不再建共享频道/scope 权限。
-  // peer 协作走 HTTP transport(peer-http-invite 三步握手,见 docs/design-http-peers.md)。
-  if (!member.user?.bot) return;
-  if (member.user.id === getBotUserId()) return;
-  console.log(`ℹ️ bot 加入 guild(${member.user.tag})——Discord peer 已移除,如需协作请走 HTTP peer 握手`);
-});
+// v2.11: guildMemberAdd handler 已删——bot 加入通知是 Discord peer 时代的 UX,
+// GuildMembers 特权 intent 一并移除(Developer Portal 可关闭该开关)。
 
 // ============================================================
 // Interaction 处理（按钮、菜单、Slash Commands）
@@ -2712,11 +2632,16 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               return;
             }
           }
-          // v2.11: Discord peer 已移除——HTTP peers 没命中即未知 peer
+          // v2.11: Discord peer 已移除——HTTP peers 没命中即未知 peer;
+          // 命中但凭据不全 = 握手进行中,报错要区分(review 2026-07-20 #6)
           {
             const { readPeers } = await import("./lib/peers.js");
-            const known = ((await readPeers()).httpPeers || []).filter((pp) => !pp.disabled).map((pp) => pp.name);
-            ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `未知 peer "${peerIdentifier}"。已配置的 HTTP peers: ${known.join(", ") || "(无——用 peer-http-invite 添加)"}` }));
+            const all = (await readPeers()).httpPeers || [];
+            const half = all.find((pp) => pp.name === peerIdentifier && !pp.disabled);
+            const err = half
+              ? `HTTP peer "${peerIdentifier}" 握手未完成(${!half.baseUrl ? "还没收到对方回执" : "缺 outToken"})——等 owner 跑完 peer-http-accept 再试`
+              : `未知 peer "${peerIdentifier}"。已配置的 HTTP peers: ${all.filter((pp) => !pp.disabled).map((pp) => pp.name).join(", ") || "(无——用 peer-http-invite 添加)"}`;
+            ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: err }));
           }
           return;
         }

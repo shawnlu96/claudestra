@@ -41,19 +41,21 @@ bun run setup
 
 就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、启动 pm2。
 
-### 跨 Claudestra 协作（v1.8+，v1.9 重新设计）
+### 跨 Claudestra 协作（v2.11+ HTTP peer）
 
-两个 Claudestra 实例之间共享专精 agent，不用彼此给对方文件系统 / SSH 权限：
+两个 Claudestra 实例共享专精 agent，不需要共享 Discord 服务器、不需要第二个 bot、更不用给对方文件系统 / SSH 权限 —— peer 之间就是互为 API 客户端：各自持有对方签发的、按 agent 圈定 scope 的 Bearer token。握手三步 CLI 完成，邀请串 / 回执串走任意私聊渠道（DM、Signal 都行）：
 
-1. **朋友用 CLI 一键生成最小权限邀请链接**：他那边跑 `bun src/manager.ts invite-link --peer`。从 bot token 自动解 Application ID，不用进 Developer Portal 点半天。
-2. **你点链接** → 把他的 bot 加到你 Discord 服务器。bridge 自动建一个 `#agent-exchange` 频道，把他的 bot 限死在这一个频道：只允许 View + Send 这里，其他频道全部 Deny View。
-3. **你显式开放 agent**：`bun src/manager.ts peer-expose <agent> <peer-name|all> --purpose "..."`。默认 `direct` 模式 —— bridge 直接把 peer 请求路由到你指定的 agent，绕过你的 master。`peer-expose` 在 `#agent-exchange` 里用隐藏的 `PeerEvent` marker 广播 capability 通告；朋友 bridge 自动更新他的 `peers.json` capabilities 列表。
-4. **朋友同步操作**：邀请你的 bot、peer-expose 他的 agent 给你。
-5. **使用方式**：
-   - 他的 agent 找你的 agent：`send_to_agent({ target: "peer:你的bot名.agent名", text: "..." })`。bridge 层路由，push 回复，不用轮询。
-   - 他的用户在 `#agent-exchange` `@你的bot`：如果有对他开放的 exposure，bridge 直接路由到你的 agent；多个候选 → Discord 按钮让他点选（零 LLM turn）。
+1. **A 发起邀请**：`bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <A方bridge地址>`，打印邀请串（A 的地址 + 现签的、scope 限定在所列 agent 的 token）。把串发给 B。
+2. **B 加入**：`bun src/manager.ts peer-http-join <peer> '<邀请串>' --agents <x,y> --url <B方bridge地址>`，把 A 存为 peer 并打印带 B 侧 token 的回执串。把回执发回 A。
+3. **A 确认**：`bun src/manager.ts peer-http-accept <peer> '<回执串>'` —— 握手完成。双方各跑一次 `bun src/manager.ts peer-http-test <peer>` 验证连通 + 看对方开放了哪些 agent。
 
-跨 Claudestra 整体链路从老的 6 跳（master 做调度 + 传话）压到 2-3 跳（直接路由）。`peer-status` 看状态 / `peer-revoke` 撤销，所有数据存在 `~/.claude-orchestrator/peers.json`。
+之后任何 agent 都能 `send_to_agent({ target: "<agent>@<peer>", text: "..." })` 跨机调用 —— bridge 直接 POST 对方的 `/api/v1` 消息端点，对方回复自动 push 回调用方，不用轮询。`peer-http-list` 看 peer 列表 + 握手状态；`peer-http-remove <peer>` 删 peer + 撤销你签出的 token，访问即时切断。
+
+注意事项：
+
+- **token scope 就是权限模型**：只有 `--agents` 里列出的 agent 可被调用，越界一律 403。之后想改开放范围，带 `--rotate` 重新握手。
+- **非 external agent 要 `--force`**：给不是 `--external` 创建的 agent 签 token 需要加 `--force` —— 和你自己对话共享上下文的 agent 不该随手暴露（R1 守卫）。
+- **传输建议**：`--url` 优先走 Tailscale / 内网；要过公网必须给 bridge 套 HTTPS 反代（口径同 `BRIDGE_BIND` 文档）。
 
 ### 装完有什么
 

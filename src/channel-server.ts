@@ -443,25 +443,7 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
     },
     {
       name: "list_shared_channels",
-      description: `列出你所在的 Discord bot 能访问的所有文字频道（含频道名、topic、所属 guild）。
-
-用于**跨 Claudestra 协作**：如果你发现对方 Claudestra 的用户把他们的 bot 邀请到了你这边的某些频道，你就能看到对应频道；反过来，当你这边的 bot 被对方邀请到了他们的频道，你也能看到。
-
-**什么时候用：**
-- 你遇到一个问题需要对方 Claudestra 的某类 agent（比如阿里云盘 / 加密货币追踪 / Claudestra 本身的 bug）协助
-- 你想知道"对方开放了哪些频道给我"，按频道名或 topic 判断应该去哪个频道提问
-- 然后用 \`reply(chat_id=<那个频道 id>, text="@对方bot xxx")\` 在那个频道 @ 对方 bot 提问
-
-**返回示例：**
-\`\`\`json
-[
-  { "id": "123", "name": "alipan-resource", "topic": "阿里云盘资源管理", "guild": "Shawn's" },
-  { "id": "456", "name": "predict", "topic": "量化预测", "guild": "Shawn's" },
-  { "id": "789", "name": "general", "topic": "", "guild": "My Own Server" }
-]
-\`\`\`
-
-自己的 guild 里的频道也会出现在列表里，过滤时看 guild 名字 / id 区分。`,
+      description: `列出本机 Discord bot 能访问的所有文字频道（含频道名、topic、所属 guild）。诊断/巡查用——确认某个 agent 频道是否存在、看频道 topic。跨 Claudestra 实例协作不走 Discord 频道:用 send_to_agent(target="对方agent@peer名")(HTTP peer,owner 用 peer-http-* CLI 配置)。`,
       inputSchema: {
         type: "object" as const,
         properties: {},
@@ -475,8 +457,8 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
 
 **target 格式**（v1.9.22+ 新增 peer 语法）：
 - \`"agent_name"\` 或 \`"predict"\` — 本地 agent（自动补 "agent-" 前缀）
-- \`"peer:claudestra_ahh.future_data"\` — peer claudestra_ahh 的 future_data agent（长格式）
-- \`"future_data@claudestra_ahh"\` — 同上（短格式）
+- \`"peer:ahh.future_data"\` — HTTP peer「ahh」的 future_data agent（长格式）
+- \`"future_data@ahh"\` — 同上（短格式）
 
 **什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段，看看 owner 配置了哪些 peer 实例（v2.11+ HTTP peer）。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
 
@@ -516,7 +498,7 @@ When a user selects from a menu, you'll receive: [select:unique_id:selected_valu
 
 Examples:
 - \`send_to_agent({ target: "predict", text: "分析 ~/data/sales.csv" })\` — 本地
-- \`send_to_agent({ target: "peer:claudestra_ahh.future_data", text: "查 SKYAI 的大户多空比" })\` — 跨 peer
+- \`send_to_agent({ target: "future_data@ahh", text: "查 SKYAI 的大户多空比" })\` — 跨 HTTP peer
 - \`send_to_agent({ target: "future_data@claudestra_ahh", text: "..." })\` — 跨 peer 短格式`,
       inputSchema: {
         type: "object" as const,

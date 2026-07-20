@@ -118,8 +118,6 @@ export interface Envelope {
     threadId: string;
     /** response 专用：指向被回应的原请求 messageId。bridge 据此清对应 pending */
     inReplyTo?: string;
-    /** 是否是 thread 的"最后一句" */
-    final?: boolean;
     /** 附件路径（本地 inbox 绝对路径） */
     attachments?: string[];
     /** 原始 Discord 消息对象引用（不持久化，只在 router 内部传递） */
@@ -308,27 +306,3 @@ export function newThreadId(): string {
   return `thr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** 新建一条 response 消息的 envelope（继承源 envelope 的 threadId + inReplyTo） */
-export function makeResponseEnvelope(
-  request: Envelope,
-  from: Endpoint,
-  to: Endpoint,
-  content: string,
-  opts: { final?: boolean; messageId?: string; triggerKind?: TriggerKind; attachments?: string[] } = {},
-): Envelope {
-  return {
-    from,
-    to,
-    intent: "response",
-    content,
-    meta: {
-      messageId: opts.messageId ?? `synth_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      triggerKind: opts.triggerKind ?? "bridge_synth",
-      ts: new Date().toISOString(),
-      threadId: request.meta.threadId,
-      inReplyTo: request.meta.messageId,
-      final: opts.final,
-      attachments: opts.attachments,
-    },
-  };
-}

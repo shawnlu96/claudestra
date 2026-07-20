@@ -55,7 +55,7 @@ Claudestra 基于 Claude Code 的**原生 Channel 协议（MCP）**，不是屏�
 - **多前端 API（v2.6.0+）** — Discord 只是第一个前端。`GET /events` SSE 实时事件流（tool 调用 / 文本 / 状态）；`POST /api/v1/agents/:name/messages` 让外部用户凭 token 与圈定的 agent 对话（同步 wait / 传文件 / 审计镜像回 Discord）。网页端、Telegram bot 都基于同一套合同接入 —— 见 `docs/design-multi-frontend.md`。
 - **Agent 间通信** — `send_to_agent(target, text)` MCP 工具直接把消息注入到另一个 agent 的上下文。
 - **定时任务** — 声明式 cron 表达式，自动创建临时 agent、执行 prompt、通知 Discord、清理。
-- **跨 Claudestra 协作（v1.8+，v1.9 重新设计）** — 朋友 bot 进来后 bridge 自动建 `#agent-exchange` shared 频道。用 `peer-expose <agent> <peer>` 显式开放指定 agent 给指定 peer。v1.9.21+ `direct` 模式：bridge 把 peer 请求**直接路由到目标 agent，两边 master 都不介入** —— 6 跳压到 2-3 跳。v1.9.22+ 对称路由：你在 `#agent-exchange` `@` peer bot，peer bridge 同样直接路由到他 agent，两个 master 都退出 happy path。v1.9.26+ 消歧义：多候选 exposure 时 bridge 发 Discord 按钮让用户点选（零 LLM turn）。agent 可用 `send_to_agent({ target: "peer:alice.future_data" })` 跨 peer 调用。
+- **跨 Claudestra 协作（v2.11+ HTTP peer）** — 两个 Claudestra 实例互为 API 客户端：各自给对方签一个**按 agent 圈定 scope 的 Bearer token**，不需要共享 Discord 服务器，也不需要第二个 bot。三步握手 CLI（`peer-http-invite` → `peer-http-join` → `peer-http-accept`，配套 `peer-http-test` / `list` / `remove`）把 token 串走任意私聊渠道交换完；之后任何 agent 都能 `send_to_agent({ target: "agent@peer" })` 跨机调用，回复自动 push 回调用方。开放范围 = token scope；`peer-http-remove` 撤销即时生效。
 - **管理按钮跳过 LLM** — 状态、监工、销毁、重启、定时任务等按钮由 Bridge 直接执行，零 token，瞬间响应。
 
 ### Web 客户端（v2.10+）
@@ -95,7 +95,7 @@ Discord 之外的第二道前门 —— 完全建立在多前端 API 之上的 *
 
 ### 安全和工具
 - **`--disallowedTools` 安全护栏** — 每个 agent 都拦 `rm -rf`、`git push --force`、`chmod 777` 等；通过 `manager.ts permissions` 切换预设（`default` / `strict` / `readonly` / `paranoid`）。
-- **一键 Bot 邀请链接（v1.8.1+）** — `bun src/manager.ts invite-link [--peer]` 从 token 解 Application ID，自动拼好 Discord OAuth URL。`--peer` 生成给朋友用的最小权限链接。
+- **一键 Bot 邀请链接（v1.8.1+）** — `bun src/manager.ts invite-link` 从 token 解 Application ID，自动拼好 Discord OAuth URL。
 
 ## 环境要求
 
@@ -200,14 +200,14 @@ bun src/manager.ts permissions reset <name>
 
 # Bot 邀请链接（v1.8.1+）
 bun src/manager.ts invite-link           # 给自己用的完整权限链接
-bun src/manager.ts invite-link --peer    # 给朋友的最小权限链接
 
-# 跨 Claudestra peer 协作（v1.9+）
-bun src/manager.ts peer-status                                     # 看 peer bots / 我开放的 agent / 对方开放给我的能力
-bun src/manager.ts peer-expose <agent> <peer|all> \
-  --purpose "..."                                                  # 把 agent 开放给 peer（默认 direct 模式）
-bun src/manager.ts peer-expose <agent> <peer> --mode via_master    # 走老的 master 路由链路（不推荐）
-bun src/manager.ts peer-revoke <agent> <peer|all>                  # 撤销 exposure（peer 的 capability 会自动被清）
+# 跨 Claudestra HTTP peer（v2.11+）— 互签 scoped token，不需要共享 Discord 服务器
+bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <我方bridge地址> [--force]    # A：打印邀请串
+bun src/manager.ts peer-http-join <peer> '<邀请串>' --agents <x,y> --url <我方地址> [--force]  # B：存下 A，打印回执串
+bun src/manager.ts peer-http-accept <peer> '<回执串>'                                         # A：完成握手
+bun src/manager.ts peer-http-test <peer>          # 验证连通 + 看对方开放给我的 agent
+bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状态
+bun src/manager.ts peer-http-remove <peer>        # 删 peer + 撤销我签出的 token
 
 # 低级 tmux 控制（给 master 兜底处理 bridge 认不出的 TUI modal）
 bun src/manager.ts tmux-screenshot <agent>
