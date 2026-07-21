@@ -305,11 +305,15 @@ function ChatInner() {
       store.maybeReconnect();
       store.refreshAgents();
       // iOS PWA 从后台回来偶发合成层黑屏（GPU 层被回收后未重绘,2026-07-13
-      // 真机）——同步 display 切换强制整树重排重绘,单帧内完成无闪烁
+      // 真机）——需要强制一次重绘。⚠ 不能用 display:none 切换:那会拆掉整棵
+      // 布局树,iOS 重建后触摸滚动区域经常注册失败,整页卡死不能滚(2026-07-21
+      // 用户报「跳回 PWA 经常无法滚动」)。改用 transform nudge:同步加/撤
+      // translateZ(0),中间态的强制 reflow 留下 sticky invalidation → compositor
+      // 重提交、重新光栅化被回收的 GPU 层,但布局树全程不动,滚动容器无恙。
       requestAnimationFrame(() => {
-        document.body.style.display = "none";
+        document.body.style.transform = "translateZ(0)";
         void document.body.offsetHeight;
-        document.body.style.display = "";
+        document.body.style.transform = "";
       });
     };
     document.addEventListener("visibilitychange", onVisible);
