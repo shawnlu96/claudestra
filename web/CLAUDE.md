@@ -167,6 +167,11 @@ iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几�
   wrapper 在 `scripts/`，`CONTROL_CHANNEL_ID=local-master-control` 两边必须一致；改 bridge 代码后
   `launchctl kickstart -k gui/$(id -u)/com.claudestra.web-bridge`）。Web-only 模式=不设
   DISCORD_BOT_TOKEN（见 FORK.md）。
+- **⚠ 正式服务 `com.claudestra.web` 的 plist 必须 `exec ./node_modules/.bin/next start`，
+  不能 `npm run start`**：npm 中间层被 kickstart 杀掉时子 next-server 可能成孤儿——它没有
+  监听端口但推送派发器（出站 SSE+出站推送）还活着，每条推送必重复（2026-07-16 泄漏一个，
+  用户连收 5 天双推送才发现）。兜底：dispatcher 有跨进程端口锁（127.0.0.1:3339，
+  `PUSH_LOCK_PORT` 可调），任何进程组合下只有一个推送者；排障时 `lsof -iTCP:3339` 看谁持锁。
 - 起 dev：`npm run dev`（已在跑别重开；探测 `curl localhost:33333`）。
 - **⚠ 本机 shell 全局有 `NODE_ENV=production`**：用 `NODE_ENV=development npm run dev` 强制。
 - **⚠ `INTERNAL_API_KEY` 全局导出会盖过 `.env.local`**：`env -u INTERNAL_API_KEY` 起 dev。

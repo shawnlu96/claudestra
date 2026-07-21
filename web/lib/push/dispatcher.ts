@@ -1,4 +1,5 @@
 import webpush from "web-push";
+import net from "net";
 import { getDb } from "@/lib/db";
 import { ensureVapid } from "./vapid";
 
@@ -120,7 +121,31 @@ async function runLoop() {
   }
 }
 
-/** 启动常驻订阅(幂等——dev HMR/多次 import 只起一条)。 */
+/**
+ * 跨进程互斥锁:独占 127.0.0.1 的一个端口,拿到才起推送循环。
+ *
+ * 进程内的 globalThis 单例挡不住「两个 BFF 进程」——2026-07-16 一次
+ * launchctl kickstart 没杀干净 npm→next 的子进程,孤儿 next-server 的
+ * 派发器(出站 SSE+出站推送,不需要监听端口)活了 5 天,每条推送必重复
+ * (2026-07-21 用户报)。dev(33333) 与正式(3333) 同跑时也是同库双推。
+ * 端口锁随进程死亡自动释放;没抢到的每 60s 重试,持锁者退出后自动接管。
+ */
+const LOCK_PORT = Number(process.env.PUSH_LOCK_PORT || 3339);
+
+function acquireLockThenRun() {
+  const srv = net.createServer();
+  srv.unref(); // 锁 socket 不阻止进程退出(退出即释放)
+  srv.once("error", () => {
+    console.log(`[push] 推送锁被其他进程持有(port ${LOCK_PORT}),60s 后重试`);
+    setTimeout(acquireLockThenRun, 60_000).unref();
+  });
+  srv.listen(LOCK_PORT, "127.0.0.1", () => {
+    console.log("[push] Web Push 派发器已启动(持有推送锁,订阅 bridge 事件流)");
+    void runLoop();
+  });
+}
+
+/** 启动常驻订阅(幂等——dev HMR/多次 import 只起一条;跨进程由端口锁保证唯一)。 */
 export function startPushDispatcher() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const g = globalThis as any;
@@ -130,6 +155,5 @@ export function startPushDispatcher() {
     return;
   }
   g.__cstraPushLoop = true;
-  void runLoop();
-  console.log("[push] Web Push 派发器已启动(订阅 bridge 事件流)");
+  acquireLockThenRun();
 }
