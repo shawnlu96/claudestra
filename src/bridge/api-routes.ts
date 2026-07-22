@@ -807,6 +807,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const tn = principal.name || tokenId;
         deps.mirrorApiExchange({ kind: "api", tokenId, name: tn }, agent.channelId, `[🌐 API←${tn}] ${text}`).catch(() => {});
         recordMetric("api_slash", { channelId: agent.channelId, agent: agent.name, meta: { cmd: slashM[1] } });
+        // 直通的 /clear 与 clear 端点一样会轮转 session——必须同样挂轮转收尾，
+        // 否则 registry/watcher/history 盯死文件（2026-07-15 用户在 Web 输入框
+        // 打 /clear，temp 的历史冻结整整 7 天才被发现）。
+        if (slashM[1] === "clear" && agent.name !== "master" && agent.cwd) {
+          deps.scheduleClearRotation(agent.name, agent.channelId, agent.cwd, agent.sessionId);
+        }
         console.log(`⚡ [api] slash 注入 ${agent.name}: ${resolved.ccText}`);
         return apiJson(202, { ok: true, accepted: true, slash: true, ccText: resolved.ccText, agent: agent.name });
       }

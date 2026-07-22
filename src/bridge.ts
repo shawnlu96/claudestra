@@ -1658,10 +1658,16 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
 
         // 找 channel 对应的 agent
         let agentName: string | null = null;
+        let agentCwd: string | null = null;
+        let agentSid: string | undefined;
         try {
           const listResult = await runManager("list");
           const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
-          if (agent) agentName = agent.name;
+          if (agent) {
+            agentName = agent.name;
+            agentCwd = agent.project ? String(agent.project).replace(/^~/, process.env.HOME || "~") : null;
+            agentSid = agent.sessionId || undefined;
+          }
         } catch { /* non-critical */ }
 
         // 如果没找到 agent，就是 master channel（control channel）
@@ -1692,6 +1698,11 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         console.log(`⚡ 转发 slash: /${cmd} → window=${targetWindow} text="${resolved.ccText}"`);
         try {
           await tmuxSendLine(targetWindow, resolved.ccText);
+          // 直通 /clear 同样轮转 session——与 clear 端点一样挂轮转收尾（Web 直通
+          // 同款补丁；master 无 registry/watcher 不需要）。Stop 自愈是最后兜底。
+          if (cmd === "clear" && agentName && agentCwd) {
+            scheduleClearRotation(agentName, channelId, agentCwd, agentSid);
+          }
           // TUI 渲染需要几秒，截图作为反馈（否则像 /context 这类纯 TUI 命令 Discord 端完全没响应）
           await Bun.sleep(2500);
           await presentSlashResult(interaction, targetWindow, targetLabel, resolved.ccText);
@@ -3008,6 +3019,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = agentLabelForChannel(channelId);
         emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done" } });
+        // [fork] 回合结束核对 registry session 是否还是活文件——原生 /clear 类
+        // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
+        void maybeHealRotatedSession(channelId);
       }
       // typing + safety timer：本 channel + 共享 ws 的所有 channel 都停（参见
       // sameWsChannels 的注释）。
@@ -3431,6 +3445,56 @@ function scheduleClearRotation(agentName: string, channelId: string, cwd: string
     else console.warn(`🧹 clear 轮转超时 agent=${agentName}（未见新 session jsonl，watcher 维持原 session）`);
   };
   setTimeout(tick, 1200);
+}
+
+/**
+ * [fork] Stop 时的 session 轮转自愈（2026-07-23 用户报：temp 历史停在 7-15）。
+ *
+ * 原生 /clear 不经 clear 端点也会轮转 session——远程终端里直敲、Discord slash
+ * 直通、TUI 里手动打——registry 全程不知情，jsonl-watcher/history 从此盯死文件：
+ * 工具流断、历史冻结，而 reply/推送照常（不走 jsonl），故障极隐蔽（temp 断了
+ * 整整 7 天才被发现）。回合结束是天然核对点：registry 指向的 jsonl 若整个回合
+ * 毫无写入（mtime 陈旧），而同 slug 刚有别的 jsonl 在写 → 真实会话已迁移，按
+ * clear 轮转同款流程认领（set-session 归档+registry 切换，watcher 重绑）。
+ *
+ * 防串台：同 cwd 多 agent 时，候选 sid 是其他 agent 的官方 session 则不认领
+ * （scheduleClearRotation 的 ownedByOther 同款）；且候选 mtime 必须落在刚结束
+ * 的回合窗口内（<3min），排除认领陈年老文件。
+ */
+const ROTATION_FRESH_MS = 3 * 60_000;
+const rotationHealInflight = new Set<string>();
+async function maybeHealRotatedSession(channelId: string) {
+  if (rotationHealInflight.has(channelId)) return;
+  rotationHealInflight.add(channelId);
+  try {
+    const agents = await readRegistryAgents();
+    const me = agents.find((a) => a.channelId === channelId && a.status === "active");
+    if (!me?.cwd || !me.sessionId) return;
+    const cwd = me.cwd.replace(/^~/, process.env.HOME || "~");
+    // 快路径（绝大多数回合）：registry session 本回合有写入 → 一切正常
+    try {
+      if (Date.now() - statSync(projectJsonlPath(cwd, me.sessionId)).mtimeMs < ROTATION_FRESH_MS) return;
+    } catch { /* registry session 文件已消失 → 继续找真身 */ }
+    const newest = listSessionIdsForCwd(cwd).find((s) => s !== me.sessionId); // mtime 降序
+    if (!newest) return;
+    let newestMtime = 0;
+    try {
+      newestMtime = statSync(`${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}/${newest}.jsonl`).mtimeMs;
+    } catch { return; }
+    if (Date.now() - newestMtime > ROTATION_FRESH_MS) return; // 没有本回合在写的新文件
+    if (agents.some((a) => a.name !== me.name && a.sessionId === newest)) return; // ownedByOther
+    const r = await runManager("set-session", me.name, newest);
+    if (r?.ok) {
+      stopWatchingByChannel(channelId);
+      startWatching(me.name, cwd, newest, channelId, discord);
+      recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: newest } });
+      console.log(`🩹 session 轮转自愈 agent=${me.name} ${me.sessionId.slice(0, 8)}->${newest.slice(0, 8)}（原生 /clear 类轮转，registry 未跟上）`);
+    } else {
+      console.error(`🩹 session 轮转自愈 set-session 失败 agent=${me.name}:`, r?.error);
+    }
+  } catch { /* 自愈失败不影响 Stop 主流程 */ } finally {
+    rotationHealInflight.delete(channelId);
+  }
 }
 
 async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {

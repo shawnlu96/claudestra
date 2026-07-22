@@ -47,7 +47,9 @@ export type MetricEvent =
   | "bridge_start_cleanup"
   | "doppelganger_detected"
   | "ia_watchdog_nudge"
-  | "reply_cross_agent_forward";
+  | "reply_cross_agent_forward"
+  // [fork] Stop 时检出原生 /clear 类 session 轮转并自动重绑（2026-07-23）
+  | "session_selfheal";
 
 export interface MetricRecord {
   ts: string;                   // ISO 8601
