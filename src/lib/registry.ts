@@ -24,6 +24,7 @@ export interface RegistryAgent {
   purpose?: string;
   displayName?: string;
   model?: string;
+  effort?: string;
 }
 
 /** 全量读取（含非 active）。读失败/文件缺失返回空数组，不抛。 */
@@ -44,6 +45,7 @@ export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<
         purpose: str("purpose"),
         displayName: str("displayName"),
         model: str("model"),
+        effort: str("effort"),
       };
     });
   } catch {

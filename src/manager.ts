@@ -3167,6 +3167,34 @@ switch (cmd) {
     break;
   }
 
+  // [fork] set-claude <name> [--model m] [--effort e] —— 记录 per-agent 模型/effort
+  // （bridge 的 claude-settings 端点切换后同步调用;restart 时 --model/--effort 沿用）
+  case "set-claude": {
+    const [name, ...rest] = args;
+    let model: string | undefined;
+    let effort: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--model" && rest[i + 1]) model = rest[++i];
+      else if (rest[i] === "--effort" && rest[i + 1]) effort = rest[++i];
+    }
+    if (!name || (!model && !effort)) {
+      output({ ok: false, error: "用法: set-claude <name> [--model <m>] [--effort <e>]" });
+      break;
+    }
+    const tmuxName = normalizeName(name);
+    const reg = await loadRegistry();
+    const info = reg.agents[tmuxName];
+    if (!info) {
+      output({ ok: false, error: `${tmuxName} 不在 registry` });
+      break;
+    }
+    if (model) (info as any).model = model;
+    if (effort) (info as any).effort = effort;
+    await saveRegistry(reg);
+    output({ ok: true, name: tmuxName, model: (info as any).model ?? null, effort: (info as any).effort ?? null });
+    break;
+  }
+
   case "kill": {
     const [name] = args;
     if (!name) {

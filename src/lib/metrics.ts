@@ -49,7 +49,9 @@ export type MetricEvent =
   | "ia_watchdog_nudge"
   | "reply_cross_agent_forward"
   // [fork] Stop 时检出原生 /clear 类 session 轮转并自动重绑（2026-07-23）
-  | "session_selfheal";
+  | "session_selfheal"
+  // [fork] per-会话模型/effort 切换端点（2026-07-23）
+  | "agent_claude_updated";
 
 export interface MetricRecord {
   ts: string;                   // ISO 8601

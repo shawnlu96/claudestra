@@ -128,4 +128,8 @@ export interface AgentSession {
   lastActivityTs?: number | null;
   /** 当前上下文占用 token 数 → TopBar 超标提示。 */
   contextTokens?: number | null;
+  /** 当前模型 id（jsonl 实测 → registry → 全局默认;null=未知）→ TopBar 徽章。 */
+  model?: string | null;
+  /** 当前 effort 档位（同上兜底链）→ TopBar 徽章。 */
+  effort?: string | null;
 }

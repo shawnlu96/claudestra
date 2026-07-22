@@ -25,7 +25,7 @@ function agentsSignature(list: AgentSession[]): string {
     .map(
       (a) =>
         `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
-        `${a.busy ? 1 : 0}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}`
+        `${a.busy ? 1 : 0}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}`
     )
     .join("");
 }

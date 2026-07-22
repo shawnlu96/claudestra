@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useChatStoreApi } from "../chat-store";
 import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client";
 import { useT, useLang, setLang } from "@/lib/i18n";
+import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
 async function fileToAvatar(file: File): Promise<string> {
@@ -89,15 +90,9 @@ function AvatarNickRow({
   );
 }
 
-/** 全局默认模型选项(value = settings.json 里的完整 model id)。 */
-const GLOBAL_MODEL_OPTIONS = [
-  { value: "claude-fable-5", label: "Fable 5" },
-  { value: "claude-opus-4-8", label: "Opus 4.8" },
-  { value: "claude-sonnet-4-6", label: "Sonnet 4.6" },
-  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-] as const;
-
-const GLOBAL_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const;
+/** 全局默认模型/effort 选项——与会话级切换器共用（claude-options.ts） */
+const GLOBAL_MODEL_OPTIONS = MODEL_OPTIONS;
+const GLOBAL_EFFORT_OPTIONS = EFFORT_OPTIONS;
 
 
 /**

@@ -17,6 +17,7 @@ import { AgentActions } from "./agent-actions";
 import { TerminalButton } from "../../terminal/terminal-button";
 import { SessionSearchButton } from "./session-search";
 import { ManagePanel } from "./manage-panel";
+import { ClaudeSwitcher } from "./claude-switcher";
 import { ctxLevel } from "../ctx-level";
 import { useT } from "@/lib/i18n";
 
@@ -98,6 +99,8 @@ function TopBar() {
           ctx {Math.round(info.contextTokens / 1000)}k
         </span>
       )}
+      {/* 会话级模型/effort 徽章 + 快速切换（owner 2026-07-23） */}
+      {info && <ClaudeSwitcher agent={info} />}
       {info?.cwd && (
         <span className="hidden truncate font-mono text-xs opacity-50 sm:inline">
           {info.cwd}

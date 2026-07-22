@@ -26,6 +26,10 @@ export interface AgentSession {
   busy?: boolean;
   /** 当前上下文占用 token 数（TopBar 超标提示） */
   contextTokens?: number | null;
+  /** 当前模型 id */
+  model?: string | null;
+  /** 当前 effort 档位 */
+  effort?: string | null;
 }
 
 interface ApiAgent {
@@ -39,6 +43,10 @@ interface ApiAgent {
   busy?: boolean;
   /** 当前上下文占用 token 数（最近一条 assistant 的 usage 合计） */
   contextTokens?: number | null;
+  /** 当前模型 id（jsonl 实测 → registry → 全局默认） */
+  model?: string | null;
+  /** 当前 effort 档位（同上兜底链） */
+  effort?: string | null;
 }
 
 /**
@@ -64,6 +72,8 @@ export async function loadAgents(): Promise<AgentSession[]> {
         lastActivityTs: a.lastActivityTs ?? null,
         busy: a.busy === true,
         contextTokens: a.contextTokens ?? null,
+        model: a.model ?? null,
+        effort: a.effort ?? null,
       };
     }
     const bare = a.name.replace(/^agent-/, "");
@@ -77,6 +87,8 @@ export async function loadAgents(): Promise<AgentSession[]> {
       // Bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
       busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
       contextTokens: a.contextTokens ?? null,
+      model: a.model ?? null,
+      effort: a.effort ?? null,
     };
   });
   // 排序：master 置顶 → 其余按最近活动降序（无时间戳的沉底，registry 序兜底稳定）

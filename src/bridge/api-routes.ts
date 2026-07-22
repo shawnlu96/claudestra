@@ -255,6 +255,10 @@ interface SessionTailInfo {
   convTs: number | null;
   /** 最近一条 assistant 的 usage 合计 ≈ 当前上下文占用 token 数 */
   ctxTokens: number | null;
+  /** 最近一条 assistant 实际用的 model id（会话内 /model 切换后即时反映，防 registry 漂移） */
+  model: string | null;
+  /** 会话内最近一次 /effort 的结果档位（stdout 自述,tail 窗内没有则 null → 调用方回退 registry/全局） */
+  effort: string | null;
 }
 const tailInfoCache = new Map<string, { mtimeMs: number; info: SessionTailInfo }>();
 async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
@@ -267,7 +271,13 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
     const lines = text.split("\n");
     let convTs: number | null = null;
     let ctxTokens: number | null = null;
-    for (let i = lines.length - 1; i >= 0 && (convTs === null || ctxTokens === null); i--) {
+    let model: string | null = null;
+    let effort: string | null = null;
+    for (
+      let i = lines.length - 1;
+      i >= 0 && (convTs === null || ctxTokens === null || model === null || effort === null);
+      i--
+    ) {
       const line = lines[i].trim();
       if (!line) continue;
       try {
@@ -290,6 +300,20 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
               u.input_tokens + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
             if (total > 0) ctxTokens = total;
           }
+        }
+        // 当前模型:最近一条 assistant 的 message.model(错误占位的 "<synthetic>" 跳过)
+        if (model === null && rec.type === "assistant") {
+          const m = rec.message?.model;
+          if (typeof m === "string" && m && !m.startsWith("<")) model = m;
+        }
+        // 会话内 /effort 切换:stdout 自述("Kept/Set effort level as/to xxx")
+        if (effort === null && rec.type === "user") {
+          const c = rec.message?.content;
+          const body = typeof c === "string" ? c : "";
+          const em = body.includes("local-command-stdout")
+            ? body.match(/(?:Kept|Set) effort level (?:as|to) (\w+)/)
+            : null;
+          if (em) effort = em[1];
         }
         if (convTs === null && (rec.type === "user" || rec.type === "assistant") && typeof rec.timestamp === "string") {
           // TUI 命令记录（批量 /model 之类）不算对话——不跳过的话一次批量维护
@@ -316,7 +340,7 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
         /* tail 起点切到半行 */
       }
     }
-    const info: SessionTailInfo = { convTs: convTs ?? st.mtimeMs, ctxTokens };
+    const info: SessionTailInfo = { convTs: convTs ?? st.mtimeMs, ctxTokens, model, effort };
     tailInfoCache.set(path, { mtimeMs: st.mtimeMs, info });
     return info;
   } catch {
@@ -370,16 +394,31 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       {
         const { readRegistryAgents } = await import("../lib/registry.js");
         const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
+        const regs = await readRegistryAgents();
+        const regByName = new Map(regs.map((r) => [r.name, r]));
         const bySessions = new Map<string, SessionTailInfo>();
-        for (const r of await readRegistryAgents()) {
+        for (const r of regs) {
           if (!r.cwd || !r.sessionId) continue;
           const info = await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId));
           if (info) bySessions.set(r.name, info);
         }
+        // [fork] model/effort 兜底链末端:全局默认(settings.json)
+        let gModel: string | null = null;
+        let gEffort: string | null = null;
+        try {
+          const s = JSON.parse(await Bun.file(`${process.env.HOME}/.claude/settings.json`).text());
+          if (typeof s.model === "string") gModel = s.model;
+          if (typeof s.effortLevel === "string") gEffort = s.effortLevel;
+        } catch { /* 无全局默认 */ }
         for (const a of agents) {
           const info = bySessions.get(a.name);
+          const r = regByName.get(a.name);
           (a as any).lastActivityTs = info?.convTs ?? null;
           (a as any).contextTokens = info?.ctxTokens ?? null;
+          // [fork] 当前模型/effort。显示链:jsonl 实测(会话内切换即时反映,防
+          // registry 漂移) → registry 钉的(创建/切换端点写入) → 全局默认
+          (a as any).model = info?.model ?? (r?.model ? resolveModelAlias(r.model) : null) ?? gModel;
+          (a as any).effort = info?.effort ?? r?.effort ?? gEffort;
         }
       }
       // [fork] ?include=stopped：registry 里已停止的 agent 也入列（additive；
@@ -400,12 +439,32 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       // [fork] master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
       // web 前端的「大总管」置顶入口靠它。
       if (CONTROL_CHANNEL_ID && agentInScope(principal, "master")) {
+        // [fork] master 的 model/effort:probe 其 cwd 最新 jsonl(master 不在 registry)
+        let mInfo: SessionTailInfo | null = null;
+        try {
+          const mCwd = deps.clients.get(CONTROL_CHANNEL_ID)?.cwd || MASTER_DIR;
+          const mSid = latestSessionIdForCwd(mCwd);
+          if (mCwd && mSid) {
+            const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
+            mInfo = await sessionTailInfo(projectJsonlPath(mCwd, mSid));
+          }
+        } catch { /* master 会话 probe 失败不影响列表 */ }
+        // master 不在 registry:jsonl 实测之外只剩全局默认这级兜底
+        let mgModel: string | null = null;
+        let mgEffort: string | null = null;
+        try {
+          const s = JSON.parse(await Bun.file(`${process.env.HOME}/.claude/settings.json`).text());
+          if (typeof s.model === "string") mgModel = s.model;
+          if (typeof s.effortLevel === "string") mgEffort = s.effortLevel;
+        } catch { /* 无全局默认 */ }
         agents.unshift({
           name: "master",
           status: deps.clients.has(CONTROL_CHANNEL_ID) ? "active" : "stopped",
           idle: undefined,
           purpose: "master orchestrator (大总管)",
           busy: getAgentStatus("master") === "thinking",
+          model: mInfo?.model ?? mgModel,
+          effort: mInfo?.effort ?? mgEffort,
         } as any);
       }
       return apiJson(200, { ok: true, agents });
@@ -991,6 +1050,62 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       agent: agent.name,
       hint: "session rotation completes in background; watcher rebinds when the new session jsonl appears",
     });
+  }
+
+  // [fork] POST /api/v1/agents/:name/claude-settings —— per-会话切换模型/effort
+  // (owner 2026-07-23:「每个对话显示当前 model/effort + 快速切换」)。原生
+  // /model、/effort 命令 tmux 注入(与 TUI 手打同一生效路径);回合进行中 409
+  // (此时注入只会排进输入框,语义不明)。非 master 同步写 registry(manager
+  // set-claude,保持 manager 唯一写者)——restart 后模型/effort 沿用。
+  const claudeSetMatch = path.match(/^\/agents\/([^/]+)\/claude-settings$/);
+  if (claudeSetMatch && req.method === "POST") {
+    const agentParam = decodeURIComponent(claudeSetMatch[1]);
+    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
+      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
+    }
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return apiJson(400, { ok: false, error: "invalid JSON body" });
+    }
+    const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
+    const effort = typeof body?.effort === "string" && body.effort.trim() ? body.effort.trim() : undefined;
+    if (!model && !effort) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
+    if (effort && !isKnownEffort(effort)) {
+      return apiJson(400, { ok: false, error: `未知 effort: "${effort}"。可用: ${KNOWN_EFFORT_LEVELS.join(", ")}` });
+    }
+    const agent = await findApiAgent(agentParam);
+    if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
+    const isMasterSet = agent.name === "master";
+    const targetWindow = isMasterSet ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
+    let pane = "";
+    try {
+      pane = await tmuxCapture(targetWindow, 40);
+    } catch (e) {
+      return apiJson(502, { ok: false, error: `tmux 不可达: ${(e as Error).message}` });
+    }
+    if (!paneLooksIdle(pane)) {
+      return apiJson(409, { ok: false, error: "agent 正在回合中，等回合结束再切换" });
+    }
+    try {
+      if (model) await tmuxSendLine(targetWindow, `/model ${model}`);
+      if (model && effort) await Bun.sleep(600); // 两条命令之间让 TUI 消化
+      if (effort) await tmuxSendLine(targetWindow, `/effort ${effort}`);
+    } catch (e) {
+      return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
+    }
+    if (!isMasterSet) {
+      try {
+        const setArgs = ["set-claude", agent.name];
+        if (model) setArgs.push("--model", model);
+        if (effort) setArgs.push("--effort", effort);
+        await runManager(...setArgs);
+      } catch { /* registry 同步失败不影响本次生效(jsonl 探测仍会显示真值) */ }
+    }
+    recordMetric("agent_claude_updated", { channelId: agent.channelId, agent: agent.name, meta: { model, effort, tokenId } });
+    console.log(`🎛 [api] claude-settings ${agent.name}: model=${model ?? "-"} effort=${effort ?? "-"} (token=${tokenId})`);
+    return apiJson(200, { ok: true, agent: agent.name, model: model ?? null, effort: effort ?? null });
   }
 
   // [fork] POST /api/v1/agents/:name/answer —— 交互卡回传。
