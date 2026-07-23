@@ -236,13 +236,28 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const next = json.data;
       // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
       // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁。
-      // 反向(busy=false 解锁)不做——15s 轮询粒度粗,会误杀刚起步的回合;
-      // 解锁交给 done 事件与断流 5s 兜底。
       const cur = next.find((a) => a.name === this.state.activeAgent);
       if (cur?.status === "active" && cur.busy && !this.state.streaming) {
         this.produce((s) => {
           s.streaming = true;
         });
+      }
+      // 反向对齐(2026-07-24 wechat-bot 事故:iOS 冻结页面错过 reply+done,恢复后
+      // 各事件驱动的恢复路径全都没生效,UI 永远「正在回复」、回复永远不出现):
+      // UI 认为回合进行中而服务端连续两拍(≈30s)说 agent 空闲 → 漏收 done/reply
+      // 实锤,强制全量对齐(重拉历史把漏的 reply 补回 + 重连流)。单拍不动——
+      // 15s 轮询粒度粗,刚起步的回合会瞬时 busy=false,下一拍即清零计数。
+      // 这条自愈只依赖「JS 在跑 + 轮询能通」,不依赖 visibility/focus 事件。
+      if (this.state.streaming && cur?.status === "active" && cur.busy === false) {
+        this.staleStreamStrikes++;
+        if (this.staleStreamStrikes >= 2 && Date.now() - this.lastForcedAlign > 60_000) {
+          this.staleStreamStrikes = 0;
+          this.lastForcedAlign = Date.now();
+          this.clientLog("realign: UI streaming 但服务端连续两拍空闲,强制对齐");
+          this.maybeReconnect();
+        }
+      } else {
+        this.staleStreamStrikes = 0;
       }
       if (agentsSignature(next) === agentsSignature(this.state.agents)) return;
       this.produce((s) => {
@@ -356,7 +371,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   // ─── 打开会话 + 持久流 ─────────────────────────────────────
 
   public async openAgent(name: string) {
-    if (name === this.state.activeAgent) return;
+    if (name === this.state.activeAgent) {
+      // 重复打开当前会话(点推送通知/重点侧栏项)= 用户明确要看最新——不能静默
+      // 返回:冻结页面点通知进来正是这条路(2026-07-24 wechat-bot 事故,推送到了
+      // 点进去还是死页面)。做一次完整对齐,带断点锚则快路径重放补漏。
+      this.clientLog("openAgent(same): 强制对齐");
+      this.maybeReconnect();
+      return;
+    }
     // 记住最后打开的会话——iOS 把后台页整个回收重载后（store 全新、hash 还在
     // #chat），据此自动恢复，不让用户卡在空内容页手动重选（2026-07-12 真机）。
     try { localStorage.setItem("cstra_last_agent", name); } catch { /* 隐私模式等 */ }
@@ -589,6 +611,22 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private lastEventAgent = "";
   /** 页面最近一次进后台的时刻(chat.tsx visibilitychange hidden 时记)。 */
   private hiddenAt = 0;
+  /** 反向对齐计数:UI streaming 但服务端说空闲的连续轮询拍数(见 refreshAgents)。 */
+  private staleStreamStrikes = 0;
+  private lastForcedAlign = 0;
+
+  /** 前端恢复动作的服务端存档(fire-and-forget)——「web 收不到消息」类事故反复
+   *  发生却无法取证前端当时做了什么(iOS 无法看 console),关键恢复路径打点到
+   *  ~/.claude-orchestrator/web/client.log,下次直接对时间线。低频:只记恢复事件。 */
+  public clientLog(msg: string) {
+    try {
+      void fetch("/api/client-log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msg }),
+      }).catch(() => {});
+    } catch { /* 不影响主流程 */ }
+  }
 
   public noteHidden() {
     this.hiddenAt = Date.now();
@@ -614,7 +652,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       let lastByteAt = Date.now();
       if (this.streamDog) clearInterval(this.streamDog);
       this.streamDog = setInterval(() => {
-        if (Date.now() - lastByteAt > 25_000) rawReader.cancel().catch(() => {});
+        if (Date.now() - lastByteAt > 25_000) {
+          this.clientLog(`watchdog: 流 ${Math.round((Date.now() - lastByteAt) / 1000)}s 无字节,判死重连`);
+          rawReader.cancel().catch(() => {});
+        }
       }, 5_000);
       const reader = {
         read: () =>
@@ -726,9 +767,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 只有退避的 3-30s,恒走快路径。bridge 重启的缺口由 seq 倒退检测兜底。
     const shortAway = this.hiddenAt > 0 && Date.now() - this.hiddenAt < 5 * 60_000;
     if ((opts?.fast || shortAway) && this.lastEventAgent === name && this.lastEventSeq > 0) {
+      if (!opts?.fast) this.clientLog(`reconnect(fast): since=${this.lastEventSeq} agent=${name}`);
       void this.openStream(name, this.lastEventSeq);
       return;
     }
+    this.clientLog(`reconnect(full): agent=${name} 重拉历史+重连流`);
     const gen = ++this.openGen;
     void this.loadMessages(name, gen).then(() => {
       if (gen !== this.openGen) return;
