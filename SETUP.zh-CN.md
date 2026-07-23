@@ -265,7 +265,7 @@ Claudestra 升级后 Discord 里命令列表还是老的 —— 同样处理。
 
 ## 接下来
 
-- **装 Web 客户端** — [web/SETUP.md](./web/SETUP.md)：PWA 聊天 + 实时终端 + 记录搜索，以及在家庭网络之外用手机访问的方案（推荐 Tailscale）。
+- **装 Web 客户端** — [web/SETUP.md](./web/SETUP.md)：PWA 聊天 + 实时终端 + 记录搜索，以及在家庭网络之外用手机访问的方案（推荐 Tailscale）；另含生产部署：launchd 常驻、HTTPS 终结（tailscale serve 或 Caddy + `tailscale cert`）、证书续期与完整端口清单。
 - 读 [CLAUDE.zh-CN.md](./CLAUDE.zh-CN.md) 了解架构（给贡献者和 agent 看的）。
 - 试试 `send_to_agent` MCP 工具搭建多 agent 协作流。
 - 建个每天早上跑的定时任务，让它汇报到控制频道。

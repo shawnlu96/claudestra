@@ -266,7 +266,7 @@ The same applies if Discord is still showing an old command list after a Claudes
 
 ## Next steps
 
-- **Set up the web client** — [web/SETUP.md](./web/SETUP.md): PWA chat + live terminal + history search, and how to reach it from your phone outside your home network (Tailscale recommended).
+- **Set up the web client** — [web/SETUP.md](./web/SETUP.md): PWA chat + live terminal + history search, and how to reach it from your phone outside your home network (Tailscale recommended), plus production deployment: launchd service, HTTPS termination (tailscale serve or Caddy + `tailscale cert`), certificate renewal, and the full port map.
 - Read [CLAUDE.md](./CLAUDE.md) for an architecture overview (written for contributors and agents).
 - Try `send_to_agent` MCP tool for agent-to-agent workflows.
 - Set up a cron job that runs every morning and reports to your control channel.

@@ -190,6 +190,120 @@ Once the app is reachable over HTTPS (or you accept degraded mode over HTTP):
 
 ---
 
+## Run it as a service (macOS launchd)
+
+`npm run start` dies with your terminal. For an always-on deployment, register
+the web app as a LaunchAgent — `~/Library/LaunchAgents/com.claudestra.web.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.claudestra.web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec ./node_modules/.bin/next start -p 3333</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOU/path/to/claude-orchestrator/web</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/claudestra-web.log</string>
+  <key>StandardErrorPath</key><string>/tmp/claudestra-web.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudestra.web.plist
+
+# after every web/ code update:
+cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web
+```
+
+- ⚠ **`exec` straight into `next`, not `npm run start`** — an npm intermediary
+  process can leave an orphaned `next-server` behind when launchd kills the job.
+  The orphan keeps its push dispatcher alive with no listening port, and every
+  web push then arrives **twice** (July 2026 incident: 5 days of duplicated
+  notifications).
+- The push dispatcher takes an exclusive lock on `127.0.0.1:3339`
+  (`PUSH_LOCK_PORT`) so that even if two server processes coexist (prod + dev,
+  or a leaked orphan), only one sends pushes. `lsof -iTCP:3339` shows the holder.
+
+## HTTPS when `tailscale serve` won't cooperate (Caddy + `tailscale cert`)
+
+`tailscale serve` (previous section) is the zero-config path — try it first. On
+some macOS GUI-app installs it fails with `The Tailscale GUI failed to start
+(CLIError error 3)` and cannot write serve config. Fallback: issue the tailnet
+certificate yourself and let Caddy terminate TLS. Caddy also gives you HTTP/2 —
+a naive TCP tunnel is HTTP/1.1-only, which serializes Safari's six
+connections-per-host and crawls on mobile.
+
+```bash
+brew install caddy
+mkdir -p ~/.claude-orchestrator/web/tls ~/.claude-orchestrator/web/caddy
+tailscale cert \
+  --cert-file ~/.claude-orchestrator/web/tls/mac.crt \
+  --key-file  ~/.claude-orchestrator/web/tls/mac.key \
+  <machine>.<tailnet>.ts.net
+```
+
+`~/.claude-orchestrator/web/caddy/Caddyfile`:
+
+```
+{
+	auto_https off
+	admin off
+}
+
+https://<machine>.<tailnet>.ts.net:443 {
+	tls /Users/YOU/.claude-orchestrator/web/tls/mac.crt /Users/YOU/.claude-orchestrator/web/tls/mac.key
+	handle {
+		reverse_proxy 127.0.0.1:3333
+	}
+}
+```
+
+(Other projects on the same machine may add their own routes to this
+Caddyfile — that is between them and Caddy, out of scope here.)
+
+Then a second LaunchAgent (same skeleton as `com.claudestra.web.plist` above)
+whose `ProgramArguments` runs
+`/opt/homebrew/bin/caddy run --config /Users/YOU/.claude-orchestrator/web/caddy/Caddyfile`,
+with logs pointed at `~/.claude-orchestrator/web/caddy/`. Bootstrap it the same
+way.
+
+- Register **exactly one** caddy LaunchAgent. Caddy binds 443 with
+  `SO_REUSEPORT`, so a duplicate registration silently starts a *second* copy
+  load-balancing the same port instead of failing loudly.
+- Non-root processes may bind 443 on modern macOS (wildcard address).
+- **Certificate renewal** — `tailscale cert` certificates last ~90 days and do
+  not auto-renew here. Check expiry with
+  `openssl x509 -enddate -noout -in ~/.claude-orchestrator/web/tls/mac.crt`,
+  re-run the `tailscale cert` command above, then
+  `launchctl kickstart -k gui/$(id -u)/<your-caddy-label>`.
+
+## Port map (production)
+
+| Port  | Bind         | What |
+|-------|--------------|------|
+| 443   | all (tailnet-reachable) | Caddy TLS/h2 → 3333 (only on the Caddy path) |
+| 3333  | all interfaces | Next.js web app, production |
+| 33333 | all interfaces | Next.js dev server |
+| 3847  | 127.0.0.1    | Bridge HTTP + WebSocket (`BRIDGE_PORT`/`BRIDGE_BIND`) |
+| 3339  | 127.0.0.1    | Web-push dispatcher lock (`PUSH_LOCK_PORT`) |
+
+Request path: phone → Caddy `:443` (TLS, tailnet-only) → Next.js `:3333`
+(BFF, session cookie) → Bridge `:3847` (Bearer token) → tmux / Claude Code.
+
+---
+
 ## Web-only backend (no Discord)
 
 If you don't want a Discord bot, run the Bridge in **Web-only mode** — it detects
