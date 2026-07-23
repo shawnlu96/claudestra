@@ -49,6 +49,8 @@ export interface BgTaskView {
   lines: string[];
   status: "running" | "done";
   durationMs?: number;
+  /** 最后一次收到该任务事件的本地时刻——陈旧收敛用（漏收 completed 的兜底）。 */
+  lastEventAt?: number;
 }
 
 /** Claude Code 原生任务清单条目（~/.claude/tasks/<sessionId>/<id>.json）。 */

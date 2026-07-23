@@ -226,6 +226,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 401 静默返回（轮询不主动跳登录，交给显式操作处理）。
    */
   public async refreshAgents() {
+    this.sweepStaleBgTasks(); // bg 卡陈旧收敛与网络无关,轮询节拍顺带跑
     try {
       const res = await fetch("/api/agents");
       if (res.status === 401) return;
@@ -1274,8 +1275,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 同 id 重开（restart 后 baseline 再触发）→ 重置为 running
         existing.status = "running";
         existing.title = title || existing.title;
+        existing.lastEventAt = Date.now();
       } else {
-        s.bgTasks.push({ id, kind, title, lines: [], status: "running" });
+        s.bgTasks.push({ id, kind, title, lines: [], status: "running", lastEventAt: Date.now() });
       }
     });
   }
@@ -1289,6 +1291,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         t = { id, kind: "subagent", title: id, lines: [], status: "running" };
         s.bgTasks.push(t);
       }
+      t.lastEventAt = Date.now();
       t.lines.push(...items);
       if (t.lines.length > ChatStore.BG_MAX_LINES) {
         t.lines = t.lines.slice(-ChatStore.BG_MAX_LINES);
@@ -1315,6 +1318,20 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       for (const t of s.bgTasks) {
         if (t.status === "running" && !live.has(t.id)) t.status = "done";
+      }
+    });
+  }
+
+  /** [fork] bg 卡陈旧收敛(2026-07-24 owner:「bg task 总是不能正确关掉」):
+   *  working 卡超 4min 无任何事件 → 置完成,镜像 bridge「3min 无活动即完成」
+   *  规则。completed 事件在断档/冻结窗口漏收时,此前只有重连时刻的 bg-sync
+   *  一次收敛机会,错过就永远 working。搭 15s 轮询便车,零新计时器。 */
+  public sweepStaleBgTasks() {
+    const cutoff = Date.now() - 4 * 60_000;
+    if (!this.state.bgTasks.some((t) => t.status === "running" && (t.lastEventAt ?? 0) < cutoff)) return;
+    this.produce((s) => {
+      for (const t of s.bgTasks) {
+        if (t.status === "running" && (t.lastEventAt ?? 0) < cutoff) t.status = "done";
       }
     });
   }
