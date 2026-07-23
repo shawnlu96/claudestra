@@ -95,6 +95,32 @@ function AvatarNickRow({
 const GLOBAL_MODEL_OPTIONS = MODEL_OPTIONS;
 const GLOBAL_EFFORT_OPTIONS = EFFORT_OPTIONS;
 
+/** 设置分区卡片(owner 2026-07-24「排版丑」→ iOS 分组式):统一「标题+右侧
+ *  控件+说明+内容」结构,六个功能块同一版式。⚠ 必须定义在模块层——组件内
+ *  定义每次渲染都是新类型,内部输入框会随重挂载丢焦点。 */
+function Section({
+  title,
+  aside,
+  desc,
+  children,
+}: {
+  title: React.ReactNode;
+  aside?: React.ReactNode;
+  desc?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-xl bg-base-200/60 p-4">
+      <div className="flex min-h-8 items-center justify-between gap-3">
+        <span className="text-[13.5px] font-semibold">{title}</span>
+        {aside}
+      </div>
+      {desc && <p className="mt-0.5 text-xs leading-relaxed text-base-content/50">{desc}</p>}
+      {children && <div className="mt-3">{children}</div>}
+    </section>
+  );
+}
+
 
 /**
  * 全局设置弹窗（侧栏 ⚙️ 进入）：个人资料（我的 + Claude 的头像/昵称,
@@ -232,62 +258,65 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   return createPortal(
     <div className="overlay-in fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
       <div
-        className="panel-pop w-full max-w-md rounded-2xl bg-base-100 p-5 shadow-xl"
+        className="panel-pop flex max-h-[88dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-center justify-between px-5 pb-2 pt-4">
           <span className="text-base font-semibold">{t("设置")}</span>
           <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
             ✕
           </button>
         </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">{/* 分区卡片流 */}
 
-        {/* ── 外观(明暗主题,owner 2026-07-24)─────────────── */}
-        <div className="mb-5 flex items-center justify-between gap-3">
-          <label className="text-sm font-medium">{t("外观")}</label>
-          <div className="join">
-            {(
-              [
-                ["auto", t("跟随系统")],
-                ["light", t("浅色")],
-                ["dark", t("深色")],
-              ] as const
-            ).map(([v, label]) => (
+        {/* ── 界面(外观 + 语言)─────────────── */}
+        <Section
+          title={t("外观")}
+          aside={
+            <div className="join">
+              {(
+                [
+                  ["auto", t("跟随系统")],
+                  ["light", t("浅色")],
+                  ["dark", t("深色")],
+                ] as const
+              ).map(([v, label]) => (
+                <button
+                  key={v}
+                  className={`btn btn-sm join-item ${themePref === v ? "btn-primary" : "btn-ghost border-base-300"}`}
+                  onClick={() => setThemePref(v)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          }
+        />
+        <Section
+          title="语言 / Language"
+          aside={
+            <div className="join">
               <button
-                key={v}
-                className={`btn btn-sm join-item ${themePref === v ? "btn-primary" : "btn-ghost border-base-300"}`}
-                onClick={() => setThemePref(v)}
+                className={`btn btn-sm join-item ${lang === "zh" ? "btn-primary" : "btn-ghost border-base-300"}`}
+                onClick={() => setLang("zh")}
               >
-                {label}
+                中文
               </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ── 语言 / Language ─────────────── */}
-        <div className="mb-5 flex items-center justify-between gap-3">
-          <label className="text-sm font-medium">语言 / Language</label>
-          <div className="join">
-            <button
-              className={`btn btn-sm join-item ${lang === "zh" ? "btn-primary" : "btn-ghost border-base-300"}`}
-              onClick={() => setLang("zh")}
-            >
-              中文
-            </button>
-            <button
-              className={`btn btn-sm join-item ${lang === "en" ? "btn-primary" : "btn-ghost border-base-300"}`}
-              onClick={() => setLang("en")}
-            >
-              English
-            </button>
-          </div>
-        </div>
+              <button
+                className={`btn btn-sm join-item ${lang === "en" ? "btn-primary" : "btn-ghost border-base-300"}`}
+                onClick={() => setLang("en")}
+              >
+                English
+              </button>
+            </div>
+          }
+        />
 
         {/* ── 个人资料（我的 + Claude 的）─────────────── */}
-        <label className="mb-1.5 block text-sm font-medium">{t("个人资料")}</label>
-        <p className="mb-2 text-xs text-base-content/50">
-          {t("头像和昵称显示在对话里（只影响本界面展示,不进对话数据）。")}
-        </p>
+        <Section
+          title={t("个人资料")}
+          desc={t("头像和昵称显示在对话里（只影响本界面展示,不进对话数据）。")}
+        >
         <AvatarNickRow
           label={t("我")}
           fallback="👤"
@@ -308,19 +337,20 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           onNick={setCNick}
           onError={() => setProfileMsg("图片读取失败")}
         />
-        <div className="mb-5 flex items-center gap-2">
+        <div className="mt-3 flex items-center justify-end gap-2.5">
+          {profileMsg && <span className="text-xs text-base-content/60">{t(profileMsg)}</span>}
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void saveProfile()}>
             {t("保存资料")}
           </button>
-          {profileMsg && <span className="text-xs text-base-content/60">{t(profileMsg)}</span>}
         </div>
+        </Section>
 
         {/* ── Claude 全局默认（模型 + Effort）─────────────── */}
-        <label className="mb-1.5 block text-sm font-medium">{t("Claude 全局默认")}</label>
-        <p className="mb-2 text-xs text-base-content/50">
-          {t("影响所有未单独钉模型/effort 的新会话（含终端里直接开的 claude）。已钉的 agent 不受影响。")}
-        </p>
-        <div className="mb-1 grid grid-cols-2 gap-3">
+        <Section
+          title={t("Claude 全局默认")}
+          desc={t("影响所有未单独钉模型/effort 的新会话（含终端里直接开的 claude）。已钉的 agent 不受影响。")}
+        >
+        <div className="grid grid-cols-2 gap-3">
           <label className="form-control">
             <span className="label-text mb-1 text-xs text-base-content/60">{t("模型")}</span>
             <select
@@ -366,52 +396,59 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
             </select>
           </label>
         </div>
-        <div className="mb-5 min-h-4 text-xs text-base-content/60">{t(gMsg)}</div>
+        {gMsg && <div className="mt-2 text-xs text-base-content/60">{t(gMsg)}</div>}
+        </Section>
 
         {/* ── Web Push 推送(本设备)─────────────── */}
-        <label className="mb-1.5 block text-sm font-medium">{t("推送通知")}</label>
-        <div className="mb-1 flex items-center justify-between gap-3">
-          <p className="text-xs text-base-content/50">
-            {t("Web 端发起的对话有回复时,推送到本设备(页面开着时不打扰)。Discord 发起的照旧走 Discord @。")}
-          </p>
-          <input
-            type="checkbox"
-            className="toggle toggle-sm shrink-0"
-            checked={pushOn}
-            disabled={pushBusy}
-            onChange={() => void togglePush()}
-          />
-        </div>
-        <div className="mb-5 min-h-4 text-xs text-base-content/60">{t(pushMsg)}</div>
+        <Section
+          title={t("推送通知")}
+          aside={
+            <input
+              type="checkbox"
+              className="toggle toggle-sm shrink-0"
+              checked={pushOn}
+              disabled={pushBusy}
+              onChange={() => void togglePush()}
+            />
+          }
+          desc={t("Web 端发起的对话有回复时,推送到本设备(页面开着时不打扰)。Discord 发起的照旧走 Discord @。")}
+        >
+          {pushMsg ? <div className="text-xs text-base-content/60">{t(pushMsg)}</div> : null}
+        </Section>
 
-        <label className="mb-1.5 block text-sm font-medium">
-          {t("语音识别 · Groq API Key")}
-        </label>
-        <p className="mb-2 text-xs text-base-content/50">
-          {hint ? `${t("当前:")}${t(hint)}${t("（输入新值覆盖）")}` : t("未配置。console.groq.com 免费注册,API Keys 页生成。")}
-        </p>
-        <input
-          type="password"
-          value={keyInput}
-          onChange={(e) => setKeyInput(e.target.value)}
-          placeholder="gsk_…"
-          autoComplete="off"
-          className="input input-bordered w-full text-sm"
-        />
-        <div className="mt-3 flex items-center gap-2">
-          <button
-            className="btn btn-primary btn-sm"
-            disabled={busy || !keyInput.trim()}
-            onClick={() => save(keyInput.trim())}
-          >
-            {t("保存")}
-          </button>
-          {hint && (
-            <button className="btn btn-ghost btn-sm text-error/80" disabled={busy} onClick={() => save("")}>
-              {t("清除")}
+        {/* ── 语音识别 Key ─────────────── */}
+        <Section
+          title={t("语音识别 · Groq API Key")}
+          desc={
+            hint
+              ? `${t("当前:")}${t(hint)}${t("（输入新值覆盖）")}`
+              : t("未配置。console.groq.com 免费注册,API Keys 页生成。")
+          }
+        >
+          <input
+            type="password"
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            placeholder="gsk_…"
+            autoComplete="off"
+            className="input input-bordered input-sm w-full text-sm"
+          />
+          <div className="mt-3 flex items-center justify-end gap-2.5">
+            {msg && <span className="text-xs text-base-content/60">{t(msg)}</span>}
+            {hint && (
+              <button className="btn btn-ghost btn-sm text-error/80" disabled={busy} onClick={() => save("")}>
+                {t("清除")}
+              </button>
+            )}
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={busy || !keyInput.trim()}
+              onClick={() => save(keyInput.trim())}
+            >
+              {t("保存")}
             </button>
-          )}
-          {msg && <span className="text-xs text-base-content/60">{t(msg)}</span>}
+          </div>
+        </Section>
         </div>
       </div>
     </div>,
