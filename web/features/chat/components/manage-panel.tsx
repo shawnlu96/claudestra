@@ -44,7 +44,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
   const rows = agents.filter((a) => !a.pinnedMaster);
 
   return createPortal(
-    <div className="fixed inset-0 z-[80] flex flex-col bg-base-100">
+    <div className="page-fade fixed inset-0 z-[80] flex flex-col bg-base-100">
       {/* 顶栏与会话页 TopBar 同构:安全区自垫、返回箭头走 onClose(窄屏= history.back) */}
       <header
         className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3"

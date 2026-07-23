@@ -75,7 +75,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
         </svg>
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-30 mt-1.5 w-56 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
+        <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-56 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
           <div className="mb-2.5 flex flex-wrap gap-1">
             {MODEL_OPTIONS.map((o) => (

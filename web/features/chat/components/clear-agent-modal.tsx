@@ -74,8 +74,8 @@ export function ClearAgentModal({
   // 在容器里渲染 .modal（fixed）会整个定位到屏幕外一屏（点了没反应，返回列表
   // 时容器滑回来弹窗才「突然出现」）。portal 出去后 fixed 重新贴视口。
   return createPortal(
-    <dialog className="modal modal-open">
-      <div className="modal-box max-w-lg">
+    <dialog className="modal modal-open overlay-in">
+      <div className="panel-pop modal-box max-w-lg">
         <h3 className="text-base font-semibold">
           {t("🧹 清空会话")} —— {agent.displayName}
         </h3>

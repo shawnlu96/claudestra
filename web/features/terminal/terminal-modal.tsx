@@ -54,8 +54,8 @@ export function TerminalModal({
   }, [onClose]);
 
   return createPortal(
-    <div className="modal modal-open">
-      <div className="modal-box flex h-[88vh] max-h-none w-[92vw] max-w-6xl flex-col gap-0 overflow-hidden rounded-xl p-0">
+    <div className="modal modal-open overlay-in">
+      <div className="panel-pop modal-box flex h-[88vh] max-h-none w-[92vw] max-w-6xl flex-col gap-0 overflow-hidden rounded-xl p-0">
         <header className="flex shrink-0 items-center gap-2 border-b border-white/10 bg-[#181825] px-3 py-2 text-[#cdd6f4]">
           <span className="text-sm opacity-60">🖥️</span>
           <span className="truncate text-sm font-medium">

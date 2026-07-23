@@ -230,9 +230,9 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
+    <div className="overlay-in fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
       <div
-        className="w-full max-w-md rounded-2xl bg-base-100 p-5 shadow-xl"
+        className="panel-pop w-full max-w-md rounded-2xl bg-base-100 p-5 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">

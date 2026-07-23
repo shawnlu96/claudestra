@@ -86,8 +86,8 @@ export function NewAgentModal({
   };
 
   return (
-    <div className="modal modal-open">
-      <div className="modal-box">
+    <div className="modal modal-open overlay-in">
+      <div className="panel-pop modal-box">
         <h3 className="text-lg font-semibold">{t("新建会话")}</h3>
         <p className="mt-1 text-xs opacity-60">
           {t("在指定目录起一个 Claude Code agent（经 Bridge）。")}

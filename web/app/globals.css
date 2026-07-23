@@ -1,10 +1,12 @@
 @import "tailwindcss";
 @import "daisyui/components/tooltip.css";
 
+/* themes: false——不引入任何内建主题,只用下面两个定制块(自带 default /
+   prefersdark 标记)。曾写 `themes: light --default, dark --prefersdark`:
+   那会把**内建** light/dark 也生成出来,内建 [data-theme=light] 规则排在
+   定制块之后同权重覆盖 → 手动切浅色变成原生蓝按钮无圆角(2026-07-24)。 */
 @plugin "daisyui" {
-    themes:
-        light --default,
-        dark --prefersdark;
+    themes: false;
 }
 
 @plugin "daisyui/theme" {
@@ -149,11 +151,34 @@ html.canvas-list {
 .claude-pulse {
     animation: claude-pulse 2s ease-in-out infinite;
 }
+/* 弹层入场动画(owner 2026-07-24「弹窗没动画,非常生硬」):遮罩淡入 +
+   面板浮现(轻缩放上浮)。出场保持即时——关闭动作响应快优于华丽。 */
+@keyframes overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes panel-pop {
+    from { opacity: 0; transform: scale(0.96) translateY(8px); }
+    to { opacity: 1; transform: none; }
+}
+.overlay-in {
+    animation: overlay-in 0.16s ease-out;
+}
+.panel-pop {
+    animation: panel-pop 0.2s cubic-bezier(0.22, 0.9, 0.35, 1);
+}
+/* 全屏页(管理页等)只淡入,缩放会显得整页在晃 */
+.page-fade {
+    animation: overlay-in 0.18s ease-out;
+}
 /* 尊重系统「减弱动态效果」:进场/呼吸全关,三点保留淡闪(信息性) */
 @media (prefers-reduced-motion: reduce) {
     .chat-msg-in,
     .tool-in,
-    .claude-pulse {
+    .claude-pulse,
+    .overlay-in,
+    .panel-pop,
+    .page-fade {
         animation: none;
     }
 }

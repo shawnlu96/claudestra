@@ -103,9 +103,9 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
     .sort((a, b) => (b.contextTokens ?? 0) - (a.contextTokens ?? 0));
 
   return createPortal(
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
+    <div className="overlay-in fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
       <div
-        className="flex max-h-[85dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
+        className="panel-pop flex max-h-[85dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center px-5 pb-2 pt-4">
