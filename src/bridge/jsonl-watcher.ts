@@ -539,7 +539,11 @@ const pendingStartTimers = new Map<
   { timer: ReturnType<typeof setInterval>; channelId: string; startedAt: number }
 >();
 const PENDING_POLL_MS = 2000;
-const PENDING_MAX_WAIT_MS = 60_000;
+// 10min(曾 60s):新建 agent 的 jsonl 要等**首条消息**才落盘,用户建完隔几分钟
+// 才开口是常态——60s 放弃 = watcher 永久缺位(工具/文本从不直播,Stop done 挂
+// '?' 名下,busy 卡 thinking「工作中」,2026-07-24 wechat-bot)。放弃后还有
+// deliverToLocal 的入站自愈兜底,这里只是第一道。poll 是 2s 一次 stat,便宜。
+const PENDING_MAX_WAIT_MS = 600_000;
 
 export async function startWatching(
   agentName: string, cwd: string, sessionId: string,

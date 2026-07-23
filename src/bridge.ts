@@ -224,6 +224,19 @@ function agentLabelForChannel(channelId: string): string {
   return agentNameForChannel(channelId) || (channelId === CONTROL_CHANNEL_ID ? "master" : "?");
 }
 
+/** 同上,但 '?' 时兜底查 registry(watcher 缺位期间事件不能挂错名——agent_status
+ *  done 挂到 '?' 名下会让 agentStatuses 卡 thinking,busy 永远「工作中」,
+ *  2026-07-24 wechat-bot)。async 场景一律用这个。 */
+async function agentLabelForChannelAsync(channelId: string): Promise<string> {
+  const label = agentLabelForChannel(channelId);
+  if (label !== "?") return label;
+  try {
+    const reg = (await readRegistryAgents()).find((r) => r.channelId === channelId);
+    if (reg) return reg.name;
+  } catch { /* 保持 ? */ }
+  return "?";
+}
+
 /**
  * v1.9.21+ send_to_agent 推回机制：记录一条 outstanding send_to_agent 调用，
  * 当 target agent 下一次 reply 到自己 channel 时，bridge 自动把那段文字也 push
@@ -546,7 +559,29 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     // v2.6.0+ 事件埋点：入站消息镜像 + agent 进入思考态（旁路，不影响主流程）
-    emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: { direction: "in", from: meta.user || "?", text: env.content, threadId: env.meta.threadId } });
+    // srcKind:入站来源类型(user=Discord 人类/api=Web 用户/local=agent/bridge)。
+    // web 前端据此把「他端用户发言」实时画成用户气泡(跨端同步),并排除 agent/
+    // bridge 注入(那些不是用户消息,2026-07-24 owner 报跨端同步慢)。
+    emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: { direction: "in", from: meta.user || "?", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId } });
+    // [fork] watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,
+    // pending-start 已放弃 → watcher 永久缺位——工具/文本从不直播、Stop done
+    // 挂 '?' 名下 busy 卡「工作中」)。每条入站消息核对该频道 watcher 在位,
+    // 缺位按 registry 重建;jsonl 还没出现会重新进 pending-wait,回合开始后
+    // 几秒内落盘即绑上。同步 map 查询,常态零开销。
+    if (!agentNameForChannel(to.channelId) && to.channelId !== CONTROL_CHANNEL_ID) {
+      void (async () => {
+        try {
+          const reg = (await readRegistryAgents()).find(
+            (r) => r.channelId === to.channelId && r.status === "active",
+          );
+          if (reg?.cwd && reg.sessionId) {
+            const cwd = reg.cwd.replace(/^~/, process.env.HOME || "~");
+            console.log(`🩹 watcher 缺位,按 registry 重建: ${reg.name} (${reg.sessionId.slice(0, 8)})`);
+            startWatching(reg.name, cwd, reg.sessionId, to.channelId, discord);
+          }
+        } catch { /* 自愈失败不影响消息投递 */ }
+      })();
+    }
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "thinking" } });
     // intent=request 挂 pending + thread 追踪。response 端到端，不挂新 pending。
     if (env.intent === "request") {
@@ -1595,7 +1630,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
           stopTyping(channelId);
           clearSafetyTimer(channelId);
           // 同打断按钮：被打断的回合没有 Stop hook，主动收尾 done
-          emitEvent({ agent: agentLabelForChannel(channelId), chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
+          emitEvent({ agent: agent.name, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
           await finishStatusMessage(discord, channelId, t("⚡ 已打断", "⚡ Interrupted"));
           await interaction.reply("⚡ 已发送 Ctrl+C");
         } else {
@@ -1958,7 +1993,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
           clearSafetyTimer(targetChannelId);
           // 被打断的回合没有 Stop hook —— 主动把回合状态收尾成 done，
           // 否则 agentStatuses 卡 thinking（web 黄点常驻 / busy 补锁复活）
-          emitEvent({ agent: agentLabelForChannel(targetChannelId), chatId: targetChannelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
+          emitEvent({ agent: agentLabel, chatId: targetChannelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
         } catch (e) {
           console.error(`⚡ 打断流程异常:`, e);
         }
@@ -3017,7 +3052,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
       if (event === "Stop" || event === "StopFailure" || event === "stop") {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
-        const evAgent = agentLabelForChannel(channelId);
+        const evAgent = await agentLabelForChannelAsync(channelId);
         emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done" } });
         // [fork] 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。

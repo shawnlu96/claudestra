@@ -88,7 +88,16 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
     case "assistant_text":
       return { t: "text", text: String(d.text ?? "") };
     case "chat_message": {
-      // direction=in 是自己发出去的消息回声；out 才是 agent 的回复
+      // [fork] direction=in 且来源是用户(Web api/Discord user)→ user-in:另一端
+      // 用户的发言实时画进本端视图(owner 2026-07-24:手机发的话电脑端要等对齐
+      // 才出现)。agent/bridge 注入不算用户消息;本端自己的回声由前端对账去重。
+      if (d.direction === "in") {
+        const src = String(d.srcKind ?? "");
+        if ((src === "api" || src === "user") && typeof d.text === "string" && d.text.trim()) {
+          return { t: "user-in", text: d.text };
+        }
+        return null;
+      }
       if (d.direction !== "out") return null;
       // [fork] reply() 的最终回复 → 独立 reply 事件（挂 replyText，与过程叙述分区、
       // 走 Domd 富文本、且回合 done 之后到达也能定稿——修「回复完又冒一条纯文本」）

@@ -600,7 +600,9 @@ const TextBlock = memo(function TextBlock({
   return (
     <QuoteSwipe quote={text}>
       <div
-        className={`cursor-pointer ${
+        // 正文不用 cursor-pointer——桌面端整段文字变小手像可点链接(owner 2026-07-24
+        // 「点完链接手放哪都是小手」);点击切时间戳的行为保留,光标用默认
+        className={`${
           muted
             ? // 首版 13px/60% 被 owner 打回「区分不够」——真因是 DOMD 组件用
               // adoptedStyleSheets 给 .DOMD-Root 钉 16px/深色,wrapper 的字号颜色
@@ -757,7 +759,7 @@ const Message = memo(function Message({
           return (
             <QuoteSwipe quote={body} className="max-w-[85%]">
               <div
-                className="cursor-pointer whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
+                className="whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
                 onClick={() => setShowTs((v) => !v)}
               >
                 {quoted && (

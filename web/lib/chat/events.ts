@@ -56,6 +56,9 @@ export type WebStreamEvent =
   | { t: "tool-state"; id: string; state: "done" | "error" }
   /** 助手文本段（过程叙述，追加到当前流式助手消息的 content） */
   | { t: "text"; text: string }
+  /** [fork] 另一端用户的发言(跨端同步:手机/电脑/Discord 同看一个会话)。
+   *  本端自己发的回声由前端按文本对账去重。 */
+  | { t: "user-in"; text: string }
   /** [fork] reply() 的最终回复（挂到当前 assistant 气泡的 replyText，与叙述分区渲染）。
    *  components：reply 附带的按钮/选单（点击回投 [button:<id>] / [select:<id>:<value>]）。
    *  attachments：agent 出站附件（图片内联显示,文件给 chip）——url 指向 BFF 附件端点。 */
