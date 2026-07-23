@@ -148,7 +148,8 @@ function AgentRow({
         )}
         <div
           className={`relative z-[1] flex items-center gap-2.5 overflow-hidden rounded-lg px-2 py-2.5 sm:gap-2 sm:py-1.5 ${
-            active ? "bg-base-300" : "bg-base-200 hover:bg-base-300/60"
+            // active:bg 按压即时反馈——触屏无 hover,没有按压态点击像「没反应」
+            active ? "bg-base-300" : "bg-base-200 hover:bg-base-300/60 active:bg-base-300"
           }`}
           style={{
             transform: swipeX ? `translateX(${swipeX}px)` : undefined,
@@ -221,8 +222,18 @@ function AgentRow({
               closeSwipe();
               return;
             }
-            store.openAgent(a.name);
+            // 两阶段提交(2026-07-24 owner「点上去卡卡的」):openAgent 的
+            // produce(整份 messages 替换 → 30+ 条 markdown 全量渲染)若与
+            // toContent 的横滑 className 同一 commit,重渲染把 commit 拖住
+            // 几百 ms,滑动迟迟不启动,手感=点了没反应然后猛跳。先只提交
+            // 横滑(轻,首帧画出后动画由 compositor 接管,主线程再忙也不掉),
+            // 双 rAF 等首帧落地再灌会话内容。
             onSelect();
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                void store.openAgent(a.name);
+              }),
+            );
           }}
         >
           {manage && (
