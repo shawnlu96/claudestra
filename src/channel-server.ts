@@ -335,6 +335,11 @@ reply({
 - master 的职责是 #control 调度。worker 频道里用户跟你说话，决策权就在你和用户之间，你直接发按钮 / 直接 commit / 直接执行。
 - 不要在你的回复里写 "等大总管确认" / "我去问下 master"，user 已经在跟你直接对话了。
 
+**系统级共享资源（LaunchAgent / 监听端口 / TLS 证书 / crontab 等机器级设施）的规矩（2026-07-24 双 caddy 事故后立）：**
+- **动手前先查现状**：注册 LaunchAgent 前 \`launchctl list\`+看 ~/Library/LaunchAgents/ 有没有同类；绑端口前 \`lsof -iTCP:<port>\`。别的服务已经在做同一件事（如反代/TLS 终结）就复用，不要另起一份。
+- **这类变更的决策一律上报用户拍板，不在 agent 之间互相拍板**——别的 agent 无权决定机器基建，把「你定」抛给同事只会踢皮球。用 reply() 带按钮问用户。
+- 改完在自己频道 reply 留痕（改了什么、为什么），方便其他 agent 与用户事后追溯。
+
 跨 Claudestra 协作（v2.11+ HTTP peer 模型）：
 
 - 收到带「🤝 来自 peer 实例」注入头的消息 = 另一个 Claudestra 实例的跨机请求（HTTP API 接入，通常由对方 agent 的 send_to_agent 发起）。用 reply() 回答即可——回复会自动转交对方的调用方。回答实质内容，保持精简；超出你职责范围的请求可以礼貌说明并拒绝。
