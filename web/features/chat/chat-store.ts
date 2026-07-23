@@ -228,7 +228,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public async refreshAgents() {
     this.sweepStaleBgTasks(); // bg 卡陈旧收敛与网络无关,轮询节拍顺带跑
     try {
-      const res = await fetch("/api/agents");
+      const res = await fetch("/api/agents", { signal: AbortSignal.timeout(10_000) });
       if (res.status === 401) return;
       const json = (await res.json()) as { data?: AgentSession[] };
       // 同 loadAgents:502/坏响应不清列表(否则 15s 轮询撞上 bridge 重启窗口,
@@ -504,7 +504,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private async loadMessages(name: string, gen: number, attempt = 0) {
     try {
       const res = await fetch(
-        `/api/chat/history?agent=${encodeURIComponent(name)}`
+        `/api/chat/history?agent=${encodeURIComponent(name)}`,
+        { signal: AbortSignal.timeout(15_000) } // 解冻窗口 fetch 悬挂 → 超时走既有重试
       );
       if (res.status === 401) return this.gotoLogin();
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -638,10 +639,19 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private async openStream(name: string, since?: number) {
     const gen = ++this.streamGen;
     const startedAt = Date.now();
+    // 连接建立超时(2026-07-24 owner:「点通知进来不更新,切出切回才好」):iOS
+    // 解冻瞬间发的 fetch 会在网络栈未醒的窗口里永远悬着——无超时就无 catch/
+    // finally,自动重连链彻底断头,只能靠用户再切一次页面。10s 没握上手就
+    // abort → finally 走既有退避重连,网络醒了自然连上。连上后清计时器,
+    // signal 不再触发,长连接流不受影响(流的死活归 25s 无字节看门狗管)。
+    const connCtrl = new AbortController();
+    const connTimer = setTimeout(() => connCtrl.abort(), 10_000);
     try {
       const res = await fetch(
-        `/api/chat/stream?agent=${encodeURIComponent(name)}${since ? `&since=${since}` : ""}`
+        `/api/chat/stream?agent=${encodeURIComponent(name)}${since ? `&since=${since}` : ""}`,
+        { signal: connCtrl.signal }
       );
+      clearTimeout(connTimer);
       if (res.status === 401) return this.gotoLogin();
       if (gen !== this.streamGen) return; // 已切走
       const rawReader = res.body?.getReader();
@@ -683,6 +693,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     } catch {
       /* 断流：保持静默，由下面的自动重连续 */
     } finally {
+      clearTimeout(connTimer);
       if (this.streamDog) {
         clearInterval(this.streamDog);
         this.streamDog = null;
