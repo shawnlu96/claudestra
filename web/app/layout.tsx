@@ -45,10 +45,18 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN">
+    // suppressHydrationWarning:下面的内联脚本会在水合前给 html 加 data-theme
+    <html lang="zh-CN" suppressHydrationWarning>
       {/* body 不设 bg：iOS 取画布色时 body 的 bg 会盖过 html，画布色跟随（globals.css
           canvas-list）必须落在 html 上。页面自身背景由应用壳根容器/面板各自绘制。 */}
       <body className="min-h-full text-base-content antialiased">
+        {/* 明暗偏好 paint 前应用(lib/theme.ts 的 localStorage 键)——放 React 里
+            要等水合,暗色用户会先白闪一帧 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{var t=localStorage.getItem("cstra_theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`,
+          }}
+        />
         <I18nInit />
         {children}
       </body>

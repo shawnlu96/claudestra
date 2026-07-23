@@ -297,6 +297,12 @@ export const DICT: Record<string, string> = {
   // ── store 系统提示 ───────────────────────────────────
   "无活动会话": "No active session",
 
+  // ── 外观 ─────────────────────────────────────────────
+  "外观": "Appearance",
+  "跟随系统": "System",
+  "浅色": "Light",
+  "深色": "Dark",
+
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
   "回合进行中，等结束后再切": "Turn in progress — try again when it finishes",

@@ -5,6 +5,7 @@ import { useChatStoreApi } from "../chat-store";
 import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client";
 import { useT, useLang, setLang } from "@/lib/i18n";
 import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
+import { useThemePref, setThemePref } from "@/lib/theme";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
 async function fileToAvatar(file: File): Promise<string> {
@@ -105,6 +106,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const store = useChatStoreApi();
   const t = useT();
   const lang = useLang();
+  const themePref = useThemePref();
   const [keyInput, setKeyInput] = useState("");
   const [hint, setHint] = useState("");
   const [busy, setBusy] = useState(false);
@@ -238,6 +240,28 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
             ✕
           </button>
+        </div>
+
+        {/* ── 外观(明暗主题,owner 2026-07-24)─────────────── */}
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <label className="text-sm font-medium">{t("外观")}</label>
+          <div className="join">
+            {(
+              [
+                ["auto", t("跟随系统")],
+                ["light", t("浅色")],
+                ["dark", t("深色")],
+              ] as const
+            ).map(([v, label]) => (
+              <button
+                key={v}
+                className={`btn btn-sm join-item ${themePref === v ? "btn-primary" : "btn-ghost border-base-300"}`}
+                onClick={() => setThemePref(v)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* ── 语言 / Language ─────────────── */}

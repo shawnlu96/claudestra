@@ -303,6 +303,38 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
+  // 桌面侧栏拖拽调宽(owner 2026-07-24):右缘手柄,localStorage 持久化。
+  // 移动端 w-full 不受影响(宽度变量只在 sm+ 生效)。
+  const [sbWidth, setSbWidth] = useState<number | null>(() => {
+    if (typeof window === "undefined") return null;
+    const v = Number(localStorage.getItem("cstra_sbw"));
+    return Number.isFinite(v) && v >= 200 && v <= 560 ? v : null;
+  });
+  const resizingRef = useRef(false);
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      if (!resizingRef.current) return;
+      // aside 起自视口左缘,clientX 即目标宽度
+      setSbWidth(Math.min(560, Math.max(200, Math.round(ev.clientX))));
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setSbWidth((w) => {
+        try {
+          if (w) localStorage.setItem("cstra_sbw", String(w));
+        } catch { /* 隐私模式 */ }
+        return w;
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
   // 相对时间标签保鲜:30s 心跳整列表重渲染(行数少,代价可忽略)
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -403,7 +435,15 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
     });
 
   return (
-    <aside className="flex w-full shrink-0 flex-col border-r border-base-300 bg-base-200 sm:w-64">
+    <aside
+      className="relative flex w-full shrink-0 flex-col border-r border-base-300 bg-base-200 sm:w-[var(--sb-w,16rem)]"
+      style={sbWidth ? ({ "--sb-w": `${sbWidth}px` } as React.CSSProperties) : undefined}
+    >
+      {/* 桌面拖宽手柄:压住右缘 5px,悬停显色提示可拖 */}
+      <div
+        className="absolute inset-y-0 -right-[2px] z-10 hidden w-[5px] cursor-col-resize hover:bg-primary/30 active:bg-primary/40 sm:block"
+        onPointerDown={startResize}
+      />
       {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）。
           刷新按钮已移除（列表由 15s 轮询 + 回前台重连自动感知 roster 变化）；
           新建会话统一走大总管对话，Web 侧不再单独提供入口。 */}
