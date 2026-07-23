@@ -337,6 +337,11 @@ export async function readSessionHistory(
         // 其余 isMeta（caveat / local-command 输出等）照旧过滤
         const un = unwrapChannelMessage(text);
         if (!un) continue;
+        // [fork] bridge 内部注入(看门狗 nudge 等管线提示,user="bridge:*")不进
+        // 历史——那是发给 agent 的指令,不是对话。直播侧 srcKind 过滤已同款
+        // 排除,历史侧对齐(2026-07-24 用户截图:nudge 全文以用户气泡出现在
+        // migration 历史里,像系统故障)。
+        if (un.from && /^bridge(:|$)/.test(un.from)) continue;
         const msg: HistoryMessage = { seq: i, ts, role: "user", text: un.text };
         if (un.from) msg.from = un.from;
         all.push(msg);
@@ -512,6 +517,7 @@ export async function searchSessionHistory(
         // channel 送达的入站消息解包；其余 isMeta（caveat / 命令输出）不搜
         const un = unwrapChannelMessage(text);
         if (!un) continue;
+        if (un.from && /^bridge(:|$)/.test(un.from)) continue; // bridge 注入不搜(同历史过滤)
         body = un.text;
         from = un.from;
       } else {
