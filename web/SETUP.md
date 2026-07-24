@@ -264,6 +264,12 @@ tailscale cert \
 
 https://<machine>.<tailnet>.ts.net:443 {
 	tls /Users/YOU/.claude-orchestrator/web/tls/mac.crt /Users/YOU/.claude-orchestrator/web/tls/mac.key
+	# Response compression — not optional if clients come in over slow links.
+	# Neither `next start` nor the bridge compresses; without this a large chat
+	# history JSON (hundreds of kB) ships raw and can take 10s+ on a lossy
+	# cross-border path (2026-07-24: 560 kB → 102 kB, 13.9s → 0.3s). SSE is
+	# safe: caddy's encode flushes per event, verified no buffering.
+	encode zstd gzip
 	handle {
 		reverse_proxy 127.0.0.1:3333
 	}
