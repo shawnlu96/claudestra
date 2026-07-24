@@ -41,8 +41,10 @@ function TopBar() {
   const t = useT();
   const active = useChatStore((s) => s.state.activeAgent);
   const agents = useChatStore((s) => s.state.agents);
+  const streaming = useChatStore((s) => s.state.streaming);
   const nav = useChatNav();
   const info = agents.find((a) => a.name === active);
+  const busy = streaming || !!info?.busy;
   // 大总管「聊天 + UI」双轨(2026-07-14 owner):生命周期操作不必经过 LLM。
   // 全屏独立页(不再是居中弹框);窄屏配 #manage hash,系统返回/左滑即退出。
   const [showManage, setShowManage] = useState(false);
@@ -81,6 +83,17 @@ function TopBar() {
       <span className="truncate font-semibold">
         {info ? t(info.displayName) : active || "Claudestra"}
       </span>
+      {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
+          顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
+      {busy && (
+        <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-info/10 px-2 py-0.5 text-[11px] font-medium text-info">
+          <span className="relative flex size-1.5">
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-info opacity-60 motion-reduce:hidden" />
+            <span className="relative inline-flex size-1.5 rounded-full bg-info" />
+          </span>
+          {t("思考中")}
+        </span>
+      )}
       {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)。
           色阶按 1M 窗口(owner 定档):≥200k 黄,≥500k 红,≥750k 深红(实色);
           <200k 不打扰(不显示)。 */}

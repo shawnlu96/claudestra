@@ -126,6 +126,7 @@ export const DICT: Record<string, string> = {
   "请求压缩": "Compact",
   "本会话不再提示": "Don't remind again this session",
   "思考中…": "Thinking…",
+  "思考中": "Thinking",
   "发送即插入当前会话，将在当前步骤后生效": "Sending now inserts into this turn, applied after the current step",
   "正在录音": "Recording",
   "松开结束": "release to finish",

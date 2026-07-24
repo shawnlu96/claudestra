@@ -423,8 +423,11 @@ export function Composer() {
   useEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
+    // 上限分端:桌面(sm+)输入区更高(owner 2026-07-24「桌面模式下太小」),
+    // 与 className 的 max-h 断点保持一致
+    const cap = window.matchMedia("(min-width: 640px)").matches ? 320 : 180;
     ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 180)}px`;
+    ta.style.height = `${Math.min(ta.scrollHeight, cap)}px`;
     if (document.activeElement !== ta) ta.scrollTop = ta.scrollHeight;
   }, [text]);
 
@@ -666,7 +669,7 @@ export function Composer() {
             ref={taRef}
             onFocus={() => setTaFocused(true)}
             onBlur={() => setTaFocused(false)}
-            className={`${recState !== "idle" ? "hidden" : "block"} max-h-[180px] min-h-[46px] w-full resize-none overflow-y-auto bg-transparent px-4 pb-1.5 pt-[14px] text-[14.5px] leading-[1.55] text-base-content outline-none placeholder:text-base-content/35`}
+            className={`${recState !== "idle" ? "hidden" : "block"} max-h-[180px] min-h-[46px] w-full resize-none overflow-y-auto bg-transparent px-4 pb-1.5 pt-[14px] text-[14.5px] leading-[1.55] text-base-content outline-none placeholder:text-base-content/35 sm:max-h-[320px] sm:min-h-[84px]`}
             rows={1}
             placeholder={
               disabled
