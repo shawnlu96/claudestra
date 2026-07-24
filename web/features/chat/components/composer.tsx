@@ -457,14 +457,31 @@ export function Composer() {
     e.target.value = ""; // 允许再次选择同一文件
   };
 
-  // 粘贴带文件（截图 / 复制的文件）直接收下；纯文本粘贴 files 为空，不影响输入
-  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const picked = Array.from(e.clipboardData.files);
-    if (picked.length) {
+  // 粘贴带文件（截图 / 复制的文件）→ 附件。窗口级监听:桌面端焦点常常不在
+  // 输入框(刚点完消息/侧栏),Ctrl+V 也要能收(owner 2026-07-24)。纯文本粘贴
+  // files 为空不受影响;焦点在别的输入框(搜索/弹窗)时不劫持它的粘贴。
+  useEffect(() => {
+    if (disabled) return;
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const picked = Array.from(e.clipboardData?.files ?? []);
+      if (!picked.length) return;
+      const ae = document.activeElement;
+      const isOtherInput =
+        ae &&
+        ae !== taRef.current &&
+        (ae instanceof HTMLInputElement ||
+          ae instanceof HTMLTextAreaElement ||
+          (ae as HTMLElement).isContentEditable);
+      if (isOtherInput) return;
       e.preventDefault();
       addFiles(picked);
-    }
-  };
+      taRef.current?.focus();
+    };
+    window.addEventListener("paste", onWindowPaste);
+    return () => window.removeEventListener("paste", onWindowPaste);
+    // addFiles 只调 setFiles 函数式更新,闭包旧引用无害
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled]);
 
   // 触屏设备（pointer: coarse）：Enter/换行键 = 换行，发送只走按钮——手机键盘的
   // 「换行」键就该换行（2026-07-13 owner）。桌面保持 Enter 发送、Shift+Enter 换行。
@@ -664,7 +681,6 @@ export function Composer() {
             disabled={disabled}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
-            onPaste={onPaste}
           />
           {/* 按住说话手势层:未聚焦时盖在输入区上——短按补 focus 进打字,按住开录。
               录音中保持挂载(pointer capture 连续性,松手才能收到 up);识别中卸载。

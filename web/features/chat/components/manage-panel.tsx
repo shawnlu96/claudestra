@@ -1,9 +1,9 @@
 "use client";
 import { useState } from "react";
-import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { NewAgentModal } from "./new-agent-modal";
 import { useT } from "@/lib/i18n";
+import { ResponsiveShell } from "./responsive-shell";
 
 /**
  * Agent 管理页（2026-07-14 owner：大总管做成「聊天 + UI」双轨——能点按钮
@@ -11,9 +11,9 @@ import { useT } from "@/lib/i18n";
  * 复用 store 的 createAgent/restartAgent/killAgent(本就是 LLM-free 的 BFF 直调);
  * 破坏性操作用行内二次确认(点一下变「确认?」,3s 复原),不弹系统框。
  *
- * 形态：全屏独立页,不是居中弹框（owner 2026-07-14 截图实锤:iOS 视口缩放/平移
- * 下居中 modal 整体歪出屏幕右缘）。fixed inset-0 不透明底 + 自垫安全区,与
- * terminal-page 同一套治法;窄屏由 chat.tsx 配 #manage hash 伪路由,左滑/返回键退出。
+ * 形态：ResponsiveShell 双形态——窄屏全屏独立页（owner 2026-07-14 截图实锤:
+ * iOS 视口缩放/平移下居中 modal 整体歪出屏幕右缘,手机必须全屏页），桌面居中
+ * 弹窗（owner 2026-07-24）。窄屏由 chat.tsx 配 #manage hash 伪路由,左滑/返回键退出。
  */
 export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const t = useT();
@@ -43,14 +43,14 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
 
   const rows = agents.filter((a) => !a.pinnedMaster);
 
-  return createPortal(
-    <div className="page-fade fixed inset-0 z-[80] flex flex-col bg-base-100">
+  return (
+    <ResponsiveShell z="z-[80]" panelClass="sm:max-w-xl" onClose={onClose}>
       {/* 顶栏与会话页 TopBar 同构:安全区自垫、返回箭头走 onClose(窄屏= history.back) */}
       <header
         className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2" aria-label={t("返回")} onClick={onClose}>
+        <button className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden" aria-label={t("返回")} onClick={onClose}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
@@ -58,6 +58,9 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
         <span className="truncate font-semibold">{t("Agent 管理")}</span>
         <button className="btn btn-primary btn-sm ml-auto" onClick={() => setShowNew(true)}>
           {t("＋ 新建")}
+        </button>
+        <button className="btn btn-ghost btn-sm max-sm:hidden" aria-label={t("关闭")} onClick={onClose}>
+          ✕
         </button>
       </header>
       {msg && <div className="px-4 pt-2 text-xs text-base-content/60">{t(msg)}</div>}
@@ -125,7 +128,6 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
         </ul>
       </div>
       <NewAgentModal open={showNew} onClose={() => setShowNew(false)} />
-    </div>,
-    document.body
+    </ResponsiveShell>
   );
 }

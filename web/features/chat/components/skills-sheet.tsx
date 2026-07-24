@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
 import { getLang, useT } from "@/lib/i18n";
+import { ResponsiveShell } from "./responsive-shell";
 
 /** 与 composer 的 SlashCmd 同形（bridge /skills 端点）。 */
 export interface SkillItem {
@@ -71,7 +71,7 @@ function PinIcon({ filled }: { filled: boolean }) {
  * Skills 面板（owner 2026-07-15:「斜杠太隐蔽,加按钮呼出;常用靠前;
  * 加管理页可置顶,其余按使用频率排」）。全屏 sheet,列表/管理双视图:
  * 列表点击 → 填入输入框;管理模式每行图钉切置顶、显示使用次数。
- * createPortal 到 body(横滑 transform 容器内 fixed 会飞出屏,规则 5.5)。
+ * 形态走 ResponsiveShell:窄屏全屏 sheet / 桌面居中弹窗(owner 2026-07-24)。
  */
 export function SkillsSheet({
   skills,
@@ -119,13 +119,13 @@ export function SkillsSheet({
     );
   }, [skills, prefs, term]);
 
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex flex-col bg-base-100">
+  return (
+    <ResponsiveShell z="z-50" panelClass="sm:max-w-lg sm:h-[72dvh]" onClose={onClose}>
       <div
         className="flex shrink-0 items-center gap-2 border-b border-base-300 px-3 pb-2"
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.5rem)" }}
       >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2" onClick={onClose} aria-label={t("关闭 Skills")}>
+        <button className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden" onClick={onClose} aria-label={t("关闭 Skills")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
@@ -139,6 +139,9 @@ export function SkillsSheet({
           onClick={() => setManage((v) => !v)}
         >
           {manage ? t("完成") : t("管理")}
+        </button>
+        <button className="btn btn-ghost btn-sm max-sm:hidden" onClick={onClose} aria-label={t("关闭 Skills")}>
+          ✕
         </button>
       </div>
       <div className="shrink-0 px-3 py-2">
@@ -223,7 +226,6 @@ export function SkillsSheet({
           );
         })}
       </div>
-    </div>,
-    document.body
+    </ResponsiveShell>
   );
 }

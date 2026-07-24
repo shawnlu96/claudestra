@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { getLang, useT } from "@/lib/i18n";
+import { ResponsiveShell } from "./responsive-shell";
 
 /**
  * 会话内搜索（owner 2026-07-14:「每个会话右上角加搜索按钮,只搜本 session」）。
@@ -57,14 +57,14 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
     setSearching(false);
   };
 
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex flex-col bg-base-100">
-      {/* 搜索条:安全区自垫,返回键 + 输入 + 触发 */}
+  return (
+    <ResponsiveShell z="z-50" panelClass="sm:max-w-xl sm:h-[72dvh]" onClose={onClose}>
+      {/* 搜索条:安全区自垫,返回键(窄屏) + 输入 + 触发 + ✕(桌面) */}
       <div
         className="flex shrink-0 items-center gap-2 border-b border-base-300 px-3 pb-2"
         style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.5rem)" }}
       >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2" onClick={onClose} aria-label={t("关闭搜索")}>
+        <button className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden" onClick={onClose} aria-label={t("关闭搜索")}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
           </svg>
@@ -104,6 +104,9 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
         >
           {searching ? <span className="loading loading-spinner loading-xs" /> : t("搜索")}
         </button>
+        <button className="btn btn-ghost btn-sm max-sm:hidden" onClick={onClose} aria-label={t("关闭搜索")}>
+          ✕
+        </button>
       </div>
       {/* 结果区 */}
       <div
@@ -132,7 +135,6 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
           />
         ))}
       </div>
-    </div>,
-    document.body
+    </ResponsiveShell>
   );
 }
