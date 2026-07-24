@@ -21,6 +21,8 @@ import {
   type Principal,
 } from "../lib/principals.js";
 import { runManager } from "./management.js";
+import { readPeers } from "../lib/peers.js";
+import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter } from "./event-bus.js";
@@ -1320,6 +1322,104 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (agentParam === "master") return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
     const r = await runManager(lifecycleMatch[2], agentParam);
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: `manager ${lifecycleMatch[2]} failed` });
+  }
+
+  // ── v2.11.1+ /peers —— HTTP peer 管理面（web UI 后端;owner 2026-07-24
+  // 「前端要能管理 peer 的权限以及在哪些远端有权限」）。全部 mutation 走
+  // runManager 复用 CLI 的 R1 校验/token 签发/原子写,bridge 不直写 principals。
+  if (path === "/peers" || path.startsWith("/peers/")) {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "peers management requires a full-scope token" });
+    }
+
+    // GET /peers —— 清单:peers.json ⋈ principals(入站 scope) + 本地 agent 表(scope 编辑器数据源)
+    if (path === "/peers" && req.method === "GET") {
+      const [peersData, pf, regAgents] = await Promise.all([
+        readPeers(),
+        readPrincipals(),
+        readRegistryAgents(),
+      ]);
+      const peers = (peersData.httpPeers || []).map((p) => {
+        const tok = pf.principals.find((x) => x.peer === p.name && !x.disabled);
+        return {
+          name: p.name,
+          baseUrl: p.baseUrl || null,
+          handshakeDone: !!(p.outToken && p.baseUrl),
+          disabled: !!p.disabled,
+          addedAt: p.addedAt,
+          inTokenId: tok ? tokenIdOf(tok) : p.inTokenId ?? null,
+          /** 对方 token 的 scope = 对方能访问我这边哪些 agent */
+          exposedAgents: tok?.agents ?? [],
+        };
+      });
+      const localAgents = regAgents.map((a) => ({
+        name: a.name.startsWith("agent-") ? a.name.slice(6) : a.name,
+        external: !!a.external,
+        status: a.status ?? "unknown",
+      }));
+      return apiJson(200, { ok: true, peers, localAgents });
+    }
+
+    // POST /peers/invite | /peers/join | /peers/accept —— 握手三步
+    if (req.method === "POST" && (path === "/peers/invite" || path === "/peers/join" || path === "/peers/accept")) {
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return apiJson(400, { ok: false, error: "invalid JSON body" });
+      }
+      const name = typeof body?.name === "string" ? body.name.trim() : "";
+      if (!name) return apiJson(400, { ok: false, error: '"name" required' });
+      const agentsCsv = Array.isArray(body?.agents)
+        ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
+        : "";
+      const flags: string[] = [];
+      if (body?.force) flags.push("--force");
+      if (body?.rotate) flags.push("--rotate");
+      let r: any;
+      if (path === "/peers/invite") {
+        r = await runManager("peer-http-invite", name, "--agents", agentsCsv, "--url", String(body?.url ?? ""), ...flags);
+      } else if (path === "/peers/join") {
+        r = await runManager("peer-http-join", name, String(body?.invite ?? ""), "--agents", agentsCsv, "--url", String(body?.url ?? ""), ...flags);
+      } else {
+        r = await runManager("peer-http-accept", name, String(body?.receipt ?? ""));
+      }
+      if (r?.ok) recordMetric("peer_managed", { meta: { action: path.slice("/peers/".length), peer: name } });
+      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+    }
+
+    // POST /peers/:name/test | /peers/:name/scope | /peers/:name/remove
+    const peerActionMatch = path.match(/^\/peers\/([^/]+)\/(test|scope|remove)$/);
+    if (peerActionMatch && req.method === "POST") {
+      const pname = decodeURIComponent(peerActionMatch[1]);
+      const action = peerActionMatch[2];
+      if (action === "test") {
+        // 连通探测(顺带回答「我在对方那边有哪些 agent 可访问」)。失败也是数据不是服务错,一律 200
+        const r = await runManager("peer-http-test", pname);
+        return apiJson(200, r ?? { ok: false, error: "manager failed" });
+      }
+      if (action === "remove") {
+        const r = await runManager("peer-http-remove", pname);
+        if (r?.ok) recordMetric("peer_managed", { meta: { action: "remove", peer: pname } });
+        return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+      }
+      // scope —— 改对方入站可访问的 agent 白名单(R1 校验在 manager 侧)
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return apiJson(400, { ok: false, error: "invalid JSON body" });
+      }
+      const agentsCsv = Array.isArray(body?.agents)
+        ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
+        : "";
+      if (!agentsCsv) return apiJson(400, { ok: false, error: '"agents" must be a non-empty array' });
+      const r = await runManager("peer-http-scope", pname, "--agents", agentsCsv, ...(body?.force ? ["--force"] : []));
+      if (r?.ok) recordMetric("peer_managed", { meta: { action: "scope", peer: pname, agents: agentsCsv } });
+      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+    }
+
+    return apiJson(404, { ok: false, error: "unknown peers endpoint" });
   }
 
   return apiJson(404, { ok: false, error: "unknown endpoint" });

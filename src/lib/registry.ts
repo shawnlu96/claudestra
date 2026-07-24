@@ -25,6 +25,8 @@ export interface RegistryAgent {
   displayName?: string;
   model?: string;
   effort?: string;
+  /** create --external 标记：可安全暴露给 API token / peer（R1 守卫） */
+  external?: boolean;
 }
 
 /** 全量读取（含非 active）。读失败/文件缺失返回空数组，不抛。 */

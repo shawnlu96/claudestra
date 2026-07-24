@@ -6,6 +6,7 @@ import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client"
 import { useT, useLang, setLang } from "@/lib/i18n";
 import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
 import { useThemePref, setThemePref } from "@/lib/theme";
+import { PeersModal } from "./peers-modal";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
 async function fileToAvatar(file: File): Promise<string> {
@@ -152,6 +153,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [pushOn, setPushOn] = useState(false);
   const [pushMsg, setPushMsg] = useState("");
   const [pushBusy, setPushBusy] = useState(false);
+  // HTTP peer 管理(owner 2026-07-24):独立弹窗
+  const [showPeers, setShowPeers] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -416,6 +419,17 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           {pushMsg ? <div className="text-xs text-base-content/60">{t(pushMsg)}</div> : null}
         </Section>
 
+        {/* ── HTTP peer 协作 ─────────────── */}
+        <Section
+          title={t("Peer 协作")}
+          aside={
+            <button className="btn btn-sm" onClick={() => setShowPeers(true)}>
+              {t("管理")}
+            </button>
+          }
+          desc={t("跨 Claudestra 实例互访：查看/编辑对方的访问权限、测试连通、完成握手。")}
+        />
+
         {/* ── 语音识别 Key ─────────────── */}
         <Section
           title={t("语音识别 · Groq API Key")}
@@ -451,6 +465,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         </Section>
         </div>
       </div>
+      <PeersModal open={showPeers} onClose={() => setShowPeers(false)} />
     </div>,
     document.body
   );

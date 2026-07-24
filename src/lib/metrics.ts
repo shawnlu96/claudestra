@@ -51,7 +51,9 @@ export type MetricEvent =
   // [fork] Stop 时检出原生 /clear 类 session 轮转并自动重绑（2026-07-23）
   | "session_selfheal"
   // [fork] per-会话模型/effort 切换端点（2026-07-23）
-  | "agent_claude_updated";
+  | "agent_claude_updated"
+  // v2.11.1+ web peer 管理端点（invite/join/accept/scope/remove，2026-07-24）
+  | "peer_managed";
 
 export interface MetricRecord {
   ts: string;                   // ISO 8601

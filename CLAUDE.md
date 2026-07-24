@@ -126,7 +126,7 @@ SETUP.md                 User-facing installation guide
 
 ### Cross-Claudestra peer collaboration
 
-**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as local `send_to_agent`); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The old Discord-based peer mechanism (shared exchange channel, exposures, bot-to-bot routing) was removed in v2.11 — HTTP peers are the only cross-instance transport.
+**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as local `send_to_agent`); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The old Discord-based peer mechanism (shared exchange channel, exposures, bot-to-bot routing) was removed in v2.11 — HTTP peers are the only cross-instance transport. v2.11.1+ adds a management surface: `GET /api/v1/peers` (list + inbound scope + local agents), `POST /api/v1/peers/{invite,join,accept}` (handshake), `POST /api/v1/peers/:name/{test,scope,remove}` — all full-scope-token only, mutations delegate to `runManager` so the CLI's R1 checks stay the single source of truth. The web client renders this as Settings → Peers (scope editor, reachability test, full 3-step handshake in UI).
 
 ## Runtime commands
 
@@ -162,6 +162,7 @@ bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url
 bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
+bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged, effective immediately)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
 # send_to_agent target syntax: "<agent>@<peer>" or "peer:<peer>.<agent>"
 

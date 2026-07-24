@@ -33,6 +33,7 @@ app/
     chat/clear/         POST（代理 /api/v1/agents/:name/clear，fork 端点）
     chat/interrupt/     POST（代理 /api/v1/agents/:name/interrupt，fork 端点）
     agents/settings/    GET/PUT per-agent 前端配置（init_message 开机指令，web SQLite）
+    peers/              GET 清单 / POST {action} 分发（代理 /api/v1/peers*，peer 管理 UI 的 BFF）
     chat/permission/    POST（代理 /api/v1/agents/:name/answer kind=permission）
     chat/auq/           POST（代理 /api/v1/agents/:name/answer kind=auq）
     terminal/stream/    GET SSE 纯透传（代理 /api/v1/agents/:name/terminal?cols=&rows=，fork 端点；

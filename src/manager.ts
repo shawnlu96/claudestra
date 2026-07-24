@@ -2725,6 +2725,30 @@ async function cmdPeerHttpList() {
   output({ ok: true, count: peers.length, httpPeers: peers });
 }
 
+/** v2.11.1+ 改 peer 入站 scope（token 不换,对方无感;web peer 管理 UI 的后端） */
+async function cmdPeerHttpScope(peerName: string, agentsCsv: string, force: boolean) {
+  const { findHttpPeer } = await import("./lib/peers.js");
+  const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!peerName || agents.length === 0) {
+    output({ ok: false, error: "peer-http-scope <peerName> --agents <a,b|*> [--force]" });
+    return;
+  }
+  const peer = await findHttpPeer(peerName);
+  if (!peer) { output({ ok: false, error: `HTTP peer "${peerName}" 不存在` }); return; }
+  const check = await checkPeerScope(agents, force);
+  if (check.error) { output({ ok: false, error: check.error }); return; }
+  const { readPrincipals, writePrincipals, tokenIdOf } = await import("./lib/principals.js");
+  const file = await readPrincipals();
+  const p = file.principals.find((x) => x.peer === peerName && !x.disabled);
+  if (!p) {
+    output({ ok: false, error: `peer "${peerName}" 没有有效 token——先完成握手（invite/join）` });
+    return;
+  }
+  p.agents = agents;
+  await writePrincipals(file);
+  output({ ok: true, peer: peerName, exposedAgents: agents, tokenId: tokenIdOf(p), warnings: check.warnings, note: "入站 scope 已更新，立即生效（token 不变）" });
+}
+
 async function cmdPeerHttpRemove(peerName: string) {
   const { removeHttpPeer } = await import("./lib/peers.js");
   const { readPrincipals, writePrincipals } = await import("./lib/principals.js");
@@ -3399,6 +3423,19 @@ switch (cmd) {
   case "peer-http-list":
     await cmdPeerHttpList();
     break;
+  case "peer-http-scope": {
+    const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
+    let agentsCsv = "";
+    const pos: string[] = [];
+    for (let i = 0; i < afterForce.length; i++) {
+      const a = afterForce[i];
+      if (a === "--agents") agentsCsv = afterForce[++i] || "";
+      else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
+      else pos.push(a);
+    }
+    await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
+    break;
+  }
   case "peer-http-remove":
     await cmdPeerHttpRemove(args[0] || "");
     break;
