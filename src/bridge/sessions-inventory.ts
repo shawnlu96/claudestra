@@ -186,13 +186,20 @@ export async function runClaudeAgentsJson(): Promise<RawClaudeSession[] | null> 
         stderr: "pipe",
         env: { ...process.env },
       });
+      // 15s 超时强杀:claude 二进制坏掉时(2026-07-24 cask 升级后签名评估挂死,
+      // 连 --version 都永久 hang)本函数每 10min 被 reconciler 调一次,无超时
+      // 就每轮堆积一个僵尸进程(实测堆了 30+)。正常执行 <2s,15s 足够宽。
+      const killer = setTimeout(() => {
+        try { proc.kill(9); } catch { /* 已退出 */ }
+      }, 15_000);
       const out = await new Response(proc.stdout).text();
       const code = await proc.exited;
+      clearTimeout(killer);
       if (code !== 0) continue;
       const arr = JSON.parse(out);
       return Array.isArray(arr) ? arr : null;
     } catch {
-      continue; // ENOENT / 解析失败 → 下一个候选
+      continue; // ENOENT / 解析失败 / 超时被杀 → 下一个候选
     }
   }
   return null;

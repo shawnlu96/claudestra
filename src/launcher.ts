@@ -263,18 +263,48 @@ async function checkForUpdates() {
 let lastClaudeUpdateCheck = 0;
 let lastDeadAgentCheck = 0;
 
-async function runCmd(cmd: string[]): Promise<{ ok: boolean; out: string }> {
+async function runCmd(cmd: string[], timeoutMs = 0): Promise<{ ok: boolean; out: string }> {
   const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  // 可选超时强杀:坏掉的 claude 二进制连 --version 都永久 hang(2026-07-24),
+  // 无超时的 runCmd 会把 launcher 主循环整个吊死
+  const killer = timeoutMs > 0 ? setTimeout(() => { try { proc.kill(9); } catch { /* 已退出 */ } }, timeoutMs) : null;
   const out = await new Response(proc.stdout).text();
   await proc.exited;
+  if (killer) clearTimeout(killer);
   return { ok: proc.exitCode === 0, out: out.trim() };
 }
 
 async function getClaudeVersion(): Promise<string | null> {
-  const { ok, out } = await runCmd(["claude", "--version"]);
+  const { ok, out } = await runCmd(["claude", "--version"], 20_000);
   if (!ok) return null;
   const m = out.match(/(\d+\.\d+\.\d+)/);
   return m ? m[1] : null;
+}
+
+/**
+ * 2026-07-24 事故 SOP:cask 升级后的新二进制带 com.apple.quarantine,Gatekeeper
+ * 首扫评估在本机挂死(进程钉死在 dyld,连 --version 都不返回);更险的是该路径
+ * 的评估缓存会被钉住——去掉 quarantine 后原路径依然挂,同内容拷到新路径立好。
+ * 升级后必须先体检可执行性,坏了按 SOP 自动修:①去 quarantine ②旁路副本+改
+ * symlink;都修不好则中止 agent 重启波(带着坏二进制重启=全灭,僵尸命令行
+ * 卡满所有窗口)。
+ */
+async function verifyClaudeLaunchable(): Promise<{ ok: boolean; fixed?: string }> {
+  const probe = async () => (await runCmd(["claude", "--version"], 20_000)).ok;
+  if (await probe()) return { ok: true };
+  try {
+    const real = (await runCmd(["readlink", "-f", "/opt/homebrew/bin/claude"])).out.trim();
+    if (real) {
+      await runCmd(["xattr", "-d", "com.apple.quarantine", real]);
+      if (await probe()) return { ok: true, fixed: "去 quarantine" };
+      const side = `${real}2`;
+      await runCmd(["cp", real, side]);
+      await runCmd(["chmod", "+x", side]);
+      await runCmd(["ln", "-sf", side, "/opt/homebrew/bin/claude"]);
+      if (await probe()) return { ok: true, fixed: "旁路副本+symlink" };
+    }
+  } catch { /* 修复失败落到 not ok */ }
+  return { ok: false };
 }
 
 async function getClaudeLatestVersion(): Promise<string | null> {
@@ -424,9 +454,27 @@ async function checkClaudeCodeUpdate() {
     return;
   }
 
-  // 确认版本
+  // 确认版本 + 可执行性体检(坏二进制绝不能进重启波,见 verifyClaudeLaunchable)
   const afterVersion = await getClaudeVersion();
   console.log(`🆙 Claude Code 已更新到 ${afterVersion}`);
+  const health = await verifyClaudeLaunchable();
+  if (!health.ok) {
+    console.log(`🆙 ⚠️ 新二进制体检失败(启动挂死),中止 agent 重启波`);
+    try {
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `🚨 **Claude Code 升级后二进制无法启动**(--version 挂死,自动修复未成功)。已中止 agent 重启——现役 agent 继续跑旧进程不受影响,但新启动会挂。需人工处理:参照 web/SETUP.md 排障或回滚版本 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Claude Code binary broken after upgrade** (--version hangs; auto-remediation failed). Agent restart wave aborted — running agents keep old processes, but new launches will hang. Manual action needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+        ),
+      });
+    } catch { /* non-critical */ }
+    return;
+  }
+  if (health.fixed) {
+    console.log(`🆙 新二进制体检:经「${health.fixed}」修复后可用`);
+  }
 
   await restartAgentsAndMaster();
 
