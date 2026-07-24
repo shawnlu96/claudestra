@@ -516,7 +516,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     try {
       const res = await fetch(
         `/api/chat/history?agent=${encodeURIComponent(name)}`,
-        { signal: AbortSignal.timeout(15_000) } // 解冻窗口 fetch 悬挂 → 超时走既有重试
+        // 解冻窗口 fetch 悬挂 → 超时走既有重试。30s 不是拍脑袋:中日跨境慢链路
+        // 上 560kB 历史实测 13.9-15s,原 15s 线把「将成而未成」的请求斩于门前
+        // (2026-07-24 DevTools 截图:两笔 200 精确停在 15.00/15.01s,再来一发就是
+        // TimeoutError 三连→「历史加载失败」)
+        { signal: AbortSignal.timeout(30_000) }
       );
       if (res.status === 401) return this.gotoLogin();
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
