@@ -383,17 +383,26 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 记住最后打开的会话——iOS 把后台页整个回收重载后（store 全新、hash 还在
     // #chat），据此自动恢复，不让用户卡在空内容页手动重选（2026-07-12 真机）。
     try { localStorage.setItem("cstra_last_agent", name); } catch { /* 隐私模式等 */ }
-    // 切走前把当前会话快照进缓存，回来时原样恢复（见 messageCache 注释）
+    // 切走前把当前会话快照进缓存，回来时原样恢复（见 messageCache 注释）。
+    // ⚠ 只存非空快照:加载中/加载失败时切走会把 [] 存进去,下次打开命中
+    // 空缓存(truthy!)→ 跳过 loading 态直接渲染「发送第一条消息」空态,
+    // 再叠加 stale 的 historyHasMore 就是「空屏+加载更早卡死」(2026-07-24
+    // 用户截图)。空的宁可保留上一份旧快照/走 loading。
     const prev = this.state.activeAgent;
-    if (prev) this.messageCache.set(prev, this.state.messages);
+    if (prev && this.state.messages.length) this.messageCache.set(prev, this.state.messages);
     this.detachActiveStream();
     const gen = ++this.openGen;
-    const cached = this.messageCache.get(name);
+    const cached0 = this.messageCache.get(name);
+    const cached = cached0?.length ? cached0 : undefined; // 历史遗留的空快照当无缓存
     this.produce((s) => {
       s.activeAgent = name;
       // 有缓存=先秒开上次那份（无 loading 闪烁），拉回最新后整体替换
       s.messages = cached ?? [];
       s.loadingHistory = !cached;
+      // 翻页态是 per-agent 的:不重置的话上一会话的「还有更早」残留到新会话
+      // (loadOlder 有 historySessionId 钉住不会误翻,但按钮/哨兵会鬼影)
+      s.historyHasMore = false;
+      s.loadingOlder = false;
       s.historyError = false;
       s.streaming = false;
       s.awaitingChunk = false;
@@ -405,6 +414,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // CC 任务清单 per-session:切走清空,下面异步拉当前 agent 的
       s.ccTasks = [];
     });
+    // 翻页锚也是 per-agent 的,跟着上面的 historyHasMore 一起清,loadMessages 会重设
+    this.historySessionId = null;
     void this.refreshCcTasks(name);
     // 无论有无缓存都重拉历史（stale-while-revalidate）——离开期间 agent 的产出
     // 只存在于 jsonl，不重拉就永远看不到。历史解析已稳定，重拉不再"漂"。
@@ -515,6 +526,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         hasMore?: boolean;
       };
       if (gen !== this.openGen) return; // 已切走，丢弃
+      // 空结果不覆盖非空视图:服务端瞬时空(session 轮转竞态/上游抖动)整体替换
+      // 会把好端端的会话清成白屏。保留现视图,下次对齐再试;真空会话(新 agent)
+      // 本来就两边都空,不受影响。
+      if (!(json.data ?? []).length && this.state.messages.length) {
+        this.clientLog(`loadMessages: 空结果不覆盖非空视图 agent=${name}`);
+        this.produce((s) => {
+          s.loadingHistory = false;
+          s.historyError = false;
+        });
+        return;
+      }
       this.historySessionId = json.sessionId ?? null;
       this.produce((s) => {
         s.historyHasMore = !!json.hasMore;
