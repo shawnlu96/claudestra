@@ -604,15 +604,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         s.loadingHistory = false;
         s.historyError = false;
       });
-    } catch {
+    } catch (e) {
       if (gen !== this.openGen) return;
-      if (attempt < 2) {
-        // 瞬时失败自动重试:限流窗口/竞态之外,iOS 回前台头几秒网络栈未醒
-        // fetch 必败(2026-07-14 真机:对齐失败历史缺口一直留到杀 App)——
-        // 1.5s/3s 两次重试把网络唤醒窗口盖住;保持 loading 态不闪空
+      // 失败原因必须留痕(2026-07-24 Windows 端「历史加载失败」截图无法归因:
+      // catch 静默吞错而服务端全健康)——是 429/502 还是网络断,对 client.log 定性
+      const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      this.clientLog(`loadMessages 失败 agent=${name} attempt=${attempt} ${errMsg}`);
+      if (attempt < 3) {
+        // 瞬时失败自动重试:1.5s/3s/6s 盖住网络唤醒/Wi-Fi 切换窗口(iOS 回前台
+        // 头几秒网络栈未醒 fetch 必败,2026-07-14 真机);保持 loading 态不闪空
         setTimeout(() => {
           if (gen === this.openGen) void this.loadMessages(name, gen, attempt + 1);
-        }, 1500 * (attempt + 1));
+        }, 1500 * 2 ** attempt);
         return;
       }
       this.produce((s) => {
@@ -620,6 +623,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 有缓存快照在显示就不打扰；空视图才亮错误态
         s.historyError = s.messages.length === 0;
       });
+      // 错误态不是终态:用户停在会话里,网络一恢复就该自己好——15s 后整链
+      // 重试(gen 守卫:切走即停),重试按钮只是手动快进
+      setTimeout(() => {
+        if (gen === this.openGen && this.state.historyError && !this.state.messages.length) {
+          void this.loadMessages(name, gen, 0);
+        }
+      }, 15_000);
     }
   }
 
