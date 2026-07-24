@@ -295,6 +295,32 @@ way.
   re-run the `tailscale cert` command above, then
   `launchctl kickstart -k gui/$(id -u)/<your-caddy-label>`.
 
+### Protocol choice on lossy links (h2/h3 vs plain h1)
+
+Caddy speaks h2 + h3 by default, and on a clean network that is what you want.
+On a **high-RTT, lossy path** (e.g. cross-border ~200 ms with visible packet
+loss) the defaults can *lose* to plain HTTP/1.1: h2 multiplexes everything over
+one TCP connection, so a single lost packet head-of-line-blocks every stream;
+h3/QUIC avoids that but rides UDP, which intermediate carriers on such routes
+often throttle or blackhole. Telltale: browsing through Caddy feels much slower
+than hitting `:3333` directly (the direct hit uses the browser's six parallel
+h1 connections). Fix — force h1 in the global options:
+
+```
+{
+	servers {
+		protocols h1
+	}
+}
+```
+
+Trade-off to know before you copy this: browsers cap h1 at **6 connections per
+host**, and every open tab of the web app holds one SSE long-poll (plus one
+more with the remote terminal open) — several simultaneous tabs can exhaust
+the budget, showing up as requests stuck "pending" while the network is fine.
+Keep h2/h3 defaults on clean links; reach for h1 only when the loss pattern
+above actually applies.
+
 ### Custom domain on the same tailnet (when `*.ts.net` won't resolve)
 
 Some networks cannot resolve `*.ts.net` at all (e.g. mainland-China DNS
