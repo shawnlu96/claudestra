@@ -109,16 +109,20 @@ export function getGrammarVersion(): number {
 /**
  * Synchronous tokenize. If the grammar is loaded, tokenize now; otherwise
  * kick off an async load (callers can subscribe via subscribeGrammarLoad to
- * re-tokenize once it lands) and return an empty array so the code block
- * renders as plain text in the meantime.
+ * re-tokenize once it lands) and return the whole code as ONE plain token.
+ *
+ * ⚠ 千万不能返回 []:DOMD 对带语言的 fence 直接把 token 数组映射成子节点,
+ * 空数组 = 空框——```powershell 整块内容被吞(2026-07-24 用户实锤)。无语言
+ * fence 之所以没事,是 DOMD 传 "plain" 且 Prism 内建 plain 空语法返回
+ * [整段文本]。这里对未加载语言手工对齐同一契约。
  */
 export function tokenize(code: string, lang?: string): CodeToken[] {
-    if (!lang) return [];
+    if (!lang) return [code];
     const norm = normalize(lang);
     const grammar = Prism.languages[norm];
     if (grammar) return Prism.tokenize(code, grammar);
     void ensureGrammar(norm);
-    return [];
+    return [code];
 }
 
 export default Prism;

@@ -12,10 +12,10 @@
  * 否则 DOMD 把整块代码降级成纯文本 span、无从上色。token 配色见 ./prism-themes.css，
  * markdown 元素排版见 globals.css 的 .chat-domd。
  */
-import type { ComponentProps, ReactNode } from "react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import { DOMD, DOMDProvider } from "@do-md/core-react";
 import "@do-md/core-react/style.css";
-import { tokenize } from "./prism";
+import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
 import "./prism-themes.css";
 
 type ProviderProps = ComponentProps<typeof DOMDProvider>;
@@ -33,8 +33,14 @@ export type DomdProps = Omit<ProviderProps, "children"> & {
  * 先用纯文本渲染，定稿后再挂 Domd（一次性拿全量 content），见 message-list。
  */
 export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
+  // 懒加载语法落地后 remount 重新 tokenize——DOMD 只读一次,首渲时 grammar 未到
+  // 的 fence(如 ```powershell)先按纯文本显示,这里补一次上色。version 只在
+  // 真正有新语法注册时 +1,一个会话最多几次,remount 成本可忽略。
+  const [grammarV, setGrammarV] = useState(0);
+  useEffect(() => subscribeGrammarLoad(() => setGrammarV(getGrammarVersion())), []);
   return (
     <DOMDProvider
+      key={grammarV}
       editable={false}
       codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
       {...provider}
