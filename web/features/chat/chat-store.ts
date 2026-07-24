@@ -795,12 +795,22 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  电脑端要等对齐才出现)。同一 token 两端共用,本端自己发的消息也会收到回声
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
-  public addRemoteUserMessage(text: string) {
+  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[]) {
     const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
     const t = norm(text);
-    if (!t) return;
+    if (!t && !attachments?.length) return;
     const tail = this.state.messages.slice(-15);
-    if (tail.some((m) => m.role === "user" && norm(m.wire ?? m.content) === t)) return;
+    // 对账去重:文本相同即回声(附件消息 BFF 已剥注入块,与乐观消息的干净文本
+    // 对得上);纯附件无文本时按附件数量兜底匹配
+    if (
+      tail.some(
+        (m) =>
+          m.role === "user" &&
+          norm(m.wire ?? m.content) === t &&
+          (t !== "" || (m.attachments?.length ?? 0) === (attachments?.length ?? 0))
+      )
+    )
+      return;
     this.produce((s) => {
       // 与 send 一致:插话给流式中的助手气泡定稿,后续输出另起气泡
       if (s.streaming) {
@@ -812,6 +822,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         role: "user",
         content: text,
         ts: new Date().toISOString(),
+        ...(attachments?.length ? { attachments } : {}),
       });
     });
   }

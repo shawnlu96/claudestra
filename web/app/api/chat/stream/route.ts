@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { SSE_DONE, type WebStreamEvent, type AnchoredStreamEvent, type WebAuqQuestion, type WebComponentRow } from "@/lib/chat/events";
 import { apiAgentName, bridgeGet, bridgeAuthHeaders, BRIDGE } from "@/lib/chat/bridge-api";
+import { extractAttachments } from "@/lib/chat/attachments";
 import { isAuthed } from "@/lib/api-auth";
 import { serverLang } from "@/lib/server-lang";
 
@@ -94,7 +95,12 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
       if (d.direction === "in") {
         const src = String(d.srcKind ?? "");
         if ((src === "api" || src === "user") && typeof d.text === "string" && d.text.trim()) {
-          return { t: "user-in", text: d.text };
+          // 剥附件注入块([用户上传了…]/[attachment:…]) → 干净正文 + 附件数组。
+          // 不剥的话:①另一端渲染出整块路径文字 ②本端回声与乐观消息文本不一致,
+          // 对账去重失配 → 同一条消息双份(2026-07-24 用户截图实锤)
+          const { content, attachments } = extractAttachments(d.text);
+          if (!content && !attachments?.length) return null;
+          return { t: "user-in", text: content, ...(attachments?.length ? { attachments } : {}) };
         }
         return null;
       }

@@ -125,7 +125,7 @@ export const DICT: Record<string, string> = {
   "，建议压缩以保持质量": ", compacting recommended to keep quality", // 值首带逗号+空格
   "请求压缩": "Compact",
   "本会话不再提示": "Don't remind again this session",
-  "正在回复…": "Replying…",
+  "思考中…": "Thinking…",
   "发送即插入当前会话，将在当前步骤后生效": "Sending now inserts into this turn, applied after the current step",
   "正在录音": "Recording",
   "松开结束": "release to finish",

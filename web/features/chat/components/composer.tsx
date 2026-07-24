@@ -614,7 +614,9 @@ export function Composer() {
                 <span className="animate-cstra-breathe absolute inline-flex size-2 rounded-full bg-info" />
                 <span className="relative inline-flex size-1.5 rounded-full bg-info" />
               </span>
-              <span className="font-medium text-base-content/70">{t("正在回复…")}</span>
+              {/* 「正在回复」改「思考中」(owner 2026-07-24):回合大部分时间在思考/跑工具,
+                  文字流出前说"正在回复"名不副实 */}
+              <span className="font-medium text-base-content/70">{t("思考中…")}</span>
               <span className="ml-auto text-base-content/40 max-sm:hidden">
                 {t("发送即插入当前会话，将在当前步骤后生效")}
               </span>
