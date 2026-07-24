@@ -868,6 +868,17 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const tn = principal.name || tokenId;
         deps.mirrorApiExchange({ kind: "api", tokenId, name: tn }, agent.channelId, `[🌐 API←${tn}] ${text}`).catch(() => {});
         recordMetric("api_slash", { channelId: agent.channelId, agent: agent.name, meta: { cmd: slashM[1] } });
+        // skill 类命令(非 builtin)注入后跑的是真实 LLM 回合,Stop hook 会正常
+        // 收尾——发 thinking 让 web 思考徽章/侧栏 busy 亮起(2026-07-24 owner:
+        // 「命令运行时没有思考中提示,agent 状态也不是工作状态」)。builtin TUI
+        // 命令(/cost /compact /context…)无回合无 Stop hook,发了会永久卡
+        // thinking,维持不发。
+        if (resolved.scope !== "builtin") {
+          const evAgentSlash =
+            agentNameForChannel(agent.channelId) ||
+            (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
+          emitEvent({ agent: evAgentSlash, chatId: agent.channelId, type: "agent_status", data: { status: "thinking" } });
+        }
         // 直通的 /clear 与 clear 端点一样会轮转 session——必须同样挂轮转收尾，
         // 否则 registry/watcher/history 盯死文件（2026-07-15 用户在 Web 输入框
         // 打 /clear，temp 的历史冻结整整 7 天才被发现）。
