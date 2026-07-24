@@ -10,6 +10,7 @@ import type {
   CcTaskView,
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
+import { hydrateHistoryMessages } from "./history-hydrate";
 import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
 import { getLang } from "@/lib/i18n";
 
@@ -451,7 +452,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const json = (await res.json()) as { data?: ChatMessage[]; hasMore?: boolean };
       if (gen !== this.openGen) return; // 已切走
       this.produce((s) => {
-        s.messages = [...(json.data ?? []), ...s.messages];
+        s.messages = [...hydrateHistoryMessages(json.data ?? []), ...s.messages];
         s.historyHasMore = !!json.hasMore;
         s.loadingOlder = false;
       });
@@ -530,6 +531,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         hasMore?: boolean;
       };
       if (gen !== this.openGen) return; // 已切走，丢弃
+      // wire 瘦身还原:assistant 气泡的 content/toolCalls/replyText 从 segments 派生
+      if (json.data?.length) json.data = hydrateHistoryMessages(json.data);
       // 空结果不覆盖非空视图:服务端瞬时空(session 轮转竞态/上游抖动)整体替换
       // 会把好端端的会话清成白屏。保留现视图,下次对齐再试;真空会话(新 agent)
       // 本来就两边都空,不受影响。
@@ -643,6 +646,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** 假死流看门狗(25s 无字节 → cancel 重连);openStream 内创建,finally 清。 */
   private streamDog: ReturnType<typeof setInterval> | null = null;
 
+  /** 流最近一次收到字节的时刻(openStream 读循环更新)——回前台判活的依据。 */
+  private lastStreamByteAt = 0;
+
+  /** 当前活流归属的 agent(openStream 连上时记,detach 清)。判活不能用
+   *  lastEventAgent——那是「最后一个事件」的锚,闲置会话只有心跳没事件,永远对不上。 */
+  private streamAgent: string | null = null;
+
   /** 断点续传锚:最后收到的 bridge 事件 seq(BFF 附在每条事件的 eid 上)。
    *  重连带 ?since=<seq> → bridge 环形缓冲重放错过的事件,不用全量重拉历史。 */
   private lastEventSeq = 0;
@@ -693,10 +703,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const rawReader = res.body?.getReader();
       if (!rawReader) return;
       this.streamReader = rawReader;
+      this.streamAgent = name;
       // 假死流看门狗:iOS 挂起恢复/网络切换后连接常「不报错也不产出」,以前
       // 只能等用户切页触发对齐。BFF 心跳 10s 一发,25s 收不到任何字节即判死,
       // 主动 cancel → read 返回 done → finally 走快路径重连(断点重放无损)。
       let lastByteAt = Date.now();
+      this.lastStreamByteAt = lastByteAt;
       if (this.streamDog) clearInterval(this.streamDog);
       this.streamDog = setInterval(() => {
         if (Date.now() - lastByteAt > 25_000) {
@@ -708,6 +720,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         read: () =>
           rawReader.read().then((r) => {
             lastByteAt = Date.now();
+            this.lastStreamByteAt = lastByteAt; // 类级镜像:回前台判活用
             return r;
           }),
       } as ReadableStreamDefaultReader<Uint8Array>;
@@ -782,6 +795,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.streamGen++;
     const reader = this.streamReader;
     this.streamReader = null;
+    this.streamAgent = null;
     if (reader) reader.cancel().catch(() => {});
     if (this.state.streaming || this.state.awaitingChunk)
       this.produce((s) => {
@@ -807,6 +821,20 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public maybeReconnect(opts?: { fast?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;
+    // 流活着就别动它(owner 拍板 2026-07-24):桌面端每次 alt-tab 回来都无条件
+    // 断流重建,慢链路上一次重连 = TLS 握手+重开流数秒断档,client.log 里
+    // 每 10-60s 一条。服务端 5s 一个心跳,30s 内有字节 = 流健康且事件从没断
+    // 过(桌面后台 tab 的 fetch 流持续送达),直接不动。iOS 冻结恢复的僵尸流
+    // (看似连着实则挂起)lastStreamByteAt 停在冻结前,>30s 自然走重连,不受
+    // 此快路径影响。fast:true 是断流后的自动重连(流已死),不走此判断。
+    if (
+      !opts?.fast &&
+      this.streamReader &&
+      this.streamAgent === name &&
+      Date.now() - this.lastStreamByteAt < 30_000
+    ) {
+      return;
+    }
     this.detachActiveStream();
     // 快路径(owner 2026-07-16「catch up 更快更丝滑」):短暂离开(<5min)且有
     // 断点锚 → 只重连流带 ?since=<seq>,bridge 环形缓冲把错过的事件直接重放,

@@ -191,6 +191,17 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
   return out;
 }
 
+/** wire 瘦身(owner 拍板 2026-07-24):assistant 气泡的 content/toolCalls/replyText
+ *  与 segments 互为冗余(实测 551kB 里占 260kB)——wire 只发 segments,客户端
+ *  hydrateHistoryMessages 派生还原。user/system 气泡与无 segments 的气泡不动。 */
+function slimForWire(msgs: ChatMessage[]): unknown[] {
+  return msgs.map((m) => {
+    if (m.role !== "assistant" || !m.segments?.length) return m;
+    const { content: _c, toolCalls: _t, replyText: _r, ...rest } = m;
+    return rest;
+  });
+}
+
 export async function GET(request: Request) {
   if (!(await isAuthed(request))) {
     return NextResponse.json({ error: "未登录" }, { status: 401 });
@@ -214,7 +225,7 @@ export async function GET(request: Request) {
       );
       const items = page.messages || [];
       return NextResponse.json({
-        data: toChatMessages(items, { tail: false }),
+        data: slimForWire(toChatMessages(items, { tail: false })),
         sessionId: pinnedSession,
         // 粗判:拿满一页 ≈ 还有更早(边界恰好取空一次,可接受)
         hasMore: items.length >= 300,
@@ -241,7 +252,7 @@ export async function GET(request: Request) {
         );
         const items = page.messages || [];
         return NextResponse.json({
-          data: toChatMessages(items),
+          data: slimForWire(toChatMessages(items)),
           sessionId: s.sessionId,
           hasMore: items.length >= 500,
         });
