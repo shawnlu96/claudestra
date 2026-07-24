@@ -376,9 +376,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (name === this.state.activeAgent) {
       // 重复打开当前会话(点推送通知/重点侧栏项)= 用户明确要看最新——不能静默
       // 返回:冻结页面点通知进来正是这条路(2026-07-24 wechat-bot 事故,推送到了
-      // 点进去还是死页面)。做一次完整对齐,带断点锚则快路径重放补漏。
+      // 点进去还是死页面)。force:跳过判活守卫,流健康也全量对齐(bridge 重启
+      // 纪元切换的静默缺口只有重拉历史能补)。
       this.clientLog("openAgent(same): 强制对齐");
-      this.maybeReconnect();
+      this.maybeReconnect({ force: true });
       return;
     }
     // 记住最后打开的会话——iOS 把后台页整个回收重载后（store 全新、hash 还在
@@ -747,6 +748,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         clearInterval(this.streamDog);
         this.streamDog = null;
       }
+      // 流已死必须立刻摘牌:留着 streamReader/streamAgent 会骗过 maybeReconnect
+      // 的判活守卫(字节戳 30s 内)——后台断流的自动重连被 visibility 拦、回前台
+      // 又被判活拦,双拦死锁流死无人管(2026-07-24 owner:「点通知进来消息没
+      // 更新,切走切回才有」)。仅当前代自然死亡时清;detach 发起的关闭 gen 已
+      // 自增,不碰新流的登记。
+      if (gen === this.streamGen) {
+        this.streamReader = null;
+        this.streamAgent = null;
+      }
       // 流关闭/断开时，若本轮仍卡在 streaming（done 没收到、流被掐、bridge 重启），
       // 解锁 composer——别让「■ 停止」永久卡住导致用户发不出/看着像没渲染。仅清当前流。
       if (
@@ -818,7 +828,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 重连流（openStream 连上后 BFF /pending 补 thinking 态，把 composer 锁态也校准：
    * 仍在回合则重锁「停止」，已结束则保持解锁）。
    */
-  public maybeReconnect(opts?: { fast?: boolean }) {
+  public maybeReconnect(opts?: { fast?: boolean; force?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;
     // 流活着就别动它(owner 拍板 2026-07-24):桌面端每次 alt-tab 回来都无条件
@@ -827,8 +837,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 过(桌面后台 tab 的 fetch 流持续送达),直接不动。iOS 冻结恢复的僵尸流
     // (看似连着实则挂起)lastStreamByteAt 停在冻结前,>30s 自然走重连,不受
     // 此快路径影响。fast:true 是断流后的自动重连(流已死),不走此判断。
+    // force:true 是用户明确要看最新(点通知/重点会话)——流健康 ≠ 数据齐:
+    // bridge 重启纪元切换后 ?since=<老seq> 重放不出静默期消息,seq 倒退检测
+    // 又要等新事件才触发,只有全量重拉能补(2026-07-24 owner 报点通知不更新)。
     if (
       !opts?.fast &&
+      !opts?.force &&
       this.streamReader &&
       this.streamAgent === name &&
       Date.now() - this.lastStreamByteAt < 30_000
