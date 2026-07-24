@@ -295,6 +295,51 @@ way.
   re-run the `tailscale cert` command above, then
   `launchctl kickstart -k gui/$(id -u)/<your-caddy-label>`.
 
+### Custom domain on the same tailnet (when `*.ts.net` won't resolve)
+
+Some networks cannot resolve `*.ts.net` at all (e.g. mainland-China DNS
+filtering) — the tailnet link itself works fine, but the browser never gets an
+IP. Fix: point **your own domain** at the tailnet IP and terminate TLS for it in
+the same Caddy. Traffic still flows only over Tailscale — a tailnet
+`100.x.y.z` A record is unroutable from the public internet, so this adds an
+entry point, not exposure.
+
+1. **DNS**: add an A record `claude.your-domain.com → 100.x.y.z` (the machine's
+   tailnet IP, `tailscale ip -4`). On Cloudflare use **DNS-only** (grey cloud) —
+   proxying (orange cloud) would obviously fail to reach a tailnet IP.
+2. **Certificate**: `tailscale cert` only signs `*.ts.net` names, so issue a
+   Let's Encrypt cert via **DNS-01** (the host needn't be publicly reachable —
+   perfect fit here). E.g. with [acme.sh](https://github.com/acmesh-official/acme.sh)
+   and a Cloudflare API token:
+
+   ```bash
+   acme.sh --issue --dns dns_cf -d 'your-domain.com' -d '*.your-domain.com'
+   acme.sh --install-cert -d 'your-domain.com' \
+     --fullchain-file ~/.claude-orchestrator/web/tls/custom/fullchain.pem \
+     --key-file       ~/.claude-orchestrator/web/tls/custom/key.pem \
+     --reloadcmd "launchctl kickstart -k gui/$(id -u)/<your-caddy-label>"
+   ```
+
+3. **Caddy**: append a second site block to the same Caddyfile (do **not** start
+   a second caddy — see the single-instance warning above):
+
+   ```
+   https://claude.your-domain.com:443 {
+   	tls /Users/YOU/.claude-orchestrator/web/tls/custom/fullchain.pem /Users/YOU/.claude-orchestrator/web/tls/custom/key.pem
+   	encode zstd gzip
+   	handle {
+   		reverse_proxy 127.0.0.1:3333
+   	}
+   }
+   ```
+
+   Validate + restart: `caddy validate --config <Caddyfile>` then
+   `launchctl kickstart -k gui/$(id -u)/<your-caddy-label>`.
+4. **Auto-renewal**: schedule `acme.sh --cron` daily (launchd/crontab). Unlike
+   the `tailscale cert` path, DNS-01 renewals are fully unattended — the
+   `--reloadcmd` above restarts Caddy with the fresh cert. The `ts.net` block
+   can stay alongside as a second entry point.
+
 ## Port map (production)
 
 | Port  | Bind         | What |
