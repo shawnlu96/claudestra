@@ -380,7 +380,37 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
 }
 
 async function restartAgentsAndMaster() {
-  // 所有 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
+  // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
+  // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
+  // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
+  try {
+    const listOut = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
+    const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
+    const canary = agents.find((a) => a.status !== "stopped");
+    if (canary) {
+      const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
+      let canaryOk = false;
+      try { canaryOk = JSON.parse(r.out || "{}").ok === true; } catch { /* 解析失败按失败算 */ }
+      console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
+      if (!canaryOk) {
+        try {
+          await bridgeRequest({
+            type: "reply",
+            chatId: CONTROL_CHANNEL_ID,
+            text: t(
+              `🚨 **升级后金丝雀重启失败**(${canary.name} 启动不了),已中止其余 agent 的重启波——它们继续跑旧进程。需人工排查新版 Claude Code ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+              `🚨 **Post-upgrade canary restart failed** (${canary.name} won't start). Remaining agents keep old processes. Manual investigation needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+            ),
+          });
+        } catch { /* non-critical */ }
+        return;
+      }
+    }
+  } catch (e) {
+    console.log(`🆙 金丝雀流程异常(继续常规重启): ${(e as Error).message}`);
+  }
+
+  // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
   console.log(`🆙 bun manager restart 结果: ok=${ok}`);
   if (!ok) console.log(out);
@@ -437,7 +467,10 @@ async function checkClaudeCodeUpdate() {
 
   const upgrade =
     install.kind === "brew"
-      ? await runCmd(["brew", "upgrade", "--cask", install.cask])
+      ? // --no-quarantine:2026-07-24 事故根因——带 quarantine 的新二进制首次
+        // 执行触发 Gatekeeper 评估,在本机挂死(dyld 阶段永久 hang)。装时就
+        // 不打隔离标记,从源头消灭这一类。
+        await runCmd(["brew", "upgrade", "--cask", "--no-quarantine", install.cask])
       : await runCmd(["npm", "install", "-g", "@anthropic-ai/claude-code"]);
   if (!upgrade.ok) {
     console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}`);
