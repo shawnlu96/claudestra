@@ -54,6 +54,9 @@ async function peersAction(body: Record<string, unknown>): Promise<ActionResult>
 
 const MY_URL_KEY = "cstra_peer_url";
 
+/** Bridge 探测出的本机对外地址候选（tailscale 优先） */
+type SuggestedUrl = { url: string; kind: "tailscale" | "lan"; iface: string; address: string };
+
 /** scope 勾选器：全部(*) + master + 每个本地 agent。external 未标的带 ⚠。 */
 function ScopePicker({
   localAgents,
@@ -332,10 +335,12 @@ function PeerCard({
 /** 新增 peer：三步握手（邀请方 invite → 对方 join → 邀请方 accept 回执） */
 function AddPeerPanel({
   localAgents,
+  suggestedUrls,
   awaitingPeers,
   onChanged,
 }: {
   localAgents: LocalAgent[];
+  suggestedUrls: SuggestedUrl[];
   awaitingPeers: string[];
   onChanged: () => void;
 }) {
@@ -357,7 +362,8 @@ function AddPeerPanel({
       setResult(null);
       setPaste("");
       try {
-        setUrl(localStorage.getItem(MY_URL_KEY) || "");
+        // 上次填过就沿用；第一次用就拿 Bridge 探测到的地址预填（Tailscale 优先）
+        setUrl(localStorage.getItem(MY_URL_KEY) || suggestedUrls[0]?.url || "");
       } catch {}
       if (mode === "accept" && awaitingPeers.length && !name) setName(awaitingPeers[0]);
     }
@@ -515,15 +521,19 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [err, setErr] = useState("");
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [localAgents, setLocalAgents] = useState<LocalAgent[]>([]);
+  // 本机对外地址候选（Bridge 探测，Tailscale 优先）——握手时预填「我的地址」，
+  // 免得手抄 IP 抄错、或者填成 127.0.0.1（对方永远连不上，且要到 test 才暴露）
+  const [suggestedUrls, setSuggestedUrls] = useState<SuggestedUrl[]>([]);
 
   const reload = useCallback(async () => {
     setErr("");
     try {
       const res = await fetch("/api/peers");
-      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[] };
+      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[]; suggestedUrls?: SuggestedUrl[] };
       if (j.ok) {
         setPeers(j.peers || []);
         setLocalAgents(j.localAgents || []);
+        setSuggestedUrls(j.suggestedUrls || []);
       } else {
         setErr(j.error || t("加载失败"));
       }
@@ -582,6 +592,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
               )}
               <AddPeerPanel
                 localAgents={localAgents}
+                suggestedUrls={suggestedUrls}
                 awaitingPeers={peers.filter((p) => !p.handshakeDone).map((p) => p.name)}
                 onChanged={() => void reload()}
               />

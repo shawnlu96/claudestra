@@ -1395,7 +1395,11 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         external: !!a.external,
         status: a.status ?? "unknown",
       }));
-      return apiJson(200, { ok: true, peers, localAgents });
+      // v2.14+ 顺带给出本机对外地址候选：握手时 --url / web 输入框预填用。
+      // 手抄这个地址是三步握手里最容易错的一环，错了要拖到 peer-http-test 才暴露。
+      const { detectBridgeUrls } = await import("../lib/net-addr.js");
+      const suggestedUrls = detectBridgeUrls(parseInt(process.env.BRIDGE_PORT || "3847"));
+      return apiJson(200, { ok: true, peers, localAgents, suggestedUrls });
     }
 
     // POST /peers/invite | /peers/join | /peers/accept —— 握手三步

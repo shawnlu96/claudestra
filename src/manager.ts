@@ -2700,13 +2700,43 @@ async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tok
   return { tokenId: tokenIdOf(p), secret: p.secret! };
 }
 
+/**
+ * peer 握手的 `--url` 没给时自动探测本机对外地址。
+ *
+ * 手抄这个地址是三步握手里最容易出错的一环：IP 记错一位、忘带端口、或者把
+ * 127.0.0.1 填进去（对方永远连不上，而错误要拖到 peer-http-test 才暴露）。
+ * 探测优先 Tailscale（100.64/10，唯一跨网络可达），其次内网地址。
+ * 返回 null 表示确实探不到，调用方照旧报错要求人工给 --url。
+ */
+async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
+  if (myUrl) return { url: myUrl };
+  const { detectBridgeUrls } = await import("./lib/net-addr.js");
+  const port = parseInt(process.env.BRIDGE_PORT || "3847");
+  const cands = detectBridgeUrls(port);
+  if (cands.length === 0) return null;
+  const best = cands[0]!;
+  const others = cands.slice(1).map((c) => `${c.url}(${c.kind})`);
+  return {
+    url: best.url,
+    note: `--url 未给，自动用 ${best.kind === "tailscale" ? "Tailscale" : "内网"} 地址 ${best.url}（网卡 ${best.iface}）` +
+      (others.length ? `；其它候选: ${others.join(", ")}` : "") +
+      (best.kind === "lan" ? "。⚠️ 内网地址只在同一局域网可达，跨网络请改用 Tailscale 或反代域名。" : ""),
+  };
+}
+
 async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myUrl: string, force: boolean, rotate: boolean) {
   const { upsertHttpPeer, encodePeerHandshake, findHttpPeer } = await import("./lib/peers.js");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!peerName || agents.length === 0 || !myUrl) {
-    output({ ok: false, error: "peer-http-invite <peerName> --agents <a,b> --url <我方bridge地址,如 http://100.x.y.z:3847> [--force] [--rotate]" });
+  if (!peerName || agents.length === 0) {
+    output({ ok: false, error: "peer-http-invite <peerName> --agents <a,b> [--url <我方bridge地址>] [--force] [--rotate]（--url 不给会自动探测本机 Tailscale/内网地址）" });
     return;
   }
+  const resolvedI = await resolveMyBridgeUrl(myUrl);
+  if (!resolvedI) {
+    output({ ok: false, error: "探测不到本机对外地址（没有 Tailscale 也没有内网网卡），请显式给 --url <http://host:port>" });
+    return;
+  }
+  myUrl = resolvedI.url;
   if (!validPeerName(peerName)) {
     output({ ok: false, error: `peer 名只能是字母/数字/下划线/连字符(1-32 位)——"@" "." 空格会撞 send_to_agent 的寻址语法` });
     return;
@@ -2729,7 +2759,9 @@ async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myUrl: str
   await upsertHttpPeer({ name: peerName, inTokenId: tokenId });
   const invite = encodePeerHandshake({ v: 1, name: selfPeerName(), url: myUrl.replace(/\/+$/, ""), token: secret });
   output({
-    ok: true, peer: peerName, exposedAgents: agents, inTokenId: tokenId, warnings: check.warnings,
+    ok: true, peer: peerName, exposedAgents: agents, inTokenId: tokenId,
+    warnings: resolvedI.note ? [...check.warnings, resolvedI.note] : check.warnings,
+    myUrl,
     invite,
     next: `把 invite 串发给对方 → 对方跑: peer-http-join <你的名字> '<invite串>' --agents <他开放的> --url <他的地址> → 他把回执串发回 → 你跑: peer-http-accept ${peerName} '<回执串>'`,
   });
@@ -2738,10 +2770,16 @@ async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myUrl: str
 async function cmdPeerHttpJoin(peerName: string, handshakeStr: string, agentsCsv: string, myUrl: string, force: boolean, rotate: boolean) {
   const { upsertHttpPeer, parsePeerHandshake, encodePeerHandshake, findHttpPeer } = await import("./lib/peers.js");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!peerName || !handshakeStr || agents.length === 0 || !myUrl) {
-    output({ ok: false, error: "peer-http-join <peerName> '<邀请串>' --agents <a,b> --url <我方地址> [--force] [--rotate]" });
+  if (!peerName || !handshakeStr || agents.length === 0) {
+    output({ ok: false, error: "peer-http-join <peerName> '<邀请串>' --agents <a,b> [--url <我方地址>] [--force] [--rotate]（--url 不给会自动探测本机 Tailscale/内网地址）" });
     return;
   }
+  const resolvedJ = await resolveMyBridgeUrl(myUrl);
+  if (!resolvedJ) {
+    output({ ok: false, error: "探测不到本机对外地址（没有 Tailscale 也没有内网网卡），请显式给 --url <http://host:port>" });
+    return;
+  }
+  myUrl = resolvedJ.url;
   if (!validPeerName(peerName)) {
     output({ ok: false, error: `peer 名只能是字母/数字/下划线/连字符(1-32 位)` });
     return;
@@ -2761,7 +2799,9 @@ async function cmdPeerHttpJoin(peerName: string, handshakeStr: string, agentsCsv
   await upsertHttpPeer({ name: peerName, baseUrl: hs.url, outToken: hs.token, inTokenId: tokenId });
   const receipt = encodePeerHandshake({ v: 1, name: selfPeerName(), url: myUrl.replace(/\/+$/, ""), token: secret });
   output({
-    ok: true, peer: peerName, peerUrl: hs.url, exposedAgents: agents, inTokenId: tokenId, warnings: check.warnings,
+    ok: true, peer: peerName, peerUrl: hs.url, exposedAgents: agents, inTokenId: tokenId,
+    warnings: resolvedJ.note ? [...check.warnings, resolvedJ.note] : check.warnings,
+    myUrl,
     receipt,
     next: `把 receipt 串发回对方 → 对方跑: peer-http-accept <你在他那的名字> '<receipt串>'。然后双方各自 peer-http-test 验证。`,
   });
