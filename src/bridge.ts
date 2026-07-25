@@ -918,7 +918,8 @@ discord.once("ready", async () => {
   startSessionReconciler(discord);
 
   // v2.8+ bg 活动追踪 — subagent / 后台 shell 任务 → 子区流式呈现 + bg_task_* 事件
-  startBgActivityWatcher();
+  // 注入来源判定：Web/API 回合不建 Discord 子区（那边有 bg_task_* SSE 渲染同样的进度）
+  startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.get(cid) });
 
   // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
   startArchiveSweeper();
@@ -2536,6 +2537,25 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         for (const [chId, info] of clients.entries()) {
           if (info.ws === ws) { fromChannelId = chId; break; }
         }
+        // v2.14+ 兜底通道（src/discord-reply.ts）不是注册过的 channel-server，ws 反查
+        // 必然落空。它会在消息里自报 channelId（来自 Claude Code 注入的
+        // DISCORD_CHANNEL_ID）—— 没有这个身份，下游 deliverToApi 会用空 key 去找等待
+        // 中的 HTTP 请求（永远匹配不上）、并把 SSE 事件的 agent 填成字面 "?"，前端
+        // 于是既不显示也不结束等待,而调用方还收到一个「成功」的空结果。
+        // 2026-07-25 一整条带按钮的消息就是这样丢掉的。
+        // 信任边界：ws 已限制同源 + 默认只绑 127.0.0.1，本机进程与 channel-server 同级。
+        if (!fromChannelId && typeof msg.fromChannelId === "string") {
+          fromChannelId = msg.fromChannelId;
+        }
+        if (!fromChannelId) {
+          // 认不出来源就明确失败,绝不静默投给 "?"。
+          ws.send(JSON.stringify({
+            type: "response",
+            requestId: msg.requestId,
+            error: "reply 无法确定来源 agent（连接未注册且未提供 fromChannelId），已拒绝投递",
+          }));
+          break;
+        }
         if (fromChannelId) {
           // v2.0.16+: agent 调了 reply()（任意频道）= 它在回应/行动，清掉 inter-agent
           // 看门狗，Stop hook 不会再 nudge。清这个 ws 名下所有 channel key。
@@ -3940,7 +3960,7 @@ sweepStaleTerminalSessions().catch(() => {});
 if (WEB_ONLY) {
   console.log("🕸️ Web-only 模式：未设 DISCORD_BOT_TOKEN，跳过 Discord 登录");
   // v2.8+ bg 活动追踪 — provisionThread 走 local adapter（落空），bg_task_* 事件照发
-  startBgActivityWatcher();
+  startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.get(cid) });
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
   startArchiveSweeper();
   // v2.13.1+ 给 web 前端补一个"重启了"的信号。Discord 侧靠

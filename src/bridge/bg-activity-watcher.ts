@@ -154,8 +154,17 @@ async function startActivity(
   const { transport } = parseChatId(agent.channelId);
   const adapter = adapterFor(transport);
 
+  // v2.14+ 按来源分流：上一回合是从 Web/API 来的，就**不要**在 Discord 建子区。
+  // 此前无条件建，而 agent.channelId 永远是 Discord 频道 —— 于是纯 Web 用户每起
+  // 一个 subagent / 后台命令就被推送一条 Discord 线程通知（owner 2026-07-25 报：
+  // 「之前不是说了把 Web 端跟 Discord 端分开吗」）。Web 侧本来就有 bg_task_* SSE
+  // 事件渲染同样的进度，子区对它是纯粹的噪音。
+  // 不确定来源时（undefined）保持建子区的老行为，宁可多一条通知也不丢可观测性。
+  const src = sourceProvider?.(agent.channelId);
+  const wantThread = src !== "api";
+
   let threadId: string | null = null;
-  if (adapter?.provisionThread && activeCountFor(agent.name) < MAX_ACTIVE_PER_AGENT) {
+  if (wantThread && adapter?.provisionThread && activeCountFor(agent.name) < MAX_ACTIVE_PER_AGENT) {
     try {
       const r = await adapter.provisionThread(agent.channelId, title);
       threadId = r.chatId;
@@ -183,7 +192,10 @@ async function startActivity(
     recent: [],
   };
   activities.set(filePath, act);
-  console.log(`🧵 bg 活动开始: ${agent.name} ${title}${threadId ? ` → thread ${threadId}` : "（无子区，仅事件）"}`);
+  console.log(
+    `🧵 bg 活动开始: ${agent.name} ${title}` +
+      (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
+  );
   recordMetric("bg_activity_started", { agent: agent.name, meta: { kind } });
   emitEvent({
     agent: agent.name,
@@ -366,7 +378,16 @@ async function tickInner(): Promise<void> {
   }
 }
 
-export function startBgActivityWatcher(): void {
+/**
+ * 「这个 agent 最近一回合是谁在跟它说话」的查询钩子，由 bridge 注入
+ * （lastMessageSource 是 bridge.ts 的模块私有状态）。
+ * 返回 undefined = 不知道 → 按 Discord 处理（保持老行为）。
+ */
+export type SourceProvider = (channelId: string) => "user" | "agent" | "api" | undefined;
+let sourceProvider: SourceProvider | null = null;
+
+export function startBgActivityWatcher(opts?: { sourceProvider?: SourceProvider }): void {
+  sourceProvider = opts?.sourceProvider ?? null;
   setInterval(() => void tick().catch(() => {}), POLL_MS);
   void tick().catch(() => {}); // 立即 baseline，避免启动后第一批新文件被当存量
   console.log(`🧵 bg 活动追踪启动（每 ${POLL_MS / 1000}s 扫 subagents + bg shell tasks）`);
