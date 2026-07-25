@@ -1274,10 +1274,32 @@ async function gracefulExit(name: string): Promise<boolean> {
  */
 const GLOBAL_CLAUDE_SETTINGS = `${process.env.HOME}/.claude/settings.json`;
 
+/**
+ * manager.ts 跑在哪个 tmux window 里（agent 自己调 manager 时非空）。
+ * 2026-07-25 事故：`model all` 由 agent-claudestra 自己发起，enforceSessionModel
+ * 把 `/model` 键进了发起者自己的 TUI —— 确认框要等本回合结束才可能被处理，而
+ * 本回合正阻塞在这个函数里等确认框消失，纯自死锁。
+ */
+async function selfWindowName(): Promise<string | null> {
+  const pane = process.env.TMUX_PANE;
+  if (!pane) return null;
+  try {
+    return (await tmuxRaw(["display-message", "-p", "-t", pane, "#{window_name}"])) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function enforceSessionModel(name: string, model?: string): Promise<boolean> {
   if (!model?.trim()) return true;
   const target = windowTarget(name);
   const resolved = resolveModelAlias(model.trim());
+  // 自守：绝不给发起者自己的窗口发键（见 selfWindowName 注释）。registry 已写，
+  // 下次 restart 时补发生效。
+  if (name === (await selfWindowName())) {
+    console.log(`[model] 跳过 ${name}（命令由该 agent 自己发起，restart 时补发）`);
+    return false;
+  }
   // 快照全局默认。null = 读失败(文件不存在/坏 JSON),跳过恢复,别越修越坏。
   let globalModel: string | undefined | null = null;
   try {
@@ -1292,7 +1314,10 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
     await tmuxRaw(["send-keys", "-t", target, "Enter"]);
     for (let i = 0; i < 8; i++) {
       await Bun.sleep(700);
-      const pane = await captureLast(name, 15);
+      // 60 行 = 整屏。15 行踩过坑：确认框标题距 pane 底部 16 行（说明文字 + 两个
+      // 选项 + 输入框都在它下面），恰好落在窗口外 —— 检测不到就空转 8 轮退出，
+      // 把确认框留在屏幕上阻塞该 agent（2026-07-25 一次性卡住 6 个）。
+      const pane = await captureLast(name, 60);
       if (/Switch model\?/i.test(pane)) {
         await tmuxRaw(["send-keys", "-t", target, "Enter"]);
         continue;
