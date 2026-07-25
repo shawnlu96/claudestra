@@ -88,7 +88,7 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 - **一键打断** — Discord 按钮向目标 agent 的 tmux window 发 `Ctrl+C`。
 - **精确空闲检测** — Claude Code `Stop` / `Notification` hooks 精确驱动 Discord typing indicator；30 分钟安全超时兜底。
 - **大总管守护** — launchd 管理的 launcher 保持大总管 tmux session 存活，自动处理 Claude Code 确认弹窗。
-- **安全限制** — 每个 spawn 的 agent 都带 `--disallowedTools`，禁止 `rm -rf`、`git push --force`、`git reset --hard`、`chmod 777` 等破坏性命令。
+- **防手滑护栏（不是安全边界）** — 每个 spawn 的 agent 都带 `--disallowedTools` 黑名单（`rm -rf`、`git push --force`、`git reset --hard`、`chmod 777`、fork bomb）。规则是**对命令字符串做前缀匹配**，等价写法（`/bin/rm -rf`、`rm -fr`、`find … -delete`、`python -c`、变量拼接）都能绕过，且没有 `PreToolUse` 钩子兜底。加上 `DEFAULT_PERMISSION_MODE` 就是 `bypassPermissions`（见 `lib/claude-launch.ts`），每个 agent 实质上是一个以用户身份运行的无限制 shell —— 黑名单只防意外，挡不住任何有意为之的 prompt。
 
 ### 跨 Claudestra peer 协作
 

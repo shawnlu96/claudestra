@@ -94,7 +94,9 @@ Setup + phone remote access (Tailscale / PWA install): **[web/SETUP.md](./web/SE
 - **Master TUI proxy (v1.7+)** — master can drive any agent's terminal via `tmux-screenshot` / `tmux-capture` / `tmux-send-keys` / `tmux-wait-idle` CLI helpers. Used to handle TUI modals the bridge can't parse.
 
 ### Safety & utilities
-- **`--disallowedTools` safety rails** — blocks `rm -rf`, `git push --force`, `chmod 777`, etc. for every spawned agent; presets (`default` / `strict` / `readonly` / `paranoid`) per-agent via `manager.ts permissions`.
+- **`--disallowedTools` guard rails** — every spawned agent carries a blocklist for `rm -rf`, `git push --force`, `chmod 777`, and friends; presets (`default` / `strict` / `readonly` / `paranoid`) are set per-agent via `manager.ts permissions`.
+
+  > **These are fat-finger guards, not a security boundary.** The rules are prefix matches against the command string, so any equivalent spelling walks straight past them (`/bin/rm -rf`, `rm -fr`, `find … -delete`, `python -c`, a shell variable). More importantly, agents run with `--dangerously-skip-permissions` by default: **an agent is an unrestricted shell running as your user**. Treat "who can message an agent" as "who can run commands on this machine", and see [Security](#security) before exposing anything.
 - **One-click bot invite URL (v1.8.1+)** — `bun src/manager.ts invite-link` auto-decodes your Application ID from the bot token and prints the ready-to-click Discord OAuth URL.
 
 ## Requirements
@@ -244,6 +246,46 @@ Runtime toggles live in `~/.claude-orchestrator/config.json` (managed via `manag
 | `autoUpdate.claudeCode` | Claude Code CLI update, weekly poll (default `true`) |
 
 Other state files under `~/.claude-orchestrator/`: `registry.json` (active agents), `cron.json` + `cron-history.json`, `metrics.jsonl`.
+
+## Security
+
+Read this before letting anyone else — or anything else — reach your instance.
+
+**An agent is an unrestricted shell running as you.** Agents launch with
+`--dangerously-skip-permissions` by default, which is what makes unattended
+operation possible. The `--disallowedTools` blocklist is a fat-finger guard, not a
+boundary: it prefix-matches command strings, so `/bin/rm -rf`, `rm -fr`,
+`find … -delete`, `python -c`, or any variable expansion walks past it. Treat
+**"who can send a message to an agent" as "who can run commands on this machine"**.
+
+**Network exposure.** The Bridge binds `127.0.0.1` by default and its WebSocket
+control plane refuses cross-origin upgrades, so a random web page you visit cannot
+drive it. Setting `BRIDGE_BIND=0.0.0.0` or port-forwarding 3847 removes that
+protection entirely — the control plane itself has no authentication. If you need
+remote access, put it behind Tailscale or a reverse proxy with its own auth; do not
+expose the port directly.
+
+**Discord.** `ALLOWED_USER_IDS` is the only gate on who may drive your agents.
+Agent channels are created without permission overwrites, so **every member of the
+guild can read every agent conversation** — use a server where you are the only
+member, or set channel permissions yourself. All conversation content (your
+messages, Claude's replies, tool calls, terminal screenshots) transits and is
+retained by Discord.
+
+**API tokens.** Scopes are per-agent whitelists (`token-add … --agents a,b`).
+Terminal access is a separate capability (`--terminal`) because a terminal is host
+shell access — it can Ctrl-C out of Claude Code to a bare prompt and bypass
+`--disallowedTools` entirely. Tokens do not expire; revoke with `token-revoke`.
+
+**HTTP peers.** Granting a peer messaging scope on an agent means the operator of
+that instance — and anyone who compromises it — can make your agent run anything.
+Invite/receipt handshake strings are live bearer tokens with no expiry; treat them
+like passwords and `peer-http-remove` to revoke.
+
+**Stored data.** `~/.claude-orchestrator/archive/` keeps full verbatim transcripts
+(every prompt, file read, and command output — including any credentials that passed
+through) with `0600` permissions, unencrypted and uncapped. Killing an agent does
+**not** delete its transcript; that is the point of the archive.
 
 ## Project layout
 

@@ -94,7 +94,9 @@ Discord 之外的第二道前门 —— 完全建立在多前端 API 之上的 *
 - **Master TUI 代理（v1.7+）** — master 可以通过 `tmux-screenshot` / `tmux-capture` / `tmux-send-keys` / `tmux-wait-idle` CLI 远程驱动任意 agent 的终端，用来处理 bridge 识别不了的 TUI modal。
 
 ### 安全和工具
-- **`--disallowedTools` 安全护栏** — 每个 agent 都拦 `rm -rf`、`git push --force`、`chmod 777` 等；通过 `manager.ts permissions` 切换预设（`default` / `strict` / `readonly` / `paranoid`）。
+- **`--disallowedTools` 防手滑护栏** — 每个 agent 都带一份 `rm -rf`、`git push --force`、`chmod 777` 之类的黑名单；预设（`default` / `strict` / `readonly` / `paranoid`）用 `manager.ts permissions` 按 agent 设置。
+
+  > **它是防手滑的，不是安全边界。** 规则是对命令字符串做前缀匹配，任何等价写法都能绕过（`/bin/rm -rf`、`rm -fr`、`find … -delete`、`python -c`、变量拼接）。更关键的是 agent 默认带 `--dangerously-skip-permissions` 运行：**一个 agent 就是一个以你的身份运行、无需确认的 shell**。请把「谁能给 agent 发消息」直接理解为「谁能在这台机器上执行命令」，对外暴露前先看[安全](#安全)一节。
 - **一键 Bot 邀请链接（v1.8.1+）** — `bun src/manager.ts invite-link` 从 token 解 Application ID，自动拼好 Discord OAuth URL。
 
 ## 环境要求
@@ -243,6 +245,39 @@ bun src/manager.ts tmux-wait-idle <agent> [ms]
 | `autoUpdate.claudeCode` | Claude Code CLI 更新，周轮询（默认 `true`） |
 
 `~/.claude-orchestrator/` 下其他状态文件：`registry.json`（active agent）、`cron.json` + `cron-history.json`、`metrics.jsonl`。
+
+## 安全
+
+在让别人——或别的什么东西——碰到你这套实例之前，先读这一节。
+
+**一个 agent 就是以你的身份运行、无需确认的 shell。** agent 默认带
+`--dangerously-skip-permissions` 启动，这正是无人值守能成立的前提。
+`--disallowedTools` 黑名单是防手滑的，不是边界：它对命令字符串做前缀匹配，
+`/bin/rm -rf`、`rm -fr`、`find … -delete`、`python -c`、变量拼接都能绕过。
+请把**「谁能给 agent 发消息」直接理解成「谁能在这台机器上执行命令」**。
+
+**网络暴露面。** Bridge 默认只绑 `127.0.0.1`，且它的 WebSocket 控制面会拒绝跨源
+升级，所以你随手访问的网页驱动不了它。一旦设 `BRIDGE_BIND=0.0.0.0` 或把 3847
+端口转发出去，这层保护就没了——控制面本身没有任何鉴权。需要远程访问就放到
+Tailscale 后面，或者用带鉴权的反向代理，别直接暴露端口。
+
+**Discord。** `ALLOWED_USER_IDS` 是唯一的门禁。agent 频道创建时没有设置权限覆盖，
+所以**服务器里的每个成员都能读到所有 agent 的对话**——请用一个只有你自己的服务器，
+或者自己去配频道权限。所有对话内容（你的消息、Claude 的回复、工具调用、终端截图）
+都会经过并留存在 Discord 的服务器上。
+
+**API token。** scope 是按 agent 的白名单（`token-add … --agents a,b`）。终端是
+独立的能力位（`--terminal`），因为终端等于宿主 shell 访问——它能 Ctrl-C 退出
+Claude Code 落到裸 shell，完全绕开 `--disallowedTools`。token 没有过期时间，
+用 `token-revoke` 吊销。
+
+**HTTP peer。** 给一个 peer 开某 agent 的消息 scope，意味着对面实例的操作者——以及
+任何攻破了它的人——可以让你的 agent 执行任意命令。握手用的 invite / receipt 字符串
+是没有有效期的实时凭据，请当密码对待，用 `peer-http-remove` 吊销。
+
+**落盘数据。** `~/.claude-orchestrator/archive/` 保存完整逐字对话（每一条 prompt、
+读过的文件、命令输出——包括流经其中的任何凭据），权限 `0600`，不加密、无容量上限。
+kill 掉一个 agent **不会**删除它的历史，这正是归档的意义。
 
 ## 项目结构
 
