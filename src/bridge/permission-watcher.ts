@@ -201,7 +201,14 @@ export function startPermissionWatcher(
   allowedUserIds: string[],
   discord: Client
 ) {
+  // 重入保护。tick 会 runManager("list") + 对每个 active agent 各 capture 一次 pane，
+  // agent 一多、或 tmux/manager 变慢，单轮就可能超过 8s 的间隔 —— 没有这个闸，
+  // setInterval 会让轮次叠罗汉，每轮各自持有一串子进程。bg-activity-watcher 和
+  // stats-dashboard 早就是这么做的，这里一直漏了。
+  let ticking = false;
   const tick = async () => {
+    if (ticking) return;
+    ticking = true;
     try {
       const list = await runManager("list");
       const agents: any[] = list.agents || [];
@@ -210,7 +217,10 @@ export function startPermissionWatcher(
         // 注意：不能根据 idle 字段跳过 — 弹窗界面底部也有 ❯ 会被误判为 idle
         await checkAgent(agent.name, agent.channelId, allowedUserIds, discord).catch(() => {});
       }
-    } catch { /* non-critical */ }
+    } catch { /* non-critical */ } finally {
+      // 必须在 finally 里放闸：任何一条异常路径漏掉它，watcher 就永久锁死再不工作。
+      ticking = false;
+    }
   };
   setInterval(tick, POLL_INTERVAL_MS);
   console.log(`🔔 权限弹窗 watcher 启动 (每 ${POLL_INTERVAL_MS / 1000}s 轮询)`);

@@ -145,6 +145,7 @@ import {
   detectArrowNavModal,
   detectPermissionMode,
   btabStepsTo,
+  probeTuiContract,
   MASTER_SESSION,
   type ArrowNavKind,
 } from "./lib/tmux-helper.js";
@@ -894,6 +895,11 @@ discord.once("ready", async () => {
   startArchiveSweeper();
   recordMetric("bridge_start", { meta: { channels: clients.size } });
 
+  // v2.13.1+ TUI 契约自检 — 见 probeTuiContract 的注释：CC 改一句底部文案不会报错，
+  // 而是让判活/判忙语义静默反转（今年已发生三次）。这里在启动后采样两次 master pane，
+  // 两次都可疑才告警一次，避免瞬时状态（弹窗、全屏 diff）造成误报。
+  void checkTuiContractOnce();
+
   // 每 30 分钟自动重扫 skill（新装 plugin / 新建 user skill 不需要 restart bridge 就能出现在 /）
   setInterval(async () => {
     try {
@@ -1396,6 +1402,42 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 // ============================================================
 
 // 工具：往 master 控制频道发一条通知（系统广播，bridge → user 信道）
+/**
+ * 启动后做一次 TUI 契约自检。两次采样都可疑才告警 —— master pane 可能正处在弹窗、
+ * 全屏 diff、compact 之类的瞬时画面，单次采样不足以下结论。
+ * 只告警、不做任何自动处置：这类问题需要人去看一眼 CC 到底改成了什么。
+ */
+async function checkTuiContractOnce(): Promise<void> {
+  const sample = async (): Promise<ReturnType<typeof probeTuiContract> | null> => {
+    try {
+      const pane = await tmuxCapture(`${MASTER_SESSION}:0`, 40);
+      return probeTuiContract(pane);
+    } catch {
+      return null; // tmux 不在 / master 没起来 —— 不是契约问题，交给别的守护去管
+    }
+  };
+
+  await new Promise((r) => setTimeout(r, 90_000)); // 等 master TUI 稳定
+  const first = await sample();
+  if (!first?.suspect) return;
+
+  await new Promise((r) => setTimeout(r, 30_000));
+  const second = await sample();
+  if (!second?.suspect) return;
+
+  const msg =
+    "⚠️ **TUI 契约自检未通过** — master 屏幕上有 Claude Code 的界面，但底部既没有模式 banner" +
+    "（`shift+tab to cycle`）也没有忙碌指示（`esc to interrupt`）。\n\n" +
+    "这两个文案是判断 agent「空闲 / 在忙 / 是否还活着」的依据，约 25 处控制流依赖它们。" +
+    "如果 Claude Code 改了这两句话，症状不会是报错，而是**判活逻辑静默反转**（典型表现：" +
+    "agent 明明活着却被判定死亡并无限重启）。\n\n" +
+    "请人工看一眼 master 窗口现在长什么样，必要时更新 `src/lib/tmux-helper.ts` 里的 " +
+    "`CC_MODE_BANNER_RE` 等匹配规则。";
+  console.error(`⚠️ [tui-contract] 自检未通过，已告警。matched=${JSON.stringify(second.matched)}`);
+  await notifyMaster(msg).catch(() => {});
+  recordMetric("error", { meta: { kind: "tui_contract_suspect" } });
+}
+
 async function notifyMaster(content: string): Promise<void> {
   const controlChannelId = CONTROL_CHANNEL_ID;
   if (!controlChannelId) return;

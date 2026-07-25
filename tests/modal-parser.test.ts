@@ -12,6 +12,7 @@ import {
   isAtShell,
   detectSessionIdlePrompt,
   detectPermissionMode,
+  probeTuiContract,
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
 } from "../src/lib/tmux-helper.js";
@@ -621,5 +622,57 @@ describe("detectPermissionMode / btabStepsTo（v2.2.0 临时放行）", () => {
   test("btabStepsTo: 未知模式 → -1", () => {
     expect(btabStepsTo("auto", "nope")).toBe(-1);
     expect(btabStepsTo("nope", "auto")).toBe(-1);
+  });
+});
+
+describe("probeTuiContract — TUI 文案漂移自检", () => {
+  const frame = "─".repeat(60);
+
+  test("空闲态（底部模式 banner）→ 契约完好", () => {
+    const pane = [frame, "❯ ", frame, "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
+    const r = probeTuiContract(pane);
+    expect(r.tuiPresent).toBe(true);
+    expect(r.matched).toContain("mode-banner");
+    expect(r.suspect).toBe(false);
+  });
+
+  test("其它权限模式的 banner 同样算命中", () => {
+    for (const banner of [
+      "  ⏵⏵ auto mode on (shift+tab to cycle)",
+      "  ⏵⏵ accept edits on (shift+tab to cycle)",
+      "  ⏸ plan mode on (shift+tab to cycle)",
+    ]) {
+      const pane = [frame, "❯ ", frame, banner].join("\n");
+      expect(probeTuiContract(pane).suspect).toBe(false);
+    }
+  });
+
+  test("忙碌态（esc to interrupt）→ 契约完好，即使没有 banner", () => {
+    const pane = [frame, "✻ Thinking… (esc to interrupt)", frame].join("\n");
+    const r = probeTuiContract(pane);
+    expect(r.matched).toContain("busy-indicator");
+    expect(r.suspect).toBe(false);
+  });
+
+  test("TUI 在场但两个判据都不命中 → 判为可疑（这正是要抓的漂移）", () => {
+    const drifted = [frame, "❯ ", frame, "  ⏵⏵ yolo mode engaged (press tab-tab to switch)"].join("\n");
+    const r = probeTuiContract(drifted);
+    expect(r.tuiPresent).toBe(true);
+    expect(r.matched).toEqual([]);
+    expect(r.suspect).toBe(true);
+  });
+
+  test("裸 shell / 空 pane 不误报 —— 那不是契约问题", () => {
+    expect(probeTuiContract("shawn@mac ~ % ls\nshawn@mac ~ % ").suspect).toBe(false);
+    expect(probeTuiContract("").suspect).toBe(false);
+    expect(probeTuiContract("\n\n\n").suspect).toBe(false);
+  });
+
+  test("只看末尾 15 行 —— scrollback 里的旧 banner 不算数", () => {
+    const stale = ["  ⏵⏵ bypass permissions on (shift+tab to cycle)"]
+      .concat(Array(20).fill("output line"))
+      .concat([frame, "❯ ", frame, "  ⏵⏵ yolo mode engaged"])
+      .join("\n");
+    expect(probeTuiContract(stale).suspect).toBe(true);
   });
 });

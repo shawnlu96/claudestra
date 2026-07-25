@@ -16,14 +16,29 @@ export const AGENT_PREFIX = "agent-";
  * 默认仍会读用户配置，如果用户设了 `set -g base-index 1`，我们假定 master:0
  * 存在的代码就会全挂。禁掉配置就强制用默认 base-index=0。
  */
-export async function tmuxRaw(args: string[]): Promise<string> {
+export async function tmuxRaw(
+  args: string[],
+  opts?: { timeoutMs?: number }
+): Promise<string> {
   const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args], {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out.trim();
+  // 超时强杀。tmuxRaw 全是查询/发键这类瞬时命令（正常 <100ms），但它坐在多条热
+  // 轮询路径上（permission-watcher 每 8s、wedge-watcher、jsonl-watcher…），一旦
+  // tmux server 卡住而这里没有超时，每一轮都会永久挂起一个 await + 一个子进程。
+  // 同样的坑在 sessions-inventory.ts 上真实发生过：2026-07-24 cask 升级后连
+  // `claude --version` 都永久 hang，堆了 30+ 僵尸进程。15s 对瞬时命令极宽松。
+  const killer = setTimeout(() => {
+    try { proc.kill(9); } catch { /* 已退出 */ }
+  }, opts?.timeoutMs ?? 15_000);
+  try {
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out.trim();
+  } finally {
+    clearTimeout(killer);
+  }
 }
 
 /** 非阻塞 fire-and-forget 发送（用于 C-c 等不需要等待的操作） */
@@ -133,6 +148,33 @@ export async function clearShellInitPrompts(
  * permissions" 分支兼容老 pane / 测试 fixture。
  */
 export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
+
+/**
+ * TUI 契约探针（纯函数，便于单测）。
+ *
+ * 为什么需要它：控制流依赖约 25 处 Claude Code 终端画面的文案匹配，其中最关键的
+ * 是「空闲」与「在忙」两个判据。CC 一旦改文案，不会有任何报错——而是**语义静默
+ * 反转**：paneLooksIdle 恒为 false → launcher 判定所有 agent 已死 → 无限重启。
+ * 2026 年已经真实发生三次（07-15 spinner 轮换、07-16 /model 落盘行为、07-24 自动
+ * 升级致全部 agent 启动挂死）。这个探针把"静默反转"降级成"明确报警"。
+ *
+ * 判据：CC 在任一时刻要么空闲（底部有模式 banner）、要么在忙（有 esc to interrupt）。
+ * 屏幕上确实是个 TUI，却两者都不命中 —— 那就是文案变了。
+ * `tuiPresent` 只看输入框边框，刻意不参与任何控制流判断，纯粹用来避免对空 pane
+ * 或裸 shell 误报。
+ */
+export function probeTuiContract(pane: string): {
+  tuiPresent: boolean;
+  matched: string[];
+  suspect: boolean;
+} {
+  const tail = pane.split("\n").slice(-15).join("\n");
+  const tuiPresent = /─{20,}/.test(tail);
+  const matched: string[] = [];
+  if (CC_MODE_BANNER_RE.test(tail)) matched.push("mode-banner");
+  if (/esc to interrupt|esc to cancel/i.test(tail)) matched.push("busy-indicator");
+  return { tuiPresent, matched, suspect: tuiPresent && matched.length === 0 };
+}
 
 /** 纯函数版：给定 pane 文本判断是否 idle。便于单测。 */
 export function paneLooksIdle(pane: string): boolean {
