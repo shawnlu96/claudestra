@@ -76,7 +76,7 @@ bun run setup
 
 ## 向导到底做了什么
 
-`bun run setup` 分 8 个带编号的步骤：
+`bun run setup` 会走一串编号步骤 —— 具体几步取决于你选了哪些前端（Discord 多五步、Web 客户端多一步），通常 8~10 步，外加开头的语言选择：
 
 1. **检查系统依赖** — 确认 `git` / `tmux` / `bun` / `claude` 都装了，缺的给出安装命令。
 2. **创建 Discord 应用** — 打开 Developer Portal，告诉你点哪个按钮。

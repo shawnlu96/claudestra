@@ -77,7 +77,7 @@ Notes:
 
 ## What the wizard actually does
 
-The `bun run setup` command runs through eight numbered steps:
+The `bun run setup` command runs through numbered steps — how many depends on which frontends you pick (Discord adds five, the web client adds one), so expect 8–10 plus an initial language prompt:
 
 1. **Check system dependencies** — verifies `git`, `tmux`, `bun`, `claude` are installed and prints install commands for anything missing.
 2. **Create a Discord application** — opens the Developer Portal and tells you which button to click.

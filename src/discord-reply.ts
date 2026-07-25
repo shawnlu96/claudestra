@@ -15,7 +15,7 @@ const chatId = args[0];
 const text = args[1];
 
 if (!chatId || !text) {
-  console.error("用法: bun discord-reply.ts <channel_id> <message>");
+  console.error("usage: bun discord-reply.ts <channel_id> <message>");
   process.exit(1);
 }
 

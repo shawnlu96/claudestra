@@ -52,7 +52,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 
 ### Core orchestration
 - **Multi-agent lifecycle** — create, resume, kill, restart, list, and browse session history.
-- **Multi-frontend API (v2.6.0+)** — Discord is just the first frontend. `GET /events` streams tool calls / assistant text / agent status over SSE; `POST /api/v1/agents/:name/messages` lets external users talk to a scoped set of agents with a Bearer token (sync `wait`, file upload, audit mirroring back to Discord). Build a web UI or a Telegram bot on the same contracts — see `docs/design-multi-frontend.md`.
+- **Multi-frontend API (v2.6.0+)** — Discord is just the first frontend. `GET /events` streams tool calls / assistant text / agent status over SSE; `POST /api/v1/agents/:name/messages` lets external users talk to a scoped set of agents with a Bearer token (sync `wait`, file upload, audit mirroring back to Discord). Build a web UI or a Telegram bot on the same contracts — see `docs/design-multi-frontend.md` (design notes, written in Chinese).
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
 - **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
 - **Cross-Claudestra peer collaboration (v2.11+, HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. A three-step CLI handshake (`peer-http-invite` → `peer-http-join` → `peer-http-accept`, then `peer-http-test` / `list` / `remove`) exchanges tokens over any private channel; after that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly.
@@ -174,12 +174,23 @@ Every agent is a window inside the `master` session. Switch with `Ctrl-B n/p` or
 
 ```bash
 # Agent lifecycle
-bun src/manager.ts create   <name> <dir> [purpose]
-bun src/manager.ts resume   <name> <sessionId> [dir]
+bun src/manager.ts create   <name> <dir> [purpose] [--model <m>] [--effort <e>] [--mode <m>] [--external]
+bun src/manager.ts resume   <name> <sessionId> [dir] [--fork]   # --fork: adopt a wild/bg-occupied session as a branch
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
+bun src/manager.ts rename   <old-name> <new-name>   # tmux window + registry + Discord channel
+bun src/manager.ts remove   <name>                  # drop the registry entry only
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
+bun src/manager.ts adopt    <name> <sessionId>      # promote a background doppelganger to the official session
+bun src/manager.ts archive  <name>                  # snapshot the session jsonl into ~/.claude-orchestrator/archive/
+bun src/manager.ts set-session <name> <sessionId>   # repoint an agent at a different session
+bun src/manager.ts set-claude  <name> <path>        # pin a specific claude binary for one agent
+
+# Per-agent model / effort / permission mode (all take effect after restart)
+bun src/manager.ts model  <name> <model|reset> | model all <model>
+bun src/manager.ts effort <name> <low|medium|high|xhigh|max|auto> | effort list | effort reset <name>
+bun src/manager.ts mode   <name> <permission-mode>
 
 # Cron jobs
 bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>
@@ -209,12 +220,22 @@ bun src/manager.ts permissions reset <name>
 # Bot invite URL (v1.8.1+)
 bun src/manager.ts invite-link           # owner — full permissions
 
+# Multi-frontend API tokens (v2.6.0+) — scope is a per-agent whitelist, "*" = all non-master
+bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]
+bun src/manager.ts token-list
+bun src/manager.ts token-revoke <tokenId|name>
+
+# Install / repair the launchd daemons + the `claudestra` CLI wrapper
+bun src/manager.ts install-cli
+bun src/manager.ts tmux-help             # tmux crash course (incl. iTerm2 -CC mode)
+
 # Cross-Claudestra HTTP peers (v2.11+) — mutual scoped tokens, no shared Discord guild
 bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <my-bridge-url> [--force]    # A: print invite string
 bun src/manager.ts peer-http-join <peer> '<invite>' --agents <x,y> --url <my-url> [--force]  # B: store A, print receipt
 bun src/manager.ts peer-http-accept <peer> '<receipt>'                                       # A: complete handshake
 bun src/manager.ts peer-http-test <peer>          # verify reachability + agents opened to you
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
+bun src/manager.ts peer-http-scope <peer> --agents <a,b|*> [--force]   # change inbound scope in place
 bun src/manager.ts peer-http-remove <peer>        # delete peer + revoke the token you issued
 
 # Low-level tmux control (for master to handle TUI modals bridge can't parse)
@@ -321,7 +342,7 @@ src/
   ansi2html.ts           ANSI escape codes → coloured HTML
   html2png.ts            HTML → PNG (Playwright headless Chromium)
   discord-reply.ts       Bash fallback for sending messages via Bridge
-web/                     Next.js web client (PWA) — see web/SETUP.md + web/CLAUDE.md
+web/                     Next.js web client (PWA) — see web/SETUP.md (English) + web/CLAUDE.md (Chinese)
 master/
   CLAUDE.md.template     Master agent behaviour template (rendered by setup)
 tests/                   315 cases across 20 files (parsers, routing, registry, history, …)
@@ -333,7 +354,7 @@ docs/                    Multi-frontend design + web frontend API contract
 
 ## Contributing
 
-Issues and pull requests welcome. The core idea is simple; the hard parts are edge cases in tmux, Discord rate limits, and Claude Code channel lifecycle. Before submitting a PR:
+Issues and pull requests welcome. A note on language: the user-facing docs (README, SETUP) and the CLI are English; the deep-dive design notes under `docs/`, plus `FORK.md` and `web/CLAUDE.md`, are written in Chinese and have no English translation yet — they are internal design records rather than user documentation. `install.sh` and the setup wizard follow your locale (`CLAUDESTRA_LANG=zh|en` to force one). The core idea is simple; the hard parts are edge cases in tmux, Discord rate limits, and Claude Code channel lifecycle. Before submitting a PR:
 
 1. `bun run check` — runs `tsc --noEmit` plus the full test suite (322 cases). Both must be green.
 2. `bun build src/bridge.ts --target=bun` (and the same for each entry point) — catches module-resolution errors that typechecking doesn't. Note that `bun build` performs **no** typechecking on its own; that is what step 1 is for.

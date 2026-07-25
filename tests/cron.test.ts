@@ -375,7 +375,7 @@ describe("Manager CLI cron commands", () => {
     await proc.exited;
     const result = JSON.parse(out.trim());
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("用法");
+    expect(result.error).toContain("usage");
   });
 
   test("cron-list 应该返回 jobs 数组", async () => {
@@ -399,7 +399,7 @@ describe("Manager CLI cron commands", () => {
     await proc.exited;
     const result = JSON.parse(out.trim());
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("用法");
+    expect(result.error).toContain("usage");
   });
 
   test("cron-toggle 无参数应报错", async () => {
@@ -411,7 +411,7 @@ describe("Manager CLI cron commands", () => {
     await proc.exited;
     const result = JSON.parse(out.trim());
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("用法");
+    expect(result.error).toContain("usage");
   });
 
   test("cron-history 应该返回 records 数组", async () => {

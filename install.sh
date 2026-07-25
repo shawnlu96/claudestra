@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 #
-# Claudestra 一键安装脚本
+# Claudestra one-line installer
 #
-# 用法：
+# Usage:
 #   curl -fsSL https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh | bash
-# 或
+# or
 #   curl -fsSL https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh -o install.sh
 #   bash install.sh
 #
-# 可选环境变量：
-#   CLAUDESTRA_DIR    — 克隆目录（默认 ~/repos/claudestra）
-#   CLAUDESTRA_REPO   — git 仓库地址（默认 https://github.com/shawnlu96/claudestra.git）
-#   CLAUDESTRA_BRANCH — 分支（默认 main）
-#   CLAUDESTRA_YES    — 设为 1 时跳过所有确认，全自动装
+# Optional environment variables:
+#   CLAUDESTRA_DIR    — clone target (default ~/repos/claudestra)
+#   CLAUDESTRA_REPO   — git remote (default https://github.com/shawnlu96/claudestra.git)
+#   CLAUDESTRA_BRANCH — branch (default main)
+#   CLAUDESTRA_YES    — set to 1 to skip every confirmation (unattended)
+#   CLAUDESTRA_LANG   — zh | en (default: auto-detect from locale)
 
 set -euo pipefail
 
@@ -41,6 +42,24 @@ if [ -t 1 ]; then
 else
   GREEN=""; YELLOW=""; RED=""; BLUE=""; CYAN=""; BOLD=""; DIM=""; RESET=""
 fi
+
+# ── 语言 ──────────────────────────────────────────────
+# 此前本脚本全程中文，而它是 README 里的第一条命令 —— 英文用户在有机会选语言
+# 之前就得先看几十行中文并决定按不按 y。这里按 locale 自动分流，默认英文；
+# CLAUDESTRA_LANG=zh|en 可显式指定。
+detect_lang() {
+  case "${CLAUDESTRA_LANG:-}" in
+    zh|zh_CN|cn) printf 'zh'; return ;;
+    en|en_US)    printf 'en'; return ;;
+  esac
+  case "${LC_ALL:-${LANG:-}}" in
+    zh_*|*zh_CN*|*Hans*) printf 'zh' ;;
+    *)                   printf 'en' ;;
+  esac
+}
+CS_LANG="$(detect_lang)"
+# L <中文> <English>
+L() { if [ "$CS_LANG" = "zh" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
 
 say()  { printf "${CYAN}▶${RESET} %s\n" "$*"; }
 ok()   { printf "${GREEN}✓${RESET}  %s\n" "$*"; }
@@ -90,23 +109,23 @@ confirm() {
 # ────────────────────────────────────────────
 
 printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
-printf "${BOLD}  Claudestra 一键安装脚本${RESET}\n"
+printf "${BOLD}  $(L "Claudestra 一键安装脚本" "Claudestra one-line installer")${RESET}\n"
 printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
 
 OS="$(uname -s)"
 case "$OS" in
   Darwin) PLATFORM="darwin" ;;
   Linux)  PLATFORM="linux"  ;;
-  *)      die "不支持的系统: $OS（只支持 macOS / Linux）" ;;
+  *)      die "$(L "不支持的系统: $OS（只支持 macOS / Linux）" "Unsupported OS: $OS (macOS / Linux only)")" ;;
 esac
-ok "系统: $OS"
+ok "$(L "系统" "OS"): $OS"
 
 # ────────────────────────────────────────────
 # 前置：包管理器
 # ────────────────────────────────────────────
 
 install_homebrew() {
-  say "安装 Homebrew"
+  say "$(L "安装 Homebrew" "Installing Homebrew")"
   if [ -e /dev/tty ]; then
     NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
   else
@@ -123,18 +142,18 @@ install_homebrew() {
 
 if [ "$PLATFORM" = "darwin" ]; then
   if ! command -v brew >/dev/null 2>&1; then
-    warn "检测不到 Homebrew"
-    if confirm "要我帮你装 Homebrew 吗？" y; then
+    warn "$(L "检测不到 Homebrew" "Homebrew not found")"
+    if confirm "$(L "要我帮你装 Homebrew 吗？" "Install Homebrew for you?")" y; then
       install_homebrew
     else
-      die "没有 Homebrew 就没法自动装依赖。去 https://brew.sh 装完再重跑本脚本。"
+      die "$(L "没有 Homebrew 就没法自动装依赖。去 https://brew.sh 装完再重跑本脚本。" "Without Homebrew this script cannot install dependencies. Install it from https://brew.sh, then re-run.")"
     fi
   fi
   ok "Homebrew: $(command -v brew)"
 else
   if ! command -v apt-get >/dev/null 2>&1; then
-    warn "Linux 自动安装目前只支持 Debian/Ubuntu 系（需要 apt-get）"
-    die "在非 Debian 系系统上，请手动安装 git / tmux / node / bun / claude 后重跑本脚本。"
+    warn "$(L "Linux 自动安装目前只支持 Debian/Ubuntu 系（需要 apt-get）" "Automatic install on Linux currently supports Debian/Ubuntu only (needs apt-get)")"
+    die "$(L "在非 Debian 系系统上，请手动安装 git / tmux / node / bun / claude 后重跑本脚本。" "On non-Debian systems, install git / tmux / node / bun / claude manually, then re-run this script.")"
   fi
   ok "apt-get: $(command -v apt-get)"
 fi
@@ -175,27 +194,27 @@ install_pkg() {
   local installer="$3"
 
   if command -v "$cmd" >/dev/null 2>&1; then
-    ok "$label — 已安装"
+    ok "$label — $(L "已安装" "already installed")"
     return 0
   fi
 
-  say "安装 $label"
+  say "$(L "安装" "Installing") $label"
   # 临时关掉 set -e，不让安装失败杀死整个脚本
   set +e
   "$installer"
   local rc=$?
   set -e
   if [ $rc -ne 0 ]; then
-    warn "$label 安装命令返回了错误码 $rc"
+    warn "$(L "$label 安装命令返回了错误码 $rc" "install command for $label exited with code $rc")"
   fi
 
   # 刷新 shell 命令缓存，否则刚装的二进制可能找不到
   hash -r 2>/dev/null || true
 
   if command -v "$cmd" >/dev/null 2>&1; then
-    ok "$label 安装成功"
+    ok "$label $(L "安装成功" "installed")"
   else
-    fail "$label 安装后仍然找不到 '$cmd'，可能需要新开一个终端让 PATH 生效"
+    fail "$(L "$label 安装后仍然找不到 '$cmd'，可能需要新开一个终端让 PATH 生效" "'$cmd' still not found after installing $label — you may need a fresh shell for PATH to take effect")"
     install_failed=1
   fi
   return 0
@@ -258,18 +277,18 @@ check_missing() {
 }
 check_missing git   "git"
 check_missing tmux  "tmux"
-check_missing node  "node (npm 的前置)"
+check_missing node  "node ($(L "npm 的前置" "required by npm"))"
 check_missing bun   "bun"
 check_missing claude "claude (Claude Code CLI)"
 
 if [ ${#missing[@]} -gt 0 ]; then
-  printf "\n${BOLD}需要安装的依赖：${RESET}\n"
+  printf "\n${BOLD}$(L "需要安装的依赖：" "Dependencies to install:")${RESET}\n"
   for m in "${missing[@]}"; do
     printf "  ${DIM}•${RESET} %s\n" "$m"
   done
   printf "\n"
-  if ! confirm "开始安装？" y; then
-    die "已取消。"
+  if ! confirm "$(L "开始安装？" "Start installing?")" y; then
+    die "$(L "已取消。" "Cancelled.")"
   fi
   printf "\n"
 fi
@@ -283,11 +302,11 @@ install_pkg "claude" claude _install_claude
 printf "\n"
 
 if [ "$install_failed" = "1" ]; then
-  fail "部分依赖没装上。请检查上面的错误，装完后重跑本脚本"
+  fail "$(L "部分依赖没装上。请检查上面的错误，装完后重跑本脚本" "Some dependencies failed to install. Check the errors above, then re-run this script.")"
   exit 1
 fi
 
-ok "所有依赖就绪 ✨"
+ok "$(L "所有依赖就绪" "All dependencies ready") ✨"
 
 # ────────────────────────────────────────────
 # 克隆代码
@@ -295,16 +314,16 @@ ok "所有依赖就绪 ✨"
 
 printf "\n"
 if [ -d "$CLAUDESTRA_DIR/.git" ]; then
-  say "检测到已有仓库: $CLAUDESTRA_DIR"
+  say "$(L "检测到已有仓库" "Existing checkout found"): $CLAUDESTRA_DIR"
   (cd "$CLAUDESTRA_DIR" && git fetch --tags --quiet origin 2>/dev/null) || true
 else
   if [ -e "$CLAUDESTRA_DIR" ]; then
-    die "$CLAUDESTRA_DIR 已存在但不是 git 仓库，请先移走或清空"
+    die "$(L "$CLAUDESTRA_DIR 已存在但不是 git 仓库，请先移走或清空" "$CLAUDESTRA_DIR exists but is not a git repo — move or empty it first")"
   fi
-  say "克隆 $CLAUDESTRA_REPO → $CLAUDESTRA_DIR"
+  say "$(L "克隆" "Cloning") $CLAUDESTRA_REPO → $CLAUDESTRA_DIR"
   mkdir -p "$(dirname "$CLAUDESTRA_DIR")"
   git clone "$CLAUDESTRA_REPO" "$CLAUDESTRA_DIR"
-  ok "代码已克隆"
+  ok "$(L "代码已克隆" "Repository cloned")"
 fi
 
 cd "$CLAUDESTRA_DIR"
@@ -315,9 +334,9 @@ if [ -n "$GITHUB_API_REPO" ]; then
   LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_API_REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*"\|"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
   if [ -n "$LATEST_TAG" ]; then
     git checkout "$LATEST_TAG" --quiet 2>/dev/null || true
-    ok "版本: $LATEST_TAG"
+    ok "$(L "版本" "Version"): $LATEST_TAG"
   else
-    warn "没有找到 release 版本，使用 main 分支最新代码"
+    warn "$(L "没有找到 release 版本，使用 main 分支最新代码" "No release tag found — using the latest commit on main")"
   fi
 fi
 
@@ -332,26 +351,26 @@ bun install
 # 浏览器版本必须与 playwright-core 对齐：executablePath() 按**本地 playwright-core 的**
 # 期望 revision 拼路径，而 `playwright install` 不带版本号时装的是最新版 —— 装完
 # existsSync 为 false，截图在每台新机器上都是坏的（本机只是碰巧留着旧 revision）。
-say "playwright install chromium ${DIM}(终端截图用)${RESET}"
+say "playwright install chromium ${DIM}($(L "终端截图用" "for terminal screenshots"))${RESET}"
 if ! bunx playwright@1.58.2 install chromium 2>/dev/null; then
-  warn "bunx playwright 失败，尝试 npx"
-  npx --yes playwright@1.58.2 install chromium || warn "Playwright 没装上，截图功能会不可用"
+  warn "$(L "bunx playwright 失败，尝试 npx" "bunx playwright failed — falling back to npx")"
+  npx --yes playwright@1.58.2 install chromium || warn "$(L "Playwright 没装上，截图功能会不可用" "Playwright not installed — terminal screenshots will be unavailable")"
 fi
 
-ok "项目依赖安装完成"
+ok "$(L "项目依赖安装完成" "Project dependencies installed")"
 
 # ────────────────────────────────────────────
 # 下一步
 # ────────────────────────────────────────────
 
 printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
-printf "${BOLD}${GREEN}  ✨ 系统已就绪，现在跑配置向导${RESET}\n"
+printf "${BOLD}${GREEN}  ✨ $(L "系统已就绪，现在跑配置向导" "Everything is ready — time for the setup wizard")${RESET}\n"
 printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
 
-printf "配置向导会带你创建 Discord bot、收集 ID、写 .env、启动服务。\n"
-printf "预计 ${BOLD}10 分钟${RESET}。\n\n"
+printf "%s\n" "$(L "配置向导会带你创建 Discord bot、收集 ID、写 .env、启动服务。" "The wizard walks you through creating a Discord bot, collecting IDs, writing .env, and starting the services.")"
+printf "%s\n\n" "$(L "预计 10-30 分钟（大头是依赖下载）。" "Budget 10-30 minutes — most of it is downloads.")"
 
-if confirm "现在跑 ${CYAN}bun run setup${RESET}？" y; then
+if confirm "$(L "现在跑" "Run") ${CYAN}bun run setup${RESET} $(L "吗？" "now?")" y; then
   printf "\n"
   cd "$CLAUDESTRA_DIR"
   # curl|bash 下 stdin 是管道。先用 exec 重定向把 shell 自身的 fd 0
@@ -362,7 +381,7 @@ if confirm "现在跑 ${CYAN}bun run setup${RESET}？" y; then
   fi
   exec bun run setup
 else
-  printf "\n稍后手动跑：\n"
+  printf "\n%s\n" "$(L "稍后手动跑：" "Run it later with:")"
   printf "  ${CYAN}cd $CLAUDESTRA_DIR${RESET}\n"
   printf "  ${CYAN}bun run setup${RESET}\n\n"
 fi

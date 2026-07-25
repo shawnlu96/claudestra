@@ -10,7 +10,7 @@ const pngPath = process.argv[3] || "/tmp/claude-orchestrator/screenshot.png";
 const width = parseInt(process.argv[4] || "1200");
 
 if (!htmlPath) {
-  console.error("用法: bun html2png.ts <input.html> <output.png> [width]");
+  console.error("usage: bun html2png.ts <input.html> <output.png> [width]");
   process.exit(1);
 }
 

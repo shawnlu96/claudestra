@@ -1917,7 +1917,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
   if (sub === "get") {
     const [name] = rest;
     if (!name) {
-      output({ ok: false, error: "用法: permissions get <name>" });
+      output({ ok: false, error: "usage: permissions get <name>" });
       return;
     }
     const tmuxName = normalizeName(name);
@@ -1945,7 +1945,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
     if (!name) {
       output({
         ok: false,
-        error: '用法: permissions set <name> --preset <preset>｜--disallowed "..."',
+        error: 'usage: permissions set <name> --preset <preset> | --disallowed "..."',
       });
       return;
     }
@@ -1991,7 +1991,7 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
   if (sub === "reset") {
     const [name] = rest;
     if (!name) {
-      output({ ok: false, error: "用法: permissions reset <name>" });
+      output({ ok: false, error: "usage: permissions reset <name>" });
       return;
     }
     const tmuxName = normalizeName(name);
@@ -2017,11 +2017,11 @@ async function cmdPermissions(sub: string, ...rest: string[]) {
     ok: false,
     error: `未知子命令: permissions ${sub}`,
     usage: [
-      "permissions list                 — 列出所有 agent 的权限预设",
-      "permissions presets              — 列出所有可用预设及其包含的工具",
-      "permissions get <name>           — 查看单个 agent 的详细权限",
+      "permissions list                 — list every agent's permission preset",
+      "permissions presets              — list available presets及其包含的工具",
+      "permissions get <name>           — show one agent's permissions in detail",
       'permissions set <name> --preset <preset>｜--disallowed "..."',
-      "permissions reset <name>         — 恢复默认预设",
+      "permissions reset <name>         — reset to the default preset",
     ],
   });
 }
@@ -2046,7 +2046,7 @@ async function cmdEffort(sub: string, ...rest: string[]) {
   if (sub === "get") {
     const [name] = rest;
     if (!name) {
-      output({ ok: false, error: "用法: effort get <name>" });
+      output({ ok: false, error: "usage: effort get <name>" });
       return;
     }
     const tmuxName = normalizeName(name);
@@ -2067,7 +2067,7 @@ async function cmdEffort(sub: string, ...rest: string[]) {
   if (sub === "reset") {
     const [name] = rest;
     if (!name) {
-      output({ ok: false, error: "用法: effort reset <name>" });
+      output({ ok: false, error: "usage: effort reset <name>" });
       return;
     }
     const tmuxName = normalizeName(name);
@@ -2101,7 +2101,7 @@ async function cmdEffort(sub: string, ...rest: string[]) {
   if (!agentName || !level) {
     output({
       ok: false,
-      error: "用法: effort <agent> <level>｜effort reset <agent>｜effort list",
+      error: "usage: effort <agent> <level> | effort reset <agent> | effort list",
       validLevels: KNOWN_EFFORT_LEVELS,
     });
     return;
@@ -2161,7 +2161,7 @@ async function cmdMode(sub: string, ...rest: string[]) {
   if (sub === "get") {
     const [name] = rest;
     if (!name) {
-      output({ ok: false, error: "用法: mode get <name>" });
+      output({ ok: false, error: "usage: mode get <name>" });
       return;
     }
     const tmuxName = normalizeName(name);
@@ -2192,7 +2192,7 @@ async function cmdMode(sub: string, ...rest: string[]) {
   if (!agentName || !modeVal) {
     output({
       ok: false,
-      error: "用法: mode <agent> <mode>｜mode get <agent>｜mode list",
+      error: "usage: mode <agent> <mode>｜mode get <agent>｜mode list",
       validModes: PERMISSION_MODES,
     });
     return;
@@ -2252,7 +2252,7 @@ async function cmdModel(sub: string, ...rest: string[]) {
 
   if (sub === "get") {
     const [name] = rest;
-    if (!name) { output({ ok: false, error: "用法: model get <name>" }); return; }
+    if (!name) { output({ ok: false, error: "usage: model get <name>" }); return; }
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
     const info = reg.agents[tmuxName];
@@ -2263,7 +2263,7 @@ async function cmdModel(sub: string, ...rest: string[]) {
 
   if (sub === "reset") {
     const [name] = rest;
-    if (!name) { output({ ok: false, error: "用法: model reset <name>" }); return; }
+    if (!name) { output({ ok: false, error: "usage: model reset <name>" }); return; }
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
     const info = reg.agents[tmuxName];
@@ -2280,7 +2280,7 @@ async function cmdModel(sub: string, ...rest: string[]) {
   // model all <model> —— 一把钉所有 active agent（满足"把所有 agent 切 fable"）
   if (sub === "all") {
     const [modelVal] = rest;
-    if (!modelVal) { output({ ok: false, error: "用法: model all <model>", aliases: listModelAliases() }); return; }
+    if (!modelVal) { output({ ok: false, error: "usage: model all <model>", aliases: listModelAliases() }); return; }
     const resolved = resolveModelAlias(modelVal);
     const reg = await loadRegistry();
     const changed: string[] = [];
@@ -2319,7 +2319,7 @@ async function cmdModel(sub: string, ...rest: string[]) {
   }
 
   if (!agentName || !modelVal) {
-    output({ ok: false, error: "用法: model <agent> <model>｜model reset <agent>｜model all <model>｜model list", aliases: listModelAliases() });
+    output({ ok: false, error: "usage: model <agent> <model>｜model reset <agent>｜model all <model>｜model list", aliases: listModelAliases() });
     return;
   }
 
@@ -2800,7 +2800,7 @@ async function cmdPeerHttpTest(peerName: string) {
       return;
     }
     const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));
-    output({ ok: true, peer: peerName, url: peer.baseUrl, reachable: true, remoteAgents: agents, note: `send_to_agent 用法: target="<对方agent>@${peerName}"` });
+    output({ ok: true, peer: peerName, url: peer.baseUrl, reachable: true, remoteAgents: agents, note: `send_to_agent usage: target="<their-agent>@${peerName}"` });
   } catch (e) {
     output({ ok: false, error: `连接失败: ${(e as Error).message}`, hint: "确认对方 bridge 在线、BRIDGE_BIND 对外可达、URL/端口正确" });
   }
@@ -3137,7 +3137,7 @@ async function cmdAutoUpdate(sub: string, ...rest: string[]) {
   if (!target || (state !== "on" && state !== "off")) {
     output({
       ok: false,
-      error: `用法: auto-update <claudestra|claude> <on|off>  |  auto-update status`,
+      error: `usage: auto-update <claudestra|claude> <on|off>  |  auto-update status`,
     });
     return;
   }
@@ -3234,7 +3234,7 @@ switch (cmd) {
   case "adopt": {
     const [name, sessionId] = args;
     if (!name || !sessionId) {
-      output({ ok: false, error: "用法: adopt <name> <sessionId> — 把指定 session（如 bg 分身）收编为该 agent 的正式会话并重启拉起" });
+      output({ ok: false, error: "usage: adopt <name> <sessionId> — 把指定 session（如 bg 分身）收编为该 agent 的正式会话并重启拉起" });
       break;
     }
     await cmdAdopt(name, sessionId);
@@ -3245,7 +3245,7 @@ switch (cmd) {
   case "archive": {
     const [name] = args;
     if (!name) {
-      output({ ok: false, error: "用法: archive <name> — 立即归档该 agent 当前 session 的对话 jsonl" });
+      output({ ok: false, error: "usage: archive <name> — 立即归档该 agent 当前 session 的对话 jsonl" });
       break;
     }
     const tmuxName = normalizeName(name);
@@ -3267,7 +3267,7 @@ switch (cmd) {
   case "set-session": {
     const [name, newSid] = args;
     if (!name || !newSid) {
-      output({ ok: false, error: "用法: set-session <name> <sessionId>" });
+      output({ ok: false, error: "usage: set-session <name> <sessionId>" });
       break;
     }
     if (!/^[0-9a-f-]{8,64}$/i.test(newSid)) {
@@ -3303,7 +3303,7 @@ switch (cmd) {
       else if (rest[i] === "--effort" && rest[i + 1]) effort = rest[++i];
     }
     if (!name || (!model && !effort)) {
-      output({ ok: false, error: "用法: set-claude <name> [--model <m>] [--effort <e>]" });
+      output({ ok: false, error: "usage: set-claude <name> [--model <m>] [--effort <e>]" });
       break;
     }
     const tmuxName = normalizeName(name);
@@ -3323,7 +3323,7 @@ switch (cmd) {
   case "kill": {
     const [name] = args;
     if (!name) {
-      output({ ok: false, error: "用法: kill <name>" });
+      output({ ok: false, error: "usage: kill <name>" });
       break;
     }
     await cmdKill(name);
@@ -3333,7 +3333,7 @@ switch (cmd) {
   case "remove": {
     const [name] = args;
     if (!name) {
-      output({ ok: false, error: "用法: remove <name>（kill + 从列表永久移除,归档保留）" });
+      output({ ok: false, error: "usage: remove <name>（kill + 从列表永久移除,归档保留）" });
       break;
     }
     await cmdRemove(name);
@@ -3343,7 +3343,7 @@ switch (cmd) {
   case "rename": {
     const [oldName, newName] = args;
     if (!oldName || !newName) {
-      output({ ok: false, error: "用法: rename <old-name> <new-name>" });
+      output({ ok: false, error: "usage: rename <old-name> <new-name>" });
       break;
     }
     await cmdRename(oldName, newName);
@@ -3414,7 +3414,7 @@ switch (cmd) {
       dir = rest.shift();
     }
     if (!name || !schedule || !dir || rest.length === 0) {
-      output({ ok: false, error: '用法: cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>]\n  --target-agent 设了的话 <dir> 可省' });
+      output({ ok: false, error: 'usage: cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>]\n  <dir> may be omitted when --target-agent is given' });
       break;
     }
     await cmdCronAdd(name, schedule, dir, rest.join(" "), reportChannelId, targetAgent);
@@ -3428,7 +3428,7 @@ switch (cmd) {
   case "cron-remove": {
     const [nameOrId] = args;
     if (!nameOrId) {
-      output({ ok: false, error: "用法: cron-remove <name|id>" });
+      output({ ok: false, error: "usage: cron-remove <name|id>" });
       break;
     }
     await cmdCronRemove(nameOrId);
@@ -3438,7 +3438,7 @@ switch (cmd) {
   case "cron-toggle": {
     const [nameOrId] = args;
     if (!nameOrId) {
-      output({ ok: false, error: "用法: cron-toggle <name|id>" });
+      output({ ok: false, error: "usage: cron-toggle <name|id>" });
       break;
     }
     await cmdCronToggle(nameOrId);
@@ -3478,7 +3478,7 @@ switch (cmd) {
   case "peer-revoke":
   case "peer-status":
   case "peer-list": {
-    output({ ok: false, error: "Discord peer 已移除(v2.11)。请用 HTTP peer: peer-http-invite/join/accept/test/list/remove(docs/design-http-peers.md)" });
+    output({ ok: false, error: "Discord-based peers were removed in v2.11 — use HTTP peers instead: peer-http-invite / peer-http-join / peer-http-accept (see README)" });
     break;
   }
 
@@ -3547,21 +3547,21 @@ switch (cmd) {
 
   case "tmux-screenshot": {
     const [name] = args;
-    if (!name) { output({ ok: false, error: "用法: tmux-screenshot <agent>" }); break; }
+    if (!name) { output({ ok: false, error: "usage: tmux-screenshot <agent>" }); break; }
     await cmdTmuxScreenshot(name);
     break;
   }
 
   case "tmux-send-keys": {
     const [name, ...rest] = args;
-    if (!name || rest.length === 0) { output({ ok: false, error: "用法: tmux-send-keys <agent> <keys...>" }); break; }
+    if (!name || rest.length === 0) { output({ ok: false, error: "usage: tmux-send-keys <agent> <keys...>" }); break; }
     await cmdTmuxSendKeys(name, rest);
     break;
   }
 
   case "tmux-capture": {
     const [name, linesArg] = args;
-    if (!name) { output({ ok: false, error: "用法: tmux-capture <agent> [lines]" }); break; }
+    if (!name) { output({ ok: false, error: "usage: tmux-capture <agent> [lines]" }); break; }
     const lines = parseInt(linesArg || "40", 10);
     await cmdTmuxCapture(name, lines);
     break;
@@ -3569,7 +3569,7 @@ switch (cmd) {
 
   case "tmux-wait-idle": {
     const [name, timeoutArg] = args;
-    if (!name) { output({ ok: false, error: "用法: tmux-wait-idle <agent> [timeout_ms]" }); break; }
+    if (!name) { output({ ok: false, error: "usage: tmux-wait-idle <agent> [timeout_ms]" }); break; }
     const timeout = parseInt(timeoutArg || "30000", 10);
     await cmdTmuxWaitIdle(name, timeout);
     break;
@@ -3642,42 +3642,42 @@ switch (cmd) {
   default:
     output({
       ok: false,
-      error: `未知命令: ${cmd || "(空)"}`,
+      error: `Unknown command: ${cmd || "(empty)"}`,
       usage: [
-        "create <name> <dir> [purpose]  — 新建 agent",
-        "resume <name> <sessionId> [dir] — 恢复历史 session",
-        "kill <name>                     — 销毁 agent",
-        "rename <old-name> <new-name>    — 重命名 agent（tmux window + registry + Discord 频道）",
-        "restart [name]                  — 重启 agent（不指定则重启所有）",
-        "list                            — 列出所有 agent",
-        "sessions [search]               — 浏览历史 Claude Code 会话",
-        'cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>] — 添加定时任务（--target-agent 让 prompt 打到已存在的 agent、继承其上下文/记忆；不设则每次建临时 agent）',
-        "cron-list                       — 列出所有定时任务",
-        "cron-remove <name|id>           — 删除定时任务",
-        "cron-toggle <name|id>           — 启用/暂停定时任务",
-        "cron-history [name|id]          — 查看执行历史",
-        "permissions list                — 列出所有 agent 的权限预设",
-        "permissions presets             — 列出所有可用预设",
-        "permissions get <name>          — 查看单个 agent 的详细权限",
+        "create <name> <dir> [purpose]  — create an agent",
+        "resume <name> <sessionId> [dir] — resume a past session",
+        "kill <name>                     — destroy an agent",
+        "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel)",
+        "restart [name]                  — restart an agent (all agents if omitted)",
+        "list                            — list all agents",
+        "sessions [search]               — browse past Claude Code sessions",
+        'cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>] — add a cron job (--target-agent sends the prompt to an existing agent, inheriting its context; otherwise a temporary agent is spawned each run)',
+        "cron-list                       — list cron jobs",
+        "cron-remove <name|id>           — remove a cron job",
+        "cron-toggle <name|id>           — enable/pause a cron job",
+        "cron-history [name|id]          — show run history",
+        "permissions list                — list every agent's permission preset",
+        "permissions presets             — list available presets",
+        "permissions get <name>          — show one agent's permissions in detail",
         'permissions set <name> --preset <preset>｜--disallowed "..."',
-        "permissions reset <name>        — 恢复默认预设",
-        "effort list                     — 列出所有 agent 的 effort 设置",
-        "effort get <name>               — 查看单个 agent 的 effort",
-        "effort <name> <low|medium|high|xhigh|max|auto>  — 设置 agent 的 effort（要 restart 生效）",
-        "effort reset <name>             — 清除 agent effort 覆盖（回到 settings.json 全局）",
-        "tmux-help                       — 打印 tmux 快速教程（含 iTerm2 -CC 模式）",
-        "version                         — 显示当前版本 + 是否有更新",
-        "update                          — 拉取最新代码并重载 3 个 launchd daemon",
-        "auto-update status              — 查看自动更新开关",
-        "auto-update claudestra on|off   — Claudestra 自动更新开关（默认 on）",
-        "auto-update claude on|off       — Claude Code 自动更新开关（默认 on）",
-        "cost [--agent <name>] [--today|--week]  — 统计 agent / 全部 token 用量",
-        "invite-link                     — 生成 Discord bot 邀请 URL（owner 权限，自己服务器用）",
-        "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — 汇总 bridge 事件日志",
-        "tmux-screenshot <agent>         — 截图某 agent 的 tmux window（返回 PNG 路径）",
-        "tmux-send-keys <agent> <keys...>  — 发按键/文本到 agent（支持 Enter/Escape/Left/C-c 等）",
-        "tmux-capture <agent> [lines]    — 读 agent pane 最后 N 行",
-        "tmux-wait-idle <agent> [ms]     — 阻塞直到 agent 回到 idle 状态（默认 30s）",
+        "permissions reset <name>        — reset to the default preset",
+        "effort list                     — list every agent's effort setting",
+        "effort get <name>               — show one agent's effort",
+        "effort <name> <low|medium|high|xhigh|max|auto>  — set an agent's effort (takes effect after restart)",
+        "effort reset <name>             — clear the override (fall back to the global settings.json value)",
+        "tmux-help                       — print the tmux crash course (incl. iTerm2 -CC mode)",
+        "version                         — show the current version and whether an update is available",
+        "update                          — git pull and reload the three launchd daemons",
+        "auto-update status              — show auto-update toggles",
+        "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
+        "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
+        "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
+        "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
+        "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — summarise the bridge event log",
+        "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
+        "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",
+        "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
+        "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",
       ],
     });
 }
