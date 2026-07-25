@@ -195,6 +195,7 @@ bun src/manager.ts auto-update claudestra on|off    # Claudestra 自更新（30 
 bun src/manager.ts auto-update claude on|off        # Claude Code CLI 更新（周轮询）
 
 # 可观测性
+bun src/manager.ts doctor [--json]                  # 体检整套安装
 bun src/manager.ts cost [--agent <n>] [--today|--week]   # per-agent token 用量
 bun src/manager.ts metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]
 
@@ -261,10 +262,12 @@ bun src/manager.ts tmux-wait-idle <agent> [ms]
 端口转发出去，这层保护就没了——控制面本身没有任何鉴权。需要远程访问就放到
 Tailscale 后面，或者用带鉴权的反向代理，别直接暴露端口。
 
-**Discord。** `ALLOWED_USER_IDS` 是唯一的门禁。agent 频道创建时没有设置权限覆盖，
-所以**服务器里的每个成员都能读到所有 agent 的对话**——请用一个只有你自己的服务器，
-或者自己去配频道权限。所有对话内容（你的消息、Claude 的回复、工具调用、终端截图）
-都会经过并留存在 Discord 的服务器上。
+**Discord。** `ALLOWED_USER_IDS` 是唯一的门禁，且是 fail-closed 的：名单为空等于
+谁都不放行，而不是谁都放行。agent 频道创建时默认对 `@everyone` 隐藏，只显式放行
+bot 和名单里的人。两点例外：服务器管理员的 Administrator 权限旁路频道覆盖，始终
+读得到；如果 Discord 拒绝了这组覆盖（bot 的 role 缺了覆盖里点名的某个权限），频道
+仍会照常建出来——只是没有覆盖——bridge 会打一条警告让你手动收紧。所有对话内容
+（你的消息、Claude 的回复、工具调用、终端截图）都会经过并留存在 Discord 的服务器上。
 
 **API token。** scope 是按 agent 的白名单（`token-add … --agents a,b`）。终端是
 独立的能力位（`--terminal`），因为终端等于宿主 shell 访问——它能 Ctrl-C 退出

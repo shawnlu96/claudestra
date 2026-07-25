@@ -207,6 +207,7 @@ bun src/manager.ts auto-update claudestra on|off    # Claudestra self-update (30
 bun src/manager.ts auto-update claude on|off        # Claude Code CLI (weekly poll)
 
 # Observability
+bun src/manager.ts doctor [--json]                  # health-check the whole install
 bun src/manager.ts cost [--agent <n>] [--today|--week]   # per-agent token usage
 bun src/manager.ts metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]
 
@@ -286,12 +287,15 @@ protection entirely — the control plane itself has no authentication. If you n
 remote access, put it behind Tailscale or a reverse proxy with its own auth; do not
 expose the port directly.
 
-**Discord.** `ALLOWED_USER_IDS` is the only gate on who may drive your agents.
-Agent channels are created without permission overwrites, so **every member of the
-guild can read every agent conversation** — use a server where you are the only
-member, or set channel permissions yourself. All conversation content (your
-messages, Claude's replies, tool calls, terminal screenshots) transits and is
-retained by Discord.
+**Discord.** `ALLOWED_USER_IDS` is the only gate on who may drive your agents, and
+it is fail-closed: an empty list rejects everyone rather than admitting everyone.
+Agent channels are created hidden from `@everyone` and explicitly readable only by
+the bot and the users on that list. Two caveats: guild administrators bypass channel
+overwrites and can always read along, and if Discord rejects the overwrites (a bot
+role missing a permission the overwrite names) the channel is still created — just
+without them — and the bridge logs a warning telling you to tighten it by hand. All
+conversation content (your messages, Claude's replies, tool calls, terminal
+screenshots) transits and is retained by Discord.
 
 **API tokens.** Scopes are per-agent whitelists (`token-add … --agents a,b`).
 Terminal access is a separate capability (`--terminal`) because a terminal is host

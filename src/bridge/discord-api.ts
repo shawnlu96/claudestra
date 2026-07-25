@@ -185,13 +185,18 @@ export async function discordCreateChannel(
       overwrites.push({
         id: selfId,
         allow: [
+          // ⚠️ 这里只能列 **向导邀请链接(setup.ts OWNER_PERMS)确实给了** 的权限位。
+          // Discord 规则：建频道带 overwrite 时,只能 allow/deny bot 自己在 guild 里
+          // 已有的位,多一个就整个 create 报 50013。ManageMessages 曾在这个列表里,
+          // 而 OWNER_PERMS 不含它 —— 本机 bot 是 Administrator 所以从没暴露,新用户
+          // 建第一个 agent 就会失败。bot 只编辑自己的消息,本就不需要 ManageMessages。
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
           PermissionFlagsBits.ReadMessageHistory,
-          PermissionFlagsBits.ManageMessages,
           PermissionFlagsBits.AttachFiles,
           PermissionFlagsBits.EmbedLinks,
           PermissionFlagsBits.AddReactions,
+          // 线程两位不在 OWNER_PERMS 里,但新服务器的 @everyone 默认自带,bot 继承得到。
           PermissionFlagsBits.CreatePublicThreads,
           PermissionFlagsBits.SendMessagesInThreads,
         ],
@@ -212,13 +217,25 @@ export async function discordCreateChannel(
     }
   }
 
-  const ch = await guild.channels.create({
-    name,
-    parent: parentId,
-    topic: `Claude Code agent channel`,
-    ...(overwrites.length > 0 ? { permissionOverwrites: overwrites } : {}),
-  });
-  return ch.id;
+  const base = { name, parent: parentId, topic: `Claude Code agent channel` };
+  if (overwrites.length === 0) {
+    const ch = await guild.channels.create(base);
+    return ch.id;
+  }
+  try {
+    const ch = await guild.channels.create({ ...base, permissionOverwrites: overwrites });
+    return ch.id;
+  } catch (e) {
+    // 上面已经对齐了权限位,但 @everyone 被服务器管理员收紧、或用户手改过 bot 的 role,
+    // 仍可能让某个位落空 → 50013。隔离是加分项,**建不出频道是致命项**(agent 直接
+    // 创建失败),所以失败退回无覆盖创建,并把「频道没设成私有」明确喊出来。
+    console.warn(
+      `⚠️ 频道 ${name} 的权限覆盖被 Discord 拒绝(${(e as Error).message})——退回无覆盖创建。\n` +
+        `   该频道服务器成员均可见。请手动收紧频道权限,或给 bot 补齐权限后重建频道。`,
+    );
+    const ch = await guild.channels.create(base);
+    return ch.id;
+  }
 }
 
 export async function discordDeleteChannel(
