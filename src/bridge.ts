@@ -92,12 +92,14 @@ import {
   readPrincipals,
   syncDiscordOwnersFromEnv,
   listDiscordPrincipalIds,
+  isDiscordSnowflake,
 } from "./lib/principals.js";
 
 // ============================================================
 // v2.6.0+ C2-3：Discord 用户鉴权统一走 principals.json（.env 作 seed/fallback）
 // 模块级缓存保持全部调用点的同步语义；30s 懒刷新（principals 变化不频繁）。
-// 语义与老 ALLOWED_USER_IDS 完全一致：列表为空 = 放行所有人。
+// ⚠️ v2.14+ 起是 **fail-closed**：列表为空 = 谁都不放行（老语义是空 = 放行所有人，
+// 那等于配置一漏就全网可驱动你的 agent）。判定见下面的 handleDiscordMessage。
 // ============================================================
 let cachedDiscordAllowed: string[] = [...ALLOWED_USER_IDS];
 let discordAllowedLoadedAt = 0;
@@ -111,7 +113,7 @@ function refreshDiscordAllowed(): void {
     })
     .catch(() => { /* 保持现值 */ });
 }
-/** 允许对话的 Discord 用户 id 列表（空 = 不限） */
+/** 允许对话的 Discord 用户 id 列表（**空 = 全部拒绝**，不是不限） */
 function allowedDiscordIds(): string[] {
   if (Date.now() - discordAllowedLoadedAt > 30_000) refreshDiscordAllowed();
   return cachedDiscordAllowed;
@@ -123,9 +125,28 @@ function primaryOwnerId(): string {
 }
 // 启动：.env → principals 单向 seed（幂等），然后立即刷新缓存
 syncDiscordOwnersFromEnv(ALLOWED_USER_IDS)
-  .then((changed) => {
+  .then(async (changed) => {
     if (changed) console.log("👤 已把 .env ALLOWED_USER_IDS 同步进 principals.json（role:owner）");
     refreshDiscordAllowed();
+    // 门禁是 fail-closed 的，空名单 = 一条消息都进不来。而拒绝发生在收到消息时、
+    // 只打一行 stdout —— 用户在 Discord 端得到的是**完全的沉默**，最难排查的那种。
+    // 所以在启动时就把这个死局喊出来：配了 bot token 却没有合法 owner = 配置没完成。
+    // 触发路径：手动装（cp .env.example .env 后忘了填）、先只装 web 后来手工加 token。
+    if (!WEB_ONLY) {
+      await readPrincipals()
+        .then((file) => {
+          const ids = listDiscordPrincipalIds(file).filter(isDiscordSnowflake);
+          if (ids.length === 0) {
+            console.error(
+              "\n🚨 Discord 已启用，但没有任何合法的 owner —— 所有 Discord 消息都会被静默拒绝。\n" +
+                "   修法：在 .env 里把 ALLOWED_USER_IDS 填成你的 Discord 用户 ID（17-20 位数字，\n" +
+                "   开发者模式下右键头像 → 复制用户 ID），然后重启 bridge：\n" +
+                "   launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge\n",
+            );
+          }
+        })
+        .catch(() => { /* 读不到就算了，别让自检本身成为启动失败点 */ });
+    }
   })
   .catch((e) => console.error("principals owner 同步失败（继续用 .env）:", (e as Error).message));
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";

@@ -22,7 +22,9 @@ const RENDERED_PATH = `${REPO_ROOT}/master/CLAUDE.md`;
 
 // v2.10+: 步骤总数随前端选择变化（Discord 5 步可跳过、Web 1 步可加），
 // 编号用自增计数器,不再硬编码。
-let TOTAL_STEPS = 8;
+// 0 = 还不知道总数（要等「选择前端」那步定下来）—— 此时只显示 [n]，不显示 [n/8]，
+// 否则前两步先报一个猜的分母、选完前端又跳成别的数，看着像出错了。
+let TOTAL_STEPS = 0;
 let stepNo = 0;
 const nextStep = () => ++stepNo;
 
@@ -61,7 +63,8 @@ function header(step: number, title: string) {
   const bar = "━".repeat(50);
   print("");
   print(`${c.cyan}${bar}${c.reset}`);
-  print(`${c.bold}${c.cyan}  [${step}/${TOTAL_STEPS}] ${title}${c.reset}`);
+  const counter = TOTAL_STEPS > 0 ? `${step}/${TOTAL_STEPS}` : `${step}`;
+  print(`${c.bold}${c.cyan}  [${counter}] ${title}${c.reset}`);
   print(`${c.cyan}${bar}${c.reset}`);
   print("");
 }
@@ -794,8 +797,17 @@ async function registerHooks(hookCmd: string): Promise<void> {
   await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 }
 
-async function stepFinalize(cfg: Config): Promise<void> {
+/**
+ * 收尾结果。`deferred` = 用户选了自己跑（不是失败）；`failures` = 真的没装上的
+ * 关键件。这两个都要带回 stepDone —— 此前不论装成什么样都无条件打印「✨ 安装
+ * 完成！」，MCP / hooks / launchd 三处失败全是 warn-continue，用户盯着「完成」
+ * 而 bot 根本不理他，是最贵的一类支持成本。
+ */
+interface FinalizeResult { deferred: boolean; failures: string[] }
+
+async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   header(nextStep(), t("写入配置 + 自动化收尾", "Write config + auto-finalize"));
+  const failures: string[] = [];
 
   // 写 .env
   if (await fileExists(ENV_PATH)) {
@@ -842,7 +854,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
     print(`  ${c.cyan}claude mcp add ${cfg.MCP_NAME} -s user -- bun run ${REPO_ROOT}/src/channel-server.ts${c.reset}`);
     print(`  ${c.dim}# ${t("typing hooks: 手动编辑 ~/.claude/settings.json，或重跑 bun run setup", "typing hooks: edit ~/.claude/settings.json manually, or rerun bun run setup")}${c.reset}`);
     print(`  ${c.cyan}bun src/manager.ts install-cli${c.reset}  ${c.dim}${t("(写 launchd plist + 启 3 个 daemon)", "(write launchd plists + start 3 daemons)")}${c.reset}`);
-    return;
+    return { deferred: true, failures };
   }
 
   // 1. bun install
@@ -854,7 +866,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
     print(`${c.red}✗${c.reset}`);
     print(bi.err);
     fail(t("bun install 失败，请自己看错误重试", "bun install failed — check the error above and retry"));
-    return;
+    return { deferred: false, failures: ["bun install"] };
   }
 
   // 2. playwright
@@ -878,6 +890,10 @@ async function stepFinalize(cfg: Config): Promise<void> {
     print(`${c.red}✗${c.reset}`);
     print(mcp.err || mcp.out);
     warn(t("MCP 注册失败，你可能需要手动跑这条命令", "MCP registration failed — you may need to run the command manually"));
+    failures.push(t(
+      `MCP 注册（没有它 agent 无法回复你）— 手动跑：claude mcp add ${cfg.MCP_NAME} -s user -- bun run ${REPO_ROOT}/src/channel-server.ts`,
+      `MCP registration (without it agents cannot reply) — run: claude mcp add ${cfg.MCP_NAME} -s user -- bun run ${REPO_ROOT}/src/channel-server.ts`,
+    ));
   }
 
   // 4. hooks (typing indicator) — 直接写 ~/.claude/settings.json
@@ -893,6 +909,10 @@ async function stepFinalize(cfg: Config): Promise<void> {
     print(`${c.yellow}⚠${c.reset}`);
     warn(t(`hook 注册失败: ${e.message}`, `Hook registration failed: ${e.message}`));
     hint(t("typing 指示器可能不会自动停止，需手动编辑 ~/.claude/settings.json", "Typing indicator may not auto-stop. Edit ~/.claude/settings.json manually."));
+    failures.push(t(
+      "typing hooks（输入指示器不会自动停）— 手动编辑 ~/.claude/settings.json，或重跑 bun run setup",
+      "typing hooks (the typing indicator will not auto-stop) — edit ~/.claude/settings.json, or rerun bun run setup",
+    ));
   }
 
   // 5. v2.4.0+: 装 `claudestra` 命令 + 3 个 user-level launchd plist 直管 daemon
@@ -906,6 +926,10 @@ async function stepFinalize(cfg: Config): Promise<void> {
     if (r.errors.length > 0) {
       print(`${c.red}✗${c.reset}`);
       for (const e of r.errors) warn(e);
+      failures.push(t(
+        `launchd daemon（bridge / launcher / cron 不会自启）— 手动跑：bun src/manager.ts install-cli\n     ${r.errors.join("; ")}`,
+        `launchd daemons (bridge / launcher / cron will not start) — run: bun src/manager.ts install-cli\n     ${r.errors.join("; ")}`,
+      ));
     } else {
       print(`${c.green}✓${c.reset}`);
       ok(t(
@@ -915,6 +939,13 @@ async function stepFinalize(cfg: Config): Promise<void> {
       for (const d of r.daemons) {
         const status = d.loaded ? `${c.green}✓${c.reset} loaded` : `${c.yellow}⚠${c.reset} ${d.warning || ""}`;
         ok(t(`${c.cyan}${d.label}${c.reset}  ${status}`, `${c.cyan}${d.label}${c.reset}  ${status}`));
+        // plist 写成了但没 load 上 —— 单条 warn 混在一堆 ✓ 里很容易被划过去
+        if (!d.loaded) {
+          failures.push(t(
+            `daemon ${d.label} 没 load 上：${d.warning || "原因未知"}`,
+            `daemon ${d.label} did not load: ${d.warning || "reason unknown"}`,
+          ));
+        }
       }
       if (r.oldAutostartPlist) {
         hint(t(
@@ -943,7 +974,12 @@ async function stepFinalize(cfg: Config): Promise<void> {
       "可以以后单跑：bun src/manager.ts install-cli",
       "Run later: bun src/manager.ts install-cli",
     ));
+    failures.push(t(
+      `launchd daemon（bridge / launcher / cron 不会自启）— 手动跑：bun src/manager.ts install-cli`,
+      `launchd daemons (bridge / launcher / cron will not start) — run: bun src/manager.ts install-cli`,
+    ));
   }
+  return { deferred: false, failures };
 }
 
 // ============================================================
@@ -1076,12 +1112,33 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
 // 完成
 // ============================================================
 
-function stepDone(cfg: Config, fronts: Frontends): void {
+function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult): void {
   br();
-  print(`${c.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
-  print(`${c.bold}${c.green}  ✨ ${t("安装完成！", "Installation complete!")}${c.reset}`);
-  print(`${c.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
-  br();
+  // 装没装成，横幅就得说实话 —— 否则用户盯着「✨ 安装完成」而 bot 根本不理他。
+  if (fin.failures.length > 0) {
+    print(`${c.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    print(`${c.bold}${c.yellow}  ⚠ ${t("配置已写入，但有组件没装上", "Config written, but some components did not install")}${c.reset}`);
+    print(`${c.yellow}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    br();
+    print(`${c.bold}${t("下面这些需要你处理，否则系统跑不起来：", "These need your attention, or the system will not come up:")}${c.reset}`);
+    for (const f of fin.failures) print(`  ${c.yellow}•${c.reset} ${f}`);
+    br();
+    print(t(
+      `处理完可以重跑 ${c.cyan}bun run setup${c.reset}，或用 ${c.cyan}bun src/manager.ts doctor${c.reset} 复查。`,
+      `Fix them, then rerun ${c.cyan}bun run setup${c.reset}, or check with ${c.cyan}bun src/manager.ts doctor${c.reset}.`,
+    ));
+    br();
+  } else if (fin.deferred) {
+    print(`${c.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    print(`${c.bold}${c.cyan}  ${t("配置已写入 — 剩下的命令等你自己跑", "Config written — the remaining commands are yours to run")}${c.reset}`);
+    print(`${c.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    br();
+  } else {
+    print(`${c.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    print(`${c.bold}${c.green}  ✨ ${t("安装完成！", "Installation complete!")}${c.reset}`);
+    print(`${c.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    br();
+  }
   if (fronts.discord) {
     print(`${c.bold}${t("试一下(Discord):", "Try it (Discord):")}${c.reset}`);
     print(`  ${c.dim}①${c.reset} ${t("打开 Discord，去你的", "Open Discord and go to your")} ${c.yellow}${t("#控制频道", "#control channel")}${c.reset}`);
@@ -1204,8 +1261,8 @@ async function main() {
     MCP_NAME: mcpName,
   };
 
-  await stepFinalize(cfg);
-  stepDone(cfg, fronts);
+  const fin = await stepFinalize(cfg);
+  stepDone(cfg, fronts, fin);
 
   process.exit(0);
 }

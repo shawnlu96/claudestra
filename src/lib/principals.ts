@@ -173,9 +173,20 @@ export function terminalAllowed(p: Principal, agentName: string): boolean {
 }
 
 /**
+ * Discord snowflake 校验：17-20 位纯数字。
+ * `.env.example` 里的占位符（`your-discord-user-id`）过得了 `filter(Boolean)`，
+ * 手动安装路径（`cp .env.example .env`）会把它当真 id 一路写进 principals.json
+ * 变成一条永久的假 owner。这里是那条链路上唯一的把关点。
+ */
+export function isDiscordSnowflake(s: string): boolean {
+  return /^\d{17,20}$/.test(s.trim());
+}
+
+/**
  * v2.6.0+ C2-3：把 .env 的 ALLOWED_USER_IDS 同步成 discord:<uid> role:owner
  * principals（principals.json 成为身份真源，.env 保留作 seed/fallback）。
  * 幂等：已存在的 discord principal 不覆盖（用户手动改过 role/disabled 要保留）。
+ * 非法 id（占位符、笔误）直接跳过，不落盘。
  * 返回 true = 文件有变化（已落盘）。
  */
 export async function syncDiscordOwnersFromEnv(
@@ -186,6 +197,13 @@ export async function syncDiscordOwnersFromEnv(
   const file = await readPrincipals(path);
   let changed = false;
   for (const uid of allowedIds) {
+    if (!isDiscordSnowflake(uid)) {
+      console.warn(
+        `⚠️ ALLOWED_USER_IDS 里的 "${uid}" 不是合法的 Discord 用户 ID（应为 17-20 位数字），已跳过。\n` +
+          `   在 Discord 里开启 设置 → 高级 → 开发者模式，右键自己的头像 → 复制用户 ID。`,
+      );
+      continue;
+    }
     const id = `discord:${uid}`;
     if (file.principals.some((p) => p.id === id)) continue;
     file.principals.push({
