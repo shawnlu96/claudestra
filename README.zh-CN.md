@@ -173,12 +173,23 @@ tmux -S /tmp/claude-orchestrator/master.sock attach
 
 ```bash
 # Agent 生命周期
-bun src/manager.ts create   <name> <dir> [purpose]
-bun src/manager.ts resume   <name> <sessionId> [dir]
+bun src/manager.ts create   <name> <dir> [purpose] [--model <m>] [--effort <e>] [--mode <m>] [--external]
+bun src/manager.ts resume   <name> <sessionId> [dir] [--fork]   # --fork: 把野生/被 bg 占用的会话当分支收编
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
+bun src/manager.ts rename   <old-name> <new-name>   # tmux window + registry + Discord 频道一起改
+bun src/manager.ts remove   <name>                  # 只删 registry 登记
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
+bun src/manager.ts adopt    <name> <sessionId>      # 把后台分身提升为正式会话
+bun src/manager.ts archive  <name>                  # 把会话 jsonl 快照进 ~/.claude-orchestrator/archive/
+bun src/manager.ts set-session <name> <sessionId>   # 把 agent 指向另一个会话
+bun src/manager.ts set-claude  <name> <path>        # 给单个 agent 钉一个特定的 claude 可执行文件
+
+# 按 agent 的模型 / effort / 权限模式（都要重启后生效）
+bun src/manager.ts model  <name> <model|reset> | model all <model>
+bun src/manager.ts effort <name> <low|medium|high|xhigh|max|auto> | effort list | effort reset <name>
+bun src/manager.ts mode   <name> <permission-mode>
 
 # 定时任务
 bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>
@@ -210,11 +221,12 @@ bun src/manager.ts permissions reset <name>
 bun src/manager.ts invite-link           # 给自己用的完整权限链接
 
 # 跨 Claudestra HTTP peer（v2.11+）— 互签 scoped token，不需要共享 Discord 服务器
-bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <我方bridge地址> [--force]    # A：打印邀请串
-bun src/manager.ts peer-http-join <peer> '<邀请串>' --agents <x,y> --url <我方地址> [--force]  # B：存下 A，打印回执串
+bun src/manager.ts peer-http-invite <peer> --agents <a,b> [--url <我方bridge地址>] [--force]   # A：打印邀请串（--url 省略则自动探测）
+bun src/manager.ts peer-http-join <peer> '<邀请串>' --agents <x,y> [--url <我方地址>] [--force] # B：存下 A，打印回执串
 bun src/manager.ts peer-http-accept <peer> '<回执串>'                                         # A：完成握手
 bun src/manager.ts peer-http-test <peer>          # 验证连通 + 看对方开放给我的 agent
 bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状态
+bun src/manager.ts peer-http-scope <peer> --agents <a,b|*> [--force]  # v2.11.1+：原地改入站 scope（token 不变，立即生效）
 bun src/manager.ts peer-http-remove <peer>        # 删 peer + 撤销我签出的 token
 
 # 低级 tmux 控制（给 master 兜底处理 bridge 认不出的 TUI modal）
@@ -222,6 +234,15 @@ bun src/manager.ts tmux-screenshot <agent>
 bun src/manager.ts tmux-capture <agent> [lines]
 bun src/manager.ts tmux-send-keys <agent> <keys...>
 bun src/manager.ts tmux-wait-idle <agent> [ms]
+bun src/manager.ts tmux-help                        # tmux 速查（attach / 切窗口 / 分屏）
+
+# 多前端 API token（v2.6.0+；scope = 按 agent 的白名单，"*" = 除 master 外全部）
+bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]
+bun src/manager.ts token-list
+bun src/manager.ts token-revoke <tokenId|name>
+
+# 安装/修复三个 launchd daemon + `claudestra` 命令
+bun src/manager.ts install-cli
 ```
 
 ## 配置

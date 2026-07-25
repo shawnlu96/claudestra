@@ -175,13 +175,26 @@ bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+
 bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
 # send_to_agent 的 target 语法："<agent>@<peer>" 或 "peer:<peer>.<agent>"
 
-# 版本
 # 体检（只读；出问题时第一个该跑的）
 bun src/manager.ts doctor [--json]
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新
 bun src/manager.ts update    # git pull + 重载 3 个 launchd daemon
+
+# 自动更新开关（两者默认开；launcher 定期轮询，只在所有 agent 空闲时才升级）
+bun src/manager.ts auto-update status
+bun src/manager.ts auto-update claudestra on|off   # Claudestra 自更新（30 分钟轮询）
+bun src/manager.ts auto-update claude on|off       # Claude Code CLI（每周轮询）
+
+# 多前端 API token（v2.6.0+；scope = 按 agent 的白名单，"*" = 除 master 外全部）
+bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
+bun src/manager.ts token-list
+bun src/manager.ts token-revoke <tokenId|name>
+bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）
+
+# token 用量统计（解析 ~/.claude/projects/<slug>/<sessionId>.jsonl）
+bun src/manager.ts cost [--agent <name>] [--today|--week]
 
 # 测试
 bun test
