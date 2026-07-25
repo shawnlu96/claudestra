@@ -47,6 +47,8 @@ interface ApiAgent {
   model?: string | null;
   /** 当前 effort 档位（同上兜底链） */
   effort?: string | null;
+  /** agent 创建时间（ISO，registry.created）——新建但还没说过话的 agent 靠它排序 */
+  created?: string;
 }
 
 /**
@@ -83,7 +85,11 @@ export async function loadAgents(): Promise<AgentSession[]> {
       purpose: a.purpose || "",
       cwd: "",
       status: a.status === "stopped" ? "stopped" : "active",
-      lastActivityTs: a.lastActivityTs ?? null,
+      // 刚建出来的 agent 还没说过话，jsonl 没内容 → lastActivityTs 为 null，
+      // 而排序用 `?? 0` 兜底，于是新 agent 直接沉到列表最底下（owner 2026-07-25
+      // 报「新建的能不能放最前面」）。用创建时间兜底：没活动过就按建的时间排，
+      // 刚建的自然在最上面，一旦说过话就被真实活动时间接管。
+      lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
       // Bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
       busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
       contextTokens: a.contextTokens ?? null,

@@ -1691,6 +1691,8 @@ async function cmdList() {
       purpose: info?.purpose || "",
       channelId: info?.channelId || "",
       sessionId: info?.sessionId || "",
+      // v2.14+ 创建时间透出 —— web 侧栏按它把新建的 agent 排到最前
+      created: info?.created || "",
     });
   }
 
@@ -1706,6 +1708,7 @@ async function cmdList() {
         purpose: info.purpose,
         channelId: info.channelId,
         sessionId: info.sessionId,
+        created: info.created || "",
       });
     }
   }

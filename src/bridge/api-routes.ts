@@ -367,7 +367,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       const listResult = await runManager("list");
       const agents = ((listResult.agents || []) as any[])
         .filter((a) => agentInScope(principal, a.name))
-        .map((a) => ({ name: a.name, status: a.status, idle: a.idle, purpose: a.purpose }));
+        .map((a) => ({ name: a.name, status: a.status, idle: a.idle, purpose: a.purpose, created: a.created }));
       // [fork] busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
       // thinking 同源——manager list 的 tmux idle 探测在回合中也常报 idle，
       // 不可靠，只作 OR 兜底）。web 列表的黄色状态点数据源。
@@ -436,7 +436,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           if (r.cwd && r.sessionId) {
             ts = (await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId)))?.convTs ?? null;
           }
-          agents.push({ name: r.name, status: "stopped", idle: undefined, purpose: r.purpose, lastActivityTs: ts } as any);
+          agents.push({ name: r.name, status: "stopped", idle: undefined, purpose: r.purpose, lastActivityTs: ts, created: (r as any).created } as any);
         }
       }
       // [fork] master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
