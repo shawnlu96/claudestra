@@ -820,9 +820,9 @@ async function cmdResume(
     const newId = await waitForNewSessionId(resolvedDir, forkBefore);
     if (newId) {
       actualSessionId = newId;
-      console.log(`[resume] --fork 探测到新 session ${newId.slice(0, 8)}（源 ${sessionId.slice(0, 8)}）`);
+      console.error(`[resume] --fork 探测到新 session ${newId.slice(0, 8)}（源 ${sessionId.slice(0, 8)}）`);
     } else {
-      console.log(`[resume] ⚠️ --fork 未探测到新 session id，registry 暂记源 id`);
+      console.error(`[resume] ⚠️ --fork 未探测到新 session id，registry 暂记源 id`);
     }
   }
 
@@ -1297,7 +1297,7 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
   // 自守：绝不给发起者自己的窗口发键（见 selfWindowName 注释）。registry 已写，
   // 下次 restart 时补发生效。
   if (name === (await selfWindowName())) {
-    console.log(`[model] 跳过 ${name}（命令由该 agent 自己发起，restart 时补发）`);
+    console.error(`[model] 跳过 ${name}（命令由该 agent 自己发起，restart 时补发）`);
     return false;
   }
   // 快照全局默认。null = 读失败(文件不存在/坏 JSON),跳过恢复,别越修越坏。
@@ -1435,7 +1435,7 @@ async function cmdAdopt(name: string, sessionId: string) {
   info.sessionId = sessionId;
   info.notes = `claude session: ${sessionId} (adopted${oldId ? `, was ${oldId.slice(0, 8)}` : ""})`;
   await saveRegistry(reg);
-  console.log(`[adopt] ${tmuxName} sessionId ${oldId?.slice(0, 8) ?? "(无)"} → ${sessionId.slice(0, 8)}，restart 拉起`);
+  console.error(`[adopt] ${tmuxName} sessionId ${oldId?.slice(0, 8) ?? "(无)"} → ${sessionId.slice(0, 8)}，restart 拉起`);
   await cmdRestart(tmuxName);
 }
 
@@ -1490,14 +1490,14 @@ async function cmdRestart(name?: string) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
       const exited = await gracefulExit(tmuxName);
       if (!exited) {
-        console.log(`[restart] ${tmuxName} 优雅退出超时，kill-window @${dupIds[0]} + 重建`);
+        console.error(`[restart] ${tmuxName} 优雅退出超时，kill-window @${dupIds[0]} + 重建`);
         await tmuxRaw(["kill-window", "-t", dupIds[0]]).catch(() => {});
         await Bun.sleep(500);
         recreated = true;
       }
     } else {
       // 多份 zombie（历史 race / restart 死循环遗留）—— 全部 by-id kill 再 new
-      console.log(`[restart] ${tmuxName} 发现 ${dupIds.length} 个同名 zombie window，全部 kill 后重建`);
+      console.error(`[restart] ${tmuxName} 发现 ${dupIds.length} 个同名 zombie window，全部 kill 后重建`);
       for (const id of dupIds) {
         await tmuxRaw(["kill-window", "-t", id]).catch(() => {});
       }
@@ -1536,7 +1536,7 @@ async function cmdRestart(name?: string) {
     // restart 又会盯回被占用的旧 id）。
     if (!started.ready && started.bgOccupied) {
       const cwd = info.cwd || process.env.HOME || "/";
-      console.log(`[restart] ${tmuxName} 的 session 被 bg agent 占用，改用 --fork-session 重试`);
+      console.error(`[restart] ${tmuxName} 的 session 被 bg agent 占用，改用 --fork-session 重试`);
       const before = await listSessionJsonls(cwd);
       const forkCmd = buildClaudeCommand({
         channelId: info.channelId,
@@ -1559,9 +1559,9 @@ async function cmdRestart(name?: string) {
           reg.agents[tmuxName].sessionId = newId;
           reg.agents[tmuxName].notes = `claude session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
           await saveRegistry(reg);
-          console.log(`[restart] ${tmuxName} fork 出新 session ${newId.slice(0, 8)}，registry 已回写`);
+          console.error(`[restart] ${tmuxName} fork 出新 session ${newId.slice(0, 8)}，registry 已回写`);
         } else {
-          console.log(`[restart] ⚠️ ${tmuxName} fork 成功但未探测到新 session id，registry 未更新`);
+          console.error(`[restart] ⚠️ ${tmuxName} fork 成功但未探测到新 session id，registry 未更新`);
         }
         await bridgeRequest({
           type: "reply",

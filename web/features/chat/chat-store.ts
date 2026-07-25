@@ -963,13 +963,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
     try {
       let res: Response;
-      if (hasFiles) {
-        // multipart：不手动设 Content-Type，浏览器自动带 boundary
+      // multipart：不手动设 Content-Type，浏览器自动带 boundary。抽成函数是因为
+      // 503 重连重试要原样重发一次（FormData 消费过不能复用）。
+      const buildForm = () => {
         const fd = new FormData();
         fd.append("agent", agent);
         fd.append("text", wire);
         for (const f of files!) fd.append("files", f);
-        res = await fetch("/api/chat/send", { method: "POST", body: fd });
+        return fd;
+      };
+      if (hasFiles) {
+        res = await fetch("/api/chat/send", { method: "POST", body: buildForm() });
       } else {
         res = await fetch("/api/chat/send", {
           method: "POST",
@@ -978,6 +982,20 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         });
       }
       if (res.status === 401) return this.gotoLogin();
+      // 503 retryable = agent 活着、只是 channel-server 链路在重连（几秒内自愈）。
+      // 静默退避重试，别弹「已断开」——owner 2026-07-25:「我进 console 看，你那边
+      // 还正在进行着上一轮的对话呢」。
+      for (let attempt = 0; res.status === 503 && attempt < 4; attempt++) {
+        await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
+        res = hasFiles
+          ? await fetch("/api/chat/send", { method: "POST", body: buildForm() })
+          : await fetch("/api/chat/send", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ agent, text: wire }),
+            });
+        if (res.status === 401) return this.gotoLogin();
+      }
       if (!res.ok) {
         // 发送失败（agent 离线→502 / 超限→400 等）：解锁 + 附错误提示，
         // 别让「停止」按钮 + 思考态一直卡死（此前给离线 agent 发消息就会一直转）。
@@ -1171,6 +1189,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.flushPendingText(); // reply 段插入前先落缓冲的叙述文本
     const hasComp = Array.isArray(components) && components.length > 0;
     const hasAtts = Array.isArray(attachments) && attachments.length > 0;
+    // 空 reply 不建段（2026-07-25 owner 报「一堆空的『回复』分隔线」）：上游若发来
+    // 空文本的 chat_message(out)，无条件建段会渲染出「分隔线 + 空白块」的幽灵回复。
+    // 纯附件 / 纯按钮的 reply 是合法的，只丢弃三者皆空的。
+    if (!text?.trim() && !hasComp && !hasAtts) return;
     const last = this.state.messages[this.state.messages.length - 1];
     // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合
     if (last && last.role === "assistant" && !this.nextBubbleBoundary) {

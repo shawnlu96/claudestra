@@ -39,6 +39,7 @@ import {
   paneLooksIdle,
   windowTarget,
   detectRuntimePermissionPrompt,
+  listWindows,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
 import { stopTyping } from "./components.js";
@@ -814,7 +815,21 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const client = deps.clients.get(agent.channelId);
-    if (!client) return apiJson(409, { ok: false, error: `agent "${agent.name}" is offline (no active session)` });
+    if (!client) {
+      // ws 不在 ≠ agent 死了。channel-server 是独立子进程，被顶替/重启时 ws 会短暂
+      // 缺席，而 tmux window 里的 Claude Code 照常跑着上一回合（2026-07-25 owner:
+      // 「提示已断开，我进 console 看你还在进行上一轮对话」）。window 还在就报可重试的
+      // 503，别把「链路重连中」说成「会话不存在」。
+      const alive = (await listWindows().catch(() => [])).includes(agent.name);
+      if (alive) {
+        return apiJson(503, {
+          ok: false,
+          retryable: true,
+          error: `agent "${agent.name}" 消息链路重连中（会话仍在运行），请稍后重试`,
+        });
+      }
+      return apiJson(409, { ok: false, error: `agent "${agent.name}" is offline (no active session)` });
+    }
 
     // body：JSON {text, wait} 或 multipart（text 字段 + files，R5 入站附件）
     let text = "";

@@ -669,11 +669,15 @@ function AssistantBody({
             muted
           />
         ) : seg.kind === "reply" ? (
-          <div key={i}>
-            {i > 0 && <ReplyDivider />}
-            {/* reply 到达即完整,永远直接富文本 */}
-            <TextBlock text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} />
-          </div>
+          // 空 reply 段不渲染（否则是一条「回复」分隔线 + 空白块的幽灵气泡）。
+          // 源头已在 chat-store.setReplyText 拦截，这里兜历史快照里的旧空段。
+          !seg.text?.trim() ? null : (
+            <div key={i}>
+              {i > 0 && <ReplyDivider />}
+              {/* reply 到达即完整,永远直接富文本 */}
+              <TextBlock text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} />
+            </div>
+          )
         ) : (
           <div key={i} className="my-2 space-y-1">
             {seg.tools.map((t, j) =>

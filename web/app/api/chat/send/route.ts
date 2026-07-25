@@ -61,9 +61,13 @@ export async function POST(request: Request) {
     // slash: bridge 走了 tmux 直通（CC 原生解释,无常规回合）——前端据此不进「正在回复」态
     return NextResponse.json({ data: { ok: true, slash: !!r.slash, ccText: r.ccText } });
   } catch (e) {
+    // 503 + retryable = agent 活着、只是消息链路在重连 —— 透传给前端自动重试，
+    // 不能和「真离线」一样报死（owner 2026-07-25 报误弹「已断开」）。
+    const err = e as Error & { status?: number; retryable?: boolean };
+    const retryable = err.retryable === true || err.status === 503;
     return NextResponse.json(
-      { error: `发送失败: ${(e as Error).message}` },
-      { status: 502 }
+      { error: `发送失败: ${err.message}`, retryable },
+      { status: retryable ? 503 : 502 }
     );
   }
 }

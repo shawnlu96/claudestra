@@ -40,8 +40,18 @@ export async function bridgeGet<T = Record<string, unknown>>(
     headers: bridgeAuthHeaders(),
     signal: AbortSignal.timeout(opts?.timeoutMs ?? 10_000),
   });
-  const json = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(json.error || `Bridge ${res.status}`);
+  const json = (await res.json().catch(() => ({}))) as T & { error?: string; retryable?: boolean };
+  if (!res.ok) {
+    // 状态码/可重试标记随 Error 带出去——上层要靠它区分「真离线」和「链路重连中」
+    // （全转成 502 的话，前端只能一律显示"发送失败"）。
+    const err = new Error(json.error || `Bridge ${res.status}`) as Error & {
+      status?: number;
+      retryable?: boolean;
+    };
+    err.status = res.status;
+    err.retryable = json.retryable === true;
+    throw err;
+  }
   return json;
 }
 
@@ -57,7 +67,17 @@ export async function bridgePost<T = Record<string, unknown>>(
     body: JSON.stringify(body ?? {}),
     signal: AbortSignal.timeout(opts?.timeoutMs ?? 60_000),
   });
-  const json = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(json.error || `Bridge ${res.status}`);
+  const json = (await res.json().catch(() => ({}))) as T & { error?: string; retryable?: boolean };
+  if (!res.ok) {
+    // 状态码/可重试标记随 Error 带出去——上层要靠它区分「真离线」和「链路重连中」
+    // （全转成 502 的话，前端只能一律显示"发送失败"）。
+    const err = new Error(json.error || `Bridge ${res.status}`) as Error & {
+      status?: number;
+      retryable?: boolean;
+    };
+    err.status = res.status;
+    err.retryable = json.retryable === true;
+    throw err;
+  }
   return json;
 }
