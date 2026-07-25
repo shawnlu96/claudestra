@@ -36,14 +36,22 @@ Claudestra 是一个多 session 编排器，基于 Claude Code 原生的 **Chann
 src/
   bridge.ts              主入口：Discord client、WebSocket server、事件分发、slash 命令
   bridge/
+    router.ts            v2.0.0+ Envelope/Endpoint 类型 + parseAddress + threadId 助手；v2.6.0+ parseChatId（带 transport 前缀的统一 chat_id 键空间）+ ApiUserEndpoint
     adapters.ts          v2.6.0+ ChatAdapter 接口 + 注册表（出站按 transport 分发，Discord 是第一个 adapter）
-    event-bus.ts         v2.6.0+ 进程内事件总线（tool 调用/文本/状态 → SSE 事件流）
+    event-bus.ts         v2.6.0+ 进程内事件总线（seq + 每 agent 环形缓冲，tool 调用/文本/状态 → SSE 事件流）
     config.ts            共享运行时常量
     components.ts        Discord UI 组件 + typing indicator
     discord-api.ts       Discord API 封装（建/删频道、编辑消息等）
     management.ts        管理按钮/菜单的直接执行处理器（绕过 LLM）
     screenshot.ts        终端截图流水线（ANSI → HTML → PNG）
-    jsonl-watcher.ts     JSONL session 监听 → 流式 tool call 摘要
+    jsonl-watcher.ts     JSONL session 监听 → 流式 tool call 摘要 + assistant 文本流 + Stop 时同步 drain
+    slash-catalog.ts     CC 内置 slash 命令的硬编码清单（挑了 Discord 上好用的那批）
+    slash-registry.ts    运行期发现的 skill 注册表（按 scope）+ 每频道解析器
+    wedge-watcher.ts     检测卡死 >30min 且非空闲的 agent → Discord 告警；v2.7+ 链路哨兵（窗口活着但 channel-server 掉线 >5min → 修复按钮）；v2.14+ 告警同时推 `session_anomaly(kind=link_down)`，web 端也看得到
+    sessions-inventory.ts v2.7+ 机器级中立会话清单：`claude agents --json` + jobs 状态 + registry 对账 → 分身检测
+    session-reconciler.ts v2.7+ 每 10 分钟后台对账：发现新分身 → Discord 告警带清理/收编按钮 + session_anomaly 事件
+    bg-activity-watcher.ts v2.8+ 后台活动追踪：按 agent 会话发现 subagent jsonl 与后台 shell 输出 → 流进各自的子区（ChatAdapter.provisionThread）+ bg_task_* SSE 事件；v2.14+ Web 来源的回合只发事件不建子区
+    archive-sweeper.ts   v2.9+ 每日归档兜底：每 24h 给所有活跃 agent 的会话 jsonl 做快照（幂等 copy-if-larger）——补上崩溃/从未退役这些退役时归档覆盖不到的缺口
   channel-server.ts      每个 session 的 MCP 代理（stdio MCP ↔ Bridge WebSocket）
   manager.ts             Agent 生命周期 + 定时任务 + 版本/更新 CLI（JSON 输出）
   cron.ts                定时任务调度守护进程（launchd 管理）
@@ -55,6 +63,10 @@ src/
     bridge-client.ts     共享 Bridge WebSocket 请求封装
     tmux-helper.ts       共享 tmux 命令封装（tmuxRaw, isIdle, sendLine, …）
     claude-launch.ts     统一 Claude Code 启动命令构造（flags, MCP_NAME, shell 转义）
+    config-store.ts      运行期配置 ~/.claude-orchestrator/config.json（自动更新开关、语言）
+    skills.ts            SKILL.md 发现——user / plugin / project 三个来源 + 硬编码的原生命令
+    jsonl-cost.ts        解析 ~/.claude/projects 的 JSONL → 按模型汇总 token
+    peers.ts             peers.json 数据模型（v2.11+ 只剩 HTTP peer）+ 握手串编解码 + 原子写
     principals.ts        v2.6.0+ API token 身份/scope/限流（~/.claude-orchestrator/principals.json）
     doctor.ts            v2.14+ 只读安装体检，`manager.ts doctor` 的实现（运行时/配置/daemon/bridge/MCP/agent）
     link-policy.ts       v2.14+ channel-server 被 bridge 顶替后该重连还是退出——纯函数，有单测
@@ -69,8 +81,33 @@ src/
 master/
   CLAUDE.md.template     大总管行为指令模板（setup.ts 渲染）
   CLAUDE.md              渲染后的本地副本（gitignored）
-tests/
-  cron.test.ts           Cron 解析器 + 调度器测试套件（46 个用例）
+tests/                     24 个文件 368 个用例——只覆盖纯逻辑；bridge.ts 本身没有隔离单测
+                           （Discord client + ws + peers.json 耦合太重），那部分靠沙箱会话实测兜底
+  agent-stats.test.ts      按 agent 的用量汇总，compact 感知
+  ask-user-question.test.ts TUI 里的 AskUserQuestion 识别 + 按键合成
+  bg-jobs.test.ts          Claude Code bg job 清理配方（roster 根因修复）
+  claude-launch.test.ts    启动 flag 构造：权限模式、effort、模型别名
+  cron.test.ts             Cron 解析器 + 调度器
+  doctor.test.ts           v2.14+ 安装体检：daemon 退出码判定 + 报告排版
+  event-bus.test.ts        v2.6.0+ seq 单调性、每 agent 环形缓冲、订阅者互不影响
+  http-peer.test.ts        v2.11+ HTTP peer 握手串编解码 + 回复提取
+  jsonl-cost.test.ts       JSONL token 用量汇总
+  link-policy.test.ts      v2.14+ channel-server 被顶替后怎么办——「stdio 活着就绝不退出」
+  modal-parser.test.ts     tmux modal 识别
+  net-addr.test.ts         v2.14+ 对外地址探测：CGNAT/RFC1918 边界、绝不返回回环
+  permission-watcher.test.ts 权限弹窗身份识别（去重键）
+  principals.test.ts       v2.6.0+ token 签发 / scope / 限流 / 终端授予
+  principals-snowflake.test.ts v2.14+ Discord ID 校验——占位符变成 principals.json 里
+                           永久假 owner 的链路上唯一的把关点
+  registry.test.ts         v2.9+ registry 字段归一（cwd/dir 兼容）
+  router.test.ts           v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
+  session-archive.test.ts  v2.8+ copy-if-larger 快照语义
+  session-history.test.ts  v2.9+ jsonl → 中立消息：reply 提取、meta 过滤、翻页
+  sessions-inventory.test.ts v2.7+ 分身检测 / 会话对账
+  skills.test.ts           SKILL.md 发现
+  slash-registry.test.ts   slash 命令注册表的按频道解析
+  stats-resets.test.ts     用量窗口重置检测
+  web-gateway.test.ts      v2.13+ ws 控制面的跨源判定（drive-by RCE 防护）
 install.sh               一键安装脚本
 SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 ```

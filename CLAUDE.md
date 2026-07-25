@@ -96,14 +96,34 @@ src/
 master/
   CLAUDE.md.template     Master agent instruction template (rendered by setup.ts)
   CLAUDE.md              Rendered local copy (git-ignored)
-tests/
-  cron.test.ts           Cron parser + scheduler test suite
-  jsonl-cost.test.ts     JSONL token-usage rollup
-  modal-parser.test.ts   Tmux modal detection
-  http-peer.test.ts      v2.11+ HTTP peer handshake encode/parse + reply extraction
-  router.test.ts         v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
-  skills.test.ts         SKILL.md discovery
-  slash-registry.test.ts Slash command registry per-channel resolution
+tests/                     368 cases across 24 files — pure logic only; bridge.ts itself has no
+                           isolated unit tests (Discord client + ws + peers.json coupling), live
+                           verification through a sandbox session is the coverage there.
+  agent-stats.test.ts      Per-agent usage rollup, compact-aware
+  ask-user-question.test.ts AskUserQuestion detection in the TUI + keystroke synthesis
+  bg-jobs.test.ts          Claude Code bg job cleanup recipe (roster root-fix)
+  claude-launch.test.ts    Launch-flag builder: permission modes, effort, model aliases
+  cron.test.ts             Cron parser + scheduler
+  doctor.test.ts           v2.14+ install health-check: daemon exit classification + report formatting
+  event-bus.test.ts        v2.6.0+ seq monotonicity, per-agent ring buffer, subscriber isolation
+  http-peer.test.ts        v2.11+ HTTP peer handshake encode/parse + reply extraction
+  jsonl-cost.test.ts       JSONL token-usage rollup
+  link-policy.test.ts      v2.14+ what channel-server does when displaced — "stdio alive ⇒ never exit"
+  modal-parser.test.ts     Tmux modal detection
+  net-addr.test.ts         v2.14+ reachable-address detection: CGNAT/RFC1918 boundaries, no loopback
+  permission-watcher.test.ts Permission-modal identity (dedupe key)
+  principals.test.ts       v2.6.0+ token issue / scope / rate limit / terminal grant
+  principals-snowflake.test.ts v2.14+ Discord ID validation — the only gate stopping a placeholder
+                           from becoming a permanent fake owner in principals.json
+  registry.test.ts         v2.9+ registry field normalization (cwd/dir compat)
+  router.test.ts           v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
+  session-archive.test.ts  v2.8+ copy-if-larger snapshot semantics
+  session-history.test.ts  v2.9+ jsonl → neutral messages: reply extraction, meta filtering, paging
+  sessions-inventory.test.ts v2.7+ doppelganger detection / session reconciliation
+  skills.test.ts           SKILL.md discovery
+  slash-registry.test.ts   Slash command registry per-channel resolution
+  stats-resets.test.ts     Usage-window reset detection
+  web-gateway.test.ts      v2.13+ cross-origin verdict for the ws control plane (drive-by RCE guard)
 install.sh               One-line installer
 SETUP.md                 User-facing installation guide
 ```
