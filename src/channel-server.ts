@@ -434,9 +434,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "array",
             description: `Optional UI components (rendered on both Discord and the Web client). Each item is a row:
 - Button row: { "type": "buttons", "buttons": [{ "id": "unique_id", "label": "Click me", "style": "primary|secondary|success|danger", "emoji": "optional emoji" }] }
-- Select menu: { "type": "select", "id": "unique_id", "placeholder": "Choose...", "options": [{ "label": "Option 1", "value": "val1", "description": "optional" }] }
+- Select menu (pick one): { "type": "select", "id": "unique_id", "placeholder": "Choose...", "options": [{ "label": "Option 1", "value": "val1", "description": "optional" }] }
+- Multi-select (pick several, then submit): { "type": "multiselect", "id": "unique_id", "placeholder": "Pick any", "options": [...same shape...], "min": 1, "max": 3, "submitLabel": "Submit" }
 When a user clicks a button, you'll receive a channel message: [button:unique_id]
-When a user selects from a menu, you'll receive: [select:unique_id:selected_value]`,
+When a user picks from a single-select menu: [select:unique_id:selected_value]
+When a user submits a multi-select: [select:unique_id:val1,val2] — same prefix, values comma-separated.
+Prefer multiselect over several yes/no buttons when the choices are not mutually exclusive:
+one round trip instead of many.`,
           },
           files: {
             type: "array",

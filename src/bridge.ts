@@ -2481,13 +2481,18 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         return;
       }
 
-      // 未知菜单 → 转发给 LLM
+      // 未知菜单 → 转发给 LLM。
+      // v2.14+ 多选：Discord 的 max_values>1 会一次交回多个值，全部带上（逗号分隔）。
+      // 单选保持原样 `[select:id:value]`，agent 侧的老分支不受影响。
       const client = clients.get(channelId);
       if (!client) return;
       startTypingWithSafety(channelId);
+      const picked = interaction.values.length > 1
+        ? interaction.values.join(",")
+        : value;
       client.ws.send(JSON.stringify({
         type: "message",
-        content: `[select:${id}:${value}]`,
+        content: `[select:${id}:${picked}]`,
         meta: { chat_id: channelId, message_id: interaction.message?.id || "", user: interaction.user.username, user_id: interaction.user.id, ts: new Date().toISOString() },
       }));
       return;

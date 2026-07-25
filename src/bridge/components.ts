@@ -84,13 +84,22 @@ export function buildComponents(
         row.addComponents(button);
       }
       rows.push(row);
-    } else if (comp.type === "select") {
+    } else if (comp.type === "select" || comp.type === "multiselect") {
       const row =
         new ActionRowBuilder<MessageActionRowComponentBuilder>();
+      const opts = comp.options || [];
       const menu = new StringSelectMenuBuilder()
         .setCustomId(comp.id)
-        .setPlaceholder(comp.placeholder || "选择...");
-      for (const opt of comp.options || []) {
+        .setPlaceholder(comp.placeholder || (comp.type === "multiselect" ? "可多选…" : "选择..."));
+      // v2.14+ 多选：Discord 原生支持 max_values>1，选完点空白即提交，不需要额外的
+      // 提交按钮（web 端才需要，那边是 checkbox + 提交）。min 默认 1——设 0 会允许
+      // 交空集，而调用方拿到空数组基本没法处理。
+      if (comp.type === "multiselect") {
+        const max = Math.min(Number(comp.max) || opts.length || 1, opts.length || 1, 25);
+        const min = Math.max(1, Math.min(Number(comp.min) || 1, max));
+        menu.setMinValues(min).setMaxValues(max);
+      }
+      for (const opt of opts) {
         menu.addOptions({
           label: opt.label,
           value: opt.value,

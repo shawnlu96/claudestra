@@ -44,7 +44,21 @@ export interface WebSelectOption {
 }
 export type WebComponentRow =
   | { type: "buttons"; buttons: WebButton[] }
-  | { type: "select"; id: string; placeholder?: string; options: WebSelectOption[] };
+  | { type: "select"; id: string; placeholder?: string; options: WebSelectOption[] }
+  /** 多选 + 一次提交（owner 2026-07-25）。回投格式与单选对齐，只是值是逗号分隔的：
+   *  `[select:<id>:<v1>,<v2>]`——agent 侧一套解析吃 Discord 与 web 两端。 */
+  | {
+      type: "multiselect";
+      id: string;
+      placeholder?: string;
+      options: WebSelectOption[];
+      /** 至少选几项（默认 1，不允许交空集） */
+      min?: number;
+      /** 最多选几项（默认不限，即全部） */
+      max?: number;
+      /** 提交按钮文案（默认「提交」） */
+      submitLabel?: string;
+    };
 
 export type WebStreamEvent =
   | { t: "status"; status: "running" | "done" }
