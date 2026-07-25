@@ -2,7 +2,8 @@
 
 > **English** · [简体中文](./design-multi-frontend.md)
 
-> Status: **implemented** (A + B + C1, finished in an all-nighter on 2026-07-09, batched for release in v2.6.0)
+> Status: **implemented and released** — A + B + C1 were finished in an all-nighter on 2026-07-09 and shipped in **v2.6.0**.
+> This doc covers the multi-frontend architecture from v2.6.0 onwards, including later additions (§12's Claude Code agents-mode adaptation landed in v2.7; decision entries in §7 gain Updates as things change).
 > Deviations between the implementation and the design are recorded in §11. C2 (full absorption of Discord) proceeds incrementally per D8 and is not a scheduled project.
 > Goal: demote Discord from "the face of the system" to "the first adapter". Decouple the core from any chat platform so that a web frontend, a Telegram bot, and a plain HTTP integration are all **consumers of the same interface**, and adding a new frontend requires no change to the core.
 
@@ -149,7 +150,7 @@ The authorization table is unified as a per-principal agent whitelist (`"*"` = e
 
 - The owner's Discord id migrates out of `.env` (reading `.env` is kept as a fallback so existing installs don't break).
 - **Management capabilities follow `role`**: only `role: "owner"` can create/kill/cron; a token has conversation rights only by default. Turning the management surface into an API is future work (D6 unchanged), but the authorization model gets its `role` field now to avoid a later refactor.
-- Rate limit of 30 req/min per principal (HTTP ingress).
+- Rate limit of **120 req/min** per principal (HTTP ingress; a 60s in-memory sliding window, reset on bridge restart). The design's initial value was 30, but heavy web usage (an SSE reconnect storm: event stream + history + list polling + pendings, all at once) blew through it and triggered a 429 loop, so it was raised to 120. It is currently hardcoded (`SlidingWindowLimiter(120)`), with no env switch.
 
 **⚠️ Shared-context risk (gap R1, the most important item)**: token scope controls "whether you can talk to a given agent"; it has no control over "what is already in that agent's context". A Claude Code session has one context — if you open an agent the owner uses daily to an external token, an outsider's question may cause the agent to recite confidential content from the owner's earlier conversation; conversely, external input also pollutes the owner's working context. This matches the philosophy of peer collaboration: **exposure must be explicit and directed at a dedicated agent**. Three concrete measures:
 1. Both the docs and the `token-add` CLI output print a warning: "only expose an agent created specifically for this purpose";
@@ -195,7 +196,7 @@ Standard SSE: `id:` = seq, `data:` = the BridgeEvent JSON, a 30s heartbeat comme
 
 ### 4.4 Tightening the bind
 
-`Bun.serve` currently binds 0.0.0.0 by default (`/hook` and `/stats` are already exposed to the LAN). Change it to `hostname: "127.0.0.1"` and add a new env var `BRIDGE_BIND` to open it up. Exposing to the public internet = the user brings their own reverse proxy (Caddy / Tailscale Funnel); TLS and network boundaries are not the bridge's job. The release notes should warn users who run a custom `BRIDGE_URL` across machines.
+Before this change `Bun.serve` bound 0.0.0.0 by default (`/hook` and `/stats` were exposed to the LAN). It was changed to `hostname: "127.0.0.1"` (today it binds the loopback only by default), with a new env var `BRIDGE_BIND` to open it up. Exposing to the public internet = the user brings their own reverse proxy (Caddy / Tailscale Funnel); TLS and network boundaries are not the bridge's job. The release notes should warn users who run a custom `BRIDGE_URL` across machines.
 
 ## 5. Phase B — the inbound HTTP API (the backend for the web prototype)
 
@@ -250,6 +251,8 @@ history   not done — the prototype is live-only; history replay is future work
 
 The web page itself = a static page (it can simply be returned from the bridge's `GET /`, or deployed separately); it has **no backend of its own**.
 
+> **Update (v2.9)**: the "history — not done" line above has been overturned — a read-only history API has landed: `GET /api/v1/agents/:name/history` lists an agent's sessions (live + archived snapshots merged), and `GET /api/v1/agents/:name/history/:sessionId` returns paginated neutral messages (`?limit=100&before=<seq>` pages backwards, `?subagent=agent-xxx` reads a subagent conversation). Parsing lives in `src/lib/session-history.ts`. The authoritative data is still the jsonl (D5 unchanged, there is still no event persistence); the endpoints are only a read-only parsing layer on top of it.
+
 ## 6. Phase C — the outbound abstraction and absorbing Discord
 
 ### C1 (a small step, done first): deliverToUser dispatches by transport
@@ -291,6 +294,7 @@ The Discord logic still living in `bridge.ts` (inbound `messageCreate`, slash co
 - **D4 leave peer collaboration alone**: the trust model of `#agent-exchange` is Discord channel membership, which is a feature, not coupling.
   - **Update (v2.11)**: this item is void — the Discord peer mechanism (including `#agent-exchange`) has been removed entirely, and cross-instance collaboration now uses HTTP peers built on this API (mutually issued scoped tokens); see `docs/design-http-peers.md`.
 - **D5 no persistent event storage**: live goes over the bus, history reads the jsonl (the pure library already exists). History replay in the web version is future work.
+  - **Update (v2.9)**: the "history replay is future work" clause is void — the read-only history API has landed (see the Update in §5.7). D5's core conclusion stands: there is still no persistent event store; history is parsed on demand from the jsonl.
 - **D6 the management surface stays out of the API (v1)**: but the principals authorization model carries a `role` field now, reserving room for a future management API.
 - **D7 path versioning `/api/v1/`** plus **three additive-only schemas** (NeutralMessage / NeutralComponent / BridgeEvent): this is our compatibility promise to frontend authors.
 - **D8 C2 absorption is not a scheduled project**: migrate gradually alongside day-to-day changes, avoiding a big bang.

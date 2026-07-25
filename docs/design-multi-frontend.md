@@ -2,7 +2,9 @@
 
 > [English](./design-multi-frontend.en.md) · **简体中文**
 
-> 状态：**已实现**（A + B + C1，2026-07-09 通宵迭代完成，攒批待发 v2.6.0）
+> 状态：**已实现并发布**——A + B + C1 于 2026-07-09 通宵迭代完成，随 **v2.6.0** 发布。
+> 本文覆盖 v2.6.0 起的多前端架构，并含后续版本的增补（§12 的 Claude Code agents 模式
+> 适配随 v2.7 落地；§7 的决策条目按需追加 Update）。
 > 实现与设计的偏差在 §11 记录。C2（Discord 全面收编）按 D8 渐进进行，不立项。
 > 目标：Discord 从「系统的脸」降级为「第一个 adapter」。核心与任何聊天平台解耦，
 > 使 Web 前端、Telegram bot、纯 HTTP 集成都是**同一套接口的消费者**，接入新前端
@@ -150,7 +152,10 @@ principal =  discord:<userId>   ← 现 ALLOWED_USER_IDS，迁移为此形态
 
 - owner 的 Discord id 从 .env 迁入（.env 保留读取作为 fallback，不 break 现有安装）。
 - **管理能力按 role 走**：`role: "owner"` 才能 create/kill/cron；token 默认只有会话权。管理面 API 化是 future（D6 不变），但授权模型现在就分出 role 字段，避免以后重构。
-- 每 principal 限流 30 req/min（HTTP 入口）。
+- 每 principal 限流 **120 req/min**（HTTP 入口，60s 内存滑动窗口，bridge 重启清零）。
+  设计初值是 30，实测 web 端重度使用（SSE 重连风暴：连流 + 历史 + 列表轮询 + pending
+  一整套）会打爆并循环触发 429，已提到 120。当前为源码硬编码（`SlidingWindowLimiter(120)`），
+  无 env 开关。
 
 **⚠️ 共享上下文风险（遗漏补遗 R1，最重要的一条）**：token scope 控制的是「能不能
 跟某 agent 说话」，管不了「agent 上下文里已有什么」。Claude Code 一个 session 一份
@@ -206,8 +211,8 @@ Phase B 后同逻辑挂 `/api/v1/events`，token 鉴权 + 按 principal 的 agen
 
 ### 4.4 绑定收紧
 
-`Bun.serve` 现在默认绑 0.0.0.0（/hook /stats 已暴露内网）。改 `hostname: "127.0.0.1"`，
-新增 env `BRIDGE_BIND` 放开。对公网暴露 = 用户自己上反代（Caddy / Tailscale Funnel），
+改动前 `Bun.serve` 默认绑 0.0.0.0（/hook /stats 暴露在内网）。已改为
+`hostname: "127.0.0.1"`（现状：默认只绑回环），并新增 env `BRIDGE_BIND` 放开。对公网暴露 = 用户自己上反代（Caddy / Tailscale Funnel），
 TLS 与网络边界不是 bridge 职责。release notes 提醒自定义 BRIDGE_URL 跨机器的用户。
 
 ## 5. Phase B — 入站 HTTP API（Web prototype 的后端）
@@ -279,6 +284,13 @@ waiter**：还挂着 → 用 drain 捕获的 assistant_text resolve，响应标
 
 网页本身 = 一个静态页（可以就放 bridge 的 `GET /` 返回，也可以独立部署），**没有独立后端**。
 
+> **Update（v2.9）**：上表「历史 不做」这一行已被推翻——只读历史 API 已落地：
+> `GET /api/v1/agents/:name/history` 列该 agent 的会话（live + archive 快照合并），
+> `GET /api/v1/agents/:name/history/:sessionId` 返回分页的中性消息
+> （`?limit=100&before=<seq>` 向前翻页，`?subagent=agent-xxx` 读子 agent 会话）。
+> 解析在 `src/lib/session-history.ts`。权威数据仍在 jsonl（D5 不变，仍无事件持久化），
+> 端点只是它之上的只读解析层。
+
 ## 6. Phase C — 出站抽象与 Discord 收编
 
 ### C1（小步，先行）：deliverToUser 按 transport 分发
@@ -328,6 +340,7 @@ async function deliverToUser(env, to) {
 - **D4 peer 协作不动**：`#agent-exchange` 的信任模型就是 Discord 频道成员资格，是特性不是耦合。
   - **Update（v2.11）**：本条已失效——Discord peer 机制（含 `#agent-exchange`）整体移除，跨实例协作改为基于本 API 的 HTTP peer（互签 scoped token），见 `docs/design-http-peers.md`。
 - **D5 无持久化事件存储**：实时走 bus，历史读 jsonl（纯库已有）。网页版历史回放是 future。
+  - **Update（v2.9）**：「历史回放是 future」这半句已作废——只读历史 API 已落地（见 §5.7 的 Update）。D5 的核心结论不变：仍然没有持久化事件存储，历史依旧是在 jsonl 之上现读现解析。
 - **D6 管理面不进 API（v1）**：但 principals 授权模型现在就带 role 字段，为 future 管理 API 留位。
 - **D7 路径版本化 `/api/v1/`** + **三个 schema additive-only**（NeutralMessage / NeutralComponent / BridgeEvent）：这是对前端作者的兼容承诺。
 - **D8 C2 收编不立项**：跟随日常改动渐进迁移，避免大爆炸。

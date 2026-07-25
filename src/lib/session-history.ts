@@ -31,7 +31,8 @@ export interface HistoryToolCall {
  *  形状与 bridge NeutralMessage 的 components 对齐，历史里原样透传给前端渲染。 */
 export type ReplyComponentRow =
   | { type: "buttons"; buttons: { id: string; label: string; style?: string; emoji?: string }[] }
-  | { type: "select"; id: string; placeholder?: string; options: { label: string; value: string; description?: string }[] };
+  | { type: "select"; id: string; placeholder?: string; options: { label: string; value: string; description?: string }[] }
+  | { type: "multiselect"; id: string; placeholder?: string; min?: number; max?: number; submitLabel?: string; options: { label: string; value: string; description?: string }[] };
 
 export interface HistoryMessage {
   /** jsonl 行号（0-based），分页锚点，同一文件内稳定 */
@@ -84,7 +85,7 @@ function sanitizeComponents(raw: unknown): ReplyComponentRow[] {
           ...(typeof b.emoji === "string" ? { emoji: b.emoji } : {}),
         }));
       if (buttons.length) out.push({ type: "buttons", buttons });
-    } else if (r.type === "select" && typeof r.id === "string" && Array.isArray(r.options)) {
+    } else if ((r.type === "select" || r.type === "multiselect") && typeof r.id === "string" && Array.isArray(r.options)) {
       const options = r.options
         .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
         .filter((o) => typeof o.label === "string" && typeof o.value === "string")
@@ -94,10 +95,18 @@ function sanitizeComponents(raw: unknown): ReplyComponentRow[] {
           ...(typeof o.description === "string" ? { description: o.description } : {}),
         }));
       if (options.length) {
+        // v2.14+ multiselect 与 select 同构，只多 min/max/submitLabel 三个可选字段。
+        // ⚠ 这里漏认一种类型的后果不是「样式不对」而是**整组交互从历史里消失**——
+        // 刷新页面后按钮就没了（owner 2026-07-25 实报「哪有多选按钮」）。
         out.push({
-          type: "select",
+          type: r.type as "select" | "multiselect",
           id: r.id,
           ...(typeof r.placeholder === "string" ? { placeholder: r.placeholder } : {}),
+          ...(r.type === "multiselect" && typeof r.min === "number" ? { min: r.min } : {}),
+          ...(r.type === "multiselect" && typeof r.max === "number" ? { max: r.max } : {}),
+          ...(r.type === "multiselect" && typeof r.submitLabel === "string"
+            ? { submitLabel: r.submitLabel }
+            : {}),
           options,
         });
       }

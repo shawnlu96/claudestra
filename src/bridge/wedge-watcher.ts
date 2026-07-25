@@ -20,6 +20,7 @@ import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
 import { getJsonlMtime } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
+import { emitEvent } from "./event-bus.js";
 
 const POLL_INTERVAL_MS = 5 * 60_000;     // 每 5 分钟扫一次
 const WEDGE_THRESHOLD_MS = 30 * 60_000;  // 30 分钟没变 + claude 在跑但非 idle → 卡死
@@ -81,6 +82,21 @@ async function checkLink(
   const minutes = Math.round((now - since) / 60_000);
   console.log(`🔗 ${agentName} 链路断开 ${minutes} 分钟（窗口活着但 channel-server 不在线）`);
   recordMetric("agent_link_down", { channelId, agent: agentName, durationMs: now - since });
+  // v2.14+ 也推 SSE。此前这条告警**只发 Discord 频道** —— 而 Web 端用户恰恰是最
+  // 需要它的那批人：MCP 一断，agent 既收不到消息也发不出回复，Web 界面上却没有
+  // 任何提示，只能干等（owner 2026-07-25 连续踩了一整天）。
+  // 类型用 session_anomaly：它的注释里本来就写了「链路掉线」，只是一直没实现。
+  emitEvent({
+    agent: agentName,
+    chatId: channelId,
+    type: "session_anomaly",
+    data: {
+      kind: "link_down",
+      minutes,
+      since: new Date(since).toISOString(),
+      hint: "tmux 窗口里 Claude Code 在跑，但 channel-server 没连上 bridge —— 消息进不来也出不去。重启该 agent 可修复。",
+    },
+  });
   try {
     const ch = (await discord.channels.fetch(channelId)) as TextChannel;
     const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");

@@ -45,9 +45,9 @@ Bridge  (bun, 默认 127.0.0.1:3847)     ← 你唯一的后端
   bun src/manager.ts token-list / token-revoke <name>
   ```
 - **Scope**：token 带 per-agent 白名单，`*` = 全部。scope 外的 agent 一律 403。agent 名双向兼容（`worker` 和 `agent-worker` 等价）。
-- 限流：30 req/min per token（SSE 长连接不占）。
+- 限流：120 req/min per token（60s 滑动窗口，源码硬编码，无 env 开关；SSE 长连接只在建连时算一次）。
 - **Mirror**：通过 API 发给 agent 的消息，默认会镜像一份到该 agent 的 Discord 频道（审计用）。`token-add --no-mirror` 可关。
-- 顶层 `/stats` 和 `/events`（不带 `/api/v1` 前缀）是**本机免鉴权版** —— bridge 默认只 bind `127.0.0.1`，信任本机。部署形态见 §8。
+- 顶层 `/stats` 和 `/events`（不带 `/api/v1` 前缀）是**本机免鉴权版** —— bridge 默认只 bind `127.0.0.1`，信任本机。部署形态见 §7。
 
 ## 4. API 全景
 

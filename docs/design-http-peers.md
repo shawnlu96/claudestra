@@ -14,7 +14,10 @@ scope、同步 wait / thread 轮询、审计镜像、history API。HTTP peer 不
 是同一条路。Discord peer 的全部复杂度（频道 scoping、bot 权限矩阵、HTML 注释编码
 PeerEvent、#agent-exchange 共享信道、[EOT] 防 ack 循环）在 HTTP 模型下**不存在**。
 
-| 关注点 | Discord peer（v1.9 现状） | HTTP peer（本设计） |
+下表对比的是**换掉它的理由**——Discord peer 那一列是 v1.9–v2.10 的历史方案，
+已在 v2.11 整体移除，不再是可选路径：
+
+| 关注点 | Discord peer（v1.9–v2.10，**已移除**） | HTTP peer（本设计，唯一现存传输） |
 |---|---|---|
 | 传输 | 共享 guild 的 #agent-exchange | HTTPS/Tailscale 直连对方 bridge |
 | 权限 | 频道权限 + exposures 双层 | token scope 单层（`agents` 白名单） |
@@ -34,7 +37,8 @@ interface HttpPeer {
   addedAt: string;
   disabled?: boolean;
 }
-// PeersData 新增 httpPeers?: HttpPeer[]；原 Discord 字段全保留（并存不迁移）
+// PeersData 新增 httpPeers?: HttpPeer[]。
+// （设计时保留了原 Discord 字段并存；v2.11 落地时它们随 Discord peer 机制一起删除了）
 ```
 
 Principal 增量：`peer?: string`（peer 名）。签给 peer 的 token 打上此标记，
@@ -59,8 +63,9 @@ B: bun src/manager.ts peer-http-test shawn   # 双方各测一次连通
 
 ## 4. 出站（send_to_agent 对 agent 透明）
 
-target 语法不变（`x@peer` / `peer:peer.x`）。解析顺序：**httpPeers 名字命中 →
-走 HTTP；否则落回 Discord capabilities 老路**（同名时 HTTP 优先）。
+target 语法不变（`x@peer` / `peer:peer.x`）。解析：**httpPeers 名字命中 → 走 HTTP；
+未命中即失败并报告调用方**——v2.11 起没有回落路径（原先的 Discord capabilities
+老路随 Discord peer 机制一并移除）。
 
 新模块 `src/bridge/http-peer.ts`：
 
@@ -96,7 +101,7 @@ wait resolver、mirror 审计、history 记录**全部现成**。唯一改动：
 ## 7. 测试策略（owner：流程难测，想一套办法）
 
 1. **纯逻辑单测**（`tests/http-peer.test.ts`）：邀请/回执串 encode/parse 往返、
-   target 解析优先级（http 命中/落回 Discord/同名冲突）、pending 轮询状态机
+   target 解析优先级（http 命中/同名冲突；「落回 Discord」一项随 v2.11 移除该机制作废）、pending 轮询状态机
    （注入 fake fetch）、HttpPeer 读写兼容（老 peers.json 无 httpPeers 字段）。
 2. **Self-peer 回环（杀手锏）**：把本机注册成自己的 http peer
    （baseUrl=127.0.0.1:3847，token 真签）→ agent-temp `send_to_agent("router@self")`
@@ -107,7 +112,8 @@ wait resolver、mirror 审计、history 记录**全部现成**。唯一改动：
 
 ## 8. 兼容与范围
 
-- Discord peer 机制完整保留（有共享 guild 的场景仍可用）；文档标注 HTTP 为推荐。
+- Discord peer 机制已在 v2.11 整体移除（#agent-exchange 共享信道、exposures、
+  bot-to-bot 路由全部删除，不再是可用路径）；HTTP peer 是唯一的跨实例传输。
 - v1 范围：CLI 全流程 + bridge transport + 注入头 + 测试。Web 管理页（可视化
   暴露/历史）v2 再做——CLI 先把地基打对。
 - 版本：v2.11.0（minor，新用户能力）。

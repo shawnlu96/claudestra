@@ -45,9 +45,9 @@ Storage design (owner's call — don't propose adding a database): **conversatio
   bun src/manager.ts token-list / token-revoke <name>
   ```
 - **Scope**: a token carries a per-agent whitelist, `*` = all. Any agent outside the scope gets a 403. Agent names are matched both ways (`worker` and `agent-worker` are equivalent).
-- Rate limit: 30 req/min per token (long-lived SSE connections don't count).
+- Rate limit: 120 req/min per token (a 60s sliding window, hardcoded with no env switch; a long-lived SSE connection only counts once, when it is established).
 - **Mirror**: a message sent to an agent through the API is by default mirrored into that agent's Discord channel (for auditing). `token-add --no-mirror` turns it off.
-- The top-level `/stats` and `/events` (without the `/api/v1` prefix) are the **unauthenticated local-machine versions** — the bridge only binds `127.0.0.1` by default and trusts the local machine. See §8 for deployment shapes.
+- The top-level `/stats` and `/events` (without the `/api/v1` prefix) are the **unauthenticated local-machine versions** — the bridge only binds `127.0.0.1` by default and trusts the local machine. See §7 for deployment shapes.
 
 ## 4. API overview
 

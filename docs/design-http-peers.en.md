@@ -10,7 +10,9 @@ Owner, 2026-07-19: "Pull the Discord-dependent parts out of peer collaboration �
 
 The v2.6 multi-frontend API already solved every hard problem peer collaboration has: Bearer-token auth, per-agent scope, synchronous `wait` / thread polling, audit mirroring, history API. HTTP peers invent no new protocol — the remote instance holds a token I issued and calls my `/api/v1/agents/:name/messages`, exactly the same path the web UI uses. The entire complexity of Discord peers (channel scoping, bot permission matrices, encoding PeerEvent in HTML comments, the shared `#agent-exchange` channel, `[EOT]` markers to prevent ack loops) simply **does not exist** in the HTTP model.
 
-| Concern | Discord peer (v1.9, current) | HTTP peer (this design) |
+The table below records **why we replaced it** — the Discord peer column is the historical v1.9–v2.10 approach, removed entirely in v2.11, and is no longer an available path:
+
+| Concern | Discord peer (v1.9–v2.10, **removed**) | HTTP peer (this design, the only remaining transport) |
 |---|---|---|
 | Transport | `#agent-exchange` in a shared guild | HTTPS/Tailscale direct to the other bridge |
 | Permissions | Channel permissions + exposures, two layers | Token scope, one layer (`agents` whitelist) |
@@ -30,7 +32,9 @@ interface HttpPeer {
   addedAt: string;
   disabled?: boolean;
 }
-// PeersData gains httpPeers?: HttpPeer[]; all existing Discord fields are kept (coexist, no migration)
+// PeersData gains httpPeers?: HttpPeer[].
+// (The design kept the existing Discord fields alongside; they were removed together with
+//  the Discord peer mechanism when v2.11 shipped.)
 ```
 
 Principal delta: `peer?: string` (the peer name). Tokens issued to a peer carry this marker, and the inbound injected header renders as a "peer request" instead of a "web user" based on it.
@@ -54,7 +58,7 @@ B: bun src/manager.ts peer-http-test shawn   # each side tests connectivity once
 
 ## 4. Outbound (transparent to the agent using `send_to_agent`)
 
-Target syntax is unchanged (`x@peer` / `peer:peer.x`). Resolution order: **a name hit in `httpPeers` → go over HTTP; otherwise fall back to the old Discord capabilities path** (HTTP wins on a name collision).
+Target syntax is unchanged (`x@peer` / `peer:peer.x`). Resolution: **a name hit in `httpPeers` → go over HTTP; a miss fails and is reported back to the caller** — as of v2.11 there is no fallback path (the old Discord capabilities route was removed along with the Discord peer mechanism).
 
 New module `src/bridge/http-peer.ts`:
 
@@ -83,12 +87,12 @@ The remote POSTs to my messages endpoint with Bearer = the token I issued. Scope
 
 ## 7. Test strategy (owner: "the flow is hard to test, come up with an approach")
 
-1. **Pure logic unit tests** (`tests/http-peer.test.ts`): invite/receipt string encode/parse round-trip, target resolution priority (HTTP hit / fall back to Discord / name collision), the pending polling state machine (inject a fake `fetch`), `HttpPeer` read/write compatibility (an old `peers.json` with no `httpPeers` field).
+1. **Pure logic unit tests** (`tests/http-peer.test.ts`): invite/receipt string encode/parse round-trip, target resolution priority (HTTP hit / name collision; the "fall back to Discord" case is void since v2.11 removed that mechanism), the pending polling state machine (inject a fake `fetch`), `HttpPeer` read/write compatibility (an old `peers.json` with no `httpPeers` field).
 2. **Self-peer loopback (the killer trick)**: register this machine as its own HTTP peer (`baseUrl=127.0.0.1:3847`, token genuinely signed) → `agent-temp` calls `send_to_agent("router@self")` → outbound HTTP → inbound API → injected into `router` → `router` replies → `wait` returns → pushback to `temp`. **One machine verifies the whole chain with real networking, real auth, and bidirectional routing**, no second deployment needed.
 3. **Fault injection**: wrong token (403), stopped agent (409), unreachable port (network error), `wait` timeout → thread polling delivers. All done with `agent-temp`/`router`, never touching real workers.
 
 ## 8. Compatibility and scope
 
-- The Discord peer mechanism is fully retained (still usable when both sides share a guild); the docs mark HTTP as the recommended option.
+- The Discord peer mechanism was removed entirely in v2.11 (the shared `#agent-exchange` channel, exposures, and bot-to-bot routing are all gone; it is no longer an available path); HTTP peers are the only cross-instance transport.
 - v1 scope: the full CLI flow + bridge transport + injected header + tests. A web management page (visual exposure/history) comes in v2 — get the foundation right in the CLI first.
 - Version: v2.11.0 (minor, new user-facing capability).

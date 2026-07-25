@@ -28,7 +28,8 @@ const SSE_HEADERS = {
  *   question              → {t:"ask"}；question_cleared → {t:"ask-cleared"}（fork 事件）
  *   auto_deny             → {t:"text", "🚫 …"}
  *   bg_task_started/update/completed → {t:"bg-start"/"bg-update"/"bg-done"}（后台任务面板）
- *   其余（turn_duration / session_anomaly）v1 暂不消费
+ *   session_anomaly(kind=link_down) → {t:"text", "⚠️ 链路已断开 …"}
+ *   其余（turn_duration / 其它 session_anomaly 子类型）v1 暂不消费
  *
  * 连流后先补拉 GET /api/v1/agents/:name/pending —— question 事件可能发生在
  * 订阅之前（切会话/刷新/回前台），对应旧 web-hub 的 pendingInteraction replay。
@@ -139,6 +140,21 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
             ? `🚫 An action was blocked by auto mode${d.reason ? `: ${String(d.reason)}` : ""}`
             : `🚫 一个操作被 auto 模式拦下${d.reason ? `：${String(d.reason)}` : ""}`,
       };
+    // [fork] 链路掉线告警(v2.14+):tmux 里 Claude Code 活着,但 channel-server
+    // 没连上 bridge —— 消息进不来也出不去。此前这条只发 Discord 频道,Web 端
+    // 用户一无所知,只能干等(owner 2026-07-25 连踩一天)。翻成一条醒目的系统
+    // 文本,复用现有渲染管线。其它 session_anomaly 子类型仍不消费。
+    case "session_anomaly": {
+      if (d.kind !== "link_down") return null;
+      const mins = Number(d.minutes) || 0;
+      return {
+        t: "text",
+        text:
+          lang === "en"
+            ? `⚠️ Link down for ${mins} min — Claude Code is running in tmux, but its channel-server is not connected to the bridge, so messages cannot get in or out. Restarting this agent fixes it.`
+            : `⚠️ 链路已断开 ${mins} 分钟 —— tmux 里 Claude Code 还在跑，但它的 channel-server 没连上 bridge，消息进不来也出不去。重启这个 agent 可修复。`,
+      };
+    }
     case "bg_task_started":
       return {
         t: "bg-start",

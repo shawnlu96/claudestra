@@ -130,7 +130,15 @@ export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
 export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string }>();
 /** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
 export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
-/** per-token 限流器（30 req/min，内存态） */
+/**
+ * API 每 token 每分钟配额。**唯一真值** —— 限流器与 429 文案都从这里取。
+ * 曾经限流器写 120、文案硬写 30、三份设计文档各说各话（30/30/120），
+ * 撞限流的人拿到的是个假数字。
+ * 120 是 2026-07-14 从 30 提上来的：web 重度使用下 SSE 重连风暴（每次重连烧
+ * 连流+历史+列表轮询+pending 一整套）会打爆 30，触发 429 循环 → 直播流死掉。
+ */
+export const API_RATE_LIMIT_PER_MIN = 120;
+/** per-token 限流器（内存态，60s 滑动窗口） */
 const apiLimiters = new Map<string, SlidingWindowLimiter>();
 const API_REQUEST_TTL_MS = 10 * 60_000;
 
@@ -209,10 +217,11 @@ async function authApi(req: Request, url: URL): Promise<Principal | Response> {
     // 120/min:默认 30 在 web 重度使用下会被打爆——SSE 重连风暴(每次重连烧
     // 连流+历史+列表轮询+pending 一整套)循环触发 429 → 直播流死掉 → 「收不到
     // 回复/没有思考中」(2026-07-14 真机)。个人部署,提额比精打细算更实际。
-    limiter = new SlidingWindowLimiter(120);
+    limiter = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN);
     apiLimiters.set(tid, limiter);
   }
-  if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: "rate limit exceeded (30 req/min)" });
+  // 文案跟着上面的常量走 —— 曾经硬写 30 而实际是 120,撞限流的人拿到的是个假数字
+  if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${API_RATE_LIMIT_PER_MIN} req/min)` });
   return p;
 }
 

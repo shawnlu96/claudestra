@@ -66,6 +66,15 @@ function matchClickedChoice(
       const opt = row.options.find((o) => o.value === selValue);
       if (opt) return { choiceId: `${selId}:${selValue}`, label: opt.label };
     }
+    // 多选的回投值是逗号分隔的（[select:<id>:<v1>,<v2>]）——按单值查会全部落空，
+    // 历史里就看不出用户当时勾了什么。逐个映射回 label 再拼。
+    if (row.type === "multiselect" && selId && row.id === selId && selValue) {
+      const values = selValue.split(",").map((v) => v.trim()).filter(Boolean);
+      const labels = values
+        .map((v) => row.options.find((o) => o.value === v)?.label)
+        .filter((l): l is string => !!l);
+      if (labels.length) return { choiceId: `${selId}:${values.join(",")}`, label: labels.join("、") };
+    }
   }
   return null;
 }
