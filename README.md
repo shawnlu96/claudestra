@@ -287,9 +287,11 @@ docs/                    Multi-frontend design + web frontend API contract
 
 Issues and pull requests welcome. The core idea is simple; the hard parts are edge cases in tmux, Discord rate limits, and Claude Code channel lifecycle. Before submitting a PR:
 
-1. `bun test` — keep all 315 cases green.
-2. `bun build src/bridge.ts --target=bun` (and the same for each entry point) — catches most type issues fast.
+1. `bun run check` — runs `tsc --noEmit` plus the full test suite (322 cases). Both must be green.
+2. `bun build src/bridge.ts --target=bun` (and the same for each entry point) — catches module-resolution errors that typechecking doesn't. Note that `bun build` performs **no** typechecking on its own; that is what step 1 is for.
 3. Test the actual user flow end-to-end in a sandbox Discord server.
+
+CI runs steps 1 and 2 on every push and pull request.
 
 ## License
 

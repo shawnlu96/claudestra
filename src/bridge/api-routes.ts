@@ -820,7 +820,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       // 缺席，而 tmux window 里的 Claude Code 照常跑着上一回合（2026-07-25 owner:
       // 「提示已断开，我进 console 看你还在进行上一轮对话」）。window 还在就报可重试的
       // 503，别把「链路重连中」说成「会话不存在」。
-      const alive = (await listWindows().catch(() => [])).includes(agent.name);
+      const alive = (await listWindows().catch((): string[] => [])).includes(agent.name);
       if (alive) {
         return apiJson(503, {
           ok: false,
@@ -843,7 +843,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         waitSec = Number(form.get("wait") || 0);
         const inboxDir = INBOX_DIR;
         await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
-        const files = form.getAll("files").filter((f): f is File => f instanceof File).slice(0, 5);
+        // 不用 `f is File` 类型谓词：Bun 的全局 File 与 node:buffer 的 File 在类型
+        // 上不兼容（缺 webkitRelativePath/slice），谓词写法会被 tsc 拒。运行时判据
+        // 仍是 instanceof File，只是把窄化交给 typeof 排除字符串项。
+        const files = form
+          .getAll("files")
+          .filter((f) => typeof f !== "string" && f instanceof File)
+          .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
           const dest = `${inboxDir}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;

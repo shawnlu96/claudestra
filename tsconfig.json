@@ -1,0 +1,23 @@
+{
+  "//": "v2.13.1+ 静态类型检查。此前根目录没有 tsconfig 也没有 typescript 依赖，而 CONTRIBUTING 指引里教的 `bun build` 并不做类型检查（实测：const x: number = \"str\" 直接通过），等于 src/ 两万余行长期零静态检查。web/ 有自己的 tsconfig，由 next build 覆盖，故排除。",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    // bundler 解析同时容得下两种既有写法：src/ 惯用 "./x.js" 指向 x.ts（NodeNext
+    // 风格），tests/ 惯用无扩展名或 "./x.ts"。改代码去迁就 tsconfig 不值得。
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["bun"],
+
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowJs": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "web", "dist"]
+}

@@ -128,3 +128,5 @@ if (output) {
 } else {
   console.log(html);
 }
+
+export {}; // 顶层 await 需要本文件是 module（tsc TS1375）

@@ -287,9 +287,11 @@ docs/                    多前端设计 + Web 前端 API 契约
 
 欢迎 issue 和 PR。核心思路很简单，复杂的部分主要集中在 tmux 边界情况、Discord 限流、Claude Code channel 生命周期等。提 PR 前请：
 
-1. `bun test` — 保证 315 个测试用例全绿。
-2. `bun build src/bridge.ts --target=bun`（每个入口都跑一下）— 快速抓出类型错误。
+1. `bun run check` — 跑 `tsc --noEmit` 加全量测试（322 个用例），两者都要绿。
+2. `bun build src/bridge.ts --target=bun`（每个入口都跑一下）— 抓类型检查覆盖不到的模块解析错误。注意 `bun build` 本身**不做**类型检查，那是第 1 步的事。
 3. 在一个 sandbox Discord server 里跑通完整用户流程。
+
+CI 会在每次 push 和 PR 上跑第 1、2 步。
 
 ## License
 

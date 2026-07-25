@@ -375,6 +375,30 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
         return await deliverToUser(env, env.to);
       case "api":
         return await deliverToApi(env, env.to);
+      case "bridge":
+        // BridgeEndpoint 按设计只能做 from（见 router.ts 的类型注释）——bridge 自己
+        // 不是消息接收者。出现在 to 上说明调用方把 envelope 构造错了；返回 error 让
+        // 它显形，而不是静默走到函数末尾返回 undefined。
+        return {
+          envelope: env,
+          outcome: {
+            kind: "error",
+            error: new Error("bridge endpoint 只能作为 from，不能作为投递目标"),
+          },
+        };
+      default: {
+        // 穷尽性保险。少了它，将来给 Endpoint 加第四种 kind 时这里会静默走到函数
+        // 末尾返回 undefined，而所有调用方都直接读 delivery.outcome.kind —— 那是
+        // 运行期 TypeError。放个 never 断言，编译期就报错。
+        const unreachable: never = env.to;
+        return {
+          envelope: env,
+          outcome: {
+            kind: "error",
+            error: new Error(`未知投递目标 kind: ${JSON.stringify(unreachable)}`),
+          },
+        };
+      }
     }
   } catch (e) {
     console.error(`deliver 失败 ${envelopeLabel(env)}:`, e);
@@ -1210,7 +1234,10 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   if (msg.author.id === getBotUserId()) return;
   if (isBotMessage(msg.id)) return;
 
-  const mentionedMe = msg.mentions.users.has(getBotUserId());
+  // getBotUserId() 在 discord client ready 之前是 null（启动竞态）。has(null) 会
+  // 直接抛，且语义上"没就绪"就等于"没被 @"。
+  const botUserId = getBotUserId();
+  const mentionedMe = botUserId ? msg.mentions.users.has(botUserId) : false;
   const channelId = msg.channelId;
 
   // v2.11: Discord peer 机制已移除(owner 2026-07-19「不用兼容,纯做新设计」,

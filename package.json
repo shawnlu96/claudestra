@@ -5,11 +5,18 @@
   "scripts": {
     "bridge": "bun run src/bridge.ts",
     "manager": "bun run src/manager.ts",
-    "setup": "bun run src/setup.ts"
+    "setup": "bun run src/setup.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "discord.js": "^14.18.0",
     "playwright-core": "^1.58.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
   }
 }

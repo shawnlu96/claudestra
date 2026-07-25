@@ -1,0 +1,37 @@
+name: CI
+
+# 在此之前仓库没有任何 CI：315 个测试没人跑，两万余行 src/ 没有静态类型检查
+# （CONTRIBUTING 里推荐的 `bun build` 实测并不做类型检查）。2026-07-25 一次
+# 方向性错误的改动 test 全绿、build 全过地走到了提交前一刻，只靠人工实测才拦下。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: typecheck + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck (tsc --noEmit)
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun test
+
+      # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
+      - name: Build entrypoints
+        run: |
+          for entry in bridge channel-server manager launcher cron setup; do
+            echo "── building src/$entry.ts"
+            bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
+          done
