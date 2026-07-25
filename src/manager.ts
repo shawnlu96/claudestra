@@ -3639,6 +3639,19 @@ switch (cmd) {
     printTmuxGuide();
     break;
 
+  // 装完/出问题时的自检。默认走**人类可读**输出（这个命令的产物是给人截图发给
+  // 维护者的），--json 给程序用。
+  case "doctor": {
+    const { runDoctor, formatDoctor } = await import("./lib/doctor.js");
+    const checks = await runDoctor(`${import.meta.dir}/..`);
+    if (args.includes("--json")) {
+      output({ ok: checks.every((c) => c.status !== "fail"), checks });
+    } else {
+      console.log(formatDoctor(checks));
+    }
+    break;
+  }
+
   default:
     output({
       ok: false,
@@ -3666,6 +3679,7 @@ switch (cmd) {
         "effort <name> <low|medium|high|xhigh|max|auto>  — set an agent's effort (takes effect after restart)",
         "effort reset <name>             — clear the override (fall back to the global settings.json value)",
         "tmux-help                       — print the tmux crash course (incl. iTerm2 -CC mode)",
+        "doctor [--json]                 — health-check the whole install (runtime, config, daemons, bridge, MCP, agents)",
         "version                         — show the current version and whether an update is available",
         "update                          — git pull and reload the three launchd daemons",
         "auto-update status              — show auto-update toggles",

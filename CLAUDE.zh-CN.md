@@ -56,6 +56,7 @@ src/
     tmux-helper.ts       共享 tmux 命令封装（tmuxRaw, isIdle, sendLine, …）
     claude-launch.ts     统一 Claude Code 启动命令构造（flags, MCP_NAME, shell 转义）
     principals.ts        v2.6.0+ API token 身份/scope/限流（~/.claude-orchestrator/principals.json）
+    doctor.ts            v2.14+ 只读安装体检，`manager.ts doctor` 的实现（运行时/配置/daemon/bridge/MCP/agent）
     registry.ts          v2.9+ registry.json 唯一读取器（字段归一含 cwd/dir 兼容）；写入仍只归 manager.ts
     bg-jobs.ts           v2.7+ bg job 清理配方：杀进程 → 等 daemon 静默 → 隔离目录 → respawn 时 roster 根治（v2.9.1：daemon 的 ~/.claude/daemon/roster.json workers 花名册才是 respawn 权威依据 —— 无其他 worker 受累时 kill worker + transient daemon 并删条目）
     session-archive.ts   v2.8+ 会话退役归档：kill/fork 换代/adopt/resume 换 session 时快照 jsonl 到 ~/.claude-orchestrator/archive/<agent>/（对抗 CC cleanupPeriodDays）
@@ -132,6 +133,10 @@ bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状�
 bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: 原地改入站 scope（token 不变，立即生效）
 bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
 # send_to_agent 的 target 语法："<agent>@<peer>" 或 "peer:<peer>.<agent>"
+
+# 版本
+# 体检（只读；出问题时第一个该跑的）
+bun src/manager.ts doctor [--json]
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新

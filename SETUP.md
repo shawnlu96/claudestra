@@ -223,6 +223,21 @@ To remove the bot from Discord, kick it from your server. To delete it entirely,
 
 ## Troubleshooting
 
+### Start here: `doctor`
+
+```bash
+bun src/manager.ts doctor          # human-readable; --json for scripts
+```
+
+One command checks the whole install and tells you what to run for anything broken:
+runtime versions (bun / claude / tmux), `.env` completeness and file permissions,
+whether the Discord allowlist actually has a valid owner, all three launchd daemons,
+whether port 3847 has exactly one listener and answers HTTP, MCP registration, typing
+hooks, and whether every agent in the registry still has a live tmux window. It is
+read-only — it never starts or fixes anything on its own.
+
+If you are asking someone else for help, paste this output first.
+
 ### Day-2 basics: is it running, where are the logs, how do I restart it
 
 Claudestra runs as three launchd user agents. Everything below works from any directory.

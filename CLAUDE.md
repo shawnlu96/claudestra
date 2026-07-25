@@ -80,6 +80,7 @@ src/
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
+    doctor.ts            v2.14+ read-only install health-check backing `manager.ts doctor` (runtime / config / daemons / bridge / MCP / agents)
     jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
     peers.ts             peers.json data model (v2.11+ HTTP peers only) + handshake string encode/parse + atomic writes
     principals.ts        v2.6.0+ transport-scoped identity + API token CRUD/scope/rate-limit (~/.claude-orchestrator/principals.json)
@@ -165,6 +166,10 @@ bun src/manager.ts peer-http-list                 # list HTTP peers + handshake 
 bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged, effective immediately)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
 # send_to_agent target syntax: "<agent>@<peer>" or "peer:<peer>.<agent>"
+
+# Versioning
+# Health check (read-only; the first thing to run when something is broken)
+bun src/manager.ts doctor [--json]
 
 # Versioning
 bun src/manager.ts version   # current version + whether an update is available
