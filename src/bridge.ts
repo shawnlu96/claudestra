@@ -33,6 +33,7 @@ import {
 } from "./bridge/components.js";
 import {
   setBotUserId,
+  setAllowlistProvider,
   getBotUserId,
   isBotMessage,
   trackSentMessage,
@@ -337,6 +338,11 @@ import type {
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
+import { installCrashGuard } from "./lib/crash-guard.js";
+
+// 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
+installCrashGuard("bridge");
+
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
 import {
   createDiscordChatAdapter,
@@ -850,6 +856,8 @@ registerAdapter(createLocalChatAdapter());
 
 discord.once("ready", async () => {
   setBotUserId(discord.user?.id || "");
+  // 建 agent 频道时用它写权限覆盖（默认对 @everyone 隐藏）
+  setAllowlistProvider(allowedDiscordIds);
   console.log(`✅ Discord 已连接: ${discord.user?.tag}`);
   console.log(`📡 Bridge WebSocket: ws://localhost:${BRIDGE_PORT}`);
   console.log(`🔗 已注册频道: ${clients.size}`);
@@ -1249,9 +1257,25 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // v2.11: Discord peer 机制已移除(owner 2026-07-19「不用兼容,纯做新设计」,
   // peer 协作走 HTTP transport)。外部 bot 消息一律忽略——防 bot 互触发。
   if (msg.author.bot) return;
-  // 人类但不在 allowlist:只有 @ 了我们才处理（跨服有人找我们的场景）
-  if (allowedDiscordIds().length > 0 && !allowedDiscordIds().includes(msg.author.id)) {
-    if (!mentionedMe) return;
+  // v2.13.1+ allowlist 一律 fail-closed。
+  //
+  // 原来是「不在 allowlist 的人，只要 @ 了机器人就照常处理」（"跨服有人找我们"），
+  // 外加「allowlist 为空则跳过检查」。两条叠起来的实际含义是：任何能看到 agent
+  // 频道的人，@ 一下就能驱动一个跑着 --dangerously-skip-permissions 的 shell。
+  // 在自己一个人的服务器上无所谓，多一个人就不成立了 —— 而"给别人用"正是要推广
+  // 的场景。给 agent 发消息 == 在这台机器上执行命令，门禁不能有例外通道。
+  const allowIds = allowedDiscordIds();
+  if (allowIds.length === 0) {
+    // 空名单不再等于"放行所有"。setup 向导会强制填，走到这里通常是手改 .env 改空了。
+    console.warn(
+      `🚫 ALLOWED_USER_IDS 为空，已拒绝 ${msg.author.id} 的消息。` +
+        `请在 .env 里填上你的 Discord user id 后重载 bridge。`
+    );
+    return;
+  }
+  if (!allowIds.includes(msg.author.id)) {
+    console.log(`🚫 用户 ${msg.author.id} 不在 allowlist，已忽略（mentioned=${mentionedMe}）`);
+    return;
   }
 
   const client = clients.get(channelId);
@@ -1669,7 +1693,16 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
     console.log(`🎯 Interaction: type=${interaction.type} channel=${channelId} user=${interaction.user?.id}`);
     if (!channelId) return;
 
-    if (allowedDiscordIds().length > 0 && !allowedDiscordIds().includes(interaction.user.id)) {
+    // fail-closed，同 messageCreate：空 allowlist 不再等于放行所有。按钮和 slash
+    // 命令能直接触发 kill / restart / 发键，门禁标准不该比消息更松。
+    const allowIds = allowedDiscordIds();
+    if (allowIds.length === 0) {
+      console.warn(
+        `🚫 ALLOWED_USER_IDS 为空，已拒绝 ${interaction.user.id} 的交互。请在 .env 里配置后重载 bridge。`
+      );
+      return;
+    }
+    if (!allowIds.includes(interaction.user.id)) {
       console.log(`🚫 用户 ${interaction.user.id} 不在允许列表（principals/.env）中`);
       return;
     }
@@ -3116,6 +3149,18 @@ setInterval(() => {
   }
   // v2.6.0+ API 会话状态 TTL（10min）：pending 请求、轮询结果、附件登记
   sweepApiState(now);
+  // v2.13.1+ pendingThreads 也要扫。它是唯一一个既不在这里清扫、也不在 ws close
+  // 里清理的 Map —— 正常路径靠 response 或 Stop hook 精确删除，但任何异常收尾
+  // （agent 崩溃、被 kill、/clear 打断回合、裸 tmux kill-window）都会永久留下一条，
+  // 而每条 value 都钉着整个请求 envelope（完整用户文本 + 附件）和一个死掉的 ws。
+  // 30min 是给最长的回合留足余量，正常 thread 活不过几分钟。
+  const THREAD_STALE_MS = 30 * 60_000;
+  for (const [tid, t] of pendingThreads.entries()) {
+    if (now - t.ts > THREAD_STALE_MS) {
+      pendingThreads.delete(tid);
+      console.log(`🧹 pendingThreads stale: 清掉 ${tid}（超 ${THREAD_STALE_MS / 60_000}min 未收尾）`);
+    }
+  }
   for (const [channelId, pending] of pendingInterAgentMsg.entries()) {
     if (now - pending.ts > STALE_MS) {
       pendingInterAgentMsg.delete(channelId);
@@ -3802,7 +3847,15 @@ const server = Bun.serve({
       console.log("🔌 新的 channel-server 连接");
     },
     message(ws, message) {
-      handleClientMessage(ws, typeof message === "string" ? message : new TextDecoder().decode(message));
+      // 必须 catch：这是个 async 函数，返回的 promise 之前被直接丢弃。任何逃逸出来的
+      // 异常都会变成 unhandledRejection —— 装了 crash-guard 之后那等于**整个 bridge
+      // 退出**（所有 agent 一起断线）。单条消息处理失败不该有这个后果。
+      void handleClientMessage(
+        ws,
+        typeof message === "string" ? message : new TextDecoder().decode(message)
+      ).catch((e) => {
+        console.error("handleClientMessage 未捕获异常:", e);
+      });
     },
     close(ws) {
       for (const [channelId, info] of clients.entries()) {
@@ -3813,6 +3866,17 @@ const server = Bun.serve({
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
         }
       }
+      // v2.13.1+ 这条 ws 上挂着的 pendingThreads 一起清掉 —— 它们的 targetWs 已经
+      // 死了，回合不可能再有结果回来。留着只会一直钉住整个请求 envelope。
+      // （30min 定时清扫是兜底，这里是即时回收。）
+      let dropped = 0;
+      for (const [tid, t] of pendingThreads.entries()) {
+        if (t.targetWs === ws) {
+          pendingThreads.delete(tid);
+          dropped++;
+        }
+      }
+      if (dropped > 0) console.log(`🧹 连接关闭，顺带清掉 ${dropped} 条挂在它上面的 pendingThread`);
     },
   },
 });
@@ -3840,5 +3904,17 @@ if (WEB_ONLY) {
     console.error("❌ 请设置 DISCORD_BOT_TOKEN");
     process.exit(1);
   }
-  discord.login(DISCORD_TOKEN);
+  // login 失败（token 失效 / 缺 privileged intent / 断网）之前是未捕获的 rejection：
+  // 进程直接死，launchd 10 秒后重启，如此循环，而 Discord 那边什么都看不到 ——
+  // 用户只知道"bot 不上线"。这里明确报出原因再退出。
+  discord.login(DISCORD_TOKEN).catch((e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(
+      `❌ Discord 登录失败：${msg}\n` +
+        `   常见原因：DISCORD_BOT_TOKEN 失效或被重置；未在 Developer Portal 打开三个 ` +
+        `Privileged Gateway Intents（尤其 MESSAGE CONTENT）；网络不通。\n` +
+        `   改完 .env 后：launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`
+    );
+    process.exit(1);
+  });
 }

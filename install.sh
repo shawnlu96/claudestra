@@ -329,10 +329,13 @@ printf "\n"
 say "bun install"
 bun install
 
+# 浏览器版本必须与 playwright-core 对齐：executablePath() 按**本地 playwright-core 的**
+# 期望 revision 拼路径，而 `playwright install` 不带版本号时装的是最新版 —— 装完
+# existsSync 为 false，截图在每台新机器上都是坏的（本机只是碰巧留着旧 revision）。
 say "playwright install chromium ${DIM}(终端截图用)${RESET}"
-if ! bunx playwright install chromium 2>/dev/null; then
+if ! bunx playwright@1.58.2 install chromium 2>/dev/null; then
   warn "bunx playwright 失败，尝试 npx"
-  npx --yes playwright install chromium || warn "Playwright 没装上，截图功能会不可用"
+  npx --yes playwright@1.58.2 install chromium || warn "Playwright 没装上，截图功能会不可用"
 fi
 
 ok "项目依赖安装完成"

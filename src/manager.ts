@@ -403,6 +403,43 @@ function extractPermFlags(args: string[]): {
 }
 
 
+/**
+ * 从 argv 提取 --purpose <text>，支持 --purpose=foo。
+ *
+ * 为什么需要它：purpose 原本只能作为**位置参数**传（`create <name> <dir> [purpose]`），
+ * 而所有 flag 提取都在切分位置参数之前跑。于是 API 端
+ * `POST /api/v1/agents {"purpose":"--disallowed=Read"}` 会被 extractPermFlags 抢先
+ * 认成 flag，**整个替换掉默认的破坏性命令黑名单**，而且这个 flag 还会从存下来的
+ * purpose 文本里消失（神不知鬼不觉）。`--mode=` / `--model=` / `--external` 同理。
+ * 改用具名 flag 传 purpose 之后，它的内容无论长什么样都不会再被当成 flag 解析。
+ */
+function extractPurposeFlag(args: string[]): { rest: string[]; purpose?: string } {
+  const rest: string[] = [];
+  let purpose: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--purpose") {
+      purpose = args[++i];
+    } else if (a.startsWith("--purpose=")) {
+      purpose = a.slice("--purpose=".length);
+    } else {
+      rest.push(a);
+    }
+  }
+  return { rest, purpose };
+}
+
+/**
+ * 位置参数守卫：agent 名和目录不允许以 `-` 开头。
+ * 这类值一旦长得像 flag，就会在后续任何一层被重新解释成 flag。
+ */
+function rejectFlagLikePositional(...vals: (string | undefined)[]): string | null {
+  for (const v of vals) {
+    if (v && v.startsWith("-")) return `位置参数不能以 "-" 开头（收到 ${JSON.stringify(v)}）`;
+  }
+  return null;
+}
+
 /** 从 argv 提取 --effort <level>，支持 --effort=foo */
 function extractEffortFlag(args: string[]): { rest: string[]; effort?: string } {
   const rest: string[] = [];
@@ -3113,16 +3150,22 @@ switch (cmd) {
     const { rest: afterModel, model } = extractModelFlag(afterExternal);
     const { rest: afterMode, mode } = extractModeFlag(afterModel);
     const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
-    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterEffort);
+    const { rest: afterPurpose, purpose: purposeFlag } = extractPurposeFlag(afterEffort);
+    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterPurpose);
     const [name, dir, ...purposeParts] = posArgs;
+    const flagLike = rejectFlagLikePositional(name, dir);
+    if (flagLike) {
+      output({ ok: false, error: flagLike });
+      break;
+    }
     if (!name || !dir) {
       output({
         ok: false,
-        error: 'create <name> <dir> [purpose] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
+        error: 'create <name> <dir> [purpose|--purpose <text>] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
       });
       break;
     }
-    await cmdCreate(name, dir, purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external);
+    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external);
     break;
   }
 

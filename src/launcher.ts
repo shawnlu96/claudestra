@@ -54,6 +54,11 @@ async function confirmMasterModal(pane: string): Promise<void> {
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
+import { installCrashGuard } from "./lib/crash-guard.js";
+
+// 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
+installCrashGuard("launcher");
+
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;

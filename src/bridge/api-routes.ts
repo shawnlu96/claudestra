@@ -1278,8 +1278,14 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const model = String(body?.model || "").trim();
     const effort = String(body?.effort || "").trim();
     if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?}' });
+    // name / dir 走位置参数，必须先挡掉长得像 flag 的值；purpose 改走具名
+    // --purpose，避免自由文本被 manager 的 flag 提取抢先解析（详见
+    // manager.ts 的 extractPurposeFlag 注释：曾可用 purpose 替换整个命令黑名单）。
+    if (name.startsWith("-") || dir.startsWith("-")) {
+      return apiJson(400, { ok: false, error: 'name/dir 不能以 "-" 开头' });
+    }
     const createArgs = ["create", name, dir];
-    if (purpose) createArgs.push(purpose);
+    if (purpose) createArgs.push("--purpose", purpose);
     if (model) createArgs.push("--model", model);
     if (effort) createArgs.push("--effort", effort);
     const r = await runManager(...createArgs);

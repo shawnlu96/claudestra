@@ -71,7 +71,10 @@ export async function readPrincipals(path = PRINCIPALS_PATH): Promise<Principals
 
 export async function writePrincipals(data: PrincipalsFile, path = PRINCIPALS_PATH): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(path, JSON.stringify(data, null, 2));
+  // mode 传给 open(2)，文件在**创建那一刻**就是 0600 —— 先写后 chmod 会留下一个
+  // 内容已落盘、权限还是 0644 的窗口，而这个文件里是全部 API/peer token 的明文。
+  // （对已存在的文件 mode 不生效，故后面仍补一次 chmod。）
+  await writeFile(path, JSON.stringify(data, null, 2), { mode: 0o600 });
   try { await chmod(path, 0o600); } catch { /* best-effort */ }
 }
 

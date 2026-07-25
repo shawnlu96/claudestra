@@ -12,6 +12,12 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { installCrashGuard } from "./lib/crash-guard.js";
+
+// 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
+// MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
+installCrashGuard("channel-server", { exitOnCrash: false });
+
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,

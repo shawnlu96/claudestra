@@ -2,7 +2,7 @@
  * Discord API 操作：发消息、获取历史、反应、编辑、创建/删除频道
  */
 
-import { TextChannel, type Client } from "discord.js";
+import { TextChannel, PermissionFlagsBits, type Client } from "discord.js";
 import { buildComponents } from "./components.js";
 
 let botUserId: string | null = null;
@@ -10,6 +10,16 @@ const recentBotMessageIds = new Set<string>();
 
 export function setBotUserId(id: string) {
   botUserId = id;
+}
+
+/**
+ * allowlist 提供者（由 bridge 启动时注入，同 setBotUserId 的模式）。
+ * 建 agent 频道时用它写权限覆盖 —— 频道内容是 agent 的完整对话，不该让服务器里
+ * 的其他成员随便读到。
+ */
+let allowlistProvider: (() => string[]) | null = null;
+export function setAllowlistProvider(fn: () => string[]) {
+  allowlistProvider = fn;
 }
 
 export function getBotUserId() {
@@ -162,10 +172,51 @@ export async function discordCreateChannel(
     parentId = cat?.id;
   }
 
+  // v2.13.1+ 建频道时写权限覆盖：默认对 @everyone 隐藏，只放行 allowlist 里的人。
+  // 此前不设任何覆盖 = 继承服务器默认，服务器里**每个成员都能读到所有 agent 的完整
+  // 对话**（含代码、文件内容、命令输出）。自己一个人的服务器无所谓，多一个人就不成立。
+  // 服务器管理员本身有 Administrator 权限，不受这里影响，仍然看得到。
+  const allowIds = allowlistProvider?.() ?? [];
+  const overwrites: Array<{ id: string; allow?: bigint[]; deny?: bigint[] }> = [];
+  if (allowIds.length > 0) {
+    overwrites.push({ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] });
+    const selfId = botUserId;
+    if (selfId) {
+      overwrites.push({
+        id: selfId,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageMessages,
+          PermissionFlagsBits.AttachFiles,
+          PermissionFlagsBits.EmbedLinks,
+          PermissionFlagsBits.AddReactions,
+          PermissionFlagsBits.CreatePublicThreads,
+          PermissionFlagsBits.SendMessagesInThreads,
+        ],
+      });
+    }
+    for (const uid of allowIds) {
+      overwrites.push({
+        id: uid,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+          PermissionFlagsBits.AddReactions,
+          PermissionFlagsBits.SendMessagesInThreads,
+        ],
+      });
+    }
+  }
+
   const ch = await guild.channels.create({
     name,
     parent: parentId,
     topic: `Claude Code agent channel`,
+    ...(overwrites.length > 0 ? { permissionOverwrites: overwrites } : {}),
   });
   return ch.id;
 }

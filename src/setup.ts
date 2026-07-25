@@ -8,7 +8,7 @@
  * 跟着它走，它会告诉你每一步点哪里、复制什么、粘贴到哪。
  */
 
-import { readFile, writeFile, access } from "fs/promises";
+import { readFile, writeFile, access, chmod } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
@@ -806,6 +806,9 @@ async function stepFinalize(cfg: Config): Promise<void> {
     }
   }
   await writeFile(ENV_PATH, buildEnvContent(cfg));
+  // 0600：里面是 Discord bot token —— 拿到它等于拿到这个 bot 的全部权限。
+  // 默认 umask 会写成 0644，同机其他用户可读。
+  await chmod(ENV_PATH, 0o600).catch(() => {});
   ok(t(`写入 ${c.bold}.env${c.reset}`, `Wrote ${c.bold}.env${c.reset}`));
 
   // 渲染 master/CLAUDE.md
@@ -824,7 +827,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
   // 自动跑依赖安装 + MCP 注册 + 装 launchd daemon
   print(t("下面这些命令我可以直接帮你跑掉，一键启动:", "I can run these commands for you, one-click launch:"));
   print(`  ${c.dim}•${c.reset} ${c.cyan}bun install${c.reset}`);
-  print(`  ${c.dim}•${c.reset} ${c.cyan}npx playwright install chromium${c.reset}  ${c.dim}${t("(终端截图用)", "(for terminal screenshots)")}${c.reset}`);
+  print(`  ${c.dim}•${c.reset} ${c.cyan}npx playwright@1.58.2 install chromium${c.reset}  ${c.dim}${t("(终端截图用)", "(for terminal screenshots)")}${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}claude mcp add ${cfg.MCP_NAME} ...${c.reset}  ${c.dim}${t("(注册 MCP server)", "(register MCP server)")}${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}${t("注册 typing hooks", "register typing hooks")}${c.reset}  ${c.dim}${t("(写入 ~/.claude/settings.json)", "(write to ~/.claude/settings.json)")}${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}${t("装 claudestra 命令 + 3 个 launchd daemon", "install claudestra CLI + 3 launchd daemons")}${c.reset}  ${c.dim}${t("(开机自启 + KeepAlive)", "(boot autostart + KeepAlive)")}${c.reset}`);
@@ -835,7 +838,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
     ok(t("配置已保存。剩下的命令自己跑：", "Config saved. Run the rest yourself:"));
     print(`  ${c.cyan}cd ${REPO_ROOT}${c.reset}`);
     print(`  ${c.cyan}bun install${c.reset}`);
-    print(`  ${c.cyan}npx playwright install chromium${c.reset}`);
+    print(`  ${c.cyan}npx playwright@1.58.2 install chromium${c.reset}`);
     print(`  ${c.cyan}claude mcp add ${cfg.MCP_NAME} -s user -- bun run ${REPO_ROOT}/src/channel-server.ts${c.reset}`);
     print(`  ${c.dim}# ${t("typing hooks: 手动编辑 ~/.claude/settings.json，或重跑 bun run setup", "typing hooks: edit ~/.claude/settings.json manually, or rerun bun run setup")}${c.reset}`);
     print(`  ${c.cyan}bun src/manager.ts install-cli${c.reset}  ${c.dim}${t("(写 launchd plist + 启 3 个 daemon)", "(write launchd plists + start 3 daemons)")}${c.reset}`);
@@ -856,7 +859,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
 
   // 2. playwright
   write(`${c.dim}▶${c.reset} playwright install chromium… `);
-  const pw = await run(["bunx", "playwright", "install", "chromium"], { cwd: REPO_ROOT });
+  const pw = await run(["bunx", "playwright@1.58.2", "install", "chromium"], { cwd: REPO_ROOT });
   if (pw.ok) print(`${c.green}✓${c.reset}`);
   else {
     print(`${c.yellow}⚠${c.reset}  ${t("跳过（截图功能会不可用）", "skipped (screenshots will be unavailable)")}`);
@@ -1044,6 +1047,8 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
 
   const lines = Object.entries(cur).map(([k, v]) => `${k}=${v}`);
   await writeFile(envPath, "# Claudestra web 前端配置 (由 bun run setup 生成)\n" + lines.join("\n") + "\n");
+  // 0600：里面是全权（*,master,--terminal）的 Bridge API token。
+  await chmod(envPath, 0o600).catch(() => {});
   ok(t(`写入 ${c.bold}web/.env.local${c.reset}`, `Wrote ${c.bold}web/.env.local${c.reset}`));
 
   // 2) npm 依赖(web 是独立的 Node/npm 依赖树,与根的 bun 互不干扰)
