@@ -528,6 +528,31 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
 const lastPreemptAt = new Map<string, number>();
 const PREEMPT_COOLDOWN_MS = 4_000;
 
+// ── 大总管的 jsonl watcher（v2.14+）──────────────────────────────────────
+// master 不在 registry（它是 tmux window 0，没有 create/resume 那套注册流程），
+// 于是 register 分支长期用 `channelId !== CONTROL_CHANNEL_ID` 把它排除在 watcher
+// 之外。代价不是「少看点工具流」，而是 **Stop 兜底彻底失效**：agent 忘了调 reply
+// 时，bridge 本来能从 jsonl 里把 assistant 文本抠出来替它发出去，而那条路径依赖
+// watcher。2026-07-25 owner 实报「大总管的消息收不到」正是如此 —— 它答了、但那一
+// 轮没调 reply（reply 现在是 deferred tool，得先 ToolSearch 加载，很容易漏掉），
+// 兜底又抽不到文本，回答就烂在终端里。worker 有两道防线，master 只有一道。
+let masterWatchedSession = "";
+function syncMasterWatcher(discord: Client): void {
+  if (WEB_ONLY || !CONTROL_CHANNEL_ID) return;
+  const sid = latestSessionIdForCwd(MASTER_DIR);
+  if (!sid) return;
+  // 只在 sessionId 真的变了才重挂 —— startWatching 会重置读取位点，无谓重挂等于
+  // 把整个 jsonl 重播一遍。master 的会话会因 /clear 轮转，所以也不能只挂一次。
+  if (sid === masterWatchedSession) return;
+  const prev = masterWatchedSession;
+  masterWatchedSession = sid;
+  console.log(`👁 大总管 watcher ${prev ? `轮转 ${prev.slice(0, 8)} →` : "挂载"} ${sid.slice(0, 8)}`);
+  void startWatching("master", MASTER_DIR, sid, CONTROL_CHANNEL_ID, discord).catch((e) => {
+    masterWatchedSession = prev; // 挂失败就退回，下一轮还会再试
+    console.error("大总管 watcher 启动失败:", (e as Error).message);
+  });
+}
+
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Promise<RouterDelivery> {
   const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
@@ -920,6 +945,11 @@ discord.once("ready", async () => {
   // v2.8+ bg 活动追踪 — subagent / 后台 shell 任务 → 子区流式呈现 + bg_task_* 事件
   // 注入来源判定：Web/API 回合不建 Discord 子区（那边有 bg_task_* SSE 渲染同样的进度）
   startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
+
+  // v2.14+ 大总管的 watcher：register 时挂一次，再每 2 分钟对一次 sessionId
+  // （master 会因 /clear 轮转会话，而它不在 registry，没有别的地方会告诉我们）。
+  syncMasterWatcher(discord);
+  setInterval(() => syncMasterWatcher(discord), 120_000);
 
   // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
   startArchiveSweeper();
@@ -2518,6 +2548,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
           console.warn(`⚠️ register 后 60s registry 仍无此频道的 agent，放弃挂 watcher: ${msg.channelId}`);
         })();
+      } else {
+        // 大总管走单独一条：它不在 registry，sessionId 从 MASTER_DIR 的 projects
+        // 目录里取最新的那个 jsonl（详见 syncMasterWatcher 上方的注释）。
+        syncMasterWatcher(discord);
       }
 
       break;
