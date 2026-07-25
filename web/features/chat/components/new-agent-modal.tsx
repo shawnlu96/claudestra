@@ -7,7 +7,8 @@ import { useT } from "@/lib/i18n";
 const MODEL_OPTIONS = [
   { value: "", label: "默认（跟随全局）" },
   { value: "fable", label: "Fable 5" },
-  { value: "opus", label: "Opus 4.8" },
+  { value: "opus", label: "Opus 5" },
+  { value: "opus-4-8", label: "Opus 4.8" },
   { value: "sonnet", label: "Sonnet 4.6" },
   { value: "haiku", label: "Haiku 4.5" },
 ] as const;

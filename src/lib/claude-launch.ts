@@ -134,7 +134,8 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 export const MODEL_ALIASES: Record<string, string> = {
   fable: "claude-fable-5",
   "fable-5": "claude-fable-5",
-  opus: "claude-opus-4-8",
+  opus: "claude-opus-5",
+  "opus-5": "claude-opus-5",
   "opus-4-8": "claude-opus-4-8",
   "opus-4-7": "claude-opus-4-7",
   sonnet: "claude-sonnet-4-6",

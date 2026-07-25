@@ -29,6 +29,7 @@ export interface UsageWindow {
  */
 const MODEL_PRICES: Array<{ match: RegExp; in_: number; out: number; cw: number; cr: number }> = [
   { match: /fable|mythos/i, in_: 10, out: 50, cw: 12.5, cr: 1 },
+  { match: /opus-5/i, in_: 5, out: 25, cw: 6.25, cr: 0.5 },
   { match: /opus-4-8/i, in_: 5, out: 25, cw: 6.25, cr: 0.5 },
   { match: /opus/i, in_: 15, out: 75, cw: 18.75, cr: 1.5 },
   { match: /sonnet/i, in_: 3, out: 15, cw: 3.75, cr: 0.3 },
