@@ -856,7 +856,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 缓冲(每 agent 500 条),仍走全量重拉保正确。断流自动重连(fast:true)断档
     // 只有退避的 3-30s,恒走快路径。bridge 重启的缺口由 seq 倒退检测兜底。
     const shortAway = this.hiddenAt > 0 && Date.now() - this.hiddenAt < 5 * 60_000;
-    if ((opts?.fast || shortAway) && this.lastEventAgent === name && this.lastEventSeq > 0) {
+    // ⚠ force 必须绕开快路径。force 的语义是「用户明确要看最新」(点推送通知 /
+    // 重点当前会话)，而快路径只带 ?since 重连流、**不重拉历史** —— 一旦那条
+    // reply 没能从环形缓冲重放回来(seq 对不上、事件被挤出、冻结期间流已死)，
+    // 它就既不在流里也不在内存里，而历史又没重拉，于是页面永远缺这一条。
+    // owner 2026-07-25 实报：点推送进来看不到回复，退出重进也没有，**切到别的
+    // agent 再切回来才秒出**——切换走的正是 openAgent 的全量路径。
+    // 此前 force 只跳过了上面的判活守卫，到这里又被 shortAway 抢先返回了。
+    if (!opts?.force && (opts?.fast || shortAway) && this.lastEventAgent === name && this.lastEventSeq > 0) {
       if (!opts?.fast) this.clientLog(`reconnect(fast): since=${this.lastEventSeq} agent=${name}`);
       void this.openStream(name, this.lastEventSeq);
       return;
