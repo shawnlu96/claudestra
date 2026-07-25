@@ -356,4 +356,5 @@ export const DICT: Record<string, string> = {
   "复制": "Copy",
   "网络错误": "Network error",
   "加载失败": "Load failed",
+  "网络不通，请重试": "Network unreachable — try again",
 };

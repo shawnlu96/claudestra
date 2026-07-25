@@ -113,7 +113,19 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
         ? await store.killAgent(agent.name)
         : await store.restartAgent(agent.name);
     setBusy("");
-    if (!res.ok) setError(res.error || `${action}${t(" 失败")}`);
+    if (!res.ok) {
+      const raw = res.error || `${action}${t(" 失败")}`;
+      // fetch 的原生失败文案对用户毫无信息量（Safari 报 "Load failed"、Chrome 报
+      // "Failed to fetch"），直接钉在顶栏只会让人以为是别的东西坏了。
+      const msg = /load failed|failed to fetch|networkerror|network request failed/i.test(raw)
+        ? t("网络不通，请重试")
+        : raw;
+      setError(msg);
+      // 曾经这条红字**永不消失**（只有下次点操作才清），于是一次网络抖动——比如
+      // bridge 正在重启——就在顶栏永久留下一条错误，看着像系统坏了
+      // （owner 2026-07-25 截图）。8 秒自动收。
+      setTimeout(() => setError(""), 8000);
+    }
   };
 
   const errorBadge = error ? (

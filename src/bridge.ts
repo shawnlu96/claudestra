@@ -441,6 +441,34 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
  * 3. 结果写 apiThreadResults（GET /api/v1/threads/:id 轮询兜底）；
  * 4. R2 审计镜像：把回复镜像到该 agent 的 Discord 频道（token mirror!==false 时）。
  */
+/**
+ * channelId → agent 名，读 registry。
+ * 与 `agentNameForChannel`（查 watcher 表）互补：watcher 随连接生灭，registry 常在。
+ * 30s 缓存，避免每条出站消息都读盘。
+ */
+let regChannelNameCache: { ts: number; map: Map<string, string> } | null = null;
+function agentNameByChannelFromRegistry(channelId: string): string | null {
+  if (!channelId) return null;
+  const now = Date.now();
+  if (!regChannelNameCache || now - regChannelNameCache.ts > 30_000) {
+    const map = new Map<string, string>();
+    try {
+      const raw = JSON.parse(
+        readFileSync(`${process.env.HOME}/.claude-orchestrator/registry.json`, "utf8"),
+      ) as { agents?: Record<string, { channelId?: string }> };
+      for (const [name, info] of Object.entries(raw.agents || {})) {
+        if (info?.channelId) map.set(String(info.channelId), name);
+      }
+    } catch {
+      /* 读不到就空表，下一轮再试 */
+    }
+    // master 不在 registry，但它有固定频道
+    if (CONTROL_CHANNEL_ID) map.set(CONTROL_CHANNEL_ID, "master");
+    regChannelNameCache = { ts: now, map };
+  }
+  return regChannelNameCache.map.get(channelId) ?? null;
+}
+
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
@@ -475,7 +503,13 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   const threadId = pending?.threadId || env.meta.threadId;
   const agentName = pending?.agentName ||
     (env.from.kind === "local" ? env.from.agentName : undefined) ||
-    agentNameForChannel(fromChannelId) || "?";
+    agentNameForChannel(fromChannelId) ||
+    // registry 兜底：上面那个查的是 **watcher 注册表**，而 watcher 会随连接一起
+    // 被清掉 —— 于是恰恰在「MCP 断了、agent 靠兜底通道说话」这个最需要认出它的
+    // 时刻，名字解析失败、落到字面 "?"。前端按 agent 归类，消息就被塞进一个叫
+    // "?" 的幽灵会话，用户在正确的会话里什么也看不到（owner 两次实报「问号频道」，
+    // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
+    agentNameByChannelFromRegistry(fromChannelId) || "?";
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
