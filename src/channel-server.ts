@@ -64,6 +64,8 @@ let mcpClosed = false;
 // 连续被顶替次数 —— 只用来算退避（3s→60s）和写日志，不再是退出条件。
 // 决策见 lib/link-policy.ts。
 let consecutiveReplaced = 0;
+/** 「稳定持有 30s 才把顶替计数归零」的定时器；被踢时取消，见 registered 分支。 */
+let stableHoldTimer: ReturnType<typeof setTimeout> | null = null;
 
 // v2.4.13+ grace-period queue：WS 跟 bridge 断了的时候，新进来的 MCP 请求不立刻
 // reject，而是入队等 WS 重连后重发。这样 Claude Code 在短暂 WS flap（典型 2-5s）
@@ -158,11 +160,21 @@ function connectBridge(): Promise<void> {
 
       if (msg.type === "registered") {
         registered = true;
-        // 拿回频道了 → 清空「连续被顶替」计数。放在 registered 而不是 onopen：
-        // 连上不等于占住，被顶替时也会先 onopen 再被踢。
+        // 拿回频道了，但**先别急着清零**顶替计数。
+        // 实测（45s 压力测试）：对面若是同样会重连的实例，立刻清零会让退避永远停在
+        // 3s，两边以 3 秒为周期无限对抢，15 轮下来纯属互相消耗。改成「稳定持有 30s
+        // 才算真赢」：短命抢占者走后我们照样 3s 拿回、30s 后归零；真的长期对抢则
+        // 计数持续累加，退避 3→6→12→24→48→60s 自动降频。
         if (consecutiveReplaced > 0) {
-          console.error(`✅ 频道已拿回（此前被顶替 ${consecutiveReplaced} 次）`);
-          consecutiveReplaced = 0;
+          if (stableHoldTimer) clearTimeout(stableHoldTimer);
+          stableHoldTimer = setTimeout(() => {
+            stableHoldTimer = null;
+            if (consecutiveReplaced > 0) {
+              console.error(`✅ 频道稳定持有 30s，顶替计数归零（此前 ${consecutiveReplaced} 次）`);
+              consecutiveReplaced = 0;
+            }
+          }, 30_000);
+          stableHoldTimer.unref?.();
         }
         // v2.4.13+ WS (重)连成功 → 把 grace 期间排队的请求全部重发
         flushQueuedSenders();
@@ -207,6 +219,8 @@ function connectBridge(): Promise<void> {
       bridgeWs = null;
       registered = false;
       stopKeepalive();
+      // 没撑满 30s 就被踢 → 这次持有不算数，计数保留（退避继续涨）
+      if (stableHoldTimer) { clearTimeout(stableHoldTimer); stableHoldTimer = null; }
       // 断开时清理所有未完成请求，避免泄漏
       for (const [id, pending] of pendingRequests.entries()) {
         pending.reject(new Error("Bridge 连接断开"));
