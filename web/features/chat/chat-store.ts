@@ -1375,6 +1375,26 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   // ── 后台任务（subagent / bg shell）跟踪 ──
   // 每行已在 bridge 侧截断；这里再给单任务的行数封顶，防长跑任务无界增长。
   private static readonly BG_MAX_LINES = 500;
+  /**
+   * 已完成任务卡的保留上限。
+   *
+   * 此前**只有**单卡行数上限（BG_MAX_LINES），卡片数量本身完全无界：done 之后
+   * 卡片就一直挂着，只有点叉、切会话或刷新才会消失。一次起 5 个 subagent 的
+   * 会话里跑上一天，输入框上方就被几十张已完成卡占满（owner 2026-07-25：
+   * 「它总不能永远在那里吧」）。running 的永远保留（不能替用户丢掉在跑的任务），
+   * 只修剪最老的已完成卡 —— 它们的内容在聊天流里也有。
+   */
+  private static readonly BG_MAX_DONE = 8;
+
+  /** 修剪超出上限的最老 done 卡。调用方须在 produce 的 draft 上调用。 */
+  private static trimDoneBgTasks(s: { bgTasks: BgTaskView[] }): void {
+    const done = s.bgTasks.filter((t) => t.status === "done");
+    const excess = done.length - ChatStore.BG_MAX_DONE;
+    if (excess <= 0) return;
+    // bgTasks 按到达序 push，故 done 也是按到达序 —— 前 excess 个即最老的那批。
+    const drop = new Set(done.slice(0, excess).map((t) => t.id));
+    s.bgTasks = s.bgTasks.filter((t) => !drop.has(t.id));
+  }
 
   /** 收起一张后台任务卡（纯前端——bridge 重启后的 stale 卡 / 看完的完成卡）。 */
   public dismissBgTask(id: string) {
@@ -1429,6 +1449,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         t.status = "done";
         t.durationMs = durationMs;
       }
+      ChatStore.trimDoneBgTasks(s);
     });
   }
 
@@ -1441,6 +1462,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       for (const t of s.bgTasks) {
         if (t.status === "running" && !live.has(t.id)) t.status = "done";
       }
+      ChatStore.trimDoneBgTasks(s);
     });
   }
 
@@ -1455,6 +1477,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       for (const t of s.bgTasks) {
         if (t.status === "running" && (t.lastEventAt ?? 0) < cutoff) t.status = "done";
       }
+      ChatStore.trimDoneBgTasks(s);
     });
   }
 

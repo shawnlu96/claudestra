@@ -1,5 +1,5 @@
 "use client";
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { BgTaskView } from "../type";
 import { useT, getLang } from "@/lib/i18n";
@@ -161,21 +161,48 @@ function BgLines({ lines }: { lines: string[] }) {
 export function BgTaskPanel() {
   const tr = useT(); // 同上,map 回调里 t 是任务变量
   const tasks = useChatStore((s) => s.state.bgTasks);
+  // 已完成的默认折叠成一行 —— 跑得多了（一次起 5 个 subagent 很常见）它们会把
+  // 输入框上方占满，而完成信息的价值随时间快速衰减，内容在聊天流里也留着。
+  // 展开后仍是原来的完整卡片，不丢任何东西。
+  const [showDone, setShowDone] = useState(false);
   if (!tasks.length) return null;
-  // running 排前，其余按到达序
-  const ordered = [...tasks].sort((a, b) => {
-    if (a.status === b.status) return 0;
-    return a.status === "running" ? -1 : 1;
-  });
+  const running = tasks.filter((t) => t.status === "running");
+  const done = tasks.filter((t) => t.status !== "running");
   return (
     <div className="mb-[22px] flex flex-col gap-1.5">
       <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-base-content/35">
         <span>{tr("后台任务")}</span>
         <span className="opacity-60">{tasks.length}</span>
       </div>
-      {ordered.map((t) => (
+      {running.map((t) => (
         <BgTaskCard key={t.id} t={t} />
       ))}
+      {done.length > 0 &&
+        (showDone ? (
+          <>
+            <button
+              className="self-start text-[11px] text-base-content/35 hover:text-base-content/60"
+              onClick={() => setShowDone(false)}
+            >
+              {tr("收起已完成")}
+            </button>
+            {done.map((t) => (
+              <BgTaskCard key={t.id} t={t} />
+            ))}
+          </>
+        ) : (
+          <button
+            className="flex items-center gap-1.5 self-start rounded px-1 py-0.5 text-[11.5px] text-base-content/35 hover:bg-base-content/5 hover:text-base-content/60"
+            onClick={() => setShowDone(true)}
+            title={tr("展开已完成的后台任务")}
+          >
+            <span className="text-success/70">✓</span>
+            <span>
+              {done.length} {tr("个已完成")}
+            </span>
+            <span className="opacity-50">›</span>
+          </button>
+        ))}
     </div>
   );
 }
