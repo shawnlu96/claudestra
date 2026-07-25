@@ -379,11 +379,14 @@ async function tickInner(): Promise<void> {
 }
 
 /**
- * 「这个 agent 最近一回合是谁在跟它说话」的查询钩子，由 bridge 注入
- * （lastMessageSource 是 bridge.ts 的模块私有状态）。
- * 返回 undefined = 不知道 → 按 Discord 处理（保持老行为）。
+ * 「最后一个**人类**是从哪儿跟这个 agent 说话的」，由 bridge 注入。
+ *
+ * 必须是「人类来源」而不是「最后一条消息的来源」：后者会被 agent→agent 转发、
+ * peer pushback、看门狗 nudge 刷成 "agent"，用它判断会失准（2026-07-25 实测，
+ * 纯 Web 会话的值是 "agent"，子区照样建到了 Discord）。
+ * 返回 undefined = 没有人类交互记录 → 按 Discord 处理（保守，保持老行为）。
  */
-export type SourceProvider = (channelId: string) => "user" | "agent" | "api" | undefined;
+export type SourceProvider = (channelId: string) => "user" | "api" | undefined;
 let sourceProvider: SourceProvider | null = null;
 
 export function startBgActivityWatcher(opts?: { sourceProvider?: SourceProvider }): void {

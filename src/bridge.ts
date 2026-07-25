@@ -919,7 +919,7 @@ discord.once("ready", async () => {
 
   // v2.8+ bg 活动追踪 — subagent / 后台 shell 任务 → 子区流式呈现 + bg_task_* 事件
   // 注入来源判定：Web/API 回合不建 Discord 子区（那边有 bg_task_* SSE 渲染同样的进度）
-  startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.get(cid) });
+  startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
 
   // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
   startArchiveSweeper();
@@ -3029,6 +3029,17 @@ const lastCompletionSent = new Map<string, number>();
 class PersistedSourceMap extends Map<string, "user" | "agent" | "api"> {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly path = `${process.env.HOME}/.claude-orchestrator/msg-source.json`;
+  /**
+   * 「最后一个**人类**是从哪儿来的」——只记 user / api，不被 agent 覆盖。
+   *
+   * 主 map 的语义是「最后一条入站消息的来源」，而入站消息包括 agent→agent 转发、
+   * HTTP peer pushback、看门狗 nudge 等机器注入，它们都会把值刷成 "agent"。用它
+   * 判断「该不该打扰 Web 用户」会失准：2026-07-25 实测，一个纯 Web 会话的值是
+   * "agent"，bg 子区照样建到了 Discord。
+   * 内存态即可：bridge 重启后为空 → 回落到「建子区」的老行为（保守方向），
+   * 下一条人类消息进来就恢复。
+   */
+  private humanSources = new Map<string, "user" | "api">();
   constructor() {
     super();
     try {
@@ -3042,8 +3053,13 @@ class PersistedSourceMap extends Map<string, "user" | "agent" | "api"> {
   }
   override set(k: string, v: "user" | "agent" | "api"): this {
     super.set(k, v);
+    if (v === "user" || v === "api") this.humanSources.set(k, v);
     this.scheduleFlush();
     return this;
+  }
+  /** 最后一次人类交互的来源；从没有过人类消息则 undefined */
+  lastHuman(k: string): "user" | "api" | undefined {
+    return this.humanSources.get(k);
   }
   private scheduleFlush() {
     if (this.timer) return;
@@ -3960,7 +3976,7 @@ sweepStaleTerminalSessions().catch(() => {});
 if (WEB_ONLY) {
   console.log("🕸️ Web-only 模式：未设 DISCORD_BOT_TOKEN，跳过 Discord 登录");
   // v2.8+ bg 活动追踪 — provisionThread 走 local adapter（落空），bg_task_* 事件照发
-  startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.get(cid) });
+  startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
   startArchiveSweeper();
   // v2.13.1+ 给 web 前端补一个"重启了"的信号。Discord 侧靠
