@@ -7,12 +7,16 @@ const nextConfig: NextConfig = {
   // 跨源 _next 请求告警，未来版本会直接拦）。手机走 Tailscale 测网页版时用得上。
   // 127.0.0.1：本机 Playwright 自动化测试——不在列表里 HMR websocket 握手会一直失败，
   // dev 页面周期性整页 reload（store 重挂、视图闪回空白），肉眼看着像灵异 bug。
+  //
+  // 自己的 tailnet IP / 局域网 IP / ts.net 主机名写进 .env.local 的 WEB_DEV_ORIGINS
+  // （逗号分隔）。此前这里硬编码的是作者本人的三个地址，别人 clone 下来必须改源码
+  // 才能用手机访问 dev server —— 那是最不该让用户碰的地方。
   allowedDevOrigins: [
-    "100.120.71.107",
-    "192.168.3.168",
     "127.0.0.1",
-    // tailscale serve 的 HTTPS 域名（getUserMedia 需要安全上下文,2026-07-14 语音输入）
-    "mac-mini-jp.tailfdc471.ts.net",
+    ...(process.env.WEB_DEV_ORIGINS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
   ],
 };
 

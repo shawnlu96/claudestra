@@ -28,8 +28,19 @@ const HOME = process.env.HOME!;
 const TLS_DIR = `${HOME}/.claude-orchestrator/web/tls`;
 const CERT = `${TLS_DIR}/mac.crt`;
 const KEY = `${TLS_DIR}/mac.key`;
-const TS_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
-const TS_HOST = "mac-mini-jp.tailfdc471.ts.net";
+// 你自己的 tailnet 主机名与 Tailscale CLI 路径，从环境变量读（此前这两个值写死
+// 的是作者本机的，别人跑这个脚本必然签不出证书）。App Store 版 Tailscale 的 CLI
+// 在 /Applications/... ，brew 版通常在 /opt/homebrew/bin/tailscale。
+const TS_CLI =
+  process.env.TLS_PROXY_TS_CLI || "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const TS_HOST = process.env.TLS_PROXY_HOST || "";
+if (!TS_HOST) {
+  console.error(
+    "[tls-proxy] 未设置 TLS_PROXY_HOST —— 需要你的 tailnet 主机名，形如 my-mac.tailXXXX.ts.net\n" +
+      "           （`tailscale status` 能看到）。设好再起本进程。"
+  );
+  process.exit(1);
+}
 const LISTEN_HOST = process.env.TLS_PROXY_BIND || "0.0.0.0";
 const LISTEN_PORT = Number(process.env.TLS_PROXY_PORT || 443);
 const BACKEND_PORT = Number(process.env.TLS_PROXY_BACKEND || 33333);

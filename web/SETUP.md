@@ -18,8 +18,9 @@ What you get:
   button next to the composer; pin favourites, the rest auto-sort by usage.
 - **Background-task threads** — subagents and background shells stream into
   collapsible panels instead of flooding the main conversation.
-- **PWA-installable** — add to your phone's home screen for a full-screen app feel;
-  optional OneSignal web push.
+- **PWA-installable** — add to your phone's home screen for a full-screen app feel,
+  with self-hosted Web Push (VAPID keys are generated on first use — no third-party
+  account, no signup).
 - Profile customisation (your + Claude's avatar/nickname), session management
   (create / kill / restart / clear / multi-select delete), per-agent init messages.
 
@@ -74,7 +75,11 @@ Fill `.env.local`:
 | `CLAUDESTRA_API_TOKEN` | **yes** | Bridge `/api/v1` Bearer token. Issue it (see below). The BFF sends it server-side; the browser never sees it. |
 | `BRIDGE_HTTP_URL` | yes | Default `http://127.0.0.1:3847`. **Use `127.0.0.1`, not `localhost`** — the Bridge binds IPv4 only; the `::1` ambiguity causes intermittent 10s `fetch failed` timeouts. |
 | `INTERNAL_API_KEY` | yes | Random secret (`openssl rand -hex 32`). Alternative auth (`x-api-key`) for scripts hitting protected API routes. |
-| `NEXT_PUBLIC_ONESIGNAL_APPID` / `ONESIGNAL_APP_ID` / `ONESIGNAL_REST_API_KEY` | no | OneSignal Web Push. Leave blank to run without push. |
+| `WEB_DEV_ORIGINS` | no | Comma-separated extra origins allowed to reach the **dev** server's `_next` assets — your tailnet IP / LAN IP / `*.ts.net` hostname. Without it, HMR websocket handshakes fail from those addresses and the dev page reloads in a loop. Not needed for `next start`. |
+| `GROQ_API_KEY` | no | Voice transcription. Unset → the transcribe endpoint returns 501; you can also set it from the in-app Settings dialog. |
+| `COOKIE_SECURE` | no | Set `on` to mark the session cookie `Secure`. Off by default so plaintext LAN/Tailscale access still works. |
+| `PUSH_VAPID_SUBJECT` | no | `mailto:` or URL identifying the push sender. |
+| `PUSH_LOCK_PORT` | no | Cross-process lock port for the push dispatcher (default `3339`) — guarantees only one dispatcher sends, whatever the process mix. |
 | `CLAUDESTRA_DATA_ROOT` | no | Overrides the data dir (default `~/.claude-orchestrator/web`), which holds the SQLite for auth sessions + per-agent settings. |
 
 **Issue the API token** (from the repo root, replace `bun` path as needed):

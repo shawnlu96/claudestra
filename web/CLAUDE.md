@@ -1,6 +1,6 @@
 # Claudestra Web 客户端
 
-Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA 安装、OneSignal 推送、多会话流式 Chat。
+Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA 安装、自托管 VAPID Web Push（零第三方账号）、多会话流式 Chat。
 
 **2026-07-10 起数据面全面迁移到 upstream 的多前端 API**（`docs/web-frontend-guide.md` +
 `docs/design-multi-frontend.md`）：BFF 消费 Bridge 的 `/api/v1/*`（Bearer token）与
@@ -164,10 +164,16 @@ iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几�
 
 ## 运行 & 排障
 
-- **两个 launchd 常驻服务**（同前：`com.claudestra.web-bridge` / `com.claudestra.web-launcher`，
-  wrapper 在 `scripts/`，`CONTROL_CHANNEL_ID=local-master-control` 两边必须一致；改 bridge 代码后
-  `launchctl kickstart -k gui/$(id -u)/com.claudestra.web-bridge`）。Web-only 模式=不设
-  DISCORD_BOT_TOKEN（见 FORK.md）。
+- **实际在跑的 launchd 服务**（`launchctl list | grep claudestra` 一看便知，别照抄记忆里的名字——
+  这里曾长期写着 `com.claudestra.web-bridge` / `.web-launcher`，而那两个标签根本不存在，
+  按它 kickstart 会拿到 exit 113）：
+  - `com.claudestra.bridge` — 后端 Bridge（Web-only 模式也是它，只是不设 DISCORD_BOT_TOKEN，见 FORK.md）
+  - `com.claudestra.web` — Next.js 生产服务（plist 必须 `exec ./node_modules/.bin/next start`，见下条）
+  - `com.claudestra.launcher` / `com.claudestra.cron` — 后端守护，与 web 无关
+  - `com.claudestra.tls-proxy` — Caddy 做 h2 TLS 终结
+
+  改后端代码 → `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`（等 15-20s）；
+  改 web 代码 → `cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web`。
 - **⚠ 正式服务 `com.claudestra.web` 的 plist 必须 `exec ./node_modules/.bin/next start`，
   不能 `npm run start`**：npm 中间层被 kickstart 杀掉时子 next-server 可能成孤儿——它没有
   监听端口但推送派发器（出站 SSE+出站推送）还活着，每条推送必重复（2026-07-16 泄漏一个，
