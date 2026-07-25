@@ -6,7 +6,58 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { corsHeadersFor, resolveStaticPath } from "../src/bridge/web-gateway.js";
+import {
+  corsHeadersFor,
+  resolveStaticPath,
+  isCrossOrigin,
+  isOriginExplicitlyAllowed,
+} from "../src/bridge/web-gateway.js";
+
+describe("跨源判定（ws 控制面防护）", () => {
+  const BRIDGE = "http://127.0.0.1:3847/";
+
+  test("无 Origin 头 → 不算跨源（channel-server / manager / 服务端 fetch 都不带）", () => {
+    expect(isCrossOrigin(null, BRIDGE)).toBe(false);
+    expect(isCrossOrigin("", BRIDGE)).toBe(false);
+  });
+
+  test("同源页面 → 不算跨源（同源 fetch 也会带 Origin，不能一见 Origin 就拒）", () => {
+    expect(isCrossOrigin("http://127.0.0.1:3847", BRIDGE)).toBe(false);
+    expect(isCrossOrigin("http://127.0.0.1:3847", "http://127.0.0.1:3847/events")).toBe(false);
+  });
+
+  test("其它站点 → 跨源", () => {
+    expect(isCrossOrigin("https://evil.example.com", BRIDGE)).toBe(true);
+    // 同 host 不同端口 / 不同协议都是不同源
+    expect(isCrossOrigin("http://127.0.0.1:5173", BRIDGE)).toBe(true);
+    expect(isCrossOrigin("https://127.0.0.1:3847", BRIDGE)).toBe(true);
+    // localhost 与 127.0.0.1 字面量不同 → 不同源
+    expect(isCrossOrigin("http://localhost:3847", BRIDGE)).toBe(true);
+  });
+
+  test("请求 URL 不可解析 → 按最坏情况算跨源", () => {
+    expect(isCrossOrigin("https://evil.example.com", "not-a-url")).toBe(true);
+  });
+
+  test("显式白名单逐条匹配", () => {
+    expect(isOriginExplicitlyAllowed("http://localhost:5173", "http://localhost:5173")).toBe(true);
+    expect(
+      isOriginExplicitlyAllowed("http://localhost:5173", "https://a.com, http://localhost:5173")
+    ).toBe(true);
+    expect(isOriginExplicitlyAllowed("https://evil.example.com", "http://localhost:5173")).toBe(false);
+  });
+
+  test('"*" 不放行 ws —— 通配符不该顺带交出控制面', () => {
+    expect(isOriginExplicitlyAllowed("https://evil.example.com", "*")).toBe(false);
+    // 对照：同样的设置在 HTTP CORS 上是放行的，两者刻意不一致
+    expect(corsHeadersFor("https://evil.example.com", "*")).not.toBeNull();
+  });
+
+  test("未配置白名单 → 任何跨源都不放行（默认安全）", () => {
+    expect(isOriginExplicitlyAllowed("https://evil.example.com", "")).toBe(false);
+    expect(isOriginExplicitlyAllowed(null, "")).toBe(false);
+  });
+});
 
 describe("corsHeadersFor", () => {
   test("未配置 → null（默认关闭）", () => {

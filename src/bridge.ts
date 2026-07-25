@@ -80,7 +80,12 @@ import {
   type PendingApiRequest,
   type ApiReplyResult,
 } from "./bridge/api-routes.js";
-import { corsHeadersFor, resolveStaticPath } from "./bridge/web-gateway.js";
+import {
+  corsHeadersFor,
+  resolveStaticPath,
+  isCrossOrigin,
+  isOriginExplicitlyAllowed,
+} from "./bridge/web-gateway.js";
 // v2.6.0+ HTTP API 身份与授权（设计 §3.4 / §5）
 import {
   readPrincipals,
@@ -3682,12 +3687,33 @@ const server = Bun.serve({
   // BRIDGE_BIND=0.0.0.0 显式放开，网络边界（反代/TLS/防火墙）由用户自己负责。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",
   async fetch(req, server) {
+    const reqOrigin = req.headers.get("Origin");
+    const crossOrigin = isCrossOrigin(reqOrigin, req.url);
+
+    // v2.13.1+ ws 跨源防护。WebSocket 不受同源策略约束 —— 用户访问的任意网页都能
+    // 连上这个端口并发 route_to_agent，等价于在这台机器上执行任意命令。回环绑定
+    // 挡不住它（实测：伪造 Origin 的连接被接受并拿到全部频道）。合法客户端
+    // （channel-server / manager / discord-reply）都是 Bun 进程、不带 Origin，
+    // 因此这道闸对它们完全透明。
+    if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      if (crossOrigin && !isOriginExplicitlyAllowed(reqOrigin, CORS_ORIGIN_SETTING)) {
+        console.warn(`🚫 拒绝跨源 WebSocket 升级: Origin=${reqOrigin}`);
+        return new Response("cross-origin websocket refused", { status: 403 });
+      }
+    }
     if (server.upgrade(req)) return undefined;
     const url = new URL(req.url);
     // v2.10+ CORS（BRIDGE_CORS_ORIGIN 未设 = 不发头，行为同旧版）
-    const cors = corsHeadersFor(req.headers.get("Origin"), CORS_ORIGIN_SETTING);
+    const cors = corsHeadersFor(reqOrigin, CORS_ORIGIN_SETTING);
     if (req.method === "OPTIONS" && cors) {
       return new Response(null, { status: 204, headers: cors });
+    }
+    // v2.13.1+ 跨源 HTTP 一并拒掉：/hook、/skills/rescan、/agent/cleanup 等控制端点
+    // 没有 CSRF token，而简单 POST 不触发 preflight，浏览器页面可以直接打进来。
+    // cors 非 null ⇒ 该 origin 已在 BRIDGE_CORS_ORIGIN 白名单（或用户设了 "*"）。
+    if (crossOrigin && !cors) {
+      console.warn(`🚫 拒绝跨源 HTTP: ${req.method} ${url.pathname} Origin=${reqOrigin}`);
+      return new Response("cross-origin request refused", { status: 403 });
     }
     const resp = await handleHttpRoutes(req, url);
     if (cors) for (const [k, v] of Object.entries(cors)) resp.headers.set(k, v);
