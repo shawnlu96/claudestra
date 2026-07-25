@@ -13,6 +13,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
+import { decideAfterReplaced } from "./lib/link-policy.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -45,7 +46,7 @@ if (!CHANNEL_ID) {
 
 let bridgeWs: WebSocket | null = null;
 let registered = false;
-let replaced = false; // bridge 通知此 channel-server 被新连接取代，跳过重连直接退出
+let replaced = false; // bridge 通知此 channel-server 被新连接取代
 const pendingRequests = new Map<
   string,
   { resolve: (v: any) => void; reject: (e: Error) => void }
@@ -53,6 +54,16 @@ const pendingRequests = new Map<
 let requestCounter = 0;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+
+// ── MCP stdio 生命周期 ────────────────────────────────────────────────
+// 唯一能证明「本进程是 Claude Code 正在使用的那一个」的信号。用它做两件事：
+//   1. 只有握手完成的进程才去 bridge 注册（野进程抢不到频道）
+//   2. 被顶替时判断自己是不是正主（stdio 还连着 = 是）
+let mcpInitialized = false;
+let mcpClosed = false;
+// 连续被顶替次数 —— 只用来算退避（3s→60s）和写日志，不再是退出条件。
+// 决策见 lib/link-policy.ts。
+let consecutiveReplaced = 0;
 
 // v2.4.13+ grace-period queue：WS 跟 bridge 断了的时候，新进来的 MCP 请求不立刻
 // reject，而是入队等 WS 重连后重发。这样 Claude Code 在短暂 WS flap（典型 2-5s）
@@ -147,6 +158,12 @@ function connectBridge(): Promise<void> {
 
       if (msg.type === "registered") {
         registered = true;
+        // 拿回频道了 → 清空「连续被顶替」计数。放在 registered 而不是 onopen：
+        // 连上不等于占住，被顶替时也会先 onopen 再被踢。
+        if (consecutiveReplaced > 0) {
+          console.error(`✅ 频道已拿回（此前被顶替 ${consecutiveReplaced} 次）`);
+          consecutiveReplaced = 0;
+        }
         // v2.4.13+ WS (重)连成功 → 把 grace 期间排队的请求全部重发
         flushQueuedSenders();
         resolve();
@@ -173,13 +190,10 @@ function connectBridge(): Promise<void> {
       }
 
       if (msg.type === "replaced") {
-        // bridge 通知我们已经被新的 channel-server 取代
-        // 这是 claude 同时通过两个 MCP 注册 spawn 双份的情况
-        // 标记为 replaced，下面的 onclose 就不会重连
+        // bridge 通知我们已经被新的 channel-server 取代。下面的 onclose 决定是
+        // 退出还是把频道拿回来 —— 判据是 MCP stdio 是否还连着。
         replaced = true;
-        console.error(
-          `❎ 被新连接取代 (${msg.reason || "unknown"})，channel-server 退出`
-        );
+        console.error(`❎ 被新连接取代 (${msg.reason || "unknown"})`);
         return;
       }
     };
@@ -199,24 +213,39 @@ function connectBridge(): Promise<void> {
         pendingRequests.delete(id);
       }
 
-      // 仅当 bridge 明确告诉我们"你被新连接取代了"才退出。判定用**专用 close code
-      // 4001**（v2.2.0+），不再依赖 "replaced" 消息能否在 close 之前送达 —— 之前
-      // bridge 用 close(1000) + 一条 "replaced" 消息，两者有竞态：close 先到时
-      // replaced 标记还没置上 → 误重连，置上后又永久 latch（见 connectBridge 注释）。
-      // code 1000 仍只意味着对端干净关闭（如 bridge 重启）→ 应重连，不退出。
+      // 被顶替的判定用**专用 close code 4001**（v2.2.0+），不依赖 "replaced" 消息
+      // 能否赶在 close 之前送达。code 1000 只意味着对端干净关闭（如 bridge 重启）
+      // → 走下面的普通重连。
+      //
+      // v2.14+ **被顶替不再等于自杀**。旧行为是收到 4001 就 process.exit(0)，而
+      // Claude Code 不会 respawn stdio MCP server —— 于是任何一次抢注册，不管抢的
+      // 人是谁、活多久，都是该 agent 永久掉线。2026-07-25 实测到最荒唐的一种：
+      // 在 agent 自己的 Bash 里误跑了一次 channel-server.ts（DISCORD_CHANNEL_ID
+      // 由 Claude Code 注入、被所有子进程继承，于是它注册了同一个频道），60 秒后
+      // 那个探针进程就被杀了，频道空着没人接管，而正主早已自杀，只能人工 /mcp。
+      //
+      // 现在的判据是 MCP stdio：它还连着 = Claude Code 仍在用本进程 = 我才是正主，
+      // 退避后回去把频道拿回来。只有 stdio 关了（mcp.onclose）才是正当的退出理由。
+      let delay: number;
       if (replaced || event.code === 4001) {
-        console.error("👋 channel-server 退出（被新连接取代）");
-        // 退出前 reject 所有排队请求（Claude Code 会立刻收到错误而不是等 15s 超时）
-        rejectQueuedSenders("channel-server 被新连接取代");
-        process.exit(0);
+        consecutiveReplaced++;
+        const d = decideAfterReplaced({ mcpClosed, consecutiveReplaced });
+        if (d.action === "exit") {
+          console.error(`👋 channel-server 退出（${d.reason}）`);
+          // 退出前 reject 所有排队请求（Claude Code 立刻收到错误，不用等 15s 超时）
+          rejectQueuedSenders("channel-server 被新连接取代");
+          process.exit(0);
+        }
+        console.error(`⚠️ 被新连接顶替 —— ${d.reason}，${d.delayMs / 1000}s 后重新注册`);
+        delay = d.delayMs;
+      } else {
+        // 正常的指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
+        reconnectAttempts++;
+        delay = Math.min(
+          3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)),
+          MAX_RECONNECT_DELAY_MS
+        );
       }
-
-      // 正常的指数退避重连：3s, 6s, 12s, 24s, 48s, 60s cap
-      reconnectAttempts++;
-      const delay = Math.min(
-        3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)),
-        MAX_RECONNECT_DELAY_MS
-      );
       setTimeout(() => {
         connectBridge().catch(() => {});
       }, delay);
@@ -645,20 +674,45 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 // ============================================================
 
 async function main() {
-  // 先连接 Bridge。v2.5.4+ 初次连接失败**不再退出**：电脑重启后 launchd 同时拉
-  // bridge 和 launcher，agent 恢复时 bridge 常常还没就绪（Discord login 要几秒），
-  // channel-server 初连被拒 → 之前这里直接 process.exit(1)，而 Claude Code 不会
-  // respawn stdio MCP → agent 永久失联（消息不达 / reply 不可用 / watcher 不启动），
-  // 只能手动 restart。现在初连失败交给 onclose 的指数退避重连（3s..60s cap），
-  // 跟断线重连同一条路：bridge 起来后自动注册，全程无感。
-  await connectBridge().catch((err) => {
-    console.error("初次连接 Bridge 失败（后台退避重连中）:", (err as Error)?.message || err);
-  });
+  // v2.14+ **先起 MCP stdio、握手完成之后才去 bridge 注册**。
+  //
+  // 原来的顺序是反的（先注册再起 transport），于是任何一个把 channel-server.ts
+  // 跑起来的进程都会立刻抢占频道 —— 哪怕它根本不是 Claude Code 启动的 MCP server。
+  // 这不是理论风险：DISCORD_CHANNEL_ID 由 Claude Code 注入并被**所有 Bash 子进程
+  // 继承**，所以在 agent 自己的仓库里手滑跑一次 `bun run src/channel-server.ts`，
+  // 就会用同一个 channelId 注册、把正在服务的那个连接顶掉（2026-07-25 实测复现）。
+  //
+  // 握手是唯一可靠的身份证明：只有 Claude Code 会发 initialize。野进程起得来、
+  // 但永远等不到握手，也就永远不会碰 bridge。
+  mcp.oninitialized = () => {
+    mcpInitialized = true;
+    connectBridge().catch((err) => {
+      // 连不上不退出：电脑重启后 launchd 同时拉 bridge 和 launcher，agent 恢复时
+      // bridge 常常还没就绪（Discord login 要几秒）。交给 onclose 的指数退避重连
+      // （3s..60s cap），bridge 起来后自动注册，全程无感。
+      console.error("初次连接 Bridge 失败（后台退避重连中）:", (err as Error)?.message || err);
+    });
+  };
 
-  // 启动 MCP stdio transport（无论 bridge 是否已连上都要起，Claude Code 侧的
-  // MCP 握手不依赖 bridge；bridge 连上前工具调用会走 grace-queue / 明确报错）
+  // Claude Code 关掉 stdio = 本进程的唯一正当退出理由（它不会 respawn 我们，
+  // 所以除此之外的任何退出都等于让 agent 永久失联）。
+  mcp.onclose = () => {
+    mcpClosed = true;
+    console.error("👋 MCP stdio 已关闭（Claude Code 侧断开），channel-server 退出");
+    process.exit(0);
+  };
+
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
+
+  // 兜底：万一 SDK 没回调 oninitialized（版本差异 / 客户端跳过通知），30s 后
+  // 仍未握手就照旧注册。宁可退回老行为，也不能让 agent 完全连不上 bridge。
+  setTimeout(() => {
+    if (!mcpInitialized && !mcpClosed && !registered) {
+      console.error("⏱ 30s 未收到 MCP initialized，按兼容路径直接注册");
+      connectBridge().catch(() => {});
+    }
+  }, 30_000).unref?.();
 }
 
 main().catch((err) => {
