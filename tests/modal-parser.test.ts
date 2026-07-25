@@ -13,6 +13,7 @@ import {
   detectSessionIdlePrompt,
   detectPermissionMode,
   probeTuiContract,
+  paneIdleVerdict,
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
 } from "../src/lib/tmux-helper.js";
@@ -674,5 +675,30 @@ describe("probeTuiContract — TUI 文案漂移自检", () => {
       .concat([frame, "❯ ", frame, "  ⏵⏵ yolo mode engaged"])
       .join("\n");
     expect(probeTuiContract(stale).suspect).toBe(true);
+  });
+});
+
+describe("paneIdleVerdict — 三态忙闲（文案漂移时给 unknown）", () => {
+  const frame = "─".repeat(60);
+
+  test("空闲输入框 → idle", () => {
+    const pane = [frame, "❯ ", frame, "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
+    expect(paneIdleVerdict(pane)).toBe("idle");
+  });
+
+  test("跑工具中 → busy", () => {
+    const pane = [frame, "✻ Running… (esc to interrupt)", frame].join("\n");
+    expect(paneIdleVerdict(pane)).toBe("busy");
+  });
+
+  test("文案漂移 → unknown，而不是武断地报 busy", () => {
+    // 这正是旧两态版本的失效方式：认不出任何标记就恒判"在忙"，
+    // 于是每条新消息都会误发一次 Ctrl+C 打断用户。
+    const drifted = [frame, "❯ ", frame, "  ⏵⏵ yolo mode engaged (press tab-tab)"].join("\n");
+    expect(paneIdleVerdict(drifted)).toBe("unknown");
+  });
+
+  test("裸 shell 不算漂移（那不是 TUI）", () => {
+    expect(paneIdleVerdict("shawn@mac ~ % ")).not.toBe("unknown");
   });
 });

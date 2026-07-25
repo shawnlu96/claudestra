@@ -1292,8 +1292,14 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       const listResult = await runManager("list");
       const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
       const targetWindow = agent ? `master:${agent.name}` : `master:0`;
-      const { isIdle } = await import("./lib/tmux-helper.js");
-      if (!(await isIdle(targetWindow))) {
+      const { idleVerdict } = await import("./lib/tmux-helper.js");
+      // 用三态判断：契约可疑（CC 可能改了底部文案）时宁可不打断。旧的两态版本在
+      // 文案漂移时会恒判"在忙" → 每条消息都误发一次 Ctrl+C，静默打断用户的工作。
+      const verdict = await idleVerdict(targetWindow);
+      if (verdict === "unknown") {
+        console.warn(`⚠️ ${targetWindow} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
+      }
+      if (verdict === "busy") {
         console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，发 Ctrl+C 打断`);
         await tmuxRaw(["send-keys", "-t", targetWindow, "C-c"]).catch(() => {});
         await Bun.sleep(400);

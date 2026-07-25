@@ -12,8 +12,9 @@ import type { Client, TextChannel } from "discord.js";
 import {
   tmuxCapture,
   windowTarget,
-  isIdle,
   isAtShell,
+  idleVerdict,
+  windowHasChildProcess,
 } from "../lib/tmux-helper.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
@@ -127,7 +128,13 @@ async function checkAgent(
   }
 
   // idle（ready 提示符）→ 正常歇着，不是卡死。清掉状态。
-  if (await isIdle(target)) {
+  // 三态：契约可疑（CC 可能改了底部文案）时按 idle 处理 —— 文案一变会让**所有**
+  // agent 同时被判成"非 idle"，那就是一轮全员误报刷屏。宁可漏报一次真卡死。
+  const verdict = await idleVerdict(target);
+  if (verdict === "idle" || verdict === "unknown") {
+    if (verdict === "unknown") {
+      console.warn(`⚠️ [wedge] ${agentName} 忙闲判据失效（TUI 文案可能已变），本轮按 idle 处理`);
+    }
     agentStates.delete(agentName);
     return;
   }
@@ -137,7 +144,13 @@ async function checkAgent(
   // 对一个根本没 claude 在跑的 window 每小时误报。这是掉线不是卡死：Esc/C-c 没用，
   // 要的是重启。下面按 atShell 分流到不同通知 + 不同阈值。
   // 空白 pane 同样按已退出处理（claude 退出后 clear 的 shell 没有提示符特征）。
-  const atShell = isAtShell(pane) || !pane.trim();
+  // "claude 是否已退出到 shell" 优先用进程树判定 —— pane 有无直接子进程是 tmux 层面的
+  // 事实，跟 CC 的界面文案完全无关。文案匹配只在查不到 pane pid 时兜底（launcher 的
+  // master 判活早就是这么做的，这里补齐）。少了这层，用户 shell 主题若用 ❯ 提示符，
+  // 判据就完全压在"能否认出 CC 的 banner"上。
+  const hasChild = await windowHasChildProcess(target);
+  const atShell =
+    hasChild === null ? isAtShell(pane) || !pane.trim() : !hasChild;
 
   // v2.0.23+: jsonl 活跃度逃生阀。Claude 思考 / 调工具时 session jsonl 一直在追加。
   // 只看 tmux pane 指纹会把"思考中但屏幕暂时没变"误判成卡死（owner 实测 claudestra

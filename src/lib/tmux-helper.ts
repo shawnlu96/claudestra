@@ -201,6 +201,32 @@ export async function isIdle(target: string): Promise<boolean> {
 }
 
 /**
+ * 三态版忙闲判断：多出一个 "unknown"。
+ *
+ * paneLooksIdle 只能答 true/false，而它完全建立在 TUI 文案上。CC 改一句文案时
+ * 它不会报错，只会**恒返回 false**（找不到 ❯ 和 banner）—— 也就是"永远在忙"。
+ * 对不同调用点，这个失效方向的后果截然不同：
+ *   - 新消息自动中断：恒忙 → **每条消息都误发 Ctrl+C 打断用户的工作**（静默且严重）
+ *   - wedge 判卡死：恒忙 → 误报"卡住"告警
+ *   - 反过来，AUQ 陈旧检测里"判为空闲"才是危险方向（会拒掉合法提交）
+ *
+ * 所以不能给 paneLooksIdle 全局钦定一个"安全"方向 —— 得让调用点自己选。
+ * 契约可疑（屏幕上有 TUI，但空闲/忙碌两个标记一个都不命中）时返回 unknown，
+ * 由调用点决定往哪边倒。
+ */
+export type IdleVerdict = "idle" | "busy" | "unknown";
+
+export function paneIdleVerdict(pane: string): IdleVerdict {
+  if (probeTuiContract(pane).suspect) return "unknown";
+  return paneLooksIdle(pane) ? "idle" : "busy";
+}
+
+export async function idleVerdict(target: string): Promise<IdleVerdict> {
+  const tail = await tmuxRaw(["capture-pane", "-t", target, "-p"]);
+  return paneIdleVerdict(tail);
+}
+
+/**
  * Claude Code TUI 启动就绪检测 —— 比 isIdle 宽松，专给 launch 流程用。
  *
  * 为什么需要：isIdle 要求行**只**含 ❯，但新版 Claude Code（≥ 2.1.129）启动后
