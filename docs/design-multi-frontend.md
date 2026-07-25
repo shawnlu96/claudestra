@@ -1,5 +1,7 @@
 # 设计文档：多前端架构（Discord 解耦 → Web / Telegram / API）
 
+> [English](./design-multi-frontend.en.md) · **简体中文**
+
 > 状态：**已实现**（A + B + C1，2026-07-09 通宵迭代完成，攒批待发 v2.6.0）
 > 实现与设计的偏差在 §11 记录。C2（Discord 全面收编）按 D8 渐进进行，不立项。
 > 目标：Discord 从「系统的脸」降级为「第一个 adapter」。核心与任何聊天平台解耦，

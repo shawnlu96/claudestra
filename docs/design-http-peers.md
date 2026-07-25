@@ -1,5 +1,7 @@
 # HTTP Peer 协作（v2.11）— 设计文档
 
+> [English](./design-http-peers.en.md) · **简体中文**
+
 owner 2026-07-19：「把强依赖 Discord 的 peer 协作拆出来……更方便做权限管理、聊天历史控制、协作流程。」
 
 ## 1. 核心理念

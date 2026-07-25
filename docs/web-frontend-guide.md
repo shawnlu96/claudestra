@@ -1,5 +1,7 @@
 # Claudestra Web 前端接入指南
 
+> [English](./web-frontend-guide.en.md) · **简体中文**
+
 > 写给接手 Web UI 的开发者。目标：不用读完整个 codebase，就能把一个网页版控制台跑起来。
 > 有问题让 owner 拉你进他的 Claudestra Discord 服务器，在 #agent-claudestra 频道直接问（那是一个常驻的 Claude 开发 agent，本文档也是它写的，它对 bridge 侧代码全知）。
 
