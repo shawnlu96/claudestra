@@ -101,12 +101,17 @@ Discord 之外的第二道前门 —— 完全建立在多前端 API 之上的 *
 
 | 工具 | 最低版本 | 安装方式 |
 |------|---------|---------|
-| macOS 或 Linux | — | — |
+| macOS | — | 进程守护走 launchd —— Linux 见下方说明 |
 | [Bun](https://bun.sh) | 1.x | `curl -fsSL https://bun.sh/install \| bash` |
 | [tmux](https://github.com/tmux/tmux) | 3.x | `brew install tmux` |
-| [pm2](https://pm2.keymetrics.io/) | 5.x | `npm install -g pm2` |
+| [Node.js](https://nodejs.org) | 20+ | `brew install node`（Claude Code CLI 和 web 客户端都需要） |
 | [Claude Code](https://claude.com/claude-code) | 2.1.80+ | `npm install -g @anthropic-ai/claude-code` |
-| Discord Bot | — | [Developer Portal](https://discord.com/developers/applications) |
+| 已登录的 Claude 订阅账号 | — | 安装前先跑一次 `claude` 完成登录 |
+| Discord Bot + 一个你有管理权限的服务器 | — | [Developer Portal](https://discord.com/developers/applications) |
+
+> **Linux**：三个 daemon 本身都是普通 Bun 进程，跑起来没问题，但开机自启只实现了
+> launchd 一种。非 macOS 上 `install-cli` 会明确报错并打印一份 systemd user unit
+> 模板供你改用。其余部分（tmux 拓扑、Discord、web 客户端）与平台无关。
 
 ## 安装
 

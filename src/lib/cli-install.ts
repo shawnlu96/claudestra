@@ -565,6 +565,28 @@ async function installBundledSkills(repoRoot: string): Promise<{ linked: string[
   return { linked, skipped };
 }
 
+/**
+ * 非 macOS 平台的替代方案提示：一个可直接抄用的 systemd user unit 模板。
+ * 三个 daemon 只有入口脚本不同，故只给一份带占位的模板。
+ */
+function systemdUnitHint(repoRoot: string, bunPath: string): string {
+  return [
+    `  # ~/.config/systemd/user/claudestra-bridge.service`,
+    `  # （launcher / cron 同理，把 ExecStart 换成 src/launcher.ts、src/cron.ts，`,
+    `  #   服务名相应改成 claudestra-launcher / claudestra-cron）`,
+    `  [Unit]`,
+    `  Description=Claudestra bridge`,
+    `  [Service]`,
+    `  ExecStart=${bunPath} ${repoRoot}/src/bridge.ts`,
+    `  WorkingDirectory=${repoRoot}`,
+    `  EnvironmentFile=${repoRoot}/.env`,
+    `  Restart=always`,
+    `  RestartSec=10`,
+    `  [Install]`,
+    `  WantedBy=default.target`,
+  ].join("\n");
+}
+
 export async function installClaudestraCli(repoRoot: string): Promise<InstallCliResult> {
   repoRoot = resolve(repoRoot);
   const errors: string[] = [];
@@ -578,6 +600,23 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     errors,
     warnings,
   };
+
+  // 平台守卫。这个函数整体是 launchd 专有的：写 ~/Library/LaunchAgents/*.plist、
+  // 调 launchctl bootout/bootstrap。以前没有这道判断，Linux 上会照样往
+  // ~/Library/LaunchAgents 里 mkdir -p 出一个假目录、launchctl 报 command not found，
+  // 而调用方（setup.ts）只 warn 不 fail —— 用户看到"✨ 安装完成"，实际没有任何
+  // 进程守护、开机不自启，且文档里的排查命令（launchctl list）全都用不了。
+  // 与其假装成功，不如明确失败并给出可操作的替代方案。
+  if (process.platform !== "darwin") {
+    errors.push(
+      `进程守护当前只实现了 macOS launchd，检测到 ${process.platform}。\n` +
+        `Claudestra 本身能在 Linux 上跑（bridge / launcher / cron 都是普通 Bun 进程），\n` +
+        `只是需要你自己接管开机自启。用 systemd 的话，为这三个服务各建一个 user unit：\n\n` +
+        systemdUnitHint(repoRoot, resolveBunPath()) +
+        `\n然后 systemctl --user daemon-reload && systemctl --user enable --now claudestra-bridge`
+    );
+    return result;
+  }
 
   // 找 bun（绝对路径，写进所有 plist + CLI wrapper）
   const bunPath = resolveBunPath();

@@ -333,6 +333,14 @@ async function stepCheckDeps(): Promise<void> {
     fail(t(`不支持的系统: ${process.platform}。Claudestra 只支持 macOS 和 Linux`, `Unsupported OS: ${process.platform}. Claudestra supports macOS and Linux only`));
     process.exit(1);
   }
+  if (platform === "linux") {
+    // 说在前面，别让用户走完 19 步才发现开机自启没装上。三个 daemon 本身是普通
+    // Bun 进程，Linux 上跑得起来；只有进程守护那步是 launchd 专有的。
+    warn(t(
+      "Linux 上进程守护（开机自启）尚未实现——最后一步 install-cli 会报错并给出 systemd unit 模板，需要你手动接管。其余功能与平台无关。",
+      "Autostart/supervision is macOS-only for now: the final install-cli step will fail on Linux and print a systemd user-unit template for you to adapt. Everything else is platform-neutral.",
+    ));
+  }
 
   // 先扫一遍
   print(t("扫描依赖:", "Scanning dependencies:"));

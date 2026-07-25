@@ -101,12 +101,18 @@ Setup + phone remote access (Tailscale / PWA install): **[web/SETUP.md](./web/SE
 
 | Tool | Minimum | Install |
 |------|---------|---------|
-| macOS or Linux | — | — |
+| macOS | — | Process supervision uses launchd — see the note below for Linux |
 | [Bun](https://bun.sh) | 1.x | `curl -fsSL https://bun.sh/install \| bash` |
 | [tmux](https://github.com/tmux/tmux) | 3.x | `brew install tmux` |
-| [pm2](https://pm2.keymetrics.io/) | 5.x | `npm install -g pm2` |
+| [Node.js](https://nodejs.org) | 20+ | `brew install node` (needed for the Claude Code CLI and the web client) |
 | [Claude Code](https://claude.com/claude-code) | 2.1.80+ | `npm install -g @anthropic-ai/claude-code` |
-| Discord Bot | — | [Developer Portal](https://discord.com/developers/applications) |
+| A Claude subscription, already logged in | — | Run `claude` once and complete the login before installing |
+| Discord Bot + a server you administer | — | [Developer Portal](https://discord.com/developers/applications) |
+
+> **Linux**: the daemons themselves are ordinary Bun processes and run fine, but
+> autostart is implemented for launchd only. `install-cli` stops with an error on
+> non-macOS and prints a systemd user-unit template you can adapt. Everything else
+> — tmux topology, Discord, the web client — is platform-neutral.
 
 ## Installation
 
