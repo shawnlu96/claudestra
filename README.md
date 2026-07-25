@@ -32,7 +32,7 @@ Claude Code is a terminal-only tool: if you aren't at your computer, you aren't 
  Discord Bot  ──  one token, many channels
         │
         ▼
- Bridge (Bun, pm2)            ws://localhost:3847
+ Bridge (Bun, launchd)        ws://localhost:3847
         │
         │  WebSocket  ├──  channel-server ◄─► Claude Code (session A)
         │             ├──  channel-server ◄─► Claude Code (session B)
@@ -83,10 +83,10 @@ Setup + phone remote access (Tailscale / PWA install): **[web/SETUP.md](./web/SE
 
 ### Reliability & ops
 - **Auto-update (v1.3+, configurable v1.4+)** — Claudestra itself polls GitHub every 30 min; Claude Code CLI every 7 days. Only upgrades while every agent is idle. Toggle per-target via `bun src/manager.ts auto-update <target> on|off`.
-- **Reboot survival (v1.7.9+)** — `pm2 startup` gets automated during setup; on reboot the launcher revives every registry-known agent with `claude --resume` into its original Discord channel.
+- **Reboot survival (v1.7.9+)** — the three launchd agents are installed during setup and start at login; on reboot the launcher revives every registry-known agent with `claude --resume` into its original Discord channel.
 - **Session-idle Discord buttons (v1.3+)** — when Claude Code's resume dialog appears, agents surface buttons in Discord (resume from summary / resume full / don't ask again); master auto-confirms to stay always-on.
 - **Wedge watcher (v1.6+)** — if an agent's tmux pane stays unchanged for 30 min while not idle, you get an @mention with Esc / Ctrl+C rescue buttons.
-- **Self-updating** — `bun src/manager.ts update` does `git pull` + `pm2 restart ecosystem.config.cjs` (only Claudestra's 3 processes; other pm2 apps untouched).
+- **Self-updating** — `bun src/manager.ts update` does `git pull` + reloads Claudestra's three launchd daemons (nothing else on the machine is touched).
 
 ### Observability
 - **Token-usage rollup (v1.6+)** — `bun src/manager.ts cost [--agent <name>] [--today|--week]` aggregates per-agent / per-model tokens straight from Claude Code's JSONL files.
@@ -188,7 +188,7 @@ bun src/manager.ts cron-history [name|id]
 
 # Versioning & auto-update
 bun src/manager.ts version                          # current version + whether update available
-bun src/manager.ts update                           # git pull + pm2 restart (Claudestra only)
+bun src/manager.ts update                           # git pull + reload the 3 launchd daemons
 bun src/manager.ts auto-update status               # show auto-update toggles
 bun src/manager.ts auto-update claudestra on|off    # Claudestra self-update (30-min poll)
 bun src/manager.ts auto-update claude on|off        # Claude Code CLI (weekly poll)
@@ -263,8 +263,8 @@ src/
     wedge-watcher.ts     Detect stuck agents (no pane change + not idle)
   channel-server.ts      Per-agent MCP proxy (one per Claude Code process)
   manager.ts             Agent lifecycle + cron + version + metrics + tmux control CLI
-  cron.ts                Cron scheduler daemon (pm2-managed)
-  launcher.ts            Master tmux session guardian (pm2-managed)
+  cron.ts                Cron scheduler daemon (launchd-managed)
+  launcher.ts            Master tmux session guardian (launchd-managed)
   setup.ts               Interactive installation wizard
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → typing indicator

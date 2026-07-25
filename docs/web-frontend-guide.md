@@ -162,7 +162,7 @@ GET /api/v1/agents/:name/history/:sessionId?limit=100&before=<seq>&subagent=agen
 | 依赖 | 说明 |
 |---|---|
 | macOS / Linux | tmux 依赖，Windows 需 WSL |
-| bun、tmux、pm2 | 运行时三件套 |
+| bun、tmux、launchd | 运行时三件套（进程守护走 launchd，非 pm2）|
 | Claude Code CLI | **登录你自己的 Claude 订阅账号** —— 本地 agent 的对话烧的是你自己的额度，测试时注意用量（`/stats` 里能看到） |
 | 自建 Discord bot + 私人测试服务器 | **硬前置，绕不开**：`manager create` 建 agent 时要通过 bot 建 Discord 频道。建 bot + 拉进自己的测试服约 5 分钟，[SETUP.md](../SETUP.md) 有一步步截图流程 |
 
@@ -170,7 +170,7 @@ GET /api/v1/agents/:name/history/:sessionId?limit=100&before=<seq>&subagent=agen
 git clone https://github.com/shawnlu96/claudestra && cd claudestra
 bun install
 bun run setup        # 交互式向导：填 bot token / guild id / 你的 Discord user id
-pm2 start ecosystem.config.cjs
+bun src/manager.ts install-cli   # 写入并加载 bridge / launcher / cron 三个 launchd daemon
 
 # 造测试数据：建 1-2 个 agent（随便指个目录），聊几句就有历史/事件了
 bun src/manager.ts create web-test ~/tmp/web-test "web UI 测试用"

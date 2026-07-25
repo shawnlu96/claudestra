@@ -25,7 +25,6 @@ This file exists as a reference for:
 # 1. Install prerequisites (skip anything you already have)
 brew install tmux                             # macOS
 curl -fsSL https://bun.sh/install | bash      # Bun
-npm install -g pm2                            # pm2
 npm install -g @anthropic-ai/claude-code      # Claude Code 2.1.80+
 
 # 2. Clone and run the wizard
@@ -40,7 +39,7 @@ bun run setup
 > curl -fsSL "https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh?t=$(date +%s)" | bash
 > ```
 
-That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and starts pm2.
+That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and installs the three launchd daemons.
 
 ### Cross-Claudestra peer collaboration (v2.11+, HTTP peers)
 
@@ -80,14 +79,14 @@ Notes:
 
 The `bun run setup` command runs through eight numbered steps:
 
-1. **Check system dependencies** — verifies `git`, `tmux`, `bun`, `pm2`, `claude` are installed and prints install commands for anything missing.
+1. **Check system dependencies** — verifies `git`, `tmux`, `bun`, `claude` are installed and prints install commands for anything missing.
 2. **Create a Discord application** — opens the Developer Portal and tells you which button to click.
 3. **Get the bot token** — instructs you to reset the token and paste it. Validates length and format.
 4. **Enable privileged intents** — reminds you which three intents to enable (bot silently drops messages otherwise).
 5. **Invite the bot** — walks through the OAuth2 URL Generator with the exact scopes and permissions to select.
 6. **Collect Discord IDs** — enables Developer Mode, then asks for guild ID, user ID, and control channel ID, validating each as a 17–20 digit snowflake.
 7. **Set preferences** — your display name, MCP server name (default `claudestra`), and bridge port (default `3847`).
-8. **Finalize** — writes `.env`, renders `master/CLAUDE.md` from the template, then optionally runs `bun install`, `playwright install`, `claude mcp add`, and `pm2 start` automatically.
+8. **Finalize** — writes `.env`, renders `master/CLAUDE.md` from the template, then optionally runs `bun install`, `playwright install`, `claude mcp add`, and `manager.ts install-cli` (which writes and loads the launchd daemons) automatically.
 
 After the wizard finishes, open Discord and say anything to the bot in your control channel. The master orchestrator will reply within a few seconds.
 
@@ -107,7 +106,11 @@ The wizard writes `.env` with seven variables:
 | `USER_NAME` | How the master agent addresses you in replies |
 | `MCP_NAME` | MCP server name used by `claude mcp add` (default `claudestra`) |
 
-Edit `.env` directly and `pm2 restart discord-bridge` to apply changes.
+Edit `.env` directly, then reload the bridge:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge
+```
 
 Runtime-mutable toggles live in a separate file — `~/.claude-orchestrator/config.json` — and are managed via `bun src/manager.ts auto-update ...`:
 
@@ -138,8 +141,9 @@ sed "s/{{USER_NAME}}/YourName/g" master/CLAUDE.md.template > master/CLAUDE.md
 
 claude mcp add claudestra -s user -- bun run $(pwd)/src/channel-server.ts
 
-pm2 start ecosystem.config.cjs
-pm2 save
+# Writes ~/Library/LaunchAgents/com.claudestra.{bridge,launcher,cron}.plist,
+# loads them, and installs the `claudestra` CLI wrapper into ~/.local/bin
+bun src/manager.ts install-cli
 ```
 
 ---
@@ -169,7 +173,7 @@ That runs:
 
 ```bash
 bun src/manager.ts version   # show status
-bun src/manager.ts update    # git pull + pm2 restart
+bun src/manager.ts update    # git pull + reload the three launchd daemons
 ```
 
 Or by hand:
@@ -177,7 +181,7 @@ Or by hand:
 ```bash
 cd ~/repos/claudestra
 git pull
-pm2 restart ecosystem.config.cjs
+bun src/manager.ts install-cli   # rewrites + reloads the three daemons
 ```
 
 ---
@@ -185,18 +189,62 @@ pm2 restart ecosystem.config.cjs
 ## Uninstalling
 
 ```bash
-pm2 delete discord-bridge master-launcher cron-scheduler
+# 1. Stop and unload the three launchd daemons, then delete their plists.
+#    Skipping the plist removal is the classic mistake: launchctl bootout only
+#    stops the current instance, and KeepAlive brings it straight back on login.
+for svc in bridge launcher cron; do
+  launchctl bootout "gui/$(id -u)/com.claudestra.$svc" 2>/dev/null
+  rm -f "$HOME/Library/LaunchAgents/com.claudestra.$svc.plist"
+done
+
+# 2. Unregister the MCP server and the CLI wrapper
 claude mcp remove claudestra -s user
+rm -f ~/.local/bin/claudestra
+
+# 3. Remove the Stop / StopFailure / Notification hooks that point at
+#    src/hooks/typing-hook.ts from ~/.claude/settings.json (edit by hand —
+#    the file may hold hooks belonging to other tools).
+
+# 4. Delete the code and all runtime state
 trash ~/repos/claudestra ~/.claude-orchestrator /tmp/claude-orchestrator
 ```
 
-The `~/.claude-orchestrator` directory contains registry, config (auto-update toggles), cron jobs, and the metrics log — deleting it wipes all runtime state. If you only want to pause the bot without forgetting its state, `pm2 stop` everything and skip the `trash` line.
+The `~/.claude-orchestrator` directory contains the registry, config (auto-update toggles), cron jobs, API tokens, peers, and the session archive — deleting it wipes all runtime state including your chat history snapshots.
+
+To pause the bot without forgetting its state, stop the daemons but leave the plists and state in place:
+
+```bash
+for svc in bridge launcher cron; do launchctl bootout "gui/$(id -u)/com.claudestra.$svc"; done
+```
 
 To remove the bot from Discord, kick it from your server. To delete it entirely, revoke the application in the Developer Portal.
 
 ---
 
 ## Troubleshooting
+
+### Day-2 basics: is it running, where are the logs, how do I restart it
+
+Claudestra runs as three launchd user agents. Everything below works from any directory.
+
+```bash
+# Are they alive? (PID in column 1, "-" means loaded but not running)
+launchctl list | grep claudestra
+
+# Logs — stdout and stderr are separate files per daemon
+tail -f /tmp/claudestra-bridge.out      # routing, registrations, deliveries
+tail -f /tmp/claudestra-bridge.err      # stack traces
+tail -f /tmp/claudestra-launcher.out    # master guardian, agent revival
+tail -f /tmp/claudestra-cron.out        # scheduled jobs
+
+# Restart one service (-k kills it first, then reloads)
+launchctl kickstart -k "gui/$(id -u)/com.claudestra.bridge"
+
+# Reinstall/repair all three plists + the `claudestra` CLI wrapper
+bun src/manager.ts install-cli
+```
+
+The bridge takes ~15 s to come back after a restart: agents' channel-servers reconnect with exponential backoff, so give it a moment before concluding something is broken.
 
 ### Wizard can't find `master/CLAUDE.md.template`
 
@@ -207,19 +255,19 @@ Run it from inside the repo: `cd ~/repos/claudestra && bun run setup`.
 Check **Privileged Intents** — all three must be enabled on the Developer Portal. Discord silently drops events the bot isn't entitled to.
 
 ```bash
-pm2 logs discord-bridge --lines 50
+tail -n 50 /tmp/claudestra-bridge.out
 ```
 
 If there are no "received message" lines, intents are the problem.
 
 ### Bot responds to buttons but not to text
 
-Your user ID is probably missing from `ALLOWED_USER_IDS`. Re-run `bun run setup` or edit `.env` directly and `pm2 restart discord-bridge`.
+Your user ID is probably missing from `ALLOWED_USER_IDS`. Re-run `bun run setup`, or edit `.env` directly and reload with `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`.
 
 ### Master agent never comes online
 
 ```bash
-pm2 logs master-launcher --lines 50
+tail -n 50 /tmp/claudestra-launcher.out
 ```
 
 Common causes:
@@ -231,7 +279,7 @@ Common causes:
 ### Bridge keeps restarting
 
 ```bash
-pm2 logs discord-bridge --err --lines 100
+tail -n 100 /tmp/claudestra-bridge.err
 ```
 
 Usually means the bot token is wrong or `.env` has a typo. Regenerate the token in the Developer Portal and re-run `bun run setup`.
@@ -240,7 +288,7 @@ Usually means the bot token is wrong or `.env` has a typo. Regenerate the token 
 
 Discord caches slash commands per client for up to an hour. If you've just installed a new Claude Code plugin or added a skill to `~/.claude/skills/` and the command isn't showing up in Discord autocomplete:
 
-1. Wait up to 30 min (bridge rescans + re-registers automatically) **or** `pm2 restart discord-bridge` to force an immediate rescan.
+1. Wait up to 30 min (bridge rescans + re-registers automatically) **or** `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge` to force an immediate rescan.
 2. Then restart the Discord mobile/desktop app to clear its client-side cache.
 
 The same applies if Discord is still showing an old command list after a Claudestra upgrade.

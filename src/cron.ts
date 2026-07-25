@@ -2,7 +2,7 @@
 /**
  * Cron Scheduler — 定时任务调度器
  *
- * pm2 管理的守护进程，按 cron 表达式调度任务。
+ * launchd 管理的守护进程（com.claudestra.cron），按 cron 表达式调度任务。
  * 每个任务触发时：创建临时 agent → 发送 prompt → 等待完成 → 通知 → 销毁。
  *
  * 存储：~/.claude-orchestrator/cron.json

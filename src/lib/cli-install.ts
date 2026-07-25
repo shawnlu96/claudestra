@@ -27,7 +27,11 @@
  *   4) 启动新 plist（launchctl bootout 容错 + bootstrap）。
  *
  * pm2 本身没卸：用户想 `pm2 logs` 看历史还能用。`ecosystem.config.cjs` 留着供
- * 临时手动启动 / 老熟人怀旧。但**启动链不再走 pm2**。
+ * 临时手动启动 / 老熟人怀旧。但**启动链不再走 pm2**，所有面向用户的文档
+ * （README / SETUP / CLAUDE.md / install.sh / master 模板）也已在 v2.13.1 全部
+ * 改口径到 launchd —— 之前文档教 pm2、代码装 launchd，照着装会同时跑起两套：
+ * 一个 token 两条 Discord 网关、3847 端口 EADDRINUSE 崩溃循环、两个 launcher
+ * 抢同一个 tmux session。
  */
 
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";

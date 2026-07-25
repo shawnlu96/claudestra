@@ -33,7 +33,13 @@ export async function bridgeRequest(msg: Record<string, unknown>): Promise<any> 
 
     ws.onerror = () => {
       clearTimeout(timer);
-      reject(new Error("无法连接 Bridge。请确认: pm2 start --only discord-bridge"));
+      reject(
+        new Error(
+          "无法连接 Bridge。检查：launchctl list | grep claudestra；" +
+            "重启：launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge；" +
+            "日志：/tmp/claudestra-bridge.err"
+        )
+      );
     };
   });
 }

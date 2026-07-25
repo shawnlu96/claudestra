@@ -24,7 +24,6 @@
 # 1. 装前置工具（已有的跳过）
 brew install tmux                             # macOS
 curl -fsSL https://bun.sh/install | bash      # Bun
-npm install -g pm2                            # pm2
 npm install -g @anthropic-ai/claude-code      # Claude Code 2.1.80+
 
 # 2. Clone 代码，跑向导
@@ -39,7 +38,7 @@ bun run setup
 > curl -fsSL "https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh?t=$(date +%s)" | bash
 > ```
 
-就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、启动 pm2。
+就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、装好三个 launchd daemon。
 
 ### 跨 Claudestra 协作（v2.11+ HTTP peer）
 
@@ -79,14 +78,14 @@ bun run setup
 
 `bun run setup` 分 8 个带编号的步骤：
 
-1. **检查系统依赖** — 确认 `git` / `tmux` / `bun` / `pm2` / `claude` 都装了，缺的给出安装命令。
+1. **检查系统依赖** — 确认 `git` / `tmux` / `bun` / `claude` 都装了，缺的给出安装命令。
 2. **创建 Discord 应用** — 打开 Developer Portal，告诉你点哪个按钮。
 3. **获取 Bot Token** — 让你 Reset Token 并粘贴，校验格式。
 4. **开启 Privileged Intents** — 提醒你必须打开的三个 intent（少一个 bot 就静默丢消息）。
 5. **邀请 Bot** — 带你走 OAuth2 URL Generator，告诉你精确的 scope 和 permission。
 6. **收集 Discord ID** — 打开开发者模式，依次问 Guild ID / User ID / 控制频道 ID，每个都校验是 17-20 位 snowflake。
 7. **个人偏好** — 你的称呼、MCP 服务名（默认 `claudestra`）、Bridge 端口（默认 `3847`）。
-8. **收尾** — 写 `.env`、渲染 `master/CLAUDE.md`，然后可选地自动跑 `bun install` + `playwright install` + `claude mcp add` + `pm2 start`。
+8. **收尾** — 写 `.env`、渲染 `master/CLAUDE.md`，然后可选地自动跑 `bun install` + `playwright install` + `claude mcp add` + `manager.ts install-cli`（写入并加载三个 launchd daemon）。
 
 向导跑完后，打开 Discord 在控制频道随便说句话，大总管几秒内就会回。
 
@@ -106,7 +105,11 @@ bun run setup
 | `USER_NAME` | 大总管在回复里怎么叫你 |
 | `MCP_NAME` | `claude mcp add` 用的 MCP 服务名（默认 `claudestra`） |
 
-直接改 `.env` 然后 `pm2 restart discord-bridge` 就能生效。
+直接改 `.env`，然后重载 bridge：
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge
+```
 
 运行时开关存在另一个文件 —— `~/.claude-orchestrator/config.json`，通过 `bun src/manager.ts auto-update ...` 管理：
 
@@ -137,8 +140,9 @@ sed "s/{{USER_NAME}}/你的名字/g" master/CLAUDE.md.template > master/CLAUDE.m
 
 claude mcp add claudestra -s user -- bun run $(pwd)/src/channel-server.ts
 
-pm2 start ecosystem.config.cjs
-pm2 save
+# 写入 ~/Library/LaunchAgents/com.claudestra.{bridge,launcher,cron}.plist 并加载，
+# 同时把 `claudestra` 命令装到 ~/.local/bin
+bun src/manager.ts install-cli
 ```
 
 ---
@@ -168,7 +172,7 @@ bun src/manager.ts auto-update claude off       # 停止 Claude Code CLI 自动�
 
 ```bash
 bun src/manager.ts version   # 看状态
-bun src/manager.ts update    # git pull + pm2 restart
+bun src/manager.ts update    # git pull + 重载三个 launchd daemon
 ```
 
 手动的话：
@@ -176,7 +180,7 @@ bun src/manager.ts update    # git pull + pm2 restart
 ```bash
 cd ~/repos/claudestra
 git pull
-pm2 restart ecosystem.config.cjs
+bun src/manager.ts install-cli   # 重写并重载三个 daemon
 ```
 
 ---
@@ -184,18 +188,62 @@ pm2 restart ecosystem.config.cjs
 ## 卸载
 
 ```bash
-pm2 delete discord-bridge master-launcher cron-scheduler
+# 1. 停掉并卸载三个 launchd daemon，然后删掉它们的 plist。
+#    只 bootout 不删 plist 是最典型的错误：bootout 只停当前这次，
+#    KeepAlive 会在下次登录时把它们原样拉回来。
+for svc in bridge launcher cron; do
+  launchctl bootout "gui/$(id -u)/com.claudestra.$svc" 2>/dev/null
+  rm -f "$HOME/Library/LaunchAgents/com.claudestra.$svc.plist"
+done
+
+# 2. 摘掉 MCP server 与 CLI wrapper
 claude mcp remove claudestra -s user
+rm -f ~/.local/bin/claudestra
+
+# 3. 手动编辑 ~/.claude/settings.json，删掉其中指向
+#    src/hooks/typing-hook.ts 的 Stop / StopFailure / Notification 三个 hook
+#    （这个文件里可能还有别的工具注册的 hook，别整段删）
+
+# 4. 删代码与全部运行时状态
 trash ~/repos/claudestra ~/.claude-orchestrator /tmp/claude-orchestrator
 ```
 
-`~/.claude-orchestrator` 目录里有 registry、config（自动更新开关）、cron 任务、metrics 日志 —— 删掉它就清空所有运行时状态。如果你只想暂停 bot 而不丢状态，就只 `pm2 stop` 不跑 `trash` 那行。
+`~/.claude-orchestrator` 里有 registry、config（自动更新开关）、cron 任务、API token、peers 和会话归档 —— 删掉它等于清空所有运行时状态，包括聊天历史快照。
+
+只想暂停 bot 而不丢状态的话，停 daemon 但保留 plist 和状态目录：
+
+```bash
+for svc in bridge launcher cron; do launchctl bootout "gui/$(id -u)/com.claudestra.$svc"; done
+```
 
 从 Discord 移除 bot：服务器成员列表 → 右键 bot → 踢出。要彻底删除 bot，去 Developer Portal 把 application 删掉。
 
 ---
 
 ## 疑难排查
+
+### 装完先会这三招：看活没活、看日志、重启
+
+Claudestra 跑成三个 launchd user agent。下面的命令在任何目录下都能用。
+
+```bash
+# 活没活？（第一列是 PID，"-" 表示已加载但没在跑）
+launchctl list | grep claudestra
+
+# 日志 —— 每个 daemon 的 stdout / stderr 是分开的两个文件
+tail -f /tmp/claudestra-bridge.out      # 路由、注册、投递
+tail -f /tmp/claudestra-bridge.err      # 堆栈报错
+tail -f /tmp/claudestra-launcher.out    # 大总管守护、agent 复活
+tail -f /tmp/claudestra-cron.out        # 定时任务
+
+# 重启单个服务（-k 先杀掉再重载）
+launchctl kickstart -k "gui/$(id -u)/com.claudestra.bridge"
+
+# 重装/修复三个 plist 和 `claudestra` 命令
+bun src/manager.ts install-cli
+```
+
+bridge 重启后大约要 15 秒才恢复：各 agent 的 channel-server 按指数退避重连，别急着判定出故障。
 
 ### 向导找不到 `master/CLAUDE.md.template`
 
@@ -206,19 +254,19 @@ trash ~/repos/claudestra ~/.claude-orchestrator /tmp/claude-orchestrator
 检查 **Privileged Intents**。三个必须全部在 Developer Portal 开启。少一个 Discord 就会静默丢弃 bot 无权接收的事件。
 
 ```bash
-pm2 logs discord-bridge --lines 50
+tail -n 50 /tmp/claudestra-bridge.out
 ```
 
 没有 "received message" 日志 = intent 问题。
 
 ### Bot 响应按钮但不响应文字
 
-你的 user ID 很可能不在 `ALLOWED_USER_IDS` 里。重跑 `bun run setup` 或直接改 `.env`，然后 `pm2 restart discord-bridge`。
+你的 user ID 很可能不在 `ALLOWED_USER_IDS` 里。重跑 `bun run setup`，或直接改 `.env` 后用 `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge` 重载。
 
 ### 大总管一直不上线
 
 ```bash
-pm2 logs master-launcher --lines 50
+tail -n 50 /tmp/claudestra-launcher.out
 ```
 
 常见原因：
@@ -230,7 +278,7 @@ pm2 logs master-launcher --lines 50
 ### Bridge 一直重启
 
 ```bash
-pm2 logs discord-bridge --err --lines 100
+tail -n 100 /tmp/claudestra-bridge.err
 ```
 
 通常是 bot token 错了或 `.env` 有错字。去 Developer Portal 重新生成 token，重跑 `bun run setup`。
@@ -239,7 +287,7 @@ pm2 logs discord-bridge --err --lines 100
 
 Discord 每个客户端缓存 slash 命令最多 1 小时。如果你刚装了 Claude Code 插件或在 `~/.claude/skills/` 里写了新 skill，Discord 自动补全里没出现：
 
-1. 等最多 30min（bridge 自动重扫并重新注册）**或** `pm2 restart discord-bridge` 立即强制重扫
+1. 等最多 30min（bridge 自动重扫并重新注册）**或** `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge` 立即强制重扫
 2. 然后重启 Discord 手机/桌面 App 清客户端缓存
 
 Claudestra 升级后 Discord 里命令列表还是老的 —— 同样处理。

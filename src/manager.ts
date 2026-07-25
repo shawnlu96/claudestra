@@ -3592,7 +3592,7 @@ switch (cmd) {
         "effort reset <name>             — 清除 agent effort 覆盖（回到 settings.json 全局）",
         "tmux-help                       — 打印 tmux 快速教程（含 iTerm2 -CC 模式）",
         "version                         — 显示当前版本 + 是否有更新",
-        "update                          — 拉取最新代码并重启 pm2 服务",
+        "update                          — 拉取最新代码并重载 3 个 launchd daemon",
         "auto-update status              — 查看自动更新开关",
         "auto-update claudestra on|off   — Claudestra 自动更新开关（默认 on）",
         "auto-update claude on|off       — Claude Code 自动更新开关（默认 on）",

@@ -32,7 +32,7 @@ Claude Code 是一个只能在终端里用的工具——不在电脑前你就�
  Discord Bot  ──  一个 token，多个频道
         │
         ▼
- Bridge (Bun 进程, pm2 管理)     ws://localhost:3847
+ Bridge (Bun 进程, launchd 管理) ws://localhost:3847
         │
         │  WebSocket  ├──  channel-server ◄─► Claude Code (session A)
         │             ├──  channel-server ◄─► Claude Code (session B)
@@ -83,10 +83,10 @@ Discord 之外的第二道前门 —— 完全建立在多前端 API 之上的 *
 
 ### 可靠性和运维
 - **自动更新（v1.3+，可配置 v1.4+）** — Claudestra 自身每 30 分钟查 GitHub；Claude Code CLI 每 7 天查一次。只在所有 agent 空闲时才升级。`bun src/manager.ts auto-update <target> on|off` 切换。
-- **重启电脑后保留（v1.7.9+）** — setup 时自动配好 `pm2 startup`；重启后 launcher 会自动把 registry 里所有 agent 用 `claude --resume` 拉回到原 Discord 频道。
+- **重启电脑后保留（v1.7.9+）** — setup 时装好三个 launchd agent、登录即启；重启后 launcher 会自动把 registry 里所有 agent 用 `claude --resume` 拉回到原 Discord 频道。
 - **Session-idle Discord 按钮（v1.3+）** — Claude Code 弹出 resume 对话框时，Discord 收到三个按钮（从摘要恢复 / 恢复完整 / 不再询问）；master 自动确认保持常驻。
 - **Wedge 检测（v1.6+）** — agent 的 tmux pane 30 分钟没变化且非 idle → @你 + 一键 Esc / Ctrl+C 救回按钮。
-- **自我更新** — `bun src/manager.ts update` 做 `git pull` + `pm2 restart ecosystem.config.cjs`（只重启 Claudestra 自己 3 个进程，不影响你其他 pm2 应用）。
+- **自我更新** — `bun src/manager.ts update` 做 `git pull` + 重载 Claudestra 自己那三个 launchd daemon（不碰机器上任何其它服务）。
 
 ### 可观测性
 - **Token 用量统计（v1.6+）** — `bun src/manager.ts cost [--agent <n>] [--today|--week]` 从 Claude Code 的 JSONL 汇总 per-agent / per-model 消耗。
@@ -187,7 +187,7 @@ bun src/manager.ts cron-history [name|id]
 
 # 版本 / 更新
 bun src/manager.ts version                          # 当前版本 + 是否有新版
-bun src/manager.ts update                           # git pull + pm2 restart（只 Claudestra 3 个进程）
+bun src/manager.ts update                           # git pull + 重载 3 个 launchd daemon
 bun src/manager.ts auto-update status               # 查看自动更新开关
 bun src/manager.ts auto-update claudestra on|off    # Claudestra 自更新（30 分钟轮询）
 bun src/manager.ts auto-update claude on|off        # Claude Code CLI 更新（周轮询）
@@ -262,8 +262,8 @@ src/
     wedge-watcher.ts     检测卡死 agent（pane 不变且非 idle）
   channel-server.ts      每个 agent 的 MCP 代理
   manager.ts             Agent 生命周期 + cron + 版本 + metrics + tmux 控制 CLI
-  cron.ts                定时任务调度守护进程（pm2 管理）
-  launcher.ts            大总管 tmux session 守护（pm2 管理）
+  cron.ts                定时任务调度守护进程（launchd 管理）
+  launcher.ts            大总管 tmux session 守护（launchd 管理）
   setup.ts               交互式安装向导
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → typing indicator

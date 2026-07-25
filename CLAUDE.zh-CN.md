@@ -12,7 +12,7 @@ Claudestra 是一个多 session 编排器，基于 Claude Code 原生的 **Chann
  Discord (一个 bot, 一个 token)
         │
         ▼
- Bridge  ── bridge.ts, pm2 管理, ws://localhost:3847
+ Bridge  ── bridge.ts, launchd 管理, ws://localhost:3847
         │
         ├── WebSocket 路由              ├── JSONL Watcher               ├── HTTP Hooks
         │                               │                               │
@@ -46,8 +46,8 @@ src/
     jsonl-watcher.ts     JSONL session 监听 → 流式 tool call 摘要
   channel-server.ts      每个 session 的 MCP 代理（stdio MCP ↔ Bridge WebSocket）
   manager.ts             Agent 生命周期 + 定时任务 + 版本/更新 CLI（JSON 输出）
-  cron.ts                定时任务调度守护进程（pm2 管理）
-  launcher.ts            大总管 tmux session 守护（pm2 管理）
+  cron.ts                定时任务调度守护进程（launchd 管理）
+  launcher.ts            大总管 tmux session 守护（launchd 管理）
   setup.ts               交互式安装向导
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → Bridge HTTP 端点
@@ -87,7 +87,7 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 - **终端截图** — ANSI 转 PNG 流水线，屏幕锁定也能看。
 - **一键打断** — Discord 按钮向目标 agent 的 tmux window 发 `Ctrl+C`。
 - **精确空闲检测** — Claude Code `Stop` / `Notification` hooks 精确驱动 Discord typing indicator；30 分钟安全超时兜底。
-- **大总管守护** — pm2 管理的 launcher 保持大总管 tmux session 存活，自动处理 Claude Code 确认弹窗。
+- **大总管守护** — launchd 管理的 launcher 保持大总管 tmux session 存活，自动处理 Claude Code 确认弹窗。
 - **安全限制** — 每个 spawn 的 agent 都带 `--disallowedTools`，禁止 `rm -rf`、`git push --force`、`git reset --hard`、`chmod 777` 等破坏性命令。
 
 ### 跨 Claudestra peer 协作
@@ -103,7 +103,7 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 bun run setup
 
 # 启动全部（bridge + launcher + cron-scheduler）
-pm2 start ecosystem.config.cjs
+bun src/manager.ts install-cli   # 写入并加载 3 个 launchd daemon
 
 # Agent 生命周期
 bun src/manager.ts create   <name> <dir> [purpose]
@@ -135,7 +135,7 @@ bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签�
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新
-bun src/manager.ts update    # git pull + pm2 restart ecosystem.config.cjs（只重启 Claudestra 自己 3 个进程）
+bun src/manager.ts update    # git pull + 重载 3 个 launchd daemon
 
 # 测试
 bun test
@@ -178,7 +178,7 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 
 ## 关键不变量
 
-- 大总管是 `master` tmux session 的 window 0。pm2 的 `master-launcher` 保证它存在且正在运行 Claude Code。
+- 大总管是 `master` tmux session 的 window 0。`com.claudestra.launcher` 这个 launchd agent 保证它存在且正在运行 Claude Code。
 - 每个 agent 的 Discord channel ID 记录在 `~/.claude-orchestrator/registry.json` 里。Bridge 用这个 registry 把入站的 Discord 消息路由到对应的 channel-server。
 - MCP server 名（`MCP_NAME`）必须在三处保持一致：`claude mcp add`、channel-server 注册、jsonl-watcher 的 tool 过滤前缀。它集中在 `src/bridge/config.ts` 和 `src/lib/claude-launch.ts`。
 - Agent 名字在 create/resume 时走 shell 元字符黑名单校验，在 kill/restart 时宽松归一，以兼容历史 CJK 命名的 worker。

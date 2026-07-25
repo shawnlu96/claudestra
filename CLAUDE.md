@@ -12,7 +12,7 @@ Claudestra is a multi-session orchestrator built on top of Claude Code's native 
  Discord (one bot, one token)
         │
         ▼
- Bridge  ── bridge.ts, pm2-managed, ws://localhost:3847
+ Bridge  ── bridge.ts, launchd-managed, ws://localhost:3847
         │
         ├── deliver(envelope)  ←── v2.0.0 unified routing
         │      ├─ to=local  (ws.send  → channel-server → Claude Code)
@@ -69,8 +69,8 @@ src/
     archive-sweeper.ts   v2.9+ daily archive sweep: every 24h snapshots all active agents' session jsonls (idempotent copy-if-larger) — covers crash/never-retired gaps that retirement-time archiving misses
   channel-server.ts      Per-session MCP proxy (stdio MCP ↔ Bridge WebSocket)
   manager.ts             Agent lifecycle + cron + version/update CLI (JSON output)
-  cron.ts                Cron scheduler daemon (pm2-managed)
-  launcher.ts            Master tmux session guardian (pm2-managed)
+  cron.ts                Cron scheduler daemon (launchd-managed)
+  launcher.ts            Master tmux session guardian (launchd-managed)
   setup.ts               Interactive installation wizard
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → Bridge HTTP endpoint
@@ -116,7 +116,7 @@ SETUP.md                 User-facing installation guide
 - **Terminal screenshots** — ANSI-to-PNG pipeline lets you peek at a locked screen.
 - **One-click interrupt** — Discord button sends `Ctrl+C` to the target agent's tmux window.
 - **Idle detection** — Claude Code `Stop` / `Notification` hooks drive Discord typing indicators precisely; a 30-minute safety timeout catches edge cases.
-- **Master guardian** — pm2-managed launcher keeps the master tmux session alive and auto-dismisses Claude Code confirmation prompts.
+- **Master guardian** — launchd-managed launcher keeps the master tmux session alive and auto-dismisses Claude Code confirmation prompts.
 - **Safety rails** — `--disallowedTools` blocks `rm -rf`, `git push --force`, `git reset --hard`, `chmod 777`, and other destructive commands for every spawned agent.
 - **Multi-frontend API (v2.6.0+)** — the core is decoupled from Discord (design doc: `docs/design-multi-frontend.md`). Three transport-neutral channels: `GET /events` (SSE stream of tool calls / assistant text / agent status, `Last-Event-ID` replay), `POST /api/v1/agents/:name/messages` (Bearer-token inbound messaging with sync `wait`, multipart file upload, thread polling fallback), and `GET /stats`. Tokens are scoped per-agent (`manager.ts token-add <name> --agents a,b`; non-`--external` agents require `--force` — shared-context leak guard). API conversations are mirrored to the agent's Discord channel for auditability (`--no-mirror` to opt out). Outbound delivery goes through the `ChatAdapter` registry (`bridge/adapters.ts`) — adding Telegram or another platform means implementing one adapter, zero core changes. Bridge HTTP binds `127.0.0.1` by default (`BRIDGE_BIND` to open up).
 - **Claude Code agents-mode integration (v2.7+)** — Claude Code 2.1.x runs a bg-agent daemon (`claude agents`, respawn-on-kill, ← key opens the agents view in every TUI). This system fights Claudestra's tmux-foreground model: a mis-pressed ← can fork a foreground session into a bg job ("doppelganger"), silently breaking the Discord link (2026-07-09 incident). Adaptation layers: **(1) visibility** — `SessionsInventory` (`bridge/sessions-inventory.ts`) merges `claude agents --json` + `~/.claude/jobs/*/state.json` + registry into a neutral session list with doppelganger detection, consumed by the Discord `/agents` panel (LLM-free buttons: detail / adopt / cleanup), `GET /api/v1/sessions`, and `POST /api/v1/sessions/:id/cleanup|adopt` (full-scope token required, 202 + `session_anomaly` SSE events); **(2) self-heal** — `manager.ts restart` detects the "running as a background agent" error and automatically retries with `--fork-session`, then probes the forked session id (projects-dir diff) and writes it back to the registry; `manager.ts adopt <name> <sessionId>` promotes a doppelganger to the official session, `resume --fork` adopts wild sessions; **(3) guards** — permission-watcher auto-escapes agents-view UIs (8s poll, Esc + notify), wedge-watcher's link sentinel alerts when a window is alive but its channel-server has been offline >5min (repair button), and a 10-min reconciler alerts on new doppelgangers with cleanup/adopt buttons. Cleanup recipe (`lib/bg-jobs.ts`, incident-proven): kill bg pids (never `--fork-session` referencers) → wait for daemon quiescence → quarantine the job dir → detect stubborn respawns and defer to the official TUI.
@@ -135,7 +135,7 @@ SETUP.md                 User-facing installation guide
 bun run setup
 
 # Start everything (bridge + launcher + cron-scheduler)
-pm2 start ecosystem.config.cjs
+bun src/manager.ts install-cli   # writes + loads the 3 launchd daemons
 
 # Agent lifecycle
 bun src/manager.ts create   <name> <dir> [purpose]
@@ -168,7 +168,7 @@ bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the tok
 
 # Versioning
 bun src/manager.ts version   # current version + whether an update is available
-bun src/manager.ts update    # git pull + pm2 restart ecosystem.config.cjs (only Claudestra's 3 processes)
+bun src/manager.ts update    # git pull + reload the 3 launchd daemons
 
 # Auto-update toggles (both default on; launcher polls on a schedule and only upgrades when all agents are idle)
 bun src/manager.ts auto-update status
@@ -225,13 +225,13 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 
 ## Key invariants
 
-- The master orchestrator is window 0 of the `master` tmux session. `master-launcher` (pm2) guarantees it exists and is running Claude Code.
+- The master orchestrator is window 0 of the `master` tmux session. the `com.claudestra.launcher` launchd agent guarantees it exists and is running Claude Code.
 - Every agent's Discord channel ID is recorded in `~/.claude-orchestrator/registry.json`. The Bridge uses this registry to route incoming Discord messages to the correct channel-server.
 - The MCP server name (`MCP_NAME`) must match between `claude mcp add`, the channel-server's registration, and the JSONL watcher's tool-filter prefix. It is centralised in `src/bridge/config.ts` and `src/lib/claude-launch.ts`.
 - Agent names are validated against a shell-metacharacter blocklist on create/resume but loosely normalised on kill/restart to keep historical CJK names working.
 - Tool call display is debounced through `WATCHER_CONFIG.debounceMs` (default 1500 ms) to avoid Discord rate limits during bursty tool sequences.
 - **Message routing (v2.0.0+)**: every message-semantic bridge operation (inbound to agent / outbound reply / agent→agent forward / pushback from HTTP-peer calls) constructs an `Envelope` and calls `deliver(env)`. The only direct `ws.send({type:"message"...})` / `channel.send({content})` calls outside `deliver` are **UI-class** side effects: the "💭 Thinking" status message with the Interrupt button, LLM-free admin button replies, `notifyMaster` broadcasts, and hook-event text notifications. Everything that an agent ends up seeing in its MCP `<channel>` tag goes through `deliver` → `renderContentForLocal`.
-- **`channel-server` reconnect (v1.9.36+)**: on WebSocket close, the channel-server only exits when the bridge sends an explicit "replaced" signal (another connection took over the same channel). Plain `code 1000` (bridge restart) is treated as a transient disconnect and triggers exponential-backoff reconnect, so `pm2 restart discord-bridge` no longer orphans every agent's MCP connection.
+- **`channel-server` reconnect (v1.9.36+)**: on WebSocket close, the channel-server only exits when the bridge sends an explicit "replaced" signal (another connection took over the same channel). Plain `code 1000` (bridge restart) is treated as a transient disconnect and triggers exponential-backoff reconnect, so restarting the bridge (`launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`) no longer orphans every agent's MCP connection.
 
 ## Contributing tips
 

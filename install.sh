@@ -134,7 +134,7 @@ if [ "$PLATFORM" = "darwin" ]; then
 else
   if ! command -v apt-get >/dev/null 2>&1; then
     warn "Linux 自动安装目前只支持 Debian/Ubuntu 系（需要 apt-get）"
-    die "在非 Debian 系系统上，请手动安装 git / tmux / node / bun / pm2 / claude 后重跑本脚本。"
+    die "在非 Debian 系系统上，请手动安装 git / tmux / node / bun / claude 后重跑本脚本。"
   fi
   ok "apt-get: $(command -v apt-get)"
 fi
@@ -217,7 +217,7 @@ _install_tmux() {
   esac
 }
 
-# node（pm2 / claude 的前置）
+# node（claude CLI 与 web 客户端的前置）
 _install_node() {
   case "$PLATFORM" in
     darwin) install_via_brew node ;;
@@ -227,11 +227,6 @@ _install_node() {
   if [ "$PLATFORM" = "linux" ] && ! command -v npm >/dev/null 2>&1; then
     sudo apt-get install -y npm
   fi
-}
-
-# pm2
-_install_pm2() {
-  sudo_npm_install pm2 || npm install -g pm2
 }
 
 # claude
@@ -265,7 +260,6 @@ check_missing git   "git"
 check_missing tmux  "tmux"
 check_missing node  "node (npm 的前置)"
 check_missing bun   "bun"
-check_missing pm2   "pm2"
 check_missing claude "claude (Claude Code CLI)"
 
 if [ ${#missing[@]} -gt 0 ]; then
@@ -284,7 +278,6 @@ install_pkg "git"    git    _install_git
 install_pkg "tmux"   tmux   _install_tmux
 install_pkg "node"   node   _install_node
 install_pkg "bun"    bun    install_bun
-install_pkg "pm2"    pm2    _install_pm2
 install_pkg "claude" claude _install_claude
 
 printf "\n"

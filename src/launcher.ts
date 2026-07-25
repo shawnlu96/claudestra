@@ -1,7 +1,7 @@
 /**
  * Master Session Launcher
  *
- * pm2 管理的守护进程，确保大总管的 tmux session 始终存活。
+ * launchd 管理的守护进程（com.claudestra.launcher），确保大总管的 tmux session 始终存活。
  * 如果 session 死了自动重启。
  */
 
@@ -234,8 +234,8 @@ async function checkForUpdates() {
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
-        `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + pm2 restart...`,
-        `🆕 **Claudestra ${release.tag} auto-updating** ${mention}\n\nv${local} → ${release.tag}, all agents idle, running git pull + pm2 restart...`,
+        `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + 重载 launchd daemon...`,
+        `🆕 **Claudestra ${release.tag} auto-updating** ${mention}\n\nv${local} → ${release.tag}, all agents idle, running git pull + reloading the launchd daemons...`,
       ),
     });
   } catch { /* non-critical */ }
