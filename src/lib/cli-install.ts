@@ -33,6 +33,7 @@
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { homedir } from "os";
+import { resolveBunPath } from "./bun-path.js";
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
@@ -579,7 +580,7 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   };
 
   // 找 bun（绝对路径，写进所有 plist + CLI wrapper）
-  const bunPath = which("bun") || `${homedir()}/.bun/bin/bun`;
+  const bunPath = resolveBunPath();
   try { await stat(bunPath); }
   catch { errors.push(`bun 不在 ${bunPath}（先 curl -fsSL https://bun.sh/install | bash）`); return result; }
 

@@ -26,13 +26,15 @@ export const TMP_DIR = "/tmp/claude-orchestrator";
 export const INBOX_DIR = `${process.env.HOME}/.claude-orchestrator/inbox`;
 // 从 tmux-helper 引入避免两处常量漂移
 export { TMUX_SOCK } from "../lib/tmux-helper.js";
+import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;
 export const MANAGER_PATH = `${REPO_ROOT}/src/manager.ts`;
 export const MASTER_DIR = `${REPO_ROOT}/master`;
-export const BUN_PATH = `${process.env.HOME}/.bun/bin/bun`;
+// 不写死 ~/.bun/bin/bun —— brew / mise / asdf 装的 bun 不在那儿，见 lib/bun-path.ts
+export const BUN_PATH = resolveBunPath();
 export const ENV_WITH_BUN = {
   ...process.env,
-  PATH: `${process.env.HOME}/.bun/bin:${process.env.PATH}`,
+  PATH: `${bunBinDir()}:${process.env.PATH}`,
 };
 
 // JSONL Watcher 配置

@@ -55,6 +55,7 @@ import {
   isKnownEffort,
 } from "./lib/claude-launch.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
+import { resolveBunPath } from "./lib/bun-path.js";
 import { projectsSlug } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
 
@@ -854,7 +855,7 @@ async function cmdResume(
   // 截图发到新频道作为上下文预览
   if (ready) {
     try {
-      const bunPath = `${process.env.HOME}/.bun/bin/bun`;
+      const bunPath = resolveBunPath();
       const srcDir = import.meta.dir;
       const htmlPath = `/tmp/claude-orchestrator/resume_${Date.now()}.html`;
       const pngPath = `/tmp/claude-orchestrator/resume_${Date.now()}.png`;
@@ -2965,7 +2966,7 @@ async function cmdTmuxScreenshot(name: string) {
     output({ ok: false, error: `${tmuxName} 不存在` });
     return;
   }
-  const bunPath = `${process.env.HOME}/.bun/bin/bun`;
+  const bunPath = resolveBunPath();
   const srcDir = import.meta.dir;
   const ts = Date.now();
   const htmlPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.html`;

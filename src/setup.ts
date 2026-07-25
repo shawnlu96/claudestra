@@ -12,6 +12,7 @@ import { readFile, writeFile, access } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
+import { resolveBunPath } from "./lib/bun-path.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
@@ -871,7 +872,7 @@ async function stepFinalize(cfg: Config): Promise<void> {
   // 4. hooks (typing indicator) — 直接写 ~/.claude/settings.json
   //    用 bun 绝对路径。v2.4.0 切到 launchd 后 worker 的 /bin/sh PATH 不带 ~/.bun/bin，
   //    用相对 "bun" 会 "command not found" 让 Stop hook 每次都报错。
-  const bunAbs = (await run(["/usr/bin/which", "bun"])).out.trim() || `${process.env.HOME}/.bun/bin/bun`;
+  const bunAbs = resolveBunPath();
   const hookCmd = `${bunAbs} ${REPO_ROOT}/src/hooks/typing-hook.ts`;
   write(`${c.dim}▶${c.reset} ${t("注册 typing hooks", "Registering typing hooks")}… `);
   try {
