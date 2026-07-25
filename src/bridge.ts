@@ -58,7 +58,7 @@ import * as fs from "fs/promises";
 // [fork] master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, subscribeEvents, replayEventsSince, getAgentStatus, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, type EventFilter } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -1292,8 +1292,22 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
     for (const [, att] of msg.attachments) {
       try {
-        const resp = await fetch(att.url);
+        // 这是全仓库唯一一个没有超时的 fetch，而它就坐在 messageCreate 处理路径上：
+        // Discord CDN 半开连接会让这个用户的这条消息永远卡住（无超时 = 无限等待）。
+        // 同时限一下体积——Discord 单附件上限 500MB（Nitro），无脑 arrayBuffer 会
+        // 把它整个读进 bridge 内存。
+        const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+        if (typeof att.size === "number" && att.size > MAX_ATTACHMENT_BYTES) {
+          console.warn(`⚠️ 附件 ${att.name} 超过 25MB（${att.size}），跳过下载`);
+          continue;
+        }
+        const resp = await fetch(att.url, { signal: AbortSignal.timeout(30_000) });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const buf = await resp.arrayBuffer();
+        if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+          console.warn(`⚠️ 附件 ${att.name} 实际大小超限，丢弃`);
+          continue;
+        }
         const filePath = `${inboxDir}/${att.id}_${att.name}`;
         await Bun.write(filePath, buf);
         attachmentPaths.push(filePath);
@@ -3770,6 +3784,16 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId);
+        // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
+        // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
+        // 建了又删的 agent 会一路堆积。
+        const goneAgent = (body as { agent?: string }).agent;
+        if (goneAgent) forgetAgent(goneAgent);
+        for (const [tid, t] of pendingThreads.entries()) {
+          if (t.request.to.kind === "local" && t.request.to.channelId === body.channelId) {
+            pendingThreads.delete(tid);
+          }
+        }
         console.log(`🧹 /agent/cleanup channel=${body.channelId} 清掉 ${n} 条 pending`);
         return new Response(JSON.stringify({ ok: true, cleared: n }), {
           headers: { "Content-Type": "application/json" },
@@ -3898,6 +3922,23 @@ if (WEB_ONLY) {
   startBgActivityWatcher();
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
   startArchiveSweeper();
+  // v2.13.1+ 给 web 前端补一个"重启了"的信号。Discord 侧靠
+  // cleanupStaleThinkingMessages 把卡住的"💭 思考中"改写成可重发提示，而那是
+  // Discord 专属（要编辑历史消息），web-only 模式整段跳过 —— 结果 bridge 重启后
+  // web 端会一直停在"正在回复"，因为那个回合的 done 事件永远不会来了
+  // （pendingThreads 已随进程消失）。这里给每个已注册频道补发一条 done。
+  setTimeout(() => {
+    for (const [chId, info] of clients.entries()) {
+      const agentName = info.cwd ? chId : chId; // 事件按 chatId 过滤，agent 名尽力而为
+      emitEvent({
+        agent: agentName,
+        chatId: chId,
+        type: "agent_status",
+        data: { status: "done", reason: "bridge_restarted" },
+      });
+    }
+    console.log(`🔄 web-only：已向 ${clients.size} 个频道补发 done（bridge 重启，旧回合状态已丢失）`);
+  }, 5_000);
   recordMetric("bridge_start", { meta: { channels: clients.size, webOnly: true } });
 } else {
   if (!DISCORD_TOKEN) {
@@ -3907,6 +3948,16 @@ if (WEB_ONLY) {
   // login 失败（token 失效 / 缺 privileged intent / 断网）之前是未捕获的 rejection：
   // 进程直接死，launchd 10 秒后重启，如此循环，而 Discord 那边什么都看不到 ——
   // 用户只知道"bot 不上线"。这里明确报出原因再退出。
+  // Discord 限流可见化。此前没有任何 rateLimited 监听 —— 批量建频道会撞
+  // Discord 每 10 分钟的频道创建配额，表现是"新建 agent 就是卡住"，日志里没有
+  // 任何线索。discord.js 会自己排队重试，我们只需要把它打出来。
+  discord.rest.on("rateLimited", (info: any) => {
+    console.warn(
+      `⏳ Discord 限流：${info?.method ?? ""} ${info?.route ?? info?.url ?? ""} ` +
+        `等待 ${Math.round((info?.timeToReset ?? 0) / 1000)}s（global=${!!info?.global}）`
+    );
+  });
+
   discord.login(DISCORD_TOKEN).catch((e: unknown) => {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(

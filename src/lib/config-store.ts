@@ -6,7 +6,7 @@
  */
 
 import { existsSync } from "fs";
-import { mkdir } from "fs/promises";
+import { mkdir, rename } from "fs/promises";
 
 const HOME = process.env.HOME || "";
 const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
@@ -66,7 +66,11 @@ export async function writeConfig(cfg: AppConfig): Promise<void> {
   if (!existsSync(CONFIG_DIR)) {
     await mkdir(CONFIG_DIR, { recursive: true });
   }
-  await Bun.write(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+  // 原子写：临时文件 + rename。直接覆盖写在进程被重启/断电时会留下截断的 JSON，
+  // 下次读取失败就静默回落到 DEFAULT_CONFIG —— 用户关掉的自动更新会自己变回开着。
+  const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
+  await Bun.write(tmp, JSON.stringify(cfg, null, 2));
+  await rename(tmp, CONFIG_PATH);
 }
 
 export async function setAutoUpdate(target: "claudestra" | "claudeCode", enabled: boolean): Promise<AppConfig> {

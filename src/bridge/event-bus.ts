@@ -63,7 +63,18 @@ type Subscriber = {
 /** 每个 agent 的环形缓冲上限（补发窗口） */
 export const RING_LIMIT = 500;
 
-let nextSeq = 1;
+/**
+ * seq 起点用启动时刻的毫秒数，而不是 1。
+ *
+ * 原来每次 bridge 启动都从 1 重新数，于是重启后：客户端拿着上个实例的
+ * `Last-Event-ID: 4321` 回来，replayEventsSince 里 `evt.seq > 4321` 对新实例的
+ * 1、2、3… 全不成立 —— **静默返回零条**，客户端以为"没有新事件"，实际是补发窗口
+ * 整个失效了；而且之后 seq 一路倒退，下一次断线重连又会把整个 ring 当新事件重放
+ * 一遍（重复消息）。
+ * 用启动时刻打底后，新实例的 seq 一定大于任何旧实例发过的值，旧 id 回来就退化成
+ * "把 ring 里现有的补给你"，这正是补发该有的行为。
+ */
+let nextSeq = Date.now();
 const subscribers = new Set<Subscriber>();
 /** agent → 该 agent 最近 RING_LIMIT 条事件（seq 升序） */
 const rings = new Map<string, BridgeEvent[]>();
@@ -137,6 +148,16 @@ export function subscribeEvents(
  * 补发：返回 seq > since 的缓冲事件（跨 agent 合并后按 seq 升序）。
  * since=0 表示"从缓冲最早处开始"。
  */
+/**
+ * 丢弃某个 agent 的事件环 + 状态。agent 被 kill 之后它的 ring 不会再有人订阅，
+ * 却会连同里面最多 RING_LIMIT 条事件（含未截断的 assistant_text）一直留在内存里 ——
+ * 长期运行的 bridge 上，建了又删的 agent 会一直堆积。
+ */
+export function forgetAgent(agent: string): void {
+  rings.delete(agent);
+  agentStatuses.delete(agent);
+}
+
 export function replayEventsSince(
   since: number,
   filter: EventFilter = {},

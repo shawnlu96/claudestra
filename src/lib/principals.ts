@@ -17,6 +17,7 @@
  */
 
 import { existsSync } from "fs";
+import { timingSafeEqual } from "crypto";
 import { readFile, writeFile, mkdir, chmod } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
@@ -104,11 +105,28 @@ export function tokenIdOf(p: Principal): string {
   return p.id.startsWith("token:") ? p.id.slice(6) : p.id;
 }
 
+/**
+ * 常数时间比较两个 secret。
+ * 256 位随机 token 用朴素 === 比较在实践中很难被计时攻击撬开，但这里是**唯一**的
+ * 鉴权判据、又是纯粹的一行改动，没有理由留着不一致（web 侧的 api-auth 早就用了
+ * timingSafeEqual）。长度不同直接返回 false —— 长度本身不是秘密。
+ */
+function secretEquals(a: string, b: string): boolean {
+  const ba = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
 /** Bearer secret → principal（禁用的不算） */
 export function findByBearer(file: PrincipalsFile, secret: string): Principal | null {
   if (!secret) return null;
   const p = file.principals.find(
-    (x) => x.id.startsWith("token:") && x.secret === secret && !x.disabled,
+    (x) =>
+      x.id.startsWith("token:") &&
+      typeof x.secret === "string" &&
+      secretEquals(x.secret, secret) &&
+      !x.disabled,
   );
   return p ?? null;
 }

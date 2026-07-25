@@ -9,7 +9,7 @@
  * 日志：~/.claude-orchestrator/cron-history.json（最近 100 条执行记录）
  */
 
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
@@ -170,6 +170,17 @@ export function nextCronTime(expr: string, from: Date = new Date()): Date {
 // 存储
 // ============================================================
 
+/**
+ * 原子写：先写同目录临时文件再 rename。直接 writeFile 的话，进程在写到一半时
+ * 被 launchd 重启 / 机器断电，就会留下一个被截断的 JSON —— 下次 load 解析失败
+ * 返回空数组，所有定时任务静默消失。rename 在同一文件系统内是原子的。
+ */
+async function writeFileAtomic(path: string, data: string): Promise<void> {
+  const tmp = `${path}.tmp.${process.pid}`;
+  await writeFile(tmp, data);
+  await rename(tmp, path);
+}
+
 export async function loadJobs(): Promise<CronJob[]> {
   if (!existsSync(CRON_PATH)) return [];
   try {
@@ -182,7 +193,7 @@ export async function loadJobs(): Promise<CronJob[]> {
 
 export async function saveJobs(jobs: CronJob[]): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(CRON_PATH, JSON.stringify(jobs, null, 2));
+  await writeFileAtomic(CRON_PATH, JSON.stringify(jobs, null, 2));
 }
 
 async function loadHistory(): Promise<CronHistory[]> {
@@ -196,7 +207,7 @@ async function loadHistory(): Promise<CronHistory[]> {
 }
 
 async function saveHistory(history: CronHistory[]): Promise<void> {
-  await writeFile(HISTORY_PATH, JSON.stringify(history.slice(-MAX_HISTORY), null, 2));
+  await writeFileAtomic(HISTORY_PATH, JSON.stringify(history.slice(-MAX_HISTORY), null, 2));
 }
 
 async function appendHistory(entry: CronHistory): Promise<void> {

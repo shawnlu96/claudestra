@@ -131,7 +131,12 @@ export async function readFileStats(path: string): Promise<FileStats> {
   const weekTs = weekStartTs();
   let mtimeMs = 0;
   try { mtimeMs = statSync(path).mtimeMs; } catch { return empty; }
-  const key = `${mtimeMs}:${dayTs}:${weekTs}`;
+  // 缓存键刻意**不含** mtime：session jsonl 每次工具调用都在追加，mtime 一直在变，
+  // 把它放进 key 等于缓存永不命中，而每次 miss 都要把整个文件读一遍解析一遍
+  // （本机最大 96MB，Stop hook 每回合触发）。改用 5 秒时间桶：同一个 5 秒窗口内
+  // 复用结果，统计数字最多滞后 5 秒，对用量面板完全够用。
+  const bucket = Math.floor(Date.now() / 5000);
+  const key = `${bucket}:${dayTs}:${weekTs}`;
   const cached = fileCache.get(path);
   if (cached && cached.key === key) return cached.stats;
 

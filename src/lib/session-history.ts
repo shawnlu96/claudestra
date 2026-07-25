@@ -480,7 +480,17 @@ export async function searchSessionHistory(
   const maxHits = Math.max(1, Math.min(100, Math.floor(opts.maxHits ?? 20)));
   const q = query.toLowerCase();
   if (!q) return [];
-  const raw = await Bun.file(filePath).text();
+  // 体积闸：本函数会同时持有 raw / lowerRaw / lines / lowerLines 四份数据，峰值
+  // 约等于文件大小的 4 倍；而调用方（GET /history/search）是 6 路并发扫遍每个
+  // agent 的 live + 归档会话。本机最大的 session jsonl 已经 96MB，一次点击就能
+  // 把 bridge 推到 GB 级峰值。超过阈值的文件只扫尾部 —— 搜索本就是找最近说过
+  // 什么，越老的内容越不需要全文命中。
+  const MAX_FULL_SCAN_BYTES = 16 * 1024 * 1024;
+  const _f = Bun.file(filePath);
+  const _size = _f.size;
+  const raw = await (_size > MAX_FULL_SCAN_BYTES
+    ? _f.slice(_size - MAX_FULL_SCAN_BYTES).text()
+    : _f.text());
   // 性能梯次（2026-07-14 owner:「先把免费优化做了」）：
   // ① 文件级预筛——整个文件不含词直接出局，多数归档文件在这里零解析返回；
   // ② 单次 toLowerCase——53MB 文件逐行 toLowerCase 是 10 万次小分配 + GC 压力，

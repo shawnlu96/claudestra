@@ -336,7 +336,15 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
 
 // 拒绝空白、shell 元字符、控制字符。CJK 和其他 Unicode 字母允许。
 // 长度上限 48 — Discord 频道名上限 100，tmux window 名没硬限制，48 足够宽。
-const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\\x00-\x1f\x7f]/;
+//
+// v2.13.1+ 补上 `/`、`\`、`:`、`~` 和 `..`：agent 名会直接拼进文件路径 ——
+// session-archive.ts 的 join(ARCHIVE_ROOT, agentName)、screenshot.ts 的
+// `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
+// 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
+// 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
+const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f]/;
+/** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
+const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 
 function normalizeName(raw: string): string {
   return `${AGENT_PREFIX}${raw.replace(AGENT_PREFIX, "").toLowerCase()}`;
@@ -353,8 +361,11 @@ function assertValidNewName(raw: string): void {
   }
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
     throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { } \\）`
+      `agent 名称含非法字符: "${raw}"（不能包含空白、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
     );
+  }
+  if (NAME_TRAVERSAL_RE.test(cleaned)) {
+    throw new Error(`agent 名称不能包含 ".."：${JSON.stringify(raw)}`);
   }
 }
 
@@ -1009,7 +1020,8 @@ async function cmdKill(name: string) {
       await fetch(`http://localhost:${port}/agent/cleanup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId: info.channelId }),
+        // 带上 agent 名，bridge 据此丢掉它在事件总线里的环形缓冲（见 forgetAgent）
+        body: JSON.stringify({ channelId: info.channelId, agent: tmuxName }),
         signal: AbortSignal.timeout(3000),
       });
     } catch { /* bridge 可能未运行 */ }
@@ -1059,7 +1071,8 @@ async function cmdRemove(name: string) {
       await fetch(`http://localhost:${port}/agent/cleanup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId: info.channelId }),
+        // 带上 agent 名，bridge 据此丢掉它在事件总线里的环形缓冲（见 forgetAgent）
+        body: JSON.stringify({ channelId: info.channelId, agent: tmuxName }),
         signal: AbortSignal.timeout(3000),
       });
     } catch { /* bridge 可能未运行 */ }

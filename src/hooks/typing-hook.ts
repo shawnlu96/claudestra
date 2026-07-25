@@ -45,10 +45,14 @@ async function main() {
   // Notification — Claude 等待输入（只停 typing，不重发完成通知）
   if (event === "Stop" || event === "StopFailure" || event === "Notification") {
     try {
+      // 必须带超时：try/catch 抓得住"连不上"，抓不住"连上了但不回"。bridge 一旦
+      // 卡住（不是挂掉），每个 agent 的每次 Stop hook 都会在这里无限等待，而 hook
+      // 是**阻塞 Claude Code 回合收尾**的 —— 等于所有 agent 一起被拖住。
       await fetch(`http://localhost:${BRIDGE_PORT}/hook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ channelId, event }), // 传递原事件名，不再硬编码 "stop"
+        signal: AbortSignal.timeout(5_000),
       });
     } catch { /* bridge 可能未运行 */ }
   }

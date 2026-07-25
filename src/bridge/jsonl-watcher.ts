@@ -216,9 +216,17 @@ export async function hasRecentScheduleWakeup(
   cwd: string, sessionId: string,
 ): Promise<boolean> {
   try {
-    const text = await Bun.file(getJsonlPath(cwd, sessionId)).text();
+    // 只读文件尾部。原来是整文件 .text() —— 注释写着"上限避免大文件 IO"，但那个
+    // 上限只限制了**解析**行数，读取本身仍然把整个文件拉进内存：本机最大的 session
+    // jsonl 已经 96MB，而这里只需要最后 60 行。每个回合都这么来一次。
+    // 512KB 尾巴足够覆盖 60 行（单行再长也很少超过几 KB）。
+    const jsonlPath = getJsonlPath(cwd, sessionId);
+    const TAIL_BYTES = 512 * 1024;
+    const f = Bun.file(jsonlPath);
+    const size = f.size;
+    const text = await (size > TAIL_BYTES ? f.slice(size - TAIL_BYTES).text() : f.text());
     const lines = text.split("\n");
-    // 反向扫，上限避免大文件 IO 跟分析全文件
+    // 反向扫，上限避免分析全文件
     const SCAN_LIMIT = 60;
     let scanned = 0;
     for (let i = lines.length - 1; i >= 0 && scanned < SCAN_LIMIT; i--) {
