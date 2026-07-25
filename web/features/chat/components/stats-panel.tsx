@@ -64,7 +64,10 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   // 冷启动自动补拉只试一次/每次打开(openRef 防面板已关还在拉)
   const retriedRef = useRef(false);
   const openRef = useRef(open);
-  openRef.current = open;
+  // 同 composer：ref 的最新值在 effect 里同步，避免在可能被丢弃的 render 里写。
+  useEffect(() => {
+    openRef.current = open;
+  });
 
   const load = (force: boolean) => {
     if (force) setRefreshing(true);
@@ -208,6 +211,8 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
               {typeof g.scrapedAt === "number" && g.scrapedAt > 0 && (
                 <div className="text-[10.5px] text-base-content/35">
                   {t("账号用量抓取于")} {fmtAge(g.scrapedAt)}
+                  {/* eslint-disable-next-line react-hooks/purity -- 同 composer：读当前时间判断数据是否偏旧，
+                      面板本来就是打开时拉一次的快照，不值得为此常驻定时器 */}
                   {Date.now() - g.scrapedAt > 15 * 60_000 && ` ${t("⚠️ 数据偏旧")}`}
                 </div>
               )}

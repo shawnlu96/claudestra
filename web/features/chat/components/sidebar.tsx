@@ -153,6 +153,10 @@ function AgentRow({
           }`}
           style={{
             transform: swipeX ? `translateX(${swipeX}px)` : undefined,
+            // 刻意保留在 render 期读这个 ref：把 swiping 提成 state 意味着触摸拖动的
+            // 每一帧都要 setState 并重渲整个会话列表，交互热路径上性能明显更差。
+            // 这里只用它决定要不要禁用 transition，读到偶发旧值最坏就是一帧过渡不对。
+            // eslint-disable-next-line react-hooks/refs
             transition: touchRef.current?.swiping ? "none" : "transform 0.18s ease",
           }}
           onTouchStart={

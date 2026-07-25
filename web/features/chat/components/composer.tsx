@@ -167,6 +167,9 @@ export function Composer() {
   const showCtxWarn =
     ctxTokens >= 750_000 &&
     ctxDismissedFor !== active &&
+    // 读当前时间决定要不要提示压缩。改成定时 tick 驱动才算"纯"，但那是为一个提示
+    // 横幅常驻一个定时器；这里读到的值最坏就是横幅晚一轮渲染才出现/消失。
+    // eslint-disable-next-line react-hooks/purity
     (!reqAt || Date.now() - reqAt > 10 * 60_000);
 
   // ── Slash 命令面板（owner 2026-07-14:skills 适配 web,比 Discord 强——
@@ -244,7 +247,12 @@ export function Composer() {
   //    切走会话 / 退出 App 再回来原样恢复；发送成功即清。 ──
   const draftKey = (a: string) => `cstra_draft_${a}`;
   const textRef = useRef(text);
-  textRef.current = text;
+  // 在 effect 里赋值而不是 render 期直接写：render 可能被 React 丢弃/重放，
+  // 那样 ref 会留下一个从未提交过的值。这些 ref 只给异步回调（定时器、事件、
+  // 卸载清理）读最新值，effect 在 commit 后同步执行，对它们没有可观察差异。
+  useEffect(() => {
+    textRef.current = text;
+  });
   const saveDraft = (agent: string, value: string) => {
     try {
       if (value.trim()) localStorage.setItem(draftKey(agent), value);

@@ -18,7 +18,10 @@ const FADE_MS = 500;
 export function Splash() {
   const t = useT();
   const ready = useChatStore((s) => s.state.agentsReady);
-  const mountedAt = useRef(Date.now());
+  // 用 lazy initializer 而不是 useRef(Date.now())：后者在每次 render 都会求值
+  // （虽然只有首次生效），属于 render 期调用非纯函数；useState 的惰性初始化是
+  // React 明确支持的写法，只在首次挂载执行一次。
+  const [mountedAt] = useState(() => Date.now());
   const [fading, setFading] = useState(false);
   const [gone, setGone] = useState(false);
   // 底部署名:版本 + commit id（owner:不一定每次改动都发版,commit 才定位得准）
@@ -39,7 +42,7 @@ export function Splash() {
 
   useEffect(() => {
     if (!ready || fading || gone) return;
-    const wait = Math.max(0, MIN_SHOW_MS - (Date.now() - mountedAt.current));
+    const wait = Math.max(0, MIN_SHOW_MS - (Date.now() - mountedAt));
     const t = setTimeout(() => setFading(true), wait);
     return () => clearTimeout(t);
   }, [ready, fading, gone]);

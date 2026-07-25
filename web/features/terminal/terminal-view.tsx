@@ -120,7 +120,10 @@ export function TerminalView({
     }, 8);
   };
   const queueInputRef = useRef(queueInput);
-  queueInputRef.current = queueInput;
+  // 同 composer：ref 的最新值在 effect 里同步，避免在可能被丢弃的 render 里写。
+  useEffect(() => {
+    queueInputRef.current = queueInput;
+  });
 
   useEffect(() => {
     const container = containerRef.current;
