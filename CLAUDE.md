@@ -62,7 +62,7 @@ src/
     jsonl-watcher.ts     JSONL session tailer → tool summaries + assistant text stream + drain-on-Stop
     slash-catalog.ts     Hardcoded list of CC built-in slash commands (Discord-friendly subset)
     slash-registry.ts    Runtime registry of discovered skills per scope + per-channel resolver
-    wedge-watcher.ts     Detects agents stuck >30min with no pane change + not idle → Discord alert; v2.7+ link sentinel (window alive but channel-server offline >5min → repair button)
+    wedge-watcher.ts     Detects agents stuck >30min with no pane change + not idle → Discord alert; v2.7+ link sentinel (window alive but channel-server offline >5min → repair button); v2.14+ the link alert also emits `session_anomaly(kind=link_down)` so web clients see it too — they used to get no signal at all when the MCP link went down
     sessions-inventory.ts v2.7+ neutral machine-wide session inventory: `claude agents --json` + jobs state + registry reconciliation → doppelganger detection
     session-reconciler.ts v2.7+ 10-min bg reconciler: new doppelganger → Discord alert with cleanup/adopt buttons + session_anomaly event
     bg-activity-watcher.ts v2.8+ bg activity tracker: discovers subagent jsonls + bg shell task outputs per agent session → streams into per-activity threads (ChatAdapter.provisionThread) + bg_task_* SSE events
@@ -81,6 +81,8 @@ src/
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
     doctor.ts            v2.14+ read-only install health-check backing `manager.ts doctor` (runtime / config / daemons / bridge / MCP / agents)
+    link-policy.ts       v2.14+ what channel-server does when the bridge says it was replaced (reconnect vs exit) — pure, unit-tested
+    net-addr.ts          v2.14+ detect this host's reachable addresses (Tailscale CGNAT first, then RFC1918) for peer handshake `--url`
     jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
     peers.ts             peers.json data model (v2.11+ HTTP peers only) + handshake string encode/parse + atomic writes
     principals.ts        v2.6.0+ transport-scoped identity + API token CRUD/scope/rate-limit (~/.claude-orchestrator/principals.json)
@@ -112,6 +114,7 @@ SETUP.md                 User-facing installation guide
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects messages directly into another agent's context via the Bridge.
 - **Cron scheduling** — cron expressions spin up a temporary agent, run a prompt, report, and clean up.
 - **Discord UI** — buttons, select menus, slash commands (`/status`, `/screenshot`, `/interrupt`, `/cron`).
+- **Interactive components in `reply()`** — button rows, single-select menus, and (v2.14+) `multiselect`: pick several options and submit once. Discord uses the native `max_values` (picking closes the menu); the web client renders checkboxes plus a submit button. Both send back the same wire format — `[select:<id>:<v1>,<v2>]`, values comma-separated — so one parser handles both. Prefer multiselect over a row of yes/no buttons when the choices are not mutually exclusive: one round trip instead of several.
 - **LLM-free admin buttons** — status, peek, kill, restart, and cron actions execute directly on the Bridge for instant response with zero token cost.
 - **Streaming tool output** — jsonl-watcher pushes `Read · Edit · Write · Bash · Grep` calls to Discord in near real-time.
 - **Terminal screenshots** — ANSI-to-PNG pipeline lets you peek at a locked screen.
@@ -158,7 +161,7 @@ bun src/manager.ts cron-history [name|id]
 # Cross-Claudestra peer collaboration — v2.11+ HTTP peers (no Discord dependency;
 # peers talk over the /api/v1 surface directly. Handshake is 3 steps; strings travel
 # over any private channel. Design: docs/design-http-peers.md)
-bun src/manager.ts peer-http-invite <name> --agents <a,b> --url <my-bridge-url> [--force] [--rotate]  # A: print invite string
+bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <my-bridge-url>] [--force] [--rotate]  # A: print invite string (--url is auto-detected if omitted: Tailscale first, then LAN)
 bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> [--force]           # B: store A, print receipt
 bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
@@ -236,7 +239,7 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - Agent names are validated against a shell-metacharacter blocklist on create/resume but loosely normalised on kill/restart to keep historical CJK names working.
 - Tool call display is debounced through `WATCHER_CONFIG.debounceMs` (default 1500 ms) to avoid Discord rate limits during bursty tool sequences.
 - **Message routing (v2.0.0+)**: every message-semantic bridge operation (inbound to agent / outbound reply / agent→agent forward / pushback from HTTP-peer calls) constructs an `Envelope` and calls `deliver(env)`. The only direct `ws.send({type:"message"...})` / `channel.send({content})` calls outside `deliver` are **UI-class** side effects: the "💭 Thinking" status message with the Interrupt button, LLM-free admin button replies, `notifyMaster` broadcasts, and hook-event text notifications. Everything that an agent ends up seeing in its MCP `<channel>` tag goes through `deliver` → `renderContentForLocal`.
-- **`channel-server` reconnect (v1.9.36+)**: on WebSocket close, the channel-server only exits when the bridge sends an explicit "replaced" signal (another connection took over the same channel). Plain `code 1000` (bridge restart) is treated as a transient disconnect and triggers exponential-backoff reconnect, so restarting the bridge (`launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`) no longer orphans every agent's MCP connection.
+- **`channel-server` lifecycle (v2.14+)**: the governing constraint is that **channel-server has no supervisor** — Claude Code neither respawns a dead stdio MCP server nor reconnects to it, so any exit is a permanent disconnect for that agent. Two rules follow. (1) **Register only after the MCP handshake.** `mcp.oninitialized` gates the bridge connection, so a stray process that merely runs `channel-server.ts` can never claim the channel — which matters because `DISCORD_CHANNEL_ID` is injected by Claude Code and inherited by every Bash subprocess, making an accidental run inside the agent's own repo trivially easy. A 30s fallback registers anyway if the SDK never fires the callback. (2) **Being displaced is not a reason to die.** On `replaced` / `close(4001)` the process checks whether its stdio is still open: if Claude Code is still using it, it backs off and re-registers to take the channel back (3s→60s, and the counter only resets after holding the channel for 30s, so two live instances degrade to a slow alternation instead of a 3-second thrash); only `mcp.onclose` is a legitimate exit. Decision logic is isolated in `lib/link-policy.ts` and unit-tested. Plain `code 1000` (bridge restart) is still a transient disconnect → exponential-backoff reconnect.
 
 ## Contributing tips
 

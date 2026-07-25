@@ -329,6 +329,10 @@ The Discord logic still living in `bridge.ts` (inbound `messageCreate`, slash co
 | C2 | Full Discord absorption | Incremental, not counted | — |
 
 - Release: A could ship on its own; A+B+C1 are merged into a single **minor** (headline: "Claudestra now has an open HTTP API and a live event stream — web clients, Telegram, any frontend can plug in"). Follow the batching rule.
+
+> **Shipped (v2.6.0)**: this section is the schedule as it stood then; A/B/C1 all shipped
+> together in v2.6.0. Later additions are outside this plan (the agents-mode adaptation in
+> §12 landed in v2.7, the read-only history API in v2.9).
 - The Telegram adapter and the web client itself are **out of scope here**; they get their own projects once the interfaces have landed.
 
 ## 11. Implementation notes (2026-07-09, deviations from the design)

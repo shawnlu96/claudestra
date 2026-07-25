@@ -57,6 +57,8 @@ src/
     claude-launch.ts     统一 Claude Code 启动命令构造（flags, MCP_NAME, shell 转义）
     principals.ts        v2.6.0+ API token 身份/scope/限流（~/.claude-orchestrator/principals.json）
     doctor.ts            v2.14+ 只读安装体检，`manager.ts doctor` 的实现（运行时/配置/daemon/bridge/MCP/agent）
+    link-policy.ts       v2.14+ channel-server 被 bridge 顶替后该重连还是退出——纯函数，有单测
+    net-addr.ts          v2.14+ 探测本机对外地址（Tailscale CGNAT 优先，其次 RFC1918），peer 握手 `--url` 的来源
     registry.ts          v2.9+ registry.json 唯一读取器（字段归一含 cwd/dir 兼容）；写入仍只归 manager.ts
     bg-jobs.ts           v2.7+ bg job 清理配方：杀进程 → 等 daemon 静默 → 隔离目录 → respawn 时 roster 根治（v2.9.1：daemon 的 ~/.claude/daemon/roster.json workers 花名册才是 respawn 权威依据 —— 无其他 worker 受累时 kill worker + transient daemon 并删条目）
     session-archive.ts   v2.8+ 会话退役归档：kill/fork 换代/adopt/resume 换 session 时快照 jsonl 到 ~/.claude-orchestrator/archive/<agent>/（对抗 CC cleanupPeriodDays）
@@ -83,6 +85,8 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 - **Agent 间通信** — `send_to_agent(target, text)` MCP 工具通过 Bridge 直接向另一个 agent 的上下文注入消息。
 - **定时任务** — cron 表达式拉起临时 agent、执行 prompt、汇报、清理。
 - **Discord UI** — 按钮、下拉菜单、slash 命令（`/status`、`/screenshot`、`/interrupt`、`/cron`）。
+- **`reply()` 的交互组件** — 按钮行、单选下拉，以及 v2.14+ 的 `multiselect`：勾若干项一次提交。Discord 用原生 `max_values`（选完即交），web 端渲染成 checkbox + 提交按钮。两端回投同一种格式 `[select:<id>:<v1>,<v2>]`（值逗号分隔），agent 侧一套解析吃两端。选项之间不互斥时优先用多选，一个来回胜过好几轮。
+- **链路掉线告警（v2.14+）** — `wedge-watcher` 的 link sentinel（tmux 窗口活着但 channel-server 掉线 >5min）除了发 Discord 频道，也推 `session_anomaly(kind=link_down)` 事件，web 端渲染成醒目提示。此前这条只发 Discord，而 web 用户在 MCP 断开时得不到任何信号。
 - **管理按钮跳过 LLM** — 状态、监工、销毁、重启、定时任务按钮由 Bridge 直接执行，零 token 成本、瞬间响应。
 - **流式 tool 输出** — jsonl-watcher 近乎实时地把 `Read · Edit · Write · Bash · Grep` 推到 Discord。
 - **终端截图** — ANSI 转 PNG 流水线，屏幕锁定也能看。
@@ -125,7 +129,7 @@ bun src/manager.ts cron-history [name|id]
 
 # 跨 Claudestra peer 协作 — v2.11+ HTTP peers（不依赖 Discord，直接走 /api/v1；
 # 三步握手，串通过任意私密渠道传递。设计见 docs/design-http-peers.md）
-bun src/manager.ts peer-http-invite <name> --agents <a,b> --url <我方bridge地址> [--force] [--rotate]  # A: 打印邀请串
+bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <我方bridge地址>] [--force] [--rotate]  # A: 打印邀请串（--url 不给则自动探测：Tailscale 优先，其次内网）
 bun src/manager.ts peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址> [--force]           # B: 存下 A 并打印回执
 bun src/manager.ts peer-http-accept <name> '<回执串>'                                                  # A: 完成握手
 bun src/manager.ts peer-http-test <name>          # GET 对方 /agents — 验证连通 + scope
@@ -188,6 +192,7 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - MCP server 名（`MCP_NAME`）必须在三处保持一致：`claude mcp add`、channel-server 注册、jsonl-watcher 的 tool 过滤前缀。它集中在 `src/bridge/config.ts` 和 `src/lib/claude-launch.ts`。
 - Agent 名字在 create/resume 时走 shell 元字符黑名单校验，在 kill/restart 时宽松归一，以兼容历史 CJK 命名的 worker。
 - Tool call 展示通过 `WATCHER_CONFIG.debounceMs`（默认 1500ms）去抖，避免在 tool 爆发时触发 Discord 限流。
+- **`channel-server` 生命周期（v2.14+）**：一切都由一条约束推导——**channel-server 没有守护者**，Claude Code 既不会 respawn 死掉的 stdio MCP server，也不会自动重连，所以它一旦退出就是该 agent 永久失联。两条规则：（1）**握手之后才注册**。`mcp.oninitialized` 是连 bridge 的闸门，野进程光把 `channel-server.ts` 跑起来抢不到频道——这很要紧，因为 `DISCORD_CHANNEL_ID` 由 Claude Code 注入并被**所有 Bash 子进程继承**，在 agent 自己的仓库里手滑跑一次就会顶掉正在服务的连接。留了 30s 兜底，SDK 不回调也照常注册。（2）**被顶替不等于该死**。收到 `replaced` / `close(4001)` 时看 stdio 还在不在：Claude Code 仍在用本进程就退避重连、把频道拿回来（3s→60s，且计数要稳定持有 30s 才归零，两个活实例只会退化成慢速轮换，不会 3 秒一轮互抢）；只有 `mcp.onclose` 才是正当退出。判定逻辑独立在 `lib/link-policy.ts` 并有单测。`code 1000`（bridge 重启）仍按瞬断处理 → 指数退避重连。
 
 ## 贡献提示
 
