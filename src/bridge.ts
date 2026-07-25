@@ -163,6 +163,10 @@ interface ClientInfo {
   /** channel-server 所在 Claude Code 进程的 cwd。jsonl-watcher 用它定位
    *  ~/.claude/projects/<cwd-slug>/<sessionId>.jsonl 监听 tool / text。 */
   cwd?: string;
+  /** v2.13.1+ 最近一次从这条连接收到消息的时刻（channel-server 每 25s keepalive
+   *  ping，所以活着的连接最多 25s 就会刷新一次）。目前仅用于 register 冲突时打印
+   *  旧连接的 idle 时长 —— 用来事后判断它当时是活的还是僵尸。 */
+  lastSeen: number;
 }
 
 // ============================================================
@@ -2292,6 +2296,15 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     return;
   }
 
+  // v2.13.1+ 任何来自这条连接的消息都是"它还活着"的证据（keepalive ping 也走这里）。
+  // case "register" 的冲突判定靠它区分活连接与僵尸连接。
+  for (const info of clients.values()) {
+    if (info.ws === ws) {
+      info.lastSeen = Date.now();
+      break;
+    }
+  }
+
   switch (msg.type) {
     case "ping": {
       // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong
@@ -2302,7 +2315,18 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "register": {
       const old = clients.get(msg.channelId);
       if (old && old.ws !== ws) {
-        console.log(`🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接`);
+        // 顶替语义保持不变：后来者接管。典型场景是 Claude Code 重启了它的 MCP server
+        // （旧进程尚未完全退出、ws 还没 close 时新进程已连上），这时新连接才是对的。
+        //
+        // 2026-07-25 曾误改成"活连接优先"来解决一次主会话失联，但实测证伪：subagent
+        // 并不会起自己的 channel-server（它复用父会话的 MCP 连接，jsonl 里的工具列表
+        // 只是继承）。真正的现象是 channel-server 被反复重启、Claude Code 重试若干次后
+        // 放弃。"活连接优先"会拒掉重启后的正统实例，反而加速耗尽重试次数 —— 已回滚。
+        // 这里只保留 idle 时长的诊断输出，便于下次判断旧连接究竟是活的还是僵尸。
+        const idleMs = Date.now() - (old.lastSeen ?? 0);
+        console.log(
+          `🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接（旧连接 ${Math.round(idleMs / 1000)}s 前还在通信）`
+        );
         // 主动关闭旧的 ws：发送 "replaced" 通知 + close(**4001**)。
         // v2.2.0+: 用专用 close code 4001（不是 1000）。旧 channel-server 凭 close code
         // 就能判定"被取代 → exit"，不依赖 "replaced" 消息能否赶在 close 前送达（竞态）。
@@ -2314,7 +2338,13 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           old.ws.close(4001, "replaced by newer registration");
         } catch { /* non-critical */ }
       }
-      clients.set(msg.channelId, { ws, channelId: msg.channelId, userId: msg.userId, cwd: msg.cwd });
+      clients.set(msg.channelId, {
+        ws,
+        channelId: msg.channelId,
+        userId: msg.userId,
+        cwd: msg.cwd,
+        lastSeen: Date.now(),
+      });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 

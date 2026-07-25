@@ -30,6 +30,14 @@ async function main() {
     process.exit(0);
   }
 
+  // v2.13.1+ subagent 过滤：Agent/Task 工具起的 subagent 继承了主会话的
+  // DISCORD_CHANNEL_ID，它内部的 Stop/Notification 会照样打到主 agent 的频道，
+  // 让 bridge 把主 agent 的回合误判成已结束、提前清 pending thread（症状：
+  // "我还在干活，界面上却显示完成了"）。2026-07-25 实测：并发 5 个 subagent
+  // 让主频道两分钟内收到 6 次 Stop，而主会话只结束了 1-2 个回合。
+  // agent_id 是官方 hook 契约里专门用来区分 subagent 与主线程的字段。
+  if (data.agent_id) process.exit(0);
+
   const event = data.hook_event_name;
 
   // Stop — Claude 完成回复（发完成通知）
