@@ -459,7 +459,10 @@ async function checkClaudeCodeUpdate() {
 
   // 等所有 agent 空闲再更新（避免打断正在进行的任务）
   if (!(await allAgentsIdle())) {
-    console.log(`🆙 有 agent 在忙，跳过本次，下次再试`);
+    // 「下次再试」如果按周期语义就是 7 天后——升级窗口稍纵即逝。把检查时间戳
+    // 拨回去,30 分钟后重试,直到逮到全员空闲的窗口
+    lastClaudeUpdateCheck = Date.now() - CLAUDE_UPDATE_CHECK_INTERVAL_MS + 30 * 60_000;
+    console.log(`🆙 有 agent 在忙，30 分钟后重试`);
     return;
   }
 
