@@ -24,7 +24,7 @@ import {
 import type { ServerWebSocket } from "bun";
 
 import { DISCORD_TOKEN, WEB_ONLY, BRIDGE_PORT, ALLOWED_USER_IDS, DISCORD_GUILD_ID, TMP_DIR, TMUX_SOCK, MASTER_DIR, INBOX_DIR } from "./bridge/config.js";
-// [fork:web-only] 无 Discord 模式的会话地址供给 + 出站落空 adapter
+// Web-only: 无 Discord 模式的会话地址供给 + 出站落空 adapter
 import { createLocalChatAdapter } from "./bridge/local-adapter.js";
 import {
   startTyping,
@@ -55,7 +55,7 @@ import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, 
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
 import * as fs from "fs/promises";
-// [fork] master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
+// master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
 import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, type EventFilter } from "./bridge/event-bus.js";
@@ -65,7 +65,7 @@ import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
-// [fork] Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
+// Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
 import {
   initApiRoutes,
@@ -75,7 +75,7 @@ import {
   apiThreadResults,
   apiFiles,
   apiReqKey,
-  // [fork] clear 轮转的快照 diff 用（定义随 /api/v1 路由块落 api-routes.ts）
+  // clear 轮转的快照 diff 用（定义随 /api/v1 路由块落 api-routes.ts）
   listSessionIdsForCwd,
   latestSessionIdForCwd,
   type PendingApiRequest,
@@ -683,7 +683,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     // web 前端据此把「他端用户发言」实时画成用户气泡(跨端同步),并排除 agent/
     // bridge 注入(那些不是用户消息,2026-07-24 owner 报跨端同步慢)。
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: { direction: "in", from: meta.user || "?", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId } });
-    // [fork] watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,
+    // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,
     // pending-start 已放弃 → watcher 永久缺位——工具/文本从不直播、Stop done
     // 挂 '?' 名下 busy 卡「工作中」)。每条入站消息核对该频道 watcher 在位,
     // 缺位按 registry 重建;jsonl 还没出现会重新进 pending-wait,回合开始后
@@ -930,7 +930,7 @@ const discord = new Client({
 // 里，本来就是 Discord 专属职责。send 时 discord client 已 ready（消息只会在
 // ready 后流动）。
 registerAdapter(createDiscordChatAdapter(discord));
-// [fork:web-only] local adapter 常驻注册：Discord 模式下没有 local-* 地址流通，
+// Web-only: local adapter 常驻注册：Discord 模式下没有 local-* 地址流通，
 // 不会被命中；Web-only 模式下承接会话地址供给（create_channel）与出站落空。
 registerAdapter(createLocalChatAdapter());
 
@@ -2332,7 +2332,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             }).catch(() => {});
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
-            // [fork] 同步收掉 web 端的交互卡
+            // 同步收掉 web 端的交互卡
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord" } });
           } else if (action === "cancel") {
             await tmuxRaw(["send-keys", "-t", state.tmuxTarget, "Escape"]);
@@ -2342,7 +2342,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             }).catch(() => {});
             recordMetric("auq_cancel", { channelId: auqChannel });
             clearAuqState(auqChannel);
-            // [fork] 同步收掉 web 端的交互卡
+            // 同步收掉 web 端的交互卡
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord" } });
           }
         } catch (e) {
@@ -2671,7 +2671,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
-        // [fork] api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
+        // api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
@@ -2796,7 +2796,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       try {
         // v2.6.0+ C2-5：会话地址供给走 adapter（ws 消息类型保留老名字做协议兼容）。
         // 将来纯 API agent = 换一个 provisioner，manager create 流程零改动。
-        // [fork:web-only] 无 Discord 时由 local adapter 供给 local-* 合成地址
+        // Web-only: 无 Discord 时由 local adapter 供给 local-* 合成地址
         const adapter = adapterFor(WEB_ONLY ? "local" : "discord");
         if (!adapter?.provisionConversation) throw new Error("adapter 不支持 provisionConversation");
         const { chatId: channelId } = await adapter.provisionConversation(msg.name, { category: msg.category });
@@ -2809,7 +2809,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "delete_channel": {
       try {
-        // [fork:web-only] local-* 合成地址没有平台面，删除是 no-op
+        // Web-only: local-* 合成地址没有平台面，删除是 no-op
         if (!String(msg.channelId || "").startsWith("local-")) {
           await discordDeleteChannel(discord, msg.channelId);
         }
@@ -2822,7 +2822,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
     case "rename_channel": {
       try {
-        // [fork:web-only] local-* 合成地址没有平台面，重命名是 no-op
+        // Web-only: local-* 合成地址没有平台面，重命名是 no-op
         if (String(msg.channelId || "").startsWith("local-")) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
           break;
@@ -2846,7 +2846,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       try {
         const annChannelId = msg.channelId as string;
         const annAgentName = msg.agentName as string;
-        // [fork:web-only] local-* 地址没有 Discord 频道，公告是 no-op
+        // Web-only: local-* 地址没有 Discord 频道，公告是 no-op
         if (annChannelId.startsWith("local-")) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true, messageId: "" } }));
           break;
@@ -3353,7 +3353,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
         emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done" } });
-        // [fork] 回合结束核对 registry session 是否还是活文件——原生 /clear 类
+        // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
       }
@@ -3690,7 +3690,7 @@ function handleEventsRequest(req: Request, extraFilter?: EventFilter): Response 
           cleanup(); // controller 已关（客户端断开），停止推送
         }
       };
-      // [fork] 立即发首包注释：flush 响应头 + 重置 Bun 的连接空闲计时。
+      // 立即发首包注释：flush 响应头 + 重置 Bun 的连接空闲计时。
       // Bun.serve 默认 HTTP idleTimeout ≈10s——不发任何字节的空闲 SSE 连接
       // 会在 ~10s 被掐（实测 10.7s close），30s ping 根本活不到第一轮。
       try { controller.enqueue(enc.encode(`: connected\n\n`)); } catch { cleanup(); }
@@ -3698,7 +3698,7 @@ function handleEventsRequest(req: Request, extraFilter?: EventFilter): Response 
         for (const evt of replayEventsSince(since, filter)) send(evt);
       }
       unsub = subscribeEvents(filter, send);
-      // [fork] ping 30s→5s：必须小于 Bun.serve 默认 idleTimeout（~10s），
+      // ping 30s→5s：必须小于 Bun.serve 默认 idleTimeout（~10s），
       // 否则事件间隙超过 10s 的订阅者会被静默断开（web 前端首当其冲）。
       ping = setInterval(() => {
         try { controller.enqueue(enc.encode(`: ping\n\n`)); } catch { cleanup(); }
@@ -3724,7 +3724,7 @@ initApiRoutes({
   startTypingWithSafety,
   lastMessageSource,
   handleEventsRequest,
-  // [fork] clear 端点后台轮转收尾（依赖 bridge 本地的 discord/startWatching，注入）
+  // clear 端点后台轮转收尾（依赖 bridge 本地的 discord/startWatching，注入）
   scheduleClearRotation,
 });
 
@@ -3735,7 +3735,7 @@ const CORS_ORIGIN_SETTING = process.env.BRIDGE_CORS_ORIGIN || "";
 const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
 
 /**
- * [fork] clear 后的会话轮转收尾（后台异步）。
+ * clear 后的会话轮转收尾（后台异步）。
  *
  * TUI 里 /clear 会轮转 sessionId，但新 session 的 jsonl 往往要等**首条消息**
  * 才落盘——所以 clear 端点先返回 202，这里每 1.5s poll cwd 的 projects slug 目录。
@@ -3782,7 +3782,7 @@ function scheduleClearRotation(agentName: string, channelId: string, cwd: string
 }
 
 /**
- * [fork] Stop 时的 session 轮转自愈（2026-07-23 用户报：temp 历史停在 7-15）。
+ * Stop 时的 session 轮转自愈（2026-07-23 用户报：temp 历史停在 7-15）。
  *
  * 原生 /clear 不经 clear 端点也会轮转 session——远程终端里直敲、Discord slash
  * 直通、TUI 里手动打——registry 全程不知情，jsonl-watcher/history 从此盯死文件：
@@ -3841,7 +3841,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       return handleStatsRequest();
     }
 
-    // [fork] Web 看板强制刷新（同 Discord 🔄 按钮语义,force 抓取最长 ~20s）
+    // Web 看板强制刷新（同 Discord 🔄 按钮语义,force 抓取最长 ~20s）
     if (url.pathname === "/stats/refresh" && req.method === "POST") {
       const { handleStatsRefreshRequest } = await import("./bridge/stats-dashboard.js");
       return handleStatsRefreshRequest();
@@ -3854,7 +3854,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 
     // v2.6.0+ token 鉴权的入站 API（多前端架构 Phase B）
     if (url.pathname.startsWith("/api/v1/")) {
-      // [fork] Web 远程终端 3 端点先行匹配（不走 30req/min 限流——逐键输入秒超；
+      // Web 远程终端 3 端点先行匹配（不走 30req/min 限流——逐键输入秒超；
       // 鉴权在 web-terminal.ts：Bearer + agentInScope + termId 属主校验）
       const termRes = await handleTerminalApi(req, url);
       if (termRes) return termRes;
@@ -4037,11 +4037,11 @@ const server = Bun.serve({
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
 
-// [fork] 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
+// 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。
 sweepStaleTerminalSessions().catch(() => {});
 
-// [fork:web-only] 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
+// Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
 // 平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

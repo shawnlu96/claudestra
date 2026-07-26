@@ -86,7 +86,7 @@ export function formatTool(name: string, input: any): string {
 }
 
 /**
- * [fork] 工具调用完整详情——web 工具卡点开后展示（摘要只够一眼扫过，
+ * 工具调用完整详情——web 工具卡点开后展示（摘要只够一眼扫过，
  * 「mem0 write 到底写了啥」这类问题要看完整入参）。随 tool_start 事件
  * 和历史 tools[] 一起下发。截断上限防单条事件撑爆 SSE / 环形缓冲。
  */
@@ -407,7 +407,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
             const questions = detectAskUserQuestion(content);
             if (questions && !auqStates.has(state.channelId)) {
               const tmuxTarget = `master:${state.agentName}`;
-              // [fork] 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
+              // 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
               // /api/v1 answer 端点也能拿到 AuqState 下键。post 成功只回填 messageId。
               registerAuqState(state.channelId, tmuxTarget, questions);
               // M6：local-* 频道没有 Discord 面，跳过 post（event-bus 的 question 事件仍发，

@@ -29,7 +29,7 @@ import { emitEvent, getAgentStatus, type EventFilter } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
 import { formatTool, formatToolDetail, agentNameForChannel } from "./jsonl-watcher.js";
 import { newThreadId, type Envelope, type ApiUserEndpoint } from "./router.js";
-// [fork] additive 端点（interrupt/clear/answer/pending/create/lifecycle）复用的共享 helper。
+// additive 端点（interrupt/clear/answer/pending/create/lifecycle）复用的共享 helper。
 // 绝大多数是平台无关模块，直接 import；仅 scheduleClearRotation 依赖 bridge 本地
 // 的 discord/startWatching，走 initApiRoutes 注入。
 import {
@@ -49,14 +49,14 @@ import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } f
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 
-// [fork] master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
+// master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
 /** interrupt 端点的每 agent 冷却(防双击双 C-c——空闲态连按两次是 CC 退出键)。 */
 const interruptCooldown = new Map<string, number>();
 
 /**
- * [fork] master 的最新 session id：master 不在 registry，从其 cwd 的
+ * master 的最新 session id：master 不在 registry，从其 cwd 的
  * ~/.claude/projects/<slug>/ 目录里 probe mtime 最新的 jsonl。
  * bridge.ts 的 scheduleClearRotation 也 import 它（clear 轮转判重用）。
  */
@@ -76,7 +76,7 @@ export function latestSessionIdForCwd(cwd: string): string | undefined {
 }
 
 /**
- * [fork] 列出 cwd 的 projects slug 目录里所有 session id（无序）。
+ * 列出 cwd 的 projects slug 目录里所有 session id（无序）。
  * clear 轮转用它做"clear 前快照 vs 之后新增"的集合 diff（M2）——同 cwd 多 agent
  * 共享一个 slug 目录，光取"最新 jsonl"会误认别人正在写的既有 session；只认领
  * 快照里没有的**新 sid**才不会串台。
@@ -178,7 +178,7 @@ export interface ApiDeps {
   /** 完成通知抑制：API 触发的 turn 不 @ owner */
   lastMessageSource: Map<string, string>;
   handleEventsRequest: (req: Request, extraFilter?: EventFilter) => Response;
-  // [fork] clear 端点的后台会话轮转收尾（依赖 bridge 本地 discord/startWatching，注入）
+  // clear 端点的后台会话轮转收尾（依赖 bridge 本地 discord/startWatching，注入）
   scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string) => void;
 }
 
@@ -227,7 +227,7 @@ async function authApi(req: Request, url: URL): Promise<Principal | Response> {
 
 /** registry 名双向兼容（"worker" ↔ "agent-worker"），返回 manager list 里的条目 */
 async function findApiAgent(name: string): Promise<{ name: string; channelId: string; idle?: boolean; status?: string; purpose?: string; cwd?: string; sessionId?: string } | null> {
-  // [fork] master 特判：master 不在 registry。channelId = CONTROL_CHANNEL_ID，
+  // master 特判：master 不在 registry。channelId = CONTROL_CHANNEL_ID，
   // cwd 优先取 channel-server 注册信息（在线时准确），离线回退 MASTER_DIR；
   // sessionId probe 该 cwd 下最新 jsonl（历史 API 用）。scope 把关在各端点的
   // agentInScope（master 必须显式列入 token scope，"*" 不含 master）。
@@ -253,7 +253,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
 }
 
 /**
- * [fork] 会话文件里最后一条真实对话记录（user/assistant，带 timestamp）的时间。
+ * 会话文件里最后一条真实对话记录（user/assistant，带 timestamp）的时间。
  *
  * 不能用文件 mtime 当「最近对话时间」：CC 会持续原地更新状态类记录
  * （last-prompt / mode / file-history-snapshot 等）——空闲 agent 的 mtime
@@ -377,7 +377,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       const agents = ((listResult.agents || []) as any[])
         .filter((a) => agentInScope(principal, a.name))
         .map((a) => ({ name: a.name, status: a.status, idle: a.idle, purpose: a.purpose, created: a.created }));
-      // [fork] busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
+      // busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
       // thinking 同源——manager list 的 tmux idle 探测在回合中也常报 idle，
       // 不可靠，只作 OR 兜底）。web 列表的黄色状态点数据源。
       // 第三信号(2026-07-16「两个 working 只有点进去过的才黄」):event-bus 状态
@@ -401,7 +401,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           }
         })
       );
-      // [fork] lastActivityTs：agent 最后一条真实对话的时间（不是 mtime——见
+      // lastActivityTs：agent 最后一条真实对话的时间（不是 mtime——见
       // sessionTailInfo 注释）。contextTokens:当前上下文占用(web 端超标提示)。
       {
         const { readRegistryAgents } = await import("../lib/registry.js");
@@ -414,7 +414,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           const info = await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId));
           if (info) bySessions.set(r.name, info);
         }
-        // [fork] model/effort 兜底链末端:全局默认(settings.json)
+        // model/effort 兜底链末端:全局默认(settings.json)
         let gModel: string | null = null;
         let gEffort: string | null = null;
         try {
@@ -427,13 +427,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           const r = regByName.get(a.name);
           (a as any).lastActivityTs = info?.convTs ?? null;
           (a as any).contextTokens = info?.ctxTokens ?? null;
-          // [fork] 当前模型/effort。显示链:jsonl 实测(会话内切换即时反映,防
+          // 当前模型/effort。显示链:jsonl 实测(会话内切换即时反映,防
           // registry 漂移) → registry 钉的(创建/切换端点写入) → 全局默认
           (a as any).model = info?.model ?? (r?.model ? resolveModelAlias(r.model) : null) ?? gModel;
           (a as any).effort = info?.effort ?? r?.effort ?? gEffort;
         }
       }
-      // [fork] ?include=stopped：registry 里已停止的 agent 也入列（additive；
+      // ?include=stopped：registry 里已停止的 agent 也入列（additive；
       // web 侧栏保留 stopped 会话入口，其历史经归档仍可读——正是归档的意义）。
       if (url.searchParams.get("include") === "stopped") {
         const { readRegistryAgents } = await import("../lib/registry.js");
@@ -448,10 +448,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           agents.push({ name: r.name, status: "stopped", idle: undefined, purpose: r.purpose, lastActivityTs: ts, created: (r as any).created } as any);
         }
       }
-      // [fork] master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
+      // master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
       // web 前端的「大总管」置顶入口靠它。
       if (CONTROL_CHANNEL_ID && agentInScope(principal, "master")) {
-        // [fork] master 的 model/effort:probe 其 cwd 最新 jsonl(master 不在 registry)
+        // master 的 model/effort:probe 其 cwd 最新 jsonl(master 不在 registry)
         let mInfo: SessionTailInfo | null = null;
         try {
           const mCwd = deps.clients.get(CONTROL_CHANNEL_ID)?.cwd || MASTER_DIR;
@@ -596,7 +596,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
-  // [fork] GET /api/v1/agents/:name/bg-tasks —— 当前活跃 bg 任务快照（replay）。
+  // GET /api/v1/agents/:name/bg-tasks —— 当前活跃 bg 任务快照（replay）。
   // web 刷新/连流后据此重建后台任务面板（SSE 只带增量,不 replay 已发生的）。
   const bgTasksMatch = path.match(/^\/agents\/([^/]+)\/bg-tasks$/);
   if (bgTasksMatch && req.method === "GET") {
@@ -611,7 +611,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, tasks });
   }
 
-  // [fork] GET /api/v1/history/search —— 跨 agent 跨 session 聊天记录全文搜索。
+  // GET /api/v1/history/search —— 跨 agent 跨 session 聊天记录全文搜索。
   //   ?q=<词，≥2 字符>&limit=<1..100，默认 30>&agent=<可选，只搜这个 agent>
   // 场景：compact 后 agent 忘事 / 用户只剩模糊记忆——对话正文全局检索捞回来。
   // 覆盖 live + 归档（含已 remove 的 agent，归档在即可搜）。按 session mtime
@@ -697,7 +697,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, query: q, hits: all.slice(0, limit), scanned: files.length });
   }
 
-  // [fork] GET /api/v1/agents/:name/tasks —— Claude Code 原生任务清单。
+  // GET /api/v1/agents/:name/tasks —— Claude Code 原生任务清单。
   // TaskCreate/TaskUpdate 落盘在 ~/.claude/tasks/<sessionId>/<id>.json(每任务一
   // 文件:{id,subject,description,activeForm,status,blocks,blockedBy})。Web 会话
   // 页任务面板的数据源(owner 2026-07-16:「console 里的 todo 适配到 Web UI」)。
@@ -878,7 +878,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     waitSec = Math.min(Math.max(waitSec, 0), 300);
 
-    // [fork] Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
+    // Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
     // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的
     // "/xxx" 落回普通消息——用户可能真想发以 / 开头的文本。TUI 类命令没有回合，
     // 响应带 slash:true 让前端不进「正在回复」态。
@@ -987,7 +987,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   }
 
   // ============================================================
-  // [fork] 以下为 fork 侧 additive 端点（upstream /api/v1 无对应能力）。
+  // 以下为 fork 侧 additive 端点（upstream /api/v1 无对应能力）。
   // 全部遵守 upstream 合同：Bearer + agentInScope、additive-only、复用
   // Discord 按钮同款 tmux keystroke 逻辑（buildAuqKeystrokes / 权限 keySeqMap
   // + 发键前 tmuxCapture 重验）。
@@ -999,7 +999,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   //   POST /agents/:name/kill|restart    生命周期（仅全权 token）
   // ============================================================
 
-  // [fork] GET /api/v1/agents/:name/skills —— Web 命令面板数据源：该 agent
+  // GET /api/v1/agents/:name/skills —— Web 命令面板数据源：该 agent
   // 可用的全部 slash 命令（builtin + 全局 skill + 本 agent 项目 skill）。
   const skillsMatch = path.match(/^\/agents\/([^/]+)\/skills$/);
   if (skillsMatch && req.method === "GET") {
@@ -1013,7 +1013,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, agent: agent.name, commands });
   }
 
-  // [fork] POST /api/v1/agents/:name/interrupt —— 复刻 Discord ⚡ 打断按钮
+  // POST /api/v1/agents/:name/interrupt —— 复刻 Discord ⚡ 打断按钮
   const interruptMatch = path.match(/^\/agents\/([^/]+)\/interrupt$/);
   if (interruptMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(interruptMatch[1]);
@@ -1049,7 +1049,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, agent: agent.name });
   }
 
-  // [fork] POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。
+  // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。
   // 语义分层（owner 哲学对齐）：本端点只做「打 /clear + 会话轮转收尾」这件原生事；
   // clear 后要不要发开机指令、发什么，是前端（用户层）的事，这里零感知。
   // master：/clear 后 CLAUDE.md 人设自动重载，且不在 registry、无 watcher —— 只发键。
@@ -1095,7 +1095,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
-  // [fork] POST /api/v1/agents/:name/claude-settings —— per-会话切换模型/effort
+  // POST /api/v1/agents/:name/claude-settings —— per-会话切换模型/effort
   // (owner 2026-07-23:「每个对话显示当前 model/effort + 快速切换」)。原生
   // /model、/effort 命令 tmux 注入(与 TUI 手打同一生效路径);回合进行中 409
   // (此时注入只会排进输入框,语义不明)。非 master 同步写 registry(manager
@@ -1151,7 +1151,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, agent: agent.name, model: model ?? null, effort: effort ?? null });
   }
 
-  // [fork] POST /api/v1/agents/:name/answer —— 交互卡回传。
+  // POST /api/v1/agents/:name/answer —— 交互卡回传。
   // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]}
   //   或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
@@ -1242,7 +1242,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(400, { ok: false, error: 'kind must be "auq" or "permission"' });
   }
 
-  // [fork] GET /api/v1/agents/:name/pending —— 当前挂起的交互卡 + thinking 态。
+  // GET /api/v1/agents/:name/pending —— 当前挂起的交互卡 + thinking 态。
   // SSE 的 question 事件可能在前端连流之前发出（切会话/刷新/回前台），
   // 前端连流后调这里补拉（对应旧 web-hub 的 pendingInteraction replay）。
   const pendingMatch = path.match(/^\/agents\/([^/]+)\/pending$/);
@@ -1255,7 +1255,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const { auqStates } = await import("./ask-user-question.js");
     const auq = auqStates.get(agent.channelId);
-    // [fork] thinking：该 agent 此刻是否在回合中（最近一次 agent_status=thinking）。
+    // thinking：该 agent 此刻是否在回合中（最近一次 agent_status=thinking）。
     // web 前端刷新/切回/回前台后连流时读它，同步 composer「暂停」态。同键：done 事件在
     // Stop hook 用 agentNameForChannel(channelId)（master 回退 CONTROL_CHANNEL_ID）落键。
     const evAgent = agentNameForChannel(agent.channelId) || (agent.channelId === CONTROL_CHANNEL_ID ? "master" : "?");
@@ -1268,7 +1268,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
-  // [fork] POST /api/v1/agents —— create（仅全权 token；复用 manager CLI）
+  // POST /api/v1/agents —— create（仅全权 token；复用 manager CLI）
   if (path === "/agents" && req.method === "POST") {
     if (!principal.agents.includes("*")) {
       return apiJson(403, { ok: false, error: "create requires a full-scope token" });
@@ -1301,7 +1301,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager create failed" });
   }
 
-  // [fork] GET/PUT /api/v1/config/claude-defaults —— 全局默认模型/effort 管理
+  // GET/PUT /api/v1/config/claude-defaults —— 全局默认模型/effort 管理
   // (owner 2026-07-16:「设置里可以管理全局 model 和 effort」)。读写
   // ~/.claude/settings.json 的 model / effortLevel 两个字段,其余字段原样保留。
   // 影响所有不带 --model/--effort 的新 session(含终端里直接开的 claude)。
@@ -1358,7 +1358,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(405, { ok: false, error: "GET / PUT only" });
   }
 
-  // [fork] POST /api/v1/agents/:name/kill | /restart | /remove —— 生命周期（仅全权 token）
+  // POST /api/v1/agents/:name/kill | /restart | /remove —— 生命周期（仅全权 token）
   // remove = kill + registry 条目删除(列表永久移除,归档保留)
   const lifecycleMatch = path.match(/^\/agents\/([^/]+)\/(kill|restart|remove)$/);
   if (lifecycleMatch && req.method === "POST") {

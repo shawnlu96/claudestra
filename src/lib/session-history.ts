@@ -20,14 +20,14 @@ import { ARCHIVE_ROOT } from "./session-archive.js";
 export interface HistoryToolCall {
   name: string;
   summary: string;
-  /** [fork] 完整入参详情（jsonl-watcher formatToolDetail 渲染，截断 4k）——
+  /** 完整入参详情（jsonl-watcher formatToolDetail 渲染，截断 4k）——
    *  web 工具卡点开展示。可选：老快照 / 未传 toolDetailFn 时缺省。 */
   detail?: string;
-  /** [fork] 该次调用的 tool_result 带 is_error——web 把失败的工具卡标红。 */
+  /** 该次调用的 tool_result 带 is_error——web 把失败的工具卡标红。 */
   error?: boolean;
 }
 
-/** [fork] reply() 附带的交互组件（按钮/选单），点击回投 [button:id]/[select:id:v]。
+/** reply() 附带的交互组件（按钮/选单），点击回投 [button:id]/[select:id:v]。
  *  形状与 bridge NeutralMessage 的 components 对齐，历史里原样透传给前端渲染。 */
 export type ReplyComponentRow =
   | { type: "buttons"; buttons: { id: string; label: string; style?: string; emoji?: string }[] }
@@ -41,22 +41,22 @@ export interface HistoryMessage {
   role: "user" | "assistant" | "system";
   text: string;
   tools?: HistoryToolCall[];
-  /** [fork] reply() 工具的正文——发给用户的「最终回复」，与过程叙述 text 分开渲染 */
+  /** reply() 工具的正文——发给用户的「最终回复」，与过程叙述 text 分开渲染 */
   replyText?: string;
-  /** [fork] reply() 附带的按钮/选单——历史里也渲染（否则用户不在直播那刻就看不到按钮） */
+  /** reply() 附带的按钮/选单——历史里也渲染（否则用户不在直播那刻就看不到按钮） */
   replyComponents?: ReplyComponentRow[];
-  /** [fork] reply() 附带的出站附件文件名（basename;取回走 inbox 后缀匹配兜底） */
+  /** reply() 附带的出站附件文件名（basename;取回走 inbox 后缀匹配兜底） */
   replyFiles?: string[];
-  /** [fork] 回合耗时 ms(system/turn_duration 回填)——只有正常收尾的回合才有 */
+  /** 回合耗时 ms(system/turn_duration 回填)——只有正常收尾的回合才有 */
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
   compactSummary?: boolean;
   model?: string;
-  /** [fork] 入站消息的发送者标签（<channel> 的 user 属性：API token 名 / Discord 用户名 / 来源 agent） */
+  /** 入站消息的发送者标签（<channel> 的 user 属性：API token 名 / Discord 用户名 / 来源 agent） */
   from?: string;
 }
 
-/** [fork] MCP reply 工具名：mcp__<MCP_NAME>__reply（MCP_NAME 可配，按前后缀匹配）。 */
+/** MCP reply 工具名：mcp__<MCP_NAME>__reply（MCP_NAME 可配，按前后缀匹配）。 */
 function isReplyTool(name: string): boolean {
   return name.startsWith("mcp__") && name.endsWith("__reply");
 }
@@ -161,14 +161,14 @@ export function listSubagentFiles(mainJsonlPath: string): string[] {
   }
 }
 
-// [fork] channel 送达的入站消息在 CC jsonl 里落成 isMeta:true + "<channel …>…</channel>"
+// channel 送达的入站消息在 CC jsonl 里落成 isMeta:true + "<channel …>…</channel>"
 // 包装的 user 记录（CC channel 协议原生格式）。这是真实对话输入（web/API 用户、
 // Discord 用户、agent↔agent），不解包的话历史 API 里看不到任何用户消息，web 端
 // 回合结构也随之丢失（连续 assistant 记录跨回合粘连成巨型气泡）。
 const CHANNEL_WRAP_RE = /^\s*<channel\s+([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/channel>\s*$/;
 
 /**
- * [fork] 剥掉 bridge renderContentForLocal 注入的 framing header：正文开头的
+ * 剥掉 bridge renderContentForLocal 注入的 framing header：正文开头的
  * [🌐 …] / [🤖 …] 方括号块是给 agent 的路由/行为指示，不是用户输入。header 内可能
  * 出现 "]"（如 [DIRECT] 标记），所以用 "]\n\n" 或行尾 "]" + 空行做块边界，而不是
  * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。
@@ -184,7 +184,7 @@ function stripChannelHeader(body: string): string {
 }
 
 /**
- * [fork] 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
+ * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
 export function unwrapChannelMessage(raw: string): { text: string; from?: string } | null {
@@ -280,7 +280,7 @@ export async function readSessionHistory(
     before?: number;
     /** tool_use 摘要渲染器（bridge 传 jsonl-watcher 的 formatTool），默认只回工具名 */
     formatToolFn?: (name: string, input: any) => string;
-    /** [fork] tool_use 完整详情渲染器（formatToolDetail）——省略则历史不带 detail */
+    /** tool_use 完整详情渲染器（formatToolDetail）——省略则历史不带 detail */
     toolDetailFn?: (name: string, input: any) => string;
   } = {},
 ): Promise<HistoryPage> {
@@ -290,7 +290,7 @@ export async function readSessionHistory(
   const raw = await Bun.file(filePath).text();
   const lines = raw.split("\n");
   const all: HistoryMessage[] = [];
-  // [fork] tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
+  // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
   const toolById = new Map<string, HistoryToolCall>();
 
   for (let i = 0; i < lines.length; i++) {
@@ -309,7 +309,7 @@ export async function readSessionHistory(
       continue;
     }
 
-    // [fork] turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
+    // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
     // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
     // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
     if (rec.type === "system" && rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
@@ -325,7 +325,7 @@ export async function readSessionHistory(
 
     if (rec.type === "user") {
       const c = rec.message?.content;
-      // [fork] tool_result 的 is_error 回填到对应工具卡（web 标红失败的调用）。
+      // tool_result 的 is_error 回填到对应工具卡（web 标红失败的调用）。
       // 回填不影响本条 user 记录自身的过滤逻辑，继续走原流程。
       if (Array.isArray(c)) {
         for (const b of c) {
@@ -342,11 +342,11 @@ export async function readSessionHistory(
             ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("\n")
             : "";
       if (rec.isMeta === true) {
-        // [fork] isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；
+        // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；
         // 其余 isMeta（caveat / local-command 输出等）照旧过滤
         const un = unwrapChannelMessage(text);
         if (!un) continue;
-        // [fork] bridge 内部注入(看门狗 nudge 等管线提示,user="bridge:*")不进
+        // bridge 内部注入(看门狗 nudge 等管线提示,user="bridge:*")不进
         // 历史——那是发给 agent 的指令,不是对话。直播侧 srcKind 过滤已同款
         // 排除,历史侧对齐(2026-07-24 用户截图:nudge 全文以用户气泡出现在
         // migration 历史里,像系统故障)。
@@ -357,12 +357,12 @@ export async function readSessionHistory(
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
-      // [fork] TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
+      // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
       //   <command-name>/x</command-name> ± <command-message>…（顺序不定）→ system 轻条目「/x」
       //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
       // 不处理会把原始标签 + ANSI 转义裸渲染成用户气泡（2026-07-12 真机截图）。
       const trimmed = text.trim();
-      // [fork] harness 注入的后台任务完成通知(<task-notification>,裸 user 记录
+      // harness 注入的后台任务完成通知(<task-notification>,裸 user 记录
       // 不带 isMeta)不是用户打的字——渲染成用户气泡就像「用户发了段 XML」
       // (2026-07-14 真机截图,master 频道)。取 summary 转 system 轻条目。
       if (/^<task-notification>/.test(trimmed)) {
@@ -383,7 +383,7 @@ export async function readSessionHistory(
         all.push({ seq: i, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
         continue;
       }
-      // [fork] 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条
+      // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条
       // 纯文本 user 记录，紧接着还有 <command-name> 记录 → 不跳过就同一命令渲染成
       // 「用户气泡 + 分隔条」双份（2026-07-13）。channel 入站消息是 isMeta 包装，
       // TUI 直敲的合法命令只落 <command-name> 记录，都不走这条路径。
@@ -405,7 +405,7 @@ export async function readSessionHistory(
       for (const b of content) {
         if (b?.type === "text" && b.text?.trim()) texts.push(b.text);
         else if (b?.type === "tool_use" && b.name) {
-          // [fork] reply() 的正文是「发给用户的消息」，不是工具动作——提取成文本，别当
+          // reply() 的正文是「发给用户的消息」，不是工具动作——提取成文本，别当
           // 工具卡（否则 formatTool 只剩「🔧 <server>/reply」，回复内容在历史里蒸发，
           // 直播能看到、进历史就没了）。这样历史与直播都渲染同一份 reply。
           if (isReplyTool(b.name) && typeof b.input?.text === "string" && b.input.text.trim()) {
@@ -449,7 +449,7 @@ export async function readSessionHistory(
   return { messages, total: all.length, hasMore: eligible.length > messages.length };
 }
 
-// ── [fork] 聊天记录全文搜索 ─────────────────────────────────────────────
+// ── 聊天记录全文搜索 ─────────────────────────────────────────────
 
 export interface HistorySearchHit {
   /** jsonl 行号，与 readSessionHistory 的 seq 同一坐标系 */

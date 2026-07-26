@@ -1,5 +1,5 @@
 /**
- * [fork] Web 远程终端 —— 把 agent 的 tmux window 以真 PTY 实时流到 Web 前端。
+ * Web 远程终端 —— 把 agent 的 tmux window 以真 PTY 实时流到 Web 前端。
  *
  * 架构（设计文档 project-nexus reference/web-terminal-design.md，PoC 2026-07-11 全链路验证）：
  *
@@ -12,7 +12,7 @@
  *   tmux -CC control client，它会同步整个 session group 的 current window，把
  *   viewer 的当前窗口漂到最大索引（「跳到最后一个 tab」bug，2026-07-12 实验钉死）。
  * - 输出：PTY 字节流 → SSE `{"t":"o","d":<base64>}`（连接即发首包 + 5s ping，
- *   Bun.serve idleTimeout≈10s 坑，同 handleEventsRequest 的 [fork] 修复）。
+ *   Bun.serve idleTimeout≈10s 坑，同 handleEventsRequest 的 修复）。
  * - 输入：POST base64 原始字节（xterm onData 的转义序列原样）→ term.write —— tmux
  *   自己解析方向键/Ctrl/粘贴，零翻译。
  * - resize：term.resize 后**必须手动 proc.kill("SIGWINCH")** —— Bun.Terminal spawn

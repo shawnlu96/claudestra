@@ -65,7 +65,7 @@ export interface AuqState {
 export const auqStates = new Map<string, AuqState>();
 
 /**
- * [fork] 注册 AUQ 状态，与 Discord 渲染解耦。
+ * 注册 AUQ 状态，与 Discord 渲染解耦。
  *
  * Web-only 模式（或 Discord post 失败）下也必须有 AuqState，否则
  * POST /api/v1/agents/:name/answer 无从下键。watcher 检测到 AUQ 先调这里，
@@ -184,7 +184,7 @@ export async function postAskUserQuestionMessage(
 
     const msg = await textCh.send({ content: body, components: rows });
 
-    // [fork] 状态可能已由 registerAuqState 预注册（web-only 回路），只回填 messageId
+    // 状态可能已由 registerAuqState 预注册（web-only 回路），只回填 messageId
     const existing = auqStates.get(channelId);
     if (existing) {
       existing.messageId = msg.id;

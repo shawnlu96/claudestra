@@ -29,8 +29,8 @@ export type MetricEvent =
   | "agent_wedged"      // wedge watcher 报警
   | "error"
   | "cron_run"
-  | "api_slash"                 // [fork] Web slash 直通注入
-  | "claude_defaults_updated"   // [fork] 全局默认模型/effort 变更
+  | "api_slash"                 // Web slash 直通注入
+  | "claude_defaults_updated"   // 全局默认模型/effort 变更
   // v2.11+ HTTP peer(Discord peer 系列事件已随机制移除)
   | "http_peer_out_ok"
   | "http_peer_out_error"
@@ -48,9 +48,9 @@ export type MetricEvent =
   | "doppelganger_detected"
   | "ia_watchdog_nudge"
   | "reply_cross_agent_forward"
-  // [fork] Stop 时检出原生 /clear 类 session 轮转并自动重绑（2026-07-23）
+  // Stop 时检出原生 /clear 类 session 轮转并自动重绑（2026-07-23）
   | "session_selfheal"
-  // [fork] per-会话模型/effort 切换端点（2026-07-23）
+  // per-会话模型/effort 切换端点（2026-07-23）
   | "agent_claude_updated"
   // v2.11.1+ web peer 管理端点（invite/join/accept/scope/remove，2026-07-24）
   | "peer_managed";

@@ -419,7 +419,7 @@ export function TerminalView({
     //    alternate screen 无滚动缓冲，手指划屏本来毫无反应）。把竖向拖动合成
     //    WheelEvent 派发到 .xterm-screen，由 xterm 按 CC 当前鼠标模式正确编码
     //    上行——滑动始终是「滚动」，不会像补发方向键那样误碰输入/命令历史。
-    //    手指下拉 = 看更早历史（wheel up），上推 = 回到最新。[fork]
+    //    手指下拉 = 看更早历史（wheel up），上推 = 回到最新。
     const screenEl = container.querySelector(".xterm-screen") as HTMLElement | null;
     let touchY: number | null = null;
     let lastMoveTs = 0;

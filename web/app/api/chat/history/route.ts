@@ -22,13 +22,13 @@ interface NeutralMessage {
   role: "user" | "assistant" | "system";
   text?: string;
   tools?: { name: string; summary: string; detail?: string; error?: boolean }[];
-  /** [fork] reply() 的最终回复正文（后端从 jsonl 的 reply tool_use 提取） */
+  /** reply() 的最终回复正文（后端从 jsonl 的 reply tool_use 提取） */
   replyText?: string;
-  /** [fork] reply() 附带的按钮/选单（后端从 reply tool_use 的 input.components 提取） */
+  /** reply() 附带的按钮/选单（后端从 reply tool_use 的 input.components 提取） */
   replyComponents?: WebComponentRow[];
-  /** [fork] reply() 出站附件文件名（basename;取回走 /api/chat/attachment 的 inbox 后缀兜底） */
+  /** reply() 出站附件文件名（basename;取回走 /api/chat/attachment 的 inbox 后缀兜底） */
   replyFiles?: string[];
-  /** [fork] 回合耗时 ms(正常收尾的回合才有)——历史尾轮据此渲染完成标记 */
+  /** 回合耗时 ms(正常收尾的回合才有)——历史尾轮据此渲染完成标记 */
   turnMs?: number;
   compactSummary?: boolean;
   /** 入站消息发送者标签（<channel> user 属性：API token 名 / Discord 用户名 / 来源 agent） */

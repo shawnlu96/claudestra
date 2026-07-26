@@ -81,7 +81,7 @@ export interface ChatMessage {
   /** assistant 的交错段序列（叙述/工具按时间序）。存在时渲染层优先用它；
    *  content/toolCalls 仍聚合维护（判空、数量统计、旧快照兼容）。 */
   segments?: AssistantSegment[];
-  /** [fork] assistant 的「最终回复」（reply() 正文）——与过程叙述 content 分区渲染，
+  /** assistant 的「最终回复」（reply() 正文）——与过程叙述 content 分区渲染，
    *  中间用淡分隔线隔开。历史来自 jsonl 的 reply tool_use，直播来自 chat_message(out)。 */
   replyText?: string;
   /** replyText 的时间（与气泡 ts 分开——长回合里回复比开场晚得多）。点击回复正文显示。 */

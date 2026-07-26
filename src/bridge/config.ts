@@ -4,7 +4,7 @@
 
 export const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN!;
 
-// [fork:web-only] 无 DISCORD_BOT_TOKEN 时以 Web-only 模式运行：不连 Discord、
+// Web-only: 无 DISCORD_BOT_TOKEN 时以 Web-only 模式运行：不连 Discord、
 // 跳过 ready 里的 Discord 专属初始化；会话地址由 local adapter 供给（local-* 合成
 // id），出站对 local transport 是 no-op（前端走 /api/v1 + /events SSE）。
 export const WEB_ONLY = !process.env.DISCORD_BOT_TOKEN;

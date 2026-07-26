@@ -778,7 +778,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           }
         }, 5_000);
       }
-      // [fork] 断流自动重连：bridge 重启 / 网络抖动会掐 SSE。此前只有「回前台」
+      // 断流自动重连：bridge 重启 / 网络抖动会掐 SSE。此前只有「回前台」
       // 触发 maybeReconnect，页面一直在前台就永远断着——断流期间 agent 的过程
       // 记录直播全丢，也不重拉历史（2026-07-12 真机：bridge 重启后用户盯着页面，
       // 后续处理过程 web 上完全没有）。仍是当前流才自动重连；走 maybeReconnect
@@ -876,7 +876,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  /** [fork] 另一端用户的发言(stream user-in 事件,2026-07-24 owner:手机发的话
+  /** 另一端用户的发言(stream user-in 事件,2026-07-24 owner:手机发的话
    *  电脑端要等对齐才出现)。同一 token 两端共用,本端自己发的消息也会收到回声
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
@@ -1179,7 +1179,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /**
-   * [fork] reply() 的最终回复：挂到当前/最后一条 assistant 气泡的 replyText
+   * reply() 的最终回复：挂到当前/最后一条 assistant 气泡的 replyText
    * （与过程叙述 content 分区渲染，中间淡分隔线）。
    *
    * 关键：**不走 ensureLiveAssistant**——reply 的 chat_message(out) 可能在回合结束
@@ -1473,7 +1473,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  /** [fork] bg 卡陈旧收敛(2026-07-24 owner:「bg task 总是不能正确关掉」):
+  /** bg 卡陈旧收敛(2026-07-24 owner:「bg task 总是不能正确关掉」):
    *  working 卡超 4min 无任何事件 → 置完成,镜像 bridge「3min 无活动即完成」
    *  规则。completed 事件在断档/冻结窗口漏收时,此前只有重连时刻的 bg-sync
    *  一次收敛机会,错过就永远 working。搭 15s 轮询便车,零新计时器。 */

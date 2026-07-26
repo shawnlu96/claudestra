@@ -1,5 +1,5 @@
 /**
- * [fork:web-only] Local ChatAdapter —— 无 Discord 模式下的会话地址供给 + 出站落空。
+ * Web-only: Local ChatAdapter —— 无 Discord 模式下的会话地址供给 + 出站落空。
  *
  * 设计（对齐 upstream docs/design-multi-frontend.md §3.3 的「纯 API agent =
  * 一个返回虚拟地址的 provisioner，create 流程零改动」预留）：

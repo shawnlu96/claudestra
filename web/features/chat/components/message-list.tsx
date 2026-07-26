@@ -487,7 +487,7 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
   );
 });
 
-/** [fork] 过程叙述 ↔ 最终回复 之间的淡分隔线（仅两者都在时出现）。 */
+/** 过程叙述 ↔ 最终回复 之间的淡分隔线（仅两者都在时出现）。 */
 function ReplyDivider() {
   const t = useT();
   return (

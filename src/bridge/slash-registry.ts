@@ -163,7 +163,7 @@ export function isProjectSkillForOtherAgent(discordName: string, agentName: stri
 }
 
 /**
- * [fork] Web 命令面板数据源：某 agent 可用的全部命令
+ * Web 命令面板数据源：某 agent 可用的全部命令
  * （builtin + 全局 skill + 该 agent 的项目 skill），去重优先级同
  * allRegistrableCommands。Web 没有 Discord 的 100 命令上限/描述截断，
  * 全量返回,前端做即时模糊搜索。
@@ -215,7 +215,7 @@ export function commandsForAgent(agentName: string | null): AgentCommandInfo[] {
 }
 
 /**
- * [fork] Web 自由文本调用解析。与 resolveInvocation 的差别只在 builtin：
+ * Web 自由文本调用解析。与 resolveInvocation 的差别只在 builtin：
  * builtin 的 argBuilder 按 Discord option 名取值（vals.instructions / vals.name…），
  * web 端只有一段自由文本参数——直接原样拼接，否则「/compact 保留xx」会被
  * 静默丢参成裸 /compact（2026-07-14 code review 抓到）。skill 路径本就用

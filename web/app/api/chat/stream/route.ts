@@ -90,7 +90,7 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
     case "assistant_text":
       return { t: "text", text: String(d.text ?? "") };
     case "chat_message": {
-      // [fork] direction=in 且来源是用户(Web api/Discord user)→ user-in:另一端
+      // direction=in 且来源是用户(Web api/Discord user)→ user-in:另一端
       // 用户的发言实时画进本端视图(owner 2026-07-24:手机发的话电脑端要等对齐
       // 才出现)。agent/bridge 注入不算用户消息;本端自己的回声由前端对账去重。
       if (d.direction === "in") {
@@ -106,7 +106,7 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
         return null;
       }
       if (d.direction !== "out") return null;
-      // [fork] reply() 的最终回复 → 独立 reply 事件（挂 replyText，与过程叙述分区、
+      // reply() 的最终回复 → 独立 reply 事件（挂 replyText，与过程叙述分区、
       // 走 Domd 富文本、且回合 done 之后到达也能定稿——修「回复完又冒一条纯文本」）
       // components：reply 附带的按钮/选单（后端 #29 起 chat_message 事件带上），原样透传
       // files：agent 出站附件（bridge 已拷贝进 inbox，attachment=落盘文件名）→
@@ -140,7 +140,7 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
             ? `🚫 An action was blocked by auto mode${d.reason ? `: ${String(d.reason)}` : ""}`
             : `🚫 一个操作被 auto 模式拦下${d.reason ? `：${String(d.reason)}` : ""}`,
       };
-    // [fork] 链路掉线告警(v2.14+):tmux 里 Claude Code 活着,但 channel-server
+    // 链路掉线告警(v2.14+):tmux 里 Claude Code 活着,但 channel-server
     // 没连上 bridge —— 消息进不来也出不去。此前这条只发 Discord 频道,Web 端
     // 用户一无所知,只能干等(owner 2026-07-25 连踩一天)。翻成一条醒目的系统
     // 文本,复用现有渲染管线。其它 session_anomaly 子类型仍不消费。

@@ -16,9 +16,9 @@ export interface StreamSink {
   /** 工具状态更新（目前只有失败标红）——按 tool_use id 找回那张卡。 */
   updateToolState(id: string, state: "done" | "error"): void;
   appendAssistantText(text: string): void;
-  /** [fork] 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析) */
+  /** 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析) */
   addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[]): void;
-  /** [fork] reply() 的最终回复：挂到当前 assistant 气泡的 replyText（回合外到达也定稿）。
+  /** reply() 的最终回复：挂到当前 assistant 气泡的 replyText（回合外到达也定稿）。
    *  components：reply 附带的按钮/选单，挂到同一气泡供渲染。
    *  attachments：agent 出站附件（图片/文件），挂到气泡尾部渲染。 */
   setReplyText(

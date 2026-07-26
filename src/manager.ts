@@ -2593,7 +2593,7 @@ async function cmdTokenAdd(name: string, agentsCsv: string, force: boolean, noMi
       warnings.push(`"*" scope：所有普通 agent 都对此 token 可见`);
       continue;
     }
-    // [fork] "master" 是特殊 scope 值（大总管不在 registry）：显式列出 + --force 才放行
+    // "master" 是特殊 scope 值（大总管不在 registry）：显式列出 + --force 才放行
     if (a === "master") {
       if (!force) {
         output({
@@ -3304,7 +3304,7 @@ switch (cmd) {
     break;
   }
 
-  // [fork] set-session：把 agent 的官方 sessionId 切到新值（先归档旧会话）。
+  // set-session：把 agent 的官方 sessionId 切到新值（先归档旧会话）。
   // 供 bridge 的 clear 端点用：TUI 里 /clear 会轮转 sessionId，registry 若不跟着
   // 换，jsonl-watcher 会盯死文件。registry 写入必须经 manager（唯一写者不变式）。
   case "set-session": {
@@ -3335,7 +3335,7 @@ switch (cmd) {
     break;
   }
 
-  // [fork] set-claude <name> [--model m] [--effort e] —— 记录 per-agent 模型/effort
+  // set-claude <name> [--model m] [--effort e] —— 记录 per-agent 模型/effort
   // （bridge 的 claude-settings 端点切换后同步调用;restart 时 --model/--effort 沿用）
   case "set-claude": {
     const [name, ...rest] = args;

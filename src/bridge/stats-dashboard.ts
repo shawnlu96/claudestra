@@ -535,7 +535,7 @@ export async function initStatsDashboard(discord: Client): Promise<void> {
   if (!tickTimer) tickTimer = setInterval(() => void doUpdate(discord), TICK_MS);
 }
 
-/** [fork] POST /stats/refresh —— Web 看板的「🔄 刷新」：与 Discord 刷新按钮
+/** POST /stats/refresh —— Web 看板的「🔄 刷新」：与 Discord 刷新按钮
  *  同款语义（清缓存年龄 + force 多轮等 idle 强抓），抓完返回新快照。
  *  force 路径最长 ~20s（5×2s 等 idle + 抓取 + 稳定帧），调用侧超时给足。 */
 export async function handleStatsRefreshRequest(): Promise<Response> {
