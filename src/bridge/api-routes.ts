@@ -269,8 +269,12 @@ interface SessionTailInfo {
   ctxTokens: number | null;
   /** 最近一条 assistant 实际用的 model id（会话内 /model 切换后即时反映，防 registry 漂移） */
   model: string | null;
+  /** model 读取自的那条 assistant 记录的时间——切换端点的乐观显示靠它判断实测是否已追上 */
+  modelTs: number | null;
   /** 会话内最近一次 /effort 的结果档位（stdout 自述,tail 窗内没有则 null → 调用方回退 registry/全局） */
   effort: string | null;
+  /** effort 读取自的那条记录的时间（同 modelTs 用途） */
+  effortTs: number | null;
 }
 const tailInfoCache = new Map<string, { mtimeMs: number; info: SessionTailInfo }>();
 async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
@@ -284,7 +288,9 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
     let convTs: number | null = null;
     let ctxTokens: number | null = null;
     let model: string | null = null;
+    let modelTs: number | null = null;
     let effort: string | null = null;
+    let effortTs: number | null = null;
     for (
       let i = lines.length - 1;
       i >= 0 && (convTs === null || ctxTokens === null || model === null || effort === null);
@@ -316,7 +322,11 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
         // 当前模型:最近一条 assistant 的 message.model(错误占位的 "<synthetic>" 跳过)
         if (model === null && rec.type === "assistant") {
           const m = rec.message?.model;
-          if (typeof m === "string" && m && !m.startsWith("<")) model = m;
+          if (typeof m === "string" && m && !m.startsWith("<")) {
+            model = m;
+            const t = Date.parse(rec.timestamp);
+            modelTs = Number.isFinite(t) ? t : null;
+          }
         }
         // 会话内 /effort 切换:stdout 自述("Kept/Set effort level as/to xxx")
         if (effort === null && rec.type === "user") {
@@ -325,7 +335,11 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
           const em = body.includes("local-command-stdout")
             ? body.match(/(?:Kept|Set) effort level (?:as|to) (\w+)/)
             : null;
-          if (em) effort = em[1];
+          if (em) {
+            effort = em[1];
+            const t = Date.parse(rec.timestamp);
+            effortTs = Number.isFinite(t) ? t : null;
+          }
         }
         if (convTs === null && (rec.type === "user" || rec.type === "assistant") && typeof rec.timestamp === "string") {
           // TUI 命令记录（批量 /model 之类）不算对话——不跳过的话一次批量维护
@@ -352,12 +366,35 @@ async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
         /* tail 起点切到半行 */
       }
     }
-    const info: SessionTailInfo = { convTs: convTs ?? st.mtimeMs, ctxTokens, model, effort };
+    const info: SessionTailInfo = { convTs: convTs ?? st.mtimeMs, ctxTokens, model, modelTs, effort, effortTs };
     tailInfoCache.set(path, { mtimeMs: st.mtimeMs, info });
     return info;
   } catch {
     return null;
   }
+}
+
+/**
+ * claude-settings 切换的乐观显示（owner 2026-07-27:「切换完直接把模型显示成
+ * 新的，读到 jsonl 不一样再改」）。注入 /model、/effort 成功后先记在这里，
+ * agents 列表优先显示；一旦 jsonl 里实测到**切换之后**的记录（无论值是否一致），
+ * 实测重新接管并清掉本条——注入静默失败最多骗到下一条消息为止。
+ * 内存态，bridge 重启即退回纯实测链（可接受:只差一条消息的显示滞后）。
+ */
+const claudeSwitchOverride = new Map<
+  string,
+  { model?: { v: string; ts: number }; effort?: { v: string; ts: number } }
+>();
+const overrideKey = (name: string) => String(name).replace(/^agent-/, "");
+/** 列表侧取乐观值:比实测记录新才算数;两个字段都被实测追上就顺手清掉 */
+function pickClaudeOverride(name: string, info: SessionTailInfo | null | undefined) {
+  const key = overrideKey(name);
+  const ov = claudeSwitchOverride.get(key);
+  if (!ov) return { model: null as string | null, effort: null as string | null };
+  const model = ov.model && ov.model.ts > (info?.modelTs ?? 0) ? ov.model.v : null;
+  const effort = ov.effort && ov.effort.ts > (info?.effortTs ?? 0) ? ov.effort.v : null;
+  if (model === null && effort === null) claudeSwitchOverride.delete(key);
+  return { model, effort };
 }
 
 // ── 路由分发 ────────────────────────────────────────────────────────────
@@ -427,10 +464,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           const r = regByName.get(a.name);
           (a as any).lastActivityTs = info?.convTs ?? null;
           (a as any).contextTokens = info?.ctxTokens ?? null;
-          // 当前模型/effort。显示链:jsonl 实测(会话内切换即时反映,防
-          // registry 漂移) → registry 钉的(创建/切换端点写入) → 全局默认
-          (a as any).model = info?.model ?? (r?.model ? resolveModelAlias(r.model) : null) ?? gModel;
-          (a as any).effort = info?.effort ?? r?.effort ?? gEffort;
+          // 当前模型/effort。显示链:刚切换的乐观值(实测追上前) → jsonl 实测
+          // (会话内切换即时反映,防 registry 漂移) → registry 钉的(创建/切换
+          // 端点写入) → 全局默认
+          const ov = pickClaudeOverride(a.name, info);
+          (a as any).model = ov.model ?? info?.model ?? (r?.model ? resolveModelAlias(r.model) : null) ?? gModel;
+          (a as any).effort = ov.effort ?? info?.effort ?? r?.effort ?? gEffort;
         }
       }
       // ?include=stopped：registry 里已停止的 agent 也入列（additive；
@@ -469,14 +508,15 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           if (typeof s.model === "string") mgModel = s.model;
           if (typeof s.effortLevel === "string") mgEffort = s.effortLevel;
         } catch { /* 无全局默认 */ }
+        const mOv = pickClaudeOverride("master", mInfo);
         agents.unshift({
           name: "master",
           status: deps.clients.has(CONTROL_CHANNEL_ID) ? "active" : "stopped",
           idle: undefined,
           purpose: "master orchestrator (大总管)",
           busy: getAgentStatus("master") === "thinking",
-          model: mInfo?.model ?? mgModel,
-          effort: mInfo?.effort ?? mgEffort,
+          model: mOv.model ?? mInfo?.model ?? mgModel,
+          effort: mOv.effort ?? mInfo?.effort ?? mgEffort,
         } as any);
       }
       return apiJson(200, { ok: true, agents });
@@ -1137,6 +1177,17 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       if (effort) await tmuxSendLine(targetWindow, `/effort ${effort}`);
     } catch (e) {
       return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
+    }
+    {
+      // 乐观显示:注入已成功,列表立即按新值显示;jsonl 实测追上后自动接管
+      const key = overrideKey(agent.name);
+      const prev = claudeSwitchOverride.get(key) ?? {};
+      const now = Date.now();
+      claudeSwitchOverride.set(key, {
+        ...prev,
+        ...(model ? { model: { v: model, ts: now } } : {}),
+        ...(effort ? { effort: { v: effort, ts: now } } : {}),
+      });
     }
     if (!isMasterSet) {
       try {
