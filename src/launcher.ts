@@ -268,15 +268,20 @@ async function checkForUpdates() {
 let lastClaudeUpdateCheck = 0;
 let lastDeadAgentCheck = 0;
 
-async function runCmd(cmd: string[], timeoutMs = 0): Promise<{ ok: boolean; out: string }> {
+async function runCmd(cmd: string[], timeoutMs = 0): Promise<{ ok: boolean; out: string; err: string }> {
   const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
   // 可选超时强杀:坏掉的 claude 二进制连 --version 都永久 hang(2026-07-24),
   // 无超时的 runCmd 会把 launcher 主循环整个吊死
   const killer = timeoutMs > 0 ? setTimeout(() => { try { proc.kill(9); } catch { /* 已退出 */ } }, timeoutMs) : null;
-  const out = await new Response(proc.stdout).text();
+  // stderr 必须一并读走:brew 等工具的报错全走 stderr,不读的话失败日志是空的
+  // (2026-07-27「brew 更新失败:」后面什么都没有),大管道还会背压死锁
+  const [out, err] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   await proc.exited;
   if (killer) clearTimeout(killer);
-  return { ok: proc.exitCode === 0, out: out.trim() };
+  return { ok: proc.exitCode === 0, out: out.trim(), err: err.trim() };
 }
 
 async function getClaudeVersion(): Promise<string | null> {
@@ -481,13 +486,15 @@ async function checkClaudeCodeUpdate() {
 
   const upgrade =
     install.kind === "brew"
-      ? // --no-quarantine:2026-07-24 事故根因——带 quarantine 的新二进制首次
-        // 执行触发 Gatekeeper 评估,在本机挂死(dyld 阶段永久 hang)。装时就
-        // 不打隔离标记,从源头消灭这一类。
-        await runCmd(["brew", "upgrade", "--cask", "--no-quarantine", install.cask])
-      : await runCmd(["npm", "install", "-g", "@anthropic-ai/claude-code"]);
+      ? // 不打 quarantine 标记:2026-07-24 事故根因——带 quarantine 的新二进制
+        // 首次执行触发 Gatekeeper 评估,在本机挂死(dyld 阶段永久 hang)。
+        // ⚠ `brew upgrade` 不认 --no-quarantine(那是 install 的 flag,直接
+        // Error: invalid option 退出——2026-07-27 实测的「更新失败」真凶),
+        // 正确姿势是 HOMEBREW_CASK_OPTS 环境变量,install/upgrade/reinstall 通吃。
+        await runCmd(["env", "HOMEBREW_CASK_OPTS=--no-quarantine", "brew", "upgrade", "--cask", install.cask], 600_000)
+      : await runCmd(["npm", "install", "-g", "@anthropic-ai/claude-code"], 600_000);
   if (!upgrade.ok) {
-    console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}`);
+    console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}\n${upgrade.err}`);
     try {
       await bridgeRequest({
         type: "reply",
