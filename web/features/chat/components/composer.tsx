@@ -150,6 +150,8 @@ export function Composer() {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
+  // v2.15+ 思考遥测:耗时 + ↓token 跳动(token 在涨 = 模型活着,消除「卡住」错觉)
+  const telemetry = useChatStore((s) => s.state.telemetry);
   const quoteDraft = useChatStore((s) => s.state.quoteDraft);
   const agents = useChatStore((s) => s.state.agents);
   const store = useChatStoreApi();
@@ -643,6 +645,16 @@ export function Composer() {
               {/* 「正在回复」改「思考中」(owner 2026-07-24):回合大部分时间在思考/跑工具,
                   文字流出前说"正在回复"名不副实 */}
               <span className="font-medium text-base-content/70">{t("思考中…")}</span>
+              {/* v2.15+ 遥测:TUI 状态行采样(3s)。token 在跳 = 活着;不显示时是
+                  遥测暂缺(bridge 老版本/采样间隙),不占位 */}
+              {telemetry && (telemetry.elapsed || telemetry.tokens != null) && (
+                <span className="font-mono text-[10.5px] tabular-nums text-base-content/45">
+                  {telemetry.elapsed || ""}
+                  {telemetry.tokens != null && (
+                    <> · ↓ {telemetry.tokens >= 1000 ? `${(telemetry.tokens / 1000).toFixed(1)}k` : telemetry.tokens} tokens</>
+                  )}
+                </span>
+              )}
               <span className="ml-auto text-base-content/40 max-sm:hidden">
                 {t("发送即插入当前会话，将在当前步骤后生效")}
               </span>

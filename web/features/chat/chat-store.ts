@@ -61,6 +61,9 @@ interface ChatState {
   /** Claude Code 原生任务清单(TaskCreate,~/.claude/tasks/<sid>/)——Web 任务
    *  面板(owner 2026-07-16「console 里的 todo 适配到 Web UI」)。 */
   ccTasks: CcTaskView[];
+  /** v2.15+ 思考遥测(TUI 状态行采样,3s 一条):思考状态条显示耗时+token 跳动。
+   *  仅 streaming 时展示,回合结束/切会话清空。 */
+  telemetry: { elapsed?: string; tokens?: number; effort?: string } | null;
   /** 左滑消息块选中的引用文本(composer 显示预览,发送时以 > 引用块前置)。 */
   quoteDraft: string | null;
   /** 个人资料：用户头像+昵称（显示在自己消息上方）与 Claude 头像+名称。 */
@@ -119,6 +122,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       pendingAsk: null,
       bgTasks: [],
       ccTasks: [],
+      telemetry: null,
       quoteDraft: null,
       profile: { nickname: "", avatar: "", claudeNickname: "", claudeAvatar: "" },
     });
@@ -415,6 +419,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.bgTasks = [];
       // CC 任务清单 per-session:切走清空,下面异步拉当前 agent 的
       s.ccTasks = [];
+      s.telemetry = null;
     });
     // 翻页锚也是 per-agent 的,跟着上面的 historyHasMore 一起清,loadMessages 会重设
     this.historySessionId = null;
@@ -1258,6 +1263,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     await this.send(label, undefined, wire);
   }
 
+  /** v2.15+ 思考遥测:3s 一条,只在回合中有意义(streaming=false 时状态条不渲染,
+   *  残值无害;endTurn/openAgent 兜底清空)。 */
+  public setTelemetry(t: { elapsed?: string; tokens?: number; effort?: string } | null) {
+    this.produce((s) => {
+      s.telemetry = t;
+    });
+  }
+
   public setStatus(status: "running" | "done") {
     this.produce((s) => {
       if (status === "done") {
@@ -1285,6 +1298,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public endTurn(interrupted?: boolean) {
     this.flushPendingText(); // 定稿前落掉缓冲文本
     this.produce((s) => {
+      s.telemetry = null;
       // 逆扫最近一条 assistant,不只看 messages[last]——连发抢占时用户的新消息
       // 已乐观 push 到末尾,done(interrupted) 到达时末尾是 user 气泡,只看末尾
       // 会整个跳过打断标记(2026-07-14 用户实测:工作中补发消息没标「已打断」;

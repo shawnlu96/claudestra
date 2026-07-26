@@ -77,6 +77,12 @@ export function formatTool(name: string, input: any): string {
       return `${e} ${(input?.command || "").split("\n")[0].split("&&")[0].trim()}`;
     case "Glob": return `${e} Glob ${input?.pattern || ""}`;
     case "Grep": return `${e} Grep ${input?.pattern || ""}`;
+    // v2.15+ 任务清单工具:通用「🔧 TaskCreate」不知所云,渲染成人话
+    case "TaskCreate": return `🗒️ 新任务：${(input?.subject || "").slice(0, 80)}`;
+    case "TaskUpdate": {
+      const st = input?.status ? ` → ${input.status}` : "";
+      return `🗒️ 任务 #${input?.taskId ?? "?"}${st}`;
+    }
     default: {
       // mcp__server__tool → server/tool
       const short = name.startsWith("mcp__") ? name.replace("mcp__", "").replace("__", "/") : name;

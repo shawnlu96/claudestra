@@ -108,7 +108,11 @@ export type WebStreamEvent =
    *  bridge 重启会丢 bg-done 事件,幽灵「working」卡靠它收敛。 */
   | { t: "bg-sync"; ids: string[] }
   /** compact 完成（jsonl compact_boundary）：插系统分隔线 + ctx 徽章即时回落。 */
-  | { t: "compact"; pre: number; post: number };
+  | { t: "compact"; pre: number; post: number }
+  /** v2.15+ 思考遥测（TUI 状态行采样,3s 一条,transient）：思考徽章显示
+   *  `47s · ↓ 2.1k tokens`——token 在跳 = 模型活着,消除「卡住了」的错觉。
+   *  （任务清单不走流:已有 ccTasks 文件真源面板 + Task* 工具触发的防抖刷新） */
+  | { t: "telemetry"; elapsed?: string; tokens?: number; effort?: string };
 
 /** 带 bridge 事件锚点的流事件:eid = BridgeEvent.seq(event-bus 单调递增),
  *  前端记录最后收到的 eid,断线/回前台重连时 ?since=<eid> 走环形缓冲重放

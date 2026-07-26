@@ -32,7 +32,11 @@ export type BridgeEventType =
   // v2.8+ bg 活动生命周期（subagent / 后台 shell 任务），data.kind 区分
   | "bg_task_started"
   | "bg_task_update"
-  | "bg_task_completed";
+  | "bg_task_completed"
+  // v2.15+ 思考遥测:回合进行中 TUI 状态行采样(耗时/输出 token/effort),
+  // transient 发布——不进 ring(过期即废,还会把 replay 窗口挤爆)。
+  // 任务清单不走事件:web 已有文件真源面板(~/.claude/tasks + /agents/:name/tasks)
+  | "thinking_telemetry";
 
 export interface BridgeEvent {
   /** 进程内单调递增，SSE 的 id / Last-Event-ID 补发锚点 */
@@ -95,9 +99,14 @@ function matches(evt: BridgeEvent, filter: EventFilter): boolean {
 /**
  * 发布一条事件。seq/ts 由总线补齐。订阅者回调异常只 log 不传播 ——
  * 事件流是旁路，任何情况下不能影响主流程。
+ *
+ * opts.transient：只发给实时订阅者，不进环形缓冲。给高频瞬态流
+ * （thinking_telemetry 每 3s 一条）用——补发陈旧遥测毫无意义，而且
+ * 一次长思考就能把 ring 里真正值得补发的工具/文本事件全挤出去。
  */
 export function emitEvent(
   evt: Omit<BridgeEvent, "seq" | "ts"> & { ts?: string },
+  opts?: { transient?: boolean },
 ): BridgeEvent {
   const full: BridgeEvent = {
     seq: nextSeq++,
@@ -107,13 +116,15 @@ export function emitEvent(
     type: evt.type,
     data: evt.data,
   };
-  let ring = rings.get(full.agent);
-  if (!ring) {
-    ring = [];
-    rings.set(full.agent, ring);
+  if (!opts?.transient) {
+    let ring = rings.get(full.agent);
+    if (!ring) {
+      ring = [];
+      rings.set(full.agent, ring);
+    }
+    ring.push(full);
+    if (ring.length > RING_LIMIT) ring.splice(0, ring.length - RING_LIMIT);
   }
-  ring.push(full);
-  if (ring.length > RING_LIMIT) ring.splice(0, ring.length - RING_LIMIT);
 
   // 追踪回合进行态（O(1) 查询锚点）。
   if (full.type === "agent_status") {

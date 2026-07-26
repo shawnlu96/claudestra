@@ -151,6 +151,7 @@ syncDiscordOwnersFromEnv(ALLOWED_USER_IDS)
   .catch((e) => console.error("principals owner 同步失败（继续用 .env）:", (e as Error).message));
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
+import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
@@ -467,6 +468,14 @@ function agentNameByChannelFromRegistry(channelId: string): string | null {
     regChannelNameCache = { ts: now, map };
   }
   return regChannelNameCache.map.get(channelId) ?? null;
+}
+
+/** v2.15+ 思考遥测的花名册——复用上面的 registry 频道缓存（含 master） */
+function listRegistryChannels(): Array<{ name: string; channelId: string }> {
+  agentNameByChannelFromRegistry("__refresh__"); // 只为触发缓存刷新
+  const out: Array<{ name: string; channelId: string }> = [];
+  for (const [channelId, name] of regChannelNameCache?.map ?? []) out.push({ name, channelId });
+  return out;
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
@@ -984,6 +993,18 @@ discord.once("ready", async () => {
   // （master 会因 /clear 轮转会话，而它不在 registry，没有别的地方会告诉我们）。
   syncMasterWatcher(discord);
   setInterval(() => syncMasterWatcher(discord), 120_000);
+
+  // v2.15+ 思考遥测 — 回合中每 3s 采样 TUI 状态行（耗时/↓token/effort）→
+  // transient SSE；输出 token 冻结 ≥8min → 卡死告警（文本 + session_anomaly）
+  startThinkingTelemetry({
+    roster: listRegistryChannels,
+    notify: (channelId, text) => {
+      try {
+        const ch = discord.channels.cache.get(channelId);
+        if (ch && "send" in ch) void (ch as { send: (t: string) => Promise<unknown> }).send(text).catch(() => {});
+      } catch { /* web-only 模式无 Discord:SSE 事件仍在发 */ }
+    },
+  });
 
   // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
   startArchiveSweeper();

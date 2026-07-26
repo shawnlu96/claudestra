@@ -145,6 +145,17 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
     // 用户一无所知,只能干等(owner 2026-07-25 连踩一天)。翻成一条醒目的系统
     // 文本,复用现有渲染管线。其它 session_anomaly 子类型仍不消费。
     case "session_anomaly": {
+      // v2.15+ stalled:输出 token 长时间冻结(thinking-telemetry 的卡死判定)
+      if (d.kind === "stalled") {
+        const mins = Number(d.minutes) || 0;
+        return {
+          t: "text",
+          text:
+            lang === "en"
+              ? `🧊 Possible stall — output token count has been frozen for ${mins} min mid-turn. Consider Interrupt and retry.`
+              : `🧊 疑似卡死 —— 回合进行中，输出 token 计数已 ${mins} 分钟纹丝不动。建议点「停止」中断后重试。`,
+        };
+      }
       if (d.kind !== "link_down") return null;
       const mins = Number(d.minutes) || 0;
       return {
@@ -155,6 +166,14 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
             : `⚠️ 链路已断开 ${mins} 分钟 —— tmux 里 Claude Code 还在跑，但它的 channel-server 没连上 bridge，消息进不来也出不去。重启这个 agent 可修复。`,
       };
     }
+    // v2.15+ 思考遥测(transient,3s 一条)——思考徽章的实时数据
+    case "thinking_telemetry":
+      return {
+        t: "telemetry",
+        ...(typeof d.elapsedRaw === "string" && d.elapsedRaw ? { elapsed: d.elapsedRaw } : {}),
+        ...(typeof d.tokens === "number" ? { tokens: d.tokens } : {}),
+        ...(typeof d.effort === "string" && d.effort ? { effort: d.effort } : {}),
+      };
     case "bg_task_started":
       return {
         t: "bg-start",

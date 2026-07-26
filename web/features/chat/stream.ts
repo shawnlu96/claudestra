@@ -43,6 +43,8 @@ export interface StreamSink {
   bgTaskSync(ids: string[]): void;
   /** compact 完成：插系统分隔线 + 该 agent contextTokens 即时更新为 post。 */
   compactDone(pre: number, post: number): void;
+  /** v2.15+ 思考遥测（3s 一条）：思考指示器显示耗时 + token 跳动。 */
+  setTelemetry(t: { elapsed?: string; tokens?: number; effort?: string } | null): void;
 }
 
 /** 处理一条已解析的 Web 流事件。初次发送与断线重连共用。 */
@@ -108,6 +110,9 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       break;
     case "compact":
       sink.compactDone(evt.pre, evt.post);
+      break;
+    case "telemetry":
+      sink.setTelemetry({ elapsed: evt.elapsed, tokens: evt.tokens, effort: evt.effort });
       break;
   }
 }
