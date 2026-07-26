@@ -136,7 +136,7 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 
 两个 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。
 
-**HTTP peers（v2.11+，唯一跨实例通道）** — peer 之间互为 API 客户端：双方各给对方签一个限定 scope 的 Bearer token（`Principal.peer` 标记），`send_to_agent("<agent>@<peer>")` 直接 POST 对方 bridge 的 `/api/v1/agents/:name/messages`（带 `wait`，超时回落 thread 轮询 30s × 10min）。入站复用现有多前端 API（scope 403 / mirror / history 全部生效）；注入头渲染成 🤝 peer 请求，peer 入站不抢占正在跑的回合、不走 slash 透传。对方回复以合成消息 push 回 caller（与本地 `send_to_agent` 同一套 UX）；所有失败（网络 / 鉴权 / 离线 / 超时）都会报告给 caller，绝不静默。开放 = token scope；撤销 = `peer-http-remove`（token 即刻失效）。状态存 `peers.json` 的 `httpPeers[]`（0600、原子写）。老的 Discord peer 机制（共享交换频道、exposure、bot 互 @ 路由）已在 v2.11 移除。v2.11.1+ 增加管理面：`GET /api/v1/peers`（清单 + 入站 scope + 本地 agent 表）、`POST /api/v1/peers/{invite,join,accept}`（握手）、`POST /api/v1/peers/:name/{test,scope,remove}` —— 全部仅限全权 token，mutation 委托 `runManager`，CLI 的 R1 校验保持唯一裁判。Web 端渲染为「设置 → Peer 协作」（scope 编辑、连通测试、三步握手全 UI 化）。
+**HTTP peers（v2.11+，唯一跨实例通道）** — peer 之间互为 API 客户端：双方各给对方签一个限定 scope 的 Bearer token（`Principal.peer` 标记），`send_to_agent("<agent>@<peer>")` 直接 POST 对方 bridge 的 `/api/v1/agents/:name/messages`（带 `wait`，超时回落 thread 轮询 30s × 10min）。入站复用现有多前端 API（scope 403 / mirror / history 全部生效）；注入头渲染成 🤝 peer 请求，peer 入站不抢占正在跑的回合、不走 slash 透传。对方回复以合成消息 push 回 caller（与本地 `send_to_agent` 同一套 UX）；所有失败（网络 / 鉴权 / 离线 / 超时）都会报告给 caller，绝不静默。开放 = token scope；撤销 = `peer-http-remove`（token 即刻失效）。状态存 `peers.json` 的 `httpPeers[]`（0600、原子写）。老的 Discord peer 机制（共享交换频道、exposure、bot 互 @ 路由）已在 v2.11 移除。v2.11.1+ 增加管理面：`GET /api/v1/peers`（清单 + 入站 scope + 本地 agent 表）、`POST /api/v1/peers/{invite,join,accept}`（握手）、`POST /api/v1/peers/:name/{test,scope,remove}` —— 全部仅限全权 token，mutation 委托 `runManager`，CLI 的 R1 校验保持唯一裁判。**v2.15+ 一键邀请**：`peer-invite-new` 预签入站 token、在 v2 邀请串里内嵌一次性 `joinSecret`（peers.json 的 `pendingInvites[]`，24h 过期，过期/撤销连带吊销 token）；B 侧 `peer-join-auto` 解析后存下 A 并 POST A 的 `POST /api/v1/peers/redeem`（无 Bearer、靠 joinSecret 常数时间比对把关，限流 10/min）——A 按对方自报名登记（撞名自动后缀，防 peer 劫持）、通知 owner，免回执/accept。B 加入时默认零反向开放（单向 peer，web 卡片显示「单向」）。**大总管永远不可分享给 peer**——`checkPeerScope` 无条件拒绝，`agentInScope` 对历史 peer token 里的 master 也截断。Web 端渲染为「设置 → Peer 协作」（一键邀请/加入 + 待兑换邀请管理、scope 编辑、连通测试）；旧三步握手只剩 CLI，对接 v2.15 之前的实例时用。
 
 ## 运行时命令
 
@@ -164,8 +164,17 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# 跨 Claudestra peer 协作 — v2.11+ HTTP peers（不依赖 Discord，直接走 /api/v1；
-# 三步握手，串通过任意私密渠道传递。设计见 docs/design-http-peers.md）
+# 跨 Claudestra peer 协作 — HTTP peers（不依赖 Discord，直接走 /api/v1；
+# 设计见 docs/design-http-peers.md）
+# v2.15+ 一键邀请（推荐）：A 生成、B 粘贴，B 的 bridge 自动回调 A 的
+# /api/v1/peers/redeem——免回执/accept。一次性、24h 过期，过期/撤销连带吊销
+# 内嵌 token。B 加入时默认不反向开放任何 agent（单向授权）；对称访问 = B 也
+# 生成一张邀请发回来。
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请串（URL 自动探测 Tailscale 优先；BRIDGE_BIND 还是回环会警告）
+bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>] [--force]  # B: 粘贴即完成（--agents = 可选的反向开放）
+bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期 + 吊销其 token）
+bun src/manager.ts peer-invite-revoke <inv_id>    # 作废未兑换的邀请 + 其内嵌 token
+# 旧三步握手（对方跑 v2.15 之前的版本时用）：
 bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <我方bridge地址>] [--force] [--rotate]  # A: 打印邀请串（--url 不给则自动探测：Tailscale 优先，其次内网）
 bun src/manager.ts peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址> [--force]           # B: 存下 A 并打印回执
 bun src/manager.ts peer-http-accept <name> '<回执串>'                                                  # A: 完成握手
@@ -174,6 +183,8 @@ bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状�
 bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: 原地改入站 scope（token 不变，立即生效）
 bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
 # send_to_agent 的 target 语法："<agent>@<peer>" 或 "peer:<peer>.<agent>"
+# 大总管永远不可分享给 peer（v2.15+ 硬规则，--force 也不放行；历史 peer token
+# 列了 master 的在 agentInScope 层被截断）
 
 # 体检（只读；出问题时第一个该跑的）
 bun src/manager.ts doctor [--json]

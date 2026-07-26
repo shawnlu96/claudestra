@@ -32,12 +32,38 @@ export interface HttpPeer {
   disabled?: boolean;
 }
 
+/**
+ * v2.15+ 一键邀请的待兑换记录。生成邀请时就把入站 token 预签好（邀请串里
+ * 直接携带），对方粘贴邀请 → 他的 bridge 拿 joinSecret 回调我方 /peers/redeem
+ * → 自动登记成 HttpPeer，免掉旧三步握手的「回执 + accept」。
+ * 一次性 + 24h 过期；撤销/过期时必须连带吊销 inTokenId 指向的 token——
+ * 邀请串里带的是真 Bearer，不吊销的话「过期」就是句空话。
+ */
+export interface PendingInvite {
+  /** 短 id（inv_xxxxxxxx）——列表/撤销锚点 */
+  id: string;
+  /** 一次性兑换凭据（只出现在邀请串里，兑换即失效） */
+  joinSecret: string;
+  /** 预签的入站 token 短 id（tok_xxx）——撤销/过期时的吊销锚点 */
+  inTokenId: string;
+  /** 邀请开放的 agent scope（展示用；真源在 token principal） */
+  agents: string[];
+  /** 生成时的我方 bridge 地址——列表里重新拼出完整邀请串用 */
+  url: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+
 export interface PeersData {
   /** v2.11+ HTTP peers（可缺——老文件兼容） */
   httpPeers?: HttpPeer[];
+  /** v2.15+ 待兑换的一键邀请（可缺） */
+  pendingInvites?: PendingInvite[];
 }
 
-const EMPTY: PeersData = { httpPeers: [] };
+const EMPTY: PeersData = { httpPeers: [], pendingInvites: [] };
 
 export async function readPeers(): Promise<PeersData> {
   if (!existsSync(PATH)) return structuredClone(EMPTY);
@@ -45,6 +71,7 @@ export async function readPeers(): Promise<PeersData> {
     const raw = await Bun.file(PATH).json();
     return {
       httpPeers: Array.isArray(raw?.httpPeers) ? raw.httpPeers : [],
+      pendingInvites: Array.isArray(raw?.pendingInvites) ? raw.pendingInvites : [],
     };
   } catch {
     return structuredClone(EMPTY);
@@ -141,6 +168,81 @@ export function parsePeerHandshake(s: string): PeerHandshake | null {
   } catch {
     return null;
   }
+}
+
+// ── v2.15+ 一键邀请串（invite v2:免回执自动握手）──────────────────────────
+//
+// base64url(JSON {v:2, name, url, token, join})。相比 v1 多一个 join（一次性
+// 兑换凭据）:对方粘贴后他的 bridge 自动 POST 我方 /api/v1/peers/redeem 完成
+// 登记,不再需要人肉回执/accept。v1 编解码原样保留——旧版本实例仍走三步 CLI。
+
+export interface PeerInviteV2 {
+  v: 2;
+  /** 邀请方自报名（对方将以此名存我） */
+  name: string;
+  /** 邀请方 bridge 基址（对方兑换回调 + 之后的 API 调用都打这里） */
+  url: string;
+  /** 邀请方预签的 Bearer secret */
+  token: string;
+  /** 一次性兑换凭据（redeem 的鉴权依据） */
+  join: string;
+}
+
+export function encodePeerInviteV2(i: PeerInviteV2): string {
+  return Buffer.from(JSON.stringify(i), "utf8").toString("base64url");
+}
+
+export function parsePeerInviteV2(s: string): PeerInviteV2 | null {
+  try {
+    const raw = JSON.parse(Buffer.from(s.trim(), "base64url").toString("utf8"));
+    if (raw?.v !== 2) return null;
+    if (typeof raw.name !== "string" || !raw.name) return null;
+    if (typeof raw.url !== "string" || !/^https?:\/\//.test(raw.url)) return null;
+    if (typeof raw.token !== "string" || raw.token.length < 16) return null;
+    if (typeof raw.join !== "string" || raw.join.length < 16) return null;
+    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join };
+  } catch {
+    return null;
+  }
+}
+
+/** 邀请是否已过期（expiresAt 解析失败按已过期处理——宁可多吊销） */
+export function inviteExpired(inv: { expiresAt: string }, now = Date.now()): boolean {
+  const t = Date.parse(inv.expiresAt);
+  return !Number.isFinite(t) || t <= now;
+}
+
+// ── pendingInvites CRUD ────────────────────────────────────────────────
+
+export async function addPendingInvite(inv: PendingInvite): Promise<void> {
+  const data = await readPeers();
+  data.pendingInvites = data.pendingInvites || [];
+  data.pendingInvites.push(inv);
+  await writePeers(data);
+}
+
+export async function removePendingInvite(id: string): Promise<PendingInvite | null> {
+  const data = await readPeers();
+  data.pendingInvites = data.pendingInvites || [];
+  const hit = data.pendingInvites.find((i) => i.id === id) ?? null;
+  if (hit) {
+    data.pendingInvites = data.pendingInvites.filter((i) => i.id !== id);
+    await writePeers(data);
+  }
+  return hit;
+}
+
+/** joinSecret → 待兑换邀请（常数时间比较——这是 redeem 端点唯一的鉴权判据） */
+export async function findPendingInviteByJoinSecret(secret: string): Promise<PendingInvite | null> {
+  if (!secret || secret.length < 16) return null;
+  const { timingSafeEqual } = await import("crypto");
+  const data = await readPeers();
+  const sb = Buffer.from(secret, "utf8");
+  for (const inv of data.pendingInvites || []) {
+    const ib = Buffer.from(inv.joinSecret, "utf8");
+    if (ib.length === sb.length && timingSafeEqual(ib, sb)) return inv;
+  }
+  return null;
 }
 
 export { PATH as PEERS_PATH };

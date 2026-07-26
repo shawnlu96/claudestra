@@ -150,7 +150,7 @@ SETUP.md                 User-facing installation guide
 
 ### Cross-Claudestra peer collaboration
 
-**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as local `send_to_agent`); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The old Discord-based peer mechanism (shared exchange channel, exposures, bot-to-bot routing) was removed in v2.11 — HTTP peers are the only cross-instance transport. v2.11.1+ adds a management surface: `GET /api/v1/peers` (list + inbound scope + local agents), `POST /api/v1/peers/{invite,join,accept}` (handshake), `POST /api/v1/peers/:name/{test,scope,remove}` — all full-scope-token only, mutations delegate to `runManager` so the CLI's R1 checks stay the single source of truth. The web client renders this as Settings → Peers (scope editor, reachability test, full 3-step handshake in UI).
+**HTTP peers (v2.11+, recommended)** — peers are just API clients of each other: each side issues the other a scoped Bearer token (`Principal.peer` marks it), and `send_to_agent("<agent>@<peer>")` POSTs the other bridge's `/api/v1/agents/:name/messages` with `wait`, falling back to thread polling (30s × 10min). Inbound rides the existing multi-frontend API unchanged (scope 403 / mirror / history all apply); the injected header renders as a 🤝 peer request, peer inbound never preempts a running turn and never gets slash passthrough. Replies push back to the caller as synthetic messages (same UX as local `send_to_agent`); all failures (network / auth / offline / timeout) are reported to the caller, never silent. Exposure = token scope; revoke = `peer-http-remove` (token dies instantly). State lives in `peers.json` `httpPeers[]` (0600, atomic writes). The old Discord-based peer mechanism (shared exchange channel, exposures, bot-to-bot routing) was removed in v2.11 — HTTP peers are the only cross-instance transport. v2.11.1+ adds a management surface: `GET /api/v1/peers` (list + inbound scope + local agents), `POST /api/v1/peers/{invite,join,accept}` (handshake), `POST /api/v1/peers/:name/{test,scope,remove}` — all full-scope-token only, mutations delegate to `runManager` so the CLI's R1 checks stay the single source of truth. **v2.15+ one-click invite**: `peer-invite-new` pre-issues the inbound token and embeds a one-time `joinSecret` in a v2 invite string (`pendingInvites[]` in peers.json, 24h TTL, expiry/revoke also revokes the token); `peer-join-auto` on B parses it, stores A, and POSTs A's unauthenticated-but-joinSecret-gated `POST /api/v1/peers/redeem` (rate-limited 10/min) — A registers B under B's self-reported name (collision-suffixed to prevent peer hijack), notifies the owner, no receipt/accept step. Joining exposes nothing of B by default (one-way peer; the web card shows 单向). The master orchestrator is **never shareable to peers** — `checkPeerScope` rejects unconditionally and `agentInScope` cuts off legacy peer tokens that list master. The web client renders this as Settings → Peers (one-click invite/join + pending-invite management, scope editor, reachability test); the 3-step handshake remains CLI-only for pre-v2.15 counterparts.
 
 ## Runtime commands
 
@@ -178,9 +178,17 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# Cross-Claudestra peer collaboration — v2.11+ HTTP peers (no Discord dependency;
-# peers talk over the /api/v1 surface directly. Handshake is 3 steps; strings travel
-# over any private channel. Design: docs/design-http-peers.md)
+# Cross-Claudestra peer collaboration — HTTP peers (no Discord dependency;
+# peers talk over the /api/v1 surface directly. Design: docs/design-http-peers.md)
+# v2.15+ one-click invite (recommended): A generates, B pastes, B's bridge calls
+# A's /api/v1/peers/redeem automatically — no receipt/accept. Single-use, 24h TTL,
+# expiry/revoke also revokes the embedded token. Joining exposes nothing of B by
+# default (one-way grant); symmetric access = B sends an invite of their own.
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (auto-URL: Tailscale first; warns if BRIDGE_BIND is loopback)
+bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = optional reverse exposure)
+bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
+bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + its embedded token
+# Legacy 3-step handshake (needed when the other side runs pre-v2.15):
 bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <my-bridge-url>] [--force] [--rotate]  # A: print invite string (--url is auto-detected if omitted: Tailscale first, then LAN)
 bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> [--force]           # B: store A, print receipt
 bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
@@ -189,6 +197,8 @@ bun src/manager.ts peer-http-list                 # list HTTP peers + handshake 
 bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged, effective immediately)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
 # send_to_agent target syntax: "<agent>@<peer>" or "peer:<peer>.<agent>"
+# master is NEVER shareable to peers (hard rule v2.15+, --force does not override;
+# legacy peer tokens listing master are cut off in agentInScope)
 
 # Versioning
 # Health check (read-only; the first thing to run when something is broken)

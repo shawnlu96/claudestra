@@ -230,3 +230,71 @@ describe("用户接管取消在飞调用", () => {
     expect(h.pushed.length).toBe(1);
   });
 });
+
+// ── v2.15+ 一键邀请（invite v2）────────────────────────────────────────
+
+import { encodePeerInviteV2, parsePeerInviteV2, inviteExpired, type PeerInviteV2 } from "../src/lib/peers";
+
+describe("invite v2 encode/parse", () => {
+  const good: PeerInviteV2 = {
+    v: 2,
+    name: "shawn",
+    url: "http://100.64.0.7:3847",
+    token: "a".repeat(64),
+    join: "b".repeat(48),
+  };
+
+  test("roundtrip", () => {
+    expect(parsePeerInviteV2(encodePeerInviteV2(good))).toEqual(good);
+  });
+
+  test("url 尾斜杠归一 + 前后空白容忍", () => {
+    const s = "  " + encodePeerInviteV2({ ...good, url: "http://x.example:3847//" }) + "\n";
+    expect(parsePeerInviteV2(s)?.url).toBe("http://x.example:3847");
+  });
+
+  test("v1 串不被 v2 解析器接受(join 缺失)——引导走 peer-http-join", () => {
+    const v1 = encodePeerHandshake({ v: 1, name: "x", url: "http://a:1", token: "t".repeat(32) });
+    expect(parsePeerInviteV2(v1)).toBeNull();
+  });
+
+  test("v2 串不被 v1 解析器接受(版本闸)", () => {
+    expect(parsePeerHandshake(encodePeerInviteV2(good))).toBeNull();
+  });
+
+  test("拒绝:缺字段", () => {
+    for (const drop of ["name", "url", "token", "join"] as const) {
+      const bad: any = { ...good };
+      delete bad[drop];
+      expect(parsePeerInviteV2(Buffer.from(JSON.stringify(bad)).toString("base64url"))).toBeNull();
+    }
+  });
+
+  test("拒绝:join 太短(不像真凭据)", () => {
+    const s = Buffer.from(JSON.stringify({ ...good, join: "short" })).toString("base64url");
+    expect(parsePeerInviteV2(s)).toBeNull();
+  });
+
+  test("拒绝:垃圾输入", () => {
+    expect(parsePeerInviteV2("")).toBeNull();
+    expect(parsePeerInviteV2("not-base64!!!")).toBeNull();
+  });
+});
+
+describe("inviteExpired", () => {
+  test("未到期 false / 已到期 true", () => {
+    const now = Date.parse("2026-07-27T00:00:00Z");
+    expect(inviteExpired({ expiresAt: "2026-07-27T00:00:01Z" }, now)).toBe(false);
+    expect(inviteExpired({ expiresAt: "2026-07-26T23:59:59Z" }, now)).toBe(true);
+  });
+
+  test("恰好等于当下 = 已过期(边界收紧)", () => {
+    const now = Date.parse("2026-07-27T00:00:00Z");
+    expect(inviteExpired({ expiresAt: "2026-07-27T00:00:00Z" }, now)).toBe(true);
+  });
+
+  test("expiresAt 解析失败按已过期(宁可多吊销)", () => {
+    expect(inviteExpired({ expiresAt: "garbage" })).toBe(true);
+    expect(inviteExpired({ expiresAt: "" })).toBe(true);
+  });
+});

@@ -357,4 +357,26 @@ export const DICT: Record<string, string> = {
   "网络错误": "Network error",
   "加载失败": "Load failed",
   "网络不通，请重试": "Network unreachable — try again",
+  // v2.15+ peer 一键邀请
+  "生成邀请": "Create invite",
+  "邀请对方": "Invite someone",
+  "勾选要开放的 agent → 生成邀请串发给对方 → 对方粘贴即完成。24h 有效、一次性。":
+    "Pick agents to expose → send the invite string → they paste it and you're connected. Valid 24h, single-use.",
+  "高级：自定义我方地址（默认自动探测）": "Advanced: custom local URL (auto-detected by default)",
+  "邀请串（发给对方，粘贴即完成）": "Invite string (send it — pasting completes setup)",
+  "24h 内有效、只能用一次。对方接入后你会收到通知。":
+    "Valid for 24h, single-use. You'll be notified when they join.",
+  "加入对方": "Join a peer",
+  "粘贴对方的邀请串，一步完成": "Paste their invite string — done in one step",
+  "已接入": "Connected",
+  "可访问：": "Can access: ",
+  "默认未向对方开放你的 agent；需要对称访问就生成一张自己的邀请发回去。":
+    "None of your agents are exposed by default; for two-way access, send them an invite of your own.",
+  "待兑换的邀请": "Pending invites",
+  "撤销": "Revoke",
+  "有效期至": "Valid until",
+  "复制邀请串": "Copy invite",
+  "单向（对方→我）": "One-way (them → me)",
+  "暂无 peer。生成邀请发给对方，或粘贴对方的邀请加入。":
+    "No peers yet. Create an invite to send, or paste one you received.",
 };

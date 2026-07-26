@@ -33,20 +33,37 @@ export async function POST(request: Request) {
     receipt?: string;
     force?: boolean;
     rotate?: boolean;
+    id?: string;
   };
   const { action, name } = body;
-  if (!action || !name || typeof name !== "string") {
-    return NextResponse.json({ ok: false, error: "action / name 不能为空" }, { status: 400 });
+  if (!action) {
+    return NextResponse.json({ ok: false, error: "action 不能为空" }, { status: 400 });
   }
-  const enc = encodeURIComponent(name.trim());
+  // v2.15+ 一键邀请系 action 不需要 name（对方名字是兑换时自报的）
+  const namelessActions = new Set(["invite-new", "join-auto", "invite-revoke"]);
+  const safeName = typeof name === "string" ? name.trim() : "";
+  if (!namelessActions.has(action) && !safeName) {
+    return NextResponse.json({ ok: false, error: "name 不能为空" }, { status: 400 });
+  }
+  const enc = encodeURIComponent(safeName);
   try {
     let result: unknown;
     switch (action) {
+      case "invite-new":
+        result = await bridgePost(`/peers/invite-new`, { agents: body.agents, url: body.url, force: body.force });
+        break;
+      case "join-auto":
+        // 对方 bridge 可能要等 10s 超时才回——给足余量
+        result = await bridgePost(`/peers/join-auto`, { invite: body.invite, agents: body.agents, url: body.url, force: body.force }, { timeoutMs: 25_000 });
+        break;
+      case "invite-revoke":
+        result = await bridgePost(`/peers/invite-revoke`, { id: body.id });
+        break;
       case "invite":
       case "join":
       case "accept":
         result = await bridgePost(`/peers/${action}`, {
-          name: name.trim(),
+          name: safeName,
           agents: body.agents,
           url: body.url,
           invite: body.invite,

@@ -55,7 +55,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 - **Multi-frontend API (v2.6.0+)** — Discord is just the first frontend. `GET /events` streams tool calls / assistant text / agent status over SSE; `POST /api/v1/agents/:name/messages` lets external users talk to a scoped set of agents with a Bearer token (sync `wait`, file upload, audit mirroring back to Discord). Build a web UI or a Telegram bot on the same contracts — see `docs/design-multi-frontend.md` (design notes, written in Chinese).
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
 - **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
-- **Cross-Claudestra peer collaboration (v2.11+, HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. A three-step CLI handshake (`peer-http-invite` → `peer-http-join` → `peer-http-accept`, then `peer-http-test` / `list` / `remove`) exchanges tokens over any private channel; after that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly.
+- **Cross-Claudestra peer collaboration (HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. v2.15+ makes it a **one-click invite**: pick the agents to share, send one string, the other side pastes it — handshake completes automatically (single-use, 24h expiry, revocable; the master orchestrator can never be shared). After that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly. No public IP needed on either side — any private path works (Tailscale is the easiest, but optional).
 - **LLM-free management** — status / kill / restart / cron buttons execute directly on the Bridge, zero-token overhead and near-instant response.
 
 ### Web client (v2.10+)
@@ -230,7 +230,13 @@ bun src/manager.ts token-revoke <tokenId|name>
 bun src/manager.ts install-cli
 bun src/manager.ts tmux-help             # tmux crash course (incl. iTerm2 -CC mode)
 
-# Cross-Claudestra HTTP peers (v2.11+) — mutual scoped tokens, no shared Discord guild
+# Cross-Claudestra HTTP peers — mutual scoped tokens, no shared Discord guild
+# One-click invite (v2.15+, recommended): A generates, B pastes, done — single-use, 24h TTL
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]        # A: print one-click invite
+bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--force]                      # B: paste invite, auto-handshake
+bun src/manager.ts peer-invite-list                # pending invites (sweeps expired)
+bun src/manager.ts peer-invite-revoke <inv_id>     # void an unredeemed invite + its token
+# Legacy 3-step handshake (for pre-v2.15 counterparts):
 bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <my-bridge-url> [--force]    # A: print invite string
 bun src/manager.ts peer-http-join <peer> '<invite>' --agents <x,y> --url <my-url> [--force]  # B: store A, print receipt
 bun src/manager.ts peer-http-accept <peer> '<receipt>'                                       # A: complete handshake

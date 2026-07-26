@@ -180,6 +180,8 @@ export interface ApiDeps {
   handleEventsRequest: (req: Request, extraFilter?: EventFilter) => Response;
   // clear 端点的后台会话轮转收尾（依赖 bridge 本地 discord/startWatching，注入）
   scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string) => void;
+  /** v2.15+ 发 owner 通知（bridge 注入 notifyMaster）——peer 一键邀请被兑换时告知 */
+  notifyOwner?: (content: string) => Promise<void>;
 }
 
 let deps: ApiDeps | null = null;
@@ -397,10 +399,54 @@ function pickClaudeOverride(name: string, info: SessionTailInfo | null | undefin
   return { model, effort };
 }
 
+// ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
+
+const redeemLimiter = new SlidingWindowLimiter(10, 60_000);
+
+async function handlePeerRedeem(req: Request): Promise<Response> {
+  if (!redeemLimiter.tryAcquire()) {
+    return apiJson(429, { ok: false, error: "rate limited" });
+  }
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return apiJson(400, { ok: false, error: "invalid JSON body" });
+  }
+  const join = typeof body?.join === "string" ? body.join.trim() : "";
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const peerUrl = typeof body?.url === "string" ? body.url.trim() : "";
+  const token = typeof body?.token === "string" ? body.token.trim() : "";
+  if (!join || !name) return apiJson(400, { ok: false, error: '"join" and "name" required' });
+  const r: any = await runManager(
+    "peer-invite-redeem", "--join", join, "--name", name,
+    ...(peerUrl ? ["--url", peerUrl] : []), ...(token ? ["--token", token] : []),
+  );
+  if (r?.ok) {
+    recordMetric("peer_managed", { meta: { action: "redeem", peer: r.peer } });
+    console.log(`🤝 [api] peer 邀请已兑换: ${r.peer}（scope: ${(r.agents || []).join(",")}）`);
+    void deps?.notifyOwner?.(
+      `🤝 新 peer「${r.peer}」通过一键邀请接入，可访问: ${(r.agents || []).join(", ") || "（无）"}` +
+        (r.oneWay ? "（单向：对方访问我，我未获对方权限）" : "") +
+        `。撤销：Web 设置 → Peer 协作 → 移除，或 \`peer-http-remove ${r.peer}\``,
+    ).catch(() => {});
+  }
+  // 失败一律 400 且不细分原因等级——这是个无鉴权端点，不给探测者更多信息面
+  return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+}
+
 // ── 路由分发 ────────────────────────────────────────────────────────────
 
 export async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (!deps) return apiJson(503, { ok: false, error: "api routes not initialized" });
+
+  // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（对方 bridge 打进来，
+  // 拿不到我方 Bearer）。鉴权依据是 body 里的一次性 joinSecret（manager 侧常数
+  // 时间比对）。48 hex 穷举本不现实，限流是纵深防御 + 挡日志噪音。
+  if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") {
+    return handlePeerRedeem(req);
+  }
+
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;
   const principal = auth;
@@ -1459,7 +1505,43 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       // 手抄这个地址是三步握手里最容易错的一环，错了要拖到 peer-http-test 才暴露。
       const { detectBridgeUrls } = await import("../lib/net-addr.js");
       const suggestedUrls = detectBridgeUrls(parseInt(process.env.BRIDGE_PORT || "3847"));
-      return apiJson(200, { ok: true, peers, localAgents, suggestedUrls });
+      // v2.15+ 待兑换的一键邀请（peer-invite-list 顺带清扫过期 + 吊销其 token）
+      const invRes: any = await runManager("peer-invite-list");
+      const pendingInvites = invRes?.ok ? invRes.invites || [] : [];
+      return apiJson(200, { ok: true, peers, localAgents, suggestedUrls, pendingInvites });
+    }
+
+    // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke
+    // —— 一键邀请（免回执自动握手）。mutation 照旧全部委托 runManager。
+    if (req.method === "POST" && (path === "/peers/invite-new" || path === "/peers/join-auto" || path === "/peers/invite-revoke")) {
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return apiJson(400, { ok: false, error: "invalid JSON body" });
+      }
+      const agentsCsv = Array.isArray(body?.agents)
+        ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
+        : "";
+      const flags: string[] = body?.force ? ["--force"] : [];
+      let r: any;
+      if (path === "/peers/invite-new") {
+        if (!agentsCsv) return apiJson(400, { ok: false, error: '"agents" must be a non-empty array' });
+        r = await runManager("peer-invite-new", "--agents", agentsCsv,
+          ...(body?.url ? ["--url", String(body.url)] : []), ...flags);
+      } else if (path === "/peers/join-auto") {
+        const invite = String(body?.invite ?? "").trim();
+        if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
+        r = await runManager("peer-join-auto", invite,
+          ...(agentsCsv ? ["--agents", agentsCsv] : []),
+          ...(body?.url ? ["--url", String(body.url)] : []), ...flags);
+      } else {
+        const id = String(body?.id ?? "").trim();
+        if (!id) return apiJson(400, { ok: false, error: '"id" required' });
+        r = await runManager("peer-invite-revoke", id);
+      }
+      if (r?.ok) recordMetric("peer_managed", { meta: { action: path.slice("/peers/".length), peer: r.peer ?? r.id ?? r.revoked ?? "" } });
+      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
     }
 
     // POST /peers/invite | /peers/join | /peers/accept —— 握手三步

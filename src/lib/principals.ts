@@ -152,6 +152,10 @@ export function agentInScope(p: Principal, agentName: string): boolean {
   // 裸名 + agent- 前缀变体，若只认 "master" 本名，"*" token 会经
   // agentInScope(p, "agent-master") 绕过 master 排除（R1 guard 漏洞）。
   const isMaster = agentName === "master" || agentName === "agent-master";
+  // v2.15+ peer token 永不含 master（owner 2026-07-27:「大总管不可能被 peer
+  // 分享出去」）。历史 token 显式列了 master（老版本 --force 能签出）也在
+  // 这里截断——签发侧和消费侧双闸。
+  if (p.peer && isMaster) return false;
   for (const a of p.agents) {
     if (a === "*") {
       if (!isMaster) return true;

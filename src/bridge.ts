@@ -3726,6 +3726,8 @@ initApiRoutes({
   handleEventsRequest,
   // clear 端点后台轮转收尾（依赖 bridge 本地的 discord/startWatching，注入）
   scheduleClearRotation,
+  // v2.15+ peer 一键邀请被兑换时通知 owner（control 频道）
+  notifyOwner: notifyMaster,
 });
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）

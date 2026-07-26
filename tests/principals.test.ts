@@ -97,6 +97,20 @@ describe("agentInScope", () => {
     const p = { ...newTokenPrincipal("t", ["*"]), disabled: true };
     expect(agentInScope(p, "agent-x")).toBe(false);
   });
+
+  // v2.15+ peer token 永不含 master（owner:「大总管不可能被 peer 分享出去」）
+  // ——签发侧已无条件拒，这里测消费侧对历史遗留 token 的截断
+  test("peer token 显式列了 master 也拒（老版本 --force 签出的遗留）", () => {
+    const p = newTokenPrincipal("peer-x", ["*", "master"], { peer: "x" });
+    expect(agentInScope(p, "master")).toBe(false);
+    expect(agentInScope(p, "agent-master")).toBe(false);
+    expect(agentInScope(p, "agent-worker")).toBe(true);
+  });
+
+  test("非 peer token 的 master 显式授权不受影响", () => {
+    const p = newTokenPrincipal("web-ui", ["*", "master"]);
+    expect(agentInScope(p, "master")).toBe(true);
+  });
 });
 
 describe("SlidingWindowLimiter", () => {

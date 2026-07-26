@@ -55,7 +55,7 @@ Claudestra 基于 Claude Code 的**原生 Channel 协议（MCP）**，不是屏�
 - **多前端 API（v2.6.0+）** — Discord 只是第一个前端。`GET /events` SSE 实时事件流（tool 调用 / 文本 / 状态）；`POST /api/v1/agents/:name/messages` 让外部用户凭 token 与圈定的 agent 对话（同步 wait / 传文件 / 审计镜像回 Discord）。网页端、Telegram bot 都基于同一套合同接入 —— 见 `docs/design-multi-frontend.md`。
 - **Agent 间通信** — `send_to_agent(target, text)` MCP 工具直接把消息注入到另一个 agent 的上下文。
 - **定时任务** — 声明式 cron 表达式，自动创建临时 agent、执行 prompt、通知 Discord、清理。
-- **跨 Claudestra 协作（v2.11+ HTTP peer）** — 两个 Claudestra 实例互为 API 客户端：各自给对方签一个**按 agent 圈定 scope 的 Bearer token**，不需要共享 Discord 服务器，也不需要第二个 bot。三步握手 CLI（`peer-http-invite` → `peer-http-join` → `peer-http-accept`，配套 `peer-http-test` / `list` / `remove`）把 token 串走任意私聊渠道交换完；之后任何 agent 都能 `send_to_agent({ target: "agent@peer" })` 跨机调用，回复自动 push 回调用方。开放范围 = token scope；`peer-http-remove` 撤销即时生效。
+- **跨 Claudestra 协作（HTTP peer）** — 两个 Claudestra 实例互为 API 客户端：各自给对方签一个**按 agent 圈定 scope 的 Bearer token**，不需要共享 Discord 服务器，也不需要第二个 bot。v2.15+ 起是**一键邀请**：勾选要开放的 agent、发一个串过去、对方粘贴即自动完成握手（一次性、24h 过期、可撤销；大总管永远不可分享）。之后任何 agent 都能 `send_to_agent({ target: "agent@peer" })` 跨机调用，回复自动 push 回调用方。开放范围 = token scope；`peer-http-remove` 撤销即时生效。双方都不需要公网 IP——任何私有通路都行（Tailscale 最省事，但非必须）。
 - **管理按钮跳过 LLM** — 状态、监工、销毁、重启、定时任务等按钮由 Bridge 直接执行，零 token，瞬间响应。
 
 ### Web 客户端（v2.10+）
@@ -220,7 +220,13 @@ bun src/manager.ts permissions reset <name>
 # Bot 邀请链接（v1.8.1+）
 bun src/manager.ts invite-link           # 给自己用的完整权限链接
 
-# 跨 Claudestra HTTP peer（v2.11+）— 互签 scoped token，不需要共享 Discord 服务器
+# 跨 Claudestra HTTP peer — 互签 scoped token，不需要共享 Discord 服务器
+# 一键邀请（v2.15+，推荐）：A 生成、B 粘贴即完成——一次性、24h 有效
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]        # A：打印一键邀请串
+bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--force]                       # B：粘贴即自动握手
+bun src/manager.ts peer-invite-list                # 待兑换邀请（顺带清扫过期）
+bun src/manager.ts peer-invite-revoke <inv_id>     # 作废未兑换邀请 + 其内嵌 token
+# 旧三步握手（对方是 v2.15 之前的版本时用）：
 bun src/manager.ts peer-http-invite <peer> --agents <a,b> [--url <我方bridge地址>] [--force]   # A：打印邀请串（--url 省略则自动探测）
 bun src/manager.ts peer-http-join <peer> '<邀请串>' --agents <x,y> [--url <我方地址>] [--force] # B：存下 A，打印回执串
 bun src/manager.ts peer-http-accept <peer> '<回执串>'                                         # A：完成握手

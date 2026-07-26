@@ -41,21 +41,27 @@ bun run setup
 
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and installs the three launchd daemons.
 
-### Cross-Claudestra peer collaboration (v2.11+, HTTP peers)
+### Cross-Claudestra peer collaboration (HTTP peers)
 
-Two Claudestra instances can share specialist agents without a shared Discord server, a second bot, or filesystem / SSH access — peers are simply API clients of each other, each holding a Bearer token the other side issued and scoped to specific agents. The handshake is three CLI steps; the invite/receipt strings travel over any private channel (DM, Signal, whatever):
+Two Claudestra instances can share specialist agents without a shared Discord server, a second bot, or filesystem / SSH access — peers are simply API clients of each other, each holding a Bearer token the other side issued and scoped to specific agents.
 
-1. **A invites**: `bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <A-bridge-url>` prints an invite string (A's URL + a freshly issued token scoped to the listed agents). A sends the string to B.
-2. **B joins**: `bun src/manager.ts peer-http-join <peer> '<invite-string>' --agents <x,y> --url <B-bridge-url>` stores A as a peer and prints a receipt string carrying B's token. B sends the receipt back to A.
-3. **A accepts**: `bun src/manager.ts peer-http-accept <peer> '<receipt-string>'` — handshake complete. Both sides run `bun src/manager.ts peer-http-test <peer>` to verify reachability and see which agents the other opened.
+**One-click invite (v2.15+, recommended)** — two steps, no forms:
+
+1. **A creates an invite**: in the web client, Settings → Peer collaboration → *Create invite* (pick which agents to expose), or `bun src/manager.ts peer-invite-new --agents <a,b>`. Send the resulting string to the other side over any private channel (DM, Signal, whatever).
+2. **B pastes it**: Settings → Peer collaboration → *Join*, or `bun src/manager.ts peer-join-auto '<invite-string>'`. B's bridge calls A back automatically — done. A gets a notification with the new peer's name.
+
+Invites are single-use and expire after 24h (the embedded token is revoked on expiry/revocation — `peer-invite-list` / `peer-invite-revoke <id>` manage pending ones). Joining exposes **nothing** of B by default: it's a one-way grant (B can call A's shared agents). For two-way access, B sends A an invite of their own — the entries merge into one peer.
+
+The older three-step handshake (`peer-http-invite` / `peer-http-join` / `peer-http-accept`) still works and is what you need when the other side runs a pre-v2.15 Claudestra.
 
 From then on any agent can call `send_to_agent({ target: "<agent>@<peer>", text: "..." })` — the bridge POSTs the peer's `/api/v1` messages endpoint and pushes the reply back to the caller as a synthetic message, no polling. `peer-http-list` shows peers + handshake state; `peer-http-remove <peer>` deletes the peer and revokes the token you issued, cutting access instantly.
 
 Notes:
 
-- **Token scope is the permission model**: only agents named in `--agents` are callable; anything else gets a 403. To change scope later, redo the handshake with `--rotate`.
-- **`--force` for non-external agents**: issuing a token for an agent not created with `--external` requires `--force` — agents sharing context with your own conversations shouldn't be casually exposed (the R1 guard).
-- **Transport**: prefer Tailscale or a private network for `--url`; over the public internet, put the bridge behind an HTTPS reverse proxy (same guidance as `BRIDGE_BIND`).
+- **Token scope is the permission model**: only agents named in the invite are callable; anything else gets a 403. `peer-http-scope <peer> --agents ...` changes it later without re-handshaking.
+- **The master orchestrator can never be shared** — hard rule since v2.15, `--force` does not override it (and legacy peer tokens that list master are cut off at the API layer).
+- **`--force` for non-external agents**: exposing an agent not created with `--external` requires `--force` (a confirm dialog in the web UI) — agents sharing context with your own conversations shouldn't be casually exposed (the R1 guard).
+- **Connectivity**: the two bridges must be able to reach each other, and the bridge listens on `127.0.0.1` only by default — set `BRIDGE_BIND` (invite generation warns you if it's still loopback). Neither side needs a public IP: installing [Tailscale](https://tailscale.com) on both machines is the easiest way to get a private encrypted path (invite URLs auto-prefer the Tailscale address), but it's optional — any private network or an HTTPS reverse proxy works just as well.
 
 ### What you get out of the box
 

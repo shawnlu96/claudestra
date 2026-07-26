@@ -40,21 +40,27 @@ bun run setup
 
 就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、装好三个 launchd daemon。
 
-### 跨 Claudestra 协作（v2.11+ HTTP peer）
+### 跨 Claudestra 协作（HTTP peer）
 
-两个 Claudestra 实例共享专精 agent，不需要共享 Discord 服务器、不需要第二个 bot、更不用给对方文件系统 / SSH 权限 —— peer 之间就是互为 API 客户端：各自持有对方签发的、按 agent 圈定 scope 的 Bearer token。握手三步 CLI 完成，邀请串 / 回执串走任意私聊渠道（DM、Signal 都行）：
+两个 Claudestra 实例共享专精 agent，不需要共享 Discord 服务器、不需要第二个 bot、更不用给对方文件系统 / SSH 权限 —— peer 之间就是互为 API 客户端：各自持有对方签发的、按 agent 圈定 scope 的 Bearer token。
 
-1. **A 发起邀请**：`bun src/manager.ts peer-http-invite <peer> --agents <a,b> --url <A方bridge地址>`，打印邀请串（A 的地址 + 现签的、scope 限定在所列 agent 的 token）。把串发给 B。
-2. **B 加入**：`bun src/manager.ts peer-http-join <peer> '<邀请串>' --agents <x,y> --url <B方bridge地址>`，把 A 存为 peer 并打印带 B 侧 token 的回执串。把回执发回 A。
-3. **A 确认**：`bun src/manager.ts peer-http-accept <peer> '<回执串>'` —— 握手完成。双方各跑一次 `bun src/manager.ts peer-http-test <peer>` 验证连通 + 看对方开放了哪些 agent。
+**一键邀请（v2.15+，推荐）** —— 两步完成，零表单：
+
+1. **A 生成邀请**：Web 客户端 设置 → Peer 协作 → 「生成邀请」（勾选要开放的 agent），或 `bun src/manager.ts peer-invite-new --agents <a,b>`。把邀请串发给对方（走任意私聊渠道）。
+2. **B 粘贴**：设置 → Peer 协作 → 「加入」，或 `bun src/manager.ts peer-join-auto '<邀请串>'`。B 的 bridge 自动回调 A 完成登记——搞定，A 会收到接入通知。
+
+邀请串一次性、24h 过期（过期/撤销都会连带吊销内嵌 token；`peer-invite-list` / `peer-invite-revoke <id>` 管理待兑换的）。B 粘贴加入时**默认不开放自己的任何 agent**——这是单向授权（B 可调用 A 开放的 agent）；要对称访问，B 也生成一张邀请发回去即可，条目会自动合并成同一个 peer。
+
+旧的三步握手（`peer-http-invite` / `peer-http-join` / `peer-http-accept`）仍然可用——对方跑的是 v2.15 之前的版本时用它。
 
 之后任何 agent 都能 `send_to_agent({ target: "<agent>@<peer>", text: "..." })` 跨机调用 —— bridge 直接 POST 对方的 `/api/v1` 消息端点，对方回复自动 push 回调用方，不用轮询。`peer-http-list` 看 peer 列表 + 握手状态；`peer-http-remove <peer>` 删 peer + 撤销你签出的 token，访问即时切断。
 
 注意事项：
 
-- **token scope 就是权限模型**：只有 `--agents` 里列出的 agent 可被调用，越界一律 403。之后想改开放范围，带 `--rotate` 重新握手。
-- **非 external agent 要 `--force`**：给不是 `--external` 创建的 agent 签 token 需要加 `--force` —— 和你自己对话共享上下文的 agent 不该随手暴露（R1 守卫）。
-- **传输建议**：`--url` 优先走 Tailscale / 内网；要过公网必须给 bridge 套 HTTPS 反代（口径同 `BRIDGE_BIND` 文档）。
+- **token scope 就是权限模型**：只有邀请里勾选的 agent 可被调用，越界一律 403。之后想改开放范围用 `peer-http-scope <peer> --agents ...`，不用重新握手。
+- **大总管永远不可分享** —— v2.15 起硬规则，`--force` 也不放行（历史 peer token 里列了 master 的也会在 API 层被截断）。
+- **非 external agent 要 `--force`**：给不是 `--external` 创建的 agent 签 token 需要加 `--force`（Web UI 里是确认弹层）—— 和你自己对话共享上下文的 agent 不该随手暴露（R1 守卫）。
+- **连通性**：两边 bridge 要能互相访问，而 bridge 默认只监听 `127.0.0.1`——记得设 `BRIDGE_BIND`（生成邀请时如果还是回环会直接警告）。双方都不需要公网 IP：两台机器都装个 [Tailscale](https://tailscale.com) 是最省事的私有加密通路（邀请串会自动优先用 Tailscale 地址），但不是必须——任何内网互通或 HTTPS 反代都行。
 
 ### 装完有什么
 
