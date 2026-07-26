@@ -1,5 +1,7 @@
 # Claudestra Web Client — Setup & Run
 
+**English** · [简体中文](./SETUP.zh-CN.md)
+
 The **Next.js web frontend** for Claudestra — a second front door beside Discord.
 It is a standard **Node/npm** app that talks only to the Bridge's HTTP API
 (`/api/v1` + `/api/v1/events`); it does **not** embed the Bun backend.

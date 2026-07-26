@@ -1,5 +1,7 @@
 # Claudestra Web 客户端
 
+[English](./CLAUDE.en.md) · **简体中文**
+
 Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA 安装、自托管 VAPID Web Push（零第三方账号）、多会话流式 Chat。
 
 **2026-07-10 起数据面全面走多前端 API**（`docs/web-frontend-guide.md` +
