@@ -438,9 +438,15 @@ async function checkClaudeCodeUpdate() {
   let latest: string;
   if (install.kind === "brew") {
     await runCmd(["brew", "update", "--quiet"]); // 刷新索引(weekly 一次,慢点无妨)
-    const outdated = await runCmd(["brew", "outdated", "--cask", install.cask]);
-    if (!outdated.ok || !outdated.out.trim()) return; // 已是 cask 最新
-    const m = outdated.out.match(/(\d+\.\d+\.\d+)\s*$/m);
+    // ⚠ brew outdated 对具名包的退出码语义:0=最新,**1=有更新**——exit 1 不是
+    // 错误!老代码 `!outdated.ok` 把它当"没更新"提前 return,brew 安装下自动
+    // 更新从未真正触发过(owner 2026-07-27「一次都没顺畅更新过」的根因)。
+    // 改靠输出内容判定;--verbose 才带版本号("cask (2.1.218) != 2.1.220")。
+    // brew 的报错走 stderr(runCmd 不收),真出错时 out 为空 → 按"已最新"安全跳过。
+    const outdated = await runCmd(["brew", "outdated", "--cask", "--verbose", install.cask], 120_000);
+    const line = outdated.out.trim();
+    if (!line || !line.includes("!=")) return; // 空 = 已最新;没有 "!=" = 输出形态不认识,别硬升
+    const m = line.match(/!=\s*(\S+)/);
     latest = m ? m[1] : "(brew 新版)";
   } else {
     const npmLatest = await getClaudeLatestVersion();
