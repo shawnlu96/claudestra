@@ -2,11 +2,10 @@
 
 Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA 安装、自托管 VAPID Web Push（零第三方账号）、多会话流式 Chat。
 
-**2026-07-10 起数据面全面迁移到 upstream 的多前端 API**（`docs/web-frontend-guide.md` +
+**2026-07-10 起数据面全面走多前端 API**（`docs/web-frontend-guide.md` +
 `docs/design-multi-frontend.md`）：BFF 消费 Bridge 的 `/api/v1/*`（Bearer token）与
-`/api/v1/events`（SSE），旧 fork 的 `/web/*` 网关与 web-hub 已删除。upstream 缺口
-（interrupt / AUQ 回传 / 生命周期 / Web-only 模式）由 fork 侧 additive 补齐——完整清单见
-仓库根 `FORK.md`。
+`/api/v1/events`（SSE），早期的 `/web/*` 网关与 web-hub 已删除。web 独有的那几个
+端点（interrupt / AUQ 回传 / 生命周期 / Web-only 模式）都是在这套 API 上 additive 加的。
 
 ## 技术栈 & 端口
 
@@ -90,14 +89,14 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
   BFF 在 server 端带 `Authorization: Bearer`，浏览器永不直连 3847，也天然绕开
   EventSource 不能带 header 的坑（guide §4.3）。
 
-## 数据流（upstream /api/v1 + /events）
+## 数据流（/api/v1 + /events）
 
 会话 = 一个 claudestra agent。前端每打开一个 agent：先拉历史（`GET /api/chat/history`），
 再建一条持久 SSE 流（`GET /api/chat/stream`）；`send` fire-and-forget（wait=0），输出经流回来。
 
 - **列表**：`loadAgents` → Bridge `GET /api/v1/agents?include=stopped`。master 由 Bridge
   置入（token scope 显式含 master），前端映射为 `__master__` 置顶（👑 大总管，不显 kill/restart）；
-  stopped agent 保留入口（历史经归档 API 仍可读——upstream 归档的意义）。
+  stopped agent 保留入口（历史经归档 API 仍可读——会话归档的意义就在这）。
 - **发消息**：`POST /api/v1/agents/:name/messages {text, wait:0}` → 202。agent 离线 409。
 - **流式**：BFF 订阅 `GET /api/v1/events`（fetch-based SSE，带 Bearer），按
   `agent ∈ {name, agent-name}` 过滤，把 BridgeEvent 翻译成前端 WebStreamEvent（协议 v1 不变）：
@@ -126,7 +125,7 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
   watcher 重绑）→ 本地视图清零 → 开机指令非空则自动作为第一条消息发出（可见可审计，
   知识注入藏在指令文本里，产品层对图谱零感知）。master 可 clear 但无需开机指令
   （CLAUDE.md 自动重载）。⚠ CC 原生 auto-memory 跨 /clear 存活（原生行为）。
-- **权限卡 ⚠ 已知缺口**：迁移后权限弹窗**事件下行暂缺**（upstream permission-watcher 只面向
+- **权限卡 ⚠ 已知缺口**：迁移后权限弹窗**事件下行暂缺**（permission-watcher 只面向
   Discord 且 web-only 模式未启动它）——卡片不会自动弹出；上行 `answer {kind:"permission"}` 保留
   （发键前 Bridge 重验弹窗在场）。agent 默认 bypassPermissions，此卡本就罕见。session-idle
   应答已随迁移移除。
@@ -167,7 +166,7 @@ iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几�
 - **实际在跑的 launchd 服务**（`launchctl list | grep claudestra` 一看便知，别照抄记忆里的名字——
   这里曾长期写着 `com.claudestra.web-bridge` / `.web-launcher`，而那两个标签根本不存在，
   按它 kickstart 会拿到 exit 113）：
-  - `com.claudestra.bridge` — 后端 Bridge（Web-only 模式也是它，只是不设 DISCORD_BOT_TOKEN，见 FORK.md）
+  - `com.claudestra.bridge` — 后端 Bridge（Web-only 模式也是它，只是不设 DISCORD_BOT_TOKEN）
   - `com.claudestra.web` — Next.js 生产服务（plist 必须 `exec ./node_modules/.bin/next start`，见下条）
   - `com.claudestra.launcher` / `com.claudestra.cron` — 后端守护，与 web 无关
   - `com.claudestra.tls-proxy` — Caddy 做 h2 TLS 终结
@@ -184,9 +183,9 @@ iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几�
 - **⚠ `INTERNAL_API_KEY` 全局导出会盖过 `.env.local`**：`env -u INTERNAL_API_KEY` 起 dev。
 - **⚠ BRIDGE_HTTP_URL 必须用 `127.0.0.1` 不是 `localhost`**：Bridge 只绑 IPv4，localhost 的
   ::1 歧义会让 Node fetch 偶发 connect 10s 超时（"fetch failed"）。
-- **⚠ /events SSE 空闲断流（已修）**：Bun.serve 默认 HTTP idleTimeout≈10s，upstream 原 30s ping
+- **⚠ /events SSE 空闲断流（已修）**：Bun.serve 默认 HTTP idleTimeout≈10s，早期的 30s ping
   活不到第一轮——事件间隙 >10s 的订阅者被静默掐掉。fork 已改为连接即发 `: connected` + 5s ping
-  （bridge.ts handleEventsRequest）。merge upstream 后若流「偶尔收不到」先查这里有没有被冲掉。
+  （bridge.ts handleEventsRequest）。流「偶尔收不到」时先查这里有没有被改回去。
 - **⚠ turbopack 冷启动**：dev 重启后的头几个 API 请求可能 401/502（env/编译未就绪），刷新即好。
 - **⚠ curl 验证 CSS 会看到陈旧 chunk**：turbopack dev 对静态 CSS chunk 不因 curl 请求重编译，
   新样式经 HMR 推给真浏览器/整页刷新才生效——「curl grep 不到新规则」≠ 没编译进去，先在浏览器里确认。

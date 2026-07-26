@@ -358,7 +358,7 @@ docs/                    Multi-frontend design + web frontend API contract
 
 ## Contributing
 
-Issues and pull requests welcome. A note on language: the user-facing docs (README, SETUP) and the CLI are English; the deep-dive design notes under `docs/`, plus `FORK.md` and `web/CLAUDE.md`, are written in Chinese and have no English translation yet — they are internal design records rather than user documentation. `install.sh` and the setup wizard follow your locale (`CLAUDESTRA_LANG=zh|en` to force one). The core idea is simple; the hard parts are edge cases in tmux, Discord rate limits, and Claude Code channel lifecycle. Before submitting a PR:
+Issues and pull requests welcome. A note on language: the user-facing docs (README, SETUP) and the CLI are English; the deep-dive design notes under `docs/` have both Chinese originals and English versions (`*.en.md`); `web/CLAUDE.md` is Chinese-only for now — it is an internal design record rather than user documentation. `install.sh` and the setup wizard follow your locale (`CLAUDESTRA_LANG=zh|en` to force one). The core idea is simple; the hard parts are edge cases in tmux, Discord rate limits, and Claude Code channel lifecycle. Before submitting a PR:
 
 1. `bun run check` — runs `tsc --noEmit` plus the full test suite (322 cases). Both must be green.
 2. `bun build src/bridge.ts --target=bun` (and the same for each entry point) — catches module-resolution errors that typechecking doesn't. Note that `bun build` performs **no** typechecking on its own; that is what step 1 is for.

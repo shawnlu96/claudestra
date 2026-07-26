@@ -134,7 +134,7 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 
 ### 跨 Claudestra peer 协作
 
-其他跑同一套 upstream 的 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。
+两个 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。
 
 **HTTP peers（v2.11+，唯一跨实例通道）** — peer 之间互为 API 客户端：双方各给对方签一个限定 scope 的 Bearer token（`Principal.peer` 标记），`send_to_agent("<agent>@<peer>")` 直接 POST 对方 bridge 的 `/api/v1/agents/:name/messages`（带 `wait`，超时回落 thread 轮询 30s × 10min）。入站复用现有多前端 API（scope 403 / mirror / history 全部生效）；注入头渲染成 🤝 peer 请求，peer 入站不抢占正在跑的回合、不走 slash 透传。对方回复以合成消息 push 回 caller（与本地 `send_to_agent` 同一套 UX）；所有失败（网络 / 鉴权 / 离线 / 超时）都会报告给 caller，绝不静默。开放 = token scope；撤销 = `peer-http-remove`（token 即刻失效）。状态存 `peers.json` 的 `httpPeers[]`（0600、原子写）。老的 Discord peer 机制（共享交换频道、exposure、bot 互 @ 路由）已在 v2.11 移除。v2.11.1+ 增加管理面：`GET /api/v1/peers`（清单 + 入站 scope + 本地 agent 表）、`POST /api/v1/peers/{invite,join,accept}`（握手）、`POST /api/v1/peers/:name/{test,scope,remove}` —— 全部仅限全权 token，mutation 委托 `runManager`，CLI 的 R1 校验保持唯一裁判。Web 端渲染为「设置 → Peer 协作」（scope 编辑、连通测试、三步握手全 UI 化）。
 

@@ -456,4 +456,3 @@ launchctl kickstart -k gui/$(id -u)/com.claudestra.web-bridge
   `/events` contract (auth, history pagination, SSE event types).
 - [`docs/design-multi-frontend.md`](../docs/design-multi-frontend.md) — multi-frontend
   design (chat_id keyspace, NeutralMessage, ChatAdapter).
-- [`FORK.md`](../FORK.md) — what this fork adds on top of upstream (additive-only).
