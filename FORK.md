@@ -1,6 +1,6 @@
 # Fork 差异清单（do-md/claudestra vs shawnlu96/claudestra）
 
-> 本 fork 的使命：给 Claudestra 加一个可 PWA 安装、OneSignal 推送的 **Next.js Web 客户端**
+> 本 fork 的使命：给 Claudestra 加一个可 PWA 安装、**自托管 VAPID Web Push**（零第三方账号）的 **Next.js Web 客户端**
 > （`web/`，Discord 之外的第二前门）。2026-07-10 起全面采纳 upstream 的多前端解耦架构
 > （`docs/design-multi-frontend.md` + `docs/web-frontend-guide.md`），fork 侧只保留
 > upstream 没有的能力，全部以 `[fork]` 注释标记、遵守 additive-only 合同。

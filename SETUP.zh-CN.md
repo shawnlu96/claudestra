@@ -222,6 +222,20 @@ for svc in bridge launcher cron; do launchctl bootout "gui/$(id -u)/com.claudest
 
 ## 疑难排查
 
+### 先跑这个：`doctor`
+
+```bash
+bun src/manager.ts doctor          # 人类可读；给程序用加 --json
+```
+
+一条命令体检整套安装，坏了的地方直接告诉你该跑什么修：运行时版本（bun / claude /
+tmux）、`.env` 是否完整与文件权限、Discord 门禁里有没有合法 owner、三个 launchd
+daemon、3847 端口是不是恰好一个监听者且 HTTP 通、MCP 注册与 typing hooks、以及
+registry 里每个 agent 是否还有活着的 tmux window。它是**只读**的——不会自己启动或
+修改任何东西。
+
+要找人帮忙的时候，**先把这段输出贴上**。
+
 ### 装完先会这三招：看活没活、看日志、重启
 
 Claudestra 跑成三个 launchd user agent。下面的命令在任何目录下都能用。
