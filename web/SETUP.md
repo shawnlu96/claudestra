@@ -400,7 +400,7 @@ the `/api/v1` + `/api/v1/events` the web app needs.
    terminal needs grouped sessions.
 2. **Register the channel-server MCP** so Claude Code sessions can reach the Bridge:
    ```bash
-   claude mcp add claudestra -s user -- ~/.bun/bin/bun run <repo>/src/channel-server.ts
+   claude mcp add "${MCP_NAME:-claudestra}" -s user -- ~/.bun/bin/bun run <repo>/src/channel-server.ts
    ```
 3. **Register the Stop / Notification hook** (REQUIRED for the web UI) in
    `~/.claude/settings.json`, so turn-end (`done`) is emitted — without it the web
@@ -441,12 +441,15 @@ Wrapper scripts are provided:
 - `scripts/web-only-launcher.sh` — optional; keeps a master orchestrator (大总管)
   Claude Code alive in window 0 and auto-dismisses its startup trust/bypass prompts.
 
-Wire them into LaunchAgents (`com.claudestra.web-bridge` / `com.claudestra.web-launcher`)
-with `RunAtLoad` + `KeepAlive`. **Both must share the same `CONTROL_CHANNEL_ID`.**
-After changing bridge code, reload with:
+Wire them into the **same LaunchAgent labels the normal install uses** —
+`com.claudestra.bridge` and `com.claudestra.launcher` — with `RunAtLoad` + `KeepAlive`.
+Web-only is a different *launch command*, not a different service; giving it its own
+labels leaves you with a machine whose daemon names don't match anything else in this
+repo (and `launchctl kickstart` on a label that was never loaded just returns exit 113).
+**Both must share the same `CONTROL_CHANNEL_ID`.** After changing bridge code, reload:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.claudestra.web-bridge
+launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge
 ```
 
 ---

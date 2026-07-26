@@ -188,7 +188,7 @@ On iOS standalone, "fills to the bottom of the screen + never budges + seamless 
    the page they border.
 5. After changing viewport/manifest, iOS only picks it up if you **delete the home-screen icon and re-add
    it** (it is cached at install time).
-5.5 **Modals — and any `position:fixed` overlay — must be `createPortal`ed into body** — on mobile the
+5b. **Modals — and any `position:fixed` overlay — must be `createPortal`ed into body** — on mobile the
    conversation page lives inside a transform-based horizontal-slide container (chat.tsx translate-x),
    and per the CSS spec a transformed ancestor becomes the containing block for `fixed`: a `.modal`
    rendered inside the container ends up positioned a full screen off-view (clicking it "does nothing",

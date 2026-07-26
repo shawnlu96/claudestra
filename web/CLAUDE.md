@@ -155,7 +155,7 @@ iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几�
    否则用 html 的）→ body 一律不设 bg（layout.tsx），chat.tsx 按视图给 `<html>` 挂/摘
    `canvas-list` 类（globals.css：列表=base-200 / 会话=base-100），条带永远与所在页同色。
 5. 改 viewport/manifest 后 iOS 需**删主屏图标重新添加**才生效（安装时缓存）。
-5.5 **模态框/任何 position:fixed 浮层必须 createPortal 到 body**——移动端会话页在
+5b. **模态框/任何 position:fixed 浮层必须 createPortal 到 body**——移动端会话页在
    transform 横滑容器内（chat.tsx translate-x），CSS 规定 transform 祖先成为 fixed
    的定位基准：容器内渲染 .modal 会整个定位到屏幕外一屏（点了「没反应」，返回列表
    时容器滑回弹窗才「突然出现」）。桌面 translate=0 复现不了，必须窄视口验证。

@@ -391,7 +391,7 @@ Web 应用需要的 `/api/v1` + `/api/v1/events`。
    实时远程终端需要 grouped session。
 2. **注册 channel-server MCP**，好让 Claude Code 会话能连上 Bridge：
    ```bash
-   claude mcp add claudestra -s user -- ~/.bun/bin/bun run <repo>/src/channel-server.ts
+   claude mcp add "${MCP_NAME:-claudestra}" -s user -- ~/.bun/bin/bun run <repo>/src/channel-server.ts
    ```
 3. 在 `~/.claude/settings.json` 里**注册 Stop / Notification hook**
    （Web UI 必需），这样每一轮结束（`done`）才会被发出来 —— 没有它，
@@ -432,12 +432,15 @@ bun src/manager.ts create <name> <existing-dir> [purpose]
 - `scripts/web-only-launcher.sh` —— 可选；让窗口 0 里的大总管
   Claude Code 保持存活，并自动关掉它启动时的信任 / bypass 提示框。
 
-把它们接进 LaunchAgent（`com.claudestra.web-bridge` / `com.claudestra.web-launcher`），
-带上 `RunAtLoad` + `KeepAlive`。**两者必须共用同一个 `CONTROL_CHANNEL_ID`。**
+把它们接进**与常规安装同名的 LaunchAgent** —— `com.claudestra.bridge` 与
+`com.claudestra.launcher`，带上 `RunAtLoad` + `KeepAlive`。Web-only 只是**换了启动
+命令**，不是另一套服务；给它单起一套 label，只会让这台机器的 daemon 名字跟本仓其余
+文档全对不上（而且对一个从没 load 过的 label 跑 `launchctl kickstart` 只会拿到
+exit 113）。**两者必须共用同一个 `CONTROL_CHANNEL_ID`。**
 改完 bridge 代码后，这样重载：
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.claudestra.web-bridge
+launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge
 ```
 
 ---
