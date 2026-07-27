@@ -68,6 +68,17 @@ async function checkRuntime(): Promise<Check[]> {
     : { group: g, name: "bun", status: "fail", detail: `跑不起来：${bunPath}`,
         fix: "重装 bun：curl -fsSL https://bun.sh/install | bash，然后重跑 bun src/manager.ts install-cli（plist 里写的是 bun 的绝对路径）" });
 
+  // 能力探测而不是解析版本号：Bun.Terminal（PTY）缺失时 web 远程终端会在 spawn
+  // 时才炸（前端只看到连不上），doctor 提前把它点名（2026-07-27 peer 实例实况）
+  if (bunV.ok) {
+    const pty = await sh([bunPath, "-e", "process.stdout.write(typeof Bun.Terminal)"]);
+    if (pty.ok && pty.out.trim() !== "function") {
+      out.push({ group: g, name: "bun PTY", status: "warn",
+        detail: `Bun ${firstLine(bunV.out)} 没有 Bun.Terminal API —— web 远程终端不可用`,
+        fix: "bun upgrade 到 ≥ 1.3.5，然后 launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge" });
+    }
+  }
+
   const claude = await sh(["claude", "--version"]);
   out.push(claude.ok
     ? { group: g, name: "claude", status: "ok", detail: firstLine(claude.out) }

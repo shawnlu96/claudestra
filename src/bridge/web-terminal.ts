@@ -341,6 +341,16 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
     });
   }
 
+  // Bun.Terminal（PTY）是 Bun 1.3.5 起才有的 API。老 runtime 必须在这里挡住——
+  // 否则要等到 fitWindow 已把 master window 缩成 viewer 尺寸之后才在 spawn 抛错，
+  // 前端拿不到可读错误就重连，桌面端窗口反复被缩小（2026-07-27 peer 实例实况）。
+  if (typeof Bun.Terminal !== "function") {
+    return json(501, {
+      ok: false,
+      error: `web 远程终端需要 Bun ≥ 1.3.5（Bun.Terminal PTY API），当前 runtime 是 ${Bun.version} —— 请 bun upgrade 后重启 bridge`,
+    });
+  }
+
   // M1：容量检查计入在途占坑，且检查+占坑在任何 await 之前**同步**完成，
   // 并发请求无法各自读到"未满"。此后每条 return / start() 都要 release()。
   if (termSessions.size + pendingReservations >= MAX_TERM_SESSIONS) {
@@ -454,6 +464,9 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
         release();
         tmuxRun(["kill-session", "-t", viewerSession]).catch(() => {});
         restoreControlClamp(fitted.lift); // 已解除钳制但 session 没建成 → 就地还原
+        // fitWindow 已把 master window 置为 manual + viewer 尺寸——失败路径同样要
+        // 把决定权还回去，否则桌面端这个窗口钉死在手机尺寸（destroy 走不到这里）
+        tmuxRun(["set-option", "-w", "-t", `${MASTER_SESSION}:${windowRef}`, "window-size", "latest"]).catch(() => {});
         try { controller.error(e); } catch { /* 已关闭 */ }
         console.error(`🖥️ [term] spawn failed id=${termId.slice(0, 8)} agent=${agentParam}:`, e);
         return;
