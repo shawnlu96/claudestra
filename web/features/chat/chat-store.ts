@@ -31,6 +31,44 @@ function agentsSignature(list: AgentSession[]): string {
     .join("");
 }
 
+/**
+ * 乐观消息保全（loadMessages 全量替换与 syncDelta 差量追加共用——两处各写一份
+ * 迟早漂移）：agent 忙时连发的消息在服务端排队,送达前不进 jsonl——整体替换会把
+ * 它们从视图「吞掉」。把尚未在 incoming 里出现的本地消息挑出来接回视图尾;
+ * 逐条消费匹配(同文本连发两条也各自对账),30 分钟后不再保全。
+ * 匹配三口径:归一化全文相等 / 历史含 wire 原文([button:id] 落在 channel 包装里)
+ * / 「🔘 label」兜底形态(2026-07-16)。CRLF 归一防注入链路差异(2026-07-15)。
+ */
+function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  const tail = incoming.slice(-80);
+  const used = new Set<number>();
+  const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
+  return current.filter((m) => {
+    if (!m.local || m.role !== "user") return false;
+    if (m.ts && Date.now() - Date.parse(m.ts) > 30 * 60_000) return false;
+    const t = norm(m.content);
+    const w = m.wire?.trim();
+    const friendly = w
+      ? (w.match(/^\[button:([\w-]+)\]$/)?.[1] ??
+          w.match(/^\[select:[\w-]+:(.+)\]$/)?.[1] ??
+          null)
+      : null;
+    const idx = tail.findIndex(
+      (h, i) =>
+        !used.has(i) &&
+        h.role === "user" &&
+        (norm(h.content) === t ||
+          (!!w && h.content.includes(w)) ||
+          (!!friendly && norm(h.content) === `🔘 ${friendly}`))
+    );
+    if (idx >= 0) {
+      used.add(idx);
+      return false; // 已进历史,不再需要本地副本
+    }
+    return true;
+  });
+}
+
 interface ChatState {
   agents: AgentSession[];
   loadingAgents: boolean;
@@ -436,6 +474,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
     // 翻页锚也是 per-agent 的,跟着上面的 historyHasMore 一起清,loadMessages 会重设
     this.historySessionId = null;
+    this.historyCursor = null; // 游标同理——旧 agent 的游标拉新 agent 的差量是灾难
     void this.refreshCcTasks(name);
     // 无论有无缓存都重拉历史（stale-while-revalidate）——离开期间 agent 的产出
     // 只存在于 jsonl，不重拉就永远看不到。历史解析已稳定，重拉不再"漂"。
@@ -447,6 +486,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
   /** 当前历史所属 sessionId(向上分页要钉在同一 session——seq 空间 per-session)。 */
   private historySessionId: string | null = null;
+
+  /** v2.16 cursor 同步模型的游标:最新视图消费到的 {session, 原始记录 seq}。
+   *  唤醒对齐用它拉差量(几条几 KB)代替全量重拉(560KB/跨境 14s)。与
+   *  historySessionId 分离——那个跟着「视图」走(含历史现场),游标只跟最新视图。
+   *  切 agent 清空,loadMessages 重锚。 */
+  private historyCursor: { sid: string; lastSeq: number } | null = null;
 
   /** 向上翻页:拉当前 session 更早的一页,prepend 到列表头。
    *  「显示更早」把本地窗口耗尽后由按钮触发(owner 2026-07-16「往上滑看全部历史」)。 */
@@ -549,6 +594,84 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     void this.openStream(name);
   }
 
+  /**
+   * v2.16 差量对齐(唤醒秒画)——cursor 模型的核心动作:只拉游标之后的新消息,
+   * 追加到现有视图,几 KB/1 秒级,代替全量重拉(560KB/跨境 14s)。
+   *
+   * 自动回退全量(loadMessages)的情形:服务端报轮转(/clear、restart 换了
+   * session)、差量比一页还大(离场太久)、请求失败/超时(重试一次后)。
+   * 差量为空 = 没错过任何东西,零动作。
+   *
+   * 已知小窗口:差量读到 jsonl 尾 → 新流(不带 since)建立之间 ~秒级事件可能
+   * 两边都不覆盖——两拍反向对齐(refreshAgents)与下次唤醒差量兜底,不为它
+   * 引入 since 重放(重放的 chat_message 与差量气泡必然重复)。
+   */
+  private async syncDelta(name: string, gen: number, attempt = 0): Promise<void> {
+    const cur = this.historyCursor;
+    if (!cur || this.state.browsing) return;
+    try {
+      const res = await fetch(
+        `/api/chat/history?agent=${encodeURIComponent(name)}&session=${encodeURIComponent(cur.sid)}&after=${cur.lastSeq}`,
+        // 8s 短超时:唤醒头几秒网络栈未醒的悬挂要快速失败快速重试,
+        // 别像全量的 30s 那样把用户晾在空等里(2026-07-28 推送点入 20s 无消息)
+        { signal: AbortSignal.timeout(8_000) }
+      );
+      if (res.status === 401) return this.gotoLogin();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as {
+        data?: ChatMessage[];
+        rotated?: boolean;
+        lastSeq?: number;
+        hasMore?: boolean;
+      };
+      if (gen !== this.openGen) return; // 已切走
+      if (json.rotated || json.hasMore) {
+        this.clientLog(`syncDelta: ${json.rotated ? "session 已轮转" : "差量超一页"} → 回退全量 agent=${name}`);
+        return this.loadMessages(name, gen);
+      }
+      const delta = hydrateHistoryMessages(json.data ?? []);
+      if (typeof json.lastSeq === "number") this.historyCursor = { sid: cur.sid, lastSeq: json.lastSeq };
+      if (!delta.length) return; // 没错过任何东西
+      this.clientLog(`syncDelta: 追平 ${delta.length} 条 agent=${name} after=${cur.lastSeq}`);
+      this.produce((s) => {
+        // 视图重组:历史气泡(h 前缀,必然 ≤ 游标) + 差量 + 幸存乐观消息 +
+        // 直播回合保全——与 loadMessages 全量替换同一套规则,只是历史部分
+        // 用现有视图代替重拉
+        const base = s.messages.filter((m) => m.id.startsWith("h"));
+        const pending = survivingPending(s.messages, delta);
+        const liveTail: ChatMessage[] = [];
+        if (this.state.streaming) {
+          const streamedBubbles = s.messages.filter((m) => m.role === "assistant" && m.streamed);
+          const dLast = delta[delta.length - 1];
+          if (streamedBubbles.length && (!dLast || dLast.role !== "assistant")) {
+            liveTail.push(...streamedBubbles);
+          }
+        }
+        s.messages = [...base, ...delta, ...pending, ...liveTail];
+        if (s.streaming && !liveTail.length) {
+          const tail = s.messages[s.messages.length - 1];
+          if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
+        }
+        s.loadingHistory = false;
+        s.historyError = false;
+      });
+    } catch (e) {
+      if (gen !== this.openGen) return;
+      const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      this.clientLog(`syncDelta 失败 agent=${name} attempt=${attempt} ${errMsg}`);
+      // ⚠ 整条链必须可 await(调用方等它完成才开流,消灭「读盘后才到的直播
+      // 气泡被差量应用过滤掉」的竞态)——重试不能 setTimeout+void 甩出去
+      if (attempt < 1) {
+        // 快重试一次(1s):唤醒网络栈未醒的悬挂多半第二发就通
+        await new Promise((r) => setTimeout(r, 1_000));
+        if (gen === this.openGen) return this.syncDelta(name, gen, attempt + 1);
+        return;
+      }
+      // 差量救不回来 → 全量兜底(带它自己的重试梯子)
+      return this.loadMessages(name, gen);
+    }
+  }
+
   /** CC 任务清单刷新防抖(TaskCreate/TaskUpdate 常连发)。 */
   private ccTasksTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -585,6 +708,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.messageCache.delete(name);
     this.discardPendingText();
     this.historySessionId = null;
+    this.historyCursor = null;
     const gen = ++this.openGen;
     this.produce((s) => {
       s.messages = [];
@@ -614,6 +738,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const json = (await res.json()) as {
         data?: ChatMessage[];
         sessionId?: string;
+        lastSeq?: number | null;
         hasMore?: boolean;
       };
       if (gen !== this.openGen) return; // 已切走，丢弃
@@ -631,47 +756,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         return;
       }
       this.historySessionId = json.sessionId ?? null;
+      // v2.16 cursor 同步:全量加载即重锚游标(sid + 最后一条原始记录 seq)。
+      // 唤醒差量按它拉「之后的」——这是 owner 2026-07-25 立的 cursor 模型扳机的落地
+      this.historyCursor =
+        json.sessionId && typeof json.lastSeq === "number"
+          ? { sid: json.sessionId, lastSeq: json.lastSeq }
+          : null;
       this.produce((s) => {
         s.historyHasMore = !!json.hasMore;
         const history = json.data ?? [];
-        // 乐观消息保全:agent 忙时连发的消息在服务端排队,送达前不进 jsonl——
-        // 历史整体替换会把它们从视图「吞掉」(2026-07-14 真机:连发多条 UI 上
-        // 消失,消息本身没丢)。把尚未在历史尾部出现的本地消息接回视图尾;
-        // 逐条消费匹配(同文本连发两条也各自对账),30 分钟后不再保全。
-        const tail = history.slice(-80);
-        const used = new Set<number>();
-        // CRLF/空白归一后再比——channel 注入链路把 \n 变 \r\n,精确匹配失败
-        // 会让乐观条+历史条双份并存(2026-07-15 真机;history route 已归一,
-        // 这里再归一防其它来源差异)
-        const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
-        const pending = s.messages.filter((m) => {
-          if (!m.local || m.role !== "user") return false;
-          if (m.ts && Date.now() - Date.parse(m.ts) > 30 * 60_000) return false;
-          const t = norm(m.content);
-          // wire 口径:按钮点击的乐观气泡显示 label,jsonl 里落的是 [button:<id>]
-          // ——不看 wire 就永远对不上,气泡挂满 30 分钟(2026-07-14 真机截图)。
-          // history route 会把点击渲染成 label(与乐观气泡同形,t 相等即中)或
-          // 兜底「🔘 id」——第三种形态也要认,否则对账再度失败(2026-07-16)
-          const w = m.wire?.trim();
-          const friendly = w
-            ? (w.match(/^\[button:([\w-]+)\]$/)?.[1] ??
-                w.match(/^\[select:[\w-]+:(.+)\]$/)?.[1] ??
-                null)
-            : null;
-          const idx = tail.findIndex(
-            (h, i) =>
-              !used.has(i) &&
-              h.role === "user" &&
-              (norm(h.content) === t ||
-                (!!w && h.content.includes(w)) ||
-                (!!friendly && norm(h.content) === `🔘 ${friendly}`))
-          );
-          if (idx >= 0) {
-            used.add(idx);
-            return false; // 已进历史,不再需要本地副本
-          }
-          return true;
-        });
+        // 乐观消息保全(逻辑在 survivingPending——与 syncDelta 共用一份)
+        const pending = survivingPending(s.messages, history);
         // 直播回合保全:回合进行中做对齐(回前台 >5min / seq 倒退兜底),历史
         // 整体替换会把正在流式的 assistant 气泡吞掉——CC 回合内经常攒内存不落
         // 盘,jsonl 里还没有这些内容,气泡一吞屏上只剩状态条,「头像和动效都
@@ -956,8 +1051,23 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       void this.openStream(name, this.lastEventSeq);
       return;
     }
-    this.clientLog(`reconnect(full): agent=${name} 重拉历史+重连流`);
+    // v2.16 cursor 模型(owner 扳机 2026-07-25,触发 2026-07-28「推送点入 20s
+    // 无消息」):有游标就差量秒画 + 流立刻并行重连,唤醒到看到新消息从全量的
+    // 14s(跨境实测)降到 1-2s;全量重拉降级为「无游标/轮转/差量失败」的兜底,
+    // 由 syncDelta 内部自动切换。流不带 since:差量已覆盖到 jsonl 尾,重放的
+    // chat_message 会和差量气泡重复。
     const gen = ++this.openGen;
+    if (this.historyCursor) {
+      this.clientLog(`reconnect(delta): agent=${name} after=${this.historyCursor.lastSeq}`);
+      // 先差量后开流(串行):并行时流上先到的直播气泡会被差量应用的视图重组
+      // 过滤掉。差量通常 1 秒内落地,流晚这一拍无感
+      void this.syncDelta(name, gen).then(() => {
+        if (gen !== this.openGen) return;
+        void this.openStream(name);
+      });
+      return;
+    }
+    this.clientLog(`reconnect(full): agent=${name} 重拉历史+重连流`);
     void this.loadMessages(name, gen).then(() => {
       if (gen !== this.openGen) return;
       void this.openStream(name);

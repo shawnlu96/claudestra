@@ -224,9 +224,39 @@ export async function GET(request: Request) {
   // 向上分页(owner 2026-07-16「往上滑看全部历史」):before=<seq> + session=<sid>
   // → 钉在同一 session 往前翻(seq 空间 per-session,不能跨 session 混用)
   const before = url.searchParams.get("before");
+  const after = url.searchParams.get("after");
   const pinnedSession = url.searchParams.get("session");
 
   try {
+    // v2.16 差量同步(cursor 模型,owner 扳机 2026-07-25/触发 2026-07-28):
+    // after=<seq> + session=<sid> → 只拉游标之后的新消息(唤醒秒画)。
+    // 先做廉价轮转检测:pinned 不再是最新 session(/clear、restart 轮转过)
+    // → 返回 rotated,客户端改走全量——差量钉在老 session 上只会永远拉空,
+    // 新会话的内容一条也看不见。
+    if (after && /^\d+$/.test(after) && pinnedSession) {
+      const list = await bridgeGet<{ ok: boolean; sessions: { sessionId: string }[] }>(
+        `/agents/${name}/history`,
+        { timeoutMs: 8000 }
+      );
+      const newest = list.sessions?.[0]?.sessionId;
+      if (newest && newest !== pinnedSession) {
+        return NextResponse.json({ data: [], sessionId: pinnedSession, rotated: true });
+      }
+      const page = await bridgeGet<{ ok: boolean; messages: NeutralMessage[] }>(
+        `/agents/${name}/history/${encodeURIComponent(pinnedSession)}?limit=300&after=${after}`,
+        { timeoutMs: 10_000 }
+      );
+      const items = page.messages || [];
+      return NextResponse.json({
+        // 差量的尾就是全局尾 → tail 语义用默认(完成标记正常渲染)
+        data: slimForWire(toChatMessages(items)),
+        sessionId: pinnedSession,
+        lastSeq: items.length ? items[items.length - 1].seq : Number(after),
+        // hasMore = 差量比一页还大(离场太久) → 客户端放弃追加改走全量
+        hasMore: items.length >= 300,
+      });
+    }
+
     if (before && /^\d+$/.test(before) && pinnedSession) {
       const page = await bridgeGet<{ ok: boolean; messages: NeutralMessage[] }>(
         `/agents/${name}/history/${encodeURIComponent(pinnedSession)}?limit=300&before=${before}`,
@@ -263,6 +293,10 @@ export async function GET(request: Request) {
         return NextResponse.json({
           data: slimForWire(toChatMessages(items)),
           sessionId: s.sessionId,
+          // lastSeq = 合并成气泡前最后一条原始记录的 seq——差量同步的游标锚。
+          // ⚠ 不能用气泡 id 推(气泡 id 是合并组首条记录的 seq,组内后续记录
+          // 的 seq 更大,拿它当锚会把同组剩余记录当「新消息」重复拉一遍)
+          lastSeq: items.length ? items[items.length - 1].seq : null,
           hasMore: items.length >= 500,
         });
       } catch (e) {

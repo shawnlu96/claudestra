@@ -895,10 +895,14 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const limitRaw = Number(url.searchParams.get("limit") || 100);
     const beforeRaw = url.searchParams.get("before");
     const before = beforeRaw != null ? Number(beforeRaw) : undefined;
+    // v2.16+ after=<seq> 差量同步(唤醒追平):只回锚点之后的新消息
+    const afterRaw = url.searchParams.get("after");
+    const after = afterRaw != null ? Number(afterRaw) : undefined;
     try {
       const page = await readSessionHistory(file, {
         limit: Number.isFinite(limitRaw) ? limitRaw : 100,
         before: before != null && Number.isFinite(before) ? before : undefined,
+        after: after != null && Number.isFinite(after) ? after : undefined,
         formatToolFn: formatTool,
         toolDetailFn: formatToolDetail,
       });

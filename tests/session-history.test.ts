@@ -95,6 +95,27 @@ describe("unwrapChannelMessage", () => {
 });
 
 describe("readSessionHistory", () => {
+  test("after 差量分页:只回 seq 之后的消息,从头取,hasMore=差量大于一页", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const p = writeJsonl(dir, `${SID}.jsonl`, SAMPLE);
+    const full = await readSessionHistory(p, {});
+    const anchor = full.messages[1].seq; // assistant 那条
+    const delta = await readSessionHistory(p, { after: anchor });
+    // 锚点之后的消息 = full 里 seq > anchor 的那些,顺序一致
+    const expected = full.messages.filter((m) => m.seq > anchor);
+    expect(delta.messages.map((m) => m.seq)).toEqual(expected.map((m) => m.seq));
+    expect(delta.hasMore).toBe(false);
+    // 锚点 = 最后一条 → 差量为空
+    const empty = await readSessionHistory(p, { after: full.messages[full.messages.length - 1].seq });
+    expect(empty.messages.length).toBe(0);
+    expect(empty.hasMore).toBe(false);
+    // limit=1 时差量大于一页 → hasMore=true 且只回紧邻锚点的第一条
+    const paged = await readSessionHistory(p, { after: anchor, limit: 1 });
+    expect(paged.messages.length).toBe(1);
+    expect(paged.messages[0].seq).toBe(expected[0].seq);
+    expect(paged.hasMore).toBe(true);
+  });
+
   test("解析：过滤 meta/tool_result，保留 user/assistant/compact 边界与摘要", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hist-"));
     const p = writeJsonl(dir, `${SID}.jsonl`, SAMPLE);

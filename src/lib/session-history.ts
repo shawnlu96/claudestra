@@ -279,6 +279,8 @@ export async function readSessionHistory(
   opts: {
     limit?: number;
     before?: number;
+    /** 差量同步:只取 seq > after 的消息(唤醒追平用,与 before 互斥) */
+    after?: number;
     /** tool_use 摘要渲染器（bridge 传 jsonl-watcher 的 formatTool），默认只回工具名 */
     formatToolFn?: (name: string, input: any) => string;
     /** tool_use 完整详情渲染器（formatToolDetail）——省略则历史不带 detail */
@@ -445,6 +447,14 @@ export async function readSessionHistory(
     }
   }
 
+  // after = 差量同步(v2.16 唤醒秒画):只取 seq > after 的消息,从头取 limit 条
+  // (紧接锚点的最早那批);hasMore=true 表示差量比一页还大,调用方应放弃追加
+  // 改走全量。before/after 互斥,同传时 after 优先(差量语义更明确)。
+  if (opts.after != null) {
+    const later = all.filter((m) => m.seq > opts.after!);
+    const messages = later.slice(0, limit);
+    return { messages, total: all.length, hasMore: later.length > messages.length };
+  }
   const eligible = opts.before != null ? all.filter((m) => m.seq < opts.before!) : all;
   const messages = eligible.slice(-limit);
   return { messages, total: all.length, hasMore: eligible.length > messages.length };
