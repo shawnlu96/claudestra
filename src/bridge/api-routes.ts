@@ -388,6 +388,13 @@ const claudeSwitchOverride = new Map<
   { model?: { v: string; ts: number }; effort?: { v: string; ts: number } }
 >();
 const overrideKey = (name: string) => String(name).replace(/^agent-/, "");
+
+/** jsonl 实测超过此时限视为陈旧——重启后一轮没跑过的 agent,老会话里的模型
+ *  读数是老黄历(2026-07-27 实例:5 月的 opus-4-7 盖过了 registry 钉的 opus-5),
+ *  显示回退到 registry/全局配置更接近「下一轮会用什么」。 */
+const CLAUDE_READ_STALE_MS = 7 * 24 * 3600_000;
+const freshOrNull = <T>(v: T | null | undefined, ts: number | null | undefined): T | null =>
+  v != null && ts != null && Date.now() - ts < CLAUDE_READ_STALE_MS ? v : null;
 /** 列表侧取乐观值:比实测记录新才算数;两个字段都被实测追上就顺手清掉 */
 function pickClaudeOverride(name: string, info: SessionTailInfo | null | undefined) {
   const key = overrideKey(name);
@@ -514,8 +521,16 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           // (会话内切换即时反映,防 registry 漂移) → registry 钉的(创建/切换
           // 端点写入) → 全局默认
           const ov = pickClaudeOverride(a.name, info);
-          (a as any).model = ov.model ?? info?.model ?? (r?.model ? resolveModelAlias(r.model) : null) ?? gModel;
-          (a as any).effort = ov.effort ?? info?.effort ?? r?.effort ?? gEffort;
+          // 实测过旧(重启后没跑过回合)不参与,回退 registry/全局;全部落空才用陈旧值兜底
+          (a as any).model =
+            ov.model ??
+            freshOrNull(info?.model, info?.modelTs) ??
+            (r?.model ? resolveModelAlias(r.model) : null) ??
+            gModel ??
+            info?.model ??
+            null;
+          (a as any).effort =
+            ov.effort ?? freshOrNull(info?.effort, info?.effortTs) ?? r?.effort ?? gEffort ?? info?.effort ?? null;
         }
       }
       // ?include=stopped：registry 里已停止的 agent 也入列（additive；
@@ -561,8 +576,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           idle: undefined,
           purpose: "master orchestrator (大总管)",
           busy: getAgentStatus("master") === "thinking",
-          model: mOv.model ?? mInfo?.model ?? mgModel,
-          effort: mOv.effort ?? mInfo?.effort ?? mgEffort,
+          model: mOv.model ?? freshOrNull(mInfo?.model, mInfo?.modelTs) ?? mgModel ?? mInfo?.model ?? null,
+          effort: mOv.effort ?? freshOrNull(mInfo?.effort, mInfo?.effortTs) ?? mgEffort ?? mInfo?.effort ?? null,
         } as any);
       }
       return apiJson(200, { ok: true, agents });
