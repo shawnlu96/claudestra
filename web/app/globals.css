@@ -446,3 +446,12 @@ html.kb-open {
     border-radius: 0.75rem;
     animation: cstra-flash 2s ease-out 1;
 }
+
+/* 行内代码可点击复制(message-list 事件委托;pre 内的大块走 do-md 自带按钮) */
+.chat-domd code:not(pre code) {
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.chat-domd code:not(pre code):active {
+    background: color-mix(in srgb, currentColor 24%, transparent);
+}

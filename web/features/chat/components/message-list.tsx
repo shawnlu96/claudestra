@@ -1,5 +1,6 @@
 "use client";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { ChatMessage, ChatAttachmentView, ToolCallView, AssistantSegment } from "../type";
 import { Domd } from "@/components/domd";
@@ -847,6 +848,9 @@ export function MessageList() {
   const followRef = useRef(true);
   /** 搜索跳转的命中气泡短暂高亮(id;动画一遍后清)。 */
   const [flashId, setFlashId] = useState<string | null>(null);
+  /** 行内代码点击复制的浮标(tap 点视口坐标;portal 到 body——移动端会话页在
+   *  transform 横滑容器里,容器内 fixed 会定位到屏幕外,页面规矩 5b)。 */
+  const [copiedTip, setCopiedTip] = useState<{ x: number; y: number; id: number } | null>(null);
   /** 已定位过的跳转锚(sessionId:seq)——窗口数据到位只定位一次,翻页不重跳。 */
   const jumpDoneRef = useRef("");
   // 窗口化初始渲染：打开会话只挂最近 30 个气泡（历史一次挂几十个气泡+几百张
@@ -1002,6 +1006,22 @@ export function MessageList() {
           ae.blur();
         }
       }}
+      onClick={(e) => {
+        // 行内代码点击即复制(owner 2026-07-28「小 code block 也要能复制」)。
+        // 大代码块(pre 内)有 do-md 自带的复制按钮,不抢;点在链接上不抢;
+        // 用户正在选字(划选后松手也触发 click)不抢。
+        const el = (e.target as HTMLElement).closest?.("code");
+        if (!el || el.closest("pre") || (e.target as HTMLElement).closest("a")) return;
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) return;
+        const text = el.textContent || "";
+        if (!text.trim()) return;
+        const id = Date.now();
+        void navigator.clipboard?.writeText(text).then(() => {
+          setCopiedTip({ x: e.clientX, y: e.clientY, id });
+          setTimeout(() => setCopiedTip((c) => (c && c.id === id ? null : c)), 1200);
+        });
+      }}
     >
       {/* 横向留白对齐 claude-os thread（px-7=28px + 居中限宽），手机端稍收到 24px，
           原 px-4(16px) 太满不透气（owner 反馈）。滚动条落在最外层边缘更干净。 */}
@@ -1075,6 +1095,16 @@ export function MessageList() {
             <ThinkingDots />
           </div>
         )}
+        {copiedTip &&
+          createPortal(
+            <div
+              className="pointer-events-none fixed z-[999] rounded-full bg-neutral px-2.5 py-1 text-xs text-neutral-content shadow-md"
+              style={{ left: copiedTip.x, top: Math.max(8, copiedTip.y - 40), transform: "translateX(-50%)" }}
+            >
+              ✓ {t("已复制")}
+            </div>,
+            document.body
+          )}
         {browsing && (
           <div className="sticky bottom-2 z-10 mt-4 flex justify-center">
             <button
