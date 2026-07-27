@@ -1,60 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 import { SkillsSheet } from "./skills-sheet";
 
-/**
- * 【临时诊断】iOS 光标错位探针(2026-07-27,root cause 未锁定期间挂着)。
- * 输入框聚焦时把关键实测值画在屏幕左上:textarea 真实矩形、visualViewport
- * 偏移(键盘 pan)、shell 滚动残留、以及 textarea 祖先链上所有会创建
- * containing block / 影响原生 UI 锚点的样式(transform/filter/will-change…)。
- * 用户截一张图 → 对照数值锁真凶。定位完删除本组件。
- */
-function CaretProbe({ taRef }: { taRef: React.RefObject<HTMLTextAreaElement | null> }) {
-  const [info, setInfo] = useState("");
-  useEffect(() => {
-    const tick = () => {
-      const ta = taRef.current;
-      if (!ta) return;
-      const r = ta.getBoundingClientRect();
-      const vv = window.visualViewport;
-      const shell = document.getElementById("cstra-shell");
-      const anc: string[] = [];
-      for (let el: HTMLElement | null = ta; el && el !== document.documentElement; el = el.parentElement) {
-        const cs = getComputedStyle(el);
-        const hits: string[] = [];
-        if (cs.transform !== "none") hits.push(`tf=${cs.transform.slice(0, 22)}`);
-        if (cs.filter !== "none") hits.push("filter");
-        const bdf = (cs as CSSStyleDeclaration & { backdropFilter?: string }).backdropFilter;
-        if (bdf && bdf !== "none") hits.push("backdrop");
-        if (cs.perspective !== "none") hits.push("persp");
-        if (cs.willChange !== "auto") hits.push(`wc=${cs.willChange}`);
-        if (cs.contain && cs.contain !== "none") hits.push(`contain=${cs.contain}`);
-        if (hits.length) anc.push(`${el.tagName.toLowerCase()}(${hits.join(",")})`);
-      }
-      setInfo(
-        [
-          `ta ${r.x.toFixed(0)},${r.y.toFixed(0)} ${r.width.toFixed(0)}x${r.height.toFixed(0)} selEnd=${ta.selectionEnd}`,
-          `vv ot=${vv ? vv.offsetTop.toFixed(0) : "?"} ol=${vv ? vv.offsetLeft.toFixed(0) : "?"} h=${vv ? vv.height.toFixed(0) : "?"} pt=${vv ? vv.pageTop.toFixed(0) : "?"}`,
-          `pg y=${window.scrollY} ih=${window.innerHeight} shell st=${shell?.scrollTop ?? "?"},${shell?.scrollLeft ?? "?"}`,
-          `cb: ${anc.join(" ") || "无"}`,
-        ].join("\n"),
-      );
-    };
-    tick();
-    const iv = setInterval(tick, 600);
-    return () => clearInterval(iv);
-  }, [taRef]);
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <pre className="pointer-events-none fixed left-1 z-[9999] max-w-[95vw] whitespace-pre-wrap break-all rounded bg-black/85 p-1.5 font-mono text-[10px] leading-tight text-green-300" style={{ top: "max(env(safe-area-inset-top), 8px)" }}>
-      {info}
-    </pre>,
-    document.body,
-  );
-}
 
 const MAX_FILES = 5;
 
@@ -802,8 +751,6 @@ export function Composer() {
               onContextMenu={(e) => e.preventDefault()}
             />
           )}
-          {/* 【临时诊断】聚焦期探针——定位 iOS 光标错位,完事即删 */}
-          {taFocused && <CaretProbe taRef={taRef} />}
           </div>
 
           {/* 控件行 */}
