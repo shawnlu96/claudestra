@@ -194,6 +194,40 @@ function ChatInner() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // v2.15+ iOS 键盘视口钉扎(2026-07-27 用户实锤截图:弹键盘后整个 fixed 壳
+  // 被顶出屏幕——TopBar 消失,caret/📎 原生菜单按未平移坐标绘制,全部错位;
+  // 连诊断探针都被一起顶出屏外)。终端页(terminal-page.tsx)同款双补偿:
+  // ① iOS 直接滚 document 顶出 fixed 层 → 强制归零;
+  // ② visualViewport 平移/缩小 → 壳钉在 (top=offsetTop, height=height),
+  //    composer 始终贴键盘上沿、TopBar 始终在视野内,iOS 无需再顶。
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => {
+      if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
+      const el = document.getElementById("cstra-shell");
+      if (!el) return;
+      const keyboardUp = window.innerHeight - vv.height > 40 || vv.offsetTop > 1;
+      if (keyboardUp) {
+        el.style.top = `${vv.offsetTop}px`;
+        el.style.height = `${vv.height}px`;
+        el.style.bottom = "auto";
+      } else {
+        el.style.top = "";
+        el.style.height = "";
+        el.style.bottom = "";
+      }
+    };
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+    window.addEventListener("scroll", apply);
+    return () => {
+      vv.removeEventListener("resize", apply);
+      vv.removeEventListener("scroll", apply);
+      window.removeEventListener("scroll", apply);
+    };
+  }, []);
+
   const toContent = useCallback(() => {
     if (!isNarrow()) return; // 桌面双栏并存，无需压栈/位移
     if (!isContentHash()) window.history.pushState(null, "", CONTENT_HASH);
