@@ -78,6 +78,21 @@ export function useFlowKeyboard(enabled: boolean): void {
       const kbUp = vv ? window.innerHeight - vv.height > 40 : false;
       // settle 后才动(kb-open 会改 composer padding = 布局变更,聚焦瞬间动会杀键盘)
       document.documentElement.classList.toggle("kb-open", kbUp);
+      if (kbUp && vv) {
+        // iOS 揭示聚焦输入框时习惯把它滚到可视区**中部**,composer 和键盘之间
+        // 留一大截空白(2026-07-27 用户截图)。settle 后把文档滚到底——composer
+        // 恰好贴在键盘上沿。滚动不是布局变更,不会杀键盘(iOS 自己也在滚)。
+        const target = Math.max(0, document.documentElement.scrollHeight - vv.height);
+        if (Math.abs((window.scrollY || 0) - target) > 4) {
+          window.scrollTo({ top: target, behavior: "smooth" });
+        }
+        // 键盘吃掉一截可视高度后,原本吸底的消息列表会差一行(最后一行卡在
+        // composer 上沿被半遮)——离底不远时重新吸底
+        const list = document.getElementById("cstra-msgs");
+        if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 160) {
+          list.scrollTop = list.scrollHeight;
+        }
+      }
       if (!kbUp) {
         const el = document.activeElement as HTMLElement | null;
         const editing =

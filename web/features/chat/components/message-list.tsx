@@ -941,6 +941,7 @@ export function MessageList() {
     // ——触摸消息区即 blur，与主流聊天 App 行为一致。
     <div
       ref={scrollerRef}
+      id="cstra-msgs"
       className="flex-1 touch-pan-y overflow-y-auto overscroll-contain"
       style={{ WebkitOverflowScrolling: "touch" }}
       onTouchStart={() => {
