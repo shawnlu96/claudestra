@@ -203,25 +203,31 @@ function ChatInner() {
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
+    // rAF 合并 + 值未变不写:键盘弹起/收起动画期 vv 事件连发,逐事件写样式
+    // 会让整个壳跟着抖(2026-07-27 用户:「乱跳来跳去」)。一帧最多应用一次,
+    // top/height 没变化就完全不碰 DOM。
+    let raf = 0;
     const apply = () => {
-      if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
-      const el = document.getElementById("cstra-shell");
-      if (!el) return;
-      const keyboardUp = window.innerHeight - vv.height > 40 || vv.offsetTop > 1;
-      if (keyboardUp) {
-        el.style.top = `${vv.offsetTop}px`;
-        el.style.height = `${vv.height}px`;
-        el.style.bottom = "auto";
-      } else {
-        el.style.top = "";
-        el.style.height = "";
-        el.style.bottom = "";
-      }
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
+        const el = document.getElementById("cstra-shell");
+        if (!el) return;
+        const keyboardUp = window.innerHeight - vv.height > 40 || vv.offsetTop > 1;
+        const top = keyboardUp ? `${Math.round(vv.offsetTop)}px` : "";
+        const height = keyboardUp ? `${Math.round(vv.height)}px` : "";
+        if (el.style.top !== top) el.style.top = top;
+        if (el.style.height !== height) el.style.height = height;
+        const bottom = keyboardUp ? "auto" : "";
+        if (el.style.bottom !== bottom) el.style.bottom = bottom;
+      });
     };
     vv.addEventListener("resize", apply);
     vv.addEventListener("scroll", apply);
     window.addEventListener("scroll", apply);
     return () => {
+      if (raf) cancelAnimationFrame(raf);
       vv.removeEventListener("resize", apply);
       vv.removeEventListener("scroll", apply);
       window.removeEventListener("scroll", apply);

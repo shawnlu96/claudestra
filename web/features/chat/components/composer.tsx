@@ -683,13 +683,9 @@ export function Composer() {
             }
           />
 
-          <input
-            ref={fileRef}
-            type="file"
-            multiple
-            hidden
-            onChange={onPick}
-          />
+          {/* file input 移进 📎 按钮内部透明覆盖(见控件行)——iOS 的文件菜单
+              锚定 <input type=file> 自身的盒子,hidden 没有盒子时菜单飘到屏幕
+              半空(2026-07-27 用户截图,键盘关着也复现)。 */}
 
           {/* relative 包裹:录音状态条 + textarea + 按住说话手势层共用这块区域 */}
           <div className="relative">
@@ -756,13 +752,26 @@ export function Composer() {
           {/* 控件行 */}
           <div className="flex items-center gap-1.5 px-2.5 pb-[9px] pt-1.5">
             <button
-              onClick={() => fileRef.current?.click()}
+              type="button"
               title={t("添加附件（也可直接粘贴）")}
               aria-label={t("添加附件")}
               disabled={disabled || files.length >= MAX_FILES}
-              className="flex size-8 items-center justify-center rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
+              className="relative flex size-8 items-center justify-center rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <PaperclipIcon />
+              {/* 原生 input 透明铺满按钮:点击直达 input(无 .click() 转发),
+                  iOS 把文件菜单锚在这个真实矩形上——位置就是按钮本身 */}
+              {!(disabled || files.length >= MAX_FILES) && (
+                <input
+                  ref={fileRef}
+                  type="file"
+                  multiple
+                  onChange={onPick}
+                  aria-hidden
+                  tabIndex={-1}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+              )}
             </button>
             <button
               onClick={() => setSkillsOpen(true)}
