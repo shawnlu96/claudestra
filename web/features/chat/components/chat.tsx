@@ -419,7 +419,17 @@ function ChatInner() {
             验证过的姿势。kbVp=null(未启用/无键盘)时 inset 铺满,与旧结构等价。 */}
         <div
           className="absolute inset-x-0 flex overflow-hidden"
-          style={kbVp ? { top: kbVp.top, height: kbVp.height } : { top: 0, bottom: 0 }}
+          style={
+            kbVp
+              ? {
+                  top: kbVp.top,
+                  height: kbVp.height,
+                  // 钉扎发生在键盘 settle 之后(不杀键盘,二迭代已证);iOS 已把
+                  // 页面顶上去了,这里用短过渡把内容「滑」回原位,替代硬跳
+                  transition: "top 0.18s ease-out, height 0.18s ease-out",
+                }
+              : { top: 0, bottom: 0 }
+          }
         >
         {/* 横滑容器：移动端 sidebar + main 各 w-full 并排溢出，showContent 时整体 -100% 切到内容；
             桌面端（sm+）sidebar 定宽 + main flex-1 双栏并存，位移恒 0。

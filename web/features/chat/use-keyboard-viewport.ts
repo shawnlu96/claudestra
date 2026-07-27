@@ -94,19 +94,12 @@ export function useKeyboardViewport(): { top: number; height: number } | null {
       if (timer) clearTimeout(timer);
       timer = setTimeout(compute, SETTLE_MS);
     };
-    // 聚焦瞬间(键盘还没动)按缓存高度预钉:input 已在安全区内,iOS 无需
-    // pan,消掉「顶上去 250ms 又弹回」的一跳。settle 后 compute 用真值校准
-    // (通常与预钉相同,无视觉变化)。
+    // ⚠ 死路③(2026-07-27 三迭代实测):focusin 瞬间按缓存高度「预钉」——
+    // 聚焦时刻的**任何布局变更**都会把刚拉起的键盘打掉,变成稳定打不开键盘。
+    // 结论:布局只能在键盘 settle 之后动;跳变观感交给 chat.tsx 层的过渡动画
+    // 缓解(settle 后再动布局不杀键盘,二迭代已证)。
     const onFocusIn = () => {
-      if (!editableFocused()) return;
-      let cached = 0;
-      try {
-        cached = Number(localStorage.getItem(KB_H_KEY) || 0);
-      } catch { /* 隐私模式 */ }
-      if (cached > 80 && cached < window.innerHeight * 0.7) {
-        setVp({ top: 0, height: Math.round(window.innerHeight - cached) });
-      }
-      schedule();
+      if (editableFocused()) schedule();
     };
     // blur(点 📎/切走焦点)立即撤钉,不等 vv 事件——原生菜单在场时 vv 可能
     // 根本不再发事件,层会永远卡在键盘态尺寸。focusout 时 activeElement 还是
