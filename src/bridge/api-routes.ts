@@ -1218,7 +1218,23 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       return apiJson(409, { ok: false, error: "agent 正在回合中，等回合结束再切换" });
     }
     try {
-      if (model) await tmuxSendLine(targetWindow, `/model ${model}`);
+      if (model) {
+        await tmuxSendLine(targetWindow, `/model ${model}`);
+        // CC 2.1.220+ 会话有 prompt cache 时切模型弹「Switch model?」二次确认。
+        // 用户已在 web UI 做过选择,没人替他按 Yes 的话 TUI 就永远卡在弹窗上
+        // (2026-07-27 用户截图实锤)。短轮询探测,出现即确认(❯ 预选 Yes,Enter 即可);
+        // 看到 "Set model to"(未弹窗直接生效)就提前收工。
+        for (let i = 0; i < 4; i++) {
+          await Bun.sleep(700);
+          const p2 = await tmuxCapture(targetWindow, 25).catch(() => "");
+          if (/Switch model\?/.test(p2)) {
+            await tmuxRaw(["send-keys", "-t", targetWindow, "Enter"]);
+            await Bun.sleep(400);
+            break;
+          }
+          if (/Set model to/i.test(p2)) break;
+        }
+      }
       if (model && effort) await Bun.sleep(600); // 两条命令之间让 TUI 消化
       if (effort) await tmuxSendLine(targetWindow, `/effort ${effort}`);
     } catch (e) {
