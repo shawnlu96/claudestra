@@ -129,7 +129,7 @@ export const DICT: Record<string, string> = {
   "本会话不再提示": "Don't remind again this session",
   "思考中…": "Thinking…",
   "思考中": "Thinking",
-  "发送即插入当前会话，将在当前步骤后生效": "Sending now inserts into this turn, applied after the current step",
+  "发送即追问——立刻插进当前对话，不用等它跑完": "Sends as a follow-up — dropped into the running conversation right away",
   "正在录音": "Recording",
   "松开结束": "release to finish",
   "识别中…": "Transcribing…",
@@ -144,7 +144,7 @@ export const DICT: Record<string, string> = {
   "按住说话": "Hold to talk",
   "暂停（停止当前回复，Ctrl+C）": "Pause (stop current reply, Ctrl+C)",
   "暂停": "Pause",
-  "插入当前会话（当前步骤后生效）": "Insert into this turn (applies after current step)",
+  "追问（立刻插进当前对话）": "Follow up (dropped in right away)",
   "发送": "Send",
   "取消引用": "Cancel quote",
 

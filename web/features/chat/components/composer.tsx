@@ -673,7 +673,7 @@ export function Composer() {
                 </span>
               )}
               <span className="ml-auto text-base-content/40 max-sm:hidden">
-                {t("发送即插入当前会话，将在当前步骤后生效")}
+                {t("发送即追问——立刻插进当前对话，不用等它跑完")}
               </span>
             </div>
           )}
@@ -828,7 +828,7 @@ export function Composer() {
                 onClick={submit}
                 disabled={!canSend}
                 title={
-                  streaming ? t("插入当前会话（当前步骤后生效）") : t("发送")
+                  streaming ? t("追问（立刻插进当前对话）") : t("发送")
                 }
                 aria-label={t("发送")}
                 className={`flex size-[34px] items-center justify-center rounded-[10px] transition-[background-color,transform] duration-150 active:scale-90 ${

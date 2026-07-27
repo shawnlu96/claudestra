@@ -613,7 +613,13 @@ const TextBlock = memo(function TextBlock({
               "narration-muted border-l-2 border-base-content/20 pl-2.5 text-[13.5px] leading-snug text-base-content/50"
             : ""
         }`}
-        onClick={() => setShowTs((v) => !v)}
+        onClick={(e) => {
+          // 行内 code 的点击已被「点击复制」占用(滚动器委托)——同一下点击再切
+          // 时间戳会两件事一起发生,复制浮标和时间戳挤在一起(owner 2026-07-28)
+          const el = e.target as HTMLElement;
+          if (el.closest?.("code") && !el.closest("pre")) return;
+          setShowTs((v) => !v);
+        }}
       >
         {streamed ? (
           // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
