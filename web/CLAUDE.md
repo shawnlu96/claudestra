@@ -109,6 +109,15 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
 - **历史**：`GET /api/v1/agents/:name/history` 取 session 清单（mtime 降序，live+归档合并，
   对已 kill agent 有效）→ 最新 session 的尾部 300 条 → 映射 ChatMessage[]
   （compactSummary 跳过；system compact 线渲染成轻提示）。**BFF 不再直读 jsonl / registry。**
+- **唤醒对齐 = cursor 差量同步（v2.16，Telegram getDifference 同构）**：全量加载时
+  服务端附 `lastSeq`（合并气泡前最后一条原始记录的 jsonl 行号——不能用气泡 id 推，
+  组内后续记录会被重复拉），chat-store 存游标 `{sessionId, lastSeq}`。回前台/点推送
+  进入时 `syncDelta` 只拉 `?session=&after=` 差量（几条几 KB，8s 短超时+1s 快重试），
+  视图重组 = 现有 h 气泡 + 差量 + 幸存乐观消息 + 直播保全（对账在 `survivingPending`，
+  与全量共用）；**先差量后开流**（串行，防直播气泡被视图重组过滤），流不带 `since`
+  （重放与差量必然重复）。BFF 差量分支先查清单做轮转检测（pinned≠newest →
+  `rotated:true`）；轮转/差量超一页/连败 → 自动回退全量。跨境链路唤醒到上屏从
+  ~14s 降到 ~0.5-2s（2026-07-28 实测追平 533ms）。
 - **大总管**：Bridge 侧 `findApiAgent("master")` 特判（fork）——messages/history/interrupt/answer
   对 master 透明可用。master 没有 jsonl-watcher，实时只有 reply 的 `chat_message(out)` + done；
   历史从 jsonl 读所以带工具卡。
