@@ -399,6 +399,7 @@ function ChatInner() {
           scrollIntoView 类调用）仍可给它塞 scrollLeft/scrollTop——残留量会叠在横滑
           translate 上，让会话页「弹过头」渲染不满视窗。任何此类滚动立即归零。 */}
       <div
+        id="cstra-shell"
         className="fixed inset-0 flex overflow-hidden bg-base-100"
         onScroll={(e) => {
           const el = e.currentTarget;
