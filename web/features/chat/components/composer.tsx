@@ -758,11 +758,15 @@ export function Composer() {
               title={t("添加附件（也可直接粘贴）")}
               aria-label={t("添加附件")}
               disabled={disabled || files.length >= MAX_FILES}
-              className="relative flex size-8 items-center justify-center rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
+              className="relative flex size-8 items-center justify-center overflow-hidden rounded-[9px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
             >
               <PaperclipIcon />
               {/* 原生 input 透明铺满按钮:点击直达 input(无 .click() 转发),
-                  iOS 把文件菜单锚在这个真实矩形上——位置就是按钮本身 */}
+                  iOS 把文件菜单锚在这个真实矩形上——位置就是按钮本身。
+                  ⚠ overflow-hidden + text-[0] 缺一不可:iOS 的 file input 内部
+                  原生控件有固有宽度,会从 32px 盒子向右透明溢出,把旁边的 /
+                  (Skills)按钮整个盖住——点 Skills 弹出的全是文件菜单
+                  (2026-07-28 用户实锤)。溢出被父级剪掉后不再参与命中。 */}
               {!(disabled || files.length >= MAX_FILES) && (
                 <input
                   ref={fileRef}
@@ -771,7 +775,7 @@ export function Composer() {
                   onChange={onPick}
                   aria-hidden
                   tabIndex={-1}
-                  className="absolute inset-0 cursor-pointer opacity-0"
+                  className="absolute inset-0 h-full w-full cursor-pointer text-[0] opacity-0"
                 />
               )}
             </button>
