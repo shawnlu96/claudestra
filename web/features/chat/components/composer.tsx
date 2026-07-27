@@ -426,6 +426,20 @@ export function Composer() {
         ta.focus();
         const len = ta.value.length;
         try { ta.setSelectionRange(len, len); } catch { /* 类型不支持 */ }
+        // ⚠ iOS caret 错位根治(2026-07-27 用户截图:光标画到卡片左下角):
+        // preventDefault + pointer capture 之后的程序化 focus,WebKit 会用陈旧
+        // 几何画 caret(fixed 壳 + 横滑 transform 容器加剧)。下一帧把 value
+        // 原样重灌一遍强制它重排 caret——内容/选区不变,不触发 input 事件,
+        // React 受控值也不受影响。仅 coarse 指针端做(桌面无此 bug 不折腾)。
+        if (window.matchMedia("(pointer: coarse)").matches) {
+          requestAnimationFrame(() => {
+            if (document.activeElement !== ta) return;
+            const v = ta.value;
+            ta.value = "";
+            ta.value = v;
+            try { ta.setSelectionRange(v.length, v.length); } catch { /* 同上 */ }
+          });
+        }
       }
     }
   };
