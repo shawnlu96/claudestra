@@ -389,7 +389,18 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   }
 }
 
+/**
+ * 升级波进行中标志。restoreDeadAgents 的 periodic 巡检必须在波内停手：
+ * 波会依次 kill/重建每个 agent 的窗口，巡检在窗口空档扫到「dead」就并发再
+ * 发一次 restart——两个 restart 各建一个同名窗口、抢同一个 --resume session，
+ * 双双失败（2026-07-27 实锤：ld-binance-operate 双窗口 + 整夜假「工作中」）。
+ * 用「租约」而非布尔量：波开始拿 15 分钟租约、全量 restart 前续一次——
+ * 函数中途异常也不会把巡检永久锁死，租约到点自然恢复。
+ */
+let restartWaveUntil = 0;
+
 async function restartAgentsAndMaster() {
+  restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检
   // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
@@ -421,9 +432,11 @@ async function restartAgentsAndMaster() {
   }
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
+  restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
   const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
   console.log(`🆙 bun manager restart 结果: ok=${ok}`);
   if (!ok) console.log(out);
+  restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
 
   // master 通过发送 /exit 让其退出，主循环会自动重启
   await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "/exit", "Enter"]).catch(() => {});
@@ -607,7 +620,9 @@ async function main() {
 
     // v1.9.13+: 定期扫 registry 找 dead agent（active 但 tmux window 丢了的）
     // 有就挨个 restart。没 dead 是 no-op，不 churn 健康 agent。
-    if (Date.now() - lastDeadAgentCheck >= DEAD_AGENT_CHECK_INTERVAL_MS) {
+    // 升级波租约内停手——波会依次重建每个窗口,巡检在空档扫到「dead」就会并发
+    // 再 restart 一次,双窗口抢 session 双双失败(2026-07-27 ld-binance 实锤)。
+    if (Date.now() - lastDeadAgentCheck >= DEAD_AGENT_CHECK_INTERVAL_MS && Date.now() >= restartWaveUntil) {
       lastDeadAgentCheck = Date.now();
       restoreDeadAgents("periodic").catch(() => {});
     }
