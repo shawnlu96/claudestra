@@ -209,6 +209,43 @@ function ChatInner() {
     }
   }, []);
 
+  // ── v2.15+ iOS 几何 bug 根治（2026-07-27 用户双截图:输入光标画到卡片
+  //    左下角、📎 的原生文件菜单飘到屏幕中部）:横滑 transform **常驻**会让
+  //    iOS 给原生 UI(caret / 菜单锚点)算出错位坐标。方案:只在滑动动画的
+  //    300ms 里用 transform,停稳后换成 margin 表达(margin 不建 containing
+  //    block,原生 UI 定位恢复正常)。回程用 FLIP:先以 transform 无过渡摆回
+  //    旧位,下一帧再开过渡滑向新位——动画观感与原来完全一致。
+  type SlideAnim = { from: boolean; to: boolean; running: boolean };
+  const [slideAnim, setSlideAnim] = useState<SlideAnim | null>(null);
+  const prevShowRef = useRef(showContent);
+  useLayoutEffect(() => {
+    if (prevShowRef.current === showContent) return;
+    const from = prevShowRef.current;
+    prevShowRef.current = showContent;
+    // 无动画直达(首帧定位/popstate 闪避)或桌面双栏:立即停稳
+    if (disableTransition || !isNarrow()) {
+      setSlideAnim(null);
+      return;
+    }
+    setSlideAnim({ from, to: showContent, running: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showContent]);
+  useEffect(() => {
+    if (!slideAnim || slideAnim.running) return;
+    // 双 rAF:确保「旧位置 + 无过渡」先被绘制,再切到目标位开动画(FLIP)
+    const id = requestAnimationFrame(() =>
+      requestAnimationFrame(() => setSlideAnim((a) => (a && !a.running ? { ...a, running: true } : a))),
+    );
+    return () => cancelAnimationFrame(id);
+  }, [slideAnim]);
+  useEffect(() => {
+    if (!slideAnim?.running) return;
+    // transitionEnd 的兜底(后台 tab 不派发/被打断):400ms 强制停稳
+    const t = setTimeout(() => setSlideAnim(null), 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slideAnim?.running]);
+
   // ── 移动端横滑手势（2026-07-13 owner）：会话页右滑 → 回列表；列表页左滑 →
   //    进入已选会话（未选过不动）。起点在横向可滚容器内（代码块等）不启用，
   //    避免劫持其滚动；纵向为主的手势（滚消息列表）用比例阈值排除。
@@ -372,16 +409,25 @@ function ChatInner() {
         onTouchEnd={onShellTouchEnd}
       >
         {/* 横滑容器：移动端 sidebar + main 各 w-full 并排溢出，showContent 时整体 -100% 切到内容；
-            桌面端（sm+）sidebar 定宽 + main flex-1 双栏并存，translate 恒 0。 */}
+            桌面端（sm+）sidebar 定宽 + main flex-1 双栏并存，位移恒 0。
+            ⚠ transform 只在动画的 300ms 内出现,停稳态用 relative+left——常驻
+            transform 会让 iOS 把 caret/原生菜单锚点画到错位坐标(见 SlideAnim 注释)。
+            ⚠ 停稳态绝不能用负 margin:margin 参与 flex 可用空间计算,flex-1 项
+            会被挤崩(2026-07-27 崩版事故);relative+left 是纯视觉偏移,布局树不动。 */}
         <div
-          className={`flex min-h-0 w-full flex-1 transform-gpu ${
-            disableTransition
-              ? "transition-none"
-              : "transition-transform duration-300 ease-out will-change-transform"
-          } ${
-            showContent
-              ? "-translate-x-full sm:translate-x-0"
-              : "translate-x-0"
+          onTransitionEnd={(e) => {
+            if (e.target === e.currentTarget && e.propertyName === "transform") setSlideAnim(null);
+          }}
+          className={`flex min-h-0 w-full flex-1 ${
+            slideAnim
+              ? `transform-gpu will-change-transform ${
+                  slideAnim.running ? "transition-transform duration-300 ease-out" : "transition-none"
+                } ${
+                  (slideAnim.running ? slideAnim.to : slideAnim.from)
+                    ? "-translate-x-full sm:translate-x-0"
+                    : "translate-x-0"
+                }`
+              : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
           <Sidebar onSelect={toContent} />
