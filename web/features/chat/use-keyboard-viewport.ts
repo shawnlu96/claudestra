@@ -55,6 +55,12 @@ function editableFocused(): boolean {
  *  vv 事件后 SETTLE_MS 无新事件才应用一次。 */
 const SETTLE_MS = 250;
 
+/** 键盘高度缓存(settle 时写入)。预钉的依据:聚焦瞬间(键盘还没动)就按
+ *  缓存高度把布局摆到位,input 不会被键盘挡住 → iOS 无需 pan → 「先顶上去
+ *  再弹回」的一跳消失(2026-07-27 真机:能用但过渡体验差)。冷首次无缓存,
+ *  退化为等 settle(只跳这一次)。 */
+const KB_H_KEY = "cstra_kb_h";
+
 export function useKeyboardViewport(): { top: number; height: number } | null {
   const [vp, setVp] = useState<{ top: number; height: number } | null>(null);
   useEffect(() => {
@@ -71,6 +77,12 @@ export function useKeyboardViewport(): { top: number; height: number } | null {
       // 菜单/系统 UI 也会挤 vv,层被钉进键盘态回不来(2026-07-27 真机:点完
       // 📎 输入框顶到最上、下方 3/4 空白)
       const keyboardUp = (window.innerHeight - vv.height > 40 || vv.offsetTop > 1) && editableFocused();
+      if (keyboardUp) {
+        // 键盘高度落缓存——下次聚焦的预钉依据
+        try {
+          localStorage.setItem(KB_H_KEY, String(Math.round(window.innerHeight - vv.height)));
+        } catch { /* 隐私模式 */ }
+      }
       setVp((prev) => {
         if (!keyboardUp) return prev === null ? prev : null;
         const next = { top: Math.round(vv.offsetTop), height: Math.round(vv.height) };
@@ -82,31 +94,43 @@ export function useKeyboardViewport(): { top: number; height: number } | null {
       if (timer) clearTimeout(timer);
       timer = setTimeout(compute, SETTLE_MS);
     };
+    // 聚焦瞬间(键盘还没动)按缓存高度预钉:input 已在安全区内,iOS 无需
+    // pan,消掉「顶上去 250ms 又弹回」的一跳。settle 后 compute 用真值校准
+    // (通常与预钉相同,无视觉变化)。
+    const onFocusIn = () => {
+      if (!editableFocused()) return;
+      let cached = 0;
+      try {
+        cached = Number(localStorage.getItem(KB_H_KEY) || 0);
+      } catch { /* 隐私模式 */ }
+      if (cached > 80 && cached < window.innerHeight * 0.7) {
+        setVp({ top: 0, height: Math.round(window.innerHeight - cached) });
+      }
+      schedule();
+    };
     // blur(点 📎/切走焦点)立即撤钉,不等 vv 事件——原生菜单在场时 vv 可能
     // 根本不再发事件,层会永远卡在键盘态尺寸。focusout 时 activeElement 还是
     // 旧值,推一拍再判。
-    const onFocusChange = () => {
+    const onFocusOut = () => {
       setTimeout(() => {
         if (!editableFocused()) {
           if (timer) clearTimeout(timer);
           compute();
-        } else {
-          schedule();
         }
       }, 50);
     };
     vv.addEventListener("resize", schedule);
     vv.addEventListener("scroll", schedule);
     window.addEventListener("scroll", schedule);
-    document.addEventListener("focusin", onFocusChange);
-    document.addEventListener("focusout", onFocusChange);
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
     return () => {
       if (timer) clearTimeout(timer);
       vv.removeEventListener("resize", schedule);
       vv.removeEventListener("scroll", schedule);
       window.removeEventListener("scroll", schedule);
-      document.removeEventListener("focusin", onFocusChange);
-      document.removeEventListener("focusout", onFocusChange);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
     };
   }, []);
   return vp;
