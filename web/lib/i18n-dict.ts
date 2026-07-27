@@ -378,6 +378,9 @@ export const DICT: Record<string, string> = {
   "复制邀请串": "Copy invite",
   "单向（对方→我）": "One-way (them → me)",
   "未送达——请重新发送": "Not delivered — please resend",
+  "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
+  "修正 iOS 弹键盘时输入光标/附件菜单错位（页面被键盘顶出屏）。有异常（输入框弹跳等）关掉即恢复原状，无需等修复。":
+    "Fixes caret/attachment-menu misplacement when the iOS keyboard pushes the page offscreen. If anything glitches (composer bouncing etc.), just toggle it off — no fix needed.",
   "暂无 peer。生成邀请发给对方，或粘贴对方的邀请加入。":
     "No peers yet. Create an invite to send, or paste one you received.",
 };

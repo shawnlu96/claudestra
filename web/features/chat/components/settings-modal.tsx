@@ -6,6 +6,7 @@ import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client"
 import { useT, useLang, setLang } from "@/lib/i18n";
 import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
 import { useThemePref, setThemePref } from "@/lib/theme";
+import { kbFixEnabled, setKbFixEnabled } from "../use-keyboard-viewport";
 import { PeersModal } from "./peers-modal";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
@@ -151,6 +152,9 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [gMsg, setGMsg] = useState("");
   // Web Push(owner 2026-07-16):本设备订阅状态
   const [pushOn, setPushOn] = useState(false);
+  // iOS 键盘修正实验开关(use-keyboard-viewport):挂载时读 localStorage
+  const [kbFixOn, setKbFixOn] = useState(false);
+  useEffect(() => setKbFixOn(kbFixEnabled()), []);
   const [pushMsg, setPushMsg] = useState("");
   const [pushBusy, setPushBusy] = useState(false);
   // HTTP peer 管理(owner 2026-07-24):独立弹窗
@@ -418,6 +422,25 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         >
           {pushMsg ? <div className="text-xs text-base-content/60">{t(pushMsg)}</div> : null}
         </Section>
+
+        {/* ── iOS 键盘修正(实验,2026-07-27 重构) ─────────────── */}
+        <Section
+          title={t("iOS 键盘修正（实验）")}
+          aside={
+            <input
+              type="checkbox"
+              className="toggle toggle-sm shrink-0"
+              checked={kbFixOn}
+              onChange={() => {
+                setKbFixEnabled(!kbFixOn);
+                setKbFixOn(!kbFixOn);
+                // 钩子在页面挂载时读开关——刷新生效,PWA 里 reload 即可
+                window.location.reload();
+              }}
+            />
+          }
+          desc={t("修正 iOS 弹键盘时输入光标/附件菜单错位（页面被键盘顶出屏）。有异常（输入框弹跳等）关掉即恢复原状，无需等修复。")}
+        />
 
         {/* ── HTTP peer 协作 ─────────────── */}
         <Section

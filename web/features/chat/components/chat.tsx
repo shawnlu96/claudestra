@@ -19,6 +19,7 @@ import { SessionSearchButton } from "./session-search";
 import { ManagePanel } from "./manage-panel";
 import { ClaudeSwitcher } from "./claude-switcher";
 import { ctxLevel } from "../ctx-level";
+import { useKeyboardViewport } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 
 /** 「会话内容」页的 hash 锚点：存在即处于内容视图，移动端横滑到内容栏 */
@@ -194,10 +195,9 @@ function ChatInner() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // ⚠ 2026-07-27 键盘视口钉扎已回滚:把壳钉在 visualViewport 上会和 iOS 的
-  // 键盘动画打架(壳弹跳、键盘拉不起来,点 4 次才能聚焦——比 caret 错位严重
-  // 得多)。iOS 键盘态的正确处理待整体重构(方向:interactive-widget=
-  // resizes-content 标准方案 + 能力检测),别再往这里塞逐事件的 DOM 手术。
+  // iOS 键盘视口:全部逻辑收在 use-keyboard-viewport 模块(实验开关默认关)。
+  // 死路清单与设计依据见该文件头注释,别再往 chat.tsx 里塞逐事件 DOM 手术。
+  const kbVp = useKeyboardViewport();
 
   const toContent = useCallback(() => {
     if (!isNarrow()) return; // 桌面双栏并存，无需压栈/位移
@@ -405,7 +405,7 @@ function ChatInner() {
           translate 上，让会话页「弹过头」渲染不满视窗。任何此类滚动立即归零。 */}
       <div
         id="cstra-shell"
-        className="fixed inset-0 flex overflow-hidden bg-base-100"
+        className="fixed inset-0 overflow-hidden bg-base-100"
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollLeft !== 0) el.scrollLeft = 0;
@@ -414,6 +414,13 @@ function ChatInner() {
         onTouchStart={onShellTouchStart}
         onTouchEnd={onShellTouchEnd}
       >
+        {/* 键盘感知内层(use-keyboard-viewport 模块):fixed 壳永不动,键盘期
+            只钉这一层(top=vv.offsetTop,height=vv.height)——terminal-page 真机
+            验证过的姿势。kbVp=null(未启用/无键盘)时 inset 铺满,与旧结构等价。 */}
+        <div
+          className="absolute inset-x-0 flex overflow-hidden"
+          style={kbVp ? { top: kbVp.top, height: kbVp.height } : { top: 0, bottom: 0 }}
+        >
         {/* 横滑容器：移动端 sidebar + main 各 w-full 并排溢出，showContent 时整体 -100% 切到内容；
             桌面端（sm+）sidebar 定宽 + main flex-1 双栏并存，位移恒 0。
             ⚠ transform 只在动画的 300ms 内出现,停稳态用 relative+left——常驻
@@ -443,6 +450,7 @@ function ChatInner() {
             <MessageList />
             <Composer />
           </main>
+        </div>
         </div>
         {/* 全屏启动页：在横滑 transform 容器之外（规则 5.5——fixed 不能在
             transform 祖先内定位），盖住整个入场加载过程 */}
