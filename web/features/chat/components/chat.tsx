@@ -194,45 +194,10 @@ function ChatInner() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // v2.15+ iOS 键盘视口钉扎(2026-07-27 用户实锤截图:弹键盘后整个 fixed 壳
-  // 被顶出屏幕——TopBar 消失,caret/📎 原生菜单按未平移坐标绘制,全部错位;
-  // 连诊断探针都被一起顶出屏外)。终端页(terminal-page.tsx)同款双补偿:
-  // ① iOS 直接滚 document 顶出 fixed 层 → 强制归零;
-  // ② visualViewport 平移/缩小 → 壳钉在 (top=offsetTop, height=height),
-  //    composer 始终贴键盘上沿、TopBar 始终在视野内,iOS 无需再顶。
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    // rAF 合并 + 值未变不写:键盘弹起/收起动画期 vv 事件连发,逐事件写样式
-    // 会让整个壳跟着抖(2026-07-27 用户:「乱跳来跳去」)。一帧最多应用一次,
-    // top/height 没变化就完全不碰 DOM。
-    let raf = 0;
-    const apply = () => {
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
-        const el = document.getElementById("cstra-shell");
-        if (!el) return;
-        const keyboardUp = window.innerHeight - vv.height > 40 || vv.offsetTop > 1;
-        const top = keyboardUp ? `${Math.round(vv.offsetTop)}px` : "";
-        const height = keyboardUp ? `${Math.round(vv.height)}px` : "";
-        if (el.style.top !== top) el.style.top = top;
-        if (el.style.height !== height) el.style.height = height;
-        const bottom = keyboardUp ? "auto" : "";
-        if (el.style.bottom !== bottom) el.style.bottom = bottom;
-      });
-    };
-    vv.addEventListener("resize", apply);
-    vv.addEventListener("scroll", apply);
-    window.addEventListener("scroll", apply);
-    return () => {
-      if (raf) cancelAnimationFrame(raf);
-      vv.removeEventListener("resize", apply);
-      vv.removeEventListener("scroll", apply);
-      window.removeEventListener("scroll", apply);
-    };
-  }, []);
+  // ⚠ 2026-07-27 键盘视口钉扎已回滚:把壳钉在 visualViewport 上会和 iOS 的
+  // 键盘动画打架(壳弹跳、键盘拉不起来,点 4 次才能聚焦——比 caret 错位严重
+  // 得多)。iOS 键盘态的正确处理待整体重构(方向:interactive-widget=
+  // resizes-content 标准方案 + 能力检测),别再往这里塞逐事件的 DOM 手术。
 
   const toContent = useCallback(() => {
     if (!isNarrow()) return; // 桌面双栏并存，无需压栈/位移
