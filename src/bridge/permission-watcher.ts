@@ -68,6 +68,22 @@ async function maybeEscapeAgentsView(
   return true;
 }
 
+/**
+ * v2.15.2+「Switch model?」prompt-cache 确认弹窗自动代按。
+ *
+ * 弹窗只由明确的 /model 操作触发（API 切换注入 / 用户手打），意图早已明确，
+ * 无人代按 agent 就卡死在弹窗上（2026-07-28 实锤：API 切换时 agent 正忙，
+ * /model 排队到回合结束才弹，claude-settings 端点的 3s 确认循环早已收场）。
+ * 默认项即「Yes, switch」→ Enter 即可。Enter 对正常界面有提交输入的副作用，
+ * 所以必须两个特征串同时在场才动手。
+ */
+async function maybeConfirmSwitchModel(agentName: string, pane: string): Promise<boolean> {
+  if (!pane.includes("Switch model?") || !/Yes,\s*switch/i.test(pane)) return false;
+  console.log(`🎛 ${agentName} 停在「Switch model?」确认弹窗，自动代按 Yes`);
+  await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]);
+  return true;
+}
+
 // v2.0.23+: session-idle 兜底 grace。manager.ts/launcher.ts 启动路径会自动选
 // 「恢复完整会话」，几秒内消掉 modal。watcher 不该抢在它前面发按钮（重启时
 // 每个 agent 都会闪一下 modal → 一堆 @ 你的噪音通知，但 modal 早被自动消了）。
@@ -112,6 +128,9 @@ async function checkAgent(
 
   // v2.7+ agents 视图自动逃逸（特征界面刚被 Esc 掉 → 本轮不再做弹窗检测）
   if (await maybeEscapeAgentsView(agentName, channelId, pane, discord)) return;
+
+  // v2.15.2+「Switch model?」确认弹窗自动代按（忙碌回合结束后迟到弹出的场景）
+  if (await maybeConfirmSwitchModel(agentName, pane)) return;
 
   // 两种弹窗共用一个 channel 级别的 slot，同时只会有一种出现
   const sessionIdleDesc = detectSessionIdlePrompt(pane);
