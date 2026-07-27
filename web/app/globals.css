@@ -432,3 +432,17 @@ html.kb-open {
 .hljs-strong {
     font-weight: 650;
 }
+
+/* 搜索跳转命中气泡的一闪高亮(message-list data-mid 包装层,动画一遍即净) */
+@keyframes cstra-flash {
+    0% {
+        background-color: color-mix(in srgb, var(--color-warning) 22%, transparent);
+    }
+    100% {
+        background-color: transparent;
+    }
+}
+.cstra-flash {
+    border-radius: 0.75rem;
+    animation: cstra-flash 2s ease-out 1;
+}

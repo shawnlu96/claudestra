@@ -13,6 +13,7 @@
  */
 
 import { existsSync, readdirSync, statSync } from "fs";
+import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
@@ -484,7 +485,7 @@ function makeSnippet(text: string, lowerText: string, q: string): string {
 export async function searchSessionHistory(
   filePath: string,
   query: string,
-  opts: { maxHits?: number } = {},
+  opts: { maxHits?: number; maxFullScanBytes?: number } = {},
 ): Promise<HistorySearchHit[]> {
   const maxHits = Math.max(1, Math.min(100, Math.floor(opts.maxHits ?? 20)));
   const q = query.toLowerCase();
@@ -494,12 +495,38 @@ export async function searchSessionHistory(
   // agent 的 live + 归档会话。本机最大的 session jsonl 已经 96MB，一次点击就能
   // 把 bridge 推到 GB 级峰值。超过阈值的文件只扫尾部 —— 搜索本就是找最近说过
   // 什么，越老的内容越不需要全文命中。
-  const MAX_FULL_SCAN_BYTES = 16 * 1024 * 1024;
+  const MAX_FULL_SCAN_BYTES = opts.maxFullScanBytes ?? 16 * 1024 * 1024;
   const _f = Bun.file(filePath);
   const _size = _f.size;
-  const raw = await (_size > MAX_FULL_SCAN_BYTES
-    ? _f.slice(_size - MAX_FULL_SCAN_BYTES).text()
-    : _f.text());
+  // ⚠ seq 是「全文件行号」,与 readSessionHistory 同坐标系——搜索跳转按它开历史
+  // 窗口。只扫尾部时行号从切片起点重数就整体错位(2026-07-27 跳转实测),必须先
+  // 数出被跳过前缀里的换行数作基准。fs 句柄 + 8MB 复用缓冲循环读(Buffer.indexOf
+  // 是 memchr 级),百 MB 前缀几十 ms、零大字符串。⚠ 不要用 Blob.slice().stream()
+  // ——实测在 100MB 级文件上病理性慢(2min+ 不返回)。前缀最后一个不完整行与尾片
+  // 首行拼成同一行,行号恰为 lineOffset,该行 JSON.parse 必失败被跳过,坐标无损。
+  let lineOffset = 0;
+  let raw: string;
+  if (_size > MAX_FULL_SCAN_BYTES) {
+    const cut = _size - MAX_FULL_SCAN_BYTES;
+    const fh = await fsOpen(filePath, "r");
+    try {
+      const buf = Buffer.alloc(8 * 1024 * 1024);
+      let pos = 0;
+      while (pos < cut) {
+        const { bytesRead } = await fh.read(buf, 0, Math.min(buf.length, cut - pos), pos);
+        if (bytesRead <= 0) break;
+        let at = -1;
+        const view = bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
+        while ((at = view.indexOf(10, at + 1)) !== -1) lineOffset++;
+        pos += bytesRead;
+      }
+    } finally {
+      await fh.close();
+    }
+    raw = await _f.slice(cut).text();
+  } else {
+    raw = await _f.text();
+  }
   // 性能梯次（2026-07-14 owner:「先把免费优化做了」）：
   // ① 文件级预筛——整个文件不含词直接出局，多数归档文件在这里零解析返回；
   // ② 单次 toLowerCase——53MB 文件逐行 toLowerCase 是 10 万次小分配 + GC 压力，
@@ -548,7 +575,7 @@ export async function searchSessionHistory(
       }
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;
-      const hit: HistorySearchHit = { seq: i, ts, role: "user", snippet: makeSnippet(body, lower, q) };
+      const hit: HistorySearchHit = { seq: lineOffset + i, ts, role: "user", snippet: makeSnippet(body, lower, q) };
       if (from) hit.from = from;
       if (rec.isCompactSummary === true) hit.compact = true;
       hits.push(hit);
@@ -569,7 +596,7 @@ export async function searchSessionHistory(
       const body = parts.join("\n");
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;
-      hits.push({ seq: i, ts, role: "assistant", snippet: makeSnippet(body, lower, q) });
+      hits.push({ seq: lineOffset + i, ts, role: "assistant", snippet: makeSnippet(body, lower, q) });
     }
   }
   return hits;

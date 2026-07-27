@@ -842,8 +842,13 @@ export function MessageList() {
   const pendingPermission = useChatStore((s) => s.state.pendingPermission);
   const pendingAsk = useChatStore((s) => s.state.pendingAsk);
   const bgTaskCount = useChatStore((s) => s.state.bgTasks.length);
+  const browsing = useChatStore((s) => s.state.browsing);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
+  /** 搜索跳转的命中气泡短暂高亮(id;动画一遍后清)。 */
+  const [flashId, setFlashId] = useState<string | null>(null);
+  /** 已定位过的跳转锚(sessionId:seq)——窗口数据到位只定位一次,翻页不重跳。 */
+  const jumpDoneRef = useRef("");
   // 窗口化初始渲染：打开会话只挂最近 30 个气泡（历史一次挂几十个气泡+几百张
   // 工具卡，手机上进页那一下明显卡），「显示更早」按需展开。extra 按会话重置。
   const [extraVisible, setExtraVisible] = useState(0);
@@ -864,6 +869,53 @@ export function MessageList() {
     followRef.current = true; // 切会话恢复吸底
     setExtraVisible(0); // 渲染窗口回到「最近 30 条」
   }, [active]);
+
+  /* 历史现场定位(搜索跳转):窗口数据到位后滚到命中气泡并高亮一闪。
+     命中 seq 可能落在合并气泡内部——取 seq ≤ anchor 的最后一个气泡。
+     Domd 富文本异步长高会把锚点顶跑,700ms 后二次校正(不再闪)。 */
+  useLayoutEffect(() => {
+    if (!browsing) {
+      jumpDoneRef.current = "";
+      return;
+    }
+    const key = `${browsing.sessionId}:${browsing.anchorSeq}`;
+    if (jumpDoneRef.current === key || loadingHistory || !messages.length) return;
+    jumpDoneRef.current = key;
+    followRef.current = false; // 历史现场绝不吸底
+    let target: string | null = null;
+    for (const m of messages) {
+      if (!m.id.startsWith("h")) continue;
+      const n = Number(m.id.slice(1));
+      if (Number.isFinite(n) && n <= browsing.anchorSeq) target = m.id;
+    }
+    if (!target) return;
+    const position = () => {
+      const el = scrollerRef.current;
+      const node = el?.querySelector(`[data-mid="${target}"]`) as HTMLElement | null;
+      if (el && node) {
+        el.scrollTop =
+          node.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 96;
+      }
+    };
+    position();
+    // 计时器故意不随依赖清理:messages 每次变化都会触发 cleanup,一清高亮就
+    // 永远停在半途;都是一次性小动作,晚触发无害(React 对已卸载组件 no-op)
+    setTimeout(() => setFlashId(target), 0);
+    setTimeout(position, 700);
+    setTimeout(() => setFlashId(null), 2_200);
+  }, [browsing, loadingHistory, messages]);
+
+  /* 退出历史现场 → 恢复吸底并落到最新尾部。 */
+  const prevBrowsingRef = useRef(false);
+  useEffect(() => {
+    const was = prevBrowsingRef.current;
+    prevBrowsingRef.current = !!browsing;
+    if (was && !browsing) {
+      followRef.current = true;
+      const el = scrollerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [browsing]);
 
   // 「显示更早」展开后保持视口锚定：内容在上方插入，滚动位置按增量补偿。
   // deps 含 messages.length:loadOlder 服务端分页是异步 prepend(iOS Safari 无
@@ -1001,22 +1053,37 @@ export function MessageList() {
           </button>
         )}
         {visible.map((m, i) => (
-          <Message
-            key={m.id}
-            m={m}
-            streaming={streaming}
-            isLast={i === visible.length - 1}
-            awaiting={awaiting}
-          />
+          // data-mid 包装层:搜索跳转按它定位;命中气泡加一闪动画。普通渲染
+          // 是零成本透明块(块级流内,不改 flex-col 布局)。
+          <div key={m.id} data-mid={m.id} className={flashId === m.id ? "cstra-flash" : undefined}>
+            <Message
+              m={m}
+              streaming={streaming}
+              isLast={i === visible.length - 1}
+              awaiting={awaiting}
+            />
+          </div>
         ))}
-        <CcTaskPanel />
-        <BgTaskPanel />
-        {pendingPermission && <PermissionCard p={pendingPermission} />}
-        {pendingAsk && <AskQuestionCard a={pendingAsk} />}
-        {standaloneThinking && (
+        {/* 活跃会话的面板/交互卡不属于历史现场——浏览模式只藏不清,回来原样恢复 */}
+        {!browsing && <CcTaskPanel />}
+        {!browsing && <BgTaskPanel />}
+        {!browsing && pendingPermission && <PermissionCard p={pendingPermission} />}
+        {!browsing && pendingAsk && <AskQuestionCard a={pendingAsk} />}
+        {standaloneThinking && !browsing && (
           <div className="chat-msg-in mb-[22px] w-full">
             <ClaudeHeader pulsing />
             <ThinkingDots />
+          </div>
+        )}
+        {browsing && (
+          <div className="sticky bottom-2 z-10 mt-4 flex justify-center">
+            <button
+              className="btn btn-sm gap-1.5 rounded-full border border-base-300 bg-base-100/95 shadow-md backdrop-blur"
+              onClick={() => void store.returnToLatest()}
+            >
+              <span className="opacity-60">📍 {t("正在看历史")}</span>
+              <span className="font-medium">↓ {t("回到最新")}</span>
+            </button>
           </div>
         )}
       </div>

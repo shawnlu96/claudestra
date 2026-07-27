@@ -66,6 +66,10 @@ interface ChatState {
   telemetry: { elapsed?: string; tokens?: number; effort?: string } | null;
   /** 左滑消息块选中的引用文本(composer 显示预览,发送时以 > 引用块前置)。 */
   quoteDraft: string | null;
+  /** 历史现场模式(搜索结果跳转,owner 2026-07-27「像微信一样跳到当时聊天的
+   *  地方」)：非 null = 正在浏览历史窗口。期间实时流断开(不往老视图里插新
+   *  消息),向上翻页照常,「回到最新」/发消息退出。anchorSeq 供列表定位高亮。 */
+  browsing: { sessionId: string; anchorSeq: number } | null;
   /** 个人资料：用户头像+昵称（显示在自己消息上方）与 Claude 头像+名称。 */
   profile: { nickname: string; avatar: string; claudeNickname: string; claudeAvatar: string };
 }
@@ -124,6 +128,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       ccTasks: [],
       telemetry: null,
       quoteDraft: null,
+      browsing: null,
       profile: { nickname: "", avatar: "", claudeNickname: "", claudeAvatar: "" },
     });
   }
@@ -243,7 +248,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
       // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁。
       const cur = next.find((a) => a.name === this.state.activeAgent);
-      if (cur?.status === "active" && cur.busy && !this.state.streaming) {
+      if (cur?.status === "active" && cur.busy && !this.state.streaming && !this.state.browsing) {
         this.produce((s) => {
           s.streaming = true;
         });
@@ -378,6 +383,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
   public async openAgent(name: string) {
     if (name === this.state.activeAgent) {
+      // 历史现场里重点当前会话 = 要回到现在,走完整退出路径
+      if (this.state.browsing) {
+        void this.returnToLatest();
+        return;
+      }
       // 重复打开当前会话(点推送通知/重点侧栏项)= 用户明确要看最新——不能静默
       // 返回:冻结页面点通知进来正是这条路(2026-07-24 wechat-bot 事故,推送到了
       // 点进去还是死页面)。force:跳过判活守卫,流健康也全量对齐(bridge 重启
@@ -395,7 +405,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 再叠加 stale 的 historyHasMore 就是「空屏+加载更早卡死」(2026-07-24
     // 用户截图)。空的宁可保留上一份旧快照/走 loading。
     const prev = this.state.activeAgent;
-    if (prev && this.state.messages.length) this.messageCache.set(prev, this.state.messages);
+    // 历史现场的窗口不能当「最新视图」快照存——切回会闪出一段旧历史
+    if (prev && this.state.messages.length && !this.state.browsing)
+      this.messageCache.set(prev, this.state.messages);
     this.detachActiveStream();
     const gen = ++this.openGen;
     const cached0 = this.messageCache.get(name);
@@ -420,6 +432,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // CC 任务清单 per-session:切走清空,下面异步拉当前 agent 的
       s.ccTasks = [];
       s.telemetry = null;
+      s.browsing = null; // 切 agent 退出历史现场
     });
     // 翻页锚也是 per-agent 的,跟着上面的 historyHasMore 一起清,loadMessages 会重设
     this.historySessionId = null;
@@ -471,6 +484,71 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     }
   }
 
+  /** 搜索结果跳转:加载命中位置前后一窗消息进入「历史现场」模式。
+   *  窗口 = 目标 seq 之后 ~25 条 + 向前填满一页(before 分页语义:seq < before
+   *  的最后 N 条,天然包含目标本身)。实时流断开,向上翻页照常(historySessionId
+   *  钉在命中 session),「回到最新」/发消息/切会话退出。 */
+  public async jumpToContext(sessionId: string, seq: number) {
+    const name = this.state.activeAgent;
+    if (!name) return;
+    // 进历史现场前把最新视图快照进缓存——returnToLatest 先秒显快照再后台对齐
+    if (this.state.messages.length && !this.state.browsing)
+      this.messageCache.set(name, this.state.messages);
+    this.detachActiveStream();
+    const gen = ++this.openGen;
+    this.historySessionId = sessionId;
+    this.produce((s) => {
+      s.browsing = { sessionId, anchorSeq: seq };
+      s.messages = [];
+      s.loadingHistory = true;
+      s.historyError = false;
+      s.historyHasMore = false;
+      s.loadingOlder = false;
+      s.streaming = false;
+      s.awaitingChunk = false;
+      s.telemetry = null;
+    });
+    try {
+      const res = await fetch(
+        `/api/chat/history?agent=${encodeURIComponent(name)}&session=${encodeURIComponent(sessionId)}&before=${seq + 26}`,
+        { signal: AbortSignal.timeout(30_000) }
+      );
+      if (res.status === 401) return this.gotoLogin();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { data?: ChatMessage[]; hasMore?: boolean };
+      if (gen !== this.openGen) return; // 已切走/已退出
+      this.produce((s) => {
+        s.messages = hydrateHistoryMessages(json.data ?? []);
+        s.historyHasMore = !!json.hasMore;
+        s.loadingHistory = false;
+      });
+    } catch (e) {
+      if (gen !== this.openGen) return;
+      this.clientLog(`jumpToContext 失败 agent=${name} sid=${sessionId} seq=${seq}: ${(e as Error).message}`);
+      // 跳转失败别把人留在空视图里,退回最新
+      void this.returnToLatest();
+    }
+  }
+
+  /** 退出历史现场,回到最新视图 + 重连实时流(标准 openAgent 全量路径)。 */
+  public async returnToLatest() {
+    const name = this.state.activeAgent;
+    if (!name) return;
+    this.historySessionId = null;
+    const gen = ++this.openGen;
+    this.produce((s) => {
+      s.browsing = null;
+      s.messages = this.messageCache.get(name) ?? [];
+      s.loadingHistory = !s.messages.length;
+      s.historyHasMore = false;
+      s.loadingOlder = false;
+      s.historyError = false;
+    });
+    await this.loadMessages(name, gen);
+    if (gen !== this.openGen) return;
+    void this.openStream(name);
+  }
+
   /** CC 任务清单刷新防抖(TaskCreate/TaskUpdate 常连发)。 */
   private ccTasksTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -506,11 +584,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!name) return;
     this.messageCache.delete(name);
     this.discardPendingText();
+    this.historySessionId = null;
     const gen = ++this.openGen;
     this.produce((s) => {
       s.messages = [];
       s.loadingHistory = true;
       s.historyError = false;
+      s.browsing = null; // 刷新 = 回到最新视图
     });
     await this.loadMessages(name, gen);
   }
@@ -836,6 +916,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public maybeReconnect(opts?: { fast?: boolean; force?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;
+    // 历史现场模式:用户在刻意看旧内容,回前台/断流对齐都不打扰(流本就断开);
+    // 实时追平在「回到最新」时由全量路径完成
+    if (this.state.browsing) return;
     // 流活着就别动它(owner 拍板 2026-07-24):桌面端每次 alt-tab 回来都无条件
     // 断流重建,慢链路上一次重连 = TLS 握手+重开流数秒断档,client.log 里
     // 每 10-60s 一条。服务端 5s 一个心跳,30s 内有字节 = 流健康且事件从没断
@@ -929,6 +1012,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     let display = text.trim();
     const hasFiles = !!files && files.length > 0;
     if ((!display && !hasFiles) || !this.state.activeAgent) return;
+    // 历史现场里发消息 = 回到现在再发(乐观气泡要落在最新视图尾部)
+    if (this.state.browsing) await this.returnToLatest();
     const agent = this.state.activeAgent;
     // 引用回复(owner 2026-07-16 左滑引用):composer 文本发送时把引用草稿以
     // Markdown 引用块前置——web/Discord 都原生渲染,agent 也看得懂针对哪段。

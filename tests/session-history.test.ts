@@ -364,6 +364,28 @@ describe("searchSessionHistory", () => {
     expect(hits.find((h: any) => h.compact === true)).toBeTruthy();
   });
 
+  test("大文件尾部切片时 seq 仍是全文件行号(搜索跳转坐标系)", async () => {
+    // 100 条填充 + 尾部 1 条命中;maxFullScanBytes 压小强制切片
+    const records = Array.from({ length: 100 }, (_, i) => ({
+      type: "user" as const,
+      timestamp: "2026-07-01T00:00:00Z",
+      message: { content: `填充消息第 ${i} 号,凑体积用的一行普通对话内容` },
+    }));
+    records.push({
+      type: "user",
+      timestamp: "2026-07-01T01:00:00Z",
+      message: { content: "切片行号校准专用命中词" },
+    });
+    const big = writeJsonl(dir, "sliced.jsonl", records);
+    const full = await searchSessionHistory(big, "切片行号校准");
+    expect(full.length).toBe(1);
+    expect(full[0].seq).toBe(100); // 全文件行号
+    // 切到只剩尾部 ~2KB:不切片行号会从切片起点重数、远小于 100
+    const sliced = await searchSessionHistory(big, "切片行号校准", { maxFullScanBytes: 2048 });
+    expect(sliced.length).toBe(1);
+    expect(sliced[0].seq).toBe(100); // 与全量扫描同坐标
+  });
+
   test("大小写不敏感 + 只搜正文(工具参数命中不算)", async () => {
     const hits = await searchSessionHistory(file, "asr");
     expect(hits.length).toBe(2); // user 首条 + reply 正文

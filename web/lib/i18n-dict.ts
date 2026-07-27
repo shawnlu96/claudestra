@@ -24,6 +24,8 @@ export const DICT: Record<string, string> = {
   "移除": "Remove",
   "提交": "Submit",
   "搜索": "Search",
+  "回到最新": "Back to latest",
+  "正在看历史": "Viewing history",
   "开启": "Enable",
   "安装": "Install",
   "创建": "Create",

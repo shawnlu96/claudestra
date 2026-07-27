@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { getLang, useT } from "@/lib/i18n";
 import { ResponsiveShell } from "./responsive-shell";
+import { useChatStoreApi } from "../chat-store";
 
 /**
  * 会话内搜索（owner 2026-07-14:「每个会话右上角加搜索按钮,只搜本 session」）。
@@ -35,6 +36,7 @@ export function SessionSearchButton({ agentName }: { agentName: string }) {
 
 function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () => void }) {
   const t = useT();
+  const store = useChatStoreApi();
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<ChatSearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -130,7 +132,12 @@ function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () 
             key={`${h.sessionId}-${h.seq}-${i}`}
             hit={h}
             q={query.trim()}
-            canOpen={false}
+            canOpen
+            onOpen={() => {
+              // 跳到命中位置的历史现场(owner 2026-07-27「像微信一样跳过去」)
+              void store.jumpToContext(h.sessionId, h.seq);
+              onClose();
+            }}
             showAgent={false}
           />
         ))}

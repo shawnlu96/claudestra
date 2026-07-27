@@ -607,7 +607,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                     q={query.trim()}
                     canOpen={canOpen}
                     onOpen={() => {
-                      store.openAgent(h.agent);
+                      // 先进会话再跳历史现场(gen 竞态由 openGen 守卫,跳转必胜出)
+                      void store.openAgent(h.agent).then(() => store.jumpToContext(h.sessionId, h.seq));
                       onSelect();
                     }}
                   />
