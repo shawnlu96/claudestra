@@ -43,37 +43,70 @@ export function setKbFixEnabled(on: boolean): void {
   }
 }
 
+/** 焦点在可编辑元素上（textarea/input/contenteditable）——钉扎的前提条件 */
+function editableFocused(): boolean {
+  const el = document.activeElement as HTMLElement | null;
+  if (!el) return false;
+  return el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable;
+}
+
+/** 键盘动画停稳判定的静默窗口。首版逐事件应用,在键盘拉起动画中途 reflow
+ *  会把刚弹的键盘打掉(2026-07-27 真机:首次聚焦 100% 闪关)——改为最后一个
+ *  vv 事件后 SETTLE_MS 无新事件才应用一次。 */
+const SETTLE_MS = 250;
+
 export function useKeyboardViewport(): { top: number; height: number } | null {
   const [vp, setVp] = useState<{ top: number; height: number } | null>(null);
   useEffect(() => {
     if (!kbFixEnabled()) return;
     const vv = window.visualViewport;
     if (!vv) return;
-    let raf = 0;
-    const update = () => {
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        // iOS 揭示 focused input 的两条路：滚 document（fixed 层被顶出屏）→
-        // 强制归零；vv 平移 → 下面的内层钉扎补偿（terminal-page 同款次序）
-        if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
-        const keyboardUp = window.innerHeight - vv.height > 40 || vv.offsetTop > 1;
-        setVp((prev) => {
-          if (!keyboardUp) return prev === null ? prev : null;
-          const next = { top: Math.round(vv.offsetTop), height: Math.round(vv.height) };
-          // 值没变不换引用——不触发重渲染，键盘动画期的事件风暴被天然吸收
-          return prev && prev.top === next.top && prev.height === next.height ? prev : next;
-        });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const compute = () => {
+      timer = null;
+      // iOS 揭示 focused input 的两条路：滚 document（fixed 层被顶出屏）→
+      // 强制归零；vv 平移 → 内层钉扎补偿（terminal-page 同款次序）
+      if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
+      // 钉扎前提 = 键盘在场 **且** 焦点在可编辑元素上。只看 vv 的话,📎 原生
+      // 菜单/系统 UI 也会挤 vv,层被钉进键盘态回不来(2026-07-27 真机:点完
+      // 📎 输入框顶到最上、下方 3/4 空白)
+      const keyboardUp = (window.innerHeight - vv.height > 40 || vv.offsetTop > 1) && editableFocused();
+      setVp((prev) => {
+        if (!keyboardUp) return prev === null ? prev : null;
+        const next = { top: Math.round(vv.offsetTop), height: Math.round(vv.height) };
+        // 值没变不换引用——不触发重渲染
+        return prev && prev.top === next.top && prev.height === next.height ? prev : next;
       });
     };
-    vv.addEventListener("resize", update);
-    vv.addEventListener("scroll", update);
-    window.addEventListener("scroll", update);
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(compute, SETTLE_MS);
+    };
+    // blur(点 📎/切走焦点)立即撤钉,不等 vv 事件——原生菜单在场时 vv 可能
+    // 根本不再发事件,层会永远卡在键盘态尺寸。focusout 时 activeElement 还是
+    // 旧值,推一拍再判。
+    const onFocusChange = () => {
+      setTimeout(() => {
+        if (!editableFocused()) {
+          if (timer) clearTimeout(timer);
+          compute();
+        } else {
+          schedule();
+        }
+      }, 50);
+    };
+    vv.addEventListener("resize", schedule);
+    vv.addEventListener("scroll", schedule);
+    window.addEventListener("scroll", schedule);
+    document.addEventListener("focusin", onFocusChange);
+    document.addEventListener("focusout", onFocusChange);
     return () => {
-      if (raf) cancelAnimationFrame(raf);
-      vv.removeEventListener("resize", update);
-      vv.removeEventListener("scroll", update);
-      window.removeEventListener("scroll", update);
+      if (timer) clearTimeout(timer);
+      vv.removeEventListener("resize", schedule);
+      vv.removeEventListener("scroll", schedule);
+      window.removeEventListener("scroll", schedule);
+      document.removeEventListener("focusin", onFocusChange);
+      document.removeEventListener("focusout", onFocusChange);
     };
   }, []);
   return vp;
