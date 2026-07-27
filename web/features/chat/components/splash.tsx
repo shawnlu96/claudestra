@@ -90,6 +90,12 @@ export function Splash() {
           {ver.version && `v${ver.version}`}
           {ver.version && ver.commit && " · "}
           {ver.commit}
+          {/* 客户端 bundle 的 commit(构建时烤入)。与前面的服务端号不一致 =
+              PWA 缓存滞后,一眼可见(owner 2026-07-27) */}
+          {process.env.NEXT_PUBLIC_CLIENT_COMMIT &&
+            process.env.NEXT_PUBLIC_CLIENT_COMMIT !== ver.commit && (
+              <span className="text-warning/70"> · 本地 {process.env.NEXT_PUBLIC_CLIENT_COMMIT}</span>
+            )}
         </div>
       )}
     </div>

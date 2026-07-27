@@ -1,6 +1,16 @@
 import type { NextConfig } from "next";
+import { execSync } from "child_process";
+
+// 构建时把 commit 烤进客户端 bundle(owner 2026-07-27:「你对一下版本不就好了」)。
+// /api/version 只能证明服务端在跑什么;PWA 的 SW 缓存会让客户端 JS 悄悄滞后,
+// 两个号并排显示,缓存漂移一眼可见。
+let clientCommit = "";
+try {
+  clientCommit = execSync("git rev-parse --short HEAD", { cwd: __dirname }).toString().trim();
+} catch { /* 非 git 环境(裸包部署):留空,splash 只显示服务端版本 */ }
 
 const nextConfig: NextConfig = {
+  env: { NEXT_PUBLIC_CLIENT_COMMIT: clientCommit },
   // better-sqlite3 / ssh2 是原生模块，不能被 bundler 打包，交给 Node require
   serverExternalPackages: ["better-sqlite3", "ssh2"],
   // 允许经 Tailscale / 局域网 IP 访问 dev server 的 _next 资源（否则 Next 16 dev 对
