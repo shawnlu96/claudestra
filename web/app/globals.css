@@ -88,19 +88,12 @@ html.canvas-list {
     background-color: #f7f7f7; /* 列表页（light base-200） */
 }
 
-/* flow 布局模式(use-keyboard-viewport)键盘在场时挂 kb-open:
-   ① composer 的 home 条安全区垫归零——键盘盖着 home 条区,34px 的垫会显示成
-      键盘上方的空白;
-   ② 应用根收缩到可视高度(--cstra-kb-h = vv.height,settle 时 JS 写入)——
-      文档高度==布局视口时窗口滚动范围为 0,iOS 用 JS 设不了的视觉视口平移做
-      揭示且习惯把输入框放可视区中部(composer 和键盘间留大段空白);根收缩后
-      输入框天然全可见,平移回落,composer 贴键盘、顶栏回屏内。 */
+/* flow 布局模式(use-keyboard-viewport)键盘在场时挂 kb-open:composer 的
+   home 条安全区垫归零——键盘盖着 home 条区,34px 的垫会显示成键盘上方的空白。
+   (曾有 --cstra-kb-h 根收缩规则 = 死路⑤:iOS 居中平移后再收缩,两段大位移,
+   已回撤;空白的彻底消除待消息列表升级为文档级滚动的真 Telegram 结构) */
 html.kb-open {
     --cstra-kb-safe: 0px;
-}
-html.kb-open #cstra-shell {
-    height: var(--cstra-kb-h, 100dvh);
-    transition: height 0.18s ease-out;
 }
 @media (prefers-color-scheme: dark) {
     html {

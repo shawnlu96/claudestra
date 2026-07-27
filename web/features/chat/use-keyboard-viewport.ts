@@ -79,23 +79,19 @@ export function useFlowKeyboard(enabled: boolean): void {
       // settle 后才动(kb-open 会改 composer padding = 布局变更,聚焦瞬间动会杀键盘)
       document.documentElement.classList.toggle("kb-open", kbUp);
       if (kbUp && vv) {
-        // ⚠ window.scrollTo 治不了「composer 和键盘之间的空白」:文档高度 ==
-        // 布局视口高度,窗口滚动范围是 0,iOS 的揭示走的是 JS 设不了的视觉视口
-        // 平移(vv.offsetTop),它habitually 把输入框放在可视区中部。
-        // 正解:键盘期把根收缩到 vv.height(globals.css 的 --cstra-kb-h)——
-        // 文档变矮后输入框在 [0, vvH] 内完全可见,iOS 的平移自然回落,composer
-        // 恰好贴键盘上沿,顶栏也回到屏内。settle 后动布局,不杀键盘(死路③边界)。
-        document.documentElement.style.setProperty("--cstra-kb-h", `${Math.round(vv.height)}px`);
-        // 根收缩后列表矮了一截,原吸底的列表会差一行(最后一行被 composer 半遮)
-        // ——下一帧(收缩已生效)离底不远就重新吸底
-        requestAnimationFrame(() => {
-          const list = document.getElementById("cstra-msgs");
-          if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 200) {
-            list.scrollTop = list.scrollHeight;
-          }
-        });
-      } else {
-        document.documentElement.style.removeProperty("--cstra-kb-h");
+        // ⚠ 死路⑤「settle 后根收缩到 vv.height」(f09dabc,已回撤):iOS 先把
+        // 输入框平移到可视区中部,收缩再制造第二段大位移(composer 顶到很上又
+        // 落回),键盘还闪烁——比空白难受得多。
+        // ⚠ 死路⑥「window.scrollTo 滚到底」:文档高度==布局视口,窗口滚动范围
+        // 恒 0,iOS 的揭示走 JS 设不了的视觉视口平移——scrollTo 是空操作。
+        // 现状结论:键盘期 composer 下方的空白 = iOS 居中揭示的过量平移露出的
+        // 文档外画布,在「内层滚动列表」结构下无解;彻底消除要把消息列表升级成
+        // 文档级滚动的真 Telegram 结构(sticky 顶/底栏)——下一阶段的结构工程。
+        // 这里只做无位移的温和动作:列表离底不远就重新吸底(最后一行别被半遮)。
+        const list = document.getElementById("cstra-msgs");
+        if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 160) {
+          list.scrollTop = list.scrollHeight;
+        }
       }
       if (!kbUp) {
         const el = document.activeElement as HTMLElement | null;
