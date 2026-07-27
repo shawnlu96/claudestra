@@ -439,7 +439,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               }}
             />
           }
-          desc={t("修正 iOS 弹键盘时输入光标/附件菜单错位（页面被键盘顶出屏）。有异常（输入框弹跳等）关掉即恢复原状，无需等修复。")}
+          desc={t("Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。")}
         />
 
         {/* ── HTTP peer 协作 ─────────────── */}

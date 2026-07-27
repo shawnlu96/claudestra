@@ -2,26 +2,27 @@
 import { useEffect, useState } from "react";
 
 /**
- * iOS 键盘视口模块（2026-07-27 重构，owner:「直接重构这一块，越改越乱」）。
- * 聊天页与 iOS 软键盘相关的视口逻辑**全部**收在这里——别再散落到 chat.tsx /
- * composer.tsx 里做逐事件 DOM 手术。
+ * iOS 键盘 / 布局模式模块（2026-07-27 owner:「按 Telegram 网页版的思路改」）。
  *
- * 背景与死路（都是当天真机踩过的，别回头再试）：
- * - iOS 软键盘不缩布局视口，而是平移 visualViewport / 直接滚 document，把
- *   fixed 壳顶出屏——TopBar 消失，caret / 📎 原生菜单按未平移坐标绘制全部错位。
- * - 死路①：把 fixed 根钉到 vv（top/height 直写壳样式）——和键盘动画打架，
- *   输入框弹跳、点 4 次才唤起键盘，已回滚（87d0515）。
- * - 死路②：viewport meta `interactive-widget=resizes-content`——Safari/iOS
- *   未实现（仅 Chromium 108+），指望不上。
- * - 成立的姿势：terminal-page.tsx（同一台真机验证）——fixed 根**永不动**，
- *   键盘期只钉内层（absolute inset-x-0，top=vv.offsetTop，height=vv.height），
- *   React state 驱动而非直改 DOM。
+ * 两种布局模式（设置页实验开关切换,localStorage `cstra_kb_fix`）：
  *
- * 本模块 = terminal 姿势的 chat 落地 + 实验开关：
- * - localStorage `cstra_kb_fix` === "1" 才启用，默认关。iOS 键盘行为在本机
- *   浏览器里无法模拟，开关让真机试错变成「设置里拨一下」，不再需要发版/回滚。
- * - 返回 {top,height} | null；null = 未启用或键盘不在场，内层保持 inset-0，
- *   与重构前逐像素一致（Playwright 可回归）。
+ * - **shell**（默认）：应用壳 `fixed inset-0 overflow-hidden`（claude-os 老方案）。
+ *   稳定,但 iOS 弹键盘时会把 fixed 壳向上顶(visualViewport pan),caret /
+ *   📎 原生菜单按未平移坐标绘制 → 错位。
+ *
+ * - **flow**（开关开）：Telegram Web 式文档流布局——应用根是 in-flow 的
+ *   `h-dvh` 容器,**没有任何 fixed 祖先**。键盘弹起时布局视口(100dvh)大于
+ *   可视视口,文档获得了真实的滚动空间,iOS 用**document 滚动**揭示输入框。
+ *   这条路径是每个普通网页都在走的,WebKit 的 caret 绘制完全正确——不需要
+ *   任何 JS 补偿。
+ *
+ * 死路清单（同一晚全部真机踩过,别回头）：
+ * ① 把 fixed 根钉到 vv(top/height 直写壳)——和键盘动画打架,输入框弹跳。
+ * ② viewport meta interactive-widget=resizes-content——Safari/iOS 未实现。
+ * ③ focusin 瞬间预钉(缓存键盘高度提前布局)——聚焦到键盘 settle 之间的
+ *    任何布局变更都会把键盘打掉,稳定打不开。
+ * ④ settle 后钉 fixed 壳内层——能用,但「iOS 先顶 → 停稳再拉回」的过渡
+ *    肉眼可见,owner 不接受。→ 于是有了 flow 模式。
  */
 
 export const KB_FIX_KEY = "cstra_kb_fix";
@@ -43,88 +44,46 @@ export function setKbFixEnabled(on: boolean): void {
   }
 }
 
-/** 焦点在可编辑元素上（textarea/input/contenteditable）——钉扎的前提条件 */
-function editableFocused(): boolean {
-  const el = document.activeElement as HTMLElement | null;
-  if (!el) return false;
-  return el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable;
+export type LayoutMode = "shell" | "flow";
+
+/**
+ * 当前布局模式。SSR/首帧固定 "shell"（与预渲染 HTML 一致），mount 后读
+ * localStorage 切换——flow 用户首帧会闪一下 shell 布局，两者几何相同（都是
+ * 全屏容器），肉眼无感。
+ */
+export function useLayoutMode(): LayoutMode {
+  const [mode, setMode] = useState<LayoutMode>("shell");
+  useEffect(() => {
+    if (kbFixEnabled()) setMode("flow");
+  }, []);
+  return mode;
 }
 
-/** 键盘动画停稳判定的静默窗口。首版逐事件应用,在键盘拉起动画中途 reflow
- *  会把刚弹的键盘打掉(2026-07-27 真机:首次聚焦 100% 闪关)——改为最后一个
- *  vv 事件后 SETTLE_MS 无新事件才应用一次。 */
-const SETTLE_MS = 250;
-
-/** 键盘高度缓存(settle 时写入)。预钉的依据:聚焦瞬间(键盘还没动)就按
- *  缓存高度把布局摆到位,input 不会被键盘挡住 → iOS 无需 pan → 「先顶上去
- *  再弹回」的一跳消失(2026-07-27 真机:能用但过渡体验差)。冷首次无缓存,
- *  退化为等 settle(只跳这一次)。 */
-const KB_H_KEY = "cstra_kb_h";
-
-export function useKeyboardViewport(): { top: number; height: number } | null {
-  const [vp, setVp] = useState<{ top: number; height: number } | null>(null);
+/**
+ * flow 模式的唯一 JS：键盘收起后的滚动残留清理。
+ *
+ * 键盘期 iOS 滚动 document 揭示输入框（这正是 flow 模式的机制,别去拦!）;
+ * 键盘收起后滚动范围回到 0,iOS 通常会自己弹回,但偶发残留 scrollY>0——
+ * 内容整体上移一截。失焦后延迟检查,有残留就归零。
+ */
+export function useFlowScrollCleanup(enabled: boolean): void {
   useEffect(() => {
-    if (!kbFixEnabled()) return;
-    const vv = window.visualViewport;
-    if (!vv) return;
+    if (!enabled) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const compute = () => {
-      timer = null;
-      // iOS 揭示 focused input 的两条路：滚 document（fixed 层被顶出屏）→
-      // 强制归零；vv 平移 → 内层钉扎补偿（terminal-page 同款次序）
-      if ((window.scrollY || 0) > 0) window.scrollTo(0, 0);
-      // 钉扎前提 = 键盘在场 **且** 焦点在可编辑元素上。只看 vv 的话,📎 原生
-      // 菜单/系统 UI 也会挤 vv,层被钉进键盘态回不来(2026-07-27 真机:点完
-      // 📎 输入框顶到最上、下方 3/4 空白)
-      const keyboardUp = (window.innerHeight - vv.height > 40 || vv.offsetTop > 1) && editableFocused();
-      if (keyboardUp) {
-        // 键盘高度落缓存——下次聚焦的预钉依据
-        try {
-          localStorage.setItem(KB_H_KEY, String(Math.round(window.innerHeight - vv.height)));
-        } catch { /* 隐私模式 */ }
-      }
-      setVp((prev) => {
-        if (!keyboardUp) return prev === null ? prev : null;
-        const next = { top: Math.round(vv.offsetTop), height: Math.round(vv.height) };
-        // 值没变不换引用——不触发重渲染
-        return prev && prev.top === next.top && prev.height === next.height ? prev : next;
-      });
-    };
-    const schedule = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(compute, SETTLE_MS);
-    };
-    // ⚠ 死路③(2026-07-27 三迭代实测):focusin 瞬间按缓存高度「预钉」——
-    // 聚焦时刻的**任何布局变更**都会把刚拉起的键盘打掉,变成稳定打不开键盘。
-    // 结论:布局只能在键盘 settle 之后动;跳变观感交给 chat.tsx 层的过渡动画
-    // 缓解(settle 后再动布局不杀键盘,二迭代已证)。
-    const onFocusIn = () => {
-      if (editableFocused()) schedule();
-    };
-    // blur(点 📎/切走焦点)立即撤钉,不等 vv 事件——原生菜单在场时 vv 可能
-    // 根本不再发事件,层会永远卡在键盘态尺寸。focusout 时 activeElement 还是
-    // 旧值,推一拍再判。
     const onFocusOut = () => {
-      setTimeout(() => {
-        if (!editableFocused()) {
-          if (timer) clearTimeout(timer);
-          compute();
-        }
-      }, 50);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        const el = document.activeElement as HTMLElement | null;
+        const editing =
+          el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable);
+        if (!editing && (window.scrollY || 0) > 0) window.scrollTo(0, 0);
+      }, 350);
     };
-    vv.addEventListener("resize", schedule);
-    vv.addEventListener("scroll", schedule);
-    window.addEventListener("scroll", schedule);
-    document.addEventListener("focusin", onFocusIn);
     document.addEventListener("focusout", onFocusOut);
     return () => {
       if (timer) clearTimeout(timer);
-      vv.removeEventListener("resize", schedule);
-      vv.removeEventListener("scroll", schedule);
-      window.removeEventListener("scroll", schedule);
-      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("focusout", onFocusOut);
     };
-  }, []);
-  return vp;
+  }, [enabled]);
 }

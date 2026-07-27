@@ -19,7 +19,7 @@ import { SessionSearchButton } from "./session-search";
 import { ManagePanel } from "./manage-panel";
 import { ClaudeSwitcher } from "./claude-switcher";
 import { ctxLevel } from "../ctx-level";
-import { useKeyboardViewport } from "../use-keyboard-viewport";
+import { useLayoutMode, useFlowScrollCleanup } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 
 /** 「会话内容」页的 hash 锚点：存在即处于内容视图，移动端横滑到内容栏 */
@@ -195,9 +195,12 @@ function ChatInner() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // iOS 键盘视口:全部逻辑收在 use-keyboard-viewport 模块(实验开关默认关)。
-  // 死路清单与设计依据见该文件头注释,别再往 chat.tsx 里塞逐事件 DOM 手术。
-  const kbVp = useKeyboardViewport();
+  // 布局模式(use-keyboard-viewport 模块,死路清单见该文件头):
+  // shell = fixed 壳(默认,稳定但 iOS 键盘期 caret 错位);
+  // flow = Telegram 式文档流(开关开)——无 fixed 祖先,键盘用真实 document
+  // 滚动揭示输入框,caret 天然正确,零 JS 补偿。
+  const layoutMode = useLayoutMode();
+  useFlowScrollCleanup(layoutMode === "flow");
 
   const toContent = useCallback(() => {
     if (!isNarrow()) return; // 桌面双栏并存，无需压栈/位移
@@ -396,16 +399,25 @@ function ChatInner() {
 
   return (
     <ChatNavContext.Provider value={nav}>
-      {/* PWA 应用壳（对齐 claude-os）：出流的 fixed inset-0 overflow-hidden 就是锁滚动的
-          全部——body 里没有流内容 → 文档天然不滚，滚动只在内部 overflow-y-auto。⚠ 不要给
-          html/body 加 overflow:hidden（会干扰 viewport-fit 撑满、底部不贴屏底，见 globals.css）。
-          安全区 padding 归各面板自己垫、条带色=面板色（不放根层，避免异色面板成色差条）。
-          onScroll 归零守卫：overflow:hidden 只是视觉裁剪，程序（iOS 键盘聚焦滚动 /
-          scrollIntoView 类调用）仍可给它塞 scrollLeft/scrollTop——残留量会叠在横滑
-          translate 上，让会话页「弹过头」渲染不满视窗。任何此类滚动立即归零。 */}
+      {/* PWA 应用壳,两种模式（use-keyboard-viewport 的 LayoutMode）:
+          shell(默认) = fixed inset-0 overflow-hidden(对齐 claude-os):出流锁滚动,
+          但 iOS 键盘期 fixed 壳被 vv pan 顶出屏,caret/原生菜单错位。
+          flow(实验开关) = in-flow h-dvh(Telegram Web 式):无 fixed 祖先,键盘用
+          真实 document 滚动揭示输入框,caret 天然正确;键盘关时文档滚动范围为 0,
+          橡皮筋由 overscroll-none 抑制。
+          通用:安全区 padding 归各面板自己垫;⚠ 不要给 html/body 加 overflow:hidden。
+          onScroll 归零守卫(壳自身的 scrollTop/Left,非 window):overflow:hidden 只是
+          视觉裁剪,程序滚动残留会叠在横滑位移上,任何此类滚动立即归零。 */}
       <div
         id="cstra-shell"
-        className="fixed inset-0 overflow-hidden bg-base-100"
+        className={
+          layoutMode === "flow"
+            ? // flow(Telegram 式):in-flow 的 h-dvh 容器,无 fixed 祖先——键盘用
+              // 真实 document 滚动揭示输入框,caret 天然正确。overscroll-none
+              // 抑制根滚动器的橡皮筋(键盘关时滚动范围为 0)。
+              "relative h-dvh w-full overflow-hidden overscroll-none bg-base-100"
+            : "fixed inset-0 overflow-hidden bg-base-100"
+        }
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollLeft !== 0) el.scrollLeft = 0;
@@ -414,23 +426,8 @@ function ChatInner() {
         onTouchStart={onShellTouchStart}
         onTouchEnd={onShellTouchEnd}
       >
-        {/* 键盘感知内层(use-keyboard-viewport 模块):fixed 壳永不动,键盘期
-            只钉这一层(top=vv.offsetTop,height=vv.height)——terminal-page 真机
-            验证过的姿势。kbVp=null(未启用/无键盘)时 inset 铺满,与旧结构等价。 */}
-        <div
-          className="absolute inset-x-0 flex overflow-hidden"
-          style={
-            kbVp
-              ? {
-                  top: kbVp.top,
-                  height: kbVp.height,
-                  // 钉扎发生在键盘 settle 之后(不杀键盘,二迭代已证);iOS 已把
-                  // 页面顶上去了,这里用短过渡把内容「滑」回原位,替代硬跳
-                  transition: "top 0.18s ease-out, height 0.18s ease-out",
-                }
-              : { top: 0, bottom: 0 }
-          }
-        >
+        {/* 内容层:两种模式都是铺满根的 flex 行(kb 钉扎已随 flow 模式废弃) */}
+        <div className="absolute inset-0 flex overflow-hidden">
         {/* 横滑容器：移动端 sidebar + main 各 w-full 并排溢出，showContent 时整体 -100% 切到内容；
             桌面端（sm+）sidebar 定宽 + main flex-1 双栏并存，位移恒 0。
             ⚠ transform 只在动画的 300ms 内出现,停稳态用 relative+left——常驻
