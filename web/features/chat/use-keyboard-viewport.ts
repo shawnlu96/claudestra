@@ -60,30 +60,42 @@ export function useLayoutMode(): LayoutMode {
 }
 
 /**
- * flow 模式的唯一 JS：键盘收起后的滚动残留清理。
+ * flow 模式的全部 JS（都在键盘 settle 之后动,遵守死路③铁律）：
  *
- * 键盘期 iOS 滚动 document 揭示输入框（这正是 flow 模式的机制,别去拦!）;
- * 键盘收起后滚动范围回到 0,iOS 通常会自己弹回,但偶发残留 scrollY>0——
- * 内容整体上移一截。失焦后延迟检查,有残留就归零。
+ * 1. `<html>` 的 kb-open 类：键盘在场时 composer 的 home 条安全区垫归零
+ *    （globals.css `--cstra-kb-safe`）——键盘盖着 home 条区,34px 的垫会显示成
+ *    键盘和输入框之间的一截空白(2026-07-27 用户截图)。terminal 页同款语义。
+ * 2. 键盘收起后的滚动残留清理：键盘期 iOS 滚 document 揭示输入框(机制本身,
+ *    别拦!),收起后滚动范围回 0,偶发残留 scrollY>0 → 内容整体上移,归零。
  */
-export function useFlowScrollCleanup(enabled: boolean): void {
+export function useFlowKeyboard(enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
+    const vv = window.visualViewport;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const onFocusOut = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
+    const settle = () => {
+      timer = null;
+      const kbUp = vv ? window.innerHeight - vv.height > 40 : false;
+      // settle 后才动(kb-open 会改 composer padding = 布局变更,聚焦瞬间动会杀键盘)
+      document.documentElement.classList.toggle("kb-open", kbUp);
+      if (!kbUp) {
         const el = document.activeElement as HTMLElement | null;
         const editing =
           el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable);
         if (!editing && (window.scrollY || 0) > 0) window.scrollTo(0, 0);
-      }, 350);
+      }
     };
-    document.addEventListener("focusout", onFocusOut);
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(settle, 250);
+    };
+    vv?.addEventListener("resize", schedule);
+    document.addEventListener("focusout", schedule);
     return () => {
       if (timer) clearTimeout(timer);
-      document.removeEventListener("focusout", onFocusOut);
+      vv?.removeEventListener("resize", schedule);
+      document.removeEventListener("focusout", schedule);
+      document.documentElement.classList.remove("kb-open");
     };
   }, [enabled]);
 }

@@ -566,7 +566,9 @@ export function Composer() {
       className="bg-base-100 px-6 pb-3 pt-2 sm:px-7"
       // max() 取大不叠加：home 条区(env≈34pt)本身就够输入卡与屏底的间距，
       // 再 +12px 双层叠出「过高的底部」（owner 真机反馈）。无安全区时回退 12px。
-      style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)" }}
+      // --cstra-kb-safe:键盘在场时(html.kb-open,flow 模式)安全区垫归零——
+      // 键盘盖着 home 条区,34px 的垫会显示成键盘上方的一截空白
+      style={{ paddingBottom: "max(var(--cstra-kb-safe, env(safe-area-inset-bottom)), 0.75rem)" }}
     >
       <div className="mx-auto max-w-3xl">
         {showCtxWarn && (

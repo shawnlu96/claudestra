@@ -19,7 +19,7 @@ import { SessionSearchButton } from "./session-search";
 import { ManagePanel } from "./manage-panel";
 import { ClaudeSwitcher } from "./claude-switcher";
 import { ctxLevel } from "../ctx-level";
-import { useLayoutMode, useFlowScrollCleanup } from "../use-keyboard-viewport";
+import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 
 /** 「会话内容」页的 hash 锚点：存在即处于内容视图，移动端横滑到内容栏 */
@@ -200,7 +200,7 @@ function ChatInner() {
   // flow = Telegram 式文档流(开关开)——无 fixed 祖先,键盘用真实 document
   // 滚动揭示输入框,caret 天然正确,零 JS 补偿。
   const layoutMode = useLayoutMode();
-  useFlowScrollCleanup(layoutMode === "flow");
+  useFlowKeyboard(layoutMode === "flow");
 
   const toContent = useCallback(() => {
     if (!isNarrow()) return; // 桌面双栏并存，无需压栈/位移

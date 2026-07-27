@@ -87,6 +87,12 @@ html {
 html.canvas-list {
     background-color: #f7f7f7; /* 列表页（light base-200） */
 }
+
+/* flow 布局模式(use-keyboard-viewport)键盘在场时挂 kb-open:composer 的
+   home 条安全区垫归零——键盘盖着 home 条区,34px 的垫会显示成键盘上方的空白 */
+html.kb-open {
+    --cstra-kb-safe: 0px;
+}
 @media (prefers-color-scheme: dark) {
     html {
         background-color: rgb(23, 24, 25); /* 会话页（dark base-100） */
