@@ -79,19 +79,23 @@ export function useFlowKeyboard(enabled: boolean): void {
       // settle 后才动(kb-open 会改 composer padding = 布局变更,聚焦瞬间动会杀键盘)
       document.documentElement.classList.toggle("kb-open", kbUp);
       if (kbUp && vv) {
-        // iOS 揭示聚焦输入框时习惯把它滚到可视区**中部**,composer 和键盘之间
-        // 留一大截空白(2026-07-27 用户截图)。settle 后把文档滚到底——composer
-        // 恰好贴在键盘上沿。滚动不是布局变更,不会杀键盘(iOS 自己也在滚)。
-        const target = Math.max(0, document.documentElement.scrollHeight - vv.height);
-        if (Math.abs((window.scrollY || 0) - target) > 4) {
-          window.scrollTo({ top: target, behavior: "smooth" });
-        }
-        // 键盘吃掉一截可视高度后,原本吸底的消息列表会差一行(最后一行卡在
-        // composer 上沿被半遮)——离底不远时重新吸底
-        const list = document.getElementById("cstra-msgs");
-        if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 160) {
-          list.scrollTop = list.scrollHeight;
-        }
+        // ⚠ window.scrollTo 治不了「composer 和键盘之间的空白」:文档高度 ==
+        // 布局视口高度,窗口滚动范围是 0,iOS 的揭示走的是 JS 设不了的视觉视口
+        // 平移(vv.offsetTop),它habitually 把输入框放在可视区中部。
+        // 正解:键盘期把根收缩到 vv.height(globals.css 的 --cstra-kb-h)——
+        // 文档变矮后输入框在 [0, vvH] 内完全可见,iOS 的平移自然回落,composer
+        // 恰好贴键盘上沿,顶栏也回到屏内。settle 后动布局,不杀键盘(死路③边界)。
+        document.documentElement.style.setProperty("--cstra-kb-h", `${Math.round(vv.height)}px`);
+        // 根收缩后列表矮了一截,原吸底的列表会差一行(最后一行被 composer 半遮)
+        // ——下一帧(收缩已生效)离底不远就重新吸底
+        requestAnimationFrame(() => {
+          const list = document.getElementById("cstra-msgs");
+          if (list && list.scrollHeight - list.scrollTop - list.clientHeight < 200) {
+            list.scrollTop = list.scrollHeight;
+          }
+        });
+      } else {
+        document.documentElement.style.removeProperty("--cstra-kb-h");
       }
       if (!kbUp) {
         const el = document.activeElement as HTMLElement | null;
