@@ -984,13 +984,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         for (const f of files!) fd.append("files", f);
         return fd;
       };
+      // ⚠ 超时必须有(2026-07-27 丢消息实锤):iOS 上带附件的 multipart fetch
+      // 可以既不 resolve 也不 reject 地永久挂起——没有超时的话失败完全静默,
+      // 乐观气泡装作已送达,用户只在重开 PWA 后发现消息没了。附件上传给宽些。
+      const sendTimeout = () => AbortSignal.timeout(hasFiles ? 60_000 : 20_000);
       if (hasFiles) {
-        res = await fetch("/api/chat/send", { method: "POST", body: buildForm() });
+        res = await fetch("/api/chat/send", { method: "POST", body: buildForm(), signal: sendTimeout() });
       } else {
         res = await fetch("/api/chat/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agent, text: wire }),
+          signal: sendTimeout(),
         });
       }
       if (res.status === 401) return this.gotoLogin();
@@ -1000,11 +1005,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       for (let attempt = 0; res.status === 503 && attempt < 4; attempt++) {
         await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
         res = hasFiles
-          ? await fetch("/api/chat/send", { method: "POST", body: buildForm() })
+          ? await fetch("/api/chat/send", { method: "POST", body: buildForm(), signal: sendTimeout() })
           : await fetch("/api/chat/send", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ agent, text: wire }),
+              signal: sendTimeout(),
             });
         if (res.status === 401) return this.gotoLogin();
       }
@@ -1015,6 +1021,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         this.produce((s) => {
           s.streaming = false;
           s.awaitingChunk = false;
+          const opt = s.messages.find((m) => m.id === optimisticId);
+          if (opt) opt.failed = true; // 气泡标「未送达」,别装作已发出
           s.messages.push({
             id: this.nextId(),
             role: "assistant",
@@ -1052,13 +1060,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 普通消息：输出经已打开的持久流回来
       }
     } catch (e) {
+      const timedOut = (e as Error).name === "TimeoutError";
       this.produce((s) => {
         s.streaming = false;
         s.awaitingChunk = false;
+        const opt = s.messages.find((m) => m.id === optimisticId);
+        if (opt) opt.failed = true; // 气泡标「未送达」,别装作已发出
         s.messages.push({
           id: this.nextId(),
           role: "assistant",
-          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${(e as Error).message}`,
+          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${
+            timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message
+          }`,
           ts: new Date().toISOString(),
         });
       });

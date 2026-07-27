@@ -377,6 +377,7 @@ export const DICT: Record<string, string> = {
   "有效期至": "Valid until",
   "复制邀请串": "Copy invite",
   "单向（对方→我）": "One-way (them → me)",
+  "未送达——请重新发送": "Not delivered — please resend",
   "暂无 peer。生成邀请发给对方，或粘贴对方的邀请加入。":
     "No peers yet. Create an invite to send, or paste one you received.",
 };

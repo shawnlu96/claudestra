@@ -113,6 +113,8 @@ export interface ChatMessage {
   /** 本端乐观发送、尚未在历史(jsonl)中确认——历史重拉时保留不吞
    *  （agent 忙时消息在服务端排队,送达前不进 jsonl）。 */
   local?: boolean;
+  /** v2.15+ 发送失败（超时/网络/服务端拒绝）——气泡标「未送达」,别装作已发出 */
+  failed?: boolean;
 }
 
 export interface AgentSession {
