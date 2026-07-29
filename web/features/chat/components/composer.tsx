@@ -532,6 +532,11 @@ export function Composer() {
     typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // IME 组字中所有键先让给输入法(2026-07-29 owner 桌面实报:拼音下敲 Enter
+    // 让英文直接上屏,却触发了发送)——此时的 Enter 是「确认组字」不是「发送」,
+    // 方向键也是在选候选词不是在导航命令面板。keyCode 229 兜浏览器时序坑
+    // (compositionend 先于 keydown 派发时 isComposing 已经翻假)。
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     // 命令面板打开时接管导航键（桌面）：↑↓ 移动、Enter/Tab 填入、Esc 关闭
     if (slashOpen) {
       if (e.key === "ArrowDown") {
