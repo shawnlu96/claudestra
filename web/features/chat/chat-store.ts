@@ -308,6 +308,26 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       } else {
         this.staleStreamStrikes = 0;
       }
+      // 流失联哨兵(2026-07-29 owner 报「reply 要切换 agent 才显示」:桌面端流
+      // 静默失联 40 分钟,现有自愈全部未命中——看门狗只管已建立的流,反向对齐
+      // 只管 streaming 卡死态,visibility 要等切页)。此处站在与流无关的轮询
+      // 节拍上兜底:本次 /api/agents 已成功 = 服务端可达,而 35s(3 个心跳周期)
+      // 没收到任何流字节 = 流必死或不存在;lastReconnectAt 闸 = 没有别的恢复
+      // 链在跑(自动重连链每 1-10s 会刷新它,链活着就不打扰)。
+      const streamIdle = Date.now() - this.lastStreamByteAt;
+      if (
+        this.state.activeAgent &&
+        !this.state.browsing &&
+        typeof document !== "undefined" &&
+        document.visibilityState === "visible" &&
+        streamIdle > 35_000 &&
+        Date.now() - this.lastReconnectAt > 30_000
+      ) {
+        this.clientLog(
+          `sentinel: 流失联 ${Math.round(streamIdle / 1000)}s 且无恢复链在跑,强制重连 agent=${this.state.activeAgent}`
+        );
+        this.maybeReconnect({ fast: true });
+      }
       if (agentsSignature(next) === agentsSignature(this.state.agents)) return;
       this.produce((s) => {
         s.agents = next;
@@ -827,8 +847,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** 假死流看门狗(25s 无字节 → cancel 重连);openStream 内创建,finally 清。 */
   private streamDog: ReturnType<typeof setInterval> | null = null;
 
-  /** 流最近一次收到字节的时刻(openStream 读循环更新)——回前台判活的依据。 */
-  private lastStreamByteAt = 0;
+  /** 流最近一次收到字节的时刻(openStream 读循环更新)——回前台判活的依据。
+   *  初值取构造时刻而非 0:哨兵按「35s 无字节」判失联,0 起步会让慢链路上
+   *  首次加载(历史 10s+ 才到 openStream)在第一个轮询拍就被误判。 */
+  private lastStreamByteAt = Date.now();
 
   /** 当前活流归属的 agent(openStream 连上时记,detach 清)。判活不能用
    *  lastEventAgent——那是「最后一个事件」的锚,闲置会话只有心跳没事件,永远对不上。 */
@@ -843,6 +865,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** 反向对齐计数:UI streaming 但服务端说空闲的连续轮询拍数(见 refreshAgents)。 */
   private staleStreamStrikes = 0;
   private lastForcedAlign = 0;
+  /** maybeReconnect 实际动手(过完早退守卫)的时刻——流失联哨兵据此判断
+   *  「是否已有恢复链在跑」,不去踩正在进行的重连/差量。 */
+  private lastReconnectAt = 0;
 
   /** 前端恢复动作的服务端存档(fire-and-forget)——「web 收不到消息」类事故反复
    *  发生却无法取证前端当时做了什么(iOS 无法看 console),关键恢复路径打点到
@@ -866,6 +891,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private async openStream(name: string, since?: number) {
     const gen = ++this.streamGen;
     const startedAt = Date.now();
+    let connected = false;
     // 连接建立超时(2026-07-24 owner:「点通知进来不更新,切出切回才好」):iOS
     // 解冻瞬间发的 fetch 会在网络栈未醒的窗口里永远悬着——无超时就无 catch/
     // finally,自动重连链彻底断头,只能靠用户再切一次页面。10s 没握上手就
@@ -885,6 +911,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (!rawReader) return;
       this.streamReader = rawReader;
       this.streamAgent = name;
+      // 连接成功打点(2026-07-29「reply 要切 agent 才显示」排查:client.log 里
+      // 完全看不出用户的流何时活着何时死了)。稳态下每次切换/唤醒各一条,不刷屏;
+      // 连接失败不打(bridge 重启窗口每 1-10s 重试一发,会淹掉有用信号)。
+      connected = true;
+      this.clientLog(`stream connected agent=${name}${since ? ` since=${since}` : ""}`);
       // 假死流看门狗:iOS 挂起恢复/网络切换后连接常「不报错也不产出」,以前
       // 只能等用户切页触发对齐。BFF 心跳 10s 一发,25s 收不到任何字节即判死,
       // 主动 cancel → read 返回 done → finally 走快路径重连(断点重放无损)。
@@ -936,6 +967,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (gen === this.streamGen) {
         this.streamReader = null;
         this.streamAgent = null;
+        // 自然死亡打点(detach 发起的主动关闭 gen 已错开,不在此列):曾连接成功
+        // 的流断了才值得记——排「流静默失联」类事故就靠 connected→closed 的时间线
+        if (connected)
+          this.clientLog(
+            `stream closed agent=${name} lived=${Math.round((Date.now() - startedAt) / 1000)}s`
+          );
       }
       // 流关闭/断开时，若本轮仍卡在 streaming（done 没收到、流被掐、bridge 重启），
       // 解锁 composer——别让「■ 停止」永久卡住导致用户发不出/看着像没渲染。仅清当前流。
@@ -1032,6 +1069,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     ) {
       return;
     }
+    this.lastReconnectAt = Date.now(); // 恢复链开跑——流失联哨兵据此让路
     this.detachActiveStream();
     // 快路径(owner 2026-07-16「catch up 更快更丝滑」):短暂离开(<5min)且有
     // 断点锚 → 只重连流带 ?since=<seq>,bridge 环形缓冲把错过的事件直接重放,
