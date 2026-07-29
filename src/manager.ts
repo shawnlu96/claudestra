@@ -639,6 +639,9 @@ async function cmdCreate(
       effort,
       permissionMode: mode,
       model,
+      // v2.16+ purpose 注入:此前 purpose 只进 registry,agent 本体看不到自己的职责
+      purpose,
+      agentName: tmuxName,
     });
     // 新 tmux window 起来后 .zshrc / .bashrc 可能弹 oh-my-zsh / homebrew 的 Y/n
     // update prompt，会吞掉 send-keys 第一个字符。先清掉再发命令。
@@ -1583,6 +1586,10 @@ async function cmdRestart(name?: string) {
 
     // 2. 重新启动 Claude Code — 沿用 registry 中存储的 channelId + 权限配置
     const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
+    // v2.16+ purpose 注入 restart 也带上(会话虽有历史,系统提示常驻比翻聊天记录可靠);
+    // resume 写入的占位 purpose("resumed: xxx")无信息量,过滤
+    const purposeForInject =
+      info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
     const cmd = buildClaudeCommand({
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
@@ -1597,6 +1604,8 @@ async function cmdRestart(name?: string) {
       // v2.4.20+ restart 沿用 registry 里钉的模型（这是"改全局无效"的解法：
       // 显式 --model 覆盖 --resume 钉死的会话原模型）。
       model: info.model,
+      purpose: purposeForInject,
+      agentName: tmuxName,
     });
 
     let started = await startClaudeInWindow(tmuxName, cmd);
@@ -1619,6 +1628,8 @@ async function cmdRestart(name?: string) {
         effort: info.effort,
         permissionMode: info.permissionMode,
         model: info.model,
+        purpose: purposeForInject,
+        agentName: tmuxName,
       });
       started = await startClaudeInWindow(tmuxName, forkCmd);
       if (started.ready) {
@@ -2485,24 +2496,31 @@ async function cmdUpdate() {
 async function renderMasterClaude(): Promise<{ rendered: boolean; reason?: string }> {
   const { existsSync } = await import("fs");
   const templatePath = `${REPO_ROOT}/master/CLAUDE.md.template`;
-  const renderedPath = `${REPO_ROOT}/master/CLAUDE.md`;
   if (!existsSync(templatePath)) return { rendered: false, reason: "template 不存在" };
 
-  // 从 .env 读 USER_NAME
-  let userName = process.env.USER_NAME || "";
-  if (!userName && existsSync(`${REPO_ROOT}/.env`)) {
+  // 从 .env 读 USER_NAME / MASTER_DIR(manager 可能从任意 cwd 被调起,Bun 只
+  // 自动加载 cwd 的 .env——env 里没有就直接翻仓库根的 .env)
+  const readEnvVar = async (key: string): Promise<string> => {
+    if (process.env[key]) return process.env[key]!;
+    if (!existsSync(`${REPO_ROOT}/.env`)) return "";
     try {
       const envText = await Bun.file(`${REPO_ROOT}/.env`).text();
-      const m = envText.match(/^USER_NAME\s*=\s*(.+)$/m);
-      if (m) userName = m[1].trim().replace(/^["']|["']$/g, "");
-    } catch { /* non-critical */ }
-  }
-  if (!userName) userName = "User";
+      const m = envText.match(new RegExp(`^${key}\\s*=\\s*(.+)$`, "m"));
+      return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+    } catch {
+      return "";
+    }
+  };
+  const userName = (await readEnvVar("USER_NAME")) || "User";
+  // v2.16+ MASTER_DIR 可移出仓库(省掉 master 加载仓库根 CLAUDE.md 的 ~11k token),
+  // 渲染目标跟着走;模板内命令用 {{REPO_ROOT}} 绝对路径,不再依赖 cwd 相对定位
+  const masterDir = (await readEnvVar("MASTER_DIR")) || `${REPO_ROOT}/master`;
 
   try {
     let tpl = await Bun.file(templatePath).text();
-    tpl = tpl.replaceAll("{{USER_NAME}}", userName);
-    await Bun.write(renderedPath, tpl);
+    tpl = tpl.replaceAll("{{USER_NAME}}", userName).replaceAll("{{REPO_ROOT}}", REPO_ROOT);
+    await mkdir(masterDir, { recursive: true });
+    await Bun.write(`${masterDir}/CLAUDE.md`, tpl);
     return { rendered: true };
   } catch (e) {
     return { rendered: false, reason: (e as Error).message };

@@ -29,7 +29,10 @@ export { TMUX_SOCK } from "../lib/tmux-helper.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;
 export const MANAGER_PATH = `${REPO_ROOT}/src/manager.ts`;
-export const MASTER_DIR = `${REPO_ROOT}/master`;
+/** v2.16+ 支持 env 覆盖(与 launcher.ts 同一语义):MASTER_DIR 移出仓库后 master
+ *  不再沿目录树加载仓库根的贡献者 CLAUDE.md(~11k token 与调度无关)。bridge 用
+ *  它定位 master 的 session jsonl(watcher/历史 API),必须与 launcher 一致。 */
+export const MASTER_DIR = process.env.MASTER_DIR || `${REPO_ROOT}/master`;
 // 不写死 ~/.bun/bin/bun —— brew / mise / asdf 装的 bun 不在那儿，见 lib/bun-path.ts
 export const BUN_PATH = resolveBunPath();
 export const ENV_WITH_BUN = {

@@ -8,7 +8,7 @@
  * 跟着它走，它会告诉你每一步点哪里、复制什么、粘贴到哪。
  */
 
-import { readFile, writeFile, access, chmod } from "fs/promises";
+import { readFile, writeFile, access, chmod, mkdir } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
@@ -18,7 +18,8 @@ const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
 const ENV_EXAMPLE_PATH = `${REPO_ROOT}/.env.example`;
 const TEMPLATE_PATH = `${REPO_ROOT}/master/CLAUDE.md.template`;
-const RENDERED_PATH = `${REPO_ROOT}/master/CLAUDE.md`;
+// v2.16+ MASTER_DIR 可 env 覆盖(移出仓库避免 master 加载仓库根 CLAUDE.md)
+const RENDERED_PATH = `${process.env.MASTER_DIR || `${REPO_ROOT}/master`}/CLAUDE.md`;
 
 // v2.10+: 步骤总数随前端选择变化（Discord 5 步可跳过、Web 1 步可加），
 // 编号用自增计数器,不再硬编码。
@@ -826,7 +827,8 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   // 渲染 master/CLAUDE.md
   if (await fileExists(TEMPLATE_PATH)) {
     let tpl = await readFile(TEMPLATE_PATH, "utf-8");
-    tpl = tpl.replaceAll("{{USER_NAME}}", cfg.USER_NAME);
+    tpl = tpl.replaceAll("{{USER_NAME}}", cfg.USER_NAME).replaceAll("{{REPO_ROOT}}", REPO_ROOT);
+    await mkdir(RENDERED_PATH.replace(/\/CLAUDE\.md$/, ""), { recursive: true }).catch(() => {});
     await writeFile(RENDERED_PATH, tpl);
     ok(t(
       `渲染 ${c.bold}master/CLAUDE.md${c.reset}（你的名字: ${c.yellow}${cfg.USER_NAME}${c.reset}）`,

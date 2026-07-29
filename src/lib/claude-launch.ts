@@ -238,6 +238,15 @@ export interface LaunchOptions {
    * 覆盖 —— 这正是"改全局 settings 对已存在 agent 无效"的根因。
    */
   model?: string;
+  /**
+   * v2.16+ agent 职责注入（`--append-system-prompt`）。create 的 purpose 此前只进
+   * registry（频道 topic 用），agent 本体从来看不到自己的职责描述——用户精心写的
+   * purpose 等于白写。传了就以一行系统提示注入；resume 的占位 purpose
+   * （"resumed: xxx"）由调用方负责过滤，这里不做启发式判断。
+   */
+  purpose?: string;
+  /** purpose 注入时的自称名（registry 名，如 agent-foo）。 */
+  agentName?: string;
 }
 
 /** POSIX 单引号 shell 转义 */
@@ -318,6 +327,14 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
 
   if (disallowed.length > 0) {
     parts.push("--disallowedTools", shellEscape(disallowed.join(" ")));
+  }
+
+  // v2.16+ purpose 注入:一行系统提示,让 agent 知道自己是谁、被派来干什么。
+  // 截断 500 字防超长 purpose 撑爆 tmux send-keys 单行命令。
+  if (opts.purpose && opts.purpose.trim()) {
+    const p = opts.purpose.trim().slice(0, 500);
+    const who = opts.agentName ? `你是 Claudestra 编排系统中的 agent「${opts.agentName}」。` : "";
+    parts.push("--append-system-prompt", shellEscape(`${who}你的职责: ${p}`));
   }
 
   return `${prefix} ${parts.join(" ")}`;
