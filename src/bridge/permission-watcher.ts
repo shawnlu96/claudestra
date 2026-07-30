@@ -68,19 +68,85 @@ async function maybeEscapeAgentsView(
   return true;
 }
 
+/** 粗粒度模型家族提取（opus/sonnet/haiku/fable）——「Switch model?」守卫用。 */
+export function modelFamilies(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.toLowerCase().matchAll(/\b(fable|opus|sonnet|haiku)\b/g)) out.add(m[1]);
+  return out;
+}
+
 /**
- * v2.15.2+「Switch model?」prompt-cache 确认弹窗自动代按。
+ * v2.15.2+「Switch model?」确认弹窗处理。
  *
- * 弹窗只由明确的 /model 操作触发（API 切换注入 / 用户手打），意图早已明确，
- * 无人代按 agent 就卡死在弹窗上（2026-07-28 实锤：API 切换时 agent 正忙，
- * /model 排队到回合结束才弹，claude-settings 端点的 3s 确认循环早已收场）。
- * 默认项即「Yes, switch」→ Enter 即可。Enter 对正常界面有提交输入的副作用，
- * 所以必须两个特征串同时在场才动手。
+ * 初版无脑代按 Yes，前提是「弹窗只由明确的 /model 操作触发」——这个前提是错的：
+ * Claude Code 在用量保护场景会**主动**弹同款对话框提议降级（Pro 计划降到
+ * Sonnet 4.6），无脑 Enter 等于替用户答应降级（2026-07-30 外部用户报
+ * 「莫名其妙被切到 Sonnet 4.6」，本守卫防的正是这个放大器）。
+ *
+ * 现在按弹窗块提到的模型家族分流：
+ * - registry 钉了模型，且弹窗块**只**涉及钉的家族 → 这是钉模型流程自己的
+ *   迟到确认框（2026-07-28 实锤场景），代按 Yes 无害；
+ * - 弹窗涉及其他家族（CC 主动提议降级）或根本没钉模型 → **绝不代按**，
+ *   发通知带 按/不按 按钮，用户拍板。
  */
-async function maybeConfirmSwitchModel(agentName: string, pane: string): Promise<boolean> {
+async function maybeConfirmSwitchModel(
+  agentName: string,
+  channelId: string,
+  pane: string,
+  allowedUserIds: string[],
+  discord: Client
+): Promise<boolean> {
   if (!pane.includes("Switch model?") || !/Yes,\s*switch/i.test(pane)) return false;
-  console.log(`🎛 ${agentName} 停在「Switch model?」确认弹窗，自动代按 Yes`);
-  await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]);
+
+  // 只看弹窗块（标题行起 ~12 行）——上方对话正文里提到的模型名不算数
+  const block = pane.slice(pane.indexOf("Switch model?")).split("\n").slice(0, 12).join("\n");
+  const mentioned = modelFamilies(block);
+
+  let pinnedFamily: string | null = null;
+  try {
+    const { readRegistryAgents } = await import("../lib/registry.js");
+    const { resolveModelAlias } = await import("../lib/claude-launch.js");
+    const info = (await readRegistryAgents()).find((r) => r.name === agentName);
+    if (info?.model) pinnedFamily = [...modelFamilies(resolveModelAlias(info.model))][0] ?? null;
+  } catch { /* registry 读不到按未钉处理 */ }
+
+  const foreign = [...mentioned].filter((f) => f !== pinnedFamily);
+  if (pinnedFamily && foreign.length === 0) {
+    console.log(`🎛 ${agentName} 停在「Switch model?」弹窗（仅涉及钉定家族 ${pinnedFamily}），自动代按 Yes`);
+    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]);
+    return true;
+  }
+
+  // CC 主动提议 / 未钉模型 → 通知用户拍板（dedup 按涉及家族）
+  const key = `swmodel|${[...mentioned].sort().join(",")}`;
+  if (lastNotified.get(channelId) === key) return true;
+  lastNotified.set(channelId, key);
+  console.log(`🎛 ${agentName} 弹「Switch model?」但涉及 ${[...mentioned].join("/") || "未知"} ≠ 钉定 ${pinnedFamily ?? "(未钉)"}，不代按，通知用户`);
+  try {
+    const pngPath = await tmuxScreenshot(agentName);
+    const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
+    const ch = (await discord.channels.fetch(channelId)) as TextChannel;
+    const msg = await ch.send({
+      content: [
+        `🎛 **${agentName}** 弹出「Switch model?」——像是 Claude Code 主动提议换模型（常见于用量保护降级）。`,
+        `我没有代按。要切就点「切换」，想保住当前模型点「不切」。`,
+        mention,
+      ].join("\n"),
+      components: buildComponents([
+        {
+          type: "buttons",
+          buttons: [
+            { id: `swmodel_no:${agentName}`, label: "不切,保持现状", emoji: "🛡", style: "primary" },
+            { id: `swmodel_yes:${agentName}`, label: "切换", emoji: "🔁", style: "secondary" },
+          ],
+        },
+      ]),
+      files: pngPath ? [{ attachment: pngPath }] : undefined,
+    });
+    permissionMessages.set(channelId, msg.id);
+  } catch (e) {
+    console.error(`🎛 Switch model 通知发送失败:`, e);
+  }
   return true;
 }
 
@@ -129,8 +195,8 @@ async function checkAgent(
   // v2.7+ agents 视图自动逃逸（特征界面刚被 Esc 掉 → 本轮不再做弹窗检测）
   if (await maybeEscapeAgentsView(agentName, channelId, pane, discord)) return;
 
-  // v2.15.2+「Switch model?」确认弹窗自动代按（忙碌回合结束后迟到弹出的场景）
-  if (await maybeConfirmSwitchModel(agentName, pane)) return;
+  // v2.15.2+「Switch model?」弹窗：钉定家族的迟到确认框代按,其余通知用户拍板
+  if (await maybeConfirmSwitchModel(agentName, channelId, pane, allowedUserIds, discord)) return;
 
   // 两种弹窗共用一个 channel 级别的 slot，同时只会有一种出现
   const sessionIdleDesc = detectSessionIdlePrompt(pane);
