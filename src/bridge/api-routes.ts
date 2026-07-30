@@ -279,7 +279,7 @@ interface SessionTailInfo {
   effortTs: number | null;
 }
 const tailInfoCache = new Map<string, { mtimeMs: number; info: SessionTailInfo }>();
-async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
+export async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
   try {
     const st = statSync(path);
     const hit = tailInfoCache.get(path);

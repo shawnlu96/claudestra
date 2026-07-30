@@ -263,11 +263,38 @@ export async function GET(request: Request) {
         { timeoutMs: 10_000 }
       );
       const items = page.messages || [];
+      if (items.length) {
+        return NextResponse.json({
+          data: slimForWire(toChatMessages(items, { tail: false })),
+          sessionId: pinnedSession,
+          // 粗判:拿满一页 ≈ 还有更早;没拿满也标 true——本 session 翻到头后
+          // 还能跨 session 接更早的会话(v2.16 跨 session 连续翻页)
+          hasMore: true,
+        });
+      }
+      // v2.16 跨 session 连续翻页(owner 拍板 2026-07-30,「session 轮转吞历史」
+      // 的根治):本 session 翻空 = 到头 → 自动接**上一个(更旧的)** session 的
+      // 尾页。数据本来就都在盘上(live+归档),此前只是主视图回不去。
+      const list = await bridgeGet<{ ok: boolean; sessions: { sessionId: string }[] }>(
+        `/agents/${name}/history`,
+        { timeoutMs: 8000 }
+      );
+      const sids = (list.sessions ?? []).map((s) => s.sessionId);
+      const idx = sids.indexOf(pinnedSession);
+      const olderSid = idx >= 0 ? sids[idx + 1] : undefined; // mtime 降序,下一个=更旧
+      if (!olderSid) {
+        return NextResponse.json({ data: [], sessionId: pinnedSession, hasMore: false });
+      }
+      const tail = await bridgeGet<{ ok: boolean; messages: NeutralMessage[] }>(
+        `/agents/${name}/history/${encodeURIComponent(olderSid)}?limit=300`,
+        { timeoutMs: 10_000 }
+      );
+      const titems = tail.messages || [];
       return NextResponse.json({
-        data: slimForWire(toChatMessages(items, { tail: false })),
-        sessionId: pinnedSession,
-        // 粗判:拿满一页 ≈ 还有更早(边界恰好取空一次,可接受)
-        hasMore: items.length >= 300,
+        data: slimForWire(toChatMessages(titems, { tail: false })),
+        sessionId: olderSid,
+        stitched: true, // 客户端据此换纸接续翻页 + 插会话边界分隔
+        hasMore: titems.length >= 300 || idx + 2 < sids.length,
       });
     }
 

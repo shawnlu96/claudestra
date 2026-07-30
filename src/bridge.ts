@@ -982,6 +982,15 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
+  // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
+  // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
+  {
+    const { startModelDriftWatcher } = await import("./bridge/model-drift.js");
+    startModelDriftWatcher((channelId, text) => {
+      discordReply(discord, channelId, text).catch(() => {});
+    });
+  }
+
   // v2.7+ bg 对账定时器 — 检测正式 agent 的 bg 分身（agents 视图误触产物）
   startSessionReconciler(discord);
 

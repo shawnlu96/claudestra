@@ -495,6 +495,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 翻页锚也是 per-agent 的,跟着上面的 historyHasMore 一起清,loadMessages 会重设
     this.historySessionId = null;
     this.historyCursor = null; // 游标同理——旧 agent 的游标拉新 agent 的差量是灾难
+    this.olderCursor = null; // 跨 session 翻页游标 per-agent,同清
     void this.refreshCcTasks(name);
     // 无论有无缓存都重拉历史（stale-while-revalidate）——离开期间 agent 的产出
     // 只存在于 jsonl，不重拉就永远看不到。历史解析已稳定，重拉不再"漂"。
@@ -513,16 +514,27 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  切 agent 清空,loadMessages 重锚。 */
   private historyCursor: { sid: string; lastSeq: number } | null = null;
 
-  /** 向上翻页:拉当前 session 更早的一页,prepend 到列表头。
-   *  「显示更早」把本地窗口耗尽后由按钮触发(owner 2026-07-16「往上滑看全部历史」)。 */
+  /** v2.16 跨 session 翻页游标:{当前翻到的 session, 该 session 已到达的最早原始
+   *  seq}。跨 session 接续后气泡 id 带命名空间,不能再从 id 解析 seq——显式记。
+   *  null = 还没翻过页(锚从视图头部 h-id 推导)。 */
+  private olderCursor: { sid: string; firstSeq: number } | null = null;
+
+  /** 向上翻页:拉更早的一页,prepend 到列表头。本 session 翻到头后自动接上一个
+   *  (更旧的) session(v2.16 跨 session 连续翻页——session 轮转不再「吞」历史,
+   *  owner 拍板 2026-07-30)。 */
   public async loadOlder() {
     const name = this.state.activeAgent;
-    const sid = this.historySessionId;
-    if (!name || !sid || this.state.loadingOlder || !this.state.historyHasMore) return;
-    // 最早一条历史消息的 seq(id=h{seq};乐观消息是本地 id,跳过)
-    const first = this.state.messages.find((m) => m.id.startsWith("h"));
-    const beforeSeq = first ? Number(first.id.slice(1)) : NaN;
-    if (!Number.isFinite(beforeSeq)) return;
+    const pinned = this.historySessionId;
+    if (!name || !pinned || this.state.loadingOlder || !this.state.historyHasMore) return;
+    let sid = this.olderCursor?.sid ?? pinned;
+    let beforeSeq = this.olderCursor?.firstSeq;
+    if (beforeSeq === undefined) {
+      // 首次翻页:最早一条历史消息的 seq(id=h{seq};乐观消息是本地 id,跳过)
+      const first = this.state.messages.find((m) => m.id.startsWith("h"));
+      const n = first ? Number(first.id.slice(1)) : NaN;
+      if (!Number.isFinite(n)) return;
+      beforeSeq = n;
+    }
     const gen = this.openGen;
     this.produce((s) => {
       s.loadingOlder = true;
@@ -533,10 +545,36 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       );
       if (res.status === 401) return this.gotoLogin();
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as { data?: ChatMessage[]; hasMore?: boolean };
+      const json = (await res.json()) as {
+        data?: ChatMessage[];
+        sessionId?: string;
+        stitched?: boolean;
+        hasMore?: boolean;
+      };
       if (gen !== this.openGen) return; // 已切走
+      const raw = json.data ?? [];
+      const respSid = json.sessionId || sid;
+      // 游标前移要在 id 改写前从原始 h<seq> 提取
+      const firstSeq = raw.length ? Number(raw[0].id.slice(1)) : beforeSeq;
+      let msgs = hydrateHistoryMessages(raw);
+      if (respSid !== pinned) {
+        // 跨 session 气泡 id 加命名空间:两个 session 的 h<seq> 会撞 React key;
+        // 仍以 h 开头,syncDelta 的 base(h-filter) 不会把已拼接的历史洗掉
+        const ns = respSid.slice(0, 4);
+        msgs = msgs.map((m) => ({ ...m, id: `${m.id}~${ns}` }));
+      }
+      this.olderCursor = { sid: respSid, firstSeq: Number.isFinite(firstSeq) ? firstSeq : beforeSeq };
       this.produce((s) => {
-        s.messages = [...hydrateHistoryMessages(json.data ?? []), ...s.messages];
+        // 换纸边界:接上一个 session 时插一条居中分隔(SystemDivider)
+        const divider: ChatMessage[] = json.stitched
+          ? [{
+              id: `sessdiv_${respSid}`,
+              role: "system",
+              content: `⏮ 以上是更早的会话（${respSid.slice(0, 8)}）`,
+              ts: msgs[msgs.length - 1]?.ts ?? new Date().toISOString(),
+            } as ChatMessage]
+          : [];
+        s.messages = [...msgs, ...divider, ...s.messages];
         s.historyHasMore = !!json.hasMore;
         s.loadingOlder = false;
       });
@@ -562,6 +600,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.detachActiveStream();
     const gen = ++this.openGen;
     this.historySessionId = sessionId;
+    this.olderCursor = null; // 历史现场从命中 session 重新起翻
     this.produce((s) => {
       s.browsing = { sessionId, anchorSeq: seq };
       s.messages = [];
@@ -600,6 +639,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const name = this.state.activeAgent;
     if (!name) return;
     this.historySessionId = null;
+    this.olderCursor = null;
     const gen = ++this.openGen;
     this.produce((s) => {
       s.browsing = null;
@@ -729,6 +769,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.discardPendingText();
     this.historySessionId = null;
     this.historyCursor = null;
+    this.olderCursor = null;
     const gen = ++this.openGen;
     this.produce((s) => {
       s.messages = [];
@@ -776,6 +817,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         return;
       }
       this.historySessionId = json.sessionId ?? null;
+      this.olderCursor = null; // 全量重载 = 视图重置,翻页游标重新起算
       // v2.16 cursor 同步:全量加载即重锚游标(sid + 最后一条原始记录 seq)。
       // 唤醒差量按它拉「之后的」——这是 owner 2026-07-25 立的 cursor 模型扳机的落地
       this.historyCursor =

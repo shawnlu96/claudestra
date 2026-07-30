@@ -156,6 +156,16 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
               : `🧊 疑似卡死 —— 回合进行中，输出 token 计数已 ${mins} 分钟纹丝不动。建议点「停止」中断后重试。`,
         };
       }
+      // v2.16+ 模型漂移(CC 用量保护静默降级)——web 端也要看得见
+      if (d.kind === "model_drift") {
+        return {
+          t: "text",
+          text:
+            lang === "en"
+              ? `⚠️ Model drift — expected \`${String(d.expected ?? "?")}\` but the session is actually using \`${String(d.actual ?? "?")}\` (likely Claude Code usage-protection downgrade). Restart to pull it back.`
+              : `⚠️ 模型漂移 —— 预期 \`${String(d.expected ?? "?")}\`，会话实际在用 \`${String(d.actual ?? "?")}\`（多半是 Claude Code 用量保护静默降级）。restart 可拉回。`,
+        };
+      }
       if (d.kind !== "link_down") return null;
       const mins = Number(d.minutes) || 0;
       return {
