@@ -42,7 +42,10 @@ const WAIT_SEC = 120;
 const POST_TIMEOUT_MS = (WAIT_SEC + 15) * 1000;
 /** thread 轮询间隔 / 放弃时限 */
 const POLL_INTERVAL_MS = 30_000;
-const POLL_GIVE_UP_MS = 10 * 60_000;
+// v2.16: 10 分钟放弃对长任务(编译/审计/大重构动辄 30-60 分钟)是硬伤——
+// 外部用户实报「>10 分钟收不到回复」。放宽到 2h,30s 一拍共 ~240 次轻量
+// GET,本地/tailnet 链路无压力;对侧结果留存窗口已配套放宽(api-routes)。
+const POLL_GIVE_UP_MS = 2 * 3600_000;
 
 interface CallerRef {
   ws: ServerWebSocket<unknown>;

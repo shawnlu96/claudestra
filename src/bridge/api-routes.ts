@@ -140,7 +140,13 @@ export const apiFiles = new Map<string, { path: string; tokenId: string; name: s
 export const API_RATE_LIMIT_PER_MIN = 120;
 /** per-token 限流器（内存态，60s 滑动窗口） */
 const apiLimiters = new Map<string, SlidingWindowLimiter>();
-const API_REQUEST_TTL_MS = 10 * 60_000;
+// v2.16 拆双 TTL(外部用户报「>10 分钟的长任务收不到回复/推送」实锤):
+// pending 队列的 TTL 就是「迟到 reply 还能找回原 threadId」的窗口——10 分钟
+// 对长任务远远不够,被清后 reply 落到新造的 threadId 下,轮询方(HTTP API
+// 调用者/peer 推回)永远等不到。放宽到 2h(条目极小,内存无虞);轮询结果
+// 本身在 reply 写入后留 30 分钟足够(30s 轮询间隔一两拍就取走)。
+const API_PENDING_TTL_MS = 2 * 3600_000;
+const API_RESULT_TTL_MS = 30 * 60_000;
 
 export function apiReqKey(tokenId: string, agentChannelId: string): string {
   return `${tokenId}|${agentChannelId}`;
@@ -149,12 +155,12 @@ export function apiReqKey(tokenId: string, agentChannelId: string): string {
 /** API 会话状态 TTL 清理（bridge 的 staleCleanup 周期里调用） */
 export function sweepApiState(now = Date.now()): void {
   for (const [key, queue] of pendingApiRequests.entries()) {
-    const fresh = queue.filter((p) => now - p.ts <= API_REQUEST_TTL_MS);
+    const fresh = queue.filter((p) => now - p.ts <= API_PENDING_TTL_MS);
     if (fresh.length === 0) pendingApiRequests.delete(key);
     else if (fresh.length !== queue.length) pendingApiRequests.set(key, fresh);
   }
   for (const [tid, hit] of apiThreadResults.entries()) {
-    if (now - hit.ts > API_REQUEST_TTL_MS) apiThreadResults.delete(tid);
+    if (now - hit.ts > API_RESULT_TTL_MS) apiThreadResults.delete(tid);
   }
   if (apiFiles.size > 200) {
     // 附件登记只按容量截断（文件本身在 TMP_DIR，系统自己清）
