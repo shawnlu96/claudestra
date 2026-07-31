@@ -3079,12 +3079,55 @@ async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl
   output({ ok: true, peer: finalName, agents: inv.agents, oneWay: !peerToken, inviteId: inv.id });
 }
 
+/** v2.16.1 跨 tailnet 候选扫描:邀请地址连不上时,扫本机 tailscale 视角的
+ *  peer IP 同端口找活着的 bridge(1.5s 超时并行 GET /api/v1/agents,有 HTTP
+ *  响应即候选——401 也算,那正是 token 门禁在工作)。只探测不发凭据。 */
+async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
+  const port = (() => { try { return new URL(failedUrl).port || "3847"; } catch { return "3847"; } })();
+  const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
+  // tailscale CLI:PATH 里的优先,mac App 路径兜底
+  let out = "";
+  for (const bin of ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
+    try {
+      const proc = Bun.spawn([bin, "status", "--json"], { stdout: "pipe", stderr: "ignore" });
+      out = await new Response(proc.stdout).text();
+      await proc.exited;
+      if (out.trim().startsWith("{")) break;
+    } catch { /* 下一个候选 */ }
+  }
+  if (!out.trim().startsWith("{")) return [];
+  const ips: string[] = [];
+  try {
+    const j = JSON.parse(out) as { Peer?: Record<string, { TailscaleIPs?: string[]; Online?: boolean }> };
+    for (const p of Object.values(j.Peer || {})) {
+      if (p.Online === false) continue;
+      const v4 = (p.TailscaleIPs || []).find((ip) => /^100\./.test(ip));
+      if (v4 && v4 !== failedHost) ips.push(v4);
+    }
+  } catch { return []; }
+  const hits = await Promise.all(
+    ips.slice(0, 20).map(async (ip) => {
+      try {
+        await fetch(`http://${ip}:${port}/api/v1/agents`, { signal: AbortSignal.timeout(1500) });
+        return `http://${ip}:${port}`; // 任何 HTTP 响应(含 401)= 有 bridge
+      } catch {
+        return null;
+      }
+    })
+  );
+  return hits.filter((x): x is string => !!x);
+}
+
 /** 加入（我是被邀方）：粘贴 v2 邀请串一步完成。默认不向对方开放任何 agent
  *  （--agents 显式给才反向开放）——对称访问 = 对方也生成一张邀请给我。 */
-async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUrl: string, force: boolean) {
+async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUrl: string, force: boolean, peerUrlOverride = "") {
   const { parsePeerInviteV2, parsePeerHandshake, upsertHttpPeer, removeHttpPeer, readPeers, writePeers, findHttpPeer } = await import("./lib/peers.js");
-  if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--force]" }); return; }
+  if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--peer-url <对方地址覆盖>] [--force]" }); return; }
   const hs = parsePeerInviteV2(inviteStr);
+  // v2.16.1 跨 tailnet 纠偏:邀请串嵌的是**发方视角**的 tailscale IP,跨 tailnet
+  // 设备共享下接方看到的是映射地址(2026-07-31 实战:串里 .46,我方视角 .45)。
+  // --peer-url 显式覆盖;连不上时下方兜底扫描会给出候选提示。
+  if (hs && peerUrlOverride.trim()) hs.url = peerUrlOverride.trim().replace(/\/+$/, "");
   if (!hs) {
     output({
       ok: false,
@@ -3141,7 +3184,17 @@ async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUrl: stri
       await removeHttpPeer(finalName);
     }
     if (myTokenId) await disableTokenById(myTokenId, false);
-    output({ ok: false, error: `加入失败（已回滚）: ${redeemErr}`, hint: "确认对方 bridge 在线、地址对外可达、邀请未过期未撤销" });
+    // 连接类失败 → 扫 tailnet 同端口找可达的 bridge 候选(只做无凭据的 GET 探测,
+    // 兑换凭据绝不往未确认的地址发)。跨 tailnet 共享的映射地址错位就靠这提示自救。
+    let hint = "确认对方 bridge 在线、地址对外可达、邀请未过期未撤销";
+    if (/连不上对方 bridge/.test(redeemErr)) {
+      const cands = await scanTailnetBridges(hs.url).catch(() => [] as string[]);
+      if (cands.length) {
+        hint = `邀请串里的地址不可达,但 tailnet 里这些地址有 bridge 在响应: ${cands.join(", ")}` +
+          `。跨 tailnet 设备共享下邀请嵌的是对方视角 IP——很可能就是其中之一,用 --peer-url <地址> 重试(邀请串原样保留)。`;
+      }
+    }
+    output({ ok: false, error: `加入失败（已回滚）: ${redeemErr}`, hint });
     return;
   }
   output({
@@ -3869,7 +3922,7 @@ switch (cmd) {
   }
   case "peer-join-auto": {
     const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
-    let agentsCsv = "", myUrl = "";
+    let agentsCsv = "", myUrl = "", peerUrl = "";
     const pos: string[] = [];
     for (let i = 0; i < afterForce.length; i++) {
       const a = afterForce[i];
@@ -3877,9 +3930,13 @@ switch (cmd) {
       else if (a.startsWith("--agents=")) agentsCsv = a.slice(9);
       else if (a === "--url") myUrl = afterForce[++i] || "";
       else if (a.startsWith("--url=")) myUrl = a.slice(6);
+      // v2.16.1: 覆盖邀请串里的对方地址(跨 tailnet 共享下串里嵌的是发方
+      // 视角 IP,接方视角是另一个映射地址——2026-07-31 实战踩坑)
+      else if (a === "--peer-url") peerUrl = afterForce[++i] || "";
+      else if (a.startsWith("--peer-url=")) peerUrl = a.slice(11);
       else pos.push(a);
     }
-    await cmdPeerJoinAuto(pos[0] || "", agentsCsv, myUrl, force);
+    await cmdPeerJoinAuto(pos[0] || "", agentsCsv, myUrl, force, peerUrl);
     break;
   }
   case "metrics": {
