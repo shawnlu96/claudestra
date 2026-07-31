@@ -127,11 +127,14 @@ function paneIdle(pane: string): boolean {
  * 它忙就退回任意 idle agent 窗口（通常刚跑完 hook 的那个就是 idle 的）。
  */
 async function findIdleScrapeTarget(): Promise<string | null> {
-  const candidates: string[] = [`${MASTER_SESSION}:0`];
+  // v2.16.1: agent 窗口优先,master 垫底(原来 master 排第一,吃下绝大多数抓取,
+  // 而 master 是消息最密的窗口——TOCTOU 撞上刚开的回合就把大总管打断,外部
+  // 用户实报「检查用量经常打断大总管」)。gauge 是账号全局的,谁的窗口都一样。
   const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => ""))
     .split("\n")
     .filter((w) => w.startsWith("agent-"));
-  candidates.push(...wins.map((w) => `${MASTER_SESSION}:${w}`));
+  const candidates: string[] = wins.map((w) => `${MASTER_SESSION}:${w}`);
+  candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {
     const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
     if (paneIdle(pane)) return t;
@@ -156,6 +159,14 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
   try {
     await tmuxRaw(["send-keys", "-t", target, "-l", "/status"]);
     await sleep(150);
+    // v2.16.1 TOCTOU 二次确认(外部用户实报「检查用量经常打断大总管」):
+    // 选窗到此已过去几百 ms,期间可能恰好来消息开了回合——此时 Enter 会把
+    // 队列文本当消息提交/把用户半截输入发出去。不再 idle 就退掉刚敲的字符走人。
+    const recheck = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+    if (!paneIdle(recheck)) {
+      for (let i = 0; i < 7; i++) await tmuxRaw(["send-keys", "-t", target, "BSpace"]).catch(() => {});
+      return null;
+    }
     await tmuxRaw(["send-keys", "-t", target, "Enter"]);
     await sleep(500);
 
@@ -183,10 +194,19 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
       const refreshed = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
       if (/Current session/.test(refreshed) && /Current week/.test(refreshed) && /%\s*used/.test(refreshed)) panel = refreshed;
     }
-    // 关闭面板恢复会话
-    await tmuxRaw(["send-keys", "-t", target, "Escape"]);
-    await sleep(80);
-    await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+    // 关闭面板恢复会话。v2.16.1: Escape 只在确认面板真的开着时才发——
+    // 面板没开(Enter 落空/被吃)时的裸 Escape 若撞上刚开的回合就是硬中断,
+    // 这正是「检查用量打断大总管」的杀伤路径。
+    const closing = found
+      ? true
+      : /Current session|Settings|Usage|Status/.test(
+          await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "")
+        );
+    if (closing) {
+      await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+      await sleep(80);
+      await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+    }
     if (!found) return null;
     const usage = parseUsagePanel(panel);
     console.log(`📊 账号用量已刷新: session=${usage.sessionPct}% week=${usage.weekPct}% (via ${target})`);
@@ -194,8 +214,12 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
   } catch (e) {
     console.error("📊 /status 抓取失败:", (e as Error).message);
     try {
-      await tmuxRaw(["send-keys", "-t", target, "Escape"]);
-      await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+      // 同上:确认面板在场才 Escape,不对活回合裸发中断键
+      const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+      if (/Current session|Settings|Usage|Status/.test(pane)) {
+        await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+        await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+      }
     } catch {}
     return null;
   }

@@ -370,6 +370,14 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   // agent 搜索（2026-07-13 owner）：名称/用途 大小写不敏感即时过滤，纯前端
   const [query, setQuery] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  // 左下角版本徽标(owner 2026-07-31):服务端版本+commit,/api/version 一次性拉
+  const [verInfo, setVerInfo] = useState<{ version?: string; commit?: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/version")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => j && setVerInfo(j))
+      .catch(() => {});
+  }, []);
   const [showStats, setShowStats] = useState(false);
   const q = query.trim().toLowerCase();
   // 多选管理(owner 2026-07-16:「agent 页面做管理功能,多选删除」)
@@ -702,6 +710,12 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
         >
           Claudestra Web
+          {verInfo?.version ? (
+            <span className="ml-1 font-mono">
+              v{verInfo.version}
+              {verInfo.commit ? ` · ${verInfo.commit}` : ""}
+            </span>
+          ) : null}
         </div>
       )}
       <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
