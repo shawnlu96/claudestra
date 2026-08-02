@@ -135,11 +135,11 @@ describe("emptyUsage", () => {
 });
 
 describe("projectsSlug", () => {
-  test("普通路径：去掉开头 / 后把 / 换成 -", () => {
+  test("普通路径：去掉开头 / 后非字母数字统一换成 -", () => {
     // 用真实存在的目录（realpath 不改变非符号链接路径的语义）
     const dir = mkdtempSync(join(tmpdir(), "slug-plain-"));
     const real = realpathSync(dir);
-    expect(projectsSlug(real)).toBe("-" + real.replace(/^\//, "").replace(/\//g, "-"));
+    expect(projectsSlug(real)).toBe("-" + real.replace(/^\//, "").replace(/[^A-Za-z0-9]/g, "-"));
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -153,6 +153,14 @@ describe("projectsSlug", () => {
     expect(projectsSlug(link)).toBe(projectsSlug(target));
     expect(projectsSlug(link)).toContain("real-target");
     rmSync(base, { recursive: true, force: true });
+  });
+
+  test("v2.16.1 非字母数字统一转 -（对齐 CC 真实规则:下划线/点都转）", () => {
+    // 2026-08-02 peer 实锤:cwd futures_data → CC 实际目录 futures-data;
+    // 旧规则保留 _ 导致 live 历史失明/归档失位/cost 漏计
+    expect(projectsSlug("/no/such/futures_data")).toBe("-no-such-futures-data");
+    expect(projectsSlug("/no/such/.claude-orchestrator/master")).toBe("-no-such--claude-orchestrator-master");
+    expect(projectsSlug("/no/such/a.b_c d")).toBe("-no-such-a-b-c-d");
   });
 
   test("路径不存在 → 按原样算 slug，不抛错", () => {

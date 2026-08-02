@@ -15,7 +15,7 @@
 import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
-import { projectJsonlPath } from "./jsonl-cost.js";
+import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
 
 export interface HistoryToolCall {
@@ -252,8 +252,15 @@ export async function listAgentSessions(
     const candidates = new Set(byId.keys());
     if (opts.currentSessionId) candidates.add(opts.currentSessionId);
     for (const sid of candidates) {
-      const lp = livePathFor(opts.cwd, sid);
-      if (!existsSync(lp)) continue;
+      let lp = livePathFor(opts.cwd, sid);
+      // v2.16.1 slug 失配兜底(2026-08-02 peer 实锤:slug 规则偏差会让 live
+      // session 整体失明,web 历史停在旧归档):路径推导 miss 就按 sessionId
+      // 全局扫 projects 目录——live 会话绝不因 slug 推导错误而不可见。
+      if (!existsSync(lp)) {
+        const found = findJsonlBySessionId(sid);
+        if (!found) continue;
+        lp = found;
+      }
       const live = summarize(sid, "live", lp);
       if (!live) continue;
       const prev = byId.get(sid);

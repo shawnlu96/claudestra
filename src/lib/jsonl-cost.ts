@@ -75,14 +75,37 @@ export function projectsSlug(cwd: string): string {
   } catch {
     /* 目录已不存在 → 按原样算，让上层走 findJsonlBySessionId 兜底 */
   }
+  // v2.16.1 对齐 Claude Code 的真实 slug 规则:**所有**非字母数字都转 `-`,
+  // 不只是 `/`。此前保留 `_` 导致 cwd 含下划线的 agent 整条链路失明——live
+  // 历史读不出、归档 sweeper 定位失败(数据丢失风险)、cost 漏计(2026-08-02
+  // peer HedeMacBook-Pro 实锤:cwd futures_data → CC 实际目录 futures-data)。
+  // 本机双证:.claude-orchestrator 的 `.` 也被 CC 转成 `-`,projects 下无任何
+  // 含 `_` 的目录。
+  return "-" + resolved.replace(/^\//, "").replace(/[^A-Za-z0-9]/g, "-");
+}
+
+/** 旧版 slug(只转 `/`)——projectJsonlPath 的兼容回退用,勿新增调用方。 */
+function legacySlug(cwd: string): string {
+  let resolved = cwd;
+  try {
+    resolved = realpathSync(cwd);
+  } catch { /* 同上 */ }
   return "-" + resolved.replace(/^\//, "").replace(/\//g, "-");
 }
 
 /**
  * 根据项目 slug 自动推 JSONL 路径。
+ * 兼容垫片:新规则路径不存在而旧规则(只转 `/`)路径存在时回退旧路径——
+ * 兜住 CC slug 规则与我们推断有出入的任何字符类(如 CJK 路径行为未实证),
+ * 存量正常读,不因规则修正引入新盲区。
  */
 export function projectJsonlPath(cwd: string, sessionId: string): string {
-  return `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}/${sessionId}.jsonl`;
+  const root = `${process.env.HOME}/.claude/projects`;
+  const primary = `${root}/${projectsSlug(cwd)}/${sessionId}.jsonl`;
+  if (existsSync(primary)) return primary;
+  const legacy = `${root}/${legacySlug(cwd)}/${sessionId}.jsonl`;
+  if (legacy !== primary && existsSync(legacy)) return legacy;
+  return primary;
 }
 
 /** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session */
