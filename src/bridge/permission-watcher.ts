@@ -232,6 +232,14 @@ export function computeModalKey(
   return null;
 }
 
+/** v2.16.4 服务端 thinking 反向对账:channelId → 首次观测到「事件态 thinking
+ *  但 pane 空闲」的时刻。2026-08-04 实锤:一条推回消息投递即点亮 thinking,
+ *  但会话从未收到、回合从未开始,thinking 挂死 27 分钟——web 永远思考中、
+ *  新消息还会误触抢占打断。web 客户端的反向对齐救不了这种,因为它信任的
+ *  正是服务端 busy。 */
+const idleWhileThinking = new Map<string, number>();
+const IDLE_THINKING_GRACE_MS = 120_000;
+
 async function checkAgent(
   agentName: string,
   channelId: string,
@@ -239,6 +247,26 @@ async function checkAgent(
   discord: Client
 ) {
   const pane = await tmuxCapture(windowTarget(agentName), 30);
+
+  // thinking 反向对账:pane 空闲(❯ 在场且无 esc to interrupt)而事件态仍
+  // thinking,连续 2 分钟 → 强制发 done 收敛。真回合的间隙(工具间/流转)
+  // 不会持续 2 分钟空闲提示符,不误伤。
+  try {
+    const { getAgentStatus, emitEvent } = await import("./event-bus.js");
+    const paneIdleNow = /❯/.test(pane) && !/esc to interrupt/i.test(pane);
+    if (getAgentStatus(agentName) === "thinking" && paneIdleNow) {
+      const first = idleWhileThinking.get(channelId);
+      if (first === undefined) {
+        idleWhileThinking.set(channelId, Date.now());
+      } else if (Date.now() - first > IDLE_THINKING_GRACE_MS) {
+        idleWhileThinking.delete(channelId);
+        console.log(`🧭 thinking 对账: ${agentName} 事件态 thinking 但 pane 已空闲 ${Math.round((Date.now() - first) / 1000)}s,强制收敛为 done`);
+        emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "reconcile" } });
+      }
+    } else {
+      idleWhileThinking.delete(channelId);
+    }
+  } catch { /* 对账失败不影响弹窗检测 */ }
 
   // v2.7+ agents 视图自动逃逸（特征界面刚被 Esc 掉 → 本轮不再做弹窗检测）
   if (await maybeEscapeAgentsView(agentName, channelId, pane, discord)) return;
