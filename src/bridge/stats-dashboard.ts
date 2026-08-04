@@ -190,9 +190,19 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
     // 会永远抓到进程启动那一刻的值（master 长寿进程 → gauge 冻结）。锚定后再等一拍、
     // 用刷新后的帧解析（实测 15%/20% 冻结值 vs 等待后 74%/40% 真值）。
     if (found) {
-      await sleep(1800);
-      const refreshed = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-      if (/Current session/.test(refreshed) && /Current week/.test(refreshed) && /%\s*used/.test(refreshed)) panel = refreshed;
+      // v2.17 自适应等真值(外部用户实锤:真实 100% 而看板 0%——固定 1800ms
+      // 没等到异步刷新,采纳了进程启动时的缓存首帧)。轮询到「数值相对首帧
+      // 变化」或超时;真 0% 场景首帧即真值,多等几拍无害。
+      const firstFrame = panel;
+      for (let w = 0; w < 6; w++) {
+        await sleep(1300);
+        const refreshed = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+        if (!(/Current session/.test(refreshed) && /Current week/.test(refreshed) && /%\s*used/.test(refreshed))) continue;
+        panel = refreshed;
+        const a = parseUsagePanel(firstFrame);
+        const b = parseUsagePanel(refreshed);
+        if (a.sessionPct !== b.sessionPct || a.weekPct !== b.weekPct || a.sessionResets !== b.sessionResets) break;
+      }
     }
     // 关闭面板恢复会话。v2.16.1: Escape 只在确认面板真的开着时才发——
     // 面板没开(Enter 落空/被吃)时的裸 Escape 若撞上刚开的回合就是硬中断,
@@ -209,6 +219,21 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
     }
     if (!found) return null;
     const usage = parseUsagePanel(panel);
+    // v2.17 合理性校验:session 窗口 ≤5h,解析出的重置时刻按「下一次出现」换算
+    // 后若在 5.2h 之外 = 物理不可能 = 陈旧缓存帧(实锤截图:真值 Resets 12:20am,
+    // 陈旧帧 Resets 3:50pm 距当时 16h)→ 丢弃本次,沿用旧缓存等下轮
+    const tm = usage.sessionResets.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+    if (tm) {
+      let h = Number(tm[1]) % 12;
+      if ((tm[3] || "").toLowerCase() === "pm") h += 12;
+      const cand = new Date();
+      cand.setHours(h, Number(tm[2]), 0, 0);
+      if (cand.getTime() <= Date.now()) cand.setDate(cand.getDate() + 1);
+      if (cand.getTime() - Date.now() > 5.2 * 3600_000) {
+        console.log(`📊 丢弃陈旧用量帧: session reset "${usage.sessionResets}" 距今超 5h,判定为启动缓存快照 (via ${target})`);
+        return null;
+      }
+    }
     console.log(`📊 账号用量已刷新: session=${usage.sessionPct}% week=${usage.weekPct}% (via ${target})`);
     return usage;
   } catch (e) {
