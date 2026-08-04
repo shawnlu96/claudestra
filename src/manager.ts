@@ -2445,7 +2445,80 @@ async function maybeBuildWeb(
   return { built: true, restarted: false, skipped: "web 非 launchd 托管——已构建,请自行重启 web 进程" };
 }
 
+/** v2.17 beta 通道 update:紧跟 origin/main 的每个 commit(ff-only,天然在分支
+ *  上不 detach)。release 通道走下面的 cmdUpdate 正式流程。 */
+async function cmdUpdateBeta() {
+  const updateLock = `${process.env.HOME}/.claude-orchestrator/update.lock`;
+  try {
+    const st = statSync(updateLock);
+    if (Date.now() - st.mtimeMs < 30 * 60_000) {
+      output({ ok: false, error: "另一次 update 正在进行(update.lock 未满 30 分钟)——稍后再试" });
+      return;
+    }
+  } catch { /* 无锁 */ }
+  await writeFile(updateLock, String(process.pid)).catch(() => {});
+  const unlock = () => import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
+
+  const status = await git("status", "--porcelain");
+  if (!status.ok || status.out) {
+    await unlock();
+    output({ ok: false, error: status.ok ? "仓库有未提交的改动,先 commit/stash 再更新" : "不是 git 仓库" });
+    return;
+  }
+  await git("fetch", "--quiet", "origin", "main");
+  const preHead = (await git("rev-parse", "HEAD")).out.trim();
+  const remote = (await git("rev-parse", "origin/main")).out.trim();
+  if (!remote) { await unlock(); output({ ok: false, error: "取不到 origin/main" }); return; }
+  if (preHead === remote) {
+    // 已同步;若还挂在 detached 顺手挂回(beta 通道也可能从 release 时代的 detach 迁移来)
+    await git("checkout", "main", "--quiet");
+    await git("merge", "--ff-only", "origin/main", "--quiet");
+    await unlock();
+    output({ ok: true, channel: "beta", head: preHead.slice(0, 7), message: `beta 已是最新 @ ${preHead.slice(0, 7)}` });
+    return;
+  }
+  const anc = await git("merge-base", "--is-ancestor", "HEAD", "origin/main");
+  if (!anc.ok) {
+    await unlock();
+    output({ ok: false, error: `本地 HEAD 与 origin/main 分叉,beta 通道不强推——手动处理后再试(git log HEAD...origin/main)` });
+    return;
+  }
+  const co = await git("checkout", "main", "--quiet");
+  const ff = co.ok ? await git("merge", "--ff-only", "origin/main", "--quiet") : co;
+  if (!ff.ok) { await unlock(); output({ ok: false, error: `ff 前进失败: ${ff.err}` }); return; }
+
+  const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+  await biProc.exited;
+  const rendered = await renderMasterClaude();
+  const webBuild = await maybeBuildWeb(preHead, remote);
+  const migrateProc = Bun.spawn(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+  await migrateProc.exited;
+  await Bun.sleep(500);
+  await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
+  const { installClaudestraCli } = await import("./lib/cli-install.js");
+  const cliInstall = await installClaudestraCli(REPO_ROOT);
+  await unlock();
+  output({
+    ok: true,
+    channel: "beta",
+    from: preHead.slice(0, 7),
+    to: remote.slice(0, 7),
+    message: `beta 已前进 ${preHead.slice(0, 7)} → ${remote.slice(0, 7)} 并 reload daemon`,
+    masterReRendered: rendered,
+    webBuild,
+    cliInstalled: cliInstall.errors.length === 0,
+  });
+}
+
 async function cmdUpdate() {
+  // v2.17 通道分流:beta 走 commit 级前进,release 走正式版流程
+  {
+    const { readConfig } = await import("./lib/config-store.js");
+    if (((await readConfig()).autoUpdate.channel ?? "release") === "beta") {
+      await cmdUpdateBeta();
+      return;
+    }
+  }
   const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
 
   // 1. 查询最新 release
@@ -3552,14 +3625,33 @@ async function cmdTmuxWaitIdle(name: string, timeoutMs: number) {
 }
 
 async function cmdAutoUpdate(sub: string, ...rest: string[]) {
-  const { readConfig, setAutoUpdate } = await import("./lib/config-store.js");
+  const { readConfig, setAutoUpdate, setUpdateChannel } = await import("./lib/config-store.js");
 
   if (sub === "status" || sub === "" || sub === "get") {
     const cfg = await readConfig();
+    const chan = cfg.autoUpdate.channel ?? "release";
     output({
       ok: true,
       autoUpdate: cfg.autoUpdate,
-      message: `Claudestra: ${cfg.autoUpdate.claudestra ? "on" : "off"} · Claude Code: ${cfg.autoUpdate.claudeCode ? "on" : "off"}`,
+      message: `Claudestra: ${cfg.autoUpdate.claudestra ? "on" : "off"} · Claude Code: ${cfg.autoUpdate.claudeCode ? "on" : "off"} · 通道: ${chan}`,
+    });
+    return;
+  }
+
+  // v2.17 auto-update channel beta|release —— beta 紧跟 origin/main 每个 commit
+  if (sub === "channel") {
+    const chan = rest[0]?.toLowerCase();
+    if (chan !== "beta" && chan !== "release") {
+      output({ ok: false, error: "usage: auto-update channel <beta|release>" });
+      return;
+    }
+    const cfg = await setUpdateChannel(chan);
+    output({
+      ok: true,
+      autoUpdate: cfg.autoUpdate,
+      message: chan === "beta"
+        ? "已切到 beta 通道:update/自动更新将紧跟 origin/main 的每个 commit(未经 release 验证,自担风险)"
+        : "已切回 release 通道:只跟正式发布版本",
     });
     return;
   }
@@ -4179,6 +4271,7 @@ switch (cmd) {
         "auto-update status              — show auto-update toggles",
         "auto-update claudestra on|off   — toggle Claudestra auto-update (default on)",
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
+        "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — summarise the bridge event log",

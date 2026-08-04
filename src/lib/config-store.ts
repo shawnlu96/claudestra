@@ -14,10 +14,15 @@ const CONFIG_PATH = `${CONFIG_DIR}/config.json`;
 
 export type AppLang = "zh" | "en";
 
+export type UpdateChannel = "release" | "beta";
+
 export interface AppConfig {
   autoUpdate: {
     claudestra: boolean;
     claudeCode: boolean;
+    /** v2.17 更新通道:release=只跟正式版(默认);beta=紧跟 origin/main 的
+     *  每个 commit(未经 release 验证,尝鲜/急修场景自担风险)。 */
+    channel?: UpdateChannel;
   };
   /** 用户在 setup 里选的默认语言，贯穿整个 app（Discord 消息 / 通知 / 日志）。v1.9.31+ */
   lang: AppLang;
@@ -40,6 +45,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     autoUpdate: {
       claudestra: typeof au.claudestra === "boolean" ? au.claudestra : base.autoUpdate.claudestra,
       claudeCode: typeof au.claudeCode === "boolean" ? au.claudeCode : base.autoUpdate.claudeCode,
+      channel: au.channel === "beta" ? "beta" : "release",
     },
     lang: raw.lang === "en" || raw.lang === "zh" ? raw.lang : base.lang,
     statsDashboard:
@@ -71,6 +77,13 @@ export async function writeConfig(cfg: AppConfig): Promise<void> {
   const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
   await Bun.write(tmp, JSON.stringify(cfg, null, 2));
   await rename(tmp, CONFIG_PATH);
+}
+
+export async function setUpdateChannel(channel: UpdateChannel): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.autoUpdate.channel = channel;
+  await writeConfig(cfg);
+  return cfg;
 }
 
 export async function setAutoUpdate(target: "claudestra" | "claudeCode", enabled: boolean): Promise<AppConfig> {

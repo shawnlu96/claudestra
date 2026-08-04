@@ -178,8 +178,52 @@ async function recoverMasterWindow(): Promise<boolean> {
 let lastUpdateCheck = 0;
 let lastNotifiedVersion = "";
 
+/** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
+ *  manager update(其内部走 beta 前进流程)。 */
+async function checkBetaUpdates(autoOn: boolean) {
+  const g = async (...a: string[]) => {
+    const p = Bun.spawn(["git", "-C", REPO_ROOT, ...a], { stdout: "pipe", stderr: "ignore" });
+    const out = (await new Response(p.stdout).text()).trim();
+    await p.exited;
+    return p.exitCode === 0 ? out : "";
+  };
+  await g("fetch", "--quiet", "origin", "main");
+  const head = await g("rev-parse", "HEAD");
+  const remote = await g("rev-parse", "origin/main");
+  if (!head || !remote || head === remote) return;
+  if (remote === lastNotifiedVersion) return; // 同一 commit 只处理一次(忙碌重试除外)
+  if (!autoOn) {
+    lastNotifiedVersion = remote;
+    await bridgeRequest({
+      type: "reply", chatId: CONTROL_CHANNEL_ID,
+      text: `🧪 beta 通道有新 commit(${head.slice(0, 7)} → ${remote.slice(0, 7)}),自动更新已关——手动: bun src/manager.ts update`,
+    }).catch(() => {});
+    return;
+  }
+  if (!(await allAgentsIdle())) {
+    console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),有 agent 在忙,下次再试`);
+    return;
+  }
+  lastNotifiedVersion = remote;
+  console.log(`🧪 beta 自动前进 ${head.slice(0, 7)} → ${remote.slice(0, 7)}`);
+  Bun.spawn(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "update"], {
+    cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    // @ts-ignore Bun 支持 detached
+    detached: true,
+  });
+}
+
 async function checkForUpdates() {
   if (!CONTROL_CHANNEL_ID) return;
+
+  // v2.17 通道分流:beta 跟 commit,release 跟正式版
+  {
+    const cfgChan = await readConfig();
+    if ((cfgChan.autoUpdate.channel ?? "release") === "beta") {
+      await checkBetaUpdates(cfgChan.autoUpdate.claudestra);
+      return;
+    }
+  }
 
   const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
 
