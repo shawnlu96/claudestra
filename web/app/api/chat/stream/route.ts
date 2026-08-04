@@ -156,6 +156,18 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
               : `🧊 疑似卡死 —— 回合进行中，输出 token 计数已 ${mins} 分钟纹丝不动。建议点「停止」中断后重试。`,
         };
       }
+      // v2.16.2「Switch model?」弹窗待决(watcher 判定非用户意图,不代按)——
+      // web 用户此前零提示只看到卡死;文本指引去模型下拉重选(会带意图,必被代按)
+      if (d.kind === "switch_model_prompt") {
+        const fams = Array.isArray(d.families) ? (d.families as string[]).join("/") : "?";
+        return {
+          t: "text",
+          text:
+            lang === "en"
+              ? `🎛 Claude Code is showing a "Switch model?" dialog (${fams}) that doesn't match any user-initiated switch — not auto-confirmed. Re-pick the model from the dropdown to complete it, or use the Discord buttons.`
+              : `🎛 会话弹出了「Switch model?」确认框（涉及 ${fams}），不是你发起的切换，我没有代按。要切就去右上模型下拉重选一次（会自动确认），或到 Discord 点按钮。`,
+        };
+      }
       // v2.16+ 模型漂移(CC 用量保护静默降级)——web 端也要看得见
       if (d.kind === "model_drift") {
         return {

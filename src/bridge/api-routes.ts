@@ -1003,6 +1003,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
         try {
           await tmuxSendLine(win, resolved.ccText);
+          // v2.16.2 输入框打 /model 也登记切换意图(peer 报告根因 1:slash 直通
+          // 无任何代按逻辑,弹窗迟到 1.5s 无人按,agent 卡死)——watcher 兜底代按
+          if (slashM[1] === "model" && (slashM[2] || "").trim()) {
+            const { noteModelSwitchIntent } = await import("./permission-watcher.js");
+            noteModelSwitchIntent(agent.name, resolveModelAlias((slashM[2] || "").trim()));
+          }
         } catch (e) {
           return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });
         }
@@ -1244,12 +1250,18 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     try {
       if (model) {
+        // v2.16.2 先登记切换意图再注入:短轮询窗外迟到的弹窗由 watcher 按意图
+        // 代按(此前 2.8s 窗一过就没人管;且 watcher 读 registry 旧钉值会误判)
+        {
+          const { noteModelSwitchIntent } = await import("./permission-watcher.js");
+          noteModelSwitchIntent(agent.name, resolveModelAlias(model));
+        }
         await tmuxSendLine(targetWindow, `/model ${model}`);
         // CC 2.1.220+ 会话有 prompt cache 时切模型弹「Switch model?」二次确认。
         // 用户已在 web UI 做过选择,没人替他按 Yes 的话 TUI 就永远卡在弹窗上
         // (2026-07-27 用户截图实锤)。短轮询探测,出现即确认(❯ 预选 Yes,Enter 即可);
-        // 看到 "Set model to"(未弹窗直接生效)就提前收工。
-        for (let i = 0; i < 4; i++) {
+        // 看到 "Set model to"(未弹窗直接生效)就提前收工。窗口 4→8 拍(peer 建议)。
+        for (let i = 0; i < 8; i++) {
           await Bun.sleep(700);
           const p2 = await tmuxCapture(targetWindow, 25).catch(() => "");
           if (/Switch model\?/.test(p2)) {

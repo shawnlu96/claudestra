@@ -75,6 +75,34 @@ export function modelFamilies(text: string): Set<string> {
   return out;
 }
 
+/** v2.16.2 切模型意图表(peer 2026-08-04 三层根因报告的核心修复):bridge 自己
+ *  注入 /model 时登记「agent → 目标家族」,watcher 见弹窗先对意图——匹配即代按。
+ *  家族守卫无法区分「用户主动换族」和「CC 主动提议降级」(弹窗长得一模一样),
+ *  意图关联可以:我们注入的 = 用户拍过板的;没有意图的弹窗 = CC 自己弹的。
+ *  TTL 2h:/model 在 agent 忙时会排队到回合结束才弹(2026-07-28 实锤迟到数十分钟),
+ *  60s 级 TTL 会漏;匹配即消费,一条意图只用一次。 */
+const SWITCH_INTENT_TTL_MS = 2 * 3600_000;
+const switchIntents = new Map<string, { families: Set<string>; ts: number }>();
+
+/** 注入 /model 的三条路径(web slash 直通/Discord slash/claude-settings)都要调。 */
+export function noteModelSwitchIntent(agentName: string, modelStr: string) {
+  const families = modelFamilies(modelStr);
+  if (!families.size) return; // 目标解析不出家族(裸别名之外的自定义 id)→ 不登记,走保守路径
+  switchIntents.set(agentName, { families, ts: Date.now() });
+}
+
+function consumeSwitchIntent(agentName: string, dialogFamilies: Set<string>): boolean {
+  const it = switchIntents.get(agentName);
+  if (!it) return false;
+  if (Date.now() - it.ts > SWITCH_INTENT_TTL_MS) {
+    switchIntents.delete(agentName);
+    return false;
+  }
+  const hit = [...it.families].some((f) => dialogFamilies.has(f));
+  if (hit) switchIntents.delete(agentName);
+  return hit;
+}
+
 /**
  * v2.15.2+「Switch model?」确认弹窗处理。
  *
@@ -102,6 +130,15 @@ async function maybeConfirmSwitchModel(
   const block = pane.slice(pane.indexOf("Switch model?")).split("\n").slice(0, 12).join("\n");
   const mentioned = modelFamilies(block);
 
+  // v2.16.2 意图优先(peer 报告根因 2:家族守卫把用户主动换族误判成 CC 降级提议,
+  // 89999c1 后自动确认实际只剩「重钉同族」一种场景生效):bridge 注入过 /model
+  // 且弹窗提到目标家族 → 这就是用户拍过板的那次切换,代按。
+  if (consumeSwitchIntent(agentName, mentioned)) {
+    console.log(`🎛 ${agentName} 「Switch model?」命中切换意图(${[...mentioned].join("/")}),自动代按 Yes`);
+    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]);
+    return true;
+  }
+
   let pinnedFamily: string | null = null;
   try {
     const { readRegistryAgents } = await import("../lib/registry.js");
@@ -122,6 +159,17 @@ async function maybeConfirmSwitchModel(
   if (lastNotified.get(channelId) === key) return true;
   lastNotified.set(channelId, key);
   console.log(`🎛 ${agentName} 弹「Switch model?」但涉及 ${[...mentioned].join("/") || "未知"} ≠ 钉定 ${pinnedFamily ?? "(未钉)"}，不代按，通知用户`);
+  // v2.16.2 web 可见(peer 报告根因 3:通知只走 Discord 直发,web 用户零提示
+  // 只看到 agent 卡死):同步 emit session_anomaly,BFF 翻译成系统文本。
+  try {
+    const { emitEvent } = await import("./event-bus.js");
+    emitEvent({
+      agent: agentName,
+      chatId: channelId,
+      type: "session_anomaly",
+      data: { kind: "switch_model_prompt", families: [...mentioned], pinned: pinnedFamily },
+    });
+  } catch { /* 事件失败不影响 Discord 通知 */ }
   try {
     const pngPath = await tmuxScreenshot(agentName);
     const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");

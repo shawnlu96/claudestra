@@ -1980,6 +1980,13 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         console.log(`⚡ 转发 slash: /${cmd} → window=${targetWindow} text="${resolved.ccText}"`);
         try {
           await tmuxSendLine(targetWindow, resolved.ccText);
+          // v2.16.2 Discord slash 的 /model 同样登记切换意图 → watcher 代按二次确认
+          if (cmd === "model" && agentName) {
+            const { noteModelSwitchIntent } = await import("./bridge/permission-watcher.js");
+            const { resolveModelAlias } = await import("./lib/claude-launch.js");
+            const arg = resolved.ccText.replace(/^\/model\s*/, "").trim();
+            if (arg) noteModelSwitchIntent(agentName, resolveModelAlias(arg));
+          }
           // 直通 /clear 同样轮转 session——与 clear 端点一样挂轮转收尾（Web 直通
           // 同款补丁；master 无 registry/watcher 不需要）。Stop 自愈是最后兜底。
           if (cmd === "clear" && agentName && agentCwd) {
