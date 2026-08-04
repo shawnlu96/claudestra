@@ -2500,6 +2500,26 @@ async function cmdUpdate() {
     return;
   }
 
+  // 3b. v2.16.3 挂回分支(HedeMacBook-Pro 报告:checkout <tag> 必然 detached
+  //     HEAD——工作区内容对,但本地分支永不前进、stash 落在 no branch 上,
+  //     版本冻结类故障的温床)。无分叉才 ff 挂回;分叉(开发机本地有超前
+  //     commit)保持 detached 并在输出里说明,绝不静默。
+  const reattach = await (async (): Promise<{ ok: boolean; detail: string }> => {
+    for (const br of ["main", "master"]) {
+      const has = await git("rev-parse", "--verify", "--quiet", `refs/heads/${br}`);
+      if (!has.ok) continue;
+      const anc = await git("merge-base", "--is-ancestor", br, release.tag);
+      if (!anc.ok) return { ok: false, detail: `本地 ${br} 与 ${release.tag} 分叉,保持 detached(开发机属预期);手工挂回: git checkout ${br} && git merge --ff-only ${release.tag}` };
+      const co = await git("checkout", br, "--quiet");
+      if (!co.ok) return { ok: false, detail: `checkout ${br} 失败: ${co.err}` };
+      const ff = await git("merge", "--ff-only", release.tag, "--quiet");
+      if (!ff.ok) return { ok: false, detail: `ff 合并失败: ${ff.err}` };
+      return { ok: true, detail: `已挂回 ${br} @ ${release.tag}` };
+    }
+    return { ok: false, detail: "未找到 main/master 本地分支,保持 detached" };
+  })();
+  if (!reattach.ok) console.error(`[update] ⚠️ ${reattach.detail}`);
+
   // 4. bun install（依赖可能变了）
   const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await biProc.exited;
@@ -2548,6 +2568,8 @@ async function cmdUpdate() {
     masterReRendered: rendered,
     // web 构建结果显式冒泡(skipped 带原因 / ok / error 带尾部日志)——绝不静默
     webBuild,
+    // 分支挂回结果(detached HEAD 修复,v2.16.3)——同样绝不静默
+    branch: reattach,
     cliInstalled: cliInstall.errors.length === 0,
     cliWrapper: cliInstall.cliWrapper || undefined,
     daemons: cliInstall.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),

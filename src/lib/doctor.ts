@@ -320,6 +320,28 @@ export function webBuildVerdict(
   return { status: "ok", detail: "web 构建产物不落后于代码" };
 }
 
+/** v2.16.3 detached HEAD 检查(HedeMacBook-Pro 报告:老版 update checkout tag
+ *  会把仓库留在 no branch,本地分支冻结、自动更新看似正常实则失灵)。 */
+async function checkGitHead(repoRoot: string): Promise<Check[]> {
+  try {
+    const p = Bun.spawn(["git", "symbolic-ref", "-q", "HEAD"], { cwd: repoRoot, stdout: "pipe", stderr: "ignore" });
+    const out = (await new Response(p.stdout).text()).trim();
+    await p.exited;
+    if (p.exitCode === 0 && out) {
+      return [{ group: "config", name: "git HEAD", status: "ok", detail: `在分支 ${out.replace("refs/heads/", "")} 上` }];
+    }
+    return [{
+      group: "config",
+      name: "git HEAD",
+      status: "warn",
+      detail: "仓库处于 detached HEAD(no branch)——本地分支不再前进,版本冻结类故障温床",
+      fix: "git checkout main && git merge --ff-only <当前版本 tag>(有分叉先看 git log 再决定)",
+    }];
+  } catch {
+    return [];
+  }
+}
+
 async function checkWebBuild(repoRoot: string): Promise<Check[]> {
   const buildId = `${repoRoot}/web/.next/BUILD_ID`;
   if (!existsSync(`${repoRoot}/web/node_modules`)) return []; // 未装 web 的实例不出这条
@@ -356,6 +378,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(),
+    checkGitHead(repoRoot),
     checkWebBuild(repoRoot),
   ]);
   return groups.flat();
