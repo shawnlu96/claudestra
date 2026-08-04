@@ -15,7 +15,7 @@
 
 import { hostname } from "os";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { join } from "path";
 
 // ============================================================
@@ -2398,6 +2398,53 @@ async function cmdVersion() {
   });
 }
 
+/** v2.16.3 update 附带的 web 构建(HedeMacBook-Pro owner 提案 + 五条实现约束)。
+ *  返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。 */
+async function maybeBuildWeb(
+  fromRef: string,
+  toRef: string
+): Promise<{ built: boolean; restarted?: boolean; skipped?: string; error?: string }> {
+  const webDir = `${REPO_ROOT}/web`;
+  // 约束2:没装 web 的实例跳过,不拖垮整体 update
+  if (!existsSync(`${webDir}/node_modules`)) return { built: false, skipped: "web 未安装(无 node_modules)" };
+  // 约束3:本次 pull 没碰 web/ 就不花这个钱(next build 分钟级,自动更新 30 分钟一轮)
+  const diff = await git("diff", "--name-only", `${fromRef}..${toRef}`, "--", "web/");
+  if (!diff.ok) return { built: false, skipped: `diff 失败(${diff.err}),保守跳过` };
+  const touched = diff.out.split("\n").filter(Boolean);
+  if (!touched.length) return { built: false, skipped: "本次更新未触及 web/" };
+  // 依赖变了先装
+  if (touched.some((f) => f === "web/package.json" || f === "web/package-lock.json")) {
+    const ip = Bun.spawn(["npm", "install"], { cwd: webDir, stdout: "pipe", stderr: "pipe" });
+    await ip.exited;
+  }
+  // 约束4:构建失败保留旧构建继续服务,但结果必须显式冒泡
+  const bp = Bun.spawn(["npm", "run", "build"], { cwd: webDir, stdout: "pipe", stderr: "pipe" });
+  const [bout, berr] = await Promise.all([new Response(bp.stdout).text(), new Response(bp.stderr).text()]);
+  await bp.exited;
+  if (bp.exitCode !== 0) {
+    const tail = (berr || bout).split("\n").filter(Boolean).slice(-8).join("\n");
+    console.error(`[update] web 构建失败(保留旧构建继续服务):\n${tail}`);
+    return { built: false, error: `next build 失败(旧构建仍在服务): ${tail.slice(0, 500)}` };
+  }
+  // 约束1:重启只在我们「拥有监督者」时做(launchd 服务在场即 kickstart,KeepAlive
+  // 保证拉起)。非 launchd 托管(裸 next start/pm2/别人的 supervisor)不猜不杀——
+  // 按命令行 pkill 会漏真正的 next-server 监听进程,留下占端口孤儿更难查。
+  const svc = Bun.spawn(
+    ["launchctl", "print", `gui/${process.getuid?.() ?? 501}/com.claudestra.web`],
+    { stdout: "ignore", stderr: "ignore" }
+  );
+  await svc.exited;
+  if (svc.exitCode === 0) {
+    const kick = Bun.spawn(
+      ["launchctl", "kickstart", "-k", `gui/${process.getuid?.() ?? 501}/com.claudestra.web`],
+      { stdout: "ignore", stderr: "ignore" }
+    );
+    await kick.exited;
+    return { built: true, restarted: kick.exitCode === 0 };
+  }
+  return { built: true, restarted: false, skipped: "web 非 launchd 托管——已构建,请自行重启 web 进程" };
+}
+
 async function cmdUpdate() {
   const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
 
@@ -2429,10 +2476,26 @@ async function cmdUpdate() {
     return;
   }
 
+  // v2.16.3 并发闸(HedeMacBook-Pro 约束5):自动更新 30 分钟一轮,web 构建
+  // 动辄分钟级,别被下一轮重入。锁文件 30 分钟视为陈旧(崩溃残留不永锁)。
+  const updateLock = `${process.env.HOME}/.claude-orchestrator/update.lock`;
+  try {
+    const st = statSync(updateLock);
+    if (Date.now() - st.mtimeMs < 30 * 60_000) {
+      output({ ok: false, error: "另一次 update 正在进行(update.lock 未满 30 分钟)——稍后再试" });
+      return;
+    }
+  } catch { /* 无锁,正常 */ }
+  await writeFile(updateLock, String(process.pid)).catch(() => {});
+
+  // web 构建的变更判定要用 checkout 前的 HEAD
+  const preUpdateHead = (await git("rev-parse", "HEAD")).out.trim();
+
   // 3. fetch tags + checkout release tag
   await git("fetch", "--tags", "--quiet", "origin");
   const checkout = await git("checkout", release.tag, "--quiet");
   if (!checkout.ok) {
+    await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
     output({ ok: false, error: `git checkout ${release.tag} 失败: ${checkout.err}` });
     return;
   }
@@ -2443,6 +2506,12 @@ async function cmdUpdate() {
 
   // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
   const rendered = await renderMasterClaude();
+
+  // 4c. v2.16.3 web 构建纳入 update(HedeMacBook-Pro owner 提案:此前 bridge 侧
+  //     生效、web 侧继续跑旧构建的「半生效」状态最难排查)。内部自带四道闸:
+  //     未装 web 跳过 / 本次未触及 web/ 跳过 / 构建失败保留旧构建并显式冒泡 /
+  //     仅 launchd 托管时才自动重启。
+  const webBuild = await maybeBuildWeb(preUpdateHead, release.tag);
 
   // 5. 执行新版 manager 的 migrate 子命令（新版可能带格式迁移逻辑）
   //    关键：用 subprocess 跑 NEW 版代码，当前进程跑的还是旧版
@@ -2469,12 +2538,16 @@ async function cmdUpdate() {
   const { installClaudestraCli } = await import("./lib/cli-install.js");
   const cliInstall = await installClaudestraCli(REPO_ROOT);
 
+  await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
+
   output({
     ok: true,
     from: `v${local}`,
     to: release.tag,
     message: `已更新到 ${release.tag} 并 reload 三个 launchd daemon`,
     masterReRendered: rendered,
+    // web 构建结果显式冒泡(skipped 带原因 / ok / error 带尾部日志)——绝不静默
+    webBuild,
     cliInstalled: cliInstall.errors.length === 0,
     cliWrapper: cliInstall.cliWrapper || undefined,
     daemons: cliInstall.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),

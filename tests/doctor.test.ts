@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { classifyDaemonExit, formatDoctor, type Check } from "../src/lib/doctor";
+import { classifyDaemonExit, formatDoctor, webBuildVerdict, type Check } from "../src/lib/doctor";
 
 describe("classifyDaemonExit", () => {
   test("正常运行 → ok", () => {
@@ -80,5 +80,22 @@ describe("formatDoctor", () => {
 
   test("ok 项不打印 fix 行", () => {
     expect(formatDoctor([mk("ok")])).not.toContain("↳");
+  });
+});
+
+describe("webBuildVerdict (v2.16.3 web 构建时效)", () => {
+  const T = 1_700_000_000_000;
+  test("无构建产物 → warn", () => {
+    expect(webBuildVerdict(null, T).status).toBe("warn");
+  });
+  test("拿不到提交时间 → ok(跳过比对)", () => {
+    expect(webBuildVerdict(T, null).status).toBe("ok");
+  });
+  test("构建落后提交超 60s 容差 → warn", () => {
+    expect(webBuildVerdict(T, T + 61_000).status).toBe("warn");
+  });
+  test("构建新于提交 / 60s 容差内 → ok", () => {
+    expect(webBuildVerdict(T + 1, T).status).toBe("ok");
+    expect(webBuildVerdict(T, T + 59_000).status).toBe("ok");
   });
 });
