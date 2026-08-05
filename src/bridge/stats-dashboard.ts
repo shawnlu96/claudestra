@@ -21,7 +21,7 @@ import {
   type TextChannel,
 } from "discord.js";
 import { existsSync } from "fs";
-import { tmuxRaw, MASTER_SESSION } from "../lib/tmux-helper.js";
+import { tmuxRaw, MASTER_SESSION, paneLooksIdle, TMUX_SOCK } from "../lib/tmux-helper.js";
 import { readConfig, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { discordCreateChannel } from "./discord-api.js";
@@ -116,8 +116,17 @@ function parseUsagePanel(raw: string): AccountUsage {
  * 驱动 master:0 的 /status，确定性导航到 Usage tab，抓 session/week 占比。
  * master 忙就返回 null（用旧缓存）。全程本地、不调用 LLM。
  */
+// v2.17.1 判据统一(peer 报告:此前自带判据把「挂着的 usage 面板」判 idle,
+// 与 tmux-helper 的 paneIdleVerdict 相反,构成污染自持回路——污染源被反复
+// 选中抓取)。收敛到 paneLooksIdle 单一来源,并显式排除面板痕迹。
 function paneIdle(pane: string): boolean {
-  return /❯/.test(pane) && !/esc to interrupt/.test(pane);
+  if (panelResidue(pane)) return false;
+  return paneLooksIdle(pane);
+}
+
+/** 抓取源 pane 上的 TUI 面板痕迹(遗留 usage/settings 面板)。 */
+function panelResidue(pane: string): boolean {
+  return /Esc to cancel|Settings dialog|Current session[\s\S]*%\s*used/.test(pane);
 }
 
 /**
@@ -137,6 +146,13 @@ async function findIdleScrapeTarget(): Promise<string | null> {
   candidates.push(`${MASTER_SESSION}:0`);
   for (const t of candidates) {
     const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
+    // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙
+    // 数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
+    if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings dialog/g, ""))) {
+      console.log(`📊 清场: ${t} 残留 TUI 面板,补发 Esc`);
+      await tmuxRaw(["send-keys", "-t", t, "Escape"]).catch(() => {});
+      continue;
+    }
     if (paneIdle(pane)) return t;
   }
   return null;
@@ -145,7 +161,28 @@ async function findIdleScrapeTarget(): Promise<string | null> {
 /** 手动点「🔄 刷新」置位：本次抓取要更执着（多轮等 idle 窗口），不许静默放弃 */
 let forceNextScrape = false;
 
+/** v2.17.1 进程级收尾兜底(peer 报告:update/reload 在抓取中途杀 bridge,收尾
+ *  Esc 永远发不出,面板遗留污染后续所有轮次)。SIGTERM/SIGINT 时若有抓取在
+ *  途,同步补一个 Esc 再退。 */
+let scrapeTargetInFlight: string | null = null;
+let sigHooked = false;
+function hookScrapeCleanupSignals() {
+  if (sigHooked) return;
+  sigHooked = true;
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      if (scrapeTargetInFlight) {
+        try {
+          Bun.spawnSync(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", scrapeTargetInFlight, "Escape"]);
+        } catch { /* 尽力而为 */ }
+      }
+      process.exit(0);
+    });
+  }
+}
+
 async function scrapeAccountUsage(): Promise<AccountUsage | null> {
+  hookScrapeCleanupSignals();
   // 常规（hook/tick 触发）找不到 idle 窗口就算了，沿用旧缓存；手动刷新是用户
   // 明确要真实数据 —— 多等几轮（刚收尾的 agent 通常几秒内就 idle）。
   const attempts = forceNextScrape ? 5 : 1;
@@ -156,6 +193,7 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
     target = await findIdleScrapeTarget();
   }
   if (!target) return null; // 没有任何 idle 会话可借，下次再说（沿用旧缓存）
+  scrapeTargetInFlight = target; // SIGTERM 兜底靠它定位要补 Esc 的 pane
   try {
     await tmuxRaw(["send-keys", "-t", target, "-l", "/status"]);
     await sleep(150);
@@ -207,15 +245,13 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
     // 关闭面板恢复会话。v2.16.1: Escape 只在确认面板真的开着时才发——
     // 面板没开(Enter 落空/被吃)时的裸 Escape 若撞上刚开的回合就是硬中断,
     // 这正是「检查用量打断大总管」的杀伤路径。
-    const closing = found
-      ? true
-      : /Current session|Settings|Usage|Status/.test(
-          await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "")
-        );
-    if (closing) {
+    // v2.17.1 确认式收尾(peer 报告「Esc×2 间隔 80ms 疑被面板吞」+ master 单发
+    // 一个 Esc 即关的实证):单发 → 验证 → 未关再发,至多 3 轮,绝不盲发
+    for (let e = 0; e < 3; e++) {
+      const now = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+      if (!panelResidue(now) && !/Settings\s+Status\s+Config\s+Usage/.test(now)) break;
       await tmuxRaw(["send-keys", "-t", target, "Escape"]);
-      await sleep(80);
-      await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+      await sleep(350);
     }
     if (!found) return null;
     const usage = parseUsagePanel(panel);
@@ -235,15 +271,17 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
       }
     }
     console.log(`📊 账号用量已刷新: session=${usage.sessionPct}% week=${usage.weekPct}% (via ${target})`);
+    scrapeTargetInFlight = null;
     return usage;
   } catch (e) {
     console.error("📊 /status 抓取失败:", (e as Error).message);
     try {
-      // 同上:确认面板在场才 Escape,不对活回合裸发中断键
-      const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-      if (/Current session|Settings|Usage|Status/.test(pane)) {
+      // 同上:确认式收尾,面板在场才发,单发验证
+      for (let e = 0; e < 3; e++) {
+        const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+        if (!panelResidue(pane)) break;
         await tmuxRaw(["send-keys", "-t", target, "Escape"]);
-        await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+        await sleep(350);
       }
     } catch {}
     return null;
