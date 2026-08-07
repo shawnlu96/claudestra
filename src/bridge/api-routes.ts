@@ -21,6 +21,7 @@ import {
   type Principal,
 } from "../lib/principals.js";
 import { runManager } from "./management.js";
+import { parseAuqPane } from "../lib/auq-pane.js";
 import { readPeers } from "../lib/peers.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
@@ -1343,18 +1344,21 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
             .filter((n: number) => Number.isInteger(n) && n >= 0 && n < q.options.length);
         });
       }
-      // M4：发方向键+Enter 前重验菜单还在（与 permission 分支同款防误击）。AUQ 若已在
-      // TUI 侧被应答/取消而 AuqState 尚未清（/pending replay 让陈旧提交更易发生），pane
-      // 会回到空闲输入框——此时导航键会误入 composer。pane 已 idle → 清态 + 409。
-      // 抓不到 pane 就跳过重验，退回原行为（不因抓取失败误拒合法提交）。
+      // M4：发键前重验弹窗还在（与 permission 分支同款防误击）。AUQ 若已在 TUI 侧
+      // 被应答/取消而 AuqState 尚未清（/pending replay 让陈旧提交更易发生），键会
+      // 误入 composer——v2.17.2 起键序列含数字键，误入会真的打出字符，必须挡。
+      // v2.17.2：判据从 paneLooksIdle 升级为 parseAuqPane（弹窗签名不在=stale，
+      // 覆盖"已应答且 agent 正忙"的窗口）；解析结果顺手交给 buildAuqKeystrokes
+      // 做现场对账（光标位/勾选态）。抓不到 pane 才跳过重验，退回盲发。
       let auqPane = "";
       try { auqPane = await tmuxCapture(state.tmuxTarget, 40); } catch { /* 跳过重验 */ }
-      if (auqPane && paneLooksIdle(auqPane)) {
+      const auqParse = auqPane ? parseAuqPane(auqPane) : null;
+      if (auqPane && !auqParse) {
         clearAuqState(agent.channelId);
         emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
         return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
       }
-      const keys = buildAuqKeystrokes(state);
+      const keys = buildAuqKeystrokes(state, auqParse);
       try {
         if (keys.length > 0) await tmuxRaw(["send-keys", "-t", state.tmuxTarget, ...keys]);
       } catch (e) {

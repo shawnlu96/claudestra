@@ -153,6 +153,7 @@ import { startPermissionWatcher, permissionMessages, clearPermissionMessage } fr
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard } from "./bridge/stats-dashboard.js";
+import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents } from "./lib/registry.js";
@@ -2353,7 +2354,18 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             return;
           }
           if (action === "submit") {
-            const keys = buildAuqKeystrokes(state);
+            // v2.17.2：发键前重验弹窗还在（API answer 端点同款）。新键位模型含数字键，
+            // 弹窗已被 TUI 侧应答时盲发会把数字真打进 composer。抓不到 pane 才盲发。
+            let auqPane = "";
+            try { auqPane = await tmuxCapture(state.tmuxTarget, 40); } catch { /* 跳过重验 */ }
+            const auqParse = auqPane ? parseAuqPane(auqPane) : null;
+            if (auqPane && !auqParse) {
+              clearAuqState(auqChannel);
+              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord" } });
+              await interaction.editReply({ content: `⚠️ 弹窗已在终端侧被应答/关闭，本次提交作废。`, components: [] }).catch(() => {});
+              return;
+            }
+            const keys = buildAuqKeystrokes(state, auqParse);
             // 一次 tmux send-keys 批量发，tmux 内部按顺序处理键序列；比一键一调用快得多
             if (keys.length > 0) {
               await tmuxRaw(["send-keys", "-t", state.tmuxTarget, ...keys]);

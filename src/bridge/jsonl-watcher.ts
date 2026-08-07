@@ -14,6 +14,8 @@ import { TextChannel } from "discord.js";
 import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 import { discordReply } from "./discord-api.js";
 import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
+import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
+import { parseAuqPane } from "../lib/auq-pane.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent } from "./event-bus.js";
 
@@ -407,24 +409,41 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           // 没法 tmux attach 按键。识别到就把 questions 渲染成 Discord select menu。
           // 渲染完跳过本 assistant entry 的其他处理（不进 textQueue / tools），由
           // AUQ 自己的交互回路驱动。
+          //
+          // v2.17.2: CC 2.1.x 把 AUQ tool_use 攒到用户作答后才连 tool_result 一起
+          // 落盘 —— jsonl 读到时弹窗几乎必然已被应答（2026-08-07 migration 事故：
+          // 检测比弹窗晚 4 分钟，还在人工作答后诈尸发卡）。及时通路已移到
+          // permission-watcher 的 pane 侧检测；这里只兜底旧版 CC 的即时落盘：
+          // pane 上弹窗还在才走注册+发卡，否则静默吞掉 entry。
           try {
             const { detectAskUserQuestion, postAskUserQuestionMessage, registerAuqState, auqStates } =
               await import("./ask-user-question.js");
             const questions = detectAskUserQuestion(content);
-            if (questions && !auqStates.has(state.channelId)) {
-              const tmuxTarget = `master:${state.agentName}`;
-              // 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
-              // /api/v1 answer 端点也能拿到 AuqState 下键。post 成功只回填 messageId。
-              registerAuqState(state.channelId, tmuxTarget, questions);
-              // M6：local-* 频道没有 Discord 面，跳过 post（event-bus 的 question 事件仍发，
-              // web 前端靠它渲染交互卡）。
-              if (!isLocalChannel(state.channelId)) {
-                postAskUserQuestionMessage(discord, state.channelId, tmuxTarget, questions)
-                  .catch((e) => console.error("AUQ post 失败:", e));
+            if (questions) {
+              if (!auqStates.has(state.channelId)) {
+                let modalStillUp = false;
+                try {
+                  const pane = await tmuxCapture(windowTarget(state.agentName), 30);
+                  modalStillUp = parseAuqPane(pane) !== null;
+                } catch { /* 抓不到 pane 按弹窗不在处理 */ }
+                if (modalStillUp) {
+                  const tmuxTarget = windowTarget(state.agentName);
+                  // 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
+                  // /api/v1 answer 端点也能拿到 AuqState 下键。post 成功只回填 messageId。
+                  registerAuqState(state.channelId, tmuxTarget, questions);
+                  // M6：local-* 频道没有 Discord 面，跳过 post（event-bus 的 question 事件仍发，
+                  // web 前端靠它渲染交互卡）。
+                  if (!isLocalChannel(state.channelId)) {
+                    postAskUserQuestionMessage(discord, state.channelId, tmuxTarget, questions)
+                      .catch((e) => console.error("AUQ post 失败:", e));
+                  }
+                  console.log(`🎛 检测到 AskUserQuestion (${questions.length} 问) for ${state.agentName}`);
+                  emitEvent({ agent: state.agentName, chatId: state.channelId, type: "question", data: { questions } });
+                } else {
+                  console.log(`🎛 AUQ tool_use 落盘时弹窗已不在（已被应答）→ 跳过发卡 for ${state.agentName}`);
+                }
               }
-              console.log(`🎛 检测到 AskUserQuestion (${questions.length} 问) for ${state.agentName}`);
-              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "question", data: { questions } });
-              continue; // 跳过本 entry 的 tool/text 处理
+              continue; // AUQ entry 一律不进 tool/text 渲染管线（pane 通路已处理或已应答）
             }
           } catch (e) { /* non-critical */ }
 

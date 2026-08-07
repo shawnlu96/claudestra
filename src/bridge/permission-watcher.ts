@@ -18,6 +18,16 @@ import {
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { parseAuqPane } from "../lib/auq-pane.js";
+import {
+  auqStates,
+  clearAuqState,
+  registerAuqState,
+  postAskUserQuestionMessage,
+  type AuqQuestion,
+} from "./ask-user-question.js";
+import { emitEvent } from "./event-bus.js";
+import { recordMetric } from "../lib/metrics.js";
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -240,6 +250,104 @@ export function computeModalKey(
 const idleWhileThinking = new Map<string, number>();
 const IDLE_THINKING_GRACE_MS = 120_000;
 
+// ── v2.17.2 AskUserQuestion pane 侧检测 ──────────────────────────────
+// CC 2.1.x 把 AUQ tool_use 攒到作答后才落盘,jsonl 检测结构性迟到(2026-08-07
+// migration 事故:弹窗挂 4 分钟,web/Discord 全程无卡片,状态还被 thinking 对账
+// 收敛成 done —— 用户视角就是"卡死")。及时通路在这里:8s 轮询里认弹窗本体。
+/** channelId → 连续未见弹窗的 tick 数(AuqState 在而弹窗消失 = 人工作答,2 次清卡) */
+const auqPaneMiss = new Map<string, number>();
+/** channelId → 已发过降级通知的多问弹窗 key(问题文本),防每 tick 刷屏 */
+const auqMultiNotified = new Map<string, string>();
+
+/**
+ * pane 上的 AUQ 弹窗生命周期管理。返回 true = 弹窗在场(本轮 checkAgent 到此为止,
+ * 权限弹窗检测不用再跑 —— 同屏不可能两种弹窗)。
+ *
+ * - 无 AuqState + 弹窗出现:单问题(含单问题多选,选项全可见)→ 注册状态 + emit
+ *   question 事件(web ask 卡) + Discord select 卡。多问题表单 pane 只能看到当前
+ *   section,凑不齐完整数据 → 降级为通知(assistant_text 事件 + Discord 截图),
+ *   引导用户开远程终端作答。
+ * - 有 AuqState + 弹窗消失:连续 2 tick(~16s)未见 → 人工在终端作答/取消了,
+ *   清态 + question_cleared(stale),把 web/Discord 的卡收掉。
+ */
+async function maybeHandleAuq(
+  agentName: string,
+  channelId: string,
+  pane: string,
+  allowedUserIds: string[],
+  discord: Client
+): Promise<boolean> {
+  const parse = parseAuqPane(pane);
+  const existing = auqStates.get(channelId);
+
+  if (existing) {
+    if (parse) {
+      auqPaneMiss.delete(channelId);
+      return true; // 弹窗还挂着,等用户在卡片上作答
+    }
+    const miss = (auqPaneMiss.get(channelId) || 0) + 1;
+    if (miss >= 2) {
+      auqPaneMiss.delete(channelId);
+      clearAuqState(channelId);
+      console.log(`🎛 AUQ 弹窗已在 TUI 侧消失(人工作答/取消)→ 清卡 agent=${agentName}`);
+      emitEvent({ agent: agentName, chatId: channelId, type: "question_cleared", data: { reason: "stale", via: "pane" } });
+    } else {
+      auqPaneMiss.set(channelId, miss);
+    }
+    return false;
+  }
+
+  auqPaneMiss.delete(channelId);
+  if (!parse) {
+    auqMultiNotified.delete(channelId);
+    return false;
+  }
+
+  // 多问题表单:pane 只见当前 section,完整卡片凑不出来 → 降级通知(每弹窗一次)
+  if (parse.sections.length > 1) {
+    if (auqMultiNotified.get(channelId) === parse.question) return true;
+    auqMultiNotified.set(channelId, parse.question);
+    const text = `🎛 agent 弹了一个多问选择框(${parse.sections.join(" / ")}),交互卡暂不支持多问表单 —— 请开远程终端(🖥️)或 tmux 作答`;
+    emitEvent({ agent: agentName, chatId: channelId, type: "assistant_text", data: { text } });
+    console.log(`🎛 pane 检测到多问 AUQ (${parse.sections.length} 问) for ${agentName} → 降级通知`);
+    recordMetric("auq_detect", { channelId, meta: { source: "pane", form: "multi-question" } });
+    if (!channelId.startsWith("local-")) {
+      try {
+        const pngPath = await tmuxScreenshot(agentName);
+        const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
+        const ch = (await discord.channels.fetch(channelId)) as TextChannel;
+        await ch.send({
+          content: [`🎛 **${agentName}** 弹了一个多问选择框(${parse.sections.join(" / ")}),请在终端作答`, mention].filter(Boolean).join("\n"),
+          files: pngPath ? [{ attachment: pngPath }] : undefined,
+        });
+      } catch { /* Discord 面失败不影响 web 通知 */ }
+    }
+    return true;
+  }
+
+  // 单问题(单选或多选):选项全可见,完整交互卡流程
+  const q: AuqQuestion = {
+    question: parse.question,
+    header: (parse.sections[0] || "").slice(0, 12),
+    options: parse.options.map((o) => ({
+      label: o.label.slice(0, 100),
+      description: o.description ? o.description.slice(0, 100) : undefined,
+    })),
+    multiSelect: parse.multiSelect,
+  };
+  const tmuxTarget = windowTarget(agentName);
+  registerAuqState(channelId, tmuxTarget, [q], "pane");
+  if (!channelId.startsWith("local-")) {
+    postAskUserQuestionMessage(discord, channelId, tmuxTarget, [q]).catch((e) =>
+      console.error("AUQ pane 检测 Discord post 失败:", e)
+    );
+  }
+  console.log(`🎛 pane 检测到 AskUserQuestion (1 问, ${parse.form}${parse.multiSelect ? ", 多选" : ""}) for ${agentName}`);
+  recordMetric("auq_detect", { channelId, meta: { source: "pane", form: parse.form } });
+  emitEvent({ agent: agentName, chatId: channelId, type: "question", data: { questions: [q] } });
+  return true;
+}
+
 async function checkAgent(
   agentName: string,
   channelId: string,
@@ -273,6 +381,9 @@ async function checkAgent(
 
   // v2.15.2+「Switch model?」弹窗：钉定家族的迟到确认框代按,其余通知用户拍板
   if (await maybeConfirmSwitchModel(agentName, channelId, pane, allowedUserIds, discord)) return;
+
+  // v2.17.2+ AskUserQuestion pane 侧检测(CC 2.1.x jsonl 迟落盘,唯一及时通路)
+  if (await maybeHandleAuq(agentName, channelId, pane, allowedUserIds, discord)) return;
 
   // 两种弹窗共用一个 channel 级别的 slot，同时只会有一种出现
   const sessionIdleDesc = detectSessionIdlePrompt(pane);

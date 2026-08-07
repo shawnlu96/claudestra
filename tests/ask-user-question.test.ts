@@ -119,7 +119,7 @@ describe("detectAskUserQuestion", () => {
   });
 });
 
-describe("buildAuqKeystrokes", () => {
+describe("buildAuqKeystrokes（CC 2.1.x 键位模型，v2.17.2 实测重校准）", () => {
   const q3: AuqQuestion = {
     question: "Q1?", header: "Q1", multiSelect: true,
     options: [{ label: "a" }, { label: "b" }, { label: "c" }],
@@ -128,47 +128,87 @@ describe("buildAuqKeystrokes", () => {
     question: "Q2?", header: "Q2", multiSelect: true,
     options: [{ label: "x" }, { label: "y" }],
   };
+  const qSingle: AuqQuestion = {
+    question: "S?", header: "S", multiSelect: false,
+    options: [{ label: "a" }, { label: "b" }, { label: "c" }],
+  };
 
-  test("单 question 选项 0 → Enter Right Enter", () => {
-    const state = mkState([q3], [[0]]);
-    // cursor 起始 0，optIdx 0：diff 0 不 Down，Enter 切；Right 去 Submit；Enter 提交
-    expect(buildAuqKeystrokes(state)).toEqual(["Enter", "Right", "Enter"]);
+  // ── 单问题单选：无 tab 栏，Enter 一击即提交 ──
+  test("单问题单选 目标 0 → Enter", () => {
+    expect(buildAuqKeystrokes(mkState([qSingle], [[0]]))).toEqual(["Enter"]);
   });
 
-  test("单 question 选项 [0, 2] → Enter Down Down Enter Right Enter", () => {
-    const state = mkState([q3], [[0, 2]]);
-    expect(buildAuqKeystrokes(state)).toEqual([
-      "Enter",       // toggle 0
-      "Down", "Down", // cursor → 2
-      "Enter",       // toggle 2
-      "Right",       // → Submit section
-      "Enter",       // submit
+  test("单问题单选 目标 1 → Down Enter", () => {
+    expect(buildAuqKeystrokes(mkState([qSingle], [[1]]))).toEqual(["Down", "Enter"]);
+  });
+
+  test("单问题单选 pane 光标对账：光标在 2、目标 0 → Up Up Enter", () => {
+    const pane = {
+      form: "single" as const, sections: ["S"], question: "S?", multiSelect: false,
+      options: [
+        { label: "a", cursor: false, checked: false },
+        { label: "b", cursor: false, checked: false },
+        { label: "c", cursor: true, checked: false },
+      ],
+    };
+    expect(buildAuqKeystrokes(mkState([qSingle], [[0]]), pane)).toEqual(["Up", "Up", "Enter"]);
+  });
+
+  // ── 单问题多选：数字 toggle + Right + Enter ──
+  test("单问题多选 [0] → 1 Right Enter", () => {
+    expect(buildAuqKeystrokes(mkState([q3], [[0]]))).toEqual(["1", "Right", "Enter"]);
+  });
+
+  test("单问题多选 [0,2] → 1 3 Right Enter", () => {
+    expect(buildAuqKeystrokes(mkState([q3], [[0, 2]]))).toEqual(["1", "3", "Right", "Enter"]);
+  });
+
+  test("单问题多选 乱序 selections 一样跑对", () => {
+    expect(buildAuqKeystrokes(mkState([q3], [[2, 0]]))).toEqual(["1", "3", "Right", "Enter"]);
+  });
+
+  test("单问题多选 pane 勾选态对账：已勾 {0}、目标 {0,2} → 只补 3", () => {
+    const pane = {
+      form: "tabbed" as const, sections: ["Q1"], question: "Q1?", multiSelect: true,
+      options: [
+        { label: "a", cursor: true, checked: true },
+        { label: "b", cursor: false, checked: false },
+        { label: "c", cursor: false, checked: false },
+      ],
+    };
+    expect(buildAuqKeystrokes(mkState([q3], [[0, 2]]), pane)).toEqual(["3", "Right", "Enter"]);
+  });
+
+  test("单问题多选 pane 对账：已勾 {1}、目标 {} → 2 反 toggle 掉", () => {
+    const pane = {
+      form: "tabbed" as const, sections: ["Q1"], question: "Q1?", multiSelect: true,
+      options: [
+        { label: "a", cursor: true, checked: false },
+        { label: "b", cursor: false, checked: true },
+        { label: "c", cursor: false, checked: false },
+      ],
+    };
+    expect(buildAuqKeystrokes(mkState([q3], [[]]), pane)).toEqual(["2", "Right", "Enter"]);
+  });
+
+  // ── 多问题（tabbed）：逐段，多选数字 toggle+Right / 单选数字+Enter 自动跳段 ──
+  test("两多选 question：Q1=[0,2], Q2=[1]", () => {
+    expect(buildAuqKeystrokes(mkState([q3, q2], [[0, 2], [1]]))).toEqual([
+      "1", "3", "Right", // Q1 toggle + 切段
+      "2", "Right",      // Q2 toggle + 切段(落 Submit)
+      "Enter",           // Submit 段提交
     ]);
   });
 
-  test("两 question：Q1=[0,2], Q2=[1]", () => {
-    const state = mkState([q3, q2], [[0, 2], [1]]);
-    expect(buildAuqKeystrokes(state)).toEqual([
-      "Enter",       // Q1 toggle 0
-      "Down", "Down", "Enter",  // Q1 toggle 2
-      "Right",       // → Q2
-      "Down", "Enter", // Q2 toggle 1
-      "Right",       // → Submit
-      "Enter",       // submit
+  test("多选+单选混合：Q1(multi)=[0], Q2(single)=[1]", () => {
+    expect(buildAuqKeystrokes(mkState([q3, qSingle], [[0], [1]]))).toEqual([
+      "1", "Right",  // Q1 toggle + 切段
+      "2", "Enter",  // Q2 数字移光标 + Enter 选定并自动跳段
+      "Enter",       // Submit 段提交
     ]);
   });
 
   test("空选择（用户不选直接 submit）也能跑出键序列", () => {
-    const state = mkState([q3, q2], [[], []]);
-    // 不切任何 [ ]，直接 Right Right Enter 提交
-    expect(buildAuqKeystrokes(state)).toEqual(["Right", "Right", "Enter"]);
-  });
-
-  test("乱序 selections 内部 sort 后处理", () => {
-    const state = mkState([q3], [[2, 0]]); // 没 sort
-    // sort 后 [0, 2]，跟前面的 case 一样
-    expect(buildAuqKeystrokes(state)).toEqual([
-      "Enter", "Down", "Down", "Enter", "Right", "Enter",
-    ]);
+    expect(buildAuqKeystrokes(mkState([q3, q2], [[], []]))).toEqual(["Right", "Right", "Enter"]);
   });
 });

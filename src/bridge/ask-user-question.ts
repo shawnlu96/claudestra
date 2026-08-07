@@ -19,22 +19,21 @@
  *     options:  2-4 个 option，每个 option 有 label + description? + preview?
  *     multiSelect: boolean
  *
- * TUI 键位（实测 + 提示文字 `Enter to select · Tab/Arrow keys to navigate · Esc to cancel`）：
- *   - ↑↓ 在当前 question 的选项之间移动光标
- *   - Enter 切换当前选项的 [ ] / [✓]
- *   - ←→ 在不同 question section 之间切换（最后一个 section 是 "✔ Submit"）
- *   - Esc 取消
+ * TUI 键位（CC 2.1.222 隔离会话逐键实测，v2.17.2 重校准）：
+ *   - **单问题单选**（无 tab 栏）：↑↓/数字移光标，**Enter 一击即选定并提交**。
+ *   - **tabbed**（多问题或任一 multiSelect，首行 `← ☐sec … ✔Submit →`）：
+ *     多选 section 数字键直接 toggle `[ ]`（绝对定位，不依赖光标）；单选 section
+ *     数字移光标、Enter 选定并自动跳下一段；Right 切段；Submit(Review) 段光标
+ *     默认在 "1. Submit answers"，Enter 提交。
+ *   - Esc 取消（两种形态同）。
  *
- * 键序列构造（提交 N 个 question 的选择 → 最后 Enter 提交）：
- *   for each question Q:
- *     for each selected option index O (升序):
- *       Down × (O - cursor)，把光标移到 option O
- *       Enter，切换 [ ]
- *     Right，去下一个 section
- *   最后 cursor 落到 "Submit" → Enter
+ * v2.17.2 起 buildAuqKeystrokes 可选传入 pane 解析结果（lib/auq-pane.ts）做
+ * 现场对账：单选按当前光标位算相对步数、多选按当前勾选态算 toggle 差集 ——
+ * 用户先在终端里拨过几下也不会答错。
  */
 
 import type { Client, TextChannel } from "discord.js";
+import type { AuqPaneParse } from "../lib/auq-pane.js";
 
 export interface AuqOption {
   label: string;
@@ -60,6 +59,8 @@ export interface AuqState {
   /** agent 的 tmux 目标（e.g. "master:agent-foo"），按键发这里 */
   tmuxTarget: string;
   ts: number;
+  /** 检测来源：jsonl（旧版 CC 即时落盘）或 pane（v2.17.2+ 及时通路） */
+  source?: "jsonl" | "pane";
 }
 
 export const auqStates = new Map<string, AuqState>();
@@ -75,6 +76,7 @@ export function registerAuqState(
   channelId: string,
   tmuxTarget: string,
   questions: AuqQuestion[],
+  source: "jsonl" | "pane" = "jsonl",
 ): AuqState {
   const state: AuqState = {
     channelId,
@@ -83,6 +85,7 @@ export function registerAuqState(
     messageId: "",
     tmuxTarget,
     ts: Date.now(),
+    source,
   };
   auqStates.set(channelId, state);
   return state;
@@ -207,34 +210,66 @@ export async function postAskUserQuestionMessage(
 }
 
 /**
- * 给定 AuqState 的 selections，生成发给 tmux 的 keystroke 序列。
+ * 给定 AuqState 的 selections，生成发给 tmux 的 keystroke 序列（CC 2.1.x 键位
+ * 模型，见文件头）。可选传入 pane 解析结果做现场对账：
  *
- *   for each question Q (i 0..N-1):
- *     for each selected option index O (sorted asc):
- *       Down × (O - cursor)
- *       Enter (toggle)
- *     Right (next section)  —— 最后一次 Right 落到 "Submit"
- *   Enter (在 Submit 上按下提交)
- *
- * 实测注意：每次 Right 切换到下一个 section 时，新 section 的光标重置到 option 0
- *（这是常见 TUI 行为；如果实际不是，需要调整算法）。
+ * - 单问题单选（无 tab 栏）：光标从 pane 实测位置（默认 0）走 Down/Up 到目标，
+ *   Enter 一击即提交 —— 没有 Submit 段，绝不多发键。
+ * - 单问题多选（tabbed，选项全可见）：按「目标勾选态 vs pane 实测勾选态」的
+ *   差集发数字键 toggle，Right 到 Submit 段，Enter 提交。
+ * - 多问题（tabbed）：假定弹窗未被人工拨动过（pane 只能看到当前 section，
+ *   没法对账）。逐段：多选段数字 toggle + Right；单选段数字移光标 + Enter
+ *  （选定并自动跳下一段）；最后在 Submit 段 Enter。
  */
-export function buildAuqKeystrokes(state: AuqState): string[] {
-  const keys: string[] = [];
-  for (let qIdx = 0; qIdx < state.questions.length; qIdx++) {
-    const sel = (state.selections[qIdx] || []).slice().sort((a, b) => a - b);
+export function buildAuqKeystrokes(state: AuqState, pane?: AuqPaneParse | null): string[] {
+  const qs = state.questions;
+
+  // ── 单问题单选：Down/Up 到目标 + Enter（Enter 即提交）──
+  if (qs.length === 1 && !qs[0].multiSelect) {
+    const target = state.selections[0]?.[0] ?? 0;
     let cursor = 0;
-    for (const optIdx of sel) {
-      const diff = optIdx - cursor;
-      for (let d = 0; d < diff; d++) keys.push("Down");
-      keys.push("Enter");
-      cursor = optIdx;
+    if (pane && !pane.multiSelect && pane.options.length === qs[0].options.length) {
+      const c = pane.options.findIndex((o) => o.cursor);
+      if (c >= 0) cursor = c;
     }
-    // 切到下一个 section（或 Submit）
-    keys.push("Right");
+    const diff = target - cursor;
+    const keys: string[] = [];
+    for (let d = 0; d < Math.abs(diff); d++) keys.push(diff > 0 ? "Down" : "Up");
+    keys.push("Enter");
+    return keys;
   }
-  // 最后一个 Right 已经把光标落到 Submit，再按 Enter 提交
-  keys.push("Enter");
+
+  // ── 单问题多选：数字 toggle 差集 + Right + Enter ──
+  if (qs.length === 1 && qs[0].multiSelect) {
+    const want = new Set(state.selections[0] || []);
+    const have = new Set<number>();
+    if (pane && pane.multiSelect && pane.options.length === qs[0].options.length) {
+      pane.options.forEach((o, i) => {
+        if (o.checked) have.add(i);
+      });
+    }
+    const keys: string[] = [];
+    for (let i = 0; i < qs[0].options.length; i++) {
+      if (want.has(i) !== have.has(i)) keys.push(String(i + 1));
+    }
+    keys.push("Right", "Enter");
+    return keys;
+  }
+
+  // ── 多问题：假定全新弹窗（section 1 起步、全未选）──
+  const keys: string[] = [];
+  for (let qIdx = 0; qIdx < qs.length; qIdx++) {
+    const sel = (state.selections[qIdx] || []).slice().sort((a, b) => a - b);
+    if (qs[qIdx].multiSelect) {
+      for (const optIdx of sel) keys.push(String(optIdx + 1));
+      keys.push("Right");
+    } else if (sel.length > 0) {
+      keys.push(String(sel[0] + 1), "Enter"); // 数字移光标 + Enter 选定并跳下一段
+    } else {
+      keys.push("Right"); // 没选就跳过该段，让 TUI 自己校验
+    }
+  }
+  keys.push("Enter"); // Submit(Review) 段光标默认在 "1. Submit answers"
   return keys;
 }
 

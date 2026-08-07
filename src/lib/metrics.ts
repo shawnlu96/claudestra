@@ -26,6 +26,7 @@ export type MetricEvent =
   | "agent_clear"       // 远程 /clear 清空会话
   | "auq_submit"        // AskUserQuestion 回传（提交）
   | "auq_cancel"        // AskUserQuestion 回传（取消）
+  | "auq_detect"        // v2.17.2+ AskUserQuestion 检测（meta.source: pane/jsonl）
   | "agent_wedged"      // wedge watcher 报警
   | "error"
   | "cron_run"
