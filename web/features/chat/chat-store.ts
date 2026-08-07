@@ -82,6 +82,15 @@ interface ChatState {
   messages: ChatMessage[];
   /** 正在拉取历史消息（openAgent → loadMessages 期间） */
   loadingHistory: boolean;
+  /** v2.17.2+ 对齐指示器(owner 2026-08-08:「点进 agent 显示的是上次的旧状态,
+   *  不知道是在后台拉取、网络卡了、还是单纯没新消息」)。陈旧快照秒开时后台
+   *  loadMessages/syncDelta 的可视状态:null=已对齐(无 UI);"syncing"=对齐进行中;
+   *  "error"=对齐最终失败(在屏内容可能陈旧,点按可重试)。空视图的加载/失败
+   *  仍走 loadingHistory/historyError,此字段只服务「有内容在屏」的场景。 */
+  syncState: "syncing" | "error" | null;
+  /** v2.17.2+ 实时流断开(自动重连中)。连上清零;断流自动重连期间为 true——
+   *  网络真断时用户会一直看到「重连中」而不是无声的死页面。 */
+  streamDown: boolean;
   /** 服务端还有更早的历史可翻(向上分页,owner 2026-07-16)。 */
   historyHasMore: boolean;
   /** 正在向上翻页加载更早消息。 */
@@ -155,6 +164,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       activeAgent: "",
       messages: [],
       loadingHistory: false,
+      syncState: null,
+      streamDown: false,
       historyHasMore: false,
       loadingOlder: false,
       historyError: false,
@@ -475,6 +486,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 有缓存=先秒开上次那份（无 loading 闪烁），拉回最新后整体替换
       s.messages = cached ?? [];
       s.loadingHistory = !cached;
+      s.syncState = null; // per-agent,loadMessages 会立即重置为 syncing
+      s.streamDown = false; // 新会话的流状态从零开始,连上/断开由 openStream 说话
       // 翻页态是 per-agent 的:不重置的话上一会话的「还有更早」残留到新会话
       // (loadOlder 有 historySessionId 钉住不会误翻,但按钮/哨兵会鬼影)
       s.historyHasMore = false;
@@ -605,6 +618,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.browsing = { sessionId, anchorSeq: seq };
       s.messages = [];
       s.loadingHistory = true;
+      s.syncState = null; // 历史现场不做后台对齐,pill 收掉
+      s.streamDown = false; // 流是刻意断开的,不是故障
       s.historyError = false;
       s.historyHasMore = false;
       s.loadingOlder = false;
@@ -645,6 +660,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.browsing = null;
       s.messages = this.messageCache.get(name) ?? [];
       s.loadingHistory = !s.messages.length;
+      s.syncState = null;
+      s.streamDown = false;
       s.historyHasMore = false;
       s.loadingOlder = false;
       s.historyError = false;
@@ -669,6 +686,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private async syncDelta(name: string, gen: number, attempt = 0): Promise<void> {
     const cur = this.historyCursor;
     if (!cur || this.state.browsing) return;
+    // 对齐指示(与 loadMessages 同一块 pill):唤醒差量通常 1s 内落地,pill 一闪
+    // 而过;真卡住(网络没醒/跨境慢)时用户能看到「在对齐」而不是死页面
+    if (gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
     try {
       const res = await fetch(
         `/api/chat/history?agent=${encodeURIComponent(name)}&session=${encodeURIComponent(cur.sid)}&after=${cur.lastSeq}`,
@@ -691,7 +711,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       const delta = hydrateHistoryMessages(json.data ?? []);
       if (typeof json.lastSeq === "number") this.historyCursor = { sid: cur.sid, lastSeq: json.lastSeq };
-      if (!delta.length) return; // 没错过任何东西
+      if (!delta.length) {
+        // 没错过任何东西——pill 消失即「已是最新」
+        this.produce((s) => { s.syncState = null; });
+        return;
+      }
       this.clientLog(`syncDelta: 追平 ${delta.length} 条 agent=${name} after=${cur.lastSeq}`);
       this.produce((s) => {
         // 视图重组:历史气泡(h 前缀,必然 ≤ 游标) + 差量 + 幸存乐观消息 +
@@ -713,6 +737,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
         }
         s.loadingHistory = false;
+        s.syncState = null; // pill 消失 = 对齐完成(没新内容也一样,「已是最新」)
         s.historyError = false;
       });
     } catch (e) {
@@ -785,6 +810,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  什么都没有才标 historyError（渲染「加载失败·重试」而不是空会话——
    *  2026-07-13「切回来完全没有聊天记录」）。失败自动重试一次（1.5s 后）。 */
   private async loadMessages(name: string, gen: number, attempt = 0) {
+    // 对齐指示:陈旧快照秒开时这趟就是「后台在拉取」本体,必须可视(owner
+    // 2026-08-08:「不知道是在 loading 还是卡住了」)。空视图场景 loadingHistory
+    // 的骨架屏在,pill 由 UI 侧按需隐藏。
+    if (gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
     try {
       const res = await fetch(
         `/api/chat/history?agent=${encodeURIComponent(name)}`,
@@ -812,6 +841,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         this.clientLog(`loadMessages: 空结果不覆盖非空视图 agent=${name}`);
         this.produce((s) => {
           s.loadingHistory = false;
+          s.syncState = null;
           s.historyError = false;
         });
         return;
@@ -852,6 +882,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
         }
         s.loadingHistory = false;
+        s.syncState = null; // pill 消失 = 对齐完成(没新内容也一样,「已是最新」)
         s.historyError = false;
       });
     } catch (e) {
@@ -870,13 +901,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       this.produce((s) => {
         s.loadingHistory = false;
-        // 有缓存快照在显示就不打扰；空视图才亮错误态
+        // 空视图亮全屏错误态;有缓存快照在显示则亮顶栏 pill(v2.17.2+:此前
+        // 这种失败完全静默,用户盯着旧快照不知道对齐早就死了)
         s.historyError = s.messages.length === 0;
+        s.syncState = "error";
       });
       // 错误态不是终态:用户停在会话里,网络一恢复就该自己好——15s 后整链
-      // 重试(gen 守卫:切走即停),重试按钮只是手动快进
+      // 重试(gen 守卫:切走即停),重试按钮/pill 点按只是手动快进
       setTimeout(() => {
-        if (gen === this.openGen && this.state.historyError && !this.state.messages.length) {
+        if (gen === this.openGen && (this.state.historyError || this.state.syncState === "error")) {
           void this.loadMessages(name, gen, 0);
         }
       }, 15_000);
@@ -957,6 +990,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 完全看不出用户的流何时活着何时死了)。稳态下每次切换/唤醒各一条,不刷屏;
       // 连接失败不打(bridge 重启窗口每 1-10s 重试一发,会淹掉有用信号)。
       connected = true;
+      this.produce((s) => { s.streamDown = false; }); // 实时链路恢复,顶栏「重连中」收掉
       this.clientLog(`stream connected agent=${name}${since ? ` since=${since}` : ""}`);
       // 假死流看门狗:iOS 挂起恢复/网络切换后连接常「不报错也不产出」,以前
       // 只能等用户切页触发对齐。BFF 心跳 10s 一发,25s 收不到任何字节即判死,
@@ -1043,6 +1077,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 后续处理过程 web 上完全没有）。仍是当前流才自动重连；走 maybeReconnect
       // 完整对齐（重拉历史把断流期间的消息补回来）。后台页交给 visibilitychange。
       if (gen === this.streamGen && this.state.activeAgent === name) {
+        // v2.17.2+ 流断开可视化:该活着的流死了(含连接失败),顶栏亮「重连中」。
+        // 稳态断连 1-10s 内就恢复,pill 一闪而过;网络真断则持续可见——用户看到
+        // 的是「在重连」而不是无声的死页面(owner 2026-08-08)
+        this.produce((s) => { s.streamDown = true; });
         // 退避 1s 起步 / 10s 封顶(曾 3s/30s——web 实时性完全押在这条流上,
         // 断档窗口就是「web 慢于 Discord」的主要成分;有断点重放兜着,激进
         // 一点重连是无损的。owner 2026-07-16)
@@ -1087,6 +1125,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 重连流（openStream 连上后 BFF /pending 补 thinking 态，把 composer 锁态也校准：
    * 仍在回合则重锁「停止」，已结束则保持解锁）。
    */
+  /** v2.17.2+ 顶栏「同步失败」pill 的点按重试:整链强制对齐(重拉历史+重连流)。 */
+  public retrySync() {
+    this.maybeReconnect({ force: true });
+  }
+
   public maybeReconnect(opts?: { fast?: boolean; force?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;

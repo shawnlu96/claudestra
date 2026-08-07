@@ -43,6 +43,12 @@ function TopBar() {
   const active = useChatStore((s) => s.state.activeAgent);
   const agents = useChatStore((s) => s.state.agents);
   const streaming = useChatStore((s) => s.state.streaming);
+  const syncState = useChatStore((s) => s.state.syncState);
+  const streamDown = useChatStore((s) => s.state.streamDown);
+  const loadingHistory = useChatStore((s) => s.state.loadingHistory);
+  const historyError = useChatStore((s) => s.state.historyError);
+  const browsing = useChatStore((s) => s.state.browsing);
+  const store = useChatStoreApi();
   const nav = useChatNav();
   const info = agents.find((a) => a.name === active);
   const busy = streaming || !!info?.busy;
@@ -84,6 +90,31 @@ function TopBar() {
       <span className="truncate font-semibold">
         {info ? t(info.displayName) : active || "Claudestra"}
       </span>
+      {/* v2.17.2+ 对齐/连接指示(owner 2026-08-08:「点进 agent 显示的是上次的旧
+          状态,不知道是在后台拉取、网络卡了、还是没新消息」)。单槽按严重度取一:
+          同步失败(点按重试) > 同步中 > 流重连中;pill 消失 = 已对齐已连接。
+          空视图的加载/失败有骨架屏/全屏错误态,历史现场不做对齐——都不亮。 */}
+      {!loadingHistory && !historyError && !browsing && (
+        syncState === "error" ? (
+          <button
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-warning/15 px-2 py-0.5 text-[11px] font-medium text-warning"
+            onClick={() => store.retrySync()}
+          >
+            <span className="inline-flex size-1.5 rounded-full bg-warning" />
+            {t("同步失败·点按重试")}
+          </button>
+        ) : syncState === "syncing" ? (
+          <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-base-300/60 px-2 py-0.5 text-[11px] font-medium text-base-content/60">
+            <span className="loading loading-spinner w-2.5" />
+            {t("同步中")}
+          </span>
+        ) : streamDown ? (
+          <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-base-300/60 px-2 py-0.5 text-[11px] font-medium text-base-content/60">
+            <span className="loading loading-spinner w-2.5" />
+            {t("重连中")}
+          </span>
+        ) : null
+      )}
       {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
           顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
       {busy && (
