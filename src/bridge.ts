@@ -2343,7 +2343,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       // v2.0.19+: AskUserQuestion 的 Submit / Cancel 按钮
       if (id.startsWith("auq:")) {
         try {
-          const { auqStates, buildAuqKeystrokes, clearAuqState } =
+          const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } =
             await import("./bridge/ask-user-question.js");
           const parts = id.split(":");
           const auqChannel = parts[1];
@@ -2366,9 +2366,9 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
               return;
             }
             const keys = buildAuqKeystrokes(state, auqParse);
-            // 一次 tmux send-keys 批量发，tmux 内部按顺序处理键序列；比一键一调用快得多
+            // 逐键分发（键间 120ms）：批量 send-keys 会被 AUQ 组件吞导航键，答错选项
             if (keys.length > 0) {
-              await tmuxRaw(["send-keys", "-t", state.tmuxTarget, ...keys]);
+              await sendAuqKeys(state.tmuxTarget, keys);
             }
             const summary = state.selections.map((sel, i) => {
               if (sel.length === 0) return `Q${i + 1}: (none)`;

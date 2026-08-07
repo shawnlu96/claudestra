@@ -277,3 +277,18 @@ export function buildAuqKeystrokes(state: AuqState, pane?: AuqPaneParse | null):
 export function clearAuqState(channelId: string): boolean {
   return auqStates.delete(channelId);
 }
+
+/**
+ * 把键序列逐个发给 tmux，键间 120ms。
+ *
+ * 不能一次 send-keys 批发：CC 2.1.x 的 AUQ 组件对同一读入 burst 里的连续键会
+ * 吞掉前面的导航键（2026-08-07 实测：批发 ["Down","Enter"] 落成"光标没动直接
+ * 提交"，答错选项；逐键+间隔则全对）。
+ */
+export async function sendAuqKeys(tmuxTarget: string, keys: string[]): Promise<void> {
+  const { tmuxRaw } = await import("../lib/tmux-helper.js");
+  for (const key of keys) {
+    await tmuxRaw(["send-keys", "-t", tmuxTarget, key]);
+    await Bun.sleep(120);
+  }
+}

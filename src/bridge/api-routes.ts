@@ -1322,7 +1322,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const kind = String(body?.kind || "");
 
     if (kind === "auq") {
-      const { auqStates, buildAuqKeystrokes, clearAuqState } = await import("./ask-user-question.js");
+      const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } = await import("./ask-user-question.js");
       const state = auqStates.get(agent.channelId);
       if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
       const action = String(body?.action || "submit");
@@ -1360,7 +1360,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       }
       const keys = buildAuqKeystrokes(state, auqParse);
       try {
-        if (keys.length > 0) await tmuxRaw(["send-keys", "-t", state.tmuxTarget, ...keys]);
+        // 逐键分发（sendAuqKeys）：批量 send-keys 会被 AUQ 组件吞导航键，答错选项
+        if (keys.length > 0) await sendAuqKeys(state.tmuxTarget, keys);
       } catch (e) {
         return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
       }
