@@ -76,8 +76,12 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
     // 深链:点通知直达该 agent 会话(owner 2026-07-16)
     url: `/chat?agent=${encodeURIComponent(agent)}`,
     agent,
-    // 同 agent 的连续回复折叠成一条(系统通知中心不刷屏)
-    tag: `cstra-${agent}`,
+    // v2.17.2:每条推送独立 tag。此前按 agent 折叠(`cstra-${agent}`),但 iOS
+    // 对同 tag 通知是「静默替换」——新推送不横幅不震动,用户测试时「啥都没
+    // 显示」(2026-08-08 回执实锤:APNs 已投递到设备,展示层被折叠吃掉)。
+    // renotify:true 能保折叠+重提醒,但 Safari 不支持——只能放弃折叠,
+    // 通知中心逐条积攒(与主流聊天 App 一致)。
+    tag: `cstra-${agent}-${Date.now()}`,
   });
 }
 

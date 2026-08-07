@@ -1,6 +1,7 @@
 /**
  * Claudestra Web Push Service Worker(owner 2026-07-16「做 pwa 推送」)。
- * - push:展示通知;若已有聚焦中的 App 窗口(人正在看)则不弹横幅,免打扰
+ * - push:无条件展示通知(tag 由服务端 payload 决定;v2.17.2 起每条独立 tag,
+ *   同 tag 在 iOS 是静默替换、不重新提醒,折叠已放弃)
  * - notificationclick:聚焦已有窗口,没有则新开 /chat
  */
 self.addEventListener("install", () => self.skipWaiting());
