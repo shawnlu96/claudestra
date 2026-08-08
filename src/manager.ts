@@ -15,7 +15,7 @@
 
 import { hostname } from "os";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
-import { existsSync, statSync } from "fs";
+import { existsSync, statSync, readdirSync } from "fs";
 import { join } from "path";
 
 // ============================================================
@@ -2400,6 +2400,28 @@ async function cmdVersion() {
 
 /** v2.16.3 update 附带的 web 构建(HedeMacBook-Pro owner 提案 + 五条实现约束)。
  *  返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。 */
+/** 在 launchd 阉割版 PATH 下解析 npm 绝对路径(v2.17.2,peer 定案:nvm 目录不在
+ *  launcher plist 的 PATH 里,Bun.spawn(["npm",...]) ENOENT,web 静默漏建)。
+ *  顺序:当前 PATH 的 which → nvm 最新版本 → homebrew → /usr/local。返回 npm
+ *  路径与其 bin 目录(npm scripts 里要能找到 node,PATH 得补进去)。 */
+function resolveNpm(): { npm: string; binDir: string } | null {
+  const w = Bun.spawnSync(["/usr/bin/which", "npm"], { env: process.env as Record<string, string> });
+  const hit = w.exitCode === 0 ? w.stdout.toString().trim() : "";
+  if (hit) return { npm: hit, binDir: hit.replace(/\/npm$/, "") };
+  const home = process.env.HOME || "";
+  const candidates: string[] = [];
+  try {
+    const nvmDir = `${home}/.nvm/versions/node`;
+    const versions = readdirSync(nvmDir).sort().reverse(); // 字典序倒排,新版本优先
+    for (const v of versions) candidates.push(`${nvmDir}/${v}/bin/npm`);
+  } catch { /* 无 nvm */ }
+  candidates.push("/opt/homebrew/bin/npm", "/usr/local/bin/npm", `${home}/.local/bin/npm`);
+  for (const c of candidates) {
+    if (existsSync(c)) return { npm: c, binDir: c.replace(/\/npm$/, "") };
+  }
+  return null;
+}
+
 async function maybeBuildWeb(
   fromRef: string,
   toRef: string
@@ -2412,19 +2434,30 @@ async function maybeBuildWeb(
   if (!diff.ok) return { built: false, skipped: `diff 失败(${diff.err}),保守跳过` };
   const touched = diff.out.split("\n").filter(Boolean);
   if (!touched.length) return { built: false, skipped: "本次更新未触及 web/" };
-  // 依赖变了先装
-  if (touched.some((f) => f === "web/package.json" || f === "web/package-lock.json")) {
-    const ip = Bun.spawn(["npm", "install"], { cwd: webDir, stdout: "pipe", stderr: "pipe" });
-    await ip.exited;
+  // v2.17.2:npm 走绝对路径 + 补 PATH(launchd 环境 ENOENT 静默漏建,peer 定案);
+  // spawn 失败也必须冒泡进返回值,不能只留日志
+  const npmBin = resolveNpm();
+  if (!npmBin) {
+    return { built: false, error: "找不到 npm(PATH/nvm/homebrew 都没有)——web 未构建,旧构建仍在服务" };
   }
-  // 约束4:构建失败保留旧构建继续服务,但结果必须显式冒泡
-  const bp = Bun.spawn(["npm", "run", "build"], { cwd: webDir, stdout: "pipe", stderr: "pipe" });
-  const [bout, berr] = await Promise.all([new Response(bp.stdout).text(), new Response(bp.stderr).text()]);
-  await bp.exited;
-  if (bp.exitCode !== 0) {
-    const tail = (berr || bout).split("\n").filter(Boolean).slice(-8).join("\n");
-    console.error(`[update] web 构建失败(保留旧构建继续服务):\n${tail}`);
-    return { built: false, error: `next build 失败(旧构建仍在服务): ${tail.slice(0, 500)}` };
+  const npmEnv = { ...process.env, PATH: `${npmBin.binDir}:${process.env.PATH || ""}` } as Record<string, string>;
+  try {
+    // 依赖变了先装
+    if (touched.some((f) => f === "web/package.json" || f === "web/package-lock.json")) {
+      const ip = Bun.spawn([npmBin.npm, "install"], { cwd: webDir, env: npmEnv, stdout: "pipe", stderr: "pipe" });
+      await ip.exited;
+    }
+    // 约束4:构建失败保留旧构建继续服务,但结果必须显式冒泡
+    const bp = Bun.spawn([npmBin.npm, "run", "build"], { cwd: webDir, env: npmEnv, stdout: "pipe", stderr: "pipe" });
+    const [bout, berr] = await Promise.all([new Response(bp.stdout).text(), new Response(bp.stderr).text()]);
+    await bp.exited;
+    if (bp.exitCode !== 0) {
+      const tail = (berr || bout).split("\n").filter(Boolean).slice(-8).join("\n");
+      console.error(`[update] web 构建失败(保留旧构建继续服务):\n${tail}`);
+      return { built: false, error: `next build 失败(旧构建仍在服务): ${tail.slice(0, 500)}` };
+    }
+  } catch (e) {
+    return { built: false, error: `web 构建 spawn 失败(${(e as Error).message})——旧构建仍在服务` };
   }
   // 约束1:重启只在我们「拥有监督者」时做(launchd 服务在场即 kickstart,KeepAlive
   // 保证拉起)。非 launchd 托管(裸 next start/pm2/别人的 supervisor)不猜不杀——
