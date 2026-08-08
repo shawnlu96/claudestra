@@ -11,6 +11,17 @@ import { fmtAgo } from "../fmt-time";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 
+/** v2.17.2 点击串台修复(peer HedeMacBook-Pro 代码级归因,2026-08-09):
+ *  列表按活动排序 + roster 指纹含易变字段 + 前台 15s 轮询 → 重排是常态;
+ *  移动端 touchstart→click 有 50-300ms 派发延迟,重排落在窗口内时 click
+ *  会落在滑进指位的**另一行**上,打开错的会话。修法:pointerdown(按下一刻,
+ *  重排发生前)记录目标行——那才是用户的真实意图;click 时优先用它。
+ *  模块级共享:重排后接住 click 的是别的行实例,必须能读到按下方记录的值。 */
+let tapIntent: { name: string; ts: number } | null = null;
+/** 意图有效窗口:covers 移动端最长 click 派发延迟,又不至于让陈旧意图
+ *  污染下一次独立点击(键盘激活无 pointerdown,走闭包兜底)。 */
+const TAP_INTENT_TTL_MS = 1_200;
+
 /** 大总管图标（lucide network,调度/编排语义）——替代 👑(owner 2026-07-15:
  *  「皇冠不要了,显得更专业一点」)。 */
 function MasterIcon({ className }: { className?: string }) {
@@ -215,7 +226,14 @@ function AgentRow({
         )}
         <button
           className="relative flex min-w-0 flex-1 items-center gap-2.5 text-left sm:gap-2"
+          onPointerDown={() => {
+            tapIntent = { name: a.name, ts: Date.now() };
+          }}
           onClick={() => {
+            // 串台守卫:按下一刻的目标优先于闭包值(见文件头 tapIntent 注释)
+            const intended =
+              tapIntent && Date.now() - tapIntent.ts < TAP_INTENT_TTL_MS ? tapIntent.name : a.name;
+            tapIntent = null;
             // 多选模式:点行 = 切换选中(不可删的行忽略)
             if (manage) {
               if (canRemove) onToggleCheck?.();
@@ -235,7 +253,7 @@ function AgentRow({
             onSelect();
             requestAnimationFrame(() =>
               requestAnimationFrame(() => {
-                void store.openAgent(a.name);
+                void store.openAgent(intended);
               }),
             );
           }}
