@@ -167,12 +167,52 @@ describe("http-peer 出站状态机", () => {
     expect(h.pushed[0]).toContain("网络不可达");
   });
 
-  test("200 空回复(reply:\"\"):终止并告知,不进轮询", async () => {
+  test("200 空回复(reply:\"\"):告知一次 + 继续轮询到期限收尾(v2.17.2 任务#84)", async () => {
     const h = makeHarness([() => json(200, { ok: true, reply: "", threadId: "t4", agent: "x" })]);
     routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");
+    await sleep(500); // 超过 pollGiveUpMs=300
+    expect(h.pushed.length).toBe(2);
+    expect(h.pushed[0]).toContain("没有文本回复");
+    expect(h.pushed[0]).toContain("继续盯");
+    expect(h.pushed[1]).toContain("没有补回复");
+  });
+
+  test("空回合后对方补回复:迟到 reply 被轮询捡回(任务#84 丢报告场景)", async () => {
+    const h = makeHarness([
+      () => json(200, { ok: true, reply: "", threadId: "t7", agent: "x" }),
+      () => json(200, { ok: true, reply: "", threadId: "t7", agent: "x" }),
+      () => json(200, { ok: true, reply: "迟到补答", threadId: "t7", agent: "x" }),
+    ]);
+    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");
+    await sleep(150);
+    expect(h.pushed.length).toBe(2);
+    expect(h.pushed[0]).toContain("没有文本回复");
+    expect(h.pushed[1]).toBe("迟到补答");
+  });
+
+  test("oneShot:202 即完成,不轮询不推回(v2.17.2 任务#85)", async () => {
+    const h = makeHarness([() => json(202, { ok: true, accepted: true, threadId: "t8" })]);
+    const r = routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "FYI 通知", undefined, true);
+    expect(r.pushBack).toBe(false);
+    await sleep(400); // 远超 pollGiveUpMs,不该有任何轮询产物
+    expect(h.pushed.length).toBe(0);
+  });
+
+  test("oneShot 投递失败仍推回错误——失败绝不静默", async () => {
+    const h = { pushed: [] as string[] };
+    initHttpPeer({
+      deliver: async (env) => {
+        h.pushed.push(env.content);
+        return { envelope: env, outcome: { kind: "sent" } };
+      },
+      fetchImpl: (async () => {
+        throw new Error("ECONNREFUSED");
+      }) as unknown as typeof fetch,
+    });
+    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "FYI", undefined, true);
     await sleep(50);
     expect(h.pushed.length).toBe(1);
-    expect(h.pushed[0]).toContain("没有文本回复");
+    expect(h.pushed[0]).toContain("网络不可达");
   });
 
   test("轮询到 deadline 放弃:超时消息推回", async () => {

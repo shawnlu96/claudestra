@@ -2992,6 +2992,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
                 ws, fromChannelId, fromName, httpPeer, peerAgentName,
                 String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
+                msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回
               );
               ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
               console.log(`🌐 HTTP PEER ROUTE: ${fromName} → ${httpPeer.name}/${peerAgentName} (${httpPeer.baseUrl})`);

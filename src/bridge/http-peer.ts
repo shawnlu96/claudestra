@@ -90,17 +90,18 @@ export function routeToHttpPeer(
   peerAgentName: string,
   text: string,
   expecting?: string,
-): { ok: true; targetName: string; pushBack: true } {
+  oneShot = false,
+): { ok: true; targetName: string; pushBack: boolean } {
   const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName };
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   inflightHttpPeerCalls.add(callId);
   inflightByCaller.set(callId, fromChannelId);
-  void runCall(callId, caller, peer, peerAgentName, text, expecting).finally(() => {
+  void runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot).finally(() => {
     inflightHttpPeerCalls.delete(callId);
     inflightByCaller.delete(callId);
     cancelledCalls.delete(callId);
   });
-  return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: true };
+  return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: !oneShot };
 }
 
 async function runCall(
@@ -110,6 +111,10 @@ async function runCall(
   peerAgentName: string,
   text: string,
   expecting?: string,
+  // v2.17.2 任务#85:oneShot=fire-and-forget——wait:0 立即 202,不轮询不推回复
+  // 也不报超时(此前 FYI 通知也挂 2h 轮询,超时推回把 caller 的 thinking 点亮,
+  // 是幽灵 thinking 的噪音源头之一)。投递失败仍推回——失败绝不静默。
+  oneShot = false,
 ) {
   const d = deps;
   if (!d) return;
@@ -125,8 +130,8 @@ async function runCall(
         Authorization: `Bearer ${peer.outToken || ""}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ text, wait: WAIT_SEC }),
-      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+      body: JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC }),
+      signal: AbortSignal.timeout(oneShot ? 15_000 : POST_TIMEOUT_MS),
     });
   } catch (e) {
     await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`, peer, peerAgentName, false, callId);
@@ -157,6 +162,12 @@ async function runCall(
     return;
   }
 
+  // oneShot:对方已接收(2xx)即完成——不取回复不轮询,让对方按 FYI 处理
+  if (oneShot) {
+    recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "oneshot" } });
+    return;
+  }
+
   // 同步拿到回复（wait 命中）
   const replyText = extractReplyText(body);
   if (replyText) {
@@ -164,12 +175,15 @@ async function runCall(
     recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "wait" } });
     return;
   }
-  // 200 且 reply 为 null/空串 = 对方回合结束但没有文本回复（罕见）——终止,不空转轮询
-  // (空串场景:对方 reply() 只发按钮/附件无文本,ApiReplyResult.reply 是 "")
+  // v2.17.2 任务#84:200 且 reply 空 = 对方回合结束但没有文本回复。此前这里直接
+  // 终止——但对方常在下一个回合才补正式回复(迟到 reply 在对方侧 2h 内仍会写回
+  // 原 threadId,apiThreadResults.set 按 threadId 覆写)——弃守就是把它永远丢掉
+  // (Shawn-2 丢 bug 报告实锤)。改为:通知一次 + 继续轮询到期限。
+  let emptyNoticed = false;
   if (res.status === 200 && body && body.ok && "reply" in body && !String(body.reply ?? "").trim()) {
-    await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。`, peer, peerAgentName, false, callId);
+    emptyNoticed = true;
+    await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。我会继续盯 2 小时——对方补回复会自动送达。`, peer, peerAgentName, false, callId);
     recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "wait", empty: true } });
-    return;
   }
 
   // 202 / wait 超时未答 → thread 轮询兜底
@@ -203,15 +217,23 @@ async function runCall(
         recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "poll" } });
         return;
       }
-      if (pb && pb.ok && "reply" in pb && !String(pb.reply ?? "").trim()) {
-        await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。`, peer, peerAgentName, false, callId);
-        return;
+      // 空回合结束:通知一次后继续轮询(任务#84,同上——迟到回复会按 threadId
+      // 覆写结果,下一拍就能取到;弃守=永久丢失)
+      if (!emptyNoticed && pb && pb.ok && "reply" in pb && !String(pb.reply ?? "").trim()) {
+        emptyNoticed = true;
+        await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。我会继续盯 2 小时——对方补回复会自动送达。`, peer, peerAgentName, false, callId);
       }
     } catch {
       /* 单轮失败不放弃 */
     }
   }
-  await pushToCaller(caller, `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`, peer, peerAgentName, false, callId);
+  await pushToCaller(
+    caller,
+    emptyNoticed
+      ? `[ℹ️ peer 调用收尾] ${label} 空回合结束后 ${Math.round(POLL_GIVE_UP_MS / 60000)} 分钟内没有补回复，线程停止跟踪。需要的话稍后再问一次。`
+      : `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`,
+    peer, peerAgentName, false, callId,
+  );
   recordMetric("http_peer_out_timeout", { channelId: caller.channelId, meta: { peer: peer.name } });
 }
 
