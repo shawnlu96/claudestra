@@ -202,6 +202,32 @@ async function checkDaemons(): Promise<Check[]> {
   return out;
 }
 
+/**
+ * v2.17.2 端口属主校验(peer 实报:遗留 pm2 bridge 抢占 3847,launchd 份 10s 一轮
+ * 崩溃重启 12908 次,而 `manager update` 只 reload launchd——真正在服务的进程
+ * 永远收不到更新,修复静默不生效)。listener 与 launchd 托管 pid 必须是同一个。
+ * 返回 null = 数据不足不下结论(无 listener 已有专门 fail)。
+ */
+export function portOwnerVerdict(
+  listenerPid: string | null,
+  launchdPid: string | null,
+): { status: CheckStatus; detail: string } | null {
+  if (!listenerPid) return null;
+  if (!launchdPid) {
+    return {
+      status: "fail",
+      detail: `端口被 pid ${listenerPid} 持有,但 launchd 托管的 bridge 没在跑——被别的托管方式(pm2 遗留?)抢占,update 重载不会重启真正在服务的进程`,
+    };
+  }
+  if (listenerPid !== launchdPid) {
+    return {
+      status: "fail",
+      detail: `端口持有者 pid ${listenerPid} ≠ launchd 托管 pid ${launchdPid}——双托管冲突(pm2 遗留?),update 重载不会重启真正在服务的进程`,
+    };
+  }
+  return { status: "ok", detail: `端口由 launchd 托管进程持有(pid ${listenerPid})` };
+}
+
 async function checkBridge(repoRoot: string): Promise<Check[]> {
   const out: Check[] = [];
   const g = "bridge";
@@ -222,6 +248,23 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
       fix: "kill 掉多余的实例，只留 launchd 那份（launchctl list | grep claudestra）" });
   } else {
     out.push({ group: g, name: `端口 ${port}`, status: "ok", detail: firstLine(listeners[0]!.replace(/\s+/g, " ")) });
+  }
+
+  // 属主校验:listener pid 必须就是 launchd 托管的那个(双托管冲突自曝,peer 建议)
+  if (listeners.length >= 1 && process.platform === "darwin") {
+    const listenerPid = (listeners[0]!.trim().split(/\s+/)[1] || "").trim() || null;
+    const lc = await sh(["launchctl", "list"]);
+    const bline = lc.out.split("\n").find((l) => l.includes("com.claudestra.bridge"));
+    const launchdPid = bline ? ((bline.split("\t")[0] || "").trim().replace(/^-$/, "") || null) : null;
+    const v = portOwnerVerdict(listenerPid, launchdPid);
+    if (v) {
+      out.push({
+        group: g, name: "端口属主", status: v.status, detail: v.detail,
+        fix: v.status === "fail"
+          ? "找出并停掉非 launchd 的那份(pm2 delete / kill),再 launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge"
+          : undefined,
+      });
+    }
   }
 
   try {

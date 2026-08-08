@@ -99,3 +99,23 @@ describe("webBuildVerdict (v2.16.3 web 构建时效)", () => {
     expect(webBuildVerdict(T, T + 59_000).status).toBe("ok");
   });
 });
+
+// ── v2.17.2 端口属主校验(peer 实报 pm2 遗留抢占 3847,launchd 份崩 12908 次)──
+import { portOwnerVerdict } from "../src/lib/doctor";
+
+describe("portOwnerVerdict", () => {
+  test("listener == launchd pid → ok", () => {
+    expect(portOwnerVerdict("123", "123")!.status).toBe("ok");
+  });
+  test("listener != launchd pid → fail(双托管冲突)", () => {
+    const v = portOwnerVerdict("123", "456")!;
+    expect(v.status).toBe("fail");
+    expect(v.detail).toContain("双托管");
+  });
+  test("有 listener 但 launchd 没在跑 → fail(被别的托管方式抢占)", () => {
+    expect(portOwnerVerdict("123", null)!.status).toBe("fail");
+  });
+  test("无 listener → null(交给已有的端口 fail)", () => {
+    expect(portOwnerVerdict(null, "123")).toBeNull();
+  });
+});

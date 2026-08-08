@@ -124,9 +124,20 @@ function paneIdle(pane: string): boolean {
   return paneLooksIdle(pane);
 }
 
-/** 抓取源 pane 上的 TUI 面板痕迹(遗留 usage/settings 面板)。 */
-function panelResidue(pane: string): boolean {
-  return /Esc to cancel|Settings dialog|Current session[\s\S]*%\s*used/.test(pane);
+/**
+ * 抓取源 pane 上是否有**开着的** TUI 面板。
+ *
+ * v2.17.2 回归修复(peer 报告:全线停摆 6 天,24h 清场 319 次刷新 0 次):判据
+ * 只能认「面板开着」的独有特征,不能认「面板关过」的痕迹——
+ * - `⎿ Settings dialog dismissed` 是抓取自己收尾产生的**回执文本**,闲置窗口
+ *   没有新输出把它顶走,按残留处理 = 发一个没用的 Esc + 永久失格,窗口逐个
+ *   毒死后 findIdleScrapeTarget 恒 null,抓取静默 bail(负 lookahead 排除);
+ * - `Current session … % used` 会命中 transcript 里**引用**面板内容的对话
+ *   (bug 报告贴用量数字就中招),删掉——Usage tab 真开着时 tab 栏
+ *   `Settings Status Config Usage` 必在屏,由它覆盖。
+ */
+export function panelResidue(pane: string): boolean {
+  return /Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog(?!\s*dismissed)/.test(pane);
 }
 
 /**
@@ -148,7 +159,7 @@ async function findIdleScrapeTarget(): Promise<string | null> {
     const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
     // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙
     // 数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
-    if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings dialog/g, ""))) {
+    if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog/g, ""))) {
       console.log(`📊 清场: ${t} 残留 TUI 面板,补发 Esc`);
       await tmuxRaw(["send-keys", "-t", t, "Escape"]).catch(() => {});
       continue;
