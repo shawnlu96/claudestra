@@ -177,6 +177,10 @@ async function recoverMasterWindow(): Promise<boolean> {
 
 let lastUpdateCheck = 0;
 let lastNotifiedVersion = "";
+// v2.17.2 beta apply 重试状态(失败的 SHA 不再一次性放弃)+ 子进程日志落点
+let lastBetaAttemptSha = "";
+let lastBetaAttemptAt = 0;
+const BETA_UPDATE_LOG = "/tmp/claudestra-beta-update.log";
 
 /** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
  *  manager update(其内部走 beta 前进流程)。 */
@@ -191,8 +195,10 @@ async function checkBetaUpdates(autoOn: boolean) {
   const head = await g("rev-parse", "HEAD");
   const remote = await g("rev-parse", "origin/main");
   if (!head || !remote || head === remote) return;
-  if (remote === lastNotifiedVersion) return; // 同一 commit 只处理一次(忙碌重试除外)
   if (!autoOn) {
+    // 通知去重只属于「自动更新关着」的提示路径;auto 路径的重试节流在下面
+    // 单独管(v2.17.2:此前这道门也拦 auto 路径,通知过的 SHA 开了 auto 也不动)
+    if (remote === lastNotifiedVersion) return;
     lastNotifiedVersion = remote;
     await bridgeRequest({
       type: "reply", chatId: CONTROL_CHANNEL_ID,
@@ -204,9 +210,19 @@ async function checkBetaUpdates(autoOn: boolean) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),有 agent 在忙,下次再试`);
     return;
   }
-  lastNotifiedVersion = remote;
-  console.log(`🧪 beta 自动前进 ${head.slice(0, 7)} → ${remote.slice(0, 7)}`);
-  Bun.spawn(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "update"], {
+  // v2.17.2(peer 报告「beta 只 pull 不 apply,形同虚设」的两个真凶):
+  // ① 旧代码把 remote SHA 记进 lastNotifiedVersion=「已处理」——update 子进程
+  //    若在早期 bail(update.lock 未过期/脏树/网络),这个 SHA 永不重试,beta 卡死
+  //    到下一个 commit 出现。改为攻击性重试:HEAD 没追平就每轮(带 10 分钟冷却)
+  //    再试;成功路径会 reload launcher 本体,状态自然清零。
+  // ② 子进程输出全 ignore——bail 无任何痕迹。改为追加到日志文件,失败可见。
+  if (remote === lastBetaAttemptSha && Date.now() - lastBetaAttemptAt < 10 * 60_000) return;
+  lastBetaAttemptSha = remote;
+  lastBetaAttemptAt = Date.now();
+  console.log(`🧪 beta 自动前进 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(结果见 ${BETA_UPDATE_LOG})`);
+  const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
+  await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
+  Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
     detached: true,
