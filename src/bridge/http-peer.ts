@@ -36,8 +36,11 @@ export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
 }
 
-/** 出站 wait 秒数（对方 API 上限 300；留余量给网络） */
-const WAIT_SEC = 120;
+/** 出站 wait 秒数。v2.17.2 从 120 降到 25(peer 实锤两次丢回复):长挂 POST 跨
+ *  tailnet 常被中间设备掐,fetch 在拿到 202 之前就超时 → **连 threadId 都没有**,
+ *  后续轮询无从谈起,对方的迟到回复必丢,还报「网络不可达」误导重发。短 wait
+ *  保证回执线程几乎必达,慢回复交给轮询(30s 一拍)+ 空回合守候(2h)。 */
+const WAIT_SEC = 25;
 /** 单次 POST 的硬超时（wait + 网络余量） */
 const POST_TIMEOUT_MS = (WAIT_SEC + 15) * 1000;
 /** thread 轮询间隔 / 放弃时限 */
@@ -134,8 +137,17 @@ async function runCall(
       signal: AbortSignal.timeout(oneShot ? 15_000 : POST_TIMEOUT_MS),
     });
   } catch (e) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`, peer, peerAgentName, false, callId);
-    recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "network" } });
+    // v2.17.2 结局分类(peer 报告:超时被统一说成「网络不可达」,而消息多半已
+    // 送达——误导性文案诱发整个 peer 网络的重复投递)
+    const isTimeout = (e as Error).name === "TimeoutError" || /timed?\s*out/i.test((e as Error).message || "");
+    await pushToCaller(
+      caller,
+      isTimeout
+        ? `[⚠️ peer 调用超时] ${label} 在 ${Math.round(POST_TIMEOUT_MS / 1000)}s 内没返回回执。消息**可能已送达**但未取得回执线程,回复无法自动取回——不要立刻重发,对方在线的话稍后重问一次即可。`
+        : `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`,
+      peer, peerAgentName, false, callId,
+    );
+    recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: isTimeout ? "post_timeout" : "network" } });
     return;
   }
 
