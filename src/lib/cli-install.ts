@@ -46,9 +46,13 @@ const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 
 /** 3 个 daemon 的 launchd 定义。改这里 = 改启动链。 */
 export const DAEMONS = [
+  // ⚠ 顺序即 reload 顺序,launcher 必须最后:update 子进程常由 launcher 派生,
+  // bootout launcher 会让 launchd 连坐回收它(macOS 责任链不随 detach 断,
+  // peer 取证 2026-08-09)——launcher 放最后保证 bridge/cron 先完成 reload,
+  // 自杀只损失收尾输出。
   { label: "com.claudestra.bridge",   script: "src/bridge.ts",   stem: "bridge" },
-  { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
   { label: "com.claudestra.cron",     script: "src/cron.ts",     stem: "cron" },
+  { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
 ] as const;
 
 /** 老 pm2 启动名（用于 stop 老的、避免跟新 launchd 抢） */

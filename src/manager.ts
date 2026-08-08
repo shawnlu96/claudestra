@@ -2445,18 +2445,41 @@ async function maybeBuildWeb(
   return { built: true, restarted: false, skipped: "web 非 launchd 托管——已构建,请自行重启 web 进程" };
 }
 
+/** update.lock 互斥。锁文件里是持有者 pid——已有锁时先验持有者是否还活着:
+ *  v2.17.2(peer 取证):update 子进程常由 launcher 派生,installClaudestraCli
+ *  bootout launcher 时 launchd 会把它连坐回收(macOS 责任链不随 detach 断),
+ *  来不及 unlock → 孤儿锁把之后 30 分钟的一切更新(含 beta 自动前进)封死。
+ *  持有 pid 已死的锁直接清除接管;活着的仍按 30 分钟陈旧闸。 */
+async function takeUpdateLock(): Promise<{ ok: boolean; error?: string }> {
+  const lockPath = `${process.env.HOME}/.claude-orchestrator/update.lock`;
+  try {
+    const st = statSync(lockPath);
+    let holderAlive = false;
+    try {
+      const pid = parseInt((await Bun.file(lockPath).text()).trim(), 10);
+      if (pid > 0) {
+        process.kill(pid, 0); // 只探活不发信号
+        holderAlive = true;
+      }
+    } catch { /* 读不到 pid / 进程不存在 → 孤儿 */ }
+    if (holderAlive && Date.now() - st.mtimeMs < 30 * 60_000) {
+      return { ok: false, error: "另一次 update 正在进行(持有进程在世,update.lock 未满 30 分钟)——稍后再试" };
+    }
+    if (!holderAlive) console.error("[update] 清除孤儿 update.lock(持有 pid 已死)");
+  } catch { /* 无锁 */ }
+  await writeFile(lockPath, String(process.pid)).catch(() => {});
+  return { ok: true };
+}
+
 /** v2.17 beta 通道 update:紧跟 origin/main 的每个 commit(ff-only,天然在分支
  *  上不 detach)。release 通道走下面的 cmdUpdate 正式流程。 */
 async function cmdUpdateBeta() {
   const updateLock = `${process.env.HOME}/.claude-orchestrator/update.lock`;
-  try {
-    const st = statSync(updateLock);
-    if (Date.now() - st.mtimeMs < 30 * 60_000) {
-      output({ ok: false, error: "另一次 update 正在进行(update.lock 未满 30 分钟)——稍后再试" });
-      return;
-    }
-  } catch { /* 无锁 */ }
-  await writeFile(updateLock, String(process.pid)).catch(() => {});
+  const lock = await takeUpdateLock();
+  if (!lock.ok) {
+    output({ ok: false, error: lock.error });
+    return;
+  }
   const unlock = () => import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
 
   const status = await git("status", "--porcelain");
@@ -2495,9 +2518,13 @@ async function cmdUpdateBeta() {
   await migrateProc.exited;
   await Bun.sleep(500);
   await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
+  // ⚠ 先释锁再 reload daemon:bootout launcher 会让本进程被 launchd 连坐回收
+  // (peer 取证),殉锁会把之后 30 分钟的更新全封死。临界区(git/build)已过,
+  // 这里释放安全;进程死在 reload 里属预期,损失的只有收尾输出。
+  await unlock();
+  console.log(`[update] beta 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("./lib/cli-install.js");
   const cliInstall = await installClaudestraCli(REPO_ROOT);
-  await unlock();
   output({
     ok: true,
     channel: "beta",
@@ -2550,16 +2577,13 @@ async function cmdUpdate() {
   }
 
   // v2.16.3 并发闸(HedeMacBook-Pro 约束5):自动更新 30 分钟一轮,web 构建
-  // 动辄分钟级,别被下一轮重入。锁文件 30 分钟视为陈旧(崩溃残留不永锁)。
+  // 动辄分钟级,别被下一轮重入。v2.17.2 起孤儿锁(持有 pid 已死)直接接管。
   const updateLock = `${process.env.HOME}/.claude-orchestrator/update.lock`;
-  try {
-    const st = statSync(updateLock);
-    if (Date.now() - st.mtimeMs < 30 * 60_000) {
-      output({ ok: false, error: "另一次 update 正在进行(update.lock 未满 30 分钟)——稍后再试" });
-      return;
-    }
-  } catch { /* 无锁,正常 */ }
-  await writeFile(updateLock, String(process.pid)).catch(() => {});
+  const relLock = await takeUpdateLock();
+  if (!relLock.ok) {
+    output({ ok: false, error: relLock.error });
+    return;
+  }
 
   // web 构建的变更判定要用 checkout 前的 HEAD
   const preUpdateHead = (await git("rev-parse", "HEAD")).out.trim();
@@ -2628,10 +2652,12 @@ async function cmdUpdate() {
   //    plist + stop 老 pm2 daemon + launchctl bootstrap 三个新 plist（这一步等同于
   //    重启 daemon，自动加载新代码）。Idempotent —— 每次 update 跑一次都安全；老用户
   //    从 v2.3.x 升级到 v2.4.0 的第一次 update 就把所有迁移做完，全无感。
+  // ⚠ 先释锁再 reload daemon(与 beta 路径同理,peer 取证的连坐回收也可能发生
+  // 在 release 自动更新——launcher 派生的 update 子进程死在 bootout launcher 时)
+  await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
+  console.log(`[update] 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("./lib/cli-install.js");
   const cliInstall = await installClaudestraCli(REPO_ROOT);
-
-  await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
 
   output({
     ok: true,
