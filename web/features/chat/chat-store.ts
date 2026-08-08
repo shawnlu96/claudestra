@@ -990,7 +990,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 完全看不出用户的流何时活着何时死了)。稳态下每次切换/唤醒各一条,不刷屏;
       // 连接失败不打(bridge 重启窗口每 1-10s 重试一发,会淹掉有用信号)。
       connected = true;
-      this.produce((s) => { s.streamDown = false; }); // 实时链路恢复,顶栏「重连中」收掉
+      // 流连上 = 每条对齐路径(全量/差量/快路径重放)的最后一步,横幅在此收场。
+      // 全量/差量路径的 syncState 在 load 完成时已清,这里对快路径生效。
+      this.produce((s) => {
+        s.streamDown = false;
+        if (s.syncState === "syncing") s.syncState = null;
+      });
       this.clientLog(`stream connected agent=${name}${since ? ` since=${since}` : ""}`);
       // 假死流看门狗:iOS 挂起恢复/网络切换后连接常「不报错也不产出」,以前
       // 只能等用户切页触发对齐。BFF 心跳 10s 一发,25s 收不到任何字节即判死,
@@ -1155,6 +1160,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       return;
     }
     this.lastReconnectAt = Date.now(); // 恢复链开跑——流失联哨兵据此让路
+    // v2.17.2 对齐横幅:过完早退守卫 = 真的要动手(快路径重连流/差量/全量都算),
+    // 从这里亮到「stream connected」收——快路径此前完全不亮,恰是最常见的
+    // 短暂切走场景(owner 2026-08-08:「不知道为什么经常不触发」)
+    this.produce((s) => { s.syncState = "syncing"; });
     this.detachActiveStream();
     // 快路径(owner 2026-07-16「catch up 更快更丝滑」):短暂离开(<5min)且有
     // 断点锚 → 只重连流带 ?since=<seq>,bridge 环形缓冲把错过的事件直接重放,

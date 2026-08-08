@@ -38,17 +38,78 @@ const isManageHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === MANAGE_HASH;
 
-function TopBar() {
+/** 最短亮灯:active 变 truthy 立即亮,变 null 后至少亮满 minMs 才熄——
+ *  秒级完成的同步不再「一闪而过等于没亮」(owner 2026-08-08)。 */
+function useMinVisible<T>(active: T | null, minMs = 1200): T | null {
+  const [shown, setShown] = useState<T | null>(active);
+  const litAtRef = useRef(0);
+  useEffect(() => {
+    if (active !== null) {
+      if (litAtRef.current === 0) litAtRef.current = Date.now();
+      setShown(active);
+      return;
+    }
+    const lit = litAtRef.current;
+    if (lit === 0) { setShown(null); return; }
+    const remain = minMs - (Date.now() - lit);
+    if (remain <= 0) { litAtRef.current = 0; setShown(null); return; }
+    const t = setTimeout(() => { litAtRef.current = 0; setShown(null); }, remain);
+    return () => clearTimeout(t);
+  }, [active, minMs]);
+  return shown;
+}
+
+/** v2.17.2 对齐/连接横幅(owner 2026-08-08:「小徽章太隐蔽,要让用户知道系统
+ *  在努力」)。消息区顶部居中的实色浮动 chip,零布局位移;严重度取一:
+ *  同步失败(可点重试) > 同步中 > 重连中;最短亮 1.2s,消失 = 已是最新。
+ *  空视图(骨架屏/全屏错误态)与历史现场不亮。 */
+function SyncBanner() {
   const t = useT();
-  const active = useChatStore((s) => s.state.activeAgent);
-  const agents = useChatStore((s) => s.state.agents);
-  const streaming = useChatStore((s) => s.state.streaming);
   const syncState = useChatStore((s) => s.state.syncState);
   const streamDown = useChatStore((s) => s.state.streamDown);
   const loadingHistory = useChatStore((s) => s.state.loadingHistory);
   const historyError = useChatStore((s) => s.state.historyError);
   const browsing = useChatStore((s) => s.state.browsing);
+  const active = useChatStore((s) => s.state.activeAgent);
   const store = useChatStoreApi();
+  const raw =
+    !active || loadingHistory || historyError || browsing
+      ? null
+      : syncState === "error"
+        ? "error"
+        : syncState === "syncing"
+          ? "syncing"
+          : streamDown
+            ? "streamDown"
+            : null;
+  // error 不吃最短亮灯(它本来就常驻到重试);syncing/streamDown 保底 1.2s
+  const held = useMinVisible(raw === "error" ? null : raw);
+  const kind = raw === "error" ? "error" : held;
+  if (!kind) return null;
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-2 z-30 flex justify-center">
+      {kind === "error" ? (
+        <button
+          className="pointer-events-auto flex items-center gap-2 rounded-full bg-warning px-4 py-1.5 text-[12.5px] font-semibold text-warning-content shadow-lg"
+          onClick={() => store.retrySync()}
+        >
+          ⚠️ {t("同步失败 · 点按重试")}
+        </button>
+      ) : (
+        <span className="pointer-events-auto flex items-center gap-2 rounded-full bg-info px-4 py-1.5 text-[12.5px] font-semibold text-info-content shadow-lg">
+          <span className="loading loading-spinner w-3.5" />
+          {kind === "syncing" ? t("正在同步最新消息…") : t("连接断开 · 重连中…")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function TopBar() {
+  const t = useT();
+  const active = useChatStore((s) => s.state.activeAgent);
+  const agents = useChatStore((s) => s.state.agents);
+  const streaming = useChatStore((s) => s.state.streaming);
   const nav = useChatNav();
   const info = agents.find((a) => a.name === active);
   const busy = streaming || !!info?.busy;
@@ -90,31 +151,6 @@ function TopBar() {
       <span className="truncate font-semibold">
         {info ? t(info.displayName) : active || "Claudestra"}
       </span>
-      {/* v2.17.2+ 对齐/连接指示(owner 2026-08-08:「点进 agent 显示的是上次的旧
-          状态,不知道是在后台拉取、网络卡了、还是没新消息」)。单槽按严重度取一:
-          同步失败(点按重试) > 同步中 > 流重连中;pill 消失 = 已对齐已连接。
-          空视图的加载/失败有骨架屏/全屏错误态,历史现场不做对齐——都不亮。 */}
-      {!loadingHistory && !historyError && !browsing && (
-        syncState === "error" ? (
-          <button
-            className="flex shrink-0 items-center gap-1.5 rounded-full bg-warning/15 px-2 py-0.5 text-[11px] font-medium text-warning"
-            onClick={() => store.retrySync()}
-          >
-            <span className="inline-flex size-1.5 rounded-full bg-warning" />
-            {t("同步失败·点按重试")}
-          </button>
-        ) : syncState === "syncing" ? (
-          <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-base-300/60 px-2 py-0.5 text-[11px] font-medium text-base-content/60">
-            <span className="loading loading-spinner w-2.5" />
-            {t("同步中")}
-          </span>
-        ) : streamDown ? (
-          <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-base-300/60 px-2 py-0.5 text-[11px] font-medium text-base-content/60">
-            <span className="loading loading-spinner w-2.5" />
-            {t("重连中")}
-          </span>
-        ) : null
-      )}
       {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
           顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
       {busy && (
@@ -485,6 +521,11 @@ function ChatInner() {
 
           <main className="flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
             <TopBar />
+            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,
+                不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
+            <div className="relative">
+              <SyncBanner />
+            </div>
             <MessageList />
             <Composer />
           </main>
