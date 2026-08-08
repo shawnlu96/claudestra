@@ -149,6 +149,17 @@ export async function clearShellInitPrompts(
  */
 export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
 
+/** 剪掉 capture-pane 输出的尾部空行(v2.17.2 P0,peer 报告)。pane 比 TUI 实绘区
+ *  高(窗口 resize 后 CC 未重绘底部)时,capture 会带出成片尾部空行——最多实测
+ *  30 行——把页脚整个挤出 slice(-N) 窗口:paneLooksIdle 恒 false = 全体 agent
+ *  被误判 busy,用量抓取/wedge/就绪轮询/claude-settings 409 守卫/web busy 态
+ *  全部失真。所有「看 pane 尾部」的判定都必须先过这一刀。 */
+function trimTrailingBlank(lines: string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]!.trim()) end--;
+  return lines.slice(0, end);
+}
+
 /**
  * TUI 契约探针（纯函数，便于单测）。
  *
@@ -168,7 +179,7 @@ export function probeTuiContract(pane: string): {
   matched: string[];
   suspect: boolean;
 } {
-  const tail = pane.split("\n").slice(-15).join("\n");
+  const tail = trimTrailingBlank(pane.split("\n")).slice(-15).join("\n");
   const tuiPresent = /─{20,}/.test(tail);
   const matched: string[] = [];
   if (CC_MODE_BANNER_RE.test(tail)) matched.push("mode-banner");
@@ -178,7 +189,7 @@ export function probeTuiContract(pane: string): {
 
 /** 纯函数版：给定 pane 文本判断是否 idle。便于单测。 */
 export function paneLooksIdle(pane: string): boolean {
-  const lines = pane.split("\n");
+  const lines = trimTrailingBlank(pane.split("\n")); // 尾部空行会把页脚挤出窗口(P0,见 trimTrailingBlank)
   const last5 = lines.slice(-5);
   // 模式 1: 严格匹配 — 老 Claude Code 行为
   if (last5.some((line) => /^\s*❯\s*$/.test(line))) return true;

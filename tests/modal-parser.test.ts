@@ -702,3 +702,38 @@ describe("paneIdleVerdict — 三态忙闲（文案漂移时给 unknown）", () 
     expect(paneIdleVerdict("shawn@mac ~ % ")).not.toBe("unknown");
   });
 });
+
+// ── v2.17.2 P0 回归(peer 报告:尾部空行把页脚挤出 slice 窗口,8/8 agent 误判 busy)──
+describe("paneLooksIdle 尾部空行免疫", () => {
+  const idleCore = `some output
+──────────────────────────────── name ──
+❯ Type a message...
+────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
+
+  test("idle pane + 30 行尾部空行 → 仍判 idle(实测 future_data 场景)", () => {
+    expect(paneLooksIdle(idleCore + "\n".repeat(30))).toBe(true);
+  });
+
+  test("idle pane + 2 行尾部空行 → 仍判 idle", () => {
+    expect(paneLooksIdle(idleCore + "\n\n")).toBe(true);
+  });
+
+  test("busy pane + 尾部空行 → 仍判 busy(别把剪空行修成假 idle)", () => {
+    // 输入框带草稿(非裸 ❯,避开 mode-1 严格短路——那是另一个既有的 false-idle
+    // 洞,不在本回归范围)
+    const busy = `working...
+✻ Cooking… (12s · esc to interrupt)
+──────────────────────────────── name ──
+❯ половина draft
+────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt`;
+    expect(paneLooksIdle(busy + "\n".repeat(20))).toBe(false);
+  });
+
+  test("probeTuiContract 同样免疫:idle+空行不 suspect", () => {
+    const p = probeTuiContract(idleCore + "\n".repeat(30));
+    expect(p.tuiPresent).toBe(true);
+    expect(p.suspect).toBe(false);
+  });
+});
