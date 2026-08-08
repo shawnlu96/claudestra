@@ -96,8 +96,8 @@ function SyncBanner() {
           ⚠️ {t("同步失败 · 点按重试")}
         </button>
       ) : (
-        <span className="pointer-events-auto flex items-center gap-2 rounded-full bg-info px-4 py-1.5 text-[12.5px] font-semibold text-info-content shadow-lg">
-          <span className="loading loading-spinner w-3.5" />
+        <span className="pointer-events-auto flex items-center gap-2 rounded-full border border-base-300/70 bg-base-100/85 px-4 py-1.5 text-[12.5px] font-medium text-base-content/80 shadow-lg backdrop-blur-md">
+          <span className="loading loading-spinner w-3.5 text-primary" />
           {kind === "syncing" ? t("正在同步最新消息…") : t("连接断开 · 重连中…")}
         </span>
       )}
