@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { useChatStore, useChatStoreApi } from "../chat-store";
+import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
 import type { AgentSession } from "../type";
 import { SettingsModal } from "./settings-modal";
 import { InstallBanner } from "./install-banner";
@@ -596,6 +596,11 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       <div
         className="flex-1 touch-pan-y overflow-y-auto overscroll-contain px-2 pb-3"
         style={{ WebkitOverflowScrolling: "touch" }}
+        // 交互期冻结 roster 重排的信号源(v2.17.2 串台补刀,见 chat-store
+        // noteSidebarInteraction):触碰/滚动期间列表顺序不动
+        onPointerDown={noteSidebarInteraction}
+        onScroll={noteSidebarInteraction}
+        onTouchMove={noteSidebarInteraction}
       >
         {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
             是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}

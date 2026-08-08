@@ -21,6 +21,14 @@ import { getLang } from "@/lib/i18n";
  * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值
  *（2026-07-16 真机实锤）；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
  */
+/** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
+ *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
+let lastSidebarTouchAt = 0;
+const SIDEBAR_FREEZE_MS = 2_000;
+export function noteSidebarInteraction() {
+  lastSidebarTouchAt = Date.now();
+}
+
 function agentsSignature(list: AgentSession[]): string {
   return list
     .map(
@@ -341,6 +349,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       if (agentsSignature(next) === agentsSignature(this.state.agents)) return;
       this.produce((s) => {
+        // v2.17.2 交互期冻结顺序(peer 补刀:pointerdown 意图捕获只覆盖「按下→
+        // click」的后半窗口,「视觉锁定→手指落下」这段更长的窗口里重排照样让
+        // 手指落在错行上)。侧栏 2s 内有过触碰/滚动 → 本拍只更新字段不重排,
+        // 顺序等下一拍(≤15s)用户手离开后再应用。成员增删仍立即生效(新增排尾)。
+        if (Date.now() - lastSidebarTouchAt < SIDEBAR_FREEZE_MS && s.agents.length) {
+          const pos = new Map(s.agents.map((x, i) => [x.name, i] as const));
+          s.agents = [...next].sort(
+            (x, y) => (pos.get(x.name) ?? 1e9) - (pos.get(y.name) ?? 1e9),
+          );
+          return;
+        }
         s.agents = next;
       });
     } catch {
