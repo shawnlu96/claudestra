@@ -8,6 +8,7 @@ import {
   SESSION_COOKIE,
 } from "@/lib/services/auth.service";
 import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
+import { totpEnabled, verifySecondFactor } from "@/lib/services/totp.service";
 
 const SESSION_DAYS = 7;
 
@@ -19,14 +20,17 @@ export async function POST(request: Request) {
   const isForm = (request.headers.get("content-type") || "").includes("form");
   let username = "";
   let password = "";
+  let code = ""; // 第二期:TOTP 验证码/恢复码,与密码同请求提交(不引入中间态 token)
   if (isForm) {
     const fd = await request.formData().catch(() => null);
     username = String(fd?.get("username") || "");
     password = String(fd?.get("password") || "");
+    code = String(fd?.get("code") || "");
   } else {
-    const j = (await request.json().catch(() => ({}))) as { username?: string; password?: string };
+    const j = (await request.json().catch(() => ({}))) as { username?: string; password?: string; code?: string };
     username = j.username || "";
     password = j.password || "";
+    code = j.code || "";
   }
   const formRedirect = (to: string) =>
     new NextResponse(null, { status: 303, headers: { Location: to } });
@@ -76,9 +80,36 @@ export async function POST(request: Request) {
     );
   }
 
+  // 第二因素（TOTP，第二期）。密码对了但 2FA 没过一律不发 session；失败同样计入
+  // 累进封禁——否则 6 位码可被无限爆破，等于没加这道门。
+  let recoveryNote: { usedRecovery: boolean; remaining: number } | undefined;
+  if (totpEnabled()) {
+    if (!code) {
+      if (isForm) return formRedirect("/login?e=totp");
+      return NextResponse.json({ error: "需要两步验证码", needTotp: true }, { status: 401 });
+    }
+    const v = verifySecondFactor(code);
+    if (!v.ok) {
+      const r = recordFailure(rlKey);
+      if (isForm) return formRedirect(r.lockedForMin > 0 ? "/login?e=locked" : "/login?e=totpbad");
+      return NextResponse.json(
+        {
+          error: r.lockedForMin > 0
+            ? `验证码不正确，失败次数过多，已锁定 ${r.lockedForMin} 分钟`
+            : "验证码不正确",
+          needTotp: true,
+        },
+        { status: 401 }
+      );
+    }
+    if (v.usedRecovery) recoveryNote = { usedRecovery: true, remaining: v.remaining ?? 0 };
+  }
+
   clearFailures(rlKey); // 登录成功清账
   const session = createSession(username);
-  const res = isForm ? formRedirect("/chat") : NextResponse.json({ data: { username } });
+  const res = isForm
+    ? formRedirect("/chat")
+    : NextResponse.json({ data: { username, ...(recoveryNote ? { recovery: recoveryNote } : {}) } });
   const maxAge = SESSION_DAYS * 24 * 60 * 60;
   // Secure 默认**关**：这套 web 常经 Tailscale / 本机的明文 HTTP 访问，Secure cookie
   // 在 HTTP 下会被浏览器直接丢弃 → 登录成功但 cookie 存不下、一直跳回登录页。

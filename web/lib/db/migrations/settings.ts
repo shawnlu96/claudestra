@@ -80,4 +80,14 @@ export function runSettingsMigrations(db: Database.Database) {
       updated_at INTEGER NOT NULL DEFAULT 0
     )
   `);
+  // TOTP 恢复码（第二期）。丢手机/换认证器时的唯一自救途径——没有它，启用 2FA
+  // 后设备一丢就彻底进不来（这套系统没有第二个管理员能帮你重置）。
+  // 只存 sha256 哈希，明文仅在生成那一刻展示一次；used_at 非空 = 已用掉（一次性）。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS totp_recovery_codes (
+      code_hash TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      used_at TEXT
+    )
+  `);
 }

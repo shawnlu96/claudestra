@@ -10,6 +10,8 @@ const FORM_ERRORS: Record<string, string> = {
   rate: "登录尝试过于频繁，请稍后再试",
   empty: "用户名和密码不能为空",
   locked: "尝试失败次数过多，账户已临时锁定，请稍后再试",
+  totp: "该账号已启用两步验证，请填写认证器上的 6 位验证码",
+  totpbad: "验证码不正确，请检查认证器时间是否同步",
 };
 
 export default function LoginPage() {
@@ -24,11 +26,17 @@ function LoginInner() {
   const t = useT();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  // 两步验证码输入框：服务端说「需要」才出现（没启用 2FA 的人完全看不到）
+  const [needTotp, setNeedTotp] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   // 未水合的原生提交走 303 重定向回 /login?e=<code>——SSR 也能渲染出错误文案
-  const urlError = FORM_ERRORS[useSearchParams().get("e") || ""] || "";
+  const urlErrCode = useSearchParams().get("e") || "";
+  const urlError = FORM_ERRORS[urlErrCode] || "";
+  // 原生表单路径下服务端要码时也得把输入框亮出来
+  const showCode = needTotp || urlErrCode === "totp" || urlErrCode === "totpbad";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,16 +46,23 @@ function LoginInner() {
     const res = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, code }),
     });
     const json = await res.json();
     setLoading(false);
 
     if (!res.ok) {
+      if (json.needTotp) setNeedTotp(true); // 亮出验证码输入框
       setError(json.error || "登录失败");
       return;
     }
 
+    // 用掉恢复码时提醒剩余数量——用完了就再也进不来，必须让人有感
+    if (json?.data?.recovery?.usedRecovery) {
+      try {
+        sessionStorage.setItem("cstra_recovery_note", String(json.data.recovery.remaining ?? 0));
+      } catch { /* 隐私模式 */ }
+    }
     router.push("/");
   };
 
@@ -94,6 +109,25 @@ function LoginInner() {
                 autoComplete="current-password"
               />
             </label>
+
+            {/* 两步验证码：服务端要码时才出现。恢复码也从这里输（一次性，
+                认证器丢了时的唯一自救途径）。inputMode=numeric 让手机直接弹数字键盘。 */}
+            {showCode && (
+              <label className="form-control">
+                <span className="label-text text-sm mb-1">{t("两步验证码")}</span>
+                <input
+                  type="text"
+                  name="code"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder={t("6 位验证码，或恢复码")}
+                  className="input input-bordered input-sm w-full font-mono tracking-widest"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  autoFocus
+                />
+              </label>
+            )}
 
             {(error || urlError) && (
               <div className="alert alert-error alert-sm text-sm py-2">
