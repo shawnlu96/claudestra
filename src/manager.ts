@@ -15,7 +15,7 @@
 
 import { hostname } from "os";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
-import { existsSync, statSync, readdirSync } from "fs";
+import { existsSync, statSync, readdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
 
 // ============================================================
@@ -1513,6 +1513,48 @@ async function cmdAdopt(name: string, sessionId: string) {
   await cmdRestart(tmuxName);
 }
 
+/**
+ * per-agent restart 跨进程互斥（v2.17.2，peer 2026-08-09 新证据：并发 restart
+ * 期间启动命令被打进无关 agent 的窗口，把没参与竞态的 agent 打成空壳）。
+ *
+ * 关键：launcher 的 boot / periodic restore 是两个独立的 `bun run manager.ts
+ * restart` **子进程**——进程内 Map 锁挡不住。cmdRestart 里 `gracefulExit →
+ * kill → sleep(500) → new-window → send 启动命令` 全程无锁，两个子进程交错
+ * 就能让 A 往 B 刚建的窗口发命令。P1 租约堵住了 launcher 侧的双跑，但 web /
+ * 手动 restart 与 launcher 仍可能并发——文件锁是不依赖上游守规矩的纵深防御。
+ */
+const RESTART_LOCK_DIR = `${process.env.HOME}/.claude-orchestrator/locks`;
+const RESTART_LOCK_STALE_MS = 3 * 60_000;
+
+function tryLockRestart(tmuxName: string, depth = 0): boolean {
+  const lock = `${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`;
+  try {
+    mkdirSync(RESTART_LOCK_DIR, { recursive: true });
+    const fd = openSync(lock, "wx"); // O_EXCL：已存在即抛
+    writeSync(fd, `${process.pid}\n${Date.now()}`);
+    closeSync(fd);
+    return true;
+  } catch {
+    if (depth > 0) return false; // 只接管一次，避免抢锁循环
+    try {
+      const [pidS, tsS] = readFileSync(lock, "utf8").split("\n");
+      const pid = parseInt(pidS, 10);
+      const ts = parseInt(tsS, 10) || 0;
+      let alive = false;
+      if (pid > 0) { try { process.kill(pid, 0); alive = true; } catch { /* 死了 */ } }
+      if (!alive || Date.now() - ts > RESTART_LOCK_STALE_MS) {
+        unlinkSync(lock); // 陈旧（持有进程已死 / 超时）→ 接管
+        return tryLockRestart(tmuxName, depth + 1);
+      }
+    } catch { /* 读锁失败按被占处理 */ }
+    return false;
+  }
+}
+
+function unlockRestart(tmuxName: string): void {
+  try { unlinkSync(`${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`); } catch { /* 已删 */ }
+}
+
 async function cmdRestart(name?: string) {
   const reg = await loadRegistry();
   const liveWindows = await listAgentWindowsShared();
@@ -1542,6 +1584,8 @@ async function cmdRestart(name?: string) {
 
   const results: { name: string; ok: boolean; error?: string; recreated?: boolean }[] = [];
 
+  let regDirty = false;
+
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
     if (!info || !info.sessionId || !info.channelId) {
@@ -1549,6 +1593,15 @@ async function cmdRestart(name?: string) {
       continue;
     }
 
+    // per-agent 跨进程锁：另一个 restart 正在处理同一 agent 就跳过（不阻塞），
+    // 防并发交错把启动命令打进无关窗口（peer 2026-08-09 新证据）
+    if (!tryLockRestart(tmuxName)) {
+      console.error(`[restart] ${tmuxName} 另一个 restart 正在进行，跳过（避免并发交错）`);
+      results.push({ name: tmuxName, ok: false, error: "另一个 restart 正在进行，已跳过" });
+      continue;
+    }
+
+    try {
     // 1. 看同名 window 数量决定路径。永远不要用 ambiguous name target 做 kill
     //    —— v2.4.2 之前这里走 `kill-window -t master:<name>`，tmux 遇到多份同名
     //    会报 "more than one window" 错误，外层 `.catch(() => {})` 吞掉错误后
@@ -1656,6 +1709,15 @@ async function cmdRestart(name?: string) {
     // v2.5.4: 会话内补发 /model，restart 也是 --resume（同样会漂回 session 原模型）
     if (started.ready) await enforceSessionModel(tmuxName, info.model);
 
+    // P2（peer 2026-08-09）：cmdRestart 此前全程不写 status——restart 一个
+    // stopped agent 进程真起来、频道真注册，但 registry 永远停在 stopped，与
+    // cmdList（硬编码 active）永久分叉：web 显示「未启动」、归档兜底跳过它、
+    // restoreDeadAgents 只认 active 故永不自愈。成功即写回 active。
+    if (started.ready && reg.agents[tmuxName] && reg.agents[tmuxName].status !== "active") {
+      reg.agents[tmuxName].status = "active";
+      regDirty = true;
+    }
+
     results.push({
       name: tmuxName,
       ok: started.ready,
@@ -1673,7 +1735,12 @@ async function cmdRestart(name?: string) {
         text: `✅ ${displayName} 已重启，自动恢复完整会话（无 compact，上下文保留）`,
       }).catch(() => { /* 通知失败不影响重启结果 */ });
     }
+    } finally {
+      unlockRestart(tmuxName); // 无论成败/异常都释锁，别把 agent 永久锁死
+    }
   }
+
+  if (regDirty) await saveRegistry(reg); // P2：落回 status=active
 
   // 重启后做一次完整 skill 重扫（每个 agent cwd 可能项目级 skill 有变动）
   await triggerSkillsRescan("full");
@@ -1694,6 +1761,12 @@ async function cmdList() {
   for (const name of tmuxWindows) {
     const idle = await isAgentIdle(name);
     const info = reg.agents[name];
+    // P2（peer 2026-08-09）：窗口活着但 registry 说 stopped = 两个数据源分叉。
+    // cmdRestart 现在会写回 status，理论上不该再出现；真出现就是还有别的写入
+    // 路径漏了——静默分叉会让 web 显示「未启动」、归档跳过、自愈不认，必须留痕。
+    if (info && info.status && info.status !== "active") {
+      console.error(`[list] ⚠️ ${name} 窗口存在但 registry status=${info.status}（数据源分叉，restart 一次可修）`);
+    }
     agents.push({
       name,
       status: "active",
