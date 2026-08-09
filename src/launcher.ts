@@ -392,13 +392,25 @@ async function getClaudeLatestVersion(): Promise<string | null> {
   return m ? m[1] : null;
 }
 
-/** claude 二进制的安装方式检测:realpath 落在 Homebrew Caskroom → brew cask
- *  (返回 cask 名);否则按 npm 全局处理。brew 装的机器上跑 npm install -g 必然
- *  EEXIST 失败——这正是「CC 静默更新老是失败」的根因(owner 2026-07-16)。 */
-async function detectClaudeInstall(): Promise<{ kind: "brew"; cask: string } | { kind: "npm" }> {
+/** claude 二进制的安装方式检测。三类:
+ *  - **brew cask**:realpath 落在 Homebrew Caskroom(返回 cask 名)。brew 装的
+ *    机器上跑 npm install -g 必然 EEXIST 失败——「CC 静默更新老失败」的根因
+ *    (owner 2026-07-16)。
+ *  - **native**(v2.17.2,peer 2026-08-09):官方原生安装器,realpath 落在
+ *    `~/.local/share/claude/versions/<ver>`,CC **自带自更新**(实测三天三版)。
+ *    此前这类被 else 一把归进 npm → `npm install -g` 装一份**永不执行**的副本
+ *    (PATH 里 ~/.local/bin 优先于 nvm),然后无条件报「已更新」并触发全员重启波。
+ *  - **npm**:兜底。 */
+async function detectClaudeInstall(): Promise<
+  { kind: "brew"; cask: string } | { kind: "native" } | { kind: "npm" }
+> {
   const which = await runCmd(["/bin/sh", "-lc", "realpath \"$(command -v claude)\" 2>/dev/null"]);
-  const m = which.ok ? which.out.match(/\/Caskroom\/([^/]+)\//) : null;
-  return m ? { kind: "brew", cask: m[1] } : { kind: "npm" };
+  const real = which.ok ? which.out.trim() : "";
+  const m = real.match(/\/Caskroom\/([^/]+)\//);
+  if (m) return { kind: "brew", cask: m[1] };
+  // 原生安装器:.../share/claude/versions/<ver>（不锁死 ~/.local，自定义前缀同样命中）
+  if (/\/share\/claude\/versions\//.test(real)) return { kind: "native" };
+  return { kind: "npm" };
 }
 
 /** 所有 agent + master 是否都空闲 */
@@ -528,6 +540,10 @@ async function checkClaudeCodeUpdate() {
   // 常领先 cask 几小时到几天,拿 npm 版本对比会永远误报「有更新」,而
   // npm install -g 对 brew 安装直接 EEXIST 失败(历史上「静默更新老失败」)。
   const install = await detectClaudeInstall();
+  // native 安装器自带自更新(peer 2026-08-09 实测三天三版),Claudestra 不该插手:
+  // npm install -g 只会装一份永不执行的副本,却触发全员重启波 + 误报「已更新」。
+  // 真要代劳也只能是 `claude update`,不是 npm——这里选择完全不碰。
+  if (install.kind === "native") return;
   let latest: string;
   if (install.kind === "brew") {
     await runCmd(["brew", "update", "--quiet"]); // 刷新索引(weekly 一次,慢点无妨)
@@ -598,6 +614,23 @@ async function checkClaudeCodeUpdate() {
 
   // 确认版本 + 可执行性体检(坏二进制绝不能进重启波,见 verifyClaudeLaunchable)
   const afterVersion = await getClaudeVersion();
+  // v2.17.2(peer 2026-08-09 独立缺口):此前这里**无条件**打「已更新到 X」并继续
+  // 走体检+全员重启波——升级包装到了别处/根本没生效时,把失败伪装成成功,代价是
+  // 一次无意义的全员重启 + 误报通知。版本没变就是没生效,告警并中止。
+  if (afterVersion && current && afterVersion === current) {
+    console.log(`🆙 ⚠️ ${install.kind} 升级命令成功但版本仍是 ${current}——升级未生效,中止重启波`);
+    try {
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `⚠️ Claude Code 升级命令执行成功，但版本仍是 ${current}（预期 ${latest}）——升级**未生效**，已中止 agent 重启。可能是装到了不在 PATH 前列的位置，或该机器由其它方式管理 CC（如原生安装器自更新）。`,
+          `⚠️ Claude Code upgrade command succeeded but version is still ${current} (expected ${latest}) — upgrade did **not** take effect; agent restart aborted. It may have installed somewhere not first on PATH, or CC is managed another way on this machine (e.g. native installer self-update).`,
+        ),
+      });
+    } catch { /* non-critical */ }
+    return;
+  }
   console.log(`🆙 Claude Code 已更新到 ${afterVersion}`);
   const health = await verifyClaudeLaunchable();
   if (!health.ok) {
