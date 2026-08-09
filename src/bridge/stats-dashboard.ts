@@ -125,6 +125,28 @@ function paneIdle(pane: string): boolean {
 }
 
 /**
+ * 敲入 /status 之后的 TOCTOU 二次确认——反向判据(v2.17.2,peer 二层定案:
+ * 敲入本身会弹 slash 补全菜单,窄 pane 上条目换行可达 11 行,把 ❯ 顶出
+ * paneLooksIdle 的 last5 窗口——任何**正向 idle 判据**必被我方自己敲的字符
+ * 否决,recheck 每轮自我否决,抓取 100% 失败且零日志。宽 pane 菜单不换行
+ * 恰好侥幸存活,掩盖了问题)。
+ *
+ * recheck 真正要防的只有两件事,直接查它们:
+ * 1) 选窗到敲入的几百 ms 间有消息进来开了回合(esc to interrupt)——Enter 会
+ *    把队列文本当消息提交;
+ * 2) 输入行内容不是纯我方敲入——用户半截输入被并进去了,Enter 会把它发出去。
+ * 补全菜单在场是敲入的**预期结果**,不是危险信号。
+ */
+export function typedRecheckOk(pane: string, typed: string): boolean {
+  if (/esc to interrupt/i.test(pane)) return false;
+  const promptLines = pane.split("\n").filter((l) => l.includes("❯"));
+  if (!promptLines.length) return false; // 输入行都找不到,保守撤退
+  const last = promptLines[promptLines.length - 1]!;
+  const content = last.slice(last.indexOf("❯") + 1).replace(/[▎█]/g, "").trim();
+  return content === typed;
+}
+
+/**
  * 抓取源 pane 上是否有**开着的** TUI 面板。
  *
  * v2.17.2 回归修复(peer 报告:全线停摆 6 天,24h 清场 319 次刷新 0 次):判据
@@ -203,16 +225,23 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
     if (k > 0) await sleep(2000);
     target = await findIdleScrapeTarget();
   }
-  if (!target) return null; // 没有任何 idle 会话可借，下次再说（沿用旧缓存）
+  if (!target) {
+    // v2.17.2 补日志(peer:整条链失败零输出,靠 ps 抓子进程才定位到)
+    console.log("📊 找不到 idle 抓取源(候选全忙/有残留),沿用旧缓存");
+    return null;
+  }
   scrapeTargetInFlight = target; // SIGTERM 兜底靠它定位要补 Esc 的 pane
   try {
     await tmuxRaw(["send-keys", "-t", target, "-l", "/status"]);
     await sleep(150);
     // v2.16.1 TOCTOU 二次确认(外部用户实报「检查用量经常打断大总管」):
     // 选窗到此已过去几百 ms,期间可能恰好来消息开了回合——此时 Enter 会把
-    // 队列文本当消息提交/把用户半截输入发出去。不再 idle 就退掉刚敲的字符走人。
+    // 队列文本当消息提交/把用户半截输入发出去。
+    // v2.17.2 判据换反向的 typedRecheckOk——正向 paneIdle 会被我方敲入弹出的
+    // 补全菜单自我否决(见函数注释,peer 二层定案:窄 pane 抓取 100% 失败)。
     const recheck = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-    if (!paneIdle(recheck)) {
+    if (!typedRecheckOk(recheck, "/status")) {
+      console.log(`📊 recheck 撤退: ${target} 敲入后不安全(回合已开/输入行有他人内容),退格还原`);
       for (let i = 0; i < 7; i++) await tmuxRaw(["send-keys", "-t", target, "BSpace"]).catch(() => {});
       return null;
     }

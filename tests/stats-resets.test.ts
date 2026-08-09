@@ -62,3 +62,47 @@ describe("panelResidue 只认「面板开着」", () => {
     expect(panelResidue("⏺ done\n\n❯ \n  ⏵⏵ bypass permissions on\n")).toBe(false);
   });
 });
+
+// ── v2.17.2 TOCTOU recheck 反向判据(peer 二层定案:补全菜单自我否决,抓取 100% 失败)──
+import { typedRecheckOk } from "../src/bridge/stats-dashboard.js";
+
+describe("typedRecheckOk 敲入后二次确认", () => {
+  // peer 实证:敲 /status 后补全菜单 11 行,❯ 被顶到倒数第 12 行
+  const MENU_PANE = `some transcript
+❯ /status
+─────────────────────────────────────────
+/status             Show Claude Code status
+                    including version, model, a…
+/statusline         Set up Claude Code's status
+                    line UI
+…elegram:configure  (telegram) Set up the
+                    Telegram channel — save the…
+/ide                Manage IDE integrations and
+                    show status
+/usage              Show session cost, plan
+                    usage, and activity stats`;
+
+  test("补全菜单在场(敲入的预期结果)→ 安全", () => {
+    expect(typedRecheckOk(MENU_PANE, "/status")).toBe(true);
+  });
+
+  test("回合开始了(esc to interrupt)→ 撤退", () => {
+    expect(typedRecheckOk(MENU_PANE + "\n✻ Cooking… esc to interrupt", "/status")).toBe(false);
+  });
+
+  test("输入行混入他人内容(用户半截输入)→ 撤退", () => {
+    expect(typedRecheckOk("transcript\n❯ 帮我查一下/status\nmenu…", "/status")).toBe(false);
+  });
+
+  test("输入行带光标占位符 ▎ → 仍安全", () => {
+    expect(typedRecheckOk("x\n❯ /status▎\nmenu", "/status")).toBe(true);
+  });
+
+  test("找不到输入行 → 保守撤退", () => {
+    expect(typedRecheckOk("blank screen", "/status")).toBe(false);
+  });
+
+  test("transcript 里的旧 ❯ 行不干扰(取最后一条 ❯ 为输入行)", () => {
+    expect(typedRecheckOk("❯ /model claude-opus-5\n⎿ Set model\n❯ /status\nmenu", "/status")).toBe(true);
+  });
+});
