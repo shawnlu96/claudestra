@@ -122,6 +122,8 @@ async function runCall(
   const d = deps;
   if (!d) return;
   const f = d.fetchImpl ?? fetch;
+  // oneShot 只等 202 回执,15s 足够;常规调用等 wait 同步窗口 + 网络余量
+  const postTimeoutMs = oneShot ? 15_000 : POST_TIMEOUT_MS;
   const base = (peer.baseUrl || "").replace(/\/+$/, "");
   const label = `peer ${peer.name}/${peerAgentName}`;
 
@@ -134,7 +136,7 @@ async function runCall(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC }),
-      signal: AbortSignal.timeout(oneShot ? 15_000 : POST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(postTimeoutMs),
     });
   } catch (e) {
     // v2.17.2 结局分类(peer 报告:超时被统一说成「网络不可达」,而消息多半已
@@ -143,7 +145,7 @@ async function runCall(
     await pushToCaller(
       caller,
       isTimeout
-        ? `[⚠️ peer 调用超时] ${label} 在 ${Math.round(POST_TIMEOUT_MS / 1000)}s 内没返回回执。消息**可能已送达**但未取得回执线程,回复无法自动取回——不要立刻重发,对方在线的话稍后重问一次即可。`
+        ? `[⚠️ peer 调用超时] ${label} 在 ${Math.round(postTimeoutMs / 1000)}s 内没返回回执。消息**可能已送达**但未取得回执线程,回复无法自动取回——不要立刻重发,对方在线的话稍后重问一次即可。`
         : `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`,
       peer, peerAgentName, false, callId,
     );
