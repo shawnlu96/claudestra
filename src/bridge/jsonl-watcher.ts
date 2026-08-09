@@ -86,6 +86,15 @@ export function formatTool(name: string, input: any): string {
       return `🗒️ 任务 #${input?.taskId ?? "?"}${st}`;
     }
     default: {
+      // v2.17.2(peer 2026-08-09):send_to_agent 出站在前端此前只剩工具名,target
+      // 和正文全丢——owner 看不到本地→peer 说了什么(半边对话)。它的正文没有
+      // 任何其它渠道会显示(不同于 reply 本身就作为消息渲染,故 isReplyTool 过滤
+      // 它是对的),省略等于纯丢信息。这里提取 target + 正文首段。
+      if (name.endsWith("__send_to_agent")) {
+        const target = input?.target ? `→ ${input.target}` : "";
+        const body = String(input?.text || "").replace(/\n/g, " ").trim().slice(0, 200);
+        return `🤝 send_to_agent ${target}${body ? `：${body}` : ""}`.trim();
+      }
       // mcp__server__tool → server/tool
       const short = name.startsWith("mcp__") ? name.replace("mcp__", "").replace("__", "/") : name;
       return `${e} ${short}`;
@@ -120,6 +129,16 @@ export function formatToolDetail(name: string, input: any): string {
       out = [input?.description, input?.command].filter(Boolean).join("\n───\n");
       break;
     default:
+      // send_to_agent 详情:target + expecting + 正文原文(不 JSON 转义——正文是
+      // 给人读的长文,几千字的 bug 报告 JSON.stringify 成一坨 \n 没法看,peer 2026-08-09)
+      if (name.endsWith("__send_to_agent")) {
+        out = [
+          input?.target ? `→ ${input.target}` : "",
+          input?.expecting ? `[期望] ${input.expecting}` : "",
+          input?.text || "",
+        ].filter(Boolean).join("\n───\n");
+        break;
+      }
       try {
         out = JSON.stringify(input ?? {}, null, 2);
       } catch {
