@@ -832,11 +832,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  失败（Bridge 限流 429→502 等）**不清空当前视图**：有缓存快照就继续显示，
    *  什么都没有才标 historyError（渲染「加载失败·重试」而不是空会话——
    *  2026-07-13「切回来完全没有聊天记录」）。失败自动重试一次（1.5s 后）。 */
+  /** v2.17.2 在飞历史请求登记(peer 终局定案:慢中继上 sentinel/visibility 触发的
+   *  full reconnect 会打断正在下载的历史——AbortError 自激循环,「历史永远拉不完」。
+   *  maybeReconnect 看到同 agent 的新鲜在飞请求就让路,等它自然完成)。 */
+  private historyLoad: { agent: string; at: number } | null = null;
+
   private async loadMessages(name: string, gen: number, attempt = 0) {
     // 对齐指示:陈旧快照秒开时这趟就是「后台在拉取」本体,必须可视(owner
     // 2026-08-08:「不知道是在 loading 还是卡住了」)。空视图场景 loadingHistory
     // 的骨架屏在,pill 由 UI 侧按需隐藏。
     if (gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
+    this.historyLoad = { agent: name, at: Date.now() };
     try {
       const res = await fetch(
         `/api/chat/history?agent=${encodeURIComponent(name)}`,
@@ -936,6 +942,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           void this.loadMessages(name, gen, 0);
         }
       }, 15_000);
+    } finally {
+      // 在飞登记出清(重试的 backoff 间隙会短暂放行重连——可接受,重试入口会重新登记)
+      if (this.historyLoad?.agent === name) this.historyLoad = null;
     }
   }
 
@@ -1187,6 +1196,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 触发源在坏网络下 1-3s 一发互相叠加,每发都 detach+新建连接,配合 iOS 连接
     // 泄漏就是自激循环)。900ms 内只放行一次——自然死亡退避最短 1s,不受影响。
     if (Date.now() - this.lastReconnectAt < 900) return;
+    // v2.17.2 在飞历史让路(peer 终局定案:慢中继上 448KB 历史要下载很久,期间
+    // sentinel 又判流失联触发 full reconnect → openGen 自增把在飞下载作废重来,
+    // AbortError 自激循环「历史永远拉不完」)。同 agent 的历史请求还新鲜(<25s,
+    // 略小于其 30s fetch 超时)就不打断——它完成后自会开流;force(用户明确要
+    // 最新)也一样让路,重启下载只会更慢。
+    if (this.historyLoad && this.historyLoad.agent === name && Date.now() - this.historyLoad.at < 25_000) {
+      this.clientLog(`reconnect 让路: ${name} 历史请求在飞(${Math.round((Date.now() - this.historyLoad.at) / 1000)}s),不打断`);
+      return;
+    }
     // 历史现场模式:用户在刻意看旧内容,回前台/断流对齐都不打扰(流本就断开);
     // 实时追平在「回到最新」时由全量路径完成
     if (this.state.browsing) return;
