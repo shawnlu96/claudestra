@@ -52,6 +52,7 @@ async function confirmMasterModal(pane: string): Promise<void> {
   }
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
+import { resolveNpm } from "./lib/npm-path.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -326,7 +327,9 @@ async function checkForUpdates() {
 // ============================================================
 
 let lastClaudeUpdateCheck = 0;
-let lastDeadAgentCheck = 0;
+// 初值取启动时刻(不是 0):否则主循环第一圈 `Date.now() - 0 >= 60_000` 恒真,
+// periodic dead-agent 巡检开机即触发,和 boot restore 撞车(P1,peer 2026-08-09)。
+let lastDeadAgentCheck = Date.now();
 
 async function runCmd(cmd: string[], timeoutMs = 0): Promise<{ ok: boolean; out: string; err: string }> {
   const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
@@ -378,7 +381,12 @@ async function verifyClaudeLaunchable(): Promise<{ ok: boolean; fixed?: string }
 }
 
 async function getClaudeLatestVersion(): Promise<string | null> {
-  const { ok, out } = await runCmd(["npm", "view", "@anthropic-ai/claude-code", "version"]);
+  // launchd 阉割 PATH 不含 nvm 目录,直接 spawn "npm" ENOENT(peer 2026-08-09:
+  // 「CC 自动更新检查一直静默失败」,与 e11500e 修的 web 构建同坑)。复用
+  // resolveNpm 解析绝对路径(src/lib/npm-path,manager 也用同一份)。
+  const npmBin = resolveNpm();
+  if (!npmBin) return null;
+  const { ok, out } = await runCmd([npmBin.npm, "view", "@anthropic-ai/claude-code", "version"], 30_000);
   if (!ok) return null;
   const m = out.match(/(\d+\.\d+\.\d+)/);
   return m ? m[1] : null;
@@ -413,6 +421,19 @@ async function allAgentsIdle(): Promise<boolean> {
  * 参数 `source`: "boot"（开机首次自检）或 "periodic"（主循环定期检查）—
  * 前者有 dead 时才 notify master 频道；后者静默处理，避免刷屏。
  */
+/**
+ * 升级波 / 恢复波进行中标志（租约）。restoreDeadAgents 的 periodic 巡检必须在
+ * 波内停手：波会依次 kill/重建每个 agent 的窗口，巡检在窗口空档扫到「dead」
+ * 就并发再发一次 restart——两个 restart 各建一个同名窗口、抢同一个 --resume
+ * session，双双失败（2026-07-27 实锤：ld-binance-operate 双窗口 + 整夜假「工作
+ * 中」）。用「租约」而非布尔量：中途异常也不会把巡检永久锁死，租约到点自然恢复。
+ *
+ * v2.17.2（peer 2026-08-09 P1）：开机波（boot restore）此前不持租约,而 periodic
+ * 的门槛 `Date.now() >= restartWaveUntil` 初值 0 恒过 → 开机时 boot 与 periodic
+ * 各把 7 个 agent restart 一遍。修:boot restore 也持租约(下方)。
+ */
+let restartWaveUntil = 0;
+
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
     const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
@@ -425,6 +446,9 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
       if (source === "boot") console.log("🔁 开机自检：没有需要恢复的 dead agent");
       return;
     }
+    // 持租约压住 periodic 巡检——不论 boot 还是 periodic 先到,先到者拿租约,
+    // 后到者被 685 的 `>= restartWaveUntil` 门槛挡住,不再撞车重启同一批(P1)
+    restartWaveUntil = Date.now() + 10 * 60_000;
     console.log(`🔁 [${source}] 发现 ${reallyDead.length} 个 dead agent：${reallyDead.map((a: any) => a.name).join(", ")}`);
     if (source === "boot") {
       try {
@@ -443,21 +467,12 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
       await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name]);
     }
+    restartWaveUntil = Date.now() + 60_000; // 收尾:留 1 分钟冷却让新窗口稳定再恢复巡检
     console.log(`🔁 [${source}] restart 调用完成`);
   } catch (e) {
     console.error(`🔁 [${source}] 自检失败:`, e);
   }
 }
-
-/**
- * 升级波进行中标志。restoreDeadAgents 的 periodic 巡检必须在波内停手：
- * 波会依次 kill/重建每个 agent 的窗口，巡检在窗口空档扫到「dead」就并发再
- * 发一次 restart——两个 restart 各建一个同名窗口、抢同一个 --resume session，
- * 双双失败（2026-07-27 实锤：ld-binance-operate 双窗口 + 整夜假「工作中」）。
- * 用「租约」而非布尔量：波开始拿 15 分钟租约、全量 restart 前续一次——
- * 函数中途异常也不会把巡检永久锁死，租约到点自然恢复。
- */
-let restartWaveUntil = 0;
 
 async function restartAgentsAndMaster() {
   restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检

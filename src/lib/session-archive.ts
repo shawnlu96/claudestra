@@ -52,7 +52,12 @@ export async function archiveSession(
   sessionId: string,
   opts: { archiveRoot?: string; srcPath?: string } = {},
 ): Promise<ArchiveResult> {
-  if (!sessionId) return { ok: false, archived: [], note: "无 sessionId" };
+  // typeof 守卫(peer 2026-08-09):调用方把非字符串(如误传 opts 对象)落到
+  // sessionId 位时,下面的路径拼接会得到必不存在的路径 → 误报「源已被 CC 清理」,
+  // 一个和真实原因完全无关、还很吓人的诊断。类型不对就直说类型不对。
+  if (typeof sessionId !== "string" || !sessionId) {
+    return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
+  }
   let src = opts.srcPath ?? (cwd ? projectJsonlPath(cwd, sessionId) : "");
   if (!src || !existsSync(src)) src = findJsonlBySessionId(sessionId) ?? "";
   if (!src || !existsSync(src)) {

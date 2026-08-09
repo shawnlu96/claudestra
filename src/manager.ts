@@ -57,6 +57,7 @@ import {
 } from "./lib/claude-launch.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
+import { resolveNpm } from "./lib/npm-path.js";
 import { projectsSlug } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
 
@@ -2400,28 +2401,6 @@ async function cmdVersion() {
 
 /** v2.16.3 update 附带的 web 构建(HedeMacBook-Pro owner 提案 + 五条实现约束)。
  *  返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。 */
-/** 在 launchd 阉割版 PATH 下解析 npm 绝对路径(v2.17.2,peer 定案:nvm 目录不在
- *  launcher plist 的 PATH 里,Bun.spawn(["npm",...]) ENOENT,web 静默漏建)。
- *  顺序:当前 PATH 的 which → nvm 最新版本 → homebrew → /usr/local。返回 npm
- *  路径与其 bin 目录(npm scripts 里要能找到 node,PATH 得补进去)。 */
-function resolveNpm(): { npm: string; binDir: string } | null {
-  const w = Bun.spawnSync(["/usr/bin/which", "npm"], { env: process.env as Record<string, string> });
-  const hit = w.exitCode === 0 ? w.stdout.toString().trim() : "";
-  if (hit) return { npm: hit, binDir: hit.replace(/\/npm$/, "") };
-  const home = process.env.HOME || "";
-  const candidates: string[] = [];
-  try {
-    const nvmDir = `${home}/.nvm/versions/node`;
-    const versions = readdirSync(nvmDir).sort().reverse(); // 字典序倒排,新版本优先
-    for (const v of versions) candidates.push(`${nvmDir}/${v}/bin/npm`);
-  } catch { /* 无 nvm */ }
-  candidates.push("/opt/homebrew/bin/npm", "/usr/local/bin/npm", `${home}/.local/bin/npm`);
-  for (const c of candidates) {
-    if (existsSync(c)) return { npm: c, binDir: c.replace(/\/npm$/, "") };
-  }
-  return null;
-}
-
 async function maybeBuildWeb(
   fromRef: string,
   toRef: string
