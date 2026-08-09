@@ -1,6 +1,6 @@
 {
   "name": "claudestra",
-  "version": "2.17.1",
+  "version": "2.18.0",
   "type": "module",
   "scripts": {
     "bridge": "bun run src/bridge.ts",
