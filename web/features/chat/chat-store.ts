@@ -137,6 +137,10 @@ interface ChatState {
  */
 export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private streamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  /** v2.17.2 当前活流的中止句柄。iOS Safari 对 fetch body 的 reader.cancel()
+   *  不关底层 TCP——不 abort 就积僵尸连接,HTTP/1.1 每 host 6 条的池耗尽后
+   *  一切请求永久排队(peer 报告:单手机 40 条 ESTABLISHED,页面全卡加载中)。 */
+  private streamAbort: AbortController | null = null;
   private streamGen = 0;
   /** openAgent 代际：切走 agent 时自增，令历史加载 / 后续连流的旧回调失效。 */
   private openGen = 0;
@@ -999,11 +1003,26 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         { signal: connCtrl.signal }
       );
       clearTimeout(connTimer);
-      if (res.status === 401) return this.gotoLogin();
-      if (gen !== this.streamGen) return; // 已切走
+      // v2.17.2 连接泄漏修复(peer 报告:单手机 40 条 ESTABLISHED,HTTP/1.1 池
+      // 6 条耗尽后所有请求永久排队——iOS 上「一直加载中」):iOS Safari 对 fetch
+      // body 的 reader.cancel() **不关底层 TCP 连接**,必须 AbortController.abort()。
+      // connCtrl 从「只管握手超时」升级为流的全生命周期中止句柄;各早退路径
+      // 也必须 abort,否则刚建立的连接就地成为僵尸。
+      if (res.status === 401) {
+        connCtrl.abort();
+        return this.gotoLogin();
+      }
+      if (gen !== this.streamGen) {
+        connCtrl.abort(); // 已切走——这条刚开的连接没人管了,必须亲手关掉
+        return;
+      }
       const rawReader = res.body?.getReader();
-      if (!rawReader) return;
+      if (!rawReader) {
+        connCtrl.abort();
+        return;
+      }
       this.streamReader = rawReader;
+      this.streamAbort = connCtrl;
       this.streamAgent = name;
       // 连接成功打点(2026-07-29「reply 要切 agent 才显示」排查:client.log 里
       // 完全看不出用户的流何时活着何时死了)。稳态下每次切换/唤醒各一条,不刷屏;
@@ -1025,6 +1044,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.streamDog = setInterval(() => {
         if (Date.now() - lastByteAt > 25_000) {
           this.clientLog(`watchdog: 流 ${Math.round((Date.now() - lastByteAt) / 1000)}s 无字节,判死重连`);
+          connCtrl.abort(); // cancel 在 iOS 上不关连接,必须 abort(连接泄漏修复)
           rawReader.cancel().catch(() => {});
         }
       }, 5_000);
@@ -1067,6 +1087,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (gen === this.streamGen) {
         this.streamReader = null;
         this.streamAgent = null;
+        // 自然死亡也补一刀 abort:服务端关闭后 iOS 客户端连接仍可能滞留(泄漏修复)
+        connCtrl.abort();
+        if (this.streamAbort === connCtrl) this.streamAbort = null;
         // 自然死亡打点(detach 发起的主动关闭 gen 已错开,不在此列):曾连接成功
         // 的流断了才值得记——排「流静默失联」类事故就靠 connected→closed 的时间线
         if (connected)
@@ -1125,8 +1148,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.discardPendingText(); // 旧会话的残字不写进新视图
     this.streamGen++;
     const reader = this.streamReader;
+    const abort = this.streamAbort;
     this.streamReader = null;
+    this.streamAbort = null;
     this.streamAgent = null;
+    if (abort) abort.abort(); // iOS 上 cancel 不关底层连接,必须 abort(连接泄漏修复)
     if (reader) reader.cancel().catch(() => {});
     if (this.state.streaming || this.state.awaitingChunk)
       this.produce((s) => {
@@ -1157,6 +1183,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public maybeReconnect(opts?: { fast?: boolean; force?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;
+    // v2.17.2 风暴地板(peer 报告:watchdog/哨兵/visibility/openAgent(same) 多个
+    // 触发源在坏网络下 1-3s 一发互相叠加,每发都 detach+新建连接,配合 iOS 连接
+    // 泄漏就是自激循环)。900ms 内只放行一次——自然死亡退避最短 1s,不受影响。
+    if (Date.now() - this.lastReconnectAt < 900) return;
     // 历史现场模式:用户在刻意看旧内容,回前台/断流对齐都不打扰(流本就断开);
     // 实时追平在「回到最新」时由全量路径完成
     if (this.state.browsing) return;
