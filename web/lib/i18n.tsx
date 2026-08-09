@@ -101,6 +101,9 @@ export function useT(): typeof t {
 export function I18nInit() {
   useEffect(() => {
     initLang();
+    // 启动看门狗解除信号(layout.tsx 内联脚本):任何页面水合到这里 = 主 bundle
+    // 已启动,25s 兜底提示不再弹
+    (window as unknown as { __cstraMounted?: boolean }).__cstraMounted = true;
   }, []);
   return null;
 }

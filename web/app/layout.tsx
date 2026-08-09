@@ -57,6 +57,16 @@ export default function RootLayout({
             __html: `try{var t=localStorage.getItem("cstra_theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`,
           }}
         />
+        {/* v2.17.2 启动看门狗(peer 报告:慢链路(DERP 中继)上主 bundle 加载失败/
+            超时 → 黑屏/无限转圈,JS 完全没跑,连 client.log 上报都发不出,前端
+            一声不吭。内联脚本不依赖 bundle,是唯一能在这种状态下发声的东西):
+            25s 内没有任何页面宣告挂载(I18nInit 水合时置 __cstraMounted)就盖一层
+            纯 HTML 提示 + 重载按钮,把「静默假死」变成可操作的失败。 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{setTimeout(function(){if(window.__cstraMounted)return;var d=document.createElement('div');d.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(20,21,23,.96);color:#e8e8ea;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;font-family:system-ui';d.innerHTML='<div style=\\'font-size:15px;line-height:1.6\\'>\\u9875\\u9762\\u8d44\\u6e90\\u52a0\\u8f7d\\u5931\\u8d25\\u6216\\u7f51\\u7edc\\u8fc7\\u6162<br><span style=\\'font-size:12.5px;opacity:.65\\'>\\u4e3b\\u7a0b\\u5e8f 25 \\u79d2\\u5185\\u672a\\u80fd\\u542f\\u52a8</span></div><button style=\\'padding:9px 26px;border-radius:9px;background:#2b2d31;color:#fff;border:1px solid #4a4d52;font-size:14px\\' onclick=\\'location.reload()\\'>\\u91cd\\u65b0\\u52a0\\u8f7d</button>';document.body.appendChild(d)},25000)}catch(e){}})();`,
+          }}
+        />
         <I18nInit />
         {children}
       </body>
