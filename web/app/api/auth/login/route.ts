@@ -7,6 +7,7 @@ import {
   createSession,
   SESSION_COOKIE,
 } from "@/lib/services/auth.service";
+import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
 
 const SESSION_DAYS = 7;
 
@@ -51,12 +52,31 @@ export async function POST(request: Request) {
     );
   }
 
-  const ok = await verifySSH(username, password);
-  if (!ok) {
-    if (isForm) return formRedirect("/login?e=cred");
-    return NextResponse.json({ error: "用户名或密码错误" }, { status: 401 });
+  // 累进封禁：处于锁定期直接拒（在密码校验之前——锁住就不再消耗 SSH 校验）。
+  const lock = checkLockout(rlKey);
+  if (lock.locked) {
+    if (isForm) return formRedirect("/login?e=locked");
+    return NextResponse.json(
+      { error: `尝试失败次数过多，账户已临时锁定，请 ${Math.ceil(lock.retryAfterSec / 60)} 分钟后再试` },
+      { status: 429, headers: { "Retry-After": String(lock.retryAfterSec) } }
+    );
   }
 
+  const ok = await verifySSH(username, password);
+  if (!ok) {
+    const r = recordFailure(rlKey); // 累进封禁计账；达阈值即进入锁定期
+    if (isForm) return formRedirect(r.lockedForMin > 0 ? "/login?e=locked" : "/login?e=cred");
+    return NextResponse.json(
+      {
+        error: r.lockedForMin > 0
+          ? `用户名或密码错误，失败次数过多，已锁定 ${r.lockedForMin} 分钟`
+          : "用户名或密码错误",
+      },
+      { status: 401 }
+    );
+  }
+
+  clearFailures(rlKey); // 登录成功清账
   const session = createSession(username);
   const res = isForm ? formRedirect("/chat") : NextResponse.json({ data: { username } });
   const maxAge = SESSION_DAYS * 24 * 60 * 60;

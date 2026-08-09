@@ -9,6 +9,7 @@ const FORM_ERRORS: Record<string, string> = {
   cred: "用户名或密码错误",
   rate: "登录尝试过于频繁，请稍后再试",
   empty: "用户名和密码不能为空",
+  locked: "尝试失败次数过多，账户已临时锁定，请稍后再试",
 };
 
 export default function LoginPage() {

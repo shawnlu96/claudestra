@@ -55,4 +55,29 @@ export function runSettingsMigrations(db: Database.Database) {
       created_at TEXT NOT NULL
     )
   `);
+  // 登录安全配置(owner 2026-08-09「设置里可选启用」)。单账号单行表,存各安全
+  // 功能的开关。默认:累进封禁开(纯加固,零登录破坏)、TOTP/Passkey 关(要用户
+  // 主动 enroll)。totp_secret 是激活后的密钥(base32),未启用时为空。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS auth_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      brute_force_on INTEGER NOT NULL DEFAULT 1,
+      totp_on INTEGER NOT NULL DEFAULT 0,
+      totp_secret TEXT NOT NULL DEFAULT '',
+      passkey_on INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  db.exec("INSERT OR IGNORE INTO auth_config (id, updated_at) VALUES (1, '')");
+  // 登录失败累进封禁状态(持久化,跨重启不清零——内存态重启即失忆,给爆破留窗口)。
+  // key=客户端 IP(见 login route),fail_count 连续失败数,locked_until 锁定到期
+  // (epoch ms,0=未锁)。登录成功即删行。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS login_lockouts (
+      k TEXT PRIMARY KEY,
+      fail_count INTEGER NOT NULL DEFAULT 0,
+      locked_until INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    )
+  `);
 }

@@ -159,6 +159,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [pushBusy, setPushBusy] = useState(false);
   // HTTP peer 管理(owner 2026-07-24):独立弹窗
   const [showPeers, setShowPeers] = useState(false);
+  // 登录安全(owner 2026-08-09):累进封禁开关。totpOn/passkeyOn 只读展示(二/三期)
+  const [bruteForceOn, setBruteForceOn] = useState(true);
+  const [totpOn, setTotpOn] = useState(false);
+  const [secBusy, setSecBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -191,7 +195,33 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
     // 本设备是否已订阅推送(看本地 pushManager,与服务端表无关——多设备各自管各自)
     setPushMsg("");
     void getPushSubscription().then((sub) => setPushOn(!!sub));
+    // 登录安全配置
+    fetch("/api/auth/config")
+      .then((r) => r.json())
+      .then((j: { bruteForceOn?: boolean; totpOn?: boolean }) => {
+        setBruteForceOn(j.bruteForceOn !== false);
+        setTotpOn(!!j.totpOn);
+      })
+      .catch(() => {});
   }, [open, store]);
+
+  const toggleBruteForce = async () => {
+    const next = !bruteForceOn;
+    setSecBusy(true);
+    setBruteForceOn(next); // 乐观
+    try {
+      const r = await fetch("/api/auth/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bruteForceOn: next }),
+      });
+      if (!r.ok) setBruteForceOn(!next); // 回滚
+    } catch {
+      setBruteForceOn(!next);
+    } finally {
+      setSecBusy(false);
+    }
+  };
 
   const togglePush = async () => {
     setPushBusy(true);
@@ -441,6 +471,26 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           }
           desc={t("Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。")}
         />
+
+        {/* ── 登录安全(owner 2026-08-09) ─────────────── */}
+        <Section
+          title={t("登录安全 · 失败封禁")}
+          aside={
+            <input
+              type="checkbox"
+              className="toggle toggle-sm shrink-0"
+              checked={bruteForceOn}
+              disabled={secBusy}
+              onChange={() => void toggleBruteForce()}
+            />
+          }
+          desc={t("连续登录失败越多，锁定越久（5次→1分钟，逐级升到60分钟），登录成功即清零。防密码爆破/喷洒。默认开启，不影响正常登录。")}
+        >
+          <div className="text-xs text-base-content/50">
+            {t("两步验证（TOTP）与 Passkey 无密码登录将在后续版本加入。")}
+            {totpOn ? t(" · 两步验证：已启用") : null}
+          </div>
+        </Section>
 
         {/* ── HTTP peer 协作 ─────────────── */}
         <Section
