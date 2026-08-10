@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 
@@ -37,6 +37,45 @@ function LoginInner() {
   const urlError = FORM_ERRORS[urlErrCode] || "";
   // 原生表单路径下服务端要码时也得把输入框亮出来
   const showCode = needTotp || urlErrCode === "totp" || urlErrCode === "totpbad";
+
+  // Passkey 登录（第三期）。仅在当前入口支持 WebAuthn 且该域注册过凭据时出现——
+  // 明文 IP 访问下浏览器根本不给 API，展示按钮只会让人点了报错。
+  const [passkeyReady, setPasskeyReady] = useState(false);
+  useEffect(() => {
+    // 只看客户端前提：浏览器支持 + secure context。「这个域有没有注册过凭据」
+    // 交给点击时的 begin 返回明确错误，避免每次进登录页都打一发探测请求。
+    setPasskeyReady(!!window.PublicKeyCredential && window.isSecureContext === true);
+  }, []);
+
+  const loginWithPasskey = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const { startAuthentication } = await import("@simplewebauthn/browser");
+      const b = await fetch("/api/auth/passkey/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "begin" }),
+      });
+      const bj = await b.json();
+      if (!b.ok) { setError(bj.error || "Passkey 不可用"); return; }
+      const asseResp = await startAuthentication({ optionsJSON: bj.options });
+      const f = await fetch("/api/auth/passkey/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "finish", challengeId: bj.challengeId, response: asseResp }),
+      });
+      const fj = await f.json();
+      if (!f.ok) { setError(fj.error || "Passkey 登录失败"); return; }
+      router.push("/");
+    } catch (e) {
+      // 用户取消指纹弹窗也走这里——不当错误刷屏
+      const msg = (e as Error).message || "";
+      if (!/NotAllowed|abort/i.test(msg)) setError(msg || "Passkey 登录失败");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,6 +186,28 @@ function LoginInner() {
               )}
             </button>
           </form>
+
+          {/* Passkey 免密登录（第三期）。放表单外——它不参与原生表单提交路径，
+              而且点了要唤起系统指纹弹窗，不能被 form 的 submit 抢走。 */}
+          {passkeyReady && (
+            <>
+              <div className="divider my-3 text-[11px] text-base-content/40">{t("或")}</div>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm w-full gap-2"
+                disabled={loading}
+                onClick={() => void loginWithPasskey()}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M6 21v-1a6 6 0 0 1 6-6" />
+                  <path d="m17 17 4 4" />
+                  <circle cx="16" cy="16" r="2" />
+                </svg>
+                {t("用 Passkey 登录")}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

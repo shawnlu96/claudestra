@@ -90,4 +90,22 @@ export function runSettingsMigrations(db: Database.Database) {
       used_at TEXT
     )
   `);
+  // Passkey / WebAuthn 凭据（第三期）。
+  // **rp_id 必须随凭据存**：WebAuthn 凭据绑定在 rpID 上且不可跨域，而这套 web
+  // 有多个入口（claude.sunstriker.cc / Tailscale MagicDNS）——它们是完全不同的
+  // 域，一个 passkey 覆盖不了两边。登录时按当前 origin 的 rpID 过滤可用凭据，
+  // 用户在哪个域用就在哪个域注册一个。
+  // counter 是签名计数器，用于克隆检测（回退即可疑）。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+      cred_id TEXT PRIMARY KEY,
+      public_key TEXT NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      rp_id TEXT NOT NULL,
+      transports TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      last_used_at TEXT
+    )
+  `);
 }
