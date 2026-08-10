@@ -79,7 +79,7 @@ export interface InstallCliResult {
   /** Claude Code 的 ~/.claude/settings.json 里 typing-hook command 是否被迁移成 bun 绝对路径 */
   migratedHookCommand: boolean;
   /** iTerm 的 TmuxDashboardLimit 是否被调高（默认 10 → 200），从 oldValue → 200。null = iTerm 没装跳过；undefined = 已经 ≥ 200 无需改 */
-  bumpedTmuxDashboardLimit?: { from: number; to: number } | null;
+  bumpedTmuxDashboardLimit?: { from: number; to: number; needsITermRestart?: boolean } | null;
   /** ~/.claude/settings.json permissions.allow 加进去的 mcp__<server>__* wildcard 规则（已存在的不重加） */
   allowedMcpTools?: { added: string[]; servers: string[] } | null;
   /** v2.5.4+ repo skills/ 里随包分发的 skill，symlink 到 ~/.claude/skills/ 的结果 */
@@ -505,7 +505,9 @@ async function ensureMcpToolsAllowed(repoRoot: string): Promise<{ added: string[
  * 调到 200（基本无限制）。idempotent —— 已经 ≥ 200 就不改，让用户自己设的值
  * 不被覆盖。iTerm 没装就跳过。
  */
-async function bumpITermTmuxDashboardLimit(): Promise<{ from: number; to: number } | null | undefined> {
+async function bumpITermTmuxDashboardLimit(): Promise<
+  { from: number; to: number; needsITermRestart?: boolean } | null | undefined
+> {
   // 检查 iTerm 是否装了
   if (!existsSync("/Applications/iTerm.app")) return null;
   const TARGET = 200;
@@ -516,7 +518,16 @@ async function bumpITermTmuxDashboardLimit(): Promise<{ from: number; to: number
   const from = Number.isFinite(current) ? current : 10;
   const w = spawnSync("defaults", ["write", "com.googlecode.iterm2", "TmuxDashboardLimit", "-int", String(TARGET)], { encoding: "utf8" });
   if (w.status !== 0) return null;
-  return { from, to: TARGET };
+  // v2.18.1（owner 2026-08-10 实报「日本那台 iTerm 有窗口不显示」）：这台机器
+  // iTerm 装着、本函数也跑过，值却从没落地——运行中的 iTerm 把偏好缓存在内存
+  // 里，退出时会用旧值覆盖回磁盘，我们写的 200 就这么没了（macOS defaults 的
+  // 经典行为）。写完立刻回读，并把「iTerm 正在运行 → 需要重启才生效、且现在
+  // 不重启可能被覆盖」这件事显式冒泡，不再静默失效。
+  const back = spawnSync("defaults", ["read", "com.googlecode.iterm2", "TmuxDashboardLimit"], { encoding: "utf8" });
+  const verified = back.status === 0 ? parseInt((back.stdout || "").trim(), 10) : NaN;
+  if (verified !== TARGET) return null; // 写了但没落地，按失败报
+  const running = spawnSync("pgrep", ["-x", "iTerm2"], { encoding: "utf8" }).status === 0;
+  return { from, to: TARGET, needsITermRestart: running || undefined };
 }
 
 /** v2.3.x 写过的 ~/.bun/bin/claudestra-autostart 现在没用了，清掉。 */
@@ -661,8 +672,15 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
 
   // 5c) 调高 iTerm TmuxDashboardLimit（默认 10 让 > 10 windows 全 bury，参考
   //     bumpITermTmuxDashboardLimit 注释里完整背景）
-  try { result.bumpedTmuxDashboardLimit = await bumpITermTmuxDashboardLimit(); }
-  catch (e) { warnings.push(`调 iTerm TmuxDashboardLimit: ${(e as Error).message}`); }
+  try {
+    result.bumpedTmuxDashboardLimit = await bumpITermTmuxDashboardLimit();
+    if (result.bumpedTmuxDashboardLimit?.needsITermRestart) {
+      warnings.push(
+        "iTerm 窗口上限已调到 200，但 iTerm 正在运行——**需要重启 iTerm 才生效**；" +
+        "且运行中的 iTerm 退出时可能用旧值覆盖回去，建议尽快重启一次（不重启的话超过 10 个 agent 窗口不会显示为标签页）"
+      );
+    }
+  } catch (e) { warnings.push(`调 iTerm TmuxDashboardLimit: ${(e as Error).message}`); }
 
   // 5d) 扫所有已装 MCP server（user-level + project-level）加 wildcard allow
   //     到 settings.json，避免 auto classifier 拦截用户主动装的 MCP 工具
