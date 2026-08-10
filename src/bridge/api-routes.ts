@@ -48,6 +48,7 @@ import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
+import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
@@ -265,117 +266,34 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
  * 会话文件里最后一条真实对话记录（user/assistant，带 timestamp）的时间。
  *
  * 不能用文件 mtime 当「最近对话时间」：CC 会持续原地更新状态类记录
- * （last-prompt / mode / file-history-snapshot 等）——空闲 agent 的 mtime
- * 也一直在刷新，列表排序就出现「没动静的 agent 莫名顶到最前」
- * （2026-07-13 真机实锤：router 尾部内容停在 07-12，mtime 却是当下）。
- * tail 256KB 逆序找；找不到（超大 tool_result 把对话挤出窗口）退回 mtime。
- * 按 (path, mtimeMs) 缓存——mtime 没变不重读。
+ * （last-prompt / mode / file-history-snapshot 等），且自己的 housekeeping
+ * 还会周期性 touch 会话文件（2026-08-10 实测：12 个 agent 的 jsonl 被逐个
+ * touch，字节与归档副本 cmp 完全一致）——空闲 agent 的 mtime 一直在刷新，
+ * 列表排序就出现「没动静的 agent 莫名顶到最前」
+ * （2026-07-13 router；2026-08-10 qingniao-miniapp owner 报「我明明啥也没干」）。
+ *
+ * 扫描策略（v2.18.1 修正）：tail 逐级放宽 256KB → 2MB → 8MB 逆序找，命中即停；
+ * 长期只被 restart 的 agent，尾部窗口可能全是重启残渣（No response requested. +
+ * /model 命令记录 + file-history-snapshot），真实对话被挤到更早的位置。
+ * 全读完仍找不到 → convTs 为 **null**（旧实现退回 mtime，等于把「CC 摸过文件」
+ * 当成活动，正是上面那个 bug 的直接成因；调用方退回 registry.created 更诚实）。
+ * 按 (path, mtimeMs) 缓存——mtime 没变不重读，放宽窗口的读放大只在 touch 后发生一次。
  */
-interface SessionTailInfo {
-  /** 最后一条真实对话(user/assistant)的时间,找不到退 mtime */
-  convTs: number | null;
-  /** 最近一条 assistant 的 usage 合计 ≈ 当前上下文占用 token 数 */
-  ctxTokens: number | null;
-  /** 最近一条 assistant 实际用的 model id（会话内 /model 切换后即时反映，防 registry 漂移） */
-  model: string | null;
-  /** model 读取自的那条 assistant 记录的时间——切换端点的乐观显示靠它判断实测是否已追上 */
-  modelTs: number | null;
-  /** 会话内最近一次 /effort 的结果档位（stdout 自述,tail 窗内没有则 null → 调用方回退 registry/全局） */
-  effort: string | null;
-  /** effort 读取自的那条记录的时间（同 modelTs 用途） */
-  effortTs: number | null;
-}
 const tailInfoCache = new Map<string, { mtimeMs: number; info: SessionTailInfo }>();
 export async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
   try {
     const st = statSync(path);
     const hit = tailInfoCache.get(path);
     if (hit && hit.mtimeMs === st.mtimeMs) return hit.info;
-    const start = Math.max(0, st.size - 262144);
-    const text = await Bun.file(path).slice(start, st.size).text();
-    const lines = text.split("\n");
-    let convTs: number | null = null;
-    let ctxTokens: number | null = null;
-    let model: string | null = null;
-    let modelTs: number | null = null;
-    let effort: string | null = null;
-    let effortTs: number | null = null;
-    for (
-      let i = lines.length - 1;
-      i >= 0 && (convTs === null || ctxTokens === null || model === null || effort === null);
-      i--
-    ) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      try {
-        const rec = JSON.parse(line);
-        // compact 边界比最近一条 assistant 更新时,占用以 postTokens 为准——
-        // 否则压缩刚完、新回合未跑的窗口里,轮询会把 ctx 徽章顶回压缩前的值
-        if (ctxTokens === null && rec.type === "system" && rec.subtype === "compact_boundary") {
-          const post = rec.compactMetadata?.postTokens;
-          if (typeof post === "number") ctxTokens = post;
-        }
-        // 上下文占用:最近一条带 usage 的 assistant——input + cache 读写就是
-        // 本轮进模型的全部上下文(web 端「context 快满」指示的数据源)。
-        // 合计为 0 的跳过:restart 回放命令产生的「No response requested.」等
-        // 合成记录 usage 全 0,采纳它会让全列表 ctx 归零(2026-07-14 CC 升级
-        // 全量 restart 后「各会话上下文占用只剩一个」的根因)
-        if (ctxTokens === null && rec.type === "assistant") {
-          const u = rec.message?.usage;
-          if (u && typeof u.input_tokens === "number") {
-            const total =
-              u.input_tokens + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-            if (total > 0) ctxTokens = total;
-          }
-        }
-        // 当前模型:最近一条 assistant 的 message.model(错误占位的 "<synthetic>" 跳过)
-        if (model === null && rec.type === "assistant") {
-          const m = rec.message?.model;
-          if (typeof m === "string" && m && !m.startsWith("<")) {
-            model = m;
-            const t = Date.parse(rec.timestamp);
-            modelTs = Number.isFinite(t) ? t : null;
-          }
-        }
-        // 会话内 /effort 切换:stdout 自述("Kept/Set effort level as/to xxx")
-        if (effort === null && rec.type === "user") {
-          const c = rec.message?.content;
-          const body = typeof c === "string" ? c : "";
-          const em = body.includes("local-command-stdout")
-            ? body.match(/(?:Kept|Set) effort level (?:as|to) (\w+)/)
-            : null;
-          if (em) {
-            effort = em[1];
-            const t = Date.parse(rec.timestamp);
-            effortTs = Number.isFinite(t) ? t : null;
-          }
-        }
-        if (convTs === null && (rec.type === "user" || rec.type === "assistant") && typeof rec.timestamp === "string") {
-          // TUI 命令记录（批量 /model 之类）不算对话——不跳过的话一次批量维护
-          // 会让全部 agent 的「最后对话」并列在同一时刻
-          if (rec.type === "user") {
-            const c = rec.message?.content;
-            const body = typeof c === "string" ? c : "";
-            if (/^\s*<(command-name|command-message|local-command-stdout|local-command-caveat)/.test(body)) continue;
-          }
-          // restart/resume 回放排队命令时,CC 会产出一条礼节性 assistant
-          // 「No response requested.」——不是真对话,不排除的话每次 restart
-          // 都把该 agent 顶到列表最前(owner 2026-07-14:「重启不算用户真正的会话」)
-          if (rec.type === "assistant") {
-            const c = rec.message?.content;
-            const txt = Array.isArray(c)
-              ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("")
-              : typeof c === "string" ? c : "";
-            if (/^\s*No response requested\.?\s*$/.test(txt)) continue;
-          }
-          const t = Date.parse(rec.timestamp);
-          if (Number.isFinite(t)) convTs = t;
-        }
-      } catch {
-        /* tail 起点切到半行 */
-      }
+    let info: SessionTailInfo = {
+      convTs: null, ctxTokens: null, model: null, modelTs: null, effort: null, effortTs: null,
+    };
+    for (const win of TAIL_WINDOWS) {
+      const start = Math.max(0, st.size - win);
+      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text());
+      // 真实对话已命中，或已经读到文件头（再放宽也没有新内容）→ 收工
+      if (info.convTs !== null || start === 0) break;
     }
-    const info: SessionTailInfo = { convTs: convTs ?? st.mtimeMs, ctxTokens, model, modelTs, effort, effortTs };
     tailInfoCache.set(path, { mtimeMs: st.mtimeMs, info });
     return info;
   } catch {
