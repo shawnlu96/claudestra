@@ -106,3 +106,54 @@ describe("typedRecheckOk 敲入后二次确认", () => {
     expect(typedRecheckOk("❯ /model claude-opus-5\n⎿ Set model\n❯ /status\nmenu", "/status")).toBe(true);
   });
 });
+
+// ── v2.19.0 Rewind 对话框：不是我们的面板，不许当残留去 Esc ─────────────
+// 2026-08-11 事故：CC 2.1.x 把「≤600ms 内连按两个 Esc」当 Rewind 手势，抓取
+// 收尾的 350ms 间隔正好落在窗口里 → 窗口卡进 Rewind → pane 永远非 idle →
+// 抓取换下一个窗口下手，一夜毒死 8 个 agent。Rewind 页脚也含「Esc to cancel」，
+// 若当成遗留面板去清场，等于每轮补一发 Esc 把它开开关关。
+import { isRewindDialog } from "../src/lib/tmux-helper.js";
+
+const REWIND_PANE = [
+  "  Rewind",
+  "",
+  "  Restore the code and/or conversation to the point before…",
+  "",
+  "    /compact",
+  "    ⚠ No code restore",
+  "",
+  "  ❯ (current)",
+  "",
+  "  Enter to continue · Esc to cancel",
+].join("\n");
+
+describe("Rewind 对话框识别", () => {
+  test("真机 pane → 认出是 Rewind", () => {
+    expect(isRewindDialog(REWIND_PANE)).toBe(true);
+  });
+
+  test("Rewind 不算「遗留面板」——否则会被周期性补 Esc 反复开关", () => {
+    expect(panelResidue(REWIND_PANE)).toBe(false);
+  });
+
+  test("Usage 面板照常算残留（护栏不能把真残留一起放走）", () => {
+    expect(panelResidue("  Settings   Status   Config   Usage\n  Current session 12% used")).toBe(true);
+  });
+
+  test("正常对话界面不误判", () => {
+    expect(isRewindDialog("⏺ 改完了\n❯ \n  ⏵⏵ bypass permissions on")).toBe(false);
+  });
+
+  test("对话里提到 Rewind 这个词不误判（要页脚+标题同时成立）", () => {
+    expect(isRewindDialog("⏺ 我用 Rewind 回滚了一下,没问题\n❯ ")).toBe(false);
+  });
+});
+
+// 双击护栏的时间常数：必须显著大于实测阈值（真机二分:≤600ms 必开,≥700ms 不开）
+import { ESC_DOUBLE_TAP_MS } from "../src/lib/tmux-helper.js";
+
+describe("Esc 双击护栏常数", () => {
+  test("间隔下限对 700ms 实测阈值留足余量", () => {
+    expect(ESC_DOUBLE_TAP_MS).toBeGreaterThanOrEqual(1200);
+  });
+});

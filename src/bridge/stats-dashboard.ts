@@ -21,7 +21,15 @@ import {
   type TextChannel,
 } from "discord.js";
 import { existsSync } from "fs";
-import { tmuxRaw, MASTER_SESSION, paneLooksIdle, TMUX_SOCK } from "../lib/tmux-helper.js";
+import {
+  tmuxRaw,
+  MASTER_SESSION,
+  paneLooksIdle,
+  TMUX_SOCK,
+  tmuxSendEscape,
+  isRewindDialog,
+  ESC_DOUBLE_TAP_MS,
+} from "../lib/tmux-helper.js";
 import { readConfig, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { discordCreateChannel } from "./discord-api.js";
@@ -159,6 +167,10 @@ export function typedRecheckOk(pane: string, typed: string): boolean {
  *   `Settings Status Config Usage` 必在屏,由它覆盖。
  */
 export function panelResidue(pane: string): boolean {
+  // v2.19.0：Rewind 检查点对话框的页脚也是「Esc to cancel」,但它不是我们开的
+  // 面板——认成残留就会周期性补 Esc 把它开开关关(2026-08-11 一夜毒死 8 个
+  // agent 的放大器)。它归 maybeRecoverRewind 处理,这里一律不认。
+  if (isRewindDialog(pane)) return false;
   return /Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog(?!\s*dismissed)/.test(pane);
 }
 
@@ -183,12 +195,36 @@ async function findIdleScrapeTarget(): Promise<string | null> {
     // 数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
     if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog/g, ""))) {
       console.log(`📊 清场: ${t} 残留 TUI 面板,补发 Esc`);
-      await tmuxRaw(["send-keys", "-t", t, "Escape"]).catch(() => {});
+      await tmuxSendEscape(t).catch(() => {});
+      continue;
+    }
+    // Rewind 卡窗:多半是历史遗留(旧版收尾 Esc 间隔 350ms 撞上双击手势)。
+    // 单发一个护栏 Esc 救回,本轮跳过,下轮它就是干净的可用窗口。
+    if (isRewindDialog(pane)) {
+      console.log(`📊 ${t} 卡在 Rewind 对话框,发一个 Esc 救回`);
+      await tmuxSendEscape(t).catch(() => {});
       continue;
     }
     if (paneIdle(pane)) return t;
   }
   return null;
+}
+
+/**
+ * v2.19.0 收尾自查：抓取结束后窗口若停在 Rewind 检查点对话框，单发一个护栏 Esc
+ * 救回并复核。只对**本次抓取动过的那个窗口**做，不巡检全局——用户自己打开
+ * Rewind 在读的窗口不该被我们关掉，而这个窗口刚被我们敲过键，责任明确。
+ */
+async function recoverRewindIfStuck(target: string): Promise<void> {
+  try {
+    const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+    if (!isRewindDialog(pane)) return;
+    console.log(`📊 收尾自查: ${target} 停在 Rewind 对话框,发 Esc 救回`);
+    await tmuxSendEscape(target);
+    await sleep(600);
+    const after = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
+    if (isRewindDialog(after)) console.log(`📊 ⚠️ ${target} 的 Rewind 未能关闭,留给 watcher 兜底`);
+  } catch { /* best-effort */ }
 }
 
 /** 手动点「🔄 刷新」置位：本次抓取要更执着（多轮等 idle 窗口），不许静默放弃 */
@@ -206,7 +242,17 @@ function hookScrapeCleanupSignals() {
     process.on(sig, () => {
       if (scrapeTargetInFlight) {
         try {
-          Bun.spawnSync(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", scrapeTargetInFlight, "Escape"]);
+          // v2.19.0:退出前这一发也不能是盲发——面板早关了还补 Esc,若与收尾
+          // 循环刚发的那一发凑成 600ms 内的双击,就把窗口留在 Rewind 里了。
+          // 同步读一眼:面板真开着才发,并先 sleep 满双击护栏(异步 sleep 在
+          // 信号处理里跑不完,只能借 spawnSync)。
+          const pane = Bun.spawnSync([
+            "tmux", "-S", TMUX_SOCK, "capture-pane", "-t", scrapeTargetInFlight, "-p",
+          ]).stdout.toString();
+          if (panelResidue(pane)) {
+            Bun.spawnSync(["sleep", String(ESC_DOUBLE_TAP_MS / 1000)]);
+            Bun.spawnSync(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", scrapeTargetInFlight, "Escape"]);
+          }
         } catch { /* 尽力而为 */ }
       }
       process.exit(0);
@@ -286,13 +332,18 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
     // 面板没开(Enter 落空/被吃)时的裸 Escape 若撞上刚开的回合就是硬中断,
     // 这正是「检查用量打断大总管」的杀伤路径。
     // v2.17.1 确认式收尾(peer 报告「Esc×2 间隔 80ms 疑被面板吞」+ master 单发
-    // 一个 Esc 即关的实证):单发 → 验证 → 未关再发,至多 3 轮,绝不盲发
+    // 一个 Esc 即关的实证):单发 → 验证 → 未关再发,至多 3 轮,绝不盲发。
+    // v2.19.0:间隔从 350ms 提到 tmuxSendEscape 的 1200ms 护栏——350ms 正好落在
+    // CC 的双击 Esc(Rewind)手势窗口内,收尾自己会把窗口捅进 Rewind 卡死。
     for (let e = 0; e < 3; e++) {
       const now = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
       if (!panelResidue(now) && !/Settings\s+Status\s+Config\s+Usage/.test(now)) break;
-      await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+      await tmuxSendEscape(target);
       await sleep(350);
     }
+    // 收尾后自查:若窗口落进了 Rewind(历史遗留状态/意外双击),自己捅出来的
+    // 自己收拾——护栏保证这一发与上一发至少隔 1200ms,不会再触发手势。
+    await recoverRewindIfStuck(target);
     if (!found) return null;
     const usage = parseUsagePanel(panel);
     // v2.17 合理性校验:session 窗口 ≤5h,解析出的重置时刻按「下一次出现」换算
@@ -320,9 +371,10 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
       for (let e = 0; e < 3; e++) {
         const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
         if (!panelResidue(pane)) break;
-        await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+        await tmuxSendEscape(target);
         await sleep(350);
       }
+      await recoverRewindIfStuck(target);
     } catch {}
     return null;
   }

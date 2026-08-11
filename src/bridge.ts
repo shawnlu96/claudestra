@@ -164,6 +164,7 @@ import {
   detectSessionIdlePrompt,
   tmuxSendLine,
   tmuxRaw,
+  tmuxSendEscape,
   paneLooksIdle,
   parseModalOptions,
   detectArrowNavModal,
@@ -2080,7 +2081,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       if (id.startsWith("wedge_esc:")) {
         const agentName = id.slice("wedge_esc:".length);
         try {
-          await tmuxRaw(["send-keys", "-t", `master:${agentName}`, "Escape"]);
+          await tmuxSendEscape(`master:${agentName}`);
           clearWedgeState(agentName);
           await interaction.followUp({ content: `✅ 已发 Esc 到 ${agentName}`, ephemeral: true }).catch(() => {});
         } catch (e) {
@@ -2384,7 +2385,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             // 同步收掉 web 端的交互卡
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord" } });
           } else if (action === "cancel") {
-            await tmuxRaw(["send-keys", "-t", state.tmuxTarget, "Escape"]);
+            await tmuxSendEscape(state.tmuxTarget);
             await interaction.editReply({
               content: `❌ 已取消 AskUserQuestion（发了 Esc 给 agent）`,
               components: [],

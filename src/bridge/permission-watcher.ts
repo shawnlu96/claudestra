@@ -11,6 +11,8 @@ import { TextChannel } from "discord.js";
 import {
   tmuxCapture,
   tmuxRaw,
+  tmuxSendEscape,
+  isRewindDialog,
   windowTarget,
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
@@ -35,6 +37,60 @@ const POLL_INTERVAL_MS = 8_000;
 const agentsViewNotifiedAt = new Map<string, number>();
 const AGENTS_VIEW_NOTIFY_COOLDOWN_MS = 10 * 60_000;
 
+// v2.19.0 Rewind 卡窗兜底（agentName → 首次看见 Rewind 的时刻 / 上次通知时刻）
+const rewindSince = new Map<string, number>();
+const rewindNotifiedAt = new Map<string, number>();
+/** 停在 Rewind 超过这个时长才动手——真人开着读检查点列表，几分钟足够了 */
+const REWIND_STUCK_MS = 3 * 60_000;
+const REWIND_NOTIFY_COOLDOWN_MS = 30 * 60_000;
+
+/**
+ * v2.19.0 兜底：窗口长期停在 CC 的 Rewind 检查点对话框 → 单发护栏 Esc 救回。
+ *
+ * 2026-08-11 事故的止损层。真实病根是「350ms 内连发两个 Esc = CC 的 Rewind
+ * 手势」（已在 tmuxSendEscape 里封死），但被模态挡住的窗口收不了消息、pane
+ * 永远非 idle，**外部完全看不出来**——用户只看到「好多 agent 卡住了」，
+ * wedge-watcher 要 30 分钟才吭声。这里 3 分钟就拉回并留痕。
+ *
+ * 只有「持续 3 分钟没变」才动手：人真的在读这个对话框时不会被抢，抢了也顶多
+ * 少一次 rewind 操作，而卡死一个 agent 是几小时的静默损失。
+ */
+async function maybeRecoverRewind(
+  agentName: string,
+  channelId: string,
+  pane: string,
+  discord: Client,
+): Promise<boolean> {
+  if (!isRewindDialog(pane)) {
+    rewindSince.delete(agentName);
+    return false;
+  }
+  const first = rewindSince.get(agentName);
+  if (!first) {
+    rewindSince.set(agentName, Date.now());
+    return true; // 本轮先记账，别的检测也没意义（模态挡着）
+  }
+  if (Date.now() - first < REWIND_STUCK_MS) return true;
+
+  const target = windowTarget(agentName);
+  console.log(`⏪ ${agentName} 卡在 Rewind 对话框 ${Math.round((Date.now() - first) / 1000)}s,发 Esc 救回`);
+  await tmuxSendEscape(target).catch(() => {});
+  rewindSince.delete(agentName);
+
+  const last = rewindNotifiedAt.get(channelId) ?? 0;
+  if (Date.now() - last > REWIND_NOTIFY_COOLDOWN_MS) {
+    rewindNotifiedAt.set(channelId, Date.now());
+    try {
+      const ch = (await discord.channels.fetch(channelId)) as TextChannel;
+      await ch.send(
+        `⏪ **${agentName}** 的窗口停在 Claude Code 的 Rewind 检查点对话框里（被模态挡住时收不到消息），已自动 Esc 拉回。` +
+          `连按两次 Esc 会触发这个手势——如果是你自己打开在看的，重开一次即可。`,
+      );
+    } catch { /* non-critical */ }
+  }
+  return true;
+}
+
 /**
  * v2.7+ 自动逃逸：agent 窗口误入 Claude Code 的 agents 视图 / bg 派发界面。
  *
@@ -57,11 +113,12 @@ async function maybeEscapeAgentsView(
 
   const target = windowTarget(agentName);
   console.log(`🏃 ${agentName} 误入 agents 视图，自动 Esc 逃逸`);
-  await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+  await tmuxSendEscape(target);
   await Bun.sleep(1_000);
   const after = await tmuxCapture(target, 30);
   if (after.includes("describe a task for a new session")) {
-    await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+    // 护栏会把这一发垫到距上一发 ≥1200ms —— 连发两个 Esc 正是 CC 的 Rewind 手势
+    await tmuxSendEscape(target);
   }
 
   const last = agentsViewNotifiedAt.get(channelId) ?? 0;
@@ -375,6 +432,9 @@ async function checkAgent(
       idleWhileThinking.delete(channelId);
     }
   } catch { /* 对账失败不影响弹窗检测 */ }
+
+  // v2.19.0 Rewind 卡窗兜底（模态挡着，其余检测本轮都没意义）
+  if (await maybeRecoverRewind(agentName, channelId, pane, discord)) return;
 
   // v2.7+ agents 视图自动逃逸（特征界面刚被 Esc 掉 → 本轮不再做弹窗检测）
   if (await maybeEscapeAgentsView(agentName, channelId, pane, discord)) return;

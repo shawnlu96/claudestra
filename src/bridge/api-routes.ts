@@ -35,6 +35,7 @@ import { newThreadId, type Envelope, type ApiUserEndpoint } from "./router.js";
 // 的 discord/startWatching，走 initApiRoutes 注入。
 import {
   tmuxRaw,
+  tmuxSendEscape,
   tmuxCapture,
   tmuxSendLine,
   paneLooksIdle,
@@ -1246,7 +1247,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       const action = String(body?.action || "submit");
       if (action === "cancel") {
         try {
-          await tmuxRaw(["send-keys", "-t", state.tmuxTarget, "Escape"]);
+          await tmuxSendEscape(state.tmuxTarget);
         } catch { /* non-critical：状态照清 */ }
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });

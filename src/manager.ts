@@ -27,6 +27,7 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
+  tmuxSendEscape,
   windowTarget,
   tmuxSendLine,
   tmuxCapture,
@@ -1273,8 +1274,8 @@ async function gracefulExit(name: string): Promise<boolean> {
     if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) break;
   }
 
-  // 阶段 2: 发 Escape 清除任何菜单/弹窗
-  await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+  // 阶段 2: 发 Escape 清除任何菜单/弹窗（走双击护栏：连发两个 Esc = CC 的 Rewind 手势）
+  await tmuxSendEscape(target);
   await Bun.sleep(500);
 
   // 阶段 3: 发 /exit
