@@ -447,6 +447,10 @@ async function allAgentsIdle(): Promise<boolean> {
  */
 let restartWaveUntil = 0;
 
+// 恢复失败的告警冷却（agentName → 上次通知时刻）：periodic 每分钟跑一次，
+// 救不回来的 agent 不能每分钟刷一条 control 频道
+const restoreFailNotifiedAt = new Map<string, number>();
+
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
     const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
@@ -493,18 +497,21 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     console.log(
       `🔁 [${source}] restart 调用完成（${reallyDead.length - failed.length}/${reallyDead.length} 成功）`,
     );
-    // 静默失败是这次事故最贵的部分——失败必须上报 control 频道，别等用户发消息没反应才发现
-    if (failed.length && CONTROL_CHANNEL_ID) {
+    // 静默失败是这次事故最贵的部分——失败必须上报 control 频道，别等用户发消息没反应才发现。
+    // 但 periodic 巡检每分钟跑一次，一个救不回来的 agent 会把频道刷爆：按 agent 冷却 30min。
+    const fresh = failed.filter((f) => Date.now() - (restoreFailNotifiedAt.get(f.name) ?? 0) > 30 * 60_000);
+    for (const f of fresh) restoreFailNotifiedAt.set(f.name, Date.now());
+    if (fresh.length && CONTROL_CHANNEL_ID) {
       try {
         await bridgeRequest({
           type: "reply",
           chatId: CONTROL_CHANNEL_ID,
           text: t(
-            `⚠️ [${source}] 有 ${failed.length} 个 agent 恢复失败，窗口可能已建但 Claude Code 没起来：\n` +
-              failed.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
+            `⚠️ [${source}] 有 ${fresh.length} 个 agent 恢复失败，窗口可能已建但 Claude Code 没起来：\n` +
+              fresh.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
               `\n手动重试：\`bun src/manager.ts restart <name>\``,
-            `⚠️ [${source}] ${failed.length} agent(s) failed to restore — the window may exist without Claude Code running:\n` +
-              failed.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
+            `⚠️ [${source}] ${fresh.length} agent(s) failed to restore — the window may exist without Claude Code running:\n` +
+              fresh.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
               `\nRetry manually: \`bun src/manager.ts restart <name>\``,
           ),
         });

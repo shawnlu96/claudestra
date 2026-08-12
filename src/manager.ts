@@ -1814,7 +1814,9 @@ async function cmdList() {
     // 永久失联，而 web 显示一切正常。改为「窗口在但 pane 是裸 shell」也算 dead。
     // 两次采样确认，避开 claude 启动瞬间的过渡帧；正在 restart 的窗口（持锁）
     // 一律不判——那正是它该停在 shell 的时候。
-    if (!isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
+    // registry 里没这条的孤儿窗口不判 dead：自愈救不了它（没有 sessionId /
+    // channelId 可用），判了只会让 launcher 每分钟白试一次并往频道刷失败通知。
+    if (info && !isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
       await Bun.sleep(800);
       if (isAtShell(await captureLast(name, 5))) {
         console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell（claude 未启动/已退出），判为 dead 交给自愈`);
