@@ -733,6 +733,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // 「启动超时」（restart 还会误标 recreated）。
 const CLAUDE_READY_ROUNDS = 240;
 
+// shell 就绪轮询预算：30 轮 × 500ms = 15s（peer 2026-08-13 P0，见
+// startClaudeInWindow 注释）。实测冷启动 zsh 出提示符 2.24s，开机并发时更久；
+// 15s 对它留了 6 倍余量，而健康窗口第一拍即过，正常路径零额外开销。
+const SHELL_READY_ROUNDS = 30;
+const SHELL_READY_POLL_MS = 500;
+
 async function cmdResume(
   name: string,
   sessionId: string,
@@ -1430,13 +1436,35 @@ async function startClaudeInWindow(
 ): Promise<{ ready: boolean; recoveredFullSession: boolean; bgOccupied?: boolean }> {
   const target = windowTarget(name);
 
-  // 确保在 shell 提示符
-  const preLaunch = await captureLast(name, 3);
-  if (!isAtShell(preLaunch)) {
-    // 等一下 shell
-    await Bun.sleep(2000);
-    const retry = await captureLast(name, 3);
-    if (!isAtShell(retry)) return { ready: false, recoveredFullSession: false };
+  // 确保在 shell 提示符。
+  //
+  // v2.19.0（peer 2026-08-13 P0：开机 9 个 restart 静默挂 3 个）：这里原本是
+  // 「看一眼 → 不行等 2s → 再看一眼 → 放弃」的一次性判定。配合 cmdRestart 里
+  // new-window 之后的 sleep(500)，新窗口从创建到判定截止总共只有 2.5s，而实测
+  // 新建 tmux 窗口里 zsh（oh-my-zsh + conda base）出提示符要 2.24s——余量 0.26s。
+  // 开机时 9 个窗口并发创建 + 系统冷启动，超时是必然而非偶然：失败的三次耗时
+  // 恰好都是 2.57/2.60/2.67s，与「等满 2s 就放弃」的时间账吻合。
+  //
+  // 预算也严重失衡：claude 就绪轮询给了 120s，shell 就绪只给 2.5s——反了，
+  // shell 起不来比 claude 起不来更致命（后者至少还有 fork 自愈）。改为轮询，
+  // 就绪即走（健康窗口第一拍就过，不增加正常路径耗时）。
+  let shellReady = false;
+  for (let i = 0; i < SHELL_READY_ROUNDS; i++) {
+    if (isAtShell(await captureLast(name, 3))) {
+      shellReady = true;
+      if (i > 0) console.error(`[restart] ${name} shell 就绪等了 ${(i * SHELL_READY_POLL_MS) / 1000}s`);
+      break;
+    }
+    await Bun.sleep(SHELL_READY_POLL_MS);
+  }
+  if (!shellReady) {
+    // 放大器 1（同报告）：原来这里是裸 return，整条失败路径在任何日志里都不
+    // 存在——窗口建好了、claude 从没启动、registry 还写着 active，只有发消息
+    // 没反应才会被发现。失败必须留痕。
+    console.error(
+      `[restart] ${name} shell 未就绪（等满 ${(SHELL_READY_ROUNDS * SHELL_READY_POLL_MS) / 1000}s），放弃启动`,
+    );
+    return { ready: false, recoveredFullSession: false };
   }
 
   // 发送启动命令前先清掉 shell init 阶段可能存在的 Y/n 交互（oh-my-zsh / homebrew）
@@ -1549,6 +1577,24 @@ function tryLockRestart(tmuxName: string, depth = 0): boolean {
       }
     } catch { /* 读锁失败按被占处理 */ }
     return false;
+  }
+}
+
+/** 该 agent 是否正有 restart 在跑（cmdList 的 dead 判定要避开这段窗口期）。
+ *  锁陈旧（进程已死 / 超 3min）按「没在跑」处理，与 tryLockRestart 的接管判据一致。 */
+function isRestartInProgress(tmuxName: string): boolean {
+  try {
+    const raw = readFileSync(`${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`, "utf8");
+    const [pidStr, tsStr] = raw.split("\n");
+    const pid = Number(pidStr);
+    const ts = Number(tsStr);
+    if (Number.isFinite(ts) && Date.now() - ts > 3 * 60_000) return false;
+    if (Number.isFinite(pid)) {
+      try { process.kill(pid, 0); } catch { return false; } // 进程没了 = 孤儿锁
+    }
+    return true;
+  } catch {
+    return false; // 没锁
   }
 }
 
@@ -1762,6 +1808,30 @@ async function cmdList() {
   for (const name of tmuxWindows) {
     const idle = await isAgentIdle(name);
     const info = reg.agents[name];
+    // v2.19.0（peer 2026-08-13 P0 的「最该修的一条」）：启动失败后窗口**存在
+    // 但里面没有 claude**，pane 停在 shell 提示符。dead 判定原来只看窗口在不
+    // 在 → 判它活着 → restoreDeadAgents 的 periodic 巡检永远不会救它 →
+    // 永久失联，而 web 显示一切正常。改为「窗口在但 pane 是裸 shell」也算 dead。
+    // 两次采样确认，避开 claude 启动瞬间的过渡帧；正在 restart 的窗口（持锁）
+    // 一律不判——那正是它该停在 shell 的时候。
+    if (!isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
+      await Bun.sleep(800);
+      if (isAtShell(await captureLast(name, 5))) {
+        console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell（claude 未启动/已退出），判为 dead 交给自愈`);
+        agents.push({
+          name,
+          status: "dead",
+          idle: false,
+          project: info?.project || "unknown",
+          cwd: info?.cwd || "",
+          purpose: info?.purpose || "",
+          channelId: info?.channelId || "",
+          sessionId: info?.sessionId || "",
+          created: info?.created || "",
+        });
+        continue;
+      }
+    }
     // P2（peer 2026-08-09）：窗口活着但 registry 说 stopped = 两个数据源分叉。
     // cmdRestart 现在会写回 status，理论上不该再出现；真出现就是还有别的写入
     // 路径漏了——静默分叉会让 web 显示「未启动」、归档跳过、自愈不认，必须留痕。

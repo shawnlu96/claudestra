@@ -6,6 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { restartFailureReason } from "./lib/restart-result.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -474,13 +475,41 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
         });
       } catch { /* non-critical */ }
     }
-    // 对每个 dead agent 单独调 restart <name>，不 churn 健康的 agent
+    // 对每个 dead agent 单独调 restart <name>，不 churn 健康的 agent。
+    // v2.19.0（peer 2026-08-13 P0 放大器 2）：restart 的返回值原来**完全不看**，
+    // 失败也照打「restart 调用完成」。restart 明明返回结构化的
+    // {ok, results:[{name, ok, error}]}，没人读 = 开机波挂了几个也无人知晓。
+    const failed: { name: string; error: string }[] = [];
     for (const agent of reallyDead) {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
-      await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name]);
+      const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
+      const why = restartFailureReason(r);
+      if (why) {
+        console.error(`🔁 [${source}] ❌ ${agent.name} 恢复失败: ${why}`);
+        failed.push({ name: agent.name, error: why });
+      }
     }
     restartWaveUntil = Date.now() + 60_000; // 收尾:留 1 分钟冷却让新窗口稳定再恢复巡检
-    console.log(`🔁 [${source}] restart 调用完成`);
+    console.log(
+      `🔁 [${source}] restart 调用完成（${reallyDead.length - failed.length}/${reallyDead.length} 成功）`,
+    );
+    // 静默失败是这次事故最贵的部分——失败必须上报 control 频道，别等用户发消息没反应才发现
+    if (failed.length && CONTROL_CHANNEL_ID) {
+      try {
+        await bridgeRequest({
+          type: "reply",
+          chatId: CONTROL_CHANNEL_ID,
+          text: t(
+            `⚠️ [${source}] 有 ${failed.length} 个 agent 恢复失败，窗口可能已建但 Claude Code 没起来：\n` +
+              failed.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
+              `\n手动重试：\`bun src/manager.ts restart <name>\``,
+            `⚠️ [${source}] ${failed.length} agent(s) failed to restore — the window may exist without Claude Code running:\n` +
+              failed.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
+              `\nRetry manually: \`bun src/manager.ts restart <name>\``,
+          ),
+        });
+      } catch { /* non-critical */ }
+    }
   } catch (e) {
     console.error(`🔁 [${source}] 自检失败:`, e);
   }
