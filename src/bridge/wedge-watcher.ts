@@ -166,8 +166,28 @@ async function checkAgent(
   // master 判活早就是这么做的，这里补齐）。少了这层，用户 shell 主题若用 ❯ 提示符，
   // 判据就完全压在"能否认出 CC 的 banner"上。
   const hasChild = await windowHasChildProcess(target);
-  const atShell =
-    hasChild === null ? isAtShell(pane) || !pane.trim() : !hasChild;
+
+  // v2.19.0：**窗口根本不存在 ≠ Claude Code 退出到 shell**。
+  //
+  // hasChild === null 意味着 `list-panes` 拿不到 pane pid —— 窗口不在（或 tmux
+  // 临时抽风）。旧代码在这种情况下退回文本判据，而空 capture 会同时满足
+  // 「verdict=busy」和「atShell=true」（实测：空串、纯换行、裸提示符三种输入
+  // 都命中），于是对一个**根本不存在的窗口**报出「Claude Code 已退出（掉线）」
+  // 并附上重启按钮。
+  //
+  // 2026-08-15 这条路径造成了一次跨机器事故：另一台机器上的 Claudestra 持有同
+  // 一份 registry（含本机的 channelId），但它本地没有这些 agent 的 tmux 窗口，
+  // 于是每小时往**别人的**频道播报内容完全虚假的掉线告警，被告警的 agent 其实
+  // 一直活得好好的。
+  //
+  // 窗口不存在是「dead agent」，归 manager list + launcher 的自愈巡检管（每分钟
+  // 一轮，会真正把它拉起来），不归卡死检测管。这里直接放手。
+  if (hasChild === null) {
+    agentStates.delete(agentName);
+    return;
+  }
+
+  const atShell = !hasChild;
 
   // v2.0.23+: jsonl 活跃度逃生阀。Claude 思考 / 调工具时 session jsonl 一直在追加。
   // 只看 tmux pane 指纹会把"思考中但屏幕暂时没变"误判成卡死（owner 实测 claudestra

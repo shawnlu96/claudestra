@@ -770,3 +770,21 @@ describe("hasChildInPsOutput", () => {
     expect(hasChildInPsOutput("30638\n", 306)).toBe(false);
   });
 });
+
+// ── v2.19.0 空 pane 绝不能被当成「Claude Code 已退出」──────────────────
+// 2026-08-15 跨机器事故：另一台机器的 Claudestra 持有同一份 registry（含本机
+// channelId）但本地没有这些 agent 的 tmux 窗口 → capture 为空 → 旧判据同时
+// 满足「verdict=busy」和「atShell=true」→ 对着**不存在的窗口**往别人频道播报
+// 「Claude Code 已退出（掉线）」，每小时一次，而被点名的 agent 一直活着。
+// 这里锁住空 pane 的两个读数，wedge-watcher 侧则改为「拿不到 pane pid 就放手」。
+describe("空 pane 的忙闲判据（掉线误报的原料）", () => {
+  test("空串 / 纯空白都会被判 busy —— 所以上层必须先排除「窗口不存在」", () => {
+    expect(paneIdleVerdict("")).toBe("busy");
+    expect(paneIdleVerdict("\n\n")).toBe("busy");
+  });
+
+  test("裸 shell 提示符同样是 busy + atShell，单靠文本区分不了「窗口没了」", () => {
+    expect(paneIdleVerdict("shawn@mac ~ %")).toBe("busy");
+    expect(isAtShell("shawn@mac ~ %")).toBe(true);
+  });
+});
