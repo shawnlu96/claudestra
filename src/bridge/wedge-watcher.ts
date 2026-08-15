@@ -21,6 +21,7 @@ import { runManager } from "./management.js";
 import { getJsonlMtime } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emitEvent } from "./event-bus.js";
+import { originFooter } from "../lib/instance-tag.js";
 
 const POLL_INTERVAL_MS = 5 * 60_000;     // 每 5 分钟扫一次
 const WEDGE_THRESHOLD_MS = 30 * 60_000;  // 30 分钟没变 + claude 在跑但非 idle → 卡死
@@ -234,6 +235,7 @@ async function checkAgent(
             `拖到现在还没起来说明自愈也失败了。`,
           ``,
           `👉 点下面重启，或 /screenshot 看现在状态。这条只报一次，不会再打扰。`,
+          originFooter(),
         ].join("\n"),
         components: buildComponents([
           {
@@ -255,6 +257,7 @@ async function checkAgent(
           `可能是：modal 没关、网络挂了、Claude API 超时、或者跑进死循环。`,
           ``,
           `👉 用下面按钮 Esc/C-c 救回，或 /screenshot 看看现在是什么状态。`,
+          originFooter(),
         ].join("\n"),
         components: buildComponents([
           {
