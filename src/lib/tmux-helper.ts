@@ -572,20 +572,36 @@ export async function masterWindowExists(): Promise<boolean> {
  * tmux window 里是不是真的跑着一个 child 进程（判断 Claude Code 还活着）。
  *
  * 原理：window pane 的 `#{pane_pid}` 是那个终端的 shell PID（zsh/bash）。
- * Claude Code 作为子进程跑。`pgrep -P <shell_pid>` 如果有输出就是有子进程
- * （Claude Code 或别的），空输出就是 shell 在 idle prompt → Claude 已死。
+ * Claude Code 作为子进程跑，有子进程 = 还活着，没有 = shell 停在 idle prompt。
  *
  * 完全不看 pane 文本，不会被 prompt 主题 / 版本号覆盖等 tmux title tricks 骗到。
  * 返回 null 表示查不到 pane pid（window 本身就不存在），调用方按需处理。
+ *
+ * ⚠ v2.19.0 改用 `ps` 自己比对 ppid，**不能用 `pgrep -P`**：BSD/macOS 的 pgrep
+ * 会把「调用者自身及其祖先进程」排除在匹配结果之外（pkill 的自保设计）。于是
+ * 任何**跑在某个 agent 窗口里**的 Claudestra 代码去查自己那个窗口时，都会得到
+ * 「没有子进程」= claude 已死的错误结论（2026-08-16 实测：`ps` 明明列出
+ * `30650 ppid=30638`，`pgrep -P 30638` 却返回空，而 30650 正是调用方的祖先）。
+ * daemon（bridge / launcher）不在窗口里，命中不了这个坑，所以一直没暴露；
+ * 但 agent 自己跑 manager.ts 时判据是反的，而这个判据的下游是「重启/重建窗口」。
  */
 export async function windowHasChildProcess(target: string): Promise<boolean | null> {
   const pidRaw = await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_pid}"]);
   const pid = parseInt(pidRaw.trim().split("\n")[0] || "", 10);
   if (!Number.isFinite(pid) || pid <= 0) return null;
-  const proc = Bun.spawn(["pgrep", "-P", String(pid)], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["ps", "-eo", "ppid="], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(proc.stdout).text();
   await proc.exited;
-  return out.trim().length > 0;
+  return hasChildInPsOutput(out, pid);
+}
+
+/** `ps -eo ppid=` 输出里是否存在 ppid == pid 的进程（纯函数，便于单测） */
+export function hasChildInPsOutput(psOut: string, pid: number): boolean {
+  for (const line of psOut.split("\n")) {
+    const n = parseInt(line.trim(), 10);
+    if (Number.isFinite(n) && n === pid) return true;
+  }
+  return false;
 }
 
 /** 确保 tmux socket 目录存在 */

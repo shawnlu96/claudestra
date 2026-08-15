@@ -737,3 +737,36 @@ describe("paneLooksIdle 尾部空行免疫", () => {
     expect(p.suspect).toBe(false);
   });
 });
+
+// ── v2.19.0 windowHasChildProcess 的 ppid 比对（pgrep 祖先排除坑）──────
+// macOS/BSD 的 pgrep 会把「调用者自身及其祖先」排除在匹配之外(pkill 自保设计)。
+// 于是跑在某个 agent 窗口里的 Claudestra 代码去查自己那个窗口,会得到「没有
+// 子进程」= claude 已死的错误结论——而这个判据的下游是重启/重建窗口。
+// 2026-08-16 实测:ps 列出 `30650 ppid=30638`,`pgrep -P 30638` 却返回空,
+// 30650 正是调用方的祖先。改成自己解析 ps 输出,不再依赖 pgrep 的过滤语义。
+import { hasChildInPsOutput } from "../src/lib/tmux-helper.js";
+
+describe("hasChildInPsOutput", () => {
+  const PS = ["    1", " 3068", "30638", "  502", "30638"].join("\n");
+
+  test("存在该 ppid → true", () => {
+    expect(hasChildInPsOutput(PS, 30638)).toBe(true);
+  });
+
+  test("不存在 → false", () => {
+    expect(hasChildInPsOutput(PS, 99999)).toBe(false);
+  });
+
+  test("祖先进程也必须能查到(pgrep 正是在这里骗了我们)", () => {
+    expect(hasChildInPsOutput("30638\n", 30638)).toBe(true);
+  });
+
+  test("空输出 / 垃圾行不误判", () => {
+    expect(hasChildInPsOutput("", 30638)).toBe(false);
+    expect(hasChildInPsOutput("PPID\n\n  \n", 30638)).toBe(false);
+  });
+
+  test("不做子串匹配(306 不能命中 30638)", () => {
+    expect(hasChildInPsOutput("30638\n", 306)).toBe(false);
+  });
+});

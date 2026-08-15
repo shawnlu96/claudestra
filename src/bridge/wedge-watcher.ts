@@ -192,8 +192,23 @@ async function checkAgent(
   const staticMs = now - prev.firstSeenAt;
   const threshold = atShell ? SHELL_EXIT_GRACE_MS : WEDGE_THRESHOLD_MS;
   if (staticMs < threshold) return;
-  // 已通知过且上一次通知在 1 小时内 → 不打扰
-  if (prev.notifiedAt > 0 && now - prev.notifiedAt < 60 * 60_000) return;
+
+  // v2.19.0 只报一次（owner 2026-08-16「这里一直在 spam 我」）。
+  // 原来是「上次通知超过 1 小时就再报一次」——同一次掉线会每小时 @ 一遍，
+  // 2026-07-26 的 ld-binance 连报 6 次是同一个毛病。状态没变就没有新信息：
+  // 按钮还在上一条消息里，人已经知道了。指纹一变（恢复了 / 换了别的状态）
+  // 会重置整个 state，下次真出事照样报。
+  if (prev.notifiedAt > 0) return;
+
+  // v2.19.0 双信号佐证：只有「进程树说没子进程」**且**「pane 文本也像 shell」
+  // 才算掉线。单靠进程树时，一次 tmux/ps 抖动就能伪造出「Claude Code 已退出」
+  // 这种吓人且会引导用户去点重启的假警。两个信号不一致 → 记一笔，不报。
+  if (atShell && hasChild === false && !(isAtShell(pane) || !pane.trim())) {
+    console.warn(
+      `⚠️ [wedge] ${agentName} 掉线判据不一致（进程树说无子进程，但 pane 仍是 CC 界面），本轮不报`,
+    );
+    return;
+  }
 
   prev.notifiedAt = now;
   const minutes = Math.round(staticMs / 60_000);
@@ -204,15 +219,21 @@ async function checkAgent(
 
     if (atShell) {
       // 掉线：claude 退出到 shell，发"已退出 + 重启按钮"
-      console.log(`🔌 agent ${agentName} 已退出到 shell（${minutes} 分钟）`);
+      // 判据一并入日志(2026-08-16 溯源教训:出现幽灵告警时,只有「报了」没有
+      // 「凭什么报」,查不出是哪个信号误判的,连是不是本进程发的都证不了)
+      console.log(
+        `🔌 agent ${agentName} 已退出到 shell（${minutes} 分钟）` +
+          ` [hasChild=${hasChild} paneAtShell=${isAtShell(pane)} paneEmpty=${!pane.trim()}]`,
+      );
       recordMetric("agent_exited", { channelId, agent: agentName, durationMs: staticMs });
       await ch.send({
         content: [
           `🔌 **${agentName}** 的 Claude Code 已退出（掉线）${mention ? " " + mention : ""}`,
           `已停在 shell ${minutes} 分钟，没有 Claude Code 在跑。`,
-          `可能是 /exit、崩溃、或自动更新失败 —— worker agent 不会自动拉起。`,
+          `可能是 /exit、崩溃、或自动更新失败。自愈巡检每分钟会尝试拉起（窗口在但没 claude 也算 dead），` +
+            `拖到现在还没起来说明自愈也失败了。`,
           ``,
-          `👉 点下面重启，或 /screenshot 看现在状态。`,
+          `👉 点下面重启，或 /screenshot 看现在状态。这条只报一次，不会再打扰。`,
         ].join("\n"),
         components: buildComponents([
           {
