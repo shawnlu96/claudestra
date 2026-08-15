@@ -116,7 +116,7 @@ end tell`;
 (async () => {
   console.log(`${C.bold}${C.cyan}🚀 Claudestra${C.reset}${C.dim} ↗ ${REPO_ROOT}${C.reset}`);
   if (!ensureDaemonsRunning()) {
-    warn("daemon 没全起来，跳过 attach。查日志：tail -f /tmp/claudestra-bridge.err");
+    warn("daemon 没全起来，跳过 attach。查日志：tail -f ~/.claude-orchestrator/logs/bridge.err");
     process.exit(1);
   }
   attachMaster();

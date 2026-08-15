@@ -7,6 +7,7 @@
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { restartFailureReason } from "./lib/restart-result.js";
+import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -60,6 +61,7 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("launcher");
+initDaemonLogs("launcher");
 
 // v2.19.0 认主守卫（见 lib/owner-guard.ts）——launcher 尤其危险:它会照着 rsync
 // 过来的 registry 把别人的 agent 全拉起来（2026-08-15 实测一口气 14 个）。
@@ -187,7 +189,7 @@ let lastNotifiedVersion = "";
 // v2.17.2 beta apply 重试状态(失败的 SHA 不再一次性放弃)+ 子进程日志落点
 let lastBetaAttemptSha = "";
 let lastBetaAttemptAt = 0;
-const BETA_UPDATE_LOG = "/tmp/claudestra-beta-update.log";
+const BETA_UPDATE_LOG = `${LOG_DIR}/beta-update.log`;
 
 /** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
  *  manager update(其内部走 beta 前进流程)。 */

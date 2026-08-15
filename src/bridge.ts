@@ -363,9 +363,15 @@ import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
+import { noteSelfMessage, installSelfSendTracker } from "./bridge/self-echo.js";
+import { originFooter } from "./lib/instance-tag.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("bridge");
+
+// v2.19.0 日志落点从 /tmp 搬到 ~/.claude-orchestrator/logs（见 lib/log-paths.ts）
+import { initDaemonLogs } from "./lib/log-paths.js";
+initDaemonLogs("bridge");
 
 // v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
@@ -1367,7 +1373,29 @@ async function handleModalInteraction(
 
 discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 跳过自己 bot 的消息（echo）+ 跳过 bridge 自己发出去的（见 trackSentMessage）
-  if (msg.author.id === getBotUserId()) return;
+  if (msg.author.id === getBotUserId()) {
+    // v2.19.0 自我消息对账：author 是我、但 id 不在「我刚发出去的」里 →
+    // 有另一个进程拿着同一个 token 在发消息（2026-08-15 事故，查了两小时）
+    const alert = noteSelfMessage(msg);
+    if (alert && CONTROL_CHANNEL_ID) {
+      recordMetric("second_instance_detected", { meta: { count: String(alert.count) } });
+      discordReply(
+        discord,
+        CONTROL_CHANNEL_ID,
+        [
+          `👻 **疑似存在第二个 Claudestra 实例**${allowedDiscordIds().map((id) => ` <@${id}>`).join("")}`,
+          `${alert.windowMin} 分钟内收到 ${alert.count} 条「本 bot 发出、但不是本实例发的」消息 —— 说明有别的进程拿着同一个 DISCORD_BOT_TOKEN 在往这些频道发东西。`,
+          `常见成因：备份/迁移出来的副本上守护进程自启（它拿着同一份 registry 和 channelId）。`,
+          ``,
+          ...alert.samples.map((s) => `• <#${s.channelId}>：${s.preview}`),
+          ``,
+          `👉 排查：另一台机器上 \`launchctl list | grep claudestra\`；确认后停掉它，或轮换 bot token。`,
+          originFooter(),
+        ].join("\n"),
+      ).catch(() => {});
+    }
+    return;
+  }
   if (isBotMessage(msg.id)) return;
 
   // getBotUserId() 在 discord client ready 之前是 null（启动竞态）。has(null) 会
@@ -4144,6 +4172,10 @@ if (WEB_ONLY) {
         `等待 ${Math.round((info?.timeToReset ?? 0) / 1000)}s（global=${!!info?.global}）`
     );
   });
+
+  // v2.19.0 自我消息对账的发送侧：包住 REST post，所有 .send()/.reply()/followUp
+  // 最终都从那儿出去，一个点覆盖全部（逐个调用点插桩漏一个就是一次假警）
+  installSelfSendTracker(discord as unknown as { rest: { post: (r: string, o?: unknown) => Promise<unknown> } });
 
   discord.login(DISCORD_TOKEN).catch((e: unknown) => {
     const msg = e instanceof Error ? e.message : String(e);

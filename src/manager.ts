@@ -3874,6 +3874,40 @@ async function cmdAutoUpdate(sub: string, ...rest: string[]) {
 
 const [cmd, ...args] = process.argv.slice(2);
 
+/**
+ * v2.19.0 写操作认主（见 lib/owner-guard.ts）。
+ *
+ * daemon 侧的守卫只拦「进程启动」；在一台拿着别人状态目录副本的机器上手动跑
+ * `manager.ts restart/create/kill` 照样会改 registry、往别人的频道建 agent、
+ * 抢同一批 Discord 链路。所以改状态的命令也要认主。
+ *
+ * 只拦**写**，读操作（list / sessions / cost / doctor / version / token-list …）
+ * 一律放行——在备机上查看状态是完全正当的需求，恰恰是排障时最需要的。
+ */
+const WRITE_COMMANDS = new Set([
+  "create", "resume", "adopt", "kill", "remove", "restart", "rename", "archive",
+  "clear", "cron-add", "cron-remove", "cron-toggle",
+  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove",
+  "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
+  "token-add", "token-revoke",
+]);
+if (cmd && WRITE_COMMANDS.has(cmd)) {
+  const { readOwnerMarker, ownerVerdict, machineUuid } = await import("./lib/owner-guard.js");
+  const self = { uuid: machineUuid(), host: (await import("os")).hostname() };
+  const v = ownerVerdict(readOwnerMarker(), self, process.env.CLAUDESTRA_TAKEOVER === "1");
+  if (!v.ok) {
+    output({
+      ok: false,
+      error:
+        `本机不是这套 Claudestra 的主机，拒绝执行写操作 \`${cmd}\`。` +
+        `标记里的主机是 ${v.owner.host}（写于 ${v.owner.at}），本机是 ${self.host}。` +
+        `多半是在热备/还原出来的副本上操作——registry 和 channelId 都是主机的，` +
+        `执行下去会造成双响。确需在本机接管：先停掉主机，再带 CLAUDESTRA_TAKEOVER=1 重试。`,
+    });
+    process.exit(1);
+  }
+}
+
 try {
 switch (cmd) {
   case "create": {

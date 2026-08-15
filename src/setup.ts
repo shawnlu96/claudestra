@@ -1156,7 +1156,7 @@ function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult): void {
     br();
   }
   print(`${c.bold}${t("如果没反应:", "If nothing happens:")}${c.reset}`);
-  print(`  ${c.cyan}tail -f /tmp/claudestra-bridge.out${c.reset}  ${c.dim}${t("(bridge 日志,launchd 直管)", "(bridge logs, managed by launchd)")}${c.reset}`);
+  print(`  ${c.cyan}tail -f ~/.claude-orchestrator/logs/bridge.out${c.reset}  ${c.dim}${t("(bridge 日志,launchd 直管)", "(bridge logs, managed by launchd)")}${c.reset}`);
   print(`  ${c.cyan}launchctl list | grep claudestra${c.reset} ${c.dim}${t("(三个 daemon 的存活状态)", "(daemon liveness)")}${c.reset}`);
   br();
   print(`${c.bold}${t("以后随时把整套拉起来 + 进 master TUI:", "Bring everything up + attach to master TUI anytime:")}${c.reset}`);

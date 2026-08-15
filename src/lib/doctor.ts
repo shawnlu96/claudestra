@@ -11,6 +11,7 @@
  * - **不打印密钥**。token / secret 一律只报「有没有」和长度。
  */
 
+import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
 import { resolveBunPath } from "./bun-path.js";
@@ -191,7 +192,7 @@ async function checkDaemons(): Promise<Check[]> {
     const pid = (pidRaw || "").trim();
     const exit = (exitRaw || "").trim();
     const v = classifyDaemonExit(pid, exit);
-    const logFile = `/tmp/claudestra-${label.split(".").pop()}.err`;
+    const logFile = resolveLogPath(String(label.split(".").pop()), "err");
     out.push({
       group: g, name: label, status: v.status, detail: v.detail,
       fix: v.status === "fail"
@@ -275,7 +276,7 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
     out.push(res.ok
       ? { group: g, name: "HTTP /stats", status: "ok", detail: `HTTP ${res.status}` }
       : { group: g, name: "HTTP /stats", status: "warn", detail: `HTTP ${res.status}`,
-          fix: "看 /tmp/claudestra-bridge.err" });
+          fix: `看 ${resolveLogPath("bridge", "err")}` });
   } catch (e) {
     out.push({ group: g, name: "HTTP /stats", status: "fail", detail: `连不上（${(e as Error).message}）`,
       fix: "bridge 没起来或崩了：launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge" });
@@ -413,6 +414,74 @@ async function checkWebBuild(repoRoot: string): Promise<Check[]> {
 // 入口
 // ────────────────────────────────────────────
 
+
+/**
+ * v2.19.0 部署归属体检（2026-08-15 双响事故的产物）。
+ *
+ * 三项，全是那晚花两小时才手工查明白的东西：
+ *  1. 本机是不是这套状态目录的主 —— 副本自启会拿着别人的 registry 干活；
+ *  2. 日志写得进去吗、在哪 —— 那晚 stderr 被 /tmp 清理删掉了，排障时看不见；
+ *  3. 备份心跳（可选）—— 有 standby-heartbeat 文件才检查，多久没更新了。
+ */
+async function checkDeployment(): Promise<Check[]> {
+  const out: Check[] = [];
+  const G = "部署归属";
+
+  // ① 认主
+  try {
+    const { readOwnerMarker, ownerVerdict, machineUuid } = await import("./owner-guard.js");
+    const { hostname } = await import("os");
+    const marker = readOwnerMarker();
+    const self = { uuid: machineUuid(), host: hostname() };
+    if (!marker) {
+      out.push({ group: G, name: "主机标记", status: "warn",
+        detail: "还没有 owner.json（下次 daemon 启动会自动登记本机）",
+        fix: "启动任一 daemon 即可生成；或 bun src/manager.ts doctor 后重启 bridge" });
+    } else {
+      const v = ownerVerdict(marker, self, false);
+      out.push(v.ok
+        ? { group: G, name: "主机标记", status: "ok", detail: `本机是主（${marker.host}）` }
+        : { group: G, name: "主机标记", status: "fail",
+            detail: `本机不是主：标记指向 ${marker.host}（写于 ${marker.at}），本机是 ${self.host}`,
+            fix: "这台多半是备份/还原出来的副本。守护进程会拒绝启动。要正式接管：先停主机，再带 CLAUDESTRA_TAKEOVER=1 启动" });
+    }
+  } catch (e) {
+    out.push({ group: G, name: "主机标记", status: "warn", detail: `读不出来: ${(e as Error).message}` });
+  }
+
+  // ② 日志落点
+  try {
+    const { LOG_DIR, logPath, legacyLogPath } = await import("./log-paths.js");
+    const newP = logPath("bridge", "err");
+    if (existsSync(newP)) {
+      out.push({ group: G, name: "日志落点", status: "ok", detail: `${LOG_DIR}（不受 /tmp 清理影响）` });
+    } else if (existsSync(legacyLogPath("bridge", "err"))) {
+      out.push({ group: G, name: "日志落点", status: "warn",
+        detail: "仍写在 /tmp —— macOS 会定期清理它，进程还开着 fd 时日志会静默消失",
+        fix: "bun src/manager.ts install-cli 重写 plist 后重启 daemon" });
+    } else {
+      out.push({ group: G, name: "日志落点", status: "warn", detail: "找不到 bridge 日志（daemon 没跑过？）" });
+    }
+  } catch (e) {
+    out.push({ group: G, name: "日志落点", status: "warn", detail: (e as Error).message });
+  }
+
+  // ③ 备份心跳（可选：文件不存在就不报，避免给没做备份的人凭空加告警）
+  try {
+    const hb = `${ORCH_DIR}/standby-heartbeat`;
+    if (existsSync(hb)) {
+      const ageH = (Date.now() - statSync(hb).mtimeMs) / 3600_000;
+      out.push(ageH < 24
+        ? { group: G, name: "备份心跳", status: "ok", detail: `${ageH.toFixed(1)} 小时前同步过` }
+        : { group: G, name: "备份心跳", status: "warn",
+            detail: `备份已 ${Math.round(ageH)} 小时没成功过（心跳文件停在 ${new Date(statSync(hb).mtimeMs).toISOString()}）`,
+            fix: "去备份端看拉取日志——静默失败的备份等于没有备份" });
+    }
+  } catch { /* 可选项，读不到就跳过 */ }
+
+  return out;
+}
+
 export async function runDoctor(repoRoot: string): Promise<Check[]> {
   const groups = await Promise.all([
     checkRuntime(),
@@ -423,6 +492,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkAgents(),
     checkGitHead(repoRoot),
     checkWebBuild(repoRoot),
+    checkDeployment(),
   ]);
   return groups.flat();
 }

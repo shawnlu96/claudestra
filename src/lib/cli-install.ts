@@ -34,6 +34,7 @@
  * 抢同一个 tmux session。
  */
 
+import { LOG_DIR, ensureLogDir } from "./log-paths.js";
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { homedir } from "os";
@@ -271,9 +272,9 @@ function buildDaemonPlist(
     <string>${repoRoot}/${daemon.script}</string>
   </array>
   <key>StandardOutPath</key>
-  <string>/tmp/claudestra-${daemon.stem}.out</string>
+  <string>${LOG_DIR}/${daemon.stem}.out</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/claudestra-${daemon.stem}.err</string>
+  <string>${LOG_DIR}/${daemon.stem}.err</string>
 </dict>
 </plist>
 `;

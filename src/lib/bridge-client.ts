@@ -3,6 +3,8 @@
  * 被 manager.ts 和 discord-reply.ts 使用
  */
 
+import { resolveLogPath } from "./log-paths.js";
+
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
 
 export async function bridgeRequest(msg: Record<string, unknown>): Promise<any> {
@@ -37,7 +39,7 @@ export async function bridgeRequest(msg: Record<string, unknown>): Promise<any> 
         new Error(
           "无法连接 Bridge。检查：launchctl list | grep claudestra；" +
             "重启：launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge；" +
-            "日志：/tmp/claudestra-bridge.err"
+            `日志：${resolveLogPath("bridge", "err")}`
         )
       );
     };

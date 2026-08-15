@@ -17,6 +17,7 @@ const METRICS_PATH = `${METRICS_DIR}/metrics.jsonl`;
 
 export type MetricEvent =
   | "bridge_start"
+  | "second_instance_detected" // v2.19.0 自我消息对账:同 token 的第二个实例现形
   | "message_in"        // Discord → agent
   | "message_out"       // agent → Discord (via reply tool)
   | "slash_invoked"     // Discord slash command

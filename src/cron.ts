@@ -32,6 +32,9 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("cron");
 
+import { initDaemonLogs } from "./lib/log-paths.js";
+initDaemonLogs("cron");
+
 const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
 const CRON_PATH = `${CONFIG_DIR}/cron.json`;
 const HISTORY_PATH = `${CONFIG_DIR}/cron-history.json`;
