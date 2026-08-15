@@ -1,27 +1,32 @@
 /**
- * v2.19.0 认主守卫 —— 结构性地杜绝「双响」（两台机器同时当主）。
+ * v2.19.0 认主守卫 —— 结构性地杜绝「双响」（两个实例同时当主）。
  *
- * 2026-08-15 事故：owner 的 MacBook 是这套系统的**热备**，`claudestra-pull`
- * 每 6 小时把 mini 的 `~/.claude/` 和 `~/.claude-orchestrator/` 整个 rsync 过去
- * （registry.json 也在内）。备份本身没问题，问题是 MacBook 上的
- * `com.claudestra.{bridge,launcher,cron}` 三个 LaunchAgent 一直是 enabled：
- * 它一开机 launchd 就把它们拉起来，读着**从 mini 同步来的 registry**（里面是
- * mini 的 agent 和 mini 的 Discord channelId），于是
- *   - 往 mini 的频道播报虚假的「Claude Code 已退出（掉线）」，每小时一次；
- *   - launcher 照着那份 registry「恢复 dead agent」，拉起 14 个重复会话，
- *     和 mini 抢同一批 Discord 频道、白烧额度。
+ * 通用前提：`~/.claude-orchestrator/` 是这套系统的**权威状态目录**（registry
+ * 里是 agent 名、cwd、sessionId 和 Discord channelId）。只要它被整体复制到另一
+ * 台机器——备份还原、机器迁移、dotfiles 同步、灾备热备——那台机器上的守护进程
+ * 一旦自启，就会拿着**别人的** registry 当权威：往别人的频道发通知、照着别人的
+ * agent 清单拉起一整队重复会话、和原机抢同一批 Discord 链路。谁都不知道消息被
+ * 处理了两遍。
  *
- * 讽刺的是 `failover.sh` 第一步就是「防双响检查」——但它只拦手动接管这条路，
- * 开机自启从后门绕过去了。所以防线不能只靠「launchd 状态别被弄乱」这种前提，
- * 得让**代码自己认主**：
+ * 2026-08-15 实锤（本仓库 owner 的部署）：一台作为热备的 MacBook 每 6 小时
+ * rsync 一次主机的状态目录；它某次开机后 launchd 自动拉起三件套，于是
+ *   - wedge-watcher 对着本地不存在的窗口，往**主机的**频道播报虚假掉线，
+ *     每小时一条，连发 8 条；
+ *   - launcher 照着同步来的 registry「恢复 dead agent」，拉起 14 个重复会话。
+ * 而那套灾备脚本第一步恰恰就是「防双响检查」——但它只拦手动接管这条路，
+ * 开机自启从后门绕了过去。
  *
- *   `~/.claude-orchestrator/owner.json` 记着主机的 UUID + hostname。
+ * 结论：防线不能建立在「外部编排（launchd / systemd / 人）永远不出错」这个
+ * 前提上，得让**代码自己认主**：
+ *
+ *   `~/.claude-orchestrator/owner.json` 记着主实例的 UUID + hostname。
  *   - 文件不存在 → 本机就是主，写下标记，照常启动（全新安装无感）；
  *   - 标记匹配本机 → 照常启动；
  *   - 不匹配 → **拒绝启动**，打印为什么、以及怎么合法接管。
  *
- * 合法接管：`CLAUDESTRA_TAKEOVER=1`（failover.sh 里带上）。它会把标记改写成本机，
- * 从此本机是主 —— 与「先把老主停掉」的人工步骤配合使用。
+ * 合法接管：`CLAUDESTRA_TAKEOVER=1`。它会把标记改写成本机，从此本机是主 ——
+ * 与「先把老主停掉」这个人工步骤配合使用（灾备脚本、迁移流程各自在外部实现，
+ * 本模块只负责认主这一件事，不关心你的接管流程长什么样）。
  *
  * 为什么同时记 UUID 和 hostname：只认 hostname 的话，主机自己改个名（macOS 跟
  * DHCP 走的场景很常见）就会把自己锁在门外，那是比双响更糟的故障。UUID 稳定，
