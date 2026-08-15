@@ -367,6 +367,10 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("bridge");
 
+// v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
+import { assertPrimaryOrExit } from "./lib/owner-guard.js";
+await assertPrimaryOrExit("bridge");
+
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
 import {
   createDiscordChatAdapter,

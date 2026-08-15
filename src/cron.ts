@@ -602,6 +602,9 @@ async function main() {
 if (import.meta.main) {
   enableTimestampLogs();
   initLang();
+  // v2.19.0 认主守卫（见 lib/owner-guard.ts）。放在 import.meta.main 里——
+  // manager.ts 会 import 本文件的工具函数，那条路径不该被守卫拦。
+  await (await import("./lib/owner-guard.js")).assertPrimaryOrExit("cron");
   main().catch((err) => {
     console.error("Cron Scheduler 崩溃:", err);
     process.exit(1);

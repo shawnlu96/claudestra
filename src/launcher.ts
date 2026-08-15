@@ -61,6 +61,11 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("launcher");
 
+// v2.19.0 认主守卫（见 lib/owner-guard.ts）——launcher 尤其危险:它会照着 rsync
+// 过来的 registry 把别人的 agent 全拉起来（2026-08-15 实测一口气 14 个）。
+import { assertPrimaryOrExit } from "./lib/owner-guard.js";
+await assertPrimaryOrExit("launcher");
+
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
