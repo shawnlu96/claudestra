@@ -25,14 +25,15 @@ export function Splash() {
   const [fading, setFading] = useState(false);
   const [gone, setGone] = useState(false);
   // 底部署名:版本 + commit id（owner:不一定每次改动都发版,commit 才定位得准）
-  const [ver, setVer] = useState<{ version: string; commit: string } | null>(null);
+  const [ver, setVer] = useState<{ version: string; commit: string; webCommit: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
     fetch("/api/version")
       .then((r) => r.json())
-      .then((j: { version?: string; commit?: string }) => {
-        if (alive && (j.version || j.commit)) setVer({ version: j.version ?? "", commit: j.commit ?? "" });
+      .then((j: { version?: string; commit?: string; webCommit?: string }) => {
+        if (alive && (j.version || j.commit))
+          setVer({ version: j.version ?? "", commit: j.commit ?? "", webCommit: j.webCommit ?? "" });
       })
       .catch(() => {});
     return () => {
@@ -90,11 +91,15 @@ export function Splash() {
           {ver.version && `v${ver.version}`}
           {ver.version && ver.commit && " · "}
           {ver.commit}
-          {/* 客户端 bundle 的 commit(构建时烤入)。与前面的服务端号不一致 =
-              PWA 缓存滞后,一眼可见(owner 2026-07-27) */}
-          {process.env.NEXT_PUBLIC_CLIENT_COMMIT &&
-            process.env.NEXT_PUBLIC_CLIENT_COMMIT !== ver.commit && (
-              <span className="text-warning/70"> · 本地 {process.env.NEXT_PUBLIC_CLIENT_COMMIT}</span>
+          {/* 客户端 bundle 是否滞后(owner 2026-07-27 要的「对一下版本」)。
+              v2.19.0 判据修正:比的是「最后一个动过 web/ 的 commit」,不是 HEAD——
+              拿 HEAD 比对时任何只改 src/ 的后端提交都会亮黄字,而 bundle 一个字节
+              都没变,是假警(owner 2026-08-15 实报「一直显示有一个黄色」)。
+              两边都取不到(裸包部署无 git)时不显示,别拿空串当不一致。 */}
+          {process.env.NEXT_PUBLIC_CLIENT_WEB_COMMIT &&
+            ver.webCommit &&
+            process.env.NEXT_PUBLIC_CLIENT_WEB_COMMIT !== ver.webCommit && (
+              <span className="text-warning/70"> · 本地 {process.env.NEXT_PUBLIC_CLIENT_WEB_COMMIT}</span>
             )}
         </div>
       )}

@@ -5,12 +5,19 @@ import { execSync } from "child_process";
 // /api/version 只能证明服务端在跑什么;PWA 的 SW 缓存会让客户端 JS 悄悄滞后,
 // 两个号并排显示,缓存漂移一眼可见。
 let clientCommit = "";
+let clientWebCommit = "";
 try {
   clientCommit = execSync("git rev-parse --short HEAD", { cwd: __dirname }).toString().trim();
+  // v2.19.0:滞后判据从「HEAD」换成「最后一个动过 web/ 的 commit」。
+  // 用 HEAD 比对时,任何只改 src/ 的后端提交都会让开屏页亮黄字「本地 xxx」,
+  // 可 bundle 内容一个字节都没变——报的是假警,报多了就没人看了(owner
+  // 2026-08-15 实报「一直显示有一个黄色」)。改成比 web/ 的最后改动,
+  // 只在客户端**真的**落后于已部署的前端时才亮。
+  clientWebCommit = execSync("git log -1 --format=%h -- .", { cwd: __dirname }).toString().trim();
 } catch { /* 非 git 环境(裸包部署):留空,splash 只显示服务端版本 */ }
 
 const nextConfig: NextConfig = {
-  env: { NEXT_PUBLIC_CLIENT_COMMIT: clientCommit },
+  env: { NEXT_PUBLIC_CLIENT_COMMIT: clientCommit, NEXT_PUBLIC_CLIENT_WEB_COMMIT: clientWebCommit },
   // better-sqlite3 / ssh2 是原生模块，不能被 bundler 打包，交给 Node require
   serverExternalPackages: ["better-sqlite3", "ssh2"],
   // 允许经 Tailscale / 局域网 IP 访问 dev server 的 _next 资源（否则 Next 16 dev 对
