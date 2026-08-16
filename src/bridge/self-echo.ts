@@ -11,15 +11,41 @@
  *   author == 我这个 bot，但 message id 不在「我刚发出去的」集合里
  * 就说明**有另一个进程用同一个 token 在发消息**。几秒钟，不用推理。
  *
- * 两个工程细节：
+ * 三个工程细节（第一条是 2026-08-16 上线当天被打脸补上的）：
+ *
+ * - **必须延迟判定**。网关回声和 HTTP 响应是两条独立通道，实测**回声先到**：
+ *   `channel.send()` 的 await 还没返回（拿不到 message id，也就无从记账），
+ *   MESSAGE_CREATE 已经推过来了。于是「id 不在集合里」对**每一条**自己发的
+ *   消息都成立——上线当天它把自己发的告警也算成了第二实例。所以看到陌生自发
+ *   消息先等一会儿再复核一次，等 HTTP 那边把 id 记上。
  * - **发送侧要全覆盖**，否则漏记一次就是一次假警。所以不去逐个调用点插桩，而是
  *   包住 discord.js 的 REST `post` —— 所有 `.send()` / `.reply()` / `followUp()`
  *   最终都从那儿出去，一个点覆盖全部。
- * - **门槛要保守**：交互回复等边角路径仍可能漏记，所以单条不报，要求 10 分钟内
- *   攒够 3 条陌生自发消息才告警，并且每条都单独打日志（带内容摘要）便于调参。
+ * - **门槛要保守**：单条不报，要求 10 分钟内攒够 3 条陌生自发消息才告警，
+ *   并且每条都单独打日志（带内容摘要）便于调参。
  */
 
 import { trackSentMessage, isBotMessage, getBotUserId } from "./discord-api.js";
+
+/**
+ * ⚠️ v2.19.1 告警**默认关闭**（2026-08-16 上线当天即误报）。
+ *
+ * 探测思路本身没问题，但它依赖「发送侧记账 100% 完整」这个前提——而实测
+ * 记账几乎全漏（连本探测器自己发出的告警都被它当成外来消息计了一笔），
+ * 于是每条正常回复都算一次「第二实例」。宁可不报也不能乱报:一个天天喊狼来了
+ * 的探测器比没有更糟,它会把真事故也一起淹掉。
+ *
+ * 记账修好、并在日志里观察到「陌生自发消息」长期为 0 之后,再把这个开关打开。
+ * 期间 console 日志照常打（不打扰用户,但保留观察窗口）。
+ */
+/** 每次读环境变量而不是模块加载时定死——便于单测，也便于运维改完重启即生效 */
+const alertEnabled = () => process.env.CLAUDESTRA_SELF_ECHO_ALERT === "1";
+
+/**
+ * 复核延迟：网关回声常常跑在 HTTP 响应前面，等这么久再判一次。
+ * 3s 对本地网络绰绰有余，而这条路径只在「疑似陌生」时才走，正常流量零开销。
+ */
+export const RECHECK_MS = 3_000;
 
 /** 攒够这么多条陌生自发消息才认定「有第二实例」 */
 const ECHO_THRESHOLD = 3;
@@ -67,15 +93,17 @@ export interface ForeignEchoAlert {
  * messageCreate 里对每条「author 是自己」的消息调一次。
  * 返回非 null 表示达到阈值且过了冷却 —— 调用方去告警。
  */
-export function noteSelfMessage(msg: {
-  id: string;
-  channelId: string;
-  content?: string | null;
-  author: { id: string };
-}): ForeignEchoAlert | null {
+export async function noteSelfMessage(
+  msg: { id: string; channelId: string; content?: string | null; author: { id: string } },
+  opts: { recheckMs?: number } = {},
+): Promise<ForeignEchoAlert | null> {
   const me = getBotUserId();
   if (!me || msg.author.id !== me) return null;
   if (isBotMessage(msg.id)) return null; // 是本实例发的，正常
+
+  // 关键复核：回声可能比 HTTP 响应先到，此刻「没记账」不代表「不是我发的」
+  await Bun.sleep(opts.recheckMs ?? RECHECK_MS);
+  if (isBotMessage(msg.id)) return null;
 
   const now = Date.now();
   const preview = (msg.content || "").replace(/\s+/g, " ").slice(0, 80);
@@ -87,6 +115,7 @@ export function noteSelfMessage(msg: {
       `(channel=${msg.channelId}, 窗口内第 ${foreignEchoes.length} 条): ${preview}`,
   );
 
+  if (!alertEnabled()) return null; // 见文件头:记账未修好前只观察不告警
   if (foreignEchoes.length < ECHO_THRESHOLD) return null;
   if (now - lastAlertAt < ALERT_COOLDOWN_MS) return null;
   lastAlertAt = now;

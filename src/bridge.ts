@@ -1376,7 +1376,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   if (msg.author.id === getBotUserId()) {
     // v2.19.0 自我消息对账：author 是我、但 id 不在「我刚发出去的」里 →
     // 有另一个进程拿着同一个 token 在发消息（2026-08-15 事故，查了两小时）
-    const alert = noteSelfMessage(msg);
+    const alert = await noteSelfMessage(msg);
     if (alert && CONTROL_CHANNEL_ID) {
       recordMetric("second_instance_detected", { meta: { count: String(alert.count) } });
       discordReply(
