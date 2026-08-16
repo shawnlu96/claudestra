@@ -37,6 +37,12 @@ import { trackSentMessage, isBotMessage, getBotUserId } from "./discord-api.js";
  *
  * 记账修好、并在日志里观察到「陌生自发消息」长期为 0 之后,再把这个开关打开。
  * 期间 console 日志照常打（不打扰用户,但保留观察窗口）。
+ *
+ * 已验证干净的路径:jsonl-watcher 的流式推送(-# 💬 / 📖 / 🔧)、reply 正常回复、
+ * 建线程的 THREAD_CREATED 系统消息。
+ * **尚未验证**:交互响应(按钮点击后的 deferReply + editReply)——那条消息由
+ * `/interactions/:id/:token/callback` 产生,POST 响应是空的,拿不到 message id,
+ * 很可能同样记不上账。开开关之前必须先跑一个含按钮点击的观察窗口。
  */
 /** 每次读环境变量而不是模块加载时定死——便于单测，也便于运维改完重启即生效 */
 const alertEnabled = () => process.env.CLAUDESTRA_SELF_ECHO_ALERT === "1";
