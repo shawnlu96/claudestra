@@ -83,6 +83,21 @@ export function installSelfSendTracker(client: {
   };
 }
 
+/**
+ * 只有「我们主动 POST 出去的」消息类型才有可比性。
+ *
+ * Discord 会以**我们的身份**代发系统消息 —— 最典型的是建线程时自动出现的
+ * `THREAD_CREATED`(type 18)，内容就是线程名（实测被误判的那条是
+ * `🐚 bg shell b0kprvgzy`，来自 bg 活动追踪开线程）。这类消息不是我们 POST
+ * 的，拿不到它的 id，也就永远记不上账 —— 只能按类型排除，否则每开一个线程
+ * 就是一次假警。
+ *
+ * 放行 Default(0) 和 Reply(19)：这两类才是真正经由我们的发送出口产生的。
+ */
+export function isTrackableMessageType(type: number | undefined): boolean {
+  return type === undefined || type === 0 || type === 19;
+}
+
 export interface ForeignEchoAlert {
   count: number;
   windowMin: number;
@@ -94,11 +109,18 @@ export interface ForeignEchoAlert {
  * 返回非 null 表示达到阈值且过了冷却 —— 调用方去告警。
  */
 export async function noteSelfMessage(
-  msg: { id: string; channelId: string; content?: string | null; author: { id: string } },
+  msg: {
+    id: string;
+    channelId: string;
+    content?: string | null;
+    author: { id: string };
+    type?: number;
+  },
   opts: { recheckMs?: number } = {},
 ): Promise<ForeignEchoAlert | null> {
   const me = getBotUserId();
   if (!me || msg.author.id !== me) return null;
+  if (!isTrackableMessageType(msg.type)) return null; // 见下：Discord 代发的系统消息
   if (isBotMessage(msg.id)) return null; // 是本实例发的，正常
 
   // 关键复核：回声可能比 HTTP 响应先到，此刻「没记账」不代表「不是我发的」

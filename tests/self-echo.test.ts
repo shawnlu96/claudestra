@@ -87,3 +87,30 @@ describe("回声先于 HTTP 响应到达（真实竞态）", () => {
     expect(await noteSelfMessage(msg("never-tracked"), { recheckMs: 20 })).toBeNull(); // 第 1 条,未到阈值
   });
 });
+
+// ── Discord 代我们发的系统消息不能算「外来」 ──────────────────────────
+// 实测漏网的那条是 `🐚 bg shell b0kprvgzy`：bg 活动追踪开线程时，Discord 以
+// 我们的身份在父频道自动发了一条 THREAD_CREATED(type 18)。它不是我们 POST 的，
+// id 永远记不上账 —— 不按类型排除的话，每开一个线程就是一次假警。
+import { isTrackableMessageType } from "../src/bridge/self-echo.js";
+
+describe("消息类型过滤", () => {
+  test("Default / Reply 参与对账", () => {
+    expect(isTrackableMessageType(0)).toBe(true);
+    expect(isTrackableMessageType(19)).toBe(true);
+    expect(isTrackableMessageType(undefined)).toBe(true); // 老结构没有 type 字段
+  });
+
+  test("THREAD_CREATED 等系统消息一律不参与", () => {
+    expect(isTrackableMessageType(18)).toBe(false); // 建线程
+    expect(isTrackableMessageType(6)).toBe(false);  // 置顶提示
+    expect(isTrackableMessageType(7)).toBe(false);  // 加入提示
+  });
+
+  test("系统消息进来时直接返回 null，不计数", async () => {
+    const sys = { id: "sys1", channelId: "c", content: "🐚 bg shell x", author: { id: ME }, type: 18 };
+    expect(await noteSelfMessage(sys, NO_WAIT)).toBeNull();
+    expect(await noteSelfMessage(sys, NO_WAIT)).toBeNull();
+    expect(await noteSelfMessage(sys, NO_WAIT)).toBeNull(); // 三条也不该触发阈值
+  });
+});
