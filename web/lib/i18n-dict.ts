@@ -392,4 +392,7 @@ export const DICT: Record<string, string> = {
   "引用": "Quote",
   "复制所选": "Copy selection",
   "滚动已锁定 · 拖动手柄调整选区": "Scrolling locked · drag the handles to adjust",
+  "复制这段": "Copy this block",
+  "复制整条": "Copy whole message",
+  "复制失败": "Copy failed",
 };

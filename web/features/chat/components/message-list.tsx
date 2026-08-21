@@ -12,7 +12,7 @@ import { CcTaskPanel } from "./cc-task-panel";
 import { highlightCode, langForPath } from "../highlight";
 import { useT, getLang } from "@/lib/i18n";
 import { fmtTs } from "../fmt-time";
-import { BlockActions, SelectModeBar } from "./block-actions";
+import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
@@ -588,19 +588,23 @@ const TextBlock = memo(function TextBlock({
   ts,
   streamed,
   muted,
+  fullText,
 }: {
   text: string;
   ts?: string;
   streamed?: boolean;
+  /** 整条消息的正文（长按菜单里的「复制整条」用；只有一段时不传）。 */
+  fullText?: string;
   /** 过程叙述（工具间碎碎念）弱化成「旁白」：左竖线+淡色+略小字号，与 reply
    *  正文拉开格式差（owner 2026-07-14:分不清哪些是正文哪些是 console 碎碎念）。 */
   muted?: boolean;
 }) {
-  // 点这一段 → 冒出操作条(复制 / 选择文字 / 引用 + 秒级时间)。原本这一下只冒
-  // 时间戳,现在顺手把复制入口挂在同一个手势上,不新增交互(2026-08-21 owner:
-  // 「手机上想复制一段文字,一选中页面就跟着动」)
-  const [open, setOpen] = useState(false);
+  // 单击 = 切时间戳（老语义）；**长按 / 右键** = 浮层菜单（复制 / 选择文字 /
+  // 引用）。第一版做成「点一下展开一条内联按钮条」被 owner 打回：点击太廉价、
+  // 内联条还把下面的排版顶下去（2026-08-22）。菜单见 ./bubble-menu。
+  const [showTs, setShowTs] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, getEl: () => bodyRef.current }));
   return (
     <QuoteSwipe quote={text}>
       <div
@@ -621,13 +625,14 @@ const TextBlock = memo(function TextBlock({
           // 时间戳会两件事一起发生,复制浮标和时间戳挤在一起(owner 2026-07-28)
           const el = e.target as HTMLElement;
           if (el.closest?.("code") && !el.closest("pre")) return;
-          // 划选后松手也算一次 click——正在选字时别顺手把操作条开关掉
-          if (hasLiveSelection()) return;
-          setOpen((v) => !v);
+          // 划选后松手、长按松手都算一次 click——这两种都不该顺手切时间戳
+          if (hasLiveSelection() || press.consumedClick()) return;
+          setShowTs((v) => !v);
         }}
+        {...press.handlers}
       >
-        {/* 这层 div 是「选择文字」的选区范围:只框正文,不把操作条一起选进去 */}
-        <div ref={bodyRef}>
+        {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
+        <div ref={bodyRef} className="cstra-bubble">
           {streamed ? (
             // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
             // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
@@ -638,7 +643,9 @@ const TextBlock = memo(function TextBlock({
             <Domd initMd={text} bodyClassName="chat-domd" />
           )}
         </div>
-        {open && <BlockActions text={text} ts={ts} getEl={() => bodyRef.current} />}
+        {showTs && ts && (
+          <div className="mt-0.5 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(ts)}</div>
+        )}
       </div>
     </QuoteSwipe>
   );
@@ -660,6 +667,7 @@ function AssistantBody({
   streamingLast: boolean;
 }) {
   const segs = m.segments;
+  const full = messagePlainText(m); // 长按菜单的「复制整条」用；只有一段时与本段相同,菜单自动不显示
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;
@@ -679,6 +687,7 @@ function AssistantBody({
             text={seg.text}
             ts={seg.ts ?? m.ts}
             streamed={m.streamed && i === segs!.length - 1}
+            fullText={full}
             muted
           />
         ) : seg.kind === "reply" ? (
@@ -688,7 +697,7 @@ function AssistantBody({
             <div key={i}>
               {i > 0 && <ReplyDivider />}
               {/* reply 到达即完整,永远直接富文本 */}
-              <TextBlock text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} />
+              <TextBlock text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
             </div>
           )
         ) : (
@@ -709,7 +718,7 @@ function AssistantBody({
       )}
     </>
   ) : hasNarration ? (
-    <TextBlock text={m.content} ts={m.ts} streamed={m.streamed} muted />
+    <TextBlock text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted />
   ) : null;
 
   return (
@@ -719,11 +728,17 @@ function AssistantBody({
         <>
           {hasNarration && <ReplyDivider />}
           {/* reply 到达即完整,直接富文本 */}
-          <TextBlock text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} />
+          <TextBlock text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
         </>
       )}
     </>
   );
+}
+
+/** 引用回复格式(左滑引用):「> 引用\n\n正文」→ 拆成引用条 + 正文。 */
+function splitQuoted(content: string): { quoted?: string; body: string } {
+  const qm = content.match(/^> (.+?)\n\n([\s\S]*)$/);
+  return { quoted: qm?.[1], body: qm ? qm[2] : content };
 }
 
 /**
@@ -765,10 +780,17 @@ const Message = memo(function Message({
   isLast: boolean;
   awaiting: boolean;
 }) {
-  // 点击消息（user 气泡 / ✦ 头）展开操作条（复制 / 选择文字 / 引用 + 秒级时间）
+  // 点击消息（user 气泡 / ✦ 头）切换秒级时间显示；长按/右键出菜单
   const [showTs, setShowTs] = useState(false);
-  /** 「选择文字」要框住的范围：user = 气泡本体，assistant = 整条正文。 */
+  /** user 气泡本体 —— 长按菜单里「选择文字」要框住的范围。 */
   const bubbleRef = useRef<HTMLDivElement>(null);
+  // hook 必须无条件调用(下面有 system/user 两处提前 return),所以正文在长按那一刻
+  // 现算,不依赖分支里的局部变量
+  const press = useBubbleMenuTrigger(() => ({
+    text: splitQuoted(m.content).body,
+    ts: m.ts,
+    getEl: () => bubbleRef.current,
+  }));
   const t = useT();
   // 个人资料：自己的消息(无 from——from 是入站来源标签,别人的消息才带)
   // 旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
@@ -777,11 +799,8 @@ const Message = memo(function Message({
   if (m.role === "user") {
     const atts = m.attachments ?? [];
     const isSelf = !m.from;
-    // 引用回复格式(左滑引用):「> 引用\n\n正文」→ 引用渲染成样式条。
-    // 拆在 return 之前:操作条的「复制/引用」要拿正文,不能连引用条一起复制。
-    const qm = m.content.match(/^> (.+?)\n\n([\s\S]*)$/);
-    const userQuoted = qm?.[1];
-    const userBody = qm ? qm[2] : m.content;
+    // 引用条与正文分开渲染;长按菜单的「复制/引用」只拿正文那一半
+    const { quoted: userQuoted, body: userBody } = splitQuoted(m.content);
     const showAvatar = isSelf && !!profile.avatar;
     const label = m.from || (isSelf ? profile.nickname : "");
     return (
@@ -801,11 +820,13 @@ const Message = memo(function Message({
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
               ref={bubbleRef}
-              className="whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
+              className="cstra-bubble whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
               onClick={() => {
-                if (hasLiveSelection()) return; // 划选后松手也算 click
+                // 划选后松手、长按松手都算 click——都不该顺手切时间戳
+                if (hasLiveSelection() || press.consumedClick()) return;
                 setShowTs((v) => !v);
               }}
+              {...press.handlers}
             >
               {userQuoted && (
                 <div className="mb-2 border-l-2 border-base-content/25 pl-2 text-[12px] leading-snug text-base-content/50">
@@ -820,8 +841,8 @@ const Message = memo(function Message({
         {m.failed && (
           <div className="pr-1 text-[11px] font-medium text-error">⚠️ {t("未送达——请重新发送")}</div>
         )}
-        {showTs && !!m.content && (
-          <BlockActions text={userBody} ts={m.ts} getEl={() => bubbleRef.current} align="end" />
+        {showTs && m.ts && (
+          <div className="pr-1 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(m.ts)}</div>
         )}
       </div>
     );
@@ -833,8 +854,7 @@ const Message = memo(function Message({
   const hasSegs = !!m.segments?.length;
   return (
     <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] w-full`}>
-      {/* 点 ✦ Claude 头 → 整条消息的操作条(复制整条正文 / 选择文字 / 时间);
-          单段的操作条点那一段自己的正文即可 */}
+      {/* 点 ✦ Claude 头显示/隐藏本条消息时间（秒级）。复制整条走正文段的长按菜单 */}
       <div
         className="cursor-pointer"
         onClick={() => {
@@ -844,13 +864,12 @@ const Message = memo(function Message({
       >
         <ClaudeHeader pulsing={liveEmpty} />
       </div>
-      {showTs && (
-        <div className="-mt-1 mb-1.5">
-          <BlockActions text={messagePlainText(m)} ts={m.ts} getEl={() => bubbleRef.current} />
+      {showTs && m.ts && (
+        <div className="-mt-1.5 mb-1.5 font-mono text-[10px] tabular-nums opacity-40">
+          {fmtTs(m.ts)}
         </div>
       )}
-      {/* ref 框住正文全体:「选择文字」从这条消息的第一个字选到最后一个字 */}
-      <div ref={bubbleRef}>
+      <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
         {!hasSegs && !!m.toolCalls?.length && (
           <ToolCallsBlock tools={m.toolCalls} streamingLast={streamingLast} />
@@ -1157,6 +1176,7 @@ export function MessageList() {
             </div>,
             document.body
           )}
+        <BubbleMenu />
         <SelectModeBar />
         {browsing && (
           <div className="sticky bottom-2 z-10 mt-4 flex justify-center">

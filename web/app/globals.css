@@ -479,3 +479,45 @@ body[data-cstra-select="1"] .cstra-selecting {
     border-radius: 0.5rem;
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-info) 40%, transparent);
 }
+
+/*
+ * ── 长按菜单（features/chat/components/bubble-menu.tsx，owner 2026-08-22） ──
+ * 第一版是「点一下展开内联按钮条」，被打回:点击太廉价(误触)、内联条还把下面
+ * 的排版顶下去。改成长按浮层菜单后，触摸端必须把气泡的原生长按让出来 ——
+ * 否则 iOS 自己的「拷贝/查询」气泡会和我们的菜单打架。
+ * 桌面端(hover:hover)一个字不动:鼠标划选照常，菜单走右键。
+ */
+@media (hover: none) and (pointer: coarse) {
+    .cstra-bubble {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+    }
+}
+/* 选择模式下把 user-select 放回来(压过上面那条,否则「选择文字」选不动) */
+body[data-cstra-select="1"] .cstra-selecting,
+body[data-cstra-select="1"] .cstra-selecting * {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+/* 菜单出现:从手指位置轻微放大淡入 */
+@keyframes cstra-menu-in {
+    from {
+        opacity: 0;
+        transform: scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+.cstra-menu-in {
+    animation: cstra-menu-in 0.13s ease-out;
+    transform-origin: top center;
+}
+@media (prefers-reduced-motion: reduce) {
+    .cstra-menu-in {
+        animation: none;
+    }
+}
