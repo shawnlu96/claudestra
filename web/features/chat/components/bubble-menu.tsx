@@ -42,11 +42,26 @@ export interface BubbleMenuTarget {
 
 type MenuState = (BubbleMenuTarget & { x: number; y: number }) | null;
 
+/**
+ * 掐掉原生选区。菜单开着的时候 iOS 可能还在自己那套长按流程里（我们的计时器
+ * 450ms 先响，它的 ≈500ms 后响），选区一成立它就弹「拷贝/查询」气泡，和我们的
+ * 菜单叠在一起。CSS 那道 user-select:none 是主防线，这里是第二道：只要菜单开着，
+ * 任何冒出来的选区立刻收掉，气泡自然消失。
+ */
+export function killNativeSelection(): void {
+  // 「选择文字」是我们自己程序化选的,绝不能连它一起掐 —— 点菜单项时 React 的
+  // 收起是异步的,监听器可能还挂着,这一行就是防它把选区当场清掉。
+  if (isSelectMode()) return;
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  if (sel && !sel.isCollapsed) sel.removeAllRanges();
+}
+
 const subs = new Set<(s: MenuState) => void>();
 function emit(s: MenuState) {
   subs.forEach((f) => f(s));
 }
 export function openBubbleMenu(s: NonNullable<MenuState>): void {
+  killNativeSelection();
   emit(s);
 }
 export function closeBubbleMenu(): void {
@@ -143,6 +158,15 @@ export function BubbleMenu() {
       subs.delete(setS);
     };
   }, []);
+  // 菜单开着时,任何冒出来的原生选区立刻收掉(见 killNativeSelection 的注释)。
+  // removeAllRanges 自己也会触发 selectionchange,但那一次 isCollapsed 为真,
+  // 不会递归。
+  useEffect(() => {
+    if (!s) return;
+    killNativeSelection();
+    document.addEventListener("selectionchange", killNativeSelection);
+    return () => document.removeEventListener("selectionchange", killNativeSelection);
+  }, [s]);
   // 路由变化（返回列表页）时收起——会话页在移动端并不卸载
   useEffect(() => {
     const close = () => emit(null);

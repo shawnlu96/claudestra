@@ -487,7 +487,13 @@ body[data-cstra-select="1"] .cstra-selecting {
  * 否则 iOS 自己的「拷贝/查询」气泡会和我们的菜单打架。
  * 桌面端(hover:hover)一个字不动:鼠标划选照常，菜单走右键。
  */
+/* 范围是整个消息区,而且显式点名每个后代 —— 只给气泡容器挂、指望继承是不够的:
+   DOMD 的每个块都带 contenteditable="false" + tabindex,WebKit 在这类节点上照样
+   起原生选字(2026-08-22 owner 截图:两个菜单同时弹出来)。选择模式的规则带
+   [data-cstra-select] + #id,优先级更高,照常放行。 */
 @media (hover: none) and (pointer: coarse) {
+    #cstra-msgs,
+    #cstra-msgs *,
     .cstra-bubble {
         -webkit-touch-callout: none;
         -webkit-user-select: none;
