@@ -11,6 +11,9 @@ import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
 import { highlightCode, langForPath } from "../highlight";
 import { useT, getLang } from "@/lib/i18n";
+import { fmtTs } from "../fmt-time";
+import { BlockActions, SelectModeBar } from "./block-actions";
+import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
    user 右对齐圆角矩形，工具调用 active（转圈）/ history（可展开）两态。
@@ -35,21 +38,6 @@ const toolIcon = (n: string) => TOOL_ICONS[n] || "🔧";
 /** formatTool 的 Bash 摘要用 ||command|| 包裹命令，展示时去掉这对标记。 */
 function cleanSummary(s: string): string {
   return s.replace(/\|\|/g, " ").replace(/\s+/g, " ").trim();
-}
-
-/** 秒级时间戳展示（点击消息/工具卡时冒出）。跨天带日期，当天只时分秒。 */
-function fmtTs(iso?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const hms = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  return sameDay ? hms : `${d.getMonth() + 1}-${pad(d.getDate())} ${hms}`;
 }
 
 /** 点击切换的时间小签（消息气泡 / 工具行共用）。 */
@@ -532,6 +520,12 @@ function QuoteSwipe({ quote, className, children }: { quote: string; className?:
       <div
         ref={ref}
         onTouchStart={(e) => {
+          // 正在选字(选择模式,或页面上已有选区)时整个手势让开:横向一动就 translateX
+          // 整块,字跟着跑,选区永远框不准(2026-08-21 owner iPhone 实测)
+          if (isSelectMode() || hasLiveSelection()) {
+            st.current = null;
+            return;
+          }
           const t = e.touches[0];
           st.current = t ? { x: t.clientX, y: t.clientY, drag: false, dead: false, startDx: 0 } : null;
         }}
@@ -544,6 +538,11 @@ function QuoteSwipe({ quote, className, children }: { quote: string; className?:
           const dx = t.clientX - s.x;
           const dy = Math.abs(t.clientY - s.y);
           if (!s.drag) {
+            // 手势中途冒出选区(长按选字)→ 让开,别在人家拖手柄时把块横着拽走
+            if (isSelectMode() || hasLiveSelection()) {
+              s.dead = true;
+              return;
+            }
             // 竖向先动 → 手势让给列表滚动;轻微左滑即接管(阈值太高「不跟手」,
             // owner 2026-07-16 打回过一版 14px)
             if (dy > 10 && dy > -dx) {
@@ -597,7 +596,11 @@ const TextBlock = memo(function TextBlock({
    *  正文拉开格式差（owner 2026-07-14:分不清哪些是正文哪些是 console 碎碎念）。 */
   muted?: boolean;
 }) {
-  const [showTs, setShowTs] = useState(false);
+  // 点这一段 → 冒出操作条(复制 / 选择文字 / 引用 + 秒级时间)。原本这一下只冒
+  // 时间戳,现在顺手把复制入口挂在同一个手势上,不新增交互(2026-08-21 owner:
+  // 「手机上想复制一段文字,一选中页面就跟着动」)
+  const [open, setOpen] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
   return (
     <QuoteSwipe quote={text}>
       <div
@@ -618,21 +621,24 @@ const TextBlock = memo(function TextBlock({
           // 时间戳会两件事一起发生,复制浮标和时间戳挤在一起(owner 2026-07-28)
           const el = e.target as HTMLElement;
           if (el.closest?.("code") && !el.closest("pre")) return;
-          setShowTs((v) => !v);
+          // 划选后松手也算一次 click——正在选字时别顺手把操作条开关掉
+          if (hasLiveSelection()) return;
+          setOpen((v) => !v);
         }}
       >
-        {streamed ? (
-          // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
-          // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
-          // 级体量解析是亚毫秒级,memo 隔离其它段;未闭合语法(写到一半的 **/```)
-          // 期间样式会短暂跳动,属流式渲染的正常代价。
-          <Domd key={text.length} initMd={text} bodyClassName="chat-domd" />
-        ) : (
-          <Domd initMd={text} bodyClassName="chat-domd" />
-        )}
-        {showTs && ts && (
-          <div className="mt-0.5 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(ts)}</div>
-        )}
+        {/* 这层 div 是「选择文字」的选区范围:只框正文,不把操作条一起选进去 */}
+        <div ref={bodyRef}>
+          {streamed ? (
+            // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
+            // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
+            // 级体量解析是亚毫秒级,memo 隔离其它段;未闭合语法(写到一半的 **/```)
+            // 期间样式会短暂跳动,属流式渲染的正常代价。
+            <Domd key={text.length} initMd={text} bodyClassName="chat-domd" />
+          ) : (
+            <Domd initMd={text} bodyClassName="chat-domd" />
+          )}
+        </div>
+        {open && <BlockActions text={text} ts={ts} getEl={() => bodyRef.current} />}
       </div>
     </QuoteSwipe>
   );
@@ -721,6 +727,27 @@ function AssistantBody({
 }
 
 /**
+ * 整条 assistant 消息的纯文本（「复制整条」用）：按段序取叙述 + reply，工具卡
+ * 不进剪贴板（复制回复是为了转发文字，不是转发执行日志）。
+ * 去重是必须的——旧快照里 reply 既可能在段里、又挂在 replyText 上（AssistantBody
+ * 的两条渲染路径），不去重就会复制两遍。
+ */
+function messagePlainText(m: ChatMessage): string {
+  const parts: string[] = [];
+  const push = (t?: string) => {
+    const v = t?.trim();
+    if (v && !parts.includes(v)) parts.push(v);
+  };
+  if (m.segments?.length) {
+    for (const seg of m.segments) if (seg.kind !== "tools") push(seg.text);
+  } else {
+    push(m.content);
+  }
+  push(m.replyText);
+  return parts.join("\n\n");
+}
+
+/**
  * memo 是整个会话页的性能命门（2026-07-13「列表滑动卡死」根因）：流式期间每个
  * SSE 事件都会 produce 新 messages 数组，无 memo 时全部气泡（几十个气泡 + 几百
  * 张工具卡 + 全部 Domd markdown）每事件全量 reconcile；immer 结构共享保证未变
@@ -738,8 +765,10 @@ const Message = memo(function Message({
   isLast: boolean;
   awaiting: boolean;
 }) {
-  // 点击消息（user 气泡 / ✦ 头）切换秒级时间显示
+  // 点击消息（user 气泡 / ✦ 头）展开操作条（复制 / 选择文字 / 引用 + 秒级时间）
   const [showTs, setShowTs] = useState(false);
+  /** 「选择文字」要框住的范围：user = 气泡本体，assistant = 整条正文。 */
+  const bubbleRef = useRef<HTMLDivElement>(null);
   const t = useT();
   // 个人资料：自己的消息(无 from——from 是入站来源标签,别人的消息才带)
   // 旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
@@ -748,6 +777,11 @@ const Message = memo(function Message({
   if (m.role === "user") {
     const atts = m.attachments ?? [];
     const isSelf = !m.from;
+    // 引用回复格式(左滑引用):「> 引用\n\n正文」→ 引用渲染成样式条。
+    // 拆在 return 之前:操作条的「复制/引用」要拿正文,不能连引用条一起复制。
+    const qm = m.content.match(/^> (.+?)\n\n([\s\S]*)$/);
+    const userQuoted = qm?.[1];
+    const userBody = qm ? qm[2] : m.content;
     const showAvatar = isSelf && !!profile.avatar;
     const label = m.from || (isSelf ? profile.nickname : "");
     return (
@@ -763,33 +797,31 @@ const Message = memo(function Message({
           </div>
         )}
         {atts.length > 0 && <AttachmentStrip items={atts} />}
-        {m.content && (() => {
-          // 引用回复格式(左滑引用):「> 引用\n\n正文」→ 引用渲染成样式条
-          const qm = m.content.match(/^> (.+?)\n\n([\s\S]*)$/);
-          const quoted = qm?.[1];
-          const body = qm ? qm[2] : m.content;
-          return (
-            <QuoteSwipe quote={body} className="max-w-[85%]">
-              <div
-                className="whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
-                onClick={() => setShowTs((v) => !v)}
-              >
-                {quoted && (
-                  <div className="mb-2 border-l-2 border-base-content/25 pl-2 text-[12px] leading-snug text-base-content/50">
-                    {quoted}
-                  </div>
-                )}
-                {body}
-              </div>
-            </QuoteSwipe>
-          );
-        })()}
+        {m.content && (
+          <QuoteSwipe quote={userBody} className="max-w-[85%]">
+            <div
+              ref={bubbleRef}
+              className="whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
+              onClick={() => {
+                if (hasLiveSelection()) return; // 划选后松手也算 click
+                setShowTs((v) => !v);
+              }}
+            >
+              {userQuoted && (
+                <div className="mb-2 border-l-2 border-base-content/25 pl-2 text-[12px] leading-snug text-base-content/50">
+                  {userQuoted}
+                </div>
+              )}
+              {userBody}
+            </div>
+          </QuoteSwipe>
+        )}
         {/* v2.15+ 发送失败标记:乐观气泡不能装作已送达(2026-07-27 用户丢消息实锤) */}
         {m.failed && (
           <div className="pr-1 text-[11px] font-medium text-error">⚠️ {t("未送达——请重新发送")}</div>
         )}
-        {showTs && m.ts && (
-          <div className="pr-1 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(m.ts)}</div>
+        {showTs && !!m.content && (
+          <BlockActions text={userBody} ts={m.ts} getEl={() => bubbleRef.current} align="end" />
         )}
       </div>
     );
@@ -801,20 +833,30 @@ const Message = memo(function Message({
   const hasSegs = !!m.segments?.length;
   return (
     <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] w-full`}>
-      {/* 点 ✦ Claude 头显示/隐藏本条消息时间（秒级） */}
-      <div className="cursor-pointer" onClick={() => setShowTs((v) => !v)}>
+      {/* 点 ✦ Claude 头 → 整条消息的操作条(复制整条正文 / 选择文字 / 时间);
+          单段的操作条点那一段自己的正文即可 */}
+      <div
+        className="cursor-pointer"
+        onClick={() => {
+          if (hasLiveSelection()) return;
+          setShowTs((v) => !v);
+        }}
+      >
         <ClaudeHeader pulsing={liveEmpty} />
       </div>
-      {showTs && m.ts && (
-        <div className="-mt-1.5 mb-1.5 font-mono text-[10px] tabular-nums opacity-40">
-          {fmtTs(m.ts)}
+      {showTs && (
+        <div className="-mt-1 mb-1.5">
+          <BlockActions text={messagePlainText(m)} ts={m.ts} getEl={() => bubbleRef.current} />
         </div>
       )}
-      {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
-      {!hasSegs && !!m.toolCalls?.length && (
-        <ToolCallsBlock tools={m.toolCalls} streamingLast={streamingLast} />
-      )}
-      <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} />
+      {/* ref 框住正文全体:「选择文字」从这条消息的第一个字选到最后一个字 */}
+      <div ref={bubbleRef}>
+        {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
+        {!hasSegs && !!m.toolCalls?.length && (
+          <ToolCallsBlock tools={m.toolCalls} streamingLast={streamingLast} />
+        )}
+        <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} />
+      </div>
       {/* agent 出站附件(reply files):图片内联、文件 chip,与 user 气泡同一渲染 */}
       {!!m.attachments?.length && (
         <div className="mt-2">
@@ -878,6 +920,7 @@ export function MessageList() {
   useEffect(() => {
     followRef.current = true; // 切会话恢复吸底
     setExtraVisible(0); // 渲染窗口回到「最近 30 条」
+    exitSelectMode(); // 别把冻住的滚动带到下一个会话
   }, [active]);
 
   /* 历史现场定位(搜索跳转):窗口数据到位后滚到命中气泡并高亮一闪。
@@ -943,6 +986,7 @@ export function MessageList() {
     // 用户上翻阅读时不强拉回底（follow=false）——之前每来一条新消息/卡片都
     // smooth 滚底并强置 follow=true，流式期间用户「滑不动」的元凶之一
     // （2026-07-13 真机）。awaiting=true 是自己刚发送 → 仍然滚底。
+    if (isSelectMode()) return; // 正在选字：滚一下选区就没了
     if (!followRef.current && !awaiting) return;
     const el = scrollerRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
@@ -963,6 +1007,7 @@ export function MessageList() {
     };
     el.addEventListener("scroll", onScroll);
     const ro = new ResizeObserver(() => {
+      if (isSelectMode()) return; // 同上：选字期间新内容长高也不吸底
       if (followRef.current) {
         el.scrollTop = el.scrollHeight;
         lastTop = el.scrollTop; // 吸底自身的位移不算「用户上滑」
@@ -1016,6 +1061,7 @@ export function MessageList() {
         // 行内代码点击即复制(owner 2026-07-28「小 code block 也要能复制」)。
         // 大代码块(pre 内)有 do-md 自带的复制按钮,不抢;点在链接上不抢;
         // 用户正在选字(划选后松手也触发 click)不抢。
+        if (isSelectMode()) return; // 选字期间点哪儿都是在调选区,不抢
         const el = (e.target as HTMLElement).closest?.("code");
         if (!el || el.closest("pre") || (e.target as HTMLElement).closest("a")) return;
         const sel = window.getSelection();
@@ -1111,6 +1157,7 @@ export function MessageList() {
             </div>,
             document.body
           )}
+        <SelectModeBar />
         {browsing && (
           <div className="sticky bottom-2 z-10 mt-4 flex justify-center">
             <button

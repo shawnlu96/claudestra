@@ -19,3 +19,18 @@ export function fmtAgo(ts?: number | null): string {
   const d = Math.floor(h / 24);
   return en ? `${d}d ago` : `${d}天前`;
 }
+
+/** 秒级时间戳（消息/工具卡点开时显示）。跨天带日期，当天只时分秒。 */
+export function fmtTs(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hms = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  return sameDay ? hms : `${d.getMonth() + 1}-${pad(d.getDate())} ${hms}`;
+}

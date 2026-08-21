@@ -455,3 +455,27 @@ html.kb-open {
 .chat-domd code:not(pre code):active {
     background: color-mix(in srgb, currentColor 24%, transparent);
 }
+
+/*
+ * ── 选择模式（features/chat/select-mode.ts，owner 2026-08-21） ──────────
+ * 「iPhone 上想复制一段文字,一选中页面就跟着动」:选择手柄一拖,消息区跟着滚,
+ * 选区永远框不准。进模式后把消息区的拖动整个冻住 —— touch-action:none 让容器
+ * 不再接管手势(手柄靠近边缘也不会自动滚屏),选区这才稳得住。
+ * 用 id 选择器是为了压过元素上内联的 .touch-pan-y。
+ */
+body[data-cstra-select="1"] #cstra-msgs {
+    touch-action: none;
+    overscroll-behavior: contain;
+}
+/* iOS 上显式给 user-select/callout 才有稳定的手柄与长按菜单 */
+body[data-cstra-select="1"] #cstra-msgs,
+body[data-cstra-select="1"] #cstra-msgs * {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+/* 正在选的那一块描个边:「现在在选这段」一眼可见 */
+body[data-cstra-select="1"] .cstra-selecting {
+    border-radius: 0.5rem;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-info) 40%, transparent);
+}

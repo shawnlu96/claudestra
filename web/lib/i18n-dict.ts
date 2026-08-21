@@ -388,4 +388,8 @@ export const DICT: Record<string, string> = {
     "Telegram-style document-flow layout: fixes caret/attachment-menu misplacement with the iOS keyboard. Toggle off to restore the original layout if anything glitches.",
   "暂无 peer。生成邀请发给对方，或粘贴对方的邀请加入。":
     "No peers yet. Create an invite to send, or paste one you received.",
+  "选择文字": "Select text",
+  "引用": "Quote",
+  "复制所选": "Copy selection",
+  "滚动已锁定 · 拖动手柄调整选区": "Scrolling locked · drag the handles to adjust",
 };
