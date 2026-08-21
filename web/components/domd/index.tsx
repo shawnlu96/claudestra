@@ -12,10 +12,11 @@
  * 否则 DOMD 把整块代码降级成纯文本 span、无从上色。token 配色见 ./prism-themes.css，
  * markdown 元素排版见 globals.css 的 .chat-domd。
  */
-import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import { DOMD, DOMDProvider } from "@do-md/core-react";
 import "@do-md/core-react/style.css";
 import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
+import { padTableBlocks } from "./normalize-md";
 import "./prism-themes.css";
 
 type ProviderProps = ComponentProps<typeof DOMDProvider>;
@@ -33,6 +34,12 @@ export type DomdProps = Omit<ProviderProps, "children"> & {
  * 先用纯文本渲染，定稿后再挂 Domd（一次性拿全量 content），见 message-list。
  */
 export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
+  // 表格紧贴上一行时 do-md 认不出来（它要求表格自成块）——渲染前补上那个空行。
+  // 见 ./normalize-md：0.2.10 与最新 0.11.2 行为一致，升级救不了，只能归一化。
+  const initMd = useMemo(
+    () => (typeof provider.initMd === "string" ? padTableBlocks(provider.initMd) : provider.initMd),
+    [provider.initMd]
+  );
   // 懒加载语法落地后 remount 重新 tokenize——DOMD 只读一次,首渲时 grammar 未到
   // 的 fence(如 ```powershell)先按纯文本显示,这里补一次上色。version 只在
   // 真正有新语法注册时 +1,一个会话最多几次,remount 成本可忽略。
@@ -44,6 +51,7 @@ export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
       editable={false}
       codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
       {...provider}
+      initMd={initMd}
     >
       {bodyClassName ? (
         <div className={bodyClassName}>
