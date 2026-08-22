@@ -6,7 +6,9 @@
     "dev": "next dev -p 33333",
     "build": "next build",
     "start": "next start -p 3333",
-    "lint": "eslint"
+    "lint": "eslint",
+    "prebuild": "node scripts/gen-build-info.mjs",
+    "predev": "node scripts/gen-build-info.mjs"
   },
   "dependencies": {
     "@do-md/core-react": "^0.2.10",

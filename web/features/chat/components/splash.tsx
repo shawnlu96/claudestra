@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../chat-store";
 import { useT } from "@/lib/i18n";
+import { CLIENT_WEB_COMMIT } from "@/lib/build-info";
 
 /**
  * 全屏启动页：landing + 加载一体（2026-07-13 owner：进入先卡「暂无会话」很久、
@@ -92,15 +93,15 @@ export function Splash() {
           {ver.version && ver.commit && " · "}
           {ver.commit}
           {/* 客户端 bundle 是否滞后(owner 2026-07-27 要的「对一下版本」)。
-              v2.19.0 判据修正:比的是「最后一个动过 web/ 的 commit」,不是 HEAD——
-              拿 HEAD 比对时任何只改 src/ 的后端提交都会亮黄字,而 bundle 一个字节
-              都没变,是假警(owner 2026-08-15 实报「一直显示有一个黄色」)。
-              两边都取不到(裸包部署无 git)时不显示,别拿空串当不一致。 */}
-          {process.env.NEXT_PUBLIC_CLIENT_WEB_COMMIT &&
-            ver.webCommit &&
-            process.env.NEXT_PUBLIC_CLIENT_WEB_COMMIT !== ver.webCommit && (
-              <span className="text-warning/70"> · 本地 {process.env.NEXT_PUBLIC_CLIENT_WEB_COMMIT}</span>
-            )}
+              比的是「最后一个动过 web/ 的 commit」,不是 HEAD——拿 HEAD 比对时任何
+              只改 src/ 的后端提交都会亮黄字,而 bundle 一个字节都没变,是假警
+              (owner 2026-08-15 实报「一直显示有一个黄色」)。
+              CLIENT_WEB_COMMIT 由 build-info.ts 提供(构建前生成的源码文件),不再
+              走 DefinePlugin —— 那条路会被 webpack 缓存钉住旧号(owner 2026-08-22
+              「版本号还是不同」)。两边都取不到(裸包无 git)时不显示,别拿空串当不一致。 */}
+          {CLIENT_WEB_COMMIT && ver.webCommit && CLIENT_WEB_COMMIT !== ver.webCommit && (
+            <span className="text-warning/70"> · 本地 {CLIENT_WEB_COMMIT}</span>
+          )}
         </div>
       )}
     </div>
