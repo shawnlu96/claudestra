@@ -431,3 +431,79 @@ describe("searchSessionHistory", () => {
     expect(await searchSessionHistory(file, "")).toEqual([]);
   });
 });
+
+// ── 大文件尾读(2026-08-23 perf 根因:全文读 232MB 同步阻塞主线程→502) ─────────
+// 用 maxFullReadBytes 逼小 fixture 走尾读路径,断言与全读逐条一致(seq/内容/顺序)。
+describe("readSessionHistory 尾读路径(maxFullReadBytes)", () => {
+  // 造一段够多行的会话:交替 user/assistant,再掺入会被过滤的 tool_result 大行
+  function bigSession(dir: string): string {
+    const recs: unknown[] = [];
+    for (let k = 0; k < 200; k++) {
+      recs.push({ type: "user", timestamp: `2026-07-01T00:00:${String(k).padStart(2, "0")}Z`, message: { content: `用户消息 ${k}` } });
+      recs.push({
+        type: "assistant",
+        timestamp: `2026-07-01T00:01:${String(k).padStart(2, "0")}Z`,
+        message: { model: "claude-opus-5", content: [{ type: "text", text: `助手回复 ${k}` }] },
+      });
+      // 掺一条巨大的 tool_result 载荷行(会被过滤,不产出消息)——模拟真实 jsonl 里
+      // 尾部可能被大行占据,考验「窗口里可显示消息不够就加宽」
+      recs.push({ type: "user", timestamp: `2026-07-01T00:02:${String(k).padStart(2, "0")}Z`, message: { content: [{ type: "tool_result", content: "x".repeat(500) }] } });
+    }
+    return writeJsonl(dir, `${SID}.jsonl`, recs);
+  }
+
+  test("默认页:尾读与全读拿到同一批尾部消息(seq+文本一致)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
+    const p = bigSession(dir);
+    const full = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 1 << 30 });
+    const tail = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 4096 }); // 逼尾读
+    expect(tail.messages.map((m) => [m.seq, m.text])).toEqual(full.messages.map((m) => [m.seq, m.text]));
+    expect(tail.messages.length).toBe(50);
+    expect(tail.hasMore).toBe(true); // 尾读未到文件头 → 前面还有更早
+  });
+
+  test("差量 after=:尾读只回 seq>after,与全读一致", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
+    const p = bigSession(dir);
+    const full0 = await readSessionHistory(p, { limit: 500, maxFullReadBytes: 1 << 30 });
+    const anchor = full0.messages[full0.messages.length - 6].seq; // 靠尾部的一个锚
+    const full = await readSessionHistory(p, { after: anchor, limit: 500, maxFullReadBytes: 1 << 30 });
+    const tail = await readSessionHistory(p, { after: anchor, limit: 500, maxFullReadBytes: 4096 });
+    expect(tail.messages.map((m) => m.seq)).toEqual(full.messages.map((m) => m.seq));
+    expect(tail.messages.every((m) => m.seq > anchor)).toBe(true);
+  });
+
+  test("差量锚点较老:窗口自动加宽回读到锚点,集合仍完整", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
+    const p = bigSession(dir);
+    const full0 = await readSessionHistory(p, { limit: 5000, maxFullReadBytes: 1 << 30 });
+    const anchor = full0.messages[10].seq; // 很靠前的锚 → 差量很大,需加宽
+    const full = await readSessionHistory(p, { after: anchor, limit: 5000, maxFullReadBytes: 1 << 30 });
+    const tail = await readSessionHistory(p, { after: anchor, limit: 5000, maxFullReadBytes: 4096 });
+    expect(tail.messages.map((m) => m.seq)).toEqual(full.messages.map((m) => m.seq));
+  });
+
+  test("before= 往回翻页:尾读与全读同一页", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
+    const p = bigSession(dir);
+    const full0 = await readSessionHistory(p, { limit: 5000, maxFullReadBytes: 1 << 30 });
+    const cursor = full0.messages[full0.messages.length - 20].seq;
+    const full = await readSessionHistory(p, { before: cursor, limit: 10, maxFullReadBytes: 1 << 30 });
+    const tail = await readSessionHistory(p, { before: cursor, limit: 10, maxFullReadBytes: 4096 });
+    expect(tail.messages.map((m) => [m.seq, m.text])).toEqual(full.messages.map((m) => [m.seq, m.text]));
+    expect(tail.messages.every((m) => m.seq < cursor)).toBe(true);
+    expect(tail.messages.length).toBe(10);
+  });
+
+  test("尾读读到文件头(窗口≥文件)时 hasMore 与全读一致", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
+    // 小会话:即便阈值=1,加宽到 cut=0 就读全,应与全读完全一致
+    const p = writeJsonl(dir, `${SID}.jsonl`, [
+      { type: "user", timestamp: "2026-07-01T00:00:00Z", message: { content: "只有一条" } },
+    ]);
+    const full = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 1 << 30 });
+    const tail = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 1 });
+    expect(tail.messages.map((m) => [m.seq, m.text])).toEqual(full.messages.map((m) => [m.seq, m.text]));
+    expect(tail.hasMore).toBe(false);
+  });
+});

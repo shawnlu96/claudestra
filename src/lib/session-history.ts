@@ -18,6 +18,36 @@ import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
 
+/** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
+const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
+
+/**
+ * 数出 [0, cut) 字节里的换行数 —— 尾读时把 seq 校正回「全文件行号」。
+ * fs 句柄 + 8MB 复用缓冲循环 Buffer.indexOf(10)(memchr 级),百 MB 前缀几十毫秒、
+ * 零大字符串。⚠ 不要用 Blob.slice().stream()(searchSessionHistory 实测 100MB 级
+ * 病理性慢,2min+ 不返回)。
+ */
+async function countNewlinesBefore(filePath: string, cut: number): Promise<number> {
+  if (cut <= 0) return 0;
+  let n = 0;
+  const fh = await fsOpen(filePath, "r");
+  try {
+    const buf = Buffer.alloc(8 * 1024 * 1024);
+    let pos = 0;
+    while (pos < cut) {
+      const { bytesRead } = await fh.read(buf, 0, Math.min(buf.length, cut - pos), pos);
+      if (bytesRead <= 0) break;
+      const view = bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
+      let at = -1;
+      while ((at = view.indexOf(10, at + 1)) !== -1) n++;
+      pos += bytesRead;
+    }
+  } finally {
+    await fh.close();
+  }
+  return n;
+}
+
 export interface HistoryToolCall {
   name: string;
   summary: string;
@@ -292,19 +322,80 @@ export async function readSessionHistory(
     formatToolFn?: (name: string, input: any) => string;
     /** tool_use 完整详情渲染器（formatToolDetail）——省略则历史不带 detail */
     toolDetailFn?: (name: string, input: any) => string;
+    /** 超过此字节走尾读(默认 16MB);单测可调低来在小 fixture 上验尾读路径 */
+    maxFullReadBytes?: number;
   } = {},
 ): Promise<HistoryPage> {
   const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 100)));
   const fmt = opts.formatToolFn ?? ((name: string) => name);
   const detailFn = opts.toolDetailFn;
-  const raw = await Bun.file(filePath).text();
-  const lines = raw.split("\n");
+  const before = opts.before;
+  const after = opts.after;
+  const maxFull = opts.maxFullReadBytes ?? MAX_HISTORY_FULL_READ_BYTES;
+
+  const f = Bun.file(filePath);
+  const size = f.size;
+
+  // 小文件:一次全读,total 精确。单测与绝大多数会话走这条,行为与 v1 完全一致。
+  if (size <= maxFull) {
+    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn);
+    return sliceHistoryPage(all, limit, before, after, all.length, false);
+  }
+
+  // 大文件:尾读加宽(2026-08-23 perf 根因,见文件头注释)。原先无条件全文读 +
+  // 逐行 JSON.parse,232MB≈1.3s 同步阻塞 Bun 主线程,期间所有请求排队、SSE 心跳
+  // 都发不出 → 手机端撞穿 BFF 8s/10s 超时 → 502 → 差量游标卡死「正在同步但永不
+  // 更新」。差量 after= 每次重连都发、原先照样全文读,是这个 bug 的真凶。
+  // 高频路径(默认页 / 差量)只需文件尾部,基本一窗命中;before 往回翻页从尾部
+  // 反向扩窗直到够一页。贫路径(极深翻页)最坏读到全文,与 v1 持平。
+  let win = 8 * 1024 * 1024;
+  for (;;) {
+    const cut = Math.max(0, size - win);
+    const reachedStart = cut === 0;
+    const lineOffset = await countNewlinesBefore(filePath, cut);
+    const all = parseHistoryLines((await f.slice(cut).text()).split("\n"), lineOffset, fmt, detailFn);
+
+    let satisfied = reachedStart;
+    if (!satisfied) {
+      if (after != null) {
+        // 差量:窗口必须回读到锚点行(首行号 <= after),才拿得到完整的 seq>after 集合
+        satisfied = lineOffset <= after;
+      } else if (before != null) {
+        satisfied = all.filter((m) => m.seq < before).length >= limit;
+      } else {
+        satisfied = all.length >= limit;
+      }
+    }
+    if (satisfied || reachedStart) {
+      return sliceHistoryPage(all, limit, before, after, all.length, !reachedStart);
+    }
+    win *= 8;
+  }
+}
+
+/**
+ * 解析一段 jsonl 行为历史消息。seq = lineOffset + 行内下标,维持「全文件行号」
+ * 坐标系(全读时 lineOffset=0;尾读时为窗口前缀的换行数)——与 searchSessionHistory
+ * 的跳转锚同一套。
+ *
+ * ⚠ 尾读时跨窗口的回填会丢:tool_result 的 is_error 要回填到更早的 tool_use、
+ * turn_duration 要回填到更早的 assistant,被回填对象若落在窗口之前就够不着。
+ * 纯装饰(工具卡标红 / 尾轮「✓ 12.3s」)且只发生在窗口边界的极少数条目,可接受;
+ * 需要精确就把 maxFullReadBytes 调大让该文件走全读。
+ */
+function parseHistoryLines(
+  lines: string[],
+  lineOffset: number,
+  fmt: (name: string, input: any) => string,
+  detailFn: ((name: string, input: any) => string) | undefined,
+): HistoryMessage[] {
   const all: HistoryMessage[] = [];
   // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
   const toolById = new Map<string, HistoryToolCall>();
 
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
+    const seq = lineOffset + i;
     let rec: any;
     try {
       rec = JSON.parse(lines[i]);
@@ -315,7 +406,7 @@ export async function readSessionHistory(
 
     if (rec.type === "system" && rec.subtype === "compact_boundary") {
       // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
-      all.push({ seq: i, ts, role: "system", text: "上下文已压缩（compact）" });
+      all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
       continue;
     }
 
@@ -361,7 +452,7 @@ export async function readSessionHistory(
         // 排除,历史侧对齐(2026-07-24 用户截图:nudge 全文以用户气泡出现在
         // migration 历史里,像系统故障)。
         if (un.from && /^bridge(:|$)/.test(un.from)) continue;
-        const msg: HistoryMessage = { seq: i, ts, role: "user", text: un.text };
+        const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
         if (un.from) msg.from = un.from;
         all.push(msg);
         continue;
@@ -378,19 +469,19 @@ export async function readSessionHistory(
       if (/^<task-notification>/.test(trimmed)) {
         const sum = /<summary>([\s\S]*?)<\/summary>/.exec(trimmed);
         const body = sum?.[1]?.trim();
-        all.push({ seq: i, ts, role: "system", text: body ? `⚙️ ${body}` : "⚙️ 后台任务通知" });
+        all.push({ seq, ts, role: "system", text: body ? `⚙️ ${body}` : "⚙️ 后台任务通知" });
         continue;
       }
       if (/^<command-(name|message)>/.test(trimmed)) {
         const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(trimmed);
-        if (cmd) all.push({ seq: i, ts, role: "system", text: cmd[1] });
+        if (cmd) all.push({ seq, ts, role: "system", text: cmd[1] });
         continue; // 无 command-name 的畸形命令记录直接丢
       }
       const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(trimmed);
       if (stdout) {
         const body = stripAnsi(stdout[1]).trim();
         if (!body || body === "(no content)") continue;
-        all.push({ seq: i, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
+        all.push({ seq, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
         continue;
       }
       // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条
@@ -398,7 +489,7 @@ export async function readSessionHistory(
       // 「用户气泡 + 分隔条」双份（2026-07-13）。channel 入站消息是 isMeta 包装，
       // TUI 直敲的合法命令只落 <command-name> 记录，都不走这条路径。
       if (/^\/[\w:-]+$/.test(trimmed)) continue;
-      const msg: HistoryMessage = { seq: i, ts, role: "user", text };
+      const msg: HistoryMessage = { seq, ts, role: "user", text };
       if (rec.isCompactSummary === true) msg.compactSummary = true;
       all.push(msg);
       continue;
@@ -444,7 +535,7 @@ export async function readSessionHistory(
         }
       }
       if (!texts.length && !replyTexts.length && !tools.length) continue;
-      const msg: HistoryMessage = { seq: i, ts, role: "assistant", text: texts.join("\n") };
+      const msg: HistoryMessage = { seq, ts, role: "assistant", text: texts.join("\n") };
       if (replyTexts.length) msg.replyText = replyTexts.join("\n");
       if (replyComponents.length) msg.replyComponents = replyComponents;
       if (replyFiles.length) msg.replyFiles = replyFiles;
@@ -454,17 +545,27 @@ export async function readSessionHistory(
     }
   }
 
-  // after = 差量同步(v2.16 唤醒秒画):只取 seq > after 的消息,从头取 limit 条
-  // (紧接锚点的最早那批);hasMore=true 表示差量比一页还大,调用方应放弃追加
-  // 改走全量。before/after 互斥,同传时 after 优先(差量语义更明确)。
-  if (opts.after != null) {
-    const later = all.filter((m) => m.seq > opts.after!);
+  return all;
+}
+
+/** 从解析好的(全量或尾窗)消息里按 before/after/默认切页。after 与 before 互斥,
+ *  after 优先。moreBefore=尾读且未读到文件头时为真(窗口之前还有更早消息)。 */
+function sliceHistoryPage(
+  all: HistoryMessage[],
+  limit: number,
+  before: number | undefined,
+  after: number | undefined,
+  total: number,
+  moreBefore: boolean,
+): HistoryPage {
+  if (after != null) {
+    const later = all.filter((m) => m.seq > after);
     const messages = later.slice(0, limit);
-    return { messages, total: all.length, hasMore: later.length > messages.length };
+    return { messages, total, hasMore: later.length > messages.length };
   }
-  const eligible = opts.before != null ? all.filter((m) => m.seq < opts.before!) : all;
+  const eligible = before != null ? all.filter((m) => m.seq < before) : all;
   const messages = eligible.slice(-limit);
-  return { messages, total: all.length, hasMore: eligible.length > messages.length };
+  return { messages, total, hasMore: moreBefore || eligible.length > messages.length };
 }
 
 // ── 聊天记录全文搜索 ─────────────────────────────────────────────
