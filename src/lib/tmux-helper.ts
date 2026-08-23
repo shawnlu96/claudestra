@@ -595,6 +595,17 @@ export async function windowHasChildProcess(target: string): Promise<boolean | n
   return hasChildInPsOutput(out, pid);
 }
 
+/**
+ * dead 判据(peer 2026-08-23 P0):窗口在、pane 停在裸 shell、且**确无子进程**才算
+ * dead。抽成纯函数是为了把「null 不能当 false」这条锁进单测——
+ * windowHasChildProcess 返回 null=探测失败=不确定,写 `!hasChild` 会把 null 当
+ * false,反而在 tmux 抽风时误杀正在干活的 agent(web 终端 resize 触发 CC 重绘、
+ * capture-pane 抓到 scrollback 旧 shell 行,已实证误杀一次)。
+ */
+export function deadShellVerdict(atShell: boolean, hasChild: boolean | null): boolean {
+  return atShell && hasChild === false;
+}
+
 /** `ps -eo ppid=` 输出里是否存在 ppid == pid 的进程（纯函数，便于单测） */
 export function hasChildInPsOutput(psOut: string, pid: number): boolean {
   for (const line of psOut.split("\n")) {

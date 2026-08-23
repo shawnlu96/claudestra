@@ -41,6 +41,8 @@ import {
   isClaudeReady,
   isAtShell,
   probeTuiContract,
+  windowHasChildProcess,
+  deadShellVerdict,
 } from "./lib/tmux-helper.js";
 import {
   buildClaudeCommand,
@@ -1818,8 +1820,19 @@ async function cmdList() {
     // channelId 可用），判了只会让 launcher 每分钟白试一次并往频道刷失败通知。
     if (info && !isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
       await Bun.sleep(800);
-      if (isAtShell(await captureLast(name, 5))) {
-        console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell（claude 未启动/已退出），判为 dead 交给自愈`);
+      // 硬判据兜底（peer 2026-08-23 P0，日志实证误杀）：pane 文本是软判据，会被
+      // web 终端 resize 触发的 CC 全屏重绘骗到——重绘窗口期 capture-pane 抓到的是
+      // scrollback 里的旧裸 shell 行（那行提示符一直在），两次采样只隔 800ms、
+      // 机器超卖时重绘超过 800ms 毫不意外 → isAtShell 连续成立 → 把正在干活的
+      // agent 误判 dead 后 gracefulExit 杀掉重启。claude 活着必然是该 window shell
+      // 的子进程，resize/重绘/滚动都骗不了它（launcher 判 master 死活、wedge-watcher
+      // 都是这么做的）。⚠ windowHasChildProcess 返回 boolean|null：null=探测失败=
+      // 不确定，必须当「不判 dead」——写 !hasChild 会把 null 当 false 反而更易误杀。
+      const stillShell = isAtShell(await captureLast(name, 5));
+      // stillShell 为真才去 spawn ps(省一次进程);否则 hasChild 留 null,判据 false
+      const hasChild = stillShell ? await windowHasChildProcess(name) : null;
+      if (deadShellVerdict(stillShell, hasChild)) {
+        console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell 且无子进程（claude 未启动/已退出），判为 dead 交给自愈`);
         agents.push({
           name,
           status: "dead",
