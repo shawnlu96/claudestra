@@ -395,4 +395,5 @@ export const DICT: Record<string, string> = {
   "复制这段": "Copy this block",
   "复制整条": "Copy whole message",
   "复制失败": "Copy failed",
+  "复制（选中的文字，或整屏可见内容）": "Copy (selection, or whole visible screen)",
 };

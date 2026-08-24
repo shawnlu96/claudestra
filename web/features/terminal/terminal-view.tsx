@@ -7,6 +7,55 @@ import { ControlBar } from "./control-bar";
 import { useT } from "@/lib/i18n";
 
 /**
+ * 复制:剪贴板 API 优先;局域网明文 http(非安全上下文)下它不存在,回退
+ * textarea + execCommand,按钮宁可土也不能是死的(与 chat 的 select-mode 同款)。
+ * 必须在用户手势同一 task 内同步调到 writeText,故 copyFromTerminal 里到这一步前
+ * 不能有 await。
+ */
+async function copyTermText(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* 落兜底 */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 当前可见屏幕的文本(无选区时复制它)。xterm 把字渲染进 canvas、不是可选 DOM
+ * 文本,加上 CC TUI 的鼠标跟踪把拖拽转给 PTY —— 移动端根本选不动,所以「整屏
+ * 复制」才是主路径(粘贴后自己裁)。viewportY = 视口顶行在 buffer 里的下标。
+ */
+function visibleScreenText(term: Terminal): string {
+  const buf = term.buffer.active;
+  const top = buf.viewportY;
+  const out: string[] = [];
+  for (let y = 0; y < term.rows; y++) {
+    const line = buf.getLine(top + y);
+    out.push(line ? line.translateToString(true) : "");
+  }
+  while (out.length && !out[out.length - 1].trim()) out.pop();
+  return out.join("\n");
+}
+
+/**
  * 远程终端视图（仅客户端，经 dynamic ssr:false 加载）。
  *
  * 数据面（设计文档 web-terminal-design.md）：
@@ -617,6 +666,15 @@ export function TerminalView({
           queueInputRef.current(seq);
         }}
         onFocusTerm={() => termRef.current?.focus()}
+        onCopy={() => {
+          // 有选区(桌面 Shift+拖拽选的)复制选区,否则复制整屏可见文本。
+          // 同步取到 text 再进 copyTermText,保住点击手势(clipboard 要求)。
+          const term = termRef.current;
+          if (!term) return Promise.resolve(false);
+          const sel = term.getSelection();
+          const text = sel && sel.trim() ? sel : visibleScreenText(term);
+          return copyTermText(text);
+        }}
         disabled={status !== "connected"}
         mobile={mobile}
       />

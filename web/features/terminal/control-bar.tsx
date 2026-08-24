@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -39,15 +40,19 @@ const KEYS: { label: string; seq: string; title?: string }[] = [
 export function ControlBar({
   onKeys,
   onFocusTerm,
+  onCopy,
   disabled,
 }: {
   onKeys: (seq: string) => void;
   onFocusTerm: () => void;
+  /** 复制:有选区复制选区,否则复制可见屏幕。返回是否成功(供按钮回显✓)。 */
+  onCopy?: () => Promise<boolean>;
   disabled?: boolean;
   /** 兼容旧调用位；输入统一走 xterm，本参数不再改变行为 */
   mobile?: boolean;
 }) {
   const t = useT();
+  const [copied, setCopied] = useState(false);
   return (
     <div
       className="flex shrink-0 flex-col gap-1.5 border-t border-white/10 bg-[#181825] px-2 py-2"
@@ -73,6 +78,23 @@ export function ControlBar({
         >
           ⌨️
         </button>
+        {onCopy && (
+          <button
+            className="btn btn-sm shrink-0 border-white/10 bg-white/5 font-normal text-[#cdd6f4] hover:bg-white/10"
+            title={t("复制（选中的文字，或整屏可见内容）")}
+            // preventDefault:不抢焦点、也不清掉 xterm 已有的选区
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={async () => {
+              const ok = await onCopy();
+              if (!ok) return;
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1400);
+            }}
+            disabled={disabled}
+          >
+            {copied ? `✓ ${t("已复制")}` : "⧉"}
+          </button>
+        )}
         <span className="mx-0.5 h-4 w-px shrink-0 bg-white/10" />
         {KEYS.map((k) => (
           <button
