@@ -89,7 +89,10 @@ export interface ChatMessage {
   /** reply 附带的交互组件（按钮/选单）。点击回投 [button:<id>] / [select:<id>:<value>]。 */
   replyComponents?: WebComponentRow[];
   /** 已点击的按钮/选项 id —— 点后禁用整组，高亮所选（一条 reply 只作答一次）。 */
+  /** @deprecated bug ① 前的消息级单值,仅老快照读;新逻辑用 replyClicks。 */
   replyClickedId?: string;
+  /** 每一行独立的已作答:rowKey → 存储值(见 lib/chat/reply-clicks)。 */
+  replyClicks?: Record<string, string>;
   toolCalls?: ToolCallView[];
   /** 本地乐观消息的实发 payload（按钮点击:展示 label、实发 [button:<id>]）。
    *  历史对账要用它——jsonl 里落的是 wire,按展示文本永远匹配不上。 */

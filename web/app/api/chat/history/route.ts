@@ -1,6 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
+import { matchClickedRow } from "@/lib/chat/reply-clicks";
 import { apiAgentName, bridgeGet } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
 import { st } from "@/lib/server-lang";
@@ -51,33 +52,6 @@ const SELF_FROM = new Set(["web-ui"]);
  * 空行拼接、工具按序收集），遇到 user / system 分隔线 / compact 边界就断开分组。
  */
 /** 在带组件的气泡里找该点击对应的 choiceId + 人类可读 label（不在组里返回 null）。 */
-function matchClickedChoice(
-  bubble: ChatMessage,
-  btnId: string | null,
-  selId: string | null,
-  selValue: string | null
-): { choiceId: string; label: string } | null {
-  for (const row of bubble.replyComponents ?? []) {
-    if (row.type === "buttons" && btnId) {
-      const btn = row.buttons.find((b) => b.id === btnId);
-      if (btn) return { choiceId: btnId, label: btn.label };
-    }
-    if (row.type === "select" && selId && row.id === selId && selValue) {
-      const opt = row.options.find((o) => o.value === selValue);
-      if (opt) return { choiceId: `${selId}:${selValue}`, label: opt.label };
-    }
-    // 多选的回投值是逗号分隔的（[select:<id>:<v1>,<v2>]）——按单值查会全部落空，
-    // 历史里就看不出用户当时勾了什么。逐个映射回 label 再拼。
-    if (row.type === "multiselect" && selId && row.id === selId && selValue) {
-      const values = selValue.split(",").map((v) => v.trim()).filter(Boolean);
-      const labels = values
-        .map((v) => row.options.find((o) => o.value === v)?.label)
-        .filter((l): l is string => !!l);
-      if (labels.length) return { choiceId: `${selId}:${values.join(",")}`, label: labels.join("、") };
-    }
-  }
-  return null;
-}
 
 function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): ChatMessage[] {
   const out: ChatMessage[] = [];
@@ -131,15 +105,16 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
       const selMatch = (m.text || "").match(/^\[select:([\w-]+):(.+)\]$/);
       let clickLabel: string | null = null;
       if ((btnMatch || selMatch) && lastWithComponents) {
-        const clicked = matchClickedChoice(
-          lastWithComponents,
+        const clicked = matchClickedRow(
+          lastWithComponents.replyComponents,
           btnMatch?.[1] ?? null,
           selMatch?.[1] ?? null,
           selMatch?.[2] ?? null
         );
         if (clicked) {
           clickLabel = clicked.label;
-          if (!lastWithComponents.replyClickedId) lastWithComponents.replyClickedId = clicked.choiceId;
+          // bug ①:收进 replyClicks(按行),多行各自的点击都还原,不再只记第一个
+          (lastWithComponents.replyClicks ??= {})[clicked.rowKey] = clicked.choiceValue;
         }
       }
       const raw = btnMatch || selMatch

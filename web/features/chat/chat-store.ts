@@ -1656,16 +1656,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    */
   public async clickReplyComponent(
     messageId: string,
-    choiceId: string,
+    rowKey: string,
+    choiceValue: string,
     label: string,
     wire: string
   ) {
-    // 已作答过就忽略（防重复点）
+    // bug ①:已作答是**按行**的,不是整条消息。防重复点只挡本行。
     const target = this.state.messages.find((m) => m.id === messageId);
-    if (!target || target.replyClickedId) return;
+    if (!target || target.replyClicks?.[rowKey]) return;
     this.produce((s) => {
       const m = s.messages.find((x) => x.id === messageId);
-      if (m) m.replyClickedId = choiceId;
+      if (m) (m.replyClicks ??= {})[rowKey] = choiceValue;
     });
     await this.send(label, undefined, wire);
   }
