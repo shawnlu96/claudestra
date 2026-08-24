@@ -11,7 +11,7 @@
     "predev": "node scripts/gen-build-info.mjs"
   },
   "dependencies": {
-    "@do-md/core-react": "^0.2.10",
+    "@do-md/core-react": "^0.11.2",
     "@microsoft/fetch-event-source": "^2.0.1",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.2",
