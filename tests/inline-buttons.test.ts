@@ -101,3 +101,20 @@ describe("inlineButtonsToText", () => {
     expect(inlineButtonsToText("`[[{#x}code]]` 原样")).toBe("`[[{#x}code]]` 原样");
   });
 });
+
+describe("inlineChipsToText(chip 降级)", () => {
+  test("copy → 反引号;agent/badge → 纯 label;按钮不动", async () => {
+    const { inlineChipsToText } = await import("../src/lib/inline-buttons.js");
+    expect(inlineChipsToText("跑 [[{.copy}bun test]] 看看")).toBe("跑 `bun test` 看看");
+    expect(inlineChipsToText("问 [[{.agent}worker-alpha]] 吧")).toBe("问 worker-alpha 吧");
+    expect(inlineChipsToText("状态 [[{.badge .success}已部署]]")).toBe("状态 已部署");
+    expect(inlineChipsToText("按钮 [[{#go}确认]] 不动")).toBe("按钮 [[{#go}确认]] 不动");
+    expect(inlineChipsToText("`[[{.copy}字面量]]` 不动")).toBe("`[[{.copy}字面量]]` 不动");
+  });
+  test("inlineButtonsToText 同时吃按钮和 chip", async () => {
+    const { inlineButtonsToText } = await import("../src/lib/inline-buttons.js");
+    expect(inlineButtonsToText("点 [[{#go}确认]] 或跑 [[{.copy}bun test]]")).toBe(
+      "点 [确认] 或跑 `bun test`"
+    );
+  });
+});

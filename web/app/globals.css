@@ -433,6 +433,85 @@ html.kb-open {
 }
 
 /*
+ * ── 行内 chips(v2.20+):copy / agent / badge ─────────────────────────
+ * 无 #id 的 [[{.variant}label]]。copy = 点击复制(mono 观感),agent = 点击
+ * 跳转会话(data-dead=名单外只展示),badge = 纯展示状态胶囊(data-tone 配色)。
+ */
+.chat-domd .cstra-copy-chip {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 1px;
+    padding: 0 7px;
+    border-radius: 7px;
+    border: 1px solid color-mix(in oklab, currentColor 22%, transparent);
+    background: color-mix(in oklab, currentColor 7%, transparent);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.86em;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background-color 0.12s;
+}
+.chat-domd .cstra-copy-chip:hover {
+    background: color-mix(in oklab, currentColor 14%, transparent);
+}
+.chat-domd .cstra-copy-chip .cstra-chip-icon {
+    opacity: 0.55;
+    font-size: 0.9em;
+}
+.chat-domd .cstra-agent-chip {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 1px;
+    padding: 0 9px;
+    border-radius: 9999px;
+    border: 1px solid color-mix(in oklab, var(--color-info) 40%, transparent);
+    background: color-mix(in oklab, var(--color-info) 10%, transparent);
+    color: var(--color-info);
+    font-size: 0.9em;
+    font-weight: 550;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background-color 0.12s;
+}
+.chat-domd .cstra-agent-chip:hover:not([data-dead]) {
+    background: color-mix(in oklab, var(--color-info) 18%, transparent);
+}
+.chat-domd .cstra-agent-chip[data-dead] {
+    cursor: default;
+    opacity: 0.6;
+}
+.chat-domd .cstra-agent-chip .cstra-chip-icon {
+    font-size: 0.85em;
+}
+.chat-domd .cstra-badge-chip {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 1px;
+    padding: 0 8px;
+    border-radius: 9999px;
+    font-size: 0.82em;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    border: 1px solid color-mix(in oklab, currentColor 30%, transparent);
+    background: color-mix(in oklab, currentColor 12%, transparent);
+    color: color-mix(in oklab, currentColor 85%, var(--color-base-content));
+}
+.chat-domd .cstra-badge-chip[data-tone="success"] {
+    color: var(--color-success);
+}
+.chat-domd .cstra-badge-chip[data-tone="warning"] {
+    color: var(--color-warning);
+}
+.chat-domd .cstra-badge-chip[data-tone="error"] {
+    color: var(--color-error);
+}
+.chat-domd .cstra-badge-chip[data-tone="info"] {
+    color: var(--color-info);
+}
+
+/*
  * ── 工具详情语法高亮 token 色（highlight.js,owner 2026-07-14） ──────
  * 不引官方主题 CSS——用 daisyUI 主题变量手写,亮暗主题自动跟随。
  * 只覆盖常见 token;没规则的 token 继承外层颜色(不花不闹)。

@@ -424,7 +424,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           text: {
             type: "string",
-            description: `Message text to send. Supports inline buttons (v2.20+): write \`[[{#id .style}label]]\` anywhere in the text — style is primary|success|danger|secondary (default secondary), id matches ^[\\w:-]+$. Web renders a real clickable button in the flow of the sentence; Discord auto-extracts them into a button row below the message. Click comes back as [button:id], same wire as block-level components. Use inline buttons when the action belongs inside a sentence; use the components field for standalone option lists.`,
+            description: `Message text to send. Supports inline widgets (v2.20+), written anywhere in the text:
+- Button \`[[{#id .style}label]]\` — style primary|success|danger|secondary (default), id ^[\\w:-]+$. Web renders a clickable button in the sentence flow; Discord auto-extracts into a button row below. Click comes back as [button:id], same wire as components.
+- Copy chip \`[[{.copy}some command]]\` — click-to-copy on web (great for commands on mobile); degrades to \`inline code\` on Discord.
+- Agent chip \`[[{.agent}worker-name]]\` — click jumps to that agent's channel on web; plain text on Discord.
+- Badge \`[[{.badge .success}deployed]]\` — status pill (tones: success|warning|error|info); plain text on Discord.
+Use inline buttons when ONE action belongs inside a sentence; for several non-exclusive choices use a components multiselect (never a row of single-choice buttons); for standalone option lists use components.`,
           },
           reply_to: {
             type: "string",

@@ -7,7 +7,7 @@
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
-import { splitInlineButtons, toButtonRows } from "./lib/inline-buttons.js";
+import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -811,6 +811,8 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
         text = split.text || "👇";
         components = [...(components ?? []), ...toButtonRows(split.buttons)];
       }
+      // chip(.copy/.agent/.badge)是 web 专属交互 → Discord 降级成纯文本
+      text = inlineChipsToText(text);
     }
     const { messageIds: ids } = await adapter.send(dest.id, {
       text,

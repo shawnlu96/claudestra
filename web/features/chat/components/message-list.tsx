@@ -679,8 +679,24 @@ function AssistantBody({
   // (同 wire `[button:<id>]`、同 replyClicks 状态,rowKey 前缀 `i:` 区分)。
   const store = useChatStoreApi();
   const [inlineBusy, setInlineBusy] = useState(false);
-  const inlineCtx = useMemo<InlineActionCtx>(
-    () => ({
+  // agent chip(`[[{.agent}name]]`)的可跳转名单:name / displayName 都认,
+  // master 别名映射到前端的 __master__(bridge-api 的 apiAgentName 约定)
+  const agents = useChatStore((s) => s.state.agents);
+  const inlineCtx = useMemo<InlineActionCtx>(() => {
+    const labels: string[] = [];
+    const resolve = (label: string) => {
+      for (const a of agents) {
+        if (a.name === label || a.displayName === label) return a.name;
+        if (a.pinnedMaster && label === "master") return a.name;
+      }
+      return null;
+    };
+    for (const a of agents) {
+      labels.push(a.name);
+      if (a.displayName) labels.push(a.displayName);
+      if (a.pinnedMaster) labels.push("master");
+    }
+    return {
       clicks: m.replyClicks ?? {},
       busy: inlineBusy,
       onClick: async (id, label) => {
@@ -691,9 +707,13 @@ function AssistantBody({
           setInlineBusy(false);
         }
       },
-    }),
-    [m.id, m.replyClicks, inlineBusy, store]
-  );
+      agents: labels,
+      openAgent: (label) => {
+        const name = resolve(label);
+        if (name) void store.openAgent(name);
+      },
+    };
+  }, [m.id, m.replyClicks, inlineBusy, store, agents]);
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;

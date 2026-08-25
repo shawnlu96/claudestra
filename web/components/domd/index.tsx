@@ -17,17 +17,29 @@ import { DOMD, DOMDProvider, defaultInlineRules, type InlineRule } from "@do-md/
 import "@do-md/core-react/style.css";
 import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
 import { padTableBlocks } from "./normalize-md";
-import { InlineButton } from "./inline-button";
+import { InlineButton, CopyChip, AgentChip, BadgeChip } from "./inline-button";
 import "./prism-themes.css";
 
 /**
- * 行内规则(v2.20+):默认集(== 高亮)+ 行内按钮 `[[{#id .style}label]]`。
- * [[ 首字符与内建 link 语法撞车属 reserved delimiter——do-md 只在带 {…}
- * capture 时触发自定义规则,普通 [[wiki]] 不受影响(Playwright 实证)。
+ * 行内规则(v2.20+):默认集(== 高亮)+ 行内交互 `[[{…}label]]`。
+ * 默认(带 #id / 未注册 variant)走 InlineButton;.copy/.agent/.badge 三个
+ * variant 走各自 chip(按钮的 .primary/.success 等不在 variants 表里 →
+ * do-md 优雅降级回 rule 级 component,即 InlineButton,行为已实证)。
+ * 普通 [[wiki]] 无 capture 触发时由 InlineButton 恢复括号视觉。
  */
 const INLINE_RULES: InlineRule[] = [
   ...defaultInlineRules,
-  { open: "[[", close: "]]", tagName: "span", component: InlineButton },
+  {
+    open: "[[",
+    close: "]]",
+    tagName: "span",
+    component: InlineButton,
+    variants: {
+      copy: { component: CopyChip },
+      agent: { component: AgentChip },
+      badge: { component: BadgeChip },
+    },
+  },
 ];
 
 type ProviderProps = ComponentProps<typeof DOMDProvider>;

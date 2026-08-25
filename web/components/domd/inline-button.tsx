@@ -13,7 +13,7 @@
  * (rowKey 前缀 `i:` 区分行内),上下文由 message-list 的 AssistantBody 注入;
  * 无上下文(非聊天场景)/无合法 id 时退化成普通文本,不产出死按钮。
  */
-import { createContext, useContext } from "react";
+import { createContext, useContext, useState } from "react";
 import { viewOnlyProps, type InlineRuleComponentProps } from "@do-md/core-react";
 
 const ID_RE = /^[\w:-]+$/;
@@ -25,6 +25,10 @@ export interface InlineActionCtx {
   /** 有一次回投在途 → 全部行内按钮暂时禁点。 */
   busy: boolean;
   onClick: (id: string, label: string) => void;
+  /** agent 跳转 chip(`[[{.agent}name]]`)用:已知 agent 名单 + 切换回调。
+   *  缺省 → chip 只展示不导航。 */
+  agents?: string[];
+  openAgent?: (name: string) => void;
 }
 
 /** AssistantBody 每条消息包一层 Provider;组件在 DOMD 深处经 context 取回调。 */
@@ -80,6 +84,97 @@ export function InlineButton({
     >
       {children}
       {clicked && <span {...viewOnlyProps}> ✓</span>}
+    </span>
+  );
+}
+
+/* ── chips(v2.20+):无 #id 的 [[{.variant}label]] ───────────────────── */
+
+/** 剪贴板写入(clipboard API + execCommand 兜底,http 场景/旧 WebView 也能用)。 */
+async function copyPlain(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** `[[{.copy}cmd]]`:点击复制 label 原文,✓ 闪 1.2s。手机上复制命令的痛点解。 */
+export function CopyChip({ domProps, children, contentText }: InlineRuleComponentProps) {
+  const [ok, setOk] = useState(false);
+  return (
+    <span
+      {...domProps}
+      role="button"
+      tabIndex={0}
+      className={`${domProps.className ?? ""} cstra-copy-chip`}
+      onClick={async (e) => {
+        e.stopPropagation();
+        if (await copyPlain(contentText.trim())) {
+          setOk(true);
+          setTimeout(() => setOk(false), 1200);
+        }
+      }}
+    >
+      {children}
+      <span {...viewOnlyProps} className="cstra-chip-icon">
+        {ok ? " ✓" : " ⧉"}
+      </span>
+    </span>
+  );
+}
+
+/** `[[{.agent}worker-alpha]]`:点击切到该 agent 频道。名单里没有的只展示不导航
+ *  (免得点出一个不存在会话的报错页)。 */
+export function AgentChip({ domProps, children, contentText }: InlineRuleComponentProps) {
+  const ctx = useContext(InlineActionContext);
+  const name = contentText.trim();
+  const live = !!ctx?.openAgent && (!ctx.agents || ctx.agents.includes(name));
+  return (
+    <span
+      {...domProps}
+      role={live ? "button" : undefined}
+      tabIndex={live ? 0 : undefined}
+      data-dead={live ? undefined : "1"}
+      className={`${domProps.className ?? ""} cstra-agent-chip`}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (live) ctx!.openAgent!(name);
+      }}
+    >
+      <span {...viewOnlyProps} className="cstra-chip-icon">🤖 </span>
+      {children}
+    </span>
+  );
+}
+
+const TONES = new Set(["success", "warning", "error", "info", "neutral"]);
+
+/** `[[{.badge .success}已部署]]`:纯展示状态胶囊。第二个 .word 是色调
+ *  (success/warning/error/info,danger 作 error 别名,缺省 neutral)。 */
+export function BadgeChip({ domProps, children, params }: InlineRuleComponentProps) {
+  const extra = params.classes.slice(1).map((c) => (c === "danger" ? "error" : c));
+  const tone = extra.find((c) => TONES.has(c)) ?? "neutral";
+  return (
+    <span
+      {...domProps}
+      data-tone={tone}
+      className={`${domProps.className ?? ""} cstra-badge-chip`}
+    >
+      {children}
     </span>
   );
 }
