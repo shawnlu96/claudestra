@@ -562,7 +562,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const name = this.state.activeAgent;
     const pinned = this.historySessionId;
     if (!name || !pinned || this.state.loadingOlder || !this.state.historyHasMore) return;
-    let sid = this.olderCursor?.sid ?? pinned;
+    const sid = this.olderCursor?.sid ?? pinned;
     let beforeSeq = this.olderCursor?.firstSeq;
     if (beforeSeq === undefined) {
       // 首次翻页:最早一条历史消息的 seq(id=h{seq};乐观消息是本地 id,跳过)
