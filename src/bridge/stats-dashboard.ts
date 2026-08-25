@@ -20,7 +20,7 @@ import {
   type Client,
   type TextChannel,
 } from "discord.js";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   tmuxRaw,
   MASTER_SESSION,
@@ -29,6 +29,8 @@ import {
   tmuxSendEscape,
   isRewindDialog,
   ESC_DOUBLE_TAP_MS,
+  windowTarget,
+  tmuxSendLine,
 } from "../lib/tmux-helper.js";
 import { readConfig, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
@@ -593,22 +595,60 @@ const CTX_TIERS = [250_000, 300_000, 400_000, 500_000, 750_000];
 const notifiedTier = new Map<string, number>(); // channelId → 已提醒过的档位（1-based，0=没过档）
 let tierBaselined = false;
 
+const DEFAULT_AUTO_COMPACT_WINDOW = 400_000;
+const autoCompactTriggered = new Map<string, boolean>(); // channelId → 本轮上涨已自动触发过 save-compact
+
+function loadAutoCompactThreshold(): number {
+  try {
+    const raw = readFileSync(`${process.env.HOME || ""}/.claude/settings.json`, "utf8");
+    const cfg = JSON.parse(raw);
+    const v = cfg?.autoCompactWindow;
+    if (v === false || v === 0) return 0; // 显式关闭
+    const n = typeof v === "number" ? v : Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  } catch {
+    // 没有全局配置或解析失败，用默认值
+  }
+  return DEFAULT_AUTO_COMPACT_WINDOW;
+}
+
 function tierOf(tokens: number): number {
   let t = 0;
   for (let i = 0; i < CTX_TIERS.length; i++) if (tokens >= CTX_TIERS[i]) t = i + 1;
   return t;
 }
 
+async function triggerAutoSaveCompact(a: AgentStat): Promise<void> {
+  try {
+    const target = a.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(a.name);
+    await tmuxSendLine(target, "/save-compact");
+    console.log(`🧹 auto save-compact triggered: ${a.name} @ ${formatTokens(a.contextTokens)} (threshold=${formatTokens(loadAutoCompactThreshold())})`);
+  } catch (e) {
+    console.error(`🧹 auto save-compact 失败 (${a.name}):`, (e as Error).message);
+  }
+}
+
 async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<void> {
+  const threshold = loadAutoCompactThreshold();
   const first = !tierBaselined;
   tierBaselined = true;
   for (const a of agents) {
     if (!a.channelId) continue;
     const tier = tierOf(a.contextTokens);
     const prev = notifiedTier.get(a.channelId) ?? 0;
-    if (tier === prev) continue;
-    notifiedTier.set(a.channelId, tier); // 涨了记新档；掉了（compact 过）复位
+    if (tier !== prev) {
+      notifiedTier.set(a.channelId, tier); // 涨了记新档；掉了（compact 过）复位
+      // 上下文回落或跨过新高位：重置自动触发状态，允许下一轮再涨时再次触发
+      autoCompactTriggered.delete(a.channelId);
+    }
     if (tier < prev || tier === 0 || first) continue;
+
+    // 自动触发：上下文超过 autoCompactWindow 且本轮尚未触发过
+    if (threshold > 0 && a.contextTokens >= threshold && !autoCompactTriggered.get(a.channelId)) {
+      autoCompactTriggered.set(a.channelId, true);
+      await triggerAutoSaveCompact(a);
+    }
+
     try {
       const ch = (await discord.channels.fetch(a.channelId).catch(() => null)) as TextChannel | null;
       if (!ch || !("send" in ch)) continue;
