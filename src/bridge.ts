@@ -8,6 +8,11 @@
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
+import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
+
+// ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
+const CODEX_MAX_INFLIGHT = 3;
+let codexInflight = 0;
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -2841,6 +2846,41 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
           pendingAgentCalls.delete(msg.chatId);
         }
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
+    case "ask_codex": {
+      // v2.20+ agent → 本机 Codex(ChatGPT.app CLI,订阅额度)。per-call spawn,
+      // 零常驻;并发上限防 agent 集体轰配额;结果同步回 MCP 工具调用。
+      // 调用过程本身在 jsonl-watcher 流里可见(工具卡),无需额外镜像。
+      try {
+        if (codexInflight >= CODEX_MAX_INFLIGHT) {
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_MAX_INFLIGHT} 路在跑),稍后再试。` }));
+          break;
+        }
+        const sandbox = CODEX_SANDBOXES.includes(msg.sandbox) ? (msg.sandbox as CodexSandbox) : undefined;
+        codexInflight++;
+        console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
+        recordMetric("ask_codex", { channelId: String(msg.fromChannel || ""), meta: { thread: String(msg.thread || "") } });
+        runCodex({
+          prompt: String(msg.prompt || ""),
+          thread: msg.thread ? String(msg.thread) : undefined,
+          cwd: msg.cwd ? String(msg.cwd) : undefined,
+          sandbox,
+        })
+          .then((result) => {
+            console.log(`🧠 ask_codex 完成 ok=${result.ok} ${Math.round(result.elapsedMs / 1000)}s thread=${result.thread || "-"}`);
+            ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
+          })
+          .catch((err) => {
+            ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+          })
+          .finally(() => {
+            codexInflight--;
+          });
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }

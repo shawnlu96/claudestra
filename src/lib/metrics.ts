@@ -32,6 +32,7 @@ export type MetricEvent =
   | "error"
   | "cron_run"
   | "api_slash"                 // Web slash 直通注入
+  | "ask_codex"                 // v2.20+ agent → 本机 Codex 调用
   | "claude_defaults_updated"   // 全局默认模型/effort 变更
   // v2.11+ HTTP peer(Discord peer 系列事件已随机制移除)
   | "http_peer_out_ok"
