@@ -23,6 +23,8 @@ import {
 import { runManager } from "./management.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { readPeers } from "../lib/peers.js";
+import { loadJobs } from "../cron.js";
+import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -1443,6 +1445,63 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (agentParam === "master") return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
     const r = await runManager(lifecycleMatch[2], agentParam);
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: `manager ${lifecycleMatch[2]} failed` });
+  }
+
+  // ── v2.20+ /memory-hygiene —— mem0 记忆卫生(owner 2026-08-26「mem0 会变粪坑,
+  // 做进产品+可配置」)。事实源 = cron 系统里的 mem0-hygiene 任务;这里只是
+  // 设置界面的读写面,mutation 全走 runManager 的 cron-add/remove/toggle,
+  // 与 CLI 手管等价。全权 token 门禁与 /peers 同级。
+  if (path === "/memory-hygiene") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "memory hygiene requires a full-scope token" });
+    }
+    const findJob = async () => (await loadJobs()).find((j) => j.name === HYGIENE_JOB_NAME) ?? null;
+    const stateOf = (j: Awaited<ReturnType<typeof findJob>>) => ({
+      ok: true,
+      exists: !!j,
+      enabled: !!j?.enabled,
+      freq: j ? freqOfSchedule(j.schedule) : null,
+      schedule: j?.schedule ?? null,
+      lastRun: j?.lastRun ?? null,
+      nextRun: j?.nextRun ?? null,
+      freqs: Object.fromEntries(Object.entries(HYGIENE_FREQS).map(([k, v]) => [k, v.label])),
+    });
+
+    if (req.method === "GET") {
+      return apiJson(200, stateOf(await findJob()));
+    }
+    if (req.method === "POST") {
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return apiJson(400, { ok: false, error: "invalid JSON body" });
+      }
+      const enabled = !!body?.enabled;
+      const freq = String(body?.freq ?? "weekly") as HygieneFreq;
+      if (enabled && !HYGIENE_FREQS[freq]) {
+        return apiJson(400, { ok: false, error: `freq must be one of ${Object.keys(HYGIENE_FREQS).join("|")}` });
+      }
+      const job = await findJob();
+      if (!enabled) {
+        // 关闭 = 停用不删除(保留 lastRun 历史;cron-toggle 是翻转,只在当前启用时调)
+        if (job?.enabled) await runManager("cron-toggle", HYGIENE_JOB_NAME);
+      } else {
+        const schedule = HYGIENE_FREQS[freq].schedule;
+        if (!job) {
+          await runManager("cron-add", HYGIENE_JOB_NAME, schedule, "~", hygienePrompt());
+        } else if (job.schedule !== schedule) {
+          // 改频率 = 重建(prompt 顺带刷成当前标准版)
+          await runManager("cron-remove", HYGIENE_JOB_NAME);
+          await runManager("cron-add", HYGIENE_JOB_NAME, schedule, "~", hygienePrompt());
+        } else if (!job.enabled) {
+          await runManager("cron-toggle", HYGIENE_JOB_NAME);
+        }
+      }
+      recordMetric("cron_run", { meta: { action: "hygiene-config", enabled: String(enabled), freq } });
+      return apiJson(200, stateOf(await findJob()));
+    }
+    return apiJson(405, { ok: false, error: "method not allowed" });
   }
 
   // ── v2.11.1+ /peers —— HTTP peer 管理面（web UI 后端;owner 2026-07-24
