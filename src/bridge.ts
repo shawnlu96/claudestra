@@ -6,6 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -511,7 +512,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   const eventFiles: { name: string; attachment: string }[] = [];
   for (const p of env.meta.files || []) {
     try {
-      const base = (p.split("/").pop() || "file").replace(/[^\w.\-]+/g, "_").slice(0, 80);
+      const base = sanitizeAttachmentBase(p); // 保 Unicode;与 web attachment 路由同一套(peer 2026-08-25)
       const dest = `${Date.now()}_${base}`;
       await fs.mkdir(INBOX_DIR, { recursive: true });
       await fs.copyFile(p, `${INBOX_DIR}/${dest}`);

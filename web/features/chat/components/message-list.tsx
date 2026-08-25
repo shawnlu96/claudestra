@@ -331,7 +331,11 @@ function AttachedImage({
 /** 把当前图片分享/保存：iOS 上走系统分享面板(可存相册),不支持时新开原图。 */
 async function shareImage(url: string, name: string): Promise<void> {
   try {
-    const blob = await fetch(url).then((r) => r.blob());
+    const res = await fetch(url);
+    // 附件取回 404 时响应体是 JSON 错误页——不查 r.ok 会把它当图存成 .json
+    // (peer 2026-08-25)。非 2xx 直接落到下面 window.open 兜底。
+    if (!res.ok) throw new Error(`attachment ${res.status}`);
+    const blob = await res.blob();
     const file = new File([blob], name || "image.png", { type: blob.type || "image/png" });
     if (navigator.canShare?.({ files: [file] })) {
       await navigator.share({ files: [file] });

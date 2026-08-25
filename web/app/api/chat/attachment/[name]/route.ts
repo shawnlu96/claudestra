@@ -1,6 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
+import { sanitizeAttachmentBase } from "@/lib/chat/attachment-name";
 import { readFile, readdir } from "fs/promises";
 import { basename, join } from "path";
 import { isAuthed } from "@/lib/api-auth";
@@ -88,8 +89,11 @@ export async function GET(
   // 落到 inbox 时加了 `<时间戳>_` 前缀——精确名全落空后按后缀匹配 inbox,
   // 取名字最大（=时间戳最新）的一个。
   try {
+    // 写侧(bridge)落 inbox 时把原名清洗过(保 Unicode),读侧必须用**同一套清洗**
+    // 再匹配,否则中文/空格名两边对不上(peer 2026-08-25)。
+    const wanted = sanitizeAttachmentBase(safe);
     const suffixed = (await readdir(INBOX_DIRS[0]))
-      .filter((f) => /^\d+_/.test(f) && f.endsWith(`_${safe}`))
+      .filter((f) => /^\d+_/.test(f) && f.endsWith(`_${wanted}`))
       .sort()
       .pop();
     if (suffixed) return serve(await readFile(join(INBOX_DIRS[0], suffixed)), suffixed);
