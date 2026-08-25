@@ -1447,6 +1447,76 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: `manager ${lifecycleMatch[2]} failed` });
   }
 
+  // ── v2.20+ /cron —— 定时任务管理面(owner 2026-08-26「cron 没有 UI」)。
+  // 与 /peers 同款:全权 token 门禁,mutation 全走 runManager 复用 CLI 校验,
+  // 与 Discord /cron 面板、CLI 手管三方等价互不打架。
+  if (path === "/cron" || path.startsWith("/cron/")) {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "cron management requires a full-scope token" });
+    }
+    if (path === "/cron" && req.method === "GET") {
+      const jobs = await loadJobs();
+      return apiJson(200, {
+        ok: true,
+        jobs: jobs.map((j) => ({
+          id: j.id,
+          name: j.name,
+          schedule: j.schedule,
+          dir: j.dir.replace(process.env.HOME || "", "~"),
+          prompt: j.prompt, // 全文——编辑界面要用,不像 cron-list 截 80
+          enabled: j.enabled,
+          lastRun: j.lastRun ?? null,
+          nextRun: j.nextRun ?? null,
+          targetAgent: j.targetAgent ?? null,
+          createdAt: j.createdAt,
+        })),
+      });
+    }
+    if (path === "/cron" && req.method === "POST") {
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return apiJson(400, { ok: false, error: "invalid JSON body" });
+      }
+      const name = String(body?.name ?? "").trim();
+      const schedule = String(body?.schedule ?? "").trim();
+      const prompt = String(body?.prompt ?? "").trim();
+      const dir = String(body?.dir ?? "~").trim() || "~";
+      if (!name || !schedule || !prompt) {
+        return apiJson(400, { ok: false, error: "name/schedule/prompt required" });
+      }
+      const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
+      const r = await runManager("cron-add", name, schedule, dir, ...extra, prompt);
+      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+    }
+    const cronAction = path.match(/^\/cron\/([^/]+)\/(toggle|remove|edit)$/);
+    if (cronAction && req.method === "POST") {
+      const id = decodeURIComponent(cronAction[1]);
+      const action = cronAction[2];
+      let r: any;
+      if (action === "toggle") r = await runManager("cron-toggle", id);
+      else if (action === "remove") r = await runManager("cron-remove", id);
+      else {
+        let body: any;
+        try {
+          body = await req.json();
+        } catch {
+          return apiJson(400, { ok: false, error: "invalid JSON body" });
+        }
+        const flags: string[] = [];
+        if (body?.schedule) flags.push("--schedule", String(body.schedule));
+        if (body?.prompt) flags.push("--prompt", String(body.prompt));
+        if (body?.name) flags.push("--name", String(body.name));
+        if (body?.dir) flags.push("--dir", String(body.dir));
+        if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
+        r = await runManager("cron-edit", id, ...flags);
+      }
+      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+    }
+    return apiJson(405, { ok: false, error: "method not allowed" });
+  }
+
   // ── v2.20+ /memory-hygiene —— mem0 记忆卫生(owner 2026-08-26「mem0 会变粪坑,
   // 做进产品+可配置」)。事实源 = cron 系统里的 mem0-hygiene 任务;这里只是
   // 设置界面的读写面,mutation 全走 runManager 的 cron-add/remove/toggle,
@@ -1490,12 +1560,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const schedule = HYGIENE_FREQS[freq].schedule;
         if (!job) {
           await runManager("cron-add", HYGIENE_JOB_NAME, schedule, "~", hygienePrompt());
-        } else if (job.schedule !== schedule) {
-          // 改频率 = 重建(prompt 顺带刷成当前标准版)
-          await runManager("cron-remove", HYGIENE_JOB_NAME);
-          await runManager("cron-add", HYGIENE_JOB_NAME, schedule, "~", hygienePrompt());
-        } else if (!job.enabled) {
-          await runManager("cron-toggle", HYGIENE_JOB_NAME);
+        } else {
+          // 原地编辑保 id/lastRun(owner 2026-08-26「改个频率要重建不合理」)
+          if (job.schedule !== schedule) {
+            await runManager("cron-edit", HYGIENE_JOB_NAME, "--schedule", schedule);
+          }
+          if (!job.enabled) await runManager("cron-toggle", HYGIENE_JOB_NAME);
         }
       }
       recordMetric("cron_run", { meta: { action: "hygiene-config", enabled: String(enabled), freq } });

@@ -8,6 +8,7 @@ import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
 import { useThemePref, setThemePref } from "@/lib/theme";
 import { kbFixEnabled, setKbFixEnabled } from "../use-keyboard-viewport";
 import { PeersModal } from "./peers-modal";
+import { CronModal } from "./cron-modal";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
 async function fileToAvatar(file: File): Promise<string> {
@@ -372,6 +373,15 @@ function PasskeySection() {
   );
 }
 
+/** 设置分组标题(owner 2026-08-26「按 type 归类,不是 tab」):卡片流里的轻量组头。 */
+function GroupLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-0.5 mt-4 px-1 text-[11px] font-semibold uppercase tracking-wider text-base-content/40 first:mt-0">
+      {children}
+    </div>
+  );
+}
+
 function Section({
   title,
   aside,
@@ -431,6 +441,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [pushBusy, setPushBusy] = useState(false);
   // HTTP peer 管理(owner 2026-07-24):独立弹窗
   const [showPeers, setShowPeers] = useState(false);
+  // 定时任务管理(owner 2026-08-26):独立弹窗
+  const [showCron, setShowCron] = useState(false);
   // 登录安全(owner 2026-08-09):累进封禁开关。TOTP 由 TotpSection 自管
   const [bruteForceOn, setBruteForceOn] = useState(true);
   const [secBusy, setSecBusy] = useState(false);
@@ -616,6 +628,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">{/* 分区卡片流 */}
 
+        <GroupLabel>{t("界面与个人")}</GroupLabel>
         {/* ── 界面(外观 + 语言)─────────────── */}
         <Section
           title={t("外观")}
@@ -692,6 +705,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         </div>
         </Section>
 
+        <GroupLabel>{t("Claude")}</GroupLabel>
         {/* ── Claude 全局默认（模型 + Effort）─────────────── */}
         <Section
           title={t("Claude 全局默认")}
@@ -746,6 +760,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         {gMsg && <div className="mt-2 text-xs text-base-content/60">{t(gMsg)}</div>}
         </Section>
 
+        <GroupLabel>{t("通知")}</GroupLabel>
         {/* ── Web Push 推送(本设备)─────────────── */}
         <Section
           title={t("推送通知")}
@@ -763,23 +778,15 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           {pushMsg ? <div className="text-xs text-base-content/60">{t(pushMsg)}</div> : null}
         </Section>
 
-        {/* ── iOS 键盘修正(实验,2026-07-27 重构) ─────────────── */}
+        <GroupLabel>{t("自动化")}</GroupLabel>
         <Section
-          title={t("iOS 键盘修正（实验）")}
+          title={t("定时任务")}
           aside={
-            <input
-              type="checkbox"
-              className="toggle toggle-sm shrink-0"
-              checked={kbFixOn}
-              onChange={() => {
-                setKbFixEnabled(!kbFixOn);
-                setKbFixOn(!kbFixOn);
-                // 钩子在页面挂载时读开关——刷新生效,PWA 里 reload 即可
-                window.location.reload();
-              }}
-            />
+            <button className="btn btn-sm" onClick={() => setShowCron(true)}>
+              {t("管理")}
+            </button>
           }
-          desc={t("Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。")}
+          desc={t("到点起临时 agent 执行指令。查看/新建/原地编辑频率与指令/停用。")}
         />
 
         {/* ── 记忆卫生(owner 2026-08-26:「mem0 会变粪坑」) ─────────────── */}
@@ -825,6 +832,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           {hygMsg && <div className="mt-2 text-xs text-error/80">{t(hygMsg)}</div>}
         </Section>
 
+        <GroupLabel>{t("安全")}</GroupLabel>
         {/* ── 登录安全(owner 2026-08-09) ─────────────── */}
         <Section
           title={t("登录安全 · 失败封禁")}
@@ -846,6 +854,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         {/* ── 登录安全 · Passkey(第三期) ─────────────── */}
         <PasskeySection />
 
+        <GroupLabel>{t("连接与集成")}</GroupLabel>
         {/* ── HTTP peer 协作 ─────────────── */}
         <Section
           title={t("Peer 协作")}
@@ -890,9 +899,30 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
             </button>
           </div>
         </Section>
+        <GroupLabel>{t("实验")}</GroupLabel>
+        {/* ── iOS 键盘修正(实验,2026-07-27 重构) ─────────────── */}
+        <Section
+          title={t("iOS 键盘修正（实验）")}
+          aside={
+            <input
+              type="checkbox"
+              className="toggle toggle-sm shrink-0"
+              checked={kbFixOn}
+              onChange={() => {
+                setKbFixEnabled(!kbFixOn);
+                setKbFixOn(!kbFixOn);
+                // 钩子在页面挂载时读开关——刷新生效,PWA 里 reload 即可
+                window.location.reload();
+              }}
+            />
+          }
+          desc={t("Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。")}
+        />
+
         </div>
       </div>
       <PeersModal open={showPeers} onClose={() => setShowPeers(false)} />
+      <CronModal open={showCron} onClose={() => setShowCron(false)} />
     </div>,
     document.body
   );

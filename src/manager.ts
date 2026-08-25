@@ -1985,6 +1985,47 @@ async function cmdCronList() {
   });
 }
 
+/** v2.20+ 原地编辑:保 id/lastRun/createdAt(改频率≠换任务,owner 2026-08-26
+ *  「改个频率要重建不合理」)。schedule 变更时重算 nextRun。 */
+async function cmdCronEdit(
+  nameOrId: string,
+  patch: { schedule?: string; prompt?: string; name?: string; dir?: string }
+) {
+  if (patch.schedule) {
+    try {
+      parseCronExpression(patch.schedule);
+    } catch (err) {
+      output({ ok: false, error: (err as Error).message });
+      return;
+    }
+  }
+  const jobs = await loadJobs();
+  const job = jobs.find((j) => j.name === nameOrId || j.id === nameOrId);
+  if (!job) {
+    output({ ok: false, error: `找不到任务: "${nameOrId}"` });
+    return;
+  }
+  if (patch.name && patch.name !== job.name && jobs.some((j) => j.name === patch.name)) {
+    output({ ok: false, error: `已存在同名任务: "${patch.name}"` });
+    return;
+  }
+  if (patch.name) job.name = patch.name;
+  if (patch.prompt) job.prompt = patch.prompt;
+  if (patch.dir) job.dir = patch.dir.replace(/^~/, process.env.HOME || "~");
+  if (patch.schedule) {
+    job.schedule = patch.schedule;
+    if (job.enabled) {
+      try { job.nextRun = nextCronTime(patch.schedule).toISOString(); } catch { /* non-critical */ }
+    }
+  }
+  await saveJobs(jobs);
+  output({
+    ok: true,
+    job: { id: job.id, name: job.name, schedule: job.schedule, nextRun: job.nextRun ?? null, lastRun: job.lastRun ?? null },
+    message: `定时任务 "${job.name}" 已更新`,
+  });
+}
+
 async function cmdCronRemove(nameOrId: string) {
   const jobs = await loadJobs();
   const idx = jobs.findIndex((j) => j.name === nameOrId || j.id === nameOrId);
@@ -3899,7 +3940,7 @@ const [cmd, ...args] = process.argv.slice(2);
  */
 const WRITE_COMMANDS = new Set([
   "create", "resume", "adopt", "kill", "remove", "restart", "rename", "archive",
-  "clear", "cron-add", "cron-remove", "cron-toggle",
+  "clear", "cron-add", "cron-remove", "cron-toggle", "cron-edit",
   "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
@@ -4197,6 +4238,26 @@ switch (cmd) {
       break;
     }
     await cmdCronRemove(nameOrId);
+    break;
+  }
+
+  case "cron-edit": {
+    const [nameOrId, ...rest] = args;
+    const patch: { schedule?: string; prompt?: string; name?: string; dir?: string } = {};
+    for (let i = 0; i < rest.length; i += 2) {
+      const k = rest[i];
+      const v = rest[i + 1];
+      if (v === undefined) break;
+      if (k === "--schedule") patch.schedule = v;
+      else if (k === "--prompt") patch.prompt = v;
+      else if (k === "--name") patch.name = v;
+      else if (k === "--dir") patch.dir = v;
+    }
+    if (!nameOrId || Object.keys(patch).length === 0) {
+      output({ ok: false, error: 'usage: cron-edit <name|id> [--schedule "<cron>"] [--prompt "<text>"] [--name <new>] [--dir <dir>]' });
+      break;
+    }
+    await cmdCronEdit(nameOrId, patch);
     break;
   }
 
