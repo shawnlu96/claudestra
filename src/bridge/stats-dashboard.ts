@@ -20,7 +20,7 @@ import {
   type Client,
   type TextChannel,
 } from "discord.js";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import {
   tmuxRaw,
   MASTER_SESSION,
@@ -612,6 +612,35 @@ function loadAutoCompactThreshold(): number {
   return DEFAULT_AUTO_COMPACT_WINDOW;
 }
 
+/** 闲置门槛(owner 2026-08-26「不然我干着干着就 compact 了」):超线只是必要条件,
+ *  还得**闲置满 N 小时**才注入 /save-compact。~/.claude/settings.json 的
+ *  autoCompactIdleHours 可调,0/false = 不要闲置门槛(回到超线即触发)。 */
+const DEFAULT_AUTO_COMPACT_IDLE_HOURS = 3;
+
+function loadAutoCompactIdleMs(): number {
+  try {
+    const raw = readFileSync(`${process.env.HOME || ""}/.claude/settings.json`, "utf8");
+    const v = JSON.parse(raw)?.autoCompactIdleHours;
+    if (v === false || v === 0) return 0;
+    const n = typeof v === "number" ? v : Number(v);
+    if (Number.isFinite(n) && n > 0) return n * 3600_000;
+  } catch { /* 用默认 */ }
+  return DEFAULT_AUTO_COMPACT_IDLE_HOURS * 3600_000;
+}
+
+/** 闲置判据 = 会话 jsonl 的 mtime(对话/工具活动都会写它;/status 抓取走 TUI
+ *  面板不落 jsonl,实测几周才 1 条,不会把闲置刷没)。拿不到 jsonl → 判「不闲置」,
+ *  宁可不触发也不打断。 */
+function idleLongEnough(a: AgentStat, idleMs: number): boolean {
+  if (idleMs <= 0) return true;
+  if (!a.jsonl) return false;
+  try {
+    return Date.now() - statSync(a.jsonl).mtimeMs >= idleMs;
+  } catch {
+    return false;
+  }
+}
+
 function tierOf(tokens: number): number {
   let t = 0;
   for (let i = 0; i < CTX_TIERS.length; i++) if (tokens >= CTX_TIERS[i]) t = i + 1;
@@ -630,6 +659,7 @@ async function triggerAutoSaveCompact(a: AgentStat): Promise<void> {
 
 async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<void> {
   const threshold = loadAutoCompactThreshold();
+  const idleMs = loadAutoCompactIdleMs();
   const first = !tierBaselined;
   tierBaselined = true;
   for (const a of agents) {
@@ -641,13 +671,23 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
       // 上下文回落或跨过新高位：重置自动触发状态，允许下一轮再涨时再次触发
       autoCompactTriggered.delete(a.channelId);
     }
-    if (tier < prev || tier === 0 || first) continue;
+    if (tier === 0 || first) continue;
 
-    // 自动触发：上下文超过 autoCompactWindow 且本轮尚未触发过
-    if (threshold > 0 && a.contextTokens >= threshold && !autoCompactTriggered.get(a.channelId)) {
+    // 自动触发：超线 + 闲置满门槛 + 本轮尚未触发。**每轮都查**(不只在跨档时)——
+    // 超线但还在干活的,等它闲下来那轮再动手(owner 2026-08-26:别干着干着就 compact)
+    if (
+      threshold > 0 &&
+      a.contextTokens >= threshold &&
+      !autoCompactTriggered.get(a.channelId) &&
+      idleLongEnough(a, idleMs)
+    ) {
       autoCompactTriggered.set(a.channelId, true);
       await triggerAutoSaveCompact(a);
     }
+
+    // 档位提醒只在**向上跨档**时发一次。18dec8f 把原 `tier === prev → continue`
+    // 拆掉后,稳态每轮都会走到这里重发提醒(刷屏回归)——这行守卫补回原语义
+    if (tier <= prev) continue;
 
     try {
       const ch = (await discord.channels.fetch(a.channelId).catch(() => null)) as TextChannel | null;
