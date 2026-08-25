@@ -13,11 +13,22 @@
  * markdown 元素排版见 globals.css 的 .chat-domd。
  */
 import { useEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
-import { DOMD, DOMDProvider } from "@do-md/core-react";
+import { DOMD, DOMDProvider, defaultInlineRules, type InlineRule } from "@do-md/core-react";
 import "@do-md/core-react/style.css";
 import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
 import { padTableBlocks } from "./normalize-md";
+import { InlineButton } from "./inline-button";
 import "./prism-themes.css";
+
+/**
+ * 行内规则(v2.20+):默认集(== 高亮)+ 行内按钮 `[[{#id .style}label]]`。
+ * [[ 首字符与内建 link 语法撞车属 reserved delimiter——do-md 只在带 {…}
+ * capture 时触发自定义规则,普通 [[wiki]] 不受影响(Playwright 实证)。
+ */
+const INLINE_RULES: InlineRule[] = [
+  ...defaultInlineRules,
+  { open: "[[", close: "]]", tagName: "span", component: InlineButton },
+];
 
 type ProviderProps = ComponentProps<typeof DOMDProvider>;
 
@@ -50,6 +61,7 @@ export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
       key={grammarV}
       editable={false}
       codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
+      inlineRules={INLINE_RULES}
       {...provider}
       initMd={initMd}
     >

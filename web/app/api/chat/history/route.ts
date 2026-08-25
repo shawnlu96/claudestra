@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { matchClickedRow } from "@/lib/chat/reply-clicks";
+import { parseInlineButtons, plainLabel } from "@/lib/chat/inline-buttons";
 import { apiAgentName, bridgeGet } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
 import { st } from "@/lib/server-lang";
@@ -115,6 +116,16 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
           clickLabel = clicked.label;
           // bug ①:收进 replyClicks(按行),多行各自的点击都还原,不再只记第一个
           (lastWithComponents.replyClicks ??= {})[clicked.rowKey] = clicked.choiceValue;
+        } else if (btnMatch) {
+          // 块级组件没命中 → 试行内按钮(v2.20+,正文里的 [[{#id}label]]):
+          // rowKey 前缀 `i:`,与前端 InlineButton 的已答态判定同键
+          const inline = parseInlineButtons(
+            `${lastWithComponents.replyText ?? ""}\n${lastWithComponents.content ?? ""}`
+          ).find((b) => b.id === btnMatch[1]);
+          if (inline) {
+            clickLabel = plainLabel(inline.label);
+            (lastWithComponents.replyClicks ??= {})[`i:${inline.id}`] = inline.id;
+          }
         }
       }
       const raw = btnMatch || selMatch
@@ -162,7 +173,15 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
       if (tail?.kind === "tools") tail.tools.push(...toolCalls);
       else segs.push({ kind: "tools", tools: toolCalls });
     }
-    if (group.replyComponents?.length) lastWithComponents = group;
+    // 行内按钮也算「可作答锚点」——后续 [button:id] 既可能命中块级组件,也可能
+    // 命中正文里的行内按钮(v2.20+)。必须真解析出按钮才算,纯 [[wiki]] 文本
+    // 不能把带组件的老锚点顶掉
+    if (
+      group.replyComponents?.length ||
+      parseInlineButtons(`${m.replyText ?? ""}\n${m.text ?? ""}`).length > 0
+    ) {
+      lastWithComponents = group;
+    }
   }
   // 完成标记只给「历史尾轮」:最后一条消息是 assistant 且回合正常收尾
   // (turnMs 来自 turn_duration,进行中/被打断的回合没有)。切后台错过 done

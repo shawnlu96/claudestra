@@ -1,5 +1,5 @@
 "use client";
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { ChatMessage, ChatAttachmentView, ToolCallView, AssistantSegment } from "../type";
@@ -13,6 +13,8 @@ import { highlightCode, langForPath } from "../highlight";
 import { useT, getLang } from "@/lib/i18n";
 import { fmtTs } from "../fmt-time";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
+import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
+import { inlineButtonsToText, plainLabel } from "@/lib/chat/inline-buttons";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
@@ -672,6 +674,26 @@ function AssistantBody({
 }) {
   const segs = m.segments;
   const full = messagePlainText(m); // 长按菜单的「复制整条」用；只有一段时与本段相同,菜单自动不显示
+  // 行内按钮(v2.20+,`[[{#id .style}label]]`):DOMD 深处的 InlineButton 经
+  // context 拿到本条消息的回投回调;点击复用块级组件的 clickReplyComponent
+  // (同 wire `[button:<id>]`、同 replyClicks 状态,rowKey 前缀 `i:` 区分)。
+  const store = useChatStoreApi();
+  const [inlineBusy, setInlineBusy] = useState(false);
+  const inlineCtx = useMemo<InlineActionCtx>(
+    () => ({
+      clicks: m.replyClicks ?? {},
+      busy: inlineBusy,
+      onClick: async (id, label) => {
+        setInlineBusy(true);
+        try {
+          await store.clickReplyComponent(m.id, `i:${id}`, id, plainLabel(label), `[button:${id}]`);
+        } finally {
+          setInlineBusy(false);
+        }
+      },
+    }),
+    [m.id, m.replyClicks, inlineBusy, store]
+  );
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;
@@ -726,7 +748,7 @@ function AssistantBody({
   ) : null;
 
   return (
-    <>
+    <InlineActionContext.Provider value={inlineCtx}>
       {narration}
       {hasReply && !hasReplySeg && (
         <>
@@ -735,7 +757,7 @@ function AssistantBody({
           <TextBlock text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
         </>
       )}
-    </>
+    </InlineActionContext.Provider>
   );
 }
 
@@ -754,7 +776,8 @@ function splitQuoted(content: string): { quoted?: string; body: string } {
 function messagePlainText(m: ChatMessage): string {
   const parts: string[] = [];
   const push = (t?: string) => {
-    const v = t?.trim();
+    // 行内按钮语法在剪贴板里退化成 [label] 文本(复制是为了转发文字)
+    const v = t && inlineButtonsToText(t).trim();
     if (v && !parts.includes(v)) parts.push(v);
   };
   if (m.segments?.length) {

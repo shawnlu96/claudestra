@@ -7,6 +7,7 @@
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
+import { splitInlineButtons, toButtonRows } from "./lib/inline-buttons.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -795,10 +796,26 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
     if (!adapter) {
       return { envelope: env, outcome: { kind: "dropped", reason: `no adapter for transport "${dest.transport}"` } };
     }
+    // v2.20+ 行内按钮 `[[{#id .style}label]]`:web 端 DOMD 渲染成真按钮(正文原样
+    // 过去);Discord 正文塞不了原生按钮 → 出站时解析拆分:从正文剥离,转成块级
+    // components 按钮行追加(方案 A,docs/design-domd-inline-buttons.md §6)。
+    // 容量守恒:Discord 上限 5 行 × 5 钮,已有 components 行先占;超容量的按钮
+    // 保留字面量(看得见语法,好过静默消失)。
+    let text = env.content;
+    let components = env.meta.components as unknown[] | undefined;
+    if (dest.transport === "discord" && text.includes("[[")) {
+      const existingRows = Array.isArray(components) ? components.length : 0;
+      const split = splitInlineButtons(text, Math.max(0, 5 - existingRows) * 5);
+      if (split.buttons.length) {
+        // 正文被剥空(整条消息只有按钮)→ Discord 不收空 content,给个指示符
+        text = split.text || "👇";
+        components = [...(components ?? []), ...toButtonRows(split.buttons)];
+      }
+    }
     const { messageIds: ids } = await adapter.send(dest.id, {
-      text: env.content,
+      text,
       replyTo: env.meta.replyTo,
-      components: env.meta.components,
+      components,
       files: env.meta.files,
     });
     // v2.0.15+ cross-agent forward —— 见函数注释（Discord 专属：clients 的 key

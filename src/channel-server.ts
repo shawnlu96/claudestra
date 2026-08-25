@@ -424,7 +424,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           text: {
             type: "string",
-            description: "Message text to send",
+            description: `Message text to send. Supports inline buttons (v2.20+): write \`[[{#id .style}label]]\` anywhere in the text — style is primary|success|danger|secondary (default secondary), id matches ^[\\w:-]+$. Web renders a real clickable button in the flow of the sentence; Discord auto-extracts them into a button row below the message. Click comes back as [button:id], same wire as block-level components. Use inline buttons when the action belongs inside a sentence; use the components field for standalone option lists.`,
           },
           reply_to: {
             type: "string",

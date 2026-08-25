@@ -1,7 +1,15 @@
 # 设计方案：DOMD 行内可点按钮（+ 前置的 0.11.2 升级）
 
-状态：**方案评审中，未实现**（owner 2026-08-24：先出方案不动手 + 先开分支验证升级）。
-分支：`chore/domd-0.11.2-eval`。
+状态：**已实现**（owner 2026-08-26 拍板动手；PR-1 升级与 bug ① 已先行上线）。
+实现落点：`src/lib/inline-buttons.ts` + `web/lib/chat/inline-buttons.ts`（共享解析,
+逐字节一致）、`web/components/domd/inline-button.tsx`（InlineButton + context）、
+`deliverToUser` Discord 出站拆分、历史路由 `i:<id>` 已答态还原。
+
+> **语法勘误（实现时发现）**：do-md 的 `{…}` capture 紧跟**开分隔符**
+> （`[[{#id .style}label]]`），不是本文首版写的 Pandoc 尾置
+> （`[[label]]{#id .style}`）。README 实例 `=={bg=red}x==`、
+> `<{.mention id=1}Name>` 与 Playwright 实证均确认。下文 §3/§4 的旧写法
+> 保留作评审记录,以勘误为准。
 
 ## 0. 一句话
 
@@ -131,3 +139,16 @@ Discord 消息正文里**塞不了原生按钮**。两条路：
 - 行内按钮在**流式渲染中途**（`[[` 写了一半）的过渡态——DOMD 未闭合语法本就会短暂
   跳动，与现有富文本流式一致，可接受。
 - 方案 A 的 Discord 拆分对「一条消息多个内联按钮跨多行」的边界处理需在 PR-3 细化。
+
+## 11. 实现纪要（2026-08-26）
+
+- 语法（勘误后）：`[[{#id .style}label]]`。fenced code / inline code span 里是字面量。
+- Playwright 实证（真实 web 封装 + 0.11.2）：带 capture 触发、符号在 view 模式隐藏
+  （innerText 只剩 label）；普通 `[[wiki]]` 无 capture 也会触发规则并吞括号——
+  InlineButton 在 `rawCapture === null` 时用 viewOnlyProps 装饰恢复括号视觉；
+  写了 capture 但 id 坏/无 context 的安静降级成 label 文本（不产出死按钮）。
+- Discord 出站：`deliverToUser` 只在 discord transport 拆分；容量 = 5 行 − 已有
+  components 行,每行 5 钮,超容量保留字面量;正文剥空时兜底 "👇"。
+- 已答态与块级组件同一份 `replyClicks`,rowKey 前缀 `i:`;历史还原在 BFF 的
+  `[button:id]` 匹配里加行内回退分支。
+- 复制整条 → `inlineButtonsToText`（按钮退化成 `[label]`）。

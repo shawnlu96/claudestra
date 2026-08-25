@@ -386,6 +386,53 @@ html.kb-open {
 }
 
 /*
+ * ── 行内按钮（.cstra-inline-btn,v2.20+） ────────────────────────────
+ * DOMD inlineRules 渲染的 `[[{#id .style}label]]` 正文内按钮。胶囊形,
+ * variant 配色用 daisyUI token 自动跟随明暗主题。specificity 两级类,
+ * 压过 DOMD adoptedStyleSheets 的单类规则(同 narration-muted 的打法)。
+ */
+.chat-domd .cstra-inline-btn {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 2px;
+    padding: 1px 10px;
+    border-radius: 9999px;
+    border: 1px solid color-mix(in oklab, currentColor 30%, transparent);
+    background: color-mix(in oklab, currentColor 10%, transparent);
+    font-size: 0.92em;
+    font-weight: 550;
+    line-height: 1.55;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    vertical-align: baseline;
+    transition:
+        background-color 0.12s,
+        opacity 0.12s;
+}
+.chat-domd .cstra-inline-btn:hover:not([aria-disabled="true"]) {
+    background: color-mix(in oklab, currentColor 18%, transparent);
+}
+.chat-domd .cstra-inline-btn[data-variant="primary"] {
+    color: var(--color-primary);
+}
+.chat-domd .cstra-inline-btn[data-variant="success"] {
+    color: var(--color-success);
+}
+.chat-domd .cstra-inline-btn[data-variant="danger"] {
+    color: var(--color-error);
+}
+.chat-domd .cstra-inline-btn[aria-disabled="true"] {
+    cursor: default;
+    opacity: 0.55;
+}
+.chat-domd .cstra-inline-btn[data-clicked] {
+    opacity: 1;
+    border-style: solid;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 35%, transparent);
+}
+
+/*
  * ── 工具详情语法高亮 token 色（highlight.js,owner 2026-07-14） ──────
  * 不引官方主题 CSS——用 daisyUI 主题变量手写,亮暗主题自动跟随。
  * 只覆盖常见 token;没规则的 token 继承外层颜色(不花不闹)。
