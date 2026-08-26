@@ -48,6 +48,9 @@ export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<
         displayName: str("displayName"),
         model: str("model"),
         effort: str("effort"),
+        // ⚠ 布尔字段不走 str() 帮手——external 曾因此被整个丢掉(所有 agent 在
+        // /peers 界面显示非 external,Codex review 2026-08-26 抓到的)
+        external: a.external === true,
       };
     });
   } catch {

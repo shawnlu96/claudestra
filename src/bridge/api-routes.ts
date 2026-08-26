@@ -219,8 +219,11 @@ function apiJson(status: number, body: unknown): Response {
 async function authApi(req: Request, url: URL): Promise<Principal | Response> {
   const auth = req.headers.get("Authorization") || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  const secret = m?.[1]?.trim() || url.searchParams.get("token") || "";
-  if (!secret) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> (SSE may use ?token=)" });
+  // ?token= 只对 SSE 端点放行(EventSource 不能带 header 的折衷本意)——此前对
+  // 全部 /api/v1/* 放行,secret 会进代理日志/浏览历史(Codex review 2026-08-26)
+  const sseTokenOk = req.method === "GET" && url.pathname === "/api/v1/events";
+  const secret = m?.[1]?.trim() || (sseTokenOk ? url.searchParams.get("token") || "" : "");
+  if (!secret) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> (only GET /events may use ?token=)" });
   const file = await readPrincipals();
   const p = findByBearer(file, secret);
   if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });

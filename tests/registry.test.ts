@@ -44,6 +44,21 @@ describe("readRegistryAgents", () => {
     expect(active.map((a) => a.name)).toEqual(["agent-a"]);
   });
 
+  test("external 布尔字段被完整映射(2026-08-26 Codex review:曾被 str() 帮手丢掉)", async () => {
+    const p = writeRegistry({
+      agents: {
+        "agent-ext": { status: "active", external: true },
+        "agent-plain": { status: "active" },
+        "agent-dirty": { status: "active", external: "yes" },
+      },
+    });
+    const all = await readRegistryAgents(p);
+    expect(all.find((a) => a.name === "agent-ext")?.external).toBe(true);
+    expect(all.find((a) => a.name === "agent-plain")?.external).toBe(false);
+    // 脏数据(非布尔)按 false 处理,不抛
+    expect(all.find((a) => a.name === "agent-dirty")?.external).toBe(false);
+  });
+
   test("容错：文件缺失 / 坏 JSON / 无 agents 键都返回空数组", async () => {
     expect(await readRegistryAgents("/no/such/registry.json")).toEqual([]);
     expect(await readRegistryAgents(writeRegistry("not json{{{"))).toEqual([]);

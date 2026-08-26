@@ -88,7 +88,13 @@ async function tick(discord: Client): Promise<void> {
 }
 
 export function startSessionReconciler(discord: Client): void {
-  setInterval(() => tick(discord).catch(() => {}), POLL_INTERVAL_MS);
+  // 重入闸(Codex review 2026-08-26):inventory 收集慢于周期时不叠加并发轮
+  let running = false;
+  setInterval(() => {
+    if (running) return;
+    running = true;
+    tick(discord).catch(() => {}).finally(() => { running = false; });
+  }, POLL_INTERVAL_MS);
   // 启动后 1 分钟先跑一轮（bridge 重启后尽快发现存量分身）
   setTimeout(() => tick(discord).catch(() => {}), 60_000);
   console.log(`🧬 Session 对账器启动（每 ${POLL_INTERVAL_MS / 60_000}min 扫 bg 分身）`);

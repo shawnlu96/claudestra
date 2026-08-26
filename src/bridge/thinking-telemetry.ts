@@ -94,6 +94,13 @@ export function startThinkingTelemetry(deps: TelemetryDeps): void {
     }
   };
 
-  setInterval(() => void tick(), POLL_MS).unref?.();
+  // 重入闸(Codex review 2026-08-26):tick 里逐 agent tmux capture,慢起来会
+  // 跨过 3s 周期——上一轮没收尾就跳过本轮,不叠加并发 capture
+  let running = false;
+  setInterval(() => {
+    if (running) return;
+    running = true;
+    void tick().finally(() => { running = false; });
+  }, POLL_MS).unref?.();
   console.log(`🧠 Thinking telemetry 启动（${POLL_MS / 1000}s 采样，${STALL_MS / 60_000}min 冻结告警）`);
 }

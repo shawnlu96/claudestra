@@ -81,7 +81,7 @@ src/
 master/
   CLAUDE.md.template     大总管行为指令模板（setup.ts 渲染）
   CLAUDE.md              渲染后的本地副本（gitignored）
-tests/                     24 个文件 368 个用例——只覆盖纯逻辑；bridge.ts 本身没有隔离单测
+tests/                     只覆盖纯逻辑（实时数量以 `bun test` 为准）；bridge.ts 本身没有隔离单测
                            （Discord client + ws + peers.json 耦合太重），那部分靠沙箱会话实测兜底
   agent-stats.test.ts      按 agent 的用量汇总，compact 感知
   ask-user-question.test.ts TUI 里的 AskUserQuestion 识别 + 按键合成

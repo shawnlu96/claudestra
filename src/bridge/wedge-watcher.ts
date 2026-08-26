@@ -314,7 +314,13 @@ export function startWedgeWatcher(
       }
     } catch { /* non-critical */ }
   };
-  setInterval(tick, POLL_INTERVAL_MS);
+  // 重入闸(Codex review 2026-08-26):tick 异步且逐窗口 capture,慢轮不叠加
+  let running = false;
+  setInterval(() => {
+    if (running) return;
+    running = true;
+    void Promise.resolve(tick()).finally(() => { running = false; });
+  }, POLL_INTERVAL_MS);
   console.log(`⚠️ Wedge watcher 启动（每 ${POLL_INTERVAL_MS / 60_000}min 扫，${WEDGE_THRESHOLD_MS / 60_000}min 卡死阈值）`);
 }
 

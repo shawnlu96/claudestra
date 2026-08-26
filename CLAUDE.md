@@ -96,7 +96,7 @@ src/
 master/
   CLAUDE.md.template     Master agent instruction template (rendered by setup.ts)
   CLAUDE.md              Rendered local copy (git-ignored)
-tests/                     368 cases across 24 files — pure logic only; bridge.ts itself has no
+tests/                     pure-logic suites only (run `bun test` for the live count); bridge.ts itself has no
                            isolated unit tests (Discord client + ws + peers.json coupling), live
                            verification through a sandbox session is the coverage there.
   agent-stats.test.ts      Per-agent usage rollup, compact-aware
