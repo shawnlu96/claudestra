@@ -34,6 +34,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { readConfig, readConfigSync, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
+import { readUsageCache } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
 import {
   computeAgentStats,
@@ -400,6 +401,23 @@ async function scrapeAccountUsage(): Promise<AccountUsage | null> {
  * 复位，绝不会永久卡住让 gauge 冻结（这是之前 6h 不更新的根源之一）。
  */
 async function getAccountUsage(block = true): Promise<AccountUsage | null> {
+  // v2.20.1+ 优先读 statusline 落盘缓存(peer 方案 2026-08-27):被动推送、
+  // 秒级新鲜、零打断——有它就完全不碰 TUI。缺失/过期(10min)才回退抓取,
+  // 没配 statusline 的安装零感知。
+  const cached = readUsageCache();
+  if (cached) {
+    accountCache = {
+      sessionPct: cached.sessionPct,
+      sessionResets: cached.sessionResets,
+      weekPct: cached.weekPct,
+      weekResets: cached.weekResets,
+      totalCost: accountCache?.totalCost ?? null,      // cost/duration 只有 /status 面板有,
+      apiDuration: accountCache?.apiDuration ?? null,  // 沿用上次抓到的旧值
+      raw: "statusline cache",
+      scrapedAt: cached.scrapedAt,
+    };
+    return accountCache;
+  }
   if (accountCache && Date.now() - accountCache.scrapedAt < ACCOUNT_TTL_MS) return accountCache;
   if (!scraping) {
     scraping = Promise.race([
