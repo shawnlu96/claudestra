@@ -457,6 +457,14 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   } | null>(null);
   const [hygBusy, setHygBusy] = useState(false);
   const [hygMsg, setHygMsg] = useState("");
+  // 自动存记忆+Compact(owner 2026-08-27「设置里看不到」):阈值+闲置门槛,写 config.json
+  const [ac, setAc] = useState<{
+    window: number | null;
+    idleHours: number | null;
+    defaults: { window: number; idleHours: number };
+  } | null>(null);
+  const [acBusy, setAcBusy] = useState(false);
+  const [acMsg, setAcMsg] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -505,6 +513,15 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         else setHygMsg(j?.error || "读取失败");
       })
       .catch(() => setHygMsg("读取失败"));
+    // autoCompact 配置
+    setAcMsg("");
+    fetch("/api/auto-compact")
+      .then((r) => r.json())
+      .then((j) => {
+        if (j?.ok) setAc(j);
+        else setAcMsg(j?.error || "读取失败");
+      })
+      .catch(() => setAcMsg("读取失败"));
   }, [open, store]);
 
   // 记忆卫生写入:开关/频率共用一条路,bridge 侧同步 cron 任务
@@ -526,6 +543,41 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
       setHygBusy(false);
     }
   };
+
+  // autoCompact 写入:两个下拉共用一条路,POST 后用 bridge 回读的状态刷新
+  const saveAc = async (patch: { window?: number; idleHours?: number }) => {
+    setAcBusy(true);
+    setAcMsg("");
+    try {
+      const r = await fetch("/api/auto-compact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const j = await r.json();
+      if (j?.ok) setAc(j);
+      else setAcMsg(j?.error || "保存失败");
+    } catch {
+      setAcMsg("保存失败");
+    } finally {
+      setAcBusy(false);
+    }
+  };
+
+  // 当前生效值(null=未设→用默认);选项表兜住手工改过的非标准值
+  const acWindow = ac ? (ac.window ?? ac.defaults.window) : null;
+  const acIdle = ac ? (ac.idleHours ?? ac.defaults.idleHours) : null;
+  const acWindowOpts = [400_000, 500_000, 750_000, 1_000_000];
+  if (acWindow !== null && acWindow !== 0 && !acWindowOpts.includes(acWindow)) {
+    acWindowOpts.push(acWindow);
+    acWindowOpts.sort((a, b) => a - b);
+  }
+  const acIdleOpts = [0, 1, 3, 6, 12];
+  if (acIdle !== null && !acIdleOpts.includes(acIdle)) {
+    acIdleOpts.push(acIdle);
+    acIdleOpts.sort((a, b) => a - b);
+  }
+  const fmtTokens = (w: number) => (w >= 1_000_000 ? `${w / 1_000_000}M` : `${Math.round(w / 1000)}K`);
 
   const toggleBruteForce = async () => {
     const next = !bruteForceOn;
@@ -830,6 +882,49 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
             </div>
           )}
           {hygMsg && <div className="mt-2 text-xs text-error/80">{t(hygMsg)}</div>}
+        </Section>
+
+        {/* ── 自动存记忆+Compact(owner 2026-08-27:「设置里看不到」) ─────────────── */}
+        <Section
+          title={t("自动存记忆 + Compact")}
+          desc={t("上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文。对所有 agent 生效。")}
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-[13px]">
+              {t("上下文阈值")}
+              <select
+                className="select select-sm select-bordered"
+                value={acWindow === null ? "" : String(acWindow)}
+                disabled={acBusy || !ac}
+                onChange={(e) => void saveAc({ window: Number(e.target.value) })}
+              >
+                {acWindowOpts.map((w) => (
+                  <option key={w} value={String(w)}>
+                    {fmtTokens(w)}
+                    {ac && w === ac.defaults.window ? ` (${t("默认")})` : ""}
+                  </option>
+                ))}
+                <option value="0">{t("关闭")}</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-[13px]">
+              {t("闲置时长")}
+              <select
+                className="select select-sm select-bordered"
+                value={acIdle === null ? "" : String(acIdle)}
+                disabled={acBusy || !ac || acWindow === 0}
+                onChange={(e) => void saveAc({ idleHours: Number(e.target.value) })}
+              >
+                {acIdleOpts.map((h) => (
+                  <option key={h} value={String(h)}>
+                    {h === 0 ? t("立即") : `${h} ${t("小时")}`}
+                    {ac && h === ac.defaults.idleHours ? ` (${t("默认")})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {acMsg && <div className="mt-2 text-xs text-error/80">{t(acMsg)}</div>}
         </Section>
 
         <GroupLabel>{t("安全")}</GroupLabel>

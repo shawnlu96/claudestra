@@ -467,6 +467,12 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           } catch (e) { /* non-critical */ }
 
           const hasReply = content.some((b: any) => b.type === "tool_use" && isHiddenTool(b.name));
+          // v2.20.2+「正在回复…」信号:看到 reply 工具调用就告诉 web 一声——
+          // 长回合里用户能看到回复马上要来了(owner 实报)。只认 reply 本体,
+          // 别的隐藏工具(react/edit_message)不算
+          if (content.some((b: any) => b.type === "tool_use" && (b.name === "reply" || String(b.name || "").endsWith("__reply")))) {
+            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: {} });
+          }
           const hasNewTools = content.some((b: any) => b.type === "tool_use" && b.name && !isHiddenTool(b.name));
 
           // 新一批 tool 到来 → 清空旧 tools，每轮独立一条 Discord 消息

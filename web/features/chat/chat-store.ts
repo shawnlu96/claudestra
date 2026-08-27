@@ -105,6 +105,8 @@ interface ChatState {
   loadingOlder: boolean;
   /** 本轮流式进行中 */
   streaming: boolean;
+  /** v2.20.2+ watcher 报「reply 工具调用中」——状态条显示「正在回复…」。 */
+  replying: boolean;
   /** 本轮已起、还没有任何输出 → 显示「思考中」 */
   awaitingChunk: boolean;
   /** Phase 2：当前会话待处理的权限 / session-idle 卡（null=无） */
@@ -182,6 +184,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       loadingOlder: false,
       historyError: false,
       streaming: false,
+      replying: false,
       awaitingChunk: false,
       pendingPermission: null,
       pendingAsk: null,
@@ -1277,7 +1280,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  电脑端要等对齐才出现)。同一 token 两端共用,本端自己发的消息也会收到回声
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
-  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[]) {
+  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string) {
     const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
     const t = norm(text);
     if (!t && !attachments?.length) return;
@@ -1304,6 +1307,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         role: "user",
         content: text,
         ts: new Date().toISOString(),
+        ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
       });
     });
@@ -1616,6 +1620,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合
     if (last && last.role === "assistant" && !this.nextBubbleBoundary) {
       this.produce((s) => {
+      s.replying = false; // 回复已到,「正在回复…」收场
+
         const m = s.messages[s.messages.length - 1];
         m.replyText = m.replyText ? `${m.replyText}\n${text}` : text;
         m.replyTs = m.replyTs ?? new Date().toISOString();
@@ -1703,10 +1709,19 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     }
   }
 
-  public endTurn(interrupted?: boolean) {
+  /** v2.20.2+「正在回复…」;reply 到达/回合收尾时清。 */
+  public setReplying() {
+    if (this.state.replying) return;
+    this.produce((s) => {
+      s.replying = true;
+    });
+  }
+
+  public endTurn(interrupted?: boolean, bgPending?: boolean) {
     this.flushPendingText(); // 定稿前落掉缓冲文本
     this.produce((s) => {
       s.telemetry = null;
+      s.replying = false;
       // 逆扫最近一条 assistant,不只看 messages[last]——连发抢占时用户的新消息
       // 已乐观 push 到末尾,done(interrupted) 到达时末尾是 user 气泡,只看末尾
       // 会整个跳过打断标记(2026-07-14 用户实测:工作中补发消息没标「已打断」;
@@ -1719,6 +1734,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 琥珀「⊘ 已打断」行;仅直播回合,历史消息不带(历史有中断系统线)
         if (m.streamed) {
           if (interrupted) m.turnInterrupted = true;
+          // v2.20.2+ 回合结束但后台任务还在跑 → 「后台继续中」,不标绿勾
+          // (owner 实报「长任务经常提前变成完成」——完成跟的是回合边界)
+          else if (bgPending) m.turnBgPending = true;
           else m.turnDone = true;
           m.streamed = false;
           marked = true;

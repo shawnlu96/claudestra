@@ -251,6 +251,17 @@ function ToolCallsBlock({
   );
 }
 
+/** v2.20.2+「✍️ 正在回复…」——reply 工具调用已发出,回复马上到。 */
+function ReplyingLine() {
+  const t = useT();
+  return (
+    <span className="inline-flex items-center gap-1.5 py-1.5 text-[12.5px] font-medium text-info">
+      <span className="chat-dot inline-block size-1.5 rounded-full bg-info" />
+      ✍️ {t("正在回复…")}
+    </span>
+  );
+}
+
 /** 流式「思考中」三点。 */
 function ThinkingDots() {
   return (
@@ -356,12 +367,14 @@ async function shareImage(url: string, name: string): Promise<void> {
 /** 回合结束标记:居中分隔线样式(owner 2026-07-14:「像中段一样居中、横线
  *  隔开、带颜色和 tick 图标」),三态同构:绿=完成 / 黄=已打断 / 红=出错。
  *  横线用 currentColor 低透明度,自动跟随态色。 */
-function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" | "error"; ms?: number; animate?: boolean }) {
+function TurnMark({ kind, ms, animate = true }: { kind: "done" | "interrupted" | "error" | "bg"; ms?: number; animate?: boolean }) {
   const t = useT();
   const conf = {
     done: { cls: "text-success", label: "完成", icon: <path d="M8.5 12.5l2.5 2.5 5-5.5" /> },
     interrupted: { cls: "text-warning", label: "已打断", icon: <path d="M5.6 5.6l12.8 12.8" /> },
     error: { cls: "text-error", label: "出错", icon: <path d="M8.5 8.5l7 7M15.5 8.5l-7 7" /> },
+    // v2.20.2+ 回合结束但后台任务还在跑——不是「完成」,别给绿勾(owner 实报误导)
+    bg: { cls: "text-info", label: "后台任务继续中", icon: <path d="M12 7v5l3.5 2" /> },
   }[kind];
   return (
     <div className={`${animate ? "chat-msg-in" : ""} my-3.5 flex select-none items-center gap-3 ${conf.cls}`}>
@@ -849,10 +862,19 @@ const Message = memo(function Message({
     // 引用条与正文分开渲染;长按菜单的「复制/引用」只拿正文那一半
     const { quoted: userQuoted, body: userBody } = splitQuoted(m.content);
     const showAvatar = isSelf && !!profile.avatar;
-    const label = m.from || (isSelf ? profile.nickname : "");
+    // v2.20.2+ 外源入站(peer/其它 agent/Discord 用户)与本人区分(owner 实报
+    // 「看起来像我说的」):来源 chip + 信息色描边,正文走 Domd 渲染 markdown
+    // (peer 的 bug 报告是全格式 markdown,纯文本糊成一坨)。本人消息保持原样。
+    const srcIcon = !isSelf ? (m.from!.startsWith("peer-") ? "🤝" : m.from!.startsWith("agent-") || m.from!.endsWith("(agent)") ? "🤖" : "👤") : "";
+    const label = isSelf ? profile.nickname : "";
     return (
       <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col items-end gap-2`}>
         {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14) */}
+        {!isSelf && (
+          <span className="flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-[10.5px] font-medium text-info">
+            {srcIcon} {m.from}
+          </span>
+        )}
         {(label || showAvatar) && (
           <div className="flex items-center gap-1.5">
             {label && <span className="text-[10px] opacity-50">{label}</span>}
@@ -867,7 +889,11 @@ const Message = memo(function Message({
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
               ref={bubbleRef}
-              className="cstra-bubble whitespace-pre-wrap break-words rounded-[15px_15px_4px_15px] border border-base-content/5 bg-base-300 px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90"
+              className={`cstra-bubble break-words rounded-[15px_15px_4px_15px] border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
+                isSelf
+                  ? "whitespace-pre-wrap border-base-content/5 bg-base-300"
+                  : "border-info/25 bg-info/[0.06]"
+              }`}
               onClick={() => {
                 // 划选后松手、长按松手都算 click——都不该顺手切时间戳
                 if (hasLiveSelection() || press.consumedClick()) return;
@@ -880,7 +906,7 @@ const Message = memo(function Message({
                   {userQuoted}
                 </div>
               )}
-              {userBody}
+              {isSelf ? userBody : <Domd initMd={userBody} bodyClassName="chat-domd" />}
             </div>
           </QuoteSwipe>
         )}
@@ -932,9 +958,9 @@ const Message = memo(function Message({
       {!!m.replyComponents?.length && <ReplyComponents m={m} />}
       {/* 直播回合三态标记(owner 2026-07-14:同构格式,绿完成/黄打断/红出错)
           ——小字行跟着本回合气泡走;历史消息不渲染完成(本来就都完成了)。 */}
-      {!streamingLast && (m.turnError || m.turnInterrupted || m.turnDone) && (
+      {!streamingLast && (m.turnError || m.turnInterrupted || m.turnDone || m.turnBgPending) && (
         <TurnMark
-          kind={m.turnError ? "error" : m.turnInterrupted ? "interrupted" : "done"}
+          kind={m.turnError ? "error" : m.turnInterrupted ? "interrupted" : m.turnBgPending ? "bg" : "done"}
           ms={m.turnMs}
           animate={!m.id.startsWith("h")}
         />
@@ -948,6 +974,7 @@ export function MessageList() {
   const messages = useChatStore((s) => s.state.messages);
   const awaiting = useChatStore((s) => s.state.awaitingChunk);
   const streaming = useChatStore((s) => s.state.streaming);
+  const replying = useChatStore((s) => s.state.replying);
   const loadingHistory = useChatStore((s) => s.state.loadingHistory);
   const historyHasMore = useChatStore((s) => s.state.historyHasMore);
   const loadingOlder = useChatStore((s) => s.state.loadingOlder);
@@ -1210,7 +1237,14 @@ export function MessageList() {
         {standaloneThinking && !browsing && (
           <div className="chat-msg-in mb-[22px] w-full">
             <ClaudeHeader pulsing />
-            <ThinkingDots />
+            {replying ? <ReplyingLine /> : <ThinkingDots />}
+          </div>
+        )}
+        {/* v2.20.2+「正在回复…」:watcher 见到 reply 工具调用(owner:长任务里
+            想看到「快回我了」)。有流式气泡时挂在列表尾,无气泡时上面已并入思考区 */}
+        {!standaloneThinking && replying && streaming && !browsing && (
+          <div className="chat-msg-in mb-[22px] w-full">
+            <ReplyingLine />
           </div>
         )}
         {copiedTip &&

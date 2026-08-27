@@ -128,9 +128,13 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
           }
         }
       }
-      const raw = btnMatch || selMatch
+      let raw = btnMatch || selMatch
         ? clickLabel ?? `🔘 ${btnMatch ? btnMatch[1] : selMatch![2]}`
         : m.text || "";
+      // v2.20.2+ 外源入站(from 非本人)剥掉 bridge 注入的来源头([🤝 来自 peer…]
+      // 这种多行方括号块)——UI 用来源 chip 展示,注入头留着就是双份来源说明,
+      // 且把 markdown 正文顶乱(owner 实报)
+      if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
       const { content, attachments } = extractAttachments(raw);
       out.push({ id: `h${m.seq}`, role: "user", content, ts: m.ts, from, ...(attachments ? { attachments } : {}) });
       continue;

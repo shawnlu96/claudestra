@@ -8,6 +8,7 @@
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
+import { hasActiveBgActivities } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
 
 // ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
@@ -3496,7 +3497,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
-        emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done" } });
+        // v2.20.2+ 回合结束≠任务完成:后台还有活(subagent/bg shell)时带上
+        // bgPending,web 端把绿勾换成「后台继续中」(owner 实报提前完成误导)
+        const bgPending = hasActiveBgActivities(evAgent);
+        emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done", ...(bgPending ? { bgPending: true } : {}) } });
         // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);

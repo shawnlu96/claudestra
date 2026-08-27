@@ -16,8 +16,9 @@ export interface StreamSink {
   /** 工具状态更新（目前只有失败标红）——按 tool_use id 找回那张卡。 */
   updateToolState(id: string, state: "done" | "error"): void;
   appendAssistantText(text: string): void;
-  /** 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析) */
-  addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[]): void;
+  /** 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析)。
+   *  from:非本人的来源标签(peer/其它用户),UI 据此区分气泡样式。 */
+  addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[], from?: string): void;
   /** reply() 的最终回复：挂到当前 assistant 气泡的 replyText（回合外到达也定稿）。
    *  components：reply 附带的按钮/选单，挂到同一气泡供渲染。
    *  attachments：agent 出站附件（图片/文件），挂到气泡尾部渲染。 */
@@ -27,7 +28,9 @@ export interface StreamSink {
     attachments?: { name: string; kind: "image" | "file"; url: string }[]
   ): void;
   setStatus(status: "running" | "done"): void;
-  endTurn(interrupted?: boolean): void;
+  /** v2.20.2+「✍️ 正在回复…」——watcher 见到 reply 工具调用。 */
+  setReplying(): void;
+  endTurn(interrupted?: boolean, bgPending?: boolean): void;
   /** 回合耗时——补到最后一条 assistant 气泡的完成标记上。 */
   turnDuration(ms: number): void;
   /** 回合出错——最后一条 assistant 气泡标红色「✕ 出错」。 */
@@ -60,7 +63,7 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.appendAssistantText(evt.text);
       break;
     case "user-in":
-      sink.addRemoteUserMessage(evt.text, evt.attachments);
+      sink.addRemoteUserMessage(evt.text, evt.attachments, evt.from);
       break;
     case "reply":
       sink.setReplyText(evt.text, evt.components, evt.attachments);
@@ -69,7 +72,10 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.setStatus(evt.status);
       break;
     case "done":
-      sink.endTurn(evt.interrupted);
+      sink.endTurn(evt.interrupted, evt.bgPending);
+      break;
+    case "replying":
+      sink.setReplying();
       break;
     case "turn":
       sink.turnDuration(evt.ms);

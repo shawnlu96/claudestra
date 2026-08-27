@@ -28,8 +28,9 @@ export interface AppConfig {
   lang: AppLang;
   /** v2.4.25+ 只读用量看板频道 + 常驻消息 id（stats-dashboard 用）。 */
   statsDashboard?: { channelId: string; messageId: string };
-  /** v2.20.1+ auto save-compact 闲置门槛（小时）。0 = 超线即触发，无需闲置。 */
-  autoCompact?: { idleHours?: number };
+  /** v2.20.1+ auto save-compact 闲置门槛（小时,0=超线即触发)与 v2.20.2+ 上下文
+   *  阈值(tokens,0=关闭自动触发;缺省用 stats-dashboard 的默认 400K)。 */
+  autoCompact?: { idleHours?: number; window?: number };
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -58,8 +59,12 @@ function merge(base: AppConfig, raw: any): AppConfig {
           }
         : base.statsDashboard,
     autoCompact:
-      raw?.autoCompact && typeof raw.autoCompact.idleHours === "number"
-        ? { idleHours: raw.autoCompact.idleHours }
+      raw?.autoCompact &&
+      (typeof raw.autoCompact.idleHours === "number" || typeof raw.autoCompact.window === "number")
+        ? {
+            ...(typeof raw.autoCompact.idleHours === "number" ? { idleHours: raw.autoCompact.idleHours } : {}),
+            ...(typeof raw.autoCompact.window === "number" ? { window: raw.autoCompact.window } : {}),
+          }
         : base.autoCompact,
   };
 }
@@ -127,6 +132,18 @@ export async function setStatsDashboard(channelId: string, messageId: string): P
 export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoCompact = { ...cfg.autoCompact, idleHours: hours };
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/** v2.20.2+ 设置界面写入口:一次可改阈值/闲置时长任意子集。 */
+export async function setAutoCompact(patch: { window?: number; idleHours?: number }): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.autoCompact = {
+    ...cfg.autoCompact,
+    ...(typeof patch.window === "number" ? { window: patch.window } : {}),
+    ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
+  };
   await writeConfig(cfg);
   return cfg;
 }

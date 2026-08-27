@@ -648,6 +648,13 @@ const autoCompactTriggered = new Map<string, boolean>(); // channelId → 本轮
 
 function loadAutoCompactThreshold(): number {
   try {
+    // v2.20.2+ Claudestra 独立配置优先(设置界面写这里;CC 的 settings.json 会拒
+    // 未知字段,只作旧安装兼容兜底)
+    const v = readConfigSync().autoCompact?.window;
+    if (v === 0) return 0;
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+  } catch { /* fallback */ }
+  try {
     const raw = readFileSync(`${process.env.HOME || ""}/.claude/settings.json`, "utf8");
     const cfg = JSON.parse(raw);
     const v = cfg?.autoCompactWindow;

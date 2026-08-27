@@ -68,7 +68,12 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
     case "agent_status":
       // trigger=interrupt 的 done → 前端给该回合标「⊘ 已打断」而非「✓ 完成」
       return d.status === "done"
-        ? { t: "done", ...(d.trigger === "interrupt" ? { interrupted: true } : {}) }
+        ? {
+            t: "done",
+            ...(d.trigger === "interrupt" ? { interrupted: true } : {}),
+            // v2.20.2+ 回合结束但后台还有活 → 前端标「后台继续中」而非绿勾
+            ...(d.bgPending ? { bgPending: true } : {}),
+          }
         : { t: "status", status: "running" };
     case "tool_start":
       return {
@@ -89,6 +94,10 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
         : null;
     case "assistant_text":
       return { t: "text", text: String(d.text ?? "") };
+    case "reply_pending":
+      // v2.20.2+ watcher 见到 reply 工具调用 → 「✍️ 正在回复…」状态
+      return { t: "replying" };
+
     case "chat_message": {
       // direction=in 且来源是用户(Web api/Discord user)→ user-in:另一端
       // 用户的发言实时画进本端视图(owner 2026-07-24:手机发的话电脑端要等对齐
@@ -101,7 +110,15 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
           // 对账去重失配 → 同一条消息双份(2026-07-24 用户截图实锤)
           const { content, attachments } = extractAttachments(d.text);
           if (!content && !attachments?.length) return null;
-          return { t: "user-in", text: content, ...(attachments?.length ? { attachments } : {}) };
+          // v2.20.2+ 带来源:peer/其它用户的发言在 UI 上要与本人区分(owner 实报
+          // 「看起来像我说的」)。web-ui 是本前端自己的 token,不标
+          const fromLabel = typeof d.from === "string" && d.from && d.from !== "web-ui" && d.from !== "?" ? d.from : undefined;
+          return {
+            t: "user-in",
+            text: content,
+            ...(fromLabel ? { from: fromLabel } : {}),
+            ...(attachments?.length ? { attachments } : {}),
+          };
         }
         return null;
       }

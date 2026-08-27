@@ -133,6 +133,18 @@ async function watchableAgents(): Promise<AgentLite[]> {
 
 // ── 活动生命周期 ───────────────────────────────────────────────────────
 
+/** v2.20.2+ 导出给 Stop hook:回合结束时该 agent 是否还有后台活动在跑
+ *  (subagent / bg shell)。有 → done 事件带 bgPending,web 不标绿勾标「后台
+ *  继续中」(owner 实报「长任务经常提前变成完成」——完成跟的是回合边界,而
+ *  长任务的回合常在等后台时先收尾)。名字两侧都可能带 agent- 前缀,归一比较。 */
+export function hasActiveBgActivities(agentName: string): boolean {
+  const norm = agentName.replace(/^agent-/, "");
+  for (const a of activities.values()) {
+    if (!a.finished && a.agentName.replace(/^agent-/, "") === norm) return true;
+  }
+  return false;
+}
+
 function activeCountFor(agentName: string): number {
   let n = 0;
   for (const a of activities.values()) if (a.agentName === agentName && !a.finished) n++;

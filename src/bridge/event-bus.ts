@@ -17,6 +17,7 @@ export type BridgeEventType =
   | "assistant_text"
   | "turn_duration"
   | "agent_status"
+  | "reply_pending" // v2.20.2+ watcher 见到 reply 工具调用 → web 显示「正在回复…」
   | "auto_deny"
   | "question"
   // AUQ 已应答/取消（Discord 按钮或 /api/v1 answer 端点触发），web 前端
