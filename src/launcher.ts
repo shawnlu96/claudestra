@@ -251,6 +251,7 @@ let lastUpdateCheck = 0;
 let lastNotifiedVersion = "";
 // v2.17.2 beta apply 重试状态(失败的 SHA 不再一次性放弃)+ 子进程日志落点
 let lastBetaAttemptSha = "";
+let lastDirtyNotifiedSha = ""; // 脏树阻塞通知按 SHA 去重,别每 30min 骚扰一次
 let lastBetaAttemptAt = 0;
 const BETA_UPDATE_LOG = `${LOG_DIR}/beta-update.log`;
 
@@ -291,7 +292,22 @@ async function checkBetaUpdates(autoOn: boolean) {
   if (remote === lastBetaAttemptSha && Date.now() - lastBetaAttemptAt < 10 * 60_000) return;
   lastBetaAttemptSha = remote;
   lastBetaAttemptAt = Date.now();
-  console.log(`🧪 beta 自动前进 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(结果见 ${BETA_UPDATE_LOG})`);
+  // v2.20.2+ 脏树先检并**如实上报**(peer 实报:用户微调软链进仓库的 skill →
+  // git pull 永远失败,而这里旧文案「自动前进」读起来像成功——版本停在旧的
+  // 三周没人发现)。阻塞是用户须知的状态,不是日志尾巴。
+  const dirty = await g("status", "--porcelain");
+  if (dirty) {
+    console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)})但仓库工作区脏——自动更新阻塞`);
+    if (remote !== lastDirtyNotifiedSha) {
+      lastDirtyNotifiedSha = remote;
+      await bridgeRequest({
+        type: "reply", chatId: CONTROL_CHANNEL_ID,
+        text: `⚠️ 自动更新被阻塞:仓库有未提交改动(常见原因:改了软链进仓库的 skill),git pull 会一直失败。\n处理:改动要保留就 commit;误改就 git checkout 还原。体检:bun src/manager.ts doctor`,
+      }).catch(() => {});
+    }
+    return;
+  }
+  console.log(`🧪 beta 自动前进尝试 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(成败见 ${BETA_UPDATE_LOG})`);
   const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
   await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
   Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {

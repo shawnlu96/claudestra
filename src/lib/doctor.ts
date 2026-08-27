@@ -386,6 +386,32 @@ async function checkGitHead(repoRoot: string): Promise<Check[]> {
   }
 }
 
+/** v2.20.2+ 脏工作区 = 自动更新静默阻塞(peer 实报:用户微调软链进仓库的 skill
+ *  → git pull 失败 → 版本停在旧的,三周没人发现)。这里把因果挑明。 */
+async function checkWorktreeClean(repoRoot: string): Promise<Check[]> {
+  try {
+    const p = Bun.spawn(["git", "status", "--porcelain"], { cwd: repoRoot, stdout: "pipe", stderr: "ignore" });
+    const out = (await new Response(p.stdout).text()).trim();
+    await p.exited;
+    if (p.exitCode !== 0) return [];
+    if (!out) {
+      return [{ group: "config", name: "工作区", status: "ok", detail: "干净(自动更新可正常前进)" }];
+    }
+    // porcelain 行是「XY<空格>路径」,但整体 trim 会吃掉首行的前导空格——按正则剥状态段,别数下标
+    const files = out.split("\n").map((l) => l.replace(/^\s*\S+\s+/, "")).slice(0, 3).join(", ");
+    const n = out.split("\n").length;
+    return [{
+      group: "config",
+      name: "工作区",
+      status: "warn",
+      detail: `有 ${n} 处未提交改动(${files}${n > 3 ? " …" : ""})——**自动更新已阻塞**,git pull 会一直失败`,
+      fix: "改动是自己要的就 commit;是误改(如微调了软链进仓库的 skill)就 git checkout -- <file>;想改 skill 又不想动仓库,把软链换成复制",
+    }];
+  } catch {
+    return [];
+  }
+}
+
 async function checkWebBuild(repoRoot: string): Promise<Check[]> {
   const buildId = `${repoRoot}/web/.next/BUILD_ID`;
   if (!existsSync(`${repoRoot}/web/node_modules`)) return []; // 未装 web 的实例不出这条
@@ -491,6 +517,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkIntegration(repoRoot),
     checkAgents(),
     checkGitHead(repoRoot),
+    checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
     checkDeployment(),
   ]);
