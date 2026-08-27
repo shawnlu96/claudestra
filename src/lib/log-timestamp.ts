@@ -22,7 +22,15 @@ export function enableTimestampLogs(): void {
   const origErr = console.error.bind(console);
   const origWarn = console.warn.bind(console);
 
-  const ts = () => `[${new Date().toISOString()}]`;
+  // 本地时间 + 时区偏移(peer 反馈 2026-08-27:UTC 的 Z 后缀在人工排查时
+  // 易被误读成本地时间;日志是给人看的,机器侧没有解析它的地方)
+  const ts = () => {
+    const d = new Date();
+    const off = -d.getTimezoneOffset();
+    const pad = (n: number) => String(Math.abs(n)).padStart(2, "0");
+    const iso = new Date(d.getTime() + off * 60_000).toISOString().slice(0, 19);
+    return `[${iso}${off >= 0 ? "+" : "-"}${pad(Math.trunc(off / 60))}:${pad(off % 60)}]`;
+  };
 
   console.log = (...a: unknown[]) => origLog(ts(), ...a);
   console.error = (...a: unknown[]) => origErr(ts(), ...a);

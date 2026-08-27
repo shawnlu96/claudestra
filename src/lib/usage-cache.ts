@@ -15,9 +15,11 @@ import { homedir } from "os";
 import { join } from "path";
 
 export const USAGE_CACHE_PATH = join(homedir(), ".claude-orchestrator", "usage-cache.json");
-/** 缓存多新才算数:statusline 每次渲染都写,10min 没写过 = 全机没有活跃会话,
- *  此时回退抓取(抓取自己也有 idle 判定,不会打谁)。 */
-export const USAGE_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+/** 「新鲜」阈值。⚠ 必须明显大于 stats-dashboard 的 TICK_MS(10min 兜底刷新)——
+ *  两者同为 10min 时闲置期每个 tick 都撞上刚过期的缓存,周期锁相地回退 TUI
+ *  抓取(peer 实测 2026-08-27:挂机一夜 ≈ 60 次敲键)。且过期≠抓取:见
+ *  deriveStaleUsage——闲置期用量不会变,陈旧值可推算,只有缓存完全不存在才抓。 */
+export const USAGE_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 
 export interface CachedUsage {
   sessionPct: number | null;
@@ -25,18 +27,27 @@ export interface CachedUsage {
   /** 人类可读本地时间(与 /status 面板解析出的字符串同角色)。 */
   sessionResets: string;
   weekResets: string;
+  /** 数值形态(epoch ms;识别不了为 null)——陈旧推算(deriveStaleUsage)要用。 */
+  sessionResetsAtMs: number | null;
+  weekResetsAtMs: number | null;
   scrapedAt: number;
+}
+
+/** Unix 秒 / ISO 字符串 → epoch ms;识别不了返回 null。 */
+export function resetTsMs(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v) && v > 1e9) return v * 1000;
+  if (typeof v === "string" && v) {
+    const p = new Date(v);
+    if (!Number.isNaN(p.getTime())) return p.getTime();
+  }
+  return null;
 }
 
 /** Unix 秒 / ISO 字符串 → 本地可读;识别不了返回空串。 */
 export function formatResetTs(v: unknown): string {
-  let d: Date | null = null;
-  if (typeof v === "number" && Number.isFinite(v) && v > 1e9) d = new Date(v * 1000);
-  else if (typeof v === "string" && v) {
-    const p = new Date(v);
-    if (!Number.isNaN(p.getTime())) d = p;
-  }
-  if (!d) return "";
+  const ms = resetTsMs(v);
+  if (ms === null) return "";
+  const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
@@ -66,6 +77,8 @@ export function parseUsageCache(
     weekPct,
     sessionResets: formatResetTs(d.sessionResets),
     weekResets: formatResetTs(d.weekResets),
+    sessionResetsAtMs: resetTsMs(d.sessionResets),
+    weekResetsAtMs: resetTsMs(d.weekResets),
     scrapedAt,
   };
 }
@@ -77,4 +90,34 @@ export function readUsageCache(nowMs = Date.now(), path = USAGE_CACHE_PATH): Cac
   } catch {
     return null;
   }
+}
+
+/** 不限龄读取(陈旧推算入口)。 */
+export function readUsageCacheStale(nowMs = Date.now(), path = USAGE_CACHE_PATH): CachedUsage | null {
+  try {
+    return parseUsageCache(readFileSync(path, "utf8"), nowMs, Number.POSITIVE_INFINITY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 陈旧缓存推算(peer 方案 B,2026-08-27):statusline 停写 = 全机没有会话在
+ * 渲染 = 没人在消耗——**闲置期用量不会变,旧值就是真值**。唯一会变的是窗口
+ * 重置:reset 时刻已过 → 对应百分比归零、reset 时间清空(下一个窗口从首次
+ * 使用起算,离线推不出来)。把这条事实写进代码,而不是靠敲 TUI 轮询去发现它。
+ */
+export function deriveStaleUsage(c: CachedUsage, nowMs: number): CachedUsage {
+  const out = { ...c };
+  if (out.sessionResetsAtMs !== null && nowMs >= out.sessionResetsAtMs) {
+    out.sessionPct = out.sessionPct === null ? null : 0;
+    out.sessionResets = "";
+    out.sessionResetsAtMs = null;
+  }
+  if (out.weekResetsAtMs !== null && nowMs >= out.weekResetsAtMs) {
+    out.weekPct = out.weekPct === null ? null : 0;
+    out.weekResets = "";
+    out.weekResetsAtMs = null;
+  }
+  return out;
 }

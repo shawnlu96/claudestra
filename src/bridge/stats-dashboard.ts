@@ -34,7 +34,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { readConfig, readConfigSync, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { readUsageCache } from "../lib/usage-cache.js";
+import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
 import {
   computeAgentStats,
@@ -415,6 +415,24 @@ async function getAccountUsage(block = true): Promise<AccountUsage | null> {
       apiDuration: accountCache?.apiDuration ?? null,  // 沿用上次抓到的旧值
       raw: "statusline cache",
       scrapedAt: cached.scrapedAt,
+    };
+    return accountCache;
+  }
+  // 缓存过期 ≠ 去抓取(peer 方案 B):statusline 停写=没人在用=用量没变,
+  // 旧值可推算(reset 已过则归零)。只有缓存**完全不存在**才落到 TUI 抓取——
+  // 否则 30min 过期与 10min 兜底 tick 锁相,挂机一夜 ≈ 60 次敲键。
+  const stale = readUsageCacheStale();
+  if (stale) {
+    const d = deriveStaleUsage(stale, Date.now());
+    accountCache = {
+      sessionPct: d.sessionPct,
+      sessionResets: d.sessionResets,
+      weekPct: d.weekPct,
+      weekResets: d.weekResets,
+      totalCost: accountCache?.totalCost ?? null,
+      apiDuration: accountCache?.apiDuration ?? null,
+      raw: "statusline cache (stale)",
+      scrapedAt: d.scrapedAt,
     };
     return accountCache;
   }
