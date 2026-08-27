@@ -159,7 +159,7 @@ syncDiscordOwnersFromEnv(ALLOWED_USER_IDS)
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
-import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard } from "./bridge/stats-dashboard.js";
+import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard, noteSaveCompactInjected } from "./bridge/stats-dashboard.js";
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
@@ -1862,6 +1862,7 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string): Pr
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
+    noteSaveCompactInjected(`master:${agent.name}`);
     await tmuxSendLine(`master:${agent.name}`, "/save-compact");
     console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId})`);
     await interaction

@@ -207,6 +207,18 @@ async function findIdleScrapeTarget(): Promise<string | null> {
       await tmuxSendEscape(t).catch(() => {});
       continue;
     }
+    // compact 盲区双守卫(peer 2026-08-27:compact 中的 pane 判 idle → 被抓取
+    // 硬中断,自激拖长)。①bridge 自有状态:刚注入过 /save-compact 的窗口
+    // 15min 内不当抓取源(不依赖 TUI 文案);②文案识别:兜住用户手动 /compact
+    // 与超时后仍在跑的超长 compact。
+    const scTs = recentSaveCompact.get(t);
+    if (scTs && Date.now() - scTs < SAVE_COMPACT_GUARD_MS) {
+      continue;
+    }
+    if (/compacting/i.test(pane)) {
+      console.log(`📊 ${t} 正在 compact,跳过抓取候选`);
+      continue;
+    }
     if (paneIdle(pane)) return t;
   }
   return null;
@@ -656,9 +668,25 @@ function tierOf(tokens: number): number {
   return t;
 }
 
+/**
+ * 近期注入过 /save-compact 的窗口(tmux target → ts)。compact 期间 TUI 既不
+ * idle 也无常规 busy 指示,paneIdle 判不出来——抓取选中它再敲 /status+Esc 就是
+ * 硬中断,且「compact 让窗口看起来闲 → 被抓取打断 → compact 拖更久」构成自激
+ * (peer 实报 2026-08-27:market-maker 一次 compact 被掐 4 次拖 11 分钟)。
+ * 注入后 15 分钟内不作为抓取源;文案识别(/compacting/i)另兜手动 /compact。
+ */
+const recentSaveCompact = new Map<string, number>();
+const SAVE_COMPACT_GUARD_MS = 15 * 60 * 1000;
+
+/** bridge 的手动按钮路径(savecompact:)也要记账——两条注入路径同一份守卫。 */
+export function noteSaveCompactInjected(target: string): void {
+  recentSaveCompact.set(target, Date.now());
+}
+
 async function triggerAutoSaveCompact(a: AgentStat): Promise<void> {
   try {
     const target = a.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(a.name);
+    noteSaveCompactInjected(target);
     await tmuxSendLine(target, "/save-compact");
     console.log(`🧹 auto save-compact triggered: ${a.name} @ ${formatTokens(a.contextTokens)} (threshold=${formatTokens(loadAutoCompactThreshold())})`);
   } catch (e) {
