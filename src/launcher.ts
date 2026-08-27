@@ -6,6 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { realpath } from "fs/promises";
 import { restartFailureReason } from "./lib/restart-result.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
@@ -160,6 +161,68 @@ async function startMaster() {
   await Bun.sleep(500);
 
   return bringUpClaudeInMasterWindow();
+}
+
+/**
+ * v2.20.2+ window 0 正身自检 + 归位(peer 实报:restart 重建让 agent 抢占 index 0,
+ * master 被挤到高位索引后,launcher 的健康检查/自动确认/idle 判定全部错位)。
+ *
+ * 判据:master 的正身 = pane 当前目录在 MASTER_DIR(realpath 对齐),且窗口名
+ * 不是 agent-*。agent 窗口一律 agent-* 命名且按名寻址(windowTarget),挪动
+ * 索引对它们无感;只有 launcher 依赖 index 0,所以恢复不变量而不是改遍全部
+ * 消费方(stats-dashboard 的 master:0、bridge 的 master 中断同样受益)。
+ *
+ * 返回 true = 本轮动过拓扑(调用方 continue,下轮再做健康检查)。
+ */
+async function ensureMasterAtZero(): Promise<boolean> {
+  const raw = await tmuxRaw([
+    "list-windows", "-t", SESSION_NAME, "-F", "#{window_index}\t#{window_name}\t#{pane_current_path}",
+  ]).catch(() => "");
+  if (!raw) return false;
+  const wins = raw
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      const [idx, name, cwd] = l.split("\t");
+      return { idx: Number(idx), name: name ?? "", cwd: cwd ?? "" };
+    });
+  const masterDirReal = await realpathSafe(MASTER_DIR);
+  const isMasterWin = async (w: { name: string; cwd: string }) =>
+    !w.name.startsWith("agent-") && (await realpathSafe(w.cwd)) === masterDirReal;
+  const w0 = wins.find((w) => w.idx === 0);
+  if (!w0) return false; // window 0 丢失走 recoverMasterWindow 的既有路径
+  if (await isMasterWin(w0)) return false; // 正身在位,无事
+
+  // window 0 被占。先找真 master 在哪
+  let trueMaster: { idx: number } | null = null;
+  for (const w of wins) {
+    if (w.idx !== 0 && (await isMasterWin(w))) {
+      trueMaster = { idx: w.idx };
+      break;
+    }
+  }
+  const freeIdx = Math.max(...wins.map((w) => w.idx)) + 1;
+  console.log(
+    `🚨 window 0 被「${w0.name}」占位(cwd=${w0.cwd}),真 master ${trueMaster ? `在 index ${trueMaster.idx}` : "不在任何窗口"}——归位中`
+  );
+  // 占位者挪去队尾(agent 按名寻址,挪索引无感)
+  await tmuxRaw(["move-window", "-s", `${SESSION_NAME}:0`, "-t", `${SESSION_NAME}:${freeIdx}`]).catch(() => {});
+  if (trueMaster) {
+    await tmuxRaw(["move-window", "-s", `${SESSION_NAME}:${trueMaster.idx}`, "-t", `${SESSION_NAME}:0`]).catch(() => {});
+    console.log(`✅ master 已归位 window 0(占位者 → index ${freeIdx})`);
+  } else {
+    // 真 master 窗口不存在:index 0 现在空了,下轮 masterWindowExists 走重建
+    console.log("⚠️ 找不到 master 窗口,index 0 已腾空,下轮走重建路径");
+  }
+  return true;
+}
+
+async function realpathSafe(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch {
+    return p;
+  }
 }
 
 /**
@@ -749,6 +812,13 @@ async function main() {
       await recoverMasterWindow();
       continue;
     }
+
+    // v2.20.2+ 归位自检(peer 实报 2026-08-27):全量 restart 的 kill-window+重建
+    // 会让 tmux 把空出来的 index 0 分给某个 agent——此后本 launcher 的所有
+    // master:0 探测/确认/按键全部作用在那个无辜 agent 上,而真 master 挂了也
+    // 没人拉(window 0「有 claude 在跑」= 误判健在),静默失联。每轮先验明
+    // window 0 的正身,被占就把 agent 挪走、把真 master 挪回来。
+    if (await ensureMasterAtZero()) continue; // 动过拓扑,本轮到此,下轮再体检
 
     // 检查是否卡在确认弹窗
     const pane = await captureLast(10);
