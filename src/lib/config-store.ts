@@ -5,7 +5,7 @@
  * 区别于 .env（安装期常量）：这里放运行时可变的开关。
  */
 
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { mkdir, rename } from "fs/promises";
 
 const HOME = process.env.HOME || "";
@@ -28,6 +28,8 @@ export interface AppConfig {
   lang: AppLang;
   /** v2.4.25+ 只读用量看板频道 + 常驻消息 id（stats-dashboard 用）。 */
   statsDashboard?: { channelId: string; messageId: string };
+  /** v2.20.1+ auto save-compact 闲置门槛（小时）。0 = 超线即触发，无需闲置。 */
+  autoCompact?: { idleHours?: number };
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -55,6 +57,10 @@ function merge(base: AppConfig, raw: any): AppConfig {
             messageId: String(raw.statsDashboard.messageId || ""),
           }
         : base.statsDashboard,
+    autoCompact:
+      raw?.autoCompact && typeof raw.autoCompact.idleHours === "number"
+        ? { idleHours: raw.autoCompact.idleHours }
+        : base.autoCompact,
   };
 }
 
@@ -62,6 +68,17 @@ export async function readConfig(): Promise<AppConfig> {
   if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
   try {
     const raw = await Bun.file(CONFIG_PATH).json();
+    return merge(DEFAULT_CONFIG, raw);
+  } catch {
+    return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
+  }
+}
+
+/** 同步读取配置（bridge 等不方便 await 的场景）。 */
+export function readConfigSync(): AppConfig {
+  if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
+  try {
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
     return merge(DEFAULT_CONFIG, raw);
   } catch {
     return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
@@ -103,6 +120,13 @@ export async function setLang(lang: AppLang): Promise<AppConfig> {
 export async function setStatsDashboard(channelId: string, messageId: string): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.statsDashboard = { channelId, messageId };
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.autoCompact = { ...cfg.autoCompact, idleHours: hours };
   await writeConfig(cfg);
   return cfg;
 }

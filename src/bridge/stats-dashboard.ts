@@ -32,7 +32,7 @@ import {
   windowTarget,
   tmuxSendLine,
 } from "../lib/tmux-helper.js";
-import { readConfig, setStatsDashboard } from "../lib/config-store.js";
+import { readConfig, readConfigSync, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { discordCreateChannel } from "./discord-api.js";
 import {
@@ -618,6 +618,15 @@ function loadAutoCompactThreshold(): number {
 const DEFAULT_AUTO_COMPACT_IDLE_HOURS = 3;
 
 function loadAutoCompactIdleMs(): number {
+  try {
+    // v2.20.1+: Claudestra 独立配置,避免往 ~/.claude/settings.json 写未知字段被 CC 校验拒绝。
+    const cfg = readConfigSync();
+    const v = cfg.autoCompact?.idleHours;
+    if (v === 0) return 0;
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v * 3600_000;
+  } catch { /* fallback */ }
+
+  // 旧安装兼容:曾经尝试放在 ~/.claude/settings.json(会被 CC 校验拒绝,保留读取兜底)。
   try {
     const raw = readFileSync(`${process.env.HOME || ""}/.claude/settings.json`, "utf8");
     const v = JSON.parse(raw)?.autoCompactIdleHours;
