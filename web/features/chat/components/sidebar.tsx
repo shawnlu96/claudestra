@@ -19,6 +19,15 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
  *  重排发生前)记录目标行——那才是用户的真实意图;click 时优先用它。
  *  模块级共享:重排后接住 click 的是别的行实例,必须能读到按下方记录的值。 */
 let tapIntent: { name: string; ts: number } | null = null;
+
+/** v2.21+ 方案 A 的沉寂判定:>30 天没真实对话(或从未说话且已停止)。
+ *  忙碌的永不算沉寂。30s tick 重渲时会重估,模块级函数与 fmtAgo 同款先例。 */
+const DORMANT_MS = 30 * 24 * 3600_000;
+function isDormantAgent(a: AgentSession): boolean {
+  if (a.busy) return false;
+  const ts = a.lastActivityTs ?? null;
+  return ts ? Date.now() - ts > DORMANT_MS : a.status === "stopped";
+}
 /** 意图有效窗口:covers 移动端最长 click 派发延迟,又不至于让陈旧意图
  *  污染下一次独立点击(键盘激活无 pointerdown,走闭包兜底)。 */
 const TAP_INTENT_TTL_MS = 1_200;
@@ -77,6 +86,7 @@ function AgentRow({
   manage = false,
   checked = false,
   onToggleCheck,
+  projEmoji,
 }: {
   a: AgentSession;
   active: boolean;
@@ -90,6 +100,8 @@ function AgentRow({
   manage?: boolean;
   checked?: boolean;
   onToggleCheck?: () => void;
+  /** v2.21+ 单人 project 的合并行:project 自定义 emoji 前缀(未自定义不显,防噪) */
+  projEmoji?: string;
 }) {
   const store = useChatStoreApi();
   const t = useT(); // 也订阅语言切换,保证 fmtAgo 标签随切换重渲
@@ -283,6 +295,7 @@ function AgentRow({
           )}
           <span className="min-w-0 flex-1 truncate text-[15px] sm:text-sm">
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
+            {projEmoji && <span className="mr-1">{projEmoji}</span>}
             {t(a.displayName)}
             {a.pinnedMaster && (
               <span className="badge badge-primary badge-xs ml-1 align-middle">
@@ -477,6 +490,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       return new Set();
     }
   });
+  // 「💤 沉寂」组的展开态:默认折叠,会话内记忆即可(不持久化——每次进来先收起)
+  const [dormantOpen, setDormantOpen] = useState(false);
   const toggleProjectCollapse = (id: string) =>
     setCollapsedProjects((prev) => {
       const next = new Set(prev);
@@ -519,6 +534,12 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       }
     }
   }
+  // 方案 A(owner 2026-08-28):>30 天没动静的 agent 收进底部默认折叠的「💤 沉寂」
+  // ——死 agent 不再占视野。组以「全员沉寂」为准整组下沉;忙碌的永不算沉寂。
+  const entryDormant = (e: SidebarEntry) =>
+    e.kind === "row" ? isDormantAgent(e.a) : e.items.every(isDormantAgent);
+  const activeEntries = entries.filter((e) => !entryDormant(e));
+  const dormantEntries = entries.filter(entryDormant);
 
   return (
     <aside
@@ -768,10 +789,11 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             ))}
           </ul>
         ) : (
-          /* v2.21+ project 分组:仅 ≥2 成员的 project 出组头(树形缩进),
-             其余平铺——单人组的组头是同名冗余噪音(owner 2026-08-28 图评) */
-          <ul className="flex w-full list-none flex-col gap-0.5 p-0">
-            {entries.map((e) => {
+          /* v2.21+ 方案 A(owner 2026-08-28):统一两级树——仅 ≥2 成员的 project
+             出组头(树形缩进),单人项目合并为一行(自定义 emoji 前缀);
+             >30 天沉寂的整体收进底部默认折叠的「💤 沉寂」 */
+          (() => {
+            const renderEntry = (e: SidebarEntry) => {
               if (e.kind === "row") {
                 return (
                   <AgentRow
@@ -785,6 +807,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                     manage={manage}
                     checked={sel.has(e.a.name)}
                     onToggleCheck={() => toggleSel(e.a.name)}
+                    projEmoji={(e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined}
                   />
                 );
               }
@@ -839,8 +862,45 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                   )}
                 </li>
               );
-            })}
-          </ul>
+            };
+            return (
+              <ul className="flex w-full list-none flex-col gap-0.5 p-0">
+                {activeEntries.map(renderEntry)}
+                {dormantEntries.length > 0 && (
+                  <li key="__dormant__" className="mt-1">
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] font-medium text-base-content/45 transition-colors hover:bg-base-300/40 hover:text-base-content/70"
+                      onClick={() => setDormantOpen((v) => !v)}
+                    >
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className={`shrink-0 transition-transform ${dormantOpen ? "" : "-rotate-90"}`}
+                      >
+                        <path d="m6 9 6 6 6-6" />
+                      </svg>
+                      <span>💤 {t("沉寂")}</span>
+                      <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/35">
+                        {dormantEntries.reduce((n, e) => n + (e.kind === "row" ? 1 : e.items.length), 0)}
+                      </span>
+                    </button>
+                    {dormantOpen && (
+                      <ul className="flex list-none flex-col gap-0.5 p-0 opacity-75">
+                        {dormantEntries.map(renderEntry)}
+                      </ul>
+                    )}
+                  </li>
+                )}
+              </ul>
+            );
+          })()
         )}
       </div>
 
