@@ -490,7 +490,13 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       return next;
     });
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
-  const groups: { id: string; meta?: ProjectMeta; items: AgentSession[] }[] = [];
+  // 分组只在 project 有 ≥2 个成员时呈现(owner 2026-08-28 图评:「agent 比
+  // project 还大,毫无条理」——单人组的组头 = 同名冗余噪音)。单成员/未分组
+  // 的 agent 平铺,停留在自身活动排序的位次上;组整体占据最活跃成员的位次。
+  type SidebarEntry =
+    | { kind: "group"; id: string; meta?: ProjectMeta; items: AgentSession[] }
+    | { kind: "row"; a: AgentSession };
+  const entries: SidebarEntry[] = [];
   if (!q) {
     const byId = new Map<string, AgentSession[]>();
     for (const a of filtered) {
@@ -499,8 +505,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       if (arr) arr.push(a);
       else byId.set(key, [a]);
     }
-    for (const [id, items] of byId) groups.push({ id, meta: id ? projMeta.get(id) : undefined, items });
-    groups.sort((g1, g2) => Number(!g1.id) - Number(!g2.id));
+    const emitted = new Set<string>();
+    for (const a of filtered) {
+      const key = a.projectId || "";
+      const items = byId.get(key)!;
+      if (key && items.length >= 2) {
+        if (!emitted.has(key)) {
+          emitted.add(key);
+          entries.push({ kind: "group", id: key, meta: projMeta.get(key), items });
+        }
+      } else {
+        entries.push({ kind: "row", a });
+      }
+    }
   }
 
   return (
@@ -751,56 +768,79 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             ))}
           </ul>
         ) : (
-          /* v2.21+ project 分组:组头可折叠,localStorage 记忆;未分组沉底 */
-          groups.map((g) => {
-            const isCollapsed = !!g.id && collapsedProjects.has(g.id);
-            const groupBusy = g.items.some((i) => i.busy || (active === i.name && streaming));
-            return (
-              <div key={g.id || "__ungrouped__"} className="mb-0.5">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-semibold uppercase tracking-wider text-base-content/40 transition-colors hover:bg-base-300/40 hover:text-base-content/60"
-                  onClick={() => g.id && toggleProjectCollapse(g.id)}
-                >
-                  <svg
-                    width="10"
-                    height="10"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className={`shrink-0 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
+          /* v2.21+ project 分组:仅 ≥2 成员的 project 出组头(树形缩进),
+             其余平铺——单人组的组头是同名冗余噪音(owner 2026-08-28 图评) */
+          <ul className="flex w-full list-none flex-col gap-0.5 p-0">
+            {entries.map((e) => {
+              if (e.kind === "row") {
+                return (
+                  <AgentRow
+                    key={e.a.name}
+                    a={e.a}
+                    active={active === e.a.name}
+                    busyLive={active === e.a.name && streaming}
+                    pinned={pinSet.has(e.a.name)}
+                    onTogglePin={() => togglePin(e.a.name)}
+                    onSelect={onSelect}
+                    manage={manage}
+                    checked={sel.has(e.a.name)}
+                    onToggleCheck={() => toggleSel(e.a.name)}
+                  />
+                );
+              }
+              const isCollapsed = collapsedProjects.has(e.id);
+              const groupBusy = e.items.some((i) => i.busy || (active === i.name && streaming));
+              return (
+                <li key={`g:${e.id}`}>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] font-semibold text-base-content/80 transition-colors hover:bg-base-300/40"
+                    onClick={() => toggleProjectCollapse(e.id)}
                   >
-                    <path d="m6 9 6 6 6-6" />
-                  </svg>
-                  <span className="shrink-0 normal-case">{g.meta?.emoji || "📁"}</span>
-                  <span className="truncate normal-case">{g.id ? g.meta?.name || g.id : t("未分组")}</span>
-                  <span className="ml-auto shrink-0 font-normal">{g.items.length}</span>
-                  {isCollapsed && groupBusy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
-                </button>
-                {!isCollapsed && (
-                  <ul className="flex w-full list-none flex-col gap-0.5 p-0">
-                    {g.items.map((a) => (
-                      <AgentRow
-                        key={a.name}
-                        a={a}
-                        active={active === a.name}
-                        busyLive={active === a.name && streaming}
-                        pinned={pinSet.has(a.name)}
-                        onTogglePin={() => togglePin(a.name)}
-                        onSelect={onSelect}
-                        manage={manage}
-                        checked={sel.has(a.name)}
-                        onToggleCheck={() => toggleSel(a.name)}
-                      />
-                    ))}
-                  </ul>
-                )}
-              </div>
-            );
-          })
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className={`shrink-0 text-base-content/40 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
+                    >
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                    <span className="shrink-0 text-[14px]">{e.meta?.emoji || "📁"}</span>
+                    <span className="truncate">{e.meta?.name || e.id}</span>
+                    <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">
+                      {e.items.length}
+                    </span>
+                    {isCollapsed && groupBusy && (
+                      <span className="size-1.5 shrink-0 rounded-full bg-warning" />
+                    )}
+                  </button>
+                  {!isCollapsed && (
+                    <ul className="ml-3 flex list-none flex-col gap-0.5 border-l border-base-content/10 pl-1.5">
+                      {e.items.map((a) => (
+                        <AgentRow
+                          key={a.name}
+                          a={a}
+                          active={active === a.name}
+                          busyLive={active === a.name && streaming}
+                          pinned={pinSet.has(a.name)}
+                          onTogglePin={() => togglePin(a.name)}
+                          onSelect={onSelect}
+                          manage={manage}
+                          checked={sel.has(a.name)}
+                          onToggleCheck={() => toggleSel(a.name)}
+                        />
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
 
