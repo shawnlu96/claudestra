@@ -312,6 +312,63 @@ interface PendingAgentCall {
 const pendingAgentCalls = new Map<string, PendingAgentCall>();
 
 /**
+ * v2.21.1+ 目标回合中的 agent→agent 消息押后队列(owner 2026-08-28「miniapp 发
+ * 不到 backend」实锤)。CC 2.1.247 对回合中到达的 channel 通知**分窗口处置**:
+ * 工具执行窗口会 queue-operation 排队到回合后浮出(tmp 对照实验证实),但回合
+ * 起始的推理流窗口里到达的通知被静默丢弃(miniapp 08:00:22 → backend 回合始于
+ * 08:00:05、首个 assistant 输出 08:00:49,消息永远没落 jsonl)。CC 内部窗口我们
+ * 管不了 → bridge 侧根治:目标在回合中就不 ws.send,压进本队列,Stop hook 后
+ * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙),押满 30min 通知 caller 放弃。
+ */
+const heldLocalMsgs = new Map<string, { env: RouterEnvelope; to: RouterLocalEndpoint; heldAt: number }[]>();
+const HELD_MSG_MAX_MS = 30 * 60_000;
+
+/** 目标 agent 是否正在回合中(pane 双信号 + event-bus 状态,与人类抢占同判据)。 */
+async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
+  try {
+    let win: string | null = null;
+    if (channelId === CONTROL_CHANNEL_ID) win = `${MASTER_SESSION}:0`;
+    else {
+      const reg = (await readRegistryAgents()).find((a) => a.channelId === channelId);
+      if (reg) win = windowTarget(reg.name);
+    }
+    const tail10 = win
+      ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
+      : "";
+    return (
+      /esc to interrupt/i.test(tail10) ||
+      /…\s*\(\d+m?\s*\d*s\b/.test(tail10) ||
+      getAgentStatus(evAgent) === "thinking"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** 押后队列投递:Stop hook / 周期扫描调用。目标还忙就原样留队等下一次触发;
+ *  投递中途目标又开新回合时,deliverToLocal 的忙检会把剩余消息重新押上(串行化)。 */
+async function flushHeldLocalMsgs(channelId: string, reason: string) {
+  const q = heldLocalMsgs.get(channelId);
+  if (!q || q.length === 0) return;
+  const evAgent = q[0].to.agentName || channelId;
+  if (await localAgentWorking(channelId, evAgent)) return;
+  heldLocalMsgs.delete(channelId);
+  for (const item of q) {
+    // ws 可能已换代(channel-server 重连):按 channelId 取最新连接
+    const fresh = clients.get(channelId);
+    const to: RouterLocalEndpoint = fresh ? { ...item.to, ws: fresh.ws, cwd: fresh.cwd } : item.to;
+    const d = await deliverToLocal(item.env, to);
+    if (d.outcome.kind === "sent") {
+      // push-back 的 10min 失效窗从真正送达起算——否则目标长回合期间
+      // pendingAgentCalls 被扫掉,对方回了 caller 也收不到(本次事故的次生伤)
+      const pac = pendingAgentCalls.get(channelId);
+      if (pac) pac.ts = Date.now();
+      console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
+    }
+  }
+}
+
+/**
  * v2.0.16+ inter-agent 消息看门狗。每当 bridge 把一条来自**另一个 agent / master**
  * 的消息投递到某个 agent 的 ws（send_to_agent / pushback / reply→别agent频道 forward
  * 任一路径都经过 deliverToLocal），记一条 (接收 agent channelId) → { fromLabel, retries }。
@@ -706,6 +763,18 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     } catch (e) {
       console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
     }
+  }
+  // ── v2.21.1+ agent→agent 忙时押后(见 heldLocalMsgs 注释):目标回合中就不发,
+  // 押进队列等 Stop——CC 的回合中通知处置有丢弃窗口,回合外投递才是可靠的。
+  // 人类/API 消息不押:上面已抢占 C-c,投递时目标已被腾空;response 回执、
+  // send_to_agent、pushback、reply 转发(from.kind=local 全集)都押。
+  if (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent))) {
+    const q = heldLocalMsgs.get(to.channelId) ?? [];
+    q.push({ env, to, heldAt: Date.now() });
+    heldLocalMsgs.set(to.channelId, q);
+    console.log(`⏸ agent 消息押后(${evAgent} 回合中): 来自 ${meta.user},队列 ${q.length} 条`);
+    // 对调用方语义仍是「已受理投递」;真正 ws.send 在 Stop/扫描时发生
+    return { envelope: env, outcome: { kind: "sent" } };
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
@@ -3497,6 +3566,33 @@ setInterval(() => {
       console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
     }
   }
+  // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押满 30min
+  // 通知 caller 放弃(不能让消息无声蒸发——那正是本次要修的病)。
+  for (const [channelId, q] of heldLocalMsgs.entries()) {
+    const expired = q.filter((i) => now - i.heldAt > HELD_MSG_MAX_MS);
+    if (expired.length > 0) {
+      heldLocalMsgs.set(channelId, q.filter((i) => now - i.heldAt <= HELD_MSG_MAX_MS));
+      if (heldLocalMsgs.get(channelId)!.length === 0) heldLocalMsgs.delete(channelId);
+      for (const item of expired) {
+        console.log(`🧹 押后消息过期放弃: → ${item.to.agentName || channelId}`);
+        if (item.env.from.kind === "local") {
+          try {
+            const caller = clients.get(item.env.from.channelId);
+            caller?.ws.send(JSON.stringify({
+              type: "message",
+              content: `[⚠️ bridge] 你 30 分钟前发给 ${item.to.agentName || channelId} 的消息始终无法送达(对方持续处于回合中),已放弃。如仍需要,请重发。原文开头: ${String(item.env.content).slice(0, 150)}`,
+              meta: {
+                chat_id: item.env.from.channelId, message_id: `held_fail_${Date.now()}`,
+                ts: new Date().toISOString(), trigger: "system", intent: "notification",
+                thread_id: newThreadId(), user: "bridge", user_id: "bridge", is_bridge: "true",
+              },
+            }));
+          } catch { /* caller 也没了就算了 */ }
+        }
+      }
+    }
+    if (heldLocalMsgs.get(channelId)?.length) void flushHeldLocalMsgs(channelId, "sweep");
+  }
   // v2.6.0+ API 会话状态 TTL（10min）：pending 请求、轮询结果、附件登记
   sweepApiState(now);
   // v2.13.1+ pendingThreads 也要扫。它是唯一一个既不在这里清扫、也不在 ws close
@@ -3565,6 +3661,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
+        // v2.21.1+ 回合结束 → 投递押后的 agent→agent 消息(2s 让 TUI 回到提示符)
+        if (heldLocalMsgs.get(channelId)?.length) {
+          setTimeout(() => void flushHeldLocalMsgs(channelId, "stop"), 2000);
+        }
       }
       // typing + safety timer：本 channel + 共享 ws 的所有 channel 都停（参见
       // sameWsChannels 的注释）。
