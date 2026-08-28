@@ -8,6 +8,7 @@ import type {
   PendingAsk,
   BgTaskView,
   CcTaskView,
+  ProjectMeta,
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
 import { hydrateHistoryMessages } from "./history-hydrate";
@@ -79,6 +80,8 @@ function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): Chat
 
 interface ChatState {
   agents: AgentSession[];
+  /** v2.21+ project 元数据（侧栏分组组头 + 管理弹窗数据源），随 agents 一起拉。 */
+  projects: ProjectMeta[];
   loadingAgents: boolean;
   /** agents 首拉是否已完成（成败均置 true）。false = 入场期，Splash 在场，
    *  侧栏不许显示「暂无会话」（SSR 首帧就渲染空态是 2026-07-13 的观感 bug）。 */
@@ -173,6 +176,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   constructor() {
     super({
       agents: [],
+      projects: [],
       loadingAgents: false,
       agentsReady: false,
       activeAgent: "",
@@ -284,11 +288,32 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         s.loadingAgents = false;
         s.agentsReady = true;
       });
+      void this.loadProjects();
     } catch {
       this.produce((s) => {
         s.loadingAgents = false;
         s.agentsReady = true; // 失败也算入场结束——Splash 得退场，别永远盖着
       });
+    }
+  }
+
+  /**
+   * v2.21+ project 元数据（侧栏组头的 emoji/显示名 + 管理弹窗）。失败静默——
+   * 分组渲染对 projects 缺失有兜底（组头退化为裸 id）。仅内容变化才 produce。
+   */
+  public async loadProjects() {
+    try {
+      const res = await fetch("/api/projects", { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) return;
+      const json = (await res.json()) as { ok?: boolean; projects?: ProjectMeta[] };
+      if (!json.ok || !Array.isArray(json.projects)) return;
+      const next = json.projects;
+      if (JSON.stringify(next) === JSON.stringify(this.state.projects)) return;
+      this.produce((s) => {
+        s.projects = next;
+      });
+    } catch {
+      /* 静默 */
     }
   }
 
@@ -369,6 +394,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         }
         s.agents = next;
       });
+      void this.loadProjects();
     } catch {
       /* 轮询失败静默，下一轮再试 */
     }
@@ -381,13 +407,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     name: string,
     dir: string,
     purpose?: string,
-    opts?: { model?: string; effort?: string }
+    opts?: { model?: string; effort?: string; project?: string }
   ): Promise<{ ok: boolean; error?: string; agent?: string }> {
     try {
       const res = await fetch("/api/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, dir, purpose, model: opts?.model, effort: opts?.effort }),
+        body: JSON.stringify({
+          name, dir, purpose,
+          model: opts?.model, effort: opts?.effort,
+          ...(opts?.project ? { project: opts.project } : {}),
+        }),
       });
       if (res.status === 401) {
         this.gotoLogin();

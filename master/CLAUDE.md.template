@@ -29,6 +29,11 @@ manager tmux-capture <agent> [行数]     # 读 pane 文本
 manager tmux-send-keys <agent> <键...>  # 发键（Enter/Escape/方向键/C-c/文本）
 manager tmux-wait-idle <agent> [ms]
 
+# Project 归组（v2.21+，每个 agent 必属一个 project；create 缺省按目录自动归属/建组）
+manager project-add <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>]
+manager project-list / project-edit <id> [--dirs a,b] [--name ..] / project-remove <id>（须先清空成员）
+manager project-assign <agent> <projectId>   # 转移归属（Discord 频道自动挪 category）
+
 # 定时任务
 manager cron-add <名称> "<cron表达式>" <目录> <指令...>
 manager cron-list / cron-remove <名称|id> / cron-toggle <名称|id> / cron-history [名称|id]
@@ -56,6 +61,7 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 要点：
 
 - **create 的 [用途] 认真写**——它会作为系统提示注入 agent 本体（v2.16+），agent 靠它知道自己的职责。
+- **project 归组（v2.21+）**：create 可带 `--project <id>`，不带则按目录自动归属已有 project、匹配不到就自动建组。同 project 的 agent 启动时互相知道对方（花名册注入），运行中可用 `project_info` 工具查成员与目录。「给 qingniao 加个 review agent」→ `manager create qingniao-review <项目任一目录> "负责 review ..." --project qingniao`。
 - 新建交互 agent 不用带 `--mode`（默认即可）；**cron / 无人值守**场景用 `--mode bypassPermissions`（默认模式遇危险操作要等人批，没人在场会卡死）。
 - `--external` 标记 agent 可暴露给 API token / peer（R1 保护：未标记的要 `--force` 才能授权出去）。
 - **master 永远不能暴露给 peer**，这是硬规则，`--force` 也不行。

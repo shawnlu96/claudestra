@@ -63,6 +63,15 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveNpm } from "./lib/npm-path.js";
 import { projectsSlug } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
+import {
+  readProjects,
+  writeProjects,
+  resolveProjectForDir,
+  slugifyProjectId,
+  normalizeDir,
+  PROJECT_ID_RE,
+  type ProjectDef,
+} from "./lib/projects.js";
 
 const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
@@ -115,6 +124,12 @@ interface AgentInfo {
    * owner 日常在用、上下文里有机密的 agent 开放给外部人。
    */
   external?: boolean;
+  /**
+   * v2.21+ 归属 project 的 id(projects.json)。硬约束:每个 agent 必属一个
+   * project(owner 2026-08-28);老数据由 project-migrate / 各写路径懒补齐。
+   * ⚠ 与遗留的 `project` 字段无关——那存的是创建时的原始 dir 字符串。
+   */
+  projectId?: string;
 }
 
 interface Registry {
@@ -539,6 +554,204 @@ function readyTimeoutHint(pane: string): string {
   );
 }
 
+// ============================================================
+// Projects（v2.21+，owner 2026-08-28「加 project 概念」）
+// ============================================================
+
+/**
+ * 解析 agent 的归属 project(硬约束:每个 agent 必属一个 project)。
+ * 显式 id 必须已存在;否则按 dir 匹配已有 project 的目录;仍没有就以 dir
+ * basename 自动建一个——cron 临时 agent / 存量迁移都走这条路,invariant 不破。
+ */
+async function resolveOrCreateProject(
+  dir: string,
+  explicitId?: string,
+): Promise<{ project: ProjectDef; created: boolean } | { error: string }> {
+  const data = await readProjects();
+  if (explicitId) {
+    const p = data.projects.find((x) => x.id === explicitId);
+    if (!p) {
+      return {
+        error: `project "${explicitId}" 不存在。先 project-add,或省略 --project 按目录自动归属。已有: ${data.projects.map((x) => x.id).join(", ") || "(无)"}`,
+      };
+    }
+    return { project: p, created: false };
+  }
+  const hit = resolveProjectForDir(data.projects, dir);
+  if (hit) return { project: hit, created: false };
+  const nd = normalizeDir(dir);
+  const base = nd.split("/").filter(Boolean).pop() || "proj";
+  const id = slugifyProjectId(base, new Set(data.projects.map((p) => p.id)));
+  const proj: ProjectDef = { id, name: base, dirs: [nd], createdAt: new Date().toISOString() };
+  data.projects.push(proj);
+  await writeProjects(data);
+  return { project: proj, created: true };
+}
+
+/** project 上下文注入串(create 时进 --append-system-prompt,见 claude-launch)。 */
+async function buildProjectContext(proj: ProjectDef, selfTmuxName: string): Promise<string> {
+  const reg = await loadRegistry();
+  const mates = Object.entries(reg.agents)
+    .filter(([n, a]) => a.projectId === proj.id && a.status === "active" && n !== selfTmuxName)
+    .map(([n, a]) => `${n}${a.purpose ? `(${a.purpose.slice(0, 40)})` : ""}`);
+  const parts = [`你属于 project「${proj.name}」(${proj.id})。`, `项目目录: ${proj.dirs.join(", ")}。`];
+  if (proj.description) parts.push(`项目说明: ${proj.description.slice(0, 120)}。`);
+  parts.push(
+    mates.length
+      ? `同项目 agent: ${mates.join("、")}——跨仓/跨职责协作用 send_to_agent 找它们,也可用 project_info 工具随时查项目成员与目录。`
+      : `目前项目里只有你一个 agent(project_info 工具可随时查最新成员)。`,
+  );
+  return parts.join(" ");
+}
+
+async function cmdProjectAdd(
+  id: string,
+  opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string },
+) {
+  if (!PROJECT_ID_RE.test(id)) {
+    output({ ok: false, error: `project id 需匹配 ${PROJECT_ID_RE}(小写字母数字/-/_,≤32): "${id}"` });
+    return;
+  }
+  const data = await readProjects();
+  if (data.projects.some((p) => p.id === id)) {
+    output({ ok: false, error: `project "${id}" 已存在` });
+    return;
+  }
+  const dirs = (opts.dirs || []).map(normalizeDir).filter(Boolean);
+  if (dirs.length === 0) {
+    output({ ok: false, error: "至少要一个工作目录: --dirs <a,b>" });
+    return;
+  }
+  const proj: ProjectDef = {
+    id,
+    name: opts.name?.trim() || id,
+    ...(opts.emoji ? { emoji: opts.emoji } : {}),
+    dirs,
+    ...(opts.desc ? { description: opts.desc } : {}),
+    createdAt: new Date().toISOString(),
+  };
+  data.projects.push(proj);
+  await writeProjects(data);
+  output({ ok: true, project: proj });
+}
+
+async function cmdProjectList() {
+  const data = await readProjects();
+  const reg = await loadRegistry();
+  const projects = data.projects.map((p) => ({
+    ...p,
+    agents: Object.entries(reg.agents)
+      .filter(([, a]) => a.projectId === p.id)
+      .map(([n, a]) => ({ name: n, status: a.status, purpose: a.purpose || "" })),
+  }));
+  // 未归属的 agent 一并透出——UI 的「未分组」提示 + 迁移遗漏排查
+  const unassigned = Object.entries(reg.agents)
+    .filter(([, a]) => !a.projectId)
+    .map(([n]) => n);
+  output({ ok: true, projects, unassigned });
+}
+
+async function cmdProjectEdit(
+  id: string,
+  opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string },
+) {
+  const data = await readProjects();
+  const p = data.projects.find((x) => x.id === id);
+  if (!p) {
+    output({ ok: false, error: `project "${id}" 不存在` });
+    return;
+  }
+  if (opts.name !== undefined) p.name = opts.name.trim() || p.id;
+  if (opts.emoji !== undefined) {
+    if (opts.emoji) p.emoji = opts.emoji;
+    else delete p.emoji;
+  }
+  if (opts.dirs !== undefined) {
+    const dirs = opts.dirs.map(normalizeDir).filter(Boolean);
+    if (dirs.length === 0) {
+      output({ ok: false, error: "目录列表不能为空(project 至少要有一个工作目录)" });
+      return;
+    }
+    p.dirs = dirs;
+  }
+  if (opts.desc !== undefined) {
+    if (opts.desc) p.description = opts.desc;
+    else delete p.description;
+  }
+  await writeProjects(data);
+  output({ ok: true, project: p });
+}
+
+async function cmdProjectRemove(id: string) {
+  const data = await readProjects();
+  if (!data.projects.some((p) => p.id === id)) {
+    output({ ok: false, error: `project "${id}" 不存在` });
+    return;
+  }
+  const reg = await loadRegistry();
+  const members = Object.entries(reg.agents)
+    .filter(([, a]) => a.projectId === id)
+    .map(([n]) => n);
+  if (members.length > 0) {
+    output({
+      ok: false,
+      error: `project "${id}" 还有 ${members.length} 个 agent(${members.join(", ")})。先 project-assign 移走或 kill+remove,再删。`,
+    });
+    return;
+  }
+  data.projects = data.projects.filter((p) => p.id !== id);
+  await writeProjects(data);
+  output({ ok: true, removed: id });
+}
+
+async function cmdProjectAssign(agentName: string, projectId: string) {
+  const tmuxName = normalizeName(agentName);
+  const data = await readProjects();
+  const proj = data.projects.find((p) => p.id === projectId);
+  if (!proj) {
+    output({ ok: false, error: `project "${projectId}" 不存在。已有: ${data.projects.map((p) => p.id).join(", ") || "(无)"}` });
+    return;
+  }
+  const reg = await loadRegistry();
+  const info = reg.agents[tmuxName];
+  if (!info) {
+    output({ ok: false, error: `agent "${tmuxName}" 不在 registry` });
+    return;
+  }
+  const from = info.projectId;
+  info.projectId = projectId;
+  await saveRegistry(reg);
+  // Phase 3:Discord 频道挪到 project 对应 category(web-only / bridge 离线时静默跳过)
+  if (info.channelId) {
+    await bridgeRequest({ type: "move_channel", channelId: info.channelId, category: proj.name }).catch(() => {});
+  }
+  output({ ok: true, agent: tmuxName, from: from || null, to: projectId });
+}
+
+/**
+ * 存量迁移:registry 里没有 projectId 的 agent,按 cwd 归入已有 project 或自动
+ * 建组。bridge 启动时跑一次,保证「每个 agent 必属一个 project」对老数据成立。
+ */
+async function cmdProjectMigrate() {
+  const reg = await loadRegistry();
+  const missing = Object.entries(reg.agents).filter(([, a]) => !a.projectId);
+  if (missing.length === 0) {
+    output({ ok: true, migrated: 0 });
+    return;
+  }
+  const assigned: Record<string, string> = {};
+  for (const [name, info] of missing) {
+    const dir = info.cwd || info.project || "";
+    if (!dir) continue;
+    const r = await resolveOrCreateProject(dir);
+    if ("error" in r) continue;
+    info.projectId = r.project.id;
+    assigned[name] = r.project.id;
+  }
+  await saveRegistry(reg);
+  output({ ok: true, migrated: Object.keys(assigned).length, assigned });
+}
+
 async function cmdCreate(
   name: string,
   dir: string,
@@ -548,10 +761,19 @@ async function cmdCreate(
   permissionMode?: string,
   model?: string,
   external?: boolean,
+  projectFlag?: string,
 ) {
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
+
+  // v2.21+ 每个 agent 必属一个 project:显式 --project > 按 dir 匹配 > 自动建组
+  const projRes = await resolveOrCreateProject(dir, projectFlag);
+  if ("error" in projRes) {
+    output({ ok: false, error: projRes.error });
+    return;
+  }
+  const proj = projRes.project;
 
   // 校验权限预设
   if (perms.preset && !isKnownPreset(perms.preset)) {
@@ -602,7 +824,8 @@ async function cmdCreate(
     const result = await bridgeRequest({
       type: "create_channel",
       name: channelName,
-      category: CATEGORY_NAME,
+      // v2.21+ Phase 3:频道归入 project 对应的 Discord category(web-only 忽略)
+      category: proj.name,
     });
     channelId = result.channelId;
   } catch (err) {
@@ -646,6 +869,8 @@ async function cmdCreate(
       // v2.16+ purpose 注入:此前 purpose 只进 registry,agent 本体看不到自己的职责
       purpose,
       agentName: tmuxName,
+      // v2.21+ project 上下文注入:目录 + 同伴花名册
+      projectContext: await buildProjectContext(proj, tmuxName),
     });
     // 新 tmux window 起来后 .zshrc / .bashrc 可能弹 oh-my-zsh / homebrew 的 Y/n
     // update prompt，会吞掉 send-keys 第一个字符。先清掉再发命令。
@@ -693,6 +918,7 @@ async function cmdCreate(
   const reg = await loadRegistry();
   reg.agents[tmuxName] = {
     project: dir,
+    projectId: proj.id,
     purpose,
     created: new Date().toISOString(),
     status: "active",
@@ -719,6 +945,8 @@ async function cmdCreate(
     channelName,
     sessionId,
     ready,
+    project: proj.id,
+    ...(projRes.created ? { projectCreated: true } : {}),
     preset: perms.preset || DEFAULT_PRESET,
     effort: effort || "(inherits ~/.claude/settings.json)",
     permissionMode: mode,
@@ -806,13 +1034,32 @@ async function cmdResume(
     }
   }
 
+  // v2.21+ resume 也满足「必属一个 project」:同名旧条目沿用,否则按目录归属
+  const regPeek = await loadRegistry();
+  let resumeProjectId = regPeek.agents[tmuxName]?.projectId;
+  let resumeProjName: string | undefined;
+  {
+    const r = await resolveOrCreateProject(resolvedDir, resumeProjectId);
+    if (!("error" in r)) {
+      resumeProjectId = r.project.id;
+      resumeProjName = r.project.name;
+    } else {
+      // registry 里记了个已被删的 project id——按目录重新归属
+      const r2 = await resolveOrCreateProject(resolvedDir);
+      if (!("error" in r2)) {
+        resumeProjectId = r2.project.id;
+        resumeProjName = r2.project.name;
+      }
+    }
+  }
+
   // 创建 Discord 频道
   let channelId: string;
   try {
     const result = await bridgeRequest({
       type: "create_channel",
       name: channelName,
-      category: CATEGORY_NAME,
+      category: resumeProjName || CATEGORY_NAME,
     });
     channelId = result.channelId;
   } catch (err) {
@@ -916,6 +1163,7 @@ async function cmdResume(
   }
   reg.agents[tmuxName] = {
     project: dir || resolvedDir.replace(process.env.HOME || "", "~"),
+    ...(resumeProjectId ? { projectId: resumeProjectId } : {}),
     purpose: `resumed: ${sessionId.slice(0, 8)}${forkSession ? " (fork)" : ""}`,
     created: new Date().toISOString(),
     status: "active",
@@ -1838,6 +2086,7 @@ async function cmdList() {
           status: "dead",
           idle: false,
           project: info?.project || "unknown",
+          projectId: info?.projectId || null,
           cwd: info?.cwd || "",
           purpose: info?.purpose || "",
           channelId: info?.channelId || "",
@@ -1858,6 +2107,7 @@ async function cmdList() {
       status: "active",
       idle,
       project: info?.project || "unknown",
+      projectId: info?.projectId || null,
       cwd: info?.cwd || "",
       purpose: info?.purpose || "",
       channelId: info?.channelId || "",
@@ -1875,6 +2125,7 @@ async function cmdList() {
         status: "dead",
         idle: false,
         project: info.project,
+        projectId: info.projectId || null,
         cwd: info.cwd || "",
         purpose: info.purpose,
         channelId: info.channelId,
@@ -3944,6 +4195,7 @@ const WRITE_COMMANDS = new Set([
   "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
+  "project-add", "project-edit", "project-remove", "project-assign", "project-migrate",
 ]);
 if (cmd && WRITE_COMMANDS.has(cmd)) {
   const { readOwnerMarker, ownerVerdict, machineUuid } = await import("./lib/owner-guard.js");
@@ -3977,7 +4229,16 @@ if (cmd && WRITE_COMMANDS.has(cmd)) {
 try {
 switch (cmd) {
   case "create": {
-    const { rest: afterExternal, value: external } = extractBoolFlag(args, "--external");
+    // v2.21+ --project <id>(也接受 --project=id):显式指定归属 project
+    let projectFlag: string | undefined;
+    const afterProject: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "--project") projectFlag = args[++i] || undefined;
+      else if (a.startsWith("--project=")) projectFlag = a.slice("--project=".length) || undefined;
+      else afterProject.push(a);
+    }
+    const { rest: afterExternal, value: external } = extractBoolFlag(afterProject, "--external");
     const { rest: afterModel, model } = extractModelFlag(afterExternal);
     const { rest: afterMode, mode } = extractModeFlag(afterModel);
     const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
@@ -3992,13 +4253,77 @@ switch (cmd) {
     if (!name || !dir) {
       output({
         ok: false,
-        error: 'create <name> <dir> [purpose|--purpose <text>] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
+        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
       });
       break;
     }
-    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external);
+    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag);
     break;
   }
+
+  // v2.21+ Projects(owner 2026-08-28)
+  case "project-add": {
+    const opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string } = {};
+    const pos: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "--name") opts.name = args[++i];
+      else if (a === "--emoji") opts.emoji = args[++i];
+      else if (a === "--dirs") opts.dirs = (args[++i] || "").split(",").map((s) => s.trim()).filter(Boolean);
+      else if (a === "--desc") opts.desc = args[++i];
+      else pos.push(a);
+    }
+    const [id] = pos;
+    if (!id) {
+      output({ ok: false, error: "project-add <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>]" });
+      break;
+    }
+    await cmdProjectAdd(id, opts);
+    break;
+  }
+  case "project-list":
+    await cmdProjectList();
+    break;
+  case "project-edit": {
+    const opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string } = {};
+    const pos: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "--name") opts.name = args[++i] ?? "";
+      else if (a === "--emoji") opts.emoji = args[++i] ?? "";
+      else if (a === "--dirs") opts.dirs = (args[++i] || "").split(",").map((s) => s.trim()).filter(Boolean);
+      else if (a === "--desc") opts.desc = args[++i] ?? "";
+      else pos.push(a);
+    }
+    const [id] = pos;
+    if (!id) {
+      output({ ok: false, error: "project-edit <id> [--name <显示名>] [--emoji <e>] [--dirs <a,b>] [--desc <说明>]" });
+      break;
+    }
+    await cmdProjectEdit(id, opts);
+    break;
+  }
+  case "project-remove": {
+    const [id] = args;
+    if (!id) {
+      output({ ok: false, error: "project-remove <id>(须先清空成员)" });
+      break;
+    }
+    await cmdProjectRemove(id);
+    break;
+  }
+  case "project-assign": {
+    const [agentName, projectId] = args;
+    if (!agentName || !projectId) {
+      output({ ok: false, error: "project-assign <agent> <projectId>" });
+      break;
+    }
+    await cmdProjectAssign(agentName, projectId);
+    break;
+  }
+  case "project-migrate":
+    await cmdProjectMigrate();
+    break;
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {

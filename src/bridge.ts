@@ -51,6 +51,7 @@ import {
   discordEditMessage,
   discordCreateChannel,
   discordDeleteChannel,
+  discordMoveChannel,
 } from "./bridge/discord-api.js";
 import {
   runManager,
@@ -165,6 +166,7 @@ import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents } from "./lib/registry.js";
+import { readProjects } from "./lib/projects.js";
 import {
   tmuxCapture,
   windowTarget,
@@ -3049,6 +3051,65 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "move_channel": {
+      // v2.21+ project-assign 时频道随归属挪 category。web-only(local-*)无平台面,no-op
+      try {
+        if (!WEB_ONLY && !String(msg.channelId || "").startsWith("local-")) {
+          await discordMoveChannel(discord, msg.channelId, String(msg.category || ""));
+        }
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
+    case "project_info": {
+      // v2.21+ Phase 2:agent 自查项目归属——成员(在线状态/purpose)+ 目录。
+      // master / 未归属 agent 拿到的是全部 project 的总览(它们是跨项目视角)。
+      try {
+        let fromChannelId = "";
+        for (const [chId, info] of clients.entries()) {
+          if (info.ws === ws) { fromChannelId = chId; break; }
+        }
+        const [{ projects }, regs] = await Promise.all([readProjects(), readRegistryAgents()]);
+        const online = (channelId?: string) => !!(channelId && clients.has(channelId));
+        const membersOf = (pid: string) =>
+          regs
+            .filter((r) => r.projectId === pid)
+            .map((r) => ({
+              name: r.name,
+              purpose: r.purpose || "",
+              status: r.status || "unknown",
+              online: online(r.channelId),
+            }));
+        const self = regs.find((r) => r.channelId === fromChannelId);
+        const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;
+        const result = myProj
+          ? {
+              scope: "project",
+              self: self!.name,
+              project: {
+                id: myProj.id, name: myProj.name, emoji: myProj.emoji || null,
+                dirs: myProj.dirs, description: myProj.description || null,
+                members: membersOf(myProj.id),
+              },
+            }
+          : {
+              scope: "all",
+              self: self?.name || (fromChannelId === CONTROL_CHANNEL_ID ? "master" : null),
+              projects: projects.map((p) => ({
+                id: p.id, name: p.name, emoji: p.emoji || null, dirs: p.dirs,
+                description: p.description || null, members: membersOf(p.id),
+              })),
+            };
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
     case "route_to_agent": {
       try {
         // 找发送方的 channelId
@@ -4190,6 +4251,16 @@ console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。
 sweepStaleTerminalSessions().catch(() => {});
+
+// v2.21+ 存量 agent 的 project 归属补齐(「每个 agent 必属一个 project」对老数据
+// 成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
+setTimeout(() => {
+  runManager("project-migrate")
+    .then((r: any) => {
+      if (r?.ok && r.migrated > 0) console.log(`📁 project 迁移:${r.migrated} 个 agent 已按目录归组`);
+    })
+    .catch(() => {});
+}, 3_000);
 
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
 // 平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。

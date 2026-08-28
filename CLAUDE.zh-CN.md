@@ -72,6 +72,7 @@ src/
     link-policy.ts       v2.14+ channel-server 被 bridge 顶替后该重连还是退出——纯函数，有单测
     net-addr.ts          v2.14+ 探测本机对外地址（Tailscale CGNAT 优先，其次 RFC1918），peer 握手 `--url` 的来源
     registry.ts          v2.9+ registry.json 唯一读取器（字段归一含 cwd/dir 兼容）；写入仍只归 manager.ts
+    projects.ts          v2.21+ project 数据模型（~/.claude-orchestrator/projects.json）：dirs[] + 按目录归属解析 + id slug；写入只归 manager.ts，bridge 只读
     bg-jobs.ts           v2.7+ bg job 清理配方：杀进程 → 等 daemon 静默 → 隔离目录 → respawn 时 roster 根治（v2.9.1：daemon 的 ~/.claude/daemon/roster.json workers 花名册才是 respawn 权威依据 —— 无其他 worker 受累时 kill worker + transient daemon 并删条目）
     session-archive.ts   v2.8+ 会话退役归档：kill/fork 换代/adopt/resume 换 session 时快照 jsonl 到 ~/.claude-orchestrator/archive/<agent>/（对抗 CC cleanupPeriodDays）
     session-history.ts   v2.9+ 只读历史解析：live + 归档 jsonl → 中性分页消息，支撑 GET /api/v1/agents/:name/history
@@ -115,6 +116,7 @@ SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
 ## 功能
 
 - **多 agent 编排** — 创建、恢复、销毁、重启、列表、浏览历史。
+- **Project 归组（v2.21+）** — 每个 agent 必属一个 project（= 一组工作目录 + 一组 agent，如 qingniao = miniapp + backend 两仓）。`create --project <id>` 显式指定;缺省按目录最长匹配自动归属、匹配不到按目录 basename 自动建组——cron 临时 agent 与存量数据都不破 invariant（bridge 启动时跑 `project-migrate` 补齐）。master 例外（跨项目调度者）。归属记在 registry `projectId`（⚠ 遗留 `project` 字段存的是原始 dir，无关）;project 定义在 projects.json（manager 唯一写者）。协作面：启动时注入项目上下文（目录 + 同伴花名册）,运行中 `project_info` MCP 工具查成员/目录（master/未归属拿全量总览）。界面：web 侧栏按 project 折叠分组 + 📁 管理弹窗 + 新建弹窗 project 选择/目录下拉/review·测试角色预设;`GET/POST /api/v1/projects`（全权 token,mutation 走 runManager）;Discord 频道归入 project 同名 category（转移时 `move_channel`,web-only no-op）。
 - **多前端 API（v2.6.0+）** — 核心与 Discord 解耦（设计文档 `docs/design-multi-frontend.md`）：`GET /events` SSE 实时事件流（断线补发）、`POST /api/v1/agents/:name/messages` token 鉴权入站消息（同步 wait / multipart 传文件 / 轮询兜底）。token 按 agent 圈定 scope（`token-add <名> --agents a,b`，未标 `--external` 的 agent 需 `--force`），API 对话默认镜像回 Discord 频道供审计。接 Telegram 等新前端 = 实现一个 ChatAdapter，核心零改动。Bridge 默认只绑 `127.0.0.1`（`BRIDGE_BIND` 放开）。
 - **Claude Code agents 模式集成（v2.7+）** — CC 2.1.x 的 bg agent 体系（daemon、respawn、← 键 agents 视图）与 tmux 前台模型互相打架：误按 ← 会把前台会话 fork 成 bg 分身、静默炸断 Discord 链路（2026-07-09 事故）。适配三层：**可见性** —— `SessionsInventory` 聚合 `claude agents --json` + jobs state + registry 对账成中性会话清单（分身检测），Discord `/agents` 面板（详情/收编/清理按钮，LLM-free）、`GET /api/v1/sessions`、`POST /api/v1/sessions/:id/cleanup|adopt`（全权 token，202 + `session_anomaly` SSE 事件）三端共用；**自愈** —— `restart` 撞「running as a background agent」自动改 `--fork-session` 重试并探测新 session id 回写 registry，`adopt <名> <sessionId>` 收编分身，`resume --fork` 收编野生会话；**守护** —— permission-watcher 秒级自动 Esc 逃逸 agents 视图、wedge-watcher 链路哨兵（窗口活着但 channel-server 掉线 >5min → 修复按钮）、10 分钟对账器发现新分身即告警带处置按钮。清理配方（`lib/bg-jobs.ts`，事故实证）：杀 bg 进程（绝不杀 `--fork-session` 正主）→ 等 daemon 静默 → 隔离 job 目录 → 顽固 respawn 检测转官方 TUI。
 - **bg 活动子区（v2.8+）** — agent 的后台工作各开一个子会话，不污染主频道。`bridge/bg-activity-watcher.ts` 轮询每个注册 agent 的 session，发现两类活动：**subagent**（`~/.claude/projects/<slug>/<sessionId>/subagents/agent-*.jsonl`，与主会话同格式）和**后台 shell 任务**（`/tmp/claude-<uid>/<slug>/<sessionId>/tasks/*.output`）。新文件出现 → `ChatAdapter.provisionThread` 在 agent 频道下开子区（Discord thread，将来 Telegram topic），工具调用/文本/shell 输出以 2.5s debounce 流入；3 分钟无增长 → 发结束总结 + 归档子区。生命周期同步 SSE（`bg_task_started/update/completed`），web 前端可脱离 Discord 渲染每任务进度线。重启安全：首轮 poll 只记 baseline 不重播存量。**会话归档**（`lib/session-archive.ts`）：session 退役（kill / fork 换代 / adopt / resume 替换 / 手动 `manager.ts archive <name>`）即快照 jsonl（含 subagents）到 `~/.claude-orchestrator/archive/<agent>/` —— CC 的 `cleanupPeriodDays` 会清源文件，归档才是聊天历史的持久层。只在源更大时覆盖；对话内容留在文件里，不入库（owner 2026-07-10 拍板的存储设计）。v2.9+ 增加每日兜底扫描（`bridge/archive-sweeper.ts`）：每 24h 对所有 active agent 补一次快照，长寿命从不退役的 session 也有归档。SSE `bg_task_*` 事件携带稳定 `id`（文件 basename：subagent id / shell taskId），不外泄服务器路径。
@@ -156,6 +158,14 @@ bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
+
+# Project 归组（v2.21+;每个 agent 必属一个 project,create 缺省按目录自动归属）
+bun src/manager.ts project-add    <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>]
+bun src/manager.ts project-list
+bun src/manager.ts project-edit   <id> [--name ..] [--emoji ..] [--dirs a,b] [--desc ..]
+bun src/manager.ts project-remove <id>            # 有成员时拒绝
+bun src/manager.ts project-assign <agent> <projectId>   # 转移归属,Discord 频道自动挪 category
+bun src/manager.ts project-migrate                # 存量 agent 补 projectId（bridge 启动时自动跑）
 
 # 定时任务
 bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>

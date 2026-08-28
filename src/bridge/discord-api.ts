@@ -145,6 +145,30 @@ export async function discordEditMessage(
   await msg.edit(text);
 }
 
+/**
+ * v2.21+ 把已有频道挪到指定 category(不存在则自动创建)。project-assign 用——
+ * 频道随 agent 的 project 归属走。lockPermissions:false 保留频道自身的权限覆盖
+ * (allowlist 隐藏策略是建频道时写在频道上的,同步 category 权限会把它冲掉)。
+ */
+export async function discordMoveChannel(
+  discord: Client,
+  channelId: string,
+  categoryName: string
+): Promise<void> {
+  const guildId = process.env.DISCORD_GUILD_ID;
+  if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
+  const guild =
+    discord.guilds.cache.get(guildId) ?? (await discord.guilds.fetch(guildId).catch(() => null));
+  if (!guild) throw new Error(`Bot 未加入 guild ${guildId}`);
+  let cat = guild.channels.cache.find((c) => c.name === categoryName && c.type === 4);
+  if (!cat) {
+    cat = await guild.channels.create({ name: categoryName, type: 4 });
+  }
+  const ch = await discord.channels.fetch(channelId);
+  if (!ch || !("setParent" in ch)) throw new Error("频道不存在或不可移动");
+  await (ch as TextChannel).setParent(cat.id, { lockPermissions: false });
+}
+
 export async function discordCreateChannel(
   discord: Client,
   name: string,

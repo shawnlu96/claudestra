@@ -449,6 +449,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           const r = regByName.get(a.name);
           (a as any).lastActivityTs = info?.convTs ?? null;
           (a as any).contextTokens = info?.ctxTokens ?? null;
+          // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
+          (a as any).projectId = r?.projectId ?? null;
           // 当前模型/effort。显示链:刚切换的乐观值(实测追上前) → jsonl 实测
           // (会话内切换即时反映,防 registry 漂移) → registry 钉的(创建/切换
           // 端点写入) → 全局默认
@@ -477,7 +479,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           if (r.cwd && r.sessionId) {
             ts = (await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId)))?.convTs ?? null;
           }
-          agents.push({ name: r.name, status: "stopped", idle: undefined, purpose: r.purpose, lastActivityTs: ts, created: (r as any).created } as any);
+          agents.push({ name: r.name, status: "stopped", idle: undefined, purpose: r.purpose, lastActivityTs: ts, created: (r as any).created, projectId: r.projectId ?? null } as any);
         }
       }
       // master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
@@ -1366,17 +1368,20 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     // 透传给 manager create --model/--effort,校验(别名/合法档位)由 manager 做。
     const model = String(body?.model || "").trim();
     const effort = String(body?.effort || "").trim();
-    if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?}' });
+    // v2.21+ 可选归属 project(缺省由 manager 按 dir 自动归属/建组)
+    const project = String(body?.project || "").trim();
+    if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?, "project"?}' });
     // name / dir 走位置参数，必须先挡掉长得像 flag 的值；purpose 改走具名
     // --purpose，避免自由文本被 manager 的 flag 提取抢先解析（详见
     // manager.ts 的 extractPurposeFlag 注释：曾可用 purpose 替换整个命令黑名单）。
-    if (name.startsWith("-") || dir.startsWith("-")) {
-      return apiJson(400, { ok: false, error: 'name/dir 不能以 "-" 开头' });
+    if (name.startsWith("-") || dir.startsWith("-") || project.startsWith("-")) {
+      return apiJson(400, { ok: false, error: 'name/dir/project 不能以 "-" 开头' });
     }
     const createArgs = ["create", name, dir];
     if (purpose) createArgs.push("--purpose", purpose);
     if (model) createArgs.push("--model", model);
     if (effort) createArgs.push("--effort", effort);
+    if (project) createArgs.push("--project", project);
     const r = await runManager(...createArgs);
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager create failed" });
   }
@@ -1566,6 +1571,54 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       }
       await setAutoCompact(patch);
       return apiJson(200, await state());
+    }
+    return apiJson(405, { ok: false, error: "method not allowed" });
+  }
+
+  // ── v2.21+ /projects —— project 管理面(owner 2026-08-28「加 project 概念」)。
+  // 与 /peers 同款:全权 token 门禁,GET 读 projects.json+registry,mutation 全
+  // 走 runManager 的 project-*(CLI 校验/写锁/原子写是唯一事实源)。
+  if (path === "/projects") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "projects requires a full-scope token" });
+    }
+    if (req.method === "GET") {
+      const r = await runManager("project-list");
+      return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager failed" });
+    }
+    if (req.method === "POST") {
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return apiJson(400, { ok: false, error: "invalid JSON body" });
+      }
+      const action = String(body?.action || "");
+      const id = String(body?.id || "").trim();
+      const str = (k: string) => (typeof body?.[k] === "string" ? (body[k] as string) : undefined);
+      // 具名 flag 之前挡掉长得像 flag 的自由文本(与 /agents create 同款防线)
+      if (id.startsWith("-")) return apiJson(400, { ok: false, error: 'id 不能以 "-" 开头' });
+      let r: any;
+      if (action === "add" || action === "edit") {
+        if (!id) return apiJson(400, { ok: false, error: '"id" required' });
+        const flags: string[] = [];
+        if (str("name") !== undefined) flags.push("--name", str("name")!);
+        if (str("emoji") !== undefined) flags.push("--emoji", str("emoji")!);
+        if (Array.isArray(body?.dirs)) flags.push("--dirs", (body.dirs as unknown[]).filter((d) => typeof d === "string").join(","));
+        if (str("desc") !== undefined) flags.push("--desc", str("desc")!);
+        r = await runManager(`project-${action}`, id, ...flags);
+      } else if (action === "remove") {
+        if (!id) return apiJson(400, { ok: false, error: '"id" required' });
+        r = await runManager("project-remove", id);
+      } else if (action === "assign") {
+        const agent = String(body?.agent || "").trim();
+        if (!agent || !id) return apiJson(400, { ok: false, error: '"agent" and "id" required' });
+        if (agent.startsWith("-")) return apiJson(400, { ok: false, error: 'agent 不能以 "-" 开头' });
+        r = await runManager("project-assign", agent, id);
+      } else {
+        return apiJson(400, { ok: false, error: `unknown action "${action}" (add|edit|remove|assign)` });
+      }
+      return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager failed" });
     }
     return apiJson(405, { ok: false, error: "method not allowed" });
   }

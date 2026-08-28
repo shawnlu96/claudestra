@@ -1,8 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
-import type { AgentSession } from "../type";
+import type { AgentSession, ProjectMeta } from "../type";
 import { SettingsModal } from "./settings-modal";
+import { ProjectsModal } from "./projects-modal";
 import { InstallBanner } from "./install-banner";
 import { PushBanner } from "./push-banner";
 import { StatsPanel } from "./stats-panel";
@@ -321,6 +322,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const store = useChatStoreApi();
   const t = useT();
   const agents = useChatStore((s) => s.state.agents);
+  const projects = useChatStore((s) => s.state.projects);
   const loading = useChatStore((s) => s.state.loadingAgents);
   const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
@@ -463,6 +465,43 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       const rank = (x: AgentSession) => (pinSet.has(x.name) ? 1 : 0);
       return rank(b) - rank(a); // 稳定排序:置顶组保持原相对顺序
     });
+  // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
+  // 组序 = 组内最近活动(filtered 已按活动排,Map 插入序即组的活动序);未分组沉底。
+  const [showProjects, setShowProjects] = useState(false);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const v = JSON.parse(localStorage.getItem("cstra_proj_collapsed") || "[]");
+      return new Set(Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const toggleProjectCollapse = (id: string) =>
+    setCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      try {
+        localStorage.setItem("cstra_proj_collapsed", JSON.stringify([...next]));
+      } catch {
+        /* 隐私模式 */
+      }
+      return next;
+    });
+  const projMeta = new Map(projects.map((p) => [p.id, p] as const));
+  const groups: { id: string; meta?: ProjectMeta; items: AgentSession[] }[] = [];
+  if (!q) {
+    const byId = new Map<string, AgentSession[]>();
+    for (const a of filtered) {
+      const key = a.projectId || "";
+      const arr = byId.get(key);
+      if (arr) arr.push(a);
+      else byId.set(key, [a]);
+    }
+    for (const [id, items] of byId) groups.push({ id, meta: id ? projMeta.get(id) : undefined, items });
+    groups.sort((g1, g2) => Number(!g1.id) - Number(!g2.id));
+  }
 
   return (
     <aside
@@ -483,8 +522,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       >
         <div className="flex items-center pb-2.5">
           <span className="font-semibold">{t("会话")}</span>
+          {/* v2.21+ 项目管理入口 */}
           <button
-            className={`ml-auto flex h-7 items-center justify-center rounded-lg px-1.5 transition-colors ${
+            className="ml-auto flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
+            title={t("项目管理")}
+            aria-label={t("项目管理")}
+            onClick={() => setShowProjects(true)}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+            </svg>
+          </button>
+          <button
+            className={`flex h-7 items-center justify-center rounded-lg px-1.5 transition-colors ${
               manage
                 ? "text-primary"
                 : "text-base-content/50 hover:bg-base-300 hover:text-base-content"
@@ -683,22 +733,75 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         {/* 不用 daisyUI menu 类——它给每行自带 :hover/:active 按压高亮，iOS 上
             手指一碰就闪（滑动时「一直触发 hover 特效」，2026-07-13 真机）；
             行样式本来就是自定义的。 */}
-        <ul className="flex w-full list-none flex-col gap-0.5 p-0">
-          {filtered.map((a) => (
-            <AgentRow
-              key={a.name}
-              a={a}
-              active={active === a.name}
-              busyLive={active === a.name && streaming}
-              pinned={pinSet.has(a.name)}
-              onTogglePin={() => togglePin(a.name)}
-              onSelect={onSelect}
-              manage={manage}
-              checked={sel.has(a.name)}
-              onToggleCheck={() => toggleSel(a.name)}
-            />
-          ))}
-        </ul>
+        {q ? (
+          <ul className="flex w-full list-none flex-col gap-0.5 p-0">
+            {filtered.map((a) => (
+              <AgentRow
+                key={a.name}
+                a={a}
+                active={active === a.name}
+                busyLive={active === a.name && streaming}
+                pinned={pinSet.has(a.name)}
+                onTogglePin={() => togglePin(a.name)}
+                onSelect={onSelect}
+                manage={manage}
+                checked={sel.has(a.name)}
+                onToggleCheck={() => toggleSel(a.name)}
+              />
+            ))}
+          </ul>
+        ) : (
+          /* v2.21+ project 分组:组头可折叠,localStorage 记忆;未分组沉底 */
+          groups.map((g) => {
+            const isCollapsed = !!g.id && collapsedProjects.has(g.id);
+            const groupBusy = g.items.some((i) => i.busy || (active === i.name && streaming));
+            return (
+              <div key={g.id || "__ungrouped__"} className="mb-0.5">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-semibold uppercase tracking-wider text-base-content/40 transition-colors hover:bg-base-300/40 hover:text-base-content/60"
+                  onClick={() => g.id && toggleProjectCollapse(g.id)}
+                >
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={`shrink-0 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
+                  >
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                  <span className="shrink-0 normal-case">{g.meta?.emoji || "📁"}</span>
+                  <span className="truncate normal-case">{g.id ? g.meta?.name || g.id : t("未分组")}</span>
+                  <span className="ml-auto shrink-0 font-normal">{g.items.length}</span>
+                  {isCollapsed && groupBusy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
+                </button>
+                {!isCollapsed && (
+                  <ul className="flex w-full list-none flex-col gap-0.5 p-0">
+                    {g.items.map((a) => (
+                      <AgentRow
+                        key={a.name}
+                        a={a}
+                        active={active === a.name}
+                        busyLive={active === a.name && streaming}
+                        pinned={pinSet.has(a.name)}
+                        onTogglePin={() => togglePin(a.name)}
+                        onSelect={onSelect}
+                        manage={manage}
+                        checked={sel.has(a.name)}
+                        onToggleCheck={() => toggleSel(a.name)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
 
       {/* 多选管理操作条:替换底部品牌行,删除按钮二次确认 */}
@@ -743,6 +846,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       )}
       <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
+      <ProjectsModal open={showProjects} onClose={() => setShowProjects(false)} />
     </aside>
   );
 }

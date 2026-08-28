@@ -247,6 +247,12 @@ export interface LaunchOptions {
   purpose?: string;
   /** purpose 注入时的自称名（registry 名，如 agent-foo）。 */
   agentName?: string;
+  /**
+   * v2.21+ project 上下文注入:一行「你属于 project X,目录有…,同伴有…」,与
+   * purpose 合并成同一条 --append-system-prompt。让 review/测试类 agent 天然
+   * 知道整个 project 的仓在哪、该找哪个同事协作。
+   */
+  projectContext?: string;
 }
 
 /** POSIX 单引号 shell 转义 */
@@ -331,10 +337,19 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
 
   // v2.16+ purpose 注入:一行系统提示,让 agent 知道自己是谁、被派来干什么。
   // 截断 500 字防超长 purpose 撑爆 tmux send-keys 单行命令。
+  // v2.21+ project 上下文并入同一条 --append-system-prompt(多条 flag 的合并
+  // 语义不背书,单条最稳)。
+  const sysLines: string[] = [];
   if (opts.purpose && opts.purpose.trim()) {
     const p = opts.purpose.trim().slice(0, 500);
     const who = opts.agentName ? `你是 Claudestra 编排系统中的 agent「${opts.agentName}」。` : "";
-    parts.push("--append-system-prompt", shellEscape(`${who}你的职责: ${p}`));
+    sysLines.push(`${who}你的职责: ${p}`);
+  }
+  if (opts.projectContext && opts.projectContext.trim()) {
+    sysLines.push(opts.projectContext.trim().slice(0, 600));
+  }
+  if (sysLines.length > 0) {
+    parts.push("--append-system-prompt", shellEscape(sysLines.join("\n")));
   }
 
   return `${prefix} ${parts.join(" ")}`;

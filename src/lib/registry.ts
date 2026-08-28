@@ -27,6 +27,8 @@ export interface RegistryAgent {
   effort?: string;
   /** create --external 标记：可安全暴露给 API token / peer（R1 守卫） */
   external?: boolean;
+  /** v2.21+ 归属 project 的 id(projects.json)。⚠ 与遗留的 project 字段无关——那存的是原始 dir */
+  projectId?: string;
 }
 
 /** 全量读取（含非 active）。读失败/文件缺失返回空数组，不抛。 */
@@ -51,6 +53,7 @@ export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<
         // ⚠ 布尔字段不走 str() 帮手——external 曾因此被整个丢掉(所有 agent 在
         // /peers 界面显示非 external,Codex review 2026-08-26 抓到的)
         external: a.external === true,
+        projectId: str("projectId"),
       };
     });
   } catch {

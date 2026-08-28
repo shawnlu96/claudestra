@@ -87,6 +87,7 @@ src/
     peers.ts             peers.json data model (v2.11+ HTTP peers only) + handshake string encode/parse + atomic writes
     principals.ts        v2.6.0+ transport-scoped identity + API token CRUD/scope/rate-limit (~/.claude-orchestrator/principals.json)
     registry.ts          v2.9+ single reader for ~/.claude-orchestrator/registry.json (field normalization incl. cwd/dir compat); manager.ts stays the sole writer
+    projects.ts          v2.21+ project data model (~/.claude-orchestrator/projects.json): dirs[] + resolveProjectForDir + id slugify; manager.ts is the sole writer, bridge reads only
     bg-jobs.ts           v2.7+ Claude Code bg job cleanup recipe: kill → wait daemon quiescent → quarantine job dir → on respawn, roster root-fix (v2.9.1: daemon's ~/.claude/daemon/roster.json workers list is the respawn authority — kill worker + transient daemon + drop the entry, only when no other worker would be affected)
     session-archive.ts   v2.8+ session jsonl snapshot on retirement (kill / fork rotation / adopt / resume-replace) → ~/.claude-orchestrator/archive/<agent>/ — counters CC cleanupPeriodDays
     session-history.ts   v2.9+ read-only history parsing: live + archived session jsonl → neutral paginated messages, backs GET /api/v1/agents/:name/history
@@ -131,6 +132,7 @@ SETUP.md                 User-facing installation guide
 ## Features
 
 - **Multi-agent orchestration** — create, resume, kill, restart, list, browse history.
+- **Projects (v2.21+)** — every agent belongs to exactly one project (a set of working dirs + a set of agents; e.g. qingniao = miniapp + backend repos). `create --project <id>` pins it; omitted → auto-resolve by dir (longest-match against project dirs) or auto-create from the dir basename, so cron temp agents and legacy data keep the invariant (bridge runs `project-migrate` at startup). Master is exempt (cross-project dispatcher). Membership lives in registry `projectId` (⚠ the legacy `project` field holds the raw dir string — unrelated); project defs in `projects.json` (manager sole writer). Collaboration: launch injects a project context line (dirs + teammate roster) into `--append-system-prompt`, and the `project_info` MCP tool returns members/dirs at runtime (master/unassigned get an all-projects overview). Surfaces: web sidebar groups by project (collapsible, 📁 management modal, new-agent modal with project selector + dir dropdown + review/test role presets), `GET/POST /api/v1/projects` (full-scope, mutations via runManager), Discord channels land in a category named after the project (`move_channel` on reassign; web-only no-op).
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects messages directly into another agent's context via the Bridge.
 - **Codex 调用 (v2.20+)** — `ask_codex(prompt, thread?, cwd?, sandbox?)` MCP tool lets any agent consult the local OpenAI Codex (ChatGPT.app's bundled CLI, subscription quota, no API key). Bridge spawns `codex exec` per call (zero resident processes; `codex exec resume` for named-thread continuity via `~/.claude-orchestrator/codex-threads.json`; sandbox/cwd fixed at thread creation — resume inherits them). Sandbox whitelist `read-only` (default) / `workspace-write`; `danger-full-access` deliberately unexposed. Concurrency cap 3; calls visible in the jsonl-watcher stream for audit. Runner in `lib/codex.ts` (`CODEX_BIN` overrides binary path). Design notes: the file-outbox/watcher approach (peer's BRIDGE.md) was evaluated and rejected for Claudestra — our return path is the MCP channel, so the tmux-injection complexity it solves doesn't exist here.
 - **Cron scheduling** — cron expressions spin up a temporary agent, run a prompt, report, and clean up.
@@ -171,6 +173,14 @@ bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
+
+# Projects (v2.21+; every agent belongs to one project, create auto-resolves by dir)
+bun src/manager.ts project-add    <id> --dirs <a,b> [--name <display>] [--emoji <e>] [--desc <text>]
+bun src/manager.ts project-list
+bun src/manager.ts project-edit   <id> [--name ..] [--emoji ..] [--dirs a,b] [--desc ..]
+bun src/manager.ts project-remove <id>            # refuses while members remain
+bun src/manager.ts project-assign <agent> <projectId>   # also moves the Discord channel category
+bun src/manager.ts project-migrate                # backfill projectId for legacy agents (bridge runs it at startup)
 
 # Cron jobs
 bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>

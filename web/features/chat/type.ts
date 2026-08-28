@@ -141,4 +141,16 @@ export interface AgentSession {
   model?: string | null;
   /** 当前 effort 档位（同上兜底链）→ TopBar 徽章。 */
   effort?: string | null;
+  /** v2.21+ 归属 project id（master 无）→ 侧栏分组。 */
+  projectId?: string | null;
+}
+
+/** v2.21+ project 元数据（GET /api/projects）→ 侧栏组头 + 项目管理弹窗。 */
+export interface ProjectMeta {
+  id: string;
+  name: string;
+  emoji?: string | null;
+  dirs: string[];
+  description?: string | null;
+  agents?: { name: string; status?: string; purpose?: string }[];
 }

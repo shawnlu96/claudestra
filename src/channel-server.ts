@@ -514,6 +514,14 @@ one round trip instead of many.`,
       },
     },
     {
+      name: "project_info",
+      description: `查你所属 project 的成员与目录(v2.21+)。每个 agent 都归属一个 project(一组工作目录 + 一组协作 agent)。返回:project 名/目录列表/说明 + 成员花名册(名字、purpose、在线状态)。跨仓协作前先查它——知道另一个仓在哪、该 send_to_agent 找谁。master 或未归属 agent 调用会得到全部 project 的总览。`,
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+      },
+    },
+    {
       name: "send_to_agent",
       description: `Send a message to another agent. Use for agent-to-agent collaboration — 包括跨 Claudestra peer 调用。
 
@@ -702,6 +710,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       });
       return {
         content: [{ type: "text" as const, text: "Message edited." }],
+      };
+    }
+
+    case "project_info": {
+      const result = await bridgeRequest({ type: "project_info" });
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
     }
 

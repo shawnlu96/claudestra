@@ -27,7 +27,7 @@ export async function POST(request: Request) {
   if (!(await isAuthed(request))) {
     return NextResponse.json({ error: "未登录" }, { status: 401 });
   }
-  const { name, dir, purpose, model, effort } = await request.json().catch(() => ({}));
+  const { name, dir, purpose, model, effort, project } = await request.json().catch(() => ({}));
   if (!name || !dir || typeof name !== "string" || typeof dir !== "string") {
     return NextResponse.json({ error: "name 和 dir 不能为空" }, { status: 400 });
   }
@@ -42,6 +42,8 @@ export async function POST(request: Request) {
         // 可选钉模型/effort(session 级 CLI flag,不碰全局 settings.json)
         ...(typeof model === "string" && model.trim() ? { model: model.trim() } : {}),
         ...(typeof effort === "string" && effort.trim() ? { effort: effort.trim() } : {}),
+        // v2.21+ 可选归属 project(缺省 manager 按 dir 自动归属)
+        ...(typeof project === "string" && project.trim() ? { project: project.trim() } : {}),
       },
       { timeoutMs: 90_000 }
     );

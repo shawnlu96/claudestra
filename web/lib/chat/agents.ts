@@ -30,6 +30,8 @@ export interface AgentSession {
   model?: string | null;
   /** 当前 effort 档位 */
   effort?: string | null;
+  /** v2.21+ 归属 project id（master 无；侧栏按它分组） */
+  projectId?: string | null;
 }
 
 interface ApiAgent {
@@ -49,6 +51,8 @@ interface ApiAgent {
   effort?: string | null;
   /** agent 创建时间（ISO，registry.created）——新建但还没说过话的 agent 靠它排序 */
   created?: string;
+  /** v2.21+ 归属 project id */
+  projectId?: string | null;
 }
 
 /**
@@ -95,6 +99,7 @@ export async function loadAgents(): Promise<AgentSession[]> {
       contextTokens: a.contextTokens ?? null,
       model: a.model ?? null,
       effort: a.effort ?? null,
+      projectId: a.projectId ?? null,
     };
   });
   // 排序：master 置顶 → 其余按最近活动降序（无时间戳的沉底，registry 序兜底稳定）
