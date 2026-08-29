@@ -16,6 +16,7 @@ import {
   windowTarget,
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
+  detectDevChannelsModal,
 } from "../lib/tmux-helper.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -438,6 +439,16 @@ async function checkAgent(
 
   // v2.7+ agents 视图自动逃逸（特征界面刚被 Esc 掉 → 本轮不再做弹窗检测）
   if (await maybeEscapeAgentsView(agentName, channelId, pane, discord)) return;
+
+  // v2.21.1+ dev-channels 确认框兜底(peer 2026-08-30):这个框是我们自己拼进启动
+  // 命令的 flag 引出来的,理应自己按掉。启动就绪轮询窗口内会被代按;但轮询超时
+  // 放弃后才起来的实例(死锁强杀后自愈、人肉 send-keys 重启…)没人管,agent 会
+  // 永远停在框上。文案精确匹配 + 默认高亮即是正确项,直接 Enter 无误伤面。
+  if (detectDevChannelsModal(pane)) {
+    console.log(`🔓 ${agentName} 停在 dev-channels 确认框(启动轮询窗口外),自动 Enter 通过`);
+    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]).catch(() => {});
+    return;
+  }
 
   // v2.15.2+「Switch model?」弹窗：钉定家族的迟到确认框代按,其余通知用户拍板
   if (await maybeConfirmSwitchModel(agentName, channelId, pane, allowedUserIds, discord)) return;

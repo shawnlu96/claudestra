@@ -606,6 +606,83 @@ export function deadShellVerdict(atShell: boolean, hasChild: boolean | null): bo
   return atShell && hasChild === false;
 }
 
+/**
+ * v2.21.1+ 列出窗口 shell 的直接子进程 pid(peer 2026-08-30 死锁救援):
+ * ps 自比对方案与 windowHasChildProcess 同款(pgrep -P 的自保排除坑见其注释)。
+ */
+export async function windowChildPids(target: string): Promise<number[]> {
+  const pidRaw = await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_pid}"]);
+  const pid = parseInt(pidRaw.trim().split("\n")[0] || "", 10);
+  if (!Number.isFinite(pid) || pid <= 0) return [];
+  const proc = Bun.spawn(["ps", "-eo", "pid=,ppid="], { stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return childPidsInPsOutput(out, pid);
+}
+
+/** `ps -eo pid=,ppid=` 输出里 ppid 匹配的子进程 pid 列表（纯函数，便于单测） */
+export function childPidsInPsOutput(psOut: string, ppid: number): number[] {
+  const kids: number[] = [];
+  for (const line of psOut.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (m && parseInt(m[2], 10) === ppid) kids.push(parseInt(m[1], 10));
+  }
+  return kids;
+}
+
+/** kill(pid, 0) 探活。 */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * v2.21.1+ SIGTERM → 宽限 → SIGKILL 升级杀,轮询确认死亡(peer 2026-08-30:
+ * 死锁的 CC 无视按键和 kill-window 的 SIGHUP,孤儿继续占着 session,新实例
+ * 起不来还报「启动超时」误导排查)。返回仍存活的 pid(空数组 = 全灭)。
+ */
+export async function killPidsEscalating(pids: number[], graceMs = 4000): Promise<number[]> {
+  const targets = pids.filter(pidAlive);
+  if (targets.length === 0) return [];
+  for (const p of targets) {
+    try { process.kill(p, "SIGTERM"); } catch { /* 已死/无权限 */ }
+  }
+  let deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    if (targets.every((p) => !pidAlive(p))) return [];
+    await Bun.sleep(300);
+  }
+  for (const p of targets) {
+    if (pidAlive(p)) {
+      try { process.kill(p, "SIGKILL"); } catch { /* race:刚死 */ }
+    }
+  }
+  deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (targets.every((p) => !pidAlive(p))) return [];
+    await Bun.sleep(300);
+  }
+  return targets.filter(pidAlive);
+}
+
+/**
+ * v2.21.1+ `--dangerously-load-development-channels` 的启动确认框(peer 2026-08-30:
+ * 启动就绪轮询窗口内会被代按,但轮询超时放弃后才起来/弹出的实例没人管,agent
+ * 永远停在框上)。文案精确匹配——此框只在 CC 启动时出现、默认高亮「local
+ * development」,Enter 即通过,无用户交互意图可误伤;不做几何泛匹配(周期性
+ * auto-Enter 会毁掉用户正在交互的 /model 类菜单)。
+ */
+export function detectDevChannelsModal(pane: string): boolean {
+  const tail = pane.split("\n").slice(-20).join("\n");
+  if (!/Loading development channels/i.test(tail)) return false;
+  if (!/❯\s*1\./.test(tail)) return false;
+  return !isAtShell(pane);
+}
+
 /** `ps -eo ppid=` 输出里是否存在 ppid == pid 的进程（纯函数，便于单测） */
 export function hasChildInPsOutput(psOut: string, pid: number): boolean {
   for (const line of psOut.split("\n")) {

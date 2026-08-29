@@ -16,6 +16,8 @@ import {
   paneIdleVerdict,
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
+  detectDevChannelsModal,
+  childPidsInPsOutput,
 } from "../src/lib/tmux-helper.js";
 
 describe("parseModalOptions", () => {
@@ -807,5 +809,49 @@ describe("空 pane 的忙闲判据（掉线误报的原料）", () => {
   test("裸 shell 提示符同样是 busy + atShell，单靠文本区分不了「窗口没了」", () => {
     expect(paneIdleVerdict("shawn@mac ~ %")).toBe("busy");
     expect(isAtShell("shawn@mac ~ %")).toBe(true);
+  });
+});
+
+// ── v2.21.1+ dev-channels 确认框检测 + restart 强杀的 ps 解析(peer 2026-08-30)──
+
+describe("detectDevChannelsModal", () => {
+  const modal = [
+    "WARNING: Loading development channels",
+    "",
+    "❯ 1. I am using this for local development",
+    "  2. Exit",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ].join("\n");
+
+  test("真弹窗命中", () => {
+    expect(detectDevChannelsModal(modal)).toBe(true);
+  });
+
+  test("缺高亮选项不命中(纯文案出现在输出里)", () => {
+    expect(detectDevChannelsModal("WARNING: Loading development channels\n一段日志")).toBe(false);
+  });
+
+  test("已退到 shell 的 scrollback 残留不命中", () => {
+    // 弹窗文字在 scrollback,底部已是 shell 提示符(无 ❯ 1. 选项行在 tail)
+    const pane = "WARNING: Loading development channels\n(旧输出)\n~/repos ❯ ";
+    expect(detectDevChannelsModal(pane)).toBe(false);
+  });
+
+  test("正常对话界面不命中", () => {
+    expect(detectDevChannelsModal("随便聊点什么\n❯ \n  ⏵⏵ bypass permissions on")).toBe(false);
+  });
+});
+
+describe("childPidsInPsOutput", () => {
+  const ps = ["  100   1", " 19174 200", "19175   200", "  300 19174", "垃圾行", "  400 999"].join("\n");
+  test("按 ppid 过滤出直接子进程", () => {
+    expect(childPidsInPsOutput(ps, 200)).toEqual([19174, 19175]);
+  });
+  test("死锁进程自己的孩子不掺进来", () => {
+    expect(childPidsInPsOutput(ps, 19174)).toEqual([300]);
+  });
+  test("无子进程返回空", () => {
+    expect(childPidsInPsOutput(ps, 12345)).toEqual([]);
   });
 });

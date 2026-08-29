@@ -42,6 +42,8 @@ import {
   isAtShell,
   probeTuiContract,
   windowHasChildProcess,
+  windowChildPids,
+  killPidsEscalating,
   deadShellVerdict,
 } from "./lib/tmux-helper.js";
 import {
@@ -61,7 +63,7 @@ import {
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveNpm } from "./lib/npm-path.js";
-import { projectsSlug } from "./lib/jsonl-cost.js";
+import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
 import {
   readProjects,
@@ -1914,7 +1916,23 @@ async function cmdRestart(name?: string) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
       const exited = await gracefulExit(tmuxName);
       if (!exited) {
-        console.error(`[restart] ${tmuxName} 优雅退出超时，kill-window @${dupIds[0]} + 重建`);
+        // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
+        // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
+        // 误导。先点名强杀子进程(SIGTERM→SIGKILL 升级)并确认死亡;杀不死就报
+        // 真因终止,不再盲目走启动侧。
+        const kids = await windowChildPids(dupIds[0]).catch(() => [] as number[]);
+        const survivors = kids.length > 0 ? await killPidsEscalating(kids) : [];
+        if (survivors.length > 0) {
+          results.push({
+            name: tmuxName,
+            ok: false,
+            error: `旧 Claude 进程未退出(pid=${survivors.join(",")}),SIGKILL 无效——可能卡在不可中断的内核态(D 状态),需人工检查后重试`,
+          });
+          continue;
+        }
+        console.error(
+          `[restart] ${tmuxName} 优雅退出超时，已强杀子进程(${kids.join(",") || "无"})，kill-window @${dupIds[0]} + 重建`,
+        );
         await tmuxRaw(["kill-window", "-t", dupIds[0]]).catch(() => {});
         await Bun.sleep(500);
         recreated = true;
@@ -1923,6 +1941,9 @@ async function cmdRestart(name?: string) {
       // 多份 zombie（历史 race / restart 死循环遗留）—— 全部 by-id kill 再 new
       console.error(`[restart] ${tmuxName} 发现 ${dupIds.length} 个同名 zombie window，全部 kill 后重建`);
       for (const id of dupIds) {
+        // v2.21.1+ 同款强杀:zombie 窗口里的死锁进程不随 kill-window 退出
+        const kids = await windowChildPids(id).catch(() => [] as number[]);
+        if (kids.length > 0) await killPidsEscalating(kids);
         await tmuxRaw(["kill-window", "-t", id]).catch(() => {});
       }
       await Bun.sleep(500);
@@ -2015,10 +2036,23 @@ async function cmdRestart(name?: string) {
       regDirty = true;
     }
 
+    // v2.21.1+ 超时报错附 session jsonl 体积(peer 建议):--resume 整读大文件,
+    // 346MB 级的 session 启动本身就要一两分钟,省得排查时再人肉 stat
+    let timeoutErr: string | undefined;
+    if (!started.ready) {
+      timeoutErr = "启动超时";
+      try {
+        const cwd = (info.cwd || "").replace(/^~/, process.env.HOME || "~");
+        const sz = statSync(projectJsonlPath(cwd, info.sessionId)).size;
+        if (sz > 50 * 1024 * 1024) {
+          timeoutErr += `(session jsonl ${Math.round(sz / 1024 / 1024)}MB——resume 大会话本身可能就需 1-2 分钟,可考虑 clear/fork)`;
+        }
+      } catch { /* jsonl 不在原处,不加注 */ }
+    }
     results.push({
       name: tmuxName,
       ok: started.ready,
-      error: started.ready ? undefined : "启动超时",
+      error: timeoutErr,
       recreated: recreated || undefined,
     });
 
