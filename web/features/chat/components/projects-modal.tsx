@@ -74,7 +74,9 @@ function ProjectRow({
         <div className="flex items-center gap-2">
           <span className="shrink-0 text-[15px]">{proj.emoji || "📁"}</span>
           <span className="truncate text-[13.5px] font-semibold">{proj.name}</span>
-          <code className="shrink-0 rounded bg-base-content/10 px-1.5 py-0.5 text-[11px]">{proj.id}</code>
+          {proj.id !== proj.name && (
+            <code className="shrink-0 rounded bg-base-content/10 px-1.5 py-0.5 text-[11px]">{proj.id}</code>
+          )}
           <span className="ml-auto shrink-0 text-[11px] opacity-50">
             {members.length} {t("个 agent")}
           </span>
@@ -129,8 +131,10 @@ function ProjectRow({
                     {m.purpose ? <span className="opacity-40"> · {m.purpose}</span> : null}
                   </span>
                   {others.length > 0 && (
+                    // w-28 钉死:daisyUI select 默认宽会吃掉整行,把成员名挤成
+                    // 两个字符(owner 2026-08-29 图评「agent 名被压缩得看不见」)
                     <select
-                      className="select select-bordered select-xs shrink-0"
+                      className="select select-bordered select-xs w-28 shrink-0"
                       value=""
                       disabled={busy}
                       onChange={(e) => {
