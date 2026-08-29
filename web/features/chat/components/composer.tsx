@@ -575,7 +575,8 @@ export function Composer() {
       // 键盘盖着 home 条区,34px 的垫会显示成键盘上方的一截空白
       style={{ paddingBottom: "max(var(--cstra-kb-safe, env(safe-area-inset-bottom)), 0.75rem)" }}
     >
-      <div className="mx-auto max-w-3xl">
+      {/* v2.21.1+ 限宽跟 message-list 同步放宽(桌面 92%/1600px),输入框与消息列对齐 */}
+      <div className="mx-auto w-full max-w-3xl lg:max-w-[min(92%,1600px)]">
         {showCtxWarn && (
           <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs">
             <span className="min-w-0 truncate">

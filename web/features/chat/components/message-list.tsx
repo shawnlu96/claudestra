@@ -1169,8 +1169,10 @@ export function MessageList() {
       }}
     >
       {/* 横向留白对齐 claude-os thread（px-7=28px + 居中限宽），手机端稍收到 24px，
-          原 px-4(16px) 太满不透气（owner 反馈）。滚动条落在最外层边缘更干净。 */}
-      <div className="mx-auto flex max-w-3xl flex-col px-6 pb-4 pt-6 sm:px-7">
+          原 px-4(16px) 太满不透气（owner 反馈）。滚动条落在最外层边缘更干净。
+          v2.21.1+ 桌面放宽(owner 2026-08-29「PC 明明可以用更宽的地方」):lg 起
+          92% 宽、1600px 封顶——宽屏不再中间一窄条;与 composer 的限宽保持一致。 */}
+      <div className="mx-auto flex w-full max-w-3xl flex-col px-6 pb-4 pt-6 sm:px-7 lg:max-w-[min(92%,1600px)]">
         {loadingHistory && (
           <div className="flex items-center justify-center gap-2 py-6 text-sm opacity-40">
             <span className="loading loading-spinner loading-sm" />
