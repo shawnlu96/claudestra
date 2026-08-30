@@ -53,7 +53,7 @@ import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
-import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
+import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
 
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
@@ -1160,8 +1160,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
     const effort = typeof body?.effort === "string" && body.effort.trim() ? body.effort.trim() : undefined;
     if (!model && !effort) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
-    if (effort && !isKnownEffort(effort)) {
-      return apiJson(400, { ok: false, error: `未知 effort: "${effort}"。可用: ${KNOWN_EFFORT_LEVELS.join(", ")}` });
+    // v2.21.1+ 会话级切换接受 runtime-only 档(ultracode)——它就是「this session
+    // only」语义,与 /effort 注入这条路完全对齐(peer owner 请求 2026-08-30)
+    if (effort && !isKnownRuntimeEffort(effort)) {
+      return apiJson(400, { ok: false, error: `未知 effort: "${effort}"。可用: ${[...KNOWN_EFFORT_LEVELS, ...RUNTIME_ONLY_EFFORT_LEVELS].join(", ")}` });
     }
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
@@ -1201,7 +1203,25 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         }
       }
       if (model && effort) await Bun.sleep(600); // 两条命令之间让 TUI 消化
-      if (effort) await tmuxSendLine(targetWindow, `/effort ${effort}`);
+      if (effort) {
+        await tmuxSendLine(targetWindow, `/effort ${effort}`);
+        // ultracode 有前提(CC /config 开 dynamic workflows),没开时 CC 只在 TUI
+        // 里打拒绝原因——web 用户看不到 TUI,短轮询把拒绝透传回去,别让乐观
+        // 显示撒谎(peer 提醒的静默失败面)
+        if (effort === "ultracode") {
+          for (let i = 0; i < 5; i++) {
+            await Bun.sleep(600);
+            const p3 = await tmuxCapture(targetWindow, 15).catch(() => "");
+            if (/needs dynamic workflows|restricted by your organization/i.test(p3)) {
+              return apiJson(409, {
+                ok: false,
+                error: "CC 拒绝了 ultracode:需要在该 agent 的 /config 里开启 dynamic workflows(或被组织策略限制)。",
+              });
+            }
+            if (/effort level: ultracode|Set effort/i.test(p3)) break;
+          }
+        }
+      }
     } catch (e) {
       return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
     }
@@ -1220,8 +1240,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       try {
         const setArgs = ["set-claude", agent.name];
         if (model) setArgs.push("--model", model);
-        if (effort) setArgs.push("--effort", effort);
-        await runManager(...setArgs);
+        // ultracode 是 session-only:不落 registry(否则 restart 会拿它当启动
+        // flag,而重启后的新 session 本来就不继承它——落钉是谎言)
+        if (effort && effort !== "ultracode") setArgs.push("--effort", effort);
+        if (setArgs.length > 2) await runManager(...setArgs);
       } catch { /* registry 同步失败不影响本次生效(jsonl 探测仍会显示真值) */ }
     }
     recordMetric("agent_claude_updated", { channelId: agent.channelId, agent: agent.name, meta: { model, effort, tokenId } });

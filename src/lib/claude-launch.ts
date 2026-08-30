@@ -151,8 +151,22 @@ export function resolveModelAlias(m: string): string {
 /** Claude Code --effort / settings.json effortLevel 的合法档位。 */
 export const KNOWN_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "auto"] as const;
 
+/**
+ * v2.21.1+ 会话内 /effort 注入额外接受的档位(peer owner 请求 2026-08-30)。
+ * ultracode = xhigh + 动态 workflow 编排,CC 语义「this session only」——
+ * 只在运行时切换有意义:不进启动 flag(重启即回落,存 registry 是谎言),
+ * 不进全局默认。CC 2.1.247 实测 CLI 对它不警告(bogus 值会警告并回落默认),
+ * 但语义仍按 CC 文档的 session-only 对待。
+ */
+export const RUNTIME_ONLY_EFFORT_LEVELS = ["ultracode"] as const;
+
 export function isKnownEffort(e: string): boolean {
   return (KNOWN_EFFORT_LEVELS as readonly string[]).includes(e);
+}
+
+/** 会话内 /effort 注入的合法档位(启动档 + runtime-only 档)。 */
+export function isKnownRuntimeEffort(e: string): boolean {
+  return isKnownEffort(e) || (RUNTIME_ONLY_EFFORT_LEVELS as readonly string[]).includes(e);
 }
 
 /** 展示用：列出所有已知别名 + 对应 id。 */
@@ -322,7 +336,11 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   }
 
   if (opts.effort && opts.effort.trim() && opts.effort !== "default") {
-    parts.push("--effort", shellEscape(opts.effort.trim()));
+    // ultracode 是 session-only 的运行时档,启动 flag 传它语义不明——防御性降到
+    // xhigh(它的算力基底)。正常路径不会走到这:claude-settings 端点不把
+    // ultracode 写进 registry。
+    const eff = opts.effort.trim() === "ultracode" ? "xhigh" : opts.effort.trim();
+    parts.push("--effort", shellEscape(eff));
   }
 
   // v2.4.20+ 显式 --model 覆盖会话原模型。放在 --resume 之后，Claude Code 以

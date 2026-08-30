@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
-import { MODEL_OPTIONS, EFFORT_OPTIONS, modelLabel } from "../claude-options";
+import { MODEL_OPTIONS, RUNTIME_EFFORT_OPTIONS, modelLabel } from "../claude-options";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -91,16 +91,20 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
           </div>
           <div className="mb-1 text-[11px] text-base-content/50">Effort</div>
           <div className="flex flex-wrap gap-1">
-            {EFFORT_OPTIONS.map((e) => (
+            {RUNTIME_EFFORT_OPTIONS.map((e) => (
               <button
                 key={e}
                 className={`btn btn-xs font-mono ${agent.effort === e ? "btn-primary" : "btn-ghost bg-base-200"}`}
                 disabled={saving !== null}
+                title={e === "ultracode" ? t("xhigh + 动态 workflow 编排;仅本 session,需 CC 开启 dynamic workflows") : undefined}
                 onClick={() => apply({ effort: e })}
               >
                 {saving === e ? "…" : e}
               </button>
             ))}
+          </div>
+          <div className="mt-1 text-[10px] leading-snug text-base-content/35">
+            {t("ultracode = xhigh + 动态编排,仅本 session(重启回落);需 CC /config 开启 dynamic workflows")}
           </div>
           {err && <div className="mt-2 text-[11px] text-error">{err}</div>}
         </div>
