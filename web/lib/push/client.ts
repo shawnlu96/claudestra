@@ -82,6 +82,32 @@ export async function enablePush(): Promise<{ ok: boolean; msg: string }> {
   }
 }
 
+/**
+ * v2.21.1+ 打开 App 时的本机通知补清(跨端已读对账的 iOS 半边):别处已读的
+ * agent,其存量通知在本机通知中心里静默关掉。非 iOS 设备平时靠 dismiss push
+ * 实时清,这里是兜底;iOS 收不到静默 push(展示惩罚),只能靠这条打开即清。
+ * mount + visibility 恢复时各跑一次;失败静默(无 SW/未登录都正常)。
+ */
+export async function cleanupReadNotifications(): Promise<void> {
+  try {
+    if (!pushSupported()) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return;
+    const ns = await reg.getNotifications();
+    if (!ns.length) return;
+    const res = await fetch("/api/push/read");
+    if (!res.ok) return;
+    const j = (await res.json()) as { reads?: Record<string, number> };
+    const reads = j.reads || {};
+    for (const n of ns) {
+      const d = (n.data || {}) as { agent?: string; ts?: number };
+      if (d.agent && reads[d.agent] && (d.ts || 0) <= reads[d.agent]) n.close();
+    }
+  } catch {
+    /* 静默 */
+  }
+}
+
 /** 关闭推送:退订 + 从服务端删除。 */
 export async function disablePush(): Promise<{ ok: boolean; msg: string }> {
   const sub = await getPushSubscription();

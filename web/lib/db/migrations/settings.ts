@@ -55,6 +55,15 @@ export function runSettingsMigrations(db: Database.Database) {
       created_at TEXT NOT NULL
     )
   `);
+  // v2.21.1+ 跨端已读对账(owner 2026-08-30「一处点完,他处取消通知」):
+  // agent → 最近一次已读时刻(epoch ms)。已读信号源:打开会话/点通知/Discord
+  // 里说话。dismiss push 与打开 App 时的补清都以它为准。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS push_read (
+      agent TEXT PRIMARY KEY,
+      ts INTEGER NOT NULL
+    )
+  `);
   // 登录安全配置(owner 2026-08-09「设置里可选启用」)。单账号单行表,存各安全
   // 功能的开关。默认:累进封禁开(纯加固,零登录破坏)、TOTP/Passkey 关(要用户
   // 主动 enroll)。totp_secret 是激活后的密钥(base32),未启用时为空。

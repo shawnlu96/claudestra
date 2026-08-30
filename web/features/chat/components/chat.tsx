@@ -248,6 +248,20 @@ function ChatInner() {
     );
   }, []);
 
+  // v2.21.1+ 跨端已读补清(owner 2026-08-30):打开/回前台时,把别处已读的
+  // agent 的存量系统通知从本机通知中心里静默关掉。iOS 收不到 dismiss push
+  // (静默 push 有展示惩罚),这条是它唯一的清理通路;其他平台是兜底。
+  useEffect(() => {
+    void import("@/lib/push/client").then((m) => m.cleanupReadNotifications());
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        void import("@/lib/push/client").then((m) => m.cleanupReadNotifications());
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
   // 浏览器返回（系统级手势 / 返回键）：出栈回到会话列表
   useEffect(() => {
     const onPop = () => {

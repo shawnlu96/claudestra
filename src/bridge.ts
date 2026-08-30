@@ -3362,6 +3362,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 // ── Hook HTTP 处理 ──
 // channelId → 最近一次完成通知时间戳，用于去抖
 const lastCompletionSent = new Map<string, number>();
+// v2.21.1+ channelId → 最近一条完成 @ 的 Discord 消息 id(跨端已读对账:
+// Web 端读过后删掉它,清 Discord 未读徽标)
+const lastCompletionMsg = new Map<string, string>();
 // v1.9.6+: 记录每个 channel 的最近一次消息触发源。如果是 "agent"（send_to_agent 转发）
 // 那次 turn 结束时就不发完成 @ — 用户没问问题，不用通知他。
 // v2.10+ "api"(owner 2026-07-16「谁发的谁回」):Web 端触发的回合不发 Discord @
@@ -3953,8 +3956,11 @@ async function handleHookRequest(req: Request): Promise<Response> {
             const textCh = ch as TextChannel;
             const mention = primaryOwnerId() ? `<@${primaryOwnerId()}>` : "";
             if (mention) {
-              await textCh.send(`${randomUmaDone()} ${mention}`);
+              const sent = await textCh.send(`${randomUmaDone()} ${mention}`);
               lastCompletionSent.set(channelId, now);
+              // v2.21.1+ 跨端已读对账:记住完成 @ 的消息 id——用户在 Web 端读过
+              // 之后,notify-read 端点把它删掉,Discord 侧未读徽标随之消失
+              lastCompletionMsg.set(channelId, sent.id);
               console.log(`🏁 完成通知已发送: channel=${channelId}`);
               recordMetric("agent_completed", { channelId });
             }
@@ -4037,6 +4043,21 @@ initApiRoutes({
   scheduleClearRotation,
   // v2.15+ peer 一键邀请被兑换时通知 owner（control 频道）
   notifyOwner: notifyMaster,
+  // v2.21.1+ 跨端已读:Web 端读过 → 删 Discord 完成 @,未读徽标消失
+  clearCompletionPing: async (channelId: string) => {
+    const msgId = lastCompletionMsg.get(channelId);
+    if (!msgId || WEB_ONLY) return false;
+    lastCompletionMsg.delete(channelId);
+    try {
+      const ch = await discord.channels.fetch(channelId);
+      if (ch && "messages" in ch) {
+        const msg = await (ch as TextChannel).messages.fetch(msgId).catch(() => null);
+        if (msg) await msg.delete();
+        return true;
+      }
+    } catch { /* 已被手动删/权限问题,无所谓 */ }
+    return false;
+  },
 });
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）

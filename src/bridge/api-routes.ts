@@ -194,6 +194,8 @@ export interface ApiDeps {
   scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string) => void;
   /** v2.15+ 发 owner 通知（bridge 注入 notifyMaster）——peer 一键邀请被兑换时告知 */
   notifyOwner?: (content: string) => Promise<void>;
+  /** v2.21.1+ 跨端已读:删该频道最近一条 Discord 完成 @(Web 端读过后清未读徽标) */
+  clearCompletionPing?: (channelId: string) => Promise<boolean>;
 }
 
 let deps: ApiDeps | null = null;
@@ -1370,6 +1372,21 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       question: auq ? { questions: auq.questions, ts: auq.ts } : null,
       thinking: status === "thinking",
     });
+  }
+
+  // POST /api/v1/agents/:name/notify-read —— v2.21.1+ 跨端已读回执:Web 端读过
+  // 该 agent 的回复 → 删掉其频道里最近一条 Discord 完成 @(未读徽标消失)。
+  // 幂等、best-effort:没有待删消息/已被人工清理都返回 ok。
+  const notifyReadMatch = path.match(/^\/agents\/([^/]+)\/notify-read$/);
+  if (notifyReadMatch && req.method === "POST") {
+    const agentParam = decodeURIComponent(notifyReadMatch[1]);
+    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
+      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
+    }
+    const agent = await findApiAgent(agentParam);
+    if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
+    const cleared = (await deps.clearCompletionPing?.(agent.channelId)) ?? false;
+    return apiJson(200, { ok: true, cleared });
   }
 
   // POST /api/v1/agents —— create（仅全权 token；复用 manager CLI）

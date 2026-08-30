@@ -18,11 +18,12 @@ import { ensureVapid } from "./vapid";
 interface PushRow {
   endpoint: string;
   keys: string;
+  ua: string;
 }
 
 function listSubs(): PushRow[] {
   try {
-    return getDb("settings").prepare("SELECT endpoint, keys FROM push_subscriptions").all() as PushRow[];
+    return getDb("settings").prepare("SELECT endpoint, keys, ua FROM push_subscriptions").all() as PushRow[];
   } catch {
     return [];
   }
@@ -36,8 +37,11 @@ function dropSub(endpoint: string) {
   }
 }
 
-async function sendToAll(payload: { title: string; body: string; url?: string; tag?: string; agent?: string }) {
-  const subs = listSubs();
+async function sendToAll(
+  payload: Record<string, unknown>,
+  filter?: (s: PushRow) => boolean,
+) {
+  const subs = listSubs().filter((s) => !filter || filter(s));
   if (!subs.length) return;
   ensureVapid();
   const json = JSON.stringify(payload);
@@ -58,15 +62,44 @@ async function sendToAll(payload: { title: string; body: string; url?: string; t
   );
 }
 
+// ── v2.21.1+ 跨端已读对账(owner 2026-08-30「一处点完,他处取消」)──────────
+
+/** iOS 订阅识别:对「push 到达不展示」有惩罚,dismiss 型静默 push 不能发给它们
+ *  (iOS 靠打开 App 时的补清,见 lib/push/client.ts cleanupReadNotifications)。
+ *  ua 为空的老订阅按 iOS 保守对待。 */
+const IOS_UA_RE = /iPhone|iPad|iPod/i;
+const dismissSafe = (s: PushRow) => !!s.ua && !IOS_UA_RE.test(s.ua);
+
+/** 标记 agent 已读(落库)并向非 iOS 订阅广播 dismiss push——SW 收到后静默清掉
+ *  该 agent 的存量通知。任何已读信号源(打开会话/点通知/Discord 说话)都走这里。 */
+export function markAgentRead(agent: string): void {
+  const a = agent.replace(/^agent-/, "");
+  const ts = Date.now();
+  try {
+    getDb("settings")
+      .prepare("INSERT INTO push_read (agent, ts) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET ts = excluded.ts")
+      .run(a, ts);
+  } catch { /* 表缺失等,不影响 dismiss */ }
+  void sendToAll({ type: "dismiss", agent: a, ts }, dismissSafe);
+}
+
 const BRIDGE = process.env.BRIDGE_HTTP_URL || "http://127.0.0.1:3847";
 const TOKEN = process.env.CLAUDESTRA_API_TOKEN || "";
 
-/** 事件 → 推送的翻译:reply 给 api 用户 → 通知。 */
+/** 事件 → 推送的翻译:reply 给 api 用户 → 通知;Discord 里用户说话 → 已读联动。 */
 function maybePush(evt: { type: string; agent: string; chatId: string; data: Record<string, unknown> }) {
   if (evt.type !== "chat_message") return;
   const d = evt.data || {};
+  const chatId = String(evt.chatId || "");
+  // v2.21.1+ Discord 侧已读代理:用户在某 agent 的 Discord 频道里发了消息
+  // (chatId 纯数字 + 入站 + 人类)= 他已经在 Discord 看到了回复 → 联动清掉
+  // 各设备上该 agent 的 Web 通知。
+  if (d.direction === "in" && d.srcKind === "user" && /^\d+$/.test(chatId)) {
+    markAgentRead(String(evt.agent || ""));
+    return;
+  }
   if (d.direction !== "out") return;
-  if (!String(evt.chatId || "").startsWith("api:")) return; // 只推 Web 发起的对话
+  if (!chatId.startsWith("api:")) return; // 只推 Web 发起的对话
   const agent = String(evt.agent || "").replace(/^agent-/, "");
   const text = String(d.text ?? "").replace(/\s+/g, " ").trim();
   if (!text) return;
@@ -76,6 +109,8 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
     // 深链:点通知直达该 agent 会话(owner 2026-07-16)
     url: `/chat?agent=${encodeURIComponent(agent)}`,
     agent,
+    // v2.21.1+ ts:跨端已读对账的水位——dismiss 只清 ts 早于已读时刻的通知
+    ts: Date.now(),
     // v2.17.2:每条推送独立 tag。此前按 agent 折叠(`cstra-${agent}`),但 iOS
     // 对同 tag 通知是「静默替换」——新推送不横幅不震动,用户测试时「啥都没
     // 显示」(2026-08-08 回执实锤:APNs 已投递到设备,展示层被折叠吃掉)。

@@ -12,6 +12,10 @@ import type {
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
 import { hydrateHistoryMessages } from "./history-hydrate";
+
+/** 大总管保留名(与 lib/chat/bridge-api 的 MASTER_AGENT_NAME 同值;不 import——
+ *  那个模块在 server 侧读 env,拖进 client bundle 没意义)。 */
+const MASTER_AGENT_NAME = "__master__";
 import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
 import { getLang } from "@/lib/i18n";
 
@@ -524,6 +528,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 记住最后打开的会话——iOS 把后台页整个回收重载后（store 全新、hash 还在
     // #chat），据此自动恢复，不让用户卡在空内容页手动重选（2026-07-12 真机）。
     try { localStorage.setItem("cstra_last_agent", name); } catch { /* 隐私模式等 */ }
+    // v2.21.1+ 打开会话 = 已读:联动清掉其他设备/平台上该 agent 的通知
+    // (owner 2026-08-30「一处点完,他处取消」)。fire-and-forget,失败无感。
+    if (name !== MASTER_AGENT_NAME) {
+      void fetch("/api/push/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: name }),
+      }).catch(() => {});
+    }
     // 切走前把当前会话快照进缓存，回来时原样恢复（见 messageCache 注释）。
     // ⚠ 只存非空快照:加载中/加载失败时切走会把 [] 存进去,下次打开命中
     // 空缓存(truthy!)→ 跳过 loading 态直接渲染「发送第一条消息」空态,

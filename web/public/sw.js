@@ -8,11 +8,25 @@ self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
 self.addEventListener("push", (event) => {
-  let payload = { title: "Claudestra", body: "", url: "/chat", tag: "cstra", agent: "" };
+  let payload = { title: "Claudestra", body: "", url: "/chat", tag: "cstra", agent: "", ts: 0, type: "" };
   try {
     payload = { ...payload, ...event.data.json() };
   } catch {
     /* 非 JSON payload,用默认 */
+  }
+  // v2.21.1+ 跨端已读对账(owner 2026-08-30「一处点完,他处取消」):
+  // dismiss 型 push 只清通知不展示。派发器只把它发给非 iOS 订阅——
+  // iOS 对「push 到达不展示」有惩罚,iOS 设备靠打开 App 时的补清(见 client)。
+  if (payload.type === "dismiss") {
+    event.waitUntil(
+      self.registration.getNotifications().then((ns) => {
+        for (const n of ns) {
+          const d = n.data || {};
+          if (d.agent === payload.agent && (d.ts || 0) <= (payload.ts || Date.now())) n.close();
+        }
+      })
+    );
+    return;
   }
   event.waitUntil(
     Promise.all([
@@ -23,7 +37,7 @@ self.addEventListener("push", (event) => {
         tag: payload.tag,
         icon: "/icons/icon-192.png",
         badge: "/icons/icon-192.png",
-        data: { url: payload.url, agent: payload.agent },
+        data: { url: payload.url, agent: payload.agent, ts: payload.ts || Date.now() },
       }),
       // 回执探针(排障):push 事件到达即打点,区分投递层/展示层问题
       fetch(`/api/push/ack?tag=${encodeURIComponent(payload.tag)}`).catch(() => {}),
@@ -35,6 +49,16 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
   const url = data.url || "/chat";
+  // 点通知 = 已读:回执服务端,联动清掉其他设备/平台的同 agent 通知
+  if (data.agent) {
+    event.waitUntil(
+      fetch("/api/push/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: data.agent }),
+      }).catch(() => {})
+    );
+  }
   event.waitUntil(
     (async () => {
       const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
