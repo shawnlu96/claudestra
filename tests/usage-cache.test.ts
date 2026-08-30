@@ -82,3 +82,40 @@ describe("formatResetTs", () => {
     expect(formatResetTs(42)).toBe(""); // 太小,不是合理的 unix 秒
   });
 });
+
+// ── v2.21.1+ per-session 上下文窗口读取(peer 2026-08-30)──
+import { readSessionCtx } from "../src/lib/usage-cache.js";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+
+describe("readSessionCtx", () => {
+  const dir = mkdtempSync(join(tmpdir(), "uc-test-"));
+  const p = join(dir, "usage-cache.json");
+
+  test("按 session_id 取到真实窗口", () => {
+    writeFileSync(p, JSON.stringify({
+      sessionPct: 40, scrapedAt: 1,
+      sessions: {
+        "sid-a": { window: 175000, usedPct: 85.2, inputTokens: 149000, ts: 123 },
+        "sid-b": { window: 2000000, usedPct: 33.4, inputTokens: 668000, ts: 456 },
+      },
+    }));
+    expect(readSessionCtx("sid-a", p)).toEqual({ window: 175000, usedPct: 85.2, inputTokens: 149000, ts: 123 });
+    expect(readSessionCtx("sid-b", p)?.window).toBe(2000000);
+  });
+
+  test("缺 session / 坏 window / 老缓存无 sessions → null", () => {
+    expect(readSessionCtx("sid-none", p)).toBeNull();
+    writeFileSync(p, JSON.stringify({ sessions: { "sid-x": { window: 0, ts: 1 } } }));
+    expect(readSessionCtx("sid-x", p)).toBeNull();
+    writeFileSync(p, JSON.stringify({ sessionPct: 40, scrapedAt: 1 }));
+    expect(readSessionCtx("sid-a", p)).toBeNull();
+    expect(readSessionCtx("sid-a", join(dir, "nope.json"))).toBeNull();
+  });
+
+  test("usedPct/inputTokens 缺失时字段为 null 但 window 可用", () => {
+    writeFileSync(p, JSON.stringify({ sessions: { "sid-c": { window: 240000, ts: 9 } } }));
+    expect(readSessionCtx("sid-c", p)).toEqual({ window: 240000, usedPct: null, inputTokens: null, ts: 9 });
+  });
+});

@@ -30,7 +30,17 @@ five = (rl.get("five_hour") or {}).get("used_percentage")
 week = (rl.get("seven_day") or {}).get("used_percentage")
 five_reset = (rl.get("five_hour") or {}).get("resets_at")
 week_reset = (rl.get("seven_day") or {}).get("resets_at")
-if five is None and week is None:
+
+# ── v2.21.1+ context_window 也落盘(peer 2026-08-30):context_window_size 是
+# 各 agent **真实窗口**的权威来源(175K/240K/2M 因模型与 1M beta 而异),
+# used_percentage 连百分比都算好了。bridge 的 auto save-compact 阈值与看板
+# 百分比都靠它,不再拿硬编码 1M 猜。按 session_id 分键——statusline 是每个
+# agent 各写各的,单键全局值会互相踩(usage 的多写者坑同款)。
+cw = d.get("context_window") or {}
+sid = d.get("session_id")
+has_ctx = bool(sid) and isinstance(cw, dict) and isinstance(cw.get("context_window_size"), (int, float)) and cw.get("context_window_size") > 0
+
+if five is None and week is None and not has_ctx:
     sys.exit(0)
 
 cache_dir = os.path.expanduser("~/.claude-orchestrator")
@@ -68,13 +78,32 @@ def merge(new_pct, new_reset, old_pct, old_reset):
 sess_pct, sess_reset = merge(five, five_reset, old.get("sessionPct"), old.get("sessionResets"))
 week_pct, week_reset_out = merge(week, week_reset, old.get("weekPct"), old.get("weekResets"))
 
+now_ms = int(time.time() * 1000)
+
+# sessions 按 session_id 分键合并:只更新自己这条,别人的保留;7 天没更新的
+# 条目清掉(session 已死/已轮转),上限 200 条防无限膨胀。
+sessions = old.get("sessions") if isinstance(old.get("sessions"), dict) else {}
+if has_ctx:
+    sessions[sid] = {
+        "window": int(cw["context_window_size"]),
+        "usedPct": cw.get("used_percentage"),
+        "inputTokens": cw.get("total_input_tokens"),
+        "ts": now_ms,
+    }
+sessions = {k: v for k, v in sessions.items()
+            if isinstance(v, dict) and now_ms - (v.get("ts") or 0) < 7 * 86400 * 1000}
+if len(sessions) > 200:
+    keep = sorted(sessions.items(), key=lambda kv: kv[1].get("ts") or 0, reverse=True)[:200]
+    sessions = dict(keep)
+
 payload = {
     "sessionPct": sess_pct,
     "weekPct": week_pct,
     "sessionResets": sess_reset,
     "weekResets": week_reset_out,
-    "scrapedAt": int(time.time() * 1000),
+    "scrapedAt": now_ms,
     "source": "statusline",
+    "sessions": sessions,
 }
 tmp = os.path.join(cache_dir, f"usage-cache.json.{os.getpid()}.tmp")
 try:

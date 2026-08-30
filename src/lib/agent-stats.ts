@@ -14,6 +14,7 @@
 
 import { existsSync, statSync } from "fs";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
+import { readSessionCtx } from "./usage-cache.js";
 
 export interface UsageWindow {
   tokens: number;
@@ -232,7 +233,14 @@ export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[
       model: fs.model.startsWith("claude-") ? fs.model : (a.model || fs.model || "?"),
       status: a.status || "active",
       contextTokens: fs.contextTokens,
-      contextPct: Math.min(100, Math.round((fs.contextTokens / CONTEXT_CEILING) * 100)),
+      // v2.21.1+ 百分比优先按 statusline 落盘的真实窗口算(peer 2026-08-30:
+      // 窗口因模型/1M beta 差 10 倍不止,硬按 1M 算的 pct 对 175K 窗口的 agent
+      // 假到没法看)。缓存没有该 session → 退回 1M 天花板,行为如旧。
+      contextPct: (() => {
+        const ctx = a.sessionId ? readSessionCtx(a.sessionId) : null;
+        const ceiling = ctx && ctx.window > 0 ? ctx.window : CONTEXT_CEILING;
+        return Math.min(100, Math.round((fs.contextTokens / ceiling) * 100));
+      })(),
       contextEstimated: fs.contextEstimated,
       today: fs.today,
       week: fs.week,

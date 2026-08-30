@@ -34,7 +34,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { readConfig, readConfigSync, setStatsDashboard } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/usage-cache.js";
+import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
 import {
   computeAgentStats,
@@ -644,7 +644,39 @@ const notifiedTier = new Map<string, number>(); // channelId → 已提醒过的
 let tierBaselined = false;
 
 const DEFAULT_AUTO_COMPACT_WINDOW = 400_000;
-const autoCompactTriggered = new Map<string, boolean>(); // channelId → 本轮上涨已自动触发过 save-compact
+/**
+ * channelId → 上次自动触发的时间戳。v2.21.1+ 从布尔改时间戳(peer 2026-08-30
+ * 实锤):布尔标记只在跨绝对档位时清,而档位越往上越宽(500K→750K 差 250K)——
+ * 一次注入被 TUI 吞掉(agent 恰好在忙/弹窗挡着),标记就卡成永久沉默,
+ * market-maker 668K 超线 4 小时零触发。改为:触发后 30 分钟没观察到上下文
+ * 回落(跨档会清)就允许重试——重试仍要过闲置门槛,不会打扰干活中的 agent。
+ */
+const autoCompactTriggered = new Map<string, number>();
+const AUTO_COMPACT_RETRY_MS = 30 * 60 * 1000;
+
+/**
+ * v2.21.1+ 按 agent 真实窗口收紧阈值(peer 2026-08-30):配置的绝对阈值(如
+ * 500K)对窗口只有 175K 的 agent 是永远够不到的天花板——CC 自家 auto-compact
+ * 先接管,「先存记忆再压」永远轮不到。statusline 落盘的 context_window_size
+ * 是权威窗口值:取 min(配置阈值, 真实窗口的 80%)。拿不到窗口(没配 statusline
+ * 落盘/新 session 还没渲染过)退回配置值,行为与从前一致。
+ */
+const REAL_WINDOW_TRIGGER_RATIO = 0.8;
+
+function sessionIdOfStat(a: AgentStat): string | null {
+  const base = a.jsonl?.split("/").pop() || "";
+  return base.endsWith(".jsonl") ? base.slice(0, -".jsonl".length) : null;
+}
+
+function effectiveAutoCompactThreshold(cfgThreshold: number, a: AgentStat): number {
+  if (cfgThreshold <= 0) return 0;
+  const sid = sessionIdOfStat(a);
+  const ctx = sid ? readSessionCtx(sid) : null;
+  if (ctx && ctx.window > 0) {
+    return Math.min(cfgThreshold, Math.floor(ctx.window * REAL_WINDOW_TRIGGER_RATIO));
+  }
+  return cfgThreshold;
+}
 
 function loadAutoCompactThreshold(): number {
   try {
@@ -726,12 +758,12 @@ export function noteSaveCompactInjected(target: string): void {
   recentSaveCompact.set(target, Date.now());
 }
 
-async function triggerAutoSaveCompact(a: AgentStat): Promise<void> {
+async function triggerAutoSaveCompact(a: AgentStat, effThreshold: number): Promise<void> {
   try {
     const target = a.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(a.name);
     noteSaveCompactInjected(target);
     await tmuxSendLine(target, "/save-compact");
-    console.log(`🧹 auto save-compact triggered: ${a.name} @ ${formatTokens(a.contextTokens)} (threshold=${formatTokens(loadAutoCompactThreshold())})`);
+    console.log(`🧹 auto save-compact triggered: ${a.name} @ ${formatTokens(a.contextTokens)} (threshold=${formatTokens(effThreshold)})`);
   } catch (e) {
     console.error(`🧹 auto save-compact 失败 (${a.name}):`, (e as Error).message);
   }
@@ -751,19 +783,26 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
       // 上下文回落或跨过新高位：重置自动触发状态，允许下一轮再涨时再次触发
       autoCompactTriggered.delete(a.channelId);
     }
-    if (tier === 0 || first) continue;
-
-    // 自动触发：超线 + 闲置满门槛 + 本轮尚未触发。**每轮都查**(不只在跨档时)——
-    // 超线但还在干活的,等它闲下来那轮再动手(owner 2026-08-26:别干着干着就 compact)
-    if (
-      threshold > 0 &&
-      a.contextTokens >= threshold &&
-      !autoCompactTriggered.get(a.channelId) &&
-      idleLongEnough(a, idleMs)
-    ) {
-      autoCompactTriggered.set(a.channelId, true);
-      await triggerAutoSaveCompact(a);
+    // 自动触发:超线 + 闲置满门槛 + (未触发过 或 上次触发已超 30min 没见效)。
+    // **每轮都查**(不只在跨档时)——超线但还在干活的,等它闲下来那轮再动手
+    // (owner 2026-08-26:别干着干着就 compact)。
+    // ⚠ 必须放在 tier===0 闸**之前**(peer 2026-08-30):小窗口 agent 的有效
+    // 阈值(80%×175K=140K)低于最小绝对档 250K,放闸后面就永远轮不到触发。
+    if (!first) {
+      const eff = effectiveAutoCompactThreshold(threshold, a);
+      const lastTrig = autoCompactTriggered.get(a.channelId) ?? 0;
+      if (
+        eff > 0 &&
+        a.contextTokens >= eff &&
+        Date.now() - lastTrig > AUTO_COMPACT_RETRY_MS &&
+        idleLongEnough(a, idleMs)
+      ) {
+        autoCompactTriggered.set(a.channelId, Date.now());
+        await triggerAutoSaveCompact(a, eff);
+      }
     }
+
+    if (tier === 0 || first) continue;
 
     // 档位提醒只在**向上跨档**时发一次。18dec8f 把原 `tier === prev → continue`
     // 拆掉后,稳态每轮都会走到这里重发提醒(刷屏回归)——这行守卫补回原语义

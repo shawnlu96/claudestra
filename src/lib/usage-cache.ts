@@ -102,6 +102,39 @@ export function readUsageCacheStale(nowMs = Date.now(), path = USAGE_CACHE_PATH)
 }
 
 /**
+ * v2.21.1+ per-session 上下文窗口(peer 2026-08-30):statusline JSON 的
+ * context_window.context_window_size 是各 agent **真实窗口**的权威值
+ * (175K/240K/2M 因模型与 1M beta 而异),usage-cache-write.sh 按 session_id
+ * 分键落在 sessions{} 里。auto save-compact 阈值和看板百分比都靠它——
+ * 此前硬编码 CONTEXT_CEILING=1M,小窗口 agent 的绝对阈值成了永远够不到的
+ * 天花板(CC 自家 auto-compact 先接管,「先存记忆再压」永远轮不到)。
+ * 窗口大小基本不变,不设新鲜度门槛;usedPct 是渲染时刻快照,调用方自行
+ * 决定要不要按 ts 过滤。
+ */
+export interface SessionCtx {
+  window: number;
+  usedPct: number | null;
+  inputTokens: number | null;
+  ts: number;
+}
+
+export function readSessionCtx(sessionId: string, path = USAGE_CACHE_PATH): SessionCtx | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    const s = raw?.sessions?.[sessionId];
+    if (!s || typeof s.window !== "number" || !Number.isFinite(s.window) || s.window <= 0) return null;
+    return {
+      window: s.window,
+      usedPct: typeof s.usedPct === "number" && Number.isFinite(s.usedPct) ? s.usedPct : null,
+      inputTokens: typeof s.inputTokens === "number" && Number.isFinite(s.inputTokens) ? s.inputTokens : null,
+      ts: typeof s.ts === "number" ? s.ts : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 陈旧缓存推算(peer 方案 B,2026-08-27):statusline 停写 = 全机没有会话在
  * 渲染 = 没人在消耗——**闲置期用量不会变,旧值就是真值**。唯一会变的是窗口
  * 重置:reset 时刻已过 → 对应百分比归零、reset 时间清空(下一个窗口从首次
