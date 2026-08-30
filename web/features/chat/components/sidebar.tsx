@@ -814,10 +814,13 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               const isCollapsed = collapsedProjects.has(e.id);
               const groupBusy = e.items.some((i) => i.busy || (active === i.name && streaming));
               return (
-                <li key={`g:${e.id}`}>
+                // v2.21.1+ 组做成「容器」(owner 2026-08-31「文件夹层级更清晰」):
+                // 组块淡底色 + 开合文件夹图标 + 成员缩进导线——文件夹是个盒子,
+                // 不再只是一行标签
+                <li key={`g:${e.id}`} className="rounded-xl bg-base-300/25 p-1">
                   <button
                     type="button"
-                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] font-semibold text-base-content/80 transition-colors hover:bg-base-300/40"
+                    className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-[13px] font-semibold text-base-content/80 transition-colors hover:bg-base-300/50"
                     onClick={() => toggleProjectCollapse(e.id)}
                   >
                     <svg
@@ -833,7 +836,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                     >
                       <path d="m6 9 6 6 6-6" />
                     </svg>
-                    <span className="shrink-0 text-[14px]">{e.meta?.emoji || "📁"}</span>
+                    <span className="shrink-0 text-[14px]">{e.meta?.emoji || (isCollapsed ? "📁" : "📂")}</span>
                     <span className="truncate">{e.meta?.name || e.id}</span>
                     <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">
                       {e.items.length}
@@ -843,7 +846,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                     )}
                   </button>
                   {!isCollapsed && (
-                    <ul className="ml-3 flex list-none flex-col gap-0.5 border-l border-base-content/10 pl-1.5">
+                    <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">
                       {e.items.map((a) => (
                         <AgentRow
                           key={a.name}
@@ -867,10 +870,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               <ul className="flex w-full list-none flex-col gap-0.5 p-0">
                 {activeEntries.map(renderEntry)}
                 {dormantEntries.length > 0 && (
-                  <li key="__dormant__" className="mt-1">
+                  <li key="__dormant__" className="mt-1 rounded-xl bg-base-300/15 p-1">
                     <button
                       type="button"
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] font-medium text-base-content/45 transition-colors hover:bg-base-300/40 hover:text-base-content/70"
+                      className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-[12px] font-medium text-base-content/45 transition-colors hover:bg-base-300/40 hover:text-base-content/70"
                       onClick={() => setDormantOpen((v) => !v)}
                     >
                       <svg
@@ -892,7 +895,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                       </span>
                     </button>
                     {dormantOpen && (
-                      <ul className="flex list-none flex-col gap-0.5 p-0 opacity-75">
+                      <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5 opacity-75">
                         {dormantEntries.map(renderEntry)}
                       </ul>
                     )}
