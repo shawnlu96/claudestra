@@ -52,11 +52,35 @@ export function windowTarget(name: string): string {
 }
 
 /** 发送文本到窗口（literal 模式 + 单独的 Enter） */
+/**
+ * v2.21.1+ copy-mode 逃逸(peer 2026-08-30 实证的最阴险静默失败):pane 一旦进
+ * copy-mode(web 终端滚轮/手动翻屏都能触发),**所有 send-keys 被 tmux 自己的
+ * 键绑定吃掉**,一个字符也到不了 Claude Code——而 send-keys 照样成功返回、
+ * capture-pane 照常有内容、日志里还有一行漂亮的 "triggered",所有常规判据全绿。
+ * 注入前查 #{pane_in_mode},在模式里就先 -X cancel。返回是否做了取消。
+ */
+export async function ensurePaneInteractive(target: string): Promise<boolean> {
+  try {
+    const inMode = (await tmuxRaw(["display-message", "-p", "-t", target, "#{pane_in_mode}"])).trim();
+    if (inMode !== "" && inMode !== "0") {
+      await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
+      await Bun.sleep(120);
+      return true;
+    }
+  } catch { /* display-message 失败按「不在模式」处理,别挡注入 */ }
+  return false;
+}
+
 export async function tmuxSendLine(
   target: string,
   text: string,
   delayMs = 100
 ): Promise<void> {
+  // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
+  // (save-compact / /model / slash 透传 / cron 指令…)全部受益
+  if (await ensurePaneInteractive(target)) {
+    console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
+  }
   await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);

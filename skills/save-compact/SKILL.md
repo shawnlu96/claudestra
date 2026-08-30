@@ -58,6 +58,10 @@ user-invocable: true
 if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
   nohup bash -c '
     sleep 10
+    # copy-mode 守卫(2026-08-30 实证):pane 在 copy-mode 时所有 send-keys 被
+    # tmux 吞掉且不报错——先无条件 cancel(不在模式时此命令无害报错,忽略)
+    tmux send-keys -t "$TMUX_PANE" -X cancel 2>/dev/null
+    sleep 0.2
     tmux send-keys -t "$TMUX_PANE" -l "/compact"
     sleep 0.4
     tmux send-keys -t "$TMUX_PANE" Enter

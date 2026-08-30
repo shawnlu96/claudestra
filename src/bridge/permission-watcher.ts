@@ -306,6 +306,11 @@ export function computeModalKey(
  *  新消息还会误触抢占打断。web 客户端的反向对齐救不了这种,因为它信任的
  *  正是服务端 busy。 */
 const idleWhileThinking = new Map<string, number>();
+
+/** v2.21.1+ copy-mode 卡死追踪:channelId → 首见时刻。持续超过阈值才 cancel,
+ *  给 owner 在裸 tmux 里正当选文本留余地(agent pane 正常运行不该停留 copy-mode)。 */
+const copyModeFirstSeen = new Map<string, number>();
+const COPY_MODE_STUCK_MS = 3 * 60 * 1000;
 const IDLE_THINKING_GRACE_MS = 120_000;
 
 // ── v2.17.2 AskUserQuestion pane 侧检测 ──────────────────────────────
@@ -439,6 +444,27 @@ async function checkAgent(
 
   // v2.7+ agents 视图自动逃逸（特征界面刚被 Esc 掉 → 本轮不再做弹窗检测）
   if (await maybeEscapeAgentsView(agentName, channelId, pane, discord)) return;
+
+  // v2.21.1+ copy-mode 卡死自愈(peer 2026-08-30):pane 进 copy-mode 后所有
+  // send-keys 被 tmux 吃掉、注入静默失效,且 capture-pane 显示的是翻屏视图,
+  // 下面所有弹窗检测都会被带偏。agent 的 pane 没有人类正当停留 copy-mode 的
+  // 场景(iTerm -CC 原生滚动不进 copy-mode;web 终端滚轮是已知触发源)——
+  // 持续 3 分钟就 cancel。短暂停留放过:可能是 owner 恰好在裸 tmux 里选文本。
+  try {
+    const inMode = (await tmuxRaw(["display-message", "-p", "-t", windowTarget(agentName), "#{pane_in_mode}"])).trim();
+    if (inMode !== "" && inMode !== "0") {
+      const first = copyModeFirstSeen.get(channelId);
+      if (first === undefined) {
+        copyModeFirstSeen.set(channelId, Date.now());
+      } else if (Date.now() - first > COPY_MODE_STUCK_MS) {
+        copyModeFirstSeen.delete(channelId);
+        console.log(`⌨️ ${agentName} 卡在 copy-mode ${Math.round((Date.now() - first) / 1000)}s,自动 cancel(期间所有注入都被吞)`);
+        await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "-X", "cancel"]).catch(() => {});
+      }
+      return; // copy-mode 下 pane 内容是翻屏视图,本轮其余检测无意义
+    }
+    copyModeFirstSeen.delete(channelId);
+  } catch { /* 探测失败不挡后续检测 */ }
 
   // v2.21.1+ dev-channels 确认框兜底(peer 2026-08-30):这个框是我们自己拼进启动
   // 命令的 flag 引出来的,理应自己按掉。启动就绪轮询窗口内会被代按;但轮询超时

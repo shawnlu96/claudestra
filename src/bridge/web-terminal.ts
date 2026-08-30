@@ -428,6 +428,11 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
         try { sess.term.close(); } catch { /* 已关闭 */ }
         // fire-and-forget：viewer session 清理失败由启动 sweep 兜底
         tmuxRun(["kill-session", "-t", viewerSession]).catch(() => {});
+        // v2.21.1+ copy-mode 兜底(peer 2026-08-30 静默失联根因):viewer 开着
+        // mouse,滚轮会让**共享的 pane** 进 copy-mode;viewer 死了 copy-mode
+        // 留在 pane 上,之后所有 send-keys 注入被 tmux 吞掉不报错。断开时
+        // 无条件 cancel(不在模式时报错无害)。
+        tmuxRun(["send-keys", "-t", `${MASTER_SESSION}:${windowRef}`, "-X", "cancel"]).catch(() => {});
         // 解除过 iTerm 钳制 → 申报尺寸改写回原值，桌面端恢复原状
         restoreControlClamp(sess.lift);
         // 把 window 尺寸决定权还回去（resize-window 置了 manual;不恢复的话
