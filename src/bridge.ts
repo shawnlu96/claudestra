@@ -95,6 +95,8 @@ import {
   resolveStaticPath,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
+  isLoopbackAddress,
+  controlAccessVerdict,
 } from "./bridge/web-gateway.js";
 // v2.6.0+ HTTP API 身份与授权（设计 §3.4 / §5）
 import {
@@ -4065,6 +4067,19 @@ initHttpPeer({ deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws 
 
 const CORS_ORIGIN_SETTING = process.env.BRIDGE_CORS_ORIGIN || "";
 const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
+// v2.21.1+ 控制面非回环鉴权(security-audit P0)。回环全豁免;非回环的裸控制
+// 路由 + ws 升级要此 token,/api/v1 走自己的 Bearer。未设 = 非回环控制访问
+// 全拒(fail-closed,当前合法流量 100% 回环,零影响)。
+const CONTROL_TOKEN = process.env.BRIDGE_CONTROL_TOKEN || "";
+/** 从请求取 control token:Authorization: Bearer / x-bridge-token / ?control_token= */
+function extractControlToken(req: Request, url: URL): string | null {
+  const auth = req.headers.get("authorization");
+  if (auth?.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
+  const h = req.headers.get("x-bridge-token");
+  if (h) return h.trim();
+  const q = url.searchParams.get("control_token");
+  return q ? q.trim() : null;
+}
 
 /**
  * clear 后的会话轮转收尾（后台异步）。
@@ -4295,6 +4310,27 @@ const server = Bun.serve({
   async fetch(req, server) {
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url);
+    const url0 = new URL(req.url);
+
+    // v2.21.1+ 控制面非回环鉴权(security-audit P0,2026-09-01)。最前置,回环是
+    // 最强信任信号——本机 channel-server/manager/web-BFF/discord 全走回环,豁免
+    // 一切;非回环的裸路由 + ws 升级要 control token,/api/v1 交给自己的 Bearer。
+    // 实测 requestIP 对回环 http 与 ws-upgrade 都稳定返回 127.0.0.1(sandbox 验过),
+    // 判定不会把本机 agent 误拦。
+    {
+      const ip = server.requestIP(req);
+      const loopback = isLoopbackAddress(ip?.address);
+      const verdict = controlAccessVerdict({
+        loopback,
+        pathname: url0.pathname,
+        providedToken: extractControlToken(req, url0),
+        controlToken: CONTROL_TOKEN,
+      });
+      if (!verdict.allow) {
+        console.warn(`🚫 拒绝非回环控制访问: ${req.method} ${url0.pathname} from ${ip?.address ?? "?"} (${verdict.reason})`);
+        return new Response("unauthorized: non-loopback control access requires BRIDGE_CONTROL_TOKEN", { status: 403 });
+      }
+    }
 
     // v2.13.1+ ws 跨源防护。WebSocket 不受同源策略约束 —— 用户访问的任意网页都能
     // 连上这个端口并发 route_to_agent，等价于在这台机器上执行任意命令。回环绑定

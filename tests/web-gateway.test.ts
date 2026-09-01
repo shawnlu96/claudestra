@@ -11,6 +11,8 @@ import {
   resolveStaticPath,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
+  isLoopbackAddress,
+  controlAccessVerdict,
 } from "../src/bridge/web-gateway.js";
 
 describe("跨源判定（ws 控制面防护）", () => {
@@ -117,5 +119,50 @@ describe("resolveStaticPath", () => {
 
   test("root 未设 → null", () => {
     expect(resolveStaticPath("", "/index.html")).toBeNull();
+  });
+});
+
+// ── v2.21.1+ 控制面非回环鉴权(security-audit P0)──
+
+describe("isLoopbackAddress", () => {
+  test("回环各形态命中", () => {
+    expect(isLoopbackAddress("127.0.0.1")).toBe(true);
+    expect(isLoopbackAddress("127.1.2.3")).toBe(true);
+    expect(isLoopbackAddress("::1")).toBe(true);
+    expect(isLoopbackAddress("::ffff:127.0.0.1")).toBe(true);
+  });
+  test("非回环 / 空 不命中", () => {
+    expect(isLoopbackAddress("192.168.3.10")).toBe(false);
+    expect(isLoopbackAddress("100.82.126.45")).toBe(false);
+    expect(isLoopbackAddress("::ffff:192.168.1.1")).toBe(false);
+    expect(isLoopbackAddress(null)).toBe(false);
+    expect(isLoopbackAddress(undefined)).toBe(false);
+    expect(isLoopbackAddress("")).toBe(false);
+  });
+});
+
+describe("controlAccessVerdict", () => {
+  const CT = "secret-control-token";
+  test("回环豁免一切(裸路由/ws 全放)", () => {
+    expect(controlAccessVerdict({ loopback: true, pathname: "/hook", providedToken: null, controlToken: "" }).allow).toBe(true);
+    expect(controlAccessVerdict({ loopback: true, pathname: "/", providedToken: null, controlToken: CT }).allow).toBe(true);
+  });
+  test("非回环 /api/v1 放行(交给自己的 Bearer——peer 入站)", () => {
+    const v = controlAccessVerdict({ loopback: false, pathname: "/api/v1/agents/x/messages", providedToken: null, controlToken: CT });
+    expect(v.allow).toBe(true);
+    expect(v.reason).toBe("api-bearer");
+  });
+  test("非回环裸路由:token 命中放行,不命中拒", () => {
+    expect(controlAccessVerdict({ loopback: false, pathname: "/hook", providedToken: CT, controlToken: CT }).allow).toBe(true);
+    expect(controlAccessVerdict({ loopback: false, pathname: "/hook", providedToken: "wrong", controlToken: CT }).allow).toBe(false);
+    expect(controlAccessVerdict({ loopback: false, pathname: "/skills/rescan", providedToken: null, controlToken: CT }).allow).toBe(false);
+  });
+  test("fail-closed:未配 token 时非回环裸路由一律拒", () => {
+    const v = controlAccessVerdict({ loopback: false, pathname: "/events", providedToken: "anything", controlToken: "" });
+    expect(v.allow).toBe(false);
+    expect(v.reason).toBe("no-token-configured");
+  });
+  test("非回环 ws 升级(根路径)未配 token → 拒(route_to_agent RCE 面)", () => {
+    expect(controlAccessVerdict({ loopback: false, pathname: "/", providedToken: null, controlToken: "" }).allow).toBe(false);
   });
 });

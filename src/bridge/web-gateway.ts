@@ -79,6 +79,50 @@ export function isOriginExplicitlyAllowed(
 }
 
 /**
+ * v2.21.1+ 控制面非回环访问闸(security-audit 2026-09-01 巡检 P0)。
+ *
+ * bridge 的裸控制路由(/hook /stats /stats/refresh /skills/rescan /agent/cleanup
+ * /events)和 ws 升级(route_to_agent = 主机 RCE)一直无鉴权。BRIDGE_BIND=0.0.0.0
+ * 时它们暴露给整个 LAN + tailnet。回环客户端(channel-server/manager/web-BFF/
+ * discord-reply)是全部合法流量;唯一合法的非回环入站是 HTTP peer,而 peer 走
+ * /api/v1(自带 Bearer)。
+ *
+ * 判据(纯函数,单测):
+ *   - 回环(127/8、::1、::ffff:127.*)→ 放行,豁免一切(信任本机)
+ *   - 非回环 + /api/v1/* → 放行,交给 handleApiRequest 自己的 Bearer 鉴权(peer)
+ *   - 非回环 + 其余 → 要求 control token 命中,否则拒
+ *
+ * fail-closed:BRIDGE_CONTROL_TOKEN 未设时,非回环非-/api/v1 一律拒(当前无此类
+ * 合法流量,零影响;要开放远程直连裸路由再设 token)。requestIP 取不到地址(null)
+ * 按非回环处理——实测本机回环的 http/ws-upgrade 都稳定返回 127.0.0.1,不会误伤。
+ */
+export function isLoopbackAddress(addr: string | null | undefined): boolean {
+  if (!addr) return false;
+  return (
+    addr === "::1" ||
+    addr === "::ffff:127.0.0.1" ||
+    addr.startsWith("127.") ||
+    addr.startsWith("::ffff:127.")
+  );
+}
+
+export function controlAccessVerdict(opts: {
+  loopback: boolean;
+  pathname: string;
+  providedToken: string | null;
+  controlToken: string;
+}): { allow: boolean; reason: string } {
+  if (opts.loopback) return { allow: true, reason: "loopback" };
+  // /api/v1/* 有自己的 Bearer 鉴权(peer 入站走这里),放行给它自处理
+  if (opts.pathname.startsWith("/api/v1/")) return { allow: true, reason: "api-bearer" };
+  // 其余控制路由 + ws 升级:非回环必须命中 control token
+  if (opts.controlToken && opts.providedToken === opts.controlToken) {
+    return { allow: true, reason: "control-token" };
+  }
+  return { allow: false, reason: opts.controlToken ? "bad-token" : "no-token-configured" };
+}
+
+/**
  * 静态文件路径解析：穿越防护 + SPA fallback。
  * - 命中真实文件 → 绝对路径
  * - 路径不存在且不像资源文件（最后一段无扩展名）→ index.html（前端路由 fallback）
