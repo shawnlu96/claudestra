@@ -251,6 +251,7 @@ bun test
 | `BRIDGE_URL` | Optional override for the channel-server's WebSocket target |
 | `MASTER_DIR` | Optional override for the master tmux session's working directory |
 | `BRIDGE_BIND` | HTTP/ws bind address (default `127.0.0.1`; set `0.0.0.0` to expose — bring your own reverse proxy/TLS) |
+| `BRIDGE_CONTROL_TOKEN` | v2.21.1+ control-plane token for **non-loopback** access to the bare routes (`/hook` `/stats` `/skills/rescan` `/agent/cleanup` `/events`) and the ws upgrade (`route_to_agent` = host RCE). Loopback is always exempt; `/api/v1/*` keeps its own Bearer (peers unaffected). Unset = **fail-closed**: non-loopback control access is refused outright (current legal traffic is 100% loopback, so the default is zero-impact). Only set it if you deliberately need remote direct access to those routes. |
 | `BRIDGE_CORS_ORIGIN` | v2.10+ CORS allowlist: comma-separated origins or `*` (default unset = no CORS headers) |
 | `BRIDGE_STATIC_DIR` | v2.10+ static dir served by the bridge (SPA fallback included; default unset = off) |
 

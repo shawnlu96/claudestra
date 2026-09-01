@@ -235,6 +235,7 @@ bun test
 | `BRIDGE_URL` | channel-server 的 WebSocket 目标地址（可选覆盖） |
 | `MASTER_DIR` | 大总管 tmux session 的工作目录（可选覆盖） |
 | `BRIDGE_BIND` | HTTP/ws 绑定地址（默认 `127.0.0.1`；`0.0.0.0` 对外开放，反代/TLS 自理） |
+| `BRIDGE_CONTROL_TOKEN` | v2.21.1+ 控制面 token：**非回环**访问裸路由（`/hook` `/stats` `/skills/rescan` `/agent/cleanup` `/events`）与 ws 升级（`route_to_agent` = 主机 RCE）时要求命中。回环永远豁免；`/api/v1/*` 走自己的 Bearer（peer 不受影响）。不设 = **fail-closed**：非回环控制访问一律拒（当前合法流量 100% 回环，默认零影响）。仅当确需远程直连这些路由时才设。 |
 | `BRIDGE_CORS_ORIGIN` | v2.10+ CORS 白名单：逗号分隔 origin 或 `*`（默认不设 = 不发 CORS 头） |
 | `BRIDGE_STATIC_DIR` | v2.10+ bridge 直接托管的静态目录（含 SPA fallback；默认不设 = 关闭） |
 
