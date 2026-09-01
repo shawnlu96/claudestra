@@ -655,27 +655,52 @@ const autoCompactTriggered = new Map<string, number>();
 const AUTO_COMPACT_RETRY_MS = 30 * 60 * 1000;
 
 /**
- * v2.21.1+ 按 agent 真实窗口收紧阈值(peer 2026-08-30):配置的绝对阈值(如
- * 500K)对窗口只有 175K 的 agent 是永远够不到的天花板——CC 自家 auto-compact
- * 先接管,「先存记忆再压」永远轮不到。statusline 落盘的 context_window_size
- * 是权威窗口值:取 min(配置阈值, 真实窗口的 80%)。拿不到窗口(没配 statusline
- * 落盘/新 session 还没渲染过)退回配置值,行为与从前一致。
+ * v2.21.1+ 按 agent 真实窗口收紧阈值(peer 2026-08-30);比例在 2026-09-02
+ * 由实测重定(owner 报 Robinhood 被 CC 裸压、上下文全丢)。
+ *
+ * **必须赶在 CC 自家 auto-compact 前面**——它只压不存记忆,一旦它先动手,
+ * 「先存记忆再 compact」这套保护就等于不存在。实测本机各 agent 被 CC 压掉
+ * 时的水位(compact 前最后一条 usage):
+ *   alipan-resource 615K/62% · router 632K/63% · qingniao-miniapp 642K/64%
+ *   gc-car 715K/71% · robinhood 717K/72% · claudestra 718K/72%
+ * 即 CC 在窗口的 **62%~72%** 就接管。此前 ratio=0.8(1M 窗口 = 800K)高于
+ * 全部观测点,owner 配的绝对值 750K 也高于——**保护从未生效过一次**。
+ *
+ * 现在两档:
+ *   NORMAL 55%  常规线,留 7 个百分点余量给最早的观测点(62%)
+ *   EMERGENCY 62%  救命线,踩到 CC 的最早触发点 = 再不动手就要被裸压,
+ *                  **无视闲置门槛**立即触发(打断一次 ≪ 记忆全丢)
+ * 拿不到真实窗口(没配 statusline 落盘)时退回配置绝对值,且无救命线。
  */
-const REAL_WINDOW_TRIGGER_RATIO = 0.8;
+const REAL_WINDOW_TRIGGER_RATIO = 0.55;
+const EMERGENCY_WINDOW_RATIO = 0.62;
 
 function sessionIdOfStat(a: AgentStat): string | null {
   const base = a.jsonl?.split("/").pop() || "";
   return base.endsWith(".jsonl") ? base.slice(0, -".jsonl".length) : null;
 }
 
-function effectiveAutoCompactThreshold(cfgThreshold: number, a: AgentStat): number {
-  if (cfgThreshold <= 0) return 0;
+/** 该 agent 的真实上下文窗口(statusline 落盘的权威值);拿不到 → null。 */
+function realWindowOf(a: AgentStat): number | null {
   const sid = sessionIdOfStat(a);
   const ctx = sid ? readSessionCtx(sid) : null;
-  if (ctx && ctx.window > 0) {
-    return Math.min(cfgThreshold, Math.floor(ctx.window * REAL_WINDOW_TRIGGER_RATIO));
-  }
+  return ctx && ctx.window > 0 ? ctx.window : null;
+}
+
+function effectiveAutoCompactThreshold(cfgThreshold: number, a: AgentStat): number {
+  if (cfgThreshold <= 0) return 0;
+  const w = realWindowOf(a);
+  if (w) return Math.min(cfgThreshold, Math.floor(w * REAL_WINDOW_TRIGGER_RATIO));
   return cfgThreshold;
+}
+
+/**
+ * 救命线:踩到它说明 CC 随时会裸压,必须**无视闲置门槛**立即存记忆+压。
+ * 只有拿得到真实窗口时才有这条线(否则无从判断离 CC 的触发点还有多远)。
+ */
+function emergencyThresholdOf(a: AgentStat): number | null {
+  const w = realWindowOf(a);
+  return w ? Math.floor(w * EMERGENCY_WINDOW_RATIO) : null;
 }
 
 function loadAutoCompactThreshold(): number {
@@ -783,21 +808,30 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
       // 上下文回落或跨过新高位：重置自动触发状态，允许下一轮再涨时再次触发
       autoCompactTriggered.delete(a.channelId);
     }
-    // 自动触发:超线 + 闲置满门槛 + (未触发过 或 上次触发已超 30min 没见效)。
-    // **每轮都查**(不只在跨档时)——超线但还在干活的,等它闲下来那轮再动手
-    // (owner 2026-08-26:别干着干着就 compact)。
+    // 自动触发:超线 + (闲置满门槛 或 踩到救命线) + (未触发过 或 上次触发已超
+    // 30min 没见效)。**每轮都查**(不只在跨档时)——超线但还在干活的,等它闲
+    // 下来那轮再动手(owner 2026-08-26:别干着干着就 compact)。
     // ⚠ 必须放在 tier===0 闸**之前**(peer 2026-08-30):小窗口 agent 的有效
-    // 阈值(80%×175K=140K)低于最小绝对档 250K,放闸后面就永远轮不到触发。
+    // 阈值低于最小绝对档 250K,放闸后面就永远轮不到触发。
+    // v2.21.1+ 救命线(owner 2026-09-02 上下文被 CC 裸压全丢):闲置门槛对忙碌
+    // agent 是永久阻塞——Robinhood 一直在干活,涨到 717K 被 CC 压掉,我们一次
+    // 都没触发过。踩到 EMERGENCY(窗口 62% = CC 最早触发点)时**无视闲置**,
+    // 因为再等下去就是被裸压(记忆全丢),打断一次远比那个轻。
     if (!first) {
       const eff = effectiveAutoCompactThreshold(threshold, a);
+      const emergency = emergencyThresholdOf(a);
+      const isEmergency = emergency !== null && a.contextTokens >= emergency;
       const lastTrig = autoCompactTriggered.get(a.channelId) ?? 0;
       if (
         eff > 0 &&
         a.contextTokens >= eff &&
         Date.now() - lastTrig > AUTO_COMPACT_RETRY_MS &&
-        idleLongEnough(a, idleMs)
+        (isEmergency || idleLongEnough(a, idleMs))
       ) {
         autoCompactTriggered.set(a.channelId, Date.now());
+        if (isEmergency) {
+          console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
+        }
         await triggerAutoSaveCompact(a, eff);
       }
     }

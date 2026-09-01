@@ -887,7 +887,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         {/* ── 自动存记忆+Compact(owner 2026-08-27:「设置里看不到」) ─────────────── */}
         <Section
           title={t("自动存记忆 + Compact")}
-          desc={t("上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文。对所有 agent 生效。")}
+          desc={t("上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文。对所有 agent 生效。实际触发线取「此阈值」与「该 agent 真实窗口 55%」的较小者——必须赶在 Claude Code 自己的 compact(实测窗口 62%~72% 就动手,它只压不存记忆)之前。涨到窗口 62% 时无视闲置门槛强制触发,避免被裸压丢上下文。")}
         >
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-[13px]">
