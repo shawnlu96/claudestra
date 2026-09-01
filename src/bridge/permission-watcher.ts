@@ -424,11 +424,20 @@ async function checkAgent(
   // 不会持续 2 分钟空闲提示符,不误伤。
   try {
     const { getAgentStatus, emitEvent, isChannelExternallyBusy } = await import("./event-bus.js");
+    const { hasActiveBgActivities } = await import("./bg-activity-watcher.js");
     const paneIdleNow = /❯/.test(pane) && !/esc to interrupt/i.test(pane);
-    // v2.21.1+ 外部繁忙豁免(owner 2026-09-02 报 Robinhood 提前完成):agent 阻塞
-    // 在长 MCP 工具(ask_codex,实测 303s)期间 pane idle 但仍在回合内,不能收敛
-    // done。重置计时器——codex 返回后若真闲下来,重新从 0 累计 120s 才判。
-    if (getAgentStatus(agentName) === "thinking" && paneIdleNow && !isChannelExternallyBusy(channelId)) {
+    // v2.21.1+ 「pane idle 但 agent 逻辑在忙」豁免(owner 2026-09-02:「每次起
+    // background task 都触发[提前完成],不只 codex」)。对账本意是抓「状态卡
+    // thinking 但真闲」的死状态,但 agent 大量异步等待时 pane idle 是常态,不是
+    // 卡死。两类可靠的「真在忙」信号并集豁免:
+    //   ① externallyBusy:bridge 经手的长 MCP 调用(ask_codex,实测 303s)
+    //   ② hasActiveBgActivities:bg-activity-watcher 追踪的后台 shell task /
+    //      subagent 仍在写输出(3min 不增长才判 finished)
+    // 命中任一 → 不收敛 done + 重置计时器,真闲下来后重新累计 120s 才判。
+    // 残留边界:静默 bg task(3min 不写输出)会被判 finished,之后若仍 idle 可能
+    // 误判——那种少见,且此刻 agent 确实无可观测活动。
+    const logicallyBusy = isChannelExternallyBusy(channelId) || hasActiveBgActivities(agentName);
+    if (getAgentStatus(agentName) === "thinking" && paneIdleNow && !logicallyBusy) {
       const first = idleWhileThinking.get(channelId);
       if (first === undefined) {
         idleWhileThinking.set(channelId, Date.now());
