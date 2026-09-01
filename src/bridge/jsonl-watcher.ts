@@ -473,7 +473,12 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           // event-bus 状态就停在上一次的 done。而 jsonl 是 CC 亲手写的——
           // 有新 assistant 内容 = 它确实在跑,这是最硬的「活着」信号。
           // 只在状态不是 thinking 时补一次,不刷屏。
-          if (getAgentStatus(state.agentName) !== "thinking") {
+          // ⚠ 只认**新鲜**记录:watcher 是 2s poll + fs.watch,可能在 Stop 之后
+          // 才读到 Stop 之前写的内容——拿它补 thinking 会把已结束的回合重新点亮
+          // 并卡住(要等 120s 对账才收敛)。30s 外的旧记录一律不补。
+          const entryTs = Date.parse(entry.timestamp || "");
+          const fresh = Number.isFinite(entryTs) && Date.now() - entryTs < 30_000;
+          if (fresh && getAgentStatus(state.agentName) !== "thinking") {
             emitEvent({
               agent: state.agentName,
               chatId: state.channelId,
