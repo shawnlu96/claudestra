@@ -10,6 +10,18 @@
 
 import { existsSync, statSync } from "fs";
 import { join, normalize, resolve } from "path";
+import { timingSafeEqual } from "crypto";
+
+/** 常量时间 token 比较(security-audit review nit-a):长度不等直接 false
+ *  (长度泄露风险极小,且 timingSafeEqual 要求等长 buffer)。 */
+function safeTokenEqual(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 按白名单算这次请求该发的 CORS 头。返回 null = 不发（未开启 / origin 不在名单）。
@@ -95,14 +107,24 @@ export function isOriginExplicitlyAllowed(
  * fail-closed:BRIDGE_CONTROL_TOKEN 未设时,非回环非-/api/v1 一律拒(当前无此类
  * 合法流量,零影响;要开放远程直连裸路由再设 token)。requestIP 取不到地址(null)
  * 按非回环处理——实测本机回环的 http/ws-upgrade 都稳定返回 127.0.0.1,不会误伤。
+ *
+ * ⚠ fail-closed 是**全集拒**(不是列举路由):将来若用 BRIDGE_STATIC_DIR 对外
+ * 托管前端,非回环静态访问也会被这道闸拦——到时要么设 CONTROL_TOKEN,要么给
+ * 静态路径单开例外(security-audit review 2026-09-01 提醒)。
  */
 export function isLoopbackAddress(addr: string | null | undefined): boolean {
   if (!addr) return false;
+  // normalize(review nit-c):大写/十六进制压缩形态也归一。miss 方向本就是
+  // 误拒不是误放(安全无洞),补齐只为不误伤边角形态。Bun requestIP 规范化
+  // 输出下只会是 127.x / ::1 / ::ffff:127.x,后两条是防御性冗余。
+  const a = addr.toLowerCase();
   return (
-    addr === "::1" ||
-    addr === "::ffff:127.0.0.1" ||
-    addr.startsWith("127.") ||
-    addr.startsWith("::ffff:127.")
+    a === "::1" ||
+    a === "::ffff:127.0.0.1" ||
+    a === "::ffff:7f00:1" ||
+    a === "0:0:0:0:0:ffff:7f00:1" ||
+    a.startsWith("127.") ||
+    a.startsWith("::ffff:127.")
   );
 }
 
@@ -115,8 +137,8 @@ export function controlAccessVerdict(opts: {
   if (opts.loopback) return { allow: true, reason: "loopback" };
   // /api/v1/* 有自己的 Bearer 鉴权(peer 入站走这里),放行给它自处理
   if (opts.pathname.startsWith("/api/v1/")) return { allow: true, reason: "api-bearer" };
-  // 其余控制路由 + ws 升级:非回环必须命中 control token
-  if (opts.controlToken && opts.providedToken === opts.controlToken) {
+  // 其余控制路由 + ws 升级:非回环必须命中 control token(常量时间比较)
+  if (opts.controlToken && opts.providedToken && safeTokenEqual(opts.providedToken, opts.controlToken)) {
     return { allow: true, reason: "control-token" };
   }
   return { allow: false, reason: opts.controlToken ? "bad-token" : "no-token-configured" };

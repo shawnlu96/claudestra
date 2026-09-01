@@ -157,6 +157,13 @@ describe("controlAccessVerdict", () => {
     expect(controlAccessVerdict({ loopback: false, pathname: "/hook", providedToken: "wrong", controlToken: CT }).allow).toBe(false);
     expect(controlAccessVerdict({ loopback: false, pathname: "/skills/rescan", providedToken: null, controlToken: CT }).allow).toBe(false);
   });
+  test("token 长度不等 → 拒(常量时间比较不抛)", () => {
+    expect(controlAccessVerdict({ loopback: false, pathname: "/hook", providedToken: "short", controlToken: CT }).allow).toBe(false);
+  });
+  test("回环归一化边角形态命中", () => {
+    expect(isLoopbackAddress("::FFFF:127.0.0.1")).toBe(true);
+    expect(isLoopbackAddress("::ffff:7f00:1")).toBe(true);
+  });
   test("fail-closed:未配 token 时非回环裸路由一律拒", () => {
     const v = controlAccessVerdict({ loopback: false, pathname: "/events", providedToken: "anything", controlToken: "" });
     expect(v.allow).toBe(false);
