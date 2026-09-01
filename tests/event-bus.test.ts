@@ -10,6 +10,9 @@ import {
   getAgentStatus,
   RING_LIMIT,
   __resetEventBusForTest,
+  markChannelExternallyBusy,
+  unmarkChannelExternallyBusy,
+  isChannelExternallyBusy,
   type BridgeEvent,
 } from "../src/bridge/event-bus.js";
 
@@ -148,3 +151,24 @@ describe("getAgentStatus（[fork] 回合进行态追踪，web composer 刷新同
     expect(getAgentStatus("x")).toBeUndefined();
   });
 });
+
+describe("externallyBusy 计数(ask_codex 期间豁免 thinking 对账)", () => {
+  test("mark/unmark 计数平衡,并发多路归零才闲", () => {
+    __resetEventBusForTest();
+    expect(isChannelExternallyBusy("c1")).toBe(false);
+    markChannelExternallyBusy("c1");
+    markChannelExternallyBusy("c1"); // 同 channel 并发两路 codex
+    expect(isChannelExternallyBusy("c1")).toBe(true);
+    unmarkChannelExternallyBusy("c1");
+    expect(isChannelExternallyBusy("c1")).toBe(true); // 还有一路在跑
+    unmarkChannelExternallyBusy("c1");
+    expect(isChannelExternallyBusy("c1")).toBe(false); // 归零 = 真闲
+  });
+  test("多减不为负,空 channelId 安全", () => {
+    __resetEventBusForTest();
+    unmarkChannelExternallyBusy("c2"); // 未 mark 先 unmark
+    expect(isChannelExternallyBusy("c2")).toBe(false);
+    markChannelExternallyBusy(""); // 空 id 不记
+    expect(isChannelExternallyBusy("")).toBe(false);
+  });
+})

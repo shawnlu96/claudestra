@@ -67,7 +67,7 @@ import * as fs from "fs/promises";
 // master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -2938,8 +2938,12 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
         const sandbox = CODEX_SANDBOXES.includes(msg.sandbox) ? (msg.sandbox as CodexSandbox) : undefined;
         codexInflight++;
+        // v2.21.1+ 标记该 channel「外部繁忙」——codex 阻塞期间 pane idle 但 agent
+        // 仍在这一回合内,防 thinking 对账把它误判成 done(owner 报 Robinhood)。
+        const codexChannel = String(msg.fromChannel || "");
+        markChannelExternallyBusy(codexChannel);
         console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
-        recordMetric("ask_codex", { channelId: String(msg.fromChannel || ""), meta: { thread: String(msg.thread || "") } });
+        recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
         runCodex({
           prompt: String(msg.prompt || ""),
           thread: msg.thread ? String(msg.thread) : undefined,
@@ -2955,6 +2959,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           })
           .finally(() => {
             codexInflight--;
+            unmarkChannelExternallyBusy(codexChannel);
           });
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));

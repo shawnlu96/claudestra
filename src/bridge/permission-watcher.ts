@@ -423,9 +423,12 @@ async function checkAgent(
   // thinking,连续 2 分钟 → 强制发 done 收敛。真回合的间隙(工具间/流转)
   // 不会持续 2 分钟空闲提示符,不误伤。
   try {
-    const { getAgentStatus, emitEvent } = await import("./event-bus.js");
+    const { getAgentStatus, emitEvent, isChannelExternallyBusy } = await import("./event-bus.js");
     const paneIdleNow = /❯/.test(pane) && !/esc to interrupt/i.test(pane);
-    if (getAgentStatus(agentName) === "thinking" && paneIdleNow) {
+    // v2.21.1+ 外部繁忙豁免(owner 2026-09-02 报 Robinhood 提前完成):agent 阻塞
+    // 在长 MCP 工具(ask_codex,实测 303s)期间 pane idle 但仍在回合内,不能收敛
+    // done。重置计时器——codex 返回后若真闲下来,重新从 0 累计 120s 才判。
+    if (getAgentStatus(agentName) === "thinking" && paneIdleNow && !isChannelExternallyBusy(channelId)) {
       const first = idleWhileThinking.get(channelId);
       if (first === undefined) {
         idleWhileThinking.set(channelId, Date.now());

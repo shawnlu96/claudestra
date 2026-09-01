@@ -197,10 +197,36 @@ export function getAgentStatus(agent: string): "thinking" | "done" | undefined {
   return agentStatuses.get(agent);
 }
 
+/**
+ * v2.21.1+ 「外部繁忙」channel 集合(owner 2026-09-02 报 Robinhood 提前显示完成)。
+ *
+ * agent 阻塞在长 MCP 工具调用(ask_codex spawn codex exec,实测跑 303s)期间,
+ * CC 在等外部 MCP 返回、pane 不显示 working spinner → 看起来 idle,但 agent
+ * 逻辑上仍在这一回合内(还没 Stop)。permission-watcher 的 thinking 对账
+ * (事件态 thinking + pane 空闲 120s → 强制 done)会把它误判成完成。bridge 自己
+ * spawn 的 codex 最清楚哪个 channel 真在忙——标记之,对账对这些 channel 豁免。
+ * 计数式(同 channel 可能并发多路 codex),归零才算真闲。
+ */
+const externallyBusy = new Map<string, number>();
+export function markChannelExternallyBusy(channelId: string): void {
+  if (!channelId) return;
+  externallyBusy.set(channelId, (externallyBusy.get(channelId) ?? 0) + 1);
+}
+export function unmarkChannelExternallyBusy(channelId: string): void {
+  if (!channelId) return;
+  const n = (externallyBusy.get(channelId) ?? 0) - 1;
+  if (n <= 0) externallyBusy.delete(channelId);
+  else externallyBusy.set(channelId, n);
+}
+export function isChannelExternallyBusy(channelId: string): boolean {
+  return (externallyBusy.get(channelId) ?? 0) > 0;
+}
+
 /** 测试专用：清空总线状态 */
 export function __resetEventBusForTest(): void {
   nextSeq = 1;
   subscribers.clear();
   rings.clear();
   agentStatuses.clear();
+  externallyBusy.clear();
 }
