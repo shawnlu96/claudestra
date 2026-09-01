@@ -176,6 +176,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * jsonl seq，追加只影响尾部），缓存降级为防白屏的过渡帧。
    */
   private messageCache = new Map<string, ChatMessage[]>();
+  /** 最近一次 reply 内容落地的时刻——用于丢弃 watcher 迟到的 reply_pending */
+  private lastReplyTextAt = 0;
 
   constructor() {
     super({
@@ -1659,6 +1661,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 空文本的 chat_message(out)，无条件建段会渲染出「分隔线 + 空白块」的幽灵回复。
     // 纯附件 / 纯按钮的 reply 是合法的，只丢弃三者皆空的。
     if (!text?.trim() && !hasComp && !hasAtts) return;
+    this.lastReplyTextAt = Date.now(); // 迟到 reply_pending 的判据(见 setReplying)
     const last = this.state.messages[this.state.messages.length - 1];
     // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合
     if (last && last.role === "assistant" && !this.nextBubbleBoundary) {
@@ -1755,6 +1758,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** v2.20.2+「正在回复…」;reply 到达/回合收尾时清。 */
   public setReplying() {
     if (this.state.replying) return;
+    // v2.21.1+ 迟到的 reply_pending 忽略(2026-09-02 抓事件流实测:watcher 读
+    // jsonl 有滞后,reply_pending 比 reply 内容本身晚 175ms 到达)——回复都
+    // 显示出来了才亮「正在回复…」,而且此后不会再有 setReplyText 来清它,
+    // 会一直亮到回合结束。刚落过 reply 的短窗内直接丢弃。
+    if (Date.now() - this.lastReplyTextAt < 5_000) return;
     this.produce((s) => {
       s.replying = true;
     });

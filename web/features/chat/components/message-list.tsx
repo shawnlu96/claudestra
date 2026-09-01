@@ -262,6 +262,21 @@ function ReplyingLine() {
   );
 }
 
+/**
+ * v2.21.1+「仍在工作…」——reply 已经发出、但回合还没结束(owner 2026-09-02:
+ * 「调完 reply 工具就当时完成了」)。与 ReplyingLine 区分:那条是「回复马上到」,
+ * 这条是「回复给过了,我还在继续干」。done 事件到达才收场。
+ */
+function WorkingLine() {
+  const t = useT();
+  return (
+    <span className="inline-flex items-center gap-1.5 py-1.5 text-[12.5px] text-base-content/45">
+      <span className="chat-dot inline-block size-1.5 rounded-full bg-base-content/40" />
+      {t("仍在工作…")}
+    </span>
+  );
+}
+
 /** 流式「思考中」三点。 */
 function ThinkingDots() {
   return (
@@ -1243,10 +1258,15 @@ export function MessageList() {
           </div>
         )}
         {/* v2.20.2+「正在回复…」:watcher 见到 reply 工具调用(owner:长任务里
-            想看到「快回我了」)。有流式气泡时挂在列表尾,无气泡时上面已并入思考区 */}
-        {!standaloneThinking && replying && streaming && !browsing && (
+            想看到「快回我了」)。有流式气泡时挂在列表尾,无气泡时上面已并入思考区
+            v2.21.1+「仍在工作…」(owner 2026-09-02:「调完 reply 就显示完成」):
+            reply 到达后 awaiting=false 且气泡有内容 → liveEmpty 与
+            standaloneThinking 双双 false,所有进行中指示消失,但 streaming 仍
+            true(agent 在继续干活)——实测事件流佐证:chat_message(out) 之后
+            还有 tool_start,全程无 done 事件。回合真正结束(done)才收场。 */}
+        {!standaloneThinking && streaming && !browsing && (
           <div className="chat-msg-in mb-[22px] w-full">
-            <ReplyingLine />
+            {replying ? <ReplyingLine /> : <WorkingLine />}
           </div>
         )}
         {copiedTip &&
