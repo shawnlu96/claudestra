@@ -267,6 +267,10 @@ export function Composer() {
   useEffect(() => {
     if (!active) return;
     try { setText(localStorage.getItem(draftKey(active)) || ""); } catch { /* 同上 */ }
+    // v2.21.1+ 切会话清空待发附件(owner 2026-09-02:「粘贴文件后切到别的对话,
+    // 文件还挂在框上」)。文字草稿是 per-agent 持久化的,附件不是——File 对象
+    // 存不进 localStorage,留在 state 里就等于跟着你串台,一不留神发错人。
+    setFiles([]);
     const onHide = () => {
       if (document.visibilityState === "hidden") saveDraft(active, textRef.current);
     };

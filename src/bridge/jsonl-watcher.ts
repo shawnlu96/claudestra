@@ -17,7 +17,7 @@ import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
-import { emitEvent } from "./event-bus.js";
+import { emitEvent, getAgentStatus } from "./event-bus.js";
 
 interface ToolEntry {
   id: string;
@@ -465,6 +465,22 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               continue; // AUQ entry 一律不进 tool/text 渲染管线（pane 通路已处理或已应答）
             }
           } catch (e) { /* non-critical */ }
+
+          // v2.21.1+ 回合态补正(owner 2026-09-02 截图实证:gc-car 工具卡在刷,
+          // 侧栏却是绿点「已完成」、无停止按钮)。thinking 事件**只在 bridge
+          // 投递消息时**发出;agent 自发开始的回合(compact 后继续、后台任务
+          // 回调、ScheduleWakeup 自唤醒、注入的 slash 命令)从不经过 deliver,
+          // event-bus 状态就停在上一次的 done。而 jsonl 是 CC 亲手写的——
+          // 有新 assistant 内容 = 它确实在跑,这是最硬的「活着」信号。
+          // 只在状态不是 thinking 时补一次,不刷屏。
+          if (getAgentStatus(state.agentName) !== "thinking") {
+            emitEvent({
+              agent: state.agentName,
+              chatId: state.channelId,
+              type: "agent_status",
+              data: { status: "thinking", trigger: "jsonl_activity" },
+            });
+          }
 
           const hasReply = content.some((b: any) => b.type === "tool_use" && isHiddenTool(b.name));
           // v2.20.2+「正在回复…」信号:看到 reply 工具调用就告诉 web 一声——
