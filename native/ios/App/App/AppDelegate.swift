@@ -27,6 +27,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        // Claudestra:开启 iOS 原生边缘右滑返回(PWA 里是系统给的,WKWebView 默认关着;
+        // owner 2026-09-03「壳里返回失效」)。web 端在壳内关掉自己的 JS 右滑返回,避免双重后退。
+        // webView 在 rootVC 的 viewDidLoad 后才存在,这里每次激活都设一遍(幂等)。
+        (window?.rootViewController as? CAPBridgeViewController)?.webView?.allowsBackForwardNavigationGestures = true
     }
 
     func applicationWillTerminate(_ application: UIApplication) {

@@ -21,6 +21,18 @@ import { ClaudeSwitcher } from "./claude-switcher";
 import { ctxLevel } from "../ctx-level";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
+import { isNativeShell } from "@/lib/native";
+
+/** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
+function shellLog(msg: string) {
+  try {
+    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: `[shell] ${msg}` }) }).catch(() => {});
+  } catch { /* ignore */ }
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (e) => { if (isNativeShell()) shellLog(`error ${e.message} @${(e.filename || "").split("/").pop()}:${e.lineno}`); });
+  window.addEventListener("unhandledrejection", (e) => { if (isNativeShell()) shellLog(`unhandledrejection ${String((e as PromiseRejectionEvent).reason).slice(0, 160)}`); });
+}
 
 /** 「会话内容」页的 hash 锚点：存在即处于内容视图，移动端横滑到内容栏 */
 const CONTENT_HASH = "#chat";
@@ -265,6 +277,7 @@ function ChatInner() {
   // 浏览器返回（系统级手势 / 返回键）：出栈回到会话列表
   useEffect(() => {
     const onPop = () => {
+      if (isNativeShell()) shellLog(`popstate hash=${window.location.hash} content=${isContentHash()}`);
       if (!skipDisableRef.current) setDisableTransition(true);
       setShowContent(isContentHash());
       requestAnimationFrame(() =>
@@ -297,6 +310,11 @@ function ChatInner() {
   // replaceState 摘掉 hash,不动栈。
   const backInFlightRef = useRef(false);
   const toList = useCallback(() => {
+    // 壳内排障打点(owner 2026-09-03「返回失效」,iOS 上看不到 console):记走了哪个分支
+    if (isNativeShell()) {
+      const st0 = window.history.state as { cstra?: string } | null;
+      shellLog(`toList hash=${window.location.hash} state=${JSON.stringify(st0)} inflight=${backInFlightRef.current} len=${window.history.length}`);
+    }
     if (isContentHash()) {
       if (backInFlightRef.current) return;
       const st = window.history.state as { cstra?: string } | null;
@@ -384,7 +402,9 @@ function ChatInner() {
     const dx = t.clientX - s.x;
     const dy = t.clientY - s.y;
     if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-    if (dx > 0 && showContent) toList();
+    // 原生壳里右滑返回交给 WKWebView 的系统手势(AppDelegate 已开启)——JS 再做一次
+    // 就是双重后退,会退过基础页到白屏
+    if (dx > 0 && showContent) { if (!isNativeShell()) toList(); }
     else if (dx < 0 && !showContent && activeAgent) toContent();
   };
 
