@@ -105,7 +105,7 @@ Base URL: `http://127.0.0.1:3847` (changeable via `BRIDGE_PORT`).
   },
   "agents": [{
     "name": "agent-x", "contextTokens": 239000, "contextEstimated": false,
-    "model": "claude-fable-5",
+    "model": "claude-fable-5-1",
     "today": {"tokens": 85000000, "requests": 12}, "week": {...}
   }]
 }

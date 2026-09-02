@@ -3,6 +3,7 @@
  * value = 完整 model id（settings.json / registry / /model 命令都认它）。
  */
 export const MODEL_OPTIONS = [
+  { value: "claude-fable-5-1", label: "Fable 5.1" },
   { value: "claude-fable-5", label: "Fable 5" },
   { value: "claude-opus-5", label: "Opus 5" },
   { value: "claude-opus-4-8", label: "Opus 4.8" },

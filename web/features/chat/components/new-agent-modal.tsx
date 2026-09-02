@@ -6,7 +6,8 @@ import { useT } from "@/lib/i18n";
 /** 模型选项(值 = manager 侧别名,空 = 跟随全局 settings.json 默认)。 */
 const MODEL_OPTIONS = [
   { value: "", label: "默认（跟随全局）" },
-  { value: "fable", label: "Fable 5" },
+  { value: "fable-5-1", label: "Fable 5.1" },
+  { value: "fable-5", label: "Fable 5" },
   { value: "opus", label: "Opus 5" },
   { value: "opus-4-8", label: "Opus 4.8" },
   { value: "sonnet", label: "Sonnet 4.6" },

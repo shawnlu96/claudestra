@@ -24,11 +24,14 @@ export interface UsageWindow {
 }
 
 /**
- * API 牌价（USD / Mtok），2026-07 官网口径：[input, output, cacheWrite(5m), cacheRead]。
- * 顺序敏感：先匹配更具体的（opus-4-8 在 opus 之前）。未知模型不计价（0），
- * 宁可少报不虚报。
+ * API 牌价（USD / Mtok），2026-09 官网口径：[input, output, cacheWrite(5m), cacheRead]。
+ * 顺序敏感：先匹配更具体的（fable-5-1 在 fable 之前、opus-4-8 在 opus 之前）。
+ * 未知模型不计价（0），宁可少报不虚报。
+ * Fable 5.1 相对 Fable 5 只有 cache read 变了（$1 → $0.25），其余同价；
+ * Mythos 5.1 的 cache read 官方未定，暂沿用泛 fable 口径。
  */
 const MODEL_PRICES: Array<{ match: RegExp; in_: number; out: number; cw: number; cr: number }> = [
+  { match: /fable-5-1/i, in_: 10, out: 50, cw: 12.5, cr: 0.25 },
   { match: /fable|mythos/i, in_: 10, out: 50, cw: 12.5, cr: 1 },
   { match: /opus-5/i, in_: 5, out: 25, cw: 6.25, cr: 0.5 },
   { match: /opus-4-8/i, in_: 5, out: 25, cw: 6.25, cr: 0.5 },

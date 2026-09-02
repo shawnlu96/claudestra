@@ -14,6 +14,8 @@ import {
   isKnownPermissionMode,
   PERMISSION_MODES,
   DEFAULT_PERMISSION_MODE,
+  MODEL_ALIASES,
+  resolveModelAlias,
 } from "../src/lib/claude-launch.ts";
 
 const base = { channelId: "123", bridgeUrl: "ws://localhost:3847" };
@@ -86,5 +88,22 @@ describe("ultracode effort", () => {
     const cmd = _bcc({ channelId: "c1", sessionId: "s1", effort: "ultracode" });
     expect(cmd).toContain("--effort xhigh");
     expect(cmd).not.toContain("ultracode");
+  });
+});
+
+describe("model aliases", () => {
+  test("裸家族名指向最新版；带版本号的别名钉死某一代", () => {
+    expect(resolveModelAlias("fable")).toBe("claude-fable-5-1");
+    expect(resolveModelAlias("fable-5-1")).toBe("claude-fable-5-1");
+    expect(resolveModelAlias("fable-5")).toBe("claude-fable-5");
+    expect(resolveModelAlias("opus")).toBe("claude-opus-5");
+  });
+  test("大小写 / 空白不敏感，未知值原样透传（允许未来新模型 id）", () => {
+    expect(resolveModelAlias("  Fable  ")).toBe("claude-fable-5-1");
+    expect(resolveModelAlias("claude-fable-5-1")).toBe("claude-fable-5-1");
+    expect(resolveModelAlias("claude-future-9")).toBe("claude-future-9");
+  });
+  test("别名表每个值都是完整 model id", () => {
+    for (const id of Object.values(MODEL_ALIASES)) expect(id.startsWith("claude-")).toBe(true);
   });
 });

@@ -95,6 +95,12 @@ describe("costOfUsage", () => {
     expect(c).toBeCloseTo(10 + 50 + 12.5 + 1, 6);
   });
 
+  test("fable-5-1: cache read 0.25，其余同 fable-5；老 fable-5 不受影响", () => {
+    expect(costOfUsage("claude-fable-5-1", { cache_read_input_tokens: 4_000_000 })).toBeCloseTo(1, 6);
+    expect(costOfUsage("claude-fable-5-1", { input_tokens: 1_000_000, output_tokens: 1_000_000 })).toBeCloseTo(60, 6);
+    expect(costOfUsage("claude-fable-5", { cache_read_input_tokens: 1_000_000 })).toBeCloseTo(1, 6);
+  });
+
   test("opus-4-8 命中专价而不是老 opus 价", () => {
     expect(costOfUsage("claude-opus-4-8", { input_tokens: 1_000_000 })).toBeCloseTo(5, 6);
   });
