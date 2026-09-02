@@ -172,3 +172,26 @@ describe("externallyBusy 计数(ask_codex 期间豁免 thinking 对账)", () => 
     expect(isChannelExternallyBusy("")).toBe(false);
   });
 })
+
+import { isBusyStatus } from "../src/bridge/event-bus.js";
+
+describe("v2.21.2 compacting 回合态", () => {
+  test("compacting 被记录为独立状态,对外 busy 语义同 thinking", () => {
+    __resetEventBusForTest();
+    emitEvent({ agent: "c", chatId: "1", type: "agent_status", data: { status: "done" } });
+    expect(getAgentStatus("c")).toBe("done");
+    expect(isBusyStatus(getAgentStatus("c"))).toBe(false);
+    emitEvent({ agent: "c", chatId: "1", type: "agent_status", data: { status: "compacting", trigger: "pane" } });
+    expect(getAgentStatus("c")).toBe("compacting");
+    expect(isBusyStatus(getAgentStatus("c"))).toBe(true);
+    emitEvent({ agent: "c", chatId: "1", type: "agent_status", data: { status: "thinking", trigger: "compact_done" } });
+    expect(getAgentStatus("c")).toBe("thinking");
+    expect(isBusyStatus(undefined)).toBe(false);
+  });
+  test("未知 status 值不改状态", () => {
+    __resetEventBusForTest();
+    emitEvent({ agent: "d", chatId: "1", type: "agent_status", data: { status: "compacting" } });
+    emitEvent({ agent: "d", chatId: "1", type: "agent_status", data: { status: "bogus" } });
+    expect(getAgentStatus("d")).toBe("compacting");
+  });
+});

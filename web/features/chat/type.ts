@@ -133,6 +133,8 @@ export interface AgentSession {
   pinnedMaster?: boolean;
   /** 正在干活（tmux 非空闲）→ 列表状态点显黄色。 */
   busy?: boolean;
+  /** v2.21.2+ 正在压缩上下文 → 列表状态点显蓝色（区分于普通忙碌）。 */
+  compacting?: boolean;
   /** 最近活动时间（session jsonl mtime，ms epoch）→ 列表行右侧时间标签。 */
   lastActivityTs?: number | null;
   /** 当前上下文占用 token 数 → TopBar 超标提示。 */

@@ -720,3 +720,26 @@ export function hasChildInPsOutput(psOut: string, pid: number): boolean {
 export async function ensureSocketDir(): Promise<void> {
   await Bun.spawn(["mkdir", "-p", "/tmp/claude-orchestrator"]).exited;
 }
+
+/**
+ * v2.21.2+ pane 是否正显示 Claude Code 的「Compacting conversation…」进行态。
+ * 只看尾部 12 行——spinner 行贴着输入框;更早的行可能是滚出去的旧内容。
+ * 结束后 CC 打印的是「Compacted (ctrl+o to see full summary)」,不含 Compacting,
+ * 天然不会误判成仍在压缩。
+ */
+export function paneShowsCompacting(pane: string): boolean {
+  const tail = pane.split("\n").slice(-12).join("\n");
+  return /\bCompacting\b/i.test(tail);
+}
+
+/**
+ * 压缩进度百分比(CC 2.1.x 在「Compacting conversation…」下一行画进度条
+ * 「▰▰▱▱… 37%」)。拿不到返回 null。
+ */
+export function paneCompactProgress(pane: string): number | null {
+  const tail = pane.split("\n").slice(-12).join("\n");
+  const m = tail.match(/[▰▱]+\s*(\d{1,3})%/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 0 && n <= 100 ? n : null;
+}

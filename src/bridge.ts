@@ -67,7 +67,7 @@ import * as fs from "fs/promises";
 // master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, isBusyStatus, markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -325,6 +325,11 @@ const pendingAgentCalls = new Map<string, PendingAgentCall>();
 const heldLocalMsgs = new Map<string, { env: RouterEnvelope; to: RouterLocalEndpoint; heldAt: number }[]>();
 const HELD_MSG_MAX_MS = 30 * 60_000;
 
+/** 人类 request(Discord 用户 / 非 peer 的 API 用户)——抢占与押后规则的分野。 */
+function isHumanRequest(env: RouterEnvelope): boolean {
+  return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
+}
+
 /** 目标 agent 是否正在回合中(pane 双信号 + event-bus 状态,与人类抢占同判据)。 */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
   try {
@@ -340,7 +345,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
     return (
       /esc to interrupt/i.test(tail10) ||
       /…\s*\(\d+m?\s*\d*s\b/.test(tail10) ||
-      getAgentStatus(evAgent) === "thinking"
+      isBusyStatus(getAgentStatus(evAgent)) // v2.21.2+ 压缩上下文中也算忙
     );
   } catch {
     return false;
@@ -353,9 +358,17 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
   const q = heldLocalMsgs.get(channelId);
   if (!q || q.length === 0) return;
   const evAgent = q[0].to.agentName || channelId;
-  if (await localAgentWorking(channelId, evAgent)) return;
-  heldLocalMsgs.delete(channelId);
-  for (const item of q) {
+  // v2.21.2+ 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
+  if (getAgentStatus(evAgent) === "compacting") return;
+  const working = await localAgentWorking(channelId, evAgent);
+  // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
+  // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
+  const due = working ? q.filter((i) => isHumanRequest(i.env)) : q;
+  if (due.length === 0) return;
+  const rest = q.filter((i) => !due.includes(i));
+  if (rest.length) heldLocalMsgs.set(channelId, rest);
+  else heldLocalMsgs.delete(channelId);
+  for (const item of due) {
     // ws 可能已换代(channel-server 重连):按 channelId 取最新连接
     const fresh = clients.get(channelId);
     const to: RouterLocalEndpoint = fresh ? { ...item.to, ws: fresh.ws, cwd: fresh.cwd } : item.to;
@@ -369,6 +382,18 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
     }
   }
 }
+
+// v2.21.2+ 压缩上下文结束(jsonl compact_boundary 主路 / pane 兜底)→ 放行压缩期间
+// 押后的消息。人类消息押的理由只是「别掐压缩」,结束就该到;1.5s 让 CC 收尾。
+// 每分钟 sweep 仍是兜底(事件丢失时最多晚 60s)。
+subscribeEvents({}, (evt) => {
+  if (evt.type !== "agent_status") return;
+  const d = (evt.data || {}) as { trigger?: string };
+  if (d.trigger !== "compact_done" && d.trigger !== "compact_end_pane") return;
+  if (heldLocalMsgs.get(evt.chatId)?.length) {
+    setTimeout(() => void flushHeldLocalMsgs(evt.chatId, "compact_end"), 1500);
+  }
+});
 
 /**
  * v2.0.16+ inter-agent 消息看门狗。每当 bridge 把一条来自**另一个 agent / master**
@@ -752,7 +777,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
         /esc to interrupt/i.test(tail10) ||
         /…\s*\(\d+m?\s*\d*s\b/.test(tail10) ||
         getAgentStatus(evAgent) === "thinking";
-      if (win && working) {
+      // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
+      if (win && working && getAgentStatus(evAgent) !== "compacting") {
         lastPreemptAt.set(to.channelId, Date.now());
         await tmuxRaw(["send-keys", "-t", win, "C-c"]);
         recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
@@ -770,11 +796,13 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   // 押进队列等 Stop——CC 的回合中通知处置有丢弃窗口,回合外投递才是可靠的。
   // 人类/API 消息不押:上面已抢占 C-c,投递时目标已被腾空;response 回执、
   // send_to_agent、pushback、reply 转发(from.kind=local 全集)都押。
-  if (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent))) {
+  // v2.21.2+ 压缩上下文中一律押(人类消息也押:上面已跳过 C-c;压缩结束事件会放行)
+  const compactingNow = getAgentStatus(evAgent) === "compacting";
+  if (compactingNow || (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent)))) {
     const q = heldLocalMsgs.get(to.channelId) ?? [];
     q.push({ env, to, heldAt: Date.now() });
     heldLocalMsgs.set(to.channelId, q);
-    console.log(`⏸ agent 消息押后(${evAgent} 回合中): 来自 ${meta.user},队列 ${q.length} 条`);
+    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${q.length} 条`);
     // 对调用方语义仍是「已受理投递」;真正 ws.send 在 Stop/扫描时发生
     return { envelope: env, outcome: { kind: "sent" } };
   }

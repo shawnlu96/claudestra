@@ -28,6 +28,8 @@ export type BridgeEventType =
   // 插分隔线、让 ctx 徽章即时回落。jsonl-watcher 一直在发，但漏了在这里声明 ——
   // 加类型检查后才暴露出来。
   | "compact_done"
+  // v2.21.2+ 压缩进度(pane 进度条百分比,8s 一刷;transient 不进环)
+  | "compact_progress"
   // v2.7+ 会话对账异常：bg 分身出现 / 链路掉线 / 收编与清理结果（agents 模式适配）
   | "session_anomaly"
   // v2.8+ bg 活动生命周期（subagent / 后台 shell 任务），data.kind 区分
@@ -84,12 +86,20 @@ const subscribers = new Set<Subscriber>();
 /** agent → 该 agent 最近 RING_LIMIT 条事件（seq 升序） */
 const rings = new Map<string, BridgeEvent[]>();
 /**
- * agent → 最近一次 agent_status（"thinking"=回合进行中 / "done"=已收尾）。
+ * agent → 最近一次 agent_status（"thinking"=回合进行中 / "done"=已收尾 /
+ * "compacting"=正在压缩上下文,v2.21.2+）。
  * O(1) 查询「该 agent 此刻是否在回合中」，供刷新/迟到订阅者（web composer 的
  * 暂停态、SSE 连流时补拉）判断——不必扫 ring（status 事件稀疏但仍可能被挤出）。
  * bridge 重启清零（同 ring 的 R6 限制：权威回合边界靠 Stop hook 的 done 事件）。
  */
-const agentStatuses = new Map<string, "thinking" | "done">();
+/**
+ * v2.21.2+ 回合态三值。compacting 单列(owner 2026-09-02:Robinhood 手动 compact
+ * 跑了 117s,期间 Stop hook 早把状态置 done、jsonl 零条 assistant → UI 整整两分钟
+ * 「已完成」):它既不是 thinking(不在回合里,thinking 对账会把它收成 done)也不是
+ * done(agent 不可用),对外 busy 语义与 thinking 相同。
+ */
+export type AgentTurnStatus = "thinking" | "done" | "compacting";
+const agentStatuses = new Map<string, AgentTurnStatus>();
 
 function matches(evt: BridgeEvent, filter: EventFilter): boolean {
   if (filter.agent && evt.agent !== filter.agent) return false;
@@ -130,7 +140,7 @@ export function emitEvent(
   // 追踪回合进行态（O(1) 查询锚点）。
   if (full.type === "agent_status") {
     const st = (full.data as { status?: unknown }).status;
-    if (st === "thinking" || st === "done") agentStatuses.set(full.agent, st);
+    if (st === "thinking" || st === "done" || st === "compacting") agentStatuses.set(full.agent, st);
   }
 
   for (const sub of subscribers) {
@@ -193,8 +203,13 @@ export function subscriberCount(): number {
  * 该 agent 当前的回合态（最近一次 agent_status）。undefined = bridge 启动后
  * 该 agent 尚无任何 status 事件（视为空闲）。用于 web composer 刷新后同步暂停态。
  */
-export function getAgentStatus(agent: string): "thinking" | "done" | undefined {
+export function getAgentStatus(agent: string): AgentTurnStatus | undefined {
   return agentStatuses.get(agent);
+}
+
+/** 对外「忙」语义:回合中 或 正在压缩上下文,都不可投递/不可视为已完成。 */
+export function isBusyStatus(st: AgentTurnStatus | undefined): boolean {
+  return st === "thinking" || st === "compacting";
 }
 
 /**

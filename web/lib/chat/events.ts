@@ -61,7 +61,7 @@ export type WebComponentRow =
     };
 
 export type WebStreamEvent =
-  | { t: "status"; status: "running" | "done" }
+  | { t: "status"; status: "running" | "done" | "compacting" }
   /** 一次工具调用的段级摘要（📖 Read xxx / ✏️ Edit xxx / ⚙️ Bash ...）。
    *  id：tool_use id（tool-state 按它更新这张卡）。
    *  detail：完整入参详情（截断 4k），工具卡点开展示。 */
@@ -110,6 +110,8 @@ export type WebStreamEvent =
   | { t: "bg-sync"; ids: string[] }
   /** compact 完成（jsonl compact_boundary）：插系统分隔线 + ctx 徽章即时回落。 */
   | { t: "compact"; pre: number; post: number }
+  /** v2.21.2+ 压缩进度百分比(pane 进度条,约 8s 一刷) */
+  | { t: "compact-progress"; pct: number }
   /** v2.15+ 思考遥测（TUI 状态行采样,3s 一条,transient）：思考徽章显示
    *  `47s · ↓ 2.1k tokens`——token 在跳 = 模型活着,消除「卡住了」的错觉。
    *  （任务清单不走流:已有 ccTasks 文件真源面板 + Task* 工具触发的防抖刷新） */

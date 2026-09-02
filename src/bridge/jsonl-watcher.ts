@@ -406,6 +406,18 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
         // （compactMetadata 带 pre/postTokens）。此前「压缩完没完」只能用户亲自去
         // 验证（owner 2026-07-14）——这里把它变成一等事件：频道推完成消息 +
         // SSE compact_done（web 端插分隔线、ctx 徽章即时回落）。
+        // v2.21.2+ 手动 compact 的开始标记:注入/排队的 `/compact` 出队时 CC 落一条裸
+        // "/compact" user 记录(Robinhood 2026-09-02:12:39:27 落盘 → 12:41:25 boundary,
+        // 117s 里 UI 一直「已完成」)。2s poll 比 permission-watcher 的 8s pane 检测快,
+        // 先点亮;同样只认 30s 内的新鲜记录(重启回放 / 迟读不误点)。
+        if (entry.type === "user" && typeof entry.message?.content === "string" && entry.message.content.trim() === "/compact") {
+          const cmdTs = Date.parse(entry.timestamp || "");
+          if (Number.isFinite(cmdTs) && Date.now() - cmdTs < 30_000 && getAgentStatus(state.agentName) !== "compacting") {
+            state.textQueue.push("📦 正在压缩上下文…");
+            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "agent_status", data: { status: "compacting", trigger: "jsonl_cmd" } });
+          }
+        }
+
         if (entry.type === "system" && entry.subtype === "compact_boundary") {
           const cm = entry.compactMetadata || {};
           const pre = typeof cm.preTokens === "number" ? cm.preTokens : 0;
@@ -418,6 +430,17 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
             type: "compact_done",
             data: { preTokens: pre, postTokens: post, trigger: cm.trigger },
           });
+          // v2.21.2+ 压缩结束 → 回合态收敛。手动 compact 在 Stop 之后触发,结束即空闲
+          // → done;自动 compact 发生在回合中途,结束后 CC 继续本回合 → thinking。
+          // 只在状态确为 compacting 时动,不覆盖别的状态。
+          if (getAgentStatus(state.agentName) === "compacting") {
+            emitEvent({
+              agent: state.agentName,
+              chatId: state.channelId,
+              type: "agent_status",
+              data: { status: cm.trigger === "auto" ? "thinking" : "done", trigger: "compact_done" },
+            });
+          }
         }
 
         if (entry.type === "assistant") {

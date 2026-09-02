@@ -855,3 +855,37 @@ describe("childPidsInPsOutput", () => {
     expect(childPidsInPsOutput(ps, 12345)).toEqual([]);
   });
 });
+
+import { paneShowsCompacting } from "../src/lib/tmux-helper.js";
+
+describe("paneShowsCompacting(v2.21.2 压缩进行态)", () => {
+  test("尾部 spinner 行 Compacting conversation… → true", () => {
+    const pane = "  📖 Read src/bridge.ts\n\n✻ Compacting conversation… (esc to interrupt)\n\n❯ \n─────\n  Haiku 4.5 · ctx 76%";
+    expect(paneShowsCompacting(pane)).toBe(true);
+  });
+  test("结束后的 Compacted 提示不算", () => {
+    const pane = "⎿ Compacted (ctrl+o to see full summary)\n\n❯ \n─────";
+    expect(paneShowsCompacting(pane)).toBe(false);
+  });
+  test("Compacting 只出现在 12 行之外的旧输出 → false", () => {
+    const old = "✻ Compacting conversation…\n" + Array.from({ length: 14 }, (_, i) => `line ${i}`).join("\n");
+    expect(paneShowsCompacting(old)).toBe(false);
+  });
+  test("普通工作 spinner 不误判", () => {
+    expect(paneShowsCompacting("✶ Thinking… (2m 7s · ↓ 4.6k tokens)\n❯ ")).toBe(false);
+  });
+});
+
+import { paneCompactProgress } from "../src/lib/tmux-helper.js";
+
+describe("paneCompactProgress", () => {
+  test("进度条行 → 百分比", () => {
+    const pane = "✢ Compacting conversation…\n  ▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 37%\n  ⎿  Tip: Send messages\n❯ ";
+    expect(paneCompactProgress(pane)).toBe(37);
+    expect(paneCompactProgress("✽ Compacting conversation…\n  ▱▱▱▱ 0%\n❯ ")).toBe(0);
+  });
+  test("没有进度条 → null", () => {
+    expect(paneCompactProgress("✶ Thinking… (2m 7s)\n❯ ")).toBeNull();
+    expect(paneCompactProgress("ctx 76% · 5h 25%")).toBeNull();
+  });
+});

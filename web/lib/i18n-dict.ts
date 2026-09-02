@@ -10,6 +10,11 @@
 export const DICT: Record<string, string> = {
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
+  "正在回复…": "Replying…",
+  "仍在工作…": "Still working…",
+  "正在压缩上下文…": "Compacting context…",
+  "正在压缩上下文": "Compacting context",
+  "压缩中": "compacting",
   "保存": "Save",
   "取消": "Cancel",
   "删除": "Delete",

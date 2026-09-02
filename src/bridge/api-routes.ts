@@ -29,7 +29,7 @@ import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store
 import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
-import { emitEvent, getAgentStatus, type EventFilter } from "./event-bus.js";
+import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
 import { formatTool, formatToolDetail, agentNameForChannel } from "./jsonl-watcher.js";
 import { newThreadId, type Envelope, type ApiUserEndpoint } from "./router.js";
@@ -411,7 +411,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       await Promise.all(
         (agents as any[]).map(async (a) => {
           const st = getAgentStatus(a.name) ?? getAgentStatus(String(a.name).replace(/^agent-/, ""));
-          a.busy = st === "thinking" || a.idle === false;
+          a.busy = isBusyStatus(st) || a.idle === false;
+          // v2.21.2+ 正在压缩上下文(侧栏/列表可区分于普通忙碌)
+          a.compacting = st === "compacting";
           if (!a.busy && st === undefined && a.status !== "stopped") {
             try {
               const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]))
@@ -511,7 +513,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           status: deps.clients.has(CONTROL_CHANNEL_ID) ? "active" : "stopped",
           idle: undefined,
           purpose: "master orchestrator (大总管)",
-          busy: getAgentStatus("master") === "thinking",
+          busy: isBusyStatus(getAgentStatus("master")),
+          compacting: getAgentStatus("master") === "compacting",
           model: mOv.model ?? freshOrNull(mInfo?.model, mInfo?.modelTs) ?? mgModel ?? mInfo?.model ?? null,
           effort: mOv.effort ?? freshOrNull(mInfo?.effort, mInfo?.effortTs) ?? mgEffort ?? mInfo?.effort ?? null,
         } as any);
@@ -1370,7 +1373,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       ok: true,
       agent: agent.name,
       question: auq ? { questions: auq.questions, ts: auq.ts } : null,
-      thinking: status === "thinking",
+      // thinking 保持「忙」语义(压缩中也算),compacting 单独给出让前端显示「正在压缩上下文」
+      thinking: isBusyStatus(status),
+      compacting: status === "compacting",
     });
   }
 

@@ -114,6 +114,10 @@ interface ChatState {
   streaming: boolean;
   /** v2.20.2+ watcher 报「reply 工具调用中」——状态条显示「正在回复…」。 */
   replying: boolean;
+  /** v2.21.2+ agent 正在压缩上下文(手动 compact 在 Stop 之后跑几分钟)——尾部显示「正在压缩上下文…」 */
+  compacting: boolean;
+  /** v2.21.2+ 压缩进度百分比(null=未知) */
+  compactPct: number | null;
   /** 本轮已起、还没有任何输出 → 显示「思考中」 */
   awaitingChunk: boolean;
   /** Phase 2：当前会话待处理的权限 / session-idle 卡（null=无） */
@@ -195,6 +199,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       historyError: false,
       streaming: false,
       replying: false,
+      compacting: false,
+      compactPct: null,
       awaitingChunk: false,
       pendingPermission: null,
       pendingAsk: null,
@@ -474,6 +480,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           s.activeAgent = "";
           s.messages = [];
           s.streaming = false;
+          s.compacting = false;
         }
       });
     }
@@ -566,6 +573,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.historyError = false;
       s.streaming = false;
       s.awaitingChunk = false;
+      s.compacting = false;
       // 交互卡是 per-session 的：切走先清空，新流连上后 bridge 会 replay 当前 pending。
       s.pendingPermission = null;
       s.pendingAsk = null;
@@ -1731,11 +1739,24 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  public setStatus(status: "running" | "done") {
+  public setStatus(status: "running" | "done" | "compacting") {
     this.produce((s) => {
       if (status === "done") {
         s.streaming = false;
         s.awaitingChunk = false;
+        s.compacting = false;
+        s.compactPct = null;
+      } else if (status === "compacting") {
+        // 压缩上下文:锁 composer(停止可用),尾部指示改「正在压缩上下文…」而非思考点。
+        // 不动气泡边界——它不是回合,结束后 done / running 各自收场。
+        s.streaming = true;
+        s.awaitingChunk = false;
+        s.compacting = true;
+      } else if (s.compacting) {
+        // 压缩结束、回合继续(自动 compact 在回合中途)→ 回到「思考中」
+        s.compacting = false;
+        s.compactPct = null;
+        s.awaitingChunk = true;
       } else if (!s.streaming) {
         // 进入回合 → 锁 composer 成「停止」态。三种触发：本端 send（已置 streaming，
         // 走不到这里）/ 他端（Discord/master/另一浏览器）触发该会话 / 刷新·切回·回前台后
@@ -1773,6 +1794,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       s.telemetry = null;
       s.replying = false;
+      s.compacting = false;
       // 逆扫最近一条 assistant,不只看 messages[last]——连发抢占时用户的新消息
       // 已乐观 push 到末尾,done(interrupted) 到达时末尾是 user 气泡,只看末尾
       // 会整个跳过打断标记(2026-07-14 用户实测:工作中补发消息没标「已打断」;
@@ -1982,6 +2004,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** compact 完成（bridge compact_done 事件）：聊天流里插一条系统分隔线，并把该
    *  agent 的 contextTokens 即时改成 post——ctx 徽章/警示条不用等 15s 轮询回落。
    *  此前「压缩完没完」全靠用户亲自去验证（owner 2026-07-14），这条就是完成回执。 */
+  public compactProgress(pct: number) {
+    this.produce((s) => {
+      s.compactPct = pct;
+      // 进度到了就一定在压缩——比 8s 一轮的状态事件更早点亮
+      if (!s.compacting) {
+        s.compacting = true;
+        s.streaming = true;
+        s.awaitingChunk = false;
+      }
+    });
+  }
+
   public compactDone(pre: number, post: number) {
     this.flushPendingText();
     const fmtK = (n: number) => `${Math.round(n / 1000)}k`;
@@ -1996,6 +2030,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           : "📦 上下文已压缩",
         ts: new Date().toISOString(),
       });
+      s.compacting = false; // 压缩已结束(随后的 done/running 状态事件各自收场)
+      s.compactPct = null;
       const a = s.agents.find((x) => x.name === s.activeAgent);
       if (a) a.contextTokens = post;
     });

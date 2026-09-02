@@ -17,6 +17,8 @@ import {
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
   detectDevChannelsModal,
+  paneShowsCompacting,
+  paneCompactProgress,
 } from "../lib/tmux-helper.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -310,6 +312,8 @@ const idleWhileThinking = new Map<string, number>();
 /** v2.21.1+ copy-mode 卡死追踪:channelId → 首见时刻。持续超过阈值才 cancel,
  *  给 owner 在裸 tmux 里正当选文本留余地(agent pane 正常运行不该停留 copy-mode)。 */
 const copyModeFirstSeen = new Map<string, number>();
+/** v2.21.2+ channelId → 最近一次上报的压缩进度百分比(去重,只在变化时发事件) */
+const compactPctSeen = new Map<string, number>();
 const COPY_MODE_STUCK_MS = 3 * 60 * 1000;
 const IDLE_THINKING_GRACE_MS = 120_000;
 
@@ -418,6 +422,37 @@ async function checkAgent(
   discord: Client
 ) {
   const pane = await tmuxCapture(windowTarget(agentName), 30);
+
+  // v2.21.2+ compact 进行态(owner 2026-09-02:Robinhood 手动 compact 跑了 117s,
+  // 期间 Stop hook 早把状态置 done、jsonl 零条 assistant → UI 整整两分钟「已完成」)。
+  // 手动 compact 发生在 Stop **之后**(状态 done),自动 compact 发生在回合**中途**
+  // (状态 thinking);jsonl 只有结束时的 compact_boundary,没有开始标记——pane 上的
+  // 「Compacting…」是唯一通用的开始信号(手动场景 jsonl-watcher 另有 2s 快速通路)。
+  // 结束以 jsonl-watcher 的 compact_boundary 为主;这里兜底被 esc 打断的压缩:
+  // pane 不再显示 → 按 pane 是否还在跑收敛成 thinking / done。
+  try {
+    const { getAgentStatus, emitEvent } = await import("./event-bus.js");
+    const st = getAgentStatus(agentName);
+    const compacting = paneShowsCompacting(pane);
+    if (compacting && st !== "compacting") {
+      console.log(`📦 ${agentName} 正在压缩上下文(pane 检测,此前状态 ${st ?? "无"})`);
+      emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "compacting", trigger: "pane", prev: st ?? null } });
+    }
+    if (compacting) {
+      const pct = paneCompactProgress(pane);
+      if (pct !== null && compactPctSeen.get(channelId) !== pct) {
+        compactPctSeen.set(channelId, pct);
+        emitEvent({ agent: agentName, chatId: channelId, type: "compact_progress", data: { pct } }, { transient: true });
+      }
+    } else {
+      compactPctSeen.delete(channelId);
+    }
+    if (!compacting && st === "compacting") {
+      const working = /esc to interrupt/i.test(pane) || /…\s*\(\d+m?\s*\d*s\b/.test(pane);
+      console.log(`📦 ${agentName} 压缩已不在 pane 上(兜底收敛 → ${working ? "thinking" : "done"})`);
+      emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: working ? "thinking" : "done", trigger: "compact_end_pane" } });
+    }
+  } catch { /* 检测失败不影响其余 */ }
 
   // thinking 反向对账:pane 空闲(❯ 在场且无 esc to interrupt)而事件态仍
   // thinking,连续 2 分钟 → 强制发 done 收敛。真回合的间隙(工具间/流转)

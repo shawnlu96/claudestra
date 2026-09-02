@@ -54,11 +54,12 @@ function MasterIcon({ className }: { className?: string }) {
   );
 }
 
-function StatusDot({ status, busy }: { status: AgentSession["status"]; busy?: boolean }) {
+function StatusDot({ status, busy, compacting }: { status: AgentSession["status"]; busy?: boolean; compacting?: boolean }) {
   if (status === "active") {
     // 运行中：实心核心点 + 柔和呼吸外晕（cstra-breathe，替换生硬的 animate-ping）。
-    // 正在干活（tmux 非空闲 / 本端流式中）→ 黄色；空闲 → 绿色。
-    const tone = busy ? "bg-warning" : "bg-success";
+    // 正在干活（tmux 非空闲 / 本端流式中）→ 黄色；空闲 → 绿色；
+    // v2.21.2+ 正在压缩上下文 → 蓝色（既不是空闲也不是普通回合）。
+    const tone = compacting ? "bg-info" : busy ? "bg-warning" : "bg-success";
     return (
       <span className="relative flex size-2.5 shrink-0 items-center justify-center">
         <span className={`animate-cstra-breathe absolute inline-flex size-2.5 rounded-full ${tone}`} />
@@ -80,6 +81,7 @@ function AgentRow({
   a,
   active,
   busyLive,
+  compacting = false,
   pinned,
   onTogglePin,
   onSelect,
@@ -92,6 +94,8 @@ function AgentRow({
   active: boolean;
   /** 本端正在流式对话（active agent 的实时忙碌,比 15s 轮询的 busy 快） */
   busyLive: boolean;
+  /** v2.21.2+ 正在压缩上下文（轮询字段 或 active agent 的实时状态） */
+  compacting?: boolean;
   /** 用户置顶(localStorage 偏好,master 恒顶不算) */
   pinned: boolean;
   onTogglePin: () => void;
@@ -291,7 +295,7 @@ function AgentRow({
           {a.pinnedMaster ? (
             <MasterIcon className="size-4 shrink-0 text-base-content/60" />
           ) : (
-            <StatusDot status={a.status} busy={a.busy || busyLive} />
+            <StatusDot status={a.status} busy={a.busy || busyLive} compacting={compacting} />
           )}
           <span className="min-w-0 flex-1 truncate text-[15px] sm:text-sm">
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
@@ -311,7 +315,9 @@ function AgentRow({
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
               期间时间冻结在回合开始前)→ 显示「工作中」更诚实 */}
-          {(a.busy || busyLive) ? (
+          {compacting ? (
+            <span className="shrink-0 pl-1 text-[11px] text-info/80">{t("压缩中")}</span>
+          ) : (a.busy || busyLive) ? (
             <span className="shrink-0 pl-1 text-[11px] text-warning/80">{t("工作中")}</span>
           ) : (
             lastAt && (
@@ -340,6 +346,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
+  const compactingLive = useChatStore((s) => s.state.compacting);
   // 桌面侧栏拖拽调宽(owner 2026-07-24):右缘手柄,localStorage 持久化。
   // 移动端 w-full 不受影响(宽度变量只在 sm+ 生效)。
   const [sbWidth, setSbWidth] = useState<number | null>(() => {
@@ -760,8 +767,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               <span className="truncate text-[15px] font-medium sm:text-sm">{t(master.displayName)}</span>
               <span className="truncate text-[11px] text-base-content/45">{t("总控调度 · 新建会话找它")}</span>
             </span>
-            {(master.busy || (active === master.name && streaming)) && (
-              <span className="size-2 shrink-0 rounded-full bg-warning" />
+            {(master.busy || master.compacting || (active === master.name && streaming)) && (
+              <span className={`size-2 shrink-0 rounded-full ${master.compacting || (active === master.name && compactingLive) ? "bg-info" : "bg-warning"}`} />
             )}
           </button>
         )}
@@ -779,6 +786,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                 a={a}
                 active={active === a.name}
                 busyLive={active === a.name && streaming}
+                compacting={a.compacting || (active === a.name && compactingLive)}
                 pinned={pinSet.has(a.name)}
                 onTogglePin={() => togglePin(a.name)}
                 onSelect={onSelect}
@@ -801,6 +809,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                     a={e.a}
                     active={active === e.a.name}
                     busyLive={active === e.a.name && streaming}
+                    compacting={e.a.compacting || (active === e.a.name && compactingLive)}
                     pinned={pinSet.has(e.a.name)}
                     onTogglePin={() => togglePin(e.a.name)}
                     onSelect={onSelect}
@@ -853,6 +862,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                           a={a}
                           active={active === a.name}
                           busyLive={active === a.name && streaming}
+                compacting={a.compacting || (active === a.name && compactingLive)}
                           pinned={pinSet.has(a.name)}
                           onTogglePin={() => togglePin(a.name)}
                           onSelect={onSelect}

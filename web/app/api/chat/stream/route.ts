@@ -74,7 +74,8 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
             // v2.20.2+ 回合结束但后台还有活 → 前端标「后台继续中」而非绿勾
             ...(d.bgPending ? { bgPending: true } : {}),
           }
-        : { t: "status", status: "running" };
+        : // v2.21.2+ 正在压缩上下文(手动 compact 在 Stop 之后跑几分钟,此前一直显示已完成)
+          { t: "status", status: d.status === "compacting" ? "compacting" : "running" };
     case "tool_start":
       return {
         t: "tool",
@@ -206,6 +207,8 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
       };
     }
     // v2.15+ 思考遥测(transient,3s 一条)——思考徽章的实时数据
+    case "compact_progress":
+      return typeof d.pct === "number" ? { t: "compact-progress", pct: d.pct } : null;
     case "thinking_telemetry":
       return {
         t: "telemetry",
@@ -303,8 +306,11 @@ export async function GET(request: Request) {
           ok: boolean;
           question: { questions: unknown; ts: number } | null;
           thinking?: boolean;
+          compacting?: boolean;
         }>(`/agents/${encodeURIComponent(apiName)}/pending`, { timeoutMs: 5000 });
-        if (pending.thinking) {
+        if (pending.compacting) {
+          send({ t: "status", status: "compacting" });
+        } else if (pending.thinking) {
           send({ t: "status", status: "running" });
         }
         if (pending.question) {

@@ -277,6 +277,23 @@ function WorkingLine() {
   );
 }
 
+/**
+ * v2.21.2+「📦 正在压缩上下文…」——agent 在 compact(手动 compact 发生在 Stop 之后,
+ * 跑几分钟;此前这段时间 UI 一直是「已完成」,owner 2026-09-02 报)。compact_done /
+ * 随后的 done·running 状态事件收场。
+ */
+function CompactingLine() {
+  const t = useT();
+  const pct = useChatStore((s) => s.state.compactPct);
+  return (
+    <span className="inline-flex items-center gap-1.5 py-1.5 text-[12.5px] font-medium text-info">
+      <span className="chat-dot inline-block size-1.5 rounded-full bg-info" />
+      📦 {t("正在压缩上下文…")}
+      {pct !== null && <span className="font-mono tabular-nums opacity-70">{pct}%</span>}
+    </span>
+  );
+}
+
 /** 流式「思考中」三点。 */
 function ThinkingDots() {
   return (
@@ -990,6 +1007,7 @@ export function MessageList() {
   const awaiting = useChatStore((s) => s.state.awaitingChunk);
   const streaming = useChatStore((s) => s.state.streaming);
   const replying = useChatStore((s) => s.state.replying);
+  const compacting = useChatStore((s) => s.state.compacting);
   const loadingHistory = useChatStore((s) => s.state.loadingHistory);
   const historyHasMore = useChatStore((s) => s.state.historyHasMore);
   const loadingOlder = useChatStore((s) => s.state.loadingOlder);
@@ -1254,7 +1272,7 @@ export function MessageList() {
         {standaloneThinking && !browsing && (
           <div className="chat-msg-in mb-[22px] w-full">
             <ClaudeHeader pulsing />
-            {replying ? <ReplyingLine /> : <ThinkingDots />}
+            {compacting ? <CompactingLine /> : replying ? <ReplyingLine /> : <ThinkingDots />}
           </div>
         )}
         {/* v2.20.2+「正在回复…」:watcher 见到 reply 工具调用(owner:长任务里
@@ -1266,7 +1284,7 @@ export function MessageList() {
             还有 tool_start,全程无 done 事件。回合真正结束(done)才收场。 */}
         {!standaloneThinking && streaming && !browsing && (
           <div className="chat-msg-in mb-[22px] w-full">
-            {replying ? <ReplyingLine /> : <WorkingLine />}
+            {compacting ? <CompactingLine /> : replying ? <ReplyingLine /> : <WorkingLine />}
           </div>
         )}
         {copiedTip &&

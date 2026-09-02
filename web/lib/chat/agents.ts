@@ -24,6 +24,8 @@ export interface AgentSession {
   lastActivityTs?: number | null;
   /** 正在干活（tmux 非空闲）——列表状态点显黄色（2026-07-13 owner 需求）。 */
   busy?: boolean;
+  /** v2.21.2+ 正在压缩上下文。 */
+  compacting?: boolean;
   /** 当前上下文占用 token 数（TopBar 超标提示） */
   contextTokens?: number | null;
   /** 当前模型 id */
@@ -43,6 +45,8 @@ interface ApiAgent {
   lastActivityTs?: number | null;
   /** 正在回合中（Bridge hook 驱动的 agent_status，比 tmux idle 探测可靠） */
   busy?: boolean;
+  /** v2.21.2+ 正在压缩上下文（agent_status=compacting） */
+  compacting?: boolean;
   /** 当前上下文占用 token 数（最近一条 assistant 的 usage 合计） */
   contextTokens?: number | null;
   /** 当前模型 id（jsonl 实测 → registry → 全局默认） */
@@ -77,6 +81,7 @@ export async function loadAgents(): Promise<AgentSession[]> {
         pinnedMaster: true,
         lastActivityTs: a.lastActivityTs ?? null,
         busy: a.busy === true,
+        compacting: a.compacting === true,
         contextTokens: a.contextTokens ?? null,
         model: a.model ?? null,
         effort: a.effort ?? null,
@@ -96,6 +101,7 @@ export async function loadAgents(): Promise<AgentSession[]> {
       lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
       // Bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
       busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
+      compacting: a.status !== "stopped" && a.compacting === true,
       contextTokens: a.contextTokens ?? null,
       model: a.model ?? null,
       effort: a.effort ?? null,

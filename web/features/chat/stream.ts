@@ -27,7 +27,7 @@ export interface StreamSink {
     components?: WebComponentRow[],
     attachments?: { name: string; kind: "image" | "file"; url: string }[]
   ): void;
-  setStatus(status: "running" | "done"): void;
+  setStatus(status: "running" | "done" | "compacting"): void;
   /** v2.20.2+「✍️ 正在回复…」——watcher 见到 reply 工具调用。 */
   setReplying(): void;
   endTurn(interrupted?: boolean, bgPending?: boolean): void;
@@ -46,6 +46,8 @@ export interface StreamSink {
   bgTaskSync(ids: string[]): void;
   /** compact 完成：插系统分隔线 + 该 agent contextTokens 即时更新为 post。 */
   compactDone(pre: number, post: number): void;
+  /** v2.21.2+ 压缩进度百分比。 */
+  compactProgress(pct: number): void;
   /** v2.15+ 思考遥测（3s 一条）：思考指示器显示耗时 + token 跳动。 */
   setTelemetry(t: { elapsed?: string; tokens?: number; effort?: string } | null): void;
 }
@@ -116,6 +118,9 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       break;
     case "compact":
       sink.compactDone(evt.pre, evt.post);
+      break;
+    case "compact-progress":
+      sink.compactProgress(evt.pct);
       break;
     case "telemetry":
       sink.setTelemetry({ elapsed: evt.elapsed, tokens: evt.tokens, effort: evt.effort });
