@@ -659,21 +659,23 @@ const AUTO_COMPACT_RETRY_MS = 30 * 60 * 1000;
  * 由实测重定(owner 报 Robinhood 被 CC 裸压、上下文全丢)。
  *
  * **必须赶在 CC 自家 auto-compact 前面**——它只压不存记忆,一旦它先动手,
- * 「先存记忆再 compact」这套保护就等于不存在。实测本机各 agent 被 CC 压掉
- * 时的水位(compact 前最后一条 usage):
- *   alipan-resource 615K/62% · router 632K/63% · qingniao-miniapp 642K/64%
- *   gc-car 715K/71% · robinhood 717K/72% · claudestra 718K/72%
- * 即 CC 在窗口的 **62%~72%** 就接管。此前 ratio=0.8(1M 窗口 = 800K)高于
- * 全部观测点,owner 配的绝对值 750K 也高于——**保护从未生效过一次**。
+ * 「先存记忆再 compact」这套保护就等于不存在。
  *
- * 现在两档:
- *   NORMAL 55%  常规线,留 7 个百分点余量给最早的观测点(62%)
- *   EMERGENCY 62%  救命线,踩到 CC 的最早触发点 = 再不动手就要被裸压,
- *                  **无视闲置门槛**立即触发(打断一次 ≪ 记忆全丢)
+ * ⚠ 纠错(2026-09-03,owner 质疑后全量核对 compact_boundary 记录):CC 默认在
+ * 1M 窗口的 **约 967K(96.7%)** 才自动压缩(changelog 2.1.247 原话),2026-04~06
+ * 的自动压缩全部落在 967K~1,003K。2026-09-02 记的「62%~72% 就压」是误诊:
+ * 615K/632K/642K 那组根本不是 CC 的自动压缩;717K~723K 的 3 次(08-27 起)是
+ * 因为 v2.20.x 遗留在 ~/.claude/settings.json 的 autoCompactWindow: 750000 被
+ * CC 2.1.247+ 开始认了(750K − ~30K 缓冲 ≈ 720K)。那两个键已移除。
+ *
+ * 现在两档(相对真实窗口):
+ *   NORMAL 85%   常规线(1M = 850K),留足闲置等待的余量
+ *   EMERGENCY 93% 救命线(1M = 930K),离 CC 的 967K 只剩几万 token,
+ *                 **无视闲置门槛**立即触发(打断一次 ≪ 记忆全丢)
  * 拿不到真实窗口(没配 statusline 落盘)时退回配置绝对值,且无救命线。
  */
-const REAL_WINDOW_TRIGGER_RATIO = 0.55;
-const EMERGENCY_WINDOW_RATIO = 0.62;
+const REAL_WINDOW_TRIGGER_RATIO = 0.85;
+const EMERGENCY_WINDOW_RATIO = 0.93;
 
 function sessionIdOfStat(a: AgentStat): string | null {
   const base = a.jsonl?.split("/").pop() || "";
