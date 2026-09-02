@@ -19,6 +19,7 @@ import {
   detectDevChannelsModal,
   paneShowsCompacting,
   paneCompactProgress,
+  paneLooksWorking,
 } from "../lib/tmux-helper.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -314,6 +315,22 @@ const idleWhileThinking = new Map<string, number>();
 const copyModeFirstSeen = new Map<string, number>();
 /** v2.21.2+ channelId → 最近一次上报的压缩进度百分比(去重,只在变化时发事件) */
 const compactPctSeen = new Map<string, number>();
+
+/** v2.21.2+ agent 主 session jsonl 距上次写入多少 ms;拿不到(无 registry/文件)→ null。 */
+async function jsonlWrittenAgoMs(agentName: string): Promise<number | null> {
+  try {
+    const { readRegistryAgents } = await import("../lib/registry.js");
+    const { getJsonlPath } = await import("./jsonl-watcher.js");
+    const { stat } = await import("node:fs/promises");
+    const r = (await readRegistryAgents()).find((a) => a.name === agentName);
+    if (!r?.cwd || !r.sessionId) return null;
+    const cwd = r.cwd.replace(/^~/, process.env.HOME || "~");
+    const st = await stat(getJsonlPath(cwd, r.sessionId));
+    return Math.max(0, Date.now() - st.mtimeMs);
+  } catch {
+    return null;
+  }
+}
 const COPY_MODE_STUCK_MS = 3 * 60 * 1000;
 const IDLE_THINKING_GRACE_MS = 120_000;
 
@@ -448,7 +465,7 @@ async function checkAgent(
       compactPctSeen.delete(channelId);
     }
     if (!compacting && st === "compacting") {
-      const working = /esc to interrupt/i.test(pane) || /…\s*\(\d+m?\s*\d*s\b/.test(pane);
+      const working = paneLooksWorking(pane);
       console.log(`📦 ${agentName} 压缩已不在 pane 上(兜底收敛 → ${working ? "thinking" : "done"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: working ? "thinking" : "done", trigger: "compact_end_pane" } });
     }
@@ -460,7 +477,9 @@ async function checkAgent(
   try {
     const { getAgentStatus, emitEvent, isChannelExternallyBusy } = await import("./event-bus.js");
     const { hasActiveBgActivities } = await import("./bg-activity-watcher.js");
-    const paneIdleNow = /❯/.test(pane) && !/esc to interrupt/i.test(pane);
+    // v2.21.2+ 判据集中到 paneLooksWorking(五信号;此前只认 esc to interrupt,
+    // 一天误收敛 444 次——owner 截图 gc-car 工具还在刷、下面已画绿勾)
+    const paneIdleNow = /❯/.test(pane) && !paneLooksWorking(pane);
     // v2.21.1+ 「pane idle 但 agent 逻辑在忙」豁免(owner 2026-09-02:「每次起
     // background task 都触发[提前完成],不只 codex」)。对账本意是抓「状态卡
     // thinking 但真闲」的死状态,但 agent 大量异步等待时 pane idle 是常态,不是
@@ -477,9 +496,17 @@ async function checkAgent(
       if (first === undefined) {
         idleWhileThinking.set(channelId, Date.now());
       } else if (Date.now() - first > IDLE_THINKING_GRACE_MS) {
-        idleWhileThinking.delete(channelId);
-        console.log(`🧭 thinking 对账: ${agentName} 事件态 thinking 但 pane 已空闲 ${Math.round((Date.now() - first) / 1000)}s,强制收敛为 done`);
-        emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "reconcile" } });
+        // v2.21.2+ 收敛前最后一道:主 jsonl 在 grace 内有落盘 = CC 还在写 = 在干活。
+        // pane 判据再全也是渲染层的猜测,jsonl 是 CC 亲手写的事实。
+        const wroteAgo = await jsonlWrittenAgoMs(agentName);
+        if (wroteAgo !== null && wroteAgo < IDLE_THINKING_GRACE_MS) {
+          idleWhileThinking.set(channelId, Date.now()); // 重新累计
+          console.log(`🧭 thinking 对账: ${agentName} pane 像空闲,但 jsonl ${Math.round(wroteAgo / 1000)}s 前还在写,不收敛`);
+        } else {
+          idleWhileThinking.delete(channelId);
+          console.log(`🧭 thinking 对账: ${agentName} 事件态 thinking 但 pane 已空闲 ${Math.round((Date.now() - first) / 1000)}s、jsonl 无新写入,强制收敛为 done`);
+          emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "reconcile" } });
+        }
       }
     } else {
       idleWhileThinking.delete(channelId);

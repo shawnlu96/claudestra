@@ -889,3 +889,32 @@ describe("paneCompactProgress", () => {
     expect(paneCompactProgress("ctx 76% · 5h 25%")).toBeNull();
   });
 });
+
+import { paneLooksWorking } from "../src/lib/tmux-helper.js";
+
+describe("paneLooksWorking(v2.21.2 工作中五信号)", () => {
+  const footer = "─────\n❯ \n─────\n  Fable 5.1 · ctx 59% · 5h 77% · 7d 17%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+  test("esc to interrupt", () => {
+    expect(paneLooksWorking("✶ Thinking… (esc to interrupt)\n" + footer)).toBe(true);
+  });
+  test("主 spinner 计时", () => {
+    expect(paneLooksWorking("✽ Wrangling… (4s · ↓ 258 tokens · thought for 1s)\n" + footer)).toBe(true);
+    expect(paneLooksWorking("✻ Crunching… (2m 7s · ↓ 4.6k tokens)\n" + footer)).toBe(true);
+  });
+  test("等 subagent:Waiting for background agent + 底栏 token 活动(gc-car 2026-09-02 实抓)", () => {
+    const pane = "  没有需要我主动做的事了,等后台任务完成。\n✻ Waiting for 1 background agent to finish\n─────\n❯ 露天的 放心\n─────\n  Opus 4.8 · ctx 59% · 5h 77% · 7d 17%\n  ⏵⏵ bypass permissions on (shift+tab to cycle) ·\n  ⏺ main\n  ◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens";
+    expect(paneLooksWorking(pane)).toBe(true);
+    expect(paneLooksWorking("  ◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens")).toBe(true);
+  });
+  test("排队消息提示", () => {
+    expect(paneLooksWorking("❯ Press up to edit queued messages\n" + footer)).toBe(true);
+  });
+  test("真空闲:Worked for … done", () => {
+    expect(paneLooksWorking("✻ Worked for 46s · done 9:51 PM\n" + footer)).toBe(false);
+    expect(paneLooksWorking("⎿  Compacted (ctrl+o to see full summary)\n" + footer)).toBe(false);
+  });
+  test("尾部 14 行之外的旧 spinner 不算", () => {
+    const old = "✶ Thinking… (esc to interrupt)\n" + Array.from({ length: 16 }, (_, i) => `line ${i}`).join("\n");
+    expect(paneLooksWorking(old)).toBe(false);
+  });
+});

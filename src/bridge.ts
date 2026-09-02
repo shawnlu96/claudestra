@@ -185,6 +185,7 @@ import {
   probeTuiContract,
   MASTER_SESSION,
   type ArrowNavKind,
+  paneLooksWorking,
 } from "./lib/tmux-helper.js";
 import {
   scanGlobal as scanGlobalSkills,
@@ -342,11 +343,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
     const tail10 = win
       ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
       : "";
-    return (
-      /esc to interrupt/i.test(tail10) ||
-      /…\s*\(\d+m?\s*\d*s\b/.test(tail10) ||
-      isBusyStatus(getAgentStatus(evAgent)) // v2.21.2+ 压缩上下文中也算忙
-    );
+    return paneLooksWorking(tail10) || isBusyStatus(getAgentStatus(evAgent)); // v2.21.2+ 五信号 + 压缩中也算忙
   } catch {
     return false;
   }
@@ -773,10 +770,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
       const tail10 = win
         ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
         : "";
-      const working =
-        /esc to interrupt/i.test(tail10) ||
-        /…\s*\(\d+m?\s*\d*s\b/.test(tail10) ||
-        getAgentStatus(evAgent) === "thinking";
+      const working = paneLooksWorking(tail10) || getAgentStatus(evAgent) === "thinking";
       // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
       if (win && working && getAgentStatus(evAgent) !== "compacting") {
         lastPreemptAt.set(to.channelId, Date.now());

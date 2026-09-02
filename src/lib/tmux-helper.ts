@@ -743,3 +743,26 @@ export function paneCompactProgress(pane: string): number | null {
   const n = Number(m[1]);
   return n >= 0 && n <= 100 ? n : null;
 }
+
+/**
+ * v2.21.2+ pane 是否呈现 Claude Code「工作中」的任一信号。集中判据(owner 2026-09-02
+ * 截图 + bridge.out 实锤:thinking 对账一天误触发 444 次,全因「有 ❯ 且无 esc to
+ * interrupt」在 CC 2.1.x 上不成立——输入框常驻,"esc to interrupt" 只是轮换提示之一):
+ *   ① "esc to interrupt"(轮换恰好在时最准)
+ *   ② 主 spinner 计时「✽ Wrangling… (2m 7s · ↓ 4.6k tokens)」
+ *   ③ 「Waiting for N background agent(s) to finish」(等 subagent,主 spinner 无计时)
+ *   ④ 底部 agents 栏活动「◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens」
+ *   ⑤ 「Press up to edit queued messages」(有排队消息 = 回合未结束)
+ * 只看尾部 14 行(CC 底栏 + spinner 都贴着输入框;更早的行可能是滚出去的旧输出)。
+ * 空闲态的「✻ Worked for 46s · done 9:51 PM」不含任何上述信号。
+ */
+export function paneLooksWorking(pane: string): boolean {
+  const tail = pane.split("\n").slice(-14).join("\n");
+  return (
+    /esc to interrupt/i.test(tail) ||
+    /…\s*\((\d+m\s*)?\d+s\b/.test(tail) ||
+    /Waiting for \d+ background/i.test(tail) ||
+    /\b(\d+m\s*)?\d+s\s*·\s*[↓↑]\s*[\d.]+k?\s*tokens/i.test(tail) ||
+    /Press up to edit queued messages/i.test(tail)
+  );
+}

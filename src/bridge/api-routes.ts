@@ -46,6 +46,7 @@ import {
   detectRuntimePermissionPrompt,
   listWindows,
   MASTER_SESSION,
+  paneLooksWorking,
 } from "../lib/tmux-helper.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
@@ -420,7 +421,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
                 .split("\n")
                 .slice(-10)
                 .join("\n");
-              if (/esc to interrupt/i.test(tail) || /…\s*\(\d+m?\s*\d*s\b/.test(tail)) a.busy = true;
+              if (paneLooksWorking(tail)) a.busy = true;
             } catch {
               /* 窗口不存在等,保持不忙 */
             }
