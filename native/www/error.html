@@ -1,0 +1,9 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Claudestra</title>
+<style>
+body{margin:0;background:#171819;color:#e8e8ea;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px}
+p{font-size:15px;line-height:1.6;opacity:.85}small{display:block;margin-top:6px;font-size:12.5px;opacity:.55}
+button{margin-top:18px;padding:10px 28px;border-radius:10px;border:1px solid #4a4d52;background:#2b2d31;color:#fff;font-size:15px}
+</style></head>
+<body><div><p>连不上 Claudestra<small>确认手机上的 Tailscale 已开启、mini 在线</small></p>
+<button onclick="location.replace(window.__cstraUrl||'https://mac-mini-jp.tailfdc471.ts.net')">重试</button></div>
+<script>try{window.__cstraUrl=(new URLSearchParams(location.search)).get('u')||''}catch(e){}</script></body></html>

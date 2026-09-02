@@ -13,7 +13,7 @@
 import sharp from "sharp";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const OUT = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -21,7 +21,6 @@ const OUT = path.join(
   "public",
   "icons",
 );
-fs.mkdirSync(OUT, { recursive: true });
 
 const C = 512; // 中心 (viewBox 1024)
 const R = 248; // 卫星环半径
@@ -86,14 +85,19 @@ const TARGETS = [
   { file: "apple-touch-icon.png", size: 180, scale: 1 },
 ];
 
-fs.writeFileSync(path.join(OUT, "icon.svg"), svg(1));
+// v2.22+ 供 native 壳的资产生成脚本复用(import 不产生副作用,只在直接执行时写图标)
+export { svg };
 
-for (const t of TARGETS) {
-  const buf = Buffer.from(svg(t.scale));
-  await sharp(buf, { density: 384 })
-    .resize(t.size, t.size)
-    .png()
-    .toFile(path.join(OUT, t.file));
-  console.log("✓", t.file, `${t.size}×${t.size}`);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  fs.mkdirSync(OUT, { recursive: true });
+  fs.writeFileSync(path.join(OUT, "icon.svg"), svg(1));
+  for (const t of TARGETS) {
+    const buf = Buffer.from(svg(t.scale));
+    await sharp(buf, { density: 384 })
+      .resize(t.size, t.size)
+      .png()
+      .toFile(path.join(OUT, t.file));
+    console.log("✓", t.file, `${t.size}×${t.size}`);
+  }
+  console.log("done →", OUT);
 }
-console.log("done →", OUT);

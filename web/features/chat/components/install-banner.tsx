@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { isNativeShell } from "@/lib/native";
 
 /**
  * 「添加到主屏幕」引导横幅（2026-07-14 owner：要一个引导入口）。
@@ -22,7 +23,8 @@ export function InstallBanner() {
     }
     const standalone =
       window.matchMedia("(display-mode: standalone)").matches ||
-      (navigator as { standalone?: boolean }).standalone === true;
+      (navigator as { standalone?: boolean }).standalone === true ||
+      isNativeShell(); // v2.22+ 原生壳里没有「添加到主屏幕」这回事
     if (standalone) return;
     const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
     setIsIOS(ios);

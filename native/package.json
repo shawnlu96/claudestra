@@ -1,0 +1,25 @@
+{
+  "name": "claudestra-native",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Claudestra iOS 壳(Capacitor):WKWebView 加载自托管的 web 客户端,加原生推送",
+  "scripts": {
+    "sync": "cap sync ios",
+    "assets": "capacitor-assets generate --ios --iconBackgroundColor '#171819' --iconBackgroundColorDark '#171819' --splashBackgroundColor '#171819' --splashBackgroundColorDark '#171819'",
+    "build:device": "bash scripts/build-ios.sh"
+  },
+  "dependencies": {
+    "@capacitor/app": "^7",
+    "@capacitor/core": "^7",
+    "@capacitor/haptics": "^7",
+    "@capacitor/ios": "^7",
+    "@capacitor/keyboard": "^7",
+    "@capacitor/splash-screen": "^7",
+    "@capacitor/status-bar": "^7"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3",
+    "@capacitor/cli": "^7",
+    "typescript": "^5"
+  }
+}
