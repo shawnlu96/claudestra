@@ -14,17 +14,40 @@ TEAM="${TEAM_ID:-G3TUSL5X84}"
 BUNDLE_ID="com.claudestra.app"
 DERIVED="build/DerivedData"
 mkdir -p build
-if [ -z "${DEVICE_ID:-}" ]; then
-  xcrun devicectl list devices --json-output "$PWD/build/devices.json" >/dev/null
-  DEVICE_ID=$(python3 -c "import json;d=json.load(open('build/devices.json'));print(next(x['identifier'] for x in d['result']['devices'] if x.get('connectionProperties',{}).get('pairingState')=='paired'))")
-fi
+#   INSTALL_ALL=1  装到所有已配对设备(iPhone + iPad);DEVICE_NAME=iPad 按型号名挑一台
+xcrun devicectl list devices --json-output "$PWD/build/devices.json" >/dev/null
+DEVICES=$(INSTALL_ALL="${INSTALL_ALL:-}" DEVICE_NAME="${DEVICE_NAME:-}" DEVICE_ID="${DEVICE_ID:-}" python3 - <<'PY'
+import json, os
+d = json.load(open('build/devices.json'))
+paired = [x for x in d['result']['devices'] if x.get('connectionProperties', {}).get('pairingState') == 'paired']
+if os.environ.get('DEVICE_ID'):
+    sel = [x for x in paired if x['identifier'] == os.environ['DEVICE_ID']]
+elif os.environ.get('INSTALL_ALL'):
+    sel = paired
+elif os.environ.get('DEVICE_NAME'):
+    n = os.environ['DEVICE_NAME'].lower()
+    sel = [x for x in paired if n in (x.get('hardwareProperties', {}).get('marketingName', '') + ' ' + x.get('deviceProperties', {}).get('name', '')).lower()]
+else:
+    sel = paired[:1]
+for x in sel:
+    print(x['identifier'], x.get('hardwareProperties', {}).get('marketingName', '?').replace(' ', '_'), x.get('hardwareProperties', {}).get('udid', '?'))
+PY
+)
+[ -n "$DEVICES" ] || { echo "✗ 没有匹配的已配对设备(iPad 需先插线到本机、信任、开启开发者模式)"; xcrun devicectl list devices; exit 1; }
 if [ -z "${PROFILE_FILE:-}" ]; then
   for f in ~/Library/Developer/Xcode/UserData/Provisioning\ Profiles/*.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision; do
     [ -f "$f" ] || continue
     if security cms -D -i "$f" 2>/dev/null | grep -q "<string>$TEAM.\*</string>"; then PROFILE_FILE="$f"; break; fi
   done
 fi
-echo "▶ device=$DEVICE_ID team=$TEAM profile=${PROFILE_FILE:-<none>}"
+echo "▶ team=$TEAM profile=${PROFILE_FILE:-<none>}"; echo "$DEVICES" | sed 's/^/  device: /'
+# 描述文件按设备 UDID 白名单签;不在名单里装了也起不来,只有账号持有人能添加
+if [ -n "${PROFILE_FILE:-}" ]; then
+  security cms -D -i "$PROFILE_FILE" > build/profile.plist 2>/dev/null || true
+  echo "$DEVICES" | while read -r id name udid; do
+    if grep -q "$udid" build/profile.plist; then echo "  ✓ $name 在描述文件白名单内"; else echo "  ✗ $name($udid)不在描述文件白名单内——装了也起不来,需要账号持有人在开发者后台添加该设备"; fi
+  done
+fi
 
 # pbxproj:App target 自动签名 + 团队(只有 App target 有 CODE_SIGN_STYLE;Pods 在另一工程)
 PBX=ios/App/App.xcodeproj/project.pbxproj
@@ -78,7 +101,9 @@ PL
 fi
 APP=$(find "$PRODUCTS" -maxdepth 1 -name "*.app" | head -1)
 [ -n "$APP" ] || { echo "✗ 没有产出 .app"; exit 1; }
-echo "▶ install $APP"
-xcrun devicectl device install app --device "$DEVICE_ID" "$APP" 2>&1 | tail -3
-xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID" 2>&1 | tail -1 || true
-echo "✓ 已装到手机并拉起"
+echo "$DEVICES" | while read -r id name udid; do
+  echo "▶ install → $name"
+  xcrun devicectl device install app --device "$id" "$APP" 2>&1 | tail -2
+  xcrun devicectl device process launch --device "$id" "$BUNDLE_ID" 2>&1 | tail -1 || true
+  echo "✓ $name 已装并拉起"
+done
