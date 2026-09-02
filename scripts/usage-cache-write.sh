@@ -57,6 +57,12 @@ cache_path = os.path.join(cache_dir, "usage-cache.json")
 #   旧值/旧 reset 缺失    → 直接写新
 #   reset 变了(窗口轮转) → 无条件写新(该清零/换周期了)
 #   同窗口               → 新 pct ≥ 旧 pct 才写(窗口内用量单调递增,更小 = 陈旧快照,丢弃)
+#   7d 例外(peer 实报 2026-09-02:7d 卡在历史峰值 31%,活跃 agent 一致报 22%)
+#     → 7d 允许**下降**,但只接受**带 five_hour 的写者**。依据:CC 只给活跃 session
+#       five_hour,长期空闲的 session 整个不给(本机 16 个 pane 实测:只有 2 个活跃
+#       agent 有 5h,其余全无)——有 5h = 新鲜快照凭证;没 5h 的写者报的 7d 更小,
+#       仍按陈旧丢弃。peer 提的「按写入时间取胜」不行:陈旧 session 一重绘,写入
+#       时间就是现在,照样把真值盖掉。
 old = {}
 try:
     with open(cache_path) as f:
@@ -64,19 +70,21 @@ try:
 except Exception:
     old = {}
 
-def merge(new_pct, new_reset, old_pct, old_reset):
+def merge(new_pct, new_reset, old_pct, old_reset, allow_decrease=False):
     if new_pct is None:
         return old_pct, old_reset
     if old_pct is None or old_reset is None:
         return new_pct, new_reset
     if new_reset != old_reset:
         return new_pct, new_reset
-    if new_pct >= old_pct:
+    if new_pct >= old_pct or allow_decrease:
         return new_pct, new_reset
     return old_pct, old_reset
 
 sess_pct, sess_reset = merge(five, five_reset, old.get("sessionPct"), old.get("sessionResets"))
-week_pct, week_reset_out = merge(week, week_reset, old.get("weekPct"), old.get("weekResets"))
+# 7d:带 five_hour 的写者视为新鲜,允许下降(见上方规则注释)
+week_pct, week_reset_out = merge(week, week_reset, old.get("weekPct"), old.get("weekResets"),
+                                 allow_decrease=(five is not None))
 
 now_ms = int(time.time() * 1000)
 
