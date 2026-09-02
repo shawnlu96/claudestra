@@ -54,6 +54,19 @@ function MasterIcon({ className }: { className?: string }) {
   );
 }
 
+/**
+ * v2.21.3+ 当前滑开的那一行的收回函数——同一时刻只允许一行滑开(iOS Mail / 微信同款):
+ * 列表滚动、别的行出现纵向手势或被点击,都先把它收回。
+ */
+const swipeReg = {
+  cur: null as (() => void) | null,
+  set(fn: () => void) { this.cur = fn; },
+  clear(fn: () => void) { if (this.cur === fn) this.cur = null; },
+  closeAll() { this.cur?.(); },
+  /** 收回除 fn 之外的滑开行 */
+  closeOthers(fn: () => void) { if (this.cur && this.cur !== fn) this.cur(); },
+};
+
 function StatusDot({ status, busy, compacting }: { status: AgentSession["status"]; busy?: boolean; compacting?: boolean }) {
   if (status === "active") {
     // 运行中：实心核心点 + 柔和呼吸外晕（cstra-breathe，替换生硬的 animate-ping）。
@@ -120,11 +133,25 @@ function AgentRow({
   const [swipeX, setSwipeX] = useState(0);
   const [confirmDel, setConfirmDel] = useState(false);
   const [removing, setRemoving] = useState(false);
-  const touchRef = useRef<{ x: number; y: number; startX: number; swiping: boolean } | null>(null);
+  // v2.21.3+ 拖动期间不再每帧 setState(整行 + 订阅链重渲,owner「左滑特别卡」):
+  // 手指跟随直接写 style.transform,dragging 只在识别到滑动/松手时各切一次
+  // (挂载操作钮、关过渡);swipeX 只在松手吸附时提交。transform 从不经 React 的
+  // style 对象,其余重渲不会把手指位置打回去。
+  const slideRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const touchRef = useRef<{ x: number; y: number; startX: number; swiping: boolean; lastX: number } | null>(null);
+  const applyX = (x: number) => {
+    const el = slideRef.current;
+    if (el) el.style.transform = x ? `translateX(${x}px)` : "";
+  };
   const closeSwipe = () => {
+    applyX(0);
     setSwipeX(0);
     setConfirmDel(false);
+    swipeReg.clear(closeSwipe);
   };
+  // 卸载时别把自己留在「当前滑开」槽里
+  useEffect(() => () => swipeReg.clear(closeSwipe));
   // ctx 用量背景条（owner 2026-07-14:用量看板藏太深,列表行内直接可视化）:
   // 行背景自左向右填充,宽=占 1M 窗口比例;色阶同顶栏 ctx 徽章
   // (≥750k 深红 / ≥500k 红 / ≥200k 黄 / 其余中性淡灰),平时几乎隐形,超标一眼看见。
@@ -141,7 +168,7 @@ function AgentRow({
     <li>
       <div className="relative overflow-hidden rounded-lg">
         {/* 左滑露出的操作钮(在滑动层下面):置顶 + 删除 */}
-        {swipeX < 0 && (
+        {(swipeX < 0 || dragging) && (
           <div className="absolute inset-y-0 right-0 z-0 flex w-[160px]">
             <button
               className="flex flex-1 items-center justify-center bg-base-content/70 text-[13px] font-medium text-base-100"
@@ -175,18 +202,12 @@ function AgentRow({
           </div>
         )}
         <div
-          className={`relative z-[1] flex items-center gap-2.5 overflow-hidden rounded-lg px-2 py-2.5 sm:gap-2 sm:py-1.5 ${
+          ref={slideRef}
+          className={`relative z-[1] flex touch-pan-y items-center gap-2.5 overflow-hidden rounded-lg px-2 py-2.5 sm:gap-2 sm:py-1.5 ${
             // active:bg 按压即时反馈——触屏无 hover,没有按压态点击像「没反应」
             active ? "bg-base-300" : "bg-base-200 hover:bg-base-300/60 active:bg-base-300"
           }`}
-          style={{
-            transform: swipeX ? `translateX(${swipeX}px)` : undefined,
-            // 刻意保留在 render 期读这个 ref：把 swiping 提成 state 意味着触摸拖动的
-            // 每一帧都要 setState 并重渲整个会话列表，交互热路径上性能明显更差。
-            // 这里只用它决定要不要禁用 transition，读到偶发旧值最坏就是一帧过渡不对。
-            // eslint-disable-next-line react-hooks/refs
-            transition: touchRef.current?.swiping ? "none" : "transform 0.18s ease",
-          }}
+          style={{ transition: dragging ? "none" : "transform 0.18s ease" }}
           onTouchStart={
             swipeEnabled
               ? (e) => {
@@ -194,6 +215,7 @@ function AgentRow({
                     x: e.touches[0].clientX,
                     y: e.touches[0].clientY,
                     startX: swipeX,
+                    lastX: swipeX,
                     swiping: false,
                   };
                 }
@@ -210,12 +232,18 @@ function AgentRow({
                   if (!t.swiping) {
                     if (Math.abs(dy) > Math.abs(dx)) {
                       touchRef.current = null;
+                      // 纵向手势 = 想滚列表 → 把别的行滑开的状态收回(微信同款)
+                      swipeReg.closeOthers(closeSwipe);
                       return;
                     }
                     if (Math.abs(dx) < 8) return;
                     t.swiping = true;
+                    // 开始拖这一行 → 别的滑开行先收回
+                    swipeReg.closeOthers(closeSwipe);
+                    setDragging(true);
                   }
-                  setSwipeX(Math.max(-160, Math.min(0, t.startX + dx)));
+                  t.lastX = Math.max(-160, Math.min(0, t.startX + dx));
+                  applyX(t.lastX);
                 }
               : undefined
           }
@@ -225,11 +253,16 @@ function AgentRow({
                   const t = touchRef.current;
                   touchRef.current = null;
                   if (!t?.swiping) return;
-                  setSwipeX((x) => {
-                    const snap = x < -60 ? -160 : 0;
-                    if (snap === 0) setConfirmDel(false);
-                    return snap;
-                  });
+                  const snap = t.lastX < -60 ? -160 : 0;
+                  applyX(snap);
+                  setDragging(false);
+                  setSwipeX(snap);
+                  if (snap === 0) {
+                    setConfirmDel(false);
+                    swipeReg.clear(closeSwipe);
+                  } else {
+                    swipeReg.set(closeSwipe);
+                  }
                 }
               : undefined
           }
@@ -256,9 +289,13 @@ function AgentRow({
               if (canRemove) onToggleCheck?.();
               return;
             }
-            // 滑开状态下点行 = 收起,不进会话
+            // 滑开状态下点行 = 收起,不进会话;别的行滑开时点这行 = 收回那行,也不进会话
             if (swipeX !== 0) {
               closeSwipe();
+              return;
+            }
+            if (swipeReg.cur) {
+              swipeReg.closeAll();
               return;
             }
             // 两阶段提交(2026-07-24 owner「点上去卡卡的」):openAgent 的
@@ -689,12 +726,17 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       {/* touch-pan-y + overscroll-contain：iOS 到边界时滚动链会穿透到不可滚的
           fixed 应用壳，橡皮筋吃掉手势看着像「滑不动」（BgLines 同款修法）。 */}
       <div
-        className="flex-1 touch-pan-y overflow-y-auto overscroll-contain px-2 pb-3"
+        // select-none + touch-callout none:长按会话行是想看操作/滑动,不是选文本
+        // (owner 2026-09-02);列表一滚动就把滑开的行收回(微信同款)
+        className="flex-1 touch-pan-y select-none overflow-y-auto overscroll-contain px-2 pb-3 [-webkit-touch-callout:none]"
         style={{ WebkitOverflowScrolling: "touch" }}
         // 交互期冻结 roster 重排的信号源(v2.17.2 串台补刀,见 chat-store
         // noteSidebarInteraction):触碰/滚动期间列表顺序不动
         onPointerDown={noteSidebarInteraction}
-        onScroll={noteSidebarInteraction}
+        onScroll={() => {
+          noteSidebarInteraction();
+          swipeReg.closeAll();
+        }}
         onTouchMove={noteSidebarInteraction}
       >
         {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态

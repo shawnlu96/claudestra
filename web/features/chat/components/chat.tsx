@@ -265,6 +265,7 @@ function ChatInner() {
   // 浏览器返回（系统级手势 / 返回键）：出栈回到会话列表
   useEffect(() => {
     const onPop = () => {
+      backInFlightRef.current = false;
       if (!skipDisableRef.current) setDisableTransition(true);
       setShowContent(isContentHash());
       requestAnimationFrame(() =>
@@ -285,14 +286,31 @@ function ChatInner() {
 
   const toContent = useCallback(() => {
     if (!isNarrow()) return; // 桌面双栏并存，无需压栈/位移
-    if (!isContentHash()) window.history.pushState(null, "", CONTENT_HASH);
+    // state 打标:只有我们自己压的条目才允许 history.back()(见 toList)
+    if (!isContentHash()) window.history.pushState({ cstra: "chat" }, "", CONTENT_HASH);
     setShowContent(true);
   }, []);
 
+  // v2.21.3+ 快速返回白屏(owner 2026-09-02):history.back() 的 popstate 是异步的,
+  // 连点两下返回 / 连续左滑时第二次仍看到 hash 在 → 再 back 一次 → 出栈到 PWA 之前
+  // 的空白页,只能重开 app。两道闸:① back 在途期间忽略重复触发;② 只对我们自己
+  // pushState 打过标的条目 back——刷新/深链带 #chat 进来的基础条目没有标,直接
+  // replaceState 摘掉 hash,不动栈。
+  const backInFlightRef = useRef(false);
   const toList = useCallback(() => {
     if (isContentHash()) {
-      skipDisableRef.current = true; // 主动返回：保留滑动动画
-      window.history.back();
+      if (backInFlightRef.current) return;
+      const st = window.history.state as { cstra?: string } | null;
+      if (st?.cstra === "chat") {
+        backInFlightRef.current = true;
+        skipDisableRef.current = true; // 主动返回：保留滑动动画
+        window.history.back();
+        // popstate 没来(极端情况)也别永久锁死
+        setTimeout(() => { backInFlightRef.current = false; }, 800);
+      } else {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+        setShowContent(false);
+      }
     } else {
       setShowContent(false);
     }
