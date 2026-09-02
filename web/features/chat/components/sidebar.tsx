@@ -232,8 +232,9 @@ function AgentRow({
                   if (!t.swiping) {
                     if (Math.abs(dy) > Math.abs(dx)) {
                       touchRef.current = null;
-                      // 纵向手势 = 想滚列表 → 把别的行滑开的状态收回(微信同款)
-                      swipeReg.closeOthers(closeSwipe);
+                      // 纵向手势 = 想滚列表 → 滑开的行(包括自己)一律收回(微信同款;
+                      // owner 2026-09-02:列表不够长滚不动时 onScroll 不触发,不能只靠它)
+                      swipeReg.closeAll();
                       return;
                     }
                     if (Math.abs(dx) < 8) return;
@@ -384,6 +385,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   const compactingLive = useChatStore((s) => s.state.compacting);
+  const listTouchY = useRef<number | null>(null);
   // 桌面侧栏拖拽调宽(owner 2026-07-24):右缘手柄,localStorage 持久化。
   // 移动端 w-full 不受影响(宽度变量只在 sm+ 生效)。
   const [sbWidth, setSbWidth] = useState<number | null>(() => {
@@ -737,7 +739,20 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           noteSidebarInteraction();
           swipeReg.closeAll();
         }}
-        onTouchMove={noteSidebarInteraction}
+        // 容器级纵向位移追踪:手指落在行间空隙/分组头上往上下拖、或列表短到滚不动,
+        // 都收回滑开的行(行内手势与 onScroll 覆盖不到这两种)
+        onTouchStart={(e) => {
+          listTouchY.current = e.touches[0]?.clientY ?? null;
+        }}
+        onTouchMove={(e) => {
+          noteSidebarInteraction();
+          const y0 = listTouchY.current;
+          const y = e.touches[0]?.clientY;
+          if (swipeReg.cur && y0 !== null && typeof y === "number" && Math.abs(y - y0) > 6) {
+            listTouchY.current = null; // 收一次就够
+            swipeReg.closeAll();
+          }
+        }}
       >
         {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
             是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}
