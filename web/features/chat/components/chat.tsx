@@ -265,7 +265,6 @@ function ChatInner() {
   // 浏览器返回（系统级手势 / 返回键）：出栈回到会话列表
   useEffect(() => {
     const onPop = () => {
-      backInFlightRef.current = false;
       if (!skipDisableRef.current) setDisableTransition(true);
       setShowContent(isContentHash());
       requestAnimationFrame(() =>
@@ -304,6 +303,9 @@ function ChatInner() {
       if (st?.cstra === "chat") {
         backInFlightRef.current = true;
         skipDisableRef.current = true; // 主动返回：保留滑动动画
+        // 一次性监听:这次 back 的 popstate 到达即解锁(不放进共享的 popstate effect——
+        // React Compiler 不允许 effect 用过的 ref 再被后定义的回调改写)
+        window.addEventListener("popstate", () => { backInFlightRef.current = false; }, { once: true });
         window.history.back();
         // popstate 没来(极端情况)也别永久锁死
         setTimeout(() => { backInFlightRef.current = false; }, 800);
