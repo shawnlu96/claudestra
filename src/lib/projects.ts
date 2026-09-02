@@ -82,8 +82,30 @@ export function normalizeDir(dir: string): string {
  * 只允许**精确匹配**,禁止前缀吞并——否则一个 cwd=$HOME 的 agent 自动建出的
  * project 会把家目录下所有后来者全吸进去(2026-08-28 首次迁移实测翻车)。
  */
-function isUmbrellaDir(d: string): boolean {
+export function isUmbrellaDir(d: string): boolean {
   return d === "/" || d === HOME || d === "/tmp" || d === "/private/tmp" || d === "/var/tmp";
+}
+
+/**
+ * v2.21.3+ 该 agent 的归属是否**只靠傘形根 dir 的前缀**沾边——2026-08-28 首次迁移
+ * 事故的残留形态(cwd=~/repos/x 的 agent 挂在 dirs=[$HOME] 的 project 下;owner
+ * 2026-09-02 截图「家目录杂项 6 个 agent」实为 3 真 3 假)。
+ * - 任一 dir 精确等于 cwd、或非傘形 dir 是 cwd 的前缀 → 归属成立,false
+ * - 否则有傘形 dir 是 cwd 的前缀 → 误归属,true
+ * - 完全不沾边(显式 --project 指到别处的 review/test agent)→ false,那是用户的决定
+ */
+export function isMisfiledByUmbrella(project: ProjectDef, dir: string): boolean {
+  const d = normalizeDir(dir);
+  let umbrellaHit = false;
+  for (const raw of project.dirs) {
+    const pd = normalizeDir(raw);
+    if (d === pd) return false;
+    if (d.startsWith(pd + "/")) {
+      if (!isUmbrellaDir(pd)) return false;
+      umbrellaHit = true;
+    }
+  }
+  return umbrellaHit;
 }
 
 /**

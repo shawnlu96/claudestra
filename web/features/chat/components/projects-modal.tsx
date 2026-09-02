@@ -329,14 +329,17 @@ export function ProjectsModal({ open, onClose }: { open: boolean; onClose: () =>
 
   return createPortal(
     <div
-      className="overlay-in fixed inset-0 z-[90] grid place-items-center bg-black/50 p-4"
+      // grid-cols-[minmax(0,1fr)]:默认 auto 列会被盒内 nowrap 长路径撑到 max-content,
+      // 再被 max-w-md 截成 448px——比手机视口宽,盒子从左侧 16pt 起向右溢出屏幕
+      // (owner 2026-09-02 截图「弹窗是歪的」)。锁成 minmax(0,1fr) 列宽 = 可用宽度。
+      className="overlay-in fixed inset-0 z-[90] grid grid-cols-[minmax(0,1fr)] place-items-center bg-black/50 p-4"
       onClick={(e) => {
         e.stopPropagation();
         onClose();
       }}
     >
       <div
-        className="panel-pop flex max-h-[88dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
+        className="panel-pop flex max-h-[88dvh] w-full min-w-0 max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 pb-2 pt-4">
@@ -345,7 +348,7 @@ export function ProjectsModal({ open, onClose }: { open: boolean; onClose: () =>
             ✕
           </button>
         </div>
-        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">
+        <div className="min-h-0 min-w-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">
           <p className="text-xs leading-relaxed text-base-content/50">
             {t("project = 一组工作目录 + 一组 agent。每个 agent 必属一个 project;新建 agent 不选时按目录自动归属。")}
           </p>

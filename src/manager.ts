@@ -71,6 +71,7 @@ import {
   resolveProjectForDir,
   slugifyProjectId,
   normalizeDir,
+  isMisfiledByUmbrella,
   PROJECT_ID_RE,
   type ProjectDef,
 } from "./lib/projects.js";
@@ -736,22 +737,37 @@ async function cmdProjectAssign(agentName: string, projectId: string) {
  */
 async function cmdProjectMigrate() {
   const reg = await loadRegistry();
-  const missing = Object.entries(reg.agents).filter(([, a]) => !a.projectId);
-  if (missing.length === 0) {
-    output({ ok: true, migrated: 0 });
-    return;
-  }
+  const byId = new Map((await readProjects()).projects.map((p) => [p.id, p] as const));
   const assigned: Record<string, string> = {};
-  for (const [name, info] of missing) {
+  const repaired: Record<string, string> = {};
+  const moves: Array<{ channelId: string; category: string }> = [];
+  for (const [name, info] of Object.entries(reg.agents)) {
     const dir = info.cwd || info.project || "";
     if (!dir) continue;
+    const cur = info.projectId ? byId.get(info.projectId) : undefined;
+    // 已有归属且站得住(dir 精确/非傘形前缀命中,或显式指到别处)→ 不动。
+    // v2.21.3+ 只靠傘形根(家目录 / tmp)前缀沾边的归属 = 2026-08-28 首次迁移事故的
+    // 残留(owner 2026-09-02 截图「家目录杂项 6 个 agent」实为 3 真 3 假)→ 按 dir 重解;
+    // 归属的 project 已不存在也重解。
+    if (cur && !isMisfiledByUmbrella(cur, dir)) continue;
     const r = await resolveOrCreateProject(dir);
     if ("error" in r) continue;
+    if (r.project.id === info.projectId) continue;
+    (info.projectId ? repaired : assigned)[name] = r.project.id;
     info.projectId = r.project.id;
-    assigned[name] = r.project.id;
+    if (info.channelId) moves.push({ channelId: info.channelId, category: r.project.name });
+  }
+  const n = Object.keys(assigned).length + Object.keys(repaired).length;
+  if (n === 0) {
+    output({ ok: true, migrated: 0, repaired: 0 });
+    return;
   }
   await saveRegistry(reg);
-  output({ ok: true, migrated: Object.keys(assigned).length, assigned });
+  // 纠正过的 agent 频道挪到新 project 的 category(同 project-assign;web-only / bridge 离线静默跳过)
+  for (const m of moves) {
+    await bridgeRequest({ type: "move_channel", channelId: m.channelId, category: m.category }).catch(() => {});
+  }
+  output({ ok: true, migrated: Object.keys(assigned).length, repaired: Object.keys(repaired).length, assigned, repairedAgents: repaired });
 }
 
 async function cmdCreate(

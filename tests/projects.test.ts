@@ -109,3 +109,31 @@ describe("read/write roundtrip", () => {
     expect((await readProjects(path)).projects).toEqual([]);
   });
 });
+
+import { isMisfiledByUmbrella } from "../src/lib/projects.js";
+
+describe("isMisfiledByUmbrella(v2.21.3 傘形根误归属识别)", () => {
+  const HOME = process.env.HOME || "/Users/x";
+  const shawn = { id: "shawn", name: "家目录杂项", dirs: [HOME], createdAt: "" };
+  const qn = { id: "qingniao", name: "青鸟", dirs: [`${HOME}/repos/qingniao-miniapp`, `${HOME}/repos/qingniao-backend`], createdAt: "" };
+  test("cwd 在家目录之下、只靠 $HOME 前缀沾边 → 误归属", () => {
+    expect(isMisfiledByUmbrella(shawn, `${HOME}/repos/terrarium`)).toBe(true);
+    expect(isMisfiledByUmbrella({ ...shawn, dirs: ["/tmp"] }, "/tmp/nike-adapt")).toBe(true);
+  });
+  test("cwd 精确等于傘形 dir → 归属成立", () => {
+    expect(isMisfiledByUmbrella(shawn, HOME)).toBe(false);
+    expect(isMisfiledByUmbrella({ ...shawn, dirs: ["/tmp"] }, "/tmp")).toBe(false);
+  });
+  test("非傘形 dir 精确/前缀命中 → 归属成立", () => {
+    expect(isMisfiledByUmbrella(qn, `${HOME}/repos/qingniao-backend`)).toBe(false);
+    expect(isMisfiledByUmbrella(qn, `${HOME}/repos/qingniao-backend/src`)).toBe(false);
+  });
+  test("完全不沾边(显式指派的 review agent)→ 不算误归属", () => {
+    expect(isMisfiledByUmbrella(qn, `${HOME}/repos/other`)).toBe(false);
+  });
+  test("傘形与非傘形并存:非傘形命中优先", () => {
+    const mixed = { ...shawn, dirs: [HOME, `${HOME}/repos/terrarium`] };
+    expect(isMisfiledByUmbrella(mixed, `${HOME}/repos/terrarium`)).toBe(false);
+    expect(isMisfiledByUmbrella(mixed, `${HOME}/repos/router`)).toBe(true);
+  });
+});
