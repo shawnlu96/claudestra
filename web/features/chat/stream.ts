@@ -15,7 +15,7 @@ export interface StreamSink {
   ): void;
   /** 工具状态更新（目前只有失败标红）——按 tool_use id 找回那张卡。 */
   updateToolState(id: string, state: "done" | "error"): void;
-  appendAssistantText(text: string): void;
+  appendAssistantText(text: string, progress?: boolean): void;
   /** 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析)。
    *  from:非本人的来源标签(peer/其它用户),UI 据此区分气泡样式。 */
   addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[], from?: string): void;
@@ -62,7 +62,7 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.updateToolState(evt.id, evt.state);
       break;
     case "text":
-      sink.appendAssistantText(evt.text);
+      sink.appendAssistantText(evt.text, evt.progress);
       break;
     case "user-in":
       sink.addRemoteUserMessage(evt.text, evt.attachments, evt.from);

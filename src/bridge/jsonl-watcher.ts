@@ -16,6 +16,7 @@ import { discordReply } from "./discord-api.js";
 import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
+import { progressNoteOf } from "../lib/session-history.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus } from "./event-bus.js";
 
@@ -553,6 +554,18 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               } else {
                 state.textQueue.push(`💬 ${t}`);
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t } });
+              }
+            }
+            // v2.21.3+ Fable 5.1 的进度句:Anthropic 文档所说的 progress-update thinking
+            // 块(CC 2.1.25x 请求 display=updates,落盘为**非空** thinking)。5.1 在长工具链
+            // 里明显少写 text——实测带 text 的 assistant 条目 9.7%,Fable 5 是 13.8%——
+            // 改把「接下来我会…」写进这里;不转发的话 web/Discord 上 5.1 agent 看着比旧
+            // 模型沉默得多(其实它说了,是我们没转)。判定与历史解析共用 progressNoteOf。
+            if (block.type === "thinking" && WATCHER_CONFIG.showClaudeText && !hasReply) {
+              const note = progressNoteOf(block);
+              if (note) {
+                state.textQueue.push(`💭 ${note}`);
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true } });
               }
             }
           }

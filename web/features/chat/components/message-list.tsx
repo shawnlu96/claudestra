@@ -634,6 +634,30 @@ function QuoteSwipe({ quote, className, children }: { quote: string; className?:
   );
 }
 
+/**
+ * v2.21.3+ 进度句(💭):Fable 5.1 在长工具链里把「接下来我会…」写进 progress-update
+ * thinking 块而不是 text。比旁白(TextBlock muted)再弱一档——纯文本、斜体、无竖线,
+ * 只为让人知道 agent 没停、在干什么;点一下显示时间。
+ */
+const ProgressNote = memo(function ProgressNote({ text, ts }: { text: string; ts?: string }) {
+  const [showTs, setShowTs] = useState(false);
+  return (
+    <div
+      className="my-1 pl-2.5 text-[12.5px] italic leading-snug text-base-content/45"
+      onClick={() => {
+        if (hasLiveSelection()) return;
+        setShowTs((v) => !v);
+      }}
+    >
+      <span className="mr-1 not-italic">💭</span>
+      {text}
+      {showTs && ts && (
+        <div className="mt-0.5 font-mono text-[10px] not-italic tabular-nums opacity-40">{fmtTs(ts)}</div>
+      )}
+    </div>
+  );
+});
+
 const TextBlock = memo(function TextBlock({
   text,
   ts,
@@ -771,7 +795,9 @@ function AssistantBody({
   const narration = hasSegs ? (
     <>
       {segs!.map((seg: AssistantSegment, i) =>
-        seg.kind === "text" ? (
+        seg.kind === "text" && seg.progress ? (
+          <ProgressNote key={i} text={seg.text} ts={seg.ts ?? m.ts} />
+        ) : seg.kind === "text" ? (
           // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
           <TextBlock
             key={i}
@@ -846,7 +872,11 @@ function messagePlainText(m: ChatMessage): string {
     if (v && !parts.includes(v)) parts.push(v);
   };
   if (m.segments?.length) {
-    for (const seg of m.segments) if (seg.kind !== "tools") push(seg.text);
+    for (const seg of m.segments) {
+      if (seg.kind === "tools") continue;
+      if (seg.kind === "text" && seg.progress) continue; // 进度句不算正文
+      push(seg.text);
+    }
   } else {
     push(m.content);
   }

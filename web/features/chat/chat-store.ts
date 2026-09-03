@@ -1608,7 +1608,22 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  public appendAssistantText(text: string) {
+  public appendAssistantText(text: string, progress?: boolean) {
+    if (progress) {
+      // v2.21.3+ 进度句(💭)自成一段:先把缓冲的叙述落盘保序,再独立入段。不并入
+      // content——历史侧 hydrate 也不把它算进 content,两边对账口径一致。
+      this.flushPendingText();
+      this.ensureLiveAssistant();
+      this.produce((s) => {
+        const last = s.messages[s.messages.length - 1];
+        if (last?.role === "assistant") {
+          last.segments = last.segments ?? [];
+          last.segments.push({ kind: "text", text, ts: new Date().toISOString(), progress: true });
+        }
+        s.awaitingChunk = false;
+      });
+      return;
+    }
     this.pendingText += text;
     if (this.textFlushTimer === null) {
       this.textFlushTimer = setTimeout(() => this.flushPendingText(), 80);
@@ -1631,7 +1646,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         last.content += text;
         last.segments = last.segments ?? [];
         const tail = last.segments[last.segments.length - 1];
-        if (tail?.kind === "text") tail.text += text;
+        // 进度段不吸收后续叙述——叙述另起一段
+        if (tail?.kind === "text" && !tail.progress) tail.text += text;
         else last.segments.push({ kind: "text", text, ts: new Date().toISOString() });
       }
       s.awaitingChunk = false;

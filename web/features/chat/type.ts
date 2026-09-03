@@ -21,6 +21,8 @@ export type AssistantSegment =
       text: string;
       /** 该段开始时间（历史=首条 jsonl 记录 ts，直播=前端 stamp）。点击该段显示。 */
       ts?: string;
+      /** v2.21.3+ 进度句(💭):Fable 5.1 的 progress-update 注,渲染更弱、不进 content/复制 */
+      progress?: boolean;
     }
   | { kind: "tools"; tools: ToolCallView[] }
   | { kind: "reply"; text: string; ts?: string };

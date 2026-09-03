@@ -94,7 +94,7 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
         ? { t: "tool-state", id: d.toolId, state: d.error ? "error" : "done" }
         : null;
     case "assistant_text":
-      return { t: "text", text: String(d.text ?? "") };
+      return { t: "text", text: String(d.text ?? ""), ...(d.progress ? { progress: true } : {}) };
     case "reply_pending":
       // v2.20.2+ watcher 见到 reply 工具调用 → 「✍️ 正在回复…」状态
       return { t: "replying" };

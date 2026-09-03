@@ -33,6 +33,8 @@ interface NeutralMessage {
   /** 回合耗时 ms(正常收尾的回合才有)——历史尾轮据此渲染完成标记 */
   turnMs?: number;
   compactSummary?: boolean;
+  /** v2.21.3+ 进度句(💭):Fable 5.1 的 progress-update thinking 块,后端 session-history 提取 */
+  progress?: string;
   /** 入站消息发送者标签（<channel> user 属性：API token 名 / Discord 用户名 / 来源 agent） */
   from?: string;
 }
@@ -81,7 +83,7 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
     const toolCalls: ToolCallView[] | undefined = m.tools?.length
       ? m.tools.map((t) => ({ name: t.name, summary: t.summary, state: t.error ? ("error" as const) : ("done" as const), ts: m.ts, ...(t.detail ? { detail: t.detail } : {}) }))
       : undefined;
-    if (!m.text && !toolCalls && !m.replyText) continue;
+    if (!m.text && !toolCalls && !m.replyText && !m.progress) continue;
 
     if (m.role === "user") {
       group = null; // 用户消息断开 assistant 分组
@@ -165,9 +167,11 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
     // reply 的时间与气泡开场 ts 分开记（长回合里回复晚得多），取首条 reply 记录的 ts
     if (m.replyText && !group.replyTs && m.ts) group.replyTs = m.ts;
     const segs = group.segments as AssistantSegment[];
+    // 进度句(💭)自成一段,先于同条目的叙述;不并入 content(与直播侧口径一致)
+    if (m.progress) segs.push({ kind: "text", text: m.progress, ts: m.ts, progress: true });
     if (m.text) {
       const tail = segs[segs.length - 1];
-      if (tail?.kind === "text") tail.text += `\n\n${m.text}`;
+      if (tail?.kind === "text" && !tail.progress) tail.text += `\n\n${m.text}`;
       else segs.push({ kind: "text", text: m.text, ts: m.ts });
     }
     // reply 按时间序插进段序列（渲染层不再钉底——reply 后叙述可能还在继续）

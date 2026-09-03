@@ -239,6 +239,29 @@ describe("readSessionHistory", () => {
     expect(page.messages[0].replyComponents).toBeUndefined();
   });
 
+  test("v2.21.3 进度句:非空 thinking 块 → progress 字段,超长/空 thinking 不算", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sh-progress-"));
+    const long = "x".repeat(801);
+    const p = writeJsonl(dir, `${SID}.jsonl`, [
+      { type: "user", timestamp: "2026-09-03T00:00:00Z", message: { content: "开工" } },
+      // Fable 5.1 的 progress-update thinking:单独一条 assistant 记录
+      { type: "assistant", timestamp: "2026-09-03T00:00:01Z", message: { model: "claude-fable-5-1", content: [{ type: "thinking", thinking: "  接下来我会并行推进三件事。  " }] } },
+      // 旧模型/订阅会话:thinking 为空串 → 不算进度句,也不产生空条目
+      { type: "assistant", timestamp: "2026-09-03T00:00:02Z", message: { model: "claude-fable-5", content: [{ type: "thinking", thinking: "" }] } },
+      // 超长 thinking = summarized 推理,不是进度句
+      { type: "assistant", timestamp: "2026-09-03T00:00:03Z", message: { model: "claude-fable-5-1", content: [{ type: "thinking", thinking: long }] } },
+      // 同条目里 thinking + text 共存:两者各归各位
+      { type: "assistant", timestamp: "2026-09-03T00:00:04Z", message: { model: "claude-fable-5-1", content: [{ type: "thinking", thinking: "先看配置" }, { type: "text", text: "配置没问题" }] } },
+    ]);
+    const page = await readSessionHistory(p, { limit: 50 });
+    const asst = page.messages.filter((m) => m.role === "assistant");
+    expect(asst.length).toBe(2);
+    expect(asst[0].progress).toBe("接下来我会并行推进三件事。");
+    expect(asst[0].text).toBe("");
+    expect(asst[1].progress).toBe("先看配置");
+    expect(asst[1].text).toBe("配置没问题");
+  });
+
   test("[fork] 纯 reply（无叙述、无其它工具）也保留：text 空 + replyText 有值", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hist-"));
     const p = writeJsonl(dir, `${SID}.jsonl`, [

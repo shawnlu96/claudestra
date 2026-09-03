@@ -22,7 +22,9 @@ export function hydrateHistoryMessages(msgs: ChatMessage[]): ChatMessage[] {
     const replies: string[] = [];
     const tools: NonNullable<ChatMessage["toolCalls"]> = [];
     for (const seg of m.segments) {
-      if (seg.kind === "text") texts.push(seg.text);
+      if (seg.kind === "text") {
+        if (!seg.progress) texts.push(seg.text); // 进度句不进 content(与直播侧一致)
+      }
       else if (seg.kind === "reply") replies.push(seg.text);
       else if (seg.kind === "tools") tools.push(...seg.tools);
     }

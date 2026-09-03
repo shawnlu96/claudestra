@@ -82,9 +82,28 @@ export interface HistoryMessage {
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
   compactSummary?: boolean;
+  /**
+   * v2.21.3+ 进度句(💭):Fable 5.1 的 progress-update thinking 块——「接下来我会…」
+   * 这类给用户看的短注,不是推理正文。与 text 分开:渲染更弱、不进 content 对账。
+   */
+  progress?: string;
   model?: string;
   /** 入站消息的发送者标签（<channel> 的 user 属性：API token 名 / Discord 用户名 / 来源 agent） */
   from?: string;
+}
+
+/**
+ * v2.21.3+ 进度句长度上限。Fable 5.1 的 progress-update thinking 块实测中位 124 字、
+ * 最长 247 字;超过这个数的 thinking 是 summarized 全量推理,不是进度句,不转发。
+ * 旧模型/订阅会话的 thinking 全是空串(服务端 redact),天然不命中。
+ */
+export const PROGRESS_NOTE_MAX_CHARS = 800;
+
+/** thinking 块 → 进度句(不是进度句返回 null)。watcher 与历史解析共用同一判定。 */
+export function progressNoteOf(block: any): string | null {
+  if (!block || block.type !== "thinking" || typeof block.thinking !== "string") return null;
+  const t = block.thinking.trim();
+  return t && t.length <= PROGRESS_NOTE_MAX_CHARS ? t : null;
 }
 
 /** MCP reply 工具名：mcp__<MCP_NAME>__reply（MCP_NAME 可配，按前后缀匹配）。 */
@@ -503,7 +522,10 @@ function parseHistoryLines(
       const replyComponents: ReplyComponentRow[] = [];
       const replyFiles: string[] = [];
       const tools: HistoryToolCall[] = [];
+      const progress: string[] = [];
       for (const b of content) {
+        const note = progressNoteOf(b);
+        if (note) progress.push(note);
         if (b?.type === "text" && b.text?.trim()) texts.push(b.text);
         else if (b?.type === "tool_use" && b.name) {
           // reply() 的正文是「发给用户的消息」，不是工具动作——提取成文本，别当
@@ -534,8 +556,9 @@ function parseHistoryLines(
           }
         }
       }
-      if (!texts.length && !replyTexts.length && !tools.length) continue;
+      if (!texts.length && !replyTexts.length && !tools.length && !progress.length) continue;
       const msg: HistoryMessage = { seq, ts, role: "assistant", text: texts.join("\n") };
+      if (progress.length) msg.progress = progress.join("\n");
       if (replyTexts.length) msg.replyText = replyTexts.join("\n");
       if (replyComponents.length) msg.replyComponents = replyComponents;
       if (replyFiles.length) msg.replyFiles = replyFiles;
