@@ -43,7 +43,9 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
   if (errLogWindow.length >= 8) return;
   errLogWindow.push(now);
   const e = err instanceof Error ? err : null;
-  const stack = (e?.stack || "").split("\n").slice(0, 8).join("\n");
+  // 20 帧:React 自己的 8 帧(throwIfInfiniteUpdateLoopDetected → dispatchSetState)之后
+  // 才轮到我们的调用方——2026-09-03 抓到 24 条 #185 全卡在第 8 帧 dispatchSetState 上
+  const stack = (e?.stack || "").split("\n").slice(0, 20).join("\n");
   const msg = `${kind} ${e?.message || fallback}${stack ? `\nstack: ${stack}` : ""}`;
   const tag = isNativeShell() ? "[shell]" : "[pwa]";
   try {

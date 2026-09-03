@@ -23,7 +23,7 @@ export async function POST(request: Request) {
   // v2.21.3+ 错误上报([shell]/[pwa] error …)带完整 JS 栈(含列号,配合
   // productionBrowserSourceMaps 用 scripts/resolve-stack.mjs 还原到源码),放宽到
   // 2000 字;其他打点仍 300 字。换行折成 ⏎,日志保持一行一条便于 grep。
-  const cap = /^\[(shell|pwa)\] error /.test(msg) ? 2000 : 300;
+  const cap = /^\[(shell|pwa)\] error |^\[loop\] /.test(msg) ? 3200 : 300;
   try {
     appendFileSync(LOG, `${new Date().toISOString()} ${msg.slice(0, cap).replace(/\r?\n/g, " ⏎ ")} | ${ua}\n`);
   } catch {

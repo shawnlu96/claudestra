@@ -1045,6 +1045,39 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     } catch { /* 不影响主流程 */ }
   }
 
+  /**
+   * v2.21.3+ produce() 突发检测——追 React #185(Maximum update depth)的取证。
+   * 抓到的 24 条栈全是 React 内部帧:抛错点是任意一次 setState,真凶是此前
+   * 「连续 50 次同步提交」的循环(uSES 订阅让每次 produce 都是同步重渲染,
+   * effect 里再 produce 就串成链);Safari 的尾调用还把 handler 帧吃掉了。几乎所有
+   * 状态都走这里,所以在源头计数:200ms 内 ≥40 次 produce 就把调用栈记下来
+   * (每次页面加载最多 5 条,配合 productionBrowserSourceMaps 还原)。
+   * 正常流式:文本 80ms 合批、工具事件逐条,远到不了 40/200ms;SSE 断点重放一批
+   * 事件是同一个任务里的顺序调用,可能触发,但栈会指向 processStreamEvent,一眼可辨。
+   */
+  private produceBurst = { windowStart: 0, count: 0, reported: 0 };
+  public override produce(...args: Parameters<ZenithStore<ChatState>["produce"]>): void {
+    const b = this.produceBurst;
+    const now = Date.now();
+    if (now - b.windowStart > 200) {
+      b.windowStart = now;
+      b.count = 0;
+    }
+    if (++b.count === 40 && b.reported < 5) {
+      b.reported++;
+      const stack = (new Error().stack || "").split("\n").slice(1, 14).join(" ⏎ ");
+      const keys = (() => {
+        try {
+          // 记一下当前哪些「易抖」字段在变,配合栈定位
+          const s = this.state;
+          return `streaming=${s.streaming} awaiting=${s.awaitingChunk} msgs=${s.messages.length} sync=${s.syncState} down=${s.streamDown}`;
+        } catch { return ""; }
+      })();
+      this.clientLog(`[loop] 40 produce() in 200ms (${keys}) stack: ${stack}`);
+    }
+    super.produce(...args);
+  }
+
   public noteHidden() {
     this.hiddenAt = Date.now();
   }
