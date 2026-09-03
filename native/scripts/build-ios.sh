@@ -1,6 +1,7 @@
 #!/bin/bash
 # 在装有 Xcode 的机器上跑:编译 Debug 包并无线装到已配对的 iPhone。
-#   TEAM_ID       默认 G3TUSL5X84
+#   TEAM_ID       Apple 开发者团队 ID(10 位),**必填**:环境变量或 native/.env.local(git 忽略)
+#                 ——不再内置默认值,壳要分发给别人,个人团队 ID 不进代码(owner 2026-09-04)
 #   PROFILE_FILE  手工签名用的 .mobileprovision(默认取 Xcode 缓存里团队的通配开发文件)
 #   DEVICE_ID     devicectl 的 Identifier,缺省取第一台已配对设备
 #   DEVELOPER_DIR 未 xcode-select 时自动指向 /Applications/Xcode*.app
@@ -10,10 +11,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export DEVELOPER_DIR="${DEVELOPER_DIR:-$(ls -d /Applications/Xcode*.app | head -1)/Contents/Developer}"
-TEAM="${TEAM_ID:-G3TUSL5X84}"
+# 个人配置从 native/.env.local 读(TEAM_ID=XXXXXXXXXX 一行即可)
+if [ -f .env.local ]; then set -a; . ./.env.local; set +a; fi
+TEAM="${TEAM_ID:-}"
+[ -n "$TEAM" ] || { echo "✗ 缺 TEAM_ID(Apple 开发者团队 ID)。设环境变量,或写进 native/.env.local:  TEAM_ID=XXXXXXXXXX"; exit 1; }
 BUNDLE_ID="com.claudestra.app"
 DERIVED="build/DerivedData"
 mkdir -p build
+# www/(首次设置页、错误页)与 capacitor.config 同步进 iOS 工程。cap copy 不跑 pod install,
+# 插件增减才需要 npx cap sync ios。
+[ -d node_modules ] || npm install --no-audit --no-fund
+npx cap copy ios >/dev/null && echo "▶ cap copy ios 完成(www + capacitor.config.json)"
 #   INSTALL_ALL=1  装到所有已配对设备(iPhone + iPad);DEVICE_NAME=iPad 按型号名挑一台
 xcrun devicectl list devices --json-output "$PWD/build/devices.json" >/dev/null
 DEVICES=$(INSTALL_ALL="${INSTALL_ALL:-}" DEVICE_NAME="${DEVICE_NAME:-}" DEVICE_ID="${DEVICE_ID:-}" python3 - <<'PY'

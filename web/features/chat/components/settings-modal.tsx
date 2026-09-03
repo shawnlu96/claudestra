@@ -7,6 +7,7 @@ import { useT, useLang, setLang } from "@/lib/i18n";
 import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
 import { useThemePref, setThemePref } from "@/lib/theme";
 import { kbFixEnabled, setKbFixEnabled } from "../use-keyboard-viewport";
+import { isNativeShell, nativeServerConfig } from "@/lib/native";
 import { PeersModal } from "./peers-modal";
 import { CronModal } from "./cron-modal";
 
@@ -382,6 +383,51 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * v2.21.3+ 原生壳的服务器地址(存在手机本机,不编进包——owner 2026-09-04 壳要分发给别人):
+ * 显示当前地址 + 两步确认更换。独立组件:随设置面板打开而挂载,关掉即卸载,armed 态自然复位。
+ */
+function ShellServerSection() {
+  const t = useT();
+  const [url, setUrl] = useState<string | null>(null);
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    const cfg = nativeServerConfig();
+    if (!cfg) return;
+    let dead = false;
+    cfg.get().then((u) => { if (!dead) setUrl(u); }).catch(() => {});
+    return () => { dead = true; };
+  }, []);
+  return (
+    <Section
+      title={t("App 连接的服务器")}
+      desc={url || t("(读取中…)")}
+      aside={
+        armed ? (
+          <div className="join">
+            <button
+              className="btn btn-error btn-sm join-item"
+              onClick={() => {
+                // clear 后原生侧重建 WebView 回到首次设置页,这里不会再有回调
+                void nativeServerConfig()?.clear();
+              }}
+            >
+              {t("确认更换")}
+            </button>
+            <button className="btn btn-ghost btn-sm join-item border-base-300" onClick={() => setArmed(false)}>
+              {t("取消")}
+            </button>
+          </div>
+        ) : (
+          <button className="btn btn-ghost btn-sm border-base-300" onClick={() => setArmed(true)}>
+            {t("更换服务器")}
+          </button>
+        )
+      }
+    />
+  );
+}
+
 function Section({
   title,
   aside,
@@ -683,6 +729,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">{/* 分区卡片流 */}
 
         <GroupLabel>{t("界面与个人")}</GroupLabel>
+        {/* ── 原生壳:服务器地址(只在 iOS App 里出现;地址存本机,可换)─────────────── */}
+        {isNativeShell() && open && <ShellServerSection />}
         {/* ── 界面(外观 + 语言)─────────────── */}
         <Section
           title={t("外观")}

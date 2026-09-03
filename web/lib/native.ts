@@ -28,3 +28,28 @@ export function nativePlugin(name: string): Record<string, (...a: unknown[]) => 
   const p = c?.Plugins?.[name];
   return p && typeof p === "object" ? p : null;
 }
+
+/**
+ * v2.21.3+ 壳的服务器地址(ios/App/App/ServerConfig.swift):地址不编进包,存在本机。
+ * clear() 后原生侧重建 WebView 回到首次设置页——调用方不会收到后续回调。
+ */
+export function nativeServerConfig(): { get: () => Promise<string>; clear: () => Promise<void> } | null {
+  const p = nativePlugin("ServerConfig");
+  if (!p) return null;
+  return {
+    get: async () => {
+      const r = (await p.get()) as { url?: string } | undefined;
+      return r?.url ?? "";
+    },
+    clear: async () => {
+      await p.clear();
+    },
+  };
+}
+
+/** 壳的原生启动图:web 首屏就绪时收掉(capacitor.config 里最晚 6s 兜底自动收)。 */
+export function hideNativeSplash(): void {
+  const p = nativePlugin("SplashScreen");
+  if (!p) return;
+  void p.hide({ fadeOutDuration: 150 }).catch(() => {});
+}

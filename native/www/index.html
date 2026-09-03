@@ -1,3 +1,81 @@
-<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Claudestra</title>
-<style>body{margin:0;background:#171819;color:#e8e8ea;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh}</style></head>
-<body><div>Claudestra</div></body></html>
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Claudestra</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #171819; color: #e8e8ea; font-family: -apple-system, system-ui, sans-serif;
+         min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)); }
+  main { width: 100%; max-width: 360px; }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 6px; }
+  p.sub { margin: 0 0 22px; font-size: 14px; line-height: 1.55; color: #9a9ca3; }
+  label { display: block; font-size: 12.5px; color: #9a9ca3; margin-bottom: 6px; }
+  input { width: 100%; font: inherit; font-size: 16px; padding: 12px 14px; border-radius: 12px;
+          border: 1px solid #3a3d43; background: #1f2126; color: #fff; outline: none; }
+  input:focus { border-color: #7c8cff; }
+  button { width: 100%; margin-top: 14px; padding: 13px; border-radius: 12px; border: 0; font: inherit;
+           font-size: 16px; font-weight: 600; background: #5b6cff; color: #fff; }
+  button:disabled { opacity: .55; }
+  .hint { margin-top: 12px; font-size: 12px; line-height: 1.5; color: #7a7d85; }
+  .err { margin-top: 10px; font-size: 13px; color: #ff7b7b; min-height: 1.4em; }
+  .busy { text-align: center; color: #9a9ca3; font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="form">
+    <h1>Claudestra</h1>
+    <p class="sub">这是原生壳,内容来自你自己部署的 Claudestra web。填入它的地址即可连接。</p>
+    <label for="url">服务器地址</label>
+    <input id="url" type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false"
+           placeholder="https://your-host.example.com" enterkeyhint="go">
+    <button id="go">连接</button>
+    <div class="err" id="err"></div>
+    <div class="hint">推荐 https(Tailscale MagicDNS 域名或公网域名)。局域网内的 http 地址也可以,但推送、Passkey 等能力需要 https。地址只存在本机,可在 web 设置里随时更换。</div>
+  </div>
+  <div id="busy" class="busy" hidden>正在连接…</div>
+</main>
+<script>
+(function () {
+  var P = function () { return (window.Capacitor && window.Capacitor.Plugins) || {}; };
+  // 启动图:设置页本身就是首屏,立刻收掉
+  try { P().SplashScreen && P().SplashScreen.hide(); } catch (e) {}
+  var input = document.getElementById('url'), btn = document.getElementById('go'), err = document.getElementById('err');
+  try { input.value = localStorage.getItem('cstra.lastUrl') || ''; } catch (e) {}
+  function normalize(v) {
+    v = (v || '').trim();
+    if (!v) return '';
+    if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+    return v.replace(/\/+$/, '');
+  }
+  function connect() {
+    var v = normalize(input.value);
+    err.textContent = '';
+    if (!v) { err.textContent = '请填服务器地址'; return; }
+    var cfg = P().ServerConfig;
+    if (!cfg) { err.textContent = '原生桥不可用(请用最新版壳)'; return; }
+    btn.disabled = true;
+    try { localStorage.setItem('cstra.lastUrl', v); } catch (e) {}
+    document.getElementById('form').hidden = true;
+    document.getElementById('busy').hidden = false;
+    // set 成功后原生侧会重建 WebView 直接加载该地址;这里不会再有回调
+    cfg.set({ url: v }).catch(function (e) {
+      document.getElementById('form').hidden = false;
+      document.getElementById('busy').hidden = true;
+      btn.disabled = false;
+      err.textContent = '地址无效:' + ((e && e.message) || e);
+    });
+  }
+  btn.addEventListener('click', connect);
+  input.addEventListener('keydown', function (e) { if (e.key === 'Enter') connect(); });
+  // 已有地址却落到了设置页(极少见:比如原生重建失败),直接再连一次
+  var cfg = P().ServerConfig;
+  if (cfg) cfg.get().then(function (r) { if (r && r.url) { input.value = r.url; } }).catch(function () {});
+})();
+</script>
+</body>
+</html>

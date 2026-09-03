@@ -11,7 +11,7 @@ import { homedir } from "node:os";
  * 配置(env 可覆盖):
  *   APNS_KEY_PATH  .p8 路径,默认取 ~/.claude-orchestrator/apns/AuthKey_*.p8 第一个
  *   APNS_KEY_ID    Key ID,默认从文件名 AuthKey_<ID>.p8 解析
- *   APNS_TEAM_ID   开发者团队 ID(默认 G3TUSL5X84)
+ *   APNS_TEAM_ID   开发者团队 ID(**必填**,10 位;不内置默认值——部署给别人时是别人的团队)
  *   APNS_TOPIC     bundle id(默认 com.claudestra.app)
  *   APNS_ENV       sandbox | production(默认 sandbox——开发签名的 App 只在 sandbox 收得到)
  * 没有 key 文件 = 未配置,所有调用静默 no-op(一次告警)。
@@ -34,10 +34,16 @@ function config(): ApnsConfig | null {
   }
   const keyId = process.env.APNS_KEY_ID || (keyPath.match(/AuthKey_([A-Z0-9]+)\.p8$/)?.[1] ?? "");
   const env = (process.env.APNS_ENV || "sandbox").toLowerCase();
+  const teamId = (process.env.APNS_TEAM_ID || "").trim();
+  if (!teamId) {
+    console.warn("[apns] 未设置 APNS_TEAM_ID(Apple 开发者团队 ID),原生推送不启用");
+    cfgCache = null;
+    return null;
+  }
   cfgCache = {
     keyPath,
     keyId,
-    teamId: process.env.APNS_TEAM_ID || "G3TUSL5X84",
+    teamId,
     topic: process.env.APNS_TOPIC || "com.claudestra.app",
     host: env === "production" ? "https://api.push.apple.com" : "https://api.sandbox.push.apple.com",
   };
