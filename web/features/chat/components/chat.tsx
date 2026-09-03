@@ -29,9 +29,30 @@ function shellLog(msg: string) {
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: `[shell] ${msg}` }) }).catch(() => {});
   } catch { /* ignore */ }
 }
+/**
+ * v2.21.3+ 运行时错误上报(壳 + PWA 都记,此前只有壳且只记文件名+行号——生产 chunk
+ * 全在第 1 行,等于没记)。带完整 JS 栈(含列号):配合 next.config 的
+ * productionBrowserSourceMaps,用 `node scripts/resolve-stack.mjs` 还原到源码位置。
+ * 背景:壳里两天抓到 18 次 React #185(渲染死循环),光凭 @chunk:1 定位不了。
+ * 5 分钟最多 8 条,防死循环类错误刷爆日志。
+ */
+const errLogWindow: number[] = [];
+function reportRuntimeError(kind: string, err: unknown, fallback: string) {
+  const now = Date.now();
+  while (errLogWindow.length && now - errLogWindow[0] > 5 * 60_000) errLogWindow.shift();
+  if (errLogWindow.length >= 8) return;
+  errLogWindow.push(now);
+  const e = err instanceof Error ? err : null;
+  const stack = (e?.stack || "").split("\n").slice(0, 8).join("\n");
+  const msg = `${kind} ${e?.message || fallback}${stack ? `\nstack: ${stack}` : ""}`;
+  const tag = isNativeShell() ? "[shell]" : "[pwa]";
+  try {
+    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: `${tag} ${msg}` }) }).catch(() => {});
+  } catch { /* ignore */ }
+}
 if (typeof window !== "undefined") {
-  window.addEventListener("error", (e) => { if (isNativeShell()) shellLog(`error ${e.message} @${(e.filename || "").split("/").pop()}:${e.lineno}`); });
-  window.addEventListener("unhandledrejection", (e) => { if (isNativeShell()) shellLog(`unhandledrejection ${String((e as PromiseRejectionEvent).reason).slice(0, 160)}`); });
+  window.addEventListener("error", (e) => reportRuntimeError("error", e.error, `${e.message} @${(e.filename || "").split("/").pop()}:${e.lineno}:${e.colno}`));
+  window.addEventListener("unhandledrejection", (e) => reportRuntimeError("unhandledrejection", (e as PromiseRejectionEvent).reason, String((e as PromiseRejectionEvent).reason).slice(0, 160)));
 }
 
 /** 「会话内容」页的 hash 锚点：存在即处于内容视图，移动端横滑到内容栏 */
