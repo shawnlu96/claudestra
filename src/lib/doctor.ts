@@ -30,6 +30,8 @@ export interface Check {
   fix?: string;
 }
 
+import { installRepoSkills } from "./skills-install.js";
+
 const HOME = process.env.HOME || "";
 const ORCH_DIR = `${HOME}/.claude-orchestrator`;
 
@@ -310,6 +312,13 @@ async function checkIntegration(repoRoot: string): Promise<Check[]> {
       ? { group: g, name: "typing hooks", status: "ok", detail: "Stop / Notification 已挂" }
       : { group: g, name: "typing hooks", status: "warn", detail: "没挂 —— 输入指示器不会自动停，完成通知会迟",
           fix: "重跑 bun run setup" });
+  }
+  // v2.21.3+ 仓库 skill 有没有真的装进 ~/.claude/skills(MacBook 曾悬空两个月没人发现)
+  for (const r of installRepoSkills(repoRoot, { apply: false })) {
+    out.push(r.action === "ok"
+      ? { group: g, name: `skill ${r.name}`, status: "ok", detail: r.detail }
+      : { group: g, name: `skill ${r.name}`, status: "warn", detail: r.detail,
+          fix: `bun ${repoRoot}/src/manager.ts install-skills` });
   }
   return out;
 }

@@ -3050,9 +3050,12 @@ async function cmdUpdateBeta() {
   console.log(`[update] beta 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("./lib/cli-install.js");
   const cliInstall = await installClaudestraCli(REPO_ROOT);
+  const { installRepoSkills } = await import("./lib/skills-install.js");
+  const skillsInstalled = installRepoSkills(REPO_ROOT);
   output({
     ok: true,
     channel: "beta",
+    skills: skillsInstalled,
     from: preHead.slice(0, 7),
     to: remote.slice(0, 7),
     message: `beta 已前进 ${preHead.slice(0, 7)} → ${remote.slice(0, 7)} 并 reload daemon`,
@@ -3183,6 +3186,9 @@ async function cmdUpdate() {
   console.log(`[update] 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("./lib/cli-install.js");
   const cliInstall = await installClaudestraCli(REPO_ROOT);
+  const { installRepoSkills } = await import("./lib/skills-install.js");
+  const skillsInstalled = installRepoSkills(REPO_ROOT);
+  for (const sk of skillsInstalled) if (sk.action !== "ok") console.log(`[skills] ${sk.name}: ${sk.action} — ${sk.detail}`);
 
   output({
     ok: true,
@@ -4892,11 +4898,24 @@ switch (cmd) {
     break;
   }
 
+  case "install-skills": {
+    // v2.21.3+ 仓库 skills/ → ~/.claude/skills 软链(owner 2026-09-03:skill 一直
+    // 在仓库里却没人装,MacBook 的软链悬空了两个月)。update / install-cli 也会顺手跑。
+    const { installRepoSkills } = await import("./lib/skills-install.js");
+    const results = installRepoSkills(`${import.meta.dir}/..`);
+    output({ ok: !results.some((r) => r.action === "warn"), skills: results });
+    break;
+  }
+
   case "install-cli": {
     // v2.3.0+: 把 `claudestra` 命令装到 PATH + 配 LaunchAgent 开机自启。
     // 给现有装机的人；首次 setup.ts 安装末尾也会跑这同一份逻辑。
     const { installClaudestraCli } = await import("./lib/cli-install.js");
     const REPO = `${import.meta.dir}/..`;
+    // 仓库 skill 顺手装上(软链,幂等)
+    const { installRepoSkills } = await import("./lib/skills-install.js");
+    const skills = installRepoSkills(REPO);
+    for (const s of skills) if (s.action !== "ok") console.log(`[skills] ${s.name}: ${s.action} — ${s.detail}`);
     const result = await installClaudestraCli(REPO);
     if (result.errors.length > 0) {
       output({ ok: false, error: result.errors.join("; "), warnings: result.warnings, result });
@@ -4965,6 +4984,7 @@ switch (cmd) {
         "effort reset <name>             — clear the override (fall back to the global settings.json value)",
         "tmux-help                       — print the tmux crash course (incl. iTerm2 -CC mode)",
         "doctor [--json]                 — health-check the whole install (runtime, config, daemons, bridge, MCP, agents)",
+        "install-skills                  — symlink the repo's skills/ (save-compact …) into ~/.claude/skills (idempotent; update/install-cli run it too)",
         "version                         — show the current version and whether an update is available",
         "update                          — git pull and reload the three launchd daemons",
         "auto-update status              — show auto-update toggles",
