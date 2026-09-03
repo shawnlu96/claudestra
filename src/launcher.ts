@@ -24,6 +24,8 @@ import {
   tmuxCapture,
   tmuxSendLine,
   isAutoConfirmableModal,
+  trustPromptMoves,
+  acceptTrustPrompt,
   detectSessionIdlePrompt,
   CC_MODE_BANNER_RE,
   listAgentWindows,
@@ -37,7 +39,8 @@ import {
  * agent 的 session-idle 由 manager.ts 的就绪轮询自动选「完整恢复」。
  */
 function masterShouldAutoConfirm(pane: string): boolean {
-  return isAutoConfirmableModal(pane, { allowSessionIdle: true });
+  // v2.21.4+ 目录信任弹窗也算(默认高亮 No, exit,confirmMasterModal 会先挪到 Yes)
+  return trustPromptMoves(pane) !== null || isAutoConfirmableModal(pane, { allowSessionIdle: true });
 }
 
 /**
@@ -46,6 +49,11 @@ function masterShouldAutoConfirm(pane: string): boolean {
  * 恢复」（Down 再 Enter）。普通确认弹窗仍直接 Enter。
  */
 async function confirmMasterModal(pane: string): Promise<void> {
+  const trustMoves = trustPromptMoves(pane);
+  if (trustMoves !== null) {
+    await acceptTrustPrompt(MASTER_WINDOW, trustMoves);
+    return;
+  }
   if (detectSessionIdlePrompt(pane)) {
     await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "Down"]);
     await Bun.sleep(150);
@@ -467,6 +475,32 @@ async function verifyClaudeLaunchable(): Promise<{ ok: boolean; fixed?: string }
   return { ok: false };
 }
 
+/** 二进制体检 + 自动修复;修不好只告警一次,恢复后复位。 */
+let binaryAlertSent = false;
+async function probeClaudeBinaryHealth(reason: string): Promise<boolean> {
+  const health = await verifyClaudeLaunchable();
+  if (health.ok) {
+    if (health.fixed) console.log(`🩺 claude 二进制体检(${reason}):经「${health.fixed}」修复后可用`);
+    binaryAlertSent = false;
+    return true;
+  }
+  console.log(`🩺 🚨 claude 二进制体检(${reason})失败:--version 挂死,自动修复未成功`);
+  if (!binaryAlertSent) {
+    binaryAlertSent = true;
+    try {
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `🚨 **Claude Code 二进制无法启动**(--version 挂死,自动修复未成功;触发:${reason})。现役 agent 不受影响,但新启动 / restart / cron 临时 agent 都会「启动超时」。需人工处理 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Claude Code binary cannot start** (--version hangs; auto-remediation failed; trigger: ${reason}). Running agents are unaffected, but new launches / restarts / cron temp agents will time out. Manual action needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+        ),
+      });
+    } catch { /* non-critical */ }
+  }
+  return false;
+}
+
 async function getClaudeLatestVersion(): Promise<string | null> {
   // launchd 阉割 PATH 不含 nvm 目录,直接 spawn "npm" ENOENT(peer 2026-08-09:
   // 「CC 自动更新检查一直静默失败」,与 e11500e 修的 web 构建同坑)。复用
@@ -656,7 +690,14 @@ async function checkClaudeCodeUpdate() {
   if (!cfg.autoUpdate.claudeCode) return; // 开关关闭 → 跳过
 
   const current = await getClaudeVersion();
-  if (!current) return;
+  if (!current) {
+    // v2.21.4+ --version 都拿不到 = 二进制挂死/坏掉。2026-09-04:brew 自更新到 2.1.259
+    // 后二进制带 quarantine,Gatekeeper 首评挂死,新启动(cron 临时 agent / create)全部
+    // 「启动超时」而 launcher 毫无察觉——此前只在自己升级成功的路径上体检,别的途径
+    // 换上的二进制没人管。每次轮询顺手体检 + 按 SOP 自动修,修不好才告警(只告一次)。
+    await probeClaudeBinaryHealth("轮询");
+    return;
+  }
 
   // 安装方式分流:brew cask 场景版本判断和升级都必须走 brew——npm 的 latest
   // 常领先 cask 几小时到几天,拿 npm 版本对比会永远误报「有更新」,而
@@ -741,6 +782,9 @@ async function checkClaudeCodeUpdate() {
   // 一次无意义的全员重启 + 误报通知。版本没变就是没生效,告警并中止。
   if (afterVersion && current && afterVersion === current) {
     console.log(`🆙 ⚠️ ${install.kind} 升级命令成功但版本仍是 ${current}——升级未生效,中止重启波`);
+    // 磁盘上的二进制可能已经被 brew 换掉(2026-09-03 就是这样:Caskroom 多了 2.1.259,
+    // --version 却还报旧号),带 quarantine 的新文件下一次启动就挂——照样体检。
+    await probeClaudeBinaryHealth("升级未生效");
     try {
       await bridgeRequest({
         type: "reply",

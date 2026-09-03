@@ -39,6 +39,8 @@ import {
   detectSessionIdlePrompt,
   clearShellInitPrompts,
   isClaudeReady,
+  trustPromptMoves,
+  acceptTrustPrompt,
   isAtShell,
   probeTuiContract,
   windowHasChildProcess,
@@ -909,6 +911,13 @@ async function cmdCreate(
         }
         continue;
       }
+      // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
+      const trustMoves = trustPromptMoves(pane);
+      if (trustMoves !== null) {
+        await acceptTrustPrompt(target, trustMoves);
+        await Bun.sleep(1000);
+        continue;
+      }
       if (hasPromptToConfirm(pane)) {
         await tmuxRaw(["send-keys", "-t", target, "Enter"]);
         await Bun.sleep(500);
@@ -1135,6 +1144,13 @@ async function cmdResume(
           sessionIdlePicked = true;
           await Bun.sleep(1500);
         }
+        continue;
+      }
+      // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
+      const trustMoves = trustPromptMoves(pane);
+      if (trustMoves !== null) {
+        await acceptTrustPrompt(target, trustMoves);
+        await Bun.sleep(1000);
         continue;
       }
       if (hasPromptToConfirm(pane)) {
@@ -1571,6 +1587,13 @@ async function gracefulExit(name: string): Promise<boolean> {
       continue;
     }
 
+    // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续
+    const trustMoves = trustPromptMoves(pane);
+    if (trustMoves !== null) {
+      await acceptTrustPrompt(target, trustMoves);
+      await Bun.sleep(1000);
+      continue;
+    }
     // 有确认提示 → 按 Enter
     if (hasPromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", target, "Enter"]);
@@ -1765,6 +1788,13 @@ async function startClaudeInWindow(
       continue;
     }
 
+    // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续
+    const trustMoves = trustPromptMoves(pane);
+    if (trustMoves !== null) {
+      await acceptTrustPrompt(target, trustMoves);
+      await Bun.sleep(1000);
+      continue;
+    }
     // 有确认提示 → 按 Enter
     if (hasPromptToConfirm(pane)) {
       await tmuxRaw(["send-keys", "-t", target, "Enter"]);

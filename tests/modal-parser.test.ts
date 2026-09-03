@@ -14,6 +14,7 @@ import {
   detectPermissionMode,
   probeTuiContract,
   paneIdleVerdict,
+  trustPromptMoves,
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
   detectDevChannelsModal,
@@ -953,5 +954,41 @@ describe("paneLooksWorking(v2.21.2 工作中五信号)", () => {
   test("尾部 14 行之外的旧 spinner 不算", () => {
     const old = "✶ Thinking… (esc to interrupt)\n" + Array.from({ length: 16 }, (_, i) => `line ${i}`).join("\n");
     expect(paneLooksWorking(old)).toBe(false);
+  });
+});
+
+/**
+ * v2.21.4 目录信任弹窗(CC 2.1.259 在家目录启动实抓,2026-09-04)。默认高亮 No, exit——
+ * 直接 Enter 就退出;又没有数字编号,老逻辑既不会误按也不会处理,只能干等到超时。
+ */
+describe("trustPromptMoves — 目录信任弹窗", () => {
+  const fixture = [
+    "shawn@macmini ~ % claude --dangerously-skip-permissions",
+    "──────────────────────────────────────────────────────────────",
+    " Accessing workspace:",
+    " /Users/shawn",
+    " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+    " Claude Code'll be able to read, edit, and execute files here.",
+    " Security guide",
+    "",
+    " ❯ No, exit",
+    "   Yes, I trust this folder",
+    "",
+    " Enter to confirm · Esc to cancel",
+    "",
+    "",
+  ].join("\n");
+
+  test("默认高亮 No → 需要 1 次 Down", () => {
+    expect(trustPromptMoves(fixture)).toBe(1);
+  });
+  test("已高亮 Yes → 0 次", () => {
+    expect(trustPromptMoves(fixture.replace(" ❯ No, exit", "   No, exit").replace("   Yes, I trust", " ❯ Yes, I trust"))).toBe(0);
+  });
+  test("不是自动 Enter 的弹窗(Enter = 退出)", () => {
+    expect(isAutoConfirmableModal(fixture)).toBe(false);
+  });
+  test("普通就绪 pane / 只是正文提到 trust → null", () => {
+    expect(trustPromptMoves("⏺ 说明:trust this folder 是 CC 的弹窗文案\n❯ \n  ⏵⏵ bypass permissions on")).toBeNull();
   });
 });
