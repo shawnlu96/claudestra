@@ -100,6 +100,14 @@ const rings = new Map<string, BridgeEvent[]>();
  */
 export type AgentTurnStatus = "thinking" | "done" | "compacting";
 const agentStatuses = new Map<string, AgentTurnStatus>();
+/**
+ * v2.21.3+ 每个 agent 最近一次进入 done 的时刻(ms)。jsonl-watcher 补 thinking 时
+ * 用它区分「回合结束前写的记录」和「结束后的新活动」——watcher 是 2s poll,
+ * 常在 Stop 之后才读到 Stop 前 0.1s 写的最后几条,按「30s 内新鲜」判会把刚
+ * 结束的回合重新点亮,再等 120s 对账才收敛(事件环实测:42 次 done 有 22 次
+ * 0.0~0.1s 内被重点亮,owner 2026-09-03「真结束了还停在思考中」)。
+ */
+const agentDoneAt = new Map<string, number>();
 
 function matches(evt: BridgeEvent, filter: EventFilter): boolean {
   if (filter.agent && evt.agent !== filter.agent) return false;
@@ -141,6 +149,7 @@ export function emitEvent(
   if (full.type === "agent_status") {
     const st = (full.data as { status?: unknown }).status;
     if (st === "thinking" || st === "done" || st === "compacting") agentStatuses.set(full.agent, st);
+    if (st === "done") agentDoneAt.set(full.agent, Date.now());
   }
 
   for (const sub of subscribers) {
@@ -178,6 +187,7 @@ export function subscribeEvents(
 export function forgetAgent(agent: string): void {
   rings.delete(agent);
   agentStatuses.delete(agent);
+  agentDoneAt.delete(agent);
 }
 
 export function replayEventsSince(
@@ -205,6 +215,23 @@ export function subscriberCount(): number {
  */
 export function getAgentStatus(agent: string): AgentTurnStatus | undefined {
   return agentStatuses.get(agent);
+}
+
+/** 最近一次 done 的时刻(ms);从未 done 过 → 0。 */
+export function getAgentDoneAt(agent: string): number {
+  return agentDoneAt.get(agent) ?? 0;
+}
+
+/**
+ * 一条 jsonl 记录能不能作为「agent 正在跑」的证据去补 thinking:
+ * 必须**新鲜**(30s 内,老记录是回放)且**晚于最近一次 done**(不是刚结束那个
+ * 回合的尾巴)。自发回合(ScheduleWakeup / 按钮回调 / 注入的 slash)的首条
+ * 记录天然晚于 done,照常点亮。纯函数,单测在 tests/event-bus.test.ts。
+ */
+export function isPostTurnActivity(agent: string, entryTs: number, now = Date.now()): boolean {
+  if (!Number.isFinite(entryTs)) return false;
+  if (now - entryTs >= 30_000) return false;
+  return entryTs > getAgentDoneAt(agent);
 }
 
 /** 对外「忙」语义:回合中 或 正在压缩上下文,都不可投递/不可视为已完成。 */
@@ -243,5 +270,6 @@ export function __resetEventBusForTest(): void {
   subscribers.clear();
   rings.clear();
   agentStatuses.clear();
+  agentDoneAt.clear();
   externallyBusy.clear();
 }

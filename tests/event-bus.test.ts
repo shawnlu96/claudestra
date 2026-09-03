@@ -13,6 +13,9 @@ import {
   markChannelExternallyBusy,
   unmarkChannelExternallyBusy,
   isChannelExternallyBusy,
+  getAgentDoneAt,
+  isPostTurnActivity,
+  forgetAgent,
   type BridgeEvent,
 } from "../src/bridge/event-bus.js";
 
@@ -193,5 +196,43 @@ describe("v2.21.2 compacting 回合态", () => {
     emitEvent({ agent: "d", chatId: "1", type: "agent_status", data: { status: "compacting" } });
     emitEvent({ agent: "d", chatId: "1", type: "agent_status", data: { status: "bogus" } });
     expect(getAgentStatus("d")).toBe("compacting");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// v2.21.3+ 回合后活动判定:done 前写的记录不得把状态重新点亮
+// ─────────────────────────────────────────────────────────────
+describe("isPostTurnActivity:jsonl 记录能否补 thinking", () => {
+  beforeEach(() => __resetEventBusForTest());
+
+  test("从未 done 过:30s 内新鲜即可", () => {
+    const now = 1_000_000_000;
+    expect(getAgentDoneAt("a")).toBe(0);
+    expect(isPostTurnActivity("a", now - 5_000, now)).toBe(true);
+    expect(isPostTurnActivity("a", now - 31_000, now)).toBe(false);
+    expect(isPostTurnActivity("a", NaN, now)).toBe(false);
+  });
+
+  test("done 之后:Stop 前 0.1s 写的尾巴不算,done 之后的新记录才算", () => {
+    const before = Date.now();
+    emitEvent({ agent: "a", chatId: "c", type: "agent_status", data: { status: "done" } });
+    const doneAt = getAgentDoneAt("a");
+    expect(doneAt).toBeGreaterThanOrEqual(before);
+    // 回合尾巴:比 done 早 100ms,虽然「新鲜」但不能重点亮
+    expect(isPostTurnActivity("a", doneAt - 100, doneAt + 2_000)).toBe(false);
+    // 自发新回合:比 done 晚 → 照常点亮
+    expect(isPostTurnActivity("a", doneAt + 500, doneAt + 2_000)).toBe(true);
+    // 晚于 done 但已经不新鲜(30s 外)→ 回放,不点
+    expect(isPostTurnActivity("a", doneAt + 500, doneAt + 40_000)).toBe(false);
+  });
+
+  test("thinking / compacting 不刷新 doneAt;forgetAgent 清掉", () => {
+    emitEvent({ agent: "a", chatId: "c", type: "agent_status", data: { status: "done" } });
+    const d = getAgentDoneAt("a");
+    emitEvent({ agent: "a", chatId: "c", type: "agent_status", data: { status: "thinking" } });
+    emitEvent({ agent: "a", chatId: "c", type: "agent_status", data: { status: "compacting" } });
+    expect(getAgentDoneAt("a")).toBe(d);
+    forgetAgent("a");
+    expect(getAgentDoneAt("a")).toBe(0);
   });
 });
