@@ -21,7 +21,13 @@ mkdir -p build
 # www/(首次设置页、错误页)与 capacitor.config 同步进 iOS 工程。cap copy 不跑 pod install,
 # 插件增减才需要 npx cap sync ios。
 [ -d node_modules ] || npm install --no-audit --no-fund
-npx cap copy ios >/dev/null && echo "▶ cap copy ios 完成(www + capacitor.config.json)"
+if [ -d ios/App/Pods ] && [ -d ios/App/App.xcworkspace ]; then
+  npx cap copy ios >/dev/null && echo "▶ cap copy ios 完成(www + capacitor.config.json)"
+else
+  # 全新 clone 没有 Pods/(git 忽略):cap sync = copy + pod install(需 brew 装的 cocoapods)
+  echo "▶ 首次构建:npx cap sync ios(pod install,需要联网,约 1-2 分钟)"
+  npx cap sync ios || { echo "✗ cap sync 失败:确认已安装 cocoapods(brew install cocoapods)"; exit 1; }
+fi
 #   INSTALL_ALL=1  装到所有已配对设备(iPhone + iPad);DEVICE_NAME=iPad 按型号名挑一台
 xcrun devicectl list devices --json-output "$PWD/build/devices.json" >/dev/null
 DEVICES=$(INSTALL_ALL="${INSTALL_ALL:-}" DEVICE_NAME="${DEVICE_NAME:-}" DEVICE_ID="${DEVICE_ID:-}" python3 - <<'PY'
