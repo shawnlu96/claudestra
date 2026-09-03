@@ -705,6 +705,39 @@ function emergencyThresholdOf(a: AgentStat): number | null {
   return w ? Math.floor(w * EMERGENCY_WINDOW_RATIO) : null;
 }
 
+/** v2.21.3+ 救命线独立开关(缺省开)。owner 2026-09-03:把常规线关成 window=0 后
+ *  发现 `eff > 0` 那道闸把救命线一起关了——忙碌 agent 涨到 967K 就是 CC 裸压,
+ *  记忆全丢(Robinhood 08-27 就是这么丢的)。常规线管「不打扰」,救命线管「别撞墙」,
+ *  两者不该绑在一个数上。 */
+function loadAutoCompactEmergency(): boolean {
+  try {
+    return readConfigSync().autoCompact?.emergency !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 自动 save-compact 的触发裁决(纯函数,单测在 tests/stats-resets.test.ts):
+ *   常规线:eff>0 且 ctx≥eff 且闲置满门槛
+ *   救命线:emergency 非 null 且 ctx≥emergency——**独立于常规线**,无视闲置
+ * 两者任一成立、且距上次触发超过 retryMs(注入可能排队未执行)才开火。
+ */
+export function autoCompactDecision(p: {
+  ctx: number;
+  eff: number;
+  emergency: number | null;
+  idleOk: boolean;
+  lastTrig: number;
+  now: number;
+  retryMs: number;
+}): { fire: boolean; emergency: boolean } {
+  const isEmergency = p.emergency !== null && p.ctx >= p.emergency;
+  const overNormal = p.eff > 0 && p.ctx >= p.eff && p.idleOk;
+  const fire = (overNormal || isEmergency) && p.now - p.lastTrig > p.retryMs;
+  return { fire, emergency: fire && isEmergency };
+}
+
 function loadAutoCompactThreshold(): number {
   try {
     // v2.20.2+ Claudestra 独立配置优先(设置界面写这里;CC 的 settings.json 会拒
@@ -799,6 +832,7 @@ async function triggerAutoSaveCompact(a: AgentStat, effThreshold: number): Promi
 async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<void> {
   const threshold = loadAutoCompactThreshold();
   const idleMs = loadAutoCompactIdleMs();
+  const emergencyOn = loadAutoCompactEmergency();
   const first = !tierBaselined;
   tierBaselined = true;
   for (const a of agents) {
@@ -817,24 +851,28 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
     // 阈值低于最小绝对档 250K,放闸后面就永远轮不到触发。
     // v2.21.1+ 救命线(owner 2026-09-02 上下文被 CC 裸压全丢):闲置门槛对忙碌
     // agent 是永久阻塞——Robinhood 一直在干活,涨到 717K 被 CC 压掉,我们一次
-    // 都没触发过。踩到 EMERGENCY(窗口 62% = CC 最早触发点)时**无视闲置**,
-    // 因为再等下去就是被裸压(记忆全丢),打断一次远比那个轻。
+    // 都没触发过。踩到 EMERGENCY(窗口 93%,离 CC 的 ~967K 只剩几万 token)时
+    // **无视闲置**,因为再等下去就是被裸压(记忆全丢),打断一次远比那个轻。
+    // v2.21.3+ 救命线不再挂在 eff>0 后面:常规线关(window=0)时它照样兜底。
     if (!first) {
       const eff = effectiveAutoCompactThreshold(threshold, a);
-      const emergency = emergencyThresholdOf(a);
-      const isEmergency = emergency !== null && a.contextTokens >= emergency;
+      const emergency = emergencyOn ? emergencyThresholdOf(a) : null;
       const lastTrig = autoCompactTriggered.get(a.channelId) ?? 0;
-      if (
-        eff > 0 &&
-        a.contextTokens >= eff &&
-        Date.now() - lastTrig > AUTO_COMPACT_RETRY_MS &&
-        (isEmergency || idleLongEnough(a, idleMs))
-      ) {
+      const d = autoCompactDecision({
+        ctx: a.contextTokens,
+        eff,
+        emergency,
+        idleOk: idleLongEnough(a, idleMs),
+        lastTrig,
+        now: Date.now(),
+        retryMs: AUTO_COMPACT_RETRY_MS,
+      });
+      if (d.fire) {
         autoCompactTriggered.set(a.channelId, Date.now());
-        if (isEmergency) {
+        if (d.emergency) {
           console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
         }
-        await triggerAutoSaveCompact(a, eff);
+        await triggerAutoSaveCompact(a, d.emergency ? emergency! : eff);
       }
     }
 

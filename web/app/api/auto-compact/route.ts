@@ -24,7 +24,7 @@ export async function POST(request: Request) {
   if (!(await isAuthed(request))) {
     return NextResponse.json({ error: "未登录" }, { status: 401 });
   }
-  const body = (await request.json().catch(() => ({}))) as { window?: number; idleHours?: number };
+  const body = (await request.json().catch(() => ({}))) as { window?: number; idleHours?: number; emergency?: boolean };
   try {
     return NextResponse.json(await bridgePost("/auto-compact", body));
   } catch (e) {

@@ -29,8 +29,10 @@ export interface AppConfig {
   /** v2.4.25+ 只读用量看板频道 + 常驻消息 id（stats-dashboard 用）。 */
   statsDashboard?: { channelId: string; messageId: string };
   /** v2.20.1+ auto save-compact 闲置门槛（小时,0=超线即触发)与 v2.20.2+ 上下文
-   *  阈值(tokens,0=关闭自动触发;缺省用 stats-dashboard 的默认 400K)。 */
-  autoCompact?: { idleHours?: number; window?: number };
+   *  阈值(tokens,0=关闭常规自动触发;缺省用 stats-dashboard 的默认 400K)。
+   *  v2.21.3+ emergency:93% 救命线独立开关(缺省 true)——常规线关了它也在,
+   *  只在快撞 CC 的 ~967K 裸压时兜底触发一次(owner 2026-09-03)。 */
+  autoCompact?: { idleHours?: number; window?: number; emergency?: boolean };
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -60,10 +62,13 @@ function merge(base: AppConfig, raw: any): AppConfig {
         : base.statsDashboard,
     autoCompact:
       raw?.autoCompact &&
-      (typeof raw.autoCompact.idleHours === "number" || typeof raw.autoCompact.window === "number")
+      (typeof raw.autoCompact.idleHours === "number" ||
+        typeof raw.autoCompact.window === "number" ||
+        typeof raw.autoCompact.emergency === "boolean")
         ? {
             ...(typeof raw.autoCompact.idleHours === "number" ? { idleHours: raw.autoCompact.idleHours } : {}),
             ...(typeof raw.autoCompact.window === "number" ? { window: raw.autoCompact.window } : {}),
+            ...(typeof raw.autoCompact.emergency === "boolean" ? { emergency: raw.autoCompact.emergency } : {}),
           }
         : base.autoCompact,
   };
@@ -137,12 +142,13 @@ export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig>
 }
 
 /** v2.20.2+ 设置界面写入口:一次可改阈值/闲置时长任意子集。 */
-export async function setAutoCompact(patch: { window?: number; idleHours?: number }): Promise<AppConfig> {
+export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean }): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoCompact = {
     ...cfg.autoCompact,
     ...(typeof patch.window === "number" ? { window: patch.window } : {}),
     ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
+    ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
   };
   await writeConfig(cfg);
   return cfg;

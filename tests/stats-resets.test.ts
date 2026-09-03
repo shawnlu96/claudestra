@@ -157,3 +157,44 @@ describe("Esc 双击护栏常数", () => {
     expect(ESC_DOUBLE_TAP_MS).toBeGreaterThanOrEqual(1200);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// v2.21.3+ 自动 save-compact 触发裁决:救命线独立于常规线
+// ─────────────────────────────────────────────────────────────
+import { autoCompactDecision } from "../src/bridge/stats-dashboard.js";
+
+describe("autoCompactDecision:常规线 / 93% 救命线", () => {
+  const base = { eff: 850_000, emergency: 930_000, idleOk: true, lastTrig: 0, now: 1_000_000_000, retryMs: 30 * 60_000 };
+
+  test("常规线:超线且闲置 → 开火(非救命)", () => {
+    expect(autoCompactDecision({ ...base, ctx: 860_000 })).toEqual({ fire: true, emergency: false });
+  });
+
+  test("常规线:超线但还在忙(未闲置) → 不开火", () => {
+    expect(autoCompactDecision({ ...base, ctx: 860_000, idleOk: false }).fire).toBe(false);
+  });
+
+  test("救命线:忙碌中踩到 93% → 无视闲置开火,标记 emergency", () => {
+    expect(autoCompactDecision({ ...base, ctx: 935_000, idleOk: false })).toEqual({ fire: true, emergency: true });
+  });
+
+  test("常规线关(eff=0)时救命线照样兜底——owner 2026-09-03 发现的漏洞", () => {
+    expect(autoCompactDecision({ ...base, eff: 0, ctx: 935_000, idleOk: false })).toEqual({ fire: true, emergency: true });
+    // 没到救命线、常规线又关 → 什么都不做
+    expect(autoCompactDecision({ ...base, eff: 0, ctx: 900_000 }).fire).toBe(false);
+  });
+
+  test("救命线开关关掉(emergency=null)且常规线关 → 完全静默", () => {
+    expect(autoCompactDecision({ ...base, eff: 0, emergency: null, ctx: 990_000 }).fire).toBe(false);
+  });
+
+  test("拿不到真实窗口(emergency=null)时常规线仍按绝对值工作", () => {
+    expect(autoCompactDecision({ ...base, emergency: null, ctx: 860_000 })).toEqual({ fire: true, emergency: false });
+  });
+
+  test("30 分钟内已触发过 → 不重复注入(救命线也遵守)", () => {
+    const recent = base.now - 10 * 60_000;
+    expect(autoCompactDecision({ ...base, ctx: 950_000, lastTrig: recent }).fire).toBe(false);
+    expect(autoCompactDecision({ ...base, ctx: 950_000, lastTrig: base.now - 31 * 60_000 }).fire).toBe(true);
+  });
+});

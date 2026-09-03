@@ -461,7 +461,9 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [ac, setAc] = useState<{
     window: number | null;
     idleHours: number | null;
-    defaults: { window: number; idleHours: number };
+    /** v2.21.3+ 93% 救命线独立开关(常规线关了它也兜底) */
+    emergency?: boolean;
+    defaults: { window: number; idleHours: number; emergency?: boolean; emergencyRatio?: number };
   } | null>(null);
   const [acBusy, setAcBusy] = useState(false);
   const [acMsg, setAcMsg] = useState("");
@@ -545,7 +547,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   };
 
   // autoCompact 写入:两个下拉共用一条路,POST 后用 bridge 回读的状态刷新
-  const saveAc = async (patch: { window?: number; idleHours?: number }) => {
+  const saveAc = async (patch: { window?: number; idleHours?: number; emergency?: boolean }) => {
     setAcBusy(true);
     setAcMsg("");
     try {
@@ -887,7 +889,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         {/* ── 自动存记忆+Compact(owner 2026-08-27:「设置里看不到」) ─────────────── */}
         <Section
           title={t("自动存记忆 + Compact")}
-          desc={t("上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文。对所有 agent 生效。实际触发线取「此阈值」与「该 agent 真实窗口 55%」的较小者——必须赶在 Claude Code 自己的 compact(实测窗口 62%~72% 就动手,它只压不存记忆)之前。涨到窗口 62% 时无视闲置门槛强制触发,避免被裸压丢上下文。")}
+          desc={t("常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文,对所有 agent 生效;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。")}
         >
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-[13px]">
@@ -922,6 +924,17 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
                   </option>
                 ))}
               </select>
+            </label>
+            {/* 救命线独立于常规线:window=0 时也可用(这正是它存在的意义) */}
+            <label className="flex items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                className="toggle toggle-sm toggle-error"
+                checked={ac?.emergency !== false}
+                disabled={acBusy || !ac}
+                onChange={(e) => void saveAc({ emergency: e.target.checked })}
+              />
+              {t("93% 救命线")}
             </label>
           </div>
           {acMsg && <div className="mt-2 text-xs text-error/80">{t(acMsg)}</div>}

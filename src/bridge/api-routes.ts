@@ -1588,7 +1588,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         // window:0=关闭;undefined=未设(用默认或 settings.json 兼容值)
         window: cfg.autoCompact?.window ?? null,
         idleHours: cfg.autoCompact?.idleHours ?? null,
-        defaults: { window: 400_000, idleHours: 3 },
+        // v2.21.3+ 93% 救命线独立开关(缺省开;常规线 window=0 时仍兜底)
+        emergency: cfg.autoCompact?.emergency !== false,
+        defaults: { window: 400_000, idleHours: 3, emergency: true, emergencyRatio: 0.93 },
       };
     };
     if (req.method === "GET") return apiJson(200, await state());
@@ -1599,7 +1601,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       } catch {
         return apiJson(400, { ok: false, error: "invalid JSON body" });
       }
-      const patch: { window?: number; idleHours?: number } = {};
+      const patch: { window?: number; idleHours?: number; emergency?: boolean } = {};
+      if (body.emergency !== undefined) patch.emergency = Boolean(body.emergency);
       if (body.window !== undefined) {
         const w = Number(body.window);
         if (!Number.isFinite(w) || w < 0 || w > 10_000_000) {
@@ -1614,7 +1617,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         }
         patch.idleHours = h;
       }
-      if (patch.window === undefined && patch.idleHours === undefined) {
+      if (patch.window === undefined && patch.idleHours === undefined && patch.emergency === undefined) {
         return apiJson(400, { ok: false, error: "nothing to set" });
       }
       await setAutoCompact(patch);
