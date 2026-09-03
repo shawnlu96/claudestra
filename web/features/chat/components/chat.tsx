@@ -18,7 +18,7 @@ import { TerminalButton } from "../../terminal/terminal-button";
 import { SessionSearchButton } from "./session-search";
 import { ManagePanel } from "./manage-panel";
 import { ClaudeSwitcher } from "./claude-switcher";
-import { ctxLevel } from "../ctx-level";
+import { CtxBadge } from "./ctx-badge";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
@@ -174,24 +174,9 @@ function TopBar() {
           {t("思考中")}
         </span>
       )}
-      {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)。
-          色阶按 1M 窗口(owner 定档):≥200k 黄,≥500k 红,≥750k 深红(实色);
-          <200k 不打扰(不显示)。 */}
-      {typeof info?.contextTokens === "number" && info.contextTokens >= 200_000 && (
-        <span
-          title={t("当前会话上下文占用(建议在对话里让 agent /compact)")}
-          className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10.5px] tabular-nums ${
-            {
-              deep: "bg-error text-error-content",
-              high: "bg-error/15 text-error",
-              mid: "bg-warning/15 text-warning",
-              none: "bg-base-300 text-base-content/50",
-            }[ctxLevel(info.contextTokens)]
-          }`}
-        >
-          ctx {Math.round(info.contextTokens / 1000)}k
-        </span>
-      )}
+      {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)——v2.21.3+
+          点开是「什么时候压」建议卡 + 一键存记忆+Compact,见 ctx-badge.tsx */}
+      {info && <CtxBadge agent={info} />}
       {/* 会话级模型/effort 徽章 + 快速切换（owner 2026-07-23） */}
       {info && <ClaudeSwitcher agent={info} />}
       {info?.cwd && (

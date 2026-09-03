@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
+import { COMPACT_REQUEST_TEXT } from "./ctx-badge";
 import { SkillsSheet } from "./skills-sheet";
 
 
@@ -584,14 +585,14 @@ export function Composer() {
         {showCtxWarn && (
           <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs">
             <span className="min-w-0 truncate">
-              ⚠️ {t("上下文已")} {Math.round(ctxTokens / 1000)}k{t("，建议压缩以保持质量")}
+              ⚠️ {t("上下文已")} {Math.round(ctxTokens / 1000)}k{t("——别等了,找个句号就存记忆 + Compact")}
             </span>
             <button
               className="btn btn-warning btn-xs ml-auto shrink-0"
               onClick={() => {
                 if (reqAt) return; // 双击竞态兜底(rerender 前的第二击)
                 setCompactReqAt((m) => ({ ...m, [active]: Date.now() }));
-                void store.send("上下文占用已经很高了，请执行 /save-compact：先抢救关键记忆，然后压缩上下文。");
+                void store.send(COMPACT_REQUEST_TEXT);
               }}
             >
               {t("请求压缩")}
