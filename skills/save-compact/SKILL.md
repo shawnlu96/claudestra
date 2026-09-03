@@ -62,7 +62,10 @@ if [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
     # tmux 吞掉且不报错——先无条件 cancel(不在模式时此命令无害报错,忽略)
     tmux send-keys -t "$TMUX_PANE" -X cancel 2>/dev/null
     sleep 0.2
-    tmux send-keys -t "$TMUX_PANE" -l "/compact"
+    # 保留清单(2026-09-03,来自 Anthropic「Prompting Claude Fable 5.1」压缩摘要
+    # 一节):/compact 接受自定义摘要指令,明确告诉模型摘要必须留住什么——否则
+    # 约束原话、放弃过的路线、精确进度这些最容易被摘掉。必须单行(换行=提前提交)。
+    tmux send-keys -t "$TMUX_PANE" -l "/compact 摘要必须让新上下文无需返工、无需重新提供约束就能接着干。务必保留:(1)遇到的难点/问题及其处理与结果;(2)提出、尝试或放弃过的方案及原因;(3)用户要求、决定、同意、否决、确立为偏好/约束/边界的内容——按原话;(4)当前精确进度:已覆盖/已定/已完成的;(5)未了、未决、已承诺、预期接下来发生的事;(6)难以重建的细节——名字、数字、日期、原话、路径、命令、链接——原样保留。这六项宁长勿缺,其余从简;用户说过/要求/确立的贴近原话,我自己的解释推理压缩到结论与产出。"
     sleep 0.4
     tmux send-keys -t "$TMUX_PANE" Enter
   ' >/dev/null 2>&1 &
@@ -73,7 +76,7 @@ else
 fi
 ```
 
-- 输出 `compact scheduled` → 本轮结束约 10 秒后 compact 会自动执行。
+- 输出 `compact scheduled` → 本轮结束约 10 秒后 compact 会自动执行(带上面的保留清单指令;Claude Code 的 `/compact <指令>` 会把它交给摘要模型)。
 - 输出 `not in tmux`（不在 tmux 里跑）→ 跳过，最后提示用户手动执行 `/compact`。
 
 ## 第 3 步：告知结果
