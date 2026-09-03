@@ -2222,14 +2222,18 @@ async function cmdSessions(search?: string) {
 // Cron 管理命令
 // ============================================================
 
-import { loadJobs, saveJobs, parseCronExpression, nextCronTime, type CronJob } from "./cron.js";
+import { loadJobs, saveJobs, parseCronExpression, nextCronTime, CRON_DEFAULT_EFFORT, type CronJob } from "./cron.js";
 
-async function cmdCronAdd(name: string, schedule: string, dir: string, prompt: string, reportChannelId?: string, targetAgent?: string) {
+async function cmdCronAdd(name: string, schedule: string, dir: string, prompt: string, reportChannelId?: string, targetAgent?: string, effort?: string) {
   // 验证 cron 表达式
   try {
     parseCronExpression(schedule);
   } catch (err) {
     output({ ok: false, error: (err as Error).message });
+    return;
+  }
+  if (effort && !isKnownEffort(effort)) {
+    output({ ok: false, error: `未知 effort: "${effort}"(可选 ${KNOWN_EFFORT_LEVELS.join("|")})` });
     return;
   }
 
@@ -2251,6 +2255,7 @@ async function cmdCronAdd(name: string, schedule: string, dir: string, prompt: s
     createdAt: new Date().toISOString(),
     ...(reportChannelId ? { reportChannelId } : {}),
     ...(targetAgent ? { targetAgent } : {}),
+    ...(effort ? { effort } : {}),
   };
 
   try {
@@ -2282,6 +2287,8 @@ async function cmdCronList() {
       lastRun: j.lastRun || null,
       nextRun: j.nextRun || null,
       ...(j.targetAgent ? { targetAgent: j.targetAgent } : {}),
+      // 临时 agent 的 effort 档:未设 = 缺省 medium(targetAgent 模式不适用)
+      ...(j.targetAgent ? {} : { effort: j.effort || CRON_DEFAULT_EFFORT }),
     })),
   });
 }
@@ -2290,7 +2297,7 @@ async function cmdCronList() {
  *  「改个频率要重建不合理」)。schedule 变更时重算 nextRun。 */
 async function cmdCronEdit(
   nameOrId: string,
-  patch: { schedule?: string; prompt?: string; name?: string; dir?: string }
+  patch: { schedule?: string; prompt?: string; name?: string; dir?: string; effort?: string }
 ) {
   if (patch.schedule) {
     try {
@@ -2299,6 +2306,10 @@ async function cmdCronEdit(
       output({ ok: false, error: (err as Error).message });
       return;
     }
+  }
+  if (patch.effort && !isKnownEffort(patch.effort)) {
+    output({ ok: false, error: `未知 effort: "${patch.effort}"(可选 ${KNOWN_EFFORT_LEVELS.join("|")})` });
+    return;
   }
   const jobs = await loadJobs();
   const job = jobs.find((j) => j.name === nameOrId || j.id === nameOrId);
@@ -2313,6 +2324,7 @@ async function cmdCronEdit(
   if (patch.name) job.name = patch.name;
   if (patch.prompt) job.prompt = patch.prompt;
   if (patch.dir) job.dir = patch.dir.replace(/^~/, process.env.HOME || "~");
+  if (patch.effort) job.effort = patch.effort;
   if (patch.schedule) {
     job.schedule = patch.schedule;
     if (job.enabled) {
@@ -4595,6 +4607,13 @@ switch (cmd) {
       targetAgent = rest[taIdx + 1];
       rest.splice(taIdx, 2);
     }
+    // v2.21.3+ --effort <level>:临时 agent 的档位(缺省 medium;targetAgent 模式忽略)
+    let effort: string | undefined;
+    const efIdx = rest.indexOf("--effort");
+    if (efIdx >= 0) {
+      effort = rest[efIdx + 1];
+      rest.splice(efIdx, 2);
+    }
     let dir: string | undefined;
     if (targetAgent) {
       // 有 target-agent 时下一个位置参数只有看着像路径才当 dir，否则并入 prompt
@@ -4607,10 +4626,10 @@ switch (cmd) {
       dir = rest.shift();
     }
     if (!name || !schedule || !dir || rest.length === 0) {
-      output({ ok: false, error: 'usage: cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>]\n  <dir> may be omitted when --target-agent is given' });
+      output({ ok: false, error: 'usage: cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>] [--effort <low|medium|high|xhigh|max>]\n  <dir> may be omitted when --target-agent is given; --effort applies to the temporary agent only (default medium)' });
       break;
     }
-    await cmdCronAdd(name, schedule, dir, rest.join(" "), reportChannelId, targetAgent);
+    await cmdCronAdd(name, schedule, dir, rest.join(" "), reportChannelId, targetAgent, effort);
     break;
   }
 
@@ -4630,7 +4649,7 @@ switch (cmd) {
 
   case "cron-edit": {
     const [nameOrId, ...rest] = args;
-    const patch: { schedule?: string; prompt?: string; name?: string; dir?: string } = {};
+    const patch: { schedule?: string; prompt?: string; name?: string; dir?: string; effort?: string } = {};
     for (let i = 0; i < rest.length; i += 2) {
       const k = rest[i];
       const v = rest[i + 1];
@@ -4639,9 +4658,10 @@ switch (cmd) {
       else if (k === "--prompt") patch.prompt = v;
       else if (k === "--name") patch.name = v;
       else if (k === "--dir") patch.dir = v;
+      else if (k === "--effort") patch.effort = v;
     }
     if (!nameOrId || Object.keys(patch).length === 0) {
-      output({ ok: false, error: 'usage: cron-edit <name|id> [--schedule "<cron>"] [--prompt "<text>"] [--name <new>] [--dir <dir>]' });
+      output({ ok: false, error: 'usage: cron-edit <name|id> [--schedule "<cron>"] [--prompt "<text>"] [--name <new>] [--dir <dir>] [--effort <level>]' });
       break;
     }
     await cmdCronEdit(nameOrId, patch);
@@ -4929,7 +4949,7 @@ switch (cmd) {
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
         "sessions [search]               — browse past Claude Code sessions",
-        'cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>] — add a cron job (--target-agent sends the prompt to an existing agent, inheriting its context; otherwise a temporary agent is spawned each run)',
+        'cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>] [--effort <level>] — add a cron job (--target-agent sends the prompt to an existing agent, inheriting its context; otherwise a temporary agent is spawned each run, at --effort, default medium)',
         "cron-list                       — list cron jobs",
         "cron-remove <name|id>           — remove a cron job",
         "cron-toggle <name|id>           — enable/pause a cron job",

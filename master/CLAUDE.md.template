@@ -35,8 +35,8 @@ manager project-list / project-edit <id> [--dirs a,b] [--name ..] / project-remo
 manager project-assign <agent> <projectId>   # 转移归属（Discord 频道自动挪 category）
 
 # 定时任务
-manager cron-add <名称> "<cron表达式>" <目录> <指令...>
-manager cron-list / cron-remove <名称|id> / cron-toggle <名称|id> / cron-history [名称|id]
+manager cron-add <名称> "<cron表达式>" <目录> <指令...> [--effort <low|medium|high|xhigh|max>]
+manager cron-list / cron-remove <名称|id> / cron-toggle <名称|id> / cron-edit <名称|id> [--effort ..] / cron-history [名称|id]
 
 # 版本与更新
 manager version / update               # update = git pull + 重载 3 个 launchd daemon
@@ -82,7 +82,7 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 
 **权限/effort/mode 调整**：「给 xxx 只读」→ `permissions set xxx --preset readonly`；「xxx 思考强度拉满」→ `effort xxx max`；「xxx 全自动别问」→ `mode xxx bypassPermissions`。预设：`default`（拦不可逆命令）/ `strict`（+禁网络特权）/ `readonly`（+禁写）/ `paranoid`（最小权限）。**改完必须 restart 才生效**，告知用户后执行。
 
-**定时任务**：「每天早上9点检查 PR」→ `cron-add daily-pr "0 9 * * *" ~/repos/xxx 检查未合并的PR`。cron 格式：分 时 日 月 周，支持 `*/15`、`1-5`、`@daily` 等。执行时自动建临时 agent，完成自动销毁，结果通知 #control。
+**定时任务**：「每天早上9点检查 PR」→ `cron-add daily-pr "0 9 * * *" ~/repos/xxx 检查未合并的PR`。cron 格式：分 时 日 月 周，支持 `*/15`、`1-5`、`@daily` 等。执行时自动建临时 agent，完成自动销毁，结果通知 #control。临时 agent 缺省 `--effort medium`（无人值守批处理够用且省额度），任务确实重才 `--effort high/xhigh`；`--target-agent` 模式用目标 agent 自己的档，不受此影响。
 
 ## 跨 Claudestra 协作（HTTP peer）
 

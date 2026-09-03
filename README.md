@@ -193,7 +193,7 @@ bun src/manager.ts effort <name> <low|medium|high|xhigh|max|auto> | effort list 
 bun src/manager.ts mode   <name> <permission-mode>
 
 # Cron jobs
-bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>
+bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # temp agent effort, default medium (v2.21.3+)
 bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>

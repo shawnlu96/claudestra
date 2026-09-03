@@ -1522,6 +1522,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           lastRun: j.lastRun ?? null,
           nextRun: j.nextRun ?? null,
           targetAgent: j.targetAgent ?? null,
+          effort: j.effort ?? null, // null = 缺省(临时 agent 走 medium)
           createdAt: j.createdAt,
         })),
       });
@@ -1541,6 +1542,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         return apiJson(400, { ok: false, error: "name/schedule/prompt required" });
       }
       const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
+      if (body?.effort) extra.push("--effort", String(body.effort));
       const r = await runManager("cron-add", name, schedule, dir, ...extra, prompt);
       return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
     }
@@ -1563,6 +1565,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         if (body?.prompt) flags.push("--prompt", String(body.prompt));
         if (body?.name) flags.push("--name", String(body.name));
         if (body?.dir) flags.push("--dir", String(body.dir));
+        if (body?.effort) flags.push("--effort", String(body.effort));
         if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
         r = await runManager("cron-edit", id, ...flags);
       }

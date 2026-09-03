@@ -168,7 +168,7 @@ bun src/manager.ts project-assign <agent> <projectId>   # 转移归属,Discord �
 bun src/manager.ts project-migrate                # 存量 agent 补 projectId（bridge 启动时自动跑）
 
 # 定时任务
-bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>
+bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # 临时 agent 的档位,缺省 medium(v2.21.3+)
 bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>

@@ -183,7 +183,7 @@ bun src/manager.ts project-assign <agent> <projectId>   # also moves the Discord
 bun src/manager.ts project-migrate                # backfill projectId for legacy agents (bridge runs it at startup)
 
 # Cron jobs
-bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...>
+bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # temp agent effort, default medium (v2.21.3+)
 bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>

@@ -70,7 +70,16 @@ export interface CronJob {
    * 值是 agent 短名（不带 "agent-" 前缀，跟 CLI 一致）。
    */
   targetAgent?: string;
+  /**
+   * v2.21.3+ 临时 agent 的 effort 档(low|medium|high|xhigh|max)。缺省 medium——
+   * Fable 5.1 文档:medium ≈ Fable 5 且更便宜;无人值守批处理不值得 xhigh 的
+   * 额度与时延。targetAgent 模式下无意义(用目标 agent 自己的档),不传。
+   */
+  effort?: string;
 }
+
+/** cron 临时 agent 缺省 effort(交互 agent 不受影响——它们走全局/registry 档)。 */
+export const CRON_DEFAULT_EFFORT = "medium";
 
 export interface CronHistory {
   id: string;
@@ -314,7 +323,8 @@ async function executeOnTempAgent(
   try {
     // 建 agent — cron 无人值守，走 bypassPermissions（auto 会弹权限框卡死）
     const createResult = await runManager(
-      "create", agentName, job.dir, `cron: ${job.name}`, "--mode", "bypassPermissions"
+      "create", agentName, job.dir, `cron: ${job.name}`, "--mode", "bypassPermissions",
+      "--effort", job.effort || CRON_DEFAULT_EFFORT,
     );
     if (!createResult.ok) throw new Error(`创建 agent 失败: ${createResult.error}`);
 

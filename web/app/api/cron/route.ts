@@ -32,6 +32,7 @@ export async function POST(request: Request) {
     prompt?: string;
     dir?: string;
     targetAgent?: string;
+    effort?: string;
   };
   const { action, id } = body;
   try {

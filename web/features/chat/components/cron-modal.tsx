@@ -21,7 +21,12 @@ interface CronJobView {
   lastRun: string | null;
   nextRun: string | null;
   targetAgent: string | null;
+  /** v2.21.3+ 临时 agent 的 effort 档;null = 缺省 medium(targetAgent 模式不适用) */
+  effort?: string | null;
 }
+
+/** 临时 agent 的档位选项(缺省 medium:Fable 5.1 文档说 medium ≈ Fable 5 且更省额度) */
+const EFFORT_CHOICES = ["medium", "low", "high", "xhigh", "max"] as const;
 
 async function cronAction(body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string }> {
   try {
@@ -71,8 +76,10 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
           <div className="flex items-center gap-2">
             <span className="truncate text-[13.5px] font-semibold">{job.name}</span>
             <code className="shrink-0 rounded bg-base-content/10 px-1.5 py-0.5 text-[11px]">{job.schedule}</code>
-            {job.targetAgent && (
+            {job.targetAgent ? (
               <span className="shrink-0 text-[11px] opacity-50">→ {job.targetAgent}</span>
+            ) : (
+              <span className="shrink-0 text-[11px] opacity-50">⚙ {job.effort || "medium"}</span>
             )}
           </div>
           <div className="mt-0.5 text-[11px] text-base-content/50">
@@ -162,6 +169,7 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
   const [schedule, setSchedule] = useState("0 10 * * 1");
   const [dir, setDir] = useState("~");
   const [prompt, setPrompt] = useState("");
+  const [effort, setEffort] = useState<string>("medium");
 
   if (!open) {
     return (
@@ -186,12 +194,27 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
           onChange={(e) => setSchedule(e.target.value)}
         />
       </div>
-      <input
-        className="input input-sm input-bordered w-full font-mono"
-        placeholder={t("工作目录(默认 ~)")}
-        value={dir}
-        onChange={(e) => setDir(e.target.value)}
-      />
+      <div className="flex gap-2">
+        <input
+          className="input input-sm input-bordered min-w-0 flex-1 font-mono"
+          placeholder={t("工作目录(默认 ~)")}
+          value={dir}
+          onChange={(e) => setDir(e.target.value)}
+        />
+        {/* 临时 agent 的 effort 档:无人值守批处理缺省 medium,要更强就手动拉高 */}
+        <select
+          className="select select-sm select-bordered w-28"
+          value={effort}
+          title={t("临时 agent 的 effort 档")}
+          onChange={(e) => setEffort(e.target.value)}
+        >
+          {EFFORT_CHOICES.map((lv) => (
+            <option key={lv} value={lv}>
+              ⚙ {lv}
+            </option>
+          ))}
+        </select>
+      </div>
       <textarea
         className="textarea textarea-bordered w-full text-[12.5px]"
         rows={3}
@@ -206,7 +229,7 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
           onClick={async () => {
             setBusy(true);
             setMsg("");
-            const r = await cronAction({ action: "add", name: name.trim(), schedule: schedule.trim(), dir: dir.trim() || "~", prompt: prompt.trim() });
+            const r = await cronAction({ action: "add", name: name.trim(), schedule: schedule.trim(), dir: dir.trim() || "~", prompt: prompt.trim(), effort });
             setBusy(false);
             if (r.ok) {
               setOpen(false);
