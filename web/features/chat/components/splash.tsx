@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../chat-store";
+import { reportBootAndHideSplash } from "../boot-report";
 import { useT } from "@/lib/i18n";
 import { CLIENT_WEB_COMMIT } from "@/lib/build-info";
 
@@ -19,6 +20,10 @@ const FADE_MS = 500;
 export function Splash() {
   const t = useT();
   const ready = useChatStore((s) => s.state.agentsReady);
+  // 首屏就绪:记一条 [boot] 计时 + 壳里收掉原生启动图(见 boot-report.ts)
+  useEffect(() => {
+    if (ready) reportBootAndHideSplash();
+  }, [ready]);
   // 用 lazy initializer 而不是 useRef(Date.now())：后者在每次 render 都会求值
   // （虽然只有首次生效），属于 render 期调用非纯函数；useState 的惰性初始化是
   // React 明确支持的写法，只在首次挂载执行一次。
