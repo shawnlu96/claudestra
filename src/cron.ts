@@ -76,6 +76,12 @@ export interface CronJob {
    * 额度与时延。targetAgent 模式下无意义(用目标 agent 自己的档),不传。
    */
   effort?: string;
+  /**
+   * v2.21.4+ 临时 agent 的归属 project id。不设 = create 按 dir 自动解析——dir 为
+   * 家目录时会落进「家目录杂项」这种傘形组(owner 2026-09-04:「你不应该把这个
+   * cron job 归到家目录杂项里」)。targetAgent 模式下无意义(目标 agent 自有归属)。
+   */
+  project?: string;
 }
 
 /** cron 临时 agent 缺省 effort(交互 agent 不受影响——它们走全局/registry 档)。 */
@@ -325,6 +331,7 @@ async function executeOnTempAgent(
     const createResult = await runManager(
       "create", agentName, job.dir, `cron: ${job.name}`, "--mode", "bypassPermissions",
       "--effort", job.effort || CRON_DEFAULT_EFFORT,
+      ...(job.project ? ["--project", job.project] : []),
     );
     if (!createResult.ok) throw new Error(`创建 agent 失败: ${createResult.error}`);
 
@@ -338,9 +345,17 @@ async function executeOnTempAgent(
     await Bun.sleep(15_000);
     const startTime = Date.now();
     let completed = false;
+    // 连续两次(10s 间隔)都 idle 才算完:单次判定撞上工具结果回来→下一次 API 请求
+    // 之间的瞬态就会误杀(2026-09-04 复盘 mem0-hygiene:两次运行都在第一个工具
+    // 结果后 20s 内被 kill,报告从未产出——主因是 paneLooksIdle 把进行中判成 idle,
+    // 已在 tmux-helper 修;这里再加一道保险)。
+    let idleStreak = 0;
     while (Date.now() - startTime < maxRuntime) {
       await Bun.sleep(10_000);
-      try { if (await tmuxIsIdle(tmuxTarget)) { completed = true; break; } } catch { break; }
+      try {
+        idleStreak = (await tmuxIsIdle(tmuxTarget)) ? idleStreak + 1 : 0;
+      } catch { break; }
+      if (idleStreak >= 2) { completed = true; break; }
     }
 
     const status = completed ? "success" : "timeout";

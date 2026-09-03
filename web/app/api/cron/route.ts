@@ -33,6 +33,7 @@ export async function POST(request: Request) {
     dir?: string;
     targetAgent?: string;
     effort?: string;
+    project?: string | null;
   };
   const { action, id } = body;
   try {

@@ -210,6 +210,17 @@ export async function clearShellInitPrompts(
  */
 export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
 
+/**
+ * v2.21.4+ 「回合进行中」标记。老 TUI 在 spinner 行/页脚写 "esc to interrupt";
+ * CC 2.1.25x 把它去掉了,进行中只剩 spinner 行本身:
+ *   `✽ Pondering… (2m 23s · ↓ 9.9k tokens)` / `✻ Thinking… (3s)` / `· Cooking… (1m 2s · ↑ 12 tokens)`
+ * 形态 = 行首 spinner 字形 + 动词… + 括号内的耗时。2026-09-04 实证:忙碌 pane 的输入框
+ * 渲染成 `❯\u00a0`(❯ + NBSP,`\s` 匹配 NBSP),模式 1 严格匹配直接命中 → 全体 agent
+ * 干活时被判 idle,cron 的「等 idle 再 kill」在临时 agent 拉完第一个工具结果 20s 内
+ * 就把它杀了(mem0-hygiene 两次运行都没活过第一个工具调用,报告从未产出)。
+ */
+export const CC_BUSY_RE = /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*…\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+s\b/im;
+
 /** 剪掉 capture-pane 输出的尾部空行(v2.17.2 P0,peer 报告)。pane 比 TUI 实绘区
  *  高(窗口 resize 后 CC 未重绘底部)时,capture 会带出成片尾部空行——最多实测
  *  30 行——把页脚整个挤出 slice(-N) 窗口:paneLooksIdle 恒 false = 全体 agent
@@ -244,7 +255,7 @@ export function probeTuiContract(pane: string): {
   const tuiPresent = /─{20,}/.test(tail);
   const matched: string[] = [];
   if (CC_MODE_BANNER_RE.test(tail)) matched.push("mode-banner");
-  if (/esc to interrupt|esc to cancel/i.test(tail)) matched.push("busy-indicator");
+  if (CC_BUSY_RE.test(tail)) matched.push("busy-indicator");
   return { tuiPresent, matched, suspect: tuiPresent && matched.length === 0 };
 }
 
@@ -252,10 +263,15 @@ export function probeTuiContract(pane: string): {
 export function paneLooksIdle(pane: string): boolean {
   const lines = trimTrailingBlank(pane.split("\n")); // 尾部空行会把页脚挤出窗口(P0,见 trimTrailingBlank)
   const last5 = lines.slice(-5);
+  // 忙碌标记先于一切:进行中的 TUI 照样画着 `❯` 输入框(甚至是 `❯\u00a0` 这种能被
+  // 严格模式命中的形态),先看有没有 spinner 行。spinner 在输入框上方,输入框可能
+  // 多行 / 下面还有 hint 行,取 15 行(与 probeTuiContract 同宽);spinner 是 Ink 动态区,
+  // 回合结束即被擦掉,不会残留在 scrollback 里造成假忙。
+  if (CC_BUSY_RE.test(lines.slice(-15).join("\n"))) return false;
   // 模式 1: 严格匹配 — 老 Claude Code 行为
   if (last5.some((line) => /^\s*❯\s*$/.test(line))) return true;
   // 模式 2: 宽松匹配 — 新 Claude Code 输入框可能带光标 / placeholder
-  // v2.0.14+: "bypass permissions" / "esc to interrupt" 检查都收紧到 last 10 行。
+  // v2.0.14+: "bypass permissions" 检查收紧到 last 10 行。
   // 之前 `pane.includes(...)` / 全 pane regex 会把 scrollback 里 stale 的旧 TUI banner
   // 字符串误命中，dev-channels modal 时假阳性返回 true → wedge / launch polling 提前
   // 退出根本没机会按 Enter dismiss modal。Claude Code TUI 的 bypass banner 永远在
@@ -263,8 +279,7 @@ export function paneLooksIdle(pane: string): boolean {
   const last10Joined = lines.slice(-10).join("\n");
   const hasPrompt = /❯/.test(last5.join("\n"));
   const hasBanner = CC_MODE_BANNER_RE.test(last10Joined);
-  const isWorking = /esc to interrupt/i.test(last10Joined);
-  return hasPrompt && hasBanner && !isWorking;
+  return hasPrompt && hasBanner;
 }
 
 export async function isIdle(target: string): Promise<boolean> {

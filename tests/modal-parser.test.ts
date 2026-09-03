@@ -580,6 +580,43 @@ describe("多权限模式 banner（v2.0.24 泛化）", () => {
   });
 });
 
+/**
+ * v2.21.4 2026-09-04 实证(agent-claudestra 干活中 capture-pane 原样):CC 2.1.25x
+ * 进行中没有 "esc to interrupt" 了,只有 spinner 行;输入框画成 `❯\u00a0`(NBSP),
+ * 老严格模式 /^\s*❯\s*$/ 直接命中 → 全体忙碌 agent 被判 idle,cron 在临时 agent
+ * 第一个工具结果回来 20s 内就 kill 了它(mem0-hygiene 两次运行都没产出报告)。
+ */
+describe("paneLooksIdle — CC 2.1.25x spinner 行(无 esc to interrupt)", () => {
+  const footer = [
+    "──────────────────────────────────────────── claudestra ",
+    "❯\u00a0",
+    "────────────────────────────────────────────────────────",
+    "  Fable 5.1 · ctx 89% · 5h 15% · 7d 21%                /rc",
+    "  ⏵⏵ bypass permissions on · 1 monitor · ← for agents",
+    "",
+    "",
+  ];
+  const busyPane = ["some earlier output", "", "✽ Pondering… (2m 23s · ↓ 9.9k tokens)", "        Update available! Run: brew upgrade claude-code@latest", ...footer].join("\n");
+  const idlePane = ["some earlier output", "", "⏺ 已完成。", "", ...footer].join("\n");
+
+  test("进行中(spinner 行 + ❯NBSP 输入框)→ false / busy", () => {
+    expect(paneLooksIdle(busyPane)).toBe(false);
+    expect(paneIdleVerdict(busyPane)).toBe("busy");
+  });
+  test("同一页脚、无 spinner → true / idle(不能把修复做成恒忙)", () => {
+    expect(paneLooksIdle(idlePane)).toBe(true);
+    expect(paneIdleVerdict(idlePane)).toBe("idle");
+  });
+  for (const line of ["✻ Thinking… (3s)", "· Cooking… (1h 2m 5s · ↑ 12 tokens)", "  ✶ Herding… (12s · ↓ 1.2k tokens)", "* Reticulating… (esc to interrupt)"]) {
+    test(`spinner 形态: ${line.trim()}`, () => {
+      expect(paneLooksIdle(["out", line, ...footer].join("\n"))).toBe(false);
+    });
+  }
+  test("assistant 正文里的省略号+括号不算 spinner", () => {
+    expect(paneLooksIdle(["out", "⏺ 结论如下… (详见上文 3s 内的日志)", ...footer].join("\n"))).toBe(true);
+  });
+});
+
 describe("detectPermissionMode / btabStepsTo（v2.2.0 临时放行）", () => {
   const mk = (banner: string) => `
 ─── agent ──

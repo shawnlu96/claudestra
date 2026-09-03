@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
+import { useChatStore } from "../chat-store";
 
 /**
  * 定时任务管理弹窗(设置 → 自动化 → 定时任务;owner 2026-08-26「cron 没有 UI」)。
@@ -23,6 +24,30 @@ interface CronJobView {
   targetAgent: string | null;
   /** v2.21.3+ 临时 agent 的 effort 档;null = 缺省 medium(targetAgent 模式不适用) */
   effort?: string | null;
+  /** v2.21.4+ 临时 agent 归属的 project id;null = 按工作目录自动解析(家目录 → 家目录杂项) */
+  project?: string | null;
+}
+
+/** project 下拉:空值 = 按目录自动解析。列表来自 store(与侧栏分组同源)。 */
+function ProjectSelect({ value, onChange, className }: { value: string; onChange: (v: string) => void; className?: string }) {
+  const t = useT();
+  const projects = useChatStore((s) => s.state.projects);
+  return (
+    <select
+      className={`select select-sm select-bordered ${className ?? ""}`}
+      value={value}
+      title={t("临时 agent 归属的项目")}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">📁 {t("按目录自动归类")}</option>
+      {projects.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.emoji ? `${p.emoji} ` : "📁 "}
+          {p.name || p.id}
+        </option>
+      ))}
+    </select>
+  );
 }
 
 /** 临时 agent 的档位选项(缺省 medium:Fable 5.1 文档说 medium ≈ Fable 5 且更省额度) */
@@ -51,7 +76,10 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
   const [msg, setMsg] = useState("");
   const [schedule, setSchedule] = useState(job.schedule);
   const [prompt, setPrompt] = useState(job.prompt);
+  const [project, setProject] = useState(job.project ?? "");
   const [confirmDel, setConfirmDel] = useState(false);
+  const projects = useChatStore((s) => s.state.projects);
+  const projMeta = job.project ? projects.find((p) => p.id === job.project) : undefined;
 
   const run = async (body: Record<string, unknown>) => {
     setBusy(true);
@@ -63,7 +91,8 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
     return !!r.ok;
   };
 
-  const dirty = schedule.trim() !== job.schedule || prompt.trim() !== job.prompt;
+  const projectDirty = !job.targetAgent && project !== (job.project ?? "");
+  const dirty = schedule.trim() !== job.schedule || prompt.trim() !== job.prompt || projectDirty;
 
   return (
     <div className="rounded-xl border border-base-content/10 bg-base-200/40 p-3">
@@ -80,6 +109,11 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
               <span className="shrink-0 text-[11px] opacity-50">→ {job.targetAgent}</span>
             ) : (
               <span className="shrink-0 text-[11px] opacity-50">⚙ {job.effort || "medium"}</span>
+            )}
+            {!job.targetAgent && job.project && (
+              <span className="shrink-0 truncate text-[11px] opacity-50" title={job.project}>
+                {projMeta?.emoji || "📁"} {projMeta?.name || job.project}
+              </span>
             )}
           </div>
           <div className="mt-0.5 text-[11px] text-base-content/50">
@@ -115,8 +149,12 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
               onChange={(e) => setPrompt(e.target.value)}
             />
           </label>
-          <div className="text-[11px] opacity-40">
-            {t("目录")} {job.dir}
+          <div className="flex items-center gap-2 text-[11px] opacity-40">
+            <span className="min-w-0 flex-1 truncate">
+              {t("目录")} {job.dir}
+            </span>
+            {/* 临时 agent 的归属:不选 = 按目录解析(家目录 → 家目录杂项) */}
+            {!job.targetAgent && <ProjectSelect value={project} onChange={setProject} className="w-40 opacity-100" />}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -128,6 +166,7 @@ function JobRow({ job, onChanged }: { job: CronJobView; onChanged: () => void })
                   id: job.id,
                   ...(schedule.trim() !== job.schedule ? { schedule: schedule.trim() } : {}),
                   ...(prompt.trim() !== job.prompt ? { prompt: prompt.trim() } : {}),
+                  ...(projectDirty ? { project: project || null } : {}),
                 }).then((ok) => ok && setExpand(false))
               }
             >
@@ -170,6 +209,7 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
   const [dir, setDir] = useState("~");
   const [prompt, setPrompt] = useState("");
   const [effort, setEffort] = useState<string>("medium");
+  const [project, setProject] = useState("");
 
   if (!open) {
     return (
@@ -215,6 +255,8 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
           ))}
         </select>
       </div>
+      {/* 归属 project:不选就按目录解析——dir 留 ~ 会落进「家目录杂项」,要归别处就选 */}
+      <ProjectSelect value={project} onChange={setProject} className="w-full" />
       <textarea
         className="textarea textarea-bordered w-full text-[12.5px]"
         rows={3}
@@ -229,7 +271,7 @@ function AddJobForm({ onChanged }: { onChanged: () => void }) {
           onClick={async () => {
             setBusy(true);
             setMsg("");
-            const r = await cronAction({ action: "add", name: name.trim(), schedule: schedule.trim(), dir: dir.trim() || "~", prompt: prompt.trim(), effort });
+            const r = await cronAction({ action: "add", name: name.trim(), schedule: schedule.trim(), dir: dir.trim() || "~", prompt: prompt.trim(), effort, ...(project ? { project } : {}) });
             setBusy(false);
             if (r.ok) {
               setOpen(false);

@@ -1523,6 +1523,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           nextRun: j.nextRun ?? null,
           targetAgent: j.targetAgent ?? null,
           effort: j.effort ?? null, // null = 缺省(临时 agent 走 medium)
+          project: j.project ?? null, // null = 按 dir 自动解析
           createdAt: j.createdAt,
         })),
       });
@@ -1543,6 +1544,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       }
       const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
       if (body?.effort) extra.push("--effort", String(body.effort));
+      if (body?.project) extra.push("--project", String(body.project));
       const r = await runManager("cron-add", name, schedule, dir, ...extra, prompt);
       return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
     }
@@ -1566,6 +1568,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         if (body?.name) flags.push("--name", String(body.name));
         if (body?.dir) flags.push("--dir", String(body.dir));
         if (body?.effort) flags.push("--effort", String(body.effort));
+        // project: 传 "" / null 表示清除(回到按 dir 解析),manager 侧用 "-" 表示
+        if (body?.project !== undefined) flags.push("--project", body.project ? String(body.project) : "-");
         if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
         r = await runManager("cron-edit", id, ...flags);
       }
