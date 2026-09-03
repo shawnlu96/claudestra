@@ -14,6 +14,7 @@
     "@capacitor/haptics": "^7",
     "@capacitor/ios": "^7",
     "@capacitor/keyboard": "^7",
+    "@capacitor/push-notifications": "^7",
     "@capacitor/splash-screen": "^7",
     "@capacitor/status-bar": "^7"
   },

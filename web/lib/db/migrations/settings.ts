@@ -64,6 +64,16 @@ export function runSettingsMigrations(db: Database.Database) {
       ts INTEGER NOT NULL
     )
   `);
+  // v2.22+ 原生壳(native/)的 APNs 设备 token。token 为主键(同设备换 token = 新行,
+  // 旧 token 由 APNs 回 BadDeviceToken/410 时清理);device 是自报的设备名。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS apns_devices (
+      token TEXT PRIMARY KEY,
+      device TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      last_seen TEXT NOT NULL
+    )
+  `);
   // 登录安全配置(owner 2026-08-09「设置里可选启用」)。单账号单行表,存各安全
   // 功能的开关。默认:累进封禁开(纯加固,零登录破坏)、TOTP/Passkey 关(要用户
   // 主动 enroll)。totp_secret 是激活后的密钥(base32),未启用时为空。

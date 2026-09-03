@@ -67,10 +67,13 @@ if [ -d ios/App/App.xcworkspace ]; then SRC=(-workspace ios/App/App.xcworkspace)
 PRODUCTS="$DERIVED/Build/Products/Debug-iphoneos"
 rm -rf "$PRODUCTS"
 
-echo "▶ 1/2 自动签名(离线)"
+echo "▶ 0/2 自动签名 + 联网更新描述文件(Xcode 账号有效时可自动生成带推送权限的 App ID/描述文件)"
 if xcodebuild "${SRC[@]}" -scheme App -configuration Debug -destination "generic/platform=iOS" \
-     -derivedDataPath "$DERIVED" build > build/xcodebuild-auto.log 2>&1; then
-  echo "  ✓ 自动签名成功"
+     -derivedDataPath "$DERIVED" -allowProvisioningUpdates -allowProvisioningDeviceRegistration build > build/xcodebuild-auto-online.log 2>&1; then
+  echo "  ✓ 自动签名(联网)成功"
+elif { grep -E "error:" build/xcodebuild-auto-online.log | head -2 | sed 's/^/  /'; echo "▶ 1/2 自动签名(离线)"; xcodebuild "${SRC[@]}" -scheme App -configuration Debug -destination "generic/platform=iOS" \
+     -derivedDataPath "$DERIVED" build > build/xcodebuild-auto.log 2>&1; }; then
+  echo "  ✓ 自动签名(离线)成功"
 else
   grep -E "error:" build/xcodebuild-auto.log | head -3 | sed 's/^/  /'
   echo "▶ 2/2 未签名构建 + 手工 codesign"

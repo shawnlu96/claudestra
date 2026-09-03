@@ -432,6 +432,16 @@ function ChatInner() {
       void store.openAgent(qa);
       toContent();
     }
+    // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
+    if (isNativeShell()) {
+      void import("@/lib/push/native").then((m) => {
+        m.bindNativePushListeners((agent) => {
+          void store.openAgent(agent);
+          toContent();
+        });
+        void m.refreshNativeRegistration();
+      });
+    }
     if (!("serviceWorker" in navigator)) return;
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; agent?: string };

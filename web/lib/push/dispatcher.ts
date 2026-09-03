@@ -2,6 +2,7 @@ import webpush from "web-push";
 import net from "net";
 import { getDb } from "@/lib/db";
 import { ensureVapid } from "./vapid";
+import { apnsConfigured, apnsSend, apnsTokenDead, type ApnsMessage } from "./apns";
 
 /**
  * Web Push 派发器(owner 2026-07-16「做 pwa 推送」+「谁发的谁回」)。
@@ -62,6 +63,32 @@ async function sendToAll(
   );
 }
 
+// ── v2.22+ 原生壳:APNs 并行推送(Web Push 走 SW,壳里没有 SW)──────────
+function listApnsTokens(): string[] {
+  try {
+    return (getDb("settings").prepare("SELECT token FROM apns_devices").all() as { token: string }[]).map((r) => r.token);
+  } catch {
+    return [];
+  }
+}
+async function apnsSendAll(msg: ApnsMessage) {
+  if (!apnsConfigured()) return;
+  const tokens = listApnsTokens();
+  if (!tokens.length) return;
+  await Promise.all(
+    tokens.map(async (t) => {
+      const r = await apnsSend(t, msg);
+      if (r.ok) return;
+      if (apnsTokenDead(r)) {
+        try { getDb("settings").prepare("DELETE FROM apns_devices WHERE token = ?").run(t); } catch { /* ignore */ }
+        console.log(`[apns] token 失效已清理(${r.status} ${r.reason})`);
+      } else {
+        console.error("[apns] 发送失败:", r.status, r.reason);
+      }
+    }),
+  );
+}
+
 // ── v2.21.1+ 跨端已读对账(owner 2026-08-30「一处点完,他处取消」)──────────
 
 /** iOS 订阅识别:对「push 到达不展示」有惩罚,dismiss 型静默 push 不能发给它们
@@ -103,9 +130,13 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
   const agent = String(evt.agent || "").replace(/^agent-/, "");
   const text = String(d.text ?? "").replace(/\s+/g, " ").trim();
   if (!text) return;
+  const body = text.length > 180 ? `${text.slice(0, 180)}…` : text;
+  const ts = Date.now();
+  // 原生壳:APNs(iOS 已读靠打开 App 时按 push_read 水位清通知,见 lib/push/native.ts)
+  void apnsSendAll({ title: agent, body, agent, url: `/chat?agent=${encodeURIComponent(agent)}`, ts, tag: `cstra-${agent}-${ts}` });
   void sendToAll({
     title: agent,
-    body: text.length > 180 ? `${text.slice(0, 180)}…` : text,
+    body,
     // 深链:点通知直达该 agent 会话(owner 2026-07-16)
     url: `/chat?agent=${encodeURIComponent(agent)}`,
     agent,

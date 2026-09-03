@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { pushSupported, getPushSubscription, enablePush } from "@/lib/push/client";
+import { nativePushAvailable, nativePushPermission, enableNativePush } from "@/lib/push/native";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -21,6 +22,11 @@ export function PushBanner() {
     try {
       if (localStorage.getItem("cstra_push_prompt_dismissed")) return;
     } catch {
+      return;
+    }
+    // v2.22+ 原生壳:走 Capacitor 权限(没问过才引导;已授权的由 chat.tsx 静默 register)
+    if (nativePushAvailable()) {
+      void nativePushPermission().then((p) => { if (p === "prompt") setShow(true); });
       return;
     }
     if (!pushSupported() || Notification.permission !== "default") return;
@@ -53,7 +59,7 @@ export function PushBanner() {
           disabled={busy}
           onClick={() => {
             setBusy(true);
-            void enablePush().then((r) => {
+            void (nativePushAvailable() ? enableNativePush() : enablePush()).then((r) => {
               setBusy(false);
               if (r.ok) {
                 setShow(false); // 已订阅,条件不再成立,无需记 dismissed

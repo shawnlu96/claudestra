@@ -27,6 +27,8 @@ const config: CapacitorConfig = {
     Keyboard: { resize: "native", resizeOnFullScreen: true },
     SplashScreen: { launchAutoHide: true, launchFadeOutDuration: 200, backgroundColor: "#171819" },
     StatusBar: { style: "DARK", overlaysWebView: true },
+    // 前台收到推送也展示横幅+声音(PWA 的 SW 在有焦点窗口时不弹;壳里统一按系统通知处理)
+    PushNotifications: { presentationOptions: ["alert", "sound"] },
   },
 };
 

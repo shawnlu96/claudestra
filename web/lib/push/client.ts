@@ -1,5 +1,6 @@
 "use client";
 import { t, getLang } from "@/lib/i18n";
+import { isNativeShell } from "@/lib/native";
 
 /**
  * Web Push 客户端共用逻辑(owner 2026-07-16「引导用户允许推送权限」):
@@ -90,6 +91,15 @@ export async function enablePush(): Promise<{ ok: boolean; msg: string }> {
  */
 export async function cleanupReadNotifications(): Promise<void> {
   try {
+    // v2.22+ 原生壳:没有 SW,通知在系统通知中心,走 Capacitor 插件清
+    if (isNativeShell()) {
+      const res = await fetch("/api/push/read");
+      if (!res.ok) return;
+      const j = (await res.json()) as { reads?: Record<string, number> };
+      const { cleanupDeliveredNative } = await import("./native");
+      await cleanupDeliveredNative(j.reads || {});
+      return;
+    }
     if (!pushSupported()) return;
     const reg = await navigator.serviceWorker.getRegistration();
     if (!reg) return;
