@@ -21,7 +21,7 @@ import { ClaudeSwitcher } from "./claude-switcher";
 import { CtxBadge } from "./ctx-badge";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
-import { isNativeShell } from "@/lib/native";
+import { isNativeShell, installNativeKeyboardPadding } from "@/lib/native";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 function shellLog(msg: string) {
@@ -70,6 +70,7 @@ function reportCommitBurst(d: CommitBurst) {
   } catch { /* ignore */ }
 }
 if (typeof window !== "undefined") {
+  installNativeKeyboardPadding();
   window.addEventListener("cstra:commit-burst", (e) => reportCommitBurst((e as CustomEvent<CommitBurst>).detail));
   // 钩子可能在本模块挂监听之前就抓到过突发——补报暂存的
   try {
@@ -581,6 +582,9 @@ function ChatInner() {
               "relative h-dvh w-full overflow-hidden overscroll-none bg-base-100"
             : "fixed inset-0 overflow-hidden bg-base-100"
         }
+        // iPad 壳键盘期抬底边(lib/native installNativeKeyboardPadding 写 --cstra-kb-pad);
+        // 非壳 / 键盘收起时变量不存在 → 0px = inset-0 原值
+        style={layoutMode === "flow" ? undefined : { bottom: "var(--cstra-kb-pad, 0px)" }}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollLeft !== 0) el.scrollLeft = 0;

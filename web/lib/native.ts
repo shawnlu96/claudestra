@@ -47,6 +47,37 @@ export function nativeServerConfig(): { get: () => Promise<string>; clear: () =>
   };
 }
 
+/**
+ * v2.21.4 键盘期把壳的底边抬到键盘上沿(只在 Keyboard 插件 resize=none 的设备上,
+ * 即 layout.tsx 内联脚本判成 iPad 的壳)。resize=none 后 WebView 不再被原生缩小,
+ * 停靠键盘靠 iOS 平移视觉视口揭示输入框,但 iPad 的分离/悬浮键盘是**覆盖**在页面上
+ * 的,iOS 不平移——composer 被整个盖住(owner 2026-09-04 截图「直接看不到文字框了」)。
+ * 插件在任何 resize 模式下都会发 keyboardDidShow/keyboardWillHide 窗口事件并带
+ * keyboardHeight,拿它写 --cstra-kb-pad,壳根 fixed 容器的 bottom 跟着抬。用 DidShow
+ * (动画结束)而不是 WillShow:聚焦到键盘 settle 之间改布局会把键盘打掉(死路③)。
+ * iPhone 是 resize=native,原生已经缩了 WebView,这里不叠加。
+ */
+let kbPadInstalled = false;
+export function installNativeKeyboardPadding(): void {
+  if (kbPadInstalled || typeof window === "undefined" || !isNativeShell()) return;
+  kbPadInstalled = true;
+  const root = document.documentElement;
+  const modeIsNone = () => String((window as unknown as { __cstraKbMode?: string }).__cstraKbMode ?? "").startsWith("none");
+  const apply = (h: number) => {
+    const px = Math.max(0, Math.round(h));
+    root.style.setProperty("--cstra-kb-pad", `${px}px`);
+    root.classList.toggle("kb-open", px > 0);
+  };
+  const heightOf = (e: Event) => {
+    const ev = e as unknown as { keyboardHeight?: number; detail?: { keyboardHeight?: number } };
+    return Number(ev.keyboardHeight ?? ev.detail?.keyboardHeight ?? 0) || 0;
+  };
+  window.addEventListener("keyboardDidShow", (e) => {
+    if (modeIsNone()) apply(heightOf(e));
+  });
+  window.addEventListener("keyboardWillHide", () => apply(0));
+}
+
 /** 壳的原生启动图:web 首屏就绪时收掉(capacitor.config 里最晚 6s 兜底自动收)。 */
 export function hideNativeSplash(): void {
   const p = nativePlugin("SplashScreen");
