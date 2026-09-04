@@ -233,6 +233,34 @@ function stripChannelHeader(body: string): string {
   return body.slice(m.index + m[0].length).trim();
 }
 
+/** attachment 记录是否为「被队列吸收的用户消息」,是则返回原始 prompt(含 channel 包装)。 */
+export function queuedPromptOf(rec: any): string | null {
+  const a = rec?.attachment;
+  if (!a || a.type !== "queued_command" || a.commandMode !== "prompt") return null;
+  return typeof a.prompt === "string" && a.prompt.trim() ? a.prompt : null;
+}
+
+/** <channel …> 包装里的 message_id 属性(bridge 给每条入站消息的唯一 id)。 */
+export function channelMessageId(raw: string): string | null {
+  return /<channel\s[^>]*\bmessage_id="([^"]+)"/.exec(raw)?.[1] ?? null;
+}
+
+/** 预扫描:所有 user(isMeta) 记录里 channel 消息的 message_id 集合(队列附件去重用)。 */
+function collectChannelMessageIds(lines: string[]): Set<string> {
+  const ids = new Set<string>();
+  for (const l of lines) {
+    if (!/"isMeta"\s*:\s*true/.test(l) || !l.includes("message_id=")) continue;
+    let rec: any;
+    try { rec = JSON.parse(l); } catch { continue; }
+    if (rec?.type !== "user") continue;
+    const c = rec.message?.content;
+    const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === "text" ? b.text || "" : "")).join("\n") : "";
+    const mid = channelMessageId(text);
+    if (mid) ids.add(mid);
+  }
+  return ids;
+}
+
 /**
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
@@ -411,6 +439,8 @@ function parseHistoryLines(
   const all: HistoryMessage[] = [];
   // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
   const toolById = new Map<string, HistoryToolCall>();
+  // v2.21.4 队列附件去重:同一条入站消息若另有 user(isMeta) 记录,以 user 记录为准
+  const seenChannelIds = collectChannelMessageIds(lines);
 
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -426,6 +456,28 @@ function parseHistoryLines(
     if (rec.type === "system" && rec.subtype === "compact_boundary") {
       // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
       all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
+      continue;
+    }
+
+    if (rec.type === "attachment") {
+      // v2.21.4 被队列吸收的入站消息:agent 忙时 channel 送达的消息先进 CC 队列,随后
+      // 「absorbed_mid_turn」并入当前回合——jsonl 里只落 attachment(queued_command,
+      // commandMode=prompt),**没有** user 记录。不解析,历史就缺这条用户消息,web 的
+      // 乐观气泡对不上账,30 分钟内每次对齐都被接回列表尾(owner 2026-09-04 截图
+      // 「很久之前发的老消息总显示在最下面」)。commandMode=task-notification 是
+      // harness 的后台任务通知,不进历史。
+      const queued = queuedPromptOf(rec);
+      if (queued) {
+        const un = unwrapChannelMessage(queued);
+        if (un && !(un.from && /^bridge(:|$)/.test(un.from))) {
+          const mid = channelMessageId(queued);
+          if (!mid || !seenChannelIds.has(mid)) {
+            const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
+            if (un.from) msg.from = un.from;
+            all.push(msg);
+          }
+        }
+      }
       continue;
     }
 
@@ -689,6 +741,19 @@ export async function searchSessionHistory(
       continue;
     }
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
+
+    // v2.21.4 被队列吸收的入站消息(attachment queued_command/prompt)与历史同规则可搜
+    const queued = rec.type === "attachment" ? queuedPromptOf(rec) : null;
+    if (queued) {
+      const un = unwrapChannelMessage(queued);
+      if (!un || (un.from && /^bridge(:|$)/.test(un.from))) continue;
+      const lower = un.text.toLowerCase();
+      if (!lower.includes(q)) continue;
+      const hit: HistorySearchHit = { seq: lineOffset + i, ts, role: "user", snippet: makeSnippet(un.text, lower, q) };
+      if (un.from) hit.from = un.from;
+      hits.push(hit);
+      continue;
+    }
 
     if (rec.type === "user") {
       const c = rec.message?.content;

@@ -13,6 +13,8 @@ import {
   isValidSessionId,
   isValidSubagentId,
   unwrapChannelMessage,
+  queuedPromptOf,
+  channelMessageId,
 } from "../src/lib/session-history.js";
 
 const SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -528,5 +530,64 @@ describe("readSessionHistory 尾读路径(maxFullReadBytes)", () => {
     const tail = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 1 });
     expect(tail.messages.map((m) => [m.seq, m.text])).toEqual(full.messages.map((m) => [m.seq, m.text]));
     expect(tail.hasMore).toBe(false);
+  });
+});
+
+
+/**
+ * v2.21.4 被队列吸收的入站消息:agent 忙时 channel 消息先进 CC 队列,随后 absorbed_mid_turn
+ * 并入当前回合——jsonl 里只有 attachment(queued_command, commandMode=prompt),没有 user 记录
+ * (2026-09-04 robinhood-memecoin 会话实抓)。历史必须把它当用户消息,否则 web 的乐观气泡
+ * 30 分钟内每次对齐都被接回列表尾。
+ */
+describe("queued_command 附件 → 用户消息", () => {
+  const wrap = (mid: string, body: string) =>
+    `<channel source="claudestra" chat_id="api:tok_x" message_id="${mid}" ts="2026-09-04T08:47:05.620Z" trigger="system" intent="request" user="web-ui" user_id="api:tok_x" api="true">\n[🌐 来自 Web 端用户「web-ui」（HTTP API 接入，非 Discord）。\n用 reply() 回答到本 chat_id。]\n\n${body}\n</channel>`;
+  const att = (mid: string, body: string, mode = "prompt", ts = "2026-09-04T08:47:06.836Z") => ({
+    type: "attachment",
+    timestamp: ts,
+    uuid: "ad7edc91-" + mid,
+    attachment: { type: "queued_command", prompt: wrap(mid, body), commandMode: mode, origin: { kind: "channel", server: "claudestra" } },
+  });
+
+  test("queuedPromptOf / channelMessageId", () => {
+    expect(queuedPromptOf(att("api_1", "hi"))).toContain("hi");
+    expect(queuedPromptOf(att("api_1", "hi", "task-notification"))).toBeNull();
+    expect(queuedPromptOf({ type: "attachment", attachment: { type: "total_tokens_reminder", text: "x" } })).toBeNull();
+    expect(channelMessageId(wrap("api_1788511625620_wgoz9h", "x"))).toBe("api_1788511625620_wgoz9h");
+    expect(channelMessageId("plain")).toBeNull();
+  });
+
+  test("吸收的 prompt 进历史(带 from、按行序落位);task-notification 不进", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const p = writeJsonl(dir, `${SID}.jsonl`, [
+      { type: "assistant", timestamp: "2026-09-04T08:47:00Z", message: { content: [{ type: "text", text: "先回一句" }] } },
+      att("api_q1", "撤家合并吧。"),
+      att("api_n1", "<task-notification>x</task-notification>", "task-notification"),
+      { type: "assistant", timestamp: "2026-09-04T08:47:09Z", message: { content: [{ type: "text", text: "收到,合并。" }] } },
+    ]);
+    const page = await readSessionHistory(p);
+    expect(page.messages.map((m) => `${m.role}:${m.text}`)).toEqual(["assistant:先回一句", "user:撤家合并吧。", "assistant:收到,合并。"]);
+    expect(page.messages[1].from).toBe("web-ui");
+  });
+
+  test("同一 message_id 另有 user(isMeta) 记录 → 附件不重复", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const p = writeJsonl(dir, `${SID}.jsonl`, [
+      att("api_dup", "重复的那条"),
+      { type: "user", isMeta: true, timestamp: "2026-09-04T08:47:10Z", message: { content: wrap("api_dup", "重复的那条") } },
+      { type: "assistant", timestamp: "2026-09-04T08:47:12Z", message: { content: [{ type: "text", text: "ok" }] } },
+    ]);
+    const page = await readSessionHistory(p);
+    expect(page.messages.filter((m) => m.role === "user").length).toBe(1);
+  });
+
+  test("bridge 内部注入的队列附件不进历史", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const rec = att("api_b", "nudge");
+    rec.attachment.prompt = rec.attachment.prompt.replace('user="web-ui"', 'user="bridge:watchdog"');
+    const p = writeJsonl(dir, `${SID}.jsonl`, [rec, { type: "assistant", timestamp: "2026-09-04T08:47:12Z", message: { content: [{ type: "text", text: "ok" }] } }]);
+    const page = await readSessionHistory(p);
+    expect(page.messages.filter((m) => m.role === "user").length).toBe(0);
   });
 });

@@ -82,6 +82,26 @@ function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): Chat
   });
 }
 
+/**
+ * 幸存的乐观消息按时间插回列表,而不是一律接到尾:它在 jsonl 里没有对应记录时
+ * (队列吸收 / 送达失败),接到尾会让「很久之前发的消息」每次对齐都跑到最下面
+ * (owner 2026-09-04 截图)。ts 缺失的仍接尾。
+ */
+function mergePendingByTs(list: ChatMessage[], pending: ChatMessage[]): ChatMessage[] {
+  if (!pending.length) return list;
+  const out = [...list];
+  for (const p of pending) {
+    const pt = p.ts ? Date.parse(p.ts) : NaN;
+    let idx = out.length;
+    if (Number.isFinite(pt)) {
+      const i = out.findIndex((m) => !!m.ts && Date.parse(m.ts) > pt);
+      if (i >= 0) idx = i;
+    }
+    out.splice(idx, 0, p);
+  }
+  return out;
+}
+
 interface ChatState {
   agents: AgentSession[];
   /** v2.21+ project 元数据（侧栏分组组头 + 管理弹窗数据源），随 agents 一起拉。 */
@@ -810,7 +830,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
             liveTail.push(...streamedBubbles);
           }
         }
-        s.messages = [...base, ...delta, ...pending, ...liveTail];
+        s.messages = [...mergePendingByTs([...base, ...delta], pending), ...liveTail];
         if (s.streaming && !liveTail.length) {
           const tail = s.messages[s.messages.length - 1];
           if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
@@ -959,7 +979,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
             liveTail.push(...streamedBubbles);
           }
         }
-        s.messages = [...history, ...pending, ...liveTail];
+        s.messages = [...mergePendingByTs(history, pending), ...liveTail];
         // 回合进行中但尾部没有直播气泡(被历史吸收/尚无输出)→ 恢复「思考中」
         // 指示,别让 streaming 态孤零零挂在状态条上而列表底空白
         if (s.streaming && !liveTail.length) {
