@@ -1441,7 +1441,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // Markdown 引用块前置——web/Discord 都原生渲染,agent 也看得懂针对哪段。
     // 按钮点击(wireText 场景)不消费引用。
     if (!wireText && this.state.quoteDraft && display) {
-      display = `> ${this.state.quoteDraft}\n\n${display}`;
+      // 块级引用可能多行(列表 / 代码块):每行都要 "> " 才是一个完整引用块
+      const quoted = this.state.quoteDraft.split("\n").map((l) => `> ${l}`).join("\n");
+      display = `${quoted}\n\n${display}`;
       this.clearQuote();
     }
     // wireText：发给 agent 的真实 payload（默认=展示文本）。按钮点击时展示 label、

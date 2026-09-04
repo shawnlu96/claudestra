@@ -551,13 +551,39 @@ function ReplyDivider() {
  * 前置(web/Discord 都原生渲染)。方向裁决同终端页手势:竖向先动让给滚动。
  * 跟手位移直接写 DOM style(不 setState——流式期间高频 re-render 是性能命门)。
  */
-function QuoteSwipe({ quote, className, children }: { quote: string; className?: string; children: React.ReactNode }) {
+/**
+ * v2.21.4 块级引用(owner 2026-09-04「Markdown 渲染出来是一块一块的,能做成块级别吗」):
+ * blockLevel 时手指落点所在的 markdown 块(段落 / 列表项 / 代码块 / 表格 / 标题 /
+ * 引用)单独跟手位移,松手引用**这一块**的渲染文本(innerText,隐藏的 md 符号不带);
+ * 落点不在任何块上(段间空白)退回整段。DOMD 渲染在 light DOM,closest 能直接命中。
+ */
+const QUOTE_BLOCK_SEL = [
+  // DOMD 的块元素未必是原生标签,类名与原生标签都列上;LiP(列表项里的段)比 li 更近,
+  // closest 先命中它——引用的是那一条列表项的正文
+  ".DOMD-LiP", ".DOMD-li", ".DOMD-CheckBoxLi", "li",
+  ".DOMD-P", "p",
+  ".DOMD-Pre", "pre",
+  ".DOMD-TableScrollable", "table",
+  ".DOMD-Blockquote", "blockquote",
+  ".DOMD-H1", ".DOMD-H2", ".DOMD-H3", ".DOMD-H4", ".DOMD-H5", ".DOMD-H6", "h1", "h2", "h3", "h4", "h5", "h6",
+].join(", ");
+function quoteTextOfBlock(el: HTMLElement): string {
+  // 代码块只取代码正文(顶栏的语言名 / 复制按钮文字不算)
+  const code = el.querySelector<HTMLElement>(".DOMD-PreCodeContent, pre code, code");
+  const src = el.matches("pre, .DOMD-Pre") && code ? code : el;
+  return (src.innerText ?? src.textContent ?? "").trim();
+}
+
+function QuoteSwipe({ quote, className, children, blockLevel }: { quote: string; className?: string; children: React.ReactNode; blockLevel?: boolean }) {
   const store = useChatStoreApi();
+  const wrapRef = useRef<HTMLDivElement>(null);
   const ref = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLSpanElement>(null);
-  const st = useRef<{ x: number; y: number; drag: boolean; dead: boolean; startDx: number } | null>(null);
+  const st = useRef<{ x: number; y: number; drag: boolean; dead: boolean; startDx: number; block: HTMLElement | null } | null>(null);
+  // 跟手位移的目标:块级命中的那块,否则整段
+  const moving = () => st.current?.block ?? ref.current;
   return (
-    <div className={`relative ${className ?? ""}`}>
+    <div ref={wrapRef} className={`relative ${className ?? ""}`}>
       <span
         ref={iconRef}
         className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-base-content/50"
@@ -578,7 +604,12 @@ function QuoteSwipe({ quote, className, children }: { quote: string; className?:
             return;
           }
           const t = e.touches[0];
-          st.current = t ? { x: t.clientX, y: t.clientY, drag: false, dead: false, startDx: 0 } : null;
+          let block: HTMLElement | null = null;
+          if (blockLevel && ref.current) {
+            const hit = (e.target as HTMLElement | null)?.closest?.(QUOTE_BLOCK_SEL) as HTMLElement | null;
+            if (hit && ref.current.contains(hit) && hit !== ref.current) block = hit;
+          }
+          st.current = t ? { x: t.clientX, y: t.clientY, drag: false, dead: false, startDx: 0, block } : null;
         }}
         onTouchMove={(e) => {
           const s = st.current;
@@ -603,13 +634,20 @@ function QuoteSwipe({ quote, className, children }: { quote: string; className?:
             if (!(dx < -6 && -dx > dy)) return;
             s.drag = true;
             s.startDx = dx; // 从接管点起算,起步不跳变
+            // 块级:引用图标对准命中块的竖直中心(默认在整段中线)
+            if (s.block && iconRef.current && wrapRef.current) {
+              const br = s.block.getBoundingClientRect();
+              const wr = wrapRef.current.getBoundingClientRect();
+              iconRef.current.style.top = `${br.top - wr.top + br.height / 2}px`;
+            }
           }
           e.stopPropagation();
           const raw = Math.min(0, dx - s.startDx);
           // 72px 内 1:1 跟手,超出 sqrt 阻尼(能继续拖但渐重,不再生硬钉死)
           const pull = raw > -72 ? raw : -72 - Math.sqrt(-raw - 72) * 3;
-          el.style.transition = "none";
-          el.style.transform = `translateX(${pull}px)`;
+          const mv = moving() ?? el;
+          mv.style.transition = "none";
+          mv.style.transform = `translateX(${pull}px)`;
           if (iconRef.current) iconRef.current.style.opacity = String(Math.min(1, -pull / 44));
         }}
         onTouchEnd={(e) => {
@@ -619,13 +657,18 @@ function QuoteSwipe({ quote, className, children }: { quote: string; className?:
           if (!s?.drag || !el) return;
           const t = e.changedTouches[0];
           const dx = t ? t.clientX - s.x - s.startDx : 0;
-          el.style.transition = "transform 0.18s ease-out";
-          el.style.transform = "translateX(0)";
+          const mv = s.block ?? el;
+          mv.style.transition = "transform 0.18s ease-out";
+          mv.style.transform = "translateX(0)";
           if (iconRef.current) {
             iconRef.current.style.transition = "opacity 0.18s ease-out";
             iconRef.current.style.opacity = "0";
+            iconRef.current.style.top = ""; // 回到整段中线(下次可能不是块级命中)
           }
-          if (dx < -44) store.setQuote(quote);
+          if (dx < -44) {
+            const blockText = s.block ? quoteTextOfBlock(s.block) : "";
+            store.setQuote(blockText || quote);
+          }
         }}
       >
         {children}
@@ -681,7 +724,7 @@ const TextBlock = memo(function TextBlock({
   const bodyRef = useRef<HTMLDivElement>(null);
   const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, getEl: () => bodyRef.current }));
   return (
-    <QuoteSwipe quote={text}>
+    <QuoteSwipe quote={text} blockLevel>
       <div
         // 正文不用 cursor-pointer——桌面端整段文字变小手像可点链接(owner 2026-07-24
         // 「点完链接手放哪都是小手」);点击切时间戳的行为保留,光标用默认
