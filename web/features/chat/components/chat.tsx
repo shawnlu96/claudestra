@@ -52,7 +52,31 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: `${tag} ${msg}` }) }).catch(() => {});
   } catch { /* ignore */ }
 }
+/**
+ * v2.21.4 React 提交突发上报(追 #185)。layout.tsx 里的内联钩子在同一个宏任务里
+ * 数到 ≥30 次 React 提交时派发 cstra:commit-burst,带「本次重渲染的组件名×次数
+ * {变动的 hook 序号:次数} fp:函数指纹」——#185 的本质是 50 次连续同步提交,这里
+ * 直接看到是谁在链上、它哪个 hook 在变,不再依赖被 Safari 尾调用吃掉的调用栈。
+ */
+type CommitBurst = { n: number; span: number; walked: number; top: string[] };
+let burstReports = 0;
+function reportCommitBurst(d: CommitBurst) {
+  if (burstReports >= 5 || !d) return;
+  burstReports++;
+  const tag = isNativeShell() ? "[shell]" : "[pwa]";
+  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} top: ${(d.top || []).join(" ; ")}`;
+  try {
+    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
+  } catch { /* ignore */ }
+}
 if (typeof window !== "undefined") {
+  window.addEventListener("cstra:commit-burst", (e) => reportCommitBurst((e as CustomEvent<CommitBurst>).detail));
+  // 钩子可能在本模块挂监听之前就抓到过突发——补报暂存的
+  try {
+    const w = window as unknown as { __cstraCommitBursts?: CommitBurst[] };
+    for (const d of w.__cstraCommitBursts || []) reportCommitBurst(d);
+    w.__cstraCommitBursts = [];
+  } catch { /* ignore */ }
   window.addEventListener("error", (e) => reportRuntimeError("error", e.error, `${e.message} @${(e.filename || "").split("/").pop()}:${e.lineno}:${e.colno}`));
   window.addEventListener("unhandledrejection", (e) => reportRuntimeError("unhandledrejection", (e as PromiseRejectionEvent).reason, String((e as PromiseRejectionEvent).reason).slice(0, 160)));
 }
