@@ -33,8 +33,11 @@ export function freqOfSchedule(schedule: string): HygieneFreq | "custom" {
  *  红线:只报告,绝不执行 memory_delete/update。 */
 export function hygienePrompt(): string {
   return (
-    "对 mem0 记忆库做定期卫生检查。步骤:用 mcp__mem0__memory_list 拉取全量记忆" +
-    "(如有分页参数就翻到取完),逐条审查,找出三类问题:" +
+    // v2.21.4+ 分页遍历:mem0-mcp 2026-09-04 修好 memory_list(limit/offset/brief,
+    // 返回 has_more)之前它永远只回 20 条,首次完整运行是绕过 MCP 直查 pgvector 才做成的。
+    "对 mem0 记忆库做定期卫生检查。步骤:用 mcp__mem0__memory_list 分页遍历全库——" +
+    "memory_list(limit=500, offset=N, brief=true) 逐页取,直到返回的 has_more 为 false" +
+    "(brief 只带 id + 摘要,需要全文时再对单条 memory_read)。逐条审查,找出三类问题:" +
     "①明显过时(内容里的版本号/日期/状态已被更新的记忆或现实取代)" +
     "②互相矛盾(两条记忆对同一事实说法不一)" +
     "③重复冗余(同一事实多条近似表述)。" +
