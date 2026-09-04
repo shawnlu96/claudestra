@@ -15,7 +15,9 @@ export function reportBootAndHideSplash() {
     const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
     const kind = shell ? "shell" : window.matchMedia("(display-mode: standalone)").matches ? "pwa" : "browser";
     const ms = (v: number | undefined) => (typeof v === "number" ? Math.round(v) : -1);
-    const msg = `[boot] ${kind} ttfb=${ms(nav?.responseStart)}ms dcl=${ms(nav?.domContentLoadedEventEnd)}ms ready=${Math.round(performance.now())}ms nav=${nav?.type ?? "?"}`;
+    // kb=:壳里 Keyboard 插件的 resize 模式(layout.tsx 内联脚本设置;iPad 为 none)
+    const kb = shell ? ` kb=${(window as unknown as { __cstraKbMode?: string }).__cstraKbMode ?? "?"}` : "";
+    const msg = `[boot] ${kind} ttfb=${ms(nav?.responseStart)}ms dcl=${ms(nav?.domContentLoadedEventEnd)}ms ready=${Math.round(performance.now())}ms nav=${nav?.type ?? "?"}${kb}`;
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
   } catch { /* ignore */ }
 }

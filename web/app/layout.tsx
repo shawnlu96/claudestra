@@ -67,6 +67,14 @@ export default function RootLayout({
             __html: `(function(){try{setTimeout(function(){if(window.__cstraMounted)return;var d=document.createElement('div');d.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(20,21,23,.96);color:#e8e8ea;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;font-family:system-ui';d.innerHTML='<div style=\\'font-size:15px;line-height:1.6\\'>\\u9875\\u9762\\u8d44\\u6e90\\u52a0\\u8f7d\\u5931\\u8d25\\u6216\\u7f51\\u7edc\\u8fc7\\u6162<br><span style=\\'font-size:12.5px;opacity:.65\\'>\\u4e3b\\u7a0b\\u5e8f 25 \\u79d2\\u5185\\u672a\\u80fd\\u542f\\u52a8</span></div><button style=\\'padding:9px 26px;border-radius:9px;background:#2b2d31;color:#fff;border:1px solid #4a4d52;font-size:14px\\' onclick=\\'location.reload()\\'>\\u91cd\\u65b0\\u52a0\\u8f7d</button>';document.body.appendChild(d)},25000)}catch(e){}})();`,
           }}
         />
+        {/* v2.21.4 iPad 壳:Capacitor Keyboard 插件 resize=native 在 iPad 上按「键盘停靠
+            在底部」算 webview 高度,且首帧算出的偏移在本次键盘会话内钉死(stageManagerOffset)
+            ——分离/悬浮键盘、键盘期旋转都会把 WebView 缩成一条,下面露出黑底(owner
+            2026-09-04 iPad 截图:只剩顶栏+输入框,中间一大块黑)。iPad 改 resize=none:
+            WebView 不动,停靠键盘走 Safari 同款视觉视口收缩,悬浮键盘直接盖在上面。
+            iPhone 不受影响(插件的 iPad 分支才有这段算法)。要赶在首次弹键盘之前生效,
+            所以放内联脚本;Capacitor 的桥在 document start 注入,拿不到就每 100ms 重试 2s。 */}
+        <script dangerouslySetInnerHTML={{ __html: "(function(){try{function go(){var C=window.Capacitor;if(!C||!C.isNativePlatform||!C.isNativePlatform())return true;var ipad=navigator.maxTouchPoints>1&&/iPad|Macintosh/.test(navigator.userAgent);if(!ipad){window.__cstraKbMode=\"native\";return true}var K=C.Plugins&&C.Plugins.Keyboard;if(!K||!K.setResizeMode)return false;K.setResizeMode({mode:\"none\"}).then(function(){window.__cstraKbMode=\"none\"},function(){window.__cstraKbMode=\"none?\"});return true}if(!go()){var n=0,t=setInterval(function(){if(go()||++n>20)clearInterval(t)},100)}}catch(e){}})();" }} />
         {/* v2.21.4 React 提交突发探测(追 #185):以「DevTools 钩子」身份在 React 加载前
             挂上 onCommitFiberRoot——同一个宏任务里 ≥30 次提交就是同步更新链;从第 20 次
             起遍历 fiber 树记下本次重渲染的组件名 / 变动的 hook 序号 / 函数指纹(压缩后
