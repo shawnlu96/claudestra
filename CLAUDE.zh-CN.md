@@ -59,6 +59,7 @@ src/
   setup.ts               交互式安装向导
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → Bridge HTTP 端点
+    recall-hook.ts       v2.21.5+ SessionStart hook：把本项目 HANDOFF.md + `~/mem0-mcp/recall.py` 的输出（mem0 顶层召回）注入开场 context；永远 exit 0，10s 上限
   lib/
     bridge-client.ts     共享 Bridge WebSocket 请求封装
     tmux-helper.ts       共享 tmux 命令封装（tmuxRaw, isIdle, sendLine, …）
@@ -70,6 +71,7 @@ src/
     principals.ts        v2.6.0+ API token 身份/scope/限流（~/.claude-orchestrator/principals.json）
     doctor.ts            v2.14+ 只读安装体检，`manager.ts doctor` 的实现（运行时/配置/daemon/bridge/MCP/agent）
     link-policy.ts       v2.14+ channel-server 被 bridge 顶替后该重连还是退出——纯函数，有单测
+    session-recall.ts    v2.21.5+ 召回 hook 的纯逻辑：Claude Code 项目 slug / HANDOFF.md 路径 / 幂等合并 SessionStart hook 进 ~/.claude/settings.json（本机有 recall.py 才注册）
     net-addr.ts          v2.14+ 探测本机对外地址（Tailscale CGNAT 优先，其次 RFC1918），peer 握手 `--url` 的来源
     registry.ts          v2.9+ registry.json 唯一读取器（字段归一含 cwd/dir 兼容）；写入仍只归 manager.ts
     projects.ts          v2.21+ project 数据模型（~/.claude-orchestrator/projects.json）：dirs[] + 按目录归属解析 + id slug；写入只归 manager.ts，bridge 只读
@@ -104,6 +106,7 @@ tests/                     只覆盖纯逻辑（实时数量以 `bun test` 为�
   router.test.ts           v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
   session-archive.test.ts  v2.8+ copy-if-larger 快照语义
   session-history.test.ts  v2.9+ jsonl → 中立消息：reply 提取、meta 过滤、翻页
+  session-recall.test.ts   v2.21.5+ 项目 slug、HANDOFF 路径、SessionStart hook 合并/移除的幂等性
   sessions-inventory.test.ts v2.7+ 分身检测 / 会话对账
   skills.test.ts           SKILL.md 发现
   slash-registry.test.ts   slash 命令注册表的按频道解析

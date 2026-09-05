@@ -74,6 +74,7 @@ src/
   setup.ts               Interactive installation wizard
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → Bridge HTTP endpoint
+    recall-hook.ts       v2.21.5+ SessionStart hook: injects the project's HANDOFF.md + `~/mem0-mcp/recall.py` output (mem0 top-layer recall) into the opening context; always exits 0, 10s cap
   lib/
     bridge-client.ts     Shared Bridge WebSocket request helper
     tmux-helper.ts       Shared tmux command wrappers (tmuxRaw, isIdle, sendLine, …)
@@ -82,6 +83,7 @@ src/
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
     doctor.ts            v2.14+ read-only install health-check backing `manager.ts doctor` (runtime / config / daemons / bridge / MCP / agents)
     link-policy.ts       v2.14+ what channel-server does when the bridge says it was replaced (reconnect vs exit) — pure, unit-tested
+    session-recall.ts    v2.21.5+ recall hook plumbing: Claude Code project slug / HANDOFF.md path / idempotent SessionStart hook merge into ~/.claude/settings.json (registered only when recall.py exists)
     net-addr.ts          v2.14+ detect this host's reachable addresses (Tailscale CGNAT first, then RFC1918) for peer handshake `--url`
     jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
     peers.ts             peers.json data model (v2.11+ HTTP peers only) + handshake string encode/parse + atomic writes
@@ -120,6 +122,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   router.test.ts           v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
   session-archive.test.ts  v2.8+ copy-if-larger snapshot semantics
   session-history.test.ts  v2.9+ jsonl → neutral messages: reply extraction, meta filtering, paging
+  session-recall.test.ts   v2.21.5+ project slug, HANDOFF path, SessionStart hook merge/remove idempotency
   sessions-inventory.test.ts v2.7+ doppelganger detection / session reconciliation
   skills.test.ts           SKILL.md discovery
   slash-registry.test.ts   Slash command registry per-channel resolution

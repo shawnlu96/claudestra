@@ -11,6 +11,7 @@
 import { readFile, writeFile, access, chmod, mkdir } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
+import { ensureRecallHook, recallAvailable } from "./lib/session-recall.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 
@@ -770,7 +771,7 @@ function parseEnv(content: string): Partial<Config> {
 }
 
 /** 把 typing hook 写入 ~/.claude/settings.json */
-async function registerHooks(hookCmd: string): Promise<void> {
+async function registerHooks(hookCmd: string, recallCmd?: string): Promise<void> {
   const settingsPath = `${process.env.HOME}/.claude/settings.json`;
   let settings: any = {};
   if (await fileExists(settingsPath)) {
@@ -794,6 +795,8 @@ async function registerHooks(hookCmd: string): Promise<void> {
     }
     settings.hooks[event] = existing;
   }
+  // v2.21.5+ SessionStart 记忆召回(本机有 ~/mem0-mcp/recall.py 才挂;lib/session-recall.ts)
+  if (recallCmd && recallAvailable()) ensureRecallHook(settings, recallCmd);
 
   await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 }
@@ -905,7 +908,7 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   const hookCmd = `${bunAbs} ${REPO_ROOT}/src/hooks/typing-hook.ts`;
   write(`${c.dim}▶${c.reset} ${t("注册 typing hooks", "Registering typing hooks")}… `);
   try {
-    await registerHooks(hookCmd);
+    await registerHooks(hookCmd, `${bunAbs} ${REPO_ROOT}/src/hooks/recall-hook.ts`);
     print(`${c.green}✓${c.reset}`);
   } catch (e: any) {
     print(`${c.yellow}⚠${c.reset}`);

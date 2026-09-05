@@ -39,6 +39,7 @@ import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { resolveBunPath } from "./bun-path.js";
+import { ensureRecallHook, recallAvailable } from "./session-recall.js";
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
@@ -79,6 +80,8 @@ export interface InstallCliResult {
   removedOldAutostartWrapper: boolean;
   /** Claude Code 的 ~/.claude/settings.json 里 typing-hook command 是否被迁移成 bun 绝对路径 */
   migratedHookCommand: boolean;
+  /** v2.21.5+ SessionStart 记忆召回 hook:installed=本次写入 / present=早就有 / skipped=本机没有 ~/mem0-mcp/recall.py */
+  recallHook?: "installed" | "present" | "skipped";
   /** iTerm 的 TmuxDashboardLimit 是否被调高（默认 10 → 200），从 oldValue → 200。null = iTerm 没装跳过；undefined = 已经 ≥ 200 无需改 */
   bumpedTmuxDashboardLimit?: { from: number; to: number; needsITermRestart?: boolean } | null;
   /** ~/.claude/settings.json permissions.allow 加进去的 mcp__<server>__* wildcard 规则（已存在的不重加） */
@@ -376,6 +379,24 @@ async function stopLegacyPm2Daemons(): Promise<string[]> {
  * 修法：每次 install-cli 都把 settings.json 里所有指向 typing-hook.ts 的 command
  * 替换为 bun **绝对路径**，幂等（已经是绝对路径就 no-op）。
  */
+/**
+ * v2.21.5+ SessionStart 记忆召回 hook(lib/session-recall.ts):本机装了 ~/mem0-mcp/recall.py
+ * 才注册,幂等——已有就只校正命令/matcher/timeout。setup / install-cli / update /
+ * `manager install-hooks` 四处共用。
+ */
+export async function ensureRecallHookInstalled(bunPath: string, repoRoot: string): Promise<{ status: "installed" | "present" | "skipped"; command: string }> {
+  const command = `${bunPath} ${resolve(repoRoot)}/src/hooks/recall-hook.ts`;
+  if (!recallAvailable()) return { status: "skipped", command };
+  const settingsPath = `${homedir()}/.claude/settings.json`;
+  let settings: any = {};
+  if (existsSync(settingsPath)) {
+    try { settings = JSON.parse(await readFile(settingsPath, "utf-8")); } catch { settings = {}; }
+  }
+  const changed = ensureRecallHook(settings, command);
+  if (changed) await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  return { status: changed ? "installed" : "present", command };
+}
+
 async function migrateHookCommand(bunPath: string): Promise<boolean> {
   const settingsPath = `${homedir()}/.claude/settings.json`;
   if (!existsSync(settingsPath)) return false;
@@ -668,6 +689,8 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
 
   // 5b) 迁移 ~/.claude/settings.json hook command → bun 绝对路径（v2.4.0 后必须，
   //     不然 worker 跑 hook 时 /bin/sh PATH 没 ~/.bun/bin，bun 找不到）
+  try { result.recallHook = (await ensureRecallHookInstalled(bunPath, repoRoot)).status; }
+  catch (e) { warnings.push(`召回 hook: ${(e as Error).message}`); }
   try { result.migratedHookCommand = await migrateHookCommand(bunPath); }
   catch (e) { warnings.push(`迁移 hook command: ${(e as Error).message}`); }
 

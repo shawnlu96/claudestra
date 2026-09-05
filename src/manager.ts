@@ -4316,6 +4316,7 @@ const [cmd, ...args] = process.argv.slice(2);
 const WRITE_COMMANDS = new Set([
   "create", "resume", "adopt", "kill", "remove", "restart", "rename", "archive",
   "clear", "cron-add", "cron-remove", "cron-toggle", "cron-edit",
+  "install-hooks",
   "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
@@ -4968,6 +4969,16 @@ switch (cmd) {
     const { installRepoSkills } = await import("./lib/skills-install.js");
     const results = installRepoSkills(`${import.meta.dir}/..`);
     output({ ok: !results.some((r) => r.action === "warn"), skills: results });
+    break;
+  }
+
+  case "install-hooks": {
+    // v2.21.5+ SessionStart 记忆召回 hook(~/mem0-mcp/recall.py + HANDOFF.md 注入)。
+    // setup / install-cli / update 都会顺手跑;这条给「只想挂/修 hook、不想动 daemon」的场合。
+    const { ensureRecallHookInstalled } = await import("./lib/cli-install.js");
+    const r = await ensureRecallHookInstalled(resolveBunPath(), `${import.meta.dir}/..`);
+    output({ ok: true, recallHook: r.status, command: r.command,
+      note: r.status === "skipped" ? "本机没有 ~/mem0-mcp/recall.py,未注册(可设 MEM0_RECALL_SCRIPT)" : undefined });
     break;
   }
 

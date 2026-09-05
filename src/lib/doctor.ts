@@ -11,6 +11,7 @@
  * - **不打印密钥**。token / secret 一律只报「有没有」和长度。
  */
 
+import { hasRecallHook, recallAvailable } from "./session-recall.js";
 import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
@@ -312,6 +313,17 @@ async function checkIntegration(repoRoot: string): Promise<Check[]> {
       ? { group: g, name: "typing hooks", status: "ok", detail: "Stop / Notification 已挂" }
       : { group: g, name: "typing hooks", status: "warn", detail: "没挂 —— 输入指示器不会自动停，完成通知会迟",
           fix: "重跑 bun run setup" });
+  }
+  // v2.21.5+ SessionStart 记忆召回 hook:本机有 recall.py 才有资格报 warn(mem0 是 owner 自己的设施)
+  if (recallAvailable()) {
+    let hooked = false;
+    if (existsSync(settingsPath)) {
+      try { hooked = hasRecallHook(JSON.parse(await readFile(settingsPath, "utf-8"))); } catch { hooked = false; }
+    }
+    out.push(hooked
+      ? { group: g, name: "记忆召回 hook", status: "ok", detail: "SessionStart 已挂(startup/resume/clear/compact → recall.py + HANDOFF.md)" }
+      : { group: g, name: "记忆召回 hook", status: "warn", detail: "本机有 ~/mem0-mcp/recall.py 但没挂 SessionStart hook —— 开会话不会自动注入 mem0 召回与 HANDOFF",
+          fix: "bun src/manager.ts install-hooks" });
   }
   // v2.21.3+ 仓库 skill 有没有真的装进 ~/.claude/skills(MacBook 曾悬空两个月没人发现)
   for (const r of installRepoSkills(repoRoot, { apply: false })) {
