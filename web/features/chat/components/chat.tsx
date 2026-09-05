@@ -58,14 +58,16 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
  * {变动的 hook 序号:次数} fp:函数指纹」——#185 的本质是 50 次连续同步提交,这里
  * 直接看到是谁在链上、它哪个 hook 在变,不再依赖被 Safari 尾调用吃掉的调用栈。
  */
-type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[] };
+type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[] };
 let burstReports = 0;
 function reportCommitBurst(d: CommitBurst) {
   if (burstReports >= 5 || !d) return;
   burstReports++;
   const tag = isNativeShell() ? "[shell]" : "[pwa]";
   // uses: 提交时快照已变(下一次提交的发起者)的 useSyncExternalStore 订阅点——组件#hook序号:旧→新
-  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} uses: ${(d.uses || []).join(" ; ") || "-"} | top: ${(d.top || []).join(" ; ")}`;
+  // roots: 每次提交**最顶层**重渲染的组件([props]=父级传新 props / [state]=自身 hook 变了)
+  // 及其变动的 hook 序号:旧值→新值——同步提交链的发起者就在这里
+  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | uses: ${(d.uses || []).join(" ; ") || "-"} | top: ${(d.top || []).join(" ; ")}`;
   try {
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
   } catch { /* ignore */ }
