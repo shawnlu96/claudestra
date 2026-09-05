@@ -42,11 +42,11 @@ export function hygienePrompt(): string {
     "对 mem0 记忆库做定期卫生检查,分四步,最后用 reply 工具发一份 Markdown 报告。" +
     "①过期进度清理(本任务**唯一**授权的删除):用 mcp__mem0__memory_list(type=\"progress\", before=\"<今天减 14 天的 ISO 日期>\", brief=true, limit=500, offset=N) " +
     "分页列出 14 天前写入的进度类条目(type=progress),逐条 mcp__mem0__memory_delete;**只删 type=progress 的,其他类型一律不碰**;把删掉的 id 与摘要列进报告。" +
-    "②近重复复核:用 memory_list(limit=500, offset=N, brief=true) 分页遍历全库,直到返回的 has_more 为 false,挑出 metadata 带 near_dup_of 的条目," +
+    "②近重复复核:用 memory_list(flagged=true, brief=true) 列出写入护栏标记过的近重复条目(metadata.near_dup_of)," +
     "对照它指向的旧条目(需要全文时 memory_read),每对给出建议:保留两条 / 删新条并把新信息并入旧条 / 删旧条——**只建议不执行**。" +
-    "③全库审查(同一次遍历顺手做):找出 a)明显过时(内容里的版本号/日期/状态已被更新的记忆或现实取代)" +
+    "③全库审查:用 memory_list(limit=500, offset=N, brief=true) 分页遍历全库,直到返回的 has_more 为 false;找出 a)明显过时(内容里的版本号/日期/状态已被更新的记忆或现实取代)" +
     "b)互相矛盾(两条记忆对同一事实说法不一)c)重复冗余(同一事实多条近似表述);每条给 id、内容摘要(50字内)、问题类型、处置建议(保留/更新成什么/删除)。" +
-    "④检索评测:用 Bash 跑 `~/mem0-mcp/.venv/bin/python ~/mem0-mcp/eval/run_eval.py`,把 hit@5 / hit@10(全局与项目内)和未命中的题目写进报告,并与上一期报告对比。" +
+    "④检索评测:用 Bash 跑 `~/mem0-mcp/.venv/bin/python ~/mem0-mcp/eval/run_eval.py --json`(约 40 题 10 秒,末行是机器可读摘要),把 hit@5 / hit@10(全局与项目内)和未命中的题目写进报告,并与上一期报告对比。" +
     "**除①之外绝不执行任何 memory_delete/update——处置由 owner 决定**。全库健康时②③写一句『本期无需清理』即可,①④照常。"
   );
 }
