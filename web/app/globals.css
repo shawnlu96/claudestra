@@ -145,6 +145,18 @@ html.kb-open {
     animation: tool-in 0.2s ease-out;
 }
 /* 思考中 ✦/头像缓慢呼吸(2s 周期,scale+opacity 双通道) */
+/* 侧栏 agent 行「工作中」闪烁外框(owner 2026-09-06);减少动态偏好下常亮不闪 */
+@keyframes cstra-busy-blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
+.cstra-busy-blink {
+    animation: cstra-busy-blink 1.3s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+    .cstra-busy-blink { animation: none; opacity: 0.85; }
+}
+
 @keyframes claude-pulse {
     0%,
     100% {

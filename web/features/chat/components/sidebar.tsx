@@ -152,17 +152,21 @@ function AgentRow({
   };
   // 卸载时别把自己留在「当前滑开」槽里
   useEffect(() => () => swipeReg.clear(closeSwipe));
-  // ctx 用量背景条（owner 2026-07-14:用量看板藏太深,列表行内直接可视化）:
-  // 行背景自左向右填充,宽=占 1M 窗口比例;色阶同顶栏 ctx 徽章
-  // (≥750k 深红 / ≥500k 红 / ≥200k 黄 / 其余中性淡灰),平时几乎隐形,超标一眼看见。
+  // ctx 用量条（owner 2026-07-14:用量看板藏太深,列表行内直接可视化）:
+  // v2.21.4 从「整行背景自左向右填充」改成行底 2px 细条(owner 2026-09-06:黄色
+  // 背景块跟「工作中」混在一起,分不清哪个是忙哪个是占用)。宽=占 1M 窗口比例,
+  // 色阶同顶栏 ctx 徽章(≥750k 深红 / ≥500k 红 / ≥200k 黄 / 其余淡灰)。
   const ctx = a.status === "active" && typeof a.contextTokens === "number" ? a.contextTokens : 0;
   const ctxPct = Math.min(100, Math.round((ctx / CTX_WINDOW) * 100));
   const ctxTone = {
-    deep: "bg-error/35",
-    high: "bg-error/15",
-    mid: "bg-warning/15",
-    none: "bg-base-content/[0.05]",
+    deep: "bg-error",
+    high: "bg-error/70",
+    mid: "bg-warning/80",
+    none: "bg-base-content/20",
   }[ctxLevel(ctx)];
+  // 忙碌态 = 行外框(owner 2026-09-06:「工作中给它加一个不断闪烁的黄色边框」);
+  // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
+  const busyNow = !!(a.busy || busyLive);
 
   return (
     <li>
@@ -271,8 +275,16 @@ function AgentRow({
         {ctx > 0 && (
           <span
             aria-hidden
-            className={`absolute inset-y-0 left-0 ${ctxTone}`}
+            className={`pointer-events-none absolute bottom-0 left-0 z-[2] h-[2px] rounded-full ${ctxTone}`}
             style={{ width: `${ctxPct}%` }}
+          />
+        )}
+        {(busyNow || compacting) && (
+          <span
+            aria-hidden
+            className={`pointer-events-none absolute inset-0 z-[2] rounded-lg border-[1.5px] ${
+              compacting ? "border-info/80" : "cstra-busy-blink border-warning"
+            }`}
           />
         )}
         <button
@@ -337,8 +349,11 @@ function AgentRow({
           )}
           <span className="min-w-0 flex-1 truncate text-[15px] sm:text-sm">
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
-            {projEmoji && <span className="mr-1">{projEmoji}</span>}
             {t(a.displayName)}
+            {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
+                「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
+                不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
+            {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
             {a.pinnedMaster && (
               <span className="badge badge-primary badge-xs ml-1 align-middle">
                 {t("总控")}
@@ -883,10 +898,13 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                 // v2.21.1+ 组做成「容器」(owner 2026-08-31「文件夹层级更清晰」):
                 // 组块淡底色 + 开合文件夹图标 + 成员缩进导线——文件夹是个盒子,
                 // 不再只是一行标签
+                // v2.21.4 组头降为「分区标签」(小号、压淡、无卡片底、hover 只提亮文字):
+                // 组头与 agent 行此前都是「emoji + 名字」的卡片样式,分不清哪个能点进会话
+                // (owner 2026-09-06)。现在:卡片 = agent,标签 = 文件夹。
                 <li key={`g:${e.id}`} className="rounded-xl bg-base-300/25 p-1">
                   <button
                     type="button"
-                    className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-[13px] font-semibold text-base-content/80 transition-colors hover:bg-base-300/50"
+                    className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
                     onClick={() => toggleProjectCollapse(e.id)}
                   >
                     <svg
@@ -902,7 +920,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                     >
                       <path d="m6 9 6 6 6-6" />
                     </svg>
-                    <span className="shrink-0 text-[14px]">{e.meta?.emoji || (isCollapsed ? "📁" : "📂")}</span>
+                    <span className="shrink-0 text-[13px] opacity-80">{e.meta?.emoji || (isCollapsed ? "📁" : "📂")}</span>
                     <span className="truncate">{e.meta?.name || e.id}</span>
                     <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">
                       {e.items.length}
