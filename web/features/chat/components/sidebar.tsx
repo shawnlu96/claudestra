@@ -152,17 +152,19 @@ function AgentRow({
   };
   // 卸载时别把自己留在「当前滑开」槽里
   useEffect(() => () => swipeReg.clear(closeSwipe));
-  // ctx 用量条（owner 2026-07-14:用量看板藏太深,列表行内直接可视化）:
-  // v2.21.4 从「整行背景自左向右填充」改成行底 2px 细条(owner 2026-09-06:黄色
-  // 背景块跟「工作中」混在一起,分不清哪个是忙哪个是占用)。宽=占 1M 窗口比例,
-  // 色阶同顶栏 ctx 徽章(≥750k 深红 / ≥500k 红 / ≥200k 黄 / 其余淡灰)。
+  // ctx 用量背景条（owner 2026-07-14:用量看板藏太深,列表行内直接可视化）:
+  // 行背景自左向右填充,宽=占 1M 窗口比例;色阶同顶栏 ctx 徽章
+  // (≥750k 深红 / ≥500k 红 / ≥200k 黄 / 其余中性淡灰)。
+  // v2.21.4 曾改成行底 2px 细线,owner 2026-09-06「有点丑,回滚之前的再优化一下」:
+  // 保留填充,右缘用 mask 渐隐(不再是一块硬边色块,读起来像仪表而不像选中高亮),
+  // 浓度各降一档;「工作中」自此用闪烁外框表达,填充只剩「占用」一种含义。
   const ctx = a.status === "active" && typeof a.contextTokens === "number" ? a.contextTokens : 0;
   const ctxPct = Math.min(100, Math.round((ctx / CTX_WINDOW) * 100));
   const ctxTone = {
-    deep: "bg-error",
-    high: "bg-error/70",
-    mid: "bg-warning/80",
-    none: "bg-base-content/20",
+    deep: "bg-error/30",
+    high: "bg-error/14",
+    mid: "bg-warning/12",
+    none: "bg-base-content/[0.04]",
   }[ctxLevel(ctx)];
   // 忙碌态 = 行外框(owner 2026-09-06:「工作中给它加一个不断闪烁的黄色边框」);
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
@@ -275,8 +277,12 @@ function AgentRow({
         {ctx > 0 && (
           <span
             aria-hidden
-            className={`pointer-events-none absolute bottom-0 left-0 z-[2] h-[2px] rounded-full ${ctxTone}`}
-            style={{ width: `${ctxPct}%` }}
+            className={`pointer-events-none absolute inset-y-0 left-0 ${ctxTone}`}
+            style={{
+              width: `${ctxPct}%`,
+              WebkitMaskImage: "linear-gradient(to right, #000 55%, transparent)",
+              maskImage: "linear-gradient(to right, #000 55%, transparent)",
+            }}
           />
         )}
         {(busyNow || compacting) && (
