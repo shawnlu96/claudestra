@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -130,5 +130,15 @@ describe("readClaudeSettings / writeClaudeSettings", () => {
     const back = await readClaudeSettings(p);
     expect(back.permissions).toEqual({ allow: ["x"] });
     expect(hasRecallHook(back)).toBe(true);
+  });
+
+  test("keeps the original file mode across the temp-file rename (0600 stays 0600)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-settings-"));
+    const p = join(dir, "settings.json");
+    writeFileSync(p, "{}\n");
+    chmodSync(p, 0o600);
+    await writeClaudeSettings(p, { hooks: {} });
+    expect(statSync(p).mode & 0o777).toBe(0o600);
+    expect(await readClaudeSettings(p)).toEqual({ hooks: {} });
   });
 });

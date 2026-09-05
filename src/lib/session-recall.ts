@@ -14,7 +14,7 @@
  * Claudestra 要发给别人用,mem0 是 owner 自己的设施,不能成为硬依赖。
  */
 import { existsSync } from "fs";
-import { readFile, rename, writeFile } from "fs/promises";
+import { chmod, readFile, rename, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 
 /** SessionStart 的 matcher:compact 后也重新注入——压缩摘要最容易把约束丢掉。 */
@@ -128,10 +128,16 @@ export async function readClaudeSettings(path: string): Promise<ClaudeSettings> 
   }
 }
 
-/** 原子写回:先写同目录临时文件再 rename,半写状态不会落到 settings.json 上。 */
+/**
+ * 原子写回:先写同目录临时文件再 rename,半写状态不会落到 settings.json 上。
+ * 权限跟原文件走(Codex 复核 2026-09-06:新建临时文件默认 0644,原文件 0600 会被放宽)。
+ */
 export async function writeClaudeSettings(path: string, settings: ClaudeSettings): Promise<void> {
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tmp, JSON.stringify(settings, null, 2) + "\n");
+  let mode: number | undefined;
+  try { mode = (await stat(path)).mode & 0o777; } catch { /* 新文件:走默认 umask */ }
+  await writeFile(tmp, JSON.stringify(settings, null, 2) + "\n", mode !== undefined ? { mode } : undefined);
+  if (mode !== undefined) await chmod(tmp, mode); // writeFile 的 mode 受 umask 裁剪,显式再 chmod 一次
   await rename(tmp, path);
 }
 
