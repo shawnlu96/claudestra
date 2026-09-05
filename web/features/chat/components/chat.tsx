@@ -11,6 +11,7 @@ import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store"
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
+import { UpdateToast } from "./update-toast";
 import { Composer } from "./composer";
 import { Splash } from "./splash";
 import { AgentActions } from "./agent-actions";
@@ -58,16 +59,17 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
  * {变动的 hook 序号:次数} fp:函数指纹」——#185 的本质是 50 次连续同步提交,这里
  * 直接看到是谁在链上、它哪个 hook 在变,不再依赖被 Safari 尾调用吃掉的调用栈。
  */
-type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[] };
+type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[]; ev?: string[]; ae?: string };
 let burstReports = 0;
 function reportCommitBurst(d: CommitBurst) {
   if (burstReports >= 5 || !d) return;
   burstReports++;
   const tag = isNativeShell() ? "[shell]" : "[pwa]";
-  // uses: 提交时快照已变(下一次提交的发起者)的 useSyncExternalStore 订阅点——组件#hook序号:旧→新
+  // ev: 突发开始前 80ms 起到上报为止捕获阶段看到的离散事件(type@TAG#id.cls+相对ms)——
+  // #185 的抛错栈落在 dispatchDiscreteEvent → 监听器 → setState,链是事件驱动的;ae = 上报时的 activeElement
   // roots: 每次提交**最顶层**重渲染的组件([props]=父级传新 props / [state]=自身 hook 变了)
   // 及其变动的 hook 序号:旧值→新值——同步提交链的发起者就在这里
-  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | uses: ${(d.uses || []).join(" ; ") || "-"} | top: ${(d.top || []).join(" ; ")}`;
+  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | ev: ${(d.ev || []).join(" ") || "-"} | ae: ${d.ae || "-"} | top: ${(d.top || []).join(" ; ")}`;
   try {
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
   } catch { /* ignore */ }
@@ -628,6 +630,7 @@ function ChatInner() {
                 不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
             <div className="relative">
               <SyncBanner />
+              <UpdateToast />
             </div>
             <MessageList />
             <Composer />

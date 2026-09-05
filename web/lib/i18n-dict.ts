@@ -135,6 +135,7 @@ export const DICT: Record<string, string> = {
   "思考中…": "Thinking…",
   "思考中": "Thinking",
   "正在同步最新消息…": "Syncing latest messages…",
+  "新版本已就绪 · 点击刷新": "New version ready · tap to reload",
   "连接断开 · 重连中…": "Disconnected · reconnecting…",
   "同步失败 · 点按重试": "Sync failed · tap to retry",
   "发送即追问——立刻插进当前对话，不用等它跑完": "Sends as a follow-up — dropped into the running conversation right away",
