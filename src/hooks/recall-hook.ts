@@ -35,7 +35,10 @@ async function readHandoff(cwd: string): Promise<string> {
     let text = readFileSync(p, "utf-8").trim();
     if (!text) return "";
     if (text.length > HANDOFF_MAX_CHARS) text = text.slice(0, HANDOFF_MAX_CHARS) + "\n…(truncated)";
-    const when = st.mtime.toISOString().slice(0, 16).replace("T", " ");
+    // 本地时间——文件正文里 save-compact 写的也是本地时间,别一个 UTC 一个本地
+    const d = st.mtime;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
     return `## HANDOFF · 上次会话交接(写于 ${when},${Math.floor(ageDays)} 天前)\n${text}`;
   } catch {
     return "";
