@@ -27,25 +27,70 @@ const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
  * 零大字符串。⚠ 不要用 Blob.slice().stream()(searchSessionHistory 实测 100MB 级
  * 病理性慢,2min+ 不返回)。
  */
+/**
+ * v2.21.4 换行计数检查点缓存(「正在同步消息」慢的主因之一,owner 2026-09-06):
+ * 尾读要知道窗口前缀有多少行(seq 坐标),原先每次请求从头扫到 cut——70MB 的会话
+ * 每次差量都扫 54MB(≈300ms 同步阻塞 Bun 主线程)。jsonl 追加写、前缀不变:按 1MB
+ * 边界记「字节 → 换行数」检查点,之后只扫最近检查点到 cut 的那一小段。每个检查点带
+ * 32 字节内容签名,文件被重写(CC 原地更新记录 / 归档替换 / 截短)时签名不符即作废
+ * 该点及其后所有点,不会算错 seq。最多缓存 64 个文件(先进先出)。
+ */
+const NL_STEP = 1 << 20;
+const NL_SIG_LEN = 32;
+interface NlCkpt { b: number; n: number; sig: string }
+const nlIndex = new Map<string, NlCkpt[]>();
+
 async function countNewlinesBefore(filePath: string, cut: number): Promise<number> {
   if (cut <= 0) return 0;
-  let n = 0;
   const fh = await fsOpen(filePath, "r");
   try {
-    const buf = Buffer.alloc(8 * 1024 * 1024);
-    let pos = 0;
+    let pts = nlIndex.get(filePath);
+    if (!pts) {
+      pts = [];
+      if (nlIndex.size >= 64) nlIndex.delete(nlIndex.keys().next().value as string);
+      nlIndex.set(filePath, pts);
+    }
+    const sigBuf = Buffer.alloc(NL_SIG_LEN);
+    const readSig = async (at: number): Promise<string | null> => {
+      const { bytesRead } = await fh.read(sigBuf, 0, NL_SIG_LEN, at);
+      return bytesRead === NL_SIG_LEN ? sigBuf.toString("latin1") : null;
+    };
+    // 从最后一个 ≤cut 且签名仍匹配的检查点起算;签名不符 → 该点及其后全部作废
+    let startB = 0;
+    let n = 0;
+    for (let i = pts.length - 1; i >= 0; i--) {
+      if (pts[i].b > cut) continue;
+      if ((await readSig(pts[i].b)) === pts[i].sig) {
+        startB = pts[i].b;
+        n = pts[i].n;
+        break;
+      }
+      pts.length = i;
+    }
+    const buf = Buffer.alloc(NL_STEP);
+    let pos = startB;
     while (pos < cut) {
-      const { bytesRead } = await fh.read(buf, 0, Math.min(buf.length, cut - pos), pos);
-      if (bytesRead <= 0) break;
-      const view = bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
+      const want = Math.min(cut, (Math.floor(pos / NL_STEP) + 1) * NL_STEP) - pos;
+      let got = 0;
+      while (got < want) {
+        const { bytesRead } = await fh.read(buf, got, want - got, pos + got);
+        if (bytesRead <= 0) break;
+        got += bytesRead;
+      }
+      const view = buf.subarray(0, got);
       let at = -1;
       while ((at = view.indexOf(10, at + 1)) !== -1) n++;
-      pos += bytesRead;
+      pos += got;
+      if (got < want) break; // 文件比 cut 短(并发截短):到此为止
+      if (pos % NL_STEP === 0 && (pts.length === 0 || pts[pts.length - 1].b < pos)) {
+        const sig = await readSig(pos);
+        if (sig !== null) pts.push({ b: pos, n, sig });
+      }
     }
+    return n;
   } finally {
     await fh.close();
   }
-  return n;
 }
 
 export interface HistoryToolCall {
@@ -395,7 +440,8 @@ export async function readSessionHistory(
   // 更新」。差量 after= 每次重连都发、原先照样全文读,是这个 bug 的真凶。
   // 高频路径(默认页 / 差量)只需文件尾部,基本一窗命中;before 往回翻页从尾部
   // 反向扩窗直到够一页。贫路径(极深翻页)最坏读到全文,与 v1 持平。
-  let win = 8 * 1024 * 1024;
+  // 差量(after=)只要锚点之后的几条,首窗 1MB 够用(不够再 ×8);默认页 / 翻页仍 8MB
+  let win = after != null ? 1024 * 1024 : 8 * 1024 * 1024;
   for (;;) {
     const cut = Math.max(0, size - win);
     const reachedStart = cut === 0;

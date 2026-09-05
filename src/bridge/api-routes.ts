@@ -273,6 +273,19 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
 }
 
 /**
+ * v2.21.4 历史端点专用的 agent 查找:只读 registry.json,不再 spawn `manager list`
+ * (findApiAgent 每次起一个 bun 子进程 ≈150–200ms,是差量同步「正在同步消息」的
+ * 固定开销大头,owner 2026-09-06)。历史端点只需要 cwd / sessionId / 名字。
+ */
+async function findHistoryAgent(name: string): Promise<{ name: string; cwd?: string; sessionId?: string } | null> {
+  if (name === "master") return findApiAgent(name);
+  const { readRegistryAgents } = await import("../lib/registry.js");
+  const regs = await readRegistryAgents();
+  const hit = regs.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name);
+  return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId } : null;
+}
+
+/**
  * 会话文件里最后一条真实对话记录（user/assistant，带 timestamp）的时间。
  *
  * 不能用文件 mtime 当「最近对话时间」：CC 会持续原地更新状态类记录
@@ -790,7 +803,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
       return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
     }
-    const agent = await findApiAgent(agentParam);
+    const agent = await findHistoryAgent(agentParam);
     const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
     const sessions = await listAgentSessions(canonical, {
       cwd: agent?.cwd,
@@ -816,13 +829,23 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     const sid = decodeURIComponent(histSessMatch[2]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
-    const agent = await findApiAgent(agentParam);
+    const agent = await findHistoryAgent(agentParam);
     const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
-    const sessions = await listAgentSessions(canonical, {
-      cwd: agent?.cwd,
-      currentSessionId: agent?.sessionId,
-    });
-    const found = sessions.find((s) => s.sessionId === sid);
+    // 热路径快捷:请求的就是当前活 session → 直接推 live 路径,跳过归档目录扫描
+    // (listAgentSessions 每次 stat 全部归档快照 + 子 agent 目录;差量同步 100% 走这条)
+    let found: { sessionId: string; source: "live" | "archive"; path: string } | undefined;
+    if (agent?.cwd && agent.sessionId === sid) {
+      const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
+      const lp = projectJsonlPath(agent.cwd, sid);
+      if (existsSync(lp)) found = { sessionId: sid, source: "live", path: lp };
+    }
+    if (!found) {
+      const sessions = await listAgentSessions(canonical, {
+        cwd: agent?.cwd,
+        currentSessionId: agent?.sessionId,
+      });
+      found = sessions.find((s) => s.sessionId === sid);
+    }
     if (!found) return apiJson(404, { ok: false, error: `session "${sid}" not found for agent "${canonical}"` });
 
     let file = found.path;

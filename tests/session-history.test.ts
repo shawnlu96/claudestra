@@ -591,3 +591,29 @@ describe("queued_command 附件 → 用户消息", () => {
     expect(page.messages.filter((m) => m.role === "user").length).toBe(0);
   });
 });
+
+
+/**
+ * v2.21.4 换行计数检查点缓存:尾读的 seq 坐标靠「窗口前缀有多少行」,缓存后追加写
+ * 只扫新增部分;文件被重写(签名不符)必须作废,seq 不能算错。
+ */
+describe("countNewlinesBefore 检查点缓存(经 readSessionHistory 尾读)", () => {
+  const rec = (i: number) => ({ type: "assistant", timestamp: "2026-09-06T00:00:00Z", message: { content: [{ type: "text", text: `m${i}` }] } });
+  const texts = (page: { messages: { text: string }[] }) => page.messages.map((m) => m.text);
+
+  test("追加写后差量仍准确;重写文件后缓存作废", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const p = writeJsonl(dir, `${SID}.jsonl`, Array.from({ length: 300 }, (_, i) => rec(i)));
+    const opts = { maxFullReadBytes: 4096, after: 290 };
+    const a = await readSessionHistory(p, opts);
+    expect(texts(a)).toEqual(["m291", "m292", "m293", "m294", "m295", "m296", "m297", "m298", "m299"]);
+    // 第二次同参走缓存
+    expect(texts(await readSessionHistory(p, opts))).toEqual(texts(a));
+    // 追加 5 行:seq 连续
+    writeFileSync(p, Array.from({ length: 5 }, (_, i) => JSON.stringify(rec(300 + i))).join("\n") + "\n", { flag: "a" });
+    expect(texts(await readSessionHistory(p, { maxFullReadBytes: 4096, after: 298 }))).toEqual(["m299", "m300", "m301", "m302", "m303", "m304"]);
+    // 整个文件重写成不同内容(行数不同):检查点签名不符 → 作废重算
+    writeFileSync(p, Array.from({ length: 200 }, (_, i) => JSON.stringify(rec(1000 + i))).join("\n") + "\n");
+    expect(texts(await readSessionHistory(p, { maxFullReadBytes: 4096, after: 195 }))).toEqual(["m1196", "m1197", "m1198", "m1199"]);
+  });
+});

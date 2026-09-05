@@ -1,4 +1,5 @@
 "use client";
+import { useMemo, useRef, useSyncExternalStore } from "react";
 import { createReactStore, ZenithStore } from "@do-md/zenith";
 import type {
   AgentSession,
@@ -2232,6 +2233,23 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
 export const {
   StoreProvider: ChatStoreProvider,
-  useStore: useChatStore,
   useStoreApi: useChatStoreApi,
 } = createReactStore(ChatStore);
+
+/**
+ * v2.21.4 稳定快照的选择器 hook(追 #185 的一环):zenith 的 useStoreSelector 每次
+ * 渲染都给 useSyncExternalStore 传**新的** getSnapshot 闭包 → React 每次提交都为每个
+ * 订阅点挂一次 updateStoreInstance 被动 effect 去复核快照;全页几十个订阅点 × 每次
+ * 提交,是同步提交链的放大器。这里 selector 存 ref、getSnapshot 只建一次,React 只在
+ * store 真正通知时才复核。语义不变(仍是同步外部 store 订阅,选择器仍每次渲染求值)。
+ */
+export function useChatStore<T>(selector: (s: ChatStore) => T): T {
+  const store = useChatStoreApi();
+  const selRef = useRef(selector);
+  // 渲染期写 ref 是刻意的:React 在**本次渲染内**就会调 getSnapshot,selector 若捕获了
+  // 本次的 props,放到 effect 里更新会读到上一次的 selector(值滞后一帧且无人触发重算)
+  // eslint-disable-next-line react-hooks/refs
+  selRef.current = selector;
+  const getSnap = useMemo(() => () => selRef.current(store), [store]);
+  return useSyncExternalStore(store.subscribe, getSnap, getSnap);
+}
