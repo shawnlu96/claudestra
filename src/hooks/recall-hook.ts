@@ -52,11 +52,21 @@ async function runRecall(cwd: string): Promise<string> {
       stdin: "ignore",
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
-    const timer = setTimeout(() => { try { proc.kill(); } catch { /* 已退出 */ } }, RECALL_TIMEOUT_MS);
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    clearTimeout(timer);
-    return out.trim();
+    // 超时链要闭合(Codex review 2026-09-06):python 卡在 DB 上时 SIGTERM 未必退,
+    // 1s 后补 SIGKILL;两个定时器都在 finally 清。
+    let killer: ReturnType<typeof setTimeout> | null = null;
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch { /* 已退出 */ }
+      killer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* 已退出 */ } }, 1_000);
+    }, RECALL_TIMEOUT_MS);
+    try {
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
+      return out.trim();
+    } finally {
+      clearTimeout(timer);
+      if (killer) clearTimeout(killer);
+    }
   } catch {
     return "";
   }
@@ -74,14 +84,14 @@ async function main() {
   const cwd: string = typeof data?.cwd === "string" && data.cwd ? data.cwd : process.cwd();
   const source: string = typeof data?.source === "string" ? data.source : "";
 
-  const parts: string[] = [];
+  // HANDOFF 先写出去再等 recall——recall 超时/挂掉也不影响交接注入
+  let wrote = false;
   if (source !== "compact") {
     const h = await readHandoff(cwd);
-    if (h) parts.push(h);
+    if (h) { process.stdout.write(h + "\n"); wrote = true; }
   }
   const r = await runRecall(cwd);
-  if (r) parts.push(r);
-  if (parts.length) process.stdout.write(parts.join("\n\n") + "\n");
+  if (r) process.stdout.write((wrote ? "\n" : "") + r + "\n");
 }
 
 main()

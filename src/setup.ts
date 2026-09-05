@@ -11,7 +11,7 @@
 import { readFile, writeFile, access, chmod, mkdir } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
-import { ensureRecallHook, recallAvailable } from "./lib/session-recall.js";
+import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./lib/session-recall.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 
@@ -773,10 +773,8 @@ function parseEnv(content: string): Partial<Config> {
 /** 把 typing hook 写入 ~/.claude/settings.json */
 async function registerHooks(hookCmd: string, recallCmd?: string): Promise<void> {
   const settingsPath = `${process.env.HOME}/.claude/settings.json`;
-  let settings: any = {};
-  if (await fileExists(settingsPath)) {
-    settings = JSON.parse(await readFile(settingsPath, "utf-8"));
-  }
+  // 解析失败直接抛给调用方 warn——绝不当空对象覆写(会清掉 permissions / env / 别的 hooks)
+  const settings: any = await readClaudeSettings(settingsPath);
   if (!settings.hooks) settings.hooks = {};
 
   const hookEntry = {
@@ -798,7 +796,7 @@ async function registerHooks(hookCmd: string, recallCmd?: string): Promise<void>
   // v2.21.5+ SessionStart 记忆召回(本机有 ~/mem0-mcp/recall.py 才挂;lib/session-recall.ts)
   if (recallCmd && recallAvailable()) ensureRecallHook(settings, recallCmd);
 
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  await writeClaudeSettings(settingsPath, settings);
 }
 
 /**

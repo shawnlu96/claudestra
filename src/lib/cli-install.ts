@@ -39,7 +39,7 @@ import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { resolveBunPath } from "./bun-path.js";
-import { ensureRecallHook, recallAvailable } from "./session-recall.js";
+import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./session-recall.js";
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
@@ -388,12 +388,10 @@ export async function ensureRecallHookInstalled(bunPath: string, repoRoot: strin
   const command = `${bunPath} ${resolve(repoRoot)}/src/hooks/recall-hook.ts`;
   if (!recallAvailable()) return { status: "skipped", command };
   const settingsPath = `${homedir()}/.claude/settings.json`;
-  let settings: any = {};
-  if (existsSync(settingsPath)) {
-    try { settings = JSON.parse(await readFile(settingsPath, "utf-8")); } catch { settings = {}; }
-  }
+  // 解析失败会抛——宁可不挂 hook,也不能把 owner 的 settings.json 覆写成只剩我们一条
+  const settings = await readClaudeSettings(settingsPath);
   const changed = ensureRecallHook(settings, command);
-  if (changed) await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  if (changed) await writeClaudeSettings(settingsPath, settings);
   return { status: changed ? "installed" : "present", command };
 }
 

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   RECALL_HOOK_TIMEOUT_S,
   RECALL_MATCHER,
@@ -8,7 +11,9 @@ import {
   isRecallHookCommand,
   memoryDir,
   projectSlug,
+  readClaudeSettings,
   removeRecallHook,
+  writeClaudeSettings,
   type ClaudeSettings,
 } from "../src/lib/session-recall";
 
@@ -62,6 +67,26 @@ describe("ensureRecallHook", () => {
     expect(s.hooks!.SessionStart[0].hooks[0]).toEqual({ type: "command", command: CMD, timeout: RECALL_HOOK_TIMEOUT_S });
   });
 
+  test("moves our command out of a mixed entry without touching that entry's matcher", () => {
+    const s: ClaudeSettings = {
+      hooks: { SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }, { type: "command", command: "bun /old/src/hooks/recall-hook.ts" }] }] },
+    };
+    expect(ensureRecallHook(s, CMD)).toBe(true);
+    expect(s.hooks!.SessionStart).toEqual([
+      { matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] },
+      { matcher: RECALL_MATCHER, hooks: [{ type: "command", command: CMD, timeout: RECALL_HOOK_TIMEOUT_S }] },
+    ]);
+    expect(ensureRecallHook(s, CMD)).toBe(false);
+  });
+
+  test("collapses duplicate standalone recall entries to one", () => {
+    const s: ClaudeSettings = { hooks: { SessionStart: [] } };
+    ensureRecallHook(s, CMD);
+    s.hooks!.SessionStart.push({ matcher: RECALL_MATCHER, hooks: [{ type: "command", command: CMD, timeout: RECALL_HOOK_TIMEOUT_S }] });
+    expect(ensureRecallHook(s, CMD)).toBe(true);
+    expect(s.hooks!.SessionStart).toHaveLength(1);
+  });
+
   test("isRecallHookCommand only matches our hook script", () => {
     expect(isRecallHookCommand(CMD)).toBe(true);
     expect(isRecallHookCommand("bun typing-hook.ts")).toBe(false);
@@ -83,5 +108,27 @@ describe("removeRecallHook", () => {
     expect(removeRecallHook(mixed)).toBe(true);
     expect(mixed.hooks!.SessionStart).toEqual([{ matcher: "startup", hooks: [{ type: "command", command: "echo hi" }] }]);
     expect(hasRecallHook(mixed)).toBe(false);
+  });
+});
+
+describe("readClaudeSettings / writeClaudeSettings", () => {
+  test("a corrupt settings.json throws instead of becoming {} (never clobber the owner's file)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-settings-"));
+    const p = join(dir, "settings.json");
+    writeFileSync(p, "{ this is not json");
+    await expect(readClaudeSettings(p)).rejects.toThrow(/解析失败/);
+    expect(readFileSync(p, "utf-8")).toBe("{ this is not json");
+  });
+
+  test("missing file reads as {} and writes atomically", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-settings-"));
+    const p = join(dir, "settings.json");
+    expect(await readClaudeSettings(p)).toEqual({});
+    const s: ClaudeSettings = { permissions: { allow: ["x"] } };
+    ensureRecallHook(s, CMD);
+    await writeClaudeSettings(p, s);
+    const back = await readClaudeSettings(p);
+    expect(back.permissions).toEqual({ allow: ["x"] });
+    expect(hasRecallHook(back)).toBe(true);
   });
 });

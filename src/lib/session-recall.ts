@@ -14,6 +14,7 @@
  * Claudestra 要发给别人用,mem0 是 owner 自己的设施,不能成为硬依赖。
  */
 import { existsSync } from "fs";
+import { readFile, rename, writeFile } from "fs/promises";
 import { homedir } from "os";
 
 /** SessionStart 的 matcher:compact 后也重新注入——压缩摘要最容易把约束丢掉。 */
@@ -67,32 +68,71 @@ type HookEntry = { matcher?: string; hooks: HookCmd[] };
 export type ClaudeSettings = { hooks?: Record<string, HookEntry[]> } & Record<string, unknown>;
 
 /**
- * 把召回 hook 合并进 settings.json 的 SessionStart:
- * - 已有指向 recall-hook.ts 的命令 → 只校正命令字符串 / matcher / timeout(改路径、换 bun 绝对路径时用);
- * - 没有 → 追加一条独立 entry(不动别人的 SessionStart hook)。
+ * 把召回 hook 合并进 settings.json 的 SessionStart,**永远是一条只含我们命令的独立 entry**:
+ * - 已有独立 entry → 只校正命令字符串 / matcher / timeout(改路径、换 bun 绝对路径时用);
+ * - 我们的命令混在别人的 entry 里(手工编辑过)→ 从那条里移出,不动那条的 matcher
+ *   (Codex review 2026-09-06:直接改混合 entry 的 matcher 会把别人的触发范围一起扩大);
+ * - 多条独立 entry → 留第一条,其余删;
+ * - 都没有 → 追加。
  * 返回是否改动,调用方决定要不要写回。
  */
 export function ensureRecallHook(settings: ClaudeSettings, command: string): boolean {
   if (!settings.hooks || typeof settings.hooks !== "object") settings.hooks = {};
   const list = Array.isArray(settings.hooks.SessionStart) ? settings.hooks.SessionStart : [];
   let changed = false;
-  let found = false;
+  let own: HookEntry | null = null;
+  const kept: HookEntry[] = [];
   for (const entry of list) {
-    if (!entry || !Array.isArray(entry.hooks)) continue;
-    for (const h of entry.hooks) {
-      if (!isRecallHookCommand(h?.command)) continue;
-      found = true;
-      if (h.command !== command) { h.command = command; changed = true; }
-      if (h.timeout !== RECALL_HOOK_TIMEOUT_S) { h.timeout = RECALL_HOOK_TIMEOUT_S; changed = true; }
-      if (entry.matcher !== RECALL_MATCHER) { entry.matcher = RECALL_MATCHER; changed = true; }
+    if (!entry || !Array.isArray(entry.hooks)) { kept.push(entry); continue; }
+    const mine = entry.hooks.filter((h) => isRecallHookCommand(h?.command));
+    if (mine.length === 0) { kept.push(entry); continue; }
+    const others = entry.hooks.filter((h) => !isRecallHookCommand(h?.command));
+    if (others.length) {
+      // 混合 entry:把我们的移出去,别人的原样保留
+      kept.push({ ...entry, hooks: others });
+      changed = true;
+      continue;
     }
+    if (own) { changed = true; continue; } // 重复的独立 entry,丢掉
+    own = entry;
+    kept.push(entry);
   }
-  if (!found) {
-    list.push({ matcher: RECALL_MATCHER, hooks: [{ type: "command", command, timeout: RECALL_HOOK_TIMEOUT_S }] });
+  if (own) {
+    const h = own.hooks[0];
+    if (own.hooks.length !== 1) { own.hooks = [h]; changed = true; }
+    if (h.command !== command) { h.command = command; changed = true; }
+    if (h.timeout !== RECALL_HOOK_TIMEOUT_S) { h.timeout = RECALL_HOOK_TIMEOUT_S; changed = true; }
+    if (own.matcher !== RECALL_MATCHER) { own.matcher = RECALL_MATCHER; changed = true; }
+  } else {
+    kept.push({ matcher: RECALL_MATCHER, hooks: [{ type: "command", command, timeout: RECALL_HOOK_TIMEOUT_S }] });
     changed = true;
   }
-  settings.hooks.SessionStart = list;
+  settings.hooks.SessionStart = kept;
   return changed;
+}
+
+/**
+ * 读 ~/.claude/settings.json 供合并。文件存在但解析失败 → 抛错,调用方必须放弃写入
+ * (Codex review 2026-09-06:解析失败当空对象再整文件覆写,会把 owner 的 permissions /
+ * env / 其他 hooks 全丢)。不存在 → 空对象。
+ */
+export async function readClaudeSettings(path: string): Promise<ClaudeSettings> {
+  if (!existsSync(path)) return {};
+  const raw = await readFile(path, "utf-8");
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("不是 JSON 对象");
+    return parsed as ClaudeSettings;
+  } catch (e) {
+    throw new Error(`${path} 解析失败,放弃写入以免清空: ${(e as Error).message}`);
+  }
+}
+
+/** 原子写回:先写同目录临时文件再 rename,半写状态不会落到 settings.json 上。 */
+export async function writeClaudeSettings(path: string, settings: ClaudeSettings): Promise<void> {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, JSON.stringify(settings, null, 2) + "\n");
+  await rename(tmp, path);
 }
 
 /** 撤掉召回 hook(owner 反悔 / 卸载用)。返回是否改动。 */
