@@ -8,9 +8,11 @@
  *
  * owner 2026-08-26:「mem0 日积月累会变成粪坑」——原月度 cron 太稀,默认改周。
  * 审查是**只报告不动手**的(处置由 owner 决定),prompt 里这条红线不许改。
- * 唯一例外(2026-09-06 记忆架构评估,agent-mem0 转达 owner 批准):type=progress 且写入
- * 超过 14 天的进度快照由 cron 直接删——这类条目按 owner 自己的写入纪律本就不该进
- * mem0,TTL 只是补刀;其他类型(含 near_dup_of 复核)仍旧只建议不执行。
+ * 两处例外(2026-09-06 记忆架构评估):①type=progress 且写入超过 14 天的进度快照由
+ * cron 直接删(agent-mem0 转达 owner 批准)——这类条目按 owner 自己的写入纪律本就不该进
+ * mem0,TTL 只是补刀;②写入护栏标记过的近重复(metadata.near_dup_of)由 cron 直接
+ * 删/并(owner 2026-09-06 在 web 端勾选「允许卫生 cron 直接处置近重复」)。
+ * 其余(全库过时/矛盾/冗余审查)仍旧只建议不执行。
  */
 
 export const HYGIENE_JOB_NAME = "mem0-hygiene";
@@ -42,11 +44,12 @@ export function hygienePrompt(): string {
     "对 mem0 记忆库做定期卫生检查,分四步,最后用 reply 工具发一份 Markdown 报告。" +
     "①过期进度清理(本任务**唯一**授权的删除):用 mcp__mem0__memory_list(type=\"progress\", before=\"<今天减 14 天的 ISO 日期>\", brief=true, limit=500, offset=N) " +
     "分页列出 14 天前写入的进度类条目(type=progress),逐条 mcp__mem0__memory_delete;**只删 type=progress 的,其他类型一律不碰**;把删掉的 id 与摘要列进报告。" +
-    "②近重复复核:用 memory_list(flagged=true, brief=true) 列出写入护栏标记过的近重复条目(metadata.near_dup_of)," +
-    "对照它指向的旧条目(需要全文时 memory_read),每对给出建议:保留两条 / 删新条并把新信息并入旧条 / 删旧条——**只建议不执行**。" +
+    "②近重复处置(owner 2026-09-06 授权 cron 直接执行):用 memory_list(flagged=true, brief=true) 列出写入护栏标记过的近重复条目(metadata.near_dup_of)," +
+    "逐对 memory_read 新旧两条全文再裁决:同一事实 → memory_update 把新条独有的信息并进旧条,然后 memory_delete 新条;新结论取代旧的 → memory_delete 旧条;" +
+    "确实是两件事 → 都保留并在报告里说明。只处置带 near_dup_of 标记的这一对,拿不准的保留并列进报告;每对的裁决与动作都写进报告。" +
     "③全库审查:用 memory_list(limit=500, offset=N, brief=true) 分页遍历全库,直到返回的 has_more 为 false;找出 a)明显过时(内容里的版本号/日期/状态已被更新的记忆或现实取代)" +
     "b)互相矛盾(两条记忆对同一事实说法不一)c)重复冗余(同一事实多条近似表述);每条给 id、内容摘要(50字内)、问题类型、处置建议(保留/更新成什么/删除)。" +
     "④检索评测:用 Bash 跑 `~/mem0-mcp/.venv/bin/python ~/mem0-mcp/eval/run_eval.py --json`(约 40 题 10 秒,末行是机器可读摘要),把 hit@5 / hit@10(全局与项目内)和未命中的题目写进报告,并与上一期报告对比。" +
-    "**除①之外绝不执行任何 memory_delete/update——处置由 owner 决定**。全库健康时②③写一句『本期无需清理』即可,①④照常。"
+    "**除①②之外绝不执行任何 memory_delete/update——③的处置由 owner 决定**。全库健康时②③写一句『本期无需清理』即可,①④照常。"
   );
 }
