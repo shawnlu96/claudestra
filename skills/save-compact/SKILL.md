@@ -36,7 +36,7 @@ user-invocable: true
 - 工具名**因机器/版本而异**（`memory_write` 与 `add_memory` 都存在过），以 ToolSearch 实际拉到的为准，别背工具名。
 - `user_id` **必填，不要省略**——取值以你系统提示 / 本机全局 CLAUDE.md 约定的那个为准（不要硬编码别人机器的值）。省略时 MCP 的默认 scope 未必是你的：实测有的机器省略后 search 静默返空 `[]` 不报错——查重永远「没存过」→ 重复写入，且拿不到任何已有上下文。
 - 每条独立事实调一次，内容写成**脱离本会话也读得懂**的完整陈述，带日期 / 项目名。2026-09-06 起 `memory_write` **默认原文入库、不走 LLM 抽取**（写什么存什么；传 `infer=true` 才抽取）——别再指望服务端替你归纳，也别把多件事塞进一条。
-- **写后判重护栏**（2026-09-06 起）：新条与已有条余弦 <0.08 会被自动丢弃，返回 `DROPPED_NEAR_DUPLICATE` + `duplicate_of`。收到它不是失败：拿 `duplicate_of` 的 id 去 `memory_update` 把新信息并进去，不要换个措辞再写一遍。
+- **写后判重护栏**（2026-09-06 起，非破坏性）：只有逐字重写（余弦 <0.01）才被丢弃，返回 `DROPPED_NEAR_DUPLICATE` + `duplicate_of`——拿这个 id 去 `memory_update` 并入新信息，别换措辞重写。余弦 0.01~0.08 的近重复**不再自动删**：照常入库，返回里带 `near_duplicate_of` + `existing_memory`（并写进该条 `metadata.near_dup_of` 供周一卫生 cron 复核）。收到 `near_duplicate_of` 时自己判断——同一事实就 `memory_delete` 自己这条并 `memory_update` 旧 id；是新结论取代旧的就 `memory_delete` 旧 id。距离分不清「换个说法」和「改了个数字」（实测只改 219→220 距离仅 0.02），所以这一步不能省。
 - **写前先搜**：新事实不会自动淘汰过时事实——搜到矛盾旧条目就地 update/delete，**两条互相矛盾的记忆比没有记忆更糟**。
 - 并发写是安全的（server 逐条执行），多条可以一起发不必串行。
 
