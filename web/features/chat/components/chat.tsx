@@ -59,7 +59,7 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
  * {变动的 hook 序号:次数} fp:函数指纹」——#185 的本质是 50 次连续同步提交,这里
  * 直接看到是谁在链上、它哪个 hook 在变,不再依赖被 Safari 尾调用吃掉的调用栈。
  */
-type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[]; ev?: string[]; ae?: string };
+type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[]; ev?: string[]; ae?: string; mounts?: string[]; at?: number };
 let burstReports = 0;
 function reportCommitBurst(d: CommitBurst) {
   if (burstReports >= 5 || !d) return;
@@ -69,7 +69,22 @@ function reportCommitBurst(d: CommitBurst) {
   // #185 的抛错栈落在 dispatchDiscreteEvent → 监听器 → setState,链是事件驱动的;ae = 上报时的 activeElement
   // roots: 每次提交**最顶层**重渲染的组件([props]=父级传新 props / [state]=自身 hook 变了)
   // 及其变动的 hook 序号:旧值→新值——同步提交链的发起者就在这里
-  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | ev: ${(d.ev || []).join(" ") || "-"} | ae: ${d.ae || "-"} | top: ${(d.top || []).join(" ; ")}`;
+  // produce: 突发窗口内 store 的 produce 轨迹(改了哪些顶层字段 × 次数 / 调用者 × 次数)——
+  // 谁在每次提交时替换 agents/messages,在这里点名;mounts: 每次遍历里新挂载的组件×数
+  const produce = (() => {
+    try {
+      const trail = (window as unknown as { __cstraProduceTrail?: { t: number; keys: string; by: string }[] }).__cstraProduceTrail || [];
+      const from = (d.at ?? performance.now() - d.span) - 60;
+      const inWin = trail.filter((e) => e.t >= from);
+      const tally = (pick: (e: { keys: string; by: string }) => string) => {
+        const m = new Map<string, number>();
+        for (const e of inWin) { const k = pick(e) || "-"; m.set(k, (m.get(k) || 0) + 1); }
+        return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => `${k}×${n}`).join(" ; ");
+      };
+      return `${inWin.length} [${tally((e) => e.keys)}] by: ${tally((e) => e.by)}`;
+    } catch { return "?"; }
+  })();
+  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | produce: ${produce} | mounts: ${(d.mounts || []).join(" ") || "-"} | ev: ${(d.ev || []).join(" ") || "-"} | ae: ${d.ae || "-"} | top: ${(d.top || []).join(" ; ")}`;
   try {
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
   } catch { /* ignore */ }

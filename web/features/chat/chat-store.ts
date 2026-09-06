@@ -1080,6 +1080,24 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * productionBrowserSourceMaps 还原。
    */
   private produceBurst = { armed: false, count: 0, reported: 0 };
+  /**
+   * v2.21.5+ produce 轨迹(#185 / 卡顿取证):每次 produce 记「时间 + 改了哪些顶层字段 +
+   * 调用者两帧」进 window.__cstraProduceTrail 环形缓冲(60 条),layout.tsx 的提交突发
+   * 探针上报时由 chat.tsx 把突发窗口内的条目一并带上——09-06 首条 roots 数据显示每次
+   * 提交 state.agents 都是新数组,但代码里没有随输入写 agents 的地方,得让数据自己说。
+   */
+  private noteProduceTrail(before: ChatState, after: ChatState): void {
+    try {
+      const w = window as unknown as { __cstraProduceTrail?: { t: number; keys: string; by: string }[] };
+      const keys = (Object.keys(after) as (keyof ChatState)[]).filter((k) => after[k] !== before[k]).join(",");
+      const frames = (new Error().stack || "").split("\n").slice(2, 5).map((l) =>
+        l.trim().replace(/^at\s+/, "").replace(/\(?https?:\/\/[^/]+\/_next\/static\/chunks\//, "(").replace(/^async\s+/, "")
+      );
+      const trail = (w.__cstraProduceTrail ||= []);
+      trail.push({ t: performance.now(), keys, by: frames.join(" < ") });
+      if (trail.length > 60) trail.splice(0, trail.length - 60);
+    } catch { /* 取证不影响主流程 */ }
+  }
   public override produce(...args: Parameters<ZenithStore<ChatState>["produce"]>): void {
     const b = this.produceBurst;
     if (!b.armed) {
@@ -1099,7 +1117,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       })();
       this.clientLog(`[loop] 30 produce() in one task (${keys}) stack: ${stack}`);
     }
+    const before = typeof window !== "undefined" ? this.state : null;
     super.produce(...args);
+    if (before) this.noteProduceTrail(before, this.state);
   }
 
   public noteHidden() {
