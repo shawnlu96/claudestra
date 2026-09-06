@@ -59,7 +59,7 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
  * {变动的 hook 序号:次数} fp:函数指纹」——#185 的本质是 50 次连续同步提交,这里
  * 直接看到是谁在链上、它哪个 hook 在变,不再依赖被 Safari 尾调用吃掉的调用栈。
  */
-type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[]; ev?: string[]; ae?: string; mounts?: string[]; at?: number };
+type CommitBurst = { n: number; span: number; walked: number; top: string[]; uses?: string[]; roots?: string[]; ev?: string[]; ae?: string; mounts?: string[]; mountRoots?: string[]; at?: number };
 let burstReports = 0;
 function reportCommitBurst(d: CommitBurst) {
   if (burstReports >= 5 || !d) return;
@@ -84,7 +84,7 @@ function reportCommitBurst(d: CommitBurst) {
       return `${inWin.length} [${tally((e) => e.keys)}] by: ${tally((e) => e.by)}`;
     } catch { return "?"; }
   })();
-  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | produce: ${produce} | mounts: ${(d.mounts || []).join(" ") || "-"} | ev: ${(d.ev || []).join(" ") || "-"} | ae: ${d.ae || "-"} | top: ${(d.top || []).join(" ; ")}`;
+  const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | produce: ${produce} | mountRoots: ${(d.mountRoots || []).join(" ; ") || "-"} | mounts: ${(d.mounts || []).join(" ") || "-"} | ev: ${(d.ev || []).join(" ") || "-"} | ae: ${d.ae || "-"} | top: ${(d.top || []).join(" ; ")}`;
   try {
     void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
   } catch { /* ignore */ }
