@@ -1503,6 +1503,39 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.streaming = true;
       s.awaitingChunk = true;
     });
+    this.pendingSends.set(optimisticId, { agent, wire, files: hasFiles ? [...files!] : undefined });
+    await this.postSend(optimisticId);
+  }
+
+  /**
+   * v2.21.5+ 待重发的乐观消息(owner 2026-09-06「网络不好发不出去时给个按钮重发,含图片」):
+   * File 对象只能留在内存里,按乐观气泡 id 存;发成功即删,失败留着给 retrySend 用。
+   * errId = 随失败一起插的「⚠️ 发送失败」提示行,重发/删除时一并撤掉。
+   */
+  private pendingSends = new Map<string, { agent: string; wire: string; files?: File[]; errId?: string }>();
+
+  /** 真正的 POST(含 503 退避重试、slash 直通处理);载荷从 pendingSends 取,重发复用同一份。 */
+  private async postSend(optimisticId: string): Promise<void> {
+    const entry = this.pendingSends.get(optimisticId);
+    if (!entry) return;
+    const { agent, wire, files } = entry;
+    const hasFiles = !!files && files.length > 0;
+    const fail = (why: string) => {
+      const errId = this.nextId();
+      entry.errId = errId;
+      this.produce((s) => {
+        s.streaming = false;
+        s.awaitingChunk = false;
+        const opt = s.messages.find((m) => m.id === optimisticId);
+        if (opt) opt.failed = true; // 气泡标「未送达」+ 重发/删除按钮,别装作已发出
+        s.messages.push({
+          id: errId,
+          role: "assistant",
+          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
+          ts: new Date().toISOString(),
+        });
+      });
+    };
     try {
       let res: Response;
       // multipart：不手动设 Content-Type，浏览器自动带 boundary。抽成函数是因为
@@ -1548,20 +1581,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 发送失败（agent 离线→502 / 超限→400 等）：解锁 + 附错误提示，
         // 别让「停止」按钮 + 思考态一直卡死（此前给离线 agent 发消息就会一直转）。
         const j = (await res.json().catch(() => ({}))) as { error?: string };
-        this.produce((s) => {
-          s.streaming = false;
-          s.awaitingChunk = false;
-          const opt = s.messages.find((m) => m.id === optimisticId);
-          if (opt) opt.failed = true; // 气泡标「未送达」,别装作已发出
-          s.messages.push({
-            id: this.nextId(),
-            role: "assistant",
-            content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${j.error || `HTTP ${res.status}`}`,
-            ts: new Date().toISOString(),
-          });
-        });
+        fail(j.error || `HTTP ${res.status}`);
       }
       else {
+        this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
         // slash 直通（/compact、/context 这类 CC 原生命令走 tmux 注入）：没有常规
         // 回合,不会有 done 事件——立即解除「正在回复」,并插一条系统线告知已注入。
         const j = (await res.json().catch(() => ({}))) as {
@@ -1591,21 +1614,38 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
     } catch (e) {
       const timedOut = (e as Error).name === "TimeoutError";
-      this.produce((s) => {
-        s.streaming = false;
-        s.awaitingChunk = false;
-        const opt = s.messages.find((m) => m.id === optimisticId);
-        if (opt) opt.failed = true; // 气泡标「未送达」,别装作已发出
-        s.messages.push({
-          id: this.nextId(),
-          role: "assistant",
-          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${
-            timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message
-          }`,
-          ts: new Date().toISOString(),
-        });
-      });
+      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message);
     }
+  }
+
+  /** 失败气泡上的「重新发送」:同一气泡挪到列表尾原地重发(附件预览不动),先撤掉错误提示行。 */
+  public async retrySend(id: string): Promise<void> {
+    const entry = this.pendingSends.get(id);
+    if (!entry || entry.agent !== this.state.activeAgent) return;
+    const errId = entry.errId;
+    entry.errId = undefined;
+    this.flushPendingText();
+    this.produce((s) => {
+      const opt = s.messages.find((m) => m.id === id);
+      s.messages = s.messages.filter((m) => m.id !== id && m.id !== errId);
+      if (opt) {
+        opt.failed = false;
+        opt.ts = new Date().toISOString();
+        s.messages.push(opt);
+      }
+      s.streaming = true;
+      s.awaitingChunk = true;
+    });
+    await this.postSend(id);
+  }
+
+  /** 失败气泡上的「删除」:连同错误提示行一起撤掉,放弃这条。 */
+  public discardFailed(id: string): void {
+    const entry = this.pendingSends.get(id);
+    this.pendingSends.delete(id);
+    this.produce((s) => {
+      s.messages = s.messages.filter((m) => m.id !== id && m.id !== entry?.errId);
+    });
   }
 
   // ─── StreamSink 实现 ─────────────────────────────────────

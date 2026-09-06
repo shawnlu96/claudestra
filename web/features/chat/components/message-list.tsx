@@ -957,6 +957,7 @@ const Message = memo(function Message({
     getEl: () => bubbleRef.current,
   }));
   const t = useT();
+  const store = useChatStoreApi();
   // 个人资料：自己的消息(无 from——from 是入站来源标签,别人的消息才带)
   // 旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
   const profile = useChatStore((s) => s.state.profile);
@@ -1015,9 +1016,33 @@ const Message = memo(function Message({
             </div>
           </QuoteSwipe>
         )}
-        {/* v2.15+ 发送失败标记:乐观气泡不能装作已送达(2026-07-27 用户丢消息实锤) */}
+        {/* v2.15+ 发送失败标记:乐观气泡不能装作已送达(2026-07-27 用户丢消息实锤)。
+            v2.21.5+ 带「重新发送 / 删除」按钮(owner 2026-09-06:网络不好时点一下就重发,
+            含图片附件)——载荷留在 store 的 pendingSends 里,同一气泡原地重发。 */}
         {m.failed && (
-          <div className="pr-1 text-[11px] font-medium text-error">⚠️ {t("未送达——请重新发送")}</div>
+          <div className="flex items-center gap-2 pr-1 text-[11px] font-medium text-error">
+            <span>⚠️ {t("未送达")}</span>
+            <button
+              type="button"
+              className="rounded-md border border-error/40 px-2 py-0.5 text-error hover:bg-error/10 active:bg-error/15"
+              onClick={(e) => {
+                e.stopPropagation();
+                void store.retrySend(m.id);
+              }}
+            >
+              ↻ {t("重新发送")}
+            </button>
+            <button
+              type="button"
+              className="px-1 text-base-content/40 hover:text-base-content/70"
+              onClick={(e) => {
+                e.stopPropagation();
+                store.discardFailed(m.id);
+              }}
+            >
+              {t("删除")}
+            </button>
+          </div>
         )}
         {showTs && m.ts && (
           <div className="pr-1 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(m.ts)}</div>

@@ -389,6 +389,8 @@ export const DICT: Record<string, string> = {
   "复制邀请串": "Copy invite",
   "单向（对方→我）": "One-way (them → me)",
   "未送达——请重新发送": "Not delivered — please resend",
+  "未送达": "Not delivered",
+  "重新发送": "Resend",
   "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
   "Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。":
     "Telegram-style document-flow layout: fixes caret/attachment-menu misplacement with the iOS keyboard. Toggle off to restore the original layout if anything glitches.",
