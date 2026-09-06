@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 import { COMPACT_REQUEST_TEXT } from "./ctx-badge";
@@ -146,10 +146,42 @@ const SCOPE_LABEL: Record<string, string> = {
 
 export function Composer() {
   const t = useT();
-  const [text, setText] = useState("");
+  // v2.21.5+ textarea 非受控——React #185(Maximum update depth)的根因(2026-09-06 复现):
+  // 受控写法每个 input 事件都同步提交一次;iOS 听写 / 输入法整段落字 / 长按删除会在
+  // **同一个任务里**连发几十个 input,React 对「同一任务里连续同步提交」计数,≥50 次就抛
+  // #185(事件分散到不同任务则计数归零)。本地 Playwright:60 个同步 input → 60 次提交 →
+  // 必抛;70 个各自成任务 → 不抛。改成:用户输入只写 DOM,状态镜像按帧节流(一帧最多一次
+  // setState,落在 rAF 自己的任务里);程序性写入(选斜杠命令 / 载草稿 / 语音回填 / 发送后
+  // 清空)统一经 setText 同时写 DOM 与状态;要读「此刻」的值一律用 textRef(提交/存盘)。
+  const [text, setTextState] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const textRef = useRef("");
+  const textRafRef = useRef<number | null>(null);
+  const setText = useCallback((v: string | ((prev: string) => string)) => {
+    const next = typeof v === "function" ? v(textRef.current) : v;
+    textRef.current = next;
+    const ta = taRef.current;
+    if (ta && ta.value !== next) ta.value = next;
+    if (textRafRef.current != null) {
+      cancelAnimationFrame(textRafRef.current);
+      textRafRef.current = null;
+    }
+    setTextState(next);
+  }, []);
+  const onTextInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    textRef.current = e.currentTarget.value;
+    if (textRafRef.current == null) {
+      textRafRef.current = requestAnimationFrame(() => {
+        textRafRef.current = null;
+        setTextState(textRef.current);
+      });
+    }
+  };
+  useEffect(() => () => {
+    if (textRafRef.current != null) cancelAnimationFrame(textRafRef.current);
+  }, []);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   // v2.15+ 思考遥测:耗时 + ↓token 跳动(token 在涨 = 模型活着,消除「卡住」错觉)
@@ -250,13 +282,6 @@ export function Composer() {
   // ── 草稿持久化（2026-07-13 owner）：未发送文字按 agent 存 localStorage，
   //    切走会话 / 退出 App 再回来原样恢复；发送成功即清。 ──
   const draftKey = (a: string) => `cstra_draft_${a}`;
-  const textRef = useRef(text);
-  // 在 effect 里赋值而不是 render 期直接写：render 可能被 React 丢弃/重放，
-  // 那样 ref 会留下一个从未提交过的值。这些 ref 只给异步回调（定时器、事件、
-  // 卸载清理）读最新值，effect 在 commit 后同步执行，对它们没有可观察差异。
-  useEffect(() => {
-    textRef.current = text;
-  });
   const saveDraft = (agent: string, value: string) => {
     try {
       if (value.trim()) localStorage.setItem(draftKey(agent), value);
@@ -477,9 +502,11 @@ export function Composer() {
   }, [text]);
 
   const submit = () => {
-    if (!canSend) return;
+    // 读「此刻」的值:状态镜像最多落后一帧,Enter 紧跟最后一个字时不能丢字
+    const cur = textRef.current;
+    if (disabled || (!cur.trim() && files.length === 0)) return;
     // Skill 使用计数埋点(面板排序的频次数据源)——手打 / 和面板选择都覆盖
-    const m = /^\/([\w:-]+)/.exec(text.trim());
+    const m = /^\/([\w:-]+)/.exec(cur.trim());
     if (m) {
       void fetch("/api/skills/prefs", {
         method: "POST",
@@ -487,7 +514,7 @@ export function Composer() {
         body: JSON.stringify({ name: m[1] }),
       }).catch(() => {});
     }
-    store.send(text, files.length ? files : undefined);
+    store.send(cur, files.length ? files : undefined);
     setText("");
     setFiles([]);
     if (active) {
@@ -741,9 +768,9 @@ export function Composer() {
                     ? `${t("发消息给")} ${active}`
                     : `${t("发消息给")} ${active}${t("（Enter 发送）")}`
             }
-            value={text}
+            defaultValue=""
             disabled={disabled}
-            onChange={(e) => setText(e.target.value)}
+            onInput={onTextInput}
             onKeyDown={onKeyDown}
           />
           {/* 按住说话手势层:未聚焦时盖在输入区上——短按补 focus 进打字,按住开录。
