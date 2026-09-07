@@ -23,6 +23,7 @@ export type MetricEvent =
   | "slash_invoked"     // Discord slash command
   | "modal_button"      // TUI modal 按钮点击
   | "agent_completed"   // Stop hook 触发
+  | "reply_nudge"       // v2.22.x Stop hook 拦截补 reply(lib/reply-nudge.ts;meta.chatId = 该回的 chat_id)
   | "agent_interrupt"   // Ctrl+C 发出
   | "agent_clear"       // 远程 /clear 清空会话
   | "auq_submit"        // AskUserQuestion 回传（提交）

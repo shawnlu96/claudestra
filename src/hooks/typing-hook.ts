@@ -48,12 +48,22 @@ async function main() {
       // 必须带超时：try/catch 抓得住"连不上"，抓不住"连上了但不回"。bridge 一旦
       // 卡住（不是挂掉），每个 agent 的每次 Stop hook 都会在这里无限等待，而 hook
       // 是**阻塞 Claude Code 回合收尾**的 —— 等于所有 agent 一起被拖住。
-      await fetch(`http://localhost:${BRIDGE_PORT}/hook`, {
+      const res = await fetch(`http://localhost:${BRIDGE_PORT}/hook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId, event }), // 传递原事件名，不再硬编码 "stop"
+        // 传递原事件名，不再硬编码 "stop"。stopHookActive:Claude Code 标记「本次 Stop
+        // 是因上一次 Stop hook 拦截而续跑后的」,bridge 据此不再二次拦截(lib/reply-nudge.ts)
+        body: JSON.stringify({ channelId, event, stopHookActive: !!data.stop_hook_active }),
         signal: AbortSignal.timeout(5_000),
       });
+      // v2.22.x 补 reply 拦截:bridge 回 {block:true, reason} → 按 Claude Code 的 Stop hook
+      // 契约在 stdout 输出 decision=block,agent 带着 reason 继续这回合去调 reply。
+      if (event === "Stop" && res.ok && (res.headers.get("content-type") || "").includes("application/json")) {
+        const j = (await res.json()) as { block?: boolean; reason?: string };
+        if (j?.block && j.reason) {
+          process.stdout.write(JSON.stringify({ decision: "block", reason: j.reason }) + "\n");
+        }
+      }
     } catch { /* bridge 可能未运行 */ }
   }
 }

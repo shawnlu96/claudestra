@@ -18,7 +18,15 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
  *  会落在滑进指位的**另一行**上,打开错的会话。修法:pointerdown(按下一刻,
  *  重排发生前)记录目标行——那才是用户的真实意图;click 时优先用它。
  *  模块级共享:重排后接住 click 的是别的行实例,必须能读到按下方记录的值。 */
-let tapIntent: { name: string; ts: number } | null = null;
+let tapIntent: { name: string; ts: number; x: number; y: number } | null = null;
+
+/** 列表容器最近一次 scroll 的时刻 / 位置 / 速度(px/s)。tap 兜底据此区分「列表还在
+ *  明显滚,用户是想按停它」与「减速尾巴肉眼已停,iOS 却把 tap 当成接住滚动而丢掉」。 */
+const listScroll = { t: 0, top: 0, v: 0 };
+/** 兜底触发前等 click 的窗口:iOS 合成 click 最迟 ~350ms(双击消歧),留余量。 */
+const TAP_RESCUE_WAIT_MS = 400;
+/** 列表滚速高于此值(且 700ms 内有过 scroll)时不兜底——那是用户按停滚动,不是点行。 */
+const TAP_RESCUE_MAX_V = 200;
 
 /** v2.21+ 方案 A 的沉寂判定:>30 天没真实对话(或从未说话且已停止)。
  *  忙碌的永不算沉寂。30s tick 重渲时会重估,模块级函数与 fmtAgo 同款先例。 */
@@ -170,6 +178,38 @@ function AgentRow({
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
   const busyNow = !!(a.busy || busyLive);
 
+  const lastClickAt = useRef(0);
+  const rescueSuppressUntil = useRef(0);
+  /** 点行的实际动作(click 与 tap 兜底共用)。 */
+  const activate = (intended: string) => {
+    // 多选模式:点行 = 切换选中(不可删的行忽略)
+    if (manage) {
+      if (canRemove) onToggleCheck?.();
+      return;
+    }
+    // 滑开状态下点行 = 收起,不进会话;别的行滑开时点这行 = 收回那行,也不进会话
+    if (swipeX !== 0) {
+      closeSwipe();
+      return;
+    }
+    if (swipeReg.cur) {
+      swipeReg.closeAll();
+      return;
+    }
+    // 两阶段提交(2026-07-24 owner「点上去卡卡的」):openAgent 的
+    // produce(整份 messages 替换 → 30+ 条 markdown 全量渲染)若与
+    // toContent 的横滑 className 同一 commit,重渲染把 commit 拖住
+    // 几百 ms,滑动迟迟不启动,手感=点了没反应然后猛跳。先只提交
+    // 横滑(轻,首帧画出后动画由 compositor 接管,主线程再忙也不掉),
+    // 双 rAF 等首帧落地再灌会话内容。
+    onSelect();
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        void store.openAgent(intended);
+      }),
+    );
+  };
+
   return (
     <li>
       <div className="relative overflow-hidden rounded-lg">
@@ -295,40 +335,38 @@ function AgentRow({
         )}
         <button
           className="relative flex min-w-0 flex-1 items-center gap-2.5 text-left sm:gap-2"
-          onPointerDown={() => {
-            tapIntent = { name: a.name, ts: Date.now() };
+          onPointerDown={(e) => {
+            tapIntent = { name: a.name, ts: Date.now(), x: e.clientX, y: e.clientY };
+          }}
+          onPointerUp={(e) => {
+            // 2026-09-07 真机 [tap-lost] 实锤:列表惯性滚动的最后一帧之后 26ms 点行,
+            // 抬手后列表又爬了 1px,WebKit 把这次触摸当成「接住还在减速的滚动」——
+            // pointerup/touchend 都到了,click 永远不来,用户 0.5s 后再点一次才进。
+            // 兜底:短按(<350ms、位移<10px)抬手后等 TAP_RESCUE_WAIT_MS 仍无 click,
+            // 且列表没在明显滚动,就按点击处理;随后 1s 内真来的 click 忽略防双触发。
+            if (e.pointerType !== "touch") return;
+            const ti = tapIntent;
+            if (!ti || ti.name !== a.name) return;
+            if (Date.now() - ti.ts > 350 || Math.hypot(e.clientX - ti.x, e.clientY - ti.y) > 10) return;
+            if (manage || swipeX !== 0 || swipeReg.cur) return;
+            const downTs = ti.ts;
+            window.setTimeout(() => {
+              if (lastClickAt.current >= downTs) return; // click 正常到了
+              if (listScroll.v > TAP_RESCUE_MAX_V && performance.now() - listScroll.t < 700) return;
+              rescueSuppressUntil.current = Date.now() + 1000;
+              tapIntent = null;
+              store.clientLog(`[tap-rescue] agent row ${a.name} v=${Math.round(listScroll.v)}px/s`);
+              activate(a.name);
+            }, TAP_RESCUE_WAIT_MS);
           }}
           onClick={() => {
+            if (Date.now() < rescueSuppressUntil.current) return; // 兜底已代劳
+            lastClickAt.current = Date.now();
             // 串台守卫:按下一刻的目标优先于闭包值(见文件头 tapIntent 注释)
             const intended =
               tapIntent && Date.now() - tapIntent.ts < TAP_INTENT_TTL_MS ? tapIntent.name : a.name;
             tapIntent = null;
-            // 多选模式:点行 = 切换选中(不可删的行忽略)
-            if (manage) {
-              if (canRemove) onToggleCheck?.();
-              return;
-            }
-            // 滑开状态下点行 = 收起,不进会话;别的行滑开时点这行 = 收回那行,也不进会话
-            if (swipeX !== 0) {
-              closeSwipe();
-              return;
-            }
-            if (swipeReg.cur) {
-              swipeReg.closeAll();
-              return;
-            }
-            // 两阶段提交(2026-07-24 owner「点上去卡卡的」):openAgent 的
-            // produce(整份 messages 替换 → 30+ 条 markdown 全量渲染)若与
-            // toContent 的横滑 className 同一 commit,重渲染把 commit 拖住
-            // 几百 ms,滑动迟迟不启动,手感=点了没反应然后猛跳。先只提交
-            // 横滑(轻,首帧画出后动画由 compositor 接管,主线程再忙也不掉),
-            // 双 rAF 等首帧落地再灌会话内容。
-            onSelect();
-            requestAnimationFrame(() =>
-              requestAnimationFrame(() => {
-                void store.openAgent(intended);
-              }),
-            );
+            activate(intended);
           }}
         >
           {manage && (
@@ -760,7 +798,14 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         // 交互期冻结 roster 重排的信号源(v2.17.2 串台补刀,见 chat-store
         // noteSidebarInteraction):触碰/滚动期间列表顺序不动
         onPointerDown={noteSidebarInteraction}
-        onScroll={() => {
+        onScroll={(e) => {
+          // tap 兜底的滚速信号(见 listScroll)
+          const now = performance.now();
+          const top = e.currentTarget.scrollTop;
+          const dt = now - listScroll.t;
+          listScroll.v = dt > 0 && dt < 500 ? (Math.abs(top - listScroll.top) / dt) * 1000 : 0;
+          listScroll.t = now;
+          listScroll.top = top;
           noteSidebarInteraction();
           swipeReg.closeAll();
         }}

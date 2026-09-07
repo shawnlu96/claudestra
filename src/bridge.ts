@@ -166,6 +166,7 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard, noteSaveCompactInjected } from "./bridge/stats-dashboard.js";
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
+import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents } from "./lib/registry.js";
 import { readProjects } from "./lib/projects.js";
@@ -233,6 +234,8 @@ interface PendingReply {
   targetWs: ServerWebSocket<unknown>;
   /** v2.0.0+: 跟新 router 里的 threadId 一致。老路径 fallback 用 msgId */
   threadId?: string;
+  /** v2.22.x Stop hook 已为这条请求拦过一次「补 reply」——不再拦(lib/reply-nudge.ts) */
+  nudgedAt?: number;
 }
 const pendingReplies = new Map<string, PendingReply>();
 
@@ -3671,10 +3674,31 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
+    }
+
+    // v2.22.x 补 reply 拦截(owner 2026-09-07「agent 总是忘了调 reply」):这回合有
+    // 投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在
+    // 一切 Stop 副作用(done 事件 / 停 typing / 完成 ping / drain / 清 pending)之前
+    // 返回——回合还没完。规则见 lib/reply-nudge.ts。
+    if (event === "Stop") {
+      const ws = clients.get(channelId)?.ws;
+      if (ws) {
+        const cands = [...pendingReplies.entries()]
+          .filter(([, p]) => p.targetWs === ws)
+          .map(([key, p]) => ({ key, ts: p.ts, nudgedAt: p.nudgedAt }));
+        const pick = pickUnrepliedForNudge(cands, { event, stopHookActive: !!body.stopHookActive, now: Date.now() });
+        if (pick) {
+          const p = pendingReplies.get(pick.key);
+          if (p) p.nudgedAt = Date.now();
+          console.log(`🔔 Stop 拦截补 reply: channel=${channelId} 未回复 ${pick.key}(挂起 ${Math.round((Date.now() - pick.ts) / 1000)}s)`);
+          recordMetric("reply_nudge", { agent: await agentLabelForChannelAsync(channelId), meta: { chatId: pick.key } });
+          return Response.json({ block: true, reason: nudgeReason(pick.key) });
+        }
+      }
     }
 
     // 所有 hook 事件都停 typing / 清 safety timer
