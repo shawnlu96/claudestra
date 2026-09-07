@@ -22,7 +22,7 @@ import { ClaudeSwitcher } from "./claude-switcher";
 import { CtxBadge } from "./ctx-badge";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
-import { isNativeShell, installNativeKeyboardPadding } from "@/lib/native";
+import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 function shellLog(msg: string) {
@@ -91,6 +91,7 @@ function reportCommitBurst(d: CommitBurst) {
 }
 if (typeof window !== "undefined") {
   installNativeKeyboardPadding();
+  installNativeStatusBarSync();
   window.addEventListener("cstra:commit-burst", (e) => reportCommitBurst((e as CustomEvent<CommitBurst>).detail));
   // 钩子可能在本模块挂监听之前就抓到过突发——补报暂存的
   try {

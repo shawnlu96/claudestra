@@ -58,6 +58,36 @@ export function nativeServerConfig(): { get: () => Promise<string>; clear: () =>
  * iPhone 是 resize=native,原生已经缩了 WebView,这里不叠加。
  */
 let kbPadInstalled = false;
+/**
+ * v2.22.x 壳状态栏文字颜色跟随 web 主题(owner 2026-09-07「打开应用之后上面看不到
+ * 时间和电量」:capacitor.config 写死 StatusBar.style=DARK,即白字;浅色主题下白字
+ * 贴在浅色顶栏上就「消失」)。Capacitor 的命名反直觉:Style.Dark = 深色背景用的浅色
+ * 字,Style.Light = 浅色背景用的深色字。有效主题 = <html data-theme>(设置里钉住)
+ * 或系统 prefers-color-scheme(auto)。设置切换 / 系统切换 / 回前台都重算一次。
+ */
+export function syncNativeStatusBar(): void {
+  const p = nativePlugin("StatusBar");
+  if (!p || typeof document === "undefined") return;
+  const pinned = document.documentElement.getAttribute("data-theme");
+  const dark = pinned ? pinned === "dark" : !!window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  void p.setStyle?.({ style: dark ? "DARK" : "LIGHT" }).catch(() => {});
+}
+let statusBarBound = false;
+export function installNativeStatusBarSync(): void {
+  if (statusBarBound || typeof window === "undefined" || !isNativeShell()) return;
+  statusBarBound = true;
+  syncNativeStatusBar();
+  try {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncNativeStatusBar);
+  } catch { /* 老 WebKit 没有 addEventListener */ }
+  try {
+    new MutationObserver(syncNativeStatusBar).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  } catch { /* ignore */ }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") syncNativeStatusBar();
+  });
+}
+
 export function installNativeKeyboardPadding(): void {
   if (kbPadInstalled || typeof window === "undefined" || !isNativeShell()) return;
   kbPadInstalled = true;
