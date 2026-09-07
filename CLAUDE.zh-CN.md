@@ -76,6 +76,7 @@ src/
     registry.ts          v2.9+ registry.json 唯一读取器（字段归一含 cwd/dir 兼容）；写入仍只归 manager.ts
     projects.ts          v2.21+ project 数据模型（~/.claude-orchestrator/projects.json）：dirs[] + 按目录归属解析 + id slug；写入只归 manager.ts，bridge 只读
     bg-jobs.ts           v2.7+ bg job 清理配方：杀进程 → 等 daemon 静默 → 隔离目录 → respawn 时 roster 根治（v2.9.1：daemon 的 ~/.claude/daemon/roster.json workers 花名册才是 respawn 权威依据 —— 无其他 worker 受累时 kill worker + transient daemon 并删条目）
+    baseline-keys.ts     v2.22.x bg-activity-watcher 的重启防重放作用域:按 agent×session 记首次进入监视(进程级单标志会把晚进入的 agent 存量 subagent 全量重播成「运行中」,2026-09-07 peer 报 109 张幽灵卡)
     session-archive.ts   v2.8+ 会话退役归档：kill/fork 换代/adopt/resume 换 session 时快照 jsonl 到 ~/.claude-orchestrator/archive/<agent>/（对抗 CC cleanupPeriodDays）
     session-history.ts   v2.9+ 只读历史解析：live + 归档 jsonl → 中性分页消息，支撑 GET /api/v1/agents/:name/history
   ansi2html.ts           ANSI 转义码 → 彩色 HTML
@@ -89,6 +90,7 @@ tests/                     只覆盖纯逻辑（实时数量以 `bun test` 为�
   agent-stats.test.ts      按 agent 的用量汇总，compact 感知
   ask-user-question.test.ts TUI 里的 AskUserQuestion 识别 + 按键合成
   bg-jobs.test.ts          Claude Code bg job 清理配方（roster 根因修复）
+  baseline-keys.test.ts    v2.22.x bg-activity baseline 作用域:同 agent-session 只 baseline 一次、换 session 重新 baseline、prune 按 agent 名
   claude-launch.test.ts    启动 flag 构造：权限模式、effort、模型别名
   cron.test.ts             Cron 解析器 + 调度器
   doctor.test.ts           v2.14+ 安装体检：daemon 退出码判定 + 报告排版

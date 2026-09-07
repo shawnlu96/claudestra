@@ -18,8 +18,11 @@
  * 没有权威的"完成"落盘标记，等主 session 的 tool_result 匹配过于耦合；display
  * 通道晚归档几分钟无伤大雅。
  *
- * 重启防重放：启动后第一轮 poll 只记 baseline（已存在的文件全部标记 seen 不开流），
- * 之后只对新出现的文件开活动 —— bridge 重启不会把历史 subagent 全部重播一遍。
+ * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 只记 baseline（已存在的
+ * 文件全部标记 seen 不开流），之后只对新出现的文件开活动 —— bridge 重启不会把历史
+ * subagent 全部重播一遍。作用域是 agent × session 而不是进程（lib/baseline-keys.ts，
+ * 2026-09-07 peer 报 109 张幽灵卡：进程级单标志下，首轮 tick 时 sessionId 还没写回
+ * registry 的 agent，22 分钟后进入列表时存量 109 个 subagent jsonl 全被开成「运行中」）。
  */
 
 import { existsSync } from "fs";
@@ -32,6 +35,7 @@ import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
 import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
+import { BaselineKeys } from "../lib/baseline-keys.js";
 
 const POLL_MS = 10_000;
 const FLUSH_MS = 2_500; // 子区推送 debounce（Discord 限速友好）
@@ -80,7 +84,8 @@ const seen = new Set<string>();
 /** shell 候选（等待 jsonl 确认是真 bg 任务）：filePath → 首见时间 */
 const shellCandidates = new Map<string, number>();
 const SHELL_CONFIRM_TIMEOUT_MS = 60_000;
-let baselined = false;
+/** 按 agent-session 记「首次进入监视」——见文件头「重启防重放」 */
+const baseline = new BaselineKeys();
 let ticking = false; // tick 重入保护：首轮 baseline 超过 POLL_MS 时 interval 会并发进入
 let tickCount = 0;
 
@@ -337,10 +342,10 @@ async function tick(): Promise<void> {
 
 async function tickInner(): Promise<void> {
   const agents = await watchableAgents();
-  const first = !baselined;
-  baselined = true;
 
   for (const agent of agents) {
+    // 该 agent-session 首次被扫到 → 本轮只记存量(baseline),不开流
+    const first = baseline.first(agent.name, agent.sessionId);
     const subFiles = await listFiles(subagentsDirFor(agent.cwd, agent.sessionId), ".jsonl");
     const shellFiles = await listFiles(shellTasksDirFor(agent.cwd, agent.sessionId), ".output");
     for (const [kind, files] of [["subagent", subFiles], ["shell", shellFiles]] as const) {
@@ -387,6 +392,10 @@ async function tickInner(): Promise<void> {
   // seen 集合瘦身（约每小时一次）：源文件已被清理的条目不会再出现，安全移除
   if (++tickCount % 360 === 0) {
     for (const f of seen) if (!existsSync(f)) seen.delete(f);
+    // baseline key 同步瘦身:按 registry 在册 agent 名过滤(不按 session,见 BaselineKeys.prune)
+    try {
+      baseline.prune((await readActiveAgents()).map((a) => a.name));
+    } catch { /* registry 读失败:下小时再试 */ }
   }
 }
 

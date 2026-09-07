@@ -91,6 +91,7 @@ src/
     registry.ts          v2.9+ single reader for ~/.claude-orchestrator/registry.json (field normalization incl. cwd/dir compat); manager.ts stays the sole writer
     projects.ts          v2.21+ project data model (~/.claude-orchestrator/projects.json): dirs[] + resolveProjectForDir + id slugify; manager.ts is the sole writer, bridge reads only
     bg-jobs.ts           v2.7+ Claude Code bg job cleanup recipe: kill → wait daemon quiescent → quarantine job dir → on respawn, roster root-fix (v2.9.1: daemon's ~/.claude/daemon/roster.json workers list is the respawn authority — kill worker + transient daemon + drop the entry, only when no other worker would be affected)
+    baseline-keys.ts     v2.22.x bg-activity-watcher 的重启防重放作用域:按 agent×session 记首次进入监视(进程级单标志会把晚进入的 agent 存量 subagent 全量重播成「运行中」,2026-09-07 peer 报 109 张幽灵卡)
     session-archive.ts   v2.8+ session jsonl snapshot on retirement (kill / fork rotation / adopt / resume-replace) → ~/.claude-orchestrator/archive/<agent>/ — counters CC cleanupPeriodDays
     session-history.ts   v2.9+ read-only history parsing: live + archived session jsonl → neutral paginated messages, backs GET /api/v1/agents/:name/history
   ansi2html.ts           ANSI escape codes → coloured HTML
@@ -105,6 +106,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   agent-stats.test.ts      Per-agent usage rollup, compact-aware
   ask-user-question.test.ts AskUserQuestion detection in the TUI + keystroke synthesis
   bg-jobs.test.ts          Claude Code bg job cleanup recipe (roster root-fix)
+  baseline-keys.test.ts    v2.22.x bg-activity baseline 作用域:同 agent-session 只 baseline 一次、换 session 重新 baseline、prune 按 agent 名
   claude-launch.test.ts    Launch-flag builder: permission modes, effort, model aliases
   cron.test.ts             Cron parser + scheduler
   doctor.test.ts           v2.14+ install health-check: daemon exit classification + report formatting
