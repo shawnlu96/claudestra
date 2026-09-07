@@ -1093,6 +1093,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const frames = (new Error().stack || "").split("\n").slice(2, 5).map((l) =>
         l.trim().replace(/^at\s+/, "").replace(/\(?https?:\/\/[^/]+\/_next\/static\/chunks\//, "(").replace(/^async\s+/, "")
       );
+      // 给 layout.tsx 的卡顿/触摸探针一个不经 React 的上下文位:当前是否在流式
+      if (before.streaming !== after.streaming) document.documentElement.setAttribute("data-streaming", after.streaming ? "1" : "0");
       const trail = (w.__cstraProduceTrail ||= []);
       trail.push({ t: performance.now(), keys, by: frames.join(" < ") });
       if (trail.length > 60) trail.splice(0, trail.length - 60);
