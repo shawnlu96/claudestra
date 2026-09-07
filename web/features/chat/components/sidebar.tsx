@@ -746,12 +746,16 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       {/* 开启推送引导（已具备推送能力且没问过权限时显示,与安装引导天然互斥） */}
       <PushBanner />
 
+      {/* 2026-09-07 contain→none：去掉列表自身的橡皮筋回弹（WebKit 把 overscroll-behavior
+          映射到 UIScrollView.bounces）。甩到底/顶后按住 agent 行时列表停在过滚动位置，
+          松手才回弹，行在 WebKit 提交 tap 前挪走 → click 丢弃——消息区 edge=29/29 实锤同款，
+          owner「agent 切换页偶尔点了没反应」大概率就是它。 */}
       {/* touch-pan-y + overscroll-contain：iOS 到边界时滚动链会穿透到不可滚的
           fixed 应用壳，橡皮筋吃掉手势看着像「滑不动」（BgLines 同款修法）。 */}
       <div
         // select-none + touch-callout none:长按会话行是想看操作/滑动,不是选文本
         // (owner 2026-09-02);列表一滚动就把滑开的行收回(微信同款)
-        className="flex-1 touch-pan-y select-none overflow-y-auto overscroll-contain px-2 pb-3 [-webkit-touch-callout:none]"
+        className="flex-1 touch-pan-y select-none overflow-y-auto overscroll-none px-2 pb-3 [-webkit-touch-callout:none]"
         style={{ WebkitOverflowScrolling: "touch" }}
         // 交互期冻结 roster 重排的信号源(v2.17.2 串台补刀,见 chat-store
         // noteSidebarInteraction):触碰/滚动期间列表顺序不动
