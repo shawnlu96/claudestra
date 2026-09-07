@@ -1319,6 +1319,23 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 重连流（openStream 连上后 BFF /pending 补 thinking 态，把 composer 锁态也校准：
    * 仍在回合则重锁「停止」，已结束则保持解锁）。
    */
+  /** 回前台判活探针(见 maybeReconnect 判活守卫注释):12s 内一个字节都没到就
+   *  判死走快路径重连。同一时刻只有一枚;期间流换代 / 切 agent / 又进后台则作废。 */
+  private resumeProbe: ReturnType<typeof setTimeout> | null = null;
+  private armResumeProbe(name: string) {
+    if (this.resumeProbe) return;
+    const mark = this.lastStreamByteAt;
+    const gen = this.streamGen;
+    this.resumeProbe = setTimeout(() => {
+      this.resumeProbe = null;
+      if (gen !== this.streamGen || this.state.activeAgent !== name) return;
+      if (this.lastStreamByteAt !== mark) return; // 期间有字节,流确实活着
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      this.clientLog(`resume-probe: 回前台 12s 无字节,判死重连 agent=${name}`);
+      this.maybeReconnect({ fast: true });
+    }, 12_000);
+  }
+
   /** v2.17.2+ 顶栏「同步失败」pill 的点按重试:整链强制对齐(重拉历史+重连流)。 */
   public retrySync() {
     this.maybeReconnect({ force: true });
@@ -1330,7 +1347,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // v2.17.2 风暴地板(peer 报告:watchdog/哨兵/visibility/openAgent(same) 多个
     // 触发源在坏网络下 1-3s 一发互相叠加,每发都 detach+新建连接,配合 iOS 连接
     // 泄漏就是自激循环)。900ms 内只放行一次——自然死亡退避最短 1s,不受影响。
-    if (Date.now() - this.lastReconnectAt < 900) return;
+    // force(点推送 / 重点当前会话)是用户动作不是风暴,只挡 300ms 内的双派发
+    // (插件 pushNotificationActionPerformed 与 ?agent= 深链两路都会 openAgent)。
+    // 2026-09-07 owner「推送比消息先到,消息过一会才来」排查:visibility 的快路径
+    // 抢先 100ms 开跑,force 被 900ms 地板整个吞掉——推送点入的「全量/差量对齐」
+    // 语义(2026-07-25 定)从 v2.17.2 起实际从未生效。
+    if (Date.now() - this.lastReconnectAt < (opts?.force ? 300 : 900)) return;
     // v2.17.2 在飞历史让路(peer 终局定案:慢中继上 448KB 历史要下载很久,期间
     // sentinel 又判流失联触发 full reconnect → openGen 自增把在飞下载作废重来,
     // AbortError 自激循环「历史永远拉不完」)。同 agent 的历史请求还新鲜(<25s,
@@ -1359,7 +1381,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.streamAgent === name &&
       Date.now() - this.lastStreamByteAt < 30_000
     ) {
-      return;
+      // iOS 壳 / PWA 的后台 = 整个 WebView 挂起:流不是「活着」是「冻着」,恢复
+      // 后多半已被系统掐断却不报错。桌面后台 tab 的流照常收心跳(10s 一发),
+      // 所以「后台 ≥12s 且期间一个字节都没到」只有挂起才会发生 → 视为死流直接
+      // 重连(快路径带 since,无损)。后台 <12s 判不了 → 布一次 12s 探针:回前台
+      // 一个心跳周期仍无字节就判死,别空等 25s 看门狗。owner 2026-09-07「推送比
+      // 消息先到,消息还要过一会才来」:推送到达那一刻流已死,页面在等看门狗。
+      const silentSinceHidden = this.hiddenAt > 0 && this.lastStreamByteAt < this.hiddenAt;
+      if (!(silentSinceHidden && Date.now() - this.hiddenAt >= 12_000)) {
+        this.armResumeProbe(name);
+        return;
+      }
+      this.clientLog(`resume: 后台 ${Math.round((Date.now() - this.hiddenAt) / 1000)}s 无字节,视为死流重连 agent=${name}`);
     }
     this.lastReconnectAt = Date.now(); // 恢复链开跑——流失联哨兵据此让路
     // v2.17.2 对齐横幅:过完早退守卫 = 真的要动手(快路径重连流/差量/全量都算),

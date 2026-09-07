@@ -564,6 +564,9 @@ function ChatInner() {
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
     window.addEventListener("pageshow", onVisible);
+    // layout.tsx 心跳脚本在定时器漂移 >5s(整页被 iOS 冻结过)时派发:锁屏/切换器
+    // 回来有时三个事件一个都不发(09-07 [suspend] 实证),这里是最后一道唤醒
+    window.addEventListener("cstra-resume", onVisible);
     // 轮询感知本端之外的 roster 变化（master/CLI/其他端 创建/kill/restart agent）——
     // 无实时事件可挂，只能轮询；仅前台，diff-guard 只在列表真变时才 re-render。
     // ⚠ 间隔受 Bridge 限流约束：web-ui token 限 30 req/min（bridge.ts SlidingWindowLimiter，
@@ -577,6 +580,7 @@ function ChatInner() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
       window.removeEventListener("pageshow", onVisible);
+      window.removeEventListener("cstra-resume", onVisible);
       clearInterval(poll);
     };
   }, [store]);
