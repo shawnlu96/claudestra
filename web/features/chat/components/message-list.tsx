@@ -1130,6 +1130,11 @@ export function MessageList() {
   // follow 语义(上滑退出吸底)不变。snapRef 由 RO effect 填,吸底位移不算用户上滑。
   const touchHoldRef = useRef(0);
   const snapRef = useRef<(() => void) | null>(null);
+  /** 收键盘(见容器 JSX 注释):只在滚动意图与点击完成后调,绝不在 touchstart。 */
+  const blurComposerIfFocused = () => {
+    const ae = document.activeElement;
+    if (ae instanceof HTMLElement && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT")) ae.blur();
+  };
   const releaseTouchHold = (e: { touches: { length: number } }) => {
     if (e.touches.length) return; // 还有手指没抬
     touchHoldRef.current = Date.now() + TOUCH_HOLD_MS;
@@ -1292,9 +1297,12 @@ export function MessageList() {
 
   return (
     // touch-pan-y + overscroll-contain：到边界时滚动链穿透到不可滚的应用壳被
-    // 橡皮筋吃手势（同 sidebar 修法）。onTouchStart 收键盘：iOS 在 transform
-    // 祖先下滚动聚焦中的输入框，光标会脱离输入框画在消息区里（2026-07-13 截图）
-    // ——触摸消息区即 blur，与主流聊天 App 行为一致。
+    // 橡皮筋吃手势（同 sidebar 修法）。收键盘：iOS 在 transform 祖先下滚动聚焦中的
+    // 输入框，光标会脱离输入框画在消息区里（2026-07-13 截图）——触摸消息区即 blur，
+    // 与主流聊天 App 行为一致。⚠ 不能在 touchstart 收（2026-09-07 真机 [tap-lost]：
+    // 键盘开着时 6ms 轻触消息区，元素没动、点位没变，却没有 click——按下瞬间 blur
+    // 让键盘开始收起，WebKit 待提交的 tap 随之作废）。改为滚动意图(touchmove)时收、
+    // 点击完成(click)后收：滚动场景光标 bug 照样被挡，点击场景 click 先派发再收键盘。
     <div
       ref={scrollerRef}
       id="cstra-msgs"
@@ -1302,14 +1310,12 @@ export function MessageList() {
       style={{ WebkitOverflowScrolling: "touch" }}
       onTouchStart={() => {
         touchHoldRef.current = Infinity; // 手指按着:吸底冻结(见 touchHoldRef 注释)
-        const ae = document.activeElement;
-        if (ae instanceof HTMLElement && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT")) {
-          ae.blur();
-        }
       }}
+      onTouchMove={blurComposerIfFocused}
       onTouchEnd={releaseTouchHold}
       onTouchCancel={releaseTouchHold}
       onClick={(e) => {
+        blurComposerIfFocused(); // 点击已派发,现在收键盘不影响这次点击
         // 行内代码点击即复制(owner 2026-07-28「小 code block 也要能复制」)。
         // 大代码块(pre 内)有 do-md 自带的复制按钮,不抢;点在链接上不抢;
         // 用户正在选字(划选后松手也触发 click)不抢。
