@@ -17,6 +17,9 @@ import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inl
 import { inlineButtonsToText, plainLabel } from "@/lib/chat/inline-buttons";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 
+/** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
+const TOUCH_HOLD_MS = 500;
+
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
    user 右对齐圆角矩形，工具调用 active（转圈）/ history（可展开）两态。
    配色走 daisyUI token 跟随明暗主题：✦ 头用 accent，工具活动用 info。 */
@@ -1118,6 +1121,23 @@ export function MessageList() {
   const browsing = useChatStore((s) => s.state.browsing);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
+  // 触摸期吸底冻结(2026-09-07 真机 [tap-lost] ×2 + WebKit 源码 WebPageCocoa.mm
+  // commitPotentialTap):iOS 合成 click 分两步——按下时记下点位的响应节点,抬手后
+  // 在同一点重新命中测试,节点不同就 commitPotentialTapFailed,click 根本不派发。
+  // 流式期间 ResizeObserver 逐帧 scrollTop=scrollHeight 推着内容走,手指按住的
+  // 工具行在抬手前已经挪位 → 「点了没反应」。手指在屏幕上 + 抬起后 TOUCH_HOLD_MS
+  // 内不吸底(值 = Infinity 表示仍按着),抬手后由 releaseTouchHold 补一次;
+  // follow 语义(上滑退出吸底)不变。snapRef 由 RO effect 填,吸底位移不算用户上滑。
+  const touchHoldRef = useRef(0);
+  const snapRef = useRef<(() => void) | null>(null);
+  const releaseTouchHold = (e: { touches: { length: number } }) => {
+    if (e.touches.length) return; // 还有手指没抬
+    touchHoldRef.current = Date.now() + TOUCH_HOLD_MS;
+    window.setTimeout(() => {
+      if (Date.now() < touchHoldRef.current) return; // 期间又按下了
+      if (followRef.current && !isSelectMode()) snapRef.current?.();
+    }, TOUCH_HOLD_MS + 20);
+  };
   /** 搜索跳转的命中气泡短暂高亮(id;动画一遍后清)。 */
   const [flashId, setFlashId] = useState<string | null>(null);
   /** 行内代码点击复制的浮标(tap 点视口坐标;portal 到 body——移动端会话页在
@@ -1212,9 +1232,10 @@ export function MessageList() {
     // （2026-07-13 真机）。awaiting=true 是自己刚发送 → 仍然滚底。
     if (isSelectMode()) return; // 正在选字：滚一下选区就没了
     if (!followRef.current && !awaiting) return;
+    followRef.current = true;
+    if (Date.now() < touchHoldRef.current) return; // 抬手后 releaseTouchHold 补吸底
     const el = scrollerRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    followRef.current = true;
   }, [messages.length, awaiting, pendingPermission, pendingAsk, bgTaskCount]);
 
   useEffect(() => {
@@ -1230,17 +1251,21 @@ export function MessageList() {
       followRef.current = !up && el.scrollHeight - el.scrollTop - el.clientHeight < 90;
     };
     el.addEventListener("scroll", onScroll);
+    const snap = () => {
+      el.scrollTop = el.scrollHeight;
+      lastTop = el.scrollTop; // 吸底自身的位移不算「用户上滑」
+    };
+    snapRef.current = snap;
     const ro = new ResizeObserver(() => {
       if (isSelectMode()) return; // 同上：选字期间新内容长高也不吸底
-      if (followRef.current) {
-        el.scrollTop = el.scrollHeight;
-        lastTop = el.scrollTop; // 吸底自身的位移不算「用户上滑」
-      }
+      if (Date.now() < touchHoldRef.current) return; // 手指在屏幕上:见 touchHoldRef 注释
+      if (followRef.current) snap();
     });
     ro.observe(inner);
     return () => {
       el.removeEventListener("scroll", onScroll);
       ro.disconnect();
+      snapRef.current = null;
     };
   }, [active]);
 
@@ -1276,11 +1301,14 @@ export function MessageList() {
       className="flex-1 touch-pan-y overflow-y-auto overscroll-contain"
       style={{ WebkitOverflowScrolling: "touch" }}
       onTouchStart={() => {
+        touchHoldRef.current = Infinity; // 手指按着:吸底冻结(见 touchHoldRef 注释)
         const ae = document.activeElement;
         if (ae instanceof HTMLElement && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT")) {
           ae.blur();
         }
       }}
+      onTouchEnd={releaseTouchHold}
+      onTouchCancel={releaseTouchHold}
       onClick={(e) => {
         // 行内代码点击即复制(owner 2026-07-28「小 code block 也要能复制」)。
         // 大代码块(pre 内)有 do-md 自带的复制按钮,不抢;点在链接上不抢;
