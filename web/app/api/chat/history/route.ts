@@ -235,6 +235,23 @@ export async function GET(request: Request) {
     // 先做廉价轮转检测:pinned 不再是最新 session(/clear、restart 轮转过)
     // → 返回 rotated,客户端改走全量——差量钉在老 session 上只会永远拉空,
     // 新会话的内容一条也看不见。
+    // browse=1(2026-09-08 owner「搜到某条后应该能上下翻看附近的记录」):历史现场
+    // 里向下翻——钉在命中 session 拉 seq 之后的一页,不做轮转检测(现场本来就
+    // 钉在老 session 上),不带尾语义(不是全局尾,完成标记不渲染)。
+    const browse = url.searchParams.get("browse") === "1";
+    if (after && /^\d+$/.test(after) && pinnedSession && browse) {
+      const page = await bridgeGet<{ ok: boolean; messages: NeutralMessage[] }>(
+        `/agents/${name}/history/${encodeURIComponent(pinnedSession)}?limit=300&after=${after}`,
+        { timeoutMs: 10_000 }
+      );
+      const items = page.messages || [];
+      return NextResponse.json({
+        data: slimForWire(toChatMessages(items, { tail: false })),
+        sessionId: pinnedSession,
+        lastSeq: items.length ? items[items.length - 1].seq : Number(after),
+        hasMore: items.length >= 300,
+      });
+    }
     if (after && /^\d+$/.test(after) && pinnedSession) {
       const list = await bridgeGet<{ ok: boolean; sessions: { sessionId: string }[] }>(
         `/agents/${name}/history`,

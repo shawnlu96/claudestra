@@ -129,6 +129,9 @@ interface ChatState {
   streamDown: boolean;
   /** 服务端还有更早的历史可翻(向上分页,owner 2026-07-16)。 */
   historyHasMore: boolean;
+  /** 历史现场向下还有更晚的消息(2026-09-08 搜索命中后上下翻看) */
+  historyNewerHasMore: boolean;
+  loadingNewer: boolean;
   /** 正在向上翻页加载更早消息。 */
   loadingOlder: boolean;
   /** 本轮流式进行中 */
@@ -216,6 +219,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       syncState: null,
       streamDown: false,
       historyHasMore: false,
+      historyNewerHasMore: false,
+      loadingNewer: false,
       loadingOlder: false,
       historyError: false,
       streaming: false,
@@ -590,6 +595,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 翻页态是 per-agent 的:不重置的话上一会话的「还有更早」残留到新会话
       // (loadOlder 有 historySessionId 钉住不会误翻,但按钮/哨兵会鬼影)
       s.historyHasMore = false;
+      s.historyNewerHasMore = false;
+      s.loadingNewer = false;
       s.loadingOlder = false;
       s.historyError = false;
       s.streaming = false;
@@ -722,6 +729,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.streamDown = false; // 流是刻意断开的,不是故障
       s.historyError = false;
       s.historyHasMore = false;
+      s.historyNewerHasMore = false;
+      s.loadingNewer = false;
       s.loadingOlder = false;
       s.streaming = false;
       s.awaitingChunk = false;
@@ -739,6 +748,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.produce((s) => {
         s.messages = hydrateHistoryMessages(json.data ?? []);
         s.historyHasMore = !!json.hasMore;
+        // 向下是否还有更晚的,首屏判不了(窗口只取到命中后 ~25 条),先亮按钮,
+        // 第一次 loadNewer 拉空即收
+        s.historyNewerHasMore = true;
+        s.loadingNewer = false;
         s.loadingHistory = false;
       });
     } catch (e) {
@@ -746,6 +759,49 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.clientLog(`jumpToContext 失败 agent=${name} sid=${sessionId} seq=${seq}: ${(e as Error).message}`);
       // 跳转失败别把人留在空视图里,退回最新
       void this.returnToLatest();
+    }
+  }
+
+  /** 历史现场向下翻页(owner 2026-09-08「搜到某条后应该能上下翻看附近的记录,现在只有
+   *  回到底部」):钉在命中 session,拉本视图最后一条历史消息 seq 之后的一页追加到
+   *  尾部;拉空即到头(按钮收起)。跨 session 的「更晚」不接——回到最新就是。 */
+  public async loadNewer() {
+    const name = this.state.activeAgent;
+    const browsing = this.state.browsing;
+    if (!name || !browsing || this.state.loadingNewer || !this.state.historyNewerHasMore) return;
+    const sid = browsing.sessionId;
+    // 本 session 的历史气泡 id 是裸 h<seq>(接上来的更旧 session 带 ~ns 后缀)
+    let afterSeq = -1;
+    for (const m of this.state.messages) {
+      const mm = /^h(\d+)$/.exec(m.id);
+      if (mm) afterSeq = Math.max(afterSeq, Number(mm[1]));
+    }
+    if (afterSeq < 0) return;
+    const gen = this.openGen;
+    this.produce((s) => {
+      s.loadingNewer = true;
+    });
+    try {
+      const res = await fetch(
+        `/api/chat/history?agent=${encodeURIComponent(name)}&after=${afterSeq}&session=${encodeURIComponent(sid)}&browse=1`,
+        { signal: AbortSignal.timeout(30_000) }
+      );
+      if (res.status === 401) return this.gotoLogin();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { data?: ChatMessage[]; hasMore?: boolean };
+      if (gen !== this.openGen) return;
+      const msgs = hydrateHistoryMessages(json.data ?? []);
+      this.produce((s) => {
+        if (msgs.length) s.messages = [...s.messages, ...msgs];
+        s.historyNewerHasMore = msgs.length > 0 && !!json.hasMore;
+        s.loadingNewer = false;
+      });
+    } catch {
+      if (gen === this.openGen) {
+        this.produce((s) => {
+          s.loadingNewer = false;
+        });
+      }
     }
   }
 
@@ -763,6 +819,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.syncState = null;
       s.streamDown = false;
       s.historyHasMore = false;
+      s.historyNewerHasMore = false;
+      s.loadingNewer = false;
       s.loadingOlder = false;
       s.historyError = false;
     });

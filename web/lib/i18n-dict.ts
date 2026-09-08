@@ -169,6 +169,7 @@ export const DICT: Record<string, string> = {
   "加载历史消息…": "Loading history…",
   "历史加载失败": "Failed to load history",
   "加载更早的消息…": "Load earlier messages…",
+  "加载更晚的消息…": "Load later messages…",
   "返回会话列表": "Back to session list",
   "当前会话上下文占用(建议在对话里让 agent /compact)": "Context usage of this session (ask the agent to /compact)",
   "Agent 管理(生命周期操作,不经过 LLM)": "Agent management (lifecycle ops, no LLM)",

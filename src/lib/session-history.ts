@@ -14,6 +14,7 @@
 
 import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
+import { StringDecoder } from "string_decoder";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
@@ -721,65 +722,71 @@ function makeSnippet(text: string, lowerText: string, q: string): string {
  * 正文提取 + 二次确认（预筛可能命中在工具参数/JSON key 上）。53MB 的 jsonl
  * 预筛一遍远快于全量 parse。
  */
+/** 流式 grep:按固定 chunk 读文件,只产出小写后含 q 的整行及其全文件行号(见 searchSessionHistory 注释)。 */
+async function* grepJsonlLines(
+  filePath: string,
+  q: string,
+  chunkBytes = 8 * 1024 * 1024,
+): AsyncGenerator<{ line: string; idx: number }> {
+  const size = Math.max(64, Math.floor(chunkBytes));
+  const fh = await fsOpen(filePath, "r");
+  try {
+    const buf = Buffer.alloc(size);
+    const decoder = new StringDecoder("utf8");
+    let pos = 0;
+    let lineIdx = 0; // 已完整产出/数过的行数 = 下一行的全文件行号
+    let carry = "";
+    for (;;) {
+      const { bytesRead } = await fh.read(buf, 0, size, pos);
+      if (bytesRead <= 0) break;
+      pos += bytesRead;
+      const text = carry + decoder.write(buf.subarray(0, bytesRead));
+      const lastNl = text.lastIndexOf("\n");
+      if (lastNl < 0) {
+        carry = text;
+        continue;
+      }
+      const body = text.slice(0, lastNl + 1);
+      carry = text.slice(lastNl + 1);
+      if (body.toLowerCase().includes(q)) {
+        const lines = body.split("\n"); // 末尾恒为 ""(body 以 \n 结尾)
+        for (let i = 0; i < lines.length - 1; i++) {
+          const l = lines[i];
+          if (l.trim() && l.toLowerCase().includes(q)) yield { line: l, idx: lineIdx + i };
+        }
+        lineIdx += lines.length - 1;
+      } else {
+        let at = -1;
+        while ((at = body.indexOf("\n", at + 1)) !== -1) lineIdx++;
+      }
+    }
+    const tail = carry + decoder.end();
+    if (tail.trim() && tail.toLowerCase().includes(q)) yield { line: tail, idx: lineIdx };
+  } finally {
+    await fh.close();
+  }
+}
+
 export async function searchSessionHistory(
   filePath: string,
   query: string,
-  opts: { maxHits?: number; maxFullScanBytes?: number } = {},
+  opts: { maxHits?: number; maxFullScanBytes?: number; chunkBytes?: number } = {},
 ): Promise<HistorySearchHit[]> {
   const maxHits = Math.max(1, Math.min(100, Math.floor(opts.maxHits ?? 20)));
   const q = query.toLowerCase();
   if (!q) return [];
-  // 体积闸：本函数会同时持有 raw / lowerRaw / lines / lowerLines 四份数据，峰值
-  // 约等于文件大小的 4 倍；而调用方（GET /history/search）是 6 路并发扫遍每个
-  // agent 的 live + 归档会话。本机最大的 session jsonl 已经 96MB，一次点击就能
-  // 把 bridge 推到 GB 级峰值。超过阈值的文件只扫尾部 —— 搜索本就是找最近说过
-  // 什么，越老的内容越不需要全文命中。
-  const MAX_FULL_SCAN_BYTES = opts.maxFullScanBytes ?? 16 * 1024 * 1024;
-  const _f = Bun.file(filePath);
-  const _size = _f.size;
-  // ⚠ seq 是「全文件行号」,与 readSessionHistory 同坐标系——搜索跳转按它开历史
-  // 窗口。只扫尾部时行号从切片起点重数就整体错位(2026-07-27 跳转实测),必须先
-  // 数出被跳过前缀里的换行数作基准。fs 句柄 + 8MB 复用缓冲循环读(Buffer.indexOf
-  // 是 memchr 级),百 MB 前缀几十 ms、零大字符串。⚠ 不要用 Blob.slice().stream()
-  // ——实测在 100MB 级文件上病理性慢(2min+ 不返回)。前缀最后一个不完整行与尾片
-  // 首行拼成同一行,行号恰为 lineOffset,该行 JSON.parse 必失败被跳过,坐标无损。
-  let lineOffset = 0;
-  let raw: string;
-  if (_size > MAX_FULL_SCAN_BYTES) {
-    const cut = _size - MAX_FULL_SCAN_BYTES;
-    const fh = await fsOpen(filePath, "r");
-    try {
-      const buf = Buffer.alloc(8 * 1024 * 1024);
-      let pos = 0;
-      while (pos < cut) {
-        const { bytesRead } = await fh.read(buf, 0, Math.min(buf.length, cut - pos), pos);
-        if (bytesRead <= 0) break;
-        let at = -1;
-        const view = bytesRead === buf.length ? buf : buf.subarray(0, bytesRead);
-        while ((at = view.indexOf(10, at + 1)) !== -1) lineOffset++;
-        pos += bytesRead;
-      }
-    } finally {
-      await fh.close();
-    }
-    raw = await _f.slice(cut).text();
-  } else {
-    raw = await _f.text();
-  }
-  // 性能梯次（2026-07-14 owner:「先把免费优化做了」）：
-  // ① 文件级预筛——整个文件不含词直接出局，多数归档文件在这里零解析返回；
-  // ② 单次 toLowerCase——53MB 文件逐行 toLowerCase 是 10 万次小分配 + GC 压力，
-  //    整体一次快得多。\n 无大小写形态，两个 split 的行号严格对齐（个别 Unicode
-  //    字符 lower 后长度会变，但只影响行内 offset，不影响行对齐与 includes 判断）。
-  const lowerRaw = raw.toLowerCase();
-  if (!lowerRaw.includes(q)) return [];
-  const lines = raw.split("\n");
-  const lowerLines = lowerRaw.split("\n");
+  // 2026-09-08 起全文流式扫描(owner:「明明聊过 DB9,搜不出来」——gc-car 会话 243MB,
+  // 旧实现超过 16MB 只扫尾部 16MB,7～9 月的讨论在 209～215MB 处永远搜不到)。
+  // 旧实现一次持有 raw / lowerRaw / lines / lowerLines 四份 = 文件 4 倍内存,才不得
+  // 不切尾;现在 fs 句柄 + 固定 chunk 循环读:每块先整体 toLowerCase 预筛,不含词的
+  // 块只数换行(绝大多数块在此出局,零 split),含词的块才按行拆、逐行判定;跨块的
+  // 半行接到下一块开头(StringDecoder 同时兜住被切开的 UTF-8 多字节)。峰值内存
+  // ≈ 3×chunk,与文件大小无关;seq 仍是全文件行号(搜索跳转按它开历史窗口)。
+  // opts.maxFullScanBytes 已无意义,保留只为兼容旧调用方。
   const hits: HistorySearchHit[] = [];
 
-  for (let i = 0; i < lines.length && hits.length < maxHits; i++) {
-    const line = lines[i];
-    if (!line.trim() || !lowerLines[i].includes(q)) continue;
+  for await (const { line, idx } of grepJsonlLines(filePath, q, opts.chunkBytes)) {
+    if (hits.length >= maxHits) break;
     let rec: any;
     try {
       rec = JSON.parse(line);
@@ -795,7 +802,7 @@ export async function searchSessionHistory(
       if (!un || (un.from && /^bridge(:|$)/.test(un.from))) continue;
       const lower = un.text.toLowerCase();
       if (!lower.includes(q)) continue;
-      const hit: HistorySearchHit = { seq: lineOffset + i, ts, role: "user", snippet: makeSnippet(un.text, lower, q) };
+      const hit: HistorySearchHit = { seq: idx, ts, role: "user", snippet: makeSnippet(un.text, lower, q) };
       if (un.from) hit.from = un.from;
       hits.push(hit);
       continue;
@@ -827,7 +834,7 @@ export async function searchSessionHistory(
       }
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;
-      const hit: HistorySearchHit = { seq: lineOffset + i, ts, role: "user", snippet: makeSnippet(body, lower, q) };
+      const hit: HistorySearchHit = { seq: idx, ts, role: "user", snippet: makeSnippet(body, lower, q) };
       if (from) hit.from = from;
       if (rec.isCompactSummary === true) hit.compact = true;
       hits.push(hit);
@@ -848,7 +855,7 @@ export async function searchSessionHistory(
       const body = parts.join("\n");
       const lower = body.toLowerCase();
       if (!lower.includes(q)) continue;
-      hits.push({ seq: lineOffset + i, ts, role: "assistant", snippet: makeSnippet(body, lower, q) });
+      hits.push({ seq: idx, ts, role: "assistant", snippet: makeSnippet(body, lower, q) });
     }
   }
   return hits;

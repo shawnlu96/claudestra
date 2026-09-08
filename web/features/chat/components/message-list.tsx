@@ -1112,6 +1112,8 @@ export function MessageList() {
   const loadingHistory = useChatStore((s) => s.state.loadingHistory);
   const historyHasMore = useChatStore((s) => s.state.historyHasMore);
   const loadingOlder = useChatStore((s) => s.state.loadingOlder);
+  const historyNewerHasMore = useChatStore((s) => s.state.historyNewerHasMore);
+  const loadingNewer = useChatStore((s) => s.state.loadingNewer);
   const historyError = useChatStore((s) => s.state.historyError);
   const active = useChatStore((s) => s.state.activeAgent);
   const store = useChatStoreApi();
@@ -1402,6 +1404,17 @@ export function MessageList() {
             />
           </div>
         ))}
+        {/* 历史现场向下翻页(2026-09-08):命中窗口只到命中后 ~25 条,继续往后看 */}
+        {browsing && historyNewerHasMore && (
+          <button
+            className="btn btn-ghost btn-xs mx-auto mb-4 text-base-content/50"
+            disabled={loadingNewer}
+            onClick={() => void store.loadNewer()}
+          >
+            {loadingNewer && <span className="loading loading-spinner loading-xs" />}
+            {t("加载更晚的消息…")}
+          </button>
+        )}
         {/* 活跃会话的面板/交互卡不属于历史现场——浏览模式只藏不清,回来原样恢复 */}
         {!browsing && <CcTaskPanel />}
         {!browsing && <BgTaskPanel />}

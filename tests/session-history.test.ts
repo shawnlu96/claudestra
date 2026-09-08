@@ -410,26 +410,30 @@ describe("searchSessionHistory", () => {
     expect(hits.find((h: any) => h.compact === true)).toBeTruthy();
   });
 
-  test("大文件尾部切片时 seq 仍是全文件行号(搜索跳转坐标系)", async () => {
-    // 100 条填充 + 尾部 1 条命中;maxFullScanBytes 压小强制切片
+  test("全文流式扫描:小 chunk 跨块拆行也不丢命中,seq 是全文件行号(搜索跳转坐标系)", async () => {
+    // 2026-09-08 前超过 16MB 只扫尾部(gc-car 243MB 会话 7～9 月的 DB9 讨论搜不到);
+    // 现在按 chunk 流式全扫。用 256B 的 chunk 逼出「一行跨多块」「多块无命中只数行」
+    // 「命中在文件中段」三种路径。
     const records = Array.from({ length: 100 }, (_, i) => ({
       type: "user" as const,
       timestamp: "2026-07-01T00:00:00Z",
       message: { content: `填充消息第 ${i} 号,凑体积用的一行普通对话内容` },
     }));
+    records[3] = { type: "user", timestamp: "2026-07-01T00:00:03Z", message: { content: "中段命中:切片行号校准专用命中词" } };
     records.push({
       type: "user",
       timestamp: "2026-07-01T01:00:00Z",
-      message: { content: "切片行号校准专用命中词" },
+      message: { content: "尾部命中:切片行号校准专用命中词" },
     });
     const big = writeJsonl(dir, "sliced.jsonl", records);
     const full = await searchSessionHistory(big, "切片行号校准");
-    expect(full.length).toBe(1);
-    expect(full[0].seq).toBe(100); // 全文件行号
-    // 切到只剩尾部 ~2KB:不切片行号会从切片起点重数、远小于 100
-    const sliced = await searchSessionHistory(big, "切片行号校准", { maxFullScanBytes: 2048 });
-    expect(sliced.length).toBe(1);
-    expect(sliced[0].seq).toBe(100); // 与全量扫描同坐标
+    expect(full.map((h: any) => h.seq)).toEqual([3, 100]);
+    const chunked = await searchSessionHistory(big, "切片行号校准", { chunkBytes: 256 });
+    expect(chunked.map((h: any) => h.seq)).toEqual([3, 100]);
+    expect(chunked[1].snippet).toContain("尾部命中");
+    // 旧参数保留兼容:传了也全扫
+    const legacy = await searchSessionHistory(big, "切片行号校准", { maxFullScanBytes: 2048 });
+    expect(legacy.map((h: any) => h.seq)).toEqual([3, 100]);
   });
 
   test("大小写不敏感 + 只搜正文(工具参数命中不算)", async () => {
