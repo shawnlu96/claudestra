@@ -436,6 +436,25 @@ describe("searchSessionHistory", () => {
     expect(legacy.map((h: any) => h.seq)).toEqual([3, 100]);
   });
 
+  test("字节预筛:ASCII 大小写不敏感 / CJK 跨块 / 非 ASCII 变形词走慢路也不漏", async () => {
+    // 2026-09-08 二次优化:每块先在原始字节上预筛(ASCII 折叠大小写),不含词的块
+    // 不解码。这里逼小 chunk,验证三条路都不漏命中。
+    const f = writeJsonl(dir, "fold.jsonl", [
+      { type: "user", timestamp: "2026-07-01T00:00:00Z", message: { content: "型号是 DB9 Volante,阿斯顿马丁" } },
+      { type: "user", timestamp: "2026-07-01T00:01:00Z", message: { content: "填充一行不含关键词的普通对话内容,占满一个块" } },
+      { type: "user", timestamp: "2026-07-01T00:02:00Z", message: { content: "中文关键词:碳罐总成也要能搜到" } },
+      { type: "user", timestamp: "2026-07-01T00:03:00Z", message: { content: "重音词 ÖSTERREICH 全大写" } },
+    ]);
+    for (const chunkBytes of [128, 4096]) {
+      expect((await searchSessionHistory(f, "db9", { chunkBytes })).map((h: any) => h.seq)).toEqual([0]);
+      expect((await searchSessionHistory(f, "DB9", { chunkBytes })).map((h: any) => h.seq)).toEqual([0]);
+      expect((await searchSessionHistory(f, "碳罐总成", { chunkBytes })).map((h: any) => h.seq)).toEqual([2]);
+      // 查询含大小写会变的非 ASCII 字母 → 退回逐块 toLowerCase 的慢路,仍要命中
+      expect((await searchSessionHistory(f, "österreich", { chunkBytes })).map((h: any) => h.seq)).toEqual([3]);
+      expect(await searchSessionHistory(f, "不存在的词", { chunkBytes })).toEqual([]);
+    }
+  });
+
   test("大小写不敏感 + 只搜正文(工具参数命中不算)", async () => {
     const hits = await searchSessionHistory(file, "asr");
     expect(hits.length).toBe(2); // user 首条 + reply 正文

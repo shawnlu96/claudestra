@@ -14,7 +14,6 @@
 
 import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
-import { StringDecoder } from "string_decoder";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
@@ -723,44 +722,91 @@ function makeSnippet(text: string, lowerText: string, q: string): string {
  * 预筛一遍远快于全量 parse。
  */
 /** 流式 grep:按固定 chunk 读文件,只产出小写后含 q 的整行及其全文件行号(见 searchSessionHistory 注释)。 */
+/** ASCII 大写折小写(字节级)。非 ASCII 字节(≥0x80)原样返回——UTF-8 自同步,子串搜索无误配。 */
+function foldByte(b: number): number {
+  return b >= 65 && b <= 90 ? b + 32 : b;
+}
+
+/** 在 buf 里找 needle(已小写)的首个位置,ASCII 不区分大小写;没有返回 -1。
+ *  用 Buffer.indexOf(首字节的大小写两形) 走 memchr 定位候选,再逐字节折叠校验。 */
+function findFolded(buf: Buffer, needle: Buffer, from = 0): number {
+  const n = needle.length;
+  const limit = buf.length - n;
+  if (n === 0 || limit < 0) return -1;
+  const lo0 = needle[0];
+  const hi0 = lo0 >= 97 && lo0 <= 122 ? lo0 - 32 : lo0;
+  let i = from;
+  while (i <= limit) {
+    const a = buf.indexOf(lo0, i);
+    const b = hi0 === lo0 ? -1 : buf.indexOf(hi0, i);
+    const p = a < 0 ? b : b < 0 ? a : Math.min(a, b);
+    if (p < 0 || p > limit) return -1;
+    let k = 1;
+    for (; k < n; k++) if (foldByte(buf[p + k]) !== needle[k]) break;
+    if (k === n) return p;
+    i = p + 1;
+  }
+  return -1;
+}
+
+/**
+ * 流式 grep:按固定 chunk 读文件,只产出小写后含 q 的整行及其全文件行号
+ * (见 searchSessionHistory 注释)。
+ *
+ * 性能要害(2026-09-08 二次优化,全库 764MB 一次搜索 6.2s→):对每块先在**原始字节**上
+ * 做预筛(findFolded,memchr 级),不含词的块只数换行,连字符串都不建——旧写法每块
+ * 无条件 decode + toLowerCase 两次 8MB 分配,而绝大多数块根本不含关键词。
+ * 字节预筛按 ASCII 折叠大小写:CJK / 数字 / 标点在大小写映射下不变,可安全走这条
+ * 快路;查询里带**非 ASCII 且大小写会变**的字母(如 ö/Ö)时退回逐块 toLowerCase 的
+ * 慢路,保证不漏。残留边角:İ(U+0130) 小写成 "i̇" 这类映射后才等于 ASCII 的字符,
+ * 快路会漏——本语料里可忽略。
+ */
 async function* grepJsonlLines(
   filePath: string,
   q: string,
   chunkBytes = 8 * 1024 * 1024,
 ): AsyncGenerator<{ line: string; idx: number }> {
   const size = Math.max(64, Math.floor(chunkBytes));
+  const needle = Buffer.from(q, "utf8");
+  // 非 ASCII 部分大小写不变 → 字节预筛可靠
+  const nonAscii = [...q].filter((ch) => ch.charCodeAt(0) > 127).join("");
+  const byteFilterOk = nonAscii === nonAscii.toUpperCase() && nonAscii === nonAscii.toLowerCase();
   const fh = await fsOpen(filePath, "r");
   try {
     const buf = Buffer.alloc(size);
-    const decoder = new StringDecoder("utf8");
     let pos = 0;
     let lineIdx = 0; // 已完整产出/数过的行数 = 下一行的全文件行号
-    let carry = "";
+    let carry: Buffer = Buffer.alloc(0); // 上一块末尾的半行(字节,避免切开 UTF-8)
     for (;;) {
       const { bytesRead } = await fh.read(buf, 0, size, pos);
       if (bytesRead <= 0) break;
       pos += bytesRead;
-      const text = carry + decoder.write(buf.subarray(0, bytesRead));
-      const lastNl = text.lastIndexOf("\n");
+      const chunk = buf.subarray(0, bytesRead);
+      const work = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      const lastNl = work.lastIndexOf(10);
       if (lastNl < 0) {
-        carry = text;
+        carry = Buffer.from(work); // buf 会被下轮覆写,必须拷贝
         continue;
       }
-      const body = text.slice(0, lastNl + 1);
-      carry = text.slice(lastNl + 1);
-      if (body.toLowerCase().includes(q)) {
-        const lines = body.split("\n"); // 末尾恒为 ""(body 以 \n 结尾)
-        for (let i = 0; i < lines.length - 1; i++) {
-          const l = lines[i];
-          if (l.trim() && l.toLowerCase().includes(q)) yield { line: l, idx: lineIdx + i };
-        }
-        lineIdx += lines.length - 1;
-      } else {
+      const body = work.subarray(0, lastNl + 1);
+      carry = Buffer.from(work.subarray(lastNl + 1));
+      // 整块预筛:不含词只数换行(memchr),不解码不分配
+      const hasWord = byteFilterOk
+        ? findFolded(body, needle) >= 0
+        : body.toString("utf8").toLowerCase().includes(q);
+      if (!hasWord) {
         let at = -1;
-        while ((at = body.indexOf("\n", at + 1)) !== -1) lineIdx++;
+        while ((at = body.indexOf(10, at + 1)) !== -1) lineIdx++;
+        continue;
       }
+      const lines = body.toString("utf8").split("\n"); // 末尾恒为 ""(body 以 \n 结尾)
+      for (let i = 0; i < lines.length - 1; i++) {
+        const l = lines[i];
+        if (l.trim() && l.toLowerCase().includes(q)) yield { line: l, idx: lineIdx + i };
+      }
+      lineIdx += lines.length - 1;
     }
-    const tail = carry + decoder.end();
+    const tail = carry.toString("utf8");
     if (tail.trim() && tail.toLowerCase().includes(q)) yield { line: tail, idx: lineIdx };
   } finally {
     await fh.close();
@@ -780,7 +826,7 @@ export async function searchSessionHistory(
   // 旧实现一次持有 raw / lowerRaw / lines / lowerLines 四份 = 文件 4 倍内存,才不得
   // 不切尾;现在 fs 句柄 + 固定 chunk 循环读:每块先整体 toLowerCase 预筛,不含词的
   // 块只数换行(绝大多数块在此出局,零 split),含词的块才按行拆、逐行判定;跨块的
-  // 半行接到下一块开头(StringDecoder 同时兜住被切开的 UTF-8 多字节)。峰值内存
+  // 半行以字节形式接到下一块开头(不在 UTF-8 中间切开)。峰值内存
   // ≈ 3×chunk,与文件大小无关;seq 仍是全文件行号(搜索跳转按它开历史窗口)。
   // opts.maxFullScanBytes 已无意义,保留只为兼容旧调用方。
   const hits: HistorySearchHit[] = [];
