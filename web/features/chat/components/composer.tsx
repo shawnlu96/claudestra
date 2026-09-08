@@ -827,6 +827,10 @@ export function Composer() {
               /
             </button>
             <button
+              // 走 pointerdown/up 的按住手势,pointerdown 里 preventDefault ⇒ 系统
+              // 不会派发合成 click。data-hold 让 [tap-lost] 探针知道这里没有 click
+              // 是设计而非丢失(2026-09-08 两条误报都是点这个麦克风)。
+              data-hold=""
               onPointerDown={(e) => {
                 e.preventDefault(); // 不抢输入焦点/不触发长按系统菜单
                 if (!disabled && recState === "idle") void holdStart();
