@@ -436,6 +436,22 @@ describe("searchSessionHistory", () => {
     expect(legacy.map((h: any) => h.seq)).toEqual([3, 100]);
   });
 
+  test("命中行定位:同行多次命中只产一条 / 相邻行都命中 / 行号连续正确", async () => {
+    // 2026-09-08 快路只切「命中所在的行」出来解码,行号靠增量数换行——最容易错的
+    // 就是一行里出现多次、以及连续多行都命中。
+    const f = writeJsonl(dir, "lines.jsonl", [
+      { type: "user", timestamp: "2026-07-01T00:00:00Z", message: { content: "开头无关的一行" } },
+      { type: "user", timestamp: "2026-07-01T00:01:00Z", message: { content: "锚点词 出现 锚点词 两次 锚点词 三次" } },
+      { type: "user", timestamp: "2026-07-01T00:02:00Z", message: { content: "紧接着这行也有 锚点词" } },
+      { type: "user", timestamp: "2026-07-01T00:03:00Z", message: { content: "中间隔一行无关内容" } },
+      { type: "user", timestamp: "2026-07-01T00:04:00Z", message: { content: "最后一行 锚点词 收尾" } },
+    ]);
+    for (const chunkBytes of [64, 512, 8 * 1024 * 1024]) {
+      const hits = await searchSessionHistory(f, "锚点词", { chunkBytes });
+      expect(hits.map((h: any) => h.seq)).toEqual([1, 2, 4]);
+    }
+  });
+
   test("字节预筛:ASCII 大小写不敏感 / CJK 跨块 / 非 ASCII 变形词走慢路也不漏", async () => {
     // 2026-09-08 二次优化:每块先在原始字节上预筛(ASCII 折叠大小写),不含词的块
     // 不解码。这里逼小 chunk,验证三条路都不漏命中。
