@@ -505,29 +505,27 @@ export function Composer() {
   // 62 个字符,抬手后 WebKit 的合成 click 拖了 720ms 才到——用户以为没点上又点了
   // 一次,消息晚发 1s;同期无 [jank],不是主线程卡,是 WebKit 自己把 tap 提交拖住)。
   // 发送 / 暂停这两个最要紧的键改为 pointerup 直接执行,1s 内跟来的 click 忽略防
-  // 双发;click 一直没来就记 [touch-rescue] 看频率。短按(≤350ms、位移 ≤10px)才算。
+  // 双发。短按(≤350ms、位移 ≤10px)才算。
+  // ⚠ 别拿「抬手后有没有 click」统计 WebKit 丢击:pointerup 一执行,输入框清空、
+  // 发送键随即 disabled(暂停键则整个卸载),WebKit 再命中测试时目标已不响应点击,
+  // click 作废是我们自己造成的——曾有 [touch-rescue] 日志据此计数,12:37 一条无键盘
+  // 无听写的普通发送也记了,证明该指标失真,已删。
   const touchAct = useRef<{ t: number; x: number; y: number } | null>(null);
   const touchActUntil = useRef(0);
-  const touchClickSeen = useRef(0);
   const touchDown = (e: React.PointerEvent) => {
     if (e.pointerType === "touch") touchAct.current = { t: Date.now(), x: e.clientX, y: e.clientY };
   };
-  const touchUp = (e: React.PointerEvent, name: string, run: () => void) => {
+  const touchUp = (e: React.PointerEvent, run: () => void) => {
     const s = touchAct.current;
     touchAct.current = null;
     if (!s || e.pointerType !== "touch") return;
     if (Date.now() - s.t > 350 || Math.hypot(e.clientX - s.x, e.clientY - s.y) > 10) return;
-    const at = Date.now();
-    touchActUntil.current = at + 1000;
+    touchActUntil.current = Date.now() + 1000;
     // 告诉 layout.tsx 的 [tap-lost] 探针:这次抬手已由兜底触发,别再当丢失上报
     (window as unknown as { __cstraTouchRescueAt?: number }).__cstraTouchRescueAt = performance.now();
-    window.setTimeout(() => {
-      if (touchClickSeen.current < at) store.clientLog(`[touch-rescue] ${name}: 抬手后 1s 无 click,已由 pointerup 触发`);
-    }, 1000);
     run();
   };
   const touchClick = (run: () => void) => {
-    touchClickSeen.current = Date.now();
     if (Date.now() < touchActUntil.current) return; // pointerup 已代劳
     run();
   };
@@ -894,7 +892,7 @@ export function Composer() {
               {streaming && (
                 <button
                   onPointerDown={touchDown}
-                  onPointerUp={(e) => touchUp(e, "pause", () => store.interrupt())}
+                  onPointerUp={(e) => touchUp(e, () => store.interrupt())}
                   onClick={() => touchClick(() => store.interrupt())}
                   title={t("暂停（停止当前回复，Ctrl+C）")}
                   aria-label={t("暂停")}
@@ -905,7 +903,7 @@ export function Composer() {
               )}
               <button
                 onPointerDown={touchDown}
-                onPointerUp={(e) => touchUp(e, "send", submit)}
+                onPointerUp={(e) => touchUp(e, submit)}
                 onClick={() => touchClick(submit)}
                 disabled={!canSend}
                 title={
