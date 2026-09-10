@@ -519,6 +519,8 @@ export function Composer() {
     if (Date.now() - s.t > 350 || Math.hypot(e.clientX - s.x, e.clientY - s.y) > 10) return;
     const at = Date.now();
     touchActUntil.current = at + 1000;
+    // 告诉 layout.tsx 的 [tap-lost] 探针:这次抬手已由兜底触发,别再当丢失上报
+    (window as unknown as { __cstraTouchRescueAt?: number }).__cstraTouchRescueAt = performance.now();
     window.setTimeout(() => {
       if (touchClickSeen.current < at) store.clientLog(`[touch-rescue] ${name}: 抬手后 1s 无 click,已由 pointerup 触发`);
     }, 1000);
