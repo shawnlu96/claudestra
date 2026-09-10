@@ -501,6 +501,35 @@ export function Composer() {
     if (document.activeElement !== ta) ta.scrollTop = ta.scrollHeight;
   }, [text]);
 
+  // 触摸抬手即触发(2026-09-10 真机 [tap-lost]:手指按在发送键上时听写一次提交了
+  // 62 个字符,抬手后 WebKit 的合成 click 拖了 720ms 才到——用户以为没点上又点了
+  // 一次,消息晚发 1s;同期无 [jank],不是主线程卡,是 WebKit 自己把 tap 提交拖住)。
+  // 发送 / 暂停这两个最要紧的键改为 pointerup 直接执行,1s 内跟来的 click 忽略防
+  // 双发;click 一直没来就记 [touch-rescue] 看频率。短按(≤350ms、位移 ≤10px)才算。
+  const touchAct = useRef<{ t: number; x: number; y: number } | null>(null);
+  const touchActUntil = useRef(0);
+  const touchClickSeen = useRef(0);
+  const touchDown = (e: React.PointerEvent) => {
+    if (e.pointerType === "touch") touchAct.current = { t: Date.now(), x: e.clientX, y: e.clientY };
+  };
+  const touchUp = (e: React.PointerEvent, name: string, run: () => void) => {
+    const s = touchAct.current;
+    touchAct.current = null;
+    if (!s || e.pointerType !== "touch") return;
+    if (Date.now() - s.t > 350 || Math.hypot(e.clientX - s.x, e.clientY - s.y) > 10) return;
+    const at = Date.now();
+    touchActUntil.current = at + 1000;
+    window.setTimeout(() => {
+      if (touchClickSeen.current < at) store.clientLog(`[touch-rescue] ${name}: 抬手后 1s 无 click,已由 pointerup 触发`);
+    }, 1000);
+    run();
+  };
+  const touchClick = (run: () => void) => {
+    touchClickSeen.current = Date.now();
+    if (Date.now() < touchActUntil.current) return; // pointerup 已代劳
+    run();
+  };
+
   const submit = () => {
     // 读「此刻」的值:状态镜像最多落后一帧,Enter 紧跟最后一个字时不能丢字
     const cur = textRef.current;
@@ -862,7 +891,9 @@ export function Composer() {
               {/* 流式期间：暂停与发送并列（不互斥替换）——可一边看回复一边输入插话 */}
               {streaming && (
                 <button
-                  onClick={() => store.interrupt()}
+                  onPointerDown={touchDown}
+                  onPointerUp={(e) => touchUp(e, "pause", () => store.interrupt())}
+                  onClick={() => touchClick(() => store.interrupt())}
                   title={t("暂停（停止当前回复，Ctrl+C）")}
                   aria-label={t("暂停")}
                   className="flex size-[34px] items-center justify-center rounded-[10px] bg-base-content/15 text-base-content transition-colors hover:bg-base-content/25"
@@ -871,7 +902,9 @@ export function Composer() {
                 </button>
               )}
               <button
-                onClick={submit}
+                onPointerDown={touchDown}
+                onPointerUp={(e) => touchUp(e, "send", submit)}
+                onClick={() => touchClick(submit)}
                 disabled={!canSend}
                 title={
                   streaming ? t("追问（立刻插进当前对话）") : t("发送")
