@@ -50,7 +50,10 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
   // 浏览器扩展注入的脚本报错不是我们的(2026-09-09 一条 Windows 上的
   // chrome-extension://…/inpage.js "func sseError not found")——它照样占 8 条/5 分钟
   // 的上报额度、还会惊动监视器。整条(含栈)只要指向扩展协议就丢弃。
-  if (/\b(chrome|moz|safari-web)-extension:\/\//.test(`${stack} ${e?.message || fallback}`)) {
+  const text = `${stack} ${e?.message || fallback}`;
+  // ResizeObserver loop completed with undelivered notifications:浏览器的良性警告
+  // (RO 回调里改了布局,同帧后续通知被丢弃),不是错误,历史上 7 天两条,不占额度
+  if (/\b(chrome|moz|safari-web)-extension:\/\//.test(text) || /ResizeObserver loop (completed|limit)/.test(text)) {
     errLogWindow.pop();
     return;
   }
