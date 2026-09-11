@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
+import { installTapRescue } from "@/lib/tap-rescue";
 import type { AgentSession, ProjectMeta } from "../type";
 import { SettingsModal } from "./settings-modal";
 import { ProjectsModal } from "./projects-modal";
@@ -20,13 +21,6 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
  *  模块级共享:重排后接住 click 的是别的行实例,必须能读到按下方记录的值。 */
 let tapIntent: { name: string; ts: number; x: number; y: number } | null = null;
 
-/** 列表容器最近一次 scroll 的时刻 / 位置 / 速度(px/s)。tap 兜底据此区分「列表还在
- *  明显滚,用户是想按停它」与「减速尾巴肉眼已停,iOS 却把 tap 当成接住滚动而丢掉」。 */
-const listScroll = { t: 0, top: 0, v: 0 };
-/** 兜底触发前等 click 的窗口:iOS 合成 click 最迟 ~350ms(双击消歧),留余量。 */
-const TAP_RESCUE_WAIT_MS = 400;
-/** 列表滚速高于此值(且 700ms 内有过 scroll)时不兜底——那是用户按停滚动,不是点行。 */
-const TAP_RESCUE_MAX_V = 200;
 
 /** v2.21+ 方案 A 的沉寂判定:>30 天没真实对话(或从未说话且已停止)。
  *  忙碌的永不算沉寂。30s tick 重渲时会重估,模块级函数与 fmtAgo 同款先例。 */
@@ -178,9 +172,7 @@ function AgentRow({
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
   const busyNow = !!(a.busy || busyLive);
 
-  const lastClickAt = useRef(0);
-  const rescueSuppressUntil = useRef(0);
-  /** 点行的实际动作(click 与 tap 兜底共用)。 */
+  /** 点行的实际动作。触摸丢 click 的兜底在列表容器上统一做(lib/tap-rescue.ts 派发合成 click),行不用管。 */
   const activate = (intended: string) => {
     // 多选模式:点行 = 切换选中(不可删的行忽略)
     if (manage) {
@@ -338,30 +330,7 @@ function AgentRow({
           onPointerDown={(e) => {
             tapIntent = { name: a.name, ts: Date.now(), x: e.clientX, y: e.clientY };
           }}
-          onPointerUp={(e) => {
-            // 2026-09-07 真机 [tap-lost] 实锤:列表惯性滚动的最后一帧之后 26ms 点行,
-            // 抬手后列表又爬了 1px,WebKit 把这次触摸当成「接住还在减速的滚动」——
-            // pointerup/touchend 都到了,click 永远不来,用户 0.5s 后再点一次才进。
-            // 兜底:短按(<350ms、位移<10px)抬手后等 TAP_RESCUE_WAIT_MS 仍无 click,
-            // 且列表没在明显滚动,就按点击处理;随后 1s 内真来的 click 忽略防双触发。
-            if (e.pointerType !== "touch") return;
-            const ti = tapIntent;
-            if (!ti || ti.name !== a.name) return;
-            if (Date.now() - ti.ts > 350 || Math.hypot(e.clientX - ti.x, e.clientY - ti.y) > 10) return;
-            if (manage || swipeX !== 0 || swipeReg.cur) return;
-            const downTs = ti.ts;
-            window.setTimeout(() => {
-              if (lastClickAt.current >= downTs) return; // click 正常到了
-              if (listScroll.v > TAP_RESCUE_MAX_V && performance.now() - listScroll.t < 700) return;
-              rescueSuppressUntil.current = Date.now() + 1000;
-              tapIntent = null;
-              store.clientLog(`[tap-rescue] agent row ${a.name} v=${Math.round(listScroll.v)}px/s`);
-              activate(a.name);
-            }, TAP_RESCUE_WAIT_MS);
-          }}
           onClick={() => {
-            if (Date.now() < rescueSuppressUntil.current) return; // 兜底已代劳
-            lastClickAt.current = Date.now();
             // 串台守卫:按下一刻的目标优先于闭包值(见文件头 tapIntent 注释)
             const intended =
               tapIntent && Date.now() - tapIntent.ts < TAP_INTENT_TTL_MS ? tapIntent.name : a.name;
@@ -445,6 +414,13 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const streaming = useChatStore((s) => s.state.streaming);
   const compactingLive = useChatStore((s) => s.state.compacting);
   const listTouchY = useRef<number | null>(null);
+  // 触摸丢 click 兜底(lib/tap-rescue.ts):回弹 / 减速尾巴期间点行也能进
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    return installTapRescue(el, { name: "list", log: (m) => store.clientLog(m) });
+  }, [store]);
   // 桌面侧栏拖拽调宽(owner 2026-07-24):右缘手柄,localStorage 持久化。
   // 移动端 w-full 不受影响(宽度变量只在 sm+ 生效)。
   const [sbWidth, setSbWidth] = useState<number | null>(() => {
@@ -784,28 +760,21 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       {/* 开启推送引导（已具备推送能力且没问过权限时显示,与安装引导天然互斥） */}
       <PushBanner />
 
-      {/* 2026-09-07 contain→none：去掉列表自身的橡皮筋回弹（WebKit 把 overscroll-behavior
-          映射到 UIScrollView.bounces）。甩到底/顶后按住 agent 行时列表停在过滚动位置，
-          松手才回弹，行在 WebKit 提交 tap 前挪走 → click 丢弃——消息区 edge=29/29 实锤同款，
-          owner「agent 切换页偶尔点了没反应」大概率就是它。 */}
+      {/* 2026-09-11 回弹恢复(owner:「没回弹总以为是卡住了」)。回弹/减速尾巴期间
+          点行丢 click 的问题改由容器上的 installTapRescue 兜底:抬手 450ms 没等到真 click
+          就向按下时的行派发合成 click(lib/tap-rescue.ts),手感不动。 */}
       {/* touch-pan-y + overscroll-contain：iOS 到边界时滚动链会穿透到不可滚的
           fixed 应用壳，橡皮筋吃掉手势看着像「滑不动」（BgLines 同款修法）。 */}
       <div
+        ref={listRef}
         // select-none + touch-callout none:长按会话行是想看操作/滑动,不是选文本
         // (owner 2026-09-02);列表一滚动就把滑开的行收回(微信同款)
-        className="flex-1 touch-pan-y select-none overflow-y-auto overscroll-none px-2 pb-3 [-webkit-touch-callout:none]"
+        className="flex-1 touch-pan-y select-none overflow-y-auto overscroll-contain px-2 pb-3 [-webkit-touch-callout:none]"
         style={{ WebkitOverflowScrolling: "touch" }}
         // 交互期冻结 roster 重排的信号源(v2.17.2 串台补刀,见 chat-store
         // noteSidebarInteraction):触碰/滚动期间列表顺序不动
         onPointerDown={noteSidebarInteraction}
-        onScroll={(e) => {
-          // tap 兜底的滚速信号(见 listScroll)
-          const now = performance.now();
-          const top = e.currentTarget.scrollTop;
-          const dt = now - listScroll.t;
-          listScroll.v = dt > 0 && dt < 500 ? (Math.abs(top - listScroll.top) / dt) * 1000 : 0;
-          listScroll.t = now;
-          listScroll.top = top;
+        onScroll={() => {
           noteSidebarInteraction();
           swipeReg.closeAll();
         }}

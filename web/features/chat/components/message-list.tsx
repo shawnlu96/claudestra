@@ -16,6 +16,7 @@ import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
 import { inlineButtonsToText, plainLabel } from "@/lib/chat/inline-buttons";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
+import { installTapRescue } from "@/lib/tap-rescue";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -1249,6 +1250,8 @@ export function MessageList() {
     const el = scrollerRef.current;
     const inner = el?.firstElementChild;
     if (!el || !inner) return;
+    // 触摸丢 click 兜底(lib/tap-rescue.ts):回弹 / 减速尾巴 / 吸底期间点工具行也能展开
+    const offRescue = installTapRescue(el, { name: "msgs", log: (m) => store.clientLog(m) });
     let lastTop = el.scrollTop;
     const onScroll = () => {
       // 向上滑立即退出吸底（不等离底 >90px）——流式内容持续长高时，90px 缓冲区
@@ -1273,6 +1276,7 @@ export function MessageList() {
       el.removeEventListener("scroll", onScroll);
       ro.disconnect();
       snapRef.current = null;
+      offRescue();
     };
   }, [active]);
 
@@ -1298,14 +1302,11 @@ export function MessageList() {
   const hiddenCount = messages.length - visible.length;
 
   return (
-    // touch-pan-y + overscroll-none：到边界时滚动链穿透到不可滚的应用壳被
-    // 橡皮筋吃手势（同 sidebar 修法,原 contain）。2026-09-07 起 none 而不是 contain：
-    // WebKit 用 overscroll-behavior 直接设 UIScrollView.bouncesVertically
-    // (ScrollingTreeScrollingNodeDelegateIOS.mm),none = 关掉本容器自己的橡皮筋。
-    // 真机 [tap-lost] edge=29/29 实锤：甩到底后按住时列表停在越过底部 29px 的
-    // 橡皮筋位置，松手才回弹，内容在 WebKit 提交 tap 前挪走 → click 被丢弃
-    // (commitPotentialTap 抬手后重新命中测试)。聊天里「甩到底再点」极常见，
-    // 去掉回弹换来点击必达。收键盘：iOS 在 transform 祖先下滚动聚焦中的
+    // touch-pan-y + overscroll-contain：到边界时滚动链穿透到不可滚的应用壳被
+    // 橡皮筋吃手势（同 sidebar 修法）。09-07 曾改 none 关掉回弹(甩到底后按住时列表
+    // 停在越过底部 29px 的橡皮筋位置,松手回弹,内容在 WebKit 提交 tap 前挪走 → click
+    // 丢弃),09-11 owner「没回弹总以为是卡住了」→ 回弹恢复,丢 click 改由
+    // installTapRescue 兜底(抬手 450ms 无真 click 就向按下时的目标派发合成 click)。收键盘：iOS 在 transform 祖先下滚动聚焦中的
     // 输入框，光标会脱离输入框画在消息区里（2026-07-13 截图）——触摸消息区即 blur，
     // 与主流聊天 App 行为一致。⚠ 不能在 touchstart 收（2026-09-07 真机 [tap-lost]：
     // 键盘开着时 6ms 轻触消息区，元素没动、点位没变，却没有 click——按下瞬间 blur
@@ -1314,7 +1315,7 @@ export function MessageList() {
     <div
       ref={scrollerRef}
       id="cstra-msgs"
-      className="flex-1 touch-pan-y overflow-y-auto overscroll-none"
+      className="flex-1 touch-pan-y overflow-y-auto overscroll-contain"
       style={{ WebkitOverflowScrolling: "touch" }}
       onTouchStart={() => {
         touchHoldRef.current = Infinity; // 手指按着:吸底冻结(见 touchHoldRef 注释)
