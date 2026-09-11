@@ -31,6 +31,52 @@ function shellLog(msg: string) {
   } catch { /* ignore */ }
 }
 /**
+ * 横滑动画探针(2026-09-12,owner「从对话回到 Agent 页面时卡住了,大概 2 秒」,当时
+ * 主线程探针零记录——JS 没卡,怀疑是合成层在 GPU 上光栅化整页时卡住)。两个直接
+ * 量:① running=true 到 transitionend 的时长——过渡跑在合成器上,合成器卡住它就
+ * 迟到(正常 ~300ms);② 期间 rAF 帧间隔最大值与首帧延迟。总时长 >600ms 或
+ * 最大帧间隔 >200ms 才上报,正常滑动不刷屏。
+ */
+let slideProbe: { dir: string; t0: number; tRun: number; frames: number; maxGap: number; firstFrame: number; last: number; raf: number; timer: number } | null = null;
+function startSlideProbe(dir: string) {
+  endSlideProbe("preempted");
+  const t0 = performance.now();
+  const sp = { dir, t0, tRun: 0, frames: 0, maxGap: 0, firstFrame: 0, last: t0, raf: 0, timer: 0 };
+  slideProbe = sp;
+  const tick = () => {
+    if (slideProbe !== sp) return;
+    const now = performance.now();
+    const gap = now - sp.last;
+    if (sp.frames === 0) sp.firstFrame = now - sp.t0;
+    else if (gap > sp.maxGap) sp.maxGap = gap;
+    sp.frames++;
+    sp.last = now;
+    sp.raf = requestAnimationFrame(tick);
+  };
+  sp.raf = requestAnimationFrame(tick);
+  sp.timer = window.setTimeout(() => endSlideProbe("timeout"), 4000);
+}
+function markSlideRunning() {
+  if (slideProbe) slideProbe.tRun = performance.now();
+}
+function endSlideProbe(how: string) {
+  const sp = slideProbe;
+  if (!sp) return;
+  slideProbe = null;
+  cancelAnimationFrame(sp.raf);
+  clearTimeout(sp.timer);
+  const now = performance.now();
+  const total = now - sp.t0;
+  const anim = sp.tRun ? now - sp.tRun : -1;
+  // 上报条件:总时长异常 / 单帧间隔异常 / 过渡没能正常收尾且平均帧率 <20fps(合成器
+  // 卡住时 JS 的 400ms 兜底照常到,只有帧数会掉)
+  const lowFps = how !== "transitionend" && sp.frames < total / 50;
+  if (total < 600 && sp.maxGap < 200 && !lowFps && how !== "timeout") return;
+  const msgs = document.querySelectorAll("[data-mid]").length;
+  const streaming = document.documentElement.getAttribute("data-streaming") || "?";
+  shellLog(`[slide] ${sp.dir} total=${Math.round(total)}ms anim=${Math.round(anim)}ms firstFrame=${Math.round(sp.firstFrame)}ms maxGap=${Math.round(sp.maxGap)}ms frames=${sp.frames} end=${how} msgs=${msgs} streaming=${streaming}`);
+}
+/**
  * v2.21.3+ 运行时错误上报(壳 + PWA 都记,此前只有壳且只记文件名+行号——生产 chunk
  * 全在第 1 行,等于没记)。带完整 JS 栈(含列号):配合 next.config 的
  * productionBrowserSourceMaps,用 `node scripts/resolve-stack.mjs` 还原到源码位置。
@@ -419,20 +465,27 @@ function ChatInner() {
       return;
     }
     setSlideAnim({ from, to: showContent, running: false });
+    startSlideProbe(showContent ? "toContent" : "toList");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showContent]);
   useEffect(() => {
     if (!slideAnim || slideAnim.running) return;
     // 双 rAF:确保「旧位置 + 无过渡」先被绘制,再切到目标位开动画(FLIP)
     const id = requestAnimationFrame(() =>
-      requestAnimationFrame(() => setSlideAnim((a) => (a && !a.running ? { ...a, running: true } : a))),
+      requestAnimationFrame(() => {
+        markSlideRunning();
+        setSlideAnim((a) => (a && !a.running ? { ...a, running: true } : a));
+      }),
     );
     return () => cancelAnimationFrame(id);
   }, [slideAnim]);
   useEffect(() => {
     if (!slideAnim?.running) return;
     // transitionEnd 的兜底(后台 tab 不派发/被打断):400ms 强制停稳
-    const t = setTimeout(() => setSlideAnim(null), 400);
+    const t = setTimeout(() => {
+      endSlideProbe("fallback400");
+      setSlideAnim(null);
+    }, 400);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slideAnim?.running]);
@@ -638,7 +691,10 @@ function ChatInner() {
             会被挤崩(2026-07-27 崩版事故);relative+left 是纯视觉偏移,布局树不动。 */}
         <div
           onTransitionEnd={(e) => {
-            if (e.target === e.currentTarget && e.propertyName === "transform") setSlideAnim(null);
+            if (e.target === e.currentTarget && e.propertyName === "transform") {
+              endSlideProbe("transitionend");
+              setSlideAnim(null);
+            }
           }}
           className={`flex min-h-0 w-full flex-1 ${
             slideAnim
