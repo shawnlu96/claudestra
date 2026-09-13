@@ -23,6 +23,7 @@ import { CtxBadge } from "./ctx-badge";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
+import { installTapRescue } from "@/lib/tap-rescue";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 function shellLog(msg: string) {
@@ -570,6 +571,14 @@ function ChatInner() {
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);
   }, [store, toContent]);
+
+  // 浮层/顶栏触摸兜底(2026-09-13 client.log [tap-lost] 实锤):bubble-menu 是 portal
+  // 到 body、claude-switcher 的 btn-xs 在滚动容器外,都不在 msgs/list 两个实例的覆盖内,
+  // streaming 时 WebKit 丢 click 就真丢了。body 层兜住一切可点击元素;msgs/list 自带
+  // 实例,外层遇到其内目标按 data-tap-rescued 让路,不双补(见 tap-rescue.ts 头注)。
+  useEffect(() => {
+    return installTapRescue(document.body, { name: "body", log: (m) => store.clientLog(m) });
+  }, [store]);
 
   // 会话恢复：iOS 把后台页整个回收重载后，URL 还带 #chat 但 store 是全新的
   // （activeAgent=""）——之前就卡在空内容页要手动返回重选（2026-07-12 真机）。
