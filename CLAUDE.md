@@ -68,6 +68,10 @@ src/
     bg-activity-watcher.ts v2.8+ bg activity tracker: discovers subagent jsonls + bg shell task outputs per agent session → streams into per-activity threads (ChatAdapter.provisionThread) + bg_task_* SSE events
     archive-sweeper.ts   v2.9+ daily archive sweep: every 24h snapshots all active agents' session jsonls (idempotent copy-if-larger) — covers crash/never-retired gaps that retirement-time archiving misses
   channel-server.ts      Per-session MCP proxy (stdio MCP ↔ Bridge WebSocket)
+  pi/
+    claudestra-extension.ts  v2.23+ Pi agent 侧通道：与 channel-server 同一套 bridge ws 协议，
+                            但靠 Pi 扩展 API 注入消息（pi.sendUserMessage）并在 agent_settled
+                            时上报回合结束；仅当 DISCORD_CHANNEL_ID 存在时生效
   manager.ts             Agent lifecycle + cron + version/update CLI (JSON output)
   cron.ts                Cron scheduler daemon (launchd-managed)
   launcher.ts            Master tmux session guardian (launchd-managed)
@@ -79,6 +83,8 @@ src/
     bridge-client.ts     Shared Bridge WebSocket request helper
     tmux-helper.ts       Shared tmux command wrappers (tmuxRaw, isIdle, sendLine, …)
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
+    pi-launch.ts         v2.23+ Pi agent 的启动命令（--approve / --extension / --session-id open-or-create）
+    launch-command.ts    v2.23+ registry runtime → 启动器分发（claude-code / pi），新增 runtime 只改这里
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
     doctor.ts            v2.14+ read-only install health-check backing `manager.ts doctor` (runtime / config / daemons / bridge / MCP / agents)
@@ -157,6 +163,26 @@ SETUP.md                 User-facing installation guide
 - **Background-activity threads (v2.8+)** — every agent's background work gets its own sub-conversation instead of polluting the main channel. `bridge/bg-activity-watcher.ts` polls each registered agent's session for two activity kinds: **subagents** (`~/.claude/projects/<slug>/<sessionId>/subagents/agent-*.jsonl`, same format as the main session) and **background shell tasks** (`/tmp/claude-<uid>/<slug>/<sessionId>/tasks/*.output`). A new file → `ChatAdapter.provisionThread` opens a thread under the agent's channel (Discord thread today, Telegram topic later); tool calls / assistant text / shell output stream in with a 2.5s debounce; 3 min of inactivity → completion summary + thread auto-archive. Lifecycle mirrors to SSE as `bg_task_started/update/completed` so a web frontend can render per-task progress lines without Discord. Restart-safe: the first poll baselines existing files without replaying. **Session archive** (`lib/session-archive.ts`): whenever a session retires (kill, fork rotation, adopt, resume-replace, or manual `manager.ts archive <name>`), its jsonl (+ subagents) is snapshotted to `~/.claude-orchestrator/archive/<agent>/` — Claude Code's `cleanupPeriodDays` prunes the originals, the archive is what makes chat history durable. Copy-if-larger semantics; conversation content stays in files, no database (owner-approved storage design 2026-07-10). v2.9+ adds a daily sweeper (`bridge/archive-sweeper.ts`) that re-snapshots every active agent's session, so long-lived sessions that never retire are archived too. SSE `bg_task_*` events carry a stable `id` (file basename: subagent id / shell task id), never server paths.
 - **Read-only history API (v2.9+)** — the web-UI-facing counterpart of the archive: `GET /api/v1/agents/:name/history` lists an agent's sessions (live + archived snapshots merged, live wins when larger), `GET /api/v1/agents/:name/history/:sessionId` returns paginated neutral messages (`?limit=100&before=<seq>` pages backwards like a chat view; `?subagent=agent-xxx` reads a subagent conversation). Parsing lives in `lib/session-history.ts` (pure, unit-tested): user/assistant/compact-boundary entries become `{seq, ts, role, text, tools[], compactSummary?}`, meta entries and tool_result payloads are filtered, tool calls render through jsonl-watcher's `formatTool`. Token scope rules match the messaging endpoint; a killed agent's archives remain readable (that is the point of archiving). sessionId/subagent params are whitelist-validated before touching the filesystem.
 - **Discord slash autocomplete for skills + built-ins** — on startup, the Bridge discovers every available slash command from four sources (user-level `~/.claude/skills/`, installed plugins in `~/.claude/plugins/cache/…`, per-agent `<cwd>/.claude/skills/`, and a curated set of Claude Code built-ins like `/cost`, `/mcp`, `/context`, `/compact`) and registers them as Discord slash commands. Invocations are re-scanned on every `manager.ts create|resume|kill|restart` via the `/skills/rescan` HTTP endpoint. When a user types a registered `/cmd args` in Discord, the bridge forwards the literal text to the channel's agent via `tmux send-keys`, so Claude Code interprets it natively. Project-level skills are filtered: typing a skill that only exists in another agent's cwd yields an ephemeral explanation instead of going through.
+
+### Pi agent sessions (v2.23+)
+
+Claudestra can host **Pi coding-agent sessions** alongside Claude Code ones. An agent's runtime lives in registry (`runtime: "pi"`; missing = Claude Code, so existing data needs no migration) and decides exactly two things: which launcher builds the command (`lib/launch-command.ts` → `lib/pi-launch.ts`), and how readiness is detected.
+
+```bash
+bun src/manager.ts create <name> <dir> [purpose] --runtime pi [--model provider/id]
+bun src/manager.ts resume <name> <sessionId> [dir] --runtime pi   # id may be non-UUID
+```
+
+**How the channel works.** Claude Code gets messages pushed into its context by the official channel protocol over an stdio MCP server (`channel-server.ts`). Pi has no such thing — its core ships no MCP and an MCP child process cannot see the session identity. So the Pi side is a **Pi extension** (`src/pi/claudestra-extension.ts`) loaded with `--extension` by the launcher. It speaks the *same* bridge WebSocket protocol as `channel-server` (register / registered / response / message / replaced + ping), so `bridge.ts` needed no changes for the round trip. Differences, all inside the extension:
+
+- inbound message → `pi.sendUserMessage()` (idle) or with `deliverAs: "steer"` (mid-turn), instead of an MCP channel notification;
+- `reply` / `send_to_agent` / `fetch_messages` / `project_info` are registered as Pi **custom tools** with the same names and parameters as the MCP ones, so agent instructions written for Claude Code still apply;
+- turn end → `agent_settled` (fires only after retries and compaction retries finish — closer to "the turn is really over" than a Stop hook) POSTs to the bridge `/hook` with `event: "Stop"`, and **acts on the `{block, reason}` answer** the same way the Claude Code Stop hook does: the reminder is injected as a new turn so the agent gets one chance to call `reply`;
+- the extension is inert unless `DISCORD_CHANNEL_ID` is present, so a user's own `pi` sessions are unaffected.
+
+**Readiness** is a tmux window user option (`@claudestra_ready`), written by the extension after the bridge accepts its registration and polled by `manager.ts` (`waitForPiReady`). Deliberately not pane-text sniffing: Pi's TUI changes between versions, while this marker is ours. Restart clears it first, so a reused window cannot report stale readiness. Graceful exit sends `/quit` (`/exit` for Claude Code).
+
+**Not covered yet** (Pi sessions currently look silent in the web/Discord stream): session-file parsing. `jsonl-watcher`, `session-history`, `session-archive`, `jsonl-cost` and `sessions-inventory` all read Claude Code's `~/.claude/projects/<slug>/<sessionId>.jsonl`; Pi writes `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` with a different entry shape (tool calls and their results are separate lines joined by `toolCallId`). That is the next slice, and it also revives the bridge's "agent forgot to reply → extract the last assistant text" fallback, which is currently dead for Pi agents.
 
 ### Cross-Claudestra peer collaboration
 
