@@ -261,6 +261,7 @@ function SessionViewer({
   const [messages, setMessages] = useState<HistoryMsg[] | null>(null);
   const [error, setError] = useState("");
   const [adopting, setAdopting] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
   const [name, setName] = useState(session.slug || session.sessionId.slice(0, 8));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -285,6 +286,35 @@ function SessionViewer({
       cancelled = true;
     };
   }, [session]);
+
+  /**
+   * 处置未纳管会话：archive = 先快照进归档目录再删原文件（可逆）；delete = 只删（不可逆）。
+   * 后端还挡一道「文件 2 分钟内还在写 = 像在跑」的保护。
+   */
+  const manage = async (action: "archive" | "delete") => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(session.sessionId)}/manage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, runtime: session.runtime, cwd: session.cwd }),
+      });
+      const json = (await res.json()) as { data?: { archived?: boolean }; error?: string };
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      setNotice(
+        action === "archive"
+          ? t("已归档并从列表移除（内容留在归档目录，可找回）")
+          : t("已删除"),
+      );
+      // 复用父级的「处理完刷新」回调（名字来自收编流程，这里只是关抽屉 + 重拉列表）
+      setTimeout(onAdopted, 1200);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const adopt = async () => {
     const n = name.trim();
@@ -409,6 +439,31 @@ function SessionViewer({
               <button className="btn btn-outline btn-sm ml-auto" onClick={() => setAdopting(true)}>
                 {t("收编为 agent")}
               </button>
+              {/* v2.23+ 未纳管会话的处置：归档（可逆）/ 删除（二次确认） */}
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={busy}
+                onClick={() => void manage("archive")}
+              >
+                {t("归档")}
+              </button>
+              {confirmDel ? (
+                <button
+                  className="btn btn-error btn-sm"
+                  disabled={busy}
+                  onClick={() => void manage("delete")}
+                >
+                  {t("确认删除")}
+                </button>
+              ) : (
+                <button
+                  className="btn btn-ghost btn-sm text-error"
+                  disabled={busy}
+                  onClick={() => setConfirmDel(true)}
+                >
+                  {t("删除")}
+                </button>
+              )}
             </div>
           )}
         </footer>
