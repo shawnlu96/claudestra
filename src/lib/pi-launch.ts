@@ -17,6 +17,7 @@
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { shellEscape } from "./claude-launch.js";
+import { piEnvFlags, type PiEnvProfile } from "./pi-env.js";
 
 /** Claudestra 注入的 Pi 扩展：绝对路径（扩展必须能被 Pi 直接 -e 加载） */
 export const PI_EXTENSION_PATH = join(
@@ -42,6 +43,11 @@ export interface PiLaunchOptions {
   model?: string;
   /** claude 的 effort 档位，能对上 Pi 的 --thinking 才传 */
   effort?: string;
+  /**
+   * v2.23+ 能力档案：决定这个 agent 带哪些扩展/技能/工具/MCP。
+   * 缺省（undefined）= 继承用户全局 Pi 环境，与引入档案之前的行为逐字节一致。
+   */
+  piEnv?: PiEnvProfile;
 }
 
 /** 构造 pi 启动命令行字符串（含前导环境变量导出），供 tmux send-keys 使用。 */
@@ -53,12 +59,28 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
     `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}`;
 
-  const parts: string[] = [
-    "pi",
-    "--approve",
-    "--extension",
-    shellEscape(PI_EXTENSION_PATH),
-  ];
+  const parts: string[] = ["pi"];
+
+  // ⚠ 参数顺序有语义（实测 pi 0.85.1）：
+  //   ① 信任开关 → ② 发现开关与额外扩展（包源必须在路径之前，见 pi-env.ts 注释）
+  //   → ③ Claudestra 自己的通道扩展（路径）→ ④ 其余
+  // 把通道扩展放最后是因为它是路径，而**任何路径之前**不能插包源；反过来说，
+  // 包源必须全部排在第一个路径之前。
+  parts.push(opts.piEnv?.trustProject === false ? "--no-approve" : "--approve");
+
+  // 能力档案的开关（--no-extensions / -e 额外扩展 / --tools / --exclude-tools …）。
+  // 带值的 flag 要成对处理 —— 不能靠「以 -- 开头」猜，值本身也可能是路径。
+  const VALUE_FLAGS = new Set(["--extension", "--skill", "--tools", "--exclude-tools", "--mcp-config"]);
+  const envFlags = piEnvFlags(opts.piEnv);
+  for (let i = 0; i < envFlags.length; i++) {
+    const flag = envFlags[i];
+    parts.push(flag);
+    if (VALUE_FLAGS.has(flag) && i + 1 < envFlags.length) parts.push(shellEscape(envFlags[++i]));
+  }
+
+  // Claudestra 通道扩展：base=minimal 下 --no-extensions 关掉了发现，但显式 -e 仍然生效
+  // （实测：--no-extensions 下只剩内置 8 个工具 + 我们的通道工具）。
+  parts.push("--extension", shellEscape(PI_EXTENSION_PATH));
 
   if (opts.sessionId) parts.push("--session-id", shellEscape(opts.sessionId));
   if (opts.agentName) parts.push("--name", shellEscape(opts.agentName));

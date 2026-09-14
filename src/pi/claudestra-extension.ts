@@ -26,6 +26,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
@@ -60,6 +63,8 @@ interface PiUi {
 
 interface PiContext {
   ui?: PiUi;
+  /** 当前模型（可能为空）。取 name/id 写进能力快照 */
+  model?: { id?: string; name?: string } | undefined;
   sessionManager?: {
     getSessionId?(): string | undefined;
     getSessionFile?(): string | undefined;
@@ -82,6 +87,12 @@ interface PiExtensionApi {
     content: string,
     options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
   ): Promise<void>;
+  /** 以下三个用于能力快照（v2.23+），老版本 Pi 上没有 ⇒ 全部可选调用 */
+  getAllTools?(): Array<{ name?: string }>;
+  getActiveTools?(): string[];
+  getCommands?(): Array<{ name?: string }>;
+  getThinkingLevel?(): string;
+  getModel?(): { id?: string; name?: string } | undefined;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -119,6 +130,47 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     const pane = process.env.TMUX_PANE;
     if (!pane) return;
     execFile("tmux", ["set-option", "-w", "-t", pane, READY_OPTION, "1"], () => { /* 不在 tmux 里就忽略 */ });
+  }
+
+  /**
+   * 把「这个会话实际加载了什么」写成快照（manager pi-env / 网页端读）。
+   *
+   * 为什么要落文件而不是发 bridge：bridge 对 registry 只读（唯一写者是 manager），
+   * 而这份快照需要在 bridge 挂了、会话已死之后仍然可读（排查用）。落点与 registry 同
+   * 目录家族，0600。
+   * 记的是**实况**而不是配置：`--no-extensions` 到底关掉了什么，只有这里看得见。
+   */
+  function writeEnvSnapshot(ctx?: PiContext) {
+    if (!AGENT_NAME) return;
+    try {
+      const tools = (pi.getAllTools?.() ?? [])
+        .map((t) => (typeof t?.name === "string" ? t.name : ""))
+        .filter(Boolean)
+        .sort();
+      const active = (pi.getActiveTools?.() ?? []).slice().sort();
+      const commands = (pi.getCommands?.() ?? [])
+        .map((c) => (typeof c?.name === "string" ? c.name : ""))
+        .filter(Boolean)
+        .sort();
+      const model = ctx?.model ?? pi.getModel?.();
+      const snap = {
+        at: new Date().toISOString(),
+        agent: AGENT_NAME,
+        sessionId: sessionId || undefined,
+        cwd: process.cwd(),
+        piVersion: process.env.PI_VERSION || undefined,
+        toolCount: tools.length,
+        tools,
+        activeTools: active,
+        commandCount: commands.length,
+        commands,
+        model: model?.id || model?.name || undefined,
+        thinking: (() => { try { return pi.getThinkingLevel?.(); } catch { return undefined; } })(),
+      };
+      const dir = join(homedir(), ".claude-orchestrator", "pi-env");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(dir, `${AGENT_NAME}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
+    } catch { /* 快照写不了不影响通道本身 */ }
   }
 
   // ── bridge 连接 ──────────────────────────────────────────
@@ -308,9 +360,15 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
       sessionId = ctx?.sessionManager?.getSessionId?.() ?? "";
       sessionFile = ctx?.sessionManager?.getSessionFile?.() ?? "";
     } catch { /* 老版本没有这两个方法时留空，不影响收发 */ }
+    // 能力快照要在扩展/工具都注册完之后写 —— session_start 时本扩展自己的工具已注册，
+    // 但 MCP 等懒加载的工具可能还没进 getAllTools（那时数量偏少，属已知误差）。
+    writeEnvSnapshot(ctx);
     setLinkStatus(false);
     connect();
   });
+
+  // 模型换了就重写快照（档案里钉的模型/用户手动切换都走这里）
+  pi.on("model_select", (_event, ctx) => writeEnvSnapshot(ctx));
 
   pi.on("agent_start", () => { streaming = true; });
   pi.on("agent_settled", () => {

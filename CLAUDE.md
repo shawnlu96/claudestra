@@ -84,6 +84,7 @@ src/
     tmux-helper.ts       Shared tmux command wrappers (tmuxRaw, isIdle, sendLine, …)
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
     pi-launch.ts         v2.23+ Pi agent 的启动命令（--approve / --extension / --session-id open-or-create）
+    pi-env.ts            v2.23+ Pi 能力档案：档案→启动参数（含包源必须排路径前的顺序规则）+ 全局/项目/运行时清单读取
     launch-command.ts    v2.23+ registry runtime → 启动器分发（claude-code / pi），新增 runtime 只改这里
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
@@ -181,6 +182,23 @@ bun src/manager.ts resume <name> <sessionId> [dir] --runtime pi   # id may be no
 - the extension is inert unless `DISCORD_CHANNEL_ID` is present, so a user's own `pi` sessions are unaffected.
 
 **Readiness** is a tmux window user option (`@claudestra_ready`), written by the extension after the bridge accepts its registration and polled by `manager.ts` (`waitForPiReady`). Deliberately not pane-text sniffing: Pi's TUI changes between versions, while this marker is ours. Restart clears it first, so a reused window cannot report stale readiness. Graceful exit sends `/quit` (`/exit` for Claude Code).
+
+**Environment management (v2.23+).** A Pi agent's abilities are a three-layer composition — global `~/.pi/agent/` (packages, extensions, skills, `mcp.json`, `models.json`), project `.pi/` + `AGENTS.md`/`CLAUDE.md`, and per-process flags. Left alone, every Claudestra Pi agent inherits whatever the operator happens to have installed (on this machine: 15 packages → 65 tools / 83 commands), which is neither visible nor controllable. So each Pi agent carries a **capability profile** in registry (`piEnv`):
+
+```bash
+manager create <name> <dir> [purpose] --runtime pi --pi-base minimal   # 只带内置工具 + 通道扩展
+manager pi-env <agent>                       # 看清：档案 + 全局/项目静态清单 + 运行时实况
+manager pi-env-set <agent> --base minimal|inherit [--add-ext <src>] [--add-skill <path>] \
+                          [--exclude-tool <name>] [--mcp-config <path>] [--no-trust] [--reset]
+```
+
+`inherit` (the default when no profile is set) means unchanged behavior; `minimal` adds `--no-extensions --no-skills --no-prompt-templates`, which measured **8 built-in tools / 1 command** — it really does drop package-provided extensions (a package contributes extensions through settings `packages[]`, and `--no-extensions` disables that too). Context files stay on deliberately: `AGENTS.md`/`CLAUDE.md` are how the repo says it wants to be worked on, and Claude Code agents get them too.
+
+**Flag order is semantic** (measured on pi 0.85.1, documented in `lib/pi-env.ts`): `--no-*` must precede the first `-e`, and **package sources (`-e npm:…`) must precede path sources** — reversing them silently drops the package source (`--no-extensions -e npm:pkg -e /path.ts` loads pkg; `--no-extensions -e /path.ts -e npm:pkg` does not, with no error anywhere). `lib/pi-launch.ts` emits that order explicitly; don't "tidy" it.
+
+The runtime truth comes from the Pi extension, which writes a snapshot of `getAllTools()` / `getActiveTools()` / `getCommands()` / model / thinking level to `~/.claude-orchestrator/pi-env/<agent>.json` on session start (and on model change). That is what makes drift visible: `manager pi-env` compares the profile against the snapshot and flags e.g. "profile is minimal but global-extension tools showed up". The bridge stays out of it — it is a read-only consumer of registry, and the snapshot must stay readable after the bridge or session is gone.
+
+`--approve` (trust project-local `.pi/` resources, which can execute project extensions and install packages) is **on by default**, matching Claude Code's auto-accepted trust dialog; the choice is recorded in the profile (`trustProject`) so it is visible rather than buried in the launch line.
 
 **Not covered yet** (Pi sessions currently look silent in the web/Discord stream): session-file parsing. `jsonl-watcher`, `session-history`, `session-archive`, `jsonl-cost` and `sessions-inventory` all read Claude Code's `~/.claude/projects/<slug>/<sessionId>.jsonl`; Pi writes `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` with a different entry shape (tool calls and their results are separate lines joined by `toolCallId`). That is the next slice, and it also revives the bridge's "agent forgot to reply → extract the last assistant text" fallback, which is currently dead for Pi agents.
 
