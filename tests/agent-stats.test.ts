@@ -7,7 +7,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { readFileStats, POST_COMPACT_BASE_TOKENS } from "../src/lib/agent-stats.js";
+import { readFileStats, scanStatsWindow, POST_COMPACT_BASE_TOKENS } from "../src/lib/agent-stats.js";
 
 let seq = 0;
 function mkJsonl(lines: object[]): string {
@@ -115,5 +115,69 @@ describe("costOfUsage", () => {
 
   test("未知模型不计价（宁少报不虚报）", () => {
     expect(costOfUsage("<synthetic>", { input_tokens: 5_000_000 })).toBe(0);
+  });
+});
+
+// ── 尾读 + 扩窗（2026-09-15 bridge OOM 根因）────────────────────────────────
+// 原先 readFileStats 无条件全文读：538MB 的会话一次吃 ~2.5GB JS 堆，而 Stop hook
+// 每回合触发 → bridge RSS 棘轮涨到 3.4GB。改成尾读 + 「回溯过周界才停」的扩窗。
+// 这里用 tailStartBytes 把窗口逼到几十字节，在小 fixture 上验扩窗逻辑。
+describe("readFileStats 尾读扩窗", () => {
+  const DAY = 86400_000;
+  function atDaysAgo(d: number) {
+    return new Date(Date.now() - d * DAY).toISOString();
+  }
+  function usageAt(ts: string, out: number) {
+    return {
+      type: "assistant",
+      timestamp: ts,
+      message: {
+        model: "claude-fable-5",
+        usage: { input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: out },
+      },
+    };
+  }
+
+  // ⚠ readFileStats 的 5 秒桶缓存是**按 path 键**的：同一路径调两次，第二次必吃缓存，
+  //   参数不同也没用。所以每个对照组都写成两份内容相同、路径不同的文件。
+  test("窗口再小也要扩到回溯过周界，本周合计与全读一致", async () => {
+    // 20 天前 → 今天，跨周界；每条 output 都不同，漏一条就对不上
+    const recs = Array.from({ length: 40 }, (_, i) => usageAt(atDaysAgo(20 - i * 0.5), i + 1));
+    const full = await readFileStats(mkJsonl(recs), { tailStartBytes: 1 << 30 });
+    const tail = await readFileStats(mkJsonl(recs), { tailStartBytes: 64 }); // 逼扩窗
+    expect(tail.week).toEqual(full.week);
+    expect(tail.today).toEqual(full.today);
+    expect(tail.contextTokens).toBe(full.contextTokens);
+    expect(tail.model).toBe(full.model);
+    expect(full.week.requests).toBeGreaterThan(0); // fixture 本身有效
+    expect(full.week.requests).toBeLessThan(recs.length); // 确实有记录落在周界外
+  });
+
+  // ⚠ 真实 jsonl 是 append-only 的「旧 → 新」。fixture 必须同序，否则尾窗第一条就是
+  //   最老的记录、一上来就越过周界，扩窗逻辑根本走不到（第一版测试就栽在这）。
+  test("整个文件都在本周内 → 扩到文件头即停，不死循环", async () => {
+    // 全部打「此刻」：now >= weekStart 恒成立，不受跑测时间影响
+    const recs = Array.from({ length: 12 }, (_, i) => usageAt(new Date().toISOString(), i + 1));
+    const tail = await readFileStats(mkJsonl(recs), { tailStartBytes: 32 });
+    const full = await readFileStats(mkJsonl(recs), { tailStartBytes: 1 << 30 });
+    expect(tail.week).toEqual(full.week);
+    expect(tail.week.requests).toBe(recs.length); // 一条不漏（没有记录在周界外）
+  });
+
+  test("窗口从半行中间切入：截断的首行被丢弃，不产生错数", async () => {
+    const recs = Array.from({ length: 30 }, (_, i) => usageAt(new Date().toISOString(), i + 1));
+    const full = await readFileStats(mkJsonl(recs), { tailStartBytes: 1 << 30 });
+    expect(full.week.requests).toBe(recs.length);
+    // 刻意取不落在行边界上的窗口大小
+    for (const w of [37, 91, 143]) {
+      const tail = await readFileStats(mkJsonl(recs), { tailStartBytes: w });
+      expect(tail.week).toEqual(full.week);
+    }
+  });
+
+  test("scanStatsWindow：没有可解析时间戳时 oldestTs = Infinity（调用方据此继续扩窗）", () => {
+    const r = scanStatsWindow(["", "{坏行", "not json"], Date.now(), Date.now() - 7 * DAY);
+    expect(r.oldestTs).toBe(Infinity);
+    expect(r.stats.week.requests).toBe(0);
   });
 });
