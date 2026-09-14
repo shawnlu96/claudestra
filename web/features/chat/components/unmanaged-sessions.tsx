@@ -167,10 +167,13 @@ export function UnmanagedSessions() {
             <span className="ml-auto loading loading-spinner loading-xs" />
           ) : null}
         </button>
+        {/* 触摸目标：原先只有 px-1.5 的裸字符（≈14×20px），手机上点不中 ——
+            而且紧挨折叠按钮，手指落点全被邻居吃掉（owner 2026-09-14 实报）。
+            给 36×36 的格子（iOS 建议 44，列表头里 36 是合理折中）+ touch-manipulation */}
         {open ? (
           <button
             type="button"
-            className="shrink-0 rounded-md px-1.5 text-sm text-base-content/40 transition-colors hover:text-base-content/80"
+            className="grid size-9 shrink-0 touch-manipulation place-items-center rounded-md text-base text-base-content/45 transition-colors hover:text-base-content/80 active:bg-base-200/70"
             title={t("刷新")}
             disabled={loading}
             onClick={(e) => {
