@@ -547,6 +547,38 @@ describe("readSessionHistory 尾读路径(maxFullReadBytes)", () => {
     expect(tail.messages.map((m) => m.seq)).toEqual(full.messages.map((m) => m.seq));
   });
 
+  // 2026-09-15：before= 深翻页原先靠「窗口里凑够 limit 条」当判据,窗口离 cursor 越远
+  // 命中越少 → 越扩越大(win *= 8 无上限,8→64→512MB),一次请求峰值 1~1.5GB。改成向前
+  // 滑动定长窗口 + 字节级判据 `lineOffset <= before - limit`。这条测试一路翻到文件头,
+  // 正是原先要把窗口扩到全文的那条路径——顺便挡住「简单封顶」那种会让深翻页返回空页
+  // 的错误改法(真发生过:封顶后 all.filter(seq<before) 恒空 → 永远翻不到更早的页)。
+  test("before= 一路深翻到文件头:每页都不空,拼起来与全读逐条一致", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
+    const p = bigSession(dir);
+    const all = await readSessionHistory(p, { limit: 5000, maxFullReadBytes: 1 << 30 });
+    const LIMIT = 10;
+
+    const walked: number[] = [];
+    let cursor: number | undefined = undefined;
+    let pages = 0;
+    for (;;) {
+      const page: Awaited<ReturnType<typeof readSessionHistory>> = await readSessionHistory(p, {
+        limit: LIMIT,
+        before: cursor,
+        maxFullReadBytes: 4096, // 逼尾读/滑窗
+      });
+      expect(page.messages.length).toBeGreaterThan(0); // 深翻页不许返回空页
+      walked.unshift(...page.messages.map((m) => m.seq));
+      pages++;
+      expect(pages).toBeLessThan(500); // 死循环兜底
+      if (!page.hasMore) break;
+      cursor = page.messages[0].seq;
+    }
+
+    expect(pages).toBeGreaterThan(20); // 确实翻了很多页(否则测不到滑窗)
+    expect(walked).toEqual(all.messages.map((m) => m.seq)); // 一条不漏、不重、不乱序
+  });
+
   test("before= 往回翻页:尾读与全读同一页", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cstra-tail-"));
     const p = bigSession(dir);
