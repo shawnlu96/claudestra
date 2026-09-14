@@ -26,6 +26,7 @@ export async function POST(
     const data = await bridgePost(`/sessions/${encodeURIComponent(sessionId)}/manage`, body);
     return NextResponse.json({ data });
   } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 502 });
+console.error("[bff] /sessions/:id/manage 失败:", (e as Error).message);
+        return NextResponse.json({ error: (e as Error).message }, { status: 502 });
   }
 }
