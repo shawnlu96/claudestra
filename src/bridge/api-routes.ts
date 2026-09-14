@@ -866,8 +866,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           : null;
         const dest = `${USER_ARCHIVE_ROOT}/${name}`;
         await fsp2.mkdir(dest, { recursive: true });
-        if (live && existsSync(live)) {
-          await fsp2.copyFile(live, `${dest}/${live.split("/").pop()}`);
+        if (live && existsSync(String(live))) {
+          await fsp2.copyFile(String(live), `${dest}/${String(live).split("/").pop()}`);
         }
         await fsp2.writeFile(
           `${dest}/.meta.json`,
