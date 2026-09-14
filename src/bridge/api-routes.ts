@@ -661,6 +661,20 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (reg.runtime !== "pi") {
       return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 Pi agent（用 /claude-settings）` });
     }
+    // 模型 id 先对着 models.json 校验：扩展内部解析不到会拒绝，而桥接这边的"乐观显示"
+    // 没法知道注入的结果 ⇒ 假 id 会在顶栏显示一个根本不存在的模型（实测踩过）。
+    if (model) {
+      try {
+        const raw = JSON.parse(await Bun.file(`${process.env.HOME}/.pi/agent/models.json`).text());
+        const ids = new Set<string>();
+        for (const [provider, cfg] of Object.entries<any>(raw?.providers ?? {})) {
+          for (const m of cfg?.models ?? []) ids.add(`${provider}/${m.id}`);
+        }
+        if (ids.size && !ids.has(model)) {
+          return apiJson(400, { ok: false, error: `未知的 Pi 模型：${model}` });
+        }
+      } catch { /* 读不到清单就不拦（扩展侧仍会拒绝） */ }
+    }
     const { tmuxSendLine, windowTarget } = await import("../lib/tmux-helper.js");
     const target = windowTarget(canonical);
     try {
