@@ -89,6 +89,9 @@ export async function loadAgents(): Promise<AgentSession[]> {
         (b) => String(b.name || "").replace(/^agent-/, "") === "master" && typeof b.runtime === "string" && b.runtime,
       );
     })
+    // 已归档的 agent 不进工作列表（owner 2026-09-14「被归档，但是还是在列表里」）：
+    // 归档区里有它的目录 = 被收起来了；恢复（清掉归档目录）后自动回来。
+    .filter((a) => (a as { archived?: boolean }).archived !== true)
     .map((a): AgentSession => {
     if (a.name === "master") {
       return {

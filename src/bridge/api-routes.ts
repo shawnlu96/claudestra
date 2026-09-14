@@ -434,9 +434,21 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   if (path === "/agents" && req.method === "GET") {
     try {
       const listResult = await runManager("list");
+      // v2.23+「已归档」标记：归档区里有这个 agent 的话标出来，网页据此把它从工作列表
+      // 隐藏（归档 = 收起来，不是删掉；恢复时归档目录被清掉，它自然回到列表）。
+      // 为什么不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。
+      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+      const { existsSync: existsSyncFs } = await import("node:fs");
       const agents = ((listResult.agents || []) as any[])
         .filter((a) => agentInScope(principal, a.name))
-        .map((a) => ({ name: a.name, status: a.status, idle: a.idle, purpose: a.purpose, created: a.created }));
+        .map((a) => ({
+          name: a.name,
+          status: a.status,
+          idle: a.idle,
+          purpose: a.purpose,
+          created: a.created,
+          archived: existsSyncFs(`${USER_ARCHIVE_ROOT}/${String(a.name).replace(/^agent-/, "")}`),
+        }));
       // busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
       // thinking 同源——manager list 的 tmux idle 探测在回合中也常报 idle，
       // 不可靠，只作 OR 兜底）。web 列表的黄色状态点数据源。
