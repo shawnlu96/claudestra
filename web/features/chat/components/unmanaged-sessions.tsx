@@ -47,6 +47,11 @@ interface HistoryMsg {
  * 运行时徽章：Claude Code 不标（它是默认），Pi 标出来 —— 两者行为差异大，该看得见。
  * v2.23+ 导出给侧栏 agent 行复用，保证「未纳管会话」与 agent 列表是同一套视觉语言。
  */
+/** 临时目录（测试/探针/子代理 scratchpad）的会话不算「未纳管」噪声源，列表与计数都不含它们 */
+function isTempSession(cwd: string): boolean {
+  return /^(\/tmp|\/private\/tmp|\/var\/folders|\/private\/var\/folders)\//.test(cwd || "");
+}
+
 export function RuntimeBadge({ runtime, className = "" }: { runtime: string; className?: string }) {
   if (runtime !== "pi") return null;
   return (
@@ -108,7 +113,7 @@ export function UnmanagedSessions() {
     };
   }, [fetchSessions]);
 
-  const count = sessions.filter((s) => s.agentName === null).length;
+  const count = sessions.filter((s) => s.agentName === null && !isTempSession(s.cwd)).length;
 
   const toggle = () => {
     const next = !open;
@@ -116,7 +121,20 @@ export function UnmanagedSessions() {
     if (next) void load();
   };
 
-  const unmanaged = sessions.filter((s) => !s.agentName);
+  // 未纳管会话里塞着大量**测试遗留**（dailies 探针 / spike / 子代理 scratchpad）：
+  // 它们的 cwd 在临时目录下，列出来只是噪声（owner 2026-09-14 实测：20 个未纳管 Pi
+  // 会话里 8+ 个是 /tmp 下的）。临时目录的会话不进列表——真想看还有 CLI
+  // `manager sessions`（isTempSession 见组件上方，与组头计数同一判据）。
+  const unmanaged = sessions.filter((s) => !s.agentName && !isTempSession(s.cwd));
+
+  // 「刚刚活跃」= 会话文件 2 分钟内还在写（真在跑的会话持续落盘）。
+  // ⚠ 这是**启发式**，不是进程检测：Pi 进程的命令行被 setproctitle 盖成 `pi`，
+  // 未纳管会话又没有扩展心跳，所以只能拿写入时间当代理信号。
+  const LIVE_MS = 2 * 60_000;
+  const isLive = (s: SessionRow) => {
+    const t = Date.parse(s.modifiedAt);
+    return Number.isFinite(t) && Date.now() - t < LIVE_MS;
+  };
 
   return (
     <li className="mx-2 mt-1 rounded-xl bg-base-300/25 p-1 list-none">
@@ -185,6 +203,14 @@ export function UnmanagedSessions() {
                 >
                   <span className="flex items-center gap-1.5 text-sm">
                     <RuntimeBadge runtime={s.runtime} />
+                    {isLive(s) ? (
+                      <span
+                        className="shrink-0 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] text-success"
+                        title={t("会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）")}
+                      >
+                        {t("活跃")}
+                      </span>
+                    ) : null}
                     <span className="truncate text-base-content/80">
                       {s.name || s.sessionId.slice(0, 8)}
                     </span>
