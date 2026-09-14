@@ -74,7 +74,22 @@ export async function loadAgents(): Promise<AgentSession[]> {
     "/agents?include=stopped",
     { timeoutMs: 5000 }
   );
-  const list = (json.agents || []).map((a): AgentSession => {
+  const list = (json.agents || [])
+    // 大总管在桥接侧有**多个来源**（注册表历史条目 `agent-master`、api-routes 的
+    // master 注入、cmdList 的补条目）——不去重时侧栏会冒出「大总管卡片 + 一条
+    // 分组里的 master」（owner 2026-09-14 手机截图实报）。这里收敛成一条：
+    // 丢掉 `agent-master` 这种带前缀的历史条目，同名只保留**第一个带 runtime 的**
+    .filter((a) => !/^agent-master$/.test(String(a.name || "")))
+    .filter((a) => {
+      const bare = String(a.name || "").replace(/^agent-/, "");
+      if (bare !== "master") return true;
+      if (typeof a.runtime === "string" && a.runtime) return true;
+      // runtime 为空的 master 条目（旧注入路径）在有带 runtime 的那条时丢弃
+      return !(json.agents || []).some(
+        (b) => String(b.name || "").replace(/^agent-/, "") === "master" && typeof b.runtime === "string" && b.runtime,
+      );
+    })
+    .map((a): AgentSession => {
     if (a.name === "master") {
       return {
         // ⚠ 展开桥接的原始字段再覆盖 —— 这个映射此前是**逐项挑字段**的，桥接新增
