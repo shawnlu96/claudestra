@@ -67,6 +67,16 @@ import {
 } from "./lib/claude-launch.js";
 import { buildAgentCommand } from "./lib/launch-command.js";
 import { agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import {
+  describePiEnvProfile,
+  normalizePiEnvProfile,
+  piEnvSnapshotPath,
+  readPiGlobalEnv,
+  readPiProjectEnv,
+  readPiRuntimeSnapshot,
+  snapshotIsFresh,
+  type PiEnvProfile,
+} from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveNpm } from "./lib/npm-path.js";
@@ -145,6 +155,11 @@ interface AgentInfo {
    * 决定用哪个启动器（lib/launch-command.ts）与怎么判就绪（tmux 标记 vs TUI 文案）。
    */
   runtime?: string;
+  /**
+   * v2.23+ Pi 能力档案（仅 Pi agent）：base=minimal 不继承用户全局环境，可额外挑扩展/
+   * 技能、禁工具、指定 MCP 配置。缺失 = 继承全局（引入档案之前的行为）。改完要 restart。
+   */
+  piEnv?: PiEnvProfile;
 }
 
 interface Registry {
@@ -547,6 +562,23 @@ function extractBoolFlag(args: string[], flag: string): { rest: string[]; value:
   return { rest, value };
 }
 
+/** 抽取可重复的 `--flag <value>` / `--flag=value`（--add-ext 这类用） */
+function extractMultiFlag(args: string[], flag: string): { rest: string[]; values: string[] } {
+  const rest: string[] = [];
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === flag) {
+      const v = args[++i];
+      if (v) values.push(v);
+    } else if (a.startsWith(`${flag}=`)) {
+      const v = a.slice(flag.length + 1);
+      if (v) values.push(v);
+    } else rest.push(a);
+  }
+  return { rest, values };
+}
+
 /** 抽取 `--flag <value>` / `--flag=value`（与 extractBoolFlag 同风格，--runtime 用） */
 function extractStringFlag(args: string[], flag: string): { rest: string[]; value?: string } {
   const rest: string[] = [];
@@ -806,15 +838,22 @@ async function cmdCreate(
   external?: boolean,
   projectFlag?: string,
   runtimeFlag?: string,
+  piBaseFlag?: string,
 ) {
   assertValidNewName(name);
   if (runtimeFlag && runtimeFlag !== "pi" && runtimeFlag !== "claude-code") {
     output({ ok: false, error: `未知的 runtime: "${runtimeFlag}"。可用: claude-code, pi` });
     return;
   }
+  if (piBaseFlag && piBaseFlag !== "minimal" && piBaseFlag !== "inherit") {
+    output({ ok: false, error: `未知的 --pi-base: "${piBaseFlag}"。可用: inherit, minimal` });
+    return;
+  }
   // v2.23+ Pi 会话纳管：runtime 只在这里决定「用哪个启动器 + 怎么判就绪」，
   // 其余（频道/窗口/project/registry 形状）两条路完全一致。
   const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
+  // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
+  const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
 
@@ -910,6 +949,7 @@ async function cmdCreate(
     sessionId = crypto.randomUUID();
     const cmd = buildAgentCommand({
       runtime,
+      piEnv,
       channelId,
       bridgeUrl: BRIDGE_URL,
       sessionId,
@@ -999,6 +1039,7 @@ async function cmdCreate(
     ...(external ? { external: true } : {}),
     // 只在 Pi 时落盘；Claude Code agent 的 registry 保持逐字节不变（零迁移）
     ...(runtime === "pi" ? { runtime } : {}),
+    ...(runtime === "pi" && piEnv ? { piEnv } : {}),
   };
   await saveRegistry(reg);
 
@@ -1182,6 +1223,8 @@ async function cmdResume(
     const displayName = channelName;
     const cmd = buildAgentCommand({
       runtime,
+      // 沿用 registry 里已有的能力档案（resume 不改档案，但必须复现它）
+      piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv),
       channelId,
       bridgeUrl: BRIDGE_URL,
       // Pi 的 --session-id 是 open-or-create：同一个字段既能新建也能续上
@@ -1285,6 +1328,8 @@ async function cmdResume(
     permissionMode: mode,
     ...(model ? { model } : {}),
     ...(runtime === "pi" ? { runtime } : {}),
+    // resume 不提供档案编辑，但**不能把已有的弄丢**（丢了下次 restart 就变回继承全局）
+    ...(runtime === "pi" && prior?.piEnv ? { piEnv: prior.piEnv } : {}),
   };
   await saveRegistry(reg);
 
@@ -2098,6 +2143,9 @@ async function cmdRestart(name?: string) {
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
     const cmd = buildAgentCommand({
       runtime,
+      // v2.23+ 能力档案随 registry 一起复现：restart 必须带上，否则 agent 的能力
+      // 会在重启后静默变回「继承全局」（档案形同虚设）
+      piEnv: normalizePiEnvProfile(info.piEnv),
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
       resumeId: info.sessionId,
@@ -4412,6 +4460,7 @@ const WRITE_COMMANDS = new Set([
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-migrate",
+  "pi-env-set",
 ]);
 if (cmd && WRITE_COMMANDS.has(cmd)) {
   const { readOwnerMarker, ownerVerdict, machineUuid } = await import("./lib/owner-guard.js");
@@ -4431,6 +4480,124 @@ if (cmd && WRITE_COMMANDS.has(cmd)) {
 }
 
 // v2.20.1+ 写命令跨进程串行(Codex review 2026-08-26):bridge 的 runManager、
+
+// ============================================================
+// v2.23+ Pi 能力管理
+// ============================================================
+
+/** `pi-env <agent>`：看清一个 Pi agent 到底带哪些能力（档案 + 磁盘静态清单 + 运行时实况） */
+async function cmdPiEnv(name: string) {
+  const tmuxName = normalizeName(name);
+  const reg = await loadRegistry();
+  const info = reg.agents[tmuxName];
+  if (!info) {
+    output({ ok: false, error: `${tmuxName} 不在 registry` });
+    return;
+  }
+  if (agentRuntime(info) !== "pi") {
+    output({
+      ok: false,
+      error: `${tmuxName} 是 Claude Code agent（runtime=${info.runtime ?? "claude-code"}），pi-env 只对 Pi agent 有意义`,
+    });
+    return;
+  }
+
+  const global = readPiGlobalEnv();
+  const cwd = (info.cwd || "").replace(/^~/, process.env.HOME || "~");
+  const project = cwd ? readPiProjectEnv(cwd) : null;
+  const profile = normalizePiEnvProfile(info.piEnv);
+  const snap = readPiRuntimeSnapshot(tmuxName);
+  const fresh = snapshotIsFresh(snap);
+
+  // 期望 vs 实况：实况里出现了档案不该有的东西（比如 minimal 却带着用户的包），
+  // 或者该有的东西没出现 —— 这是「档案没生效 / 全局环境变了」的唯一可见信号。
+  const notes: string[] = [];
+  if (profile.base === "minimal" && fresh && snap) {
+    const foreign = snap.tools.filter((t) =>
+      ["mcp", "web_search", "hb", "knowledge_search", "spawn_session", "subagent"].includes(t),
+    );
+    if (foreign.length) notes.push(`档案是 minimal，但实况里出现了全局扩展的工具：${foreign.join(", ")}`);
+  }
+  if (!fresh && snap) notes.push("运行时快照已过期（agent 可能重启过或早已停）");
+
+  output({
+    ok: true,
+    agent: tmuxName,
+    runtime: "pi",
+    profile: Object.keys(profile).length ? profile : null,
+    profileText: describePiEnvProfile(profile),
+    global: {
+      settingsPath: global.settingsPath,
+      packages: global.packages,
+      extensions: global.extensions,
+      localExtensions: global.localExtensions,
+      localSkills: global.localSkills,
+      mcpServers: global.mcpServers,
+      providers: global.providers,
+    },
+    project,
+    runtimeSnapshot: fresh ? snap : null,
+    snapshotPath: piEnvSnapshotPath(tmuxName),
+    notes,
+    hint: "改档案: manager pi-env-set <agent> --base minimal|inherit [--add-ext <src>] [--exclude-tool <t>] [--no-trust]，改完要 restart",
+  });
+}
+
+/** `pi-env-set <agent> …`：改一个 Pi agent 的能力档案（改完要 restart 才生效） */
+async function cmdPiEnvSet(
+  name: string,
+  opts: {
+    base?: string;
+    addExt?: string[];
+    addSkill?: string[];
+    excludeTool?: string[];
+    mcpConfig?: string;
+    trust?: boolean;
+    reset?: boolean;
+  },
+) {
+  const tmuxName = normalizeName(name);
+  const reg = await loadRegistry();
+  const info = reg.agents[tmuxName];
+  if (!info) {
+    output({ ok: false, error: `${tmuxName} 不在 registry` });
+    return;
+  }
+  if (agentRuntime(info) !== "pi") {
+    output({ ok: false, error: `${tmuxName} 不是 Pi agent（runtime=${info.runtime ?? "claude-code"}）` });
+    return;
+  }
+  if (opts.base && opts.base !== "minimal" && opts.base !== "inherit") {
+    output({ ok: false, error: `未知的 --base: "${opts.base}"。可用: inherit, minimal` });
+    return;
+  }
+
+  const next: PiEnvProfile = opts.reset ? {} : normalizePiEnvProfile(info.piEnv);
+  if (opts.base) {
+    if (opts.base === "inherit") delete next.base;
+    else next.base = "minimal";
+  }
+  if (opts.addExt?.length) next.extensions = [...new Set([...(next.extensions ?? []), ...opts.addExt])];
+  if (opts.addSkill?.length) next.skills = [...new Set([...(next.skills ?? []), ...opts.addSkill])];
+  if (opts.excludeTool?.length) next.excludeTools = [...new Set([...(next.excludeTools ?? []), ...opts.excludeTool])];
+  if (opts.mcpConfig) next.mcpConfig = opts.mcpConfig;
+  if (opts.trust !== undefined) next.trustProject = opts.trust;
+
+  const cleaned = normalizePiEnvProfile(next);
+  if (Object.keys(cleaned).length) reg.agents[tmuxName].piEnv = cleaned;
+  else delete reg.agents[tmuxName].piEnv;
+  await saveRegistry(reg);
+
+  output({
+    ok: true,
+    agent: tmuxName,
+    profile: Object.keys(cleaned).length ? cleaned : null,
+    profileText: describePiEnvProfile(cleaned),
+    restartRequired: true,
+    hint: `跑 manager restart ${tmuxName.replace(AGENT_PREFIX, "")} 让档案生效；查看: manager pi-env ${tmuxName.replace(AGENT_PREFIX, "")}`,
+  });
+}
+
 // cron、CLI 可能并发跑写命令,registry 等状态文件的 load→mutate→save 会互相
 // 覆盖(saveRegistry 只防撕裂不防丢更新)。命令级锁一把关掉全部窗口;拿不到
 // (20s)降级放行——advisory,宁可退回旧竞态也不卡死命令。进程退出兜底释放。
@@ -4444,6 +4611,45 @@ if (cmd && WRITE_COMMANDS.has(cmd)) {
 
 try {
 switch (cmd) {
+  // v2.23+ Pi 能力管理：看清（只读）/ 改档案（写）
+  case "pi-env": {
+    const [name] = args;
+    if (!name) {
+      output({ ok: false, error: "usage: pi-env <agent> — 看这个 Pi agent 带哪些扩展/技能/工具/MCP（档案 + 静态清单 + 运行时实况）" });
+      break;
+    }
+    await cmdPiEnv(name);
+    break;
+  }
+  case "pi-env-set": {
+    const { rest: a1, value: base } = extractStringFlag(args, "--base");
+    const { rest: a2, value: mcpConfig } = extractStringFlag(a1, "--mcp-config");
+    const { rest: a3, values: addExt } = extractMultiFlag(a2, "--add-ext");
+    const { rest: a4, values: addSkill } = extractMultiFlag(a3, "--add-skill");
+    const { rest: a5, values: excludeTool } = extractMultiFlag(a4, "--exclude-tool");
+    const { rest: a6, value: noTrust } = extractBoolFlag(a5, "--no-trust");
+    const { rest: a7, value: trust } = extractBoolFlag(a6, "--trust");
+    const { rest: posArgs, value: reset } = extractBoolFlag(a7, "--reset");
+    const [name] = posArgs;
+    if (!name) {
+      output({
+        ok: false,
+        error: 'usage: pi-env-set <agent> [--base inherit|minimal] [--add-ext <src>]... [--add-skill <path>]... [--exclude-tool <name>]... [--mcp-config <path>] [--no-trust|--trust] [--reset]',
+      });
+      break;
+    }
+    await cmdPiEnvSet(name, {
+      base,
+      addExt,
+      addSkill,
+      excludeTool,
+      mcpConfig,
+      trust: noTrust ? false : trust ? true : undefined,
+      reset,
+    });
+    break;
+  }
+
   case "create": {
     // v2.21+ --project <id>(也接受 --project=id):显式指定归属 project
     let projectFlag: string | undefined;
@@ -4456,7 +4662,8 @@ switch (cmd) {
     }
     const { rest: afterExternal, value: external } = extractBoolFlag(afterProject, "--external");
     const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
-    const { rest: afterModel, model } = extractModelFlag(afterRuntime);
+    const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterRuntime, "--pi-base");
+    const { rest: afterModel, model } = extractModelFlag(afterPiBase);
     const { rest: afterMode, mode } = extractModeFlag(afterModel);
     const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
     const { rest: afterPurpose, purpose: purposeFlag } = extractPurposeFlag(afterEffort);
@@ -4470,11 +4677,11 @@ switch (cmd) {
     if (!name || !dir) {
       output({
         ok: false,
-        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
+        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
       });
       break;
     }
-    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag);
+    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag);
     break;
   }
 

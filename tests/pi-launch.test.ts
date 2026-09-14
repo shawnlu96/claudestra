@@ -62,6 +62,56 @@ describe("buildPiCommand", () => {
     // 前缀是注入的职责说明，这里只断言值本身的转义结果在串里
     expect(cmd).toContain("a b'\\''c'");
   });
+
+  test("能力档案：缺省不加任何开关，信任项目默认开启", () => {
+    const cmd = buildPiCommand(base);
+    expect(cmd).toContain("--approve");
+    expect(cmd).not.toContain("--no-approve");
+    expect(cmd).not.toContain("--no-extensions");
+  });
+
+  test("能力档案：minimal 关掉发现但仍加载 Claudestra 自己的扩展", () => {
+    const cmd = buildPiCommand({ ...base, piEnv: { base: "minimal" } });
+    expect(cmd).toContain("--no-extensions");
+    expect(cmd).toContain("--no-skills");
+    expect(cmd).toContain("--no-prompt-templates");
+    // 显式 -e 在 --no-extensions 下仍然生效（实测），通道扩展必须还在
+    expect(cmd).toContain(`--extension ${PI_EXTENSION_PATH}`);
+    // 发现开关必须在第一个 -e 之前（顺序有语义，见 pi-env.ts 注释）
+    expect(cmd.indexOf("--no-extensions")).toBeLessThan(cmd.indexOf("--extension"));
+  });
+
+  test("能力档案：包源扩展排在通道扩展（路径）之前 —— 反序会让包源被静默忽略", () => {
+    const cmd = buildPiCommand({ ...base, piEnv: { base: "minimal", extensions: ["npm:@ff-labs/pi-fff"] } });
+    const pkg = cmd.indexOf("--extension npm:@ff-labs/pi-fff");
+    const chan = cmd.indexOf(`--extension ${PI_EXTENSION_PATH}`);
+    expect(pkg).toBeGreaterThan(-1);
+    expect(chan).toBeGreaterThan(-1);
+    expect(pkg).toBeLessThan(chan);
+  });
+
+  test("能力档案：不信任项目资源 / 额外扩展 / 禁工具 / MCP 配置都能落到命令上", () => {
+    const cmd = buildPiCommand({
+      ...base,
+      piEnv: {
+        base: "minimal",
+        trustProject: false,
+        extensions: ["npm:pi-lens"],
+        excludeTools: ["web_search"],
+        mcpConfig: "/tmp/mcp.json",
+      },
+    });
+    expect(cmd).toContain("--no-approve");
+    expect(cmd).not.toContain(" --approve");
+    expect(cmd).toContain("--extension npm:pi-lens");
+    expect(cmd).toContain("--exclude-tools web_search");
+    expect(cmd).toContain("--mcp-config /tmp/mcp.json");
+  });
+
+  test("能力档案：带空格的扩展路径被转义（不会断成两个参数）", () => {
+    const cmd = buildPiCommand({ ...base, piEnv: { extensions: ["/Users/he/my ext/x.ts"] } });
+    expect(cmd).toContain("--extension '/Users/he/my ext/x.ts'");
+  });
 });
 
 describe("agentRuntime", () => {
