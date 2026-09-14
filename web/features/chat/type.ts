@@ -147,6 +147,12 @@ export interface AgentSession {
   effort?: string | null;
   /** v2.21+ 归属 project id（master 无）→ 侧栏分组。 */
   projectId?: string | null;
+  /**
+   * v2.23+ 运行时：`"pi"` = Pi coding agent，`"claude-code"`/缺失 = Claude Code。
+   * 侧栏徽章、TopBar 模型/effort 展示都按它分叉（Pi 的模型来自 provider 配置，
+   * 没有 CC 那套别名与 /model 热切换语义）。
+   */
+  runtime?: string | null;
 }
 
 /** v2.21+ project 元数据（GET /api/projects）→ 侧栏组头 + 项目管理弹窗。 */

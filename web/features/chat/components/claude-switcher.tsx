@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
-import { MODEL_OPTIONS, RUNTIME_EFFORT_OPTIONS, modelLabel } from "../claude-options";
+import { MODEL_OPTIONS, RUNTIME_EFFORT_OPTIONS, modelLabel, piModelLabel } from "../claude-options";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -32,6 +32,24 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   }, [open]);
 
   if (agent.status === "stopped") return null;
+
+  // v2.23+ Pi 会话：只**只读展示**真实值，不给切换入口。
+  // 为什么不能照用下面的面板：模型来自 Pi 的 provider 配置（models.json），不是
+  // Claude Code 的别名表；apply() 走的是 CC 的 /model、/effort 注入，对 Pi 是错的
+  // 语义（Pi 那边要 /model <provider/id>）。真实值由桥接侧从会话记录实测给出
+  // （agent.model/effort），显示链与 CC 相同，只是渲染方式不同。
+  // 后续若要支持热切换：桥接侧将提供只读的 Pi 模型清单端点，这里再补面板。
+  if (agent.runtime === "pi") {
+    return (
+      <div className="shrink-0" title={t("Pi 会话的模型由 Pi 的 provider 配置决定（网页端暂不支持热切换）")}>
+        <span className="flex items-center gap-1 rounded-full bg-base-200 px-2 py-0.5 font-mono text-[10.5px] text-base-content/60">
+          <span className="max-w-[110px] truncate">{piModelLabel(agent.model)}</span>
+          <span className="opacity-40">·</span>
+          <span>{agent.effort || "?"}</span>
+        </span>
+      </div>
+    );
+  }
 
   const apply = async (patch: { model?: string; effort?: string }) => {
     const key = patch.model ?? patch.effort ?? "";

@@ -31,6 +31,7 @@ import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type Hy
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
+import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
@@ -461,7 +462,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const bySessions = new Map<string, SessionTailInfo>();
         for (const r of regs) {
           if (!r.cwd || !r.sessionId) continue;
-          const info = await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId));
+          // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/ 下，拿 CC 路径
+          // 去找必然空手 → model/effort 回落全局默认（owner 实测：Pi agent 顶栏显示
+          // 「Opus 5 · xhigh」，实际是 deepseek-v4.1-flash + thinking off）
+          const path = sessionJsonlPath(r.runtime, r.cwd, r.sessionId);
+          if (!path) continue;
+          const info = await sessionTailInfo(path);
           if (info) bySessions.set(r.name, info);
         }
         // model/effort 兜底链末端:全局默认(settings.json)
@@ -479,6 +485,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           (a as any).contextTokens = info?.ctxTokens ?? null;
           // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
           (a as any).projectId = r?.projectId ?? null;
+          // v2.23+ 运行时（web 侧栏显示 Pi 徽章的数据源）
+          (a as any).runtime = r?.runtime === "pi" ? "pi" : "claude-code";
           // 当前模型/effort。显示链:刚切换的乐观值(实测追上前) → jsonl 实测
           // (会话内切换即时反映,防 registry 漂移) → registry 钉的(创建/切换
           // 端点写入) → 全局默认
@@ -487,12 +495,24 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           (a as any).model =
             ov.model ??
             freshOrNull(info?.model, info?.modelTs) ??
-            (r?.model ? resolveModelAlias(r.model) : null) ??
+            // Pi 的 model 是 provider/id（如 cc-switch-open-code-go/deepseek-v4.1-flash），
+            // 不能拿 Claude Code 的别名表去改写它
+            (r?.model ? (r.runtime === "pi" ? r.model : resolveModelAlias(r.model)) : null) ??
             gModel ??
             info?.model ??
             null;
-          (a as any).effort =
-            ov.effort ?? freshOrNull(info?.effort, info?.effortTs) ?? r?.effort ?? gEffort ?? info?.effort ?? null;
+          // Pi 的 thinking 档位来自会话里的 thinking_level_change（通常只在开场写一次，
+          // 拿"实测是否新鲜"去卡它 ⇒ 永远被判陈旧 ⇒ 回落 Claude Code 全局默认
+          // （owner 实测：Pi agent 顶栏显示 xhigh，实际是 off）
+          const piRuntime = r?.runtime === "pi";
+          // Pi 的 thinking 档位通常只在开场写一条 thinking_level_change，落在会话文件的
+          // **头部**，而 session-tail 只扫尾部窗口 ⇒ 扫不到、回落全局默认（实测顶栏显示
+          // xhigh 而实际是 off/max）。扩展在启动时把运行实况写进了快照，这里用它兜底；
+          // tail 扫到更新鲜的值时优先（会话内切换思考档位的情况）。
+          const piSnap = piRuntime ? readPiRuntimeSnapshot(a.name) : null;
+          (a as any).effort = piRuntime
+            ? (info?.effort ?? piSnap?.thinking ?? r?.effort ?? null)
+            : (ov.effort ?? freshOrNull(info?.effort, info?.effortTs) ?? r?.effort ?? gEffort ?? info?.effort ?? null);
         }
       }
       // ?include=stopped：registry 里已停止的 agent 也入列（additive；
@@ -564,6 +584,35 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           return owner ? agentInScope(principal, owner) : false;
         });
     return apiJson(200, { ok: true, sessions: visible });
+  }
+
+  // v2.23+ GET /api/v1/pi-models —— Pi provider 配了哪些模型（web 模型选择器用）。
+  // 与 /config/claude-defaults 的分工：那个是 Claude Code 的全局默认；这个是 Pi 侧
+  // ~/.pi/agent/models.json 里 providers[].models[]，给 Pi agent 的选择器渲染用。
+  if (path === "/pi-models" && req.method === "GET") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "pi-models requires a full-scope token" });
+    }
+    try {
+      const raw = JSON.parse(await Bun.file(`${process.env.HOME}/.pi/agent/models.json`).text());
+      const models: Array<Record<string, unknown>> = [];
+      for (const [provider, cfg] of Object.entries<any>(raw?.providers ?? {})) {
+        for (const m of cfg?.models ?? []) {
+          models.push({
+            id: `${provider}/${m.id}`,
+            provider,
+            name: m.name ?? m.id,
+            input: Array.isArray(m.input) ? m.input : ["text"],
+            images: Array.isArray(m.input) && m.input.includes("image"),
+            thinking: m.reasoning === true,
+            contextWindow: m.contextWindow ?? null,
+          });
+        }
+      }
+      return apiJson(200, { ok: true, count: models.length, models });
+    } catch (e) {
+      return apiJson(500, { ok: false, error: `读取 models.json 失败: ${(e as Error).message}` });
+    }
   }
 
   // v2.23+ GET /api/v1/session-list —— 机器上所有会话（两种 runtime，活的+历史的）。

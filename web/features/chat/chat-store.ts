@@ -46,12 +46,29 @@ function agentsSignature(list: AgentSession[]): string {
 }
 
 /**
+ * 剥掉 Claudestra 的**入站注入头**：`[🌐 来自 Web 端用户「x」（…）。\n用 reply() …]\n\n正文`。
+ *
+ * 为什么需要：本地那条乐观气泡只有**正文**，而历史里的入站消息可能自带这段头
+ * （Pi 会话没有 Claude Code 的 `<channel>` 包装，入站消息在会话记录里就是带头裸文
+ * 本）⇒ 两边 norm 不相等 ⇒ 用户发一条、屏上出现两条（owner 2026-09-14 实测）。
+ * Claude Code 侧历史里本来就是解包后的正文，这个函数对它是 no-op（不影响既有去重）。
+ *
+ * 只认 Claudestra 注入头（`[` + 来源 emoji + …`]`），普通以 `[` 开头的用户文本不动。
+ */
+const INBOUND_HEAD_RE = /^\[(?:🌐|💬|🤖|🤝|🛰|📨|📬)[^\]]*\]\s*/u;
+function stripInboundHeader(x: string): string {
+  return x.trimStart().replace(INBOUND_HEAD_RE, "").trim();
+}
+
+/**
  * 乐观消息保全（loadMessages 全量替换与 syncDelta 差量追加共用——两处各写一份
  * 迟早漂移）：agent 忙时连发的消息在服务端排队,送达前不进 jsonl——整体替换会把
  * 它们从视图「吞掉」。把尚未在 incoming 里出现的本地消息挑出来接回视图尾;
  * 逐条消费匹配(同文本连发两条也各自对账),30 分钟后不再保全。
  * 匹配三口径:归一化全文相等 / 历史含 wire 原文([button:id] 落在 channel 包装里)
  * / 「🔘 label」兜底形态(2026-07-16)。CRLF 归一防注入链路差异(2026-07-15)。
+ * v2.23+ 加第四口径:剥掉注入头后的裸文本相等（Pi 的入站消息在记录里带 🌐 头,
+ * 本地气泡只有正文——不比裸文本就当成两条）。
  */
 function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
   const tail = incoming.slice(-80);
@@ -61,6 +78,8 @@ function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): Chat
     if (!m.local || m.role !== "user") return false;
     if (m.ts && Date.now() - Date.parse(m.ts) > 30 * 60_000) return false;
     const t = norm(m.content);
+    // 带头版本也拿来比一次：本地只有正文、历史带注入头时，光比原文匹配不上
+    const tBare = norm(stripInboundHeader(m.content));
     const w = m.wire?.trim();
     const friendly = w
       ? (w.match(/^\[button:([\w-]+)\]$/)?.[1] ??
@@ -72,6 +91,8 @@ function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): Chat
         !used.has(i) &&
         h.role === "user" &&
         (norm(h.content) === t ||
+          // Pi：历史带注入头、本地只有正文 ⇒ 与两侧各自的裸文本比对
+          (tBare.length > 0 && norm(stripInboundHeader(h.content)) === tBare) ||
           (!!w && h.content.includes(w)) ||
           (!!friendly && norm(h.content) === `🔘 ${friendly}`))
     );
@@ -1513,11 +1534,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const tail = this.state.messages.slice(-15);
     // 对账去重:文本相同即回声(附件消息 BFF 已剥注入块,与乐观消息的干净文本
     // 对得上);纯附件无文本时按附件数量兜底匹配
+    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒
+    // 回声被画成第二个气泡（owner 2026-09-14 实报「发一条多出现一个」）
+    const bare = (m: ChatMessage) => norm(stripInboundHeader(m.wire ?? m.content ?? ""));
     if (
       tail.some(
         (m) =>
           m.role === "user" &&
-          norm(m.wire ?? m.content) === t &&
+          (norm(m.wire ?? m.content) === t || (t !== "" && bare(m) === t)) &&
           (t !== "" || (m.attachments?.length ?? 0) === (attachments?.length ?? 0))
       )
     )

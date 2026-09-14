@@ -27,3 +27,15 @@ export function modelLabel(id: string | null | undefined): string {
   const hit = MODEL_OPTIONS.find((o) => o.value === id);
   return hit ? hit.label : id.replace(/^claude-/, "");
 }
+
+/**
+ * Pi 的 model id → 短标签。Pi 的写法是 `provider/model`（可选 `:thinking` 后缀，
+ * 如 `cc-switch-open-code-go/deepseek-v4.1-flash:low`），整串塞进 TopBar 徽章只会被
+ * 截成 `cc-switch-…` 什么都看不出来 ⇒ 只取 model 段。
+ * 注意**不要**走 modelLabel：那套是 Claude Code 的别名表（Pi 的模型永远不在里面）。
+ */
+export function piModelLabel(id: string | null | undefined): string {
+  if (!id) return "?";
+  const tail = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+  return tail.replace(/:.*$/, "");
+}

@@ -270,7 +270,7 @@ const CHANNEL_WRAP_RE = /^\s*<channel\s+([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/channel
  * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。
  */
 function stripChannelHeader(body: string): string {
-  if (!/^\[(🌐|🤖|📢|📣)/.test(body)) return body;
+  if (!/^\[(🌐|🤖|🤝|📢|📣)/.test(body)) return body;
   // header 块与正文用空行分隔——兼容 LF 与 CRLF（L7：CRLF jsonl 下 "]\n\n" 匹配不到
   // 会把 framing 头留在正文）。仍要求"]"+空行做边界，不用单个换行（正文里可能出现
   // "]\n"，会误切）。
