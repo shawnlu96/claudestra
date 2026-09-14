@@ -66,6 +66,8 @@ import {
   isKnownEffort,
 } from "./lib/claude-launch.js";
 import { buildAgentCommand } from "./lib/launch-command.js";
+import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
+import { translateSessionLine } from "./lib/session-source.js";
 import { agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import {
   describePiEnvProfile,
@@ -288,6 +290,8 @@ interface ClaudeSession {
   slug: string;
   modifiedAt: Date;
   lastUserMessage: string;
+  /** v2.23+ 运行时（缺省 = claude-code）。会话列表两种 runtime 合并展示 */
+  runtime?: string;
 }
 
 async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
@@ -340,36 +344,7 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
         }
 
         // 从文件尾部读取最后一条用户文字消息（跳过 tool_result）
-        let lastUserMessage = "";
-        try {
-          const size = fileStat.size;
-          const tailStart = Math.max(0, size - 500_000);
-          const tailChunk = await fd.slice(tailStart, size).text();
-          const tailLines = tailChunk.split("\n").filter((l) => l.trim());
-          for (let i = tailLines.length - 1; i >= 0; i--) {
-            try {
-              const entry = JSON.parse(tailLines[i]);
-              if (entry.type !== "user") continue;
-              const content = entry.message?.content;
-              let text = "";
-              if (typeof content === "string") {
-                text = content;
-              } else if (Array.isArray(content)) {
-                const textBlock = content.find(
-                  (b: any) => b.type === "text" && b.text?.length > 3
-                );
-                if (textBlock) text = textBlock.text;
-              }
-              if (text && text.length > 3) {
-                // 提取 <channel> 标签内的实际内容
-                const channelMatch = text.match(/<channel[^>]*>([\s\S]*?)<\/channel>/);
-                if (channelMatch) text = channelMatch[1].trim();
-                lastUserMessage = text.replace(/\n/g, " ").slice(0, 80);
-                break;
-              }
-            } catch { /* non-critical */ }
-          }
-        } catch { /* non-critical */ }
+        const lastUserMessage = await lastUserText(filePath, undefined, fileStat.size);
 
         sessions.push({ sessionId, cwd, slug, modifiedAt: fileStat.mtime, lastUserMessage });
       } catch { /* non-critical */ }
@@ -378,6 +353,106 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
 
   sessions.sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
   return sessions;
+}
+
+/** 会话尾部最后一条「用户说的话」（两种 runtime 共用；Pi 的行先翻译成 Claude Code 形状） */
+async function lastUserText(filePath: string, runtime: string | undefined, size: number): Promise<string> {
+  try {
+    const fd = Bun.file(filePath);
+    const tailStart = Math.max(0, size - 500_000);
+    const tailChunk = await fd.slice(tailStart, size).text();
+    const tailLines = tailChunk.split("\n").filter((l) => l.trim());
+    for (let i = tailLines.length - 1; i >= 0; i--) {
+      const entry = translateSessionLine(runtime, tailLines[i]);
+      if (!entry || entry.type !== "user") continue;
+      const content = entry.message?.content;
+      let text = "";
+      if (typeof content === "string") {
+        text = content;
+      } else if (Array.isArray(content)) {
+        const textBlock = content.find((b: any) => b.type === "text" && b.text?.length > 3);
+        if (textBlock) text = textBlock.text;
+      }
+      if (text && text.length > 3) {
+        // Claude Code 的入站消息包在 <channel> 里；Pi 侧是裸文本（注入头自己带）
+        const channelMatch = text.match(/<channel[^>]*>([\s\S]*?)<\/channel>/);
+        if (channelMatch) text = channelMatch[1].trim();
+        return text.replace(/\n/g, " ").slice(0, 80);
+      }
+    }
+  } catch { /* non-critical */ }
+  return "";
+}
+
+/**
+ * v2.23+ 扫本机**所有** Pi 会话（~/.pi/agent/sessions/<cwd编码>/<时间戳>_<id>.jsonl）。
+ *
+ * 为什么需要：Claudestra 只「管」自己创建的 agent，但**看见**不该受这个限制 ——
+ * Claude Code 的历史会话一直能在会话列表里翻（manager sessions + Discord 面板），
+ * Pi 的却完全不出现。pi-web 起的会话、终端手敲的 pi 会话都是"机器上正在发生的对话"，
+ * 会话记录那刀已经能读它们了，这里只补「进列表」。
+ *
+ * 注：这些会话**没法收消息**（没挂 Claudestra 扩展就没有注入通道），但可以
+ * `manager resume <名字> <sessionId> --runtime pi` 把它收编成正式 agent。
+ */
+async function scanPiSessions(search?: string): Promise<ClaudeSession[]> {
+  const root = join(piAgentDir(), "sessions");
+  if (!existsSync(root)) return [];
+  const sessions: ClaudeSession[] = [];
+  const dirs = await readdir(root).catch(() => [] as string[]);
+
+  for (const dir of dirs) {
+    if (!dir.startsWith("--")) continue;
+    const dirPath = join(root, dir);
+    const files = await readdir(dirPath).catch(() => [] as string[]);
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const sessionId = piSessionIdFromFilename(file);
+      if (!sessionId) continue;
+      const filePath = join(dirPath, file);
+      const fileStat = await stat(filePath).catch(() => null);
+      if (!fileStat) continue;
+
+      // cwd 只能从 header 行读（目录编码把 `/` 换成 `-`，不可逆）
+      let cwd = "";
+      try {
+        const head = await Bun.file(filePath).slice(0, 4096).text();
+        for (const line of head.split("\n")) {
+          if (!line.includes('"cwd"')) continue;
+          const obj = JSON.parse(line);
+          if (obj?.type === "session" && typeof obj.cwd === "string") {
+            cwd = obj.cwd;
+            break;
+          }
+        }
+      } catch { /* non-critical */ }
+      if (!cwd) continue;
+
+      if (search) {
+        const q = search.toLowerCase();
+        if (!`${cwd} ${sessionId}`.toLowerCase().includes(q)) continue;
+      }
+
+      sessions.push({
+        sessionId,
+        cwd,
+        slug: cwd.split("/").filter(Boolean).pop() || "",
+        modifiedAt: fileStat.mtime,
+        lastUserMessage: await lastUserText(filePath, "pi", fileStat.size),
+        runtime: "pi",
+      });
+    }
+  }
+  return sessions;
+}
+
+/** 两种 runtime 的会话一起扫（会话列表 / 按 sessionId 找目录 都用它） */
+async function scanAllSessions(search?: string): Promise<ClaudeSession[]> {
+  const [cc, pi] = await Promise.all([scanClaudeSessions(search), scanPiSessions(search)]);
+  return [
+    ...cc.map((s) => ({ ...s, runtime: s.runtime ?? "claude-code" })),
+    ...pi,
+  ].sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
 }
 
 // ============================================================
@@ -1165,7 +1240,8 @@ async function cmdResume(
   // 如果没有指定目录，从 session 文件找
   let resolvedDir = dir?.replace(/^~/, process.env.HOME || "~") || "";
   if (!resolvedDir) {
-    const sessions = await scanClaudeSessions();
+    // v2.23+ 两种 runtime 都找：Pi 会话也能从列表里直接 resume 收编
+    const sessions = await scanAllSessions();
     const match = sessions.find((s) => s.sessionId === sessionId);
     if (match) {
       resolvedDir = match.cwd;
@@ -2374,7 +2450,7 @@ async function cmdList() {
 }
 
 async function cmdSessions(search?: string) {
-  const sessions = await scanClaudeSessions(search);
+  const sessions = await scanAllSessions(search);
 
   // 从 registry 建立 sessionId → displayName 映射
   const reg = await loadRegistry();
@@ -2391,6 +2467,7 @@ async function cmdSessions(search?: string) {
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
     slug: s.slug,
     project: s.cwd.replace(process.env.HOME || "", "~"),
+    runtime: s.runtime ?? "claude-code",
     age: formatAge(s.modifiedAt),
     lastMessage: s.lastUserMessage || "",
   }));
