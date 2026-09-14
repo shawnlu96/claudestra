@@ -470,7 +470,10 @@ export async function readSessionHistory(
     const hi = sliding ? Math.min(size, slideCut + 2 * WIN) : size;
     const reachedStart = cut === 0;
     const lineOffset = await countNewlinesBefore(filePath, cut);
-    const all = parseHistoryLines((await f.slice(cut, hi).text()).split("\n"), lineOffset, fmt, detailFn);
+    // ⚠ runtime 必须传：全读分支(上面 442)传了、这里漏传的话，>16MB 的 Pi 会话会被
+    //   当成 Claude Code 行解析 → 一条都认不出来 → all.length 恒为 0 → satisfied 永远
+    //   不成立 → 扩窗一路跑到文件头，既全文读又返回空历史。
+    const all = parseHistoryLines((await f.slice(cut, hi).text()).split("\n"), lineOffset, fmt, detailFn, runtime);
 
     let satisfied = reachedStart;
     if (!satisfied) {
