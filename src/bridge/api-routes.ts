@@ -10,6 +10,9 @@
  * 其余依赖（manager 调用、principals、session-history……）都是无状态模块，直接 import。
  */
 
+import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
+import { agentRuntime } from "../lib/registry.js";
+import { piSessionsDir } from "../lib/pi-session.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR } from "./config.js";
 import {
@@ -67,19 +70,8 @@ const interruptCooldown = new Map<string, number>();
  * ~/.claude/projects/<slug>/ 目录里 probe mtime 最新的 jsonl。
  * bridge.ts 的 scheduleClearRotation 也 import 它（clear 轮转判重用）。
  */
-export function latestSessionIdForCwd(cwd: string): string | undefined {
-  try {
-    const dir = `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
-    let best: { sid: string; mtime: number } | null = null;
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".jsonl")) continue;
-      const st = statSync(`${dir}/${f}`);
-      if (!best || st.mtimeMs > best.mtime) best = { sid: f.slice(0, -".jsonl".length), mtime: st.mtimeMs };
-    }
-    return best?.sid;
-  } catch {
-    return undefined;
-  }
+export function latestSessionIdForCwd(cwd: string, runtime?: string): string | undefined {
+  return listSessionIdsForCwd(cwd, runtime)[0];
 }
 
 /**
@@ -88,12 +80,25 @@ export function latestSessionIdForCwd(cwd: string): string | undefined {
  * 共享一个 slug 目录，光取"最新 jsonl"会误认别人正在写的既有 session；只认领
  * 快照里没有的**新 sid**才不会串台。
  */
-export function listSessionIdsForCwd(cwd: string): string[] {
+export function listSessionIdsForCwd(cwd: string, runtime?: string): string[] {
+  // v2.23+ runtime 感知：Pi 的会话文件是 `<时间戳>_<sessionId>.jsonl`（id 是后缀，
+  // 不是整个文件名），目录也在 ~/.pi/agent/sessions/ 下 —— 不做这一步，Pi 会话
+  // 一旦 /new 轮转，watcher / 历史 / 归档会同时冻在旧文件上（与 CC 侧
+  // maybeHealRotatedSession 注释里那个 7 天隐性故障同型）。
+  const pi = agentRuntime({ runtime }) === "pi";
+  const dir = pi ? piSessionsDir(cwd) : `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
+  const idOf = (file: string): string | null => {
+    if (pi) {
+      const m = /_(.+)\.jsonl$/.exec(file);
+      return m ? m[1] : null;
+    }
+    return file.slice(0, -".jsonl".length);
+  };
   try {
-    const dir = `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
     return readdirSync(dir)
       .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => ({ sid: f.slice(0, -".jsonl".length), mtime: statSync(`${dir}/${f}`).mtimeMs }))
+      .map((f) => ({ sid: idOf(f), mtime: statSync(`${dir}/${f}`).mtimeMs }))
+      .filter((e): e is { sid: string; mtime: number } => !!e.sid)
       .sort((a, b) => b.mtime - a.mtime) // mtime 降序：调用方取 [0] 即最新
       .map((e) => e.sid);
   } catch {
@@ -260,7 +265,8 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       status: client ? "active" : "stopped",
       purpose: "master orchestrator (大总管)",
       cwd,
-      sessionId: latestSessionIdForCwd(cwd),
+      // master 恒为 Claude Code（硬规则），显式给 runtime 免得走 Pi 分支
+      sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
   try {
@@ -277,12 +283,15 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
  * (findApiAgent 每次起一个 bun 子进程 ≈150–200ms,是差量同步「正在同步消息」的
  * 固定开销大头,owner 2026-09-06)。历史端点只需要 cwd / sessionId / 名字。
  */
-async function findHistoryAgent(name: string): Promise<{ name: string; cwd?: string; sessionId?: string } | null> {
+async function findHistoryAgent(
+  name: string,
+): Promise<{ name: string; cwd?: string; sessionId?: string; runtime?: string } | null> {
   if (name === "master") return findApiAgent(name);
   const { readRegistryAgents } = await import("../lib/registry.js");
   const regs = await readRegistryAgents();
   const hit = regs.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name);
-  return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId } : null;
+  // v2.23+ 带上 runtime：Pi 的会话文件要扫目录、行要翻译
+  return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId, runtime: hit.runtime } : null;
 }
 
 /**
@@ -313,7 +322,7 @@ export async function sessionTailInfo(path: string): Promise<SessionTailInfo | n
     };
     for (const win of TAIL_WINDOWS) {
       const start = Math.max(0, st.size - win);
-      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text());
+      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text(), runtimeForSessionPath(path));
       // 真实对话已命中，或已经读到文件头（再放宽也没有新内容）→ 收工
       if (info.convTs !== null || start === 0) break;
     }
@@ -714,6 +723,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     for (const n of names) {
       let cwd: string | undefined;
       let sessionId: string | undefined;
+      let runtime: string | undefined;
       if (n === "master") {
         const m = await findApiAgent("master"); // master 分支不起子进程
         cwd = m?.cwd;
@@ -722,8 +732,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const a = regMap.get(n);
         cwd = a?.cwd;
         sessionId = a?.sessionId;
+        runtime = a?.runtime;
       }
-      const sessions = await listAgentSessions(n, { cwd, currentSessionId: sessionId });
+      const sessions = await listAgentSessions(n, {
+        cwd,
+        currentSessionId: sessionId,
+        runtime,
+      });
       for (const s of sessions) files.push({ agent: n, sessionId: s.sessionId, source: s.source, path: s.path, mtime: s.mtime });
     }
     files.sort((a, b) => b.mtime.localeCompare(a.mtime));
@@ -808,6 +823,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const sessions = await listAgentSessions(canonical, {
       cwd: agent?.cwd,
       currentSessionId: agent?.sessionId,
+      runtime: agent?.runtime,
     });
     if (!agent && !sessions.length) {
       return apiJson(404, { ok: false, error: `agent "${agentParam}" not found (no registry entry, no archives)` });
@@ -836,13 +852,15 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     let found: { sessionId: string; source: "live" | "archive"; path: string } | undefined;
     if (agent?.cwd && agent.sessionId === sid) {
       const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
-      const lp = projectJsonlPath(agent.cwd, sid);
-      if (existsSync(lp)) found = { sessionId: sid, source: "live", path: lp };
+      // v2.23+ runtime 感知（Pi 返回 null ⇒ 落回下面的 listAgentSessions 扫描）
+      const lp = sessionJsonlPath(agent.runtime, agent.cwd, sid);
+      if (lp && existsSync(lp)) found = { sessionId: sid, source: "live", path: lp };
     }
     if (!found) {
       const sessions = await listAgentSessions(canonical, {
         cwd: agent?.cwd,
         currentSessionId: agent?.sessionId,
+        runtime: agent?.runtime,
       });
       found = sessions.find((s) => s.sessionId === sid);
     }
