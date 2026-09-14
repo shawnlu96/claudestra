@@ -134,6 +134,7 @@ function AgentRow({
   const canRemove = !a.pinnedMaster && !a.mock;
   const swipeEnabled = canRemove && !manage; // 多选模式下手势让位
   const [swipeX, setSwipeX] = useState(0);
+  const [archiving, setArchiving] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [removing, setRemoving] = useState(false);
   // v2.21.3+ 拖动期间不再每帧 setState(整行 + 订阅链重渲,owner「左滑特别卡」):
@@ -208,7 +209,7 @@ function AgentRow({
       <div className="relative overflow-hidden rounded-lg">
         {/* 左滑露出的操作钮(在滑动层下面):置顶 + 删除 */}
         {(swipeX < 0 || dragging) && (
-          <div className="absolute inset-y-0 right-0 z-0 flex w-[160px]">
+          <div className="absolute inset-y-0 right-0 z-0 flex w-[240px]">
             <button
               className="flex flex-1 items-center justify-center bg-base-content/70 text-[13px] font-medium text-base-100"
               onClick={() => {
@@ -217,6 +218,21 @@ function AgentRow({
               }}
             >
               {pinned ? t("取消置顶") : t("置顶")}
+            </button>
+            {/* v2.23+ 归档：只给当前会话做快照（非破坏性），不动 agent 本身 ——
+                owner 2026-09-14「给工作列表的也加入一个左滑归档按钮」 */}
+            <button
+              className="flex flex-1 items-center justify-center bg-base-300/80 text-[13px] font-medium text-base-content/80"
+              onClick={async () => {
+                if (archiving) return;
+                setArchiving(true);
+                const r = await store.archiveAgent(a.name);
+                setArchiving(false);
+                closeSwipe();
+                if (!r.ok) alert(`${t("归档失败:")}${t(r.error || "操作失败")}`);
+              }}
+            >
+              {archiving ? "…" : t("归档")}
             </button>
             <button
               className="flex flex-1 items-center justify-center bg-error text-[13px] font-medium text-error-content"

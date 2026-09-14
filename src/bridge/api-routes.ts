@@ -772,6 +772,53 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
+  // v2.23+ POST /api/v1/agents/:name/archive —— 给某个 agent 的当前会话做快照
+  // （= CLI `manager archive <name>`；**不动 agent 本身**，非破坏性）。
+  // 网页侧栏 agent 行左滑「归档」用它。仅全权 token。
+  const archMatch = path.match(/^\/agents\/([^/]+)\/archive$/);
+  if (archMatch && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "archive requires a full-scope token" });
+    }
+    const name = decodeURIComponent(archMatch[1]);
+    if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
+    try {
+      const r = await runManager("archive", name);
+      return apiJson(r?.ok === false ? 500 : 200, { ok: r?.ok !== false, result: r });
+    } catch (e) {
+      return apiJson(500, { ok: false, error: (e as Error).message });
+    }
+  }
+
+  // v2.23+ 归档保留天数读写（owner：90 天自动清理，天数在设置里改）。
+  // GET 任何 token 可读；POST 需全权。0 = 永不清理。
+  if (path === "/settings/archive-retention" && (req.method === "GET" || req.method === "POST")) {
+    const { readConfig, setArchiveRetention, DEFAULT_ARCHIVE_RETENTION_DAYS } = await import("../lib/config-store.js");
+    if (req.method === "GET") {
+      const cfg = await readConfig();
+      return apiJson(200, {
+        ok: true,
+        days: cfg.archiveRetentionDays ?? DEFAULT_ARCHIVE_RETENTION_DAYS,
+        defaultDays: DEFAULT_ARCHIVE_RETENTION_DAYS,
+      });
+    }
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "changing archive retention requires a full-scope token" });
+    }
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch {
+      body = {};
+    }
+    const days = Number(body?.days);
+    if (!Number.isFinite(days) || days < 0) {
+      return apiJson(400, { ok: false, error: 'body must be {"days": <number >= 0>}' });
+    }
+    const cfg = await setArchiveRetention(days);
+    return apiJson(200, { ok: true, days: cfg.archiveRetentionDays });
+  }
+
   // v2.23+ GET /api/v1/capabilities —— 这台机器支持什么（当前只有 Pi 有没有装）。
   // 给网页用：没装 Pi 的用户应该**无感**（新建 agent 里不出现 Pi 选项），而不是
   // 选了一个点了才报错的选项。轻量、无副作用，任何 token 都能读。
