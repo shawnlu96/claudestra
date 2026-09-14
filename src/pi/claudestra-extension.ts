@@ -61,8 +61,21 @@ interface PiUi {
   setStatus?(key: string, text: string | undefined): void;
 }
 
+interface PiModelLike {
+  provider?: string;
+  id?: string;
+}
+
+interface PiModelRegistryLike {
+  getAll?(): PiModelLike[];
+  getAvailable?(): PiModelLike[];
+  find?(provider: string, modelId: string): PiModelLike | undefined;
+}
+
 interface PiContext {
   ui?: PiUi;
+  /** 模型注册表（扩展命令里按 provider/id 解析模型用） */
+  modelRegistry?: PiModelRegistryLike;
   /** 当前模型（可能为空）。取 name/id 写进能力快照 */
   model?: { id?: string; name?: string } | undefined;
   sessionManager?: {
@@ -87,6 +100,17 @@ interface PiExtensionApi {
     content: string,
     options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
   ): Promise<void>;
+  /**
+   * 注册斜杠命令（v2.23+）：web 端切模型/思考档位走它 —— 不依赖 Pi 自带
+   * `/model`（那是打开选择器的交互语义，未验证是否收参数），而是我们自己的
+   * 确定性入口，直接调 setModel/setThinkingLevel。
+   */
+  registerCommand?(
+    name: string,
+    options: { description?: string; handler: (args: string, ctx: PiContext) => Promise<void> | void },
+  ): void;
+  setModel?(model: PiModelLike): Promise<boolean>;
+  setThinkingLevel?(level: string): void;
   /** 以下三个用于能力快照（v2.23+），老版本 Pi 上没有 ⇒ 全部可选调用 */
   getAllTools?(): Array<{ name?: string }>;
   getActiveTools?(): string[];
@@ -494,6 +518,49 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
       } catch (error) {
         return { content: [{ type: "text", text: String(error) }], details: {}, isError: true };
       }
+    },
+  });
+
+  /**
+   * web 端切模型/思考档位（v2.23+）：`/claudestra-model <provider/id>`、
+   * `/claudestra-thinking <level>`。由 bridge 用 tmux send-keys 注入本命令，
+   * 效果与在 TUI 里手动切一致（Pi 的模型表 / 思考档位都是会话级状态）。
+   */
+  pi.registerCommand?.("claudestra-model", {
+    description: "Claudestra: 切换本会话模型（参数：provider/model）",
+    handler: async (args, ctx) => {
+      const wanted = String(args || "").trim();
+      if (!wanted) {
+        notify("用法: /claudestra-model <provider/model>", "warning");
+        return;
+      }
+      const registry = ctx?.modelRegistry;
+      const all = [...(registry?.getAll?.() ?? []), ...(registry?.getAvailable?.() ?? [])];
+      const found =
+        all.find((m) => `${m?.provider ?? ""}/${m?.id ?? ""}` === wanted) ??
+        (wanted.includes("/")
+          ? registry?.find?.(wanted.split("/")[0], wanted.split("/").slice(1).join("/"))
+          : all.find((m) => m?.id === wanted));
+      if (!found) {
+        notify(`找不到模型：${wanted}`, "error");
+        return;
+      }
+      const ok = await pi.setModel?.(found);
+      notify(ok ? `已切到 ${found.provider}/${found.id}` : `切换失败：${wanted}`, ok ? "info" : "error");
+    },
+  });
+
+  pi.registerCommand?.("claudestra-thinking", {
+    description: "Claudestra: 切换本会话思考档位（参数：off/minimal/low/medium/high/xhigh/max）",
+    handler: async (args) => {
+      const level = String(args || "").trim().toLowerCase();
+      const allowed = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+      if (!allowed.includes(level)) {
+        notify(`思考档位只能是 ${allowed.join(" / ")}`, "warning");
+        return;
+      }
+      pi.setThinkingLevel?.(level);
+      notify(`思考档位 → ${level}`);
     },
   });
 
