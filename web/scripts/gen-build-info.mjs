@@ -39,3 +39,16 @@ export const CLIENT_WEB_COMMIT = ${JSON.stringify(webCommit)};
 `;
 writeFileSync(join(webDir, "lib", "build-info.ts"), out);
 console.log(`[build-info] commit=${commit || "(none)"} webCommit=${webCommit || "(none)"}`);
+// ⚠️ 构建时工作区有未提交改动 ⇒ bundle 烤入的是**旧 commit**，而服务端 /api/version
+// 报的是新 commit ⇒ 客户端「新版本已就绪」胶囊永远亮（2026-09-14 一天踩了两次：
+// 先 build 后 commit）。这里吼一声，别等用户来报。
+try {
+  const dirty = git(["status", "--porcelain", "--", "."]);
+  if (dirty) {
+    console.warn(
+      "[build-info] ⚠️ web/ 有未提交改动 —— bundle 会烤入旧 commit，客户端会一直提示「新版本已就绪」。\n" +
+        "             正确顺序：先 git commit，再 npm run build（再重启 next start）。",
+    );
+  }
+} catch { /* 非 git 工作区忽略 */ }
+
