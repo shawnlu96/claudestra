@@ -516,6 +516,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return this.lifecycleAction("restart", name);
   }
 
+  /** 给 agent 的当前会话做快照（CLI `manager archive`）——列表左滑「归档」的后端。
+   *  非破坏性：不动 agent、不动列表（只是把当前 session jsonl 快照进归档目录）。 */
+  public async archiveAgent(
+    name: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    return this.lifecycleAction("archive", name);
+  }
+
   /** 永久移除(kill + registry 条目删除,归档保留)——列表左滑删除的后端。
    *  成功后本地立即剔除,activeAgent 恰好是它则清空回列表。 */
   public async removeAgent(
@@ -538,7 +546,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   private async lifecycleAction(
-    action: "kill" | "restart" | "remove",
+    action: "kill" | "restart" | "remove" | "archive",
     name: string
   ): Promise<{ ok: boolean; error?: string }> {
     try {
