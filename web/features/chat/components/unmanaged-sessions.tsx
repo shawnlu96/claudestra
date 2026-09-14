@@ -43,11 +43,14 @@ interface HistoryMsg {
   tools?: HistoryTool[];
 }
 
-/** 运行时徽章：Claude Code 不标（它是默认），Pi 标出来 —— 两者行为差异大，该看得见 */
-function RuntimeBadge({ runtime }: { runtime: string }) {
+/**
+ * 运行时徽章：Claude Code 不标（它是默认），Pi 标出来 —— 两者行为差异大，该看得见。
+ * v2.23+ 导出给侧栏 agent 行复用，保证「未纳管会话」与 agent 列表是同一套视觉语言。
+ */
+export function RuntimeBadge({ runtime, className = "" }: { runtime: string; className?: string }) {
   if (runtime !== "pi") return null;
   return (
-    <span className="badge badge-xs border-primary/40 bg-primary/10 text-[10px] text-primary">
+    <span className={`badge badge-xs border-primary/40 bg-primary/10 text-[10px] text-primary ${className}`}>
       Pi
     </span>
   );
@@ -61,27 +64,52 @@ export function UnmanagedSessions() {
   const [error, setError] = useState("");
   const [viewing, setViewing] = useState<SessionRow | null>(null);
 
+  /** 拉一次会话清单（纯取数，不改状态）——挂载 effect 与 load() 共用一份 */
+  const fetchSessions = useCallback(async (): Promise<SessionRow[]> => {
+    const res = await fetch("/api/sessions");
+    const json = (await res.json()) as {
+      data?: { sessions?: SessionRow[] };
+      error?: string;
+    };
+    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    return json.data?.sessions ?? [];
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/sessions");
-      const json = (await res.json()) as {
-        data?: { sessions?: SessionRow[] };
-        error?: string;
-      };
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
-      setSessions(json.data?.sessions ?? []);
+      setSessions(await fetchSessions());
     } catch (e) {
       setError((e as Error).message);
       setSessions([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchSessions]);
 
-  // 只在用户展开时拉（不放进 effect：数据来自外部接口、又只在点开后才需要），
-  // 收编成功后会再拉一次。
+  // 折叠头要显示条数 ⇒ 挂载时拉一次（只有这一发；之后靠展开/刷新/收编后重拉，不轮询）。
+  // 这里**不直接调 load()**：它开头会同步 setLoading(true)，在 effect 里同步 setState
+  // 会触发 react-hooks/set-state-in-effect（级联渲染）。绕过方式就是让状态更新只发生
+  // 在 promise 回调里（规则本身推荐的做法）。
+  useEffect(() => {
+    let cancelled = false;
+    void fetchSessions()
+      .then((rows) => {
+        if (!cancelled) setSessions(rows);
+      })
+      .catch((e: Error) => {
+        if (cancelled) return;
+        setError(e.message);
+        setSessions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchSessions]);
+
+  const count = sessions.filter((s) => s.agentName === null).length;
+
   const toggle = () => {
     const next = !open;
     setOpen(next);
@@ -91,41 +119,60 @@ export function UnmanagedSessions() {
   const unmanaged = sessions.filter((s) => !s.agentName);
 
   return (
-    <div className="border-t border-base-300/60">
-      <div className="flex w-full items-center gap-1 px-3 py-2 text-xs text-base-content/60">
+    <li className="mx-2 mt-1 rounded-xl bg-base-300/25 p-1 list-none">
+      <div className="flex w-full items-center">
         <button
-          className="flex flex-1 items-center gap-2 text-left transition-colors hover:text-base-content/80"
+          type="button"
+          className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
           onClick={toggle}
+          aria-expanded={open}
         >
-          <span className={`transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
-          <span>{t("未纳管会话")}</span>
-          {open && !loading && !error ? (
-            <span className="text-base-content/40">{unmanaged.length}</span>
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={`shrink-0 text-base-content/40 transition-transform ${open ? "" : "-rotate-90"}`}
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+          <span className="shrink-0 text-[13px] opacity-80">{open ? "🗂" : "🗂"}</span>
+          <span className="truncate">{t("未纳管会话")}</span>
+          {/* 折叠态也给计数：不给条数用户没有点开的动机（视觉审查 P1） */}
+          {count !== null ? (
+            <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{count}</span>
+          ) : loading ? (
+            <span className="ml-auto loading loading-spinner loading-xs" />
           ) : null}
-          {loading ? <span className="loading loading-spinner loading-xs" /> : null}
-          {open ? null : <span className="ml-auto text-base-content/30">{t("展开")}</span>}
         </button>
         {open ? (
           <button
-            className="btn btn-ghost btn-xs"
+            type="button"
+            className="shrink-0 rounded-md px-1.5 text-sm text-base-content/40 transition-colors hover:text-base-content/80"
             title={t("刷新")}
             disabled={loading}
-            onClick={() => void load()}
+            onClick={(e) => {
+              e.stopPropagation();
+              void load();
+            }}
           >
             ⟳
           </button>
         ) : null}
       </div>
-
       {open ? (
-        <div className="pb-2">
+        <div className="pb-1">
           {error ? (
-            <div className="px-3 py-2 text-xs text-error break-words">
+            <div className="px-1.5 py-2 text-xs text-error break-words">
               {t("读取失败")}: {error}
             </div>
           ) : null}
           {!loading && !error && unmanaged.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-base-content/40">
+            <div className="px-1.5 py-2 text-xs text-base-content/40">
               {t("没有未纳管的会话")}
             </div>
           ) : null}
@@ -133,7 +180,7 @@ export function UnmanagedSessions() {
             {unmanaged.map((s) => (
               <li key={s.sessionId}>
                 <button
-                  className="flex w-full flex-col gap-0.5 px-3 py-1.5 text-left transition-colors hover:bg-base-200/60"
+                  className="flex w-full flex-col gap-0.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-base-200/60"
                   onClick={() => setViewing(s)}
                 >
                   <span className="flex items-center gap-1.5 text-sm">
@@ -170,7 +217,7 @@ export function UnmanagedSessions() {
           }}
         />
       ) : null}
-    </div>
+    </li>
   );
 }
 

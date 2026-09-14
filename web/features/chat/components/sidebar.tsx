@@ -12,7 +12,7 @@ import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
-import { UnmanagedSessions } from "./unmanaged-sessions";
+import { RuntimeBadge, UnmanagedSessions } from "./unmanaged-sessions";
 
 /** v2.17.2 点击串台修复(peer HedeMacBook-Pro 代码级归因,2026-08-09):
  *  列表按活动排序 + roster 指纹含易变字段 + 前台 15s 轮询 → 重排是常态;
@@ -368,6 +368,9 @@ function AgentRow({
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
             {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
+            {/* v2.23+ 运行时徽章：列表里看不出哪些是 Pi 会话，而两者的模型/工具/
+                行为都不同（owner 2026-09-14 实测反馈「第一个 pi 加入标识」） */}
+            <RuntimeBadge runtime={a.runtime ?? ""} className="ml-1 align-middle" />
             {a.pinnedMaster && (
               <span className="badge badge-primary badge-xs ml-1 align-middle">
                 {t("总控")}
@@ -1055,23 +1058,26 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
         </div>
       ) : (
-        /* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */
-        <div
-          className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
-          style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
-        >
-          Claudestra Web
-          {verInfo?.version ? (
-            <span className="ml-1 font-mono">
-              v{verInfo.version}
-              {verInfo.commit ? ` · ${verInfo.commit}` : ""}
-            </span>
-          ) : null}
-        </div>
+        <>
+          {/* v2.23+ 未纳管会话分区：机器上没纳管的会话（pi-web 起的 Pi 会话、终端手敲的）。
+              放在版本行**之上** —— 版本行是页面收尾元素，功能分区压在它下面很反常
+              （视觉审查 P2-5）。样式复用项目组头，不再自创一套。 */}
+          {!manage ? <UnmanagedSessions /> : null}
+          {/* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */}
+          <div
+            className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
+            style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
+          >
+            Claudestra Web
+            {verInfo?.version ? (
+              <span className="ml-1 font-mono">
+                v{verInfo.version}
+                {verInfo.commit ? ` · ${verInfo.commit}` : ""}
+              </span>
+            ) : null}
+          </div>
+        </>
       )}
-      {/* v2.23+ 未纳管会话分区：机器上还有一堆没纳管的会话（pi-web 起的 Pi 会话、
-          终端手敲的），它们能看历史、能收编，但不能直接对话 */}
-      {!manage ? <UnmanagedSessions /> : null}
       <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
       <ProjectsModal open={showProjects} onClose={() => setShowProjects(false)} />
