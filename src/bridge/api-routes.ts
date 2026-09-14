@@ -772,6 +772,63 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
+  // v2.23+ POST /api/v1/sessions/:sessionId/manage —— 未纳管会话的处置（仅全权 token）。
+  // body: { action: "archive" | "delete", runtime?, cwd? }
+  //   archive：会话文件快照进 ~/.claude-orchestrator/archive/unmanaged/<sid>/，再删原文件
+  //            ⇒ 列表不再显示，内容留档（可逆）
+  //   delete ：只删原文件（不可逆，前端二次确认）
+  // 两者都拒绝「看起来正在跑」的会话（文件 2 分钟内还在写）——顺带一提，这也和侧栏
+  // 那个「活跃」标记同一口径。
+  const manageMatch = path.match(/^\/sessions\/([^/]+)\/manage$/);
+  if (manageMatch && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "session management requires a full-scope token" });
+    }
+    const sid = decodeURIComponent(manageMatch[1]);
+    if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
+    let mbody: any = {};
+    try {
+      mbody = await req.json();
+    } catch {
+      /* → 400 */
+    }
+    const action = mbody?.action === "delete" ? "delete" : mbody?.action === "archive" ? "archive" : null;
+    if (!action) return apiJson(400, { ok: false, error: 'body must be {"action":"archive"|"delete"}' });
+    const mRuntime = typeof mbody?.runtime === "string" ? mbody.runtime : undefined;
+    const mCwd = typeof mbody?.cwd === "string" ? mbody.cwd : undefined;
+    // 定位口径与 /sessions/:id/history 完全一致（Pi 文件名带时间戳，光有 id 推不出路径）
+    let mfile = mCwd ? sessionJsonlPath(mRuntime, mCwd, sid) : null;
+    if (!mfile || !existsSync(mfile)) {
+      mfile =
+        findSessionJsonlBySessionId(mRuntime ?? "pi", sid) ??
+        findSessionJsonlBySessionId("claude-code", sid);
+    }
+    if (!mfile || !existsSync(mfile)) {
+      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
+    }
+    const fsp = await import("node:fs/promises");
+    try {
+      const st = await fsp.stat(mfile);
+      if (Date.now() - st.mtimeMs < 120_000) {
+        return apiJson(409, {
+          ok: false,
+          error: "session looks live (file written within 2 min) — stop it before archiving/deleting",
+        });
+      }
+    } catch {
+      /* stat 失败就照常走 */
+    }
+    if (action === "archive") {
+      const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+      const dest = `${ARCHIVE_ROOT}/unmanaged/${sid}`;
+      await fsp.mkdir(dest, { recursive: true });
+      await fsp.copyFile(mfile, `${dest}/${mfile.split("/").pop()}`);
+    }
+    await fsp.rm(mfile, { force: true });
+    console.log(`🗂 会话处置: ${action} ${sid} (${mfile})`);
+    return apiJson(200, { ok: true, action, sessionId: sid, archived: action === "archive" });
+  }
+
   // v2.23+ GET /api/v1/sessions/:sessionId/history —— 任意会话的历史（不要求已纳管）。
   // 已有 /agents/:name/history/:sessionId 只认 registry 里的 agent；Web 端的会话列表
   // 里大部分是**未纳管**的会话（pi-web 起的、终端手敲的），点开它们要看历史只能走这条。
