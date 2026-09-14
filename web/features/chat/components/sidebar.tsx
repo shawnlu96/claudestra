@@ -368,9 +368,6 @@ function AgentRow({
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
             {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
-            {/* v2.23+ 运行时徽章：列表里看不出哪些是 Pi 会话，而两者的模型/工具/
-                行为都不同（owner 2026-09-14 实测反馈「第一个 pi 加入标识」） */}
-            <RuntimeBadge runtime={a.runtime ?? ""} className="ml-1 align-middle" />
             {a.pinnedMaster && (
               <span className="badge badge-primary badge-xs ml-1 align-middle">
                 {t("总控")}
@@ -382,6 +379,12 @@ function AgentRow({
               </span>
             )}
           </span>
+          {/* v2.23+ 运行时徽章：列表里看不出哪些是 Pi 会话，而两者的模型/工具/
+              行为都不同（owner 2026-09-14 实测反馈「第一个 pi 加入标识」）。
+              ⚠ 必须放在上面那个 `truncate` 容器**外面** —— 放里面时名字一长
+              （agent-claudestraworker）就被省略号整块吃掉，看着像"徽章没渲染"
+              （owner 2026-09-14 二次反馈，截图里正是 `claudestraworker...`）。 */}
+          <RuntimeBadge runtime={a.runtime ?? ""} className="ml-1 shrink-0 align-middle" />
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
               期间时间冻结在回合开始前)→ 显示「工作中」更诚实 */}
