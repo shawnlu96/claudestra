@@ -144,14 +144,3 @@ export function slugifyProjectId(base: string, taken: Set<string>): string {
     if (!taken.has(cand)) return cand;
   }
 }
-
-/**
- * 花名册一行（v2.23+）：`名字(职责)[Pi]`。运行时标识是给**模型**看的 —— 同 project
- * 里可能既有 Claude Code agent 也有 Pi 会话，工具集不同，不标出来派活会踩空。
- * Claude Code 是默认运行时，不加后缀（保持既有注入串逐字节不变）。
- */
-export function rosterLine(name: string, purpose: string, runtime?: string): string {
-  const p = purpose ? `(${purpose.slice(0, 40)})` : "";
-  const tag = runtime === "pi" ? "[Pi]" : "";
-  return `${name}${p}${tag}`;
-}

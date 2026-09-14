@@ -10,9 +10,6 @@
  * 其余依赖（manager 调用、principals、session-history……）都是无状态模块，直接 import。
  */
 
-import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
-import { agentRuntime } from "../lib/registry.js";
-import { piSessionsDir } from "../lib/pi-session.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR } from "./config.js";
 import {
@@ -31,7 +28,6 @@ import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type Hy
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
-import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
@@ -71,8 +67,19 @@ const interruptCooldown = new Map<string, number>();
  * ~/.claude/projects/<slug>/ 目录里 probe mtime 最新的 jsonl。
  * bridge.ts 的 scheduleClearRotation 也 import 它（clear 轮转判重用）。
  */
-export function latestSessionIdForCwd(cwd: string, runtime?: string): string | undefined {
-  return listSessionIdsForCwd(cwd, runtime)[0];
+export function latestSessionIdForCwd(cwd: string): string | undefined {
+  try {
+    const dir = `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
+    let best: { sid: string; mtime: number } | null = null;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      const st = statSync(`${dir}/${f}`);
+      if (!best || st.mtimeMs > best.mtime) best = { sid: f.slice(0, -".jsonl".length), mtime: st.mtimeMs };
+    }
+    return best?.sid;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -81,25 +88,12 @@ export function latestSessionIdForCwd(cwd: string, runtime?: string): string | u
  * 共享一个 slug 目录，光取"最新 jsonl"会误认别人正在写的既有 session；只认领
  * 快照里没有的**新 sid**才不会串台。
  */
-export function listSessionIdsForCwd(cwd: string, runtime?: string): string[] {
-  // v2.23+ runtime 感知：Pi 的会话文件是 `<时间戳>_<sessionId>.jsonl`（id 是后缀，
-  // 不是整个文件名），目录也在 ~/.pi/agent/sessions/ 下 —— 不做这一步，Pi 会话
-  // 一旦 /new 轮转，watcher / 历史 / 归档会同时冻在旧文件上（与 CC 侧
-  // maybeHealRotatedSession 注释里那个 7 天隐性故障同型）。
-  const pi = agentRuntime({ runtime }) === "pi";
-  const dir = pi ? piSessionsDir(cwd) : `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
-  const idOf = (file: string): string | null => {
-    if (pi) {
-      const m = /_(.+)\.jsonl$/.exec(file);
-      return m ? m[1] : null;
-    }
-    return file.slice(0, -".jsonl".length);
-  };
+export function listSessionIdsForCwd(cwd: string): string[] {
   try {
+    const dir = `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
     return readdirSync(dir)
       .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => ({ sid: idOf(f), mtime: statSync(`${dir}/${f}`).mtimeMs }))
-      .filter((e): e is { sid: string; mtime: number } => !!e.sid)
+      .map((f) => ({ sid: f.slice(0, -".jsonl".length), mtime: statSync(`${dir}/${f}`).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime) // mtime 降序：调用方取 [0] 即最新
       .map((e) => e.sid);
   } catch {
@@ -266,8 +260,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       status: client ? "active" : "stopped",
       purpose: "master orchestrator (大总管)",
       cwd,
-      // master 恒为 Claude Code（硬规则），显式给 runtime 免得走 Pi 分支
-      sessionId: latestSessionIdForCwd(cwd, "claude-code"),
+      sessionId: latestSessionIdForCwd(cwd),
     };
   }
   try {
@@ -284,15 +277,12 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
  * (findApiAgent 每次起一个 bun 子进程 ≈150–200ms,是差量同步「正在同步消息」的
  * 固定开销大头,owner 2026-09-06)。历史端点只需要 cwd / sessionId / 名字。
  */
-async function findHistoryAgent(
-  name: string,
-): Promise<{ name: string; cwd?: string; sessionId?: string; runtime?: string } | null> {
+async function findHistoryAgent(name: string): Promise<{ name: string; cwd?: string; sessionId?: string } | null> {
   if (name === "master") return findApiAgent(name);
   const { readRegistryAgents } = await import("../lib/registry.js");
   const regs = await readRegistryAgents();
   const hit = regs.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name);
-  // v2.23+ 带上 runtime：Pi 的会话文件要扫目录、行要翻译
-  return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId, runtime: hit.runtime } : null;
+  return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId } : null;
 }
 
 /**
@@ -323,7 +313,7 @@ export async function sessionTailInfo(path: string): Promise<SessionTailInfo | n
     };
     for (const win of TAIL_WINDOWS) {
       const start = Math.max(0, st.size - win);
-      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text(), runtimeForSessionPath(path));
+      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text());
       // 真实对话已命中，或已经读到文件头（再放宽也没有新内容）→ 收工
       if (info.convTs !== null || start === 0) break;
     }
@@ -566,27 +556,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, sessions: visible });
   }
 
-  // v2.23+ GET /api/v1/session-list —— 机器上所有会话（两种 runtime，活的+历史的）。
-  // 与 /sessions 的区别：那个是 Claude Code 的**活**会话清单（doppelganger 检测用，
-  // NeutralSessionInfo）；这个是 manager 扫盘得到的**会话历史清单**（含未纳管的
-  // pi-web / 终端手敲的 Pi 会话），供 web 端「会话列表」用。仅全权 token。
-  if (path === "/session-list" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "session-list requires a full-scope token" });
-    }
-    const r = await runManager("sessions");
-    if (!r?.ok) return apiJson(500, { ok: false, error: r?.error || "manager sessions failed" });
-    // 标出哪些已经纳管（有 registry 条目）—— Web 端据此决定「收编」还是「打开对话」
-    const regs = await readRegistryAgents();
-    const byId = new Map<string, string>();
-    for (const a of regs) if (a.sessionId) byId.set(a.sessionId, a.name);
-    const sessions = ((r.sessions as any[]) || []).map((s) => ({
-      ...s,
-      agentName: byId.get(String(s.sessionId)) ?? null,
-    }));
-    return apiJson(200, { ok: true, count: sessions.length, sessions });
-  }
-
   // v2.7+ POST /api/v1/sessions/:bgId/cleanup —— 清理 bg job（死分身/残留）。
   // 耗时操作（kill → 等 daemon 静默 → 隔离目录，最长 ~90s）→ 202 后台执行，
   // 结果以 session_anomaly kind=cleanup_result 进事件流。仅全权 token。
@@ -646,37 +615,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       accepted: true,
       hint: "adoption runs in background (~1-2 min); watch /api/v1/events for session_anomaly kind=adopt_result",
     });
-  }
-
-  // v2.23+ GET /api/v1/sessions/:sessionId/history —— 任意会话的历史（不要求已纳管）。
-  // 已有 /agents/:name/history/:sessionId 只认 registry 里的 agent；Web 端的会话列表
-  // 里大部分是**未纳管**的会话（pi-web 起的、终端手敲的），点开它们要看历史只能走这条。
-  const sessHistMatch = path.match(/^\/sessions\/([^/]+)\/history$/);
-  if (sessHistMatch && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "session history requires a full-scope token" });
-    }
-    const sid = decodeURIComponent(sessHistMatch[1]);
-    if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
-    const runtime = url.searchParams.get("runtime") || undefined;
-    const cwd = url.searchParams.get("cwd") || undefined;
-    const limit = Math.min(Number(url.searchParams.get("limit") || 100) || 100, 500);
-    const before = url.searchParams.get("before");
-    // 定位：先按 cwd+runtime 精确推，再两种 runtime 各自全库兜底扫
-    let file = cwd ? sessionJsonlPath(runtime, cwd, sid) : null;
-    if (!file || !existsSync(file)) {
-      file =
-        findSessionJsonlBySessionId(runtime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid);
-    }
-    if (!file || !existsSync(file)) {
-      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    }
-    const page = await readSessionHistory(file, {
-      limit,
-      ...(before ? { before: Number(before) } : {}),
-    });
-    return apiJson(200, { ok: true, sessionId: sid, path: file, ...page });
   }
 
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
@@ -776,7 +714,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     for (const n of names) {
       let cwd: string | undefined;
       let sessionId: string | undefined;
-      let runtime: string | undefined;
       if (n === "master") {
         const m = await findApiAgent("master"); // master 分支不起子进程
         cwd = m?.cwd;
@@ -785,13 +722,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const a = regMap.get(n);
         cwd = a?.cwd;
         sessionId = a?.sessionId;
-        runtime = a?.runtime;
       }
-      const sessions = await listAgentSessions(n, {
-        cwd,
-        currentSessionId: sessionId,
-        runtime,
-      });
+      const sessions = await listAgentSessions(n, { cwd, currentSessionId: sessionId });
       for (const s of sessions) files.push({ agent: n, sessionId: s.sessionId, source: s.source, path: s.path, mtime: s.mtime });
     }
     files.sort((a, b) => b.mtime.localeCompare(a.mtime));
@@ -876,7 +808,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const sessions = await listAgentSessions(canonical, {
       cwd: agent?.cwd,
       currentSessionId: agent?.sessionId,
-      runtime: agent?.runtime,
     });
     if (!agent && !sessions.length) {
       return apiJson(404, { ok: false, error: `agent "${agentParam}" not found (no registry entry, no archives)` });
@@ -905,15 +836,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     let found: { sessionId: string; source: "live" | "archive"; path: string } | undefined;
     if (agent?.cwd && agent.sessionId === sid) {
       const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
-      // v2.23+ runtime 感知（Pi 返回 null ⇒ 落回下面的 listAgentSessions 扫描）
-      const lp = sessionJsonlPath(agent.runtime, agent.cwd, sid);
-      if (lp && existsSync(lp)) found = { sessionId: sid, source: "live", path: lp };
+      const lp = projectJsonlPath(agent.cwd, sid);
+      if (existsSync(lp)) found = { sessionId: sid, source: "live", path: lp };
     }
     if (!found) {
       const sessions = await listAgentSessions(canonical, {
         cwd: agent?.cwd,
         currentSessionId: agent?.sessionId,
-        runtime: agent?.runtime,
       });
       found = sessions.find((s) => s.sessionId === sid);
     }
@@ -1509,16 +1438,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const effort = String(body?.effort || "").trim();
     // v2.21+ 可选归属 project(缺省由 manager 按 dir 自动归属/建组)
     const project = String(body?.project || "").trim();
-    // v2.23+ 运行时：Web 端也能建 Pi agent（此前只有命令行能建）
-    const runtime = String(body?.runtime || "").trim();
-    const piBase = String(body?.piBase || "").trim();
-    if (runtime && runtime !== "pi" && runtime !== "claude-code") {
-      return apiJson(400, { ok: false, error: 'runtime must be "pi" or "claude-code"' });
-    }
-    if (piBase && piBase !== "minimal" && piBase !== "inherit") {
-      return apiJson(400, { ok: false, error: 'piBase must be "minimal" or "inherit"' });
-    }
-    if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?, "project"?, "runtime"?, "piBase"?}' });
+    if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?, "project"?}' });
     // name / dir 走位置参数，必须先挡掉长得像 flag 的值；purpose 改走具名
     // --purpose，避免自由文本被 manager 的 flag 提取抢先解析（详见
     // manager.ts 的 extractPurposeFlag 注释：曾可用 purpose 替换整个命令黑名单）。
@@ -1530,56 +1450,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (model) createArgs.push("--model", model);
     if (effort) createArgs.push("--effort", effort);
     if (project) createArgs.push("--project", project);
-    if (runtime === "pi") createArgs.push("--runtime", "pi");
-    if (piBase) createArgs.push("--pi-base", piBase);
     const r = await runManager(...createArgs);
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager create failed" });
-  }
-
-  // v2.23+ POST /api/v1/agents/resume —— 把一个**已存在的会话**收编成正式 agent。
-  // 与 /sessions/:id/adopt 的区别：adopt 是「把 bg 分身立为**已有** agent 的正式会话」
-  // （Claude Code 专属语义）；这条是「这个会话还不属于任何 agent，给它起个名字收编」，
-  // 两种 runtime 都支持（Pi 走 resume --runtime pi，会话 id 是 open-or-create）。
-  // 耗时（起 tmux 窗口 + 等就绪）→ 202 后台执行，结果进事件流。
-  if (path === "/agents/resume" && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "resume requires a full-scope token" });
-    }
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return apiJson(400, { ok: false, error: "invalid JSON body" });
-    }
-    const agent = String(body?.agent || "").trim();
-    const sessionId = String(body?.sessionId || "").trim();
-    const runtime = String(body?.runtime || "").trim();
-    const cwd = String(body?.cwd || "").trim();
-    if (!agent || !sessionId) {
-      return apiJson(400, { ok: false, error: 'body must be {"agent", "sessionId", "runtime"?, "cwd"?}' });
-    }
-    if (agent.startsWith("-") || sessionId.startsWith("-") || cwd.startsWith("-")) {
-      return apiJson(400, { ok: false, error: 'agent/sessionId/cwd 不能以 "-" 开头' });
-    }
-    if (!isValidSessionId(sessionId)) return apiJson(400, { ok: false, error: "invalid sessionId" });
-    const args = ["resume", agent, sessionId];
-    if (cwd) args.push(cwd);
-    if (runtime === "pi") args.push("--runtime", "pi");
-    runManager(...args)
-      .then((r) => {
-        emitEvent({
-          agent,
-          chatId: "",
-          type: "session_anomaly",
-          data: { kind: "resume_result", sessionId, ok: !!r?.ok, ...r },
-        });
-      })
-      .catch(() => {});
-    return apiJson(202, {
-      ok: true,
-      accepted: true,
-      hint: "resume 在后台跑（起窗口 + 等就绪，约 10-40s）；结果看 /api/v1/events 的 session_anomaly kind=resume_result",
-    });
   }
 
   // GET/PUT /api/v1/config/claude-defaults —— 全局默认模型/effort 管理

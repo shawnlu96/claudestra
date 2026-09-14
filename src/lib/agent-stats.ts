@@ -14,12 +14,6 @@
 
 import { existsSync, statSync } from "fs";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
-import {
-  findSessionJsonlBySessionId,
-  runtimeForSessionPath,
-  sessionJsonlPath,
-  translateSessionLine,
-} from "./session-source.js";
 import { readSessionCtx } from "./usage-cache.js";
 
 export interface UsageWindow {
@@ -87,8 +81,6 @@ export interface AgentLike {
   dir?: string;
   sessionId?: string;
   model?: string;
-  /** v2.23+ 运行时（registry 字段）：决定会话文件怎么定位 */
-  runtime?: string;
 }
 
 /** 上下文窗口天花板（用于算占比）。会话实测能涨到 ~1M。 */
@@ -164,9 +156,7 @@ export async function readFileStats(path: string): Promise<FileStats> {
     const line = lines[i];
     if (!line) continue;
     let rec: any;
-    // v2.23+ Pi 行归一（usage 键名 input/output/cacheRead/cacheWrite → CC 口径）
-    rec = translateSessionLine(runtimeForSessionPath(path), line);
-    if (!rec) continue;
+    try { rec = JSON.parse(line); } catch { continue; }
     // compact 后还没新对话：尾扫会先遇到 compact 摘要而不是带 usage 的 assistant。
     // 这时最后一条 usage 是**压缩前**的旧值（owner 2026-07-09 报告：compact 完很久
     // 不聊天，看板一直显示压缩前的红色大数）。真实值要等下一轮对话才有，先按
@@ -223,11 +213,10 @@ export async function readFileStats(path: string): Promise<FileStats> {
 function resolveJsonl(agent: AgentLike): string | null {
   const cwd = agent.cwd || agent.dir;
   if (cwd && agent.sessionId) {
-    // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/ 下（文件名带时间戳）
-    const p = sessionJsonlPath(agent.runtime, cwd, agent.sessionId);
-    if (p && existsSync(p)) return p;
+    const p = projectJsonlPath(cwd, agent.sessionId);
+    if (existsSync(p)) return p;
   }
-  if (agent.sessionId) return findSessionJsonlBySessionId(agent.runtime, agent.sessionId);
+  if (agent.sessionId) return findJsonlBySessionId(agent.sessionId);
   return null;
 }
 
@@ -243,10 +232,8 @@ export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[
     out.push({
       name: a.name,
       channelId: a.channelId || "",
-      // 实际在跑的模型（jsonl 真相）优先；占位模型（<synthetic> 之类）才退回 registry。
-      // ⚠ 原来判据是 startsWith("claude-")，Pi agent 的模型是 provider/model 形式
-      // （cc-switch-open-code-go/glm-5.3-flash），会被整条丢掉 → 看板显示 "?"。
-      model: fs.model && !fs.model.startsWith("<") ? fs.model : (a.model || fs.model || "?"),
+      // 实际在跑的模型（jsonl 真相）优先；不是正常 claude- 模型（如 <synthetic>）时退回 registry
+      model: fs.model.startsWith("claude-") ? fs.model : (a.model || fs.model || "?"),
       status: a.status || "active",
       contextTokens: fs.contextTokens,
       // v2.21.1+ 百分比优先按 statusline 落盘的真实窗口算(peer 2026-08-30:

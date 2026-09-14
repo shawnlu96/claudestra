@@ -7,7 +7,6 @@
  */
 
 import { existsSync, readdirSync, realpathSync } from "fs";
-import { runtimeForSessionPath, translateSessionLine } from "./session-source.js";
 
 export interface Usage {
   input: number;
@@ -45,10 +44,7 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
   for (const line of text.split("\n")) {
     if (!line) continue;
     let rec: any;
-    // v2.23+ Pi 的会话行在这里归一成 Claude Code 形状（含 usage 键名），
-    // 路径自带判据，不必把 runtime 一路透传
-    rec = translateSessionLine(runtimeForSessionPath(path), line);
-    if (!rec) continue;
+    try { rec = JSON.parse(line); } catch { continue; }
     if (rec.type !== "assistant") continue;
     if (sinceTs > 0) {
       const ts = new Date(rec.timestamp).getTime();
@@ -95,14 +91,6 @@ function legacySlug(cwd: string): string {
     resolved = realpathSync(cwd);
   } catch { /* 同上 */ }
   return "-" + resolved.replace(/^\//, "").replace(/\//g, "-");
-}
-
-/**
- * cwd → Claude Code projects 目录（jsonl 落点）。
- * 抽出来是给 runtime 感知的 session-source 用（列目录时不用再拿假 sessionId 推）。
- */
-export function projectsDir(cwd: string): string {
-  return `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
 }
 
 /**

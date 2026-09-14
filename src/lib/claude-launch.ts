@@ -271,8 +271,8 @@ export interface LaunchOptions {
   projectContext?: string;
 }
 
-/** POSIX 单引号 shell 转义（pi-launch.ts 复用同一套，保证两侧注入的 env 语义一致） */
-export function shellEscape(s: string): string {
+/** POSIX 单引号 shell 转义 */
+function shellEscape(s: string): string {
   if (s === "") return "''";
   if (/^[a-zA-Z0-9_.\/:@-]+$/.test(s)) return s;
   return `'${s.replace(/'/g, "'\\''")}'`;
