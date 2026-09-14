@@ -815,8 +815,16 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     const name = decodeURIComponent(archMatch[1]);
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
+    // 子进程加**硬超时**：manager 的 archive/kill 都可能卡住（实测 curl 25s 无响应，
+    // 界面按钮永远停在「…」）。归档标记来自桥接自己建的目录，所以这两步超时也不影响
+    // 「移出工作列表」这个结果 —— 超时就当尽力而为，绝不把请求挂死。
+    const race = async <T,>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
+      Promise.race([
+        p.catch(() => fallback),
+        new Promise<T>((res) => setTimeout(() => res(fallback), ms)),
+      ]);
     try {
-      const r = await runManager("archive", name);
+      const r = await race(runManager("archive", name), 6_000, { ok: false, error: "archive 超时（后台可能仍在跑）" } as any);
       // 移动语义（owner 2026-09-14「把归档的移动进去」）：快照之后把窗口停掉 ⇒
       // agent 离开工作列表、出现在网页侧栏的「归档」栏。**不动注册表条目**，
       // 所以之后还能 `manager resume <name> <sessionId>` 恢复回来。
@@ -849,7 +857,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         /* 快照失败不影响停窗口；manager archive 那份安全副本仍在 */
       }
       try {
-        const k = await runManager("kill", name);
+        const k = await race(runManager("kill", name), 6_000, { ok: false, error: "kill 超时" } as any);
         killed = k?.ok !== false;
       } catch {
         /* 停不掉也不影响快照 */
