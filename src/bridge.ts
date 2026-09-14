@@ -32,6 +32,7 @@ import {
 import type { ServerWebSocket } from "bun";
 
 import { DISCORD_TOKEN, WEB_ONLY, BRIDGE_PORT, ALLOWED_USER_IDS, DISCORD_GUILD_ID, TMP_DIR, TMUX_SOCK, MASTER_DIR, INBOX_DIR } from "./bridge/config.js";
+import { ContentionTracker } from "./lib/channel-contention.js";
 // Web-only: 无 Discord 模式的会话地址供给 + 出站落空 adapter
 import { createLocalChatAdapter } from "./bridge/local-adapter.js";
 import {
@@ -209,9 +210,13 @@ interface ClientInfo {
    *  ~/.claude/projects/<cwd-slug>/<sessionId>.jsonl 监听 tool / text。 */
   cwd?: string;
   /** v2.13.1+ 最近一次从这条连接收到消息的时刻（channel-server 每 25s keepalive
-   *  ping，所以活着的连接最多 25s 就会刷新一次）。目前仅用于 register 冲突时打印
-   *  旧连接的 idle 时长 —— 用来事后判断它当时是活的还是僵尸。 */
+   *  ping，所以活着的连接最多 25s 就会刷新一次）。用于 register 冲突时判断旧连接
+   *  当时是活的还是僵尸（也是频道对抢识别的判据之一）。 */
   lastSeen: number;
+  /** channel-server 进程 pid / 它的 Claude Code 父进程 pid（自报）。没有它，
+   *  「谁在跟谁抢这个频道」只能靠 ps 翻环境变量考古。老版本 channel-server 不带。 */
+  pid?: number;
+  ppid?: number;
 }
 
 // ============================================================
@@ -219,6 +224,66 @@ interface ClientInfo {
 // ============================================================
 
 const clients = new Map<string, ClientInfo>();
+
+/** 同一频道被两个活实例反复对抢的识别器（判据与阈值见 lib/channel-contention.ts）。
+ *  只负责**报警**，不负责裁决——谁该退出由 channel-server 的 link-policy 决定，
+ *  而那边的结论是「stdio 还连着就别退」，bridge 无权也不该替它做这个决定。 */
+const contention = new ContentionTracker();
+
+/** 正在被顶替、由 bridge 主动关掉的旧 ws。
+ *  ⚠ 实测（2026-09-15 假频道驱动）：`old.ws.close()` 是**同步派发**的，close 回调
+ *  在 `clients.set(新 ws)` 之前就跑了，那一刻 map 里还是旧 ws → 匹配上 → 走删除分支。
+ *  所以「close 回调里删掉了」**不等于**「频道空了」。不把它排掉的话，对抢记账每次
+ *  顶替都被清空，永远攒不到阈值，告警形同虚设。 */
+const beingReplaced = new WeakSet<object>();
+
+/**
+ * 频道对抢告警。**只报不裁**：谁该退出由 channel-server 的 link-policy 决定，
+ * 那边的结论是「MCP stdio 还连着就别退」（退出 = 该 agent 永久失联，比抢占更糟），
+ * bridge 无权也不该替它做这个决定。这里要解决的是另一个问题——它此前完全静默。
+ *
+ * 三条出口都走，因为三拨人从不同地方看故障：日志（事后对账）、SSE（Web 端实时）、
+ * 控制频道（Discord）。
+ */
+async function reportChannelContention(a: {
+  channelId: string;
+  flips: number;
+  pids: number[];
+  repeatPids: number[];
+  windowMs: number;
+}): Promise<void> {
+  const isMaster = !!CONTROL_CHANNEL_ID && a.channelId === CONTROL_CHANNEL_ID;
+  const who = isMaster ? "master（大总管）" : agentNameByChannelFromRegistry(a.channelId) || "未知 agent";
+  const mins = Math.round(a.windowMs / 60_000);
+  const detail =
+    `⚔️ 频道对抢: ${who} (${a.channelId}) —— ${mins} 分钟内活连接被顶替 ${a.flips} 次，` +
+    `pid ${a.repeatPids.join("/")} 反复抢回频道。参与进程: ${a.pids.join(", ")}`;
+  console.error(detail);
+  console.error(
+    "   多半是同一个 agent 起了两个 Claude Code 实例（比如 tmux 里多出一个同名窗口）。\n" +
+      "   两边的 channel-server 都握过手、都认为自己是正主，于是无限交替，谁也不会退出。\n" +
+      `   排查: ps -o pid=,ppid=,lstart=,command= -p ${a.pids.join(",")}`,
+  );
+
+  emitEvent({
+    agent: isMaster ? "master" : who,
+    chatId: a.channelId,
+    type: "session_anomaly",
+    data: {
+      kind: "channel_contention",
+      flips: a.flips,
+      pids: a.pids,
+      repeatPids: a.repeatPids,
+      windowMinutes: mins,
+      hint: "同一个频道有两个活着的 channel-server 在反复对抢——多半是该 agent 起了两个 Claude Code 实例。" +
+        "消息会随机落到其中一个，回复也可能发不出。用上面的 pid 找出多余的那个实例并关掉。",
+    },
+  });
+
+  // 控制频道（Discord）。⚠ 若对抢的正是控制频道本身，这条会落到当前握着频道的那个
+  // 实例上——仍然比没有强，而且日志与 SSE 两路不受影响。
+  await notifyMaster(detail).catch(() => {});
+}
 
 /**
  * 记 "Discord 入站消息转发到某个 channel-server，turn 结果还没回到 Discord" 的
@@ -2750,8 +2815,18 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 这里只保留 idle 时长的诊断输出，便于下次判断旧连接究竟是活的还是僵尸。
         const idleMs = Date.now() - (old.lastSeen ?? 0);
         console.log(
-          `🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接（旧连接 ${Math.round(idleMs / 1000)}s 前还在通信）`
+          `🔄 频道 ${msg.channelId} 重新注册 — 主动关闭旧连接（旧连接 ${Math.round(idleMs / 1000)}s 前还在通信，` +
+            `pid ${old.pid ?? "?"} → ${msg.pid ?? "?"}）`
         );
+        // 两个活实例互抢时这条日志会一直刷，且跟「Claude Code 重启了 MCP server」
+        // 长得一模一样。交给识别器分辨，够格才报一次（判据见 lib/channel-contention.ts）。
+        const alert = contention.note(msg.channelId, {
+          at: Date.now(),
+          fromPid: old.pid,
+          toPid: typeof msg.pid === "number" ? msg.pid : undefined,
+          idleMs,
+        });
+        if (alert) void reportChannelContention(alert);
         // 主动关闭旧的 ws：发送 "replaced" 通知 + close(**4001**)。
         // v2.2.0+: 用专用 close code 4001（不是 1000）。旧 channel-server 凭 close code
         // 就能判定"被取代 → exit"，不依赖 "replaced" 消息能否赶在 close 前送达（竞态）。
@@ -2760,6 +2835,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           old.ws.send(JSON.stringify({ type: "replaced", reason: "channel re-registered" }));
         } catch { /* non-critical */ }
         try {
+          beingReplaced.add(old.ws as unknown as object);
           old.ws.close(4001, "replaced by newer registration");
         } catch { /* non-critical */ }
       }
@@ -2769,6 +2845,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         userId: msg.userId,
         cwd: msg.cwd,
         lastSeen: Date.now(),
+        pid: typeof msg.pid === "number" ? msg.pid : undefined,
+        ppid: typeof msg.ppid === "number" ? msg.ppid : undefined,
       });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
@@ -4434,6 +4512,13 @@ const server = Bun.serve({
       for (const [channelId, info] of clients.entries()) {
         if (info.ws === ws) {
           clients.delete(channelId);
+          // 频道真的空了才清对抢记账（免得几小时后的零星重连跟旧记录凑成误报）。
+          // 「被顶替」不算空——见 beingReplaced 的注释：那条 close 也会走到这里。
+          if (beingReplaced.has(ws as unknown as object)) {
+            beingReplaced.delete(ws as unknown as object);
+          } else {
+            contention.forget(channelId);
+          }
           // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
           stopWatchingByChannel(channelId);
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
