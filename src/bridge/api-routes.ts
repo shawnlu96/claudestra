@@ -887,8 +887,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       const sid = String(meta?.sessionId || (info as any)?.sessionId || "");
       if (!sid) return apiJson(400, { ok: false, error: "无法确定要恢复的会话 id（meta 缺失）" });
       try {
-        const r = await runManager("resume", rid, sid);
-        await fsp.rm(dir, { recursive: true, force: true });
+        // resume 需要目录：session 文件不一定能反推出 cwd（实测报「找不到工作目录」），
+        // 所以把归档时记下的 cwd 显式作为第三个参数传进去。
+        const cwd = String(meta?.cwd || (info as any)?.cwd || (info as any)?.dir || "");
+        const r = await runManager("resume", rid, sid, ...(cwd ? [cwd] : []));
+        // ⚠ 只有**恢复成功**才清掉归档副本：失败时删掉 = 归档凭空消失（实测踩到）
+        if (r?.ok !== false) await fsp.rm(dir, { recursive: true, force: true });
         return apiJson(200, { ok: r?.ok !== false, kind: "agent", result: r });
       } catch (e) {
         return apiJson(500, { ok: false, error: (e as Error).message });
