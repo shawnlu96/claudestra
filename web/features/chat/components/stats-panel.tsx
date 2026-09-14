@@ -190,10 +190,16 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
                 // v2.23+ 用量分开看（owner 2026-09-14）：Pi 与 Claude Code 的窗口/计费
                 // 口径不同（Pi 走 cc-switch 网关，不吃订阅额度），混着看等于互相淹没。
                 const isPi = (a: StatAgent) => a.runtime === "pi";
+                const piList = statAgents.filter(isPi);
+                // 没有 Pi agent 时不显示 Pi 那一行（没装 Pi 的用户不该看到空分组）
                 const groups: { label: string; list: StatAgent[] }[] = [
                   { label: t("全机合计"), list: statAgents },
-                  { label: "Claude Code", list: statAgents.filter((a) => !isPi(a)) },
-                  { label: "Pi", list: statAgents.filter(isPi) },
+                  ...(piList.length > 0
+                    ? [
+                        { label: "Claude Code", list: statAgents.filter((a) => !isPi(a)) },
+                        { label: "Pi", list: piList },
+                      ]
+                    : []),
                 ];
                 const sum = (l: StatAgent[], pick: (a: StatAgent) => number) =>
                   l.reduce((s, a) => s + pick(a), 0);

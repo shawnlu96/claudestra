@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 /**
  * Pi 环境管理：一个 Pi agent 到底带了哪些能力（看得见）+ 按 agent 决定带哪些（管得住）。
  *
@@ -259,4 +260,24 @@ export function snapshotIsFresh(snap: PiRuntimeSnapshot | null, now = Date.now()
   if (!snap?.at) return false;
   const t = Date.parse(snap.at);
   return Number.isFinite(t) && now - t <= maxAgeMs;
+}
+
+/**
+ * 这台机器上有没有 `pi` 可执行文件（v2.23+）。
+ *
+ * 唯一实现（manager 的 create/resume 预检与桥接的 `/capabilities` 都用它）：
+ * 没装 Pi 的用户应该**完全无感** —— create 提前报错、网页不显示 Pi 入口，
+ * 而不是先建出半成品再超时、或让人选了一个点了才报错的选项。
+ * 可用 `PI_BIN` 覆盖二进制名/路径（测试与自定义安装位置用）。
+ */
+export async function piAvailable(): Promise<boolean> {
+  const bin = process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi";
+  const finder = process.platform === "win32" ? "where" : "which";
+  return new Promise((resolve) => {
+    try {
+      execFile(finder, [bin], (e) => resolve(!e));
+    } catch {
+      resolve(false);
+    }
+  });
 }

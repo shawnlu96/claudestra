@@ -70,16 +70,7 @@ import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
 import { agentRuntime, type AgentRuntime } from "./lib/registry.js";
-import {
-  describePiEnvProfile,
-  normalizePiEnvProfile,
-  piEnvSnapshotPath,
-  readPiGlobalEnv,
-  readPiProjectEnv,
-  readPiRuntimeSnapshot,
-  snapshotIsFresh,
-  type PiEnvProfile,
-} from "./lib/pi-env.js";
+import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveNpm } from "./lib/npm-path.js";
@@ -1191,17 +1182,8 @@ const CLAUDE_READY_ROUNDS = 240;
  * 条目 + 分配 sessionId，然后卡在就绪等待上超时 —— 报错发生在最后一步、且已经留下垃圾。
  * 这里提前拦：解析不到可执行文件就明确告诉他怎么装（或改用默认运行时）。
  */
-async function assertPiAvailable(): Promise<string | null> {
-  const bin = process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi";
-  const finder = process.platform === "win32" ? ["where", bin] : ["which", bin];
-  try {
-    const out = await new Promise<string>((resolve, reject) => {
-      execFileCb(finder[0], [finder[1]], (e: Error | null, stdout: string) => (e ? reject(e) : resolve(String(stdout))));
-    });
-    return out.trim().split("\n")[0] || null;
-  } catch {
-    return null;
-  }
+async function assertPiAvailable(): Promise<boolean> {
+  return piAvailable();
 }
 
 async function waitForPiReady(name: string, rounds = CLAUDE_READY_ROUNDS): Promise<boolean> {
