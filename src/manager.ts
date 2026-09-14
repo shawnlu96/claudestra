@@ -2461,14 +2461,18 @@ async function cmdSessions(search?: string) {
     }
   }
 
-  const display = sessions.slice(0, 25).map((s, i) => ({
+  // v2.23+ 给 web 端也留原始字段：ISO 时间（排序/相对时间自己算）、cwd（点开要看历史）。
+  // 上限从 25 放到 100 —— Discord 面板自己 slice(15)，CLI 是人读的，两者都不受影响。
+  const display = sessions.slice(0, 100).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
     slug: s.slug,
     project: s.cwd.replace(process.env.HOME || "", "~"),
+    cwd: s.cwd,
     runtime: s.runtime ?? "claude-code",
     age: formatAge(s.modifiedAt),
+    modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
   }));
 
