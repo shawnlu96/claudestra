@@ -915,32 +915,46 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     })());
     if (kind === "agent") {
       const { readRegistryAgents } = await import("../lib/registry.js");
+      const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
       const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
       const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(rid));
       const sid = String(meta?.sessionId || (info as any)?.sessionId || "");
-      if (!sid) return apiJson(400, { ok: false, error: "无法确定要恢复的会话 id（meta 缺失）" });
-      // **异步受理**：resume 要起窗口 + 等 Claude Code 冷启动就绪（实测同步等待会挂到
-      // 客户端超时 ✗）。照 adopt 的做法立即回 202，后台跑完再清归档副本 + 发事件。
-      const cwd = String(meta?.cwd || (info as any)?.cwd || (info as any)?.dir || "");
-      void runManager("resume", rid, sid, ...(cwd ? [cwd] : []))
-        .then(async (r) => {
-          const ok = r?.ok !== false;
-          // ⚠ 只有**成功**才清掉归档副本（失败时删掉 = 归档凭空消失，实测踩过）
-          if (ok) await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-          emitEvent({
-            agent: rid,
-            chatId: "",
-            type: "session_anomaly",
-            data: { kind: "restore_result", id: rid, ok, result: r },
-          });
-          console.log(`🗄 归档恢复${ok ? "完成" : "失败"}: ${rid}`);
-        })
-        .catch(() => {});
-      return apiJson(202, {
+      // **第一步（关键）**：把它移出「归档」区 —— 工作列表的来源是 registry（含已停止的）
+      // + tmux 窗口，归档只是 kill 了窗口，所以移出归档区它就**立刻回到列表**（stopped
+      // 状态），不需要起窗口。owner 2026-09-14「你应该是回复到工作 list 先，这都无法成功吗」。
+      // 不删除内容：挪到自动快照区 archive/<agent>/，防丢语义不变。
+      try {
+        await fsp.mkdir(`${ARCHIVE_ROOT}/${rid}`, { recursive: true });
+        for (const f of await fsp.readdir(dir).catch(() => [])) {
+          if (f === ".meta.json") continue;
+          await fsp.rename(`${dir}/${f}`, `${ARCHIVE_ROOT}/${rid}/${f}`).catch(() => {});
+        }
+        await fsp.rm(dir, { recursive: true, force: true });
+      } catch (e) {
+        return apiJson(500, { ok: false, error: `移出归档区失败: ${(e as Error).message}` });
+      }
+      // **第二步（尽力而为，后台）**：把窗口起回来。这一步可能失败（实测 Claude Code
+      // 冷启动超时），但**不影响列表** —— agent 已在列表里（stopped），可以手动重启。
+      if (sid) {
+        const cwd = String(meta?.cwd || (info as any)?.cwd || (info as any)?.dir || "");
+        void runManager("resume", rid, sid, ...(cwd ? [cwd] : []))
+          .then((r) => {
+            emitEvent({
+              agent: rid,
+              chatId: "",
+              type: "session_anomaly",
+              data: { kind: "restore_window", id: rid, ok: r?.ok !== false, result: r },
+            });
+            console.log(`🗄 恢复起窗口${r?.ok !== false ? "成功" : "失败(不影响列表)"}: ${rid}`);
+          })
+          .catch(() => {});
+      }
+      return apiJson(200, {
         ok: true,
-        accepted: true,
         kind: "agent",
-        hint: "恢复在后台跑（要起窗口 + CC 冷启动，约 1-2 分钟）；完成后归档栏条目消失",
+        restored: true,
+        window: sid ? "starting" : "skipped",
+        hint: "已回到工作列表（stopped）；窗口在后台起，起来了会自动变活跃",
       });
     }
     const original = String(meta?.originalPath || "");
