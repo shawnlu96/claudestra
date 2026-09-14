@@ -919,17 +919,29 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(rid));
       const sid = String(meta?.sessionId || (info as any)?.sessionId || "");
       if (!sid) return apiJson(400, { ok: false, error: "无法确定要恢复的会话 id（meta 缺失）" });
-      try {
-        // resume 需要目录：session 文件不一定能反推出 cwd（实测报「找不到工作目录」），
-        // 所以把归档时记下的 cwd 显式作为第三个参数传进去。
-        const cwd = String(meta?.cwd || (info as any)?.cwd || (info as any)?.dir || "");
-        const r = await runManager("resume", rid, sid, ...(cwd ? [cwd] : []));
-        // ⚠ 只有**恢复成功**才清掉归档副本：失败时删掉 = 归档凭空消失（实测踩到）
-        if (r?.ok !== false) await fsp.rm(dir, { recursive: true, force: true });
-        return apiJson(200, { ok: r?.ok !== false, kind: "agent", result: r });
-      } catch (e) {
-        return apiJson(500, { ok: false, error: (e as Error).message });
-      }
+      // **异步受理**：resume 要起窗口 + 等 Claude Code 冷启动就绪（实测同步等待会挂到
+      // 客户端超时 ✗）。照 adopt 的做法立即回 202，后台跑完再清归档副本 + 发事件。
+      const cwd = String(meta?.cwd || (info as any)?.cwd || (info as any)?.dir || "");
+      void runManager("resume", rid, sid, ...(cwd ? [cwd] : []))
+        .then(async (r) => {
+          const ok = r?.ok !== false;
+          // ⚠ 只有**成功**才清掉归档副本（失败时删掉 = 归档凭空消失，实测踩过）
+          if (ok) await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+          emitEvent({
+            agent: rid,
+            chatId: "",
+            type: "session_anomaly",
+            data: { kind: "restore_result", id: rid, ok, result: r },
+          });
+          console.log(`🗄 归档恢复${ok ? "完成" : "失败"}: ${rid}`);
+        })
+        .catch(() => {});
+      return apiJson(202, {
+        ok: true,
+        accepted: true,
+        kind: "agent",
+        hint: "恢复在后台跑（要起窗口 + CC 冷启动，约 1-2 分钟）；完成后归档栏条目消失",
+      });
     }
     const original = String(meta?.originalPath || "");
     if (!original) {
