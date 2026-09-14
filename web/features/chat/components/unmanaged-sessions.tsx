@@ -74,9 +74,13 @@ function SwipeActions({
 }) {
   const W = actions.length * 68;
   const [dx, setDx] = useState(0);
+  // 拖动中不做过渡（跟手要瞬时），只在松手吸附时走 150ms；动作钮也只在露出时挂载 ——
+  // 否则每一帧重绘都可能让底下那排浅色按钮闪一下，看着像"左滑瞬间白屏"（owner 2026-09-14）。
+  const [dragging, setDragging] = useState(false);
   const start = useRef<{ x: number; y: number; open: boolean; locked: boolean } | null>(null);
   return (
     <div className="relative overflow-hidden rounded-lg">
+      {(dx !== 0 || dragging) && (
       <div className="absolute inset-y-0 right-0 flex">
         {actions.map((a) => (
           <button
@@ -92,14 +96,16 @@ function SwipeActions({
           </button>
         ))}
       </div>
+      )}
       <div
         /* 必须是**不透明**的背景：跟手层透明时，后面那排动作按钮会从行下面透出来 ——
            看着像"没左滑就冒出按钮"（owner 2026-09-14 手机实报）。 */
-        className="relative bg-base-100 transition-transform duration-150"
+        className={`relative bg-base-100 ${dragging ? "" : "transition-transform duration-150"}`}
         style={{ transform: `translateX(${dx}px)` }}
         onTouchStart={(e) => {
           const t = e.touches[0];
           start.current = { x: t.clientX, y: t.clientY, open: dx !== 0, locked: false };
+          setDragging(true);
         }}
         onTouchMove={(e) => {
           const st = start.current;
@@ -119,6 +125,7 @@ function SwipeActions({
           setDx(Math.min(0, Math.max(-W - 16, base + ddx)));
         }}
         onTouchEnd={() => {
+          setDragging(false);
           if (!start.current) return;
           setDx(dx < -W / 2 ? -W : 0);
           start.current = null;
