@@ -21,6 +21,15 @@ export function UpdateToast() {
   const loadingHistory = useChatStore((s) => s.state.loadingHistory);
   const [serverCommit, setServerCommit] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
+  // 关掉就**记住**（owner 2026-09-14「这个按钮一直消不掉」）：原先只是内存态，
+  // 一刷新就忘 —— 配上「旧 HTML 被长缓存」的循环就是永远弹（点刷新→拿到的还是
+  // 那份旧 HTML→commit 依旧不一致→又弹）。按 commit 记 localStorage，出现更新的
+  // commit 才再提示一次。
+  useEffect(() => {
+    try {
+      setDismissed(localStorage.getItem("update-toast-dismissed"));
+    } catch { /* 隐私模式等取不到 localStorage：退回内存态，行为如旧 */ }
+  }, []);
   useEffect(() => {
     if (!CLIENT_WEB_COMMIT) return;
     let alive = true;
@@ -57,7 +66,12 @@ export function UpdateToast() {
         <button
           className="text-base-content/45"
           aria-label={t("关闭")}
-          onClick={() => setDismissed(stale)}
+          onClick={() => {
+            setDismissed(stale);
+            try {
+              localStorage.setItem("update-toast-dismissed", stale);
+            } catch { /* 同上 */ }
+          }}
         >
           ✕
         </button>
