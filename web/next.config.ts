@@ -21,6 +21,20 @@ const nextConfig: NextConfig = {
   // 自己的 tailnet IP / 局域网 IP / ts.net 主机名写进 .env.local 的 WEB_DEV_ORIGINS
   // （逗号分隔）。此前这里硬编码的是作者本人的三个地址，别人 clone 下来必须改源码
   // 才能用手机访问 dev server —— 那是最不该让用户碰的地方。
+  // HTML 文档不许长缓存（2026-09-14 owner 反复「改了还是旧界面」的根因）：
+  // 预渲染页默认发 `Cache-Control: s-maxage=31536000`，而 /_next/static 的 chunk 是
+  // 内容哈希 + immutable ⇒ **旧 HTML 会一直指向旧 chunk，用户怎么刷都是旧构建**
+  // （实测：Pi 徽章 / 用量分组反复「没出现」，服务端与构建产物都确认是对的）。
+  // 文档改成 no-cache（仍带 ETag，命中就是 304，代价可忽略）；静态 chunk 一个字不动。
+  // 只列真实页面，不写正则 —— 免得路径匹配在不同 Next 版本上翻车。
+  async headers() {
+    const noCache = [{ key: "Cache-Control", value: "no-cache, must-revalidate" }];
+    return [
+      { source: "/", headers: noCache },
+      { source: "/chat", headers: noCache },
+      { source: "/login", headers: noCache },
+    ];
+  },
   allowedDevOrigins: [
     "127.0.0.1",
     ...(process.env.WEB_DEV_ORIGINS || "")
