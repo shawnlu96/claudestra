@@ -14,6 +14,12 @@
 
 import { existsSync, statSync } from "fs";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
+import {
+  findSessionJsonlBySessionId,
+  runtimeForSessionPath,
+  sessionJsonlPath,
+  translateSessionLine,
+} from "./session-source.js";
 import { readSessionCtx } from "./usage-cache.js";
 
 export interface UsageWindow {
@@ -81,6 +87,8 @@ export interface AgentLike {
   dir?: string;
   sessionId?: string;
   model?: string;
+  /** v2.23+ 运行时（registry 字段）：决定会话文件怎么定位 */
+  runtime?: string;
 }
 
 /** 上下文窗口天花板（用于算占比）。会话实测能涨到 ~1M。 */
@@ -139,6 +147,8 @@ export function scanStatsWindow(
   lines: string[],
   dayTs: number,
   weekTs: number,
+  /** v2.23+ 会话 runtime；由 readFileStats 按路径判定**一次**传入，别在每行里重算 */
+  runtime?: string,
 ): { stats: FileStats; oldestTs: number } {
   const today: UsageWindow = { tokens: 0, requests: 0, costUsd: 0 };
   const week: UsageWindow = { tokens: 0, requests: 0, costUsd: 0 };
@@ -151,7 +161,10 @@ export function scanStatsWindow(
     const line = lines[i];
     if (!line) continue;
     let rec: any;
-    try { rec = JSON.parse(line); } catch { continue; }
+    // v2.23+ Pi 行归一（usage 键名 input/output/cacheRead/cacheWrite → CC 口径）；
+    // Claude Code 行原样 JSON.parse。坏行返回 null → 跳过。
+    rec = translateSessionLine(runtime, line);
+    if (!rec) continue;
     // 窗口是否已回溯过周界，由「整窗最早的时间戳」判定（见 readFileStats 的注释）
     {
       const t = Date.parse(rec?.timestamp);
@@ -247,13 +260,14 @@ export async function readFileStats(
   //
   // ⚠ 为什么不在反向扫描里遇到 `ts < weekTs` 就 break：sidechain / tool_result 这类记录
   // 可能轻微乱序，提前 break 会少算用量。判断「整窗最早」对乱序免疫，而窗口本来就小。
+  const runtime = runtimeForSessionPath(path);
   let win = Math.max(1, opts.tailStartBytes ?? STATS_TAIL_START_BYTES);
   for (;;) {
     const cut = Math.max(0, size - win);
     // slice 从半行中间起头：截断的首行 JSON.parse 会失败 → 被 catch 丢掉，天然安全，
     // 不需要额外对齐到行首。
     const lines = (await Bun.file(path).slice(cut).text()).split("\n");
-    const { stats, oldestTs } = scanStatsWindow(lines, dayTs, weekTs);
+    const { stats, oldestTs } = scanStatsWindow(lines, dayTs, weekTs, runtime);
     if (oldestTs < weekTs || cut === 0 || win >= STATS_TAIL_MAX_BYTES) {
       fileCache.set(path, { key, stats });
       return stats;
@@ -265,10 +279,11 @@ export async function readFileStats(
 function resolveJsonl(agent: AgentLike): string | null {
   const cwd = agent.cwd || agent.dir;
   if (cwd && agent.sessionId) {
-    const p = projectJsonlPath(cwd, agent.sessionId);
-    if (existsSync(p)) return p;
+    // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/ 下（文件名带时间戳）
+    const p = sessionJsonlPath(agent.runtime, cwd, agent.sessionId);
+    if (p && existsSync(p)) return p;
   }
-  if (agent.sessionId) return findJsonlBySessionId(agent.sessionId);
+  if (agent.sessionId) return findSessionJsonlBySessionId(agent.runtime, agent.sessionId);
   return null;
 }
 
@@ -284,8 +299,10 @@ export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[
     out.push({
       name: a.name,
       channelId: a.channelId || "",
-      // 实际在跑的模型（jsonl 真相）优先；不是正常 claude- 模型（如 <synthetic>）时退回 registry
-      model: fs.model.startsWith("claude-") ? fs.model : (a.model || fs.model || "?"),
+      // 实际在跑的模型（jsonl 真相）优先；占位模型（<synthetic> 之类）才退回 registry。
+      // ⚠ 原来判据是 startsWith("claude-")，Pi agent 的模型是 provider/model 形式
+      // （cc-switch-open-code-go/glm-5.3-flash），会被整条丢掉 → 看板显示 "?"。
+      model: fs.model && !fs.model.startsWith("<") ? fs.model : (a.model || fs.model || "?"),
       status: a.status || "active",
       contextTokens: fs.contextTokens,
       // v2.21.1+ 百分比优先按 statusline 落盘的真实窗口算(peer 2026-08-30:

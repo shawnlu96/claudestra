@@ -12,6 +12,7 @@
  * byte-offset 索引，不提前优化。
  */
 
+import { findSessionJsonlBySessionId, runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./session-source.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
@@ -351,11 +352,16 @@ export async function listAgentSessions(
     cwd?: string;
     currentSessionId?: string;
     archiveRoot?: string;
-    /** 测试注入：live 路径推导，默认 projectJsonlPath */
+    /** 测试注入：live 路径推导，默认按 runtime 选 Claude Code / Pi */
     livePathFor?: (cwd: string, sessionId: string) => string;
+    /** v2.23+ 运行时：Pi 的会话文件在 ~/.pi/agent/sessions/ 下，文件名带时间戳 */
+    runtime?: string;
   } = {},
 ): Promise<SessionSummary[]> {
-  const livePathFor = opts.livePathFor ?? projectJsonlPath;
+  const livePathFor =
+    opts.livePathFor ??
+    ((cwd: string, sessionId: string) =>
+      sessionJsonlPath(opts.runtime, cwd, sessionId) ?? projectJsonlPath(cwd, sessionId));
   const byId = new Map<string, SessionSummary>();
 
   const archiveDir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
@@ -379,7 +385,8 @@ export async function listAgentSessions(
       // session 整体失明,web 历史停在旧归档):路径推导 miss 就按 sessionId
       // 全局扫 projects 目录——live 会话绝不因 slug 推导错误而不可见。
       if (!existsSync(lp)) {
-        const found = findJsonlBySessionId(sid);
+        // v2.23+ runtime 感知兜底：Pi 的文件名带时间戳，只能扫目录找
+        const found = findSessionJsonlBySessionId(opts.runtime, sid);
         if (!found) continue;
         lp = found;
       }
@@ -426,11 +433,13 @@ export async function readSessionHistory(
   const maxFull = opts.maxFullReadBytes ?? MAX_HISTORY_FULL_READ_BYTES;
 
   const f = Bun.file(filePath);
+  // v2.23+ 由路径判定 runtime（Pi 的会话根目录固定），解析层不必再被透传
+  const runtime = runtimeForSessionPath(filePath);
   const size = f.size;
 
   // 小文件:一次全读,total 精确。单测与绝大多数会话走这条,行为与 v1 完全一致。
   if (size <= maxFull) {
-    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn);
+    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn, runtime);
     return sliceHistoryPage(all, limit, before, after, all.length, false);
   }
 
@@ -504,6 +513,8 @@ function parseHistoryLines(
   lineOffset: number,
   fmt: (name: string, input: any) => string,
   detailFn: ((name: string, input: any) => string) | undefined,
+  /** v2.23+ 运行时：Pi 的行要翻译成 Claude Code 形状后再解析 */
+  runtime?: string,
 ): HistoryMessage[] {
   const all: HistoryMessage[] = [];
   // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
@@ -514,12 +525,8 @@ function parseHistoryLines(
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
     const seq = lineOffset + i;
-    let rec: any;
-    try {
-      rec = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
+    const rec: any = translateSessionLine(runtime, lines[i]);
+    if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
     if (rec.type === "system" && rec.subtype === "compact_boundary") {
@@ -926,12 +933,8 @@ export async function searchSessionHistory(
 
   for await (const { line, idx } of grepJsonlLines(filePath, q, opts.chunkBytes)) {
     if (hits.length >= maxHits) break;
-    let rec: any;
-    try {
-      rec = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const rec: any = translateSessionLine(runtimeForSessionPath(filePath), line);
+    if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
     // v2.21.4 被队列吸收的入站消息(attachment queued_command/prompt)与历史同规则可搜
