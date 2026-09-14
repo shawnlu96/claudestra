@@ -961,22 +961,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       } catch (e) {
         return apiJson(500, { ok: false, error: `移出归档区失败: ${(e as Error).message}` });
       }
-      // **第二步（尽力而为，后台）**：把窗口起回来。这一步可能失败（实测 Claude Code
-      // 冷启动超时），但**不影响列表** —— agent 已在列表里（stopped），可以手动重启。
-      if (sid) {
-        const cwd = String(meta?.cwd || (info as any)?.cwd || (info as any)?.dir || "");
-        void runManager("resume", rid, sid, ...(cwd ? [cwd] : []))
-          .then((r) => {
-            emitEvent({
-              agent: rid,
-              chatId: "",
-              type: "session_anomaly",
-              data: { kind: "restore_window", id: rid, ok: r?.ok !== false, result: r },
-            });
-            console.log(`🗄 恢复起窗口${r?.ok !== false ? "成功" : "失败(不影响列表)"}: ${rid}`);
-          })
-          .catch(() => {});
-      }
+      // 不再自动起窗口：resume 失败时会执行清理（实测把 registry 条目一起清掉 ⇒
+      // 「恢复后它又消失了」✗）。恢复只负责**回到列表**（stopped 状态），起窗口由用户
+      // 在列表里点重启 —— 那是他自己可控的动作，不会被后台任务反噬。
       return apiJson(200, {
         ok: true,
         kind: "agent",
