@@ -19,8 +19,22 @@ import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
 
 export const ARCHIVE_ROOT = join(
-  process.env.HOME || "~", ".claude-orchestrator", "archive",
+  process.env.HOME || "~",
+  ".claude-orchestrator",
+  "archive",
 );
+
+/**
+ * 「归档」类别区（v2.23+）—— 网页侧栏那份列表的唯一来源。
+ *
+ * 与 ARCHIVE_ROOT 的区别（owner 2026-09-14 纠正两次后定的）：
+ *   - ARCHIVE_ROOT/<agent>/     自动快照：每日兜底给**在跑** agent 做的安全副本、
+ *                               kill/fork/adopt 退役时的快照 —— 防丢机制，不进「归档」栏
+ *   - ARCHIVE_ROOT/archived/    **用户手动归档**的会话本体：归档 = 把会话移进来，
+ *                               它从此不在工作列表/未纳管列表；内容照旧可读
+ * 归档是**类别**不是台账：目录里的文件本身就是记录，没有额外索引。
+ */
+export const USER_ARCHIVE_ROOT = `${ARCHIVE_ROOT}/archived`;
 
 export interface ArchiveResult {
   ok: boolean;
