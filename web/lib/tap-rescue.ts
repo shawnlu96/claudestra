@@ -33,6 +33,12 @@ export function installTapRescue(
   const CLICKABLE = "button,a,[role=button],input,select,label,summary,code,.cursor-pointer,[data-clickable]";
   const MARK = "data-tap-rescued";
   let down: { t: number; x: number; y: number; target: Element; edge: number } | null = null;
+  // 手指自按下起的最大位移(touchmove 实测)。iOS 一旦把触摸判成滑动就停派 pointermove、
+  // pointercancel 带的往往仍是按下坐标——只看 up/cancel 坐标会把慢速滚动当成零位移
+  // (2026-09-14 owner:「上下滑动的时候还会误触点进 Agent」,884e300 回归)。touchmove
+  // 在滚动期间照常派发,是唯一可靠的「手指动没动」信号;回弹/惯性爬行是容器在动、
+  // 手指没动,不受此守卫影响。
+  let moved = 0;
   let lastClickAt = 0;
   let suppressUntil = 0;
   let suppressTarget: Element | null = null;
@@ -72,6 +78,13 @@ export function installTapRescue(
       return;
     }
     down = { t: performance.now(), x: e.clientX, y: e.clientY, target: e.target, edge: edgeNow() };
+    moved = 0;
+  };
+  const onTouchMove = (e: TouchEvent) => {
+    if (!down || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const dist = Math.hypot(t.clientX - down.x, t.clientY - down.y);
+    if (dist > moved) moved = dist;
   };
   /** pointerup / pointercancel 共用的 arm 链:过守卫 → 450ms 后真 click 没来就补。 */
   const arm = (e: PointerEvent, via: "up" | "cancel") => {
@@ -82,6 +95,7 @@ export function installTapRescue(
     const cx = via === "cancel" && e.clientX === 0 && e.clientY === 0 ? d.x : e.clientX;
     const cy = via === "cancel" && e.clientX === 0 && e.clientY === 0 ? d.y : e.clientY;
     if (performance.now() - d.t > 350 || Math.hypot(cx - d.x, cy - d.y) > 10) return;
+    if (moved > 10) return; // 手指实际滑过了(touchmove 实测):是滚动,不是点——cancel 坐标不可信
     const target = d.target;
     if (!target.closest(CLICKABLE)) return; // 死区:本来就没 click
     if (target.closest("[data-hold]")) return; // 按住说话类手势键:按设计无 click
@@ -119,6 +133,7 @@ export function installTapRescue(
   el.addEventListener("pointerdown", onDown);
   el.addEventListener("pointerup", onUp);
   el.addEventListener("pointercancel", onCancel);
+  el.addEventListener("touchmove", onTouchMove, { passive: true });
   el.addEventListener("click", onClick, true);
   el.addEventListener("scroll", onScroll, { passive: true });
   return () => {
@@ -126,6 +141,7 @@ export function installTapRescue(
     el.removeEventListener("pointerdown", onDown);
     el.removeEventListener("pointerup", onUp);
     el.removeEventListener("pointercancel", onCancel);
+    el.removeEventListener("touchmove", onTouchMove);
     el.removeEventListener("click", onClick, true);
     el.removeEventListener("scroll", onScroll);
   };

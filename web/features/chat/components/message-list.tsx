@@ -1339,6 +1339,9 @@ export function MessageList() {
         void navigator.clipboard?.writeText(text).then(() => {
           setCopiedTip({ x: e.clientX, y: e.clientY, id });
           setTimeout(() => setCopiedTip((c) => (c && c.id === id ? null : c)), 1200);
+        }).catch(() => {
+          // tap-rescue 合成的 click 没有用户激活,iOS 直接拒写剪贴板(2026-09-14 client.log
+          // unhandledrejection 实锤)。不提示「已复制」、也别让 rejection 冒到全局;用户再点一次即可。
         });
       }}
     >
