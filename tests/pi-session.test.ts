@@ -17,6 +17,7 @@ import {
   listPiSessionJsonls,
   piLineToClaudeShape,
   mapPiToolCall,
+  piSessionIdFromFilename,
   piSessionPath,
   piUsageToClaude,
   readPiSessionAsClaudeShape,
@@ -251,5 +252,20 @@ describe("mapPiToolCall（Pi 工具名/参数 → Claude Code 形状）", () => 
       }),
     )!;
     expect(out.message.content[0]).toEqual({ type: "tool_use", id: "c1", name: "Read", input: { file_path: "/x/y.ts" } });
+  });
+});
+
+describe("piSessionIdFromFilename（会话文件名 → sessionId）", () => {
+  test("按第一个下划线切，时间戳前缀丢掉", () => {
+    expect(piSessionIdFromFilename("2026-09-14T10-41-50-730Z_04b31677-8fef-4128.jsonl")).toBe("04b31677-8fef-4128");
+  });
+
+  test("自造 id 里带下划线也取全（这正是不能按最后一个下划线切的原因）", () => {
+    expect(piSessionIdFromFilename("2026-09-14T10-41-50-730Z_pi_my_agent.jsonl")).toBe("pi_my_agent");
+  });
+
+  test("不是会话文件返回 null", () => {
+    expect(piSessionIdFromFilename("notes.txt")).toBeNull();
+    expect(piSessionIdFromFilename("nounderscore.jsonl")).toBeNull();
   });
 });
