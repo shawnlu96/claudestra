@@ -211,6 +211,15 @@ Readers that only have a path auto-detect the runtime from it (`runtimeForSessio
 
 Consequences worth knowing: Pi sessions show up in `manager sessions`, `GET /api/v1/agents/:name/history`, the cost rollup, the context/model badges, and `manager archive` (Pi's subagent artifacts — `<session-stem>/<runId>/run-N/session.jsonl` — are copied into the archive as `<sid>/subagents/<runId>.jsonl`, i.e. the Claude Code layout, so the history panel reads them unchanged). The `/new`-style session rotation self-heal now works for Pi as well (`listSessionIdsForCwd` understands the `<ts>_<id>` filename); without it a rotated Pi session would freeze the watcher and history exactly like the Claude Code failure described in `maybeHealRotatedSession`.
 
+**Session discovery (v2.23+).** Two lists, deliberately different:
+
+- the **agent list** = what Claudestra manages (registry entry + channel) — that's *control*;
+- the **session list** (`manager sessions`, the Discord history panel, and the web's session section) = conversations happening on this machine — that's *visibility*, and it must not care which harness runs them.
+
+`scanPiSessions()` walks `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` (cwd comes from the header line — the directory encoding is lossy), and `scanAllSessions()` merges both runtimes by recent activity. `cmdSessions` and **resume's directory lookup** both use it, which is what makes "spot a Pi session in the list → `resume <name> <sessionId> --runtime pi` to adopt it as a real agent" work. Sessions that were **not** started by Claudestra can be listed and adopted, but they cannot receive messages until adopted (no extension = no inbound channel).
+
+Surfaces over the API (all full-scope token, consumed by the web client): `GET /api/v1/session-list` (merged inventory, each entry tagged with `runtime` and `agentName` when already managed), `GET /api/v1/sessions/:sessionId/history` (history for a session that belongs to no agent — the existing per-agent history endpoint can't serve those), and `POST /api/v1/agents/resume` (adopt an existing session as a new agent, 202 + `session_anomaly kind=resume_result`). `POST /api/v1/agents` also accepts `runtime` and `piBase` now, so the web can create Pi agents.
+
 **Still not covered**: Pi subagent *threads* (`bg-activity-watcher` looks in Claude Code's `subagents/` directory) and Pi's background shell logs (`$TMPDIR/pi-bash-*.log` has no session scope, so it cannot be attributed).
 
 ### Cross-Claudestra peer collaboration
