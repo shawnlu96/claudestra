@@ -93,6 +93,11 @@ function StatusDot({ status, busy, compacting }: { status: AgentSession["status"
  * 会话列表行——纯选择项。会话操作（清空/重启/停止）已迁到会话详情顶栏
  * （agent-actions.tsx），列表保持干净。
  */
+/** 左滑露出的动作区总宽（置顶 / 归档 / 删除 三格）—— 必须与滑动上限、吸附阈值同源，
+ *  否则加一个动作就会把最左边那个按钮挤出可视区（2026-09-14 owner 实报「置顶按钮
+ *  怎么搞没了」：容器加宽到 240 而滑动上限还是 160）。 */
+const ACTIONS_W = 240;
+
 function AgentRow({
   a,
   active,
@@ -209,7 +214,7 @@ function AgentRow({
       <div className="relative overflow-hidden rounded-lg">
         {/* 左滑露出的操作钮(在滑动层下面):置顶 + 删除 */}
         {(swipeX < 0 || dragging) && (
-          <div className="absolute inset-y-0 right-0 z-0 flex w-[240px]">
+          <div className="absolute inset-y-0 right-0 z-0 flex" style={{ width: ACTIONS_W }}>
             <button
               className="flex flex-1 items-center justify-center bg-base-content/70 text-[13px] font-medium text-base-100"
               onClick={() => {
@@ -298,7 +303,7 @@ function AgentRow({
                     swipeReg.closeOthers(closeSwipe);
                     setDragging(true);
                   }
-                  t.lastX = Math.max(-160, Math.min(0, t.startX + dx));
+                  t.lastX = Math.max(-ACTIONS_W, Math.min(0, t.startX + dx));
                   applyX(t.lastX);
                 }
               : undefined
@@ -309,7 +314,7 @@ function AgentRow({
                   const t = touchRef.current;
                   touchRef.current = null;
                   if (!t?.swiping) return;
-                  const snap = t.lastX < -60 ? -160 : 0;
+                  const snap = t.lastX < -ACTIONS_W * 0.375 ? -ACTIONS_W : 0;
                   applyX(snap);
                   setDragging(false);
                   setSwipeX(snap);
