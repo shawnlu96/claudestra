@@ -65,7 +65,7 @@ export function RuntimeBadge({ runtime, className = "" }: { runtime: string; cla
  * 左滑露出快捷动作（与侧栏 agent 行同一套手感：跟手位移、松手吸附、纵向意图让给滚动）。
  * owner 2026-09-14：未纳管会话也要快捷按钮，归档要能直接点。
  */
-function SwipeActions({
+export function SwipeActions({
   children,
   actions,
 }: {
