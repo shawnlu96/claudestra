@@ -14,12 +14,19 @@ import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 
 interface ArchivedEntry {
-  kind: "agent" | "unmanaged";
+  /** agent 名或会话 id（「归档」区里的目录名） */
   id: string;
-  /** 归档时的会话 id(s) */
-  sessionIds: string[];
+  /** 里面有多少个会话文件 */
+  sessions: number;
+  bytes: number;
   archivedAt: number;
-  note?: string;
+}
+
+function fmtBytes(n: number): string {
+  if (!n) return "0";
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
+  if (n >= 1024) return `${Math.round(n / 1024)}k`;
+  return String(n);
 }
 
 export function ArchivedSessions() {
@@ -103,20 +110,17 @@ export function ArchivedSessions() {
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
             {entries.map((e) => (
-              <li key={`${e.kind}:${e.id}`}>
+              <li key={e.id}>
                 <div className="flex flex-col gap-0.5 rounded-lg px-1.5 py-1">
                   <span className="flex items-center gap-1.5 text-sm">
-                    <span className="shrink-0 rounded-full bg-base-100/70 px-1.5 py-0.5 text-[10px] text-base-content/60">
-                      {e.kind === "agent" ? t("agent") : t("未纳管")}
-                    </span>
+                    <span className="shrink-0 text-[13px] opacity-70">📦</span>
                     <span className="truncate text-base-content/80">{e.id}</span>
                     <span className="ml-auto shrink-0 text-[11px] text-base-content/40">
                       {fmtAgo(e.archivedAt)}
                     </span>
                   </span>
                   <span className="truncate font-mono text-[11px] text-base-content/40">
-                    {(e.sessionIds?.length ?? 0)} {t("个会话")}
-                    {e.note ? ` · ${e.note}` : ""}
+                    {(e.sessions ?? 0)} {t("个会话")} · {fmtBytes(e.bytes ?? 0)}
                   </span>
                 </div>
               </li>

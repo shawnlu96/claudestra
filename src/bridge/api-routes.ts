@@ -787,25 +787,31 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       // 移动语义（owner 2026-09-14「把归档的移动进去」）：快照之后把窗口停掉 ⇒
       // agent 离开工作列表、出现在网页侧栏的「归档」栏。**不动注册表条目**，
       // 所以之后还能 `manager resume <name> <sessionId>` 恢复回来。
+      // 归档 = 把会话本体放进「归档」区（archived/<agent>/），再停掉窗口 ⇒ 它离开
+      // 工作列表、出现在侧栏「归档」类别里。注册表条目保留，之后可 resume 恢复。
       let killed = false;
+      try {
+        const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+        const { readRegistryAgents, agentRuntime } = await import("../lib/registry.js");
+        const { sessionJsonlPath } = await import("../lib/session-source.js");
+        const fsp2 = await import("node:fs/promises");
+        const info = (await readRegistryAgents()).find((r) => r.name === name || r.name === name.replace(/^agent-/, ""));
+        const live = info
+          ? sessionJsonlPath(agentRuntime(info), String((info as any).cwd || (info as any).dir || ""), String((info as any).sessionId || ""))
+          : null;
+        if (live && existsSync(live)) {
+          const dest = `${USER_ARCHIVE_ROOT}/${name}`;
+          await fsp2.mkdir(dest, { recursive: true });
+          await fsp2.copyFile(live, `${dest}/${live.split("/").pop()}`);
+        }
+      } catch {
+        /* 快照失败不影响停窗口；manager archive 那份安全副本仍在 */
+      }
       try {
         const k = await runManager("kill", name);
         killed = k?.ok !== false;
       } catch {
         /* 停不掉也不影响快照 */
-      }
-      // 记进归档台账（「归档」栏只列台账里的东西）
-      try {
-        const { addArchivedItem } = await import("../lib/archive-index.js");
-        await addArchivedItem({
-          kind: "agent",
-          id: name,
-          sessionIds: Array.isArray(r?.sessions) ? (r!.sessions as string[]) : [],
-          archivedAt: Date.now(),
-          note: "snapshot + kill（registry 保留，可 resume 恢复）",
-        });
-      } catch {
-        /* 台账写失败不影响归档本身 */
       }
       return apiJson(r?.ok === false ? 500 : 200, { ok: r?.ok !== false, killed, result: r });
     } catch (e) {
@@ -842,13 +848,40 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, days: cfg.archiveRetentionDays });
   }
 
-  // v2.23+ GET /api/v1/sessions/archived —— 「归档」栏数据源 = **归档台账**
-  // （~/.claude-orchestrator/archived.json），只记用户手动归档过的。
-  // 不再扫归档目录：那是大杂烩（每日兜底给在跑 agent 的安全快照、退役自动快照），
-  // 直接列出来会让"归档"栏冒充成"所有会话的列表"（owner 2026-09-14 两次纠正）。
+  // v2.23+ GET /api/v1/sessions/archived —— 「归档」类别的内容：
+  // 列 archive/archived/** （用户手动归档的会话本体）**不列** archive/<agent>/（自动快照）。
   if (path === "/sessions/archived" && req.method === "GET") {
-    const { readArchiveIndex } = await import("../lib/archive-index.js");
-    const entries = await readArchiveIndex();
+    const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+    const fsp = await import("node:fs/promises");
+    const entries: Record<string, unknown>[] = [];
+    const walk = async (dir: string, id: string): Promise<void> => {
+      let files = 0;
+      let bytes = 0;
+      let newest = 0;
+      const rec = async (d: string): Promise<void> => {
+        const list = await fsp.readdir(d, { withFileTypes: true }).catch(() => []);
+        for (const e of list) {
+          const full = `${d}/${e.name}`;
+          if (e.isDirectory()) await rec(full);
+          else {
+            files++;
+            const st = await fsp.stat(full).catch(() => null);
+            if (st) {
+              bytes += st.size;
+              newest = Math.max(newest, st.mtimeMs);
+            }
+          }
+        }
+      };
+      await rec(dir);
+      entries.push({ id, sessions: files, bytes, archivedAt: newest });
+    };
+    const top = await fsp.readdir(USER_ARCHIVE_ROOT, { withFileTypes: true }).catch(() => []);
+    for (const e of top) {
+      if (!e.isDirectory()) continue; // 目录里只有目录，单个文件也允许
+      await walk(`${USER_ARCHIVE_ROOT}/${e.name}`, e.name);
+    }
+    entries.sort((a, b) => Number(b.archivedAt || 0) - Number(a.archivedAt || 0));
     return apiJson(200, { ok: true, entries });
   }
 
@@ -907,26 +940,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       /* stat 失败就照常走 */
     }
     if (action === "archive") {
-      const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-      const dest = `${ARCHIVE_ROOT}/unmanaged/${sid}`;
+      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+      const dest = `${USER_ARCHIVE_ROOT}/${sid}`;
       await fsp.mkdir(dest, { recursive: true });
       await fsp.copyFile(mfile, `${dest}/${mfile.split("/").pop()}`);
     }
     await fsp.rm(mfile, { force: true });
-    if (action === "archive") {
-      try {
-        const { addArchivedItem } = await import("../lib/archive-index.js");
-        await addArchivedItem({
-          kind: "unmanaged",
-          id: sid,
-          sessionIds: [sid],
-          archivedAt: Date.now(),
-          note: "快照后移出（可从未纳管列表再收藏）",
-        });
-      } catch {
-        /* 台账写失败不影响归档本身 */
-      }
-    }
     console.log(`🗂 会话处置: ${action} ${sid} (${mfile})`);
     return apiJson(200, { ok: true, action, sessionId: sid, archived: action === "archive" });
   }
