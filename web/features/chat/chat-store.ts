@@ -445,7 +445,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     name: string,
     dir: string,
     purpose?: string,
-    opts?: { model?: string; effort?: string; project?: string }
+    opts?: { model?: string; effort?: string; project?: string; runtime?: string; piBase?: string }
   ): Promise<{ ok: boolean; error?: string; agent?: string }> {
     try {
       const res = await fetch("/api/agents", {
@@ -455,6 +455,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           name, dir, purpose,
           model: opts?.model, effort: opts?.effort,
           ...(opts?.project ? { project: opts.project } : {}),
+          // v2.23+ 运行时（Pi）/ 能力档案（继承全局 | 最小集）——Web 上也能建 Pi agent
+          ...(opts?.runtime ? { runtime: opts.runtime } : {}),
+          ...(opts?.piBase ? { piBase: opts.piBase } : {}),
         }),
       });
       if (res.status === 401) {

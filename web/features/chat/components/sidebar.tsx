@@ -12,6 +12,7 @@ import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
+import { UnmanagedSessions } from "./unmanaged-sessions";
 
 /** v2.17.2 点击串台修复(peer HedeMacBook-Pro 代码级归因,2026-08-09):
  *  列表按活动排序 + roster 指纹含易变字段 + 前台 15s 轮询 → 重排是常态;
@@ -1068,6 +1069,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           ) : null}
         </div>
       )}
+      {/* v2.23+ 未纳管会话分区：机器上还有一堆没纳管的会话（pi-web 起的 Pi 会话、
+          终端手敲的），它们能看历史、能收编，但不能直接对话 */}
+      {!manage ? <UnmanagedSessions /> : null}
       <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
       <ProjectsModal open={showProjects} onClose={() => setShowProjects(false)} />
