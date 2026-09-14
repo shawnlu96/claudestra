@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
+import { SwipeActions } from "./unmanaged-sessions";
 
 interface ArchivedEntry {
   /** agent 名或会话 id（「归档」区里的目录名） */
@@ -35,6 +36,25 @@ export function ArchivedSessions() {
   const [entries, setEntries] = useState<ArchivedEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  /** 回归：agent 走 resume 回工作列表；未纳管会话把文件搬回原位（重回未纳管列表）。 */
+  const restore = async (id: string) => {
+    setBusyId(id);
+    setError("");
+    try {
+      const res = await fetch(`/api/sessions/archived/${encodeURIComponent(id)}/restore`, {
+        method: "POST",
+      });
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || json.ok === false) throw new Error(json.error || `HTTP ${res.status}`);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -111,7 +131,17 @@ export function ArchivedSessions() {
           <ul className="max-h-64 overflow-y-auto">
             {entries.map((e) => (
               <li key={e.id}>
-                <div className="flex flex-col gap-0.5 rounded-lg px-1.5 py-1">
+                {/* 左滑「恢复」：归档是类别，进来之后要能回去（owner 2026-09-14） */}
+                <SwipeActions
+                  actions={[
+                    {
+                      label: busyId === e.id ? t("…") : t("恢复"),
+                      className: "bg-primary/80 text-primary-content",
+                      onClick: () => void restore(e.id),
+                    },
+                  ]}
+                >
+                <div className="flex flex-col gap-0.5 rounded-lg bg-base-100 px-1.5 py-1">
                   <span className="flex items-center gap-1.5 text-sm">
                     <span className="shrink-0 text-[13px] opacity-70">📦</span>
                     <span className="truncate text-base-content/80">{e.id}</span>
@@ -123,6 +153,7 @@ export function ArchivedSessions() {
                     {(e.sessions ?? 0)} {t("个会话")} · {fmtBytes(e.bytes ?? 0)}
                   </span>
                 </div>
+                </SwipeActions>
               </li>
             ))}
           </ul>

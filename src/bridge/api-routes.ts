@@ -803,11 +803,15 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const live = info
           ? sessionJsonlPath(agentRuntime(info), String((info as any).cwd || (info as any).dir || ""), String((info as any).sessionId || ""))
           : null;
+        const dest = `${USER_ARCHIVE_ROOT}/${name}`;
+        await fsp2.mkdir(dest, { recursive: true });
         if (live && existsSync(live)) {
-          const dest = `${USER_ARCHIVE_ROOT}/${name}`;
-          await fsp2.mkdir(dest, { recursive: true });
           await fsp2.copyFile(live, `${dest}/${live.split("/").pop()}`);
         }
+        await fsp2.writeFile(
+          `${dest}/.meta.json`,
+          JSON.stringify({ kind: "agent", name, sessionId: String((info as any)?.sessionId || ""), cwd: String((info as any)?.cwd || (info as any)?.dir || ""), runtime: String((info as any)?.runtime || "claude-code") }, null, 2),
+        );
       } catch {
         /* 快照失败不影响停窗口；manager archive 那份安全副本仍在 */
       }
@@ -850,6 +854,69 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     const cfg = await setArchiveRetention(days);
     return apiJson(200, { ok: true, days: cfg.archiveRetentionDays });
+  }
+
+  // v2.23+ POST /api/v1/sessions/archived/:id/restore —— 把归档条目**回归**：
+  //   kind=agent     → manager resume <name> <sessionId>（回到工作列表）+ 删掉归档副本
+  //   kind=unmanaged → 把会话文件搬回 meta 里记的原路径（重回「未纳管会话」）+ 删掉归档副本
+  // 依赖归档时写的 .meta.json（cwd 编码不可逆，只能靠它还原位置）。仅全权 token。
+  const restoreMatch = path.match(/^\/sessions\/archived\/([^/]+)\/restore$/);
+  if (restoreMatch && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "restore requires a full-scope token" });
+    }
+    const rid = decodeURIComponent(restoreMatch[1]);
+    const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+    const fsp = await import("node:fs/promises");
+    const dir = `${USER_ARCHIVE_ROOT}/${rid}`;
+    let meta: any = null;
+    try {
+      meta = JSON.parse(await fsp.readFile(`${dir}/.meta.json`, "utf8"));
+    } catch {
+      /* 老条目没有 meta：agent 可以靠 registry 推，未纳管会话推不出来 */
+    }
+    const kind = meta?.kind ?? (await (async () => {
+      const { readRegistryAgents } = await import("../lib/registry.js");
+      const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
+      return (await readRegistryAgents()).some((r) => norm(r.name) === norm(rid)) ? "agent" : "unmanaged";
+    })());
+    if (kind === "agent") {
+      const { readRegistryAgents } = await import("../lib/registry.js");
+      const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
+      const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(rid));
+      const sid = String(meta?.sessionId || (info as any)?.sessionId || "");
+      if (!sid) return apiJson(400, { ok: false, error: "无法确定要恢复的会话 id（meta 缺失）" });
+      try {
+        const r = await runManager("resume", rid, sid);
+        await fsp.rm(dir, { recursive: true, force: true });
+        return apiJson(200, { ok: r?.ok !== false, kind: "agent", result: r });
+      } catch (e) {
+        return apiJson(500, { ok: false, error: (e as Error).message });
+      }
+    }
+    const original = String(meta?.originalPath || "");
+    if (!original) {
+      return apiJson(400, { ok: false, error: "这条归档没有记录原始位置（老条目），只能手动恢复" });
+    }
+    try {
+      await fsp.mkdir(original.split("/").slice(0, -1).join("/"), { recursive: true });
+      const files = (await fsp.readdir(dir)).filter((f) => f !== ".meta.json");
+      for (const f of files) {
+        // 单个会话文件 → 直接搬回原始路径；其余（子会话目录等）→ 放在原文件同级的同名目录下
+        const direct = files.length === 1 ? original : "";
+        if (direct) {
+          await fsp.rename(`${dir}/${f}`, direct);
+        } else {
+          const target = `${original.replace(/\.jsonl$/, "")}/${f}`;
+          await fsp.mkdir(target.split("/").slice(0, -1).join("/"), { recursive: true });
+          await fsp.rename(`${dir}/${f}`, target);
+        }
+      }
+      await fsp.rm(dir, { recursive: true, force: true });
+      return apiJson(200, { ok: true, kind: "unmanaged", restoredTo: original });
+    } catch (e) {
+      return apiJson(500, { ok: false, error: (e as Error).message });
+    }
   }
 
   // v2.23+ GET /api/v1/sessions/archived —— 「归档」类别的内容：
@@ -948,6 +1015,11 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       const dest = `${USER_ARCHIVE_ROOT}/${sid}`;
       await fsp.mkdir(dest, { recursive: true });
       await fsp.copyFile(mfile, `${dest}/${mfile.split("/").pop()}`);
+      // 记一份 meta：恢复时要知道它原来在哪个目录（cwd 编码不可逆）
+      await fsp.writeFile(
+        `${dest}/.meta.json`,
+        JSON.stringify({ kind: "unmanaged", originalPath: mfile, runtime: mRuntime ?? null, cwd: mCwd ?? null, sessionId: sid }, null, 2),
+      );
     }
     await fsp.rm(mfile, { force: true });
     console.log(`🗂 会话处置: ${action} ${sid} (${mfile})`);
