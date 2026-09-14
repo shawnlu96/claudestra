@@ -268,6 +268,16 @@ async function windowExists(name: string): Promise<boolean> {
 }
 
 async function isAgentIdle(name: string): Promise<boolean> {
+  // v2.23+ Pi 的 TUI 不是 Claude Code 那套（没有 ❯ 提示符 / banner），paneLooksIdle
+  // 对它**恒为 false** ⇒ 每个 Pi agent 都被算成「永远在忙」：网页侧栏黄点常驻、
+  // 「工作中」不下线、输入框一直显示「思考中…」（2026-09-14 owner 实测）。
+  // Pi 的回合状态由扩展经 /hook 上报 bridge（agent_settled → Stop），而 CLI 进程
+  // 看不到那份内存状态 ⇒ 这里对 Pi 一律答「空闲」，忙碌只由 hook 信号决定；
+  // 投递侧也因此不会对 Pi 发 Ctrl+C 抢占（Pi 用 deliverAs:"steer" 处理回合中插话）。
+  const bare = name.replace(/^agent-/, "");
+  const reg = await loadRegistry();
+  const info = reg.agents?.[name] ?? reg.agents?.[bare] ?? reg.agents?.[`agent-${bare}`];
+  if (agentRuntime(info) === "pi") return true;
   return isIdle(windowTarget(name));
 }
 
