@@ -795,7 +795,11 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         const { readRegistryAgents, agentRuntime } = await import("../lib/registry.js");
         const { sessionJsonlPath } = await import("../lib/session-source.js");
         const fsp2 = await import("node:fs/promises");
-        const info = (await readRegistryAgents()).find((r) => r.name === name || r.name === name.replace(/^agent-/, ""));
+        // ⚠ 名字要归一化再比：registry 里存的是 `agent-<name>`，而 API 路径传进来的是
+        // 裸名（tmp-scratch）—— 少了这一步 find 永远不命中，拷贝被静默跳过
+        // （2026-09-14 实测踩到：归档动作全绿但归档区是空的）。
+        const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
+        const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(name));
         const live = info
           ? sessionJsonlPath(agentRuntime(info), String((info as any).cwd || (info as any).dir || ""), String((info as any).sessionId || ""))
           : null;
