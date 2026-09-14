@@ -784,7 +784,17 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
     try {
       const r = await runManager("archive", name);
-      return apiJson(r?.ok === false ? 500 : 200, { ok: r?.ok !== false, result: r });
+      // 移动语义（owner 2026-09-14「把归档的移动进去」）：快照之后把窗口停掉 ⇒
+      // agent 离开工作列表、出现在网页侧栏的「归档」栏。**不动注册表条目**，
+      // 所以之后还能 `manager resume <name> <sessionId>` 恢复回来。
+      let killed = false;
+      try {
+        const k = await runManager("kill", name);
+        killed = k?.ok !== false;
+      } catch {
+        /* 停不掉也不影响快照 */
+      }
+      return apiJson(r?.ok === false ? 500 : 200, { ok: r?.ok !== false, killed, result: r });
     } catch (e) {
       return apiJson(500, { ok: false, error: (e as Error).message });
     }
@@ -817,6 +827,58 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     const cfg = await setArchiveRetention(days);
     return apiJson(200, { ok: true, days: cfg.archiveRetentionDays });
+  }
+
+  // v2.23+ GET /api/v1/sessions/archived —— 归档清单（给网页侧栏「归档」栏用）。
+  // 两种来源：按 agent 的归档（archive/<agent>/）与未纳管会话的归档
+  // （archive/unmanaged/<sessionId>/）。只读元数据（条数/大小/时间），不读内容。
+  if (path === "/sessions/archived" && req.method === "GET") {
+    const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+    const fsp = await import("node:fs/promises");
+    const entries: Record<string, unknown>[] = [];
+    const statDir = async (dir: string) => {
+      let files: string[] = [];
+      let bytes = 0;
+      let newest = 0;
+      const walk = async (d: string): Promise<void> => {
+        const list = await fsp.readdir(d, { withFileTypes: true }).catch(() => []);
+        for (const e of list) {
+          const full = `${d}/${e.name}`;
+          if (e.isDirectory()) await walk(full);
+          else {
+            files.push(e.name);
+            const st = await fsp.stat(full).catch(() => null);
+            if (st) {
+              bytes += st.size;
+              newest = Math.max(newest, st.mtimeMs);
+            }
+          }
+        }
+      };
+      await walk(dir);
+      return { files, bytes, newest };
+    };
+    try {
+      const top = await fsp.readdir(ARCHIVE_ROOT, { withFileTypes: true }).catch(() => []);
+      for (const e of top) {
+        if (!e.isDirectory()) continue;
+        if (e.name === "unmanaged") {
+          const subs = await fsp.readdir(`${ARCHIVE_ROOT}/unmanaged`, { withFileTypes: true }).catch(() => []);
+          for (const sub of subs) {
+            if (!sub.isDirectory()) continue;
+            const { files, bytes, newest } = await statDir(`${ARCHIVE_ROOT}/unmanaged/${sub.name}`);
+            entries.push({ kind: "unmanaged", id: sub.name, sessions: files.length, bytes, archivedAt: newest });
+          }
+          continue;
+        }
+        const { files, bytes, newest } = await statDir(`${ARCHIVE_ROOT}/${e.name}`);
+        entries.push({ kind: "agent", id: e.name, sessions: files.length, bytes, archivedAt: newest });
+      }
+    } catch {
+      /* 归档目录不存在 = 空清单 */
+    }
+    entries.sort((a, b) => Number(b.archivedAt || 0) - Number(a.archivedAt || 0));
+    return apiJson(200, { ok: true, entries });
   }
 
   // v2.23+ GET /api/v1/capabilities —— 这台机器支持什么（当前只有 Pi 有没有装）。
