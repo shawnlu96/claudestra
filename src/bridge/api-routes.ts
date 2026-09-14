@@ -772,6 +772,14 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
+  // v2.23+ GET /api/v1/capabilities —— 这台机器支持什么（当前只有 Pi 有没有装）。
+  // 给网页用：没装 Pi 的用户应该**无感**（新建 agent 里不出现 Pi 选项），而不是
+  // 选了一个点了才报错的选项。轻量、无副作用，任何 token 都能读。
+  if (path === "/capabilities" && req.method === "GET") {
+    const { piAvailable } = await import("../lib/pi-env.js");
+    return apiJson(200, { ok: true, piAvailable: await piAvailable() });
+  }
+
   // v2.23+ POST /api/v1/sessions/:sessionId/manage —— 未纳管会话的处置（仅全权 token）。
   // body: { action: "archive" | "delete", runtime?, cwd? }
   //   archive：会话文件快照进 ~/.claude-orchestrator/archive/unmanaged/<sid>/，再删原文件

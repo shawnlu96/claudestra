@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 
@@ -49,6 +49,22 @@ export function NewAgentModal({
   const [project, setProject] = useState("");
   // v2.23+ 运行时：Pi coding agent（工具集与 Claude Code 不同）+ 它的能力档案
   const [runtime, setRuntime] = useState("");
+  // 这台机器有没有装 Pi：没有就**不显示任何 Pi 入口**（owner 2026-09-14 要求
+  // 「让没装 pi 的人无感」）。失败/桥接不可达一律当没有 —— 安全方向（宁可少显示，
+  // 也不给一个点了才报错的选项）。
+  const [piAvailable, setPiAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/capabilities")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { data?: { piAvailable?: boolean } } | null) => {
+        if (alive) setPiAvailable(j?.data?.piAvailable === true);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
   const [piBase, setPiBase] = useState("");
   const [dirCustom, setDirCustom] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -122,7 +138,7 @@ export function NewAgentModal({
       <div className="panel-pop modal-box">
         <h3 className="text-lg font-semibold">{t("新建会话")}</h3>
         <p className="mt-1 text-xs opacity-60">
-          {runtime === "pi"
+          {runtime === "pi" && piAvailable
             ? t("在指定目录起一个 Pi coding agent（经 Bridge）。工具集与 Claude Code 不同。")
             : t("在指定目录起一个 Claude Code agent（经 Bridge）。")}
         </p>
@@ -227,6 +243,7 @@ export function NewAgentModal({
               </button>
             </div>
           </label>
+          {piAvailable ? (
           <label className="form-control">
             <span className="label-text mb-1 text-sm">{t("运行时")}</span>
             <select
@@ -242,6 +259,7 @@ export function NewAgentModal({
               <option value="pi">Pi coding agent</option>
             </select>
           </label>
+          ) : null}
           {runtime === "pi" ? (
             <label className="form-control">
               <span className="label-text mb-1 text-sm">{t("能力档案")}</span>
