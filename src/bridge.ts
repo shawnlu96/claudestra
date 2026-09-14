@@ -169,7 +169,7 @@ import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
-import { readRegistryAgents } from "./lib/registry.js";
+import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { readProjects } from "./lib/projects.js";
 import {
   tmuxCapture,
@@ -770,17 +770,24 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   ) {
     try {
       let win: string | null = null;
+      let targetRuntime: AgentRuntime = "claude-code";
       if (to.channelId === CONTROL_CHANNEL_ID) win = `${MASTER_SESSION}:0`;
       else {
         const reg = (await readRegistryAgents()).find((a) => a.channelId === to.channelId);
-        if (reg) win = windowTarget(reg.name);
+        if (reg) {
+          win = windowTarget(reg.name);
+          targetRuntime = agentRuntime(reg);
+        }
       }
       const tail10 = win
         ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
         : "";
       const working = paneLooksWorking(tail10) || getAgentStatus(evAgent) === "thinking";
       // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
-      if (win && working && getAgentStatus(evAgent) !== "compacting") {
+      // v2.23+ Pi:**人类消息一律不打断** —— Pi 扩展能把消息 steer 进正在跑的回合
+      // (pi.sendUserMessage deliverAs:"steer"),C-c 反而把活干到一半的回合掐了
+      // (2026-09-14 实测日志「⚡ 抢占打断 agent-claudestraworker」)。CC 保持原样。
+      if (win && working && targetRuntime !== "pi" && getAgentStatus(evAgent) !== "compacting") {
         lastPreemptAt.set(to.channelId, Date.now());
         await tmuxRaw(["send-keys", "-t", win, "C-c"]);
         recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
