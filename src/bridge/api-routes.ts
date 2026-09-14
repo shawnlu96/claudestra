@@ -460,6 +460,15 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         (agents as any[]).map(async (a) => {
           const st = getAgentStatus(a.name) ?? getAgentStatus(String(a.name).replace(/^agent-/, ""));
           a.busy = isBusyStatus(st) || a.idle === false;
+          // v2.23+ 已归档标记（真正的列表构建器在这里 —— 上面那个 map 不是生效路径，
+          // 2026-09-14 我改错过一次）：归档区里有它的目录 ⇒ 网页把它从工作列表隐藏。
+          try {
+            const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+            const { existsSync: ex } = await import("node:fs");
+            (a as any).archived = ex(`${USER_ARCHIVE_ROOT}/${String(a.name).replace(/^agent-/, "")}`);
+          } catch {
+            /* 归档区读不到就当作未归档 */
+          }
           // v2.21.2+ 正在压缩上下文(侧栏/列表可区分于普通忙碌)
           a.compacting = st === "compacting";
           if (!a.busy && st === undefined && a.status !== "stopped") {
@@ -550,7 +559,19 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           if (r.cwd && r.sessionId) {
             ts = (await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId)))?.convTs ?? null;
           }
-          agents.push({ name: r.name, status: "stopped", idle: undefined, purpose: r.purpose, lastActivityTs: ts, created: (r as any).created, projectId: r.projectId ?? null } as any);
+          // ⚠ 已停止的 agent 走这条**独立路径**进来（不在 manager list 里），
+          // 归档标记必须在这也带一份 —— 上一版只在上面的 .map() 里加了，结果灰点的
+          // 归档 agent 照样留在列表里（owner「被归档，但是还是在列表里」，2026-09-14）。
+          agents.push({
+            name: r.name,
+            status: "stopped",
+            idle: undefined,
+            purpose: r.purpose,
+            lastActivityTs: ts,
+            created: (r as any).created,
+            projectId: r.projectId ?? null,
+            archived: existsSyncFs(`${USER_ARCHIVE_ROOT}/${String(r.name).replace(/^agent-/, "")}`),
+          } as any);
         }
       }
       // master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
