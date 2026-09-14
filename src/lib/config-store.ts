@@ -33,7 +33,13 @@ export interface AppConfig {
    *  v2.21.3+ emergency:93% 救命线独立开关(缺省 true)——常规线关了它也在,
    *  只在快撞 CC 的 ~967K 裸压时兜底触发一次(owner 2026-09-03)。 */
   autoCompact?: { idleHours?: number; window?: number; emergency?: boolean };
+  /** v2.23+ 归档保留天数（缺省 90；0 = 永不自动清理）。归档目录里的条目超过
+   *  这个天数就由每日兜底清掉——归档是"可找回的过期会话"，不是永久仓库。 */
+  archiveRetentionDays?: number;
 }
+
+/** 归档保留天数缺省值（设置里可改） */
+export const DEFAULT_ARCHIVE_RETENTION_DAYS = 90;
 
 const DEFAULT_CONFIG: AppConfig = {
   autoUpdate: {
@@ -104,6 +110,15 @@ export async function writeConfig(cfg: AppConfig): Promise<void> {
   const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
   await Bun.write(tmp, JSON.stringify(cfg, null, 2));
   await rename(tmp, CONFIG_PATH);
+}
+
+/** 设置归档保留天数（0 = 永不自动清理） */
+export async function setArchiveRetention(days: number): Promise<AppConfig> {
+  const cfg = await readConfig();
+  const n = Number.isFinite(days) && days >= 0 ? Math.floor(days) : DEFAULT_ARCHIVE_RETENTION_DAYS;
+  cfg.archiveRetentionDays = n;
+  await writeConfig(cfg);
+  return cfg;
 }
 
 export async function setUpdateChannel(channel: UpdateChannel): Promise<AppConfig> {
