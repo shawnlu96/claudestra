@@ -348,6 +348,17 @@ const claudeSwitchOverride = new Map<
 >();
 const overrideKey = (name: string) => String(name).replace(/^agent-/, "");
 
+/** 记一次"刚切换"的乐观值（Claude Code 与 Pi 两条切换路径共用） */
+function rememberSwitchOverride(name: string, patch: { model?: string; effort?: string }): void {
+  const key = overrideKey(name);
+  const prev = claudeSwitchOverride.get(key) ?? {};
+  const now = Date.now();
+  claudeSwitchOverride.set(key, {
+    model: patch.model ? { v: patch.model, ts: now } : prev.model,
+    effort: patch.effort ? { v: patch.effort, ts: now } : prev.effort,
+  });
+}
+
 /** jsonl 实测超过此时限视为陈旧——重启后一轮没跑过的 agent,老会话里的模型
  *  读数是老黄历(2026-07-27 实例:5 月的 opus-4-7 盖过了 registry 钉的 opus-5),
  *  显示回退到 registry/全局配置更接近「下一轮会用什么」。 */
@@ -613,6 +624,54 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     } catch (e) {
       return apiJson(500, { ok: false, error: `读取 models.json 失败: ${(e as Error).message}` });
     }
+  }
+
+  // v2.23+ POST /api/v1/agents/:name/pi-settings —— Pi agent 切模型/思考档位。
+  // 与 claude-settings 的分工：那个注入 Claude Code 的 `/model`、`/effort`；Pi 侧
+  // 的 `/model` 是**打开选择器**的交互语义（未验证收不收参数），所以走我们自己扩展
+  // 注册的确定性命令 `/claudestra-model <provider/id>`、`/claudestra-thinking <level>`
+  // （扩展内部直接调 setModel/setThinkingLevel），注入方式与 CC 相同：tmux send-keys。
+  const piSetMatch = path.match(/^\/agents\/([^/]+)\/pi-settings$/);
+  if (piSetMatch && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "pi-settings requires a full-scope token" });
+    }
+    const agentName = decodeURIComponent(piSetMatch[1]);
+    const canonical = agentName.startsWith("agent-") ? agentName : `agent-${agentName}`;
+    if (!agentInScope(principal, canonical)) {
+      return apiJson(403, { ok: false, error: `agent "${canonical}" not in token scope` });
+    }
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return apiJson(400, { ok: false, error: "invalid JSON body" });
+    }
+    const model = String(body?.model || "").trim();
+    const effort = String(body?.effort || "").trim();
+    if (!model && !effort) {
+      return apiJson(400, { ok: false, error: 'body must be {"model"?,"effort"?}' });
+    }
+    if (model && !/^[A-Za-z0-9._\/@:-]+$/.test(model)) {
+      return apiJson(400, { ok: false, error: "model 含非法字符" });
+    }
+    const agents = await readRegistryAgents();
+    const reg = agents.find((a) => a.name === canonical);
+    if (!reg) return apiJson(404, { ok: false, error: `agent "${canonical}" not found` });
+    if (reg.runtime !== "pi") {
+      return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 Pi agent（用 /claude-settings）` });
+    }
+    const { tmuxSendLine, windowTarget } = await import("../lib/tmux-helper.js");
+    const target = windowTarget(canonical);
+    try {
+      if (model) await tmuxSendLine(target, `/claudestra-model ${model}`);
+      if (effort) await tmuxSendLine(target, `/claudestra-thinking ${effort}`);
+    } catch (e) {
+      return apiJson(500, { ok: false, error: `注入失败: ${(e as Error).message}` });
+    }
+    // 乐观显示：与 claude-settings 同款（切换生效前让顶栏先跟着变）
+    rememberSwitchOverride(canonical, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+    return apiJson(200, { ok: true, agent: canonical, model: model || null, effort: effort || null });
   }
 
   // v2.23+ GET /api/v1/session-list —— 机器上所有会话（两种 runtime，活的+历史的）。
@@ -1378,6 +1437,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     {
       // 乐观显示:注入已成功,列表立即按新值显示;jsonl 实测追上后自动接管
+      rememberSwitchOverride(agent.name, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
       const key = overrideKey(agent.name);
       const prev = claudeSwitchOverride.get(key) ?? {};
       const now = Date.now();
