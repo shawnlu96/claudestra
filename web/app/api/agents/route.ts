@@ -27,7 +27,7 @@ export async function POST(request: Request) {
   if (!(await isAuthed(request))) {
     return NextResponse.json({ error: "未登录" }, { status: 401 });
   }
-  const { name, dir, purpose, model, effort, project } = await request.json().catch(() => ({}));
+  const { name, dir, purpose, model, effort, project, runtime, piBase } = await request.json().catch(() => ({}));
   if (!name || !dir || typeof name !== "string" || typeof dir !== "string") {
     return NextResponse.json({ error: "name 和 dir 不能为空" }, { status: 400 });
   }
@@ -44,6 +44,9 @@ export async function POST(request: Request) {
         ...(typeof effort === "string" && effort.trim() ? { effort: effort.trim() } : {}),
         // v2.21+ 可选归属 project(缺省 manager 按 dir 自动归属)
         ...(typeof project === "string" && project.trim() ? { project: project.trim() } : {}),
+        // v2.23+ 运行时：Web 上也能建 Pi agent（此前只能命令行）
+        ...(runtime === "pi" || runtime === "claude-code" ? { runtime } : {}),
+        ...(typeof piBase === "string" && piBase.trim() ? { piBase: piBase.trim() } : {}),
       },
       { timeoutMs: 90_000 }
     );
