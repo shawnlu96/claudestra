@@ -57,6 +57,15 @@ export function piSessionsDir(cwd: string, agentDir = piAgentDir()): string {
   return join(agentDir, "sessions", encodePiSessionDir(cwd));
 }
 
+/**
+ * 从 Pi 会话文件名取 sessionId（`<ISO时间戳>_<sessionId>.jsonl`）。
+ * 时间戳里没有下划线，所以按**第一个**下划线切 —— 自造 id 里带下划线也能取全。
+ */
+export function piSessionIdFromFilename(file: string): string | null {
+  const m = /^[^_]+_(.+)\.jsonl$/.exec(file);
+  return m ? m[1] : null;
+}
+
 /** 列出该目录下的会话 jsonl（完整路径，按文件名排序） */
 export function listPiSessionJsonls(cwd: string, agentDir = piAgentDir()): string[] {
   const dir = piSessionsDir(cwd, agentDir);
