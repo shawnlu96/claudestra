@@ -46,6 +46,27 @@ export function tmuxFire(args: string[]): void {
   Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]);
 }
 
+/**
+ * Pi 会话的就绪标记：写在同一窗口的 tmux 用户选项上。
+ *
+ * 为什么不用「认 pane 文案」：Claude Code 那套 isClaudeReady（❯ + bypass 横幅）是
+ * 认它的 UI，Pi 的 UI 会随版本变；而这个标记是 **我们自己** 的扩展在 bridge 注册
+ * 成功后写下的——版本无关、harness 无关（任何 runtime 的通道客户端都能写）。
+ * 写法见 src/pi/claudestra-extension.ts 的 markReady()。
+ */
+export const PI_READY_OPTION = "@claudestra_ready";
+
+/** 读 tmux window 上的用户选项（未设置 / 窗口不存在 / tmux 报错都返回 null） */
+export async function windowOption(target: string, option: string): Promise<string | null> {
+  const out = await tmuxRaw(["show-options", "-w", "-v", "-t", target, option]).catch(() => "");
+  return out ? out : null;
+}
+
+/** 写 tmux window 上的用户选项（restart 复用的窗口要先清掉旧的就绪标记） */
+export async function setWindowOption(target: string, option: string, value: string): Promise<void> {
+  await tmuxRaw(["set-option", "-w", "-t", target, option, value]).catch(() => {});
+}
+
 /** tmux window target: `master:agent-xxx` */
 export function windowTarget(name: string): string {
   return `${MASTER_SESSION}:${name}`;
