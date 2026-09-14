@@ -656,3 +656,52 @@ describe("countNewlinesBefore 检查点缓存(经 readSessionHistory 尾读)", (
     expect(texts(await readSessionHistory(p, { maxFullReadBytes: 4096, after: 195 }))).toEqual(["m1196", "m1197", "m1198", "m1199"]);
   });
 });
+
+// ── Pi 会话走尾读路径（2026-09-15 排查 bridge OOM 时发现的漏传参数）──────────
+// 全读分支传了第 5 个参数 runtime，尾读分支漏传 → >16MB 的 Pi 会话被当成 CC 行解析，
+// 一条都认不出来 → all.length 恒 0 → 扩窗一路跑到文件头，既全文读又返回空历史。
+// 当时还没炸只是因为本机最大 Pi 会话 14.79MB < 16MB 阈值，很接近了。
+describe("Pi 会话的尾读路径（runtime 必须透传）", () => {
+  function piSession(root: string): string {
+    const dir = join(root, "sessions", "--tmp-pi-fixture--");
+    mkdirSync(dir, { recursive: true });
+    const recs: unknown[] = [{ type: "session", id: "sid-pi", cwd: "/tmp/pi-fixture", timestamp: "2026-09-01T00:00:00Z" }];
+    for (let k = 0; k < 120; k++) {
+      recs.push({
+        type: "message",
+        timestamp: `2026-09-01T00:${String(k % 60).padStart(2, "0")}:00Z`,
+        message: { role: "user", content: [{ type: "text", text: `用户消息 ${k}` }] },
+      });
+      recs.push({
+        type: "message",
+        timestamp: `2026-09-01T01:${String(k % 60).padStart(2, "0")}:00Z`,
+        message: {
+          role: "assistant",
+          model: "cc-switch/glm-5.3",
+          usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+          content: [{ type: "text", text: `助手回复 ${k}` }],
+        },
+      });
+    }
+    const p = join(dir, "2026-09-01T00-00-00-000Z_sid-pi.jsonl");
+    writeFileSync(p, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    return p;
+  }
+
+  test("尾读与全读拿到同一批消息（漏传 runtime 时尾读会恒空）", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cstra-pi-root-"));
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = root;
+    try {
+      const p = piSession(root);
+      const full = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 1 << 30 });
+      const tail = await readSessionHistory(p, { limit: 50, maxFullReadBytes: 4096 }); // 逼尾读
+      expect(full.messages.length).toBe(50); // fixture 本身有效：Pi 行确实被认出来了
+      expect(tail.messages.length).toBe(50); // ← 漏传 runtime 时这里是 0
+      expect(tail.messages.map((m) => [m.seq, m.text])).toEqual(full.messages.map((m) => [m.seq, m.text]));
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+    }
+  });
+});
