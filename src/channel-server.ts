@@ -143,6 +143,11 @@ function connectBridge(): Promise<void> {
           channelId: CHANNEL_ID,
           userId: ALLOWED_USER_ID || undefined,
           cwd: process.cwd(),
+          // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新
+          // pid 只出现一次）和「两个活实例在对抢」（同一个 pid 被顶掉又抢回来），
+          // 也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
+          pid: process.pid,
+          ppid: process.ppid,
         })
       );
       // v2.2.0+: keepalive ping，防止空闲连接被 Bun idleTimeout 关掉（无 keepalive 时
