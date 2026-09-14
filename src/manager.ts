@@ -2369,6 +2369,32 @@ async function cmdList() {
 
   const agents: Record<string, unknown>[] = [];
 
+  // v2.23+ 大总管显式补一条：它的 tmux 窗口名就是 `master`（不带 agent- 前缀），
+  // 而 listAgentWindows 只收 agent-* ⇒ 它一直被漏掉（owner 2026-09-14「大管家怎么
+  // 没了」）。数据取 registry 的 agent-master 条目，只要窗口在就进列表。
+  try {
+    const th = await import("./lib/tmux-helper.js");
+    const winNames = (await th.tmuxRaw(["list-windows", "-t", "master", "-F", "#{window_name}"]))
+      .split("\n")
+      .map((x) => x.trim());
+    if (winNames.includes("master") && !tmuxWindows.includes("master")) {
+      const m: any = (reg as any).agents?.["agent-master"] || {};
+      agents.push({
+        name: "master",
+        channelId: m.channelId || "",
+        status: "active",
+        idle: await isAgentIdle("master"),
+        cwd: m.cwd || "",
+        runtime: m.runtime || "claude-code",
+        sessionId: m.sessionId || "",
+        purpose: m.purpose || "",
+        created: m.created || "",
+      });
+    }
+  } catch {
+    /* tmux 不可用（Web-only 等）就不补 */
+  }
+
   for (const name of tmuxWindows) {
     const idle = await isAgentIdle(name);
     const info = reg.agents[name];
