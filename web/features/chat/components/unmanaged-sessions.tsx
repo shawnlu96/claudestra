@@ -539,7 +539,13 @@ function SessionViewer({
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* 手机上没有返回按钮可点：抽屉右上那个 ✕ 会被刘海/状态栏压住（owner
+                  2026-09-14 实报「左滑不能回退、也没有回上一步的按钮」）。底部动作行
+                  里固定给一个「返回」，任何机型都能点到。 */}
+              <button className="btn btn-ghost btn-sm shrink-0" onClick={onClose}>
+                {t("← 返回")}
+              </button>
               <span className="text-xs text-base-content/50">
                 {t("这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。")}
               </span>
