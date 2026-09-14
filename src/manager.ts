@@ -90,6 +90,7 @@ import {
   normalizeDir,
   isMisfiledByUmbrella,
   PROJECT_ID_RE,
+  rosterLine,
   type ProjectDef,
 } from "./lib/projects.js";
 
@@ -653,9 +654,17 @@ async function buildProjectContext(proj: ProjectDef, selfTmuxName: string): Prom
   const reg = await loadRegistry();
   const mates = Object.entries(reg.agents)
     .filter(([n, a]) => a.projectId === proj.id && a.status === "active" && n !== selfTmuxName)
-    .map(([n, a]) => `${n}${a.purpose ? `(${a.purpose.slice(0, 40)})` : ""}`);
+    .map(([n, a]) => rosterLine(n, a.purpose || "", agentRuntime(a)));
+  const hasPiMate = Object.entries(reg.agents).some(
+    ([n, a]) => a.projectId === proj.id && a.status === "active" && n !== selfTmuxName && agentRuntime(a) === "pi",
+  );
   const parts = [`你属于 project「${proj.name}」(${proj.id})。`, `项目目录: ${proj.dirs.join(", ")}。`];
   if (proj.description) parts.push(`项目说明: ${proj.description.slice(0, 120)}。`);
+  // 不标出来的话，Claude Code agent 会默认同事的工具集跟自己一样（Pi 侧没有
+  // Task/子代理、没有它那些 MCP），派活容易踩空
+  if (hasPiMate) {
+    parts.push("带 [Pi] 的同事跑在 Pi coding agent 上（工具集与 Claude Code 不同，别假设它有你有的工具）；派活/协作仍用 send_to_agent。");
+  }
   parts.push(
     mates.length
       ? `同项目 agent: ${mates.join("、")}——跨仓/跨职责协作用 send_to_agent 找它们,也可用 project_info 工具随时查项目成员与目录。`
@@ -2306,6 +2315,9 @@ async function cmdList() {
           idle: false,
           project: info?.project || "unknown",
           projectId: info?.projectId || null,
+          // v2.23+ 运行时标识：Pi 会话与 Claude Code agent 同属一个 project，
+          // 靠这个字段在列表面上区分（web 侧栏/面板用它显示徽章）
+          runtime: agentRuntime(info),
           cwd: info?.cwd || "",
           purpose: info?.purpose || "",
           channelId: info?.channelId || "",
@@ -2327,6 +2339,8 @@ async function cmdList() {
       idle,
       project: info?.project || "unknown",
       projectId: info?.projectId || null,
+      // v2.23+ 运行时标识（同上）
+      runtime: agentRuntime(info),
       cwd: info?.cwd || "",
       purpose: info?.purpose || "",
       channelId: info?.channelId || "",
@@ -2345,6 +2359,8 @@ async function cmdList() {
         idle: false,
         project: info.project,
         projectId: info.projectId || null,
+        // v2.23+ 运行时标识（同上）
+        runtime: agentRuntime(info),
         cwd: info.cwd || "",
         purpose: info.purpose,
         channelId: info.channelId,
