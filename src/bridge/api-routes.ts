@@ -815,6 +815,11 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     const name = decodeURIComponent(archMatch[1]);
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
+    // 大总管不参与归档（它是常驻调度器；把它归档掉 = 侧栏消失，2026-09-14 我的测试脚本
+    // 误选它当靶子，正好验证了这个坑必须堵）
+    if (String(name).replace(/^agent-/, "") === "master") {
+      return apiJson(400, { ok: false, error: "master 不参与归档" });
+    }
     // 子进程加**硬超时**：manager 的 archive/kill 都可能卡住（实测 curl 25s 无响应，
     // 界面按钮永远停在「…」）。归档标记来自桥接自己建的目录，所以这两步超时也不影响
     // 「移出工作列表」这个结果 —— 超时就当尽力而为，绝不把请求挂死。
@@ -823,6 +828,21 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         p.catch(() => fallback),
         new Promise<T>((res) => setTimeout(() => res(fallback), ms)),
       ]);
+    // **归档 = 分类**（owner 2026-09-14「他不是只是一个显示逻辑和分类问题吗」）：
+    // 只建标记目录（瞬间）⇒ 列表立刻隐藏、归档栏立刻出现，请求亚秒返回；
+    // 会话快照与停窗口 fire-and-forget 跑后台，卡住/失败都不影响分类结果。
+    {
+      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
+      const { existsSync: ex2 } = await import("node:fs");
+      const { mkdir: mk2 } = await import("node:fs/promises");
+      if (!ex2(`${USER_ARCHIVE_ROOT}/${name}`)) {
+        await mk2(`${USER_ARCHIVE_ROOT}/${name}`, { recursive: true }).catch(() => {});
+      }
+      void runManager("archive", name).catch(() => {});
+      void runManager("kill", name).catch(() => {});
+      return apiJson(200, { ok: true, archived: true, background: "快照 + 停窗口在后台跑" });
+    }
+    // eslint-disable-next-line no-unreachable
     try {
       const r = await race(runManager("archive", name), 6_000, { ok: false, error: "archive 超时（后台可能仍在跑）" } as any);
       // 移动语义（owner 2026-09-14「把归档的移动进去」）：快照之后把窗口停掉 ⇒
