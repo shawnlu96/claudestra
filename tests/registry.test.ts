@@ -64,4 +64,16 @@ describe("readRegistryAgents", () => {
     expect(await readRegistryAgents(writeRegistry("not json{{{"))).toEqual([]);
     expect(await readRegistryAgents(writeRegistry({ something: "else" }))).toEqual([]);
   });
+
+  test("runtime 字段被读出（v2.23+ Pi 会话纳管；漏读 = Pi agent 被当成 Claude Code 起）", async () => {
+    const p = writeRegistry({
+      agents: {
+        "agent-pi": { status: "active", runtime: "pi" },
+        "agent-cc": { status: "active" },
+      },
+    });
+    const all = await readRegistryAgents(p);
+    expect(all.find((a) => a.name === "agent-pi")?.runtime).toBe("pi");
+    expect(all.find((a) => a.name === "agent-cc")?.runtime).toBeUndefined();
+  });
 });
