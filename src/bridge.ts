@@ -230,6 +230,13 @@ const clients = new Map<string, ClientInfo>();
  *  而那边的结论是「stdio 还连着就别退」，bridge 无权也不该替它做这个决定。 */
 const contention = new ContentionTracker();
 
+/** 正在被顶替、由 bridge 主动关掉的旧 ws。
+ *  ⚠ 实测（2026-09-15 假频道驱动）：`old.ws.close()` 是**同步派发**的，close 回调
+ *  在 `clients.set(新 ws)` 之前就跑了，那一刻 map 里还是旧 ws → 匹配上 → 走删除分支。
+ *  所以「close 回调里删掉了」**不等于**「频道空了」。不把它排掉的话，对抢记账每次
+ *  顶替都被清空，永远攒不到阈值，告警形同虚设。 */
+const beingReplaced = new WeakSet<object>();
+
 /**
  * 频道对抢告警。**只报不裁**：谁该退出由 channel-server 的 link-policy 决定，
  * 那边的结论是「MCP stdio 还连着就别退」（退出 = 该 agent 永久失联，比抢占更糟），
@@ -2828,6 +2835,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           old.ws.send(JSON.stringify({ type: "replaced", reason: "channel re-registered" }));
         } catch { /* non-critical */ }
         try {
+          beingReplaced.add(old.ws as unknown as object);
           old.ws.close(4001, "replaced by newer registration");
         } catch { /* non-critical */ }
       }
@@ -4504,10 +4512,13 @@ const server = Bun.serve({
       for (const [channelId, info] of clients.entries()) {
         if (info.ws === ws) {
           clients.delete(channelId);
-          // 走到这里说明**没有后继**（被顶替时 clients 里已经换成新 ws，旧 ws 的
-          // close 匹配不到，不会进来）。频道真的空了，对抢记账清掉，免得几小时后
-          // 的零星重连跟今天的旧记录凑成误报。
-          contention.forget(channelId);
+          // 频道真的空了才清对抢记账（免得几小时后的零星重连跟旧记录凑成误报）。
+          // 「被顶替」不算空——见 beingReplaced 的注释：那条 close 也会走到这里。
+          if (beingReplaced.has(ws as unknown as object)) {
+            beingReplaced.delete(ws as unknown as object);
+          } else {
+            contention.forget(channelId);
+          }
           // 同步兜底：直接按 channelId 在 watcher Map 中查，避免依赖异步 runManager
           stopWatchingByChannel(channelId);
           console.log(`🔌 断开: 频道 ${channelId} (剩余 ${clients.size} 个)`);
