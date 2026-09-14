@@ -20,6 +20,7 @@ export async function POST(request: Request) {
     const data = await bridgePost(`/agents/${encodeURIComponent(name)}/archive`, {});
     return NextResponse.json({ ok: true, data });
   } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 502 });
+console.error("[bff] /agents/:name/archive 失败:", (e as Error).message);
+        return NextResponse.json({ error: (e as Error).message }, { status: 502 });
   }
 }
