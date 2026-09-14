@@ -14,6 +14,7 @@
  */
 
 import { hostname } from "os";
+import { execFile as execFileCb } from "node:child_process";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync, statSync, readdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
@@ -946,6 +947,15 @@ async function cmdCreate(
   // v2.23+ Pi 会话纳管：runtime 只在这里决定「用哪个启动器 + 怎么判就绪」，
   // 其余（频道/窗口/project/registry 形状）两条路完全一致。
   const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
+  if (runtime === "pi" && !(await assertPiAvailable())) {
+    output({
+      ok: false,
+      error:
+        "这台机器上没有找到 pi 可执行文件 —— --runtime pi 建不出能用的 agent。" +
+        "装好 Pi 再试（或用 PI_BIN 指定路径），也可以省掉 --runtime 用默认的 Claude Code。",
+    });
+    return;
+  }
   // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
   const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
   const tmuxName = normalizeName(name);
@@ -1173,6 +1183,27 @@ const CLAUDE_READY_ROUNDS = 240;
  * （❯ + 权限横幅），Pi 的 UI 会随版本变；而 tmux 用户选项是**我们自己**写的，
  * 版本无关。兜底早败：窗口回到 shell 说明 pi 进程已退出，不必等满预算。
  */
+/**
+ * v2.23+ Pi 二进制预检：**没装 Pi 的机器上不该装出"看着建好了、其实起不来"的 agent**。
+ *
+ * 背景（owner 2026-09-14「确认一下 对于没有 pi 的用户也能正常的使用」）：create/
+ * resume 走 `--runtime pi` 时此前不检查 `pi` 是否在，无 Pi 的机器会照建频道 + 注册表
+ * 条目 + 分配 sessionId，然后卡在就绪等待上超时 —— 报错发生在最后一步、且已经留下垃圾。
+ * 这里提前拦：解析不到可执行文件就明确告诉他怎么装（或改用默认运行时）。
+ */
+async function assertPiAvailable(): Promise<string | null> {
+  const bin = process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi";
+  const finder = process.platform === "win32" ? ["where", bin] : ["which", bin];
+  try {
+    const out = await new Promise<string>((resolve, reject) => {
+      execFileCb(finder[0], [finder[1]], (e: Error | null, stdout: string) => (e ? reject(e) : resolve(String(stdout))));
+    });
+    return out.trim().split("\n")[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 async function waitForPiReady(name: string, rounds = CLAUDE_READY_ROUNDS): Promise<boolean> {
   const target = windowTarget(name);
   // restart 复用同一个窗口时，上一轮留下的标记会让我们把「还没起来」认成就绪。
@@ -1206,6 +1237,9 @@ async function cmdResume(
   runtimeFlag?: string,
 ) {
   const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
+  if (runtime === "pi" && !(await assertPiAvailable())) {
+    throw new Error("这台机器上没有找到 pi 可执行文件 —— 无法用 --runtime pi 收编会话（可用 PI_BIN 指定路径，或省略 --runtime 走 Claude Code）");
+  }
   // Pi 的会话 id 是我们自造的（--session-id 收任意合法 id），不一定是 UUID
   if (runtime !== "pi" && !UUID_RE.test(sessionId)) {
     throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式；Pi 会话请加 --runtime pi）`);
