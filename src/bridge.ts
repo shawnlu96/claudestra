@@ -260,8 +260,8 @@ async function reportChannelContention(a: {
     `pid ${a.repeatPids.join("/")} 反复抢回频道。参与进程: ${a.pids.join(", ")}`;
   console.error(detail);
   console.error(
-    "   多半是同一个 agent 起了两个 Claude Code 实例（比如 tmux 里多出一个同名窗口）。" +
-      "两边的 channel-server 都握过手、都认为自己是正主，于是无限交替，谁也不会退出。" +
+    "   多半是同一个 agent 起了两个 Claude Code 实例（比如 tmux 里多出一个同名窗口）。\n" +
+      "   两边的 channel-server 都握过手、都认为自己是正主，于是无限交替，谁也不会退出。\n" +
       `   排查: ps -o pid=,ppid=,lstart=,command= -p ${a.pids.join(",")}`,
   );
 
