@@ -48,7 +48,10 @@ export function ArchivedSessions() {
       });
       const json = (await res.json()) as { ok?: boolean; error?: string };
       if (!res.ok || json.ok === false) throw new Error(json.error || `HTTP ${res.status}`);
+      // agent 的恢复是异步受理（起窗口 + CC 冷启动 1-2 分钟），先给个提示再刷新
+      setError("");
       await load();
+      setTimeout(() => void load(), 90_000);
     } catch (e) {
       setError((e as Error).message);
     } finally {
