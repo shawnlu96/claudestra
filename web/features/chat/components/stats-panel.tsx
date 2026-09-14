@@ -1,10 +1,11 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { getLang, t, useT } from "@/lib/i18n";
+import { RuntimeBadge } from "./unmanaged-sessions";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
@@ -43,6 +44,8 @@ interface StatAgent {
   name: string;
   today?: { tokens: number; costUsd?: number };
   week?: { tokens: number; costUsd?: number };
+  /** v2.23+ claude-code | pi（用量按 runtime 分开看） */
+  runtime?: string | null;
 }
 
 function fmtTok(n: number): string {
@@ -184,23 +187,31 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
                   旧值是被借去抓 /status 的那个窗口单会话的数）：Σ 所有活跃 agent
                   的今日/本周 token × 各模型 API 牌价。订阅制不按此扣费,仅参考。 */}
               {statAgents.length > 0 && (() => {
-                const td = statAgents.reduce((s, a) => s + (a.today?.costUsd || 0), 0);
-                const wk = statAgents.reduce((s, a) => s + (a.week?.costUsd || 0), 0);
-                const tdTok = statAgents.reduce((s, a) => s + (a.today?.tokens || 0), 0);
-                const wkTok = statAgents.reduce((s, a) => s + (a.week?.tokens || 0), 0);
+                // v2.23+ 用量分开看（owner 2026-09-14）：Pi 与 Claude Code 的窗口/计费
+                // 口径不同（Pi 走 cc-switch 网关，不吃订阅额度），混着看等于互相淹没。
+                const isPi = (a: StatAgent) => a.runtime === "pi";
+                const groups: { label: string; list: StatAgent[] }[] = [
+                  { label: t("全机合计"), list: statAgents },
+                  { label: "Claude Code", list: statAgents.filter((a) => !isPi(a)) },
+                  { label: "Pi", list: statAgents.filter(isPi) },
+                ];
+                const sum = (l: StatAgent[], pick: (a: StatAgent) => number) =>
+                  l.reduce((s, a) => s + pick(a), 0);
+                const cell = (l: StatAgent[], win: "today" | "week") =>
+                  `${fmtTok(sum(l, (a) => a[win]?.tokens || 0))} · $${sum(l, (a) => a[win]?.costUsd || 0).toFixed(2)}`;
                 return (
                   <>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-base-content/60">{t("今日全机用量")}</span>
-                      <span className="font-mono tabular-nums">
-                        {fmtTok(tdTok)} tok · ${td.toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-base-content/60">{t("本周全机用量")}</span>
-                      <span className="font-mono tabular-nums">
-                        {fmtTok(wkTok)} tok · ${wk.toFixed(2)}
-                      </span>
+                    <div className="grid grid-cols-[1fr_auto_auto] items-baseline gap-x-3 gap-y-0.5 text-xs">
+                      <span />
+                      <span className="text-right text-[10.5px] text-base-content/40">{t("今日")}</span>
+                      <span className="text-right text-[10.5px] text-base-content/40">{t("本周")}</span>
+                      {groups.map((gr) => (
+                        <Fragment key={gr.label}>
+                          <span className="text-base-content/60">{gr.label}</span>
+                          <span className="text-right font-mono tabular-nums">{cell(gr.list, "today")}</span>
+                          <span className="text-right font-mono tabular-nums">{cell(gr.list, "week")}</span>
+                        </Fragment>
+                      ))}
                     </div>
                     <div className="text-[10.5px] text-base-content/35">
                       {t("成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计")}
@@ -240,6 +251,8 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
                   <div className="mb-1 flex items-center gap-1.5 text-xs">
                     {a.busy && <span className="size-1.5 rounded-full bg-warning" />}
                     <span className="truncate">{t(a.displayName)}</span>
+                    {/* v2.23+ Pi 与 CC 的窗口差 10 倍(1M vs 200k)，条子上得看得出来 */}
+                    <RuntimeBadge runtime={a.runtime ?? ""} />
                     <span className="ml-auto font-mono tabular-nums text-base-content/60">
                       {Math.round(tok / 1000)}k
                     </span>

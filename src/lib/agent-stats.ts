@@ -77,6 +77,8 @@ export interface AgentStat {
   today: UsageWindow;
   week: UsageWindow;
   jsonl: string | null;
+  /** v2.23+ 运行时（claude-code | pi）：用量看板按它分开看——两者窗口/计费口径不同 */
+  runtime: string;
 }
 
 export interface AgentLike {
@@ -243,6 +245,8 @@ export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[
     out.push({
       name: a.name,
       channelId: a.channelId || "",
+      runtime: a.runtime || "claude-code",
+
       // 实际在跑的模型（jsonl 真相）优先；占位模型（<synthetic> 之类）才退回 registry。
       // ⚠ 原来判据是 startsWith("claude-")，Pi agent 的模型是 provider/model 形式
       // （cc-switch-open-code-go/glm-5.3-flash），会被整条丢掉 → 看板显示 "?"。
