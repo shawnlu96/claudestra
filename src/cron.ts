@@ -11,6 +11,7 @@
 
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { runtimeForSessionPath, translateSessionLine } from "./lib/session-source.js";
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { bridgeRequest } from "./lib/bridge-client.js";
@@ -280,7 +281,8 @@ async function extractAgentSummary(dir: string, sessionId: string): Promise<stri
     let last = "";
     for (const line of lines) {
       let rec: any;
-      try { rec = JSON.parse(line); } catch { continue; }
+      rec = translateSessionLine(runtimeForSessionPath(path), line);
+      if (!rec) continue;
       if (rec.type !== "assistant") continue;
       const content = rec.message?.content;
       if (!Array.isArray(content)) continue;

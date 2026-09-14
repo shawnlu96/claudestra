@@ -45,7 +45,7 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
     const win = a.name.startsWith("agent-") ? a.name : `agent-${a.name}`;
     if (a.status !== "active" && !liveWindows.has(win)) continue;
     swept++;
-    const r = await archiveSession(a.name, a.cwd, a.sessionId).catch(() => null);
+    const r = await archiveSession(a.name, a.cwd, a.sessionId, { runtime: a.runtime }).catch(() => null);
     if (r?.archived.length) archived += r.archived.length;
   }
 

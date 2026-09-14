@@ -85,6 +85,8 @@ src/
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
     pi-launch.ts         v2.23+ Pi agent 的启动命令（--approve / --extension / --session-id open-or-create）
     pi-env.ts            v2.23+ Pi 能力档案：档案→启动参数（含包源必须排路径前的顺序规则）+ 全局/项目/运行时清单读取
+    pi-session.ts        v2.23+ Pi 会话文件定位（目录编码/软链/扫目录）+ 行格式翻译成 Claude Code 形状
+    session-source.ts    v2.23+ 会话记录统一入口：runtime 感知的「定位 + 逐行翻译」，五个消费者共用
     launch-command.ts    v2.23+ registry runtime → 启动器分发（claude-code / pi），新增 runtime 只改这里
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
@@ -200,7 +202,16 @@ The runtime truth comes from the Pi extension, which writes a snapshot of `getAl
 
 `--approve` (trust project-local `.pi/` resources, which can execute project extensions and install packages) is **on by default**, matching Claude Code's auto-accepted trust dialog; the choice is recorded in the profile (`trustProject`) so it is visible rather than buried in the launch line.
 
-**Not covered yet** (Pi sessions currently look silent in the web/Discord stream): session-file parsing. `jsonl-watcher`, `session-history`, `session-archive`, `jsonl-cost` and `sessions-inventory` all read Claude Code's `~/.claude/projects/<slug>/<sessionId>.jsonl`; Pi writes `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` with a different entry shape (tool calls and their results are separate lines joined by `toolCallId`). That is the next slice, and it also revives the bridge's "agent forgot to reply → extract the last assistant text" fallback, which is currently dead for Pi agents.
+**Session records are read too (v2.23+).** Pi agents are not silent in the web/Discord stream any more. The trick is that the five readers (jsonl-watcher, session-history, session-archive, jsonl-cost/agent-stats, the bridge's "agent forgot to reply → extract its text" fallback) are all written against Claude Code's path *and* line shape, so instead of rewriting five consumers there are two seams in `lib/session-source.ts`:
+
+- **locate** — `sessionJsonlPath(runtime, cwd, sessionId)`. Claude Code's path is predictable; **Pi's is not** (the filename is `<ISO-timestamp>_<sessionId>.jsonl`), so it is a directory scan, and a miss returns `null` rather than a path that will never exist. The watcher's pending-file loop therefore re-resolves every tick instead of `existsSync`-ing a fixed path. The Pi extension also reports its own `sessionFile` in the register frame, which is used as the first-choice source.
+- **translate** — `translateSessionLine(runtime, line)` turns one Pi record into Claude Code's shape (one line each): `toolCall{name,arguments}` → `tool_use{name,input}`, the standalone `toolResult` record → a `tool_result` block inside a `user` message, `usage{input,output,cacheRead,cacheWrite}` → `{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}`, `compaction` → `compact_boundary`, `thinking_level_change` → the effort display. Pi's built-in tool names and arguments are also mapped (`read{path}` → `Read{file_path}`, `edit{edits[]}` → `Edit{old_string,new_string}`, `find` → `Glob`, …) so the existing tool-card rendering produces `💻 echo hi` / `📖 file.ts` instead of a bare `🔧 bash`.
+
+Readers that only have a path auto-detect the runtime from it (`runtimeForSessionPath` — the Pi sessions root is fixed), so runtime does not have to be threaded through six signatures. **Locating** always needs it explicitly.
+
+Consequences worth knowing: Pi sessions show up in `manager sessions`, `GET /api/v1/agents/:name/history`, the cost rollup, the context/model badges, and `manager archive` (Pi's subagent artifacts — `<session-stem>/<runId>/run-N/session.jsonl` — are copied into the archive as `<sid>/subagents/<runId>.jsonl`, i.e. the Claude Code layout, so the history panel reads them unchanged). The `/new`-style session rotation self-heal now works for Pi as well (`listSessionIdsForCwd` understands the `<ts>_<id>` filename); without it a rotated Pi session would freeze the watcher and history exactly like the Claude Code failure described in `maybeHealRotatedSession`.
+
+**Still not covered**: Pi subagent *threads* (`bg-activity-watcher` looks in Claude Code's `subagents/` directory) and Pi's background shell logs (`$TMPDIR/pi-bash-*.log` has no session scope, so it cannot be attributed).
 
 ### Cross-Claudestra peer collaboration
 
