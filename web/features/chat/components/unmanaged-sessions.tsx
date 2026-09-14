@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 
@@ -61,6 +61,73 @@ export function RuntimeBadge({ runtime, className = "" }: { runtime: string; cla
   );
 }
 
+/**
+ * 左滑露出快捷动作（与侧栏 agent 行同一套手感：跟手位移、松手吸附、纵向意图让给滚动）。
+ * owner 2026-09-14：未纳管会话也要快捷按钮，归档要能直接点。
+ */
+function SwipeActions({
+  children,
+  actions,
+}: {
+  children: React.ReactNode;
+  actions: { label: string; className: string; onClick: () => void }[];
+}) {
+  const W = actions.length * 68;
+  const [dx, setDx] = useState(0);
+  const start = useRef<{ x: number; y: number; open: boolean; locked: boolean } | null>(null);
+  return (
+    <div className="relative overflow-hidden rounded-lg">
+      <div className="absolute inset-y-0 right-0 flex">
+        {actions.map((a) => (
+          <button
+            key={a.label}
+            type="button"
+            className={`w-[68px] shrink-0 text-[11px] font-medium ${a.className}`}
+            onClick={() => {
+              setDx(0);
+              a.onClick();
+            }}
+          >
+            {a.label}
+          </button>
+        ))}
+      </div>
+      <div
+        className="relative bg-base-100/0 transition-transform duration-150"
+        style={{ transform: `translateX(${dx}px)` }}
+        onTouchStart={(e) => {
+          const t = e.touches[0];
+          start.current = { x: t.clientX, y: t.clientY, open: dx !== 0, locked: false };
+        }}
+        onTouchMove={(e) => {
+          const st = start.current;
+          if (!st) return;
+          const t = e.touches[0];
+          const ddx = t.clientX - st.x;
+          const ddy = t.clientY - st.y;
+          // 纵向意图让给列表滚动（前 8px 判定）
+          if (!st.locked) {
+            if (Math.abs(ddy) > Math.abs(ddx) && Math.abs(ddy) > 8) {
+              start.current = null;
+              return;
+            }
+            if (Math.abs(ddx) > 8) st.locked = true;
+          }
+          const base = st.open ? -W : 0;
+          setDx(Math.min(0, Math.max(-W - 16, base + ddx)));
+        }}
+        onTouchEnd={() => {
+          if (!start.current) return;
+          setDx(dx < -W / 2 ? -W : 0);
+          start.current = null;
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function UnmanagedSessions() {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -114,6 +181,25 @@ export function UnmanagedSessions() {
   }, [fetchSessions]);
 
   const count = sessions.filter((s) => s.agentName === null && !isTempSession(s.cwd)).length;
+
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  /** 列表里左滑直接处置（不必点进抽屉）；成功后重拉列表 */
+  const manageFromList = async (s: SessionRow, action: "archive" | "delete") => {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/manage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, runtime: s.runtime, cwd: s.cwd }),
+      });
+      const json = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      setConfirming(null);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   const toggle = () => {
     const next = !open;
@@ -200,6 +286,23 @@ export function UnmanagedSessions() {
           <ul className="max-h-64 overflow-y-auto">
             {unmanaged.map((s) => (
               <li key={s.sessionId}>
+                <SwipeActions
+                  actions={[
+                    {
+                      label: t("归档"),
+                      className: "bg-base-300/70 text-base-content/80",
+                      onClick: () => void manageFromList(s, "archive"),
+                    },
+                    {
+                      label: confirming === s.sessionId ? t("确认删除") : t("删除"),
+                      className: "bg-error/80 text-error-content",
+                      onClick: () =>
+                        confirming === s.sessionId
+                          ? void manageFromList(s, "delete")
+                          : setConfirming(s.sessionId),
+                    },
+                  ]}
+                >
                 <button
                   className="flex w-full flex-col gap-0.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-base-200/60"
                   onClick={() => setViewing(s)}
@@ -230,6 +333,7 @@ export function UnmanagedSessions() {
                     </span>
                   ) : null}
                 </button>
+                </SwipeActions>
               </li>
             ))}
           </ul>
