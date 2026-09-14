@@ -93,7 +93,9 @@ function SwipeActions({
         ))}
       </div>
       <div
-        className="relative bg-base-100/0 transition-transform duration-150"
+        /* 必须是**不透明**的背景：跟手层透明时，后面那排动作按钮会从行下面透出来 ——
+           看着像"没左滑就冒出按钮"（owner 2026-09-14 手机实报）。 */
+        className="relative bg-base-100 transition-transform duration-150"
         style={{ transform: `translateX(${dx}px)` }}
         onTouchStart={(e) => {
           const t = e.touches[0];
