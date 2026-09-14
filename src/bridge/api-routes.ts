@@ -583,6 +583,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const sessions = ((r.sessions as any[]) || []).map((s) => ({
       ...s,
       agentName: byId.get(String(s.sessionId)) ?? null,
+      // 目录已消失（/tmp 被清、项目搬走）→ 收编必然失败，提前标出来别让用户白试
+      cwdExists: typeof s.cwd === "string" && s.cwd ? existsSync(s.cwd) : false,
     }));
     return apiJson(200, { ok: true, count: sessions.length, sessions });
   }
@@ -1565,21 +1567,18 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const args = ["resume", agent, sessionId];
     if (cwd) args.push(cwd);
     if (runtime === "pi") args.push("--runtime", "pi");
-    runManager(...args)
-      .then((r) => {
-        emitEvent({
-          agent,
-          chatId: "",
-          type: "session_anomaly",
-          data: { kind: "resume_result", sessionId, ok: !!r?.ok, ...r },
-        });
-      })
-      .catch(() => {});
-    return apiJson(202, {
-      ok: true,
-      accepted: true,
-      hint: "resume 在后台跑（起窗口 + 等就绪，约 10-40s）；结果看 /api/v1/events 的 session_anomaly kind=resume_result",
+    // ⚠ 必须**同步等**（与 POST /agents 的 create 一致）：原来做成 202 + 后台，
+    // 结果只进事件流 → 界面只看到「已受理」，后台失败（最常见：默认名字与已有
+    // agent 撞车 → manager 报「已存在」）时用户完全看不到原因，只会认为"收编失败"。
+    // 代价是这个请求要挂 10-40s（起窗口 + 等就绪），browser 侧超时给到 180s。
+    const r = await runManager(...args);
+    emitEvent({
+      agent,
+      chatId: "",
+      type: "session_anomaly",
+      data: { kind: "resume_result", sessionId, ok: !!r?.ok, ...r },
     });
+    return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager resume failed" });
   }
 
   // GET/PUT /api/v1/config/claude-defaults —— 全局默认模型/effort 管理
