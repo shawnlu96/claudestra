@@ -31,6 +31,7 @@ import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type Hy
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { collectSessions } from "./sessions-inventory.js";
+import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
@@ -565,6 +566,27 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, sessions: visible });
   }
 
+  // v2.23+ GET /api/v1/session-list —— 机器上所有会话（两种 runtime，活的+历史的）。
+  // 与 /sessions 的区别：那个是 Claude Code 的**活**会话清单（doppelganger 检测用，
+  // NeutralSessionInfo）；这个是 manager 扫盘得到的**会话历史清单**（含未纳管的
+  // pi-web / 终端手敲的 Pi 会话），供 web 端「会话列表」用。仅全权 token。
+  if (path === "/session-list" && req.method === "GET") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "session-list requires a full-scope token" });
+    }
+    const r = await runManager("sessions");
+    if (!r?.ok) return apiJson(500, { ok: false, error: r?.error || "manager sessions failed" });
+    // 标出哪些已经纳管（有 registry 条目）—— Web 端据此决定「收编」还是「打开对话」
+    const regs = await readRegistryAgents();
+    const byId = new Map<string, string>();
+    for (const a of regs) if (a.sessionId) byId.set(a.sessionId, a.name);
+    const sessions = ((r.sessions as any[]) || []).map((s) => ({
+      ...s,
+      agentName: byId.get(String(s.sessionId)) ?? null,
+    }));
+    return apiJson(200, { ok: true, count: sessions.length, sessions });
+  }
+
   // v2.7+ POST /api/v1/sessions/:bgId/cleanup —— 清理 bg job（死分身/残留）。
   // 耗时操作（kill → 等 daemon 静默 → 隔离目录，最长 ~90s）→ 202 后台执行，
   // 结果以 session_anomaly kind=cleanup_result 进事件流。仅全权 token。
@@ -624,6 +646,37 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       accepted: true,
       hint: "adoption runs in background (~1-2 min); watch /api/v1/events for session_anomaly kind=adopt_result",
     });
+  }
+
+  // v2.23+ GET /api/v1/sessions/:sessionId/history —— 任意会话的历史（不要求已纳管）。
+  // 已有 /agents/:name/history/:sessionId 只认 registry 里的 agent；Web 端的会话列表
+  // 里大部分是**未纳管**的会话（pi-web 起的、终端手敲的），点开它们要看历史只能走这条。
+  const sessHistMatch = path.match(/^\/sessions\/([^/]+)\/history$/);
+  if (sessHistMatch && req.method === "GET") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "session history requires a full-scope token" });
+    }
+    const sid = decodeURIComponent(sessHistMatch[1]);
+    if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
+    const runtime = url.searchParams.get("runtime") || undefined;
+    const cwd = url.searchParams.get("cwd") || undefined;
+    const limit = Math.min(Number(url.searchParams.get("limit") || 100) || 100, 500);
+    const before = url.searchParams.get("before");
+    // 定位：先按 cwd+runtime 精确推，再两种 runtime 各自全库兜底扫
+    let file = cwd ? sessionJsonlPath(runtime, cwd, sid) : null;
+    if (!file || !existsSync(file)) {
+      file =
+        findSessionJsonlBySessionId(runtime ?? "pi", sid) ??
+        findSessionJsonlBySessionId("claude-code", sid);
+    }
+    if (!file || !existsSync(file)) {
+      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
+    }
+    const page = await readSessionHistory(file, {
+      limit,
+      ...(before ? { before: Number(before) } : {}),
+    });
+    return apiJson(200, { ok: true, sessionId: sid, path: file, ...page });
   }
 
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
@@ -1456,7 +1509,16 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const effort = String(body?.effort || "").trim();
     // v2.21+ 可选归属 project(缺省由 manager 按 dir 自动归属/建组)
     const project = String(body?.project || "").trim();
-    if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?, "project"?}' });
+    // v2.23+ 运行时：Web 端也能建 Pi agent（此前只有命令行能建）
+    const runtime = String(body?.runtime || "").trim();
+    const piBase = String(body?.piBase || "").trim();
+    if (runtime && runtime !== "pi" && runtime !== "claude-code") {
+      return apiJson(400, { ok: false, error: 'runtime must be "pi" or "claude-code"' });
+    }
+    if (piBase && piBase !== "minimal" && piBase !== "inherit") {
+      return apiJson(400, { ok: false, error: 'piBase must be "minimal" or "inherit"' });
+    }
+    if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?, "project"?, "runtime"?, "piBase"?}' });
     // name / dir 走位置参数，必须先挡掉长得像 flag 的值；purpose 改走具名
     // --purpose，避免自由文本被 manager 的 flag 提取抢先解析（详见
     // manager.ts 的 extractPurposeFlag 注释：曾可用 purpose 替换整个命令黑名单）。
@@ -1468,8 +1530,56 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (model) createArgs.push("--model", model);
     if (effort) createArgs.push("--effort", effort);
     if (project) createArgs.push("--project", project);
+    if (runtime === "pi") createArgs.push("--runtime", "pi");
+    if (piBase) createArgs.push("--pi-base", piBase);
     const r = await runManager(...createArgs);
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager create failed" });
+  }
+
+  // v2.23+ POST /api/v1/agents/resume —— 把一个**已存在的会话**收编成正式 agent。
+  // 与 /sessions/:id/adopt 的区别：adopt 是「把 bg 分身立为**已有** agent 的正式会话」
+  // （Claude Code 专属语义）；这条是「这个会话还不属于任何 agent，给它起个名字收编」，
+  // 两种 runtime 都支持（Pi 走 resume --runtime pi，会话 id 是 open-or-create）。
+  // 耗时（起 tmux 窗口 + 等就绪）→ 202 后台执行，结果进事件流。
+  if (path === "/agents/resume" && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "resume requires a full-scope token" });
+    }
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return apiJson(400, { ok: false, error: "invalid JSON body" });
+    }
+    const agent = String(body?.agent || "").trim();
+    const sessionId = String(body?.sessionId || "").trim();
+    const runtime = String(body?.runtime || "").trim();
+    const cwd = String(body?.cwd || "").trim();
+    if (!agent || !sessionId) {
+      return apiJson(400, { ok: false, error: 'body must be {"agent", "sessionId", "runtime"?, "cwd"?}' });
+    }
+    if (agent.startsWith("-") || sessionId.startsWith("-") || cwd.startsWith("-")) {
+      return apiJson(400, { ok: false, error: 'agent/sessionId/cwd 不能以 "-" 开头' });
+    }
+    if (!isValidSessionId(sessionId)) return apiJson(400, { ok: false, error: "invalid sessionId" });
+    const args = ["resume", agent, sessionId];
+    if (cwd) args.push(cwd);
+    if (runtime === "pi") args.push("--runtime", "pi");
+    runManager(...args)
+      .then((r) => {
+        emitEvent({
+          agent,
+          chatId: "",
+          type: "session_anomaly",
+          data: { kind: "resume_result", sessionId, ok: !!r?.ok, ...r },
+        });
+      })
+      .catch(() => {});
+    return apiJson(202, {
+      ok: true,
+      accepted: true,
+      hint: "resume 在后台跑（起窗口 + 等就绪，约 10-40s）；结果看 /api/v1/events 的 session_anomaly kind=resume_result",
+    });
   }
 
   // GET/PUT /api/v1/config/claude-defaults —— 全局默认模型/effort 管理
