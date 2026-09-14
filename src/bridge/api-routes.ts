@@ -794,6 +794,19 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       } catch {
         /* 停不掉也不影响快照 */
       }
+      // 记进归档台账（「归档」栏只列台账里的东西）
+      try {
+        const { addArchivedItem } = await import("../lib/archive-index.js");
+        await addArchivedItem({
+          kind: "agent",
+          id: name,
+          sessionIds: Array.isArray(r?.sessions) ? (r!.sessions as string[]) : [],
+          archivedAt: Date.now(),
+          note: "snapshot + kill（registry 保留，可 resume 恢复）",
+        });
+      } catch {
+        /* 台账写失败不影响归档本身 */
+      }
       return apiJson(r?.ok === false ? 500 : 200, { ok: r?.ok !== false, killed, result: r });
     } catch (e) {
       return apiJson(500, { ok: false, error: (e as Error).message });
@@ -829,55 +842,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     return apiJson(200, { ok: true, days: cfg.archiveRetentionDays });
   }
 
-  // v2.23+ GET /api/v1/sessions/archived —— 归档清单（给网页侧栏「归档」栏用）。
-  // 两种来源：按 agent 的归档（archive/<agent>/）与未纳管会话的归档
-  // （archive/unmanaged/<sessionId>/）。只读元数据（条数/大小/时间），不读内容。
+  // v2.23+ GET /api/v1/sessions/archived —— 「归档」栏数据源 = **归档台账**
+  // （~/.claude-orchestrator/archived.json），只记用户手动归档过的。
+  // 不再扫归档目录：那是大杂烩（每日兜底给在跑 agent 的安全快照、退役自动快照），
+  // 直接列出来会让"归档"栏冒充成"所有会话的列表"（owner 2026-09-14 两次纠正）。
   if (path === "/sessions/archived" && req.method === "GET") {
-    const { ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-    const fsp = await import("node:fs/promises");
-    const entries: Record<string, unknown>[] = [];
-    const statDir = async (dir: string) => {
-      let files: string[] = [];
-      let bytes = 0;
-      let newest = 0;
-      const walk = async (d: string): Promise<void> => {
-        const list = await fsp.readdir(d, { withFileTypes: true }).catch(() => []);
-        for (const e of list) {
-          const full = `${d}/${e.name}`;
-          if (e.isDirectory()) await walk(full);
-          else {
-            files.push(e.name);
-            const st = await fsp.stat(full).catch(() => null);
-            if (st) {
-              bytes += st.size;
-              newest = Math.max(newest, st.mtimeMs);
-            }
-          }
-        }
-      };
-      await walk(dir);
-      return { files, bytes, newest };
-    };
-    try {
-      const top = await fsp.readdir(ARCHIVE_ROOT, { withFileTypes: true }).catch(() => []);
-      for (const e of top) {
-        if (!e.isDirectory()) continue;
-        if (e.name === "unmanaged") {
-          const subs = await fsp.readdir(`${ARCHIVE_ROOT}/unmanaged`, { withFileTypes: true }).catch(() => []);
-          for (const sub of subs) {
-            if (!sub.isDirectory()) continue;
-            const { files, bytes, newest } = await statDir(`${ARCHIVE_ROOT}/unmanaged/${sub.name}`);
-            entries.push({ kind: "unmanaged", id: sub.name, sessions: files.length, bytes, archivedAt: newest });
-          }
-          continue;
-        }
-        const { files, bytes, newest } = await statDir(`${ARCHIVE_ROOT}/${e.name}`);
-        entries.push({ kind: "agent", id: e.name, sessions: files.length, bytes, archivedAt: newest });
-      }
-    } catch {
-      /* 归档目录不存在 = 空清单 */
-    }
-    entries.sort((a, b) => Number(b.archivedAt || 0) - Number(a.archivedAt || 0));
+    const { readArchiveIndex } = await import("../lib/archive-index.js");
+    const entries = await readArchiveIndex();
     return apiJson(200, { ok: true, entries });
   }
 
@@ -942,6 +913,20 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       await fsp.copyFile(mfile, `${dest}/${mfile.split("/").pop()}`);
     }
     await fsp.rm(mfile, { force: true });
+    if (action === "archive") {
+      try {
+        const { addArchivedItem } = await import("../lib/archive-index.js");
+        await addArchivedItem({
+          kind: "unmanaged",
+          id: sid,
+          sessionIds: [sid],
+          archivedAt: Date.now(),
+          note: "快照后移出（可从未纳管列表再收藏）",
+        });
+      } catch {
+        /* 台账写失败不影响归档本身 */
+      }
+    }
     console.log(`🗂 会话处置: ${action} ${sid} (${mfile})`);
     return apiJson(200, { ok: true, action, sessionId: sid, archived: action === "archive" });
   }

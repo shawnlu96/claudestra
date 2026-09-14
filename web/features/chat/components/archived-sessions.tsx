@@ -2,10 +2,12 @@
 /**
  * 侧栏「归档」栏（v2.23+）。
  *
- * owner 2026-09-14：「肯定要新增一栏归档，然后把归档的移动进去」—— 归档语义是
- * **快照 + 停掉 agent/挪走会话文件**：它离开工作列表、落到这里，注册表条目仍在，
- * 所以 agent 之后还能 `manager resume <name> <sessionId>` 恢复。
- * 数据源：BFF /api/sessions/archived（代理桥接 /api/v1/sessions/archived）。
+ * owner 2026-09-14 两次纠正后的语义：**这里只放"我们手动归档过的"**。
+ * 数据源是桥接的**归档台账**（~/.claude-orchestrator/archived.json），
+ * 不是归档目录 —— 目录里还有每日兜底给在跑 agent 做的安全快照、退役自动快照，
+ * 那是防丢机制，不是"归档"（直接列目录会让这一栏冒充成"所有会话"）。
+ * 归档动作 = 快照 + 停掉 agent/挪走会话文件；agent 的注册表条目保留，
+ * 之后仍可 `manager resume <name> <sessionId>` 恢复。
  */
 import { useCallback, useEffect, useState } from "react";
 import { fmtAgo } from "../fmt-time";
@@ -14,16 +16,10 @@ import { useT } from "@/lib/i18n";
 interface ArchivedEntry {
   kind: "agent" | "unmanaged";
   id: string;
-  sessions: number;
-  bytes: number;
+  /** 归档时的会话 id(s) */
+  sessionIds: string[];
   archivedAt: number;
-}
-
-function fmtBytes(n: number): string {
-  if (!n) return "0";
-  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
-  if (n >= 1024) return `${Math.round(n / 1024)}k`;
-  return String(n);
+  note?: string;
 }
 
 export function ArchivedSessions() {
@@ -119,7 +115,8 @@ export function ArchivedSessions() {
                     </span>
                   </span>
                   <span className="truncate font-mono text-[11px] text-base-content/40">
-                    {e.sessions} {t("个会话")} · {fmtBytes(e.bytes)}
+                    {(e.sessionIds?.length ?? 0)} {t("个会话")}
+                    {e.note ? ` · ${e.note}` : ""}
                   </span>
                 </div>
               </li>
