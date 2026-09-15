@@ -891,6 +891,7 @@ export function Composer() {
               {/* 流式期间：暂停与发送并列（不互斥替换）——可一边看回复一边输入插话 */}
               {streaming && (
                 <button
+                  data-tap-self=""
                   onPointerDown={touchDown}
                   onPointerUp={(e) => touchUp(e, () => store.interrupt())}
                   onClick={() => touchClick(() => store.interrupt())}
@@ -902,6 +903,7 @@ export function Composer() {
                 </button>
               )}
               <button
+                data-tap-self=""
                 onPointerDown={touchDown}
                 onPointerUp={(e) => touchUp(e, submit)}
                 onClick={() => touchClick(submit)}

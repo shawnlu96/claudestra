@@ -98,7 +98,11 @@ export function installTapRescue(
     if (moved > 10) return; // 手指实际滑过了(touchmove 实测):是滚动,不是点——cancel 坐标不可信
     const target = d.target;
     if (!target.closest(CLICKABLE)) return; // 死区:本来就没 click
-    if (target.closest("[data-hold]")) return; // 按住说话类手势键:按设计无 click
+    // data-hold:按住说话类手势键,按设计无 click。data-tap-self:自己在 pointerup 上执行
+    // 动作的键(发送/暂停,3601ee6),pointerup 一跑输入框清空/按钮 disabled,WebKit 的 click
+    // 作废是我们自己造成的——再补一个 click 什么都救不了,只污染 [tap-synth] 计数
+    // (2026-09-15 实测 13 条 body 层合成全打在这两键上,全被 touchClick 的 1s 窗口吞掉)。
+    if (target.closest("[data-hold],[data-tap-self]")) return;
     const upAt = performance.now();
     window.setTimeout(() => {
       if (lastClickAt >= upAt) return; // 真 click 到了
