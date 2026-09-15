@@ -60,7 +60,7 @@ export function UpdateToast() {
   return (
     <div className="pointer-events-none absolute inset-x-0 top-2 z-30 flex justify-center">
       <span className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-base-300/70 bg-base-100/90 py-1.5 pl-4 pr-3 text-[12.5px] font-medium shadow-lg backdrop-blur-md">
-        <button className="font-semibold text-primary" onClick={() => window.location.reload()}>
+        <button className="font-semibold text-primary" onClick={() => void hardReload(stale)}>
           {t("新版本已就绪 · 点击刷新")}
         </button>
         <button
@@ -78,4 +78,33 @@ export function UpdateToast() {
       </span>
     </div>
   );
+}
+
+/**
+ * 真正能拿到新 bundle 的刷新（owner 2026-09-15「点了也没有消失」）。
+ *
+ * `window.location.reload()` **不是** cache buster：文档命中本地 HTTP 缓存时它照样
+ * 把那份旧 HTML 交回来，于是 commit 依旧对不上、提示再弹——点多少次都一样。
+ * 服务端那边的兜底（/api/version 每进程发一次 `Clear-Site-Data: "cache"`）在 **WebKit
+ * 上是空操作**（该端点注释里已写明 Safari 不实现），而 iOS 壳就是 WKWebView，
+ * 恰好是最需要这条的那一端。
+ *
+ * 两步，第二步保底：
+ *  ① `fetch(cache: "reload")` 强制走网络并**改写**文档在 HTTP 缓存里的那一份 ——
+ *     修好的是无参 URL 的缓存项，以后普通刷新也能拿到新的；
+ *  ② 带上 `?_v=<新 commit>` 导航 —— 没见过的 URL 不可能命中任何缓存，①失败也稳。
+ *     参数取 commit 而不是时间戳：同一版本只产生一个 URL，拿到新 bundle 后
+ *     commit 就对上了、不会再弹，自然收敛；下个版本自动换成新值。
+ */
+async function hardReload(commit: string): Promise<void> {
+  try {
+    await fetch(window.location.href, { cache: "reload", credentials: "same-origin" });
+  } catch { /* 网络抖动等：直接走②，它本身就不依赖缓存被刷新 */ }
+  try {
+    const u = new URL(window.location.href);
+    u.searchParams.set("_v", commit);
+    window.location.replace(u.toString());
+  } catch {
+    window.location.reload(); // URL 构造不出来（极端情况）：退回老行为，好过什么都不做
+  }
 }
