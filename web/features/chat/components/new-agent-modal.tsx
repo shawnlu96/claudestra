@@ -2,17 +2,8 @@
 import { useState } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
-
-/** 模型选项(值 = manager 侧别名,空 = 跟随全局 settings.json 默认)。 */
-const MODEL_OPTIONS = [
-  { value: "", label: "默认（跟随全局）" },
-  { value: "fable-5-1", label: "Fable 5.1" },
-  { value: "fable-5", label: "Fable 5" },
-  { value: "opus", label: "Opus 5" },
-  { value: "opus-4-8", label: "Opus 4.8" },
-  { value: "sonnet", label: "Sonnet 4.6" },
-  { value: "haiku", label: "Haiku 4.5" },
-] as const;
+// 模型选项来自共享目录(值 = manager 别名);别再在这里另维护一份——曾与切换器漂移(2026-09-15)
+import { MODEL_ALIAS_OPTIONS } from "../claude-options";
 
 /** Effort 选项(经 --effort 传 CC,session 级,不写全局默认)。 */
 const EFFORT_OPTIONS = [
@@ -227,7 +218,7 @@ export function NewAgentModal({
                 disabled={busy}
                 onChange={(e) => setModel(e.target.value)}
               >
-                {MODEL_OPTIONS.map((o) => (
+                {MODEL_ALIAS_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
                     {t(o.label)}
                   </option>

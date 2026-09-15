@@ -97,6 +97,11 @@ describe("model aliases", () => {
     expect(resolveModelAlias("fable-5-1")).toBe("claude-fable-5-1");
     expect(resolveModelAlias("fable-5")).toBe("claude-fable-5");
     expect(resolveModelAlias("opus")).toBe("claude-opus-5");
+    // 2026-09-15:裸 sonnet 跟最新(5),版本号别名钉死各代;web 新建弹窗只用版本号别名
+    expect(resolveModelAlias("sonnet")).toBe("claude-sonnet-5");
+    expect(resolveModelAlias("sonnet-5")).toBe("claude-sonnet-5");
+    expect(resolveModelAlias("sonnet-4-6")).toBe("claude-sonnet-4-6");
+    expect(resolveModelAlias("haiku-4-5")).toBe("claude-haiku-4-5-20251001");
   });
   test("大小写 / 空白不敏感，未知值原样透传（允许未来新模型 id）", () => {
     expect(resolveModelAlias("  Fable  ")).toBe("claude-fable-5-1");

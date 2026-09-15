@@ -132,7 +132,9 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 // v2.4.20+ 支持按 agent 钉模型。别名 → 完整 model id 的映射，方便用户敲短名。
 // 不在别名表里的值原样透传（允许用户指定任意 model id / 未来新模型）。
 export const MODEL_ALIASES: Record<string, string> = {
-  // 裸家族名（fable / opus）始终指向该家族最新版；要钉死某一代用带版本号的别名。
+  // 裸家族名（fable / opus / sonnet / haiku）始终指向该家族最新版；要钉死某一代用带版本号的别名。
+  // web 新建弹窗只用带版本号的别名(web/features/chat/claude-options.ts MODEL_CATALOG),
+  // 两边的版本号别名集合要保持一致。
   fable: "claude-fable-5-1",
   "fable-5-1": "claude-fable-5-1",
   "fable-5": "claude-fable-5",
@@ -140,8 +142,11 @@ export const MODEL_ALIASES: Record<string, string> = {
   "opus-5": "claude-opus-5",
   "opus-4-8": "claude-opus-4-8",
   "opus-4-7": "claude-opus-4-7",
-  sonnet: "claude-sonnet-4-6",
+  sonnet: "claude-sonnet-5", // 2026-09-15 owner 拍板:裸 sonnet 从 4.6 跟到 5
+  "sonnet-5": "claude-sonnet-5",
+  "sonnet-4-6": "claude-sonnet-4-6",
   haiku: "claude-haiku-4-5-20251001",
+  "haiku-4-5": "claude-haiku-4-5-20251001",
 };
 
 /** 别名 → model id；未知值原样返回（透传任意 model id）。 */
