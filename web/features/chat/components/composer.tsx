@@ -142,6 +142,7 @@ const SCOPE_LABEL: Record<string, string> = {
   plugin: "插件",
   user: "技能",
   project: "项目",
+  pi: "Pi",
 };
 
 export function Composer() {

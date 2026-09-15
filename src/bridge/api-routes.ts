@@ -57,6 +57,7 @@ import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
+import { piCommandsFor } from "../lib/pi-env.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
@@ -1482,7 +1483,14 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const slashM = attachments.length === 0 && !principal.peer ? text.trim().match(/^\/([\w:-]+)(?:\s+([\s\S]+))?$/) : null;
     if (slashM) {
       const regName = agent.name === "master" ? null : agent.name;
-      const resolved = resolveWebInvocation(slashM[1], regName, slashM[2] || "");
+      // Pi agent 的命令表是 Pi 自己的（快照），不走 CC 的注册表解析 —— 同名命令
+      // 在两端语义不同（Pi 的 /compact 是 Pi 内置），交给 Pi 原生解释。
+      const piHit = String((agent as any).runtime || "") === "pi"
+        ? piCommandsFor(agent.name).find((c) => c.name === slashM[1])
+        : undefined;
+      const resolved = piHit
+        ? { ok: true as const, ccText: `/${piHit.invokeName}${(slashM[2] || "").trim() ? ` ${slashM[2].trim()}` : ""}`, scope: "pi" }
+        : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
       if (resolved.ok) {
         const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
         try {
@@ -1610,8 +1618,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    const commands = commandsForAgent(agent.name === "master" ? null : agent.name);
-    return apiJson(200, { ok: true, agent: agent.name, commands });
+    // Pi agent 的命令来自它自己的运行时快照（CC 的 skills 扫描在 Pi 上不适用）。
+    // 这里也决定了「能注入什么」：面板里没有的命令，直通分支会拒绝 —— 两边同源。
+    const isPiAgent = String((agent as any).runtime || "") === "pi";
+    const commands = isPiAgent
+      ? piCommandsFor(agent.name)
+      : commandsForAgent(agent.name === "master" ? null : agent.name);
+    return apiJson(200, { ok: true, agent: agent.name, runtime: isPiAgent ? "pi" : "claude-code", commands });
   }
 
   // POST /api/v1/agents/:name/interrupt —— 复刻 Discord ⚡ 打断按钮

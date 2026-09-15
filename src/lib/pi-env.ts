@@ -270,6 +270,28 @@ export function snapshotIsFresh(snap: PiRuntimeSnapshot | null, now = Date.now()
  * 而不是先建出半成品再超时、或让人选了一个点了才报错的选项。
  * 可用 `PI_BIN` 覆盖二进制名/路径（测试与自定义安装位置用）。
  */
+/** 网页命令面板的形状（与 bridge/slash-registry 的 AgentCommandInfo 结构兼容，
+ *  但不 import 它 —— 避免 lib ← bridge 的反向依赖） */
+export interface PiCommandInfo {
+  name: string;
+  invokeName: string;
+  description: string;
+  scope: string;
+}
+
+/**
+ * Pi agent 实际可用的 slash 命令（来自扩展写的运行时快照）。
+ * Pi 没有 Claude Code 的 skills/plugins 目录，命令来自它加载的包与扩展，
+ * 只有扩展的 `getCommands()` 知道真实清单 —— 所以 Command 面板必须读快照，
+ * 不能沿用 CC 的 skills 扫描（否则面板里全是 Pi 上不存在的命令，反之亦然）。
+ */
+export function piCommandsFor(agent: string, home = homedir()): PiCommandInfo[] {
+  const snap = readPiRuntimeSnapshot(agent, home);
+  return (snap?.commands || [])
+    .filter((n) => typeof n === "string" && n.trim())
+    .map((name) => ({ name, invokeName: name, description: "", scope: "pi" }));
+}
+
 export async function piAvailable(): Promise<boolean> {
   const bin = process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi";
   const finder = process.platform === "win32" ? "where" : "which";
