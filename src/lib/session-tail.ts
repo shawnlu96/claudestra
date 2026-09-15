@@ -16,6 +16,8 @@
  * 256KB 窗内 0 条真实对话 → 退 mtime → CC 一 touch 就顶到列表第一。
  */
 
+import { translateSessionLine } from "./session-source.js";
+
 export interface SessionTailInfo {
   /** 最后一条真实对话(user/assistant)的时间；窗内找不到为 null（**不退 mtime**） */
   convTs: number | null;
@@ -40,7 +42,7 @@ const CMD_RECORD_RE = /^\s*<(command-name|command-message|local-command-stdout|l
 const NO_RESPONSE_RE = /^\s*No response requested\.?\s*$/;
 
 /** 逆序扫描一段 jsonl 文本，取每个字段的首个命中（= 时间上最后一条） */
-export function scanSessionTail(text: string): SessionTailInfo {
+export function scanSessionTail(text: string, runtime?: string): SessionTailInfo {
   const lines = text.split("\n");
   let convTs: number | null = null;
   let ctxTokens: number | null = null;
@@ -56,7 +58,9 @@ export function scanSessionTail(text: string): SessionTailInfo {
     const line = lines[i].trim();
     if (!line) continue;
     try {
-      const rec = JSON.parse(line);
+      // v2.23+ runtime 感知：Pi 的行在这里归一（usage 键名、model 位置、thinkingLevel）
+      const rec = translateSessionLine(runtime, line);
+      if (!rec) continue;
       // compact 边界比最近一条 assistant 更新时,占用以 postTokens 为准——
       // 否则压缩刚完、新回合未跑的窗口里,轮询会把 ctx 徽章顶回压缩前的值
       if (ctxTokens === null && rec.type === "system" && rec.subtype === "compact_boundary") {
@@ -83,6 +87,15 @@ export function scanSessionTail(text: string): SessionTailInfo {
           model = m;
           const t = Date.parse(rec.timestamp);
           modelTs = Number.isFinite(t) ? t : null;
+        }
+      }
+      // v2.23+ Pi:思考档位是独立记录(thinking_level_change),不是命令自述
+      if (effort === null && rec.type === "system" && rec.subtype === "thinking_level_change") {
+        const lvl = rec.thinkingLevel;
+        if (typeof lvl === "string" && lvl) {
+          effort = lvl;
+          const t = Date.parse(rec.timestamp);
+          effortTs = Number.isFinite(t) ? t : null;
         }
       }
       // 会话内 /effort 切换:stdout 自述("Kept/Set effort level as/to xxx")

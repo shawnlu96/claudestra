@@ -11,14 +11,30 @@
  * 源文件更大（内容更多）时覆盖，缩水/丢失不回写。
  */
 
-import { existsSync } from "fs";
+import { agentRuntime } from "./registry.js";
+import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
+import { existsSync, readdirSync } from "fs";
 import { copyFile, mkdir, readdir, stat } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
 
 export const ARCHIVE_ROOT = join(
-  process.env.HOME || "~", ".claude-orchestrator", "archive",
+  process.env.HOME || "~",
+  ".claude-orchestrator",
+  "archive",
 );
+
+/**
+ * 「归档」类别区（v2.23+）—— 网页侧栏那份列表的唯一来源。
+ *
+ * 与 ARCHIVE_ROOT 的区别（owner 2026-09-14 纠正两次后定的）：
+ *   - ARCHIVE_ROOT/<agent>/     自动快照：每日兜底给**在跑** agent 做的安全副本、
+ *                               kill/fork/adopt 退役时的快照 —— 防丢机制，不进「归档」栏
+ *   - ARCHIVE_ROOT/archived/    **用户手动归档**的会话本体：归档 = 把会话移进来，
+ *                               它从此不在工作列表/未纳管列表；内容照旧可读
+ * 归档是**类别**不是台账：目录里的文件本身就是记录，没有额外索引。
+ */
+export const USER_ARCHIVE_ROOT = `${ARCHIVE_ROOT}/archived`;
 
 export interface ArchiveResult {
   ok: boolean;
@@ -41,8 +57,36 @@ async function copyIfLarger(src: string, dest: string): Promise<boolean> {
   }
 }
 
+/** Pi 的子代理产物：<stem>/<runId>/run-N/session.jsonl → 归档用的 id 与路径 */
+function listPiSubagentJsonls(mainPath: string): Array<{ id: string; path: string }> {
+  const stem = mainPath.replace(/\.jsonl$/, "");
+  const out: Array<{ id: string; path: string }> = [];
+  let runIds: string[];
+  try {
+    runIds = readdirSync(stem).filter((n) => !n.startsWith("."));
+  } catch {
+    return out;
+  }
+  for (const runId of runIds) {
+    let runs: string[];
+    try {
+      runs = readdirSync(join(stem, runId)).filter((n) => n.startsWith("run-"));
+    } catch {
+      continue; // subagent-artifacts 之类的扁平产物目录，跳过
+    }
+    for (const run of runs.sort()) {
+      const p = join(stem, runId, run, "session.jsonl");
+      if (!existsSync(p)) continue;
+      // ⚠ 同一 runId 可能有 run-0/run-1…：id 带上 run 序号，避免互相覆盖
+      out.push({ id: runs.length > 1 ? `${runId}-${run}` : runId, path: p });
+    }
+  }
+  return out;
+}
+
 /**
- * 归档一个 agent 的某个 session：主 jsonl + subagents/*.jsonl。
+ * 归档一个 agent 的某个 session：主 jsonl + subagents/*.jsonl（Pi 的子代理产物会
+ * 落成与 Claude Code 同构的布局，见下方 listPiSubagentJsonls）。
  * 落点 ~/.claude-orchestrator/archive/<agent>/<sessionId>[.jsonl|/subagents/]。
  * 源不存在（已被 CC 清理）→ ok:false 但不抛错，调用方 best-effort。
  */
@@ -50,7 +94,7 @@ export async function archiveSession(
   agentName: string,
   cwd: string | undefined,
   sessionId: string,
-  opts: { archiveRoot?: string; srcPath?: string } = {},
+  opts: { archiveRoot?: string; srcPath?: string; runtime?: string } = {},
 ): Promise<ArchiveResult> {
   // typeof 守卫(peer 2026-08-09):调用方把非字符串(如误传 opts 对象)落到
   // sessionId 位时,下面的路径拼接会得到必不存在的路径 → 误报「源已被 CC 清理」,
@@ -58,8 +102,12 @@ export async function archiveSession(
   if (typeof sessionId !== "string" || !sessionId) {
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
   }
-  let src = opts.srcPath ?? (cwd ? projectJsonlPath(cwd, sessionId) : "");
-  if (!src || !existsSync(src)) src = findJsonlBySessionId(sessionId) ?? "";
+  // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/<cwd编码>/ 下，
+  // 文件名带时间戳前缀 ⇒ 只能扫目录（sessionJsonlPath 返回 null 即未找到）
+  const piRuntime = agentRuntime({ runtime: opts.runtime }) === "pi";
+  let src = opts.srcPath ?? "";
+  if (!src && cwd) src = piRuntime ? (sessionJsonlPath(opts.runtime, cwd, sessionId) ?? "") : projectJsonlPath(cwd, sessionId);
+  if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(opts.runtime, sessionId) ?? "";
   if (!src || !existsSync(src)) {
     return { ok: false, archived: [], note: "源 jsonl 不存在（可能已被 CC 清理）" };
   }
@@ -72,6 +120,16 @@ export async function archiveSession(
   if (await copyIfLarger(src, destMain)) archived.push(destMain);
 
   // subagents 对话（与主会话同级的 <sessionId>/subagents/ 目录）
+  // Pi 的子代理产物布局与 CC 不同：<会话 stem>/<runId>/run-N/session.jsonl。
+  // 这里把它们**落成与 CC 同构**的 <sid>/subagents/<runId>[-runN].jsonl，好让
+  // 历史面板（只扫 *.jsonl）零改动就能读。
+  const piSubFiles = piRuntime ? listPiSubagentJsonls(src) : [];
+  for (const { id, path: subPath } of piSubFiles) {
+    const destSub = join(dir, sessionId, "subagents");
+    await mkdir(destSub, { recursive: true });
+    const dest = join(destSub, `${id}.jsonl`);
+    if (await copyIfLarger(subPath, dest)) archived.push(dest);
+  }
   const subDir = join(src.replace(/\.jsonl$/, ""), "subagents");
   if (existsSync(subDir)) {
     const destSub = join(dir, sessionId, "subagents");

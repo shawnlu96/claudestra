@@ -60,6 +60,7 @@ import {
   handleMgmtSelect,
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
+import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
@@ -168,7 +169,7 @@ import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
-import { readRegistryAgents } from "./lib/registry.js";
+import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { readProjects } from "./lib/projects.js";
 import {
   tmuxCapture,
@@ -212,6 +213,10 @@ interface ClientInfo {
    *  ping，所以活着的连接最多 25s 就会刷新一次）。目前仅用于 register 冲突时打印
    *  旧连接的 idle 时长 —— 用来事后判断它当时是活的还是僵尸。 */
   lastSeen: number;
+  /** v2.23+ 运行时（Pi 侧在 register 帧自报；Claude Code 侧不发 = undefined） */
+  runtime?: string;
+  /** v2.23+ Pi 自报的会话文件路径（Pi 文件名带时间戳，靠 cwd 推算不出来） */
+  sessionFile?: string;
 }
 
 // ============================================================
@@ -765,17 +770,24 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   ) {
     try {
       let win: string | null = null;
+      let targetRuntime: AgentRuntime = "claude-code";
       if (to.channelId === CONTROL_CHANNEL_ID) win = `${MASTER_SESSION}:0`;
       else {
         const reg = (await readRegistryAgents()).find((a) => a.channelId === to.channelId);
-        if (reg) win = windowTarget(reg.name);
+        if (reg) {
+          win = windowTarget(reg.name);
+          targetRuntime = agentRuntime(reg);
+        }
       }
       const tail10 = win
         ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
         : "";
       const working = paneLooksWorking(tail10) || getAgentStatus(evAgent) === "thinking";
       // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
-      if (win && working && getAgentStatus(evAgent) !== "compacting") {
+      // v2.23+ Pi:**人类消息一律不打断** —— Pi 扩展能把消息 steer 进正在跑的回合
+      // (pi.sendUserMessage deliverAs:"steer"),C-c 反而把活干到一半的回合掐了
+      // (2026-09-14 实测日志「⚡ 抢占打断 agent-claudestraworker」)。CC 保持原样。
+      if (win && working && targetRuntime !== "pi" && getAgentStatus(evAgent) !== "compacting") {
         lastPreemptAt.set(to.channelId, Date.now());
         await tmuxRaw(["send-keys", "-t", win, "C-c"]);
         recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
@@ -824,7 +836,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
           if (reg?.cwd && reg.sessionId) {
             const cwd = reg.cwd.replace(/^~/, process.env.HOME || "~");
             console.log(`🩹 watcher 缺位,按 registry 重建: ${reg.name} (${reg.sessionId.slice(0, 8)})`);
-            startWatching(reg.name, cwd, reg.sessionId, to.channelId, discord);
+            startWatching(reg.name, cwd, reg.sessionId, to.channelId, discord, { runtime: reg.runtime });
           }
         } catch { /* 自愈失败不影响消息投递 */ }
       })();
@@ -2768,6 +2780,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         channelId: msg.channelId,
         userId: msg.userId,
         cwd: msg.cwd,
+        // v2.23+ Pi 侧在 register 帧里自报运行时与会话文件（Pi 的文件名带时间戳，
+        // 靠 cwd 推算不出来，这是最省事也最准的真源）
+        runtime: msg.runtime,
+        sessionFile: msg.sessionFile,
         lastSeen: Date.now(),
       });
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
@@ -2786,7 +2802,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               const agent = (regResult.agents || []).find((a: any) => a.channelId === msg.channelId);
               if (agent?.sessionId && agent?.project) {
                 const cwd = agent.project.replace(/^~/, process.env.HOME || "~");
-                startWatching(agent.name, cwd, agent.sessionId, msg.channelId, discord);
+                startWatching(agent.name, cwd, agent.sessionId, msg.channelId, discord, {
+                  runtime: agent.runtime ?? msg.runtime,
+                  sessionFile: msg.sessionFile,
+                });
                 return;
               }
             } catch { /* registry 竞写等瞬时错，下一轮再试 */ }
@@ -3183,6 +3202,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               purpose: r.purpose || "",
               status: r.status || "unknown",
               online: online(r.channelId),
+              // v2.23+ 运行时：同 project 里可能既有 Claude Code agent 也有 Pi 会话，
+              // 工具集不同（Pi 侧没有 Task/子代理），派活前该看得到
+              runtime: r.runtime === "pi" ? "pi" : "claude-code",
             }));
         const self = regs.find((r) => r.channelId === fromChannelId);
         const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;
@@ -3472,25 +3494,32 @@ async function inferInboundSourceFromJsonl(channelId: string): Promise<"api" | u
   try {
     let cwd: string | undefined;
     let sessionId: string | undefined;
+    let runtime: string | undefined;
     if (channelId === CONTROL_CHANNEL_ID) {
       cwd = MASTER_DIR;
-      sessionId = latestSessionIdForCwd(cwd);
+      sessionId = latestSessionIdForCwd(cwd, "claude-code");
+      runtime = "claude-code";
     } else {
       const reg = (await readRegistryAgents()).find((a) => a.channelId === channelId);
       cwd = reg?.cwd;
       sessionId = reg?.sessionId;
+      runtime = reg?.runtime;
     }
     if (!cwd || !sessionId) return undefined;
-    const f = Bun.file(projectJsonlPath(cwd, sessionId));
+    // v2.23+ runtime 感知：Pi 的会话文件要扫目录定位、行要翻译（Pi 的 user 记录
+    // 不带 "type":"user" 字样，原来的字符串预筛会把整个会话判成"没有入站痕迹"）
+    const path = sessionJsonlPath(runtime, cwd, sessionId);
+    if (!path) return undefined;
+    const f = Bun.file(path);
     const size = f.size;
     if (!size) return undefined;
     const start = Math.max(0, size - 256 * 1024);
     const lines = (await f.slice(start, size).text()).split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i].includes('"type":"user"')) continue;
+      if (!lines[i].trim()) continue;
       try {
-        const e = JSON.parse(lines[i]);
-        if (e.type !== "user") continue;
+        const e = translateSessionLine(runtimeForSessionPath(path), lines[i]);
+        if (!e || e.type !== "user") continue;
         const c = e.message?.content;
         const txt =
           typeof c === "string"
@@ -4147,14 +4176,16 @@ function extractControlToken(req: Request, url: URL): string | null {
  *   -> stopWatchingByChannel + startWatching 重绑 jsonl-watcher（否则盯死文件，工具流断掉）。
  * 超时（2min，比如该 CC 版本 /clear 不轮转 session）则放弃，watcher 维持原样。
  */
-function scheduleClearRotation(agentName: string, channelId: string, cwd: string, oldSid?: string) {
+function scheduleClearRotation(
+  agentName: string, channelId: string, cwd: string, oldSid?: string, runtime?: string,
+) {
   const deadline = Date.now() + 120_000;
-  const beforeSids = new Set(listSessionIdsForCwd(cwd)); // clear 前的会话快照
+  const beforeSids = new Set(listSessionIdsForCwd(cwd, runtime)); // clear 前的会话快照
   const tick = async () => {
     try {
       // 只认领快照外的新 sid（排除同 cwd 其他 agent 一直在写的既有 session）；
       // 列表 mtime 降序，[0] 是最新出现的那个新会话。
-      const sid = listSessionIdsForCwd(cwd).find((s) => !beforeSids.has(s) && s !== oldSid);
+      const sid = listSessionIdsForCwd(cwd, runtime).find((s) => !beforeSids.has(s) && s !== oldSid);
       if (sid) {
         const listResult = await runManager("list");
         const ownedByOther = ((listResult.agents || []) as any[]).some(
@@ -4164,7 +4195,7 @@ function scheduleClearRotation(agentName: string, channelId: string, cwd: string
           const r = await runManager("set-session", agentName, sid);
           if (r?.ok) {
             stopWatchingByChannel(channelId);
-            startWatching(agentName, cwd, sid, channelId, discord);
+            startWatching(agentName, cwd, sid, channelId, discord, { runtime: clients.get(channelId)?.runtime });
             console.log(`🧹 clear 轮转完成 agent=${agentName} ${oldSid?.slice(0, 8) ?? "?"}->${sid.slice(0, 8)}`);
           } else {
             console.error(`🧹 clear 轮转 set-session 失败 agent=${agentName}:`, r?.error);
@@ -4204,14 +4235,17 @@ async function maybeHealRotatedSession(channelId: string) {
     if (!me?.cwd || !me.sessionId) return;
     const cwd = me.cwd.replace(/^~/, process.env.HOME || "~");
     // 快路径（绝大多数回合）：registry session 本回合有写入 → 一切正常
+    const mePath = sessionJsonlPath(me.runtime, cwd, me.sessionId);
     try {
-      if (Date.now() - statSync(projectJsonlPath(cwd, me.sessionId)).mtimeMs < ROTATION_FRESH_MS) return;
+      if (mePath && Date.now() - statSync(mePath).mtimeMs < ROTATION_FRESH_MS) return;
     } catch { /* registry session 文件已消失 → 继续找真身 */ }
-    const newest = listSessionIdsForCwd(cwd).find((s) => s !== me.sessionId); // mtime 降序
+    const newest = listSessionIdsForCwd(cwd, me.runtime).find((s) => s !== me.sessionId); // mtime 降序
     if (!newest) return;
+    const newestPath = sessionJsonlPath(me.runtime, cwd, newest);
     let newestMtime = 0;
     try {
-      newestMtime = statSync(`${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}/${newest}.jsonl`).mtimeMs;
+      if (!newestPath) return;
+      newestMtime = statSync(newestPath).mtimeMs;
     } catch { return; }
     if (Date.now() - newestMtime > ROTATION_FRESH_MS) return; // 没有本回合在写的新文件
     if (agents.some((a) => a.name !== me.name && a.sessionId === newest)) return; // ownedByOther

@@ -1,3 +1,4 @@
+import { rosterLine } from "../src/lib/projects.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
@@ -135,5 +136,26 @@ describe("isMisfiledByUmbrella(v2.21.3 傘形根误归属识别)", () => {
     const mixed = { ...shawn, dirs: [HOME, `${HOME}/repos/terrarium`] };
     expect(isMisfiledByUmbrella(mixed, `${HOME}/repos/terrarium`)).toBe(false);
     expect(isMisfiledByUmbrella(mixed, `${HOME}/repos/router`)).toBe(true);
+  });
+});
+
+describe("rosterLine（v2.23+ 花名册行：运行时标识）", () => {
+  test("Claude Code 是默认运行时，不加后缀（既有注入串逐字节不变）", () => {
+    expect(rosterLine("worker-a", "测试", undefined)).toBe("worker-a(测试)");
+    expect(rosterLine("worker-a", "测试", "claude-code")).toBe("worker-a(测试)");
+  });
+
+  test("Pi 会话带 [Pi] 标识（模型据此知道同事工具集不同）", () => {
+    expect(rosterLine("worker-pi", "回归", "pi")).toBe("worker-pi(回归)[Pi]");
+  });
+
+  test("无职责时不出现空括号", () => {
+    expect(rosterLine("worker-a", "", undefined)).toBe("worker-a");
+    expect(rosterLine("worker-pi", "", "pi")).toBe("worker-pi[Pi]");
+  });
+
+  test("职责超长截断到 40 字（与既有行为一致）", () => {
+    const long = "x".repeat(60);
+    expect(rosterLine("a", long, undefined)).toBe(`a(${"x".repeat(40)})`);
   });
 });

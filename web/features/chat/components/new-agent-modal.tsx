@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 
@@ -47,6 +47,25 @@ export function NewAgentModal({
   const [effort, setEffort] = useState("");
   // v2.21+ project 归属:"" = 自动(按目录);选定后目录变下拉(project 的 dirs + 自定义)
   const [project, setProject] = useState("");
+  // v2.23+ 运行时：Pi coding agent（工具集与 Claude Code 不同）+ 它的能力档案
+  const [runtime, setRuntime] = useState("");
+  // 这台机器有没有装 Pi：没有就**不显示任何 Pi 入口**（owner 2026-09-14 要求
+  // 「让没装 pi 的人无感」）。失败/桥接不可达一律当没有 —— 安全方向（宁可少显示，
+  // 也不给一个点了才报错的选项）。
+  const [piAvailable, setPiAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/capabilities")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { data?: { piAvailable?: boolean } } | null) => {
+        if (alive) setPiAvailable(j?.data?.piAvailable === true);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const [piBase, setPiBase] = useState("");
   const [dirCustom, setDirCustom] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -63,6 +82,8 @@ export function NewAgentModal({
     setEffort("");
     setProject("");
     setDirCustom(false);
+    setRuntime("");
+    setPiBase("");
     setError("");
     setBusy(false);
   };
@@ -100,6 +121,8 @@ export function NewAgentModal({
       model: model || undefined,
       effort: effort || undefined,
       project: project || undefined,
+      runtime: runtime || undefined,
+      piBase: runtime === "pi" && piBase ? piBase : undefined,
     });
     setBusy(false);
     if (res.ok) {
@@ -115,7 +138,9 @@ export function NewAgentModal({
       <div className="panel-pop modal-box">
         <h3 className="text-lg font-semibold">{t("新建会话")}</h3>
         <p className="mt-1 text-xs opacity-60">
-          {t("在指定目录起一个 Claude Code agent（经 Bridge）。")}
+          {runtime === "pi" && piAvailable
+            ? t("在指定目录起一个 Pi coding agent（经 Bridge）。工具集与 Claude Code 不同。")
+            : t("在指定目录起一个 Claude Code agent（经 Bridge）。")}
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
@@ -218,6 +243,40 @@ export function NewAgentModal({
               </button>
             </div>
           </label>
+          {piAvailable ? (
+          <label className="form-control">
+            <span className="label-text mb-1 text-sm">{t("运行时")}</span>
+            <select
+              className="select select-bordered select-sm w-full"
+              value={runtime}
+              disabled={busy}
+              onChange={(e) => {
+                setRuntime(e.target.value);
+                if (e.target.value !== "pi") setPiBase("");
+              }}
+            >
+              <option value="">{t("Claude Code（默认）")}</option>
+              <option value="pi">Pi coding agent</option>
+            </select>
+          </label>
+          ) : null}
+          {runtime === "pi" ? (
+            <label className="form-control">
+              <span className="label-text mb-1 text-sm">{t("能力档案")}</span>
+              <select
+                className="select select-bordered select-sm w-full"
+                value={piBase}
+                disabled={busy}
+                onChange={(e) => setPiBase(e.target.value)}
+              >
+                <option value="">{t("继承全局（你桌面装的那套扩展）")}</option>
+                <option value="minimal">{t("最小集（只带内置工具 + 通道）")}</option>
+              </select>
+              <span className="mt-1 text-[11px] leading-snug opacity-45">
+                {t("最小集不继承 ~/.pi/agent 里的包（联网搜索、子代理等），cron / 无人值守场景更合适。")}
+              </span>
+            </label>
+          ) : null}
           <div className="grid grid-cols-2 gap-3">
             <label className="form-control">
               <span className="label-text mb-1 text-sm">{t("模型")}</span>

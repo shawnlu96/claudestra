@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { MODEL_OPTIONS, RUNTIME_EFFORT_OPTIONS, modelLabel } from "../claude-options";
+import { PiModelSwitcher } from "./pi-model-switcher";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -32,6 +33,14 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   }, [open]);
 
   if (agent.status === "stopped") return null;
+
+  // v2.23+ Pi 会话走自己的切换器：模型来自 provider 配置（models.json）而不是
+  // Claude Code 的别名表，切换走扩展命令 `/claudestra-model`、`/claudestra-thinking`
+  // 的 tmux 注入（不是 CC 的 `/model`、`/effort` 语义）。见 pi-model-switcher.tsx。
+  // 未来第三种 runtime 不加分支 ⇒ 到这里继续走下面的 CC 面板（保持现状）。
+  if (agent.runtime === "pi") {
+    return <PiModelSwitcher agent={agent} />;
+  }
 
   const apply = async (patch: { model?: string; effort?: string }) => {
     const key = patch.model ?? patch.effort ?? "";

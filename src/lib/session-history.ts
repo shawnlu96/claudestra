@@ -12,6 +12,7 @@
  * byte-offset 索引，不提前优化。
  */
 
+import { findSessionJsonlBySessionId, runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./session-source.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
@@ -269,7 +270,7 @@ const CHANNEL_WRAP_RE = /^\s*<channel\s+([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/channel
  * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。
  */
 function stripChannelHeader(body: string): string {
-  if (!/^\[(🌐|🤖|📢|📣)/.test(body)) return body;
+  if (!/^\[(🌐|🤖|🤝|📢|📣)/.test(body)) return body;
   // header 块与正文用空行分隔——兼容 LF 与 CRLF（L7：CRLF jsonl 下 "]\n\n" 匹配不到
   // 会把 framing 头留在正文）。仍要求"]"+空行做边界，不用单个换行（正文里可能出现
   // "]\n"，会误切）。
@@ -351,11 +352,16 @@ export async function listAgentSessions(
     cwd?: string;
     currentSessionId?: string;
     archiveRoot?: string;
-    /** 测试注入：live 路径推导，默认 projectJsonlPath */
+    /** 测试注入：live 路径推导，默认按 runtime 选 Claude Code / Pi */
     livePathFor?: (cwd: string, sessionId: string) => string;
+    /** v2.23+ 运行时：Pi 的会话文件在 ~/.pi/agent/sessions/ 下，文件名带时间戳 */
+    runtime?: string;
   } = {},
 ): Promise<SessionSummary[]> {
-  const livePathFor = opts.livePathFor ?? projectJsonlPath;
+  const livePathFor =
+    opts.livePathFor ??
+    ((cwd: string, sessionId: string) =>
+      sessionJsonlPath(opts.runtime, cwd, sessionId) ?? projectJsonlPath(cwd, sessionId));
   const byId = new Map<string, SessionSummary>();
 
   const archiveDir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
@@ -379,7 +385,8 @@ export async function listAgentSessions(
       // session 整体失明,web 历史停在旧归档):路径推导 miss 就按 sessionId
       // 全局扫 projects 目录——live 会话绝不因 slug 推导错误而不可见。
       if (!existsSync(lp)) {
-        const found = findJsonlBySessionId(sid);
+        // v2.23+ runtime 感知兜底：Pi 的文件名带时间戳，只能扫目录找
+        const found = findSessionJsonlBySessionId(opts.runtime, sid);
         if (!found) continue;
         lp = found;
       }
@@ -426,11 +433,13 @@ export async function readSessionHistory(
   const maxFull = opts.maxFullReadBytes ?? MAX_HISTORY_FULL_READ_BYTES;
 
   const f = Bun.file(filePath);
+  // v2.23+ 由路径判定 runtime（Pi 的会话根目录固定），解析层不必再被透传
+  const runtime = runtimeForSessionPath(filePath);
   const size = f.size;
 
   // 小文件:一次全读,total 精确。单测与绝大多数会话走这条,行为与 v1 完全一致。
   if (size <= maxFull) {
-    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn);
+    const all = parseHistoryLines((await f.text()).split("\n"), 0, fmt, detailFn, runtime);
     return sliceHistoryPage(all, limit, before, after, all.length, false);
   }
 
@@ -446,7 +455,10 @@ export async function readSessionHistory(
     const cut = Math.max(0, size - win);
     const reachedStart = cut === 0;
     const lineOffset = await countNewlinesBefore(filePath, cut);
-    const all = parseHistoryLines((await f.slice(cut).text()).split("\n"), lineOffset, fmt, detailFn);
+    // ⚠ runtime 必须传：全读分支(上面 442)传了、这里漏传的话，>16MB 的 Pi 会话会被
+    //   当成 Claude Code 行解析 → 一条都认不出来 → all.length 恒为 0 → satisfied 永远
+    //   不成立 → 扩窗一路跑到文件头，既全文读又返回空历史。
+    const all = parseHistoryLines((await f.slice(cut).text()).split("\n"), lineOffset, fmt, detailFn, runtime);
 
     let satisfied = reachedStart;
     if (!satisfied) {
@@ -481,6 +493,8 @@ function parseHistoryLines(
   lineOffset: number,
   fmt: (name: string, input: any) => string,
   detailFn: ((name: string, input: any) => string) | undefined,
+  /** v2.23+ 运行时：Pi 的行要翻译成 Claude Code 形状后再解析 */
+  runtime?: string,
 ): HistoryMessage[] {
   const all: HistoryMessage[] = [];
   // tool_use id → 工具卡：后续 user 记录里的 tool_result(is_error) 回填失败态
@@ -491,12 +505,8 @@ function parseHistoryLines(
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
     const seq = lineOffset + i;
-    let rec: any;
-    try {
-      rec = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
+    const rec: any = translateSessionLine(runtime, lines[i]);
+    if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
     if (rec.type === "system" && rec.subtype === "compact_boundary") {
@@ -903,12 +913,8 @@ export async function searchSessionHistory(
 
   for await (const { line, idx } of grepJsonlLines(filePath, q, opts.chunkBytes)) {
     if (hits.length >= maxHits) break;
-    let rec: any;
-    try {
-      rec = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const rec: any = translateSessionLine(runtimeForSessionPath(filePath), line);
+    if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
     // v2.21.4 被队列吸收的入站消息(attachment queued_command/prompt)与历史同规则可搜

@@ -340,6 +340,22 @@ async function tick(): Promise<void> {
   }
 }
 
+/**
+ * 「洪水闸」阈值（2026-09-14 owner 实报「重启 session 之后冒出来超级多 agent」）。
+ *
+ * 病灶：baseline 只能标记**扫描那一刻已存在**的文件。实测日志 22:34:43 同一秒为
+ * agent-market-maker 开了 ~330 个 subagent 活动 —— 它的 subagents 目录在
+ * restart/resume 后的首轮扫描时是空的（baseline 无物可标），随后 Claude Code
+ * 一次性把几百个**存量** subagent 文件落了盘 ⇒ 一个个都被当成「新任务」，
+ * SSE 里刷出 330 张卡，web 端后台任务面板直接淹没。
+ *
+ * 真任务不会在一个 poll（5s）窗口里冒出这么多——真工作流是陆续 spawn 的。所以
+ * 单轮单 agent 新增文件数超过这个阈值时，按存量处理（标 seen、不开流）+ 记账，
+ * 宁可少开几张卡，也不要淹没界面；门槛留得比正常爆发高（夜班工作流一次十几个
+ * subagent 是正常的）。
+ */
+const BURST_LIMIT = 30;
+
 async function tickInner(): Promise<void> {
   const agents = await watchableAgents();
 
@@ -348,6 +364,17 @@ async function tickInner(): Promise<void> {
     const first = baseline.first(agent.name, agent.sessionId);
     const subFiles = await listFiles(subagentsDirFor(agent.cwd, agent.sessionId), ".jsonl");
     const shellFiles = await listFiles(shellTasksDirFor(agent.cwd, agent.sessionId), ".output");
+    // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
+    const fresh = [...subFiles, ...shellFiles].filter((f) => !seen.has(f));
+    const suppressBurst = !first && fresh.length > BURST_LIMIT;
+    if (suppressBurst) {
+      for (const f of fresh) seen.add(f);
+      console.log(
+        `🧵 bg 洪水抑制: ${agent.name} 本轮新增 ${fresh.length} 个文件（>${BURST_LIMIT}）——` +
+          `按存量处理，不开流（多半是 restart/resume 后一次性落盘的旧 subagent）`,
+      );
+    }
+
     for (const [kind, files] of [["subagent", subFiles], ["shell", shellFiles]] as const) {
       for (const f of files) {
         if (seen.has(f)) continue;

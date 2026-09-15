@@ -14,6 +14,7 @@
  */
 
 import { hostname } from "os";
+import { execFile as execFileCb } from "node:child_process";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync, statSync, readdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "fs";
 import { join } from "path";
@@ -47,6 +48,9 @@ import {
   windowChildPids,
   killPidsEscalating,
   deadShellVerdict,
+  PI_READY_OPTION,
+  windowOption,
+  setWindowOption,
 } from "./lib/tmux-helper.js";
 import {
   buildClaudeCommand,
@@ -62,6 +66,11 @@ import {
   KNOWN_EFFORT_LEVELS,
   isKnownEffort,
 } from "./lib/claude-launch.js";
+import { buildAgentCommand } from "./lib/launch-command.js";
+import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
+import { translateSessionLine } from "./lib/session-source.js";
+import { agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveNpm } from "./lib/npm-path.js";
@@ -75,6 +84,7 @@ import {
   normalizeDir,
   isMisfiledByUmbrella,
   PROJECT_ID_RE,
+  rosterLine,
   type ProjectDef,
 } from "./lib/projects.js";
 
@@ -135,6 +145,16 @@ interface AgentInfo {
    * ⚠ 与遗留的 `project` 字段无关——那存的是创建时的原始 dir 字符串。
    */
   projectId?: string;
+  /**
+   * v2.23+ 运行时："pi" = Pi agent，缺失 = Claude Code（历史数据零迁移）。
+   * 决定用哪个启动器（lib/launch-command.ts）与怎么判就绪（tmux 标记 vs TUI 文案）。
+   */
+  runtime?: string;
+  /**
+   * v2.23+ Pi 能力档案（仅 Pi agent）：base=minimal 不继承用户全局环境，可额外挑扩展/
+   * 技能、禁工具、指定 MCP 配置。缺失 = 继承全局（引入档案之前的行为）。改完要 restart。
+   */
+  piEnv?: PiEnvProfile;
 }
 
 interface Registry {
@@ -240,6 +260,16 @@ async function windowExists(name: string): Promise<boolean> {
 }
 
 async function isAgentIdle(name: string): Promise<boolean> {
+  // v2.23+ Pi 的 TUI 不是 Claude Code 那套（没有 ❯ 提示符 / banner），paneLooksIdle
+  // 对它**恒为 false** ⇒ 每个 Pi agent 都被算成「永远在忙」：网页侧栏黄点常驻、
+  // 「工作中」不下线、输入框一直显示「思考中…」（2026-09-14 owner 实测）。
+  // Pi 的回合状态由扩展经 /hook 上报 bridge（agent_settled → Stop），而 CLI 进程
+  // 看不到那份内存状态 ⇒ 这里对 Pi 一律答「空闲」，忙碌只由 hook 信号决定；
+  // 投递侧也因此不会对 Pi 发 Ctrl+C 抢占（Pi 用 deliverAs:"steer" 处理回合中插话）。
+  const bare = name.replace(/^agent-/, "");
+  const reg = await loadRegistry();
+  const info = reg.agents?.[name] ?? reg.agents?.[bare] ?? reg.agents?.[`agent-${bare}`];
+  if (agentRuntime(info) === "pi") return true;
   return isIdle(windowTarget(name));
 }
 
@@ -262,6 +292,8 @@ interface ClaudeSession {
   slug: string;
   modifiedAt: Date;
   lastUserMessage: string;
+  /** v2.23+ 运行时（缺省 = claude-code）。会话列表两种 runtime 合并展示 */
+  runtime?: string;
 }
 
 async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
@@ -314,36 +346,7 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
         }
 
         // 从文件尾部读取最后一条用户文字消息（跳过 tool_result）
-        let lastUserMessage = "";
-        try {
-          const size = fileStat.size;
-          const tailStart = Math.max(0, size - 500_000);
-          const tailChunk = await fd.slice(tailStart, size).text();
-          const tailLines = tailChunk.split("\n").filter((l) => l.trim());
-          for (let i = tailLines.length - 1; i >= 0; i--) {
-            try {
-              const entry = JSON.parse(tailLines[i]);
-              if (entry.type !== "user") continue;
-              const content = entry.message?.content;
-              let text = "";
-              if (typeof content === "string") {
-                text = content;
-              } else if (Array.isArray(content)) {
-                const textBlock = content.find(
-                  (b: any) => b.type === "text" && b.text?.length > 3
-                );
-                if (textBlock) text = textBlock.text;
-              }
-              if (text && text.length > 3) {
-                // 提取 <channel> 标签内的实际内容
-                const channelMatch = text.match(/<channel[^>]*>([\s\S]*?)<\/channel>/);
-                if (channelMatch) text = channelMatch[1].trim();
-                lastUserMessage = text.replace(/\n/g, " ").slice(0, 80);
-                break;
-              }
-            } catch { /* non-critical */ }
-          }
-        } catch { /* non-critical */ }
+        const lastUserMessage = await lastUserText(filePath, undefined, fileStat.size);
 
         sessions.push({ sessionId, cwd, slug, modifiedAt: fileStat.mtime, lastUserMessage });
       } catch { /* non-critical */ }
@@ -352,6 +355,106 @@ async function scanClaudeSessions(search?: string): Promise<ClaudeSession[]> {
 
   sessions.sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
   return sessions;
+}
+
+/** 会话尾部最后一条「用户说的话」（两种 runtime 共用；Pi 的行先翻译成 Claude Code 形状） */
+async function lastUserText(filePath: string, runtime: string | undefined, size: number): Promise<string> {
+  try {
+    const fd = Bun.file(filePath);
+    const tailStart = Math.max(0, size - 500_000);
+    const tailChunk = await fd.slice(tailStart, size).text();
+    const tailLines = tailChunk.split("\n").filter((l) => l.trim());
+    for (let i = tailLines.length - 1; i >= 0; i--) {
+      const entry = translateSessionLine(runtime, tailLines[i]);
+      if (!entry || entry.type !== "user") continue;
+      const content = entry.message?.content;
+      let text = "";
+      if (typeof content === "string") {
+        text = content;
+      } else if (Array.isArray(content)) {
+        const textBlock = content.find((b: any) => b.type === "text" && b.text?.length > 3);
+        if (textBlock) text = textBlock.text;
+      }
+      if (text && text.length > 3) {
+        // Claude Code 的入站消息包在 <channel> 里；Pi 侧是裸文本（注入头自己带）
+        const channelMatch = text.match(/<channel[^>]*>([\s\S]*?)<\/channel>/);
+        if (channelMatch) text = channelMatch[1].trim();
+        return text.replace(/\n/g, " ").slice(0, 80);
+      }
+    }
+  } catch { /* non-critical */ }
+  return "";
+}
+
+/**
+ * v2.23+ 扫本机**所有** Pi 会话（~/.pi/agent/sessions/<cwd编码>/<时间戳>_<id>.jsonl）。
+ *
+ * 为什么需要：Claudestra 只「管」自己创建的 agent，但**看见**不该受这个限制 ——
+ * Claude Code 的历史会话一直能在会话列表里翻（manager sessions + Discord 面板），
+ * Pi 的却完全不出现。pi-web 起的会话、终端手敲的 pi 会话都是"机器上正在发生的对话"，
+ * 会话记录那刀已经能读它们了，这里只补「进列表」。
+ *
+ * 注：这些会话**没法收消息**（没挂 Claudestra 扩展就没有注入通道），但可以
+ * `manager resume <名字> <sessionId> --runtime pi` 把它收编成正式 agent。
+ */
+async function scanPiSessions(search?: string): Promise<ClaudeSession[]> {
+  const root = join(piAgentDir(), "sessions");
+  if (!existsSync(root)) return [];
+  const sessions: ClaudeSession[] = [];
+  const dirs = await readdir(root).catch(() => [] as string[]);
+
+  for (const dir of dirs) {
+    if (!dir.startsWith("--")) continue;
+    const dirPath = join(root, dir);
+    const files = await readdir(dirPath).catch(() => [] as string[]);
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const sessionId = piSessionIdFromFilename(file);
+      if (!sessionId) continue;
+      const filePath = join(dirPath, file);
+      const fileStat = await stat(filePath).catch(() => null);
+      if (!fileStat) continue;
+
+      // cwd 只能从 header 行读（目录编码把 `/` 换成 `-`，不可逆）
+      let cwd = "";
+      try {
+        const head = await Bun.file(filePath).slice(0, 4096).text();
+        for (const line of head.split("\n")) {
+          if (!line.includes('"cwd"')) continue;
+          const obj = JSON.parse(line);
+          if (obj?.type === "session" && typeof obj.cwd === "string") {
+            cwd = obj.cwd;
+            break;
+          }
+        }
+      } catch { /* non-critical */ }
+      if (!cwd) continue;
+
+      if (search) {
+        const q = search.toLowerCase();
+        if (!`${cwd} ${sessionId}`.toLowerCase().includes(q)) continue;
+      }
+
+      sessions.push({
+        sessionId,
+        cwd,
+        slug: cwd.split("/").filter(Boolean).pop() || "",
+        modifiedAt: fileStat.mtime,
+        lastUserMessage: await lastUserText(filePath, "pi", fileStat.size),
+        runtime: "pi",
+      });
+    }
+  }
+  return sessions;
+}
+
+/** 两种 runtime 的会话一起扫（会话列表 / 按 sessionId 找目录 都用它） */
+async function scanAllSessions(search?: string): Promise<ClaudeSession[]> {
+  const [cc, pi] = await Promise.all([scanClaudeSessions(search), scanPiSessions(search)]);
+  return [
+    ...cc.map((s) => ({ ...s, runtime: s.runtime ?? "claude-code" })),
+    ...pi,
+  ].sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
 }
 
 // ============================================================
@@ -537,6 +640,36 @@ function extractBoolFlag(args: string[], flag: string): { rest: string[]; value:
   return { rest, value };
 }
 
+/** 抽取可重复的 `--flag <value>` / `--flag=value`（--add-ext 这类用） */
+function extractMultiFlag(args: string[], flag: string): { rest: string[]; values: string[] } {
+  const rest: string[] = [];
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === flag) {
+      const v = args[++i];
+      if (v) values.push(v);
+    } else if (a.startsWith(`${flag}=`)) {
+      const v = a.slice(flag.length + 1);
+      if (v) values.push(v);
+    } else rest.push(a);
+  }
+  return { rest, values };
+}
+
+/** 抽取 `--flag <value>` / `--flag=value`（与 extractBoolFlag 同风格，--runtime 用） */
+function extractStringFlag(args: string[], flag: string): { rest: string[]; value?: string } {
+  const rest: string[] = [];
+  let value: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === flag) value = args[++i] || undefined;
+    else if (a.startsWith(`${flag}=`)) value = a.slice(flag.length + 1) || undefined;
+    else rest.push(a);
+  }
+  return { rest, value };
+}
+
 // ============================================================
 // 命令实现
 // ============================================================
@@ -598,9 +731,17 @@ async function buildProjectContext(proj: ProjectDef, selfTmuxName: string): Prom
   const reg = await loadRegistry();
   const mates = Object.entries(reg.agents)
     .filter(([n, a]) => a.projectId === proj.id && a.status === "active" && n !== selfTmuxName)
-    .map(([n, a]) => `${n}${a.purpose ? `(${a.purpose.slice(0, 40)})` : ""}`);
+    .map(([n, a]) => rosterLine(n, a.purpose || "", agentRuntime(a)));
+  const hasPiMate = Object.entries(reg.agents).some(
+    ([n, a]) => a.projectId === proj.id && a.status === "active" && n !== selfTmuxName && agentRuntime(a) === "pi",
+  );
   const parts = [`你属于 project「${proj.name}」(${proj.id})。`, `项目目录: ${proj.dirs.join(", ")}。`];
   if (proj.description) parts.push(`项目说明: ${proj.description.slice(0, 120)}。`);
+  // 不标出来的话，Claude Code agent 会默认同事的工具集跟自己一样（Pi 侧没有
+  // Task/子代理、没有它那些 MCP），派活容易踩空
+  if (hasPiMate) {
+    parts.push("带 [Pi] 的同事跑在 Pi coding agent 上（工具集与 Claude Code 不同，别假设它有你有的工具）；派活/协作仍用 send_to_agent。");
+  }
   parts.push(
     mates.length
       ? `同项目 agent: ${mates.join("、")}——跨仓/跨职责协作用 send_to_agent 找它们,也可用 project_info 工具随时查项目成员与目录。`
@@ -782,8 +923,32 @@ async function cmdCreate(
   model?: string,
   external?: boolean,
   projectFlag?: string,
+  runtimeFlag?: string,
+  piBaseFlag?: string,
 ) {
   assertValidNewName(name);
+  if (runtimeFlag && runtimeFlag !== "pi" && runtimeFlag !== "claude-code") {
+    output({ ok: false, error: `未知的 runtime: "${runtimeFlag}"。可用: claude-code, pi` });
+    return;
+  }
+  if (piBaseFlag && piBaseFlag !== "minimal" && piBaseFlag !== "inherit") {
+    output({ ok: false, error: `未知的 --pi-base: "${piBaseFlag}"。可用: inherit, minimal` });
+    return;
+  }
+  // v2.23+ Pi 会话纳管：runtime 只在这里决定「用哪个启动器 + 怎么判就绪」，
+  // 其余（频道/窗口/project/registry 形状）两条路完全一致。
+  const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
+  if (runtime === "pi" && !(await assertPiAvailable())) {
+    output({
+      ok: false,
+      error:
+        "这台机器上没有找到 pi 可执行文件 —— --runtime pi 建不出能用的 agent。" +
+        "装好 Pi 再试（或用 PI_BIN 指定路径），也可以省掉 --runtime 用默认的 Claude Code。",
+    });
+    return;
+  }
+  // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
+  const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
 
@@ -877,7 +1042,9 @@ async function cmdCreate(
     // 3. 启动 Claude Code
     const target = windowTarget(tmuxName);
     sessionId = crypto.randomUUID();
-    const cmd = buildClaudeCommand({
+    const cmd = buildAgentCommand({
+      runtime,
+      piEnv,
       channelId,
       bridgeUrl: BRIDGE_URL,
       sessionId,
@@ -898,39 +1065,44 @@ async function cmdCreate(
     await tmuxSendLine(target, cmd);
 
     // 4. 轮询等待就绪 — 与 restart 的 startClaudeInWindow 对齐（CLAUDE_READY_ROUNDS）
-    let sessionIdlePicked = false;
-    for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
-      await Bun.sleep(500);
-      const pane = await captureLast(tmuxName, 10);
-      // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不卡着等用户点按钮
-      if (detectSessionIdlePrompt(pane)) {
-        if (!sessionIdlePicked) {
-          await pickFullResume(target);
-          sessionIdlePicked = true;
-          await Bun.sleep(1500);
-        }
-        continue;
-      }
-      // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
-      const trustMoves = trustPromptMoves(pane);
-      if (trustMoves !== null) {
-        await acceptTrustPrompt(target, trustMoves);
-        await Bun.sleep(1000);
-        continue;
-      }
-      if (hasPromptToConfirm(pane)) {
-        await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+    if (runtime === "pi") {
+      ready = await waitForPiReady(tmuxName);
+    } else {
+      let sessionIdlePicked = false;
+      for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
         await Bun.sleep(500);
-        continue;
-      }
-      if (isClaudeReady(pane)) {
-        ready = true;
-        break;
+        const pane = await captureLast(tmuxName, 10);
+        // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不卡着等用户点按钮
+        if (detectSessionIdlePrompt(pane)) {
+          if (!sessionIdlePicked) {
+            await pickFullResume(target);
+            sessionIdlePicked = true;
+            await Bun.sleep(1500);
+          }
+          continue;
+        }
+        // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
+        const trustMoves = trustPromptMoves(pane);
+        if (trustMoves !== null) {
+          await acceptTrustPrompt(target, trustMoves);
+          await Bun.sleep(1000);
+          continue;
+        }
+        if (hasPromptToConfirm(pane)) {
+          await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+          await Bun.sleep(500);
+          continue;
+        }
+        if (isClaudeReady(pane)) {
+          ready = true;
+          break;
+        }
       }
     }
 
     if (!ready) {
-      await cleanup(`Claude Code 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
+      const who = runtime === "pi" ? "Pi" : "Claude Code";
+      await cleanup(`${who} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
       return;
     }
   } catch (err) {
@@ -938,8 +1110,9 @@ async function cmdCreate(
     return;
   }
 
-  // v2.5.4: 会话内补发 /model，确保 pin 真正生效（--model 对 resume 场景不可靠）
-  await enforceSessionModel(tmuxName, model);
+  // v2.5.4: 会话内补发 /model，确保 pin 真正生效（--model 对 resume 场景不可靠）。
+  // Pi 不走这条路：它的 --model 是启动期权威值，/model 在 Pi 里是另一套 slash 语义。
+  if (runtime !== "pi") await enforceSessionModel(tmuxName, model);
 
   // 6. 更新 registry（只有启动成功才落盘）
   const reg = await loadRegistry();
@@ -959,6 +1132,9 @@ async function cmdCreate(
     permissionMode: mode,
     ...(model ? { model } : {}),
     ...(external ? { external: true } : {}),
+    // 只在 Pi 时落盘；Claude Code agent 的 registry 保持逐字节不变（零迁移）
+    ...(runtime === "pi" ? { runtime } : {}),
+    ...(runtime === "pi" && piEnv ? { piEnv } : {}),
   };
   await saveRegistry(reg);
 
@@ -990,6 +1166,39 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // 「启动超时」（restart 还会误标 recreated）。
 const CLAUDE_READY_ROUNDS = 240;
 
+/**
+ * Pi 会话就绪等待：Pi 扩展在 bridge 注册成功后会往本窗口写 @claudestra_ready
+ * （见 src/pi/claudestra-extension.ts 的 markReady）。
+ *
+ * 为什么不像 Claude Code 那样认 pane 文案：isClaudeReady 认的是 CC 自己的 TUI
+ * （❯ + 权限横幅），Pi 的 UI 会随版本变；而 tmux 用户选项是**我们自己**写的，
+ * 版本无关。兜底早败：窗口回到 shell 说明 pi 进程已退出，不必等满预算。
+ */
+/**
+ * v2.23+ Pi 二进制预检：**没装 Pi 的机器上不该装出"看着建好了、其实起不来"的 agent**。
+ *
+ * 背景（owner 2026-09-14「确认一下 对于没有 pi 的用户也能正常的使用」）：create/
+ * resume 走 `--runtime pi` 时此前不检查 `pi` 是否在，无 Pi 的机器会照建频道 + 注册表
+ * 条目 + 分配 sessionId，然后卡在就绪等待上超时 —— 报错发生在最后一步、且已经留下垃圾。
+ * 这里提前拦：解析不到可执行文件就明确告诉他怎么装（或改用默认运行时）。
+ */
+async function assertPiAvailable(): Promise<boolean> {
+  return piAvailable();
+}
+
+async function waitForPiReady(name: string, rounds = CLAUDE_READY_ROUNDS): Promise<boolean> {
+  const target = windowTarget(name);
+  // restart 复用同一个窗口时，上一轮留下的标记会让我们把「还没起来」认成就绪。
+  // 先清零，再等扩展自己写 "1"。
+  await setWindowOption(target, PI_READY_OPTION, "0");
+  for (let i = 0; i < rounds; i++) {
+    if ((await windowOption(target, PI_READY_OPTION)) === "1") return true;
+    if (i > 4 && isAtShell(await captureLast(name, 3).catch(() => ""))) return false;
+    await Bun.sleep(500);
+  }
+  return false;
+}
+
 // shell 就绪轮询预算：30 轮 × 500ms = 15s（peer 2026-08-13 P0，见
 // startClaudeInWindow 注释）。实测冷启动 zsh 出提示符 2.24s，开机并发时更久；
 // 15s 对它留了 6 倍余量，而健康窗口第一拍即过，正常路径零额外开销。
@@ -1007,9 +1216,15 @@ async function cmdResume(
   // v2.7+ --fork：--fork-session 分支副本（收编野生 bg 会话 / 源 session 被
   // bg agent 占用时）。就绪后探测实际新 session id 写 registry。
   forkSession = false,
+  runtimeFlag?: string,
 ) {
-  if (!UUID_RE.test(sessionId)) {
-    throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式）`);
+  const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
+  if (runtime === "pi" && !(await assertPiAvailable())) {
+    throw new Error("这台机器上没有找到 pi 可执行文件 —— 无法用 --runtime pi 收编会话（可用 PI_BIN 指定路径，或省略 --runtime 走 Claude Code）");
+  }
+  // Pi 的会话 id 是我们自造的（--session-id 收任意合法 id），不一定是 UUID
+  if (runtime !== "pi" && !UUID_RE.test(sessionId)) {
+    throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式；Pi 会话请加 --runtime pi）`);
   }
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
@@ -1051,7 +1266,8 @@ async function cmdResume(
   // 如果没有指定目录，从 session 文件找
   let resolvedDir = dir?.replace(/^~/, process.env.HOME || "~") || "";
   if (!resolvedDir) {
-    const sessions = await scanClaudeSessions();
+    // v2.23+ 两种 runtime 都找：Pi 会话也能从列表里直接 resume 收编
+    const sessions = await scanAllSessions();
     const match = sessions.find((s) => s.sessionId === sessionId);
     if (match) {
       resolvedDir = match.cwd;
@@ -1116,9 +1332,14 @@ async function cmdResume(
     // 启动 Claude Code（resume 模式）
     const target = windowTarget(tmuxName);
     const displayName = channelName;
-    const cmd = buildClaudeCommand({
+    const cmd = buildAgentCommand({
+      runtime,
+      // 沿用 registry 里已有的能力档案（resume 不改档案，但必须复现它）
+      piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv),
       channelId,
       bridgeUrl: BRIDGE_URL,
+      // Pi 的 --session-id 是 open-or-create：同一个字段既能新建也能续上
+      sessionId,
       resumeId: sessionId,
       forkSession,
       displayName,
@@ -1133,39 +1354,44 @@ async function cmdResume(
     await tmuxSendLine(target, cmd);
 
     // 轮询等待 — 与 restart 的 startClaudeInWindow 对齐（CLAUDE_READY_ROUNDS）
-    let sessionIdlePicked = false;
-    for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
-      await Bun.sleep(500);
-      const pane = await captureLast(tmuxName, 10);
-      // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不卡着等用户点按钮
-      if (detectSessionIdlePrompt(pane)) {
-        if (!sessionIdlePicked) {
-          await pickFullResume(target);
-          sessionIdlePicked = true;
-          await Bun.sleep(1500);
-        }
-        continue;
-      }
-      // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
-      const trustMoves = trustPromptMoves(pane);
-      if (trustMoves !== null) {
-        await acceptTrustPrompt(target, trustMoves);
-        await Bun.sleep(1000);
-        continue;
-      }
-      if (hasPromptToConfirm(pane)) {
-        await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+    if (runtime === "pi") {
+      ready = await waitForPiReady(tmuxName);
+    } else {
+      let sessionIdlePicked = false;
+      for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
         await Bun.sleep(500);
-        continue;
-      }
-      if (isClaudeReady(pane)) {
-        ready = true;
-        break;
+        const pane = await captureLast(tmuxName, 10);
+        // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不卡着等用户点按钮
+        if (detectSessionIdlePrompt(pane)) {
+          if (!sessionIdlePicked) {
+            await pickFullResume(target);
+            sessionIdlePicked = true;
+            await Bun.sleep(1500);
+          }
+          continue;
+        }
+        // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
+        const trustMoves = trustPromptMoves(pane);
+        if (trustMoves !== null) {
+          await acceptTrustPrompt(target, trustMoves);
+          await Bun.sleep(1000);
+          continue;
+        }
+        if (hasPromptToConfirm(pane)) {
+          await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+          await Bun.sleep(500);
+          continue;
+        }
+        if (isClaudeReady(pane)) {
+          ready = true;
+          break;
+        }
       }
     }
 
     if (!ready) {
-      await cleanup(`Claude Code 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
+      const who = runtime === "pi" ? "Pi" : "Claude Code";
+      await cleanup(`${who} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
       return;
     }
   } catch (err) {
@@ -1173,8 +1399,9 @@ async function cmdResume(
     return;
   }
 
-  // v2.5.4: 会话内补发 /model —— resume 是 --model 失效的重灾区（session 保留原模型）
-  await enforceSessionModel(tmuxName, model);
+  // v2.5.4: 会话内补发 /model —— resume 是 --model 失效的重灾区（session 保留原模型）。
+  // Pi 不适用：它的 --model 是启动期权威值。
+  if (runtime !== "pi") await enforceSessionModel(tmuxName, model);
 
   // v2.7+ fork 模式：registry 必须记 fork 出的实际新 session id，不是源 id
   let actualSessionId = sessionId;
@@ -1202,7 +1429,7 @@ async function cmdResume(
     created: new Date().toISOString(),
     status: "active",
     channelId,
-    notes: `claude session: ${actualSessionId}${forkSession ? ` (forked from ${sessionId.slice(0, 8)})` : ""}`,
+    notes: `${runtime === "pi" ? "pi" : "claude"} session: ${actualSessionId}${forkSession ? ` (forked from ${sessionId.slice(0, 8)})` : ""}`,
     sessionId: actualSessionId,
     cwd: resolvedDir,
     displayName: channelName,
@@ -1211,6 +1438,9 @@ async function cmdResume(
     effort,
     permissionMode: mode,
     ...(model ? { model } : {}),
+    ...(runtime === "pi" ? { runtime } : {}),
+    // resume 不提供档案编辑，但**不能把已有的弄丢**（丢了下次 restart 就变回继承全局）
+    ...(runtime === "pi" && prior?.piEnv ? { piEnv: prior.piEnv } : {}),
   };
   await saveRegistry(reg);
 
@@ -1551,7 +1781,7 @@ async function pickFullResume(target: string) {
 }
 
 /** 优雅退出一个 Claude Code agent，处理所有确认弹窗 */
-async function gracefulExit(name: string): Promise<boolean> {
+async function gracefulExit(name: string, runtime: AgentRuntime = "claude-code"): Promise<boolean> {
   const target = windowTarget(name);
 
   // 阶段 1: 多次 Ctrl+C 确保打断当前操作
@@ -1568,8 +1798,9 @@ async function gracefulExit(name: string): Promise<boolean> {
   await tmuxSendEscape(target);
   await Bun.sleep(500);
 
-  // 阶段 3: 发 /exit
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", "/exit"]);
+  // 阶段 3: 发退出命令（Claude Code 是 /exit，Pi 是 /quit）
+  const exitCommand = runtime === "pi" ? "/quit" : "/exit";
+  await tmuxRaw(["send-keys", "-t", target, "-l", "--", exitCommand]);
   await Bun.sleep(100);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 
@@ -1580,6 +1811,10 @@ async function gracefulExit(name: string): Promise<boolean> {
 
     // 已经回到 shell
     if (isAtShell(pane)) return true;
+
+    // Pi：退出就是退出，没有 CC 那套「Goodbye! / 信任弹窗 / 补全列表」分支，
+    // 只等回 shell（等不到交给阶段 5 强杀）。
+    if (runtime === "pi") continue;
 
     // Goodbye! 表示 Claude Code 正在退出
     if (pane.includes("Goodbye!")) {
@@ -1723,7 +1958,8 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
 
 async function startClaudeInWindow(
   name: string,
-  claudeCmd: string
+  claudeCmd: string,
+  runtime: AgentRuntime = "claude-code",
 ): Promise<{ ready: boolean; recoveredFullSession: boolean; bgOccupied?: boolean }> {
   const target = windowTarget(name);
 
@@ -1761,6 +1997,12 @@ async function startClaudeInWindow(
   // 发送启动命令前先清掉 shell init 阶段可能存在的 Y/n 交互（oh-my-zsh / homebrew）
   await clearShellInitPrompts(target);
   await tmuxSendLine(target, claudeCmd);
+
+  // Pi：就绪判据是扩展写下的 tmux 标记（@claudestra_ready），不是 pane 文案。
+  // 不进下面那段 CC 弹窗处理——那些判据对 Pi 只会恒不命中，白等满 120s 预算。
+  if (runtime === "pi") {
+    return { ready: await waitForPiReady(name), recoveredFullSession: false };
+  }
 
   // 轮询处理各种确认提示（预算见 CLAUDE_READY_ROUNDS）
   let sessionIdlePicked = false;
@@ -1960,7 +2202,7 @@ async function cmdRestart(name?: string) {
       recreated = true;
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
-      const exited = await gracefulExit(tmuxName);
+      const exited = await gracefulExit(tmuxName, agentRuntime(info));
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
@@ -2004,14 +2246,22 @@ async function cmdRestart(name?: string) {
 
     // 2. 重新启动 Claude Code — 沿用 registry 中存储的 channelId + 权限配置
     const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
+    // v2.23+ runtime 决定用哪个启动器 + 怎么判就绪（Pi 与 Claude Code 两条路）
+    const runtime = agentRuntime(info);
     // v2.16+ purpose 注入 restart 也带上(会话虽有历史,系统提示常驻比翻聊天记录可靠);
     // resume 写入的占位 purpose("resumed: xxx")无信息量,过滤
     const purposeForInject =
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
-    const cmd = buildClaudeCommand({
+    const cmd = buildAgentCommand({
+      runtime,
+      // v2.23+ 能力档案随 registry 一起复现：restart 必须带上，否则 agent 的能力
+      // 会在重启后静默变回「继承全局」（档案形同虚设）
+      piEnv: normalizePiEnvProfile(info.piEnv),
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
       resumeId: info.sessionId,
+      // Pi 用 --session-id 续会话（open-or-create），Claude Code 用 --resume
+      sessionId: info.sessionId,
       displayName,
       disallowedPreset: info.disallowedPreset,
       disallowedRaw: info.disallowedRaw,
@@ -2026,7 +2276,7 @@ async function cmdRestart(name?: string) {
       agentName: tmuxName,
     });
 
-    let started = await startClaudeInWindow(tmuxName, cmd);
+    let started = await startClaudeInWindow(tmuxName, cmd, runtime);
 
     // v2.7+ 自愈：session 被 bg agent 占用 → --fork-session 分支副本重试，
     // 就绪后探测 fork 出的新 session id 并回写 registry（否则 watcher/下次
@@ -2135,6 +2385,32 @@ async function cmdList() {
 
   const agents: Record<string, unknown>[] = [];
 
+  // v2.23+ 大总管显式补一条：它的 tmux 窗口名就是 `master`（不带 agent- 前缀），
+  // 而 listAgentWindows 只收 agent-* ⇒ 它一直被漏掉（owner 2026-09-14「大管家怎么
+  // 没了」）。数据取 registry 的 agent-master 条目，只要窗口在就进列表。
+  try {
+    const th = await import("./lib/tmux-helper.js");
+    const winNames = (await th.tmuxRaw(["list-windows", "-t", "master", "-F", "#{window_name}"]))
+      .split("\n")
+      .map((x) => x.trim());
+    if (winNames.includes("master") && !tmuxWindows.includes("master")) {
+      const m: any = (reg as any).agents?.["agent-master"] || {};
+      agents.push({
+        name: "master",
+        channelId: m.channelId || "",
+        status: "active",
+        idle: await isAgentIdle("master"),
+        cwd: m.cwd || "",
+        runtime: m.runtime || "claude-code",
+        sessionId: m.sessionId || "",
+        purpose: m.purpose || "",
+        created: m.created || "",
+      });
+    }
+  } catch {
+    /* tmux 不可用（Web-only 等）就不补 */
+  }
+
   for (const name of tmuxWindows) {
     const idle = await isAgentIdle(name);
     const info = reg.agents[name];
@@ -2167,6 +2443,9 @@ async function cmdList() {
           idle: false,
           project: info?.project || "unknown",
           projectId: info?.projectId || null,
+          // v2.23+ 运行时标识：Pi 会话与 Claude Code agent 同属一个 project，
+          // 靠这个字段在列表面上区分（web 侧栏/面板用它显示徽章）
+          runtime: agentRuntime(info),
           cwd: info?.cwd || "",
           purpose: info?.purpose || "",
           channelId: info?.channelId || "",
@@ -2188,6 +2467,8 @@ async function cmdList() {
       idle,
       project: info?.project || "unknown",
       projectId: info?.projectId || null,
+      // v2.23+ 运行时标识（同上）
+      runtime: agentRuntime(info),
       cwd: info?.cwd || "",
       purpose: info?.purpose || "",
       channelId: info?.channelId || "",
@@ -2206,6 +2487,8 @@ async function cmdList() {
         idle: false,
         project: info.project,
         projectId: info.projectId || null,
+        // v2.23+ 运行时标识（同上）
+        runtime: agentRuntime(info),
         cwd: info.cwd || "",
         purpose: info.purpose,
         channelId: info.channelId,
@@ -2219,7 +2502,7 @@ async function cmdList() {
 }
 
 async function cmdSessions(search?: string) {
-  const sessions = await scanClaudeSessions(search);
+  const sessions = await scanAllSessions(search);
 
   // 从 registry 建立 sessionId → displayName 映射
   const reg = await loadRegistry();
@@ -2230,13 +2513,18 @@ async function cmdSessions(search?: string) {
     }
   }
 
-  const display = sessions.slice(0, 25).map((s, i) => ({
+  // v2.23+ 给 web 端也留原始字段：ISO 时间（排序/相对时间自己算）、cwd（点开要看历史）。
+  // 上限从 25 放到 100 —— Discord 面板自己 slice(15)，CLI 是人读的，两者都不受影响。
+  const display = sessions.slice(0, 100).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
     slug: s.slug,
     project: s.cwd.replace(process.env.HOME || "", "~"),
+    cwd: s.cwd,
+    runtime: s.runtime ?? "claude-code",
     age: formatAge(s.modifiedAt),
+    modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
   }));
 
@@ -4321,6 +4609,7 @@ const WRITE_COMMANDS = new Set([
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-migrate",
+  "pi-env-set",
 ]);
 if (cmd && WRITE_COMMANDS.has(cmd)) {
   const { readOwnerMarker, ownerVerdict, machineUuid } = await import("./lib/owner-guard.js");
@@ -4340,6 +4629,124 @@ if (cmd && WRITE_COMMANDS.has(cmd)) {
 }
 
 // v2.20.1+ 写命令跨进程串行(Codex review 2026-08-26):bridge 的 runManager、
+
+// ============================================================
+// v2.23+ Pi 能力管理
+// ============================================================
+
+/** `pi-env <agent>`：看清一个 Pi agent 到底带哪些能力（档案 + 磁盘静态清单 + 运行时实况） */
+async function cmdPiEnv(name: string) {
+  const tmuxName = normalizeName(name);
+  const reg = await loadRegistry();
+  const info = reg.agents[tmuxName];
+  if (!info) {
+    output({ ok: false, error: `${tmuxName} 不在 registry` });
+    return;
+  }
+  if (agentRuntime(info) !== "pi") {
+    output({
+      ok: false,
+      error: `${tmuxName} 是 Claude Code agent（runtime=${info.runtime ?? "claude-code"}），pi-env 只对 Pi agent 有意义`,
+    });
+    return;
+  }
+
+  const global = readPiGlobalEnv();
+  const cwd = (info.cwd || "").replace(/^~/, process.env.HOME || "~");
+  const project = cwd ? readPiProjectEnv(cwd) : null;
+  const profile = normalizePiEnvProfile(info.piEnv);
+  const snap = readPiRuntimeSnapshot(tmuxName);
+  const fresh = snapshotIsFresh(snap);
+
+  // 期望 vs 实况：实况里出现了档案不该有的东西（比如 minimal 却带着用户的包），
+  // 或者该有的东西没出现 —— 这是「档案没生效 / 全局环境变了」的唯一可见信号。
+  const notes: string[] = [];
+  if (profile.base === "minimal" && fresh && snap) {
+    const foreign = snap.tools.filter((t) =>
+      ["mcp", "web_search", "hb", "knowledge_search", "spawn_session", "subagent"].includes(t),
+    );
+    if (foreign.length) notes.push(`档案是 minimal，但实况里出现了全局扩展的工具：${foreign.join(", ")}`);
+  }
+  if (!fresh && snap) notes.push("运行时快照已过期（agent 可能重启过或早已停）");
+
+  output({
+    ok: true,
+    agent: tmuxName,
+    runtime: "pi",
+    profile: Object.keys(profile).length ? profile : null,
+    profileText: describePiEnvProfile(profile),
+    global: {
+      settingsPath: global.settingsPath,
+      packages: global.packages,
+      extensions: global.extensions,
+      localExtensions: global.localExtensions,
+      localSkills: global.localSkills,
+      mcpServers: global.mcpServers,
+      providers: global.providers,
+    },
+    project,
+    runtimeSnapshot: fresh ? snap : null,
+    snapshotPath: piEnvSnapshotPath(tmuxName),
+    notes,
+    hint: "改档案: manager pi-env-set <agent> --base minimal|inherit [--add-ext <src>] [--exclude-tool <t>] [--no-trust]，改完要 restart",
+  });
+}
+
+/** `pi-env-set <agent> …`：改一个 Pi agent 的能力档案（改完要 restart 才生效） */
+async function cmdPiEnvSet(
+  name: string,
+  opts: {
+    base?: string;
+    addExt?: string[];
+    addSkill?: string[];
+    excludeTool?: string[];
+    mcpConfig?: string;
+    trust?: boolean;
+    reset?: boolean;
+  },
+) {
+  const tmuxName = normalizeName(name);
+  const reg = await loadRegistry();
+  const info = reg.agents[tmuxName];
+  if (!info) {
+    output({ ok: false, error: `${tmuxName} 不在 registry` });
+    return;
+  }
+  if (agentRuntime(info) !== "pi") {
+    output({ ok: false, error: `${tmuxName} 不是 Pi agent（runtime=${info.runtime ?? "claude-code"}）` });
+    return;
+  }
+  if (opts.base && opts.base !== "minimal" && opts.base !== "inherit") {
+    output({ ok: false, error: `未知的 --base: "${opts.base}"。可用: inherit, minimal` });
+    return;
+  }
+
+  const next: PiEnvProfile = opts.reset ? {} : normalizePiEnvProfile(info.piEnv);
+  if (opts.base) {
+    if (opts.base === "inherit") delete next.base;
+    else next.base = "minimal";
+  }
+  if (opts.addExt?.length) next.extensions = [...new Set([...(next.extensions ?? []), ...opts.addExt])];
+  if (opts.addSkill?.length) next.skills = [...new Set([...(next.skills ?? []), ...opts.addSkill])];
+  if (opts.excludeTool?.length) next.excludeTools = [...new Set([...(next.excludeTools ?? []), ...opts.excludeTool])];
+  if (opts.mcpConfig) next.mcpConfig = opts.mcpConfig;
+  if (opts.trust !== undefined) next.trustProject = opts.trust;
+
+  const cleaned = normalizePiEnvProfile(next);
+  if (Object.keys(cleaned).length) reg.agents[tmuxName].piEnv = cleaned;
+  else delete reg.agents[tmuxName].piEnv;
+  await saveRegistry(reg);
+
+  output({
+    ok: true,
+    agent: tmuxName,
+    profile: Object.keys(cleaned).length ? cleaned : null,
+    profileText: describePiEnvProfile(cleaned),
+    restartRequired: true,
+    hint: `跑 manager restart ${tmuxName.replace(AGENT_PREFIX, "")} 让档案生效；查看: manager pi-env ${tmuxName.replace(AGENT_PREFIX, "")}`,
+  });
+}
+
 // cron、CLI 可能并发跑写命令,registry 等状态文件的 load→mutate→save 会互相
 // 覆盖(saveRegistry 只防撕裂不防丢更新)。命令级锁一把关掉全部窗口;拿不到
 // (20s)降级放行——advisory,宁可退回旧竞态也不卡死命令。进程退出兜底释放。
@@ -4353,6 +4760,45 @@ if (cmd && WRITE_COMMANDS.has(cmd)) {
 
 try {
 switch (cmd) {
+  // v2.23+ Pi 能力管理：看清（只读）/ 改档案（写）
+  case "pi-env": {
+    const [name] = args;
+    if (!name) {
+      output({ ok: false, error: "usage: pi-env <agent> — 看这个 Pi agent 带哪些扩展/技能/工具/MCP（档案 + 静态清单 + 运行时实况）" });
+      break;
+    }
+    await cmdPiEnv(name);
+    break;
+  }
+  case "pi-env-set": {
+    const { rest: a1, value: base } = extractStringFlag(args, "--base");
+    const { rest: a2, value: mcpConfig } = extractStringFlag(a1, "--mcp-config");
+    const { rest: a3, values: addExt } = extractMultiFlag(a2, "--add-ext");
+    const { rest: a4, values: addSkill } = extractMultiFlag(a3, "--add-skill");
+    const { rest: a5, values: excludeTool } = extractMultiFlag(a4, "--exclude-tool");
+    const { rest: a6, value: noTrust } = extractBoolFlag(a5, "--no-trust");
+    const { rest: a7, value: trust } = extractBoolFlag(a6, "--trust");
+    const { rest: posArgs, value: reset } = extractBoolFlag(a7, "--reset");
+    const [name] = posArgs;
+    if (!name) {
+      output({
+        ok: false,
+        error: 'usage: pi-env-set <agent> [--base inherit|minimal] [--add-ext <src>]... [--add-skill <path>]... [--exclude-tool <name>]... [--mcp-config <path>] [--no-trust|--trust] [--reset]',
+      });
+      break;
+    }
+    await cmdPiEnvSet(name, {
+      base,
+      addExt,
+      addSkill,
+      excludeTool,
+      mcpConfig,
+      trust: noTrust ? false : trust ? true : undefined,
+      reset,
+    });
+    break;
+  }
+
   case "create": {
     // v2.21+ --project <id>(也接受 --project=id):显式指定归属 project
     let projectFlag: string | undefined;
@@ -4364,7 +4810,9 @@ switch (cmd) {
       else afterProject.push(a);
     }
     const { rest: afterExternal, value: external } = extractBoolFlag(afterProject, "--external");
-    const { rest: afterModel, model } = extractModelFlag(afterExternal);
+    const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
+    const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterRuntime, "--pi-base");
+    const { rest: afterModel, model } = extractModelFlag(afterPiBase);
     const { rest: afterMode, mode } = extractModeFlag(afterModel);
     const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
     const { rest: afterPurpose, purpose: purposeFlag } = extractPurposeFlag(afterEffort);
@@ -4378,11 +4826,11 @@ switch (cmd) {
     if (!name || !dir) {
       output({
         ok: false,
-        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
+        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
       });
       break;
     }
-    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag);
+    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag);
     break;
   }
 
@@ -4482,7 +4930,8 @@ switch (cmd) {
 
   case "resume": {
     const { rest: afterFork, value: fork } = extractBoolFlag(args, "--fork");
-    const { rest: afterModel, model } = extractModelFlag(afterFork);
+    const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterFork, "--runtime");
+    const { rest: afterModel, model } = extractModelFlag(afterRuntime);
     const { rest: afterMode, mode } = extractModeFlag(afterModel);
     const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
     const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterEffort);
@@ -4490,11 +4939,11 @@ switch (cmd) {
     if (!name || !sessionId) {
       output({
         ok: false,
-        error: 'resume <name> <sessionId> [dir] [--fork] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>]',
+        error: 'resume <name> <sessionId> [dir] [--runtime pi] [--fork] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>]',
       });
       break;
     }
-    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork);
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork, runtimeFlag);
     break;
   }
 

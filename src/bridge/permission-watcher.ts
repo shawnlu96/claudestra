@@ -34,6 +34,7 @@ import {
 } from "./ask-user-question.js";
 import { emitEvent } from "./event-bus.js";
 import { recordMetric } from "../lib/metrics.js";
+import { readRegistryAgents } from "../lib/registry.js";
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -447,10 +448,20 @@ async function checkAgent(
   // 「Compacting…」是唯一通用的开始信号(手动场景 jsonl-watcher 另有 2s 快速通路)。
   // 结束以 jsonl-watcher 的 compact_boundary 为主;这里兜底被 esc 打断的压缩:
   // pane 不再显示 → 按 pane 是否还在跑收敛成 thinking / done。
+  // v2.23+ Pi 的 TUI 不是 Claude Code 那套：paneShowsCompacting 在 Pi 窗口上会
+  // **误命中**（实测 2026-09-14：日志反复「📦 正在压缩上下文(pane 检测)」）⇒ 状态被
+  // 置成 compacting，而 isBusyStatus("compacting") 为真 ⇒ 网页侧栏黄点/「工作中」
+  // 常驻不下线、输入框一直「思考中…」。更要命的是下面那条「thinking 反向对账」靠
+  // CC 的 ❯ 提示符判定，Pi 上永不命中 ⇒ 误置的 compacting 再也收敛不回来。
+  // Pi 的压缩态由会话记录驱动（translateSessionLine 把 compaction 翻成
+  // compact_boundary，jsonl-watcher 负责起落）⇒ 这里对 Pi 整块跳过，不猜屏幕。
+  const isPiAgent = (await readRegistryAgents().catch(() => []))
+    .find((r) => r.name === agentName)?.runtime === "pi";
+
   try {
     const { getAgentStatus, emitEvent } = await import("./event-bus.js");
     const st = getAgentStatus(agentName);
-    const compacting = paneShowsCompacting(pane);
+    const compacting = !isPiAgent && paneShowsCompacting(pane);
     if (compacting && st !== "compacting") {
       console.log(`📦 ${agentName} 正在压缩上下文(pane 检测,此前状态 ${st ?? "无"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "compacting", trigger: "pane", prev: st ?? null } });
@@ -464,7 +475,7 @@ async function checkAgent(
     } else {
       compactPctSeen.delete(channelId);
     }
-    if (!compacting && st === "compacting") {
+    if (!isPiAgent && !compacting && st === "compacting") {
       const working = paneLooksWorking(pane);
       console.log(`📦 ${agentName} 压缩已不在 pane 上(兜底收敛 → ${working ? "thinking" : "done"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: working ? "thinking" : "done", trigger: "compact_end_pane" } });
