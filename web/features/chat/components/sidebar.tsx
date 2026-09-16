@@ -563,9 +563,12 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   )
     .slice()
     .sort((a, b) => {
-      // 置顶 > 有未读 > 其余(2026-09-16 未读功能:有未读的靠前);稳定排序,
-      // 各层内保持原相对顺序(即最近活动序)
-      const rank = (x: AgentSession) => (pinSet.has(x.name) ? 2 : 0) + (x.unread ? 1 : 0);
+      // 只按「置顶」分层,层内保持原相对顺序(= state.agents 的最近活动序)。
+      // ⚠ 未读**不参与排序**(2026-09-16 撤回:曾把有未读的拽到顶,但组件里每次
+      // render 都 sort,绕过了 refreshAgents 的交互期冻结[noteSidebarInteraction],
+      // Car Talk 一有未读/活动就在手指底下跳到顶 → 误点进错 agent。未读只用徽章+
+      // 加粗表达,不动行位置)。
+      const rank = (x: AgentSession) => (pinSet.has(x.name) ? 1 : 0);
       return rank(b) - rank(a);
     });
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。

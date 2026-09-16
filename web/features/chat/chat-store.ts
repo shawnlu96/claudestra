@@ -40,7 +40,7 @@ function agentsSignature(list: AgentSession[]): string {
     .map(
       (a) =>
         `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
-        `${a.busy ? 1 : 0}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}`
+        `${a.busy ? 1 : 0}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}${a.unread ?? 0}`
     )
     .join("");
 }
@@ -941,6 +941,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!(this.state.streaming || this.state.replying) || this.state.browsing) return;
     if (!this.historyCursor) return;
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    // 只在会话页真在前台时兜(2026-09-16「列表卡」补刀):窄屏下 message-list 一直挂载、
+    // 只是滑到屏外,若在列表页也每 7s 差量→重建 messages→屏外 30 条 markdown 全量重渲,
+    // 白卡列表。窄屏认 hash=#chat,宽屏双栏恒在前。
+    if (typeof window !== "undefined") {
+      const narrow = window.matchMedia("(max-width: 639px)").matches;
+      if (narrow && window.location.hash.split("?")[0] !== "#chat") return;
+    }
     // ⚠ 不按 lastStreamByteAt 早退(2026-09-16 owner「点进去还是这样」的根因):流常「半死」
     // ——reply_pending 送到了(字节戳刷新、UI 显示「正在回复」),真正的 reply chat_message(out)
     // 却漏了,agent 早已 call 完 reply 在写 mem0。若按「近 5s 有字节=健康」跳过,恰好在最该兜
