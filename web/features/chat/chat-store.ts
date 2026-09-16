@@ -1511,7 +1511,16 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 由 syncDelta 内部自动切换。流不带 since:差量已覆盖到 jsonl 尾,重放的
     // chat_message 会和差量气泡重复。
     const gen = ++this.openGen;
-    if (this.historyCursor) {
+    // ⚠ force 必须绕开差量,走全量(2026-09-16 owner 实报:点推送进去看不到那条
+    // 回复,手机同会话「强制对齐」刷不出,电脑端切别的 agent 再切回来才出)。
+    // 差量是 `after=<游标>` **排他**的:回合中途的 reply 其气泡锚点恰好落在游标那个
+    // seq 上时,后续差量不会再拉它;它只能靠已在内存里的气泡保留——而手机流狂抖时
+    // 多个 reconnect 抢 openGen,某次带 reply 的差量 produce 被后来的抢占跳过,那条
+    // reply 就既不在内存也不再被差量重拉,直到全量重载才回来。force 的语义本就是
+    // 「用户明确要看最新 / 出问题了要对齐」(上面注释也写了「切换走的正是全量路径」),
+    // 全量重拉是它该有的行为;差量只服务快路径(fast)与短时后台(shortAway),那两条
+    // 本就没被 force 触发,不受影响。
+    if (!opts?.force && this.historyCursor) {
       this.clientLog(`reconnect(delta): agent=${name} after=${this.historyCursor.lastSeq}`);
       // 先差量后开流(串行):并行时流上先到的直播气泡会被差量应用的视图重组
       // 过滤掉。差量通常 1 秒内落地,流晚这一拍无感
