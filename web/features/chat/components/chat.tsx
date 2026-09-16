@@ -583,6 +583,15 @@ function ChatInner() {
     return installTapRescue(document.body, { name: "body", log: (m) => store.clientLog(m) });
   }, [store]);
 
+  // 内容对账心跳(2026-09-16 owner「没修好，car talk 又出现了」):每 7s 让 store 自查,
+  // 若开着会话且回合进行中、流却已僵死(近 5s 零字节),就从权威 jsonl 静默补差量。
+  // 不碰流、不亮同步条、健康流下零请求;把「回合中途 reply 上不了屏」从依赖乱糟糟的
+  // reconnect 改成独立于流的兜底(store.reconcileVisibleChat 内含全部守卫)。
+  useEffect(() => {
+    const id = setInterval(() => store.reconcileVisibleChat(), 7_000);
+    return () => clearInterval(id);
+  }, [store]);
+
   // 未读总数 → 标签页标题「(3) Claudestra」+ App 图标角标(Badging API:iOS 16.4+
   // 主屏 PWA / 桌面 Chrome;原生壳的角标由 APNs badge 字段驱动,这里调了也无害)。
   // agents 每 15s 轮询刷新,总数随之变化;为 0 时清掉。(2026-09-16 未读功能)

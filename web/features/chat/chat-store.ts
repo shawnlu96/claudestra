@@ -841,12 +841,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 两边都不覆盖——两拍反向对齐(refreshAgents)与下次唤醒差量兜底,不为它
    * 引入 since 重放(重放的 chat_message 与差量气泡必然重复)。
    */
-  private async syncDelta(name: string, gen: number, attempt = 0): Promise<void> {
+  private async syncDelta(name: string, gen: number, attempt = 0, quiet = false): Promise<void> {
     const cur = this.historyCursor;
     if (!cur || this.state.browsing) return;
     // 对齐指示(与 loadMessages 同一块 pill):唤醒差量通常 1s 内落地,pill 一闪
-    // 而过;真卡住(网络没醒/跨境慢)时用户能看到「在对齐」而不是死页面
-    if (gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
+    // 而过;真卡住(网络没醒/跨境慢)时用户能看到「在对齐」而不是死页面。
+    // quiet(内容对账心跳,2026-09-16):后台每 7s 悄悄跑,不亮 pill、失败不回退全量,
+    // 只在真差到东西时补,免得心跳把「同步中」闪个不停。
+    if (!quiet && gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
     try {
       const res = await fetch(
         `/api/chat/history?agent=${encodeURIComponent(name)}&session=${encodeURIComponent(cur.sid)}&after=${cur.lastSeq}`,
@@ -864,14 +866,16 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       };
       if (gen !== this.openGen) return; // 已切走
       if (json.rotated || json.hasMore) {
+        // quiet 心跳不接管全量(会闪 loading);留给 reconnect/openAgent 处理轮转
+        if (quiet) return;
         this.clientLog(`syncDelta: ${json.rotated ? "session 已轮转" : "差量超一页"} → 回退全量 agent=${name}`);
         return this.loadMessages(name, gen);
       }
       const delta = hydrateHistoryMessages(json.data ?? []);
       if (typeof json.lastSeq === "number") this.historyCursor = { sid: cur.sid, lastSeq: json.lastSeq };
       if (!delta.length) {
-        // 没错过任何东西——pill 消失即「已是最新」
-        this.produce((s) => { s.syncState = null; });
+        // 没错过任何东西——pill 消失即「已是最新」(quiet 心跳没亮过 pill,不必 produce)
+        if (!quiet) this.produce((s) => { s.syncState = null; });
         return;
       }
       this.clientLog(`syncDelta: 追平 ${delta.length} 条 agent=${name} after=${cur.lastSeq}`);
@@ -901,6 +905,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     } catch (e) {
       if (gen !== this.openGen) return;
       const errMsg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      // quiet 心跳失败不打点不重试不回退——下一拍(7s 后)自会再来,别刷日志/闪 loading
+      if (quiet) return;
       this.clientLog(`syncDelta 失败 agent=${name} attempt=${attempt} ${errMsg}`);
       // ⚠ 整条链必须可 await(调用方等它完成才开流,消灭「读盘后才到的直播
       // 气泡被差量应用过滤掉」的竞态)——重试不能 setTimeout+void 甩出去
@@ -913,6 +919,25 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 差量救不回来 → 全量兜底(带它自己的重试梯子)
       return this.loadMessages(name, gen);
     }
+  }
+
+  /**
+   * 内容对账心跳(owner 2026-09-16「没修好，car talk 又出现了」)。把「内容新鲜度」
+   * 和「流健康」解耦:手机 SSE 流常僵尸(连着但零字节达十几分钟),回合中途 agent
+   * reply() 发的消息只靠流事件或 reconnect 补——而坏网下 reconnect 自己就乱(抢
+   * openGen / 被在飞历史让路 / force 走差量的历史盲区),于是那条 reply 迟迟不上屏,
+   * 要手动切会话才出。这条心跳不碰流、不亮 pill,只在「开着会话 + 回合进行中 + 页面
+   * 可见 + 流已僵死(近 5s 零字节)」时,从权威 jsonl 静默差量刷一次视图。turn 一结束
+   * (streaming=false)就自动歇手,idle 期零请求。chat.tsx 挂一个 7s interval 调它。
+   */
+  public reconcileVisibleChat() {
+    const name = this.state.activeAgent;
+    if (!name || name === MASTER_AGENT_NAME) return;
+    if (!this.state.streaming || this.state.browsing) return; // 只在回合进行中兜;idle 无新内容
+    if (!this.historyCursor) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    if (Date.now() - this.lastStreamByteAt < 5_000) return; // 流刚来过字节=健康,交给流
+    void this.syncDelta(name, this.openGen, 0, true);
   }
 
   /** CC 任务清单刷新防抖(TaskCreate/TaskUpdate 常连发)。 */
