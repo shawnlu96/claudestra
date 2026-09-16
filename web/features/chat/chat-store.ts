@@ -898,6 +898,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           const tail = s.messages[s.messages.length - 1];
           if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
         }
+        // 差量补到 agent 的新产出(reply/工具/文本)→ 清掉可能卡住的「正在回复…」指示
+        // (2026-09-16:流漏了 reply 的 chat_message(out),setReplyText 没跑过,replying 一直挂;
+        // 差量把 reply 从 jsonl 补进来后,指示也要跟着收场,否则回复已上屏还显示「正在回复」)。
+        if (s.replying && delta.some((m) => m.role === "assistant")) s.replying = false;
         s.loadingHistory = false;
         s.syncState = null; // pill 消失 = 对齐完成(没新内容也一样,「已是最新」)
         s.historyError = false;
@@ -933,10 +937,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public reconcileVisibleChat() {
     const name = this.state.activeAgent;
     if (!name || name === MASTER_AGENT_NAME) return;
-    if (!this.state.streaming || this.state.browsing) return; // 只在回合进行中兜;idle 无新内容
+    // 回合进行中(streaming)或卡在「正在回复」(replying)时兜;idle 无新内容不打扰。
+    if (!(this.state.streaming || this.state.replying) || this.state.browsing) return;
     if (!this.historyCursor) return;
     if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
-    if (Date.now() - this.lastStreamByteAt < 5_000) return; // 流刚来过字节=健康,交给流
+    // ⚠ 不按 lastStreamByteAt 早退(2026-09-16 owner「点进去还是这样」的根因):流常「半死」
+    // ——reply_pending 送到了(字节戳刷新、UI 显示「正在回复」),真正的 reply chat_message(out)
+    // 却漏了,agent 早已 call 完 reply 在写 mem0。若按「近 5s 有字节=健康」跳过,恰好在最该兜
+    // 的时候不兜。差量很轻(常空/几 KB),回合期每 7s 无条件兜,健康流下也只是重复确认。
     void this.syncDelta(name, this.openGen, 0, true);
   }
 
