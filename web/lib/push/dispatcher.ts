@@ -107,7 +107,70 @@ export function markAgentRead(agent: string): void {
       .prepare("INSERT INTO push_read (agent, ts) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET ts = excluded.ts")
       .run(a, ts);
   } catch { /* 表缺失等,不影响 dismiss */ }
-  void sendToAll({ type: "dismiss", agent: a, ts }, dismissSafe);
+  // 未读归零(2026-09-16 未读功能)。只在真有未读时才向各端同步角标——绝大多数
+  // 打开会话动作本来就没未读,别为它们白发推送。
+  const had = clearUnread(a);
+  const badge = had ? totalUnread() : undefined;
+  void sendToAll({ type: "dismiss", agent: a, ts, ...(badge !== undefined ? { badge } : {}) }, dismissSafe);
+  if (badge !== undefined) {
+    // iOS 图标角标只能由推送或 App 自己改;原生壳没有 badge 插件,靠一条仅带
+    // badge 的静默 APNs 让图标数回落(alert/sound 都不带,通知中心不多一条)。
+    void apnsSendAll({ silent: true, badge, title: "", body: "", agent: a, url: "/chat", ts, tag: `cstra-badge-${ts}` });
+  }
+}
+
+// ─── 未读计数(owner 2026-09-16,跨设备方案) ───────────────────────────
+// 服务端持有:dispatcher(锁持有者,单写者)在 reply 给 web 用户时 +1,任何已读
+// 信号归零。/api/agents 把 count 合并进列表,侧栏 15s 轮询天然刷新。
+
+/** agent 收到一条给 web 用户的回复 → count+1,返回当前全局未读总数(给角标)。 */
+function bumpUnread(agent: string, ts: number): number {
+  try {
+    getDb("settings")
+      .prepare(
+        "INSERT INTO agent_unread (agent, count, last_reply_ts) VALUES (?, 1, ?) " +
+          "ON CONFLICT(agent) DO UPDATE SET count = count + 1, last_reply_ts = excluded.last_reply_ts",
+      )
+      .run(agent, ts);
+  } catch { /* 表缺失等,不影响推送 */ }
+  return totalUnread();
+}
+
+/** 归零;返回归零前是否真有未读(决定要不要同步角标)。 */
+function clearUnread(agent: string): boolean {
+  try {
+    const row = getDb("settings").prepare("SELECT count FROM agent_unread WHERE agent = ?").get(agent) as
+      | { count: number }
+      | undefined;
+    if (!row || row.count <= 0) return false;
+    getDb("settings").prepare("UPDATE agent_unread SET count = 0 WHERE agent = ?").run(agent);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** agent → 未读数(只含 >0 的)。/api/agents 合并进列表用。 */
+export function getUnreadCounts(): Record<string, number> {
+  try {
+    const rows = getDb("settings").prepare("SELECT agent, count FROM agent_unread WHERE count > 0").all() as {
+      agent: string;
+      count: number;
+    }[];
+    return Object.fromEntries(rows.map((r) => [r.agent, r.count]));
+  } catch {
+    return {};
+  }
+}
+
+/** 全局未读总数(App 图标角标 / 标签页标题)。 */
+export function totalUnread(): number {
+  try {
+    const r = getDb("settings").prepare("SELECT COALESCE(SUM(count), 0) AS n FROM agent_unread").get() as { n: number };
+    return Number(r?.n) || 0;
+  } catch {
+    return 0;
+  }
 }
 
 const BRIDGE = process.env.BRIDGE_HTTP_URL || "http://127.0.0.1:3847";
@@ -132,11 +195,15 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
   if (!text) return;
   const body = text.length > 180 ? `${text.slice(0, 180)}…` : text;
   const ts = Date.now();
+  // 未读 +1(2026-09-16):badge = 全局未读总数,随两种推送下发(iOS 图标角标 /
+  // SW setAppBadge)。计数发生在推送之前,与是否有订阅者无关——没装推送也要有未读。
+  const badge = bumpUnread(agent, ts);
   // 原生壳:APNs(iOS 已读靠打开 App 时按 push_read 水位清通知,见 lib/push/native.ts)
-  void apnsSendAll({ title: agent, body, agent, url: `/chat?agent=${encodeURIComponent(agent)}`, ts, tag: `cstra-${agent}-${ts}` });
+  void apnsSendAll({ title: agent, body, agent, url: `/chat?agent=${encodeURIComponent(agent)}`, ts, tag: `cstra-${agent}-${ts}`, badge });
   void sendToAll({
     title: agent,
     body,
+    badge,
     // 深链:点通知直达该 agent 会话(owner 2026-07-16)
     url: `/chat?agent=${encodeURIComponent(agent)}`,
     agent,

@@ -360,7 +360,7 @@ function AgentRow({
           ) : (
             <StatusDot status={a.status} busy={a.busy || busyLive} compacting={compacting} />
           )}
-          <span className="min-w-0 flex-1 truncate text-[15px] sm:text-sm">
+          <span className={`min-w-0 flex-1 truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
             {t(a.displayName)}
             {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
@@ -381,6 +381,13 @@ function AgentRow({
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
               期间时间冻结在回合开始前)→ 显示「工作中」更诚实 */}
+          {/* 未读数(2026-09-16):服务端计数,任一设备打开该会话即清。放在时间/状态之前,
+              名字同时加粗——一眼能扫出「谁回了我还没看」 */}
+          {!!a.unread && (
+            <span className="ml-1 inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold leading-none text-white">
+              {a.unread > 99 ? "99+" : a.unread}
+            </span>
+          )}
           {compacting ? (
             <span className="shrink-0 pl-1 text-[11px] text-info/80">{t("压缩中")}</span>
           ) : (a.busy || busyLive) ? (
@@ -556,8 +563,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   )
     .slice()
     .sort((a, b) => {
-      const rank = (x: AgentSession) => (pinSet.has(x.name) ? 1 : 0);
-      return rank(b) - rank(a); // 稳定排序:置顶组保持原相对顺序
+      // 置顶 > 有未读 > 其余(2026-09-16 未读功能:有未读的靠前);稳定排序,
+      // 各层内保持原相对顺序(即最近活动序)
+      const rank = (x: AgentSession) => (pinSet.has(x.name) ? 2 : 0) + (x.unread ? 1 : 0);
+      return rank(b) - rank(a);
     });
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
   // 组序 = 组内最近活动(filtered 已按活动排,Map 插入序即组的活动序);未分组沉底。

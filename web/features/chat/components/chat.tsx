@@ -460,6 +460,9 @@ function ChatInner() {
     if (prevShowRef.current === showContent) return;
     const from = prevShowRef.current;
     prevShowRef.current = showContent;
+    // 进入会话页 = 看到了(2026-09-16 未读功能):从列表重新点进同一个 agent 不经
+    // openAgent,那里的已读回执不会触发,这里补上。store 内按 agent 节流。
+    if (showContent) store.markActiveRead();
     // 无动画直达(首帧定位/popstate 闪避)或桌面双栏:立即停稳
     if (disableTransition || !isNarrow()) {
       setSlideAnim(null);
@@ -580,6 +583,25 @@ function ChatInner() {
     return installTapRescue(document.body, { name: "body", log: (m) => store.clientLog(m) });
   }, [store]);
 
+  // 未读总数 → 标签页标题「(3) Claudestra」+ App 图标角标(Badging API:iOS 16.4+
+  // 主屏 PWA / 桌面 Chrome;原生壳的角标由 APNs badge 字段驱动,这里调了也无害)。
+  // agents 每 15s 轮询刷新,总数随之变化;为 0 时清掉。(2026-09-16 未读功能)
+  const agentsForBadge = useChatStore((s) => s.state.agents);
+  useEffect(() => {
+    const total = agentsForBadge.reduce((n, a) => n + (a.unread || 0), 0);
+    document.title = total > 0 ? `(${total > 99 ? "99+" : total}) Claudestra` : "Claudestra";
+    const nav = navigator as Navigator & {
+      setAppBadge?: (n?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    try {
+      if (total > 0) void nav.setAppBadge?.(total).catch(() => {});
+      else void nav.clearAppBadge?.().catch(() => {});
+    } catch {
+      /* 不支持 Badging API */
+    }
+  }, [agentsForBadge]);
+
   // 会话恢复：iOS 把后台页整个回收重载后，URL 还带 #chat 但 store 是全新的
   // （activeAgent=""）——之前就卡在空内容页要手动返回重选（2026-07-12 真机）。
   // agents 列表首次到位后：上次会话还在 → 自动重开；不在 → 退回列表页。
@@ -616,6 +638,8 @@ function ChatInner() {
         store.noteHidden();
         return;
       }
+      // 回前台且会话页在眼前 = 看到了(2026-09-16 未读功能;store 内判断是否正看着会话页并节流)
+      store.markActiveRead();
       if (document.visibilityState !== "visible") return;
       const now = Date.now();
       if (now - lastAlign < 5_000) return;

@@ -1186,6 +1186,35 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.hiddenAt = Date.now();
   }
 
+  /** 上次给某 agent 发已读回执的时刻(节流:同一 agent 5s 内只发一次)。 */
+  private lastReadAckAt = new Map<string, number>();
+
+  /**
+   * 未读功能(owner 2026-09-16,跨设备方案):「用户此刻正看着当前会话」→ 服务端归零
+   * 该 agent 未读 + 本地列表即时清徽章(不等 15s 轮询)。调用点:进入会话页、回前台、
+   * 看着时收到 reply。这里统一判定"正看着":页面可见,且窄屏时会话页在前(#chat)、
+   * 宽屏双栏恒可见。master 不计未读。fire-and-forget,失败下一次再补。
+   */
+  public markActiveRead() {
+    const name = this.state.activeAgent;
+    if (!name || name === MASTER_AGENT_NAME || typeof window === "undefined") return;
+    if (document.visibilityState !== "visible") return;
+    const narrow = window.matchMedia("(max-width: 639px)").matches;
+    if (narrow && window.location.hash.split("?")[0] !== "#chat") return; // 在列表页,没看会话
+    const now = Date.now();
+    if (now - (this.lastReadAckAt.get(name) || 0) < 5_000) return;
+    this.lastReadAckAt.set(name, now);
+    this.produce((s) => {
+      const a = s.agents.find((x) => x.name === name);
+      if (a && a.unread) a.unread = 0;
+    });
+    void fetch("/api/push/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: name }),
+    }).catch(() => {});
+  }
+
   /** 打开某 agent 的持久 SSE 输出流。会话切换 / 重连共用。
    *  since:断点续传锚——bridge 重放 seq>since 的缓冲事件(错过的直播直接补)。 */
   private async openStream(name: string, since?: number) {
@@ -1891,6 +1920,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     attachments?: { name: string; kind: "image" | "file"; url: string }[]
   ) {
     this.flushPendingText(); // reply 段插入前先落缓冲的叙述文本
+    // 看着时收到回复 = 已读(2026-09-16 未读功能):服务端刚为这条 +1,立刻归零,
+    // 否则自己眼前的回复会在其它设备(和 15s 后的本机列表)上标成未读
+    this.markActiveRead();
     const hasComp = Array.isArray(components) && components.length > 0;
     const hasAtts = Array.isArray(attachments) && attachments.length > 0;
     // 空 reply 不建段（2026-07-25 owner 报「一堆空的『回复』分隔线」）：上游若发来

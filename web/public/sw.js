@@ -17,6 +17,16 @@ self.addEventListener("push", (event) => {
   // v2.21.1+ 跨端已读对账(owner 2026-08-30「一处点完,他处取消」):
   // dismiss 型 push 只清通知不展示。派发器只把它发给非 iOS 订阅——
   // iOS 对「push 到达不展示」有惩罚,iOS 设备靠打开 App 时的补清(见 client)。
+  // 未读角标(2026-09-16):派发器在每条推送(含 dismiss)里带全局未读总数,
+  // 这里同步到 App 图标——App 关着时角标也跟得上。不支持 Badging API 的环境静默跳过。
+  if (typeof payload.badge === "number" && self.navigator && typeof self.navigator.setAppBadge === "function") {
+    try {
+      if (payload.badge > 0) self.navigator.setAppBadge(payload.badge).catch(() => {});
+      else if (typeof self.navigator.clearAppBadge === "function") self.navigator.clearAppBadge().catch(() => {});
+    } catch {
+      /* ignore */
+    }
+  }
   if (payload.type === "dismiss") {
     event.waitUntil(
       self.registration.getNotifications().then((ns) => {

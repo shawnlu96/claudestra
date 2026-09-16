@@ -92,6 +92,11 @@ export interface ApnsMessage {
   tag: string;
   /** 同 id 的通知在通知中心合并(可选) */
   collapseId?: string;
+  /** App 图标角标数(2026-09-16 未读功能):未读总数;省略则不动角标 */
+  badge?: number;
+  /** 仅同步角标、不弹通知(已读归零时用):aps 只带 badge,无 alert/sound。
+   *  Apple 规定带 badge 的推送 push-type 仍是 alert。 */
+  silent?: boolean;
 }
 
 export interface ApnsResult { ok: boolean; status: number; reason?: string }
@@ -100,8 +105,12 @@ export interface ApnsResult { ok: boolean; status: number; reason?: string }
 export async function apnsSend(deviceToken: string, msg: ApnsMessage, retry = true): Promise<ApnsResult> {
   const c = config();
   if (!c) return { ok: false, status: 0, reason: "NotConfigured" };
+  const aps: Record<string, unknown> = msg.silent
+    ? { "thread-id": msg.agent }
+    : { alert: { title: msg.title, body: msg.body }, sound: "default", "thread-id": msg.agent };
+  if (typeof msg.badge === "number") aps.badge = Math.max(0, Math.floor(msg.badge));
   const body = JSON.stringify({
-    aps: { alert: { title: msg.title, body: msg.body }, sound: "default", "thread-id": msg.agent },
+    aps,
     agent: msg.agent, url: msg.url, ts: msg.ts, tag: msg.tag,
   });
   return new Promise<ApnsResult>((resolve) => {

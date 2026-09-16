@@ -64,6 +64,18 @@ export function runSettingsMigrations(db: Database.Database) {
       ts INTEGER NOT NULL
     )
   `);
+  // 未读计数(owner 2026-09-16「做一个未读消息功能」,选跨设备方案):agent → 未读
+  // 回复数 + 最近一条回复时刻。只计 reply() 给 web 用户的回复(与推送同源事件);
+  // 写入方:push dispatcher(锁持有者,单写者)在 chat_message(out, api:) 上 +1,
+  // markAgentRead(打开会话 / 点通知 / Discord 说话 / 看着时收到回复)归零。
+  // 服务端持有 → 手机与 Mac 看到一致;App 关着时照样累计。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_unread (
+      agent TEXT PRIMARY KEY,
+      count INTEGER NOT NULL DEFAULT 0,
+      last_reply_ts INTEGER NOT NULL DEFAULT 0
+    )
+  `);
   // v2.22+ 原生壳(native/)的 APNs 设备 token。token 为主键(同设备换 token = 新行,
   // 旧 token 由 APNs 回 BadDeviceToken/410 时清理);device 是自报的设备名。
   db.exec(`

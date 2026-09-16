@@ -139,6 +139,8 @@ export interface AgentSession {
   compacting?: boolean;
   /** 最近活动时间（session jsonl mtime，ms epoch）→ 列表行右侧时间标签。 */
   lastActivityTs?: number | null;
+  /** 2026-09-16 未读回复数(服务端计数,跨设备一致);0/缺省 = 无未读 */
+  unread?: number;
   /** 当前上下文占用 token 数 → TopBar 超标提示。 */
   contextTokens?: number | null;
   /** 当前模型 id（jsonl 实测 → registry → 全局默认;null=未知）→ TopBar 徽章。 */

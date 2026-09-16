@@ -5,6 +5,7 @@ import { loadAgents } from "@/lib/chat/agents";
 import { bridgePost } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
 import { st } from "@/lib/server-lang";
+import { getUnreadCounts } from "@/lib/push/dispatcher";
 
 /** agent 列表：代理 Bridge GET /api/v1/agents（master 在 token scope 内时置顶入列）。 */
 export async function GET(request: Request) {
@@ -13,7 +14,14 @@ export async function GET(request: Request) {
   }
   try {
     const list = await loadAgents();
-    return NextResponse.json({ data: list });
+    // 未读数合并(2026-09-16):服务端计数,键为去掉 agent- 前缀的短名(与 push_read 同键)。
+    // 侧栏每 15s 轮询本接口,未读随之刷新,不另开长连接。
+    const unread = getUnreadCounts();
+    const data = list.map((a) => {
+      const n = unread[a.name.replace(/^agent-/, "")] ?? 0;
+      return n > 0 ? { ...a, unread: n } : a;
+    });
+    return NextResponse.json({ data });
   } catch (e) {
     return NextResponse.json(
       { error: `${await st("Bridge 不可达", "Bridge unreachable")}: ${(e as Error).message}` },
