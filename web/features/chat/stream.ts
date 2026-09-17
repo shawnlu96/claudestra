@@ -1,5 +1,6 @@
 import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
 import type { PendingPermission, PendingAsk } from "./type";
+import type { RecordSrc } from "./live-merge";
 
 /**
  * 消费流式事件的最小接口。ChatStore 实现它。
@@ -11,11 +12,13 @@ export interface StreamSink {
     summary: string,
     state: "running" | "done" | "error",
     detail?: string,
-    id?: string
+    id?: string,
+    /** v2.23.2+ 来源记录坐标(jsonl seq + sid):已被历史游标覆盖的事件不画 */
+    src?: RecordSrc
   ): void;
   /** 工具状态更新（目前只有失败标红）——按 tool_use id 找回那张卡。 */
   updateToolState(id: string, state: "done" | "error"): void;
-  appendAssistantText(text: string, progress?: boolean): void;
+  appendAssistantText(text: string, progress?: boolean, src?: RecordSrc): void;
   /** 另一端用户的发言(user-in)——对账去重后画成用户气泡(附件已由 BFF 解析)。
    *  from:非本人的来源标签(peer/其它用户),UI 据此区分气泡样式。 */
   addRemoteUserMessage(text: string, attachments?: { name: string; kind: "image" | "file"; url?: string }[], from?: string): void;
@@ -56,13 +59,13 @@ export interface StreamSink {
 export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
   switch (evt.t) {
     case "tool":
-      sink.addToolCall(evt.name, evt.summary, evt.state, evt.detail, evt.id);
+      sink.addToolCall(evt.name, evt.summary, evt.state, evt.detail, evt.id, { seq: evt.seq, sid: evt.sid });
       break;
     case "tool-state":
       sink.updateToolState(evt.id, evt.state);
       break;
     case "text":
-      sink.appendAssistantText(evt.text, evt.progress);
+      sink.appendAssistantText(evt.text, evt.progress, { seq: evt.seq, sid: evt.sid });
       break;
     case "user-in":
       sink.addRemoteUserMessage(evt.text, evt.attachments, evt.from);

@@ -18,7 +18,8 @@ import { findSessionJsonlBySessionId, sessionJsonlPath, translateSessionLine } f
 import { piAgentDir } from "../lib/pi-session.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
-import { progressNoteOf } from "../lib/session-history.js";
+import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
+import { splitChunkLines } from "../lib/jsonl-lines.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 
@@ -33,6 +34,10 @@ interface WatcherState {
   watcher: FSWatcher;
   jsonlPath: string;
   lastSize: number;
+  /** v2.23.2+ 会话 id：直播事件带 sid，前端只拿同一会话的历史游标比 seq */
+  sessionId: string;
+  /** v2.23.2+ [0, lastSize) 里的换行数 = 下一条新记录的全文件行号（seq 坐标，与 session-history 一致） */
+  lineNo: number;
   channelId: string;
   tools: ToolEntry[];
   toolMsgId: string | null;
@@ -369,7 +374,12 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
     let toolsChanged = false;
 
-    for (const line of newData.split("\n").filter((l) => l.trim())) {
+    // v2.23.2+ 每条记录带全文件行号 seq：前端拿它与历史游标比对，判定「这条直播事件
+    // 的内容是否已经以历史形态在视图里」——按时间戳 ±5s 猜的老办法在流有延迟 /
+    // 两端时钟不齐时会漏（owner 2026-09-17 桌面端「同一回合两份」第二次复现）。
+    const chunk = splitChunkLines(newData, state.lineNo);
+    state.lineNo = chunk.next;
+    for (const { seq, line } of chunk.lines) {
       try {
         // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状，下面的解析逻辑
         // （工具摘要/文本/状态/思考时长）一行都不用改
@@ -531,7 +541,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           // 长回合里用户能看到回复马上要来了(owner 实报)。只认 reply 本体,
           // 别的隐藏工具(react/edit_message)不算
           if (content.some((b: any) => b.type === "tool_use" && (b.name === "reply" || String(b.name || "").endsWith("__reply")))) {
-            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: {} });
+            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: { seq, sid: state.sessionId } });
           }
           const hasNewTools = content.some((b: any) => b.type === "tool_use" && b.name && !isHiddenTool(b.name));
 
@@ -551,7 +561,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
                 error: false,
               });
               toolsChanged = true;
-              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input) } });
+              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input), seq, sid: state.sessionId } });
             }
             if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
               // 以前有 `t.length > 3` 的 filter 防碎片短 text 刷屏，但那会把 "OK"
@@ -565,10 +575,10 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               if (/You['']?ve hit your limit|Hit your (rate )?limit/i.test(t)) {
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, seq, sid: state.sessionId } });
               } else {
                 state.textQueue.push(`💬 ${t}`);
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId } });
               }
             }
             // v2.21.3+ Fable 5.1 的进度句:Anthropic 文档所说的 progress-update thinking
@@ -580,7 +590,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               const note = progressNoteOf(block);
               if (note) {
                 state.textQueue.push(`💭 ${note}`);
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true, seq, sid: state.sessionId } });
               }
             }
           }
@@ -747,6 +757,8 @@ export async function startWatching(
     watcher: null as any,
     jsonlPath,
     lastSize: fileStat.size,
+    sessionId,
+    lineNo: await countNewlinesBefore(jsonlPath, fileStat.size),
     channelId,
     tools: [],
     toolMsgId: null,

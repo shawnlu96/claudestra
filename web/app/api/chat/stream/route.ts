@@ -61,6 +61,15 @@ function mapAuqQuestions(raw: unknown): WebAuqQuestion[] {
   }));
 }
 
+/** v2.23.2+ watcher 事件带的记录坐标(jsonl 行号 seq + 会话 sid)原样透传:前端拿它与
+ *  历史游标比对,判「这条直播事件的内容是否已经以历史形态在视图里」 */
+function recordSrc(d: Record<string, unknown>): { seq?: number; sid?: string } {
+  return {
+    ...(typeof d.seq === "number" ? { seq: d.seq } : {}),
+    ...(typeof d.sid === "string" && d.sid ? { sid: d.sid } : {}),
+  };
+}
+
 /** BridgeEvent → WebStreamEvent（null = 该事件 v1 不消费）。 */
 function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
   const d = evt.data || {};
@@ -86,6 +95,7 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
         ...(typeof d.toolId === "string" && d.toolId ? { id: d.toolId } : {}),
         // 完整入参详情（后端 formatToolDetail，截断 4k）——工具卡点开展示
         ...(typeof d.detail === "string" && d.detail ? { detail: d.detail } : {}),
+        ...recordSrc(d),
       };
     case "tool_done":
       // 成功/失败都推 tool-state——工具卡三态背景(运行蓝/完成绿/失败红,
@@ -94,7 +104,7 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
         ? { t: "tool-state", id: d.toolId, state: d.error ? "error" : "done" }
         : null;
     case "assistant_text":
-      return { t: "text", text: String(d.text ?? ""), ...(d.progress ? { progress: true } : {}) };
+      return { t: "text", text: String(d.text ?? ""), ...(d.progress ? { progress: true } : {}), ...recordSrc(d) };
     case "reply_pending":
       // v2.20.2+ watcher 见到 reply 工具调用 → 「✍️ 正在回复…」状态
       return { t: "replying" };

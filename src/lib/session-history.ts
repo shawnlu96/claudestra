@@ -41,7 +41,7 @@ const NL_SIG_LEN = 32;
 interface NlCkpt { b: number; n: number; sig: string }
 const nlIndex = new Map<string, NlCkpt[]>();
 
-async function countNewlinesBefore(filePath: string, cut: number): Promise<number> {
+export async function countNewlinesBefore(filePath: string, cut: number): Promise<number> {
   if (cut <= 0) return 0;
   const fh = await fsOpen(filePath, "r");
   try {

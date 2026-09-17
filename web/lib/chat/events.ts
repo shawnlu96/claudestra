@@ -65,12 +65,13 @@ export type WebStreamEvent =
   /** 一次工具调用的段级摘要（📖 Read xxx / ✏️ Edit xxx / ⚙️ Bash ...）。
    *  id：tool_use id（tool-state 按它更新这张卡）。
    *  detail：完整入参详情（截断 4k），工具卡点开展示。 */
-  | { t: "tool"; id?: string; name: string; summary: string; state: "running" | "done" | "error"; detail?: string }
+  /** seq/sid(v2.23.2+):来源 jsonl 记录的全文件行号 + 会话 id——前端与历史游标比对判重 */
+  | { t: "tool"; id?: string; name: string; summary: string; state: "running" | "done" | "error"; detail?: string; seq?: number; sid?: string }
   /** 工具调用状态定稿（done=绿 / error=红,三态背景直播侧的收尾信号）。 */
   | { t: "tool-state"; id: string; state: "done" | "error" }
   /** 助手文本段（过程叙述，追加到当前流式助手消息的 content） */
   /** progress=true:进度句(💭,Fable 5.1 的 progress-update thinking 块)——自成一段、更弱化 */
-  | { t: "text"; text: string; progress?: boolean }
+  | { t: "text"; text: string; progress?: boolean; seq?: number; sid?: string }
   /** 另一端用户的发言(跨端同步:手机/电脑/Discord 同看一个会话)。
    *  本端自己发的回声由前端按文本对账去重。 */
   | { t: "user-in"; text: string; from?: string; attachments?: { name: string; kind: "image" | "file"; url?: string }[] }

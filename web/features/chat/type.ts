@@ -10,6 +10,8 @@ export interface ToolCallView {
   ts?: string;
   /** 完整入参详情（后端 formatToolDetail，截断 4k）——工具卡点开展示。 */
   detail?: string;
+  /** v2.23.2+ 直播工具卡来源记录的 jsonl 行号——差量对账按它剥掉已入历史的卡。 */
+  seq?: number;
 }
 
 /** assistant 气泡内的交错段——叙述与工具按真实时间顺序排列（修「工具全堆气泡顶部」）。
@@ -23,6 +25,8 @@ export type AssistantSegment =
       ts?: string;
       /** v2.21.3+ 进度句(💭):Fable 5.1 的 progress-update 注,渲染更弱、不进 content/复制 */
       progress?: boolean;
+      /** v2.23.2+ 直播段来源记录的 jsonl 行号——差量对账按它剥掉已入历史的段。 */
+      seq?: number;
     }
   | { kind: "tools"; tools: ToolCallView[] }
   | { kind: "reply"; text: string; ts?: string };
@@ -101,9 +105,11 @@ export interface ChatMessage {
   wire?: string;
   /** 由本轮流式生成（区别于历史加载） */
   streamed?: boolean;
-  /** v2.23.1+ 历史气泡所属 session（「删除」按 session+seq 区间隐藏；直播气泡无） */
+  /** v2.23.1+ 历史气泡所属 session（「删除」按 session+seq 区间隐藏）；
+   *  v2.23.2+ 直播气泡也带(首个带 sid 的事件写入)——对账时只与同一会话的游标比 seq */
   sid?: string;
-  /** v2.23.1+ 历史气泡覆盖的原始记录区间尾 seq（首 seq 在 id 里：h<seq>） */
+  /** v2.23.1+ 历史气泡覆盖的原始记录区间尾 seq（首 seq 在 id 里：h<seq>）；
+   *  v2.23.2+ 直播气泡 = 已画进来的事件最大 seq */
   seqEnd?: number;
   /** 直播回合已完成——气泡底部渲染绿色「✓ 完成」行(历史消息不带,不刷屏)。 */
   turnDone?: boolean;

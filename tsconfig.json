@@ -16,7 +16,10 @@
     "allowJs": false,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    // v2.23.2+ tests/ 可以直接测 web/ 里不依赖 React/DOM 的纯逻辑模块(web-live-merge.test.ts);
+    // 它们经 type.ts 只牵到 web/lib/chat/events.ts 这一个 "@/..." 别名,在这里解析掉。
+    "paths": { "@/*": ["./web/*"] }
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "web", "dist"]

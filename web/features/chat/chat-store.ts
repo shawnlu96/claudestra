@@ -13,6 +13,13 @@ import type {
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
 import { hydrateHistoryMessages } from "./history-hydrate";
+import {
+  isHistoryBubble,
+  coveredByCursor,
+  pruneLiveBubbles,
+  mergeContiguousAssistant,
+  type RecordSrc,
+} from "./live-merge";
 
 /** 大总管保留名(与 lib/chat/bridge-api 的 MASTER_AGENT_NAME 同值;不 import——
  *  那个模块在 server 侧读 env,拖进 client bundle 没意义)。 */
@@ -70,33 +77,6 @@ function stripInboundHeader(x: string): string {
  * v2.23+ 加第四口径:剥掉注入头后的裸文本相等（Pi 的入站消息在记录里带 🌐 头,
  * 本地气泡只有正文——不比裸文本就当成两条）。
  */
-/** 历史/差量拉回来的气泡（h 前缀，见 hydrateHistoryMessages）。直播事件**绝不能**并进去。 */
-function isHistoryBubble(m: ChatMessage): boolean {
-  return m.id.startsWith("h");
-}
-
-/**
- * 直播气泡保全（2026-09-17 桌面端「同一回合两份」根因之一）：只留比 incoming 里最后一条
- * assistant **更新**的直播气泡——早于它的内容已被历史覆盖，留下就是两份。原先只看
- * 「incoming 末条是不是 assistant」：末条是 user（比如刚投递的插话/按钮）时直播气泡整段
- * 保留，其中已入历史的部分就重复了。容 5s 时钟偏差且偏向丢弃：丢了下一个流事件/差量
- * 会补回，留错了就是两份。incoming 没有 assistant 时全部保留（jsonl 尚未落盘，历史吞不掉
- * 正在流的内容——2026-07-16「头像和动效都消失了」）。
- */
-function liveBubblesNewerThan(streamed: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  let lastAsst = -Infinity;
-  for (const m of incoming) {
-    if (m.role !== "assistant" || !m.ts) continue;
-    const t = Date.parse(m.ts);
-    if (Number.isFinite(t) && t > lastAsst) lastAsst = t;
-  }
-  if (lastAsst === -Infinity) return streamed;
-  return streamed.filter((m) => {
-    const t = m.ts ? Date.parse(m.ts) : NaN;
-    return Number.isFinite(t) && t > lastAsst + 5_000;
-  });
-}
-
 function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
   const tail = incoming.slice(-80);
   const used = new Set<number>();
@@ -235,7 +215,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  都在 DOM）。缓冲 80ms 合并写入；工具/回复/定稿/发送前强制 flush 保段序；
    *  切会话时丢弃（别把旧会话的残字写进新视图）。 */
   private pendingText = "";
+  /** v2.23.2+ 缓冲中叙述文本的来源记录坐标(seq 变了先 flush,一段只对应一条记录) */
+  private pendingTextSrc: RecordSrc | undefined;
   private textFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** v2.23.2+ 已被历史覆盖而丢弃的直播事件计数(10s 合并打一条 client.log) */
+  private coveredDrops = 0;
+  private coveredLogAt = 0;
   /** 回合边界标志：进入新回合(status running)置 true，下一段输出另起气泡。
    *  用于区分「新回合的输出」和「Stop 之后才冲刷到的同回合迟到文本」——后者
    *  必须并进同一气泡，否则渲染成「两个 Claude」，且新气泡永远等不到 done
@@ -1023,13 +1008,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 用现有视图代替重拉
         const base = s.messages.filter((m) => m.id.startsWith("h"));
         const pending = survivingPending(s.messages, delta);
+        // 同一回合被 7s 差量切成的多段历史气泡拼回一泡(见 live-merge.ts)
+        const history = mergeContiguousAssistant(base, delta);
         const liveTail: ChatMessage[] = [];
         if (this.state.streaming) {
           const streamedBubbles = s.messages.filter((m) => m.role === "assistant" && m.streamed);
-          // 按时间保全（见 liveBubblesNewerThan）：早于差量末条 assistant 的直播内容已被历史覆盖
-          liveTail.push(...liveBubblesNewerThan(streamedBubbles, delta));
+          // 按 seq 精确剥掉已入历史的直播内容(无 seq 的退回时间戳规则,见 live-merge.ts)
+          liveTail.push(...pruneLiveBubbles(streamedBubbles, delta, this.historyCursor, history));
         }
-        s.messages = [...mergePendingByTs([...base, ...delta], pending), ...liveTail];
+        s.messages = [...mergePendingByTs(history, pending), ...liveTail];
         if (s.streaming && !liveTail.length) {
           const tail = s.messages[s.messages.length - 1];
           if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
@@ -1209,8 +1196,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           const streamedBubbles = s.messages.filter(
             (m) => m.role === "assistant" && m.streamed
           );
-          // 按时间保全（见 liveBubblesNewerThan）：早于历史末条 assistant 的直播内容已被覆盖
-          liveTail.push(...liveBubblesNewerThan(streamedBubbles, history));
+          // 按 seq 精确剥掉已入历史的直播内容(无 seq 的退回时间戳规则,见 live-merge.ts)
+          liveTail.push(...pruneLiveBubbles(streamedBubbles, history, this.historyCursor, history));
         }
         s.messages = [...mergePendingByTs(history, pending), ...liveTail];
         // 回合进行中但尾部没有直播气泡(被历史吸收/尚无输出)→ 恢复「思考中」
@@ -1965,6 +1952,31 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
   // ─── StreamSink 实现 ─────────────────────────────────────
 
+  /**
+   * v2.23.2+ 直播事件的记录已被历史游标覆盖(差量/全量抢先把它以历史形态拉进了视图)→ 不画。
+   * 这是「差量先到、事件后到」的那一半;另一半(事件先到)在差量应用时由 pruneLiveBubbles
+   * 按 seq 剥掉。老办法按时间戳 ±5s 猜,流一延迟就两份(owner 2026-09-17 两次截图)。
+   */
+  private dropIfCovered(kind: string, src?: RecordSrc): boolean {
+    if (!coveredByCursor(this.historyCursor, src)) return false;
+    this.coveredDrops++;
+    const now = Date.now();
+    if (now - this.coveredLogAt > 10_000) {
+      this.clientLog(
+        `stream: 丢弃已入历史的直播事件 ×${this.coveredDrops} (${kind} seq=${src?.seq} ≤ 游标 ${this.historyCursor?.lastSeq})`
+      );
+      this.coveredDrops = 0;
+      this.coveredLogAt = now;
+    }
+    return true;
+  }
+
+  /** 直播气泡记下已画进来的最大 seq / 所属会话——差量对账按它判覆盖 */
+  private tagLiveBubble(m: ChatMessage, src?: RecordSrc) {
+    if (typeof src?.seq === "number") m.seqEnd = Math.max(m.seqEnd ?? -1, src.seq);
+    if (src?.sid && !m.sid) m.sid = src.sid;
+  }
+
   /** 确保当前有一个流式助手气泡承接工具/文本；没有则新建。 */
   private ensureLiveAssistant() {
     const last = this.state.messages[this.state.messages.length - 1];
@@ -2001,16 +2013,22 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     summary: string,
     state: "running" | "done" | "error",
     detail?: string,
-    id?: string
+    id?: string,
+    src?: RecordSrc
   ) {
     // Task* 工具出现 = 任务清单大概率变了 → 防抖刷新任务面板
     if (/^Task(Create|Update|Stop)$/.test(name)) this.noteTaskToolSeen();
+    if (this.dropIfCovered("tool", src)) return;
     this.flushPendingText(); // 保持叙述/工具的真实交错序
     this.ensureLiveAssistant();
     this.produce((s) => {
       const last = s.messages[s.messages.length - 1];
       if (last?.role === "assistant") {
-        const tc = { name, summary, state, ts: new Date().toISOString(), ...(detail ? { detail } : {}), ...(id ? { id } : {}) };
+        const tc = {
+          name, summary, state, ts: new Date().toISOString(),
+          ...(detail ? { detail } : {}), ...(id ? { id } : {}),
+          ...(typeof src?.seq === "number" ? { seq: src.seq } : {}),
+        };
         last.toolCalls = last.toolCalls ?? [];
         last.toolCalls.push(tc);
         // segments 保持叙述/工具的真实交错序（渲染层优先用它）
@@ -2018,6 +2036,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         const tail = last.segments[last.segments.length - 1];
         if (tail?.kind === "tools") tail.tools.push(tc);
         else last.segments.push({ kind: "tools", tools: [tc] });
+        this.tagLiveBubble(last, src);
       }
       s.awaitingChunk = false;
     });
@@ -2046,7 +2065,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  public appendAssistantText(text: string, progress?: boolean) {
+  public appendAssistantText(text: string, progress?: boolean, src?: RecordSrc) {
+    if (this.dropIfCovered(progress ? "progress" : "text", src)) return;
     if (progress) {
       // v2.21.3+ 进度句(💭)自成一段:先把缓冲的叙述落盘保序,再独立入段。不并入
       // content——历史侧 hydrate 也不把它算进 content,两边对账口径一致。
@@ -2056,12 +2076,21 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         const last = s.messages[s.messages.length - 1];
         if (last?.role === "assistant") {
           last.segments = last.segments ?? [];
-          last.segments.push({ kind: "text", text, ts: new Date().toISOString(), progress: true });
+          last.segments.push({
+            kind: "text", text, ts: new Date().toISOString(), progress: true,
+            ...(typeof src?.seq === "number" ? { seq: src.seq } : {}),
+          });
+          this.tagLiveBubble(last, src);
         }
         s.awaitingChunk = false;
       });
       return;
     }
+    // 换了来源记录就先落上一段:一个文本段只对应一条 jsonl 记录,对账才能按 seq 整段剥
+    if (this.pendingText && (this.pendingTextSrc?.seq !== src?.seq || this.pendingTextSrc?.sid !== src?.sid)) {
+      this.flushPendingText();
+    }
+    this.pendingTextSrc = src;
     this.pendingText += text;
     if (this.textFlushTimer === null) {
       this.textFlushTimer = setTimeout(() => this.flushPendingText(), 80);
@@ -2075,8 +2104,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.textFlushTimer = null;
     }
     const text = this.pendingText;
+    const src = this.pendingTextSrc;
     if (!text) return;
     this.pendingText = "";
+    this.pendingTextSrc = undefined;
     this.ensureLiveAssistant();
     this.produce((s) => {
       const last = s.messages[s.messages.length - 1];
@@ -2084,9 +2115,15 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         last.content += text;
         last.segments = last.segments ?? [];
         const tail = last.segments[last.segments.length - 1];
-        // 进度段不吸收后续叙述——叙述另起一段
-        if (tail?.kind === "text" && !tail.progress) tail.text += text;
-        else last.segments.push({ kind: "text", text, ts: new Date().toISOString() });
+        // 进度段不吸收后续叙述——叙述另起一段;来源记录不同也另起(seq 对账按段剥)
+        if (tail?.kind === "text" && !tail.progress && tail.seq === src?.seq) tail.text += text;
+        else {
+          last.segments.push({
+            kind: "text", text, ts: new Date().toISOString(),
+            ...(typeof src?.seq === "number" ? { seq: src.seq } : {}),
+          });
+        }
+        this.tagLiveBubble(last, src);
       }
       s.awaitingChunk = false;
     });
@@ -2098,6 +2135,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       clearTimeout(this.textFlushTimer);
       this.textFlushTimer = null;
     }
+    this.pendingTextSrc = undefined;
     this.pendingText = "";
   }
 
