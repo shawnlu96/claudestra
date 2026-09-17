@@ -53,6 +53,33 @@ function agentsSignature(list: AgentSession[]): string {
  * 匹配三口径:归一化全文相等 / 历史含 wire 原文([button:id] 落在 channel 包装里)
  * / 「🔘 label」兜底形态(2026-07-16)。CRLF 归一防注入链路差异(2026-07-15)。
  */
+/** 历史/差量拉回来的气泡（h 前缀，见 hydrateHistoryMessages）。直播事件**绝不能**并进去。 */
+function isHistoryBubble(m: ChatMessage): boolean {
+  return m.id.startsWith("h");
+}
+
+/**
+ * 直播气泡保全（2026-09-17 桌面端「同一回合两份」根因之一）：只留比 incoming 里最后一条
+ * assistant **更新**的直播气泡——早于它的内容已被历史覆盖，留下就是两份。原先只看
+ * 「incoming 末条是不是 assistant」：末条是 user（比如刚投递的插话/按钮）时直播气泡整段
+ * 保留，其中已入历史的部分就重复了。容 5s 时钟偏差且偏向丢弃：丢了下一个流事件/差量
+ * 会补回，留错了就是两份。incoming 没有 assistant 时全部保留（jsonl 尚未落盘，历史吞不掉
+ * 正在流的内容——2026-07-16「头像和动效都消失了」）。
+ */
+function liveBubblesNewerThan(streamed: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  let lastAsst = -Infinity;
+  for (const m of incoming) {
+    if (m.role !== "assistant" || !m.ts) continue;
+    const t = Date.parse(m.ts);
+    if (Number.isFinite(t) && t > lastAsst) lastAsst = t;
+  }
+  if (lastAsst === -Infinity) return streamed;
+  return streamed.filter((m) => {
+    const t = m.ts ? Date.parse(m.ts) : NaN;
+    return Number.isFinite(t) && t > lastAsst + 5_000;
+  });
+}
+
 function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
   const tail = incoming.slice(-80);
   const used = new Set<number>();
@@ -874,8 +901,20 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const delta = hydrateHistoryMessages(json.data ?? []);
       if (typeof json.lastSeq === "number") this.historyCursor = { sid: cur.sid, lastSeq: json.lastSeq };
       if (!delta.length) {
-        // 没错过任何东西——pill 消失即「已是最新」(quiet 心跳没亮过 pill,不必 produce)
-        if (!quiet) this.produce((s) => { s.syncState = null; });
+        // 没错过任何东西——pill 消失即「已是最新」(quiet 心跳没亮过 pill,不必 produce)。
+        // 但回放/迟到事件可能留下了已定稿却不在历史里的直播气泡(非 h、streamed=false):
+        // 差量为空说明 jsonl 在游标后没有新东西,这种气泡的内容必已在 base 里 → 是重复,
+        // 闲置时不会再有差量来清,这里顺手清掉。
+        const orphans = this.state.streaming
+          ? 0
+          : this.state.messages.filter((m) => m.role === "assistant" && !isHistoryBubble(m) && !m.streamed).length;
+        if (!quiet || orphans > 0) {
+          this.produce((s) => {
+            if (!quiet) s.syncState = null;
+            if (orphans > 0) s.messages = s.messages.filter((m) => !(m.role === "assistant" && !isHistoryBubble(m) && !m.streamed));
+          });
+          if (orphans > 0) this.clientLog(`syncDelta: 清掉 ${orphans} 个已入历史的直播气泡 agent=${name}`);
+        }
         return;
       }
       this.clientLog(`syncDelta: 追平 ${delta.length} 条 agent=${name} after=${cur.lastSeq}`);
@@ -888,10 +927,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         const liveTail: ChatMessage[] = [];
         if (this.state.streaming) {
           const streamedBubbles = s.messages.filter((m) => m.role === "assistant" && m.streamed);
-          const dLast = delta[delta.length - 1];
-          if (streamedBubbles.length && (!dLast || dLast.role !== "assistant")) {
-            liveTail.push(...streamedBubbles);
-          }
+          // 按时间保全（见 liveBubblesNewerThan）：早于差量末条 assistant 的直播内容已被历史覆盖
+          liveTail.push(...liveBubblesNewerThan(streamedBubbles, delta));
         }
         s.messages = [...mergePendingByTs([...base, ...delta], pending), ...liveTail];
         if (s.streaming && !liveTail.length) {
@@ -1073,10 +1110,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           const streamedBubbles = s.messages.filter(
             (m) => m.role === "assistant" && m.streamed
           );
-          const histLast = history[history.length - 1];
-          if (streamedBubbles.length && (!histLast || histLast.role !== "assistant")) {
-            liveTail.push(...streamedBubbles);
-          }
+          // 按时间保全（见 liveBubblesNewerThan）：早于历史末条 assistant 的直播内容已被覆盖
+          liveTail.push(...liveBubblesNewerThan(streamedBubbles, history));
         }
         s.messages = [...mergePendingByTs(history, pending), ...liveTail];
         // 回合进行中但尾部没有直播气泡(被历史吸收/尚无输出)→ 恢复「思考中」
@@ -1306,6 +1341,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         if (s.syncState === "syncing") s.syncState = null;
       });
       this.clientLog(`stream connected agent=${name}${since ? ` since=${since}` : ""}`);
+      // 带 since 的重连会把环形缓冲里错过的事件整段回放；若期间 7s 对账已把其中一部分以
+      // 历史形态拉进视图，回放会再画一份直播气泡（闲置时没有后续差量来清）。回放冲完后
+      // 做一次 quiet 差量，把已被历史覆盖的直播气泡按时间/孤儿规则清掉。
+      if (since && this.historyCursor) {
+        const g = this.openGen;
+        setTimeout(() => { if (g === this.openGen) void this.syncDelta(name, g, 0, true); }, 2_000);
+      }
       // 假死流看门狗:iOS 挂起恢复/网络切换后连接常「不报错也不产出」,以前
       // 只能等用户切页触发对齐。BFF 心跳 10s 一发,25s 收不到任何字节即判死,
       // 主动 cancel → read 返回 done → finally 走快路径重连(断点重放无损)。
@@ -1827,7 +1869,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 尾部是 assistant 气泡且不在回合边界 → 直接承接。包括已定稿的：
     // Stop 之后才冲刷到的同回合迟到文本并进原气泡（此时 streamed=false，
     // 渲染自动走 Domd，markdown 正常）。只有新回合(boundary)才另起气泡。
-    if (last && last.role === "assistant" && (last.streamed || !this.nextBubbleBoundary)) {
+    // ⚠ 绝不往**历史气泡**（h 前缀，差量/全量拉回来的）里追加：回合中 7s 对账把直播气泡换成
+    // 历史气泡后，继续到达的流事件若塞进它，就永久留在 base 里；下一次差量再把同一段以历史
+    // 形态追加在后面 → 同一回合两份（owner 2026-09-17 桌面端截图：上面「历史 A + 塞进去的
+    // 直播内容」、下面「历史 B」）。历史气泡后面的直播内容一律另起气泡。
+    if (last && last.role === "assistant" && !isHistoryBubble(last) && (last.streamed || !this.nextBubbleBoundary)) {
       this.nextBubbleBoundary = false; // 本回合输出已开始流动，边界消费掉
       return;
     }
@@ -1963,6 +2009,21 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 直接挂到最后一条 assistant 气泡上（无论是否已定稿），已定稿的保持定稿 → reply 走
    * Domd 富文本。没有前置 assistant 气泡（纯 reply 无叙述）才新建，且回合外直接定稿。
    */
+  /** 最近几条历史气泡里是否已有同文本的 reply 段（差量抢先补进来的） */
+  private recentHistoryHasReply(text: string): boolean {
+    const want = text.trim();
+    if (!want) return false;
+    const msgs = this.state.messages;
+    for (let i = msgs.length - 1, seen = 0; i >= 0 && seen < 6; i--) {
+      const m = msgs[i];
+      if (m.role !== "assistant") continue;
+      seen++;
+      if (!isHistoryBubble(m)) continue;
+      if ((m.segments ?? []).some((seg) => seg.kind === "reply" && seg.text.trim() === want)) return true;
+    }
+    return false;
+  }
+
   public setReplyText(
     text: string,
     components?: WebComponentRow[],
@@ -1980,8 +2041,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!text?.trim() && !hasComp && !hasAtts) return;
     this.lastReplyTextAt = Date.now(); // 迟到 reply_pending 的判据(见 setReplying)
     const last = this.state.messages[this.state.messages.length - 1];
-    // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合
-    if (last && last.role === "assistant" && !this.nextBubbleBoundary) {
+    // 7s 对账可能抢在 chat_message(out) 之前把这条 reply 从 jsonl 补进了历史气泡 → 不再建第二份
+    if (this.recentHistoryHasReply(text)) return;
+    // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合；
+    // 历史气泡（h 前缀）同样不并——理由见 ensureLiveAssistant
+    if (last && last.role === "assistant" && !isHistoryBubble(last) && !this.nextBubbleBoundary) {
       this.produce((s) => {
       s.replying = false; // 回复已到,「正在回复…」收场
 
