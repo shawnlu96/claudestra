@@ -59,7 +59,10 @@ src/
     discord-api.ts       Discord API wrappers: discordReply (chunking / reply_to / files / components), channel CRUD, react, edit
     management.ts        Admin button/select handlers that bypass the LLM
     screenshot.ts        Terminal screenshot pipeline (ANSI → HTML → PNG)
-    jsonl-watcher.ts     JSONL session tailer → tool summaries + assistant text stream + drain-on-Stop
+    jsonl-watcher.ts     JSONL session tailer → tool summaries + assistant text stream + drain-on-Stop; v2.23.2+ every
+                         tool_start / assistant_text / reply_pending event carries {seq, sid} — the record's full-file
+                         line number (same coordinate as session-history's seq) + session id — so the web client can tell
+                         "already rendered from history" exactly instead of guessing by timestamp
     slash-catalog.ts     Hardcoded list of CC built-in slash commands (Discord-friendly subset)
     slash-registry.ts    Runtime registry of discovered skills per scope + per-channel resolver
     wedge-watcher.ts     Detects agents stuck >30min with no pane change + not idle → Discord alert; v2.7+ link sentinel (window alive but channel-server offline >5min → repair button); v2.14+ the link alert also emits `session_anomaly(kind=link_down)` so web clients see it too — they used to get no signal at all when the MCP link went down
@@ -95,6 +98,8 @@ src/
     session-recall.ts    v2.21.5+ recall hook plumbing: Claude Code project slug / HANDOFF.md path / idempotent SessionStart hook merge into ~/.claude/settings.json (registered only when recall.py exists)
     net-addr.ts          v2.14+ detect this host's reachable addresses (Tailscale CGNAT first, then RFC1918) for peer handshake `--url`
     jsonl-cost.ts        Parse ~/.claude/projects JSONL files → per-model token rollup
+    jsonl-lines.ts       v2.23.2+ splitChunkLines: appended-chunk → lines with full-file line numbers (watcher's seq source;
+                         a partial trailing line does not advance the base, so its continuation lands on the same seq)
     peers.ts             peers.json data model (v2.11+ HTTP peers only) + handshake string encode/parse + atomic writes
     principals.ts        v2.6.0+ transport-scoped identity + API token CRUD/scope/rate-limit (~/.claude-orchestrator/principals.json)
     registry.ts          v2.9+ single reader for ~/.claude-orchestrator/registry.json (field normalization incl. cwd/dir compat); manager.ts stays the sole writer
@@ -126,6 +131,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   held-pac.test.ts         v2.23.1+ pendingAgentCalls 失效判定：目标长回合期间消息还押着就不清回程路由簿
   http-peer.test.ts        v2.11+ HTTP peer handshake encode/parse + reply extraction
   jsonl-cost.test.ts       JSONL token-usage rollup
+  jsonl-lines.test.ts      v2.23.2+ watcher line-number coordinates: empty lines keep their number, partial lines don't advance
   link-policy.test.ts      v2.14+ what channel-server does when displaced — "stdio alive ⇒ never exit"
   modal-parser.test.ts     Tmux modal detection
   net-addr.test.ts         v2.14+ reachable-address detection: CGNAT/RFC1918 boundaries, no loopback
@@ -144,6 +150,8 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   slash-registry.test.ts   Slash command registry per-channel resolution
   stats-resets.test.ts     Usage-window reset detection
   web-gateway.test.ts      v2.13+ cross-origin verdict for the ws control plane (drive-by RCE guard)
+  web-live-merge.test.ts   v2.23.2+ web client live/history dedup by seq (pruneLiveBubbles / coveredByCursor /
+                           mergeContiguousAssistant) — root tsconfig maps "@/*" → web/* so tests/ can import web pure logic
 install.sh               One-line installer
 SETUP.md                 User-facing installation guide
 ```

@@ -118,6 +118,15 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
   （重放与差量必然重复）。BFF 差量分支先查清单做轮转检测（pinned≠newest →
   `rotated:true`）；轮转/差量超一页/连败 → 自动回退全量。跨境链路唤醒到上屏从
   ~14s 降到 ~0.5-2s（2026-07-28 实测追平 533ms）。
+- **直播 ↔ 历史判重按 seq（v2.23.2，`features/chat/live-merge.ts`）**：同一条 jsonl 记录
+  两条路都会到（watcher 推事件 / 7s 对账拉差量），先后不定。watcher 的 tool/text 事件带
+  `{seq, sid}`（记录的全文件行号 + 会话 id，BFF `recordSrc` 透传），历史游标 `{sid,lastSeq}`
+  说「≤ lastSeq 都已在历史里」：事件后到 → `coveredByCursor` 命中不画（client.log
+  「丢弃已入历史的直播事件」10s 合并计数）；事件先到 → 差量/全量应用时 `pruneLiveBubbles`
+  按 seq 剥掉直播气泡里已覆盖的段/工具，剥空即丢；reply 段（bridge 直投无 seq）看历史里有无
+  同文；没带 seq 的老事件退回时间戳 ±5s 规则。`mergeContiguousAssistant` 把长回合被差量切成
+  的多段历史气泡拼回一泡。⚠ 别再用时间戳猜重复——流一延迟 / 两端时钟一偏就两份
+  （owner 2026-09-17 两次截图）。
 - **大总管**：Bridge 侧 `findApiAgent("master")` 特判（fork）——messages/history/interrupt/answer
   对 master 透明可用。master 没有 jsonl-watcher，实时只有 reply 的 `chat_message(out)` + done；
   历史从 jsonl 读所以带工具卡。
