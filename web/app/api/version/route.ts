@@ -42,10 +42,11 @@ export async function GET() {
   } catch {
     /* 根 package.json 读不到就只显示 commit */
   }
-  // cwd 是 web/，所以 pathspec 用 `.` —— 与 next.config.ts 烤入时同源同写法
+  // cwd 是 web/，所以 pathspec 用 `.` 且排除 markdown —— 与 scripts/gen-build-info.mjs 烤入时
+  // 同源同写法(2026-09-18:只改 web/CLAUDE.md 的提交曾让横幅永远亮「新版本已就绪」)
   const [commit, webCommit] = await Promise.all([
     git(["rev-parse", "--short", "HEAD"]),
-    git(["log", "-1", "--format=%h", "--", "."]),
+    git(["log", "-1", "--format=%h", "--", ".", ":(exclude)*.md"]),
   ]);
   cache = { version, commit, webCommit, at: Date.now() };
   return NextResponse.json({ version, commit, webCommit });
