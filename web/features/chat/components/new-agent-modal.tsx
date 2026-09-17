@@ -244,6 +244,8 @@ export function NewAgentModal({
               onChange={(e) => {
                 setRuntime(e.target.value);
                 if (e.target.value !== "pi") setPiBase("");
+                // 两个运行时的模型标识不通用（Claude 别名 vs Pi 的 provider/model-id），切换就清空
+                setModel("");
               }}
             >
               <option value="">{t("Claude Code（默认）")}</option>
@@ -271,18 +273,31 @@ export function NewAgentModal({
           <div className="grid grid-cols-2 gap-3">
             <label className="form-control">
               <span className="label-text mb-1 text-sm">{t("模型")}</span>
-              <select
-                className="select select-bordered select-sm w-full"
-                value={model}
-                disabled={busy}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                {MODEL_ALIAS_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {t(o.label)}
-                  </option>
-                ))}
-              </select>
+              {runtime === "pi" ? (
+                // Pi 的 --model 收的是 provider/model-id，Claude 别名表对它无意义：
+                // 选个 sonnet-5 会原样透传给 pi → 起不来（review #10 应修项）
+                <input
+                  type="text"
+                  className="input input-bordered input-sm w-full"
+                  value={model}
+                  disabled={busy}
+                  placeholder={t("provider/model-id（留空 = Pi 默认）")}
+                  onChange={(e) => setModel(e.target.value)}
+                />
+              ) : (
+                <select
+                  className="select select-bordered select-sm w-full"
+                  value={model}
+                  disabled={busy}
+                  onChange={(e) => setModel(e.target.value)}
+                >
+                  {MODEL_ALIAS_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {t(o.label)}
+                    </option>
+                  ))}
+                </select>
+              )}
             </label>
             <label className="form-control">
               <span className="label-text mb-1 text-sm">Effort</span>

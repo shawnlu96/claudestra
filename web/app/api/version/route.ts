@@ -24,30 +24,14 @@ const git = (args: string[]): Promise<string> =>
     execFile("git", args, { cwd: process.cwd() }, (e, out) => resolve(e ? "" : out.trim()));
   });
 
-/**
- * 每个服务进程只发一次的「清掉浏览器 HTTP 缓存」信号（2026-09-14）。
- *
- * 为什么需要：文档页此前带 `Cache-Control: s-maxage=31536000`（已改成 no-cache），
- * 凡是那之前访问过的浏览器都可能**抱着旧 HTML 不放**——点「新版本已就绪」的刷新
- * 也拿回同一份旧 HTML，commit 永远对不上，提示永远弹（owner 实报「点了刷新没有用」）。
- * 只靠改响应头救不了：旧 HTML 早就在对方缓存里，客户端连问都不问服务器。
- *
- * 好在**陈旧客户端会主动轮询这个端点**（UpdateToast 比对 webCommit）——它的请求
- * 不会被缓存，于是在每次部署/重启后的第一条响应上挂 `Clear-Site-Data: "cache"`，
- * 浏览器收到就丢掉本站 HTTP 缓存，下一次刷新即拿到新 bundle。
- * 只发一次：每个进程的生命周期 = 一次部署，之后恢复正常缓存行为。
- * （注意 Safari 不实现 Clear-Site-Data，那条路仍要人工清站点数据。）
- */
-let cacheCleared = false;
+// 2026-09-17 去掉了这里曾有的 `Clear-Site-Data: "cache"`：它是进程级一次性头，只有部署后
+// **第一个**来轮询的客户端收到（其它设备永远收不到），而 Safari / WKWebView 又根本不实现
+// ——对 iOS PWA 零效果，只会误导排障。陈旧 bundle 的刷新走 update-toast 的 `_v=<commit>`
+// cache-busting（真正对所有客户端都生效的那条路）。
 
 export async function GET() {
   if (cache && Date.now() - cache.at < 30_000) {
-    const cached = NextResponse.json({ version: cache.version, commit: cache.commit, webCommit: cache.webCommit });
-    if (!cacheCleared) {
-      cacheCleared = true;
-      cached.headers.set("Clear-Site-Data", '"cache"');
-    }
-    return cached;
+    return NextResponse.json({ version: cache.version, commit: cache.commit, webCommit: cache.webCommit });
   }
   let version = "";
   try {
@@ -64,10 +48,5 @@ export async function GET() {
     git(["log", "-1", "--format=%h", "--", "."]),
   ]);
   cache = { version, commit, webCommit, at: Date.now() };
-  const res = NextResponse.json({ version, commit, webCommit });
-  if (!cacheCleared) {
-    cacheCleared = true;
-    res.headers.set("Clear-Site-Data", '"cache"');
-  }
-  return res;
+  return NextResponse.json({ version, commit, webCommit });
 }
