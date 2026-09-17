@@ -63,6 +63,7 @@ import {
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
+import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
@@ -4319,6 +4320,26 @@ async function maybeHealRotatedSession(channelId: string) {
     const me = agents.find((a) => a.channelId === channelId && a.status === "active");
     if (!me?.cwd || !me.sessionId) return;
     const cwd = me.cwd.replace(/^~/, process.env.HOME || "~");
+    // v2.23.2+ fork 源 id 共用:registry 记的 session 同时是另一个活 agent 的(resume --fork
+    // 探测失败时暂记的源 id)。源文件一直"新鲜"(是别人在写),下面的快路径永远放行,两个频道
+    // 渲染同一份 transcript(master 2026-09-18 实报)。改按 Claude Code 自己的登记
+    // (~/.claude/sessions/<pid>.json,带 tmux pane id)找这个窗口的真身,不看文件新鲜度。
+    const sharedWith = agents.find((a) => a.name !== me.name && a.status === "active" && a.sessionId === me.sessionId);
+    if (sharedWith && me.runtime !== "pi") {
+      const viaCc = await resolveSessionIdForWindow(me.name, cwd, { exclude: me.sessionId, timeoutMs: 1_500 }).catch(() => null);
+      if (viaCc && !agents.some((a) => a.name !== me.name && a.sessionId === viaCc.sessionId)) {
+        const r = await runManager("set-session", me.name, viaCc.sessionId);
+        if (r?.ok) {
+          stopWatchingByChannel(channelId);
+          startWatching(me.name, cwd, viaCc.sessionId, channelId, discord);
+          recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: viaCc.sessionId, reason: "shared_fork_source" } });
+          console.log(`🩹 session 自愈(fork 源 id 共用) agent=${me.name} ${me.sessionId.slice(0, 8)}->${viaCc.sessionId.slice(0, 8)}（与 ${sharedWith.name} 共用源 id，按 CC sessions 登记纠正）`);
+        } else {
+          console.error(`🩹 session 自愈(fork 源 id 共用) set-session 失败 agent=${me.name}:`, r?.error);
+        }
+      }
+      return;
+    }
     // 快路径（绝大多数回合）：registry session 本回合有写入 → 一切正常
     const mePath = sessionJsonlPath(me.runtime, cwd, me.sessionId);
     try {

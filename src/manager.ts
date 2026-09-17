@@ -69,6 +69,7 @@ import {
 import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
+import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
@@ -1416,12 +1417,16 @@ async function cmdResume(
   // v2.7+ fork 模式：registry 必须记 fork 出的实际新 session id，不是源 id
   let actualSessionId = sessionId;
   if (forkSession && forkBefore) {
-    const newId = await waitForNewSessionId(resolvedDir, forkBefore);
+    // v2.23.2+ 先问 Claude Code 自己的登记(~/.claude/sessions/<pid>.json,进程一起来就有新 id),
+    // 目录 diff 只作兜底:fork 出的 jsonl 要到第一条消息才创建(master 2026-09-18 实报就绪
+    // 32s 后才出现,20s 窗口错过 → registry 记了源 id,两个频道渲染同一份 transcript)
+    const viaCc = runtime === "pi" ? null : await resolveSessionIdForWindow(tmuxName, resolvedDir, { exclude: sessionId });
+    const newId = viaCc?.sessionId ?? (await waitForNewSessionId(resolvedDir, forkBefore));
     if (newId) {
       actualSessionId = newId;
-      console.error(`[resume] --fork 探测到新 session ${newId.slice(0, 8)}（源 ${sessionId.slice(0, 8)}）`);
+      console.error(`[resume] --fork 探测到新 session ${newId.slice(0, 8)}（源 ${sessionId.slice(0, 8)}，${viaCc ? "CC sessions 登记" : "目录 diff"}）`);
     } else {
-      console.error(`[resume] ⚠️ --fork 未探测到新 session id，registry 暂记源 id`);
+      console.error(`[resume] ⚠️ --fork 未探测到新 session id，registry 暂记源 id（bridge 回合结束时会按 CC sessions 登记自愈）`);
     }
   }
 
@@ -2312,7 +2317,9 @@ async function cmdRestart(name?: string) {
       });
       started = await startClaudeInWindow(tmuxName, forkCmd);
       if (started.ready) {
-        const newId = await waitForNewSessionId(cwd, before);
+        // v2.23.2+ 同 resume --fork:先按 CC sessions 登记拿新 id,目录 diff 兜底
+        const viaCc = await resolveSessionIdForWindow(tmuxName, cwd, { exclude: info.sessionId });
+        const newId = viaCc?.sessionId ?? (await waitForNewSessionId(cwd, before));
         if (newId) {
           // v2.8+ fork 换代：旧 session 从 registry 退役，先归档快照
           await archiveSession(tmuxName, cwd, info.sessionId).catch(() => {});
