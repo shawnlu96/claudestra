@@ -101,6 +101,10 @@ export interface ChatMessage {
   wire?: string;
   /** 由本轮流式生成（区别于历史加载） */
   streamed?: boolean;
+  /** v2.23.1+ 历史气泡所属 session（「删除」按 session+seq 区间隐藏；直播气泡无） */
+  sid?: string;
+  /** v2.23.1+ 历史气泡覆盖的原始记录区间尾 seq（首 seq 在 id 里：h<seq>） */
+  seqEnd?: number;
   /** 直播回合已完成——气泡底部渲染绿色「✓ 完成」行(历史消息不带,不刷屏)。 */
   turnDone?: boolean;
   /** 直播回合被打断(手动停止/连发抢占)——气泡底部黄色「⊘ 已打断」行。 */

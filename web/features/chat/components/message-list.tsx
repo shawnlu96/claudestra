@@ -706,12 +706,15 @@ const ProgressNote = memo(function ProgressNote({ text, ts }: { text: string; ts
 });
 
 const TextBlock = memo(function TextBlock({
+  msgId,
   text,
   ts,
   streamed,
   muted,
   fullText,
 }: {
+  /** 所属消息 id（长按/右键菜单「删除」用） */
+  msgId?: string;
   text: string;
   ts?: string;
   streamed?: boolean;
@@ -726,7 +729,7 @@ const TextBlock = memo(function TextBlock({
   // 内联条还把下面的排版顶下去（2026-08-22）。菜单见 ./bubble-menu。
   const [showTs, setShowTs] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, getEl: () => bodyRef.current }));
+  const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, messageId: msgId, getEl: () => bodyRef.current }));
   return (
     <QuoteSwipe quote={text} blockLevel>
       <div
@@ -846,7 +849,7 @@ function AssistantBody({
           <ProgressNote key={i} text={seg.text} ts={seg.ts ?? m.ts} />
         ) : seg.kind === "text" ? (
           // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
-          <TextBlock
+          <TextBlock msgId={m.id}
             key={i}
             text={seg.text}
             ts={seg.ts ?? m.ts}
@@ -861,7 +864,7 @@ function AssistantBody({
             <div key={i}>
               {i > 0 && <ReplyDivider />}
               {/* reply 到达即完整,永远直接富文本 */}
-              <TextBlock text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
+              <TextBlock msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
             </div>
           )
         ) : (
@@ -882,7 +885,7 @@ function AssistantBody({
       )}
     </>
   ) : hasNarration ? (
-    <TextBlock text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted />
+    <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted />
   ) : null;
 
   return (
@@ -892,7 +895,7 @@ function AssistantBody({
         <>
           {hasNarration && <ReplyDivider />}
           {/* reply 到达即完整,直接富文本 */}
-          <TextBlock text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
+          <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
         </>
       )}
     </InlineActionContext.Provider>
@@ -958,6 +961,7 @@ const Message = memo(function Message({
   const press = useBubbleMenuTrigger(() => ({
     text: splitQuoted(m.content).body,
     ts: m.ts,
+    messageId: m.id,
     getEl: () => bubbleRef.current,
   }));
   const t = useT();

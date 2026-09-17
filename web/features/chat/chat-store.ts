@@ -288,6 +288,73 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /** 左滑消息块 → 设引用草稿(composer 预览;再滑别的块覆盖;✕ 清除)。 */
+  /** 最近一次「删除」的现场，供 5s 内撤销（只留一份，再删一条就覆盖） */
+  private lastHidden: { msg: ChatMessage; index: number; agent: string; sid: string; from: number; to: number } | null = null;
+
+  /**
+   * v2.23.1+ 删除一条消息 = 跨设备隐藏（服务端按 session + 原始记录 seq 区间记，不动
+   * agent 的会话文件与上下文）。只对历史气泡（h 前缀）开放：直播气泡还没有 seq，等
+   * 差量把它换成历史气泡后才能删——否则本地删掉、下一次差量又长回来。
+   */
+  public async hideMessage(id: string): Promise<{ ok: boolean; reason?: "not-history" | "no-session" | "network" }> {
+    const agent = this.state.activeAgent;
+    if (!agent) return { ok: false, reason: "no-session" };
+    const idx = this.state.messages.findIndex((m) => m.id === id);
+    if (idx < 0) return { ok: false, reason: "not-history" };
+    const m = this.state.messages[idx];
+    const seqM = m.id.match(/^h(\d+)/);
+    if (!seqM) return { ok: false, reason: "not-history" };
+    const from = Number(seqM[1]);
+    const to = typeof m.seqEnd === "number" && m.seqEnd >= from ? m.seqEnd : from;
+    const sid = m.sid ?? this.historyCursor?.sid ?? this.historySessionId;
+    if (!sid) return { ok: false, reason: "no-session" };
+    this.produce((s) => {
+      s.messages = s.messages.filter((x) => x.id !== id);
+    });
+    this.lastHidden = { msg: m, index: idx, agent, sid, from, to };
+    try {
+      const r = await fetch("/api/chat/messages/hide", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent, session: sid, from, to, hide: true }),
+      });
+      if (!r.ok) throw new Error(String(r.status));
+      this.clientLog(`hide: agent=${agent} sid=${sid.slice(0, 8)} seq=${from}-${to}`);
+      return { ok: true };
+    } catch {
+      this.restoreHidden(false);
+      return { ok: false, reason: "network" };
+    }
+  }
+
+  /** 撤销最近一次删除（5s toast 里的「撤销」） */
+  public async undoHide(): Promise<boolean> {
+    const h = this.lastHidden;
+    if (!h) return false;
+    this.restoreHidden(false);
+    try {
+      const r = await fetch("/api/chat/messages/hide", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent: h.agent, session: h.sid, from: h.from, to: h.to, hide: false }),
+      });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private restoreHidden(keep: boolean) {
+    const h = this.lastHidden;
+    if (!h) return;
+    if (!keep) this.lastHidden = null;
+    this.produce((s) => {
+      if (s.messages.some((x) => x.id === h.msg.id)) return;
+      const i = Math.min(h.index, s.messages.length);
+      s.messages.splice(i, 0, h.msg);
+    });
+  }
+
   public setQuote(text: string) {
     const t = text.trim().replace(/\s+/g, " ").slice(0, 200);
     if (!t) return;

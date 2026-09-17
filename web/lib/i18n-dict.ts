@@ -410,6 +410,11 @@ export const DICT: Record<string, string> = {
   "滚动已锁定 · 拖动手柄调整选区": "Scrolling locked · drag the handles to adjust",
   "复制这段": "Copy this block",
   "复制整条": "Copy whole message",
+  "已删除": "Deleted",
+  "已恢复": "Restored",
+  "恢复失败": "Restore failed",
+  "删除失败": "Delete failed",
+  "回合结束后才能删": "Can be deleted after the turn ends",
   "复制失败": "Copy failed",
   "复制（选中的文字，或整屏可见内容）": "Copy (selection, or whole visible screen)",
 };

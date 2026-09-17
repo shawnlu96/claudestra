@@ -38,6 +38,8 @@ export interface BubbleMenuTarget {
   ts?: string;
   /** 「选择文字」要框住的 DOM。 */
   getEl: () => HTMLElement | null;
+  /** v2.23.1+ 所属消息 id：有它才显示「删除」（历史气泡 h 前缀可删；直播气泡提示回合结束后再删） */
+  messageId?: string;
 }
 
 type MenuState = (BubbleMenuTarget & { x: number; y: number }) | null;
@@ -151,7 +153,7 @@ export function BubbleMenu() {
   const t = useT();
   const store = useChatStoreApi();
   const [s, setS] = useState<MenuState>(null);
-  const [toast, setToast] = useState("");
+  const [toast, setToast] = useState<{ text: string; undo?: () => void } | null>(null);
   useEffect(() => {
     subs.add(setS);
     return () => {
@@ -178,9 +180,28 @@ export function BubbleMenu() {
     };
   }, []);
 
-  const flash = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast((v) => (v === msg ? "" : v)), 1400);
+  const flash = (msg: string, opts?: { undo?: () => void; ms?: number }) => {
+    const item = { text: msg, undo: opts?.undo };
+    setToast(item);
+    setTimeout(() => setToast((v) => (v === item ? null : v)), opts?.ms ?? 1400);
+  };
+  const doDelete = (id: string) => {
+    closeBubbleMenu();
+    if (!id.startsWith("h")) {
+      flash(t("回合结束后才能删"));
+      return;
+    }
+    void store.hideMessage(id).then((r) => {
+      if (r.ok) {
+        flash(t("已删除"), {
+          ms: 5000,
+          undo: () => {
+            setToast(null);
+            void store.undoHide().then((ok) => flash(ok ? t("已恢复") : t("恢复失败")));
+          },
+        });
+      } else flash(r.reason === "not-history" ? t("回合结束后才能删") : t("删除失败"));
+    });
   };
   const doCopy = (text: string) => {
     closeBubbleMenu();
@@ -190,7 +211,7 @@ export function BubbleMenu() {
   const menu = (() => {
     if (!s) return null;
     const hasFull = !!s.fullText && s.fullText !== s.text;
-    const rows = 2 + (hasFull ? 1 : 0) + 1; // 复制 / (整条) / 选择 / 引用
+    const rows = 2 + (hasFull ? 1 : 0) + 1 + (s.messageId ? 1 : 0); // 复制 / (整条) / 选择 / 引用 / (删除)
     const h = rows * 42 + (s.ts ? 26 : 0) + 12;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -230,6 +251,7 @@ export function BubbleMenu() {
               closeBubbleMenu();
             }}
           />
+          {s.messageId && <Item icon="🗑" label={t("删除")} danger onClick={() => doDelete(s.messageId!)} />}
           {s.ts && (
             <div className="px-3.5 pb-0.5 pt-1 font-mono text-[10px] tabular-nums text-base-content/35">
               {fmtTs(s.ts)}
@@ -246,10 +268,15 @@ export function BubbleMenu() {
       {menu}
       {toast && (
         <div
-          className="pointer-events-none fixed left-1/2 z-[999] -translate-x-1/2 rounded-full bg-neutral px-3 py-1.5 text-xs text-neutral-content shadow-lg"
+          className={`${toast.undo ? "pointer-events-auto" : "pointer-events-none"} fixed left-1/2 z-[999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-neutral px-3 py-1.5 text-xs text-neutral-content shadow-lg`}
           style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 96px)" }}
         >
-          {toast}
+          <span>{toast.text}</span>
+          {toast.undo && (
+            <button type="button" className="font-medium text-info underline-offset-2 active:underline" onClick={toast.undo}>
+              {t("撤销")}
+            </button>
+          )}
         </div>
       )}
     </>,

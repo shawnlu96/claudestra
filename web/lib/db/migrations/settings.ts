@@ -69,6 +69,18 @@ export function runSettingsMigrations(db: Database.Database) {
   // 写入方:push dispatcher(锁持有者,单写者)在 chat_message(out, api:) 上 +1,
   // markAgentRead(打开会话 / 点通知 / Discord 说话 / 看着时收到回复)归零。
   // 服务端持有 → 手机与 Mac 看到一致;App 关着时照样累计。
+  // v2.23.1+ 消息「删除」= 跨设备隐藏（lib/chat/hidden.ts）：按 jsonl 原始记录 seq 区间记，
+  // BFF history 合并气泡前过滤。不动 agent 的会话文件。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hidden_messages (
+      agent TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      seq_from INTEGER NOT NULL,
+      seq_to INTEGER NOT NULL,
+      hidden_at INTEGER NOT NULL,
+      PRIMARY KEY (agent, session_id, seq_from)
+    )
+  `);
   db.exec(`
     CREATE TABLE IF NOT EXISTS agent_unread (
       agent TEXT PRIMARY KEY,

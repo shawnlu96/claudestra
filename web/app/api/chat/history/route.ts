@@ -5,6 +5,7 @@ import { matchClickedRow } from "@/lib/chat/reply-clicks";
 import { parseInlineButtons, plainLabel } from "@/lib/chat/inline-buttons";
 import { apiAgentName, bridgeGet } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
+import { filterHidden } from "@/lib/chat/hidden";
 import { st } from "@/lib/server-lang";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "@/lib/chat/events";
@@ -56,7 +57,8 @@ const SELF_FROM = new Set(["web-ui"]);
  */
 /** 在带组件的气泡里找该点击对应的 choiceId + 人类可读 label（不在组里返回 null）。 */
 
-function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): ChatMessage[] {
+function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: string }): ChatMessage[] {
+  const sid = opts?.sid;
   const out: ChatMessage[] = [];
   let group: ChatMessage | null = null; // 当前正在累积的 assistant 回合气泡
   // 最近一条带组件的 assistant 气泡：后续 user 的按钮点击 payload 命中其组件
@@ -76,7 +78,7 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
       // 渲染交给前端 SystemDivider。剥掉老 bridge 自带的「── ──」装饰（兼容）。
       group = null;
       const text = (m.text || "上下文已压缩").replace(/^[─—\s]+|[─—\s]+$/g, "");
-      out.push({ id: `h${m.seq}`, role: "system", content: text, ts: m.ts });
+      out.push({ id: `h${m.seq}`, role: "system", content: text, ts: m.ts, sid, seqEnd: m.seq });
       continue;
     }
 
@@ -89,14 +91,14 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
       group = null; // 用户消息断开 assistant 分组
       // CC 写入的中断标记不是用户打的字 → 渲染成轻分隔线
       if (/^\[Request interrupted/.test(m.text || "")) {
-        out.push({ id: `h${m.seq}`, role: "system", content: "已被用户中断", ts: m.ts });
+        out.push({ id: `h${m.seq}`, role: "system", content: "已被用户中断", ts: m.ts, sid, seqEnd: m.seq });
         continue;
       }
       // TUI 斜杠命令记录（如 clear 后新会话首条 <command-name>/clear</command-name>）
       // 不是用户打的字 → 渲染成轻分隔线
       const cmdMatch = (m.text || "").match(/^<command-name>(\/[\w-]+)<\/command-name>/);
       if (cmdMatch) {
-        out.push({ id: `h${m.seq}`, role: "system", content: cmdMatch[1], ts: m.ts });
+        out.push({ id: `h${m.seq}`, role: "system", content: cmdMatch[1], ts: m.ts, sid, seqEnd: m.seq });
         continue;
       }
       const from = m.from && !SELF_FROM.has(m.from) ? m.from : undefined;
@@ -138,7 +140,7 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
       // 且把 markdown 正文顶乱(owner 实报)
       if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
       const { content, attachments } = extractAttachments(raw);
-      out.push({ id: `h${m.seq}`, role: "user", content, ts: m.ts, from, ...(attachments ? { attachments } : {}) });
+      out.push({ id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}) });
       continue;
     }
 
@@ -150,12 +152,13 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean }): Cha
       .map((f) => attachmentFromPath(f))
       .filter((a): a is ChatAttachmentView => !!a);
     if (!group) {
-      group = { id: `h${m.seq}`, role: "assistant", content: m.text || "", toolCalls, ts: m.ts, segments: [] };
+      group = { id: `h${m.seq}`, role: "assistant", content: m.text || "", toolCalls, ts: m.ts, segments: [], sid, seqEnd: m.seq };
       if (m.replyText) group.replyText = m.replyText;
       if (m.replyComponents?.length) group.replyComponents = m.replyComponents;
       if (replyAtts.length) group.attachments = replyAtts;
       out.push(group);
     } else {
+      group.seqEnd = m.seq; // 气泡覆盖的原始记录区间尾（「删除」按区间隐藏）
       if (m.text) group.content = group.content ? `${group.content}\n\n${m.text}` : m.text;
       if (toolCalls) group.toolCalls = [...(group.toolCalls ?? []), ...toolCalls];
       if (m.replyText) group.replyText = group.replyText ? `${group.replyText}\n${m.replyText}` : m.replyText;
@@ -223,6 +226,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "missing agent" }, { status: 400 });
   }
   const name = encodeURIComponent(apiAgentName(agent));
+  const agentKey = apiAgentName(agent);
+  // v2.23.1+ 「删除」的隐藏区间在**合并成气泡之前**过滤原始记录；lastSeq/hasMore 仍按未过滤
+  // 的页算，否则尾部记录被隐藏时游标永远追不到尾、每次差量重拉同一段
+  const shape = (items: NeutralMessage[], sid: string, tail?: boolean) =>
+    slimForWire(toChatMessages(filterHidden(agentKey, sid, items), { ...(tail === false ? { tail: false } : {}), sid }));
   // 向上分页(owner 2026-07-16「往上滑看全部历史」):before=<seq> + session=<sid>
   // → 钉在同一 session 往前翻(seq 空间 per-session,不能跨 session 混用)
   const before = url.searchParams.get("before");
@@ -246,7 +254,7 @@ export async function GET(request: Request) {
       );
       const items = page.messages || [];
       return NextResponse.json({
-        data: slimForWire(toChatMessages(items, { tail: false })),
+        data: shape(items, pinnedSession, false),
         sessionId: pinnedSession,
         lastSeq: items.length ? items[items.length - 1].seq : Number(after),
         hasMore: items.length >= 300,
@@ -268,7 +276,7 @@ export async function GET(request: Request) {
       const items = page.messages || [];
       return NextResponse.json({
         // 差量的尾就是全局尾 → tail 语义用默认(完成标记正常渲染)
-        data: slimForWire(toChatMessages(items)),
+        data: shape(items, pinnedSession),
         sessionId: pinnedSession,
         lastSeq: items.length ? items[items.length - 1].seq : Number(after),
         // hasMore = 差量比一页还大(离场太久) → 客户端放弃追加改走全量
@@ -284,7 +292,7 @@ export async function GET(request: Request) {
       const items = page.messages || [];
       if (items.length) {
         return NextResponse.json({
-          data: slimForWire(toChatMessages(items, { tail: false })),
+          data: shape(items, pinnedSession, false),
           sessionId: pinnedSession,
           // 粗判:拿满一页 ≈ 还有更早;没拿满也标 true——本 session 翻到头后
           // 还能跨 session 接更早的会话(v2.16 跨 session 连续翻页)
@@ -310,7 +318,7 @@ export async function GET(request: Request) {
       );
       const titems = tail.messages || [];
       return NextResponse.json({
-        data: slimForWire(toChatMessages(titems, { tail: false })),
+        data: shape(titems, olderSid, false),
         sessionId: olderSid,
         stitched: true, // 客户端据此换纸接续翻页 + 插会话边界分隔
         hasMore: titems.length >= 300 || idx + 2 < sids.length,
@@ -337,7 +345,7 @@ export async function GET(request: Request) {
         );
         const items = page.messages || [];
         return NextResponse.json({
-          data: slimForWire(toChatMessages(items)),
+          data: shape(items, s.sessionId),
           sessionId: s.sessionId,
           // lastSeq = 合并成气泡前最后一条原始记录的 seq——差量同步的游标锚。
           // ⚠ 不能用气泡 id 推(气泡 id 是合并组首条记录的 seq,组内后续记录
