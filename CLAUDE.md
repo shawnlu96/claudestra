@@ -114,6 +114,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
                            isolated unit tests (Discord client + ws + peers.json coupling), live
                            verification through a sandbox session is the coverage there.
   agent-stats.test.ts      Per-agent usage rollup, compact-aware
+  archive-sweeper.test.ts  v2.23+ pruneArchives 只清传入的根（手动归档区）、快照不碰、days=0 不清
   ask-user-question.test.ts AskUserQuestion detection in the TUI + keystroke synthesis
   bg-jobs.test.ts          Claude Code bg job cleanup recipe (roster root-fix)
   baseline-keys.test.ts    v2.22.x bg-activity baseline 作用域:同 agent-session 只 baseline 一次、换 session 重新 baseline、prune 按 agent 名
@@ -136,6 +137,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   session-archive.test.ts  v2.8+ copy-if-larger snapshot semantics
   session-history.test.ts  v2.9+ jsonl → neutral messages: reply extraction, meta filtering, paging
   session-recall.test.ts   v2.21.5+ project slug, HANDOFF path, SessionStart hook merge/remove idempotency
+  session-source.test.ts   v2.23+ runtimeForSessionPath：Pi 根按路径、CC 根零 I/O、归档副本读头行
   sessions-inventory.test.ts v2.7+ doppelganger detection / session reconciliation
   skills.test.ts           SKILL.md discovery
   slash-registry.test.ts   Slash command registry per-channel resolution

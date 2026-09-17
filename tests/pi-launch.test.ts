@@ -10,7 +10,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { buildPiCommand, PI_EXTENSION_PATH } from "../src/lib/pi-launch.ts";
+import { buildPiCommand, PI_EXTENSION_PATH, isPiThinkingLevel } from "../src/lib/pi-launch.ts";
 import { buildAgentCommand } from "../src/lib/launch-command.ts";
 import { agentRuntime } from "../src/lib/registry.ts";
 
@@ -139,5 +139,40 @@ describe("buildAgentCommand 分发", () => {
       expect(cmd).toContain("claude --dangerously-load-development-channels");
       expect(cmd).not.toContain("--extension");
     }
+  });
+});
+
+describe("PI_BIN / thinking 白名单（review #10 修复）", () => {
+  const withEnv = (patch: Record<string, string | undefined>, fn: () => void) => {
+    const prev: Record<string, string | undefined> = {};
+    for (const k of Object.keys(patch)) { prev[k] = process.env[k]; if (patch[k] === undefined) delete process.env[k]; else process.env[k] = patch[k]; }
+    try { fn(); } finally {
+      for (const k of Object.keys(patch)) { if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k]; }
+    }
+  };
+
+  test("PI_BIN 生效：命令用它，不再写死 pi（与 piAvailable() 同源）", () => {
+    withEnv({ PI_BIN: "/opt/pi-dist/bin/pi", PI_CODING_AGENT_BIN: undefined }, () => {
+      const cmd = buildPiCommand(base);
+      expect(cmd).toContain("/opt/pi-dist/bin/pi");
+      expect(cmd).not.toContain(" pi ");
+    });
+  });
+
+  test("PI_CODING_AGENT_BIN 作为次选；都没设回落到 pi", () => {
+    withEnv({ PI_BIN: undefined, PI_CODING_AGENT_BIN: "/usr/local/bin/pi-agent" }, () => {
+      expect(buildPiCommand(base)).toContain("/usr/local/bin/pi-agent");
+    });
+    withEnv({ PI_BIN: undefined, PI_CODING_AGENT_BIN: undefined }, () => {
+      expect(buildPiCommand(base)).toContain(" pi ");
+    });
+  });
+
+  test("isPiThinkingLevel 只放行已知档位（换行注入串一律拒绝）", () => {
+    expect(isPiThinkingLevel("high")).toBe(true);
+    expect(isPiThinkingLevel("off")).toBe(true);
+    expect(isPiThinkingLevel("high\n/quit")).toBe(false);
+    expect(isPiThinkingLevel("")).toBe(false);
+    expect(isPiThinkingLevel("ultra")).toBe(false);
   });
 });
