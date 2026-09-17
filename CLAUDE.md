@@ -113,6 +113,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   cron.test.ts             Cron parser + scheduler
   doctor.test.ts           v2.14+ install health-check: daemon exit classification + report formatting
   event-bus.test.ts        v2.6.0+ seq monotonicity, per-agent ring buffer, subscriber isolation
+  held-pac.test.ts         v2.23.1+ pendingAgentCalls 失效判定：目标长回合期间消息还押着就不清回程路由簿
   http-peer.test.ts        v2.11+ HTTP peer handshake encode/parse + reply extraction
   jsonl-cost.test.ts       JSONL token-usage rollup
   link-policy.test.ts      v2.14+ what channel-server does when displaced — "stdio alive ⇒ never exit"

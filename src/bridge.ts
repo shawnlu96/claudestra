@@ -6,6 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
+import { shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { hasActiveBgActivities } from "./bridge/bg-activity-watcher.js";
@@ -3669,15 +3670,21 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 
 /** v1.9.21+ 每分钟扫一次，清超过 10min 仍未被 agent 回复消化的 pendingAgentCalls。
  * 正常情况下 agent 会在几十秒内回 → 被 reply handler 清掉。残留条目只会发生在
- * agent 挂了 / 忘了回 / fetch_messages 被用户取消等极端场景。留太多占内存。 */
+ * agent 挂了 / 忘了回 / fetch_messages 被用户取消等极端场景。留太多占内存。
+ * v2.23.1+ 例外：消息还押在 heldLocalMsgs 里（目标长回合）时**不清**——失效钟从
+ * 真正投递起算（flushHeldLocalMsgs 投递时刷新 ts）。2026-09-17 master→claudestra
+ * 的回程就是这样被扫没的：目标回合 >10min，pac 先于投递被清，回复无路可回。 */
 setInterval(() => {
   const now = Date.now();
   const STALE_MS = 10 * 60_000;
   for (const [channelId, pending] of pendingAgentCalls.entries()) {
-    if (now - pending.ts > STALE_MS) {
-      pendingAgentCalls.delete(channelId);
-      console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
-    }
+    const held = heldLocalMsgs.get(channelId)?.map((i) => ({
+      fromKind: i.env.from.kind,
+      fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined,
+    }));
+    if (!shouldSweepPac(pending, held, now, STALE_MS)) continue;
+    pendingAgentCalls.delete(channelId);
+    console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
   }
   // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押满 30min
   // 通知 caller 放弃(不能让消息无声蒸发——那正是本次要修的病)。
