@@ -440,13 +440,28 @@ export async function readSessionHistory(
   // 更新」。差量 after= 每次重连都发、原先照样全文读,是这个 bug 的真凶。
   // 高频路径(默认页 / 差量)只需文件尾部,基本一窗命中;before 往回翻页从尾部
   // 反向扩窗直到够一页。贫路径(极深翻页)最坏读到全文,与 v1 持平。
-  // 差量(after=)只要锚点之后的几条,首窗 1MB 够用(不够再 ×8);默认页 / 翻页仍 8MB
-  let win = after != null ? 1024 * 1024 : 8 * 1024 * 1024;
+  // 窗口不再无限 ×8 放大。原先 `win *= 8` 没有上限(8→64→512MB),深翻页一次请求就能把
+  // 513MB 会话整读成 JS 字符串,单次峰值 1~1.5GB(2026-09-15 排查 bridge OOM 时一并发现)。
+  // 两条路径分开处理,因为它们「需要读到哪」根本不同:
+  //   · 默认页 / 差量(after=):结果集必须连到**文件尾部**,所以仍从尾部扩窗,但**封顶**。
+  //     这两条到不了顶——默认页一窗就满;差量窗口只需覆盖客户端落后的那段。
+  //   · 往回翻页(before=):要的是 before 之前那一页,跟尾部无关。改成**向前滑动**定长
+  //     窗口,内存恒定、与翻页深度无关。判据也换成字节级的 `lineOffset <= before - limit`
+  //     (与差量同款),不再靠「窗口里凑够 limit 条」——后者正是逼着窗口一路涨到 512MB 的
+  //     原因:窗口离 before 越远,命中数越少,于是越扩越大。
+  // 滑动窗宽 2×WIN、每次只退 1×WIN ⇒ 相邻两窗重叠一整窗,保证 limit(≤500)条的一页
+  // 不会被窗口边界劈开。峰值内存 = 2×WIN = 16MB,与文件大小无关。
+  const WIN = after != null ? 1024 * 1024 : 8 * 1024 * 1024;
+  const MAX_TAIL_WIN = 64 * 1024 * 1024;
+  const sliding = before != null;
+  let tailWin = WIN;
+  let slideCut = Math.max(0, size - WIN);
   for (;;) {
-    const cut = Math.max(0, size - win);
+    const cut = sliding ? slideCut : Math.max(0, size - tailWin);
+    const hi = sliding ? Math.min(size, slideCut + 2 * WIN) : size;
     const reachedStart = cut === 0;
     const lineOffset = await countNewlinesBefore(filePath, cut);
-    const all = parseHistoryLines((await f.slice(cut).text()).split("\n"), lineOffset, fmt, detailFn);
+    const all = parseHistoryLines((await f.slice(cut, hi).text()).split("\n"), lineOffset, fmt, detailFn);
 
     let satisfied = reachedStart;
     if (!satisfied) {
@@ -454,7 +469,8 @@ export async function readSessionHistory(
         // 差量:窗口必须回读到锚点行(首行号 <= after),才拿得到完整的 seq>after 集合
         satisfied = lineOffset <= after;
       } else if (before != null) {
-        satisfied = all.filter((m) => m.seq < before).length >= limit;
+        // 窗口首行号已经早于「这一页的最早一条」⇒ 整页都在窗内
+        satisfied = lineOffset <= before - limit;
       } else {
         satisfied = all.length >= limit;
       }
@@ -462,7 +478,14 @@ export async function readSessionHistory(
     if (satisfied || reachedStart) {
       return sliceHistoryPage(all, limit, before, after, all.length, !reachedStart);
     }
-    win *= 8;
+    if (sliding) {
+      slideCut = Math.max(0, slideCut - WIN);
+    } else if (tailWin >= MAX_TAIL_WIN) {
+      // 到顶还不满足:带 hasMore=true 如实返回,不再继续放大。
+      return sliceHistoryPage(all, limit, before, after, all.length, true);
+    } else {
+      tailWin = Math.min(tailWin * 8, MAX_TAIL_WIN);
+    }
   }
 }
 

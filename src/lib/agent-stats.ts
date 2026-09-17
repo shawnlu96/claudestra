@@ -121,42 +121,42 @@ interface FileStats {
 
 const fileCache = new Map<string, { key: string; stats: FileStats }>();
 
-/** 单遍扫描一个 JSONL，同时算上下文 + 今日 + 本周；带 (mtime,日界,周界) 缓存 */
-export async function readFileStats(path: string): Promise<FileStats> {
-  const empty: FileStats = {
-    contextTokens: 0,
-    contextEstimated: false,
-    today: { tokens: 0, requests: 0, costUsd: 0 },
-    week: { tokens: 0, requests: 0, costUsd: 0 },
-    model: "",
-  };
-  if (!existsSync(path)) return empty;
-  const dayTs = dayStartTs();
-  const weekTs = weekStartTs();
-  let mtimeMs = 0;
-  try { mtimeMs = statSync(path).mtimeMs; } catch { return empty; }
-  // 缓存键刻意**不含** mtime：session jsonl 每次工具调用都在追加，mtime 一直在变，
-  // 把它放进 key 等于缓存永不命中，而每次 miss 都要把整个文件读一遍解析一遍
-  // （本机最大 96MB，Stop hook 每回合触发）。改用 5 秒时间桶：同一个 5 秒窗口内
-  // 复用结果，统计数字最多滞后 5 秒，对用量面板完全够用。
-  const bucket = Math.floor(Date.now() / 5000);
-  const key = `${bucket}:${dayTs}:${weekTs}`;
-  const cached = fileCache.get(path);
-  if (cached && cached.key === key) return cached.stats;
+/** 统计尾读的起始窗口。实测本机最大会话（513MB）只需尾部 4MB 就回溯过周界，8MB 留一倍余量。 */
+const STATS_TAIL_START_BYTES = 8 * 1024 * 1024;
+/**
+ * 尾读窗口上限。真有 agent 一周写超过这个量，用量数字会少算一截——但那是个**显示值**，
+ * 而无上限扩窗是会把 bridge 拖进 OOM 的（session-history 的 `win *= 8` 就是现成教训）。
+ */
+const STATS_TAIL_MAX_BYTES = 128 * 1024 * 1024;
 
-  const text = await Bun.file(path).text();
-  const lines = text.split("\n");
+/**
+ * 扫描一段 jsonl 行，算出上下文 + 今日 + 本周。纯函数，不碰文件系统（可单测）。
+ *
+ * 返回的 `oldestTs` 是本段里最早的一条时间戳，调用方据此判断窗口是否已经回溯过周界。
+ * 取 Infinity 表示整段没有一条可解析的时间戳。
+ */
+export function scanStatsWindow(
+  lines: string[],
+  dayTs: number,
+  weekTs: number,
+): { stats: FileStats; oldestTs: number } {
   const today: UsageWindow = { tokens: 0, requests: 0, costUsd: 0 };
   const week: UsageWindow = { tokens: 0, requests: 0, costUsd: 0 };
   let contextTokens = 0;
   let contextEstimated = false;
   let model = "";
   let ctxFound = false;
+  let oldestTs = Infinity;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line) continue;
     let rec: any;
     try { rec = JSON.parse(line); } catch { continue; }
+    // 窗口是否已回溯过周界，由「整窗最早的时间戳」判定（见 readFileStats 的注释）
+    {
+      const t = Date.parse(rec?.timestamp);
+      if (Number.isFinite(t) && t < oldestTs) oldestTs = t;
+    }
     // compact 后还没新对话：尾扫会先遇到 compact 摘要而不是带 usage 的 assistant。
     // 这时最后一条 usage 是**压缩前**的旧值（owner 2026-07-09 报告：compact 完很久
     // 不聊天，看板一直显示压缩前的红色大数）。真实值要等下一轮对话才有，先按
@@ -205,9 +205,61 @@ export async function readFileStats(path: string): Promise<FileStats> {
       today.costUsd += cost;
     }
   }
-  const stats: FileStats = { contextTokens, contextEstimated, today, week, model };
-  fileCache.set(path, { key, stats });
-  return stats;
+  return { stats: { contextTokens, contextEstimated, today, week, model }, oldestTs };
+}
+
+/** 单遍扫描一个 JSONL 的**尾部**，同时算上下文 + 今日 + 本周；带 (5 秒桶,日界,周界) 缓存 */
+export async function readFileStats(
+  path: string,
+  /** 尾读起始窗口；单测可调小来在小 fixture 上验扩窗路径（与 readSessionHistory 的 maxFullReadBytes 同约定） */
+  opts: { tailStartBytes?: number } = {},
+): Promise<FileStats> {
+  const empty: FileStats = {
+    contextTokens: 0,
+    contextEstimated: false,
+    today: { tokens: 0, requests: 0, costUsd: 0 },
+    week: { tokens: 0, requests: 0, costUsd: 0 },
+    model: "",
+  };
+  if (!existsSync(path)) return empty;
+  const dayTs = dayStartTs();
+  const weekTs = weekStartTs();
+  let size = 0;
+  try { size = statSync(path).size; } catch { return empty; }
+  // 缓存键刻意**不含** mtime：session jsonl 每次工具调用都在追加，mtime 一直在变，
+  // 把它放进 key 等于缓存永不命中。改用 5 秒时间桶：同一个 5 秒窗口内复用结果，
+  // 统计数字最多滞后 5 秒，对用量面板完全够用。
+  const bucket = Math.floor(Date.now() / 5000);
+  const key = `${bucket}:${dayTs}:${weekTs}`;
+  const cached = fileCache.get(path);
+  if (cached && cached.key === key) return cached.stats;
+
+  // 尾读，不是全文读。这里要的三样东西——最后一条 usage（当前上下文）、最后的 model、
+  // 今日/本周聚合——全都在文件尾部，没有一样需要文件开头。
+  //
+  // 原先是无条件 `Bun.file(path).text()`：513MB 的会话一次就是 ~1.5GB JS 堆（实测放大
+  // 3x，中文正文被 JSC 提升成 UTF-16），而 Stop hook 每回合触发、5 秒桶挡不住 3 秒防抖
+  // → bridge RSS 棘轮涨到 3.4GB（2026-09-15 owner 报 OOM，全机 swap 3.9G）。
+  //
+  // ⚠ 终止条件刻意绑「整窗最早记录是否越过周界」这个**语义**，而不是按当时文件大小
+  // 拍一个常数——上面那条 5 秒桶缓存的注释写着「本机最大 96MB」，正是被文件涨到 513MB
+  // 悄悄作废的前车之鉴。语义判据不会随文件长大而失效。
+  //
+  // ⚠ 为什么不在反向扫描里遇到 `ts < weekTs` 就 break：sidechain / tool_result 这类记录
+  // 可能轻微乱序，提前 break 会少算用量。判断「整窗最早」对乱序免疫，而窗口本来就小。
+  let win = Math.max(1, opts.tailStartBytes ?? STATS_TAIL_START_BYTES);
+  for (;;) {
+    const cut = Math.max(0, size - win);
+    // slice 从半行中间起头：截断的首行 JSON.parse 会失败 → 被 catch 丢掉，天然安全，
+    // 不需要额外对齐到行首。
+    const lines = (await Bun.file(path).slice(cut).text()).split("\n");
+    const { stats, oldestTs } = scanStatsWindow(lines, dayTs, weekTs);
+    if (oldestTs < weekTs || cut === 0 || win >= STATS_TAIL_MAX_BYTES) {
+      fileCache.set(path, { key, stats });
+      return stats;
+    }
+    win *= 4;
+  }
 }
 
 function resolveJsonl(agent: AgentLike): string | null {
