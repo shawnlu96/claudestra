@@ -448,7 +448,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
           idle: a.idle,
           purpose: a.purpose,
           created: a.created,
-          archived: existsSyncFs(`${USER_ARCHIVE_ROOT}/${String(a.name).replace(/^agent-/, "")}`),
         }));
       // busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
       // thinking 同源——manager list 的 tmux idle 探测在回合中也常报 idle，
@@ -821,14 +820,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (String(name).replace(/^agent-/, "") === "master") {
       return apiJson(400, { ok: false, error: "master 不参与归档" });
     }
-    // 子进程加**硬超时**：manager 的 archive/kill 都可能卡住（实测 curl 25s 无响应，
-    // 界面按钮永远停在「…」）。归档标记来自桥接自己建的目录，所以这两步超时也不影响
-    // 「移出工作列表」这个结果 —— 超时就当尽力而为，绝不把请求挂死。
-    const race = async <T,>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
-      Promise.race([
-        p.catch(() => fallback),
-        new Promise<T>((res) => setTimeout(() => res(fallback), ms)),
-      ]);
     // **归档 = 分类**（owner 2026-09-14「他不是只是一个显示逻辑和分类问题吗」）：
     // 只建标记目录（瞬间）⇒ 列表立刻隐藏、归档栏立刻出现，请求亚秒返回；
     // 会话快照与停窗口 fire-and-forget 跑后台，卡住/失败都不影响分类结果。
@@ -842,50 +833,6 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       void runManager("archive", name).catch(() => {});
       void runManager("kill", name).catch(() => {});
       return apiJson(200, { ok: true, archived: true, background: "快照 + 停窗口在后台跑" });
-    }
-    // eslint-disable-next-line no-unreachable
-    try {
-      const r = await race(runManager("archive", name), 6_000, { ok: false, error: "archive 超时（后台可能仍在跑）" } as any);
-      // 移动语义（owner 2026-09-14「把归档的移动进去」）：快照之后把窗口停掉 ⇒
-      // agent 离开工作列表、出现在网页侧栏的「归档」栏。**不动注册表条目**，
-      // 所以之后还能 `manager resume <name> <sessionId>` 恢复回来。
-      // 归档 = 把会话本体放进「归档」区（archived/<agent>/），再停掉窗口 ⇒ 它离开
-      // 工作列表、出现在侧栏「归档」类别里。注册表条目保留，之后可 resume 恢复。
-      let killed = false;
-      try {
-        const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-        const { readRegistryAgents, agentRuntime } = await import("../lib/registry.js");
-        const { sessionJsonlPath } = await import("../lib/session-source.js");
-        const fsp2 = await import("node:fs/promises");
-        // ⚠ 名字要归一化再比：registry 里存的是 `agent-<name>`，而 API 路径传进来的是
-        // 裸名（tmp-scratch）—— 少了这一步 find 永远不命中，拷贝被静默跳过
-        // （2026-09-14 实测踩到：归档动作全绿但归档区是空的）。
-        const norm = (x: unknown) => String(x || "").replace(/^agent-/, "");
-        const info = (await readRegistryAgents()).find((r) => norm(r.name) === norm(name));
-        const live = info
-          ? sessionJsonlPath(agentRuntime(info), String((info as any).cwd || (info as any).dir || ""), String((info as any).sessionId || ""))
-          : null;
-        const dest = `${USER_ARCHIVE_ROOT}/${name}`;
-        await fsp2.mkdir(dest, { recursive: true });
-        if (live && existsSync(String(live))) {
-          await fsp2.copyFile(String(live), `${dest}/${String(live).split("/").pop()}`);
-        }
-        await fsp2.writeFile(
-          `${dest}/.meta.json`,
-          JSON.stringify({ kind: "agent", name, sessionId: String((info as any)?.sessionId || ""), cwd: String((info as any)?.cwd || (info as any)?.dir || ""), runtime: String((info as any)?.runtime || "claude-code") }, null, 2),
-        );
-      } catch {
-        /* 快照失败不影响停窗口；manager archive 那份安全副本仍在 */
-      }
-      try {
-        const k = await race(runManager("kill", name), 6_000, { ok: false, error: "kill 超时" } as any);
-        killed = k?.ok !== false;
-      } catch {
-        /* 停不掉也不影响快照 */
-      }
-      return apiJson(r?.ok === false ? 500 : 200, { ok: r?.ok !== false, killed, result: r });
-    } catch (e) {
-      return apiJson(500, { ok: false, error: (e as Error).message });
     }
   }
 

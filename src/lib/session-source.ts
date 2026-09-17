@@ -25,7 +25,8 @@ import {
   piLineToClaudeShape,
   piSessionPath,
 } from "./pi-session.js";
-import { readdirSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 type AnyRecord = Record<string, any>;
@@ -56,13 +57,45 @@ export function listSessionJsonls(runtime: string | undefined, cwd: string): str
  * 从**已知的会话文件路径**反推 runtime。
  *
  * 为什么要这个：解析侧（历史面板 / 用量 / 归档 / 会话尾巴 / cron 摘要 / reply 兜底）
- * 拿到的都是一个路径，把 runtime 从 manager 一路透传到这几层要改六处签名；而 Pi 的
- * 会话根目录是固定的（`~/.pi/agent/sessions/`），路径本身就是充分判据。
+ * 拿到的都是一个路径，把 runtime 从 manager 一路透传到这几层要改六处签名。
+ *
+ * 判据分两层：
+ *   1. 活会话：Pi 的根目录固定（`~/.pi/agent/sessions/`）⇒ 路径即判据；
+ *      Claude Code 的根目录也固定（`~/.claude/projects/`）⇒ 直接判 undefined，零 I/O。
+ *   2. **归档副本**（`~/.claude-orchestrator/archive/<agent>/`、`archived/`、`unmanaged/`）
+ *      路径里两个根都没有 —— 原版只看路径，归档后的 Pi 会话被当成 Claude Code 行解析，
+ *      一条都认不出来 → 历史面板永远为空（review #10 阻塞项）。这里改为读**头行**：
+ *      Pi 的第一行固定是 `{type:"session", version:N, …}`，Claude Code 从不写这种行。
+ *      按路径缓存（同一路径 runtime 不会变；归档 copy-if-larger 只会追加）。
  * 注意：**定位**（cwd+sessionId → 路径）仍然必须显式给 runtime —— 那个方向推不出来。
  */
 export function runtimeForSessionPath(path: string | undefined | null): string | undefined {
   if (!path) return undefined;
-  return path.includes(`${piAgentDir()}/sessions/`) ? "pi" : undefined;
+  if (path.includes(`${piAgentDir()}/sessions/`)) return "pi";
+  if (path.startsWith(CLAUDE_PROJECTS_ROOT)) return undefined;
+  return sniffRuntimeFromHead(path);
+}
+
+const CLAUDE_PROJECTS_ROOT = join(homedir(), ".claude", "projects") + "/";
+const headSniffCache = new Map<string, string | undefined>();
+
+/** 读文件头 512 字节，Pi 的 header 行 ⇒ "pi"；其余（含读不了）⇒ undefined。结果按路径缓存。 */
+function sniffRuntimeFromHead(path: string): string | undefined {
+  if (headSniffCache.has(path)) return headSniffCache.get(path);
+  let runtime: string | undefined;
+  try {
+    const fd = openSync(path, "r");
+    const buf = Buffer.alloc(512);
+    let n = 0;
+    try { n = readSync(fd, buf, 0, 512, 0); } finally { closeSync(fd); }
+    const first = buf.toString("utf8", 0, n).split("\n")[0];
+    const rec = JSON.parse(first);
+    if (rec && rec.type === "session" && typeof rec.version === "number") runtime = "pi";
+  } catch {
+    runtime = undefined;
+  }
+  headSniffCache.set(path, runtime);
+  return runtime;
 }
 
 /** 一行原文 → Claude Code 形状的 entry（读不了/不是对话行返回 null） */

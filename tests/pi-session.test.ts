@@ -20,7 +20,6 @@ import {
   piSessionIdFromFilename,
   piSessionPath,
   piUsageToClaude,
-  readPiSessionAsClaudeShape,
   resolveCwd,
 } from "../src/lib/pi-session.ts";
 
@@ -186,28 +185,6 @@ describe("piLineToClaudeShape", () => {
     const out = piLineToClaudeShape(JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "/x" }))!;
     expect(out.subtype).toBe("pi_session_start");
     expect(out.sessionId).toBe("s1");
-  });
-});
-
-describe("readPiSessionAsClaudeShape", () => {
-  test("整文件翻译：跳过非对话行，保留顺序", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-session-file-"));
-    const p = join(dir, "s.jsonl");
-    const lines = [
-      JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "/x" }),
-      JSON.stringify({ type: "model_change", modelId: "m" }),
-      JSON.stringify({ type: "message", timestamp: "t1", message: { role: "user", content: [{ type: "text", text: "hi" }] } }),
-      "",
-      JSON.stringify({ type: "message", timestamp: "t2", message: { role: "assistant", content: [{ type: "text", text: "yo" }] } }),
-    ];
-    writeFileSync(p, lines.join("\n") + "\n");
-    const out = readPiSessionAsClaudeShape(p);
-    expect(out.map((e) => e.type)).toEqual(["system", "user", "assistant"]);
-    expect(out[2].message.content[0].text).toBe("yo");
-  });
-
-  test("文件不存在返回空数组", () => {
-    expect(readPiSessionAsClaudeShape("/no/such/file.jsonl")).toEqual([]);
   });
 });
 

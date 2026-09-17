@@ -352,20 +352,3 @@ export function piLineToClaudeShape(line: string): AnyRecord | null {
   // custom / bashExecution：不进对话流（custom 是扩展状态；bashExecution 是 ! 命令）
   return null;
 }
-
-/** 读一个 Pi 会话文件并翻译成 Claude Code 形状的行（读不了返回空数组，不抛） */
-export function readPiSessionAsClaudeShape(path: string): AnyRecord[] {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf-8");
-  } catch {
-    return [];
-  }
-  const out: AnyRecord[] = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    const translated = piLineToClaudeShape(line);
-    if (translated) out.push(translated);
-  }
-  return out;
-}
