@@ -425,13 +425,19 @@ export function isAutoConfirmableModal(
   opts: { allowSessionIdle?: boolean } = {}
 ): boolean {
   const modalOpts = parseModalOptions(pane);
-  if (!modalOpts) return false;
-  // parseModalOptions 已经保证至少 1 个 ❯，但显式再校验一次，防未来重构破坏不变量
-  if (!modalOpts.some((o) => o.selected)) return false;
+  // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用
+  const choice = modalOpts ? null : parseChoicePrompt(pane);
+  if (!modalOpts && !choice) return false;
+  // 两个解析器都保证恰有 ❯ 高亮项，但显式再校验一次，防未来重构破坏不变量
+  if (modalOpts && !modalOpts.some((o) => o.selected)) return false;
+  if (choice && !choice.some((o) => o.selected)) return false;
   // 运行时权限弹窗（Do you want to edit / run / allow ...）必须用户决定
   if (detectRuntimePermissionPrompt(pane)) return false;
   // session-idle 弹窗除非显式允许
   if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
+  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。它由 trustPromptMoves
+  // 专门处理（先 Down 到 Yes 再 Enter），这里绝不能当普通弹窗自动 Enter
+  if (trustPromptMoves(pane) !== null) return false;
   return true;
 }
 
@@ -539,6 +545,51 @@ export function parseModalOptions(pane: string): ModalOption[] | null {
   // 关键：真 modal 一定有一个选中标记 ❯，否则就是 Claude 回复里普通的编号列表
   if (!options.some((o) => o.selected)) return null;
   return options.slice(0, 25);
+}
+
+/** 无编号选择弹窗的一个选项（没有可发送的按键：确认只能 Enter 默认项 / 方向键移动） */
+export interface ChoiceOption {
+  label: string;
+  selected: boolean;
+}
+
+/**
+ * v2.23.1+ 无编号的选择弹窗。CC 2.1.26x 起的启动期确认框长这样：
+ *   Use Fable 5.1 at high effort by default?
+ *   ❯ Keep xhigh
+ *     Switch to high
+ *   Enter to confirm · Esc to cancel
+ * 与目录信任弹窗（❯ No, exit / Yes, I trust this folder）同一个组件家族。
+ * parseModalOptions 只认 "❯ N." 数字菜单，这类它认不出 → 就绪轮询干等到超时
+ * （2026-09-17 master 实报：create 连续三次「启动超时」，手动代按才建成）。
+ *
+ * 几何判据（不认文案，文案随版本变）：底部 "Enter to confirm/select/continue" 之上、
+ * 紧邻（允许一个空行）的一组 2~6 行短标签，恰有一行以 ❯ 开头，其余以 ≥2 空格缩进；
+ * 任一行带 "N." 编号就交给 parseModalOptions（返回 null）。
+ */
+export function parseChoicePrompt(pane: string): ChoiceOption[] | null {
+  if (isAtShell(pane)) return null;
+  const lines = trimTrailingBlank(pane.split("\n")).slice(-25);
+  let footer = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/[Ee]nter to (confirm|select|continue|accept)/.test(lines[i])) { footer = i; break; }
+  }
+  if (footer < 0) return null;
+  let i = footer - 1;
+  while (i >= 0 && !lines[i].trim()) i--;
+  const opts: ChoiceOption[] = [];
+  for (; i >= 0; i--) {
+    const raw = lines[i];
+    if (!raw.trim()) break;
+    if (/^\s*❯?\s*\d{1,2}\.\s/.test(raw)) return null; // 数字菜单归 parseModalOptions
+    const m = raw.match(/^(\s*❯\s+|\s{2,})(\S.{0,78}?)\s*$/);
+    if (!m) break;
+    opts.unshift({ label: m[2].replace(/\s+/g, " "), selected: m[1].includes("❯") });
+    if (opts.length > 6) return null;
+  }
+  if (opts.length < 2) return null;
+  if (opts.filter((o) => o.selected).length !== 1) return null;
+  return opts;
 }
 
 /**

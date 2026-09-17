@@ -18,8 +18,7 @@ import {
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
   detectDevChannelsModal,
-  childPidsInPsOutput,
-} from "../src/lib/tmux-helper.js";
+  childPidsInPsOutput, parseChoicePrompt } from "../src/lib/tmux-helper.ts";
 
 describe("parseModalOptions", () => {
   test("识别带 ❯ 选中标记的数字菜单", () => {
@@ -990,5 +989,48 @@ describe("trustPromptMoves — 目录信任弹窗", () => {
   });
   test("普通就绪 pane / 只是正文提到 trust → null", () => {
     expect(trustPromptMoves("⏺ 说明:trust this folder 是 CC 的弹窗文案\n❯ \n  ⏵⏵ bypass permissions on")).toBeNull();
+  });
+});
+
+describe("parseChoicePrompt（v2.23.1+ 无编号选择弹窗）", () => {
+  const effortPrompt = `
+Use Fable 5.1 at high effort by default?
+
+Fable 5.1 is tuned for high effort. xhigh costs more and is rarely better.
+
+❯ Keep xhigh
+  Switch to high
+
+Enter to confirm · Esc to cancel
+`;
+  test("effort 默认档位弹窗：两个选项，Keep xhigh 高亮", () => {
+    const o = parseChoicePrompt(effortPrompt)!;
+    expect(o).not.toBeNull();
+    expect(o.map((x) => x.label)).toEqual(["Keep xhigh", "Switch to high"]);
+    expect(o.find((x) => x.selected)!.label).toBe("Keep xhigh");
+  });
+  test("effort 弹窗 → isAutoConfirmableModal 自动按（默认项 = 保持现状）", () => {
+    expect(isAutoConfirmableModal(effortPrompt)).toBe(true);
+  });
+  test("数字菜单归 parseModalOptions，这里返回 null", () => {
+    expect(parseChoicePrompt("\n❯ 1. Yes\n  2. No\n\nEnter to confirm\n")).toBeNull();
+  });
+  test("没有 Enter to confirm 尾注 → null，且不自动按", () => {
+    const p = "\nPick one:\n❯ Keep xhigh\n  Switch to high\n";
+    expect(parseChoicePrompt(p)).toBeNull();
+    expect(isAutoConfirmableModal(p)).toBe(false);
+  });
+  test("目录信任弹窗（默认 No, exit）识别得出但**绝不**自动按——交给 trustPromptMoves", () => {
+    const trust = `
+Quick safety check: Is this a project you created or one you trust?
+
+❯ No, exit
+  Yes, I trust this folder
+
+Enter to confirm · Esc to cancel
+`;
+    expect(parseChoicePrompt(trust)!.length).toBe(2);
+    expect(trustPromptMoves(trust)).toBe(1);
+    expect(isAutoConfirmableModal(trust)).toBe(false);
   });
 });
