@@ -40,6 +40,13 @@ export function unhideRange(agent: string, sessionId: string, from: number): voi
     .run(agent, sessionId, from);
 }
 
+/** 「seq 是否被隐藏」谓词（合并气泡的循环里用：隐藏的 user/system 仍是分组断点，只是不输出） */
+export function hiddenPredicate(agent: string, sessionId: string): ((seq: number) => boolean) | undefined {
+  const ranges = hiddenRanges(agent, sessionId);
+  if (!ranges.length) return undefined;
+  return (seq) => ranges.some((r) => seq >= r.from && seq <= r.to);
+}
+
 /** 过滤掉落在隐藏区间内的原始记录（在合并成气泡**之前**调）。没有隐藏记录时原样返回。 */
 export function filterHidden<T extends { seq: number }>(agent: string, sessionId: string, items: T[]): T[] {
   if (!items.length) return items;

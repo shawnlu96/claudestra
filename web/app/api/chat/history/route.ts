@@ -5,7 +5,7 @@ import { matchClickedRow } from "@/lib/chat/reply-clicks";
 import { parseInlineButtons, plainLabel } from "@/lib/chat/inline-buttons";
 import { apiAgentName, bridgeGet } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
-import { filterHidden } from "@/lib/chat/hidden";
+import { hiddenPredicate } from "@/lib/chat/hidden";
 import { st } from "@/lib/server-lang";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "@/lib/chat/events";
@@ -57,7 +57,7 @@ const SELF_FROM = new Set(["web-ui"]);
  */
 /** 在带组件的气泡里找该点击对应的 choiceId + 人类可读 label（不在组里返回 null）。 */
 
-function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: string }): ChatMessage[] {
+function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: string; isHidden?: (seq: number) => boolean }): ChatMessage[] {
   const sid = opts?.sid;
   const out: ChatMessage[] = [];
   let group: ChatMessage | null = null; // 当前正在累积的 assistant 回合气泡
@@ -66,6 +66,12 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: 
   let lastWithComponents: ChatMessage | null = null;
 
   for (const m of items) {
+    // v2.23.1+ 「删除」的隐藏区间：不输出；但 user/system 记录仍然是 assistant 分组的断点——
+    // 否则隐藏一条用户消息会把它两侧的两个回合合成一个气泡（实测 133→131 条）
+    if (opts?.isHidden?.(m.seq)) {
+      if (m.role !== "assistant") group = null;
+      continue;
+    }
     // compact 生成的长摘要不是真实用户输入（guide §6 建议默认折叠），v1 先不展示
     if (m.compactSummary) continue;
     // CRLF 归一：channel 注入链路会把 \n 变 \r\n,而前端乐观消息是 textarea 的
@@ -227,10 +233,10 @@ export async function GET(request: Request) {
   }
   const name = encodeURIComponent(apiAgentName(agent));
   const agentKey = apiAgentName(agent);
-  // v2.23.1+ 「删除」的隐藏区间在**合并成气泡之前**过滤原始记录；lastSeq/hasMore 仍按未过滤
-  // 的页算，否则尾部记录被隐藏时游标永远追不到尾、每次差量重拉同一段
+  // v2.23.1+ 「删除」的隐藏区间在合并气泡的循环里跳过（user/system 仍作分组断点）；
+  // lastSeq/hasMore 按整页算，尾部记录被隐藏时游标照样追到尾
   const shape = (items: NeutralMessage[], sid: string, tail?: boolean) =>
-    slimForWire(toChatMessages(filterHidden(agentKey, sid, items), { ...(tail === false ? { tail: false } : {}), sid }));
+    slimForWire(toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: hiddenPredicate(agentKey, sid) }));
   // 向上分页(owner 2026-07-16「往上滑看全部历史」):before=<seq> + session=<sid>
   // → 钉在同一 session 往前翻(seq 空间 per-session,不能跨 session 混用)
   const before = url.searchParams.get("before");
