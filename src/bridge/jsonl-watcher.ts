@@ -7,7 +7,7 @@
 
 import { watch, type FSWatcher } from "fs";
 import { stat } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
@@ -15,6 +15,7 @@ import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 import { discordReply } from "./discord-api.js";
 import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath, translateSessionLine } from "../lib/session-source.js";
+import { piAgentDir } from "../lib/pi-session.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { progressNoteOf } from "../lib/session-history.js";
@@ -684,7 +685,16 @@ function resolveSessionPath(
   runtime: string | undefined, cwd: string, sessionId: string, sessionFile?: string,
 ): string | null {
   // ① 真源：Pi 扩展在 register 帧里报的会话文件（文件名带时间戳，算不出来）
-  if (sessionFile && existsSync(sessionFile)) return sessionFile;
+  if (sessionFile) {
+    // 只有 Pi 扩展会自报 sessionFile；它是 agent 进程给的值，realpath 后必须落在 Pi 会话根之下——
+    // 否则一个失守的 agent 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道
+    try {
+      const real = realpathSync(sessionFile);
+      const root = realpathSync(join(piAgentDir(), "sessions")) + "/";
+      if (real.startsWith(root)) return real;
+      console.warn(`⚠ 忽略越界的自报 sessionFile: ${sessionFile}`);
+    } catch { /* 不存在 / 解析失败 → 走常规定位 */ }
+  }
   const predicted = sessionJsonlPath(runtime, cwd, sessionId);
   if (predicted && existsSync(predicted)) return predicted;
   // 推算落空 → 按 sessionId 全库扫一遍兜底（slug/cwd 记录不准时自愈）

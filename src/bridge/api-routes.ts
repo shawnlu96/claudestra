@@ -61,6 +61,16 @@ import { piCommandsFor } from "../lib/pi-env.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
+import { isPiThinkingLevel } from "../lib/pi-launch.js";
+
+/**
+ * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
+ * 路由正则的 [^/]+ 挡不住 %2F —— decodeURIComponent 之后 "..%2F..%2Fx" 就是 "../../x"，
+ * 直接拼进 mkdir -p 是目录穿越（review #10 安全项）。
+ */
+function isPathSafeName(x: string): boolean {
+  return !!x && x !== "." && x !== ".." && !/[\/\\\0]/.test(x);
+}
 
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
@@ -685,6 +695,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!model && !effort) {
       return apiJson(400, { ok: false, error: 'body must be {"model"?,"effort"?}' });
     }
+    // effort 原样进 tmux send-keys -l：不校验 = 换行即可向 agent TUI 注入第二行任意输入
+    if (effort && !isPiThinkingLevel(effort)) {
+      return apiJson(400, { ok: false, error: `未知的 thinking 档位：${effort}` });
+    }
     if (model && !/^[A-Za-z0-9._\/@:-]+$/.test(model)) {
       return apiJson(400, { ok: false, error: "model 含非法字符" });
     }
@@ -814,6 +828,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       return apiJson(403, { ok: false, error: "archive requires a full-scope token" });
     }
     const name = decodeURIComponent(archMatch[1]);
+    if (!isPathSafeName(name)) return apiJson(400, { ok: false, error: "invalid agent name" });
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
     // 大总管不参与归档（它是常驻调度器；把它归档掉 = 侧栏消失，2026-09-14 我的测试脚本
     // 误选它当靶子，正好验证了这个坑必须堵）
@@ -875,6 +890,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       return apiJson(403, { ok: false, error: "restore requires a full-scope token" });
     }
     const rid = decodeURIComponent(restoreMatch[1]);
+    if (!isPathSafeName(rid)) return apiJson(400, { ok: false, error: "invalid archive id" });
     const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
     const fsp = await import("node:fs/promises");
     const dir = `${USER_ARCHIVE_ROOT}/${rid}`;
@@ -948,6 +964,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // v2.23+ GET /api/v1/sessions/archived —— 「归档」类别的内容：
   // 列 archive/archived/** （用户手动归档的会话本体）**不列** archive/<agent>/（自动快照）。
   if (path === "/sessions/archived" && req.method === "GET") {
+    // 与其余 v2.23 会话端点一致：全权 token；否则 scoped/peer token 能枚举全部归档 agent
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "archived sessions require a full-scope token" });
+    }
     const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
     const fsp = await import("node:fs/promises");
     const entries: Record<string, unknown>[] = [];
