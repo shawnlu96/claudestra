@@ -554,18 +554,26 @@ export interface ChoiceOption {
 }
 
 /**
- * v2.23.1+ 无编号的选择弹窗。CC 2.1.26x 起的启动期确认框长这样：
- *   Use Fable 5.1 at high effort by default?
- *   ❯ Keep xhigh
- *     Switch to high
- *   Enter to confirm · Esc to cancel
+ * v2.23.1+ 无编号的选择弹窗。CC 2.1.26x 起的启动期确认框（master 2026-09-17 原屏）：
+ *    Use Fable 5.1 at high effort by default?
+ *      high is the default effort for Fable 5.1 and is recommended for most
+ *      coding tasks; xhigh spends more tokens per task. You can change this any
+ *      time with /effort.
+ *      xhigh effort is ~1.4x the estimated cost of high (the default).
+ *      ❯ Keep xhigh
+ *        Switch Fable 5.1 to high effort
+ *
+ *      Enter to confirm · Esc to cancel
  * 与目录信任弹窗（❯ No, exit / Yes, I trust this folder）同一个组件家族。
  * parseModalOptions 只认 "❯ N." 数字菜单，这类它认不出 → 就绪轮询干等到超时
- * （2026-09-17 master 实报：create 连续三次「启动超时」，手动代按才建成）。
+ * （create 连续三次「启动超时」，手动代按才建成）。
  *
- * 几何判据（不认文案，文案随版本变）：底部 "Enter to confirm/select/continue" 之上、
- * 紧邻（允许一个空行）的一组 2~6 行短标签，恰有一行以 ❯ 开头，其余以 ≥2 空格缩进；
- * 任一行带 "N." 编号就交给 parseModalOptions（返回 null）。
+ * 几何判据（不认文案）：
+ *   1. 底部有 "Enter to confirm/select/continue/accept" 尾注；
+ *   2. 尾注之上最近的一行以 ❯ 开头（无编号）——它的**标签起始列**是锚；
+ *   3. 选项块 = ❯ 行 + 上下相邻、标签起始列与之相同的行（说明行顶在 ❯ 的列上、
+ *      不对齐，自然切开——说明行与选项之间**没有空行**，靠缩进切才不会把它吞进来）；
+ *   4. 2~6 个选项、恰一个 ❯；任一行带 "N." 编号就交给 parseModalOptions（null）。
  */
 export function parseChoicePrompt(pane: string): ChoiceOption[] | null {
   if (isAtShell(pane)) return null;
@@ -575,20 +583,36 @@ export function parseChoicePrompt(pane: string): ChoiceOption[] | null {
     if (/[Ee]nter to (confirm|select|continue|accept)/.test(lines[i])) { footer = i; break; }
   }
   if (footer < 0) return null;
-  let i = footer - 1;
-  while (i >= 0 && !lines[i].trim()) i--;
-  const opts: ChoiceOption[] = [];
-  for (; i >= 0; i--) {
-    const raw = lines[i];
-    if (!raw.trim()) break;
-    if (/^\s*❯?\s*\d{1,2}\.\s/.test(raw)) return null; // 数字菜单归 parseModalOptions
-    const m = raw.match(/^(\s*❯\s+|\s{2,})(\S.{0,78}?)\s*$/);
-    if (!m) break;
-    opts.unshift({ label: m[2].replace(/\s+/g, " "), selected: m[1].includes("❯") });
+  let cur = -1;
+  for (let i = footer - 1; i >= 0 && i >= footer - 9; i--) {
+    if (/^\s*❯\s+\S/.test(lines[i])) { cur = i; break; }
+  }
+  if (cur < 0) return null;
+  if (/^\s*❯\s*\d{1,2}\.\s/.test(lines[cur])) return null; // 数字菜单归 parseModalOptions
+  const m = lines[cur].match(/^(\s*❯\s+)(\S.{0,78}?)\s*$/);
+  if (!m) return null;
+  const labelCol = m[1].length;
+  const labelAt = (raw: string): string | null => {
+    const mm = raw.match(/^(\s*)(\S.{0,78}?)\s*$/);
+    if (!mm || mm[1].length !== labelCol) return null;
+    if (/^\d{1,2}\.\s/.test(mm[2])) return null;
+    return mm[2].replace(/\s+/g, " ");
+  };
+  const opts: ChoiceOption[] = [{ label: m[2].replace(/\s+/g, " "), selected: true }];
+  for (let i = cur - 1; i >= 0; i--) {
+    const l = labelAt(lines[i]);
+    if (l == null) break;
+    opts.unshift({ label: l, selected: false });
+    if (opts.length > 6) return null;
+  }
+  for (let i = cur + 1; i < footer; i++) {
+    if (!lines[i].trim()) break;
+    const l = labelAt(lines[i]);
+    if (l == null) break;
+    opts.push({ label: l, selected: false });
     if (opts.length > 6) return null;
   }
   if (opts.length < 2) return null;
-  if (opts.filter((o) => o.selected).length !== 1) return null;
   return opts;
 }
 

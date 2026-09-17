@@ -993,21 +993,55 @@ describe("trustPromptMoves — 目录信任弹窗", () => {
 });
 
 describe("parseChoicePrompt（v2.23.1+ 无编号选择弹窗）", () => {
+  // master 2026-09-17 capture-pane 原文（行首空格照抄）：说明行与选项同缩进且无空行，
+  // 第二项 31 字符——靠「标签列对齐」切块才不会把说明行吞成选项
   const effortPrompt = `
-Use Fable 5.1 at high effort by default?
+ Use Fable 5.1 at high effort by default?
+   high is the default effort for Fable 5.1 and is recommended for most
+   coding tasks; xhigh spends more tokens per task. You can change this any
+   time with /effort.
+   xhigh effort is ~1.4x the estimated cost of high (the default).
+   ❯ Keep xhigh
+     Switch Fable 5.1 to high effort
 
-Fable 5.1 is tuned for high effort. xhigh costs more and is rarely better.
-
-❯ Keep xhigh
-  Switch to high
-
-Enter to confirm · Esc to cancel
+   Enter to confirm · Esc to cancel
 `;
-  test("effort 默认档位弹窗：两个选项，Keep xhigh 高亮", () => {
+  test("effort 默认档位弹窗（真实原屏）：恰两个选项，说明行不被吞，Keep xhigh 高亮", () => {
     const o = parseChoicePrompt(effortPrompt)!;
     expect(o).not.toBeNull();
-    expect(o.map((x) => x.label)).toEqual(["Keep xhigh", "Switch to high"]);
+    expect(o.map((x) => x.label)).toEqual(["Keep xhigh", "Switch Fable 5.1 to high effort"]);
     expect(o.find((x) => x.selected)!.label).toBe("Keep xhigh");
+  });
+  test("❯ 在第二项时同样切得出（高亮项不必在首行）", () => {
+    const p = `
+ Use Fable 5.1 at high effort by default?
+   xhigh effort is ~1.4x the estimated cost of high (the default).
+     Keep xhigh
+   ❯ Switch Fable 5.1 to high effort
+
+   Enter to confirm · Esc to cancel
+`;
+    const o = parseChoicePrompt(p)!;
+    expect(o.map((x) => x.label)).toEqual(["Keep xhigh", "Switch Fable 5.1 to high effort"]);
+    expect(o.find((x) => x.selected)!.label).toBe("Switch Fable 5.1 to high effort");
+  });
+  test("说明行再多几行也不影响（不再靠行数阈值）", () => {
+    const p = `
+ Use Fable 5.1 at high effort by default?
+   line 1
+   line 2
+   line 3
+   line 4
+   line 5
+   line 6
+   line 7
+   ❯ Keep xhigh
+     Switch Fable 5.1 to high effort
+
+   Enter to confirm · Esc to cancel
+`;
+    expect(parseChoicePrompt(p)!.length).toBe(2);
+    expect(isAutoConfirmableModal(p)).toBe(true);
   });
   test("effort 弹窗 → isAutoConfirmableModal 自动按（默认项 = 保持现状）", () => {
     expect(isAutoConfirmableModal(effortPrompt)).toBe(true);
