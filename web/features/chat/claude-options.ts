@@ -43,3 +43,22 @@ export function modelLabel(id: string | null | undefined): string {
   const hit = MODEL_OPTIONS.find((o) => o.value === id);
   return hit ? hit.label : id.replace(/^claude-/, "");
 }
+
+/**
+ * Pi 的思考档位（与 Claude Code 的 effort 不是一套值）：`off` 是 Pi 独有的最低档，
+ * `ultracode` 是 CC 独有的运行档——两边不要互相套用。桥接注入的是扩展命令
+ * `/claudestra-thinking <level>`。
+ */
+export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * Pi 的 model id → 短标签。Pi 的写法是 `provider/model`（可选 `:thinking` 后缀，
+ * 如 `cc-switch-open-code-go/deepseek-v4.1-flash:low`），整串塞进 TopBar 徽章只会被
+ * 截成 `cc-switch-…` 什么都看不出来 ⇒ 只取 model 段。
+ * 注意**不要**走 modelLabel：那套是 Claude Code 的别名表（Pi 的模型永远不在里面）。
+ */
+export function piModelLabel(id: string | null | undefined): string {
+  if (!id) return "?";
+  const tail = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+  return tail.replace(/:.*$/, "");
+}

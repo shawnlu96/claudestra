@@ -7,13 +7,15 @@
 
 import { watch, type FSWatcher } from "fs";
 import { stat } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 import { discordReply } from "./discord-api.js";
 import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
+import { findSessionJsonlBySessionId, sessionJsonlPath, translateSessionLine } from "../lib/session-source.js";
+import { piAgentDir } from "../lib/pi-session.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { progressNoteOf } from "../lib/session-history.js";
@@ -37,6 +39,8 @@ interface WatcherState {
   textQueue: string[];
   textTimer: ReturnType<typeof setTimeout> | null;
   agentName: string;
+  /** v2.23+ 运行时：决定行怎么翻译（Pi 的行形状与 Claude Code 不同） */
+  runtime?: string;
   /** 并发锁：processNewData 同时只能跑一份 */
   processing: boolean;
   /** 2s poll 兜底的 interval handle */
@@ -91,11 +95,16 @@ export function formatTool(name: string, input: any): string {
       // 和正文全丢——owner 看不到本地→peer 说了什么(半边对话)。它的正文没有
       // 任何其它渠道会显示(不同于 reply 本身就作为消息渲染,故 isReplyTool 过滤
       // 它是对的),省略等于纯丢信息。这里提取 target + 正文首段。
-      if (name.endsWith("__send_to_agent")) {
+      // Pi 侧同名工具（send_to_agent 不带 mcp__ 前缀）与 mcp__x__send_to_agent 同款渲染
+      if (name === "send_to_agent" || name.endsWith("__send_to_agent")) {
         const target = input?.target ? `→ ${input.target}` : "";
         const body = String(input?.text || "").replace(/\n/g, " ").trim().slice(0, 200);
         return `🤝 send_to_agent ${target}${body ? `：${body}` : ""}`.trim();
       }
+      // v2.23+ Claudestra 自有工具在 Pi 侧是裸名（无 mcp__ 前缀），渲染成人话
+      if (name === "reply") return `💬 回复`;
+      if (name === "fetch_messages") return `📥 取消息`;
+      if (name === "project_info") return `📁 project 信息`;
       // mcp__server__tool → server/tool
       const short = name.startsWith("mcp__") ? name.replace("mcp__", "").replace("__", "/") : name;
       return `${e} ${short}`;
@@ -219,9 +228,11 @@ export function getJsonlPath(cwd: string, sessionId: string): string {
  * 在追加，mtime 会很新。只看 tmux pane 指纹会把"思考中但屏幕暂时没变"误判成卡死，
  * jsonl mtime 是权威进度信号。
  */
-export async function getJsonlMtime(cwd: string, sessionId: string): Promise<number | null> {
+export async function getJsonlMtime(cwd: string, sessionId: string, runtime?: string): Promise<number | null> {
   try {
-    const s = await stat(getJsonlPath(cwd, sessionId));
+    const p = sessionJsonlPath(runtime, cwd, sessionId);
+    if (!p) return null;
+    const s = await stat(p);
     return s.mtimeMs;
   } catch {
     return null;
@@ -360,7 +371,10 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
     for (const line of newData.split("\n").filter((l) => l.trim())) {
       try {
-        const entry = JSON.parse(line);
+        // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状，下面的解析逻辑
+        // （工具摘要/文本/状态/思考时长）一行都不用改
+        const entry = translateSessionLine(state.runtime, line);
+        if (!entry) continue;
 
         // v2.2.0+: auto-mode classifier 拦截检测。被拦的操作在 jsonl 里是一条
         // type:"user" 的 tool_result（is_error），内容稳定含 "denied by the Claude
@@ -661,33 +675,54 @@ const PENDING_POLL_MS = 2000;
 // deliverToLocal 的入站自愈兜底,这里只是第一道。poll 是 2s 一次 stat,便宜。
 const PENDING_MAX_WAIT_MS = 600_000;
 
+/**
+ * v2.23+ runtime 感知的会话文件定位。
+ * Claude Code 的路径可预测（推算即可，文件还没生成也能算出将来在哪）；
+ * Pi 的文件名带时间戳前缀，**只能扫目录**，所以这里每次调用都重新解析 ——
+ * pending 轮询必须复用这个函数，不能缓存一次路径死等。
+ */
+function resolveSessionPath(
+  runtime: string | undefined, cwd: string, sessionId: string, sessionFile?: string,
+): string | null {
+  // ① 真源：Pi 扩展在 register 帧里报的会话文件（文件名带时间戳，算不出来）
+  if (sessionFile) {
+    // 只有 Pi 扩展会自报 sessionFile；它是 agent 进程给的值，realpath 后必须落在 Pi 会话根之下——
+    // 否则一个失守的 agent 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道
+    try {
+      const real = realpathSync(sessionFile);
+      const root = realpathSync(join(piAgentDir(), "sessions")) + "/";
+      if (real.startsWith(root)) return real;
+      console.warn(`⚠ 忽略越界的自报 sessionFile: ${sessionFile}`);
+    } catch { /* 不存在 / 解析失败 → 走常规定位 */ }
+  }
+  const predicted = sessionJsonlPath(runtime, cwd, sessionId);
+  if (predicted && existsSync(predicted)) return predicted;
+  // 推算落空 → 按 sessionId 全库扫一遍兜底（slug/cwd 记录不准时自愈）
+  const found = findSessionJsonlBySessionId(runtime, sessionId);
+  return found && existsSync(found) ? found : null;
+}
+
 export async function startWatching(
   agentName: string, cwd: string, sessionId: string,
-  channelId: string, discord: Client
+  channelId: string, discord: Client,
+  opts: { runtime?: string; sessionFile?: string } = {}
 ) {
+  const { runtime, sessionFile } = opts;
   stopWatching(agentName);
-  let jsonlPath = getJsonlPath(cwd, sessionId);
+  const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
 
-  // 推算路径不存在 → 按 sessionId 全 projects 扫一遍兜底（slug 规则漂移 /
-  // cwd 记录不准时自愈，而不是傻等一个永远不会出现的文件）
-  if (!existsSync(jsonlPath)) {
-    const found = findJsonlBySessionId(sessionId);
-    if (found) {
-      console.log(`👁 slug 推算落空，按 sessionId 兜底命中: ${agentName} → ${found}`);
-      jsonlPath = found;
-    }
-  }
-
-  if (!existsSync(jsonlPath)) {
+  if (!jsonlPath) {
     const startedAt = Date.now();
     const timer = setInterval(() => {
-      if (existsSync(jsonlPath)) {
+      // ⚠ 每拍重新解析：Pi 的会话文件是「先有目录、后有文件」，路径只能扫出来
+      const hit = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
+      if (hit) {
         clearInterval(timer);
         pendingStartTimers.delete(agentName);
         console.log(
           `👁 JSONL 出现，启动 watcher: ${agentName} (等了 ${Date.now() - startedAt}ms)`
         );
-        startWatching(agentName, cwd, sessionId, channelId, discord).catch((err) =>
+        startWatching(agentName, cwd, sessionId, channelId, discord, { runtime, sessionFile }).catch((err) =>
           console.error(`pending watcher 启动失败: ${agentName}`, err)
         );
         return;
@@ -696,13 +731,13 @@ export async function startWatching(
         clearInterval(timer);
         pendingStartTimers.delete(agentName);
         console.warn(
-          `⚠️  JSONL ${PENDING_MAX_WAIT_MS}ms 没出现，放弃 watcher: ${agentName} → ${jsonlPath}`
+          `⚠️  JSONL ${PENDING_MAX_WAIT_MS}ms 没出现，放弃 watcher: ${agentName} (runtime=${runtime ?? "claude-code"})`
         );
       }
     }, PENDING_POLL_MS);
     pendingStartTimers.set(agentName, { timer, channelId, startedAt });
     console.log(
-      `⏳ JSONL 暂不存在，poll 等候: ${agentName} → ${jsonlPath}`
+      `⏳ JSONL 暂不存在，poll 等候: ${agentName} (runtime=${runtime ?? "claude-code"})`
     );
     return;
   }
@@ -718,6 +753,7 @@ export async function startWatching(
     textQueue: [],
     textTimer: null,
     agentName,
+    runtime,
     processing: false,
     pollInterval: null,
     rateLimited: false,

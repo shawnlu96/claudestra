@@ -318,6 +318,13 @@ export const DICT: Record<string, string> = {
 
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
+  // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
+  "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
+  "思考档位": "Thinking level",
+  "支持图片": "Supports images",
+  "支持思考": "Supports reasoning",
+  "没有可用的 Pi 模型（检查 ~/.pi/agent/models.json）": "No Pi models available (check ~/.pi/agent/models.json)",
+  "Pi 的档位与 Claude Code 的 effort 不是一套值（off 是 Pi 独有）": "Pi thinking levels are not Claude Code effort values (off is Pi-only)",
   "回合进行中，等结束后再切": "Turn in progress — try again when it finishes",
   "切换失败": "Switch failed",
 

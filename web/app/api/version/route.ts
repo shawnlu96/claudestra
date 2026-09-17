@@ -24,6 +24,11 @@ const git = (args: string[]): Promise<string> =>
     execFile("git", args, { cwd: process.cwd() }, (e, out) => resolve(e ? "" : out.trim()));
   });
 
+// 2026-09-17 去掉了这里曾有的 `Clear-Site-Data: "cache"`：它是进程级一次性头，只有部署后
+// **第一个**来轮询的客户端收到（其它设备永远收不到），而 Safari / WKWebView 又根本不实现
+// ——对 iOS PWA 零效果，只会误导排障。陈旧 bundle 的刷新走 update-toast 的 `_v=<commit>`
+// cache-busting（真正对所有客户端都生效的那条路）。
+
 export async function GET() {
   if (cache && Date.now() - cache.at < 30_000) {
     return NextResponse.json({ version: cache.version, commit: cache.commit, webCommit: cache.webCommit });

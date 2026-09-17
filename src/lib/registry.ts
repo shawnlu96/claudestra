@@ -13,6 +13,14 @@ import { readFile } from "fs/promises";
 
 export const REGISTRY_PATH = join(homedir(), ".claude-orchestrator", "registry.json");
 
+/** v2.23+ agent 运行时。缺失/未知一律当 `claude-code`——宁可走老路，不猜新路 */
+export type AgentRuntime = "claude-code" | "pi";
+
+/** 从 agent 记录判定运行时（registry 字段缺失 = 历史 agent = Claude Code） */
+export function agentRuntime(info: { runtime?: string } | undefined | null): AgentRuntime {
+  return info?.runtime === "pi" ? "pi" : "claude-code";
+}
+
 export interface RegistryAgent {
   /** tmux 名（registry key，"agent-xxx"） */
   name: string;
@@ -29,6 +37,10 @@ export interface RegistryAgent {
   external?: boolean;
   /** v2.21+ 归属 project 的 id(projects.json)。⚠ 与遗留的 project 字段无关——那存的是原始 dir */
   projectId?: string;
+  /** v2.23+ 运行时（"pi" / "claude-code"）。缺失 = 老 agent = claude-code */
+  runtime?: string;
+  /** v2.23+ Pi 能力档案（Pi agent 专用）：带哪些扩展/技能/工具/MCP。缺失 = 继承全局 */
+  piEnv?: Record<string, unknown>;
 }
 
 /** 全量读取（含非 active）。读失败/文件缺失返回空数组，不抛。 */
@@ -54,6 +66,11 @@ export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<
         // /peers 界面显示非 external,Codex review 2026-08-26 抓到的)
         external: a.external === true,
         projectId: str("projectId"),
+        // ⚠ 同样是白名单式读取：registry 里写了 runtime 但这里漏读 = 静默丢失，
+        // 下游会把 Pi agent 当 Claude Code 起（读成 undefined 不报错，这坑踩过一次）
+        runtime: str("runtime"),
+        // 嵌套对象：不是对象就当没有（脏数据不能把 bridge 搞崩）
+        piEnv: a.piEnv && typeof a.piEnv === "object" ? (a.piEnv as Record<string, unknown>) : undefined,
       };
     });
   } catch {

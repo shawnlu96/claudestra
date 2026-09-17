@@ -30,6 +30,8 @@ export interface AgentSession {
   contextTokens?: number | null;
   /** 当前模型 id */
   model?: string | null;
+  /** v2.23+ 运行时："pi" = Pi 会话（模型/effort 走 provider 配置，不给 CC 的切换面板） */
+  runtime?: string | null;
   /** 当前 effort 档位 */
   effort?: string | null;
   /** v2.21+ 归属 project id（master 无；侧栏按它分组） */
@@ -51,6 +53,8 @@ interface ApiAgent {
   contextTokens?: number | null;
   /** 当前模型 id（jsonl 实测 → registry → 全局默认） */
   model?: string | null;
+  /** v2.23+ 运行时（同上） */
+  runtime?: string | null;
   /** 当前 effort 档位（同上兜底链） */
   effort?: string | null;
   /** agent 创建时间（ISO，registry.created）——新建但还没说过话的 agent 靠它排序 */
@@ -70,9 +74,32 @@ export async function loadAgents(): Promise<AgentSession[]> {
     "/agents?include=stopped",
     { timeoutMs: 5000 }
   );
-  const list = (json.agents || []).map((a): AgentSession => {
+  const list = (json.agents || [])
+    // 大总管在桥接侧有**多个来源**（注册表历史条目 `agent-master`、api-routes 的
+    // master 注入、cmdList 的补条目）——不去重时侧栏会冒出「大总管卡片 + 一条
+    // 分组里的 master」（owner 2026-09-14 手机截图实报）。这里收敛成一条：
+    // 丢掉 `agent-master` 这种带前缀的历史条目，同名只保留**第一个带 runtime 的**
+    .filter((a) => !/^agent-master$/.test(String(a.name || "")))
+    .filter((a) => {
+      const bare = String(a.name || "").replace(/^agent-/, "");
+      if (bare !== "master") return true;
+      if (typeof a.runtime === "string" && a.runtime) return true;
+      // runtime 为空的 master 条目（旧注入路径）在有带 runtime 的那条时丢弃
+      return !(json.agents || []).some(
+        (b) => String(b.name || "").replace(/^agent-/, "") === "master" && typeof b.runtime === "string" && b.runtime,
+      );
+    })
+    // 已归档的 agent 不进工作列表（owner 2026-09-14「被归档，但是还是在列表里」）：
+    // 归档区里有它的目录 = 被收起来了；恢复（清掉归档目录）后自动回来。
+    .filter((a) => (a as { archived?: boolean }).archived !== true)
+    .map((a): AgentSession => {
     if (a.name === "master") {
       return {
+        // ⚠ 展开桥接的原始字段再覆盖 —— 这个映射此前是**逐项挑字段**的，桥接新增
+        // 一个字段（runtime / contextTokens …）忘了在这里加，网页就永远读不到
+        // （2026-09-14 一天内踩了两次：Pi 徽章不显示、Pi 只读模型面板不生效）。
+        // 展开之后新字段自动流过，只有需要**改名/兜底**的才在后面显式写。
+        ...a,
         name: MASTER_AGENT_NAME,
         displayName: "大总管",
         purpose: a.purpose || "调度员：管理/派发多个 agent",
@@ -84,11 +111,13 @@ export async function loadAgents(): Promise<AgentSession[]> {
         compacting: a.compacting === true,
         contextTokens: a.contextTokens ?? null,
         model: a.model ?? null,
+        runtime: a.runtime ?? null,
         effort: a.effort ?? null,
       };
     }
     const bare = a.name.replace(/^agent-/, "");
     return {
+      ...a, // 同上：新字段自动流过，别改回逐项挑
       name: bare,
       displayName: bare,
       purpose: a.purpose || "",
@@ -104,6 +133,7 @@ export async function loadAgents(): Promise<AgentSession[]> {
       compacting: a.status !== "stopped" && a.compacting === true,
       contextTokens: a.contextTokens ?? null,
       model: a.model ?? null,
+      runtime: a.runtime ?? null,
       effort: a.effort ?? null,
       projectId: a.projectId ?? null,
     };

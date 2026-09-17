@@ -428,6 +428,62 @@ function ShellServerSection() {
   );
 }
 
+
+/** 归档保留天数（0 = 永不自动清理）。缺省 90 天 —— 超期由 bridge 的每日兜底删除。 */
+function ArchiveRetentionSection() {
+  const t = useT();
+  const [days, setDays] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    fetch("/api/settings/archive-retention")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { data?: { days?: number } } | null) => setDays(j?.data?.days ?? 90))
+      .catch(() => setDays(90));
+  }, []);
+  const save = async (next: number) => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      const res = await fetch("/api/settings/archive-retention", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ days: next }),
+      });
+      const j = (await res.json()) as { data?: { days?: number }; error?: string };
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      setDays(j.data?.days ?? next);
+      setSaved(true);
+    } catch {
+      setSaved(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Section
+      title={t("归档保留")}
+      desc={t("已退役会话的归档保留天数；超期由每日兜底清理，0 = 永不清理（归档是「可找回的过期会话」，不是永久仓库）。")}
+      aside={
+        <select
+          className="select select-bordered select-sm"
+          value={days ?? 90}
+          disabled={days === null || saving}
+          onChange={(e) => void save(Number(e.target.value))}
+        >
+          {[30, 90, 180, 365, 0].map((d) => (
+            <option key={d} value={d}>
+              {d === 0 ? t("永不清理") : `${d} ${t("天")}`}
+            </option>
+          ))}
+        </select>
+      }
+    >
+      {saved ? <span className="text-xs text-success">{t("已保存")}</span> : null}
+    </Section>
+  );
+}
+
 function Section({
   title,
   aside,
@@ -729,6 +785,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">{/* 分区卡片流 */}
 
         <GroupLabel>{t("界面与个人")}</GroupLabel>
+        {/* ── 归档保留（v2.23+）：超期归档由每日兜底清理，0 = 永不清理 ── */}
+        <ArchiveRetentionSection />
         {/* ── 原生壳:服务器地址(只在 iOS App 里出现;地址存本机,可换)─────────────── */}
         {isNativeShell() && open && <ShellServerSection />}
         {/* ── 界面(外观 + 语言)─────────────── */}

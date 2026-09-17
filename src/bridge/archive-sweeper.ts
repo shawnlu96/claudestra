@@ -16,7 +16,10 @@
  *    那个 agent 裸奔。
  */
 
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, rmdirSync, statSync, unlinkSync } from "fs";
+import { join } from "path";
+import { ARCHIVE_ROOT, USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
+import { DEFAULT_ARCHIVE_RETENTION_DAYS, readConfigSync } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { archiveSession } from "../lib/session-archive.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
@@ -26,7 +29,61 @@ import { MASTER_DIR } from "./config.js";
 const SWEEP_MS = 24 * 3600_000;
 const FIRST_DELAY_MS = 10 * 60_000; // 启动 10min 后跑首轮，避开 bridge 启动风暴
 
+/**
+ * 超期归档清理（v2.23+）：**只清用户手动归档区** `archive/archived/**`（USER_ARCHIVE_ROOT）。
+ *
+ * ⚠ 绝不走 ARCHIVE_ROOT 整棵树：`archive/<agent>/` 是退役快照 —— 被 kill 的 agent 的
+ * 唯一历史副本（原件早被 Claude Code cleanupPeriodDays 清掉），CLAUDE.md 的不变量是
+ * "a killed agent's archives remain readable"。review #10 时那版按整棵树 mtime 删，
+ * 本机当时已有 26 个 >90 天的快照会在合并后第一次 sweep 被静默删掉。
+ * 按文件 mtime 判龄；`archiveRetentionDays = 0` 表示不清理。空目录顺手删掉。
+ */
+export function pruneArchives(days: number, now = Date.now(), root: string = USER_ARCHIVE_ROOT): number {
+  if (!Number.isFinite(days) || days <= 0) return 0;
+  const cutoff = now - days * 86_400_000;
+  let removed = 0;
+  const walk = (dir: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        try {
+          if (readdirSync(full).length === 0) rmdirSync(full);
+        } catch {
+          /* 非空/权限：留着 */
+        }
+      } else {
+        try {
+          if (statSync(full).mtimeMs < cutoff) {
+            unlinkSync(full);
+            removed++;
+          }
+        } catch {
+          /* 单个文件失败不影响其余 */
+        }
+      }
+    }
+  };
+  walk(root);
+  return removed;
+}
+
 export async function sweepArchives(): Promise<{ agents: number; archived: number }> {
+  // 超期清理（默认 90 天，设置里可改；0=不清理）—— 只清 archived/ 手动归档区，快照不碰
+  try {
+    const days = readConfigSync().archiveRetentionDays ?? DEFAULT_ARCHIVE_RETENTION_DAYS;
+    const pruned = pruneArchives(days);
+    if (pruned > 0) console.log(`🗄 归档区(archived/)清理：移除 ${pruned} 个超过 ${days} 天的文件`);
+  } catch {
+    /* 清理失败不阻塞兜底快照 */
+  }
+
   const agents = await readRegistryAgents();
 
   // tmux 实际存在的 agent 窗口（P2：registry 标 stopped 但窗口还活着的也要归档）
@@ -45,7 +102,7 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
     const win = a.name.startsWith("agent-") ? a.name : `agent-${a.name}`;
     if (a.status !== "active" && !liveWindows.has(win)) continue;
     swept++;
-    const r = await archiveSession(a.name, a.cwd, a.sessionId).catch(() => null);
+    const r = await archiveSession(a.name, a.cwd, a.sessionId, { runtime: a.runtime }).catch(() => null);
     if (r?.archived.length) archived += r.archived.length;
   }
 

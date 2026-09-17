@@ -68,6 +68,10 @@ src/
     bg-activity-watcher.ts v2.8+ bg activity tracker: discovers subagent jsonls + bg shell task outputs per agent session → streams into per-activity threads (ChatAdapter.provisionThread) + bg_task_* SSE events
     archive-sweeper.ts   v2.9+ daily archive sweep: every 24h snapshots all active agents' session jsonls (idempotent copy-if-larger) — covers crash/never-retired gaps that retirement-time archiving misses
   channel-server.ts      Per-session MCP proxy (stdio MCP ↔ Bridge WebSocket)
+  pi/
+    claudestra-extension.ts  v2.23+ Pi agent 侧通道：与 channel-server 同一套 bridge ws 协议，
+                            但靠 Pi 扩展 API 注入消息（pi.sendUserMessage）并在 agent_settled
+                            时上报回合结束；仅当 DISCORD_CHANNEL_ID 存在时生效
   manager.ts             Agent lifecycle + cron + version/update CLI (JSON output)
   cron.ts                Cron scheduler daemon (launchd-managed)
   launcher.ts            Master tmux session guardian (launchd-managed)
@@ -79,6 +83,11 @@ src/
     bridge-client.ts     Shared Bridge WebSocket request helper
     tmux-helper.ts       Shared tmux command wrappers (tmuxRaw, isIdle, sendLine, …)
     claude-launch.ts     Unified Claude Code launch-command builder (flags, MCP_NAME, shell escaping)
+    pi-launch.ts         v2.23+ Pi agent 的启动命令（--approve / --extension / --session-id open-or-create）
+    pi-env.ts            v2.23+ Pi 能力档案：档案→启动参数（含包源必须排路径前的顺序规则）+ 全局/项目/运行时清单读取
+    pi-session.ts        v2.23+ Pi 会话文件定位（目录编码/软链/扫目录）+ 行格式翻译成 Claude Code 形状
+    session-source.ts    v2.23+ 会话记录统一入口：runtime 感知的「定位 + 逐行翻译」，五个消费者共用
+    launch-command.ts    v2.23+ registry runtime → 启动器分发（claude-code / pi），新增 runtime 只改这里
     config-store.ts      Runtime config at ~/.claude-orchestrator/config.json (auto-update toggles)
     skills.ts            SKILL.md discovery — user / plugin / project sources + hardcoded natives
     doctor.ts            v2.14+ read-only install health-check backing `manager.ts doctor` (runtime / config / daemons / bridge / MCP / agents)
@@ -105,6 +114,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
                            isolated unit tests (Discord client + ws + peers.json coupling), live
                            verification through a sandbox session is the coverage there.
   agent-stats.test.ts      Per-agent usage rollup, compact-aware
+  archive-sweeper.test.ts  v2.23+ pruneArchives 只清传入的根（手动归档区）、快照不碰、days=0 不清
   ask-user-question.test.ts AskUserQuestion detection in the TUI + keystroke synthesis
   bg-jobs.test.ts          Claude Code bg job cleanup recipe (roster root-fix)
   baseline-keys.test.ts    v2.22.x bg-activity baseline 作用域:同 agent-session 只 baseline 一次、换 session 重新 baseline、prune 按 agent 名
@@ -128,6 +138,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   session-archive.test.ts  v2.8+ copy-if-larger snapshot semantics
   session-history.test.ts  v2.9+ jsonl → neutral messages: reply extraction, meta filtering, paging
   session-recall.test.ts   v2.21.5+ project slug, HANDOFF path, SessionStart hook merge/remove idempotency
+  session-source.test.ts   v2.23+ runtimeForSessionPath：Pi 根按路径、CC 根零 I/O、归档副本读头行
   sessions-inventory.test.ts v2.7+ doppelganger detection / session reconciliation
   skills.test.ts           SKILL.md discovery
   slash-registry.test.ts   Slash command registry per-channel resolution
@@ -152,12 +163,68 @@ SETUP.md                 User-facing installation guide
 - **One-click interrupt** — Discord button sends `Ctrl+C` to the target agent's tmux window.
 - **Idle detection** — Claude Code `Stop` / `Notification` hooks drive Discord typing indicators precisely; a 30-minute safety timeout catches edge cases.
 - **Master guardian** — launchd-managed launcher keeps the master tmux session alive and auto-dismisses Claude Code confirmation prompts.
-- **Guard rails (not a security boundary)** — `--disallowedTools` carries a blocklist (`rm -rf`, `git push --force`, `git reset --hard`, `chmod 777`, fork bomb) for every spawned agent. The rules are **prefix matches on the command string**, so equivalent spellings (`/bin/rm -rf`, `rm -fr`, `find … -delete`, `python -c`, variable expansion) bypass them, and there is no `PreToolUse` hook backstop. Since `DEFAULT_PERMISSION_MODE` is `bypassPermissions` (`lib/claude-launch.ts`), every agent is effectively an unrestricted shell running as the user — the blocklist only prevents accidents, never a determined prompt.
+- **Guard rails (not a security boundary)** — `--disallowedTools` carries a blocklist (`rm -rf`, `git push --force`, `git reset --hard`, `chmod 777`, fork bomb) for every spawned agent. The rules are **prefix matches on the command string**, so equivalent spellings (`/bin/rm -rf`, `rm -fr`, `find … -delete`, `python -c`, variable expansion) bypass them, and there is no `PreToolUse` hook backstop. Since `DEFAULT_PERMISSION_MODE` is `bypassPermissions` (`lib/claude-launch.ts`), every agent is effectively an unrestricted shell running as the user — the blocklist only prevents accidents, never a determined prompt. **Pi agents (v2.23+) have no `--disallowedTools` equivalent at all**: the blocklist is a Claude Code launch flag, so a Pi agent's only guard is its capability profile (`--pi-base minimal`).
 - **Multi-frontend API (v2.6.0+)** — the core is decoupled from Discord (design doc: `docs/design-multi-frontend.md`). Three transport-neutral channels: `GET /events` (SSE stream of tool calls / assistant text / agent status, `Last-Event-ID` replay), `POST /api/v1/agents/:name/messages` (Bearer-token inbound messaging with sync `wait`, multipart file upload, thread polling fallback), and `GET /stats`. Tokens are scoped per-agent (`manager.ts token-add <name> --agents a,b`; non-`--external` agents require `--force` — shared-context leak guard). API conversations are mirrored to the agent's Discord channel for auditability (`--no-mirror` to opt out). Outbound delivery goes through the `ChatAdapter` registry (`bridge/adapters.ts`) — adding Telegram or another platform means implementing one adapter, zero core changes. Bridge HTTP binds `127.0.0.1` by default (`BRIDGE_BIND` to open up).
 - **Claude Code agents-mode integration (v2.7+)** — Claude Code 2.1.x runs a bg-agent daemon (`claude agents`, respawn-on-kill, ← key opens the agents view in every TUI). This system fights Claudestra's tmux-foreground model: a mis-pressed ← can fork a foreground session into a bg job ("doppelganger"), silently breaking the Discord link (2026-07-09 incident). Adaptation layers: **(1) visibility** — `SessionsInventory` (`bridge/sessions-inventory.ts`) merges `claude agents --json` + `~/.claude/jobs/*/state.json` + registry into a neutral session list with doppelganger detection, consumed by the Discord `/agents` panel (LLM-free buttons: detail / adopt / cleanup), `GET /api/v1/sessions`, and `POST /api/v1/sessions/:id/cleanup|adopt` (full-scope token required, 202 + `session_anomaly` SSE events); **(2) self-heal** — `manager.ts restart` detects the "running as a background agent" error and automatically retries with `--fork-session`, then probes the forked session id (projects-dir diff) and writes it back to the registry; `manager.ts adopt <name> <sessionId>` promotes a doppelganger to the official session, `resume --fork` adopts wild sessions; **(3) guards** — permission-watcher auto-escapes agents-view UIs (8s poll, Esc + notify), wedge-watcher's link sentinel alerts when a window is alive but its channel-server has been offline >5min (repair button), and a 10-min reconciler alerts on new doppelgangers with cleanup/adopt buttons. Cleanup recipe (`lib/bg-jobs.ts`, incident-proven): kill bg pids (never `--fork-session` referencers) → wait for daemon quiescence → quarantine the job dir → detect stubborn respawns and defer to the official TUI.
 - **Background-activity threads (v2.8+)** — every agent's background work gets its own sub-conversation instead of polluting the main channel. `bridge/bg-activity-watcher.ts` polls each registered agent's session for two activity kinds: **subagents** (`~/.claude/projects/<slug>/<sessionId>/subagents/agent-*.jsonl`, same format as the main session) and **background shell tasks** (`/tmp/claude-<uid>/<slug>/<sessionId>/tasks/*.output`). A new file → `ChatAdapter.provisionThread` opens a thread under the agent's channel (Discord thread today, Telegram topic later); tool calls / assistant text / shell output stream in with a 2.5s debounce; 3 min of inactivity → completion summary + thread auto-archive. Lifecycle mirrors to SSE as `bg_task_started/update/completed` so a web frontend can render per-task progress lines without Discord. Restart-safe: the first poll baselines existing files without replaying. **Session archive** (`lib/session-archive.ts`): whenever a session retires (kill, fork rotation, adopt, resume-replace, or manual `manager.ts archive <name>`), its jsonl (+ subagents) is snapshotted to `~/.claude-orchestrator/archive/<agent>/` — Claude Code's `cleanupPeriodDays` prunes the originals, the archive is what makes chat history durable. Copy-if-larger semantics; conversation content stays in files, no database (owner-approved storage design 2026-07-10). v2.9+ adds a daily sweeper (`bridge/archive-sweeper.ts`) that re-snapshots every active agent's session, so long-lived sessions that never retire are archived too. SSE `bg_task_*` events carry a stable `id` (file basename: subagent id / shell task id), never server paths.
 - **Read-only history API (v2.9+)** — the web-UI-facing counterpart of the archive: `GET /api/v1/agents/:name/history` lists an agent's sessions (live + archived snapshots merged, live wins when larger), `GET /api/v1/agents/:name/history/:sessionId` returns paginated neutral messages (`?limit=100&before=<seq>` pages backwards like a chat view; `?subagent=agent-xxx` reads a subagent conversation). Parsing lives in `lib/session-history.ts` (pure, unit-tested): user/assistant/compact-boundary entries become `{seq, ts, role, text, tools[], compactSummary?}`, meta entries and tool_result payloads are filtered, tool calls render through jsonl-watcher's `formatTool`. Token scope rules match the messaging endpoint; a killed agent's archives remain readable (that is the point of archiving). sessionId/subagent params are whitelist-validated before touching the filesystem.
+- **Manual archive category (v2.23+)** — `POST /api/v1/agents/:name/archive` moves an agent out of the working list: a session copy + `.meta.json` land in `~/.claude-orchestrator/archive/archived/<name>/`, the window is stopped, the registry entry is kept (so `resume` / `POST /api/v1/sessions/archived/:id/restore` bring it back); unmanaged sessions get the same via `POST /api/v1/sessions/:id/manage`. `archiveRetentionDays` (default 90, `0` = never; `GET/POST /api/v1/settings/archive-retention`) prunes **only this manual category** on the daily sweep — the per-agent auto-snapshots in `archive/<agent>/` are never auto-deleted, they are the durable history of killed agents. All of it is full-scope-token only; `name` / `id` path segments are rejected unless they are a single safe directory name (`%2F` would otherwise escape `archived/`).
 - **Discord slash autocomplete for skills + built-ins** — on startup, the Bridge discovers every available slash command from four sources (user-level `~/.claude/skills/`, installed plugins in `~/.claude/plugins/cache/…`, per-agent `<cwd>/.claude/skills/`, and a curated set of Claude Code built-ins like `/cost`, `/mcp`, `/context`, `/compact`) and registers them as Discord slash commands. Invocations are re-scanned on every `manager.ts create|resume|kill|restart` via the `/skills/rescan` HTTP endpoint. When a user types a registered `/cmd args` in Discord, the bridge forwards the literal text to the channel's agent via `tmux send-keys`, so Claude Code interprets it natively. Project-level skills are filtered: typing a skill that only exists in another agent's cwd yields an ephemeral explanation instead of going through.
+
+### Pi agent sessions (v2.23+)
+
+Claudestra can host **Pi coding-agent sessions** alongside Claude Code ones. An agent's runtime lives in registry (`runtime: "pi"`; missing = Claude Code, so existing data needs no migration) and decides exactly two things: which launcher builds the command (`lib/launch-command.ts` → `lib/pi-launch.ts`), and how readiness is detected.
+
+```bash
+bun src/manager.ts create <name> <dir> [purpose] --runtime pi [--model provider/id]
+bun src/manager.ts resume <name> <sessionId> [dir] --runtime pi   # id may be non-UUID
+```
+
+**How the channel works.** Claude Code gets messages pushed into its context by the official channel protocol over an stdio MCP server (`channel-server.ts`). Pi has no such thing — its core ships no MCP and an MCP child process cannot see the session identity. So the Pi side is a **Pi extension** (`src/pi/claudestra-extension.ts`) loaded with `--extension` by the launcher. It speaks the *same* bridge WebSocket protocol as `channel-server` (register / registered / response / message / replaced + ping), so `bridge.ts` needed no changes for the round trip. Differences, all inside the extension:
+
+- inbound message → `pi.sendUserMessage()` (idle) or with `deliverAs: "steer"` (mid-turn), instead of an MCP channel notification;
+- `reply` / `send_to_agent` / `fetch_messages` / `project_info` are registered as Pi **custom tools** with the same names and parameters as the MCP ones, so agent instructions written for Claude Code still apply;
+- turn end → `agent_settled` (fires only after retries and compaction retries finish — closer to "the turn is really over" than a Stop hook) POSTs to the bridge `/hook` with `event: "Stop"`, and **acts on the `{block, reason}` answer** the same way the Claude Code Stop hook does: the reminder is injected as a new turn so the agent gets one chance to call `reply`;
+- the extension is inert unless `DISCORD_CHANNEL_ID` is present, so a user's own `pi` sessions are unaffected.
+
+**Readiness** is a tmux window user option (`@claudestra_ready`), written by the extension after the bridge accepts its registration and polled by `manager.ts` (`waitForPiReady`). Deliberately not pane-text sniffing: Pi's TUI changes between versions, while this marker is ours. Restart clears it first, so a reused window cannot report stale readiness. Graceful exit sends `/quit` (`/exit` for Claude Code).
+
+**Environment management (v2.23+).** A Pi agent's abilities are a three-layer composition — global `~/.pi/agent/` (packages, extensions, skills, `mcp.json`, `models.json`), project `.pi/` + `AGENTS.md`/`CLAUDE.md`, and per-process flags. Left alone, every Claudestra Pi agent inherits whatever the operator happens to have installed (on this machine: 15 packages → 65 tools / 83 commands), which is neither visible nor controllable. So each Pi agent carries a **capability profile** in registry (`piEnv`):
+
+```bash
+manager create <name> <dir> [purpose] --runtime pi --pi-base minimal   # 只带内置工具 + 通道扩展
+manager pi-env <agent>                       # 看清：档案 + 全局/项目静态清单 + 运行时实况
+manager pi-env-set <agent> --base minimal|inherit [--add-ext <src>] [--add-skill <path>] \
+                          [--exclude-tool <name>] [--mcp-config <path>] [--no-trust] [--reset]
+```
+
+`inherit` (the default when no profile is set) means unchanged behavior; `minimal` adds `--no-extensions --no-skills --no-prompt-templates`, which measured **8 built-in tools / 1 command** — it really does drop package-provided extensions (a package contributes extensions through settings `packages[]`, and `--no-extensions` disables that too). Context files stay on deliberately: `AGENTS.md`/`CLAUDE.md` are how the repo says it wants to be worked on, and Claude Code agents get them too.
+
+**Flag order is semantic** (measured on pi 0.85.1, documented in `lib/pi-env.ts`): `--no-*` must precede the first `-e`, and **package sources (`-e npm:…`) must precede path sources** — reversing them silently drops the package source (`--no-extensions -e npm:pkg -e /path.ts` loads pkg; `--no-extensions -e /path.ts -e npm:pkg` does not, with no error anywhere). `lib/pi-launch.ts` emits that order explicitly; don't "tidy" it.
+
+The runtime truth comes from the Pi extension, which writes a snapshot of `getAllTools()` / `getActiveTools()` / `getCommands()` / model / thinking level to `~/.claude-orchestrator/pi-env/<agent>.json` on session start (and on model change). That is what makes drift visible: `manager pi-env` compares the profile against the snapshot and flags e.g. "profile is minimal but global-extension tools showed up". The bridge stays out of it — it is a read-only consumer of registry, and the snapshot must stay readable after the bridge or session is gone.
+
+`--approve` (trust project-local `.pi/` resources, which can execute project extensions and install packages) is **on by default**, matching Claude Code's auto-accepted trust dialog; the choice is recorded in the profile (`trustProject`) so it is visible rather than buried in the launch line.
+
+**Session records are read too (v2.23+).** Pi agents are not silent in the web/Discord stream any more. The trick is that the five readers (jsonl-watcher, session-history, session-archive, jsonl-cost/agent-stats, the bridge's "agent forgot to reply → extract its text" fallback) are all written against Claude Code's path *and* line shape, so instead of rewriting five consumers there are two seams in `lib/session-source.ts`:
+
+- **locate** — `sessionJsonlPath(runtime, cwd, sessionId)`. Claude Code's path is predictable; **Pi's is not** (the filename is `<ISO-timestamp>_<sessionId>.jsonl`), so it is a directory scan, and a miss returns `null` rather than a path that will never exist. The watcher's pending-file loop therefore re-resolves every tick instead of `existsSync`-ing a fixed path. The Pi extension also reports its own `sessionFile` in the register frame, which is used as the first-choice source.
+- **translate** — `translateSessionLine(runtime, line)` turns one Pi record into Claude Code's shape (one line each): `toolCall{name,arguments}` → `tool_use{name,input}`, the standalone `toolResult` record → a `tool_result` block inside a `user` message, `usage{input,output,cacheRead,cacheWrite}` → `{input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens}`, `compaction` → `compact_boundary`, `thinking_level_change` → the effort display. Pi's built-in tool names and arguments are also mapped (`read{path}` → `Read{file_path}`, `edit{edits[]}` → `Edit{old_string,new_string}`, `find` → `Glob`, …) so the existing tool-card rendering produces `💻 echo hi` / `📖 file.ts` instead of a bare `🔧 bash`.
+
+Readers that only have a path auto-detect the runtime from it (`runtimeForSessionPath`: under the Pi sessions root ⇒ `pi`; under `~/.claude/projects/` ⇒ Claude Code with zero I/O; anything else — i.e. **archive copies** under `~/.claude-orchestrator/archive/`, whose path carries neither root — sniffs the first line, which for Pi is always `{type:"session",version}`, cached per path), so runtime does not have to be threaded through six signatures. **Locating** always needs it explicitly.
+
+Consequences worth knowing: Pi sessions show up in `manager sessions`, `GET /api/v1/agents/:name/history`, the cost rollup, the context/model badges, and `manager archive` (Pi's subagent artifacts — `<session-stem>/<runId>/run-N/session.jsonl` — are copied into the archive as `<sid>/subagents/<runId>.jsonl`, i.e. the Claude Code layout, so the history panel reads them unchanged). The `/new`-style session rotation self-heal now works for Pi as well (`listSessionIdsForCwd` understands the `<ts>_<id>` filename); without it a rotated Pi session would freeze the watcher and history exactly like the Claude Code failure described in `maybeHealRotatedSession`.
+
+**Session discovery (v2.23+).** Two lists, deliberately different:
+
+- the **agent list** = what Claudestra manages (registry entry + channel) — that's *control*;
+- the **session list** (`manager sessions`, the Discord history panel, and the web's session section) = conversations happening on this machine — that's *visibility*, and it must not care which harness runs them.
+
+`scanPiSessions()` walks `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl` (cwd comes from the header line — the directory encoding is lossy), and `scanAllSessions()` merges both runtimes by recent activity. `cmdSessions` and **resume's directory lookup** both use it, which is what makes "spot a Pi session in the list → `resume <name> <sessionId> --runtime pi` to adopt it as a real agent" work. Sessions that were **not** started by Claudestra can be listed and adopted, but they cannot receive messages until adopted (no extension = no inbound channel).
+
+Surfaces over the API (all full-scope token, consumed by the web client): `GET /api/v1/session-list` (merged inventory, each entry tagged with `runtime` and `agentName` when already managed), `GET /api/v1/sessions/:sessionId/history` (history for a session that belongs to no agent — the existing per-agent history endpoint can't serve those), and `POST /api/v1/agents/resume` (adopt an existing session as a new agent, 202 + `session_anomaly kind=resume_result`). `POST /api/v1/agents` also accepts `runtime` and `piBase` now, so the web can create Pi agents.
+
+**Still not covered**: Pi subagent *threads* (`bg-activity-watcher` looks in Claude Code's `subagents/` directory) and Pi's background shell logs (`$TMPDIR/pi-bash-*.log` has no session scope, so it cannot be attributed).
 
 ### Cross-Claudestra peer collaboration
 

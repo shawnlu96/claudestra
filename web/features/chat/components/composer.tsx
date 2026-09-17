@@ -142,6 +142,7 @@ const SCOPE_LABEL: Record<string, string> = {
   plugin: "插件",
   user: "技能",
   project: "项目",
+  pi: "Pi",
 };
 
 export function Composer() {
@@ -157,13 +158,19 @@ export function Composer() {
   const [files, setFiles] = useState<File[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // IME（中文/日文等）组合态：组合期间**绝不能程序化改写 textarea.value** ——
+  // iOS/WebKit 会直接把组合串丢掉、候选条消失，表现为「输入法失效」（owner
+  // 2026-09-14 手机实报「偶尔出现中文输入法失效」）。下面所有编程式写入都要看这个。
+  const composingRef = useRef(false);
   const textRef = useRef("");
   const textRafRef = useRef<number | null>(null);
   const setText = useCallback((v: string | ((prev: string) => string)) => {
     const next = typeof v === "function" ? v(textRef.current) : v;
     textRef.current = next;
     const ta = taRef.current;
-    if (ta && ta.value !== next) ta.value = next;
+    // 组合期间不写 DOM（见 composingRef 注释）；textRef/state 照常更新，
+    // 组合结束后的下一次 setText 或用户输入会把 DOM 对齐回来。
+    if (ta && ta.value !== next && !composingRef.current) ta.value = next;
     if (textRafRef.current != null) {
       cancelAnimationFrame(textRafRef.current);
       textRafRef.current = null;
@@ -465,6 +472,9 @@ export function Composer() {
         if (window.matchMedia("(pointer: coarse)").matches) {
           requestAnimationFrame(() => {
             if (document.activeElement !== ta) return;
+            // 组合期间跳过：这一手重灌 value 正是把 iOS 输入法打断的元凶
+            // （它在 coarse 指针端每次聚焦都跑，撞上组合就"输入法失效"）。
+            if (composingRef.current) return;
             const v = ta.value;
             ta.value = "";
             ta.value = v;
@@ -782,6 +792,12 @@ export function Composer() {
           )}
           <textarea
             ref={taRef}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+            }}
             onFocus={() => setTaFocused(true)}
             onBlur={() => setTaFocused(false)}
             className={`${recState !== "idle" ? "hidden" : "block"} max-h-[180px] min-h-[46px] w-full resize-none overflow-y-auto bg-transparent px-4 pb-1.5 pt-[14px] text-[14.5px] leading-[1.55] text-base-content outline-none placeholder:text-base-content/35 sm:max-h-[320px] sm:min-h-[84px]`}

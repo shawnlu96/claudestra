@@ -12,6 +12,8 @@ import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
+import { RuntimeBadge, UnmanagedSessions } from "./unmanaged-sessions";
+import { ArchivedSessions } from "./archived-sessions";
 
 /** v2.17.2 点击串台修复(peer HedeMacBook-Pro 代码级归因,2026-08-09):
  *  列表按活动排序 + roster 指纹含易变字段 + 前台 15s 轮询 → 重排是常态;
@@ -92,6 +94,11 @@ function StatusDot({ status, busy, compacting }: { status: AgentSession["status"
  * 会话列表行——纯选择项。会话操作（清空/重启/停止）已迁到会话详情顶栏
  * （agent-actions.tsx），列表保持干净。
  */
+/** 左滑露出的动作区总宽（置顶 / 归档 / 删除 三格）—— 必须与滑动上限、吸附阈值同源，
+ *  否则加一个动作就会把最左边那个按钮挤出可视区（2026-09-14 owner 实报「置顶按钮
+ *  怎么搞没了」：容器加宽到 240 而滑动上限还是 160）。 */
+const ACTIONS_W = 240;
+
 function AgentRow({
   a,
   active,
@@ -133,6 +140,7 @@ function AgentRow({
   const canRemove = !a.pinnedMaster && !a.mock;
   const swipeEnabled = canRemove && !manage; // 多选模式下手势让位
   const [swipeX, setSwipeX] = useState(0);
+  const [archiving, setArchiving] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [removing, setRemoving] = useState(false);
   // v2.21.3+ 拖动期间不再每帧 setState(整行 + 订阅链重渲,owner「左滑特别卡」):
@@ -207,7 +215,7 @@ function AgentRow({
       <div className="relative overflow-hidden rounded-lg">
         {/* 左滑露出的操作钮(在滑动层下面):置顶 + 删除 */}
         {(swipeX < 0 || dragging) && (
-          <div className="absolute inset-y-0 right-0 z-0 flex w-[160px]">
+          <div className="absolute inset-y-0 right-0 z-0 flex" style={{ width: ACTIONS_W }}>
             <button
               className="flex flex-1 items-center justify-center bg-base-content/70 text-[13px] font-medium text-base-100"
               onClick={() => {
@@ -216,6 +224,21 @@ function AgentRow({
               }}
             >
               {pinned ? t("取消置顶") : t("置顶")}
+            </button>
+            {/* v2.23+ 归档：只给当前会话做快照（非破坏性），不动 agent 本身 ——
+                owner 2026-09-14「给工作列表的也加入一个左滑归档按钮」 */}
+            <button
+              className="flex flex-1 items-center justify-center bg-base-300/80 text-[13px] font-medium text-base-content/80"
+              onClick={async () => {
+                if (archiving) return;
+                setArchiving(true);
+                const r = await store.archiveAgent(a.name);
+                setArchiving(false);
+                closeSwipe();
+                if (!r.ok) alert(`${t("归档失败:")}${t(r.error || "操作失败")}`);
+              }}
+            >
+              {archiving ? "…" : t("归档")}
             </button>
             <button
               className="flex flex-1 items-center justify-center bg-error text-[13px] font-medium text-error-content"
@@ -281,7 +304,7 @@ function AgentRow({
                     swipeReg.closeOthers(closeSwipe);
                     setDragging(true);
                   }
-                  t.lastX = Math.max(-160, Math.min(0, t.startX + dx));
+                  t.lastX = Math.max(-ACTIONS_W, Math.min(0, t.startX + dx));
                   applyX(t.lastX);
                 }
               : undefined
@@ -292,7 +315,7 @@ function AgentRow({
                   const t = touchRef.current;
                   touchRef.current = null;
                   if (!t?.swiping) return;
-                  const snap = t.lastX < -60 ? -160 : 0;
+                  const snap = t.lastX < -ACTIONS_W * 0.375 ? -ACTIONS_W : 0;
                   applyX(snap);
                   setDragging(false);
                   setSwipeX(snap);
@@ -360,6 +383,12 @@ function AgentRow({
           ) : (
             <StatusDot status={a.status} busy={a.busy || busyLive} compacting={compacting} />
           )}
+          {/* v2.23+ 运行时徽章：列表里看不出哪些是 Pi 会话，而两者的模型/工具/
+              行为都不同（owner 2026-09-14「第一个 pi 加入标识」）。
+              ① 位置在**名字前面**（owner 2026-09-14 再反馈「位置放在前面啊」）；
+              ② 必须在下面那个 `truncate` 容器**外面**且 shrink-0 —— 放里面时名字
+                 一长（agent-claudestraworker）就被省略号整块吃掉，看着像"没渲染"。 */}
+          <RuntimeBadge runtime={a.runtime ?? ""} className="shrink-0 align-middle" />
           <span className={`min-w-0 flex-1 truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
             {t(a.displayName)}
@@ -1054,19 +1083,30 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
         </div>
       ) : (
-        /* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */
-        <div
-          className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
-          style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
-        >
-          Claudestra Web
-          {verInfo?.version ? (
-            <span className="ml-1 font-mono">
-              v{verInfo.version}
-              {verInfo.commit ? ` · ${verInfo.commit}` : ""}
-            </span>
+        <>
+          {/* v2.23+ 未纳管会话分区：机器上没纳管的会话（pi-web 起的 Pi 会话、终端手敲的）。
+              放在版本行**之上** —— 版本行是页面收尾元素，功能分区压在它下面很反常
+              （视觉审查 P2-5）。样式复用项目组头，不再自创一套。 */}
+          {!manage ? (
+            <>
+              <UnmanagedSessions />
+              <ArchivedSessions />
+            </>
           ) : null}
-        </div>
+          {/* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */}
+          <div
+            className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
+            style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
+          >
+            Claudestra Web
+            {verInfo?.version ? (
+              <span className="ml-1 font-mono">
+                v{verInfo.version}
+                {verInfo.commit ? ` · ${verInfo.commit}` : ""}
+              </span>
+            ) : null}
+          </div>
+        </>
       )}
       <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
