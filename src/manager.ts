@@ -1062,6 +1062,7 @@ async function cmdCreate(
     // 新 tmux window 起来后 .zshrc / .bashrc 可能弹 oh-my-zsh / homebrew 的 Y/n
     // update prompt，会吞掉 send-keys 第一个字符。先清掉再发命令。
     await clearShellInitPrompts(target);
+    if (runtime === "pi") await clearPiReady(tmuxName);
     await tmuxSendLine(target, cmd);
 
     // 4. 轮询等待就绪 — 与 restart 的 startClaudeInWindow 对齐（CLAUDE_READY_ROUNDS）
@@ -1186,11 +1187,19 @@ async function assertPiAvailable(): Promise<boolean> {
   return piAvailable();
 }
 
+/**
+ * Pi 就绪标记清零 —— 必须在**发启动命令之前**调。扩展在 registered 一到就写 "1"；
+ * 清零若晚于启动，会把真就绪抹掉 → 永远等不到 → 假「启动超时」→ create 路径
+ * cleanup 掉一个健康的 agent。restart 复用同一窗口时旧标记同样靠这里清。
+ */
+async function clearPiReady(name: string): Promise<void> {
+  const ok = await setWindowOption(windowTarget(name), PI_READY_OPTION, "0");
+  if (!ok) console.error(`⚠ 清不掉 ${name} 的 ${PI_READY_OPTION}（复用窗口时可能误判就绪）`);
+}
+
 async function waitForPiReady(name: string, rounds = CLAUDE_READY_ROUNDS): Promise<boolean> {
   const target = windowTarget(name);
-  // restart 复用同一个窗口时，上一轮留下的标记会让我们把「还没起来」认成就绪。
-  // 先清零，再等扩展自己写 "1"。
-  await setWindowOption(target, PI_READY_OPTION, "0");
+  // 清零不在这里做（见 clearPiReady）：这里只等扩展自己写 "1"。
   for (let i = 0; i < rounds; i++) {
     if ((await windowOption(target, PI_READY_OPTION)) === "1") return true;
     if (i > 4 && isAtShell(await captureLast(name, 3).catch(() => ""))) return false;
@@ -1351,6 +1360,7 @@ async function cmdResume(
     });
     await clearShellInitPrompts(target);
     if (forkSession) forkBefore = await listSessionJsonls(resolvedDir);
+    if (runtime === "pi") await clearPiReady(tmuxName);
     await tmuxSendLine(target, cmd);
 
     // 轮询等待 — 与 restart 的 startClaudeInWindow 对齐（CLAUDE_READY_ROUNDS）
@@ -1996,6 +2006,7 @@ async function startClaudeInWindow(
 
   // 发送启动命令前先清掉 shell init 阶段可能存在的 Y/n 交互（oh-my-zsh / homebrew）
   await clearShellInitPrompts(target);
+  if (runtime === "pi") await clearPiReady(name);
   await tmuxSendLine(target, claudeCmd);
 
   // Pi：就绪判据是扩展写下的 tmux 标记（@claudestra_ready），不是 pane 文案。

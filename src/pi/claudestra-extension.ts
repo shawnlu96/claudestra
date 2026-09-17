@@ -134,12 +134,18 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   let shuttingDown = false;
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** registered 后**持有 30s** 才把退避计数归零（channel-server 同款）：立刻归零会让两个活实例以 3s 恒定互抢 */
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 曾注册成功过 ⇒ 断线期间的请求入队等重连（channel-server 的 grace-queue 同款），而不是直接报错丢回复 */
+  let everRegistered = false;
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   /** Pi 是否在一轮当中——决定注入用不用 deliverAs（流式中必须给） */
   let streaming = false;
   /** 最近一次入站消息的 chat_id：reply 不传 chat_id 时的默认去处 */
   let lastChatId = "";
   const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  const QUEUE_GRACE_MS = 60_000;
+  const queued: Array<{ type: string; payload: Record<string, unknown>; resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
 
   function notify(message: string, level: "info" | "warning" | "error" = "info") {
     try { ui?.notify?.(message, level); } catch { /* UI 不可用时静默 */ }
@@ -220,6 +226,22 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     }
   }
 
+  function rejectQueued(reason: string) {
+    for (const q of queued.splice(0, queued.length)) {
+      clearTimeout(q.timer);
+      q.reject(new Error(reason));
+    }
+  }
+
+  /** registered 之后把断线期间排队的请求按原顺序重发 */
+  function flushQueued() {
+    if (!queued.length) return;
+    for (const q of queued.splice(0, queued.length)) {
+      clearTimeout(q.timer);
+      bridgeRequest(q.type, q.payload).then(q.resolve, q.reject);
+    }
+  }
+
   function scheduleReconnect() {
     if (shuttingDown || reconnectTimer) return;
     const delay = Math.min(RECONNECT_MIN_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
@@ -232,6 +254,13 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
 
   function connect(): void {
     if (shuttingDown) return;
+    // 同进程只留一条 bridge 连接：session_start 可能再次触发（Pi 内切会话），不先关旧
+    // socket 就会两条 ws 互相 4001 顶替 → onclose → 重连 → 自我内战。
+    if (socket) {
+      const old = socket;
+      socket = null;
+      try { old.onclose = null; old.onerror = null; old.close(); } catch { /* 已在关闭中 */ }
+    }
     let ws: WebSocket;
     try {
       ws = new WebSocket(BRIDGE_URL);
@@ -242,7 +271,6 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     socket = ws;
 
     ws.onopen = () => {
-      reconnectAttempts = 0;
       try {
         // 与 channel-server 的 register 帧同构，多带 runtime/sessionId/sessionFile：
         // bridge 靠 runtime 把 Pi 会话与 Claude Code 会话区分开（后者要挂 jsonl watcher）。
@@ -251,6 +279,10 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           channelId: CHANNEL_ID,
           agentName: AGENT_NAME || undefined,
           runtime: "pi",
+          // 自报 pid/ppid：bridge 的频道对抢识别（lib/channel-contention.ts）只认数字 pid，
+          // 不报 = 两个 Pi 实例内战永不告警，日志也只有 `pid ? → ?`
+          pid: process.pid,
+          ppid: process.ppid,
           sessionId: sessionId || undefined,
           sessionFile: sessionFile || undefined,
           cwd: process.cwd(),
@@ -270,6 +302,11 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         case "registered":
           setLinkStatus(true);
           markReady();
+          everRegistered = true;
+          // 退避归零要等**持有 30s**：被顶替→夺回→再被顶替的循环里立刻归零，两个活实例就是 3s 一轮死循环
+          if (holdTimer) clearTimeout(holdTimer);
+          holdTimer = setTimeout(() => { holdTimer = null; reconnectAttempts = 0; }, 30_000);
+          flushQueued();
           return;
         case "response": {
           const entry = pending.get(msg.requestId);
@@ -297,7 +334,8 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
 
     ws.onclose = () => {
       stopPing();
-      socket = null;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      if (socket === ws) socket = null;
       rejectPending("bridge 连接断开");
       if (!shuttingDown) {
         setLinkStatus(false);
@@ -329,6 +367,17 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   function bridgeRequest(type: string, payload: Record<string, unknown> = {}): Promise<any> {
     return new Promise((resolve, reject) => {
       if (!socket || socket.readyState !== WebSocket.OPEN) {
+        if (everRegistered && !shuttingDown) {
+          // bridge 例行重启（kickstart 几秒）期间：入队等 registered 后 flush，
+          // 而不是让 reply 直接报工具错误 → 用户丢回复
+          const timer = setTimeout(() => {
+            const i = queued.findIndex((q) => q.timer === timer);
+            if (i >= 0) queued.splice(i, 1);
+            reject(new Error(`bridge 断开超过 ${QUEUE_GRACE_MS / 1000}s，请求放弃：${type}`));
+          }, QUEUE_GRACE_MS);
+          queued.push({ type, payload, resolve, reject, timer });
+          return;
+        }
         reject(new Error("bridge 未连接（稍后重试，或检查 bridge 是否在跑）"));
         return;
       }
@@ -404,7 +453,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     shuttingDown = true;
     stopPing();
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     rejectPending("会话结束");
+    rejectQueued("会话结束");
     try { socket?.close(); } catch { /* 已在关闭中 */ }
     socket = null;
   });

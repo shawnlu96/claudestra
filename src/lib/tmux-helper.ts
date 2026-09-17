@@ -63,8 +63,15 @@ export async function windowOption(target: string, option: string): Promise<stri
 }
 
 /** 写 tmux window 上的用户选项（restart 复用的窗口要先清掉旧的就绪标记） */
-export async function setWindowOption(target: string, option: string, value: string): Promise<void> {
-  await tmuxRaw(["set-option", "-w", "-t", target, option, value]).catch(() => {});
+export async function setWindowOption(target: string, option: string, value: string): Promise<boolean> {
+  try {
+    await tmuxRaw(["set-option", "-w", "-t", target, option, value]);
+    return true;
+  } catch (e) {
+    // 不再静默吞错：Pi 就绪标记清不掉 = 复用窗口时把残留 "1" 当就绪，调用方要能感知
+    console.error(`⚠ tmux set-option ${option} on ${target} 失败: ${(e as Error).message}`);
+    return false;
+  }
 }
 
 /** tmux window target: `master:agent-xxx` */

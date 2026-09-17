@@ -28,7 +28,11 @@ export const PI_EXTENSION_PATH = join(
 );
 
 /** Pi 的 --thinking 合法值（与 claude 的 effort 档位不完全重合，只放行交集） */
-const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/** api 侧 effort 白名单（pi-settings 端点把它原样送进 tmux，不校验 = 换行注入面） */
+export function isPiThinkingLevel(level: string): boolean {
+  return PI_THINKING_LEVELS.includes(level);
+}
 
 export interface PiLaunchOptions {
   channelId: string;
@@ -59,7 +63,10 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
     `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}`;
 
-  const parts: string[] = ["pi"];
+  // 可执行文件名与 piAvailable() 的探测**同源**：tmux 窗口不继承 manager 的 env，
+  // 这里写死 "pi" 而预检认 PI_BIN 的话 → 预检通过、窗口里 command not found、
+  // 120s 假超时、create 把刚建的 agent 清掉。
+  const parts: string[] = [shellEscape(process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi")];
 
   // ⚠ 参数顺序有语义（实测 pi 0.85.1）：
   //   ① 信任开关 → ② 发现开关与额外扩展（包源必须在路径之前，见 pi-env.ts 注释）
