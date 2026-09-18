@@ -104,6 +104,12 @@ src/
     principals.ts        v2.6.0+ transport-scoped identity + API token CRUD/scope/rate-limit (~/.claude-orchestrator/principals.json)
     registry.ts          v2.9+ single reader for ~/.claude-orchestrator/registry.json (field normalization incl. cwd/dir compat); manager.ts stays the sole writer
     projects.ts          v2.21+ project data model (~/.claude-orchestrator/projects.json): dirs[] + resolveProjectForDir + id slugify; manager.ts is the sole writer, bridge reads only
+    claude-binary.ts     v2.23.2+ locate the claude binary the way tmux agents do (login-shell PATH → realpath) and probe it by
+                         absolute path; plus the quarantine-hang repair recipe (cp to a new name → xattr -c the copy → verify it
+                         runs → rm original → mv back; in-place xattr -d never works, the vnode is pinned). The launcher's
+                         post-upgrade / periodic health check used a bare `claude` under launchd's PATH, which resolved to the
+                         native installer's healthy old copy in ~/.local/bin — so four cask upgrades in a row (2.1.258→274)
+                         reported "upgrade did not take effect" while agents hung on the quarantined brew binary (2026-09-18).
     cc-sessions.ts       v2.23.2+ reads Claude Code's own per-process registry (~/.claude/sessions/<pid>.json: sessionId, cwd,
                          tmux pane id) → the real sessionId of an agent window without waiting for its jsonl. `resume --fork` /
                          restart's fork self-heal ask it first (a forked session's jsonl is only created on the first message —
@@ -128,6 +134,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   archive-sweeper.test.ts  v2.23+ pruneArchives 只清传入的根（手动归档区）、快照不碰、days=0 不清
   ask-user-question.test.ts AskUserQuestion detection in the TUI + keystroke synthesis
   bg-jobs.test.ts          Claude Code bg job cleanup recipe (roster root-fix)
+  claude-binary.test.ts    v2.23.2+ quarantine repair recipe order / rollback + login-shell binary resolution
   cc-sessions.test.ts      v2.23.2+ ~/.claude/sessions registry parsing + window→session pick (child pid first, pane id fallback, fork source excluded)
   baseline-keys.test.ts    v2.22.x bg-activity baseline 作用域:同 agent-session 只 baseline 一次、换 session 重新 baseline、prune 按 agent 名
   reply-nudge.test.ts      v2.22.x Stop hook 补 reply 拦截:只拦 Stop、stop_hook_active 不拦、一次为限、挑最老
@@ -309,7 +316,9 @@ bun src/manager.ts doctor [--json]
 bun src/manager.ts version   # current version + whether an update is available
 bun src/manager.ts update    # git pull + reload the 3 launchd daemons
 
-# Auto-update toggles (both default on; launcher polls on a schedule and only upgrades when all agents are idle)
+# Auto-update toggles (both default on; launcher polls on a schedule and only upgrades when all agents are idle;
+# after a Claude Code upgrade the launcher probes the binary agents actually run and auto-repairs a quarantine hang,
+# alerting #control only if the repair fails — see lib/claude-binary.ts)
 bun src/manager.ts auto-update status
 bun src/manager.ts auto-update claudestra on|off   # Claudestra self-update (30 min poll)
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly poll)

@@ -64,6 +64,7 @@ async function confirmMasterModal(pane: string): Promise<void> {
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { resolveNpm } from "./lib/npm-path.js";
+import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace } from "./lib/claude-binary.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -442,37 +443,36 @@ async function runCmd(cmd: string[], timeoutMs = 0): Promise<{ ok: boolean; out:
   return { ok: proc.exitCode === 0, out: out.trim(), err: err.trim() };
 }
 
+/**
+ * v2.23.2+ 一律按**登录 shell 的 PATH**定位 claude(与 tmux 里 agent 同一口径),再按绝对
+ * 路径探版本。此前裸 `claude --version` 走 launchd 的 PATH(~/.local/bin 在 /opt/homebrew/bin
+ * 之前)解析到原生安装器留下的旧副本:brew 升完看到「版本仍是旧号 → 升级未生效」,体检又
+ * 恰好探的是那个健康的旧副本,于是 2.1.258/259/267/274 四次 quarantine 挂死全部漏网
+ * (master 2026-09-18 报,每次人肉修)。见 lib/claude-binary.ts。
+ */
 async function getClaudeVersion(): Promise<string | null> {
-  const { ok, out } = await runCmd(["claude", "--version"], 20_000);
-  if (!ok) return null;
-  const m = out.match(/(\d+\.\d+\.\d+)/);
-  return m ? m[1] : null;
+  const bin = await resolveClaudeBinary(runCmd);
+  if (!bin) return null;
+  return probeClaudeVersion(runCmd, bin.real, 20_000);
 }
 
 /**
- * 2026-07-24 事故 SOP:cask 升级后的新二进制带 com.apple.quarantine,Gatekeeper
- * 首扫评估在本机挂死(进程钉死在 dyld,连 --version 都不返回);更险的是该路径
- * 的评估缓存会被钉住——去掉 quarantine 后原路径依然挂,同内容拷到新路径立好。
- * 升级后必须先体检可执行性,坏了按 SOP 自动修:①去 quarantine ②旁路副本+改
- * symlink;都修不好则中止 agent 重启波(带着坏二进制重启=全灭,僵尸命令行
- * 卡满所有窗口)。
+ * 2026-07-24 事故 SOP(2026-09-18 按 master 实测配方重写):cask 升级后的新二进制带
+ * com.apple.quarantine,Gatekeeper 首评在本机挂死(进程钉死在 _dyld_start,连 --version
+ * 都不返回),且该路径的 vnode 被评估缓存钉住——原地 `xattr -d` / 原地覆盖都无效,必须
+ * cp 出新文件名副本 → 副本 xattr -c → 验证副本能跑 → rm 原文件 → mv 副本回原名。
+ * 升级后必须先体检可执行性,坏了按配方自动修;修不好则中止 agent 重启波(带着坏
+ * 二进制重启=全灭,僵尸命令行卡满所有窗口)并告警 #control。
  */
-async function verifyClaudeLaunchable(): Promise<{ ok: boolean; fixed?: string }> {
-  const probe = async () => (await runCmd(["claude", "--version"], 20_000)).ok;
-  if (await probe()) return { ok: true };
-  try {
-    const real = (await runCmd(["readlink", "-f", "/opt/homebrew/bin/claude"])).out.trim();
-    if (real) {
-      await runCmd(["xattr", "-d", "com.apple.quarantine", real]);
-      if (await probe()) return { ok: true, fixed: "去 quarantine" };
-      const side = `${real}2`;
-      await runCmd(["cp", real, side]);
-      await runCmd(["chmod", "+x", side]);
-      await runCmd(["ln", "-sf", side, "/opt/homebrew/bin/claude"]);
-      if (await probe()) return { ok: true, fixed: "旁路副本+symlink" };
-    }
-  } catch { /* 修复失败落到 not ok */ }
-  return { ok: false };
+async function verifyClaudeLaunchable(): Promise<{ ok: boolean; fixed?: string; detail?: string }> {
+  const bin = await resolveClaudeBinary(runCmd);
+  if (!bin) return { ok: false, detail: "登录 shell 里找不到 claude" };
+  const probe = async (path: string) => (await runCmd([path, "--version"], 20_000)).ok;
+  if (await probe(bin.real)) return { ok: true };
+  console.log(`🩺 ${bin.real} --version 挂死/失败,按「副本替换」配方修复…`);
+  const r = await dequarantineByReplace(bin.real, runCmd, probe);
+  if (r.ok) return { ok: true, fixed: `副本替换去 quarantine(${bin.real})` };
+  return { ok: false, detail: `${r.error ?? "未知"}(已做:${r.steps.join(" → ")})` };
 }
 
 /** 二进制体检 + 自动修复;修不好只告警一次,恢复后复位。 */
@@ -484,7 +484,7 @@ async function probeClaudeBinaryHealth(reason: string): Promise<boolean> {
     binaryAlertSent = false;
     return true;
   }
-  console.log(`🩺 🚨 claude 二进制体检(${reason})失败:--version 挂死,自动修复未成功`);
+  console.log(`🩺 🚨 claude 二进制体检(${reason})失败:--version 挂死,自动修复未成功:${health.detail ?? ""}`);
   if (!binaryAlertSent) {
     binaryAlertSent = true;
     try {
@@ -492,8 +492,8 @@ async function probeClaudeBinaryHealth(reason: string): Promise<boolean> {
         type: "reply",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
-          `🚨 **Claude Code 二进制无法启动**(--version 挂死,自动修复未成功;触发:${reason})。现役 agent 不受影响,但新启动 / restart / cron 临时 agent 都会「启动超时」。需人工处理 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-          `🚨 **Claude Code binary cannot start** (--version hangs; auto-remediation failed; trigger: ${reason}). Running agents are unaffected, but new launches / restarts / cron temp agents will time out. Manual action needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Claude Code 二进制无法启动**(--version 挂死,自动修复未成功:${health.detail ?? "?"};触发:${reason})。现役 agent 不受影响,但新启动 / restart / cron 临时 agent 都会「启动超时」。需人工处理 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Claude Code binary cannot start** (--version hangs; auto-remediation failed: ${health.detail ?? "?"}; trigger: ${reason}). Running agents are unaffected, but new launches / restarts / cron temp agents will time out. Manual action needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
         ),
       });
     } catch { /* non-critical */ }
@@ -800,14 +800,14 @@ async function checkClaudeCodeUpdate() {
   console.log(`🆙 Claude Code 已更新到 ${afterVersion}`);
   const health = await verifyClaudeLaunchable();
   if (!health.ok) {
-    console.log(`🆙 ⚠️ 新二进制体检失败(启动挂死),中止 agent 重启波`);
+    console.log(`🆙 ⚠️ 新二进制体检失败(启动挂死),中止 agent 重启波:${health.detail ?? ""}`);
     try {
       await bridgeRequest({
         type: "reply",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
-          `🚨 **Claude Code 升级后二进制无法启动**(--version 挂死,自动修复未成功)。已中止 agent 重启——现役 agent 继续跑旧进程不受影响,但新启动会挂。需人工处理:参照 web/SETUP.md 排障或回滚版本 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-          `🚨 **Claude Code binary broken after upgrade** (--version hangs; auto-remediation failed). Agent restart wave aborted — running agents keep old processes, but new launches will hang. Manual action needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Claude Code 升级后二进制无法启动**(--version 挂死,自动修复未成功:${health.detail ?? "?"})。已中止 agent 重启——现役 agent 继续跑旧进程不受影响,但新启动会挂。需人工处理:参照 web/SETUP.md 排障或回滚版本 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Claude Code binary broken after upgrade** (--version hangs; auto-remediation failed: ${health.detail ?? "?"}). Agent restart wave aborted — running agents keep old processes, but new launches will hang. Manual action needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
         ),
       });
     } catch { /* non-critical */ }
