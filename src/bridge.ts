@@ -9,6 +9,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
+import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
 
@@ -2994,7 +2995,16 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // renderContentForLocal 的 from.kind==="local" 分支会拼 "[🤖 来自 <name>]"
         // 前缀（原来写的是 "[🤖 target 回复]"，语义等价 —— 都是标识"这条是别的
         // agent 发来的 response"）。
-        const pending = pendingAgentCalls.get(msg.chatId);
+        // ⚠ 必须确认「发这条 reply 的就是 target 本人」。原先只按 msg.chatId 取 pending，
+        // 于是**任何** agent 只要 reply 到 target 的频道，它自己那条就会被当成 target 的
+        // 答复推回给 caller——带 intent=response、带「对方答复如下，请按计划继续」、还附上
+        // caller 自己填的 expecting（owner 2026-09-18 实报，一晚上撞十几次：
+        // 「正文逐字是我自己写的答复」「它一度以为我回了并准备据此动手」）。
+        // 判据见 lib/pushback-scope.ts：key 就是 target 的 channelId，所以
+        // 「发送方自己的频道 == 这条 reply 的目的频道」才成立。
+        const pending = isTargetsOwnReply(msg.chatId, fromChannelId)
+          ? pendingAgentCalls.get(msg.chatId)
+          : undefined;
         if (pending) {
           try {
             // v2.0.1+: from.channelId 用 originalReplyChannel（caller 手头的
@@ -3952,7 +3962,13 @@ async function handleHookRequest(req: Request): Promise<Response> {
             //   - drain 出了文字 → push 该文字
             //   - drain 没文字（连 assistant text 都没有）→ push 一句 "对方结束了
             //     turn 但没回复"，至少让 caller 不会无限静默等
-            const pendingAgent = pendingAgentCalls.get(cid);
+            // ⚠ 同上的归属问题，而且这条更宽：channelsToClear 里除了本 agent 自己的
+            // 频道，还塞了 pendingReplies 里**别人的** intendedReplyChannel（为了把
+            // 「💭 思考中」改成「✅ 完成」）。拿那些频道取 pending，等于用 A 的收尾
+            // 去回答 B 的提问。
+            const pendingAgent = isOwnStopChannel(cid, channelId, thisClientForStatus?.ws, clients.get(cid)?.ws)
+              ? pendingAgentCalls.get(cid)
+              : undefined;
             if (pendingAgent) {
               if (!drainedText) {
                 // v2.4.16+ no-text 静默清掉 pending，**不 push** 回 caller。
