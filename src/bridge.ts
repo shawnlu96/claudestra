@@ -3477,6 +3477,14 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             skipInterAgentWatchdog: oneShot || undefined,
           },
         };
+        // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
+        // （intent=request）在**我这边**挂着一条 pendingReplies[它的频道]，
+        // 只有 `reply` 工具会清 —— 于是 agent 之间用 send_to_agent 互相答复时，
+        // 答了照样被 Stop hook 拦「你没回 chat_id=…」，被迫再往对方频道贴一条
+        // 重复消息（2026-09-19 实测，与 oneShot 那条同族）。在 deliver 之前删，
+        // 与 `reply` 分支同一纪律（await 之前先删，免得 Stop hook 插在中间）。
+        pendingReplies.delete(target.channelId);
+
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
           const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
