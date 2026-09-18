@@ -70,7 +70,7 @@ import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
-import { agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import { agentRuntime, isMasterAgent, type AgentRuntime } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
@@ -2498,6 +2498,14 @@ async function cmdList() {
 
   // 也列出 registry 里 active 但 tmux 已死的
   for (const [name, info] of Object.entries(reg.agents)) {
+    // ⚠ 大总管必须跳过，否则**恒判 dead**：tmuxWindows 只收 `agent-*` 窗口，而大总管
+    //   的窗口名就是裸 `master`（registry 的键却是 `agent-master`）⇒ 这条永远不在
+    //   集合里。它已经由上面那条合成的 `master` 行代表了。
+    //   代价是实打实的：launcher 的 periodic 自愈每分钟把它当 dead 捡起来 restart，
+    //   而 master 的 channelId 在 registry 里按设计为空、`manager restart` 硬要求
+    //   sessionId + channelId ⇒ 永远失败。实测 2026-09-15 02:04 起每 ~75s 一次，
+    //   到发现时已累计 3678 次失败重启，纯空转还刷满 launcher 日志。
+    if (isMasterAgent(name)) continue;
     if (info.status === "active" && !tmuxWindows.includes(name)) {
       agents.push({
         name,
