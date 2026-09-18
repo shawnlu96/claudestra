@@ -171,6 +171,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefr
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
+import { dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { readProjects } from "./lib/projects.js";
@@ -1198,6 +1199,51 @@ discord.once("ready", async () => {
   // 启动 wedge watcher — 检测长时间没动静但又不 idle 的 agent；
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
+
+  // v2.24+ 回合以 API 错误结束 ⇒ 60s 无活动自动续跑一次（owner 2026-09-18；规则见 lib/api-error-resume.ts）
+  const apiErrorStates = new Map<string, ApiErrorState>();
+  subscribeEvents({}, (evt) => {
+    const ts = Date.parse(evt.ts) || Date.now();
+    if (evt.type === "api_error_turn") {
+      const err = String((evt.data as { error?: unknown }).error ?? "");
+      const r = noteApiError(apiErrorStates, evt.chatId, err, ts);
+      console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${r === "track" ? "60s 后自动续跑" : "续跑后再撞，升级到频道"}`);
+      recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: r } });
+      if (r === "escalate" && /^\d+$/.test(evt.chatId)) {
+        void (async () => {
+          try {
+            const ch = (await discord.channels.fetch(evt.chatId)) as TextChannel;
+            await ch.send(`⛔ ${evt.agent} 连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`);
+          } catch (e) { console.error("api-error 升级通知失败:", (e as Error).message); }
+        })();
+      }
+      return;
+    }
+    if (evt.type === "assistant_text" || evt.type === "tool_start" || evt.type === "chat_message" ||
+        (evt.type === "agent_status" && (evt.data as { status?: unknown }).status === "thinking")) {
+      noteActivity(apiErrorStates, evt.chatId, ts);
+    }
+  });
+  setInterval(() => {
+    const now = Date.now();
+    for (const cid of dueForResume(apiErrorStates, now)) {
+      const st = apiErrorStates.get(cid);
+      const target = clients.get(cid);
+      if (!st || !target) { apiErrorStates.delete(cid); continue; }
+      markResumed(apiErrorStates, cid, now);
+      lastMessageSource.set(cid, "agent");
+      void deliver({
+        from: { kind: "bridge", label: "api-error-resume" },
+        to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
+        intent: "notification",
+        content: resumeText(st.error, st.errorAt),
+        meta: { messageId: `api_resume_${now}`, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
+      }).then(() => {
+        console.log(`🔁 api-error-resume → ${cid}`);
+        recordMetric("api_error_resume", { channelId: cid, meta: { error: st.error } });
+      }).catch((e) => console.error("api-error-resume 投递失败:", (e as Error).message));
+    }
+  }, 15_000);
 
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。

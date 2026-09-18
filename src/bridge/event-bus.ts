@@ -39,7 +39,9 @@ export type BridgeEventType =
   // v2.15+ 思考遥测:回合进行中 TUI 状态行采样(耗时/输出 token/effort),
   // transient 发布——不进 ring(过期即废,还会把 replay 窗口挤爆)。
   // 任务清单不走事件:web 已有文件真源面板(~/.claude/tasks + /agents/:name/tasks)
-  | "thinking_telemetry";
+  | "thinking_telemetry"
+  // v2.24+ 回合以 API 错误结束（jsonl assistant 条目 isApiErrorMessage:true）——bridge 据此 60s 后自动续跑一次
+  | "api_error_turn";
 
 export interface BridgeEvent {
   /** 进程内单调递增，SSE 的 id / Last-Event-ID 补发锚点 */

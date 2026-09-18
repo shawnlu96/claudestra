@@ -469,6 +469,14 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
         }
 
         if (entry.type === "assistant") {
+          // v2.24+ 回合被 API 错误终止（CC 把它写成 assistant 条目 + isApiErrorMessage:true，
+          // 紧跟 system/turn_duration）。发事件让 bridge 60s 后自动续跑一次。
+          if (entry.isApiErrorMessage === true) {
+            emitEvent({
+              agent: state.agentName, chatId: state.channelId, type: "api_error_turn",
+              data: { error: String(entry.error ?? ""), ts: entry.timestamp ?? null },
+            });
+          }
           const content = entry.message?.content;
           if (!Array.isArray(content)) continue;
 

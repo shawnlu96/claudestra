@@ -24,6 +24,8 @@ export type MetricEvent =
   | "modal_button"      // TUI modal 按钮点击
   | "agent_completed"   // Stop hook 触发
   | "reply_nudge"       // v2.22.x Stop hook 拦截补 reply(lib/reply-nudge.ts;meta.chatId = 该回的 chat_id)
+  | "api_error_turn"    // v2.24 回合以 API 错误结束(jsonl isApiErrorMessage;meta.error / meta.action=track|escalate)
+  | "api_error_resume"  // v2.24 60s 无活动后自动注「继续」(lib/api-error-resume.ts)
   | "agent_interrupt"   // Ctrl+C 发出
   | "agent_clear"       // 远程 /clear 清空会话
   | "auq_submit"        // AskUserQuestion 回传（提交）
