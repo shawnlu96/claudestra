@@ -3966,9 +3966,13 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // 频道，还塞了 pendingReplies 里**别人的** intendedReplyChannel（为了把
             // 「💭 思考中」改成「✅ 完成」）。拿那些频道取 pending，等于用 A 的收尾
             // 去回答 B 的提问。
-            const pendingAgent = isOwnStopChannel(cid, channelId, thisClientForStatus?.ws, clients.get(cid)?.ws)
-              ? pendingAgentCalls.get(cid)
-              : undefined;
+            // 本轮结束的到底是不是「这条频道的 agent」。
+            // ⚠ channelsToClear 里除了本 agent 自己的频道，还塞了 pendingReplies 里
+            //   **别人的** intendedReplyChannel（为了把「💭 思考中」改成「✅ 完成」）。
+            //   drain 本身对它们是需要的（把 💬 冲干净再标 ✅），但下面三个消费点
+            //   都在回答「谁欠谁一个回应」，拿别人的收尾去结算就是张冠李戴。
+            const ownTurn = isOwnStopChannel(cid, channelId, thisClientForStatus?.ws, clients.get(cid)?.ws);
+            const pendingAgent = ownTurn ? pendingAgentCalls.get(cid) : undefined;
             if (pendingAgent) {
               if (!drainedText) {
                 // v2.4.16+ no-text 静默清掉 pending，**不 push** 回 caller。
@@ -4029,7 +4033,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // v2.6.0+ R3: API waiter 兜底 —— agent end_turn 没 reply() 时，用
             // drain 出的 assistant 文本 resolve 挂着的 API 请求，wait 调用方不必
             // 干等到超时。连文本都没有 → resolve reply:null（"结束但没回复"）。
-            for (const [pKey, pQueue] of pendingApiRequests.entries()) {
+            for (const [pKey, pQueue] of ownTurn ? pendingApiRequests.entries() : []) {
               if (!pQueue.length || pQueue[0].agentChannelId !== cid) continue;
               pendingApiRequests.delete(pKey);
               for (const p of pQueue) {
@@ -4057,7 +4061,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // v2.4.16+: 最多 nudge **1** 次（之前是 2 次，跟 drain兜底 no-text push
             // 叠加导致 agent 反复 wake-up 抓 LLM turn，是"聊不停"的另一个根因）。
             // 1 次未响应直接放弃，少打扰对面 + 少烧 token。
-            const iaPending = pendingInterAgentMsg.get(cid);
+            const iaPending = ownTurn ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);
