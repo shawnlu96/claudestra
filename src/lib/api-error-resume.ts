@@ -31,11 +31,27 @@ export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: 
   return "track";
 }
 
+/**
+ * 错误条目自己会在同一次 watcher 扫描里连带发出 assistant_text（那句 "API Error: …"）
+ * 与 agent_status:thinking（isPostTurnActivity 把新 assistant 条目当「活着」）——它们的
+ * 时间戳只比 api_error_turn 晚几毫秒。2026-09-18 17:22/17:29 实测两次都被这样删掉、
+ * 续跑一次没触发。所以错误后这段宽限内的活动不算。
+ */
+export const ACTIVITY_GRACE_MS = 3_000;
+
 /** 该 agent 有了错误之后的新活动 ⇒ 不用续（还没续过才删；续过的留到窗口过期以便判「又撞」） */
 export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: number): void {
   const s = m.get(cid);
   if (!s) return;
-  if (s.resumedAt === undefined && ts > s.errorAt) m.delete(cid);
+  if (s.resumedAt === undefined && ts > s.errorAt + ACTIVITY_GRACE_MS) m.delete(cid);
+}
+
+/** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" 文本不算 */
+export function countsAsActivity(type: string, data: Record<string, unknown>): boolean {
+  if (type === "tool_start" || type === "chat_message") return true;
+  if (type === "agent_status") return (data as { status?: unknown }).status === "thinking";
+  if (type === "assistant_text") return !String((data as { text?: unknown }).text ?? "").startsWith("API Error");
+  return false;
 }
 
 export function dueForResume(m: Map<string, ApiErrorState>, now: number): string[] {

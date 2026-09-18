@@ -171,7 +171,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefr
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
+import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { readProjects } from "./lib/projects.js";
@@ -1219,10 +1219,7 @@ discord.once("ready", async () => {
       }
       return;
     }
-    if (evt.type === "assistant_text" || evt.type === "tool_start" || evt.type === "chat_message" ||
-        (evt.type === "agent_status" && (evt.data as { status?: unknown }).status === "thinking")) {
-      noteActivity(apiErrorStates, evt.chatId, ts);
-    }
+    if (countsAsActivity(evt.type, evt.data)) noteActivity(apiErrorStates, evt.chatId, ts);
   });
   setInterval(() => {
     const now = Date.now();

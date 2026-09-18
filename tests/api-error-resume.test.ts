@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  RESUME_DELAY_MS, RESUME_WINDOW_MS, dueForResume, markResumed, noteActivity, noteApiError, resumeText,
+  ACTIVITY_GRACE_MS, RESUME_DELAY_MS, RESUME_WINDOW_MS, countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText,
   type ApiErrorState,
 } from "../src/lib/api-error-resume.js";
 
@@ -21,7 +21,9 @@ describe("api-error-resume", () => {
     noteApiError(m, "c1", "e", T0);
     noteActivity(m, "c1", T0 - 1); // watcher 补读到的旧条目不算
     expect(m.has("c1")).toBe(true);
-    noteActivity(m, "c1", T0 + 1);
+    noteActivity(m, "c1", T0 + 1); // 错误条目自己连带的 assistant_text / thinking，几毫秒后
+    expect(m.has("c1")).toBe(true);
+    noteActivity(m, "c1", T0 + ACTIVITY_GRACE_MS + 1);
     expect(m.has("c1")).toBe(false);
     expect(dueForResume(m, T0 + RESUME_DELAY_MS)).toEqual([]);
   });
@@ -39,6 +41,16 @@ describe("api-error-resume", () => {
     expect(dueForResume(m, T0 + RESUME_WINDOW_MS)).toEqual([]);
     expect(m.has("c2")).toBe(false); // 过期清掉
     expect(noteApiError(m, "c2", "e", T0 + RESUME_WINDOW_MS + 1)).toBe("track");
+  });
+
+  test("错误条目自己那句 API Error 文本不算活动；工具调用 / thinking / 用户消息算", () => {
+    expect(countsAsActivity("assistant_text", { text: "API Error: Unable to connect to API (X)" })).toBe(false);
+    expect(countsAsActivity("assistant_text", { text: "继续做 §24.1" })).toBe(true);
+    expect(countsAsActivity("tool_start", {})).toBe(true);
+    expect(countsAsActivity("chat_message", {})).toBe(true);
+    expect(countsAsActivity("agent_status", { status: "thinking" })).toBe(true);
+    expect(countsAsActivity("agent_status", { status: "done" })).toBe(false);
+    expect(countsAsActivity("turn_duration", {})).toBe(false);
   });
 
   test("续跑文案带错误名与时间，并允许无事可做时 end_turn", () => {
