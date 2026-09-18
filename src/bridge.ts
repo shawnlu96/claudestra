@@ -910,7 +910,9 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     }
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "thinking" } });
     // intent=request 挂 pending + thread 追踪。response 端到端，不挂新 pending。
-    if (env.intent === "request") {
+    // oneShot（skipInterAgentWatchdog）的 send_to_agent 也不挂：caller 不期待回应，
+    // 挂了会让 target 下一次 Stop 被 reply-nudge 拦住逼它回一条（2026-09-18 实测）。
+    if (env.intent === "request" && !env.meta.skipInterAgentWatchdog) {
       pendingReplies.set(replyBackChannel, {
         msgId: env.meta.messageId,
         ts: Date.now(),
