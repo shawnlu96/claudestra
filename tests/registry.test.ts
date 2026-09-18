@@ -6,7 +6,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { readRegistryAgents, readActiveAgents } from "../src/lib/registry.js";
+import { readRegistryAgents, readActiveAgents, isMasterAgent } from "../src/lib/registry.js";
 
 function writeRegistry(obj: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "registry-test-"));
@@ -75,5 +75,35 @@ describe("readRegistryAgents", () => {
     const all = await readRegistryAgents(p);
     expect(all.find((a) => a.name === "agent-pi")?.runtime).toBe("pi");
     expect(all.find((a) => a.name === "agent-cc")?.runtime).toBeUndefined();
+  });
+});
+
+// ── isMasterAgent（2026-09-18 大总管恒判 dead）──────────────────────────────
+// registry 的**键**是 `agent-master`，tmux 窗口名和 CLI 参数却是裸 `master`。
+// 只认一种就会在两处对不上：`manager.ts list` 的孤儿检测只比 `agent-*` 窗口名，
+// 于是 `agent-master` 永远不在集合里 → 恒判 dead → launcher 每分钟 restart 一次
+// → 而 master 的 channelId 按设计为空、restart 硬要求它 ⇒ 永远失败。
+// 实测 3678 次空转后才被发现。
+describe("isMasterAgent", () => {
+  test("两种写法都认（这正是本 bug 的成因）", () => {
+    expect(isMasterAgent("master")).toBe(true);
+    expect(isMasterAgent("agent-master")).toBe(true);
+  });
+
+  test("普通 agent 不认", () => {
+    expect(isMasterAgent("agent-market-maker")).toBe(false);
+    expect(isMasterAgent("market-maker")).toBe(false);
+  });
+
+  test("名字里含 master 但不是大总管 → 不认（别写成 includes）", () => {
+    expect(isMasterAgent("agent-master-plan")).toBe(false);
+    expect(isMasterAgent("masterful")).toBe(false);
+    expect(isMasterAgent("agent-remaster")).toBe(false);
+  });
+
+  test("空值安全", () => {
+    expect(isMasterAgent(undefined)).toBe(false);
+    expect(isMasterAgent(null)).toBe(false);
+    expect(isMasterAgent("")).toBe(false);
   });
 });
