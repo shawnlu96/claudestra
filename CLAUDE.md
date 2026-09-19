@@ -164,6 +164,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   slash-registry.test.ts   Slash command registry per-channel resolution
   stats-resets.test.ts     Usage-window reset detection
   web-gateway.test.ts      v2.13+ cross-origin verdict for the ws control plane (drive-by RCE guard)
+  web-send-dedupe.test.ts  v2.23.2+ web client duplicate-send guard (same agent + same payload within 1.5s)
   web-live-merge.test.ts   v2.23.2+ web client live/history dedup by seq (pruneLiveBubbles / coveredByCursor /
                            mergeContiguousAssistant) — root tsconfig maps "@/*" → web/* so tests/ can import web pure logic
 install.sh               One-line installer

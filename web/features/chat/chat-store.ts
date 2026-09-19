@@ -13,6 +13,7 @@ import type {
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
 import { hydrateHistoryMessages } from "./history-hydrate";
+import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import {
   isHistoryBubble,
   coveredByCursor,
@@ -1772,6 +1773,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // wireText：发给 agent 的真实 payload（默认=展示文本）。按钮点击时展示 label、
     // 实际发 [button:<id>]，二者不同——agent 收到的是分支用的机器 payload。
     const wire = (wireText ?? display).trim() || display;
+    // v2.23.2+ 重复发送闸(见 send-dedupe.ts):同 agent 同载荷 1.5s 内只发一次。
+    // owner 2026-09-19 实录同一句 0.7s 发两遍,第二条还抢占打断了正在跑的回合。
+    const nowMs = Date.now();
+    if (isDuplicateSend(this.lastSend, { agent, wire, at: nowMs, hasFiles })) {
+      this.clientLog(`send: 丢弃 1.5s 内的重复发送 agent=${agent} len=${wire.length}`);
+      return;
+    }
+    this.lastSend = { agent, wire, at: nowMs };
     // 用户气泡内回显：图片给 objectURL 预览，其它给文件名 chip
     const attachments: ChatAttachmentView[] | undefined = hasFiles
       ? files!.map((f) => {
@@ -1815,6 +1824,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * errId = 随失败一起插的「⚠️ 发送失败」提示行,重发/删除时一并撤掉。
    */
   private pendingSends = new Map<string, { agent: string; wire: string; files?: File[]; errId?: string }>();
+
+  /** v2.23.2+ 上一次发送(重复闸用,见 send-dedupe.ts) */
+  private lastSend: LastSend | null = null;
 
   /** 真正的 POST(含 503 退避重试、slash 直通处理);载荷从 pendingSends 取,重发复用同一份。 */
   private async postSend(optimisticId: string): Promise<void> {

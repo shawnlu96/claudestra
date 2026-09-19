@@ -118,6 +118,10 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
   （重放与差量必然重复）。BFF 差量分支先查清单做轮转检测（pinned≠newest →
   `rotated:true`）；轮转/差量超一页/连败 → 自动回退全量。跨境链路唤醒到上屏从
   ~14s 降到 ~0.5-2s（2026-07-28 实测追平 533ms）。
+- **重复发送闸（v2.23.2，`features/chat/send-dedupe.ts`）**：`send()` 上同 agent + 同 wire
+  载荷 + 1.5s 内只发一次（带附件不参与）。触屏「发送」有 pointerup 直接执行与 click 兜底两条路，
+  各自有防重窗口，但 owner 2026-09-19 实录仍漏出一次同句 0.7s 双发，第二条还抢占打断了正在跑的
+  回合。逐条堵不如在唯一出口装闸；丢弃时打 client.log「丢弃 1.5s 内的重复发送」。
 - **直播 ↔ 历史判重按 seq（v2.23.2，`features/chat/live-merge.ts`）**：同一条 jsonl 记录
   两条路都会到（watcher 推事件 / 7s 对账拉差量），先后不定。watcher 的 tool/text 事件带
   `{seq, sid}`（记录的全文件行号 + 会话 id，BFF `recordSrc` 透传），历史游标 `{sid,lastSeq}`
