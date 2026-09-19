@@ -121,7 +121,11 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
 - **重复发送闸（v2.23.2，`features/chat/send-dedupe.ts`）**：`send()` 上同 agent + 同 wire
   载荷 + 1.5s 内只发一次（带附件不参与）。触屏「发送」有 pointerup 直接执行与 click 兜底两条路，
   各自有防重窗口，但 owner 2026-09-19 实录仍漏出一次同句 0.7s 双发，第二条还抢占打断了正在跑的
-  回合。逐条堵不如在唯一出口装闸；丢弃时打 client.log「丢弃 1.5s 内的重复发送」。
+  回合。逐条堵不如在唯一出口装闸；丢弃时打 client.log「丢弃 1.5s 内的重复发送」。同日第二例是
+  iOS 听写：发送清空输入框后听写把**标点润色过的最终稿**写回框里，用户以为没发出去再点一次
+  （两条正文只差「票。/票？」这类标点，间隔 2.16s）——所以再加一档「去标点空白后相同 + 5s」
+  （`normalizeForDedupe`）。⚠ 只挡住重复投递；听写回写导致输入框不空这个根因没动（改输入路径
+  风险高：React #185 / IME 失效都出在那条路上）。
 - **直播 ↔ 历史判重按 seq（v2.23.2，`features/chat/live-merge.ts`）**：同一条 jsonl 记录
   两条路都会到（watcher 推事件 / 7s 对账拉差量），先后不定。watcher 的 tool/text 事件带
   `{seq, sid}`（记录的全文件行号 + 会话 id，BFF `recordSrc` 透传），历史游标 `{sid,lastSeq}`
