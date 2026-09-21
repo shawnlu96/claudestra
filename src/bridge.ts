@@ -172,6 +172,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefr
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
+import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { readProjects } from "./lib/projects.js";
@@ -911,7 +912,9 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     }
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "thinking" } });
     // intent=request 挂 pending + thread 追踪。response 端到端，不挂新 pending。
-    if (env.intent === "request") {
+    // oneShot（skipInterAgentWatchdog）的 send_to_agent 也不挂：caller 不期待回应，
+    // 挂了会让 target 下一次 Stop 被 reply-nudge 拦住逼它回一条（2026-09-18 实测）。
+    if (env.intent === "request" && !env.meta.skipInterAgentWatchdog) {
       pendingReplies.set(replyBackChannel, {
         msgId: env.meta.messageId,
         ts: Date.now(),
@@ -1197,6 +1200,48 @@ discord.once("ready", async () => {
   // 启动 wedge watcher — 检测长时间没动静但又不 idle 的 agent；
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
+
+  // v2.24+ 回合以 API 错误结束 ⇒ 60s 无活动自动续跑一次（owner 2026-09-18；规则见 lib/api-error-resume.ts）
+  const apiErrorStates = new Map<string, ApiErrorState>();
+  subscribeEvents({}, (evt) => {
+    const ts = Date.parse(evt.ts) || Date.now();
+    if (evt.type === "api_error_turn") {
+      const err = String((evt.data as { error?: unknown }).error ?? "");
+      const r = noteApiError(apiErrorStates, evt.chatId, err, ts);
+      console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${r === "track" ? "60s 后自动续跑" : "续跑后再撞，升级到频道"}`);
+      recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: r } });
+      if (r === "escalate" && /^\d+$/.test(evt.chatId)) {
+        void (async () => {
+          try {
+            const ch = (await discord.channels.fetch(evt.chatId)) as TextChannel;
+            await ch.send(`⛔ ${evt.agent} 连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`);
+          } catch (e) { console.error("api-error 升级通知失败:", (e as Error).message); }
+        })();
+      }
+      return;
+    }
+    if (countsAsActivity(evt.type, evt.data)) noteActivity(apiErrorStates, evt.chatId, ts);
+  });
+  setInterval(() => {
+    const now = Date.now();
+    for (const cid of dueForResume(apiErrorStates, now)) {
+      const st = apiErrorStates.get(cid);
+      const target = clients.get(cid);
+      if (!st || !target) { apiErrorStates.delete(cid); continue; }
+      markResumed(apiErrorStates, cid, now);
+      lastMessageSource.set(cid, "agent");
+      void deliver({
+        from: { kind: "bridge", label: "api-error-resume" },
+        to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
+        intent: "notification",
+        content: resumeText(st.error, st.errorAt),
+        meta: { messageId: `api_resume_${now}`, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
+      }).then(() => {
+        console.log(`🔁 api-error-resume → ${cid}`);
+        recordMetric("api_error_resume", { channelId: cid, meta: { error: st.error } });
+      }).catch((e) => console.error("api-error-resume 投递失败:", (e as Error).message));
+    }
+  }, 15_000);
 
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
@@ -3442,6 +3487,14 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             skipInterAgentWatchdog: oneShot || undefined,
           },
         };
+        // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
+        // （intent=request）在**我这边**挂着一条 pendingReplies[它的频道]，
+        // 只有 `reply` 工具会清 —— 于是 agent 之间用 send_to_agent 互相答复时，
+        // 答了照样被 Stop hook 拦「你没回 chat_id=…」，被迫再往对方频道贴一条
+        // 重复消息（2026-09-19 实测，与 oneShot 那条同族）。在 deliver 之前删，
+        // 与 `reply` 分支同一纪律（await 之前先删，免得 Stop hook 插在中间）。
+        pendingReplies.delete(target.channelId);
+
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
           const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
