@@ -16,7 +16,7 @@ import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
 import { resolveBunPath } from "./bun-path.js";
-import { readRegistryAgents } from "./registry.js";
+import { readRegistryAgents, isMasterAgent } from "./registry.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -335,13 +335,33 @@ async function checkIntegration(repoRoot: string): Promise<Check[]> {
   return out;
 }
 
+/**
+ * 「registry 里有、tmux 里没有」的真·孤儿名单（纯函数，单测覆盖）。
+ *
+ * ⚠ 必须按 status 过滤：**stopped 的 agent 本来就没有 window**——那是「已停」的
+ * 定义，不是异常。2026-09-21 体检里 13 个 2026-03 起陆续退役的 agent 被一直点名，
+ * 把一条本该有意义的信号（「它自称 active，窗口却没了」= 掉线/被 kill/换了 session）
+ * 变成了永久噪声。`manager.ts list` 的孤儿检测一直就是只看 active 的，这里对齐。
+ *
+ * ⚠ 大总管也要跳过：它的 window 名是裸 `master`，registry 的键却是 `agent-master`
+ * （见 registry.isMasterAgent），按名字比对必然对不上 ⇒ 恒判孤儿。
+ */
+export function orphanAgentNames(
+  agents: Array<{ name: string; status?: string }>,
+  windows: Set<string>,
+): string[] {
+  return agents
+    .filter((a) => a.status === "active" && !isMasterAgent(a.name) && !windows.has(a.name))
+    .map((a) => a.name);
+}
+
 async function checkAgents(): Promise<Check[]> {
   const out: Check[] = [];
   const g = "agent";
 
-  let agents: Array<{ name: string }> = [];
+  let agents: Array<{ name: string; status?: string }> = [];
   try {
-    agents = (await readRegistryAgents()).map((a) => ({ name: a.name }));
+    agents = (await readRegistryAgents()).map((a) => ({ name: a.name, status: a.status }));
   } catch (e) {
     out.push({ group: g, name: "registry.json", status: "fail", detail: `读不了：${(e as Error).message}`,
       fix: `检查 ${ORCH_DIR}/registry.json 是不是坏了（应是 JSON 对象）` });
@@ -358,10 +378,11 @@ async function checkAgents(): Promise<Check[]> {
     return out;
   }
   const windows = new Set(win.out.split("\n").map((s) => s.trim()).filter(Boolean));
-  const missing = agents.filter((a) => !windows.has(a.name)).map((a) => a.name);
+  const missing = orphanAgentNames(agents, windows);
+  const active = agents.filter((a) => a.status === "active").length;
   out.push(missing.length === 0
-    ? { group: g, name: "tmux window", status: "ok", detail: `${windows.size} 个 window，registry 里的 agent 都在` }
-    : { group: g, name: "tmux window", status: "warn", detail: `registry 里有但 tmux 里没有：${missing.join(", ")}`,
+    ? { group: g, name: "tmux window", status: "ok", detail: `${windows.size} 个 window，${active} 个 active agent 都在` }
+    : { group: g, name: "tmux window", status: "warn", detail: `registry 说 active 但 tmux 里没有：${missing.join(", ")}`,
         fix: `bun src/manager.ts restart <name> 重新拉起，或 bun src/manager.ts remove <name> 清掉登记` });
   return out;
 }

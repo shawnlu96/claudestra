@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { classifyDaemonExit, formatDoctor, webBuildVerdict, type Check } from "../src/lib/doctor";
+import { classifyDaemonExit, formatDoctor, orphanAgentNames, webBuildVerdict, type Check } from "../src/lib/doctor";
 
 describe("classifyDaemonExit", () => {
   test("正常运行 → ok", () => {
@@ -117,5 +117,47 @@ describe("portOwnerVerdict", () => {
   });
   test("无 listener → null(交给已有的端口 fail)", () => {
     expect(portOwnerVerdict(null, "123")).toBeNull();
+  });
+});
+
+// ── orphanAgentNames（2026-09-21：13 个退役 agent 被永久点名）────────────────
+// 「registry 里有、tmux 里没有」对 stopped 的 agent 是**定义**不是异常。判据写宽
+// 了就把一条真信号（自称 active 但窗口没了）变成常年黄灯，跟上面 SIGTERM 那条
+// 是同一类错误：警告一旦常态化就没人看了。
+describe("orphanAgentNames", () => {
+  const win = new Set(["agent-alive", "master"]);
+
+  test("active 且没有 window → 是孤儿", () => {
+    expect(orphanAgentNames([{ name: "agent-gone", status: "active" }], win)).toEqual(["agent-gone"]);
+  });
+
+  test("stopped 没有 window → 不是孤儿（那正是「已停」的定义）", () => {
+    expect(orphanAgentNames([{ name: "agent-retired", status: "stopped" }], win)).toEqual([]);
+  });
+
+  test("active 且 window 在 → 不是孤儿", () => {
+    expect(orphanAgentNames([{ name: "agent-alive", status: "active" }], win)).toEqual([]);
+  });
+
+  test("大总管跳过：window 名是裸 master，registry 键是 agent-master，比对必然对不上", () => {
+    expect(orphanAgentNames([{ name: "agent-master", status: "active" }], win)).toEqual([]);
+    expect(orphanAgentNames([{ name: "master", status: "active" }], new Set<string>())).toEqual([]);
+  });
+
+  test("status 缺失（老数据）不当 active 报", () => {
+    expect(orphanAgentNames([{ name: "agent-legacy" }], win)).toEqual([]);
+  });
+
+  test("混合名单只挑出真孤儿", () => {
+    const got = orphanAgentNames(
+      [
+        { name: "agent-alive", status: "active" },
+        { name: "agent-gone", status: "active" },
+        { name: "agent-retired", status: "stopped" },
+        { name: "agent-master", status: "active" },
+      ],
+      win,
+    );
+    expect(got).toEqual(["agent-gone"]);
   });
 });
