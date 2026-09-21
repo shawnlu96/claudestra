@@ -141,8 +141,11 @@ describe("readFileStats 尾读扩窗", () => {
   // ⚠ readFileStats 的 5 秒桶缓存是**按 path 键**的：同一路径调两次，第二次必吃缓存，
   //   参数不同也没用。所以每个对照组都写成两份内容相同、路径不同的文件。
   test("窗口再小也要扩到回溯过周界，本周合计与全读一致", async () => {
-    // 20 天前 → 今天，跨周界；每条 output 都不同，漏一条就对不上
-    const recs = Array.from({ length: 40 }, (_, i) => usageAt(atDaysAgo(20 - i * 0.5), i + 1));
+    // 20 天前 → **此刻**，跨周界；每条 output 都不同，漏一条就对不上。
+    // ⚠ 最后一条必须是 0 天前：周界是「本周一本地 00:00」，原来最近的一条是 0.5 天前，
+    //    周一上午跑测时它落在上周 → week 合计为 0，下面那条 fixture 有效性断言必挂
+    //    （2026-09-21 周一实际挂了）。测试不能依赖今天是星期几。
+    const recs = Array.from({ length: 40 }, (_, i) => usageAt(atDaysAgo(20 * (1 - i / 39)), i + 1));
     const full = await readFileStats(mkJsonl(recs), { tailStartBytes: 1 << 30 });
     const tail = await readFileStats(mkJsonl(recs), { tailStartBytes: 64 }); // 逼扩窗
     expect(tail.week).toEqual(full.week);
