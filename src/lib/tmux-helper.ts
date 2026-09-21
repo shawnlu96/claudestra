@@ -331,7 +331,44 @@ export async function isIdle(target: string): Promise<boolean> {
  */
 export type IdleVerdict = "idle" | "busy" | "unknown";
 
+
+/**
+ * v2.23+ Pi 窗口的忙闲判据。
+ *
+ * 为什么要单独一条：`probeTuiContract` / `paneLooksIdle` 整套判据都长在 Claude Code
+ * 的画面上（`❯` 输入框 + `bypass permissions` banner + `esc to interrupt`/spinner 行）。
+ * Pi 的 TUI 一样都没有，但**画面上确实有 TUI**（两条 `────` 横线），于是探针恒判
+ * `suspect` ⇒ `idleVerdict` 对每个 Pi 窗口恒返回 `unknown`。
+ * 2026-09-21 owner 的 bridge.err 里，`⚠️ [wedge] agent-pi_bn_market_maker 忙闲判据失效`
+ * 每 5 分钟一条刷了一上午——而那个窗口里 Pi 进程其实早就没了（被 C-c 打掉），
+ * 真正该报的「掉线」反倒被 `unknown → 按 idle 处理` 这条路径吞了。
+ *
+ * 判据刻意挑了两个**不依赖 Pi 版本**的信号：
+ *  - 在不在 Pi：`🔗 <agent>` 状态行是**我们自己**的扩展写的（见
+ *    src/pi/claudestra-extension.ts 的 `ui.setStatus`），Pi 换主题换布局都不动它；
+ *    bridge 断开时它变成 `⚠️ bridge 断开`，两种都算「这是我们的 Pi 窗口」。
+ *  - 忙不忙：Pi 的 working 指示器是一条**内嵌文字的横线**（`── ⠧ Working ─────`），
+ *    空闲时同一位置是纯横线。不认 spinner 字形也不认 "Working" 这个词——
+ *    指示器文案可以被扩展改写（`defaultWorkingMessage` 只是默认值），而「线里有字」
+ *    是这个组件的结构。
+ *
+ * 认不出是 Pi 窗口就返回 null，让调用方退回 Claude Code 那套，不影响既有行为。
+ */
+export const PI_STATUS_RE = /🔗\s*\S|⚠️\s*bridge/;
+// ⚠ 逐行匹配，别写成带 /m 的整段正则：`\s` 会吃掉换行，`────\n\n────`（空闲的
+//   两条横线）就会被当成「线里有字」——第一版栽在这，PI_IDLE 直接判成 busy。
+export const PI_BUSY_LINE_RE = /^─{2,}[^\S\n]+\S.*─{2,}$/;
+
+export function piPaneIdleVerdict(pane: string): IdleVerdict | null {
+  const tail = trimTrailingBlank(pane.split("\n")).slice(-15);
+  if (!PI_STATUS_RE.test(tail.join("\n"))) return null;
+  return tail.some((l) => PI_BUSY_LINE_RE.test(l.trim())) ? "busy" : "idle";
+}
+
 export function paneIdleVerdict(pane: string): IdleVerdict {
+  // Pi 窗口先走自己的判据（CC 那套在它身上恒判 unknown，见 piPaneIdleVerdict）
+  const pi = piPaneIdleVerdict(pane);
+  if (pi) return pi;
   if (probeTuiContract(pane).suspect) return "unknown";
   return paneLooksIdle(pane) ? "idle" : "busy";
 }
