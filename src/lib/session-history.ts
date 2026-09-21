@@ -152,8 +152,21 @@ export function progressNoteOf(block: any): string | null {
   return t && t.length <= PROGRESS_NOTE_MAX_CHARS ? t : null;
 }
 
-/** MCP reply 工具名：mcp__<MCP_NAME>__reply（MCP_NAME 可配，按前后缀匹配）。 */
+/**
+ * reply 工具名。两种形态都要认：
+ *  - Claude Code：MCP 工具 `mcp__<MCP_NAME>__reply`（MCP_NAME 可配，按前后缀匹配）；
+ *  - Pi（v2.23+）：扩展注册的**裸名** `reply`（Pi 没有 MCP，见 pi/claudestra-extension.ts）。
+ *
+ * 漏掉裸名的后果不是"少个标签"，而是**回复正文在历史里变成一张工具卡**：走下面的
+ * else 分支后，summary 是「💬 回复」，正文被塞进 `detail` —— 也就是把 JSON 参数
+ * 原样 dump 出来，`\n` 全是字面量。owner 2026-09-22 实报的就是这个（Pi 会话里
+ * 一整段回复渲染成转义文本块，末尾还挂着个 `"`）。搜索那条路径（searchHistory）
+ * 同样因此搜不到 Pi 的任何回复。
+ *
+ * jsonl-watcher 的 HIDDEN_TOOLS 与 reply_pending 早就认裸名了，这里是漏网的两处。
+ */
 function isReplyTool(name: string): boolean {
+  if (name === "reply") return true; // Pi 侧裸名
   return name.startsWith("mcp__") && name.endsWith("__reply");
 }
 
