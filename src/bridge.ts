@@ -166,6 +166,7 @@ syncDiscordOwnersFromEnv(ALLOWED_USER_IDS)
   })
   .catch((e) => console.error("principals owner 同步失败（继续用 .env）:", (e as Error).message));
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
+import { checkControlRegistrant } from "./lib/control-registrant.js";
 import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard, noteSaveCompactInjected } from "./bridge/stats-dashboard.js";
@@ -290,6 +291,40 @@ async function reportChannelContention(a: {
 
   // 控制频道（Discord）。⚠ 若对抢的正是控制频道本身，这条会落到当前握着频道的那个
   // 实例上——仍然比没有强，而且日志与 SSE 两路不受影响。
+  await notifyMaster(detail).catch(() => {});
+}
+
+/**
+ * 控制频道注册被拒 → 告警一次（按 cwd 记冷却）。
+ *
+ * 被拒的实例会按普通退避一直重连（3s→60s），所以这事**每分钟都会再发生一次**；
+ * 日志每次都记（要的就是能对账），但推送给人的那条 30 分钟只发一次。
+ */
+const controlRejectNotifiedAt = new Map<string, number>();
+const CONTROL_REJECT_COOLDOWN_MS = 30 * 60_000;
+
+async function reportControlRegistrantRejected(
+  cwd: string,
+  pid: unknown,
+  reason: string,
+): Promise<void> {
+  const last = controlRejectNotifiedAt.get(cwd) ?? 0;
+  if (Date.now() - last < CONTROL_REJECT_COOLDOWN_MS) return;
+  controlRejectNotifiedAt.set(cwd, Date.now());
+
+  const detail =
+    `⛔ 有实例想认领控制频道但被挡下（${reason}）。pid ${typeof pid === "number" ? pid : "?"}，` +
+    `cwd \`${cwd}\`。控制频道只认 MASTER_DIR 里的那个大总管——多半是 dev worktree / 实验实例` +
+    `带着生产的 DISCORD_CHANNEL_ID 起来了。它现在没有通道（会一直退避重连），关掉它即可。`;
+  console.error(detail);
+
+  emitEvent({
+    agent: "master",
+    chatId: CONTROL_CHANNEL_ID,
+    type: "session_anomaly",
+    data: { kind: "control_registrant_rejected", cwd, pid: typeof pid === "number" ? pid : null, reason },
+  });
+
   await notifyMaster(detail).catch(() => {});
 }
 
@@ -2818,6 +2853,34 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       return;
     }
     case "register": {
+      // ⛔ 控制频道的准入：只有跑在 MASTER_DIR 里的实例能认领它（判据见
+      //    lib/control-registrant.ts）。2026-09-21 dev worktree 里的大总管带着生产的
+      //    DISCORD_CHANNEL_ID + BRIDGE_URL 起来，跟正主抢了三个多小时、10 分钟 19 次。
+      //    这里挡的是**注册本身**，所以内战根本打不起来；contention 告警留着兜别的形态。
+      //    拒绝后不断连接：用普通 close code 让对方走既有的指数退避重连（3s→60s 封顶）。
+      //    **不能**用 4001——那是「被顶替」，会让对方以为自己才是正主、退避后回来抢。
+      //    也刻意不让它退出：channel-server 没有守护者，退出 = 那个实例永久失联，
+      //    而它只是配错了频道（见 lib/link-policy.ts 的核心约束）。
+      const guard = checkControlRegistrant({
+        channelId: msg.channelId,
+        controlChannelId: CONTROL_CHANNEL_ID,
+        masterDir: MASTER_DIR,
+        cwd: msg.cwd,
+      });
+      if (!guard.allow) {
+        console.error(
+          `⛔ 拒绝注册控制频道 ${msg.channelId}（pid ${msg.pid ?? "?"}）：${guard.reason}`,
+        );
+        try {
+          ws.send(JSON.stringify({ type: "rejected", reason: guard.reason }));
+        } catch { /* non-critical */ }
+        try {
+          ws.close(4002, "control channel is reserved for MASTER_DIR");
+        } catch { /* non-critical */ }
+        void reportControlRegistrantRejected(msg.cwd ?? "?", msg.pid, guard.reason ?? "");
+        return;
+      }
+
       const old = clients.get(msg.channelId);
       if (old && old.ws !== ws) {
         // 顶替语义保持不变：后来者接管。典型场景是 Claude Code 重启了它的 MCP server
