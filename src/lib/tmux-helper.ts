@@ -20,6 +20,20 @@ export async function tmuxRaw(
   args: string[],
   opts?: { timeoutMs?: number }
 ): Promise<string> {
+  return (await runTmux(args, opts)).out;
+}
+
+export interface TmuxRunResult {
+  out: string;
+  err: string;
+  /** 被超时强杀时为 null */
+  code: number | null;
+}
+
+async function runTmux(
+  args: string[],
+  opts?: { timeoutMs?: number }
+): Promise<TmuxRunResult> {
   const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args], {
     stdout: "pipe",
     stderr: "pipe",
@@ -34,11 +48,65 @@ export async function tmuxRaw(
   }, opts?.timeoutMs ?? 15_000);
   try {
     const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    return out.trim();
+    const err = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+    return { out: out.trim(), err: err.trim(), code };
   } finally {
     clearTimeout(killer);
   }
+}
+
+/** 单行的失败说明（纯函数，便于单测）。 */
+export function formatTmuxFailure(args: string[], code: number | null, err: string): string {
+  const cmd = `tmux ${args.join(" ")}`;
+  const why = err || (code === null ? "（超时被杀，无输出）" : "（无 stderr 输出）");
+  return `${cmd} 失败（exit ${code ?? "null"}）：${why}`;
+}
+
+/**
+ * 跟 `tmuxRaw` 同一条命令，但**非零退出就抛**。
+ *
+ * 为什么要有两个：`tmuxRaw` 吞掉退出码是**故意**的，一大票调用方依赖它
+ * （cleanup 里的 kill-window、各种探测性 capture-pane、清场用的 send-keys…），
+ * 那些地方「目标不在」本来就是正常结局，抛错只会让调用点写满 try/catch。
+ *
+ * 但关键路径不一样。2026-09-21 实锤：master session 里混进一个**窗口名也叫
+ * `master`** 的闲置 zsh，于是
+ *
+ * ```
+ * tmux new-window -t master -n agent-xxx -c <dir>
+ * → create window failed: index 19 in use     (exit 1)
+ * ```
+ *
+ * 这句报错被 `tmuxRaw` 吞掉，`cmdCreate` 照常往下走：send-keys 发给一个不存在的
+ * 窗口（静默失败）→ 死等就绪 → 90 秒后报「Claude Code 启动超时」并清理频道。
+ * **错误信息指向的阶段在 new-window 之后，真正炸的点在它之前** —— 排查的人会去查
+ * 目录信任、claude 二进制、Discord 限流，全是错的方向（实际就发生了）。
+ *
+ * 所以：能继续跑的用 `tmuxRaw`，「这一步失败后面全是白搭」的用这个。
+ */
+export async function tmuxRawStrict(
+  args: string[],
+  opts?: { timeoutMs?: number }
+): Promise<string> {
+  const r = await runTmux(args, opts);
+  if (r.code !== 0) throw new Error(formatTmuxFailure(args, r.code, r.err));
+  return r.out;
+}
+
+/**
+ * 「这是个 session，不是窗口名」的目标串。
+ *
+ * ⚠ `-t master` 会**优先按窗口名解析**：master session 里只要有个窗口名叫
+ * `master`，`new-window -t master` 就落到那个窗口上（报 `index N in use`），
+ * `move-window -s master` 搬的也是它。带冒号的 `master:` 才是「这个 session，
+ * 自己挑空闲 index」。
+ *
+ * 只有**接受窗口目标**的命令需要它（new-window / move-window 等）；
+ * `list-windows -t master` 这类本来就只吃 session 目标，两种写法等价（已实测）。
+ */
+export function sessionTarget(session: string = MASTER_SESSION): string {
+  return `${session}:`;
 }
 
 /** 非阻塞 fire-and-forget 发送（用于 C-c 等不需要等待的操作） */
