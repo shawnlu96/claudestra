@@ -39,6 +39,23 @@ describe("isTargetsOwnReply", () => {
   test("chat_id 为空不算", () => {
     expect(isTargetsOwnReply("", CA)).toBe(false);
   });
+
+  // ⚠ ws→频道的反查只取第一条命中（bridge.ts 2916 行的 for/break），一个 ws 挂多条
+  //   频道时（sameWsChannels）拿到的可能是同一个 agent 的**另一条**频道。频道号对
+  //   不上但产出方确实是 target 本人，不能把合法答复丢掉。
+  test("同一个 ws 的另一条频道 → 仍算 target 本人", () => {
+    const wsB = { id: "B" };
+    const CB2 = "1000000000000000009";
+    expect(isTargetsOwnReply(CB, CB2, wsB, wsB)).toBe(true);
+  });
+
+  test("别人的 ws → 仍然不算（兜底不能反过来放行回声）", () => {
+    expect(isTargetsOwnReply(CB, CA, { id: "A" }, { id: "B" })).toBe(false);
+  });
+
+  test("两边 ws 都认不出来时不算 —— undefined === undefined 的陷阱", () => {
+    expect(isTargetsOwnReply(CB, CA, undefined, undefined)).toBe(false);
+  });
 });
 
 describe("isOwnStopChannel", () => {

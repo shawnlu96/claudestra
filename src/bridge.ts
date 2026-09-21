@@ -3002,7 +3002,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 「正文逐字是我自己写的答复」「它一度以为我回了并准备据此动手」）。
         // 判据见 lib/pushback-scope.ts：key 就是 target 的 channelId，所以
         // 「发送方自己的频道 == 这条 reply 的目的频道」才成立。
-        const pending = isTargetsOwnReply(msg.chatId, fromChannelId)
+        const pending = isTargetsOwnReply(msg.chatId, fromChannelId, ws, clients.get(msg.chatId)?.ws)
           ? pendingAgentCalls.get(msg.chatId)
           : undefined;
         if (pending) {
@@ -3963,14 +3963,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
             //   - drain 没文字（连 assistant text 都没有）→ push 一句 "对方结束了
             //     turn 但没回复"，至少让 caller 不会无限静默等
             // ⚠ 同上的归属问题，而且这条更宽：channelsToClear 里除了本 agent 自己的
-            // 频道，还塞了 pendingReplies 里**别人的** intendedReplyChannel（为了把
-            // 「💭 思考中」改成「✅ 完成」）。拿那些频道取 pending，等于用 A 的收尾
-            // 去回答 B 的提问。
-            // 本轮结束的到底是不是「这条频道的 agent」。
-            // ⚠ channelsToClear 里除了本 agent 自己的频道，还塞了 pendingReplies 里
-            //   **别人的** intendedReplyChannel（为了把「💭 思考中」改成「✅ 完成」）。
-            //   drain 本身对它们是需要的（把 💬 冲干净再标 ✅），但下面三个消费点
-            //   都在回答「谁欠谁一个回应」，拿别人的收尾去结算就是张冠李戴。
+            //   频道，还塞了 pendingReplies 里**别人的** intendedReplyChannel（为了把
+            //   「💭 思考中」改成「✅ 完成」）。drain 本身对它们是需要的（把 💬 冲干净
+            //   再标 ✅），但下面三个消费点都在回答「谁欠谁一个回应」，拿别人的收尾
+            //   去结算就是张冠李戴。
             const ownTurn = isOwnStopChannel(cid, channelId, thisClientForStatus?.ws, clients.get(cid)?.ws);
             const pendingAgent = ownTurn ? pendingAgentCalls.get(cid) : undefined;
             if (pendingAgent) {

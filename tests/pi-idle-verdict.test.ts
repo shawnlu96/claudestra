@@ -69,4 +69,21 @@ describe("paneIdleVerdict 接上 Pi 分支", () => {
   test("Claude Code 窗口走原路", () => {
     expect(paneIdleVerdict(CC_IDLE)).toBe("idle");
   });
+
+  // ⚠ 顺序回归：PI_STATUS_RE 是内容匹配不是 footer 签名，agent 自己打一个带 🔗 的
+  //   链接就能命中。若 Pi 分支排在 CC 契约探针前面，这个**正在跑**的 CC 窗口会被
+  //   判成 idle（CC 的 spinner 不是「内嵌文字的横线」）——AUQ 陈旧检测据此会拒掉
+  //   合法提交。CC 窗口忙闲都命中自己的标记 ⇒ 永不 suspect ⇒ 必须先问它。
+  test("CC 窗口输出里带 🔗 也不许落进 Pi 分支", () => {
+    const ccBusyWithLink = [
+      "  🔗 https://github.com/shawnlu96/claudestra/pull/17",
+      "  ✳ Thinking… (12s · esc to interrupt)",
+      "╭" + "─".repeat(60) + "╮",
+      "❯ ",
+      "╰" + "─".repeat(60) + "╯",
+      "  bypass permissions on",
+    ].join("\n");
+    expect(piPaneIdleVerdict(ccBusyWithLink)).toBe("idle"); // Pi 判据本身会看走眼
+    expect(paneIdleVerdict(ccBusyWithLink)).toBe("busy");   // 但顺序挡住了它
+  });
 });

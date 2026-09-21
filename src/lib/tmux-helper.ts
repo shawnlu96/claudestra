@@ -366,11 +366,14 @@ export function piPaneIdleVerdict(pane: string): IdleVerdict | null {
 }
 
 export function paneIdleVerdict(pane: string): IdleVerdict {
-  // Pi 窗口先走自己的判据（CC 那套在它身上恒判 unknown，见 piPaneIdleVerdict）
-  const pi = piPaneIdleVerdict(pane);
-  if (pi) return pi;
-  if (probeTuiContract(pane).suspect) return "unknown";
-  return paneLooksIdle(pane) ? "idle" : "busy";
+  // ⚠ 顺序是判据的一部分：**先问 CC 的契约探针，只有它说 suspect 才轮到 Pi 分支**。
+  //   反过来写（Pi 优先）会让任何 CC 画面只要尾部出现 `🔗 x` 就被当成 Pi 窗口——
+  //   PI_STATUS_RE 是内容匹配不是 footer 签名，agent 自己打一个带 🔗 的链接就够了，
+  //   而 CC 的忙碌 spinner 不是「内嵌文字的横线」⇒ 在忙的 CC 窗口会被判成 idle。
+  //   CC 窗口无论忙闲都命中自己的标记（banner / esc to interrupt）⇒ 永不 suspect，
+  //   所以这个顺序对 CC 是零改动；Pi 窗口在 CC 那套里恒 suspect ⇒ 一定走得到下面。
+  if (!probeTuiContract(pane).suspect) return paneLooksIdle(pane) ? "idle" : "busy";
+  return piPaneIdleVerdict(pane) ?? "unknown";
 }
 
 export async function idleVerdict(target: string): Promise<IdleVerdict> {

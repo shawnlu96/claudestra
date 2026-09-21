@@ -41,9 +41,20 @@
  * @param replyToChatId  reply 的目的 chat_id（也就是 pendingAgentCalls 的 key 候选）
  * @param replierChannelId 发这条 reply 的 agent 自己的频道（ws 反查所得）
  */
-export function isTargetsOwnReply(replyToChatId: string, replierChannelId: string): boolean {
-  if (!replyToChatId || !replierChannelId) return false;
-  return replyToChatId === replierChannelId;
+export function isTargetsOwnReply(
+  replyToChatId: string,
+  replierChannelId: string,
+  replierWs?: unknown,
+  targetWs?: unknown,
+): boolean {
+  if (!replyToChatId) return false;
+  if (replierChannelId && replyToChatId === replierChannelId) return true;
+  // ⚠ 一个 ws 可能挂多条频道（见 bridge.ts 的 sameWsChannels）。ws→频道的反查只取
+  //   第一条命中，所以 fromChannelId 可能是同一个 agent 的**另一条**频道——这时
+  //   频道号对不上，但产出方确实是 target 本人，不能把它的答复丢掉。
+  // ⚠ 两边都认不出 ws 时 `undefined === undefined` 会误判成真，必须先要求 replierWs 存在
+  if (replierWs === undefined || replierWs === null) return false;
+  return targetWs === replierWs;
 }
 
 /**
