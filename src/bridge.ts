@@ -172,6 +172,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefr
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
+import { hangsPendingReply, ownsPendingReply } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
@@ -912,9 +913,12 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     }
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "thinking" } });
     // intent=request 挂 pending + thread 追踪。response 端到端，不挂新 pending。
-    // oneShot（skipInterAgentWatchdog）的 send_to_agent 也不挂：caller 不期待回应，
-    // 挂了会让 target 下一次 Stop 被 reply-nudge 拦住逼它回一条（2026-09-18 实测）。
-    if (env.intent === "request" && !env.meta.skipInterAgentWatchdog) {
+    // oneShot 的 send_to_agent 也不挂：caller 不期待回应，挂了会让 target 下一次
+    // Stop 被 reply-nudge 拦住逼它回一条（2026-09-18 实测）。
+    // ⚠ 判据不能只看 skipInterAgentWatchdog——api-routes.ts 的 HTTP 入站**恒设 true**，
+    //   只看它就等于把每一条 Web/API 消息的 pendingReply 也取消掉，「忘了 reply」的
+    //   Stop 拦截对整个 Web 端失效。判据见 lib/pending-reply-scope.ts。
+    if (hangsPendingReply(env.intent, env.from.kind, env.meta.skipInterAgentWatchdog)) {
       pendingReplies.set(replyBackChannel, {
         msgId: env.meta.messageId,
         ts: Date.now(),
@@ -3493,7 +3497,13 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 答了照样被 Stop hook 拦「你没回 chat_id=…」，被迫再往对方频道贴一条
         // 重复消息（2026-09-19 实测，与 oneShot 那条同族）。在 deliver 之前删，
         // 与 `reply` 分支同一纪律（await 之前先删，免得 Stop hook 插在中间）。
-        pendingReplies.delete(target.channelId);
+        // ⚠ 只能销**自己欠的**：key 是回信地址不是欠账人。B 之前给 C 发过请求时，
+        //   pendingReplies[B 的频道].targetWs 是 C——这时 A 给 B 发消息若无条件
+        //   delete，就把 C 的欠账销了，C 的 Stop 不再被拦、B 永远等不到答复。
+        //   （同 lib/pushback-scope.ts 的纪律，判据见 lib/pending-reply-scope.ts。）
+        if (ownsPendingReply(pendingReplies.get(target.channelId)?.targetWs, ws)) {
+          pendingReplies.delete(target.channelId);
+        }
 
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
