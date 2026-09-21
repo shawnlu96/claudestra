@@ -173,6 +173,11 @@ interface ChatState {
   compactPct: number | null;
   /** 本轮已起、还没有任何输出 → 显示「思考中」 */
   awaitingChunk: boolean;
+  /** v2.24+ 「本端刚发出一条」的一次性信号（自增计数，消息列表据此强制滚到底）。
+   *  ⚠ 不要复用 awaitingChunk 做这件事：它在 7 秒一次的 reconcile 里也会被置真
+   *  （回合进行中尾部没有直播气泡就恢复「思考中」），于是用户上翻看历史时每来
+   *  一次差量就被强拉回底部（owner 2026-09-21 实报）。只有用户自己发送/重发才 ++。 */
+  selfSendSeq: number;
   /** Phase 2：当前会话待处理的权限 / session-idle 卡（null=无） */
   pendingPermission: PendingPermission | null;
   /** Phase 2：当前会话待处理的 AskUserQuestion 卡（null=无） */
@@ -262,6 +267,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       compacting: false,
       compactPct: null,
       awaitingChunk: false,
+      selfSendSeq: 0,
       pendingPermission: null,
       pendingAsk: null,
       bgTasks: [],
@@ -1813,6 +1819,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       });
       s.streaming = true;
       s.awaitingChunk = true;
+      s.selfSendSeq++; // 自己发的 → 无条件滚到底（Telegram 语义）
     });
     this.pendingSends.set(optimisticId, { agent, wire, files: hasFiles ? [...files!] : undefined });
     await this.postSend(optimisticId);
@@ -1949,6 +1956,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       s.streaming = true;
       s.awaitingChunk = true;
+      s.selfSendSeq++;
     });
     await this.postSend(id);
   }

@@ -16,6 +16,7 @@ import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
 import { inlineButtonsToText, plainLabel } from "@/lib/chat/inline-buttons";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
+import { isNearBottom, tailAppendedCount } from "../scroll-follow";
 import { installTapRescue } from "@/lib/tap-rescue";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
@@ -1111,6 +1112,7 @@ export function MessageList() {
   const t = useT();
   const messages = useChatStore((s) => s.state.messages);
   const awaiting = useChatStore((s) => s.state.awaitingChunk);
+  const selfSendSeq = useChatStore((s) => s.state.selfSendSeq);
   const streaming = useChatStore((s) => s.state.streaming);
   const replying = useChatStore((s) => s.state.replying);
   const compacting = useChatStore((s) => s.state.compacting);
@@ -1128,6 +1130,36 @@ export function MessageList() {
   const browsing = useChatStore((s) => s.state.browsing);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
+  /* v2.24+ 回到底部按钮（owner 2026-09-21：「不要刷出一个新消息就自动回到底部，
+     加一个回到底部的按钮，跟 Telegram 一样」）。
+     - atBottom：只在布尔翻转时 setState，滚动期间不制造额外渲染；
+     - unread：离底期间尾部新增的条数（流式长大同一个气泡不计数——id 没变）。
+     两者都另配 ref，供 [active] 那个只建一次的 scroll/RO effect 读取当前值。 */
+  const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
+  const [unread, setUnread] = useState(0);
+  const unreadRef = useRef(0);
+  const tailIdRef = useRef<string | null>(null);
+  const setAtBottomBoth = (v: boolean) => {
+    if (atBottomRef.current === v) return;
+    atBottomRef.current = v;
+    setAtBottom(v);
+  };
+  const clearUnread = () => {
+    if (unreadRef.current === 0) return;
+    unreadRef.current = 0;
+    setUnread(0);
+  };
+  const goBottom = () => {
+    followRef.current = true;
+    clearUnread();
+    setAtBottomBoth(true);
+    const el = scrollerRef.current;
+    if (!el) return;
+    // 离底很远时 smooth 要缓动好几秒（还会被中途的 resize 打断）——直接跳。
+    const far = el.scrollHeight - el.scrollTop - el.clientHeight > 4000;
+    el.scrollTo({ top: el.scrollHeight, behavior: far ? "auto" : "smooth" });
+  };
   // 触摸期吸底冻结(2026-09-07 真机 [tap-lost] ×2 + WebKit 源码 WebPageCocoa.mm
   // commitPotentialTap):iOS 合成 click 分两步——按下时记下点位的响应节点,抬手后
   // 在同一点重新命中测试,节点不同就 commitPotentialTapFailed,click 根本不派发。
@@ -1177,6 +1209,10 @@ export function MessageList() {
     followRef.current = true; // 切会话恢复吸底
     setExtraVisible(0); // 渲染窗口回到「最近 30 条」
     exitSelectMode(); // 别把冻住的滚动带到下一个会话
+    setAtBottomBoth(true);
+    clearUnread();
+    tailIdRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
   /* 历史现场定位(搜索跳转):窗口数据到位后滚到命中气泡并高亮一闪。
@@ -1241,14 +1277,46 @@ export function MessageList() {
   useEffect(() => {
     // 用户上翻阅读时不强拉回底（follow=false）——之前每来一条新消息/卡片都
     // smooth 滚底并强置 follow=true，流式期间用户「滑不动」的元凶之一
-    // （2026-07-13 真机）。awaiting=true 是自己刚发送 → 仍然滚底。
+    // （2026-07-13 真机）。
+    // ⚠ 2026-09-21 owner 再报「刷出一条新消息就被拉回底部，没法看历史」：原来
+    //   这里的豁免写的是 `|| awaiting`，而 awaitingChunk **不只**在自己发送时为真
+    //   ——syncDelta / loadMessages 的 7 秒对账里「回合进行中但尾部没有直播气泡」
+    //   也会把它置真，于是长回合中每一次对账都把人强拉回底部，且顺手把 follow
+    //   重置成 true，上翻直接失效。现在判据只认 follow；「自己发送要滚到底」改由
+    //   下面的 selfSendSeq effect 单独负责（Telegram 也是这个语义）。
     if (isSelectMode()) return; // 正在选字：滚一下选区就没了
-    if (!followRef.current && !awaiting) return;
-    followRef.current = true;
+    if (!followRef.current) return;
     if (Date.now() < touchHoldRef.current) return; // 抬手后 releaseTouchHold 补吸底
     const el = scrollerRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages.length, awaiting, pendingPermission, pendingAsk, bgTaskCount]);
+  }, [messages.length, pendingPermission, pendingAsk, bgTaskCount]);
+
+  /* 自己发送 / 重发 → 无条件回到底部（即便此刻正在上面看历史）。 */
+  useEffect(() => {
+    if (!selfSendSeq) return;
+    goBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selfSendSeq]);
+
+  /* 离底期间尾部新增的条数 → 按钮上的角标。
+     用「上一次的尾部 id 在新数组里的位置」算增量：流式把同一个气泡越写越长时
+     尾部 id 不变 ⇒ 不计数；向上翻页 prepend 也不会误计（尾部 id 仍在末尾）。 */
+  useEffect(() => {
+    const lastId = messages.length ? messages[messages.length - 1].id : null;
+    const prevId = tailIdRef.current;
+    tailIdRef.current = lastId;
+    if (browsing) return; // 历史现场有自己的「回到最新」
+    if (followRef.current || atBottomRef.current) {
+      clearUnread();
+      return;
+    }
+    if (!prevId || prevId === lastId) return; // 流式每个 chunk 都进这个 effect，先短路再建 id 数组
+    const added = tailAppendedCount(prevId, messages.map((m) => m.id));
+    if (added <= 0) return;
+    unreadRef.current = Math.min(99, unreadRef.current + added);
+    setUnread(unreadRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, browsing]);
 
   useEffect(() => {
     const el = scrollerRef.current;
@@ -1262,7 +1330,12 @@ export function MessageList() {
       // 内的每次 resize 吸底都会把刚起步的上滑手势拽回去，手感就是「滑不动」
       const up = el.scrollTop < lastTop;
       lastTop = el.scrollTop;
-      followRef.current = !up && el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+      const nearBottom = isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+      followRef.current = !up && nearBottom;
+      // 按钮的可见性按「离底」判，与 follow 解耦：向上滑一下就退出吸底，但只有
+      // 真的离开底部 90px 才值得弹按钮，否则贴着底微调也会闪一下。
+      setAtBottomBoth(nearBottom);
+      if (nearBottom) clearUnread();
     };
     el.addEventListener("scroll", onScroll);
     const snap = () => {
@@ -1458,6 +1531,26 @@ export function MessageList() {
           )}
         <BubbleMenu />
         <SelectModeBar />
+        {/* v2.24+ 回到底部（非历史现场）：负 margin 让它浮在内容上，不占列表高度。 */}
+        {!browsing && !atBottom && (
+          <div className="pointer-events-none sticky bottom-3 z-10 -mb-8 flex justify-end">
+            <button
+              className="btn btn-circle btn-sm pointer-events-auto relative border border-base-300 bg-base-100/95 shadow-md backdrop-blur"
+              aria-label={t("回到底部")}
+              title={t("回到底部")}
+              onClick={goBottom}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 5v14M19 12l-7 7-7-7" />
+              </svg>
+              {unread > 0 && (
+                <span className="absolute -right-1 -top-1 min-w-[18px] rounded-full bg-primary px-1 text-[11px] font-medium leading-[18px] text-primary-content">
+                  {unread > 98 ? "99+" : unread}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
         {browsing && (
           <div className="sticky bottom-2 z-10 mt-4 flex justify-center">
             <button
