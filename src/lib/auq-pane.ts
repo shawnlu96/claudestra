@@ -60,8 +60,95 @@ export function parseAuqTabSections(line: string): string[] {
     .filter(Boolean);
 }
 
+
+/**
+ * v2.23+ Pi 的选择/确认对话框（owner 2026-09-21 实报：「pi 里面有些选项没办法
+ * 发到 Claudestra 里面做选择」——截图是权限守门扩展的 `工具守门: rm-rf-relative`
+ * 确认框，agent 就那么停着，手机侧完全无感）。
+ *
+ * Pi 的 TUI 不是 Claude Code 那套：没有 `❯ N.` 编号选项，也没有
+ * `Enter to select · Esc to cancel` 那行 footer，所以 CC 的解析器一律返回 null，
+ * 整条交互卡链路（web 卡片 + Discord 按钮 + /answer 端点）都不会被触发。
+ *
+ * Pi 的共用 select 组件（`ctx.ui.confirm` / `ctx.ui.select` / 内建对话框都走它）
+ * 渲染成：
+ *
+ * ```
+ *   工具守门: rm-rf-relative
+ *   rm -rf 相对路径，需确认
+ *
+ *   仍要执行吗？
+ *
+ *   → Yes
+ *     No
+ *
+ *   ↑↓ navigate   enter select   escape/ctrl+c cancel
+ * ```
+ *
+ * 翻译成 AuqPaneParse 之后，**下游一个字都不用改**：单问题单选的键序列本来就是
+ * 「Down×n + Enter」（buildAuqKeystrokes 的第一条分支），取消本来就是 Esc，
+ * 陈旧重验本来就是「再解析一次 pane」——正好都是 Pi 这个组件的键位。
+ */
+const PI_FOOTER_RE = /↑↓\s+\S*\s*navigate\b.*\bselect\b.*\bcancel\b/;
+const PI_CURSOR_RE = /^\s*(→|›)\s+(.*\S)\s*$/;
+/** 选项块/标题块各自最多这么多行，多了当不是对话框 */
+const PI_MAX_BLOCK_LINES = 10;
+
+/** footer 往上取一段连续非空行（跳过前置空行）。返回 [块, 块上方的下标]。 */
+function piBlockAbove(lines: string[], from: number): { block: string[]; next: number } {
+  let i = from;
+  while (i >= 0 && lines[i].trim() === "") i--;
+  const block: string[] = [];
+  while (i >= 0 && lines[i].trim() !== "" && block.length <= PI_MAX_BLOCK_LINES) {
+    block.unshift(lines[i]);
+    i--;
+  }
+  return { block, next: i };
+}
+
+export function parsePiSelectPane(pane: string): AuqPaneParse | null {
+  const lines = pane.split("\n");
+
+  let footerIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (PI_FOOTER_RE.test(lines[i])) {
+      footerIdx = i;
+      break;
+    }
+  }
+  if (footerIdx < 0) return null;
+
+  // 选项块：footer 上方第一段连续非空行，其中**恰好一行**带 → 光标。
+  // 「恰好一行」是把普通正文误当选项挡在外面的主判据。
+  const { block: optLines, next } = piBlockAbove(lines, footerIdx - 1);
+  if (optLines.length < 2 || optLines.length > 8) return null;
+  if (optLines.some((l) => BOX_CHARS_RE.test(l))) return null;
+  const options: AuqPaneOption[] = optLines.map((l) => {
+    const m = l.match(PI_CURSOR_RE);
+    return { label: (m ? m[2] : l.trim()).slice(0, 100), cursor: !!m, checked: false };
+  });
+  if (options.filter((o) => o.cursor).length !== 1) return null;
+
+  // 问题：再往上取两段（Pi 把 confirm 的 title 和 message 分成两块渲染）。
+  const q1 = piBlockAbove(lines, next);
+  const q2 = piBlockAbove(lines, q1.next);
+  const text = [...q2.block, ...q1.block]
+    .map((l) => l.trim())
+    .filter((l) => l && !BOX_CHARS_RE.test(l))
+    .join(" ")
+    .slice(0, 300);
+  if (!text) return null;
+
+  return { form: "single", sections: ["Pi 确认"], question: text, options, multiSelect: false };
+}
+
 export function parseAuqPane(pane: string): AuqPaneParse | null {
   const lines = pane.split("\n");
+
+  // Pi 的对话框长得完全不一样（无 `❯ N.` 无 CC footer），先试它；
+  // 两边 footer 签名互斥，不会互相误命中。
+  const pi = parsePiSelectPane(pane);
+  if (pi) return pi;
 
   // 1) footer 提示行在场才可能是 AUQ 弹窗
   let footerIdx = -1;
