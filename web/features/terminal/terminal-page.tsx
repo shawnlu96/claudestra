@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { t, useT } from "@/lib/i18n";
+import { isNativeShell } from "@/lib/native";
 
 /** dynamic loading fallback——用 useT 订阅而非模块级 t():chunk 加载窗口里切语言也能跟上 */
 function TermLoading() {
@@ -75,6 +76,17 @@ export function TerminalPage({
   //   方向裁决:首次位移横向主导才进入拖动,竖向主导则放弃(让给终端滚动);
   //           进入拖动后 stopPropagation,别让 xterm 同时收到触摸当滚动处理。
   // capture 阶段监听,xterm 自己的触摸处理拦不到左缘起始的这一段。
+  //
+  // ⚠ 原生壳里**整条手势让给 WKWebView**(AppDelegate/ClaudestraViewController 开了
+  //   allowsBackForwardNavigationGestures),这里绝不能再自己拖一遍——跟 chat.tsx
+  //   onShellTouchEnd 里「JS 再做一次就是双重后退」是同一条规矩,只是这页漏了。
+  //   症状(owner 2026-09-21 截图):系统手势把整个 webview 往右推 d1,我们又额外给
+  //   这个 fixed 层加了 translateX(d2),两层错开 d2≈31px ⇒ 缝里露出底下聊天页的
+  //   base-100 底色和它自己的返回箭头,看着像页面裂成两半、多出一个返回键。
+  //   (像素证据:缝 #171819=base-100、终端页 #1e1e2e/标题 #181825,两个箭头距各自
+  //    左边缘都是 80px ⇒ 两个真实图层而非重影。)
+  //   系统手势本来就能从 #terminal 退回 #chat(popstate 已由 TerminalButton 接),
+  //   所以这里直接不接管,不会丢功能。
   const edgeRef = useRef<{ x: number; y: number; dragging: boolean; dead: boolean } | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   return createPortal(
@@ -84,7 +96,9 @@ export function TerminalPage({
       onTouchStartCapture={(e) => {
         const t = e.touches[0];
         edgeRef.current =
-          t && t.clientX < 28 ? { x: t.clientX, y: t.clientY, dragging: false, dead: false } : null;
+          !isNativeShell() && t && t.clientX < 28
+            ? { x: t.clientX, y: t.clientY, dragging: false, dead: false }
+            : null;
       }}
       onTouchMoveCapture={(e) => {
         const s = edgeRef.current;
