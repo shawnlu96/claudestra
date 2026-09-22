@@ -16,7 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
-import { CodexQueueSink, codexQueueArgs, defaultRunner, heldThreadIds, type InboundSink } from "./lib/codex-thread.js";
+import { CodexQueueSink, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 import { findCodexSessionPath } from "./lib/codex-session.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
@@ -44,14 +44,6 @@ if (!CHANNEL_ID) {
   process.exit(1);
 }
 
-// Codex 模式（CLAUDESTRA_RUNTIME=codex）：Codex 不认 notifications/claude/channel，
-// 入站改走 `codex queue`；其余（握手后注册、被顶替不退出、reply 等工具）与 CC 共用。
-const IS_CODEX = process.env.CLAUDESTRA_RUNTIME === "codex";
-const CODEX_BIN = process.env.CLAUDESTRA_CODEX_BIN || "codex";
-const AGENT_NAME = process.env.CLAUDESTRA_AGENT || "";
-let codexSessionId: string | undefined = process.env.CLAUDESTRA_SESSION_ID || undefined;
-let codexSessionFile: string | undefined;
-
 // ============================================================
 // Bridge WebSocket 连接
 // ============================================================
@@ -66,6 +58,14 @@ const pendingRequests = new Map<
 let requestCounter = 0;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+
+// Codex 模式（CLAUDESTRA_RUNTIME=codex）：Codex 不认 notifications/claude/channel，
+// 入站改走 `codex queue`；其余（握手后注册、被顶替不退出、reply 等工具）与 CC 共用。
+const IS_CODEX = process.env.CLAUDESTRA_RUNTIME === "codex";
+const CODEX_BIN = process.env.CLAUDESTRA_CODEX_BIN || "codex";
+const AGENT_NAME = process.env.CLAUDESTRA_AGENT || "";
+let codexSessionId: string | undefined = process.env.CLAUDESTRA_SESSION_ID || undefined;
+let codexSessionFile: string | undefined;
 
 // ── MCP stdio 生命周期 ────────────────────────────────────────────────
 // 唯一能证明「本进程是 Claude Code 正在使用的那一个」的信号。用它做两件事：
@@ -429,6 +429,18 @@ async function discoverCodexSession(): Promise<void> {
     await new Promise((r) => setTimeout(r, 400));
   }
   if (codexSessionId && !codexSessionFile) setCodexSession(codexSessionId);
+}
+
+/** Codex 被强杀时 MCP 子进程会成孤儿（判据见 codexParentGone）：父进程没了就按 stdio 关闭处理 */
+function startCodexParentWatch() {
+  const parent = process.ppid;
+  const timer = setInterval(() => {
+    if (!codexParentGone(parent, process.ppid, isPidAlive)) return;
+    mcpClosed = true;
+    console.error(`👋 Codex 父进程 ${parent} 已退出，channel-server 随之退出`);
+    process.exit(0);
+  }, 2000);
+  timer.unref?.();
 }
 
 /** 就绪标记与 Pi 扩展同款：manager 等 @claudestra_ready=1，而不是嗅探会随版本变的 TUI 文案 */
@@ -840,6 +852,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
+  if (IS_CODEX) startCodexParentWatch();
 
   // 兜底：万一 SDK 没回调 oninitialized（版本差异 / 客户端跳过通知），30s 后
   // 仍未握手就照旧注册。宁可退回老行为，也不能让 agent 完全连不上 bridge。

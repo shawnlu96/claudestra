@@ -96,6 +96,25 @@ export function wrapChannelContent(content: string, meta: Record<string, string>
   return `<channel ${attrs.join(" ")}>\n${content}\n</channel>`;
 }
 
+/**
+ * Codex 父进程是否已经没了。强杀 Codex（tmux kill-window 的 SIGHUP）不会带走它的 MCP
+ * 子进程（实测 /quit 会带走），孤儿 channel-server 收不到 stdio 关闭通知，会一直重连
+ * bridge、跟重启后的新实例抢同一个频道。父进程没了 = MCP 客户端没了，与 mcp.onclose 同义。
+ */
+export function codexParentGone(initialPpid: number, currentPpid: number, alive: (pid: number) => boolean): boolean {
+  if (!Number.isInteger(initialPpid) || initialPpid <= 1) return false; // 起来时就没有可盯的父进程
+  return currentPpid !== initialPpid || !alive(initialPpid);
+}
+
+export function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM"; // 活着但不归我们管
+  }
+}
+
 /** 与设计里的 InboundSink 同形（合并后可换成 runtimes/types.ts 的定义） */
 export interface InboundSink {
   deliver(content: string, meta: Record<string, string>): Promise<{ ok: true } | { ok: false; error: string }>;

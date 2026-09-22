@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   CodexQueueSink,
   OFFLINE_NOTICE,
+  codexParentGone,
+  isPidAlive,
   codexQueueArgs,
   decideDelivery,
   heldThreadIds,
@@ -158,5 +160,21 @@ describe("CodexQueueSink", () => {
     expect(r1.ok).toBe(false); // 查活失败按离线处理
     expect(r2.ok).toBe(true);
     expect(queued.length).toBe(1);
+  });
+});
+
+describe("codexParentGone", () => {
+  const alive = (set: number[]) => (pid: number) => set.includes(pid);
+  test("被过继（ppid 变了）或父进程查无此人 → 已退出", () => {
+    expect(codexParentGone(500, 500, alive([500]))).toBe(false);
+    expect(codexParentGone(500, 1, alive([500]))).toBe(true);
+    expect(codexParentGone(500, 500, alive([]))).toBe(true);
+  });
+  test("起来时就挂在 init 下：没有可盯的父进程，不因此退出", () => {
+    expect(codexParentGone(1, 1, alive([]))).toBe(false);
+  });
+  test("isPidAlive", () => {
+    expect(isPidAlive(process.pid)).toBe(true);
+    expect(isPidAlive(2 ** 22 + 12345)).toBe(false);
   });
 });
