@@ -86,8 +86,8 @@ export function remoteAccessChecks(r: RemoteAccessReport): Check[] {
   return out;
 }
 
-/** web 端口的唯一真源是 web/package.json 的 start 脚本（与 install-cli 同一判据） */
-function readWebPort(repoRoot: string): number {
+/** web 端口的唯一真源是 web/package.json 的 start 脚本（与 install-cli 同一判据）；bridge 端点也用它 */
+export function readWebPort(repoRoot: string): number {
   let start: string | undefined;
   try { start = JSON.parse(readFileSync(`${repoRoot}/web/package.json`, "utf-8"))?.scripts?.start; } catch { /* 用默认端口 */ }
   return webPortFromStartScript(start);

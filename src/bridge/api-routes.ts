@@ -669,6 +669,22 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
   }
 
+  // GET /api/v1/remote-access —— 网页「手机访问」面板：Tailscale 状态、每个入口（可达 / 证书剩余天数）、
+  // 建议。只读：绝不在这里配 serve 或改任何机器配置（那只在 setup 的交互终端里、经用户同意做）。
+  // 全权 token：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。
+  if (path === "/remote-access" && req.method === "GET") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "remote-access requires a full-scope token" });
+    }
+    const { remoteAccessSnapshot } = await import("../lib/tailscale.js");
+    const { readWebPort } = await import("../lib/doctor-remote.js");
+    try {
+      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readWebPort(`${import.meta.dir}/../..`))) });
+    } catch (e) {
+      return apiJson(500, { ok: false, error: `探测失败: ${(e as Error).message}` });
+    }
+  }
+
   // GET /api/v1/claude-models —— Claude Code 的模型目录（web 三处模型下拉用）。
   // 与 /pi-models 对称：那个读 Pi 的 models.json；这个读 CC 自己拉的目录（本地缓存 →
   // 公开端点 → 别名表兜底），见 lib/model-catalog.ts。目录本身是公开的，不限 scope。

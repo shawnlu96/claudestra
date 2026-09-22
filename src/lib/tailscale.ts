@@ -467,6 +467,43 @@ export function workingHttpsEntry(r: RemoteAccessReport): { url: string; source:
   return e && e.source !== "tailnet-ip" ? { url: e.url, source: e.source } : null;
 }
 
+/**
+ * 给网页「手机访问」面板用的快照：现状 + 建议（纯只读）。60 秒缓存 —— 每次都探测要起
+ * 几个子进程、做几次 TLS 握手，面板开关一次就是一轮，没必要。
+ */
+let snapCache: { at: number; port: number; data: RemoteAccessSnapshot } | null = null;
+
+export interface RemoteAccessSnapshot extends RemoteAccessReport {
+  plan: HttpsPlan;
+  /** plan 为 serve 时给一条可复制的命令（CLI 绝对路径）；网页只展示，不执行 */
+  suggestedCommand: string | null;
+  checkedAt: string;
+}
+
+export async function remoteAccessSnapshot(webPort: number, maxAgeMs = 60_000): Promise<RemoteAccessSnapshot> {
+  if (snapCache && snapCache.port === webPort && Date.now() - snapCache.at < maxAgeMs) return snapCache.data;
+  const r = await collectRemoteAccess(webPort);
+  const cli = r.tailscale.cli;
+  const [status, serve, busy8443] = await Promise.all([
+    readTailscaleStatus(cli),
+    readServeStatus(cli),
+    portBusyByOthers(8443),
+  ]);
+  const plan = planHttps({
+    cliFound: !!cli, status, serve, webPort,
+    port443Busy: r.others443.length > 0, port8443Busy: busy8443,
+    workingEntry: workingHttpsEntry(r),
+  });
+  const data: RemoteAccessSnapshot = {
+    ...r,
+    plan,
+    suggestedCommand: plan.kind === "serve" && cli ? [shellQuote(cli), ...plan.args].join(" ") : null,
+    checkedAt: new Date().toISOString(),
+  };
+  snapCache = { at: Date.now(), port: webPort, data };
+  return data;
+}
+
 // ============================================================
 // 变更（只在用户明确同意后由交互式 setup 调用）
 // ============================================================
