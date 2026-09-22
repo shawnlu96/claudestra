@@ -221,6 +221,7 @@ async function saveRegistry(reg: Registry) {
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
+import { stderrTail } from "./lib/run-manager.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -441,6 +442,21 @@ function formatAge(date: Date): string {
 
 function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
+}
+
+/**
+ * 等子进程结束；非 0 退出返回「exit=N：stderr 末几行」，成功返回 null。
+ * stdout/stderr 都读走——pipe 了不读，输出一多子进程就卡在写管道上。
+ */
+async function spawnFailure(proc: { exited: Promise<number>; stdout: ReadableStream; stderr: ReadableStream }): Promise<string | null> {
+  const [, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (code === 0) return null;
+  const tail = stderrTail(err);
+  return `exit=${code}${tail ? `：${tail}` : ""}`;
 }
 
 /**
@@ -3434,11 +3450,18 @@ async function cmdUpdateBeta() {
   if (!ff.ok) { await unlock(); output({ ok: false, error: `ff 前进失败: ${ff.err}` }); return; }
 
   const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  await biProc.exited;
+  const biFail = await spawnFailure(biProc);
+  if (biFail) {
+    // 依赖没装齐就 reload，新代码直接起不来——停在这里，让失败冒泡
+    await unlock();
+    output({ ok: false, channel: "beta", error: `bun install 失败（${biFail}）——代码已前进到 ${remote.slice(0, 7)} 但未 reload daemon；修好后重跑 manager update` });
+    return;
+  }
   const rendered = await renderMasterClaude();
   const webBuild = await maybeBuildWeb(preHead, remote);
   const migrateProc = Bun.spawn(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  await migrateProc.exited;
+  const migrateError = await spawnFailure(migrateProc);
+  if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
   await Bun.sleep(500);
   await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
   // ⚠ 先释锁再 reload daemon:bootout launcher 会让本进程被 launchd 连坐回收
@@ -3460,6 +3483,7 @@ async function cmdUpdateBeta() {
     masterReRendered: rendered,
     webBuild,
     cliInstalled: cliInstall.errors.length === 0,
+    ...(migrateError ? { migrateError } : {}),
   });
 }
 
@@ -3545,7 +3569,13 @@ async function cmdUpdate() {
 
   // 4. bun install（依赖可能变了）
   const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  await biProc.exited;
+  const biFail = await spawnFailure(biProc);
+  if (biFail) {
+    // 以前只 await exited：断网/锁文件冲突时照样 reload 三个 daemon，新代码缺依赖起不来
+    await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
+    output({ ok: false, error: `bun install 失败（${biFail}）——代码已切到 ${release.tag} 但未 reload daemon；修好后重跑 manager update` });
+    return;
+  }
 
   // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
   const rendered = await renderMasterClaude();
@@ -3562,7 +3592,8 @@ async function cmdUpdate() {
     ["bun", "run", `${REPO_ROOT}/src/manager.ts`, "migrate"],
     { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }
   );
-  await migrateProc.exited;
+  const migrateError = await spawnFailure(migrateProc);
+  if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
 
   // v2.4.0+: 不再 pm2 restart。install-cli 用 launchctl bootout+bootstrap 来
   // reload 三个 daemon plist，每次都生效新代码；如果检测到老 pm2 进程也会顺手
@@ -3598,6 +3629,7 @@ async function cmdUpdate() {
     webBuild,
     // 分支挂回结果(detached HEAD 修复,v2.16.3)——同样绝不静默
     branch: reattach,
+    migrateError: migrateError || undefined,
     cliInstalled: cliInstall.errors.length === 0,
     cliWrapper: cliInstall.cliWrapper || undefined,
     daemons: cliInstall.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),
