@@ -15,7 +15,7 @@
 
 import { existsSync } from "fs";
 import { connect as tlsConnect } from "tls";
-import { connect as netConnect } from "net";
+import { connect as netConnect, isIP } from "net";
 
 // ============================================================
 // CLI 定位
@@ -43,6 +43,8 @@ export function tailscaleCliCandidates(
   add(env.TLS_PROXY_TS_CLI);
   for (const dir of (env.PATH || "").split(":")) if (dir) add(`${dir.replace(/\/+$/, "")}/tailscale`);
   for (const p of TAILSCALE_CLI_FALLBACKS) add(p);
+  // 拖进 ~/Applications 的 App（非管理员用户常见）：漏掉它就会把「装着在跑」当成「没装」
+  if (env.HOME) add(`${env.HOME.replace(/\/+$/, "")}/Applications/Tailscale.app/Contents/MacOS/Tailscale`);
   return out;
 }
 
@@ -393,7 +395,13 @@ export async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown 
   }
 }
 
-/** TLS 握手取证书剩余天数与寿命；不校验链（过期证书也要能报天数），authorized 单独给出 */
+/**
+ * TLS 握手取证书剩余天数与寿命；不校验链（过期证书也要能报天数），authorized 单独给出。
+ *
+ * 超时用独立的 JS 计时器兜底：Bun 1.3 忽略 tls.connect 的 `timeout` 选项，对端只接 TCP
+ * 不说 TLS（卡死的 Caddy、serve 正在签证书、中间盒）时 Promise 永不 resolve —— doctor
+ * 会卡死、bridge 每次开面板泄漏一个 socket。计时器同时覆盖慢 DNS。
+ */
 export function certDaysLeft(
   host: string,
   port: number,
@@ -401,26 +409,36 @@ export function certDaysLeft(
 ): Promise<{ daysLeft: number; lifetimeDays: number; authorized: boolean } | null> {
   return new Promise((resolve) => {
     let done = false;
-    const finish = (v: { daysLeft: number; lifetimeDays: number; authorized: boolean } | null) => {
+    let sock: ReturnType<typeof tlsConnect> | undefined;
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    function finish(v: { daysLeft: number; lifetimeDays: number; authorized: boolean } | null) {
       if (done) return;
       done = true;
-      try { sock.destroy(); } catch { /* ignore */ }
+      clearTimeout(timer);
+      try { sock?.destroy(); } catch { /* ignore */ }
       resolve(v);
-    };
-    const sock = tlsConnect({ host, port, servername: host, rejectUnauthorized: false, timeout: timeoutMs }, () => {
-      const cert = sock.getPeerCertificate();
-      const to = cert?.valid_to ? Date.parse(cert.valid_to) : NaN;
-      const from = cert?.valid_from ? Date.parse(cert.valid_from) : NaN;
-      finish(Number.isFinite(to)
-        ? {
-            daysLeft: (to - Date.now()) / 86_400_000,
-            lifetimeDays: Number.isFinite(from) ? (to - from) / 86_400_000 : 90,
-            authorized: sock.authorized,
-          }
-        : null);
-    });
+    }
+    // SNI 不能是 IP 字面量：tls.connect 会同步抛 ERR_INVALID_ARG_VALUE
+    const opts = { host, port, rejectUnauthorized: false, ...(isIP(host) ? {} : { servername: host }) };
+    try {
+      sock = tlsConnect(opts, () => {
+        const s = sock!;
+        const cert = s.getPeerCertificate();
+        const to = cert?.valid_to ? Date.parse(cert.valid_to) : NaN;
+        const from = cert?.valid_from ? Date.parse(cert.valid_from) : NaN;
+        finish(Number.isFinite(to)
+          ? {
+              daysLeft: (to - Date.now()) / 86_400_000,
+              lifetimeDays: Number.isFinite(from) ? (to - from) / 86_400_000 : 90,
+              authorized: s.authorized,
+            }
+          : null);
+      });
+    } catch {
+      finish(null);
+      return;
+    }
     sock.on("error", () => finish(null));
-    sock.on("timeout", () => finish(null));
   });
 }
 

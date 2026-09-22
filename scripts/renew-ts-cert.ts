@@ -43,7 +43,7 @@ function inspect(certPath: string, keyPath: string) {
   return { subjectAltName: cert.subjectAltName || "", validTo: cert.validTo, keyMatches };
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
   const cli = await findTailscaleCli();
   if (!cli) { console.error("✗ 找不到 tailscale CLI（PATH / App 包内 / brew 位置都没有）"); return 1; }
   const host = arg("host") || (await readTailscaleStatus(cli))?.dnsName || "";
@@ -92,4 +92,6 @@ async function main(): Promise<number> {
   return 0;
 }
 
-process.exit(await main());
+// 只在直接运行时执行：tests/ 会 import 本文件，让根 tsconfig（只 include src/ 与 tests/）
+// 顺着 import 把它纳入类型检查 —— 否则这个脚本在 `bun run check` 和 CI 里都无人把关。
+if (import.meta.main) process.exit(await main());

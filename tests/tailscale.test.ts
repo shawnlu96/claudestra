@@ -17,6 +17,7 @@ import {
   shellQuote,
   workingHttpsEntry,
   validateCertCandidate,
+  certDaysLeft,
   type PlanInput,
   type RemoteAccessReport,
 } from "../src/lib/tailscale";
@@ -246,5 +247,52 @@ describe("validateCertCandidate（续签脚本替换前的闸）", () => {
     expect(validateCertCandidate({ ...good, validTo: "Oct 10 00:00:00 2026 GMT" }).ok).toBe(false);
     expect(validateCertCandidate({ ...good, keyMatches: false }).ok).toBe(false);
     expect(validateCertCandidate({ ...good, validTo: "garbage" }).ok).toBe(false);
+  });
+});
+
+describe("tailscaleCliCandidates：~/Applications 里的 App", () => {
+  test("HOME 下的 App 包内 CLI 也算候选（排在系统位置之后）", () => {
+    const home = "/Users/someone";
+    const homeApp = `${home}/Applications/Tailscale.app/Contents/MacOS/Tailscale`;
+    expect(pickTailscaleCli({ PATH: "/usr/bin", HOME: home }, (p) => p === homeApp)).toBe(homeApp);
+    expect(tailscaleCliCandidates({ PATH: "", HOME: `${home}/` }, (p) => p === homeApp || p === APP)).toEqual([APP, homeApp]);
+  });
+});
+
+describe("certDaysLeft 的硬超时", () => {
+  test("对端只接 TCP 不说 TLS → 按时返回 null，不挂住（Bun 忽略 tls.connect 的 timeout 选项）", async () => {
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { open() {}, data() {} },
+    });
+    try {
+      const t0 = Date.now();
+      const r = await certDaysLeft("localhost", server.port, 300);
+      expect(r).toBeNull();
+      expect(Date.now() - t0).toBeLessThan(1000);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("IP 字面量不当 SNI 用（否则 tls.connect 同步抛错）", async () => {
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { open() {}, data() {} },
+    });
+    try {
+      expect(await certDaysLeft("127.0.0.1", server.port, 300)).toBeNull();
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("scripts/renew-ts-cert.ts", () => {
+  test("可被 import 而不执行（借此纳入 tsc 与 bun test 的检查范围）", async () => {
+    const m = await import("../scripts/renew-ts-cert");
+    expect(typeof m.main).toBe("function");
   });
 });
