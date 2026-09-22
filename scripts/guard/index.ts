@@ -7,7 +7,7 @@
 // 放宽只能手改 baseline.json 并在 raised[] 写 {key,from,to,why}；没有行内 ignore。
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { EXCLUDE, HINTS, PATTERNS, prefixOf, SCAN_DIRS, DOC_FILES } from "./config.ts";
+import { capFor, DOC_FILES, EXCLUDE, HINTS, PATTERNS, prefixOf, SCAN_DIRS } from "./config.ts";
 import { checkRaised, compare, initLimits, loosenings, parseBaseline, sortCounts, tighten } from "./ratchet.ts";
 import { measureComments } from "./rules/comments.ts";
 import { measureDead } from "./rules/dead.ts";
@@ -45,7 +45,7 @@ async function runFn(files: Files): Promise<RuleResult> {
   const parser = await loadParser(ROOT);
   if (!parser) return { counts: {}, skipped: "没有可用的解析器（oxc-parser 未安装、web/node_modules/typescript 也不在），跳过函数长度检查" };
   const r = measureFn(files, parser.parse);
-  return { ...r, detail: [`（解析器：${parser.name}）`, ...(r.detail ?? [])] };
+  return { ...r, detail: [`fn （解析器：${parser.name}）`, ...(r.detail ?? [])] };
 }
 
 function git(args: string[]): { ok: boolean; out: string } {
@@ -93,7 +93,10 @@ function hintFor(key: string): string {
 const SET_PREFIXES = new Set(["deps", "dead", "twins", "route", "fnLong"]);
 
 function printFinding(f: Finding): void {
-  const what = SET_PREFIXES.has(prefixOf(f.key)) && f.limit === 0 ? "新增违规" : `${f.cur} > ${f.limit}（只许降）`;
+  const p = prefixOf(f.key);
+  let what = `${f.cur} > ${f.limit}（只许降）`;
+  if (SET_PREFIXES.has(p) && f.limit === 0) what = "新增违规";
+  else if (p === "size" && f.limit === capFor(f.key)) what = `${f.cur} 行 > 默认上限 ${f.limit}`;
   console.log(`✗ ${f.key} ${what} → ${hintFor(f.key)}`);
 }
 
@@ -186,7 +189,7 @@ async function main(): Promise<number> {
   const v = compare(cur.limits, m.counts, m.skipped);
   const base = resolveBase();
   const baseBaseline = loadBaseBaseline(base);
-  const raisedErrs = checkRaised(baseBaseline, cur);
+  let raisedErrs = checkRaised(baseBaseline, cur);
   if (args.includes("--json")) {
     console.log(JSON.stringify({ base, ...v, raisedErrs, skipped: m.notes, counts: m.counts }, null, 2));
     return v.failures.length || raisedErrs.length ? 1 : 0;
@@ -199,6 +202,7 @@ async function main(): Promise<number> {
     const next = tighten(cur.limits, m.counts, m.skipped);
     const changed = Object.keys(cur.limits).filter((k) => next[k] !== cur.limits[k]);
     writeBaseline({ ...cur, limits: next });
+    raisedErrs = checkRaised(baseBaseline, { ...cur, limits: next });
     changed.forEach((k) => console.log(`↓ ${k}: ${cur.limits[k]} → ${next[k] ?? "删除（已在默认上限内）"}`));
     console.log(`✓ baseline 收紧 ${changed.length} 项`);
     v.tightenable = [];
@@ -206,7 +210,8 @@ async function main(): Promise<number> {
   report(v, raisedErrs);
   const ms = (performance.now() - t0).toFixed(0);
   if (v.failures.length || raisedErrs.length) {
-    m.detail.forEach((d) => console.log(`  · ${d}`));
+    const failed = new Set(v.failures.map((f) => prefixOf(f.key).replace(/^fnLong$/, "fn")));
+    m.detail.filter((d) => failed.has(d.split(" ")[0])).forEach((d) => console.log(`  · ${d}`));
     console.log(`guard ✗ ${v.failures.length + raisedErrs.length} 项（${m.fileCount} 个文件，${ms}ms，基准 ${base.slice(0, 10)}）`);
     console.log("  规则：修代码，不要改 baseline；真要放宽见 CLAUDE.md「防腐规则」");
     return 1;
