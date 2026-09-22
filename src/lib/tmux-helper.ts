@@ -876,12 +876,21 @@ export function modelFamilies(text: string): Set<string> {
 }
 
 /**
+ * `/effort` 参数 → 确认框里显示的档位。ultracode 在框里写作 xhigh（CC 2.1.280 的 /effort
+ * 解析把它当 xhigh 档，框文案「Yes, switch to xhigh」）——两边都过这一刀再比。
+ */
+export function effortDialogLevel(level: string): string {
+  const l = level.trim().toLowerCase();
+  return l === "ultracode" ? "xhigh" : l;
+}
+
+/**
  * 这个框是不是我们刚注入的那条命令引出的：model 按家族比（框里是显示名 "Sonnet 5"，
  * 命令里是 id "claude-sonnet-5"），解析不出家族的自定义 id 只认种类；effort 按档位全等。
  */
 export function switchPromptMatches(p: SwitchConfirmPrompt, kind: SwitchConfirmKind, arg: string): boolean {
   if (p.kind !== kind) return false;
-  if (kind === "effort") return p.target.toLowerCase() === arg.trim().toLowerCase();
+  if (kind === "effort") return effortDialogLevel(p.target) === effortDialogLevel(arg);
   const want = modelFamilies(arg);
   if (!want.size) return true;
   const got = modelFamilies(p.target);
@@ -892,10 +901,10 @@ export function switchPromptMatches(p: SwitchConfirmPrompt, kind: SwitchConfirmK
  * pane 里有几条已出结果的 `/model`（或 `/effort`）命令：回显行 `❯ /model …` 之后、
  * 下一个 ❯ 之前出现了 `⎿` 结果行才算一条。
  *
- * 为什么数条数而不是搜 "Set model to"：上一次切换的结果行留在 scrollback 里，确认框
- * 还没画出来的那一拍就会被它提前放行——旧轮询就此收工，框没人按；接着注入的
- * `/effort …` 打进了框里，回车替框选了 Yes、effort 本身被吞掉（2.1.280 实测）。
- * 注入前记下基数，数目变大才是这次命令落地。
+ * 为什么不搜 "Set model to"：上一次切换的结果行留在 scrollback 里，确认框还没画出来的
+ * 那一拍就会被它提前放行，框没人按；接着注入的 `/effort …` 打进框里被吞掉（2.1.280 实测）。
+ * 注入前记下基数，数目变大才是这次命令落地。全屏模式下旧回显可能被顶出屏幕、数目不涨，
+ * 所以还要配 lastSettledSwitch 的位置判据（见 runSwitchCommand）。
  */
 export function countSettledSwitchCommands(pane: string, kind: SwitchConfirmKind): number {
   const echoRe = kind === "model" ? /^\s*❯\s+\/model\b/ : /^\s*❯\s+\/effort\b/;
@@ -908,6 +917,63 @@ export function countSettledSwitchCommands(pane: string, kind: SwitchConfirmKind
   return n;
 }
 
+const INPUT_RULE_RE = /^[─━]{20,}\s*$/;
+/** 右对齐的临时提示行（toast / 状态提示）；对话正文最多缩进 2~3 格 */
+const RIGHT_ALIGNED_RE = /^\s{8,}\S/;
+
+/** 输入框上沿之上的对话区（没有输入框——比如框正盖着——就是整屏） */
+function conversationRegion(pane: string): string[] {
+  const lines = trimTrailingBlank(pane.split("\n"));
+  for (let i = lines.length - 1; i >= 2; i--) {
+    if (!INPUT_RULE_RE.test(lines[i]!)) continue;
+    // 输入框 = 上沿 ─── / ❯ 行（可多行）/ 下沿 ───；i 是下沿，往上找 ❯ 与上沿
+    for (let j = i - 1; j >= Math.max(0, i - 8); j--) {
+      if (INPUT_RULE_RE.test(lines[j]!)) {
+        return lines.slice(j + 1, i).some((l) => /^\s*❯/.test(l)) ? lines.slice(0, j) : lines;
+      }
+    }
+    break;
+  }
+  return lines;
+}
+
+export interface SettledSwitch {
+  /** 回显行（空白已规整）：`❯ /model claude-sonnet-5` */
+  command: string;
+  /** ⎿ 结果行正文（去掉 ⎿） */
+  result: string;
+  /** 结果行之后对话区里还有几行正文——同一条命令重复时靠它分新旧 */
+  tail: number;
+}
+
+/**
+ * 对话区里最底下一条已出结果的 `/model`（或 `/effort`）命令。位置判据：全屏模式只 capture
+ * 得到可见屏，旧回显被顶出屏幕时 countSettledSwitchCommands 数目不涨，但「最底下那条是
+ * 不是这次的命令、后面跟了几行」仍然变了。
+ */
+export function lastSettledSwitch(pane: string, kind: SwitchConfirmKind): SettledSwitch | null {
+  const region = conversationRegion(pane);
+  const echoRe = kind === "model" ? /^\s*❯\s+\/model\b/ : /^\s*❯\s+\/effort\b/;
+  let pending: string | null = null;
+  let last: { command: string; result: string; at: number } | null = null;
+  region.forEach((line, i) => {
+    if (/^\s*❯/.test(line)) { pending = echoRe.test(line) ? line.trim().replace(/\s+/g, " ") : null; return; }
+    if (pending && /^\s*⎿/.test(line)) {
+      last = { command: pending, result: line.trim().replace(/^⎿\s*/, ""), at: i };
+      pending = null;
+    }
+  });
+  if (!last) return null;
+  const { command, result, at } = last as { command: string; result: string; at: number };
+  const tail = region.slice(at + 1).filter((l) => l.trim() && !RIGHT_ALIGNED_RE.test(l)).length;
+  return { command, result, tail };
+}
+
+/** 输入框上方右对齐的 toast 行（不进对话记录，几秒后自己消失） */
+function toastLines(pane: string): string[] {
+  return trimTrailingBlank(pane.split("\n")).slice(-12).filter((l) => RIGHT_ALIGNED_RE.test(l)).map((l) => l.trim());
+}
+
 /**
  * 命令结果的另一种落地形态：输入框上方右对齐的临时提示行（toast），不进对话记录。
  * 2.1.280 实测代按 effort 框后有时只出 toast、没有「❯ /effort … ⎿」那两行——只数回显会
@@ -915,62 +981,128 @@ export function countSettledSwitchCommands(pane: string, kind: SwitchConfirmKind
  */
 export function switchResultToast(pane: string, kind: SwitchConfirmKind): string | null {
   const re = kind === "model" ? /^Set model to\b/ : /^Set effort level to\b/;
-  for (const line of trimTrailingBlank(pane.split("\n")).slice(-12)) {
-    if (!/^\s{8,}\S/.test(line)) continue; // 右对齐；对话里的 ⎿ 结果行只缩进 2 格
-    const t = line.trim();
-    if (re.test(t)) return t;
-  }
-  return null;
+  return toastLines(pane).find((t) => re.test(t)) ?? null;
+}
+
+/**
+ * CC 拒绝切换的原因（2.1.280 文案）：ultracode 没开 dynamic workflows / 超出 effort 上限、
+ * 模型被组织策略禁用。它和成功结果一样可能以 ⎿ 行或 toast 出现——认出来就算落地，
+ * 别空等到超时（toast 等不到最后一拍就消失了，拒绝原因会丢）。
+ */
+export const SWITCH_REJECT_RE = /needs dynamic workflows|restricted by your organization|runs at xhigh effort, which is above/i;
+
+export function switchRejectionToast(pane: string): string | null {
+  return toastLines(pane).find((t) => SWITCH_REJECT_RE.test(t)) ?? null;
 }
 
 export type SwitchOutcome =
   /** 命令落地，没弹框 */
   | "applied"
-  /** 弹了确认框，已代按 Yes 并看到落地 */
+  /** 弹了确认框，已代按 Yes，框已关 */
   | "confirmed"
+  /** CC 拒绝了这次切换（reason 是原因文案） */
+  | "rejected"
   /** 弹出的框不是这条命令引出的（种类/目标对不上）——没按，留给用户 */
   | "foreign"
   /** 轮询窗内没看到落地（框可能仍挂着：看 pane） */
   | "timeout";
 
+export interface SwitchResult {
+  outcome: SwitchOutcome;
+  /** 返回前最后一次 capture（按过键之后会重新 capture，不会是按键前的旧屏） */
+  pane: string;
+  prompt?: SwitchConfirmPrompt;
+  reason?: string;
+}
+
+/** tmux 读写口；单测注入假 pane 序列 */
+export interface SwitchIO {
+  capture(target: string, lines: number): Promise<string>;
+  sendLine(target: string, text: string, delayMs: number): Promise<void>;
+  sendKey(target: string, key: string): Promise<void>;
+  sleep(ms: number): Promise<void>;
+}
+
+const tmuxSwitchIO: SwitchIO = {
+  capture: (t, n) => tmuxCapture(t, n),
+  sendLine: (t, text, d) => tmuxSendLine(t, text, d),
+  sendKey: async (t, k) => { await tmuxRaw(["send-keys", "-t", t, k]); },
+  sleep: (ms) => Bun.sleep(ms),
+};
+
+/** 在确认框上选 Yes（按 detectSwitchConfirmPrompt 算好的键）。 */
+export async function pressSwitchConfirm(target: string, p: SwitchConfirmPrompt, io: SwitchIO = tmuxSwitchIO): Promise<void> {
+  for (const k of p.keys) {
+    await io.sendKey(target, k);
+    await io.sleep(120);
+  }
+}
+
 /**
  * 注入 `/model X` 或 `/effort X`，确认框出现就代按 Yes，等到命令真正落地再返回。
- * claude-settings 端点与 manager 的 enforceSessionModel 共用；返回时 TUI 已回到输入框
- * （applied/confirmed），调用方可以放心接着注入下一条命令。
+ * claude-settings 端点与 manager 的 enforceSessionModel 共用；返回 applied/confirmed 时
+ * TUI 已回到输入框，调用方可以放心接着注入下一条命令。
  */
 export async function runSwitchCommand(
   target: string,
   kind: SwitchConfirmKind,
   arg: string,
-  opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number } = {},
-): Promise<{ outcome: SwitchOutcome; pane: string; prompt?: SwitchConfirmPrompt }> {
-  const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120 } = opts;
-  const before = await tmuxCapture(target, captureLines).catch(() => "");
+  opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number; io?: SwitchIO } = {},
+): Promise<SwitchResult> {
+  const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120, io = tmuxSwitchIO } = opts;
+  const capture = () => io.capture(target, captureLines).catch(() => "");
+  const before = await capture();
   const base = countSettledSwitchCommands(before, kind);
   const baseToast = switchResultToast(before, kind);
-  await tmuxSendLine(target, `/${kind} ${arg}`, sendDelayMs);
-  let confirmed = false;
+  const baseReject = switchRejectionToast(before);
+  const baseLast = lastSettledSwitch(before, kind);
+  const want = `❯ /${kind} ${arg.trim()}`.replace(/\s+/g, " ");
+
+  // 这次命令落地了吗：数目涨了 / 最底下那条换成了这次的命令 / 出了新 toast
+  const landed = (pane: string): SettledSwitch | "toast" | null => {
+    const last = lastSettledSwitch(pane, kind);
+    const isOurs = last?.command === want;
+    if (isOurs && (!baseLast || baseLast.command !== last!.command || baseLast.tail !== last!.tail || baseLast.result !== last!.result)) return last!;
+    if (countSettledSwitchCommands(pane, kind) > base) return last && isOurs ? last : "toast";
+    const toast = switchResultToast(pane, kind);
+    return toast && toast !== baseToast ? "toast" : null;
+  };
+  const verdict = (pane: string, pressed: boolean): SwitchResult | null => {
+    const rej = switchRejectionToast(pane);
+    if (rej && rej !== baseReject) return { outcome: "rejected", pane, reason: rej };
+    const l = landed(pane);
+    if (l && l !== "toast" && SWITCH_REJECT_RE.test(l.result)) return { outcome: "rejected", pane, reason: l.result };
+    if (l) return { outcome: pressed ? "confirmed" : "applied", pane };
+    // 已代按且框没了、回到输入框：结果行可能只闪了个 toast 就没了，框关掉本身就是确认生效
+    if (pressed && paneLooksIdle(pane)) return { outcome: "confirmed", pane };
+    return null;
+  };
+
+  await io.sendLine(target, `/${kind} ${arg}`, sendDelayMs);
   let presses = 0;
   let pane = "";
   for (let i = 0; i < ticks; i++) {
-    await Bun.sleep(intervalMs);
-    pane = await tmuxCapture(target, captureLines).catch(() => "");
+    await io.sleep(intervalMs);
+    pane = await capture();
     const p = detectSwitchConfirmPrompt(pane);
     if (p) {
       if (!switchPromptMatches(p, kind, arg)) return { outcome: "foreign", pane, prompt: p };
       if (presses >= 3) return { outcome: "timeout", pane, prompt: p }; // 按了不消失：别无限按
-      for (const k of p.keys) {
-        await tmuxRaw(["send-keys", "-t", target, k]);
-        await Bun.sleep(120);
-      }
+      await pressSwitchConfirm(target, p, io);
       presses++;
-      confirmed = true;
       continue;
     }
-    const toast = switchResultToast(pane, kind);
-    if (countSettledSwitchCommands(pane, kind) > base || (toast && toast !== baseToast)) {
-      return { outcome: confirmed ? "confirmed" : "applied", pane };
-    }
+    const v = verdict(pane, presses > 0);
+    if (v) return v;
+  }
+  if (presses > 0) {
+    // 最后一拍刚按过键：pane 还是按键前的屏，重看一眼再下结论
+    await io.sleep(intervalMs);
+    pane = await capture();
+    const p = detectSwitchConfirmPrompt(pane);
+    if (p) return { outcome: "timeout", pane, prompt: p };
+    const v = verdict(pane, true);
+    if (v) return v;
   }
   return { outcome: "timeout", pane };
 }

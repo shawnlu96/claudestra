@@ -1724,7 +1724,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     } catch (e) {
       return apiJson(502, { ok: false, error: `tmux 不可达: ${(e as Error).message}` });
     }
-    const { detectSwitchConfirmPrompt, switchPromptMatches, runSwitchCommand } = await import("../lib/tmux-helper.js");
+    const { detectSwitchConfirmPrompt, switchPromptMatches, runSwitchCommand, pressSwitchConfirm } = await import("../lib/tmux-helper.js");
+    const promptTitle = (k: "model" | "effort") => (k === "model" ? "Switch model?" : "Change effort level?");
     {
       // 残留的切换确认框也让 paneLooksIdle 为假——以前统一回「正在回合中」,用户照
       // 提示去下拉重选只会一直 409。框的目标与本次选择一致 = 用户重申了意图,直接代按。
@@ -1732,13 +1733,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       if (leftover) {
         const want = leftover.kind === "model" ? model : effort;
         if (!want || !switchPromptMatches(leftover, leftover.kind, want)) {
-          const title = leftover.kind === "model" ? "Switch model?" : "Change effort level?";
-          return apiJson(409, { ok: false, error: `会话停在「${title}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或 Discord 按钮处理` });
+          return apiJson(409, { ok: false, error: `会话停在「${promptTitle(leftover.kind)}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或 Discord 按钮处理` });
         }
-        for (const k of leftover.keys) {
-          await tmuxRaw(["send-keys", "-t", targetWindow, k]);
-          await Bun.sleep(120);
-        }
+        await pressSwitchConfirm(targetWindow, leftover);
         await Bun.sleep(800);
         pane = await tmuxCapture(targetWindow, 40).catch(() => "");
       }
@@ -1746,33 +1743,54 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!paneLooksIdle(pane)) {
       return apiJson(409, { ok: false, error: "agent 正在回合中，等回合结束再切换" });
     }
+    const warnings: string[] = [];
     try {
       // 会话有 prompt cache 时 /model 弹「Switch model?」、/effort 弹「Change effort level?」
       // (CC 2.1.280 实测两者都弹)。用户已在 web 下拉拍过板,没人按 TUI 就永远卡在框上。
       // runSwitchCommand 注入 → 见框代按 → 等命令真正落地才返回,两条命令不会叠进同一个框。
       const { noteModelSwitchIntent, noteEffortSwitchIntent, clearSwitchIntent } = await import("./permission-watcher.js");
+      // 总时长封顶:web BFF 代理超时 20s,两条命令各等满 7s 再加 set-claude 就贴边了
+      const deadline = Date.now() + 11_000;
+      const TICK_MS = 700;
+      /** 没落地的结局 → 409 文案;null = 可以继续 */
+      const failure = (kind: "model" | "effort", r: Awaited<ReturnType<typeof runSwitchCommand>>): string | null => {
+        const label = kind === "model" ? "模型" : "effort";
+        if (r.outcome === "rejected") {
+          if (kind === "effort" && effort === "ultracode") {
+            return "CC 拒绝了 ultracode:需要在该 agent 的 /config 里开启 dynamic workflows(或超出 effort 上限 / 被组织策略限制)。";
+          }
+          return `CC 拒绝了这次切换:${r.reason ?? "原因见终端"}`;
+        }
+        const stuck = detectSwitchConfirmPrompt(r.pane);
+        if (r.outcome === "foreign" && stuck) {
+          return `会话停在「${promptTitle(stuck.kind)}」确认框上(切到 ${stuck.target}),与本次选择不符,请到终端或 Discord 按钮处理`;
+        }
+        if (stuck) return `切${label}的确认框没能自动确认,请到终端或 Discord 按钮处理`;
+        return null;
+      };
       if (model) {
         // 先登记意图:轮询窗外迟到的框由 watcher 按意图代按
         noteModelSwitchIntent(agent.name, resolveModelAlias(model));
-        const r = await runSwitchCommand(targetWindow, "model", model);
-        if (r.outcome === "applied" || r.outcome === "confirmed") clearSwitchIntent(agent.name, "model");
-        // 框还挂着就别再注入 /effort:它会打进框里,回车替框选了 Yes、effort 本身被吞掉
-        if (effort && detectSwitchConfirmPrompt(r.pane)) {
-          return apiJson(409, { ok: false, error: "切模型的确认框没能自动确认,effort 未切换,稍后再试" });
+        const r = await runSwitchCommand(targetWindow, "model", model, { intervalMs: TICK_MS });
+        if (r.outcome === "applied" || r.outcome === "confirmed" || r.outcome === "rejected") clearSwitchIntent(agent.name, "model");
+        const err = failure("model", r);
+        if (err) return apiJson(409, { ok: false, error: effort ? `${err}(effort 未切换)` : err });
+        if (r.outcome === "timeout") {
+          // 没框也没等到结果行:状态不明时别再注入 /effort——迟到的框会把它吞掉
+          if (effort) return apiJson(409, { ok: false, error: "没等到 /model 落地,effort 未切换,稍后再试" });
+          warnings.push("没等到 /model 落地,以会话实际显示为准");
         }
       }
       if (effort) {
         noteEffortSwitchIntent(agent.name, effort);
-        const r = await runSwitchCommand(targetWindow, "effort", effort);
-        if (r.outcome === "applied" || r.outcome === "confirmed") clearSwitchIntent(agent.name, "effort");
-        // ultracode 有前提(CC /config 开 dynamic workflows),没开时 CC 只在 TUI
-        // 里打拒绝原因——web 用户看不到 TUI,把拒绝透传回去,别让乐观显示撒谎
-        if (effort === "ultracode" && /needs dynamic workflows|restricted by your organization/i.test(r.pane.split("\n").filter((l) => l.trim()).slice(-15).join("\n"))) {
-          return apiJson(409, {
-            ok: false,
-            error: "CC 拒绝了 ultracode:需要在该 agent 的 /config 里开启 dynamic workflows(或被组织策略限制)。",
-          });
-        }
+        const ticks = Math.max(4, Math.floor((deadline - Date.now()) / TICK_MS));
+        const r = await runSwitchCommand(targetWindow, "effort", effort, { intervalMs: TICK_MS, ticks });
+        if (r.outcome === "applied" || r.outcome === "confirmed" || r.outcome === "rejected") clearSwitchIntent(agent.name, "effort");
+        // ultracode 有前提(CC /config 开 dynamic workflows),没开时 CC 只在 TUI 里打拒绝
+        // 原因——web 用户看不到 TUI,runSwitchCommand 认出拒绝(⎿ 行或 toast)就透传回去
+        const err = failure("effort", r);
+        if (err) return apiJson(409, { ok: false, error: err });
+        if (r.outcome === "timeout") warnings.push("没等到 /effort 落地,以会话实际显示为准");
       }
     } catch (e) {
       return apiJson(500, { ok: false, error: `tmux 发送失败: ${(e as Error).message}` });
@@ -1801,7 +1819,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
     recordMetric("agent_claude_updated", { channelId: agent.channelId, agent: agent.name, meta: { model, effort, tokenId } });
     console.log(`🎛 [api] claude-settings ${agent.name}: model=${model ?? "-"} effort=${effort ?? "-"} (token=${tokenId})`);
-    return apiJson(200, { ok: true, agent: agent.name, model: model ?? null, effort: effort ?? null });
+    return apiJson(200, { ok: true, agent: agent.name, model: model ?? null, effort: effort ?? null, ...(warnings.length ? { warning: warnings.join("；") } : {}) });
   }
 
   // POST /api/v1/agents/:name/answer —— 交互卡回传。

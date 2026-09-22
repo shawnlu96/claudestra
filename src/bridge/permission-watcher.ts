@@ -21,7 +21,9 @@ import {
   paneCompactProgress,
   paneLooksWorking,
   detectSwitchConfirmPrompt,
+  effortDialogLevel,
   modelFamilies,
+  pressSwitchConfirm,
   type SwitchConfirmPrompt,
 } from "../lib/tmux-helper.js";
 import { tmuxScreenshot } from "./screenshot.js";
@@ -179,7 +181,8 @@ function consumeSwitchIntent(agentName: string, dialogFamilies: Set<string>): bo
 const effortIntents = new Map<string, { level: string; ts: number }>();
 
 export function noteEffortSwitchIntent(agentName: string, level: string) {
-  const l = level.trim().toLowerCase();
+  // 存框里会显示的档位：ultracode 在框里写作 xhigh，存原词就永远对不上
+  const l = effortDialogLevel(level);
   if (l) effortIntents.set(agentName, { level: l, ts: Date.now() });
 }
 
@@ -195,16 +198,13 @@ function consumeEffortIntent(agentName: string, dialogLevel: string): boolean {
     effortIntents.delete(agentName);
     return false;
   }
-  const hit = it.level === dialogLevel.trim().toLowerCase();
+  const hit = it.level === effortDialogLevel(dialogLevel);
   if (hit) effortIntents.delete(agentName);
   return hit;
 }
 
-async function pressSwitchYes(agentName: string, p: SwitchConfirmPrompt): Promise<void> {
-  for (const k of p.keys) {
-    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), k]);
-    await Bun.sleep(120);
-  }
+function pressSwitchYes(agentName: string, p: SwitchConfirmPrompt): Promise<void> {
+  return pressSwitchConfirm(windowTarget(agentName), p);
 }
 
 /**
