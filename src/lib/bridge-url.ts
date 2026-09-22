@@ -20,12 +20,16 @@
 
 export const DEFAULT_BRIDGE_PORT = 3847;
 
+/** BRIDGE_PORT → 端口号；没设 / 不是 1-65535 的整数 → 默认端口（与 resolveBridgeUrl 同一口径） */
+export function resolveBridgePort(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.BRIDGE_PORT);
+  return env.BRIDGE_PORT && Number.isInteger(n) && n > 0 && n < 65536 ? n : DEFAULT_BRIDGE_PORT;
+}
+
 export function resolveBridgeUrl(env: Record<string, string | undefined> = process.env): string {
   const explicit = (env.BRIDGE_URL || "").trim();
   if (explicit) return explicit;
-  const n = Number(env.BRIDGE_PORT);
-  const port = Number.isInteger(n) && n > 0 && n < 65536 ? n : DEFAULT_BRIDGE_PORT;
-  return `ws://localhost:${port}`;
+  return `ws://localhost:${resolveBridgePort(env)}`;
 }
 
 /**

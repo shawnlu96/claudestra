@@ -11,6 +11,8 @@
  * - **不打印密钥**。token / secret 一律只报「有没有」和长度。
  */
 
+import { resolveBridgePort } from "./bridge-url.js";
+import { parseDotenv, readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR, TMUX_SOCK } from "./paths.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
 import { resolveLogPath } from "./log-paths.js";
@@ -121,11 +123,8 @@ async function checkConfig(repoRoot: string): Promise<Check[]> {
     : { group: g, name: ".env 权限", status: "warn", detail: `0${mode} —— 同机其他用户可读，里面有 bot token`,
         fix: `chmod 600 ${envPath}` });
 
-  const env: Record<string, string> = {};
-  for (const line of (await readFile(envPath, "utf-8")).split("\n")) {
-    const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.*)$/);
-    if (m) env[m[1]!] = m[2]!.trim();
-  }
+  // doctor 看的是 daemon 实际会拿到的配置：只读文件，不看本终端 export 的变量
+  const env = parseDotenv(await readFile(envPath, "utf-8"));
 
   const webOnly = !env.DISCORD_BOT_TOKEN;
   if (webOnly) {
@@ -240,12 +239,10 @@ export function portOwnerVerdict(
 async function checkBridge(repoRoot: string): Promise<Check[]> {
   const out: Check[] = [];
   const g = "bridge";
-  let port = 3847;
-  try {
-    const envTxt = await readFile(`${repoRoot}/.env`, "utf-8");
-    const m = envTxt.match(/^\s*BRIDGE_PORT\s*=\s*(\d+)/m);
-    if (m) port = parseInt(m[1]!);
-  } catch { /* 用默认端口 */ }
+  // 与 Bun 加载 .env 同一口径（带引号的 BRIDGE_PORT 以前会被误读成默认端口 → 误诊）
+  const dotenvFile = readDotenvFileSync(`${repoRoot}/.env`);
+  const dotenv = dotenvFile ?? {};
+  const port = resolveBridgePort(dotenv);
 
   const lsof = await sh(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN"]);
   const listeners = lsof.out.split("\n").slice(1).filter(Boolean);
@@ -280,8 +277,8 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
   // 症状是「bridge 完全健康，但所有 agent 永远离线」（2026-09-22 实锤）
   try {
     const { bridgeUrlPortMismatch } = await import("./bridge-url.js");
-    const envTxt2 = await readFile(`${repoRoot}/.env`, "utf-8");
-    const pick = (k: string) => envTxt2.match(new RegExp(`^\\s*${k}\\s*=\\s*(\\S+)`, "m"))?.[1];
+    if (!dotenvFile) throw new Error("no .env"); // 没有 .env：这组检查整体跳过（与原先 readFile 抛错时一致）
+    const pick = (k: string) => dotenv[k] || undefined;
     const mismatch = bridgeUrlPortMismatch({ BRIDGE_URL: pick("BRIDGE_URL"), BRIDGE_PORT: pick("BRIDGE_PORT") });
     if (mismatch) {
       out.push({ group: g, name: "BRIDGE_URL 端口", status: "fail", detail: mismatch,

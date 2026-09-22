@@ -3,6 +3,7 @@
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
+import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
 
@@ -75,7 +76,7 @@ async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: 
     : "";
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
   const { detectBridgeUrls } = await import("../lib/net-addr.js");
-  const port = parseInt(process.env.BRIDGE_PORT || "3847");
+  const port = parseInt(process.env.BRIDGE_PORT || String(DEFAULT_BRIDGE_PORT));
   const cands = detectBridgeUrls(port);
   if (cands.length === 0) return null;
   const best = cands[0]!;
@@ -423,7 +424,7 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
  *  peer IP 同端口找活着的 bridge(1.5s 超时并行 GET /api/v1/agents,有 HTTP
  *  响应即候选——401 也算,那正是 token 门禁在工作)。只探测不发凭据。 */
 async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
-  const port = (() => { try { return new URL(failedUrl).port || "3847"; } catch { return "3847"; } })();
+  const port = (() => { try { return new URL(failedUrl).port || String(DEFAULT_BRIDGE_PORT); } catch { return String(DEFAULT_BRIDGE_PORT); } })();
   const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
   // CLI 定位统一走 lib/tailscale（PATH → App 包内 → 常见位置），与 setup / doctor / bridge 同一套
   const { readTailscaleStatusRaw } = await import("../lib/tailscale.js");

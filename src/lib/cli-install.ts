@@ -34,6 +34,8 @@
  * 抢同一个 tmux session。
  */
 
+import { resolveBridgePort } from "./bridge-url.js";
+import { readDotenvFileSync } from "./env-file.js";
 import { TMUX_SOCK } from "./paths.js";
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
@@ -749,9 +751,7 @@ async function ensureMcpToolsAllowed(repoRoot: string): Promise<{ added: string[
   let mcpName = process.env.MCP_NAME || "";
   if (!mcpName) {
     try {
-      const envText = await readFile(`${repoRoot}/.env`, "utf-8").catch(() => "");
-      const m = envText.match(/^MCP_NAME\s*=\s*(.+)$/m);
-      if (m) mcpName = m[1].trim().replace(/^["']|["']$/g, "");
+      mcpName = readDotenvFileSync(`${repoRoot}/.env`)?.MCP_NAME || "";
     } catch { /* */ }
   }
   if (!mcpName) mcpName = "claudestra";
@@ -1177,13 +1177,9 @@ export function launchdPidOf(label: string): string | null {
 
 /** .env 里的 BRIDGE_PORT（用户改过端口的机器不能按默认值去探） */
 function readBridgePort(repoRoot: string): number | null {
-  try {
-    const m = readFileSync(`${repoRoot}/.env`, "utf-8").match(/^\s*BRIDGE_PORT\s*=\s*(\d+)/m);
-    const n = m ? Number(m[1]) : 3847;
-    return Number.isInteger(n) && n > 0 && n < 65536 ? n : 3847;
-  } catch {
-    return null; // 没有 .env = 还没配过，谈不上探活
-  }
+  const env = readDotenvFileSync(`${repoRoot}/.env`);
+  if (!env) return null; // 没有 .env = 还没配过，谈不上探活
+  return resolveBridgePort(env);
 }
 
 async function httpOk(url: string, timeoutMs: number): Promise<boolean> {
