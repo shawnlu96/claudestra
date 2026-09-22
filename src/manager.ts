@@ -74,6 +74,7 @@ import { translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow, readCcSessionEntries } from "./lib/cc-sessions.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
 import { mayTakeOver, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
+import { codexSessionIdFromFilename, codexSessionsRoot, listCodexSessionFiles, readCodexMeta } from "./lib/codex-session.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
@@ -523,12 +524,54 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   output({ ok: results.every((r) => r.ok), results });
 }
 
-/** 两种 runtime 的会话一起扫（会话列表 / 按 sessionId 找目录 都用它） */
+/**
+ * Codex 会话（v2.24+，只读）。
+ *
+ * ⚠ 它跟 Claude Code / Pi 不是一个级别：我们对 Codex 只有 `codex exec` 一条通路，
+ * 没有往它会话里注消息的手段 ⇒ **列得出、读得了，但收编不了**。所以它不进
+ * AgentRuntime，只作为会话来源出现在列表里（前端据 runtime 决定要不要给收编按钮）。
+ *
+ * 布局：~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<sessionId>.jsonl，cwd 在首行
+ * session_meta 里（文件名里没有）。
+ */
+async function scanCodexSessions(search?: string): Promise<ClaudeSession[]> {
+  const root = codexSessionsRoot();
+  if (!existsSync(root)) return [];
+  const out: ClaudeSession[] = [];
+  for (const filePath of listCodexSessionFiles(root)) {
+    const sessionId = codexSessionIdFromFilename(filePath.split("/").pop() || "");
+    if (!sessionId) continue;
+    const fileStat = await stat(filePath).catch(() => null);
+    if (!fileStat) continue;
+    // cwd 只能从首行 session_meta 读；那一行可能有好几 KB（塞着 base_instructions），
+    // 必须读完整行再 parse，见 lib/codex-session.ts 的 readCodexMeta
+    const meta = await readCodexMeta(filePath);
+    if (!meta?.cwd) continue;
+    const cwd = meta.cwd;
+    if (search && !`${cwd} ${sessionId}`.toLowerCase().includes(search.toLowerCase())) continue;
+    out.push({
+      sessionId,
+      cwd,
+      slug: cwd.split("/").filter(Boolean).pop() || "",
+      modifiedAt: fileStat.mtime,
+      lastUserMessage: await lastUserText(filePath, "codex", fileStat.size),
+      runtime: "codex",
+    });
+  }
+  return out;
+}
+
+/** 三种来源的会话一起扫（会话列表 / 按 sessionId 找目录 都用它） */
 async function scanAllSessions(search?: string): Promise<ClaudeSession[]> {
-  const [cc, pi] = await Promise.all([scanClaudeSessions(search), scanPiSessions(search)]);
+  const [cc, pi, codex] = await Promise.all([
+    scanClaudeSessions(search),
+    scanPiSessions(search),
+    scanCodexSessions(search).catch(() => [] as ClaudeSession[]),
+  ]);
   return [
     ...cc.map((s) => ({ ...s, runtime: s.runtime ?? "claude-code" })),
     ...pi,
+    ...codex,
   ].sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
 }
 

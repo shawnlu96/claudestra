@@ -25,6 +25,7 @@ import {
   piLineToClaudeShape,
   piSessionPath,
 } from "./pi-session.js";
+import { codexLineToClaudeShape, codexSessionsRoot, findCodexSessionPath, isCodexSessionPath } from "./codex-session.js";
 import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +44,7 @@ export function sessionJsonlPath(
 
 /** 全库兜底查找（cwd 记错或路径推断失准时用） */
 export function findSessionJsonlBySessionId(runtime: string | undefined, sessionId: string): string | null {
+  if (runtime === "codex") return findCodexSessionPath(sessionId);
   if (agentRuntime({ runtime }) === "pi") return findPiSessionBySessionId(sessionId);
   return findJsonlBySessionId(sessionId);
 }
@@ -72,6 +74,7 @@ export function listSessionJsonls(runtime: string | undefined, cwd: string): str
 export function runtimeForSessionPath(path: string | undefined | null): string | undefined {
   if (!path) return undefined;
   if (path.includes(`${piAgentDir()}/sessions/`)) return "pi";
+  if (isCodexSessionPath(path)) return "codex";
   if (path.startsWith(CLAUDE_PROJECTS_ROOT)) return undefined;
   return sniffRuntimeFromHead(path);
 }
@@ -91,6 +94,8 @@ function sniffRuntimeFromHead(path: string): string | undefined {
     const first = buf.toString("utf8", 0, n).split("\n")[0];
     const rec = JSON.parse(first);
     if (rec && rec.type === "session" && typeof rec.version === "number") runtime = "pi";
+    // 归档副本的路径不带任何根的特征，只能靠头行：Codex 的第一行恒为 session_meta
+    else if (rec && rec.type === "session_meta") runtime = "codex";
   } catch {
     runtime = undefined;
   }
@@ -100,6 +105,10 @@ function sniffRuntimeFromHead(path: string): string | undefined {
 
 /** 一行原文 → Claude Code 形状的 entry（读不了/不是对话行返回 null） */
 export function translateSessionLine(runtime: string | undefined, line: string): AnyRecord | null {
+  // ⚠ codex 先判：它**不在** AgentRuntime 里（那是「能启动并对话的运行时」，
+  //   Codex 只读不能跑，见 lib/codex-session.ts 开头），agentRuntime() 会把它
+  //   归一成 claude-code，于是原样返回 Codex 的行、下游全解析不出来。
+  if (runtime === "codex") return codexLineToClaudeShape(line);
   if (agentRuntime({ runtime }) === "pi") return piLineToClaudeShape(line);
   try {
     const parsed = JSON.parse(line);
