@@ -79,6 +79,62 @@ export function authed<A extends unknown[]>(
   };
 }
 
+/**
+ * 只包鉴权：未登录回 401，其余全交给 handler（handler 自己的 try/catch / 抛出行为原样保留）。
+ * 给错误口径特殊的路由用（本地读写不经 bridge、catch 里有兜底值或自带状态码判断的）。
+ */
+export function withAuth<A extends unknown[]>(
+  handler: (req: Request, ...rest: A) => Promise<Response>,
+): (req: Request, ...rest: A) => Promise<Response> {
+  return async (req: Request, ...rest: A) => {
+    if (!(await isAuthed(req))) return unauthorized();
+    return handler(req, ...rest);
+  };
+}
+
+/**
+ * 旧错误口径的包装（D8-10 第二批：只去样板，不改对外响应）：未登录 401；handler 抛出
+ * 任何错误 → 一律 502，body 逐字节同迁移前：
+ *   - 默认 `{ error: message }`；
+ *   - `okFalse: true` → `{ ok: false, error: message }`（键序也一样）；
+ *   - `errorPrefix` → message 前加前缀（可以是异步的，如 `st("Bridge 不可达", …)` 按语言取）；
+ *   - `onError` → 迁移前 catch 里有的日志。
+ * 这批路由的前端仍按「失败就是 502」处理；要改成 `authed` 的透传口径（bridge 4xx 原样回）
+ * 需逐个核对前端，另开提交。
+ */
+export function authedLegacy<A extends unknown[]>(
+  handler: (req: Request, ...rest: A) => Promise<Response>,
+  opts: {
+    okFalse?: boolean;
+    errorPrefix?: string | (() => Promise<string>);
+    onError?: (e: unknown) => void;
+  } = {},
+): (req: Request, ...rest: A) => Promise<Response> {
+  return async (req: Request, ...rest: A) => {
+    if (!(await isAuthed(req))) return unauthorized();
+    try {
+      return await handler(req, ...rest);
+    } catch (e) {
+      opts.onError?.(e);
+      return NextResponse.json(await legacyErrorBody(e, opts), { status: 502 });
+    }
+  };
+}
+
+/** 纯函数（单测锁形状）：旧口径的错误 body。没有前缀时 message 原样（undefined 会被 JSON 省掉，同迁移前） */
+export async function legacyErrorBody(
+  e: unknown,
+  opts: { okFalse?: boolean; errorPrefix?: string | (() => Promise<string>) } = {},
+): Promise<{ ok?: false; error?: string }> {
+  const raw = (e as Error).message;
+  let error: string | undefined = raw;
+  if (opts.errorPrefix !== undefined) {
+    const prefix = typeof opts.errorPrefix === "string" ? opts.errorPrefix : await opts.errorPrefix();
+    error = `${prefix}${raw}`;
+  }
+  return opts.okFalse ? { ok: false, error } : { error };
+}
+
 /** 纯代理 GET：bridge 的 JSON 原样回给浏览器 */
 export function proxyGet(path: string, opts?: { timeoutMs?: number }) {
   return authed(async () => NextResponse.json(await bridgeGet(path, opts)));

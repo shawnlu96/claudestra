@@ -1,7 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { isAuthed } from "@/lib/api-auth";
+import { withAuth } from "@/lib/bff";
 import { apiAgentName } from "@/lib/chat/bridge-api";
 import { hideRange, unhideRange } from "@/lib/chat/hidden";
 
@@ -9,10 +9,7 @@ import { hideRange, unhideRange } from "@/lib/chat/hidden";
  * v2.23.1+ 消息删除（= 跨设备隐藏，见 lib/chat/hidden.ts 的语义说明）。
  * POST {agent, session, from, to, hide} —— hide=true 记区间，false 撤销（撤销按 from 定位）。
  */
-export async function POST(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const POST = withAuth(async (request: Request) => {
   const body = (await request.json().catch(() => ({}))) as {
     agent?: string;
     session?: string;
@@ -41,4 +38,4 @@ export async function POST(request: Request) {
   } catch (e) {
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });
   }
-}
+});

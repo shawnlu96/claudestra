@@ -2,16 +2,13 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { bridgePost, apiAgentName } from "@/lib/chat/bridge-api";
-import { isAuthed } from "@/lib/api-auth";
+import { withAuth } from "@/lib/bff";
 
 /**
  * per-会话切换模型/effort：代理 Bridge POST /api/v1/agents/:name/claude-settings
  * （fork additive 端点）。409 = agent 回合进行中，原样透传给前端提示。
  */
-export async function POST(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const POST = withAuth(async (request: Request) => {
   const { agent, model, effort } = await request.json().catch(() => ({}));
   if (!agent || typeof agent !== "string") {
     return NextResponse.json({ error: "agent 不能为空" }, { status: 400 });
@@ -35,4 +32,4 @@ export async function POST(request: Request) {
       { status: busy ? 409 : 502 }
     );
   }
-}
+});
