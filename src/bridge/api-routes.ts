@@ -1658,14 +1658,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // 防重入(owner 2026-07-16:「打断按钮点两次出两个打断」):3s 冷却——
     // 空闲态连发两次 C-c 是 CC 的退出快捷键,双击可能直接把会话关了
     const lastInt = interruptCooldown.get(agent.name) ?? 0;
-    if (Date.now() - lastInt < 3_000) {
-      return apiJson(200, { ok: true, deduped: true });
-    }
+    if (Date.now() - lastInt < 3_000) return apiJson(200, { ok: true, deduped: true });
     interruptCooldown.set(agent.name, Date.now());
     // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出，所以它空闲时一个键都不发）
     const sent = await interruptAgent(agent.name).catch((e: Error) => e);
     if (sent instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${sent.message}` });
-    recordMetric("agent_interrupt", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
+    if (sent.length) recordMetric("agent_interrupt", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
+    else interruptCooldown.delete(agent.name); // 空闲没发键：不记打断指标，也不占 3s 冷却
     stopTyping(agent.channelId);
     clearSafetyTimer(agent.channelId);
     // 被打断的回合 CC 不触发 Stop hook —— agentStatuses 会永远卡在 thinking：
