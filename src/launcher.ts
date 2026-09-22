@@ -16,6 +16,8 @@ initLang();
 
 import {
   tmuxRaw,
+  tmuxRawStrict,
+  sessionTarget,
   masterSessionExists,
   masterWindowExists,
   windowHasChildProcess,
@@ -240,10 +242,15 @@ async function realpathSafe(p: string): Promise<string> {
  */
 async function recoverMasterWindow(): Promise<boolean> {
   console.log("🔧 master session 存在但 window:0 丢了，重建 window:0...");
-  await tmuxRaw(["new-window", "-t", SESSION_NAME, "-k", "-c", MASTER_DIR]);
+  // ⚠ 目标必须带冒号（sessionTarget）：`-t master` 优先按**窗口名**解析，master
+  //    session 里只要有个窗口名叫 master，这句 `-k` 就会把**那个窗口**替掉，而
+  //    window:0 还是缺的 —— 下面的 masterWindowExists 于是恒假，而我们已经默默
+  //    干掉了一个无关窗口（2026-09-21 owner 机器上真有这么个 index 19 的闲置 zsh）。
+  await tmuxRawStrict(["new-window", "-t", sessionTarget(SESSION_NAME), "-k", "-c", MASTER_DIR]);
   await Bun.sleep(500);
-  // 上面的 new-window 不带 index，会按 base-index 自动分配；强制挪到 0
-  await tmuxRaw(["move-window", "-s", SESSION_NAME, "-t", MASTER_WINDOW]).catch(() => {});
+  // 上面的 new-window 不带 index，会按 base-index 自动分配；强制挪到 0。
+  // `-s` 同理要带冒号，否则搬的是那个叫 master 的窗口而不是刚建的这个。
+  await tmuxRaw(["move-window", "-s", sessionTarget(SESSION_NAME), "-t", MASTER_WINDOW]).catch(() => {});
   await Bun.sleep(200);
   if (!(await masterWindowExists())) {
     console.log("⚠️ 创建 window:0 失败");

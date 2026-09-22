@@ -28,6 +28,8 @@ import {
   MASTER_SESSION,
   AGENT_PREFIX,
   tmuxRaw,
+  tmuxRawStrict,
+  sessionTarget,
   tmuxSendEscape,
   windowTarget,
   tmuxSendLine,
@@ -1037,7 +1039,7 @@ async function cmdCreate(
   try {
     // 2. 创建 tmux window（在 master session 里）
     await ensureSocket();
-    await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", expandedDir]);
+    await tmuxRawStrict(["new-window", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", expandedDir]);
     await Bun.sleep(500);
 
     // 3. 启动 Claude Code
@@ -1336,7 +1338,7 @@ async function cmdResume(
   try {
     // 创建 tmux window（在 master session 里）
     await ensureSocket();
-    await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", resolvedDir]);
+    await tmuxRawStrict(["new-window", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", resolvedDir]);
     await Bun.sleep(500);
 
     // 启动 Claude Code（resume 模式）
@@ -2256,7 +2258,7 @@ async function cmdRestart(name?: string) {
 
     if (recreated) {
       const cwd = info.cwd || process.env.HOME || "/";
-      await tmuxRaw(["new-window", "-t", MASTER_SESSION, "-n", tmuxName, "-c", cwd]);
+      await tmuxRawStrict(["new-window", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", cwd]);
       await Bun.sleep(500);
     }
 
