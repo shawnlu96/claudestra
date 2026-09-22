@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { apiAgentName, bridgePost } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
 import { st } from "@/lib/server-lang";
+import { bridgeErrorResponse, bridgeErrorStatus } from "@/lib/bff";
 
 /**
  * 清空会话：代理 Bridge POST /api/v1/agents/:name/clear（fork additive 端点）。
@@ -28,12 +29,9 @@ export async function POST(request: Request) {
     );
     return NextResponse.json({ ...result, ok: true });
   } catch (e) {
-    const msg = (e as Error).message;
-    // Bridge 409（回合进行中）原样透传语义，前端提示「先停止再 clear」
-    const busy = /回合中|409/.test(msg);
-    return NextResponse.json(
-      { ok: false, error: busy ? msg : `${await st("clear 失败", "Clear failed")}: ${msg}` },
-      { status: busy ? 409 : 502 }
-    );
+    // bridge 的 409（回合进行中）按状态码透传，前端提示「先停止再 clear」——以前靠正则
+    // 从错误文案里猜 409；其余 4xx 也照原样透传（bff.ts 的口径）
+    if (bridgeErrorStatus(e) === 409) return bridgeErrorResponse(e);
+    return bridgeErrorResponse(e, `${await st("clear 失败", "Clear failed")}: `);
   }
 }

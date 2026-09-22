@@ -13,7 +13,14 @@
  */
 import { NextResponse } from "next/server";
 import { isAuthed } from "@/lib/api-auth";
-import type { BridgeError } from "@/lib/chat/bridge-api";
+import { bridgeGet, bridgePost, type BridgeError } from "@/lib/chat/bridge-api";
+
+/** handler 里抛它 = 直接回这个状态码（参数校验失败等，不经 bridge 错误映射） */
+export class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
 
 export function unauthorized(): NextResponse {
   return NextResponse.json({ error: "未登录" }, { status: 401 });
@@ -55,7 +62,29 @@ export function authed<A extends unknown[]>(
     try {
       return await handler(req, ...rest);
     } catch (e) {
+      if (e instanceof HttpError) return NextResponse.json({ error: e.message }, { status: e.status });
       return bridgeErrorResponse(e, opts?.errorPrefix);
     }
   };
+}
+
+/** 纯代理 GET：bridge 的 JSON 原样回给浏览器 */
+export function proxyGet(path: string, opts?: { timeoutMs?: number }) {
+  return authed(async () => NextResponse.json(await bridgeGet(path, opts)));
+}
+
+/** 纯代理 POST：浏览器的 JSON body 原样转给 bridge（解析失败当空对象） */
+export function proxyPost(path: string, opts?: { timeoutMs?: number }) {
+  return authed(async (req) => NextResponse.json(await bridgePost(path, await req.json().catch(() => ({})), opts)));
+}
+
+/** agents/{kill,restart,remove}：body {name} → POST /agents/:name/<action> */
+export function agentAction(action: "kill" | "restart" | "remove", timeoutMs: number) {
+  return authed(async (req) => {
+    const { name } = (await req.json().catch(() => ({}))) as { name?: unknown };
+    if (!name || typeof name !== "string") throw new HttpError(400, "name 不能为空");
+    return NextResponse.json(
+      await bridgePost(`/agents/${encodeURIComponent(name.trim())}/${action}`, {}, { timeoutMs }),
+    );
+  });
 }
