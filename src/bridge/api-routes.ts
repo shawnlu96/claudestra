@@ -1724,51 +1724,54 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     } catch (e) {
       return apiJson(502, { ok: false, error: `tmux 不可达: ${(e as Error).message}` });
     }
+    const { detectSwitchConfirmPrompt, switchPromptMatches, runSwitchCommand } = await import("../lib/tmux-helper.js");
+    {
+      // 残留的切换确认框也让 paneLooksIdle 为假——以前统一回「正在回合中」,用户照
+      // 提示去下拉重选只会一直 409。框的目标与本次选择一致 = 用户重申了意图,直接代按。
+      const leftover = detectSwitchConfirmPrompt(pane);
+      if (leftover) {
+        const want = leftover.kind === "model" ? model : effort;
+        if (!want || !switchPromptMatches(leftover, leftover.kind, want)) {
+          const title = leftover.kind === "model" ? "Switch model?" : "Change effort level?";
+          return apiJson(409, { ok: false, error: `会话停在「${title}」确认框上(切到 ${leftover.target}),与本次选择不符,请到终端或 Discord 按钮处理` });
+        }
+        for (const k of leftover.keys) {
+          await tmuxRaw(["send-keys", "-t", targetWindow, k]);
+          await Bun.sleep(120);
+        }
+        await Bun.sleep(800);
+        pane = await tmuxCapture(targetWindow, 40).catch(() => "");
+      }
+    }
     if (!paneLooksIdle(pane)) {
       return apiJson(409, { ok: false, error: "agent 正在回合中，等回合结束再切换" });
     }
     try {
+      // 会话有 prompt cache 时 /model 弹「Switch model?」、/effort 弹「Change effort level?」
+      // (CC 2.1.280 实测两者都弹)。用户已在 web 下拉拍过板,没人按 TUI 就永远卡在框上。
+      // runSwitchCommand 注入 → 见框代按 → 等命令真正落地才返回,两条命令不会叠进同一个框。
+      const { noteModelSwitchIntent, noteEffortSwitchIntent, clearSwitchIntent } = await import("./permission-watcher.js");
       if (model) {
-        // v2.16.2 先登记切换意图再注入:短轮询窗外迟到的弹窗由 watcher 按意图
-        // 代按(此前 2.8s 窗一过就没人管;且 watcher 读 registry 旧钉值会误判)
-        {
-          const { noteModelSwitchIntent } = await import("./permission-watcher.js");
-          noteModelSwitchIntent(agent.name, resolveModelAlias(model));
-        }
-        await tmuxSendLine(targetWindow, `/model ${model}`);
-        // CC 2.1.220+ 会话有 prompt cache 时切模型弹「Switch model?」二次确认。
-        // 用户已在 web UI 做过选择,没人替他按 Yes 的话 TUI 就永远卡在弹窗上
-        // (2026-07-27 用户截图实锤)。短轮询探测,出现即确认(❯ 预选 Yes,Enter 即可);
-        // 看到 "Set model to"(未弹窗直接生效)就提前收工。窗口 4→8 拍(peer 建议)。
-        for (let i = 0; i < 8; i++) {
-          await Bun.sleep(700);
-          const p2 = await tmuxCapture(targetWindow, 25).catch(() => "");
-          if (/Switch model\?/.test(p2)) {
-            await tmuxRaw(["send-keys", "-t", targetWindow, "Enter"]);
-            await Bun.sleep(400);
-            break;
-          }
-          if (/Set model to/i.test(p2)) break;
+        // 先登记意图:轮询窗外迟到的框由 watcher 按意图代按
+        noteModelSwitchIntent(agent.name, resolveModelAlias(model));
+        const r = await runSwitchCommand(targetWindow, "model", model);
+        if (r.outcome === "applied" || r.outcome === "confirmed") clearSwitchIntent(agent.name, "model");
+        // 框还挂着就别再注入 /effort:它会打进框里,回车替框选了 Yes、effort 本身被吞掉
+        if (effort && detectSwitchConfirmPrompt(r.pane)) {
+          return apiJson(409, { ok: false, error: "切模型的确认框没能自动确认,effort 未切换,稍后再试" });
         }
       }
-      if (model && effort) await Bun.sleep(600); // 两条命令之间让 TUI 消化
       if (effort) {
-        await tmuxSendLine(targetWindow, `/effort ${effort}`);
+        noteEffortSwitchIntent(agent.name, effort);
+        const r = await runSwitchCommand(targetWindow, "effort", effort);
+        if (r.outcome === "applied" || r.outcome === "confirmed") clearSwitchIntent(agent.name, "effort");
         // ultracode 有前提(CC /config 开 dynamic workflows),没开时 CC 只在 TUI
-        // 里打拒绝原因——web 用户看不到 TUI,短轮询把拒绝透传回去,别让乐观
-        // 显示撒谎(peer 提醒的静默失败面)
-        if (effort === "ultracode") {
-          for (let i = 0; i < 5; i++) {
-            await Bun.sleep(600);
-            const p3 = await tmuxCapture(targetWindow, 15).catch(() => "");
-            if (/needs dynamic workflows|restricted by your organization/i.test(p3)) {
-              return apiJson(409, {
-                ok: false,
-                error: "CC 拒绝了 ultracode:需要在该 agent 的 /config 里开启 dynamic workflows(或被组织策略限制)。",
-              });
-            }
-            if (/effort level: ultracode|Set effort/i.test(p3)) break;
-          }
+        // 里打拒绝原因——web 用户看不到 TUI,把拒绝透传回去,别让乐观显示撒谎
+        if (effort === "ultracode" && /needs dynamic workflows|restricted by your organization/i.test(r.pane.split("\n").filter((l) => l.trim()).slice(-15).join("\n"))) {
+          return apiJson(409, {
+            ok: false,
+            error: "CC 拒绝了 ultracode:需要在该 agent 的 /config 里开启 dynamic workflows(或被组织策略限制)。",
+          });
         }
       }
     } catch (e) {

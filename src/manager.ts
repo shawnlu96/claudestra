@@ -1861,21 +1861,12 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
     /* 无快照就不恢复 */
   }
   try {
-    await tmuxRaw(["send-keys", "-t", target, "-l", `/model ${resolved}`]);
-    await Bun.sleep(400);
-    await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-    for (let i = 0; i < 8; i++) {
-      await Bun.sleep(700);
-      // 60 行 = 整屏。15 行踩过坑：确认框标题距 pane 底部 16 行（说明文字 + 两个
-      // 选项 + 输入框都在它下面），恰好落在窗口外 —— 检测不到就空转 8 轮退出，
-      // 把确认框留在屏幕上阻塞该 agent（2026-07-25 一次性卡住 6 个）。
-      const pane = await captureLast(name, 60);
-      if (/Switch model\?/i.test(pane)) {
-        await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-        continue;
-      }
-      if (/Set model to/i.test(pane)) return true;
-    }
+    // 与 claude-settings 共用 runSwitchCommand：只认底部真框、核对目标家族再代按，
+    // 以「这次命令的结果行出现」判落地——旧实现全屏搜 "Set model to"，scrollback 里
+    // 上一次切换的结果行会在框画出来之前就放行，框留在屏幕上没人按。
+    const { runSwitchCommand } = await import("./lib/tmux-helper.js");
+    const r = await runSwitchCommand(target, "model", resolved, { sendDelayMs: 400 });
+    if (r.outcome === "applied" || r.outcome === "confirmed") return true;
   } catch {
     /* 失败不阻塞启动 */
   } finally {

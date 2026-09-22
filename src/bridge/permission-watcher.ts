@@ -20,6 +20,9 @@ import {
   paneShowsCompacting,
   paneCompactProgress,
   paneLooksWorking,
+  detectSwitchConfirmPrompt,
+  modelFamilies,
+  type SwitchConfirmPrompt,
 } from "../lib/tmux-helper.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -140,12 +143,8 @@ async function maybeEscapeAgentsView(
   return true;
 }
 
-/** 粗粒度模型家族提取（opus/sonnet/haiku/fable）——「Switch model?」守卫用。 */
-export function modelFamilies(text: string): Set<string> {
-  const out = new Set<string>();
-  for (const m of text.toLowerCase().matchAll(/\b(fable|opus|sonnet|haiku)\b/g)) out.add(m[1]);
-  return out;
-}
+/** 实现挪到 tmux-helper（runSwitchCommand 也要用）；这里保留导出给 model-drift 等老调用方。 */
+export { modelFamilies };
 
 /** v2.16.2 切模型意图表(peer 2026-08-04 三层根因报告的核心修复):bridge 自己
  *  注入 /model 时登记「agent → 目标家族」,watcher 见弹窗先对意图——匹配即代按。
@@ -175,8 +174,41 @@ function consumeSwitchIntent(agentName: string, dialogFamilies: Set<string>): bo
   return hit;
 }
 
+/** `/effort` 同样会弹「Change effort level?」(cache 失效确认)——意图表与 /model 同理。
+ *  CC 从不主动用这个框提议改 effort,但没意图时仍按保守路径通知,不盲按。 */
+const effortIntents = new Map<string, { level: string; ts: number }>();
+
+export function noteEffortSwitchIntent(agentName: string, level: string) {
+  const l = level.trim().toLowerCase();
+  if (l) effortIntents.set(agentName, { level: l, ts: Date.now() });
+}
+
+/** 注入方自己已把框按掉/命令已落地 → 撤掉意图,免得 2h 内同族的 CC 主动提议被当成用户意图代按。 */
+export function clearSwitchIntent(agentName: string, kind: "model" | "effort") {
+  (kind === "model" ? switchIntents : effortIntents).delete(agentName);
+}
+
+function consumeEffortIntent(agentName: string, dialogLevel: string): boolean {
+  const it = effortIntents.get(agentName);
+  if (!it) return false;
+  if (Date.now() - it.ts > SWITCH_INTENT_TTL_MS) {
+    effortIntents.delete(agentName);
+    return false;
+  }
+  const hit = it.level === dialogLevel.trim().toLowerCase();
+  if (hit) effortIntents.delete(agentName);
+  return hit;
+}
+
+async function pressSwitchYes(agentName: string, p: SwitchConfirmPrompt): Promise<void> {
+  for (const k of p.keys) {
+    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), k]);
+    await Bun.sleep(120);
+  }
+}
+
 /**
- * v2.15.2+「Switch model?」确认弹窗处理。
+ * v2.15.2+「Switch model?」确认弹窗处理（P9 起连同「Change effort level?」）。
  *
  * 初版无脑代按 Yes，前提是「弹窗只由明确的 /model 操作触发」——这个前提是错的：
  * Claude Code 在用量保护场景会**主动**弹同款对话框提议降级（Pro 计划降到
@@ -196,18 +228,30 @@ async function maybeConfirmSwitchModel(
   allowedUserIds: string[],
   discord: Client
 ): Promise<boolean> {
-  if (!pane.includes("Switch model?") || !/Yes,\s*switch/i.test(pane)) return false;
+  // 识别收敛到 detectSwitchConfirmPrompt：只认底部真框（标题独占一行 + Yes/No 两项），
+  // 旧的 pane.includes 会被 scrollback 里的字样误导，也不认 effort 框
+  const p = detectSwitchConfirmPrompt(pane);
+  if (!p) return false;
 
-  // 只看弹窗块（标题行起 ~12 行）——上方对话正文里提到的模型名不算数
-  const block = pane.slice(pane.indexOf("Switch model?")).split("\n").slice(0, 12).join("\n");
-  const mentioned = modelFamilies(block);
+  if (p.kind === "effort") {
+    if (consumeEffortIntent(agentName, p.target)) {
+      console.log(`🎛 ${agentName} 「Change effort level?」命中切换意图(${p.target}),自动代按 Yes`);
+      await pressSwitchYes(agentName, p);
+      return true;
+    }
+    await notifySwitchPrompt(agentName, channelId, p, [], null, allowedUserIds, discord);
+    return true;
+  }
+
+  // 只看框里的目标模型——上方对话正文里提到的模型名不算数
+  const mentioned = modelFamilies(p.target);
 
   // v2.16.2 意图优先(peer 报告根因 2:家族守卫把用户主动换族误判成 CC 降级提议,
   // 89999c1 后自动确认实际只剩「重钉同族」一种场景生效):bridge 注入过 /model
   // 且弹窗提到目标家族 → 这就是用户拍过板的那次切换,代按。
   if (consumeSwitchIntent(agentName, mentioned)) {
     console.log(`🎛 ${agentName} 「Switch model?」命中切换意图(${[...mentioned].join("/")}),自动代按 Yes`);
-    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]);
+    await pressSwitchYes(agentName, p);
     return true;
   }
 
@@ -222,15 +266,33 @@ async function maybeConfirmSwitchModel(
   const foreign = [...mentioned].filter((f) => f !== pinnedFamily);
   if (pinnedFamily && foreign.length === 0) {
     console.log(`🎛 ${agentName} 停在「Switch model?」弹窗（仅涉及钉定家族 ${pinnedFamily}），自动代按 Yes`);
-    await tmuxRaw(["send-keys", "-t", windowTarget(agentName), "Enter"]);
+    await pressSwitchYes(agentName, p);
     return true;
   }
 
-  // CC 主动提议 / 未钉模型 → 通知用户拍板（dedup 按涉及家族）
-  const key = `swmodel|${[...mentioned].sort().join(",")}`;
-  if (lastNotified.get(channelId) === key) return true;
+  await notifySwitchPrompt(agentName, channelId, p, [...mentioned], pinnedFamily, allowedUserIds, discord);
+  return true;
+}
+
+/** 没意图也不是钉定家族的确认框 → 不代按，通知用户拍板（Discord 按钮 + web 事件）。 */
+async function notifySwitchPrompt(
+  agentName: string,
+  channelId: string,
+  p: SwitchConfirmPrompt,
+  families: string[],
+  pinnedFamily: string | null,
+  allowedUserIds: string[],
+  discord: Client
+): Promise<void> {
+  const isModel = p.kind === "model";
+  const key = isModel ? `swmodel|${[...families].sort().join(",")}` : `sweffort|${p.target.toLowerCase()}`;
+  if (lastNotified.get(channelId) === key) return;
   lastNotified.set(channelId, key);
-  console.log(`🎛 ${agentName} 弹「Switch model?」但涉及 ${[...mentioned].join("/") || "未知"} ≠ 钉定 ${pinnedFamily ?? "(未钉)"}，不代按，通知用户`);
+  console.log(
+    isModel
+      ? `🎛 ${agentName} 弹「Switch model?」但涉及 ${families.join("/") || "未知"} ≠ 钉定 ${pinnedFamily ?? "(未钉)"}，不代按，通知用户`
+      : `🎛 ${agentName} 弹「Change effort level?」(→ ${p.target}) 但没有登记过的切换意图，不代按，通知用户`,
+  );
   // v2.16.2 web 可见(peer 报告根因 3:通知只走 Discord 直发,web 用户零提示
   // 只看到 agent 卡死):同步 emit session_anomaly,BFF 翻译成系统文本。
   try {
@@ -239,7 +301,9 @@ async function maybeConfirmSwitchModel(
       agent: agentName,
       chatId: channelId,
       type: "session_anomaly",
-      data: { kind: "switch_model_prompt", families: [...mentioned], pinned: pinnedFamily },
+      data: isModel
+        ? { kind: "switch_model_prompt", families, pinned: pinnedFamily }
+        : { kind: "switch_effort_prompt", target: p.target },
     });
   } catch { /* 事件失败不影响 Discord 通知 */ }
   try {
@@ -248,10 +312,15 @@ async function maybeConfirmSwitchModel(
     const ch = (await discord.channels.fetch(channelId)) as TextChannel;
     const msg = await ch.send({
       content: [
-        `🎛 **${agentName}** 弹出「Switch model?」——像是 Claude Code 主动提议换模型（常见于用量保护降级）。`,
-        `我没有代按。要切就点「切换」，想保住当前模型点「不切」。`,
+        isModel
+          ? `🎛 **${agentName}** 弹出「Switch model?」——像是 Claude Code 主动提议换模型（常见于用量保护降级）。`
+          : `🎛 **${agentName}** 弹出「Change effort level?」（切到 ${p.target}，会让 prompt cache 失效）——不是经模型/effort 下拉发起的。`,
+        isModel
+          ? `我没有代按。要切就点「切换」，想保住当前模型点「不切」。`
+          : `我没有代按。要切就点「切换」，不切点「不切」。`,
         mention,
       ].join("\n"),
+      // 两种框都是「1. Yes / 2. No」：swmodel_* 按钮发 Enter / Escape，同样适用
       components: buildComponents([
         {
           type: "buttons",
@@ -265,9 +334,8 @@ async function maybeConfirmSwitchModel(
     });
     permissionMessages.set(channelId, msg.id);
   } catch (e) {
-    console.error(`🎛 Switch model 通知发送失败:`, e);
+    console.error(`🎛 Switch 确认框通知发送失败:`, e);
   }
-  return true;
 }
 
 // v2.0.23+: session-idle 兜底 grace。manager.ts/launcher.ts 启动路径会自动选
@@ -561,7 +629,7 @@ async function checkAgent(
     return;
   }
 
-  // v2.15.2+「Switch model?」弹窗：钉定家族的迟到确认框代按,其余通知用户拍板
+  // v2.15.2+「Switch model?」/「Change effort level?」：有意图/钉定家族的迟到确认框代按,其余通知用户拍板
   if (await maybeConfirmSwitchModel(agentName, channelId, pane, allowedUserIds, discord)) return;
 
   // v2.17.2+ AskUserQuestion pane 侧检测(CC 2.1.x jsonl 迟落盘,唯一及时通路)

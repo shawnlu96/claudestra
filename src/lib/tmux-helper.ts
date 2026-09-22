@@ -801,6 +801,160 @@ export function detectRuntimePermissionPrompt(pane: string): string | null {
   }
   return null;
 }
+
+// ────────────────────────────────────────────────
+// 切模型 / 切 effort 的二次确认框（原屏：tests/fixtures/switch-confirm/）
+// ────────────────────────────────────────────────
+//
+// 会话里有 prompt cache 时，CC 对 `/model` 和 `/effort` **都**会弹确认框（2.1.280 实测）：
+//    Switch model?            | Change effort level?
+//    Your next response will be slower and use more tokens
+//    This conversation is cached for the current model|effort level. Switching to X means …
+//    ❯ 1. Yes, switch to X
+//      2. No, go back
+// 同一请求里先切了模型再切 effort 时 cache 已失效，effort 不再弹——所以「只切 effort」
+// 才会撞上它，这正是「偶尔」没人按的那一半。
+
+export type SwitchConfirmKind = "model" | "effort";
+
+export interface SwitchConfirmPrompt {
+  kind: SwitchConfirmKind;
+  /** 「Yes, switch to X」里的 X：模型显示名（"Sonnet 5"）或 effort 档位（"high"） */
+  target: string;
+  /** 正文说的是 prompt cache 失效（"cached for the current …"） */
+  cached: boolean;
+  /** 选中 Yes 并确认要依次发的 tmux 键 */
+  keys: string[];
+}
+
+const SWITCH_CONFIRM_TITLES: Record<string, SwitchConfirmKind> = {
+  "Switch model?": "model",
+  "Change effort level?": "effort",
+};
+
+/**
+ * 认出切模型/effort 确认框并算出「选 Yes」的按键；别的框一律 null。
+ * 只认底部：标题行必须独占一行、下面恰好是「Yes, switch to …」+「No …」两个编号项、
+ * 且下面没有输入框页脚（真框盖住输入框；页脚还在 = 那段字只是屏幕上显示的内容）。
+ */
+export function detectSwitchConfirmPrompt(pane: string): SwitchConfirmPrompt | null {
+  const lines = trimTrailingBlank(pane.split("\n")).slice(-20);
+  let titleIdx = -1;
+  let kind: SwitchConfirmKind | null = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const k = SWITCH_CONFIRM_TITLES[lines[i]!.trim()];
+    if (k) { titleIdx = i; kind = k; break; }
+  }
+  if (!kind) return null;
+  const below = lines.slice(titleIdx + 1);
+  if (below.some((l) => CC_MODE_BANNER_RE.test(l) || /esc to interrupt/i.test(l))) return null;
+  const opts: Array<{ selected: boolean; label: string }> = [];
+  for (const raw of below) {
+    const m = raw.match(/^\s*(❯)?\s*\d{1,2}\.\s+(.+?)\s*$/);
+    if (m) opts.push({ selected: !!m[1], label: m[2]! });
+  }
+  if (opts.length !== 2) return null;
+  const yesM = opts[0]!.label.match(/^Yes, switch to (.+)$/i);
+  if (!yesM || !/^No\b/i.test(opts[1]!.label)) return null;
+  const sel = opts.findIndex((o) => o.selected);
+  if (sel < 0) return null;
+  const keys: string[] = sel === 0 ? [] : ["Up"];
+  keys.push("Enter");
+  return {
+    kind,
+    target: yesM[1]!.trim(),
+    cached: /cached for the current/i.test(below.join("\n")),
+    keys,
+  };
+}
+
+/** 粗粒度模型家族（opus/sonnet/haiku/fable），用来比对「我们要切的」和「框里写的」。 */
+export function modelFamilies(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.toLowerCase().matchAll(/\b(fable|opus|sonnet|haiku)\b/g)) out.add(m[1]!);
+  return out;
+}
+
+/**
+ * 这个框是不是我们刚注入的那条命令引出的：model 按家族比（框里是显示名 "Sonnet 5"，
+ * 命令里是 id "claude-sonnet-5"），解析不出家族的自定义 id 只认种类；effort 按档位全等。
+ */
+export function switchPromptMatches(p: SwitchConfirmPrompt, kind: SwitchConfirmKind, arg: string): boolean {
+  if (p.kind !== kind) return false;
+  if (kind === "effort") return p.target.toLowerCase() === arg.trim().toLowerCase();
+  const want = modelFamilies(arg);
+  if (!want.size) return true;
+  const got = modelFamilies(p.target);
+  return [...want].some((f) => got.has(f));
+}
+
+/**
+ * pane 里有几条已出结果的 `/model`（或 `/effort`）命令：回显行 `❯ /model …` 之后、
+ * 下一个 ❯ 之前出现了 `⎿` 结果行才算一条。
+ *
+ * 为什么数条数而不是搜 "Set model to"：上一次切换的结果行留在 scrollback 里，确认框
+ * 还没画出来的那一拍就会被它提前放行——旧轮询就此收工，框没人按；接着注入的
+ * `/effort …` 打进了框里，回车替框选了 Yes、effort 本身被吞掉（2.1.280 实测）。
+ * 注入前记下基数，数目变大才是这次命令落地。
+ */
+export function countSettledSwitchCommands(pane: string, kind: SwitchConfirmKind): number {
+  const echoRe = kind === "model" ? /^\s*❯\s+\/model\b/ : /^\s*❯\s+\/effort\b/;
+  let n = 0;
+  let pending = false;
+  for (const line of pane.split("\n")) {
+    if (/^\s*❯/.test(line)) { pending = echoRe.test(line); continue; }
+    if (pending && /^\s*⎿/.test(line)) { n++; pending = false; }
+  }
+  return n;
+}
+
+export type SwitchOutcome =
+  /** 命令落地，没弹框 */
+  | "applied"
+  /** 弹了确认框，已代按 Yes 并看到落地 */
+  | "confirmed"
+  /** 弹出的框不是这条命令引出的（种类/目标对不上）——没按，留给用户 */
+  | "foreign"
+  /** 轮询窗内没看到落地（框可能仍挂着：看 pane） */
+  | "timeout";
+
+/**
+ * 注入 `/model X` 或 `/effort X`，确认框出现就代按 Yes，等到命令真正落地再返回。
+ * claude-settings 端点与 manager 的 enforceSessionModel 共用；返回时 TUI 已回到输入框
+ * （applied/confirmed），调用方可以放心接着注入下一条命令。
+ */
+export async function runSwitchCommand(
+  target: string,
+  kind: SwitchConfirmKind,
+  arg: string,
+  opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number } = {},
+): Promise<{ outcome: SwitchOutcome; pane: string; prompt?: SwitchConfirmPrompt }> {
+  const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120 } = opts;
+  const base = countSettledSwitchCommands(await tmuxCapture(target, captureLines).catch(() => ""), kind);
+  await tmuxSendLine(target, `/${kind} ${arg}`, sendDelayMs);
+  let confirmed = false;
+  let presses = 0;
+  let pane = "";
+  for (let i = 0; i < ticks; i++) {
+    await Bun.sleep(intervalMs);
+    pane = await tmuxCapture(target, captureLines).catch(() => "");
+    const p = detectSwitchConfirmPrompt(pane);
+    if (p) {
+      if (!switchPromptMatches(p, kind, arg)) return { outcome: "foreign", pane, prompt: p };
+      if (presses >= 3) return { outcome: "timeout", pane, prompt: p }; // 按了不消失：别无限按
+      for (const k of p.keys) {
+        await tmuxRaw(["send-keys", "-t", target, k]);
+        await Bun.sleep(120);
+      }
+      presses++;
+      confirmed = true;
+      continue;
+    }
+    if (countSettledSwitchCommands(pane, kind) > base) return { outcome: confirmed ? "confirmed" : "applied", pane };
+  }
+  return { outcome: "timeout", pane };
+}
+
 export async function listWindows(): Promise<string[]> {
   const out = await tmuxRaw([
     "list-windows",
