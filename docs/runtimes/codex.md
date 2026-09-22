@@ -61,9 +61,10 @@ message」），再按就往前翻旧消息。接着键入 `/quit` 时，`q` 会
 之后键入 `/quit` + Enter。退出阶段如果又看到遮罩，`onExitPane` 只补按一次 `q`，同样不按 Enter；
 还是退不出去，就走强杀兜底（C-c / C-c / C-d；空闲的 Codex 收到 C-c 本来就会退出）。
 
-bridge 的「打断」按钮目前仍然无条件按一次 Esc（`interruptAgent`，归 P10）。空闲时连按两次同样会把
-TUI 停在回溯遮罩里。`control.interruptOnlyWhenBusy = true` 已经声明，等 bridge 按 hook 驱动的忙闲
-状态去读它。
+bridge 的打断（Discord 按钮、`/interrupt`、`POST /api/v1/agents/:name/interrupt`）都经
+`interruptWindow` 读 `control.interruptOnlyWhenBusy`：回合在跑才按一次 Esc，空闲时一个键都不按
+（API 返回 `idle: true`，Discord 回报「当前空闲，无需打断」）——空闲时的 Esc 会把 TUI 停在回溯遮罩里。
+Discord 入站消息也不会触发抢占（`preemptOnHumanMessage = false`），消息由 `codex queue` 排到下一轮。
 
 ### 权限
 

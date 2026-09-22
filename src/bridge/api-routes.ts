@@ -1662,12 +1662,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(200, { ok: true, deduped: true });
     }
     interruptCooldown.set(agent.name, Date.now());
-    // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出）
-    try {
-      await interruptAgent(agent.name);
-    } catch (e) {
-      return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
-    }
+    // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出，所以它空闲时一个键都不发）
+    const sent = await interruptAgent(agent.name).catch((e: Error) => e);
+    if (sent instanceof Error) return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${sent.message}` });
     recordMetric("agent_interrupt", { channelId: agent.channelId, agent: agent.name, meta: { trigger: "api" } });
     stopTyping(agent.channelId);
     clearSafetyTimer(agent.channelId);
@@ -1678,8 +1675,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentNameForChannel(agent.channelId) ||
       (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
     emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
-    console.log(`⚡ [api] 打断键已发送给 ${agent.name} (token=${tokenId})`);
-    return apiJson(200, { ok: true, agent: agent.name });
+    console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
+    return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
   }
 
   // POST /api/v1/agents/:name/clear —— 远程调用 CC 原生 /clear（清上下文）。

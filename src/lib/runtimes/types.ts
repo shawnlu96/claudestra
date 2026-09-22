@@ -173,7 +173,7 @@ export interface RuntimeControl {
   /**
    * 只在「忙」时才发 interruptKeys。Codex：空闲时的 Esc 不是空操作——第一下挂上
    * backtrack，第二下打开历史回溯遮罩，TUI 就停在那里。不声明 = 照旧无条件发（CC / Pi）。
-   * ⚠ bridge 的 interruptAgent 目前还没读这个字段（归 P10），见 docs/runtimes/codex.md。
+   * window-ops 的 interruptWindow 读它：空闲时一个键都不发，调用方回报「当前空闲，无需打断」。
    */
   interruptOnlyWhenBusy?: boolean;
 }
