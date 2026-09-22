@@ -177,6 +177,7 @@ import { hangsPendingReply, pendingKeysOwedBy } from "./lib/pending-reply-scope.
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
   tmuxCapture,
@@ -3180,6 +3181,58 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
           pendingAgentCalls.delete(msg.chatId);
         }
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
+    case "notify": {
+      // 本机 daemon（launcher/cron/manager）的系统通知。它们不是 agent，走 reply 会被
+      // 上面「认不出来源就拒」挡掉（那道门堵的是 SSE 挂到 "?" 名下的洞，保持不动）。
+      // 这里发件人是 bridge 自己，目标只许是 control 或 registry 有主的 agent 频道，
+      // SSE 事件挂在目标频道的真实 agent 名下。见 lib/notify.ts。
+      try {
+        const source = typeof msg.source === "string" && msg.source ? msg.source.slice(0, 40) : "daemon";
+        const regs = await readRegistryAgents().catch(() => []);
+        const verdict = notifyTargetVerdict(msg.chatId, {
+          controlChannelId: CONTROL_CHANNEL_ID,
+          knownChannelIds: regs.map((r) => r.channelId || ""),
+        });
+        if (!verdict.ok) {
+          console.error(`📣 [notify:${source}] 拒绝: ${verdict.reason}`);
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: verdict.reason }));
+          break;
+        }
+        const text = String(msg.text ?? "");
+        const env: RouterEnvelope = {
+          from: { kind: "bridge", label: `notify:${source}` },
+          to: { kind: "user", userId: primaryOwnerId(), channelId: msg.chatId },
+          intent: "notification",
+          content: text,
+          meta: {
+            messageId: `notify_${Date.now()}`,
+            triggerKind: "bridge_synth",
+            ts: new Date().toISOString(),
+            threadId: newThreadId(),
+            components: msg.components,
+            files: msg.files,
+          },
+        };
+        const delivery = await deliver(env);
+        if (delivery.outcome.kind !== "sent") {
+          const errMsg = delivery.outcome.kind === "dropped"
+            ? `notify dropped: ${delivery.outcome.reason}`
+            : (delivery.outcome as any).error?.message || "unknown";
+          console.error(`📣 [notify:${source}] 投递失败 → ${msg.chatId}: ${errMsg}`);
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
+          break;
+        }
+        console.log(`📣 [notify:${source}] → ${msg.chatId}: ${text.slice(0, 80).replace(/\n/g, " ")}`);
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: delivery.outcome.discordMessageIds || [] } }));
+        // 未登记的频道（cron --channel）不发 SSE：没有 agent 名可挂，挂 "?" 正是 bce6351 堵的洞
+        const evAgent = verdict.known ? await agentLabelForChannelAsync(msg.chatId) : "?";
+        if (evAgent !== "?") emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: `⚙️ ${source}`, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}) } });
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }

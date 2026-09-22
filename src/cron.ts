@@ -14,7 +14,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { runtimeForSessionPath, translateSessionLine } from "./lib/session-source.js";
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
-import { bridgeRequest } from "./lib/bridge-client.js";
+import { notify } from "./lib/notify.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
@@ -320,8 +320,8 @@ async function executeOnTempAgent(
 
   if (reportChannel) {
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "cron",
         chatId: reportChannel,
         text: `⏰ **定时任务开始**: ${job.name}\n-# 📁 ${job.dir}\n-# 💬 ${job.prompt.slice(0, 100)}`,
       });
@@ -376,7 +376,7 @@ async function executeOnTempAgent(
           const summary = await extractAgentSummary(job.dir, tmpSessionId);
           if (summary) body += `\n\n${summary}`;
         }
-        await bridgeRequest({ type: "reply", chatId: reportChannel, text: body });
+        await notify({ source: "cron", chatId: reportChannel, text: body });
       } catch { /* non-critical */ }
     }
   } finally {
@@ -424,8 +424,8 @@ async function executeOnExistingAgent(
   const shouldNotifyStart = reportChannel && reportChannel !== targetChannelId;
   if (shouldNotifyStart) {
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "cron",
         chatId: reportChannel!,
         text: `⏰ **定时任务开始**: ${job.name} → ${tmuxName}\n-# 💬 ${job.prompt.slice(0, 100)}`,
       });
@@ -458,8 +458,8 @@ async function executeOnExistingAgent(
     try {
       const emoji = completed ? "✅" : "⏰";
       const statusText = completed ? "完成" : "超时";
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "cron",
         chatId: reportChannel,
         text: `${emoji} **定时任务${statusText}**: ${job.name} → ${tmuxName}`,
       });
@@ -516,8 +516,8 @@ async function executeJob(job: CronJob): Promise<void> {
 
     if (reportChannel) {
       try {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "cron",
           chatId: reportChannel,
           text: `❌ **定时任务失败**: ${job.name}\n-# ${errorMsg.slice(0, 200)}`,
         });

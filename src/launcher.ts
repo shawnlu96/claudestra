@@ -68,7 +68,7 @@ async function confirmMasterModal(pane: string): Promise<void> {
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { resolveNpm } from "./lib/npm-path.js";
 import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace } from "./lib/claude-binary.js";
-import { bridgeRequest } from "./lib/bridge-client.js";
+import { notify } from "./lib/notify.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { takeMasterResume } from "./lib/master-session.js";
@@ -298,8 +298,8 @@ async function checkBetaUpdates(autoOn: boolean) {
     // 单独管(v2.17.2:此前这道门也拦 auto 路径,通知过的 SHA 开了 auto 也不动)
     if (remote === lastNotifiedVersion) return;
     lastNotifiedVersion = remote;
-    await bridgeRequest({
-      type: "reply", chatId: CONTROL_CHANNEL_ID,
+    await notify({
+      source: "launcher", chatId: CONTROL_CHANNEL_ID,
       text: `🧪 beta 通道有新 commit(${head.slice(0, 7)} → ${remote.slice(0, 7)}),自动更新已关——手动: bun src/manager.ts update`,
     }).catch(() => {});
     return;
@@ -325,8 +325,8 @@ async function checkBetaUpdates(autoOn: boolean) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)})但仓库工作区脏——自动更新阻塞`);
     if (remote !== lastDirtyNotifiedSha) {
       lastDirtyNotifiedSha = remote;
-      await bridgeRequest({
-        type: "reply", chatId: CONTROL_CHANNEL_ID,
+      await notify({
+        source: "launcher", chatId: CONTROL_CHANNEL_ID,
         text: `⚠️ 自动更新被阻塞:仓库有未提交改动(常见原因:改了软链进仓库的 skill),git pull 会一直失败。\n处理:改动要保留就 commit;误改就 git checkout 还原。体检:bun src/manager.ts doctor`,
       }).catch(() => {});
     }
@@ -369,8 +369,8 @@ async function checkForUpdates() {
   if (!cfg.autoUpdate.claudestra) {
     // 关闭自动更新 → 只通知
     try {
-      await bridgeRequest({
-        type: "reply",
+      const sent = await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: [
           t(
@@ -391,7 +391,8 @@ async function checkForUpdates() {
           ),
         ].filter(Boolean).join("\n"),
       });
-      console.log(`📢 已通知用户：新版本 ${release.tag}（自动更新 off）`);
+      if (sent) console.log(`📢 已通知用户：新版本 ${release.tag}（自动更新 off）`);
+      else lastNotifiedVersion = ""; // 没送达就下轮再试，别当成已通知
     } catch {
       console.log("⚠️ 版本通知发送失败（bridge 可能还没就绪）");
     }
@@ -408,8 +409,8 @@ async function checkForUpdates() {
   console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲）`);
   const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
   try {
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + 重载 launchd daemon...`,
@@ -509,10 +510,10 @@ async function probeClaudeBinaryHealth(reason: string): Promise<boolean> {
   }
   console.log(`🩺 🚨 claude 二进制体检(${reason})失败:--version 挂死,自动修复未成功:${health.detail ?? ""}`);
   if (!binaryAlertSent) {
-    binaryAlertSent = true;
+    // 送达才置位：先置位再发，发失败就永远不会再告警（bridge 没起来时尤其如此）
     try {
-      await bridgeRequest({
-        type: "reply",
+      binaryAlertSent = await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `🚨 **Claude Code 二进制无法启动**(--version 挂死,自动修复未成功:${health.detail ?? "?"};触发:${reason})。现役 agent 不受影响,但新启动 / restart / cron 临时 agent 都会「启动超时」。需人工处理 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
@@ -625,8 +626,8 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     console.log(`🔁 [${source}] 发现 ${reallyDead.length} 个 dead agent：${reallyDead.map((a: any) => a.name).join(", ")}`);
     if (source === "boot") {
       try {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "launcher",
           chatId: CONTROL_CHANNEL_ID,
           text: t(
             `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
@@ -659,8 +660,8 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     for (const f of fresh) restoreFailNotifiedAt.set(f.name, Date.now());
     if (fresh.length && CONTROL_CHANNEL_ID) {
       try {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "launcher",
           chatId: CONTROL_CHANNEL_ID,
           text: t(
             `⚠️ [${source}] 有 ${fresh.length} 个 agent 恢复失败，窗口可能已建但 Claude Code 没起来：\n` +
@@ -694,8 +695,8 @@ async function restartAgentsAndMaster() {
       console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
       if (!canaryOk) {
         try {
-          await bridgeRequest({
-            type: "reply",
+          await notify({
+            source: "launcher",
             chatId: CONTROL_CHANNEL_ID,
             text: t(
               `🚨 **升级后金丝雀重启失败**(${canary.name} 启动不了),已中止其余 agent 的重启波——它们继续跑旧进程。需人工排查新版 Claude Code ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
@@ -777,8 +778,8 @@ async function checkClaudeCodeUpdate() {
   console.log(`🆙 所有 agent 空闲，开始更新 Claude Code`);
   try {
     const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `🆙 **Claude Code 新版本** ${current} → ${latest} ${mention}\n\n所有 agent 当前空闲，开始${install.kind === "brew" ? " brew upgrade" : " npm install"} + 重启...`,
@@ -799,8 +800,8 @@ async function checkClaudeCodeUpdate() {
   if (!upgrade.ok) {
     console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}\n${upgrade.err}`);
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `⚠️ Claude Code 更新失败（${install.kind === "brew" ? "brew upgrade" : "npm install"} 返回错误），详见 launcher 日志`,
@@ -822,8 +823,8 @@ async function checkClaudeCodeUpdate() {
     // --version 却还报旧号),带 quarantine 的新文件下一次启动就挂——照样体检。
     await probeClaudeBinaryHealth("升级未生效");
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `⚠️ Claude Code 升级命令执行成功，但版本仍是 ${current}（预期 ${latest}）——升级**未生效**，已中止 agent 重启。可能是装到了不在 PATH 前列的位置，或该机器由其它方式管理 CC（如原生安装器自更新）。`,
@@ -838,8 +839,8 @@ async function checkClaudeCodeUpdate() {
   if (!health.ok) {
     console.log(`🆙 ⚠️ 新二进制体检失败(启动挂死),中止 agent 重启波:${health.detail ?? ""}`);
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `🚨 **Claude Code 升级后二进制无法启动**(--version 挂死,自动修复未成功:${health.detail ?? "?"})。已中止 agent 重启——现役 agent 继续跑旧进程不受影响,但新启动会挂。需人工处理:参照 web/SETUP.md 排障或回滚版本 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
@@ -856,8 +857,8 @@ async function checkClaudeCodeUpdate() {
   await restartAgentsAndMaster();
 
   try {
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,

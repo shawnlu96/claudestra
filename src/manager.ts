@@ -219,6 +219,7 @@ async function saveRegistry(reg: Registry) {
 }
 
 import { bridgeRequest } from "./lib/bridge-client.js";
+import { notify } from "./lib/notify.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -1417,8 +1418,8 @@ async function cmdResume(
       // 发图片到 Discord
       const { existsSync } = await import("fs");
       if (existsSync(pngPath)) {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "manager",
           chatId: channelId,
           text: "**📜 恢复的会话终端预览**",
           files: [pngPath],
@@ -2351,8 +2352,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
         } else {
           console.error(`[restart] ⚠️ ${tmuxName} fork 成功但未探测到新 session id，registry 未更新`);
         }
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "manager",
           chatId: info.channelId,
           text: `🔀 ${displayName} 原 session 被后台 agent 占用，已自动 fork 副本恢复（上下文完整）${newId ? "" : "，⚠️ 新 session id 探测失败请查 registry"}`,
         }).catch(() => {});
@@ -2395,8 +2396,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     // 取代 permission-watcher 那条让人摸不清状态的 session-idle 按钮消息。
     // 只在确实命中 session-idle 弹窗时发；普通秒级重启不打扰。
     if (started.ready && started.recoveredFullSession) {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "manager",
         chatId: info.channelId,
         text: `✅ ${displayName} 已重启，自动恢复完整会话（无 compact，上下文保留）`,
       }).catch(() => { /* 通知失败不影响重启结果 */ });
