@@ -12,6 +12,12 @@
  * ⚠ override 只作用于读到它的进程。Pi 扩展（src/pi/claudestra-extension.ts）为了只依赖
  * node: 模块而内联了同一条规则，改这里的默认值要同步改那边。
  *
+ * ⚠ 目前**还不能**靠它隔离出一个沙箱 bridge：bridge.ts 里仍有直接 readFileSync 生产
+ * registry.json 的地方、msg-source.json 与 api-routes 的日志路径还是手写的、web BFF 读 inbox
+ * 也没接（这些文件归 P10）。设了 override 的沙箱 bridge 会读生产 registry、而 manager 写沙箱
+ * 那份。manager / cron / launcher / lib 这一侧已全部走这里；剩余手写点见 tests/paths-guard.test.ts
+ * 的白名单，P10 收完后删白名单条目即可。默认值不受影响。
+ *
  * 路径都在模块加载时求值（与之前各处的常量语义一致）；需要「换一个 home 算路径」的
  * 纯函数（测试用）走 `stateDirIn(home)`。
  */

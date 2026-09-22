@@ -19,25 +19,35 @@ const KEY_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 // 却匹配不上，于是按 3847 去探、给出错误的 kickstart 建议。
 
 /**
- * 与 Bun 的 .env 加载口径对齐的解析：`export ` 前缀、成对的单/双引号、未加引号值的
- * 行内注释（` #` 之后）、空值、键名含数字。不做 `${VAR}` 展开。
+ * 与 Bun 的 .env 加载口径对齐的解析（bun 1.3.14 实测，用例见 tests/env-file.test.ts）：
+ * - `export ` 前缀、空值、键名含数字；
+ * - 未加引号的值：第一个 `#` 起都是注释（`p#q` → `p`，不要求 `#` 前有空格），再去首尾空白；
+ * - 单/双/反引号：闭合引号 = 其后只剩空白或注释的那个同类引号，可以落在后面的行上（多行值）；
+ *   找不到这样的闭合引号 → 按未加引号处理（`"a"b` → `"a"b`，`"noclose` → `"noclose`）；
+ * - 双引号里只有 `\n` 转成换行，其余反斜杠原样保留（`\t`、`\"` 都不转义）。
+ * 不做 `${VAR}` 展开。
  */
 export function parseDotenv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const line of text.split(/\r?\n/)) {
-    const m = KEY_LINE_RE.exec(line);
+  const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
+  for (let i = 0; i < lines.length; i++) {
+    const m = KEY_LINE_RE.exec(lines[i]!);
     if (!m) continue;
-    let v = m[2]!.trim();
+    let v = m[2]!.replace(/^[ \t]+/, "");
     const q = v[0];
-    if (q === '"' || q === "'") {
-      // 取到下一个同类引号为止（后面可能跟着注释）；没闭合就去掉开引号
-      const end = v.indexOf(q, 1);
-      v = end > 0 ? v.slice(1, end) : v.slice(1);
-    } else {
-      const hash = v.search(/(^|\s)#/);
-      if (hash >= 0) v = v.slice(0, hash).trimEnd();
+    if (q === '"' || q === "'" || q === "`") {
+      const rest = [v.slice(1), ...lines.slice(i + 1)].join("\n");
+      const close = new RegExp(`${q}[ \\t]*(?:#[^\\n]*)?(?:\\n|$)`).exec(rest);
+      if (close) {
+        const body = rest.slice(0, close.index);
+        i += body.split("\n").length - 1; // 多行值吃掉的后续行
+        out[m[1]!] = q === '"' ? body.replace(/\\n/g, "\n") : body;
+        continue;
+      }
     }
-    out[m[1]!] = v;
+    const hash = v.indexOf("#");
+    if (hash >= 0) v = v.slice(0, hash);
+    out[m[1]!] = v.trim();
   }
   return out;
 }

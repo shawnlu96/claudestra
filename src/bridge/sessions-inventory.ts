@@ -201,11 +201,14 @@ const spawnRunner: Runner = async (cmd, timeoutMs = 0) => {
   }
 };
 
-// 进程内只解析一次（登录 shell 一次几百毫秒；reconciler 每 10 分钟调一轮）。解析失败 = 退回原候选
+// 解析成功后进程内只解析一次（登录 shell 一次几百毫秒；reconciler 每 10 分钟调一轮）。
+// 失败（开机时 shell 慢 / 超时）不缓存：本轮退回原候选，下一轮再试——否则 null 会一直粘到 bridge 重启
 let loginClaude: Promise<string | null> | null = null;
 function loginShellClaude(): Promise<string | null> {
-  loginClaude ??= resolveClaudeBinary(spawnRunner).then((b) => b?.link ?? null, () => null);
-  return loginClaude;
+  const p = (loginClaude ??= resolveClaudeBinary(spawnRunner).then((b) => b?.link ?? null, () => null));
+  void p.then((v) => { if (v === null && loginClaude === p) loginClaude = null; });
+  // 最多等 3s（resolveClaudeBinary 自身上限 15s）：慢了本轮先用原候选，解析在后台继续、成功后下一轮生效
+  return Promise.race([p, new Promise<null>((r) => { setTimeout(r, 3000, null).unref(); })]);
 }
 
 /** 跑 `claude agents --json`。失败返回 null（上游不可用时清单退化为空，不炸 bridge）。 */
