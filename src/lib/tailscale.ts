@@ -306,9 +306,22 @@ export function looksLikeClaudestra(v: unknown): boolean {
 // 只读查询（I/O）
 // ============================================================
 
+/**
+ * macOS App 内置的 Tailscale CLI 靠 **TERM 是否存在** 判断「被当 CLI 调」还是「该拉起 GUI」：
+ * launchd 起的进程（bridge / launcher）没有 TERM，它就去启动 GUI 并报
+ * `Tailscale.CLIError error 3`，于是网页面板把在跑的 Tailscale 判成「没装」（2026-09-23 实测，
+ * 终端里跑 doctor 却一切正常）。补一个 TERM 就回到 CLI 模式；已有的不覆盖。
+ */
+export function tailscaleCliEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) if (typeof v === "string") out[k] = v;
+  if (!out.TERM) out.TERM = "dumb";
+  return out;
+}
+
 async function runCli(cli: string, args: string[], timeoutMs = 5000): Promise<{ code: number; out: string; err: string }> {
   try {
-    const proc = Bun.spawn([cli, ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const proc = Bun.spawn([cli, ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: tailscaleCliEnv() });
     const timer = setTimeout(() => proc.kill(), timeoutMs);
     const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     const code = await proc.exited;

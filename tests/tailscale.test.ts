@@ -1,4 +1,5 @@
 import { test, expect, describe } from "bun:test";
+import { tailscaleCliEnv } from "../src/lib/tailscale";
 import {
   pickTailscaleCli,
   tailscaleCliCandidates,
@@ -294,5 +295,14 @@ describe("scripts/renew-ts-cert.ts", () => {
   test("可被 import 而不执行（借此纳入 tsc 与 bun test 的检查范围）", async () => {
     const m = await import("../scripts/renew-ts-cert");
     expect(typeof m.main).toBe("function");
+  });
+});
+
+describe("tailscaleCliEnv", () => {
+  test("launchd 下没有 TERM 时补上（否则 App 内置 CLI 会去拉起 GUI 并报 CLIError 3）", () => {
+    expect(tailscaleCliEnv({ HOME: "/h", PATH: "/usr/bin" }).TERM).toBe("dumb");
+  });
+  test("已有 TERM 不覆盖", () => {
+    expect(tailscaleCliEnv({ TERM: "xterm-256color" }).TERM).toBe("xterm-256color");
   });
 });
