@@ -69,7 +69,7 @@ async function confirmMasterModal(pane: string): Promise<void> {
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { resolveNpm } from "./lib/npm-path.js";
-import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace } from "./lib/claude-binary.js";
+import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace, classifyClaudeInstall, type ClaudeInstall } from "./lib/claude-binary.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -580,38 +580,31 @@ async function getClaudeLatestVersion(): Promise<string | null> {
 }
 
 /**
- * npm 安装方式下的升级。**必须走 resolveNpm 的绝对路径**：launchd 给 daemon 的 PATH
- * 是阉割版，裸 `npm` 在这里 ENOENT，而 runCmd 把错误吞进返回值 → 「更新失败」日志里
- * 什么都没有。同坑已经踩过两次（web 构建 e11500e、CC 更新检查 peer 2026-08-09），
- * 检查那一侧（getClaudeLatestVersion）早就改了，升级这一侧一直是裸 npm。
- * binDir 也要补进 PATH：npm 自己要找得到 node，postinstall 脚本同理。
+ * npm 安装方式下的升级。**必须装回 claude 所在的那个前缀**：resolveNpm 选中的 npm 可能属于
+ * 另一个 node（nvm 切过默认版本、nodejs.org pkg 装在 /usr/local），`npm i -g` 会装到别处
+ * （永不生效）或 EACCES。npm 优先用 <prefix>/bin/npm，没有再退回 resolveNpm；绝对路径 +
+ * binDir 进 PATH，因为 launchd 给 daemon 的 PATH 是阉割版，裸 npm 会 ENOENT。
  */
-async function npmUpgradeClaude(): Promise<{ ok: boolean; out: string; err: string }> {
-  const npmBin = resolveNpm();
+async function npmUpgradeClaude(prefix: string): Promise<{ ok: boolean; out: string; err: string }> {
+  const { accessSync, constants, existsSync } = await import("fs");
+  try {
+    accessSync(`${prefix}/lib/node_modules`, constants.W_OK);
+  } catch {
+    return { ok: false, out: "", err: `${prefix}/lib/node_modules 不可写——需要手动升级（可能要 sudo）：npm install -g --prefix ${prefix} @anthropic-ai/claude-code` };
+  }
+  const own = `${prefix}/bin/npm`;
+  const npmBin = existsSync(own) ? { npm: own, binDir: `${prefix}/bin` } : resolveNpm();
   if (!npmBin) return { ok: false, out: "", err: "找不到 npm（PATH/nvm/homebrew 都没有）" };
-  return runCmd([npmBin.npm, "install", "-g", "@anthropic-ai/claude-code"], 600_000, npmBin.binDir);
+  return runCmd([npmBin.npm, "install", "-g", "--prefix", prefix, "@anthropic-ai/claude-code"], 600_000, npmBin.binDir);
 }
 
-/** claude 二进制的安装方式检测。三类:
- *  - **brew cask**:realpath 落在 Homebrew Caskroom(返回 cask 名)。brew 装的
- *    机器上跑 npm install -g 必然 EEXIST 失败——「CC 静默更新老失败」的根因
- *    (owner 2026-07-16)。
- *  - **native**(v2.17.2,peer 2026-08-09):官方原生安装器,realpath 落在
- *    `~/.local/share/claude/versions/<ver>`,CC **自带自更新**(实测三天三版)。
- *    此前这类被 else 一把归进 npm → `npm install -g` 装一份**永不执行**的副本
- *    (PATH 里 ~/.local/bin 优先于 nvm),然后无条件报「已更新」并触发全员重启波。
- *  - **npm**:兜底。 */
-async function detectClaudeInstall(): Promise<
-  { kind: "brew"; cask: string } | { kind: "native" } | { kind: "npm" }
-> {
-  const which = await runCmd(["/bin/sh", "-lc", "realpath \"$(command -v claude)\" 2>/dev/null"]);
-  const real = which.ok ? which.out.trim() : "";
-  const m = real.match(/\/Caskroom\/([^/]+)\//);
-  if (m) return { kind: "brew", cask: m[1] };
-  // 原生安装器:.../share/claude/versions/<ver>（不锁死 ~/.local，自定义前缀同样命中）
-  if (/\/share\/claude\/versions\//.test(real)) return { kind: "native" };
-  return { kind: "npm" };
+/** claude 二进制的安装方式：按登录 shell 解析出的真实文件分类（见 classifyClaudeInstall） */
+async function detectClaudeInstall(): Promise<ClaudeInstall | null> {
+  const bin = await resolveClaudeBinary(runCmd);
+  return bin ? classifyClaudeInstall(bin.real) : null;
 }
+
+let unknownInstallNotified = false;
 
 /** 所有 agent + master 是否都空闲 */
 async function allAgentsIdle(): Promise<boolean> {
@@ -838,10 +831,27 @@ async function checkClaudeCodeUpdate() {
   // 常领先 cask 几小时到几天,拿 npm 版本对比会永远误报「有更新」,而
   // npm install -g 对 brew 安装直接 EEXIST 失败(历史上「静默更新老失败」)。
   const install = await detectClaudeInstall();
+  if (!install) return;
   // native 安装器自带自更新(peer 2026-08-09 实测三天三版),Claudestra 不该插手:
   // npm install -g 只会装一份永不执行的副本,却触发全员重启波 + 误报「已更新」。
   // 真要代劳也只能是 `claude update`,不是 npm——这里选择完全不碰。
   if (install.kind === "native") return;
+  // 认不出的安装方式（volta shim / pnpm / bun 全局…）不猜着升级，只说一次
+  if (install.kind === "unknown") {
+    if (!unknownInstallNotified) {
+      unknownInstallNotified = true;
+      console.log(`🆙 认不出 Claude Code 的安装方式（${install.path}），不自动升级`);
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `ℹ️ 认不出 Claude Code 的安装方式（${install.path}），Claudestra 不会自动升级它——请用你安装它的工具自行升级。`,
+          `ℹ️ Can't tell how Claude Code was installed (${install.path}); Claudestra won't auto-upgrade it — upgrade it with the tool you installed it with.`,
+        ),
+      }).catch(() => {});
+    }
+    return;
+  }
   let latest: string;
   if (install.kind === "brew") {
     await runCmd(["brew", "update", "--quiet"]); // 刷新索引(weekly 一次,慢点无妨)
@@ -858,7 +868,9 @@ async function checkClaudeCodeUpdate() {
   } else {
     const npmLatest = await getClaudeLatestVersion();
     if (!npmLatest) return;
-    if (current === npmLatest) return;
+    // 只在 latest 真的更新时升级：用 next / 手动装了更高版本时，「不相等」会把它降级并触发全员重启
+    const { isNewer } = await import("./lib/github-release.js");
+    if (!isNewer(npmLatest, current)) return;
     latest = npmLatest;
   }
 
@@ -894,7 +906,7 @@ async function checkClaudeCodeUpdate() {
         // Error: invalid option 退出——2026-07-27 实测的「更新失败」真凶),
         // 正确姿势是 HOMEBREW_CASK_OPTS 环境变量,install/upgrade/reinstall 通吃。
         await runCmd(["env", "HOMEBREW_CASK_OPTS=--no-quarantine", "brew", "upgrade", "--cask", install.cask], 600_000)
-      : await npmUpgradeClaude();
+      : await npmUpgradeClaude(install.prefix);
   if (!upgrade.ok) {
     console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}\n${upgrade.err}`);
     try {
