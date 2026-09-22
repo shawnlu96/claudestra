@@ -163,11 +163,15 @@ bun run setup
 # iTerm2 原生 tab 模式
 tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 
-# 普通 tmux
-tmux -S /tmp/claude-orchestrator/master.sock attach
+# 普通 tmux（任何终端）
+tmux -S /tmp/claude-orchestrator/master.sock attach   # 等同 claudestra attach --plain
+
+# 列出 agent 窗口
+claudestra ls
 ```
 
 每个 agent 是 `master` session 里的一个 window。用 `Ctrl-B n/p` 切换，或者直接点 iTerm2 的 tab。
+会话在私有 socket 里，普通 `tmux ls` 看不到是正常的——用 `claudestra ls`。
 
 ### CLI 参考
 

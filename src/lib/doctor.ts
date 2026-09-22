@@ -409,7 +409,9 @@ async function checkAgents(): Promise<Check[]> {
   const missing = orphanAgentNames(agents, windows);
   const active = agents.filter((a) => a.status === "active").length;
   out.push(missing.length === 0
-    ? { group: g, name: "tmux window", status: "ok", detail: `${windows.size} 个 window，${active} 个 active agent 都在` }
+    ? { group: g, name: "tmux window", status: "ok",
+        // 私有 socket：普通 `tmux ls` 看不到这些会话，把能看到的命令直接给出来
+        detail: `${windows.size} 个 window，${active} 个 active agent 都在（查看：tmux -S ${sock} ls，或 claudestra ls）` }
     : { group: g, name: "tmux window", status: "warn", detail: `registry 说 active 但 tmux 里没有：${missing.join(", ")}`,
         fix: `bun src/manager.ts restart <name> 重新拉起，或 bun src/manager.ts remove <name> 清掉登记` });
   return out;

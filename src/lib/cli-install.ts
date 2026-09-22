@@ -338,14 +338,35 @@ async function writeCliWrapper(repoRoot: string, _bunPath: string): Promise<stri
   const fallback = `${home}/.bun/bin/claudestra`;
   await mkdir(`${home}/.local/bin`, { recursive: true });
   await mkdir(`${home}/.bun/bin`, { recursive: true });
+  const content = cliWrapperScript(repoRoot);
+  // 老版本可能在 primary 写过 symlink（甚至 ~/.local/bin <-> ~/.bun/bin 循环），
+  // writeFile 会 ELOOP；先 unlink 容错再写真实文件。
+  await unlink(primary).catch(() => {});
+  await writeFile(primary, content);
+  await chmod(primary, 0o755);
+  // ~/.bun/bin/claudestra symlink → primary（两个 PATH 选项都覆盖）
+  try {
+    await unlink(fallback).catch(() => {});
+    await symlink(primary, fallback);
+  } catch { /* 非关键 */ }
+  return primary;
+}
+
+/** `claudestra` 包装脚本的内容（纯函数，单测做 bash -n 语法检查） */
+export function cliWrapperScript(repoRoot: string): string {
   const daemonLabels = DAEMONS.map((d) => `"${d.label}"`).join(" ");
-  const content = `#!/usr/bin/env bash
+  return `#!/usr/bin/env bash
 # claudestra — one-shot launcher (Claudestra-installed, v2.4.1+)
+# 用法：
+#   claudestra                 检查 daemon 后 attach（iTerm 用 -CC 原生标签，没装 iTerm 用普通 tmux）
+#   claudestra attach --plain  强制普通 tmux attach（任何终端都能用）
+#   claudestra ls              列出 master session 里的窗口（agent）
 # 流程：
 #   1) launchctl 检查 3 个 daemon，没 load 的 bootstrap
 #   2) 已在 tmux 嵌套，提示 + 退出
-#   3) 在 iTerm：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
-#   4) 不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+#   3) --plain 或没装 iTerm：普通 tmux attach（-CC 在普通终端里只会吐控制协议文本）
+#   4) 在 iTerm：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
+#   5) 不在 iTerm 但装了 iTerm：osascript 唤起 iTerm 新窗口跑 attach
 set -u
 
 REPO=${JSON.stringify(repoRoot)}
@@ -353,6 +374,26 @@ SOCK=${JSON.stringify(TMUX_SOCK)}
 DAEMONS=(${daemonLabels})
 PLIST_DIR="$HOME/Library/LaunchAgents"
 ATTACH=(tmux -S "$SOCK" -CC attach -t master)
+PLAIN_ATTACH=(tmux -S "$SOCK" attach -t master)
+
+PLAIN=0
+case "\${1:-}" in
+  ls|list)
+    echo "会话在私有 socket（$SOCK）里，普通 tmux ls 看不到是正常的。"
+    exec tmux -S "$SOCK" list-windows -t master -F '#{window_index}  #{window_name}'
+    ;;
+  attach)
+    [ "\${2:-}" = "--plain" ] && PLAIN=1
+    ;;
+  --plain)
+    PLAIN=1
+    ;;
+  "") ;;
+  *)
+    echo "用法: claudestra [attach [--plain] | ls]"
+    exit 2
+    ;;
+esac
 
 UID_NUM=$(/usr/bin/id -u)
 
@@ -364,6 +405,7 @@ CB=$'\\033[1;36m'
 CR=$'\\033[0m'
 
 echo "\${CB}🚀 Claudestra\${CR} \\033[2m↗ $REPO\\033[0m"
+echo "$CI 会话在私有 socket 里，普通 tmux ls 看不到是正常的；看窗口用 claudestra ls，非 iTerm 终端用 claudestra attach --plain"
 
 missing=()
 for d in "\${DAEMONS[@]}"; do
@@ -395,6 +437,12 @@ if [ -n "\${TMUX:-}" ]; then
   exit 0
 fi
 
+# --plain 或根本没装 iTerm：普通 tmux attach，任何终端都能用
+if [ "$PLAIN" -eq 1 ] || { [ "\${TERM_PROGRAM:-}" != "iTerm.app" ] && [ ! -d /Applications/iTerm.app ]; }; then
+  echo "$CI 普通 tmux attach（切窗口 Ctrl-B n/p，离开 Ctrl-B d）"
+  exec "\${PLAIN_ATTACH[@]}"
+fi
+
 # 在 iTerm：exec 替换当前进程，让 tmux 直接成为 iTerm 子进程（-CC 协议字节直送 PTY）
 if [ "\${TERM_PROGRAM:-}" = "iTerm.app" ]; then
   echo "$CI 在 iTerm，exec tmux -CC（iTerm 集成会切到 native tabs）"
@@ -415,21 +463,10 @@ rc=$?
 if [ "$rc" -eq 0 ]; then
   echo "$CO 已在 iTerm 打开新窗口并 attach 到 master"
 else
-  echo "$CF osascript 失败，手动跑：\${ATTACH[*]}"
+  echo "$CF osascript 失败。在 iTerm 里手动跑：\${ATTACH[*]}；其它终端：claudestra attach --plain"
 fi
 exit "$rc"
 `;
-  // 老版本可能在 primary 写过 symlink（甚至 ~/.local/bin <-> ~/.bun/bin 循环），
-  // writeFile 会 ELOOP；先 unlink 容错再写真实文件。
-  await unlink(primary).catch(() => {});
-  await writeFile(primary, content);
-  await chmod(primary, 0o755);
-  // ~/.bun/bin/claudestra symlink → primary（两个 PATH 选项都覆盖）
-  try {
-    await unlink(fallback).catch(() => {});
-    await symlink(primary, fallback);
-  } catch { /* 非关键 */ }
-  return primary;
 }
 
 function buildDaemonPlist(
