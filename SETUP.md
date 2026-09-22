@@ -10,12 +10,18 @@ This file exists as a reference for:
 - Understanding what the wizard does under the hood.
 - Operators who prefer to configure things by hand.
 
-> **Two front doors.** This guide sets up the **Discord** frontend. Since v2.10
-> there is also a **web client** — a PWA-installable Next.js app with streaming
-> chat, a live remote terminal, and chat-history search. It can run **beside**
-> Discord or **instead of it** (Web-only mode, no bot token needed). See
-> **[web/SETUP.md](./web/SETUP.md)**, including the "Access from your phone"
-> section (Tailscale / PWA install).
+> **Two front doors — the web client is the default.** Since v2.24 the wizard
+> installs the **web client** only: a PWA-installable Next.js app with streaming
+> chat, a live remote terminal, and chat-history search. It logs in with your OS
+> account (SSH username/password), depends on no third party, and by the time the
+> wizard finishes it is already installed for autostart and you have a URL. The
+> wizard also walks you through Tailscale so your phone can reach it from any
+> network.
+>
+> **Discord is optional** (you would create your own bot — 5 extra steps) and is
+> only asked about if you pick it at the "Pick your frontends" step. The Discord
+> sections below only matter if you did. For web details see
+> **[web/SETUP.md](./web/SETUP.md)**.
 
 ---
 

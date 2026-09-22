@@ -805,11 +805,17 @@ async function registerHooks(hookCmd: string, recallCmd?: string): Promise<void>
  * 完成！」，MCP / hooks / launchd 三处失败全是 warn-continue，用户盯着「完成」
  * 而 bot 根本不理他，是最贵的一类支持成本。
  */
-interface FinalizeResult { deferred: boolean; failures: string[] }
+interface FinalizeResult {
+  deferred: boolean;
+  failures: string[];
+  /** install-cli 报回来的 web daemon 结果(装上了给 url,没装给缺什么) */
+  web?: { installed: true; url: string } | { installed: false; reason?: string };
+}
 
 async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   header(nextStep(), t("写入配置 + 自动化收尾", "Write config + auto-finalize"));
   const failures: string[] = [];
+  let webResult: FinalizeResult["web"];
 
   // 写 .env
   if (await fileExists(ENV_PATH)) {
@@ -969,6 +975,22 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
         ));
       }
       for (const w of r.warnings) warn(w);
+      // v2.24+ web 前端 daemon:装上了就把 URL 带到收尾提示里(别再让用户
+      // 自己开一个前台 npm run dev)
+      if (r.webDaemon?.installed) {
+        webResult = { installed: true, url: r.webDaemon.url };
+        const kept = r.daemons.find((d) => d.label === "com.claudestra.web")?.keptExisting;
+        ok(t(
+          kept
+            ? `web 服务已有自己的 plist,原样保留 → ${c.cyan}${r.webDaemon.url}${c.reset}`
+            : `web 服务已装成开机自启 → ${c.cyan}${r.webDaemon.url}${c.reset}`,
+          kept
+            ? `web service already had its own plist — left untouched → ${c.cyan}${r.webDaemon.url}${c.reset}`
+            : `web service installed for autostart → ${c.cyan}${r.webDaemon.url}${c.reset}`,
+        ));
+      } else if (r.webDaemon) {
+        webResult = { installed: false, reason: r.webDaemon.reason };
+      }
     }
   } catch (e) {
     print(`${c.red}✗${c.reset}`);
@@ -982,7 +1004,7 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
       `launchd daemons (bridge / launcher / cron will not start) — run: bun src/manager.ts install-cli`,
     ));
   }
-  return { deferred: false, failures };
+  return { deferred: false, failures, web: webResult };
 }
 
 // ============================================================
@@ -995,27 +1017,30 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
   header(nextStep(), t("选择前端", "Pick your frontends"));
   print(t("Claudestra 有两种入口,可以同时启用,也可以只要一个:", "Claudestra has two frontends. Enable either or both:"));
   br();
-  print(`  ${c.bold}${c.yellow}1${c.reset}  ${c.bold}Discord${c.reset} — ${t("手机 App / 推送通知 / 按钮交互(需要 Discord 账号 + 建 bot)", "phone app / push notifications / buttons (needs a Discord account + bot)")}`);
-  print(`  ${c.bold}${c.yellow}2${c.reset}  ${c.bold}Web${c.reset} — ${t("浏览器 / PWA,本机系统账号(SSH)登录,不依赖任何第三方", "browser / PWA, logs in with your OS account (SSH), no third-party dependency")}`);
+  print(`  ${c.bold}${c.yellow}1${c.reset}  ${c.bold}Web${c.reset} ${c.dim}${t("(推荐)", "(recommended)")}${c.reset} — ${t("浏览器 / PWA,本机系统账号(SSH 用户名密码)登录,不依赖任何第三方,装完就能用", "browser / PWA, logs in with your OS account (SSH username/password), no third-party dependency, usable right after install")}`);
+  print(`  ${c.bold}${c.yellow}2${c.reset}  ${c.bold}Discord${c.reset} — ${t("手机 App / 推送通知 / 按钮交互(需要 Discord 账号 + 自己建 bot,多 5 个步骤)", "phone app / push notifications / buttons (needs a Discord account + your own bot; 5 extra steps)")}`);
   br();
-  // 默认:老用户按现有配置推断;全新安装默认 Discord(经典路径)
+  // 默认:老用户按现有配置推断;全新安装默认 **Web** —— 它零第三方依赖、装完即用,
+  // 而 Discord 要先去开发者后台建 bot、开 intents、邀请进服务器(5 步)。
+  // (2026-09-22 owner:「最好是有 Claude Code 的人,一个安装命令下来,就可以用
+  //  我这个 Web 端。Discord 端可以暂时先不用配置,或者做成可选项。一切以 Web 端优先。」)
   const hasWebEnv = await fileExists(`${REPO_ROOT}/web/.env.local`);
   const def = existing.DISCORD_BOT_TOKEN
-    ? hasWebEnv ? "1,2" : "1"
-    : hasWebEnv ? "2" : "1";
+    ? hasWebEnv ? "1,2" : "2"
+    : "1";
   while (true) {
     const raw = await prompt(
       `${kbd(t("启用哪些?", "Which ones?"))} ${c.dim}${t("(多选,逗号分隔,如 1,2)", "(multi-select, comma-separated, e.g. 1,2)")}${c.reset}`,
       def,
     );
     const picks = new Set(raw.split(/[,，\s]+/).filter(Boolean));
-    const fronts = { discord: picks.has("1"), web: picks.has("2") };
+    const fronts = { web: picks.has("1"), discord: picks.has("2") };
     if (!fronts.discord && !fronts.web) {
       fail(t("至少选一个(输入 1、2 或 1,2)", "Pick at least one (enter 1, 2, or 1,2)"));
       continue;
     }
-    // 步骤总数定下来:基础 4 步(依赖/前端/偏好/收尾) + Discord 5 步 + Web 1 步
-    TOTAL_STEPS = 4 + (fronts.discord ? 5 : 0) + (fronts.web ? 1 : 0);
+    // 步骤总数定下来:基础 4 步(依赖/前端/偏好/收尾) + Discord 5 步 + Web 2 步(配置 + 手机访问)
+    TOTAL_STEPS = 4 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0);
     if (!fronts.discord) {
       hint(t("跳过 Discord 的 5 个配置步骤(以后想加,重跑 bun run setup 即可)", "Skipping the 5 Discord steps (rerun `bun run setup` anytime to add it later)"));
     }
@@ -1098,24 +1123,124 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
     ));
     return;
   }
-  if (await confirm(t("现在安装 web 依赖吗?(npm install,可能要几分钟)", "Install web dependencies now? (npm install, may take a few minutes)"), true)) {
+  if (await confirm(t("现在安装并构建 web 前端吗?(npm install + build,可能要几分钟)", "Install and build the web frontend now? (npm install + build, may take a few minutes)"), true)) {
     write(`${c.dim}▶${c.reset} npm install… `);
     const ni = await run(["npm", "install"], { cwd: webDir });
     if (ni.ok) print(`${c.green}✓${c.reset}`);
     else {
       print(`${c.red}✗${c.reset}`);
       warn(t("npm install 失败,稍后在 web/ 目录手动重试", "npm install failed — retry manually in web/"));
+      return;
+    }
+    // ⚠ 必须 build:开机自启那个 daemon 跑的是 `next start`(生产模式),没有 .next/
+    //   它会直接退出,而 KeepAlive 会把它无限重启。install-cli 因此也把「构建产物
+    //   在不在」列为装 daemon 的前置条件(见 lib/cli-install.ts 的 webDaemonReadiness)。
+    write(`${c.dim}▶${c.reset} npm run build… `);
+    const nb = await run(["npm", "run", "build"], { cwd: webDir });
+    if (nb.ok) print(`${c.green}✓${c.reset}`);
+    else {
+      print(`${c.red}✗${c.reset}`);
+      warn(t("web 构建失败,稍后跑: cd web && npm run build(不构建就没有开机自启的 web 服务)", "web build failed — run later: cd web && npm run build (without it there is no auto-started web service)"));
     }
   } else {
-    hint(t("稍后自己跑: cd web && npm install", "Run later: cd web && npm install"));
+    hint(t("稍后自己跑: cd web && npm install && npm run build", "Run later: cd web && npm install && npm run build"));
   }
+}
+
+// ============================================================
+// 手机访问（Tailscale）—— v2.24+
+// ============================================================
+
+/**
+ * Web 端默认只听在本机。要在手机上用，两台设备得互相看得见：
+ *   - 同一个局域网 → LAN 地址就行，但换个网络（出门、4G）就断；
+ *   - Tailscale → 给每台设备一个稳定的私有地址（100.64.0.0/10），换网不换址，
+ *     不用端口转发、也不把服务暴露到公网。owner 自己就是这么用的。
+ *
+ * 地址探测复用 lib/net-addr.ts：它**按网卡地址段判断**，不依赖 `tailscale` CLI
+ * ——macOS 上常常只装了 App，CLI 躺在 /Applications/Tailscale.app/... 不在 PATH。
+ *
+ * ⚠ 这里只打印**运行时探测到的**地址，绝不内置任何具体地址：这个仓库是要给别人用的。
+ */
+async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
+  header(nextStep(), t("手机访问（Tailscale）", "Phone access (Tailscale)"));
+  const { detectBridgeUrls } = await import("./lib/net-addr.js");
+
+  const pick = () => {
+    const cands = detectBridgeUrls(webPort);
+    return {
+      ts: cands.find((c) => c.kind === "tailscale"),
+      lan: cands.find((c) => c.kind === "lan"),
+    };
+  };
+  let { ts, lan } = pick();
+
+  print(t(
+    "Web 端装在本机,在这台机器上开浏览器就能用。要在**手机**上用,两边得互相看得见:",
+    "The web frontend runs on this machine — a browser here just works. To use it from your **phone**, the two devices must be able to reach each other:",
+  ));
+  br();
+  print(`  ${c.dim}•${c.reset} ${t("同一个 Wi-Fi → 局域网地址够用,但出门换到 4G 就断了", "Same Wi-Fi → a LAN address works, but breaks the moment you leave on cellular")}`);
+  print(`  ${c.dim}•${c.reset} ${t("Tailscale → 每台设备一个固定私有地址,换网不换址,不用端口转发,也不把服务暴露到公网", "Tailscale → a stable private address per device; survives network changes, no port forwarding, nothing exposed publicly")}`);
+  br();
+
+  if (!ts) {
+    if (lan) hint(t(`现在只探测到局域网地址: ${lan.url}`, `Only a LAN address is visible right now: ${lan.url}`));
+    else hint(t("现在探测不到可用于手机的地址(只有 localhost)", "No phone-reachable address is visible right now (localhost only)"));
+    br();
+    const isMac = process.platform === "darwin";
+    const installCmd = isMac
+      ? "brew install --cask tailscale"
+      : "curl -fsSL https://tailscale.com/install.sh | sh";
+    print(t("装 Tailscale（两边都要装、登录同一个账号）:", "Install Tailscale (on both devices, same account):"));
+    print(`  ${c.dim}①${c.reset} ${t("这台机器:", "This machine:")} ${c.cyan}${installCmd}${c.reset}`);
+    print(`  ${c.dim}②${c.reset} ${t("手机: App Store / Google Play 装 Tailscale,登录同一个账号", "Phone: install Tailscale from the App Store / Google Play, sign in with the same account")}`);
+    print(`  ${c.dim}③${c.reset} ${t("这台机器上打开 Tailscale 并登录（macOS 是 App，Linux 是", "Open Tailscale here and sign in (a menu-bar app on macOS; on Linux:")} ${c.cyan}sudo tailscale up${c.reset}${t("）", ")")}`);
+    br();
+    if (await confirm(t("现在帮你装 Tailscale 吗?（装完还要自己登录一次）", "Install Tailscale now? (you still sign in yourself afterwards)"), true)) {
+      write(`${c.dim}▶${c.reset} ${installCmd}… `);
+      const r = isMac
+        ? await run(["brew", "install", "--cask", "tailscale"])
+        : await run(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"]);
+      print(r.ok ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`);
+      if (!r.ok) warn(t(`装 Tailscale 失败,手动跑: ${installCmd}`, `Tailscale install failed — run manually: ${installCmd}`));
+    }
+    hint(t(
+      "登录之后重跑 bun run setup（或直接看 tailscale 给的地址）就能拿到手机可用的网址。",
+      "After signing in, rerun `bun run setup` (or just read the address Tailscale gives you) to get the phone URL.",
+    ));
+    // 登录可能就在刚才那几十秒里完成了 —— 再探一次，省一轮重跑
+    ({ ts, lan } = pick());
+  }
+
+  if (ts) {
+    ok(t(`探测到 Tailscale 地址,手机上用这个: ${c.cyan}${ts.url}${c.reset}`, `Tailscale address detected — use this on your phone: ${c.cyan}${ts.url}${c.reset}`));
+    hint(t(
+      `想要 HTTPS（语音输入、完整 PWA 能力要求安全上下文）: ${c.cyan}tailscale serve --bg ${webPort}${c.reset}，细节见 web/SETUP.md`,
+      `For HTTPS (voice input and full PWA capabilities require a secure context): ${c.cyan}tailscale serve --bg ${webPort}${c.reset} — details in web/SETUP.md`,
+    ));
+    return { url: ts.url };
+  }
+  if (lan) return { url: lan.url };
+  return {};
 }
 
 // ============================================================
 // 完成
 // ============================================================
 
-function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult): void {
+/** web 端口的唯一真源是 web/package.json 的 start 脚本（与 install-cli 同一判据）。 */
+async function readWebPort(): Promise<number> {
+  const { webPortFromStartScript } = await import("./lib/cli-install.js");
+  try {
+    const pkg = JSON.parse(await readFile(`${REPO_ROOT}/web/package.json`, "utf-8"));
+    return webPortFromStartScript(pkg?.scripts?.start);
+  } catch {
+    return webPortFromStartScript(undefined);
+  }
+}
+
+function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?: string): void {
   br();
   // 装没装成，横幅就得说实话 —— 否则用户盯着「✨ 安装完成」而 bot 根本不理他。
   if (fin.failures.length > 0) {
@@ -1151,9 +1276,21 @@ function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult): void {
   }
   if (fronts.web) {
     print(`${c.bold}${t("试一下(Web):", "Try it (Web):")}${c.reset}`);
-    print(`  ${c.dim}①${c.reset} ${t("启动:", "Start it:")} ${c.cyan}cd web && npm run dev${c.reset}  ${c.dim}${t("(生产部署见 web/CLAUDE.md)", "(production deploy: see web/CLAUDE.md)")}${c.reset}`);
-    print(`  ${c.dim}②${c.reset} ${t("浏览器打开", "Open in browser:")} ${url("http://localhost:33333")}`);
-    print(`  ${c.dim}③${c.reset} ${t("用本机系统账号(SSH 用户名密码)登录,手机上可「添加到主屏幕」装成 PWA", "Log in with your OS account (SSH username/password). On phones, Add to Home Screen for the PWA")}`);
+    if (fin.web?.installed) {
+      // daemon 已经在跑了 —— 别再让用户去开一个前台 `npm run dev`(关掉终端就没了)。
+      print(`  ${c.dim}①${c.reset} ${t("已经在跑了,浏览器打开", "Already running — open in your browser:")} ${url(fin.web.url)}`);
+      print(`  ${c.dim}②${c.reset} ${t("用本机系统账号(SSH 用户名密码)登录,手机上可「添加到主屏幕」装成 PWA", "Log in with your OS account (SSH username/password). On phones, Add to Home Screen for the PWA")}`);
+      if (phoneUrl) {
+        print(`  ${c.dim}③${c.reset} ${t("手机上用这个:", "On your phone:")} ${url(phoneUrl)}`);
+      } else {
+        print(`  ${c.dim}③${c.reset} ${t("手机要用的话,装上 Tailscale 两边登录同一个账号,再回来重跑 bun run setup 拿地址", "To use it from your phone: install Tailscale on both and sign in with the same account, then rerun `bun run setup` for the address")}`);
+      }
+      hint(t("它由 launchd 托管(com.claudestra.web),关终端不掉、重启机器自动回来", "It is managed by launchd (com.claudestra.web): survives closing the terminal and machine reboots"));
+    } else {
+      print(`  ${c.dim}①${c.reset} ${t("先补上缺的这步:", "Finish this first:")} ${c.yellow}${fin.web?.reason || t("cd web && npm install && npm run build", "cd web && npm install && npm run build")}${c.reset}`);
+      print(`  ${c.dim}②${c.reset} ${t("然后跑", "Then run")} ${c.cyan}bun src/manager.ts install-cli${c.reset} ${t("把 web 服务装成开机自启", "to install the web service for autostart")}`);
+      print(`  ${c.dim}③${c.reset} ${t("临时试跑也行:", "Or try it in the foreground:")} ${c.cyan}cd web && npm run dev${c.reset}`);
+    }
     br();
   }
   print(`${c.bold}${t("如果没反应:", "If nothing happens:")}${c.reset}`);
@@ -1252,7 +1389,11 @@ async function main() {
     ({ guildId, userId, controlChannelId } = await stepCollectIds());
   }
   const { userName, mcpName, bridgePort } = await stepPreferences(existing);
-  if (fronts.web) await stepWebSetup(bridgePort);
+  let phoneUrl: string | undefined;
+  if (fronts.web) {
+    await stepWebSetup(bridgePort);
+    phoneUrl = (await stepRemoteAccess(await readWebPort())).url;
+  }
 
   const cfg: Config = {
     DISCORD_BOT_TOKEN: token,
@@ -1265,7 +1406,7 @@ async function main() {
   };
 
   const fin = await stepFinalize(cfg);
-  stepDone(cfg, fronts, fin);
+  stepDone(cfg, fronts, fin, phoneUrl);
 
   process.exit(0);
 }

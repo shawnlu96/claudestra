@@ -36,7 +36,7 @@
 
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { resolveBunPath } from "./bun-path.js";
 import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./session-recall.js";
@@ -46,8 +46,19 @@ import { readActiveAgents } from "./registry.js";
 
 const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 
-/** 3 个 daemon 的 launchd 定义。改这里 = 改启动链。 */
-export const DAEMONS = [
+export interface DaemonSpec {
+  label: string;
+  stem: string;
+  /** bun 跑的仓库内脚本（与 exec 二选一） */
+  script?: string;
+  /** 自带 argv + 工作目录（web 前端走这条：next start，不经 bun） */
+  exec?: { cwd: string; argv: string[] };
+  /** 已存在同名 plist 就不覆盖（给 web：用户可能手写过自己的） */
+  keepExisting?: boolean;
+}
+
+/** 常驻 daemon 的 launchd 定义。改这里 = 改启动链。 */
+export const DAEMONS: DaemonSpec[] = [
   // ⚠ 顺序即 reload 顺序,launcher 必须最后:update 子进程常由 launcher 派生,
   // bootout launcher 会让 launchd 连坐回收它(macOS 责任链不随 detach 断,
   // peer 取证 2026-08-09)——launcher 放最后保证 bridge/cron 先完成 reload,
@@ -55,7 +66,56 @@ export const DAEMONS = [
   { label: "com.claudestra.bridge",   script: "src/bridge.ts",   stem: "bridge" },
   { label: "com.claudestra.cron",     script: "src/cron.ts",     stem: "cron" },
   { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
-] as const;
+];
+
+/** web 前端的默认端口（web/package.json 的 `start` 脚本没写明时用它） */
+export const WEB_PORT_FALLBACK = 3333;
+
+/**
+ * 从 `web/package.json` 的 `start` 脚本里抠出端口（纯函数，单测覆盖）。
+ *
+ * 端口的**唯一真源**是那个脚本（`next start -p 3333`）：plist 里再写一遍就会有两份
+ * 会漂的配置——改了 package.json 却忘了重装 plist，网页就 502 在一个没人监听的端口上。
+ */
+export function webPortFromStartScript(startScript: string | undefined): number {
+  const m = /(?:-p|--port)[\s=]+(\d{2,5})/.exec(startScript ?? "");
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : WEB_PORT_FALLBACK;
+}
+
+/**
+ * web 前端够不够格装成 daemon（纯函数，单测覆盖）。
+ *
+ * 四个条件缺一不可，因为 `next start` 对三种缺失的报错都很难懂：
+ *  - 没有 `web/package.json` = 上游精简版，压根没有前端；
+ *  - 没装依赖（`node_modules/.bin/next`）= 启动即 command not found；
+ *  - 没 build（`.next/BUILD_ID`）= next start 直接退出让你先 build；
+ *  - 没有 `web/.env.local` = 没签 API token，页面起来了也连不上 bridge。
+ */
+export function webDaemonReadiness(has: {
+  pkg: boolean; nextBin: boolean; build: boolean; envLocal: boolean;
+}): { ready: boolean; reason?: string } {
+  if (!has.pkg) return { ready: false, reason: "本 checkout 没有 web/ 前端" };
+  if (!has.envLocal) return { ready: false, reason: "web/.env.local 还没生成（跑 bun run setup 选上 Web）" };
+  if (!has.nextBin) return { ready: false, reason: "web 依赖没装（cd web && npm install）" };
+  if (!has.build) return { ready: false, reason: "web 还没构建（cd web && npm run build）" };
+  return { ready: true };
+}
+
+/**
+ * web daemon 的 spec。**只在文件不存在时写**（keepExisting）：这台机器上可能已经有一份
+ * 手写的 plist（改过端口、日志落点、或挂在反代后面），install-cli 每次 update 都会跑，
+ * 无条件覆盖等于每次升级都把用户的定制悄悄抹掉。
+ */
+export function webDaemonSpec(repoRoot: string, port: number): DaemonSpec {
+  const webDir = `${repoRoot}/web`;
+  return {
+    label: "com.claudestra.web",
+    stem: "web",
+    keepExisting: true,
+    exec: { cwd: webDir, argv: [`${webDir}/node_modules/.bin/next`, "start", "-p", String(port)] },
+  };
+}
 
 /** 老 pm2 启动名（用于 stop 老的、避免跟新 launchd 抢） */
 const LEGACY_PM2_NAMES = ["discord-bridge", "master-launcher", "cron-scheduler"];
@@ -65,6 +125,8 @@ export interface DaemonInstall {
   plistPath: string;
   loaded: boolean;
   warning?: string;
+  /** 已有同名 plist，原样保留、也没重新 load（见 webDaemonSpec 的 keepExisting） */
+  keptExisting?: boolean;
 }
 
 export interface InstallCliResult {
@@ -88,6 +150,8 @@ export interface InstallCliResult {
   allowedMcpTools?: { added: string[]; servers: string[] } | null;
   /** v2.5.4+ repo skills/ 里随包分发的 skill，symlink 到 ~/.claude/skills/ 的结果 */
   bundledSkills?: { linked: string[]; skipped: string[] };
+  /** v2.24+ web 前端 daemon：装上了就给 url，没装给不够格的原因 */
+  webDaemon?: { installed: true; port: number; url: string } | { installed: false; reason?: string };
   errors: string[];
   warnings: string[];
 }
@@ -233,10 +297,12 @@ exit "$rc"
 function buildDaemonPlist(
   repoRoot: string,
   bunPath: string,
-  daemon: typeof DAEMONS[number],
+  daemon: DaemonSpec,
 ): string {
   const home = homedir();
   const envPath = buildEnvPath();
+  const cwd = daemon.exec?.cwd ?? repoRoot;
+  const argv = daemon.exec?.argv ?? [bunPath, `${repoRoot}/${daemon.script}`];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -250,7 +316,7 @@ function buildDaemonPlist(
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>WorkingDirectory</key>
-  <string>${repoRoot}</string>
+  <string>${cwd}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -271,8 +337,7 @@ function buildDaemonPlist(
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>${bunPath}</string>
-    <string>${repoRoot}/${daemon.script}</string>
+${argv.map((a) => `    <string>${a}</string>`).join("\n")}
   </array>
   <key>StandardOutPath</key>
   <string>${LOG_DIR}/${daemon.stem}.out</string>
@@ -286,12 +351,18 @@ function buildDaemonPlist(
 async function writeDaemonPlists(
   repoRoot: string,
   bunPath: string,
-): Promise<{ label: string; plistPath: string }[]> {
+  extra: DaemonSpec[] = [],
+): Promise<{ label: string; plistPath: string; kept?: boolean }[]> {
   const dir = `${homedir()}/Library/LaunchAgents`;
   await mkdir(dir, { recursive: true });
-  const out: { label: string; plistPath: string }[] = [];
-  for (const d of DAEMONS) {
+  const out: { label: string; plistPath: string; kept?: boolean }[] = [];
+  for (const d of [...DAEMONS, ...extra]) {
     const plistPath = `${dir}/${d.label}.plist`;
+    // keepExisting：用户手写过就原样保留（见 webDaemonSpec 的注释）
+    if (d.keepExisting && existsSync(plistPath)) {
+      out.push({ label: d.label, plistPath, kept: true });
+      continue;
+    }
     await writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d));
     out.push({ label: d.label, plistPath });
   }
@@ -666,9 +737,26 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   try { result.cliWrapper = await writeCliWrapper(repoRoot, bunPath); }
   catch (e) { errors.push(`CLI wrapper: ${(e as Error).message}`); return result; }
 
-  // 2) 写 3 个 plist
-  let plists: { label: string; plistPath: string }[];
-  try { plists = await writeDaemonPlists(repoRoot, bunPath); }
+  // 2) 写 daemon plist（3 个常驻 + web 前端，后者够格才装）
+  const webDir = `${repoRoot}/web`;
+  let webPkgStart: string | undefined;
+  try {
+    webPkgStart = JSON.parse(readFileSync(`${webDir}/package.json`, "utf-8"))?.scripts?.start;
+  } catch { /* 没有 web/ 或读不了：下面 readiness 会说明 */ }
+  const webReady = webDaemonReadiness({
+    pkg: existsSync(`${webDir}/package.json`),
+    nextBin: existsSync(`${webDir}/node_modules/.bin/next`),
+    build: existsSync(`${webDir}/.next/BUILD_ID`),
+    envLocal: existsSync(`${webDir}/.env.local`),
+  });
+  const webPort = webPortFromStartScript(webPkgStart);
+  const extraDaemons = webReady.ready ? [webDaemonSpec(repoRoot, webPort)] : [];
+  result.webDaemon = webReady.ready
+    ? { installed: true, port: webPort, url: `http://localhost:${webPort}` }
+    : { installed: false, reason: webReady.reason };
+
+  let plists: { label: string; plistPath: string; kept?: boolean }[];
+  try { plists = await writeDaemonPlists(repoRoot, bunPath, extraDaemons); }
   catch (e) { errors.push(`写 daemon plist: ${(e as Error).message}`); return result; }
 
   // 3) 迁移老 plist
@@ -714,9 +802,15 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   try { result.bundledSkills = await installBundledSkills(repoRoot); }
   catch (e) { warnings.push(`装 bundled skills: ${(e as Error).message}`); }
 
-  // 6) bootstrap 3 个新 plist
+  // 6) bootstrap 新 plist
   const uid = getUid();
   for (const p of plists) {
+    // keepExisting 且本来就在：那是用户自己的 plist，连 reload 都不碰——它可能被
+    // 刻意 unload 着（挂在别的反代后面 / 临时停用），我们没资格替他重新拉起。
+    if (p.kept) {
+      result.daemons.push({ label: p.label, plistPath: p.plistPath, loaded: true, keptExisting: true });
+      continue;
+    }
     const r = reloadDaemon(p.plistPath, uid);
     const item: DaemonInstall = { label: p.label, plistPath: p.plistPath, loaded: r.ok };
     if (!r.ok) {

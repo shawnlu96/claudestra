@@ -13,6 +13,8 @@
 #   CLAUDESTRA_REPO   — git remote (default https://github.com/shawnlu96/claudestra.git)
 #   CLAUDESTRA_BRANCH — branch (default main)
 #   CLAUDESTRA_YES    — set to 1 to skip every confirmation (unattended)
+#   CLAUDESTRA_NO_SETUP — set to 1 to stop after dependencies + clone (skip the wizard).
+#                       Useful for CI / smoke tests, and for configuring later by hand.
 #   CLAUDESTRA_LANG   — zh | en (default: auto-detect from locale)
 
 set -euo pipefail
@@ -367,10 +369,15 @@ printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━
 printf "${BOLD}${GREEN}  ✨ $(L "系统已就绪，现在跑配置向导" "Everything is ready — time for the setup wizard")${RESET}\n"
 printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
 
-printf "%s\n" "$(L "配置向导会带你创建 Discord bot、收集 ID、写 .env、启动服务。" "The wizard walks you through creating a Discord bot, collecting IDs, writing .env, and starting the services.")"
-printf "%s\n\n" "$(L "预计 10-30 分钟（大头是依赖下载）。" "Budget 10-30 minutes — most of it is downloads.")"
+printf "%s\n" "$(L "配置向导默认只装 Web 端：写 .env、签 API token、构建前端、装成开机自启，跑完给你一个网址。" "The wizard installs the Web frontend by default: writes .env, issues an API token, builds the frontend, installs it for autostart, and prints you a URL.")"
+printf "%s\n" "$(L "Discord 是可选项（要自己建 bot，多 5 个步骤）——向导里选上才会问。" "Discord is optional (you would create your own bot — 5 extra steps); the wizard only asks if you pick it.")"
+printf "%s\n\n" "$(L "预计 5-15 分钟（大头是依赖下载与前端构建）。" "Budget 5-15 minutes — mostly downloads and the frontend build.")"
 
-if confirm "$(L "现在跑" "Run") ${CYAN}bun run setup${RESET} $(L "吗？" "now?")" y; then
+if [ "${CLAUDESTRA_NO_SETUP:-0}" = "1" ]; then
+  printf "%s\n" "$(L "CLAUDESTRA_NO_SETUP=1 —— 依赖与代码已就绪，跳过配置向导。" "CLAUDESTRA_NO_SETUP=1 — dependencies and code are ready; skipping the wizard.")"
+  printf "  ${CYAN}cd $CLAUDESTRA_DIR${RESET}\n"
+  printf "  ${CYAN}bun run setup${RESET}\n\n"
+elif confirm "$(L "现在跑" "Run") ${CYAN}bun run setup${RESET} $(L "吗？" "now?")" y; then
   printf "\n"
   cd "$CLAUDESTRA_DIR"
   # curl|bash 下 stdin 是管道。先用 exec 重定向把 shell 自身的 fd 0
