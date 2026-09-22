@@ -33,6 +33,7 @@ import {
   readCodexMeta,
 } from "../codex-session.js";
 import { bridgePortOf, defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
+import { codexExitPrelude, codexOnExitPane } from "./codex-exit.js";
 import { CODEX_READY_OPTION, paneBaseline, waitCodexReady, type PaneBaseline } from "./codex-ready.js";
 import { lastUserTextOf } from "./shared.js";
 import type {
@@ -60,6 +61,8 @@ export const CODEX_CONTROL: RuntimeControl = {
   idleSource: "hook",
   modelEnforcement: "launch-flag",
   paneHeuristics: false,
+  // 空闲时的 Esc 会挂上 backtrack、第二下打开回溯遮罩（codex-exit.ts）
+  interruptOnlyWhenBusy: true,
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -238,7 +241,8 @@ async function discover(ctx: CodexCtx, d: DiscoverContext): Promise<{ sessionId:
     const pids = await ctx.deps.childPids(d.windowName).catch(() => [] as number[]); // 窗口刚起、查不到就下一轮
     for (const pid of pids) {
       const locks = await ctx.deps.heldThreadIds(pid).catch(() => [] as string[]); // lsof 失败按无锁，下一轮重查
-      const held = locks.filter((s) => s !== d.exclude);
+      // 锁文件名来自文件系统，不是我们写的：不像线程 id 的一律不认，免得写进 registry
+      const held = locks.filter((s) => s !== d.exclude && UUID_RE.test(s));
       if (held.length === 1) return { sessionId: held[0], via: "thread-writer-lock" };
     }
     if (ctx.deps.now() >= deadline) return null;
@@ -278,7 +282,9 @@ export function createCodexAdapter(overrides: Partial<CodexAdapterDeps> = {}): C
         c.baselines.delete(win.target);
       }
     },
-    // Codex 的 /quit 直接回 shell，没有 CC 那套收尾弹窗（等不到回 shell 由 gracefulExit 强杀兜底）
+    // 清场绝不连发 Esc（backtrack 手势，见 codex-exit.ts）；/quit 直接回 shell，没有 CC 那套收尾弹窗
+    exitPrelude: codexExitPrelude,
+    onExitPane: codexOnExitPane,
     discoverSessionId: (d) => discover(ctx(), d),
     registryFields: () => ({ runtime: "codex" }),
   };

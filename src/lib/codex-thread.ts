@@ -91,10 +91,14 @@ export type DeliveryDecision =
   /** 持有多个锁且都不是已知的那个：猜错会把消息送进别的线程，宁可不投 */
   | { action: "ambiguous"; held: string[] };
 
+/** 线程 id 的形状。锁文件名来自文件系统：不像线程 id 的不能切过去（会被当 sessionId 报给 bridge） */
+const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function decideDelivery(knownSid: string | undefined, held: string[]): DeliveryDecision {
   if (knownSid && held.includes(knownSid)) return { action: "queue", sid: knownSid };
   if (held.length === 0) return { action: "offline" };
-  if (held.length === 1) return { action: "switch", sid: held[0] };
+  const valid = held.filter((s) => THREAD_ID_RE.test(s));
+  if (valid.length === 1) return { action: "switch", sid: valid[0] };
   return { action: "ambiguous", held };
 }
 
