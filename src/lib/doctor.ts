@@ -616,6 +616,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkWebBuild(repoRoot),
     checkWebLogin(repoRoot),
     checkDeployment(),
+    import("./doctor-remote.js").then((m) => m.checkRemoteAccess(repoRoot)),
   ]);
   return groups.flat();
 }

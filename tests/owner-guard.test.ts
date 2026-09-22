@@ -37,7 +37,7 @@ describe("ownerVerdict", () => {
   });
 
   test("主机改了 hostname 但 UUID 不变 → 仍放行（别把自己锁在门外）", () => {
-    const renamed = { uuid: MINI.uuid, host: "mac-mini-jp.local" };
+    const renamed = { uuid: MINI.uuid, host: "my-mac.local" };
     expect(ownerVerdict(MINI, renamed, false)).toEqual({ ok: true, reason: "match" });
   });
 

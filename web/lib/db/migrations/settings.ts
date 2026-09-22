@@ -135,7 +135,7 @@ export function runSettingsMigrations(db: Database.Database) {
   `);
   // Passkey / WebAuthn 凭据（第三期）。
   // **rp_id 必须随凭据存**：WebAuthn 凭据绑定在 rpID 上且不可跨域，而这套 web
-  // 有多个入口（claude.sunstriker.cc / Tailscale MagicDNS）——它们是完全不同的
+  // 有多个入口（自有域名如 claude.example.com / Tailscale MagicDNS）——它们是完全不同的
   // 域，一个 passkey 覆盖不了两边。登录时按当前 origin 的 rpID 过滤可用凭据，
   // 用户在哪个域用就在哪个域注册一个。
   // counter 是签名计数器，用于克隆检测（回退即可疑）。
