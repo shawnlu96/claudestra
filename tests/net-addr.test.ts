@@ -6,7 +6,7 @@ describe("isTailscaleAddr", () => {
   // 认错会把一个对方连不上的地址填进 peer 握手，而错误要到 peer-http-test 才暴露。
   test("100.64–100.127 属于 Tailscale", () => {
     expect(isTailscaleAddr("100.64.0.1")).toBe(true);
-    expect(isTailscaleAddr("100.120.71.107")).toBe(true);
+    expect(isTailscaleAddr("100.101.102.103")).toBe(true);
     expect(isTailscaleAddr("100.127.255.254")).toBe(true);
   });
 
@@ -39,7 +39,7 @@ describe("isPrivateAddr", () => {
 
   test("公网地址不是私网", () => {
     expect(isPrivateAddr("8.8.8.8")).toBe(false);
-    expect(isPrivateAddr("100.120.71.107")).toBe(false); // Tailscale 归 Tailscale
+    expect(isPrivateAddr("100.101.102.103")).toBe(false); // Tailscale 归 Tailscale
   });
 });
 

@@ -1,5 +1,5 @@
 /**
- * TLS 终结代理：https://mac-mini-jp.<tailnet>.ts.net → http://127.0.0.1:33333
+ * TLS 终结代理：https://<主机名>.<tailnet>.ts.net → http://127.0.0.1:33333
  *
  * ⚠ 已退役(2026-07-14):裸 TCP 代理只有 HTTP/1.1——Safari 每域名 6 连接,
  * dev 模式几百个 chunk 串行化,手机端加载卡死(真机:登录按钮永久转圈/卡

@@ -20,8 +20,8 @@ import { getDb } from "../db";
  *
  * ## rpID 的硬约束（本项目的关键设计点）
  * WebAuthn 凭据绑定 rpID，**跨域不可用**。本 web 有多个入口：
- *   - https://claude.sunstriker.cc
- *   - https://mac-mini-jp.tailfdc471.ts.net （Tailscale MagicDNS）
+ *   - https://claude.example.com（自有域名反代）
+ *   - https://my-mac.tailXXXX.ts.net （Tailscale MagicDNS）
  *   - http://localhost:3333（本机，浏览器视作 secure context，可用）
  *   - http://<tailscale-ip>:3333 —— **WebAuthn 用不了**（非 secure context，
  *     且 IP 不能作 rpID）。这类入口下前端不展示 passkey 入口。
