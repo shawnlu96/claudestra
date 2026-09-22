@@ -236,6 +236,28 @@ export function portOwnerVerdict(
   return { status: "ok", detail: `端口由 launchd 托管进程持有(pid ${listenerPid})` };
 }
 
+/**
+ * 安装级变量（BRIDGE_PORT / BRIDGE_URL 由上面的「会话连接地址」单独判）在 tmux 全局环境里
+ * 的值与 .env 不一致的键名（D7-3）。tmux server 的 env 停在它被创建那一刻，之后改 .env
+ * 不会传进去。只报「两边都有且值不同」；tmux 里缺的不报（manager 已改为回读 .env）。
+ * 返回键名，不返回值——DISCORD_BOT_TOKEN 也在里面。纯函数，tests/doctor.test.ts。
+ */
+export const INSTALL_ENV_KEYS = [
+  "DISCORD_BOT_TOKEN", "DISCORD_GUILD_ID", "ALLOWED_USER_IDS", "CONTROL_CHANNEL_ID",
+  "MASTER_DIR", "USER_NAME", "BRIDGE_BIND", "MCP_NAME", "CODEX_BIN",
+];
+export function staleInstallEnvKeys(
+  tmuxEnvOut: string,
+  dotenv: Record<string, string>,
+  parseLine: (out: string, name: string) => string | undefined,
+): string[] {
+  return INSTALL_ENV_KEYS.filter((k) => {
+    const t = parseLine(tmuxEnvOut, k);
+    const e = dotenv[k];
+    return t !== undefined && e !== undefined && e !== "" && t !== e;
+  });
+}
+
 async function checkBridge(repoRoot: string): Promise<Check[]> {
   const out: Check[] = [];
   const g = "bridge";
@@ -298,6 +320,12 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
             detail: `tmux 里的会话按 ${drift.from} 启动，.env 现在是 ${drift.to} —— 这些会话连不上 bridge`,
             fix: "launchctl kickstart -k gui/$(id -u)/com.claudestra.launcher（launcher 会在新 bridge 应答后重启全部会话）" }
         : { group: g, name: "会话连接地址", status: "ok", detail: "tmux 全局环境与 .env 一致" });
+      const stale = staleInstallEnvKeys(tenv.out, dotenv, parseTmuxEnvLine);
+      if (stale.length) {
+        out.push({ group: g, name: "tmux 全局环境", status: "warn",
+          detail: `${stale.join(", ")} 与 .env 不一致 —— 新开的 agent / 大总管调起的 manager 拿到的是旧值`,
+          fix: `逐个 tmux -S ${TMUX_SOCK} set-environment -g <KEY> <.env 里的值>（值不打印，里面可能有 token），再 bun src/manager.ts restart 让会话重读` });
+      }
     }
   } catch { /* 没有 .env 就跳过 */ }
 

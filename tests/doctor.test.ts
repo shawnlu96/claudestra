@@ -228,3 +228,23 @@ describe("undeliveredAlertsVerdict", () => {
     expect(v.detail).toBe("1 条（近 7 天 0 条）");
   });
 });
+
+import { staleInstallEnvKeys } from "../src/lib/doctor";
+import { parseTmuxEnvLine } from "../src/lib/bridge-port";
+
+describe("staleInstallEnvKeys", () => {
+  const tmux = "BRIDGE_PORT=3847\nUSER_NAME=old\nMCP_NAME=claudestra\n-BRIDGE_BIND\nDISCORD_BOT_TOKEN=secret\n";
+
+  test("只报两边都有且值不同的键；tmux 里缺的 / 已 unset 的不报；不含端口类", () => {
+    const env = { USER_NAME: "shawn", MCP_NAME: "claudestra", BRIDGE_BIND: "0.0.0.0", BRIDGE_PORT: "13847", DISCORD_BOT_TOKEN: "secret" };
+    expect(staleInstallEnvKeys(tmux, env, parseTmuxEnvLine)).toEqual(["USER_NAME"]);
+  });
+
+  test("一致 → 空", () => {
+    expect(staleInstallEnvKeys(tmux, { USER_NAME: "old", DISCORD_BOT_TOKEN: "secret" }, parseTmuxEnvLine)).toEqual([]);
+  });
+
+  test(".env 里是空值不算漂移", () => {
+    expect(staleInstallEnvKeys(tmux, { USER_NAME: "" }, parseTmuxEnvLine)).toEqual([]);
+  });
+});
