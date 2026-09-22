@@ -269,3 +269,11 @@ export async function resolveCodexBinary(run: Runner, env: Record<string, string
   if (override) return { link: override, real: override };
   return resolveLoginBinary(run, "codex");
 }
+
+/**
+ * 能不能当 Codex agent 的底座：入站全靠 `codex queue`，没有这个子命令（旧版）就别建 agent，
+ * 免得建出一个收不到消息的频道。
+ */
+export async function probeCodexQueue(run: Runner, codexBin: string): Promise<boolean> {
+  return (await run([codexBin, "queue", "--help"], 20_000)).ok;
+}

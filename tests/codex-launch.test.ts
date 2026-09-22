@@ -8,6 +8,7 @@ import {
   codexModel,
   codexPermissionFlags,
   parseBootstrapThreadId,
+  probeCodexQueue,
   resolveCodexBinary,
   tomlString,
   type CodexLaunchSpec,
@@ -168,4 +169,11 @@ test("resolveCodexBinary：CODEX_TUI_BIN 覆盖优先，否则登录 shell 解�
   }, {});
   expect(r?.link).toBe("/opt/homebrew/bin/codex");
   expect(seen[2]).toContain("command -v codex");
+});
+
+test("probeCodexQueue：按绝对路径跑 queue --help，exit 0 才算可用", async () => {
+  let seen: string[] = [];
+  expect(await probeCodexQueue(async (cmd) => { seen = cmd; return { ok: true, out: "", err: "" }; }, "/c")).toBe(true);
+  expect(seen).toEqual(["/c", "queue", "--help"]);
+  expect(await probeCodexQueue(async () => ({ ok: false, out: "", err: "unknown subcommand" }), "/c")).toBe(false);
 });
