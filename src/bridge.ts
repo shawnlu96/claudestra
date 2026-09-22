@@ -167,7 +167,7 @@ syncDiscordOwnersFromEnv(ALLOWED_USER_IDS)
   .catch((e) => console.error("principals owner 同步失败（继续用 .env）:", (e as Error).message));
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
 import { checkControlRegistrant } from "./lib/control-registrant.js";
-import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
+import { startWedgeWatcher, startLinkSentinel, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard, noteSaveCompactInjected } from "./bridge/stats-dashboard.js";
 import { parseAuqPane } from "./lib/auq-pane.js";
@@ -176,9 +176,10 @@ import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { hangsPendingReply, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
-import { readRegistryAgents } from "./lib/registry.js";
+import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { describeKeys, interruptWindow } from "./lib/runtimes/window-ops.js";
+import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
   tmuxCapture,
@@ -3191,6 +3192,58 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "notify": {
+      // 本机 daemon（launcher/cron/manager）的系统通知。它们不是 agent，走 reply 会被
+      // 上面「认不出来源就拒」挡掉（那道门堵的是 SSE 挂到 "?" 名下的洞，保持不动）。
+      // 这里发件人是 bridge 自己，目标只许是 control 或 registry 有主的 agent 频道，
+      // SSE 事件挂在目标频道的真实 agent 名下。见 lib/notify.ts。
+      try {
+        const source = typeof msg.source === "string" && msg.source ? msg.source.slice(0, 40) : "daemon";
+        const regs = await readRegistryAgents().catch(() => []);
+        const verdict = notifyTargetVerdict(msg.chatId, {
+          controlChannelId: CONTROL_CHANNEL_ID,
+          knownChannelIds: regs.map((r) => r.channelId || ""),
+        });
+        if (!verdict.ok) {
+          console.error(`📣 [notify:${source}] 拒绝: ${verdict.reason}`);
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: verdict.reason }));
+          break;
+        }
+        const text = String(msg.text ?? "");
+        const env: RouterEnvelope = {
+          from: { kind: "bridge", label: `notify:${source}` },
+          to: { kind: "user", userId: primaryOwnerId(), channelId: msg.chatId },
+          intent: "notification",
+          content: text,
+          meta: {
+            messageId: `notify_${Date.now()}`,
+            triggerKind: "bridge_synth",
+            ts: new Date().toISOString(),
+            threadId: newThreadId(),
+            components: msg.components,
+            files: msg.files,
+          },
+        };
+        const delivery = await deliver(env);
+        if (delivery.outcome.kind !== "sent") {
+          const errMsg = delivery.outcome.kind === "dropped"
+            ? `notify dropped: ${delivery.outcome.reason}`
+            : (delivery.outcome as any).error?.message || "unknown";
+          console.error(`📣 [notify:${source}] 投递失败 → ${msg.chatId}: ${errMsg}`);
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
+          break;
+        }
+        console.log(`📣 [notify:${source}] → ${msg.chatId}: ${text.slice(0, 80).replace(/\n/g, " ")}`);
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: delivery.outcome.discordMessageIds || [] } }));
+        // 未登记的频道（cron --channel）不发 SSE：没有 agent 名可挂，挂 "?" 正是 bce6351 堵的洞
+        const evAgent = verdict.known ? await agentLabelForChannelAsync(msg.chatId) : "?";
+        if (evAgent !== "?") emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: `⚙️ ${source}`, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}) } });
+      } catch (err) {
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
+      }
+      break;
+    }
+
     case "ask_codex": {
       // v2.20+ agent → 本机 Codex(ChatGPT.app CLI,订阅额度)。per-call spawn,
       // 零常驻;并发上限防 agent 集体轰配额;结果同步回 MCP 工具调用。
@@ -4793,6 +4846,9 @@ if (WEB_ONLY) {
   startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
   startArchiveSweeper();
+  // 链路哨兵：wedge watcher 只在 Discord ready 里起，web-only 以前完全没有「窗口活着但
+  // channel-server 没连上」的探测——而它的 SSE link_down 正是给 web 用户的（D7-6）
+  startLinkSentinel((cid) => clients.has(cid));
   // v2.13.1+ 给 web 前端补一个"重启了"的信号。Discord 侧靠
   // cleanupStaleThinkingMessages 把卡住的"💭 思考中"改写成可重发提示，而那是
   // Discord 专属（要编辑历史消息），web-only 模式整段跳过 —— 结果 bridge 重启后

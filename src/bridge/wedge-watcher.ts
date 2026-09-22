@@ -15,9 +15,11 @@ import {
   isAtShell,
   idleVerdict,
   windowHasChildProcess,
+  MASTER_SESSION,
 } from "../lib/tmux-helper.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { agentsFromList, createFailureLatch } from "../lib/run-manager.js";
 import { getJsonlMtime } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emitEvent } from "./event-bus.js";
@@ -60,7 +62,8 @@ async function checkLink(
   pane: string,
   connected: boolean,
   allowedUserIds: string[],
-  discord: Client,
+  // null = web-only：没有 Discord 可发，只推 SSE（web 用户恰恰最需要这条）
+  discord: Client | null,
 ): Promise<void> {
   const now = Date.now();
   if (connected || isAtShell(pane) || !pane.trim()) {
@@ -98,6 +101,7 @@ async function checkLink(
       hint: "tmux 窗口里 Claude Code 在跑，但 channel-server 没连上 bridge —— 消息进不来也出不去。重启该 agent 可修复。",
     },
   });
+  if (!discord) return;
   try {
     const ch = (await discord.channels.fetch(channelId)) as TextChannel;
     const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
@@ -300,11 +304,20 @@ export function startWedgeWatcher(
   // v2.7+ 链路哨兵：bridge 注入「该频道是否有 channel-server 在线」的查询
   isChannelConnected?: (channelId: string) => boolean,
 ) {
+  // manager list 失败 ≠ 没有 agent：以前 `list.agents || []` + catch 吞掉，manager 一坏
+  // 卡死检测和链路哨兵就一起静默失明。现在按状态切换报一次、恢复时再报一次。
+  const listLatch = createFailureLatch("wedge-watcher manager list");
   const tick = async () => {
     try {
       const allowedUserIds = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
-      const list = await runManager("list");
-      const agents: any[] = list.agents || [];
+      let agents: any[];
+      try {
+        agents = agentsFromList(await runManager("list"));
+        listLatch.ok();
+      } catch (e) {
+        listLatch.fail(e);
+        return;
+      }
       for (const agent of agents) {
         if (agent.status !== "active" || !agent.channelId) continue;
         await checkAgent(
@@ -312,6 +325,7 @@ export function startWedgeWatcher(
           allowedUserIds, discord, isChannelConnected,
         ).catch(() => {});
       }
+      if (isChannelConnected) await checkMasterLink(isChannelConnected).catch(() => {});
     } catch { /* non-critical */ }
   };
   // 重入闸(Codex review 2026-08-26):tick 异步且逐窗口 capture,慢轮不叠加
@@ -322,6 +336,50 @@ export function startWedgeWatcher(
     void Promise.resolve(tick()).finally(() => { running = false; });
   }, POLL_INTERVAL_MS);
   console.log(`⚠️ Wedge watcher 启动（每 ${POLL_INTERVAL_MS / 60_000}min 扫，${WEDGE_THRESHOLD_MS / 60_000}min 卡死阈值）`);
+}
+
+/**
+ * 大总管不在 manager list 里（registry 没有它），链路哨兵以前从不看它。它的频道是
+ * CONTROL_CHANNEL_ID、窗口是 master:0。只推 SSE + 日志：Discord 那条告警带的
+ * 「重启修复」按钮走 manager restart <agent>，不适用于大总管。
+ */
+async function checkMasterLink(isChannelConnected: (channelId: string) => boolean): Promise<void> {
+  const controlId = process.env.CONTROL_CHANNEL_ID || "";
+  if (!controlId) return;
+  const pane = await tmuxCapture(`${MASTER_SESSION}:0`, 40);
+  await checkLink("master", controlId, pane, isChannelConnected(controlId), [], null);
+}
+
+/**
+ * web-only 模式的链路哨兵（D7-6）。卡死检测的告警面是 Discord 按钮，web-only 不起它；
+ * 可链路断开的 SSE `session_anomaly kind=link_down` 本来就是给 web 用户加的，以前
+ * 却因为整个 wedge watcher 只在 Discord ready 里启动而永远触发不了。
+ */
+export function startLinkSentinel(isChannelConnected: (channelId: string) => boolean) {
+  const listLatch = createFailureLatch("link-sentinel manager list");
+  const tick = async () => {
+    let agents: any[];
+    try {
+      agents = agentsFromList(await runManager("list"));
+      listLatch.ok();
+    } catch (e) {
+      listLatch.fail(e);
+      return;
+    }
+    for (const agent of agents) {
+      if (agent.status !== "active" || !agent.channelId) continue;
+      const pane = await tmuxCapture(windowTarget(agent.name), 40).catch(() => "");
+      await checkLink(agent.name, agent.channelId, pane, isChannelConnected(agent.channelId), [], null).catch(() => {});
+    }
+    await checkMasterLink(isChannelConnected).catch(() => {});
+  };
+  let running = false;
+  setInterval(() => {
+    if (running) return;
+    running = true;
+    void Promise.resolve(tick()).finally(() => { running = false; });
+  }, POLL_INTERVAL_MS);
+  console.log(`🔗 链路哨兵启动（web-only，每 ${POLL_INTERVAL_MS / 60_000}min 扫，掉线 ${LINK_DOWN_THRESHOLD_MS / 60_000}min 推 SSE）`);
 }
 
 /** 清掉 agent 状态，agent 被 kill 时可调用 */

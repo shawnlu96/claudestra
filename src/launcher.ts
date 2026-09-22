@@ -9,7 +9,7 @@ import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
-import { restartFailureReason } from "./lib/restart-result.js";
+import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "./lib/restart-result.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
@@ -72,6 +72,7 @@ import { resolveNpm } from "./lib/npm-path.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace, classifyClaudeInstall, type ClaudeInstall } from "./lib/claude-binary.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
+import { notify } from "./lib/notify.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { takeMasterResume } from "./lib/master-session.js";
@@ -326,8 +327,8 @@ async function checkBetaUpdates(autoOn: boolean) {
     // 单独管(v2.17.2:此前这道门也拦 auto 路径,通知过的 SHA 开了 auto 也不动)
     if (remote === lastNotifiedVersion) return;
     lastNotifiedVersion = remote;
-    await bridgeRequest({
-      type: "reply", chatId: CONTROL_CHANNEL_ID,
+    await notify({
+      source: "launcher", chatId: CONTROL_CHANNEL_ID,
       text: `🧪 beta 通道有新 commit(${head.slice(0, 7)} → ${remote.slice(0, 7)}),自动更新已关——手动: bun src/manager.ts update`,
     }).catch(() => {});
     return;
@@ -353,8 +354,8 @@ async function checkBetaUpdates(autoOn: boolean) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)})但仓库工作区脏——自动更新阻塞`);
     if (remote !== lastDirtyNotifiedSha) {
       lastDirtyNotifiedSha = remote;
-      await bridgeRequest({
-        type: "reply", chatId: CONTROL_CHANNEL_ID,
+      await notify({
+        source: "launcher", chatId: CONTROL_CHANNEL_ID,
         text: `⚠️ 自动更新被阻塞:仓库有未提交改动(常见原因:改了软链进仓库的 skill),git pull 会一直失败。\n处理:改动要保留就 commit;误改就 git checkout 还原。体检:bun src/manager.ts doctor`,
       }).catch(() => {});
     }
@@ -397,8 +398,8 @@ async function checkForUpdates() {
     if (release.version === lastNotifiedVersion) return;
     lastNotifiedVersion = release.version;
     try {
-      await bridgeRequest({
-        type: "reply",
+      const sent = await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: [
           t(
@@ -419,7 +420,8 @@ async function checkForUpdates() {
           ),
         ].filter(Boolean).join("\n"),
       });
-      console.log(`📢 已通知用户：新版本 ${release.tag}（自动更新 off）`);
+      if (sent) console.log(`📢 已通知用户：新版本 ${release.tag}（自动更新 off）`);
+      else lastNotifiedVersion = ""; // 没送达就下轮再试，别当成已通知
     } catch {
       console.log("⚠️ 版本通知发送失败（bridge 可能还没就绪）");
     }
@@ -446,8 +448,8 @@ async function checkForUpdates() {
     console.log(`🆙 Claudestra ${release.tag} 有新版本但仓库工作区脏——自动更新阻塞`);
     if (lastReleaseDirtyNotified !== release.version) {
       lastReleaseDirtyNotified = release.version;
-      await bridgeRequest({
-        type: "reply", chatId: CONTROL_CHANNEL_ID,
+      await notify({
+        source: "launcher", chatId: CONTROL_CHANNEL_ID,
         text: t(
           `⚠️ Claudestra ${release.tag} 自动更新被阻塞:仓库有未提交改动,update 会一直失败。\n处理:改动要保留就 commit;误改就 git checkout 还原。体检:bun src/manager.ts doctor`,
           `⚠️ Claudestra ${release.tag} auto-update is blocked: the repo has uncommitted changes, so update keeps failing.\nCommit them if intended, or git checkout to revert. Health check: bun src/manager.ts doctor`,
@@ -460,8 +462,8 @@ async function checkForUpdates() {
   console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲；成败见 ${RELEASE_UPDATE_LOG}）`);
   const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
   if (firstAttempt) try {
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `🆕 **Claudestra ${release.tag} 自动更新中** ${mention}\n\nv${local} → ${release.tag}，所有 agent 当前空闲，开始 git pull + 重载 launchd daemon...`,
@@ -557,10 +559,10 @@ async function probeClaudeBinaryHealth(reason: string): Promise<boolean> {
   }
   console.log(`🩺 🚨 claude 二进制体检(${reason})失败:--version 挂死,自动修复未成功:${health.detail ?? ""}`);
   if (!binaryAlertSent) {
-    binaryAlertSent = true;
+    // 送达才置位：先置位再发，发失败就永远不会再告警（bridge 没起来时尤其如此）
     try {
-      await bridgeRequest({
-        type: "reply",
+      binaryAlertSent = await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `🚨 **Claude Code 二进制无法启动**(--version 挂死,自动修复未成功:${health.detail ?? "?"};触发:${reason})。现役 agent 不受影响,但新启动 / restart / cron 临时 agent 都会「启动超时」。需人工处理 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
@@ -656,12 +658,34 @@ let restartWaveUntil = 0;
 // 救不回来的 agent 不能每分钟刷一条 control 频道
 const restoreFailNotifiedAt = new Map<string, number>();
 
+// manager list 连续失败计数：第一次失败打日志，连续 N 轮才告警一次（每分钟巡检，别刷屏）
+let listFailStreak = 0;
+const LIST_FAIL_ALERT_AFTER = 5;
+
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
-    const list = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
-    if (!list.ok) return;
-    const parsed = JSON.parse(list.out || "{}");
-    const agents: any[] = parsed.agents || [];
+    const list = parseManagerList(await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 60_000));
+    if (!list.ok) {
+      // 以前这里无声 return：registry 坏了 / 拉到坏提交时 launcher「loaded 但没干活」
+      listFailStreak++;
+      if (listFailStreak === 1) console.error(`🔁 [${source}] manager list 失败，本轮跳过恢复: ${list.reason}`);
+      if (listFailStreak === LIST_FAIL_ALERT_AFTER) {
+        await notify({
+          source: "launcher",
+          chatId: CONTROL_CHANNEL_ID,
+          text: t(
+            `⚠️ launcher 连续 ${LIST_FAIL_ALERT_AFTER} 轮 \`manager list\` 失败，dead agent 自动恢复已停摆：${list.reason.slice(0, 300)}\n体检：\`bun src/manager.ts doctor\``,
+            `⚠️ launcher: \`manager list\` failed ${LIST_FAIL_ALERT_AFTER} times in a row — dead-agent auto-restore is stalled: ${list.reason.slice(0, 300)}\nHealth check: \`bun src/manager.ts doctor\``,
+          ),
+        });
+      }
+      return;
+    }
+    if (listFailStreak) {
+      console.log(`🔁 [${source}] manager list 已恢复（此前连续失败 ${listFailStreak} 轮）`);
+      listFailStreak = 0;
+    }
+    const agents: any[] = list.agents;
     // manager.ts list 会把 "registry active 但 window 丢了" 的标为 status="dead"
     const reallyDead = agents.filter((a) => a.status === "dead");
     if (reallyDead.length === 0) {
@@ -674,8 +698,8 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     console.log(`🔁 [${source}] 发现 ${reallyDead.length} 个 dead agent：${reallyDead.map((a: any) => a.name).join(", ")}`);
     if (source === "boot") {
       try {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "launcher",
           chatId: CONTROL_CHANNEL_ID,
           text: t(
             `🔁 检测到 ${reallyDead.length} 个 agent 需要开机后恢复：${reallyDead.map((a: any) => `\`${a.name}\``).join(" / ")}\n正在 resume 它们的历史会话，几十秒内会陆续回到原频道。`,
@@ -708,8 +732,8 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     for (const f of fresh) restoreFailNotifiedAt.set(f.name, Date.now());
     if (fresh.length && CONTROL_CHANNEL_ID) {
       try {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "launcher",
           chatId: CONTROL_CHANNEL_ID,
           text: t(
             `⚠️ [${source}] 有 ${fresh.length} 个 agent 恢复失败，窗口可能已建但 Claude Code 没起来：\n` +
@@ -765,8 +789,8 @@ async function healBridgeDrift(): Promise<void> {
   restartWaveUntil = Date.now() + 20 * 60_000; // 拿租约压住 dead-agent 巡检
   console.log(`🔀 bridge 地址漂移 ${drift.from} → ${drift.to}：全员重启（含大总管）`);
   try {
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `🔀 bridge 地址已改为 ${drift.to}（原 ${drift.from}），正在重启所有会话让它们连到新地址（大总管会接回原会话）。`,
@@ -795,8 +819,8 @@ async function healBridgeDrift(): Promise<void> {
   }
   console.log(`🔀 漂移重启未完全成功（保留旧的 tmux 全局环境，冷却后重试）: ${why}`);
   try {
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `⚠️ bridge 地址迁移到 ${drift.to} 时有会话没重启成功：${why}\n这些会话还连着旧地址（离线），launcher 30 分钟后重试；也可手动 \`bun src/manager.ts restart --include-master\`。`,
@@ -806,16 +830,31 @@ async function healBridgeDrift(): Promise<void> {
   } catch { /* non-critical */ }
 }
 
-async function restartAgentsAndMaster() {
+/** 重启波结果：ok=false 时「完成」消息不能说「所有 agent 已重启」 */
+type RestartWaveResult = { ok: true } | { ok: false; reason: string };
+
+async function restartAgentsAndMaster(): Promise<RestartWaveResult> {
   restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检
   // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
   try {
-    const listOut = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
-    const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
-    // 大总管不当金丝雀（窗口定名后 manager list 会带上它那一行；它由下面 /exit + 主循环拉起）
-    const canary = agents.find((a) => a.status !== "stopped" && a.name !== MASTER_WINDOW_NAME);
+    const plan = canaryPlan(parseManagerList(await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000)));
+    if (plan.kind === "list-failed") {
+      // 以前 list 失败时 canary=undefined → 静默跳过金丝雀、直接全量重启。
+      // 是否就此中止整波（fail-closed）是设计取舍，待 owner 拍板；这里先保持 25b66f7
+      // 的 fail-open（继续全量重启），但必须喊出来——不再静默绕过防护。
+      console.error(`🆙 manager list 失败，无法选金丝雀（按既有设计继续全量重启）: ${plan.reason}`);
+      await notify({
+        source: "launcher",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `⚠️ 升级后重启波**没有金丝雀**：manager list 失败（${plan.reason.slice(0, 300)}），按既有设计继续全量重启，结果另行汇报`,
+          `⚠️ Post-upgrade restart wave is running **without a canary**: manager list failed (${plan.reason.slice(0, 300)}); proceeding with the full restart as designed, results to follow`,
+        ),
+      });
+    }
+    const canary = plan.kind === "canary" ? { name: plan.name } : undefined;
     if (canary) {
       const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
       let canaryOk = false;
@@ -823,8 +862,8 @@ async function restartAgentsAndMaster() {
       console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
       if (!canaryOk) {
         try {
-          await bridgeRequest({
-            type: "reply",
+          await notify({
+            source: "launcher",
             chatId: CONTROL_CHANNEL_ID,
             text: t(
               `🚨 **升级后金丝雀重启失败**(${canary.name} 启动不了),已中止其余 agent 的重启波——它们继续跑旧进程。需人工排查新版 Claude Code ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
@@ -832,22 +871,33 @@ async function restartAgentsAndMaster() {
             ),
           });
         } catch { /* non-critical */ }
-        return;
+        return { ok: false, reason: `金丝雀 ${canary.name} 重启失败` };
       }
     }
   } catch (e) {
-    console.log(`🆙 金丝雀流程异常(继续常规重启): ${(e as Error).message}`);
+    // 25b66f7 的既有选择：金丝雀流程异常时继续常规重启（是否改 fail-closed 待 owner 拍板）
+    console.error(`🆙 金丝雀流程异常(继续常规重启): ${(e as Error).message}`);
+    await notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: `⚠️ 升级后金丝雀流程异常，继续常规重启：${(e as Error).message.slice(0, 300)}` });
   }
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
-  const { ok, out } = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
-  console.log(`🆙 bun manager restart 结果: ok=${ok}`);
-  if (!ok) console.log(out);
+  const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+  // 退出码不可信：manager restart 部分失败时照样输出 JSON 并以 0 退出（09-21 日志里
+  // 「ok=true」之后紧跟「✅ 更新完成,所有 agent 已重启」）。按 restart 的结构化结果判。
+  const why = restartFailureReason(r);
+  const failedNames = restartFailedNames(r);
+  console.log(`🆙 bun manager restart 结果: ${why ? `❌ ${why}` : "✅"}`);
+  if (why && !failedNames.length) console.log(r.out);
   restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
 
   // master 通过发送 /exit 让其退出，主循环会自动重启
   await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "/exit", "Enter"]).catch(() => {});
+  if (!why) return { ok: true };
+  return {
+    ok: false,
+    reason: failedNames.length ? `${failedNames.join(", ")} 重启失败：${why}` : why,
+  };
 }
 
 async function checkClaudeCodeUpdate() {
@@ -878,8 +928,8 @@ async function checkClaudeCodeUpdate() {
     if (!(await unknownInstallAlreadyNoted(install.path))) {
       await noteUnknownInstall(install.path);
       console.log(`🆙 认不出 Claude Code 的安装方式（${install.path}），不自动升级`);
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `ℹ️ 认不出 Claude Code 的安装方式（${install.path}），Claudestra 不会自动升级它——请用你安装它的工具自行升级。`,
@@ -925,8 +975,8 @@ async function checkClaudeCodeUpdate() {
   console.log(`🆙 所有 agent 空闲，开始更新 Claude Code`);
   try {
     const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
       text: t(
         `🆙 **Claude Code 新版本** ${current} → ${latest} ${mention}\n\n所有 agent 当前空闲，开始${install.kind === "brew" ? " brew upgrade" : " npm install"} + 重启...`,
@@ -947,8 +997,8 @@ async function checkClaudeCodeUpdate() {
   if (!upgrade.ok) {
     console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}\n${upgrade.err}`);
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `⚠️ Claude Code 更新失败（${install.kind === "brew" ? "brew upgrade" : "npm install"} 返回错误），详见 launcher 日志`,
@@ -970,8 +1020,8 @@ async function checkClaudeCodeUpdate() {
     // --version 却还报旧号),带 quarantine 的新文件下一次启动就挂——照样体检。
     await probeClaudeBinaryHealth("升级未生效");
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `⚠️ Claude Code 升级命令执行成功，但版本仍是 ${current}（预期 ${latest}）——升级**未生效**，已中止 agent 重启。可能是装到了不在 PATH 前列的位置，或该机器由其它方式管理 CC（如原生安装器自更新）。`,
@@ -986,8 +1036,8 @@ async function checkClaudeCodeUpdate() {
   if (!health.ok) {
     console.log(`🆙 ⚠️ 新二进制体检失败(启动挂死),中止 agent 重启波:${health.detail ?? ""}`);
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
           `🚨 **Claude Code 升级后二进制无法启动**(--version 挂死,自动修复未成功:${health.detail ?? "?"})。已中止 agent 重启——现役 agent 继续跑旧进程不受影响,但新启动会挂。需人工处理:参照 web/SETUP.md 排障或回滚版本 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
@@ -1001,16 +1051,21 @@ async function checkClaudeCodeUpdate() {
     console.log(`🆙 新二进制体检:经「${health.fixed}」修复后可用`);
   }
 
-  await restartAgentsAndMaster();
+  const wave = await restartAgentsAndMaster();
 
   try {
-    await bridgeRequest({
-      type: "reply",
+    await notify({
+      source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
-      text: t(
-        `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-        `✅ **Claude Code updated** to v${afterVersion}, all agents restarted ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-      ),
+      text: wave.ok
+        ? t(
+            `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+            `✅ **Claude Code updated** to v${afterVersion}, all agents restarted ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          )
+        : t(
+            `⚠️ **Claude Code 已更新到 v${afterVersion}，但重启波没有全部成功**：${wave.reason.slice(0, 500)}\n手动重试：\`bun src/manager.ts restart <name>\` ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+            `⚠️ **Claude Code updated to v${afterVersion}, but the restart wave did not fully succeed**: ${wave.reason.slice(0, 500)}\nRetry manually: \`bun src/manager.ts restart <name>\` ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          ),
     });
   } catch { /* non-critical */ }
 }

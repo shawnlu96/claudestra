@@ -16,10 +16,9 @@
  * agent 上下文里已有什么。CLI 会对未标 external 的 agent 要求 --force。
  */
 
-import { existsSync } from "fs";
 import { isMasterAgent } from "./registry.js";
 import { timingSafeEqual } from "crypto";
-import { readFile, writeFile, mkdir, chmod } from "fs/promises";
+import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
 import { homedir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
@@ -60,24 +59,31 @@ export interface PrincipalsFile {
 const CONFIG_DIR = join(homedir(), ".claude-orchestrator");
 export const PRINCIPALS_PATH = join(CONFIG_DIR, "principals.json");
 
+const isPrincipalsFile = (d: unknown): boolean =>
+  !!d && typeof d === "object" && Array.isArray((d as PrincipalsFile).principals);
+
+/**
+ * 读者用：永不抛。运行中被写坏 → 沿用上次成功读到的值；冷启动就坏 → 按空（鉴权
+ * fail-closed）。都会响亮地报一次；写者不会拿这个结果去覆盖——writePrincipals 会先
+ * 确认磁盘上的文件不是坏的。
+ */
 export async function readPrincipals(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
-  try {
-    if (!existsSync(path)) return { principals: [] };
-    const data = JSON.parse(await readFile(path, "utf-8"));
-    if (!Array.isArray(data.principals)) return { principals: [] };
-    return data as PrincipalsFile;
-  } catch {
-    return { principals: [] };
-  }
+  return readJsonLenient<PrincipalsFile>(path, { principals: [] }, { validate: isPrincipalsFile, who: "principals" });
+}
+
+/** 写者用：损坏时抛 StateCorruptError，而不是返回空。 */
+export async function readPrincipalsStrict(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
+  const r = await readJsonState(path, isPrincipalsFile);
+  if (r.status === "ok") return r.data as PrincipalsFile;
+  if (r.status === "missing") return { principals: [] };
+  throw new StateCorruptError(path, r.error);
 }
 
 export async function writePrincipals(data: PrincipalsFile, path = PRINCIPALS_PATH): Promise<void> {
-  await mkdir(CONFIG_DIR, { recursive: true });
-  // mode 传给 open(2)，文件在**创建那一刻**就是 0600 —— 先写后 chmod 会留下一个
-  // 内容已落盘、权限还是 0644 的窗口，而这个文件里是全部 API/peer token 的明文。
-  // （对已存在的文件 mode 不生效，故后面仍补一次 chmod。）
-  await writeFile(path, JSON.stringify(data, null, 2), { mode: 0o600 });
-  try { await chmod(path, 0o600); } catch { /* best-effort */ }
+  // 整份 API/peer token 的明文：0600 在 open(2) 时就生效；tmp+rename 原子写——
+  // 原地覆写的半写状态会被别的进程读成「损坏」（peers.json 踩过同一个坑）；
+  // 磁盘上已是坏文件就拒写并备份，绝不拿「读成空」的结果去覆盖。
+  await writeJsonStateGuarded(path, data, { mode: 0o600, validate: isPrincipalsFile });
 }
 
 /** 生成一个新 token principal（不落盘，调用方决定何时 write） */
@@ -199,7 +205,8 @@ export async function syncDiscordOwnersFromEnv(
   path = PRINCIPALS_PATH,
 ): Promise<boolean> {
   if (allowedIds.length === 0) return false;
-  const file = await readPrincipals(path);
+  // strict：principals.json 坏了就抛，绝不「读成空 → 追加 owner → 写回」抹掉全部 token
+  const file = await readPrincipalsStrict(path);
   let changed = false;
   for (const uid of allowedIds) {
     if (!isDiscordSnowflake(uid)) {

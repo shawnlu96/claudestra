@@ -9,12 +9,14 @@
  * 日志：~/.claude-orchestrator/cron-history.json（最近 100 条执行记录）
  */
 
-import { readFile, writeFile, mkdir, rename } from "fs/promises";
+import { readFile, mkdir } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { runtimeForSessionPath, translateSessionLine } from "./lib/session-source.js";
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
-import { bridgeRequest } from "./lib/bridge-client.js";
+import { notify } from "./lib/notify.js";
+import { runManagerProcess, agentsFromList } from "./lib/run-manager.js";
+import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
@@ -189,30 +191,19 @@ export function nextCronTime(expr: string, from: Date = new Date()): Date {
 // 存储
 // ============================================================
 
-/**
- * 原子写：先写同目录临时文件再 rename。直接 writeFile 的话，进程在写到一半时
- * 被 launchd 重启 / 机器断电，就会留下一个被截断的 JSON —— 下次 load 解析失败
- * 返回空数组，所有定时任务静默消失。rename 在同一文件系统内是原子的。
- */
-async function writeFileAtomic(path: string, data: string): Promise<void> {
-  const tmp = `${path}.tmp.${process.pid}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
+const isJobsFile = (d: unknown): boolean => Array.isArray(d);
 
+/**
+ * 损坏时沿用上次成功读到的任务（daemon 冷启动就坏则为空），并响亮地报一次；saveJobs 拒绝覆盖坏文件——
+ * 旧写法把解析失败当成 []，下一次 cron-add 就把全部任务清空。
+ */
 export async function loadJobs(): Promise<CronJob[]> {
-  if (!existsSync(CRON_PATH)) return [];
-  try {
-    const data = JSON.parse(await readFile(CRON_PATH, "utf-8"));
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
+  return readJsonLenient<CronJob[]>(CRON_PATH, [], { validate: isJobsFile, who: "cron" });
 }
 
 export async function saveJobs(jobs: CronJob[]): Promise<void> {
-  await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFileAtomic(CRON_PATH, JSON.stringify(jobs, null, 2));
+  // 原子写（进程写到一半被 launchd 重启不会留下截断的 JSON）+ 坏文件拒写
+  await writeJsonStateGuarded(CRON_PATH, jobs, { validate: isJobsFile });
 }
 
 async function loadHistory(): Promise<CronHistory[]> {
@@ -226,7 +217,8 @@ async function loadHistory(): Promise<CronHistory[]> {
 }
 
 async function saveHistory(history: CronHistory[]): Promise<void> {
-  await writeFileAtomic(HISTORY_PATH, JSON.stringify(history.slice(-MAX_HISTORY), null, 2));
+  // 历史只是日志：坏了就覆盖，不拦（拦了会让每次任务执行都抛）
+  await writeJsonAtomic(HISTORY_PATH, history.slice(-MAX_HISTORY));
 }
 
 async function appendHistory(entry: CronHistory): Promise<void> {
@@ -248,19 +240,17 @@ async function updateHistory(id: string, update: Partial<CronHistory>): Promise<
 // Manager 调用
 // ============================================================
 
+// create 要等 Claude Code 起来（manager 自己的启动超时 + 清理），给足；其余短。
+// 以前这里没有超时：manager 或它拉起的 tmux 挂住，这个任务就永远 running。
+const CRON_MANAGER_TIMEOUT_MS: Record<string, number> = { list: 20_000, create: 300_000 };
+
 async function runManager(...args: string[]): Promise<any> {
-  const proc = Bun.spawn([BUN_PATH, "run", MANAGER_PATH, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
+  return runManagerProcess(args, {
+    bunPath: BUN_PATH,
+    managerPath: MANAGER_PATH,
     env: { ...process.env, PATH: `${HOME}/.bun/bin:${process.env.PATH}` },
+    timeoutMs: CRON_MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? 120_000,
   });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  try {
-    return JSON.parse(out.trim());
-  } catch {
-    return { ok: false, error: out.trim() || "manager 执行失败" };
-  }
 }
 
 /**
@@ -320,8 +310,8 @@ async function executeOnTempAgent(
 
   if (reportChannel) {
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "cron",
         chatId: reportChannel,
         text: `⏰ **定时任务开始**: ${job.name}\n-# 📁 ${job.dir}\n-# 💬 ${job.prompt.slice(0, 100)}`,
       });
@@ -376,15 +366,28 @@ async function executeOnTempAgent(
           const summary = await extractAgentSummary(job.dir, tmpSessionId);
           if (summary) body += `\n\n${summary}`;
         }
-        await bridgeRequest({ type: "reply", chatId: reportChannel, text: body });
+        await notify({ source: "cron", chatId: reportChannel, text: body });
       } catch { /* non-critical */ }
     }
   } finally {
     // 清理临时 agent（成功、超时、异常都跑一次）
+    // 以前不看结果：清理失败时窗口和频道泄漏，没有任何痕迹
     try {
       await Bun.sleep(2000);
-      await runManager("kill", agentName);
-    } catch { /* non-critical */ }
+      const k = await runManager("kill", agentName);
+      if (!k?.ok) {
+        console.error(`❌ cron 临时 agent 清理失败: ${agentName} — ${k?.error ?? "未知"}`);
+        if (reportChannel) {
+          await notify({
+            source: "cron",
+            chatId: reportChannel,
+            text: `⚠️ **定时任务临时 agent 清理失败**: ${job.name}（${agentName}）\n-# ${String(k?.error ?? "未知").slice(0, 200)}\n-# 手动清理：bun src/manager.ts kill ${agentName}`,
+          });
+        }
+      }
+    } catch (e) {
+      console.error(`❌ cron 临时 agent 清理异常: ${agentName} — ${(e as Error).message}`);
+    }
   }
 }
 
@@ -424,8 +427,8 @@ async function executeOnExistingAgent(
   const shouldNotifyStart = reportChannel && reportChannel !== targetChannelId;
   if (shouldNotifyStart) {
     try {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "cron",
         chatId: reportChannel!,
         text: `⏰ **定时任务开始**: ${job.name} → ${tmuxName}\n-# 💬 ${job.prompt.slice(0, 100)}`,
       });
@@ -458,8 +461,8 @@ async function executeOnExistingAgent(
     try {
       const emoji = completed ? "✅" : "⏰";
       const statusText = completed ? "完成" : "超时";
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "cron",
         chatId: reportChannel,
         text: `${emoji} **定时任务${statusText}**: ${job.name} → ${tmuxName}`,
       });
@@ -470,10 +473,11 @@ async function executeOnExistingAgent(
 /** 从 registry 里根据 tmux 名（含 "agent-" 前缀）查该 agent 的 Discord channelId。 */
 async function lookupAgentChannelId(tmuxName: string): Promise<string | undefined> {
   try {
-    const r = await runManager("list");
-    const agent = (r.agents || []).find((a: any) => a.name === tmuxName);
+    const agent = agentsFromList(await runManager("list")).find((a: any) => a.name === tmuxName);
     return agent?.channelId;
-  } catch {
+  } catch (e) {
+    // manager 坏了 ≠ agent 没有频道：说清楚，别让通知静默少一半
+    console.error(`⚠️ cron 查 ${tmuxName} 的频道失败: ${(e as Error).message}`);
     return undefined;
   }
 }
@@ -516,8 +520,8 @@ async function executeJob(job: CronJob): Promise<void> {
 
     if (reportChannel) {
       try {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "cron",
           chatId: reportChannel,
           text: `❌ **定时任务失败**: ${job.name}\n-# ${errorMsg.slice(0, 200)}`,
         });

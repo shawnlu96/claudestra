@@ -52,3 +52,59 @@ export function restartFailureReason(r: RestartRunOutcome): string | null {
   const tail = (r.err || "").split("\n").filter((l) => l.trim()).slice(-3).join(" ");
   return tail || "restart 进程非 0 退出且无输出";
 }
+
+/** restart 结果里失败的 agent 名（「完成」消息只能列成功项，失败项要单独报）。 */
+export function restartFailedNames(r: RestartRunOutcome): string[] {
+  try {
+    const parsed = JSON.parse(r.out || "");
+    if (!Array.isArray(parsed?.results)) return [];
+    return parsed.results
+      .filter((x: any) => x && x.ok === false && typeof x.name === "string")
+      .map((x: any) => x.name as string);
+  } catch {
+    return [];
+  }
+}
+
+export type CanaryPlan =
+  | { kind: "canary"; name: string }
+  | { kind: "no-candidate" }
+  | { kind: "list-failed"; reason: string };
+
+/**
+ * 升级重启波的金丝雀决策。「list 成功但没有可选的 agent」和「list 失败」必须分开：
+ * 前者是真没 agent，跳过金丝雀无妨；后者是没验证过新版本能起就要进全量重启，
+ * 以前两者都表现为 canary=undefined、静默跳过。
+ */
+export function canaryPlan(list: ListOutcome): CanaryPlan {
+  if (!list.ok) return { kind: "list-failed", reason: list.reason };
+  const c = list.agents.find((a) => a.status !== "stopped");
+  return c ? { kind: "canary", name: c.name } : { kind: "no-candidate" };
+}
+
+export type ListOutcome =
+  | { ok: true; agents: { name: string; status?: string }[] }
+  | { ok: false; reason: string };
+
+/**
+ * `manager.ts list` 结果解读。失败必须是失败——launcher 以前 `if (!list.ok) return` 不留
+ * 一行日志、`JSON.parse(out || "{}").agents || []` 把坏输出读成「零个 agent」，于是开机
+ * 恢复 / 巡检静默不干活，金丝雀因为「找不到 agent」被跳过、直接进全量重启波。
+ */
+export function parseManagerList(r: RestartRunOutcome): ListOutcome {
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(r.out || "");
+  } catch {
+    parsed = null;
+  }
+  if (parsed && typeof parsed === "object") {
+    if (parsed.ok === false) {
+      return { ok: false, reason: typeof parsed.error === "string" && parsed.error ? parsed.error : "manager list 返回 ok:false" };
+    }
+    if (!Array.isArray(parsed.agents)) return { ok: false, reason: "manager list 输出缺少 agents 字段" };
+    return { ok: true, agents: parsed.agents };
+  }
+  const tail = (r.err || "").split("\n").filter((l) => l.trim()).slice(-3).join(" ");
+  return { ok: false, reason: tail || (r.ok ? "manager list 输出不是 JSON" : "manager list 非 0 退出且无输出") };
+}

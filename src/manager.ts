@@ -192,7 +192,7 @@ async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entries: num
     raw.agents[newKey] = val;
   }
   delete raw.workers;
-  await writeFile(REGISTRY_PATH, JSON.stringify(raw, null, 2));
+  await writeJsonAtomic(REGISTRY_PATH, raw); // 原子写：迁移中途被杀不能留下半截 registry
 
   // 同步重命名 tmux window（可能因为 tmux 不在运行而失败，忽略即可）
   for (const newName of Object.keys(raw.agents)) {
@@ -220,6 +220,10 @@ async function saveRegistry(reg: Registry) {
 }
 
 import { bridgeRequest } from "./lib/bridge-client.js";
+import { notify } from "./lib/notify.js";
+import { writeJsonAtomic } from "./lib/state-file.js";
+import { stderrTail } from "./lib/run-manager.js";
+import { installAfterPull, DEP_MANIFESTS } from "./lib/post-pull.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -489,6 +493,21 @@ function formatAge(date: Date): string {
 
 function output(data: Record<string, unknown>) {
   console.log(JSON.stringify(data));
+}
+
+/**
+ * 等子进程结束；非 0 退出返回「exit=N：stderr 末几行」，成功返回 null。
+ * stdout/stderr 都读走——pipe 了不读，输出一多子进程就卡在写管道上。
+ */
+async function spawnFailure(proc: { exited: Promise<number>; stdout: ReadableStream; stderr: ReadableStream }, tailLines = 3): Promise<string | null> {
+  const [, err, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (code === 0) return null;
+  const tail = stderrTail(err, tailLines);
+  return `exit=${code}${tail ? `：${tail}` : ""}`;
 }
 
 /**
@@ -1381,8 +1400,8 @@ async function cmdResume(
       // 发图片到 Discord
       const { existsSync } = await import("fs");
       if (existsSync(pngPath)) {
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "manager",
           chatId: channelId,
           text: "**📜 恢复的会话终端预览**",
           files: [pngPath],
@@ -2091,8 +2110,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
         } else {
           console.error(`[restart] ⚠️ ${tmuxName} fork 成功但未探测到新 session id，registry 未更新`);
         }
-        await bridgeRequest({
-          type: "reply",
+        await notify({
+          source: "manager",
           chatId: info.channelId,
           text: `🔀 ${displayName} 原 session 被后台 agent 占用，已自动 fork 副本恢复（上下文完整）${newId ? "" : "，⚠️ 新 session id 探测失败请查 registry"}`,
         }).catch(() => {});
@@ -2139,8 +2158,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     // 取代 permission-watcher 那条让人摸不清状态的 session-idle 按钮消息。
     // 只在确实命中 session-idle 弹窗时发；普通秒级重启不打扰。
     if (started.ready && started.recoveredFullSession) {
-      await bridgeRequest({
-        type: "reply",
+      await notify({
+        source: "manager",
         chatId: info.channelId,
         text: `✅ ${displayName} 已重启，自动恢复完整会话（无 compact，上下文保留）`,
       }).catch(() => { /* 通知失败不影响重启结果 */ });
@@ -3138,12 +3157,26 @@ async function cmdUpdateBeta() {
   const ff = co.ok ? await git("merge", "--ff-only", "origin/main", "--quiet") : co;
   if (!ff.ok) { await unlock(); output({ ok: false, error: `ff 前进失败: ${ff.err}` }); return; }
 
-  const biProc = Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  await biProc.exited;
+  // 依赖清单变了还装不上 → 回退到 preHead，不 /exit、不 reload（见 lib/post-pull.ts）
+  const install = await installAfterPull({
+    runInstall: () => spawnFailure(Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
+    depsChanged: async () => !(await git("diff", "--quiet", preHead, remote, "--", ...DEP_MANIFESTS)).ok,
+    rollback: async () => { const r = await git("reset", "--keep", preHead); return r.ok ? null : r.err || "git reset 失败"; },
+  });
+  if (!install.ok) {
+    await unlock();
+    output({
+      ok: false, channel: "beta", step: install.step, rolledBack: install.rolledBack,
+      error: `bun install 失败（${install.err}）——${install.rolledBack ? `已回退到 ${preHead.slice(0, 7)}` : `回退也失败了：${install.rollbackError}`}；未 reload daemon`,
+    });
+    return;
+  }
+  if (install.warning) console.error(`[update] ⚠️ ${install.warning}`);
   const rendered = await renderMasterClaude();
   const webBuild = await maybeBuildWeb();
   const migrateProc = Bun.spawn([resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  await migrateProc.exited;
+  const migrateError = await spawnFailure(migrateProc);
+  if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
   await Bun.sleep(500);
   await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
   // ⚠ 先释锁再 reload daemon:bootout launcher 会让本进程被 launchd 连坐回收
@@ -3165,6 +3198,8 @@ async function cmdUpdateBeta() {
     masterReRendered: rendered,
     webBuild,
     cliInstalled: cliInstall.errors.length === 0,
+    ...(migrateError ? { migrateError } : {}),
+    ...(install.warning ? { installWarning: install.warning } : {}),
   });
 }
 
@@ -3218,6 +3253,8 @@ async function cmdUpdate() {
 
   // 3. fetch tags + checkout release tag
   await git("fetch", "--tags", "--quiet", "origin");
+  // 记下升级前的 HEAD：bun install 失败且依赖清单变了时回退到这里（lib/post-pull.ts）
+  const preUpdateHead = (await git("rev-parse", "HEAD")).out.trim();
   const checkout = await git("checkout", release.tag, "--quiet");
   if (!checkout.ok) {
     await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
@@ -3246,8 +3283,22 @@ async function cmdUpdate() {
   if (!reattach.ok) console.error(`[update] ⚠️ ${reattach.detail}`);
 
   // 4. bun install（依赖可能变了）
-  const biProc = Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  await biProc.exited;
+  //    以前只 await exited：断网/锁文件冲突时照样 reload 三个 daemon，新代码缺依赖起不来。
+  //    依赖清单变了还装不上 → 回退到升级前，不 /exit、不 reload（见 lib/post-pull.ts）
+  const install = await installAfterPull({
+    runInstall: () => spawnFailure(Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
+    depsChanged: async () => !(await git("diff", "--quiet", preUpdateHead, release.tag, "--", ...DEP_MANIFESTS)).ok,
+    rollback: async () => { const r = await git("checkout", preUpdateHead, "--quiet"); return r.ok ? null : r.err || "git checkout 失败"; },
+  });
+  if (!install.ok) {
+    await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
+    output({
+      ok: false, step: install.step, rolledBack: install.rolledBack,
+      error: `bun install 失败（${install.err}）——${install.rolledBack ? `已回退到 ${preUpdateHead.slice(0, 7)}` : `回退也失败了：${install.rollbackError}`}；未 reload daemon`,
+    });
+    return;
+  }
+  if (install.warning) console.error(`[update] ⚠️ ${install.warning}`);
 
   // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
   const rendered = await renderMasterClaude();
@@ -3263,7 +3314,8 @@ async function cmdUpdate() {
     [resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"],
     { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }
   );
-  await migrateProc.exited;
+  const migrateError = await spawnFailure(migrateProc);
+  if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
 
   // v2.4.0+: 不再 pm2 restart。install-cli 用 launchctl bootout+bootstrap 来
   // reload 三个 daemon plist，每次都生效新代码；如果检测到老 pm2 进程也会顺手
@@ -3299,6 +3351,8 @@ async function cmdUpdate() {
     webBuild,
     // 分支挂回结果(detached HEAD 修复,v2.16.3)——同样绝不静默
     branch: reattach,
+    migrateError: migrateError || undefined,
+    installWarning: install.warning,
     cliInstalled: cliInstall.errors.length === 0,
     cliWrapper: cliInstall.cliWrapper || undefined,
     daemons: cliInstall.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),
