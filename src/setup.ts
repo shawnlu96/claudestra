@@ -16,6 +16,13 @@ import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 
+/**
+ * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
+ * Web 优先 + 自动收编（默认 Discord、没有 web 托管），和 install.sh 的描述对不上。
+ * 向导的对外行为有大改时递增，并同步 install.sh 里的判据。
+ */
+export const SETUP_CONTRACT = 2;
+
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
 const ENV_EXAMPLE_PATH = `${REPO_ROOT}/.env.example`;
