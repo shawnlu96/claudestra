@@ -66,6 +66,22 @@ export function restartFailedNames(r: RestartRunOutcome): string[] {
   }
 }
 
+export type CanaryPlan =
+  | { kind: "canary"; name: string }
+  | { kind: "no-candidate" }
+  | { kind: "list-failed"; reason: string };
+
+/**
+ * 升级重启波的金丝雀决策。「list 成功但没有可选的 agent」和「list 失败」必须分开：
+ * 前者是真没 agent，跳过金丝雀无妨；后者是没验证过新版本能起就要进全量重启，
+ * 以前两者都表现为 canary=undefined、静默跳过。
+ */
+export function canaryPlan(list: ListOutcome): CanaryPlan {
+  if (!list.ok) return { kind: "list-failed", reason: list.reason };
+  const c = list.agents.find((a) => a.status !== "stopped");
+  return c ? { kind: "canary", name: c.name } : { kind: "no-candidate" };
+}
+
 export type ListOutcome =
   | { ok: true; agents: { name: string; status?: string }[] }
   | { ok: false; reason: string };

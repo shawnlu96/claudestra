@@ -8,7 +8,7 @@
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
-import { restartFailureReason, restartFailedNames, parseManagerList } from "./lib/restart-result.js";
+import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "./lib/restart-result.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
@@ -710,25 +710,22 @@ async function restartAgentsAndMaster(): Promise<RestartWaveResult> {
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
   try {
-    const list = parseManagerList(await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000));
-    if (!list.ok) {
-      // 以前 list 失败时 canary=undefined → 静默跳过金丝雀、直接全量重启：防护被绕过。
-      // 现在 fail-closed：选不出金丝雀就整波中止，agent 继续跑旧进程。
-      const reason = `manager list 失败，无法选金丝雀：${list.reason}`;
-      console.error(`🆙 ${reason}——中止重启波`);
-      restartWaveUntil = Date.now() + 60_000;
+    const plan = canaryPlan(parseManagerList(await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000)));
+    if (plan.kind === "list-failed") {
+      // 以前 list 失败时 canary=undefined → 静默跳过金丝雀、直接全量重启。
+      // 是否就此中止整波（fail-closed）是设计取舍，待 owner 拍板；这里先保持 25b66f7
+      // 的 fail-open（继续全量重启），但必须喊出来——不再静默绕过防护。
+      console.error(`🆙 manager list 失败，无法选金丝雀（按既有设计继续全量重启）: ${plan.reason}`);
       await notify({
         source: "launcher",
         chatId: CONTROL_CHANNEL_ID,
         text: t(
-          `🚨 **升级后重启波已中止**：${reason.slice(0, 300)}。agent 继续跑旧进程，需人工排查 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-          `🚨 **Post-upgrade restart wave aborted**: ${reason.slice(0, 300)}. Agents keep their old processes; manual investigation needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `⚠️ 升级后重启波**没有金丝雀**：manager list 失败（${plan.reason.slice(0, 300)}），按既有设计继续全量重启，结果另行汇报`,
+          `⚠️ Post-upgrade restart wave is running **without a canary**: manager list failed (${plan.reason.slice(0, 300)}); proceeding with the full restart as designed, results to follow`,
         ),
       });
-      return { ok: false, reason };
     }
-    const agents = list.agents;
-    const canary = agents.find((a) => a.status !== "stopped");
+    const canary = plan.kind === "canary" ? { name: plan.name } : undefined;
     if (canary) {
       const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
       let canaryOk = false;
@@ -749,12 +746,9 @@ async function restartAgentsAndMaster(): Promise<RestartWaveResult> {
       }
     }
   } catch (e) {
-    // 金丝雀流程本身出异常 = 没验证过新版本能起，同样中止（以前这里「继续常规重启」）
-    const reason = `金丝雀流程异常：${(e as Error).message}`;
-    console.error(`🆙 ${reason}——中止重启波`);
-    restartWaveUntil = Date.now() + 60_000;
-    await notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: `🚨 **升级后重启波已中止**：${reason.slice(0, 300)}` });
-    return { ok: false, reason };
+    // 25b66f7 的既有选择：金丝雀流程异常时继续常规重启（是否改 fail-closed 待 owner 拍板）
+    console.error(`🆙 金丝雀流程异常(继续常规重启): ${(e as Error).message}`);
+    await notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: `⚠️ 升级后金丝雀流程异常，继续常规重启：${(e as Error).message.slice(0, 300)}` });
   }
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
