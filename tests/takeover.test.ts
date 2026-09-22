@@ -7,7 +7,7 @@
  * 用户正在用的进程。
  */
 import { describe, test, expect } from "bun:test";
-import { classifyRunning, mayTakeOver, paneIdOf, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type RunningCc } from "../src/lib/takeover.js";
+import { classifyRunning, mayTakeOver, paneIdOf, planAdoption, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type RunningCc } from "../src/lib/takeover.js";
 import { bypassConsentGiven, claudeUserSettingsPath } from "../src/lib/bypass-consent.js";
 import { parseCcSessionEntry } from "../src/lib/cc-sessions.js";
 
@@ -150,6 +150,44 @@ describe("bypass 同意记录", () => {
   test("settings 路径尊重 CLAUDE_CONFIG_DIR", () => {
     expect(claudeUserSettingsPath({ HOME: "/h" })).toBe("/h/.claude/settings.json");
     expect(claudeUserSettingsPath({ HOME: "/h", CLAUDE_CONFIG_DIR: "/cfg" })).toBe("/cfg/settings.json");
+  });
+});
+
+describe("planAdoption —— setup 收编分类", () => {
+  const env = {
+    masterDirs: ["/Users/x/.claude-orchestrator/master"],
+    exists: (p: string) => !p.includes("gone"),
+    realpath: (p: string) => p.replace("/link-master", "/.claude-orchestrator/master"),
+  };
+  const run = (sessionId: string, cwd: string, verdict: "ready" | "busy" = "ready") => ({ sessionId, cwd, verdict });
+
+  test("空闲的进 ready、跑回合的进 busy", () => {
+    const p = planAdoption([run("a", "/Users/x/p1"), run("b", "/Users/x/p2", "busy")], [], new Set(), env);
+    expect(p.ready.map((r) => r.sessionId)).toEqual(["a"]);
+    expect(p.busy.map((r) => r.sessionId)).toEqual(["b"]);
+  });
+
+  test("master 自己（含软链路径）、临时目录、已删除目录、已纳管的都不收", () => {
+    const p = planAdoption([
+      run("m", "/Users/x/.claude-orchestrator/master"),
+      run("m2", "/Users/x/link-master"),
+      run("t", "/private/tmp/claude-501/scratch"),
+      run("g", "/Users/x/gone"),
+      run("k", "/Users/x/p1"),
+    ], [], new Set(["k"]), env);
+    expect(p.ready).toHaveLength(0);
+  });
+
+  test("历史会话只数数量：codex、正在跑的、已纳管的、临时目录不计", () => {
+    const p = planAdoption([run("live", "/Users/x/p1")], [
+      { sessionId: "h1", cwd: "/Users/x/p1" },
+      { sessionId: "h2", cwd: "/Users/x/p2", runtime: "pi" },
+      { sessionId: "c", cwd: "/Users/x/p3", runtime: "codex" },
+      { sessionId: "live", cwd: "/Users/x/p1" },
+      { sessionId: "k", cwd: "/Users/x/p1" },
+      { sessionId: "t", cwd: "/tmp/probe" },
+    ], new Set(["k"]), env);
+    expect(p.historyCount).toBe(2);
   });
 });
 

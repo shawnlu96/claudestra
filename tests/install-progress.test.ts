@@ -5,7 +5,7 @@
  * 且默认**否** → 一路回车就 exit(1)，重跑比第一次还难走通。判据一律取落盘事实。
  */
 import { describe, test, expect } from "bun:test";
-import { assessInstall, progressChecklist, skippableSteps } from "../src/lib/install-progress.js";
+import { assessInstall, parseClientWebCommit, progressChecklist, skippableSteps, webBuildFresh, webDepsFresh } from "../src/lib/install-progress.js";
 
 const none = {
   envFile: false, webEnvLocal: false, webNextBin: false,
@@ -55,6 +55,41 @@ describe("skippableSteps", () => {
     const s = skippableSteps(assessInstall(none));
     expect(s.webInstall).toBe(false);
     expect(s.webBuild).toBe(false);
+  });
+});
+
+describe("新鲜度：文件在 ≠ 是这一版的（切版本后重跑 setup）", () => {
+  test("依赖过期 → 重装依赖，也就必须重新构建", () => {
+    const s = skippableSteps(assessInstall({ ...all, webDepsFresh: false }));
+    expect(s.webInstall).toBe(false);
+    expect(s.webBuild).toBe(false);
+  });
+  test("只有构建过期 → 依赖跳过、重新构建", () => {
+    const s = skippableSteps(assessInstall({ ...all, webDepsFresh: true, webBuildFresh: false }));
+    expect(s.webInstall).toBe(true);
+    expect(s.webBuild).toBe(false);
+  });
+  test("都新鲜 → 都跳过", () => {
+    const s = skippableSteps(assessInstall({ ...all, webDepsFresh: true, webBuildFresh: true }));
+    expect(s).toEqual({ webInstall: true, webBuild: true });
+  });
+
+  test("webDepsFresh：npm 写的 .package-lock.json 不早于 package-lock.json", () => {
+    expect(webDepsFresh(100, 200)).toBe(true);
+    expect(webDepsFresh(200, 100)).toBe(false);
+    expect(webDepsFresh(200, null)).toBe(false);
+    expect(webDepsFresh(null, null)).toBe(true); // 没有 lock 文件：判断不了
+  });
+
+  test("webBuildFresh：产物烤的 web commit 等于当前的", () => {
+    const src = 'export const CLIENT_COMMIT = "abc1234";\nexport const CLIENT_WEB_COMMIT = "def5678";\n';
+    expect(parseClientWebCommit(src)).toBe("def5678");
+    expect(webBuildFresh(parseClientWebCommit(src), "def5678")).toBe(true);
+    expect(webBuildFresh(parseClientWebCommit(src), "0000000")).toBe(false);
+    // v2.20.1 时代的构建没有 build-info.ts → 过期
+    expect(webBuildFresh(parseClientWebCommit(null), "def5678")).toBe(false);
+    // 不是 git 检出、拿不到当前 commit → 判断不了，按旧行为
+    expect(webBuildFresh(null, null)).toBe(true);
   });
 });
 

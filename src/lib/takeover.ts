@@ -150,3 +150,52 @@ export function resumeOutcome(lines: string[]): { ok: boolean; error?: string; a
   if (last.ready === false) return { ok: false, error: "resume 后 Claude Code 没有就绪" };
   return { ok: true, ...(typeof last.agent === "string" ? { agent: last.agent } : {}) };
 }
+
+// ────────────────────────────────────────────
+// setup 的收编计划（纯函数）
+// ────────────────────────────────────────────
+
+/** 临时目录（测试 / 探针 / 子代理 scratchpad）——和网页侧栏的 isTempSession 同一判据 */
+export function isTempDir(cwd: string): boolean {
+  return /^(\/tmp|\/private\/tmp|\/var\/folders|\/private\/var\/folders)\//.test(cwd || "");
+}
+
+export interface AdoptDirEnv {
+  /** master 自己的工作目录（已 realpath）：它是调度者，不是收编对象 */
+  masterDirs: string[];
+  exists: (p: string) => boolean;
+  realpath: (p: string) => string;
+}
+
+/** 值不值得收编：目录还在、不是临时目录、不是 master 自己 */
+export function adoptableDir(cwd: string, env: AdoptDirEnv): boolean {
+  if (!cwd || isTempDir(cwd) || !env.exists(cwd)) return false;
+  return !env.masterDirs.includes(env.realpath(cwd));
+}
+
+export interface AdoptRunning { sessionId: string; cwd: string; verdict: "ready" | "busy"; suggestedName?: string }
+export interface AdoptHistory { sessionId: string; cwd: string; runtime?: string }
+
+/**
+ * setup 收编分三类：外面在跑且空闲的（默认 takeover）、正在跑回合的（不动，给办法）、
+ * 没在跑的历史会话（只报数量——网页侧栏里本来就能看、能收编）。
+ * 只有 Claude Code / Pi 是可收编的运行时；codex 等其它来源不进任何一类。
+ */
+export function planAdoption(
+  running: AdoptRunning[],
+  history: AdoptHistory[],
+  managed: Set<string>,
+  env: AdoptDirEnv,
+): { ready: AdoptRunning[]; busy: AdoptRunning[]; historyCount: number } {
+  const live = new Set(running.map((r) => r.sessionId));
+  const ok = running.filter((r) => !managed.has(r.sessionId) && adoptableDir(r.cwd, env));
+  const historyCount = history.filter((h) =>
+    (!h.runtime || h.runtime === "claude-code" || h.runtime === "pi") &&
+    !managed.has(h.sessionId) && !live.has(h.sessionId) && adoptableDir(h.cwd, env),
+  ).length;
+  return {
+    ready: ok.filter((r) => r.verdict === "ready"),
+    busy: ok.filter((r) => r.verdict === "busy"),
+    historyCount,
+  };
+}
