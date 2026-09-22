@@ -10,7 +10,11 @@
  * 环境变量：DISCORD_CHANNEL_ID（每个 Claude Code 实例自动设置）
  */
 
-const BRIDGE_PORT = process.env.BRIDGE_PORT || "3847";
+import { bridgeHttpBase } from "../lib/bridge-port.js";
+
+// 端口跟随 BRIDGE_URL（启动命令显式注入、随每次重启更新），而不是 tmux 全局环境里
+// 可能停在旧值的 BRIDGE_PORT——改过端口后 Stop hook 会静默打到旧端口
+const BRIDGE_HTTP = bridgeHttpBase();
 
 async function main() {
   const channelId = process.env.DISCORD_CHANNEL_ID;
@@ -48,7 +52,7 @@ async function main() {
       // 必须带超时：try/catch 抓得住"连不上"，抓不住"连上了但不回"。bridge 一旦
       // 卡住（不是挂掉），每个 agent 的每次 Stop hook 都会在这里无限等待，而 hook
       // 是**阻塞 Claude Code 回合收尾**的 —— 等于所有 agent 一起被拖住。
-      const res = await fetch(`http://localhost:${BRIDGE_PORT}/hook`, {
+      const res = await fetch(`${BRIDGE_HTTP}/hook`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // 传递原事件名，不再硬编码 "stop"。stopHookActive:Claude Code 标记「本次 Stop

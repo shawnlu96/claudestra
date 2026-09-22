@@ -282,6 +282,21 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
       out.push({ group: g, name: "BRIDGE_URL 端口", status: "fail", detail: mismatch,
         fix: "把 .env 里的 BRIDGE_URL 删掉（会自动按 BRIDGE_PORT 推），或改成同一个端口" });
     }
+    // tmux 全局环境停在 server 创建那一刻：与 .env 不一致 = 在跑的会话还连着旧地址
+    const { resolveBridgeUrl } = await import("./bridge-url.js");
+    const { bridgeDrift, parseTmuxEnvLine } = await import("./bridge-port.js");
+    const tenv = await sh(["tmux", "-S", "/tmp/claude-orchestrator/master.sock", "show-environment", "-g"]);
+    if (tenv.ok && tenv.out) {
+      const drift = bridgeDrift(
+        { BRIDGE_URL: parseTmuxEnvLine(tenv.out, "BRIDGE_URL"), BRIDGE_PORT: parseTmuxEnvLine(tenv.out, "BRIDGE_PORT") },
+        resolveBridgeUrl({ BRIDGE_URL: pick("BRIDGE_URL"), BRIDGE_PORT: pick("BRIDGE_PORT") }),
+      );
+      out.push(drift
+        ? { group: g, name: "会话连接地址", status: "fail",
+            detail: `tmux 里的会话按 ${drift.from} 启动，.env 现在是 ${drift.to} —— 这些会话连不上 bridge`,
+            fix: "launchctl kickstart -k gui/$(id -u)/com.claudestra.launcher（launcher 会在新 bridge 应答后重启全部会话）" }
+        : { group: g, name: "会话连接地址", status: "ok", detail: "tmux 全局环境与 .env 一致" });
+    }
   } catch { /* 没有 .env 就跳过 */ }
 
   try {

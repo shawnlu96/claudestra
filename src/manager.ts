@@ -229,9 +229,9 @@ async function triggerSkillsRescan(
   agent?: string,
   cwd?: string
 ): Promise<void> {
-  const port = process.env.BRIDGE_PORT || "3847";
+  const { bridgeHttpBase } = await import("./lib/bridge-port.js");
   try {
-    await fetch(`http://localhost:${port}/skills/rescan`, {
+    await fetch(`${bridgeHttpBase()}/skills/rescan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, agent, cwd }),
@@ -1484,9 +1484,9 @@ async function cmdKill(name: string) {
   // 的 agent 在别处被 resume 后吃陈年 pushback / nudge）。restart 走另一条路，
   // 不调这里。bridge 没启也无所谓 —— 静默失败。
   if (info?.channelId) {
-    const port = process.env.BRIDGE_PORT || "3847";
+    const { bridgeHttpBase } = await import("./lib/bridge-port.js");
     try {
-      await fetch(`http://localhost:${port}/agent/cleanup`, {
+      await fetch(`${bridgeHttpBase()}/agent/cleanup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // 带上 agent 名，bridge 据此丢掉它在事件总线里的环形缓冲（见 forgetAgent）
@@ -1535,9 +1535,9 @@ async function cmdRemove(name: string) {
   await saveRegistry(reg);
   await triggerSkillsRescan("remove", tmuxName);
   if (info?.channelId) {
-    const port = process.env.BRIDGE_PORT || "3847";
+    const { bridgeHttpBase } = await import("./lib/bridge-port.js");
     try {
-      await fetch(`http://localhost:${port}/agent/cleanup`, {
+      await fetch(`${bridgeHttpBase()}/agent/cleanup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // 带上 agent 名，bridge 据此丢掉它在事件总线里的环形缓冲（见 forgetAgent）

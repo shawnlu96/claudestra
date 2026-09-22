@@ -6,6 +6,7 @@
  */
 
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
+import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason } from "./lib/restart-result.js";
@@ -678,6 +679,61 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   }
 }
 
+/**
+ * 改了 BRIDGE_URL / BRIDGE_PORT 之后的自愈。launcher 被 reload 时读到新 .env，但 tmux 里的
+ * 大总管和每个 agent 都带着启动时的旧 BRIDGE_URL，channel-server 静默重连旧端口 ⇒ 全员离线；
+ * restoreDeadAgents 只管窗口没了的，管不到这种。
+ *
+ * tmux 全局环境 = 这批进程启动时的配置。与当前配置不一致、且新 bridge 已在应答时：
+ * 改写全局环境 + 全员（含大总管）重启。新 bridge 还没应答就等下一轮——只 kickstart 了
+ * launcher、bridge 还在旧端口时，别把大家迁到一个没人听的端口上。
+ */
+let driftProbeFailLoggedFor = "";
+async function healBridgeDrift(): Promise<void> {
+  if (Date.now() < restartWaveUntil) return;
+  const envOut = await tmuxRaw(["show-environment", "-g"]).catch(() => "");
+  if (!envOut) return;
+  const drift = bridgeDrift(
+    { BRIDGE_URL: parseTmuxEnvLine(envOut, "BRIDGE_URL"), BRIDGE_PORT: parseTmuxEnvLine(envOut, "BRIDGE_PORT") },
+    BRIDGE_URL,
+  );
+  if (!drift) return;
+  const httpBase = bridgeHttpUrlOf(drift.to);
+  let alive = false;
+  if (httpBase) {
+    try {
+      const r = await fetch(`${httpBase}/stats`, { signal: AbortSignal.timeout(4_000) });
+      alive = r.status < 500;
+    } catch { /* 还没起来 */ }
+  }
+  if (!alive) {
+    if (driftProbeFailLoggedFor !== drift.to) {
+      driftProbeFailLoggedFor = drift.to;
+      console.log(`🔀 bridge 地址已从 ${drift.from} 改为 ${drift.to}，但新 bridge 还没应答——等它起来再迁移会话`);
+    }
+    return;
+  }
+  const port = bridgePortOf(drift.to);
+  await tmuxRaw(["set-environment", "-g", "BRIDGE_URL", drift.to]).catch(() => {});
+  if (port) await tmuxRaw(["set-environment", "-g", "BRIDGE_PORT", String(port)]).catch(() => {});
+  restartWaveUntil = Date.now() + 20 * 60_000; // 拿租约压住 dead-agent 巡检
+  console.log(`🔀 bridge 地址漂移 ${drift.from} → ${drift.to}：全员重启（含大总管）`);
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: t(
+        `🔀 bridge 地址已改为 ${drift.to}（原 ${drift.from}），正在重启所有会话让它们连到新地址（大总管会接回原会话）。`,
+        `🔀 Bridge address changed to ${drift.to} (was ${drift.from}); restarting all sessions so they reconnect (the orchestrator resumes its session).`,
+      ),
+    });
+  } catch { /* 通知失败不挡迁移 */ }
+  const r = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart", "--include-master"], 900_000);
+  const why = restartFailureReason(r);
+  console.log(`🔀 漂移重启${why ? `未完全成功: ${why}` : "完成"}`);
+  restartWaveUntil = Date.now() + 2 * 60_000;
+}
+
 async function restartAgentsAndMaster() {
   restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检
   // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
@@ -915,6 +971,8 @@ async function main() {
     // 没人拉(window 0「有 claude 在跑」= 误判健在),静默失联。每轮先验明
     // window 0 的正身,被占就把 agent 挪走、把真 master 挪回来。
     if (await ensureMasterAtZero()) continue; // 动过拓扑,本轮到此,下轮再体检
+
+    await healBridgeDrift().catch((e) => console.error("bridge 漂移检查异常:", e));
 
     // 检查是否卡在确认弹窗
     const pane = await captureLast(10);
