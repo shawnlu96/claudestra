@@ -11,6 +11,7 @@ import {
   codexSessionIdFromFilename,
   codexTextOf,
   isCodexSessionPath,
+  newCodexTranslateState,
 } from "../src/lib/codex-session.js";
 
 const L = (o: unknown) => JSON.stringify(o);
@@ -90,10 +91,11 @@ describe("codexLineToClaudeShape", () => {
   });
 
   test("custom_tool_call → tool_use；字符串 input 包成 {command}（下游卡片要对象）", () => {
+    // 本轮还没有 item 事件（老格式）时 exec 照旧显示；有 item 事件的情形见 codex-session-items.test.ts
     const e = codexLineToClaudeShape(L({
       timestamp: TS, type: "response_item",
       payload: { type: "custom_tool_call", name: "exec", call_id: "call_1", input: "ls -la" },
-    }))!;
+    }), newCodexTranslateState())!;
     expect(e.message.content[0]).toEqual({ type: "tool_use", id: "call_1", name: "exec", input: { command: "ls -la" } });
   });
 
