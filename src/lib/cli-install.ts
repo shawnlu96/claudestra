@@ -687,7 +687,7 @@ async function migrateHookCommand(bunPath: string): Promise<boolean> {
   }
 
   if (!changed) return false;
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  await writeClaudeSettings(settingsPath, settings);
   return true;
 }
 
@@ -770,7 +770,7 @@ async function ensureMcpToolsAllowed(repoRoot: string): Promise<{ added: string[
     }
   }
   if (added.length === 0) return { added: [], servers };
-  await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  await writeClaudeSettings(settingsPath, settings);
   return { added, servers };
 }
 

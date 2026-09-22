@@ -13,6 +13,7 @@
  *   bun src/manager.ts sessions [search]
  */
 
+import { writeClaudeSettings } from "./lib/session-recall.js";
 import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
 import { readDotenvFileSync } from "./lib/env-file.js";
 import { RUNTIME_DIR, runtimePath, statePath, UPDATE_LOCK } from "./lib/paths.js";
@@ -1311,7 +1312,7 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
           if (s.model !== globalModel) {
             if (globalModel === undefined) delete s.model;
             else s.model = globalModel;
-            await Bun.write(GLOBAL_CLAUDE_SETTINGS, JSON.stringify(s, null, 2) + "\n");
+            await writeClaudeSettings(GLOBAL_CLAUDE_SETTINGS, s);
           }
         } catch {
           /* 恢复失败不阻塞 */

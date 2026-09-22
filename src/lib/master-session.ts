@@ -21,6 +21,7 @@
  * 崩溃 / 开机的行为**没有改变**（没有单子 = 全新会话，与 v2.24 之前一致）。
  */
 
+import { writeJsonAtomic } from "./state-file.js";
 import { statePath, stateDirIn } from "./paths.js";
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
 
@@ -72,8 +73,8 @@ export async function writeMasterResume(
   if (!SESSION_ID_RE.test(sessionId.trim())) return false;
   const body: MasterResume = { sessionId: sessionId.trim(), recordedAt: Date.now(), reason };
   try {
-    await mkdir(path.slice(0, path.lastIndexOf("/")), { recursive: true });
-    await writeFile(path, JSON.stringify(body, null, 2));
+    // 原子写（建目录也在里面）：重启大总管前写到一半被杀，不能留下半截交接单
+    await writeJsonAtomic(path, body);
     return true;
   } catch {
     return false;

@@ -116,18 +116,15 @@ export async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entri
   return { migrated: true, entries: Object.keys(raw.agents).length };
 }
 
-let regWriteSeq = 0;
 export async function saveRegistry(reg: Registry) {
   await mkdir(STATE_DIR, { recursive: true });
   // 原子写：同目录临时文件 + rename（POSIX 下 rename 原子）。防并发 reader 读到
   // 半写文件（JSON.parse 抛错），也防单次写被撕裂。tmp 名带 pid + 进程内递增序号，
-  // 两个 manager 进程 / 同进程连续写都不撞同一 tmp。
+  // 两个 manager 进程 / 同进程连续写都不撞同一 tmp（lib/state-file 的 writeJsonAtomic）。
   // 注：这解决"半写/撕裂"，但不消除跨进程 read-modify-write 的 lost-update 窗口
   // （两进程各自 load→mutate→save 精确交错时后写覆盖先写）——该窗口概率低，
   // 真出问题再上文件锁。bridge 侧后台写者（clear 轮转）已尽量避开活跃 agent。
-  const tmp = `${REGISTRY_PATH}.${process.pid}.${regWriteSeq++}.tmp`;
-  await writeFile(tmp, JSON.stringify(reg, null, 2));
-  await rename(tmp, REGISTRY_PATH);
+  await writeJsonAtomic(REGISTRY_PATH, reg);
 }
 
 // ============================================================

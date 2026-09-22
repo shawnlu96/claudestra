@@ -13,6 +13,7 @@
  * 三处共用这里的 ensureRecallHook,幂等。recall.py 不存在的机器一律跳过——
  * Claudestra 要发给别人用,mem0 是 owner 自己的设施,不能成为硬依赖。
  */
+import { writeJsonAtomic } from "./state-file.js";
 import { existsSync } from "fs";
 import { chmod, readFile, rename, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -133,12 +134,9 @@ export async function readClaudeSettings(path: string): Promise<ClaudeSettings> 
  * 权限跟原文件走(Codex 复核 2026-09-06:新建临时文件默认 0644,原文件 0600 会被放宽)。
  */
 export async function writeClaudeSettings(path: string, settings: ClaudeSettings): Promise<void> {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  let mode: number | undefined;
-  try { mode = (await stat(path)).mode & 0o777; } catch { /* 新文件:走默认 umask */ }
-  await writeFile(tmp, JSON.stringify(settings, null, 2) + "\n", mode !== undefined ? { mode } : undefined);
-  if (mode !== undefined) await chmod(tmp, mode); // writeFile 的 mode 受 umask 裁剪,显式再 chmod 一次
-  await rename(tmp, path);
+  // lib/state-file：tmp + rename、preserveMode（writeFile 的 mode 受 umask 裁剪,内部再 chmod），
+  // 并且写到软链的最终目标——dotfiles 管理的 settings.json 常是软链,rename 到软链本身会把它断开
+  await writeJsonAtomic(path, settings, { preserveMode: true, trailingNewline: true });
 }
 
 /** 撤掉召回 hook(owner 反悔 / 卸载用)。返回是否改动。 */

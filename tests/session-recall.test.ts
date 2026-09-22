@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "fs";
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -140,5 +140,18 @@ describe("readClaudeSettings / writeClaudeSettings", () => {
     await writeClaudeSettings(p, { hooks: {} });
     expect(statSync(p).mode & 0o777).toBe(0o600);
     expect(await readClaudeSettings(p)).toEqual({ hooks: {} });
+  });
+});
+
+describe("writeClaudeSettings 软链", () => {
+  test("settings.json 是软链（dotfiles 管理）→ 写到目标，软链保持不动", async () => {
+    const d = mkdtempSync(join(tmpdir(), "recall-link-"));
+    const target = join(d, "real-settings.json");
+    const link = join(d, "settings.json");
+    writeFileSync(target, "{}\n");
+    symlinkSync(target, link);
+    await writeClaudeSettings(link, { hooks: {} });
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(readFileSync(target, "utf-8"))).toEqual({ hooks: {} });
   });
 });

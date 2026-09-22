@@ -33,6 +33,7 @@
  * 两者任一匹配即放行；两者都不匹配才是「另一台机器」。
  */
 
+import { writeJsonAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 import { hostname } from "os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
@@ -75,8 +76,7 @@ export function readOwnerMarker(): OwnerMarker | null {
 export function writeOwnerMarker(): OwnerMarker {
   const m: OwnerMarker = { uuid: machineUuid(), host: hostname(), at: new Date().toISOString() };
   try {
-    mkdirSync(DIR, { recursive: true });
-    writeFileSync(MARKER, JSON.stringify(m, null, 2) + "\n");
+    writeJsonAtomicSync(MARKER, m, { trailingNewline: true });
   } catch {
     /* 写不进去不阻塞启动——守卫是加固，不是硬依赖 */
   }
