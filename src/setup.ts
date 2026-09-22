@@ -14,6 +14,7 @@ import { resolve } from "path";
 import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./lib/session-recall.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
+import { agentNameFromDir } from "./lib/agent-name.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
@@ -1129,8 +1130,8 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
       fail(t("至少选一个(输入 1、2 或 1,2)", "Pick at least one (enter 1, 2, or 1,2)"));
       continue;
     }
-    // 步骤总数定下来:基础 5 步(依赖/发现/前端/偏好/收尾) + Discord 5 步 + Web 2 步(配置 + 手机访问)
-    TOTAL_STEPS = 5 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0);
+    // 步骤总数定下来:基础 6 步(依赖/发现/前端/偏好/收尾/收编) + Discord 5 步 + Web 2 步(配置 + 手机访问)
+    TOTAL_STEPS = 6 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0);
     if (!fronts.discord) {
       hint(t("跳过 Discord 的 5 个配置步骤(以后想加,重跑 bun run setup 即可)", "Skipping the 5 Discord steps (rerun `bun run setup` anytime to add it later)"));
     }
@@ -1230,6 +1231,117 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
   } else {
     hint(t("稍后自己跑: cd web && npm install && npm run build", "Run later: cd web && npm install && npm run build"));
   }
+}
+
+// ============================================================
+// 收编已有会话（v2.24+）
+// ============================================================
+
+/** ~/.claude/sessions/<pid>.json 里**进程还活着**的那些 sessionId */
+async function liveClaudeSessionIds(): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const { readCcSessionEntries } = await import("./lib/cc-sessions.js");
+    for (const e of await readCcSessionEntries()) {
+      if (!e.sessionId || !e.pid) continue;
+      try { process.kill(e.pid, 0); out.add(e.sessionId); } catch { /* 进程没了 */ }
+    }
+  } catch { /* 读不到就当没有,不阻断安装 */ }
+  return out;
+}
+
+/**
+ * 把机器上已有的会话收编成 Claudestra agent（= 在我们自己的 tmux 里跑起来，
+ * 于是手机上能直接对话，而不只是能看历史）。
+ *
+ * ⚠ **跑着的进程搬不进 tmux**。一个已经在别的终端里跑的 Claude Code，我们没有任何
+ * 办法把它挪进 Claudestra 的 tmux session —— 进程的控制终端在它出生时就定了。能做的
+ * 只有两种，这一步如实分流：
+ *   - 那个会话**没在跑** → `resume`：在我们的 tmux 里把同一个 session 接着开，
+ *     是真正的「接着聊」；
+ *   - 还**在跑** → `resume --fork`：分叉出一份副本（新 session id）。原来那个不受
+ *     影响，但从此是两条线。**不自动去 kill 用户的进程**，也不假装能接管它。
+ *
+ * 必须排在 stepFinalize 之后：resume 要经 bridge 建频道（纯 Web 模式下走 local
+ * adapter 合成 local-* 地址，不需要 Discord），bridge 是那一步才装起来的。
+ */
+async function stepAdoptSessions(): Promise<void> {
+  header(nextStep(), t("把已有会话收编成 agent", "Adopt existing sessions as agents"));
+
+  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
+  let list: Array<{ sessionId: string; cwd: string; slug: string; age: string; runtime?: string }> = [];
+  try { list = JSON.parse(r.out)?.sessions ?? []; } catch { /* 下面按空处理 */ }
+
+  // 已经纳管的不再列（registry 里有同 sessionId 的）
+  const taken = new Set<string>();
+  const managed = new Set<string>();
+  try {
+    const { readRegistryAgents } = await import("./lib/registry.js");
+    for (const a of await readRegistryAgents()) {
+      taken.add(a.name.replace(/^agent-/, ""));
+      if (a.sessionId) managed.add(a.sessionId);
+    }
+  } catch { /* 全新安装时 registry 还不存在 */ }
+
+  const live = await liveClaudeSessionIds();
+  const cands = list.filter((x) => x.sessionId && !managed.has(x.sessionId)).slice(0, 8);
+  if (cands.length === 0) {
+    hint(t("没有可收编的会话（新机器很正常）——装完在网页里新建 agent 即可。",
+           "No sessions to adopt (normal on a fresh machine) — create an agent in the web UI instead."));
+    br();
+    return;
+  }
+
+  print(t(
+    "下面是这台机器上还没纳管的会话。收编 = 在 Claudestra 自己的 tmux 里把它跑起来，之后手机上就能**直接对话**（不收编也能看历史，只是不能说话）：",
+    "Sessions on this machine that Claudestra does not manage yet. Adopting one runs it inside Claudestra's own tmux, so you can **talk to it** from your phone (without adopting you can still read its history, just not chat):",
+  ));
+  br();
+  cands.forEach((x, i) => {
+    const running = live.has(x.sessionId);
+    print(`  ${c.bold}${c.yellow}${i + 1}${c.reset}  ${c.bold}${x.slug || x.cwd}${c.reset} ${c.dim}${x.cwd}${c.reset}`);
+    print(`     ${c.dim}${x.age}${x.runtime && x.runtime !== "claude-code" ? ` · ${x.runtime}` : ""}${c.reset}` +
+      (running ? ` ${c.yellow}${t("● 还在跑 —— 收编会分叉出一份副本（原来那个不动）", "● still running — adopting will fork a copy (the original is left alone)")}${c.reset}` : ""));
+  });
+  br();
+  hint(t(
+    "跑着的进程没法搬进 tmux（控制终端在它出生时就定了）——所以「还在跑」的只能分叉。想真正接着聊，先在原终端里退出它，装完再从网页侧栏收编。",
+    "A running process cannot be moved into tmux (its controlling terminal is fixed at birth), so a live one can only be forked. To truly continue it, quit it in its own terminal first and adopt it later from the web sidebar.",
+  ));
+  br();
+
+  const raw = await prompt(
+    `${kbd(t("收编哪些?", "Adopt which?"))} ${c.dim}${t("(序号,逗号分隔;直接回车=都不收编,以后随时在网页侧栏点)", "(numbers, comma-separated; Enter = none, you can always do it later from the web sidebar)")}${c.reset}`,
+    "",
+  );
+  const picks = [...new Set(raw.split(/[,，\s]+/).filter(Boolean).map((n) => Number(n) - 1))]
+    .filter((i) => Number.isInteger(i) && i >= 0 && i < cands.length);
+  if (picks.length === 0) {
+    hint(t("跳过。网页侧栏的「未纳管会话」里随时可以收编。", "Skipped. You can adopt from the web sidebar's unmanaged sessions section anytime."));
+    br();
+    return;
+  }
+
+  for (const i of picks) {
+    const x = cands[i];
+    const name = agentNameFromDir(x.cwd, taken);
+    taken.add(name);
+    const fork = live.has(x.sessionId);
+    const args = ["bun", `${REPO_ROOT}/src/manager.ts`, "resume", name, x.sessionId, x.cwd];
+    if (fork) args.push("--fork");
+    if (x.runtime && x.runtime !== "claude-code") args.push("--runtime", x.runtime);
+    write(`${c.dim}▶${c.reset} ${t("收编", "Adopting")} ${c.bold}${name}${c.reset}${fork ? ` ${c.dim}(fork)${c.reset}` : ""}… `);
+    const res = await run(args, { cwd: REPO_ROOT });
+    let okFlag = res.ok;
+    let err = "";
+    try { const j = JSON.parse(res.out); okFlag = okFlag && j?.ok !== false; err = j?.error || ""; } catch { /* 非 JSON */ }
+    print(okFlag ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`);
+    if (!okFlag) warn(err || res.err.trim().split("\n").slice(-1)[0] || t("收编失败", "adoption failed"));
+  }
+  br();
+  ok(t("收编完的会话会以 agent 的身份出现在网页侧栏,可以直接对话。",
+       "Adopted sessions now appear as agents in the web sidebar and are ready to chat."));
+  br();
 }
 
 // ============================================================
@@ -1495,6 +1607,8 @@ async function main() {
   };
 
   const fin = await stepFinalize(cfg);
+  // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后
+  if (fin.failures.length === 0 && !fin.deferred) await stepAdoptSessions();
   stepDone(cfg, fronts, fin, phoneUrl);
 
   process.exit(0);
