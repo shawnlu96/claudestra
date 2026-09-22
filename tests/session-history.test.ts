@@ -156,6 +156,48 @@ describe("readSessionHistory", () => {
     expect(asst.tools?.map((t) => t.name)).toEqual(["Read"]); // reply 不再混进工具卡
   });
 
+  // v2.23+ Pi 侧的 reply 是扩展注册的**裸名** `reply`（Pi 没有 MCP）。判据原先只认
+  // `mcp__*__reply`，于是 Pi 的每一条回复都掉进工具卡分支：summary「💬 回复」、正文
+  // 进 detail（JSON 参数原样 dump，`\n` 全是字面量），**消息体是空的**。
+  // owner 2026-09-22 实报；拿真实 Pi 会话跑过：最近 40 条里 6 条回复全是这个形态。
+  test("[fork] Pi 的裸名 reply 同样提取成 replyText", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const p = writeJsonl(dir, `${SID}.jsonl`, [
+      { type: "user", timestamp: "2026-09-22T00:00:00Z", message: { content: "还能多开几个包并行跑吗" } },
+      {
+        type: "assistant",
+        timestamp: "2026-09-22T00:01:00Z",
+        message: {
+          content: [
+            { type: "tool_use", name: "Bash", input: { command: "ls" } },
+            { type: "tool_use", name: "reply", input: { chat_id: "api:x", text: "**结论**：上限 2 条" } },
+          ],
+        },
+      },
+    ]);
+    const page = await readSessionHistory(p, { formatToolFn: (n) => n });
+    const asst = page.messages.find((m) => m.role === "assistant")!;
+    expect(asst.replyText).toBe("**结论**：上限 2 条");
+    expect(asst.tools?.map((t) => t.name)).toEqual(["Bash"]); // reply 不再是工具卡
+  });
+
+  test("[fork] 别的 MCP 的 reply 类工具名不受影响（只放宽裸名这一条）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hist-"));
+    const p = writeJsonl(dir, `${SID}.jsonl`, [
+      {
+        type: "assistant",
+        timestamp: "2026-09-22T00:01:00Z",
+        message: {
+          content: [{ type: "tool_use", name: "reply_all", input: { text: "不是我们的 reply" } }],
+        },
+      },
+    ]);
+    const page = await readSessionHistory(p, { formatToolFn: (n) => n });
+    const asst = page.messages.find((m) => m.role === "assistant")!;
+    expect(asst.replyText).toBeUndefined();
+    expect(asst.tools?.map((t) => t.name)).toEqual(["reply_all"]);
+  });
+
   test("[fork] TUI 斜杠命令记录 → system 轻条目，stdout 去 ANSI，空输出过滤", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hist-"));
     const p = writeJsonl(dir, `${SID}.jsonl`, [
