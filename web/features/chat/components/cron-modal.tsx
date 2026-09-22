@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 import { useChatStore } from "../chat-store";
 
@@ -321,18 +321,8 @@ export function CronModal({ open, onClose }: { open: boolean; onClose: () => voi
 
   if (!open) return null;
 
-  return createPortal(
-    <div
-      className="overlay-in fixed inset-0 z-[90] grid place-items-center bg-black/50 p-4"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
-    >
-      <div
-        className="panel-pop flex max-h-[88dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+  return (
+    <CenteredModal onClose={onClose}>
         <div className="flex items-center justify-between px-5 pb-2 pt-4">
           <span className="text-base font-semibold">{t("定时任务")}</span>
           <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
@@ -352,8 +342,6 @@ export function CronModal({ open, onClose }: { open: boolean; onClose: () => voi
           ))}
           <AddJobForm onChanged={() => void reload()} />
         </div>
-      </div>
-    </div>,
-    document.body
+    </CenteredModal>
   );
 }

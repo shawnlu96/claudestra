@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { CenteredModal } from "./centered-modal";
 import { useChatStoreApi } from "../chat-store";
 import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client";
 import { useT, useLang, setLang } from "@/lib/i18n";
@@ -900,12 +900,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
     }
   };
 
-  return createPortal(
-    <div className="overlay-in fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
-      <div
-        className="panel-pop flex max-h-[88dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+  // portal 到 body（规则 5b）+ 手机上不歪的列宽修正，都在 CenteredModal 里
+  return (
+    <>
+    <CenteredModal onClose={onClose} layer="base">
         <div className="flex items-center justify-between px-5 pb-2 pt-4">
           <span className="text-base font-semibold">{t("设置")}</span>
           <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
@@ -1266,10 +1264,9 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         />
 
         </div>
-      </div>
-      <PeersModal open={showPeers} onClose={() => setShowPeers(false)} />
-      <CronModal open={showCron} onClose={() => setShowCron(false)} />
-    </div>,
-    document.body
+    </CenteredModal>
+    <PeersModal open={showPeers} onClose={() => setShowPeers(false)} />
+    <CronModal open={showCron} onClose={() => setShowCron(false)} />
+    </>
   );
 }

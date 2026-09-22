@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -624,20 +624,9 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
 
   if (!open) return null;
 
-  return createPortal(
-    // stopPropagation:本弹窗从设置弹窗内 portal 出来,React 合成事件沿 React 树
-    // 冒泡——不拦的话点遮罩会连设置弹窗一起关掉
-    <div
-      className="overlay-in fixed inset-0 z-[90] grid place-items-center bg-black/50 p-4"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
-    >
-      <div
-        className="panel-pop flex max-h-[88dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+  // 本弹窗从设置弹窗内打开：遮罩点击的 stopPropagation 由外壳负责，不拦会连设置弹窗一起关
+  return (
+    <CenteredModal onClose={onClose}>
         <div className="flex items-center justify-between px-5 pb-2 pt-4">
           <span className="text-base font-semibold">{t("Peer 协作")}</span>
           <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
@@ -669,8 +658,6 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
             </>
           )}
         </div>
-      </div>
-    </div>,
-    document.body
+    </CenteredModal>
   );
 }
