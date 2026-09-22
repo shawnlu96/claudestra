@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { renderSVG } from "uqr";
 import { useT } from "@/lib/i18n";
+import { copyText } from "@/features/chat/select-mode";
 
 /**
  * 设置 →「手机访问」：这台机器现在能从手机经哪些地址打开，每个地址能不能用、证书还剩几天。
@@ -53,18 +54,20 @@ function certTone(days: number, lifetime = 90): string {
 
 function CopyButton({ text }: { text: string }) {
   const t = useT();
-  const [done, setDone] = useState(false);
+  const [state, setState] = useState<"idle" | "done" | "failed">("idle");
   return (
     <button
       className="btn btn-ghost btn-xs border-base-300"
       onClick={() => {
-        void navigator.clipboard?.writeText(text).then(() => {
-          setDone(true);
-          setTimeout(() => setDone(false), 1500);
+        // 明文 tailnet IP 下不是安全上下文、navigator.clipboard 不存在 —— 恰恰是最需要复制
+        // HTTPS 地址的场景，所以走 copyText 的 textarea 兜底；失败也要给反馈而不是装死。
+        void copyText(text).then((ok) => {
+          setState(ok ? "done" : "failed");
+          setTimeout(() => setState("idle"), 1500);
         });
       }}
     >
-      {done ? t("已复制") : t("复制")}
+      {state === "done" ? t("已复制") : state === "failed" ? t("复制失败") : t("复制")}
     </button>
   );
 }
