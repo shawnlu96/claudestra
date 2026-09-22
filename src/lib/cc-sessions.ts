@@ -25,6 +25,14 @@ export interface CcSessionEntry {
   tmux?: string;
   startedAt?: number;
   name?: string;
+  /** Claude Code 自报：idle / busy / shell。takeover 靠它不去打断正在跑的回合 */
+  status?: string;
+  /** interactive = 用户开的 TUI；其它（bg job / sdk 等）不是收编对象 */
+  kind?: string;
+  /** 进程启动时刻（`ps -o lstart` 格式，实测为 UTC）。用来识破 pid 复用的过期登记 */
+  procStart?: string;
+  /** cli / sdk-ts / … */
+  entrypoint?: string;
 }
 
 export function ccSessionsDir(): string {
@@ -45,6 +53,10 @@ export function parseCcSessionEntry(raw: string): CcSessionEntry | null {
       ...(typeof j.tmux === "string" ? { tmux: j.tmux } : {}),
       ...(typeof j.startedAt === "number" ? { startedAt: j.startedAt } : {}),
       ...(typeof j.name === "string" ? { name: j.name } : {}),
+      ...(typeof j.status === "string" ? { status: j.status } : {}),
+      ...(typeof j.kind === "string" ? { kind: j.kind } : {}),
+      ...(typeof j.procStart === "string" ? { procStart: j.procStart } : {}),
+      ...(typeof j.entrypoint === "string" ? { entrypoint: j.entrypoint } : {}),
     };
   } catch {
     return null;
@@ -64,6 +76,44 @@ export async function readCcSessionEntries(dir = ccSessionsDir()): Promise<CcSes
     if (e) out.push(e);
   }
   return out;
+}
+
+/**
+ * 登记里的 pid 是不是**还是当初那个进程**（纯函数）。
+ *
+ * 进程退出后登记文件可能留着，pid 又被系统复用给了不相干的进程——只看
+ * `kill(pid, 0)` 会把它当成活着的 Claude Code，takeover 就会 SIGTERM 错人。
+ * psLstart 是 `ps -o lstart= -p <pid>` 的输出（本地时区）；procStart 实测是 UTC，
+ * 为防版本差异两种解读都认。没有 procStart 时退回 startedAt（写于启动后一两秒）。
+ * 判断不了（没有 ps 输出 / 登记里没有任何时间）返回 false：宁可不动手。
+ */
+export function procStartMatches(e: Pick<CcSessionEntry, "procStart" | "startedAt">, psLstart: string): boolean {
+  const actual = Date.parse(psLstart.trim());
+  if (!Number.isFinite(actual)) return false;
+  if (e.procStart) {
+    const asUtc = Date.parse(`${e.procStart.trim()} GMT`);
+    const asLocal = Date.parse(e.procStart.trim());
+    return [asUtc, asLocal].some((t) => Number.isFinite(t) && Math.abs(t - actual) <= 2_000);
+  }
+  if (typeof e.startedAt === "number") {
+    // startedAt 在进程起来之后才写；lstart 精度 1s
+    const d = e.startedAt - actual;
+    return d >= -2_000 && d <= 60_000;
+  }
+  return false;
+}
+
+function psLstart(pid: number): string {
+  const r = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 ? r.stdout.toString() : "";
+}
+
+/**
+ * 进程还活着、而且确实是登记里那个进程的条目（pid 复用的过期登记被剔除）。
+ * 要对进程动手（takeover 的 SIGTERM）的调用方用它，别只用 pidAlive。
+ */
+export async function readLiveCcSessionEntries(dir = ccSessionsDir()): Promise<CcSessionEntry[]> {
+  return (await readCcSessionEntries(dir)).filter((e) => pidAlive(e.pid) && procStartMatches(e, psLstart(e.pid)));
 }
 
 /**

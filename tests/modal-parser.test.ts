@@ -18,7 +18,9 @@ import {
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
   detectDevChannelsModal,
-  childPidsInPsOutput, parseChoicePrompt } from "../src/lib/tmux-helper.ts";
+  childPidsInPsOutput, parseChoicePrompt, detectBypassConsentPrompt } from "../src/lib/tmux-helper.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 describe("parseModalOptions", () => {
   test("识别带 ❯ 选中标记的数字菜单", () => {
@@ -1066,5 +1068,34 @@ Enter to confirm · Esc to cancel
     expect(parseChoicePrompt(trust)!.length).toBe(2);
     expect(trustPromptMoves(trust)).toBe(1);
     expect(isAutoConfirmableModal(trust)).toBe(false);
+  });
+});
+
+describe("detectBypassConsentPrompt — Bypass 模式首启确认框", () => {
+  // CC 2.1.280 真实抓屏（隔离 CLAUDE_CONFIG_DIR + claude --dangerously-skip-permissions）
+  const real = readFileSync(join(import.meta.dir, "fixtures/cc-bypass-consent-pane.txt"), "utf8");
+
+  test("真实抓屏：识别得出，且绝不自动确认（默认高亮 No, exit）", () => {
+    expect(detectBypassConsentPrompt(real)).toBe(true);
+    expect(isAutoConfirmableModal(real)).toBe(false);
+    expect(isAutoConfirmableModal(real, { allowSessionIdle: true })).toBe(false);
+    // 几何上仍是普通选择框——正是之前被当成可自动按的原因
+    expect(parseChoicePrompt(real)?.find((o) => o.selected)?.label).toBe("No, exit");
+  });
+
+  test("光标挪到 Yes 也照样不自动按（接受与否只能用户决定）", () => {
+    const moved = real.replace("❯ No, exit", "  No, exit").replace("  Yes, I accept", "❯ Yes, I accept");
+    expect(detectBypassConsentPrompt(moved)).toBe(true);
+    expect(isAutoConfirmableModal(moved)).toBe(false);
+  });
+
+  test("就绪画面 / 正文提到 Bypass Permissions mode → false", () => {
+    expect(detectBypassConsentPrompt("⏺ 文档里说 Bypass Permissions mode 很危险\n❯ \n  ⏵⏵ bypass permissions on")).toBe(false);
+    expect(detectBypassConsentPrompt("")).toBe(false);
+  });
+
+  test("目录信任弹窗不会被误认成 bypass 确认框", () => {
+    const trust = "\nQuick safety check: Is this a project you created or one you trust?\n\n❯ No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel\n";
+    expect(detectBypassConsentPrompt(trust)).toBe(false);
   });
 });
