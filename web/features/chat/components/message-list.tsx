@@ -14,6 +14,7 @@ import { useT, getLang } from "@/lib/i18n";
 import { fmtTs } from "../fmt-time";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
+import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
 import { inlineButtonsToText, plainLabel } from "@/lib/chat/inline-buttons";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 import { isNearBottom, tailAppendedCount } from "../scroll-follow";
@@ -848,7 +849,9 @@ function AssistantBody({
       {segs!.map((seg: AssistantSegment, i) =>
         seg.kind === "text" && seg.progress ? (
           <ProgressNote key={i} text={seg.text} ts={seg.ts ?? m.ts} />
-        ) : seg.kind === "text" ? (
+        ) : // agent 把自己刚发的 reply 又当普通文本复述了一遍 → 藏掉这份灰的
+        // （判据见 features/chat/reply-echo.ts；owner 2026-09-22 实报同一段话显示两份）
+        seg.kind === "text" && isEchoSegment(m, seg.text) ? null : seg.kind === "text" ? (
           // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
           <TextBlock msgId={m.id}
             key={i}
@@ -885,7 +888,7 @@ function AssistantBody({
         )
       )}
     </>
-  ) : hasNarration ? (
+  ) : hasNarration && !isEchoSegment(m, m.content) ? (
     <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted />
   ) : null;
 
@@ -1377,6 +1380,9 @@ export function MessageList() {
   const windowSize = 30 + extraVisible;
   const visible = messages.length > windowSize ? messages.slice(-windowSize) : messages;
   const hiddenCount = messages.length - visible.length;
+  // 形态②的复述：历史按 jsonl 记录切段，agent 复述那份会独立成一条纯 text 消息。
+  // 整个列表扫一遍（不是 visible——回合边界可能在窗口之外），拿到该藏的 id。
+  const echoIds = replyEchoMessageIds(messages);
 
   return (
     // touch-pan-y + overscroll-contain：到边界时滚动链穿透到不可滚的应用壳被
@@ -1477,12 +1483,14 @@ export function MessageList() {
           // data-mid 包装层:搜索跳转按它定位;命中气泡加一闪动画。普通渲染
           // 是零成本透明块(块级流内,不改 flex-col 布局)。
           <div key={m.id} data-mid={m.id} className={flashId === m.id ? "cstra-flash" : undefined}>
-            <Message
-              m={m}
-              streaming={streaming}
-              isLast={i === visible.length - 1}
-              awaiting={awaiting}
-            />
+            {echoIds.has(m.id) ? null : (
+              <Message
+                m={m}
+                streaming={streaming}
+                isLast={i === visible.length - 1}
+                awaiting={awaiting}
+              />
+            )}
           </div>
         ))}
         {/* 历史现场向下翻页(2026-09-08):命中窗口只到命中后 ~25 条,继续往后看 */}
