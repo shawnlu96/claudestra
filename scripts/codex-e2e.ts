@@ -104,7 +104,8 @@ try {
     if (JSON.stringify(Object.keys(reg.msg)) !== JSON.stringify(["type", "channelId", "cwd", "pid", "ppid"])) {
       throw new Error(`CC register 帧字段变了: ${Object.keys(reg.msg)}`);
     }
-    cc.stdin.end();
+    // stdin EOF 不会让 channel-server 退出（MCP SDK 的 stdio transport 不监听 end），显式杀掉
+    cc.kill();
     await Promise.race([cc.exited, Bun.sleep(3000)]);
     log("CC 模式 register 帧字段:", summary.ccRegisterKeys);
   }
