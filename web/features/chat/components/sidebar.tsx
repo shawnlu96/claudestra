@@ -12,7 +12,9 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { UnmanagedSessions } from "./unmanaged-sessions";
 import { ArchivedSessions } from "./archived-sessions";
 import { buildSidebarEntries, filterAndRankWorkers, splitDormant, type SidebarEntry } from "../sidebar-entries";
-import { AgentRow, MasterIcon, swipeReg } from "./agent-row";
+import { AgentRow } from "./agent-row";
+import { swipeReg } from "./agent-row-swipe";
+import { MasterIcon } from "./master-icon";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。

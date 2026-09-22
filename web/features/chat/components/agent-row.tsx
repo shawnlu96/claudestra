@@ -6,9 +6,11 @@ import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./unmanaged-sessions";
+import { MasterIcon } from "./master-icon";
+import { swipeReg } from "./agent-row-swipe";
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
-   swipeReg / tapIntent 是模块级单例——所有行实例共享，Sidebar 也从这里取 swipeReg。 */
+   tapIntent 是模块级单例——所有行实例共享；swipeReg 在 agent-row-swipe.ts（AgentRow 与 Sidebar 共用同一实例）。 */
 
 /** v2.17.2 点击串台修复(peer HedeMacBook-Pro 代码级归因,2026-08-09):
  *  列表按活动排序 + roster 指纹含易变字段 + 前台 15s 轮询 → 重排是常态;
@@ -22,41 +24,6 @@ let tapIntent: { name: string; ts: number; x: number; y: number } | null = null;
 /** 意图有效窗口:covers 移动端最长 click 派发延迟,又不至于让陈旧意图
  *  污染下一次独立点击(键盘激活无 pointerdown,走闭包兜底)。 */
 const TAP_INTENT_TTL_MS = 1_200;
-
-/** 大总管图标（lucide network,调度/编排语义）——替代 👑(owner 2026-07-15:
- *  「皇冠不要了,显得更专业一点」)。 */
-export function MasterIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="16" y="16" width="6" height="6" rx="1" />
-      <rect x="2" y="16" width="6" height="6" rx="1" />
-      <rect x="9" y="2" width="6" height="6" rx="1" />
-      <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" />
-      <path d="M12 12V8" />
-    </svg>
-  );
-}
-
-/**
- * v2.21.3+ 当前滑开的那一行的收回函数——同一时刻只允许一行滑开(iOS Mail / 微信同款):
- * 列表滚动、别的行出现纵向手势或被点击,都先把它收回。
- */
-export const swipeReg = {
-  cur: null as (() => void) | null,
-  set(fn: () => void) { this.cur = fn; },
-  clear(fn: () => void) { if (this.cur === fn) this.cur = null; },
-  closeAll() { this.cur?.(); },
-  /** 收回除 fn 之外的滑开行 */
-  closeOthers(fn: () => void) { if (this.cur && this.cur !== fn) this.cur(); },
-};
 
 function StatusDot({ status, busy, compacting }: { status: AgentSession["status"]; busy?: boolean; compacting?: boolean }) {
   if (status === "active") {
