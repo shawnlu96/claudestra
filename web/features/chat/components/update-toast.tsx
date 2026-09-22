@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { CLIENT_WEB_COMMIT } from "@/lib/build-info";
 import { useChatStore } from "../chat-store";
+import { isNativeShell } from "@/lib/native";
 
 export function UpdateToast() {
   const t = useT();
@@ -95,11 +96,30 @@ export function UpdateToast() {
  *  ② 带上 `?_v=<新 commit>` 导航 —— 没见过的 URL 不可能命中任何缓存，①失败也稳。
  *     参数取 commit 而不是时间戳：同一版本只产生一个 URL，拿到新 bundle 后
  *     commit 就对上了、不会再弹，自然收敛；下个版本自动换成新值。
+ *
+ * ⚠ **原生壳里不能走 ②**（owner 2026-09-22：「点击刷新会从 app 跳到 chrome」）。
+ * 壳是 Capacitor + WKWebView，以 `server.url` 加载本站；主框架的每一次导航都要过
+ * 它的 `decidePolicyFor`，被判成"站外"就交给系统浏览器打开——用户的默认浏览器是
+ * Chrome，于是点一下刷新，人就被踢出 App 了。改 URL（加 query）正是会踩到这条
+ * 分类的动作。
+ *
+ * 壳里改成：① 照做（它修的是 HTTP 缓存，跟 URL 无关），然后 `location.reload()`。
+ * **地址一个字都不动**，也就没有被判站外的机会。
+ * 代价：壳里失去 ②「没见过的 URL 必不命中缓存」这层保险，只剩 ①；而 ① 恰好就是
+ * 为 WKWebView 加的（`Clear-Site-Data` 在 WebKit 是空操作）——它把无参 URL 的缓存项
+ * 改写掉之后，紧随其后的普通 reload 拿到的就是新文档，这正是当初设计 ① 的用意。
  */
 async function hardReload(commit: string): Promise<void> {
   try {
     await fetch(window.location.href, { cache: "reload", credentials: "same-origin" });
-  } catch { /* 网络抖动等：直接走②，它本身就不依赖缓存被刷新 */ }
+  } catch { /* 网络抖动等：直接走下面，它本身就不依赖缓存被刷新 */ }
+
+  // 原生壳：不碰地址，避免被壳判成站外导航后踢去系统浏览器
+  if (isNativeShell()) {
+    window.location.reload();
+    return;
+  }
+
   try {
     const u = new URL(window.location.href);
     u.searchParams.set("_v", commit);
