@@ -11,6 +11,7 @@ import { kbFixEnabled, setKbFixEnabled } from "../use-keyboard-viewport";
 import { isNativeShell, nativeServerConfig } from "@/lib/native";
 import { PeersModal } from "./peers-modal";
 import { CronModal } from "./cron-modal";
+import { useBackgroundJob, JobLog } from "./background-job";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
 async function fileToAvatar(file: File): Promise<string> {
@@ -501,9 +502,6 @@ function BackendUpdateSection() {
   const t = useT();
   const [commit, setCommit] = useState<string>("");
   const [version, setVersion] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-  const [lines, setLines] = useState<string[]>([]);
-  const [err, setErr] = useState("");
   const startCommit = useRef<string>("");
 
   const readVersion = async () => {
@@ -520,41 +518,29 @@ function BackendUpdateSection() {
   };
   useEffect(() => { void readVersion(); }, []);
 
-  const start = async () => {
-    setBusy(true);
-    setErr("");
-    setLines([]);
-    startCommit.current = commit;
-    try {
-      const res = await fetch("/api/update", { method: "POST" });
-      const j = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
-    } catch (e) {
-      setErr((e as Error).message);
-      setBusy(false);
-      return;
-    }
-    // 轮询：日志看进度，commit 变了 = 真的升完了
-    const until = Date.now() + 10 * 60_000;
-    const tick = async () => {
-      try {
-        const j = (await (await fetch("/api/update", { cache: "no-store" })).json()) as { lines?: string[] };
-        if (j.lines?.length) setLines(j.lines.slice(-12));
-      } catch { /* 升级中接口会断，正常 */ }
+  // 完成判据：本轮日志的结果行（含「已是最新」）；bridge 重启把结果行吞掉时，commit 变了也算
+  const job = useBackgroundJob({
+    endpoint: "/api/update",
+    deadlineMs: 10 * 60_000,
+    deadlineMsg: t("等了 10 分钟还没升完，去看 update.log"),
+    extraDone: async () => {
       const now = await readVersion();
-      if (now && startCommit.current && now !== startCommit.current) { setBusy(false); return; }
-      if (Date.now() > until) { setBusy(false); setErr(t("等了 10 分钟还没升完，去看 update.log")); return; }
-      setTimeout(() => void tick(), 3000);
-    };
-    setTimeout(() => void tick(), 3000);
+      return !!(now && startCommit.current && now !== startCommit.current);
+    },
+    onDone: () => void readVersion(),
+  });
+  const start = () => {
+    startCommit.current = commit;
+    void job.start();
   };
+  const busy = job.busy;
 
   return (
     <Section
       title={t("后端版本")}
       desc={t("git pull + 重装后台服务（bridge / launcher / cron / web）。升级时服务会依次重启，页面可能短暂断连，属正常。")}
       aside={
-        <button className="btn btn-sm" disabled={busy} onClick={() => void start()}>
+        <button className="btn btn-sm" disabled={busy} onClick={start}>
           {busy && <span className="loading loading-spinner loading-xs" />}
           {busy ? t("升级中…") : t("升级后端")}
         </button>
@@ -563,12 +549,9 @@ function BackendUpdateSection() {
       <div className="text-xs opacity-60">
         {version ? `v${version}` : "—"} · {commit || "—"}
       </div>
-      {err ? <div className="mt-1 text-xs text-error">{err}</div> : null}
-      {lines.length > 0 && (
-        <pre className="mt-2 max-h-40 overflow-auto rounded bg-base-300/50 p-2 text-[11px] leading-snug">
-          {lines.join("\n")}
-        </pre>
-      )}
+      {job.err ? <div className="mt-1 text-xs text-error">{job.err}</div> : null}
+      {job.note ? <div className="mt-1 text-xs opacity-70">{job.note}</div> : null}
+      <JobLog lines={job.lines} />
     </Section>
   );
 }
@@ -587,10 +570,13 @@ function BackendUpdateSection() {
 function RestartAllSection() {
   const t = useT();
   const [armed, setArmed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [lines, setLines] = useState<string[]>([]);
-  const [err, setErr] = useState("");
   const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const job = useBackgroundJob({
+    endpoint: "/api/restart-all",
+    deadlineMs: 20 * 60_000,
+    deadlineMsg: t("等了 20 分钟还没重启完，去看 restart-all.log"),
+  });
+  const busy = job.busy;
 
   useEffect(() => () => { if (armTimer.current) clearTimeout(armTimer.current); }, []);
 
@@ -600,35 +586,9 @@ function RestartAllSection() {
     armTimer.current = setTimeout(() => setArmed(false), 8000);
   };
 
-  const start = async () => {
+  const start = () => {
     setArmed(false);
-    setBusy(true);
-    setErr("");
-    setLines([]);
-    try {
-      const res = await fetch("/api/restart-all", { method: "POST" });
-      const j = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
-    } catch (e) {
-      setErr((e as Error).message);
-      setBusy(false);
-      return;
-    }
-    // 轮询日志看进度；整轮结束的标志是 manager 打出的汇总行（每个会话一行 ✅/❌）
-    const until = Date.now() + 20 * 60_000;
-    const tick = async () => {
-      let done = false;
-      try {
-        const j = (await (await fetch("/api/restart-all", { cache: "no-store" })).json()) as { lines?: string[] };
-        if (j.lines?.length) {
-          setLines(j.lines.slice(-12));
-          done = j.lines.some((l) => l.includes('"ok"'));
-        }
-      } catch { /* 重启期间接口会抖，正常 */ }
-      if (done || Date.now() > until) { setBusy(false); return; }
-      setTimeout(() => void tick(), 3000);
-    };
-    setTimeout(() => void tick(), 3000);
+    void job.start();
   };
 
   return (
@@ -639,19 +599,16 @@ function RestartAllSection() {
         <button
           className={`btn btn-sm ${armed ? "btn-warning" : ""}`}
           disabled={busy}
-          onClick={() => (armed ? void start() : arm())}
+          onClick={() => (armed ? start() : arm())}
         >
           {busy && <span className="loading loading-spinner loading-xs" />}
           {busy ? t("重启中…") : armed ? t("确定，全部重启") : t("重启全部会话")}
         </button>
       }
     >
-      {err ? <div className="text-xs text-error">{err}</div> : null}
-      {lines.length > 0 && (
-        <pre className="mt-2 max-h-40 overflow-auto rounded bg-base-300/50 p-2 text-[11px] leading-snug">
-          {lines.join("\n")}
-        </pre>
-      )}
+      {job.err ? <div className="text-xs text-error">{job.err}</div> : null}
+      {job.note ? <div className="text-xs opacity-70">{job.note}</div> : null}
+      <JobLog lines={job.lines} />
     </Section>
   );
 }

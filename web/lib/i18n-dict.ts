@@ -424,5 +424,10 @@ export const DICT: Record<string, string> = {
   "删除失败": "Delete failed",
   "回合结束后才能删": "Can be deleted after the turn ends",
   "复制失败": "Copy failed",
-  "复制（选中的文字，或整屏可见内容）": "Copy (selection, or whole visible screen)",
+  "复制（选中的文字，或整屏可见内容）": "Copy (selection, or whole visible screen)",  // 后台任务（升级后端 / 全体重启）
+  "失败": "Failed",
+  "退出码": "Exit code",
+  "上一轮还没结束，接着看它的进度": "The previous run is still going — following its progress",
+  "等了 10 分钟还没升完，去看 update.log": "Still not done after 10 minutes — check update.log",
+  "等了 20 分钟还没重启完，去看 restart-all.log": "Still not done after 20 minutes — check restart-all.log",
 };
