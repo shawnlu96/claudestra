@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   composeView,
+  droppedBlobUrls,
   mergePendingByTs,
   stripInboundHeader,
   survivingPending,
@@ -120,5 +121,16 @@ describe("composeView（全量 / 差量共用的视图重组）", () => {
     const delta = [histUser(3, "新消息", iso(500))];
     const v = composeView({ current: [...base, pending], history: [...base, ...delta], incoming: delta, streaming: false, cursor: null, nowMs: NOW });
     expect(v.messages.map((m) => m.id)).toEqual(["h1", "h2", "h3"]);
+  });
+});
+
+describe("droppedBlobUrls（乐观气泡被历史替换后回收本地预览 URL）", () => {
+  test("只回收被丢掉的本地气泡里的 blob:，留下的与服务端 URL 不碰", () => {
+    const gone = local("图", { id: "m1", attachments: [{ name: "a.png", kind: "image", url: "blob:x/1" }] });
+    const kept = local("图2", { id: "m2", attachments: [{ name: "b.png", kind: "image", url: "blob:x/2" }] });
+    const server: ChatMessage = {
+      id: "h9", role: "user", content: "图", attachments: [{ name: "a.png", kind: "image", url: "/api/chat/attachment/a.png" }],
+    };
+    expect(droppedBlobUrls([gone, kept, server], [kept])).toEqual(["blob:x/1"]);
   });
 });

@@ -128,3 +128,18 @@ export function composeView(opts: {
   }
   return { messages, restoreAwaiting };
 }
+
+/**
+ * 视图重组后被丢掉的乐观气泡里那些本地预览 blob URL（D8-3 store 侧）。发送时给图片附件
+ * 建了 objectURL 做即时预览，气泡一旦被历史里的同一条替换（历史里的附件是服务端 URL），
+ * 这个 blob 就再没人用了；不 revoke 的话，附过的图片在整个页面生命周期里都释放不掉。
+ */
+export function droppedBlobUrls(before: ChatMessage[], after: ChatMessage[]): string[] {
+  const kept = new Set(after.map((m) => m.id));
+  const out: string[] = [];
+  for (const m of before) {
+    if (!m.local || kept.has(m.id)) continue;
+    for (const a of m.attachments ?? []) if (a.url?.startsWith("blob:")) out.push(a.url);
+  }
+  return out;
+}

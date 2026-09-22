@@ -21,8 +21,19 @@ import {
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
-import { composeView, stripInboundHeader } from "./view-compose";
+import { composeView, droppedBlobUrls, stripInboundHeader } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
+
+/** 乐观气泡的本地预览 URL 用完即还（见 view-compose.ts 的 droppedBlobUrls） */
+function revokeBlobUrls(urls: string[]) {
+  for (const u of urls) {
+    try {
+      URL.revokeObjectURL(u);
+    } catch {
+      /* 已失效的 URL revoke 不会抛，这里只是防御 */
+    }
+  }
+}
 
 /** 大总管保留名(与 lib/chat/bridge-api 的 MASTER_AGENT_NAME 同值;不 import——
  *  那个模块在 server 侧读 env,拖进 client bundle 没意义)。 */
@@ -962,6 +973,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           cursor: this.historyCursor,
           nowMs: Date.now(),
         });
+        revokeBlobUrls(droppedBlobUrls(s.messages, v.messages));
         s.messages = v.messages;
         if (v.restoreAwaiting) s.awaitingChunk = true;
         // 差量补到 agent 的新产出(reply/工具/文本)→ 清掉可能卡住的「正在回复…」指示
@@ -1137,6 +1149,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           cursor: this.historyCursor,
           nowMs: Date.now(),
         });
+        revokeBlobUrls(droppedBlobUrls(s.messages, v.messages));
         s.messages = v.messages;
         if (v.restoreAwaiting) s.awaitingChunk = true;
         s.loadingHistory = false;
@@ -1845,7 +1858,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const entry = this.pendingSends.get(id);
     this.pendingSends.delete(id);
     this.produce((s) => {
-      s.messages = s.messages.filter((m) => m.id !== id && m.id !== entry?.errId);
+      const next = s.messages.filter((m) => m.id !== id && m.id !== entry?.errId);
+      revokeBlobUrls(droppedBlobUrls(s.messages, next));
+      s.messages = next;
     });
   }
 
