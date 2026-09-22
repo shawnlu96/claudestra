@@ -370,8 +370,14 @@ export function createCodexAdapter(overrides: Partial<CodexAdapterDeps> = {}): C
           if (countMatches(pane, BLOCKING_DIALOG_RE) > base.dialog) {
             return { ready: false, reason: "blocked-dialog", detail: matchedLine(pane, BLOCKING_DIALOG_RE) };
           }
-          // 窗口回到 shell = codex 已退出（参数错、登录过期……），不必等满预算
-          if (i > 4 && isAtShell(pane.split("\n").filter((l) => l.trim()).slice(-3).join("\n"))) {
+          // 窗口回到 shell = codex 已退出（参数错、登录过期……），不必等满预算。
+          // 只看屏幕会误判：oh-my-zsh 的「➜  dir」提示符后面跟着刚键入的长命令，TUI 接管屏幕前
+          // 那一行照样像 shell——所以再要求 pane 下已经没有子进程（codex 在跑时它就是 pane 的子进程）
+          if (
+            i > 4 &&
+            isAtShell(pane.split("\n").filter((l) => l.trim()).slice(-3).join("\n")) &&
+            (await win.childPids().catch(() => [] as number[])).length === 0
+          ) {
             return { ready: false, reason: "exited", detail: pane.split("\n").filter((l) => l.trim()).slice(-4).join(" | ").slice(0, 300) };
           }
           await win.sleep(budget.pollMs);

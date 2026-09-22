@@ -206,6 +206,14 @@ describe("beforeLaunch / waitReady", () => {
     expect(r.ready === true || (r.ready === false && r.reason !== "occupied")).toBe(true);
   });
 
+  test("提示符后面跟着刚键入的命令、codex 子进程还在 → 不算 exited", async () => {
+    const a = createCodexAdapter(deps());
+    const w = fakeWindow(["➜  work git:(main) DISCORD_CHANNEL_ID=1 /opt/codex resume x"]);
+    w.win.childPids = async () => [4242];
+    await a.beforeLaunch!(w.win);
+    expect(await a.waitReady(w.win, { rounds: 8, pollMs: 1 })).toMatchObject({ ready: false, reason: "timeout" });
+  });
+
   test("回到 shell → exited（不等满预算）", async () => {
     const a = createCodexAdapter(deps());
     const w = fakeWindow(["codex: error: not logged in\n➜  work git:(main)"]);
