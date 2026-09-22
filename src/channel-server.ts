@@ -397,8 +397,7 @@ const codexSink = new CodexQueueSink({
     await bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text });
   },
   log: (line) => console.error(line),
-  // 重启 / 收编后的职责前言（codex-launch 经 CLAUDESTRA_CODEX_PREAMBLE 带来；new 模式不带）
-  preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined,
+  preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 
 const inboundSink: InboundSink = IS_CODEX ? codexSink : mcpChannelSink;

@@ -67,7 +67,7 @@ export function NewAgentModal({
       .then((j: { data?: { runtimes?: { id: string; available: boolean }[] } } | null) => {
         if (alive) setCodexAvailable(j?.data?.runtimes?.some((r) => r.id === "codex" && r.available) === true);
       })
-      .catch(() => {});
+      .catch(() => {}); // 查不到就当没有 Codex：不显示这个选项，是安全方向
     return () => {
       alive = false;
     };
