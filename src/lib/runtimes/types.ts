@@ -59,6 +59,15 @@ export interface SessionSourceAdapter {
   /** 这个路径是不是这种运行时的会话文件（按根目录判，零 I/O） */
   ownsPath(path: string, home?: string): boolean;
 
+  /** 会话文件路径 → sessionId（文件名规则各家不同；认不出返回 null） */
+  sessionIdFromPath(path: string): string | null;
+
+  /**
+   * bridge / API 侧的运行时策略。只读来源也可以先声明（接线前就把「怎么打断」
+   * 这类约束定下来）；不声明 = 按 Claude Code 处理（controlFor 的回退）。
+   */
+  readonly control?: RuntimeControl;
+
   /**
    * 首行嗅探：归档副本的路径不带任何根特征，只能看内容。
    * 不实现 = 这种运行时没有可靠的头行签名。
@@ -69,11 +78,136 @@ export interface SessionSourceAdapter {
   translateLine(line: string): AnyRecord | null;
 }
 
+// ── 生命周期层 ─────────────────────────────────────────────────────────
+//
+// manager 只认下面这几个接口：建窗口 → 准备会话 → 发启动命令 → 等就绪 → 落 registry，
+// 退出时按适配器给的按键 / 退出指令 / 弹窗处理走。加一种运行时 = 写一个适配器文件，
+// manager / bridge 零改动。
+
 /**
- * ⚠ 生命周期那一层（启动命令 / 就绪判据 / 退出指令 / 消息注入）**故意还没定义在这里**。
- *
- * 它现在真实地散在 manager.ts 的 create 与 resume 里（各抄了一遍同样的五步），把它
- * 抽上来是下一步的事。先定义一个没人实现的 `ManagedRuntimeAdapter`、再让适配器写
- * `waitReady: async () => true` 这种占位，等于在接口里撒谎——调用方会以为问过适配器
- * 了，其实答案是假的。接口要么是真的，要么先别有。
+ * manager 交给适配器的窗口操作面。适配器不直接拼 tmux 命令 → 就绪 / 退出逻辑能用
+ * 假窗口单测（runtime-lifecycle.test.ts）。
  */
+export interface WindowOps {
+  /** tmux 窗口名（registry 名，如 agent-foo；大总管是 "0"） */
+  readonly name: string;
+  /** tmux target（"master:agent-foo"） */
+  readonly target: string;
+  capture(lines?: number): Promise<string>;
+  /** 字面文本 + Enter（带 copy-mode 守卫，见 tmuxSendLine） */
+  sendLine(text: string): Promise<void>;
+  /** 只发字面文本，不回车 */
+  sendLiteral(text: string): Promise<void>;
+  /** 发一个 tmux 按键名（"Enter" / "Escape" / "C-c" / "Down"） */
+  sendKey(key: string): Promise<void>;
+  /** Esc 走双击护栏（CC 连按两次 = Rewind，见 tmuxSendEscape） */
+  sendEscape(): Promise<void>;
+  getOption(key: string): Promise<string | null>;
+  setOption(key: string, value: string): Promise<boolean>;
+  childPids(): Promise<number[]>;
+  sleep(ms: number): Promise<void>;
+}
+
+/** new = 全新会话；resume = 续上 sessionId；fork = 从 sessionId 分一份副本 */
+export type LaunchMode = "new" | "resume" | "fork";
+
+/**
+ * 一次启动需要的全部信息。各适配器只读自己认得的字段，manager 可以无脑全传。
+ *
+ * ⚠ 可选字段「不传」与「传空」对启动命令是有区别的（比如 resume 历来不注入
+ * agentName / purpose）——适配器必须原样转交，不要自作主张补默认值，否则
+ * 老 agent 的启动命令会变（runtime-lifecycle.test.ts 逐字钉住）。
+ */
+export interface LaunchSpec {
+  mode: LaunchMode;
+  channelId: string;
+  bridgeUrl: string;
+  /** new：新会话 id；resume / fork：源会话 id */
+  sessionId: string;
+  /** 注入给会话的自称（registry 名）。不传 = 不注入 */
+  agentName?: string;
+  displayName?: string;
+  purpose?: string;
+  projectContext?: string;
+  model?: string;
+  effort?: string;
+  permissionMode?: string;
+  /** 运行时专属项（CC：disallowedPreset / disallowedRaw；Pi：piEnv）。不认得的键忽略 */
+  extras?: Readonly<Record<string, unknown>>;
+}
+
+export type ReadyResult =
+  | { ready: true; recoveredFullSession?: boolean }
+  | {
+      ready: false;
+      /** occupied = 会话被别的进程占着（CC 的 bg agent）——调用方可改 fork 重试 */
+      reason: "timeout" | "exited" | "occupied" | "blocked-dialog";
+      detail?: string;
+      recoveredFullSession?: boolean;
+    };
+
+/** bridge / API 侧的运行时策略：把散落的 `runtime === "pi"` 收成声明 */
+export interface RuntimeControl {
+  /** 打断当前回合发什么键。CC / Pi 是 C-c；空闲 Codex 收到 C-c 会直接退出 */
+  interruptKeys: readonly string[];
+  /** 人类消息到达且目标在忙时，是否先打断再投递（Pi 能 steer 进回合，不打断） */
+  preemptOnHumanMessage: boolean;
+  /** 忙闲信号从哪来：pane = 看屏幕文案；hook = 只信回合结束上报（isAgentIdle 恒答空闲） */
+  idleSource: "pane" | "hook";
+  /** 模型钉值怎么生效：in-session = 启动后会话内补发 /model；launch-flag = 启动参数即权威 */
+  modelEnforcement: "in-session" | "launch-flag";
+  /** CC 的屏幕文案判据（压缩中 / 权限弹窗等）能不能套在它身上 */
+  paneHeuristics: boolean;
+}
+
+/** fork 后探测真实会话 id 的上下文 */
+export interface DiscoverContext {
+  windowName: string;
+  cwd: string;
+  /** 源会话 id（探测结果不能是它） */
+  exclude?: string;
+  /** forkBaseline 在启动前拍的快照；没有 = 只用不依赖快照的探测手段 */
+  baseline?: unknown;
+  timeoutMs?: number;
+}
+
+export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
+  readonly manageable: true;
+  readonly control: RuntimeControl;
+  /** 消息怎么进会话（声明性，doctor / 前端展示用；真正的注入在 agent 侧通道进程） */
+  readonly inbound: string;
+  /** 回合结束怎么报（最终都是 POST /hook {event:"Stop"}） */
+  readonly turnEnd: string;
+  /** 优雅退出时键入的指令 */
+  readonly exitCommand: string;
+  /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
+  readonly noteTag: string;
+
+  isValidSessionId(id: string): boolean;
+  /** 可执行文件在不在：create / resume 早败，不留垃圾频道 */
+  available(): Promise<{ ok: true } | { ok: false; hint: string }>;
+  /** 启动前把会话准备好，返回 TUI 应打开的 id。不实现 = 用 spec.sessionId */
+  prepareSession?(spec: LaunchSpec): Promise<{ sessionId: string }>;
+  buildLaunchCommand(spec: LaunchSpec): string;
+  /** 发启动命令之前（复用窗口时清掉上一轮的就绪标记） */
+  beforeLaunch?(win: WindowOps): Promise<void>;
+  waitReady(win: WindowOps, budget: { rounds: number; pollMs: number }): Promise<ReadyResult>;
+  /** 退出指令发出后，每轮看一眼屏幕，处理这个运行时自己的收尾弹窗 */
+  onExitPane?(pane: string, win: WindowOps): Promise<"handled" | "none">;
+  /** fork 启动前拍快照（给 discoverSessionId 做 diff 兜底） */
+  forkBaseline?(cwd: string): Promise<unknown>;
+  /** fork / 轮转后探测窗口里真实的会话 id。不实现 = 这个运行时不需要（会话 id 自报） */
+  discoverSessionId?(ctx: DiscoverContext): Promise<{ sessionId: string; via: string } | null>;
+  /** 落 registry 的运行时字段（CC 返回 {}：老数据逐字节不变） */
+  registryFields(spec: LaunchSpec): Record<string, unknown>;
+}
+
+export function isManaged(a: SessionSourceAdapter): a is ManagedRuntimeAdapter {
+  return a.manageable === true && typeof (a as Partial<ManagedRuntimeAdapter>).buildLaunchCommand === "function";
+}
+
+/** agent 侧通道进程里「把 bridge 的 message 帧送进会话」这一步（channel-server / 扩展实现） */
+export interface InboundSink {
+  deliver(content: string, meta: Record<string, string>): Promise<{ ok: true } | { ok: false; error: string }>;
+}
+

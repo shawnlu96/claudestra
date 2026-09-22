@@ -5,12 +5,14 @@
  *   - 按 id 拿：`sourceFor(runtime)`
  *   - 按路径认：`sourceForPath(path)`（先按根目录，再按首行嗅探）
  *   - 全部：`allSources()`（会话列表就是把它们的 scanSessions 并起来）
+ *   - 要启动 / 退出它：`managedFor(runtime)` / `requireManaged(runtime)`
+ *   - bridge 侧策略（打断键、是否抢占、忙闲来源）：`controlFor(runtime)`
  */
 import { closeSync, openSync, readSync } from "node:fs";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { piAdapter } from "./pi.js";
-import type { SessionSourceAdapter } from "./types.js";
+import { isManaged, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter } from "./types.js";
 
 export * from "./types.js";
 export { claudeCodeAdapter, codexAdapter, piAdapter };
@@ -36,6 +38,45 @@ export function isKnownRuntime(runtime: string | undefined | null): boolean {
 /** 这个 id 的会话能不能被收编成可对话的 agent */
 export function isManageableRuntime(runtime: string | undefined | null): boolean {
   return sourceFor(runtime).manageable;
+}
+
+/**
+ * 可启动的适配器。缺省（undefined / 空串）= Claude Code（历史数据没有 runtime 字段）；
+ * 认不出的 id 或只读来源返回 null——**不**像 sourceFor 那样回退，否则拼错的
+ * `--runtime` 会被悄悄当成 Claude Code 起。
+ */
+export function managedFor(runtime: string | undefined | null): ManagedRuntimeAdapter | null {
+  if (!runtime) return claudeCodeAdapter;
+  const s = SOURCES.find((x) => x.id === runtime);
+  return s && isManaged(s) ? s : null;
+}
+
+/** 所有可启动的运行时 id（报错信息 / API 白名单用） */
+export function manageableRuntimeIds(): string[] {
+  const ids = SOURCES.filter(isManaged).map((s) => s.id);
+  return [DEFAULT_RUNTIME, ...ids.filter((id) => id !== DEFAULT_RUNTIME)];
+}
+
+/** 同 managedFor，拿不到就抛出能直接给人看的错误 */
+export function requireManaged(runtime: string | undefined | null): ManagedRuntimeAdapter {
+  const m = managedFor(runtime);
+  if (m) return m;
+  const s = SOURCES.find((x) => x.id === runtime);
+  const avail = manageableRuntimeIds().join(", ");
+  throw new Error(
+    s
+      ? `${s.label} 目前是只读会话来源，不能建 agent。可用: ${avail}`
+      : `未知的 runtime: "${runtime}"。可用: ${avail}`,
+  );
+}
+
+/**
+ * 运行时策略。registry 里的 agent 一定是可启动的运行时，所以这里对未知 / 缺省
+ * 回退 Claude Code 的策略（历史行为）；只读来源若自己声明了策略就用它的。
+ */
+export function controlFor(runtime: string | undefined | null): RuntimeControl {
+  const s = runtime ? SOURCES.find((x) => x.id === runtime) : undefined;
+  return s?.control ?? claudeCodeAdapter.control;
 }
 
 const headSniffCache = new Map<string, string | undefined>();
