@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { createSession, SESSION_COOKIE, checkRateLimit } from "@/lib/services/auth.service";
 import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
 import { beginAuthentication, finishAuthentication } from "@/lib/services/webauthn.service";
+import { requestClientIp } from "@/lib/client-ip";
 
 /**
  * Passkey 登录（**未鉴权入口**，与管理端点分开）。
@@ -23,8 +24,8 @@ import { beginAuthentication, finishAuthentication } from "@/lib/services/webaut
 const SESSION_DAYS = 7;
 
 function rlKeyOf(request: Request): string {
-  const xff = request.headers.get("x-forwarded-for");
-  const ip = xff?.split(",")[0]?.trim() || "";
+  // 直连时不信 XFF（客户端可伪造），见 client-ip.ts
+  const ip = requestClientIp(request);
   return ip ? `ip:${ip}` : "passkey:unknown";
 }
 
