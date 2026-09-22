@@ -181,7 +181,11 @@ async function checkDaemons(): Promise<Check[]> {
   if (process.platform !== "darwin") return out;
 
   const list = await sh(["launchctl", "list"]);
-  for (const label of ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron"]) {
+  // web 服务只在装过（plist 存在）时才查：没选 web 的实例不该因此亮灯
+  const webPlist = `${HOME}/Library/LaunchAgents/com.claudestra.web.plist`;
+  const labels = ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron",
+    ...(existsSync(webPlist) ? ["com.claudestra.web"] : [])];
+  for (const label of labels) {
     const plist = `${HOME}/Library/LaunchAgents/${label}.plist`;
     const line = list.out.split("\n").find((l) => l.endsWith(label) || l.includes(`\t${label}`));
     if (!line) {
@@ -505,7 +509,26 @@ async function checkWebBuild(repoRoot: string): Promise<Check[]> {
     detail: v.detail,
     // manager update 在已是最新时不会构建；install-cli 每次都按同一判据检查并重建
     ...(v.status !== "ok" ? { fix: "bun src/manager.ts install-cli" } : {}),
-  } as Check];
+  } as Check, ...(await checkWebPort(repoRoot))];
+}
+
+/** web 端口：有没有人听、听的是不是 launchd 托管的那份（常见开发端口被占时服务会崩溃循环） */
+async function checkWebPort(repoRoot: string): Promise<Check[]> {
+  if (process.platform !== "darwin" || !existsSync(`${HOME}/Library/LaunchAgents/com.claudestra.web.plist`)) return [];
+  const { webPortFromStartScript, listenersOf, launchdPidOf, portOwnerConflict } = await import("./cli-install.js");
+  let start: string | undefined;
+  try { start = JSON.parse(await readFile(`${repoRoot}/web/package.json`, "utf-8"))?.scripts?.start; } catch { /* 用默认端口 */ }
+  const port = webPortFromStartScript(start);
+  const listeners = listenersOf(port);
+  if (listeners.length === 0) {
+    return [{ group: "web", name: `端口 ${port}`, status: "fail", detail: "没有进程在监听 —— 网页打不开",
+      fix: `看日志 ${resolveLogPath("web", "err")}，再 launchctl kickstart -k gui/$(id -u)/com.claudestra.web` }];
+  }
+  const conflict = portOwnerConflict(listeners, launchdPidOf("com.claudestra.web"));
+  return [conflict
+    ? { group: "web", name: `端口 ${port}`, status: "fail", detail: conflict,
+        fix: `lsof -nP -iTCP:${port} -sTCP:LISTEN 找出占用者并停掉，再 launchctl kickstart -k gui/$(id -u)/com.claudestra.web` }
+    : { group: "web", name: `端口 ${port}`, status: "ok", detail: `由 launchd 托管进程监听（pid ${listeners[0]!.pid}）` }];
 }
 
 // ────────────────────────────────────────────

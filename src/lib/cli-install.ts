@@ -170,6 +170,8 @@ export interface DaemonHealth {
   repaired: boolean;
   /** 仍不健康时附上 .err 的末尾几行（已去重） */
   log?: string[];
+  /** 端口在应答，但应答的不是 launchd 托管的进程（被别的程序占了） */
+  conflict?: string;
 }
 
 export interface DaemonInstall {
@@ -1045,13 +1047,13 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     if (h.label === "com.claudestra.web" && result.webDaemon?.installed) {
       result.webDaemon.serving = h.healthy;
       if (!h.healthy) {
-        result.webDaemon.error = `装好了但 ${result.webDaemon.port} 端口没人监听——服务起来就退出了`;
+        result.webDaemon.error = h.conflict ?? `装好了但 ${result.webDaemon.port} 端口没人监听——服务起来就退出了`;
         if (h.log?.length) result.webDaemon.log = h.log;
       }
     }
     if (!h.healthy) {
       warnings.push(
-        `${h.name} 不健康${h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：` +
+        `${h.name} 不健康${h.conflict ? `：${h.conflict}` : h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：` +
           (h.log?.slice(-2).join(" | ") || "(.err 是空的)"),
       );
     } else if (h.repaired) {
@@ -1107,15 +1109,61 @@ async function healDaemons(
       repaired = true;
       healthy = await waitFor(p.probe, 15_000);
     }
+    // 「有人应答」不等于「是我们的进程在应答」：3333 这类常见开发端口被别的程序占着时，
+    // launchd 那份 EADDRINUSE 崩溃循环，探活却照样通过。属主不对就如实报，不 kickstart
+    // （重启解决不了占用）。
+    const port = p.label === "com.claudestra.web" ? webPort : bridgePort;
+    const conflict = healthy && port ? portOwnerConflict(listenersOf(port), launchdPidOf(p.label)) : null;
+    if (conflict) healthy = false;
     out.push({
       label: p.label,
       name: p.name,
       healthy,
       repaired,
+      ...(conflict ? { conflict } : {}),
       ...(healthy ? {} : { log: tailFile(`${LOG_DIR}/${p.stem}.err`, 6) }),
     });
   }
   return out;
+}
+
+/**
+ * 端口属主判定（纯函数）：监听者是 launchd 托管的那个进程，或是它的子孙（`sh -c exec` /
+ * npm 包一层的手写 plist）才算我们的。返回问题描述；没问题或数据不足返回 null。
+ */
+export function portOwnerConflict(
+  listeners: Array<{ pid: string; ancestors: string[] }>,
+  launchdPid: string | null,
+): string | null {
+  if (listeners.length === 0) return null;
+  if (!launchdPid) return `端口被 pid ${listeners[0]!.pid} 占用，但 launchd 托管的服务没在跑——被别的程序占了`;
+  if (listeners.some((l) => l.pid === launchdPid || l.ancestors.includes(launchdPid))) return null;
+  return `端口被 pid ${listeners[0]!.pid} 占用，不是 launchd 托管的进程（pid ${launchdPid}）——服务在崩溃重试，应答的是别的程序`;
+}
+
+/** 端口上的监听进程及其祖先链（最多 6 层） */
+export function listenersOf(port: number): Array<{ pid: string; ancestors: string[] }> {
+  const r = spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8" });
+  const pids = [...new Set((r.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean))];
+  return pids.map((pid) => {
+    const ancestors: string[] = [];
+    let cur = pid;
+    for (let i = 0; i < 6; i++) {
+      const pp = (spawnSync("/bin/ps", ["-o", "ppid=", "-p", cur], { encoding: "utf8" }).stdout || "").trim();
+      if (!pp || pp === "0" || pp === "1") break;
+      ancestors.push(pp);
+      cur = pp;
+    }
+    return { pid, ancestors };
+  });
+}
+
+/** `launchctl list <label>` 里的 PID；没在跑 / 没 load 返回 null */
+export function launchdPidOf(label: string): string | null {
+  const r = spawnSync("launchctl", ["list", label], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  const m = /"PID"\s*=\s*(\d+)/.exec(r.stdout || "");
+  return m ? m[1]! : null;
 }
 
 /** .env 里的 BRIDGE_PORT（用户改过端口的机器不能按默认值去探） */
