@@ -84,15 +84,31 @@ function escapeAttr(v: string): string {
 }
 
 /**
+ * 回复路径提示（`reply_via` 属性）。Codex 的 developer_instructions 只在建线程那一轮生效
+ * （0.153.4 实测 TUI `resume` / `fork` 带新的 -c developer_instructions 都不写进上下文），
+ * 所以接管的外来会话、改过职责后重启的会话都看不到频道回复规则；每条入站自带这一句，
+ * 模型至少知道该调哪个工具。
+ */
+export function codexReplyHint(source: string): string {
+  return `mcp__${source}__reply(chat_id)；纯文本输出不会送达`;
+}
+
+/**
  * 包成与 Claude Code channel 通知同款的 `<channel …>` 标签：回复规则（「用 <channel> 里的
  * chat_id 调 reply」）逐字适用，历史面板的 unwrapChannelMessage 也能照常解包。
  */
-export function wrapChannelContent(content: string, meta: Record<string, string> | undefined, source: string): string {
+export function wrapChannelContent(
+  content: string,
+  meta: Record<string, string> | undefined,
+  source: string,
+  replyVia?: string,
+): string {
   const attrs = [`source="${escapeAttr(source)}"`];
   for (const [k, v] of Object.entries(meta || {})) {
-    if (!/^[A-Za-z_][\w-]*$/.test(k) || k === "source" || v === undefined || v === null) continue;
+    if (!/^[A-Za-z_][\w-]*$/.test(k) || k === "source" || k === "reply_via" || v === undefined || v === null) continue;
     attrs.push(`${k}="${escapeAttr(String(v))}"`);
   }
+  if (replyVia) attrs.push(`reply_via="${escapeAttr(replyVia)}"`);
   return `<channel ${attrs.join(" ")}>\n${content}\n</channel>`;
 }
 
@@ -135,6 +151,16 @@ export interface CodexQueueSinkDeps {
 }
 
 export const OFFLINE_NOTICE = "⚠️ Codex 会话不在线，消息未投递";
+/** 同一 Codex 进程持有多个线程锁、且都不是已知那个（刚 /new 过、或子 agent 在跑）：认不准，宁可不投 */
+export const AMBIGUOUS_NOTICE = "⚠️ Codex 进程同时开着多个会话（刚 /new 过或有子 agent 在跑），认不准该投哪个，消息未投递——请先在终端里发一条消息，再从这里重发";
+/** /new 之后新线程还没有 rollout，queue 报 `no rollout found` */
+export const ROTATED_NOTICE = "⚠️ Codex 会话刚轮转、还没有第一轮，消息未投递——请先在终端里发一条消息，再从这里重发";
+
+/** queue 失败时给发消息的人看的话：已知原因给指引，其余带上 stderr 末行 */
+export function queueFailureNotice(detail: string): string {
+  if (/no rollout found/i.test(detail)) return ROTATED_NOTICE;
+  return `⚠️ 消息投递到 Codex 失败：${detail}`;
+}
 
 /** 构造 queue 命令（纯函数，便于钉住参数形状） */
 export function codexQueueArgs(codexBin: string, sid: string, text: string): string[] {
@@ -157,20 +183,21 @@ export class CodexQueueSink implements InboundSink {
       try { held = await d.heldThreadIds(); } catch { held = []; }
       const decision = decideDelivery(d.getSessionId(), held);
       if (decision.action === "offline" || decision.action === "ambiguous") {
-        const why = decision.action === "offline" ? "offline" : `ambiguous locks: ${decision.held.join(",")}`;
+        const offline = decision.action === "offline";
+        const why = offline ? "offline" : `ambiguous locks: ${decision.held.join(",")}`;
         d.log?.(`⚠️ Codex 入站未投递（${why}）`);
-        await d.notify(chatId, OFFLINE_NOTICE).catch(() => {});
+        await d.notify(chatId, offline ? OFFLINE_NOTICE : AMBIGUOUS_NOTICE).catch(() => {});
         return { ok: false, error: why };
       }
       if (decision.action === "switch") {
         d.log?.(`🔀 Codex 线程已切换 ${d.getSessionId() ?? "?"} → ${decision.sid}`);
         d.onSwitch(decision.sid);
       }
-      const r = await d.queue(decision.sid, wrapChannelContent(content, meta, d.source));
+      const r = await d.queue(decision.sid, wrapChannelContent(content, meta, d.source, codexReplyHint(d.source)));
       if (!r.ok) {
         const detail = (r.err || r.out || "unknown").trim().split("\n").slice(-1)[0].slice(0, 300);
         d.log?.(`❌ codex queue 失败: ${detail}`);
-        await d.notify(chatId, `⚠️ 消息投递到 Codex 失败：${detail}`).catch(() => {});
+        await d.notify(chatId, queueFailureNotice(detail)).catch(() => {});
         return { ok: false, error: detail };
       }
       return { ok: true };

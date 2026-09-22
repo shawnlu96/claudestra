@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AMBIGUOUS_NOTICE,
   CodexQueueSink,
   OFFLINE_NOTICE,
+  ROTATED_NOTICE,
+  codexReplyHint,
+  queueFailureNotice,
   codexParentGone,
   isPidAlive,
   codexQueueArgs,
@@ -65,9 +69,14 @@ describe("wrapChannelContent", () => {
     expect(w).toBe('<channel source="claudestra" chat_id="api:tok1" user="web" message_id="m1">\n你好\n第二行\n</channel>');
     expect(unwrapChannelMessage(w)?.text).toBe("你好\n第二行");
   });
-  test("属性值转义，非法键丢弃，source 不被 meta 覆盖", () => {
-    const w = wrapChannelContent("x", { user: 'a"<b>', "bad key": "v", source: "evil" }, "claudestra");
+  test("属性值转义，非法键丢弃，source / reply_via 不被 meta 覆盖", () => {
+    const w = wrapChannelContent("x", { user: 'a"<b>', "bad key": "v", source: "evil", reply_via: "evil" }, "claudestra");
     expect(w).toBe('<channel source="claudestra" user="a&quot;&lt;b&gt;">\nx\n</channel>');
+  });
+  test("reply_via（developer_instructions 不随 resume 生效的兜底）不影响解包出原文", () => {
+    const w = wrapChannelContent("[🌐 来自 Web]\n\n正文 <b>&", { chat_id: "api:t", user: "web" }, "claudestra", codexReplyHint("claudestra"));
+    expect(w).toContain(' reply_via="mcp__claudestra__reply(chat_id)；纯文本输出不会送达">');
+    expect(unwrapChannelMessage(w)).toEqual({ text: "正文 <b>&", from: "web" });
   });
 });
 
@@ -102,7 +111,11 @@ describe("CodexQueueSink", () => {
   test("在线：包装后投到已知线程", async () => {
     const h = harness({ sid: A, held: [[A]] });
     expect(await h.sink.deliver("hi", { chat_id: "123", user: "u" })).toEqual({ ok: true });
-    expect(h.queued).toEqual([{ sid: A, text: '<channel source="claudestra" chat_id="123" user="u">\nhi\n</channel>' }]);
+    expect(h.queued).toEqual([{
+      sid: A,
+      text: '<channel source="claudestra" chat_id="123" user="u" reply_via="mcp__claudestra__reply(chat_id)；纯文本输出不会送达">\nhi\n</channel>',
+    }]);
+    expect(unwrapChannelMessage(h.queued[0].text)).toEqual({ text: "hi", from: "u" });
     expect(h.notices).toEqual([]);
   });
 
@@ -125,7 +138,13 @@ describe("CodexQueueSink", () => {
     const h = harness({ sid: undefined, held: [[A, B]] });
     expect((await h.sink.deliver("hi", { chat_id: "1" })).ok).toBe(false);
     expect(h.queued).toEqual([]);
-    expect(h.notices.length).toBe(1);
+    expect(h.notices).toEqual([{ chatId: "1", text: AMBIGUOUS_NOTICE }]);
+    expect(AMBIGUOUS_NOTICE).not.toContain("不在线");
+  });
+
+  test("/new 后新线程还没有 rollout：给出「先在终端发一条」的指引，而不是原样甩 stderr", async () => {
+    expect(queueFailureNotice("Error: no rollout found for thread 01a0")).toBe(ROTATED_NOTICE);
+    expect(queueFailureNotice("Error: boom")).toBe("⚠️ 消息投递到 Codex 失败：Error: boom");
   });
 
   test("queue 失败：报给发消息的人，不静默", async () => {
