@@ -308,8 +308,11 @@ function buildEnvPath(): string {
     const p = stableBinPath("node");
     return p ? dirname(p) : null;
   })();
+  // bun 所在目录同理（mise / asdf 装的 bun 不在 ~/.bun/bin）：daemon 派生的子进程与 hook 要找得到它
+  const bunDir = dirname(resolveBunPath());
   return [
     ...(nodeDir ? [nodeDir] : []),
+    ...(bunDir && bunDir !== `${home}/.bun/bin` ? [bunDir] : []),
     `${home}/.bun/bin`,
     `${home}/.local/bin`,
     "/opt/homebrew/bin",

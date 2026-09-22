@@ -297,6 +297,11 @@ let lastBetaAttemptSha = "";
 let lastDirtyNotifiedSha = ""; // 脏树阻塞通知按 SHA 去重,别每 30min 骚扰一次
 let lastBetaAttemptAt = 0;
 const BETA_UPDATE_LOG = `${LOG_DIR}/beta-update.log`;
+// release 通道同样：失败的版本要能重试，子进程输出要落盘（此前尝试前就记「已处理」、输出全丢）
+let lastReleaseAttemptVersion = "";
+let lastReleaseAttemptAt = 0;
+let lastReleaseDirtyNotified = "";
+const RELEASE_UPDATE_LOG = `${LOG_DIR}/update.log`;
 
 /** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
  *  manager update(其内部走 beta 前进流程)。 */
@@ -379,13 +384,13 @@ async function checkForUpdates() {
 
   const local = await getLocalVersion();
   if (!isNewer(release.version, local)) return;
-  if (release.version === lastNotifiedVersion) return;
-  lastNotifiedVersion = release.version;
 
   const cfg = await readConfig();
 
   if (!cfg.autoUpdate.claudestra) {
-    // 关闭自动更新 → 只通知
+    // 关闭自动更新 → 只通知（按版本去重）
+    if (release.version === lastNotifiedVersion) return;
+    lastNotifiedVersion = release.version;
     try {
       await bridgeRequest({
         type: "reply",
@@ -419,13 +424,37 @@ async function checkForUpdates() {
   // 自动更新开启 → 等所有 agent 空闲再更新
   if (!(await allAgentsIdle())) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本，但有 agent 在忙，下次再试`);
-    lastNotifiedVersion = ""; // 让下次 poll 重新进入这个分支
     return;
   }
 
-  console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲）`);
+  // 本地版本没追上就每轮重试（带 10 分钟冷却）：update 在脏树 / 锁 / checkout 失败时 bail，
+  // 不会 reload launcher，旧逻辑把版本记成「已处理」后这个版本就再也不试了。
+  // 成功路径会 reload launcher 本体，状态自然清零。
+  if (release.version === lastReleaseAttemptVersion && Date.now() - lastReleaseAttemptAt < 10 * 60_000) return;
+  const firstAttempt = release.version !== lastReleaseAttemptVersion;
+  lastReleaseAttemptVersion = release.version;
+  lastReleaseAttemptAt = Date.now();
+
+  // 脏树 = update 必然 bail：如实上报一次（按版本去重），别静默
+  const st = Bun.spawnSync(["git", "-C", REPO_ROOT, "status", "--porcelain"]);
+  if (st.exitCode === 0 && st.stdout.toString().trim()) {
+    console.log(`🆙 Claudestra ${release.tag} 有新版本但仓库工作区脏——自动更新阻塞`);
+    if (lastReleaseDirtyNotified !== release.version) {
+      lastReleaseDirtyNotified = release.version;
+      await bridgeRequest({
+        type: "reply", chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `⚠️ Claudestra ${release.tag} 自动更新被阻塞:仓库有未提交改动,update 会一直失败。\n处理:改动要保留就 commit;误改就 git checkout 还原。体检:bun src/manager.ts doctor`,
+          `⚠️ Claudestra ${release.tag} auto-update is blocked: the repo has uncommitted changes, so update keeps failing.\nCommit them if intended, or git checkout to revert. Health check: bun src/manager.ts doctor`,
+        ),
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲；成败见 ${RELEASE_UPDATE_LOG}）`);
   const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
-  try {
+  if (firstAttempt) try {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
@@ -436,19 +465,15 @@ async function checkForUpdates() {
     });
   } catch { /* non-critical */ }
 
-  // 关键：manager.ts update 会执行 pm2 restart，会杀掉本 launcher 自己
-  // 用 detached + 重定向 stdio 让子进程脱离 launcher 生命周期
-  Bun.spawn(
-    ["bun", "run", `${REPO_ROOT}/src/manager.ts`, "update"],
-    {
-      cwd: REPO_ROOT,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      // @ts-ignore Bun 支持 detached
-      detached: true,
-    }
-  );
+  // 关键：manager.ts update 会 reload launcher 自己，用 detached 让子进程脱离 launcher 生命周期；
+  // 输出追加到日志文件，bail 时有迹可查
+  const stamp = `\n[${new Date().toISOString()}] 🆙 release v${local} → ${release.tag}\n`;
+  await import("fs/promises").then((m) => m.appendFile(RELEASE_UPDATE_LOG, stamp)).catch(() => {});
+  Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
+    cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    // @ts-ignore Bun 支持 detached
+    detached: true,
+  });
   // 不 await exited — pm2 会马上杀掉我们；新 launcher 进程启动后通过 github-release 判断已是最新版
 }
 
@@ -627,7 +652,7 @@ const restoreFailNotifiedAt = new Map<string, number>();
 
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
-    const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
+    const list = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
     if (!list.ok) return;
     const parsed = JSON.parse(list.out || "{}");
     const agents: any[] = parsed.agents || [];
@@ -660,7 +685,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     const failed: { name: string; error: string }[] = [];
     for (const agent of reallyDead) {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
-      const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
+      const r = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
       const why = restartFailureReason(r);
       if (why) {
         console.error(`🔁 [${source}] ❌ ${agent.name} 恢复失败: ${why}`);
@@ -757,12 +782,12 @@ async function restartAgentsAndMaster() {
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
   try {
-    const listOut = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
+    const listOut = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
     const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
     // 大总管不当金丝雀（窗口定名后 manager list 会带上它那一行；它由下面 /exit + 主循环拉起）
     const canary = agents.find((a) => a.status !== "stopped" && a.name !== MASTER_WINDOW_NAME);
     if (canary) {
-      const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
+      const r = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
       let canaryOk = false;
       try { canaryOk = JSON.parse(r.out || "{}").ok === true; } catch { /* 解析失败按失败算 */ }
       console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
@@ -786,7 +811,7 @@ async function restartAgentsAndMaster() {
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
-  const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+  const { ok, out } = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
   console.log(`🆙 bun manager restart 结果: ok=${ok}`);
   if (!ok) console.log(out);
   restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
