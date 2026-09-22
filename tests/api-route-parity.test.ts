@@ -9,7 +9,7 @@
  * 重新生成，并在 commit 里说明哪一条变了、为什么。
  */
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -84,13 +84,30 @@ const specs: Spec[] = [
   // ── D5-11：非法百分号编码（decodeURIComponent 抛 URIError）→ 400 JSON，不是 Bun 的 HTML 500 ──
   { name: "bad-encoding skills", method: "GET", path: "/api/v1/agents/%E0%A4%A/skills", token: "full" },
   { name: "bad-encoding history", method: "GET", path: "/api/v1/agents/%E0%A4%A/history", token: "full" },
+  // ── D1-5：目标会话正被本机活的 interactive Claude Code 占着、又没带 fork/takeover → 409 ──
+  //    （runner 在自己的 pid 上伪造登记；body 里的 pid 被替换成 <pid> 以便 golden 稳定）
+  {
+    name: "resume-409 live session",
+    method: "POST",
+    path: "/api/v1/agents/resume",
+    token: "full",
+    body: JSON.stringify({ agent: "t1", sessionId: "11111111-2222-3333-4444-555555555555" }),
+    liveSession: "11111111-2222-3333-4444-555555555555",
+  },
 ];
 
 test("早退分支响应逐字节不变（golden）", () => {
   const home = mkdtempSync(join(tmpdir(), "api-parity-"));
   try {
-    const r = Bun.spawnSync(["bun", join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
-      env: { PATH: process.env.PATH || "", HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C" },
+    // 沙箱：子进程 PATH 里的 bun / tmux 都是假的。runManager 按 PATH 找 bun 去 spawn manager，
+    // tmux 包装按 PATH 找 tmux（而 socket 是写死的 master.sock）——万一哪个改动让请求越过了
+    // 早退分支，拿到的也只是假 manager 的 ok:false（golden 对不上而失败），碰不到真实 tmux / registry。
+    const fakeBin = join(home, "fakebin");
+    mkdirSync(fakeBin);
+    writeFileSync(join(fakeBin, "bun"), `#!/bin/sh\necho '{"ok":false,"error":"manager blocked in parity runner"}'\n`, { mode: 0o755 });
+    writeFileSync(join(fakeBin, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
+      env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C" },
       stdout: "pipe",
       stderr: "pipe",
     });

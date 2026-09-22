@@ -340,5 +340,11 @@
     "status": 400,
     "contentType": "application/json",
     "body": "{\"ok\":false,\"error\":\"bad path encoding\"}"
+  },
+  {
+    "name": "resume-409 live session",
+    "status": 409,
+    "contentType": "application/json",
+    "body": "{\"ok\":false,\"live\":true,\"pid\":\"<pid>\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"error\":\"session is open in a live Claude Code process — retry with takeover or fork\"}"
   }
 ]

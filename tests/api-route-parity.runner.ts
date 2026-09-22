@@ -82,7 +82,8 @@ for (const s of specs) {
       handleApiRequest(req, new URL(url)),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000)),
     ]);
-    out.push({ name: s.name, status: res.status, contentType: res.headers.get("Content-Type"), body: await res.text() });
+    const text = (await res.text()).replaceAll(`"pid":${process.pid}`, `"pid":"<pid>"`);
+    out.push({ name: s.name, status: res.status, contentType: res.headers.get("Content-Type"), body: text });
   } catch (e) {
     out.push({ name: s.name, threw: (e as Error).name, message: (e as Error).message });
   }

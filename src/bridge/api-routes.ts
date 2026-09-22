@@ -32,6 +32,7 @@ import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
+import { readLiveCcSessionEntries, type CcSessionEntry } from "../lib/cc-sessions.js";
 import { collectSessions } from "./sessions-inventory.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
@@ -229,6 +230,18 @@ async function readJsonBody(req: Request): Promise<unknown> {
 
 function invalidJsonBody(): Response {
   return apiJson(400, { ok: false, error: "invalid JSON body" });
+}
+
+/**
+ * D1-5：sessionId 是否正被本机一个**活的 interactive** Claude Code 进程占着（用户自己在
+ * 终端里开的那种）。判据复用 cc-sessions 的 readLiveCcSessionEntries：pid 活着且启动时刻
+ * 与登记一致（pid 复用的过期登记被剔除）。已归 Claudestra 管的会话（registry 里有）不算——
+ * 那是我们自己的窗口，resume 维持原行为。
+ */
+async function liveInteractiveHolder(sessionId: string): Promise<CcSessionEntry | null> {
+  const [live, reg] = await Promise.all([readLiveCcSessionEntries(), readRegistryAgents().catch(() => [])]);
+  if (reg.some((a) => a.sessionId === sessionId)) return null;
+  return live.find((e) => e.sessionId === sessionId && e.kind === "interactive") ?? null;
 }
 
 /**
@@ -2089,7 +2102,28 @@ async function routeApiRequest(req: Request, url: URL): Promise<Response> {
     // 结果只进事件流 → 界面只看到「已受理」，后台失败（最常见：默认名字与已有
     // agent 撞车 → manager 报「已存在」）时用户完全看不到原因，只会认为"收编失败"。
     // 代价是这个请求要挂 10-40s（起窗口 + 等就绪），browser 侧超时给到 180s。
-    const r = await runManager(...args);
+    //
+    // D1-5 占用闸：这个会话正被本机一个活的 interactive Claude Code 开着（用户在别的终端里），
+    // 直接 resume 会让两个进程同时写同一个 session。没带 fork / takeover 就回 409 + {live,pid}，
+    // 由前端给「接管（会关掉原窗口）/ 分叉副本」两个选择：
+    //   takeover:true → manager takeover（SIGTERM 原进程后用同一个 id 接着开）
+    //   fork:true     → resume --fork（原会话不动，收编一个分叉副本）
+    const takeover = body?.takeover === true;
+    const fork = body?.fork === true;
+    if (!takeover && !fork && (!runtime || runtime === DEFAULT_RUNTIME)) {
+      const holder = await liveInteractiveHolder(sessionId);
+      if (holder) {
+        return apiJson(409, {
+          ok: false,
+          live: true,
+          pid: holder.pid,
+          sessionId,
+          error: "session is open in a live Claude Code process — retry with takeover or fork",
+        });
+      }
+    }
+    if (fork && !takeover) args.push("--fork");
+    const r = takeover ? await runManager("takeover", sessionId, "--name", agent) : await runManager(...args);
     emitEvent({
       agent,
       chatId: "",
