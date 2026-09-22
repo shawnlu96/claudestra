@@ -2,7 +2,8 @@
 import { useState, useEffect } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
-// 模型选项来自共享目录(值 = manager 别名);别再在这里另维护一份——曾与切换器漂移(2026-09-15)
+// 模型清单来自 CC 自己的模型目录(值 = 完整 model id,manager 原样透传);别在这里另维护一份
+// ——写死的表跟后端别名表一起漂移过两次(2026-09-15 缺 Sonnet 5、09-22 缺 Opus 5.5)
 import { useClaudeModels } from "../claude-models";
 
 /** Effort 选项(经 --effort 传 CC,session 级,不写全局默认)。 */
