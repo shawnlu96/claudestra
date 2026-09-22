@@ -15,6 +15,7 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
+import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
@@ -27,6 +28,11 @@ const RENDERED_PATH = `${process.env.MASTER_DIR || `${REPO_ROOT}/master`}/CLAUDE
 // 编号用自增计数器,不再硬编码。
 // 0 = 还不知道总数（要等「选择前端」那步定下来）—— 此时只显示 [n]，不显示 [n/8]，
 // 否则前两步先报一个猜的分母、选完前端又跳成别的数，看着像出错了。
+/** 上次装到哪一步（main() 开头探一次，后续步骤据此跳过已完成的耗时动作） */
+let progress: InstallProgress = assessInstall({
+  envFile: false, webEnvLocal: false, webNextBin: false, webBuildId: false, bridgePlist: false, webPlist: false,
+});
+
 let TOTAL_STEPS = 0;
 let stepNo = 0;
 const nextStep = () => ++stepNo;
@@ -479,6 +485,33 @@ async function stepCheckDeps(): Promise<void> {
   ok(t("系统依赖就绪 ✨", "System dependencies ready ✨"));
 }
 
+/**
+ * 续装横幅：装到一半断了再跑，先把「已经好了的」摆出来。
+ * 判据全是落盘事实（文件在不在），见 lib/install-progress.ts。
+ */
+function printResumeBanner(): void {
+  const L: Array<[boolean, string, string]> = [
+    [progress.envFile, ".env", t("主配置", "main config")],
+    [progress.webEnvLocal, "web/.env.local", t("Web 配置 + API token", "web config + API token")],
+    [progress.webNextBin, "web/node_modules", t("Web 依赖", "web dependencies")],
+    [progress.webBuildId, "web/.next", t("Web 构建产物", "web build output")],
+    [progress.bridgePlist, "com.claudestra.bridge", t("后台服务", "background daemons")],
+    [progress.webPlist, "com.claudestra.web", t("Web 服务", "web service")],
+  ];
+  br();
+  print(`${c.bold}${c.cyan}${t("检测到上次的安装痕迹 —— 接着装，不从头来", "Found a previous install — resuming instead of starting over")}${c.reset}`);
+  br();
+  for (const [done, what, desc] of L) {
+    print(`  ${done ? `${c.green}✓${c.reset}` : `${c.dim}○${c.reset}`} ${c.bold}${what.padEnd(22)}${c.reset}${c.dim}${desc}${c.reset}`);
+  }
+  br();
+  hint(t(
+    "已经好了的耗时步骤（装依赖 / 构建）会跳过；配置项会用现有值做默认，回车即保留。",
+    "Completed slow steps (dependency install / build) are skipped; existing config values are pre-filled as defaults — press Enter to keep them.",
+  ));
+  br();
+}
+
 // ============================================================
 // 发现本机已有的东西（v2.24+）
 // ============================================================
@@ -909,11 +942,15 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   let webResult: FinalizeResult["web"];
 
   // 写 .env
+  // ⚠ 原来这里见到 .env 已存在就问「要覆盖吗？」且默认**否**，选否直接 exit(1)——
+  //   于是「装到一半断了重跑」一路回车反而把向导干掉，续装比头一次还难。
+  //   现在默认是**更新**：前面每一项都拿现有值做过默认，回车即保留，覆盖不丢东西。
   if (await fileExists(ENV_PATH)) {
-    warn(t(".env 已存在", ".env already exists"));
-    if (!(await confirm(t("要覆盖吗？", "Overwrite?"), false))) {
-      fail(t("已取消。你现有的 .env 没被动", "Cancelled. Existing .env left untouched"));
-      process.exit(1);
+    hint(t(".env 已存在 —— 下面的值来自你这一轮的选择（没改的就是原值）",
+           ".env already exists — the values below come from this run (unchanged ones are your existing values)"));
+    if (!(await confirm(t("用这些值更新 .env？", "Update .env with these values?"), true))) {
+      hint(t("跳过写 .env，继续后面的步骤（现有配置不动）", "Skipping .env write — continuing with the remaining steps (existing config untouched)"));
+      return { deferred: false, failures, web: webResult };
     }
   }
   await writeFile(ENV_PATH, buildEnvContent(cfg));
@@ -1214,12 +1251,23 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
     ));
     return;
   }
+  // 续装：已经装好/构建过的就别再花几分钟重来一遍（判据见 lib/install-progress.ts）
+  const skip = skippableSteps(progress);
+  if (skip.webInstall && skip.webBuild) {
+    ok(t("web 依赖与构建产物都在,跳过（要重来就删掉 web/.next 再跑）",
+         "web dependencies and build output are both present — skipping (delete web/.next to force a rebuild)"));
+    return;
+  }
   if (await confirm(t("现在安装并构建 web 前端吗?(npm install + build,可能要几分钟)", "Install and build the web frontend now? (npm install + build, may take a few minutes)"), true)) {
     // 这两条都要跑好几分钟,用继承 stdio 让进度看得见(静默几分钟像卡死)
-    say_run("npm install");
-    if (!(await runInteractive(["npm", "install"], { cwd: webDir }))) {
-      warn(t("npm install 失败,稍后在 web/ 目录手动重试", "npm install failed — retry manually in web/"));
-      return;
+    if (skip.webInstall) {
+      ok(t("web 依赖已在,跳过 npm install", "web dependencies already present — skipping npm install"));
+    } else {
+      say_run("npm install");
+      if (!(await runInteractive(["npm", "install"], { cwd: webDir }))) {
+        warn(t("npm install 失败,稍后在 web/ 目录手动重试", "npm install failed — retry manually in web/"));
+        return;
+      }
     }
     // ⚠ 必须 build:开机自启那个 daemon 跑的是 `next start`(生产模式),没有 .next/
     //   它会直接退出,而 KeepAlive 会把它无限重启。install-cli 因此也把「构建产物
@@ -1571,6 +1619,16 @@ async function main() {
   } else if (await fileExists(ENV_EXAMPLE_PATH)) {
     existing = parseEnv(await readFile(ENV_EXAMPLE_PATH, "utf-8"));
   }
+
+  progress = assessInstall({
+    envFile: await fileExists(ENV_PATH),
+    webEnvLocal: await fileExists(`${REPO_ROOT}/web/.env.local`),
+    webNextBin: await fileExists(`${REPO_ROOT}/web/node_modules/.bin/next`),
+    webBuildId: await fileExists(`${REPO_ROOT}/web/.next/BUILD_ID`),
+    bridgePlist: await fileExists(`${process.env.HOME}/Library/LaunchAgents/com.claudestra.bridge.plist`),
+    webPlist: await fileExists(`${process.env.HOME}/Library/LaunchAgents/com.claudestra.web.plist`),
+  });
+  if (progress.partial) printResumeBanner();
 
   await stepCheckDeps();
   await stepDiscover();
