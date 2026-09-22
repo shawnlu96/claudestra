@@ -104,7 +104,13 @@ export function procStartMatches(e: Pick<CcSessionEntry, "procStart" | "startedA
 }
 
 function psLstart(pid: number): string {
-  const r = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+  // lstart 跟随 locale：zh_CN 下输出「三  9月/23 03:38:51 2026」，Date.parse 认不出 →
+  // 所有条目都被当成过期登记剔除。强制 C locale 拿英文格式
+  const r = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], {
+    env: { ...process.env, LC_ALL: "C", LANG: "C", LC_TIME: "C" },
+    stdout: "pipe",
+    stderr: "ignore",
+  });
   return r.exitCode === 0 ? r.stdout.toString() : "";
 }
 

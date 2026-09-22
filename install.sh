@@ -409,7 +409,9 @@ fi
 # 向导契约：本脚本下面承诺的是 Web 优先 + 自动收编的向导（SETUP_CONTRACT >= 2，见
 # src/setup.ts）。最新 release 早于它的话，装出来的是旧向导（默认 Discord、没有 web
 # 托管和收编），和这里的承诺对不上——问一句，默认改装 main。显式指定了 ref 的尊重用户选择。
-if [ "$CLAUDESTRA_REF_EXPLICIT" != "1" ] && ! grep -Eq 'SETUP_CONTRACT = [2-9]' src/setup.ts 2>/dev/null; then
+# 取出数字按数值比（正则 [2-9] 到 10 就失配了）；取不到按 0 算
+SETUP_CONTRACT_VER=$(sed -n 's/.*SETUP_CONTRACT = \([0-9][0-9]*\).*/\1/p' src/setup.ts 2>/dev/null | head -1 || true)
+if [ "$CLAUDESTRA_REF_EXPLICIT" != "1" ] && [ "${SETUP_CONTRACT_VER:-0}" -lt 2 ]; then
   warn "$(L "这个版本的配置向导早于 Web 优先向导（没有 web 服务托管、没有会话收编）" "This version's setup wizard predates the Web-first wizard (no web service, no session adoption)")"
   if confirm "$(L "改装 main 分支的最新代码吗？" "Install the latest main branch instead?")" y; then
     if CO_ERR=$(git checkout --quiet origin/main 2>&1); then

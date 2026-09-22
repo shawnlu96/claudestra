@@ -1098,4 +1098,19 @@ describe("detectBypassConsentPrompt — Bypass 模式首启确认框", () => {
     const trust = "\nQuick safety check: Is this a project you created or one you trust?\n\n❯ No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel\n";
     expect(detectBypassConsentPrompt(trust)).toBe(false);
   });
+
+  test("带编号的选项（❯ 1. No, exit / 2. Yes, I accept）同样识别", () => {
+    const numbered = real.replace("❯ No, exit", "❯ 1. No, exit").replace("  Yes, I accept", "  2. Yes, I accept");
+    expect(detectBypassConsentPrompt(numbered)).toBe(true);
+    expect(isAutoConfirmableModal(numbered)).toBe(false);
+  });
+
+  test("确认框贴在 pane 底部时不算就绪（❯ No, exit + 警告正文会凑齐 isClaudeReady 的两个信号）", () => {
+    // 窄/矮窗口里启动命令很长，CC 内联渲染在它下面，确认框正好落到最底部
+    const bottom = real.replace(/\n+$/, "");
+    expect(detectBypassConsentPrompt(bottom)).toBe(true);
+    expect(isClaudeReady(bottom)).toBe(false);
+    expect(isClaudeReady(bottom + "\n")).toBe(false);
+    expect(isClaudeReady(real)).toBe(false);
+  });
 });

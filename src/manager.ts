@@ -76,7 +76,7 @@ import { resolveSessionIdForWindow, readLiveCcSessionEntries } from "./lib/cc-se
 import { readBypassConsent } from "./lib/bypass-consent.js";
 import { writeMasterResume } from "./lib/master-session.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
-import { mayTakeOver, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
+import { ancestorPids, mayTakeOver, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
 import { allSources, type DiscoveredSession } from "./lib/runtimes/index.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
@@ -327,7 +327,13 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   ]);
   const managed = new Set(reg.map((a) => a.sessionId).filter(Boolean) as string[]);
   const taken = new Set(reg.map((a) => a.name.replace(/^agent-/, "")));
-  const cands = takeoverCandidates(alive, panes, managed);
+  // 从 CC 的 `!` 模式 / Bash 工具里跑 setup 或 takeover 时，那个 CC 是我们的祖先：绝不能列、更不能 SIGTERM
+  const ancestors = ancestorPids(process.pid, (p) => {
+    const r = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(p)], { stdout: "pipe", stderr: "ignore" });
+    const n = Number(r.stdout.toString().trim());
+    return r.exitCode === 0 && Number.isFinite(n) ? n : null;
+  });
+  const cands = takeoverCandidates(alive.filter((e) => !ancestors.has(e.pid)), panes, managed);
 
   if (!target && !opts.all) {
     output({ ok: true, candidates: cands.map((c) => ({

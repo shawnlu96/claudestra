@@ -76,4 +76,7 @@ describe("procStartMatches — 识破 pid 复用的过期登记", () => {
     expect(procStartMatches({ procStart: utc }, "")).toBe(false);
     expect(procStartMatches({}, psOf(startMs))).toBe(false);
   });
+  test("本地化的 lstart（zh_CN）解析不了 → false：所以 psLstart 必须强制 C locale", () => {
+    expect(procStartMatches({ procStart: utc }, "三  9月/23 03:23:19 2026")).toBe(false);
+  });
 });

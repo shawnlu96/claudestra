@@ -465,6 +465,9 @@ export async function idleVerdict(target: string): Promise<IdleVerdict> {
  * 很久，稳定。统一到 launch 流程里消除 create / resume 路径的滞后。
  */
 export function isClaudeReady(pane: string): boolean {
+  // bypass 首启确认框贴在 pane 底部时，`❯ No, exit` + 警告正文里的 "Bypass Permissions"
+  // 恰好同时满足下面两个信号——不排除就会把卡在确认框上的会话报成就绪
+  if (detectBypassConsentPrompt(pane)) return false;
   const lines = pane.split("\n");
   // v2.0.14+: bypass banner 检查从 `pane.includes(...)` 收紧到 last 10 行，避免
   // 旧 claude session 残留在 scrollback 的 banner 字符串造成假阳性。具体 bug：
@@ -593,7 +596,8 @@ export function detectBypassConsentPrompt(pane: string): boolean {
   const joined = trimTrailingBlank(pane.split("\n")).slice(-25).join("\n");
   return (
     /Bypass Permissions mode/i.test(joined) &&
-    /^\s*(?:❯\s*)?Yes, I accept\s*$/im.test(joined) &&
+    // 有的 CC 版本给选项编号（`2. Yes, I accept`）；漏认会退回自动 Enter，所以两种都认
+    /^\s*(?:❯\s*)?(?:\d+\.\s*)?Yes, I accept\s*$/im.test(joined) &&
     /Enter to confirm/i.test(joined)
   );
 }

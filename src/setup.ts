@@ -15,6 +15,7 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
+import { mergeEnvContent } from "./lib/env-file.js";
 
 /**
  * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
@@ -910,18 +911,17 @@ interface Config {
   MCP_NAME: string;
 }
 
-function buildEnvContent(cfg: Config): string {
-  return [
-    "# Claudestra 运行时配置 (由 bun run setup 生成)",
-    `DISCORD_BOT_TOKEN=${cfg.DISCORD_BOT_TOKEN}`,
-    `DISCORD_GUILD_ID=${cfg.DISCORD_GUILD_ID}`,
-    `ALLOWED_USER_IDS=${cfg.ALLOWED_USER_IDS}`,
-    `CONTROL_CHANNEL_ID=${cfg.CONTROL_CHANNEL_ID}`,
-    `BRIDGE_PORT=${cfg.BRIDGE_PORT}`,
-    `USER_NAME=${cfg.USER_NAME}`,
-    `MCP_NAME=${cfg.MCP_NAME}`,
-    "",
-  ].join("\n");
+/** 在现有 .env 上就地合并（手加的键、注释不丢；值没变的行逐字节保留）。见 lib/env-file.ts */
+function buildEnvContent(cfg: Config, existing: string | null): string {
+  return mergeEnvContent(existing, {
+    DISCORD_BOT_TOKEN: cfg.DISCORD_BOT_TOKEN,
+    DISCORD_GUILD_ID: cfg.DISCORD_GUILD_ID,
+    ALLOWED_USER_IDS: cfg.ALLOWED_USER_IDS,
+    CONTROL_CHANNEL_ID: cfg.CONTROL_CHANNEL_ID,
+    BRIDGE_PORT: cfg.BRIDGE_PORT,
+    USER_NAME: cfg.USER_NAME,
+    MCP_NAME: cfg.MCP_NAME,
+  }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
 function parseEnv(content: string): Partial<Config> {
@@ -998,7 +998,8 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
     }
   }
   if (writeEnv) {
-    await writeFile(ENV_PATH, buildEnvContent(cfg));
+    const prev = (await fileExists(ENV_PATH)) ? await readFile(ENV_PATH, "utf-8") : null;
+    await writeFile(ENV_PATH, buildEnvContent(cfg, prev));
     // 0600：里面是 Discord bot token —— 拿到它等于拿到这个 bot 的全部权限。
     // 默认 umask 会写成 0644，同机其他用户可读。
     await chmod(ENV_PATH, 0o600).catch(() => {});
@@ -1272,6 +1273,13 @@ async function stepWebLogin(): Promise<string[]> {
   const username = userInfo().username;
   print(t(`网页登录用本机账号：登录名 ${c.bold}${c.yellow}${username}${c.reset}（不是全名，也不是 Apple ID），密码是开机密码。`,
           `The web UI logs in with this Mac's account: username ${c.bold}${c.yellow}${username}${c.reset} (not your full name or Apple ID), password = your login password.`));
+  if (process.platform !== "darwin") {
+    // checkWebLogin 的探测用的是 macOS nc 的语法（-G），别的平台上 sshd 开着也会报失败
+    hint(t("非 macOS：请自行确认 sshd 在 127.0.0.1:22 上监听（例如 systemctl status ssh）。",
+           "Not macOS: make sure sshd is listening on 127.0.0.1:22 yourself (e.g. `systemctl status ssh`)."));
+    br();
+    return [];
+  }
   for (let round = 0; round < 3; round++) {
     const [r] = await checkWebLogin(REPO_ROOT);
     if (!r) {
@@ -1286,11 +1294,9 @@ async function stepWebLogin(): Promise<string[]> {
       return [];
     }
     warn(t("「远程登录」没开：网页登录会一律报「密码错误」。", "Remote Login is off: web login will always say \"wrong password\"."));
-    if (process.platform === "darwin") {
-      await run(["open", "x-apple.systempreferences:com.apple.Sharing-Settings.extension"]);
-      print(t(`已打开「系统设置 → 通用 → 共享」：打开 ${c.bold}远程登录${c.reset}，并确认「允许访问」里包含 ${c.bold}${username}${c.reset}。`,
-              `Opened System Settings → General → Sharing: turn on ${c.bold}Remote Login${c.reset} and make sure ${c.bold}${username}${c.reset} is allowed.`));
-    }
+    await run(["open", "x-apple.systempreferences:com.apple.Sharing-Settings.extension"]);
+    print(t(`已打开「系统设置 → 通用 → 共享」：打开 ${c.bold}远程登录${c.reset}，并确认「允许访问」里包含 ${c.bold}${username}${c.reset}。`,
+            `Opened System Settings → General → Sharing: turn on ${c.bold}Remote Login${c.reset} and make sure ${c.bold}${username}${c.reset} is allowed.`));
     hint(t("命令行备选：sudo systemsetup -setremotelogin on（新版 macOS 可能要求终端有完全磁盘访问权限）",
            "CLI alternative: sudo systemsetup -setremotelogin on (newer macOS may require Full Disk Access for the terminal)"));
     await waitEnter(t("开好后按 ENTER 重新检测", "Press ENTER to check again"));
@@ -1534,7 +1540,8 @@ async function stepAdoptSessions(bridgePort: string): Promise<string[]> {
     { masterDirs, exists: existsSync, realpath });
 
   if (plan.busy.length) {
-    print(t("正在跑回合的会话，这次不动（接管会打断它）：", "Sessions in the middle of a turn — left alone (taking over would interrupt them):"));
+    print(t("不在空闲状态的会话（正在跑回合 / `!` 命令，或状态未知），这次不动（接管会打断它）：",
+            "Sessions that are not idle (running a turn or a `!` command, or status unknown) — left alone (taking over would interrupt them):"));
     for (const b of plan.busy) print(`  ${c.dim}•${c.reset} ${c.bold}${b.cwd}${c.reset} ${c.dim}${b.sessionId}${c.reset}`);
     hint(t("等它跑完，在网页侧栏收编，或跑: bun src/manager.ts takeover <sessionId>",
            "Once it finishes, adopt it from the web sidebar, or run: bun src/manager.ts takeover <sessionId>"));
@@ -1835,6 +1842,9 @@ async function main() {
   await stepCheckDeps();
   await stepDiscover();
   const fronts = await stepPickFrontends(existing);
+  // daemon 一装上 launcher 就会以 bypass 模式拉起 master，所以同意必须先于 stepFinalize；
+  // 放在最前（任何有副作用的步骤之前）：不同意时不留下装了一半的 web / token
+  await stepBypassConsent();
 
   // Discord 未选时留空 → bridge 按 WEB_ONLY 模式启动(config.ts:
   // WEB_ONLY = !DISCORD_BOT_TOKEN);控制频道用 web-only 约定的本地常量。
@@ -1881,8 +1891,6 @@ async function main() {
     MCP_NAME: mcpName,
   };
 
-  // daemon 一装上 launcher 就会以 bypass 模式拉起 master：同意必须先于 stepFinalize
-  await stepBypassConsent();
   const fin = await stepFinalize(cfg);
   // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后
   if (fin.failures.length === 0 && !fin.deferred) {

@@ -42,7 +42,7 @@ export type TakeoverVerdict =
   | "inside"
   /** 可以接管：退出原进程 + 在我们这边 resume 同一个 session */
   | "ready"
-  /** 正在跑一个回合——接管会打断它，要显式 --force */
+  /** 不是空闲（在跑回合 / 在跑 `!` shell 命令 / 状态未知）——接管会打断它，要显式 --force */
   | "busy";
 
 /** `master:@994.%994` → `%994`；取不出来返回 null */
@@ -59,7 +59,8 @@ export function classifyRunning(
   if (managedSessionIds.has(e.sessionId)) return "inside";
   const pane = paneIdOf(e.tmux);
   if (pane && ourPanes.has(pane)) return "inside";
-  return e.status === "busy" ? "busy" : "ready";
+  // 只有明确自报 idle 才算可接管：shell（正在跑 `!` 命令）和缺字段的老版本都不敢打断
+  return e.status === "idle" ? "ready" : "busy";
 }
 
 export interface TakeoverCandidate extends RunningCc {
@@ -90,10 +91,27 @@ export function takeoverCandidates(
   return out;
 }
 
+/**
+ * 从 pid 往上走 ppid 链，拿到全部祖先（纯函数，ppidOf 由调用方注入 `ps -o ppid=`）。
+ * takeover 要剔除自己的祖先：从 CC 的 `!` 模式或 Bash 工具里跑 setup / takeover 时，
+ * 那个 CC 就是祖先，SIGTERM 它等于把正在执行接管的自己也杀掉。
+ */
+export function ancestorPids(pid: number, ppidOf: (p: number) => number | null, maxDepth = 64): Set<number> {
+  const out = new Set<number>();
+  let cur = pid;
+  for (let i = 0; i < maxDepth; i++) {
+    const pp = ppidOf(cur);
+    if (!pp || pp <= 1 || out.has(pp)) break;
+    out.add(pp);
+    cur = pp;
+  }
+  return out;
+}
+
 /** 允不允许对它动手：busy 的必须显式 force */
 export function mayTakeOver(c: TakeoverCandidate, force: boolean): { ok: boolean; reason?: string } {
   if (c.verdict === "busy" && !force) {
-    return { ok: false, reason: "它正在跑一个回合，接管会打断；确认要打断就加 --force" };
+    return { ok: false, reason: `它不是空闲状态（status=${c.status ?? "未知"}），接管会打断；确认要打断就加 --force` };
   }
   return { ok: true };
 }

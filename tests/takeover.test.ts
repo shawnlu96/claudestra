@@ -7,14 +7,14 @@
  * 用户正在用的进程。
  */
 import { describe, test, expect } from "bun:test";
-import { classifyRunning, mayTakeOver, paneIdOf, planAdoption, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type RunningCc } from "../src/lib/takeover.js";
+import { ancestorPids, classifyRunning, mayTakeOver, paneIdOf, planAdoption, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type RunningCc } from "../src/lib/takeover.js";
 import { bypassConsentGiven, claudeUserSettingsPath } from "../src/lib/bypass-consent.js";
 import { parseCcSessionEntry } from "../src/lib/cc-sessions.js";
 
 const ours = new Set(["%994", "%830"]);
 const managed = new Set(["sid-managed"]);
 const mk = (o: Partial<RunningCc>): RunningCc =>
-  ({ pid: 100, sessionId: "sid-x", cwd: "/Users/x/proj", kind: "interactive", ...o });
+  ({ pid: 100, sessionId: "sid-x", cwd: "/Users/x/proj", kind: "interactive", status: "idle", ...o });
 
 describe("paneIdOf", () => {
   test("从 session:window.pane 里取 pane id", () => {
@@ -49,8 +49,9 @@ describe("classifyRunning", () => {
     expect(classifyRunning(mk({ status: "busy" }), ours, managed)).toBe("busy");
   });
 
-  test("status=shell（退回 shell 了）不算 busy", () => {
-    expect(classifyRunning(mk({ status: "shell" }), ours, managed)).toBe("ready");
+  test("status=shell（正在跑 `!` 命令）/ 缺 status（老版本）→ 同样当 busy，不敢打断", () => {
+    expect(classifyRunning(mk({ status: "shell" }), ours, managed)).toBe("busy");
+    expect(classifyRunning(mk({ status: undefined }), ours, managed)).toBe("busy");
   });
 });
 
@@ -74,6 +75,18 @@ describe("takeoverCandidates", () => {
       ours, managed,
     );
     expect(got.map((c) => c.sessionId)).toEqual(["e"]);
+  });
+});
+
+describe("ancestorPids —— 不能把正在执行接管的自己的祖先 SIGTERM 掉", () => {
+  const tree: Record<number, number> = { 500: 400, 400: 300, 300: 1 };
+  const ppidOf = (p: number) => tree[p] ?? null;
+  test("沿 ppid 链一直走到 launchd（1）为止，不含自己", () => {
+    expect([...ancestorPids(500, ppidOf)]).toEqual([400, 300]);
+  });
+  test("ps 查不到 / 环 → 停下，不死循环", () => {
+    expect(ancestorPids(999, ppidOf).size).toBe(0);
+    expect([...ancestorPids(7, (p) => (p === 7 ? 8 : 7))]).toEqual([8, 7]);
   });
 });
 
