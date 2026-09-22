@@ -14,7 +14,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "未登录" }, { status: 401 });
   }
   try {
-    const data = await bridgeGet<Record<string, unknown>>("/remote-access", { timeoutMs: 15000 });
+    const fresh = new URL(request.url).searchParams.get("fresh") === "1";
+    const data = await bridgeGet<Record<string, unknown>>(`/remote-access${fresh ? "?fresh=1" : ""}`, { timeoutMs: 15000 });
     return NextResponse.json({ data });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 502 });

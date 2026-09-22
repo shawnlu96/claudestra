@@ -679,7 +679,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     const { remoteAccessSnapshot } = await import("../lib/tailscale.js");
     const { readWebPort } = await import("../lib/doctor-remote.js");
     try {
-      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readWebPort(`${import.meta.dir}/../..`))) });
+      // ?fresh=1：面板上的「重新检测」要绕过 60 秒缓存（刚配完 serve / 刚续完证书就想看结果）
+      const maxAge = url.searchParams.get("fresh") === "1" ? 0 : 60_000;
+      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readWebPort(`${import.meta.dir}/../..`), maxAge)) });
     } catch (e) {
       return apiJson(500, { ok: false, error: `探测失败: ${(e as Error).message}` });
     }

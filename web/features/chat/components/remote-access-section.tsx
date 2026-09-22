@@ -154,9 +154,9 @@ function PlanHint({ snap }: { snap: Snapshot }) {
   }
 }
 
-async function fetchSnapshot(): Promise<{ snap?: Snapshot; err?: string }> {
+async function fetchSnapshot(fresh = false): Promise<{ snap?: Snapshot; err?: string }> {
   try {
-    const r = await fetch("/api/remote-access");
+    const r = await fetch(`/api/remote-access${fresh ? "?fresh=1" : ""}`);
     const j = (await r.json()) as { data?: Snapshot; error?: string };
     if (!r.ok || !j.data) return { err: j.error || `HTTP ${r.status}` };
     return { snap: j.data };
@@ -183,7 +183,7 @@ export function RemoteAccessSection() {
   }, [apply]);
   const reload = () => {
     setLoading(true);
-    void fetchSnapshot().then(apply);
+    void fetchSnapshot(true).then(apply);
   };
 
   const ts = snap?.tailscale;
