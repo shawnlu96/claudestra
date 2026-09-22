@@ -443,8 +443,15 @@ let lastClaudeUpdateCheck = 0;
 // periodic dead-agent 巡检开机即触发,和 boot restore 撞车(P1,peer 2026-08-09)。
 let lastDeadAgentCheck = Date.now();
 
-async function runCmd(cmd: string[], timeoutMs = 0): Promise<{ ok: boolean; out: string; err: string }> {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+async function runCmd(
+  cmd: string[],
+  timeoutMs = 0,
+  extraPath?: string,
+): Promise<{ ok: boolean; out: string; err: string }> {
+  const env = extraPath
+    ? { ...process.env, PATH: `${extraPath}:${process.env.PATH ?? ""}` }
+    : undefined;
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", ...(env ? { env } : {}) });
   // 可选超时强杀:坏掉的 claude 二进制连 --version 都永久 hang(2026-07-24),
   // 无超时的 runCmd 会把 launcher 主循环整个吊死
   const killer = timeoutMs > 0 ? setTimeout(() => { try { proc.kill(9); } catch { /* 已退出 */ } }, timeoutMs) : null;
@@ -527,6 +534,19 @@ async function getClaudeLatestVersion(): Promise<string | null> {
   if (!ok) return null;
   const m = out.match(/(\d+\.\d+\.\d+)/);
   return m ? m[1] : null;
+}
+
+/**
+ * npm 安装方式下的升级。**必须走 resolveNpm 的绝对路径**：launchd 给 daemon 的 PATH
+ * 是阉割版，裸 `npm` 在这里 ENOENT，而 runCmd 把错误吞进返回值 → 「更新失败」日志里
+ * 什么都没有。同坑已经踩过两次（web 构建 e11500e、CC 更新检查 peer 2026-08-09），
+ * 检查那一侧（getClaudeLatestVersion）早就改了，升级这一侧一直是裸 npm。
+ * binDir 也要补进 PATH：npm 自己要找得到 node，postinstall 脚本同理。
+ */
+async function npmUpgradeClaude(): Promise<{ ok: boolean; out: string; err: string }> {
+  const npmBin = resolveNpm();
+  if (!npmBin) return { ok: false, out: "", err: "找不到 npm（PATH/nvm/homebrew 都没有）" };
+  return runCmd([npmBin.npm, "install", "-g", "@anthropic-ai/claude-code"], 600_000, npmBin.binDir);
 }
 
 /** claude 二进制的安装方式检测。三类:
@@ -775,7 +795,7 @@ async function checkClaudeCodeUpdate() {
         // Error: invalid option 退出——2026-07-27 实测的「更新失败」真凶),
         // 正确姿势是 HOMEBREW_CASK_OPTS 环境变量,install/upgrade/reinstall 通吃。
         await runCmd(["env", "HOMEBREW_CASK_OPTS=--no-quarantine", "brew", "upgrade", "--cask", install.cask], 600_000)
-      : await runCmd(["npm", "install", "-g", "@anthropic-ai/claude-code"], 600_000);
+      : await npmUpgradeClaude();
   if (!upgrade.ok) {
     console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}\n${upgrade.err}`);
     try {
