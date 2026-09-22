@@ -37,3 +37,15 @@ export function piModelLabel(id: string | null | undefined): string {
   const tail = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
   return tail.replace(/:.*$/, "");
 }
+
+/**
+ * 顶栏挂哪种模型/effort 切换器。只有 Claude Code（runtime 缺失 = 老 agent = CC）
+ * 走 CC 面板——选项是 CC 的模型别名表，切换是往 TUI 注入 `/model`、`/effort`；
+ * Pi 有自己的切换器；其它运行时（Codex …）没有可用的切换路径，返回 null 不渲染
+ * （落进 CC 面板的话 bridge 按 runtime 回 400，见 tests/claude-settings-runtime.test.ts）。
+ */
+export function switcherKindFor(runtime: string | null | undefined): "claude" | "pi" | null {
+  if (!runtime || runtime === "claude-code") return "claude";
+  if (runtime === "pi") return "pi";
+  return null;
+}
