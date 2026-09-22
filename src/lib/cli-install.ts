@@ -159,6 +159,18 @@ export function webDaemonSpec(repoRoot: string, port: number, nodePath?: string 
 /** 老 pm2 启动名（用于 stop 老的、避免跟新 launchd 抢） */
 const LEGACY_PM2_NAMES = ["discord-bridge", "master-launcher", "cron-scheduler"];
 
+/** 装完探活 + 自愈的结果 */
+export interface DaemonHealth {
+  label: string;
+  /** 给人看的探测目标，如 `bridge HTTP :13847` */
+  name: string;
+  healthy: boolean;
+  /** 探失败后自动 kickstart 过一次 */
+  repaired: boolean;
+  /** 仍不健康时附上 .err 的末尾几行（已去重） */
+  log?: string[];
+}
+
 export interface DaemonInstall {
   label: string;
   plistPath: string;
@@ -193,6 +205,8 @@ export interface InstallCliResult {
   webDaemon?:
     | { installed: true; port: number; url: string; serving: boolean; error?: string; log?: string[] }
     | { installed: false; reason?: string };
+  /** v2.24+ 装完逐个探活；不健康的自动 kickstart 一次再探 */
+  daemonHealth?: DaemonHealth[];
   errors: string[];
   warnings: string[];
 }
@@ -963,32 +977,121 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   //   install-cli 都打印 ok、daemons 全 loaded:true，而端口从头到尾没人监听——
   //   launchd 的 bootstrap 成功只代表「plist 被接受了」，不代表进程活着。
   //   服务起不来的真话只在 web.err 里，而没人会主动去看它。
-  if (result.webDaemon?.installed) {
-    const port = result.webDaemon.port;
-    const serving = await waitPortListening(port, 12_000);
-    result.webDaemon.serving = serving;
-    if (!serving) {
-      const log = tailFile(`${LOG_DIR}/web.err`, 8);
-      result.webDaemon.error = `装好了但 ${port} 端口没人监听——服务起来就退出了`;
-      if (log.length) result.webDaemon.log = log;
+  // 装完逐个探活，不健康的自动 kickstart 一次再探（见 healDaemons）
+  result.daemonHealth = await healDaemons(repoRoot, uid, result.webDaemon?.installed ? result.webDaemon.port : null);
+  for (const h of result.daemonHealth) {
+    if (h.label === "com.claudestra.web" && result.webDaemon?.installed) {
+      result.webDaemon.serving = h.healthy;
+      if (!h.healthy) {
+        result.webDaemon.error = `装好了但 ${result.webDaemon.port} 端口没人监听——服务起来就退出了`;
+        if (h.log?.length) result.webDaemon.log = h.log;
+      }
+    }
+    if (!h.healthy) {
       warnings.push(
-        `web 服务没起来（${port} 无监听）。日志末尾：${log.slice(-2).join(" | ") || "(web.err 是空的)"}`,
+        `${h.name} 不健康${h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：` +
+          (h.log?.slice(-2).join(" | ") || "(.err 是空的)"),
       );
+    } else if (h.repaired) {
+      warnings.push(`${h.name} 起初没响应，已自动重启修好`);
     }
   }
 
   return result;
 }
 
-/** 轮询端口直到有人监听（用 lsof，不自己去 connect —— 免得在半开状态上误判） */
-async function waitPortListening(port: number, timeoutMs: number): Promise<boolean> {
+/**
+ * 装完的**自愈**：daemon 不只要被 launchd 接受，还得真的在干活。
+ *
+ * 由来（2026-09-22 试装全程）：`launchctl bootstrap` 成功只代表 plist 被接受；
+ * 进程起来就崩、或者端口开着却不响应，`launchctl list` 和 install-cli 都照样报 ok。
+ * 这一轮连着踩了两次：web 服务 exit 127 刷了十几次没人知道；bridge 端口在 LISTEN
+ * 但 HTTP 超时（`Bun.serve` 一起来端口就开了，"在听"不等于"活着"）。
+ *
+ * 所以每个能探活的 daemon 都探一次，不健康就**自动 kickstart 一次**再探。
+ * 只修一次：修不好说明是代码或配置的问题，再重启十次也一样，那时该把日志摆给人看。
+ */
+async function healDaemons(
+  repoRoot: string,
+  uid: string,
+  webPort: number | null,
+): Promise<DaemonHealth[]> {
+  const bridgePort = readBridgePort(repoRoot);
+  const probes: Array<{ label: string; name: string; probe: () => Promise<boolean>; stem: string }> = [];
+  if (bridgePort) {
+    probes.push({
+      label: "com.claudestra.bridge",
+      name: `bridge HTTP :${bridgePort}`,
+      stem: "bridge",
+      // 端口在听不够 —— 必须真的答一个 HTTP，这正是试装现场那一幕
+      probe: () => httpOk(`http://127.0.0.1:${bridgePort}/stats`, 4_000),
+    });
+  }
+  if (webPort) {
+    probes.push({
+      label: "com.claudestra.web",
+      name: `web :${webPort}`,
+      stem: "web",
+      probe: () => portListening(webPort),
+    });
+  }
+
+  const out: DaemonHealth[] = [];
+  for (const p of probes) {
+    let healthy = await waitFor(p.probe, 12_000);
+    let repaired = false;
+    if (!healthy) {
+      spawnSync("launchctl", ["kickstart", "-k", `gui/${uid}/${p.label}`], { encoding: "utf8" });
+      repaired = true;
+      healthy = await waitFor(p.probe, 15_000);
+    }
+    out.push({
+      label: p.label,
+      name: p.name,
+      healthy,
+      repaired,
+      ...(healthy ? {} : { log: tailFile(`${LOG_DIR}/${p.stem}.err`, 6) }),
+    });
+  }
+  return out;
+}
+
+/** .env 里的 BRIDGE_PORT（用户改过端口的机器不能按默认值去探） */
+function readBridgePort(repoRoot: string): number | null {
+  try {
+    const m = readFileSync(`${repoRoot}/.env`, "utf-8").match(/^\s*BRIDGE_PORT\s*=\s*(\d+)/m);
+    const n = m ? Number(m[1]) : 3847;
+    return Number.isInteger(n) && n > 0 && n < 65536 ? n : 3847;
+  } catch {
+    return null; // 没有 .env = 还没配过，谈不上探活
+  }
+}
+
+async function httpOk(url: string, timeoutMs: number): Promise<boolean> {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    return r.status < 500;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function waitFor(probe: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
   const until = Date.now() + timeoutMs;
   while (Date.now() < until) {
-    const r = spawnSync("/usr/sbin/lsof", ["-iTCP:" + port, "-sTCP:LISTEN", "-n", "-P"], { encoding: "utf8" });
-    if (r.status === 0 && (r.stdout || "").trim()) return true;
-    await new Promise((res) => setTimeout(res, 500));
+    if (await probe()) return true;
+    await new Promise((r) => setTimeout(r, 700));
   }
   return false;
+}
+
+function portListening(port: number): Promise<boolean> {
+  const r = spawnSync("/usr/sbin/lsof", ["-iTCP:" + port, "-sTCP:LISTEN", "-n", "-P"], { encoding: "utf8" });
+  return Promise.resolve(r.status === 0 && !!(r.stdout || "").trim());
 }
 
 function tailFile(path: string, n: number): string[] {
