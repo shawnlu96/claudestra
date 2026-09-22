@@ -71,8 +71,10 @@ import {
 import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
-import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
-import { agentRuntime, isMasterAgent, type AgentRuntime } from "./lib/registry.js";
+import { resolveSessionIdForWindow, readCcSessionEntries } from "./lib/cc-sessions.js";
+import { agentNameFromDir } from "./lib/agent-name.js";
+import { mayTakeOver, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
+import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
@@ -449,6 +451,76 @@ async function scanPiSessions(search?: string): Promise<ClaudeSession[]> {
     }
   }
   return sessions;
+}
+
+/** 我们自己 socket 上所有 pane id —— 判断某个 CC 进程在不在我们的 tmux 里 */
+async function ourPaneIds(): Promise<Set<string>> {
+  const out = await tmuxRaw(["list-panes", "-a", "-F", "#{pane_id}"]).catch(() => "");
+  return new Set(out.split("\n").map((x) => x.trim()).filter(Boolean));
+}
+
+/** 等一个 pid 消失；到点还在就返回 false（不默认 SIGKILL——那是用户正在用的东西） */
+async function waitPidGone(pid: number, timeoutMs: number): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    try { process.kill(pid, 0); } catch { return true; }
+    await Bun.sleep(300);
+  }
+  try { process.kill(pid, 0); return false; } catch { return true; }
+}
+
+/**
+ * v2.24+ takeover —— 把跑在 Claudestra 之外的 Claude Code「重启进」我们的 tmux。
+ *
+ * 进程搬不动（控制终端出生即定），但会话状态全在 jsonl 里，所以：让原进程干净退出
+ * （SIGTERM，等它落盘），再在我们的 tmux 里 resume **同一个 sessionId**。对用户就是
+ * 「同一个会话换了个地方继续」。判据与安全阀见 lib/takeover.ts。
+ */
+async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boolean; name?: string } = {}) {
+  const [entries, panes, reg] = await Promise.all([
+    readCcSessionEntries(),
+    ourPaneIds(),
+    readRegistryAgents().catch(() => []),
+  ]);
+  const managed = new Set(reg.map((a) => a.sessionId).filter(Boolean) as string[]);
+  const taken = new Set(reg.map((a) => a.name.replace(/^agent-/, "")));
+  const alive = entries.filter((e) => { try { process.kill(e.pid, 0); return true; } catch { return false; } });
+  const cands = takeoverCandidates(alive, panes, managed);
+
+  if (!target && !opts.all) {
+    output({ ok: true, candidates: cands.map((c) => ({
+      sessionId: c.sessionId, cwd: c.cwd, pid: c.pid, verdict: c.verdict,
+      suggestedName: agentNameFromDir(c.cwd, taken),
+    })), hint: cands.length
+      ? "takeover <sessionId> 接管一个；takeover --all 全部；正在跑回合的要加 --force"
+      : "没有跑在 Claudestra 之外的 Claude Code" });
+    return;
+  }
+
+  const picked: TakeoverCandidate[] = opts.all ? cands : cands.filter((c) => c.sessionId === target || c.sessionId.startsWith(target!));
+  if (picked.length === 0) {
+    output({ ok: false, error: target ? `没找到可接管的会话 ${target}（它可能已经在 Claudestra 里，或进程已退出）` : "没有可接管的会话" });
+    return;
+  }
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const c of picked) {
+    const gate = mayTakeOver(c, !!opts.force);
+    if (!gate.ok) { results.push({ sessionId: c.sessionId, ok: false, error: gate.reason }); continue; }
+    const name = opts.name && picked.length === 1 ? opts.name : agentNameFromDir(c.cwd, taken);
+    taken.add(name);
+    try { process.kill(c.pid, "SIGTERM"); } catch { /* 刚好自己退了 */ }
+    const gone = await waitPidGone(c.pid, 20_000);
+    if (!gone) {
+      results.push({ sessionId: c.sessionId, ok: false,
+        error: `原进程 ${c.pid} 收到 SIGTERM 后 20 秒仍在；没有强杀（那是你正在用的窗口）。请手动退出它再重试` });
+      continue;
+    }
+    // 原进程已退出 ⇒ session 没人占用，直接 resume 同一个 id（不是 fork，上下文一条不丢）
+    await cmdResume(name, c.sessionId, c.cwd);
+    results.push({ sessionId: c.sessionId, ok: true, name, pid: c.pid });
+  }
+  output({ ok: results.every((r) => r.ok), results });
 }
 
 /** 两种 runtime 的会话一起扫（会话列表 / 按 sessionId 找目录 都用它） */
@@ -4975,6 +5047,15 @@ switch (cmd) {
     break;
   }
 
+  // v2.24+ takeover —— 把跑在 Claudestra 之外的 Claude Code 重启进我们的 tmux
+  case "takeover": {
+    const { rest: afterAll, value: all } = extractBoolFlag(args, "--all");
+    const { rest: afterForce, value: force } = extractBoolFlag(afterAll, "--force");
+    const { rest: posArgs, value: nameFlag } = extractStringFlag(afterForce, "--name");
+    await cmdTakeover(posArgs[0], { all, force, name: nameFlag });
+    break;
+  }
+
   // v2.7+ 收编：adopt <name> <sessionId> —— 把 bg 分身/任意 session 立为正式会话并重启
   case "adopt": {
     const [name, sessionId] = args;
@@ -5520,6 +5601,7 @@ switch (cmd) {
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
         "sessions [search]               — browse past Claude Code sessions",
+        "takeover [sessionId|--all]      — restart a Claude Code running OUTSIDE Claudestra into our tmux (SIGTERM the original, then resume the same session; --force for a busy one). No args = list candidates.",
         'cron-add <name> "<cron>" <dir> <prompt...> [--channel <id>] [--target-agent <agent>] [--effort <level>] [--project <id>] — add a cron job (--target-agent sends the prompt to an existing agent, inheriting its context; otherwise a temporary agent is spawned each run, at --effort (default medium), filed under --project (default: resolved by dir))',
         "cron-list                       — list cron jobs",
         "cron-remove <name|id>           — remove a cron job",
