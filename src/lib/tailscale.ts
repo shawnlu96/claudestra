@@ -349,8 +349,11 @@ export async function readServeStatus(cli?: string | null): Promise<ServeState> 
 export async function listListeners(port: number): Promise<{ command: string; addr: string }[] | null> {
   try {
     const proc = Bun.spawn(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fcn"], { stdout: "pipe", stderr: "ignore" });
+    // 与 certDaysLeft 同理：doctor / bridge 面板都 await 这里，lsof 偶发卡住（僵死挂载）不能拖死整条链
+    const timer = setTimeout(() => proc.kill(), 3000);
     const out = await new Response(proc.stdout).text();
     await proc.exited;
+    clearTimeout(timer);
     return parseLsofListen(out);
   } catch {
     return null;
