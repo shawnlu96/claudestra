@@ -21,6 +21,6 @@
     // 它们经 type.ts 只牵到 web/lib/chat/events.ts 这一个 "@/..." 别名,在这里解析掉。
     "paths": { "@/*": ["./web/*"] }
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "web", "dist"]
 }

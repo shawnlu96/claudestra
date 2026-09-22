@@ -17,67 +17,17 @@ Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA �
 
 ## 目录结构
 
+逐文件说明（含终端移动端形态、xterm 细节等踩坑记录）见 [docs/web/layout.md](../docs/web/layout.md)。
+
 ```
-app/
-  page.tsx              → redirect /chat
-  chat/page.tsx         Chat 页面（<Chat/>）
-  login/page.tsx        SSH 账号登录
-  api/
-    auth/{login,logout,me}/  鉴权（公开，自处理）
-    agents/             GET 列表（代理 /api/v1/agents?include=stopped，master 置顶）；
-                        POST 新建（代理 /api/v1/agents，fork 端点）
-    agents/kill/        POST（代理 /api/v1/agents/:name/kill，fork 端点）
-    agents/restart/     POST（代理 /api/v1/agents/:name/restart，fork 端点）
-    chat/send/          POST（代理 /api/v1/agents/:name/messages，wait=0）
-    chat/stream/        GET SSE（订阅 /api/v1/events → 按 agent 过滤 → 翻译成 WebStreamEvent）
-    chat/history/       GET ?agent=（代理 /api/v1/agents/:name/history[/:sid]，live+归档）
-    chat/clear/         POST（代理 /api/v1/agents/:name/clear，fork 端点）
-    chat/interrupt/     POST（代理 /api/v1/agents/:name/interrupt，fork 端点）
-    agents/settings/    GET/PUT per-agent 前端配置（init_message 开机指令，web SQLite）
-    peers/              GET 清单 / POST {action} 分发（代理 /api/v1/peers*，peer 管理 UI 的 BFF）
-    chat/permission/    POST（代理 /api/v1/agents/:name/answer kind=permission）
-    chat/auq/           POST（代理 /api/v1/agents/:name/answer kind=auq）
-    terminal/stream/    GET SSE 纯透传（代理 /api/v1/agents/:name/terminal?cols=&rows=，fork 端点；
-                        浏览器断开→上游 abort→Bridge 销毁 PTY+viewer session）
-    terminal/input/     POST {id,d:base64}（代理 /api/v1/terminal/:id/input，逐键/微批，Bridge 不限流）
-    terminal/resize/    POST {id,cols,rows}（代理 /api/v1/terminal/:id/resize）
-features/terminal/      远程终端（会话详情 🖥️ 按钮 → 实时镜像 tmux + 可输入）
-  terminal-button.tsx   TopBar 入口（active 会话 + master 都有；stopped 隐藏）。形态分流：
-                        窄屏(<sm) → hash 伪路由 #terminal 全屏页（左滑/返回键退出，同 #chat
-                        导航栈）；宽屏 → 大模态框。⚠ 手机端别用模态框——软键盘 + daisyUI
-                        居中模态是结构性冲突（塌陷/露背/背面可滚，真机两轮实测）
-  terminal-page.tsx     移动端全屏页（createPortal + fixed inset-0 不透明底；软键盘时内容层
-                        钉 visualViewport (top=offsetTop,h=height) + --term-safe-bottom 归零）
-  terminal-modal.tsx    桌面模态框（无键盘逻辑）
-  terminal-view.tsx     @xterm/xterm v6 + fit + webgl(尽力)；SSE 下行 base64 帧→term.write，
-                        onData 8ms 微批+串行链→input POST（字节序），RO 防抖 150ms→resize POST。
-                        连接延迟 50ms（dev 双 effect 取消传导 race，见 prin-645ac3）。
-                        ?noWebgl=1 强制 DOM renderer（后台 tab 自动化验证用，WebGL hidden 不 paint）；
-                        window.__claudestraTerm debug 句柄（读 buffer 验数据面）
-  control-bar.tsx       控制键条（Esc/Tab/⇧Tab/方向/⏎/^C/^O + ⌨️ 聚焦唤软键盘；
-                        onPointerDown preventDefault 防抢焦点收键盘）
-                        ⚠ 滚动语义：CC TUI 在 alternate screen（无终端滚动缓冲，tmux pane
-                        history 也为空）——看转录历史用 ^O（CC transcript 模式，可滚）；
-                        viewer session 已开 tmux mouse（shell 场景滚轮进 copy-mode 可用）
-features/chat/
-  type.ts               ChatMessage / AgentSession / ToolCallView / PendingPermission / PendingAsk
-  stream.ts             consumeSSEStream + processStreamEvent + StreamSink（协议 v1，迁移零改动）
-  chat-store.ts         zenith 中枢（agents/messages/streaming + pendingPermission/pendingAsk；
-                        openGen 门控历史加载，streamGen 门控流；createAgent/killAgent/restartAgent；
-                        interrupt/resolvePermission/submitAsk/cancelAsk）
-  components/           sidebar / new-agent-modal / message-list（permission-card + ask-question-card）
-                        / composer（streaming 时出「停止」）/ chat(Provider)
-lib/
-  db/                   getDb + auth migration（数据根 ~/.claude-orchestrator/web/db）
-  services/auth.service.ts  verifySSH(ssh2) + session CRUD
-  api-auth.ts           isAuthed（cookie 或 x-api-key 双认证）
-  chat/
-    bridge-api.ts       /api/v1 客户端中枢：BRIDGE、Bearer 头、bridgeGet/bridgePost、
-                        apiAgentName（__master__ ↔ master 映射）
-    agents.ts           loadAgents（GET /api/v1/agents?include=stopped → AgentSession[]）
-    events.ts           WebStreamEvent 前端协议 v1（tool/text/status/done/permission/ask…）
-proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自守
+app/                  页面（chat / login）+ api/ 下的 BFF 路由（每个路由自己调 isAuthed，公开路由登记在 guard 的 PUBLIC_ROUTES）
+features/chat/        Chat：type / stream（SSE 协议 v1）/ chat-store（zenith 中枢）/ components
+features/terminal/    远程终端：窄屏全屏页、宽屏模态、xterm 视图、控制键条
+lib/                  db、auth.service、api-auth（isAuthed）、chat/（bridge-api 客户端、agents、events 协议）
+proxy.ts              Next16 proxy：只拦页面 cookie，API 由 handler 自守
 ```
+
+防腐规则与仓库根一致（见根目录 CLAUDE.md「防腐规则」）：web 同样受 `scripts/guard` 约束（文件 ≤400 行、函数 ≤100 行、无声吞错、web 与 src 互不 import）。
 
 ## 鉴权模型（复用 claude-os SSH/PAM + Bearer）
 
@@ -93,51 +43,12 @@ proxy.ts                Next16 proxy：只拦页面 cookie；API 由 handler 自
 
 ## 数据流（/api/v1 + /events）
 
-会话 = 一个 claudestra agent。前端每打开一个 agent：先拉历史（`GET /api/chat/history`），
-再建一条持久 SSE 流（`GET /api/chat/stream`）；`send` fire-and-forget（wait=0），输出经流回来。
+会话 = 一个 claudestra agent。打开 agent：先拉历史（`GET /api/chat/history`），再建一条持久 SSE 流（`GET /api/chat/stream`）；`send` fire-and-forget（wait=0），输出经流回来。完整说明（事件翻译表、cursor 差量同步、判重规则、master 特判）见 [docs/web/data-flow.md](../docs/web/data-flow.md)。必须守住的几条：
 
-- **列表**：`loadAgents` → Bridge `GET /api/v1/agents?include=stopped`。master 由 Bridge
-  置入（token scope 显式含 master），前端映射为 `__master__` 置顶（👑 大总管，不显 kill/restart）；
-  stopped agent 保留入口（历史经归档 API 仍可读——会话归档的意义就在这）。
-- **发消息**：`POST /api/v1/agents/:name/messages {text, wait:0}` → 202。agent 离线 409。
-- **流式**：BFF 订阅 `GET /api/v1/events`（fetch-based SSE，带 Bearer），按
-  `agent ∈ {name, agent-name}` 过滤，把 BridgeEvent 翻译成前端 WebStreamEvent（协议 v1 不变）：
-  `agent_status(thinking/done)→status/done`、`tool_start→tool(running)`（tool_done 不重复推卡）、
-  `assistant_text→text`、`chat_message(out)→text`（reply() 的最终回复）、`question→ask`、
-  `question_cleared→ask-cleared`（fork 事件）、`auto_deny→text(🚫)`。连流后补拉
-  `GET /api/v1/agents/:name/pending` replay 挂起的 AUQ 卡（对应旧 web-hub 的 pendingInteraction）。
-- **历史**：`GET /api/v1/agents/:name/history` 取 session 清单（mtime 降序，live+归档合并，
-  对已 kill agent 有效）→ 最新 session 的尾部 300 条 → 映射 ChatMessage[]
-  （compactSummary 跳过；system compact 线渲染成轻提示）。**BFF 不再直读 jsonl / registry。**
-- **唤醒对齐 = cursor 差量同步（v2.16，Telegram getDifference 同构）**：全量加载时
-  服务端附 `lastSeq`（合并气泡前最后一条原始记录的 jsonl 行号——不能用气泡 id 推，
-  组内后续记录会被重复拉），chat-store 存游标 `{sessionId, lastSeq}`。回前台/点推送
-  进入时 `syncDelta` 只拉 `?session=&after=` 差量（几条几 KB，8s 短超时+1s 快重试），
-  视图重组 = 现有 h 气泡 + 差量 + 幸存乐观消息 + 直播保全（对账在 `survivingPending`，
-  与全量共用）；**先差量后开流**（串行，防直播气泡被视图重组过滤），流不带 `since`
-  （重放与差量必然重复）。BFF 差量分支先查清单做轮转检测（pinned≠newest →
-  `rotated:true`）；轮转/差量超一页/连败 → 自动回退全量。跨境链路唤醒到上屏从
-  ~14s 降到 ~0.5-2s（2026-07-28 实测追平 533ms）。
-- **重复发送闸（v2.23.2，`features/chat/send-dedupe.ts`）**：`send()` 上同 agent + 同 wire
-  载荷 + 1.5s 内只发一次（带附件不参与）。触屏「发送」有 pointerup 直接执行与 click 兜底两条路，
-  各自有防重窗口，但 owner 2026-09-19 实录仍漏出一次同句 0.7s 双发，第二条还抢占打断了正在跑的
-  回合。逐条堵不如在唯一出口装闸；丢弃时打 client.log「丢弃 1.5s 内的重复发送」。同日第二例是
-  iOS 听写：发送清空输入框后听写把**标点润色过的最终稿**写回框里，用户以为没发出去再点一次
-  （两条正文只差「票。/票？」这类标点，间隔 2.16s）——所以再加一档「去标点空白后相同 + 5s」
-  （`normalizeForDedupe`）。⚠ 只挡住重复投递；听写回写导致输入框不空这个根因没动（改输入路径
-  风险高：React #185 / IME 失效都出在那条路上）。
-- **直播 ↔ 历史判重按 seq（v2.23.2，`features/chat/live-merge.ts`）**：同一条 jsonl 记录
-  两条路都会到（watcher 推事件 / 7s 对账拉差量），先后不定。watcher 的 tool/text 事件带
-  `{seq, sid}`（记录的全文件行号 + 会话 id，BFF `recordSrc` 透传），历史游标 `{sid,lastSeq}`
-  说「≤ lastSeq 都已在历史里」：事件后到 → `coveredByCursor` 命中不画（client.log
-  「丢弃已入历史的直播事件」10s 合并计数）；事件先到 → 差量/全量应用时 `pruneLiveBubbles`
-  按 seq 剥掉直播气泡里已覆盖的段/工具，剥空即丢；reply 段（bridge 直投无 seq）看历史里有无
-  同文；没带 seq 的老事件退回时间戳 ±5s 规则。`mergeContiguousAssistant` 把长回合被差量切成
-  的多段历史气泡拼回一泡。⚠ 别再用时间戳猜重复——流一延迟 / 两端时钟一偏就两份
-  （owner 2026-09-17 两次截图）。
-- **大总管**：Bridge 侧 `findApiAgent("master")` 特判（fork）——messages/history/interrupt/answer
-  对 master 透明可用。master 没有 jsonl-watcher，实时只有 reply 的 `chat_message(out)` + done；
-  历史从 jsonl 读所以带工具卡。
+- **BFF 不直读 jsonl / registry**：列表、历史、发消息、事件全走 Bridge 的 `/api/v1/*`（Bearer 在 server 端带，浏览器永不直连 3847）。
+- **唤醒对齐 = cursor 差量同步**：游标 `{sessionId, lastSeq}`，先差量后开流（串行），流不带 `since`；轮转/超一页/连败自动回退全量。
+- **直播 ↔ 历史判重按 seq**（`features/chat/live-merge.ts`）：⚠ 别再用时间戳猜重复。
+- **重复发送闸**（`features/chat/send-dedupe.ts`）：同 agent + 同载荷 1.5s 内只发一次，去标点后相同 5s 内只发一次。
 
 ## 富交互（中断 / 权限卡 / AskUserQuestion 卡）
 
