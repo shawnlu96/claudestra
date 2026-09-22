@@ -14,6 +14,7 @@
  */
 
 import { hostname } from "os";
+import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { execFile as execFileCb } from "node:child_process";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync, statSync, readdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "fs";
@@ -95,7 +96,7 @@ import {
 } from "./lib/projects.js";
 
 const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
-const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
+const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
 
 // ============================================================

@@ -5,6 +5,7 @@
  * 如果 session 死了自动重启。
  */
 
+import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason } from "./lib/restart-result.js";
@@ -85,7 +86,7 @@ await assertPrimaryOrExit("launcher");
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
 const REPO_ROOT = `${import.meta.dir}/..`;
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
-const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
+const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
 const CHECK_INTERVAL_MS = 15_000; // 每 15 秒检查一次
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60_000; // 每 30 分钟检查一次 Claudestra 新版本

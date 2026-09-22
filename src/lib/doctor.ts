@@ -271,6 +271,19 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
     }
   }
 
+  // BRIDGE_URL 显式指向了别的端口 → channel-server 会连到没人听的地方，
+  // 症状是「bridge 完全健康，但所有 agent 永远离线」（2026-09-22 实锤）
+  try {
+    const { bridgeUrlPortMismatch } = await import("./bridge-url.js");
+    const envTxt2 = await readFile(`${repoRoot}/.env`, "utf-8");
+    const pick = (k: string) => envTxt2.match(new RegExp(`^\\s*${k}\\s*=\\s*(\\S+)`, "m"))?.[1];
+    const mismatch = bridgeUrlPortMismatch({ BRIDGE_URL: pick("BRIDGE_URL"), BRIDGE_PORT: pick("BRIDGE_PORT") });
+    if (mismatch) {
+      out.push({ group: g, name: "BRIDGE_URL 端口", status: "fail", detail: mismatch,
+        fix: "把 .env 里的 BRIDGE_URL 删掉（会自动按 BRIDGE_PORT 推），或改成同一个端口" });
+    }
+  } catch { /* 没有 .env 就跳过 */ }
+
   try {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 5000);

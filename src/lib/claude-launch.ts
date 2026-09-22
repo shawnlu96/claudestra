@@ -7,6 +7,8 @@
  * - dev channel 加载 + skip-permissions
  */
 
+import { resolveBridgeUrl } from "./bridge-url.js";
+
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 
 // ────────────────────────────────────────────────
@@ -288,8 +290,10 @@ export function shellEscape(s: string): string {
  * 返回完整的 shell 命令，包含前导环境变量导出。
  */
 export function buildClaudeCommand(opts: LaunchOptions): string {
-  const bridgeUrl =
-    opts.bridgeUrl || process.env.BRIDGE_URL || "ws://localhost:3847";
+  // ⚠ 兜底必须从 BRIDGE_PORT 推，不能写死 3847：用户改过端口的机器，所有
+  //   channel-server 都会去连一个没人听的端口，而且**静默失败**（按设计退避重连），
+  //   症状是「bridge 完全健康，但所有 agent 永远离线」。见 lib/bridge-url.ts。
+  const bridgeUrl = opts.bridgeUrl || resolveBridgeUrl();
 
   const prefix =
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +

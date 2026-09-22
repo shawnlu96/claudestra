@@ -3,9 +3,10 @@
  * 被 manager.ts 和 discord-reply.ts 使用
  */
 
+import { resolveBridgeUrl } from "./bridge-url.js";
 import { resolveLogPath } from "./log-paths.js";
 
-const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
+const BRIDGE_URL = resolveBridgeUrl();
 
 export async function bridgeRequest(msg: Record<string, unknown>): Promise<any> {
   return new Promise((resolve, reject) => {

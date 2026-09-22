@@ -11,6 +11,7 @@
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
@@ -29,7 +30,7 @@ import {
 // ============================================================
 
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
-const BRIDGE_URL = process.env.BRIDGE_URL || "ws://localhost:3847";
+const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || "";
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 const CLAUDESTRA_HOME =

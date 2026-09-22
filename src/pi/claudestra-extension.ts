@@ -32,7 +32,13 @@ import { join } from "node:path";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
-const BRIDGE_URL = (process.env.BRIDGE_URL ?? "ws://localhost:3847").trim();
+// ⚠ 这个文件由 Pi 用 --extension 直接加载，**只依赖 node: 内置模块**（引仓库里的
+//   lib 会把它的加载路径变复杂），所以这里内联同一条规则而不是 import
+//   lib/bridge-url.ts：兜底要从 BRIDGE_PORT 推，写死 3847 会让改过端口的机器上
+//   Pi agent 静默连不上 bridge。正常情况下 pi-launch 已经把 BRIDGE_URL 传进来了。
+const BRIDGE_URL = (
+  process.env.BRIDGE_URL?.trim() || `ws://localhost:${Number(process.env.BRIDGE_PORT) || 3847}`
+).trim();
 const BRIDGE_HTTP = BRIDGE_URL.replace(/^ws/, "http").replace(/\/+$/, "");
 
 /** keepalive 间隔，与 channel-server 一致（防 bridge 的 ws idle 超时） */
