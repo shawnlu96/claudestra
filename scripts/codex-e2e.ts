@@ -8,13 +8,16 @@
  * 会真实调用 Codex（两轮左右，订阅额度），并在 ~/.codex 留下一个会话；Codex 自己还可能
  * 往 ~/.codex/config.toml 追加该目录的 projects 信任记录（脚本只报告，不回滚）。
  *
- * 用法：bun scripts/codex-e2e.ts --dir <scratch 目录> [--port 38591] [--keep]
+ * 用法：bun scripts/codex-e2e.ts --dir <scratch 目录> [--port 38591] [--thread <sid>] [--keep]
+ *   --thread：复用已有线程（跳过 exec 引导、不新开 Codex 会话），TUI 走 resume。该线程的
+ *   rollout 必须已有至少一轮，且 --dir 与它的 cwd 一致。
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bootstrapArgs, buildCodexCommand, parseBootstrapThreadId, resolveCodexBinary } from "../src/lib/codex-launch.js";
 import { channelInstructions } from "../src/lib/channel-instructions.js";
 import { defaultRunner } from "../src/lib/codex-thread.js";
+import { findCodexSessionPath } from "../src/lib/codex-session.js";
 
 const args = process.argv.slice(2);
 const opt = (k: string, d?: string) => {
@@ -28,6 +31,7 @@ if (!DIR) {
 }
 const PORT = Number(opt("--port", "38591"));
 const KEEP = args.includes("--keep");
+const REUSE_THREAD = opt("--thread");
 const REPO = resolve(import.meta.dir, "..");
 const WORK = join(resolve(DIR), "work");
 const SOCK = `p3b-e2e-${process.pid}`;
@@ -113,18 +117,24 @@ try {
   // ── 1. exec 引导 ────────────────────────────────────────────────────────
   const bin = await resolveCodexBinary(defaultRunner);
   if (!bin) throw new Error("登录 shell 里找不到 codex");
-  const version = (await defaultRunner([bin.link, "--version"], 20_000)).out.trim();
+  const version = (await defaultRunner([bin.real, "--version"], 20_000)).out.trim();
   summary.codex = { ...bin, version };
-  log("codex:", bin.link, version);
+  log("codex:", bin.real, version);
   const rules = channelInstructions(REPO);
-  const argv = bootstrapArgs({ codexBin: bin.link, cwd: WORK, agentName: AGENT, purpose: "端到端测试", effort: "low", channelRules: rules });
-  const boot = Bun.spawn(argv, { cwd: WORK, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const bootOut = await new Response(boot.stdout).text();
-  await boot.exited;
-  const threadId = parseBootstrapThreadId(bootOut);
-  summary.bootstrap = { exit: boot.exitCode, firstLine: bootOut.split("\n")[0], threadId };
-  if (!threadId) throw new Error(`exec 引导没拿到 thread id: ${bootOut.slice(0, 300)}`);
-  log("引导 thread:", threadId);
+  let threadId: string | null = REUSE_THREAD ?? null;
+  if (threadId) {
+    summary.bootstrap = { reused: threadId };
+    log("复用 thread:", threadId);
+  } else {
+    const argv = bootstrapArgs({ codexBin: bin.real, cwd: WORK, agentName: AGENT, purpose: "端到端测试", effort: "low", channelRules: rules });
+    const boot = Bun.spawn(argv, { cwd: WORK, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const bootOut = await new Response(boot.stdout).text();
+    await boot.exited;
+    threadId = parseBootstrapThreadId(bootOut);
+    summary.bootstrap = { exit: boot.exitCode, firstLine: bootOut.split("\n")[0], threadId };
+    if (!threadId) throw new Error(`exec 引导没拿到 thread id: ${bootOut.slice(0, 300)}`);
+    log("引导 thread:", threadId);
+  }
 
   // ── 2. 起 TUI ───────────────────────────────────────────────────────────
   await tmux("new-session", "-d", "-s", "e2e", "-x", "220", "-y", "50", "-c", WORK);
@@ -132,9 +142,9 @@ try {
   await tmux("set-option", "-w", "-t", pane, "-u", "@claudestra_ready");
   const cmd = buildCodexCommand(
     {
-      mode: "new", sessionId: threadId, agentName: AGENT, channelId: CHANNEL,
+      mode: REUSE_THREAD ? "resume" : "new", sessionId: threadId, agentName: AGENT, channelId: CHANNEL,
       bridgeUrl: `ws://127.0.0.1:${PORT}`, bridgePort: String(PORT), cwd: WORK,
-      codexBin: bin.link, bunBin: process.execPath, claudestraHome: REPO,
+      codexBin: bin.real, bunBin: process.execPath, claudestraHome: REPO,
       purpose: "端到端测试", effort: "low",
     },
     rules,
@@ -150,6 +160,12 @@ try {
   summary.register = reg.msg;
   log("register:", JSON.stringify(reg.msg));
   if (reg.msg.runtime !== "codex" || reg.msg.sessionId !== threadId) throw new Error("register 帧的 runtime/sessionId 不对");
+  if ("sessionFile" in reg.msg) throw new Error("Codex register 帧不该自报 sessionFile");
+  // channel-server 的父进程 = 持线程锁的那个进程；npm 壳被换成原生二进制后它应直接是 pane 的子进程
+  const parentCmd = (await defaultRunner(["ps", "-o", "command=", "-p", String(reg.msg.ppid)], 5_000)).out.trim();
+  const paneChild = (await defaultRunner(["pgrep", "-P", (await tmux("display-message", "-p", "-t", pane, "#{pane_pid}")).out.trim()], 5_000)).out.trim().split("\n")[0];
+  summary.processTree = { channelServerParent: parentCmd.slice(0, 160), parentIsPaneChild: String(reg.msg.ppid) === paneChild };
+  log("进程树:", JSON.stringify(summary.processTree));
   let readyVal = "";
   for (let i = 0; i < 40 && readyVal !== "1"; i++) {
     readyVal = (await tmux("show-options", "-w", "-v", "-t", pane, "@claudestra_ready")).out.trim();
@@ -174,6 +190,13 @@ try {
   const stop = await waitFor("Stop hook", () => hooks.find((h) => h.at >= pushedAt && h.msg?.event === "Stop" && h.msg?.channelId === CHANNEL), 60_000);
   summary.stopHook = { ...stop.msg, afterMs: stop.at - pushedAt };
   log("Stop hook:", JSON.stringify(stop.msg));
+  // 投进去的 <channel> 标签带 reply_via（developer_instructions 不随 resume 生效时的兜底）
+  const rollout = findCodexSessionPath(threadId);
+  const channelLines = rollout ? readFileSync(rollout, "utf8").split("\n").filter((l) => l.includes("e2e-1") && l.includes("<channel ")) : [];
+  const lastTag = /<channel [^>]*>/.exec(channelLines.at(-1)?.replace(/\\"/g, '"') ?? "")?.[0] ?? "";
+  summary.deliveredTag = lastTag;
+  log("投递标签:", lastTag);
+  if (!lastTag.includes("reply_via=")) throw new Error("投递的 <channel> 标签缺 reply_via");
   summary.allFrames = frames.map((f) => f.msg.type);
 } catch (e) {
   failed = true;
