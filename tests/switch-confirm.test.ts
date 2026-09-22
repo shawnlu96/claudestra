@@ -12,6 +12,7 @@ import {
   detectSwitchConfirmPrompt,
   switchPromptMatches,
   countSettledSwitchCommands,
+  switchResultToast,
   modelFamilies,
   paneLooksIdle,
 } from "../src/lib/tmux-helper.ts";
@@ -168,6 +169,25 @@ describe("countSettledSwitchCommands", () => {
     expect(countSettledSwitchCommands(EFFORT_SWALLOWED, "model")).toBe(3);
     expect(countSettledSwitchCommands(EFFORT_SWALLOWED, "effort")).toBe(2);
     expect(EFFORT_SWALLOWED).not.toContain("/effort low");
+  });
+});
+
+describe("switchResultToast", () => {
+  // 2.1.280 e2e 实测：代按 effort 框后有时只在输入框上方出右对齐 toast、不进对话记录
+  const TOAST =
+    " ".repeat(62) +
+    "Set effort level to high (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation";
+  const withToast = MODEL_SET.replace(/^(─{20,})$/m, `${TOAST}\n$1`);
+
+  test("认出输入框上方的 toast", () => {
+    expect(withToast).toContain(TOAST);
+    expect(switchResultToast(withToast, "effort")).toBe(TOAST.trim());
+    expect(switchResultToast(withToast, "model")).toBeNull();
+  });
+
+  test("对话里的 ⎿ 结果行不是 toast（它由 countSettledSwitchCommands 管）", () => {
+    expect(switchResultToast(MODEL_SET, "model")).toBeNull();
+    expect(switchResultToast(MODEL_THEN_EFFORT, "effort")).toBeNull();
   });
 });
 

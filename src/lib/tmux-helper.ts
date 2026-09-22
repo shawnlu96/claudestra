@@ -908,6 +908,21 @@ export function countSettledSwitchCommands(pane: string, kind: SwitchConfirmKind
   return n;
 }
 
+/**
+ * 命令结果的另一种落地形态：输入框上方右对齐的临时提示行（toast），不进对话记录。
+ * 2.1.280 实测代按 effort 框后有时只出 toast、没有「❯ /effort … ⎿」那两行——只数回显会
+ * 空等到超时。toast 几秒后自己消失，调用方拿注入前的 toast 做基线比对，防同一条残留。
+ */
+export function switchResultToast(pane: string, kind: SwitchConfirmKind): string | null {
+  const re = kind === "model" ? /^Set model to\b/ : /^Set effort level to\b/;
+  for (const line of trimTrailingBlank(pane.split("\n")).slice(-12)) {
+    if (!/^\s{8,}\S/.test(line)) continue; // 右对齐；对话里的 ⎿ 结果行只缩进 2 格
+    const t = line.trim();
+    if (re.test(t)) return t;
+  }
+  return null;
+}
+
 export type SwitchOutcome =
   /** 命令落地，没弹框 */
   | "applied"
@@ -930,7 +945,9 @@ export async function runSwitchCommand(
   opts: { sendDelayMs?: number; ticks?: number; intervalMs?: number; captureLines?: number } = {},
 ): Promise<{ outcome: SwitchOutcome; pane: string; prompt?: SwitchConfirmPrompt }> {
   const { sendDelayMs = 100, ticks = 10, intervalMs = 700, captureLines = 120 } = opts;
-  const base = countSettledSwitchCommands(await tmuxCapture(target, captureLines).catch(() => ""), kind);
+  const before = await tmuxCapture(target, captureLines).catch(() => "");
+  const base = countSettledSwitchCommands(before, kind);
+  const baseToast = switchResultToast(before, kind);
   await tmuxSendLine(target, `/${kind} ${arg}`, sendDelayMs);
   let confirmed = false;
   let presses = 0;
@@ -950,7 +967,10 @@ export async function runSwitchCommand(
       confirmed = true;
       continue;
     }
-    if (countSettledSwitchCommands(pane, kind) > base) return { outcome: confirmed ? "confirmed" : "applied", pane };
+    const toast = switchResultToast(pane, kind);
+    if (countSettledSwitchCommands(pane, kind) > base || (toast && toast !== baseToast)) {
+      return { outcome: confirmed ? "confirmed" : "applied", pane };
+    }
   }
   return { outcome: "timeout", pane };
 }
