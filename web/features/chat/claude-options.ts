@@ -1,33 +1,8 @@
 /**
- * 模型 / effort 选项——设置页「全局默认」、会话级切换器（TopBar）、新建 agent 弹窗
- * 共用的**唯一目录**(2026-09-15 合并:此前新建弹窗自维护一份别名列表,与这里漂移过,
- * 两边都漏了 Sonnet 5)。
- *
- * - id    = 完整 model id(settings.json / registry / /model 命令都认它)——切换器与全局默认用;
- * - alias = manager 侧别名(`create --model <alias>`,见 src/lib/claude-launch.ts MODEL_ALIASES)
- *           ——新建 agent 用。一律带版本号,钉死标签所指的那一代;裸家族名(opus/sonnet)
- *           在后端始终跟最新版,不放进 UI 以免标签与实际版本脱节。
+ * effort 选项——设置页「全局默认」、会话级切换器（TopBar）、新建 agent 弹窗共用。
+ * 模型清单不在这里：从 Bridge 拉 CC 自己的目录（claude-models.ts / useClaudeModels），
+ * 此前这里写死的 MODEL_CATALOG 与后端别名表一起落后上游（2026-09-22 Opus 5.5 两边都没有）。
  */
-export const MODEL_CATALOG = [
-  { id: "claude-fable-5-1", alias: "fable-5-1", label: "Fable 5.1" },
-  { id: "claude-fable-5", alias: "fable-5", label: "Fable 5" },
-  { id: "claude-opus-5", alias: "opus-5", label: "Opus 5" },
-  { id: "claude-opus-4-8", alias: "opus-4-8", label: "Opus 4.8" },
-  { id: "claude-opus-4-7", alias: "opus-4-7", label: "Opus 4.7" },
-  { id: "claude-sonnet-5", alias: "sonnet-5", label: "Sonnet 5" },
-  { id: "claude-sonnet-4-6", alias: "sonnet-4-6", label: "Sonnet 4.6" },
-  { id: "claude-haiku-4-5-20251001", alias: "haiku-4-5", label: "Haiku 4.5" },
-] as const;
-
-/** 切换器 / 全局默认:value = 完整 model id。 */
-export const MODEL_OPTIONS = MODEL_CATALOG.map((m) => ({ value: m.id, label: m.label }));
-
-/** 新建 agent 弹窗:value = manager 别名,空 = 跟随全局 settings.json 默认。 */
-export const MODEL_ALIAS_OPTIONS = [
-  { value: "", label: "默认（跟随全局）" },
-  ...MODEL_CATALOG.map((m) => ({ value: m.alias, label: m.label })),
-];
-
 export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 /**
@@ -38,11 +13,10 @@ export const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh", "max"] as const
  */
 export const RUNTIME_EFFORT_OPTIONS = [...EFFORT_OPTIONS, "ultracode"] as const;
 
-/** model id → 短标签（未知 id 去掉 claude- 前缀原样显示，透传未来新模型）。 */
-export function modelLabel(id: string | null | undefined): string {
+/** model id → 短标签：在目录里就用目录的名字；不在（目录还没到 / 未知 id）去掉 claude- 前缀原样显示。 */
+export function modelLabel(id: string | null | undefined, models: readonly { value: string; label: string }[] = []): string {
   if (!id) return "?";
-  const hit = MODEL_OPTIONS.find((o) => o.value === id);
-  return hit ? hit.label : id.replace(/^claude-/, "");
+  return models.find((o) => o.value === id)?.label ?? id.replace(/^claude-/, "");
 }
 
 /**

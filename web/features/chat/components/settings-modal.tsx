@@ -4,7 +4,8 @@ import { createPortal } from "react-dom";
 import { useChatStoreApi } from "../chat-store";
 import { enablePush, disablePush, getPushSubscription } from "@/lib/push/client";
 import { useT, useLang, setLang } from "@/lib/i18n";
-import { MODEL_OPTIONS, EFFORT_OPTIONS } from "../claude-options";
+import { EFFORT_OPTIONS } from "../claude-options";
+import { useClaudeModels } from "../claude-models";
 import { useThemePref, setThemePref } from "@/lib/theme";
 import { kbFixEnabled, setKbFixEnabled } from "../use-keyboard-viewport";
 import { isNativeShell, nativeServerConfig } from "@/lib/native";
@@ -95,8 +96,7 @@ function AvatarNickRow({
   );
 }
 
-/** 全局默认模型/effort 选项——与会话级切换器共用（claude-options.ts） */
-const GLOBAL_MODEL_OPTIONS = MODEL_OPTIONS;
+/** 全局默认 effort 选项——与会话级切换器共用（claude-options.ts）；模型清单见 useClaudeModels */
 const GLOBAL_EFFORT_OPTIONS = EFFORT_OPTIONS;
 
 /** 设置分区卡片(owner 2026-07-24「排版丑」→ iOS 分组式):统一「标题+右侧
@@ -687,6 +687,7 @@ function Section({
  * 完整 key 永不回显——已配置时展示尾四位提示。
  */
 export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const GLOBAL_MODEL_OPTIONS = useClaudeModels();
   const store = useChatStoreApi();
   const t = useT();
   const lang = useLang();

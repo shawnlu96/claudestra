@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
-import { MODEL_OPTIONS, RUNTIME_EFFORT_OPTIONS, modelLabel } from "../claude-options";
+import { RUNTIME_EFFORT_OPTIONS, modelLabel } from "../claude-options";
+import { useClaudeModels } from "../claude-models";
 import { PiModelSwitcher } from "./pi-model-switcher";
 import { useT } from "@/lib/i18n";
 
@@ -21,6 +22,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const models = useClaudeModels();
 
   // 点面板外任意处关闭
   useEffect(() => {
@@ -76,7 +78,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
           setErr("");
         }}
       >
-        <span className="max-w-[72px] truncate">{modelLabel(agent.model)}</span>
+        <span className="max-w-[72px] truncate">{modelLabel(agent.model, models)}</span>
         <span className="opacity-40">·</span>
         <span>{agent.effort || "?"}</span>
         <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className="opacity-50">
@@ -87,7 +89,8 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
         <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-56 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
           <div className="mb-2.5 flex flex-wrap gap-1">
-            {MODEL_OPTIONS.map((o) => (
+            {models.length === 0 && <span className="text-[11px] text-base-content/40">{t("加载中…")}</span>}
+            {models.map((o) => (
               <button
                 key={o.value}
                 className={`btn btn-xs ${agent.model === o.value ? "btn-primary" : "btn-ghost bg-base-200"}`}

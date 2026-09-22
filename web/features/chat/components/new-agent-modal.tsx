@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 // 模型选项来自共享目录(值 = manager 别名);别再在这里另维护一份——曾与切换器漂移(2026-09-15)
-import { MODEL_ALIAS_OPTIONS } from "../claude-options";
+import { useClaudeModels } from "../claude-models";
 
 /** Effort 选项(经 --effort 传 CC,session 级,不写全局默认)。 */
 const EFFORT_OPTIONS = [
@@ -35,6 +35,7 @@ export function NewAgentModal({
   const [dir, setDir] = useState("");
   const [purpose, setPurpose] = useState("");
   const [model, setModel] = useState("");
+  const claudeModels = useClaudeModels();
   const [effort, setEffort] = useState("");
   // v2.21+ project 归属:"" = 自动(按目录);选定后目录变下拉(project 的 dirs + 自定义)
   const [project, setProject] = useState("");
@@ -291,9 +292,10 @@ export function NewAgentModal({
                   disabled={busy}
                   onChange={(e) => setModel(e.target.value)}
                 >
-                  {MODEL_ALIAS_OPTIONS.map((o) => (
+                  <option value="">{t("默认（跟随全局）")}</option>
+                  {claudeModels.map((o) => (
                     <option key={o.value} value={o.value}>
-                      {t(o.label)}
+                      {o.label}
                     </option>
                   ))}
                 </select>

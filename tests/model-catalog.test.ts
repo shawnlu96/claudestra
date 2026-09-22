@@ -1,51 +1,101 @@
-/**
- * 两张模型表的一致性闸门。
- *
- * 模型清单在两处各写一份——后端 `MODEL_ALIASES`（src/lib/claude-launch.ts，
- * `create --model` / `manager model list` 用）和前端 `MODEL_CATALOG`
- * （web/features/chat/claude-options.ts，新建弹窗 / 切换器 / 全局默认用）。
- *
- * **为什么不合成一张**：web 是独立构建，tsconfig 的 include 只覆盖 web/，
- * 拿不到 src/ 的任何东西；要真共享就得让前端运行时从 bridge 拉一次清单——
- * 为 7 行常量铺一整条异步路径（新 API route + loading 态 + 失败回退）不划算。
- *
- * 真正的问题从来不是「两份」，是**漂移**：加模型时只改一边。
- * 2026-09-15 就栽过一次（claude-options.ts 注释原话：「此前新建弹窗自维护一份
- * 别名列表，与这里漂移过，**两边都漏了 Sonnet 5**」）。这个文件把漂移变成红灯。
- */
 import { describe, expect, test } from "bun:test";
-import { MODEL_ALIASES } from "../src/lib/claude-launch";
-import { MODEL_CATALOG } from "../web/features/chat/claude-options";
+import { mkdtempSync, writeFileSync, utimesSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import {
+  parseLocalCache,
+  parseRemoteCatalog,
+  labelFromId,
+  builtinCatalog,
+  loadModelCatalog,
+} from "../src/lib/model-catalog";
 
-/** 裸家族名（opus / sonnet / …）始终跟该家族最新版，故意不进 UI——见两边注释。 */
-const isVersioned = (alias: string) => alias.includes("-");
+// 形状取自 2026-09-22 本机实物（CC 2.1.280），字段删到只剩用得上的
+const localCache = (ids: string[]) => ({
+  version: 2,
+  catalog: {
+    surface: "cc",
+    config: { id: "cc", models: ids.map((id, i) => ({ id, name: `M${i}`, section: i ? "overflow" : "main" })) },
+    state: { model: ids[0] },
+  },
+});
+const remote = {
+  schema_version: 1,
+  surfaces: {
+    chat: { model_selector_config: [{ id: "chat", models: [{ id: "claude-wrong-surface" }] }] },
+    cc: { model_selector_config: [{ id: "cc", models: [{ id: "claude-opus-5-5", name: "Opus 5.5", section: "main" }] }] },
+  },
+};
 
-describe("模型表一致性（后端 MODEL_ALIASES ↔ 前端 MODEL_CATALOG）", () => {
-  test("前端每个条目的 alias 在后端存在，且 id 对得上", () => {
-    for (const { alias, id, label } of MODEL_CATALOG) {
-      expect(MODEL_ALIASES[alias], `前端有 "${alias}"（${label}），后端别名表里没有`).toBeDefined();
-      expect(MODEL_ALIASES[alias], `别名 "${alias}" 两边指向不同的 model id`).toBe(id);
+describe("parse", () => {
+  test("本地缓存：取 catalog.config.models", () => {
+    expect(parseLocalCache(localCache(["claude-opus-5-5", "claude-opus-4-6"]))).toEqual([
+      { id: "claude-opus-5-5", name: "M0", section: "main" },
+      { id: "claude-opus-4-6", name: "M1", section: "overflow" },
+    ]);
+  });
+
+  test("公开端点：只取 cc 分区", () => {
+    expect(parseRemoteCatalog(remote)).toEqual([{ id: "claude-opus-5-5", name: "Opus 5.5", section: "main" }]);
+  });
+
+  test("格式对不上 → null（交给下一档），不抛", () => {
+    for (const bad of [null, {}, { catalog: {} }, { catalog: { config: { models: [] } } }, { surfaces: {} }]) {
+      expect(parseLocalCache(bad)).toBeNull();
+      expect(parseRemoteCatalog(bad)).toBeNull();
     }
   });
 
-  test("后端每个带版本号的别名都出现在前端下拉里", () => {
-    const uiAliases = new Set<string>(MODEL_CATALOG.map((m) => m.alias));
-    for (const alias of Object.keys(MODEL_ALIASES)) {
-      if (!isVersioned(alias)) continue;
-      expect(uiAliases.has(alias), `后端有 "${alias}"，前端下拉里选不到（加模型时漏了一边）`).toBe(true);
-    }
+  test("缺 name 用 id 推", () => {
+    expect(parseLocalCache({ catalog: { config: { models: [{ id: "claude-opus-5-5" }] } } })?.[0].name).toBe("Opus 5.5");
+  });
+});
+
+test("labelFromId", () => {
+  expect(labelFromId("claude-opus-5-5")).toBe("Opus 5.5");
+  expect(labelFromId("claude-fable-5-1")).toBe("Fable 5.1");
+  expect(labelFromId("claude-sonnet-5")).toBe("Sonnet 5");
+  expect(labelFromId("claude-haiku-4-5-20251001")).toBe("Haiku 4.5");
+  expect(labelFromId("claude-opus-4-1-20250805")).toBe("Opus 4.1");
+});
+
+test("builtin 兜底：别名表去重，裸名与版本别名不重复出现", () => {
+  const ids = builtinCatalog().map((m) => m.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(ids).toContain("claude-opus-5");
+});
+
+describe("loadModelCatalog 回退链", () => {
+  const noRemote = async () => null;
+
+  test("本地缓存优先；多份取最新写入的", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-"));
+    writeFileSync(join(dir, "old-cc.json"), JSON.stringify(localCache(["claude-old"])));
+    writeFileSync(join(dir, "new-cc.json"), JSON.stringify(localCache(["claude-new"])));
+    writeFileSync(join(dir, "x-chat.json"), JSON.stringify(localCache(["claude-chat-surface"])));
+    utimesSync(join(dir, "old-cc.json"), 1000, 1000);
+    const c = await loadModelCatalog({ dir, fetchRemote: noRemote });
+    expect(c.source).toBe("local-cache");
+    expect(c.models[0].id).toBe("claude-new");
   });
 
-  test("裸家族名指向的那一代，前端下拉里有对应的带版本号条目", () => {
-    const uiIds = new Set<string>(MODEL_CATALOG.map((m) => m.id));
-    for (const [alias, id] of Object.entries(MODEL_ALIASES)) {
-      if (isVersioned(alias)) continue;
-      expect(uiIds.has(id), `裸名 "${alias}" → ${id}，但前端下拉里没有这一代`).toBe(true);
-    }
+  test("本地坏文件跳过，看下一份", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-"));
+    writeFileSync(join(dir, "bad-cc.json"), "{not json");
+    writeFileSync(join(dir, "ok-cc.json"), JSON.stringify(localCache(["claude-ok"])));
+    utimesSync(join(dir, "ok-cc.json"), 1000, 1000);
+    expect((await loadModelCatalog({ dir, fetchRemote: noRemote })).models[0].id).toBe("claude-ok");
   });
 
-  test("前端 label 不重复，id 不重复", () => {
-    expect(new Set(MODEL_CATALOG.map((m) => m.id)).size).toBe(MODEL_CATALOG.length);
-    expect(new Set(MODEL_CATALOG.map((m) => m.label)).size).toBe(MODEL_CATALOG.length);
+  test("本地没有 → 公开端点", async () => {
+    const c = await loadModelCatalog({ dir: "/nonexistent", fetchRemote: async () => parseRemoteCatalog(remote) });
+    expect(c.source).toBe("remote");
+    expect(c.models[0].id).toBe("claude-opus-5-5");
+  });
+
+  test("都拿不到 → 别名表兜底，下拉永远不空", async () => {
+    const c = await loadModelCatalog({ dir: "/nonexistent", fetchRemote: noRemote });
+    expect(c.source).toBe("builtin");
+    expect(c.models.length).toBeGreaterThan(0);
   });
 });

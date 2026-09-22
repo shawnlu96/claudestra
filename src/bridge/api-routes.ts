@@ -669,6 +669,17 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     }
   }
 
+  // GET /api/v1/claude-models —— Claude Code 的模型目录（web 三处模型下拉用）。
+  // 与 /pi-models 对称：那个读 Pi 的 models.json；这个读 CC 自己拉的目录（本地缓存 →
+  // 公开端点 → 别名表兜底），见 lib/model-catalog.ts。目录本身是公开的，不限 scope。
+  // ponytail: 每次请求现读；本地缓存缺失时每次都会打一次公开端点（5s 超时），
+  // 只在没跑过 CC 的机器上发生，真成问题再加内存 TTL。
+  if (path === "/claude-models" && req.method === "GET") {
+    const { loadModelCatalog } = await import("../lib/model-catalog.js");
+    const catalog = await loadModelCatalog();
+    return apiJson(200, { ok: true, source: catalog.source, count: catalog.models.length, models: catalog.models });
+  }
+
   // v2.23+ POST /api/v1/agents/:name/pi-settings —— Pi agent 切模型/思考档位。
   // 与 claude-settings 的分工：那个注入 Claude Code 的 `/model`、`/effort`；Pi 侧
   // 的 `/model` 是**打开选择器**的交互语义（未验证收不收参数），所以走我们自己扩展

@@ -135,8 +135,8 @@ export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 // 不在别名表里的值原样透传（允许用户指定任意 model id / 未来新模型）。
 export const MODEL_ALIASES: Record<string, string> = {
   // 裸家族名（fable / opus / sonnet / haiku）始终指向该家族最新版；要钉死某一代用带版本号的别名。
-  // web 新建弹窗只用带版本号的别名(web/features/chat/claude-options.ts MODEL_CATALOG),
-  // 两边的版本号别名集合要保持一致。
+  // 这里只是命令行输入的简写；web 的模型下拉不读这张表，读 CC 自己的模型目录
+  // (lib/model-catalog.ts)——新模型不用来这里加也能在网页上选到。
   fable: "claude-fable-5-1",
   "fable-5-1": "claude-fable-5-1",
   "fable-5": "claude-fable-5",
