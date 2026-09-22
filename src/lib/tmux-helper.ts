@@ -7,6 +7,13 @@
 
 export const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 export const MASTER_SESSION = "master";
+/**
+ * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
+ * iTerm 标签与 list-windows 都对不上；`manager list` 也靠这个名字补出大总管那一行。
+ * 认大总管仍靠 index 0 + cwd，名字只是标签——所以窗口类命令的目标一律带冒号（sessionTarget），
+ * 裸 `-t master` 会优先解析成这个窗口。
+ */
+export const MASTER_WINDOW_NAME = "master";
 export const AGENT_PREFIX = "agent-";
 
 /**

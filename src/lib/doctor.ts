@@ -371,8 +371,8 @@ async function checkIntegration(repoRoot: string): Promise<Check[]> {
  * 把一条本该有意义的信号（「它自称 active，窗口却没了」= 掉线/被 kill/换了 session）
  * 变成了永久噪声。`manager.ts list` 的孤儿检测一直就是只看 active 的，这里对齐。
  *
- * ⚠ 大总管也要跳过：它的 window 名是裸 `master`，registry 的键却是 `agent-master`
- * （见 registry.isMasterAgent），按名字比对必然对不上 ⇒ 恒判孤儿。
+ * ⚠ 大总管也要跳过：它的 window 名是裸 `master`（未定名的老窗口则是 claude / 版本号），
+ * registry 的键却是 `agent-master`（见 registry.isMasterAgent），按名字比对必然对不上 ⇒ 恒判孤儿。
  */
 export function orphanAgentNames(
   agents: Array<{ name: string; status?: string }>,

@@ -2524,8 +2524,9 @@ async function cmdList() {
   // 也列出 registry 里 active 但 tmux 已死的
   for (const [name, info] of Object.entries(reg.agents)) {
     // ⚠ 大总管必须跳过，否则**恒判 dead**：tmuxWindows 只收 `agent-*` 窗口，而大总管
-    //   的窗口名就是裸 `master`（registry 的键却是 `agent-master`）⇒ 这条永远不在
-    //   集合里。它已经由上面那条合成的 `master` 行代表了。
+    //   的窗口名是裸 `master`（launcher 定名；未迁移的老窗口是 claude / 版本号），
+    //   registry 的键却是 `agent-master` ⇒ 这条永远不在集合里。它由上面那条合成的
+    //   `master` 行代表（窗口定名后才会出现）。
     //   代价是实打实的：launcher 的 periodic 自愈每分钟把它当 dead 捡起来 restart，
     //   而 master 的 channelId 在 registry 里按设计为空、`manager restart` 硬要求
     //   sessionId + channelId ⇒ 永远失败。实测 2026-09-15 02:04 起每 ~75s 一次，

@@ -36,6 +36,7 @@ import {
   windowTarget,
   clearShellInitPrompts,
   MASTER_SESSION as SESSION_NAME,
+  MASTER_WINDOW_NAME,
 } from "./lib/tmux-helper.js";
 
 /**
@@ -177,8 +178,9 @@ async function startMaster() {
   // 创建 tmux session；base-index=0 显式设一下，防止私有 socket 的 tmux
   // server 意外继承到非 0 的 base-index（-f /dev/null 在 tmuxRaw 已经处理，
   // 这里是 belt-and-suspenders）。
-  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-c", MASTER_DIR]);
+  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-n", MASTER_WINDOW_NAME, "-c", MASTER_DIR]);
   await tmuxRaw(["set-option", "-t", SESSION_NAME, "base-index", "0"]).catch(() => {});
+  await pinMasterWindowName();
   await Bun.sleep(500);
 
   return bringUpClaudeInMasterWindow();
@@ -212,7 +214,14 @@ async function ensureMasterAtZero(): Promise<boolean> {
     !w.name.startsWith("agent-") && (await realpathSafe(w.cwd)) === masterDirReal;
   const w0 = wins.find((w) => w.idx === 0);
   if (!w0) return false; // window 0 丢失走 recoverMasterWindow 的既有路径
-  if (await isMasterWin(w0)) return false; // 正身在位,无事
+  if (await isMasterWin(w0)) {
+    // 正身在位。老版本建的窗口没命名（被自动改成 claude / 版本号），顺手迁移成显式名字
+    if (w0.name !== MASTER_WINDOW_NAME) {
+      console.log(`🏷️  大总管窗口名「${w0.name}」→「${MASTER_WINDOW_NAME}」`);
+      await pinMasterWindowName();
+    }
+    return false;
+  }
 
   // window 0 被占。先找真 master 在哪
   let trueMaster: { idx: number } | null = null;
@@ -238,6 +247,13 @@ async function ensureMasterAtZero(): Promise<boolean> {
   return true;
 }
 
+/** 大总管窗口定名并关掉自动改名（-n / rename 已隐含关闭，显式再设一次给老版本 tmux 兜底）。幂等 */
+async function pinMasterWindowName(): Promise<void> {
+  await tmuxRaw(["rename-window", "-t", MASTER_WINDOW, MASTER_WINDOW_NAME]).catch(() => {});
+  await tmuxRaw(["set-option", "-w", "-t", MASTER_WINDOW, "automatic-rename", "off"]).catch(() => {});
+  await tmuxRaw(["set-option", "-w", "-t", MASTER_WINDOW, "allow-rename", "off"]).catch(() => {});
+}
+
 async function realpathSafe(p: string): Promise<string> {
   try {
     return await realpath(p);
@@ -256,7 +272,7 @@ async function recoverMasterWindow(): Promise<boolean> {
   //    session 里只要有个窗口名叫 master，这句 `-k` 就会把**那个窗口**替掉，而
   //    window:0 还是缺的 —— 下面的 masterWindowExists 于是恒假，而我们已经默默
   //    干掉了一个无关窗口（2026-09-21 owner 机器上真有这么个 index 19 的闲置 zsh）。
-  await tmuxRawStrict(["new-window", "-t", sessionTarget(SESSION_NAME), "-k", "-c", MASTER_DIR]);
+  await tmuxRawStrict(["new-window", "-t", sessionTarget(SESSION_NAME), "-k", "-n", MASTER_WINDOW_NAME, "-c", MASTER_DIR]);
   await Bun.sleep(500);
   // 上面的 new-window 不带 index，会按 base-index 自动分配；强制挪到 0。
   // `-s` 同理要带冒号，否则搬的是那个叫 master 的窗口而不是刚建的这个。
@@ -266,6 +282,7 @@ async function recoverMasterWindow(): Promise<boolean> {
     console.log("⚠️ 创建 window:0 失败");
     return false;
   }
+  await pinMasterWindowName();
   return bringUpClaudeInMasterWindow();
 }
 
@@ -742,7 +759,8 @@ async function restartAgentsAndMaster() {
   try {
     const listOut = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
     const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
-    const canary = agents.find((a) => a.status !== "stopped");
+    // 大总管不当金丝雀（窗口定名后 manager list 会带上它那一行；它由下面 /exit + 主循环拉起）
+    const canary = agents.find((a) => a.status !== "stopped" && a.name !== MASTER_WINDOW_NAME);
     if (canary) {
       const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
       let canaryOk = false;
