@@ -15,8 +15,9 @@ describe("bridgeErrorStatus（BFF 错误映射口径）", () => {
     expect(bridgeErrorStatus(berr(409))).toBe(409);
     expect(bridgeErrorStatus(berr(400))).toBe(400);
   });
-  test("bridge 401 绝不透传（前端遇 401 跳登录页，那是 BFF token 的问题）", () => {
+  test("bridge 401/403 绝不透传（前端遇 401 跳登录页，那是 BFF token 的问题）", () => {
     expect(bridgeErrorStatus(berr(401))).toBe(502);
+    expect(bridgeErrorStatus(berr(403))).toBe(502);
   });
   test("retryable / 503 → 503；网络错误、5xx → 502", () => {
     expect(bridgeErrorStatus(berr(500, true))).toBe(503);
@@ -41,5 +42,6 @@ describe("bridgeErrorResponse", () => {
     const j = (await r.json()) as Record<string, unknown>;
     expect(j.secret).toBeUndefined();
     expect(j.error).toBe("代理失败: x");
+    expect(j.upstream).toBe(401);
   });
 });

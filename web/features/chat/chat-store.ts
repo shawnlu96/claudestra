@@ -206,7 +206,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
   /** 左滑消息块 → 设引用草稿(composer 预览;再滑别的块覆盖;✕ 清除)。 */
   /** 最近一次「删除」的现场，供 5s 内撤销（只留一份，再删一条就覆盖） */
-  private lastHidden: { msg: ChatMessage; index: number; agent: string; sid: string; from: number; to: number } | null = null;
+  private lastHidden: { msg: ChatMessage; index: number; agent: string; sid: string; from: number; to: number; view: string } | null = null;
+
+  /** 当前视图的身份：同一 agent 的「最新」与「历史现场」是两个视图，撤销只能插回删除时的那个 */
+  private viewKey(): string {
+    const b = this.state.browsing;
+    return `${this.state.activeAgent ?? ""}|${b ? `${b.sessionId}:${b.anchorSeq}` : "live"}`;
+  }
 
   /**
    * v2.23.1+ 删除一条消息 = 跨设备隐藏（服务端按 session + 原始记录 seq 区间记，不动
@@ -228,7 +234,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       s.messages = s.messages.filter((x) => x.id !== id);
     });
-    this.lastHidden = { msg: m, index: idx, agent, sid, from, to };
+    this.lastHidden = { msg: m, index: idx, agent, sid, from, to, view: this.viewKey() };
     try {
       const r = await fetch("/api/chat/messages/hide", {
         method: "POST",
@@ -265,9 +271,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const h = this.lastHidden;
     if (!h) return;
     if (!keep) this.lastHidden = null;
-    // 撤销 toast 活 5 秒，期间可能已切到别的会话（或进了历史浏览）：别把 A 的消息插进
-    // B 的视图（D8-5）。服务端照常按 h.agent 解除隐藏；丢掉 A 的快照，切回时重新拉取即恢复。
-    if (this.state.activeAgent !== h.agent || this.state.browsing) {
+    // 撤销 toast 活 5 秒，期间可能已切到别的会话、或在同一会话的「最新」与「历史现场」间
+    // 跳过：别把消息插进别的视图（D8-5）。服务端照常按 h.agent 解除隐藏；丢掉该 agent 的
+    // 快照，回到那个视图时重新拉取即恢复。在历史现场里删、原地撤销仍走下面的就地恢复。
+    if (this.viewKey() !== h.view) {
       this.messageCache.delete(h.agent);
       return;
     }

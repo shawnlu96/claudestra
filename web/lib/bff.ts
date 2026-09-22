@@ -6,7 +6,8 @@
  * 抹成 502，前端只能一律显示「失败」，clear 路由甚至要靠正则从错误文案里猜 409。
  *
  * 映射口径：
- *  - bridge 401 → 502：那是 BFF 自己的 token 配错了，不是用户没登录；透传 401 前端会跳登录页。
+ *  - bridge 401 / 403 → 502（body 带 upstream 状态码）：那是 BFF 自己的 token 失效或 scope
+ *    不足，不是用户没登录；透传 401 前端会无限跳登录页（chat-store 遇 401 一律 gotoLogin）。
  *  - 其余 4xx 原样透传，body 带上 bridge 给的字段（如 409 的 runId）。
  *  - retryable 或 503 → 503（链路重连中，前端可以稍后再试）。
  *  - 其它（网络不通、超时、5xx）→ 502。
@@ -30,7 +31,7 @@ export function unauthorized(): NextResponse {
 export function bridgeErrorStatus(e: unknown): number {
   const err = e as BridgeError | undefined;
   const st = typeof err?.status === "number" ? err.status : 0;
-  if (st === 401) return 502;
+  if (st === 401 || st === 403) return 502;
   if (st >= 400 && st < 500) return st;
   if (err?.retryable || st === 503) return 503;
   return 502;
@@ -40,10 +41,20 @@ export function bridgeErrorResponse(e: unknown, prefix = ""): NextResponse {
   const err = e as BridgeError | undefined;
   const status = bridgeErrorStatus(e);
   const msg = `${prefix}${err?.message ?? String(e)}`;
-  // 透传的 4xx 带上 bridge 的原始字段；401 映射成 502 时不带（里面是 token 层的信息）
+  const upstream = err?.status;
+  if (upstream === 401 || upstream === 403) {
+    console.error(`[bff] bridge 回 ${upstream}：CLAUDESTRA_API_TOKEN 无效或 scope 不足 —— ${err?.message}`);
+  }
+  // 透传的 4xx 带上 bridge 的原始字段；401/403 映射成 502 时不带（里面是 token 层的信息）
   const extra = status >= 400 && status < 500 && err?.body ? err.body : {};
   return NextResponse.json(
-    { ...extra, ok: false, error: msg, ...(err?.retryable ? { retryable: true } : {}) },
+    {
+      ...extra,
+      ok: false,
+      error: msg,
+      ...(err?.retryable ? { retryable: true } : {}),
+      ...(upstream === 401 || upstream === 403 ? { upstream } : {}),
+    },
     { status },
   );
 }
