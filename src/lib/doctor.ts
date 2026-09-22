@@ -13,7 +13,7 @@
 
 import { resolveBridgePort } from "./bridge-url.js";
 import { parseDotenv, readDotenvFileSync } from "./env-file.js";
-import { STATE_DIR, TMUX_SOCK } from "./paths.js";
+import { STATE_DIR, TMUX_SOCK, UNDELIVERED_ALERTS_LOG } from "./paths.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
 import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
@@ -601,11 +601,44 @@ async function checkDeployment(): Promise<Check[]> {
   return out;
 }
 
+/**
+ * notify 投递失败会追加到 undelivered-alerts.log（lib/notify）。以前没人读它——告警没送达
+ * 这件事本身也没送达。有条目就 warn；文件不存在 / 为空不出这一行（健康实例输出不变）。
+ * 纯函数，tests/doctor.test.ts。
+ */
+export function undeliveredAlertsVerdict(text: string | null, path: string, now = Date.now()): Check | null {
+  if (!text) return null;
+  const lines = text.split("\n").filter((l) => l.trim());
+  if (lines.length === 0) return null;
+  let last: { ts?: string; source?: string; reason?: string } = {};
+  try { last = JSON.parse(lines[lines.length - 1]!); } catch { /* 坏行：只报条数 */ }
+  const WEEK = 7 * 24 * 3600 * 1000;
+  const recent = lines.filter((l) => {
+    try {
+      const t = Date.parse(JSON.parse(l).ts);
+      return Number.isFinite(t) && now - t < WEEK;
+    } catch { return false; }
+  }).length;
+  const lastDesc = last.ts ? `；最近一条 ${last.ts}${last.source ? ` [${last.source}]` : ""}${last.reason ? `：${last.reason}` : ""}` : "";
+  return {
+    group: "告警投递", name: "未送达告警", status: "warn",
+    detail: `${lines.length} 条（近 7 天 ${recent} 条）${lastDesc}`,
+    fix: `看 ${path} 里没送到的告警内容；处理完后清空该文件（: > ${path}）`,
+  };
+}
+
+async function checkUndeliveredAlerts(): Promise<Check[]> {
+  const text = await readFile(UNDELIVERED_ALERTS_LOG, "utf-8").catch(() => null);
+  const v = undeliveredAlertsVerdict(text, UNDELIVERED_ALERTS_LOG);
+  return v ? [v] : [];
+}
+
 export async function runDoctor(repoRoot: string): Promise<Check[]> {
   const groups = await Promise.all([
     checkRuntime(),
     checkConfig(repoRoot),
     checkDaemons(),
+    checkUndeliveredAlerts(),
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(),

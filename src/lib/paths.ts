@@ -56,6 +56,8 @@ export const ARCHIVE_ROOT = statePath("archive");
 export const INBOX_DIR = statePath("inbox");
 export const UPDATE_LOCK = statePath("update.lock");
 export const CRON_HISTORY_PATH = statePath("cron-history.json");
+/** notify 投递失败的留痕（lib/notify 写，doctor 读） */
+export const UNDELIVERED_ALERTS_LOG = join(LOG_DIR, "undelivered-alerts.log");
 
 /**
  * 被拉起的进程（agent 里的 claude / pi、它们的 hook、channel-server）不继承 manager 的 env，

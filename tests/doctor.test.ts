@@ -196,3 +196,35 @@ describe("orphanAgentNames", () => {
     expect(got).toEqual(["agent-gone"]);
   });
 });
+
+import { undeliveredAlertsVerdict } from "../src/lib/doctor";
+
+describe("undeliveredAlertsVerdict", () => {
+  const P = "/x/logs/undelivered-alerts.log";
+  const now = Date.parse("2026-09-23T00:00:00Z");
+
+  test("文件不存在 / 空 → 不出这一行", () => {
+    expect(undeliveredAlertsVerdict(null, P, now)).toBeNull();
+    expect(undeliveredAlertsVerdict("", P, now)).toBeNull();
+    expect(undeliveredAlertsVerdict("\n\n", P, now)).toBeNull();
+  });
+
+  test("有条目 → warn，带条数、近 7 天条数、最近一条", () => {
+    const text = [
+      JSON.stringify({ ts: "2026-09-01T00:00:00Z", source: "cron", reason: "old" }),
+      JSON.stringify({ ts: "2026-09-22T10:00:00Z", source: "launcher", reason: "bridge 连不上" }),
+    ].join("\n") + "\n";
+    const v = undeliveredAlertsVerdict(text, P, now)!;
+    expect(v.status).toBe("warn");
+    expect(v.detail).toContain("2 条（近 7 天 1 条）");
+    expect(v.detail).toContain("[launcher]");
+    expect(v.detail).toContain("bridge 连不上");
+    expect(v.fix).toContain(P);
+  });
+
+  test("坏行不抛，只报条数", () => {
+    const v = undeliveredAlertsVerdict("not json\n", P, now)!;
+    expect(v.status).toBe("warn");
+    expect(v.detail).toBe("1 条（近 7 天 0 条）");
+  });
+});

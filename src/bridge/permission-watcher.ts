@@ -29,6 +29,7 @@ import {
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { agentsFromList, createFailureLatch } from "../lib/run-manager.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import {
   auqStates,
@@ -730,12 +731,21 @@ export function startPermissionWatcher(
   // setInterval 会让轮次叠罗汉，每轮各自持有一串子进程。bg-activity-watcher 和
   // stats-dashboard 早就是这么做的，这里一直漏了。
   let ticking = false;
+  // manager list 失败（registry 坏了 / 超时）以前被当成「没有 agent」静默跳过——弹窗检测
+  // 整体失明却没有一行日志。与 wedge-watcher 同款：状态切换时报一次、恢复时再报一次。
+  const listLatch = createFailureLatch("permission-watcher manager list");
   const tick = async () => {
     if (ticking) return;
     ticking = true;
     try {
-      const list = await runManager("list");
-      const agents: any[] = list.agents || [];
+      let agents: any[];
+      try {
+        agents = agentsFromList(await runManager("list"));
+        listLatch.ok();
+      } catch (e) {
+        listLatch.fail(e);
+        return;
+      }
       for (const agent of agents) {
         if (agent.status !== "active" || !agent.channelId) continue;
         // 注意：不能根据 idle 字段跳过 — 弹窗界面底部也有 ❯ 会被误判为 idle
