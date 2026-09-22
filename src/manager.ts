@@ -86,7 +86,7 @@ import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { REPO_ROOT, SRC_DIR } from "./lib/repo-root.js";
 import { resolveNpm } from "./lib/npm-path.js";
-import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
+import { projectsSlug } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
 import {
   readProjects,
@@ -115,6 +115,7 @@ import { bridgeRequest } from "./lib/bridge-client.js";
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
+import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
 import { installAfterPull, DEP_MANIFESTS } from "./lib/post-pull.js";
 
 /**
@@ -611,10 +612,12 @@ async function cmdCreate(
       extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv },
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
-    ready = (await launchInWindow(tmuxName, adapter, spec)).result.ready;
-
-    if (!ready) {
-      await cleanup(`${adapter.label} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
+    const started = (await launchInWindow(tmuxName, adapter, spec)).result;
+    ready = started.ready;
+    if (!started.ready) {
+      // 按 reason 出文案（对话框原文 / 秒退 / 占用）；CC 状态栏契约提示只对「超时」有意义
+      const hint = started.reason === "timeout" ? readyTimeoutHint(await captureLast(name, 40).catch(() => "")) : "";
+      await cleanup(`${adapter.label} ${readyFailureText(started)}${hint}`);
       return;
     }
   } catch (err) {
@@ -874,9 +877,9 @@ async function cmdResume(
     const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
     ready = launched.result.ready;
     baseline = launched.baseline;
-
-    if (!ready) {
-      await cleanup(`${adapter.label} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
+    if (!launched.result.ready) {
+      const hint = launched.result.reason === "timeout" ? readyTimeoutHint(await captureLast(name, 40).catch(() => "")) : "";
+      await cleanup(`${adapter.label} ${readyFailureText(launched.result)}${hint}`);
       return;
     }
   } catch (err) {
@@ -1641,18 +1644,10 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       regDirty = true;
     }
 
-    // v2.21.1+ 超时报错附 session jsonl 体积(peer 建议):--resume 整读大文件,
-    // 346MB 级的 session 启动本身就要一两分钟,省得排查时再人肉 stat
+    // 按 reason 出文案并附 detail（以前一律「启动超时」）；超时再附大会话体积提示
     let timeoutErr: string | undefined;
     if (!started.ready) {
-      timeoutErr = "启动超时";
-      try {
-        const cwd = (info.cwd || "").replace(/^~/, process.env.HOME || "~");
-        const sz = statSync(projectJsonlPath(cwd, info.sessionId)).size;
-        if (sz > 50 * 1024 * 1024) {
-          timeoutErr += `(session jsonl ${Math.round(sz / 1024 / 1024)}MB——resume 大会话本身可能就需 1-2 分钟,可考虑 clear/fork)`;
-        }
-      } catch { /* jsonl 不在原处,不加注 */ }
+      timeoutErr = readyFailureText(started) + (started.reason === "timeout" ? bigSessionNote(info.cwd, info.sessionId) : "");
     }
     results.push({
       name: tmuxName,
@@ -1671,6 +1666,11 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
         text: `✅ ${displayName} 已重启，自动恢复完整会话（无 compact，上下文保留）`,
       }).catch(() => { /* 通知失败不影响重启结果 */ });
     }
+    } catch (e) {
+      // 单个 agent 的异常（如 Codex 按 registry 值抛错）只记进它自己的结果，继续下一个——以前穿出循环，整轮全丢
+      const entry = restartExceptionResult(tmuxName, e);
+      console.error(`[restart] ❌ ${tmuxName} ${entry.error}`);
+      if (!results.some((r) => r.name === tmuxName)) results.push(entry);
     } finally {
       unlockRestart(tmuxName); // 无论成败/异常都释锁，别把 agent 永久锁死
     }
@@ -2116,13 +2116,10 @@ async function cmdModel(sub: string, ...rest: string[]) {
     if (!modelVal) { output({ ok: false, error: "usage: model all <model>", aliases: listModelAliases() }); return; }
     const resolved = resolveModelAlias(modelVal);
     const reg = await loadRegistry();
-    const changed: string[] = [];
-    for (const [name, info] of Object.entries(reg.agents)) {
-      if (info.status === "active") {
-        info.model = modelVal;
-        changed.push(name);
-      }
-    }
+    // 只钉会话内生效的运行时（CC）；Codex / Pi 的模型是启动参数，写进 Claude 别名会让下次启动抛错
+    const plan = modelPinPlan(reg.agents, (rt) => managedFor(rt)?.control.modelEnforcement);
+    const changed = plan.pin;
+    for (const name of changed) reg.agents[name].model = modelVal;
     await saveRegistry(reg);
     // v2.5.4: idle 的 agent 顺手在会话内立即生效（忙的跳过，restart 时会补发）
     const applied: string[] = [];
@@ -2136,6 +2133,7 @@ async function cmdModel(sub: string, ...rest: string[]) {
       model: resolved,
       changed,
       appliedLive: applied,
+      skipped: plan.skipped,
       hint: `已钉 ${changed.length} 个 active agent 到 ${resolved}；${applied.length} 个 idle 的已当场生效，其余在下次 restart 时自动补发 /model。`,
     });
     return;
@@ -2160,6 +2158,8 @@ async function cmdModel(sub: string, ...rest: string[]) {
   const reg = await loadRegistry();
   const info = reg.agents[tmuxName];
   if (!info) { output({ ok: false, error: `找不到 agent: ${tmuxName}` }); return; }
+  const enforcement = managedFor(info.runtime)?.control.modelEnforcement; // Codex / Pi 的模型是启动参数，不接受 model 命令
+  if (enforcement !== "in-session") { output({ ok: false, agent: tmuxName, error: modelPinRefusal(info.runtime, enforcement) }); return; }
   info.model = modelVal;
   await saveRegistry(reg);
   // v2.5.4: idle 就当场在会话内生效；忙就等下次 restart 自动补发
