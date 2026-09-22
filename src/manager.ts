@@ -29,7 +29,6 @@ import {
   tmuxRaw,
   tmuxRawStrict,
   sessionTarget,
-  tmuxSendEscape,
   windowTarget,
   tmuxCapture,
   isIdle,
@@ -75,6 +74,7 @@ import {
   type ReadyResult,
 } from "./lib/runtimes/index.js";
 import { listSessionJsonls } from "./lib/runtimes/claude-code.js";
+import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
@@ -1189,54 +1189,11 @@ function projectsDirFor(cwd: string): string {
 }
 
 /**
- * 优雅退出一个会话：打断 → 清菜单 → 键入退出指令 → 处理收尾弹窗 → 最后强杀。
- * 按键、退出指令、收尾弹窗都由适配器给（缺省 Claude Code，大总管走这条）。
+ * 优雅退出一个会话：清场 → 键入退出指令 → 处理收尾弹窗 → 最后强杀。
+ * 按键序列在 runtimes/graceful-exit.ts（适配器可用 exitPrelude 接管清场；缺省 Claude Code，大总管走这条）。
  */
 async function gracefulExit(name: string, adapter: ManagedRuntimeAdapter = claudeCodeAdapter): Promise<boolean> {
-  const target = windowTarget(name);
-  const win = tmuxWindowOps(name);
-
-  // 阶段 1: 多次打断确保停下当前操作
-  for (let i = 0; i < 3; i++) {
-    for (const key of adapter.control.interruptKeys) await win.sendKey(key);
-    await Bun.sleep(800);
-    const pane = await captureLast(name, 5);
-    if (isAtShell(pane)) return true;
-    // 如果出现了 ❯ 提示符（Claude Code 空闲），可以继续退出
-    if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) break;
-  }
-
-  // 阶段 2: 发 Escape 清除任何菜单/弹窗（走双击护栏：连发两个 Esc = CC 的 Rewind 手势）
-  await tmuxSendEscape(target);
-  await Bun.sleep(500);
-
-  // 阶段 3: 发退出命令
-  await win.sendLiteral(adapter.exitCommand);
-  await Bun.sleep(100);
-  await win.sendKey("Enter");
-
-  // 阶段 4: 轮询处理收尾弹窗，最多等 30 秒（没有 onExitPane 的运行时只等回 shell）
-  for (let i = 0; i < 60; i++) {
-    await Bun.sleep(500);
-    const pane = await captureLast(name, 10);
-    if (isAtShell(pane)) return true;
-    await adapter.onExitPane?.(pane, win);
-  }
-
-  // 阶段 5: 最后手段 — 强制杀进程
-  const finalPane = await captureLast(name, 5);
-  if (!isAtShell(finalPane)) {
-    // 发 Ctrl+C 多次 + Ctrl+D
-    await tmuxRaw(["send-keys", "-t", target, "C-c"]);
-    await Bun.sleep(300);
-    await tmuxRaw(["send-keys", "-t", target, "C-c"]);
-    await Bun.sleep(300);
-    await tmuxRaw(["send-keys", "-t", target, "C-d"]);
-    await Bun.sleep(2000);
-  }
-
-  const check = await captureLast(name, 3);
-  return isAtShell(check);
+  return gracefulExitWindow(tmuxWindowOps(name), adapter);
 }
 
 /**

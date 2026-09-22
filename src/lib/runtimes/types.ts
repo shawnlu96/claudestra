@@ -170,6 +170,12 @@ export interface RuntimeControl {
   modelEnforcement: "in-session" | "launch-flag";
   /** CC 的屏幕文案判据（压缩中 / 权限弹窗等）能不能套在它身上 */
   paneHeuristics: boolean;
+  /**
+   * 只在「忙」时才发 interruptKeys。Codex：空闲时的 Esc 不是空操作——第一下挂上
+   * backtrack，第二下打开历史回溯遮罩，TUI 就停在那里。不声明 = 照旧无条件发（CC / Pi）。
+   * ⚠ bridge 的 interruptAgent 目前还没读这个字段（归 P10），见 docs/runtimes/codex.md。
+   */
+  interruptOnlyWhenBusy?: boolean;
 }
 
 /** fork 后探测真实会话 id 的上下文 */
@@ -192,6 +198,12 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
   readonly turnEnd: string;
   /** 优雅退出时键入的指令 */
   readonly exitCommand: string;
+  /**
+   * 退出指令之前的清场（停下当前回合、关掉遮罩）。返回 "at-shell" = 已经回到 shell。
+   * 不实现 = 默认序列：interruptKeys 连发 3 轮（间隔 800ms）+ 一次守卫 Esc（CC / Pi）。
+   * 连按 Esc 在别的 TUI 里是手势（Codex：backtrack 回溯）的运行时必须自己实现。
+   */
+  exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
 
