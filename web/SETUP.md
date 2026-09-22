@@ -82,7 +82,7 @@ Fill `.env.local`:
 | `COOKIE_SECURE` | no | Set `on` to mark the session cookie `Secure`. Off by default so plaintext LAN/Tailscale access still works. |
 | `PUSH_VAPID_SUBJECT` | no | `mailto:` or URL identifying the push sender. |
 | `PUSH_LOCK_PORT` | no | Cross-process lock port for the push dispatcher (default `3339`) — guarantees only one dispatcher sends, whatever the process mix. |
-| `CLAUDESTRA_DATA_ROOT` | no | Overrides the data dir (default `~/.claude-orchestrator/web`), which holds the SQLite for auth sessions + per-agent settings. |
+| `CLAUDESTRA_DATA_ROOT` | no | Overrides the web data dir itself (default `~/.claude-orchestrator/web`): SQLite (auth sessions + per-agent settings), `config.json`, VAPID keys, uploads, `client.log`. Before 2026-09 the SQLite treated this as the *parent* of `web/` — if you set it that way, point it at `…/web` now. |
 
 **Issue the API token** (from the repo root, replace `bun` path as needed):
 

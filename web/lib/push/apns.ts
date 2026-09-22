@@ -2,7 +2,7 @@ import http2 from "node:http2";
 import { createPrivateKey, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { APNS_DIR } from "@/lib/data-root";
 
 /**
  * v2.22+ APNs 直连发送器(原生壳 native/ 的推送;owner 2026-09-03 给了 Auth Key)。
@@ -21,7 +21,7 @@ interface ApnsConfig { keyPath: string; keyId: string; teamId: string; topic: st
 let cfgCache: ApnsConfig | null | undefined;
 function config(): ApnsConfig | null {
   if (cfgCache !== undefined) return cfgCache;
-  const dir = join(process.env.CLAUDESTRA_DATA_ROOT || join(homedir(), ".claude-orchestrator"), "apns");
+  const dir = APNS_DIR;
   let keyPath = process.env.APNS_KEY_PATH || "";
   if (!keyPath && existsSync(dir)) {
     const f = readdirSync(dir).find((n) => /^AuthKey_[A-Z0-9]+\.p8$/.test(n));

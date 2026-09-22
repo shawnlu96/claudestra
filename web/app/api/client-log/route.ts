@@ -2,7 +2,7 @@ export const runtime = "nodejs";
 
 import { appendFileSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { DATA_ROOT } from "@/lib/data-root";
 import { isAuthed } from "@/lib/api-auth";
 
 /**
@@ -10,10 +10,7 @@ import { isAuthed } from "@/lib/api-auth";
  * 无法取证前端当时做了什么(看不到 console)——关键恢复路径(watchdog 判死/
  * 重连/强制对齐)打点到这里,下次事故直接对时间线。只记恢复事件,低频。
  */
-const LOG = join(
-  process.env.CLAUDESTRA_DATA_ROOT || join(homedir(), ".claude-orchestrator", "web"),
-  "client.log"
-);
+const LOG = join(DATA_ROOT, "client.log");
 
 export async function POST(request: Request) {
   if (!(await isAuthed(request))) return new Response(null, { status: 401 });
