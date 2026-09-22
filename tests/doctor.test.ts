@@ -197,7 +197,7 @@ describe("orphanAgentNames", () => {
   });
 });
 
-import { undeliveredAlertsVerdict } from "../src/lib/doctor-state";
+import { undeliveredAlertsVerdict, stateFileVerdicts } from "../src/lib/doctor-state";
 
 describe("undeliveredAlertsVerdict", () => {
   const P = "/x/logs/undelivered-alerts.log";
@@ -246,5 +246,23 @@ describe("staleInstallEnvKeys", () => {
 
   test(".env 里是空值不算漂移", () => {
     expect(staleInstallEnvKeys(tmux, { USER_NAME: "" }, parseTmuxEnvLine)).toEqual([]);
+  });
+});
+
+describe("stateFileVerdicts", () => {
+  test("都正常 / 不存在 → 不出行", () => {
+    expect(stateFileVerdicts([
+      { path: "/s/registry.json", read: { status: "ok", data: {} } },
+      { path: "/s/peers.json", read: { status: "missing" } },
+    ], [])).toEqual([]);
+  });
+
+  test("损坏 → fail（带文件名与原因）；有 .corrupt 备份 → warn", () => {
+    const v = stateFileVerdicts(
+      [{ path: "/s/principals.json", read: { status: "corrupt", error: "JSON 解析失败" } }],
+      ["principals.json.corrupt-2026-09-23T00-00-00-000Z"],
+    );
+    expect(v.map((c) => [c.name, c.status])).toEqual([["principals.json", "fail"], [".corrupt 备份", "warn"]]);
+    expect(v[0]!.detail).toContain("JSON 解析失败");
   });
 });

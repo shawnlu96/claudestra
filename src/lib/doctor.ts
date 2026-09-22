@@ -14,7 +14,7 @@
 import { resolveBridgePort } from "./bridge-url.js";
 import { parseDotenv, readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR, TMUX_SOCK } from "./paths.js";
-import { checkUndeliveredAlerts, staleInstallEnvCheck } from "./doctor-state.js";
+import { checkStateFiles, checkUndeliveredAlerts, staleInstallEnvCheck } from "./doctor-state.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
 import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
@@ -607,7 +607,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkRuntime(),
     checkConfig(repoRoot),
     checkDaemons(),
-    checkUndeliveredAlerts(),
+    checkUndeliveredAlerts(), checkStateFiles(),
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(),
