@@ -749,7 +749,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     try {
       // ?fresh=1：面板上的「重新检测」要绕过 60 秒缓存（刚配完 serve / 刚续完证书就想看结果）
       const maxAge = url.searchParams.get("fresh") === "1" ? 0 : 60_000;
-      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readWebPort(`${import.meta.dir}/../..`), maxAge)) });
+      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readWebPort(REPO_ROOT), maxAge)) });
     } catch (e) {
       return apiJson(500, { ok: false, error: `探测失败: ${(e as Error).message}` });
     }
