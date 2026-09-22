@@ -2,11 +2,28 @@
 
 [English](./CLAUDE.md) · **简体中文**
 
-本文档描述 Claudestra 的内部架构，面向贡献者、修改代码的 agent、以及排查生产问题的人。新用户请先看 [SETUP.zh-CN.md](./SETUP.zh-CN.md)。
+面向贡献者和在本仓干活的 agent：架构地图、不变量、规则。新用户请先看 [SETUP.zh-CN.md](./SETUP.zh-CN.md)。功能细节在 [`docs/architecture/`](./docs/architecture/)——本文件只留每个会话都用得上的内容，它自己也在体量棘轮里。
+
+## 防腐规则（`bun run check` 会拦，别绕）
+
+1. **每次提交前跑 `bun run check`**（= `tsc --noEmit` + `bun test` + `bun run guard`）。guard 报红就**改代码，不许为了通过去改 `scripts/guard/baseline.json`**。baseline 唯一允许的自动变更是 `bun run guard:update`（只会收紧）。没有行内 ignore 注释。
+2. **放宽必须留痕**：手改 baseline，并在它的 `raised[]` 里写 `{key, from, to, why}`（why ≥10 字），commit message 再写一遍。guard 拿比较基准版本的 baseline 做 diff（CI：`GUARD_BASE` = PR 的 base / push 的 before；本地：与 upstream/`origin/main` 的分叉点），没记录的放宽本地侥幸过了，CI 也会红。
+3. **体量上限**：新文件 ≤400 行（tests ≤600），新函数 ≤100 行，单行 ≤200 字符。baseline 里的大文件只许变小：往 `manager.ts` / `bridge.ts` / `api-routes.ts` / `chat-store.ts` 加功能 = 新建模块写逻辑，大文件里只留一行调用。把超长函数或重复块原样搬出去不算违规（这两项按全仓总量计）。
+4. **写 helper 之前先搜**：`grep -rn "export function" src/lib | grep -i <关键词>`。规范位置：
+   - tmux → `src/lib/tmux-helper.ts`（`windowTarget()`、`tmuxRaw`、`tmuxFire`、`tmuxInterrupt`）；禁止手写 `master:${x}` 和 `Bun.spawn(["tmux", …])`。已知例外：`bridge/web-terminal.ts` 的 PTY 参数、`lib/doctor.ts` 的 `tmux -V` 探测、Pi 扩展里的 `execFile`、`setup.ts`。
+   - 启动参数 → `src/lib/claude-launch.ts`、`src/lib/launch-command.ts`、`src/lib/runtimes/`、`src/lib/pi-launch.ts`。
+   - 路径 → registry 用 `src/lib/registry.ts`（`REGISTRY_PATH`），日志 `src/lib/log-paths.ts`，bun/npm 可执行文件 `src/lib/bun-path.ts` / `src/lib/npm-path.ts`，会话文件 `src/lib/session-source.ts`。
+   - 文件锁 / 原子写 JSON → `src/lib/file-lock.ts`；原子写复用拥有该文件的模块里的 tmp+rename 写法（如 `src/lib/peers.ts`），要出现第三份就先抽到 `src/lib`。
+   - bridge/cron 调 `manager.ts` → `runManager`（`src/lib/manager-client.ts` 落地后用它，否则 `src/bridge/management.ts`），禁止自己 spawn `bun src/manager.ts`；Bridge ws 请求 → `src/lib/bridge-client.ts`。
+5. **依赖方向**：`src/lib` 只 import `src/lib`；`src/bridge/*` 不 import 入口文件（`src/*.ts`），也不 import 枢纽（`api-routes` / `management` / `web-terminal` / `web-gateway`）；watcher 之间不互相 import——共用纯函数下沉到 `src/lib`，运行时状态查询用注入。`web/` 与 `src/` 互不 import，确需两边各一份的登记进 `scripts/guard/config.ts` 的 twins。
+6. **不许复制 6 行以上的逻辑**。需要「和 X 对齐」就抽函数去调用，不要写一句「与 X 保持一致」的注释。
+7. **不许无声吞错**：`catch {}` / `.catch(() => {})` 里必须写一句为什么丢了也没事（`/* ignore */`、`/* 同上 */`、`/* non-critical */` 这类占位按吞错计）；能打日志就打日志。
+8. **注释写「现在为什么这样、改了会坏什么」**，最多 6 行，不加 `v2.x+:` 前缀。版本演变、事故经过、谁哪天报的、原话引用都写进 commit message；注释里最多留一句「见 tests/x.test.ts」或「git log -S <符号>」。
+9. **本文件是地图不是 changelog**：功能细节写到 `docs/<领域>/<主题>.md`，这里留一行指针（`CLAUDE.md` 的字节数在 baseline 里）。
 
 ## 系统概览
 
-Claudestra 是一个多 session 编排器，基于 Claude Code 原生的 **Channel 协议**（MCP 的一个扩展）。一个 Bridge 进程把单个 Discord bot token 扇出到多个 Claude Code session——每个 session 作为一个独立的 channel 监听者注册。
+Claudestra 是基于 Claude Code 原生 **Channel 协议**（MCP 的扩展）的多会话编排器。一个 Bridge 进程把单个 Discord bot token（以及 HTTP/Web API）扇出到多个 Claude Code / Pi 会话，每个会话注册为独立的 channel 监听者。
 
 ```
  Discord (一个 bot, 一个 token)
@@ -22,130 +39,57 @@ Claudestra 是一个多 session 编排器，基于 Claude Code 原生的 **Chann
         │   ...                         │                               │
 ```
 
-**消息流向：**
-
-- **入站** — Discord → Bridge → channel-server (MCP) → Claude Code session。
-- **出站** — Claude Code 调用 `reply` 工具 → channel-server → Bridge → Discord。
-- **流式 tool call** — Claude Code 写 JSONL → jsonl-watcher 监听 → Bridge 推送格式化的 tool 摘要到 Discord。
-
-每个 Claude Code session 都有自己的 `channel-server` 子进程，作为 stdio MCP server 运行。channel-server 一边跟 Claude Code 讲 MCP，另一边跟 Bridge 讲轻量的 WebSocket 协议。
+- 所有「消息语义」的操作都构造 `Envelope{from, to, intent, content, meta}` 再调 `deliver()`（`src/bridge/router.ts` 定义 `Endpoint` = local / user / api）。入站、出站 `reply`、agent↔agent `send_to_agent`、HTTP peer 回推都走这条路。
+- 每个 Claude Code 会话有自己的 `channel-server`（stdio MCP ↔ Bridge WebSocket）；Pi 会话用 `src/pi/claudestra-extension.ts`，讲同一套 ws 协议。
+- `jsonl-watcher` 追会话 JSONL，推送工具调用和 assistant 文本（1.5s 去抖），Stop hook 时同步 drain。
+- 完整说明（消息流、Envelope 模型）：[docs/architecture/overview.zh-CN.md](./docs/architecture/overview.zh-CN.md)。
 
 ## 项目结构
 
+每块一行；逐文件说明（历史、事故、理由）见 [docs/architecture/project-layout.zh-CN.md](./docs/architecture/project-layout.zh-CN.md)。
+
 ```
 src/
-  bridge.ts              主入口：Discord client、WebSocket server、事件分发、slash 命令
-  bridge/
-    router.ts            v2.0.0+ Envelope/Endpoint 类型 + parseAddress + threadId 助手；v2.6.0+ parseChatId（带 transport 前缀的统一 chat_id 键空间）+ ApiUserEndpoint
-    adapters.ts          v2.6.0+ ChatAdapter 接口 + 注册表（出站按 transport 分发，Discord 是第一个 adapter）
-    event-bus.ts         v2.6.0+ 进程内事件总线（seq + 每 agent 环形缓冲，tool 调用/文本/状态 → SSE 事件流）
-    config.ts            共享运行时常量
-    components.ts        Discord UI 组件 + typing indicator
-    discord-api.ts       Discord API 封装（建/删频道、编辑消息等）
-    management.ts        管理按钮/菜单的直接执行处理器（绕过 LLM）
-    screenshot.ts        终端截图流水线（ANSI → HTML → PNG）
-    jsonl-watcher.ts     JSONL session 监听 → 流式 tool call 摘要 + assistant 文本流 + Stop 时同步 drain
-    slash-catalog.ts     CC 内置 slash 命令的硬编码清单（挑了 Discord 上好用的那批）
-    slash-registry.ts    运行期发现的 skill 注册表（按 scope）+ 每频道解析器
-    wedge-watcher.ts     检测卡死 >30min 且非空闲的 agent → Discord 告警；v2.7+ 链路哨兵（窗口活着但 channel-server 掉线 >5min → 修复按钮）；v2.14+ 告警同时推 `session_anomaly(kind=link_down)`，web 端也看得到
-    sessions-inventory.ts v2.7+ 机器级中立会话清单：`claude agents --json` + jobs 状态 + registry 对账 → 分身检测
-    session-reconciler.ts v2.7+ 每 10 分钟后台对账：发现新分身 → Discord 告警带清理/收编按钮 + session_anomaly 事件
-    bg-activity-watcher.ts v2.8+ 后台活动追踪：按 agent 会话发现 subagent jsonl 与后台 shell 输出 → 流进各自的子区（ChatAdapter.provisionThread）+ bg_task_* SSE 事件；v2.14+ Web 来源的回合只发事件不建子区
-    archive-sweeper.ts   v2.9+ 每日归档兜底：每 24h 给所有活跃 agent 的会话 jsonl 做快照（幂等 copy-if-larger）——补上崩溃/从未退役这些退役时归档覆盖不到的缺口
-  channel-server.ts      每个 session 的 MCP 代理（stdio MCP ↔ Bridge WebSocket）
-  manager.ts             Agent 生命周期 + 定时任务 + 版本/更新 CLI（JSON 输出）
-  cron.ts                定时任务调度守护进程（launchd 管理）
-  launcher.ts            大总管 tmux session 守护（launchd 管理）
-  setup.ts               交互式安装向导
-  hooks/
-    typing-hook.ts       Claude Code Stop/Notification hook → Bridge HTTP 端点
-    recall-hook.ts       v2.21.5+ SessionStart hook：把本项目 HANDOFF.md + `~/mem0-mcp/recall.py` 的输出（mem0 顶层召回）注入开场 context；永远 exit 0，10s 上限
-  lib/
-    bridge-client.ts     共享 Bridge WebSocket 请求封装
-    tmux-helper.ts       共享 tmux 命令封装（tmuxRaw, isIdle, sendLine, …）
-    claude-launch.ts     统一 Claude Code 启动命令构造（flags, MCP_NAME, shell 转义）
-    config-store.ts      运行期配置 ~/.claude-orchestrator/config.json（自动更新开关、语言）
-    skills.ts            SKILL.md 发现——user / plugin / project 三个来源 + 硬编码的原生命令
-    jsonl-cost.ts        解析 ~/.claude/projects 的 JSONL → 按模型汇总 token
-    peers.ts             peers.json 数据模型（v2.11+ 只剩 HTTP peer）+ 握手串编解码 + 原子写
-    principals.ts        v2.6.0+ API token 身份/scope/限流（~/.claude-orchestrator/principals.json）
-    doctor.ts            v2.14+ 只读安装体检，`manager.ts doctor` 的实现（运行时/配置/daemon/bridge/MCP/agent）
-    link-policy.ts       v2.14+ channel-server 被 bridge 顶替后该重连还是退出——纯函数，有单测
-    session-recall.ts    v2.21.5+ 召回 hook 的纯逻辑：Claude Code 项目 slug / HANDOFF.md 路径 / 幂等合并 SessionStart hook 进 ~/.claude/settings.json（本机有 recall.py 才注册）
-    net-addr.ts          v2.14+ 探测本机对外地址（Tailscale CGNAT 优先，其次 RFC1918），peer 握手 `--url` 的来源
-    registry.ts          v2.9+ registry.json 唯一读取器（字段归一含 cwd/dir 兼容）；写入仍只归 manager.ts
-    projects.ts          v2.21+ project 数据模型（~/.claude-orchestrator/projects.json）：dirs[] + 按目录归属解析 + id slug；写入只归 manager.ts，bridge 只读
-    bg-jobs.ts           v2.7+ bg job 清理配方：杀进程 → 等 daemon 静默 → 隔离目录 → respawn 时 roster 根治（v2.9.1：daemon 的 ~/.claude/daemon/roster.json workers 花名册才是 respawn 权威依据 —— 无其他 worker 受累时 kill worker + transient daemon 并删条目）
-    baseline-keys.ts     v2.22.x bg-activity-watcher 的重启防重放作用域:按 agent×session 记首次进入监视(进程级单标志会把晚进入的 agent 存量 subagent 全量重播成「运行中」,2026-09-07 peer 报 109 张幽灵卡)
-    reply-nudge.ts       v2.22.x Stop hook「补 reply」拦截规则:该 agent ws 上仍挂着未回复的请求 → 回 {block, reason} 让 Claude Code 续跑一次去调 reply(stop_hook_active / 已拦过 / 刚投递 <500ms 不拦)
-    session-archive.ts   v2.8+ 会话退役归档：kill/fork 换代/adopt/resume 换 session 时快照 jsonl 到 ~/.claude-orchestrator/archive/<agent>/（对抗 CC cleanupPeriodDays）
-    session-history.ts   v2.9+ 只读历史解析：live + 归档 jsonl → 中性分页消息，支撑 GET /api/v1/agents/:name/history
-  ansi2html.ts           ANSI 转义码 → 彩色 HTML
-  html2png.ts            HTML → PNG（Playwright headless Chromium）
-  discord-reply.ts       Bash fallback：通过 Bridge 直接发消息
-master/
-  CLAUDE.md.template     大总管行为指令模板（setup.ts 渲染）
-  CLAUDE.md              渲染后的本地副本（gitignored）
-tests/                     只覆盖纯逻辑（实时数量以 `bun test` 为准）；bridge.ts 本身没有隔离单测
-                           （Discord client + ws + peers.json 耦合太重），那部分靠沙箱会话实测兜底
-  agent-stats.test.ts      按 agent 的用量汇总，compact 感知
-  ask-user-question.test.ts TUI 里的 AskUserQuestion 识别 + 按键合成
-  bg-jobs.test.ts          Claude Code bg job 清理配方（roster 根因修复）
-  baseline-keys.test.ts    v2.22.x bg-activity baseline 作用域:同 agent-session 只 baseline 一次、换 session 重新 baseline、prune 按 agent 名
-  reply-nudge.test.ts      v2.22.x Stop hook 补 reply 拦截:只拦 Stop、stop_hook_active 不拦、一次为限、挑最老
-  claude-launch.test.ts    启动 flag 构造：权限模式、effort、模型别名
-  cron.test.ts             Cron 解析器 + 调度器
-  doctor.test.ts           v2.14+ 安装体检：daemon 退出码判定 + 报告排版
-  event-bus.test.ts        v2.6.0+ seq 单调性、每 agent 环形缓冲、订阅者互不影响
-  http-peer.test.ts        v2.11+ HTTP peer 握手串编解码 + 回复提取
-  jsonl-cost.test.ts       JSONL token 用量汇总
-  link-policy.test.ts      v2.14+ channel-server 被顶替后怎么办——「stdio 活着就绝不退出」
-  modal-parser.test.ts     tmux modal 识别
-  net-addr.test.ts         v2.14+ 对外地址探测：CGNAT/RFC1918 边界、绝不返回回环
-  permission-watcher.test.ts 权限弹窗身份识别（去重键）
-  principals.test.ts       v2.6.0+ token 签发 / scope / 限流 / 终端授予
-  principals-snowflake.test.ts v2.14+ Discord ID 校验——占位符变成 principals.json 里
-                           永久假 owner 的链路上唯一的把关点
-  registry.test.ts         v2.9+ registry 字段归一（cwd/dir 兼容）
-  router.test.ts           v2.0.0+ Envelope / Endpoint / parseAddress / makeResponseEnvelope
-  session-archive.test.ts  v2.8+ copy-if-larger 快照语义
-  session-history.test.ts  v2.9+ jsonl → 中立消息：reply 提取、meta 过滤、翻页
-  session-recall.test.ts   v2.21.5+ 项目 slug、HANDOFF 路径、SessionStart hook 合并/移除的幂等性
-  sessions-inventory.test.ts v2.7+ 分身检测 / 会话对账
-  skills.test.ts           SKILL.md 发现
-  slash-registry.test.ts   slash 命令注册表的按频道解析
-  stats-resets.test.ts     用量窗口重置检测
-  web-gateway.test.ts      v2.13+ ws 控制面的跨源判定（drive-by RCE 防护）
-install.sh               一键安装脚本
-SETUP.md / SETUP.zh-CN.md    面向用户的安装指南
+  bridge.ts            入口：Discord client、ws server、deliver() 分发、slash 命令、Stop hook
+  bridge/              bridge 模块——router（Envelope/Endpoint/chat_id）、adapters（ChatAdapter 注册表）、
+                       event-bus（SSE）、api-routes（/api/v1）、management（免 LLM 按钮）、discord-api、
+                       各 watcher（jsonl / bg-activity / permission / wedge / session-reconciler / model-drift）、
+                       sessions-inventory、archive-sweeper、screenshot、web-terminal、web-gateway、config
+  channel-server.ts    每会话一个的 MCP 代理（stdio MCP ↔ Bridge ws）
+  pi/                  Pi agent 扩展（同一套 ws 协议 + Pi 自定义工具）
+  manager.ts           agent 生命周期 / project / cron / token / peer / 更新 CLI（JSON 输出）
+  cron.ts launcher.ts  launchd 守护：定时任务调度、master 会话守护 + 自动更新
+  setup.ts cli/        安装向导、`claudestra` CLI
+  hooks/               Claude Code hook：Stop/Notification → bridge、SessionStart 记忆召回
+  lib/                 纯逻辑 / 共用逻辑——规范 helper 所在地（见防腐规则第 4 条）
+  runtimes（lib/ 下）   各 runtime 的启动与会话适配（claude-code / pi / codex）
+web/                   Next.js PWA 客户端（有自己的 CLAUDE.md 和 npm 依赖树）
+tests/                 纯逻辑 bun 测试（`bun test`）；bridge.ts 本身靠 sandbox 实测
+scripts/guard/         防腐棘轮：规则、配置、baseline.json（见防腐规则）
+docs/                  设计文档 + architecture/（本文件搬出去的细节）
+master/                大总管指令模板（由 setup.ts 渲染）
 ```
 
 ## 功能
 
-- **多 agent 编排** — 创建、恢复、销毁、重启、列表、浏览历史。
-- **Project 归组（v2.21+）** — 每个 agent 必属一个 project（= 一组工作目录 + 一组 agent，如 qingniao = miniapp + backend 两仓）。`create --project <id>` 显式指定;缺省按目录最长匹配自动归属、匹配不到按目录 basename 自动建组——cron 临时 agent 与存量数据都不破 invariant（bridge 启动时跑 `project-migrate` 补齐）。master 例外（跨项目调度者）。归属记在 registry `projectId`（⚠ 遗留 `project` 字段存的是原始 dir，无关）;project 定义在 projects.json（manager 唯一写者）。协作面：启动时注入项目上下文（目录 + 同伴花名册）,运行中 `project_info` MCP 工具查成员/目录（master/未归属拿全量总览）。界面：web 侧栏按 project 折叠分组 + 📁 管理弹窗 + 新建弹窗 project 选择/目录下拉/review·测试角色预设;`GET/POST /api/v1/projects`（全权 token,mutation 走 runManager）;Discord 频道归入 project 同名 category（转移时 `move_channel`,web-only no-op）。
-- **多前端 API（v2.6.0+）** — 核心与 Discord 解耦（设计文档 `docs/design-multi-frontend.md`）：`GET /events` SSE 实时事件流（断线补发）、`POST /api/v1/agents/:name/messages` token 鉴权入站消息（同步 wait / multipart 传文件 / 轮询兜底）。token 按 agent 圈定 scope（`token-add <名> --agents a,b`，未标 `--external` 的 agent 需 `--force`），API 对话默认镜像回 Discord 频道供审计。接 Telegram 等新前端 = 实现一个 ChatAdapter，核心零改动。Bridge 默认只绑 `127.0.0.1`（`BRIDGE_BIND` 放开）。
-- **Claude Code agents 模式集成（v2.7+）** — CC 2.1.x 的 bg agent 体系（daemon、respawn、← 键 agents 视图）与 tmux 前台模型互相打架：误按 ← 会把前台会话 fork 成 bg 分身、静默炸断 Discord 链路（2026-07-09 事故）。适配三层：**可见性** —— `SessionsInventory` 聚合 `claude agents --json` + jobs state + registry 对账成中性会话清单（分身检测），Discord `/agents` 面板（详情/收编/清理按钮，LLM-free）、`GET /api/v1/sessions`、`POST /api/v1/sessions/:id/cleanup|adopt`（全权 token，202 + `session_anomaly` SSE 事件）三端共用；**自愈** —— `restart` 撞「running as a background agent」自动改 `--fork-session` 重试并探测新 session id 回写 registry，`adopt <名> <sessionId>` 收编分身，`resume --fork` 收编野生会话；**守护** —— permission-watcher 秒级自动 Esc 逃逸 agents 视图、wedge-watcher 链路哨兵（窗口活着但 channel-server 掉线 >5min → 修复按钮）、10 分钟对账器发现新分身即告警带处置按钮。清理配方（`lib/bg-jobs.ts`，事故实证）：杀 bg 进程（绝不杀 `--fork-session` 正主）→ 等 daemon 静默 → 隔离 job 目录 → 顽固 respawn 检测转官方 TUI。
-- **bg 活动子区（v2.8+）** — agent 的后台工作各开一个子会话，不污染主频道。`bridge/bg-activity-watcher.ts` 轮询每个注册 agent 的 session，发现两类活动：**subagent**（`~/.claude/projects/<slug>/<sessionId>/subagents/agent-*.jsonl`，与主会话同格式）和**后台 shell 任务**（`/tmp/claude-<uid>/<slug>/<sessionId>/tasks/*.output`）。新文件出现 → `ChatAdapter.provisionThread` 在 agent 频道下开子区（Discord thread，将来 Telegram topic），工具调用/文本/shell 输出以 2.5s debounce 流入；3 分钟无增长 → 发结束总结 + 归档子区。生命周期同步 SSE（`bg_task_started/update/completed`），web 前端可脱离 Discord 渲染每任务进度线。重启安全：首轮 poll 只记 baseline 不重播存量。**会话归档**（`lib/session-archive.ts`）：session 退役（kill / fork 换代 / adopt / resume 替换 / 手动 `manager.ts archive <name>`）即快照 jsonl（含 subagents）到 `~/.claude-orchestrator/archive/<agent>/` —— CC 的 `cleanupPeriodDays` 会清源文件，归档才是聊天历史的持久层。只在源更大时覆盖；对话内容留在文件里，不入库（owner 2026-07-10 拍板的存储设计）。v2.9+ 增加每日兜底扫描（`bridge/archive-sweeper.ts`）：每 24h 对所有 active agent 补一次快照，长寿命从不退役的 session 也有归档。SSE `bg_task_*` 事件携带稳定 `id`（文件 basename：subagent id / shell taskId），不外泄服务器路径。
-- **只读历史 API（v2.9+）** — 归档的 web UI 侧出口：`GET /api/v1/agents/:name/history` 列 agent 的全部 session（live + 归档合并，live 更大时优先），`GET /api/v1/agents/:name/history/:sessionId` 返回中性分页消息（`?limit=100&before=<seq>` 像聊天视图一样往前翻页；`?subagent=agent-xxx` 读 subagent 对话）。解析在 `lib/session-history.ts`（纯函数，有单测）：user/assistant/compact 边界条目 → `{seq, ts, role, text, tools[], compactSummary?}`，meta 条目和 tool_result 载荷被过滤，工具调用经 jsonl-watcher 的 `formatTool` 渲染。token scope 规则与 messages 端点一致；agent 被 kill 后归档仍可读（这正是归档的意义）。sessionId/subagent 参数拼路径前做白名单校验。
-- **Agent 间通信** — `send_to_agent(target, text)` MCP 工具通过 Bridge 直接向另一个 agent 的上下文注入消息。
-- **定时任务** — cron 表达式拉起临时 agent、执行 prompt、汇报、清理。
-- **Discord UI** — 按钮、下拉菜单、slash 命令（`/status`、`/screenshot`、`/interrupt`、`/cron`）。
-- **`reply()` 的交互组件** — 按钮行、单选下拉，以及 v2.14+ 的 `multiselect`：勾若干项一次提交。Discord 用原生 `max_values`（选完即交），web 端渲染成 checkbox + 提交按钮。两端回投同一种格式 `[select:<id>:<v1>,<v2>]`（值逗号分隔），agent 侧一套解析吃两端。选项之间不互斥时优先用多选，一个来回胜过好几轮。
-- **链路掉线告警（v2.14+）** — `wedge-watcher` 的 link sentinel（tmux 窗口活着但 channel-server 掉线 >5min）除了发 Discord 频道，也推 `session_anomaly(kind=link_down)` 事件，web 端渲染成醒目提示。此前这条只发 Discord，而 web 用户在 MCP 断开时得不到任何信号。
-- **管理按钮跳过 LLM** — 状态、监工、销毁、重启、定时任务按钮由 Bridge 直接执行，零 token 成本、瞬间响应。
-- **流式 tool 输出** — jsonl-watcher 近乎实时地把 `Read · Edit · Write · Bash · Grep` 推到 Discord。
-- **终端截图** — ANSI 转 PNG 流水线，屏幕锁定也能看。
-- **一键打断** — Discord 按钮向目标 agent 的 tmux window 发 `Ctrl+C`。
-- **精确空闲检测** — Claude Code `Stop` / `Notification` hooks 精确驱动 Discord typing indicator；30 分钟安全超时兜底。
-- **大总管守护** — launchd 管理的 launcher 保持大总管 tmux session 存活，自动处理 Claude Code 确认弹窗。
+每项一行；完整说明见 [docs/architecture/features.zh-CN.md](./docs/architecture/features.zh-CN.md)（英文版更全：[features.md](./docs/architecture/features.md)）。
+
+- **多 agent 编排** — 创建 / 恢复 / 销毁 / 重启 / 列表 / 历史，每个 agent 是一个 tmux window。
+- **Project 归组** — 每个 agent 必属一个 project（`projects.json`，manager 是唯一写者）；大总管例外。
+- **Agent 间消息** — `send_to_agent` 经 Bridge 直接注入另一个 agent 的上下文。
+- **Codex 调用** — `ask_codex` 每次调用起一个本机 Codex CLI（`lib/codex.ts`），默认只读沙箱。
+- **定时任务** — cron 表达式拉起临时 agent，跑 prompt、汇报、清理。
+- **Discord + Web UI** — `reply()` 里的按钮 / 单选 / 多选、免 LLM 管理按钮、工具调用流式推送、截图、一键中断、skills 的 slash 补全。
+- **多前端 API** — `GET /events` SSE、按 agent scope 的 Bearer `POST /api/v1/agents/:name/messages`、`ChatAdapter` 注册表；bridge 默认只绑 `127.0.0.1`。
+- **Claude Code agents 模式适配** — 会话清单 + 分身检测、重启时 fork 自愈、adopt/cleanup（`lib/bg-jobs.ts`）。
+- **后台活动子区 + 会话归档** — subagent / 后台 shell 各开子区；退役会话快照到 `~/.claude-orchestrator/archive/`（另有每日补扫）。
+- **只读历史 API + 手动归档区** — `GET /api/v1/agents/:name/history`、归档/恢复端点，保留期只清手动归档区。
+- **Pi agent 会话** — `runtime: "pi"` 经 Pi 扩展接入，能力档案（`pi-env`），会话记录翻译成 Claude Code 形状（`lib/session-source.ts`）。
+- **HTTP peers** — 跨实例协作走 `/api/v1`，scope token + 一键邀请；大总管永不可分享。
+
+## 安全姿态
+
 - **防手滑护栏（不是安全边界）** — 每个 spawn 的 agent 都带 `--disallowedTools` 黑名单（`rm -rf`、`git push --force`、`git reset --hard`、`chmod 777`、fork bomb）。规则是**对命令字符串做前缀匹配**，等价写法（`/bin/rm -rf`、`rm -fr`、`find … -delete`、`python -c`、变量拼接）都能绕过，且没有 `PreToolUse` 钩子兜底。加上 `DEFAULT_PERMISSION_MODE` 就是 `bypassPermissions`（见 `lib/claude-launch.ts`），每个 agent 实质上是一个以用户身份运行的无限制 shell —— 黑名单只防意外，挡不住任何有意为之的 prompt。
-
-### 跨 Claudestra peer 协作
-
-两个 Claudestra 实例之间可以共享各自的专精 agent，不用彼此开 SSH / 文件系统权限。
-
-**HTTP peers（v2.11+，唯一跨实例通道）** — peer 之间互为 API 客户端：双方各给对方签一个限定 scope 的 Bearer token（`Principal.peer` 标记），`send_to_agent("<agent>@<peer>")` 直接 POST 对方 bridge 的 `/api/v1/agents/:name/messages`（带 `wait`，超时回落 thread 轮询 30s × 10min）。入站复用现有多前端 API（scope 403 / mirror / history 全部生效）；注入头渲染成 🤝 peer 请求，peer 入站不抢占正在跑的回合、不走 slash 透传。对方回复以合成消息 push 回 caller（与本地 `send_to_agent` 同一套 UX）；所有失败（网络 / 鉴权 / 离线 / 超时）都会报告给 caller，绝不静默。开放 = token scope；撤销 = `peer-http-remove`（token 即刻失效）。状态存 `peers.json` 的 `httpPeers[]`（0600、原子写）。老的 Discord peer 机制（共享交换频道、exposure、bot 互 @ 路由）已在 v2.11 移除。v2.11.1+ 增加管理面：`GET /api/v1/peers`（清单 + 入站 scope + 本地 agent 表）、`POST /api/v1/peers/{invite,join,accept}`（握手）、`POST /api/v1/peers/:name/{test,scope,remove}` —— 全部仅限全权 token，mutation 委托 `runManager`，CLI 的 R1 校验保持唯一裁判。**v2.15+ 一键邀请**：`peer-invite-new` 预签入站 token、在 v2 邀请串里内嵌一次性 `joinSecret`（peers.json 的 `pendingInvites[]`，24h 过期，过期/撤销连带吊销 token）；B 侧 `peer-join-auto` 解析后存下 A 并 POST A 的 `POST /api/v1/peers/redeem`（无 Bearer、靠 joinSecret 常数时间比对把关，限流 10/min）——A 按对方自报名登记（撞名自动后缀，防 peer 劫持）、通知 owner，免回执/accept。B 加入时默认零反向开放（单向 peer，web 卡片显示「单向」）。**大总管永远不可分享给 peer**——`checkPeerScope` 无条件拒绝，`agentInScope` 对历史 peer token 里的 master 也截断。Web 端渲染为「设置 → Peer 协作」（一键邀请/加入 + 待兑换邀请管理、scope 编辑、连通测试）；旧三步握手只剩 CLI，对接 v2.15 之前的实例时用。
 
 ## 运行时命令
 
@@ -277,7 +221,13 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 ## 贡献提示
 
 - **发布流程**：commit 和 `git push` 到 `main` 可以自主执行。`git tag v*` + `gh release create` **每次都必须先获得 owner 明确同意** — 不要自己主动发 release。GitHub 上只保留最新一个 release，之前版本视为不兼容会被删除。
+- **批量发版，别连发**（owner 2026-07-08 在复盘 2.5 个月 59 个 release 后规定）：不紧急的改动先攒在 `main`，每个工作时段/每天结束时**合成一个 release**，包含自上次 release 以来的全部改动（参照 v2.5.4：五个功能/修复，一次发版）。只有生产挂掉的热修才值得立刻单独发。同一天连发多个 release（如 2026-04-25 发了 4 个）通常说明没验证就发了——先验证再发。版本语义要诚实：新的用户可见能力 = minor，哪怕很小；patch 只用于修复/重构/打磨。
+- **版本号规则**（owner 规定，2026-04-20 自 v1.7.0 起细化）：
+  - **Patch**（`x.y.Z`）— bug 修复、小增强、多几个 CLI 子命令、重构、测试、文档、UI 打磨。大多数改动属于这一档。如果这次 bump 专门是修 bug，还要用 `gh release delete <tag> --yes --cleanup-tag` **删掉有 bug 的那个 release**，让 Releases 列表里没有坏版本。打磨/小功能类 patch 不删上一个版本。
+  - **Minor**（`x.Y.0`）— 真正新的、值得一句「现在你可以……」标题的用户可见能力。例：v1.3.0 Claude Code 自动更新、v1.5.0 Discord slash 补全。旧 minor 作为历史保留。
+  - **Major**（`X.0.0`）— 破坏性变更或系统级重构。由 owner 手动 bump；不要自己主动升 major。
+  - 判断法：写 release notes 时如果开头是「修了……」「加了个……」「补了测试」「重构了……」——那就是 **patch**。只有配得上标题的新能力才是 minor。
 - `tmux-helper.ts` 和 `claude-launch.ts` 是 tmux 命令和 Claude Code 启动参数的**唯一权威位置**。新文件里不要再内联这些。
 - 需要绕过 LLM 的管理按钮放到 `bridge/management.ts`。把 `id` 同时加到 `handleMgmtButton` 和对应的面板构造器。
-- 提交前跑 `bun run check`（= `tsc --noEmit` + `bun test`）。**`bun build` 不做类型检查** —— 它对 `const x: number = "str"` 直接放行，此前"用它快速抓类型错误"的说法是错的。每个入口仍要 `bun build src/<entry>.ts --target=bun` 跑一遍（`bridge`、`channel-server`、`manager`、`launcher`、`cron`、`setup`），它能抓到类型检查覆盖不到的模块解析错误。CI 在每次 push / PR 上跑这三件事。
+- 提交前跑 `bun run check`（= `tsc --noEmit` + `bun test` + `scripts/guard`）。**`bun build` 不做类型检查** —— 它对 `const x: number = "str"` 直接放行，此前"用它快速抓类型错误"的说法是错的。每个入口仍要 `bun build src/<entry>.ts --target=bun` 跑一遍（`bridge`、`channel-server`、`manager`、`launcher`、`cron`、`setup`），它能抓到类型检查覆盖不到的模块解析错误。CI 在每次 push / PR 上跑这三件事。
 - Cron 测试套件覆盖解析器和下次触发时间计算，但不跑真实 agent——集成测试在 sandbox Discord server 里手动做。
