@@ -2220,6 +2220,58 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // ── v2.21+ /projects —— project 管理面(owner 2026-08-28「加 project 概念」)。
   // 与 /peers 同款:全权 token 门禁,GET 读 projects.json+registry,mutation 全
   // 走 runManager 的 project-*(CLI 校验/写锁/原子写是唯一事实源)。
+  /**
+   * v2.24+ POST /api/v1/update —— 从网页一键升级后端（owner 2026-09-22：
+   * 「UI 里最好也加一个手动升级按钮，这样我点一下就好了」）。
+   *
+   * ⚠ 必须 detached + 立刻 202：`manager update` 会 reload 三个 daemon，**包括正在
+   * 处理这个请求的 bridge 自己**——等它返回就是等自己被杀，连接必断，前端只会看到
+   * 一个无从区分的网络错误。所以这里只负责「点着火就走」，进度另开
+   * GET /api/v1/update/log 拉。
+   *
+   * 升级走哪条通道（release / beta）由 config 决定，这里不另立策略。
+   */
+  if (path === "/update" && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "update requires a full-scope token" });
+    }
+    const repoRoot = `${import.meta.dir}/../..`;
+    const log = `${process.env.HOME}/.claude-orchestrator/logs/update.log`;
+    try {
+      Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${repoRoot}/src/manager.ts" update >> "${log}" 2>&1`], {
+        cwd: repoRoot,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        // @ts-ignore Bun 支持 detached —— 不 detach 的话 bridge 被 reload 时会连坐杀掉它
+        detached: true,
+      });
+    } catch (e) {
+      return apiJson(500, { ok: false, error: `起不来更新进程: ${(e as Error).message}` });
+    }
+    return apiJson(202, {
+      ok: true,
+      accepted: true,
+      log,
+      hint: "升级中：三个 daemon 会依次重启，bridge 自己也在内。进度拉 GET /api/v1/update/log",
+    });
+  }
+
+  /** 升级进度：update.log 的末尾（前端轮询它，顺带靠 /api/version 判完成） */
+  if (path === "/update/log" && req.method === "GET") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "update log requires a full-scope token" });
+    }
+    const n = Math.min(Number(url.searchParams.get("tail") || 40) || 40, 200);
+    try {
+      const txt = await Bun.file(`${process.env.HOME}/.claude-orchestrator/logs/update.log`).text();
+      const lines = txt.split("\n").filter((l) => l.trim());
+      return apiJson(200, { ok: true, lines: lines.slice(-n) });
+    } catch {
+      return apiJson(200, { ok: true, lines: [] });
+    }
+  }
+
   if (path === "/projects") {
     if (!principal.agents.includes("*")) {
       return apiJson(403, { ok: false, error: "projects requires a full-scope token" });

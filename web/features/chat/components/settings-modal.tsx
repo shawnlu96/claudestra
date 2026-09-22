@@ -484,6 +484,95 @@ function ArchiveRetentionSection() {
   );
 }
 
+/**
+ * v2.24+ 后端升级（owner 2026-09-22：「UI 里最好也加一个手动升级按钮，这样我点一下
+ * 就好了。我指的是升级后端哈，UI 的版本更新现在已经有了。」）。
+ *
+ * 跟那个「新版本已就绪」胶囊是两回事：胶囊只换浏览器里的 bundle，这里是 git pull +
+ * 重装 launchd daemon（bridge / launcher / cron / web）。
+ *
+ * ⚠ 三个细节决定了这段代码的形状：
+ *  1. 升级会**重启 bridge 自己**，所以 POST 是点火即走（202），不等结果——等就是
+ *     等自己被杀，前端只会拿到一个无从区分的网络错误；
+ *  2. 因此「升完了没」不能靠请求返回，靠**轮询 /api/version 看 commit 变没变**；
+ *  3. 升级期间日志接口自己也会短暂失败，那是正常现象，不当错误显示。
+ */
+function BackendUpdateSection() {
+  const t = useT();
+  const [commit, setCommit] = useState<string>("");
+  const [version, setVersion] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState<string[]>([]);
+  const [err, setErr] = useState("");
+  const startCommit = useRef<string>("");
+
+  const readVersion = async () => {
+    try {
+      const j = (await (await fetch("/api/version", { cache: "no-store" })).json()) as {
+        version?: string; commit?: string;
+      };
+      if (j.commit) setCommit(j.commit);
+      if (j.version) setVersion(j.version);
+      return j.commit || "";
+    } catch {
+      return "";
+    }
+  };
+  useEffect(() => { void readVersion(); }, []);
+
+  const start = async () => {
+    setBusy(true);
+    setErr("");
+    setLines([]);
+    startCommit.current = commit;
+    try {
+      const res = await fetch("/api/update", { method: "POST" });
+      const j = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
+    } catch (e) {
+      setErr((e as Error).message);
+      setBusy(false);
+      return;
+    }
+    // 轮询：日志看进度，commit 变了 = 真的升完了
+    const until = Date.now() + 10 * 60_000;
+    const tick = async () => {
+      try {
+        const j = (await (await fetch("/api/update", { cache: "no-store" })).json()) as { lines?: string[] };
+        if (j.lines?.length) setLines(j.lines.slice(-12));
+      } catch { /* 升级中接口会断，正常 */ }
+      const now = await readVersion();
+      if (now && startCommit.current && now !== startCommit.current) { setBusy(false); return; }
+      if (Date.now() > until) { setBusy(false); setErr(t("等了 10 分钟还没升完，去看 update.log")); return; }
+      setTimeout(() => void tick(), 3000);
+    };
+    setTimeout(() => void tick(), 3000);
+  };
+
+  return (
+    <Section
+      title={t("后端版本")}
+      desc={t("git pull + 重装后台服务（bridge / launcher / cron / web）。升级时服务会依次重启，页面可能短暂断连，属正常。")}
+      aside={
+        <button className="btn btn-sm" disabled={busy} onClick={() => void start()}>
+          {busy && <span className="loading loading-spinner loading-xs" />}
+          {busy ? t("升级中…") : t("升级后端")}
+        </button>
+      }
+    >
+      <div className="text-xs opacity-60">
+        {version ? `v${version}` : "—"} · {commit || "—"}
+      </div>
+      {err ? <div className="mt-1 text-xs text-error">{err}</div> : null}
+      {lines.length > 0 && (
+        <pre className="mt-2 max-h-40 overflow-auto rounded bg-base-300/50 p-2 text-[11px] leading-snug">
+          {lines.join("\n")}
+        </pre>
+      )}
+    </Section>
+  );
+}
+
 function Section({
   title,
   aside,
@@ -788,6 +877,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         {/* ── 归档保留（v2.23+）：超期归档由每日兜底清理，0 = 永不清理 ── */}
         <ArchiveRetentionSection />
         {/* ── 原生壳:服务器地址(只在 iOS App 里出现;地址存本机,可换)─────────────── */}
+        <BackendUpdateSection />
         {isNativeShell() && open && <ShellServerSection />}
         {/* ── 界面(外观 + 语言)─────────────── */}
         <Section
