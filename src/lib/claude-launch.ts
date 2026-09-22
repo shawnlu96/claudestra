@@ -312,6 +312,8 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   // v2.4.13+ "auto" deprecated → 归一到 bypassPermissions。三处都会兜：cmdCreate
   // / cmdResume 写 registry 之前已经归一了，这里再兜一层保护 cmdRestart 直读 registry
   // 的路径，并防止有人把 `--mode auto` 当 CLI 参数手敲。
+  // ⚠ auto 只是不再作为**启动**模式：非 bypass 启动的 agent 仍可能在 TUI 里被 Shift+Tab
+  // 切进 auto，所以 auto 拦截检测 + 临时放行链（jsonl-watcher / bridge/auto-allow.ts）是现役的，别当残骸删。
   let mode =
     (opts.permissionMode && opts.permissionMode.trim()) || DEFAULT_PERMISSION_MODE;
   if (mode === "auto") mode = "bypassPermissions";

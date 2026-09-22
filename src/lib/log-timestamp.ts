@@ -1,7 +1,7 @@
 /**
  * 给 daemon 的 console.log / error / warn 加 ISO timestamp 前缀。
  *
- * 只在 pm2 管的守护进程里调（bridge / launcher / cron）。
+ * 只在 launchd 管的守护进程里调（bridge / launcher / cron）。
  * 不要在 manager.ts 里调 —— manager 通过 console.log 输出 JSON 供 master 解析，
  * 加 timestamp 会污染 JSON。
  *
