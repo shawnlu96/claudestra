@@ -1,6 +1,7 @@
 {
   "name": "claudestra",
   "version": "2.20.1",
+  "description": "Run Claude Code on your workstation and drive it from your phone — a self-hosted PWA web client (Discord optional), with every session living in tmux.",
   "type": "module",
   "scripts": {
     "bridge": "bun run src/bridge.ts",

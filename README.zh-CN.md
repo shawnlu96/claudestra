@@ -2,9 +2,9 @@
 
 [English](./README.md) · **简体中文**
 
-> 通过 Discord —— 或者内置的 Web 应用 —— 远程管理本地运行的多个 Claude Code session。
+> 在自己电脑上跑 Claude Code，用手机指挥它 —— 走内置的 Web 应用，想用 Discord 也行。
 
-Claudestra 让你在自己的电脑上运行 Claude Code，然后从任何地方（手机、平板、另一台电脑）通过 Discord 或自带的 **PWA Web 客户端**指挥它。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
+Claudestra 让你在自己的电脑上运行 Claude Code，然后从任何地方（手机、平板、另一台电脑）指挥它。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，用你本机的系统账号登录，不经过任何第三方。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -26,10 +26,10 @@ Claude Code 是一个只能在终端里用的工具——不在电脑前你就�
 ## 工作原理
 
 ```
- 你的手机 (Discord)
+ 你的手机
         │
-        ▼
- Discord Bot  ──  一个 token，多个频道
+        ├──  Web 客户端 (PWA)  ──  HTTP/SSE，用本机系统账号登录    ← 默认
+        └──  Discord bot       ──  一个 token，多个频道            ← 可选
         │
         ▼
  Bridge (Bun 进程, launchd 管理) ws://localhost:3847
@@ -39,7 +39,7 @@ Claude Code 是一个只能在终端里用的工具——不在电脑前你就�
         │             └──  channel-server ◄─► Claude Code (session C)
         │
         │  JSONL watcher
-        └──  监听每个 session 文件，把 tool call 推到 Discord
+        └──  监听每个 session 文件，把 tool call 推给两个前门
 
  你的 Mac (iTerm2)
         │  tmux -CC attach

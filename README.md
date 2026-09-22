@@ -2,9 +2,9 @@
 
 **English** · [简体中文](./README.zh-CN.md)
 
-> Manage multiple local Claude Code sessions from Discord — or from the built-in web app.
+> Run Claude Code on your workstation, drive it from your phone — through the built-in web app, or Discord if you prefer.
 
-Claudestra lets you run Claude Code on your workstation and drive it from anywhere — phone, tablet, or another machine — through Discord or the bundled **PWA web client**. Each session lives in tmux, so the moment you're back at your desk you can attach and keep going in the same process.
+Claudestra lets you run Claude Code on your workstation and drive it from anywhere — phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, logged in with your own OS account, no third party involved. **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -14,10 +14,10 @@ Claudestra lets you run Claude Code on your workstation and drive it from anywhe
 
 ## Why
 
-Claude Code is a terminal-only tool: if you aren't at your computer, you aren't using it. Claudestra puts a persistent front door (Discord and/or a web app) in front of your local sessions so you can:
+Claude Code is a terminal-only tool: if you aren't at your computer, you aren't using it. Claudestra puts a persistent front door — a web app, and optionally Discord — in front of your local sessions so you can:
 
 - Chat with any active Claude Code session from your phone.
-- Run several sessions in parallel — one Discord channel per session.
+- Run several sessions in parallel — one conversation per session.
 - Return to your desk and attach to the **same** running process via `tmux`.
 - Watch tool calls stream in real time (Read / Edit / Bash / Grep).
 - Open a **live remote terminal** to any session right from the web app.
@@ -26,10 +26,10 @@ Claude Code is a terminal-only tool: if you aren't at your computer, you aren't 
 ## How it works
 
 ```
- Your phone (Discord)
+ Your phone
         │
-        ▼
- Discord Bot  ──  one token, many channels
+        ├──  Web client (PWA)   ──  HTTP/SSE, your OS account          ← default
+        └──  Discord bot        ──  one token, many channels           ← optional
         │
         ▼
  Bridge (Bun, launchd)        ws://localhost:3847
@@ -39,7 +39,7 @@ Claude Code is a terminal-only tool: if you aren't at your computer, you aren't 
         │             └──  channel-server ◄─► Claude Code (session C)
         │
         │  JSONL watcher
-        └──  tails each session file and pushes tool calls to Discord
+        └──  tails each session file and streams tool calls to both front doors
 
  Your Mac (iTerm2)
         │  tmux -CC attach
@@ -60,7 +60,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 
 ### Web client (v2.10+)
 
-A second front door beside Discord — a **PWA-installable Next.js app** built entirely on the multi-frontend API. Runs beside Discord or fully replaces it (Web-only mode, no bot token needed).
+The default front door — a **PWA-installable Next.js app** built entirely on the multi-frontend API. Runs on its own (no bot token needed) or beside Discord.
 
 - **Streaming chat** — tool calls render as live three-state cards (running / done / failed), Write & Edit show syntax-highlighted diffs, interrupts and permission / AskUserQuestion prompts are interactive cards.
 - **Live remote terminal** — a real read-write mirror of the agent's tmux pane with a mobile control-key bar.
