@@ -21,7 +21,7 @@ import {
 const EXPECTED = [
   { id: "claude-code", manageable: true },
   { id: "pi", manageable: true },
-  { id: "codex", manageable: false },
+  { id: "codex", manageable: true },
 ];
 
 describe("注册表契约", () => {
@@ -41,9 +41,9 @@ describe("注册表契约", () => {
 
   test("manageable 如实反映「能不能收编成可对话的 agent」", () => {
     for (const e of EXPECTED) expect(sourceFor(e.id).manageable).toBe(e.manageable);
-    // Codex 只读不是「做不到」而是「还没接线」，但在接完之前必须如实报 false——
-    // 前端据此不渲染收编按钮，摆一个点了必失败的按钮比不摆更糟。
-    expect(isManageableRuntime("codex")).toBe(false);
+    // v2.24 P3c 起 Codex 接完了生命周期（适配器 + CodexQueueSink），如实报 true——
+    // 前端据此渲染收编按钮；接线前它是 false，那时摆一个点了必失败的按钮比不摆更糟。
+    expect(isManageableRuntime("codex")).toBe(true);
   });
 });
 

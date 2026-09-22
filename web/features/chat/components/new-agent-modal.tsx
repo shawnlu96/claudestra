@@ -17,6 +17,27 @@ const EFFORT_OPTIONS = [
 ] as const;
 
 /**
+ * 某个运行时在这台机器上能不能用（bridge GET /api/v1/runtimes，经 BFF /api/runtimes）。
+ * v2.24+ Codex 靠它决定出不出现在下拉里；查不到一律当不可用（安全方向：不显示点了会报错的选项）。
+ */
+function useRuntimeAvailable(id: string): boolean {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/runtimes")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { data?: { runtimes?: { id: string; available: boolean }[] } } | null) => {
+        if (alive) setAvailable(j?.data?.runtimes?.some((r) => r.id === id && r.available) === true);
+      })
+      .catch(() => {}); // 查不到就当不可用：不显示这个选项，是安全方向
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+  return available;
+}
+
+/**
  * 新建 agent 弹窗：填 name / dir / purpose (+可选钉模型/effort) → store.createAgent
  * → Bridge runManager create。选了模型/effort 会写进 registry,restart 也保持——
  * 与 TUI /model、/effort 不同,不会改写全局 settings.json(owner 2026-07-16)。
@@ -58,6 +79,7 @@ export function NewAgentModal({
       alive = false;
     };
   }, []);
+  const codexAvailable = useRuntimeAvailable("codex");
   const [piBase, setPiBase] = useState("");
   const [dirCustom, setDirCustom] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -133,7 +155,9 @@ export function NewAgentModal({
         <p className="mt-1 text-xs opacity-60">
           {runtime === "pi" && piAvailable
             ? t("在指定目录起一个 Pi coding agent（经 Bridge）。工具集与 Claude Code 不同。")
-            : t("在指定目录起一个 Claude Code agent（经 Bridge）。")}
+            : runtime === "codex" && codexAvailable
+              ? t("在指定目录起一个 Codex agent（经 Bridge）。只支持免审批模式，职责在建线程时写入。")
+              : t("在指定目录起一个 Claude Code agent（经 Bridge）。")}
         </p>
 
         <div className="mt-4 flex flex-col gap-3">
@@ -236,7 +260,7 @@ export function NewAgentModal({
               </button>
             </div>
           </label>
-          {piAvailable ? (
+          {piAvailable || codexAvailable ? (
           <label className="form-control">
             <span className="label-text mb-1 text-sm">{t("运行时")}</span>
             <select
@@ -251,7 +275,8 @@ export function NewAgentModal({
               }}
             >
               <option value="">{t("Claude Code（默认）")}</option>
-              <option value="pi">Pi coding agent</option>
+              {piAvailable ? <option value="pi">Pi coding agent</option> : null}
+              {codexAvailable ? <option value="codex">Codex</option> : null}
             </select>
           </label>
           ) : null}
@@ -275,15 +300,15 @@ export function NewAgentModal({
           <div className="grid grid-cols-2 gap-3">
             <label className="form-control">
               <span className="label-text mb-1 text-sm">{t("模型")}</span>
-              {runtime === "pi" ? (
-                // Pi 的 --model 收的是 provider/model-id，Claude 别名表对它无意义：
-                // 选个 sonnet-5 会原样透传给 pi → 起不来（review #10 应修项）
+              {runtime === "pi" || runtime === "codex" ? (
+                // Pi 的 --model 收的是 provider/model-id，Codex 收它自己的模型 id，Claude 别名表
+                // 对两者都无意义：选个 sonnet-5 会原样透传 → 起不来（review #10 应修项）
                 <input
                   type="text"
                   className="input input-bordered input-sm w-full"
                   value={model}
                   disabled={busy}
-                  placeholder={t("provider/model-id（留空 = Pi 默认）")}
+                  placeholder={runtime === "pi" ? t("provider/model-id（留空 = Pi 默认）") : t("Codex 模型 id（留空 = Codex 默认）")}
                   onChange={(e) => setModel(e.target.value)}
                 />
               ) : (

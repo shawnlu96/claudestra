@@ -52,8 +52,9 @@ export async function POST(request: Request) {
         ...(typeof effort === "string" && effort.trim() ? { effort: effort.trim() } : {}),
         // v2.21+ 可选归属 project(缺省 manager 按 dir 自动归属)
         ...(typeof project === "string" && project.trim() ? { project: project.trim() } : {}),
-        // v2.23+ 运行时：Web 上也能建 Pi agent（此前只能命令行）
-        ...(runtime === "pi" || runtime === "claude-code" ? { runtime } : {}),
+        // v2.23+ 运行时：Web 上也能建 Pi agent（此前只能命令行）；v2.24+ 不再在这里列白名单，
+        // 由 bridge 按运行时注册表校验（不认识的 400 带可用清单），加运行时 BFF 不用跟着改
+        ...(typeof runtime === "string" && runtime.trim() ? { runtime: runtime.trim() } : {}),
         ...(typeof piBase === "string" && piBase.trim() ? { piBase: piBase.trim() } : {}),
       },
       { timeoutMs: 90_000 }

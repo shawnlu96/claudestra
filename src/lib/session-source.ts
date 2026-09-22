@@ -57,7 +57,34 @@ export function runtimeForSessionPath(path: string | undefined | null): string |
   return sourceIdForPath(path);
 }
 
-/** 一行原文 → Claude Code 形状的 entry（读不了/不是对话行返回 null） */
-export function translateSessionLine(runtime: string | undefined, line: string): AnyRecord | null {
-  return sourceFor(runtime).translateLine(line);
+export type LineTranslator = (line: string) => AnyRecord | null;
+
+/**
+ * 一个文件（或一段连续的读窗口）用的翻译器。适配器声明了有状态翻译（Codex）就每次
+ * 新建一份状态，否则就是无状态的 translateLine 本身。
+ */
+export function createLineTranslator(runtime: string | undefined): LineTranslator {
+  const src = sourceFor(runtime);
+  return src.newTranslator ? src.newTranslator() : (line) => src.translateLine(line);
+}
+
+/** scope 对象（watcher 的状态、一次解析的行数组）→ 它专属的翻译器；按 runtime 分开存 */
+const scopedTranslators = new WeakMap<object, Map<string, LineTranslator>>();
+
+/**
+ * 一行原文 → Claude Code 形状的 entry（读不了/不是对话行返回 null）。
+ *
+ * `scope`：连续读同一个文件的调用方传一个**每文件唯一**的对象（watcher 的 state、
+ * 一次分页解析的 lines 数组），同一 scope 共用一份翻译状态——Codex 的 rollout 要跨行
+ * 上下文才翻得对（按轮丢 code-mode exec、整轮丢 exec 引导的 "OK"）。不传 = 无状态近似。
+ * scope 用 WeakMap 挂，调用方丢掉对象即回收，不需要显式释放。
+ */
+export function translateSessionLine(runtime: string | undefined, line: string, scope?: object): AnyRecord | null {
+  if (!scope) return sourceFor(runtime).translateLine(line);
+  let byRuntime = scopedTranslators.get(scope);
+  if (!byRuntime) scopedTranslators.set(scope, (byRuntime = new Map()));
+  const key = runtime ?? "";
+  let t = byRuntime.get(key);
+  if (!t) byRuntime.set(key, (t = createLineTranslator(runtime)));
+  return t(line);
 }

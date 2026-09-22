@@ -11,6 +11,25 @@
  * 做成纯函数，漂移时改这里一处。
  */
 
+/** 重启 / 收编后职责前言的标记（codex-launch.codexContextPreamble 生成；codex-session 的历史翻译据此剥掉前言） */
+export const CONTEXT_PREAMBLE_MARKER = "[claudestra:context]";
+
+/** 前言经环境变量带给 channel-server：base64 免得换行 / 引号进 tmux 键入的启动命令 */
+export function encodePreambleEnv(preamble: string): string {
+  return Buffer.from(preamble, "utf8").toString("base64");
+}
+
+/** 解不出来 / 不是我们的前言 → undefined（宁可不附，也不把乱码塞给模型） */
+export function decodePreambleEnv(v: string | undefined): string | undefined {
+  if (!v || !v.trim()) return undefined;
+  try {
+    const s = Buffer.from(v.trim(), "base64").toString("utf8");
+    return s.startsWith(CONTEXT_PREAMBLE_MARKER) ? s : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface CmdResult {
   ok: boolean;
   out: string;
@@ -72,10 +91,14 @@ export type DeliveryDecision =
   /** 持有多个锁且都不是已知的那个：猜错会把消息送进别的线程，宁可不投 */
   | { action: "ambiguous"; held: string[] };
 
+/** 线程 id 的形状。锁文件名来自文件系统：不像线程 id 的不能切过去（会被当 sessionId 报给 bridge） */
+const THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function decideDelivery(knownSid: string | undefined, held: string[]): DeliveryDecision {
   if (knownSid && held.includes(knownSid)) return { action: "queue", sid: knownSid };
   if (held.length === 0) return { action: "offline" };
-  if (held.length === 1) return { action: "switch", sid: held[0] };
+  const valid = held.filter((s) => THREAD_ID_RE.test(s));
+  if (valid.length === 1) return { action: "switch", sid: valid[0] };
   return { action: "ambiguous", held };
 }
 
@@ -148,6 +171,11 @@ export interface CodexQueueSinkDeps {
   /** 投不进去时告诉发消息的人（never silent） */
   notify(chatId: string | undefined, text: string): Promise<void>;
   log?(line: string): void;
+  /**
+   * 重启 / 收编后第一条成功投递前附的前言（codex-launch.codexContextPreamble）。只附一次，
+   * 投递失败不算用掉——下一条再附。
+   */
+  preamble?: string;
 }
 
 export const OFFLINE_NOTICE = "⚠️ Codex 会话不在线，消息未投递";
@@ -173,7 +201,10 @@ export function codexQueueArgs(codexBin: string, sid: string, text: string): str
  */
 export class CodexQueueSink implements InboundSink {
   private chain: Promise<unknown> = Promise.resolve();
-  constructor(private deps: CodexQueueSinkDeps) {}
+  private preamblePending: string | undefined;
+  constructor(private deps: CodexQueueSinkDeps) {
+    this.preamblePending = deps.preamble?.trim() ? deps.preamble : undefined;
+  }
 
   deliver(content: string, meta: Record<string, string>): Promise<{ ok: true } | { ok: false; error: string }> {
     const run = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
@@ -193,7 +224,10 @@ export class CodexQueueSink implements InboundSink {
         d.log?.(`🔀 Codex 线程已切换 ${d.getSessionId() ?? "?"} → ${decision.sid}`);
         d.onSwitch(decision.sid);
       }
-      const r = await d.queue(decision.sid, wrapChannelContent(content, meta, d.source, codexReplyHint(d.source)));
+      const wrapped = wrapChannelContent(content, meta, d.source, codexReplyHint(d.source));
+      const preamble = this.preamblePending;
+      const r = await d.queue(decision.sid, preamble ? `${preamble}\n\n${wrapped}` : wrapped);
+      if (r.ok && preamble) this.preamblePending = undefined;
       if (!r.ok) {
         const detail = (r.err || r.out || "unknown").trim().split("\n").slice(-1)[0].slice(0, 300);
         d.log?.(`❌ codex queue 失败: ${detail}`);

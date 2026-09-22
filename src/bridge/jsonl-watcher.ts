@@ -383,7 +383,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
       try {
         // v2.23+ runtime 感知：Pi 的行在这里翻译成 Claude Code 形状，下面的解析逻辑
         // （工具摘要/文本/状态/思考时长）一行都不用改
-        const entry = translateSessionLine(state.runtime, line);
+        const entry = translateSessionLine(state.runtime, line, state);
         if (!entry) continue;
 
         // v2.2.0+: auto-mode classifier 拦截检测。被拦的操作在 jsonl 里是一条

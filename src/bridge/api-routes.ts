@@ -11,7 +11,8 @@
  */
 
 import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
-import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds } from "../lib/runtimes/index.js";
+import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
+import { runtimeCatalog } from "../lib/runtimes/catalog.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
 import {
@@ -825,8 +826,15 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentName: byId.get(String(s.sessionId)) ?? null,
       // 目录已消失（/tmp 被清、项目搬走）→ 收编必然失败，提前标出来别让用户白试
       cwdExists: typeof s.cwd === "string" && s.cwd ? existsSync(s.cwd) : false,
+      manageable: sourceFor(String(s.runtime ?? "")).manageable, // 取自运行时适配器：前端据此给不给「收编」按钮
     }));
     return apiJson(200, { ok: true, count: sessions.length, sessions });
+  }
+
+  // v2.24+ GET /api/v1/runtimes —— 可建 agent 的运行时 + 本机能不能用（见 lib/runtimes/catalog.ts）
+  if (path === "/runtimes" && req.method === "GET") {
+    if (!principal.agents.includes("*")) return apiJson(403, { ok: false, error: "runtimes requires a full-scope token" });
+    return apiJson(200, { ok: true, runtimes: await runtimeCatalog() });
   }
 
   // v2.7+ POST /api/v1/sessions/:bgId/cleanup —— 清理 bg job（死分身/残留）。

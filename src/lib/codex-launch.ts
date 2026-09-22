@@ -25,6 +25,9 @@
 import { existsSync } from "node:fs";
 import { shellEscape } from "./claude-launch.js";
 import { resolveLoginBinary, type LoginBinary, type Runner } from "./login-binary.js";
+import { CONTEXT_PREAMBLE_MARKER, encodePreambleEnv } from "./codex-thread.js";
+
+export { CONTEXT_PREAMBLE_MARKER };
 
 export type CodexLaunchMode = "new" | "resume" | "fork";
 
@@ -124,6 +127,14 @@ export function codexDeveloperInstructions(opts: {
   projectContext?: string;
   channelRules: string;
 }): string {
+  return [...codexRoleLines(opts), opts.channelRules].join("\n\n");
+}
+
+/**
+ * 职责 / project 上下文 / 回复规则三段——developer_instructions 与重启后的前言共用这一份，
+ * 两处不会各写各的、慢慢漂移。
+ */
+export function codexRoleLines(opts: { agentName?: string; purpose?: string; projectContext?: string }): string[] {
   const lines: string[] = [];
   if (opts.purpose && opts.purpose.trim()) {
     const who = opts.agentName ? `你是 Claudestra 编排系统中的 agent「${opts.agentName}」。` : "";
@@ -134,8 +145,22 @@ export function codexDeveloperInstructions(opts: {
     "用 <channel …> 包着的 user 消息来自 Claudestra 频道（Discord / Web）。你的纯文字输出对方看不到，" +
       "回复一律调用 claudestra 的 reply 工具（chat_id 取 <channel> 标签里的 chat_id）。",
   );
-  lines.push(opts.channelRules);
-  return lines.join("\n\n");
+  return lines;
+}
+
+/**
+ * 重启 / 收编后第一条投递消息前附的前言。
+ *
+ * 为什么要它：developer_instructions 只在 exec 引导建线程那一轮生效（TUI 的 resume / fork
+ * 带新值不写进上下文，0.153.4 实测），所以收编来的外来会话从没见过回复规则，重启前改过的
+ * 职责 / project 名册也送不进去。前言与 developer_instructions 同源（codexRoleLines），
+ * 刻意只放短的三段，完整频道规则太长、每次重启都塞一遍不划算。
+ */
+export function codexContextPreamble(opts: { agentName?: string; purpose?: string; projectContext?: string }): string {
+  return [
+    `${CONTEXT_PREAMBLE_MARKER} 会话刚由 Claudestra 重启或收编，以下是当前生效的身份与规则（以此为准）：`,
+    ...codexRoleLines(opts),
+  ].join("\n");
 }
 
 // ── 启动命令 ───────────────────────────────────────────────────────────────
@@ -149,6 +174,7 @@ export const CODEX_MCP_ENV_VARS = [
   "CLAUDESTRA_RUNTIME",
   "CLAUDESTRA_SESSION_ID",
   "CLAUDESTRA_CODEX_BIN",
+  "CLAUDESTRA_CODEX_PREAMBLE",
   "MCP_NAME",
   "TMUX",
   "TMUX_PANE",
@@ -169,6 +195,15 @@ export function buildCodexCommand(spec: CodexLaunchSpec, channelRules: string): 
     `CLAUDESTRA_RUNTIME=codex`,
     `CLAUDESTRA_SESSION_ID=${shellEscape(envSid)}`,
     `CLAUDESTRA_CODEX_BIN=${shellEscape(spec.codexBin)}`,
+    // new 的职责已经由 exec 引导写进线程；resume / fork 的 developer_instructions 不生效，
+    // 靠 channel-server 在第一条投递前附前言送达
+    ...(spec.mode === "new"
+      ? []
+      : [
+          `CLAUDESTRA_CODEX_PREAMBLE=${encodePreambleEnv(
+            codexContextPreamble({ agentName: spec.agentName, purpose: spec.purpose, projectContext: spec.projectContext }),
+          )}`,
+        ]),
     `MCP_NAME=${shellEscape(mcpName)}`,
   ].join(" ");
 
