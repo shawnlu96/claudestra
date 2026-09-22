@@ -3,9 +3,12 @@
  * Codex **适配器**端到端（P3c）：走 runtimes/codex.ts 本身，而不是手拼命令——
  *   available → prepareSession(new, exec 引导) → beforeLaunch → buildLaunchCommand → waitReady
  *   → 假 bridge 推 message → CodexQueueSink 投递 → reply → Stop hook
- *   → gracefulExit（exitCommand /quit，等回 shell）
+ *   → gracefulExitWindow（**生产的退出序列**，与 manager restart / kill 同一段代码；空闲 → 不发 Esc）
  *   → 同一窗口 resume 模式再拉起同一线程 → 前言随第一条投递送达 → 问上一轮的暗号，确认上下文还在
- *   → discoverSessionId 按线程写锁认出窗口里的线程 → /quit 收尾
+ *   → discoverSessionId 按线程写锁认出窗口里的线程
+ *   → 投一条会跑 sleep 的消息，趁回合在跑时 gracefulExitWindow（忙 → 恰好一个 Esc 再 /quit）
+ *   每次退出都断言：回到 shell，且 rollout 里没有多出一轮（task_started 数不变）——
+ *   旧序列 Esc×3 会打开 backtrack 遮罩，"/quit" 的 "uit" 被当成一轮用户消息发给模型
  *
  * 不碰生产：独立 tmux socket（-L，WindowOps 在本脚本里自己实现——接口本来就是为注入设计的，
  * 不动 tmux-helper 的 socket 常量）、只绑 127.0.0.1 的假 bridge、工作目录由 --dir 指定。
@@ -19,6 +22,8 @@ import { join, resolve } from "node:path";
 import { findCodexSessionPath } from "../src/lib/codex-session.js";
 import { CONTEXT_PREAMBLE_MARKER, defaultRunner } from "../src/lib/codex-thread.js";
 import { createCodexAdapter } from "../src/lib/runtimes/codex.js";
+import { codexBusy } from "../src/lib/runtimes/codex-exit.js";
+import { gracefulExitWindow } from "../src/lib/runtimes/graceful-exit.js";
 import type { LaunchSpec, WindowOps } from "../src/lib/runtimes/types.js";
 import { isAtShell } from "../src/lib/tmux-helper.js";
 
@@ -79,10 +84,11 @@ const server = Bun.serve({
 });
 log(`假 bridge 127.0.0.1:${PORT}，tmux -L ${SOCK}`);
 
-async function waitFor<T>(what: string, fn: () => T | undefined | null | false, timeoutMs: number): Promise<T> {
+type Maybe<T> = T | undefined | null | false;
+async function waitFor<T>(what: string, fn: () => Maybe<T> | Promise<Maybe<T>>, timeoutMs: number): Promise<T> {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
-    const v = fn();
+    const v = await fn();
     if (v) return v as T;
     await Bun.sleep(250);
   }
@@ -121,18 +127,34 @@ const win: WindowOps = {
 
 const adapter = createCodexAdapter({ childPids: () => win.childPids() });
 
-async function gracefulExit(label: string): Promise<number> {
+/** rollout 里的回合数（每轮用户消息一个 task_started）：退出前后必须相等 */
+function turnCount(sid: string): number {
+  const p = findCodexSessionPath(sid);
+  return p ? readFileSync(p, "utf8").split("\n").filter((l) => l.includes('"type":"task_started"')).length : -1;
+}
+
+/** 走生产的 gracefulExitWindow；断言回到 shell、没有多出一轮 */
+async function gracefulExit(label: string, sid: string): Promise<{ ms: number; keys: string[]; turnsBefore: number; turnsAfter: number }> {
+  const keys: string[] = [];
+  const spy: WindowOps = {
+    ...win,
+    sendKey: async (k) => { keys.push(k); await win.sendKey(k); },
+    sendEscape: async () => { keys.push("Escape"); await win.sendEscape(); },
+    sendLiteral: async (t) => { keys.push(`"${t}"`); await win.sendLiteral(t); },
+  };
+  const turnsBefore = turnCount(sid);
   const at = Date.now();
-  await win.sendLine(adapter.exitCommand);
-  for (let i = 0; i < 40; i++) {
-    const cur = (await tmux("display-message", "-p", "-t", target, "#{pane_current_command}")).out.trim();
-    if (/^-?(zsh|bash|sh|fish)$/.test(cur)) {
-      log(`${label}: ${adapter.exitCommand} 后 ${Date.now() - at}ms 回到 shell`);
-      return Date.now() - at;
-    }
-    await Bun.sleep(500);
-  }
-  throw new Error(`${label}: ${adapter.exitCommand} 后 20s 没回到 shell`);
+  const ok = await gracefulExitWindow(spy, adapter);
+  const ms = Date.now() - at;
+  const cur = (await tmux("display-message", "-p", "-t", target, "#{pane_current_command}")).out.trim();
+  await Bun.sleep(1500); // rollout 落盘
+  const turnsAfter = turnCount(sid);
+  log(`${label}: gracefulExitWindow=${ok}（${ms}ms）按键 ${keys.join(" ")}；pane 命令 ${cur}；回合数 ${turnsBefore} → ${turnsAfter}`);
+  if (!ok || !/^-?(zsh|bash|sh|fish)$/.test(cur)) throw new Error(`${label}: 没回到 shell（${cur}）`);
+  if (ms > 20_000) throw new Error(`${label}: 退出用了 ${ms}ms——走到了强杀兜底`);
+  if (turnsAfter !== turnsBefore) throw new Error(`${label}: 退出多出了 ${turnsAfter - turnsBefore} 轮（按键被当成用户消息）`);
+  if (keys.filter((k) => k === "Escape").length > 1) throw new Error(`${label}: 连发了 Esc`);
+  return { ms, keys, turnsBefore, turnsAfter };
 }
 
 async function launch(spec: LaunchSpec, label: string) {
@@ -205,7 +227,7 @@ try {
   );
 
   // ── 4. 优雅退出 ─────────────────────────────────────────────────────────
-  summary.exit1Ms = await gracefulExit("第一轮");
+  summary.exit1 = await gracefulExit("第一轮（空闲退出）", sid);
 
   // ── 5. resume 同一线程（同一窗口，模拟 restart）───────────────────────────
   const regCount = frames.filter((f) => f.msg.type === "register").length;
@@ -238,7 +260,18 @@ try {
   log("前言:", JSON.stringify(summary.preamble));
   if (!(summary.preamble as any).carriesNewPurpose) throw new Error("resume 后的第一条投递没带前言");
 
-  summary.exit2Ms = await gracefulExit("第二轮");
+  // ── 6. 回合在跑时退出（restart 撞上忙 agent 的情形）──────────────────────
+  const busyAt = Date.now();
+  sockets.get(CHANNEL).send(JSON.stringify({
+    type: "message",
+    content: "请用 shell 工具执行 `sleep 40`，结束后调用 claudestra 的 reply 工具回复 SLEPT。",
+    meta: { chat_id: CHANNEL, user: "e2e", message_id: "p3c-3" },
+  }));
+  await waitFor("回合开始（pane 出现 esc to interrupt）", async () => codexBusy(await win.capture(40)), 90_000);
+  log(`第三轮已在跑（${Date.now() - busyAt}ms），开始退出`);
+  summary.exit2 = await gracefulExit("第三轮（忙时退出）", sid);
+  if ((summary.exit2 as any).keys.filter((k: string) => k === "Escape").length !== 1) throw new Error("忙时退出应恰好发一个 Esc");
+  if (frames.some((f) => f.at >= busyAt && f.msg.type === "reply")) log("⚠ 退出前模型已 reply（sleep 太短？）");
   summary.allFrames = frames.map((f) => f.msg.type);
 } catch (e) {
   failed = true;

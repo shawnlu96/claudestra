@@ -9,6 +9,8 @@
  *   入站   → channel-server 的 CodexQueueSink 经 `codex queue` 投进线程（先按线程写锁查活）
  *   回合末 → hooks.Stop / hooks.Interrupt → typing-hook → bridge /hook
  *
+ *   退出   → 清场（codex-exit.ts：绝不连发 Esc，只在回合在跑时按一次）→ /quit
+ *
  * 外部动作全经 CodexAdapterDeps 注入（codex-deps.ts），就绪判据在 codex-ready.ts。
  */
 import { existsSync } from "node:fs";
