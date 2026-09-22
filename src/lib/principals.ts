@@ -18,7 +18,7 @@
 
 import { isMasterAgent } from "./registry.js";
 import { timingSafeEqual } from "crypto";
-import { readJsonState, reportCorrupt, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
+import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
 import { homedir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
@@ -63,14 +63,12 @@ const isPrincipalsFile = (d: unknown): boolean =>
   !!d && typeof d === "object" && Array.isArray((d as PrincipalsFile).principals);
 
 /**
- * 读者用：损坏时按空处理（鉴权 fail-closed），但会响亮地报一次，且写者不会拿这个
- * 空值去覆盖——writePrincipals 会先确认磁盘上的文件不是坏的。
+ * 读者用：永不抛。运行中被写坏 → 沿用上次成功读到的值；冷启动就坏 → 按空（鉴权
+ * fail-closed）。都会响亮地报一次；写者不会拿这个结果去覆盖——writePrincipals 会先
+ * 确认磁盘上的文件不是坏的。
  */
 export async function readPrincipals(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
-  const r = await readJsonState(path, isPrincipalsFile);
-  if (r.status === "ok") return r.data as PrincipalsFile;
-  if (r.status === "corrupt") reportCorrupt(path, r.error, "principals");
-  return { principals: [] };
+  return readJsonLenient<PrincipalsFile>(path, { principals: [] }, { validate: isPrincipalsFile, who: "principals" });
 }
 
 /** 写者用：损坏时抛 StateCorruptError，而不是返回空。 */

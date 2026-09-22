@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync } from "fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, symlinkSync, lstatSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   readJsonState,
   readJsonStateSync,
+  readJsonLenient,
   writeJsonAtomic,
   writeJsonAtomicSync,
   writeJsonStateGuarded,
@@ -58,13 +59,45 @@ describe("原子写", () => {
     expect(readFileSync(p, "utf-8").endsWith("}\n")).toBe(true);
   });
 
-  test("guarded：磁盘上是坏文件就拒写、字节不变、留 .corrupt-* 备份", async () => {
+  test("guarded：磁盘上是坏文件就拒写、字节不变、留 0600 的 .corrupt-* 备份", async () => {
     const d = tmp();
     const p = join(d, "cron.json");
-    writeFileSync(p, "[{bad");
+    writeFileSync(p, "[{bad", { mode: 0o644 });
     await expect(writeJsonStateGuarded(p, [], { validate: Array.isArray })).rejects.toBeInstanceOf(StateCorruptError);
     expect(readFileSync(p, "utf-8")).toBe("[{bad");
-    expect(readdirSync(d).some((f) => f.startsWith("cron.json.corrupt-"))).toBe(true);
+    const backup = readdirSync(d).find((f) => f.startsWith("cron.json.corrupt-"));
+    expect(backup).toBeDefined();
+    expect(statSync(join(d, backup!)).mode & 0o777).toBe(0o600);
+  });
+
+  test("软链：写到目标文件，软链本身保持不动（dotfiles 管理的 settings.json）", async () => {
+    const d = tmp();
+    const real = join(d, "dotfiles-settings.json");
+    const link = join(d, "settings.json");
+    writeFileSync(real, "{}", { mode: 0o640 });
+    symlinkSync(real, link);
+    await writeJsonAtomic(link, { model: "x" }, { preserveMode: true });
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(readFileSync(real, "utf-8"))).toEqual({ model: "x" });
+    expect(statSync(real).mode & 0o777).toBe(0o640);
+  });
+});
+
+describe("readJsonLenient", () => {
+  test("运行中被写坏 → 沿用上次成功值（深拷贝）；冷启动就坏 → fallback", async () => {
+    const d = tmp();
+    const p = join(d, "p.json");
+    writeFileSync(p, '{"principals":[{"id":"token:a"}]}');
+    const first = await readJsonLenient<any>(p, { principals: [] });
+    expect(first.principals.length).toBe(1);
+    first.principals.push({ id: "mutated" });
+    writeFileSync(p, "{bad");
+    const second = await quiet(() => readJsonLenient<any>(p, { principals: [] }));
+    expect(second.principals).toEqual([{ id: "token:a" }]);
+    expect(await quiet(() => readJsonLenient<any>(join(d, "other.json.bad"), [] as any[]))).toEqual([]);
+    const cold = join(d, "cold.json");
+    writeFileSync(cold, "{bad");
+    expect(await quiet(() => readJsonLenient<any>(cold, { principals: [] }))).toEqual({ principals: [] });
   });
 });
 

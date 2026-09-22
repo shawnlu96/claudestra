@@ -11,7 +11,7 @@
  * 历史遗留的 `project` 字段——那里存的是创建时的原始 dir 字符串)。
  */
 
-import { readJsonState, reportCorrupt, writeJsonStateGuarded } from "./state-file.js";
+import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 
 const HOME = process.env.HOME || "";
 const DIR = `${HOME}/.claude-orchestrator`;
@@ -39,16 +39,10 @@ const isProjectsFile = (d: unknown): boolean =>
   !!d && typeof d === "object" && !Array.isArray(d) &&
   ((d as { projects?: unknown }).projects === undefined || Array.isArray((d as { projects?: unknown }).projects));
 
-/** 损坏时按空处理（读者只是暂时看不到项目），但会报一次；writeProjects 拒绝覆盖坏文件。 */
+/** 损坏时沿用上次成功值 / 按空（读者只是暂时看不到项目），并报一次；writeProjects 拒绝覆盖坏文件。 */
 export async function readProjects(path = PROJECTS_PATH): Promise<ProjectsData> {
-  const r = await readJsonState(path, isProjectsFile);
-  if (r.status === "missing") return { projects: [] };
-  if (r.status === "corrupt") {
-    reportCorrupt(path, r.error, "projects");
-    return { projects: [] };
-  }
   {
-    const raw = r.data as { projects?: any[] };
+    const raw = await readJsonLenient<{ projects?: any[] }>(path, { projects: [] }, { validate: isProjectsFile, who: "projects" });
     const list = Array.isArray(raw?.projects) ? raw.projects : [];
     const projects: ProjectDef[] = [];
     for (const p of list) {

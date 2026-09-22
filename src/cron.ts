@@ -16,7 +16,7 @@ import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { notify } from "./lib/notify.js";
 import { runManagerProcess, agentsFromList } from "./lib/run-manager.js";
-import { readJsonState, reportCorrupt, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
+import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
@@ -194,14 +194,11 @@ export function nextCronTime(expr: string, from: Date = new Date()): Date {
 const isJobsFile = (d: unknown): boolean => Array.isArray(d);
 
 /**
- * 损坏时返回空（daemon 这一轮什么都不跑），但会响亮地报一次；saveJobs 拒绝覆盖坏文件——
+ * 损坏时沿用上次成功读到的任务（daemon 冷启动就坏则为空），并响亮地报一次；saveJobs 拒绝覆盖坏文件——
  * 旧写法把解析失败当成 []，下一次 cron-add 就把全部任务清空。
  */
 export async function loadJobs(): Promise<CronJob[]> {
-  const r = await readJsonState(CRON_PATH, isJobsFile);
-  if (r.status === "ok") return r.data as CronJob[];
-  if (r.status === "corrupt") reportCorrupt(CRON_PATH, r.error, "cron");
-  return [];
+  return readJsonLenient<CronJob[]>(CRON_PATH, [], { validate: isJobsFile, who: "cron" });
 }
 
 export async function saveJobs(jobs: CronJob[]): Promise<void> {

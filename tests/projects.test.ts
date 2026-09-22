@@ -85,7 +85,7 @@ describe("slugifyProjectId", () => {
 });
 
 describe("read/write roundtrip", () => {
-  test("写后读回等价;坏文件/缺文件返回空", async () => {
+  test("写后读回等价;缺文件返回空;坏文件沿用上次成功值", async () => {
     const dir = mkdtempSync(join(tmpdir(), "projects-test-"));
     const path = join(dir, "projects.json");
     expect((await readProjects(path)).projects).toEqual([]);
@@ -106,8 +106,19 @@ describe("read/write roundtrip", () => {
     expect(dirty.projects).toHaveLength(1);
     expect(dirty.projects[0].name).toBe("c");
     expect(dirty.projects[0].dirs).toEqual(["/c"]);
-    await Bun.write(path, "not json");
-    expect((await readProjects(path)).projects).toEqual([]);
+    // 运行中被写坏：读者沿用上次成功读到的内容（常驻进程不因一次坏写失明）
+    const origErr = console.error;
+    console.error = () => {};
+    try {
+      await Bun.write(path, "not json");
+      expect((await readProjects(path)).projects.map((p) => p.id)).toEqual(["c"]);
+      // 冷启动就坏（没有上次成功值）→ 空
+      const cold = join(dir, "cold-projects.json");
+      await Bun.write(cold, "not json");
+      expect((await readProjects(cold)).projects).toEqual([]);
+    } finally {
+      console.error = origErr;
+    }
   });
 });
 

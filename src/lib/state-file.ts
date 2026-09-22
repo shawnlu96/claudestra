@@ -12,7 +12,7 @@
  *     rename 前再 chmod 一次（对已存在的 tmp 名 mode 不生效）。
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, chmodSync, unlinkSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, chmodSync, unlinkSync, realpathSync } from "fs";
 import { readFile, writeFile, rename, mkdir, stat, chmod, copyFile, unlink } from "fs/promises";
 import { dirname } from "path";
 
@@ -82,7 +82,35 @@ export function reportCorrupt(path: string, error: string, who = "state"): void 
   const m = mtimeOf(path);
   if (reportedCorrupt.get(path) === m) return;
   reportedCorrupt.set(path, m);
-  console.error(`🚨 [${who}] 状态文件损坏，按空处理但不会覆盖写: ${path}（${error}）`);
+  console.error(`🚨 [${who}] 状态文件损坏（读者沿用上次成功值或按空处理，写者拒绝覆盖）: ${path}（${error}）`);
+}
+
+// 常驻进程（bridge 每个 API 请求都读 principals）的「上次成功读到的值」。文件在运行中
+// 被写坏时继续用它，而不是突然把所有 token 当成不存在、把 web 端踢回登录页。
+const lastGood = new Map<string, unknown>();
+
+/**
+ * 读者用的宽松读：永不抛。正常 → 数据（并记为 lastGood）；不存在 → fallback；
+ * 损坏 → 报一次，返回上次成功读到的值（没有就 fallback）。写者不要用它的结果去写——
+ * 写入走 writeJsonStateGuarded，磁盘上是坏文件会被拒。
+ */
+export async function readJsonLenient<T>(
+  path: string,
+  fallback: T,
+  opts: { validate?: StateValidator; who?: string } = {},
+): Promise<T> {
+  const r = await readJsonState(path, opts.validate);
+  if (r.status === "ok") {
+    // 存一份拷贝：调用方常会就地修改读到的对象（manager 的读改写），不能污染缓存
+    lastGood.set(path, structuredClone(r.data));
+    return r.data as T;
+  }
+  if (r.status === "missing") {
+    lastGood.delete(path);
+    return fallback;
+  }
+  reportCorrupt(path, r.error, opts.who);
+  return lastGood.has(path) ? (structuredClone(lastGood.get(path)) as T) : fallback;
 }
 
 function backupName(path: string): string {
@@ -101,6 +129,8 @@ export async function assertWritable(path: string, validate?: StateValidator): P
   try {
     backup = backupName(path);
     await copyFile(path, backup);
+    // principals/peers 的副本里是明文 token：copyFile 沿用原权限不可靠，显式收紧
+    await chmod(backup, 0o600);
   } catch {
     backup = undefined;
   }
@@ -133,15 +163,25 @@ async function resolveMode(path: string, opts: WriteOpts): Promise<number | unde
   return opts.mode;
 }
 
+/**
+ * 软链（dotfiles 管理的 ~/.claude/settings.json 很常见）要写到最终目标：rename 到
+ * 软链路径本身会把软链替换成普通文件，悄悄断开用户的 dotfiles。tmp 也建在目标目录，
+ * 保证 rename 在同一文件系统内。
+ */
+function resolveTarget(path: string): string {
+  try { return realpathSync(path); } catch { return path; }
+}
+
 /** 原子写 JSON（tmp + rename，同目录保证同文件系统）。 */
 export async function writeJsonAtomic(path: string, data: unknown, opts: WriteOpts = {}): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const mode = await resolveMode(path, opts);
-  const tmp = tmpName(path);
+  const target = resolveTarget(path);
+  const mode = await resolveMode(target, opts);
+  const tmp = tmpName(target);
   try {
     await writeFile(tmp, serialize(data, opts), mode !== undefined ? { mode } : undefined);
     if (mode !== undefined) await chmod(tmp, mode);
-    await rename(tmp, path);
+    await rename(tmp, target);
   } catch (e) {
     await unlink(tmp).catch(() => {});
     throw e;
@@ -150,15 +190,16 @@ export async function writeJsonAtomic(path: string, data: unknown, opts: WriteOp
 
 export function writeJsonAtomicSync(path: string, data: unknown, opts: WriteOpts = {}): void {
   mkdirSync(dirname(path), { recursive: true });
+  const target = resolveTarget(path);
   let mode = opts.mode;
-  if (opts.preserveMode && existsSync(path)) {
-    try { mode = statSync(path).mode & 0o777; } catch { /* 用 opts.mode */ }
+  if (opts.preserveMode && existsSync(target)) {
+    try { mode = statSync(target).mode & 0o777; } catch { /* 用 opts.mode */ }
   }
-  const tmp = tmpName(path);
+  const tmp = tmpName(target);
   try {
     writeFileSync(tmp, serialize(data, opts), mode !== undefined ? { mode } : undefined);
     if (mode !== undefined) chmodSync(tmp, mode);
-    renameSync(tmp, path);
+    renameSync(tmp, target);
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* 不在 */ }
     throw e;
