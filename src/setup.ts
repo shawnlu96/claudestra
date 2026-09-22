@@ -580,7 +580,7 @@ async function stepDiscover(): Promise<void> {
   //   showing=100 / total=109 两个字段并存），拿数组长度当总数会在会话多的机器上
   //   系统性少报。
   let total = 0;
-  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
+  const r = await run([resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
   if (r.ok) {
     try {
       const d = JSON.parse(r.out);
@@ -1389,7 +1389,7 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
     // 不需要 bridge 在跑
     write(`${c.dim}▶${c.reset} ${t("签发 web-ui API token", "Issuing web-ui API token")}… `);
     const r = await run([
-      "bun", `${REPO_ROOT}/src/manager.ts`, "token-add", "web-ui",
+      resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, "token-add", "web-ui",
       "--agents", "*,master", "--force", "--terminal",
     ], { cwd: REPO_ROOT });
     let secret = "";
@@ -1458,7 +1458,7 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
 
 /** manager 子命令的 JSON 结论（不是 JSON 就返回 null） */
 async function runManagerJson(args: string[]): Promise<Record<string, any> | null> {
-  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, ...args], { cwd: REPO_ROOT });
+  const r = await run([resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, ...args], { cwd: REPO_ROOT });
   const lines = r.out.trim().split("\n").filter((l) => l.trim().startsWith("{"));
   try { return lines.length ? JSON.parse(lines[lines.length - 1]) : null; } catch { return null; }
 }

@@ -29,8 +29,7 @@ import {
 // 配置
 // ============================================================
 
-const HOME = process.env.HOME || "~";
-import { resolveBunPath } from "./lib/bun-path.js";
+import { resolveBunPath, bunBinDir } from "./lib/bun-path.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
@@ -249,7 +248,7 @@ async function runManager(...args: string[]): Promise<any> {
   return runManagerProcess(args, {
     bunPath: BUN_PATH,
     managerPath: MANAGER_PATH,
-    env: { ...process.env, PATH: `${HOME}/.bun/bin:${process.env.PATH}` },
+    env: { ...process.env, PATH: `${bunBinDir()}:${process.env.PATH}` },
     timeoutMs: CRON_MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? 120_000,
   });
 }

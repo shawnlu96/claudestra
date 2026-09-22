@@ -179,3 +179,18 @@ describe("reconcileSessions", () => {
     expect(dops[0].bgId).toBe("68115ded");
   });
 });
+
+import { claudeBinCandidates } from "../src/bridge/sessions-inventory";
+
+describe("claudeBinCandidates", () => {
+  test("登录 shell 解析出的 claude 排第一，其余候选保持原序且不重复", () => {
+    expect(claudeBinCandidates("/opt/homebrew/bin/claude")).toEqual([
+      "/opt/homebrew/bin/claude", "claude", "/usr/local/bin/claude",
+    ]);
+    expect(claudeBinCandidates("/Users/x/.npm-global/bin/claude")[0]).toBe("/Users/x/.npm-global/bin/claude");
+  });
+
+  test("解析失败 → 原候选", () => {
+    expect(claudeBinCandidates(null)).toEqual(["claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]);
+  });
+});
