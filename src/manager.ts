@@ -5410,7 +5410,12 @@ switch (cmd) {
       output({
         ok: true,
         cliWrapper: result.cliWrapper,
-        daemons: result.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),
+        daemons: result.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning, ...(d.keptExisting ? { keptExisting: true } : {}) })),
+        // v2.24+ web 服务装没装上 —— 装上了给 url，没装给**缺什么**。
+        // 这条不输出的话，前置条件缺一项（比如没跑过 setup、没有 web/.env.local）
+        // 就是彻底静默：daemon 不装、端口不监听、命令行一个字都不说，
+        // 用户只能看到「装完了但网页打不开」。
+        webDaemon: result.webDaemon,
         pm2Stopped: result.pm2Stopped.length > 0 ? result.pm2Stopped : undefined,
         oldAutostartPlist: result.oldAutostartPlist,
         oldPm2StartupPlist: result.oldPm2StartupPlist,
