@@ -17,7 +17,6 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
 import { CodexQueueSink, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
-import { findCodexSessionPath } from "./lib/codex-session.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -65,7 +64,6 @@ const IS_CODEX = process.env.CLAUDESTRA_RUNTIME === "codex";
 const CODEX_BIN = process.env.CLAUDESTRA_CODEX_BIN || "codex";
 const AGENT_NAME = process.env.CLAUDESTRA_AGENT || "";
 let codexSessionId: string | undefined = process.env.CLAUDESTRA_SESSION_ID || undefined;
-let codexSessionFile: string | undefined;
 
 // ── MCP stdio 生命周期 ────────────────────────────────────────────────
 // 唯一能证明「本进程是 Claude Code 正在使用的那一个」的信号。用它做两件事：
@@ -145,13 +143,14 @@ function registerFrame(): string {
     pid: process.pid,
     ppid: process.ppid,
   };
-  // Codex 与 Pi 扩展同构：自报运行时与会话文件（rollout 文件名带时间戳，bridge 推算不出）。
+  // Codex：自报运行时与当前线程 id（fork / /new 之后只有这里知道新 id）。刻意**不报**
+  // sessionFile：自报路径只对 Pi 放行，Codex 的 rollout 由 bridge 按 registry 的 sessionId
+  // 自己定位（~/.codex/sessions 里还有用户的私人会话，不能让自报路径指过去）。
   // CC 模式不加字段，帧逐字不变。
   if (IS_CODEX) {
     frame.runtime = "codex";
     frame.agentName = AGENT_NAME || undefined;
     frame.sessionId = codexSessionId;
-    frame.sessionFile = codexSessionFile;
   }
   return JSON.stringify(frame);
 }
@@ -384,18 +383,13 @@ const mcpChannelSink: InboundSink = {
   },
 };
 
-function setCodexSession(sid: string) {
-  codexSessionId = sid;
-  codexSessionFile = findCodexSessionPath(sid) ?? undefined;
-}
-
 const codexSink = new CodexQueueSink({
   source: MCP_NAME,
   getSessionId: () => codexSessionId,
   heldThreadIds: () => heldThreadIds(process.ppid),
   onSwitch: (sid) => {
-    setCodexSession(sid);
-    // 同一条 ws 上重发 register：bridge 按新 sessionFile 更新频道记录（不会触发顶替）
+    codexSessionId = sid;
+    // 同一条 ws 上重发 register：bridge 按新 sessionId 更新频道记录（不会触发顶替）
     if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
       try { bridgeWs.send(registerFrame()); } catch { /* onclose 兜重连 */ }
     }
@@ -424,11 +418,10 @@ async function discoverCodexSession(): Promise<void> {
   for (let i = 0; i < 5; i++) {
     const held = await heldThreadIds(process.ppid).catch(() => [] as string[]);
     if (codexSessionId && held.includes(codexSessionId)) break;
-    if (held.length === 1) { setCodexSession(held[0]); return; }
+    if (held.length === 1) { codexSessionId = held[0]; return; }
     if (codexSessionId && held.length === 0 && i >= 1) break;
     await new Promise((r) => setTimeout(r, 400));
   }
-  if (codexSessionId && !codexSessionFile) setCodexSession(codexSessionId);
 }
 
 /** Codex 被强杀时 MCP 子进程会成孤儿（判据见 codexParentGone）：父进程没了就按 stdio 关闭处理 */
@@ -837,7 +830,7 @@ async function main() {
       // （3s..60s cap），bridge 起来后自动注册，全程无感。
       console.error("初次连接 Bridge 失败（后台退避重连中）:", (err as Error)?.message || err);
     });
-    // Codex：先认准线程再注册，register 帧才带得上 sessionId / sessionFile
+    // Codex：先认准线程再注册，register 帧才带得上 sessionId
     if (IS_CODEX) void discoverCodexSession().catch(() => {}).finally(go);
     else go();
   };

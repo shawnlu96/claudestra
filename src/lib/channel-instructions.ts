@@ -3,7 +3,7 @@
  * 共用这一份。Codex 不把 MCP instructions 放进模型上下文（实测），所以这段文字必须能被
  * 单独注入；抽成常量避免两边各改各的。
  *
- * ⚠ Claude Code 侧逐字不变是契约（tests/channel-instructions.test.ts 钉了摘要）。
+ * ⚠ Claude Code 侧逐字不变是契约（tests/codex-cc-invariants.test.ts 钉了摘要）。
  */
 export function channelInstructions(claudestraHome: string): string {
   const CLAUDESTRA_HOME = claudestraHome;
