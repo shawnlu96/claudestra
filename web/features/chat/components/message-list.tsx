@@ -23,6 +23,7 @@ import { AttachmentStrip } from "./attachments";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 import { isNearBottom, tailAppendedCount } from "../scroll-follow";
 import { installTapRescue } from "@/lib/tap-rescue";
+import { devCount } from "../../devtools/dev-mode";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -301,17 +302,8 @@ function AssistantBody({
  * 消息的对象引用稳定，memo 后每事件只有正在流式的最后一个气泡重渲染。移动端
  * 列表页与会话页并排都在 DOM——会话页的重渲染风暴会卡死列表页的滚动。
  */
-const Message = memo(function Message({
-  m,
-  streaming,
-  isLast,
-  awaiting,
-}: {
-  m: ChatMessage;
-  streaming: boolean;
-  isLast: boolean;
-  awaiting: boolean;
-}) {
+const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean }) {
+  devCount("bubble-render"); // 开发者面板的「气泡渲染速率」:memo 失效时这里会飙
   // 点击消息（user 气泡 / ✦ 头）切换秒级时间显示；长按/右键出菜单
   const [showTs, setShowTs] = useState(false);
   /** user 气泡本体 —— 长按菜单里「选择文字」要框住的范围。 */

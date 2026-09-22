@@ -25,11 +25,10 @@ import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
+import { DevToolsMount } from "../../devtools/dev-mount";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
-function shellLog(msg: string) {
-  postClientLog(`[shell] ${msg}`);
-}
+const shellLog = (msg: string) => postClientLog(`[shell] ${msg}`);
 /**
  * 横滑动画探针(2026-09-12,owner「从对话回到 Agent 页面时卡住了,大概 2 秒」,当时
  * 主线程探针零记录——JS 没卡,怀疑是合成层在 GPU 上光栅化整页时卡住)。两个直接
@@ -772,6 +771,7 @@ export function Chat() {
   return (
     <ChatStoreProvider>
       <ChatInner />
+      <DevToolsMount />
     </ChatStoreProvider>
   );
 }

@@ -4,6 +4,8 @@ import { useT, useLang, setLang } from "@/lib/i18n";
 import { useThemePref, setThemePref } from "@/lib/theme";
 import { kbFixEnabled, setKbFixEnabled } from "../../use-keyboard-viewport";
 import { Section } from "./section";
+import { setDevMode } from "../../../devtools/dev-mode";
+import { useDevMode } from "../../../devtools/dev-mount";
 
 /** 界面 · 外观（跟随系统 / 浅色 / 深色） */
 export function AppearanceSection() {
@@ -90,5 +92,18 @@ export function KbFixSection({ kbFix }: { kbFix: ReturnType<typeof useKbFixToggl
           }
           desc={t("Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。")}
         />
+  );
+}
+
+/** 开发者模式总开关(features/devtools):切换即时生效,面板按需加载。范式见 docs/web-dev-mode.md */
+export function DevModeSection() {
+  const t = useT();
+  const devOn = useDevMode();
+  return (
+    <Section
+      title={t("开发者模式")}
+      aside={<input type="checkbox" className="toggle toggle-sm shrink-0" checked={devOn} onChange={() => setDevMode(!devOn)} />}
+      desc={t("右下角出现调试面板：帧率 / 帧间隔 / 提交突发 / DOM 与消息计数 / 视口实测值 / 最近事件。URL 加 ?dev=1 也能打开。")}
+    />
   );
 }

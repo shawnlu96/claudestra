@@ -46,6 +46,25 @@ features/terminal/      远程终端（会话详情 🖥️ 按钮 → 实时镜
                         ⚠ 滚动语义：CC TUI 在 alternate screen（无终端滚动缓冲，tmux pane
                         history 也为空）——看转录历史用 ^O（CC transcript 模式，可滚）；
                         viewer session 已开 tmux mouse（shell 场景滚轮进 copy-mode 可用）
+features/devtools/      开发者模式：设置 → 实验 → 「开发者模式」或 URL `?dev=1`；右下角徽章（FPS · 最大
+                        帧间隔 · 提交突发）点开 → 面板。⚠ 所有 dev-only 代码只能在这里，业务代码只留
+                        isDevMode() / devCount() 一行接入点；打点经 lib/client-log 自动双写进面板；
+                        提交突发从 layout.tsx 的 cstra:commit-burst 事件计数，produce 速率读 __cstraProduceTrail。
+                        临时调参范式（先让用户在面板上拖，定稿再写死）见 docs/web-dev-mode.md
+  dev-mode.ts           总开关：localStorage `cstra_devmode` + `?dev=` 解析（纯逻辑，bun test 覆盖）；
+                        isDevMode() 同步读给热路径；不直接引用 window（根 tsconfig 无 dom lib）
+  dev-events.ts         事件环（200 条）+ 计数器 + 每秒速率采样器；devEventFromLog 把 client.log 行的
+                        `[tag]` 翻成 kind，壳/PWA 的运行时错误标成 error
+  dev-registry.ts       分区注册表 registerDevSection(id, mount)：临时探针自己注册进面板
+                        （调用上方 3 行内必须有 `dev-section: YYYY-MM-DD` 注释，tests/web-dev-sections 守卫）
+  dev-mount.tsx         订阅开关 → next/dynamic 加载面板（stats.js / lil-gui 不进普通用户 bundle）；
+                        打 html[data-dev]；window.__cstraDev 给控制台用
+  dev-meters.ts         采样 hook：stats.js 三格（FPS / MS / 帧间隔）、rAF 最大帧间隔、输入到下一帧
+                        （Safari 无 Event Timing → pointerdown→双 rAF 手测）、long task（Safari 无 → n/a）
+  dev-panel-sections.ts 内置分区：性能 / Store / 视口（standalone / inner / visualViewport / 安全区实测 /
+                        底部对齐线 / 元素轮廓——容器规则 6 那个反复手写的浮层）/ 动作
+  dev-overlay.tsx       面板壳：徽章 ↔ 面板、lil-gui 生命周期（注册分区变了整个重建）、事件列表。
+                        portal 到 body，根元素 stopPropagation（portal 合成事件会冒泡到横滑手势）
 features/chat/
   type.ts               ChatMessage / AgentSession / ToolCallView / PendingPermission / PendingAsk
   stream.ts             consumeSSEStream + processStreamEvent + StreamSink（协议 v1，迁移零改动）

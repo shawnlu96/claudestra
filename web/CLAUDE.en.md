@@ -70,6 +70,27 @@ features/terminal/      remote terminal (🖥️ button in the session detail �
                         scrollback, and the tmux pane history is empty too) — use ^O to read
                         transcript history (CC transcript mode, scrollable); the viewer session has
                         tmux mouse enabled (so wheel-into-copy-mode works in shell scenarios)
+features/devtools/      Developer mode (v2.24+): Settings → Experimental → "Developer mode", or `?dev=1` in the
+                        URL; a bottom-right badge (FPS · max frame gap · commit bursts) opens the panel.
+                        ⚠ All dev-only code lives here; product code keeps exactly three touch points:
+                        isDevMode() / devEvent() / bumpCounter()
+  dev-mode.ts           the master switch: localStorage `cstra_devmode` + `?dev=` parsing (pure, bun-tested);
+                        isDevMode() is a sync read for hot paths; no direct window refs (root tsconfig has no dom lib)
+  dev-events.ts         event ring (200) + counters + per-second rate sampler. The three resident probes (errors /
+                        slide / commit bursts) and store.clientLog **dual-write** here: server client.log unchanged,
+                        the panel shows the same events
+  dev-registry.ts       section registry registerDevSection(id, mount): temporary probes register themselves into
+                        the panel (comment carries date + incident, delete the registration when done) — the panel
+                        code never changes
+  dev-mount.tsx         subscribes to the switch → next/dynamic loads the panel (stats.js / lil-gui never reach a
+                        normal user's bundle); sets html[data-dev]; window.__cstraDev for the console
+  dev-overlay.tsx       the panel: three stats.js meters (FPS / MS / frame gap) + lil-gui built-in sections
+                        (Perf: max frame gap / input→next frame (Safari has no Event Timing → pointerdown→double
+                        rAF by hand) / long tasks (Safari: n/a) / DOM nodes / rendered messages / bubble render
+                        rate / produce rate / commit bursts; Store; Viewport: standalone / inner / visualViewport /
+                        measured safe-area / bottom-alignment line / element outlines; Actions) + recent-events
+                        list. Portaled to body, root stopPropagation (React portal synthetic events bubble up to
+                        the #cstra-shell swipe handlers)
 features/chat/
   type.ts               ChatMessage / AgentSession / ToolCallView / PendingPermission / PendingAsk
   stream.ts             consumeSSEStream + processStreamEvent + StreamSink (protocol v1, untouched by
@@ -194,9 +215,12 @@ On iOS standalone, "fills to the bottom of the screen + never budges + seamless 
    rendered inside the container ends up positioned a full screen off-view (clicking it "does nothing",
    and it "suddenly appears" when you go back to the list and the container slides back). Desktop has
    translate=0 and cannot reproduce it — this must be verified at a narrow viewport.
-6. **How to debug this**: don't eyeball screenshots and guess. Drop in a temporary diagnostic overlay that
-   reads `navigator.standalone` / `innerHeight` / the measured `env()` probe values, and draw a line at
-   `fixed bottom:0` to see whether it reaches the bottom of the screen — one screenshot localises it.
+6. **How to debug this**: don't eyeball screenshots and guess. Turn on Developer mode (Settings →
+   Experimental, or `?dev=1`) → the panel's Viewport section permanently shows `navigator.standalone` /
+   `innerHeight` / `visualViewport` / the measured safe-area `env()` values, and the "bottom line" toggle
+   draws a line at `fixed bottom:0` to see whether it reaches the bottom of the screen — one screenshot
+   localises it. (Before v2.24 this was a hand-written temporary overlay every time; don't hand-write it
+   again, add what's missing to features/devtools.)
    Icon regeneration: `node scripts/make-icons.mjs` (sharp; the manifest lives in app/manifest.ts).
 
 ## Running & troubleshooting
