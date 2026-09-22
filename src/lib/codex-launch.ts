@@ -334,12 +334,14 @@ export async function resolveCodexBinary(
   run: Runner,
   env: Record<string, string | undefined> = process.env,
   exists: (p: string) => boolean = existsSync,
+  platform: string = process.platform,
+  arch: string = process.arch,
 ): Promise<LoginBinary | null> {
   const override = env.CODEX_TUI_BIN?.trim();
   if (override) return { link: override, real: override };
   const found = await resolveLoginBinary(run, "codex");
   if (!found) return null;
-  const native = nativeCodexCandidates(found.real).find(exists);
+  const native = nativeCodexCandidates(found.real, platform, arch).find(exists);
   return native ? { link: found.link, real: native } : found;
 }
 

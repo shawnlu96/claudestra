@@ -177,7 +177,8 @@ describe("resolveCodexBinary", () => {
   });
 
   test("npm 壳换成原生二进制（壳不转发 SIGKILL，原生进程会变成 pane 的孙进程）", async () => {
-    const r = await resolveCodexBinary(login(WRAPPER), {}, (p) => p === NATIVE);
+    // 钉死平台：NATIVE 是 darwin-arm64 的布局，CI 跑在 linux-x64 上
+    const r = await resolveCodexBinary(login(WRAPPER), {}, (p) => p === NATIVE, "darwin", "arm64");
     expect(r).toEqual({ link: "/opt/homebrew/bin/codex", real: NATIVE });
   });
 
