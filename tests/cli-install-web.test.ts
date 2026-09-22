@@ -67,11 +67,26 @@ describe("webDaemonReadiness", () => {
 });
 
 describe("webDaemonSpec", () => {
-  const spec = webDaemonSpec("/repo", 3333);
+  const spec = webDaemonSpec("/repo", 3333, "/opt/homebrew/bin/node");
 
-  test("直接跑 next 二进制、cwd 落在 web/", () => {
+  // ⚠ 这条是「装完网页打不开」的正主：`node_modules/.bin/next` 是
+  // `#!/usr/bin/env node` 的 shim，解析 node 靠 plist 里那份固定 PATH，而 nvm /
+  // fnm / volta 装的 node 根本不在那份列表里 ⇒ launchd 起不来、端口不监听、
+  // KeepAlive 还会安静地重试下去。拿到绝对路径就直接 exec node。
+  test("拿得到 node 绝对路径时直接 exec node，不依赖 shebang", () => {
     expect(spec.exec?.cwd).toBe("/repo/web");
-    expect(spec.exec?.argv).toEqual(["/repo/web/node_modules/.bin/next", "start", "-p", "3333"]);
+    expect(spec.exec?.argv).toEqual([
+      "/opt/homebrew/bin/node", "/repo/web/node_modules/next/dist/bin/next", "start", "-p", "3333",
+    ]);
+  });
+
+  test("找不到 node 才退回 .bin/next 的 shim（总比不装强）", () => {
+    const s2 = webDaemonSpec("/repo", 3333, null);
+    expect(s2.exec?.argv).toEqual(["/repo/web/node_modules/.bin/next", "start", "-p", "3333"]);
+  });
+
+  test("端口跟着参数走（不是写死 3333）", () => {
+    expect(webDaemonSpec("/repo", 8080, "/usr/bin/node").exec?.argv.slice(-1)).toEqual(["8080"]);
   });
 
   test("keepExisting——用户手写过的 plist 不许覆盖", () => {

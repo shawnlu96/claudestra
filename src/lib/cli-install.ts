@@ -107,14 +107,17 @@ export function webDaemonReadiness(has: {
  * 手写的 plist（改过端口、日志落点、或挂在反代后面），install-cli 每次 update 都会跑，
  * 无条件覆盖等于每次升级都把用户的定制悄悄抹掉。
  */
-export function webDaemonSpec(repoRoot: string, port: number): DaemonSpec {
+export function webDaemonSpec(repoRoot: string, port: number, nodePath?: string | null): DaemonSpec {
   const webDir = `${repoRoot}/web`;
-  return {
-    label: "com.claudestra.web",
-    stem: "web",
-    keepExisting: true,
-    exec: { cwd: webDir, argv: [`${webDir}/node_modules/.bin/next`, "start", "-p", String(port)] },
-  };
+  // ⚠ 不要直接 exec `node_modules/.bin/next`：它是 `#!/usr/bin/env node` 的 shim，
+  //   解析 node 靠的是 **plist 里那份固定 PATH**。用 nvm / fnm / volta 装 node 的机器
+  //   （相当常见）node 在 ~/.nvm/versions/node/vX/bin 之类的地方，不在那份列表里 ⇒
+  //   launchd 起不来这个 daemon，端口永远不监听，用户看到的就是「装完网页打不开」，
+  //   而且 KeepAlive 会让它安静地重试到天荒地老。拿到 node 绝对路径就直接 exec 它。
+  const argv = nodePath
+    ? [nodePath, `${webDir}/node_modules/next/dist/bin/next`, "start", "-p", String(port)]
+    : [`${webDir}/node_modules/.bin/next`, "start", "-p", String(port)];
+  return { label: "com.claudestra.web", stem: "web", keepExisting: true, exec: { cwd: webDir, argv } };
 }
 
 /** 老 pm2 启动名（用于 stop 老的、避免跟新 launchd 抢） */
@@ -174,7 +177,14 @@ function getUid(): string {
  */
 function buildEnvPath(): string {
   const home = homedir();
+  // node 的实际所在目录排在最前：nvm / fnm / volta 的路径不在下面这份固定列表里，
+  // 而 web daemon 与它派生的子进程都要用到 node（见 webDaemonSpec 的注释）。
+  const nodeDir = (() => {
+    const p = which("node");
+    return p ? dirname(p) : null;
+  })();
   return [
+    ...(nodeDir ? [nodeDir] : []),
     `${home}/.bun/bin`,
     `${home}/.local/bin`,
     "/opt/homebrew/bin",
@@ -750,7 +760,11 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     envLocal: existsSync(`${webDir}/.env.local`),
   });
   const webPort = webPortFromStartScript(webPkgStart);
-  const extraDaemons = webReady.ready ? [webDaemonSpec(repoRoot, webPort)] : [];
+  const nodePath = which("node");
+  const extraDaemons = webReady.ready ? [webDaemonSpec(repoRoot, webPort, nodePath)] : [];
+  if (webReady.ready && !nodePath) {
+    warnings.push("PATH 里找不到 node —— web daemon 只能靠 next 的 shebang 解析它，nvm/fnm 装的 node 会起不来");
+  }
   result.webDaemon = webReady.ready
     ? { installed: true, port: webPort, url: `http://localhost:${webPort}` }
     : { installed: false, reason: webReady.reason };
