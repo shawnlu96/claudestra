@@ -15,6 +15,7 @@
 
 import { existsSync } from "fs";
 import { connect as tlsConnect } from "tls";
+import { connect as netConnect } from "net";
 
 // ============================================================
 // CLI 定位
@@ -29,27 +30,43 @@ export const TAILSCALE_CLI_FALLBACKS = [
 ];
 
 /**
- * 纯函数版定位：显式覆盖 → PATH → 已知位置。`exists` 注入便于单测。
+ * 按优先级列出存在的候选：显式覆盖 → PATH → 已知位置（去重）。`exists` 注入便于单测。
  * 覆盖用环境变量 TAILSCALE_CLI（沿用 tls-proxy 的 TLS_PROXY_TS_CLI 也认）。
  */
-export function pickTailscaleCli(
+export function tailscaleCliCandidates(
   env: Record<string, string | undefined>,
   exists: (p: string) => boolean,
-): string | null {
-  for (const o of [env.TAILSCALE_CLI, env.TLS_PROXY_TS_CLI]) {
-    if (o && exists(o)) return o;
-  }
-  for (const dir of (env.PATH || "").split(":")) {
-    if (!dir) continue;
-    const p = `${dir.replace(/\/+$/, "")}/tailscale`;
-    if (exists(p)) return p;
-  }
-  for (const p of TAILSCALE_CLI_FALLBACKS) if (exists(p)) return p;
-  return null;
+): string[] {
+  const out: string[] = [];
+  const add = (p: string | undefined) => { if (p && !out.includes(p) && exists(p)) out.push(p); };
+  add(env.TAILSCALE_CLI);
+  add(env.TLS_PROXY_TS_CLI);
+  for (const dir of (env.PATH || "").split(":")) if (dir) add(`${dir.replace(/\/+$/, "")}/tailscale`);
+  for (const p of TAILSCALE_CLI_FALLBACKS) add(p);
+  return out;
+}
+
+/** 第一个存在的候选（同步、不执行）。只用于没法 await 的地方；能 await 就用 findTailscaleCli。 */
+export function pickTailscaleCli(env: Record<string, string | undefined>, exists: (p: string) => boolean): string | null {
+  return tailscaleCliCandidates(env, exists)[0] ?? null;
 }
 
 export function resolveTailscaleCli(): string | null {
   return pickTailscaleCli(process.env, existsSync);
+}
+
+/**
+ * 真正能用的 CLI：每个候选执行一次 `status --json`，能解析出 JSON 的才算命中。
+ * 只看文件存在不够 —— PATH 里可能是 brew formula 版 CLI，它连的 tailscaled 没在跑
+ * （在跑的是 GUI 版），这时它只会报错。都拿不到 JSON（例如 App 没打开）就退回第一个
+ * 存在的候选：「装了但没运行」和「没装」要区分开，前者绝不能再去重装。
+ */
+export async function findTailscaleCli(): Promise<string | null> {
+  const cands = tailscaleCliCandidates(process.env, existsSync);
+  for (const c of cands) {
+    if ((await readStatusJson(c)) !== null) return c;
+  }
+  return cands[0] ?? null;
 }
 
 // ============================================================
@@ -221,11 +238,15 @@ export function planHttps(i: PlanInput): HttpsPlan {
   return { kind: "fallback-manual", reason: "443 与 8443 都已被占用" };
 }
 
-/** 证书剩余天数的三档：≥21 ok，7–21 warn，<7 或已过期 fail（ts.net 证书 90 天有效） */
-export function certVerdict(daysLeft: number): "ok" | "warn" | "fail" {
-  if (daysLeft >= 21) return "ok";
-  if (daysLeft >= 7) return "warn";
-  return "fail";
+/**
+ * 证书剩余天数三档：<7 天或已过期 fail；不到寿命的 1/4 warn；其余 ok。
+ * 按寿命比例而不是固定 21 天：CA 在缩短证书寿命（Let's Encrypt 公布的时间表是 2027 年 64 天、
+ * 2028 年 45 天），而 tailscaled 大约剩 1/3 寿命才续，固定阈值到时会常年误报。
+ */
+export function certVerdict(daysLeft: number, lifetimeDays = 90): "ok" | "warn" | "fail" {
+  if (daysLeft < 7) return "fail";
+  if (daysLeft < lifetimeDays / 4) return "warn";
+  return "ok";
 }
 
 /**
@@ -296,19 +317,27 @@ async function runCli(cli: string, args: string[], timeoutMs = 5000): Promise<{ 
   }
 }
 
-/** 原始 status JSON（manager 的 tailnet 扫描要 Peer 列表，所以单独暴露） */
-export async function readTailscaleStatusRaw(cli = resolveTailscaleCli()): Promise<unknown | null> {
-  if (!cli) return null;
+async function readStatusJson(cli: string): Promise<unknown | null> {
   const r = await runCli(cli, ["status", "--json"]);
   // 没登录时 status 可能非零退出但仍输出 JSON —— 以能否解析为准
   try { return r.out.trim().startsWith("{") ? JSON.parse(r.out) : null; } catch { return null; }
 }
 
-export async function readTailscaleStatus(cli = resolveTailscaleCli()): Promise<TailscaleStatus | null> {
+/**
+ * 原始 status JSON（manager 的 tailnet 扫描要 Peer 列表，所以单独暴露）。
+ * cli 不传 = 自动找；传 null = 已确认没装。
+ */
+export async function readTailscaleStatusRaw(cli?: string | null): Promise<unknown | null> {
+  const bin = cli === undefined ? await findTailscaleCli() : cli;
+  return bin ? readStatusJson(bin) : null;
+}
+
+export async function readTailscaleStatus(cli?: string | null): Promise<TailscaleStatus | null> {
   return parseTailscaleStatus(await readTailscaleStatusRaw(cli));
 }
 
-export async function readServeStatus(cli = resolveTailscaleCli()): Promise<ServeState> {
+export async function readServeStatus(cli?: string | null): Promise<ServeState> {
+  if (cli === undefined) cli = await findTailscaleCli();
   if (!cli) return { ports: [], handlers: [] };
   const r = await runCli(cli, ["serve", "status", "--json"]);
   try { return parseServeStatus(JSON.parse(r.out || "{}")); } catch { return { ports: [], handlers: [] }; }
@@ -326,11 +355,32 @@ export async function listListeners(port: number): Promise<{ command: string; ad
   }
 }
 
-/** 非 tailscale 进程在监听该端口（serve 的监听在 tailscaled / 网络扩展里，不算「被别人占」） */
-export async function portBusyByOthers(port: number): Promise<boolean> {
-  const ls = await listListeners(port);
-  if (ls === null) return true; // 看不清就保守：别去抢
-  return ls.some((l) => !/tailscale/i.test(l.command));
+/** TCP 能不能连上（只握手不发数据） */
+export function tcpOpen(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host, port });
+    const done = (v: boolean) => { sock.destroy(); resolve(v); };
+    sock.setTimeout(timeoutMs, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
+}
+
+/**
+ * 该端口是否被 serve 以外的进程占着。**以连接探测为准**：普通用户的 lsof 看不见 root 属主的
+ * 监听（doctor 的 sshd 检查实测过），root 跑的反代会被误判成空闲，然后被 serve 静默遮蔽。
+ * serve 自己占的端口从 serve status 读（servePorts），这里不算。
+ *   - 127.0.0.1 能连上 → 有本机进程在听（serve 只挂在 tailnet 地址上 —— 需实测的假设）；
+ *   - serve 没占这个端口、tailnet IP 却能连上 → 有别的进程在听通配地址；
+ *   - lsof 看得见的非 tailscale 进程 → 也算。
+ */
+export async function portBusyByOthers(port: number, opts: { servePorts?: number[]; tailnetIp?: string } = {}): Promise<boolean> {
+  const [ls, local, viaTs] = await Promise.all([
+    listListeners(port),
+    tcpOpen("127.0.0.1", port),
+    opts.tailnetIp && !opts.servePorts?.includes(port) ? tcpOpen(opts.tailnetIp, port) : Promise.resolve(false),
+  ]);
+  return local || viaTs || (ls ?? []).some((l) => !/tailscale/i.test(l.command));
 }
 
 export async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown | null> {
@@ -343,11 +393,15 @@ export async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown 
   }
 }
 
-/** TLS 握手取证书剩余天数；不校验链（过期证书也要能报天数），authorized 单独给出 */
-export function certDaysLeft(host: string, port: number, timeoutMs = 4000): Promise<{ daysLeft: number; authorized: boolean } | null> {
+/** TLS 握手取证书剩余天数与寿命；不校验链（过期证书也要能报天数），authorized 单独给出 */
+export function certDaysLeft(
+  host: string,
+  port: number,
+  timeoutMs = 4000,
+): Promise<{ daysLeft: number; lifetimeDays: number; authorized: boolean } | null> {
   return new Promise((resolve) => {
     let done = false;
-    const finish = (v: { daysLeft: number; authorized: boolean } | null) => {
+    const finish = (v: { daysLeft: number; lifetimeDays: number; authorized: boolean } | null) => {
       if (done) return;
       done = true;
       try { sock.destroy(); } catch { /* ignore */ }
@@ -356,7 +410,14 @@ export function certDaysLeft(host: string, port: number, timeoutMs = 4000): Prom
     const sock = tlsConnect({ host, port, servername: host, rejectUnauthorized: false, timeout: timeoutMs }, () => {
       const cert = sock.getPeerCertificate();
       const to = cert?.valid_to ? Date.parse(cert.valid_to) : NaN;
-      finish(Number.isFinite(to) ? { daysLeft: (to - Date.now()) / 86_400_000, authorized: sock.authorized } : null);
+      const from = cert?.valid_from ? Date.parse(cert.valid_from) : NaN;
+      finish(Number.isFinite(to)
+        ? {
+            daysLeft: (to - Date.now()) / 86_400_000,
+            lifetimeDays: Number.isFinite(from) ? (to - from) / 86_400_000 : 90,
+            authorized: sock.authorized,
+          }
+        : null);
     });
     sock.on("error", () => finish(null));
     sock.on("timeout", () => finish(null));
@@ -371,6 +432,7 @@ export interface EntryProbe {
   /** 返回的 /api/version 与本机 web 一致（本机 web 不在时退化为「像 Claudestra」） */
   matchesLocal: boolean;
   certDaysLeft?: number;
+  certLifetimeDays?: number;
   certValid?: boolean;
 }
 
@@ -389,7 +451,11 @@ export async function probeEntry(
   if (secure) {
     const u = new URL(url);
     const c = await certDaysLeft(u.hostname, Number(u.port || 443));
-    if (c) { probe.certDaysLeft = Math.round(c.daysLeft * 10) / 10; probe.certValid = c.authorized; }
+    if (c) {
+      probe.certDaysLeft = Math.round(c.daysLeft * 10) / 10;
+      probe.certLifetimeDays = Math.round(c.lifetimeDays);
+      probe.certValid = c.authorized;
+    }
   }
   return probe;
 }
@@ -410,8 +476,14 @@ export interface RemoteAccessReport {
   webBind: string[];
   servePorts: number[];
   entries: EntryProbe[];
-  /** 其它进程在监听 443（serve 若也占 443 会与之冲突） */
+  /** lsof 看得见的、在听 443 的非 tailscale 进程名（只用于展示；root 属主的看不见） */
   others443: string[];
+  /** 443 被 serve 以外的进程占着（连接探测为准，见 portBusyByOthers） */
+  port443Busy: boolean;
+  /** 本机 web 的 /api/version 能不能通 —— 后面所有入口都以它为前提 */
+  webUp: boolean;
+  /** planHttps 的结论（复用 / 建议 serve 端口 / 引导） */
+  plan: HttpsPlan;
 }
 
 /**
@@ -419,13 +491,18 @@ export interface RemoteAccessReport {
  * 候选入口：serve 里指向 web 的处理器 → ts.net 的 443（可能是 Caddy 之类外部反代）→ tailnet IP 明文。
  */
 export async function collectRemoteAccess(webPort: number): Promise<RemoteAccessReport> {
-  const cli = resolveTailscaleCli();
+  const cli = await findTailscaleCli();
   const [status, serve, webLs, ls443, local] = await Promise.all([
     readTailscaleStatus(cli),
     readServeStatus(cli),
     listListeners(webPort),
     listListeners(443),
     fetchJson(`http://127.0.0.1:${webPort}/api/version`, 2000),
+  ]);
+  const tailnetIp = status?.ipv4[0];
+  const [port443Busy, port8443Busy] = await Promise.all([
+    portBusyByOthers(443, { servePorts: serve.ports, tailnetIp }),
+    portBusyByOthers(8443, { servePorts: serve.ports, tailnetIp }),
   ]);
   const report: RemoteAccessReport = {
     tailscale: {
@@ -442,22 +519,28 @@ export async function collectRemoteAccess(webPort: number): Promise<RemoteAccess
     webBind: (webLs ?? []).map((l) => l.addr),
     servePorts: serve.ports,
     entries: [],
-    others443: (ls443 ?? []).filter((l) => !/tailscale/i.test(l.command)).map((l) => l.command),
+    others443: [...new Set((ls443 ?? []).filter((l) => !/tailscale/i.test(l.command)).map((l) => l.command))],
+    port443Busy,
+    webUp: local !== null,
+    plan: { kind: "not-installed" },
   };
-  if (!status?.running) return report;
-
-  const cands: { url: string; source: EntryProbe["source"] }[] = [];
-  if (status.dnsName) {
-    const h = findServeForPort(serve, webPort);
-    if (h) cands.push({ url: httpsUrl(status.dnsName, h.port), source: "serve" });
-    if (!h || h.port !== 443) cands.push({ url: httpsUrl(status.dnsName, 443), source: serve.ports.includes(443) ? "serve" : "external" });
+  if (status?.running) {
+    const cands: { url: string; source: EntryProbe["source"] }[] = [];
+    if (status.dnsName) {
+      const h = findServeForPort(serve, webPort);
+      if (h) cands.push({ url: httpsUrl(status.dnsName, h.port), source: "serve" });
+      if (!h || h.port !== 443) cands.push({ url: httpsUrl(status.dnsName, 443), source: serve.ports.includes(443) ? "serve" : "external" });
+    }
+    if (tailnetIp) cands.push({ url: `http://${tailnetIp}:${webPort}`, source: "tailnet-ip" });
+    const probes = await Promise.all(cands.map((c) => probeEntry(c.url, c.source, local)));
+    // ts.net:443 连 TLS 都握不上 = 那里没有入口，不列（否则面板多一条噪音）；握得上就列，
+    // 哪怕 HTTP 不通 —— 证书过期正是这种样子，doctor 要能报出来
+    report.entries = probes.filter((p) => p.source !== "external" || p.reachable || p.certDaysLeft !== undefined);
   }
-  if (status.ipv4[0]) cands.push({ url: `http://${status.ipv4[0]}:${webPort}`, source: "tailnet-ip" });
-
-  const probes = await Promise.all(cands.map((c) => probeEntry(c.url, c.source, local)));
-  // ts.net:443 连 TLS 都握不上 = 那里没有入口，不列（否则面板多一条噪音）；握得上就列，
-  // 哪怕 HTTP 不通 —— 证书过期正是这种样子，doctor 要能报出来
-  report.entries = probes.filter((p) => p.source !== "external" || p.reachable || p.certDaysLeft !== undefined);
+  report.plan = planHttps({
+    cliFound: !!cli, status, serve, webPort, port443Busy, port8443Busy,
+    workingEntry: workingHttpsEntry(report),
+  });
   return report;
 }
 
@@ -474,7 +557,6 @@ export function workingHttpsEntry(r: RemoteAccessReport): { url: string; source:
 let snapCache: { at: number; port: number; data: RemoteAccessSnapshot } | null = null;
 
 export interface RemoteAccessSnapshot extends RemoteAccessReport {
-  plan: HttpsPlan;
   /** plan 为 serve 时给一条可复制的命令（CLI 绝对路径）；网页只展示，不执行 */
   suggestedCommand: string | null;
   checkedAt: string;
@@ -484,20 +566,9 @@ export async function remoteAccessSnapshot(webPort: number, maxAgeMs = 60_000): 
   if (snapCache && snapCache.port === webPort && Date.now() - snapCache.at < maxAgeMs) return snapCache.data;
   const r = await collectRemoteAccess(webPort);
   const cli = r.tailscale.cli;
-  const [status, serve, busy8443] = await Promise.all([
-    readTailscaleStatus(cli),
-    readServeStatus(cli),
-    portBusyByOthers(8443),
-  ]);
-  const plan = planHttps({
-    cliFound: !!cli, status, serve, webPort,
-    port443Busy: r.others443.length > 0, port8443Busy: busy8443,
-    workingEntry: workingHttpsEntry(r),
-  });
   const data: RemoteAccessSnapshot = {
     ...r,
-    plan,
-    suggestedCommand: plan.kind === "serve" && cli ? [shellQuote(cli), ...plan.args].join(" ") : null,
+    suggestedCommand: r.plan.kind === "serve" && cli ? [shellQuote(cli), ...r.plan.args].join(" ") : null,
     checkedAt: new Date().toISOString(),
   };
   snapCache = { at: Date.now(), port: webPort, data };

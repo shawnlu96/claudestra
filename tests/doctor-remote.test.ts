@@ -11,6 +11,9 @@ const report = (over: Partial<RemoteAccessReport> = {}, ts: Partial<RemoteAccess
   servePorts: [],
   entries: [],
   others443: [],
+  port443Busy: false,
+  webUp: true,
+  plan: { kind: "reuse", url: `https://${HOST}`, source: "external" },
   ...over,
 });
 const https = (over: Partial<EntryProbe> = {}): EntryProbe => ({
@@ -32,8 +35,8 @@ describe("remoteAccessChecks", () => {
     expect(by(c, "证书剩余")[0].detail).toContain("60");
   });
 
-  test("证书 19 天 → warn，且外部反代给续签脚本建议（这正是 2026-09 线上的样子）", () => {
-    const c = by(remoteAccessChecks(report({ entries: [https({ certDaysLeft: 19 })] })), "证书剩余")[0];
+  test("90 天证书剩 19 天 → warn（<1/4 寿命），外部反代给续签脚本建议（这正是 2026-09 线上的样子）", () => {
+    const c = by(remoteAccessChecks(report({ entries: [https({ certDaysLeft: 19, certLifetimeDays: 90 })] })), "证书剩余")[0];
     expect(c.status).toBe("warn");
     expect(c.fix).toContain("renew-ts-cert");
   });
@@ -44,16 +47,30 @@ describe("remoteAccessChecks", () => {
     expect(c.fix).toContain("tailscaled");
   });
 
-  test("证书过期：HTTP 不通 → 入口 fail + 证书 fail", () => {
+  test("证书过期：HTTP 不通 → 入口 warn + 证书 fail", () => {
     const c = remoteAccessChecks(report({ entries: [https({ reachable: false, certDaysLeft: -2, certValid: false })] }));
-    expect(by(c, "HTTPS 入口")[0].status).toBe("fail");
+    expect(by(c, "HTTPS 入口")[0].status).toBe("warn");
     expect(by(c, "证书剩余")[0]).toMatchObject({ status: "fail" });
     expect(by(c, "证书剩余")[0].detail).toContain("已过期");
   });
 
-  test("入口通到别的服务 → fail", () => {
-    const c = by(remoteAccessChecks(report({ entries: [https({ matchesLocal: false })] })), "HTTPS 入口")[0];
-    expect(c.status).toBe("fail");
+  test("入口通到别的服务 / HTTP 探测失败 → warn（可能只是一时超时或刚部署），不给 fail", () => {
+    expect(by(remoteAccessChecks(report({ entries: [https({ matchesLocal: false })] })), "HTTPS 入口")[0].status).toBe("warn");
+    expect(by(remoteAccessChecks(report({ entries: [https({ reachable: false, certDaysLeft: 60 })] })), "HTTPS 入口")[0].status).toBe("warn");
+  });
+
+  test("证书阈值按寿命比例：45 天证书剩 12 天 → ok，剩 10 天 → warn；任何证书 <7 天 → fail", () => {
+    const v = (d: number, life: number) => by(remoteAccessChecks(report({ entries: [https({ certDaysLeft: d, certLifetimeDays: life })] })), "证书剩余")[0].status;
+    expect(v(12, 45)).toBe("ok");
+    expect(v(10, 45)).toBe("warn");
+    expect(v(23, 90)).toBe("ok");
+    expect(v(22, 90)).toBe("warn");
+    expect(v(6, 45)).toBe("fail");
+  });
+
+  test("本机 web 不应答 → 单独一条 warn，并且排在最前", () => {
+    const c = remoteAccessChecks(report({ webUp: false }));
+    expect(c[0]).toMatchObject({ name: "web 服务", status: "warn" });
   });
 
   test("没有 HTTPS 入口 → warn；tailnet 没开 HTTPS 时建议先去后台开", () => {
@@ -63,15 +80,18 @@ describe("remoteAccessChecks", () => {
     expect(b.fix).toContain("HTTPS Certificates");
   });
 
-  test("serve 占 443 且另有进程听 443 → 冲突 warn", () => {
-    const c = by(remoteAccessChecks(report({ servePorts: [443], others443: ["caddy", "caddy"] })), "443 冲突");
+  test("serve 占 443 且另有进程听 443 → 冲突 warn；lsof 看不见时（root 属主）也要报", () => {
+    const c = by(remoteAccessChecks(report({ servePorts: [443], port443Busy: true, others443: ["caddy"] })), "443 冲突");
     expect(c).toHaveLength(1);
     expect(c[0].detail).toContain("caddy");
-    expect(c[0].detail).not.toContain("caddy、caddy");
+    const hidden = by(remoteAccessChecks(report({ servePorts: [443], port443Busy: true, others443: [] })), "443 冲突");
+    expect(hidden[0].detail).toContain("root");
+    expect(by(remoteAccessChecks(report({ servePorts: [443], port443Busy: false })), "443 冲突")).toHaveLength(0);
   });
 
-  test("已有 HTTPS 但 web 仍听通配地址 → 只提示 warn；没 HTTPS 时不提（那是唯一入口）", () => {
-    expect(by(remoteAccessChecks(report({ webBind: ["*:3333"], entries: [https()] })), "明文入口")).toHaveLength(1);
-    expect(by(remoteAccessChecks(report({ webBind: ["*:3333"] })), "明文入口")).toHaveLength(0);
+  test("web 听通配地址不单独告警（有人有意留明文备用），只写进 HTTPS 入口的 detail", () => {
+    const c = remoteAccessChecks(report({ webBind: ["*:3333"], entries: [https()] }));
+    expect(c.every((x) => x.status === "ok")).toBe(true);
+    expect(by(c, "HTTPS 入口")[0].detail).toContain("*:3333");
   });
 });

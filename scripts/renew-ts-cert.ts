@@ -21,7 +21,7 @@
 import { X509Certificate, createPrivateKey } from "crypto";
 import { existsSync, readFileSync, renameSync, copyFileSync, unlinkSync, chmodSync } from "fs";
 import { dirname, basename } from "path";
-import { resolveTailscaleCli, readTailscaleStatus, validateCertCandidate } from "../src/lib/tailscale";
+import { findTailscaleCli, readTailscaleStatus, validateCertCandidate } from "../src/lib/tailscale";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -44,7 +44,7 @@ function inspect(certPath: string, keyPath: string) {
 }
 
 async function main(): Promise<number> {
-  const cli = resolveTailscaleCli();
+  const cli = await findTailscaleCli();
   if (!cli) { console.error("✗ 找不到 tailscale CLI（PATH / App 包内 / brew 位置都没有）"); return 1; }
   const host = arg("host") || (await readTailscaleStatus(cli))?.dnsName || "";
   if (!host) { console.error("✗ 拿不到 ts.net 主机名：Tailscale 没登录或 MagicDNS 没开；也可用 --host 显式给"); return 1; }

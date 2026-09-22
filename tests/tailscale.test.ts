@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import {
   pickTailscaleCli,
+  tailscaleCliCandidates,
   parseTailscaleStatus,
   parseServeStatus,
   proxyTargetsPort,
@@ -55,6 +56,14 @@ describe("pickTailscaleCli", () => {
 
   test("哪里都没有 → null", () => {
     expect(pickTailscaleCli({ PATH: "/usr/bin" }, () => false)).toBeNull();
+  });
+
+  test("候选按优先级去重列出（findTailscaleCli 逐个执行验证：PATH 里的可能是连不上 daemon 的 brew 版）", () => {
+    const has = new Set(["/opt/homebrew/bin/tailscale", APP]);
+    expect(tailscaleCliCandidates({ PATH: "/opt/homebrew/bin:/opt/homebrew/bin/" }, (p) => has.has(p))).toEqual([
+      "/opt/homebrew/bin/tailscale",
+      APP,
+    ]);
   });
 });
 
@@ -168,13 +177,15 @@ describe("planHttps", () => {
 });
 
 describe("小工具", () => {
-  test("certVerdict 边界：21 / 7", () => {
+  test("certVerdict 按寿命 1/4 与 7 天两条线（默认寿命 90）", () => {
     expect(certVerdict(60)).toBe("ok");
-    expect(certVerdict(21)).toBe("ok");
-    expect(certVerdict(20.9)).toBe("warn");
+    expect(certVerdict(22.5)).toBe("ok");
+    expect(certVerdict(22.4)).toBe("warn");
     expect(certVerdict(7)).toBe("warn");
     expect(certVerdict(6.9)).toBe("fail");
     expect(certVerdict(-1)).toBe("fail");
+    expect(certVerdict(12, 45)).toBe("ok");
+    expect(certVerdict(11, 45)).toBe("warn");
   });
 
   test("parseLsofListen / isWildcardBind", () => {
@@ -210,6 +221,7 @@ describe("小工具", () => {
     const r = (entries: RemoteAccessReport["entries"]): RemoteAccessReport => ({
       tailscale: { installed: true, cli: APP, backendState: "Running", running: true, dnsName: "h", ipv4: [], magicDNS: true, httpsEnabled: true },
       webPort: 3333, webBind: [], servePorts: [], entries, others443: [],
+      port443Busy: false, webUp: true, plan: { kind: "not-installed" },
     });
     const ok = { url: "https://h", secure: true, source: "external" as const, reachable: true, matchesLocal: true, certValid: true };
     expect(workingHttpsEntry(r([ok]))).toEqual({ url: "https://h", source: "external" });

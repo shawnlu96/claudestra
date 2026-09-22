@@ -22,6 +22,7 @@ interface Entry {
   reachable: boolean;
   matchesLocal: boolean;
   certDaysLeft?: number;
+  certLifetimeDays?: number;
   certValid?: boolean;
 }
 
@@ -43,9 +44,10 @@ interface Snapshot {
   checkedAt: string;
 }
 
-function certTone(days: number): string {
+/** 与 doctor 同一口径：<7 天红；不到寿命 1/4 黄（CA 在缩短寿命，固定天数会常年误报） */
+function certTone(days: number, lifetime = 90): string {
   if (days < 7) return "text-error";
-  if (days < 21) return "text-warning";
+  if (days < lifetime / 4) return "text-warning";
   return "text-base-content/50";
 }
 
@@ -89,7 +91,7 @@ function EntryRow({ e }: { e: Entry }) {
           {usable ? t("可用") : e.reachable ? t("通到的不是本机当前的 web") : t("连不上")}
         </span>
         {e.certDaysLeft !== undefined && (
-          <span className={certTone(e.certDaysLeft)}>
+          <span className={certTone(e.certDaysLeft, e.certLifetimeDays)}>
             {e.certDaysLeft < 0
               ? `${t("证书已过期")} ${Math.ceil(-e.certDaysLeft)} ${t("天")}`
               : `${t("证书剩")} ${Math.floor(e.certDaysLeft)} ${t("天")}`}

@@ -1397,7 +1397,8 @@ async function stepAdoptSessions(): Promise<void> {
 // ============================================================
 
 /**
- * Web 端默认只听在本机。要在手机上用，两台设备得互相看得见：
+ * Web 端（next start -p <port>，不带 -H）监听所有网卡：本机、局域网、tailnet 都能直连明文 HTTP，
+ * 网页自带登录。要在手机上用，两台设备得互相看得见：
  *   - 同一个局域网 → LAN 地址就行，但换个网络（出门、4G）就断；
  *   - Tailscale → 给每台设备一个稳定的私有地址（100.64.0.0/10），换网不换址，
  *     不用端口转发、也不把服务暴露到公网。
@@ -1429,7 +1430,9 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
   br();
 
   // ── S0 检测 / 安装 / 登录 ──
-  let cli = ts.resolveTailscaleCli();
+  // 以「能不能跑出 status --json」区分三态：没装 / 装了没连上 / 在线。此前只看网卡上有没有
+  // 100.x 地址，「装了但没登录」会被当成没装，默认 Y 去重装。
+  let cli = await ts.findTailscaleCli();
   let status = cli ? await ts.readTailscaleStatus(cli) : null;
   if (!cli) {
     cli = await offerTailscaleInstall(isMac, lan?.url);
@@ -1448,15 +1451,9 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
   print(`  ${c.dim}•${c.reset} ${t("手机: App Store / Google Play 装 Tailscale,登录同一个账号", "Phone: install Tailscale from the App Store / Google Play, sign in with the same account")}`);
   br();
 
-  // ── S2 HTTPS 入口决策 ──
-  const report = await ts.collectRemoteAccess(webPort);
-  const decide = async (st: import("./lib/tailscale.js").TailscaleStatus) => ts.planHttps({
-    cliFound: true, status: st, serve: await ts.readServeStatus(tsCli), webPort,
-    port443Busy: report.others443.length > 0,
-    port8443Busy: await ts.portBusyByOthers(8443),
-    workingEntry: ts.workingHttpsEntry(report),
-  });
-  let plan = await decide(status);
+  // ── S2 HTTPS 入口决策（端口占用以连接探测为准：lsof 看不见 root 属主的监听） ──
+  let report = await ts.collectRemoteAccess(webPort);
+  let plan = report.plan;
   if (plan.kind === "need-https-enable") {
     print(t(
       "tailnet 还没开 HTTPS 证书。去 Tailscale 管理后台 → DNS 页 → 开启「HTTPS Certificates」。",
@@ -1467,8 +1464,8 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
       "Note: certificates land in public Certificate Transparency logs, so this machine name and your tailnet name become publicly visible. Skip if you'd rather not — you'll get the plain-HTTP address below.",
     ));
     await waitEnter(t("开好后按 ENTER 重新检测（不开也直接回车）", "Press ENTER to re-check once enabled (or just ENTER to skip)"));
-    status = (await ts.readTailscaleStatus(tsCli)) ?? status;
-    plan = await decide(status);
+    report = await ts.collectRemoteAccess(webPort);
+    plan = report.plan;
   }
 
   let httpsUrl: string | undefined;
@@ -1485,7 +1482,7 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
       ));
       print(`  ${c.cyan}${cmd}${c.reset}`);
       if (plan.port !== 443) {
-        const who = report.others443.join(", ") || "serve";
+        const who = report.others443.join(", ") || t("别的进程", "another process");
         hint(t(`443 已被占用（${who}），改用 ${plan.port}，不去抢它`, `Port 443 is taken (${who}), using ${plan.port} instead of displacing it`));
       }
       hint(t("这会改这台机器的 Tailscale 配置（只加这一条，不动已有的）。", "This changes this machine's Tailscale config (adds just this one handler, leaves existing ones alone)."));
@@ -1583,14 +1580,19 @@ async function waitForTailscaleLogin(
       "Opened Tailscale. On first run, allow its system extension and VPN configuration in System Settings (Privacy & Security / General → Login Items & Extensions), then sign in from the menu-bar icon.",
     ));
   } else {
-    const user = process.env.USER || "";
+    // 分两步：operator 用 `set` 单独设（把它塞进 `up`，若以前 up 带过别的非默认参数会被要求全部重述）；
+    // 用户名在代码里取值 —— runInteractive 不经过 shell，字面的 $USER 不会展开。
+    const user = (await import("os")).userInfo().username;
     print(t(
-      `登录用 ${c.cyan}sudo tailscale up --qr --operator=${user}${c.reset}。--operator 让当前用户以后不用 sudo 就能操作 tailscaled（向导配 serve、doctor 读状态都要它）。`,
-      `Sign in with ${c.cyan}sudo tailscale up --qr --operator=${user}${c.reset}. --operator lets your user manage tailscaled without sudo afterwards (needed for serve and doctor).`,
+      `先 ${c.cyan}sudo ${cli} set --operator=${user}${c.reset}：让当前用户以后不用 sudo 就能操作 tailscaled（登录、配 serve、doctor 读状态都要它）。`,
+      `First ${c.cyan}sudo ${cli} set --operator=${user}${c.reset}: lets your user manage tailscaled without sudo (sign-in, serve and doctor need it).`,
     ));
-    if (user && (await confirm(t("现在运行吗?", "Run it now?"), true))) {
+    if (await confirm(t("现在设置吗?（会改 tailscaled 的权限配置）", "Set it now? (changes tailscaled's permissions)"), true)) {
       br();
-      await runInteractive(["sudo", cli, "up", "--qr", `--operator=${user}`]);
+      await runInteractive(["sudo", cli, "set", `--operator=${user}`]);
+      br();
+      print(t("接着登录（会打印登录二维码）:", "Now sign in (prints a sign-in QR code):"));
+      await runInteractive([cli, "up", "--qr"]);
       br();
     }
   }
