@@ -11,8 +11,7 @@
  * 历史遗留的 `project` 字段——那里存的是创建时的原始 dir 字符串)。
  */
 
-import { existsSync } from "fs";
-import { mkdir, readFile, writeFile, rename } from "fs/promises";
+import { readJsonState, reportCorrupt, writeJsonStateGuarded } from "./state-file.js";
 
 const HOME = process.env.HOME || "";
 const DIR = `${HOME}/.claude-orchestrator`;
@@ -36,10 +35,20 @@ export interface ProjectsData {
 
 export const PROJECT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
+const isProjectsFile = (d: unknown): boolean =>
+  !!d && typeof d === "object" && !Array.isArray(d) &&
+  ((d as { projects?: unknown }).projects === undefined || Array.isArray((d as { projects?: unknown }).projects));
+
+/** 损坏时按空处理（读者只是暂时看不到项目），但会报一次；writeProjects 拒绝覆盖坏文件。 */
 export async function readProjects(path = PROJECTS_PATH): Promise<ProjectsData> {
-  if (!existsSync(path)) return { projects: [] };
-  try {
-    const raw = JSON.parse(await readFile(path, "utf-8"));
+  const r = await readJsonState(path, isProjectsFile);
+  if (r.status === "missing") return { projects: [] };
+  if (r.status === "corrupt") {
+    reportCorrupt(path, r.error, "projects");
+    return { projects: [] };
+  }
+  {
+    const raw = r.data as { projects?: any[] };
     const list = Array.isArray(raw?.projects) ? raw.projects : [];
     const projects: ProjectDef[] = [];
     for (const p of list) {
@@ -54,19 +63,12 @@ export async function readProjects(path = PROJECTS_PATH): Promise<ProjectsData> 
       });
     }
     return { projects };
-  } catch {
-    return { projects: [] };
   }
 }
 
-let writeSeq = 0;
 export async function writeProjects(data: ProjectsData, path = PROJECTS_PATH): Promise<void> {
-  const dir = path.slice(0, path.lastIndexOf("/")) || DIR;
-  if (!existsSync(dir)) await mkdir(dir, { recursive: true });
-  // 原子写(tmp+rename),与 registry/peers 同款——防并发读者读到半写 JSON
-  const tmp = `${path}.${process.pid}.${writeSeq++}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 2));
-  await rename(tmp, path);
+  // 原子写 + 坏文件拒写：读者把坏文件读成空，写者不能拿这个空去覆盖
+  await writeJsonStateGuarded(path, data, { validate: isProjectsFile });
 }
 
 /** 目录归一:展开 ~、去尾斜杠。不做 realpath(symlink 语义交给调用方的输入) */

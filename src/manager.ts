@@ -191,7 +191,7 @@ async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entries: num
     raw.agents[newKey] = val;
   }
   delete raw.workers;
-  await writeFile(REGISTRY_PATH, JSON.stringify(raw, null, 2));
+  await writeJsonAtomic(REGISTRY_PATH, raw); // 原子写：迁移中途被杀不能留下半截 registry
 
   // 同步重命名 tmux window（可能因为 tmux 不在运行而失败，忽略即可）
   for (const newName of Object.keys(raw.agents)) {
@@ -220,6 +220,7 @@ async function saveRegistry(reg: Registry) {
 
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { notify } from "./lib/notify.js";
+import { writeJsonAtomic } from "./lib/state-file.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。

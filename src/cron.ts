@@ -9,12 +9,13 @@
  * 日志：~/.claude-orchestrator/cron-history.json（最近 100 条执行记录）
  */
 
-import { readFile, writeFile, mkdir, rename } from "fs/promises";
+import { readFile, mkdir } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { runtimeForSessionPath, translateSessionLine } from "./lib/session-source.js";
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { notify } from "./lib/notify.js";
+import { readJsonState, reportCorrupt, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
@@ -189,30 +190,22 @@ export function nextCronTime(expr: string, from: Date = new Date()): Date {
 // 存储
 // ============================================================
 
-/**
- * 原子写：先写同目录临时文件再 rename。直接 writeFile 的话，进程在写到一半时
- * 被 launchd 重启 / 机器断电，就会留下一个被截断的 JSON —— 下次 load 解析失败
- * 返回空数组，所有定时任务静默消失。rename 在同一文件系统内是原子的。
- */
-async function writeFileAtomic(path: string, data: string): Promise<void> {
-  const tmp = `${path}.tmp.${process.pid}`;
-  await writeFile(tmp, data);
-  await rename(tmp, path);
-}
+const isJobsFile = (d: unknown): boolean => Array.isArray(d);
 
+/**
+ * 损坏时返回空（daemon 这一轮什么都不跑），但会响亮地报一次；saveJobs 拒绝覆盖坏文件——
+ * 旧写法把解析失败当成 []，下一次 cron-add 就把全部任务清空。
+ */
 export async function loadJobs(): Promise<CronJob[]> {
-  if (!existsSync(CRON_PATH)) return [];
-  try {
-    const data = JSON.parse(await readFile(CRON_PATH, "utf-8"));
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
+  const r = await readJsonState(CRON_PATH, isJobsFile);
+  if (r.status === "ok") return r.data as CronJob[];
+  if (r.status === "corrupt") reportCorrupt(CRON_PATH, r.error, "cron");
+  return [];
 }
 
 export async function saveJobs(jobs: CronJob[]): Promise<void> {
-  await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFileAtomic(CRON_PATH, JSON.stringify(jobs, null, 2));
+  // 原子写（进程写到一半被 launchd 重启不会留下截断的 JSON）+ 坏文件拒写
+  await writeJsonStateGuarded(CRON_PATH, jobs, { validate: isJobsFile });
 }
 
 async function loadHistory(): Promise<CronHistory[]> {
@@ -226,7 +219,8 @@ async function loadHistory(): Promise<CronHistory[]> {
 }
 
 async function saveHistory(history: CronHistory[]): Promise<void> {
-  await writeFileAtomic(HISTORY_PATH, JSON.stringify(history.slice(-MAX_HISTORY), null, 2));
+  // 历史只是日志：坏了就覆盖，不拦（拦了会让每次任务执行都抛）
+  await writeJsonAtomic(HISTORY_PATH, history.slice(-MAX_HISTORY));
 }
 
 async function appendHistory(entry: CronHistory): Promise<void> {
