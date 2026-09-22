@@ -17,6 +17,7 @@ import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { notify } from "./lib/notify.js";
 import { runManagerProcess, agentsFromList } from "./lib/run-manager.js";
+import { tempAgentCleanupFailure } from "./lib/restart-result.js";
 import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
@@ -370,18 +371,17 @@ async function executeOnTempAgent(
       } catch { /* non-critical */ }
     }
   } finally {
-    // 清理临时 agent（成功、超时、异常都跑一次）
-    // 以前不看结果：清理失败时窗口和频道泄漏，没有任何痕迹
+    // 清理临时 agent（成功、超时、异常都跑一次）。看结果防泄漏；「不存在」= create 失败时已自清，不算失败
     try {
       await Bun.sleep(2000);
-      const k = await runManager("kill", agentName);
-      if (!k?.ok) {
-        console.error(`❌ cron 临时 agent 清理失败: ${agentName} — ${k?.error ?? "未知"}`);
+      const cleanupErr = tempAgentCleanupFailure(await runManager("kill", agentName));
+      if (cleanupErr) {
+        console.error(`❌ cron 临时 agent 清理失败: ${agentName} — ${cleanupErr}`);
         if (reportChannel) {
           await notify({
             source: "cron",
             chatId: reportChannel,
-            text: `⚠️ **定时任务临时 agent 清理失败**: ${job.name}（${agentName}）\n-# ${String(k?.error ?? "未知").slice(0, 200)}\n-# 手动清理：bun src/manager.ts kill ${agentName}`,
+            text: `⚠️ **定时任务临时 agent 清理失败**: ${job.name}（${agentName}）\n-# ${cleanupErr.slice(0, 200)}\n-# 手动清理：bun src/manager.ts kill ${agentName}`,
           });
         }
       }

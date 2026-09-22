@@ -8,7 +8,11 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "../src/lib/restart-result.js";
+import {
+  restartFailureReason, restartFailedNames, parseManagerList, canaryPlan,
+  tempAgentCleanupFailure, restartExceptionResult, readyFailureText, modelPinPlan, modelPinRefusal,
+} from "../src/lib/restart-result.js";
+import { managedFor } from "../src/lib/runtimes/index.js";
 
 describe("restartFailedNames（D7-5：全量重启退出码 0 但部分失败）", () => {
   test("列出失败项的名字；退出码 0 也不能当成功", () => {
@@ -25,8 +29,22 @@ describe("restartFailedNames（D7-5：全量重启退出码 0 但部分失败）
 describe("canaryPlan：list 失败 与 没有候选 必须分开", () => {
   test("三种结果", () => {
     expect(canaryPlan({ ok: false, reason: "boom" })).toEqual({ kind: "list-failed", reason: "boom" });
-    expect(canaryPlan({ ok: true, agents: [{ name: "a", status: "stopped" }] })).toEqual({ kind: "no-candidate" });
-    expect(canaryPlan({ ok: true, agents: [{ name: "a", status: "stopped" }, { name: "b", status: "active" }] })).toEqual({ kind: "canary", name: "b" });
+    expect(canaryPlan({ ok: true, agents: [{ name: "agent-a", status: "stopped" }] })).toEqual({ kind: "no-candidate" });
+    expect(canaryPlan({ ok: true, agents: [{ name: "agent-a", status: "stopped" }, { name: "agent-b", status: "active" }] })).toEqual({ kind: "canary", name: "agent-b" });
+  });
+
+  test("合成的 master 行排在最前也不能被选成金丝雀（window 0 改名 master 后的回归）", () => {
+    const agents = [
+      { name: "master", status: "active" },
+      { name: "agent-master", status: "active" },
+      { name: "agent-qingniao-backend", status: "active" },
+    ];
+    expect(canaryPlan({ ok: true, agents })).toEqual({ kind: "canary", name: "agent-qingniao-backend" });
+  });
+
+  test("非 agent- 前缀的行不当金丝雀；只剩大总管 = 没有候选", () => {
+    const agents = [{ name: "master", status: "active" }, { name: "stray", status: "active" }];
+    expect(canaryPlan({ ok: true, agents })).toEqual({ kind: "no-candidate" });
   });
 });
 
@@ -100,5 +118,74 @@ describe("restartFailureReason", () => {
 
   test("退出码 0 但输出不是 JSON → 按成功处理,不造假失败", () => {
     expect(restartFailureReason({ ok: true, out: "some non-json noise" })).toBeNull();
+  });
+});
+
+describe("tempAgentCleanupFailure（cron 临时 agent 收尾的 kill 结果）", () => {
+  test("kill 成功不告警", () => {
+    expect(tempAgentCleanupFailure({ ok: true })).toBeNull();
+  });
+  test("create 失败后 kill 报「不存在」= 已被 create 清掉，不告警", () => {
+    expect(tempAgentCleanupFailure({ ok: false, error: "agent-cron-daily-report-mfx1a2b 不存在" })).toBeNull();
+  });
+  test("其它失败照常告警；没有结果也算失败", () => {
+    expect(tempAgentCleanupFailure({ ok: false, error: "tmux 挂了" })).toBe("tmux 挂了");
+    expect(tempAgentCleanupFailure({ ok: false, error: 'project "x" 不存在。先 project-add' })).toBe('project "x" 不存在。先 project-add');
+    expect(tempAgentCleanupFailure(null)).toBe("未知");
+  });
+});
+
+describe("restartExceptionResult（单个 agent 抛错不再中止整轮 restart）", () => {
+  test("异常记成该 agent 的失败项，launcher 拿得到名字和原因", () => {
+    const entry = restartExceptionResult("agent-codex-x", new Error("「opus」是 Claude 的模型"));
+    expect(entry).toEqual({ name: "agent-codex-x", ok: false, error: "重启异常: 「opus」是 Claude 的模型" });
+    const out = JSON.stringify({ ok: false, results: [{ name: "agent-a", ok: true }, entry, { name: "agent-b", ok: true }] });
+    expect(restartFailedNames({ ok: true, out })).toEqual(["agent-codex-x"]);
+    expect(restartFailureReason({ ok: true, out })).toContain("opus");
+  });
+  test("非 Error 的抛出值也有可读原因", () => {
+    expect(restartExceptionResult("agent-a", "boom").error).toBe("重启异常: boom");
+    expect(restartExceptionResult("agent-a", new Error("")).error).toBe("重启异常: 未知错误");
+  });
+});
+
+describe("readyFailureText（就绪失败按 reason 出文案）", () => {
+  test("超时仍叫超时", () => {
+    expect(readyFailureText({ ready: false, reason: "timeout" })).toBe("启动超时");
+    expect(readyFailureText({ ready: false, reason: "timeout", detail: "shell 未就绪" })).toBe("启动超时：shell 未就绪");
+  });
+  test("秒退 / 对话框 / 占用不再被说成超时，并带上 detail", () => {
+    expect(readyFailureText({ ready: false, reason: "exited", detail: "Not logged in" })).toBe("进程已退出：Not logged in");
+    const dialog = readyFailureText({ ready: false, reason: "blocked-dialog", detail: "Update available! Run codex update" });
+    expect(dialog).toBe("被启动对话框挡住：Update available! Run codex update");
+    const occ = readyFailureText({ ready: false, reason: "occupied" });
+    expect(occ).toContain("会话被占用");
+    expect(occ).toContain("--fork");
+    expect(occ).not.toContain("超时");
+  });
+});
+
+describe("modelPinPlan / modelPinRefusal（model 命令只钉 in-session 运行时）", () => {
+  const enforcementOf = (rt: string | undefined) => managedFor(rt)?.control.modelEnforcement;
+  test("model all 跳过 Codex / Pi / 未知运行时，也不碰非 active", () => {
+    const plan = modelPinPlan(
+      {
+        "agent-cc": { status: "active" },
+        "agent-cc2": { status: "active", runtime: "claude-code" },
+        "agent-codex": { status: "active", runtime: "codex" },
+        "agent-pi": { status: "active", runtime: "pi" },
+        "agent-odd": { status: "active", runtime: "mystery" },
+        "agent-stopped": { status: "stopped" },
+      },
+      enforcementOf,
+    );
+    expect(plan.pin).toEqual(["agent-cc", "agent-cc2"]);
+    expect(plan.skipped.map((x) => x.name)).toEqual(["agent-codex", "agent-pi", "agent-odd"]);
+    expect(plan.skipped[0].reason).toContain("启动参数");
+    expect(plan.skipped[2].reason).toContain("不能由 Claudestra 启动");
+  });
+  test("单设被拒时的说明", () => {
+    expect(modelPinRefusal("codex", "launch-flag")).toContain('runtime "codex"');
+    expect(modelPinRefusal(undefined, undefined)).toContain('runtime "claude-code"');
   });
 });
