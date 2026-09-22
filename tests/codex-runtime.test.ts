@@ -290,7 +290,9 @@ describe("职责前言（重启 / 收编后第一条投递）", () => {
     const line = JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
     const rec = codexLineToClaudeShape(line)!;
     expect(rec.isMeta).toBe(true);
-    expect(String(rec.message.content).startsWith("<channel ")).toBe(true);
+    // 前言正文里也提到「<channel …>」——剥的必须是 sink 拼上的那个标签，不是前言里的字样
+    expect(pre).toContain("<channel …>");
+    expect(String(rec.message.content)).toBe(`<channel source="claudestra" chat_id="1">\nhi\n</channel>`);
   });
 });
 

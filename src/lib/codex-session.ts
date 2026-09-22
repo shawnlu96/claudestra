@@ -253,9 +253,10 @@ export function codexLineToClaudeShape(line: string, state?: CodexTranslateState
       if (p.role === "user") {
         if (INJECTED_USER_RE.test(text)) return null;
         if (text.trimStart().startsWith(CONTEXT_PREAMBLE_MARKER)) {
-          const at = text.indexOf("<channel ");
+          // 前言正文里自己就提到「<channel …>」，只能认 sink 拼接处（空行 + 带 source 属性的标签头）
+          const at = text.indexOf("\n\n<channel source=");
           if (at < 0) return null;
-          return { type: "user", isMeta: true, timestamp: ts, message: { content: text.slice(at) } };
+          return { type: "user", isMeta: true, timestamp: ts, message: { content: text.slice(at + 2) } };
         }
         if (text.trimStart().startsWith(BOOTSTRAP_MARKER)) {
           if (state) state.bootstrapTurn = true;
