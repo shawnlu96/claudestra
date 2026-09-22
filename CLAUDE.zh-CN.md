@@ -7,7 +7,7 @@
 ## 防腐规则（`bun run check` 会拦，别绕）
 
 1. **每次提交前跑 `bun run check`**（= `tsc --noEmit` + `bun test` + `bun run guard`）。guard 报红就**改代码，不许为了通过去改 `scripts/guard/baseline.json`**。baseline 唯一允许的自动变更是 `bun run guard:update`（只会收紧）。没有行内 ignore 注释。
-2. **放宽必须留痕**：手改 baseline，并在它的 `raised[]` 里写 `{key, from, to, why}`（why ≥10 字），commit message 再写一遍。guard 拿比较基准版本的 baseline 做 diff（CI：`GUARD_BASE` = PR 的 base / push 的 before；本地：与 upstream/`origin/main` 的分叉点），没记录的放宽本地侥幸过了，CI 也会红。
+2. **放宽必须留痕**：手改 baseline，并在它的 `raised[]` 里写 `{key, from, to, why}`（why ≥10 字），commit message 再写一遍。改闸门本身（`scripts/guard/` 下除 `baseline.json` 以外的任何文件——上限、`PUBLIC_ROUTES`、twins、`knip.json`）同样要**新增**一条 `{key: "guard:<路径>", from: 0, to: 0, why}`；`package.json` 的 `check`/`guard` 脚本和 CI 的 Guard 步骤也会被校验。guard 拿比较基准版本做 diff（CI：`GUARD_BASE` = PR 的 base / push 的 before；本地：与 `origin/main` 的分叉点），没记录的改动本地侥幸过了，CI 也会红。CI 是严格模式（`GUARD_STRICT=1`）：依赖（knip、oxc-parser）缺席导致规则被跳过也算失败。`--init` 重建基线只给主会话 / owner 在合并后用，agent 不要跑。
 3. **体量上限**：新文件 ≤400 行（tests ≤600），新函数 ≤100 行，单行 ≤200 字符。baseline 里的大文件只许变小：往 `manager.ts` / `bridge.ts` / `api-routes.ts` / `chat-store.ts` 加功能 = 新建模块写逻辑，大文件里只留一行调用。把超长函数或重复块原样搬出去不算违规（这两项按全仓总量计）。
 4. **写 helper 之前先搜**：`grep -rn "export function" src/lib | grep -i <关键词>`。规范位置：
    - tmux → `src/lib/tmux-helper.ts`（`windowTarget()`、`tmuxRaw`、`tmuxFire`、`tmuxInterrupt`）；禁止手写 `master:${x}` 和 `Bun.spawn(["tmux", …])`。已知例外：`bridge/web-terminal.ts` 的 PTY 参数、`lib/doctor.ts` 的 `tmux -V` 探测、Pi 扩展里的 `execFile`、`setup.ts`。
@@ -17,7 +17,7 @@
    - bridge/cron 调 `manager.ts` → `runManager`（`src/lib/manager-client.ts` 落地后用它，否则 `src/bridge/management.ts`），禁止自己 spawn `bun src/manager.ts`；Bridge ws 请求 → `src/lib/bridge-client.ts`。
 5. **依赖方向**：`src/lib` 只 import `src/lib`；`src/bridge/*` 不 import 入口文件（`src/*.ts`），也不 import 枢纽（`api-routes` / `management` / `web-terminal` / `web-gateway`）；watcher 之间不互相 import——共用纯函数下沉到 `src/lib`，运行时状态查询用注入。`web/` 与 `src/` 互不 import，确需两边各一份的登记进 `scripts/guard/config.ts` 的 twins。
 6. **不许复制 6 行以上的逻辑**。需要「和 X 对齐」就抽函数去调用，不要写一句「与 X 保持一致」的注释。
-7. **不许无声吞错**：`catch {}` / `.catch(() => {})` 里必须写一句为什么丢了也没事（`/* ignore */`、`/* 同上 */`、`/* non-critical */` 这类占位按吞错计）；能打日志就打日志。
+7. **不许无声吞错**：`catch {}` / `.catch(() => {})` / `.catch(() => null)` 里必须写一句为什么丢了也没事（`/* ignore it */`、`/* 同上 */`、`/* non-critical */` 这类占位按吞错计）；能打日志就打日志。
 8. **注释写「现在为什么这样、改了会坏什么」**，最多 6 行，不加 `v2.x+:` 前缀。版本演变、事故经过、谁哪天报的、原话引用都写进 commit message；注释里最多留一句「见 tests/x.test.ts」或「git log -S <符号>」。
 9. **本文件是地图不是 changelog**：功能细节写到 `docs/<领域>/<主题>.md`，这里留一行指针（`CLAUDE.md` 的字节数在 baseline 里）。
 

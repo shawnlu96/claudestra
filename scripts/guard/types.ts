@@ -9,6 +9,8 @@ export interface RuleResult {
   skipped?: string;
   /** 给人看的细节（按文件分布等），失败时打印。 */
   detail?: string[];
+  /** 跨文件规则（dup）的按文件计数，失败时用来指出改过的文件各占多少。 */
+  perFile?: Record<string, number>;
 }
 
 export interface Raised {

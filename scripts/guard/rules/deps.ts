@@ -1,9 +1,10 @@
 // 分层依赖 + 运行时 import 环。已知违规边进 baseline（每条一个 key），出现新边就失败。
-// 扫静态 import / export-from / 动态 import() / require()；type-only 边不参与分层与环。
+// 扫静态 import / export-from / 动态 import()（含无插值的模板字面量）/ require()；type-only 边不参与分层与环。
+// 在遮罩了字符串和注释的文本上匹配（字符串里的 import 不算），路径按下标回原文取。
 import { dirname, join, normalize } from "path";
 import { BRIDGE_HUBS, WATCHERS } from "../config.ts";
 import type { Counts, Files, RuleResult } from "../types.ts";
-import { stripComments } from "./strip.ts";
+import { maskStrings } from "./lex.ts";
 
 export interface Edge {
   from: string;
@@ -12,7 +13,7 @@ export interface Edge {
 }
 
 const IMPORT_RE =
-  /(?:^|[^.\w])(?:import|export)\s+(type\s+)?(?:[^'"`;]*?\s+from\s+)?["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)|require\(\s*["']([^"']+)["']\s*\)/g;
+  /(?:^|[^.\w$])(?:import|export)\s+(type\s+)?(?:[^'"`;]*?\s+from\s+)?["'](_+)["']|(?:import|require)\(\s*(["'`])(_+)\3\s*\)/dg;
 
 function resolveSpec(files: Files, from: string, spec: string): string | null {
   let b: string | null = null;
@@ -27,8 +28,10 @@ export function collectEdges(files: Files): Edge[] {
   const edges: Edge[] = [];
   for (const [f, src] of files) {
     if (!/\.(ts|tsx|mjs)$/.test(f)) continue;
-    for (const m of stripComments(src).matchAll(IMPORT_RE)) {
-      const to = resolveSpec(files, f, m[2] ?? m[3] ?? m[4]);
+    for (const m of maskStrings(src, true).matchAll(IMPORT_RE)) {
+      const at = m.indices?.[2] ?? m.indices?.[4];
+      if (!at) continue;
+      const to = resolveSpec(files, f, src.slice(at[0], at[1]));
       if (to) edges.push({ from: f, to, typeOnly: Boolean(m[1]) });
     }
   }

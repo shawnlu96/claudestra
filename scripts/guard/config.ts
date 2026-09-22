@@ -1,5 +1,6 @@
 // guard 的规则数据：上限、分层表、patterns、twins。规则逻辑在 rules/，这里只放数字和清单。
-// 改这里等于改闸门本身：commit message 里写清楚为什么（guard 会对此打警告）。
+// 改这里（以及 scripts/guard/ 下任何非 baseline 文件）等于改闸门本身：baseline 的 raised[] 必须新增
+// {key:"guard:scripts/guard/config.ts", from:0, to:0, why}，否则 guard 失败（见 self.ts）。
 
 /** 默认上限：代码文件 / tests / 数据文件（纯表格型，行多但无逻辑）。 */
 const CODE_CAP = 400;
@@ -9,7 +10,7 @@ const DATA_FILES: RegExp[] = [/^web\/lib\/i18n-dict\.ts$/, /^src\/bridge\/slash-
 
 /** 单行超过这么多字符（JS 字符串长度）算一行「压行」。 */
 export const LONG_LINE = 200;
-/** 函数超过这么多行，超出部分计入 fn:overflow；超长函数的签名行计入 fnLong。 */
+/** 函数超过这么多行，超出部分计入 fn:overflow；超长函数按名字计入 fnLong。 */
 export const FN_CAP = 100;
 /** 重复检测窗口：连续这么多条有效行完全相同算重复。 */
 export const DUP_WINDOW = 6;
@@ -17,7 +18,7 @@ export const DUP_WINDOW = 6;
 export const COMMENT_BLOCK_MIN = 8;
 
 /** 按字节计的文档（每个会话都会加载，只许变小）。 */
-export const DOC_FILES = ["CLAUDE.md", "CLAUDE.zh-CN.md", "web/CLAUDE.md"];
+export const DOC_FILES = ["CLAUDE.md", "CLAUDE.zh-CN.md", "web/CLAUDE.md", "web/CLAUDE.en.md"];
 
 /** 扫描范围：git ls-files 这些目录下的 ts/tsx/mjs。 */
 export const SCAN_DIRS = ["src", "web", "tests", "scripts"];
@@ -89,12 +90,20 @@ export const PATTERNS: PatternDef[] = [
   },
 ];
 
-/** catch 块里的占位注释：写了等于没写，按吞错计。比较前先小写、去标点和空白。 */
-export const PLACEHOLDER_COMMENTS = new Set([
-  "noncritical", "ignore", "ignored", "noop", "nop", "besteffort", "fallback", "skip", "swallow",
-  "ok", "fine", "同上", "忽略", "无所谓", "静默", "吞掉", "不关心",
+/**
+ * catch 注释的「占位词」：去掉这些词之后剩下的字不够 CATCH_COMMENT_MIN 就按吞错计。
+ * 英文按单词比较（前缀词表匹配 ignore/ignored/skipping…，整词表匹配 ok/fine…，虚词直接丢），
+ * 中文按子串去掉。所以 `ignore it`、`ignore errors`、`best-effort`、`忽略错误` 都是吞错。
+ */
+export const PLACEHOLDER_PREFIXES = ["ignor", "skip", "noop", "swallow", "silen", "intentional", "deliberate"];
+export const PLACEHOLDER_WORDS = new Set([
+  "nop", "fallback", "best", "effort", "besteffort", "noncritical", "non", "critical", "ok", "okay", "fine",
+  "expected", "harmless", "safe", "whatever", "todo",
+  "it", "this", "that", "the", "a", "an", "error", "errors", "err", "e", "ex", "exception", "exceptions",
+  "here", "on", "purpose", "any", "all", "just",
 ]);
-/** catch 注释去掉标点和空白后至少这么多字（CJK 一个字算 1）。 */
+export const PLACEHOLDER_CJK = ["同上", "忽略", "无所谓", "静默", "吞掉", "不关心"];
+/** catch 注释去掉占位词、标点和空白后至少这么多字（CJK 一个字算 1）。 */
 export const CATCH_COMMENT_MIN = 6;
 
 /** 每类违规的改法（CLI 输出里每条违规附一行）。 */
@@ -103,7 +112,7 @@ export const HINTS: Record<string, string> = {
   doc: "功能细节写进 docs/，这里只留一行指针",
   longLine: "别压行：拆成多行（单行 ≤200 字符）",
   fn: "拆函数；把超长函数原样搬出大文件不算违规（按全仓总量计）",
-  fnLong: "新写的（或改了签名行的）函数超过 100 行：拆开",
+  fnLong: "新写的函数超过 100 行（按函数名计，改参数不算新增）：拆开",
   dup: "抽成函数复用，别复制；看具体克隆：npx jscpd@5.3.1 src web -f typescript,tsx",
   comments: "注释 ≤6 行、写现行约束；演变史/事故/原话进 commit message",
   catch: "吞错要写一句为什么丢了也没事（≥6 字，占位词不算），能打日志就打日志",

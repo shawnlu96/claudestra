@@ -1,5 +1,6 @@
 // scripts/guard 的规则与棘轮语义：全部用内存 fixture（Map<path, text>），不碰磁盘。
 import { describe, expect, test } from "bun:test";
+import { explainChanged } from "../scripts/guard/explain.ts";
 import { checkRaised, compare, initLimits, loosenings, parseBaseline, tighten } from "../scripts/guard/ratchet.ts";
 import { countCommentBlocks, measureComments } from "../scripts/guard/rules/comments.ts";
 import { parseKnip } from "../scripts/guard/rules/dead.ts";
@@ -8,7 +9,9 @@ import { measureDup } from "../scripts/guard/rules/dup.ts";
 import { measureFn, type SpanParser } from "../scripts/guard/rules/fn.ts";
 import { commentExplains, measurePatterns } from "../scripts/guard/rules/patterns.ts";
 import { lineCount, measureSize } from "../scripts/guard/rules/size.ts";
+import { maskStrings } from "../scripts/guard/rules/lex.ts";
 import { measureTwins } from "../scripts/guard/rules/twins.ts";
+import { checkSelfRaised, checkWiring, guardSelfFiles, isStrict } from "../scripts/guard/self.ts";
 import type { Baseline } from "../scripts/guard/types.ts";
 
 const files = (o: Record<string, string>) => new Map(Object.entries(o));
@@ -48,24 +51,32 @@ describe("size", () => {
 });
 
 describe("fn", () => {
-  // 假解析器：每个 `function` 行开始一个函数，到下一个 `}` 顶格行结束
+  // 假解析器：每个 `function` 行开始一个函数，到下一个 `}` 顶格行结束；`function (` 算匿名
   const fake: SpanParser = (_f, src) => {
     const ls = src.split("\n");
-    const out: { start: number; end: number }[] = [];
+    const out: { start: number; end: number; name: string | null }[] = [];
     ls.forEach((l, i) => {
       if (!l.startsWith("function")) return;
       const end = ls.findIndex((x, j) => j > i && x === "}");
-      out.push({ start: i + 1, end: end + 1 });
+      out.push({ start: i + 1, end: end + 1, name: l.match(/^function (\w+)/)?.[1] ?? null });
     });
     return out;
   };
   const longFn = (name: string, body: number) => `function ${name}() {\n${lines(body, "  x();")}}\n`;
 
-  test("超出量按全仓累加，签名行进 fnLong", () => {
+  test("超出量按全仓累加，超长函数按名字进 fnLong；匿名回退到签名行", () => {
     const r = measureFn(files({ "src/a.ts": longFn("big", 148), "src/b.ts": longFn("small", 10) }), fake);
     expect(r.counts["fn:overflow"]).toBe(50);
-    expect(r.counts["fnLong:function big() {"]).toBe(1);
-    expect(r.counts["fnLong:function small() {"]).toBeUndefined();
+    expect(r.counts["fnLong:big"]).toBe(1);
+    expect(r.counts["fnLong:small"]).toBeUndefined();
+    const anon = measureFn(files({ "src/c.ts": `function () {\n${lines(120, "  x();")}}\n` }), fake).counts;
+    expect(anon["fnLong:<anon> function () {"]).toBe(1);
+  });
+
+  test("改签名行（加参数、换返回类型）不算新增超长函数", () => {
+    const before = measureFn(files({ "src/a.ts": longFn("big", 200) }), fake).counts;
+    const changed = longFn("big", 200).replace("big() {", "big(extra: number): Promise<void> {");
+    expect(compare(before, measureFn(files({ "src/a.ts": changed }), fake).counts, none).failures).toEqual([]);
   });
 
   test("把超长函数原样搬进新文件：总量与签名都不变", () => {
@@ -77,7 +88,7 @@ describe("fn", () => {
   test("新写一个超长函数：签名不在 baseline → 失败", () => {
     const base = measureFn(files({ "src/a.ts": longFn("old", 300) }), fake).counts;
     const cur = measureFn(files({ "src/a.ts": longFn("old", 150), "src/b.ts": longFn("fresh", 120) }), fake).counts;
-    expect(compare(base, cur, none).failures.map((f) => f.key)).toEqual(["fnLong:function fresh() {"]);
+    expect(compare(base, cur, none).failures.map((f) => f.key)).toEqual(["fnLong:fresh"]);
   });
 
   test("tests/ 不计函数长度", () => {
@@ -134,6 +145,22 @@ describe("deps", () => {
       "deps:tests-web-pure: tests/w.test.ts -> web/lib/ui.ts",
       "deps:web-src-split: web/lib/a.ts -> src/lib/x.ts",
     ]);
+  });
+
+  test("字符串 / 模板字面量里的 import 不算；无插值模板的动态 import 算", () => {
+    const r = measureDeps(
+      files({
+        "src/lib/a.ts": [
+          'const fixture = `import { x } from "../bridge/b.js";`;',
+          "const s = 'import { y } from \"../bridge/b.js\"';",
+          "const k = await import(`../bridge/k.js`);",
+          "const dyn = await import(`../bridge/${name}.js`);",
+        ].join("\n"),
+        "src/bridge/b.ts": "export const x = 1;",
+        "src/bridge/k.ts": "export const k = 1;",
+      }),
+    );
+    expect(Object.keys(r.counts)).toEqual(["deps:lib-only-lib: src/lib/a.ts -> src/bridge/k.ts"]);
   });
 
   test("运行时环被找出来；注释里的 import 不算", () => {
@@ -197,12 +224,34 @@ describe("patterns", () => {
     expect(r.counts["catch:silent-promise"]).toBe(2);
   });
 
-  test("commentExplains：长度与占位词", () => {
-    expect(commentExplains("/* ignore */")).toBe(false);
-    expect(commentExplains("// best-effort")).toBe(false);
-    expect(commentExplains("// 忽略")).toBe(false);
+  test("commentExplains：去掉占位词后的长度", () => {
+    for (const c of ["/* ignore */", "// best-effort", "// 忽略", "/* ignore it */", "/* ignore errors */", "// 忽略错误", "// skip"]) {
+      expect(commentExplains(c)).toBe(false);
+    }
     expect(commentExplains("// 文件不存在就用默认值")).toBe(true);
     expect(commentExplains("// socket closed; nothing to flush")).toBe(true);
+    expect(commentExplains("// ignored: the socket is already closed")).toBe(true);
+  });
+
+  test("绕过写法：无副作用语句、async / function / 常量返回值 / noop 都算吞错；字符串里的不算", () => {
+    const src = [
+      "try { a(); } catch { void 0; }",
+      "try { a(); } catch (e) { e; }",
+      "try { a(); } catch { return; }",
+      'const s = "try {} catch {}";',
+      "p.catch(() => {;});",
+      "p.catch(async () => {});",
+      "p.catch(function () {});",
+      "p.catch(() => 0);",
+      "p.catch(() => null);",
+      "p.catch(noop);",
+      "p.catch(logError);",
+      "p.catch(() => []); // 目录不存在时按空列表处理即可",
+      "p.catch((e: unknown) => { log(e); });",
+    ].join("\n");
+    const r = measurePatterns(files({ "src/x.ts": src }));
+    expect(r.counts["catch:empty-block"]).toBe(2);
+    expect(r.counts["catch:silent-promise"]).toBe(6);
   });
 
   test("web/app/api 路由不调 isAuthed 且不在公开清单 → 违规", () => {
@@ -316,5 +365,65 @@ describe("棘轮语义", () => {
     expect(() => parseBaseline(`{"version":1,"limits":{"a":"x"},"raised":[]}`)).toThrow();
     expect(() => parseBaseline(`{"limits":{}}`)).toThrow();
     expect(parseBaseline(`{"version":1,"limits":{"a":1},"raised":[]}`).limits.a).toBe(1);
+  });
+});
+
+describe("lex（字符串遮罩）", () => {
+  test("字符串 / 模板 / 正则内容换成 _，长度和换行不变，注释与 ${} 里的代码保留", () => {
+    const src = 'a("x"); // "c"\nb(`t${f("y")}u`);\nconst r = /["\']/g; x = a / b / c;';
+    const m = maskStrings(src);
+    expect(m.length).toBe(src.length);
+    expect(m).toBe('a("_"); // "c"\nb(`_${f("_")}_`);\nconst r = /____/g; x = a / b / c;');
+    expect(maskStrings("a; // x\n/* y */b", true)).toBe(`a; ${" ".repeat(4)}\n${" ".repeat(7)}b`);
+  });
+});
+
+describe("闸门自身（self）", () => {
+  test("改 scripts/guard/**（baseline.json 除外）必须有新的 guard:<path> 记录，旧记录不能复用", () => {
+    const changed = guardSelfFiles(["scripts/guard/config.ts", "scripts/guard/baseline.json", "src/a.ts", "scripts/guard/knip.json"]);
+    expect(changed).toEqual(["scripts/guard/config.ts", "scripts/guard/knip.json"]);
+    expect(checkSelfRaised(changed, [], [])).toEqual(changed);
+    const old = { key: "guard:scripts/guard/config.ts", from: 0, to: 0, why: "上一次放宽 PUBLIC_ROUTES 的理由" };
+    expect(checkSelfRaised(changed, [old], [old])).toEqual(changed);
+    const fresh = [
+      old,
+      { key: "guard:scripts/guard/config.ts", from: 0, to: 0, why: "登记新的公开路由 /api/health，无需鉴权" },
+      { key: "guard:scripts/guard/knip.json", from: 0, to: 0, why: "短" },
+    ];
+    expect(checkSelfRaised(changed, [old], fresh)).toEqual(["scripts/guard/knip.json"]);
+  });
+
+  test("package.json / ci.yml 的接线被删掉就失败", () => {
+    const pkg = (check: string, guard = "bun scripts/guard/index.ts") => JSON.stringify({ scripts: { check, guard } });
+    const ci = 'steps:\n  - name: Guard\n    run: bun run guard\n    env:\n      GUARD_STRICT: "1"\n';
+    expect(checkWiring(pkg("bun run typecheck && bun test && bun run guard"), ci)).toEqual([]);
+    expect(checkWiring(pkg("bun run typecheck && bun test"), ci)).toHaveLength(1);
+    expect(checkWiring(pkg("bun test && bun run guard || true"), ci)).toHaveLength(1);
+    expect(checkWiring(pkg("bun run guard", "bun scripts/guard/index.ts --only size"), ci)).toHaveLength(1);
+    expect(checkWiring(pkg("bun run guard"), ci.replace('GUARD_STRICT: "1"', ""))).toHaveLength(1);
+    expect(checkWiring(pkg("bun run guard"), ci.replace("bun run guard", "bun run guard --only size"))).toHaveLength(1);
+    expect(checkWiring(pkg("bun run guard"), null)).toHaveLength(1);
+  });
+
+  test("严格模式：GUARD_STRICT=1 或 CI=true", () => {
+    expect(isStrict({ GUARD_STRICT: "1" })).toBe(true);
+    expect(isStrict({ CI: "true" })).toBe(true);
+    expect(isStrict({})).toBe(false);
+  });
+});
+
+describe("explain（失败时指出新违规在哪个文件）", () => {
+  test("只列比基准版本变多、且属于失败规则的项", () => {
+    const base = "try { a(); } catch { /* 进程已退出时 kill 必然失败 */ }\n";
+    const out = explainChanged(
+      [
+        { file: "src/old.ts", cur: `${base}try { b(); } catch {}\n`, base },
+        { file: "src/new.ts", cur: lines(410), base: null },
+        { file: "src/same.ts", cur: base, base },
+      ],
+      new Set(["catch", "size"]),
+      null,
+    );
+    expect(out).toEqual(["src/old.ts: catch:empty-block 0 → 1", "src/new.ts: size 新文件 → 410"]);
   });
 });

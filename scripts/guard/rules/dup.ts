@@ -64,5 +64,6 @@ export function measureDup(files: Files, win = DUP_WINDOW): RuleResult {
   }
   const per = [...marked].map(([f, s]) => [f, s.size] as const).sort((a, b) => b[1] - a[1]);
   const total = per.reduce((a, [, n]) => a + n, 0);
-  return { counts: { "dup:total": total }, detail: per.slice(0, 8).map(([f, n]) => `dup ${f}: ${n}`) };
+  const detail = per.slice(0, 8).map(([f, n]) => `dup ${f}: ${n}`);
+  return { counts: { "dup:total": total }, detail, perFile: Object.fromEntries(per) };
 }

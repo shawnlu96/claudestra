@@ -31,12 +31,16 @@ jobs:
       - name: Unit tests
         run: bun test
 
-      # 防腐棘轮（scripts/guard）：超 baseline 即红；baseline 变大必须在 raised[] 写理由。
-      # 比较基准：PR 取 base.sha，push 取推送前的 before（新分支首推是全 0，guard 自己回退到分叉点）。
+      # 防腐棘轮（scripts/guard）：超 baseline 即红；baseline 变大、改闸门本身都必须在 raised[] 写理由。
+      # 比较基准：PR 取 base.sha，push 取推送前的 before（新分支首推是全 0 / force push 取不到时，
+      # guard 回退到与 origin/main 的分叉点，再不行用 HEAD~1）。
+      # GUARD_STRICT：CI 是最后一道闸，knip / oxc-parser 缺席导致规则被跳过也算失败（本地才降级）。
+      # 这一步和 GUARD_STRICT 由 guard 自己校验（scripts/guard/self.ts），删掉或改名会让 guard 失败。
       - name: Guard (ratchets)
         run: bun run guard
         env:
           GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GUARD_STRICT: "1"
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
       - name: Build entrypoints
