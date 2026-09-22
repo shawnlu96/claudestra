@@ -18,6 +18,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { agentsFromList, createFailureLatch } from "../lib/run-manager.js";
 import { getJsonlMtime } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emitEvent } from "./event-bus.js";
@@ -300,11 +301,20 @@ export function startWedgeWatcher(
   // v2.7+ 链路哨兵：bridge 注入「该频道是否有 channel-server 在线」的查询
   isChannelConnected?: (channelId: string) => boolean,
 ) {
+  // manager list 失败 ≠ 没有 agent：以前 `list.agents || []` + catch 吞掉，manager 一坏
+  // 卡死检测和链路哨兵就一起静默失明。现在按状态切换报一次、恢复时再报一次。
+  const listLatch = createFailureLatch("wedge-watcher manager list");
   const tick = async () => {
     try {
       const allowedUserIds = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
-      const list = await runManager("list");
-      const agents: any[] = list.agents || [];
+      let agents: any[];
+      try {
+        agents = agentsFromList(await runManager("list"));
+        listLatch.ok();
+      } catch (e) {
+        listLatch.fail(e);
+        return;
+      }
       for (const agent of agents) {
         if (agent.status !== "active" || !agent.channelId) continue;
         await checkAgent(

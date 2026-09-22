@@ -15,6 +15,7 @@ import { runtimeForSessionPath, translateSessionLine } from "./lib/session-sourc
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { notify } from "./lib/notify.js";
+import { runManagerProcess, agentsFromList } from "./lib/run-manager.js";
 import { readJsonState, reportCorrupt, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
@@ -242,19 +243,17 @@ async function updateHistory(id: string, update: Partial<CronHistory>): Promise<
 // Manager 调用
 // ============================================================
 
+// create 要等 Claude Code 起来（manager 自己的启动超时 + 清理），给足；其余短。
+// 以前这里没有超时：manager 或它拉起的 tmux 挂住，这个任务就永远 running。
+const CRON_MANAGER_TIMEOUT_MS: Record<string, number> = { list: 20_000, create: 300_000 };
+
 async function runManager(...args: string[]): Promise<any> {
-  const proc = Bun.spawn([BUN_PATH, "run", MANAGER_PATH, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
+  return runManagerProcess(args, {
+    bunPath: BUN_PATH,
+    managerPath: MANAGER_PATH,
     env: { ...process.env, PATH: `${HOME}/.bun/bin:${process.env.PATH}` },
+    timeoutMs: CRON_MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? 120_000,
   });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  try {
-    return JSON.parse(out.trim());
-  } catch {
-    return { ok: false, error: out.trim() || "manager 执行失败" };
-  }
 }
 
 /**
@@ -375,10 +374,23 @@ async function executeOnTempAgent(
     }
   } finally {
     // 清理临时 agent（成功、超时、异常都跑一次）
+    // 以前不看结果：清理失败时窗口和频道泄漏，没有任何痕迹
     try {
       await Bun.sleep(2000);
-      await runManager("kill", agentName);
-    } catch { /* non-critical */ }
+      const k = await runManager("kill", agentName);
+      if (!k?.ok) {
+        console.error(`❌ cron 临时 agent 清理失败: ${agentName} — ${k?.error ?? "未知"}`);
+        if (reportChannel) {
+          await notify({
+            source: "cron",
+            chatId: reportChannel,
+            text: `⚠️ **定时任务临时 agent 清理失败**: ${job.name}（${agentName}）\n-# ${String(k?.error ?? "未知").slice(0, 200)}\n-# 手动清理：bun src/manager.ts kill ${agentName}`,
+          });
+        }
+      }
+    } catch (e) {
+      console.error(`❌ cron 临时 agent 清理异常: ${agentName} — ${(e as Error).message}`);
+    }
   }
 }
 
@@ -464,10 +476,11 @@ async function executeOnExistingAgent(
 /** 从 registry 里根据 tmux 名（含 "agent-" 前缀）查该 agent 的 Discord channelId。 */
 async function lookupAgentChannelId(tmuxName: string): Promise<string | undefined> {
   try {
-    const r = await runManager("list");
-    const agent = (r.agents || []).find((a: any) => a.name === tmuxName);
+    const agent = agentsFromList(await runManager("list")).find((a: any) => a.name === tmuxName);
     return agent?.channelId;
-  } catch {
+  } catch (e) {
+    // manager 坏了 ≠ agent 没有频道：说清楚，别让通知静默少一半
+    console.error(`⚠️ cron 查 ${tmuxName} 的频道失败: ${(e as Error).message}`);
     return undefined;
   }
 }

@@ -16,6 +16,7 @@ import {
 } from "./sessions-inventory.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent } from "./event-bus.js";
+import { runManagerProcess } from "../lib/run-manager.js";
 
 /**
  * 各 manager 子命令的超时上限（毫秒）。只读类命令必须短 —— 它们坐在热轮询路径上
@@ -32,31 +33,8 @@ const MANAGER_TIMEOUT_MS: Record<string, number> = {
 const MANAGER_TIMEOUT_DEFAULT_MS = 120_000; // create / resume / restart 要等 CC 启动
 
 export async function runManager(...args: string[]): Promise<any> {
-  const proc = Bun.spawn(["bun", "run", MANAGER_PATH, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: ENV_WITH_BUN,
-  });
   const budget = MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? MANAGER_TIMEOUT_DEFAULT_MS;
-  let timedOut = false;
-  const killer = setTimeout(() => {
-    timedOut = true;
-    try { proc.kill(9); } catch { /* 已退出 */ }
-  }, budget);
-  try {
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    if (timedOut) {
-      return { ok: false, error: `manager ${args[0] ?? ""} 超时（>${budget / 1000}s）已强杀` };
-    }
-    try {
-      return JSON.parse(out.trim());
-    } catch {
-      return { ok: false, error: out.trim() || "manager 执行失败" };
-    }
-  } finally {
-    clearTimeout(killer);
-  }
+  return runManagerProcess(args, { bunPath: "bun", managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget });
 }
 
 export async function buildStatusPanel(): Promise<{
