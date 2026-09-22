@@ -213,10 +213,43 @@ export function preferStablePath(p: string, resolve: (x: string) => string, exis
   return exists(p) ? p : null;
 }
 
+/** 常见的 node 安装位置（版本管理器的 shim 不在这里，靠上面两路兜） */
+const WELL_KNOWN_NODE = [
+  "/opt/homebrew/bin/node",
+  "/usr/local/bin/node",
+  "/usr/bin/node",
+];
+
+/**
+ * 找一个**launchd 也能执行到**的 node。
+ *
+ * 三路依次试，因为 2026-09-22 的试装现场证明单靠 `/usr/bin/which` 会落空：
+ * 那台机器的 `web.err` 刷满 `env: node: No such file or directory`，而 plist 里
+ * argv0 是 `.bin/next` 那个 shim —— 说明 install-cli 当时 `which node` 返回了 null，
+ * 于是退回 shebang 形式，launchd 的固定 PATH 里又没有 node。
+ *   1. `/usr/bin/which`：继承当前进程的 PATH，最快；
+ *   2. **登录 shell**：`sh -lc 'command -v node'` —— nvm / fnm / volta 的初始化写在
+ *      ~/.zshrc / ~/.zprofile 里，只有过一遍登录 shell 才看得到（与
+ *      lib/claude-binary.ts 解析 claude 同一口径）；
+ *   3. 几个常见绝对路径兜底。
+ * 三路都没有就返回 null —— 调用方据此**不装**这个 daemon，而不是装一个必然 127 的。
+ */
 function stableBinPath(cmd: string): string | null {
-  const p = which(cmd);
-  if (!p) return null;
-  return preferStablePath(p, realpathSync, existsSync);
+  const candidates: string[] = [];
+  const direct = which(cmd);
+  if (direct) candidates.push(direct);
+  try {
+    const r = spawnSync("/bin/sh", ["-lc", `command -v ${cmd}`], { encoding: "utf8", timeout: 10_000 });
+    const viaLogin = (r.stdout || "").trim().split("\n").pop()?.trim();
+    if (viaLogin && viaLogin.startsWith("/")) candidates.push(viaLogin);
+  } catch { /* 登录 shell 起不来就跳过这一路 */ }
+  if (cmd === "node") candidates.push(...WELL_KNOWN_NODE);
+
+  for (const c of candidates) {
+    const picked = preferStablePath(c, realpathSync, existsSync);
+    if (picked) return picked;
+  }
+  return null;
 }
 
 function getUid(): string {
@@ -824,13 +857,21 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   });
   const webPort = webPortFromStartScript(webPkgStart);
   const nodePath = stableBinPath("node");
-  const extraDaemons = webReady.ready ? [webDaemonSpec(repoRoot, webPort, nodePath)] : [];
+  // ⚠ 找不到 node 就**不装**。退回 next 的 shebang 形式等于装一个必然失败的服务：
+  //   launchd 的 PATH 是固定那几条，`env node` 找不到就 exit 127，而 KeepAlive 会
+  //   安静地一直重试 —— 用户看到的是「命令一路 ok，网页打不开」，日志里只有
+  //   `env: node: No such file or directory`（2026-09-22 试装现场就是这一幕）。
+  //   宁可不装并把原因说清楚。
+  const webInstallable = webReady.ready && !!nodePath;
+  const extraDaemons = webInstallable ? [webDaemonSpec(repoRoot, webPort, nodePath)] : [];
   if (webReady.ready && !nodePath) {
-    warnings.push("PATH 里找不到 node —— web daemon 只能靠 next 的 shebang 解析它，nvm/fnm 装的 node 会起不来");
+    warnings.push("找不到可执行的 node（which / 登录 shell / 常见路径都试过）—— web 服务没装。装好 node 后重跑 install-cli");
   }
-  result.webDaemon = webReady.ready
+  result.webDaemon = webInstallable
     ? { installed: true, port: webPort, url: `http://localhost:${webPort}` }
-    : { installed: false, reason: webReady.reason };
+    : { installed: false, reason: webReady.ready
+        ? "找不到可执行的 node（which / 登录 shell / 常见路径都试过）"
+        : webReady.reason };
 
   let plists: { label: string; plistPath: string; kept?: boolean }[];
   try { plists = await writeDaemonPlists(repoRoot, bunPath, extraDaemons); }
