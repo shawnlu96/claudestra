@@ -10,6 +10,7 @@ import {
   parseBootstrapThreadId,
   probeCodexQueue,
   resolveCodexBinary,
+  nativeCodexCandidates,
   tomlString,
   type CodexLaunchSpec,
 } from "../src/lib/codex-launch.js";
@@ -159,16 +160,39 @@ describe("exec 引导", () => {
   });
 });
 
-test("resolveCodexBinary：CODEX_TUI_BIN 覆盖优先，否则登录 shell 解析 codex", async () => {
-  expect(await resolveCodexBinary(async () => ({ ok: false, out: "", err: "" }), { CODEX_TUI_BIN: "/x/codex" }))
-    .toEqual({ link: "/x/codex", real: "/x/codex" });
-  let seen: string[] = [];
-  const r = await resolveCodexBinary(async (cmd) => {
-    seen = cmd;
-    return { ok: true, out: "/opt/homebrew/bin/codex\n/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js\n", err: "" };
-  }, {});
-  expect(r?.link).toBe("/opt/homebrew/bin/codex");
-  expect(seen[2]).toContain("command -v codex");
+describe("resolveCodexBinary", () => {
+  const WRAPPER = "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js";
+  const NATIVE = "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex";
+  const login = (real: string) => async (cmd: string[]) => {
+    expect(cmd[2]).toContain("command -v codex");
+    return { ok: true, out: `/opt/homebrew/bin/codex\n${real}\n`, err: "" };
+  };
+
+  test("CODEX_TUI_BIN 覆盖优先", async () => {
+    expect(await resolveCodexBinary(async () => ({ ok: false, out: "", err: "" }), { CODEX_TUI_BIN: "/x/codex" }))
+      .toEqual({ link: "/x/codex", real: "/x/codex" });
+  });
+
+  test("npm 壳换成原生二进制（壳不转发 SIGKILL，原生进程会变成 pane 的孙进程）", async () => {
+    const r = await resolveCodexBinary(login(WRAPPER), {}, (p) => p === NATIVE);
+    expect(r).toEqual({ link: "/opt/homebrew/bin/codex", real: NATIVE });
+  });
+
+  test("找不到原生的退回壳；非 npm 安装原样返回", async () => {
+    expect((await resolveCodexBinary(login(WRAPPER), {}, () => false))?.real).toBe(WRAPPER);
+    expect((await resolveCodexBinary(login("/Applications/Codex/codex"), {}, () => true))?.real).toBe("/Applications/Codex/codex");
+  });
+
+  test("nativeCodexCandidates：与壳里 findCodexExecutable 同一布局", () => {
+    expect(nativeCodexCandidates(WRAPPER, "darwin", "arm64")).toEqual([
+      NATIVE,
+      "/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/bin/codex",
+    ]);
+    expect(nativeCodexCandidates("/usr/local/lib/node_modules/@openai/codex/bin/codex.js", "linux", "x64")[0])
+      .toBe("/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex");
+    expect(nativeCodexCandidates(WRAPPER, "sunos", "x64")).toEqual([]);
+    expect(nativeCodexCandidates("/opt/homebrew/bin/codex")).toEqual([]);
+  });
 });
 
 test("probeCodexQueue：按绝对路径跑 queue --help，exit 0 才算可用", async () => {

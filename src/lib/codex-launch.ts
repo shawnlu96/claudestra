@@ -17,7 +17,12 @@
  *   hooks.Stop（与 Claude Code 同构），打断走 hooks.Interrupt（打断时 Codex 不发 Stop）。
  * - 启动弹窗：`check_for_update_on_startup=false` 关掉默认高亮「Update now」的更新框，
  *   `--dangerously-bypass-hook-trust` 让我们注入的 hooks 免审（否则 Active=0）。
+ * - developer_instructions **只在建线程那一轮生效**：TUI `resume` / `fork` 带新值都不会写进
+ *   上下文（0.153.4 实测）。所以职责与回复规则真正生效的是 bootstrap 那一次；TUI 命令里
+ *   照样带上，只为将来 Codex 改成 resume 也注入时不必改这里。接管外来会话、重启后改了
+ *   职责/名册都拿不到新值——兜底是每条入站 `<channel>` 自带的 reply_via（codex-thread.ts）。
  */
+import { existsSync } from "node:fs";
 import { shellEscape } from "./claude-launch.js";
 import { resolveLoginBinary, type LoginBinary, type Runner } from "./login-binary.js";
 
@@ -110,7 +115,8 @@ function modelFlags(spec: { model?: string; effort?: string }): string[] {
 
 /**
  * Codex 不把 MCP server 的 instructions 放进模型上下文（实测 rollout 里没有），所以
- * 职责、project 上下文和频道回复规则都经 developer_instructions 注入。
+ * 职责、project 上下文和频道回复规则经 developer_instructions 注入——只在 exec 引导建线程
+ * 时生效一次（见文件头）。
  */
 export function codexDeveloperInstructions(opts: {
   agentName?: string;
@@ -257,17 +263,49 @@ export function parseBootstrapThreadId(stdout: string): string | null {
   }
 }
 
-// ── 二进制 ─────────────────────────────────────────────────────────────────
+// ── 二进制 ──────────────────────────────────────────────────────────────
+
+const NATIVE_TRIPLES: Record<string, string> = {
+  "darwin-arm64": "aarch64-apple-darwin",
+  "darwin-x64": "x86_64-apple-darwin",
+  "linux-arm64": "aarch64-unknown-linux-musl",
+  "linux-x64": "x86_64-unknown-linux-musl",
+};
 
 /**
- * 交互式 agent 用的 codex：`CODEX_TUI_BIN` 覆盖，否则按登录 shell 解析（npm 装的是 node
- * 壳，launchd 的精简 PATH 下可能连 node 都没有）。与 ask_codex 用的 ChatGPT.app 内置
- * 版本（CODEX_BIN）刻意分开。
+ * npm 装的 codex 是 node 壳（`@openai/codex/bin/codex.js`），它 spawn 原生二进制且不转发
+ * SIGKILL——直接起壳会让原生进程成为 pane 的孙进程，按 pane 找进程 / 杀进程都会落到壳上。
+ * 能定位到原生二进制就用它（与壳里 findCodexExecutable 同一布局）；不是 npm 壳（brew cask、
+ * 自编译）原样返回。
  */
-export async function resolveCodexBinary(run: Runner, env: Record<string, string | undefined> = process.env): Promise<LoginBinary | null> {
+export function nativeCodexCandidates(real: string, platform: string = process.platform, arch: string = process.arch): string[] {
+  const m = /^(.*\/@openai\/codex)\/bin\/codex\.js$/.exec(real);
+  if (!m) return [];
+  const triple = NATIVE_TRIPLES[`${platform}-${arch}`];
+  if (!triple) return [];
+  const pkg = m[1];
+  return [
+    `${pkg}/node_modules/@openai/codex-${platform}-${arch}/vendor/${triple}/bin/codex`,
+    `${pkg}/vendor/${triple}/bin/codex`,
+  ];
+}
+
+/**
+ * 交互式 agent 用的 codex：`CODEX_TUI_BIN` 覆盖，否则按登录 shell 解析，npm 壳换成原生
+ * 二进制（找不到原生的才退回壳）。与 ask_codex 用的 ChatGPT.app 内置版本（CODEX_BIN）刻意分开。
+ * 返回值的 `real` 是该拿去启动的路径。
+ */
+export async function resolveCodexBinary(
+  run: Runner,
+  env: Record<string, string | undefined> = process.env,
+  exists: (p: string) => boolean = existsSync,
+): Promise<LoginBinary | null> {
   const override = env.CODEX_TUI_BIN?.trim();
   if (override) return { link: override, real: override };
-  return resolveLoginBinary(run, "codex");
+  const found = await resolveLoginBinary(run, "codex");
+  if (!found) return null;
+  const native = nativeCodexCandidates(found.real).find(exists);
+  return native ? { link: found.link, real: native } : found;
 }
 
 /**
