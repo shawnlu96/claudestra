@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 import { isAuthed } from "@/lib/api-auth";
 import { bridgeGet, bridgePost, type BridgeError } from "@/lib/chat/bridge-api";
+import { legacyErrorBody } from "@/lib/bff-legacy-body";
 
 /** handler 里抛它 = 直接回这个状态码（参数校验失败等，不经 bridge 错误映射） */
 export class HttpError extends Error {
@@ -101,6 +102,11 @@ export function withAuth<A extends unknown[]>(
  *   - `onError` → 迁移前 catch 里有的日志。
  * 这批路由的前端仍按「失败就是 502」处理；要改成 `authed` 的透传口径（bridge 4xx 原样回）
  * 需逐个核对前端，另开提交。
+ *
+ * 已知的唯一差异（审查确认，不阻塞）：迁移前各路由的 try 只包 bridge 调用，这里包整个 handler。
+ * 所以 try 之前就会抛的畸形输入换了响应——例：body 是 JSON `null` 时
+ * `request.json().catch(() => ({}))` 得到 null、解构抛 TypeError，迁移前是 Next 默认的 500，
+ * 现在是 502 + 上面的 body。自家前端从不发 null body，正常请求的响应逐字节不变。
  */
 export function authedLegacy<A extends unknown[]>(
   handler: (req: Request, ...rest: A) => Promise<Response>,
@@ -119,20 +125,6 @@ export function authedLegacy<A extends unknown[]>(
       return NextResponse.json(await legacyErrorBody(e, opts), { status: 502 });
     }
   };
-}
-
-/** 纯函数（单测锁形状）：旧口径的错误 body。没有前缀时 message 原样（undefined 会被 JSON 省掉，同迁移前） */
-export async function legacyErrorBody(
-  e: unknown,
-  opts: { okFalse?: boolean; errorPrefix?: string | (() => Promise<string>) } = {},
-): Promise<{ ok?: false; error?: string }> {
-  const raw = (e as Error).message;
-  let error: string | undefined = raw;
-  if (opts.errorPrefix !== undefined) {
-    const prefix = typeof opts.errorPrefix === "string" ? opts.errorPrefix : await opts.errorPrefix();
-    error = `${prefix}${raw}`;
-  }
-  return opts.okFalse ? { ok: false, error } : { error };
 }
 
 /** 纯代理 GET：bridge 的 JSON 原样回给浏览器 */
