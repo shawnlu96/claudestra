@@ -81,6 +81,7 @@ import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } fr
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
+import { REPO_ROOT, SRC_DIR } from "./lib/repo-root.js";
 import { resolveNpm } from "./lib/npm-path.js";
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
@@ -1393,7 +1394,7 @@ async function cmdResume(
   if (ready) {
     try {
       const bunPath = resolveBunPath();
-      const srcDir = import.meta.dir;
+      const srcDir = SRC_DIR;
       const htmlPath = `/tmp/claude-orchestrator/resume_${Date.now()}.html`;
       const pngPath = `/tmp/claude-orchestrator/resume_${Date.now()}.png`;
 
@@ -3271,8 +3272,6 @@ async function cmdModel(sub: string, ...rest: string[]) {
 // 版本检查 / 自动更新
 // ============================================================
 
-const REPO_ROOT = `${import.meta.dir}/..`;
-
 async function git(...args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
   const proc = Bun.spawn(["git", "-C", REPO_ROOT, ...args], {
     stdout: "pipe",
@@ -4491,7 +4490,7 @@ async function cmdTmuxScreenshot(name: string) {
     return;
   }
   const bunPath = resolveBunPath();
-  const srcDir = import.meta.dir;
+  const srcDir = SRC_DIR;
   const ts = Date.now();
   const htmlPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.html`;
   const pngPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.png`;
@@ -5472,7 +5471,7 @@ switch (cmd) {
     // v2.21.3+ 仓库 skills/ → ~/.claude/skills 软链(owner 2026-09-03:skill 一直
     // 在仓库里却没人装,MacBook 的软链悬空了两个月)。update / install-cli 也会顺手跑。
     const { installRepoSkills } = await import("./lib/skills-install.js");
-    const results = installRepoSkills(`${import.meta.dir}/..`);
+    const results = installRepoSkills(REPO_ROOT);
     output({ ok: !results.some((r) => r.action === "warn"), skills: results });
     break;
   }
@@ -5481,7 +5480,7 @@ switch (cmd) {
     // v2.21.5+ SessionStart 记忆召回 hook(~/mem0-mcp/recall.py + HANDOFF.md 注入)。
     // setup / install-cli / update 都会顺手跑;这条给「只想挂/修 hook、不想动 daemon」的场合。
     const { ensureRecallHookInstalled } = await import("./lib/cli-install.js");
-    const r = await ensureRecallHookInstalled(resolveBunPath(), `${import.meta.dir}/..`);
+    const r = await ensureRecallHookInstalled(resolveBunPath(), REPO_ROOT);
     output({ ok: true, recallHook: r.status, command: r.command,
       note: r.status === "skipped" ? "本机没有 ~/mem0-mcp/recall.py,未注册(可设 MEM0_RECALL_SCRIPT)" : undefined });
     break;
@@ -5491,7 +5490,7 @@ switch (cmd) {
     // v2.3.0+: 把 `claudestra` 命令装到 PATH + 配 LaunchAgent 开机自启。
     // 给现有装机的人；首次 setup.ts 安装末尾也会跑这同一份逻辑。
     const { installClaudestraCli } = await import("./lib/cli-install.js");
-    const REPO = `${import.meta.dir}/..`;
+    const REPO = REPO_ROOT;
     // 仓库 skill 顺手装上(软链,幂等)
     const { installRepoSkills } = await import("./lib/skills-install.js");
     const skills = installRepoSkills(REPO);
@@ -5539,7 +5538,7 @@ switch (cmd) {
   // 维护者的），--json 给程序用。
   case "doctor": {
     const { runDoctor, formatDoctor } = await import("./lib/doctor.js");
-    const checks = await runDoctor(`${import.meta.dir}/..`);
+    const checks = await runDoctor(REPO_ROOT);
     if (args.includes("--json")) {
       output({ ok: checks.every((c) => c.status !== "fail"), checks });
     } else {

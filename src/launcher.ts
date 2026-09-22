@@ -10,6 +10,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason } from "./lib/restart-result.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
+import { REPO_ROOT } from "./lib/repo-root.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -84,8 +85,7 @@ await assertPrimaryOrExit("launcher");
 
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
-const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
-const REPO_ROOT = `${import.meta.dir}/..`;
+const MASTER_DIR = process.env.MASTER_DIR || `${REPO_ROOT}/master`;
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);

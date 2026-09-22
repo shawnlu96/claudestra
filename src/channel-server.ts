@@ -15,6 +15,7 @@ import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
+import { REPO_ROOT } from "./lib/repo-root.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -34,7 +35,7 @@ const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || "";
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 const CLAUDESTRA_HOME =
-  process.env.CLAUDESTRA_HOME || `${import.meta.dir}/..`;
+  process.env.CLAUDESTRA_HOME || REPO_ROOT;
 
 if (!CHANNEL_ID) {
   console.error("❌ 请设置 DISCORD_CHANNEL_ID 环境变量");

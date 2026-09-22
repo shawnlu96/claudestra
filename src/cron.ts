@@ -34,12 +34,13 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 installCrashGuard("cron");
 
 import { initDaemonLogs } from "./lib/log-paths.js";
+import { SRC_DIR } from "./lib/repo-root.js";
 initDaemonLogs("cron");
 
 const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
 const CRON_PATH = `${CONFIG_DIR}/cron.json`;
 const HISTORY_PATH = `${CONFIG_DIR}/cron-history.json`;
-const MANAGER_PATH = `${import.meta.dir}/manager.ts`;
+const MANAGER_PATH = `${SRC_DIR}/manager.ts`;
 // 见 lib/bun-path.ts：写死 ~/.bun 会让 brew/mise 装 bun 的人所有 cron 任务静默失败
 const BUN_PATH = resolveBunPath();
 const REPORT_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";

@@ -2,7 +2,7 @@
  * GitHub Release 工具 — 查询最新 release、版本比较
  */
 
-const REPO_ROOT = `${import.meta.dir}/../..`;
+import { REPO_ROOT } from "./repo-root.js";
 
 /** 从 git remote 解析 GitHub owner/repo */
 export async function getGitHubRepo(): Promise<string | null> {

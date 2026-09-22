@@ -17,7 +17,7 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 
-const REPO_ROOT = resolve(import.meta.dir, "..");
+import { REPO_ROOT } from "./lib/repo-root.js";
 const ENV_PATH = `${REPO_ROOT}/.env`;
 const ENV_EXAMPLE_PATH = `${REPO_ROOT}/.env.example`;
 const TEMPLATE_PATH = `${REPO_ROOT}/master/CLAUDE.md.template`;
