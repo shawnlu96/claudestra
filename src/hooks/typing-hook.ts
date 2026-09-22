@@ -38,7 +38,9 @@ async function main() {
   // agent_id 是官方 hook 契约里专门用来区分 subagent 与主线程的字段。
   if (data.agent_id) process.exit(0);
 
-  const event = data.hook_event_name;
+  // Codex 被打断时不发 Stop（rollout 里是 turn_aborted），只发 Interrupt。bridge 对
+  // StopFailure 按「回合结束、不做补 reply 拦截」处理，正合打断的语义。
+  const event = data.hook_event_name === "Interrupt" ? "StopFailure" : data.hook_event_name;
 
   // Stop — Claude 完成回复（发完成通知）
   // StopFailure — Claude 异常退出（也发完成通知）
