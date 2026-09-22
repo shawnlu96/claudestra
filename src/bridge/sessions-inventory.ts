@@ -16,12 +16,11 @@
  * Discord /agents 面板 —— 三者共用本模块，Discord 只是渲染器之一。
  */
 
-import { REGISTRY_PATH } from "../lib/paths.js";
 import { existsSync } from "fs";
 import { readFile, readdir } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-import { readRegistryAgents } from "../lib/registry.js";
+import { readRegistryAgents, REGISTRY_PATH } from "../lib/registry.js";
 import { resolveClaudeBinary, type Runner } from "../lib/claude-binary.js";
 
 // ============================================================
@@ -192,7 +191,7 @@ export function claudeBinCandidates(loginShellClaude: string | null): string[] {
 const spawnRunner: Runner = async (cmd, timeoutMs = 0) => {
   try {
     const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-    const killer = timeoutMs > 0 ? setTimeout(() => { try { p.kill(9); } catch { /* 已退出 */ } }, timeoutMs) : null;
+    const killer = timeoutMs > 0 ? setTimeout(() => { try { p.kill(9); } catch { /* 进程已自己退出，没得杀 */ } }, timeoutMs) : null;
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     const code = await p.exited;
     if (killer) clearTimeout(killer);

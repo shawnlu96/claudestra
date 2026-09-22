@@ -7,10 +7,11 @@ import { homedir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import {
-  STATE_DIR, RUNTIME_DIR, TMUX_SOCK, REGISTRY_PATH, CONFIG_PATH, LOG_DIR, ARCHIVE_ROOT,
+  STATE_DIR, RUNTIME_DIR, TMUX_SOCK, CONFIG_PATH, LOG_DIR, ARCHIVE_ROOT,
   INBOX_DIR, UPDATE_LOCK, CRON_HISTORY_PATH, stateDirIn, statePath, pathOverrideEnv,
 } from "../src/lib/paths";
 import { buildClaudeCommand } from "../src/lib/claude-launch";
+import { REGISTRY_PATH } from "../src/lib/registry";
 
 const hasOverride = !!(process.env.CLAUDESTRA_STATE_DIR || process.env.CLAUDESTRA_RUNTIME_DIR);
 
@@ -54,14 +55,14 @@ describe("override 生效（子进程里验证，模块常量在加载时求值�
   test("STATE_DIR / RUNTIME_DIR / 派生路径都跟着走", () => {
     const script =
       `import * as p from ${JSON.stringify(join(import.meta.dir, "../src/lib/paths.ts"))};` +
-      `console.log(JSON.stringify([p.STATE_DIR, p.RUNTIME_DIR, p.TMUX_SOCK, p.REGISTRY_PATH, p.LOG_DIR]));`;
+      `console.log(JSON.stringify([p.STATE_DIR, p.RUNTIME_DIR, p.TMUX_SOCK, p.statePath("x.json"), p.LOG_DIR]));`;
     const r = spawnSync(process.execPath, ["-e", script], {
       env: { ...process.env, CLAUDESTRA_STATE_DIR: "/sbx/state", CLAUDESTRA_RUNTIME_DIR: "/sbx/run" },
       encoding: "utf-8",
     });
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout.trim())).toEqual([
-      "/sbx/state", "/sbx/run", "/sbx/run/master.sock", "/sbx/state/registry.json", "/sbx/state/logs",
+      "/sbx/state", "/sbx/run", "/sbx/run/master.sock", "/sbx/state/x.json", "/sbx/state/logs",
     ]);
   });
 });

@@ -197,7 +197,7 @@ describe("orphanAgentNames", () => {
   });
 });
 
-import { undeliveredAlertsVerdict } from "../src/lib/doctor";
+import { undeliveredAlertsVerdict } from "../src/lib/doctor-state";
 
 describe("undeliveredAlertsVerdict", () => {
   const P = "/x/logs/undelivered-alerts.log";
@@ -229,7 +229,7 @@ describe("undeliveredAlertsVerdict", () => {
   });
 });
 
-import { staleInstallEnvKeys } from "../src/lib/doctor";
+import { staleInstallEnvKeys } from "../src/lib/doctor-state";
 import { parseTmuxEnvLine } from "../src/lib/bridge-port";
 
 describe("staleInstallEnvKeys", () => {

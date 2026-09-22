@@ -9,6 +9,7 @@
  */
 
 import { readFileSync } from "fs";
+import { REPO_ROOT } from "./repo-root.js";
 
 const KEY_LINE_RE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
@@ -71,7 +72,7 @@ export function readDotenvFileSync(path: string): Record<string, string> | null 
  * 报「bridge 只监听 127.0.0.1」而 bridge 实际在 *:3847）。
  * doctor 不用它：doctor 要看的是 daemon 实际拿到的文件内容，终端 export 的值不该掩盖它。
  */
-export function repoEnvVar(key: string, repoRoot: string, env: Record<string, string | undefined> = process.env): string {
+export function repoEnvVar(key: string, repoRoot = REPO_ROOT, env: Record<string, string | undefined> = process.env): string {
   if (env[key]) return env[key]!;
   return readDotenvFileSync(`${repoRoot}/.env`)?.[key] || "";
 }

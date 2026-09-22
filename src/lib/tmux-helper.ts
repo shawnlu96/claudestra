@@ -5,8 +5,7 @@
  * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
  */
 
-import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js";
-export { TMUX_SOCK };
+import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），

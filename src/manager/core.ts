@@ -4,7 +4,8 @@
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
-import { STATE_DIR, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/paths.js";
+import { STATE_DIR } from "../lib/paths.js";
+import { REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";

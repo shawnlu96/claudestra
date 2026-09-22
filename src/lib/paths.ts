@@ -49,7 +49,6 @@ export function runtimePath(...parts: string[]): string {
 export const TMUX_SOCK = runtimePath("master.sock");
 
 // ── 状态文件（多处共用的才列在这里；只有一个模块用的由该模块自己 statePath()）──
-export const REGISTRY_PATH = statePath("registry.json");
 export const CONFIG_PATH = statePath("config.json");
 export const LOG_DIR = statePath("logs");
 export const ARCHIVE_ROOT = statePath("archive");
@@ -64,6 +63,11 @@ export const UNDELIVERED_ALERTS_LOG = join(LOG_DIR, "undelivered-alerts.log");
  * 而是继承 tmux server 的全局 env。所以 override 必须显式写进启动前缀，否则沙箱 agent 的
  * hook 仍会写生产目录。没设 override 时返回空对象 → 启动命令与原来逐字节相同。
  */
+/** 启动前缀用：` KEY=<escaped>` 串（没设 override 时是空串） */
+export function pathOverrideAssignments(escape: (v: string) => string, env: Record<string, string | undefined> = process.env): string {
+  return Object.entries(pathOverrideEnv(env)).map(([k, v]) => ` ${k}=${escape(v)}`).join("");
+}
+
 export function pathOverrideEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"]) {
