@@ -494,7 +494,28 @@ async function bgJobLogResponse(kind: BgJobKind, url: URL): Promise<Response> {
 
 // ── 路由分发 ────────────────────────────────────────────────────────────
 
+/**
+ * /api/v1 入口。handler 里逃逸的异常以前一路冒到 Bun.serve，而 Bun 在没设 NODE_ENV 时
+ * （launchd 就不设）回的是 67KB 的 HTML 调试页——web 端拿到的不是 JSON（D5-11）。
+ * 最常见的来源是路由正则匹配后的 decodeURIComponent 遇到非法百分号编码抛 URIError：
+ * 那是请求的错，回 400；其余回 500，body 都是 {ok:false,error}。
+ */
 export async function handleApiRequest(req: Request, url: URL): Promise<Response> {
+  try {
+    return await routeApiRequest(req, url);
+  } catch (e) {
+    return apiErrorResponse(e);
+  }
+}
+
+/** handler 异常 → JSON 响应（bridge.ts 的 Bun.serve error() 兜底也用它）。 */
+export function apiErrorResponse(e: unknown): Response {
+  if (e instanceof URIError) return apiJson(400, { ok: false, error: "bad path encoding" });
+  console.error("❌ HTTP handler 异常:", e);
+  return apiJson(500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+}
+
+async function routeApiRequest(req: Request, url: URL): Promise<Response> {
   if (!deps) return apiJson(503, { ok: false, error: "api routes not initialized" });
 
   // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（对方 bridge 打进来，

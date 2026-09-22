@@ -75,6 +75,7 @@ import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-term
 import {
   initApiRoutes,
   handleApiRequest,
+  apiErrorResponse,
   sweepApiState,
   pendingApiRequests,
   apiThreadResults,
@@ -3610,6 +3611,11 @@ const server = Bun.serve({
     const resp = await handleHttpRoutes(req, url);
     if (cors) for (const [k, v] of Object.entries(cors)) resp.headers.set(k, v);
     return resp;
+  },
+  // D5-11 兜底：fetch 里逃逸的异常（/api/v1 以外的路由、终端 API 等）回 JSON，
+  // 不再是 Bun 未设 NODE_ENV 时的 67KB HTML 调试页。/api/v1 自己已在 handleApiRequest 里接住。
+  error(e) {
+    return apiErrorResponse(e);
   },
   websocket: {
     // v2.2.0+: 抬高 idleTimeout（Bun 默认 120s）。配合 channel-server 每 25s 的

@@ -81,6 +81,9 @@ const specs: Spec[] = [
     ["POST", "/api/v1/agents"],
     ["POST", "/api/v1/agents/resume"],
   ] as const).map(([method, path]) => ({ name: `json-400 ${method} ${path}`, method, path, token: "full" as const, body: BAD })),
+  // ── D5-11：非法百分号编码（decodeURIComponent 抛 URIError）→ 400 JSON，不是 Bun 的 HTML 500 ──
+  { name: "bad-encoding skills", method: "GET", path: "/api/v1/agents/%E0%A4%A/skills", token: "full" },
+  { name: "bad-encoding history", method: "GET", path: "/api/v1/agents/%E0%A4%A/history", token: "full" },
 ];
 
 test("早退分支响应逐字节不变（golden）", () => {

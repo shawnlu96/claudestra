@@ -328,5 +328,17 @@
     "status": 400,
     "contentType": "application/json",
     "body": "{\"ok\":false,\"error\":\"invalid JSON body\"}"
+  },
+  {
+    "name": "bad-encoding skills",
+    "status": 400,
+    "contentType": "application/json",
+    "body": "{\"ok\":false,\"error\":\"bad path encoding\"}"
+  },
+  {
+    "name": "bad-encoding history",
+    "status": 400,
+    "contentType": "application/json",
+    "body": "{\"ok\":false,\"error\":\"bad path encoding\"}"
   }
 ]
