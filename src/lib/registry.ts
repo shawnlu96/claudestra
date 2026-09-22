@@ -8,7 +8,7 @@
  */
 
 import { REGISTRY_PATH as STATE_REGISTRY_PATH } from "./paths.js";
-import { readFile } from "fs/promises";
+import { readJsonLenient, readJsonStateSync, reportCorrupt } from "./state-file.js";
 
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 
@@ -55,39 +55,65 @@ export interface RegistryAgent {
   piEnv?: Record<string, unknown>;
 }
 
-/** 全量读取（含非 active）。读失败/文件缺失返回空数组，不抛。 */
-export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<RegistryAgent[]> {
+/** registry.json 的内容 → 规范化后的 agent 列表（纯函数；结构不对返回空数组） */
+export function normalizeRegistryAgents(data: unknown): RegistryAgent[] {
+  const agents = (data as { agents?: unknown } | null)?.agents;
+  if (!agents || typeof agents !== "object") return [];
   try {
-    const data = JSON.parse(await readFile(registryPath, "utf-8"));
-    const agents = data?.agents;
-    if (!agents || typeof agents !== "object") return [];
-    return Object.entries(agents).map(([name, v]) => {
-      const a = v as Record<string, unknown>;
-      const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined);
-      return {
-        name,
-        status: str("status"),
-        channelId: str("channelId"),
-        sessionId: str("sessionId"),
-        cwd: str("cwd") ?? str("dir"),
-        purpose: str("purpose"),
-        displayName: str("displayName"),
-        model: str("model"),
-        effort: str("effort"),
-        // ⚠ 布尔字段不走 str() 帮手——external 曾因此被整个丢掉(所有 agent 在
-        // /peers 界面显示非 external,Codex review 2026-08-26 抓到的)
-        external: a.external === true,
-        projectId: str("projectId"),
-        // ⚠ 同样是白名单式读取：registry 里写了 runtime 但这里漏读 = 静默丢失，
-        // 下游会把 Pi agent 当 Claude Code 起（读成 undefined 不报错，这坑踩过一次）
-        runtime: str("runtime"),
-        // 嵌套对象：不是对象就当没有（脏数据不能把 bridge 搞崩）
-        piEnv: a.piEnv && typeof a.piEnv === "object" ? (a.piEnv as Record<string, unknown>) : undefined,
-      };
-    });
+    return normalizeEntries(agents as Record<string, unknown>);
   } catch {
-    return [];
+    return []; // 条目是 null 之类的脏数据：与原先「解析抛错 → 空数组」一致，不把 bridge 搞崩
   }
+}
+
+function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
+  return Object.entries(agents).map(([name, v]) => {
+    const a = v as Record<string, unknown>;
+    const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : undefined);
+    return {
+      name,
+      status: str("status"),
+      channelId: str("channelId"),
+      sessionId: str("sessionId"),
+      cwd: str("cwd") ?? str("dir"),
+      purpose: str("purpose"),
+      displayName: str("displayName"),
+      model: str("model"),
+      effort: str("effort"),
+      // ⚠ 布尔字段不走 str() 帮手——external 曾因此被整个丢掉(所有 agent 在
+      // /peers 界面显示非 external,Codex review 2026-08-26 抓到的)
+      external: a.external === true,
+      projectId: str("projectId"),
+      // ⚠ 同样是白名单式读取：registry 里写了 runtime 但这里漏读 = 静默丢失，
+      // 下游会把 Pi agent 当 Claude Code 起（读成 undefined 不报错，这坑踩过一次）
+      runtime: str("runtime"),
+      // 嵌套对象：不是对象就当没有（脏数据不能把 bridge 搞崩）
+      piEnv: a.piEnv && typeof a.piEnv === "object" ? (a.piEnv as Record<string, unknown>) : undefined,
+    };
+  });
+}
+
+/**
+ * 全量读取（含非 active）。永不抛：文件缺失 → 空数组；文件损坏 → stderr 报一次（按 mtime
+ * 去重），沿用本进程上次成功读到的内容（没有就空数组）——以前损坏被静默当成「没有 agent」。
+ */
+export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<RegistryAgent[]> {
+  return normalizeRegistryAgents(await readJsonLenient<unknown>(registryPath, null, { who: "registry" }));
+}
+
+// 同步读者的「上次成功值」（async 版的缓存在 state-file 里，二者互不影响）
+const lastGoodSync = new Map<string, unknown>();
+
+/** 同步版（bridge 里不方便 await 的地方用；语义同 readRegistryAgents） */
+export function readRegistryAgentsSync(registryPath = REGISTRY_PATH): RegistryAgent[] {
+  const r = readJsonStateSync(registryPath);
+  if (r.status === "ok") {
+    lastGoodSync.set(registryPath, r.data);
+    return normalizeRegistryAgents(r.data);
+  }
+  if (r.status === "missing") return [];
+  reportCorrupt(registryPath, r.error, "registry");
+  return normalizeRegistryAgents(lastGoodSync.get(registryPath) ?? null);
 }
 
 /** active 状态的 agent（bridge 侧最常用的形态） */

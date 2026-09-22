@@ -107,3 +107,35 @@ describe("isMasterAgent", () => {
     expect(isMasterAgent("")).toBe(false);
   });
 });
+
+import { normalizeRegistryAgents, readRegistryAgentsSync } from "../src/lib/registry";
+import { mkdtempSync as mkdtempP11, writeFileSync as writeP11 } from "fs";
+import { tmpdir as tmpdirP11 } from "os";
+import { join as joinP11 } from "path";
+
+describe("registry 读者：损坏 ≠ 空", () => {
+  test("脏条目（null）→ 空数组，不抛", () => {
+    expect(normalizeRegistryAgents({ agents: { x: null } })).toEqual([]);
+    expect(normalizeRegistryAgents(null)).toEqual([]);
+  });
+
+  test("运行中文件被写坏 → 沿用上次成功值（async / sync 各自）", async () => {
+    const dir = mkdtempP11(joinP11(tmpdirP11(), "reg-corrupt-"));
+    const p = joinP11(dir, "registry.json");
+    writeP11(p, JSON.stringify({ agents: { a: { status: "active", channelId: "1" } } }));
+    expect((await readRegistryAgents(p)).map((a) => a.name)).toEqual(["a"]);
+    expect(readRegistryAgentsSync(p).map((a) => a.name)).toEqual(["a"]);
+    writeP11(p, "{half");
+    expect((await readRegistryAgents(p)).map((a) => a.name)).toEqual(["a"]);
+    expect(readRegistryAgentsSync(p).map((a) => a.name)).toEqual(["a"]);
+  });
+
+  test("冷启动就坏 / 不存在 → 空数组", async () => {
+    const dir = mkdtempP11(joinP11(tmpdirP11(), "reg-cold-"));
+    const p = joinP11(dir, "registry.json");
+    expect(await readRegistryAgents(p)).toEqual([]);
+    writeP11(p, "{half");
+    expect(await readRegistryAgents(p)).toEqual([]);
+    expect(readRegistryAgentsSync(p)).toEqual([]);
+  });
+});
