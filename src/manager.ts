@@ -17,7 +17,7 @@ import { hostname } from "os";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { execFile as execFileCb } from "node:child_process";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
-import { existsSync, statSync, readdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "fs";
+import { existsSync, statSync, readdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync, realpathSync } from "fs";
 import { join } from "path";
 
 // ============================================================
@@ -73,6 +73,7 @@ import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow, readCcSessionEntries } from "./lib/cc-sessions.js";
+import { writeMasterResume } from "./lib/master-session.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
 import { mayTakeOver, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
 import { allSources, type DiscoveredSession } from "./lib/runtimes/index.js";
@@ -2087,7 +2088,98 @@ function unlockRestart(tmuxName: string): void {
   try { unlinkSync(`${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`); } catch { /* 已删 */ }
 }
 
-async function cmdRestart(name?: string) {
+/**
+ * 仓库根 .env 里的一个变量（manager 可能从任意 cwd 被调起，Bun 只自动加载 cwd 的
+ * .env——所以 env 里没有就直接翻 REPO_ROOT/.env）。
+ */
+async function readRepoEnvVar(key: string): Promise<string> {
+  if (process.env[key]) return process.env[key]!;
+  if (!existsSync(`${REPO_ROOT}/.env`)) return "";
+  try {
+    const envText = await Bun.file(`${REPO_ROOT}/.env`).text();
+    const m = envText.match(new RegExp(`^${key}\\s*=\\s*(.+)$`, "m"));
+    return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+  } catch {
+    return "";
+  }
+}
+
+/** 大总管的工作目录（与 launcher / bridge 同一语义：env / .env 优先，默认仓库里的 master/）。 */
+async function masterDir(): Promise<string> {
+  return (await readRepoEnvVar("MASTER_DIR")) || `${REPO_ROOT}/master`;
+}
+
+/**
+ * v2.24+ 重启大总管——**不在这里拉起它**。
+ *
+ * 大总管的启动归 launcher 独占（bridge 的生命周期端点也拒绝 master）。这里两件事：
+ * 写下「接回原会话」的交接单（lib/master-session.ts），然后把它的 Claude Code
+ * 优雅退掉；launcher 的 15 秒巡检看到窗口退回 shell，就会带 `--resume` 把它拉回来。
+ * 自己动手拉的话会和 launcher 抢同一个窗口——两条命令打进同一个 pane，谁都起不来。
+ *
+ * 用途是「Claude Code 重新登录后让所有会话认新凭证」：凭证只在进程启动时读一次，
+ * 已经在跑的进程既刷不动旧 token 也不回头重读 keychain（owner 2026-09-22 实遇）。
+ */
+async function restartMaster(): Promise<{ name: string; ok: boolean; error?: string; note?: string }> {
+  const target = windowTarget("0");
+  const dir = await masterDir();
+
+  // 先验明正身，判据抄 launcher 的 ensureMasterAtZero：窗口名不是 agent-*，且
+  // pane 的当前目录就是 MASTER_DIR。index 0 被某个 agent 占位的情况真实发生过
+  // （2026-08-27 peer 实报），那时候朝 master:0 发 /exit 就是误杀无辜窗口。
+  const meta = (await tmuxRaw([
+    "display-message", "-p", "-t", target, "#{window_name}\t#{pane_current_path}",
+  ]).catch(() => "")).trim();
+  const [winName = "", paneCwd = ""] = meta.split("\t");
+  const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+  if (!meta || winName.startsWith(AGENT_PREFIX) || real(paneCwd) !== real(dir)) {
+    return {
+      name: "master",
+      ok: false,
+      error: `window 0 不是大总管（name=${winName || "?"} cwd=${paneCwd || "?"}），交给 launcher 归位`,
+    };
+  }
+
+  // 窗口里得真有 Claude Code 在跑，否则它本来就停着，launcher 会拉起，不用我们插手。
+  const alive = await windowHasChildProcess(target).catch(() => null);
+  if (alive !== true) {
+    return { name: "master", ok: false, error: "大总管窗口里没有在跑的 Claude Code（交给 launcher 拉起）" };
+  }
+
+  // sessionId：先问 Claude Code 自己的进程登记（启动那一刻就写好了），
+  // 问不到再退回 MASTER_DIR 的 projects 目录里最新的那份 jsonl。
+  let sessionId =
+    (await resolveSessionIdForWindow("0", dir, { timeoutMs: 1500 }).catch(() => null))?.sessionId ?? "";
+  if (!sessionId) {
+    const projDir = projectsDirFor(dir);
+    const newest = [...(await listSessionJsonls(dir))]
+      .map((f) => ({ f, m: (() => { try { return statSync(join(projDir, f)).mtimeMs; } catch { return 0; } })() }))
+      .sort((a, b) => b.m - a.m)[0];
+    if (newest?.f) sessionId = newest.f.replace(/\.jsonl$/, "");
+  }
+
+  const handed = sessionId ? await writeMasterResume(sessionId, "restart --include-master") : false;
+  if (!handed) {
+    console.error("[restart] ⚠️ 没拿到大总管的 sessionId，重启后会是全新会话（上下文不接回）");
+  }
+
+  // 退出判据：gracefulExit 看 pane 文本，再用「窗口 shell 还有没有子进程」复核一次
+  //（大总管的 pane 尾部常年是 Claude 的输出，文本判据比 agent 窗口更容易误判）。
+  const exited =
+    (await gracefulExit("0")) || (await windowHasChildProcess(target).catch(() => true)) === false;
+  if (!exited) {
+    return { name: "master", ok: false, error: "大总管没能退出（窗口仍有进程），本次未重启" };
+  }
+  return {
+    name: "master",
+    ok: true,
+    note: handed
+      ? `已退出，launcher 会在 15 秒内用 --resume ${sessionId.slice(0, 8)} 拉回来（上下文保留）`
+      : "已退出，launcher 会在 15 秒内拉起（⚠️ 未拿到 sessionId，将是全新会话）",
+  };
+}
+
+async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {}) {
   const reg = await loadRegistry();
   const liveWindows = await listAgentWindowsShared();
 
@@ -2109,12 +2201,12 @@ async function cmdRestart(name?: string) {
     targets = [...liveWindows, ...deadButInReg];
   }
 
-  if (targets.length === 0) {
+  if (targets.length === 0 && !opts.includeMaster) {
     output({ ok: false, error: "没有需要重启的 agent" });
     return;
   }
 
-  const results: { name: string; ok: boolean; error?: string; recreated?: boolean }[] = [];
+  const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string }[] = [];
 
   let regDirty = false;
 
@@ -2319,10 +2411,15 @@ async function cmdRestart(name?: string) {
   // 重启后做一次完整 skill 重扫（每个 agent cwd 可能项目级 skill 有变动）
   await triggerSkillsRescan("full");
 
+  // 大总管放最后：它退出后由 launcher 拉起，不占我们这轮的等待时间
+  if (opts.includeMaster) results.push(await restartMaster());
+
   output({
     ok: results.every((r) => r.ok),
     results,
-    message: results.map((r) => `${r.name}: ${r.ok ? "✅" : `❌ ${r.error}`}`).join("\n"),
+    message: results
+      .map((r) => `${r.name}: ${r.ok ? `✅${r.note ? ` ${r.note}` : ""}` : `❌ ${r.error}`}`)
+      .join("\n"),
   });
 }
 
@@ -3522,29 +3619,16 @@ async function renderMasterClaude(): Promise<{ rendered: boolean; reason?: strin
   const templatePath = `${REPO_ROOT}/master/CLAUDE.md.template`;
   if (!existsSync(templatePath)) return { rendered: false, reason: "template 不存在" };
 
-  // 从 .env 读 USER_NAME / MASTER_DIR(manager 可能从任意 cwd 被调起,Bun 只
-  // 自动加载 cwd 的 .env——env 里没有就直接翻仓库根的 .env)
-  const readEnvVar = async (key: string): Promise<string> => {
-    if (process.env[key]) return process.env[key]!;
-    if (!existsSync(`${REPO_ROOT}/.env`)) return "";
-    try {
-      const envText = await Bun.file(`${REPO_ROOT}/.env`).text();
-      const m = envText.match(new RegExp(`^${key}\\s*=\\s*(.+)$`, "m"));
-      return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
-    } catch {
-      return "";
-    }
-  };
-  const userName = (await readEnvVar("USER_NAME")) || "User";
+  const userName = (await readRepoEnvVar("USER_NAME")) || "User";
   // v2.16+ MASTER_DIR 可移出仓库(省掉 master 加载仓库根 CLAUDE.md 的 ~11k token),
   // 渲染目标跟着走;模板内命令用 {{REPO_ROOT}} 绝对路径,不再依赖 cwd 相对定位
-  const masterDir = (await readEnvVar("MASTER_DIR")) || `${REPO_ROOT}/master`;
+  const masterDirPath = await masterDir();
 
   try {
     let tpl = await Bun.file(templatePath).text();
     tpl = tpl.replaceAll("{{USER_NAME}}", userName).replaceAll("{{REPO_ROOT}}", REPO_ROOT);
-    await mkdir(masterDir, { recursive: true });
-    await Bun.write(`${masterDir}/CLAUDE.md`, tpl);
+    await mkdir(masterDirPath, { recursive: true });
+    await Bun.write(`${masterDirPath}/CLAUDE.md`, tpl);
     return { rendered: true };
   } catch (e) {
     return { rendered: false, reason: (e as Error).message };
@@ -5060,8 +5144,16 @@ switch (cmd) {
     break;
 
   case "restart": {
-    const [name] = args;
-    await cmdRestart(name || undefined);
+    // --include-master：连大总管一起重启（Claude Code 重新登录后让所有会话认新凭证）。
+    // 只在「全体重启」时有意义——指名道姓重启某个 agent 时带它是自相矛盾的。
+    const rest = args.filter((a) => a !== "--include-master");
+    const includeMaster = args.length !== rest.length;
+    const [name] = rest;
+    if (name && includeMaster) {
+      output({ ok: false, error: "--include-master 只能用于全体重启（不要同时指定 agent 名）" });
+      break;
+    }
+    await cmdRestart(name || undefined, { includeMaster });
     break;
   }
 

@@ -163,6 +163,7 @@ bun src/manager.ts adopt    <name> <sessionId>   # 把 bg 分身收编为正式�
 bun src/manager.ts archive  <name>               # 立即快照该 agent 当前 session 的对话 jsonl 到归档
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
+bun src/manager.ts restart  --include-master   # v2.24+ 全体重启（含大总管）
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
 

@@ -269,6 +269,7 @@ bun src/manager.ts adopt    <name> <sessionId>   # promote a bg doppelganger to 
 bun src/manager.ts archive  <name>               # snapshot the agent's current session jsonl to ~/.claude-orchestrator/archive/
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
+bun src/manager.ts restart  --include-master   # v2.24+ restart every session, master included
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
 

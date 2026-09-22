@@ -310,6 +310,14 @@ export const DICT: Record<string, string> = {
   // ── store 系统提示 ───────────────────────────────────
   "无活动会话": "No active session",
 
+  // ── 设置 · 全体重启（v2.24+）────────────────────────
+  "全体重启": "Restart everything",
+  "重启全部会话": "Restart all sessions",
+  "确定，全部重启": "Yes, restart all",
+  "重启中…": "Restarting…",
+  "Claude Code 重新登录后用：凭证只在进程启动时读一次，已经在跑的会话不会自己认新登录。每个会话都 resume 原会话，上下文不丢；大总管由守护进程在 15 秒内接回。整轮几分钟，期间会话会陆续离线又回来。":
+    "Use this after signing back in to Claude Code: credentials are read once at process start, so sessions already running never pick up the new login. Every session resumes its own conversation (no context lost); the master is brought back by the launcher within 15s. The whole pass takes a few minutes — sessions drop off and come back one by one.",
+
   // ── 外观 ─────────────────────────────────────────────
   "外观": "Appearance",
   "跟随系统": "System",

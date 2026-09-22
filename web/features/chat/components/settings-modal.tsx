@@ -573,6 +573,89 @@ function BackendUpdateSection() {
   );
 }
 
+/**
+ * v2.24+ 全体重启（owner 2026-09-22：「Claude 被意外登出后，我在某个 Agent 手动登录了，
+ * 其他 Agent 还是需要重启，不然发消息还是未登录」）。
+ *
+ * 这不是我们的 bug 也修不掉：Claude Code 的凭证只在**进程启动时**读一次，之后在内存里
+ * 自己续期。远端重新登录会让旧 refresh token 作废，跑着的进程既刷不动也不会回头重读
+ * keychain —— 只能让每个进程重启。所以给一个按钮，而不是让人去敲 18 次命令。
+ *
+ * 两段式确认（点一下变「确定？」，8 秒无操作复原）：这是个影响全机的动作，但又不值得
+ * 为它开一个模态框。
+ */
+function RestartAllSection() {
+  const t = useT();
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState<string[]>([]);
+  const [err, setErr] = useState("");
+  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => { if (armTimer.current) clearTimeout(armTimer.current); }, []);
+
+  const arm = () => {
+    setArmed(true);
+    if (armTimer.current) clearTimeout(armTimer.current);
+    armTimer.current = setTimeout(() => setArmed(false), 8000);
+  };
+
+  const start = async () => {
+    setArmed(false);
+    setBusy(true);
+    setErr("");
+    setLines([]);
+    try {
+      const res = await fetch("/api/restart-all", { method: "POST" });
+      const j = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
+    } catch (e) {
+      setErr((e as Error).message);
+      setBusy(false);
+      return;
+    }
+    // 轮询日志看进度；整轮结束的标志是 manager 打出的汇总行（每个会话一行 ✅/❌）
+    const until = Date.now() + 20 * 60_000;
+    const tick = async () => {
+      let done = false;
+      try {
+        const j = (await (await fetch("/api/restart-all", { cache: "no-store" })).json()) as { lines?: string[] };
+        if (j.lines?.length) {
+          setLines(j.lines.slice(-12));
+          done = j.lines.some((l) => l.includes('"ok"'));
+        }
+      } catch { /* 重启期间接口会抖，正常 */ }
+      if (done || Date.now() > until) { setBusy(false); return; }
+      setTimeout(() => void tick(), 3000);
+    };
+    setTimeout(() => void tick(), 3000);
+  };
+
+  return (
+    <Section
+      title={t("全体重启")}
+      desc={t("Claude Code 重新登录后用：凭证只在进程启动时读一次，已经在跑的会话不会自己认新登录。每个会话都 resume 原会话，上下文不丢；大总管由守护进程在 15 秒内接回。整轮几分钟，期间会话会陆续离线又回来。")}
+      aside={
+        <button
+          className={`btn btn-sm ${armed ? "btn-warning" : ""}`}
+          disabled={busy}
+          onClick={() => (armed ? void start() : arm())}
+        >
+          {busy && <span className="loading loading-spinner loading-xs" />}
+          {busy ? t("重启中…") : armed ? t("确定，全部重启") : t("重启全部会话")}
+        </button>
+      }
+    >
+      {err ? <div className="text-xs text-error">{err}</div> : null}
+      {lines.length > 0 && (
+        <pre className="mt-2 max-h-40 overflow-auto rounded bg-base-300/50 p-2 text-[11px] leading-snug">
+          {lines.join("\n")}
+        </pre>
+      )}
+    </Section>
+  );
+}
+
 function Section({
   title,
   aside,
@@ -878,6 +961,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         <ArchiveRetentionSection />
         {/* ── 原生壳:服务器地址(只在 iOS App 里出现;地址存本机,可换)─────────────── */}
         <BackendUpdateSection />
+        <RestartAllSection />
         {isNativeShell() && open && <ShellServerSection />}
         {/* ── 界面(外观 + 语言)─────────────── */}
         <Section

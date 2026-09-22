@@ -2257,6 +2257,74 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     });
   }
 
+  /**
+   * v2.24+ POST /api/v1/restart-all —— 全体重启（含大总管）。
+   *
+   * 由来（owner 2026-09-22）：Claude Code 被意外登出后，在某一个会话里重新登录，
+   * **其它会话照样是未登录**——凭证只在进程启动时读一次，已经在跑的进程既刷不动
+   * 作废的 refresh token，也不会回头重读 keychain。唯一的解是让每个进程重启。
+   *
+   * 与 /update 同一形状：detached + 立刻 202。这里等不得的理由不同——18 个 agent
+   * 逐个 `--resume` 拉起是分钟级，HTTP 早超时了。进度拉 GET /api/v1/restart-all/log。
+   *
+   * agent 走 `--resume <原 sessionId>`（上下文不丢）；大总管由 manager 退出、
+   * launcher 15 秒内用交接单里的 id 接回（lib/master-session.ts）。
+   */
+  if (path === "/restart-all" && req.method === "POST") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "restart-all requires a full-scope token" });
+    }
+    let body: any = {};
+    try {
+      body = (await req.json()) ?? {};
+    } catch { /* 空 body = 默认全带上 */ }
+    const includeMaster = body?.includeMaster !== false;
+    const repoRoot = `${import.meta.dir}/../..`;
+    const log = `${process.env.HOME}/.claude-orchestrator/logs/restart-all.log`;
+    const flag = includeMaster ? " --include-master" : "";
+    try {
+      Bun.spawn(
+        [
+          "bash",
+          "-c",
+          `mkdir -p "$(dirname "${log}")"; { echo "=== $(date '+%F %T') restart-all${flag} ==="; exec "${process.execPath}" run "${repoRoot}/src/manager.ts" restart${flag}; } >> "${log}" 2>&1`,
+        ],
+        {
+          cwd: repoRoot,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          // @ts-ignore Bun 支持 detached —— 不 detach 的话重启期间 bridge 抖一下会连坐杀掉它
+          detached: true,
+        },
+      );
+    } catch (e) {
+      return apiJson(500, { ok: false, error: `起不来重启进程: ${(e as Error).message}` });
+    }
+    return apiJson(202, {
+      ok: true,
+      accepted: true,
+      includeMaster,
+      log,
+      hint: "逐个重启中（每个 agent 都 --resume 原会话）。进度拉 GET /api/v1/restart-all/log",
+    });
+  }
+
+  /** 全体重启的进度：restart-all.log 的末尾 */
+  if (path === "/restart-all/log" && req.method === "GET") {
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "restart-all log requires a full-scope token" });
+    }
+    const n = Math.min(Number(url.searchParams.get("tail") || 40) || 40, 200);
+    try {
+      const txt = await Bun.file(`${process.env.HOME}/.claude-orchestrator/logs/restart-all.log`).text();
+      const lines = txt.split("\n").filter((l) => l.trim());
+      return apiJson(200, { ok: true, lines: lines.slice(-n) });
+    } catch {
+      return apiJson(200, { ok: true, lines: [] });
+    }
+  }
+
   /** 升级进度：update.log 的末尾（前端轮询它，顺带靠 /api/version 判完成） */
   if (path === "/update/log" && req.method === "GET") {
     if (!principal.agents.includes("*")) {

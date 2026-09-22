@@ -71,6 +71,7 @@ import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace } from "
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
+import { takeMasterResume } from "./lib/master-session.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("launcher");
@@ -129,10 +130,17 @@ const MASTER_EFFORT = (process.env.MASTER_EFFORT || "low").trim();
  * 假定 session 已存在、window:0 已存在（或调用方保证会被创建）。
  */
 async function bringUpClaudeInMasterWindow(): Promise<boolean> {
+  // v2.24+ 有人刚刚**有意**重启了大总管（`manager restart --include-master`，
+  // 比如 Claude Code 重新登录后让所有会话认新凭证）→ 交接单里有它退出前的
+  // sessionId，用 --resume 接回去，上下文不丢。取走即删：resume 失败就退回
+  // shell，下一轮没单子可读，自动降级成全新会话（崩溃/开机路径行为不变）。
+  const resume = await takeMasterResume().catch(() => null);
+  if (resume) console.log(`↩️  接回大总管原会话 ${resume.sessionId.slice(0, 8)}（${resume.reason ?? "?"}）`);
   const cmd = buildClaudeCommand({
     channelId: CONTROL_CHANNEL_ID,
     bridgeUrl: BRIDGE_URL,
     effort: MASTER_EFFORT,
+    resumeId: resume?.sessionId,
   });
   // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
   await clearShellInitPrompts(MASTER_WINDOW);
