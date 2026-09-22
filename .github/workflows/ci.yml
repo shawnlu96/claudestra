@@ -25,6 +25,19 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # 根目录 tests/ 会 import web 的纯逻辑，其中几个（BFF 包装器的测试）顺带引用了 next /
+      # better-sqlite3 的类型——web 依赖不装，typecheck 和 bun test 都找不到它们。
+      # 本地因为 web/node_modules 一直在，所以这个缺口只在 CI 暴露（2026-09-23 首次推送即红）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci --ignore-scripts
+        working-directory: web
+
       - name: Typecheck (tsc --noEmit)
         run: bun run typecheck
 
