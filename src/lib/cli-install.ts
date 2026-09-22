@@ -43,6 +43,7 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
+import { rebuildWebIfStale, restartWebService, type WebBuildResult } from "./web-build.js";
 
 const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 
@@ -207,6 +208,8 @@ export interface InstallCliResult {
     | { installed: false; reason?: string };
   /** v2.24+ 装完逐个探活；不健康的自动 kickstart 一次再探 */
   daemonHealth?: DaemonHealth[];
+  /** web 构建过期（按 hash 判）就在 reload 之前重建；失败只进 warnings */
+  webBuild?: WebBuildResult;
   errors: string[];
   warnings: string[];
 }
@@ -878,8 +881,22 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   try { result.cliWrapper = await writeCliWrapper(repoRoot, bunPath); }
   catch (e) { errors.push(`CLI wrapper: ${(e as Error).message}`); return result; }
 
-  // 2) 写 daemon plist（3 个常驻 + web 前端，后者够格才装）
   const webDir = `${repoRoot}/web`;
+
+  // 1b) web 构建过期就重建。必须排在第 6 步 reload 之前：update 子进程由 launcher 派生，
+  //     bootout launcher 会把它连坐回收，构建若在后面会被中途杀掉、留下被清空的 .next。
+  //     也要在 readiness 之前：新的 BUILD_ID 参与判断能不能装 web daemon。
+  //     没有 .env.local = 没选 web，不花这个钱。
+  if (existsSync(`${webDir}/.env.local`)) {
+    try {
+      result.webBuild = await rebuildWebIfStale(repoRoot);
+      if (result.webBuild.error) {
+        warnings.push(`web 构建: ${result.webBuild.error}${result.webBuild.log?.length ? `。输出末尾：${result.webBuild.log.slice(-2).join(" | ")}` : ""}`);
+      }
+    } catch (e) { warnings.push(`web 构建: ${(e as Error).message}`); }
+  }
+
+  // 2) 写 daemon plist（3 个常驻 + web 前端，后者够格才装）
   let webPkgStart: string | undefined;
   try {
     webPkgStart = JSON.parse(readFileSync(`${webDir}/package.json`, "utf-8"))?.scripts?.start;
@@ -961,6 +978,11 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     // keepExisting 且本来就在：那是用户自己的 plist，连 reload 都不碰——它可能被
     // 刻意 unload 着（挂在别的反代后面 / 临时停用），我们没资格替他重新拉起。
     if (p.kept) {
+      // 但刚重建过 web 的话，正在跑的服务手里是旧构建（文件还被删过一轮）：它若是 load 着的就
+      // 重启一下（restartWebService 只 kickstart 已 load 的服务，不替人拉起）
+      if (p.label === "com.claudestra.web" && result.webBuild?.attempted) {
+        result.webBuild.restarted = restartWebService();
+      }
       result.daemons.push({ label: p.label, plistPath: p.plistPath, loaded: true, keptExisting: true });
       continue;
     }

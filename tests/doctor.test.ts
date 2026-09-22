@@ -83,20 +83,37 @@ describe("formatDoctor", () => {
   });
 });
 
-describe("webBuildVerdict (v2.16.3 web 构建时效)", () => {
+describe("webBuildVerdict（按 hash 判，与 install-cli 自动重建共用）", () => {
   const T = 1_700_000_000_000;
-  test("无构建产物 → warn", () => {
-    expect(webBuildVerdict(null, T).status).toBe("warn");
+  const base = { buildIdMtimeMs: T, buildInfoMtimeMs: T - 120_000, bakedWebCommit: "0df41f5", headWebCommit: "0df41f5", lastWebCommitMs: T - 3600_000 };
+  test("无构建产物 → stale", () => {
+    const v = webBuildVerdict({ ...base, buildIdMtimeMs: null });
+    expect(v.stale).toBe(true);
+    expect(v.status).toBe("warn");
   });
-  test("拿不到提交时间 → ok(跳过比对)", () => {
-    expect(webBuildVerdict(T, null).status).toBe("ok");
+  test("烤入 hash 与 web 最新提交一致 → ok", () => {
+    expect(webBuildVerdict(base)).toMatchObject({ status: "ok", stale: false });
   });
-  test("构建落后提交超 60s 容差 → warn", () => {
-    expect(webBuildVerdict(T, T + 61_000).status).toBe("warn");
+  test("缩写长度不同但同一提交 → ok", () => {
+    expect(webBuildVerdict({ ...base, headWebCommit: "0df41f5a" }).stale).toBe(false);
   });
-  test("构建新于提交 / 60s 容差内 → ok", () => {
-    expect(webBuildVerdict(T + 1, T).status).toBe("ok");
-    expect(webBuildVerdict(T, T + 59_000).status).toBe("ok");
+  test("烤入 hash ≠ 最新提交 → stale（哪怕 BUILD_ID 比提交时间新：release tag 里的提交常早于拉取）", () => {
+    const v = webBuildVerdict({ ...base, headWebCommit: "a4c11db", lastWebCommitMs: T - 86_400_000 });
+    expect(v.stale).toBe(true);
+    expect(v.detail).toContain("a4c11db");
+  });
+  test("只改了 web/*.md：head 按排除 md 的 pathspec 算，仍等于烤入值 → ok（不白建）", () => {
+    // 调用方用 WEB_PATHSPEC 取 head；md-only 提交不会让它前进，提交时间再新也不看
+    expect(webBuildVerdict({ ...base, lastWebCommitMs: T + 3600_000 }).stale).toBe(false);
+  });
+  test("build-info 比 BUILD_ID 新 = prebuild 写了新值但构建没完成 → stale", () => {
+    expect(webBuildVerdict({ ...base, buildInfoMtimeMs: T + 1 }).stale).toBe(true);
+  });
+  test("拿不到 hash 才退回时间比较（60s 容差）", () => {
+    const noHash = { ...base, bakedWebCommit: null, headWebCommit: null };
+    expect(webBuildVerdict({ ...noHash, lastWebCommitMs: T + 61_000 }).stale).toBe(true);
+    expect(webBuildVerdict({ ...noHash, lastWebCommitMs: T + 59_000 }).stale).toBe(false);
+    expect(webBuildVerdict({ ...noHash, lastWebCommitMs: null }).status).toBe("ok");
   });
 });
 

@@ -400,24 +400,8 @@ async function checkAgents(): Promise<Check[]> {
   return out;
 }
 
-/** v2.16.3 web 构建时效判定(纯函数,单测覆盖):BUILD_ID 的 mtime 早于最后一次
- *  触及 web/ 的 commit 时间 = 构建产物落后于代码,「bridge 生效、web 跑旧构建」
- *  的半生效状态(HedeMacBook-Pro 排查法沉淀)。60s 容差吸收 commit/build 同分钟
- *  的时钟粒度。 */
-export function webBuildVerdict(
-  buildIdMtimeMs: number | null,
-  lastWebCommitMs: number | null
-): { status: CheckStatus; detail: string } {
-  if (buildIdMtimeMs === null) return { status: "warn", detail: "web 无构建产物(.next/BUILD_ID 不存在)" };
-  if (lastWebCommitMs === null) return { status: "ok", detail: "无法取得 web/ 提交时间,跳过比对" };
-  if (buildIdMtimeMs + 60_000 < lastWebCommitMs) {
-    return {
-      status: "warn",
-      detail: `web 构建产物落后于代码(BUILD_ID ${new Date(buildIdMtimeMs).toISOString()} < 最后 web 提交 ${new Date(lastWebCommitMs).toISOString()})`,
-    };
-  }
-  return { status: "ok", detail: "web 构建产物不落后于代码" };
-}
+/** web 构建时效判定：与 install-cli 的自动重建共用同一判据（按 hash，见 lib/web-build.ts） */
+export { webBuildVerdict } from "./web-build.js";
 
 /** v2.16.3 detached HEAD 检查(HedeMacBook-Pro 报告:老版 update checkout tag
  *  会把仓库留在 no branch,本地分支冻结、自动更新看似正常实则失灵)。 */
@@ -494,26 +478,16 @@ async function checkWebLogin(repoRoot: string): Promise<Check[]> {
 }
 
 async function checkWebBuild(repoRoot: string): Promise<Check[]> {
-  const buildId = `${repoRoot}/web/.next/BUILD_ID`;
   if (!existsSync(`${repoRoot}/web/node_modules`)) return []; // 未装 web 的实例不出这条
-  let mtime: number | null = null;
-  try {
-    mtime = statSync(buildId).mtimeMs;
-  } catch { /* 无构建产物 */ }
-  let commitMs: number | null = null;
-  try {
-    const p = Bun.spawn(["git", "log", "-1", "--format=%ct", "--", "web/"], { cwd: repoRoot, stdout: "pipe", stderr: "ignore" });
-    const out = (await new Response(p.stdout).text()).trim();
-    await p.exited;
-    if (/^\d+$/.test(out)) commitMs = Number(out) * 1000;
-  } catch { /* git 不可用 */ }
-  const v = webBuildVerdict(mtime, commitMs);
+  const { readWebBuildFacts, webBuildVerdict } = await import("./web-build.js");
+  const v = webBuildVerdict(readWebBuildFacts(repoRoot));
   return [{
     group: "web",
     name: "构建产物时效",
     status: v.status,
     detail: v.detail,
-    ...(v.status !== "ok" ? { fix: "cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web(或跑 manager update)" } : {}),
+    // manager update 在已是最新时不会构建；install-cli 每次都按同一判据检查并重建
+    ...(v.status !== "ok" ? { fix: "bun src/manager.ts install-cli" } : {}),
   } as Check];
 }
 

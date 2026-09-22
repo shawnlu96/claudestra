@@ -81,7 +81,6 @@ import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } fr
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
-import { resolveNpm } from "./lib/npm-path.js";
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
 import {
@@ -3308,62 +3307,24 @@ async function cmdVersion() {
   });
 }
 
-/** v2.16.3 update 附带的 web 构建(HedeMacBook-Pro owner 提案 + 五条实现约束)。
- *  返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。 */
-async function maybeBuildWeb(
-  fromRef: string,
-  toRef: string
-): Promise<{ built: boolean; restarted?: boolean; skipped?: string; error?: string }> {
-  const webDir = `${REPO_ROOT}/web`;
-  // 约束2:没装 web 的实例跳过,不拖垮整体 update
-  if (!existsSync(`${webDir}/node_modules`)) return { built: false, skipped: "web 未安装(无 node_modules)" };
-  // 约束3:本次 pull 没碰 web/ 就不花这个钱(next build 分钟级,自动更新 30 分钟一轮)
-  const diff = await git("diff", "--name-only", `${fromRef}..${toRef}`, "--", "web/");
-  if (!diff.ok) return { built: false, skipped: `diff 失败(${diff.err}),保守跳过` };
-  const touched = diff.out.split("\n").filter(Boolean);
-  if (!touched.length) return { built: false, skipped: "本次更新未触及 web/" };
-  // v2.17.2:npm 走绝对路径 + 补 PATH(launchd 环境 ENOENT 静默漏建,peer 定案);
-  // spawn 失败也必须冒泡进返回值,不能只留日志
-  const npmBin = resolveNpm();
-  if (!npmBin) {
-    return { built: false, error: "找不到 npm(PATH/nvm/homebrew 都没有)——web 未构建,旧构建仍在服务" };
+/** v2.16.3 update 附带的 web 构建。返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。
+ *  判据与 install-cli / doctor 共用(lib/web-build.ts,按 hash 比对):此前按「本次 diff 是否触及
+ *  web/」触发,某一轮构建失败后下一轮 diff 不再含 web/,就永远不重试。 */
+async function maybeBuildWeb(): Promise<{ built: boolean; restarted?: boolean; restored?: boolean; skipped?: string; error?: string }> {
+  const { rebuildWebIfStale } = await import("./lib/web-build.js");
+  // 没装 web 的实例跳过,不拖垮整体 update
+  if (!existsSync(`${REPO_ROOT}/web/node_modules`)) return { built: false, skipped: "web 未安装(无 node_modules)" };
+  // 构建会删掉正在服务的 .next(成败都一样),所以构建后一律重启 launchd 托管的 web
+  const r = await rebuildWebIfStale(REPO_ROOT, { restartService: true });
+  if (!r.attempted) return { built: false, ...(r.error ? { error: r.error } : { skipped: r.skipped }) };
+  if (!r.ok) {
+    const tail = (r.log ?? []).join("\n");
+    console.error(`[update] web 构建失败:\n${tail}`);
+    return { built: false, restarted: r.restarted, restored: r.restored, error: `${r.error ?? "web 构建失败"}: ${tail.slice(0, 500)}` };
   }
-  const npmEnv = { ...process.env, PATH: `${npmBin.binDir}:${process.env.PATH || ""}` } as Record<string, string>;
-  try {
-    // 依赖变了先装
-    if (touched.some((f) => f === "web/package.json" || f === "web/package-lock.json")) {
-      const ip = Bun.spawn([npmBin.npm, "install"], { cwd: webDir, env: npmEnv, stdout: "pipe", stderr: "pipe" });
-      await ip.exited;
-    }
-    // 约束4:构建失败保留旧构建继续服务,但结果必须显式冒泡
-    const bp = Bun.spawn([npmBin.npm, "run", "build"], { cwd: webDir, env: npmEnv, stdout: "pipe", stderr: "pipe" });
-    const [bout, berr] = await Promise.all([new Response(bp.stdout).text(), new Response(bp.stderr).text()]);
-    await bp.exited;
-    if (bp.exitCode !== 0) {
-      const tail = (berr || bout).split("\n").filter(Boolean).slice(-8).join("\n");
-      console.error(`[update] web 构建失败(保留旧构建继续服务):\n${tail}`);
-      return { built: false, error: `next build 失败(旧构建仍在服务): ${tail.slice(0, 500)}` };
-    }
-  } catch (e) {
-    return { built: false, error: `web 构建 spawn 失败(${(e as Error).message})——旧构建仍在服务` };
-  }
-  // 约束1:重启只在我们「拥有监督者」时做(launchd 服务在场即 kickstart,KeepAlive
-  // 保证拉起)。非 launchd 托管(裸 next start/pm2/别人的 supervisor)不猜不杀——
-  // 按命令行 pkill 会漏真正的 next-server 监听进程,留下占端口孤儿更难查。
-  const svc = Bun.spawn(
-    ["launchctl", "print", `gui/${process.getuid?.() ?? 501}/com.claudestra.web`],
-    { stdout: "ignore", stderr: "ignore" }
-  );
-  await svc.exited;
-  if (svc.exitCode === 0) {
-    const kick = Bun.spawn(
-      ["launchctl", "kickstart", "-k", `gui/${process.getuid?.() ?? 501}/com.claudestra.web`],
-      { stdout: "ignore", stderr: "ignore" }
-    );
-    await kick.exited;
-    return { built: true, restarted: kick.exitCode === 0 };
-  }
-  return { built: true, restarted: false, skipped: "web 非 launchd 托管——已构建,请自行重启 web 进程" };
+  return r.restarted
+    ? { built: true, restarted: true }
+    : { built: true, restarted: false, skipped: "web 非 launchd 托管——已构建,请自行重启 web 进程" };
 }
 
 /** update.lock 互斥。锁文件里是持有者 pid——已有锁时先验持有者是否还活着:
@@ -3434,7 +3395,7 @@ async function cmdUpdateBeta() {
   const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await biProc.exited;
   const rendered = await renderMasterClaude();
-  const webBuild = await maybeBuildWeb(preHead, remote);
+  const webBuild = await maybeBuildWeb();
   const migrateProc = Bun.spawn(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await migrateProc.exited;
   await Bun.sleep(500);
@@ -3509,9 +3470,6 @@ async function cmdUpdate() {
     return;
   }
 
-  // web 构建的变更判定要用 checkout 前的 HEAD
-  const preUpdateHead = (await git("rev-parse", "HEAD")).out.trim();
-
   // 3. fetch tags + checkout release tag
   await git("fetch", "--tags", "--quiet", "origin");
   const checkout = await git("checkout", release.tag, "--quiet");
@@ -3548,11 +3506,10 @@ async function cmdUpdate() {
   // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
   const rendered = await renderMasterClaude();
 
-  // 4c. v2.16.3 web 构建纳入 update(HedeMacBook-Pro owner 提案:此前 bridge 侧
-  //     生效、web 侧继续跑旧构建的「半生效」状态最难排查)。内部自带四道闸:
-  //     未装 web 跳过 / 本次未触及 web/ 跳过 / 构建失败保留旧构建并显式冒泡 /
-  //     仅 launchd 托管时才自动重启。
-  const webBuild = await maybeBuildWeb(preUpdateHead, release.tag);
+  // 4c. v2.16.3 web 构建纳入 update(此前 bridge 侧生效、web 侧继续跑旧构建的「半生效」
+  //     状态最难排查)。闸门:未装 web 跳过 / 构建未过期跳过 / 脏树不建 / 失败换回旧构建
+  //     并显式冒泡 / 仅 launchd 托管时才自动重启。
+  const webBuild = await maybeBuildWeb();
 
   // 5. 执行新版 manager 的 migrate 子命令（新版可能带格式迁移逻辑）
   //    关键：用 subprocess 跑 NEW 版代码，当前进程跑的还是旧版
@@ -5509,6 +5466,8 @@ switch (cmd) {
         // 就是彻底静默：daemon 不装、端口不监听、命令行一个字都不说，
         // 用户只能看到「装完了但网页打不开」。
         webDaemon: result.webDaemon,
+        // web 构建过期时的自动重建结果（没重建 = 构建与代码一致或被闸门拦下，skipped 说明原因）
+        webBuild: result.webBuild,
         // 装完自验的结论提到最外层:「命令报成功但网页打不开」来回过六轮,
         // 就是因为成败藏在一个要自己去翻的字段里。
         ...(result.webDaemon?.installed && !result.webDaemon.serving
