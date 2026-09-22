@@ -91,8 +91,11 @@ describe("buildCodexCommand", () => {
     expect(CODEX_MCP_ENV_VARS).toContain("CLAUDESTRA_RUNTIME");
   });
 
-  test("new 与 resume 同一条命令；fork 换子命令且不报 sid（由线程锁发现）", async () => {
-    expect(buildCodexCommand(spec({ mode: "new" }), "R")).toBe(buildCodexCommand(spec(), "R"));
+  test("new 与 resume 同一条子命令（resume 多带职责前言）；fork 换子命令且不报 sid（由线程锁发现）", async () => {
+    const strip = (c: string) => c.replace(/ CLAUDESTRA_CODEX_PREAMBLE=\S+/, "");
+    expect(buildCodexCommand(spec({ mode: "new" }), "R")).not.toContain("CLAUDESTRA_CODEX_PREAMBLE=");
+    expect(buildCodexCommand(spec(), "R")).toContain("CLAUDESTRA_CODEX_PREAMBLE=");
+    expect(buildCodexCommand(spec({ mode: "new" }), "R")).toBe(strip(buildCodexCommand(spec(), "R")));
     const { env, argv } = await shellArgv(buildCodexCommand(spec({ mode: "fork" }), "R"));
     expect(argv.slice(0, 3)).toEqual(["/opt/homebrew/bin/codex", "fork", SID]);
     expect(env.CLAUDESTRA_SESSION_ID).toBe("");

@@ -601,6 +601,7 @@ async function cmdCreate(
       // v2.16+ purpose 注入:此前 purpose 只进 registry,agent 本体看不到自己的职责
       purpose,
       agentName: tmuxName,
+      cwd: expandedDir,
       // v2.21+ project 上下文注入:目录 + 同伴花名册
       projectContext: await buildProjectContext(proj, tmuxName),
       extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv },
@@ -855,6 +856,7 @@ async function cmdResume(
       bridgeUrl: BRIDGE_URL,
       sessionId,
       displayName: channelName,
+      cwd: resolvedDir,
       effort,
       permissionMode: mode,
       model,
@@ -1627,6 +1629,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       model: info.model,
       purpose: purposeForInject,
       agentName: tmuxName,
+      ...(info.cwd ? { cwd: info.cwd } : {}),
       extras: {
         disallowedPreset: info.disallowedPreset,
         disallowedRaw: info.disallowedRaw,

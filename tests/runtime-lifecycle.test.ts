@@ -233,7 +233,7 @@ describe("manageable 适配器契约", () => {
 
   test("manageable=true 的适配器都实现了生命周期（不能只挂个名）", () => {
     for (const s of allSources()) expect(isManaged(s)).toBe(s.manageable);
-    expect(managed.map((m) => m.id).sort()).toEqual(["claude-code", "pi"]);
+    expect(managed.map((m) => m.id).sort()).toEqual(["claude-code", "codex", "pi"]);
   });
 
   test("每个 manageable 适配器都有退出指令、control、就绪判据、registry 字段", () => {
@@ -303,9 +303,9 @@ describe("control 声明", () => {
     });
   });
 
-  test("Codex 还只读，但打断键已声明为 Escape（空闲时 C-c = 退出）", () => {
+  test("Codex 的打断键是 Escape（空闲时 C-c = 退出）", () => {
     expect(controlFor("codex").interruptKeys).toEqual(["Escape"]);
-    expect(managedFor("codex")).toBeNull();
+    expect(managedFor("codex")?.control.interruptKeys).toEqual(["Escape"]);
   });
 
   test("缺省 / 未知 runtime 回退 CC 的策略（历史数据没有 runtime 字段）", () => {
@@ -320,18 +320,18 @@ describe("control 声明", () => {
 });
 
 describe("managedFor / requireManaged", () => {
-  test("缺省 = Claude Code；认不出 / 只读 = null", () => {
+  test("缺省 = Claude Code；认不出 = null；三种运行时都可启动", () => {
     expect(managedFor(undefined)).toBe(claudeCodeAdapter);
     expect(managedFor("")).toBe(claudeCodeAdapter);
     expect(managedFor("pi")).toBe(piAdapter);
+    expect(managedFor("codex")?.id).toBe("codex");
     expect(managedFor("gpt-9")).toBeNull();
-    expect(managedFor("codex")).toBeNull();
   });
 
-  test("requireManaged 的报错分得清「只读来源」与「不认识」", () => {
-    expect(() => requireManaged("codex")).toThrow(/只读会话来源/);
-    expect(() => requireManaged("gpt-9")).toThrow(/未知的 runtime: "gpt-9"。可用: claude-code, pi/);
-    expect(manageableRuntimeIds()).toEqual(["claude-code", "pi"]);
+  test("requireManaged 认不出的 runtime 报可用清单（只读来源的分支目前没有实例）", () => {
+    expect(requireManaged("codex").id).toBe("codex");
+    expect(() => requireManaged("gpt-9")).toThrow(/未知的 runtime: "gpt-9"。可用: claude-code, pi, codex/);
+    expect(manageableRuntimeIds()).toEqual(["claude-code", "pi", "codex"]);
   });
 });
 

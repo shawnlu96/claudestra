@@ -150,6 +150,12 @@ export function newCodexTranslateState(): CodexTranslateState {
 /** Claudestra exec 引导轮的标记（与 codex-launch.BOOTSTRAP_MARKER 同值；这里不 import，免得只读路径拖进启动器依赖） */
 const BOOTSTRAP_MARKER = "[claudestra:bootstrap]";
 
+/**
+ * 重启 / 收编后第一条投递前附的职责前言（与 codex-launch.CONTEXT_PREAMBLE_MARKER 同值）。
+ * 前言是给模型看的，历史面板只该显示后面的 <channel> 消息本身。
+ */
+const CONTEXT_PREAMBLE_MARKER = "[claudestra:context]";
+
 /** Codex 自己注入的上下文块，以 user 角色落盘但不是用户说的话 */
 const INJECTED_USER_RE = /^\s*(# AGENTS\.md instructions|<INSTRUCTIONS>|<environment_context>|<user_instructions>|<recommended_plugins>)/;
 
@@ -246,6 +252,11 @@ export function codexLineToClaudeShape(line: string, state?: CodexTranslateState
       if (p.role === "developer" || p.role === "system") return null;
       if (p.role === "user") {
         if (INJECTED_USER_RE.test(text)) return null;
+        if (text.trimStart().startsWith(CONTEXT_PREAMBLE_MARKER)) {
+          const at = text.indexOf("<channel ");
+          if (at < 0) return null;
+          return { type: "user", isMeta: true, timestamp: ts, message: { content: text.slice(at) } };
+        }
         if (text.trimStart().startsWith(BOOTSTRAP_MARKER)) {
           if (state) state.bootstrapTurn = true;
           return null;

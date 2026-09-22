@@ -17,7 +17,7 @@ import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
-import { CodexQueueSink, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
+import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -397,6 +397,8 @@ const codexSink = new CodexQueueSink({
     await bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text });
   },
   log: (line) => console.error(line),
+  // 重启 / 收编后的职责前言（codex-launch 经 CLAUDESTRA_CODEX_PREAMBLE 带来；new 模式不带）
+  preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined,
 });
 
 const inboundSink: InboundSink = IS_CODEX ? codexSink : mcpChannelSink;

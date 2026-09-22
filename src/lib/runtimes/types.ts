@@ -76,6 +76,13 @@ export interface SessionSourceAdapter {
 
   /** 一行原文 → Claude Code 形状（不是对话内容返回 null） */
   translateLine(line: string): AnyRecord | null;
+
+  /**
+   * 有状态翻译器（每个文件 / 每个读窗口一个）。行格式需要跨行上下文才能翻对的运行时
+   * 实现它（Codex：按轮丢 code-mode exec、整轮丢 exec 引导）；不实现 = translateLine 本身
+   * 就是无状态的，调用方直接用它。
+   */
+  newTranslator?(): (line: string) => AnyRecord | null;
 }
 
 // ── 生命周期层 ─────────────────────────────────────────────────────────
@@ -126,6 +133,11 @@ export interface LaunchSpec {
   sessionId: string;
   /** 注入给会话的自称（registry 名）。不传 = 不注入 */
   agentName?: string;
+  /**
+   * 会话的工作目录（tmux 窗口的 -c）。CC / Pi 不读它（窗口 cwd 即会话 cwd）；Codex 要拿它
+   * 跑 exec 引导（-C）并写目录信任。不传时 Codex 从 rollout 首行的 session_meta 取。
+   */
+  cwd?: string;
   displayName?: string;
   purpose?: string;
   projectContext?: string;

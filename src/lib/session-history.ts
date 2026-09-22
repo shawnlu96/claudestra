@@ -541,7 +541,7 @@ function parseHistoryLines(
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
     const seq = lineOffset + i;
-    const rec: any = translateSessionLine(runtime, lines[i]);
+    const rec: any = translateSessionLine(runtime, lines[i], lines);
     if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 

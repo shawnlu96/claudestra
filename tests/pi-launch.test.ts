@@ -144,9 +144,9 @@ describe("按 runtime 分发启动器（managedFor）", () => {
     }
   });
 
-  test("认不出 / 只读的 runtime 不回退成 Claude Code（拼错的 --runtime 不能被悄悄当 CC 起）", () => {
+  test("认不出的 runtime 不回退成 Claude Code（拼错的 --runtime 不能被悄悄当 CC 起）", () => {
     expect(managedFor("something-else")).toBeNull();
-    expect(managedFor("codex")).toBeNull();
+    expect(managedFor("codex")?.id).toBe("codex");
   });
 });
 
