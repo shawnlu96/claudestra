@@ -53,7 +53,10 @@ src/
     bg-activity-watcher.ts v2.8+ 后台活动追踪：按 agent 会话发现 subagent jsonl 与后台 shell 输出 → 流进各自的子区（ChatAdapter.provisionThread）+ bg_task_* SSE 事件；v2.14+ Web 来源的回合只发事件不建子区
     archive-sweeper.ts   v2.9+ 每日归档兜底：每 24h 给所有活跃 agent 的会话 jsonl 做快照（幂等 copy-if-larger）——补上崩溃/从未退役这些退役时归档覆盖不到的缺口
   channel-server.ts      每个 session 的 MCP 代理（stdio MCP ↔ Bridge WebSocket）
-  manager.ts             Agent 生命周期 + 定时任务 + 版本/更新 CLI（JSON 输出）
+  manager.ts             Agent 生命周期 + 定时任务 + 版本/更新 CLI（JSON 输出）——入口 + switch，命令族在 manager/
+  manager/               从 manager.ts 逐字拆出的命令族：core.ts（registry 读写、output()、名字校验、argv flag 解析）、
+                         projects / cron / permissions / tokens / peers / cost / auto-update，以及 write-commands.ts
+                         （哪些调用要过认主守卫 + 写锁，带测试）。这里绝不 import manager.ts（顶层即执行 CLI）；stdout 只走 output()
   cron.ts                定时任务调度守护进程（launchd 管理）
   launcher.ts            大总管 tmux session 守护（launchd 管理）
   setup.ts               交互式安装向导
@@ -80,6 +83,8 @@ src/
     reply-nudge.ts       v2.22.x Stop hook「补 reply」拦截规则:该 agent ws 上仍挂着未回复的请求 → 回 {block, reason} 让 Claude Code 续跑一次去调 reply(stop_hook_active / 已拦过 / 刚投递 <500ms 不拦)
     session-archive.ts   v2.8+ 会话退役归档：kill/fork 换代/adopt/resume 换 session 时快照 jsonl 到 ~/.claude-orchestrator/archive/<agent>/（对抗 CC cleanupPeriodDays）
     session-history.ts   v2.9+ 只读历史解析：live + 归档 jsonl → 中性分页消息，支撑 GET /api/v1/agents/:name/history
+    repo-root.ts         SRC_DIR / REPO_ROOT——仓库路径的唯一来源。可能被搬动的模块（manager/*）必须用它：
+                         `${import.meta.dir}/..` 随文件所在目录变义且不报错（其余用法的白名单见 tests/repo-root.test.ts）
   ansi2html.ts           ANSI 转义码 → 彩色 HTML
   html2png.ts            HTML → PNG（Playwright headless Chromium）
   discord-reply.ts       Bash fallback：通过 Bridge 直接发消息

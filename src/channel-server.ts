@@ -7,7 +7,6 @@
  * 环境变量：
  *   DISCORD_CHANNEL_ID  — 此实例对应的 Discord 频道 ID
  *   BRIDGE_URL           — Bridge WebSocket 地址 (默认 ws://localhost:3847)
- *   ALLOWED_USER_ID      — 允许的 Discord 用户 ID (可选)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -16,6 +15,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
+import { REPO_ROOT } from "./lib/repo-root.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -32,10 +32,10 @@ import {
 
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || "";
 const BRIDGE_URL = resolveBridgeUrl();
-const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || "";
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
-const CLAUDESTRA_HOME =
-  process.env.CLAUDESTRA_HOME || `${import.meta.dir}/..`;
+// 仓库目录（拼 discord-reply.ts 兜底命令用）。曾可被 CLAUDESTRA_HOME 覆盖，但没有任何
+// 地方设它，而且这个名字在别处惯指「状态目录」，留着只会被误用——直接取仓库根。
+const CLAUDESTRA_HOME = REPO_ROOT;
 
 // 没有 DISCORD_CHANNEL_ID = 用户自己开的会话（用户级 MCP 注册也会拉起我们）。
 // 不 exit：退出会在用户的 /mcp 里留一条 ✘ failed。改为 0 工具空闲（见 lib/channel-mode.ts）
@@ -146,7 +146,6 @@ function connectBridge(): Promise<void> {
         JSON.stringify({
           type: "register",
           channelId: CHANNEL_ID,
-          userId: ALLOWED_USER_ID || undefined,
           cwd: process.cwd(),
           // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新
           // pid 只出现一次）和「两个活实例在对抢」（同一个 pid 被顶掉又抢回来），

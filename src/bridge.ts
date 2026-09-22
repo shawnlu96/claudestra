@@ -19,7 +19,7 @@ let codexInflight = 0;
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
-initLang(); // 同步载一次 lang（pm2 fork 模式不支持 top-level await）
+initLang(); // 同步载一次 lang（<1KB 同步读；后面任何 t() 都拿到已载入的语言）
 
 import {
   Client,
@@ -63,6 +63,7 @@ import {
   handleMgmtSelect,
 } from "./bridge/management.js";
 import { tmuxScreenshot } from "./bridge/screenshot.js";
+import { isAutoPermButton, parseAutoPermButton, autoRevertButtonId } from "./bridge/auto-allow.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
@@ -2441,10 +2442,9 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
       }
 
       // v2.2.0+: auto 拦截「临时放行并重试」—— Shift+Tab 运行时切到 bypass + 注入重试
-      if (id.startsWith("auto_allow:") || id.startsWith("auto_revert:")) {
-        const isAllow = id.startsWith("auto_allow:");
-        const targetChannelId = id.slice((isAllow ? "auto_allow:" : "auto_revert:").length);
-        const target = isAllow ? "bypassPermissions" : "auto";
+      if (isAutoPermButton(id)) {
+        // 切回的目标 = 放行前记下的模式（编在 revert 按钮 id 里），见 bridge/auto-allow.ts
+        const { isAllow, channelId: targetChannelId, target } = parseAutoPermButton(id)!;
         try {
           const listResult = await runManager("list");
           const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
@@ -2483,20 +2483,20 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
               startTypingWithSafety(targetChannelId);
               client.ws.send(JSON.stringify({
                 type: "message",
-                content: `[系统] 刚才被 auto 模式拦下的操作，用户已临时放行（已切到 bypass permissions）。请重试那个操作。完成后简单说一句，方便用户把你切回 auto。`,
+                content: `[系统] 刚才被 auto 模式拦下的操作，用户已临时放行（已切到 bypass permissions）。请重试那个操作。完成后简单说一句，方便用户把你切回原来的模式（${cur}）。`,
                 meta: { chat_id: targetChannelId, message_id: "", user: interaction.user.username, user_id: interaction.user.id, ts: new Date().toISOString() },
               }));
             }
             const note = after === "bypassPermissions" ? "已临时切到 bypass 并让它重试" : `尝试切 bypass（当前检测=${after || "?"}）并让它重试`;
             await interaction.message?.edit({
-              content: `⚡ ${agent.name}：${note}。完事点下面切回 auto。`,
+              content: `⚡ ${agent.name}：${note}。完事点下面切回 ${cur}。`,
               components: buildComponents([
-                { type: "buttons", buttons: [{ id: `auto_revert:${targetChannelId}`, label: "切回 auto", emoji: "🔒", style: "secondary" }] },
+                { type: "buttons", buttons: [{ id: autoRevertButtonId(targetChannelId, cur), label: `切回 ${cur}`, emoji: "🔒", style: "secondary" }] },
               ]),
             }).catch(() => {});
           } else {
             await interaction.message?.edit({
-              content: after === "auto" ? `🔒 ${agent.name} 已切回 auto。` : `🔒 ${agent.name} 切回 auto（当前检测=${after || "?"}）。`,
+              content: after === target ? `🔒 ${agent.name} 已切回 ${target}。` : `🔒 ${agent.name} 切回 ${target}（当前检测=${after || "?"}）。`,
               components: [],
             }).catch(() => {});
           }

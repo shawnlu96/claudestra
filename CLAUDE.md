@@ -75,7 +75,11 @@ src/
     claudestra-extension.ts  v2.23+ Pi agent 侧通道：与 channel-server 同一套 bridge ws 协议，
                             但靠 Pi 扩展 API 注入消息（pi.sendUserMessage）并在 agent_settled
                             时上报回合结束；仅当 DISCORD_CHANNEL_ID 存在时生效
-  manager.ts             Agent lifecycle + cron + version/update CLI (JSON output)
+  manager.ts             Agent lifecycle + cron + version/update CLI (JSON output) — entry + switch; command families live in manager/
+  manager/               Command families split out of manager.ts (moved verbatim): core.ts (registry read/write, output(),
+                         name validation, argv flag parsing), projects / cron / permissions / tokens / peers / cost /
+                         auto-update, and write-commands.ts (which invocations need the owner guard + write lock — tested).
+                         Never import manager.ts from here (its top level runs the CLI); stdout only via output()
   cron.ts                Cron scheduler daemon (launchd-managed)
   launcher.ts            Master tmux session guardian (launchd-managed)
   setup.ts               Interactive installation wizard
@@ -121,6 +125,8 @@ src/
     reply-nudge.ts       v2.22.x Stop hook「补 reply」拦截规则:该 agent ws 上仍挂着未回复的请求 → 回 {block, reason} 让 Claude Code 续跑一次去调 reply(stop_hook_active / 已拦过 / 刚投递 <500ms 不拦)
     session-archive.ts   v2.8+ session jsonl snapshot on retirement (kill / fork rotation / adopt / resume-replace) → ~/.claude-orchestrator/archive/<agent>/ — counters CC cleanupPeriodDays
     session-history.ts   v2.9+ read-only history parsing: live + archived session jsonl → neutral paginated messages, backs GET /api/v1/agents/:name/history
+    repo-root.ts         SRC_DIR / REPO_ROOT — the one place that derives repo paths. Modules that may move (manager/*) must use it:
+                         `${import.meta.dir}/..` silently changes meaning when a file changes directory (tests/repo-root.test.ts whitelists the rest)
   ansi2html.ts           ANSI escape codes → coloured HTML
   html2png.ts            HTML → PNG via Playwright headless Chromium
   discord-reply.ts       Bash fallback: send a message through the Bridge directly

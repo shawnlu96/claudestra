@@ -8,8 +8,9 @@
  * 为什么不直接每次读 config 文件？—— `t()` 调用高频（bridge 每条消息都会走），
  * 同步读文件太慢。一次载入内存，进程生命周期内都有效。config 变了要重启服务。
  *
- * initLang **同步** 读文件 —— top-level await 在 pm2 fork mode 跑 bundle 时
- * 不支持（require() 报 "async module unsupported"），所以用 readFileSync。
+ * initLang **同步** 读文件（readFileSync）：各入口在模块顶层调用它，同步读保证之后任何
+ * t() 都拿到已载入的语言。最初是因为 pm2 fork mode 不支持 top-level await 才这么定；
+ * 现在守护进程由 launchd 直跑，这个限制已不存在，同步读只是更简单。
  * Config 文件很小（<1KB），同步读启动期只会跑一次，性能无感。
  */
 import { readFileSync, existsSync } from "fs";

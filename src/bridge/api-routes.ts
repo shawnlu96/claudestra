@@ -14,7 +14,7 @@ import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.j
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { interruptAgent } from "../lib/runtimes/window-ops.js";
 import { existsSync, readdirSync, statSync } from "fs";
-import { TMP_DIR, MASTER_DIR, INBOX_DIR } from "./config.js";
+import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT } from "./config.js";
 import {
   readPrincipals,
   findByBearer,
@@ -2263,7 +2263,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!principal.agents.includes("*")) {
       return apiJson(403, { ok: false, error: "update requires a full-scope token" });
     }
-    const repoRoot = `${import.meta.dir}/../..`;
+    const repoRoot = REPO_ROOT;
     const log = `${process.env.HOME}/.claude-orchestrator/logs/update.log`;
     try {
       Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${repoRoot}/src/manager.ts" update >> "${log}" 2>&1`], {
@@ -2307,7 +2307,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       body = (await req.json()) ?? {};
     } catch { /* 空 body = 默认全带上 */ }
     const includeMaster = body?.includeMaster !== false;
-    const repoRoot = `${import.meta.dir}/../..`;
+    const repoRoot = REPO_ROOT;
     const log = `${process.env.HOME}/.claude-orchestrator/logs/restart-all.log`;
     const flag = includeMaster ? " --include-master" : "";
     try {
