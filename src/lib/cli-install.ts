@@ -36,7 +36,7 @@
 
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { resolveBunPath } from "./bun-path.js";
 import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./session-recall.js";
@@ -182,6 +182,43 @@ function which(cmd: string): string | null {
   return p && r.status === 0 ? p : null;
 }
 
+/**
+ * 写进 plist 的可执行文件路径。
+ *
+ * ⚠ 这里有两个**方向相反**的坑，所以既不能「一律用 which 的结果」也不能「一律 realpath」：
+ *
+ *  1. **临时软链**：fnm 默认把 node 挂在
+ *     `~/Library/Caches/fnm_multishells/<pid>_<ts>/bin/node` —— 那个目录随装机
+ *     那个 shell 退出就没了。which 当场找得到、写进 plist，launchd 再去执行时路径
+ *     已经不存在 ⇒ `launchctl list` 报 exit **127（命令找不到）**，而 KeepAlive 会
+ *     安静地一直重试。这种必须 realpath 到真实安装位置。
+ *
+ *  2. **跟随升级的稳定软链**：brew 的 `/opt/homebrew/bin/node` 正是我们想要的形态
+ *     ——它始终指向当前版本。realpath 反而得到
+ *     `/opt/homebrew/Cellar/node/26.4.0/bin/node`，**下次 brew 升级 node 这个路径
+ *     就消失了**，等于把一个好路径换成会过期的。
+ *
+ * 所以只对「看起来是临时的」才 realpath：多壳缓存目录、/tmp、/var/folders。
+ * 其余保持原样。两种情况最后都验一次文件真的在。
+ * （同一条教训在 lib/claude-binary.ts 上踩过一次，那次是 claude。）
+ */
+const EPHEMERAL_BIN_RE = /(fnm_multishells|^\/tmp\/|^\/var\/folders\/|\/Caches\/)/;
+
+export function preferStablePath(p: string, resolve: (x: string) => string, exists: (x: string) => boolean): string | null {
+  let chosen = p;
+  if (EPHEMERAL_BIN_RE.test(p)) {
+    try { chosen = resolve(p); } catch { chosen = p; }
+  }
+  if (exists(chosen)) return chosen;
+  return exists(p) ? p : null;
+}
+
+function stableBinPath(cmd: string): string | null {
+  const p = which(cmd);
+  if (!p) return null;
+  return preferStablePath(p, realpathSync, existsSync);
+}
+
 function getUid(): string {
   const r = spawnSync("/usr/bin/id", ["-u"], { encoding: "utf8" });
   return (r.stdout || "").trim() || "501";
@@ -197,7 +234,7 @@ function buildEnvPath(): string {
   // node 的实际所在目录排在最前：nvm / fnm / volta 的路径不在下面这份固定列表里，
   // 而 web daemon 与它派生的子进程都要用到 node（见 webDaemonSpec 的注释）。
   const nodeDir = (() => {
-    const p = which("node");
+    const p = stableBinPath("node");
     return p ? dirname(p) : null;
   })();
   return [
@@ -786,7 +823,7 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     envLocal: existsSync(`${webDir}/.env.local`),
   });
   const webPort = webPortFromStartScript(webPkgStart);
-  const nodePath = which("node");
+  const nodePath = stableBinPath("node");
   const extraDaemons = webReady.ready ? [webDaemonSpec(repoRoot, webPort, nodePath)] : [];
   if (webReady.ready && !nodePath) {
     warnings.push("PATH 里找不到 node —— web daemon 只能靠 next 的 shebang 解析它，nvm/fnm 装的 node 会起不来");
