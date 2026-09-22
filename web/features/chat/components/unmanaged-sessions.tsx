@@ -158,6 +158,8 @@ export function UnmanagedSessions() {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  // 「刚刚活跃」的参照时刻取**列表拉到的那一刻**，不在渲染里读 Date.now()（渲染要纯，react-hooks/purity）
+  const [fetchedAt, setFetchedAt] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [viewing, setViewing] = useState<SessionRow | null>(null);
@@ -178,6 +180,7 @@ export function UnmanagedSessions() {
     setError("");
     try {
       setSessions(await fetchSessions());
+      setFetchedAt(Date.now());
     } catch (e) {
       setError((e as Error).message);
       setSessions([]);
@@ -194,7 +197,10 @@ export function UnmanagedSessions() {
     let cancelled = false;
     void fetchSessions()
       .then((rows) => {
-        if (!cancelled) setSessions(rows);
+        if (!cancelled) {
+          setSessions(rows);
+          setFetchedAt(Date.now());
+        }
       })
       .catch((e: Error) => {
         if (cancelled) return;
@@ -245,7 +251,7 @@ export function UnmanagedSessions() {
   const LIVE_MS = 2 * 60_000;
   const isLive = (s: SessionRow) => {
     const t = Date.parse(s.modifiedAt);
-    return Number.isFinite(t) && Date.now() - t < LIVE_MS;
+    return Number.isFinite(t) && fetchedAt - t < LIVE_MS;
   };
 
   return (
