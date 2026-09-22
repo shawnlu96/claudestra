@@ -4193,20 +4193,13 @@ async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl
 async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
   const port = (() => { try { return new URL(failedUrl).port || "3847"; } catch { return "3847"; } })();
   const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
-  // tailscale CLI:PATH 里的优先,mac App 路径兜底
-  let out = "";
-  for (const bin of ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
-    try {
-      const proc = Bun.spawn([bin, "status", "--json"], { stdout: "pipe", stderr: "ignore" });
-      out = await new Response(proc.stdout).text();
-      await proc.exited;
-      if (out.trim().startsWith("{")) break;
-    } catch { /* 下一个候选 */ }
-  }
-  if (!out.trim().startsWith("{")) return [];
+  // CLI 定位统一走 lib/tailscale（PATH → App 包内 → 常见位置），与 setup / doctor / bridge 同一套
+  const { readTailscaleStatusRaw } = await import("./lib/tailscale.js");
+  const raw = await readTailscaleStatusRaw();
+  if (!raw) return [];
   const ips: string[] = [];
   try {
-    const j = JSON.parse(out) as { Peer?: Record<string, { TailscaleIPs?: string[]; Online?: boolean }> };
+    const j = raw as { Peer?: Record<string, { TailscaleIPs?: string[]; Online?: boolean }> };
     for (const p of Object.values(j.Peer || {})) {
       if (p.Online === false) continue;
       const v4 = (p.TailscaleIPs || []).find((ip) => /^100\./.test(ip));

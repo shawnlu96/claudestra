@@ -23,16 +23,15 @@
 
 import { spawnSync } from "child_process";
 import { existsSync, statSync } from "fs";
+import { resolveTailscaleCli } from "../../src/lib/tailscale";
 
 const HOME = process.env.HOME!;
 const TLS_DIR = `${HOME}/.claude-orchestrator/web/tls`;
 const CERT = `${TLS_DIR}/mac.crt`;
 const KEY = `${TLS_DIR}/mac.key`;
-// 你自己的 tailnet 主机名与 Tailscale CLI 路径，从环境变量读（此前这两个值写死
-// 的是作者本机的，别人跑这个脚本必然签不出证书）。App Store 版 Tailscale 的 CLI
-// 在 /Applications/... ，brew 版通常在 /opt/homebrew/bin/tailscale。
-const TS_CLI =
-  process.env.TLS_PROXY_TS_CLI || "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+// 你自己的 tailnet 主机名从环境变量读（此前写死的是作者本机的，别人跑必然签不出证书）。
+// CLI 定位走 src/lib/tailscale（TLS_PROXY_TS_CLI 覆盖 → PATH → App 包内 → brew 位置）。
+const TS_CLI = resolveTailscaleCli() || "tailscale";
 const TS_HOST = process.env.TLS_PROXY_HOST || "";
 if (!TS_HOST) {
   console.error(
