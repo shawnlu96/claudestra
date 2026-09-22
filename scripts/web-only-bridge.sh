@@ -21,12 +21,15 @@ TMUX_BIN="$(command -v tmux || echo /opt/homebrew/bin/tmux)"
 
 mkdir -p /tmp/claude-orchestrator
 
-# ① 幂等确保 master session（base-index 0，与 launcher.ts 一致）。
+# ① 幂等确保 master session（base-index 0、window 0 定名 master，与 launcher.ts 一致）。
 #    window:0 的 cwd 必须是 master/（MASTER_DIR），大总管才会加载 master/CLAUDE.md 的
 #    调度员 persona（否则在 repo 根会误加载架构文档 apps/claudestra/CLAUDE.md）。
-if ! "$TMUX_BIN" -S "$SOCK" has-session -t master 2>/dev/null; then
-  "$TMUX_BIN" -S "$SOCK" new-session -d -s master -c "$REPO/master"
+#    -f /dev/null：这是私有 server，不读用户的 ~/.tmux.conf（与 tmux-helper 同口径）。
+if ! "$TMUX_BIN" -f /dev/null -S "$SOCK" has-session -t master 2>/dev/null; then
+  "$TMUX_BIN" -f /dev/null -S "$SOCK" new-session -d -s master -n master -c "$REPO/master"
   "$TMUX_BIN" -S "$SOCK" set-option -t master base-index 0 2>/dev/null || true
+  "$TMUX_BIN" -S "$SOCK" set-option -w -t master:0 automatic-rename off 2>/dev/null || true
+  "$TMUX_BIN" -S "$SOCK" set-option -w -t master:0 allow-rename off 2>/dev/null || true
 fi
 
 # ② 大总管（master orchestrator）的合成控制频道 id。Web-only 无 Discord #control，

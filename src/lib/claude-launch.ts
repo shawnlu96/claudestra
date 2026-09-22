@@ -8,6 +8,7 @@
  */
 
 import { resolveBridgeUrl } from "./bridge-url.js";
+import { bridgePortOf } from "./bridge-port.js";
 
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 
@@ -295,9 +296,13 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   //   症状是「bridge 完全健康，但所有 agent 永远离线」。见 lib/bridge-url.ts。
   const bridgeUrl = opts.bridgeUrl || resolveBridgeUrl();
 
+  // BRIDGE_PORT 也显式带上：tmux 全局环境停在 server 创建那一刻，改过端口后新窗口继承的
+  // 仍是旧值，而 hook 等子进程会读它（见 lib/bridge-port.ts）
+  const port = bridgePortOf(bridgeUrl);
   const prefix =
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
+    (port ? `BRIDGE_PORT=${port} ` : "") +
     `MCP_NAME=${shellEscape(MCP_NAME)}`;
 
   // 解析 disallowedTools

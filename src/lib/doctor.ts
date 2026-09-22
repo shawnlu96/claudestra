@@ -181,7 +181,11 @@ async function checkDaemons(): Promise<Check[]> {
   if (process.platform !== "darwin") return out;
 
   const list = await sh(["launchctl", "list"]);
-  for (const label of ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron"]) {
+  // web 服务只在装过（plist 存在）时才查：没选 web 的实例不该因此亮灯
+  const webPlist = `${HOME}/Library/LaunchAgents/com.claudestra.web.plist`;
+  const labels = ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron",
+    ...(existsSync(webPlist) ? ["com.claudestra.web"] : [])];
+  for (const label of labels) {
     const plist = `${HOME}/Library/LaunchAgents/${label}.plist`;
     const line = list.out.split("\n").find((l) => l.endsWith(label) || l.includes(`\t${label}`));
     if (!line) {
@@ -282,6 +286,21 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
       out.push({ group: g, name: "BRIDGE_URL 端口", status: "fail", detail: mismatch,
         fix: "把 .env 里的 BRIDGE_URL 删掉（会自动按 BRIDGE_PORT 推），或改成同一个端口" });
     }
+    // tmux 全局环境停在 server 创建那一刻：与 .env 不一致 = 在跑的会话还连着旧地址
+    const { resolveBridgeUrl } = await import("./bridge-url.js");
+    const { bridgeDrift, parseTmuxEnvLine } = await import("./bridge-port.js");
+    const tenv = await sh(["tmux", "-S", "/tmp/claude-orchestrator/master.sock", "show-environment", "-g"]);
+    if (tenv.ok && tenv.out) {
+      const drift = bridgeDrift(
+        { BRIDGE_URL: parseTmuxEnvLine(tenv.out, "BRIDGE_URL"), BRIDGE_PORT: parseTmuxEnvLine(tenv.out, "BRIDGE_PORT") },
+        resolveBridgeUrl({ BRIDGE_URL: pick("BRIDGE_URL"), BRIDGE_PORT: pick("BRIDGE_PORT") }),
+      );
+      out.push(drift
+        ? { group: g, name: "会话连接地址", status: "fail",
+            detail: `tmux 里的会话按 ${drift.from} 启动，.env 现在是 ${drift.to} —— 这些会话连不上 bridge`,
+            fix: "launchctl kickstart -k gui/$(id -u)/com.claudestra.launcher（launcher 会在新 bridge 应答后重启全部会话）" }
+        : { group: g, name: "会话连接地址", status: "ok", detail: "tmux 全局环境与 .env 一致" });
+    }
   } catch { /* 没有 .env 就跳过 */ }
 
   try {
@@ -356,8 +375,8 @@ async function checkIntegration(repoRoot: string): Promise<Check[]> {
  * 把一条本该有意义的信号（「它自称 active，窗口却没了」= 掉线/被 kill/换了 session）
  * 变成了永久噪声。`manager.ts list` 的孤儿检测一直就是只看 active 的，这里对齐。
  *
- * ⚠ 大总管也要跳过：它的 window 名是裸 `master`，registry 的键却是 `agent-master`
- * （见 registry.isMasterAgent），按名字比对必然对不上 ⇒ 恒判孤儿。
+ * ⚠ 大总管也要跳过：它的 window 名是裸 `master`（未定名的老窗口则是 claude / 版本号），
+ * registry 的键却是 `agent-master`（见 registry.isMasterAgent），按名字比对必然对不上 ⇒ 恒判孤儿。
  */
 export function orphanAgentNames(
   agents: Array<{ name: string; status?: string }>,
@@ -394,30 +413,16 @@ async function checkAgents(): Promise<Check[]> {
   const missing = orphanAgentNames(agents, windows);
   const active = agents.filter((a) => a.status === "active").length;
   out.push(missing.length === 0
-    ? { group: g, name: "tmux window", status: "ok", detail: `${windows.size} 个 window，${active} 个 active agent 都在` }
+    ? { group: g, name: "tmux window", status: "ok",
+        // 私有 socket：普通 `tmux ls` 看不到这些会话，把能看到的命令直接给出来
+        detail: `${windows.size} 个 window，${active} 个 active agent 都在（查看：tmux -S ${sock} ls，或 claudestra ls）` }
     : { group: g, name: "tmux window", status: "warn", detail: `registry 说 active 但 tmux 里没有：${missing.join(", ")}`,
         fix: `bun src/manager.ts restart <name> 重新拉起，或 bun src/manager.ts remove <name> 清掉登记` });
   return out;
 }
 
-/** v2.16.3 web 构建时效判定(纯函数,单测覆盖):BUILD_ID 的 mtime 早于最后一次
- *  触及 web/ 的 commit 时间 = 构建产物落后于代码,「bridge 生效、web 跑旧构建」
- *  的半生效状态(HedeMacBook-Pro 排查法沉淀)。60s 容差吸收 commit/build 同分钟
- *  的时钟粒度。 */
-export function webBuildVerdict(
-  buildIdMtimeMs: number | null,
-  lastWebCommitMs: number | null
-): { status: CheckStatus; detail: string } {
-  if (buildIdMtimeMs === null) return { status: "warn", detail: "web 无构建产物(.next/BUILD_ID 不存在)" };
-  if (lastWebCommitMs === null) return { status: "ok", detail: "无法取得 web/ 提交时间,跳过比对" };
-  if (buildIdMtimeMs + 60_000 < lastWebCommitMs) {
-    return {
-      status: "warn",
-      detail: `web 构建产物落后于代码(BUILD_ID ${new Date(buildIdMtimeMs).toISOString()} < 最后 web 提交 ${new Date(lastWebCommitMs).toISOString()})`,
-    };
-  }
-  return { status: "ok", detail: "web 构建产物不落后于代码" };
-}
+/** web 构建时效判定：与 install-cli 的自动重建共用同一判据（按 hash，见 lib/web-build.ts） */
+export { webBuildVerdict } from "./web-build.js";
 
 /** v2.16.3 detached HEAD 检查(HedeMacBook-Pro 报告:老版 update checkout tag
  *  会把仓库留在 no branch,本地分支冻结、自动更新看似正常实则失灵)。 */
@@ -494,27 +499,36 @@ export async function checkWebLogin(repoRoot: string): Promise<Check[]> {
 }
 
 async function checkWebBuild(repoRoot: string): Promise<Check[]> {
-  const buildId = `${repoRoot}/web/.next/BUILD_ID`;
   if (!existsSync(`${repoRoot}/web/node_modules`)) return []; // 未装 web 的实例不出这条
-  let mtime: number | null = null;
-  try {
-    mtime = statSync(buildId).mtimeMs;
-  } catch { /* 无构建产物 */ }
-  let commitMs: number | null = null;
-  try {
-    const p = Bun.spawn(["git", "log", "-1", "--format=%ct", "--", "web/"], { cwd: repoRoot, stdout: "pipe", stderr: "ignore" });
-    const out = (await new Response(p.stdout).text()).trim();
-    await p.exited;
-    if (/^\d+$/.test(out)) commitMs = Number(out) * 1000;
-  } catch { /* git 不可用 */ }
-  const v = webBuildVerdict(mtime, commitMs);
+  const { readWebBuildFacts, webBuildVerdict } = await import("./web-build.js");
+  const v = webBuildVerdict(readWebBuildFacts(repoRoot));
   return [{
     group: "web",
     name: "构建产物时效",
     status: v.status,
     detail: v.detail,
-    ...(v.status !== "ok" ? { fix: "cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web(或跑 manager update)" } : {}),
-  } as Check];
+    // manager update 在已是最新时不会构建；install-cli 每次都按同一判据检查并重建
+    ...(v.status !== "ok" ? { fix: "bun src/manager.ts install-cli" } : {}),
+  } as Check, ...(await checkWebPort(repoRoot))];
+}
+
+/** web 端口：有没有人听、听的是不是 launchd 托管的那份（常见开发端口被占时服务会崩溃循环） */
+async function checkWebPort(repoRoot: string): Promise<Check[]> {
+  if (process.platform !== "darwin" || !existsSync(`${HOME}/Library/LaunchAgents/com.claudestra.web.plist`)) return [];
+  const { webPortFromStartScript, listenersOf, launchdPidOf, portOwnerConflict } = await import("./cli-install.js");
+  let start: string | undefined;
+  try { start = JSON.parse(await readFile(`${repoRoot}/web/package.json`, "utf-8"))?.scripts?.start; } catch { /* 用默认端口 */ }
+  const port = webPortFromStartScript(start);
+  const listeners = listenersOf(port);
+  if (listeners.length === 0) {
+    return [{ group: "web", name: `端口 ${port}`, status: "fail", detail: "没有进程在监听 —— 网页打不开",
+      fix: `看日志 ${resolveLogPath("web", "err")}，再 launchctl kickstart -k gui/$(id -u)/com.claudestra.web` }];
+  }
+  const conflict = portOwnerConflict(listeners, launchdPidOf("com.claudestra.web"));
+  return [conflict
+    ? { group: "web", name: `端口 ${port}`, status: "fail", detail: conflict,
+        fix: `lsof -nP -iTCP:${port} -sTCP:LISTEN 找出占用者并停掉，再 launchctl kickstart -k gui/$(id -u)/com.claudestra.web` }
+    : { group: "web", name: `端口 ${port}`, status: "ok", detail: `由 launchd 托管进程监听（pid ${listeners[0]!.pid}）` }];
 }
 
 // ────────────────────────────────────────────

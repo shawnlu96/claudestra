@@ -43,6 +43,7 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
+import { rebuildWebIfStale, restartWebService, type WebBuildResult } from "./web-build.js";
 
 const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 
@@ -169,6 +170,8 @@ export interface DaemonHealth {
   repaired: boolean;
   /** 仍不健康时附上 .err 的末尾几行（已去重） */
   log?: string[];
+  /** 端口在应答，但应答的不是 launchd 托管的进程（被别的程序占了） */
+  conflict?: string;
 }
 
 export interface DaemonInstall {
@@ -207,6 +210,8 @@ export interface InstallCliResult {
     | { installed: false; reason?: string };
   /** v2.24+ 装完逐个探活；不健康的自动 kickstart 一次再探 */
   daemonHealth?: DaemonHealth[];
+  /** web 构建过期（按 hash 判）就在 reload 之前重建；失败只进 warnings */
+  webBuild?: WebBuildResult;
   errors: string[];
   warnings: string[];
 }
@@ -305,8 +310,11 @@ function buildEnvPath(): string {
     const p = stableBinPath("node");
     return p ? dirname(p) : null;
   })();
+  // bun 所在目录同理（mise / asdf 装的 bun 不在 ~/.bun/bin）：daemon 派生的子进程与 hook 要找得到它
+  const bunDir = dirname(resolveBunPath());
   return [
     ...(nodeDir ? [nodeDir] : []),
+    ...(bunDir && bunDir !== `${home}/.bun/bin` ? [bunDir] : []),
     `${home}/.bun/bin`,
     `${home}/.local/bin`,
     "/opt/homebrew/bin",
@@ -332,14 +340,37 @@ async function writeCliWrapper(repoRoot: string, _bunPath: string): Promise<stri
   const fallback = `${home}/.bun/bin/claudestra`;
   await mkdir(`${home}/.local/bin`, { recursive: true });
   await mkdir(`${home}/.bun/bin`, { recursive: true });
+  const content = cliWrapperScript(repoRoot);
+  // 老版本可能在 primary 写过 symlink（甚至 ~/.local/bin <-> ~/.bun/bin 循环），
+  // writeFile 会 ELOOP；先 unlink 容错再写真实文件。
+  await unlink(primary).catch(() => {});
+  await writeFile(primary, content);
+  await chmod(primary, 0o755);
+  // ~/.bun/bin/claudestra symlink → primary（两个 PATH 选项都覆盖）
+  try {
+    await unlink(fallback).catch(() => {});
+    await symlink(primary, fallback);
+  } catch { /* 非关键 */ }
+  return primary;
+}
+
+/** `claudestra` 包装脚本的内容（纯函数，单测做 bash -n 语法检查） */
+export function cliWrapperScript(repoRoot: string): string {
   const daemonLabels = DAEMONS.map((d) => `"${d.label}"`).join(" ");
-  const content = `#!/usr/bin/env bash
+  return `#!/usr/bin/env bash
 # claudestra — one-shot launcher (Claudestra-installed, v2.4.1+)
+# 用法：
+#   claudestra                 检查 daemon 后 attach（在 iTerm 里用 -CC 原生标签，其它终端用普通 tmux）
+#   claudestra attach --plain  强制普通 tmux attach（任何终端都能用）
+#   claudestra attach --iterm  不在 iTerm 里也唤起 iTerm 新窗口走 -CC
+#   claudestra ls              列出 master session 里的窗口（agent）
 # 流程：
 #   1) launchctl 检查 3 个 daemon，没 load 的 bootstrap
 #   2) 已在 tmux 嵌套，提示 + 退出
-#   3) 在 iTerm：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
-#   4) 不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+#   3) 在 iTerm（且没 --plain）：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
+#   4) --iterm 且装了 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+#   5) 其余（--plain / Terminal.app / ssh 等）：普通 tmux attach
+#      （-CC 在普通终端里只会吐控制协议文本；ssh 进来时唤起 iTerm 会开在远端桌面上）
 set -u
 
 REPO=${JSON.stringify(repoRoot)}
@@ -347,6 +378,28 @@ SOCK=${JSON.stringify(TMUX_SOCK)}
 DAEMONS=(${daemonLabels})
 PLIST_DIR="$HOME/Library/LaunchAgents"
 ATTACH=(tmux -S "$SOCK" -CC attach -t master)
+PLAIN_ATTACH=(tmux -S "$SOCK" attach -t master)
+
+MODE=auto
+case "\${1:-}" in
+  ls|list)
+    echo "会话在私有 socket（$SOCK）里，普通 tmux ls 看不到是正常的。"
+    exec tmux -S "$SOCK" list-windows -t master -F '#{window_index}  #{window_name}'
+    ;;
+  attach)
+    case "\${2:-}" in
+      --plain) MODE=plain ;;
+      --iterm) MODE=iterm ;;
+    esac
+    ;;
+  --plain) MODE=plain ;;
+  --iterm) MODE=iterm ;;
+  "") ;;
+  *)
+    echo "用法: claudestra [attach [--plain|--iterm] | ls]"
+    exit 2
+    ;;
+esac
 
 UID_NUM=$(/usr/bin/id -u)
 
@@ -358,6 +411,7 @@ CB=$'\\033[1;36m'
 CR=$'\\033[0m'
 
 echo "\${CB}🚀 Claudestra\${CR} \\033[2m↗ $REPO\\033[0m"
+echo "$CI 会话在私有 socket 里，普通 tmux ls 看不到是正常的；看窗口用 claudestra ls；iTerm 外的终端自动走普通 tmux attach"
 
 missing=()
 for d in "\${DAEMONS[@]}"; do
@@ -390,13 +444,20 @@ if [ -n "\${TMUX:-}" ]; then
 fi
 
 # 在 iTerm：exec 替换当前进程，让 tmux 直接成为 iTerm 子进程（-CC 协议字节直送 PTY）
-if [ "\${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+if [ "$MODE" != plain ] && [ "\${TERM_PROGRAM:-}" = "iTerm.app" ]; then
   echo "$CI 在 iTerm，exec tmux -CC（iTerm 集成会切到 native tabs）"
   exec "\${ATTACH[@]}"
 fi
 
-# 不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
-echo "$CI 不在 iTerm，AppleScript 唤起 iTerm 新窗口…"
+# 其余一律普通 tmux attach，任何终端都能用；只有显式 --iterm 才去唤起 iTerm
+if [ "$MODE" != iterm ] || [ ! -d /Applications/iTerm.app ]; then
+  [ "$MODE" = iterm ] && echo "$CW 没装 iTerm，改用普通 tmux attach"
+  echo "$CI 普通 tmux attach（切窗口 Ctrl-B n/p，离开 Ctrl-B d；要 iTerm 原生标签：claudestra attach --iterm）"
+  exec "\${PLAIN_ATTACH[@]}"
+fi
+
+# --iterm 且不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+echo "$CI AppleScript 唤起 iTerm 新窗口…"
 ATTACH_STR="\${ATTACH[*]}"
 /usr/bin/osascript <<APPLESCRIPT
 tell application "iTerm"
@@ -409,21 +470,10 @@ rc=$?
 if [ "$rc" -eq 0 ]; then
   echo "$CO 已在 iTerm 打开新窗口并 attach 到 master"
 else
-  echo "$CF osascript 失败，手动跑：\${ATTACH[*]}"
+  echo "$CF osascript 失败。在 iTerm 里手动跑：\${ATTACH[*]}；其它终端：claudestra attach --plain"
 fi
 exit "$rc"
 `;
-  // 老版本可能在 primary 写过 symlink（甚至 ~/.local/bin <-> ~/.bun/bin 循环），
-  // writeFile 会 ELOOP；先 unlink 容错再写真实文件。
-  await unlink(primary).catch(() => {});
-  await writeFile(primary, content);
-  await chmod(primary, 0o755);
-  // ~/.bun/bin/claudestra symlink → primary（两个 PATH 选项都覆盖）
-  try {
-    await unlink(fallback).catch(() => {});
-    await symlink(primary, fallback);
-  } catch { /* 非关键 */ }
-  return primary;
 }
 
 function buildDaemonPlist(
@@ -838,7 +888,11 @@ function systemdUnitHint(repoRoot: string, bunPath: string): string {
   ].join("\n");
 }
 
-export async function installClaudestraCli(repoRoot: string): Promise<InstallCliResult> {
+export async function installClaudestraCli(
+  repoRoot: string,
+  /** skipWebBuild：调用方（manager update）本轮已经试过构建——失败时不再把同一个失败的构建跑第二遍 */
+  opts: { skipWebBuild?: boolean } = {},
+): Promise<InstallCliResult> {
   repoRoot = resolve(repoRoot);
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -878,8 +932,22 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   try { result.cliWrapper = await writeCliWrapper(repoRoot, bunPath); }
   catch (e) { errors.push(`CLI wrapper: ${(e as Error).message}`); return result; }
 
-  // 2) 写 daemon plist（3 个常驻 + web 前端，后者够格才装）
   const webDir = `${repoRoot}/web`;
+
+  // 1b) web 构建过期就重建。必须排在第 6 步 reload 之前：update 子进程由 launcher 派生，
+  //     bootout launcher 会把它连坐回收，构建若在后面会被中途杀掉、留下被清空的 .next。
+  //     也要在 readiness 之前：新的 BUILD_ID 参与判断能不能装 web daemon。
+  //     没有 .env.local = 没选 web，不花这个钱。
+  if (!opts.skipWebBuild && existsSync(`${webDir}/.env.local`)) {
+    try {
+      result.webBuild = await rebuildWebIfStale(repoRoot);
+      if (result.webBuild.error) {
+        warnings.push(`web 构建: ${result.webBuild.error}${result.webBuild.log?.length ? `。输出末尾：${result.webBuild.log.slice(-2).join(" | ")}` : ""}`);
+      }
+    } catch (e) { warnings.push(`web 构建: ${(e as Error).message}`); }
+  }
+
+  // 2) 写 daemon plist（3 个常驻 + web 前端，后者够格才装）
   let webPkgStart: string | undefined;
   try {
     webPkgStart = JSON.parse(readFileSync(`${webDir}/package.json`, "utf-8"))?.scripts?.start;
@@ -961,6 +1029,11 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     // keepExisting 且本来就在：那是用户自己的 plist，连 reload 都不碰——它可能被
     // 刻意 unload 着（挂在别的反代后面 / 临时停用），我们没资格替他重新拉起。
     if (p.kept) {
+      // 但刚重建过 web 的话，正在跑的服务手里是旧构建（文件还被删过一轮）：它若是 load 着的就
+      // 重启一下（restartWebService 只 kickstart 已 load 的服务，不替人拉起）
+      if (p.label === "com.claudestra.web" && result.webBuild?.attempted) {
+        result.webBuild.restarted = restartWebService();
+      }
       result.daemons.push({ label: p.label, plistPath: p.plistPath, loaded: true, keptExisting: true });
       continue;
     }
@@ -983,13 +1056,13 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     if (h.label === "com.claudestra.web" && result.webDaemon?.installed) {
       result.webDaemon.serving = h.healthy;
       if (!h.healthy) {
-        result.webDaemon.error = `装好了但 ${result.webDaemon.port} 端口没人监听——服务起来就退出了`;
+        result.webDaemon.error = h.conflict ?? `装好了但 ${result.webDaemon.port} 端口没人监听——服务起来就退出了`;
         if (h.log?.length) result.webDaemon.log = h.log;
       }
     }
     if (!h.healthy) {
       warnings.push(
-        `${h.name} 不健康${h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：` +
+        `${h.name} 不健康${h.conflict ? `：${h.conflict}` : h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：` +
           (h.log?.slice(-2).join(" | ") || "(.err 是空的)"),
       );
     } else if (h.repaired) {
@@ -1045,15 +1118,61 @@ async function healDaemons(
       repaired = true;
       healthy = await waitFor(p.probe, 15_000);
     }
+    // 「有人应答」不等于「是我们的进程在应答」：3333 这类常见开发端口被别的程序占着时，
+    // launchd 那份 EADDRINUSE 崩溃循环，探活却照样通过。属主不对就如实报，不 kickstart
+    // （重启解决不了占用）。
+    const port = p.label === "com.claudestra.web" ? webPort : bridgePort;
+    const conflict = healthy && port ? portOwnerConflict(listenersOf(port), launchdPidOf(p.label)) : null;
+    if (conflict) healthy = false;
     out.push({
       label: p.label,
       name: p.name,
       healthy,
       repaired,
+      ...(conflict ? { conflict } : {}),
       ...(healthy ? {} : { log: tailFile(`${LOG_DIR}/${p.stem}.err`, 6) }),
     });
   }
   return out;
+}
+
+/**
+ * 端口属主判定（纯函数）：监听者是 launchd 托管的那个进程，或是它的子孙（`sh -c exec` /
+ * npm 包一层的手写 plist）才算我们的。返回问题描述；没问题或数据不足返回 null。
+ */
+export function portOwnerConflict(
+  listeners: Array<{ pid: string; ancestors: string[] }>,
+  launchdPid: string | null,
+): string | null {
+  if (listeners.length === 0) return null;
+  if (!launchdPid) return `端口被 pid ${listeners[0]!.pid} 占用，但 launchd 托管的服务没在跑——被别的程序占了`;
+  if (listeners.some((l) => l.pid === launchdPid || l.ancestors.includes(launchdPid))) return null;
+  return `端口被 pid ${listeners[0]!.pid} 占用，不是 launchd 托管的进程（pid ${launchdPid}）——服务在崩溃重试，应答的是别的程序`;
+}
+
+/** 端口上的监听进程及其祖先链（最多 6 层） */
+export function listenersOf(port: number): Array<{ pid: string; ancestors: string[] }> {
+  const r = spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8" });
+  const pids = [...new Set((r.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean))];
+  return pids.map((pid) => {
+    const ancestors: string[] = [];
+    let cur = pid;
+    for (let i = 0; i < 6; i++) {
+      const pp = (spawnSync("/bin/ps", ["-o", "ppid=", "-p", cur], { encoding: "utf8" }).stdout || "").trim();
+      if (!pp || pp === "0" || pp === "1") break;
+      ancestors.push(pp);
+      cur = pp;
+    }
+    return { pid, ancestors };
+  });
+}
+
+/** `launchctl list <label>` 里的 PID；没在跑 / 没 load 返回 null */
+export function launchdPidOf(label: string): string | null {
+  const r = spawnSync("launchctl", ["list", label], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  const m = /"PID"\s*=\s*(\d+)/.exec(r.stdout || "");
+  return m ? m[1]! : null;
 }
 
 /** .env 里的 BRIDGE_PORT（用户改过端口的机器不能按默认值去探） */

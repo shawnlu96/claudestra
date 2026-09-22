@@ -38,6 +38,29 @@ export async function resolveClaudeBinary(run: Runner): Promise<ClaudeBinary | n
   return { link, real };
 }
 
+export type ClaudeInstall =
+  | { kind: "brew"; cask: string }
+  | { kind: "native" }
+  | { kind: "npm"; prefix: string }
+  | { kind: "unknown"; path: string };
+
+/**
+ * 按 claude 真实文件的位置判安装方式（纯函数）。只认得出来的才归类：
+ *  - Homebrew Caskroom → brew（npm -g 对它必然 EEXIST）；
+ *  - `…/share/claude/versions/<ver>` → 官方原生安装器（自带自更新，不插手）；
+ *  - `<prefix>/lib/node_modules/@anthropic-ai/claude-code/…` → npm，并带出 prefix，
+ *    升级必须装回同一个前缀（resolveNpm 选中的 npm 可能属于别的 node，装到别处永不生效）；
+ *  - 其余（volta shim、pnpm/bun 全局等）→ unknown：只通知不升级。旧逻辑一律兜底成 npm。
+ */
+export function classifyClaudeInstall(real: string): ClaudeInstall {
+  const cask = /\/Caskroom\/([^/]+)\//.exec(real);
+  if (cask) return { kind: "brew", cask: cask[1]! };
+  if (/\/share\/claude\/versions\//.test(real)) return { kind: "native" };
+  const npm = /^(.*)\/lib\/node_modules\/@anthropic-ai\/claude-code\//.exec(real);
+  if (npm && npm[1]) return { kind: "npm", prefix: npm[1] };
+  return { kind: "unknown", path: real };
+}
+
 /** 按绝对路径探版本号；挂死（超时）/失败 → null。 */
 export async function probeClaudeVersion(run: Runner, bin: string, timeoutMs = 20_000): Promise<string | null> {
   const r = await run([bin, "--version"], timeoutMs);

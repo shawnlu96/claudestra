@@ -20,8 +20,8 @@ export type AgentRuntime = "claude-code" | "pi";
 /**
  * 这个名字指的是不是大总管。
  *
- * ⚠ 两种写法都得认：registry 的**键**是 `agent-master`，而它的 tmux 窗口名和
- * 各处 CLI 参数用的是裸 `master`。只认一种，就会出现「同一个东西在两处对不上」
+ * ⚠ 两种写法都得认：registry 的**键**是 `agent-master`，而它的 tmux 窗口名（launcher
+ * 显式定名为 MASTER_WINDOW_NAME；老窗口由 launcher 迁移）和各处 CLI 参数用的是裸 `master`。只认一种，就会出现「同一个东西在两处对不上」
  * 的分叉——`principals.ts` 的 R1 guard 早就踩过（只认 `master` 时 `*` token 能经
  * `agent-master` 绕过 master 排除），`manager.ts list` 这次踩的是另一头。
  */

@@ -15,6 +15,7 @@
  */
 
 import { resolveBridgeUrl } from "./bridge-url.js";
+import { bridgePortOf } from "./bridge-port.js";
 
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -62,9 +63,12 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
   //   机器上所有 Pi agent 静默连不上 bridge（见 lib/bridge-url.ts）。
   const bridgeUrl = opts.bridgeUrl || resolveBridgeUrl();
 
+  // BRIDGE_PORT 显式带上的理由同 claude-launch（tmux 全局环境会停在旧端口）
+  const port = bridgePortOf(bridgeUrl);
   const prefix =
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
+    (port ? `BRIDGE_PORT=${port} ` : "") +
     `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}`;
 
   // 可执行文件名与 piAvailable() 的探测**同源**：tmux 窗口不继承 manager 的 env，

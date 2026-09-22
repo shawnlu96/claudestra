@@ -6,6 +6,7 @@
  */
 
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
+import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason } from "./lib/restart-result.js";
@@ -35,6 +36,7 @@ import {
   windowTarget,
   clearShellInitPrompts,
   MASTER_SESSION as SESSION_NAME,
+  MASTER_WINDOW_NAME,
 } from "./lib/tmux-helper.js";
 
 /**
@@ -67,7 +69,8 @@ async function confirmMasterModal(pane: string): Promise<void> {
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { resolveNpm } from "./lib/npm-path.js";
-import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace } from "./lib/claude-binary.js";
+import { resolveBunPath } from "./lib/bun-path.js";
+import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace, classifyClaudeInstall, type ClaudeInstall } from "./lib/claude-binary.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -86,6 +89,10 @@ await assertPrimaryOrExit("launcher");
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
 const REPO_ROOT = `${import.meta.dir}/..`;
+/** 拉 manager 子进程用的 bun。不用 process.execPath：Homebrew 下它是带版本号的 Cellar 路径，
+ *  launcher 一跑几天，brew upgrade bun 清掉旧目录后每次 spawn 都 ENOENT；resolveBunPath 优先
+ *  PATH 上的稳定符号链接（plist PATH 已含 bun 所在目录）。 */
+const BUN = resolveBunPath();
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
@@ -176,8 +183,9 @@ async function startMaster() {
   // 创建 tmux session；base-index=0 显式设一下，防止私有 socket 的 tmux
   // server 意外继承到非 0 的 base-index（-f /dev/null 在 tmuxRaw 已经处理，
   // 这里是 belt-and-suspenders）。
-  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-c", MASTER_DIR]);
+  await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-n", MASTER_WINDOW_NAME, "-c", MASTER_DIR]);
   await tmuxRaw(["set-option", "-t", SESSION_NAME, "base-index", "0"]).catch(() => {});
+  await pinMasterWindowName();
   await Bun.sleep(500);
 
   return bringUpClaudeInMasterWindow();
@@ -211,7 +219,14 @@ async function ensureMasterAtZero(): Promise<boolean> {
     !w.name.startsWith("agent-") && (await realpathSafe(w.cwd)) === masterDirReal;
   const w0 = wins.find((w) => w.idx === 0);
   if (!w0) return false; // window 0 丢失走 recoverMasterWindow 的既有路径
-  if (await isMasterWin(w0)) return false; // 正身在位,无事
+  if (await isMasterWin(w0)) {
+    // 正身在位。老版本建的窗口没命名（被自动改成 claude / 版本号），顺手迁移成显式名字
+    if (w0.name !== MASTER_WINDOW_NAME) {
+      console.log(`🏷️  大总管窗口名「${w0.name}」→「${MASTER_WINDOW_NAME}」`);
+      await pinMasterWindowName();
+    }
+    return false;
+  }
 
   // window 0 被占。先找真 master 在哪
   let trueMaster: { idx: number } | null = null;
@@ -237,6 +252,13 @@ async function ensureMasterAtZero(): Promise<boolean> {
   return true;
 }
 
+/** 大总管窗口定名并关掉自动改名（-n / rename 已隐含关闭，显式再设一次给老版本 tmux 兜底）。幂等 */
+async function pinMasterWindowName(): Promise<void> {
+  await tmuxRaw(["rename-window", "-t", MASTER_WINDOW, MASTER_WINDOW_NAME]).catch(() => {});
+  await tmuxRaw(["set-option", "-w", "-t", MASTER_WINDOW, "automatic-rename", "off"]).catch(() => {});
+  await tmuxRaw(["set-option", "-w", "-t", MASTER_WINDOW, "allow-rename", "off"]).catch(() => {});
+}
+
 async function realpathSafe(p: string): Promise<string> {
   try {
     return await realpath(p);
@@ -255,7 +277,7 @@ async function recoverMasterWindow(): Promise<boolean> {
   //    session 里只要有个窗口名叫 master，这句 `-k` 就会把**那个窗口**替掉，而
   //    window:0 还是缺的 —— 下面的 masterWindowExists 于是恒假，而我们已经默默
   //    干掉了一个无关窗口（2026-09-21 owner 机器上真有这么个 index 19 的闲置 zsh）。
-  await tmuxRawStrict(["new-window", "-t", sessionTarget(SESSION_NAME), "-k", "-c", MASTER_DIR]);
+  await tmuxRawStrict(["new-window", "-t", sessionTarget(SESSION_NAME), "-k", "-n", MASTER_WINDOW_NAME, "-c", MASTER_DIR]);
   await Bun.sleep(500);
   // 上面的 new-window 不带 index，会按 base-index 自动分配；强制挪到 0。
   // `-s` 同理要带冒号，否则搬的是那个叫 master 的窗口而不是刚建的这个。
@@ -265,6 +287,7 @@ async function recoverMasterWindow(): Promise<boolean> {
     console.log("⚠️ 创建 window:0 失败");
     return false;
   }
+  await pinMasterWindowName();
   return bringUpClaudeInMasterWindow();
 }
 
@@ -279,6 +302,11 @@ let lastBetaAttemptSha = "";
 let lastDirtyNotifiedSha = ""; // 脏树阻塞通知按 SHA 去重,别每 30min 骚扰一次
 let lastBetaAttemptAt = 0;
 const BETA_UPDATE_LOG = `${LOG_DIR}/beta-update.log`;
+// release 通道同样：失败的版本要能重试，子进程输出要落盘（此前尝试前就记「已处理」、输出全丢）
+let lastReleaseAttemptVersion = "";
+let lastReleaseAttemptAt = 0;
+let lastReleaseDirtyNotified = "";
+const RELEASE_UPDATE_LOG = `${LOG_DIR}/update.log`;
 
 /** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
  *  manager update(其内部走 beta 前进流程)。 */
@@ -335,7 +363,7 @@ async function checkBetaUpdates(autoOn: boolean) {
   console.log(`🧪 beta 自动前进尝试 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(成败见 ${BETA_UPDATE_LOG})`);
   const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
   await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
-  Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
+  Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
     detached: true,
@@ -361,13 +389,13 @@ async function checkForUpdates() {
 
   const local = await getLocalVersion();
   if (!isNewer(release.version, local)) return;
-  if (release.version === lastNotifiedVersion) return;
-  lastNotifiedVersion = release.version;
 
   const cfg = await readConfig();
 
   if (!cfg.autoUpdate.claudestra) {
-    // 关闭自动更新 → 只通知
+    // 关闭自动更新 → 只通知（按版本去重）
+    if (release.version === lastNotifiedVersion) return;
+    lastNotifiedVersion = release.version;
     try {
       await bridgeRequest({
         type: "reply",
@@ -401,13 +429,37 @@ async function checkForUpdates() {
   // 自动更新开启 → 等所有 agent 空闲再更新
   if (!(await allAgentsIdle())) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本，但有 agent 在忙，下次再试`);
-    lastNotifiedVersion = ""; // 让下次 poll 重新进入这个分支
     return;
   }
 
-  console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲）`);
+  // 本地版本没追上就每轮重试（带 10 分钟冷却）：update 在脏树 / 锁 / checkout 失败时 bail，
+  // 不会 reload launcher，旧逻辑把版本记成「已处理」后这个版本就再也不试了。
+  // 成功路径会 reload launcher 本体，状态自然清零。
+  if (release.version === lastReleaseAttemptVersion && Date.now() - lastReleaseAttemptAt < 10 * 60_000) return;
+  const firstAttempt = release.version !== lastReleaseAttemptVersion;
+  lastReleaseAttemptVersion = release.version;
+  lastReleaseAttemptAt = Date.now();
+
+  // 脏树 = update 必然 bail：如实上报一次（按版本去重），别静默
+  const st = Bun.spawnSync(["git", "-C", REPO_ROOT, "status", "--porcelain"]);
+  if (st.exitCode === 0 && st.stdout.toString().trim()) {
+    console.log(`🆙 Claudestra ${release.tag} 有新版本但仓库工作区脏——自动更新阻塞`);
+    if (lastReleaseDirtyNotified !== release.version) {
+      lastReleaseDirtyNotified = release.version;
+      await bridgeRequest({
+        type: "reply", chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `⚠️ Claudestra ${release.tag} 自动更新被阻塞:仓库有未提交改动,update 会一直失败。\n处理:改动要保留就 commit;误改就 git checkout 还原。体检:bun src/manager.ts doctor`,
+          `⚠️ Claudestra ${release.tag} auto-update is blocked: the repo has uncommitted changes, so update keeps failing.\nCommit them if intended, or git checkout to revert. Health check: bun src/manager.ts doctor`,
+        ),
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  console.log(`🆙 Claudestra ${release.tag} 自动更新开始（所有 agent 空闲；成败见 ${RELEASE_UPDATE_LOG}）`);
   const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
-  try {
+  if (firstAttempt) try {
     await bridgeRequest({
       type: "reply",
       chatId: CONTROL_CHANNEL_ID,
@@ -418,19 +470,15 @@ async function checkForUpdates() {
     });
   } catch { /* non-critical */ }
 
-  // 关键：manager.ts update 会执行 pm2 restart，会杀掉本 launcher 自己
-  // 用 detached + 重定向 stdio 让子进程脱离 launcher 生命周期
-  Bun.spawn(
-    ["bun", "run", `${REPO_ROOT}/src/manager.ts`, "update"],
-    {
-      cwd: REPO_ROOT,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      // @ts-ignore Bun 支持 detached
-      detached: true,
-    }
-  );
+  // 关键：manager.ts update 会 reload launcher 自己，用 detached 让子进程脱离 launcher 生命周期；
+  // 输出追加到日志文件，bail 时有迹可查
+  const stamp = `\n[${new Date().toISOString()}] 🆙 release v${local} → ${release.tag}\n`;
+  await import("fs/promises").then((m) => m.appendFile(RELEASE_UPDATE_LOG, stamp)).catch(() => {});
+  Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
+    cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    // @ts-ignore Bun 支持 detached
+    detached: true,
+  });
   // 不 await exited — pm2 会马上杀掉我们；新 launcher 进程启动后通过 github-release 判断已是最新版
 }
 
@@ -537,37 +585,38 @@ async function getClaudeLatestVersion(): Promise<string | null> {
 }
 
 /**
- * npm 安装方式下的升级。**必须走 resolveNpm 的绝对路径**：launchd 给 daemon 的 PATH
- * 是阉割版，裸 `npm` 在这里 ENOENT，而 runCmd 把错误吞进返回值 → 「更新失败」日志里
- * 什么都没有。同坑已经踩过两次（web 构建 e11500e、CC 更新检查 peer 2026-08-09），
- * 检查那一侧（getClaudeLatestVersion）早就改了，升级这一侧一直是裸 npm。
- * binDir 也要补进 PATH：npm 自己要找得到 node，postinstall 脚本同理。
+ * npm 安装方式下的升级。**必须装回 claude 所在的那个前缀**：resolveNpm 选中的 npm 可能属于
+ * 另一个 node（nvm 切过默认版本、nodejs.org pkg 装在 /usr/local），`npm i -g` 会装到别处
+ * （永不生效）或 EACCES。npm 优先用 <prefix>/bin/npm，没有再退回 resolveNpm；绝对路径 +
+ * binDir 进 PATH，因为 launchd 给 daemon 的 PATH 是阉割版，裸 npm 会 ENOENT。
  */
-async function npmUpgradeClaude(): Promise<{ ok: boolean; out: string; err: string }> {
-  const npmBin = resolveNpm();
+async function npmUpgradeClaude(prefix: string): Promise<{ ok: boolean; out: string; err: string }> {
+  const { accessSync, constants, existsSync } = await import("fs");
+  try {
+    accessSync(`${prefix}/lib/node_modules`, constants.W_OK);
+  } catch {
+    return { ok: false, out: "", err: `${prefix}/lib/node_modules 不可写——需要手动升级（可能要 sudo）：npm install -g --prefix ${prefix} @anthropic-ai/claude-code` };
+  }
+  const own = `${prefix}/bin/npm`;
+  const npmBin = existsSync(own) ? { npm: own, binDir: `${prefix}/bin` } : resolveNpm();
   if (!npmBin) return { ok: false, out: "", err: "找不到 npm（PATH/nvm/homebrew 都没有）" };
-  return runCmd([npmBin.npm, "install", "-g", "@anthropic-ai/claude-code"], 600_000, npmBin.binDir);
+  return runCmd([npmBin.npm, "install", "-g", "--prefix", prefix, "@anthropic-ai/claude-code"], 600_000, npmBin.binDir);
 }
 
-/** claude 二进制的安装方式检测。三类:
- *  - **brew cask**:realpath 落在 Homebrew Caskroom(返回 cask 名)。brew 装的
- *    机器上跑 npm install -g 必然 EEXIST 失败——「CC 静默更新老失败」的根因
- *    (owner 2026-07-16)。
- *  - **native**(v2.17.2,peer 2026-08-09):官方原生安装器,realpath 落在
- *    `~/.local/share/claude/versions/<ver>`,CC **自带自更新**(实测三天三版)。
- *    此前这类被 else 一把归进 npm → `npm install -g` 装一份**永不执行**的副本
- *    (PATH 里 ~/.local/bin 优先于 nvm),然后无条件报「已更新」并触发全员重启波。
- *  - **npm**:兜底。 */
-async function detectClaudeInstall(): Promise<
-  { kind: "brew"; cask: string } | { kind: "native" } | { kind: "npm" }
-> {
-  const which = await runCmd(["/bin/sh", "-lc", "realpath \"$(command -v claude)\" 2>/dev/null"]);
-  const real = which.ok ? which.out.trim() : "";
-  const m = real.match(/\/Caskroom\/([^/]+)\//);
-  if (m) return { kind: "brew", cask: m[1] };
-  // 原生安装器:.../share/claude/versions/<ver>（不锁死 ~/.local，自定义前缀同样命中）
-  if (/\/share\/claude\/versions\//.test(real)) return { kind: "native" };
-  return { kind: "npm" };
+/** claude 二进制的安装方式：按登录 shell 解析出的真实文件分类（见 classifyClaudeInstall） */
+async function detectClaudeInstall(): Promise<ClaudeInstall | null> {
+  const bin = await resolveClaudeBinary(runCmd);
+  return bin ? classifyClaudeInstall(bin.real) : null;
+}
+
+/** 已报过「认不出安装方式」的 claude 路径。落盘而非内存：launcher 每次更新都会 reload、启动即检查，
+ *  只记内存的话每次更新后 #control 都会再收到同一条 */
+const UNKNOWN_INSTALL_NOTED = `${process.env.HOME || ""}/.claude-orchestrator/unknown-claude-install.notified`;
+async function unknownInstallAlreadyNoted(path: string): Promise<boolean> {
+  try { return (await Bun.file(UNKNOWN_INSTALL_NOTED).text()).trim() === path; } catch { return false; }
+}
+async function noteUnknownInstall(path: string): Promise<void> {
+  await Bun.write(UNKNOWN_INSTALL_NOTED, path).catch(() => {});
 }
 
 /** 所有 agent + master 是否都空闲 */
@@ -609,7 +658,7 @@ const restoreFailNotifiedAt = new Map<string, number>();
 
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
-    const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
+    const list = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
     if (!list.ok) return;
     const parsed = JSON.parse(list.out || "{}");
     const agents: any[] = parsed.agents || [];
@@ -642,7 +691,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     const failed: { name: string; error: string }[] = [];
     for (const agent of reallyDead) {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
-      const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
+      const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
       const why = restartFailureReason(r);
       if (why) {
         console.error(`🔁 [${source}] ❌ ${agent.name} 恢复失败: ${why}`);
@@ -678,17 +727,97 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   }
 }
 
+/**
+ * 改了 BRIDGE_URL / BRIDGE_PORT 之后的自愈。launcher 被 reload 时读到新 .env，但 tmux 里的
+ * 大总管和每个 agent 都带着启动时的旧 BRIDGE_URL，channel-server 静默重连旧端口 ⇒ 全员离线；
+ * restoreDeadAgents 只管窗口没了的，管不到这种。
+ *
+ * tmux 全局环境 = 这批进程启动时的配置。与当前配置不一致、且新 bridge 已在应答时：
+ * 改写全局环境 + 全员（含大总管）重启。新 bridge 还没应答就等下一轮——只 kickstart 了
+ * launcher、bridge 还在旧端口时，别把大家迁到一个没人听的端口上。
+ */
+let driftProbeFailLoggedFor = "";
+async function healBridgeDrift(): Promise<void> {
+  if (Date.now() < restartWaveUntil) return;
+  const envOut = await tmuxRaw(["show-environment", "-g"]).catch(() => "");
+  if (!envOut) return;
+  const drift = bridgeDrift(
+    { BRIDGE_URL: parseTmuxEnvLine(envOut, "BRIDGE_URL"), BRIDGE_PORT: parseTmuxEnvLine(envOut, "BRIDGE_PORT") },
+    BRIDGE_URL,
+  );
+  if (!drift) return;
+  const httpBase = bridgeHttpUrlOf(drift.to);
+  let alive = false;
+  if (httpBase) {
+    try {
+      const r = await fetch(`${httpBase}/stats`, { signal: AbortSignal.timeout(4_000) });
+      alive = r.status < 500;
+    } catch { /* 还没起来 */ }
+  }
+  if (!alive) {
+    if (driftProbeFailLoggedFor !== drift.to) {
+      driftProbeFailLoggedFor = drift.to;
+      console.log(`🔀 bridge 地址已从 ${drift.from} 改为 ${drift.to}，但新 bridge 还没应答——等它起来再迁移会话`);
+    }
+    return;
+  }
+  const port = bridgePortOf(drift.to);
+  restartWaveUntil = Date.now() + 20 * 60_000; // 拿租约压住 dead-agent 巡检
+  console.log(`🔀 bridge 地址漂移 ${drift.from} → ${drift.to}：全员重启（含大总管）`);
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: t(
+        `🔀 bridge 地址已改为 ${drift.to}（原 ${drift.from}），正在重启所有会话让它们连到新地址（大总管会接回原会话）。`,
+        `🔀 Bridge address changed to ${drift.to} (was ${drift.from}); restarting all sessions so they reconnect (the orchestrator resumes its session).`,
+      ),
+    });
+  } catch { /* 通知失败不挡迁移 */ }
+  // 新会话的地址不靠 tmux 全局环境：启动命令前缀自带 BRIDGE_URL/BRIDGE_PORT（claude-launch）
+  let why: string | null;
+  try {
+    why = restartFailureReason(
+      await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", "--include-master"], 900_000),
+    );
+  } catch (e) {
+    why = `restart 拉起失败: ${(e as Error).message}`;
+  }
+  // 失败时冷却拉长：每轮重试都是含大总管的全员重启，救不回来的会话不能每 2 分钟折腾一次全员
+  restartWaveUntil = Date.now() + (why ? 30 : 2) * 60_000;
+  if (!why) {
+    // 全员重启成功才把 tmux 全局环境改成新值——它是「漂移已处理」的唯一标记，
+    // 提前改了，没重启成功的会话会永远留在旧端口而再也检测不到
+    await tmuxRaw(["set-environment", "-g", "BRIDGE_URL", drift.to]).catch(() => {});
+    if (port) await tmuxRaw(["set-environment", "-g", "BRIDGE_PORT", String(port)]).catch(() => {});
+    console.log(`🔀 漂移重启完成`);
+    return;
+  }
+  console.log(`🔀 漂移重启未完全成功（保留旧的 tmux 全局环境，冷却后重试）: ${why}`);
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: t(
+        `⚠️ bridge 地址迁移到 ${drift.to} 时有会话没重启成功：${why}\n这些会话还连着旧地址（离线），launcher 30 分钟后重试；也可手动 \`bun src/manager.ts restart --include-master\`。`,
+        `⚠️ Some sessions failed to restart while moving to ${drift.to}: ${why}\nThey are still on the old address (offline); the launcher retries in 30 minutes, or run \`bun src/manager.ts restart --include-master\`.`,
+      ),
+    });
+  } catch { /* non-critical */ }
+}
+
 async function restartAgentsAndMaster() {
   restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检
   // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
   try {
-    const listOut = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
+    const listOut = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
     const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
-    const canary = agents.find((a) => a.status !== "stopped");
+    // 大总管不当金丝雀（窗口定名后 manager list 会带上它那一行；它由下面 /exit + 主循环拉起）
+    const canary = agents.find((a) => a.status !== "stopped" && a.name !== MASTER_WINDOW_NAME);
     if (canary) {
-      const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
+      const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
       let canaryOk = false;
       try { canaryOk = JSON.parse(r.out || "{}").ok === true; } catch { /* 解析失败按失败算 */ }
       console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
@@ -712,7 +841,7 @@ async function restartAgentsAndMaster() {
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
-  const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+  const { ok, out } = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
   console.log(`🆙 bun manager restart 结果: ok=${ok}`);
   if (!ok) console.log(out);
   restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
@@ -739,10 +868,27 @@ async function checkClaudeCodeUpdate() {
   // 常领先 cask 几小时到几天,拿 npm 版本对比会永远误报「有更新」,而
   // npm install -g 对 brew 安装直接 EEXIST 失败(历史上「静默更新老失败」)。
   const install = await detectClaudeInstall();
+  if (!install) return;
   // native 安装器自带自更新(peer 2026-08-09 实测三天三版),Claudestra 不该插手:
   // npm install -g 只会装一份永不执行的副本,却触发全员重启波 + 误报「已更新」。
   // 真要代劳也只能是 `claude update`,不是 npm——这里选择完全不碰。
   if (install.kind === "native") return;
+  // 认不出的安装方式（volta shim / pnpm / bun 全局…）不猜着升级，只说一次
+  if (install.kind === "unknown") {
+    if (!(await unknownInstallAlreadyNoted(install.path))) {
+      await noteUnknownInstall(install.path);
+      console.log(`🆙 认不出 Claude Code 的安装方式（${install.path}），不自动升级`);
+      await bridgeRequest({
+        type: "reply",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `ℹ️ 认不出 Claude Code 的安装方式（${install.path}），Claudestra 不会自动升级它——请用你安装它的工具自行升级。`,
+          `ℹ️ Can't tell how Claude Code was installed (${install.path}); Claudestra won't auto-upgrade it — upgrade it with the tool you installed it with.`,
+        ),
+      }).catch(() => {});
+    }
+    return;
+  }
   let latest: string;
   if (install.kind === "brew") {
     await runCmd(["brew", "update", "--quiet"]); // 刷新索引(weekly 一次,慢点无妨)
@@ -759,7 +905,9 @@ async function checkClaudeCodeUpdate() {
   } else {
     const npmLatest = await getClaudeLatestVersion();
     if (!npmLatest) return;
-    if (current === npmLatest) return;
+    // 只在 latest 真的更新时升级：用 next / 手动装了更高版本时，「不相等」会把它降级并触发全员重启
+    const { isNewer } = await import("./lib/github-release.js");
+    if (!isNewer(npmLatest, current)) return;
     latest = npmLatest;
   }
 
@@ -795,7 +943,7 @@ async function checkClaudeCodeUpdate() {
         // Error: invalid option 退出——2026-07-27 实测的「更新失败」真凶),
         // 正确姿势是 HOMEBREW_CASK_OPTS 环境变量,install/upgrade/reinstall 通吃。
         await runCmd(["env", "HOMEBREW_CASK_OPTS=--no-quarantine", "brew", "upgrade", "--cask", install.cask], 600_000)
-      : await npmUpgradeClaude();
+      : await npmUpgradeClaude(install.prefix);
   if (!upgrade.ok) {
     console.log(`🆙 ${install.kind} 更新失败: ${upgrade.out}\n${upgrade.err}`);
     try {
@@ -915,6 +1063,8 @@ async function main() {
     // 没人拉(window 0「有 claude 在跑」= 误判健在),静默失联。每轮先验明
     // window 0 的正身,被占就把 agent 挪走、把真 master 挪回来。
     if (await ensureMasterAtZero()) continue; // 动过拓扑,本轮到此,下轮再体检
+
+    await healBridgeDrift().catch((e) => console.error("bridge 漂移检查异常:", e));
 
     // 检查是否卡在确认弹窗
     const pane = await captureLast(10);
