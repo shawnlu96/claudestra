@@ -7,6 +7,7 @@
  */
 import { describe, test, expect } from "bun:test";
 import {
+  isGeneratedPlist,
   WEB_PORT_FALLBACK,
   webDaemonReadiness,
   webDaemonSpec,
@@ -97,5 +98,34 @@ describe("webDaemonSpec", () => {
 
   test("日志跟另外三个 daemon 同一个 stem 规则（不落 /tmp，那儿会被系统清理）", () => {
     expect(spec.stem).toBe("web");
+  });
+});
+
+/**
+ * 2026-09-22 试装实录：用户先用带 shebang bug 的版本跑过一次 install-cli，生成了
+ * 一份起不来的 web plist（launchctl 报 `- 127` = 命令找不到）；之后拉了修复版再跑，
+ * keepExisting 原样保留那份坏文件 —— **修复根本没机会生效**。
+ * 「不覆盖用户手写的」和「永远不更新自己生成的」是两件事。
+ */
+describe("isGeneratedPlist", () => {
+  const generated = `<plist version="1.0"><dict>
+  <key>Label</key><string>com.claudestra.web</string>
+  <key>ClaudestraGenerated</key><true/>
+</dict></plist>`;
+  const handWritten = `<plist version="1.0"><dict>
+  <key>Label</key><string>com.claudestra.web</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string></array>
+</dict></plist>`;
+
+  test("我们生成的认得出来 → 可以被新版替换", () => {
+    expect(isGeneratedPlist(generated)).toBe(true);
+  });
+
+  test("用户手写的没有标记 → 永不覆盖", () => {
+    expect(isGeneratedPlist(handWritten)).toBe(false);
+  });
+
+  test("空内容 / 读不出来当成用户的（保守方向：宁可不覆盖）", () => {
+    expect(isGeneratedPlist("")).toBe(false);
   });
 });

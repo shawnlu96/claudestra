@@ -68,6 +68,23 @@ export const DAEMONS: DaemonSpec[] = [
   { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
 ];
 
+/**
+ * 生成标记。写进我们自己生成的每一份 plist。
+ *
+ * ⚠ 为什么必须有：`keepExisting` 原本是「文件已存在就不覆盖」，用来保护用户手写的
+ * plist（改过端口 / 日志落点 / 挂在反代后面）。但它同时也保护了**我们上一版生成的
+ * 那一份**——试装用户 2026-09-22 就栽在这：他先用带 shebang bug 的版本跑过一次
+ * install-cli，生成了一份起不来的 web plist（launchctl 报 exit 127 = 命令找不到）；
+ * 之后拉了修复版再跑，`keepExisting` 原样保留那份坏文件，**修复根本没机会生效**。
+ * 「不覆盖用户的」和「永远不更新自己的」是两件事，靠这个标记分开。
+ */
+const GENERATED_MARKER = "ClaudestraGenerated";
+
+/** 这份 plist 是我们自己生成的吗（不是 ⇒ 用户手写，永不覆盖） */
+export function isGeneratedPlist(content: string): boolean {
+  return content.includes(`<key>${GENERATED_MARKER}</key>`);
+}
+
 /** web 前端的默认端口（web/package.json 的 `start` 脚本没写明时用它） */
 export const WEB_PORT_FALLBACK = 3333;
 
@@ -319,6 +336,10 @@ function buildDaemonPlist(
 <dict>
   <key>Label</key>
   <string>${daemon.label}</string>
+  <!-- 这一条是 Claudestra 生成的。keepExisting 的 daemon 靠它区分「用户手写的」
+       和「我们上一版生成的」：手写的永远不覆盖，自己生成的必须能被新版替换。 -->
+  <key>${GENERATED_MARKER}</key>
+  <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -368,10 +389,15 @@ async function writeDaemonPlists(
   const out: { label: string; plistPath: string; kept?: boolean }[] = [];
   for (const d of [...DAEMONS, ...extra]) {
     const plistPath = `${dir}/${d.label}.plist`;
-    // keepExisting：用户手写过就原样保留（见 webDaemonSpec 的注释）
+    // keepExisting：只保留**用户手写的**。我们自己生成的必须能被新版替换，
+    // 否则一旦生成过一份坏的，后续所有修复都进不来（见 GENERATED_MARKER）。
     if (d.keepExisting && existsSync(plistPath)) {
-      out.push({ label: d.label, plistPath, kept: true });
-      continue;
+      let mine = false;
+      try { mine = isGeneratedPlist(readFileSync(plistPath, "utf-8")); } catch { /* 读不了就当是用户的 */ }
+      if (!mine) {
+        out.push({ label: d.label, plistPath, kept: true });
+        continue;
+      }
     }
     await writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d));
     out.push({ label: d.label, plistPath });
