@@ -462,6 +462,79 @@ async function stepCheckDeps(): Promise<void> {
 }
 
 // ============================================================
+// 发现本机已有的东西（v2.24+）
+// ============================================================
+
+/**
+ * 装之前先扫一遍这台机器，把「你已经有什么」摆给用户看。
+ *
+ * 为什么值得单开一步（owner 2026-09-22：「他安装完就直接能用，并且能显示出他的
+ * 历史会话」）：Claudestra 不要求你先建 agent 才有东西看 —— `~/.claude/projects`
+ * 和 `~/.pi/agent/sessions` 里的**历史会话本来就能读**（manager sessions / bridge
+ * 的 /api/v1/session-list / 网页侧栏的「未纳管会话」分区都走同一份扫描）。但装机
+ * 时没人告诉用户这件事，他打开网页看见空列表，会以为得先配一堆东西。
+ *
+ * 三种运行时的真实覆盖度（**别在这里许诺做不到的事**）：
+ *   - Claude Code：会话可扫、历史可读、可收编成能对话的 agent；
+ *   - Pi：同一套（lib/pi-session.ts + session-source.ts 做了定位与逐行翻译）；
+ *   - Codex：**只能作为工具调用**（ask_codex → `codex exec`）。它的会话记录在
+ *     ~/.codex，格式与 CC 不同，我们没有任何读它的代码 —— 所以这里只报「装了，
+ *     能当工具用」，不报历史会话数。
+ */
+async function stepDiscover(): Promise<void> {
+  header(nextStep(), t("发现本机已有的会话与运行时", "Discover what is already on this machine"));
+
+  const [hasClaude, hasPi, hasCodex] = await Promise.all([which("claude"), which("pi"), which("codex")]);
+
+  // 会话扫描直接借 manager 的 JSON 输出（它就是网页侧栏那份数据的来源），
+  // 不把 manager 的依赖图拖进向导。
+  // ⚠ 用 `total` 而不是 `sessions.length`：这条命令默认只回前 100 条（输出里
+  //   showing=100 / total=109 两个字段并存），拿数组长度当总数会在会话多的机器上
+  //   系统性少报。
+  let total = 0;
+  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
+  if (r.ok) {
+    try {
+      const d = JSON.parse(r.out);
+      total = Number(d?.total ?? (d?.sessions ?? []).length) || 0;
+    } catch { /* 输出非 JSON:当作没扫到,不阻断安装 */ }
+  }
+
+  const line = (okFlag: boolean, name: string, detail: string) =>
+    print(`  ${okFlag ? `${c.green}✓${c.reset}` : `${c.dim}○${c.reset}`} ${c.bold}${name.padEnd(12)}${c.reset} ${detail}`);
+
+  line(hasClaude, "Claude Code", hasClaude
+    ? t("已装 —— 历史会话可读、可收编成能对话的 agent", "installed — past sessions are readable and adoptable into chattable agents")
+    : t("没装（装了才有 agent 可跑）", "not installed (required to run agents)"));
+  line(hasPi, "Pi", hasPi
+    ? t("已装 —— 与 Claude Code 同一套：历史可读、可收编", "installed — same as Claude Code: history readable, sessions adoptable")
+    : t("没装（装了会自动一起列出来，不用改配置）", "not installed (if you install it later it shows up automatically — no config change)"));
+  line(hasCodex, "Codex", hasCodex
+    ? t("已装 —— agent 可以用 ask_codex 调它；它自己的历史会话暂不支持读取", "installed — agents can call it via ask_codex; reading its own session history is not supported yet")
+    : t("没装（可选，装了 agent 就能用 ask_codex 咨询它）", "not installed (optional — enables ask_codex for agents)"));
+  br();
+
+  if (total > 0) {
+    ok(t(
+      `一共 ${total} 个历史会话。装完打开网页就能在侧栏「未纳管会话」里看到它们 —— 能看、能搜、能收编成可对话的 agent，不需要先建任何东西。`,
+      `${total} past sessions in total. Right after install they show up in the web sidebar under "unmanaged sessions" — browse, search, and adopt them into chattable agents. Nothing to create first.`,
+    ));
+  } else if (hasClaude) {
+    hint(t(
+      "还没有历史会话（这台机器上的 Claude Code 还没聊过）。装完在网页里新建 agent 即可开始。",
+      "No past sessions yet (Claude Code has not been used on this machine). Create an agent in the web UI after install.",
+    ));
+  }
+  if (!hasClaude) {
+    warn(t(
+      "没有 claude 就没法跑 agent —— 上一步的依赖检查会帮你装；跳过了的话之后自己装: npm install -g @anthropic-ai/claude-code",
+      "Without `claude` there are no agents to run — the dependency step installs it; otherwise: npm install -g @anthropic-ai/claude-code",
+    ));
+  }
+  br();
+}
+
+// ============================================================
 // 步骤 2：创建 Discord 应用
 // ============================================================
 
@@ -1039,8 +1112,8 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
       fail(t("至少选一个(输入 1、2 或 1,2)", "Pick at least one (enter 1, 2, or 1,2)"));
       continue;
     }
-    // 步骤总数定下来:基础 4 步(依赖/前端/偏好/收尾) + Discord 5 步 + Web 2 步(配置 + 手机访问)
-    TOTAL_STEPS = 4 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0);
+    // 步骤总数定下来:基础 5 步(依赖/发现/前端/偏好/收尾) + Discord 5 步 + Web 2 步(配置 + 手机访问)
+    TOTAL_STEPS = 5 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0);
     if (!fronts.discord) {
       hint(t("跳过 Discord 的 5 个配置步骤(以后想加,重跑 bun run setup 即可)", "Skipping the 5 Discord steps (rerun `bun run setup` anytime to add it later)"));
     }
@@ -1373,6 +1446,7 @@ async function main() {
   }
 
   await stepCheckDeps();
+  await stepDiscover();
   const fronts = await stepPickFrontends(existing);
 
   // Discord 未选时留空 → bridge 按 WEB_ONLY 模式启动(config.ts:
