@@ -17,9 +17,11 @@
  * Codex 上下文(特性,不是 bug:多 agent 问同一个「PM」)。
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from "fs";
+import { existsSync, readFileSync, rmSync } from "fs";
 import { spawn } from "child_process";
-import { homedir, tmpdir } from "os";
+import { statePath } from "./paths.js";
+import { writeJsonAtomicSync } from "./state-file.js";
+import { tmpdir } from "os";
 import { join } from "path";
 
 /** 沙箱白名单:read-only 缺省(纯问答/审阅);workspace-write 让它真改 cwd 里的
@@ -40,7 +42,7 @@ export function findCodexBin(): string | null {
 
 /* ── 命名线程注册表 ─────────────────────────────────────────────── */
 
-const THREADS_PATH = join(homedir(), ".claude-orchestrator", "codex-threads.json");
+const THREADS_PATH = statePath("codex-threads.json");
 
 export interface CodexThreadEntry {
   sessionId: string;
@@ -57,12 +59,9 @@ export function readThreads(path = THREADS_PATH): Record<string, CodexThreadEntr
   }
 }
 
-/** 原子写(临时文件 + rename,同仓库其它状态文件的惯例)。 */
+/** 原子写(lib/state-file:tmp 名带 pid+序号,不同进程并发写不撞同一个 tmp;0600 在 open 时生效)。 */
 export function writeThreads(threads: Record<string, CodexThreadEntry>, path = THREADS_PATH): void {
-  mkdirSync(join(path, ".."), { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(threads, null, 2), { mode: 0o600 });
-  renameSync(tmp, path);
+  writeJsonAtomicSync(path, threads, { mode: 0o600 });
 }
 
 /* ── 参数构建(纯函数,单测) ─────────────────────────────────────── */

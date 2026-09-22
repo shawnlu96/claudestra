@@ -21,7 +21,6 @@ const ALLOW: Record<string, string> = {
   "lib/channel-instructions.ts": "给 agent 看的说明文字（~ 路径是给人读的）",
   "channel-server.ts": "给 agent 看的说明文字（归 P3b）",
   "setup.ts": "安装完成后打印的提示文字",
-  "lib/codex.ts": "codex-threads.json 路径，待随 codex 相关文件一起收口",
   "bridge.ts": "registry 同步读 / msg-source.json，待 P10 改用 readRegistryAgentsSync / statePath",
   "bridge/api-routes.ts": "日志路径与 peer 端口默认值，待 P10 改用 LOG_DIR / DEFAULT_BRIDGE_PORT",
 };
