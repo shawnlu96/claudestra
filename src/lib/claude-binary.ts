@@ -15,27 +15,15 @@
  * vnode 已被内核/Gatekeeper 评估缓存钉住——必须 cp 出新文件名副本 → 副本 xattr -c →
  * 验证副本能跑 → rm 原文件 → mv 副本回原名（新 vnode）。执行器可注入，配方本身可单测。
  */
-export interface ClaudeBinary {
-  /** 登录 shell 里 `command -v claude` 的结果（通常是 /opt/homebrew/bin/claude 这个 symlink） */
-  link: string;
-  /** 解析 symlink 后的真实文件 */
-  real: string;
-}
+import { resolveLoginBinary, type LoginBinary, type Runner } from "./login-binary.js";
+export type { CmdResult, Runner } from "./login-binary.js";
 
-export interface CmdResult {
-  ok: boolean;
-  out: string;
-  err: string;
-}
-export type Runner = (cmd: string[], timeoutMs?: number) => Promise<CmdResult>;
+/** link = 登录 shell 里 `command -v claude`（通常是 /opt/homebrew/bin/claude 这个 symlink），real = realpath */
+export type ClaudeBinary = LoginBinary;
 
 /** 与 tmux 里 agent 同一口径：登录 shell 的 PATH 解析 `claude`，再 realpath。 */
 export async function resolveClaudeBinary(run: Runner): Promise<ClaudeBinary | null> {
-  const r = await run(["/bin/sh", "-lc", 'p="$(command -v claude)" && printf "%s\\n%s\\n" "$p" "$(realpath "$p")"'], 15_000);
-  if (!r.ok) return null;
-  const [link, real] = r.out.trim().split("\n");
-  if (!link || !real) return null;
-  return { link, real };
+  return resolveLoginBinary(run, "claude");
 }
 
 export type ClaudeInstall =

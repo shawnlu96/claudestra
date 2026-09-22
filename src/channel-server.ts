@@ -16,6 +16,8 @@ import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
+import { channelInstructions } from "./lib/channel-instructions.js";
+import { CodexQueueSink, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -59,6 +61,13 @@ const pendingRequests = new Map<
 let requestCounter = 0;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+
+// Codex 模式（CLAUDESTRA_RUNTIME=codex）：Codex 不认 notifications/claude/channel，
+// 入站改走 `codex queue`；其余（握手后注册、被顶替不退出、reply 等工具）与 CC 共用。
+const IS_CODEX = process.env.CLAUDESTRA_RUNTIME === "codex";
+const CODEX_BIN = process.env.CLAUDESTRA_CODEX_BIN || "codex";
+const AGENT_NAME = process.env.CLAUDESTRA_AGENT || "";
+let codexSessionId: string | undefined = process.env.CLAUDESTRA_SESSION_ID || undefined;
 
 // ── MCP stdio 生命周期 ────────────────────────────────────────────────
 // 唯一能证明「本进程是 Claude Code 正在使用的那一个」的信号。用它做两件事：
@@ -126,6 +135,29 @@ function stopKeepalive() {
   if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
 }
 
+function registerFrame(): string {
+  const frame: Record<string, unknown> = {
+    type: "register",
+    channelId: CHANNEL_ID,
+    cwd: process.cwd(),
+    // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新
+    // pid 只出现一次）和「两个活实例在对抢」（同一个 pid 被顶掉又抢回来），
+    // 也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
+    pid: process.pid,
+    ppid: process.ppid,
+  };
+  // Codex：自报运行时与当前线程 id（fork / /new 之后只有这里知道新 id）。刻意**不报**
+  // sessionFile：自报路径只对 Pi 放行，Codex 的 rollout 由 bridge 按 registry 的 sessionId
+  // 自己定位（~/.codex/sessions 里还有用户的私人会话，不能让自报路径指过去）。
+  // CC 模式不加字段，帧逐字不变。
+  if (IS_CODEX) {
+    frame.runtime = "codex";
+    frame.agentName = AGENT_NAME || undefined;
+    frame.sessionId = codexSessionId;
+  }
+  return JSON.stringify(frame);
+}
+
 function connectBridge(): Promise<void> {
   // v2.2.0+: 每次新连接前重置 replaced latch。replaced 是模块级变量，之前从不重置，
   // 一旦收到过一次（哪怕是重连竞态里发给上一条 ws 的）"replaced"，标记就永久 true，
@@ -142,18 +174,7 @@ function connectBridge(): Promise<void> {
       // 注册频道。v1.9.21+ 带上 cwd → bridge 用它算 Claude Code jsonl 路径
       // (~/.claude/projects/<slug>/<sessionId>.jsonl)，用于 reply 缺失时兜底抽取
       // assistant 文字。
-      ws.send(
-        JSON.stringify({
-          type: "register",
-          channelId: CHANNEL_ID,
-          cwd: process.cwd(),
-          // 自报进程身份：bridge 靠它区分「Claude Code 重启了 MCP server」（每个新
-          // pid 只出现一次）和「两个活实例在对抢」（同一个 pid 被顶掉又抢回来），
-          // 也让告警能直接给出可 ps 的 pid，不必再翻环境变量考古。
-          pid: process.pid,
-          ppid: process.ppid,
-        })
-      );
+      ws.send(registerFrame());
       // v2.2.0+: keepalive ping，防止空闲连接被 Bun idleTimeout 关掉（无 keepalive 时
       // 长时间不说话的 agent 连接会被关，触发反复重连 flap）。每 25s 发一次。
       startKeepalive();
@@ -169,6 +190,7 @@ function connectBridge(): Promise<void> {
 
       if (msg.type === "registered") {
         registered = true;
+        if (IS_CODEX) markCodexReady();
         // 拿回频道了，但**先别急着清零**顶替计数。
         // 实测（45s 压力测试）：对面若是同样会重连的实例，立刻清零会让退避永远停在
         // 3s，两边以 3 秒为周期无限对抢，15 轮下来纯属互相消耗。改成「稳定持有 30s
@@ -344,78 +366,92 @@ const mcp = new Server(
   { name: MCP_NAME, version: "1.0.0" },
   {
     capabilities: mcpCapabilities(MODE),
-    instructions: INERT ? undefined : `Claudestra channel bridge——用户通过 Discord 或 Web 客户端远程与你对话（多在手机上）。
-
-Reply rules（通用，不分来源）:
-- Use the "reply" tool with chat_id from the <channel> tag.
-- If reply tool unavailable, use: bun ${CLAUDESTRA_HOME}/src/discord-reply.ts "<chat_id>" "<text>"
-- Reply in 精简中文——直奔结论，先说结果再说细节。
-- 有干货才说话；纯状态同步没人问就别刷屏。
-
-**格式按消息来源分流（看 <channel> tag 的 chat_id）：**
-
-chat_id 以 \`api:\` 开头 = **Web 客户端**：
-- 完整 Markdown 可用：表格、长消息、代码块都正常写，不受 Discord 限制。
-- 用户在 Web 界面能看到本频道**完整聊天记录**（含工具执行过程）——回复不要复述上下文。
-- 没有 @mention 语义。
-- 这是外部 token 接入的 principal：不要在回复里引用与本请求无关的上下文内容。
-
-chat_id 是纯数字 = **Discord 频道**：
-- Never use markdown tables (Discord doesn't support them). Use bullet lists.
-- Keep lines under 60 chars in code blocks. Max 2000 chars per message.
-- Do NOT @ the user in your reply body. The system adds one @mention automatically when your turn ends, so adding your own (\`<@id>\` or \`@username\`) causes double-notification.
-
-**确认 / 决策类回复一律用按钮（components，两端都渲染），不要用纯文字问问题：**
-- commit / push / git tag / release 这种走 git 的操作
-- 任何破坏性 / 不可逆操作（删文件、kill agent、drop table、force-push 等）
-- 多选一的方案选择
-用户在手机上，按钮一点就完成；让他打字回 "好" / "yes" / "push" 是糟糕 UX。最小模板：
-\`\`\`
-reply({
-  chat_id: "<本频道>",
-  text: "v2.0.2 commit 完成，要 push + tag + release 吗？",
-  components: [{
-    type: "buttons",
-    buttons: [
-      { id: "release_v2_0_2_go", label: "✅ Push + Tag + Release", style: "success" },
-      { id: "release_v2_0_2_cancel", label: "🚫 取消", style: "secondary" }
-    ]
-  }]
-})
-\`\`\`
-你会以 \`[button:<id>]\` 形式收到点击事件，按 id 分支处理。
-
-**用户在你的频道直接发消息 = 你直接回答这里，不要把决定推给 master：**
-- master 的职责是 #control 调度。worker 频道里用户跟你说话，决策权就在你和用户之间，你直接发按钮 / 直接 commit / 直接执行。
-- 不要在你的回复里写 "等大总管确认" / "我去问下 master"，user 已经在跟你直接对话了。
-
-**系统级共享资源（LaunchAgent / 监听端口 / TLS 证书 / crontab 等机器级设施）的规矩（2026-07-24 双 caddy 事故后立）：**
-- **动手前先查现状**：注册 LaunchAgent 前 \`launchctl list\`+看 ~/Library/LaunchAgents/ 有没有同类；绑端口前 \`lsof -iTCP:<port>\`。别的服务已经在做同一件事（如反代/TLS 终结）就复用，不要另起一份。
-- **这类变更的决策一律上报用户拍板，不在 agent 之间互相拍板**——别的 agent 无权决定机器基建，把「你定」抛给同事只会踢皮球。用 reply() 带按钮问用户。
-- 改完在自己频道 reply 留痕（改了什么、为什么），方便其他 agent 与用户事后追溯。
-
-跨 Claudestra 协作（v2.11+ HTTP peer 模型）：
-
-- 收到带「🤝 来自 peer 实例」注入头的消息 = 另一个 Claudestra 实例的跨机请求（HTTP API 接入，通常由对方 agent 的 send_to_agent 发起）。用 reply() 回答即可——回复会自动转交对方的调用方。回答实质内容，保持精简；超出你职责范围的请求可以礼貌说明并拒绝。
-- 主动调对方实例的 agent：\`send_to_agent({ target: "<对方agent>@<peer名>" })\`（或长格式 \`peer:<peer名>.<对方agent>\`）。对方回复会由 bridge push 回来。
-- peers 由 owner 用 \`manager.ts peer-http-*\` CLI 管理（invite/join/accept/test/list/remove），已配置的在 \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段。`,
+    instructions: INERT ? undefined : channelInstructions(CLAUDESTRA_HOME),
   }
 );
 
-// 处理来自 Bridge 的入站消息 → MCP notification
+// 处理来自 Bridge 的入站消息：CC → MCP channel 通知；Codex → codex queue
+const mcpChannelSink: InboundSink = {
+  async deliver(content, meta) {
+    mcp.notification({
+      method: "notifications/claude/channel",
+      params: { content, meta },
+    });
+    return { ok: true };
+  },
+};
+
+const codexSink = new CodexQueueSink({
+  source: MCP_NAME,
+  getSessionId: () => codexSessionId,
+  heldThreadIds: () => heldThreadIds(process.ppid),
+  onSwitch: (sid) => {
+    codexSessionId = sid;
+    // 同一条 ws 上重发 register：bridge 按新 sessionId 更新频道记录（不会触发顶替）
+    if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+      try { bridgeWs.send(registerFrame()); } catch { /* onclose 兜重连 */ }
+    }
+  },
+  queue: (sid, text) => defaultRunner(codexQueueArgs(CODEX_BIN, sid, text), 30_000),
+  notify: async (chatId, text) => {
+    await bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text });
+  },
+  log: (line) => console.error(line),
+});
+
+const inboundSink: InboundSink = IS_CODEX ? codexSink : mcpChannelSink;
+
 function handleInboundMessage(
   content: string,
   meta: Record<string, string>
 ) {
-  mcp.notification({
-    method: "notifications/claude/channel",
-    params: { content, meta },
-  });
+  void inboundSink.deliver(content, meta);
+}
+
+/**
+ * 注册前找到 TUI 真正打开的线程：fork 的新 id 只能这样拿到，resume 时也顺带校正。
+ * 锁在 TUI 起来 1s 内出现，MCP 握手通常更晚，给几次短重试兜竞态。
+ */
+async function discoverCodexSession(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    const held = await heldThreadIds(process.ppid).catch(() => [] as string[]);
+    if (codexSessionId && held.includes(codexSessionId)) break;
+    if (held.length === 1) { codexSessionId = held[0]; return; }
+    if (codexSessionId && held.length === 0 && i >= 1) break;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+/** Codex 被强杀时 MCP 子进程会成孤儿（判据见 codexParentGone）：父进程没了就按 stdio 关闭处理 */
+function startCodexParentWatch() {
+  const parent = process.ppid;
+  const timer = setInterval(() => {
+    if (!codexParentGone(parent, process.ppid, isPidAlive)) return;
+    mcpClosed = true;
+    console.error(`👋 Codex 父进程 ${parent} 已退出，channel-server 随之退出`);
+    process.exit(0);
+  }, 2000);
+  timer.unref?.();
+}
+
+/** 就绪标记与 Pi 扩展同款：manager 等 @claudestra_ready=1，而不是嗅探会随版本变的 TUI 文案 */
+function markCodexReady() {
+  const pane = process.env.TMUX_PANE;
+  if (!pane) return;
+  try {
+    Bun.spawn(["tmux", "set-option", "-w", "-t", pane, "@claudestra_ready", "1"], {
+      stdin: "ignore", stdout: "ignore", stderr: "ignore",
+    });
+  } catch { /* 不在 tmux 里就忽略 */ }
 }
 
 // 列出可用工具
+// Codex agent 自己就是 Codex，ask_codex 只会绕回自己，隐藏掉
+const visibleTools = <T extends { name: string }>(tools: T[]): T[] =>
+  IS_CODEX ? tools.filter((t) => t.name !== "ask_codex") : tools;
+
 mcp.setRequestHandler(ListToolsRequestSchema, async () => INERT ? { tools: [] } : ({
-  tools: [
+  tools: visibleTools([
     {
       name: "reply",
       description:
@@ -633,7 +669,7 @@ Good for: a second opinion from a different model family, cross-review of a desi
         required: ["prompt"],
       },
     },
-  ],
+  ]),
 }));
 
 // 处理工具调用
@@ -675,6 +711,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "ask_codex": {
+      if (IS_CODEX) throw new Error("Codex agent 不提供 ask_codex");
       // codex 一轮可能跑几分钟 —— 15min 请求超时(bridge 侧 12min 杀进程,先于此触发)
       const result = await bridgeRequest(
         {
@@ -789,12 +826,15 @@ async function main() {
   mcp.oninitialized = () => {
     mcpInitialized = true;
     if (!shouldConnectBridge(MODE)) return; // inert：握手完成就空闲，等 onclose
-    connectBridge().catch((err) => {
+    const go = () => connectBridge().catch((err) => {
       // 连不上不退出：电脑重启后 launchd 同时拉 bridge 和 launcher，agent 恢复时
       // bridge 常常还没就绪（Discord login 要几秒）。交给 onclose 的指数退避重连
       // （3s..60s cap），bridge 起来后自动注册，全程无感。
       console.error("初次连接 Bridge 失败（后台退避重连中）:", (err as Error)?.message || err);
     });
+    // Codex：先认准线程再注册，register 帧才带得上 sessionId
+    if (IS_CODEX) void discoverCodexSession().catch(() => {}).finally(go);
+    else go();
   };
 
   // Claude Code 关掉 stdio = 本进程的唯一正当退出理由（它不会 respawn 我们，
@@ -807,6 +847,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
+  if (IS_CODEX) startCodexParentWatch();
 
   // 兜底：万一 SDK 没回调 oninitialized（版本差异 / 客户端跳过通知），30s 后
   // 仍未握手就照旧注册。宁可退回老行为，也不能让 agent 完全连不上 bridge。

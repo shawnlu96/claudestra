@@ -702,14 +702,15 @@ const PENDING_MAX_WAIT_MS = 600_000;
 function resolveSessionPath(
   runtime: string | undefined, cwd: string, sessionId: string, sessionFile?: string,
 ): string | null {
-  // ① 真源：通道进程在 register 帧里自报的会话文件（Pi / Codex 文件名带时间戳，算不出来）
+  // ① 真源：Pi 扩展在 register 帧里自报的会话文件（文件名带时间戳，算不出来）
   if (sessionFile) {
-    // 它是 agent 进程给的值，realpath 后必须落在**该运行时自己的**会话根之下——否则一个
-    // 失守的 agent 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道。
-    // Claude Code 的路径可推算、从不自报；对它放行等于让 CC agent 指向 master 的会话。
+    // 它是 agent 进程给的值，realpath 后必须落在 Pi 的会话根之下——否则一个失守的 agent
+    // 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道。
+    // **只对 Pi 放行**：runtime 也可能来自自报，而 ~/.codex/sessions 里还有用户的私人
+    // 会话——Codex 的 rollout 由 registry 的 sessionId 定位，通道进程也刻意不自报路径。
     try {
       const real = realpathSync(sessionFile);
-      if (runtime && runtime !== DEFAULT_RUNTIME && sourceFor(runtime).ownsPath(real)) return real;
+      if (runtime === "pi" && sourceFor(runtime).ownsPath(real)) return real;
       console.warn(`⚠ 忽略越界的自报 sessionFile: ${sessionFile}`);
     } catch { /* 不存在 / 解析失败 → 走常规定位 */ }
   }

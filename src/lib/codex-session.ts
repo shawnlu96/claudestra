@@ -29,7 +29,8 @@
  *     而且每条都是几 KB，混进历史面板就是刷屏；
  *   - `reasoning` **丢掉**：`encrypted_content` 读不了、`summary` 实测恒空，
  *     留下来只会变成一堆空气泡；
- *   - `event_msg` / `world_state` / `turn_context` **丢掉**：遥测与内部状态；
+ *   - `event_msg` 只取 `item_completed` 里的结构化工具记录（见 codexLineToClaudeShape），
+ *     其余与 `world_state` / `turn_context` 一样**丢掉**：遥测与内部状态；
  *   - `token_usage_record` 暂不翻译（用量归并是另一条链路，没接就别假装有）。
  */
 
@@ -129,8 +130,91 @@ export function codexTextOf(content: unknown): string {
     .join("\n");
 }
 
-/** 一行 Codex 记录 → Claude Code 形状（不是对话内容就返回 null） */
-export function codexLineToClaudeShape(line: string): AnyRecord | null {
+/**
+ * 翻译状态（按轮）。流式消费者（watcher / 历史分页）逐行调用，同一文件共用一份即可；
+ * 不传就走无状态近似（见 codexLineToClaudeShape）。
+ */
+export interface CodexTranslateState {
+  /** 本轮已见过 item_completed 事件 = 这一版 rollout 有结构化工具记录 */
+  turnHasItems: boolean;
+  /** 被丢掉的 code-mode exec 的 call_id，其输出一并丢 */
+  droppedCalls: Set<string>;
+  /** 本轮是 Claudestra 的 exec 引导轮（整轮不进历史） */
+  bootstrapTurn: boolean;
+}
+
+export function newCodexTranslateState(): CodexTranslateState {
+  return { turnHasItems: false, droppedCalls: new Set(), bootstrapTurn: false };
+}
+
+/** Claudestra exec 引导轮的标记（与 codex-launch.BOOTSTRAP_MARKER 同值；这里不 import，免得只读路径拖进启动器依赖） */
+const BOOTSTRAP_MARKER = "[claudestra:bootstrap]";
+
+/** Codex 自己注入的上下文块，以 user 角色落盘但不是用户说的话 */
+const INJECTED_USER_RE = /^\s*(# AGENTS\.md instructions|<INSTRUCTIONS>|<environment_context>|<user_instructions>|<recommended_plugins>)/;
+
+const HOOK_PROMPT_RE = /^\s*<hook_prompt\b[^>]*>([\s\S]*?)<\/hook_prompt>\s*$/;
+
+/** code-mode exec 的输出签名（无状态时靠它认出要跟着 exec 一起丢的输出） */
+const CODE_MODE_OUTPUT_RE = /^Script [\w ]+\nWall time /;
+
+/** ["/bin/zsh","-lc","sleep 20"] → "sleep 20"；其它形状按空格拼 */
+export function codexCommandText(command: unknown): string {
+  if (typeof command === "string") return command;
+  if (!Array.isArray(command)) return "";
+  const parts = command.map(String);
+  if (parts.length >= 3 && /(^|\/)(ba|z)?sh$/.test(parts[0]) && /^-l?c$/.test(parts[1])) return parts.slice(2).join(" ");
+  return parts.join(" ");
+}
+
+/** item_completed 里的结构化工具记录 → tool_use；不是工具（或与 response_item 重复）返回 null */
+function codexItemToolUse(item: AnyRecord): { id: string; name: string; input: AnyRecord } | null {
+  const id = String(item.id ?? "");
+  switch (item.type) {
+    case "McpToolCall": {
+      const server = String(item.server ?? "mcp");
+      const tool = String(item.tool ?? "tool");
+      // 与 Claude Code 的 mcp__<server>__<tool> 同名：reply 的识别（session-history.isReplyTool、
+      // jsonl-watcher）直接复用
+      const input = item.arguments && typeof item.arguments === "object" ? item.arguments : {};
+      return { id, name: `mcp__${server}__${tool}`, input };
+    }
+    case "CommandExecution":
+      return { id, name: "Bash", input: { command: codexCommandText(item.command) } };
+    case "ImageView": {
+      const path = typeof item.path === "string" ? item.path.replace(/^file:\/\//, "") : "";
+      return { id, name: "Read", input: { file_path: path } };
+    }
+    case "Extension": {
+      // web.search 带 query（多条查询时是截断后的拼接）→ WebSearch 卡片显示查询词
+      if (item.kind === "web.search") {
+        const action = item.action && typeof item.action === "object" ? (item.action as AnyRecord) : {};
+        const query = [item.query, action.query, Array.isArray(action.queries) ? action.queries[0] : undefined]
+          .find((q) => typeof q === "string" && q.trim());
+        return { id, name: "WebSearch", input: { query: (query as string | undefined) ?? "" } };
+      }
+      return { id, name: String(item.kind ?? "extension"), input: {} };
+    }
+    default:
+      // UserMessage / AgentMessage 与 response_item 重复；Reasoning 恒空；HookPrompt 由 response_item 的
+      // <hook_prompt> 承担
+      return null;
+  }
+}
+
+/**
+ * 一行 Codex 记录 → Claude Code 形状（不是对话内容就返回 null）。
+ *
+ * 新版 Codex（0.149+ 的 code mode）把工具调用包在 `custom_tool_call name:"exec"` 里
+ * （input 是一段 JS），真正的结构化信息在 `event_msg item_completed` 的
+ * McpToolCall / CommandExecution。以后者为准，前者及其输出丢掉——否则 reply 被渲染成
+ * 一段脚本，历史里一个 mcp__claudestra__reply 都认不出。
+ *
+ * 带 state：exec 只在「本轮已有 item 事件」时丢（每轮开头的 UserMessage item 先于任何
+ * exec），输出按 call_id 精确丢。不带 state：本机全部 code-mode rollout 都带 item 事件，
+ * 所以 exec 一律丢，输出按 code-mode 签名丢。
+ */
+export function codexLineToClaudeShape(line: string, state?: CodexTranslateState): AnyRecord | null {
   let e: AnyRecord;
   try { e = JSON.parse(line); } catch { return null; }
   if (!e || typeof e !== "object") return null;
@@ -140,6 +224,18 @@ export function codexLineToClaudeShape(line: string): AnyRecord | null {
   if (e.type === "session_meta") {
     return { type: "system", subtype: "codex_session_start", timestamp: ts, sessionId: p.session_id ?? p.id, cwd: p.cwd };
   }
+  if (e.type === "event_msg") {
+    if (p.type === "task_started") {
+      if (state) { state.turnHasItems = false; state.bootstrapTurn = false; state.droppedCalls.clear(); }
+      return null;
+    }
+    if (p.type !== "item_completed" || !p.item || typeof p.item !== "object") return null;
+    if (state) state.turnHasItems = true;
+    if (state?.bootstrapTurn) return null;
+    const tu = codexItemToolUse(p.item as AnyRecord);
+    if (!tu) return null;
+    return { type: "assistant", timestamp: ts, message: { content: [{ type: "tool_use", ...tu }] } };
+  }
   if (e.type !== "response_item") return null;
 
   switch (p.type) {
@@ -148,12 +244,29 @@ export function codexLineToClaudeShape(line: string): AnyRecord | null {
       if (!text) return null;
       // developer = 系统提示 / skills 块，不是对话（每条几 KB）
       if (p.role === "developer" || p.role === "system") return null;
-      if (p.role === "user") return { type: "user", timestamp: ts, message: { content: text } };
+      if (p.role === "user") {
+        if (INJECTED_USER_RE.test(text)) return null;
+        if (text.trimStart().startsWith(BOOTSTRAP_MARKER)) {
+          if (state) state.bootstrapTurn = true;
+          return null;
+        }
+        // Stop hook 的 block reason 以 <hook_prompt> 回灌成 user 消息：是系统提示，不是用户发言
+        const hook = HOOK_PROMPT_RE.exec(text);
+        if (hook) return { type: "system", subtype: "hook_prompt", level: "info", timestamp: ts, content: hook[1] };
+        // channel-server 的 Codex 模式按 CC 同款 <channel> 包装投递 → 标 isMeta，历史面板照 CC 的路子解包
+        if (/^\s*<channel\s/.test(text)) return { type: "user", isMeta: true, timestamp: ts, message: { content: text } };
+        return { type: "user", timestamp: ts, message: { content: text } };
+      }
+      if (state?.bootstrapTurn) return null;
       return { type: "assistant", timestamp: ts, message: { content: [{ type: "text", text }] } };
     }
     case "custom_tool_call":
     case "function_call": {
       const name = typeof p.name === "string" ? p.name : "tool";
+      if (p.type === "custom_tool_call" && name === "exec" && (!state || state.turnHasItems)) {
+        if (state && p.call_id) state.droppedCalls.add(String(p.call_id));
+        return null;
+      }
       // Codex 的 input 是字符串（exec 是一段脚本）；下游卡片期待对象，包一层
       const input = typeof p.input === "string" ? { command: p.input } : (p.input ?? p.arguments ?? {});
       return {
@@ -165,6 +278,9 @@ export function codexLineToClaudeShape(line: string): AnyRecord | null {
     case "custom_tool_call_output":
     case "function_call_output": {
       const text = codexTextOf(p.output);
+      if (p.type === "custom_tool_call_output") {
+        if (state ? state.droppedCalls.has(String(p.call_id)) : CODE_MODE_OUTPUT_RE.test(text)) return null;
+      }
       return {
         type: "user",
         timestamp: ts,
