@@ -97,7 +97,7 @@ import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
-import { isWriteInvocation, needsWriteLock } from "./manager/write-commands.js";
+import { isWriteInvocation } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
@@ -3106,7 +3106,7 @@ async function cmdPiEnvSet(
 // 覆盖(saveRegistry 只防撕裂不防丢更新)。命令级锁一把关掉全部窗口;拿不到
 // (20s)降级放行——advisory,宁可退回旧竞态也不卡死命令。进程退出兜底释放。
 let writeLock: { release: () => void } | null = null;
-if (needsWriteLock(cmd, args)) {
+if (isWriteInvocation(cmd, args)) {
   const { acquireLock } = await import("./lib/file-lock.js");
   writeLock = await acquireLock(`${process.env.HOME}/.claude-orchestrator/.manager-write.lock`);
   if (!writeLock) console.error("⚠ 写锁 20s 未拿到,降级继续(并发写命令可能竞态)");

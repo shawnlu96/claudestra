@@ -3,7 +3,6 @@
  */
 
 import { TMUX_SOCK, BUN_PATH, ENV_WITH_BUN, TMP_DIR } from "./config.js";
-import { SRC_DIR } from "../lib/repo-root.js";
 
 export async function tmuxScreenshot(
   windowName: string
@@ -14,7 +13,7 @@ export async function tmuxScreenshot(
 
   try {
     const htmlPath = `${TMP_DIR}/peek_${Date.now()}.html`;
-    const srcDir = SRC_DIR;
+    const srcDir = import.meta.dir + "/..";
 
     // capture with ANSI colors → pipe to ansi2html
     const capture = Bun.spawn(

@@ -27,8 +27,7 @@ export const INBOX_DIR = `${process.env.HOME}/.claude-orchestrator/inbox`;
 // 从 tmux-helper 引入避免两处常量漂移
 export { TMUX_SOCK } from "../lib/tmux-helper.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
-export { REPO_ROOT } from "../lib/repo-root.js";
-import { REPO_ROOT } from "../lib/repo-root.js";
+export const REPO_ROOT = `${import.meta.dir}/../..`;
 export const MANAGER_PATH = `${REPO_ROOT}/src/manager.ts`;
 /** v2.16+ 支持 env 覆盖(与 launcher.ts 同一语义):MASTER_DIR 移出仓库后 master
  *  不再沿目录树加载仓库根的贡献者 CLAUDE.md(~11k token 与调度无关)。bridge 用
