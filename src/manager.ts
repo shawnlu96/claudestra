@@ -3393,11 +3393,11 @@ async function cmdUpdateBeta() {
   const ff = co.ok ? await git("merge", "--ff-only", "origin/main", "--quiet") : co;
   if (!ff.ok) { await unlock(); output({ ok: false, error: `ff 前进失败: ${ff.err}` }); return; }
 
-  const biProc = Bun.spawn([process.execPath, "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+  const biProc = Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await biProc.exited;
   const rendered = await renderMasterClaude();
   const webBuild = await maybeBuildWeb();
-  const migrateProc = Bun.spawn([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+  const migrateProc = Bun.spawn([resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await migrateProc.exited;
   await Bun.sleep(500);
   await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
@@ -3407,7 +3407,7 @@ async function cmdUpdateBeta() {
   await unlock();
   console.log(`[update] beta 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("./lib/cli-install.js");
-  const cliInstall = await installClaudestraCli(REPO_ROOT);
+  const cliInstall = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 上面 maybeBuildWeb 已判过/建过
   const { installRepoSkills } = await import("./lib/skills-install.js");
   const skillsInstalled = installRepoSkills(REPO_ROOT);
   output({
@@ -3501,7 +3501,7 @@ async function cmdUpdate() {
   if (!reattach.ok) console.error(`[update] ⚠️ ${reattach.detail}`);
 
   // 4. bun install（依赖可能变了）
-  const biProc = Bun.spawn([process.execPath, "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
+  const biProc = Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
   await biProc.exited;
 
   // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
@@ -3515,7 +3515,7 @@ async function cmdUpdate() {
   // 5. 执行新版 manager 的 migrate 子命令（新版可能带格式迁移逻辑）
   //    关键：用 subprocess 跑 NEW 版代码，当前进程跑的还是旧版
   const migrateProc = Bun.spawn(
-    [process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "migrate"],
+    [resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"],
     { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }
   );
   await migrateProc.exited;
@@ -3539,7 +3539,7 @@ async function cmdUpdate() {
   await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
   console.log(`[update] 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
   const { installClaudestraCli } = await import("./lib/cli-install.js");
-  const cliInstall = await installClaudestraCli(REPO_ROOT);
+  const cliInstall = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 上面 maybeBuildWeb 已判过/建过
   const { installRepoSkills } = await import("./lib/skills-install.js");
   const skillsInstalled = installRepoSkills(REPO_ROOT);
   for (const sk of skillsInstalled) if (sk.action !== "ok") console.log(`[skills] ${sk.name}: ${sk.action} — ${sk.detail}`);

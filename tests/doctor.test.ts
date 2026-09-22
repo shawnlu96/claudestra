@@ -85,9 +85,16 @@ describe("formatDoctor", () => {
 
 describe("webBuildVerdict（按 hash 判，与 install-cli 自动重建共用）", () => {
   const T = 1_700_000_000_000;
-  const base = { buildIdMtimeMs: T, buildInfoMtimeMs: T - 120_000, bakedWebCommit: "0df41f5", headWebCommit: "0df41f5", lastWebCommitMs: T - 3600_000 };
+  const base = {
+    buildId: "B1",
+    buildIdMtimeMs: T,
+    marker: null,
+    bakedWebCommit: "0df41f5",
+    headWebCommit: "0df41f5",
+    lastWebCommitMs: T - 3600_000,
+  };
   test("无构建产物 → stale", () => {
-    const v = webBuildVerdict({ ...base, buildIdMtimeMs: null });
+    const v = webBuildVerdict({ ...base, buildId: null, buildIdMtimeMs: null });
     expect(v.stale).toBe(true);
     expect(v.status).toBe("warn");
   });
@@ -106,8 +113,19 @@ describe("webBuildVerdict（按 hash 判，与 install-cli 自动重建共用）
     // 调用方用 WEB_PATHSPEC 取 head；md-only 提交不会让它前进，提交时间再新也不看
     expect(webBuildVerdict({ ...base, lastWebCommitMs: T + 3600_000 }).stale).toBe(false);
   });
-  test("build-info 比 BUILD_ID 新 = prebuild 写了新值但构建没完成 → stale", () => {
-    expect(webBuildVerdict({ ...base, buildInfoMtimeMs: T + 1 }).stale).toBe(true);
+  test("标记与 BUILD_ID 相符时以标记为准：predev / 手动 gen-build-info 把 build-info 改成新 hash 也不骗过判据", () => {
+    const v = webBuildVerdict({ ...base, marker: { commit: "a4c11db", buildId: "B1" }, bakedWebCommit: "0df41f5" });
+    expect(v.stale).toBe(true);
+    expect(v.detail).toContain("a4c11db");
+    expect(webBuildVerdict({ ...base, marker: { commit: "0df41f5", buildId: "B1" }, bakedWebCommit: "zzzzzzz" }).stale).toBe(false);
+  });
+  test("标记的 BUILD_ID 对不上 = 之后有人另外 build 过，标记作废、退回比 build-info", () => {
+    expect(webBuildVerdict({ ...base, marker: { commit: "a4c11db", buildId: "OLD" } }).stale).toBe(false);
+  });
+  test("失败标记（commit 为空）= 构建失败换回了旧构建 → stale", () => {
+    const v = webBuildVerdict({ ...base, marker: { commit: "", buildId: "B1" } });
+    expect(v.stale).toBe(true);
+    expect(v.detail).toContain("失败");
   });
   test("拿不到 hash 才退回时间比较（60s 容差）", () => {
     const noHash = { ...base, bakedWebCommit: null, headWebCommit: null };

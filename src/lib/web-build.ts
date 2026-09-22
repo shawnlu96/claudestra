@@ -10,12 +10,16 @@
  *  - pathspec 必须排除 web 下的 *.md（与 web/scripts/gen-build-info.mjs、
  *    web/app/api/version/route.ts 一致）：文档提交不进 bundle，不算前端变更。
  *
+ * 为什么另写 .next/claudestra-web-commit 标记：build-info.ts 每次跑 gen-build-info.mjs 都会重写
+ * （predev、手动 typecheck 前都会跑），它的内容与 mtime 都不能证明 .next 里是哪次构建。标记在
+ * 构建成功后写入并绑定 BUILD_ID——BUILD_ID 对不上（别人手动 build 过）就作废，退回比 build-info。
+ *
  * 重建为什么要备份 .next：next build 开局就原地清空 .next（cleanDistDir 默认 true），
  * 失败时旧构建已经没了，下次重启 web 服务就是 "Could not find a production build"。
  * 所以先把 .next 克隆一份（APFS clonefile，秒级、几乎不占空间），失败就换回去。
  */
 
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statSync, unlinkSync, writeSync } from "fs";
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
 import { spawnSync } from "child_process";
 import { homedir } from "os";
 import { resolveNpm } from "./npm-path.js";
@@ -23,12 +27,22 @@ import { resolveNpm } from "./npm-path.js";
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
 export const WEB_PATHSPEC = ["--", "web", ":(exclude)web/*.md"];
 
+/** .next/claudestra-web-commit：这份 .next 是哪次提交构建的。commit 为空 = 那次构建失败、换回了旧构建 */
+export interface BuildMarker {
+  commit: string;
+  buildId: string;
+}
+
+export const MARKER_NAME = "claudestra-web-commit";
+
 export interface WebBuildFacts {
-  /** web/.next/BUILD_ID 的 mtime；null = 没有构建产物 */
+  /** web/.next/BUILD_ID 的内容；null = 没有构建产物 */
+  buildId: string | null;
+  /** web/.next/BUILD_ID 的 mtime（只给拿不到 hash 时的时间兜底用） */
   buildIdMtimeMs: number | null;
-  /** web/lib/build-info.ts 的 mtime（prebuild 写） */
-  buildInfoMtimeMs: number | null;
-  /** build-info.ts 里烤入的 CLIENT_WEB_COMMIT */
+  /** 构建成功后写入的标记；与 buildId 不符时作废 */
+  marker: BuildMarker | null;
+  /** build-info.ts 里烤入的 CLIENT_WEB_COMMIT（没有有效标记时的退路） */
   bakedWebCommit: string | null;
   /** 当前工作树里最后一次触及 web（不含 md）的提交 */
   headWebCommit: string | null;
@@ -54,30 +68,40 @@ export function parseBakedWebCommit(src: string): string | null {
   return m && m[1] ? m[1] : null;
 }
 
+export function parseBuildMarker(src: string): BuildMarker | null {
+  try {
+    const j = JSON.parse(src);
+    if (j && typeof j.commit === "string" && typeof j.buildId === "string" && j.buildId) {
+      return { commit: j.commit, buildId: j.buildId };
+    }
+  } catch { /* 损坏按没有 */ }
+  return null;
+}
+
 export function webBuildVerdict(f: WebBuildFacts): WebBuildVerdict {
-  if (f.buildIdMtimeMs === null) {
+  if (f.buildId === null) {
     return { status: "warn", stale: true, detail: "web 无构建产物(.next/BUILD_ID 不存在)" };
   }
-  if (f.bakedWebCommit && f.headWebCommit) {
-    if (!sameCommit(f.bakedWebCommit, f.headWebCommit)) {
+  // 标记只对写它时的那份 .next 有效；BUILD_ID 变了说明之后有人另外 build 过
+  const built = f.marker && f.marker.buildId === f.buildId ? f.marker.commit : null;
+  if (built === "") {
+    return { status: "warn", stale: true, detail: "上一次 web 构建失败,在服务的是更早的构建" };
+  }
+  const have = built ?? f.bakedWebCommit;
+  if (have && f.headWebCommit) {
+    if (!sameCommit(have, f.headWebCommit)) {
       return {
         status: "warn",
         stale: true,
-        detail: `web 构建落后于代码(bundle 烤入 ${f.bakedWebCommit},web/ 最新提交 ${f.headWebCommit})`,
-      };
-    }
-    // prebuild 已写入新值但 BUILD_ID 更旧 = 上一次构建没跑完或失败了（bundle 仍是旧的）
-    if (f.buildInfoMtimeMs !== null && f.buildIdMtimeMs < f.buildInfoMtimeMs) {
-      return {
-        status: "warn",
-        stale: true,
-        detail: "上一次 web 构建没有完成(build-info 比 .next/BUILD_ID 新)——在服务的仍是更早的构建",
+        detail: `web 构建落后于代码(构建自 ${have},web/ 最新提交 ${f.headWebCommit})`,
       };
     }
     return { status: "ok", stale: false, detail: `web 构建与代码一致(${f.headWebCommit})` };
   }
   // 拿不到 hash（非 git 部署 / 老构建没有 build-info）才退回时间比较；60s 吸收同分钟粒度
-  if (f.lastWebCommitMs === null) return { status: "ok", stale: false, detail: "无法取得 web/ 提交信息,跳过比对" };
+  if (f.buildIdMtimeMs === null || f.lastWebCommitMs === null) {
+    return { status: "ok", stale: false, detail: "无法取得 web/ 提交信息,跳过比对" };
+  }
   if (f.buildIdMtimeMs + 60_000 < f.lastWebCommitMs) {
     return {
       status: "warn",
@@ -92,6 +116,17 @@ function mtimeOrNull(p: string): number | null {
   try { return statSync(p).mtimeMs; } catch { return null; }
 }
 
+function readBuildId(nextDir: string): string | null {
+  try { return readFileSync(`${nextDir}/BUILD_ID`, "utf-8").trim() || null; } catch { return null; }
+}
+
+/** 给当前 .next 打标记；commit 为空表示「这份是构建失败后换回的旧构建」 */
+function writeMarker(nextDir: string, commit: string): void {
+  const buildId = readBuildId(nextDir);
+  if (!buildId) return;
+  try { writeFileSync(`${nextDir}/${MARKER_NAME}`, JSON.stringify({ commit, buildId }) + "\n"); } catch { /* 标记只影响判据 */ }
+}
+
 function git(repoRoot: string, args: string[]): { ok: boolean; out: string } {
   const r = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 15_000 });
   return { ok: r.status === 0, out: (r.stdout || "").trim() };
@@ -103,9 +138,12 @@ export function readWebBuildFacts(repoRoot: string): WebBuildFacts {
   try { baked = parseBakedWebCommit(readFileSync(`${webDir}/lib/build-info.ts`, "utf-8")); } catch { /* 没构建过 */ }
   const h = git(repoRoot, ["log", "-1", "--format=%h", ...WEB_PATHSPEC]);
   const ct = git(repoRoot, ["log", "-1", "--format=%ct", ...WEB_PATHSPEC]);
+  let marker: BuildMarker | null = null;
+  try { marker = parseBuildMarker(readFileSync(`${webDir}/.next/${MARKER_NAME}`, "utf-8")); } catch { /* 没有 */ }
   return {
+    buildId: readBuildId(`${webDir}/.next`),
     buildIdMtimeMs: mtimeOrNull(`${webDir}/.next/BUILD_ID`),
-    buildInfoMtimeMs: mtimeOrNull(`${webDir}/lib/build-info.ts`),
+    marker,
     bakedWebCommit: baked,
     headWebCommit: h.ok && h.out ? h.out : null,
     lastWebCommitMs: ct.ok && /^\d+$/.test(ct.out) ? Number(ct.out) * 1000 : null,
@@ -136,13 +174,26 @@ const ORCH_DIR = `${homedir()}/.claude-orchestrator`;
 const LOCK_PATH = `${ORCH_DIR}/web-build.lock`;
 /** 备份放仓库外：web/.gitignore 只忽略 /.next/，放 web/ 下会让工作区变脏、挡住自动更新 */
 const BACKUP_DIR = `${ORCH_DIR}/web-build/next-prev`;
-const LOCK_STALE_MS = 30 * 60_000;
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-/** 与 update.lock 同语义：持有者活着且未满 30 分钟才算被占；否则接管 */
+/**
+ * 锁持有者是否还在构建。只看死活、不按年龄接管：备份目录是共用的，接管一个还活着的构建
+ * 会删掉它的备份、让它失败时无从回滚。pid 被复用成别的进程时（不是 bun）按已死处理。
+ */
+function holderBusy(pid: number): boolean {
+  if (!(pid > 0) || !pidAlive(pid)) return false;
+  const comm = (spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" }).stdout || "").trim();
+  return !comm || isBuilderComm(comm); // ps 读不到就当还活着：宁可这轮不建，也不删别人的备份
+}
+
+/** 构建都跑在 bun 进程里（manager / install-cli）；ps comm 可能是全路径 */
+export function isBuilderComm(comm: string): boolean {
+  return /(^|\/)bun$/.test(comm.trim());
+}
+
 function takeLock(): boolean {
   mkdirSync(ORCH_DIR, { recursive: true });
   for (let i = 0; i < 2; i++) {
@@ -154,8 +205,7 @@ function takeLock(): boolean {
     } catch {
       let holder = 0;
       try { holder = parseInt(readFileSync(LOCK_PATH, "utf-8").trim(), 10); } catch { /* 读不到当孤儿 */ }
-      const age = Date.now() - (mtimeOrNull(LOCK_PATH) ?? 0);
-      if (holder > 0 && pidAlive(holder) && age < LOCK_STALE_MS) return false;
+      if (holderBusy(holder)) return false;
       try { unlinkSync(LOCK_PATH); } catch { /* 被别人抢先清了，再试一次 */ }
     }
   }
@@ -264,14 +314,20 @@ export async function rebuildWebIfStale(
     }
     if (result.ok) {
       rmSync(BACKUP_DIR, { recursive: true, force: true });
+      // prebuild 刚把这次的 hash 写进 build-info，照抄进标记
+      let baked: string | null = null;
+      try { baked = parseBakedWebCommit(readFileSync(`${webDir}/lib/build-info.ts`, "utf-8")); } catch { /* 没有就不写 */ }
+      if (baked) writeMarker(nextDir, baked);
     } else if (hadBuild) {
       result.restored = restoreNext(nextDir);
+      if (result.restored) writeMarker(nextDir, "");
       result.error += result.restored ? "(已换回旧构建)" : "(换回旧构建也失败了——web 服务可能起不来)";
     }
     if (opts.restartService) result.restarted = restartWebService();
     return result;
   } catch (e) {
     const restored = existsSync(BACKUP_DIR) && !existsSync(`${nextDir}/BUILD_ID`) ? restoreNext(nextDir) : undefined;
+    if (restored) writeMarker(nextDir, "");
     return { attempted: true, ok: false, restored, error: `web 构建异常: ${(e as Error).message}` };
   } finally {
     releaseLock();

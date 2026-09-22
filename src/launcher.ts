@@ -69,6 +69,7 @@ async function confirmMasterModal(pane: string): Promise<void> {
 }
 import { buildClaudeCommand } from "./lib/claude-launch.js";
 import { resolveNpm } from "./lib/npm-path.js";
+import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveClaudeBinary, probeClaudeVersion, dequarantineByReplace, classifyClaudeInstall, type ClaudeInstall } from "./lib/claude-binary.js";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { readConfig } from "./lib/config-store.js";
@@ -88,6 +89,10 @@ await assertPrimaryOrExit("launcher");
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;
 const REPO_ROOT = `${import.meta.dir}/..`;
+/** 拉 manager 子进程用的 bun。不用 process.execPath：Homebrew 下它是带版本号的 Cellar 路径，
+ *  launcher 一跑几天，brew upgrade bun 清掉旧目录后每次 spawn 都 ENOENT；resolveBunPath 优先
+ *  PATH 上的稳定符号链接（plist PATH 已含 bun 所在目录）。 */
+const BUN = resolveBunPath();
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
@@ -358,7 +363,7 @@ async function checkBetaUpdates(autoOn: boolean) {
   console.log(`🧪 beta 自动前进尝试 ${head.slice(0, 7)} → ${remote.slice(0, 7)}(成败见 ${BETA_UPDATE_LOG})`);
   const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
   await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
-  Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
+  Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
     detached: true,
@@ -469,7 +474,7 @@ async function checkForUpdates() {
   // 输出追加到日志文件，bail 时有迹可查
   const stamp = `\n[${new Date().toISOString()}] 🆙 release v${local} → ${release.tag}\n`;
   await import("fs/promises").then((m) => m.appendFile(RELEASE_UPDATE_LOG, stamp)).catch(() => {});
-  Bun.spawn(["bash", "-c", `exec "${process.execPath}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
+  Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
     detached: true,
@@ -604,7 +609,15 @@ async function detectClaudeInstall(): Promise<ClaudeInstall | null> {
   return bin ? classifyClaudeInstall(bin.real) : null;
 }
 
-let unknownInstallNotified = false;
+/** 已报过「认不出安装方式」的 claude 路径。落盘而非内存：launcher 每次更新都会 reload、启动即检查，
+ *  只记内存的话每次更新后 #control 都会再收到同一条 */
+const UNKNOWN_INSTALL_NOTED = `${process.env.HOME || ""}/.claude-orchestrator/unknown-claude-install.notified`;
+async function unknownInstallAlreadyNoted(path: string): Promise<boolean> {
+  try { return (await Bun.file(UNKNOWN_INSTALL_NOTED).text()).trim() === path; } catch { return false; }
+}
+async function noteUnknownInstall(path: string): Promise<void> {
+  await Bun.write(UNKNOWN_INSTALL_NOTED, path).catch(() => {});
+}
 
 /** 所有 agent + master 是否都空闲 */
 async function allAgentsIdle(): Promise<boolean> {
@@ -645,7 +658,7 @@ const restoreFailNotifiedAt = new Map<string, number>();
 
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
-    const list = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
+    const list = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
     if (!list.ok) return;
     const parsed = JSON.parse(list.out || "{}");
     const agents: any[] = parsed.agents || [];
@@ -678,7 +691,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     const failed: { name: string; error: string }[] = [];
     for (const agent of reallyDead) {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
-      const r = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
+      const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
       const why = restartFailureReason(r);
       if (why) {
         console.error(`🔁 [${source}] ❌ ${agent.name} 恢复失败: ${why}`);
@@ -749,8 +762,6 @@ async function healBridgeDrift(): Promise<void> {
     return;
   }
   const port = bridgePortOf(drift.to);
-  await tmuxRaw(["set-environment", "-g", "BRIDGE_URL", drift.to]).catch(() => {});
-  if (port) await tmuxRaw(["set-environment", "-g", "BRIDGE_PORT", String(port)]).catch(() => {});
   restartWaveUntil = Date.now() + 20 * 60_000; // 拿租约压住 dead-agent 巡检
   console.log(`🔀 bridge 地址漂移 ${drift.from} → ${drift.to}：全员重启（含大总管）`);
   try {
@@ -763,10 +774,36 @@ async function healBridgeDrift(): Promise<void> {
       ),
     });
   } catch { /* 通知失败不挡迁移 */ }
-  const r = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart", "--include-master"], 900_000);
-  const why = restartFailureReason(r);
-  console.log(`🔀 漂移重启${why ? `未完全成功: ${why}` : "完成"}`);
-  restartWaveUntil = Date.now() + 2 * 60_000;
+  // 新会话的地址不靠 tmux 全局环境：启动命令前缀自带 BRIDGE_URL/BRIDGE_PORT（claude-launch）
+  let why: string | null;
+  try {
+    why = restartFailureReason(
+      await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", "--include-master"], 900_000),
+    );
+  } catch (e) {
+    why = `restart 拉起失败: ${(e as Error).message}`;
+  }
+  // 失败时冷却拉长：每轮重试都是含大总管的全员重启，救不回来的会话不能每 2 分钟折腾一次全员
+  restartWaveUntil = Date.now() + (why ? 30 : 2) * 60_000;
+  if (!why) {
+    // 全员重启成功才把 tmux 全局环境改成新值——它是「漂移已处理」的唯一标记，
+    // 提前改了，没重启成功的会话会永远留在旧端口而再也检测不到
+    await tmuxRaw(["set-environment", "-g", "BRIDGE_URL", drift.to]).catch(() => {});
+    if (port) await tmuxRaw(["set-environment", "-g", "BRIDGE_PORT", String(port)]).catch(() => {});
+    console.log(`🔀 漂移重启完成`);
+    return;
+  }
+  console.log(`🔀 漂移重启未完全成功（保留旧的 tmux 全局环境，冷却后重试）: ${why}`);
+  try {
+    await bridgeRequest({
+      type: "reply",
+      chatId: CONTROL_CHANNEL_ID,
+      text: t(
+        `⚠️ bridge 地址迁移到 ${drift.to} 时有会话没重启成功：${why}\n这些会话还连着旧地址（离线），launcher 30 分钟后重试；也可手动 \`bun src/manager.ts restart --include-master\`。`,
+        `⚠️ Some sessions failed to restart while moving to ${drift.to}: ${why}\nThey are still on the old address (offline); the launcher retries in 30 minutes, or run \`bun src/manager.ts restart --include-master\`.`,
+      ),
+    });
+  } catch { /* non-critical */ }
 }
 
 async function restartAgentsAndMaster() {
@@ -775,12 +812,12 @@ async function restartAgentsAndMaster() {
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
   try {
-    const listOut = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
+    const listOut = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
     const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
     // 大总管不当金丝雀（窗口定名后 manager list 会带上它那一行；它由下面 /exit + 主循环拉起）
     const canary = agents.find((a) => a.status !== "stopped" && a.name !== MASTER_WINDOW_NAME);
     if (canary) {
-      const r = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
+      const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
       let canaryOk = false;
       try { canaryOk = JSON.parse(r.out || "{}").ok === true; } catch { /* 解析失败按失败算 */ }
       console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
@@ -804,7 +841,7 @@ async function restartAgentsAndMaster() {
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
-  const { ok, out } = await runCmd([process.execPath, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+  const { ok, out } = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
   console.log(`🆙 bun manager restart 结果: ok=${ok}`);
   if (!ok) console.log(out);
   restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
@@ -838,8 +875,8 @@ async function checkClaudeCodeUpdate() {
   if (install.kind === "native") return;
   // 认不出的安装方式（volta shim / pnpm / bun 全局…）不猜着升级，只说一次
   if (install.kind === "unknown") {
-    if (!unknownInstallNotified) {
-      unknownInstallNotified = true;
+    if (!(await unknownInstallAlreadyNoted(install.path))) {
+      await noteUnknownInstall(install.path);
       console.log(`🆙 认不出 Claude Code 的安装方式（${install.path}），不自动升级`);
       await bridgeRequest({
         type: "reply",

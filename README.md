@@ -171,6 +171,8 @@ tmux -S /tmp/claude-orchestrator/master.sock attach   # same as: claudestra atta
 claudestra ls
 ```
 
+`claudestra` uses `-CC` only when run inside iTerm2; any other terminal (or an ssh session) gets a plain attach. `claudestra attach --iterm` opens a new iTerm2 window instead.
+
 Every agent is a window inside the `master` session. Switch with `Ctrl-B n/p` or click the iTerm2 tab.
 The session lives on a private socket, so a plain `tmux ls` showing nothing is expected — use `claudestra ls`.
 

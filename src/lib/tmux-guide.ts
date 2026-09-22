@@ -62,7 +62,8 @@ export function printTmuxGuide(): void {
 
   p(`${c.bold}${c.blue}非 iTerm2 终端（Terminal.app / Alacritty / kitty / Warp）：普通 tmux 模式${c.reset}`);
   p("");
-  p(`  ${c.cyan}claudestra attach --plain${c.reset}   ${c.dim}或  tmux -S ${SOCK} attach${c.reset}`);
+  p(`  ${c.cyan}claudestra${c.reset}   ${c.dim}在 iTerm2 外运行会自动用普通模式（--plain 可强制；--iterm 反过来唤起 iTerm2）${c.reset}`);
+  p(`  ${c.dim}或  tmux -S ${SOCK} attach${c.reset}`);
   p("");
   p(`${c.dim}切窗口 Ctrl-B n / p，离开（agent 继续跑）Ctrl-B d。-CC 模式只有 iTerm2 认，${c.reset}`);
   p(`${c.dim}在别的终端里会吐出一屏控制协议文本。${c.reset}`);

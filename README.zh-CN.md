@@ -170,6 +170,8 @@ tmux -S /tmp/claude-orchestrator/master.sock attach   # 等同 claudestra attach
 claudestra ls
 ```
 
+`claudestra` 只在 iTerm2 里用 `-CC`；其它终端（含 ssh 进来）自动普通 attach。想从别的终端唤起 iTerm2 新窗口：`claudestra attach --iterm`。
+
 每个 agent 是 `master` session 里的一个 window。用 `Ctrl-B n/p` 切换，或者直接点 iTerm2 的 tab。
 会话在私有 socket 里，普通 `tmux ls` 看不到是正常的——用 `claudestra ls`。
 

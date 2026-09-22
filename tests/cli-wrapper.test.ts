@@ -16,11 +16,14 @@ test("提供 ls 与普通模式 attach，并说明私有 socket", () => {
   expect(script).toContain("普通 tmux ls 看不到是正常的");
 });
 
-// 非 iTerm 终端里 -CC 只会吐控制协议文本；没装 iTerm 时必须直接走普通 attach，不能去唤起 iTerm
-test("没装 iTerm 走普通 attach，而且判断在唤起 iTerm 之前", () => {
+// 非 iTerm 终端里 -CC 只会吐控制协议文本；ssh 进来时唤起 iTerm 会开在远端桌面上。
+// 所以 iTerm 外默认普通 attach，唤起 iTerm 只在显式 --iterm 时发生
+test("iTerm 外默认普通 attach，唤起 iTerm 要显式 --iterm", () => {
+  const plainGate = script.indexOf(`if [ "$MODE" != iterm ] || [ ! -d /Applications/iTerm.app ]; then`);
   const plainAt = script.indexOf('exec "${PLAIN_ATTACH[@]}"');
   const osaAt = script.indexOf("/usr/bin/osascript");
-  expect(script).toContain("[ ! -d /Applications/iTerm.app ]");
-  expect(plainAt).toBeGreaterThan(0);
+  expect(plainGate).toBeGreaterThan(0);
+  expect(plainAt).toBeGreaterThan(plainGate);
   expect(plainAt).toBeLessThan(osaAt);
+  expect(script).toContain("--iterm) MODE=iterm ;;");
 });

@@ -360,15 +360,17 @@ export function cliWrapperScript(repoRoot: string): string {
   return `#!/usr/bin/env bash
 # claudestra — one-shot launcher (Claudestra-installed, v2.4.1+)
 # 用法：
-#   claudestra                 检查 daemon 后 attach（iTerm 用 -CC 原生标签，没装 iTerm 用普通 tmux）
+#   claudestra                 检查 daemon 后 attach（在 iTerm 里用 -CC 原生标签，其它终端用普通 tmux）
 #   claudestra attach --plain  强制普通 tmux attach（任何终端都能用）
+#   claudestra attach --iterm  不在 iTerm 里也唤起 iTerm 新窗口走 -CC
 #   claudestra ls              列出 master session 里的窗口（agent）
 # 流程：
 #   1) launchctl 检查 3 个 daemon，没 load 的 bootstrap
 #   2) 已在 tmux 嵌套，提示 + 退出
-#   3) --plain 或没装 iTerm：普通 tmux attach（-CC 在普通终端里只会吐控制协议文本）
-#   4) 在 iTerm：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
-#   5) 不在 iTerm 但装了 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+#   3) 在 iTerm（且没 --plain）：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
+#   4) --iterm 且装了 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+#   5) 其余（--plain / Terminal.app / ssh 等）：普通 tmux attach
+#      （-CC 在普通终端里只会吐控制协议文本；ssh 进来时唤起 iTerm 会开在远端桌面上）
 set -u
 
 REPO=${JSON.stringify(repoRoot)}
@@ -378,21 +380,23 @@ PLIST_DIR="$HOME/Library/LaunchAgents"
 ATTACH=(tmux -S "$SOCK" -CC attach -t master)
 PLAIN_ATTACH=(tmux -S "$SOCK" attach -t master)
 
-PLAIN=0
+MODE=auto
 case "\${1:-}" in
   ls|list)
     echo "会话在私有 socket（$SOCK）里，普通 tmux ls 看不到是正常的。"
     exec tmux -S "$SOCK" list-windows -t master -F '#{window_index}  #{window_name}'
     ;;
   attach)
-    [ "\${2:-}" = "--plain" ] && PLAIN=1
+    case "\${2:-}" in
+      --plain) MODE=plain ;;
+      --iterm) MODE=iterm ;;
+    esac
     ;;
-  --plain)
-    PLAIN=1
-    ;;
+  --plain) MODE=plain ;;
+  --iterm) MODE=iterm ;;
   "") ;;
   *)
-    echo "用法: claudestra [attach [--plain] | ls]"
+    echo "用法: claudestra [attach [--plain|--iterm] | ls]"
     exit 2
     ;;
 esac
@@ -407,7 +411,7 @@ CB=$'\\033[1;36m'
 CR=$'\\033[0m'
 
 echo "\${CB}🚀 Claudestra\${CR} \\033[2m↗ $REPO\\033[0m"
-echo "$CI 会话在私有 socket 里，普通 tmux ls 看不到是正常的；看窗口用 claudestra ls，非 iTerm 终端用 claudestra attach --plain"
+echo "$CI 会话在私有 socket 里，普通 tmux ls 看不到是正常的；看窗口用 claudestra ls；iTerm 外的终端自动走普通 tmux attach"
 
 missing=()
 for d in "\${DAEMONS[@]}"; do
@@ -439,20 +443,21 @@ if [ -n "\${TMUX:-}" ]; then
   exit 0
 fi
 
-# --plain 或根本没装 iTerm：普通 tmux attach，任何终端都能用
-if [ "$PLAIN" -eq 1 ] || { [ "\${TERM_PROGRAM:-}" != "iTerm.app" ] && [ ! -d /Applications/iTerm.app ]; }; then
-  echo "$CI 普通 tmux attach（切窗口 Ctrl-B n/p，离开 Ctrl-B d）"
-  exec "\${PLAIN_ATTACH[@]}"
-fi
-
 # 在 iTerm：exec 替换当前进程，让 tmux 直接成为 iTerm 子进程（-CC 协议字节直送 PTY）
-if [ "\${TERM_PROGRAM:-}" = "iTerm.app" ]; then
+if [ "$MODE" != plain ] && [ "\${TERM_PROGRAM:-}" = "iTerm.app" ]; then
   echo "$CI 在 iTerm，exec tmux -CC（iTerm 集成会切到 native tabs）"
   exec "\${ATTACH[@]}"
 fi
 
-# 不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
-echo "$CI 不在 iTerm，AppleScript 唤起 iTerm 新窗口…"
+# 其余一律普通 tmux attach，任何终端都能用；只有显式 --iterm 才去唤起 iTerm
+if [ "$MODE" != iterm ] || [ ! -d /Applications/iTerm.app ]; then
+  [ "$MODE" = iterm ] && echo "$CW 没装 iTerm，改用普通 tmux attach"
+  echo "$CI 普通 tmux attach（切窗口 Ctrl-B n/p，离开 Ctrl-B d；要 iTerm 原生标签：claudestra attach --iterm）"
+  exec "\${PLAIN_ATTACH[@]}"
+fi
+
+# --iterm 且不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
+echo "$CI AppleScript 唤起 iTerm 新窗口…"
 ATTACH_STR="\${ATTACH[*]}"
 /usr/bin/osascript <<APPLESCRIPT
 tell application "iTerm"
@@ -883,7 +888,11 @@ function systemdUnitHint(repoRoot: string, bunPath: string): string {
   ].join("\n");
 }
 
-export async function installClaudestraCli(repoRoot: string): Promise<InstallCliResult> {
+export async function installClaudestraCli(
+  repoRoot: string,
+  /** skipWebBuild：调用方（manager update）本轮已经试过构建——失败时不再把同一个失败的构建跑第二遍 */
+  opts: { skipWebBuild?: boolean } = {},
+): Promise<InstallCliResult> {
   repoRoot = resolve(repoRoot);
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -929,7 +938,7 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
   //     bootout launcher 会把它连坐回收，构建若在后面会被中途杀掉、留下被清空的 .next。
   //     也要在 readiness 之前：新的 BUILD_ID 参与判断能不能装 web daemon。
   //     没有 .env.local = 没选 web，不花这个钱。
-  if (existsSync(`${webDir}/.env.local`)) {
+  if (!opts.skipWebBuild && existsSync(`${webDir}/.env.local`)) {
     try {
       result.webBuild = await rebuildWebIfStale(repoRoot);
       if (result.webBuild.error) {
