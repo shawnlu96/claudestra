@@ -259,10 +259,12 @@ describe("patterns", () => {
       files({
         "web/app/api/secret/route.ts": "export async function GET() { return ok(); }",
         "web/app/api/fine/route.ts": "export async function GET(r) { if (!isAuthed(r)) return no(); }",
+        "web/app/api/wrapped/route.ts": 'import { authed } from "@/lib/bff";\nexport const GET = authed(async () => ok());',
+        "web/app/api/fake-wrap/route.ts": "const authed = (h) => h;\nexport const GET = authed(async () => ok());",
         "web/app/api/version/route.ts": "export async function GET() { return ok(); }",
       }),
     );
-    expect(Object.keys(r.counts).filter((k) => k.startsWith("route:"))).toEqual(["route:web/app/api/secret/route.ts"]);
+    expect(Object.keys(r.counts).filter((k) => k.startsWith("route:")).sort()).toEqual(["route:web/app/api/fake-wrap/route.ts", "route:web/app/api/secret/route.ts"]);
   });
 });
 
