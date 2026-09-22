@@ -15,7 +15,8 @@ import { fmtTs } from "../fmt-time";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
-import { inlineButtonsToText, plainLabel } from "@/lib/chat/inline-buttons";
+import { plainLabel } from "@/lib/chat/inline-buttons";
+import { agentChipIndex, agentLabelKey, cleanSummary, messagePlainText, splitQuoted, toolIcon } from "../message-text";
 import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 import { isNearBottom, tailAppendedCount } from "../scroll-follow";
 import { installTapRescue } from "@/lib/tap-rescue";
@@ -26,27 +27,6 @@ const TOUCH_HOLD_MS = 500;
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
    user 右对齐圆角矩形，工具调用 active（转圈）/ history（可展开）两态。
    配色走 daisyUI token 跟随明暗主题：✦ 头用 accent，工具活动用 info。 */
-
-const TOOL_ICONS: Record<string, string> = {
-  Read: "📄",
-  Write: "📝",
-  Edit: "✏️",
-  Bash: "💻",
-  Grep: "🔍",
-  Glob: "📂",
-  Task: "🤖",
-  Agent: "🤖",
-  TodoWrite: "📋",
-  Skill: "⚡",
-  WebFetch: "🌐",
-  WebSearch: "🌐",
-};
-const toolIcon = (n: string) => TOOL_ICONS[n] || "🔧";
-
-/** formatTool 的 Bash 摘要用 ||command|| 包裹命令，展示时去掉这对标记。 */
-function cleanSummary(s: string): string {
-  return s.replace(/\|\|/g, " ").replace(/\s+/g, " ").trim();
-}
 
 /** 点击切换的时间小签（消息气泡 / 工具行共用）。 */
 function TsBadge({ ts, shown }: { ts?: string; shown: boolean }) {
@@ -789,25 +769,8 @@ const TextBlock = memo(function TextBlock({
  * 有 segments（叙述/工具的真实交错序）时按段渲染——修「工具全堆气泡顶部、
  * 文本全挤底部」的时间线错乱；无 segments（旧缓存快照）回退 content+toolCalls。
  * 流式进行中文本段用纯文本（DOMD 只读一次不适合增量喂字），定稿/历史走 DOMD。
+ * agent chip 名单只订阅压成字符串的 agentLabelKey（D8-4，见 message-text.ts）。
  */
-/**
- * agent chip 需要的只是「名字 / 显示名 / 是否大总管」。订阅整个 agents 数组的话，15 秒一次的
- * 列表轮询（busy、上下文、未读任何一项变了都会整体替换数组）就让窗口里每条助手气泡都重渲染，
- * 外层 Message 的 memo 挡不住组件自己的订阅（D8-4）。压成字符串订阅：内容不变 = 同一个串，
- * Object.is 相等不重渲染。按数组引用缓存，一次轮询只拼一次。
- */
-const agentLabelKeyCache = new WeakMap<object, string>();
-const KEY_FIELD = "\u0001";
-const KEY_ROW = "\u0002";
-function agentLabelKey(agents: { name: string; displayName?: string; pinnedMaster?: boolean }[]): string {
-  let k = agentLabelKeyCache.get(agents);
-  if (k === undefined) {
-    k = agents.map((a) => [a.name, a.displayName ?? "", a.pinnedMaster ? "1" : ""].join(KEY_FIELD)).join(KEY_ROW);
-    agentLabelKeyCache.set(agents, k);
-  }
-  return k;
-}
-
 function AssistantBody({
   m,
   liveEmpty,
@@ -828,25 +791,7 @@ function AssistantBody({
   // master 别名映射到前端的 __master__(bridge-api 的 apiAgentName 约定)
   const agentKey = useChatStore((s) => agentLabelKey(s.state.agents));
   const inlineCtx = useMemo<InlineActionCtx>(() => {
-    const agents = agentKey
-      ? agentKey.split(KEY_ROW).map((row) => {
-          const [name, displayName, pinned] = row.split(KEY_FIELD);
-          return { name, displayName: displayName || undefined, pinnedMaster: pinned === "1" };
-        })
-      : [];
-    const labels: string[] = [];
-    const resolve = (label: string) => {
-      for (const a of agents) {
-        if (a.name === label || a.displayName === label) return a.name;
-        if (a.pinnedMaster && label === "master") return a.name;
-      }
-      return null;
-    };
-    for (const a of agents) {
-      labels.push(a.name);
-      if (a.displayName) labels.push(a.displayName);
-      if (a.pinnedMaster) labels.push("master");
-    }
+    const { labels, resolve } = agentChipIndex(agentKey);
     return {
       clicks: m.replyClicks ?? {},
       busy: inlineBusy,
@@ -934,38 +879,6 @@ function AssistantBody({
       )}
     </InlineActionContext.Provider>
   );
-}
-
-/** 引用回复格式(左滑引用):「> 引用\n\n正文」→ 拆成引用条 + 正文。 */
-function splitQuoted(content: string): { quoted?: string; body: string } {
-  const qm = content.match(/^> (.+?)\n\n([\s\S]*)$/);
-  return { quoted: qm?.[1], body: qm ? qm[2] : content };
-}
-
-/**
- * 整条 assistant 消息的纯文本（「复制整条」用）：按段序取叙述 + reply，工具卡
- * 不进剪贴板（复制回复是为了转发文字，不是转发执行日志）。
- * 去重是必须的——旧快照里 reply 既可能在段里、又挂在 replyText 上（AssistantBody
- * 的两条渲染路径），不去重就会复制两遍。
- */
-function messagePlainText(m: ChatMessage): string {
-  const parts: string[] = [];
-  const push = (t?: string) => {
-    // 行内按钮语法在剪贴板里退化成 [label] 文本(复制是为了转发文字)
-    const v = t && inlineButtonsToText(t).trim();
-    if (v && !parts.includes(v)) parts.push(v);
-  };
-  if (m.segments?.length) {
-    for (const seg of m.segments) {
-      if (seg.kind === "tools") continue;
-      if (seg.kind === "text" && seg.progress) continue; // 进度句不算正文
-      push(seg.text);
-    }
-  } else {
-    push(m.content);
-  }
-  push(m.replyText);
-  return parts.join("\n\n");
 }
 
 /**

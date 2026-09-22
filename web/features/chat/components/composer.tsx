@@ -4,6 +4,7 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 import { COMPACT_REQUEST_TEXT } from "./ctx-badge";
 import { SkillsSheet } from "./skills-sheet";
+import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 
 
 const MAX_FILES = 5;
@@ -156,14 +157,6 @@ function RemoveBtn({ onClick }: { onClick: () => void }) {
   );
 }
 
-/** Slash 命令（bridge /skills 端点形状）。web 无 Discord 的 100 命令上限/描述截断。 */
-interface SlashCmd {
-  name: string;
-  invokeName: string;
-  description: string;
-  scope: string;
-  argHint?: string;
-}
 const SCOPE_LABEL: Record<string, string> = {
   builtin: "内建",
   native: "CC",
@@ -279,28 +272,9 @@ export function Composer() {
     setSlashSel(0);
     setSlashDismissed(false);
   }, [text]);
-  // 只在输入命令 token 期间弹(无空格/换行):pickSlash 填入「/cmd 」带尾随空格
-  // 即自动收起——否则填入后菜单基于新文本重新匹配(description 子串能撞上无关
-  // 命令),二次回车被菜单拦截选中错误命令而不是发送(2026-07-24 owner:输 /save
-  // 补全后再回车,期望发送却变成 Discord Configure)
-  const slashQ = /^\/\S*$/.test(text) ? text.slice(1).toLowerCase() : null;
-  // 匹配优先级:name 前缀 > name 子串 > 仅 description 命中。不排序的话
-  // skills 原序里 description 撞词的无关命令会排在 name 精确命中前——输 /save
-  // 第一项竟是 discord-configure(描述含 "save the bot"),回车直接填错命令
-  // (2026-07-24 owner 报障,Playwright 复现实锤)。sort 稳定,同级保持原序。
-  const slashRank = (c: SlashCmd) => {
-    const n = c.name.toLowerCase();
-    if (slashQ && n.startsWith(slashQ)) return 0;
-    if (slashQ && n.includes(slashQ)) return 1;
-    return 2;
-  };
-  const slashItems =
-    slashQ !== null && skills.length
-      ? skills
-          .filter((c) => c.name.toLowerCase().includes(slashQ) || c.description.toLowerCase().includes(slashQ))
-          .sort((a, b) => slashRank(a) - slashRank(b))
-          .slice(0, 40)
-      : [];
+  // 只在输入命令 token 期间弹;匹配优先级 name 前缀 > name 子串 > description——缘由见 slash-match.ts
+  const slashQ = slashQuery(text);
+  const slashItems = matchSlashCommands(skills, slashQ);
   const slashOpen = !slashDismissed && slashItems.length > 0;
   const pickSlash = (c: SlashCmd) => {
     setText(`/${c.name} `);

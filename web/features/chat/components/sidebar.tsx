@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
 import { installTapRescue } from "@/lib/tap-rescue";
-import type { AgentSession, ProjectMeta } from "../type";
+import type { AgentSession } from "../type";
 import { SettingsModal } from "./settings-modal";
 import { ProjectsModal } from "./projects-modal";
 import { InstallBanner } from "./install-banner";
@@ -14,6 +14,7 @@ import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { RuntimeBadge, UnmanagedSessions } from "./unmanaged-sessions";
 import { ArchivedSessions } from "./archived-sessions";
+import { buildSidebarEntries, filterAndRankWorkers, splitDormant, type SidebarEntry } from "../sidebar-entries";
 
 /** v2.17.2 点击串台修复(peer HedeMacBook-Pro 代码级归因,2026-08-09):
  *  列表按活动排序 + roster 指纹含易变字段 + 前台 15s 轮询 → 重排是常态;
@@ -24,14 +25,6 @@ import { ArchivedSessions } from "./archived-sessions";
 let tapIntent: { name: string; ts: number; x: number; y: number } | null = null;
 
 
-/** v2.21+ 方案 A 的沉寂判定:>30 天没真实对话(或从未说话且已停止)。
- *  忙碌的永不算沉寂。30s tick 重渲时会重估,模块级函数与 fmtAgo 同款先例。 */
-const DORMANT_MS = 30 * 24 * 3600_000;
-function isDormantAgent(a: AgentSession): boolean {
-  if (a.busy) return false;
-  const ts = a.lastActivityTs ?? null;
-  return ts ? Date.now() - ts > DORMANT_MS : a.status === "stopped";
-}
 /** 意图有效窗口:covers 移动端最长 click 派发延迟,又不至于让陈旧意图
  *  污染下一次独立点击(键盘激活无 pointerdown,走闭包兜底)。 */
 const TAP_INTENT_TTL_MS = 1_200;
@@ -585,21 +578,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   // 不参与搜索过滤,常驻列表区顶部的边框卡片
   const master = agents.find((a) => a.pinnedMaster);
   const workers = agents.filter((a) => !a.pinnedMaster);
-  const filtered = (
-    q
-      ? workers.filter((a) => `${a.displayName} ${a.name} ${a.purpose}`.toLowerCase().includes(q))
-      : workers
-  )
-    .slice()
-    .sort((a, b) => {
-      // 只按「置顶」分层,层内保持原相对顺序(= state.agents 的最近活动序)。
-      // ⚠ 未读**不参与排序**(2026-09-16 撤回:曾把有未读的拽到顶,但组件里每次
-      // render 都 sort,绕过了 refreshAgents 的交互期冻结[noteSidebarInteraction],
-      // Car Talk 一有未读/活动就在手指底下跳到顶 → 误点进错 agent。未读只用徽章+
-      // 加粗表达,不动行位置)。
-      const rank = (x: AgentSession) => (pinSet.has(x.name) ? 1 : 0);
-      return rank(b) - rank(a);
-    });
+  // 只按「置顶」分层,⚠ 未读不参与排序——规则与缘由见 sidebar-entries.ts
+  const filtered = filterAndRankWorkers(workers, q, pinSet);
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
   // 组序 = 组内最近活动(filtered 已按活动排,Map 插入序即组的活动序);未分组沉底。
   const [showProjects, setShowProjects] = useState(false);
@@ -627,41 +607,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       return next;
     });
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
-  // 分组只在 project 有 ≥2 个成员时呈现(owner 2026-08-28 图评:「agent 比
-  // project 还大,毫无条理」——单人组的组头 = 同名冗余噪音)。单成员/未分组
-  // 的 agent 平铺,停留在自身活动排序的位次上;组整体占据最活跃成员的位次。
-  type SidebarEntry =
-    | { kind: "group"; id: string; meta?: ProjectMeta; items: AgentSession[] }
-    | { kind: "row"; a: AgentSession };
-  const entries: SidebarEntry[] = [];
-  if (!q) {
-    const byId = new Map<string, AgentSession[]>();
-    for (const a of filtered) {
-      const key = a.projectId || "";
-      const arr = byId.get(key);
-      if (arr) arr.push(a);
-      else byId.set(key, [a]);
-    }
-    const emitted = new Set<string>();
-    for (const a of filtered) {
-      const key = a.projectId || "";
-      const items = byId.get(key)!;
-      if (key && items.length >= 2) {
-        if (!emitted.has(key)) {
-          emitted.add(key);
-          entries.push({ kind: "group", id: key, meta: projMeta.get(key), items });
-        }
-      } else {
-        entries.push({ kind: "row", a });
-      }
-    }
-  }
-  // 方案 A(owner 2026-08-28):>30 天没动静的 agent 收进底部默认折叠的「💤 沉寂」
-  // ——死 agent 不再占视野。组以「全员沉寂」为准整组下沉;忙碌的永不算沉寂。
-  const entryDormant = (e: SidebarEntry) =>
-    e.kind === "row" ? isDormantAgent(e.a) : e.items.every(isDormantAgent);
-  const activeEntries = entries.filter((e) => !entryDormant(e));
-  const dormantEntries = entries.filter(entryDormant);
+  // 单成员 project 不成组;整组全员沉寂才下沉「💤 沉寂」——规则见 sidebar-entries.ts
+  const entries = buildSidebarEntries(filtered, q, projMeta);
+  const { activeEntries, dormantEntries } = splitDormant(entries);
 
   return (
     <aside
