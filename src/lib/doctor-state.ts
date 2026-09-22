@@ -18,13 +18,19 @@ import { readJsonStateSync, type StateRead } from "./state-file.js";
  * 唯一会主动看的地方。坏了 → fail（写命令会被拒，得先修）；目录里有 `.corrupt-*` 备份 →
  * warn（上次拒写时留的，里面可能有明文 token）。都正常时不出行，健康实例输出不变。
  */
-export function stateFileVerdicts(reads: { path: string; read: StateRead }[], corruptBackups: string[]): Check[] {
+export function stateFileVerdicts(
+  reads: { path: string; read: StateRead; /** 写者走 writeJsonStateGuarded（缺省 true；registry 不是） */ guarded?: boolean }[],
+  corruptBackups: string[],
+): Check[] {
   const g = "状态文件";
   const out: Check[] = [];
-  for (const { path, read } of reads) {
+  for (const { path, read, guarded = true } of reads) {
     if (read.status !== "corrupt") continue;
-    out.push({ group: g, name: path.split("/").pop() || path, status: "fail", detail: `损坏：${read.error}（写命令会拒写）`,
-      fix: `手工修好 ${path}（或从 .corrupt-* / 备份恢复），修好前相关写操作都会失败` });
+    out.push(guarded
+      ? { group: g, name: path.split("/").pop() || path, status: "fail", detail: `损坏：${read.error}（写命令会拒写）`,
+        fix: `手工修好 ${path}（或从 .corrupt-* / 备份恢复），修好前相关写操作都会失败` }
+      : { group: g, name: path.split("/").pop() || path, status: "fail", detail: `损坏：${read.error}（写者不拒写，下一次写入会直接覆盖）`,
+        fix: `先备份 ${path} 再手工修好，别在修好前跑会写它的命令（create / kill / restart 等）` });
   }
   if (corruptBackups.length) {
     out.push({ group: g, name: ".corrupt 备份", status: "warn", detail: `${corruptBackups.length} 个：${corruptBackups.slice(0, 3).join(", ")}`,
@@ -34,12 +40,16 @@ export function stateFileVerdicts(reads: { path: string; read: StateRead }[], co
 }
 
 const STATE_FILES = () => [
-  REGISTRY_PATH, CONFIG_PATH, statePath("principals.json"), statePath("peers.json"),
+  CONFIG_PATH, statePath("principals.json"), statePath("peers.json"),
   statePath("projects.json"), statePath("cron.json"),
 ];
 
 export async function checkStateFiles(): Promise<Check[]> {
-  const reads = STATE_FILES().map((path) => ({ path, read: readJsonStateSync(path) }));
+  const reads = [
+    // registry 的写者（manager/core.ts saveRegistry）是不设防的原子写
+    { path: REGISTRY_PATH, read: readJsonStateSync(REGISTRY_PATH), guarded: false },
+    ...STATE_FILES().map((path) => ({ path, read: readJsonStateSync(path) })),
+  ];
   const names = await readdir(STATE_DIR).catch(() => [] as string[]); // 目录不存在即没有备份
   return stateFileVerdicts(reads, names.filter((n) => n.includes(".corrupt-")));
 }

@@ -110,6 +110,14 @@ export async function readConfig(): Promise<AppConfig> {
   return fromRead(await readJsonState(CONFIG_PATH));
 }
 
+/**
+ * 磁盘上的 config.json 此刻是否损坏（不是「不存在」）。自动写者（用量看板）据此暂停：
+ * 坏文件时 writeConfig 必然被拒，照常「建频道 → 存 id」就会每轮再建一个频道。
+ */
+export function isConfigCorrupt(): boolean {
+  return readJsonStateSync(CONFIG_PATH).status === "corrupt";
+}
+
 /** 同步读取配置（bridge 等不方便 await 的场景）。 */
 export function readConfigSync(): AppConfig {
   return fromRead(readJsonStateSync(CONFIG_PATH));

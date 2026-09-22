@@ -264,5 +264,13 @@ describe("stateFileVerdicts", () => {
     );
     expect(v.map((c) => [c.name, c.status])).toEqual([["principals.json", "fail"], [".corrupt 备份", "warn"]]);
     expect(v[0]!.detail).toContain("JSON 解析失败");
+    expect(v[0]!.detail).toContain("拒写");
+  });
+
+  test("registry（写者不设防）损坏 → 不宣称拒写，提示下一次写入会覆盖", () => {
+    const [c] = stateFileVerdicts([{ path: "/s/registry.json", read: { status: "corrupt", error: "x" }, guarded: false }], []);
+    expect(c!.status).toBe("fail");
+    expect(c!.detail).not.toContain("写命令会拒写");
+    expect(c!.detail).toContain("覆盖");
   });
 });

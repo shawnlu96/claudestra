@@ -98,7 +98,8 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
  * 去重），沿用本进程上次成功读到的内容（没有就空数组）——以前损坏被静默当成「没有 agent」。
  */
 export async function readRegistryAgents(registryPath = REGISTRY_PATH): Promise<RegistryAgent[]> {
-  return normalizeRegistryAgents(await readJsonLenient<unknown>(registryPath, null, { who: "registry" }));
+  // saveRegistry（manager/core.ts）是不设防的原子写：损坏时的日志不能说「写者拒绝覆盖」
+  return normalizeRegistryAgents(await readJsonLenient<unknown>(registryPath, null, { who: "registry", writersGuarded: false }));
 }
 
 // 同步读者的「上次成功值」（async 版的缓存在 state-file 里，二者互不影响）
@@ -112,7 +113,7 @@ export function readRegistryAgentsSync(registryPath = REGISTRY_PATH): RegistryAg
     return normalizeRegistryAgents(r.data);
   }
   if (r.status === "missing") return [];
-  reportCorrupt(registryPath, r.error, "registry");
+  reportCorrupt(registryPath, r.error, "registry", false);
   return normalizeRegistryAgents(lastGoodSync.get(registryPath) ?? null);
 }
 

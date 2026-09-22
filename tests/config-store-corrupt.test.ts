@@ -54,6 +54,51 @@ describe("config-store 坏文件", () => {
     expect(readdirSync(dir).some((f) => f.startsWith("config.json.corrupt-"))).toBe(true);
   });
 
+  // 审查 major：看板是唯一的自动周期写者。坏文件时每轮「建频道 → 存 id 被拒」，
+  // 以前会每个 Stop hook 建一个 Discord 频道、落一份 .corrupt 备份
+  test("损坏 → 反复被拒写只留 1 份备份；看板不建频道", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-dash-"));
+    const p = join(dir, "config.json");
+    writeFileSync(p, "{bad");
+    const DASH = join(import.meta.dir, "../src/bridge/stats-dashboard.ts");
+    const r = run(dir, `
+      const { ensureChannel } = await import(${JSON.stringify(DASH)});
+      let refused = 0, created = 0;
+      for (let i = 0; i < 3; i++) {
+        try { await c.setStatsDashboard("123", "456"); } catch (e) { if (e.name === "StateCorruptError") refused++; }
+      }
+      const fake = { channels: { fetch: async () => null } };
+      for (let i = 0; i < 3; i++) {
+        const id = await ensureChannel(fake, async () => { created++; return "999"; });
+        if (id !== null) throw new Error("ensureChannel 不该返回频道: " + id);
+      }
+      console.log(JSON.stringify({ refused, created, corrupt: c.isConfigCorrupt() }));`);
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.out)).toEqual({ refused: 3, created: 0, corrupt: true });
+    expect(readdirSync(dir).filter((f) => f.startsWith("config.json.corrupt-")).length).toBe(1);
+    expect(readFileSync(p, "utf-8")).toBe("{bad");
+    // 暂停提示只打一次
+    expect(r.err.split("用量看板暂停").length - 1).toBe(1);
+  });
+
+  test("内容变了（又坏成另一个样子）才另落一份备份", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-bak2-"));
+    const p = join(dir, "config.json");
+    writeFileSync(p, "{bad");
+    run(dir, `await c.setLang("en").catch(() => {});`);
+    writeFileSync(p, "{worse");
+    run(dir, `await c.setLang("en").catch(() => {});`);
+    run(dir, `await c.setLang("en").catch(() => {});`);
+    expect(readdirSync(dir).filter((f) => f.startsWith("config.json.corrupt-")).length).toBe(2);
+  });
+
+  test("不存在 / 正常 → isConfigCorrupt 为 false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-flag-"));
+    expect(run(dir, `console.log(c.isConfigCorrupt());`).out).toBe("false");
+    writeFileSync(join(dir, "config.json"), "{}");
+    expect(run(dir, `console.log(c.isConfigCorrupt());`).out).toBe("false");
+  });
+
   test("正常文件照常读写（原子写，不留 tmp）", () => {
     const dir = mkdtempSync(join(tmpdir(), "cfg-ok-"));
     const r = run(dir, `
