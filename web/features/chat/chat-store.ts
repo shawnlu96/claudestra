@@ -17,10 +17,12 @@ import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import {
   isHistoryBubble,
   coveredByCursor,
-  pruneLiveBubbles,
   mergeContiguousAssistant,
+  historyHasReply,
   type RecordSrc,
 } from "./live-merge";
+import { composeView, stripInboundHeader } from "./view-compose";
+import { decideReconnect } from "./reconnect-policy";
 
 /** 大总管保留名(与 lib/chat/bridge-api 的 MASTER_AGENT_NAME 同值;不 import——
  *  那个模块在 server 侧读 env,拖进 client bundle 没意义)。 */
@@ -53,84 +55,7 @@ function agentsSignature(list: AgentSession[]): string {
     .join("");
 }
 
-/**
- * 剥掉 Claudestra 的**入站注入头**：`[🌐 来自 Web 端用户「x」（…）。\n用 reply() …]\n\n正文`。
- *
- * 为什么需要：本地那条乐观气泡只有**正文**，而历史里的入站消息可能自带这段头
- * （Pi 会话没有 Claude Code 的 `<channel>` 包装，入站消息在会话记录里就是带头裸文
- * 本）⇒ 两边 norm 不相等 ⇒ 用户发一条、屏上出现两条（owner 2026-09-14 实测）。
- * Claude Code 侧历史里本来就是解包后的正文，这个函数对它是 no-op（不影响既有去重）。
- *
- * 只认 Claudestra 注入头（`[` + 来源 emoji + …`]`），普通以 `[` 开头的用户文本不动。
- */
-const INBOUND_HEAD_RE = /^\[(?:🌐|💬|🤖|🤝|🛰|📨|📬)[^\]]*\]\s*/u;
-function stripInboundHeader(x: string): string {
-  return x.trimStart().replace(INBOUND_HEAD_RE, "").trim();
-}
-
-/**
- * 乐观消息保全（loadMessages 全量替换与 syncDelta 差量追加共用——两处各写一份
- * 迟早漂移）：agent 忙时连发的消息在服务端排队,送达前不进 jsonl——整体替换会把
- * 它们从视图「吞掉」。把尚未在 incoming 里出现的本地消息挑出来接回视图尾;
- * 逐条消费匹配(同文本连发两条也各自对账),30 分钟后不再保全。
- * 匹配三口径:归一化全文相等 / 历史含 wire 原文([button:id] 落在 channel 包装里)
- * / 「🔘 label」兜底形态(2026-07-16)。CRLF 归一防注入链路差异(2026-07-15)。
- * v2.23+ 加第四口径:剥掉注入头后的裸文本相等（Pi 的入站消息在记录里带 🌐 头,
- * 本地气泡只有正文——不比裸文本就当成两条）。
- */
-function survivingPending(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
-  const tail = incoming.slice(-80);
-  const used = new Set<number>();
-  const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
-  return current.filter((m) => {
-    if (!m.local || m.role !== "user") return false;
-    if (m.ts && Date.now() - Date.parse(m.ts) > 30 * 60_000) return false;
-    const t = norm(m.content);
-    // 带头版本也拿来比一次：本地只有正文、历史带注入头时，光比原文匹配不上
-    const tBare = norm(stripInboundHeader(m.content));
-    const w = m.wire?.trim();
-    const friendly = w
-      ? (w.match(/^\[button:([\w-]+)\]$/)?.[1] ??
-          w.match(/^\[select:[\w-]+:(.+)\]$/)?.[1] ??
-          null)
-      : null;
-    const idx = tail.findIndex(
-      (h, i) =>
-        !used.has(i) &&
-        h.role === "user" &&
-        (norm(h.content) === t ||
-          // Pi：历史带注入头、本地只有正文 ⇒ 与两侧各自的裸文本比对
-          (tBare.length > 0 && norm(stripInboundHeader(h.content)) === tBare) ||
-          (!!w && h.content.includes(w)) ||
-          (!!friendly && norm(h.content) === `🔘 ${friendly}`))
-    );
-    if (idx >= 0) {
-      used.add(idx);
-      return false; // 已进历史,不再需要本地副本
-    }
-    return true;
-  });
-}
-
-/**
- * 幸存的乐观消息按时间插回列表,而不是一律接到尾:它在 jsonl 里没有对应记录时
- * (队列吸收 / 送达失败),接到尾会让「很久之前发的消息」每次对齐都跑到最下面
- * (owner 2026-09-04 截图)。ts 缺失的仍接尾。
- */
-function mergePendingByTs(list: ChatMessage[], pending: ChatMessage[]): ChatMessage[] {
-  if (!pending.length) return list;
-  const out = [...list];
-  for (const p of pending) {
-    const pt = p.ts ? Date.parse(p.ts) : NaN;
-    let idx = out.length;
-    if (Number.isFinite(pt)) {
-      const i = out.findIndex((m) => !!m.ts && Date.parse(m.ts) > pt);
-      if (i >= 0) idx = i;
-    }
-    out.splice(idx, 0, p);
-  }
-  return out;
-}
+// 视图合流（入站头剥离 / 乐观消息保全 / 按 ts 插回 / 直播保全）在 view-compose.ts
 
 interface ChatState {
   agents: AgentSession[];
@@ -1020,20 +945,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 直播回合保全——与 loadMessages 全量替换同一套规则,只是历史部分
         // 用现有视图代替重拉
         const base = s.messages.filter((m) => m.id.startsWith("h"));
-        const pending = survivingPending(s.messages, delta);
         // 同一回合被 7s 差量切成的多段历史气泡拼回一泡(见 live-merge.ts)
         const history = mergeContiguousAssistant(base, delta);
-        const liveTail: ChatMessage[] = [];
-        if (this.state.streaming) {
-          const streamedBubbles = s.messages.filter((m) => m.role === "assistant" && m.streamed);
-          // 按 seq 精确剥掉已入历史的直播内容(无 seq 的退回时间戳规则,见 live-merge.ts)
-          liveTail.push(...pruneLiveBubbles(streamedBubbles, delta, this.historyCursor, history));
-        }
-        s.messages = [...mergePendingByTs(history, pending), ...liveTail];
-        if (s.streaming && !liveTail.length) {
-          const tail = s.messages[s.messages.length - 1];
-          if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
-        }
+        const v = composeView({
+          current: s.messages,
+          history,
+          incoming: delta,
+          streaming: this.state.streaming,
+          cursor: this.historyCursor,
+          nowMs: Date.now(),
+        });
+        s.messages = v.messages;
+        if (v.restoreAwaiting) s.awaitingChunk = true;
         // 差量补到 agent 的新产出(reply/工具/文本)→ 清掉可能卡住的「正在回复…」指示
         // (2026-09-16:流漏了 reply 的 chat_message(out),setReplyText 没跑过,replying 一直挂;
         // 差量把 reply 从 jsonl 补进来后,指示也要跟着收场,否则回复已上屏还显示「正在回复」)。
@@ -1197,28 +1120,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.produce((s) => {
         s.historyHasMore = !!json.hasMore;
         const history = json.data ?? [];
-        // 乐观消息保全(逻辑在 survivingPending——与 syncDelta 共用一份)
-        const pending = survivingPending(s.messages, history);
-        // 直播回合保全:回合进行中做对齐(回前台 >5min / seq 倒退兜底),历史
-        // 整体替换会把正在流式的 assistant 气泡吞掉——CC 回合内经常攒内存不落
-        // 盘,jsonl 里还没有这些内容,气泡一吞屏上只剩状态条,「头像和动效都
-        // 消失了,像卡死」(2026-07-16 真机截图)。历史尾部还不是 assistant
-        // (jsonl 未落盘)时,把 streamed 气泡接回列表尾。
-        const liveTail: ChatMessage[] = [];
-        if (this.state.streaming) {
-          const streamedBubbles = s.messages.filter(
-            (m) => m.role === "assistant" && m.streamed
-          );
-          // 按 seq 精确剥掉已入历史的直播内容(无 seq 的退回时间戳规则,见 live-merge.ts)
-          liveTail.push(...pruneLiveBubbles(streamedBubbles, history, this.historyCursor, history));
-        }
-        s.messages = [...mergePendingByTs(history, pending), ...liveTail];
-        // 回合进行中但尾部没有直播气泡(被历史吸收/尚无输出)→ 恢复「思考中」
-        // 指示,别让 streaming 态孤零零挂在状态条上而列表底空白
-        if (s.streaming && !liveTail.length) {
-          const tail = s.messages[s.messages.length - 1];
-          if (!(tail?.role === "assistant" && tail.streamed)) s.awaitingChunk = true;
-        }
+        // 乐观消息保全 + 直播回合保全(回合进行中做对齐时,整体替换会把正在流式的
+        // 气泡吞掉)——与 syncDelta 共用 composeView,规则与来由见 view-compose.ts
+        const v = composeView({
+          current: s.messages,
+          history,
+          incoming: history,
+          streaming: this.state.streaming,
+          cursor: this.historyCursor,
+          nowMs: Date.now(),
+        });
+        s.messages = v.messages;
+        if (v.restoreAwaiting) s.awaitingChunk = true;
         s.loadingHistory = false;
         s.syncState = null; // pill 消失 = 对齐完成(没新内容也一样,「已是最新」)
         s.historyError = false;
@@ -1612,55 +1525,34 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public maybeReconnect(opts?: { fast?: boolean; force?: boolean }) {
     const name = this.state.activeAgent;
     if (!name) return;
-    // v2.17.2 风暴地板(peer 报告:watchdog/哨兵/visibility/openAgent(same) 多个
-    // 触发源在坏网络下 1-3s 一发互相叠加,每发都 detach+新建连接,配合 iOS 连接
-    // 泄漏就是自激循环)。900ms 内只放行一次——自然死亡退避最短 1s,不受影响。
-    // force(点推送 / 重点当前会话)是用户动作不是风暴,只挡 300ms 内的双派发
-    // (插件 pushNotificationActionPerformed 与 ?agent= 深链两路都会 openAgent)。
-    // 2026-09-07 owner「推送比消息先到,消息过一会才来」排查:visibility 的快路径
-    // 抢先 100ms 开跑,force 被 900ms 地板整个吞掉——推送点入的「全量/差量对齐」
-    // 语义(2026-07-25 定)从 v2.17.2 起实际从未生效。
-    if (Date.now() - this.lastReconnectAt < (opts?.force ? 300 : 900)) return;
-    // v2.17.2 在飞历史让路(peer 终局定案:慢中继上 448KB 历史要下载很久,期间
-    // sentinel 又判流失联触发 full reconnect → openGen 自增把在飞下载作废重来,
-    // AbortError 自激循环「历史永远拉不完」)。同 agent 的历史请求还新鲜(<25s,
-    // 略小于其 30s fetch 超时)就不打断——它完成后自会开流;force(用户明确要
-    // 最新)也一样让路,重启下载只会更慢。
-    if (this.historyLoad && this.historyLoad.agent === name && Date.now() - this.historyLoad.at < 25_000) {
-      this.clientLog(`reconnect 让路: ${name} 历史请求在飞(${Math.round((Date.now() - this.historyLoad.at) / 1000)}s),不打断`);
+    // 走哪条路（地板 / 让路 / 判活 / 快路径 / 差量 / 全量）由 reconnect-policy.ts 的纯函数
+    // 决定——每个分支的事故来由都在那边，并有单测锁住；这里只负责执行
+    const now = Date.now();
+    const plan = decideReconnect({
+      now,
+      name,
+      fast: opts?.fast,
+      force: opts?.force,
+      lastReconnectAt: this.lastReconnectAt,
+      historyLoad: this.historyLoad,
+      browsing: !!this.state.browsing,
+      stream: { hasReader: !!this.streamReader, agent: this.streamAgent, lastByteAt: this.lastStreamByteAt },
+      hiddenAt: this.hiddenAt,
+      lastEvent: { agent: this.lastEventAgent, seq: this.lastEventSeq },
+      cursorLastSeq: this.historyCursor ? this.historyCursor.lastSeq : null,
+    });
+    if (plan.kind === "skip") {
+      if (plan.why === "history-inflight") {
+        this.clientLog(`reconnect 让路: ${name} 历史请求在飞(${Math.round((plan.inflightMs ?? 0) / 1000)}s),不打断`);
+      }
       return;
     }
-    // 历史现场模式:用户在刻意看旧内容,回前台/断流对齐都不打扰(流本就断开);
-    // 实时追平在「回到最新」时由全量路径完成
-    if (this.state.browsing) return;
-    // 流活着就别动它(owner 拍板 2026-07-24):桌面端每次 alt-tab 回来都无条件
-    // 断流重建,慢链路上一次重连 = TLS 握手+重开流数秒断档,client.log 里
-    // 每 10-60s 一条。服务端 5s 一个心跳,30s 内有字节 = 流健康且事件从没断
-    // 过(桌面后台 tab 的 fetch 流持续送达),直接不动。iOS 冻结恢复的僵尸流
-    // (看似连着实则挂起)lastStreamByteAt 停在冻结前,>30s 自然走重连,不受
-    // 此快路径影响。fast:true 是断流后的自动重连(流已死),不走此判断。
-    // force:true 是用户明确要看最新(点通知/重点会话)——流健康 ≠ 数据齐:
-    // bridge 重启纪元切换后 ?since=<老seq> 重放不出静默期消息,seq 倒退检测
-    // 又要等新事件才触发,只有全量重拉能补(2026-07-24 owner 报点通知不更新)。
-    if (
-      !opts?.fast &&
-      !opts?.force &&
-      this.streamReader &&
-      this.streamAgent === name &&
-      Date.now() - this.lastStreamByteAt < 30_000
-    ) {
-      // iOS 壳 / PWA 的后台 = 整个 WebView 挂起:流不是「活着」是「冻着」,恢复
-      // 后多半已被系统掐断却不报错。桌面后台 tab 的流照常收心跳(10s 一发),
-      // 所以「后台 ≥12s 且期间一个字节都没到」只有挂起才会发生 → 视为死流直接
-      // 重连(快路径带 since,无损)。后台 <12s 判不了 → 布一次 12s 探针:回前台
-      // 一个心跳周期仍无字节就判死,别空等 25s 看门狗。owner 2026-09-07「推送比
-      // 消息先到,消息还要过一会才来」:推送到达那一刻流已死,页面在等看门狗。
-      const silentSinceHidden = this.hiddenAt > 0 && this.lastStreamByteAt < this.hiddenAt;
-      if (!(silentSinceHidden && Date.now() - this.hiddenAt >= 12_000)) {
-        this.armResumeProbe(name);
-        return;
-      }
-      this.clientLog(`resume: 后台 ${Math.round((Date.now() - this.hiddenAt) / 1000)}s 无字节,视为死流重连 agent=${name}`);
+    if (plan.kind === "probe") {
+      this.armResumeProbe(name);
+      return;
+    }
+    if (plan.deadStreamHiddenMs !== undefined) {
+      this.clientLog(`resume: 后台 ${Math.round(plan.deadStreamHiddenMs / 1000)}s 无字节,视为死流重连 agent=${name}`);
     }
     this.lastReconnectAt = Date.now(); // 恢复链开跑——流失联哨兵据此让路
     // v2.17.2 对齐横幅:过完早退守卫 = 真的要动手(快路径重连流/差量/全量都算),
@@ -1668,43 +1560,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 短暂切走场景(owner 2026-08-08:「不知道为什么经常不触发」)
     this.produce((s) => { s.syncState = "syncing"; });
     this.detachActiveStream();
-    // 快路径(owner 2026-07-16「catch up 更快更丝滑」):短暂离开(<5min)且有
-    // 断点锚 → 只重连流带 ?since=<seq>,bridge 环形缓冲把错过的事件直接重放,
-    // 跳过全量历史往返(限流窗口下动辄数秒)。长时间后台/无锚 → 事件可能被挤出
-    // 缓冲(每 agent 500 条),仍走全量重拉保正确。断流自动重连(fast:true)断档
-    // 只有退避的 3-30s,恒走快路径。bridge 重启的缺口由 seq 倒退检测兜底。
-    const shortAway = this.hiddenAt > 0 && Date.now() - this.hiddenAt < 5 * 60_000;
-    // ⚠ force 必须绕开快路径。force 的语义是「用户明确要看最新」(点推送通知 /
-    // 重点当前会话)，而快路径只带 ?since 重连流、**不重拉历史** —— 一旦那条
-    // reply 没能从环形缓冲重放回来(seq 对不上、事件被挤出、冻结期间流已死)，
-    // 它就既不在流里也不在内存里，而历史又没重拉，于是页面永远缺这一条。
-    // owner 2026-07-25 实报：点推送进来看不到回复，退出重进也没有，**切到别的
-    // agent 再切回来才秒出**——切换走的正是 openAgent 的全量路径。
-    // 此前 force 只跳过了上面的判活守卫，到这里又被 shortAway 抢先返回了。
-    if (!opts?.force && (opts?.fast || shortAway) && this.lastEventAgent === name && this.lastEventSeq > 0) {
-      if (!opts?.fast) this.clientLog(`reconnect(fast): since=${this.lastEventSeq} agent=${name}`);
-      void this.openStream(name, this.lastEventSeq);
+    if (plan.kind === "fast") {
+      if (!opts?.fast) this.clientLog(`reconnect(fast): since=${plan.since} agent=${name}`);
+      void this.openStream(name, plan.since);
       return;
     }
-    // v2.16 cursor 模型(owner 扳机 2026-07-25,触发 2026-07-28「推送点入 20s
-    // 无消息」):有游标就差量秒画 + 流立刻并行重连,唤醒到看到新消息从全量的
-    // 14s(跨境实测)降到 1-2s;全量重拉降级为「无游标/轮转/差量失败」的兜底,
-    // 由 syncDelta 内部自动切换。流不带 since:差量已覆盖到 jsonl 尾,重放的
-    // chat_message 会和差量气泡重复。
     const gen = ++this.openGen;
-    // ⚠ force 必须绕开差量,走全量(2026-09-16 owner 实报:点推送进去看不到那条
-    // 回复,手机同会话「强制对齐」刷不出,电脑端切别的 agent 再切回来才出)。
-    // 差量是 `after=<游标>` **排他**的:回合中途的 reply 其气泡锚点恰好落在游标那个
-    // seq 上时,后续差量不会再拉它;它只能靠已在内存里的气泡保留——而手机流狂抖时
-    // 多个 reconnect 抢 openGen,某次带 reply 的差量 produce 被后来的抢占跳过,那条
-    // reply 就既不在内存也不再被差量重拉,直到全量重载才回来。force 的语义本就是
-    // 「用户明确要看最新 / 出问题了要对齐」(上面注释也写了「切换走的正是全量路径」),
-    // 全量重拉是它该有的行为;差量只服务快路径(fast)与短时后台(shortAway),那两条
-    // 本就没被 force 触发,不受影响。
-    if (!opts?.force && this.historyCursor) {
-      this.clientLog(`reconnect(delta): agent=${name} after=${this.historyCursor.lastSeq}`);
+    if (plan.kind === "delta") {
+      this.clientLog(`reconnect(delta): agent=${name} after=${plan.after}`);
       // 先差量后开流(串行):并行时流上先到的直播气泡会被差量应用的视图重组
-      // 过滤掉。差量通常 1 秒内落地,流晚这一拍无感
+      // 过滤掉。差量通常 1 秒内落地,流晚这一拍无感。流不带 since:差量已覆盖到
+      // jsonl 尾,重放的 chat_message 会和差量气泡重复。
       void this.syncDelta(name, gen).then(() => {
         if (gen !== this.openGen) return;
         void this.openStream(name);
@@ -2177,17 +2043,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    */
   /** 最近几条历史气泡里是否已有同文本的 reply 段（差量抢先补进来的） */
   private recentHistoryHasReply(text: string): boolean {
-    const want = text.trim();
-    if (!want) return false;
-    const msgs = this.state.messages;
-    for (let i = msgs.length - 1, seen = 0; i >= 0 && seen < 6; i--) {
-      const m = msgs[i];
-      if (m.role !== "assistant") continue;
-      seen++;
-      if (!isHistoryBubble(m)) continue;
-      if ((m.segments ?? []).some((seg) => seg.kind === "reply" && seg.text.trim() === want)) return true;
-    }
-    return false;
+    // 与 live-merge 的 historyHasReply 同一口径；唯一差别是空文本在这里算「没有」
+    return !!text.trim() && historyHasReply(this.state.messages, text);
   }
 
   public setReplyText(
