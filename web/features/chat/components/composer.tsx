@@ -4,6 +4,8 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 import { COMPACT_REQUEST_TEXT } from "./ctx-badge";
 import { SkillsSheet } from "./skills-sheet";
+import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
+import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
 
 
 const MAX_FILES = 5;
@@ -11,59 +13,6 @@ const MAX_FILES = 5;
 /* 复刻 Claude OS features/chat/composer 的卡片式输入：圆角卡 + 内嵌「正在回复」条
    + 附件缩略图 + 无边框 textarea + 图标控件。功能保留 claudestra 侧：流式中可插话、
    粘贴上传、停止与发送并列。 */
-
-function PaperclipIcon() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-    </svg>
-  );
-}
-
-function MicIcon() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-      <line x1="12" x2="12" y1="19" y2="22" />
-    </svg>
-  );
-}
-
-function SendIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 19V5M5 12l7-7 7 7" />
-    </svg>
-  );
-}
 
 /**
  * 缩略图的 blob URL：同一个 File 只建一次，移出待发列表就 revoke（D8-3）。
@@ -156,14 +105,6 @@ function RemoveBtn({ onClick }: { onClick: () => void }) {
   );
 }
 
-/** Slash 命令（bridge /skills 端点形状）。web 无 Discord 的 100 命令上限/描述截断。 */
-interface SlashCmd {
-  name: string;
-  invokeName: string;
-  description: string;
-  scope: string;
-  argHint?: string;
-}
 const SCOPE_LABEL: Record<string, string> = {
   builtin: "内建",
   native: "CC",
@@ -279,28 +220,9 @@ export function Composer() {
     setSlashSel(0);
     setSlashDismissed(false);
   }, [text]);
-  // 只在输入命令 token 期间弹(无空格/换行):pickSlash 填入「/cmd 」带尾随空格
-  // 即自动收起——否则填入后菜单基于新文本重新匹配(description 子串能撞上无关
-  // 命令),二次回车被菜单拦截选中错误命令而不是发送(2026-07-24 owner:输 /save
-  // 补全后再回车,期望发送却变成 Discord Configure)
-  const slashQ = /^\/\S*$/.test(text) ? text.slice(1).toLowerCase() : null;
-  // 匹配优先级:name 前缀 > name 子串 > 仅 description 命中。不排序的话
-  // skills 原序里 description 撞词的无关命令会排在 name 精确命中前——输 /save
-  // 第一项竟是 discord-configure(描述含 "save the bot"),回车直接填错命令
-  // (2026-07-24 owner 报障,Playwright 复现实锤)。sort 稳定,同级保持原序。
-  const slashRank = (c: SlashCmd) => {
-    const n = c.name.toLowerCase();
-    if (slashQ && n.startsWith(slashQ)) return 0;
-    if (slashQ && n.includes(slashQ)) return 1;
-    return 2;
-  };
-  const slashItems =
-    slashQ !== null && skills.length
-      ? skills
-          .filter((c) => c.name.toLowerCase().includes(slashQ) || c.description.toLowerCase().includes(slashQ))
-          .sort((a, b) => slashRank(a) - slashRank(b))
-          .slice(0, 40)
-      : [];
+  // 只在输入命令 token 期间弹;匹配优先级 name 前缀 > name 子串 > description——缘由见 slash-match.ts
+  const slashQ = slashQuery(text);
+  const slashItems = matchSlashCommands(skills, slashQ);
   const slashOpen = !slashDismissed && slashItems.length > 0;
   const pickSlash = (c: SlashCmd) => {
     setText(`/${c.name} `);

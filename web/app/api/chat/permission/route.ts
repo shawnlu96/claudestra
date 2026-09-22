@@ -2,7 +2,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { apiAgentName, bridgePost } from "@/lib/chat/bridge-api";
-import { isAuthed } from "@/lib/api-auth";
+import { authedLegacy } from "@/lib/bff";
 
 /**
  * 应答权限卡：代理 Bridge POST /api/v1/agents/:name/answer {kind:"permission"}
@@ -22,10 +22,7 @@ const ACTION_MAP: Record<string, string> = {
   deny: "deny",
 };
 
-export async function POST(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const POST = authedLegacy(async (request: Request) => {
   const { agent, action } = await request.json().catch(() => ({}));
   if (!agent || !action) {
     return NextResponse.json({ error: "agent 和 action 不能为空" }, { status: 400 });
@@ -37,17 +34,10 @@ export async function POST(request: Request) {
       { status: 501 }
     );
   }
-  try {
-    const result = await bridgePost<{ ok: boolean }>(
-      `/agents/${encodeURIComponent(apiAgentName(agent))}/answer`,
-      { kind: "permission", action: mapped },
-      { timeoutMs: 15_000 }
-    );
-    return NextResponse.json({ ...result, ok: true });
-  } catch (e) {
-    return NextResponse.json(
-      { ok: false, error: `应答失败: ${(e as Error).message}` },
-      { status: 502 }
-    );
-  }
-}
+  const result = await bridgePost<{ ok: boolean }>(
+    `/agents/${encodeURIComponent(apiAgentName(agent))}/answer`,
+    { kind: "permission", action: mapped },
+    { timeoutMs: 15_000 }
+  );
+  return NextResponse.json({ ...result, ok: true });
+}, { okFalse: true, errorPrefix: "应答失败: " });

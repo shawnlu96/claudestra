@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
+import { useArmedConfirm } from "../use-armed-confirm";
 
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
@@ -185,7 +186,8 @@ function PeerCard({
   const [needForce, setNeedForce] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testRes, setTestRes] = useState<ActionResult | null>(null);
-  const [confirmRm, setConfirmRm] = useState(false);
+  // 两段式确认：第二下直接执行、不复原，「确认移除?」保持到 4 秒计时结束（原样）
+  const { armed: confirmRm, arm: armRm } = useArmedConfirm(4000);
   const [removing, setRemoving] = useState(false);
 
   const saveScope = async (force: boolean) => {
@@ -215,8 +217,7 @@ function PeerCard({
 
   const remove = async () => {
     if (!confirmRm) {
-      setConfirmRm(true);
-      setTimeout(() => setConfirmRm(false), 4000);
+      armRm();
       return;
     }
     setRemoving(true);

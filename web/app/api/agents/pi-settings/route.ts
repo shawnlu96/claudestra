@@ -2,7 +2,7 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { bridgeGet, bridgePost, apiAgentName } from "@/lib/chat/bridge-api";
-import { isAuthed } from "@/lib/api-auth";
+import { authedLegacy } from "@/lib/bff";
 
 /**
  * Pi agent 切换模型 / 思考档位。
@@ -15,22 +15,12 @@ import { isAuthed } from "@/lib/api-auth";
  * GET  → 可选模型清单（桥接读 ~/.pi/agent/models.json），给选择面板渲染。
  * POST → { agent, model?, effort? } 注入切换。
  */
-export async function GET(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
-  try {
-    const json = await bridgeGet<Record<string, unknown>>("/pi-models", { timeoutMs: 10_000 });
-    return NextResponse.json({ data: json });
-  } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 502 });
-  }
-}
+export const GET = authedLegacy(async () => {
+  const json = await bridgeGet<Record<string, unknown>>("/pi-models", { timeoutMs: 10_000 });
+  return NextResponse.json({ data: json });
+});
 
-export async function POST(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const POST = authedLegacy(async (request: Request) => {
   const { agent, model, effort } = (await request.json().catch(() => ({}))) as {
     agent?: string;
     model?: string;
@@ -42,14 +32,10 @@ export async function POST(request: Request) {
   if (!model && !effort) {
     return NextResponse.json({ error: "model / effort 至少一项" }, { status: 400 });
   }
-  try {
-    const result = await bridgePost(
-      `/agents/${encodeURIComponent(apiAgentName(agent))}/pi-settings`,
-      { ...(model ? { model } : {}), ...(effort ? { effort } : {}) },
-      { timeoutMs: 20_000 }
-    );
-    return NextResponse.json(result);
-  } catch (e) {
-    return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 502 });
-  }
-}
+  const result = await bridgePost(
+    `/agents/${encodeURIComponent(apiAgentName(agent))}/pi-settings`,
+    { ...(model ? { model } : {}), ...(effort ? { effort } : {}) },
+    { timeoutMs: 20_000 }
+  );
+  return NextResponse.json(result);
+}, { okFalse: true });

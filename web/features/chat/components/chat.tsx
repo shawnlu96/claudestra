@@ -24,12 +24,11 @@ import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
 import { installTapRescue } from "@/lib/tap-rescue";
+import { postClientLog } from "@/lib/client-log";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 function shellLog(msg: string) {
-  try {
-    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: `[shell] ${msg}` }) }).catch(() => {});
-  } catch { /* ignore */ }
+  postClientLog(`[shell] ${msg}`);
 }
 /**
  * 横滑动画探针(2026-09-12,owner「从对话回到 Agent 页面时卡住了,大概 2 秒」,当时
@@ -106,9 +105,7 @@ function reportRuntimeError(kind: string, err: unknown, fallback: string) {
   }
   const msg = `${kind} ${e?.message || fallback}${stack ? `\nstack: ${stack}` : ""}`;
   const tag = isNativeShell() ? "[shell]" : "[pwa]";
-  try {
-    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: `${tag} ${msg}` }) }).catch(() => {});
-  } catch { /* ignore */ }
+  postClientLog(`${tag} ${msg}`);
 }
 /**
  * v2.21.4 React 提交突发上报(追 #185)。layout.tsx 里的内联钩子在同一个宏任务里
@@ -142,9 +139,7 @@ function reportCommitBurst(d: CommitBurst) {
     } catch { return "?"; }
   })();
   const msg = `[commits] ${d.n} commits in one task (${d.span}ms, walked ${d.walked}) ${tag} roots: ${(d.roots || []).join(" ; ") || "-"} | produce: ${produce} | mountRoots: ${(d.mountRoots || []).join(" ; ") || "-"} | mounts: ${(d.mounts || []).join(" ") || "-"} | ev: ${(d.ev || []).join(" ") || "-"} | ae: ${d.ae || "-"} | top: ${(d.top || []).join(" ; ")}`;
-  try {
-    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
-  } catch { /* ignore */ }
+  postClientLog(msg);
 }
 if (typeof window !== "undefined") {
   installNativeKeyboardPadding();

@@ -1,7 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { isAuthed } from "@/lib/api-auth";
+import { withAuth } from "@/lib/bff";
 import { readAuthConfig, setBruteForce } from "@/lib/services/auth-hardening";
 
 /**
@@ -10,21 +10,15 @@ import { readAuthConfig, setBruteForce } from "@/lib/services/auth-hardening";
  * 敏感材料（totp_secret 等）永不经此端点出后端。
  */
 
-export async function GET(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const GET = withAuth(async () => {
   return NextResponse.json(readAuthConfig());
-}
+});
 
-export async function PUT(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const PUT = withAuth(async (request: Request) => {
   const body = (await request.json().catch(() => ({}))) as { bruteForceOn?: unknown };
   if (typeof body.bruteForceOn !== "boolean") {
     return NextResponse.json({ error: "bruteForceOn 必须是布尔值" }, { status: 400 });
   }
   setBruteForce(body.bruteForceOn);
   return NextResponse.json({ ok: true, ...readAuthConfig() });
-}
+});

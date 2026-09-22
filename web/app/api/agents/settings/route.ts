@@ -2,17 +2,14 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
-import { isAuthed } from "@/lib/api-auth";
+import { withAuth } from "@/lib/bff";
 
 /**
  * per-agent 前端配置（当前只有 init_message：clear 后自动发送的开机指令）。
  * 纯用户层数据，存 web 自己的 SQLite——Claudestra 产品侧零感知。
  */
 
-export async function GET(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const GET = withAuth(async (request: Request) => {
   const url = new URL(request.url);
   const agent = url.searchParams.get("agent");
   if (!agent) return NextResponse.json({ error: "missing agent" }, { status: 400 });
@@ -20,12 +17,9 @@ export async function GET(request: Request) {
     .prepare("SELECT init_message FROM agent_settings WHERE agent = ?")
     .get(agent) as { init_message: string } | undefined;
   return NextResponse.json({ data: { initMessage: row?.init_message ?? "" } });
-}
+});
 
-export async function PUT(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const PUT = withAuth(async (request: Request) => {
   const { agent, initMessage } = (await request.json().catch(() => ({}))) as {
     agent?: string;
     initMessage?: string;
@@ -40,4 +34,4 @@ export async function PUT(request: Request) {
     )
     .run(agent, initMessage, new Date().toISOString());
   return NextResponse.json({ ok: true });
-}
+});

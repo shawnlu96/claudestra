@@ -1,7 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { isAuthed } from "@/lib/api-auth";
+import { withAuth } from "@/lib/bff";
 import { readWebConfig, writeWebConfig } from "@/lib/web-config";
 
 /**
@@ -9,21 +9,15 @@ import { readWebConfig, writeWebConfig } from "@/lib/web-config";
  * 完整 key 永不回传前端;PUT { groqApiKey } 保存,空串清除。
  */
 
-export async function GET(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const GET = withAuth(async () => {
   const cfg = await readWebConfig();
   return NextResponse.json({
     groqApiKeySet: !!cfg.groqApiKey,
     groqApiKeyHint: cfg.groqApiKey ? `····${cfg.groqApiKey.slice(-4)}` : "",
   });
-}
+});
 
-export async function PUT(request: Request) {
-  if (!(await isAuthed(request))) {
-    return NextResponse.json({ error: "未登录" }, { status: 401 });
-  }
+export const PUT = withAuth(async (request: Request) => {
   const body = (await request.json().catch(() => ({}))) as { groqApiKey?: unknown; lang?: unknown };
   // 语言偏好(前端 setLang 同步落盘,服务端文案跟随;可与 groqApiKey 独立提交)
   if (body.lang !== undefined) {
@@ -46,4 +40,4 @@ export async function PUT(request: Request) {
     groqApiKeySet: !!cfg.groqApiKey,
     groqApiKeyHint: cfg.groqApiKey ? `····${cfg.groqApiKey.slice(-4)}` : "",
   });
-}
+});

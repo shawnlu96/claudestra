@@ -1,4 +1,5 @@
 import { isNativeShell, hideNativeSplash } from "@/lib/native";
+import { postClientLog } from "@/lib/client-log";
 
 /**
  * v2.21.3+ 启动计时(owner 2026-09-04「性能会更好吗」——拿数字答,不靠感觉):agents 首次
@@ -18,7 +19,7 @@ export function reportBootAndHideSplash() {
     // kb=:壳里 Keyboard 插件的 resize 模式(layout.tsx 内联脚本设置;iPad 为 none)
     const kb = shell ? ` kb=${(window as unknown as { __cstraKbMode?: string }).__cstraKbMode ?? "?"}` : "";
     const msg = `[boot] ${kind} ttfb=${ms(nav?.responseStart)}ms dcl=${ms(nav?.domContentLoadedEventEnd)}ms ready=${Math.round(performance.now())}ms nav=${nav?.type ?? "?"}${kb}`;
-    void fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
+    postClientLog(msg);
   } catch { /* ignore */ }
 }
 

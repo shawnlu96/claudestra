@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 import { isAuthed } from "@/lib/api-auth";
 import { bridgeGet, bridgePost, type BridgeError } from "@/lib/chat/bridge-api";
+import { legacyErrorBody } from "@/lib/bff-legacy-body";
 
 /** handler 里抛它 = 直接回这个状态码（参数校验失败等，不经 bridge 错误映射） */
 export class HttpError extends Error {
@@ -75,6 +76,53 @@ export function authed<A extends unknown[]>(
     } catch (e) {
       if (e instanceof HttpError) return NextResponse.json({ error: e.message }, { status: e.status });
       return bridgeErrorResponse(e, opts?.errorPrefix);
+    }
+  };
+}
+
+/**
+ * 只包鉴权：未登录回 401，其余全交给 handler（handler 自己的 try/catch / 抛出行为原样保留）。
+ * 给错误口径特殊的路由用（本地读写不经 bridge、catch 里有兜底值或自带状态码判断的）。
+ */
+export function withAuth<A extends unknown[]>(
+  handler: (req: Request, ...rest: A) => Promise<Response>,
+): (req: Request, ...rest: A) => Promise<Response> {
+  return async (req: Request, ...rest: A) => {
+    if (!(await isAuthed(req))) return unauthorized();
+    return handler(req, ...rest);
+  };
+}
+
+/**
+ * 旧错误口径的包装（D8-10 第二批：只去样板，不改对外响应）：未登录 401；handler 抛出
+ * 任何错误 → 一律 502，body 逐字节同迁移前：
+ *   - 默认 `{ error: message }`；
+ *   - `okFalse: true` → `{ ok: false, error: message }`（键序也一样）；
+ *   - `errorPrefix` → message 前加前缀（可以是异步的，如 `st("Bridge 不可达", …)` 按语言取）；
+ *   - `onError` → 迁移前 catch 里有的日志。
+ * 这批路由的前端仍按「失败就是 502」处理；要改成 `authed` 的透传口径（bridge 4xx 原样回）
+ * 需逐个核对前端，另开提交。
+ *
+ * 已知的唯一差异（审查确认，不阻塞）：迁移前各路由的 try 只包 bridge 调用，这里包整个 handler。
+ * 所以 try 之前就会抛的畸形输入换了响应——例：body 是 JSON `null` 时
+ * `request.json().catch(() => ({}))` 得到 null、解构抛 TypeError，迁移前是 Next 默认的 500，
+ * 现在是 502 + 上面的 body。自家前端从不发 null body，正常请求的响应逐字节不变。
+ */
+export function authedLegacy<A extends unknown[]>(
+  handler: (req: Request, ...rest: A) => Promise<Response>,
+  opts: {
+    okFalse?: boolean;
+    errorPrefix?: string | (() => Promise<string>);
+    onError?: (e: unknown) => void;
+  } = {},
+): (req: Request, ...rest: A) => Promise<Response> {
+  return async (req: Request, ...rest: A) => {
+    if (!(await isAuthed(req))) return unauthorized();
+    try {
+      return await handler(req, ...rest);
+    } catch (e) {
+      opts.onError?.(e);
+      return NextResponse.json(await legacyErrorBody(e, opts), { status: 502 });
     }
   };
 }
