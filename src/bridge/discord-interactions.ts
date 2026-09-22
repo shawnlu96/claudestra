@@ -13,7 +13,6 @@ import { t } from "../lib/i18n.js";
 import { TextChannel, type Client, type Interaction } from "discord.js";
 import { TMUX_SOCK } from "./config.js";
 import { stopTyping, buildComponents } from "./components.js";
-import { runManager, buildStatusPanel, handleMgmtButton, handleMgmtSelect } from "./management.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { isAutoPermButton, parseAutoPermButton, autoRevertButtonId } from "./auto-allow.js";
 import { resetToolTracking, agentNameForChannel } from "./jsonl-watcher.js";
@@ -25,7 +24,21 @@ import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { describeKeys, interruptWindow } from "../lib/runtimes/window-ops.js";
-import { tmuxCapture, windowTarget, detectRuntimePermissionPrompt, detectSessionIdlePrompt, tmuxSendLine, tmuxRaw, tmuxSendEscape, parseModalOptions, detectArrowNavModal, detectPermissionMode, btabStepsTo, MASTER_SESSION, type ArrowNavKind } from "../lib/tmux-helper.js";
+import {
+  tmuxCapture,
+  windowTarget,
+  detectRuntimePermissionPrompt,
+  detectSessionIdlePrompt,
+  tmuxSendLine,
+  tmuxRaw,
+  tmuxSendEscape,
+  parseModalOptions,
+  detectArrowNavModal,
+  detectPermissionMode,
+  btabStepsTo,
+  MASTER_SESSION,
+  type ArrowNavKind,
+} from "../lib/tmux-helper.js";
 import { resolveInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { newThreadId } from "./router.js";
 import { clearSafetyTimer, trackStatusMessage, statusMessageIdFor, finishStatusMessage, agentActionButtons } from "./discord-adapter.js";
@@ -43,12 +56,15 @@ export interface InteractionDeps {
   deliver: (env: Envelope) => Promise<Delivery>;
   startTypingWithSafety: (channelId: string) => void;
   scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string, runtime?: string) => void;
+  /** manager CLI 调用与 LLM-free 管理面板：management.ts 是 hub，bridge/* 不直接 import，由 bridge 注入 */
+  runManager: RunManager;
+  buildStatusPanel: () => Promise<{ text: string; components: any[] }>;
+  handleMgmtButton: (id: string, chatId: string, messageId?: string, discord?: Client) => Promise<MgmtReply | null>;
+  handleMgmtSelect: (id: string, value: string, chatId: string, discord: Client) => Promise<MgmtReply | null>;
 }
 
-/** 挂上 interactionCreate 监听。只调一次（bridge.ts 启动时）。 */
-export function registerInteractionHandlers(discord: Client, deps: InteractionDeps): void {
-  discord.on("interactionCreate", (interaction: Interaction) => handleInteraction(discord, deps, interaction));
-}
+type RunManager = (...args: string[]) => Promise<any>;
+type MgmtReply = { text: string; components?: any[] };
 
 // ────────────────────────────────────────────────
 // Slash 结果呈现（支持 TUI modal 适配 → Discord 按钮/菜单）
@@ -230,7 +246,7 @@ async function handleModalInteraction(
  */
 
 /** v2.4.22+ button 触发截图（复用 /screenshot slash 的逻辑）。返回 png 路径或 null。 */
-async function captureChannelScreenshot(channelId: string): Promise<string | null> {
+async function captureChannelScreenshot(channelId: string, runManager: RunManager): Promise<string | null> {
   const listResult = await runManager("list");
   const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
   const windowName = agent ? agent.name : "master";
@@ -244,7 +260,7 @@ async function captureChannelScreenshot(channelId: string): Promise<string | nul
  * CC 跟随切 tab（前台 1s 内稳定；对远端 ssh -CC attach 的 iTerm 同样生效）。
  * 位置序号 AppleScript 只做验证失败后的本机兜底。
  */
-async function focusITermTab(targetChannelId: string, controlId: string): Promise<{ ok: boolean; found: boolean; label: string; note: string }> {
+async function focusITermTab(targetChannelId: string, controlId: string, runManager: RunManager): Promise<{ ok: boolean; found: boolean; label: string; note: string }> {
   let targetWindow: string;
   let label: string;
   if (targetChannelId === controlId) {
@@ -360,7 +376,7 @@ async function focusITermTab(targetChannelId: string, controlId: string): Promis
  * 再自动安排 /compact）。看板 select 和档位提醒按钮共用。agent 正忙也照发，
  * TUI 会排队，轮到时执行（跟 cron --target-agent 一个假设）。
  */
-async function triggerSaveCompact(interaction: any, targetChannelId: string): Promise<void> {
+async function triggerSaveCompact(interaction: any, targetChannelId: string, runManager: RunManager): Promise<void> {
   try {
     const listResult = await runManager("list");
     const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
@@ -383,8 +399,17 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string): Pr
   }
 }
 
+/**
+ * 挂上 interactionCreate 监听。只调一次（bridge.ts 在 new Client 之后、login 之前，原位置）。
+ * 处理本体单独成函数：包在这里面会让闸门把它算成两个超长函数。
+ */
+export function registerInteractionHandlers(discord: Client, deps: InteractionDeps): void {
+  discord.on("interactionCreate", (interaction: Interaction) => handleInteraction(discord, deps, interaction));
+}
+
 async function handleInteraction(discord: Client, deps: InteractionDeps, interaction: Interaction): Promise<void> {
-  const { allowedDiscordIds, clients, controlChannelId: CONTROL_CHANNEL_ID, deliver, startTypingWithSafety, scheduleClearRotation } = deps;
+  const { allowedDiscordIds, clients, controlChannelId: CONTROL_CHANNEL_ID, deliver, startTypingWithSafety } = deps;
+  const { scheduleClearRotation, runManager, buildStatusPanel, handleMgmtButton, handleMgmtSelect } = deps;
   try {
     const channelId = interaction.channelId;
     console.log(`🎯 Interaction: type=${interaction.type} channel=${channelId} user=${interaction.user?.id}`);
@@ -462,7 +487,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           await interaction.deferReply({ ephemeral: true });
         } catch { return; }
         try {
-          const r = await focusITermTab(channelId, CONTROL_CHANNEL_ID);
+          const r = await focusITermTab(channelId, CONTROL_CHANNEL_ID, runManager);
           await interaction.editReply({ content: r.note }).catch(() => {});
         } catch (e) {
           await interaction.editReply({ content: `❌ 切换失败: ${(e as Error).message}` }).catch(() => {});
@@ -591,7 +616,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       // v2.5.4+ 「🧹 存记忆 + Compact」按钮（上下文档位提醒消息上的）
       if (id.startsWith("savecompact:")) {
         const targetChannelId = id.slice("savecompact:".length);
-        await triggerSaveCompact(interaction, targetChannelId);
+        await triggerSaveCompact(interaction, targetChannelId, runManager);
         return;
       }
 
@@ -746,7 +771,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       if (id.startsWith("focus:")) {
         const targetChannelId = id.slice("focus:".length);
         try {
-          const r = await focusITermTab(targetChannelId, CONTROL_CHANNEL_ID);
+          const r = await focusITermTab(targetChannelId, CONTROL_CHANNEL_ID, runManager);
           await interaction.followUp({ content: r.note, ephemeral: true }).catch(() => {});
         } catch (e) {
           await interaction.followUp({ content: `❌ 切换失败: ${(e as Error).message}`, ephemeral: true }).catch(() => {});
@@ -758,7 +783,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       if (id.startsWith("screenshot:")) {
         const targetChannelId = id.slice("screenshot:".length);
         try {
-          const pngPath = await captureChannelScreenshot(targetChannelId);
+          const pngPath = await captureChannelScreenshot(targetChannelId, runManager);
           if (pngPath) {
             await interaction.followUp({ content: "📸 终端截图", files: [{ attachment: pngPath }], ephemeral: true }).catch(() => {});
           } else {
@@ -1041,7 +1066,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
       // v2.5.4+ 看板「🧹 存记忆 + Compact」select（value = 目标 agent 的 channelId）
       if (id === "stats_savecompact") {
-        await triggerSaveCompact(interaction, value);
+        await triggerSaveCompact(interaction, value, runManager);
         return;
       }
 

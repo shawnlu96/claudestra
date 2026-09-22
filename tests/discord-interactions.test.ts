@@ -44,6 +44,12 @@ function fakeDeps(allow: string[]) {
     scheduleClearRotation: () => {
       calls.rotation++;
     },
+    runManager: async () => {
+      throw new Error("runManager should not be called");
+    },
+    buildStatusPanel: async () => ({ text: "", components: [] }),
+    handleMgmtButton: async () => null,
+    handleMgmtSelect: async () => null,
   };
   return { deps, calls };
 }

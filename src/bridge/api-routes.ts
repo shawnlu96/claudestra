@@ -14,6 +14,18 @@ import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.j
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds } from "../lib/runtimes/index.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
+import {
+  apiJson,
+  apiErrorResponse,
+  isFullScope,
+  forbidden,
+  notInScope,
+  inScopeEitherName,
+  INVALID_JSON,
+  readJsonBody,
+  invalidJsonBody,
+  liveInteractiveHolder,
+} from "./api-respond.js";
 import { interruptAgent } from "../lib/runtimes/window-ops.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT } from "./config.js";
@@ -32,7 +44,6 @@ import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { readLiveCcSessionEntries, type CcSessionEntry } from "../lib/cc-sessions.js";
 import { collectSessions } from "./sessions-inventory.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
@@ -186,63 +197,6 @@ export function initApiRoutes(d: ApiDeps): void {
 }
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
-
-function apiJson(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-// ── 早退分支的样板（D5-5）：响应逐字节沿用原写法，tests/api-route-parity.test.ts 钉住 ──
-
-/** 全权 token（scope 含 "*"；注意 "*" 不含 master，见 agentInScope）。 */
-function isFullScope(principal: Principal): boolean {
-  return principal.agents.includes("*");
-}
-
-/** 403 + 调用方给的文案（各端点「xxx requires a full-scope token」文案各不相同）。 */
-function forbidden(error: string): Response {
-  return apiJson(403, { ok: false, error });
-}
-
-/** agent 不在 token scope 的统一 403。 */
-function notInScope(agent: string): Response {
-  return apiJson(403, { ok: false, error: `agent "${agent}" not in token scope` });
-}
-
-/** scope 双向兼容前缀：裸名或 agent- 前缀的任一个在 scope 内即放行。 */
-function inScopeEitherName(principal: Principal, name: string): boolean {
-  return agentInScope(principal, name) || agentInScope(principal, `agent-${name}`);
-}
-
-/** readJsonBody 解析失败的哨兵（合法 JSON 不可能产出 symbol）。 */
-const INVALID_JSON: unique symbol = Symbol("invalid-json");
-
-/** 读 JSON body；解析失败返回 INVALID_JSON，调用方据此回 invalidJsonBody()。 */
-async function readJsonBody(req: Request): Promise<unknown> {
-  try {
-    return await req.json();
-  } catch {
-    return INVALID_JSON;
-  }
-}
-
-function invalidJsonBody(): Response {
-  return apiJson(400, { ok: false, error: "invalid JSON body" });
-}
-
-/**
- * D1-5：sessionId 是否正被本机一个**活的 interactive** Claude Code 进程占着（用户自己在
- * 终端里开的那种）。判据复用 cc-sessions 的 readLiveCcSessionEntries：pid 活着且启动时刻
- * 与登记一致（pid 复用的过期登记被剔除）。已归 Claudestra 管的会话（registry 里有）不算——
- * 那是我们自己的窗口，resume 维持原行为。
- */
-async function liveInteractiveHolder(sessionId: string): Promise<CcSessionEntry | null> {
-  const [live, reg] = await Promise.all([readLiveCcSessionEntries(), readRegistryAgents().catch(() => [])]);
-  if (reg.some((a) => a.sessionId === sessionId)) return null;
-  return live.find((e) => e.sessionId === sessionId && e.kind === "interactive") ?? null;
-}
 
 /**
  * Bearer 鉴权 + 限流。失败直接返回 Response，成功返回 principal。
@@ -508,27 +462,21 @@ async function bgJobLogResponse(kind: BgJobKind, url: URL): Promise<Response> {
 // ── 路由分发 ────────────────────────────────────────────────────────────
 
 /**
- * /api/v1 入口。handler 里逃逸的异常以前一路冒到 Bun.serve，而 Bun 在没设 NODE_ENV 时
+ * /api/v1 入口（bridge.ts 调它，不直接调 handleApiRequest）。handler 里逃逸的异常以前一路冒到 Bun.serve，而 Bun 在没设 NODE_ENV 时
  * （launchd 就不设）回的是 67KB 的 HTML 调试页——web 端拿到的不是 JSON（D5-11）。
  * 最常见的来源是路由正则匹配后的 decodeURIComponent 遇到非法百分号编码抛 URIError：
  * 那是请求的错，回 400；其余回 500，body 都是 {ok:false,error}。
  */
-export async function handleApiRequest(req: Request, url: URL): Promise<Response> {
+export async function serveApiRequest(req: Request, url: URL): Promise<Response> {
   try {
-    return await routeApiRequest(req, url);
+    return await handleApiRequest(req, url);
   } catch (e) {
     return apiErrorResponse(e);
   }
 }
 
-/** handler 异常 → JSON 响应（bridge.ts 的 Bun.serve error() 兜底也用它）。 */
-export function apiErrorResponse(e: unknown): Response {
-  if (e instanceof URIError) return apiJson(400, { ok: false, error: "bad path encoding" });
-  console.error("❌ HTTP handler 异常:", e);
-  return apiJson(500, { ok: false, error: e instanceof Error ? e.message : String(e) });
-}
-
-async function routeApiRequest(req: Request, url: URL): Promise<Response> {
+// 路由本体保持原名：防腐闸门按函数名给超长函数记账（fnLong:handleApiRequest）
+async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (!deps) return apiJson(503, { ok: false, error: "api routes not initialized" });
 
   // v2.15+ POST /api/v1/peers/redeem —— 一键邀请的兑换回调（对方 bridge 打进来，

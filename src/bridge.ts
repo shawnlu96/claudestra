@@ -53,6 +53,9 @@ import {
 } from "./bridge/discord-api.js";
 import {
   runManager,
+  buildStatusPanel,
+  handleMgmtButton,
+  handleMgmtSelect,
 } from "./bridge/management.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
@@ -74,8 +77,7 @@ import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
 import {
   initApiRoutes,
-  handleApiRequest,
-  apiErrorResponse,
+  serveApiRequest,
   sweepApiState,
   pendingApiRequests,
   apiThreadResults,
@@ -84,6 +86,7 @@ import {
   type PendingApiRequest,
   type ApiReplyResult,
 } from "./bridge/api-routes.js";
+import { apiErrorResponse } from "./bridge/api-respond.js";
 // clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import {
@@ -1724,6 +1727,10 @@ registerInteractionHandlers(discord, {
   deliver,
   startTypingWithSafety,
   scheduleClearRotation,
+  runManager,
+  buildStatusPanel,
+  handleMgmtButton,
+  handleMgmtSelect,
 });
 
 // ============================================================
@@ -3456,7 +3463,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       // 鉴权在 web-terminal.ts：Bearer + agentInScope + termId 属主校验）
       const termRes = await handleTerminalApi(req, url);
       if (termRes) return termRes;
-      return handleApiRequest(req, url);
+      return serveApiRequest(req, url);
     }
 
     // Skills 重新扫描（manager 在 create/resume/kill 后调）

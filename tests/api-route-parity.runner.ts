@@ -49,7 +49,7 @@ function psLstart(pid: number): string {
   return r.stdout.toString().trim();
 }
 
-const { initApiRoutes, handleApiRequest } = await import("../src/bridge/api-routes.ts");
+const { initApiRoutes, serveApiRequest } = await import("../src/bridge/api-routes.ts");
 initApiRoutes({
   clients: new Map(),
   deliver: async () => {
@@ -79,7 +79,7 @@ for (const s of specs) {
   const req = new Request(url, { method: s.method, headers, body: s.body });
   try {
     const res = await Promise.race([
-      handleApiRequest(req, new URL(url)),
+      serveApiRequest(req, new URL(url)),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000)),
     ]);
     const text = (await res.text()).replaceAll(`"pid":${process.pid}`, `"pid":"<pid>"`);
