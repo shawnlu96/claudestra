@@ -340,6 +340,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const h = this.lastHidden;
     if (!h) return;
     if (!keep) this.lastHidden = null;
+    // 撤销 toast 活 5 秒，期间可能已切到别的会话（或进了历史浏览）：别把 A 的消息插进
+    // B 的视图（D8-5）。服务端照常按 h.agent 解除隐藏；丢掉 A 的快照，切回时重新拉取即恢复。
+    if (this.state.activeAgent !== h.agent || this.state.browsing) {
+      this.messageCache.delete(h.agent);
+      return;
+    }
     this.produce((s) => {
       if (s.messages.some((x) => x.id === h.msg.id)) return;
       const i = Math.min(h.index, s.messages.length);
@@ -2201,14 +2207,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!text?.trim() && !hasComp && !hasAtts) return;
     this.lastReplyTextAt = Date.now(); // 迟到 reply_pending 的判据(见 setReplying)
     const last = this.state.messages[this.state.messages.length - 1];
-    // 7s 对账可能抢在 chat_message(out) 之前把这条 reply 从 jsonl 补进了历史气泡 → 不再建第二份
-    if (this.recentHistoryHasReply(text)) return;
+    // 7s 对账可能抢在 chat_message(out) 之前把这条 reply 从 jsonl 补进了历史气泡 → 不再建第二份。
+    // 但「正在回复…」照样要收场：对账清过一次后，迟到的 reply_pending 可能又把它点亮了
+    // （那时 lastReplyTextAt 还没写，setReplying 拦不住）——三条路径都得清（D8-2）
+    if (this.recentHistoryHasReply(text)) {
+      if (this.state.replying) this.produce((s) => { s.replying = false; });
+      return;
+    }
     // 回合边界上的 reply（他端触发、纯 reply 无叙述）另起气泡，不并进上一回合；
     // 历史气泡（h 前缀）同样不并——理由见 ensureLiveAssistant
     if (last && last.role === "assistant" && !isHistoryBubble(last) && !this.nextBubbleBoundary) {
       this.produce((s) => {
-      s.replying = false; // 回复已到,「正在回复…」收场
-
+        s.replying = false; // 回复已到,「正在回复…」收场
         const m = s.messages[s.messages.length - 1];
         m.replyText = m.replyText ? `${m.replyText}\n${text}` : text;
         m.replyTs = m.replyTs ?? new Date().toISOString();
@@ -2225,6 +2235,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       this.nextBubbleBoundary = false; // 本回合气泡由 reply 开启
       const streamed = this.state.streaming;
       this.produce((s) => {
+        s.replying = false; // 另起气泡同样是回复已到
         s.messages.push({
           id: this.nextId(),
           role: "assistant",
