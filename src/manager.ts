@@ -222,6 +222,7 @@ import { bridgeRequest } from "./lib/bridge-client.js";
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
+import { installAfterPull, DEP_MANIFESTS } from "./lib/post-pull.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -448,14 +449,14 @@ function output(data: Record<string, unknown>) {
  * 等子进程结束；非 0 退出返回「exit=N：stderr 末几行」，成功返回 null。
  * stdout/stderr 都读走——pipe 了不读，输出一多子进程就卡在写管道上。
  */
-async function spawnFailure(proc: { exited: Promise<number>; stdout: ReadableStream; stderr: ReadableStream }): Promise<string | null> {
+async function spawnFailure(proc: { exited: Promise<number>; stdout: ReadableStream; stderr: ReadableStream }, tailLines = 3): Promise<string | null> {
   const [, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
   if (code === 0) return null;
-  const tail = stderrTail(err);
+  const tail = stderrTail(err, tailLines);
   return `exit=${code}${tail ? `：${tail}` : ""}`;
 }
 
@@ -3449,14 +3450,21 @@ async function cmdUpdateBeta() {
   const ff = co.ok ? await git("merge", "--ff-only", "origin/main", "--quiet") : co;
   if (!ff.ok) { await unlock(); output({ ok: false, error: `ff 前进失败: ${ff.err}` }); return; }
 
-  const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  const biFail = await spawnFailure(biProc);
-  if (biFail) {
-    // 依赖没装齐就 reload，新代码直接起不来——停在这里，让失败冒泡
+  // 依赖清单变了还装不上 → 回退到 preHead，不 /exit、不 reload（见 lib/post-pull.ts）
+  const install = await installAfterPull({
+    runInstall: () => spawnFailure(Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
+    depsChanged: async () => !(await git("diff", "--quiet", preHead, remote, "--", ...DEP_MANIFESTS)).ok,
+    rollback: async () => { const r = await git("reset", "--keep", preHead); return r.ok ? null : r.err || "git reset 失败"; },
+  });
+  if (!install.ok) {
     await unlock();
-    output({ ok: false, channel: "beta", error: `bun install 失败（${biFail}）——代码已前进到 ${remote.slice(0, 7)} 但未 reload daemon；修好后重跑 manager update` });
+    output({
+      ok: false, channel: "beta", step: install.step, rolledBack: install.rolledBack,
+      error: `bun install 失败（${install.err}）——${install.rolledBack ? `已回退到 ${preHead.slice(0, 7)}` : `回退也失败了：${install.rollbackError}`}；未 reload daemon`,
+    });
     return;
   }
+  if (install.warning) console.error(`[update] ⚠️ ${install.warning}`);
   const rendered = await renderMasterClaude();
   const webBuild = await maybeBuildWeb(preHead, remote);
   const migrateProc = Bun.spawn(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
@@ -3484,6 +3492,7 @@ async function cmdUpdateBeta() {
     webBuild,
     cliInstalled: cliInstall.errors.length === 0,
     ...(migrateError ? { migrateError } : {}),
+    ...(install.warning ? { installWarning: install.warning } : {}),
   });
 }
 
@@ -3568,14 +3577,22 @@ async function cmdUpdate() {
   if (!reattach.ok) console.error(`[update] ⚠️ ${reattach.detail}`);
 
   // 4. bun install（依赖可能变了）
-  const biProc = Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  const biFail = await spawnFailure(biProc);
-  if (biFail) {
-    // 以前只 await exited：断网/锁文件冲突时照样 reload 三个 daemon，新代码缺依赖起不来
+  //    以前只 await exited：断网/锁文件冲突时照样 reload 三个 daemon，新代码缺依赖起不来。
+  //    依赖清单变了还装不上 → 回退到升级前，不 /exit、不 reload（见 lib/post-pull.ts）
+  const install = await installAfterPull({
+    runInstall: () => spawnFailure(Bun.spawn(["bun", "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
+    depsChanged: async () => !(await git("diff", "--quiet", preUpdateHead, release.tag, "--", ...DEP_MANIFESTS)).ok,
+    rollback: async () => { const r = await git("checkout", preUpdateHead, "--quiet"); return r.ok ? null : r.err || "git checkout 失败"; },
+  });
+  if (!install.ok) {
     await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
-    output({ ok: false, error: `bun install 失败（${biFail}）——代码已切到 ${release.tag} 但未 reload daemon；修好后重跑 manager update` });
+    output({
+      ok: false, step: install.step, rolledBack: install.rolledBack,
+      error: `bun install 失败（${install.err}）——${install.rolledBack ? `已回退到 ${preUpdateHead.slice(0, 7)}` : `回退也失败了：${install.rollbackError}`}；未 reload daemon`,
+    });
     return;
   }
+  if (install.warning) console.error(`[update] ⚠️ ${install.warning}`);
 
   // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
   const rendered = await renderMasterClaude();
@@ -3630,6 +3647,7 @@ async function cmdUpdate() {
     // 分支挂回结果(detached HEAD 修复,v2.16.3)——同样绝不静默
     branch: reattach,
     migrateError: migrateError || undefined,
+    installWarning: install.warning,
     cliInstalled: cliInstall.errors.length === 0,
     cliWrapper: cliInstall.cliWrapper || undefined,
     daemons: cliInstall.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),
