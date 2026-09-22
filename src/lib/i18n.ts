@@ -13,29 +13,16 @@
  * 现在守护进程由 launchd 直跑，这个限制已不存在，同步读只是更简单。
  * Config 文件很小（<1KB），同步读启动期只会跑一次，性能无感。
  */
-import { CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
-import { readFileSync, existsSync } from "fs";
-import type { AppLang } from "./config-store.js";
-
-const CONFIG_PATH = STATE_CONFIG_PATH;
+import { readConfigSync, type AppLang } from "./config-store.js";
 
 let cachedLang: AppLang = "zh";
 let loaded = false;
 
 /** daemon 启动时调一次（bridge / launcher / cron / manager），从 config.json 载 lang。同步。 */
 export function initLang(): AppLang {
-  try {
-    if (existsSync(CONFIG_PATH)) {
-      const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-      if (raw && (raw.lang === "en" || raw.lang === "zh")) {
-        cachedLang = raw.lang;
-      }
-    }
-    loaded = true;
-  } catch {
-    // config 读失败就用默认 zh
-    loaded = true;
-  }
+  // 与其它读者同一口径（lib/config-store）：缺失 / 损坏 / lang 非法都落到默认 zh，永不抛
+  cachedLang = readConfigSync().lang;
+  loaded = true;
   return cachedLang;
 }
 
