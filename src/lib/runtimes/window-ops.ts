@@ -10,6 +10,7 @@ import {
   setWindowOption,
   tmuxCapture,
   tmuxRaw,
+  tmuxRawStrict,
   tmuxSendEscape,
   tmuxSendLine,
   windowChildPids,
@@ -41,13 +42,18 @@ export function tmuxWindowOps(name: string): WindowOps {
 }
 
 /**
- * 按目标运行时的 control.interruptKeys 打断一个 tmux 窗口。
- * 发键失败照常抛出（调用方各自决定是报错还是吞掉）。
+ * 按目标运行时的 control.interruptKeys 打断一个 tmux 窗口，返回发出的键。
+ * 发键失败会抛出（调用方各自决定是报错还是吞掉）。
  */
 export async function interruptWindow(target: string, runtime: string | undefined | null): Promise<readonly string[]> {
   const keys = controlFor(runtime).interruptKeys;
-  for (const key of keys) await tmuxRaw(["send-keys", "-t", target, key]);
+  for (const key of keys) await tmuxRawStrict(["send-keys", "-t", target, key]);
   return keys;
+}
+
+/** 给人看的按键名（"C-c" → "Ctrl+C"），打断回执里用 */
+export function describeKeys(keys: readonly string[]): string {
+  return keys.map((k) => (k === "C-c" ? "Ctrl+C" : k === "Escape" ? "Esc" : k)).join(" ");
 }
 
 /**

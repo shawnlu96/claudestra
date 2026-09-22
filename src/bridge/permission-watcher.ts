@@ -35,6 +35,7 @@ import {
 import { emitEvent } from "./event-bus.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
+import { controlFor } from "../lib/runtimes/index.js";
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -454,14 +455,15 @@ async function checkAgent(
   // 常驻不下线、输入框一直「思考中…」。更要命的是下面那条「thinking 反向对账」靠
   // CC 的 ❯ 提示符判定，Pi 上永不命中 ⇒ 误置的 compacting 再也收敛不回来。
   // Pi 的压缩态由会话记录驱动（translateSessionLine 把 compaction 翻成
-  // compact_boundary，jsonl-watcher 负责起落）⇒ 这里对 Pi 整块跳过，不猜屏幕。
-  const isPiAgent = (await readRegistryAgents().catch(() => []))
-    .find((r) => r.name === agentName)?.runtime === "pi";
+  // compact_boundary，jsonl-watcher 负责起落）⇒ 不认 CC 文案的运行时整块跳过，不猜屏幕。
+  const noPaneHeuristics = !controlFor(
+    (await readRegistryAgents().catch(() => [])).find((r) => r.name === agentName)?.runtime,
+  ).paneHeuristics;
 
   try {
     const { getAgentStatus, emitEvent } = await import("./event-bus.js");
     const st = getAgentStatus(agentName);
-    const compacting = !isPiAgent && paneShowsCompacting(pane);
+    const compacting = !noPaneHeuristics && paneShowsCompacting(pane);
     if (compacting && st !== "compacting") {
       console.log(`📦 ${agentName} 正在压缩上下文(pane 检测,此前状态 ${st ?? "无"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "compacting", trigger: "pane", prev: st ?? null } });
@@ -475,7 +477,7 @@ async function checkAgent(
     } else {
       compactPctSeen.delete(channelId);
     }
-    if (!isPiAgent && !compacting && st === "compacting") {
+    if (!noPaneHeuristics && !compacting && st === "compacting") {
       const working = paneLooksWorking(pane);
       console.log(`📦 ${agentName} 压缩已不在 pane 上(兜底收敛 → ${working ? "thinking" : "done"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: working ? "thinking" : "done", trigger: "compact_end_pane" } });

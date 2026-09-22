@@ -24,6 +24,7 @@ import {
   requireManaged,
 } from "../src/lib/runtimes/index.ts";
 import type { LaunchSpec, WindowOps } from "../src/lib/runtimes/types.ts";
+import { describeKeys } from "../src/lib/runtimes/window-ops.ts";
 
 // ── 1. 启动命令逐字一致 ─────────────────────────────────────────────
 
@@ -310,6 +311,11 @@ describe("control 声明", () => {
   test("缺省 / 未知 runtime 回退 CC 的策略（历史数据没有 runtime 字段）", () => {
     expect(controlFor(undefined)).toBe(claudeCodeAdapter.control);
     expect(controlFor("gpt-9")).toBe(claudeCodeAdapter.control);
+  });
+
+  test("打断回执里的按键名给人看", () => {
+    expect(describeKeys(controlFor(undefined).interruptKeys)).toBe("Ctrl+C");
+    expect(describeKeys(controlFor("codex").interruptKeys)).toBe("Esc");
   });
 });
 

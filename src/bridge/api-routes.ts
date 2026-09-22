@@ -11,8 +11,8 @@
  */
 
 import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
-import { agentRuntime } from "../lib/registry.js";
-import { piSessionsDir } from "../lib/pi-session.js";
+import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
+import { interruptAgent } from "../lib/runtimes/window-ops.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR } from "./config.js";
 import {
@@ -58,7 +58,6 @@ import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { piCommandsFor } from "../lib/pi-env.js";
-import { projectsSlug } from "../lib/jsonl-cost.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { isPiThinkingLevel } from "../lib/pi-launch.js";
@@ -94,29 +93,22 @@ export function latestSessionIdForCwd(cwd: string, runtime?: string): string | u
  * 快照里没有的**新 sid**才不会串台。
  */
 export function listSessionIdsForCwd(cwd: string, runtime?: string): string[] {
-  // v2.23+ runtime 感知：Pi 的会话文件是 `<时间戳>_<sessionId>.jsonl`（id 是后缀，
-  // 不是整个文件名），目录也在 ~/.pi/agent/sessions/ 下 —— 不做这一步，Pi 会话
-  // 一旦 /new 轮转，watcher / 历史 / 归档会同时冻在旧文件上（与 CC 侧
+  // 目录与「文件名 → id」规则都问适配器（Pi 是 `<时间戳>_<id>.jsonl`，在 ~/.pi 下）——
+  // 认错了 Pi 会话一旦 /new 轮转，watcher / 历史 / 归档会同时冻在旧文件上（与 CC 侧
   // maybeHealRotatedSession 注释里那个 7 天隐性故障同型）。
-  const pi = agentRuntime({ runtime }) === "pi";
-  const dir = pi ? piSessionsDir(cwd) : `${process.env.HOME}/.claude/projects/${projectsSlug(cwd)}`;
-  const idOf = (file: string): string | null => {
-    if (pi) {
-      const m = /_(.+)\.jsonl$/.exec(file);
-      return m ? m[1] : null;
-    }
-    return file.slice(0, -".jsonl".length);
-  };
-  try {
-    return readdirSync(dir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => ({ sid: idOf(f), mtime: statSync(`${dir}/${f}`).mtimeMs }))
-      .filter((e): e is { sid: string; mtime: number } => !!e.sid)
-      .sort((a, b) => b.mtime - a.mtime) // mtime 降序：调用方取 [0] 即最新
-      .map((e) => e.sid);
-  } catch {
-    return [];
-  }
+  const src = sourceFor(runtime);
+  return src
+    .listSessionsForCwd(cwd)
+    .map((p) => {
+      try {
+        return { sid: src.sessionIdFromPath(p), mtime: statSync(p).mtimeMs };
+      } catch {
+        return null; // 列目录与 stat 之间被删
+      }
+    })
+    .filter((e): e is { sid: string; mtime: number } => !!e?.sid)
+    .sort((a, b) => b.mtime - a.mtime) // mtime 降序：调用方取 [0] 即最新
+    .map((e) => e.sid);
 }
 
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
@@ -1623,9 +1615,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       return apiJson(200, { ok: true, deduped: true });
     }
     interruptCooldown.set(agent.name, Date.now());
-    const targetWindow = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
+    // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出）
     try {
-      await tmuxRaw(["send-keys", "-t", targetWindow, "C-c"]);
+      await interruptAgent(agent.name);
     } catch (e) {
       return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
     }
@@ -1639,7 +1631,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       agentNameForChannel(agent.channelId) ||
       (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
     emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
-    console.log(`⚡ [api] C-c 已发送给 ${agent.name} (token=${tokenId})`);
+    console.log(`⚡ [api] 打断键已发送给 ${agent.name} (token=${tokenId})`);
     return apiJson(200, { ok: true, agent: agent.name });
   }
 
@@ -1962,8 +1954,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     // v2.23+ 运行时：Web 端也能建 Pi agent（此前只有命令行能建）
     const runtime = String(body?.runtime || "").trim();
     const piBase = String(body?.piBase || "").trim();
-    if (runtime && runtime !== "pi" && runtime !== "claude-code") {
-      return apiJson(400, { ok: false, error: 'runtime must be "pi" or "claude-code"' });
+    if (runtime && !managedFor(runtime)) {
+      return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
     }
     if (piBase && piBase !== "minimal" && piBase !== "inherit") {
       return apiJson(400, { ok: false, error: 'piBase must be "minimal" or "inherit"' });
@@ -1980,7 +1972,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (model) createArgs.push("--model", model);
     if (effort) createArgs.push("--effort", effort);
     if (project) createArgs.push("--project", project);
-    if (runtime === "pi") createArgs.push("--runtime", "pi");
+    if (runtime && runtime !== DEFAULT_RUNTIME) createArgs.push("--runtime", runtime);
     if (piBase) createArgs.push("--pi-base", piBase);
     const r = await runManager(...createArgs);
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager create failed" });
@@ -2012,9 +2004,13 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       return apiJson(400, { ok: false, error: 'agent/sessionId/cwd 不能以 "-" 开头' });
     }
     if (!isValidSessionId(sessionId)) return apiJson(400, { ok: false, error: "invalid sessionId" });
+    // 只读来源（Codex 在接线前）不能收编；以前这里不校验，未知值会被悄悄当 Claude Code 起
+    if (runtime && !managedFor(runtime)) {
+      return apiJson(400, { ok: false, error: `runtime must be one of: ${manageableRuntimeIds().join(", ")}` });
+    }
     const args = ["resume", agent, sessionId];
     if (cwd) args.push(cwd);
-    if (runtime === "pi") args.push("--runtime", "pi");
+    if (runtime && runtime !== DEFAULT_RUNTIME) args.push("--runtime", runtime);
     // ⚠ 必须**同步等**（与 POST /agents 的 create 一致）：原来做成 202 + 后台，
     // 结果只进事件流 → 界面只看到「已受理」，后台失败（最常见：默认名字与已有
     // agent 撞车 → manager 报「已存在」）时用户完全看不到原因，只会认为"收编失败"。
