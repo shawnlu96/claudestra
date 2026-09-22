@@ -92,15 +92,18 @@ export type CanaryPlan =
  */
 export function canaryPlan(list: ListOutcome): CanaryPlan {
   if (!list.ok) return { kind: "list-failed", reason: list.reason };
-  // 只挑真正的 agent 窗口（agent-* 前缀）当金丝雀：window 0 改名 master 后，cmdList 会把
-  // 合成的 master 行排在最前，选中它 → `restart master` 必然「agent-master 不存在」→
-  // 整个升级重启波被一次误报中止。大总管由重启波最后单独处理，不参与金丝雀。
-  const c = list.agents.find((a) => a.status !== "stopped" && !isMasterAgent(a.name) && a.name.startsWith("agent-"));
+  // 只挑「活着的 Claude Code agent 窗口」当金丝雀——重启波只在 CC 升级后触发，验的是新 CC 能不能起：
+  // - 合成的 master 行（window 0 改名 master 后排在最前）：`restart master` 必然「不存在」→ 整波被误报中止；
+  // - Pi / Codex：重启成功与新 CC 二进制无关，选中它等于没验就放行全量重启；
+  // - dead 行（cmdList 只报 active / dead，没有 stopped）：它因自身原因起不来，会把整波误判成新版坏了。
+  const c = list.agents.find(
+    (a) => a.status === "active" && !isMasterAgent(a.name) && a.name.startsWith("agent-") && (a.runtime ?? "claude-code") === "claude-code",
+  );
   return c ? { kind: "canary", name: c.name } : { kind: "no-candidate" };
 }
 
 export type ListOutcome =
-  | { ok: true; agents: { name: string; status?: string }[] }
+  | { ok: true; agents: { name: string; status?: string; runtime?: string }[] }
   | { ok: false; reason: string };
 
 /**

@@ -46,6 +46,16 @@ describe("canaryPlan：list 失败 与 没有候选 必须分开", () => {
     const agents = [{ name: "master", status: "active" }, { name: "stray", status: "active" }];
     expect(canaryPlan({ ok: true, agents })).toEqual({ kind: "no-candidate" });
   });
+
+  test("只选活着的 Claude Code agent：Pi / Codex / dead 行排在前面也跳过（重启波验的是新 CC）", () => {
+    expect(canaryPlan({ ok: true, agents: [
+      { name: "agent-pi", status: "active", runtime: "pi" },
+      { name: "agent-cx", status: "active", runtime: "codex" },
+      { name: "agent-broken", status: "dead" },
+      { name: "agent-cc", status: "active" },
+    ] })).toEqual({ kind: "canary", name: "agent-cc" });
+    expect(canaryPlan({ ok: true, agents: [{ name: "agent-pi", status: "active", runtime: "pi" }] })).toEqual({ kind: "no-candidate" });
+  });
 });
 
 describe("parseManagerList（D7-5：list 失败不是「零个 agent」）", () => {
