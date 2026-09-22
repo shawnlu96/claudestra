@@ -2955,7 +2955,18 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "reply": {
       // v1.9.24+: 在任何 await 之前先删 pending。这样即使 Stop hook 在我们还在
       // 打 Discord API 的时候到达，后面的 cleanup 路径不会误触发。
-      pendingReplies.delete(msg.chatId);
+      // ⚠ 只能销**自己欠的**（与 send_to_agent 分支同一条纪律，判据见
+      //   lib/pending-reply-scope.ts）。key 是回信地址，而 Web/API 用户的回信地址
+      //   是 `api:<tokenId>`——**同一个 token 跟几个 agent 说话，共用这一个 key**。
+      //   无条件 delete ⇒ 我在自己频道回一句，把别的 agent 欠这个用户的债也销了；
+      //   那个 agent 的 Stop 于是不再被 reply-nudge 拦，它「只打字不 reply」就此
+      //   无人纠正，用户看到的是整条回复全是灰字旁白、没有正文。
+      //   2026-09-22 实测：10:59:48 用户问 mm-pm（pending 挂 mm-pm）→ 11:00:0x
+      //   claudestra-debug 在自己频道 reply（chatId 同为 api:tok_a375704d，销账）
+      //   → 11:01:00 mm-pm Stop 零拦截，1267 字答复全渲染成旁白。
+      if (ownsPendingReply(pendingReplies.get(msg.chatId)?.targetWs, ws)) {
+        pendingReplies.delete(msg.chatId);
+      }
 
       try {
         const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text || "";

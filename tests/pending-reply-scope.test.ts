@@ -50,4 +50,24 @@ describe("ownsPendingReply", () => {
     expect(ownsPendingReply(undefined, undefined)).toBe(false);
     expect(ownsPendingReply(null, null)).toBe(false);
   });
+
+  /**
+   * 2026-09-22 实测的那一幕（这条判据的第三个消费点：`reply` 分支）。
+   *
+   * Web/API 用户的回信地址是 `api:<tokenId>`——**同一个 token 跟几个 agent 说话，
+   * 共用这一个 key**。所以「无条件 delete」在 Web 端不是理论风险，是日常：
+   *   10:59:48  用户问 mm-pm        → pendingReplies["api:tok_…"].targetWs = mm-pm
+   *   11:00:0x  claudestra-debug 在**自己**频道 reply(chat_id="api:tok_…") → 销账
+   *   11:01:00  mm-pm 的 Stop 零拦截 ⇒ 它「只打字不 reply」没人纠正
+   *             ⇒ 用户看到 1267 字答复全是灰字旁白、没有正文
+   *
+   * 判据下的正确行为：debug 的 ws ≠ 欠账人 mm-pm 的 ws ⇒ 不许销。
+   */
+  test("Web token 共用一个 key：别的 agent 回复不能销掉这个 agent 的欠账", () => {
+    const wsDebug = { id: "claudestra-debug" };
+    const wsMmPm = { id: "mm-pm" };
+    // pendingReplies["api:tok_…"] 的欠账人是 mm-pm
+    expect(ownsPendingReply(wsMmPm, wsDebug)).toBe(false); // debug 回复 → 不许销
+    expect(ownsPendingReply(wsMmPm, wsMmPm)).toBe(true);   // mm-pm 自己回复 → 销
+  });
 });
