@@ -16,6 +16,7 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
+import { gateSetupAdoption } from "./lib/setup-adoption.js";
 import { mergeEnvContent, parseEnvRaw } from "./lib/env-file.js";
 
 /**
@@ -1103,7 +1104,7 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   write(`${c.dim}▶${c.reset} ${t("装 claudestra 命令 + 3 个 launchd daemon", "Install claudestra CLI + 3 launchd daemons")}… `);
   try {
     const { installClaudestraCli } = await import("./lib/cli-install.js");
-    const r = await installClaudestraCli(REPO_ROOT);
+    const r = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 构建只在 web 步骤前台做（看得见、能拒）；这里重跑是无输出无超时的几分钟
     if (r.errors.length > 0) {
       print(`${c.red}✗${c.reset}`);
       for (const e of r.errors) warn(e);
@@ -2079,14 +2080,11 @@ async function main() {
   };
 
   const fin = await stepFinalize(cfg);
-  // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后
-  if (fin.failures.length === 0 && !fin.deferred) {
-    fin.failures.push(...(await stepAdoptSessions(bridgePort)));
-  } else if (!fin.deferred) {
-    hint(t("有组件没装好，先跳过收编（修好后用 bun src/manager.ts takeover 或网页侧栏收编）。",
-           "Some components did not install — skipping adoption (adopt later with `bun src/manager.ts takeover` or the web sidebar)."));
-  }
-  fin.failures.push(...laterFailures);
+  // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后；能不能收编见 gateSetupAdoption
+  const gate = gateSetupAdoption({ ...fin, laterFailures, discord: fronts.discord, webInstalled: fin.web?.installed === true });
+  fin.failures = gate.failures;
+  if (gate.verdict === "adopt") fin.failures.push(...(await stepAdoptSessions(bridgePort)));
+  else if (gate.skipHint) hint(t(...gate.skipHint));
   stepDone(cfg, fronts, fin, phoneUrl);
 
   process.exit(0);
