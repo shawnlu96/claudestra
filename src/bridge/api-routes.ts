@@ -45,6 +45,7 @@ import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
+import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions } from "./sessions-inventory.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
@@ -579,8 +580,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           (a as any).contextTokens = info?.ctxTokens ?? null;
           // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
           (a as any).projectId = r?.projectId ?? null;
-          // v2.23+ 运行时（web 侧栏显示 Pi 徽章的数据源）
-          (a as any).runtime = r?.runtime === "pi" ? "pi" : "claude-code";
+          // 运行时徽章 + 顶栏挂哪种切换器的数据源：如实透传（未知/缺失 = claude-code），只认 pi 的话 Codex 会拿到 CC 面板
+          (a as any).runtime = sourceFor(r?.runtime).id;
           // 当前模型/effort。显示链:刚切换的乐观值(实测追上前) → jsonl 实测
           // (会话内切换即时反映,防 registry 漂移) → registry 钉的(创建/切换
           // 端点写入) → 全局默认
@@ -1725,11 +1726,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     });
   }
 
-  // POST /api/v1/agents/:name/claude-settings —— per-会话切换模型/effort
-  // (owner 2026-07-23:「每个对话显示当前 model/effort + 快速切换」)。原生
-  // /model、/effort 命令 tmux 注入(与 TUI 手打同一生效路径);回合进行中 409
-  // (此时注入只会排进输入框,语义不明)。非 master 同步写 registry(manager
-  // set-claude,保持 manager 唯一写者)——restart 后模型/effort 沿用。
+  // POST /api/v1/agents/:name/claude-settings —— 会话级切模型/effort：tmux 注入原生 /model、/effort(与 TUI 手打同一生效路径)。
+  // 非 CC runtime 400;回合进行中 409(注入只会排进输入框);非 master 同步写 registry(manager set-claude)——restart 后沿用。
   const claudeSetMatch = path.match(/^\/agents\/([^/]+)\/claude-settings$/);
   if (claudeSetMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(claudeSetMatch[1]);
@@ -1744,6 +1742,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (effort && !isKnownRuntimeEffort(effort)) {
       return apiJson(400, { ok: false, error: `未知 effort: "${effort}"。可用: ${[...KNOWN_EFFORT_LEVELS, ...RUNTIME_ONLY_EFFORT_LEVELS].join(", ")}` });
     }
+    const runtimeErr = nonClaudeRuntimeError(agentParam, await readRegistryAgents());
+    if (runtimeErr) return apiJson(400, { ok: false, error: runtimeErr });
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const isMasterSet = agent.name === "master";
