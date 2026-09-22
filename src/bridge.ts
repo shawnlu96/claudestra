@@ -167,7 +167,7 @@ syncDiscordOwnersFromEnv(ALLOWED_USER_IDS)
   .catch((e) => console.error("principals owner 同步失败（继续用 .env）:", (e as Error).message));
 import { startPermissionWatcher, permissionMessages, clearPermissionMessage } from "./bridge/permission-watcher.js";
 import { checkControlRegistrant } from "./lib/control-registrant.js";
-import { startWedgeWatcher, clearWedgeState } from "./bridge/wedge-watcher.js";
+import { startWedgeWatcher, startLinkSentinel, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefreshStatsDashboard, noteSaveCompactInjected } from "./bridge/stats-dashboard.js";
 import { parseAuqPane } from "./lib/auq-pane.js";
@@ -4840,6 +4840,9 @@ if (WEB_ONLY) {
   startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
   // v2.9+ 归档每日兜底 — 纯文件系统操作，历史 API 依赖它
   startArchiveSweeper();
+  // 链路哨兵：wedge watcher 只在 Discord ready 里起，web-only 以前完全没有「窗口活着但
+  // channel-server 没连上」的探测——而它的 SSE link_down 正是给 web 用户的（D7-6）
+  startLinkSentinel((cid) => clients.has(cid));
   // v2.13.1+ 给 web 前端补一个"重启了"的信号。Discord 侧靠
   // cleanupStaleThinkingMessages 把卡住的"💭 思考中"改写成可重发提示，而那是
   // Discord 专属（要编辑历史消息），web-only 模式整段跳过 —— 结果 bridge 重启后
