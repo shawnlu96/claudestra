@@ -11,6 +11,7 @@
  * 源文件更大（内容更多）时覆盖，缩水/丢失不回写。
  */
 
+import { ARCHIVE_ROOT as STATE_ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
 import { existsSync, readdirSync } from "fs";
@@ -18,11 +19,7 @@ import { copyFile, mkdir, readdir, stat } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
 
-export const ARCHIVE_ROOT = join(
-  process.env.HOME || "~",
-  ".claude-orchestrator",
-  "archive",
-);
+export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 
 /**
  * 「归档」类别区（v2.23+）—— 网页侧栏那份列表的唯一来源。

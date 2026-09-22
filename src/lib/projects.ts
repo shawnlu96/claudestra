@@ -11,10 +11,11 @@
  * 历史遗留的 `project` 字段——那里存的是创建时的原始 dir 字符串)。
  */
 
+import { STATE_DIR } from "./paths.js";
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 
 const HOME = process.env.HOME || "";
-const DIR = `${HOME}/.claude-orchestrator`;
+const DIR = STATE_DIR;
 export const PROJECTS_PATH = `${DIR}/projects.json`;
 
 export interface ProjectDef {

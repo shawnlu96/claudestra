@@ -1,3 +1,4 @@
+import { STATE_DIR, stateDirIn } from "./paths.js";
 import { execFile } from "node:child_process";
 /**
  * Pi 环境管理：一个 Pi agent 到底带了哪些能力（看得见）+ 按 agent 决定带哪些（管得住）。
@@ -230,11 +231,11 @@ export interface PiRuntimeSnapshot {
 }
 
 /** 运行时快照落点（Pi 扩展写、manager/web 读；与 registry 分开是为了不让 bridge 变写者） */
-export function piEnvSnapshotPath(agent: string, home = homedir()): string {
-  return join(home, ".claude-orchestrator", "pi-env", `${agent}.json`);
+export function piEnvSnapshotPath(agent: string, home?: string): string {
+  return join(home === undefined ? STATE_DIR : stateDirIn(home), "pi-env", `${agent}.json`);
 }
 
-export function readPiRuntimeSnapshot(agent: string, home = homedir()): PiRuntimeSnapshot | null {
+export function readPiRuntimeSnapshot(agent: string, home?: string): PiRuntimeSnapshot | null {
   const raw = readJson(piEnvSnapshotPath(agent, home));
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
@@ -321,7 +322,7 @@ export const PI_BUILTIN_PASSTHROUGH: ReadonlyArray<{ name: string; description: 
   { name: "bug", description: "给 Pi 作者报 bug" },
 ];
 
-export function piCommandsFor(agent: string, home = homedir()): PiCommandInfo[] {
+export function piCommandsFor(agent: string, home?: string): PiCommandInfo[] {
   const snap = readPiRuntimeSnapshot(agent, home);
   const fromSnapshot = (snap?.commands || [])
     .filter((n) => typeof n === "string" && n.trim())

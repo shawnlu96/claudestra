@@ -5,12 +5,12 @@
  * 区别于 .env（安装期常量）：这里放运行时可变的开关。
  */
 
+import { STATE_DIR, CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
 import { existsSync, readFileSync } from "fs";
 import { mkdir, rename } from "fs/promises";
 
-const HOME = process.env.HOME || "";
-const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
-const CONFIG_PATH = `${CONFIG_DIR}/config.json`;
+const CONFIG_DIR = STATE_DIR;
+const CONFIG_PATH = STATE_CONFIG_PATH;
 
 export type AppLang = "zh" | "en";
 

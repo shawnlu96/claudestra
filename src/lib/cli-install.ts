@@ -34,6 +34,7 @@
  * 抢同一个 tmux session。
  */
 
+import { TMUX_SOCK } from "./paths.js";
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
 import { existsSync, readFileSync, realpathSync } from "fs";
@@ -45,7 +46,6 @@ import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
 import { rebuildWebIfStale, restartWebService, type WebBuildResult } from "./web-build.js";
 
-const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
 
 export interface DaemonSpec {
   label: string;

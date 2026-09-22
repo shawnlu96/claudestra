@@ -18,7 +18,9 @@ const c = {
   cyan: tty ? "\x1b[36m" : "",
 };
 
-const SOCK = "/tmp/claude-orchestrator/master.sock";
+import { TMUX_SOCK } from "./paths.js";
+
+const SOCK = TMUX_SOCK;
 
 function p(s: string = "") { process.stdout.write(s + "\n"); }
 

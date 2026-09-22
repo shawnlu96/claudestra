@@ -13,11 +13,11 @@
  * 现在守护进程由 launchd 直跑，这个限制已不存在，同步读只是更简单。
  * Config 文件很小（<1KB），同步读启动期只会跑一次，性能无感。
  */
+import { CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
 import { readFileSync, existsSync } from "fs";
 import type { AppLang } from "./config-store.js";
 
-const HOME = process.env.HOME || "";
-const CONFIG_PATH = `${HOME}/.claude-orchestrator/config.json`;
+const CONFIG_PATH = STATE_CONFIG_PATH;
 
 let cachedLang: AppLang = "zh";
 let loaded = false;

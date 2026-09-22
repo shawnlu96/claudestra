@@ -33,11 +33,12 @@
  * 两者任一匹配即放行；两者都不匹配才是「另一台机器」。
  */
 
+import { STATE_DIR } from "./paths.js";
 import { hostname } from "os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 
-const DIR = join(process.env.HOME || "~", ".claude-orchestrator");
+const DIR = STATE_DIR;
 const MARKER = join(DIR, "owner.json");
 
 export interface OwnerMarker {

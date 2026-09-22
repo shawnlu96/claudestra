@@ -16,6 +16,7 @@
  * Discord /agents 面板 —— 三者共用本模块，Discord 只是渲染器之一。
  */
 
+import { REGISTRY_PATH } from "../lib/paths.js";
 import { existsSync } from "fs";
 import { readFile, readdir } from "fs/promises";
 import { homedir } from "os";
@@ -172,7 +173,7 @@ export function doppelgangers(list: NeutralSessionInfo[]): NeutralSessionInfo[] 
 // ============================================================
 
 const DEFAULT_JOBS_DIR = join(homedir(), ".claude", "jobs");
-const DEFAULT_REGISTRY = join(homedir(), ".claude-orchestrator", "registry.json");
+const DEFAULT_REGISTRY = REGISTRY_PATH;
 
 /** claude 可执行文件候选（launchd 环境 PATH 可能不含 homebrew） */
 const CLAUDE_BIN_CANDIDATES = ["claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"];

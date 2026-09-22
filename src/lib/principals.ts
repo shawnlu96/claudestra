@@ -16,10 +16,10 @@
  * agent 上下文里已有什么。CLI 会对未标 external 的 agent 要求 --force。
  */
 
+import { STATE_DIR } from "./paths.js";
 import { isMasterAgent } from "./registry.js";
 import { timingSafeEqual } from "crypto";
 import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
-import { homedir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
 
@@ -56,7 +56,7 @@ export interface PrincipalsFile {
   principals: Principal[];
 }
 
-const CONFIG_DIR = join(homedir(), ".claude-orchestrator");
+const CONFIG_DIR = STATE_DIR;
 export const PRINCIPALS_PATH = join(CONFIG_DIR, "principals.json");
 
 const isPrincipalsFile = (d: unknown): boolean =>

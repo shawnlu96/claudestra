@@ -7,11 +7,10 @@
  * bridge 侧一律只读。
  */
 
-import { homedir } from "os";
-import { join } from "path";
+import { REGISTRY_PATH as STATE_REGISTRY_PATH } from "./paths.js";
 import { readFile } from "fs/promises";
 
-export const REGISTRY_PATH = join(homedir(), ".claude-orchestrator", "registry.json");
+export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 
 /** v2.23+ agent 运行时。缺失/未知一律当 `claude-code`——宁可走老路，不猜新路 */
 export type AgentRuntime = "claude-code" | "pi" | "codex";

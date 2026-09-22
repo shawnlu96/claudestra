@@ -8,11 +8,11 @@
  * 聚合查询由 readMetrics(filter) + 上层算出汇总。
  */
 
+import { STATE_DIR } from "./paths.js";
 import { existsSync } from "fs";
 import { mkdir, appendFile } from "fs/promises";
 
-const HOME = process.env.HOME || "";
-const METRICS_DIR = `${HOME}/.claude-orchestrator`;
+const METRICS_DIR = STATE_DIR;
 const METRICS_PATH = `${METRICS_DIR}/metrics.jsonl`;
 
 export type MetricEvent =

@@ -7,11 +7,11 @@
  * httpPeers，老文件里的多余字段自然忽略，不迁移不报错。
  */
 
+import { STATE_DIR } from "./paths.js";
 import { existsSync } from "fs";
 import { mkdir } from "fs/promises";
 
-const HOME = process.env.HOME || "";
-const DIR = `${HOME}/.claude-orchestrator`;
+const DIR = STATE_DIR;
 const PATH = `${DIR}/peers.json`;
 
 /**

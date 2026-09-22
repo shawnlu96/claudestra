@@ -21,6 +21,7 @@
  * 崩溃 / 开机的行为**没有改变**（没有单子 = 全新会话，与 v2.24 之前一致）。
  */
 
+import { statePath, stateDirIn } from "./paths.js";
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
 
 export const MASTER_RESUME_MAX_AGE_MS = 10 * 60_000;
@@ -34,8 +35,8 @@ export interface MasterResume {
 /** Claude Code 的 session id 形状（拼进启动命令前的白名单，宁可当没有也不放行怪东西） */
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;
 
-export function masterResumePath(home = process.env.HOME || ""): string {
-  return `${home}/.claude-orchestrator/master-resume.json`;
+export function masterResumePath(home?: string): string {
+  return home === undefined ? statePath("master-resume.json") : `${stateDirIn(home)}/master-resume.json`;
 }
 
 /**

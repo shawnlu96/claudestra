@@ -5,7 +5,8 @@
  * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
  */
 
-export const TMUX_SOCK = "/tmp/claude-orchestrator/master.sock";
+import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js";
+export { TMUX_SOCK };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -1321,7 +1322,7 @@ export function hasChildInPsOutput(psOut: string, pid: number): boolean {
 
 /** 确保 tmux socket 目录存在 */
 export async function ensureSocketDir(): Promise<void> {
-  await Bun.spawn(["mkdir", "-p", "/tmp/claude-orchestrator"]).exited;
+  await Bun.spawn(["mkdir", "-p", RUNTIME_DIR]).exited;
 }
 
 /**

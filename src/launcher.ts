@@ -5,6 +5,7 @@
  * 如果 session 死了自动重启。
  */
 
+import { statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
@@ -613,7 +614,7 @@ async function detectClaudeInstall(): Promise<ClaudeInstall | null> {
 
 /** 已报过「认不出安装方式」的 claude 路径。落盘而非内存：launcher 每次更新都会 reload、启动即检查，
  *  只记内存的话每次更新后 #control 都会再收到同一条 */
-const UNKNOWN_INSTALL_NOTED = `${process.env.HOME || ""}/.claude-orchestrator/unknown-claude-install.notified`;
+const UNKNOWN_INSTALL_NOTED = statePath("unknown-claude-install.notified");
 async function unknownInstallAlreadyNoted(path: string): Promise<boolean> {
   try { return (await Bun.file(UNKNOWN_INSTALL_NOTED).text()).trim() === path; } catch { return false; }
 }
