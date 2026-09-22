@@ -851,8 +851,28 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       agentName: byId.get(String(s.sessionId)) ?? null,
       // 目录已消失（/tmp 被清、项目搬走）→ 收编必然失败，提前标出来别让用户白试
       cwdExists: typeof s.cwd === "string" && s.cwd ? existsSync(s.cwd) : false,
+      // 能不能收编成可对话的 agent —— 取自运行时适配器（前端据此决定给不给「收编」按钮）
+      manageable: sourceFor(String(s.runtime ?? "")).manageable,
     }));
     return apiJson(200, { ok: true, count: sessions.length, sessions });
+  }
+
+  // v2.24+ GET /api/v1/runtimes —— 可建 agent 的运行时清单 + 这台机器上能不能用。
+  // 新建 agent 的运行时下拉读它：available=false 的不显示（没装 codex 的人无感）。
+  // available() 由适配器自己缓存（Codex 5 分钟），这里不再加一层。
+  if (path === "/runtimes" && req.method === "GET") {
+    // hint 里带本机路径；能建 agent 的也只有全权 token
+    if (!principal.agents.includes("*")) {
+      return apiJson(403, { ok: false, error: "runtimes requires a full-scope token" });
+    }
+    const runtimes = await Promise.all(
+      manageableRuntimeIds().map(async (id) => {
+        const a = managedFor(id)!;
+        const r = await a.available().catch((e) => ({ ok: false as const, hint: (e as Error).message }));
+        return { id, label: a.label, manageable: true, available: r.ok, ...(r.ok ? {} : { hint: r.hint }) };
+      }),
+    );
+    return apiJson(200, { ok: true, runtimes });
   }
 
   // v2.7+ POST /api/v1/sessions/:bgId/cleanup —— 清理 bg job（死分身/残留）。

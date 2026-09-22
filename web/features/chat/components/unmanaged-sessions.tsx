@@ -26,6 +26,8 @@ interface SessionRow {
   modifiedAt: string;
   lastMessage: string;
   agentName: string | null;
+  /** v2.24+ bridge 按运行时适配器给出：能不能收编成可对话的 agent（老 bridge 不带） */
+  manageable?: boolean;
 }
 
 interface HistoryTool {
@@ -62,9 +64,7 @@ export function RuntimeBadge({ runtime, className = "" }: { runtime: string; cla
     );
   }
   if (runtime === "codex") {
-    // v2.24+ Codex 只读：列得出、读得了历史，但**收编不了**（我们对它只有
-    // `codex exec` 一条通路，没有往会话里注消息的手段）。徽章用中性色，跟 Pi
-    // 那种「能收编」的一等运行时区分开。
+    // v2.24+ Codex：能收编（入站走 `codex queue`）。徽章用中性色，与 Pi 区分开。
     return (
       <span className={`badge badge-xs border-base-content/25 bg-base-content/10 text-[10px] text-base-content/70 ${className}`}>
         Codex
@@ -74,9 +74,12 @@ export function RuntimeBadge({ runtime, className = "" }: { runtime: string; cla
   return null;
 }
 
-/** 这个 runtime 的会话能不能收编成可对话的 agent（Codex 不能，见 RuntimeBadge） */
-export function canAdoptRuntime(runtime: string): boolean {
-  return runtime !== "codex";
+/**
+ * 这个会话能不能收编成可对话的 agent。以 bridge 给的 manageable 为准（取自运行时适配器，
+ * 加新运行时前端不用改）；老 bridge 不带这个字段时按旧规则（只有 Codex 不能）。
+ */
+export function canAdoptSession(s: { runtime: string; manageable?: boolean }): boolean {
+  return typeof s.manageable === "boolean" ? s.manageable : s.runtime !== "codex";
 }
 
 /**
@@ -574,11 +577,11 @@ function SessionViewer({
                 {t("← 返回")}
               </button>
               <span className="text-xs text-base-content/50">
-                {canAdoptRuntime(session.runtime)
+                {canAdoptSession(session)
                   ? t("这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。")
-                  : t("Codex 的会话只读：历史能看能搜，但收编不了——我们对它只有 codex exec 一条通路，没有往会话里发消息的办法。")}
+                  : t("这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。")}
               </span>
-              {canAdoptRuntime(session.runtime) && (
+              {canAdoptSession(session) && (
                 <button className="btn btn-outline btn-sm ml-auto" onClick={() => setAdopting(true)}>
                   {t("收编为 agent")}
                 </button>
