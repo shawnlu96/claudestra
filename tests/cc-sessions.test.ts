@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseCcSessionEntry, pickCcSessionForWindow, type CcSessionEntry } from "../src/lib/cc-sessions";
+import { parseCcSessionEntry, pickCcSessionForWindow, procStartMatches, type CcSessionEntry } from "../src/lib/cc-sessions";
 
 const SRC = "32bd5a87-6982-4717-aef2-58d80812935b";
 const FORK = "72aabe18-8395-43ee-a9e0-31abdf8aab4e";
@@ -8,7 +8,16 @@ const e = (o: Partial<CcSessionEntry> & { pid: number; sessionId: string }): CcS
 describe("parseCcSessionEntry", () => {
   test("真实登记（master 2026-09-18 案例）", () => {
     const raw = '{"pid":16304,"sessionId":"72aabe18-8395-43ee-a9e0-31abdf8aab4e","cwd":"/Users/shawn/repos/gc-car","startedAt":1789671687953,"tmux":"master:@1111.%1111","name":"gc-car-chat","status":"busy"}';
-    expect(parseCcSessionEntry(raw)).toEqual({ pid: 16304, sessionId: FORK, cwd: "/Users/shawn/repos/gc-car", startedAt: 1789671687953, tmux: "master:@1111.%1111", name: "gc-car-chat" });
+    expect(parseCcSessionEntry(raw)).toEqual({ pid: 16304, sessionId: FORK, cwd: "/Users/shawn/repos/gc-car", startedAt: 1789671687953, tmux: "master:@1111.%1111", name: "gc-car-chat", status: "busy" });
+  });
+  test("保留 status / kind / procStart / entrypoint——takeover 的 busy 保护与 pid 复用校验靠它们", () => {
+    // CC 2.1.280 真实登记（字段节选）
+    const raw = '{"pid":72201,"sessionId":"3f21e202-1ff9-4048-a6aa-9ad51fa0f481","cwd":"/x","startedAt":1790099225278,"procStart":"Tue Sep 22 17:47:04 2026","kind":"interactive","entrypoint":"cli","status":"busy"}';
+    const got = parseCcSessionEntry(raw)!;
+    expect(got.status).toBe("busy");
+    expect(got.kind).toBe("interactive");
+    expect(got.procStart).toBe("Tue Sep 22 17:47:04 2026");
+    expect(got.entrypoint).toBe("cli");
   });
   test("坏 JSON / 缺 pid / 缺 sessionId → null", () => {
     expect(parseCcSessionEntry("{")).toBeNull();
@@ -40,5 +49,34 @@ describe("pickCcSessionForWindow", () => {
   test("什么都没命中 → null", () => {
     expect(pickCcSessionForWindow([src, fork], { childPids: [1], paneId: "%5" })).toBeNull();
     expect(pickCcSessionForWindow([], { childPids: [16304] })).toBeNull();
+  });
+});
+
+describe("procStartMatches — 识破 pid 复用的过期登记", () => {
+  // 登记 procStart 实测是 UTC，ps lstart 是本地时区：两边换算成绝对时间再比
+  const utc = "Tue Sep 22 18:23:19 2026";
+  const startMs = Date.parse(`${utc} GMT`);
+  /** 仿 `ps -o lstart=` 的本地时间格式：Wed Sep 23 03:23:19 2026 */
+  const psOf = (ms: number) => {
+    const [wd, mon, day, year, time] = new Date(ms).toString().split(" ");
+    return `${wd} ${mon} ${day} ${time} ${year}`;
+  };
+
+  test("同一个进程（UTC 登记 vs 本地 lstart）→ 匹配", () => {
+    expect(procStartMatches({ procStart: utc }, psOf(startMs))).toBe(true);
+  });
+  test("pid 被复用给后来的进程 → 不匹配", () => {
+    expect(procStartMatches({ procStart: utc }, psOf(startMs + 3_600_000))).toBe(false);
+  });
+  test("没有 procStart 时退回 startedAt（启动后一两秒才写）", () => {
+    expect(procStartMatches({ startedAt: startMs + 1_056 }, psOf(startMs))).toBe(true);
+    expect(procStartMatches({ startedAt: startMs + 600_000 }, psOf(startMs))).toBe(false);
+  });
+  test("判断不了（进程没了 / 登记里没有时间）→ false，宁可不动手", () => {
+    expect(procStartMatches({ procStart: utc }, "")).toBe(false);
+    expect(procStartMatches({}, psOf(startMs))).toBe(false);
+  });
+  test("本地化的 lstart（zh_CN）解析不了 → false：所以 psLstart 必须强制 C locale", () => {
+    expect(procStartMatches({ procStart: utc }, "三  9月/23 03:23:19 2026")).toBe(false);
   });
 });

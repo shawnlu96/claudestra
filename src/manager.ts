@@ -72,10 +72,11 @@ import {
 import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
-import { resolveSessionIdForWindow, readCcSessionEntries } from "./lib/cc-sessions.js";
+import { resolveSessionIdForWindow, readLiveCcSessionEntries } from "./lib/cc-sessions.js";
+import { readBypassConsent } from "./lib/bypass-consent.js";
 import { writeMasterResume } from "./lib/master-session.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
-import { mayTakeOver, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
+import { ancestorPids, mayTakeOver, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
 import { allSources, type DiscoveredSession } from "./lib/runtimes/index.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } from "./lib/registry.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
@@ -318,15 +319,21 @@ async function waitPidGone(pid: number, timeoutMs: number): Promise<boolean> {
  * 「同一个会话换了个地方继续」。判据与安全阀见 lib/takeover.ts。
  */
 async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boolean; name?: string } = {}) {
-  const [entries, panes, reg] = await Promise.all([
-    readCcSessionEntries(),
+  // 只认「活着且确实是登记里那个进程」的条目：pid 复用的过期登记会让 SIGTERM 打错人
+  const [alive, panes, reg] = await Promise.all([
+    readLiveCcSessionEntries(),
     ourPaneIds(),
     readRegistryAgents().catch(() => []),
   ]);
   const managed = new Set(reg.map((a) => a.sessionId).filter(Boolean) as string[]);
   const taken = new Set(reg.map((a) => a.name.replace(/^agent-/, "")));
-  const alive = entries.filter((e) => { try { process.kill(e.pid, 0); return true; } catch { return false; } });
-  const cands = takeoverCandidates(alive, panes, managed);
+  // 从 CC 的 `!` 模式 / Bash 工具里跑 setup 或 takeover 时，那个 CC 是我们的祖先：绝不能列、更不能 SIGTERM
+  const ancestors = ancestorPids(process.pid, (p) => {
+    const r = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(p)], { stdout: "pipe", stderr: "ignore" });
+    const n = Number(r.stdout.toString().trim());
+    return r.exitCode === 0 && Number.isFinite(n) ? n : null;
+  });
+  const cands = takeoverCandidates(alive.filter((e) => !ancestors.has(e.pid)), panes, managed);
 
   if (!target && !opts.all) {
     output({ ok: true, candidates: cands.map((c) => ({
@@ -344,12 +351,38 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
     return;
   }
 
+  // SIGTERM 之前的全局预检：这边起不来就一个进程都不动
+  const bridgePort = process.env.BRIDGE_PORT || "3847";
+  const [bypassAccepted, masterSession, bridgeReachable] = await Promise.all([
+    readBypassConsent(),
+    tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]).then(() => true, () => false),
+    fetch(`http://127.0.0.1:${bridgePort}/stats`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false),
+  ]);
+  const problems = preflightProblems({ bypassAccepted, masterSession, bridgeReachable });
+  if (problems.length) {
+    output({ ok: false, error: `没有动任何进程：${problems.join("；")}`, problems });
+    return;
+  }
+
   const results: Array<Record<string, unknown>> = [];
+  let halted = false;
   for (const c of picked) {
+    if (halted) {
+      results.push({ sessionId: c.sessionId, ok: false, skipped: true, error: "前一个接管失败，剩下的没动" });
+      continue;
+    }
     const gate = mayTakeOver(c, !!opts.force);
     if (!gate.ok) { results.push({ sessionId: c.sessionId, ok: false, error: gate.reason }); continue; }
+    // 逐条预检（名字 / 窗口 / sessionId）——cmdResume 里同样的校验发生在 kill 之后，来不及
     const name = opts.name && picked.length === 1 ? opts.name : agentNameFromDir(c.cwd, taken);
+    let preErr = "";
+    try { assertValidNewName(name); } catch (e) { preErr = (e as Error).message; }
+    if (!preErr && taken.has(name.replace(/^agent-/, ""))) preErr = `agent 名 ${name} 已被占用（换一个 --name）`;
+    if (!preErr && (await windowExists(normalizeName(name)))) preErr = `${normalizeName(name)} 窗口已存在（换一个 --name）`;
+    if (!preErr && !UUID_RE.test(c.sessionId)) preErr = `sessionId 不是 UUID：${c.sessionId}`;
+    if (preErr) { results.push({ sessionId: c.sessionId, ok: false, error: `没有动原进程：${preErr}` }); continue; }
     taken.add(name);
+
     try { process.kill(c.pid, "SIGTERM"); } catch { /* 刚好自己退了 */ }
     const gone = await waitPidGone(c.pid, 20_000);
     if (!gone) {
@@ -357,9 +390,29 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
         error: `原进程 ${c.pid} 收到 SIGTERM 后 20 秒仍在；没有强杀（那是你正在用的窗口）。请手动退出它再重试` });
       continue;
     }
-    // 原进程已退出 ⇒ session 没人占用，直接 resume 同一个 id（不是 fork，上下文一条不丢）
-    await cmdResume(name, c.sessionId, c.cwd);
-    results.push({ sessionId: c.sessionId, ok: true, name, pid: c.pid });
+    // 原进程已退出 ⇒ session 没人占用，直接 resume 同一个 id（不是 fork，上下文一条不丢）。
+    // cmdResume 自己往 stdout 打 JSON：这里截下来判成败，只输出 takeover 的一份汇总。
+    const captured: string[] = [];
+    const origLog = console.log;
+    console.log = (...a: unknown[]) => { captured.push(a.map(String).join(" ")); };
+    let thrown = "";
+    try {
+      await cmdResume(name, c.sessionId, c.cwd);
+    } catch (e) {
+      thrown = (e as Error).message;
+    } finally {
+      console.log = origLog;
+    }
+    for (const l of captured) if (!l.trim().startsWith("{")) console.error(l);
+    const res = thrown ? { ok: false, error: thrown } : resumeOutcome(captured);
+    if (res.ok) {
+      results.push({ sessionId: c.sessionId, ok: true, name, agent: res.agent, pid: c.pid });
+    } else {
+      // 原进程已经关了、这边又没起来：给出手动接回的命令，并停下剩余的
+      results.push({ sessionId: c.sessionId, ok: false, name, pid: c.pid, error: res.error,
+        recover: recoverCommand(c.cwd, c.sessionId) });
+      halted = true;
+    }
   }
   output({ ok: results.every((r) => r.ok), results });
 }
@@ -1158,6 +1211,12 @@ async function cmdResume(
   forkSession = false,
   runtimeFlag?: string,
 ) {
+  // 同 cmdCreate：未知 runtime（如 codex）以前被静默当成 Claude Code，claude --resume 一个
+  // codex id 要干等满 120s 就绪预算才失败
+  if (runtimeFlag && runtimeFlag !== "pi" && runtimeFlag !== "claude-code") {
+    output({ ok: false, error: `未知的 runtime: "${runtimeFlag}"。可用: claude-code, pi` });
+    return;
+  }
   const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
   if (runtime === "pi" && !(await assertPiAvailable())) {
     throw new Error("这台机器上没有找到 pi 可执行文件 —— 无法用 --runtime pi 收编会话（可用 PI_BIN 指定路径，或省略 --runtime 走 Claude Code）");

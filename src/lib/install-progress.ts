@@ -17,6 +17,38 @@ export interface InstallProgressInput {
   webBuildId: boolean;
   bridgePlist: boolean;
   webPlist: boolean;
+  /**
+   * 文件在 ≠ 是这一版的：重跑 install.sh 切到新版本后 node_modules / .next 都还是旧的。
+   * false = 确知过期；省略 = 判断不了（按旧行为当新鲜），见 webDepsFresh / webBuildFresh。
+   */
+  webDepsFresh?: boolean;
+  webBuildFresh?: boolean;
+}
+
+/**
+ * 依赖新鲜度：npm install 写 node_modules/.package-lock.json，它不早于 package-lock.json
+ * 才算装的是这一版。lockMtime 为 null（没有 lock 文件）判断不了 → 当新鲜。
+ */
+export function webDepsFresh(lockMtime: number | null, installedMtime: number | null): boolean {
+  if (lockMtime === null) return true;
+  if (installedMtime === null) return false;
+  return installedMtime >= lockMtime;
+}
+
+/** web/lib/build-info.ts（构建前生成、不进 git）里烤进 bundle 的 web commit */
+export function parseClientWebCommit(buildInfoSource: string | null): string | null {
+  const m = /CLIENT_WEB_COMMIT\s*=\s*"([^"]*)"/.exec(buildInfoSource ?? "");
+  return m && m[1] ? m[1] : null;
+}
+
+/**
+ * 构建新鲜度：产物烤的 web commit 等于当前 web/ 最后一次（非文档）提交。
+ * 当前 commit 拿不到（不是 git 检出）判断不了 → 当新鲜；产物里没有记录
+ * （v2.20.1 时代的构建没有 build-info.ts）→ 过期。
+ */
+export function webBuildFresh(builtCommit: string | null, currentCommit: string | null): boolean {
+  if (!currentCommit) return true;
+  return !!builtCommit && builtCommit === currentCommit;
 }
 
 export interface InstallProgress extends InstallProgressInput {
@@ -33,10 +65,11 @@ export function assessInstall(x: InstallProgressInput): InstallProgress {
 
 /** 续装时该跳过哪些**耗时且已完成**的动作（用户仍可显式要求重做） */
 export function skippableSteps(p: InstallProgress): { webInstall: boolean; webBuild: boolean } {
+  const webInstall = p.webNextBin && p.webDepsFresh !== false;
   return {
-    webInstall: p.webNextBin,
+    webInstall,
     // 依赖重装过就得重新构建：.next 里烤着上一份依赖的产物
-    webBuild: p.webBuildId && p.webNextBin,
+    webBuild: p.webBuildId && p.webBuildFresh !== false && webInstall,
   };
 }
 

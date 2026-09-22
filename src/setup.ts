@@ -14,8 +14,15 @@ import { resolve } from "path";
 import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./lib/session-recall.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
-import { agentNameFromDir } from "./lib/agent-name.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
+import { mergeEnvContent } from "./lib/env-file.js";
+
+/**
+ * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
+ * Web 优先 + 自动收编（默认 Discord、没有 web 托管），和 install.sh 的描述对不上。
+ * 向导的对外行为有大改时递增，并同步 install.sh 里的判据。
+ */
+export const SETUP_CONTRACT = 2;
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENV_PATH = `${REPO_ROOT}/.env`;
@@ -211,6 +218,14 @@ function validateSnowflake(v: string): string | null {
     );
   }
   return null;
+}
+
+/** 现有配置里 Discord 四项都是真值（不是 .env.example 的占位符）——续装可以整段沿用 */
+function hasDiscordConfig(e: Partial<Config>): boolean {
+  return !!e.DISCORD_BOT_TOKEN && !validateToken(e.DISCORD_BOT_TOKEN) &&
+    !!e.DISCORD_GUILD_ID && !validateSnowflake(e.DISCORD_GUILD_ID) &&
+    !!e.ALLOWED_USER_IDS && e.ALLOWED_USER_IDS.split(",").every((id) => !validateSnowflake(id.trim())) &&
+    !!e.CONTROL_CHANNEL_ID && !validateSnowflake(e.CONTROL_CHANNEL_ID);
 }
 
 function validateToken(v: string): string | null {
@@ -489,20 +504,41 @@ async function stepCheckDeps(): Promise<void> {
  * 续装横幅：装到一半断了再跑，先把「已经好了的」摆出来。
  * 判据全是落盘事实（文件在不在），见 lib/install-progress.ts。
  */
+/** web 依赖 / 构建产物是不是这一版的（判据见 lib/install-progress.ts；拿不到的事实就省略） */
+async function webFreshness(): Promise<{ webDepsFresh?: boolean; webBuildFresh?: boolean }> {
+  const { statSync } = await import("fs");
+  const { webDepsFresh, webBuildFresh, parseClientWebCommit } = await import("./lib/install-progress.js");
+  const mtime = (p: string) => { try { return statSync(p).mtimeMs; } catch { return null; } };
+  const webDir = `${REPO_ROOT}/web`;
+  // 与 web/scripts/gen-build-info.mjs 同源同写法：在 web/ 下算，排除文档。
+  // 没有 git / 没有 web 目录时 spawn 会抛——判断不了就省略，按旧行为
+  const cur = await run(["git", "log", "-1", "--format=%h", "--", ".", ":(exclude)*.md"], { cwd: webDir })
+    .catch(() => ({ ok: false, out: "", err: "" }));
+  let built: string | null = null;
+  try { built = parseClientWebCommit(await readFile(`${webDir}/lib/build-info.ts`, "utf-8")); } catch { /* 没构建过 */ }
+  return {
+    webDepsFresh: webDepsFresh(mtime(`${webDir}/package-lock.json`), mtime(`${webDir}/node_modules/.package-lock.json`)),
+    webBuildFresh: webBuildFresh(built, cur.ok ? cur.out.trim() || null : null),
+  };
+}
+
 function printResumeBanner(): void {
-  const L: Array<[boolean, string, string]> = [
+  // 第四列：文件在但不是这一版的（切版本后重跑）——显示「过期」，别打 ✓
+  const L: Array<[boolean, string, string, boolean?]> = [
     [progress.envFile, ".env", t("主配置", "main config")],
     [progress.webEnvLocal, "web/.env.local", t("Web 配置 + API token", "web config + API token")],
-    [progress.webNextBin, "web/node_modules", t("Web 依赖", "web dependencies")],
-    [progress.webBuildId, "web/.next", t("Web 构建产物", "web build output")],
+    [progress.webNextBin, "web/node_modules", t("Web 依赖", "web dependencies"), progress.webDepsFresh === false],
+    [progress.webBuildId, "web/.next", t("Web 构建产物", "web build output"), progress.webBuildFresh === false],
     [progress.bridgePlist, "com.claudestra.bridge", t("后台服务", "background daemons")],
     [progress.webPlist, "com.claudestra.web", t("Web 服务", "web service")],
   ];
   br();
   print(`${c.bold}${c.cyan}${t("检测到上次的安装痕迹 —— 接着装，不从头来", "Found a previous install — resuming instead of starting over")}${c.reset}`);
   br();
-  for (const [done, what, desc] of L) {
-    print(`  ${done ? `${c.green}✓${c.reset}` : `${c.dim}○${c.reset}`} ${c.bold}${what.padEnd(22)}${c.reset}${c.dim}${desc}${c.reset}`);
+  for (const [done, what, desc, stale] of L) {
+    const mark = done && stale ? `${c.yellow}↻${c.reset}` : done ? `${c.green}✓${c.reset}` : `${c.dim}○${c.reset}`;
+    const note = done && stale ? ` ${c.yellow}${t("(过期，会重做)", "(stale, will redo)")}${c.reset}` : "";
+    print(`  ${mark} ${c.bold}${what.padEnd(22)}${c.reset}${c.dim}${desc}${c.reset}${note}`);
   }
   br();
   hint(t(
@@ -840,8 +876,12 @@ async function stepPreferences(existing: Partial<Config>): Promise<{
   print(t("最后几个小问题，都有默认值，直接按 ENTER 就行。", "A few small questions. All have defaults — press ENTER to accept."));
   br();
 
-  const userName = await promptRequired(
+  // 续装时用现有值做默认（回车即保留）；.env.example 的占位符不算
+  const prevName = existing.USER_NAME && existing.USER_NAME !== "Your Name" ? existing.USER_NAME : undefined;
+  const userName = await prompt(
     `${kbd(t("你的称呼", "Your name"))} ${c.dim}${t("(大总管在回复里怎么叫你)", "(how the master will address you in replies)")}${c.reset}`,
+    prevName,
+    (v) => (v ? null : t("这项必填，再试一次", "This field is required — try again")),
   );
   const mcpName = await prompt(
     `${kbd(t("MCP 服务名", "MCP server name"))} ${c.dim}${t("(只能用英文字母/数字/-/_；不能用中文，claude mcp add 会拒绝)", "(letters/digits/-/_ only; no CJK — claude mcp add will reject it)")}${c.reset}`,
@@ -871,18 +911,17 @@ interface Config {
   MCP_NAME: string;
 }
 
-function buildEnvContent(cfg: Config): string {
-  return [
-    "# Claudestra 运行时配置 (由 bun run setup 生成)",
-    `DISCORD_BOT_TOKEN=${cfg.DISCORD_BOT_TOKEN}`,
-    `DISCORD_GUILD_ID=${cfg.DISCORD_GUILD_ID}`,
-    `ALLOWED_USER_IDS=${cfg.ALLOWED_USER_IDS}`,
-    `CONTROL_CHANNEL_ID=${cfg.CONTROL_CHANNEL_ID}`,
-    `BRIDGE_PORT=${cfg.BRIDGE_PORT}`,
-    `USER_NAME=${cfg.USER_NAME}`,
-    `MCP_NAME=${cfg.MCP_NAME}`,
-    "",
-  ].join("\n");
+/** 在现有 .env 上就地合并（手加的键、注释不丢；值没变的行逐字节保留）。见 lib/env-file.ts */
+function buildEnvContent(cfg: Config, existing: string | null): string {
+  return mergeEnvContent(existing, {
+    DISCORD_BOT_TOKEN: cfg.DISCORD_BOT_TOKEN,
+    DISCORD_GUILD_ID: cfg.DISCORD_GUILD_ID,
+    ALLOWED_USER_IDS: cfg.ALLOWED_USER_IDS,
+    CONTROL_CHANNEL_ID: cfg.CONTROL_CHANNEL_ID,
+    BRIDGE_PORT: cfg.BRIDGE_PORT,
+    USER_NAME: cfg.USER_NAME,
+    MCP_NAME: cfg.MCP_NAME,
+  }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
 function parseEnv(content: string): Partial<Config> {
@@ -945,19 +984,27 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   // ⚠ 原来这里见到 .env 已存在就问「要覆盖吗？」且默认**否**，选否直接 exit(1)——
   //   于是「装到一半断了重跑」一路回车反而把向导干掉，续装比头一次还难。
   //   现在默认是**更新**：前面每一项都拿现有值做过默认，回车即保留，覆盖不丢东西。
+  let writeEnv = true;
   if (await fileExists(ENV_PATH)) {
     hint(t(".env 已存在 —— 下面的值来自你这一轮的选择（没改的就是原值）",
            ".env already exists — the values below come from this run (unchanged ones are your existing values)"));
     if (!(await confirm(t("用这些值更新 .env？", "Update .env with these values?"), true))) {
+      // 答否只跳过写 .env：后面 MCP / hooks / daemon 照常装（以前在这里直接 return，
+      // 文案说「继续」、实际什么都没装，结尾还报「安装完成」）。cfg 换回磁盘上的值，
+      // 保证 MCP_NAME 等后续取值与 .env 一致
+      writeEnv = false;
+      cfg = { ...cfg, ...parseEnv(await readFile(ENV_PATH, "utf-8")) } as Config;
       hint(t("跳过写 .env，继续后面的步骤（现有配置不动）", "Skipping .env write — continuing with the remaining steps (existing config untouched)"));
-      return { deferred: false, failures, web: webResult };
     }
   }
-  await writeFile(ENV_PATH, buildEnvContent(cfg));
-  // 0600：里面是 Discord bot token —— 拿到它等于拿到这个 bot 的全部权限。
-  // 默认 umask 会写成 0644，同机其他用户可读。
-  await chmod(ENV_PATH, 0o600).catch(() => {});
-  ok(t(`写入 ${c.bold}.env${c.reset}`, `Wrote ${c.bold}.env${c.reset}`));
+  if (writeEnv) {
+    const prev = (await fileExists(ENV_PATH)) ? await readFile(ENV_PATH, "utf-8") : null;
+    await writeFile(ENV_PATH, buildEnvContent(cfg, prev));
+    // 0600：里面是 Discord bot token —— 拿到它等于拿到这个 bot 的全部权限。
+    // 默认 umask 会写成 0644，同机其他用户可读。
+    await chmod(ENV_PATH, 0o600).catch(() => {});
+    ok(t(`写入 ${c.bold}.env${c.reset}`, `Wrote ${c.bold}.env${c.reset}`));
+  }
 
   // 渲染 master/CLAUDE.md
   if (await fileExists(TEMPLATE_PATH)) {
@@ -1103,9 +1150,29 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
         ));
       }
       for (const w of r.warnings) warn(w);
+      // 如实告知：这条放行规则写在用户级 settings，对用户自己开的 CC 会话同样生效
+      if (r.allowedMcpTools?.added.length) {
+        hint(t(
+          `已在 ~/.claude/settings.json 的 permissions.allow 里加了: ${r.allowedMcpTools.added.join(", ")}` +
+            `（auto 模式的分类器会误拦 MCP 工具；它对你自己开的 Claude Code 会话同样生效，不想要可以手动删掉）`,
+          `Added to permissions.allow in ~/.claude/settings.json: ${r.allowedMcpTools.added.join(", ")}` +
+            ` (the auto-mode classifier blocks MCP tools by mistake; this applies to your own Claude Code sessions too — remove by hand if unwanted)`,
+        ));
+      }
+      // 装完探活不健康的算失败：只 warn 的话横幅照样「完成」、照样去收编（每条都会失败）
+      for (const h of r.daemonHealth ?? []) {
+        if (h.healthy) continue;
+        const tail = h.log?.slice(-2).join(" | ") || t("(.err 是空的)", "(.err is empty)");
+        failures.push(t(
+          `${h.name} 装上了但没响应${h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：${tail}`,
+          `${h.name} was installed but does not respond${h.repaired ? " (an automatic restart did not help)" : ""}. Log tail: ${tail}`,
+        ));
+      }
       // v2.24+ web 前端 daemon:装上了就把 URL 带到收尾提示里(别再让用户
-      // 自己开一个前台 npm run dev)
-      if (r.webDaemon?.installed) {
+      // 自己开一个前台 npm run dev)。装上 ≠ 在服务：没在监听就如实报原因
+      if (r.webDaemon?.installed && !r.webDaemon.serving) {
+        webResult = { installed: false, reason: r.webDaemon.error || t("web 服务没在监听", "the web service is not listening") };
+      } else if (r.webDaemon?.installed) {
         webResult = { installed: true, url: r.webDaemon.url };
         const kept = r.daemons.find((d) => d.label === "com.claudestra.web")?.keptExisting;
         ok(t(
@@ -1136,6 +1203,111 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
 }
 
 // ============================================================
+// Bypass 模式同意（必须在 daemon 装起来之前）
+// ============================================================
+
+/**
+ * Claudestra 的 agent 全部以 --dangerously-skip-permissions 启动。CC 第一次这样启动会弹
+ * 确认框（默认高亮「No, exit」），launcher / manager 不会替用户选——所以同意要在这里
+ * 由用户本人给出，写进 ~/.claude/settings.json 的 skipDangerousModePermissionPrompt。
+ * 不同意就不继续装：没有这项同意，master 和每个 agent 都会停在确认框上起不来。
+ */
+async function stepBypassConsent(): Promise<void> {
+  const { BYPASS_CONSENT_KEY, claudeUserSettingsPath, readBypassConsent } = await import("./lib/bypass-consent.js");
+  if (await readBypassConsent()) return; // 以前同意过（在 CC 里选过 Yes 或上次 setup），不再问
+  header(nextStep(), t("接受 Claude Code 的 Bypass Permissions 模式", "Accept Claude Code's Bypass Permissions mode"));
+  print(t("Claude Code 对这个模式的原始警告：", "Claude Code's own warning for this mode:"));
+  br();
+  print(`  ${c.yellow}WARNING: Claude Code running in Bypass Permissions mode${c.reset}`);
+  print(`  ${c.dim}In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.${c.reset}`);
+  print(`  ${c.dim}This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.${c.reset}`);
+  print(`  ${c.dim}By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.${c.reset}`);
+  print(`  ${c.dim}https://code.claude.com/docs/en/security${c.reset}`);
+  br();
+  print(t(
+    "Claudestra 的 master 和每个 agent 默认都以 bypassPermissions 运行——你在手机上没法逐条批准工具调用。它自带的命令黑名单只防手滑，不是安全边界：每个 agent 实际上等于一个以你身份运行、不受限的 shell。",
+    "Claudestra's master and every agent run with bypassPermissions by default — you cannot approve each tool call from your phone. Its command blocklist only prevents accidents; it is not a security boundary: every agent is effectively an unrestricted shell running as you.",
+  ));
+  hint(t(`同意后写入 ${claudeUserSettingsPath()} 的 ${BYPASS_CONSENT_KEY}: true（等同于在确认框里选 Yes, I accept）`,
+         `Accepting writes ${BYPASS_CONSENT_KEY}: true to ${claudeUserSettingsPath()} (same as choosing "Yes, I accept" in that dialog)`));
+  br();
+  if (!(await confirm(t("接受 bypass 模式？", "Accept bypass mode?"), true))) {
+    br();
+    fail(t("没有接受 bypass 模式，安装到此为止。", "Bypass mode not accepted — stopping the install here."));
+    print(t(
+      "原因：Claudestra 启动的每个 Claude Code 都会停在这个确认框上，自动化不会替你选，master 和 agent 都起不来。想好了随时重跑 bun run setup。",
+      "Why: every Claude Code that Claudestra starts would stop at this dialog, automation will not choose for you, so neither master nor any agent could start. Rerun `bun run setup` whenever you are ready.",
+    ));
+    process.exit(1);
+  }
+  const path = claudeUserSettingsPath();
+  try {
+    await mkdir(path.replace(/\/settings\.json$/, ""), { recursive: true });
+    const settings: Record<string, unknown> = await readClaudeSettings(path);
+    settings[BYPASS_CONSENT_KEY] = true;
+    await writeClaudeSettings(path, settings);
+    ok(t("已记录同意", "Consent recorded"));
+  } catch (e) {
+    // 解析失败时 readClaudeSettings 会抛（绝不当空对象覆写用户的 settings）
+    fail(t(`写 ${path} 失败：${(e as Error).message}`, `Failed to write ${path}: ${(e as Error).message}`));
+    print(t(`手动在里面加上 "${BYPASS_CONSENT_KEY}": true 后重跑 bun run setup。`,
+            `Add "${BYPASS_CONSENT_KEY}": true to it by hand, then rerun \`bun run setup\`.`));
+    process.exit(1);
+  }
+  br();
+}
+
+// ============================================================
+// Web 登录前置：本机 sshd（v2.24+）
+// ============================================================
+
+/**
+ * 网页用本机系统账号登录（后端拿账号密码 SSH 127.0.0.1:22）。macOS 默认关着「远程登录」，
+ * 关着就一律「密码错误」。这里探一次，没开就打开共享面板引导用户开，最多 3 轮。
+ * 返回失败说明（计入收尾横幅）；探测复用 doctor 的 checkWebLogin。
+ */
+async function stepWebLogin(): Promise<string[]> {
+  header(nextStep(), t("网页登录（本机远程登录）", "Web login (Remote Login on this Mac)"));
+  const { checkWebLogin } = await import("./lib/doctor.js");
+  const { userInfo } = await import("os");
+  const username = userInfo().username;
+  print(t(`网页登录用本机账号：登录名 ${c.bold}${c.yellow}${username}${c.reset}（不是全名，也不是 Apple ID），密码是开机密码。`,
+          `The web UI logs in with this Mac's account: username ${c.bold}${c.yellow}${username}${c.reset} (not your full name or Apple ID), password = your login password.`));
+  if (process.platform !== "darwin") {
+    // checkWebLogin 的探测用的是 macOS nc 的语法（-G），别的平台上 sshd 开着也会报失败
+    hint(t("非 macOS：请自行确认 sshd 在 127.0.0.1:22 上监听（例如 systemctl status ssh）。",
+           "Not macOS: make sure sshd is listening on 127.0.0.1:22 yourself (e.g. `systemctl status ssh`)."));
+    br();
+    return [];
+  }
+  for (let round = 0; round < 3; round++) {
+    const [r] = await checkWebLogin(REPO_ROOT);
+    if (!r) {
+      // checkWebLogin 只在 web/.env.local 存在时出结论：web 没配好，这一步无从谈起
+      hint(t("web 还没配置好，跳过登录检测。", "The web UI is not configured yet — skipping the login check."));
+      br();
+      return [];
+    }
+    if (r.status === "ok") {
+      ok(t("远程登录已开启（sshd 在听 22）", "Remote Login is on (sshd is listening on 22)"));
+      br();
+      return [];
+    }
+    warn(t("「远程登录」没开：网页登录会一律报「密码错误」。", "Remote Login is off: web login will always say \"wrong password\"."));
+    await run(["open", "x-apple.systempreferences:com.apple.Sharing-Settings.extension"]);
+    print(t(`已打开「系统设置 → 通用 → 共享」：打开 ${c.bold}远程登录${c.reset}，并确认「允许访问」里包含 ${c.bold}${username}${c.reset}。`,
+            `Opened System Settings → General → Sharing: turn on ${c.bold}Remote Login${c.reset} and make sure ${c.bold}${username}${c.reset} is allowed.`));
+    hint(t("命令行备选：sudo systemsetup -setremotelogin on（新版 macOS 可能要求终端有完全磁盘访问权限）",
+           "CLI alternative: sudo systemsetup -setremotelogin on (newer macOS may require Full Disk Access for the terminal)"));
+    await waitEnter(t("开好后按 ENTER 重新检测", "Press ENTER to check again"));
+    br();
+  }
+  br();
+  return [t("「远程登录」没开：网页登录会失败——系统设置 → 通用 → 共享 → 远程登录",
+            "Remote Login is off, so web login will fail — System Settings → General → Sharing → Remote Login")];
+}
+
+// ============================================================
 // 前端选择（v2.10+：Discord 成为选项而非必然,可只配 Web）
 // ============================================================
 
@@ -1153,9 +1325,14 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
   // (2026-09-22 owner:「最好是有 Claude Code 的人,一个安装命令下来,就可以用
   //  我这个 Web 端。Discord 端可以暂时先不用配置,或者做成可选项。一切以 Web 端优先。」)
   const hasWebEnv = await fileExists(`${REPO_ROOT}/web/.env.local`);
-  const def = existing.DISCORD_BOT_TOKEN
+  // 全新安装时 existing 来自 .env.example，里面的 "your-bot-token" 占位符不算已配 Discord
+  const hadDiscord = !!existing.DISCORD_BOT_TOKEN && !validateToken(existing.DISCORD_BOT_TOKEN);
+  const def = hadDiscord
     ? hasWebEnv ? "1,2" : "2"
     : "1";
+  if (hadDiscord && !hasWebEnv) {
+    hint(t("现在有 Web 端了（推荐）：输入 1,2 即可和 Discord 同时启用。", "There is a Web UI now (recommended): enter 1,2 to enable it alongside Discord."));
+  }
   while (true) {
     const raw = await prompt(
       `${kbd(t("启用哪些?", "Which ones?"))} ${c.dim}${t("(多选,逗号分隔,如 1,2)", "(multi-select, comma-separated, e.g. 1,2)")}${c.reset}`,
@@ -1167,8 +1344,10 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
       fail(t("至少选一个(输入 1、2 或 1,2)", "Pick at least one (enter 1, 2, or 1,2)"));
       continue;
     }
-    // 步骤总数定下来:基础 6 步(依赖/发现/前端/偏好/收尾/收编) + Discord 5 步 + Web 2 步(配置 + 手机访问)
-    TOTAL_STEPS = 6 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0);
+    // 步骤总数定下来:基础 6 步(依赖/发现/前端/偏好/收尾/收编) + Discord 5 步 + Web 3 步(配置 + 登录 + 手机访问)
+    // + bypass 同意 1 步(以前同意过就没有)。沿用现有 Discord 配置时 main 再减掉那 5 步
+    const { readBypassConsent } = await import("./lib/bypass-consent.js");
+    TOTAL_STEPS = 6 + (fronts.discord ? 5 : 0) + (fronts.web ? 3 : 0) + ((await readBypassConsent()) ? 0 : 1);
     if (!fronts.discord) {
       hint(t("跳过 Discord 的 5 个配置步骤(以后想加,重跑 bun run setup 即可)", "Skipping the 5 Discord steps (rerun `bun run setup` anytime to add it later)"));
     }
@@ -1285,111 +1464,140 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
 // 收编已有会话（v2.24+）
 // ============================================================
 
-/** ~/.claude/sessions/<pid>.json 里**进程还活着**的那些 sessionId */
-async function liveClaudeSessionIds(): Promise<Set<string>> {
-  const out = new Set<string>();
+/** manager 子命令的 JSON 结论（不是 JSON 就返回 null） */
+async function runManagerJson(args: string[]): Promise<Record<string, any> | null> {
+  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, ...args], { cwd: REPO_ROOT });
+  const lines = r.out.trim().split("\n").filter((l) => l.trim().startsWith("{"));
+  try { return lines.length ? JSON.parse(lines[lines.length - 1]) : null; } catch { return null; }
+}
+
+/** master tmux session 在不在；launcher 刚装上时要给它几秒建 session */
+async function waitMasterSession(timeoutMs: number): Promise<boolean> {
+  const { tmuxRawStrict, sessionTarget, MASTER_SESSION } = await import("./lib/tmux-helper.js");
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    try { await tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]); return true; } catch { /* 还没起来 */ }
+    if (Date.now() >= until) return false;
+    await Bun.sleep(1000);
+  }
+}
+
+async function bridgeReachable(port: string): Promise<boolean> {
   try {
-    const { readCcSessionEntries } = await import("./lib/cc-sessions.js");
-    for (const e of await readCcSessionEntries()) {
-      if (!e.sessionId || !e.pid) continue;
-      try { process.kill(e.pid, 0); out.add(e.sessionId); } catch { /* 进程没了 */ }
-    }
-  } catch { /* 读不到就当没有,不阻断安装 */ }
-  return out;
+    const r = await fetch(`http://127.0.0.1:${port}/stats`, { signal: AbortSignal.timeout(3000) });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * 把机器上已有的会话收编成 Claudestra agent（= 在我们自己的 tmux 里跑起来，
  * 于是手机上能直接对话，而不只是能看历史）。
  *
- * ⚠ **跑着的进程搬不进 tmux**。一个已经在别的终端里跑的 Claude Code，我们没有任何
- * 办法把它挪进 Claudestra 的 tmux session —— 进程的控制终端在它出生时就定了。能做的
- * 只有两种，这一步如实分流：
- *   - 那个会话**没在跑** → `resume`：在我们的 tmux 里把同一个 session 接着开，
- *     是真正的「接着聊」；
- *   - 还**在跑** → `resume --fork`：分叉出一份副本（新 session id）。原来那个不受
- *     影响，但从此是两条线。**不自动去 kill 用户的进程**，也不假装能接管它。
- *
- * 必须排在 stepFinalize 之后：resume 要经 bridge 建频道（纯 Web 模式下走 local
- * adapter 合成 local-* 地址，不需要 Discord），bridge 是那一步才装起来的。
+ * 进程搬不进 tmux（控制终端出生即定），所以对「在外面跑着且空闲」的会话默认走
+ * takeover：让原进程干净退出，再在我们的 tmux 里 resume **同一个** sessionId（不分叉）。
+ * - 正在跑回合的不动（接管会打断它），给出处理办法；
+ * - 没在跑的历史会话只报数量（网页侧栏里本来就能看、能收编）；
+ * - 前置条件（bypass 已同意、bridge 可达、master 在）任一不满足就整体跳过：
+ *   先关掉用户的会话、再发现这边起不来，是最坏的结果。
+ * 逐条执行，一条失败就停下剩余的并打印恢复命令。返回失败说明（计入收尾横幅）。
  */
-async function stepAdoptSessions(): Promise<void> {
+async function stepAdoptSessions(bridgePort: string): Promise<string[]> {
   header(nextStep(), t("把已有会话收编成 agent", "Adopt existing sessions as agents"));
 
-  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
-  let list: Array<{ sessionId: string; cwd: string; slug: string; age: string; runtime?: string }> = [];
-  try { list = JSON.parse(r.out)?.sessions ?? []; } catch { /* 下面按空处理 */ }
+  const { readBypassConsent } = await import("./lib/bypass-consent.js");
+  const blockers: string[] = [];
+  if (!(await readBypassConsent())) blockers.push(t("还没接受 bypass 模式", "bypass mode has not been accepted"));
+  if (!(await bridgeReachable(bridgePort))) blockers.push(t(`bridge 连不上（:${bridgePort}/stats 无响应）`, `bridge unreachable (:${bridgePort}/stats did not answer)`));
+  if (!(await waitMasterSession(20_000))) blockers.push(t("master tmux session 不在（launcher 没起来）", "the master tmux session is missing (launcher not up)"));
+  if (blockers.length) {
+    warn(t(`跳过收编：${blockers.join("；")}`, `Skipping adoption: ${blockers.join("; ")}`));
+    hint(t("修好后跑 claudestra doctor 复查，再用 bun src/manager.ts takeover 或网页侧栏收编。",
+           "Once fixed, check with `claudestra doctor`, then adopt via `bun src/manager.ts takeover` or the web sidebar."));
+    br();
+    return [];
+  }
 
-  // 已经纳管的不再列（registry 里有同 sessionId 的）
-  const taken = new Set<string>();
+  const [listing, sessions] = await Promise.all([
+    runManagerJson(["takeover"]),
+    runManagerJson(["sessions"]),
+  ]);
   const managed = new Set<string>();
   try {
     const { readRegistryAgents } = await import("./lib/registry.js");
-    for (const a of await readRegistryAgents()) {
-      taken.add(a.name.replace(/^agent-/, ""));
-      if (a.sessionId) managed.add(a.sessionId);
-    }
+    for (const a of await readRegistryAgents()) if (a.sessionId) managed.add(a.sessionId);
   } catch { /* 全新安装时 registry 还不存在 */ }
 
-  const live = await liveClaudeSessionIds();
-  const cands = list.filter((x) => x.sessionId && !managed.has(x.sessionId)).slice(0, 8);
-  if (cands.length === 0) {
-    hint(t("没有可收编的会话（新机器很正常）——装完在网页里新建 agent 即可。",
-           "No sessions to adopt (normal on a fresh machine) — create an agent in the web UI instead."));
+  const { planAdoption } = await import("./lib/takeover.js");
+  const { existsSync, realpathSync } = await import("fs");
+  const realpath = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+  let envMasterDir = "";
+  try { envMasterDir = parseDotEnv(await readFile(ENV_PATH, "utf-8")).MASTER_DIR || ""; } catch { /* 没有 .env */ }
+  const masterDirs = [process.env.MASTER_DIR, envMasterDir, `${REPO_ROOT}/master`]
+    .filter((d): d is string => !!d).map(realpath);
+  const plan = planAdoption(listing?.candidates ?? [], sessions?.sessions ?? [], managed,
+    { masterDirs, exists: existsSync, realpath });
+
+  if (plan.busy.length) {
+    print(t("不在空闲状态的会话（正在跑回合 / `!` 命令，或状态未知），这次不动（接管会打断它）：",
+            "Sessions that are not idle (running a turn or a `!` command, or status unknown) — left alone (taking over would interrupt them):"));
+    for (const b of plan.busy) print(`  ${c.dim}•${c.reset} ${c.bold}${b.cwd}${c.reset} ${c.dim}${b.sessionId}${c.reset}`);
+    hint(t("等它跑完，在网页侧栏收编，或跑: bun src/manager.ts takeover <sessionId>",
+           "Once it finishes, adopt it from the web sidebar, or run: bun src/manager.ts takeover <sessionId>"));
     br();
-    return;
+  }
+  if (plan.historyCount) {
+    hint(t(`另有 ${plan.historyCount} 个没在跑的历史会话：网页侧栏「未纳管会话」里能看、能一键收编。`,
+           `${plan.historyCount} more past sessions are not running: browse or adopt them from the web sidebar's unmanaged sessions.`));
+    br();
+  }
+  if (plan.ready.length === 0) {
+    hint(t("没有在外面跑着、可以直接接管的会话。", "No idle sessions running outside Claudestra to take over."));
+    br();
+    return [];
   }
 
   print(t(
-    "下面是这台机器上还没纳管的会话。收编 = 在 Claudestra 自己的 tmux 里把它跑起来，之后手机上就能**直接对话**（不收编也能看历史，只是不能说话）：",
-    "Sessions on this machine that Claudestra does not manage yet. Adopting one runs it inside Claudestra's own tmux, so you can **talk to it** from your phone (without adopting you can still read its history, just not chat):",
+    "下面这些 Claude Code 正在别的终端里跑着（空闲）。收编 = 关掉那边的进程，在 Claudestra 的 tmux 里接着开**同一个会话**（上下文不丢），之后手机上就能直接对话：",
+    "These Claude Code sessions are running (idle) in other terminals. Adopting closes that process and continues the **same session** inside Claudestra's tmux (no context lost), so you can talk to it from your phone:",
   ));
+  for (const x of plan.ready) print(`  ${c.dim}•${c.reset} ${c.bold}${x.cwd}${c.reset} ${c.dim}${x.sessionId}${c.reset}`);
   br();
-  cands.forEach((x, i) => {
-    const running = live.has(x.sessionId);
-    print(`  ${c.bold}${c.yellow}${i + 1}${c.reset}  ${c.bold}${x.slug || x.cwd}${c.reset} ${c.dim}${x.cwd}${c.reset}`);
-    print(`     ${c.dim}${x.age}${x.runtime && x.runtime !== "claude-code" ? ` · ${x.runtime}` : ""}${c.reset}` +
-      (running ? ` ${c.yellow}${t("● 还在跑 —— 收编会分叉出一份副本（原来那个不动）", "● still running — adopting will fork a copy (the original is left alone)")}${c.reset}` : ""));
-  });
-  br();
-  hint(t(
-    "跑着的进程没法搬进 tmux（控制终端在它出生时就定了）——所以「还在跑」的只能分叉。想真正接着聊，先在原终端里退出它，装完再从网页侧栏收编。",
-    "A running process cannot be moved into tmux (its controlling terminal is fixed at birth), so a live one can only be forked. To truly continue it, quit it in its own terminal first and adopt it later from the web sidebar.",
-  ));
-  br();
-
-  const raw = await prompt(
-    `${kbd(t("收编哪些?", "Adopt which?"))} ${c.dim}${t("(序号,逗号分隔;直接回车=都不收编,以后随时在网页侧栏点)", "(numbers, comma-separated; Enter = none, you can always do it later from the web sidebar)")}${c.reset}`,
-    "",
-  );
-  const picks = [...new Set(raw.split(/[,，\s]+/).filter(Boolean).map((n) => Number(n) - 1))]
-    .filter((i) => Number.isInteger(i) && i >= 0 && i < cands.length);
-  if (picks.length === 0) {
-    hint(t("跳过。网页侧栏的「未纳管会话」里随时可以收编。", "Skipped. You can adopt from the web sidebar's unmanaged sessions section anytime."));
+  if (!(await confirm(t(`关掉这 ${plan.ready.length} 个窗口里的 claude，在网页里接着开？`, `Close claude in these ${plan.ready.length} windows and continue them in the web UI?`), true))) {
+    hint(t("跳过。以后在网页侧栏或 bun src/manager.ts takeover 收编。", "Skipped. Adopt later from the web sidebar or with `bun src/manager.ts takeover`."));
     br();
-    return;
+    return [];
   }
 
-  for (const i of picks) {
-    const x = cands[i];
-    const name = agentNameFromDir(x.cwd, taken);
-    taken.add(name);
-    const fork = live.has(x.sessionId);
-    const args = ["bun", `${REPO_ROOT}/src/manager.ts`, "resume", name, x.sessionId, x.cwd];
-    if (fork) args.push("--fork");
-    if (x.runtime && x.runtime !== "claude-code") args.push("--runtime", x.runtime);
-    write(`${c.dim}▶${c.reset} ${t("收编", "Adopting")} ${c.bold}${name}${c.reset}${fork ? ` ${c.dim}(fork)${c.reset}` : ""}… `);
-    const res = await run(args, { cwd: REPO_ROOT });
-    let okFlag = res.ok;
-    let err = "";
-    try { const j = JSON.parse(res.out); okFlag = okFlag && j?.ok !== false; err = j?.error || ""; } catch { /* 非 JSON */ }
-    print(okFlag ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`);
-    if (!okFlag) warn(err || res.err.trim().split("\n").slice(-1)[0] || t("收编失败", "adoption failed"));
+  let done = 0;
+  for (let i = 0; i < plan.ready.length; i++) {
+    const x = plan.ready[i];
+    write(`${c.dim}▶${c.reset} ${t("收编", "Adopting")} ${c.bold}${x.cwd}${c.reset} ${c.dim}${t("(最长约 2 分钟)", "(up to ~2 min)")}${c.reset}… `);
+    const j = await runManagerJson(["takeover", x.sessionId]);
+    const r = j?.results?.[0];
+    if (j?.ok && r?.ok) {
+      done++;
+      print(`${c.green}✓${c.reset} ${c.dim}${r.name ?? ""}${c.reset}`);
+      continue;
+    }
+    print(`${c.red}✗${c.reset}`);
+    const err = r?.error || j?.error || t("没有拿到结果", "no result");
+    warn(err);
+    if (r?.recover) hint(t(`原会话已关闭。手动接回: ${c.cyan}${r.recover}${c.reset}`, `The original was closed. Reopen it with: ${c.cyan}${r.recover}${c.reset}`));
+    const left = plan.ready.length - i - 1;
+    if (left > 0) hint(t(`剩下 ${left} 个没动。`, `The remaining ${left} were left alone.`));
+    br();
+    return [t(
+      `收编 ${x.cwd} 失败：${err}${r?.recover ? `（手动接回：${r.recover}）` : ""}`,
+      `Adopting ${x.cwd} failed: ${err}${r?.recover ? ` (reopen with: ${r.recover})` : ""}`,
+    )];
   }
   br();
-  ok(t("收编完的会话会以 agent 的身份出现在网页侧栏,可以直接对话。",
-       "Adopted sessions now appear as agents in the web sidebar and are ready to chat."));
+  ok(t(`收编了 ${done} 个会话，它们以 agent 的身份出现在网页侧栏，可以直接对话。`,
+       `Adopted ${done} session(s); they appear as agents in the web sidebar, ready to chat.`));
   br();
+  return [];
 }
 
 // ============================================================
@@ -1625,6 +1833,7 @@ async function main() {
     webEnvLocal: await fileExists(`${REPO_ROOT}/web/.env.local`),
     webNextBin: await fileExists(`${REPO_ROOT}/web/node_modules/.bin/next`),
     webBuildId: await fileExists(`${REPO_ROOT}/web/.next/BUILD_ID`),
+    ...(await webFreshness()),
     bridgePlist: await fileExists(`${process.env.HOME}/Library/LaunchAgents/com.claudestra.bridge.plist`),
     webPlist: await fileExists(`${process.env.HOME}/Library/LaunchAgents/com.claudestra.web.plist`),
   });
@@ -1633,6 +1842,9 @@ async function main() {
   await stepCheckDeps();
   await stepDiscover();
   const fronts = await stepPickFrontends(existing);
+  // daemon 一装上 launcher 就会以 bypass 模式拉起 master，所以同意必须先于 stepFinalize；
+  // 放在最前（任何有副作用的步骤之前）：不同意时不留下装了一半的 web / token
+  await stepBypassConsent();
 
   // Discord 未选时留空 → bridge 按 WEB_ONLY 模式启动(config.ts:
   // WEB_ONLY = !DISCORD_BOT_TOKEN);控制频道用 web-only 约定的本地常量。
@@ -1640,7 +1852,20 @@ async function main() {
   let guildId = "";
   let userId = "";
   let controlChannelId = "local-master-control";
-  if (fronts.discord) {
+  // 续装：Discord 四项齐全就整段沿用——token 只在 Reset 时显示一次，重输等于逼人
+  // 去重置 token，而那会让正在跑的 bridge 立刻失效
+  const reuseDiscord = fronts.discord && hasDiscordConfig(existing) && await confirm(t(
+    `沿用现有 Discord 配置（bot token …${existing.DISCORD_BOT_TOKEN!.slice(-4)}，服务器 ${existing.DISCORD_GUILD_ID}）？`,
+    `Keep the existing Discord config (bot token …${existing.DISCORD_BOT_TOKEN!.slice(-4)}, server ${existing.DISCORD_GUILD_ID})?`,
+  ), true);
+  if (reuseDiscord) {
+    token = existing.DISCORD_BOT_TOKEN!;
+    guildId = existing.DISCORD_GUILD_ID!;
+    userId = existing.ALLOWED_USER_IDS!;
+    controlChannelId = existing.CONTROL_CHANNEL_ID!;
+    if (TOTAL_STEPS) TOTAL_STEPS -= 5;
+    ok(t("沿用现有 Discord 配置，跳过 5 个配置步骤", "Keeping the existing Discord config — skipping the 5 setup steps"));
+  } else if (fronts.discord) {
     const appId = await stepCreateApp();
     token = await stepGetToken(appId);
     await stepIntents(appId);
@@ -1649,8 +1874,10 @@ async function main() {
   }
   const { userName, mcpName, bridgePort } = await stepPreferences(existing);
   let phoneUrl: string | undefined;
+  const laterFailures: string[] = [];
   if (fronts.web) {
     await stepWebSetup(bridgePort);
+    laterFailures.push(...(await stepWebLogin()));
     phoneUrl = (await stepRemoteAccess(await readWebPort())).url;
   }
 
@@ -1666,7 +1893,13 @@ async function main() {
 
   const fin = await stepFinalize(cfg);
   // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后
-  if (fin.failures.length === 0 && !fin.deferred) await stepAdoptSessions();
+  if (fin.failures.length === 0 && !fin.deferred) {
+    fin.failures.push(...(await stepAdoptSessions(bridgePort)));
+  } else if (!fin.deferred) {
+    hint(t("有组件没装好，先跳过收编（修好后用 bun src/manager.ts takeover 或网页侧栏收编）。",
+           "Some components did not install — skipping adoption (adopt later with `bun src/manager.ts takeover` or the web sidebar)."));
+  }
+  fin.failures.push(...laterFailures);
   stepDone(cfg, fronts, fin, phoneUrl);
 
   process.exit(0);

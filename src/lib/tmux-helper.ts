@@ -465,6 +465,9 @@ export async function idleVerdict(target: string): Promise<IdleVerdict> {
  * 很久，稳定。统一到 launch 流程里消除 create / resume 路径的滞后。
  */
 export function isClaudeReady(pane: string): boolean {
+  // bypass 首启确认框贴在 pane 底部时，`❯ No, exit` + 警告正文里的 "Bypass Permissions"
+  // 恰好同时满足下面两个信号——不排除就会把卡在确认框上的会话报成就绪
+  if (detectBypassConsentPrompt(pane)) return false;
   const lines = pane.split("\n");
   // v2.0.14+: bypass banner 检查从 `pane.includes(...)` 收紧到 last 10 行，避免
   // 旧 claude session 残留在 scrollback 的 banner 字符串造成假阳性。具体 bug：
@@ -574,7 +577,29 @@ export function isAutoConfirmableModal(
   // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。它由 trustPromptMoves
   // 专门处理（先 Down 到 Yes 再 Enter），这里绝不能当普通弹窗自动 Enter
   if (trustPromptMoves(pane) !== null) return false;
+  // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
+  // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
+  if (detectBypassConsentPrompt(pane)) return false;
   return true;
+}
+
+/**
+ * Claude Code 首次以 --dangerously-skip-permissions 启动时的确认框：
+ *   WARNING: Claude Code running in Bypass Permissions mode …
+ *   ❯ No, exit
+ *     Yes, I accept
+ *   Enter to confirm · Esc to cancel
+ * 默认高亮 No, exit，几何上又是普通选择框，所以必须显式识别、排除出自动确认。
+ * 三个文案同时出现在 pane 底部才算，避免正文里提到它时误报。
+ */
+export function detectBypassConsentPrompt(pane: string): boolean {
+  const joined = trimTrailingBlank(pane.split("\n")).slice(-25).join("\n");
+  return (
+    /Bypass Permissions mode/i.test(joined) &&
+    // 有的 CC 版本给选项编号（`2. Yes, I accept`）；漏认会退回自动 Enter，所以两种都认
+    /^\s*(?:❯\s*)?(?:\d+\.\s*)?Yes, I accept\s*$/im.test(joined) &&
+    /Enter to confirm/i.test(joined)
+  );
 }
 
 /**

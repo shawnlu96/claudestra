@@ -145,19 +145,34 @@ ok "$(L "系统" "OS"): $OS"
 # 前置：包管理器
 # ────────────────────────────────────────────
 
+# 注意：在 `if ! install_homebrew` 里调用时 set -e 不生效，每一步失败都要显式 return 1
 install_homebrew() {
   say "$(L "安装 Homebrew" "Installing Homebrew")"
+  # NONINTERACTIVE 下 brew 安装器只用 `sudo -n`（不问密码），凭据没缓存就会报
+  # 「需要是管理员」——哪怕你就是管理员。所以先在这里要一次密码把凭据缓存上。
+  printf "%s\n" "$(L "Homebrew 需要管理员密码（输入时不显示字符）：" "Homebrew needs your admin password (typing is hidden):")"
   if [ -e /dev/tty ]; then
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+    sudo -v </dev/tty || return 1
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty || return 1
   else
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    sudo -v || return 1
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || return 1
   fi
 
   # 把 brew 加到 PATH（Apple Silicon 和 Intel 路径不同）
+  local brew_bin=""
   if [ -x /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
+    brew_bin=/opt/homebrew/bin/brew
   elif [ -x /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
+    brew_bin=/usr/local/bin/brew
+  fi
+  [ -n "$brew_bin" ] || return 1
+  eval "$("$brew_bin" shellenv)"
+  # 只在当前进程 eval 的话，新开的终端找不到 brew / tmux / node。和 Homebrew 官方
+  # 「Next steps」一样写进 ~/.zprofile，并告诉用户改了什么
+  if ! grep -qs "brew shellenv" "$HOME/.zprofile"; then
+    printf '\neval "$(%s shellenv)"\n' "$brew_bin" >> "$HOME/.zprofile"
+    ok "$(L "已在 ~/.zprofile 末尾加上 brew shellenv（新开的终端才找得到 brew）" "Appended brew shellenv to ~/.zprofile (so new terminals can find brew)")"
   fi
 }
 
@@ -165,7 +180,9 @@ if [ "$PLATFORM" = "darwin" ]; then
   if ! command -v brew >/dev/null 2>&1; then
     warn "$(L "检测不到 Homebrew" "Homebrew not found")"
     if confirm "$(L "要我帮你装 Homebrew 吗？" "Install Homebrew for you?")" y; then
-      install_homebrew
+      if ! install_homebrew; then
+        die "$(L "Homebrew 没装上：上面是它的原始报错。手动装好 https://brew.sh 后重跑本脚本" "Homebrew did not install — its own error is above. Install it from https://brew.sh, then re-run this script")"
+      fi
     else
       die "$(L "没有 Homebrew 就没法自动装依赖。去 https://brew.sh 装完再重跑本脚本。" "Without Homebrew this script cannot install dependencies. Install it from https://brew.sh, then re-run.")"
     fi
@@ -334,7 +351,9 @@ ok "$(L "所有依赖就绪" "All dependencies ready") ✨"
 # ────────────────────────────────────────────
 
 printf "\n"
+EXISTING_CHECKOUT=0
 if [ -d "$CLAUDESTRA_DIR/.git" ]; then
+  EXISTING_CHECKOUT=1
   say "$(L "检测到已有仓库" "Existing checkout found"): $CLAUDESTRA_DIR"
   (cd "$CLAUDESTRA_DIR" && git fetch --tags --quiet origin 2>/dev/null) || true
 else
@@ -353,23 +372,56 @@ if [ "$CLAUDESTRA_REF_EXPLICIT" = "1" ]; then
   # 显式指定了 ref：装的就是它，不再切 release tag。
   # origin/<branch> 优先（分支要的是最新提交），失败再当成 tag / commit 试一次。
   if git checkout --quiet "origin/$CLAUDESTRA_BRANCH" 2>/dev/null \
-     || git checkout --quiet "$CLAUDESTRA_BRANCH" 2>/dev/null; then
+     || CO_ERR=$(git checkout --quiet "$CLAUDESTRA_BRANCH" 2>&1); then
     ok "$(L "版本" "Version"): $CLAUDESTRA_BRANCH ($(git rev-parse --short HEAD))"
   else
-    die "$(L "找不到 ${CLAUDESTRA_BRANCH}（分支或标签都没匹配上）" "Cannot find ${CLAUDESTRA_BRANCH} (matched neither a branch nor a tag)")"
+    # 打出 git 的原话：可能是本地改动挡住了 checkout，而不是 ref 不存在
+    printf "%s\n" "$CO_ERR" >&2
+    git status --short >&2 || true
+    die "$(L "切不到 ${CLAUDESTRA_BRANCH}（上面是 git 的原始报错）" "Could not check out ${CLAUDESTRA_BRANCH} (git's own error is above)")"
   fi
 else
   # 默认：切到最新 release 版本（如果有的话）
   GITHUB_API_REPO=$(echo "$CLAUDESTRA_REPO" | sed -n 's|.*github\.com[:/]\(.*\)\.git$|\1|p')
   if [ -n "$GITHUB_API_REPO" ]; then
     LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_API_REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*"\|"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
-    if [ -n "$LATEST_TAG" ]; then
-      git checkout "$LATEST_TAG" --quiet 2>/dev/null || true
+    # 只对已有检出生效：全新克隆的 HEAD 是默认分支，天然比 tag 新，照旧切 release
+    if [ -n "$LATEST_TAG" ] && [ "$EXISTING_CHECKOUT" = "1" ] \
+       && git merge-base --is-ancestor "$LATEST_TAG" HEAD 2>/dev/null \
+       && [ "$(git rev-parse HEAD)" != "$(git rev-parse "$LATEST_TAG^{commit}" 2>/dev/null)" ]; then
+      # 现在的检出已经比最新 release 新（以前用 CLAUDESTRA_BRANCH=main 装过）：不往回降级
+      ok "$(L "版本" "Version"): $(git rev-parse --short HEAD) ($(L "已比 $LATEST_TAG 新，保持不动" "newer than $LATEST_TAG — left as is"))"
+    elif [ -n "$LATEST_TAG" ]; then
+      if ! CO_ERR=$(git checkout "$LATEST_TAG" --quiet 2>&1); then
+        # 以前是 `|| true` 然后照样报「版本: $LATEST_TAG」——装的其实是别的版本
+        printf "%s\n" "$CO_ERR" >&2
+        git status --short >&2 || true
+        die "$(L "切不到 $LATEST_TAG（上面是 git 的原始报错；常见原因是本地有改动）" "Could not check out $LATEST_TAG (git's own error is above; usually local changes)")"
+      fi
       ok "$(L "版本" "Version"): $LATEST_TAG"
       hint_newer_main "$LATEST_TAG"
     else
       warn "$(L "没有找到 release 版本，使用默认分支最新代码" "No release tag found — using the default branch")"
     fi
+  fi
+fi
+
+# 向导契约：本脚本下面承诺的是 Web 优先 + 自动收编的向导（SETUP_CONTRACT >= 2，见
+# src/setup.ts）。最新 release 早于它的话，装出来的是旧向导（默认 Discord、没有 web
+# 托管和收编），和这里的承诺对不上——问一句，默认改装 main。显式指定了 ref 的尊重用户选择。
+# 取出数字按数值比（正则 [2-9] 到 10 就失配了）；取不到按 0 算
+SETUP_CONTRACT_VER=$(sed -n 's/.*SETUP_CONTRACT = \([0-9][0-9]*\).*/\1/p' src/setup.ts 2>/dev/null | head -1 || true)
+if [ "$CLAUDESTRA_REF_EXPLICIT" != "1" ] && [ "${SETUP_CONTRACT_VER:-0}" -lt 2 ]; then
+  warn "$(L "这个版本的配置向导早于 Web 优先向导（没有 web 服务托管、没有会话收编）" "This version's setup wizard predates the Web-first wizard (no web service, no session adoption)")"
+  if confirm "$(L "改装 main 分支的最新代码吗？" "Install the latest main branch instead?")" y; then
+    if CO_ERR=$(git checkout --quiet origin/main 2>&1); then
+      ok "$(L "版本" "Version"): main ($(git rev-parse --short HEAD))"
+    else
+      printf "%s\n" "$CO_ERR" >&2
+      die "$(L "切不到 origin/main（上面是 git 的原始报错）" "Could not check out origin/main (git's own error is above)")"
+    fi
+  else
+    warn "$(L "保持当前版本：下面的向导流程会和本脚本的描述不一致" "Keeping this version: the wizard below will not match what this script describes")"
   fi
 fi
 

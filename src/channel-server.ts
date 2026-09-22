@@ -15,6 +15,7 @@ import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 import { decideAfterReplaced } from "./lib/link-policy.js";
+import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -29,16 +30,19 @@ import {
 // 配置
 // ============================================================
 
-const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || "";
 const BRIDGE_URL = resolveBridgeUrl();
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID || "";
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 const CLAUDESTRA_HOME =
   process.env.CLAUDESTRA_HOME || `${import.meta.dir}/..`;
 
-if (!CHANNEL_ID) {
-  console.error("❌ 请设置 DISCORD_CHANNEL_ID 环境变量");
-  process.exit(1);
+// 没有 DISCORD_CHANNEL_ID = 用户自己开的会话（用户级 MCP 注册也会拉起我们）。
+// 不 exit：退出会在用户的 /mcp 里留一条 ✘ failed。改为 0 工具空闲（见 lib/channel-mode.ts）
+const MODE = channelServerMode(process.env);
+const INERT = MODE === "inert";
+if (INERT) {
+  console.error("ℹ 没有 DISCORD_CHANNEL_ID：不是 Claudestra 启动的会话，以 0 工具空闲模式运行（不连 bridge）");
 }
 
 // ============================================================
@@ -340,13 +344,8 @@ function doSend(
 const mcp = new Server(
   { name: MCP_NAME, version: "1.0.0" },
   {
-    capabilities: {
-      tools: {},
-      experimental: {
-        "claude/channel": {},
-      },
-    },
-    instructions: `Claudestra channel bridge——用户通过 Discord 或 Web 客户端远程与你对话（多在手机上）。
+    capabilities: mcpCapabilities(MODE),
+    instructions: INERT ? undefined : `Claudestra channel bridge——用户通过 Discord 或 Web 客户端远程与你对话（多在手机上）。
 
 Reply rules（通用，不分来源）:
 - Use the "reply" tool with chat_id from the <channel> tag.
@@ -416,7 +415,7 @@ function handleInboundMessage(
 }
 
 // 列出可用工具
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+mcp.setRequestHandler(ListToolsRequestSchema, async () => INERT ? { tools: [] } : ({
   tools: [
     {
       name: "reply",
@@ -641,6 +640,9 @@ Good for: a second opinion from a different model family, cross-review of a desi
 // 处理工具调用
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  if (INERT) {
+    return { content: [{ type: "text", text: "这个会话不是 Claudestra 启动的，没有频道可用" }], isError: true };
+  }
 
   switch (name) {
     case "reply": {
@@ -787,6 +789,7 @@ async function main() {
   // 但永远等不到握手，也就永远不会碰 bridge。
   mcp.oninitialized = () => {
     mcpInitialized = true;
+    if (!shouldConnectBridge(MODE)) return; // inert：握手完成就空闲，等 onclose
     connectBridge().catch((err) => {
       // 连不上不退出：电脑重启后 launchd 同时拉 bridge 和 launcher，agent 恢复时
       // bridge 常常还没就绪（Discord login 要几秒）。交给 onclose 的指数退避重连
@@ -809,7 +812,7 @@ async function main() {
   // 兜底：万一 SDK 没回调 oninitialized（版本差异 / 客户端跳过通知），30s 后
   // 仍未握手就照旧注册。宁可退回老行为，也不能让 agent 完全连不上 bridge。
   setTimeout(() => {
-    if (!mcpInitialized && !mcpClosed && !registered) {
+    if (shouldConnectBridge(MODE) && !mcpInitialized && !mcpClosed && !registered) {
       console.error("⏱ 30s 未收到 MCP initialized，按兼容路径直接注册");
       connectBridge().catch(() => {});
     }

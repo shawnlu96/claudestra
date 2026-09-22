@@ -479,7 +479,7 @@ async function checkWorktreeClean(repoRoot: string): Promise<Check[]> {
  * ⚠ 探法用 `nc -z` 而不是 `lsof -iTCP:22`：sshd 的监听套接字属 root，普通用户的
  * lsof 看不见它，会得到「没人监听」的假阴性（本机实测）。
  */
-async function checkWebLogin(repoRoot: string): Promise<Check[]> {
+export async function checkWebLogin(repoRoot: string): Promise<Check[]> {
   if (!existsSync(`${repoRoot}/web/.env.local`)) return []; // 没配 web 的实例不出这条
   const r = await sh(["nc", "-z", "-G", "2", "127.0.0.1", "22"]);
   return [r.ok

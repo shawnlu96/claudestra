@@ -7,12 +7,14 @@
  * 用户正在用的进程。
  */
 import { describe, test, expect } from "bun:test";
-import { classifyRunning, mayTakeOver, paneIdOf, takeoverCandidates, type RunningCc } from "../src/lib/takeover.js";
+import { ancestorPids, classifyRunning, mayTakeOver, paneIdOf, planAdoption, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type RunningCc } from "../src/lib/takeover.js";
+import { bypassConsentGiven, claudeUserSettingsPath } from "../src/lib/bypass-consent.js";
+import { parseCcSessionEntry } from "../src/lib/cc-sessions.js";
 
 const ours = new Set(["%994", "%830"]);
 const managed = new Set(["sid-managed"]);
 const mk = (o: Partial<RunningCc>): RunningCc =>
-  ({ pid: 100, sessionId: "sid-x", cwd: "/Users/x/proj", ...o });
+  ({ pid: 100, sessionId: "sid-x", cwd: "/Users/x/proj", kind: "interactive", status: "idle", ...o });
 
 describe("paneIdOf", () => {
   test("从 session:window.pane 里取 pane id", () => {
@@ -47,8 +49,9 @@ describe("classifyRunning", () => {
     expect(classifyRunning(mk({ status: "busy" }), ours, managed)).toBe("busy");
   });
 
-  test("status=shell（退回 shell 了）不算 busy", () => {
-    expect(classifyRunning(mk({ status: "shell" }), ours, managed)).toBe("ready");
+  test("status=shell（正在跑 `!` 命令）/ 缺 status（老版本）→ 同样当 busy，不敢打断", () => {
+    expect(classifyRunning(mk({ status: "shell" }), ours, managed)).toBe("busy");
+    expect(classifyRunning(mk({ status: undefined }), ours, managed)).toBe("busy");
   });
 });
 
@@ -75,6 +78,18 @@ describe("takeoverCandidates", () => {
   });
 });
 
+describe("ancestorPids —— 不能把正在执行接管的自己的祖先 SIGTERM 掉", () => {
+  const tree: Record<number, number> = { 500: 400, 400: 300, 300: 1 };
+  const ppidOf = (p: number) => tree[p] ?? null;
+  test("沿 ppid 链一直走到 launchd（1）为止，不含自己", () => {
+    expect([...ancestorPids(500, ppidOf)]).toEqual([400, 300]);
+  });
+  test("ps 查不到 / 环 → 停下，不死循环", () => {
+    expect(ancestorPids(999, ppidOf).size).toBe(0);
+    expect([...ancestorPids(7, (p) => (p === 7 ? 8 : 7))]).toEqual([8, 7]);
+  });
+});
+
 describe("mayTakeOver", () => {
   test("busy 默认不许动 —— 会打断人家正在跑的回合", () => {
     const c = { ...mk({ status: "busy" }), verdict: "busy" as const };
@@ -86,5 +101,112 @@ describe("mayTakeOver", () => {
   });
   test("ready 一律放行", () => {
     expect(mayTakeOver({ ...mk({}), verdict: "ready" as const }, false).ok).toBe(true);
+  });
+});
+
+describe("从登记文件到判决（端到端：解析不能丢 status / kind）", () => {
+  // 曾经的缺口：parseCcSessionEntry 丢了 status，磁盘上 busy 的会话被判成 ready
+  const raw = (o: Record<string, unknown>) =>
+    JSON.stringify({ pid: 72201, sessionId: "sid-real", cwd: "/Users/x/proj", kind: "interactive", ...o });
+
+  test("磁盘上 status=busy → busy，不带 --force 不动", () => {
+    const e = parseCcSessionEntry(raw({ status: "busy" }))!;
+    const [c] = takeoverCandidates([e], ours, managed);
+    expect(c.verdict).toBe("busy");
+    expect(mayTakeOver(c, false).ok).toBe(false);
+  });
+
+  test("非 interactive（bg job / sdk）或缺 kind → 不是候选", () => {
+    expect(takeoverCandidates([parseCcSessionEntry(raw({ kind: "bg" }))!], ours, managed)).toHaveLength(0);
+    expect(takeoverCandidates([parseCcSessionEntry(raw({ kind: undefined }))!], ours, managed)).toHaveLength(0);
+  });
+});
+
+describe("resumeOutcome —— 原进程已被关掉，resume 的成败必须如实", () => {
+  test("cmdResume 成功那一行", () => {
+    expect(resumeOutcome(['{"ok":true,"agent":"agent-proj","ready":true}'])).toEqual({ ok: true, agent: "agent-proj" });
+  });
+  test("cmdResume 失败 → ok:false 带原因", () => {
+    const r = resumeOutcome(['{"ok":false,"error":"创建 Discord 频道失败: ECONNREFUSED"}']);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("ECONNREFUSED");
+  });
+  test("没有任何 JSON 结论（抛异常 / 中途退出）→ 失败，绝不当成功", () => {
+    expect(resumeOutcome([]).ok).toBe(false);
+    expect(resumeOutcome(["some log line"]).ok).toBe(false);
+  });
+  test("以最后一条结论为准", () => {
+    expect(resumeOutcome(['{"ok":true}', '{"ok":false,"error":"x"}']).ok).toBe(false);
+  });
+});
+
+describe("preflightProblems —— SIGTERM 前的全局前置条件", () => {
+  const good = { bypassAccepted: true, masterSession: true, bridgeReachable: true };
+  test("全部满足 → 可以动手", () => {
+    expect(preflightProblems(good)).toEqual([]);
+  });
+  test("任何一项不满足都列出来（调用方据此一个进程都不动）", () => {
+    expect(preflightProblems({ ...good, bypassAccepted: false })[0]).toContain("bypass");
+    expect(preflightProblems({ ...good, masterSession: false })[0]).toContain("master");
+    expect(preflightProblems({ ...good, bridgeReachable: false })[0]).toContain("bridge");
+    expect(preflightProblems({ bypassAccepted: false, masterSession: false, bridgeReachable: false })).toHaveLength(3);
+  });
+});
+
+describe("bypass 同意记录", () => {
+  test("只认用户级 settings 里显式的 true", () => {
+    expect(bypassConsentGiven({ skipDangerousModePermissionPrompt: true })).toBe(true);
+    expect(bypassConsentGiven({ skipDangerousModePermissionPrompt: "true" })).toBe(false);
+    expect(bypassConsentGiven({})).toBe(false);
+    expect(bypassConsentGiven(null)).toBe(false);
+  });
+  test("settings 路径尊重 CLAUDE_CONFIG_DIR", () => {
+    expect(claudeUserSettingsPath({ HOME: "/h" })).toBe("/h/.claude/settings.json");
+    expect(claudeUserSettingsPath({ HOME: "/h", CLAUDE_CONFIG_DIR: "/cfg" })).toBe("/cfg/settings.json");
+  });
+});
+
+describe("planAdoption —— setup 收编分类", () => {
+  const env = {
+    masterDirs: ["/Users/x/.claude-orchestrator/master"],
+    exists: (p: string) => !p.includes("gone"),
+    realpath: (p: string) => p.replace("/link-master", "/.claude-orchestrator/master"),
+  };
+  const run = (sessionId: string, cwd: string, verdict: "ready" | "busy" = "ready") => ({ sessionId, cwd, verdict });
+
+  test("空闲的进 ready、跑回合的进 busy", () => {
+    const p = planAdoption([run("a", "/Users/x/p1"), run("b", "/Users/x/p2", "busy")], [], new Set(), env);
+    expect(p.ready.map((r) => r.sessionId)).toEqual(["a"]);
+    expect(p.busy.map((r) => r.sessionId)).toEqual(["b"]);
+  });
+
+  test("master 自己（含软链路径）、临时目录、已删除目录、已纳管的都不收", () => {
+    const p = planAdoption([
+      run("m", "/Users/x/.claude-orchestrator/master"),
+      run("m2", "/Users/x/link-master"),
+      run("t", "/private/tmp/claude-501/scratch"),
+      run("g", "/Users/x/gone"),
+      run("k", "/Users/x/p1"),
+    ], [], new Set(["k"]), env);
+    expect(p.ready).toHaveLength(0);
+  });
+
+  test("历史会话只数数量：codex、正在跑的、已纳管的、临时目录不计", () => {
+    const p = planAdoption([run("live", "/Users/x/p1")], [
+      { sessionId: "h1", cwd: "/Users/x/p1" },
+      { sessionId: "h2", cwd: "/Users/x/p2", runtime: "pi" },
+      { sessionId: "c", cwd: "/Users/x/p3", runtime: "codex" },
+      { sessionId: "live", cwd: "/Users/x/p1" },
+      { sessionId: "k", cwd: "/Users/x/p1" },
+      { sessionId: "t", cwd: "/tmp/probe" },
+    ], new Set(["k"]), env);
+    expect(p.historyCount).toBe(2);
+  });
+});
+
+describe("recoverCommand", () => {
+  test("带空格 / 单引号的目录也能原样粘贴", () => {
+    expect(recoverCommand("/Users/x/my proj", "sid")).toBe("cd '/Users/x/my proj' && claude --resume sid");
+    expect(recoverCommand("/Users/x/it's", "sid")).toBe(`cd '/Users/x/it'\\''s' && claude --resume sid`);
   });
 });
