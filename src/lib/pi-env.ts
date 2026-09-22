@@ -285,11 +285,56 @@ export interface PiCommandInfo {
  * 只有扩展的 `getCommands()` 知道真实清单 —— 所以 Command 面板必须读快照，
  * 不能沿用 CC 的 skills 扫描（否则面板里全是 Pi 上不存在的命令，反之亦然）。
  */
+/**
+ * Pi **内置** TUI 命令里可以远程直通的那些（白名单）。
+ *
+ * 为什么必须单列：扩展的 `getCommands()` 只报**包与扩展提供的**命令，Pi 自己的
+ * `BUILTIN_SLASH_COMMANDS` 一条都不在里面。owner 2026-09-22 实报：在网页对
+ * agent-mm-docs 打 `/reload` 毫无反应 —— 快照里 97 条命令没有 `reload`，直通分支
+ * 认不出来，于是当**普通文本**投给了 agent，agent 只能回一句「这是 TUI 命令，
+ * 我这边只收到一行文本」。同理 `/compact`、`/session`、`/copy` 全都不通。
+ *
+ * 白名单而不是黑名单：Pi 升级新增的内置命令不会自动漏进来（与 CC 那份
+ * `bridge/slash-catalog.ts` 的「只收在桥里有意义的」同一个取舍）。
+ *
+ * 刻意**不收**的几类（都是远程按不了或会把链路弄断的）：
+ *   - `quit` / `new` / `resume` / `fork` / `clone` / `import`：结束或轮转会话。
+ *     Pi 的会话 id 记在 registry 里，远程一键轮转是纯 foot-gun（轮转自愈是兜底，
+ *     不是许可）。
+ *   - `settings` / `model` / `tree` / `thinking` / `scoped-models` / `login`：
+ *     打开**交互选择器**。模态挡住时 Pi 收不到新消息，而 Pi 这边没有 CC 那种
+ *     自动 Esc 的看门狗 —— 远程点开等于把 agent 卡住。
+ *     （换模型/思考档另有扩展提供的 `claudestra-model` / `claudestra-thinking`，
+ *      非交互，直通即用。）
+ *   - `logout` / `trust`：改的是持久凭据与信任决定。
+ */
+export const PI_BUILTIN_PASSTHROUGH: ReadonlyArray<{ name: string; description: string }> = [
+  { name: "reload", description: "重载 keybindings / 扩展 / 技能 / 提示模板 / 主题 / 上下文文件" },
+  { name: "compact", description: "手动压缩会话上下文" },
+  { name: "session", description: "会话信息与统计" },
+  { name: "copy", description: "复制最后一条回复到剪贴板" },
+  { name: "name", description: "设置会话显示名" },
+  { name: "export", description: "导出会话（默认 HTML，可给 .html/.jsonl 路径）" },
+  { name: "share", description: "把会话分享成私密 gist" },
+  { name: "changelog", description: "查看 Pi 更新日志" },
+  { name: "hotkeys", description: "查看快捷键" },
+  { name: "bug", description: "给 Pi 作者报 bug" },
+];
+
 export function piCommandsFor(agent: string, home = homedir()): PiCommandInfo[] {
   const snap = readPiRuntimeSnapshot(agent, home);
-  return (snap?.commands || [])
+  const fromSnapshot = (snap?.commands || [])
     .filter((n) => typeof n === "string" && n.trim())
     .map((name) => ({ name, invokeName: name, description: "", scope: "pi" }));
+  // 快照优先：同名时以扩展/包那份为准（它才是这个会话真正加载到的东西）
+  const seen = new Set(fromSnapshot.map((c) => c.name));
+  const builtins = PI_BUILTIN_PASSTHROUGH.filter((b) => !seen.has(b.name)).map((b) => ({
+    name: b.name,
+    invokeName: b.name,
+    description: b.description,
+    scope: "pi-builtin",
+  }));
+  return [...fromSnapshot, ...builtins];
 }
 
 export async function piAvailable(): Promise<boolean> {
