@@ -1,7 +1,7 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { useBackgroundJob, JobLog } from "../background-job";
+import { useArmedConfirm } from "../../use-armed-confirm";
 import { Section } from "./section";
 
 /**
@@ -17,8 +17,7 @@ import { Section } from "./section";
  */
 export function RestartAllSection() {
   const t = useT();
-  const [armed, setArmed] = useState(false);
-  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { armed, arm, disarm } = useArmedConfirm(8000);
   const job = useBackgroundJob({
     endpoint: "/api/restart-all",
     deadlineMs: 20 * 60_000,
@@ -26,16 +25,8 @@ export function RestartAllSection() {
   });
   const busy = job.busy;
 
-  useEffect(() => () => { if (armTimer.current) clearTimeout(armTimer.current); }, []);
-
-  const arm = () => {
-    setArmed(true);
-    if (armTimer.current) clearTimeout(armTimer.current);
-    armTimer.current = setTimeout(() => setArmed(false), 8000);
-  };
-
   const start = () => {
-    setArmed(false);
+    disarm();
     void job.start();
   };
 

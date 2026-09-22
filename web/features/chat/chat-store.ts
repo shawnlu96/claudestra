@@ -40,6 +40,7 @@ function revokeBlobUrls(urls: string[]) {
 const MASTER_AGENT_NAME = "__master__";
 import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
 import { getLang } from "@/lib/i18n";
+import { postClientLog } from "@/lib/client-log";
 
 /**
  * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
@@ -1222,13 +1223,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  发生却无法取证前端当时做了什么(iOS 无法看 console),关键恢复路径打点到
    *  ~/.claude-orchestrator/web/client.log,下次直接对时间线。低频:只记恢复事件。 */
   public clientLog(msg: string) {
-    try {
-      void fetch("/api/client-log", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ msg }),
-      }).catch(() => {});
-    } catch { /* 不影响主流程 */ }
+    postClientLog(msg);
   }
 
   /**
