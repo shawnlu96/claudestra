@@ -11,7 +11,8 @@
 
 import { describe, test, expect } from "bun:test";
 import { buildPiCommand, PI_EXTENSION_PATH, isPiThinkingLevel } from "../src/lib/pi-launch.ts";
-import { buildAgentCommand } from "../src/lib/launch-command.ts";
+import { managedFor } from "../src/lib/runtimes/index.ts";
+import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 import { agentRuntime } from "../src/lib/registry.ts";
 
 const base = { channelId: "chan-1", bridgeUrl: "ws://localhost:3847", agentName: "agent-pi" };
@@ -120,25 +121,32 @@ describe("agentRuntime", () => {
     expect(agentRuntime({ runtime: "claude-code" })).toBe("claude-code");
     expect(agentRuntime({})).toBe("claude-code");
     expect(agentRuntime(undefined)).toBe("claude-code");
-    expect(agentRuntime({ runtime: "codex" })).toBe("claude-code"); // 未知值走老路
+    expect(agentRuntime({ runtime: "codex" })).toBe("codex");
+    expect(agentRuntime({ runtime: "gpt-9" })).toBe("claude-code"); // 未知值走老路
   });
 });
 
-describe("buildAgentCommand 分发", () => {
+describe("按 runtime 分发启动器（managedFor）", () => {
+  const spec = (over: Partial<LaunchSpec>): LaunchSpec => ({ mode: "new", sessionId: "", ...base, bridgeUrl: base.bridgeUrl, ...over });
   test("runtime=pi 出 pi 命令，且不含 claude 专属 flag", () => {
-    const cmd = buildAgentCommand({ ...base, runtime: "pi", purpose: "测试" });
+    const cmd = managedFor("pi")!.buildLaunchCommand(spec({ purpose: "测试" }));
     expect(cmd).toContain(" pi ");
     expect(cmd).toContain("--extension");
     expect(cmd).not.toContain("--dangerously-skip-permissions");
     expect(cmd).not.toContain("--dangerously-load-development-channels");
   });
 
-  test("runtime 缺失/未知 → Claude Code 命令（历史 agent 行为不变）", () => {
-    for (const runtime of [undefined, "claude-code", "something-else"]) {
-      const cmd = buildAgentCommand({ ...base, runtime, sessionId: "11111111-2222-3333-4444-555555555555" });
+  test("runtime 缺失 → Claude Code 命令（历史 agent 行为不变）", () => {
+    for (const runtime of [undefined, "", "claude-code"]) {
+      const cmd = managedFor(runtime)!.buildLaunchCommand(spec({ sessionId: "11111111-2222-3333-4444-555555555555" }));
       expect(cmd).toContain("claude --dangerously-load-development-channels");
       expect(cmd).not.toContain("--extension");
     }
+  });
+
+  test("认不出 / 只读的 runtime 不回退成 Claude Code（拼错的 --runtime 不能被悄悄当 CC 起）", () => {
+    expect(managedFor("something-else")).toBeNull();
+    expect(managedFor("codex")).toBeNull();
   });
 });
 

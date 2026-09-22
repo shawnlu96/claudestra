@@ -17,13 +17,28 @@ import {
   listCodexSessionFiles,
   readCodexMeta,
 } from "../codex-session.js";
+import { basename } from "node:path";
 import { lastUserTextOf } from "./shared.js";
-import type { AnyRecord, DiscoveredSession, SessionSourceAdapter } from "./types.js";
+import type { AnyRecord, DiscoveredSession, RuntimeControl, SessionSourceAdapter } from "./types.js";
+
+/**
+ * 先把 bridge 侧的约束声明好（生命周期接线是后续的事）：
+ * - 空闲的 Codex 收到一次 C-c 会在 0.8s 内直接退出（2026-09-23 实测），打断只能发 Esc
+ * - `codex queue` 对忙着的线程是排到下一轮（不插进当前回合），不需要也不该抢占
+ */
+export const CODEX_CONTROL: RuntimeControl = {
+  interruptKeys: ["Escape"],
+  preemptOnHumanMessage: false,
+  idleSource: "hook",
+  modelEnforcement: "launch-flag",
+  paneHeuristics: false,
+};
 
 export const codexAdapter: SessionSourceAdapter = {
   id: "codex",
   label: "Codex",
   manageable: false,
+  control: CODEX_CONTROL,
 
   async scanSessions(search?: string): Promise<DiscoveredSession[]> {
     const root = codexSessionsRoot();
@@ -57,6 +72,7 @@ export const codexAdapter: SessionSourceAdapter = {
   /** rollout 按日期分目录、不按 cwd 分，没有「某目录下的会话文件」这个概念 */
   listSessionsForCwd: () => [],
   ownsPath: (path, home) => isCodexSessionPath(path, home),
+  sessionIdFromPath: (path) => codexSessionIdFromFilename(basename(path)),
   /** 归档副本没有路径特征时靠首行：Codex 恒以 session_meta 开头 */
   sniffFirstLine: (rec) => rec?.type === "session_meta",
   translateLine: (line): AnyRecord | null => codexLineToClaudeShape(line),

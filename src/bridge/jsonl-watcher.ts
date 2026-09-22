@@ -15,7 +15,7 @@ import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 import { discordReply } from "./discord-api.js";
 import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath, translateSessionLine } from "../lib/session-source.js";
-import { piAgentDir } from "../lib/pi-session.js";
+import { DEFAULT_RUNTIME, sourceFor } from "../lib/runtimes/index.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
@@ -702,14 +702,14 @@ const PENDING_MAX_WAIT_MS = 600_000;
 function resolveSessionPath(
   runtime: string | undefined, cwd: string, sessionId: string, sessionFile?: string,
 ): string | null {
-  // ① 真源：Pi 扩展在 register 帧里报的会话文件（文件名带时间戳，算不出来）
+  // ① 真源：通道进程在 register 帧里自报的会话文件（Pi / Codex 文件名带时间戳，算不出来）
   if (sessionFile) {
-    // 只有 Pi 扩展会自报 sessionFile；它是 agent 进程给的值，realpath 后必须落在 Pi 会话根之下——
-    // 否则一个失守的 agent 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道
+    // 它是 agent 进程给的值，realpath 后必须落在**该运行时自己的**会话根之下——否则一个
+    // 失守的 agent 进程能借它让 bridge 尾读任意 jsonl（比如 master 的会话）流进自己频道。
+    // Claude Code 的路径可推算、从不自报；对它放行等于让 CC agent 指向 master 的会话。
     try {
       const real = realpathSync(sessionFile);
-      const root = realpathSync(join(piAgentDir(), "sessions")) + "/";
-      if (real.startsWith(root)) return real;
+      if (runtime && runtime !== DEFAULT_RUNTIME && sourceFor(runtime).ownsPath(real)) return real;
       console.warn(`⚠ 忽略越界的自报 sessionFile: ${sessionFile}`);
     } catch { /* 不存在 / 解析失败 → 走常规定位 */ }
   }

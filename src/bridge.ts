@@ -176,7 +176,9 @@ import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { hangsPendingReply, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
-import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
+import { readRegistryAgents } from "./lib/registry.js";
+import { controlFor, managedFor } from "./lib/runtimes/index.js";
+import { describeKeys, interruptWindow } from "./lib/runtimes/window-ops.js";
 import { readProjects } from "./lib/projects.js";
 import {
   tmuxCapture,
@@ -875,13 +877,13 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   ) {
     try {
       let win: string | null = null;
-      let targetRuntime: AgentRuntime = "claude-code";
+      let targetRuntime: string | undefined;
       if (to.channelId === CONTROL_CHANNEL_ID) win = `${MASTER_SESSION}:0`;
       else {
         const reg = (await readRegistryAgents()).find((a) => a.channelId === to.channelId);
         if (reg) {
           win = windowTarget(reg.name);
-          targetRuntime = agentRuntime(reg);
+          targetRuntime = reg.runtime;
         }
       }
       const tail10 = win
@@ -889,12 +891,11 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
         : "";
       const working = paneLooksWorking(tail10) || getAgentStatus(evAgent) === "thinking";
       // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
-      // v2.23+ Pi:**人类消息一律不打断** —— Pi 扩展能把消息 steer 进正在跑的回合
-      // (pi.sendUserMessage deliverAs:"steer"),C-c 反而把活干到一半的回合掐了
-      // (2026-09-14 实测日志「⚡ 抢占打断 agent-claudestraworker」)。CC 保持原样。
-      if (win && working && targetRuntime !== "pi" && getAgentStatus(evAgent) !== "compacting") {
+      // v2.23+ 能把消息 steer / 排进回合的运行时(Pi)**人类消息一律不打断**:打断反而把
+      // 干到一半的回合掐了(2026-09-14 实测)。由 control.preemptOnHumanMessage 声明。
+      if (win && working && controlFor(targetRuntime).preemptOnHumanMessage && getAgentStatus(evAgent) !== "compacting") {
         lastPreemptAt.set(to.channelId, Date.now());
-        await tmuxRaw(["send-keys", "-t", win, "C-c"]);
+        await interruptWindow(win, targetRuntime);
         recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
         // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
         emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
@@ -1781,8 +1782,9 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
         console.warn(`⚠️ ${targetWindow} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
       }
       if (verdict === "busy") {
-        console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，发 Ctrl+C 打断`);
-        await tmuxRaw(["send-keys", "-t", targetWindow, "C-c"]).catch(() => {});
+        console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，打断`);
+        // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出）
+        await interruptWindow(targetWindow, agent?.runtime).catch(() => {});
         await Bun.sleep(400);
       }
     } catch { /* non-critical */ }
@@ -2201,13 +2203,16 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
         const listResult = await runManager("list");
         const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
         if (agent) {
-          Bun.spawn(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, "C-c"]);
+          const keys = controlFor(agent.runtime).interruptKeys;
+          interruptWindow(`master:${agent.name}`, agent.runtime).catch((e) =>
+            console.error(`⚡ /interrupt 发键失败: ${(e as Error).message}`),
+          );
           stopTyping(channelId);
           clearSafetyTimer(channelId);
           // 同打断按钮：被打断的回合没有 Stop hook，主动收尾 done
           emitEvent({ agent: agent.name, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
           await finishStatusMessage(discord, channelId, t("⚡ 已打断", "⚡ Interrupted"));
-          await interaction.reply("⚡ 已发送 Ctrl+C");
+          await interaction.reply(`⚡ 已发送 ${describeKeys(keys)}`);
         } else {
           await interaction.reply("⚠️ 当前频道没有关联的 agent");
         }
@@ -2540,6 +2545,7 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
 
           let targetWindow: string;
           let agentLabel: string;
+          let targetRuntime: string | undefined;
           if (isMasterTarget) {
             targetWindow = `${MASTER_SESSION}:0`;
             agentLabel = "master";
@@ -2553,21 +2559,20 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
             }
             targetWindow = `master:${agent.name}`;
             agentLabel = agent.name;
+            targetRuntime = agent.runtime;
           }
 
-          console.log(`⚡ 发送 C-c 到 tmux window: ${targetWindow}`);
-          const proc = Bun.spawn(
-            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", targetWindow, "C-c"],
-            { stdout: "pipe", stderr: "pipe" }
-          );
-          const stderr = await new Response(proc.stderr).text();
-          await proc.exited;
-          if (proc.exitCode !== 0) {
-            console.error(`⚡ tmux send-keys 失败 (exit=${proc.exitCode}): ${stderr}`);
-            await interaction.followUp({ content: `❌ tmux 发送 C-c 失败: ${stderr}`, ephemeral: true }).catch(() => {});
+          console.log(`⚡ 打断 tmux window: ${targetWindow}`);
+          let keys: readonly string[];
+          try {
+            keys = await interruptWindow(targetWindow, targetRuntime);
+          } catch (e) {
+            const msg = (e as Error).message;
+            console.error(`⚡ tmux send-keys 失败: ${msg}`);
+            await interaction.followUp({ content: `❌ tmux 发送打断键失败: ${msg}`, ephemeral: true }).catch(() => {});
             return;
           }
-          console.log(`⚡ C-c 已发送给 ${agentLabel}`);
+          console.log(`⚡ ${describeKeys(keys)} 已发送给 ${agentLabel}`);
           recordMetric("agent_interrupt", { channelId: targetChannelId, agent: agentLabel, meta: { trigger: "button" } });
 
           await finishStatusMessage(discord, targetChannelId, t("⚡ 已打断", "⚡ Interrupted"));
@@ -4484,8 +4489,9 @@ async function maybeHealRotatedSession(channelId: string) {
     // 渲染同一份 transcript(master 2026-09-18 实报)。改按 Claude Code 自己的登记
     // (~/.claude/sessions/<pid>.json,带 tmux pane id)找这个窗口的真身,不看文件新鲜度。
     const sharedWith = agents.find((a) => a.name !== me.name && a.status === "active" && a.sessionId === me.sessionId);
-    if (sharedWith && me.runtime !== "pi") {
-      const viaCc = await resolveSessionIdForWindow(me.name, cwd, { exclude: me.sessionId, timeoutMs: 1_500 }).catch(() => null);
+    const discover = managedFor(me.runtime)?.discoverSessionId;
+    if (sharedWith && discover) {
+      const viaCc = await discover({ windowName: me.name, cwd, exclude: me.sessionId, timeoutMs: 1_500 }).catch(() => null);
       if (viaCc && !agents.some((a) => a.name !== me.name && a.sessionId === viaCc.sessionId)) {
         const r = await runManager("set-session", me.name, viaCc.sessionId);
         if (r?.ok) {

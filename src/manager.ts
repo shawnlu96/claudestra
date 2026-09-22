@@ -33,30 +33,20 @@ import {
   sessionTarget,
   tmuxSendEscape,
   windowTarget,
-  tmuxSendLine,
   tmuxCapture,
   isIdle,
   listAgentWindows as listAgentWindowsShared,
   listWindowIdsByName,
   ensureSocketDir,
-  isAutoConfirmableModal,
-  detectSessionIdlePrompt,
   clearShellInitPrompts,
-  isClaudeReady,
-  trustPromptMoves,
-  acceptTrustPrompt,
   isAtShell,
   probeTuiContract,
   windowHasChildProcess,
   windowChildPids,
   killPidsEscalating,
   deadShellVerdict,
-  PI_READY_OPTION,
-  windowOption,
-  setWindowOption,
 } from "./lib/tmux-helper.js";
 import {
-  buildClaudeCommand,
   resolveDisallowed,
   listPresets,
   isKnownPreset,
@@ -69,7 +59,6 @@ import {
   KNOWN_EFFORT_LEVELS,
   isKnownEffort,
 } from "./lib/claude-launch.js";
-import { buildAgentCommand } from "./lib/launch-command.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow, readLiveCcSessionEntries } from "./lib/cc-sessions.js";
@@ -77,9 +66,21 @@ import { readBypassConsent } from "./lib/bypass-consent.js";
 import { writeMasterResume } from "./lib/master-session.js";
 import { agentNameFromDir } from "./lib/agent-name.js";
 import { ancestorPids, mayTakeOver, preflightProblems, recoverCommand, resumeOutcome, takeoverCandidates, type TakeoverCandidate } from "./lib/takeover.js";
-import { allSources, type DiscoveredSession } from "./lib/runtimes/index.js";
-import { agentRuntime, isMasterAgent, readRegistryAgents, type AgentRuntime } from "./lib/registry.js";
-import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile, piAvailable } from "./lib/pi-env.js";
+import {
+  allSources,
+  claudeCodeAdapter,
+  controlFor,
+  managedFor,
+  requireManaged,
+  type DiscoveredSession,
+  type LaunchSpec,
+  type ManagedRuntimeAdapter,
+  type ReadyResult,
+} from "./lib/runtimes/index.js";
+import { listSessionJsonls } from "./lib/runtimes/claude-code.js";
+import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
+import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
+import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
@@ -268,16 +269,13 @@ async function windowExists(name: string): Promise<boolean> {
 }
 
 async function isAgentIdle(name: string): Promise<boolean> {
-  // v2.23+ Pi 的 TUI 不是 Claude Code 那套（没有 ❯ 提示符 / banner），paneLooksIdle
-  // 对它**恒为 false** ⇒ 每个 Pi agent 都被算成「永远在忙」：网页侧栏黄点常驻、
-  // 「工作中」不下线、输入框一直显示「思考中…」（2026-09-14 owner 实测）。
-  // Pi 的回合状态由扩展经 /hook 上报 bridge（agent_settled → Stop），而 CLI 进程
-  // 看不到那份内存状态 ⇒ 这里对 Pi 一律答「空闲」，忙碌只由 hook 信号决定；
-  // 投递侧也因此不会对 Pi 发 Ctrl+C 抢占（Pi 用 deliverAs:"steer" 处理回合中插话）。
+  // pane 判据只认 Claude Code 的 TUI（❯ / 横幅），套在别的运行时上恒判「忙」。
+  // idleSource=hook 的运行时（Pi）忙闲只由回合结束上报决定，CLI 进程看不到那份
+  // 内存状态 ⇒ 这里一律答「空闲」。
   const bare = name.replace(/^agent-/, "");
   const reg = await loadRegistry();
   const info = reg.agents?.[name] ?? reg.agents?.[bare] ?? reg.agents?.[`agent-${bare}`];
-  if (agentRuntime(info) === "pi") return true;
+  if (controlFor(info?.runtime).idleSource === "hook") return true;
   return isIdle(windowTarget(name));
 }
 
@@ -910,24 +908,23 @@ async function cmdCreate(
   piBaseFlag?: string,
 ) {
   assertValidNewName(name);
-  if (runtimeFlag && runtimeFlag !== "pi" && runtimeFlag !== "claude-code") {
-    output({ ok: false, error: `未知的 runtime: "${runtimeFlag}"。可用: claude-code, pi` });
+  // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
+  // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
+  let adapter: ManagedRuntimeAdapter;
+  try {
+    adapter = requireManaged(runtimeFlag);
+  } catch (e) {
+    output({ ok: false, error: (e as Error).message });
     return;
   }
   if (piBaseFlag && piBaseFlag !== "minimal" && piBaseFlag !== "inherit") {
     output({ ok: false, error: `未知的 --pi-base: "${piBaseFlag}"。可用: inherit, minimal` });
     return;
   }
-  // v2.23+ Pi 会话纳管：runtime 只在这里决定「用哪个启动器 + 怎么判就绪」，
-  // 其余（频道/窗口/project/registry 形状）两条路完全一致。
-  const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
-  if (runtime === "pi" && !(await assertPiAvailable())) {
-    output({
-      ok: false,
-      error:
-        "这台机器上没有找到 pi 可执行文件 —— --runtime pi 建不出能用的 agent。" +
-        "装好 Pi 再试（或用 PI_BIN 指定路径），也可以省掉 --runtime 用默认的 Claude Code。",
-    });
+  // 可执行文件不在就早败：否则会照建频道 + 窗口，卡满就绪预算后才报错
+  const avail = await adapter.available();
+  if (!avail.ok) {
+    output({ ok: false, error: `--runtime ${adapter.id} 建不出能用的 agent：${avail.hint}` });
     return;
   }
   // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
@@ -1013,7 +1010,7 @@ async function cmdCreate(
   }
 
   let ready = false;
-  let sessionId: string;
+  let spec: LaunchSpec;
   const expandedDir = dir.replace(/^~/, process.env.HOME || "~");
 
   try {
@@ -1022,17 +1019,12 @@ async function cmdCreate(
     await tmuxRawStrict(["new-window", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", expandedDir]);
     await Bun.sleep(500);
 
-    // 3. 启动 Claude Code
-    const target = windowTarget(tmuxName);
-    sessionId = crypto.randomUUID();
-    const cmd = buildAgentCommand({
-      runtime,
-      piEnv,
+    // 3. 启动会话
+    spec = {
+      mode: "new",
       channelId,
       bridgeUrl: BRIDGE_URL,
-      sessionId,
-      disallowedPreset: perms.preset,
-      disallowedRaw: perms.disallowedRaw,
+      sessionId: crypto.randomUUID(),
       effort,
       permissionMode: mode,
       model,
@@ -1041,62 +1033,24 @@ async function cmdCreate(
       agentName: tmuxName,
       // v2.21+ project 上下文注入:目录 + 同伴花名册
       projectContext: await buildProjectContext(proj, tmuxName),
-    });
-    // 新 tmux window 起来后 .zshrc / .bashrc 可能弹 oh-my-zsh / homebrew 的 Y/n
-    // update prompt，会吞掉 send-keys 第一个字符。先清掉再发命令。
-    await clearShellInitPrompts(target);
-    if (runtime === "pi") await clearPiReady(tmuxName);
-    await tmuxSendLine(target, cmd);
-
-    // 4. 轮询等待就绪 — 与 restart 的 startClaudeInWindow 对齐（CLAUDE_READY_ROUNDS）
-    if (runtime === "pi") {
-      ready = await waitForPiReady(tmuxName);
-    } else {
-      let sessionIdlePicked = false;
-      for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
-        await Bun.sleep(500);
-        const pane = await captureLast(tmuxName, 10);
-        // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不卡着等用户点按钮
-        if (detectSessionIdlePrompt(pane)) {
-          if (!sessionIdlePicked) {
-            await pickFullResume(target);
-            sessionIdlePicked = true;
-            await Bun.sleep(1500);
-          }
-          continue;
-        }
-        // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
-        const trustMoves = trustPromptMoves(pane);
-        if (trustMoves !== null) {
-          await acceptTrustPrompt(target, trustMoves);
-          await Bun.sleep(1000);
-          continue;
-        }
-        if (hasPromptToConfirm(pane)) {
-          await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-          await Bun.sleep(500);
-          continue;
-        }
-        if (isClaudeReady(pane)) {
-          ready = true;
-          break;
-        }
-      }
-    }
+      extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv },
+    };
+    if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
+    ready = (await launchInWindow(tmuxName, adapter, spec)).result.ready;
 
     if (!ready) {
-      const who = runtime === "pi" ? "Pi" : "Claude Code";
-      await cleanup(`${who} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
+      await cleanup(`${adapter.label} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
       return;
     }
   } catch (err) {
     await cleanup(`创建失败: ${(err as Error).message}`);
     return;
   }
+  const sessionId = spec.sessionId;
 
   // v2.5.4: 会话内补发 /model，确保 pin 真正生效（--model 对 resume 场景不可靠）。
-  // Pi 不走这条路：它的 --model 是启动期权威值，/model 在 Pi 里是另一套 slash 语义。
-  if (runtime !== "pi") await enforceSessionModel(tmuxName, model);
+  // 启动参数即权威的运行时（Pi）不补发：/model 在那边是另一套语义。
+  if (adapter.control.modelEnforcement === "in-session") await enforceSessionModel(tmuxName, model);
 
   // 6. 更新 registry（只有启动成功才落盘）
   const reg = await loadRegistry();
@@ -1116,9 +1070,8 @@ async function cmdCreate(
     permissionMode: mode,
     ...(model ? { model } : {}),
     ...(external ? { external: true } : {}),
-    // 只在 Pi 时落盘；Claude Code agent 的 registry 保持逐字节不变（零迁移）
-    ...(runtime === "pi" ? { runtime } : {}),
-    ...(runtime === "pi" && piEnv ? { piEnv } : {}),
+    // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
+    ...adapter.registryFields(spec),
   };
   await saveRegistry(reg);
 
@@ -1145,57 +1098,62 @@ async function cmdCreate(
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Claude Code 就绪轮询预算：240 轮 × 500ms = 120s。曾是 60s，2026-07-10 实测
+// 会话就绪轮询预算：240 轮 × 500ms = 120s（各运行时共用）。曾是 60s，2026-07-10 实测
 // 大 session（数 MB jsonl）resume + MCP 连接可超 60s，导致实际启动成功却报
 // 「启动超时」（restart 还会误标 recreated）。
 const CLAUDE_READY_ROUNDS = 240;
 
-/**
- * Pi 会话就绪等待：Pi 扩展在 bridge 注册成功后会往本窗口写 @claudestra_ready
- * （见 src/pi/claudestra-extension.ts 的 markReady）。
- *
- * 为什么不像 Claude Code 那样认 pane 文案：isClaudeReady 认的是 CC 自己的 TUI
- * （❯ + 权限横幅），Pi 的 UI 会随版本变；而 tmux 用户选项是**我们自己**写的，
- * 版本无关。兜底早败：窗口回到 shell 说明 pi 进程已退出，不必等满预算。
- */
-/**
- * v2.23+ Pi 二进制预检：**没装 Pi 的机器上不该装出"看着建好了、其实起不来"的 agent**。
- *
- * 背景（owner 2026-09-14「确认一下 对于没有 pi 的用户也能正常的使用」）：create/
- * resume 走 `--runtime pi` 时此前不检查 `pi` 是否在，无 Pi 的机器会照建频道 + 注册表
- * 条目 + 分配 sessionId，然后卡在就绪等待上超时 —— 报错发生在最后一步、且已经留下垃圾。
- * 这里提前拦：解析不到可执行文件就明确告诉他怎么装（或改用默认运行时）。
- */
-async function assertPiAvailable(): Promise<boolean> {
-  return piAvailable();
-}
-
-/**
- * Pi 就绪标记清零 —— 必须在**发启动命令之前**调。扩展在 registered 一到就写 "1"；
- * 清零若晚于启动，会把真就绪抹掉 → 永远等不到 → 假「启动超时」→ create 路径
- * cleanup 掉一个健康的 agent。restart 复用同一窗口时旧标记同样靠这里清。
- */
-async function clearPiReady(name: string): Promise<void> {
-  const ok = await setWindowOption(windowTarget(name), PI_READY_OPTION, "0");
-  if (!ok) console.error(`⚠ 清不掉 ${name} 的 ${PI_READY_OPTION}（复用窗口时可能误判就绪）`);
-}
-
-async function waitForPiReady(name: string, rounds = CLAUDE_READY_ROUNDS): Promise<boolean> {
-  const target = windowTarget(name);
-  // 清零不在这里做（见 clearPiReady）：这里只等扩展自己写 "1"。
-  for (let i = 0; i < rounds; i++) {
-    if ((await windowOption(target, PI_READY_OPTION)) === "1") return true;
-    if (i > 4 && isAtShell(await captureLast(name, 3).catch(() => ""))) return false;
-    await Bun.sleep(500);
-  }
-  return false;
-}
-
 // shell 就绪轮询预算：30 轮 × 500ms = 15s（peer 2026-08-13 P0，见
-// startClaudeInWindow 注释）。实测冷启动 zsh 出提示符 2.24s，开机并发时更久；
+// waitForShell 注释）。实测冷启动 zsh 出提示符 2.24s，开机并发时更久；
 // 15s 对它留了 6 倍余量，而健康窗口第一拍即过，正常路径零额外开销。
 const SHELL_READY_ROUNDS = 30;
 const SHELL_READY_POLL_MS = 500;
+
+/**
+ * 等窗口回到 shell 提示符（restart 复用 / 重建窗口时用）。
+ *
+ * 轮询而不是「看一眼 → 等 2s → 放弃」：新窗口里 zsh（oh-my-zsh + conda）出提示符
+ * 实测 2.24s，开机并发时更久，一次性判定会让 restart 静默起不来（peer 2026-08-13
+ * P0：开机 9 个挂 3 个）。健康窗口第一拍就过，正常路径零额外开销。
+ */
+async function waitForShell(name: string): Promise<boolean> {
+  for (let i = 0; i < SHELL_READY_ROUNDS; i++) {
+    if (isAtShell(await captureLast(name, 3))) {
+      if (i > 0) console.error(`[restart] ${name} shell 就绪等了 ${(i * SHELL_READY_POLL_MS) / 1000}s`);
+      return true;
+    }
+    await Bun.sleep(SHELL_READY_POLL_MS);
+  }
+  // 失败必须留痕：否则窗口建好了、会话从没启动、registry 还写着 active
+  console.error(`[restart] ${name} shell 未就绪（等满 ${(SHELL_READY_ROUNDS * SHELL_READY_POLL_MS) / 1000}s），放弃启动`);
+  return false;
+}
+
+/**
+ * 在已建好的窗口里起一个会话 —— create / resume / restart 共用的唯一一份启动流程：
+ * [等 shell] → 清 shell init 的 Y/n 交互 → [fork 前快照] → 适配器 beforeLaunch →
+ * 发启动命令 → 适配器等就绪。运行时差异全在适配器里。
+ *
+ * 清 Y/n 必须在发命令之前：oh-my-zsh / homebrew 的更新提示会吞掉 send-keys 的第一个字符。
+ */
+async function launchInWindow(
+  tmuxName: string,
+  adapter: ManagedRuntimeAdapter,
+  spec: LaunchSpec,
+  opts: { waitShell?: boolean; cwd?: string } = {},
+): Promise<{ result: ReadyResult; baseline?: unknown }> {
+  const win = tmuxWindowOps(tmuxName);
+  if (opts.waitShell && !(await waitForShell(tmuxName))) {
+    return { result: { ready: false, reason: "timeout", detail: "shell 未就绪", recoveredFullSession: false } };
+  }
+  await clearShellInitPrompts(win.target);
+  const baseline =
+    spec.mode === "fork" && opts.cwd && adapter.forkBaseline ? await adapter.forkBaseline(opts.cwd) : undefined;
+  await adapter.beforeLaunch?.(win);
+  await win.sendLine(adapter.buildLaunchCommand(spec));
+  const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  return { result, baseline };
+}
 
 async function cmdResume(
   name: string,
@@ -1210,19 +1168,12 @@ async function cmdResume(
   forkSession = false,
   runtimeFlag?: string,
 ) {
-  // 同 cmdCreate：未知 runtime（如 codex）以前被静默当成 Claude Code，claude --resume 一个
-  // codex id 要干等满 120s 就绪预算才失败
-  if (runtimeFlag && runtimeFlag !== "pi" && runtimeFlag !== "claude-code") {
-    output({ ok: false, error: `未知的 runtime: "${runtimeFlag}"。可用: claude-code, pi` });
-    return;
-  }
-  const runtime: AgentRuntime = runtimeFlag === "pi" ? "pi" : "claude-code";
-  if (runtime === "pi" && !(await assertPiAvailable())) {
-    throw new Error("这台机器上没有找到 pi 可执行文件 —— 无法用 --runtime pi 收编会话（可用 PI_BIN 指定路径，或省略 --runtime 走 Claude Code）");
-  }
-  // Pi 的会话 id 是我们自造的（--session-id 收任意合法 id），不一定是 UUID
-  if (runtime !== "pi" && !UUID_RE.test(sessionId)) {
-    throw new Error(`非法 sessionId: "${sessionId}"（应为 UUID 格式；Pi 会话请加 --runtime pi）`);
+  const adapter = requireManaged(runtimeFlag);
+  const avail = await adapter.available();
+  if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
+  // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
+  if (!adapter.isValidSessionId(sessionId)) {
+    throw new Error(`非法 sessionId: "${sessionId}"（不是合法的 ${adapter.label} 会话 id；其它运行时的会话请加 --runtime <id>）`);
   }
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
@@ -1319,7 +1270,8 @@ async function cmdResume(
   }
 
   let ready = false;
-  let forkBefore: Set<string> | null = null;
+  let spec: LaunchSpec;
+  let baseline: unknown;
 
   try {
     // 创建 tmux window（在 master session 里）
@@ -1327,70 +1279,28 @@ async function cmdResume(
     await tmuxRawStrict(["new-window", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", resolvedDir]);
     await Bun.sleep(500);
 
-    // 启动 Claude Code（resume 模式）
-    const target = windowTarget(tmuxName);
-    const displayName = channelName;
-    const cmd = buildAgentCommand({
-      runtime,
-      // 沿用 registry 里已有的能力档案（resume 不改档案，但必须复现它）
-      piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv),
+    spec = {
+      mode: forkSession ? "fork" : "resume",
       channelId,
       bridgeUrl: BRIDGE_URL,
-      // Pi 的 --session-id 是 open-or-create：同一个字段既能新建也能续上
       sessionId,
-      resumeId: sessionId,
-      forkSession,
-      displayName,
-      disallowedPreset: perms.preset,
-      disallowedRaw: perms.disallowedRaw,
+      displayName: channelName,
       effort,
       permissionMode: mode,
       model,
-    });
-    await clearShellInitPrompts(target);
-    if (forkSession) forkBefore = await listSessionJsonls(resolvedDir);
-    if (runtime === "pi") await clearPiReady(tmuxName);
-    await tmuxSendLine(target, cmd);
-
-    // 轮询等待 — 与 restart 的 startClaudeInWindow 对齐（CLAUDE_READY_ROUNDS）
-    if (runtime === "pi") {
-      ready = await waitForPiReady(tmuxName);
-    } else {
-      let sessionIdlePicked = false;
-      for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
-        await Bun.sleep(500);
-        const pane = await captureLast(tmuxName, 10);
-        // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不卡着等用户点按钮
-        if (detectSessionIdlePrompt(pane)) {
-          if (!sessionIdlePicked) {
-            await pickFullResume(target);
-            sessionIdlePicked = true;
-            await Bun.sleep(1500);
-          }
-          continue;
-        }
-        // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续等就绪
-        const trustMoves = trustPromptMoves(pane);
-        if (trustMoves !== null) {
-          await acceptTrustPrompt(target, trustMoves);
-          await Bun.sleep(1000);
-          continue;
-        }
-        if (hasPromptToConfirm(pane)) {
-          await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-          await Bun.sleep(500);
-          continue;
-        }
-        if (isClaudeReady(pane)) {
-          ready = true;
-          break;
-        }
-      }
-    }
+      extras: {
+        disallowedPreset: perms.preset,
+        disallowedRaw: perms.disallowedRaw,
+        // 沿用 registry 里已有的能力档案（resume 不改档案，但必须复现它）
+        piEnv: normalizePiEnvProfile((await loadRegistry()).agents[tmuxName]?.piEnv),
+      },
+    };
+    const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
+    ready = launched.result.ready;
+    baseline = launched.baseline;
 
     if (!ready) {
-      const who = runtime === "pi" ? "Pi" : "Claude Code";
-      await cleanup(`${who} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
+      await cleanup(`${adapter.label} 启动超时${readyTimeoutHint(await captureLast(name, 40).catch(() => ""))}`);
       return;
     }
   } catch (err) {
@@ -1399,20 +1309,17 @@ async function cmdResume(
   }
 
   // v2.5.4: 会话内补发 /model —— resume 是 --model 失效的重灾区（session 保留原模型）。
-  // Pi 不适用：它的 --model 是启动期权威值。
-  if (runtime !== "pi") await enforceSessionModel(tmuxName, model);
+  if (adapter.control.modelEnforcement === "in-session") await enforceSessionModel(tmuxName, model);
 
   // v2.7+ fork 模式：registry 必须记 fork 出的实际新 session id，不是源 id
   let actualSessionId = sessionId;
-  if (forkSession && forkBefore) {
-    // v2.23.2+ 先问 Claude Code 自己的登记(~/.claude/sessions/<pid>.json,进程一起来就有新 id),
-    // 目录 diff 只作兜底:fork 出的 jsonl 要到第一条消息才创建(master 2026-09-18 实报就绪
-    // 32s 后才出现,20s 窗口错过 → registry 记了源 id,两个频道渲染同一份 transcript)
-    const viaCc = runtime === "pi" ? null : await resolveSessionIdForWindow(tmuxName, resolvedDir, { exclude: sessionId });
-    const newId = viaCc?.sessionId ?? (await waitForNewSessionId(resolvedDir, forkBefore));
-    if (newId) {
-      actualSessionId = newId;
-      console.error(`[resume] --fork 探测到新 session ${newId.slice(0, 8)}（源 ${sessionId.slice(0, 8)}，${viaCc ? "CC sessions 登记" : "目录 diff"}）`);
+  if (forkSession && adapter.discoverSessionId) {
+    const found = await adapter
+      .discoverSessionId({ windowName: tmuxName, cwd: resolvedDir, exclude: sessionId, baseline })
+      .catch(() => null);
+    if (found) {
+      actualSessionId = found.sessionId;
+      console.error(`[resume] --fork 探测到新 session ${found.sessionId.slice(0, 8)}（源 ${sessionId.slice(0, 8)}，${found.via}）`);
     } else {
       console.error(`[resume] ⚠️ --fork 未探测到新 session id，registry 暂记源 id（bridge 回合结束时会按 CC sessions 登记自愈）`);
     }
@@ -1432,7 +1339,7 @@ async function cmdResume(
     created: new Date().toISOString(),
     status: "active",
     channelId,
-    notes: `${runtime === "pi" ? "pi" : "claude"} session: ${actualSessionId}${forkSession ? ` (forked from ${sessionId.slice(0, 8)})` : ""}`,
+    notes: `${adapter.noteTag} session: ${actualSessionId}${forkSession ? ` (forked from ${sessionId.slice(0, 8)})` : ""}`,
     sessionId: actualSessionId,
     cwd: resolvedDir,
     displayName: channelName,
@@ -1441,9 +1348,8 @@ async function cmdResume(
     effort,
     permissionMode: mode,
     ...(model ? { model } : {}),
-    ...(runtime === "pi" ? { runtime } : {}),
-    // resume 不提供档案编辑，但**不能把已有的弄丢**（丢了下次 restart 就变回继承全局）
-    ...(runtime === "pi" && prior?.piEnv ? { piEnv: prior.piEnv } : {}),
+    // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
+    ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
   };
   await saveRegistry(reg);
 
@@ -1696,12 +1602,6 @@ async function cmdRename(oldName: string, newName: string) {
  * 用户反馈 v1.7.4 的坑：oh-my-zsh "robbyrussell" 主题用 ➜，原来的
  * /[%$]/ 正则认不出来导致 restart 永远"启动超时"。
  */
-/**
- * Agent 用：几何识别 modal 自动确认；session-idle 不自动按（permission-watcher
- * 会发 Discord 按钮让用户决定）。
- */
-const hasPromptToConfirm = (pane: string) => isAutoConfirmableModal(pane);
-
 // ────────────────────────────────────────────────
 // v2.7+ fork-session 自愈（Claude Code agents 模式适配）
 // ────────────────────────────────────────────────
@@ -1709,87 +1609,24 @@ const hasPromptToConfirm = (pane: string) => isAutoConfirmableModal(pane);
 // session 被 Claude Code 的 bg agent 占用时无法 --resume（bg daemon 会把被杀
 // 的占用者 respawn 回来，进程层面赢不了 —— 2026-07-09 事故实证）。唯一可靠
 // 破局是 `--resume <id> --fork-session` 分支副本。fork 出的新 session id 上游
-// 不直接告知，靠启动前后 diff projects 目录探测，拿到后回写 registry。
+// 不直接告知，由适配器的 discoverSessionId 探测（runtimes/claude-code.ts），拿到后回写 registry。
 
 /** cwd → ~/.claude/projects/<slug>/（slug 规则与 jsonl-watcher.getJsonlPath 一致） */
 function projectsDirFor(cwd: string): string {
   return join(process.env.HOME || "~", ".claude", "projects", projectsSlug(cwd));
 }
 
-async function listSessionJsonls(cwd: string): Promise<Set<string>> {
-  try {
-    return new Set(
-      (await readdir(projectsDirFor(cwd))).filter((f) => f.endsWith(".jsonl")),
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-/** 启动前 diff：projects 目录里新出现的 jsonl → 新 session id（多个取 mtime 最新） */
-async function detectNewSessionId(
-  cwd: string,
-  before: Set<string>,
-): Promise<string | null> {
-  try {
-    const dir = projectsDirFor(cwd);
-    const fresh = (await readdir(dir)).filter(
-      (f) => f.endsWith(".jsonl") && !before.has(f),
-    );
-    if (fresh.length === 0) return null;
-    if (fresh.length === 1) return fresh[0].replace(/\.jsonl$/, "");
-    const withMtime = await Promise.all(
-      fresh.map(async (f) => ({
-        f,
-        m: (await stat(join(dir, f)).catch(() => null))?.mtimeMs ?? 0,
-      })),
-    );
-    withMtime.sort((a, b) => b.m - a.m);
-    return withMtime[0].f.replace(/\.jsonl$/, "");
-  } catch {
-    return null;
-  }
-}
-
-/** 轮询探测 fork 出的新 session（jsonl 落盘可能滞后于 TUI 就绪） */
-async function waitForNewSessionId(
-  cwd: string,
-  before: Set<string>,
-  timeoutMs = 20_000,
-): Promise<string | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const found = await detectNewSessionId(cwd, before);
-    if (found) return found;
-    await Bun.sleep(1_000);
-  }
-  return null;
-}
-
 /**
- * v2.0.22+: 检测到 session-idle 弹窗时自动选「恢复完整会话」(option 2)。
- *
- *   ❯ 1. Resume from summary (recommended)   ← 默认高亮 = compact，丢上下文
- *     2. Resume full session as-is            ← 我们要的
- *     3. Don't ask me again
- *
- * 这个 modal **不接受 digit 跳转**（按 "2" 没用，Enter 还是确认高亮的 option 1），
- * 只能 arrow nav：Down 一次到 option 2 再 Enter。startClaudeInWindow / cmdCreate /
- * cmdResume 三个就绪轮询都用它，不再卡着等用户点 Discord 按钮。
+ * 优雅退出一个会话：打断 → 清菜单 → 键入退出指令 → 处理收尾弹窗 → 最后强杀。
+ * 按键、退出指令、收尾弹窗都由适配器给（缺省 Claude Code，大总管走这条）。
  */
-async function pickFullResume(target: string) {
-  await tmuxRaw(["send-keys", "-t", target, "Down"]);
-  await Bun.sleep(150);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-}
-
-/** 优雅退出一个 Claude Code agent，处理所有确认弹窗 */
-async function gracefulExit(name: string, runtime: AgentRuntime = "claude-code"): Promise<boolean> {
+async function gracefulExit(name: string, adapter: ManagedRuntimeAdapter = claudeCodeAdapter): Promise<boolean> {
   const target = windowTarget(name);
+  const win = tmuxWindowOps(name);
 
-  // 阶段 1: 多次 Ctrl+C 确保打断当前操作
+  // 阶段 1: 多次打断确保停下当前操作
   for (let i = 0; i < 3; i++) {
-    await tmuxRaw(["send-keys", "-t", target, "C-c"]);
+    for (const key of adapter.control.interruptKeys) await win.sendKey(key);
     await Bun.sleep(800);
     const pane = await captureLast(name, 5);
     if (isAtShell(pane)) return true;
@@ -1801,50 +1638,17 @@ async function gracefulExit(name: string, runtime: AgentRuntime = "claude-code")
   await tmuxSendEscape(target);
   await Bun.sleep(500);
 
-  // 阶段 3: 发退出命令（Claude Code 是 /exit，Pi 是 /quit）
-  const exitCommand = runtime === "pi" ? "/quit" : "/exit";
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", exitCommand]);
+  // 阶段 3: 发退出命令
+  await win.sendLiteral(adapter.exitCommand);
   await Bun.sleep(100);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+  await win.sendKey("Enter");
 
-  // 阶段 4: 轮询处理各种确认提示，最多等 30 秒
+  // 阶段 4: 轮询处理收尾弹窗，最多等 30 秒（没有 onExitPane 的运行时只等回 shell）
   for (let i = 0; i < 60; i++) {
     await Bun.sleep(500);
     const pane = await captureLast(name, 10);
-
-    // 已经回到 shell
     if (isAtShell(pane)) return true;
-
-    // Pi：退出就是退出，没有 CC 那套「Goodbye! / 信任弹窗 / 补全列表」分支，
-    // 只等回 shell（等不到交给阶段 5 强杀）。
-    if (runtime === "pi") continue;
-
-    // Goodbye! 表示 Claude Code 正在退出
-    if (pane.includes("Goodbye!")) {
-      await Bun.sleep(1000);
-      continue;
-    }
-
-    // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续
-    const trustMoves = trustPromptMoves(pane);
-    if (trustMoves !== null) {
-      await acceptTrustPrompt(target, trustMoves);
-      await Bun.sleep(1000);
-      continue;
-    }
-    // 有确认提示 → 按 Enter
-    if (hasPromptToConfirm(pane)) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-      await Bun.sleep(500);
-      continue;
-    }
-
-    // /exit 可能出现在自动补全列表里，需要再按一次 Enter
-    if (pane.includes("/exit") && pane.includes("Exit the REPL")) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-      await Bun.sleep(500);
-      continue;
-    }
+    await adapter.onExitPane?.(pane, win);
   }
 
   // 阶段 5: 最后手段 — 强制杀进程
@@ -1863,11 +1667,6 @@ async function gracefulExit(name: string, runtime: AgentRuntime = "claude-code")
   return isAtShell(check);
 }
 
-/**
- * 在已有的 tmux window 里启动 Claude Code，处理所有确认弹窗。
- * 返回 ready（是否就绪）+ recoveredFullSession（是否自动选了「恢复完整会话」，
- * 用于给频道发一条正面"已恢复"信号，取代 watcher 的按钮噪音）。
- */
 /**
  * v2.5.4: 启动就绪后在会话内补一发 `/model`，强制 pin 的模型真正生效。
  *
@@ -1948,103 +1747,6 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
     }
   }
   return false;
-}
-
-async function startClaudeInWindow(
-  name: string,
-  claudeCmd: string,
-  runtime: AgentRuntime = "claude-code",
-): Promise<{ ready: boolean; recoveredFullSession: boolean; bgOccupied?: boolean }> {
-  const target = windowTarget(name);
-
-  // 确保在 shell 提示符。
-  //
-  // v2.19.0（peer 2026-08-13 P0：开机 9 个 restart 静默挂 3 个）：这里原本是
-  // 「看一眼 → 不行等 2s → 再看一眼 → 放弃」的一次性判定。配合 cmdRestart 里
-  // new-window 之后的 sleep(500)，新窗口从创建到判定截止总共只有 2.5s，而实测
-  // 新建 tmux 窗口里 zsh（oh-my-zsh + conda base）出提示符要 2.24s——余量 0.26s。
-  // 开机时 9 个窗口并发创建 + 系统冷启动，超时是必然而非偶然：失败的三次耗时
-  // 恰好都是 2.57/2.60/2.67s，与「等满 2s 就放弃」的时间账吻合。
-  //
-  // 预算也严重失衡：claude 就绪轮询给了 120s，shell 就绪只给 2.5s——反了，
-  // shell 起不来比 claude 起不来更致命（后者至少还有 fork 自愈）。改为轮询，
-  // 就绪即走（健康窗口第一拍就过，不增加正常路径耗时）。
-  let shellReady = false;
-  for (let i = 0; i < SHELL_READY_ROUNDS; i++) {
-    if (isAtShell(await captureLast(name, 3))) {
-      shellReady = true;
-      if (i > 0) console.error(`[restart] ${name} shell 就绪等了 ${(i * SHELL_READY_POLL_MS) / 1000}s`);
-      break;
-    }
-    await Bun.sleep(SHELL_READY_POLL_MS);
-  }
-  if (!shellReady) {
-    // 放大器 1（同报告）：原来这里是裸 return，整条失败路径在任何日志里都不
-    // 存在——窗口建好了、claude 从没启动、registry 还写着 active，只有发消息
-    // 没反应才会被发现。失败必须留痕。
-    console.error(
-      `[restart] ${name} shell 未就绪（等满 ${(SHELL_READY_ROUNDS * SHELL_READY_POLL_MS) / 1000}s），放弃启动`,
-    );
-    return { ready: false, recoveredFullSession: false };
-  }
-
-  // 发送启动命令前先清掉 shell init 阶段可能存在的 Y/n 交互（oh-my-zsh / homebrew）
-  await clearShellInitPrompts(target);
-  if (runtime === "pi") await clearPiReady(name);
-  await tmuxSendLine(target, claudeCmd);
-
-  // Pi：就绪判据是扩展写下的 tmux 标记（@claudestra_ready），不是 pane 文案。
-  // 不进下面那段 CC 弹窗处理——那些判据对 Pi 只会恒不命中，白等满 120s 预算。
-  if (runtime === "pi") {
-    return { ready: await waitForPiReady(name), recoveredFullSession: false };
-  }
-
-  // 轮询处理各种确认提示（预算见 CLAUDE_READY_ROUNDS）
-  let sessionIdlePicked = false;
-  for (let i = 0; i < CLAUDE_READY_ROUNDS; i++) {
-    await Bun.sleep(500);
-    const pane = await captureLast(name, 10);
-
-    // Claude Code 就绪
-    if (isClaudeReady(pane)) return { ready: true, recoveredFullSession: sessionIdlePicked };
-
-    // v2.7+: session 被 bg agent 占用 → claude 报错退出。提前返回 bgOccupied，
-    // 让 cmdRestart 走 --fork-session 自愈重试（见 projectsDirFor 上方注释）。
-    if (/currently running as a background agent/i.test(pane)) {
-      return { ready: false, recoveredFullSession: false, bgOccupied: true };
-    }
-
-    // v2.0.22+: Session 闲置弹窗 → 自动选「恢复完整会话」，不再卡着等用户点按钮。
-    // picked 标记防止重复发键；发完给加载留窗口，下轮再判 ready。
-    if (detectSessionIdlePrompt(pane)) {
-      if (!sessionIdlePicked) {
-        await pickFullResume(target);
-        sessionIdlePicked = true;
-        await Bun.sleep(1500);
-      }
-      continue;
-    }
-
-    // v2.21.4+ 目录信任弹窗(默认高亮 No, exit,不能 Enter):选 Yes 再继续
-    const trustMoves = trustPromptMoves(pane);
-    if (trustMoves !== null) {
-      await acceptTrustPrompt(target, trustMoves);
-      await Bun.sleep(1000);
-      continue;
-    }
-    // 有确认提示 → 按 Enter
-    if (hasPromptToConfirm(pane)) {
-      await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-      await Bun.sleep(500);
-      continue;
-    }
-  }
-
-  // 最后再捕一次：用同样的严格条件兜底（不靠循环结束的瞬时状态）。
-  // 严格条件 isClaudeReady 同时要求 ❯ 和 "bypass permissions"，避免 ❯ 出现在
-  // "❯ 1. I am using this for local development" 这类选项菜单里被误判。
-  const final = await captureLast(name, 10);
-  return { ready: isClaudeReady(final), recoveredFullSession: sessionIdlePicked };
 }
 
 /**
@@ -2275,6 +1977,12 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     }
 
     try {
+    // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
+    const adapter = managedFor(info.runtime);
+    if (!adapter) {
+      results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
+      continue;
+    }
     // 1. 看同名 window 数量决定路径。永远不要用 ambiguous name target 做 kill
     //    —— v2.4.2 之前这里走 `kill-window -t master:<name>`，tmux 遇到多份同名
     //    会报 "more than one window" 错误，外层 `.catch(() => {})` 吞掉错误后
@@ -2288,7 +1996,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       recreated = true;
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
-      const exited = await gracefulExit(tmuxName, agentRuntime(info));
+      const exited = await gracefulExit(tmuxName, adapter);
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
@@ -2330,73 +2038,56 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       await Bun.sleep(500);
     }
 
-    // 2. 重新启动 Claude Code — 沿用 registry 中存储的 channelId + 权限配置
+    // 2. 重新启动 — 沿用 registry 中存储的 channelId + 权限配置
     const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
-    // v2.23+ runtime 决定用哪个启动器 + 怎么判就绪（Pi 与 Claude Code 两条路）
-    const runtime = agentRuntime(info);
     // v2.16+ purpose 注入 restart 也带上(会话虽有历史,系统提示常驻比翻聊天记录可靠);
     // resume 写入的占位 purpose("resumed: xxx")无信息量,过滤
     const purposeForInject =
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
-    const cmd = buildAgentCommand({
-      runtime,
-      // v2.23+ 能力档案随 registry 一起复现：restart 必须带上，否则 agent 的能力
-      // 会在重启后静默变回「继承全局」（档案形同虚设）
-      piEnv: normalizePiEnvProfile(info.piEnv),
+    const spec: LaunchSpec = {
+      mode: "resume",
       channelId: info.channelId,
       bridgeUrl: BRIDGE_URL,
-      resumeId: info.sessionId,
-      // Pi 用 --session-id 续会话（open-or-create），Claude Code 用 --resume
       sessionId: info.sessionId,
       displayName,
-      disallowedPreset: info.disallowedPreset,
-      disallowedRaw: info.disallowedRaw,
       effort: info.effort,
-      // 老 agent（feature 前建的）info.permissionMode 为空 → buildClaudeCommand
-      // 回退 bypassPermissions，行为不变。新 agent 沿用 registry 里存的模式。
+      // 老 agent（feature 前建的）info.permissionMode 为空 → 启动器回退 bypassPermissions
       permissionMode: info.permissionMode,
-      // v2.4.20+ restart 沿用 registry 里钉的模型（这是"改全局无效"的解法：
-      // 显式 --model 覆盖 --resume 钉死的会话原模型）。
+      // v2.4.20+ 显式 --model 覆盖 --resume 钉死的会话原模型（"改全局无效"的解法）
       model: info.model,
       purpose: purposeForInject,
       agentName: tmuxName,
-    });
-
-    let started = await startClaudeInWindow(tmuxName, cmd, runtime);
-
-    // v2.7+ 自愈：session 被 bg agent 占用 → --fork-session 分支副本重试，
-    // 就绪后探测 fork 出的新 session id 并回写 registry（否则 watcher/下次
-    // restart 又会盯回被占用的旧 id）。
-    if (!started.ready && started.bgOccupied) {
-      const cwd = info.cwd || process.env.HOME || "/";
-      console.error(`[restart] ${tmuxName} 的 session 被 bg agent 占用，改用 --fork-session 重试`);
-      const before = await listSessionJsonls(cwd);
-      const forkCmd = buildClaudeCommand({
-        channelId: info.channelId,
-        bridgeUrl: BRIDGE_URL,
-        resumeId: info.sessionId,
-        forkSession: true,
-        displayName,
+      extras: {
         disallowedPreset: info.disallowedPreset,
         disallowedRaw: info.disallowedRaw,
-        effort: info.effort,
-        permissionMode: info.permissionMode,
-        model: info.model,
-        purpose: purposeForInject,
-        agentName: tmuxName,
-      });
-      started = await startClaudeInWindow(tmuxName, forkCmd);
+        // v2.23+ 能力档案随 registry 复现，否则重启后静默变回「继承全局」
+        piEnv: normalizePiEnvProfile(info.piEnv),
+      },
+    };
+
+    let started = (await launchInWindow(tmuxName, adapter, spec, { waitShell: true })).result;
+
+    // v2.7+ 自愈：会话被占用（CC 的 bg agent）→ fork 一份副本重试，就绪后探测
+    // 新 session id 回写 registry（否则 watcher / 下次 restart 又会盯回被占用的旧 id）。
+    if (!started.ready && started.reason === "occupied") {
+      const cwd = info.cwd || process.env.HOME || "/";
+      console.error(`[restart] ${tmuxName} 的 session 被 bg agent 占用，改用 fork 重试`);
+      const forked = await launchInWindow(tmuxName, adapter, { ...spec, mode: "fork" }, { waitShell: true, cwd });
+      started = forked.result;
       if (started.ready) {
-        // v2.23.2+ 同 resume --fork:先按 CC sessions 登记拿新 id,目录 diff 兜底
-        const viaCc = await resolveSessionIdForWindow(tmuxName, cwd, { exclude: info.sessionId });
-        const newId = viaCc?.sessionId ?? (await waitForNewSessionId(cwd, before));
+        const found = adapter.discoverSessionId
+          ? await adapter
+              .discoverSessionId({ windowName: tmuxName, cwd, exclude: info.sessionId, baseline: forked.baseline })
+              .catch(() => null)
+          : null;
+        const newId = found?.sessionId;
         if (newId) {
           // v2.8+ fork 换代：旧 session 从 registry 退役，先归档快照
           await archiveSession(tmuxName, cwd, info.sessionId).catch(() => {});
           reg.agents[tmuxName].sessionId = newId;
-          reg.agents[tmuxName].notes = `claude session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
+          reg.agents[tmuxName].notes = `${adapter.noteTag} session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
           await saveRegistry(reg);
-          console.error(`[restart] ${tmuxName} fork 出新 session ${newId.slice(0, 8)}，registry 已回写`);
+          console.error(`[restart] ${tmuxName} fork 出新 session ${newId.slice(0, 8)}（${found.via}），registry 已回写`);
         } else {
           console.error(`[restart] ⚠️ ${tmuxName} fork 成功但未探测到新 session id，registry 未更新`);
         }
@@ -2408,8 +2099,12 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       }
     }
 
-    // v2.5.4: 会话内补发 /model，restart 也是 --resume（同样会漂回 session 原模型）
-    if (started.ready) await enforceSessionModel(tmuxName, info.model);
+    // v2.5.4: 会话内补发 /model，restart 也是 --resume（同样会漂回 session 原模型）。
+    // 只对 in-session 的运行时补发——Pi 的 --model 是启动期权威值，以前这里没排除它，
+    // 会把 `/model <id>` 当普通消息打进 Pi 会话。
+    if (started.ready && adapter.control.modelEnforcement === "in-session") {
+      await enforceSessionModel(tmuxName, info.model);
+    }
 
     // P2（peer 2026-08-09）：cmdRestart 此前全程不写 status——restart 一个
     // stopped agent 进程真起来、频道真注册，但 registry 永远停在 stopped，与
