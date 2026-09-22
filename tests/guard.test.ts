@@ -260,6 +260,7 @@ describe("patterns", () => {
         "web/app/api/secret/route.ts": "export async function GET() { return ok(); }",
         "web/app/api/fine/route.ts": "export async function GET(r) { if (!isAuthed(r)) return no(); }",
         "web/app/api/wrapped/route.ts": 'import { authed } from "@/lib/bff";\nexport const GET = authed(async () => ok());',
+        "web/app/api/wrapped2/route.ts": 'import { withAuth, authedLegacy } from "@/lib/bff";\nexport const GET = withAuth(async () => ok());\nexport const POST = authedLegacy(async () => ok());',
         "web/app/api/fake-wrap/route.ts": "const authed = (h) => h;\nexport const GET = authed(async () => ok());",
         "web/app/api/version/route.ts": "export async function GET() { return ok(); }",
       }),

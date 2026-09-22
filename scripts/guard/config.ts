@@ -116,7 +116,7 @@ export const HINTS: Record<string, string> = {
   dup: "抽成函数复用，别复制；看具体克隆：npx jscpd@5.3.1 src web -f typescript,tsx",
   comments: "注释 ≤6 行、写现行约束；演变史/事故/原话进 commit message",
   catch: "吞错要写一句为什么丢了也没事（≥6 字，占位词不算），能打日志就打日志",
-  route: "web/app/api 路由必须调 isAuthed 或走 web/lib/bff 的 authed / proxyGet / proxyPost；公开路由登记进 scripts/guard/config.ts 的 PUBLIC_ROUTES",
+  route: "web/app/api 路由必须调 isAuthed 或走 web/lib/bff 的 authed / authedLegacy / withAuth / proxyGet / proxyPost / agentAction；公开路由登记进 scripts/guard/config.ts 的 PUBLIC_ROUTES",
   deps: "依赖方向违规：纯函数下沉到 src/lib，运行时状态查询改用注入",
   dead: "未使用的导出：删掉，或者真的用上它",
   twins: "twin 文件不一致：两份同步修改（去注释后逐行比对）",

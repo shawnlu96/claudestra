@@ -78,8 +78,8 @@ export function measurePatterns(files: Files, patterns: PatternDef[] = PATTERNS)
     counts["catch:empty-block"] += e;
     counts["catch:silent-promise"] += s;
     if (e + s) perFile.set(f, e + s);
-    // 鉴权要么直接调 isAuthed，要么走 web/lib/bff 的包装（authed / proxyGet / proxyPost 内部都先验 isAuthed）
-    const viaBff = /from\s+["']@\/lib\/bff["']/.test(src) && /\b(authed|proxyGet|proxyPost|agentAction)\s*\(/.test(src);
+    // 鉴权要么直接调 isAuthed，要么走 web/lib/bff 的包装（authed / authedLegacy / withAuth / proxyGet / proxyPost / agentAction 内部都先验 isAuthed）
+    const viaBff = /from\s+["']@\/lib\/bff["']/.test(src) && /\b(authed|authedLegacy|withAuth|proxyGet|proxyPost|agentAction)\s*\(/.test(src);
     if (/^web\/app\/api\/.+\/route\.ts$/.test(f) && !PUBLIC_ROUTES.includes(f) && !/\bisAuthed\b/.test(src) && !viaBff) {
       counts[`route:${f}`] = 1;
     }
