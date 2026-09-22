@@ -15,6 +15,7 @@ import {
   httpsUrl,
   shellQuote,
   workingHttpsEntry,
+  validateCertCandidate,
   type PlanInput,
   type RemoteAccessReport,
 } from "../src/lib/tailscale";
@@ -215,5 +216,23 @@ describe("小工具", () => {
     expect(workingHttpsEntry(r([{ ...ok, matchesLocal: false }]))).toBeNull();
     expect(workingHttpsEntry(r([{ ...ok, certValid: false }]))).toBeNull();
     expect(workingHttpsEntry(r([{ ...ok, url: "http://100.64.0.1:3333", secure: false, source: "tailnet-ip" }]))).toBeNull();
+  });
+});
+
+describe("validateCertCandidate（续签脚本替换前的闸）", () => {
+  const now = Date.parse("2026-10-01T00:00:00Z");
+  const good = { host: "my-mac.tail0000.ts.net", subjectAltName: "DNS:my-mac.tail0000.ts.net", validTo: "Dec 30 00:00:00 2026 GMT", keyMatches: true, now };
+
+  test("合格 → ok 并给出天数", () => {
+    const r = validateCertCandidate(good);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(Math.round(r.daysLeft)).toBe(90);
+  });
+
+  test("SAN 不对 / 有效期不够 / 私钥不配对 → 都拒绝（保留旧证书）", () => {
+    expect(validateCertCandidate({ ...good, subjectAltName: "DNS:other.tail0000.ts.net" }).ok).toBe(false);
+    expect(validateCertCandidate({ ...good, validTo: "Oct 10 00:00:00 2026 GMT" }).ok).toBe(false);
+    expect(validateCertCandidate({ ...good, keyMatches: false }).ok).toBe(false);
+    expect(validateCertCandidate({ ...good, validTo: "garbage" }).ok).toBe(false);
   });
 });

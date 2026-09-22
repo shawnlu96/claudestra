@@ -228,6 +228,28 @@ export function certVerdict(daysLeft: number): "ok" | "warn" | "fail" {
   return "fail";
 }
 
+/**
+ * 新签出的证书能不能替换旧的（续签脚本用）：SAN 必须含本机 ts.net 名、有效期要够、私钥配对。
+ * 任何一项不过都保留旧证书 —— 换上一张坏证书比临期更糟（入口立刻全断）。
+ */
+export function validateCertCandidate(c: {
+  host: string;
+  subjectAltName: string;
+  validTo: string;
+  keyMatches: boolean;
+  now?: number;
+  minDays?: number;
+}): { ok: true; daysLeft: number } | { ok: false; reason: string } {
+  const sans = c.subjectAltName.split(",").map((x) => x.trim().replace(/^DNS:/, "").toLowerCase());
+  if (!sans.includes(c.host.toLowerCase())) return { ok: false, reason: `证书 SAN 不含 ${c.host}` };
+  const to = Date.parse(c.validTo);
+  if (!Number.isFinite(to)) return { ok: false, reason: "读不出有效期" };
+  const daysLeft = (to - (c.now ?? Date.now())) / 86_400_000;
+  if (daysLeft < (c.minDays ?? 30)) return { ok: false, reason: `新证书只剩 ${Math.floor(daysLeft)} 天` };
+  if (!c.keyMatches) return { ok: false, reason: "私钥与证书不配对" };
+  return { ok: true, daysLeft };
+}
+
 /** `lsof -nP -iTCP:<port> -sTCP:LISTEN -Fcn` 的输出 → [{command, addr}] */
 export function parseLsofListen(out: string): { command: string; addr: string }[] {
   const res: { command: string; addr: string }[] = [];
