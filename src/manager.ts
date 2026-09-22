@@ -15,7 +15,7 @@
 
 import { writeClaudeSettings } from "./lib/session-recall.js";
 import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
-import { readDotenvFileSync } from "./lib/env-file.js";
+import { repoEnvVar } from "./lib/env-file.js";
 import { RUNTIME_DIR, runtimePath, statePath, UPDATE_LOCK } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
@@ -245,7 +245,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   }
 
   // SIGTERM 之前的全局预检：这边起不来就一个进程都不动
-  const bridgePort = process.env.BRIDGE_PORT || String(DEFAULT_BRIDGE_PORT);
+  const bridgePort = repoEnvVar("BRIDGE_PORT", REPO_ROOT) || String(DEFAULT_BRIDGE_PORT);
   const [bypassAccepted, masterSession, bridgeReachable] = await Promise.all([
     readBypassConsent(),
     tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]).then(() => true, () => false),
@@ -1418,8 +1418,7 @@ function unlockRestart(tmuxName: string): void {
  * .env——所以 env 里没有就直接翻 REPO_ROOT/.env）。
  */
 async function readRepoEnvVar(key: string): Promise<string> {
-  if (process.env[key]) return process.env[key]!;
-  return readDotenvFileSync(`${REPO_ROOT}/.env`)?.[key] || "";
+  return repoEnvVar(key, REPO_ROOT);
 }
 
 /** 大总管的工作目录（与 launcher / bridge 同一语义：env / .env 优先，默认仓库里的 master/）。 */

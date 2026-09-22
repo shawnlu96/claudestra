@@ -63,6 +63,19 @@ export function readDotenvFileSync(path: string): Record<string, string> | null 
   }
 }
 
+/**
+ * 安装级变量（BRIDGE_PORT / BRIDGE_BIND / USER_NAME / MASTER_DIR …）：先看 process.env，
+ * 没有再读仓库根的 .env。Bun 只自动加载 **cwd** 的 .env，而 manager 常被大总管从
+ * ~/.claude-orchestrator/master 之类的目录调起；tmux 全局环境又停在 server 创建那一刻、
+ * 缺了后来加的键——直接读 process.env 会拿到默认值（D7-3：master 跑 peer-invite-new
+ * 报「bridge 只监听 127.0.0.1」而 bridge 实际在 *:3847）。
+ * doctor 不用它：doctor 要看的是 daemon 实际拿到的文件内容，终端 export 的值不该掩盖它。
+ */
+export function repoEnvVar(key: string, repoRoot: string, env: Record<string, string | undefined> = process.env): string {
+  if (env[key]) return env[key]!;
+  return readDotenvFileSync(`${repoRoot}/.env`)?.[key] || "";
+}
+
 export function mergeEnvContent(
   existing: string | null,
   updates: Record<string, string>,

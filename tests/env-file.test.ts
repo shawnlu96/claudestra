@@ -2,7 +2,10 @@
  * setup 写 .env：只动向导管的键，手加的键和注释在重跑时不能丢。
  */
 import { describe, test, expect } from "bun:test";
-import { mergeEnvContent, parseDotenv, parseEnvRaw } from "../src/lib/env-file.ts";
+import { mergeEnvContent, parseDotenv, parseEnvRaw, repoEnvVar } from "../src/lib/env-file.ts";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { resolveBridgePort, DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.ts";
 
 const HEADER = "# Claudestra 运行时配置 (由 bun run setup 生成)";
@@ -67,5 +70,16 @@ describe("resolveBridgePort", () => {
     expect(resolveBridgePort({ BRIDGE_PORT: "abc" })).toBe(DEFAULT_BRIDGE_PORT);
     expect(resolveBridgePort({ BRIDGE_PORT: "70000" })).toBe(DEFAULT_BRIDGE_PORT);
     expect(resolveBridgePort({ BRIDGE_PORT: "13847" })).toBe(13847);
+  });
+});
+
+describe("repoEnvVar（manager 从任意 cwd 调起也能拿到安装级变量）", () => {
+  test("process.env 优先；没有再读仓库根 .env；都没有 → 空串", () => {
+    const root = mkdtempSync(join(tmpdir(), "repoenv-"));
+    writeFileSync(join(root, ".env"), 'BRIDGE_BIND="0.0.0.0"\nUSER_NAME=shawn\n');
+    expect(repoEnvVar("BRIDGE_BIND", root, {})).toBe("0.0.0.0");
+    expect(repoEnvVar("BRIDGE_BIND", root, { BRIDGE_BIND: "127.0.0.1" })).toBe("127.0.0.1");
+    expect(repoEnvVar("MASTER_DIR", root, {})).toBe("");
+    expect(repoEnvVar("USER_NAME", join(root, "nope"), {})).toBe("");
   });
 });
