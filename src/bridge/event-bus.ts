@@ -18,6 +18,8 @@ export type BridgeEventType =
   | "turn_duration"
   | "agent_status"
   | "reply_pending" // v2.20.2+ watcher 见到 reply 工具调用 → web 显示「正在回复…」
+  // 已不再发出：auto 权限模式的「临时放行」链已删（启动路径早把 auto 归一成 bypass）。
+  // 类型保留——SSE 事件类型是 additive-only 合同，外部消费者的分支不该因此编译失败。
   | "auto_deny"
   | "question"
   // AUQ 已应答/取消（Discord 按钮或 /api/v1 answer 端点触发），web 前端

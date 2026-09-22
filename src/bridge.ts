@@ -189,8 +189,6 @@ import {
   paneLooksIdle,
   parseModalOptions,
   detectArrowNavModal,
-  detectPermissionMode,
-  btabStepsTo,
   probeTuiContract,
   MASTER_SESSION,
   type ArrowNavKind,
@@ -2430,72 +2428,6 @@ discord.on("interactionCreate", async (interaction: Interaction) => {
           }).catch(() => {});
         } catch (e) {
           await interaction.followUp({ content: `❌ 重启失败: ${(e as Error).message}`, ephemeral: true }).catch(() => {});
-        }
-        return;
-      }
-
-      // v2.2.0+: auto 拦截「临时放行并重试」—— Shift+Tab 运行时切到 bypass + 注入重试
-      if (id.startsWith("auto_allow:") || id.startsWith("auto_revert:")) {
-        const isAllow = id.startsWith("auto_allow:");
-        const targetChannelId = id.slice((isAllow ? "auto_allow:" : "auto_revert:").length);
-        const target = isAllow ? "bypassPermissions" : "auto";
-        try {
-          const listResult = await runManager("list");
-          const agent = (listResult.agents || []).find((a: any) => a.channelId === targetChannelId);
-          if (!agent) {
-            await interaction.followUp({ content: "❌ 找不到对应 agent", ephemeral: true }).catch(() => {});
-            return;
-          }
-          const win = `master:${agent.name}`;
-          const pane = await tmuxCapture(windowTarget(agent.name), 12);
-          const cur = detectPermissionMode(pane);
-          if (!cur) {
-            await interaction.followUp({ content: "❌ 认不出当前权限模式，请手动 shift+tab 切", ephemeral: true }).catch(() => {});
-            return;
-          }
-          const steps = btabStepsTo(cur, target);
-          if (steps < 0) {
-            await interaction.followUp({
-              content: `❌ 切不到 ${target}（这个 agent 启动没带 allow-flag？需 restart 一次更新）`,
-              ephemeral: true,
-            }).catch(() => {});
-            return;
-          }
-          // 发 steps 下 Shift+Tab（tmux 里是 BTab）
-          for (let i = 0; i < steps; i++) {
-            await tmuxRaw(["send-keys", "-t", win, "BTab"]);
-            await Bun.sleep(150);
-          }
-          await Bun.sleep(300);
-          const after = detectPermissionMode(await tmuxCapture(windowTarget(agent.name), 12));
-          console.log(`⚡ auto_${isAllow ? "allow" : "revert"}: ${agent.name} ${cur}→${after} (${steps} BTab)`);
-
-          if (isAllow) {
-            // 切到 bypass 后，注入「重试」让 agent 重做被拦的操作
-            const client = clients.get(targetChannelId);
-            if (client) {
-              startTypingWithSafety(targetChannelId);
-              client.ws.send(JSON.stringify({
-                type: "message",
-                content: `[系统] 刚才被 auto 模式拦下的操作，用户已临时放行（已切到 bypass permissions）。请重试那个操作。完成后简单说一句，方便用户把你切回 auto。`,
-                meta: { chat_id: targetChannelId, message_id: "", user: interaction.user.username, user_id: interaction.user.id, ts: new Date().toISOString() },
-              }));
-            }
-            const note = after === "bypassPermissions" ? "已临时切到 bypass 并让它重试" : `尝试切 bypass（当前检测=${after || "?"}）并让它重试`;
-            await interaction.message?.edit({
-              content: `⚡ ${agent.name}：${note}。完事点下面切回 auto。`,
-              components: buildComponents([
-                { type: "buttons", buttons: [{ id: `auto_revert:${targetChannelId}`, label: "切回 auto", emoji: "🔒", style: "secondary" }] },
-              ]),
-            }).catch(() => {});
-          } else {
-            await interaction.message?.edit({
-              content: after === "auto" ? `🔒 ${agent.name} 已切回 auto。` : `🔒 ${agent.name} 切回 auto（当前检测=${after || "?"}）。`,
-              components: [],
-            }).catch(() => {});
-          }
-        } catch (e) {
-          await interaction.followUp({ content: `❌ 操作失败: ${(e as Error).message}`, ephemeral: true }).catch(() => {});
         }
         return;
       }

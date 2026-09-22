@@ -303,40 +303,6 @@ export async function hasRecentScheduleWakeup(
   }
 }
 
-// v2.2.0+: auto-deny 通知去重。一次 deny 可能只产生一条 tool_result，但 agent 之后
-// 又试别的被拦操作会再产生 → 15s 窗口内每个 channel 只弹一次「临时放行」按钮。
-const lastAutoDenyPost = new Map<string, number>();
-async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: string) {
-  if (isLocalChannel(state.channelId)) return;
-  const now = Date.now();
-  if (now - (lastAutoDenyPost.get(state.channelId) || 0) < 15_000) return;
-  lastAutoDenyPost.set(state.channelId, now);
-  try {
-    const text = [
-      `🚫 **${state.agentName}** 一个操作被 auto 模式拦下了`,
-      reason ? `原因：${reason}` : "",
-      `如果这确实是你要做的，点下面临时放行（切 bypass）并让它重试。`,
-    ].filter(Boolean).join("\n");
-    // 直接传 **raw** components 给 discordReply，它内部自己 buildComponents 一次。
-    // v2.2.0~v2.3.2 这里曾自己 buildComponents 一次再传给 discordReply → 双重 build：
-    // discordReply 第二次拿到的是 ActionRowBuilder（不是 raw {type:"buttons"...}），
-    // buildComponents 两个分支都不命中 → 返回空数组 → 按钮没附上去。owner 在 alipan
-    // 频道实测：两条 deny 文字都到了，但 `GET /channels/.../messages/<id>` 返回的
-    // `components` 为 `[]`，确认双重 build 吃掉了按钮。
-    await discordReply(discord, state.channelId, text, undefined, [
-      {
-        type: "buttons",
-        buttons: [
-          { id: `auto_allow:${state.channelId}`, label: "临时放行并重试", emoji: "⚡", style: "primary" },
-        ],
-      },
-    ]);
-    console.log(`🚫 auto-deny 通知 agent=${state.agentName} reason="${reason.slice(0, 60)}"`);
-  } catch (e) {
-    console.error("auto-deny 通知失败:", e);
-  }
-}
-
 /**
  * 处理 jsonl 新增数据：读新字节、解析 entry、推 tool/text 到队列。
  * 并发时以 state.processing 作锁，**且后到的调用必须等前一次跑完**（而不是 bail）—
@@ -385,34 +351,6 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
         // （工具摘要/文本/状态/思考时长）一行都不用改
         const entry = translateSessionLine(state.runtime, line);
         if (!entry) continue;
-
-        // v2.2.0+: auto-mode classifier 拦截检测。被拦的操作在 jsonl 里是一条
-        // type:"user" 的 tool_result（is_error），内容稳定含 "denied by the Claude
-        // Code auto mode classifier. Reason: …"。检测到 → 频道弹「临时放行」按钮。
-        //
-        // v2.5.5+: 必须查 is_error === true。之前只做字符串正则 → agent 一 Read/
-        // grep 到**含这行字面量的源码**（比如本文件自己），tool_result 里带着这
-        // 句话就误报"被 auto 拦了"，明明 agent 全程 bypass 也弹放行按钮（owner
-        // 2026-07-09 实测：claudestra agent 读 jsonl-watcher.ts 触发）。真 deny
-        // 的 tool_result 一定 is_error，成功的 Read/Bash 结果不会。
-        if (entry.type === "user") {
-          const uc = entry.message?.content;
-          if (Array.isArray(uc)) {
-            for (const b of uc) {
-              if (
-                b?.type === "tool_result" &&
-                b.is_error === true &&
-                typeof b.content === "string" &&
-                /denied by the Claude Code auto mode classifier/i.test(b.content)
-              ) {
-                const rm = b.content.match(/Reason:\s*([\s\S]+?)(?:\.\s+If you|\.\.|$)/i);
-                const reason = rm ? rm[1].trim().replace(/\s+/g, " ").slice(0, 220) : "";
-                maybePostAutoDeny(discord, state, reason).catch(() => {});
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "auto_deny", data: { reason } });
-              }
-            }
-          }
-        }
 
         // 显示思考时长（仅展示，不用于完成判断）
         if (entry.type === "system" && entry.subtype === "turn_duration" && entry.durationMs) {

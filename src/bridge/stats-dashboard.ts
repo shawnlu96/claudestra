@@ -12,7 +12,6 @@
 
 import {
   EmbedBuilder,
-  PermissionFlagsBits,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -20,7 +19,7 @@ import {
   type Client,
   type TextChannel,
 } from "discord.js";
-import { existsSync, readFileSync, statSync } from "fs";
+import { statSync } from "fs";
 import {
   tmuxRaw,
   MASTER_SESSION,
@@ -740,28 +739,19 @@ export function autoCompactDecision(p: {
 
 function loadAutoCompactThreshold(): number {
   try {
-    // v2.20.2+ Claudestra 独立配置优先(设置界面写这里;CC 的 settings.json 会拒
-    // 未知字段,只作旧安装兼容兜底)
+    // 只读 Claudestra 自己的 config.json（设置界面写这里）。曾兜底读 ~/.claude/settings.json
+    // 的 autoCompactWindow——那是 Claude Code 自己认的键（遗留的 750000 让 CC 约 720K 就裸压，
+    // b294b84 已移除），拿它当我们的阈值等于两套语义混用，且设置页显示「未设置」却在生效。
     const v = readConfigSync().autoCompact?.window;
     if (v === 0) return 0;
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
-  } catch { /* fallback */ }
-  try {
-    const raw = readFileSync(`${process.env.HOME || ""}/.claude/settings.json`, "utf8");
-    const cfg = JSON.parse(raw);
-    const v = cfg?.autoCompactWindow;
-    if (v === false || v === 0) return 0; // 显式关闭
-    const n = typeof v === "number" ? v : Number(v);
-    if (Number.isFinite(n) && n > 0) return n;
-  } catch {
-    // 没有全局配置或解析失败，用默认值
-  }
+  } catch { /* 用默认 */ }
   return DEFAULT_AUTO_COMPACT_WINDOW;
 }
 
 /** 闲置门槛(owner 2026-08-26「不然我干着干着就 compact 了」):超线只是必要条件,
- *  还得**闲置满 N 小时**才注入 /save-compact。~/.claude/settings.json 的
- *  autoCompactIdleHours 可调,0/false = 不要闲置门槛(回到超线即触发)。 */
+ *  还得**闲置满 N 小时**才注入 /save-compact。config.json 的 autoCompact.idleHours
+ *  可调,0 = 不要闲置门槛(回到超线即触发)。 */
 const DEFAULT_AUTO_COMPACT_IDLE_HOURS = 3;
 
 function loadAutoCompactIdleMs(): number {
@@ -771,16 +761,9 @@ function loadAutoCompactIdleMs(): number {
     const v = cfg.autoCompact?.idleHours;
     if (v === 0) return 0;
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return v * 3600_000;
-  } catch { /* fallback */ }
-
-  // 旧安装兼容:曾经尝试放在 ~/.claude/settings.json(会被 CC 校验拒绝,保留读取兜底)。
-  try {
-    const raw = readFileSync(`${process.env.HOME || ""}/.claude/settings.json`, "utf8");
-    const v = JSON.parse(raw)?.autoCompactIdleHours;
-    if (v === false || v === 0) return 0;
-    const n = typeof v === "number" ? v : Number(v);
-    if (Number.isFinite(n) && n > 0) return n * 3600_000;
   } catch { /* 用默认 */ }
+  // 曾兜底读 ~/.claude/settings.json 的 autoCompactIdleHours：CC 校验会拒这个未知字段，
+  // 没有任何代码再写它，已删。
   return DEFAULT_AUTO_COMPACT_IDLE_HOURS * 3600_000;
 }
 
