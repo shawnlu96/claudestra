@@ -12,6 +12,7 @@ import { isNativeShell, nativeServerConfig } from "@/lib/native";
 import { PeersModal } from "./peers-modal";
 import { CronModal } from "./cron-modal";
 import { useBackgroundJob, JobLog } from "./background-job";
+import { RemoteAccessSection } from "./remote-access-section";
 
 /** 选中的图片 → 128×128 居中裁剪 jpeg data URL（~10-20KB,存库直出）。 */
 async function fileToAvatar(file: File): Promise<string> {
@@ -255,7 +256,7 @@ function TotpSection() {
  * 不可爆破的因素，且体验是负成本（比打密码快）。
  *
  * ⚠️ rpID 约束：WebAuthn 凭据绑定域名且不可跨域。这套 web 有多个入口
- * （claude.sunstriker.cc / Tailscale MagicDNS / localhost），每个域要各注册
+ * （claude.example.com / Tailscale MagicDNS / localhost），每个域要各注册
  * 一个；明文 IP 入口浏览器根本不给 API，此时 supported=false 不展示注册。
  */
 function PasskeySection() {
@@ -919,6 +920,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         <BackendUpdateSection />
         <RestartAllSection />
         {isNativeShell() && open && <ShellServerSection />}
+        {open && <RemoteAccessSection />}
         {/* ── 界面(外观 + 语言)─────────────── */}
         <Section
           title={t("外观")}
