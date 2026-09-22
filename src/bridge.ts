@@ -171,7 +171,7 @@ import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
-import { interruptWindow } from "./lib/runtimes/window-ops.js";
+import { interruptWindow, preemptIfBusy, stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
@@ -181,6 +181,7 @@ import {
   detectSessionIdlePrompt,
   tmuxRaw,
   paneLooksIdle,
+  isIdle,
   probeTuiContract,
   MASTER_SESSION,
   paneLooksWorking,
@@ -1509,19 +1510,9 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       const listResult = await runManager("list");
       const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
       const targetWindow = agent ? `master:${agent.name}` : `master:0`;
-      const { idleVerdict } = await import("./lib/tmux-helper.js");
-      // 用三态判断：契约可疑（CC 可能改了底部文案）时宁可不打断。旧的两态版本在
-      // 文案漂移时会恒判"在忙" → 每条消息都误发一次 Ctrl+C，静默打断用户的工作。
-      const verdict = await idleVerdict(targetWindow);
-      if (verdict === "unknown") {
-        console.warn(`⚠️ ${targetWindow} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
-      }
-      if (verdict === "busy") {
-        console.log(`⚡ 新消息到达但 ${targetWindow} 还在忙，打断`);
-        // 按键由运行时决定（空闲的 Codex 收到 C-c 会直接退出）
-        await interruptWindow(targetWindow, agent?.runtime).catch(() => {});
-        await Bun.sleep(400);
-      }
+      // 三态判断（契约可疑时宁可不打断）；只对 preemptOnHumanMessage + paneHeuristics 的运行时（CC），
+      // Pi / Codex 跳过——它们套 CC 判据恒判 busy，每条消息都会被误发打断键
+      if (await preemptIfBusy(targetWindow, agent?.runtime)) await Bun.sleep(400);
     } catch { /* non-critical */ }
 
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
@@ -2950,13 +2941,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
             if (detectRuntimePermissionPrompt(pane) || detectSessionIdlePrompt(pane)) {
               console.log(`🏁 pane 有弹窗，跳过完成通知: channel=${channelId} agent=${agent.name}`);
               shouldNotify = false;
-            } else {
-              const { isIdle } = await import("./lib/tmux-helper.js");
-              const idle = await isIdle(target);
-              if (!idle) {
-                console.log(`🏁 Stop 触发但 pane 不是 ❯ idle 状态，Claude 还在工作 → 跳过这次通知，等下一个 Stop: channel=${channelId} agent=${agent.name}`);
-                shouldNotify = false;
-              }
+            } else if (stopNeedsPaneRecheck(agent.runtime) && !(await isIdle(target))) {
+              // 只有 idleSource=pane（CC）才看屏幕复核；hook 驱动的（Pi / Codex）屏幕没有 ❯，直接信 Stop
+              console.log(`🏁 Stop 触发但 pane 不是 ❯ idle 状态，Claude 还在工作 → 跳过这次通知，等下一个 Stop: channel=${channelId} agent=${agent.name}`);
+              shouldNotify = false;
             }
             // v2.4.17+ 检测 ScheduleWakeup：新版 Claude Code 把任务包成
             // run_in_background bash + ScheduleWakeup 排队回调，turn 干净结束 →
