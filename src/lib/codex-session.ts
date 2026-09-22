@@ -185,8 +185,16 @@ function codexItemToolUse(item: AnyRecord): { id: string; name: string; input: A
       const path = typeof item.path === "string" ? item.path.replace(/^file:\/\//, "") : "";
       return { id, name: "Read", input: { file_path: path } };
     }
-    case "Extension":
+    case "Extension": {
+      // web.search 带 query（多条查询时是截断后的拼接）→ WebSearch 卡片显示查询词
+      if (item.kind === "web.search") {
+        const action = item.action && typeof item.action === "object" ? (item.action as AnyRecord) : {};
+        const query = [item.query, action.query, Array.isArray(action.queries) ? action.queries[0] : undefined]
+          .find((q) => typeof q === "string" && q.trim());
+        return { id, name: "WebSearch", input: { query: (query as string | undefined) ?? "" } };
+      }
       return { id, name: String(item.kind ?? "extension"), input: {} };
+    }
     default:
       // UserMessage / AgentMessage 与 response_item 重复；Reasoning 恒空；HookPrompt 由 response_item 的
       // <hook_prompt> 承担

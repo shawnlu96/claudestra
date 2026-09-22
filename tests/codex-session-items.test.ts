@@ -99,3 +99,16 @@ test("历史面板读得出 Codex 的 reply（经 session-source 首行嗅探认
   expect(users).toContain("hello from web");
   expect(users.some((t: string) => t.includes("AGENTS.md"))).toBe(false);
 });
+
+test("Extension web.search → WebSearch{query}；其它扩展按 kind 命名", () => {
+  // 形状取自 0.153 rollout（结果数组省略）
+  const line = (item: Record<string, unknown>) =>
+    JSON.stringify({ timestamp: "2026-09-23T00:00:00Z", type: "event_msg", payload: { type: "item_completed", item } });
+  const tu = (item: Record<string, unknown>) =>
+    (codexLineToClaudeShape(line(item)) as any)?.message?.content?.[0];
+  expect(tu({ type: "Extension", kind: "web.search", id: "exec-1", query: "bun test timeout", action: { type: "search", query: null, queries: ["bun test timeout"] } }))
+    .toEqual({ type: "tool_use", id: "exec-1", name: "WebSearch", input: { query: "bun test timeout" } });
+  expect(tu({ type: "Extension", kind: "web.search", id: "exec-2", action: { type: "search", queries: ["q1", "q2"] } })?.input)
+    .toEqual({ query: "q1" });
+  expect(tu({ type: "Extension", kind: "image_gen.generation", id: "exec-3" })?.name).toBe("image_gen.generation");
+});
