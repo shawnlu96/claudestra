@@ -4,6 +4,7 @@
  * 全部经 CodexAdapterDeps 注入：单测换成假的，scripts/codex-adapter-e2e.ts 换成独立 tmux
  * socket 上的实现，生产用 defaultCodexDeps()。
  */
+import { resolveBridgePort } from "../bridge-url.js";
 import { closeSync, openSync, readSync } from "node:fs";
 import { resolveCodexBinary } from "../codex-launch.js";
 import { findCodexSessionPath } from "../codex-session.js";
@@ -86,7 +87,7 @@ export function defaultCodexDeps(): CodexAdapterDeps {
   };
 }
 
-/** ws://host:3847 → "3847"（typing-hook 靠 BRIDGE_PORT 找 bridge） */
+/** ws://host:<port> → "<port>"（typing-hook 靠 BRIDGE_PORT 找 bridge） */
 export function bridgePortOf(bridgeUrl: string): string {
   try {
     const u = new URL(bridgeUrl);
@@ -94,5 +95,5 @@ export function bridgePortOf(bridgeUrl: string): string {
   } catch {
     /* BRIDGE_URL 不是合法 URL：落到下面的环境变量 / 默认端口 */
   }
-  return process.env.BRIDGE_PORT || "3847";
+  return String(resolveBridgePort());
 }
