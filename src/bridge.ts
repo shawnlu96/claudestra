@@ -172,7 +172,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest, forceRefr
 import { parseAuqPane } from "./lib/auq-pane.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { hangsPendingReply, ownsPendingReply } from "./lib/pending-reply-scope.js";
+import { hangsPendingReply, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, agentRuntime, type AgentRuntime } from "./lib/registry.js";
@@ -919,7 +919,12 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     //   只看它就等于把每一条 Web/API 消息的 pendingReply 也取消掉，「忘了 reply」的
     //   Stop 拦截对整个 Web 端失效。判据见 lib/pending-reply-scope.ts。
     if (hangsPendingReply(env.intent, env.from.kind, env.meta.skipInterAgentWatchdog)) {
-      pendingReplies.set(replyBackChannel, {
+      // ⚠ key 是 **threadId**（每条请求天生唯一，与 pendingThreads 对齐），不是回信
+      //   地址。曾以回信地址为 key，而 Web/API 用户的地址是 `api:<tokenId>`——同一个
+      //   token 跟几个 agent 说话共用一个 key，于是 ①别人回复会销掉这个 agent 的欠账
+      //   ②同时问两个 agent 时后挂的覆盖先挂的。两条 2026-09-22 都实测到了。
+      //   下面所有消费点除了销账都是「遍历 + 按 targetWs 过滤」，不依赖 key 形状。
+      pendingReplies.set(env.meta.threadId, {
         msgId: env.meta.messageId,
         ts: Date.now(),
         intendedReplyChannel: replyBackChannel,
@@ -2955,17 +2960,14 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "reply": {
       // v1.9.24+: 在任何 await 之前先删 pending。这样即使 Stop hook 在我们还在
       // 打 Discord API 的时候到达，后面的 cleanup 路径不会误触发。
-      // ⚠ 只能销**自己欠的**（与 send_to_agent 分支同一条纪律，判据见
-      //   lib/pending-reply-scope.ts）。key 是回信地址，而 Web/API 用户的回信地址
-      //   是 `api:<tokenId>`——**同一个 token 跟几个 agent 说话，共用这一个 key**。
-      //   无条件 delete ⇒ 我在自己频道回一句，把别的 agent 欠这个用户的债也销了；
-      //   那个 agent 的 Stop 于是不再被 reply-nudge 拦，它「只打字不 reply」就此
-      //   无人纠正，用户看到的是整条回复全是灰字旁白、没有正文。
-      //   2026-09-22 实测：10:59:48 用户问 mm-pm（pending 挂 mm-pm）→ 11:00:0x
-      //   claudestra-debug 在自己频道 reply（chatId 同为 api:tok_a375704d，销账）
-      //   → 11:01:00 mm-pm Stop 零拦截，1267 字答复全渲染成旁白。
-      if (ownsPendingReply(pendingReplies.get(msg.chatId)?.targetWs, ws)) {
-        pendingReplies.delete(msg.chatId);
+      // ⚠ 只销**自己欠这个地址**的那些账（判据见 lib/pending-reply-scope.ts）。
+      //   曾经是 `delete(msg.chatId)`：key 是回信地址，而 Web/API 用户的地址是
+      //   `api:<tokenId>`——同一个 token 跟几个 agent 说话共用这一个 key，于是我在
+      //   自己频道回一句，就把别的 agent 欠这个用户的债一起销了；那个 agent 的 Stop
+      //   不再被 reply-nudge 拦，它「只打字不 reply」无人纠正 ⇒ 用户看到整条回复全是
+      //   灰字旁白、没有正文（2026-09-22 实测：mm-pm 的 1267 字答复就是这么灰的）。
+      for (const key of pendingKeysOwedBy(pendingReplies.entries(), ws, msg.chatId)) {
+        pendingReplies.delete(key);
       }
 
       try {
@@ -3512,8 +3514,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         //   pendingReplies[B 的频道].targetWs 是 C——这时 A 给 B 发消息若无条件
         //   delete，就把 C 的欠账销了，C 的 Stop 不再被拦、B 永远等不到答复。
         //   （同 lib/pushback-scope.ts 的纪律，判据见 lib/pending-reply-scope.ts。）
-        if (ownsPendingReply(pendingReplies.get(target.channelId)?.targetWs, ws)) {
-          pendingReplies.delete(target.channelId);
+        for (const key of pendingKeysOwedBy(pendingReplies.entries(), ws, target.channelId)) {
+          pendingReplies.delete(key);
         }
 
         const delivery = await deliver(env);
@@ -3893,9 +3895,13 @@ async function handleHookRequest(req: Request): Promise<Response> {
         if (pick) {
           const p = pendingReplies.get(pick.key);
           if (p) p.nudgedAt = Date.now();
-          console.log(`🔔 Stop 拦截补 reply: channel=${channelId} 未回复 ${pick.key}(挂起 ${Math.round((Date.now() - pick.ts) / 1000)}s)`);
-          recordMetric("reply_nudge", { agent: await agentLabelForChannelAsync(channelId), meta: { chatId: pick.key } });
-          return Response.json({ block: true, reason: nudgeReason(pick.key) });
+          // ⚠ 提醒文案里要写的是**回信地址**（agent 得知道 reply 给谁）。key 现在是
+          //   threadId，不再等于地址，所以从条目里取——写成 pick.key 会让 agent 看到
+          //   一句 `chat_id=thr_…`，照着填必然发不出去。
+          const chatId = p?.intendedReplyChannel ?? pick.key;
+          console.log(`🔔 Stop 拦截补 reply: channel=${channelId} 未回复 ${chatId}(挂起 ${Math.round((Date.now() - pick.ts) / 1000)}s)`);
+          recordMetric("reply_nudge", { agent: await agentLabelForChannelAsync(channelId), meta: { chatId } });
+          return Response.json({ block: true, reason: nudgeReason(chatId) });
         }
       }
     }

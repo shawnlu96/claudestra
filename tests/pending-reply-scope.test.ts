@@ -7,7 +7,7 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { hangsPendingReply, ownsPendingReply } from "../src/lib/pending-reply-scope.js";
+import { hangsPendingReply, ownsPendingReply, pendingKeysOwedBy } from "../src/lib/pending-reply-scope.js";
 
 describe("hangsPendingReply", () => {
   test("Web/API 入站：即便 skipInterAgentWatchdog=true 也要挂（补 reply 拦截靠它）", () => {
@@ -69,5 +69,49 @@ describe("ownsPendingReply", () => {
     // pendingReplies["api:tok_…"] 的欠账人是 mm-pm
     expect(ownsPendingReply(wsMmPm, wsDebug)).toBe(false); // debug 回复 → 不许销
     expect(ownsPendingReply(wsMmPm, wsMmPm)).toBe(true);   // mm-pm 自己回复 → 销
+  });
+});
+
+/**
+ * key 从「回信地址」改成 threadId 之后，销账一律按「欠账人 + 回信地址」找。
+ *
+ * 这两格就是 2026-09-22 实测那两层后果：
+ *   ① 别的 agent 回复同一个 Web 用户，不能销掉这个 agent 的欠账；
+ *   ② 同一个 token 同时问两个 agent，两条账要同时存在（旧 key 下后挂的会覆盖先挂的）。
+ */
+describe("pendingKeysOwedBy", () => {
+  const wsDebug = { id: "claudestra-debug" };
+  const wsMmPm = { id: "mm-pm" };
+  const WEB = "api:tok_a375704d";
+
+  /** 同一个 Web token 同时问了两个 agent —— 旧 key 下这是不可能存在的状态 */
+  const book = (): [string, { targetWs: unknown; intendedReplyChannel: string }][] => [
+    ["thr_1", { targetWs: wsMmPm, intendedReplyChannel: WEB }],
+    ["thr_2", { targetWs: wsDebug, intendedReplyChannel: WEB }],
+    ["thr_3", { targetWs: wsMmPm, intendedReplyChannel: "1546121533422964768" }],
+  ];
+
+  test("只销自己欠这个地址的那条", () => {
+    expect(pendingKeysOwedBy(book(), wsDebug, WEB)).toEqual(["thr_2"]);
+    expect(pendingKeysOwedBy(book(), wsMmPm, WEB)).toEqual(["thr_1"]);
+  });
+
+  test("地址不同的欠账不动（同一个 agent 可以同时欠 Web 和 Discord）", () => {
+    expect(pendingKeysOwedBy(book(), wsMmPm, "1546121533422964768")).toEqual(["thr_3"]);
+  });
+
+  test("同一个 agent 欠同一个地址两条（两个 thread）→ 一起销", () => {
+    const two: [string, { targetWs: unknown; intendedReplyChannel: string }][] = [
+      ["thr_a", { targetWs: wsMmPm, intendedReplyChannel: WEB }],
+      ["thr_b", { targetWs: wsMmPm, intendedReplyChannel: WEB }],
+    ];
+    expect(pendingKeysOwedBy(two, wsMmPm, WEB)).toEqual(["thr_a", "thr_b"]);
+  });
+
+  test("没欠账 / 认不出欠账人 / 地址为空 → 什么都不销", () => {
+    expect(pendingKeysOwedBy(book(), { id: "someone-else" }, WEB)).toEqual([]);
+    expect(pendingKeysOwedBy(book(), undefined, WEB)).toEqual([]);
+    expect(pendingKeysOwedBy(book(), null, WEB)).toEqual([]);
+    expect(pendingKeysOwedBy(book(), wsMmPm, "")).toEqual([]);
   });
 });

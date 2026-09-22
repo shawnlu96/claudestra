@@ -39,3 +39,37 @@ export function ownsPendingReply(pendingTargetWs: unknown, senderWs: unknown): b
   if (pendingTargetWs === undefined || pendingTargetWs === null) return false;
   return pendingTargetWs === senderWs;
 }
+
+/** `pendingReplies` 里判断归属只需要这两个字段 */
+export interface OwedEntry {
+  /** 欠这条回复的 agent 的 ws */
+  targetWs: unknown;
+  /** 该回给谁（Discord 频道 id，或 Web/API 的 `api:<tokenId>`） */
+  intendedReplyChannel: string;
+}
+
+/**
+ * 「这个 agent 欠这个地址的那些账」的 key 列表。
+ *
+ * ⚠ 为什么不能按地址直接 `get`/`delete`：`pendingReplies` 曾以**回信地址**为 key，
+ * 而 Web/API 用户的回信地址是 `api:<tokenId>`——**同一个 token 跟几个 agent 说话
+ * 共用这一个 key**。后果有两层，2026-09-22 两条都实测到了：
+ *   1. 任何一个 agent 回复这个用户，`delete(chatId)` 就把别的 agent 的欠账一起销了
+ *      （mm-pm 的 1267 字答复因此全渲染成灰字旁白——它的 Stop 拦截被别人拆了）；
+ *   2. 同一个 token **同时**问两个 agent 时，后挂的直接覆盖先挂的，先被问的那个
+ *      即使没人 reply 也不会被拦。
+ * 所以 key 改成 threadId（每条请求天生唯一，与 `pendingThreads` 对齐），销账一律
+ * 走这里：**按「欠账人 + 回信地址」找**，找出几条销几条。
+ */
+export function pendingKeysOwedBy<T extends OwedEntry>(
+  entries: Iterable<[string, T]>,
+  debtorWs: unknown,
+  replyChannel: string,
+): string[] {
+  if (debtorWs === undefined || debtorWs === null || !replyChannel) return [];
+  const keys: string[] = [];
+  for (const [key, p] of entries) {
+    if (p.targetWs === debtorWs && p.intendedReplyChannel === replyChannel) keys.push(key);
+  }
+  return keys;
+}
