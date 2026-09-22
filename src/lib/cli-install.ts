@@ -80,9 +80,28 @@ export const DAEMONS: DaemonSpec[] = [
  */
 const GENERATED_MARKER = "ClaudestraGenerated";
 
+/**
+ * 我们**历史上生成过**的 web plist 长什么样（用来认出「标记出现之前生成的那些」）。
+ *
+ * ⚠ 光有标记不够 —— 标记是 2026-09-22 才加的，在那之前生成的 plist 一个标记都没有，
+ * 于是被永远当成「用户手写的」保护起来、再也更新不了。试装现场就卡死在这：
+ * install-cli 回 `keptExisting: true`，而那份文件正是上一版生成的坏文件
+ * （`env: node: No such file or directory`）。
+ *
+ * 判据只认**独立的绝对路径**元素，不做子串匹配：用户手写的那种
+ * `/bin/sh -c 'exec ./node_modules/.bin/next start -p 3333'` 里虽然也出现
+ * `./node_modules/.bin/next`，但它是一整条命令字符串、不是绝对路径元素，
+ * 所以不会被误判成我们的（实测 owner 本机那份仍被判为用户手写）。
+ */
+const LEGACY_GENERATED_ARGV = [
+  /<string>\/[^<]*\/node_modules\/\.bin\/next<\/string>/,
+  /<string>\/[^<]*\/node_modules\/next\/dist\/bin\/next<\/string>/,
+];
+
 /** 这份 plist 是我们自己生成的吗（不是 ⇒ 用户手写，永不覆盖） */
 export function isGeneratedPlist(content: string): boolean {
-  return content.includes(`<key>${GENERATED_MARKER}</key>`);
+  if (content.includes(`<key>${GENERATED_MARKER}</key>`)) return true;
+  return LEGACY_GENERATED_ARGV.some((re) => re.test(content));
 }
 
 /** web 前端的默认端口（web/package.json 的 `start` 脚本没写明时用它） */

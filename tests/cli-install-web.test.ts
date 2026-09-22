@@ -129,6 +129,25 @@ describe("isGeneratedPlist", () => {
   test("空内容 / 读不出来当成用户的（保守方向：宁可不覆盖）", () => {
     expect(isGeneratedPlist("")).toBe(false);
   });
+
+  // ⚠ 标记是 2026-09-22 才加的。**在那之前生成的 plist 一个标记都没有** —— 只认标记
+  // 的话它们会被永远当成「用户手写」保护起来、再也更新不了。试装现场就卡死在这：
+  // install-cli 回 keptExisting:true，而那份正是上一版生成的坏文件。
+  test("标记出现之前生成的（shim 形式）也要认出来，否则修复永远进不去", () => {
+    const legacy = `<array><string>/Users/x/repos/claudestra/web/node_modules/.bin/next</string><string>start</string></array>`;
+    expect(isGeneratedPlist(legacy)).toBe(true);
+  });
+
+  test("标记出现之前生成的（node <script> 形式）同样认", () => {
+    const legacy = `<array><string>/opt/homebrew/bin/node</string><string>/Users/x/web/node_modules/next/dist/bin/next</string></array>`;
+    expect(isGeneratedPlist(legacy)).toBe(true);
+  });
+
+  test("用户手写的 shell 形式不许被误判——它那条命令里也含 ./node_modules/.bin/next", () => {
+    // 判据只认**独立的绝对路径**元素，不做子串匹配
+    const handShell = `<array><string>/bin/sh</string><string>-c</string><string>exec ./node_modules/.bin/next start -p 3333</string></array>`;
+    expect(isGeneratedPlist(handShell)).toBe(false);
+  });
 });
 
 /**
