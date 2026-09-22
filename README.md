@@ -2,9 +2,9 @@
 
 **English** · [简体中文](./README.zh-CN.md)
 
-> Run Claude Code on your workstation, drive it from your phone — through the built-in web app, or Discord if you prefer.
+> Run your coding agents — Claude Code and Pi — on your workstation, and drive them from your phone through the built-in web app (Discord optional).
 
-Claudestra lets you run Claude Code on your workstation and drive it from anywhere — phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, logged in with your own OS account, no third party involved. **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
+Claudestra lets you run coding agents on your workstation — **Claude Code** and **Pi** are both first-class runtimes — and drive them from anywhere: phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, logged in with your own OS account, no third party involved. **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -14,9 +14,9 @@ Claudestra lets you run Claude Code on your workstation and drive it from anywhe
 
 ## Why
 
-Claude Code is a terminal-only tool: if you aren't at your computer, you aren't using it. Claudestra puts a persistent front door — a web app, and optionally Discord — in front of your local sessions so you can:
+Coding agents are terminal-only tools: if you aren't at your computer, you aren't using them. Claudestra puts a persistent front door — a web app, and optionally Discord — in front of your local sessions so you can:
 
-- Chat with any active Claude Code session from your phone.
+- Chat with any active session from your phone — Claude Code or Pi.
 - Run several sessions in parallel — one conversation per session.
 - Return to your desk and attach to the **same** running process via `tmux`.
 - Watch tool calls stream in real time (Read / Edit / Bash / Grep).

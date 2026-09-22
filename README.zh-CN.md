@@ -2,9 +2,9 @@
 
 [English](./README.md) · **简体中文**
 
-> 在自己电脑上跑 Claude Code，用手机指挥它 —— 走内置的 Web 应用，想用 Discord 也行。
+> 在自己电脑上跑编码 agent（Claude Code、Pi 都是一等运行时），用手机通过内置的 Web 应用指挥它们 —— Discord 可选。
 
-Claudestra 让你在自己的电脑上运行 Claude Code，然后从任何地方（手机、平板、另一台电脑）指挥它。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，用你本机的系统账号登录，不经过任何第三方。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
+Claudestra 让你在自己的电脑上运行编码 agent（**Claude Code** 与 **Pi** 都是一等运行时），然后从任何地方（手机、平板、另一台电脑）指挥它们。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，用你本机的系统账号登录，不经过任何第三方。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
