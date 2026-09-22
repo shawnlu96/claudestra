@@ -8,6 +8,7 @@ import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { existsSync } from "fs";
 import { TMUX_SOCK as SOCK, MASTER_SESSION, AGENT_PREFIX, tmuxRaw } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
+
 export const REGISTRY_PATH = `${process.env.HOME}/.claude-orchestrator/registry.json`;
 // ============================================================
 // Registry

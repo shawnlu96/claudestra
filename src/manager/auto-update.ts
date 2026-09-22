@@ -4,6 +4,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { output } from "./core.js";
+
 export async function cmdAutoUpdate(sub: string, ...rest: string[]) {
   const { readConfig, setAutoUpdate, setUpdateChannel } = await import("../lib/config-store.js");
 

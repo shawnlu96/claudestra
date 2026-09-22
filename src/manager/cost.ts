@@ -4,6 +4,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { loadRegistry, output } from "./core.js";
+
 export async function cmdCost(args: string[]) {
   const { rollupJsonl, projectJsonlPath, findJsonlBySessionId, mergeByModel } =
     await import("../lib/jsonl-cost.js");

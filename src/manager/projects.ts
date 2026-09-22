@@ -8,6 +8,7 @@
 import { readProjects, writeProjects, normalizeDir, PROJECT_ID_RE, type ProjectDef } from "../lib/projects.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { loadRegistry, saveRegistry, normalizeName, output } from "./core.js";
+
 export async function cmdProjectAdd(
   id: string,
   opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string },

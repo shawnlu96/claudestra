@@ -6,6 +6,7 @@
 import { AGENT_PREFIX } from "../lib/tmux-helper.js";
 import { listPresets, isKnownPreset, DISALLOWED_PRESETS, DEFAULT_PRESET } from "../lib/claude-launch.js";
 import { type AgentInfo, loadRegistry, saveRegistry, normalizeName, output, extractPermFlags } from "./core.js";
+
 // ============================================================
 // 权限管理
 // ============================================================

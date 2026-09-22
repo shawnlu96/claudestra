@@ -5,6 +5,7 @@
  */
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
+
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
 /** peer 名校验:名字要进 `x@peer` / `peer:name.agent` 寻址语法,"@" "." 空白都会
