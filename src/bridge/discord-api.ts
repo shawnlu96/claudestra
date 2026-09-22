@@ -4,6 +4,8 @@
 
 import { TextChannel, PermissionFlagsBits, type Client } from "discord.js";
 import { buildComponents } from "./components.js";
+// guild id 走 config 的唯一导出，别各处直读 env（D7-10）
+import { DISCORD_GUILD_ID } from "./config.js";
 
 let botUserId: string | null = null;
 const recentBotMessageIds = new Set<string>();
@@ -155,7 +157,7 @@ export async function discordMoveChannel(
   channelId: string,
   categoryName: string
 ): Promise<void> {
-  const guildId = process.env.DISCORD_GUILD_ID;
+  const guildId = DISCORD_GUILD_ID;
   if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
   const guild =
     discord.guilds.cache.get(guildId) ?? (await discord.guilds.fetch(guildId).catch(() => null));
@@ -174,7 +176,7 @@ export async function discordCreateChannel(
   name: string,
   categoryName?: string
 ): Promise<string> {
-  const guildId = process.env.DISCORD_GUILD_ID;
+  const guildId = DISCORD_GUILD_ID;
   if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
   const guild =
     discord.guilds.cache.get(guildId) ??
