@@ -193,6 +193,44 @@ function apiJson(status: number, body: unknown): Response {
   });
 }
 
+// ── 早退分支的样板（D5-5）：响应逐字节沿用原写法，tests/api-route-parity.test.ts 钉住 ──
+
+/** 全权 token（scope 含 "*"；注意 "*" 不含 master，见 agentInScope）。 */
+function isFullScope(principal: Principal): boolean {
+  return principal.agents.includes("*");
+}
+
+/** 403 + 调用方给的文案（各端点「xxx requires a full-scope token」文案各不相同）。 */
+function forbidden(error: string): Response {
+  return apiJson(403, { ok: false, error });
+}
+
+/** agent 不在 token scope 的统一 403。 */
+function notInScope(agent: string): Response {
+  return apiJson(403, { ok: false, error: `agent "${agent}" not in token scope` });
+}
+
+/** scope 双向兼容前缀：裸名或 agent- 前缀的任一个在 scope 内即放行。 */
+function inScopeEitherName(principal: Principal, name: string): boolean {
+  return agentInScope(principal, name) || agentInScope(principal, `agent-${name}`);
+}
+
+/** readJsonBody 解析失败的哨兵（合法 JSON 不可能产出 symbol）。 */
+const INVALID_JSON: unique symbol = Symbol("invalid-json");
+
+/** 读 JSON body；解析失败返回 INVALID_JSON，调用方据此回 invalidJsonBody()。 */
+async function readJsonBody(req: Request): Promise<unknown> {
+  try {
+    return await req.json();
+  } catch {
+    return INVALID_JSON;
+  }
+}
+
+function invalidJsonBody(): Response {
+  return apiJson(400, { ok: false, error: "invalid JSON body" });
+}
+
 /**
  * Bearer 鉴权 + 限流。失败直接返回 Response，成功返回 principal。
  * v2.10+ 也接受 ?token=<secret>（header 优先）：浏览器 EventSource 不能带
@@ -356,12 +394,8 @@ async function handlePeerRedeem(req: Request): Promise<Response> {
   if (!redeemLimiter.tryAcquire()) {
     return apiJson(429, { ok: false, error: "rate limited" });
   }
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return apiJson(400, { ok: false, error: "invalid JSON body" });
-  }
+  const body: any = await readJsonBody(req);
+  if (body === INVALID_JSON) return invalidJsonBody();
   const join = typeof body?.join === "string" ? body.join.trim() : "";
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const peerUrl = typeof body?.url === "string" ? body.url.trim() : "";
@@ -679,9 +713,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 与 /config/claude-defaults 的分工：那个是 Claude Code 的全局默认；这个是 Pi 侧
   // ~/.pi/agent/models.json 里 providers[].models[]，给 Pi agent 的选择器渲染用。
   if (path === "/pi-models" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "pi-models requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("pi-models requires a full-scope token");
     try {
       const raw = JSON.parse(await Bun.file(`${process.env.HOME}/.pi/agent/models.json`).text());
       const models: Array<Record<string, unknown>> = [];
@@ -741,20 +773,12 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // （扩展内部直接调 setModel/setThinkingLevel），注入方式与 CC 相同：tmux send-keys。
   const piSetMatch = path.match(/^\/agents\/([^/]+)\/pi-settings$/);
   if (piSetMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "pi-settings requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("pi-settings requires a full-scope token");
     const agentName = decodeURIComponent(piSetMatch[1]);
     const canonical = agentName.startsWith("agent-") ? agentName : `agent-${agentName}`;
-    if (!agentInScope(principal, canonical)) {
-      return apiJson(403, { ok: false, error: `agent "${canonical}" not in token scope` });
-    }
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return apiJson(400, { ok: false, error: "invalid JSON body" });
-    }
+    if (!agentInScope(principal, canonical)) return notInScope(canonical);
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
     const model = String(body?.model || "").trim();
     const effort = String(body?.effort || "").trim();
     if (!model && !effort) {
@@ -828,9 +852,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 结果以 session_anomaly kind=cleanup_result 进事件流。仅全权 token。
   const cleanupMatch = path.match(/^\/sessions\/([^/]+)\/cleanup$/);
   if (cleanupMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "cleanup requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("cleanup requires a full-scope token");
     const bgId = decodeURIComponent(cleanupMatch[1]);
     const list = await collectSessions();
     const target = list?.find((s) => s.bgId === bgId && s.kind === "background");
@@ -856,9 +878,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 某正式 agent 的会话并重启拉起（body: {"agent": "<name>"}）。仅全权 token。
   const adoptMatch = path.match(/^\/sessions\/([^/]+)\/adopt$/);
   if (adoptMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "adopt requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("adopt requires a full-scope token");
     const sid = decodeURIComponent(adoptMatch[1]);
     let agentName = "";
     try {
@@ -889,9 +909,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 网页侧栏 agent 行左滑「归档」用它。仅全权 token。
   const archMatch = path.match(/^\/agents\/([^/]+)\/archive$/);
   if (archMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "archive requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("archive requires a full-scope token");
     const name = decodeURIComponent(archMatch[1]);
     if (!isPathSafeName(name)) return apiJson(400, { ok: false, error: "invalid agent name" });
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
@@ -928,9 +946,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         defaultDays: DEFAULT_ARCHIVE_RETENTION_DAYS,
       });
     }
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "changing archive retention requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("changing archive retention requires a full-scope token");
     let body: any = {};
     try {
       body = await req.json();
@@ -951,9 +967,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 依赖归档时写的 .meta.json（cwd 编码不可逆，只能靠它还原位置）。仅全权 token。
   const restoreMatch = path.match(/^\/sessions\/archived\/([^/]+)\/restore$/);
   if (restoreMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "restore requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("restore requires a full-scope token");
     const rid = decodeURIComponent(restoreMatch[1]);
     if (!isPathSafeName(rid)) return apiJson(400, { ok: false, error: "invalid archive id" });
     const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
@@ -1030,9 +1044,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 列 archive/archived/** （用户手动归档的会话本体）**不列** archive/<agent>/（自动快照）。
   if (path === "/sessions/archived" && req.method === "GET") {
     // 与其余 v2.23 会话端点一致：全权 token；否则 scoped/peer token 能枚举全部归档 agent
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "archived sessions require a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("archived sessions require a full-scope token");
     const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
     const fsp = await import("node:fs/promises");
     const entries: Record<string, unknown>[] = [];
@@ -1084,9 +1096,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 那个「活跃」标记同一口径。
   const manageMatch = path.match(/^\/sessions\/([^/]+)\/manage$/);
   if (manageMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "session management requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("session management requires a full-scope token");
     const sid = decodeURIComponent(manageMatch[1]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
     let mbody: any = {};
@@ -1143,9 +1153,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 里大部分是**未纳管**的会话（pi-web 起的、终端手敲的），点开它们要看历史只能走这条。
   const sessHistMatch = path.match(/^\/sessions\/([^/]+)\/history$/);
   if (sessHistMatch && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "session history requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("session history requires a full-scope token");
     const sid = decodeURIComponent(sessHistMatch[1]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
     const runtime = url.searchParams.get("runtime") || undefined;
@@ -1208,9 +1216,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const bgTasksMatch = path.match(/^\/agents\/([^/]+)\/bg-tasks$/);
   if (bgTasksMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(bgTasksMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const { activeBgTasksFor } = await import("./bg-activity-watcher.js");
     const name = agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`;
     // 两种名字形态都试（master/裸名兼容）
@@ -1317,9 +1323,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const tasksMatch = path.match(/^\/agents\/([^/]+)\/tasks$/);
   if (tasksMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(tasksMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent?.sessionId) return apiJson(200, { ok: true, tasks: [] });
     const dir = `${process.env.HOME}/.claude/tasks/${agent.sessionId}`;
@@ -1359,9 +1363,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const histListMatch = path.match(/^\/agents\/([^/]+)\/history$/);
   if (histListMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(histListMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findHistoryAgent(agentParam);
     const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
     const sessions = await listAgentSessions(canonical, {
@@ -1384,9 +1386,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const histSessMatch = path.match(/^\/agents\/([^/]+)\/history\/([^/]+)$/);
   if (histSessMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(histSessMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const sid = decodeURIComponent(histSessMatch[2]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
     const agent = await findHistoryAgent(agentParam);
@@ -1448,9 +1448,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const msgMatch = path.match(/^\/agents\/([^/]+)\/messages$/);
   if (msgMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(msgMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const client = deps.clients.get(agent.channelId);
@@ -1647,9 +1645,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const skillsMatch = path.match(/^\/agents\/([^/]+)\/skills$/);
   if (skillsMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(skillsMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     // Pi agent 的命令来自它自己的运行时快照（CC 的 skills 扫描在 Pi 上不适用）。
@@ -1665,9 +1661,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const interruptMatch = path.match(/^\/agents\/([^/]+)\/interrupt$/);
   if (interruptMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(interruptMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     // 防重入(owner 2026-07-16:「打断按钮点两次出两个打断」):3s 冷却——
@@ -1704,9 +1698,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const clearMatch = path.match(/^\/agents\/([^/]+)\/clear$/);
   if (clearMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(clearMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const isMasterClear = agent.name === "master";
@@ -1751,15 +1743,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const claudeSetMatch = path.match(/^\/agents\/([^/]+)\/claude-settings$/);
   if (claudeSetMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(claudeSetMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return apiJson(400, { ok: false, error: "invalid JSON body" });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
     const effort = typeof body?.effort === "string" && body.effort.trim() ? body.effort.trim() : undefined;
     if (!model && !effort) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
@@ -1882,17 +1868,11 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
   if (answerMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(answerMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return apiJson(400, { ok: false, error: "invalid JSON body" });
-    }
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
     const kind = String(body?.kind || "");
 
     if (kind === "auq") {
@@ -1977,9 +1957,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const pendingMatch = path.match(/^\/agents\/([^/]+)\/pending$/);
   if (pendingMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(pendingMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const { auqStates } = await import("./ask-user-question.js");
@@ -2005,9 +1983,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   const notifyReadMatch = path.match(/^\/agents\/([^/]+)\/notify-read$/);
   if (notifyReadMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(notifyReadMatch[1]);
-    if (!agentInScope(principal, agentParam) && !agentInScope(principal, `agent-${agentParam}`)) {
-      return apiJson(403, { ok: false, error: `agent "${agentParam}" not in token scope` });
-    }
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const cleared = (await deps.clearCompletionPing?.(agent.channelId)) ?? false;
@@ -2016,15 +1992,9 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
 
   // POST /api/v1/agents —— create（仅全权 token；复用 manager CLI）
   if (path === "/agents" && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "create requires a full-scope token" });
-    }
-    let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return apiJson(400, { ok: false, error: "invalid JSON body" });
-    }
+    if (!isFullScope(principal)) return forbidden("create requires a full-scope token");
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
     const name = String(body?.name || "").trim();
     const dir = String(body?.dir || "").trim();
     const purpose = String(body?.purpose || "").trim();
@@ -2113,9 +2083,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // ~/.claude/settings.json 的 model / effortLevel 两个字段,其余字段原样保留。
   // 影响所有不带 --model/--effort 的新 session(含终端里直接开的 claude)。
   if (path === "/config/claude-defaults") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "claude-defaults requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("claude-defaults requires a full-scope token");
     const settingsPath = `${process.env.HOME}/.claude/settings.json`;
     if (req.method === "GET") {
       try {
@@ -2130,12 +2098,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       }
     }
     if (req.method === "PUT") {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const model = typeof body?.model === "string" ? body.model.trim() : undefined;
       const effort = typeof body?.effort === "string" ? body.effort.trim() : undefined;
       if (model === undefined && effort === undefined) {
@@ -2169,9 +2133,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // remove = kill + registry 条目删除(列表永久移除,归档保留)
   const lifecycleMatch = path.match(/^\/agents\/([^/]+)\/(kill|restart|remove)$/);
   if (lifecycleMatch && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: `${lifecycleMatch[2]} requires a full-scope token` });
-    }
+    if (!isFullScope(principal)) return forbidden(`${lifecycleMatch[2]} requires a full-scope token`);
     const agentParam = decodeURIComponent(lifecycleMatch[1]);
     if (agentParam === "master") return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
     const r = await runManager(lifecycleMatch[2], agentParam);
@@ -2182,9 +2144,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 与 /peers 同款:全权 token 门禁,mutation 全走 runManager 复用 CLI 校验,
   // 与 Discord /cron 面板、CLI 手管三方等价互不打架。
   if (path === "/cron" || path.startsWith("/cron/")) {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "cron management requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("cron management requires a full-scope token");
     if (path === "/cron" && req.method === "GET") {
       const jobs = await loadJobs();
       return apiJson(200, {
@@ -2206,12 +2166,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       });
     }
     if (path === "/cron" && req.method === "POST") {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const name = String(body?.name ?? "").trim();
       const schedule = String(body?.schedule ?? "").trim();
       const prompt = String(body?.prompt ?? "").trim();
@@ -2233,12 +2189,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       if (action === "toggle") r = await runManager("cron-toggle", id);
       else if (action === "remove") r = await runManager("cron-remove", id);
       else {
-        let body: any;
-        try {
-          body = await req.json();
-        } catch {
-          return apiJson(400, { ok: false, error: "invalid JSON body" });
-        }
+        const body: any = await readJsonBody(req);
+        if (body === INVALID_JSON) return invalidJsonBody();
         const flags: string[] = [];
         if (body?.schedule) flags.push("--schedule", String(body.schedule));
         if (body?.prompt) flags.push("--prompt", String(body.prompt));
@@ -2259,9 +2211,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 「设置里看不到」——此前只有配置文件可改)。写入 Claudestra 自己的
   // config.json(CC 的 settings.json 会拒未知字段,只读兼容不写)。
   if (path === "/auto-compact") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "auto-compact config requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("auto-compact config requires a full-scope token");
     const state = async () => {
       const cfg = await readAppConfig();
       return {
@@ -2276,12 +2226,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     };
     if (req.method === "GET") return apiJson(200, await state());
     if (req.method === "POST") {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const patch: { window?: number; idleHours?: number; emergency?: boolean } = {};
       if (body.emergency !== undefined) patch.emergency = Boolean(body.emergency);
       if (body.window !== undefined) {
@@ -2322,9 +2268,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
    * 升级走哪条通道（release / beta）由 config 决定，这里不另立策略。
    */
   if (path === "/update" && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "update requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("update requires a full-scope token");
     const busy = await activeBgJob("update");
     if (busy) return apiJson(409, { ok: false, error: "上一次升级还没结束", runId: busy });
     let runId: string;
@@ -2356,9 +2300,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
    * launcher 15 秒内用交接单里的 id 接回（lib/master-session.ts）。
    */
   if (path === "/restart-all" && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "restart-all requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("restart-all requires a full-scope token");
     let body: any = {};
     try {
       body = (await req.json()) ?? {};
@@ -2385,35 +2327,25 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
 
   /** 全体重启的进度：只回本轮的行 + done/exitCode（不带 ?run 时 = 最后一轮，用来接回进行中的） */
   if (path === "/restart-all/log" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "restart-all log requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("restart-all log requires a full-scope token");
     return bgJobLogResponse("restart-all", url);
   }
 
   /** 升级进度：同上（前端另外靠 /api/version 的 commit 变化兜底判完成） */
   if (path === "/update/log" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "update log requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("update log requires a full-scope token");
     return bgJobLogResponse("update", url);
   }
 
   if (path === "/projects") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "projects requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("projects requires a full-scope token");
     if (req.method === "GET") {
       const r = await runManager("project-list");
       return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager failed" });
     }
     if (req.method === "POST") {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const action = String(body?.action || "");
       const id = String(body?.id || "").trim();
       const str = (k: string) => (typeof body?.[k] === "string" ? (body[k] as string) : undefined);
@@ -2449,9 +2381,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 设置界面的读写面,mutation 全走 runManager 的 cron-add/remove/toggle,
   // 与 CLI 手管等价。全权 token 门禁与 /peers 同级。
   if (path === "/memory-hygiene") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "memory hygiene requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("memory hygiene requires a full-scope token");
     const findJob = async () => (await loadJobs()).find((j) => j.name === HYGIENE_JOB_NAME) ?? null;
     const stateOf = (j: Awaited<ReturnType<typeof findJob>>) => ({
       ok: true,
@@ -2468,12 +2398,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       return apiJson(200, stateOf(await findJob()));
     }
     if (req.method === "POST") {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const enabled = !!body?.enabled;
       const freq = String(body?.freq ?? "weekly") as HygieneFreq;
       if (enabled && !HYGIENE_FREQS[freq]) {
@@ -2505,9 +2431,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
   // 「前端要能管理 peer 的权限以及在哪些远端有权限」）。全部 mutation 走
   // runManager 复用 CLI 的 R1 校验/token 签发/原子写,bridge 不直写 principals。
   if (path === "/peers" || path.startsWith("/peers/")) {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "peers management requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("peers management requires a full-scope token");
 
     // GET /peers —— 清单:peers.json ⋈ principals(入站 scope) + 本地 agent 表(scope 编辑器数据源)
     if (path === "/peers" && req.method === "GET") {
@@ -2547,12 +2471,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke
     // —— 一键邀请（免回执自动握手）。mutation 照旧全部委托 runManager。
     if (req.method === "POST" && (path === "/peers/invite-new" || path === "/peers/join-auto" || path === "/peers/invite-revoke")) {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const agentsCsv = Array.isArray(body?.agents)
         ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
         : "";
@@ -2579,12 +2499,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
 
     // POST /peers/invite | /peers/join | /peers/accept —— 握手三步
     if (req.method === "POST" && (path === "/peers/invite" || path === "/peers/join" || path === "/peers/accept")) {
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const name = typeof body?.name === "string" ? body.name.trim() : "";
       if (!name) return apiJson(400, { ok: false, error: '"name" required' });
       const agentsCsv = Array.isArray(body?.agents)
@@ -2621,12 +2537,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
         return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
       }
       // scope —— 改对方入站可访问的 agent 白名单(R1 校验在 manager 侧)
-      let body: any;
-      try {
-        body = await req.json();
-      } catch {
-        return apiJson(400, { ok: false, error: "invalid JSON body" });
-      }
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
       const agentsCsv = Array.isArray(body?.agents)
         ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
         : "";
