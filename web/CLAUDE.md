@@ -17,12 +17,13 @@ Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA �
 
 ## 目录结构
 
-逐文件说明（含终端移动端形态、xterm 细节等踩坑记录）见 [docs/web/layout.md](../docs/web/layout.md)。
+逐文件说明（含踩坑记录）见 [docs/web/layout.md](../docs/web/layout.md)。
 
 ```
 app/                  页面（chat / login）+ api/ 下的 BFF 路由（每个路由自己调 isAuthed，公开路由登记在 guard 的 PUBLIC_ROUTES）
 features/chat/        Chat：type / stream（SSE 协议 v1）/ chat-store（zenith 中枢）/ components
 features/terminal/    远程终端：窄屏全屏页、宽屏模态、xterm 视图、控制键条
+features/devtools/    开发者模式面板。UI 调参先在面板上拖、定稿再写死，规矩见 docs/web-dev-mode.md
 lib/                  db、auth.service、api-auth（isAuthed）、chat/（bridge-api 客户端、agents、events 协议）
 proxy.ts              Next16 proxy：只拦页面 cookie，API 由 handler 自守
 ```
@@ -96,8 +97,7 @@ iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几�
    transform 横滑容器内（chat.tsx translate-x），CSS 规定 transform 祖先成为 fixed
    的定位基准：容器内渲染 .modal 会整个定位到屏幕外一屏（点了「没反应」，返回列表
    时容器滑回弹窗才「突然出现」）。桌面 translate=0 复现不了，必须窄视口验证。
-6. **排查方法**：别肉眼猜截图。塞临时诊断浮层读 `navigator.standalone`/`innerHeight`/探针
-   `env()` 实测值，并在 `fixed bottom:0` 画条线看它到没到屏底——一张截图定位。
+6. **排查方法**：别肉眼猜截图。开开发者模式（`?dev=1`）看「视口」分区实测值 + 底部对齐线。
    图标重生成：`node scripts/make-icons.mjs`（sharp，manifest 在 app/manifest.ts）。
 
 ## 运行 & 排障
