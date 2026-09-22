@@ -80,12 +80,11 @@ import {
   apiThreadResults,
   apiFiles,
   apiReqKey,
-  // clear 轮转的快照 diff 用（定义随 /api/v1 路由块落 api-routes.ts）
-  listSessionIdsForCwd,
-  latestSessionIdForCwd,
   type PendingApiRequest,
   type ApiReplyResult,
 } from "./bridge/api-routes.js";
+// clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
+import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import {
   corsHeadersFor,
   resolveStaticPath,

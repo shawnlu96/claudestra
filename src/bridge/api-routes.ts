@@ -11,7 +11,9 @@
  */
 
 import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
-import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
+import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds } from "../lib/runtimes/index.js";
+// cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
+import { latestSessionIdForCwd } from "./session-ids.js";
 import { interruptAgent } from "../lib/runtimes/window-ops.js";
 import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT } from "./config.js";
@@ -77,40 +79,6 @@ const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
 /** interrupt 端点的每 agent 冷却(防双击双 C-c——空闲态连按两次是 CC 退出键)。 */
 const interruptCooldown = new Map<string, number>();
-
-/**
- * master 的最新 session id：master 不在 registry，从其 cwd 的
- * ~/.claude/projects/<slug>/ 目录里 probe mtime 最新的 jsonl。
- * bridge.ts 的 scheduleClearRotation 也 import 它（clear 轮转判重用）。
- */
-export function latestSessionIdForCwd(cwd: string, runtime?: string): string | undefined {
-  return listSessionIdsForCwd(cwd, runtime)[0];
-}
-
-/**
- * 列出 cwd 的 projects slug 目录里所有 session id（无序）。
- * clear 轮转用它做"clear 前快照 vs 之后新增"的集合 diff（M2）——同 cwd 多 agent
- * 共享一个 slug 目录，光取"最新 jsonl"会误认别人正在写的既有 session；只认领
- * 快照里没有的**新 sid**才不会串台。
- */
-export function listSessionIdsForCwd(cwd: string, runtime?: string): string[] {
-  // 目录与「文件名 → id」规则都问适配器（Pi 是 `<时间戳>_<id>.jsonl`，在 ~/.pi 下）——
-  // 认错了 Pi 会话一旦 /new 轮转，watcher / 历史 / 归档会同时冻在旧文件上（与 CC 侧
-  // maybeHealRotatedSession 注释里那个 7 天隐性故障同型）。
-  const src = sourceFor(runtime);
-  return src
-    .listSessionsForCwd(cwd)
-    .map((p) => {
-      try {
-        return { sid: src.sessionIdFromPath(p), mtime: statSync(p).mtimeMs };
-      } catch {
-        return null; // 列目录与 stat 之间被删
-      }
-    })
-    .filter((e): e is { sid: string; mtime: number } => !!e?.sid)
-    .sort((a, b) => b.mtime - a.mtime) // mtime 降序：调用方取 [0] 即最新
-    .map((e) => e.sid);
-}
 
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
