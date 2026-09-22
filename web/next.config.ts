@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "node:path";
 
 // commit 号不再从这里经 DefinePlugin 注入 —— 那是 webpack 持久缓存**看不见**的
 // 隐藏输入,引用它的文件没改动时会复用旧 chunk,把上一次的 commit 带出来(2026-08-22
@@ -6,6 +7,10 @@ import type { NextConfig } from "next";
 // lib/build-info.ts 源码文件,内容随 commit 变 → 缓存自然失效。splash 直接 import。
 
 const nextConfig: NextConfig = {
+  // 工作区根钉在 web/ 自己：不钉的话 Turbopack 看到仓库根的 bun.lock 就把整个仓库当根去扫，
+  // 扫进 .claude/worktrees/*（agent 的隔离 worktree，node_modules 是软链回主树的）后判成
+  // 「symlink 死循环」直接 panic，主树 build 失败（2026-09-23 实遇）。web 不 import 仓库根的任何东西。
+  turbopack: { root: path.resolve(__dirname) },
   // better-sqlite3 / ssh2 是原生模块，不能被 bundler 打包，交给 Node require
   serverExternalPackages: ["better-sqlite3", "ssh2"],
   // v2.21.3+ 生产 source map:客户端错误栈(/api/client-log)只有压缩后的 chunk:行:列,
