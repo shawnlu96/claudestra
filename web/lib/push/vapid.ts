@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { DATA_ROOT } from "@/lib/data-root";
 import webpush from "web-push";
 
 /**
@@ -10,7 +10,6 @@ import webpush from "web-push";
  * ——换密钥会让所有既有订阅失效,所以必须持久化。
  */
 
-const DATA_ROOT = process.env.CLAUDESTRA_DATA_ROOT || join(homedir(), ".claude-orchestrator", "web");
 const VAPID_FILE = join(DATA_ROOT, "push-vapid.json");
 
 interface VapidKeys {

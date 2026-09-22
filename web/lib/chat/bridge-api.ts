@@ -31,53 +31,48 @@ export function bridgeAuthHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${TOKEN}` };
 }
 
-/** GET /api/v1<path>，返回解析后的 JSON（非 2xx 时抛错，message 带 Bridge 的 error）。 */
-export async function bridgeGet<T = Record<string, unknown>>(
+/** bridge 回非 2xx 时抛的错：状态码 / 可重试标记 / 原始 body 随 Error 带出去 */
+export type BridgeError = Error & { status?: number; retryable?: boolean; body?: Record<string, unknown> };
+
+async function bridgeFetch<T>(
   path: string,
-  opts?: { timeoutMs?: number }
+  init: { method: "GET" | "POST" | "PUT"; body?: unknown; timeoutMs: number },
 ): Promise<T> {
   const res = await fetch(`${BRIDGE}/api/v1${path}`, {
-    headers: bridgeAuthHeaders(),
-    signal: AbortSignal.timeout(opts?.timeoutMs ?? 10_000),
+    method: init.method,
+    headers: init.method === "GET"
+      ? bridgeAuthHeaders()
+      : { "Content-Type": "application/json", ...bridgeAuthHeaders() },
+    body: init.method === "GET" ? undefined : JSON.stringify(init.body ?? {}),
+    signal: AbortSignal.timeout(init.timeoutMs),
   });
   const json = (await res.json().catch(() => ({}))) as T & { error?: string; retryable?: boolean };
   if (!res.ok) {
     // 状态码/可重试标记随 Error 带出去——上层要靠它区分「真离线」和「链路重连中」
-    // （全转成 502 的话，前端只能一律显示"发送失败"）。
-    const err = new Error(json.error || `Bridge ${res.status}`) as Error & {
-      status?: number;
-      retryable?: boolean;
-    };
+    // （全转成 502 的话，前端只能一律显示"发送失败"）。body 也带上：409 之类的
+    // 拒绝常附带前端要用的字段（如 restart-all 进行中那一轮的 runId）。
+    const err = new Error(json.error || `Bridge ${res.status}`) as BridgeError;
     err.status = res.status;
     err.retryable = json.retryable === true;
+    err.body = json as Record<string, unknown>;
     throw err;
   }
   return json;
 }
 
+/** GET /api/v1<path>，返回解析后的 JSON（非 2xx 时抛 BridgeError，message 带 Bridge 的 error）。 */
+export function bridgeGet<T = Record<string, unknown>>(
+  path: string,
+  opts?: { timeoutMs?: number }
+): Promise<T> {
+  return bridgeFetch<T>(path, { method: "GET", timeoutMs: opts?.timeoutMs ?? 10_000 });
+}
+
 /** POST /api/v1<path>（JSON body），语义同 bridgeGet。 */
-export async function bridgePost<T = Record<string, unknown>>(
+export function bridgePost<T = Record<string, unknown>>(
   path: string,
   body: unknown,
   opts?: { timeoutMs?: number; method?: "POST" | "PUT" }
 ): Promise<T> {
-  const res = await fetch(`${BRIDGE}/api/v1${path}`, {
-    method: opts?.method ?? "POST",
-    headers: { "Content-Type": "application/json", ...bridgeAuthHeaders() },
-    body: JSON.stringify(body ?? {}),
-    signal: AbortSignal.timeout(opts?.timeoutMs ?? 60_000),
-  });
-  const json = (await res.json().catch(() => ({}))) as T & { error?: string; retryable?: boolean };
-  if (!res.ok) {
-    // 状态码/可重试标记随 Error 带出去——上层要靠它区分「真离线」和「链路重连中」
-    // （全转成 502 的话，前端只能一律显示"发送失败"）。
-    const err = new Error(json.error || `Bridge ${res.status}`) as Error & {
-      status?: number;
-      retryable?: boolean;
-    };
-    err.status = res.status;
-    err.retryable = json.retryable === true;
-    throw err;
-  }
-  return json;
+  return bridgeFetch<T>(path, { method: opts?.method ?? "POST", body, timeoutMs: opts?.timeoutMs ?? 60_000 });
 }

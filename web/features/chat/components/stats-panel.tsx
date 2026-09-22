@@ -1,6 +1,6 @@
 "use client";
 import { Fragment, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { CenteredModal } from "./centered-modal";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
@@ -108,12 +108,8 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
     .filter((a) => typeof a.contextTokens === "number" && a.contextTokens! > 0)
     .sort((a, b) => (b.contextTokens ?? 0) - (a.contextTokens ?? 0));
 
-  return createPortal(
-    <div className="overlay-in fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={onClose}>
-      <div
-        className="panel-pop flex max-h-[85dvh] w-full max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+  return (
+    <CenteredModal onClose={onClose} layer="base" tall={false}>
         <div className="flex items-center px-5 pb-2 pt-4">
           <span className="text-base font-semibold">{t("用量看板")}</span>
           <button
@@ -275,8 +271,6 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
             )}
           </div>
         </div>
-      </div>
-    </div>,
-    document.body
+    </CenteredModal>
   );
 }

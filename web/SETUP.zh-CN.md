@@ -81,7 +81,7 @@ cp .env.example .env.local
 | `COOKIE_SECURE` | 否 | 设成 `on` 会给 session cookie 打上 `Secure`。默认关闭，这样明文的局域网 / Tailscale 访问仍然可用。 |
 | `PUSH_VAPID_SUBJECT` | 否 | 标识推送发送方的 `mailto:` 或 URL。 |
 | `PUSH_LOCK_PORT` | 否 | 推送派发器的跨进程锁端口（默认 `3339`）—— 保证无论进程怎么组合，都只有一个派发器在发。 |
-| `CLAUDESTRA_DATA_ROOT` | 否 | 覆盖数据目录（默认 `~/.claude-orchestrator/web`），里面放着鉴权 session + per-agent 设置的 SQLite。 |
+| `CLAUDESTRA_DATA_ROOT` | 否 | 覆盖 web 数据目录**本身**（默认 `~/.claude-orchestrator/web`）：SQLite（鉴权 session + per-agent 设置）、`config.json`、VAPID 密钥、上传文件、`client.log` 都在这里。2026-09 之前 SQLite 把它当 `web/` 的**父目录**读——按那种口径设过的，改成指向 `…/web`。 |
 
 **签发 API token**（在仓库根目录执行，`bun` 的路径按需替换）：
 

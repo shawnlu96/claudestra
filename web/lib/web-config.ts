@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
+import { DATA_ROOT } from "@/lib/data-root";
 
 /**
  * Web 前端的服务端配置（2026-07-14 owner：API key 要有地方在界面上填）。
@@ -6,7 +7,8 @@ import { mkdir, readFile, writeFile } from "fs/promises";
  * 不进 git、不进 .env(env 改了要重启 dev server,文件读取即时生效)。
  */
 
-const DIR = `${process.env.HOME}/.claude-orchestrator/web`;
+// 与 SQLite 同根（CLAUDESTRA_DATA_ROOT 覆盖时一起走），见 lib/data-root.ts
+const DIR = DATA_ROOT;
 const FILE = `${DIR}/config.json`;
 
 export interface WebConfig {

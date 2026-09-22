@@ -790,6 +790,24 @@ const TextBlock = memo(function TextBlock({
  * 文本全挤底部」的时间线错乱；无 segments（旧缓存快照）回退 content+toolCalls。
  * 流式进行中文本段用纯文本（DOMD 只读一次不适合增量喂字），定稿/历史走 DOMD。
  */
+/**
+ * agent chip 需要的只是「名字 / 显示名 / 是否大总管」。订阅整个 agents 数组的话，15 秒一次的
+ * 列表轮询（busy、上下文、未读任何一项变了都会整体替换数组）就让窗口里每条助手气泡都重渲染，
+ * 外层 Message 的 memo 挡不住组件自己的订阅（D8-4）。压成字符串订阅：内容不变 = 同一个串，
+ * Object.is 相等不重渲染。按数组引用缓存，一次轮询只拼一次。
+ */
+const agentLabelKeyCache = new WeakMap<object, string>();
+const KEY_FIELD = "\u0001";
+const KEY_ROW = "\u0002";
+function agentLabelKey(agents: { name: string; displayName?: string; pinnedMaster?: boolean }[]): string {
+  let k = agentLabelKeyCache.get(agents);
+  if (k === undefined) {
+    k = agents.map((a) => [a.name, a.displayName ?? "", a.pinnedMaster ? "1" : ""].join(KEY_FIELD)).join(KEY_ROW);
+    agentLabelKeyCache.set(agents, k);
+  }
+  return k;
+}
+
 function AssistantBody({
   m,
   liveEmpty,
@@ -808,8 +826,14 @@ function AssistantBody({
   const [inlineBusy, setInlineBusy] = useState(false);
   // agent chip(`[[{.agent}name]]`)的可跳转名单:name / displayName 都认,
   // master 别名映射到前端的 __master__(bridge-api 的 apiAgentName 约定)
-  const agents = useChatStore((s) => s.state.agents);
+  const agentKey = useChatStore((s) => agentLabelKey(s.state.agents));
   const inlineCtx = useMemo<InlineActionCtx>(() => {
+    const agents = agentKey
+      ? agentKey.split(KEY_ROW).map((row) => {
+          const [name, displayName, pinned] = row.split(KEY_FIELD);
+          return { name, displayName: displayName || undefined, pinnedMaster: pinned === "1" };
+        })
+      : [];
     const labels: string[] = [];
     const resolve = (label: string) => {
       for (const a of agents) {
@@ -840,7 +864,7 @@ function AssistantBody({
         if (name) void store.openAgent(name);
       },
     };
-  }, [m.id, m.replyClicks, inlineBusy, store, agents]);
+  }, [m.id, m.replyClicks, inlineBusy, store, agentKey]);
   const hasSegs = !!segs && segs.length > 0;
   const hasNarration = hasSegs || !!m.content;
   const hasReply = !!m.replyText;

@@ -20,7 +20,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useChatStoreApi } from "../chat-store";
+import { useChatStore, useChatStoreApi } from "../chat-store";
 import { fmtTs } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { copyText, enterSelectMode, exitSelectMode, isSelectMode, onSelectModeChange, selectedText } from "../select-mode";
@@ -153,7 +153,10 @@ export function BubbleMenu() {
   const t = useT();
   const store = useChatStoreApi();
   const [s, setS] = useState<MenuState>(null);
-  const [toast, setToast] = useState<{ text: string; undo?: () => void } | null>(null);
+  const [toast, setToast] = useState<{ text: string; undo?: () => void; agent?: string | null } | null>(null);
+  // 带「撤销」的 toast 只在删除时所在的会话里显示：切走后再点撤销没有意义（D8-5）
+  const activeAgent = useChatStore((st) => st.state.activeAgent);
+  const shownToast = toast && (!toast.undo || toast.agent === activeAgent) ? toast : null;
   useEffect(() => {
     subs.add(setS);
     return () => {
@@ -181,7 +184,7 @@ export function BubbleMenu() {
   }, []);
 
   const flash = (msg: string, opts?: { undo?: () => void; ms?: number }) => {
-    const item = { text: msg, undo: opts?.undo };
+    const item = { text: msg, undo: opts?.undo, agent: store.state.activeAgent };
     setToast(item);
     setTimeout(() => setToast((v) => (v === item ? null : v)), opts?.ms ?? 1400);
   };
@@ -266,14 +269,14 @@ export function BubbleMenu() {
   return createPortal(
     <>
       {menu}
-      {toast && (
+      {shownToast && (
         <div
-          className={`${toast.undo ? "pointer-events-auto" : "pointer-events-none"} fixed left-1/2 z-[999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-neutral px-3 py-1.5 text-xs text-neutral-content shadow-lg`}
+          className={`${shownToast.undo ? "pointer-events-auto" : "pointer-events-none"} fixed left-1/2 z-[999] flex -translate-x-1/2 items-center gap-3 rounded-full bg-neutral px-3 py-1.5 text-xs text-neutral-content shadow-lg`}
           style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 96px)" }}
         >
-          <span>{toast.text}</span>
-          {toast.undo && (
-            <button type="button" className="font-medium text-info underline-offset-2 active:underline" onClick={toast.undo}>
+          <span>{shownToast.text}</span>
+          {shownToast.undo && (
+            <button type="button" className="font-medium text-info underline-offset-2 active:underline" onClick={shownToast.undo}>
               {t("撤销")}
             </button>
           )}

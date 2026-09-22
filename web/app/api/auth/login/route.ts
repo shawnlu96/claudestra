@@ -9,6 +9,7 @@ import {
 } from "@/lib/services/auth.service";
 import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
 import { totpEnabled, verifySecondFactor } from "@/lib/services/totp.service";
+import { requestClientIp } from "@/lib/client-ip";
 
 const SESSION_DAYS = 7;
 
@@ -43,10 +44,9 @@ export async function POST(request: Request) {
     );
   }
 
-  // 限流按客户端 IP（反代设置 x-forwarded-for），换 username 也换不掉桶；
-  // 无 IP 时回退 username 至少有个限。
-  const xff = request.headers.get("x-forwarded-for");
-  const ip = xff?.split(",")[0]?.trim() || "";
+  // 限流按客户端 IP，换 username 也换不掉桶；无 IP 时回退 username 至少有个限。
+  // IP 只在请求来自本机反代时才取 XFF（直连的 XFF 是客户端自己写的，见 client-ip.ts）。
+  const ip = requestClientIp(request);
   const rlKey = ip ? `ip:${ip}` : `user:${username}`;
   if (!checkRateLimit(rlKey)) {
     if (isForm) return formRedirect("/login?e=rate");

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
+import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 import { useChatStoreApi } from "../chat-store";
 import type { ProjectMeta } from "../type";
@@ -327,21 +327,9 @@ export function ProjectsModal({ open, onClose }: { open: boolean; onClose: () =>
 
   if (!open) return null;
 
-  return createPortal(
-    <div
-      // grid-cols-[minmax(0,1fr)]:默认 auto 列会被盒内 nowrap 长路径撑到 max-content,
-      // 再被 max-w-md 截成 448px——比手机视口宽,盒子从左侧 16pt 起向右溢出屏幕
-      // (owner 2026-09-02 截图「弹窗是歪的」)。锁成 minmax(0,1fr) 列宽 = 可用宽度。
-      className="overlay-in fixed inset-0 z-[90] grid grid-cols-[minmax(0,1fr)] place-items-center bg-black/50 p-4"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
-    >
-      <div
-        className="panel-pop flex max-h-[88dvh] w-full min-w-0 max-w-md flex-col rounded-2xl bg-base-100 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+  // 外壳（含「弹窗歪」的 minmax(0,1fr) 修正，owner 2026-09-02）见 centered-modal.tsx
+  return (
+    <CenteredModal onClose={onClose}>
         <div className="flex items-center justify-between px-5 pb-2 pt-4">
           <span className="text-base font-semibold">{t("项目管理")}</span>
           <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
@@ -361,8 +349,6 @@ export function ProjectsModal({ open, onClose }: { open: boolean; onClose: () =>
           ))}
           <AddProjectForm onChanged={() => void reload()} />
         </div>
-      </div>
-    </div>,
-    document.body
+    </CenteredModal>
   );
 }

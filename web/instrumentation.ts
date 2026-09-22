@@ -5,6 +5,9 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // 登录限流要知道真实对端（是不是本机反代），Route Handler 拿不到 socket，在这里盖章
+    const { installPeerStamp } = await import("@/lib/peer-stamp");
+    installPeerStamp();
     const { startPushDispatcher } = await import("@/lib/push/dispatcher");
     startPushDispatcher();
   }
