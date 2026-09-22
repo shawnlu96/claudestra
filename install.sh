@@ -11,7 +11,9 @@
 # Optional environment variables:
 #   CLAUDESTRA_DIR    — clone target (default ~/repos/claudestra)
 #   CLAUDESTRA_REPO   — git remote (default https://github.com/shawnlu96/claudestra.git)
-#   CLAUDESTRA_BRANCH — branch (default main)
+#   CLAUDESTRA_BRANCH — branch or tag to install (e.g. main). When set, the latest
+#                       release tag is NOT checked out — you get exactly this ref.
+#                       Unset (default): install the latest published release.
 #   CLAUDESTRA_YES    — set to 1 to skip every confirmation (unattended)
 #   CLAUDESTRA_NO_SETUP — set to 1 to stop after dependencies + clone (skip the wizard).
 #                       Useful for CI / smoke tests, and for configuring later by hand.
@@ -24,6 +26,11 @@ set -euo pipefail
 # ────────────────────────────────────────────
 
 CLAUDESTRA_REPO="${CLAUDESTRA_REPO:-https://github.com/shawnlu96/claudestra.git}"
+# ⚠ 之前这个变量声明了、文档里也写了，但**脚本从头到尾没用过它**（git clone 不带
+#   -b，后面也没 checkout），于是「装某个分支/标签」这件事根本做不到——而下面又
+#   无条件切到最新 release tag，结果是「装最新代码」也做不到。要验主干上的改动
+#   （发版前的功能、修完还没发的 bug）时只能手工 clone，这跟一键安装的目的相悖。
+if [ -n "${CLAUDESTRA_BRANCH:-}" ]; then CLAUDESTRA_REF_EXPLICIT=1; else CLAUDESTRA_REF_EXPLICIT=0; fi
 CLAUDESTRA_BRANCH="${CLAUDESTRA_BRANCH:-main}"
 CLAUDESTRA_DIR="${CLAUDESTRA_DIR:-$HOME/repos/claudestra}"
 CLAUDESTRA_YES="${CLAUDESTRA_YES:-0}"
@@ -61,9 +68,21 @@ detect_lang() {
 }
 CS_LANG="$(detect_lang)"
 # L <中文> <English>
+# ⚠ 在中文串里插变量一律写 ${VAR} 带花括号：`$VAR（`、`$VAR，` 这种紧跟全角标点的
+#   写法，bash 会把多字节字节当成变量名的一部分 → set -u 下报 `VAR…: unbound variable`，
+#   要说的话一个字都到不了用户眼前（2026-09-22 实测，两处都中招）。
 L() { if [ "$CS_LANG" = "zh" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
 
 say()  { printf "${CYAN}▶${RESET} %s\n" "$*"; }
+# release tag 落后 origin/main 多少个提交 —— 落后不少时提醒一句，
+# 免得有人拿一个月前的 release 去验主干上刚修好的东西。
+hint_newer_main() {
+  local tag="$1" behind
+  behind=$(git rev-list --count "$tag..origin/main" 2>/dev/null || echo 0)
+  if [ "${behind:-0}" -gt 0 ]; then
+    printf "${YELLOW}⚠${RESET}  %s\n" "$(L "主干(main)比 $tag 新 $behind 个提交。想装最新代码：CLAUDESTRA_BRANCH=main 再跑一次。" "main is $behind commits ahead of $tag. To install the latest code: re-run with CLAUDESTRA_BRANCH=main.")"
+  fi
+}
 ok()   { printf "${GREEN}✓${RESET}  %s\n" "$*"; }
 warn() { printf "${YELLOW}⚠${RESET}  %s\n" "$*"; }
 fail() { printf "${RED}✗${RESET}  %s\n" "$*" >&2; }
@@ -118,7 +137,7 @@ OS="$(uname -s)"
 case "$OS" in
   Darwin) PLATFORM="darwin" ;;
   Linux)  PLATFORM="linux"  ;;
-  *)      die "$(L "不支持的系统: $OS（只支持 macOS / Linux）" "Unsupported OS: $OS (macOS / Linux only)")" ;;
+  *)      die "$(L "不支持的系统: ${OS}（只支持 macOS / Linux）" "Unsupported OS: ${OS} (macOS / Linux only)")" ;;
 esac
 ok "$(L "系统" "OS"): $OS"
 
@@ -330,15 +349,27 @@ fi
 
 cd "$CLAUDESTRA_DIR"
 
-# 切换到最新 release 版本（如果有的话）
-GITHUB_API_REPO=$(echo "$CLAUDESTRA_REPO" | sed -n 's|.*github\.com[:/]\(.*\)\.git$|\1|p')
-if [ -n "$GITHUB_API_REPO" ]; then
-  LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_API_REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*"\|"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
-  if [ -n "$LATEST_TAG" ]; then
-    git checkout "$LATEST_TAG" --quiet 2>/dev/null || true
-    ok "$(L "版本" "Version"): $LATEST_TAG"
+if [ "$CLAUDESTRA_REF_EXPLICIT" = "1" ]; then
+  # 显式指定了 ref：装的就是它，不再切 release tag。
+  # origin/<branch> 优先（分支要的是最新提交），失败再当成 tag / commit 试一次。
+  if git checkout --quiet "origin/$CLAUDESTRA_BRANCH" 2>/dev/null \
+     || git checkout --quiet "$CLAUDESTRA_BRANCH" 2>/dev/null; then
+    ok "$(L "版本" "Version"): $CLAUDESTRA_BRANCH ($(git rev-parse --short HEAD))"
   else
-    warn "$(L "没有找到 release 版本，使用 main 分支最新代码" "No release tag found — using the latest commit on main")"
+    die "$(L "找不到 ${CLAUDESTRA_BRANCH}（分支或标签都没匹配上）" "Cannot find ${CLAUDESTRA_BRANCH} (matched neither a branch nor a tag)")"
+  fi
+else
+  # 默认：切到最新 release 版本（如果有的话）
+  GITHUB_API_REPO=$(echo "$CLAUDESTRA_REPO" | sed -n 's|.*github\.com[:/]\(.*\)\.git$|\1|p')
+  if [ -n "$GITHUB_API_REPO" ]; then
+    LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_API_REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*"\|"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
+    if [ -n "$LATEST_TAG" ]; then
+      git checkout "$LATEST_TAG" --quiet 2>/dev/null || true
+      ok "$(L "版本" "Version"): $LATEST_TAG"
+      hint_newer_main "$LATEST_TAG"
+    else
+      warn "$(L "没有找到 release 版本，使用默认分支最新代码" "No release tag found — using the default branch")"
+    fi
   fi
 fi
 

@@ -75,6 +75,9 @@ function step(n: string, text: string) {
   print(`${c.bold}${c.magenta}${n}${c.reset} ${text}`);
 }
 
+/** 「接下来要跑这条命令」的行首提示（后面跟着命令自己的输出） */
+function say_run(cmd: string) { print(`${c.dim}▶${c.reset} ${c.cyan}${cmd}${c.reset}`); }
+
 function hint(text: string) {
   print(`  ${c.dim}${text}${c.reset}`);
 }
@@ -236,6 +239,20 @@ async function run(cmd: string[], opts: { cwd?: string } = {}): Promise<{ ok: bo
   const err = await new Response(proc.stderr).text();
   const code = await proc.exited;
   return { ok: code === 0, out, err };
+}
+
+/**
+ * 跟 `run()` 的区别：**stdio 全继承**。
+ *
+ * `run()` 把 stdout/stderr 收进管道、也不给 stdin —— 装东西的命令一旦要 sudo 密码
+ * （brew cask 往 /Applications 写、Tailscale 的 Linux 安装脚本、apt…），用户既看不到
+ * 提示也打不了字，界面就停在「▶ 正在装…」不动了，看着和死机一样。
+ * 长耗时的命令（npm install / build 好几分钟）用它也更好：进度是看得见的。
+ * 所以：**要交互或要等很久的，一律用这个；只想拿输出去解析的才用 run()。**
+ */
+async function runInteractive(cmd: string[], opts: { cwd?: string } = {}): Promise<boolean> {
+  const proc = Bun.spawn(cmd, { cwd: opts.cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  return (await proc.exited) === 0;
 }
 
 // ============================================================
@@ -1197,22 +1214,17 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
     return;
   }
   if (await confirm(t("现在安装并构建 web 前端吗?(npm install + build,可能要几分钟)", "Install and build the web frontend now? (npm install + build, may take a few minutes)"), true)) {
-    write(`${c.dim}▶${c.reset} npm install… `);
-    const ni = await run(["npm", "install"], { cwd: webDir });
-    if (ni.ok) print(`${c.green}✓${c.reset}`);
-    else {
-      print(`${c.red}✗${c.reset}`);
+    // 这两条都要跑好几分钟,用继承 stdio 让进度看得见(静默几分钟像卡死)
+    say_run("npm install");
+    if (!(await runInteractive(["npm", "install"], { cwd: webDir }))) {
       warn(t("npm install 失败,稍后在 web/ 目录手动重试", "npm install failed — retry manually in web/"));
       return;
     }
     // ⚠ 必须 build:开机自启那个 daemon 跑的是 `next start`(生产模式),没有 .next/
     //   它会直接退出,而 KeepAlive 会把它无限重启。install-cli 因此也把「构建产物
     //   在不在」列为装 daemon 的前置条件(见 lib/cli-install.ts 的 webDaemonReadiness)。
-    write(`${c.dim}▶${c.reset} npm run build… `);
-    const nb = await run(["npm", "run", "build"], { cwd: webDir });
-    if (nb.ok) print(`${c.green}✓${c.reset}`);
-    else {
-      print(`${c.red}✗${c.reset}`);
+    say_run("npm run build");
+    if (!(await runInteractive(["npm", "run", "build"], { cwd: webDir }))) {
       warn(t("web 构建失败,稍后跑: cd web && npm run build(不构建就没有开机自启的 web 服务)", "web build failed — run later: cd web && npm run build (without it there is no auto-started web service)"));
     }
   } else {
@@ -1271,12 +1283,15 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
     print(`  ${c.dim}③${c.reset} ${t("这台机器上打开 Tailscale 并登录（macOS 是 App，Linux 是", "Open Tailscale here and sign in (a menu-bar app on macOS; on Linux:")} ${c.cyan}sudo tailscale up${c.reset}${t("）", ")")}`);
     br();
     if (await confirm(t("现在帮你装 Tailscale 吗?（装完还要自己登录一次）", "Install Tailscale now? (you still sign in yourself afterwards)"), true)) {
-      write(`${c.dim}▶${c.reset} ${installCmd}… `);
-      const r = isMac
-        ? await run(["brew", "install", "--cask", "tailscale"])
-        : await run(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"]);
-      print(r.ok ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`);
-      if (!r.ok) warn(t(`装 Tailscale 失败,手动跑: ${installCmd}`, `Tailscale install failed — run manually: ${installCmd}`));
+      // ⚠ 必须继承 stdio:brew cask 往 /Applications 写、Linux 那条 curl|sh 都可能要
+      //   sudo 密码。用 run() 的话提示看不见、也打不了字,界面就停在这不动了。
+      br();
+      const okInstall = isMac
+        ? await runInteractive(["brew", "install", "--cask", "tailscale"])
+        : await runInteractive(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"]);
+      br();
+      if (okInstall) ok(t("Tailscale 已装", "Tailscale installed"));
+      else warn(t(`装 Tailscale 失败,手动跑: ${installCmd}`, `Tailscale install failed — run manually: ${installCmd}`));
     }
     hint(t(
       "登录之后重跑 bun run setup（或直接看 tailscale 给的地址）就能拿到手机可用的网址。",
