@@ -17,6 +17,27 @@ const EFFORT_OPTIONS = [
 ] as const;
 
 /**
+ * 某个运行时在这台机器上能不能用（bridge GET /api/v1/runtimes，经 BFF /api/runtimes）。
+ * v2.24+ Codex 靠它决定出不出现在下拉里；查不到一律当不可用（安全方向：不显示点了会报错的选项）。
+ */
+function useRuntimeAvailable(id: string): boolean {
+  const [available, setAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/runtimes")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { data?: { runtimes?: { id: string; available: boolean }[] } } | null) => {
+        if (alive) setAvailable(j?.data?.runtimes?.some((r) => r.id === id && r.available) === true);
+      })
+      .catch(() => {}); // 查不到就当不可用：不显示这个选项，是安全方向
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+  return available;
+}
+
+/**
  * 新建 agent 弹窗：填 name / dir / purpose (+可选钉模型/effort) → store.createAgent
  * → Bridge runManager create。选了模型/effort 会写进 registry,restart 也保持——
  * 与 TUI /model、/effort 不同,不会改写全局 settings.json(owner 2026-07-16)。
@@ -58,20 +79,7 @@ export function NewAgentModal({
       alive = false;
     };
   }, []);
-  // v2.24+ Codex：bridge 的 /runtimes 报告可用（装了 codex 且有 `codex queue`）才显示
-  const [codexAvailable, setCodexAvailable] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/runtimes")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { data?: { runtimes?: { id: string; available: boolean }[] } } | null) => {
-        if (alive) setCodexAvailable(j?.data?.runtimes?.some((r) => r.id === "codex" && r.available) === true);
-      })
-      .catch(() => {}); // 查不到就当没有 Codex：不显示这个选项，是安全方向
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const codexAvailable = useRuntimeAvailable("codex");
   const [piBase, setPiBase] = useState("");
   const [dirCustom, setDirCustom] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -300,9 +308,7 @@ export function NewAgentModal({
                   className="input input-bordered input-sm w-full"
                   value={model}
                   disabled={busy}
-                  placeholder={
-                    runtime === "pi" ? t("provider/model-id（留空 = Pi 默认）") : t("Codex 模型 id（留空 = Codex 默认）")
-                  }
+                  placeholder={runtime === "pi" ? t("provider/model-id（留空 = Pi 默认）") : t("Codex 模型 id（留空 = Codex 默认）")}
                   onChange={(e) => setModel(e.target.value)}
                 />
               ) : (

@@ -26,8 +26,7 @@ interface SessionRow {
   modifiedAt: string;
   lastMessage: string;
   agentName: string | null;
-  /** v2.24+ bridge 按运行时适配器给出：能不能收编成可对话的 agent（老 bridge 不带） */
-  manageable?: boolean;
+  manageable?: boolean; // v2.24+ bridge 按运行时适配器给出（老 bridge 不带）
 }
 
 interface HistoryTool {
@@ -74,10 +73,7 @@ export function RuntimeBadge({ runtime, className = "" }: { runtime: string; cla
   return null;
 }
 
-/**
- * 这个会话能不能收编成可对话的 agent。以 bridge 给的 manageable 为准（取自运行时适配器，
- * 加新运行时前端不用改）；老 bridge 不带这个字段时按旧规则（只有 Codex 不能）。
- */
+/** 能不能收编成可对话的 agent：以 bridge 的 manageable 为准（加运行时前端不用改）；老 bridge 按旧规则 */
 export function canAdoptSession(s: { runtime: string; manageable?: boolean }): boolean {
   return typeof s.manageable === "boolean" ? s.manageable : s.runtime !== "codex";
 }

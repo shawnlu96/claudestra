@@ -852,8 +852,7 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
       agentName: byId.get(String(s.sessionId)) ?? null,
       // 目录已消失（/tmp 被清、项目搬走）→ 收编必然失败，提前标出来别让用户白试
       cwdExists: typeof s.cwd === "string" && s.cwd ? existsSync(s.cwd) : false,
-      // 能不能收编成可对话的 agent —— 取自运行时适配器（前端据此决定给不给「收编」按钮）
-      manageable: sourceFor(String(s.runtime ?? "")).manageable,
+      manageable: sourceFor(String(s.runtime ?? "")).manageable, // 取自运行时适配器：前端据此给不给「收编」按钮
     }));
     return apiJson(200, { ok: true, count: sessions.length, sessions });
   }
