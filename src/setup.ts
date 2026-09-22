@@ -1400,25 +1400,24 @@ async function stepAdoptSessions(): Promise<void> {
  * Web 端默认只听在本机。要在手机上用，两台设备得互相看得见：
  *   - 同一个局域网 → LAN 地址就行，但换个网络（出门、4G）就断；
  *   - Tailscale → 给每台设备一个稳定的私有地址（100.64.0.0/10），换网不换址，
- *     不用端口转发、也不把服务暴露到公网。owner 自己就是这么用的。
+ *     不用端口转发、也不把服务暴露到公网。
  *
- * 地址探测复用 lib/net-addr.ts：它**按网卡地址段判断**，不依赖 `tailscale` CLI
- * ——macOS 上常常只装了 App，CLI 躺在 /Applications/Tailscale.app/... 不在 PATH。
+ * 流程（lib/tailscale.ts 的 planHttps 决策，纯函数有单测）：检测 → 没装就引导安装 →
+ * 没登录就等登录 → 已有能用的 HTTPS 入口就复用（零改动）→ 否则经用户同意配
+ * `tailscale serve`（443 空闲用 443，被占用 8443）→ 用 /api/version 验证 → 打二维码。
+ * 主地址优先 HTTPS：Passkey 按域名绑定、PWA 装在哪个 origin 就绑在哪，换地址要全部重来，
+ * 所以第一次就给对的地址，比事后迁移便宜得多。
  *
- * ⚠ 这里只打印**运行时探测到的**地址，绝不内置任何具体地址：这个仓库是要给别人用的。
+ * ⚠ 只打印**运行时探测到的**地址，绝不内置任何具体地址：这个仓库是要给别人用的。
+ * ⚠ 凡是动整台机器的步骤（装 Tailscale、sudo tailscale up、serve）都先问；永远不 reset serve、
+ *   不开 funnel（公网暴露）。
  */
 async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
   header(nextStep(), t("手机访问（Tailscale）", "Phone access (Tailscale)"));
+  const ts = await import("./lib/tailscale.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
-
-  const pick = () => {
-    const cands = detectBridgeUrls(webPort);
-    return {
-      ts: cands.find((c) => c.kind === "tailscale"),
-      lan: cands.find((c) => c.kind === "lan"),
-    };
-  };
-  let { ts, lan } = pick();
+  const lan = detectBridgeUrls(webPort).find((x) => x.kind === "lan");
+  const isMac = process.platform === "darwin";
 
   print(t(
     "Web 端装在本机,在这台机器上开浏览器就能用。要在**手机**上用,两边得互相看得见:",
@@ -1429,48 +1428,218 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
   print(`  ${c.dim}•${c.reset} ${t("Tailscale → 每台设备一个固定私有地址,换网不换址,不用端口转发,也不把服务暴露到公网", "Tailscale → a stable private address per device; survives network changes, no port forwarding, nothing exposed publicly")}`);
   br();
 
-  if (!ts) {
-    if (lan) hint(t(`现在只探测到局域网地址: ${lan.url}`, `Only a LAN address is visible right now: ${lan.url}`));
-    else hint(t("现在探测不到可用于手机的地址(只有 localhost)", "No phone-reachable address is visible right now (localhost only)"));
-    br();
-    const isMac = process.platform === "darwin";
-    const installCmd = isMac
-      ? "brew install --cask tailscale"
-      : "curl -fsSL https://tailscale.com/install.sh | sh";
-    print(t("装 Tailscale（两边都要装、登录同一个账号）:", "Install Tailscale (on both devices, same account):"));
-    print(`  ${c.dim}①${c.reset} ${t("这台机器:", "This machine:")} ${c.cyan}${installCmd}${c.reset}`);
-    print(`  ${c.dim}②${c.reset} ${t("手机: App Store / Google Play 装 Tailscale,登录同一个账号", "Phone: install Tailscale from the App Store / Google Play, sign in with the same account")}`);
-    print(`  ${c.dim}③${c.reset} ${t("这台机器上打开 Tailscale 并登录（macOS 是 App，Linux 是", "Open Tailscale here and sign in (a menu-bar app on macOS; on Linux:")} ${c.cyan}sudo tailscale up${c.reset}${t("）", ")")}`);
-    br();
-    if (await confirm(t("现在帮你装 Tailscale 吗?（装完还要自己登录一次）", "Install Tailscale now? (you still sign in yourself afterwards)"), true)) {
-      // ⚠ 必须继承 stdio:brew cask 往 /Applications 写、Linux 那条 curl|sh 都可能要
-      //   sudo 密码。用 run() 的话提示看不见、也打不了字,界面就停在这不动了。
-      br();
-      const okInstall = isMac
-        ? await runInteractive(["brew", "install", "--cask", "tailscale"])
-        : await runInteractive(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"]);
-      br();
-      if (okInstall) ok(t("Tailscale 已装", "Tailscale installed"));
-      else warn(t(`装 Tailscale 失败,手动跑: ${installCmd}`, `Tailscale install failed — run manually: ${installCmd}`));
-    }
+  // ── S0 检测 / 安装 / 登录 ──
+  let cli = ts.resolveTailscaleCli();
+  let status = cli ? await ts.readTailscaleStatus(cli) : null;
+  if (!cli) {
+    cli = await offerTailscaleInstall(isMac, lan?.url);
+    status = cli ? await ts.readTailscaleStatus(cli) : null;
+  }
+  if (cli && !status?.running) status = await waitForTailscaleLogin(cli, isMac, status);
+  if (!cli || !status?.running) {
     hint(t(
-      "登录之后重跑 bun run setup（或直接看 tailscale 给的地址）就能拿到手机可用的网址。",
-      "After signing in, rerun `bun run setup` (or just read the address Tailscale gives you) to get the phone URL.",
+      "Tailscale 登录之后重跑 bun run setup（或 bun src/manager.ts doctor 查看现状）就能拿到手机可用的网址。",
+      "After signing in to Tailscale, rerun `bun run setup` (or check `bun src/manager.ts doctor`) to get the phone URL.",
     ));
-    // 登录可能就在刚才那几十秒里完成了 —— 再探一次，省一轮重跑
-    ({ ts, lan } = pick());
+    return lan ? { url: lan.url } : {};
+  }
+  const tsCli = cli;
+  ok(t(`Tailscale 在线${status.dnsName ? `: ${status.dnsName}` : ""}`, `Tailscale is up${status.dnsName ? `: ${status.dnsName}` : ""}`));
+  print(`  ${c.dim}•${c.reset} ${t("手机: App Store / Google Play 装 Tailscale,登录同一个账号", "Phone: install Tailscale from the App Store / Google Play, sign in with the same account")}`);
+  br();
+
+  // ── S2 HTTPS 入口决策 ──
+  const report = await ts.collectRemoteAccess(webPort);
+  const decide = async (st: import("./lib/tailscale.js").TailscaleStatus) => ts.planHttps({
+    cliFound: true, status: st, serve: await ts.readServeStatus(tsCli), webPort,
+    port443Busy: report.others443.length > 0,
+    port8443Busy: await ts.portBusyByOthers(8443),
+    workingEntry: ts.workingHttpsEntry(report),
+  });
+  let plan = await decide(status);
+  if (plan.kind === "need-https-enable") {
+    print(t(
+      "tailnet 还没开 HTTPS 证书。去 Tailscale 管理后台 → DNS 页 → 开启「HTTPS Certificates」。",
+      "HTTPS certificates are not enabled for your tailnet. Open the Tailscale admin console → DNS → enable \"HTTPS Certificates\".",
+    ));
+    hint(t(
+      "注意：证书会进入公开的证书透明（CT）日志，这台机器名和 tailnet 名可被公开查到。不想要就跳过，用下面的明文地址。",
+      "Note: certificates land in public Certificate Transparency logs, so this machine name and your tailnet name become publicly visible. Skip if you'd rather not — you'll get the plain-HTTP address below.",
+    ));
+    await waitEnter(t("开好后按 ENTER 重新检测（不开也直接回车）", "Press ENTER to re-check once enabled (or just ENTER to skip)"));
+    status = (await ts.readTailscaleStatus(tsCli)) ?? status;
+    plan = await decide(status);
   }
 
-  if (ts) {
-    ok(t(`探测到 Tailscale 地址,手机上用这个: ${c.cyan}${ts.url}${c.reset}`, `Tailscale address detected — use this on your phone: ${c.cyan}${ts.url}${c.reset}`));
-    hint(t(
-      `想要 HTTPS（语音输入、完整 PWA 能力要求安全上下文）: ${c.cyan}tailscale serve --bg ${webPort}${c.reset}，细节见 web/SETUP.md`,
-      `For HTTPS (voice input and full PWA capabilities require a secure context): ${c.cyan}tailscale serve --bg ${webPort}${c.reset} — details in web/SETUP.md`,
-    ));
-    return { url: ts.url };
+  let httpsUrl: string | undefined;
+  switch (plan.kind) {
+    case "reuse":
+      ok(t(`已有 HTTPS 入口，直接复用（不改任何配置）: ${plan.url}`, `An HTTPS entry already works — reusing it (no changes): ${plan.url}`));
+      httpsUrl = plan.url;
+      break;
+    case "serve": {
+      const cmd = [ts.shellQuote(tsCli), ...plan.args].join(" ");
+      print(t(
+        "可以用 tailscale serve 给网页加一个 HTTPS 入口（只在你的 tailnet 内可达，不对公网开放，证书由 Tailscale 自动续）:",
+        "tailscale serve can give the web app an HTTPS entry (reachable only inside your tailnet, not public; Tailscale renews the certificate):",
+      ));
+      print(`  ${c.cyan}${cmd}${c.reset}`);
+      if (plan.port !== 443) {
+        const who = report.others443.join(", ") || "serve";
+        hint(t(`443 已被占用（${who}），改用 ${plan.port}，不去抢它`, `Port 443 is taken (${who}), using ${plan.port} instead of displacing it`));
+      }
+      hint(t("这会改这台机器的 Tailscale 配置（只加这一条，不动已有的）。", "This changes this machine's Tailscale config (adds just this one handler, leaves existing ones alone)."));
+      if (await confirm(t("现在配置吗?", "Configure it now?"), true)) {
+        const r = await ts.applyServe(tsCli, plan.port, webPort);
+        if (r.ok) {
+          ok(t(`已配置: ${plan.url}`, `Configured: ${plan.url}`));
+          httpsUrl = plan.url;
+          await verifyHttpsEntry(ts, plan.url, webPort);
+          if (!isMac) hint(t("Linux 上 web 服务还不会自动常驻（没有 systemd 安装），serve 背后的 web 要你自己保证在跑。", "On Linux the web service is not auto-installed as a systemd unit yet — keep it running yourself behind serve."));
+        } else {
+          warn(t(`配置失败: ${r.detail}`, `Failed: ${r.detail}`));
+          printManualHttps();
+        }
+      } else {
+        hint(t("跳过了。之后想要 HTTPS，手动执行上面那条命令即可。", "Skipped. Run the command above yourself whenever you want HTTPS."));
+      }
+      break;
+    }
+    case "need-https-enable":
+      hint(t("还没开 HTTPS，先用明文地址；开了之后重跑 setup 即可升级到 HTTPS。", "HTTPS still off — using the plain address for now; rerun setup after enabling it."));
+      break;
+    case "no-magicdns":
+      warn(t("tailnet 没开 MagicDNS，拿不到 ts.net 域名，也就签不了 HTTPS 证书（管理后台 → DNS 开启）。", "MagicDNS is off, so there's no ts.net name to certify (enable it in the admin console → DNS)."));
+      break;
+    case "fallback-manual":
+      printManualHttps();
+      break;
+    default:
+      break;
   }
-  if (lan) return { url: lan.url };
-  return {};
+
+  // ── S4 输出：主地址优先 HTTPS ──
+  const plainUrl = status.ipv4[0] ? `http://${status.ipv4[0]}:${webPort}` : lan?.url;
+  const primary = httpsUrl ?? plainUrl;
+  if (!primary) return {};
+  br();
+  ok(t(`手机上用这个: ${c.cyan}${primary}${c.reset}`, `Use this on your phone: ${c.cyan}${primary}${c.reset}`));
+  if (httpsUrl && plainUrl) hint(t(`备用（明文，语音输入 / 推送 / Passkey 不可用）: ${plainUrl}`, `Fallback (plain HTTP — no voice input / push / passkeys): ${plainUrl}`));
+  if (!httpsUrl) hint(t("明文地址下语音输入、推送、Passkey 用不了（浏览器要求 HTTPS）。", "Voice input, push and passkeys need HTTPS; they won't work on the plain address."));
+  hint(t(
+    "在把网页添加到主屏幕（PWA）之前就用这个地址——换地址要重新注册 Passkey、重装 PWA、重新订阅推送。",
+    "Use this address before adding the app to your home screen — switching later means re-registering passkeys, reinstalling the PWA and re-subscribing to push.",
+  ));
+  await printQr(primary);
+  return { url: primary };
+}
+
+/** 没装 Tailscale：说明 + 经同意安装。返回装好后的 CLI 路径（没装成为 null）。 */
+async function offerTailscaleInstall(isMac: boolean, lanUrl?: string): Promise<string | null> {
+  if (lanUrl) hint(t(`现在只探测到局域网地址: ${lanUrl}`, `Only a LAN address is visible right now: ${lanUrl}`));
+  else hint(t("现在探测不到可用于手机的地址(只有 localhost)", "No phone-reachable address is visible right now (localhost only)"));
+  br();
+  // macOS: cask 已改名 tailscale-app（装的是官方 pkg，CLI 在 App 包里、不进 PATH —— 由 lib/tailscale 定位）
+  const installCmd = isMac ? "brew install --cask tailscale-app" : "curl -fsSL https://tailscale.com/install.sh | sh";
+  print(t("装 Tailscale（两边都要装、登录同一个账号）:", "Install Tailscale (on both devices, same account):"));
+  print(`  ${c.dim}①${c.reset} ${t("这台机器:", "This machine:")} ${c.cyan}${installCmd}${c.reset}`);
+  print(`  ${c.dim}②${c.reset} ${t("手机: App Store / Google Play 装 Tailscale,登录同一个账号", "Phone: install Tailscale from the App Store / Google Play, sign in with the same account")}`);
+  br();
+  if (!(await confirm(t("现在帮你装 Tailscale 吗?（会改整台机器的网络，需要管理员密码）", "Install Tailscale now? (changes this machine's networking; needs your admin password)"), true))) {
+    return null;
+  }
+  // ⚠ 必须继承 stdio:pkg 安装、Linux 那条 curl|sh 都可能要 sudo 密码。用 run() 的话提示
+  //   看不见、也打不了字,界面就停在这不动了。
+  br();
+  const okInstall = isMac
+    ? await runInteractive(["brew", "install", "--cask", "tailscale-app"])
+    : await runInteractive(["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"]);
+  br();
+  if (!okInstall) {
+    warn(t(`装 Tailscale 失败,手动跑: ${installCmd}`, `Tailscale install failed — run manually: ${installCmd}`));
+    return null;
+  }
+  ok(t("Tailscale 已装", "Tailscale installed"));
+  const { resolveTailscaleCli } = await import("./lib/tailscale.js");
+  return resolveTailscaleCli();
+}
+
+/**
+ * 装了但没连上：macOS 打开 App；Linux 经同意跑 `sudo tailscale up --qr --operator=$USER`。
+ * 然后按 ENTER 轮询状态（读终端是同步阻塞的，没法边等边轮询），拿到登录链接就打印链接和二维码。
+ */
+async function waitForTailscaleLogin(
+  cli: string,
+  isMac: boolean,
+  initial: import("./lib/tailscale.js").TailscaleStatus | null,
+): Promise<import("./lib/tailscale.js").TailscaleStatus | null> {
+  const { readTailscaleStatus } = await import("./lib/tailscale.js");
+  let status = initial;
+  warn(t(`Tailscale 已装但还没连上（${status?.backendState || "未运行"}）`, `Tailscale is installed but not connected (${status?.backendState || "not running"})`));
+  if (isMac) {
+    await run(["open", "-a", "Tailscale"]);
+    print(t(
+      "已打开 Tailscale。首次使用要在「系统设置 → 隐私与安全性 / 通用 → 登录项与扩展」里允许它的系统扩展和 VPN 配置，然后在菜单栏图标里登录。",
+      "Opened Tailscale. On first run, allow its system extension and VPN configuration in System Settings (Privacy & Security / General → Login Items & Extensions), then sign in from the menu-bar icon.",
+    ));
+  } else {
+    const user = process.env.USER || "";
+    print(t(
+      `登录用 ${c.cyan}sudo tailscale up --qr --operator=${user}${c.reset}。--operator 让当前用户以后不用 sudo 就能操作 tailscaled（向导配 serve、doctor 读状态都要它）。`,
+      `Sign in with ${c.cyan}sudo tailscale up --qr --operator=${user}${c.reset}. --operator lets your user manage tailscaled without sudo afterwards (needed for serve and doctor).`,
+    ));
+    if (user && (await confirm(t("现在运行吗?", "Run it now?"), true))) {
+      br();
+      await runInteractive(["sudo", cli, "up", "--qr", `--operator=${user}`]);
+      br();
+    }
+  }
+  for (let i = 0; i < 10; i++) {
+    write(`${c.dim}  ${t("登录好后按 ENTER 检测（输入 s 跳过）", "Press ENTER once signed in (type s to skip)")}… ${c.reset}`);
+    if ((await readLine()).trim().toLowerCase() === "s") break;
+    status = await readTailscaleStatus(cli);
+    if (status?.running) return status;
+    hint(t(`还没连上（${status?.backendState || "未知"}）`, `Not connected yet (${status?.backendState || "unknown"})`));
+    if (status?.authUrl) {
+      print(`  ${t("登录链接:", "Sign-in link:")} ${c.cyan}${status.authUrl}${c.reset}`);
+      await printQr(status.authUrl);
+    }
+  }
+  return status;
+}
+
+/** 刚配好的入口验证：TLS 校验通过 + /api/version 与本机 web 一致才算成功 */
+async function verifyHttpsEntry(ts: typeof import("./lib/tailscale.js"), url: string, webPort: number): Promise<void> {
+  const local = await ts.fetchJson(`http://127.0.0.1:${webPort}/api/version`, 2000);
+  if (!local) {
+    hint(t("web 服务会在后面一步装好，届时才能真正打开；装完用 bun src/manager.ts doctor 复查「手机访问」。", "The web service is installed in a later step; afterwards run `bun src/manager.ts doctor` to re-check phone access."));
+    return;
+  }
+  const p = await ts.probeEntry(url, "serve", local);
+  if (p.reachable && p.matchesLocal && p.certValid !== false) ok(t(`验证通过: ${url}`, `Verified: ${url}`));
+  else warn(t(`${url} 暂时打不开（首次签证书可能要几十秒），稍后用 doctor 复查`, `${url} isn't answering yet (first certificate issuance can take a bit) — re-check with doctor later`));
+}
+
+function printManualHttps(): void {
+  hint(t(
+    "自动配置走不通。手工方案（tailscale cert + 反向代理）见 web/SETUP.md 的「HTTPS when tailscale serve won't cooperate」；文件证书约 90 天要续一次，可用 scripts/renew-ts-cert.ts。",
+    "Automatic setup didn't work. For the manual route (tailscale cert + reverse proxy) see web/SETUP.md, \"HTTPS when tailscale serve won't cooperate\"; file certificates need renewing about every 90 days (scripts/renew-ts-cert.ts).",
+  ));
+}
+
+/**
+ * 终端二维码。复用 web 已有的依赖 uqr（此步只在装了 web 之后才走，web/node_modules 一定在），
+ * 根目录不为它新增依赖；加载失败就只留上面那行 URL。只编码 URL，不编码任何凭据。
+ */
+async function printQr(url: string): Promise<void> {
+  try {
+    const m = (await import(`${REPO_ROOT}/web/node_modules/uqr/dist/index.mjs`)) as {
+      renderUnicodeCompact: (d: string, o?: { border?: number }) => string;
+    };
+    br();
+    print(m.renderUnicodeCompact(url, { border: 1 }).split("\n").map((l) => `  ${l}`).join("\n"));
+    br();
+  } catch { /* 没有 uqr 就只打印 URL */ }
 }
 
 // ============================================================
