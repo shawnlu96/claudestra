@@ -139,9 +139,9 @@ export async function saveRegistry(reg: Registry) {
 // `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
 // 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
 // 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
-export const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f]/;
+const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f]/;
 /** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
-export const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
+const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 
 export function normalizeName(raw: string): string {
   return `${AGENT_PREFIX}${raw.replace(AGENT_PREFIX, "").toLowerCase()}`;

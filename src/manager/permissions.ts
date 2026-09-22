@@ -10,7 +10,7 @@ import { type AgentInfo, loadRegistry, saveRegistry, normalizeName, output, extr
 // 权限管理
 // ============================================================
 
-export function describePerm(info: AgentInfo): {
+function describePerm(info: AgentInfo): {
   preset: string;
   raw?: string;
   tools: string[];

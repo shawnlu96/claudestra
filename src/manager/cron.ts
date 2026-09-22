@@ -15,7 +15,7 @@ import { output } from "./core.js";
 
 
 /** v2.21.4+ cron 的 --project 校验:必须是已有 project id("-" = 清除,给 cron-edit 用)。 */
-export async function checkCronProject(project: string | undefined): Promise<string | null> {
+async function checkCronProject(project: string | undefined): Promise<string | null> {
   if (!project || project === "-") return null;
   const data = await readProjects();
   if (data.projects.some((p) => p.id === project)) return null;

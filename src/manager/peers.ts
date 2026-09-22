@@ -9,17 +9,17 @@ import { loadRegistry, output } from "./core.js";
 
 /** peer 名校验:名字要进 `x@peer` / `peer:name.agent` 寻址语法,"@" "." 空白都会
  *  撞分隔符(review 2026-07-19 #11) */
-export function validPeerName(name: string): boolean {
+function validPeerName(name: string): boolean {
   return /^[\w-]{1,32}$/.test(name);
 }
 
 /** 握手串自报名:对方界面上「谁邀请的我」。USER_NAME 是 setup 时配置的称呼。 */
-export function selfPeerName(): string {
+function selfPeerName(): string {
   return (process.env.USER_NAME || "").trim().replace(/[^\w-]/g, "") || hostname().split(".")[0];
 }
 
 /** invite/join 共用的 scope 校验（token-add 同款 R1 规则,不动原函数避免回归） */
-export async function checkPeerScope(agents: string[], force: boolean): Promise<{ error?: string; warnings: string[] }> {
+async function checkPeerScope(agents: string[], force: boolean): Promise<{ error?: string; warnings: string[] }> {
   const reg = await loadRegistry();
   const warnings: string[] = [];
   for (const a of agents) {
@@ -44,7 +44,7 @@ export async function checkPeerScope(agents: string[], force: boolean): Promise<
 }
 
 /** 为 peer 签 token 并登记 principal。返回 {tokenId, secret} */
-export async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tokenId: string; secret: string }> {
+async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tokenId: string; secret: string }> {
   const { readPrincipals, writePrincipals, newTokenPrincipal, tokenIdOf } = await import("../lib/principals.js");
   const file = await readPrincipals();
   // 同名 peer 的旧 token 先禁用（重跑握手不留悬空凭据）
@@ -65,7 +65,7 @@ export async function issuePeerToken(peerName: string, agents: string[]): Promis
  * 探测优先 Tailscale（100.64/10，唯一跨网络可达），其次内网地址。
  * 返回 null 表示确实探不到，调用方照旧报错要求人工给 --url。
  */
-export async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
+async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
   // bridge 默认只绑 127.0.0.1——邀请串里的对外地址再对,对方也连不进来。
   // 生成邀请这一刻就把话说明白,别拖到对方兑换失败才暴露(loopback 显式 --url 同理)。
   const bind = (process.env.BRIDGE_BIND || "127.0.0.1").trim();
@@ -270,7 +270,7 @@ export async function cmdPeerHttpRemove(peerName: string) {
 
 /** 按 token 短 id 禁用 principal。onlyUnredeemed=true 时仅动 peer 字段仍是
  *  "invite:*" 占位的（已兑换的 token 归 peer 管理面管,不在这里误伤）。 */
-export async function disableTokenById(tokenId: string, onlyUnredeemed: boolean): Promise<boolean> {
+async function disableTokenById(tokenId: string, onlyUnredeemed: boolean): Promise<boolean> {
   const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
   const file = await readPrincipals();
   const p = file.principals.find((x) => x.id === `token:${tokenId}`);
@@ -283,7 +283,7 @@ export async function disableTokenById(tokenId: string, onlyUnredeemed: boolean)
 
 /** 过期邀请清扫：吊销预签 token + 从 pendingInvites 移除。邀请串里带的是
  *  真 Bearer——不吊销的话「24h 过期」就是句空话。invite-new/list/redeem 前都跑。 */
-export async function sweepExpiredInvites(): Promise<number> {
+async function sweepExpiredInvites(): Promise<number> {
   const { readPeers, writePeers, inviteExpired } = await import("../lib/peers.js");
   const data = await readPeers();
   const expired = (data.pendingInvites || []).filter((i) => inviteExpired(i));
@@ -297,7 +297,7 @@ export async function sweepExpiredInvites(): Promise<number> {
 /** 自报名净化 + 撞名后缀。对方的名字是自报的——撞上已有 peer 时必须换名,
  *  否则一张新邀请就能顶掉既有 peer 的 baseUrl/outToken(peer 劫持)。
  *  sameAs 返回 true 表示「就是同一个 peer」(合并而非后缀)。 */
-export async function uniquePeerName(
+async function uniquePeerName(
   rawName: string,
   sameAs: (existing: import("../lib/peers.js").HttpPeer) => boolean,
 ): Promise<string> {
@@ -421,7 +421,7 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
 /** v2.16.1 跨 tailnet 候选扫描:邀请地址连不上时,扫本机 tailscale 视角的
  *  peer IP 同端口找活着的 bridge(1.5s 超时并行 GET /api/v1/agents,有 HTTP
  *  响应即候选——401 也算,那正是 token 门禁在工作)。只探测不发凭据。 */
-export async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
+async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
   const port = (() => { try { return new URL(failedUrl).port || "3847"; } catch { return "3847"; } })();
   const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
   // tailscale CLI:PATH 里的优先,mac App 路径兜底
