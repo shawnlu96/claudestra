@@ -8,7 +8,7 @@
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
-import { restartFailureReason } from "./lib/restart-result.js";
+import { restartFailureReason, restartFailedNames, parseManagerList } from "./lib/restart-result.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
@@ -608,12 +608,34 @@ let restartWaveUntil = 0;
 // 救不回来的 agent 不能每分钟刷一条 control 频道
 const restoreFailNotifiedAt = new Map<string, number>();
 
+// manager list 连续失败计数：第一次失败打日志，连续 N 轮才告警一次（每分钟巡检，别刷屏）
+let listFailStreak = 0;
+const LIST_FAIL_ALERT_AFTER = 5;
+
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   try {
-    const list = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"]);
-    if (!list.ok) return;
-    const parsed = JSON.parse(list.out || "{}");
-    const agents: any[] = parsed.agents || [];
+    const list = parseManagerList(await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 60_000));
+    if (!list.ok) {
+      // 以前这里无声 return：registry 坏了 / 拉到坏提交时 launcher「loaded 但没干活」
+      listFailStreak++;
+      if (listFailStreak === 1) console.error(`🔁 [${source}] manager list 失败，本轮跳过恢复: ${list.reason}`);
+      if (listFailStreak === LIST_FAIL_ALERT_AFTER) {
+        await notify({
+          source: "launcher",
+          chatId: CONTROL_CHANNEL_ID,
+          text: t(
+            `⚠️ launcher 连续 ${LIST_FAIL_ALERT_AFTER} 轮 \`manager list\` 失败，dead agent 自动恢复已停摆：${list.reason.slice(0, 300)}\n体检：\`bun src/manager.ts doctor\``,
+            `⚠️ launcher: \`manager list\` failed ${LIST_FAIL_ALERT_AFTER} times in a row — dead-agent auto-restore is stalled: ${list.reason.slice(0, 300)}\nHealth check: \`bun src/manager.ts doctor\``,
+          ),
+        });
+      }
+      return;
+    }
+    if (listFailStreak) {
+      console.log(`🔁 [${source}] manager list 已恢复（此前连续失败 ${listFailStreak} 轮）`);
+      listFailStreak = 0;
+    }
+    const agents: any[] = list.agents;
     // manager.ts list 会把 "registry active 但 window 丢了" 的标为 status="dead"
     const reallyDead = agents.filter((a) => a.status === "dead");
     if (reallyDead.length === 0) {
@@ -679,14 +701,33 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
   }
 }
 
-async function restartAgentsAndMaster() {
+/** 重启波结果：ok=false 时「完成」消息不能说「所有 agent 已重启」 */
+type RestartWaveResult = { ok: true } | { ok: false; reason: string };
+
+async function restartAgentsAndMaster(): Promise<RestartWaveResult> {
   restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检
   // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
   // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
   // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
   try {
-    const listOut = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000);
-    const agents = (JSON.parse(listOut.out || "{}").agents || []) as { name: string; status?: string }[];
+    const list = parseManagerList(await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000));
+    if (!list.ok) {
+      // 以前 list 失败时 canary=undefined → 静默跳过金丝雀、直接全量重启：防护被绕过。
+      // 现在 fail-closed：选不出金丝雀就整波中止，agent 继续跑旧进程。
+      const reason = `manager list 失败，无法选金丝雀：${list.reason}`;
+      console.error(`🆙 ${reason}——中止重启波`);
+      restartWaveUntil = Date.now() + 60_000;
+      await notify({
+        source: "launcher",
+        chatId: CONTROL_CHANNEL_ID,
+        text: t(
+          `🚨 **升级后重启波已中止**：${reason.slice(0, 300)}。agent 继续跑旧进程，需人工排查 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          `🚨 **Post-upgrade restart wave aborted**: ${reason.slice(0, 300)}. Agents keep their old processes; manual investigation needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+        ),
+      });
+      return { ok: false, reason };
+    }
+    const agents = list.agents;
     const canary = agents.find((a) => a.status !== "stopped");
     if (canary) {
       const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
@@ -704,22 +745,36 @@ async function restartAgentsAndMaster() {
             ),
           });
         } catch { /* non-critical */ }
-        return;
+        return { ok: false, reason: `金丝雀 ${canary.name} 重启失败` };
       }
     }
   } catch (e) {
-    console.log(`🆙 金丝雀流程异常(继续常规重启): ${(e as Error).message}`);
+    // 金丝雀流程本身出异常 = 没验证过新版本能起，同样中止（以前这里「继续常规重启」）
+    const reason = `金丝雀流程异常：${(e as Error).message}`;
+    console.error(`🆙 ${reason}——中止重启波`);
+    restartWaveUntil = Date.now() + 60_000;
+    await notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: `🚨 **升级后重启波已中止**：${reason.slice(0, 300)}` });
+    return { ok: false, reason };
   }
 
   // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
   restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
-  const { ok, out } = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
-  console.log(`🆙 bun manager restart 结果: ok=${ok}`);
-  if (!ok) console.log(out);
+  const r = await runCmd(["bun", "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
+  // 退出码不可信：manager restart 部分失败时照样输出 JSON 并以 0 退出（09-21 日志里
+  // 「ok=true」之后紧跟「✅ 更新完成,所有 agent 已重启」）。按 restart 的结构化结果判。
+  const why = restartFailureReason(r);
+  const failedNames = restartFailedNames(r);
+  console.log(`🆙 bun manager restart 结果: ${why ? `❌ ${why}` : "✅"}`);
+  if (why && !failedNames.length) console.log(r.out);
   restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
 
   // master 通过发送 /exit 让其退出，主循环会自动重启
   await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "/exit", "Enter"]).catch(() => {});
+  if (!why) return { ok: true };
+  return {
+    ok: false,
+    reason: failedNames.length ? `${failedNames.join(", ")} 重启失败：${why}` : why,
+  };
 }
 
 async function checkClaudeCodeUpdate() {
@@ -854,16 +909,21 @@ async function checkClaudeCodeUpdate() {
     console.log(`🆙 新二进制体检:经「${health.fixed}」修复后可用`);
   }
 
-  await restartAgentsAndMaster();
+  const wave = await restartAgentsAndMaster();
 
   try {
     await notify({
       source: "launcher",
       chatId: CONTROL_CHANNEL_ID,
-      text: t(
-        `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-        `✅ **Claude Code updated** to v${afterVersion}, all agents restarted ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-      ),
+      text: wave.ok
+        ? t(
+            `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+            `✅ **Claude Code updated** to v${afterVersion}, all agents restarted ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          )
+        : t(
+            `⚠️ **Claude Code 已更新到 v${afterVersion}，但重启波没有全部成功**：${wave.reason.slice(0, 500)}\n手动重试：\`bun src/manager.ts restart <name>\` ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+            `⚠️ **Claude Code updated to v${afterVersion}, but the restart wave did not fully succeed**: ${wave.reason.slice(0, 500)}\nRetry manually: \`bun src/manager.ts restart <name>\` ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
+          ),
     });
   } catch { /* non-critical */ }
 }

@@ -8,7 +8,37 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { restartFailureReason } from "../src/lib/restart-result.js";
+import { restartFailureReason, restartFailedNames, parseManagerList } from "../src/lib/restart-result.js";
+
+describe("restartFailedNames（D7-5：全量重启退出码 0 但部分失败）", () => {
+  test("列出失败项的名字；退出码 0 也不能当成功", () => {
+    const out = JSON.stringify({ ok: false, results: [{ name: "a", ok: true }, { name: "b", ok: false, error: "启动超时" }] });
+    expect(restartFailedNames({ ok: true, out })).toEqual(["b"]);
+    expect(restartFailureReason({ ok: true, out })).toBe("启动超时");
+  });
+  test("非 JSON / 无 results → 空", () => {
+    expect(restartFailedNames({ ok: false, out: "boom" })).toEqual([]);
+    expect(restartFailedNames({ ok: true, out: '{"ok":true}' })).toEqual([]);
+  });
+});
+
+describe("parseManagerList（D7-5：list 失败不是「零个 agent」）", () => {
+  test("正常", () => {
+    expect(parseManagerList({ ok: true, out: '{"ok":true,"agents":[{"name":"x"}]}' })).toEqual({ ok: true, agents: [{ name: "x" }] });
+  });
+  test("manager 自报失败", () => {
+    expect(parseManagerList({ ok: false, out: '{"ok":false,"error":"registry 损坏"}' })).toEqual({ ok: false, reason: "registry 损坏" });
+  });
+  test("崩溃无输出：带 stderr 尾巴", () => {
+    const r = parseManagerList({ ok: false, out: "", err: "line1\nSyntaxError: x\n" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("SyntaxError: x");
+  });
+  test("缺 agents 字段 / 空输出 也算失败", () => {
+    expect(parseManagerList({ ok: true, out: '{"ok":true}' }).ok).toBe(false);
+    expect(parseManagerList({ ok: true, out: "" }).ok).toBe(false);
+  });
+});
 
 describe("restartFailureReason", () => {
   test("全部成功 → null", () => {
