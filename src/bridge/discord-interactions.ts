@@ -22,7 +22,6 @@ import { clearWedgeState } from "./wedge-watcher.js";
 import { forceRefreshStatsDashboard, noteSaveCompactInjected } from "./stats-dashboard.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
-import { controlFor } from "../lib/runtimes/index.js";
 import { describeKeys, interruptWindow } from "../lib/runtimes/window-ops.js";
 import {
   tmuxCapture,
@@ -465,10 +464,9 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const listResult = await runManager("list");
         const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
         if (agent) {
-          const keys = controlFor(agent.runtime).interruptKeys;
-          interruptWindow(`master:${agent.name}`, agent.runtime).catch((e) =>
-            console.error(`⚡ /interrupt 发键失败: ${(e as Error).message}`),
-          );
+          const keys = await interruptWindow(`master:${agent.name}`, agent.runtime).catch((e: Error) => e);
+          if (keys instanceof Error) return void (await interaction.reply(`❌ 发送打断键失败: ${keys.message}`));
+          if (!keys.length) return void (await interaction.reply(`💤 ${agent.name} 当前空闲，无需打断`));
           stopTyping(channelId);
           clearSafetyTimer(channelId);
           // 同打断按钮：被打断的回合没有 Stop hook，主动收尾 done
@@ -833,6 +831,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             await interaction.followUp({ content: `❌ tmux 发送打断键失败: ${msg}`, ephemeral: true }).catch(() => {});
             return;
           }
+          const idle = { content: `💤 ${agentLabel} 当前空闲，无需打断`, ephemeral: true };
+          if (!keys.length) return void (await interaction.followUp(idle).catch(() => {})); // 回执发不出无妨：本就什么键都没按
           console.log(`⚡ ${describeKeys(keys)} 已发送给 ${agentLabel}`);
           recordMetric("agent_interrupt", { channelId: targetChannelId, agent: agentLabel, meta: { trigger: "button" } });
 

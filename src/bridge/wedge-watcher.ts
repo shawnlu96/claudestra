@@ -24,6 +24,7 @@ import { getJsonlMtime } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emitEvent } from "./event-bus.js";
 import { originFooter } from "../lib/instance-tag.js";
+import { controlFor } from "../lib/runtimes/index.js";
 
 const POLL_INTERVAL_MS = 5 * 60_000;     // 每 5 分钟扫一次
 const WEDGE_THRESHOLD_MS = 30 * 60_000;  // 30 分钟没变 + claude 在跑但非 idle → 卡死
@@ -135,6 +136,7 @@ async function checkAgent(
   allowedUserIds: string[],
   discord: Client,
   isChannelConnected?: (channelId: string) => boolean,
+  runtime?: string,
 ): Promise<void> {
   const target = windowTarget(agentName);
   const pane = await tmuxCapture(target, 40);
@@ -151,7 +153,9 @@ async function checkAgent(
   // idle（ready 提示符）→ 正常歇着，不是卡死。清掉状态。
   // 三态：契约可疑（CC 可能改了底部文案）时按 idle 处理 —— 文案一变会让**所有**
   // agent 同时被判成"非 idle"，那就是一轮全员误报刷屏。宁可漏报一次真卡死。
-  const verdict = await idleVerdict(target);
+  // 屏幕判据不适用的运行时（Pi / Codex）不看这个，卡死判定在下面 atShell 之后整个跳过。
+  const paneJudged = wedgeJudgedByPane(runtime);
+  const verdict = paneJudged ? await idleVerdict(target) : "busy";
   if (verdict === "idle" || verdict === "unknown") {
     if (verdict === "unknown") {
       console.warn(`⚠️ [wedge] ${agentName} 忙闲判据失效（TUI 文案可能已变），本轮按 idle 处理`);
@@ -192,6 +196,11 @@ async function checkAgent(
   }
 
   const atShell = !hasChild;
+  // Pi / Codex：空闲画面本来就不变，「屏幕静止 = 卡死」不成立；只留上面的链路哨兵和下面进程树的掉线检测
+  if (!atShell && !paneJudged) {
+    agentStates.delete(agentName);
+    return;
+  }
 
   // v2.0.23+: jsonl 活跃度逃生阀。Claude 思考 / 调工具时 session jsonl 一直在追加。
   // 只看 tmux pane 指纹会把"思考中但屏幕暂时没变"误判成卡死（owner 实测 claudestra
@@ -199,7 +208,7 @@ async function checkAgent(
   // 只对"claude 在跑"分支生效：at-shell 是 claude 已退出、jsonl 本来就不更新，
   // 那条掉线检测单独按 atShell 走，不受这里影响。
   if (!atShell) {
-    const mtime = await getJsonlMtime(cwd, sessionId);
+    const mtime = await getJsonlMtime(cwd, sessionId, runtime);
     if (mtime !== null && now - mtime < WEDGE_THRESHOLD_MS) {
       agentStates.delete(agentName);
       return;
@@ -316,7 +325,7 @@ export function startWedgeWatcher(
         if (agent.status !== "active" || !agent.channelId) continue;
         await checkAgent(
           agent.name, agent.channelId, agent.cwd || "", agent.sessionId || "",
-          allowedUserIds, discord, isChannelConnected,
+          allowedUserIds, discord, isChannelConnected, agent.runtime,
         ).catch(() => {});
       }
       if (isChannelConnected) await checkMasterLink(isChannelConnected).catch(() => {});
@@ -368,6 +377,11 @@ export function startLinkSentinel(isChannelConnected: (channelId: string) => boo
     void Promise.resolve(tick()).finally(() => { running = false; });
   }, POLL_INTERVAL_MS);
   console.log(`🔗 链路哨兵启动（web-only，每 ${POLL_INTERVAL_MS / 60_000}min 扫，掉线 ${LINK_DOWN_THRESHOLD_MS / 60_000}min 推 SSE）`);
+}
+
+/** 卡死判定（屏幕静止 + CC 判「非 idle」）只对 CC 屏幕判据适用的运行时成立 */
+export function wedgeJudgedByPane(runtime: string | undefined | null): boolean {
+  return controlFor(runtime).paneHeuristics;
 }
 
 /** 清掉 agent 状态，agent 被 kill 时可调用 */
