@@ -171,7 +171,9 @@ export interface InstallCliResult {
   /** v2.5.4+ repo skills/ 里随包分发的 skill，symlink 到 ~/.claude/skills/ 的结果 */
   bundledSkills?: { linked: string[]; skipped: string[] };
   /** v2.24+ web 前端 daemon：装上了就给 url，没装给不够格的原因 */
-  webDaemon?: { installed: true; port: number; url: string } | { installed: false; reason?: string };
+  webDaemon?:
+    | { installed: true; port: number; url: string; serving: boolean; error?: string; log?: string[] }
+    | { installed: false; reason?: string };
   errors: string[];
   warnings: string[];
 }
@@ -868,7 +870,7 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     warnings.push("找不到可执行的 node（which / 登录 shell / 常见路径都试过）—— web 服务没装。装好 node 后重跑 install-cli");
   }
   result.webDaemon = webInstallable
-    ? { installed: true, port: webPort, url: `http://localhost:${webPort}` }
+    ? { installed: true, port: webPort, url: `http://localhost:${webPort}`, serving: false }
     : { installed: false, reason: webReady.ready
         ? "找不到可执行的 node（which / 登录 shell / 常见路径都试过）"
         : webReady.reason };
@@ -938,5 +940,44 @@ export async function installClaudestraCli(repoRoot: string): Promise<InstallCli
     result.daemons.push(item);
   }
 
+  // ⚠ 装完必须**自己验一次**。这一段的由来：2026-09-22 的试装来回了六轮，每一轮
+  //   install-cli 都打印 ok、daemons 全 loaded:true，而端口从头到尾没人监听——
+  //   launchd 的 bootstrap 成功只代表「plist 被接受了」，不代表进程活着。
+  //   服务起不来的真话只在 web.err 里，而没人会主动去看它。
+  if (result.webDaemon?.installed) {
+    const port = result.webDaemon.port;
+    const serving = await waitPortListening(port, 12_000);
+    result.webDaemon.serving = serving;
+    if (!serving) {
+      const log = tailFile(`${LOG_DIR}/web.err`, 8);
+      result.webDaemon.error = `装好了但 ${port} 端口没人监听——服务起来就退出了`;
+      if (log.length) result.webDaemon.log = log;
+      warnings.push(
+        `web 服务没起来（${port} 无监听）。日志末尾：${log.slice(-2).join(" | ") || "(web.err 是空的)"}`,
+      );
+    }
+  }
+
   return result;
+}
+
+/** 轮询端口直到有人监听（用 lsof，不自己去 connect —— 免得在半开状态上误判） */
+async function waitPortListening(port: number, timeoutMs: number): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const r = spawnSync("/usr/sbin/lsof", ["-iTCP:" + port, "-sTCP:LISTEN", "-n", "-P"], { encoding: "utf8" });
+    if (r.status === 0 && (r.stdout || "").trim()) return true;
+    await new Promise((res) => setTimeout(res, 500));
+  }
+  return false;
+}
+
+function tailFile(path: string, n: number): string[] {
+  try {
+    const lines = readFileSync(path, "utf-8").split("\n").map((l) => l.trim()).filter(Boolean);
+    // 同一句报错常刷几十遍（KeepAlive 重试），去重后更有信息量
+    return [...new Set(lines.slice(-200))].slice(-n);
+  } catch {
+    return [];
+  }
 }

@@ -5416,6 +5416,11 @@ switch (cmd) {
         // 就是彻底静默：daemon 不装、端口不监听、命令行一个字都不说，
         // 用户只能看到「装完了但网页打不开」。
         webDaemon: result.webDaemon,
+        // 装完自验的结论提到最外层:「命令报成功但网页打不开」来回过六轮,
+        // 就是因为成败藏在一个要自己去翻的字段里。
+        ...(result.webDaemon?.installed && !result.webDaemon.serving
+          ? { webServiceFailed: result.webDaemon.error, webServiceLog: result.webDaemon.log }
+          : {}),
         pm2Stopped: result.pm2Stopped.length > 0 ? result.pm2Stopped : undefined,
         oldAutostartPlist: result.oldAutostartPlist,
         oldPm2StartupPlist: result.oldPm2StartupPlist,
@@ -5424,7 +5429,9 @@ switch (cmd) {
         bumpedTmuxDashboardLimit: result.bumpedTmuxDashboardLimit,
         allowedMcpTools: result.allowedMcpTools,
         warnings: result.warnings,
-        hint: "打 `claudestra` 试试 —— launchd 3 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
+        hint: result.webDaemon?.installed && !result.webDaemon.serving
+          ? "⚠️ web 服务装上了但没跑起来 —— 看上面的 webServiceLog；其余 daemon 正常。"
+          : "打 `claudestra` 试试 —— launchd 3 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
       });
     }
     break;
