@@ -3,7 +3,7 @@
  */
 
 import { TextChannel, type Client } from "discord.js";
-import { MANAGER_PATH, ENV_WITH_BUN } from "./config.js";
+import { MANAGER_PATH, ENV_WITH_BUN, BUN_PATH } from "./config.js";
 import { typingIntervals } from "./components.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
@@ -34,7 +34,7 @@ const MANAGER_TIMEOUT_DEFAULT_MS = 120_000; // create / resume / restart 要等 
 
 export async function runManager(...args: string[]): Promise<any> {
   const budget = MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? MANAGER_TIMEOUT_DEFAULT_MS;
-  return runManagerProcess(args, { bunPath: "bun", managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget });
+  return runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget });
 }
 
 export async function buildStatusPanel(): Promise<{

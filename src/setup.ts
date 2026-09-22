@@ -8,6 +8,7 @@
  * 跟着它走，它会告诉你每一步点哪里、复制什么、粘贴到哪。
  */
 
+import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
 import { readFile, writeFile, access, chmod, mkdir } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
@@ -15,7 +16,7 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
-import { mergeEnvContent } from "./lib/env-file.js";
+import { mergeEnvContent, parseEnvRaw } from "./lib/env-file.js";
 
 /**
  * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
@@ -579,7 +580,7 @@ async function stepDiscover(): Promise<void> {
   //   showing=100 / total=109 两个字段并存），拿数组长度当总数会在会话多的机器上
   //   系统性少报。
   let total = 0;
-  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
+  const r = await run([resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, "sessions"], { cwd: REPO_ROOT });
   if (r.ok) {
     try {
       const d = JSON.parse(r.out);
@@ -890,7 +891,7 @@ async function stepPreferences(existing: Partial<Config>): Promise<{
   );
   const bridgePort = await prompt(
     kbd(t("Bridge 端口", "Bridge port")),
-    existing.BRIDGE_PORT || "3847",
+    existing.BRIDGE_PORT || String(DEFAULT_BRIDGE_PORT),
     (v) => /^\d{1,5}$/.test(v) && +v > 0 && +v < 65536 ? null : t("端口必须是 1-65535 的整数", "Port must be an integer 1-65535"),
   );
 
@@ -924,13 +925,9 @@ function buildEnvContent(cfg: Config, existing: string | null): string {
   }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
+/** 向导读 .env 取 `=` 后原文（mergeEnvContent 按原文比对），见 lib/env-file.ts parseEnvRaw */
 function parseEnv(content: string): Partial<Config> {
-  const out: Partial<Config> = {};
-  for (const line of content.split("\n")) {
-    const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m) (out as any)[m[1]] = m[2];
-  }
-  return out;
+  return parseEnvRaw(content) as Partial<Config>;
 }
 
 /** 把 typing hook 写入 ~/.claude/settings.json */
@@ -1361,12 +1358,7 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
 
 /** 解析 web/.env.local 现有键值（保留已有 token,不重复签发） */
 function parseDotEnv(content: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of content.split("\n")) {
-    const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m) out[m[1]] = m[2];
-  }
-  return out;
+  return parseEnvRaw(content);
 }
 
 async function stepWebSetup(bridgePort: string): Promise<void> {
@@ -1397,7 +1389,7 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
     // 不需要 bridge 在跑
     write(`${c.dim}▶${c.reset} ${t("签发 web-ui API token", "Issuing web-ui API token")}… `);
     const r = await run([
-      "bun", `${REPO_ROOT}/src/manager.ts`, "token-add", "web-ui",
+      resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, "token-add", "web-ui",
       "--agents", "*,master", "--force", "--terminal",
     ], { cwd: REPO_ROOT });
     let secret = "";
@@ -1466,7 +1458,7 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
 
 /** manager 子命令的 JSON 结论（不是 JSON 就返回 null） */
 async function runManagerJson(args: string[]): Promise<Record<string, any> | null> {
-  const r = await run(["bun", `${REPO_ROOT}/src/manager.ts`, ...args], { cwd: REPO_ROOT });
+  const r = await run([resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, ...args], { cwd: REPO_ROOT });
   const lines = r.out.trim().split("\n").filter((l) => l.trim().startsWith("{"));
   try { return lines.length ? JSON.parse(lines[lines.length - 1]) : null; } catch { return null; }
 }

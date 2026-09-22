@@ -11,6 +11,10 @@
  * - **不打印密钥**。token / secret 一律只报「有没有」和长度。
  */
 
+import { resolveBridgePort } from "./bridge-url.js";
+import { parseDotenv, readDotenvFileSync } from "./env-file.js";
+import { STATE_DIR, TMUX_SOCK } from "./paths.js";
+import { checkStateFiles, checkUndeliveredAlerts, staleInstallEnvCheck } from "./doctor-state.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
 import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
@@ -34,7 +38,7 @@ export interface Check {
 import { installRepoSkills } from "./skills-install.js";
 
 const HOME = process.env.HOME || "";
-const ORCH_DIR = `${HOME}/.claude-orchestrator`;
+const ORCH_DIR = STATE_DIR;
 
 async function sh(cmd: string[], timeoutMs = 8000): Promise<{ ok: boolean; out: string; err: string }> {
   try {
@@ -120,11 +124,8 @@ async function checkConfig(repoRoot: string): Promise<Check[]> {
     : { group: g, name: ".env 权限", status: "warn", detail: `0${mode} —— 同机其他用户可读，里面有 bot token`,
         fix: `chmod 600 ${envPath}` });
 
-  const env: Record<string, string> = {};
-  for (const line of (await readFile(envPath, "utf-8")).split("\n")) {
-    const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.*)$/);
-    if (m) env[m[1]!] = m[2]!.trim();
-  }
+  // doctor 看的是 daemon 实际会拿到的配置：只读文件，不看本终端 export 的变量
+  const env = parseDotenv(await readFile(envPath, "utf-8"));
 
   const webOnly = !env.DISCORD_BOT_TOKEN;
   if (webOnly) {
@@ -239,12 +240,10 @@ export function portOwnerVerdict(
 async function checkBridge(repoRoot: string): Promise<Check[]> {
   const out: Check[] = [];
   const g = "bridge";
-  let port = 3847;
-  try {
-    const envTxt = await readFile(`${repoRoot}/.env`, "utf-8");
-    const m = envTxt.match(/^\s*BRIDGE_PORT\s*=\s*(\d+)/m);
-    if (m) port = parseInt(m[1]!);
-  } catch { /* 用默认端口 */ }
+  // 与 Bun 加载 .env 同一口径（带引号的 BRIDGE_PORT 以前会被误读成默认端口 → 误诊）
+  const dotenvFile = readDotenvFileSync(`${repoRoot}/.env`);
+  const dotenv = dotenvFile ?? {};
+  const port = resolveBridgePort(dotenv);
 
   const lsof = await sh(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN"]);
   const listeners = lsof.out.split("\n").slice(1).filter(Boolean);
@@ -279,8 +278,8 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
   // 症状是「bridge 完全健康，但所有 agent 永远离线」（2026-09-22 实锤）
   try {
     const { bridgeUrlPortMismatch } = await import("./bridge-url.js");
-    const envTxt2 = await readFile(`${repoRoot}/.env`, "utf-8");
-    const pick = (k: string) => envTxt2.match(new RegExp(`^\\s*${k}\\s*=\\s*(\\S+)`, "m"))?.[1];
+    if (!dotenvFile) throw new Error("no .env"); // 没有 .env：这组检查整体跳过（与原先 readFile 抛错时一致）
+    const pick = (k: string) => dotenv[k] || undefined;
     const mismatch = bridgeUrlPortMismatch({ BRIDGE_URL: pick("BRIDGE_URL"), BRIDGE_PORT: pick("BRIDGE_PORT") });
     if (mismatch) {
       out.push({ group: g, name: "BRIDGE_URL 端口", status: "fail", detail: mismatch,
@@ -289,7 +288,7 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
     // tmux 全局环境停在 server 创建那一刻：与 .env 不一致 = 在跑的会话还连着旧地址
     const { resolveBridgeUrl } = await import("./bridge-url.js");
     const { bridgeDrift, parseTmuxEnvLine } = await import("./bridge-port.js");
-    const tenv = await sh(["tmux", "-S", "/tmp/claude-orchestrator/master.sock", "show-environment", "-g"]);
+    const tenv = await sh(["tmux", "-S", TMUX_SOCK, "show-environment", "-g"]);
     if (tenv.ok && tenv.out) {
       const drift = bridgeDrift(
         { BRIDGE_URL: parseTmuxEnvLine(tenv.out, "BRIDGE_URL"), BRIDGE_PORT: parseTmuxEnvLine(tenv.out, "BRIDGE_PORT") },
@@ -300,6 +299,7 @@ async function checkBridge(repoRoot: string): Promise<Check[]> {
             detail: `tmux 里的会话按 ${drift.from} 启动，.env 现在是 ${drift.to} —— 这些会话连不上 bridge`,
             fix: "launchctl kickstart -k gui/$(id -u)/com.claudestra.launcher（launcher 会在新 bridge 应答后重启全部会话）" }
         : { group: g, name: "会话连接地址", status: "ok", detail: "tmux 全局环境与 .env 一致" });
+      out.push(...staleInstallEnvCheck(tenv.out, dotenv, g));
     }
   } catch { /* 没有 .env 就跳过 */ }
 
@@ -401,7 +401,7 @@ async function checkAgents(): Promise<Check[]> {
   }
   out.push({ group: g, name: "registry.json", status: "ok", detail: `${agents.length} 个 agent` });
 
-  const sock = "/tmp/claude-orchestrator/master.sock";
+  const sock = TMUX_SOCK;
   const win = await sh(["tmux", "-S", sock, "list-windows", "-t", "master", "-F", "#{window_name}"]);
   if (!win.ok) {
     out.push({ group: g, name: "master tmux session", status: agents.length > 0 ? "fail" : "warn",
@@ -535,7 +535,6 @@ async function checkWebPort(repoRoot: string): Promise<Check[]> {
 // 入口
 // ────────────────────────────────────────────
 
-
 /**
  * v2.19.0 部署归属体检（2026-08-15 双响事故的产物）。
  *
@@ -608,6 +607,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkRuntime(),
     checkConfig(repoRoot),
     checkDaemons(),
+    checkUndeliveredAlerts(), checkStateFiles(),
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(),

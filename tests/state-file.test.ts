@@ -139,3 +139,34 @@ describe("projects.json", () => {
     expect(readFileSync(p, "utf-8")).toBe("{oops");
   });
 });
+
+describe("reportCorrupt 文案", () => {
+  const capture = async (fn: () => Promise<unknown>): Promise<string> => {
+    const orig = console.error;
+    let out = "";
+    console.error = (...a: unknown[]) => { out += a.join(" ") + "\n"; };
+    try { await fn(); } finally { console.error = orig; }
+    return out;
+  };
+
+  test("写者设防的文件才说「写者拒绝覆盖」；registry（writersGuarded=false）不说", async () => {
+    const d = tmp();
+    const a = join(d, "guarded.json");
+    const b = join(d, "registry.json");
+    writeFileSync(a, "{bad");
+    writeFileSync(b, "{bad");
+    const ga = await capture(() => readJsonLenient(a, null, { who: "x" }));
+    const gb = await capture(() => readJsonLenient(b, null, { who: "registry", writersGuarded: false }));
+    expect(ga).toContain("写者拒绝覆盖");
+    expect(gb).not.toContain("写者拒绝覆盖");
+    expect(gb).toContain("下一次写入会覆盖它");
+  });
+
+  test("同一份坏内容反复被拒写 → 只留一份 .corrupt 备份", async () => {
+    const d = tmp();
+    const p = join(d, "x.json");
+    writeFileSync(p, "{bad");
+    for (let i = 0; i < 3; i++) await expect(writeJsonStateGuarded(p, {})).rejects.toBeInstanceOf(StateCorruptError);
+    expect(readdirSync(d).filter((f) => f.startsWith("x.json.corrupt-")).length).toBe(1);
+  });
+});

@@ -3,6 +3,8 @@
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
+import { repoEnvVar } from "../lib/env-file.js";
+import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
 
@@ -16,7 +18,7 @@ function validPeerName(name: string): boolean {
 
 /** 握手串自报名:对方界面上「谁邀请的我」。USER_NAME 是 setup 时配置的称呼。 */
 function selfPeerName(): string {
-  return (process.env.USER_NAME || "").trim().replace(/[^\w-]/g, "") || hostname().split(".")[0];
+  return repoEnvVar("USER_NAME").trim().replace(/[^\w-]/g, "") || hostname().split(".")[0];
 }
 
 /** invite/join 共用的 scope 校验（token-add 同款 R1 规则,不动原函数避免回归） */
@@ -69,13 +71,13 @@ async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tok
 async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
   // bridge 默认只绑 127.0.0.1——邀请串里的对外地址再对,对方也连不进来。
   // 生成邀请这一刻就把话说明白,别拖到对方兑换失败才暴露(loopback 显式 --url 同理)。
-  const bind = (process.env.BRIDGE_BIND || "127.0.0.1").trim();
+  const bind = (repoEnvVar("BRIDGE_BIND") || "127.0.0.1").trim();
   const bindWarn = bind === "127.0.0.1" || bind === "localhost" || bind === "::1"
     ? `⚠️ bridge 当前只监听 ${bind}（BRIDGE_BIND 未开放）——对方无法连入。在 .env 设 BRIDGE_BIND=0.0.0.0（或 Tailscale IP）并重启 bridge 后邀请才可用。`
     : "";
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
   const { detectBridgeUrls } = await import("../lib/net-addr.js");
-  const port = parseInt(process.env.BRIDGE_PORT || "3847");
+  const port = parseInt(repoEnvVar("BRIDGE_PORT") || String(DEFAULT_BRIDGE_PORT));
   const cands = detectBridgeUrls(port);
   if (cands.length === 0) return null;
   const best = cands[0]!;
@@ -423,7 +425,7 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
  *  peer IP 同端口找活着的 bridge(1.5s 超时并行 GET /api/v1/agents,有 HTTP
  *  响应即候选——401 也算,那正是 token 门禁在工作)。只探测不发凭据。 */
 async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
-  const port = (() => { try { return new URL(failedUrl).port || "3847"; } catch { return "3847"; } })();
+  const port = (() => { try { return new URL(failedUrl).port || String(DEFAULT_BRIDGE_PORT); } catch { return String(DEFAULT_BRIDGE_PORT); } })();
   const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
   // CLI 定位统一走 lib/tailscale（PATH → App 包内 → 常见位置），与 setup / doctor / bridge 同一套
   const { readTailscaleStatusRaw } = await import("../lib/tailscale.js");

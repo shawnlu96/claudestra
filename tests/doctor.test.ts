@@ -196,3 +196,81 @@ describe("orphanAgentNames", () => {
     expect(got).toEqual(["agent-gone"]);
   });
 });
+
+import { undeliveredAlertsVerdict, stateFileVerdicts } from "../src/lib/doctor-state";
+
+describe("undeliveredAlertsVerdict", () => {
+  const P = "/x/logs/undelivered-alerts.log";
+  const now = Date.parse("2026-09-23T00:00:00Z");
+
+  test("文件不存在 / 空 → 不出这一行", () => {
+    expect(undeliveredAlertsVerdict(null, P, now)).toBeNull();
+    expect(undeliveredAlertsVerdict("", P, now)).toBeNull();
+    expect(undeliveredAlertsVerdict("\n\n", P, now)).toBeNull();
+  });
+
+  test("有条目 → warn，带条数、近 7 天条数、最近一条", () => {
+    const text = [
+      JSON.stringify({ ts: "2026-09-01T00:00:00Z", source: "cron", reason: "old" }),
+      JSON.stringify({ ts: "2026-09-22T10:00:00Z", source: "launcher", reason: "bridge 连不上" }),
+    ].join("\n") + "\n";
+    const v = undeliveredAlertsVerdict(text, P, now)!;
+    expect(v.status).toBe("warn");
+    expect(v.detail).toContain("2 条（近 7 天 1 条）");
+    expect(v.detail).toContain("[launcher]");
+    expect(v.detail).toContain("bridge 连不上");
+    expect(v.fix).toContain(P);
+  });
+
+  test("坏行不抛，只报条数", () => {
+    const v = undeliveredAlertsVerdict("not json\n", P, now)!;
+    expect(v.status).toBe("warn");
+    expect(v.detail).toBe("1 条（近 7 天 0 条）");
+  });
+});
+
+import { staleInstallEnvKeys } from "../src/lib/doctor-state";
+import { parseTmuxEnvLine } from "../src/lib/bridge-port";
+
+describe("staleInstallEnvKeys", () => {
+  const tmux = "BRIDGE_PORT=3847\nUSER_NAME=old\nMCP_NAME=claudestra\n-BRIDGE_BIND\nDISCORD_BOT_TOKEN=secret\n";
+
+  test("只报两边都有且值不同的键；tmux 里缺的 / 已 unset 的不报；不含端口类", () => {
+    const env = { USER_NAME: "shawn", MCP_NAME: "claudestra", BRIDGE_BIND: "0.0.0.0", BRIDGE_PORT: "13847", DISCORD_BOT_TOKEN: "secret" };
+    expect(staleInstallEnvKeys(tmux, env, parseTmuxEnvLine)).toEqual(["USER_NAME"]);
+  });
+
+  test("一致 → 空", () => {
+    expect(staleInstallEnvKeys(tmux, { USER_NAME: "old", DISCORD_BOT_TOKEN: "secret" }, parseTmuxEnvLine)).toEqual([]);
+  });
+
+  test(".env 里是空值不算漂移", () => {
+    expect(staleInstallEnvKeys(tmux, { USER_NAME: "" }, parseTmuxEnvLine)).toEqual([]);
+  });
+});
+
+describe("stateFileVerdicts", () => {
+  test("都正常 / 不存在 → 不出行", () => {
+    expect(stateFileVerdicts([
+      { path: "/s/registry.json", read: { status: "ok", data: {} } },
+      { path: "/s/peers.json", read: { status: "missing" } },
+    ], [])).toEqual([]);
+  });
+
+  test("损坏 → fail（带文件名与原因）；有 .corrupt 备份 → warn", () => {
+    const v = stateFileVerdicts(
+      [{ path: "/s/principals.json", read: { status: "corrupt", error: "JSON 解析失败" } }],
+      ["principals.json.corrupt-2026-09-23T00-00-00-000Z"],
+    );
+    expect(v.map((c) => [c.name, c.status])).toEqual([["principals.json", "fail"], [".corrupt 备份", "warn"]]);
+    expect(v[0]!.detail).toContain("JSON 解析失败");
+    expect(v[0]!.detail).toContain("拒写");
+  });
+
+  test("registry（写者不设防）损坏 → 不宣称拒写，提示下一次写入会覆盖", () => {
+    const [c] = stateFileVerdicts([{ path: "/s/registry.json", read: { status: "corrupt", error: "x" }, guarded: false }], []);
+    expect(c!.status).toBe("fail");
+    expect(c!.detail).not.toContain("写命令会拒写");
+    expect(c!.detail).toContain("覆盖");
+  });
+});

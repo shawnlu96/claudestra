@@ -13,8 +13,8 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, chmodSync, unlinkSync, realpathSync } from "fs";
-import { readFile, writeFile, rename, mkdir, stat, chmod, copyFile, unlink } from "fs/promises";
-import { dirname } from "path";
+import { readFile, writeFile, rename, mkdir, stat, chmod, copyFile, unlink, readdir } from "fs/promises";
+import { basename, dirname, join } from "path";
 
 export type StateRead =
   | { status: "missing" }
@@ -77,12 +77,17 @@ function mtimeOf(path: string): number {
   try { return statSync(path).mtimeMs; } catch { return 0; }
 }
 
-/** 读者发现损坏时调用：响亮地报一次（stderr），同一版本的坏文件不重复刷屏。 */
-export function reportCorrupt(path: string, error: string, who = "state"): void {
+/**
+ * 读者发现损坏时调用：响亮地报一次（stderr），同一版本的坏文件不重复刷屏。
+ * writersGuarded=false：这个文件的写者没走 writeJsonStateGuarded（registry 的 saveRegistry），
+ * 不能宣称「写者拒绝覆盖」——下一次写入会直接覆盖它。
+ */
+export function reportCorrupt(path: string, error: string, who = "state", writersGuarded = true): void {
   const m = mtimeOf(path);
   if (reportedCorrupt.get(path) === m) return;
   reportedCorrupt.set(path, m);
-  console.error(`🚨 [${who}] 状态文件损坏（读者沿用上次成功值或按空处理，写者拒绝覆盖）: ${path}（${error}）`);
+  const writers = writersGuarded ? "写者拒绝覆盖" : "注意：写者不拒写，下一次写入会覆盖它";
+  console.error(`🚨 [${who}] 状态文件损坏（读者沿用上次成功值或按空处理，${writers}）: ${path}（${error}）`);
 }
 
 // 常驻进程（bridge 每个 API 请求都读 principals）的「上次成功读到的值」。文件在运行中
@@ -97,7 +102,7 @@ const lastGood = new Map<string, unknown>();
 export async function readJsonLenient<T>(
   path: string,
   fallback: T,
-  opts: { validate?: StateValidator; who?: string } = {},
+  opts: { validate?: StateValidator; who?: string; writersGuarded?: boolean } = {},
 ): Promise<T> {
   const r = await readJsonState(path, opts.validate);
   if (r.status === "ok") {
@@ -109,7 +114,7 @@ export async function readJsonLenient<T>(
     lastGood.delete(path);
     return fallback;
   }
-  reportCorrupt(path, r.error, opts.who);
+  reportCorrupt(path, r.error, opts.who, opts.writersGuarded ?? true);
   return lastGood.has(path) ? (structuredClone(lastGood.get(path)) as T) : fallback;
 }
 
@@ -119,18 +124,37 @@ function backupName(path: string): string {
 }
 
 /**
- * 写者在写之前调用：磁盘上的文件若损坏就备份一份 `<file>.corrupt-<ts>` 并抛
- * StateCorruptError。不存在 / 正常都放行。
+ * 同一份坏内容已经备份过就复用那份。自动写者（用量看板每个 Stop hook 都会写 config.json）
+ * 每轮被拒都会走到 assertWritable，按次落备份会堆出无数份——principals/peers 的备份里还是明文 token。
+ * 按内容认（不按 mtime）：manager 每次都是新进程，内存里记不住上一次备份过什么。
+ */
+async function existingBackup(path: string, raw: Buffer): Promise<string | undefined> {
+  const prefix = `${basename(path)}.corrupt-`;
+  const names = await readdir(dirname(path)).catch(() => [] as string[]);
+  for (const n of names.filter((f) => f.startsWith(prefix)).sort().reverse()) {
+    const full = join(dirname(path), n);
+    const same = await readFile(full).then((b) => b.equals(raw), () => false);
+    if (same) return full;
+  }
+  return undefined;
+}
+
+/**
+ * 写者在写之前调用：磁盘上的文件若损坏就备份一份 `<file>.corrupt-<ts>`（同样内容已有备份则复用）
+ * 并抛 StateCorruptError。不存在 / 正常都放行。
  */
 export async function assertWritable(path: string, validate?: StateValidator): Promise<void> {
   const cur = await readJsonState(path, validate);
   if (cur.status !== "corrupt") return;
   let backup: string | undefined;
   try {
-    backup = backupName(path);
-    await copyFile(path, backup);
-    // principals/peers 的副本里是明文 token：copyFile 沿用原权限不可靠，显式收紧
-    await chmod(backup, 0o600);
+    backup = await existingBackup(path, await readFile(path));
+    if (!backup) {
+      backup = backupName(path);
+      await copyFile(path, backup);
+      // principals/peers 的副本里是明文 token：copyFile 沿用原权限不可靠，显式收紧
+      await chmod(backup, 0o600);
+    }
   } catch {
     backup = undefined;
   }

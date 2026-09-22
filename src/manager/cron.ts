@@ -3,6 +3,7 @@
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
+import { CRON_HISTORY_PATH } from "../lib/paths.js";
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { KNOWN_EFFORT_LEVELS, isKnownEffort } from "../lib/claude-launch.js";
@@ -191,7 +192,7 @@ export async function cmdCronToggle(nameOrId: string) {
 }
 
 export async function cmdCronHistory(nameOrId?: string) {
-  const historyPath = `${process.env.HOME}/.claude-orchestrator/cron-history.json`;
+  const historyPath = CRON_HISTORY_PATH;
   let history: any[] = [];
   if (existsSync(historyPath)) {
     try {

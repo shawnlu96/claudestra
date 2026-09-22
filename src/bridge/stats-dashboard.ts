@@ -31,7 +31,7 @@ import {
   windowTarget,
   tmuxSendLine,
 } from "../lib/tmux-helper.js";
-import { readConfig, readConfigSync, setStatsDashboard } from "../lib/config-store.js";
+import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
@@ -578,15 +578,33 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
 
 // ── 频道 / 消息 保障 ───────────────────────────────────────────────────
 
-async function ensureChannel(discord: Client): Promise<string | null> {
+// 本进程建了、却没能落盘的频道 / 消息 id（setStatsDashboard 失败时）。不记下来，
+// 下一轮 doUpdate（每个 Stop hook + 10 分钟 tick）就会再建一个频道、再发一条消息。
+const unpersisted: { channelId?: string; messageId?: string } = {};
+let corruptNoted = false;
+
+/** 导出给测试（create 可替换）；运行时只由 doUpdate 调。 */
+export async function ensureChannel(
+  discord: Pick<Client, "channels">,
+  create: (d: Client, name: string) => Promise<string> = discordCreateChannel,
+): Promise<string | null> {
   const cfg = await readConfig();
-  if (cfg.statsDashboard?.channelId) {
-    const ch = await discord.channels.fetch(cfg.statsDashboard.channelId).catch(() => null);
-    if (ch) return cfg.statsDashboard.channelId;
+  for (const id of new Set([cfg.statsDashboard?.channelId, unpersisted.channelId])) {
+    if (!id) continue;
+    const ch = await discord.channels.fetch(id).catch(() => null);
+    if (ch) return id;
   }
+  // config.json 坏了：建了频道也存不下，每轮都会再建一个。暂停看板，坏文件由 doctor 报
+  if (isConfigCorrupt()) {
+    if (!corruptNoted) console.error("📊 config.json 已损坏，用量看板暂停（修好或删掉该文件后自动恢复）");
+    corruptNoted = true;
+    return null;
+  }
+  corruptNoted = false;
   // 复用 discordCreateChannel，再把 @everyone 设成不可发言（只读）
   try {
-    const chId = await discordCreateChannel(discord, DASHBOARD_CHANNEL_NAME);
+    const chId = await create(discord as Client, DASHBOARD_CHANNEL_NAME);
+    unpersisted.channelId = chId;
     const ch = (await discord.channels.fetch(chId).catch(() => null)) as TextChannel | null;
     if (ch && ch.guild) {
       await ch.permissionOverwrites
@@ -895,8 +913,8 @@ async function ensureMessage(
   if (!ch || !("send" in ch)) return null;
   const payload = { embeds: [embed], components: [refreshRow(), ...extraRows] };
   const cfg = await readConfig();
-  const existingId = cfg.statsDashboard?.messageId;
-  if (existingId) {
+  for (const existingId of new Set([cfg.statsDashboard?.messageId, unpersisted.messageId])) {
+    if (!existingId) continue;
     const msg = await ch.messages.fetch(existingId).catch(() => null);
     if (msg) {
       await msg.edit(payload);
@@ -904,6 +922,7 @@ async function ensureMessage(
     }
   }
   const msg = await ch.send(payload);
+  unpersisted.messageId = msg.id;
   await setStatsDashboard(channelId, msg.id);
   return msg.id;
 }

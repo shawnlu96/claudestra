@@ -3,10 +3,11 @@
  * HTML → PNG 截图工具，使用 Playwright headless Chrome
  * 用法: bun html2png.ts <input.html> <output.png> [width]
  */
+import { runtimePath } from "./lib/paths.js";
 import { chromium } from "playwright-core";
 
 const htmlPath = process.argv[2];
-const pngPath = process.argv[3] || "/tmp/claude-orchestrator/screenshot.png";
+const pngPath = process.argv[3] || runtimePath("screenshot.png");
 const width = parseInt(process.argv[4] || "1200");
 
 if (!htmlPath) {

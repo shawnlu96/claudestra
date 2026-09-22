@@ -8,7 +8,7 @@ export const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN!;
 // 跳过 ready 里的 Discord 专属初始化；会话地址由 local adapter 供给（local-* 合成
 // id），出站对 local transport 是 no-op（前端走 /api/v1 + /events SSE）。
 export const WEB_ONLY = !process.env.DISCORD_BOT_TOKEN;
-export const BRIDGE_PORT = parseInt(process.env.BRIDGE_PORT || "3847");
+export const BRIDGE_PORT = parseInt(process.env.BRIDGE_PORT || String(DEFAULT_BRIDGE_PORT));
 export const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
   .split(",")
   .filter(Boolean);
@@ -20,12 +20,14 @@ export const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID || "";
 export const MCP_NAME = process.env.MCP_NAME || "claudestra";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_NAME.replace(/-/g, "_")}__`;
 
-export const TMP_DIR = "/tmp/claude-orchestrator";
+export const TMP_DIR = RUNTIME_DIR;
 /** 聊天附件落盘目录。曾在 TMP_DIR 下（重启即清），owner 2026-07-13 要求
  *  图片永久保存 → 迁到持久位置；web BFF 的附件端点同步读这里。 */
-export const INBOX_DIR = `${process.env.HOME}/.claude-orchestrator/inbox`;
+export const INBOX_DIR = STATE_INBOX_DIR;
 // 从 tmux-helper 引入避免两处常量漂移
 export { TMUX_SOCK } from "../lib/tmux-helper.js";
+import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
+import { RUNTIME_DIR, INBOX_DIR as STATE_INBOX_DIR } from "../lib/paths.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;
 export const MANAGER_PATH = `${REPO_ROOT}/src/manager.ts`;

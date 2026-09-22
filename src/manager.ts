@@ -13,6 +13,10 @@
  *   bun src/manager.ts sessions [search]
  */
 
+import { writeClaudeSettings } from "./lib/session-recall.js";
+import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
+import { repoEnvVar } from "./lib/env-file.js";
+import { RUNTIME_DIR, runtimePath, statePath, UPDATE_LOCK } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync, statSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync, realpathSync } from "fs";
@@ -241,7 +245,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
   }
 
   // SIGTERM 之前的全局预检：这边起不来就一个进程都不动
-  const bridgePort = process.env.BRIDGE_PORT || "3847";
+  const bridgePort = repoEnvVar("BRIDGE_PORT", REPO_ROOT) || String(DEFAULT_BRIDGE_PORT);
   const [bypassAccepted, masterSession, bridgeReachable] = await Promise.all([
     readBypassConsent(),
     tmuxRawStrict(["has-session", "-t", sessionTarget(MASTER_SESSION)]).then(() => true, () => false),
@@ -928,8 +932,8 @@ async function cmdResume(
     try {
       const bunPath = resolveBunPath();
       const srcDir = SRC_DIR;
-      const htmlPath = `/tmp/claude-orchestrator/resume_${Date.now()}.html`;
-      const pngPath = `/tmp/claude-orchestrator/resume_${Date.now()}.png`;
+      const htmlPath = runtimePath(`resume_${Date.now()}.html`);
+      const pngPath = runtimePath(`resume_${Date.now()}.png`);
 
       // tmux capture-pane -e → ansi2html → HTML
       const capture = Bun.spawn(
@@ -1308,7 +1312,7 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
           if (s.model !== globalModel) {
             if (globalModel === undefined) delete s.model;
             else s.model = globalModel;
-            await Bun.write(GLOBAL_CLAUDE_SETTINGS, JSON.stringify(s, null, 2) + "\n");
+            await writeClaudeSettings(GLOBAL_CLAUDE_SETTINGS, s);
           }
         } catch {
           /* 恢复失败不阻塞 */
@@ -1359,7 +1363,7 @@ async function cmdAdopt(name: string, sessionId: string) {
  * 就能让 A 往 B 刚建的窗口发命令。P1 租约堵住了 launcher 侧的双跑，但 web /
  * 手动 restart 与 launcher 仍可能并发——文件锁是不依赖上游守规矩的纵深防御。
  */
-const RESTART_LOCK_DIR = `${process.env.HOME}/.claude-orchestrator/locks`;
+const RESTART_LOCK_DIR = statePath("locks");
 const RESTART_LOCK_STALE_MS = 3 * 60_000;
 
 function tryLockRestart(tmuxName: string, depth = 0): boolean {
@@ -1414,15 +1418,7 @@ function unlockRestart(tmuxName: string): void {
  * .env——所以 env 里没有就直接翻 REPO_ROOT/.env）。
  */
 async function readRepoEnvVar(key: string): Promise<string> {
-  if (process.env[key]) return process.env[key]!;
-  if (!existsSync(`${REPO_ROOT}/.env`)) return "";
-  try {
-    const envText = await Bun.file(`${REPO_ROOT}/.env`).text();
-    const m = envText.match(new RegExp(`^${key}\\s*=\\s*(.+)$`, "m"));
-    return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
-  } catch {
-    return "";
-  }
+  return repoEnvVar(key, REPO_ROOT);
 }
 
 /** 大总管的工作目录（与 launcher / bridge 同一语义：env / .env 优先，默认仓库里的 master/）。 */
@@ -2285,7 +2281,7 @@ async function maybeBuildWeb(): Promise<{ built: boolean; restarted?: boolean; r
  *  来不及 unlock → 孤儿锁把之后 30 分钟的一切更新(含 beta 自动前进)封死。
  *  持有 pid 已死的锁直接清除接管;活着的仍按 30 分钟陈旧闸。 */
 async function takeUpdateLock(): Promise<{ ok: boolean; error?: string }> {
-  const lockPath = `${process.env.HOME}/.claude-orchestrator/update.lock`;
+  const lockPath = UPDATE_LOCK;
   try {
     const st = statSync(lockPath);
     let holderAlive = false;
@@ -2308,7 +2304,7 @@ async function takeUpdateLock(): Promise<{ ok: boolean; error?: string }> {
 /** v2.17 beta 通道 update:紧跟 origin/main 的每个 commit(ff-only,天然在分支
  *  上不 detach)。release 通道走下面的 cmdUpdate 正式流程。 */
 async function cmdUpdateBeta() {
-  const updateLock = `${process.env.HOME}/.claude-orchestrator/update.lock`;
+  const updateLock = UPDATE_LOCK;
   const lock = await takeUpdateLock();
   if (!lock.ok) {
     output({ ok: false, error: lock.error });
@@ -2431,7 +2427,7 @@ async function cmdUpdate() {
 
   // v2.16.3 并发闸(HedeMacBook-Pro 约束5):自动更新 30 分钟一轮,web 构建
   // 动辄分钟级,别被下一轮重入。v2.17.2 起孤儿锁(持有 pid 已死)直接接管。
-  const updateLock = `${process.env.HOME}/.claude-orchestrator/update.lock`;
+  const updateLock = UPDATE_LOCK;
   const relLock = await takeUpdateLock();
   if (!relLock.ok) {
     output({ ok: false, error: relLock.error });
@@ -2639,9 +2635,9 @@ async function cmdTmuxScreenshot(name: string) {
   const bunPath = resolveBunPath();
   const srcDir = SRC_DIR;
   const ts = Date.now();
-  const htmlPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.html`;
-  const pngPath = `/tmp/claude-orchestrator/tmux_${tmuxName}_${ts}.png`;
-  await mkdir("/tmp/claude-orchestrator", { recursive: true }).catch(() => {});
+  const htmlPath = runtimePath(`tmux_${tmuxName}_${ts}.html`);
+  const pngPath = runtimePath(`tmux_${tmuxName}_${ts}.png`);
+  await mkdir(RUNTIME_DIR, { recursive: true }).catch(() => {});
 
   const capture = Bun.spawn(
     ["tmux", "-S", SOCK, "capture-pane", "-t", windowTarget(tmuxName), "-p", "-e", "-S", "-50"],
@@ -2869,7 +2865,7 @@ async function cmdPiEnvSet(
 let writeLock: { release: () => void } | null = null;
 if (isWriteInvocation(cmd, args)) {
   const { acquireLock } = await import("./lib/file-lock.js");
-  writeLock = await acquireLock(`${process.env.HOME}/.claude-orchestrator/.manager-write.lock`);
+  writeLock = await acquireLock(statePath(".manager-write.lock"));
   if (!writeLock) console.error("⚠ 写锁 20s 未拿到,降级继续(并发写命令可能竞态)");
   else process.on("exit", () => writeLock?.release());
 }

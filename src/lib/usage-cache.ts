@@ -10,11 +10,10 @@
  * scrapedAt 是**毫秒**;两者别搞混。resets 也兼容 ISO 字符串(防脚本变体)。
  */
 
+import { statePath } from "./paths.js";
 import { readFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
 
-export const USAGE_CACHE_PATH = join(homedir(), ".claude-orchestrator", "usage-cache.json");
+export const USAGE_CACHE_PATH = statePath("usage-cache.json");
 /** 「新鲜」阈值。⚠ 必须明显大于 stats-dashboard 的 TICK_MS(10min 兜底刷新)——
  *  两者同为 10min 时闲置期每个 tick 都撞上刚过期的缓存,周期锁相地回退 TUI
  *  抓取(peer 实测 2026-08-27:挂机一夜 ≈ 60 次敲键)。且过期≠抓取:见

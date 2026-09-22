@@ -20,9 +20,9 @@
 import { appendFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { bridgeRequest } from "./bridge-client.js";
-import { LOG_DIR } from "./log-paths.js";
+import { UNDELIVERED_ALERTS_LOG } from "./paths.js";
 
-export const UNDELIVERED_ALERTS_LOG = join(LOG_DIR, "undelivered-alerts.log");
+export { UNDELIVERED_ALERTS_LOG };
 
 export interface NotifyRequest {
   /** 谁发的（日志 / SSE 标签用），如 "launcher" / "cron" / "manager" */

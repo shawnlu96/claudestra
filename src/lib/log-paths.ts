@@ -15,10 +15,11 @@
  * 依然有效，O_APPEND 从头开始写。
  */
 
+import { LOG_DIR as STATE_LOG_DIR } from "./paths.js";
 import { existsSync, statSync, copyFileSync, truncateSync, mkdirSync } from "fs";
 import { join } from "path";
 
-export const LOG_DIR = join(process.env.HOME || "~", ".claude-orchestrator", "logs");
+export const LOG_DIR = STATE_LOG_DIR;
 
 /** 单个日志上限：超过就轮转（保留一代） */
 export const LOG_ROTATE_BYTES = 32 * 1024 * 1024;

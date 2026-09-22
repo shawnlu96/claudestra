@@ -7,11 +7,12 @@
  * httpPeers，老文件里的多余字段自然忽略，不迁移不报错。
  */
 
+import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
+import { STATE_DIR } from "./paths.js";
 import { existsSync } from "fs";
 import { mkdir } from "fs/promises";
 
-const HOME = process.env.HOME || "";
-const DIR = `${HOME}/.claude-orchestrator`;
+const DIR = STATE_DIR;
 const PATH = `${DIR}/peers.json`;
 
 /**
@@ -65,17 +66,18 @@ export interface PeersData {
 
 const EMPTY: PeersData = { httpPeers: [], pendingInvites: [] };
 
+/**
+ * 读者永不抛：缺失 → 空；损坏 → stderr 报一次并沿用上次成功值（没有就空）。
+ * 写者（writePeers）遇到磁盘上的坏文件会拒写——manager 的 peer 命令都是读改写，
+ * 以前把「坏了」当「空」照写，会把全部 peer 和双方 token 一并抹掉（D7-4）。
+ */
 export async function readPeers(): Promise<PeersData> {
-  if (!existsSync(PATH)) return structuredClone(EMPTY);
-  try {
-    const raw = await Bun.file(PATH).json();
-    return {
-      httpPeers: Array.isArray(raw?.httpPeers) ? raw.httpPeers : [],
-      pendingInvites: Array.isArray(raw?.pendingInvites) ? raw.pendingInvites : [],
-    };
-  } catch {
-    return structuredClone(EMPTY);
-  }
+  const raw = await readJsonLenient<any>(PATH, null, { who: "peers" });
+  if (!raw) return structuredClone(EMPTY);
+  return {
+    httpPeers: Array.isArray(raw?.httpPeers) ? raw.httpPeers : [],
+    pendingInvites: Array.isArray(raw?.pendingInvites) ? raw.pendingInvites : [],
+  };
 }
 
 async function ensureDir() {
@@ -87,16 +89,8 @@ export async function writePeers(data: PeersData): Promise<void> {
   // 原子写(tmp+rename):bridge 与 manager CLI 两个进程都会写本文件,原地覆写
   // 的半写状态会被另一进程读成 EMPTY 再回写,放大成整文件清空(含双方 token,
   // review 2026-07-19 #3)。rename 同卷原子,读者只会看到旧全量或新全量。
-  const tmp = `${PATH}.tmp.${process.pid}`;
-  await Bun.write(tmp, JSON.stringify(data, null, 2));
-  const { chmod, rename } = await import("fs/promises");
-  // outToken 是凭据——0600(principals.json 同款);rename 前设好,避免可读窗口
-  try {
-    await chmod(tmp, 0o600);
-  } catch {
-    /* best-effort */
-  }
-  await rename(tmp, PATH);
+  // outToken 是凭据——0600(principals.json 同款);mode 在 open 时就生效,rename 前再 chmod
+  await writeJsonStateGuarded(PATH, data, { mode: 0o600 });
 }
 
 // ── v2.11+ HTTP peer CRUD ──────────────────────────────────────────────

@@ -5,12 +5,11 @@
  * 区别于 .env（安装期常量）：这里放运行时可变的开关。
  */
 
-import { existsSync, readFileSync } from "fs";
-import { mkdir, rename } from "fs/promises";
+import { STATE_DIR, CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
+import { readJsonState, readJsonStateSync, reportCorrupt, writeJsonStateGuarded, type StateRead } from "./state-file.js";
 
-const HOME = process.env.HOME || "";
-const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
-const CONFIG_PATH = `${CONFIG_DIR}/config.json`;
+const CONFIG_DIR = STATE_DIR;
+const CONFIG_PATH = STATE_CONFIG_PATH;
 
 export type AppLang = "zh" | "en";
 
@@ -80,36 +79,56 @@ function merge(base: AppConfig, raw: any): AppConfig {
   };
 }
 
-export async function readConfig(): Promise<AppConfig> {
-  if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
-  try {
-    const raw = await Bun.file(CONFIG_PATH).json();
-    return merge(DEFAULT_CONFIG, raw);
-  } catch {
-    return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
+function defaults(): AppConfig {
+  return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
+}
+
+/**
+ * config.json 坏了（半写 / 手改坏）时的安全默认：自动更新全部**关**。
+ * 以前坏文件回落到 DEFAULT_CONFIG（自动更新全开），用户关掉的自动更新会被静默重新打开
+ * （2026-09 审查 D7-4）。其余字段仍取默认值。
+ */
+export function safeConfigOnCorrupt(): AppConfig {
+  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false } };
+}
+
+// 常驻进程（bridge / launcher）运行中文件被写坏时，继续用上次成功读到的内容
+let lastGoodRaw: unknown;
+
+/** 读结果 → 配置（纯逻辑：不存在 → 默认；损坏 → 留痕 + 上次成功值 / 安全默认；正常 → 合并） */
+function fromRead(r: StateRead): AppConfig {
+  if (r.status === "ok") {
+    lastGoodRaw = r.data;
+    return merge(defaults(), r.data);
   }
+  if (r.status === "missing") return defaults();
+  reportCorrupt(CONFIG_PATH, r.error, "config");
+  return lastGoodRaw !== undefined ? merge(defaults(), lastGoodRaw) : safeConfigOnCorrupt();
+}
+
+export async function readConfig(): Promise<AppConfig> {
+  return fromRead(await readJsonState(CONFIG_PATH));
+}
+
+/**
+ * 磁盘上的 config.json 此刻是否损坏（不是「不存在」）。自动写者（用量看板）据此暂停：
+ * 坏文件时 writeConfig 必然被拒，照常「建频道 → 存 id」就会每轮再建一个频道。
+ */
+export function isConfigCorrupt(): boolean {
+  return readJsonStateSync(CONFIG_PATH).status === "corrupt";
 }
 
 /** 同步读取配置（bridge 等不方便 await 的场景）。 */
 export function readConfigSync(): AppConfig {
-  if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
-  try {
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-    return merge(DEFAULT_CONFIG, raw);
-  } catch {
-    return { ...DEFAULT_CONFIG, autoUpdate: { ...DEFAULT_CONFIG.autoUpdate } };
-  }
+  return fromRead(readJsonStateSync(CONFIG_PATH));
 }
 
+/**
+ * 原子写（tmp + rename，lib/state-file）。磁盘上的 config.json 已损坏时拒写并备份
+ * `<file>.corrupt-<ts>`：set* 是读改写，读到的是安全默认，照写就会把其余设置一并抹掉。
+ */
 export async function writeConfig(cfg: AppConfig): Promise<void> {
-  if (!existsSync(CONFIG_DIR)) {
-    await mkdir(CONFIG_DIR, { recursive: true });
-  }
-  // 原子写：临时文件 + rename。直接覆盖写在进程被重启/断电时会留下截断的 JSON，
-  // 下次读取失败就静默回落到 DEFAULT_CONFIG —— 用户关掉的自动更新会自己变回开着。
-  const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
-  await Bun.write(tmp, JSON.stringify(cfg, null, 2));
-  await rename(tmp, CONFIG_PATH);
+  await writeJsonStateGuarded(CONFIG_PATH, cfg);
 }
 
 /** 设置归档保留天数（0 = 永不自动清理） */

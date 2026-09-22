@@ -9,6 +9,7 @@
  * 日志：~/.claude-orchestrator/cron-history.json（最近 100 条执行记录）
  */
 
+import { STATE_DIR, statePath, CRON_HISTORY_PATH } from "./lib/paths.js";
 import { readFile, mkdir } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { runtimeForSessionPath, translateSessionLine } from "./lib/session-source.js";
@@ -28,8 +29,7 @@ import {
 // 配置
 // ============================================================
 
-const HOME = process.env.HOME || "~";
-import { resolveBunPath } from "./lib/bun-path.js";
+import { resolveBunPath, bunBinDir } from "./lib/bun-path.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
@@ -38,9 +38,9 @@ installCrashGuard("cron");
 import { initDaemonLogs } from "./lib/log-paths.js";
 initDaemonLogs("cron");
 
-const CONFIG_DIR = `${HOME}/.claude-orchestrator`;
-const CRON_PATH = `${CONFIG_DIR}/cron.json`;
-const HISTORY_PATH = `${CONFIG_DIR}/cron-history.json`;
+const CONFIG_DIR = STATE_DIR;
+const CRON_PATH = statePath("cron.json");
+const HISTORY_PATH = CRON_HISTORY_PATH;
 const MANAGER_PATH = `${import.meta.dir}/manager.ts`;
 // 见 lib/bun-path.ts：写死 ~/.bun 会让 brew/mise 装 bun 的人所有 cron 任务静默失败
 const BUN_PATH = resolveBunPath();
@@ -248,7 +248,7 @@ async function runManager(...args: string[]): Promise<any> {
   return runManagerProcess(args, {
     bunPath: BUN_PATH,
     managerPath: MANAGER_PATH,
-    env: { ...process.env, PATH: `${HOME}/.bun/bin:${process.env.PATH}` },
+    env: { ...process.env, PATH: `${bunBinDir()}:${process.env.PATH}` },
     timeoutMs: CRON_MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? 120_000,
   });
 }

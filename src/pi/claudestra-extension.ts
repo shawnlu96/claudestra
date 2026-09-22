@@ -203,7 +203,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         model: model?.id || model?.name || undefined,
         thinking: (() => { try { return pi.getThinkingLevel?.(); } catch { return undefined; } })(),
       };
-      const dir = join(homedir(), ".claude-orchestrator", "pi-env");
+      const dir = join(process.env.CLAUDESTRA_STATE_DIR?.trim() || join(homedir(), ".claude-orchestrator"), "pi-env"); // = lib/paths STATE_DIR
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeFileSync(join(dir, `${AGENT_NAME}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
     } catch { /* 快照写不了不影响通道本身 */ }

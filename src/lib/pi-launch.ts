@@ -14,6 +14,7 @@
  *   那一半「别问我信不信任这个目录」）
  */
 
+import { pathOverrideAssignments } from "./paths.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 
@@ -69,7 +70,7 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
     (port ? `BRIDGE_PORT=${port} ` : "") +
-    `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}`;
+    `CLAUDESTRA_AGENT=${shellEscape(opts.agentName || "")}${pathOverrideAssignments(shellEscape)}`;
 
   // 可执行文件名与 piAvailable() 的探测**同源**：tmux 窗口不继承 manager 的 env，
   // 这里写死 "pi" 而预检认 PI_BIN 的话 → 预检通过、窗口里 command not found、

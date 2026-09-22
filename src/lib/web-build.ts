@@ -19,9 +19,9 @@
  * 所以先把 .next 克隆一份（APFS clonefile，秒级、几乎不占空间），失败就换回去。
  */
 
+import { STATE_DIR } from "./paths.js";
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
 import { spawnSync } from "child_process";
-import { homedir } from "os";
 import { resolveNpm } from "./npm-path.js";
 
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
@@ -170,7 +170,7 @@ export interface WebBuildResult {
   log?: string[];
 }
 
-const ORCH_DIR = `${homedir()}/.claude-orchestrator`;
+const ORCH_DIR = STATE_DIR;
 const LOCK_PATH = `${ORCH_DIR}/web-build.lock`;
 /** 备份放仓库外：web/.gitignore 只忽略 /.next/，放 web/ 下会让工作区变脏、挡住自动更新 */
 const BACKUP_DIR = `${ORCH_DIR}/web-build/next-prev`;

@@ -20,7 +20,8 @@ import { existsSync } from "fs";
 import { readFile, readdir } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
-import { readRegistryAgents } from "../lib/registry.js";
+import { readRegistryAgents, REGISTRY_PATH } from "../lib/registry.js";
+import { resolveClaudeBinary, type Runner } from "../lib/claude-binary.js";
 
 // ============================================================
 // 类型
@@ -172,14 +173,47 @@ export function doppelgangers(list: NeutralSessionInfo[]): NeutralSessionInfo[] 
 // ============================================================
 
 const DEFAULT_JOBS_DIR = join(homedir(), ".claude", "jobs");
-const DEFAULT_REGISTRY = join(homedir(), ".claude-orchestrator", "registry.json");
+const DEFAULT_REGISTRY = REGISTRY_PATH;
 
 /** claude 可执行文件候选（launchd 环境 PATH 可能不含 homebrew） */
 const CLAUDE_BIN_CANDIDATES = ["claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"];
 
+/**
+ * 候选顺序：登录 shell 解析出的 claude 排第一（lib/claude-binary：tmux 里的 agent 跑的就是它），
+ * 其后才是原来的候选。bridge 的 launchd PATH 把 ~/.local/bin 排在前面，裸 `claude` 可能命中
+ * 原生安装器留下的旧副本——claude-binary.ts 头注释记录的正是这类「查的不是在跑的那个」。
+ */
+export function claudeBinCandidates(loginShellClaude: string | null): string[] {
+  if (!loginShellClaude) return CLAUDE_BIN_CANDIDATES;
+  return [loginShellClaude, ...CLAUDE_BIN_CANDIDATES.filter((c) => c !== loginShellClaude)];
+}
+
+const spawnRunner: Runner = async (cmd, timeoutMs = 0) => {
+  try {
+    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+    const killer = timeoutMs > 0 ? setTimeout(() => { try { p.kill(9); } catch { /* 进程已自己退出，没得杀 */ } }, timeoutMs) : null;
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    const code = await p.exited;
+    if (killer) clearTimeout(killer);
+    return { ok: code === 0, out, err };
+  } catch (e) {
+    return { ok: false, out: "", err: (e as Error).message };
+  }
+};
+
+// 解析成功后进程内只解析一次（登录 shell 一次几百毫秒；reconciler 每 10 分钟调一轮）。
+// 失败（开机时 shell 慢 / 超时）不缓存：本轮退回原候选，下一轮再试——否则 null 会一直粘到 bridge 重启
+let loginClaude: Promise<string | null> | null = null;
+function loginShellClaude(): Promise<string | null> {
+  const p = (loginClaude ??= resolveClaudeBinary(spawnRunner).then((b) => b?.link ?? null, () => null));
+  void p.then((v) => { if (v === null && loginClaude === p) loginClaude = null; });
+  // 最多等 3s（resolveClaudeBinary 自身上限 15s）：慢了本轮先用原候选，解析在后台继续、成功后下一轮生效
+  return Promise.race([p, new Promise<null>((r) => { setTimeout(r, 3000, null).unref(); })]);
+}
+
 /** 跑 `claude agents --json`。失败返回 null（上游不可用时清单退化为空，不炸 bridge）。 */
 export async function runClaudeAgentsJson(): Promise<RawClaudeSession[] | null> {
-  for (const bin of CLAUDE_BIN_CANDIDATES) {
+  for (const bin of claudeBinCandidates(await loginShellClaude())) {
     try {
       const proc = Bun.spawn([bin, "agents", "--json"], {
         stdout: "pipe",

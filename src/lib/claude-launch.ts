@@ -7,6 +7,7 @@
  * - dev channel 加载 + skip-permissions
  */
 
+import { pathOverrideAssignments } from "./paths.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 
@@ -303,7 +304,7 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
     (port ? `BRIDGE_PORT=${port} ` : "") +
-    `MCP_NAME=${shellEscape(MCP_NAME)}`;
+    `MCP_NAME=${shellEscape(MCP_NAME)}${pathOverrideAssignments(shellEscape)}`;
 
   // 解析 disallowedTools
   const disallowed: string[] =

@@ -19,7 +19,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
-import { agentsFromList, createFailureLatch } from "../lib/run-manager.js";
+import { listAgentsLatched, createFailureLatch } from "../lib/run-manager.js";
 import { getJsonlMtime } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emitEvent } from "./event-bus.js";
@@ -310,14 +310,8 @@ export function startWedgeWatcher(
   const tick = async () => {
     try {
       const allowedUserIds = (process.env.ALLOWED_USER_IDS || "").split(",").filter(Boolean);
-      let agents: any[];
-      try {
-        agents = agentsFromList(await runManager("list"));
-        listLatch.ok();
-      } catch (e) {
-        listLatch.fail(e);
-        return;
-      }
+      const agents = await listAgentsLatched(() => runManager("list"), listLatch);
+      if (!agents) return;
       for (const agent of agents) {
         if (agent.status !== "active" || !agent.channelId) continue;
         await checkAgent(
@@ -358,14 +352,8 @@ async function checkMasterLink(isChannelConnected: (channelId: string) => boolea
 export function startLinkSentinel(isChannelConnected: (channelId: string) => boolean) {
   const listLatch = createFailureLatch("link-sentinel manager list");
   const tick = async () => {
-    let agents: any[];
-    try {
-      agents = agentsFromList(await runManager("list"));
-      listLatch.ok();
-    } catch (e) {
-      listLatch.fail(e);
-      return;
-    }
+    const agents = await listAgentsLatched(() => runManager("list"), listLatch);
+    if (!agents) return;
     for (const agent of agents) {
       if (agent.status !== "active" || !agent.channelId) continue;
       const pane = await tmuxCapture(windowTarget(agent.name), 40).catch(() => "");

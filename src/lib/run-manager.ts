@@ -88,6 +88,21 @@ export function agentsFromList(result: any): any[] {
   return Array.isArray(result.agents) ? result.agents : [];
 }
 
+/** manager list → agents；失败交给 latch（切换时报一次），返回 null = 本轮跳过。watcher 们共用 */
+export async function listAgentsLatched(
+  list: () => Promise<unknown>,
+  latch: { ok(): void; fail(err: unknown): void },
+): Promise<any[] | null> {
+  try {
+    const agents = agentsFromList(await list());
+    latch.ok();
+    return agents;
+  } catch (e) {
+    latch.fail(e);
+    return null;
+  }
+}
+
 /**
  * 按「状态切换」打日志：同一组件连续失败只在第一次喊，恢复时说一声。
  * 轮询型 watcher 每几秒跑一次，不能每轮刷一行。

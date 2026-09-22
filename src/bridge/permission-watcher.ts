@@ -29,6 +29,7 @@ import {
 import { tmuxScreenshot } from "./screenshot.js";
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
+import { listAgentsLatched, createFailureLatch } from "../lib/run-manager.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import {
   auqStates,
@@ -730,12 +731,13 @@ export function startPermissionWatcher(
   // setInterval 会让轮次叠罗汉，每轮各自持有一串子进程。bg-activity-watcher 和
   // stats-dashboard 早就是这么做的，这里一直漏了。
   let ticking = false;
+  const listLatch = createFailureLatch("permission-watcher manager list"); // list 失败 ≠ 没有 agent：切换时报一次、恢复时再报
   const tick = async () => {
     if (ticking) return;
     ticking = true;
     try {
-      const list = await runManager("list");
-      const agents: any[] = list.agents || [];
+      const agents = await listAgentsLatched(() => runManager("list"), listLatch);
+      if (!agents) return;
       for (const agent of agents) {
         if (agent.status !== "active" || !agent.channelId) continue;
         // 注意：不能根据 idle 字段跳过 — 弹窗界面底部也有 ❯ 会被误判为 idle
