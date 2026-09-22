@@ -1417,7 +1417,8 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
   header(nextStep(), t("手机访问（Tailscale）", "Phone access (Tailscale)"));
   const ts = await import("./lib/tailscale.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
-  const lan = detectBridgeUrls(webPort).find((x) => x.kind === "lan");
+  const ifaceUrls = detectBridgeUrls(webPort);
+  const lan = ifaceUrls.find((x) => x.kind === "lan");
   const isMac = process.platform === "darwin";
 
   print(t(
@@ -1435,6 +1436,21 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
   let cli = await ts.findTailscaleCli();
   let status = cli ? await ts.readTailscaleStatus(cli) : null;
   if (!cli) {
+    // 找不到 CLI 但网卡上已有 tailnet 地址 = Tailscale 在跑、只是 CLI 装在我们不认识的位置。
+    // 这时绝不能默认 Y 去重装：照旧给出 tailnet 明文地址，并提示用 TAILSCALE_CLI 指路。
+    const tailnet = ifaceUrls.find((x) => x.kind === "tailscale");
+    if (tailnet) {
+      warn(t("Tailscale 在运行，但找不到它的命令行工具，没法配 HTTPS 入口。", "Tailscale is running, but its CLI couldn't be found, so HTTPS can't be configured."));
+      hint(t(
+        "设置 TAILSCALE_CLI=<tailscale 可执行文件的绝对路径> 后重跑 bun run setup，即可升级到 HTTPS。",
+        "Set TAILSCALE_CLI=<absolute path to the tailscale binary> and rerun `bun run setup` to upgrade to HTTPS.",
+      ));
+      br();
+      ok(t(`手机上用这个: ${c.cyan}${tailnet.url}${c.reset}`, `Use this on your phone: ${c.cyan}${tailnet.url}${c.reset}`));
+      hint(t("明文地址下语音输入、推送、Passkey 用不了（浏览器要求 HTTPS）。", "Voice input, push and passkeys need HTTPS; they won't work on the plain address."));
+      await printQr(tailnet.url);
+      return { url: tailnet.url };
+    }
     cli = await offerTailscaleInstall(isMac, lan?.url);
     status = cli ? await ts.readTailscaleStatus(cli) : null;
   }
@@ -1562,7 +1578,8 @@ async function offerTailscaleInstall(isMac: boolean, lanUrl?: string): Promise<s
 }
 
 /**
- * 装了但没连上：macOS 打开 App；Linux 经同意跑 `sudo tailscale up --qr --operator=$USER`。
+ * 装了但没连上：macOS 打开 App；Linux 分别征得同意后跑 `sudo tailscale set --operator=<user>`
+ * 与 `tailscale up --qr`（两件系统级的事，各问一次）。
  * 然后按 ENTER 轮询状态（读终端是同步阻塞的，没法边等边轮询），拿到登录链接就打印链接和二维码。
  */
 async function waitForTailscaleLogin(
@@ -1591,7 +1608,14 @@ async function waitForTailscaleLogin(
       br();
       await runInteractive(["sudo", cli, "set", `--operator=${user}`]);
       br();
-      print(t("接着登录（会打印登录二维码）:", "Now sign in (prints a sign-in QR code):"));
+    }
+    // 登录是另一件系统级的事（把这台机器加入 tailnet），单独征得同意，不搭上一条的便车
+    print(t(
+      `然后 ${c.cyan}${cli} up --qr${c.reset}：把这台机器登录并加入你的 tailnet（会打印登录二维码）。`,
+      `Then ${c.cyan}${cli} up --qr${c.reset}: signs this machine in and joins it to your tailnet (prints a sign-in QR code).`,
+    ));
+    if (await confirm(t("现在登录吗?（这台机器会加入 tailnet）", "Sign in now? (this machine joins your tailnet)"), true)) {
+      br();
       await runInteractive([cli, "up", "--qr"]);
       br();
     }

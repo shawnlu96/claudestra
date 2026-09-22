@@ -671,9 +671,10 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
 
   // GET /api/v1/remote-access —— 网页「手机访问」面板：Tailscale 状态、每个入口（可达 / 证书剩余天数）、
   // 建议。只读：绝不在这里配 serve 或改任何机器配置（那只在 setup 的交互终端里、经用户同意做）。
-  // 全权 token：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。
+  // 全权 token：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。peer token 即便是 `*`
+  // 也拒：那是另一台 Claudestra，本机的网络盘点不该给它。
   if (path === "/remote-access" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
+    if (!principal.agents.includes("*") || principal.peer) {
       return apiJson(403, { ok: false, error: "remote-access requires a full-scope token" });
     }
     const { remoteAccessSnapshot } = await import("../lib/tailscale.js");
