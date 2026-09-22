@@ -731,8 +731,7 @@ export function startPermissionWatcher(
   // setInterval 会让轮次叠罗汉，每轮各自持有一串子进程。bg-activity-watcher 和
   // stats-dashboard 早就是这么做的，这里一直漏了。
   let ticking = false;
-  // list 失败 ≠ 没有 agent：切换时报一次、恢复时再报（与 wedge-watcher 同款）
-  const listLatch = createFailureLatch("permission-watcher manager list");
+  const listLatch = createFailureLatch("permission-watcher manager list"); // list 失败 ≠ 没有 agent：切换时报一次、恢复时再报
   const tick = async () => {
     if (ticking) return;
     ticking = true;
