@@ -1039,7 +1039,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!mfile || !existsSync(mfile)) {
       mfile =
         findSessionJsonlBySessionId(mRuntime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid);
+        findSessionJsonlBySessionId("claude-code", sid) ??
+        findSessionJsonlBySessionId("codex", sid);
     }
     if (!mfile || !existsSync(mfile)) {
       return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
@@ -1091,7 +1092,8 @@ export async function handleApiRequest(req: Request, url: URL): Promise<Response
     if (!file || !existsSync(file)) {
       file =
         findSessionJsonlBySessionId(runtime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid);
+        findSessionJsonlBySessionId("claude-code", sid) ??
+        findSessionJsonlBySessionId("codex", sid);
     }
     if (!file || !existsSync(file)) {
       return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });

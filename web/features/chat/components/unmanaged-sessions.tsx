@@ -53,12 +53,30 @@ function isTempSession(cwd: string): boolean {
 }
 
 export function RuntimeBadge({ runtime, className = "" }: { runtime: string; className?: string }) {
-  if (runtime !== "pi") return null;
-  return (
-    <span className={`badge badge-xs border-primary/40 bg-primary/10 text-[10px] text-primary ${className}`}>
-      Pi
-    </span>
-  );
+  // claude-code 是默认，不加徽章（列表里绝大多数是它，标了反而全是噪声）
+  if (runtime === "pi") {
+    return (
+      <span className={`badge badge-xs border-primary/40 bg-primary/10 text-[10px] text-primary ${className}`}>
+        Pi
+      </span>
+    );
+  }
+  if (runtime === "codex") {
+    // v2.24+ Codex 只读：列得出、读得了历史，但**收编不了**（我们对它只有
+    // `codex exec` 一条通路，没有往会话里注消息的手段）。徽章用中性色，跟 Pi
+    // 那种「能收编」的一等运行时区分开。
+    return (
+      <span className={`badge badge-xs border-base-content/25 bg-base-content/10 text-[10px] text-base-content/70 ${className}`}>
+        Codex
+      </span>
+    );
+  }
+  return null;
+}
+
+/** 这个 runtime 的会话能不能收编成可对话的 agent（Codex 不能，见 RuntimeBadge） */
+export function canAdoptRuntime(runtime: string): boolean {
+  return runtime !== "codex";
 }
 
 /**
@@ -556,11 +574,15 @@ function SessionViewer({
                 {t("← 返回")}
               </button>
               <span className="text-xs text-base-content/50">
-                {t("这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。")}
+                {canAdoptRuntime(session.runtime)
+                  ? t("这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。")
+                  : t("Codex 的会话只读：历史能看能搜，但收编不了——我们对它只有 codex exec 一条通路，没有往会话里发消息的办法。")}
               </span>
-              <button className="btn btn-outline btn-sm ml-auto" onClick={() => setAdopting(true)}>
-                {t("收编为 agent")}
-              </button>
+              {canAdoptRuntime(session.runtime) && (
+                <button className="btn btn-outline btn-sm ml-auto" onClick={() => setAdopting(true)}>
+                  {t("收编为 agent")}
+                </button>
+              )}
               {/* v2.23+ 未纳管会话的处置：归档（可逆）/ 删除（二次确认） */}
               <button
                 className="btn btn-ghost btn-sm"

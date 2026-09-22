@@ -38,6 +38,9 @@ export function sessionJsonlPath(
   cwd: string,
   sessionId: string,
 ): string | null {
+  // Codex 的文件名带 ISO 时间戳前缀且按日期分目录，光有 cwd+id 推不出路径 ⇒ 返回
+  // null 让调用方走全库扫描（同 Pi 的理由）。
+  if (runtime === "codex") return null;
   if (agentRuntime({ runtime }) === "pi") return piSessionPath(cwd, sessionId);
   return projectJsonlPath(cwd, sessionId);
 }
