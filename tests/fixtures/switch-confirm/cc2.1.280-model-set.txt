@@ -1,0 +1,51 @@
+                                                                                                                                                                                                        
+
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Sonnet 5 with xhigh effort · Claude Max
+  ▝▝ ▝▝    /tmp/p9-exp/work
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+  1 more notice hidden
+
+❯ Reply with just the word OK.                                                                                                                                                                          
+
+⏺ OK
+
+✻ Cogitated for 1s · done 3:23 AM
+
+❯ Reply with just the word YES.                                                                                                                                                                         
+
+⏺ YES
+
+✻ Sautéed for 1s · done 3:23 AM
+
+❯ /model claude-sonnet-5                                                                                                                                                                                
+  ⎿  Set model to Sonnet 5 and saved as your default for new sessions
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+                                                        
+                                                                                                                                                                                     ◉ xhigh · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Sonnet 5 · ctx 96% · 5h 15% · 7d 75% 
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                                                                                                                                          
