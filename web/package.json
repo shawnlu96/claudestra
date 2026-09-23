@@ -53,5 +53,12 @@
     "sharp": "^0.34.2",
     "tailwindcss": "^4",
     "typescript": "5.9.3"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "cpu-features": true,
+    "sharp": true,
+    "ssh2": true,
+    "unrs-resolver": true
   }
 }
