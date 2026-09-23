@@ -35,9 +35,15 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      # 用 npm install 而不是 npm ci：用户装网页走的就是 npm install（setup / update），锁文件的排法差异
+      # 不影响安装；npm ci 却会因为贡献者本机 npm 版本不同、重排了锁文件而整个作业失败（#29 / #31 实遇，
+      # 代码一行没错）。锁文件与本次安装结果不一致时只在下一步给黄色提醒，不判失败。
       - name: Install web dependencies
-        run: npm ci --ignore-scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
         working-directory: web
+
+      - name: Web lockfile drift (warning only)
+        run: git diff --quiet -- web/package-lock.json || echo "::warning file=web/package-lock.json::锁文件与 CI 的 npm 装出来的不一致（多半是本地 npm 版本不同重排了它）。不影响安装；要消掉就以 main 的锁文件为底执行 npm install --package-lock-only"
 
       - name: Typecheck (tsc --noEmit)
         run: bun run typecheck
@@ -79,9 +85,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # 类型检查和 lint 用不到 sqlite / sharp 这类原生模块的安装脚本
+      # 类型检查和 lint 用不到 sqlite / sharp 这类原生模块的安装脚本；npm install 而非 npm ci 的原因见上面 check 作业
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
 
       # lib/build-info.ts 由构建时生成（不入库），tsc 需要它先存在
       - name: Generate build info
