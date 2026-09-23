@@ -77,7 +77,8 @@ import { piCommandsFor } from "../lib/pi-env.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { isPiThinkingLevel } from "../lib/pi-launch.js";
-import { newRunId, loggedRunScript, sliceRunLog, isRunActive, RUN_ID_RE, type RunView } from "../lib/run-log.js";
+import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
+import { handleUpdateRoutes } from "./update-routes.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -385,80 +386,6 @@ async function handlePeerRedeem(req: Request): Promise<Response> {
   }
   // 失败一律 400 且不细分原因等级——这是个无鉴权端点，不给探测者更多信息面
   return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-}
-
-// ── 点火即走的后台任务（/update、/restart-all）────────────────────────────
-// 每次点火一个 runId，日志按轮切（lib/run-log.ts 有来由）。进行中的轮次再点火回 409：
-// 两个 `manager restart --include-master` 并发会各建同名窗口、抢同一个 --resume。
-
-type BgJobKind = "update" | "restart-all";
-const BG_JOB_STALE_MS: Record<BgJobKind, number> = {
-  "update": 10 * 60_000,
-  "restart-all": 20 * 60_000,
-};
-/** 本进程点着的轮次（外壳退出即清）。bridge 自己被 update 重启后这里是空的，改看日志。 */
-const bgJobInflight = new Map<BgJobKind, string>();
-
-function bgJobLog(kind: BgJobKind): string {
-  return `${process.env.HOME}/.claude-orchestrator/logs/${kind}.log`;
-}
-
-async function readBgJob(kind: BgJobKind, runId?: string | null): Promise<RunView> {
-  let txt = "";
-  try { txt = await Bun.file(bgJobLog(kind)).text(); } catch { /* 还没跑过 */ }
-  return sliceRunLog(txt, runId);
-}
-
-/** 正在进行的轮次 id（没有 = null）：先看本进程记账，再看日志（跨 bridge 重启） */
-async function activeBgJob(kind: BgJobKind): Promise<string | null> {
-  const mine = bgJobInflight.get(kind);
-  if (mine) return mine;
-  const last = await readBgJob(kind);
-  return isRunActive(last, Date.now(), BG_JOB_STALE_MS[kind]) ? last.runId : null;
-}
-
-function spawnBgJob(kind: BgJobKind, label: string, managerArgs: string): string {
-  const repoRoot = REPO_ROOT;
-  const runId = newRunId();
-  const script = loggedRunScript({
-    runId,
-    label,
-    cmd: `"${process.execPath}" run "${repoRoot}/src/manager.ts" ${managerArgs}`,
-    log: bgJobLog(kind),
-  });
-  const proc = Bun.spawn(["bash", "-c", script], {
-    cwd: repoRoot,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-    // @ts-ignore Bun 支持 detached —— 不 detach 的话 bridge 被 reload / 抖一下会连坐杀掉它
-    detached: true,
-  });
-  bgJobInflight.set(kind, runId);
-  void proc.exited.finally(() => {
-    if (bgJobInflight.get(kind) === runId) bgJobInflight.delete(kind);
-  });
-  return runId;
-}
-
-/** GET …/log：只回本轮（?run=<runId>；不带 = 最后一轮）+ 明确的完成态 */
-async function bgJobLogResponse(kind: BgJobKind, url: URL): Promise<Response> {
-  const n = Math.min(Number(url.searchParams.get("tail") || 40) || 40, 200);
-  const run = url.searchParams.get("run");
-  if (run && !RUN_ID_RE.test(run)) return apiJson(400, { ok: false, error: "bad run id" });
-  const v = await readBgJob(kind, run);
-  const running = v.runId !== null && !v.done && (bgJobInflight.get(kind) === v.runId
-    || isRunActive(v, Date.now(), BG_JOB_STALE_MS[kind]));
-  return apiJson(200, {
-    ok: true,
-    lines: v.lines.slice(-n),
-    runId: v.runId,
-    found: v.found,
-    running,
-    done: v.done,
-    exitCode: v.exitCode,
-    result: v.result,
-  });
 }
 
 // ── 路由分发 ────────────────────────────────────────────────────────────
@@ -2263,35 +2190,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // ── v2.21+ /projects —— project 管理面(owner 2026-08-28「加 project 概念」)。
   // 与 /peers 同款:全权 token 门禁,GET 读 projects.json+registry,mutation 全
   // 走 runManager 的 project-*(CLI 校验/写锁/原子写是唯一事实源)。
-  /**
-   * v2.24+ POST /api/v1/update —— 从网页一键升级后端（owner 2026-09-22：
-   * 「UI 里最好也加一个手动升级按钮，这样我点一下就好了」）。
-   *
-   * ⚠ 必须 detached + 立刻 202：`manager update` 会 reload 三个 daemon，**包括正在
-   * 处理这个请求的 bridge 自己**——等它返回就是等自己被杀，连接必断，前端只会看到
-   * 一个无从区分的网络错误。所以这里只负责「点着火就走」，进度另开
-   * GET /api/v1/update/log 拉。
-   *
-   * 升级走哪条通道（release / beta）由 config 决定，这里不另立策略。
-   */
-  if (path === "/update" && req.method === "POST") {
-    if (!isFullScope(principal)) return forbidden("update requires a full-scope token");
-    const busy = await activeBgJob("update");
-    if (busy) return apiJson(409, { ok: false, error: "上一次升级还没结束", runId: busy });
-    let runId: string;
-    try {
-      runId = spawnBgJob("update", "update", "update");
-    } catch (e) {
-      return apiJson(500, { ok: false, error: `起不来更新进程: ${(e as Error).message}` });
-    }
-    return apiJson(202, {
-      ok: true,
-      accepted: true,
-      runId,
-      log: bgJobLog("update"),
-      hint: "升级中：三个 daemon 会依次重启，bridge 自己也在内。进度拉 GET /api/v1/update/log?run=<runId>",
-    });
-  }
+  const upd = await handleUpdateRoutes(req, url, path, principal);
+  if (upd) return upd;
 
   /**
    * v2.24+ POST /api/v1/restart-all —— 全体重启（含大总管）。
@@ -2336,12 +2236,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (path === "/restart-all/log" && req.method === "GET") {
     if (!isFullScope(principal)) return forbidden("restart-all log requires a full-scope token");
     return bgJobLogResponse("restart-all", url);
-  }
-
-  /** 升级进度：同上（前端另外靠 /api/version 的 commit 变化兜底判完成） */
-  if (path === "/update/log" && req.method === "GET") {
-    if (!isFullScope(principal)) return forbidden("update log requires a full-scope token");
-    return bgJobLogResponse("update", url);
   }
 
   if (path === "/projects") {

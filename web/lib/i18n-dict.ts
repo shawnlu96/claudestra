@@ -430,4 +430,27 @@ export const DICT: Record<string, string> = {
   "上一轮还没结束，接着看它的进度": "The previous run is still going — following its progress",
   "等了 10 分钟还没升完，去看 update.log": "Still not done after 10 minutes — check update.log",
   "等了 20 分钟还没重启完，去看 restart-all.log": "Still not done after 20 minutes — check restart-all.log",
+  // ── 设置 · 版本与更新 ─────────────────────────────────
+  "版本与更新": "Version & updates",
+  "前后端一起升：拉取新版本 → 装依赖 → 网页有变化就重新构建 → 依次重启网页、bridge、launcher、cron。不用自己构建；升级时页面会短暂断开，属正常。":
+    "Updates the server and the web client together: fetch the new version → install dependencies → " +
+    "rebuild the web client if it changed → restart the web client, bridge, launcher and cron in turn. " +
+    "No manual build needed; the page disconnects briefly while it runs.",
+  "升级 Claudestra": "Update Claudestra",
+  "当前": "Current",
+  "检查失败": "Check failed",
+  "正在检查新版本…": "Checking for updates…",
+  "查不到最新版本": "Couldn't look up the latest version",
+  "已是 main 最新": "Up to date with main",
+  "main 有新提交，可升级": "New commits on main",
+  "已是最新正式版": "Latest release",
+  "可升级到": "Update available:",
+  "更新通道": "Update channel",
+  "正式版": "Release",
+  "Beta：跟着 main 的每个提交，修复来得最快，但没经过发版验证。": "Beta: follows every commit on main — fixes arrive first, but haven't been through a release.",
+  "正式版：只升到 GitHub 上正式发布的版本（推荐）。": "Release: only updates to versions published as GitHub releases (recommended).",
+  "自动升级 Claudestra": "Auto-update Claudestra",
+  "每 30 分钟检查一次，所有 agent 都空闲时才升；关掉后只提醒不升级。": "Checks every 30 minutes and updates only when every agent is idle; when off, it only notifies you.",
+  "自动升级 Claude Code": "Auto-update Claude Code",
+  "每周检查一次，同样只在所有 agent 都空闲时才升。": "Checks weekly and likewise updates only when every agent is idle.",
 };
