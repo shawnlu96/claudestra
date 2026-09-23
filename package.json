@@ -1,6 +1,6 @@
 {
   "name": "claudestra",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "description": "Run your coding agents — Claude Code and Pi — on your workstation and drive them from your phone: a self-hosted PWA web client (Discord optional), every session in tmux.",
   "type": "module",
   "scripts": {
