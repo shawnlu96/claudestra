@@ -8,6 +8,7 @@ import type { RefObject } from "react";
 import type { ChatStore } from "../chat/chat-store";
 import { setDevMode } from "./dev-mode";
 import { allCounters, clearDevEvents, devEvent, makeRateSampler, recentDevEvents, resetCounters } from "./dev-events";
+import { mountBenchSection } from "./bench-section";
 
 export type OnTick = (fn: (now: number) => void) => void;
 export type MeterRefs = { maxGap: RefObject<number>; inputLag: RefObject<number>; longTasks: RefObject<number | null> };
@@ -134,5 +135,11 @@ export function mountActionsSection(gui: GUI): () => void {
 }
 
 export function mountBuiltinSections(gui: GUI, onTick: OnTick, store: ChatStore, refs: MeterRefs): (() => void)[] {
-  return [mountPerfSection(gui, onTick, refs), mountStoreSection(gui, onTick, store), mountViewportSection(gui, onTick), mountActionsSection(gui)];
+  return [
+    mountPerfSection(gui, onTick, refs),
+    mountBenchSection(gui),
+    mountStoreSection(gui, onTick, store),
+    mountViewportSection(gui, onTick),
+    mountActionsSection(gui),
+  ];
 }
