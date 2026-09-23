@@ -107,6 +107,9 @@ peer 可以不连 bridge 端口，改走网页的 HTTPS 入口：反代（Caddy 
 `peer-invite-new` 先实测 `https://<ts.net>/api/v1/agents` 回 bridge 的 401 JSON 才写 HTTPS 地址
 （`src/lib/peer-url.ts`，`PEER_PUBLIC_URL` 可强制），否则退回 `http://<tailnet IP>:<bridge 端口>`。
 已有 peer 记的 baseUrl 不受影响。
+⚠ 同一台机器上「自己邀请自己」测不了 peer-join-auto：join 持有 manager 写锁等 redeem，而 bridge 处理 redeem
+要跑同一把锁的 peer-redeem → 10 秒超时后 redeem 才执行（邀请被用掉、留下一个半截 peer）。本机冒烟改为：
+生成邀请 → curl 带邀请里的 token 打 `https://<ts.net>/api/v1/agents` 与 `…/agents/<x>/messages`（2026-09-23 实测 5 秒拿到回复）。
 
 ## 7. 测试策略（owner：流程难测，想一套办法）
 
