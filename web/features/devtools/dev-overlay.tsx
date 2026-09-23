@@ -11,7 +11,7 @@
  * ⚠ React portal 的合成事件仍沿 React 树冒泡到 #cstra-shell 的 touch 手势处理——根元素
  *   上全部 stopPropagation,拖滑块不会触发横滑导航。
  */
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import GUI from "lil-gui";
 import { useChatStoreApi, type ChatStore } from "../chat/chat-store";
@@ -149,7 +149,9 @@ export default function DevOverlay() {
   const store = useChatStoreApi();
   const [open, setOpen] = useState(readOpen);
   const meters = useMeters();
-  const refs: MeterRefs = { maxGap: useFrameGap(meters), inputLag: useInputLag(), longTasks: useLongTasks() };
+  const maxGap = useFrameGap(meters), inputLag = useInputLag(), longTasks = useLongTasks();
+  // 必须稳定：refs 是 usePanel 的 effect 依赖，每次渲染新建对象会让整块 lil-gui 销毁重建（折叠状态、滑块值全丢）
+  const refs = useMemo<MeterRefs>(() => ({ maxGap, inputLag, longTasks }), [maxGap, inputLag, longTasks]);
   const badge = useBadgeText(!open, refs.maxGap);
   const toggle = () => {
     writeOpen(!open);
