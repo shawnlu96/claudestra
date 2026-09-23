@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatBench, percentile, summarizeFrames } from "../web/features/devtools/bench-stats";
+import { formatBench, oscillate, percentile, summarizeFrames } from "../web/features/devtools/bench-stats";
 
 describe("bench-stats", () => {
   test("percentile:空数组 0;p50 / p95 取上取整位置", () => {
@@ -17,9 +17,15 @@ describe("bench-stats", () => {
     expect(st.over50).toBe(2);
     expect(st.over100).toBe(1);
   });
-  test("formatBench:一行、带前缀、附加字段按 k=v", () => {
+  test("formatBench:一行、附加字段按 k=v", () => {
     const line = formatBench("scroll 1200px/s 到底", summarizeFrames([16, 17]), { msgs: 300, dom: 12000 });
-    expect(line.startsWith("[bench] scroll 1200px/s 到底 frames=2 ")).toBe(true);
+    expect(line.startsWith("scroll 1200px/s 到底 frames=2 ")).toBe(true);
     expect(line.endsWith("msgs=300 dom=12000")).toBe(true);
+  });
+  test("oscillate:0 在 min,半周期在 max,整周期回 min", () => {
+    expect(oscillate(0, 240, 480, 1500)).toBeCloseTo(240, 6);
+    expect(oscillate(750, 240, 480, 1500)).toBeCloseTo(480, 6);
+    expect(oscillate(1500, 240, 480, 1500)).toBeCloseTo(240, 6);
+    expect(oscillate(375, 0, 100, 1500)).toBeCloseTo(50, 6);
   });
 });

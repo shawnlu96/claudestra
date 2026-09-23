@@ -26,5 +26,11 @@ export function summarizeFrames(gaps: number[]): FrameStats {
 /** 一行可复制的结论(进事件列表 / 贴回对话)。 */
 export function formatBench(label: string, s: FrameStats, extra: Record<string, string | number>): string {
   const tail = Object.entries(extra).map(([k, v]) => `${k}=${v}`).join(" ");
-  return `[bench] ${label} frames=${s.frames} p50=${s.p50}ms p95=${s.p95}ms max=${s.max}ms >50ms=${s.over50} >100ms=${s.over100} ${tail}`.trim();
+  return `${label} frames=${s.frames} p50=${s.p50}ms p95=${s.p95}ms max=${s.max}ms >50ms=${s.over50} >100ms=${s.over100} ${tail}`.trim();
+}
+
+/** 正弦摆动:t=0 在 min,半个周期到 max,再回来。侧栏基准用。 */
+export function oscillate(t: number, min: number, max: number, periodMs: number): number {
+  const phase = (1 - Math.cos((2 * Math.PI * t) / periodMs)) / 2;
+  return min + (max - min) * phase;
 }

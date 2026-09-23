@@ -42,13 +42,14 @@
 - 流式期间的气泡渲染速率、produce 速率
 - 打开频道到首屏稳定的时间（`[slide]` / 手工秒表）
 
-### 1. `content-visibility: auto`（几行 CSS，先上）
+### 1. `content-visibility: auto`（已上 CSS，2026-09-23）
 
-给每个 `[data-mid]` 包装层加 `content-visibility: auto; contain-intrinsic-size: auto 120px`。屏外气泡跳过样式 / 布局 / 绘制，DOM 保留，选字、查找、`[data-mid]` 定位、prepend 的 `scrollHeight` 补偿全部照旧。iOS 18+ 支持。
+每个 `[data-mid]` 包装层 `content-visibility: auto; contain-intrinsic-size: auto 120px`（globals.css）。屏外气泡跳过样式 / 布局 / 绘制，DOM 保留，选字、查找、`[data-mid]` 定位、prepend 的 `scrollHeight` 补偿全部照旧。iOS 18+ 支持。owner 用拖侧栏复现：每个 pointermove 都让全部已挂气泡重新折行，屏幕上其实只有十来条需要——这条 CSS 正对这个。
 
-- 风险：`contain-intrinsic-size` 的估值与真实高度差得远时，滚动条会「呼吸」；用 `auto` 关键字让浏览器记住上次渲染的尺寸，只有从未渲染过的行用估值。流式中的最后一个气泡不加（它必须一直布局才能吸底）。
-- 进入条件：基线里滚动 p95 > 50ms 或 DOM 节点 > 1.5 万。
-- 退出条件：同频道同窗口，滚动 p95 与「显示更早」后的首帧时间都下降；无视口跳动。
+屏外行的高度由 `contain-intrinsic-size` 决定：渲染过的行记住上次真实高度，从没渲染过的（「显示更早」prepend 进来的）先占 120px，宽度变过的行保留旧宽度下的高度。差值只在**向上滑**进该行时露出：Chrome / Firefox 有 `overflow-anchor` 自动锚定，iOS Safari 没有，会顿一下。
+
+- 后续升级点（不满意再做，接口不变，都是往 `contain-intrinsic-size` 写一个数）：① 占位值按每条消息字符数 / 工具卡数粗估；② Pretext 按块 `prepare()` 一次、换宽只重跑 `layout()` 刷新全部行；③ Safari 的 `scrollTop` 补偿（`contentvisibilityautostatechange` / RO 盯视口上方的行）。
+- 验收：面板「侧栏基准」（程序化摆动侧栏宽度）与「滚动基准」前后对比；真机向上滑看有无可感知的跳。
 
 ### 1.5 流式与对账的重渲染
 

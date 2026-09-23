@@ -674,3 +674,13 @@ html[data-dev-outline] * {
   width: 100% !important;
   --width: 100%;
 }
+
+/* ── 长对话渲染 阶段 1（docs/design-render-perf.md）：屏外气泡跳过布局 / 绘制 ──
+   拖侧栏 / 滚动 / 追加时只有视口附近的十来条气泡参与重排，DOM 保留（选字、[data-mid]
+   定位、prepend 的 scrollHeight 补偿全不动）。`auto 120px`：渲染过的行记住上次真实高度，
+   从没渲染过的行先占 120px——占位与真实的差只在向上滑进该行时露出（iOS Safari 无
+   overflow-anchor 会顿一下；Chrome / Firefox 自动锚定）。估值升级点：把 120px 换成按行算出的数。 */
+#cstra-msgs [data-mid] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
