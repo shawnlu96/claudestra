@@ -71,8 +71,18 @@ features/chat/
   chat-store.ts         zenith 中枢（agents/messages/streaming + pendingPermission/pendingAsk；
                         openGen 门控历史加载，streamGen 门控流；createAgent/killAgent/restartAgent；
                         interrupt/resolvePermission/submitAsk/cancelAsk）
+  sidebar-entries.ts    侧栏排序 / project 分组（≥2 成员才出组头）/ 沉寂判定（纯函数）
+  agent-menu.ts         会话右键 / 长按菜单的内容：运行中 = 重启/停止/清空/移动到/归档，已停止 = 启动/移动到/归档；
+                        master / mock 无菜单（纯函数，tests/web-agent-menu）
+  sidebar-dnd.ts        桌面拖拽改 project 的判定 + 模块级拖拽态（同 project / 自己 / 无归属目标不可放）
+  project-actions.ts    /api/projects 写入口（projAction / assignAgentProject），弹窗、菜单、拖拽共用
   components/           sidebar / new-agent-modal / message-list（permission-card + ask-question-card）
                         / composer（streaming 时出「停止」）/ chat(Provider)
+    agent-row.tsx       会话行：左滑（置顶/归档/删除）+ 右键/长按菜单触发 + 可拖 + 放置目标
+    agent-menu.tsx      单实例浮层（手势同 bubble-menu：桌面右键、长按 450ms、挪 >12px 作废；portal 到 body）；
+                        「移动到」是同一浮层里的二级页
+    agent-dnd.tsx       HTML5 拖拽接线：dragHandlers（仅 hover+fine pointer 设备）/ useAgentDrop（悬停高亮、松手 assign）
+    project-group.tsx   project 组头 + 组块（放置目标）；status-dot.tsx 行首状态点
 lib/
   db/                   getDb + auth migration（数据根 ~/.claude-orchestrator/web/db）
   services/auth.service.ts  verifySSH(ssh2) + session CRUD

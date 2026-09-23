@@ -18,17 +18,13 @@
  * iOS 自己的「拷贝 / 查询」气泡打架。要选局部文字走菜单里的「选择文字」，
  * 那条路会把 user-select 放开、并冻结滚动（见 ../select-mode）。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { useCloseOnNavigate, useLongPressMenu } from "./menu-gestures";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { fmtTs } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { copyText, enterSelectMode, exitSelectMode, isSelectMode, onSelectModeChange, selectedText } from "../select-mode";
-
-/** 长按判定。450ms：比 iOS 原生 callout(≈500ms)稍早，抢在它前面出。 */
-const LONG_PRESS_MS = 450;
-/** 手指挪超过这个距离就认为是在滚动/左滑，不是长按。 */
-const MOVE_TOLERANCE = 12;
 
 export interface BubbleMenuTarget {
   /** 这一块的纯文本（复制 / 引用用它）。 */
@@ -75,47 +71,8 @@ export function closeBubbleMenu(): void {
  * 判断「这次 click 只是长按的尾巴」——否则松手会顺带把时间戳切了。
  */
 export function useBubbleMenuTrigger(get: () => BubbleMenuTarget) {
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const start = useRef<{ x: number; y: number } | null>(null);
-  const firedAt = useRef(0);
-  const clear = () => {
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = null;
-  };
-  useEffect(() => clear, []);
-  return {
-    consumedClick: () => Date.now() - firedAt.current < 700,
-    handlers: {
-      onTouchStart: (e: React.TouchEvent) => {
-        if (isSelectMode()) return; // 选字期间一切手势让位给选区
-        const t = e.touches[0];
-        if (!t) return;
-        start.current = { x: t.clientX, y: t.clientY };
-        clear();
-        timer.current = setTimeout(() => {
-          firedAt.current = Date.now();
-          navigator.vibrate?.(8); // 安卓有触感，iOS 无声降级
-          openBubbleMenu({ ...get(), x: start.current!.x, y: start.current!.y });
-        }, LONG_PRESS_MS);
-      },
-      onTouchMove: (e: React.TouchEvent) => {
-        const s = start.current;
-        const t = e.touches[0];
-        if (!s || !t) return;
-        if (Math.abs(t.clientX - s.x) > MOVE_TOLERANCE || Math.abs(t.clientY - s.y) > MOVE_TOLERANCE) clear();
-      },
-      onTouchEnd: clear,
-      onTouchCancel: clear,
-      // 桌面右键；安卓 Chrome 的长按也会走这里（和上面的计时器重复触发无害，
-      // 后一次只是用同样的内容重开一次）
-      onContextMenu: (e: React.MouseEvent) => {
-        if (isSelectMode()) return;
-        e.preventDefault();
-        firedAt.current = Date.now();
-        openBubbleMenu({ ...get(), x: e.clientX, y: e.clientY });
-      },
-    },
-  };
+  // 选字期间一切手势让位给选区
+  return useLongPressMenu({ blocked: isSelectMode, open: (x, y) => openBubbleMenu({ ...get(), x, y }) });
 }
 
 const MENU_W = 190;
@@ -172,18 +129,9 @@ export function BubbleMenu() {
     document.addEventListener("selectionchange", killNativeSelection);
     return () => document.removeEventListener("selectionchange", killNativeSelection);
   }, [s]);
-  // 路由变化（返回列表页）时收起——会话页在移动端并不卸载
-  useEffect(() => {
-    const close = () => emit(null);
-    window.addEventListener("hashchange", close);
-    window.addEventListener("popstate", close);
-    return () => {
-      window.removeEventListener("hashchange", close);
-      window.removeEventListener("popstate", close);
-    };
-  }, []);
+  useCloseOnNavigate(closeBubbleMenu);
 
-  const flash = (msg: string, opts?: { undo?: () => void; ms?: number }) => {
+  const flash =(msg: string, opts?: { undo?: () => void; ms?: number }) => {
     const item = { text: msg, undo: opts?.undo, agent: store.state.activeAgent };
     setToast(item);
     setTimeout(() => setToast((v) => (v === item ? null : v)), opts?.ms ?? 1400);
