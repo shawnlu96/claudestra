@@ -35,15 +35,20 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # 用 npm install 而不是 npm ci：用户装网页走的就是 npm install（setup / update），锁文件的排法差异
-      # 不影响安装；npm ci 却会因为贡献者本机 npm 版本不同、重排了锁文件而整个作业失败（#29 / #31 实遇，
-      # 代码一行没错）。锁文件与本次安装结果不一致时只在下一步给黄色提醒，不判失败。
+      # 只查真正有意义的不同步：package.json 的依赖声明与锁文件根节点记的不一致（加了依赖没更新锁）。
+      # 不比锁文件逐字——不同版本的 npm 排法本来就不一样（main 自己的锁在 CI 的 npm 10 下也会被重排），比了只剩噪音。
+      - name: Web lockfile in sync with package.json (warning only)
+        run: >-
+          node -e "const p=require('./web/package.json'),l=require('./web/package-lock.json').packages[''];
+          const k=(o)=>JSON.stringify(Object.entries(o||{}).sort());
+          if(k(p.dependencies)!==k(l.dependencies)||k(p.devDependencies)!==k(l.devDependencies))
+          console.log('::warning file=web/package-lock.json::web/package.json 的依赖与锁文件不一致（改了依赖没更新锁文件）——在 web/ 下执行 npm install --package-lock-only 后提交')"
+
+      # 用 npm install 而不是 npm ci：用户装网页走的就是 npm install（setup / update）；npm ci 会因为贡献者本机
+      # npm 版本不同、重排了锁文件而整个作业失败（#29 / #31 实遇，代码一行没错）。
       - name: Install web dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
         working-directory: web
-
-      - name: Web lockfile drift (warning only)
-        run: git diff --quiet -- web/package-lock.json || echo "::warning file=web/package-lock.json::锁文件与 CI 的 npm 装出来的不一致（多半是本地 npm 版本不同重排了它）。不影响安装；要消掉就以 main 的锁文件为底执行 npm install --package-lock-only"
 
       - name: Typecheck (tsc --noEmit)
         run: bun run typecheck
