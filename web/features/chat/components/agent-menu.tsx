@@ -80,7 +80,7 @@ function MenuPanel({ s, page, targets, onAction, onMove, onBack }: {
         style={{ left, top, width: MENU_W }}
       >
         <div className="truncate px-3.5 pb-1 pt-0.5 text-[11px] text-base-content/40">
-          {page === "move" ? t("移动到") : t(s.agent.displayName)}
+          {page === "move" ? t("移动到") : s.agent.displayName}
         </div>
         {page === "main" &&
           items.map((it) =>

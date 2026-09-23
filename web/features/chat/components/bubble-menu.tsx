@@ -131,7 +131,7 @@ export function BubbleMenu() {
   }, [s]);
   useCloseOnNavigate(closeBubbleMenu);
 
-  const flash =(msg: string, opts?: { undo?: () => void; ms?: number }) => {
+  const flash = (msg: string, opts?: { undo?: () => void; ms?: number }) => {
     const item = { text: msg, undo: opts?.undo, agent: store.state.activeAgent };
     setToast(item);
     setTimeout(() => setToast((v) => (v === item ? null : v)), opts?.ms ?? 1400);
