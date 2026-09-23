@@ -4,26 +4,15 @@ import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 import { useChatStoreApi } from "../chat-store";
 import type { ProjectMeta } from "../type";
+import { projAction } from "../project-actions";
 
 /**
  * v2.21+ 项目管理弹窗(侧栏 📁 进入;owner 2026-08-28「project 概念 + UI 方便管理」)。
  * 列表 + 行内编辑(名/emoji/目录/说明) + 成员转移 + 新建 + 删除(须先清空成员)。
  * 数据面走 /api/projects(BFF)→ bridge /api/v1/projects → runManager project-*,
- * 与 CLI 等价。agent 归属是硬约束——成员只能「转移到别的 project」,不能移出不管。
+ * 与 CLI 等价(写入口在 ../project-actions.ts,侧栏菜单 / 拖拽共用)。
+ * agent 归属是硬约束——成员只能「转移到别的 project」,不能移出不管。
  */
-
-async function projAction(body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string }> {
-  try {
-    const r = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return (await r.json()) as { ok?: boolean; error?: string };
-  } catch (e) {
-    return { ok: false, error: (e as Error).message };
-  }
-}
 
 /** 单个 project 行:折叠态概览,展开态编辑 + 成员管理。 */
 function ProjectRow({

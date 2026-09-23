@@ -13,6 +13,9 @@ import { UnmanagedSessions } from "./unmanaged-sessions";
 import { ArchivedSessions } from "./archived-sessions";
 import { buildSidebarEntries, filterAndRankWorkers, splitDormant, type SidebarEntry } from "../sidebar-entries";
 import { AgentRow } from "./agent-row";
+import { AgentMenu } from "./agent-menu";
+import { Chevron, ProjectGroup } from "./project-group";
+import type { AgentSession } from "../type";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
 
@@ -198,6 +201,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   // 单成员 project 不成组;整组全员沉寂才下沉「💤 沉寂」——规则见 sidebar-entries.ts
   const entries = buildSidebarEntries(filtered, q, projMeta);
   const { activeEntries, dormantEntries } = splitDormant(entries);
+  // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
+  const rowProps = (a: AgentSession) => ({
+    a,
+    active: active === a.name,
+    busyLive: active === a.name && streaming,
+    compacting: a.compacting || (active === a.name && compactingLive),
+    pinned: pinSet.has(a.name),
+    onTogglePin: () => togglePin(a.name),
+    onSelect,
+    manage,
+    checked: sel.has(a.name),
+    onToggleCheck: () => toggleSel(a.name),
+  });
 
   return (
     <aside
@@ -454,19 +470,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         {q ? (
           <ul className="flex w-full list-none flex-col gap-0.5 p-0">
             {filtered.map((a) => (
-              <AgentRow
-                key={a.name}
-                a={a}
-                active={active === a.name}
-                busyLive={active === a.name && streaming}
-                compacting={a.compacting || (active === a.name && compactingLive)}
-                pinned={pinSet.has(a.name)}
-                onTogglePin={() => togglePin(a.name)}
-                onSelect={onSelect}
-                manage={manage}
-                checked={sel.has(a.name)}
-                onToggleCheck={() => toggleSel(a.name)}
-              />
+              <AgentRow key={a.name} {...rowProps(a)} />
             ))}
           </ul>
         ) : (
@@ -479,77 +483,24 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                 return (
                   <AgentRow
                     key={e.a.name}
-                    a={e.a}
-                    active={active === e.a.name}
-                    busyLive={active === e.a.name && streaming}
-                    compacting={e.a.compacting || (active === e.a.name && compactingLive)}
-                    pinned={pinSet.has(e.a.name)}
-                    onTogglePin={() => togglePin(e.a.name)}
-                    onSelect={onSelect}
-                    manage={manage}
-                    checked={sel.has(e.a.name)}
-                    onToggleCheck={() => toggleSel(e.a.name)}
+                    {...rowProps(e.a)}
                     projEmoji={(e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined}
                   />
                 );
               }
-              const isCollapsed = collapsedProjects.has(e.id);
-              const groupBusy = e.items.some((i) => i.busy || (active === i.name && streaming));
+              // 组头 / 组块样式与拖拽放置在 project-group.tsx
               return (
-                // v2.21.1+ 组做成「容器」(owner 2026-08-31「文件夹层级更清晰」):
-                // 组块淡底色 + 开合文件夹图标 + 成员缩进导线——文件夹是个盒子,
-                // 不再只是一行标签
-                // v2.21.4 组头降为「分区标签」(小号、压淡、无卡片底、hover 只提亮文字):
-                // 组头与 agent 行此前都是「emoji + 名字」的卡片样式,分不清哪个能点进会话
-                // (owner 2026-09-06)。现在:卡片 = agent,标签 = 文件夹。
-                <li key={`g:${e.id}`} className="rounded-xl bg-base-300/25 p-1">
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
-                    onClick={() => toggleProjectCollapse(e.id)}
-                  >
-                    <svg
-                      width="12"
-                      height="12"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className={`shrink-0 text-base-content/40 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}
-                    >
-                      <path d="m6 9 6 6 6-6" />
-                    </svg>
-                    <span className="shrink-0 text-[13px] opacity-80">{e.meta?.emoji || (isCollapsed ? "📁" : "📂")}</span>
-                    <span className="truncate">{e.meta?.name || e.id}</span>
-                    <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">
-                      {e.items.length}
-                    </span>
-                    {isCollapsed && groupBusy && (
-                      <span className="size-1.5 shrink-0 rounded-full bg-warning" />
-                    )}
-                  </button>
-                  {!isCollapsed && (
-                    <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">
-                      {e.items.map((a) => (
-                        <AgentRow
-                          key={a.name}
-                          a={a}
-                          active={active === a.name}
-                          busyLive={active === a.name && streaming}
-                compacting={a.compacting || (active === a.name && compactingLive)}
-                          pinned={pinSet.has(a.name)}
-                          onTogglePin={() => togglePin(a.name)}
-                          onSelect={onSelect}
-                          manage={manage}
-                          checked={sel.has(a.name)}
-                          onToggleCheck={() => toggleSel(a.name)}
-                        />
-                      ))}
-                    </ul>
-                  )}
-                </li>
+                <ProjectGroup
+                  key={`g:${e.id}`}
+                  e={e}
+                  collapsed={collapsedProjects.has(e.id)}
+                  groupBusy={e.items.some((i) => i.busy || (active === i.name && streaming))}
+                  onToggle={() => toggleProjectCollapse(e.id)}
+                >
+                  {e.items.map((a) => (
+                    <AgentRow key={a.name} {...rowProps(a)} />
+                  ))}
+                </ProjectGroup>
               );
             };
             return (
@@ -562,19 +513,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                       className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-[12px] font-medium text-base-content/45 transition-colors hover:bg-base-300/40 hover:text-base-content/70"
                       onClick={() => setDormantOpen((v) => !v)}
                     >
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        className={`shrink-0 transition-transform ${dormantOpen ? "" : "-rotate-90"}`}
-                      >
-                        <path d="m6 9 6 6 6-6" />
-                      </svg>
+                      <Chevron open={dormantOpen} />
                       <span>💤 {t("沉寂")}</span>
                       <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/35">
                         {dormantEntries.reduce((n, e) => n + (e.kind === "row" ? 1 : e.items.length), 0)}
@@ -647,6 +586,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
       <ProjectsModal open={showProjects} onClose={() => setShowProjects(false)} />
+      <AgentMenu />
     </aside>
   );
 }

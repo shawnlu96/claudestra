@@ -8,6 +8,9 @@ import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./unmanaged-sessions";
 import { MasterIcon } from "./master-icon";
 import { swipeReg } from "./agent-row-swipe";
+import { StatusDot } from "./status-dot";
+import { useAgentMenuTrigger } from "./agent-menu";
+import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
    tapIntent 是模块级单例——所有行实例共享；swipeReg 在 agent-row-swipe.ts（AgentRow 与 Sidebar 共用同一实例）。 */
@@ -25,28 +28,10 @@ let tapIntent: { name: string; ts: number; x: number; y: number } | null = null;
  *  污染下一次独立点击(键盘激活无 pointerdown,走闭包兜底)。 */
 const TAP_INTENT_TTL_MS = 1_200;
 
-function StatusDot({ status, busy, compacting }: { status: AgentSession["status"]; busy?: boolean; compacting?: boolean }) {
-  if (status === "active") {
-    // 运行中：实心核心点 + 柔和呼吸外晕（cstra-breathe，替换生硬的 animate-ping）。
-    // 正在干活（tmux 非空闲 / 本端流式中）→ 黄色；空闲 → 绿色；
-    // v2.21.2+ 正在压缩上下文 → 蓝色（既不是空闲也不是普通回合）。
-    const tone = compacting ? "bg-info" : busy ? "bg-warning" : "bg-success";
-    return (
-      <span className="relative flex size-2.5 shrink-0 items-center justify-center">
-        <span className={`animate-cstra-breathe absolute inline-flex size-2.5 rounded-full ${tone}`} />
-        <span className={`relative inline-flex size-2 rounded-full ${tone}`} />
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex size-2.5 shrink-0 rounded-full bg-base-content/25" />
-  );
-}
-
-
 /**
- * 会话列表行——纯选择项。会话操作（清空/重启/停止）已迁到会话详情顶栏
- * （agent-actions.tsx），列表保持干净。
+ * 会话列表行——点击 = 进会话。会话操作不占行内空间：左滑（置顶 / 归档 / 删除）、
+ * 右键 / 长按菜单（agent-menu.tsx：重启 / 停止 / 清空 / 移动到 / 归档）、桌面拖到别的
+ * project 组或 agent 行上改 project（agent-dnd.tsx）。
  */
 /** 左滑露出的动作区总宽（置顶 / 归档 / 删除 三格）—— 必须与滑动上限、吸附阈值同源，
  *  否则加一个动作就会把最左边那个按钮挤出可视区（2026-09-14 owner 实报「置顶按钮
@@ -133,6 +118,11 @@ export function AgentRow({
   // 忙碌态 = 行外框(owner 2026-09-06:「工作中给它加一个不断闪烁的黄色边框」);
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
   const busyNow = !!(a.busy || busyLive);
+  // 右键 / 长按菜单 + 桌面拖拽改 project（owner 2026-09-23）。master / mock / 多选模式无菜单不可拖；
+  // 本行也是放置目标 = 它所属的 project（单人 project 没有组头，拖到它的 agent 上就是进那个 project）。
+  const menu = useAgentMenuTrigger(() => a, canRemove && !manage);
+  const drop = useAgentDrop({ projectId: a.projectId, agentName: a.name });
+  const drag = canRemove && !manage && dragAllowed() ? dragHandlers({ name: a.name, projectId: a.projectId ?? null }) : {};
 
   /** 点行的实际动作。触摸丢 click 的兜底在列表容器上统一做(lib/tap-rescue.ts 派发合成 click),行不用管。 */
   const activate = (intended: string) => {
@@ -166,7 +156,7 @@ export function AgentRow({
 
   return (
     <li>
-      <div className="relative overflow-hidden rounded-lg">
+      <div className={`relative overflow-hidden rounded-lg ${drop.over ? "ring-2 ring-primary/50" : ""}`} {...drop.handlers}>
         {/* 左滑露出的操作钮(在滑动层下面):置顶 + 删除 */}
         {(swipeX < 0 || dragging) && (
           <div className="absolute inset-y-0 right-0 z-0 flex" style={{ width: ACTIONS_W }}>
@@ -222,7 +212,9 @@ export function AgentRow({
             // active:bg 按压即时反馈——触屏无 hover,没有按压态点击像「没反应」
             active ? "bg-base-300" : "bg-base-200 hover:bg-base-300/60 active:bg-base-300"
           }`}
-          style={{ transition: dragging ? "none" : "transform 0.18s ease" }}
+          // touch-callout 关掉：长按出我们的菜单，不出 iOS 的「拷贝 / 查询」气泡（bubble-menu 同款代价）
+          style={{ transition: dragging ? "none" : "transform 0.18s ease", WebkitTouchCallout: "none" }}
+          {...drag}
           onTouchStart={
             swipeEnabled
               ? (e) => {
@@ -303,7 +295,8 @@ export function AgentRow({
           />
         )}
         <button
-          className="relative flex min-w-0 flex-1 items-center gap-2.5 text-left sm:gap-2"
+          className="relative flex min-w-0 flex-1 select-none items-center gap-2.5 text-left sm:gap-2"
+          {...menu.handlers}
           onPointerDown={(e) => {
             tapIntent = { name: a.name, ts: Date.now(), x: e.clientX, y: e.clientY };
           }}
@@ -312,6 +305,8 @@ export function AgentRow({
             const intended =
               tapIntent && Date.now() - tapIntent.ts < TAP_INTENT_TTL_MS ? tapIntent.name : a.name;
             tapIntent = null;
+            // 长按松手的 click 只是菜单的尾巴,不进会话
+            if (menu.consumedClick()) return;
             activate(intended);
           }}
         >
