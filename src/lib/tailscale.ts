@@ -319,7 +319,7 @@ export function tailscaleCliEnv(env: Record<string, string | undefined> = proces
   return out;
 }
 
-async function runCli(cli: string, args: string[], timeoutMs = 5000): Promise<{ code: number; out: string; err: string }> {
+export async function runCli(cli: string, args: string[], timeoutMs = 5000): Promise<{ code: number; out: string; err: string }> {
   try {
     const proc = Bun.spawn([cli, ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: tailscaleCliEnv() });
     const timer = setTimeout(() => proc.kill(), timeoutMs);

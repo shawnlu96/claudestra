@@ -98,6 +98,16 @@ wait resolver、mirror 审计、history 记录**全部现成**。唯一改动：
 - 无 ack 循环风险（HTTP 一问一答，无广播信道）；pending 有 TTL 清理。
 - R1 共享上下文守卫沿用：给 peer 签 token 时非 `--external` agent 要 `--force`。
 
+## 6b. 走 HTTPS 入口（2026-09-23）
+
+peer 可以不连 bridge 端口，改走网页的 HTTPS 入口：反代（Caddy `handle /api/v1/*` / tailscale serve
+`--set-path /api/v1`）转到 bridge 在回环上另开的 **peer 专用入口**（`src/bridge/peer-ingress.ts`，
+端口 = `.env` 的 `PEER_INGRESS_PORT`，没配就不开——升级不凭空多占端口）。入口只调 /api/v1 处理函数、
+带凭据必须是 peer token、拒 ws；反代绝不能直接指 bridge 主端口（回环对控制面一律放行）。
+`peer-invite-new` 先实测 `https://<ts.net>/api/v1/agents` 回 bridge 的 401 JSON 才写 HTTPS 地址
+（`src/lib/peer-url.ts`，`PEER_PUBLIC_URL` 可强制），否则退回 `http://<tailnet IP>:<bridge 端口>`。
+已有 peer 记的 baseUrl 不受影响。
+
 ## 7. 测试策略（owner：流程难测，想一套办法）
 
 1. **纯逻辑单测**（`tests/http-peer.test.ts`）：邀请/回执串 encode/parse 往返、

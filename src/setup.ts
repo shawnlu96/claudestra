@@ -1614,13 +1614,12 @@ async function stepAdoptSessions(bridgePort: string): Promise<string[]> {
  * ⚠ 凡是动整台机器的步骤（装 Tailscale、sudo tailscale up、serve）都先问；永远不 reset serve、
  *   不开 funnel（公网暴露）。
  */
-async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
+async function stepRemoteAccess(webPort: number, bridgePort: string): Promise<{ url?: string }> {
   header(nextStep(), t("手机访问（Tailscale）", "Phone access (Tailscale)"));
   const ts = await import("./lib/tailscale.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
   const ifaceUrls = detectBridgeUrls(webPort);
-  const lan = ifaceUrls.find((x) => x.kind === "lan");
-  const isMac = process.platform === "darwin";
+  const lan = ifaceUrls.find((x) => x.kind === "lan"), isMac = process.platform === "darwin";
 
   print(t(
     "Web 端装在本机,在这台机器上开浏览器就能用。要在**手机**上用,两边得互相看得见:",
@@ -1702,11 +1701,12 @@ async function stepRemoteAccess(webPort: number): Promise<{ url?: string }> {
         const who = report.others443.join(", ") || t("别的进程", "another process");
         hint(t(`443 已被占用（${who}），改用 ${plan.port}，不去抢它`, `Port 443 is taken (${who}), using ${plan.port} instead of displacing it`));
       }
-      hint(t("这会改这台机器的 Tailscale 配置（只加这一条，不动已有的）。", "This changes this machine's Tailscale config (adds just this one handler, leaves existing ones alone)."));
+      hint(t("这会改这台机器的 Tailscale 配置（只加网页入口和 peer 的 /api/v1 两条，不动已有的）。", "This changes this machine's Tailscale config (adds the web entry and a peer /api/v1 path; existing ones stay)."));
       if (await confirm(t("现在配置吗?", "Configure it now?"), true)) {
         const r = await ts.applyServe(tsCli, plan.port, webPort);
         if (r.ok) {
           ok(t(`已配置: ${plan.url}`, `Configured: ${plan.url}`));
+          hint(await (await import("./lib/peer-ingress-config.js")).setupPeerHttps(t, tsCli, plan.port, Number(bridgePort) || DEFAULT_BRIDGE_PORT, webPort));
           httpsUrl = plan.url;
           await verifyHttpsEntry(ts, plan.url, webPort);
           if (!isMac) hint(t("Linux 上 web 服务还不会自动常驻（没有 systemd 安装），serve 背后的 web 要你自己保证在跑。", "On Linux the web service is not auto-installed as a systemd unit yet — keep it running yourself behind serve."));
@@ -2066,7 +2066,7 @@ async function main() {
   if (fronts.web) {
     await stepWebSetup(bridgePort);
     laterFailures.push(...(await stepWebLogin()));
-    phoneUrl = (await stepRemoteAccess(await readWebPort())).url;
+    phoneUrl = (await stepRemoteAccess(await readWebPort(), bridgePort)).url;
   }
 
   const cfg: Config = {

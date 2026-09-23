@@ -10,7 +10,7 @@ import { shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
-import { hasActiveBgActivities } from "./bridge/bg-activity-watcher.js";
+import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
 
 // ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
+import { configuredPeerIngressPort, startPeerIngress } from "./bridge/peer-ingress.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
@@ -3549,9 +3549,8 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 
 const server = Bun.serve({
   port: BRIDGE_PORT,
-  // v2.6.0+ 默认只绑回环 —— /hook /stats /skills/rescan 一直无鉴权，之前默认
-  // 0.0.0.0 等于把它们暴露在内网。跨机器场景（自定义 BRIDGE_URL 指向远程）用
-  // BRIDGE_BIND=0.0.0.0 显式放开，网络边界（反代/TLS/防火墙）由用户自己负责。
+  // 默认只绑回环：/hook /stats /skills/rescan 无鉴权，绑 0.0.0.0 等于暴露在内网。peer 走 HTTPS
+  // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",
   async fetch(req, server) {
     const reqOrigin = req.headers.get("Origin");
@@ -3662,6 +3661,7 @@ const server = Bun.serve({
 });
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
+startPeerIngress({ port: configuredPeerIngressPort(), handleApi: serveApiRequest });
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

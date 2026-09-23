@@ -62,11 +62,8 @@ async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tok
 }
 
 /**
- * peer 握手的 `--url` 没给时自动探测本机对外地址。
- *
- * 手抄这个地址是三步握手里最容易出错的一环：IP 记错一位、忘带端口、或者把
- * 127.0.0.1 填进去（对方永远连不上，而错误要拖到 peer-http-test 才暴露）。
- * 探测优先 Tailscale（100.64/10，唯一跨网络可达），其次内网地址。
+ * peer 握手的 `--url` 没给时自动探测本机对外地址（手抄最容易错：IP 记错、忘带端口、填 127.0.0.1）。
+ * 优先实测可用的 HTTPS 入口（lib/peer-url.ts），其次 Tailscale 地址（100.64/10），再次内网。
  * 返回 null 表示确实探不到，调用方照旧报错要求人工给 --url。
  */
 async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
@@ -77,6 +74,8 @@ async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: 
     ? `⚠️ bridge 当前只监听 ${bind}（BRIDGE_BIND 未开放）——对方无法连入。在 .env 设 BRIDGE_BIND=0.0.0.0（或 Tailscale IP）并重启 bridge 后邀请才可用。`
     : "";
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
+  const https = await (await import("../lib/peer-url.js")).httpsPeerUrl(repoEnvVar("PEER_PUBLIC_URL") || "");
+  if (https) return { url: https, note: `用 HTTPS 入口 ${https}（反代 → 本机 peer 专用入口，bridge 端口不必对外开放）` };
   const { detectBridgeUrls } = await import("../lib/net-addr.js");
   const port = parseInt(repoEnvVar("BRIDGE_PORT") || String(DEFAULT_BRIDGE_PORT));
   const cands = detectBridgeUrls(port);
