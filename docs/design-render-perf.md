@@ -88,6 +88,23 @@ owner 2026-09-23 指出：流式不是重排问题——块级流里后面的兄
 - 服务端历史分页改为按高度预算而非条数。
 - Domd 增量喂字（do-md 侧的能力，非本仓）。
 
+## 封板记录（2026-09-23，owner 决定暂停到此）
+
+**已落地**（分支 `feat/render-perf`，共 6 个提交）：
+- 阶段 0：面板「渲染基准」——滚动基准 + 侧栏基准（`features/devtools/bench-section.ts` / `bench-stats.ts`）。
+- 阶段 1：`#cstra-msgs [data-mid] { content-visibility: auto; contain-intrinsic-size: auto 120px }`（`globals.css`）。实测 10 万 px 高的对话反复拖侧栏，FPS 从 ~40 回到基准 120。
+
+**owner 决定先不做**：拖拽预览线（手感差）；Pretext 估高（不为几像素加依赖）；面板 1s tick 的优化（关着时零成本，见下）。
+
+**审计结论**（供下次直接引用，不必重查）：
+- 气泡组件内没有 canvas / 定时器 / rAF；只有 CSS 无限动画，屏外行与后台页浏览器都不绘制。页面级定时器里该判可见的（15s agents 轮询、7s 对账心跳）已判；流看门狗故意常驻。
+- 流式文本 80ms 合批（`chat-store` `pendingText`），每次 flush 只重渲染最后一个气泡、只重挂最后一个文本段的 Domd；成本正比于该段长度，不正比于历史。
+- 唯一随历史线性增长的 per-flush 开销：`MessageList` 每次渲染调 `replyEchoMessageIds(messages)` 扫整个列表做正则归一化，无缓存。修法：结果只取决于「该消息 + 同回合前面的 reply」，按消息对象 `WeakMap` 缓存。**先用面板 long task 证实再做。**
+- 一次性尖峰：Prism 懒加载到新语法时 `Domd` 的 `key={grammarV}` 让窗口内所有 Domd 同时重挂（一个会话几次）。
+- 开发者模式关着时：面板 + stats.js + lil-gui 在独立 chunk（约 45KB），不在 /chat 初始脚本里；主 bundle 只多 1–2KB 纯逻辑；`postClientLog` 的事件环双写是唯一常驻动作（低频，故意保留）。
+
+**下次从哪接**：先跑一次带大代码块的长回复看面板「最大帧间隔」/ long task。有 >50ms 帧 → 先做 `replyEchoMessageIds` 缓存，再考虑生长段 Domd 合批放宽；向上滑进「显示更早」那批行有可感知顿跳 → 阶段 1 升级点（占位粗估 / Pretext / Safari 补偿）；DOM 节点本身成问题（> 3 万）或要全历史连续滚 → 阶段 2。
+
 ## 验收口径（面板读数）
 
 | 指标 | 基线 | 阶段 1 目标 | 阶段 2 目标 |
