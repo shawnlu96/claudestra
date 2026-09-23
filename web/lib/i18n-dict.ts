@@ -378,7 +378,7 @@ export const DICT: Record<string, string> = {
   "我方发起选「邀请」；拿到对方邀请串选「加入」；对方回执串回来后选「回执」完成。":
     "Choose Invite to start; Join if you got an invite string; Receipt to finish when their receipt comes back.",
   "peer 名（字母/数字/-/_）": "Peer name (letters/digits/-/_)",
-  "我方 bridge 地址（http://100.x.y.z:3847）": "My bridge URL (http://100.x.y.z:3847)",
+  "留空 = 自动（优先 HTTPS 入口）": "Leave empty = auto (HTTPS entry first)",
   "粘贴对方的邀请串": "Paste their invite string",
   "粘贴对方的回执串": "Paste their receipt string",
   "向对方开放的 agent": "Agents to expose",

@@ -38,11 +38,6 @@ interface PendingInviteInfo {
   invite: string | null;
 }
 
-const MY_URL_KEY = "cstra_peer_url";
-
-/** Bridge 探测出的本机对外地址候选（tailscale 优先） */
-type SuggestedUrl = { url: string; kind: "tailscale" | "lan"; iface: string; address: string };
-
 function PeerCard({
   peer,
   localAgents,
@@ -218,15 +213,7 @@ function PeerCard({
 }
 
 /** 生成一键邀请：勾 agent → 出邀请串。对方粘贴即完成，24h 一次性。 */
-function InvitePanel({
-  localAgents,
-  suggestedUrls,
-  onChanged,
-}: {
-  localAgents: LocalAgent[];
-  suggestedUrls: SuggestedUrl[];
-  onChanged: () => void;
-}) {
+function InvitePanel({ localAgents, onChanged }: { localAgents: LocalAgent[]; onChanged: () => void }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [sel, setSel] = useState<string[]>([]);
@@ -236,23 +223,21 @@ function InvitePanel({
   const [needForce, setNeedForce] = useState(false);
   const [result, setResult] = useState<ActionResult | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    setMsg("");
-    setNeedForce(false);
-    setResult(null);
-    try {
-      setUrl(localStorage.getItem(MY_URL_KEY) || suggestedUrls[0]?.url || "");
-    } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  const toggle = () => {
+    if (!open) {
+      setMsg("");
+      setNeedForce(false);
+      setResult(null);
+      // 地址默认留空 = 交给 manager 自动选（实测通的 HTTPS 入口优先，其次 Tailscale IP）。
+      // 预填 bridge 端口地址会被原样写进邀请、跳过 HTTPS——对方被防火墙拒，只报 Unable to connect。
+      setUrl("");
+    }
+    setOpen(!open);
+  };
 
   const submit = async (force = false) => {
     setBusy(true);
     setMsg("");
-    try {
-      localStorage.setItem(MY_URL_KEY, url.trim());
-    } catch {}
     const r = await peersAction({ action: "invite-new", agents: sel, url: url.trim() || undefined, force });
     setBusy(false);
     if (r.ok) {
@@ -273,7 +258,7 @@ function InvitePanel({
         <span className="text-[13.5px] font-semibold">{t("生成邀请")}</span>
         <button
           className={`btn btn-xs ${open ? "btn-ghost border-base-300" : "btn-primary"}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={toggle}
         >
           {open ? t("收起") : t("邀请对方")}
         </button>
@@ -295,7 +280,7 @@ function InvitePanel({
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder={t("我方 bridge 地址（http://100.x.y.z:3847）")}
+              placeholder={t("留空 = 自动（优先 HTTPS 入口）")}
               autoComplete="off"
               className="input input-bordered input-sm mt-1 w-full font-mono text-xs"
             />
@@ -403,20 +388,16 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [err, setErr] = useState("");
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [localAgents, setLocalAgents] = useState<LocalAgent[]>([]);
-  // 本机对外地址候选（Bridge 探测，Tailscale 优先）——握手时预填「我的地址」，
-  // 免得手抄 IP 抄错、或者填成 127.0.0.1（对方永远连不上，且要到 test 才暴露）
-  const [suggestedUrls, setSuggestedUrls] = useState<SuggestedUrl[]>([]);
   const [pendingInvites, setPendingInvites] = useState<PendingInviteInfo[]>([]);
 
   const reload = useCallback(async () => {
     setErr("");
     try {
       const res = await fetch("/api/peers");
-      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[]; suggestedUrls?: SuggestedUrl[]; pendingInvites?: PendingInviteInfo[] };
+      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[]; pendingInvites?: PendingInviteInfo[] };
       if (j.ok) {
         setPeers(j.peers || []);
         setLocalAgents(j.localAgents || []);
-        setSuggestedUrls(j.suggestedUrls || []);
         setPendingInvites(j.pendingInvites || []);
       } else {
         setErr(j.error || t("加载失败"));
@@ -464,7 +445,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
                 </div>
               )}
               <PendingInvites invites={pendingInvites} onChanged={() => void reload()} />
-              <InvitePanel localAgents={localAgents} suggestedUrls={suggestedUrls} onChanged={() => void reload()} />
+              <InvitePanel localAgents={localAgents} onChanged={() => void reload()} />
               <JoinPanel localAgents={localAgents} onChanged={() => void reload()} />
             </>
           )}
