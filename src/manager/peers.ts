@@ -63,12 +63,11 @@ async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tok
 
 /**
  * peer 握手的 `--url` 没给时自动探测本机对外地址（手抄最容易错：IP 记错、忘带端口、填 127.0.0.1）。
- * 优先实测可用的 HTTPS 入口（lib/peer-url.ts），其次 Tailscale 地址（100.64/10），再次内网。
- * 返回 null 表示确实探不到，调用方照旧报错要求人工给 --url。
+ * 顺序：实测可用的 HTTPS 入口（lib/peer-url.ts）→ 主端口只听本机（默认）时 peer 专用端口直连
+ * （lib/peer-ingress-config.ts）→ bridge 端口的 Tailscale / 内网地址。返回 null = 确实探不到，调用方要求人工给 --url。
  */
 async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
-  // bridge 默认只绑 127.0.0.1——邀请串里的对外地址再对,对方也连不进来。
-  // 生成邀请这一刻就把话说明白,别拖到对方兑换失败才暴露(loopback 显式 --url 同理)。
+  // 主端口只听本机时，写它的对外地址对方也连不进来——生成邀请这一刻就说明白（显式 --url 同理）
   const bind = (repoEnvVar("BRIDGE_BIND") || "127.0.0.1").trim();
   const bindWarn = bind === "127.0.0.1" || bind === "localhost" || bind === "::1"
     ? `⚠️ bridge 当前只监听 ${bind}（BRIDGE_BIND 未开放）——对方无法连入。在 .env 设 BRIDGE_BIND=0.0.0.0（或 Tailscale IP）并重启 bridge 后邀请才可用。`
@@ -76,9 +75,10 @@ async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: 
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
   const https = await (await import("../lib/peer-url.js")).httpsPeerUrl(repoEnvVar("PEER_PUBLIC_URL") || "");
   if (https) return { url: https, note: `用 HTTPS 入口 ${https}（反代 → 本机 peer 专用入口，bridge 端口不必对外开放）` };
-  const { detectBridgeUrls } = await import("../lib/net-addr.js");
   const port = parseInt(repoEnvVar("BRIDGE_PORT") || String(DEFAULT_BRIDGE_PORT));
-  const cands = detectBridgeUrls(port);
+  const direct = bindWarn ? await (await import("../lib/peer-ingress-config.js")).openDirectPeerIngress(port) : null;
+  if (direct) return direct;
+  const cands = (await import("../lib/net-addr.js")).detectBridgeUrls(port);
   if (cands.length === 0) return null;
   const best = cands[0]!;
   const others = cands.slice(1).map((c) => `${c.url}(${c.kind})`);

@@ -12,13 +12,14 @@ export function isBridgeApiProbe(status: number, contentType: string, body: unkn
   return status === 401 && contentType.includes("application/json") && (body as { ok?: unknown } | null)?.ok === false;
 }
 
-async function probe(base: string): Promise<boolean> {
+/** base 下的 /api/v1 是不是真打到了本机 bridge（HTTPS 入口、peer 专用端口都用它实测） */
+export async function probeBridgeApi(base: string): Promise<boolean> {
   try {
     const r = await fetch(`${base}/api/v1/agents`, { signal: AbortSignal.timeout(4000) });
     const body = await r.json().catch(() => null); // 非 JSON（落到网页的 HTML）正是要识别的「没转发到 bridge」
     return isBridgeApiProbe(r.status, r.headers.get("content-type") || "", body);
   } catch {
-    return false; // 连不上 = 这个入口不可用，退回 bridge 端口地址
+    return false; // 连不上 = 这个入口不可用，调用方退回下一种地址
   }
 }
 
@@ -29,6 +30,6 @@ export async function httpsPeerUrl(explicit = ""): Promise<string | null> {
     const dns = (await readTailscaleStatus())?.dnsName;
     if (dns) bases.push(`https://${dns}`, `https://${dns}:8443`);
   }
-  for (const b of bases) if (await probe(b)) return b;
+  for (const b of bases) if (await probeBridgeApi(b)) return b;
   return null;
 }

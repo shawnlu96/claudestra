@@ -136,7 +136,7 @@ bun src/manager.ts cron-history [name|id]
 # A's /api/v1/peers/redeem automatically — no receipt/accept. Single-use, 24h TTL,
 # expiry/revoke also revokes the embedded token. Joining exposes nothing of B by
 # default (one-way grant); symmetric access = B sends an invite of their own.
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (auto-URL: Tailscale first; warns if BRIDGE_BIND is loopback)
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (auto-URL: HTTPS entry, else the peer-only port)
 bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = optional reverse exposure)
 bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
 bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + its embedded token

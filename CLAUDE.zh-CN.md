@@ -132,7 +132,7 @@ bun src/manager.ts cron-history [name|id]
 # /api/v1/peers/redeem——免回执/accept。一次性、24h 过期，过期/撤销连带吊销
 # 内嵌 token。B 加入时默认不反向开放任何 agent（单向授权）；对称访问 = B 也
 # 生成一张邀请发回来。
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请串（URL 自动探测 Tailscale 优先；BRIDGE_BIND 还是回环会警告）
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请串（URL 自动：HTTPS 入口，否则 peer 专用端口）
 bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>] [--force]  # B: 粘贴即完成（--agents = 可选的反向开放）
 bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期 + 吊销其 token）
 bun src/manager.ts peer-invite-revoke <inv_id>    # 作废未兑换的邀请 + 其内嵌 token

@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { configuredPeerIngressPort, startPeerIngress } from "./bridge/peer-ingress.js";
+import { initPeerIngress, peerIngressSyncRoute } from "./bridge/peer-ingress.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
@@ -3453,8 +3453,8 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       return serveApiRequest(req, url);
     }
 
-    // Skills 重新扫描（manager 在 create/resume/kill 后调）
-    if (url.pathname === "/skills/rescan" && req.method === "POST") {
+    if (url.pathname === "/peer-ingress/sync" && req.method === "POST") return peerIngressSyncRoute(req); // manager 生成直连邀请前调
+    if (url.pathname === "/skills/rescan" && req.method === "POST") { // Skills 重新扫描（manager 在 create/resume/kill 后调）
       try {
         const body = (await req.json().catch(() => ({}))) as {
           agent?: string;
@@ -3660,7 +3660,7 @@ const server = Bun.serve({
 });
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
-startPeerIngress({ port: configuredPeerIngressPort(), handleApi: serveApiRequest });
+initPeerIngress(serveApiRequest);
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，

@@ -9,10 +9,13 @@
  *   - 带了凭据就必须是 peer 签的 token（principal.peer），网页用的全权 token 从这里进不来；
  *     没带凭据只剩兑换邀请（凭一次性 join 口令）和 API 自己回 401。
  * 有了它，peer 走 HTTPS 443 就行，3847 不必对外开放、也不用给每个 peer 加防火墙白名单。
+ * 没有 HTTPS 的机器，它自己对外当直连入口（ingressHost）——同样只有 peer 能用，主端口照旧只听本机。
  */
 import { findByBearer, readPrincipals } from "../lib/principals.js";
+import { configuredPeerIngressPort } from "../lib/bridge-url.js";
+import { repoEnvVar } from "../lib/env-file.js";
 
-export { configuredPeerIngressPort } from "../lib/bridge-url.js";
+export { configuredPeerIngressPort };
 
 /** 反代剥不剥挂载前缀都认：Caddy 的 handle 保留 /api/v1/…；tailscale serve 挂在路径下可能剥成 /… */
 export function ingressApiPath(pathname: string): string {
@@ -37,23 +40,72 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-/** port 为 null（.env 没配 PEER_INGRESS_PORT）就不开；起不来（端口被占等）只记日志：附加能力，不能拖垮 bridge */
-export function startPeerIngress(opts: { port: number | null; handleApi: (req: Request, url: URL) => Promise<Response> }) {
-  if (!opts.port) return null;
+type Host = "127.0.0.1" | "0.0.0.0";
+type ApiHandler = (req: Request, url: URL) => Promise<Response>;
+
+/**
+ * 纯判定（tests/peer-ingress.test.ts）：入口开在哪。默认只给本机反代用；.env 标了直连
+ * （PEER_INGRESS_PUBLIC=1，生成邀请时没有 HTTPS 入口才会标）且确实有 peer（或刚被要求 hold）才对外。
+ * 对外也只多出 peer token + 兑换邀请这一小块——主端口的控制面、ws、全权 token 都不在这个入口上。
+ */
+export function ingressHost(publicFlag: boolean, hasPeers: boolean, holdUntil: number, now: number): Host {
+  return publicFlag && (hasPeers || now < holdUntil) ? "0.0.0.0" : "127.0.0.1";
+}
+
+const HOLD_MS = 10 * 60_000;
+let handler: ApiHandler | null = null;
+let cur: { srv: ReturnType<typeof serve>; port: number; host: Host } | null = null;
+let holdUntil = 0;
+
+/** 有没有在用的 peer token（兑换前的邀请也签了 peer token，一并算）；读失败按「有」算，宁可保持现状 */
+async function hasPeerTokens(): Promise<boolean> {
   try {
-    const srv = serve({ port: opts.port, handleApi: opts.handleApi });
-    console.log(`🤝 peer 入口: http://127.0.0.1:${opts.port}（只服务 /api/v1 + peer token，供 HTTPS 反代转发）`);
-    return srv;
-  } catch (e) {
-    console.error(`⚠️ peer 入口起不来（127.0.0.1:${opts.port}）: ${(e as Error).message}——peer 只能走 bridge 主端口`);
-    return null;
+    return (await readPrincipals()).principals.some((p) => p.peer && !p.disabled);
+  } catch {
+    return true;
   }
 }
 
-function serve(opts: { port: number; handleApi: (req: Request, url: URL) => Promise<Response> }) {
+/**
+ * 按 .env（每次现读：manager 生成邀请时才写进去）+ 当前 peer 情况，把入口开到该开的地方；已是目标状态就不动。
+ * 端口没配就不开；起不来（端口被占等）只记日志：附加能力，不能拖垮 bridge。
+ */
+async function syncPeerIngress(hold = false): Promise<{ port: number | null; host: Host | null }> {
+  if (hold) holdUntil = Date.now() + HOLD_MS;
+  const port = configuredPeerIngressPort({ PEER_INGRESS_PORT: repoEnvVar("PEER_INGRESS_PORT") });
+  const host = port ? ingressHost(repoEnvVar("PEER_INGRESS_PUBLIC") === "1", await hasPeerTokens(), holdUntil, Date.now()) : null;
+  if (cur && cur.port === port && cur.host === host) return { port, host };
+  cur?.srv.stop(true);
+  cur = null;
+  if (!port || !host || !handler) return { port, host: null };
+  try {
+    cur = { srv: serve({ port, host, handleApi: handler }), port, host };
+    const how = host === "0.0.0.0" ? "对外直连，只收 peer token" : "只听本机，供 HTTPS 反代转发";
+    console.log(`🤝 peer 入口: http://${host}:${port}（${how}）`);
+    return { port, host };
+  } catch (e) {
+    console.error(`⚠️ peer 入口起不来（${host}:${port}）: ${(e as Error).message}——peer 只能走 bridge 主端口`);
+    return { port, host: null };
+  }
+}
+
+/** bridge 启动时调一次；之后每分钟按 peer 情况收放（peer 全删了，直连入口就退回本机） */
+export function initPeerIngress(handleApi: ApiHandler): void {
+  handler = handleApi;
+  void syncPeerIngress();
+  setInterval(() => void syncPeerIngress(), 60_000);
+}
+
+/** POST /peer-ingress/sync（控制面，只有回环能调）：manager 生成直连邀请前让入口立刻对外 */
+export async function peerIngressSyncRoute(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => ({}))) as { hold?: boolean }; // 空 body = 只按现状同步
+  return json(200, { ok: true, ...(await syncPeerIngress(body.hold === true)) });
+}
+
+function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
   return Bun.serve({
     port: opts.port,
-    hostname: "127.0.0.1", // 只给本机反代用，永远不对外
+    hostname: opts.host,
     async fetch(req) {
       if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
       const raw = new URL(req.url);

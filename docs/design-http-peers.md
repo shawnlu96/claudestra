@@ -105,11 +105,27 @@ peer 可以不连 bridge 端口，改走网页的 HTTPS 入口：反代（Caddy 
 端口 = `.env` 的 `PEER_INGRESS_PORT`，没配就不开——升级不凭空多占端口）。入口只调 /api/v1 处理函数、
 带凭据必须是 peer token、拒 ws；反代绝不能直接指 bridge 主端口（回环对控制面一律放行）。
 `peer-invite-new` 先实测 `https://<ts.net>/api/v1/agents` 回 bridge 的 401 JSON 才写 HTTPS 地址
-（`src/lib/peer-url.ts`，`PEER_PUBLIC_URL` 可强制），否则退回 `http://<tailnet IP>:<bridge 端口>`。
+（`src/lib/peer-url.ts`，`PEER_PUBLIC_URL` 可强制），否则按 6c 退回直连地址。
 已有 peer 记的 baseUrl 不受影响。
 ⚠ 同一台机器上「自己邀请自己」测不了 peer-join-auto：join 持有 manager 写锁等 redeem，而 bridge 处理 redeem
 要跑同一把锁的 peer-redeem → 10 秒超时后 redeem 才执行（邀请被用掉、留下一个半截 peer）。本机冒烟改为：
 生成邀请 → curl 带邀请里的 token 打 `https://<ts.net>/api/v1/agents` 与 `…/agents/<x>/messages`（2026-09-23 实测 5 秒拿到回复）。
+
+## 6c. 没有 HTTPS 时：peer 专用端口直连（2026-09-24）
+
+bridge 主端口默认只听本机（`BRIDGE_BIND` 未设），以前在这种机器上生成的邀请写的是 `http://<IP>:<主端口>`，
+对方必然 ConnectionRefused（owner 的朋友实遇：邀请生成时只有一行黄字提醒）。现在邀请地址的顺序是：
+HTTPS 入口（6b）→ **主端口只听本机时，peer 专用入口直连** → 主端口地址（用户自己开放了 `BRIDGE_BIND` 的机器照旧）。
+
+直连（`openDirectPeerIngress`，`src/lib/peer-ingress-config.ts`）：定好 `PEER_INGRESS_PORT`、在 `.env` 标
+`PEER_INGRESS_PUBLIC=1`、POST 回环控制面 `/peer-ingress/sync {hold:true}`，bridge 把专用入口从 `127.0.0.1`
+重绑到 `0.0.0.0`，再实测 `http://<tailnet IP>:<端口>/api/v1/agents` 回 401 JSON 才算通（不通照写地址，
+提示里说明）。对外的只有 6b 那一小块（peer token + 兑换邀请），控制面 / ws / 网页全权 token 仍只在主端口的本机上。
+
+对外与否 bridge 每分钟重算（`ingressHost`）：标了直连且还有未吊销的 peer token（兑换前的邀请也算）才对外，
+peer 全删了就退回本机；`hold` 顶住「邀请 token 还没签出来」那几毫秒（10 分钟）。
+⚠ 本机实测走的是自己的网卡，挡不住对方那侧的问题：Tailscale 共享是单向的，macOS 应用防火墙若开着「阻止所有传入」
+也会静默丢包——对方超时就先查这两处。
 
 ## 7. 测试策略（owner：流程难测，想一套办法）
 

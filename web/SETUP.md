@@ -322,6 +322,8 @@ Claudestra peers (other instances that call your agents) can use this HTTPS entr
 
 With `tailscale serve`, `bun run setup` adds the equivalent `--set-path /api/v1` handler and writes `PEER_INGRESS_PORT` when you let it configure HTTPS.
 
+No HTTPS entry and the bridge still bound to loopback (the default)? You don't need to open the bridge port either: `peer-invite-new` then opens the same peer-only entrance on all interfaces (`PEER_INGRESS_PUBLIC=1` in `.env`, only while peer tokens exist) and writes `http://<tailnet IP>:<that port>` into the invite. The bridge port keeps listening on loopback only.
+
 ### Protocol choice on lossy links (h2/h3 vs plain h1)
 
 Caddy speaks h2 + h3 by default, and on a clean network that is what you want.

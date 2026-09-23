@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { configuredPeerIngressPort, ingressApiPath, ingressSecret, ingressVerdict } from "../src/bridge/peer-ingress";
+import { configuredPeerIngressPort, ingressApiPath, ingressHost, ingressSecret, ingressVerdict } from "../src/bridge/peer-ingress";
 import { pickIngressPort } from "../src/lib/peer-ingress-config";
 
 describe("peer 入口（HTTPS 反代 → 回环上的 peer 专用端口）", () => {
@@ -37,5 +37,13 @@ describe("peer 入口（HTTPS 反代 → 回环上的 peer 专用端口）", () 
     expect(ingressVerdict("s", { peer: "HedeMacBook-Pro" })).toBe("ok");
     expect(ingressVerdict("s", {})).toBe("not-peer"); // 网页用的全权 token
     expect(ingressVerdict("s", null)).toBe("not-peer"); // 无效 token
+  });
+
+  test("开在哪：默认只听本机；标了直连且有 peer（或刚 hold）才对外，peer 全没了退回本机", () => {
+    const now = 1_000_000;
+    expect(ingressHost(false, true, now + 1, now)).toBe("127.0.0.1"); // 没标直连（HTTPS 反代的机器）：永远只听本机
+    expect(ingressHost(true, true, 0, now)).toBe("0.0.0.0");
+    expect(ingressHost(true, false, now + 1, now)).toBe("0.0.0.0"); // 邀请 token 还没签出来，hold 顶住
+    expect(ingressHost(true, false, now - 1, now)).toBe("127.0.0.1"); // hold 过期又没有 peer
   });
 });
