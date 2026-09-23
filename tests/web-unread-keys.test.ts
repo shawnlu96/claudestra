@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { countsUnread, unreadOrphans } from "../web/lib/push/unread-keys";
+import { countsUnread, isMyApiChat, unreadOrphans } from "../web/lib/push/unread-keys";
 
 describe("countsUnread", () => {
   test("master 不计未读（前端没有入口能给它发已读）", () => {
@@ -32,5 +32,16 @@ describe("unreadOrphans", () => {
 
   test("都在列表里就什么都不删", () => {
     expect(unreadOrphans([{ agent: "car-talk", count: 3 }], ["car-talk"])).toEqual({ agents: [], hadUnread: false });
+  });
+});
+
+describe("isMyApiChat（哪些 api: 对话推送 + 计未读）", () => {
+  test("只有本 web 自己的 token；peer / 其它 token 不算；Discord 频道不算", () => {
+    expect(isMyApiChat("api:tok_web", "api:tok_web")).toBe(true);
+    expect(isMyApiChat("api:tok_peer", "api:tok_web")).toBe(false);
+    expect(isMyApiChat("1234567890", "api:tok_web")).toBe(false);
+  });
+  test("拿不到自己的 token（老 bridge 没有 /whoami）→ 退回旧行为：所有 api: 都算", () => {
+    expect(isMyApiChat("api:tok_peer", null)).toBe(true);
   });
 });
