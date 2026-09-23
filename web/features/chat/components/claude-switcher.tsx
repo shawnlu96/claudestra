@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { RUNTIME_EFFORT_OPTIONS, modelLabel, switcherKindFor } from "../claude-options";
-import { useClaudeModels } from "../claude-models";
+import { useClaudeModelCatalog } from "../claude-models";
 import { PiModelSwitcher } from "./pi-model-switcher";
 import { useT } from "@/lib/i18n";
 
@@ -22,7 +22,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
-  const models = useClaudeModels();
+  const catalog = useClaudeModelCatalog(open), models = catalog.models;
 
   // 点面板外任意处关闭
   useEffect(() => {
@@ -89,7 +89,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
         <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-56 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
           <div className="mb-2.5 flex flex-wrap gap-1">
-            {models.length === 0 && <span className="text-[11px] text-base-content/40">{t("加载中…")}</span>}
+            {models.length === 0 && <ModelCatalogStatus loading={catalog.loading} error={catalog.error} retry={catalog.retry} />}
             {models.map((o) => (
               <button
                 key={o.value}
@@ -122,5 +122,17 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** 目录为空时的占位：请求中显示「加载中…」；失败显示原因 + 重试（打开面板时 hook 也会自动重拉一次）。 */
+function ModelCatalogStatus({ loading, error, retry }: { loading: boolean; error: string | null; retry: () => void }) {
+  const t = useT();
+  if (loading || !error) return <span className="text-[11px] text-base-content/40">{t("加载中…")}</span>;
+  return (
+    <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-error">
+      {t("加载失败")}: {error}
+      <button className="btn btn-ghost btn-xs" onClick={retry}>{t("重试")}</button>
+    </span>
   );
 }
