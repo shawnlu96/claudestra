@@ -223,6 +223,7 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
     return;
   }
   if (d.direction !== "out") return;
+  if (d.notice) return; // 转交留在原对话里的「↪ 已转给 X」只是提示，不推送、不计未读（接手方的回复会推）
   if (!isMyApiChat(chatId, myChatId)) return; // 只推本 web 自己发起的对话（peer / 其它 token 的不推）
   const agent = String(evt.agent || "").replace(/^agent-/, "");
   const text = String(d.text ?? "").replace(/\s+/g, " ").trim();

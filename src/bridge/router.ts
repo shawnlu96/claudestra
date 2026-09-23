@@ -136,6 +136,8 @@ export interface Envelope {
      * pushback，target 也不该被 watchdog 在 Stop 时 nudge 要求回应。
      */
     skipInterAgentWatchdog?: boolean;
+    /** 这条是「转交」过来的用户消息（bridge/forward.ts）：接手方不能再转，防来回踢皮球 */
+    forwarded?: boolean;
   };
 }
 
