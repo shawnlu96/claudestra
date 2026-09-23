@@ -3,6 +3,9 @@ import { useCallback, useEffect, useState } from "react";
 import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 import { useArmedConfirm } from "../use-armed-confirm";
+import { peersAction, ScopePicker, ForceRow, HandshakeString, type ActionResult, type LocalAgent } from "./peers-shared";
+import { JoinPanel } from "./peers-join-panel";
+import { InviteChecklist } from "./peers-invite-checklist";
 
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
@@ -35,139 +38,10 @@ interface PendingInviteInfo {
   invite: string | null;
 }
 
-interface LocalAgent {
-  name: string;
-  external: boolean;
-  status: string;
-}
-
-type ActionResult = {
-  ok?: boolean;
-  error?: string;
-  invite?: string;
-  receipt?: string;
-  warnings?: string[];
-  reachable?: boolean;
-  remoteAgents?: { name: string; status: string }[];
-  // v2.15+ 一键邀请
-  expiresAt?: string;
-  myUrl?: string;
-  peer?: string;
-  note?: string;
-  exposedAgents?: string[];
-};
-
-async function peersAction(body: Record<string, unknown>): Promise<ActionResult> {
-  try {
-    const res = await fetch("/api/peers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return (await res.json()) as ActionResult;
-  } catch {
-    return { ok: false, error: "网络错误" };
-  }
-}
-
 const MY_URL_KEY = "cstra_peer_url";
 
 /** Bridge 探测出的本机对外地址候选（tailscale 优先） */
 type SuggestedUrl = { url: string; kind: "tailscale" | "lan"; iface: string; address: string };
-
-/** scope 勾选器：全部(*) + master + 每个本地 agent。external 未标的带 ⚠。 */
-function ScopePicker({
-  localAgents,
-  sel,
-  onChange,
-}: {
-  localAgents: LocalAgent[];
-  sel: string[];
-  onChange: (v: string[]) => void;
-}) {
-  const t = useT();
-  const star = sel.includes("*");
-  const toggle = (n: string) =>
-    onChange(sel.includes(n) ? sel.filter((x) => x !== n) : [...sel, n]);
-  // master 不提供勾选:服务端硬禁,peer 永远拿不到大总管(owner 2026-07-27)
-  const toggleStar = () => onChange(star ? [] : ["*"]);
-  return (
-    <div className="max-h-44 space-y-1 overflow-y-auto rounded-lg border border-base-300 bg-base-100 p-2">
-      <label className="flex cursor-pointer items-center gap-2 text-sm">
-        <input type="checkbox" className="checkbox checkbox-xs" checked={star} onChange={toggleStar} />
-        <span>{t("全部普通 agent（*）")}</span>
-        <span className="text-[10px] text-warning">{t("⚠ 不含 master")}</span>
-      </label>
-      {localAgents.map((a) => (
-        <label key={a.name} className="flex cursor-pointer items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-xs"
-            checked={star || sel.includes(a.name)}
-            disabled={star}
-            onChange={() => toggle(a.name)}
-          />
-          <span className={a.status === "active" ? "" : "opacity-50"}>{a.name}</span>
-          {a.external ? (
-            <span className="badge badge-ghost badge-xs">external</span>
-          ) : (
-            <span className="text-[10px] text-warning">{t("⚠ 未标 external")}</span>
-          )}
-        </label>
-      ))}
-    </div>
-  );
-}
-
-/** 错误/告警行 + 「强制执行」二次确认（服务端 --force / --rotate 提示驱动） */
-function ForceRow({
-  msg,
-  busy,
-  onForce,
-  forceLabel,
-}: {
-  msg: string;
-  busy: boolean;
-  onForce: () => void;
-  forceLabel: string;
-}) {
-  const t = useT();
-  return (
-    <div className="mt-2 rounded-lg bg-warning/10 p-2 text-xs">
-      <div className="whitespace-pre-wrap break-all text-base-content/80">{msg}</div>
-      <button className="btn btn-warning btn-xs mt-2" disabled={busy} onClick={onForce}>
-        {t(forceLabel)}
-      </button>
-    </div>
-  );
-}
-
-/** 握手串展示 + 复制 */
-function HandshakeString({ label, value }: { label: string; value: string }) {
-  const t = useT();
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="mt-2 rounded-lg bg-base-100 p-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium">{label}</span>
-        <button
-          className="btn btn-ghost btn-xs"
-          onClick={() => {
-            void navigator.clipboard?.writeText(value).then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            });
-          }}
-        >
-          {copied ? t("已复制") : t("复制")}
-        </button>
-      </div>
-      <div className="mt-1 max-h-20 overflow-y-auto break-all font-mono text-[10px] leading-tight text-base-content/70">
-        {value}
-      </div>
-    </div>
-  );
-}
 
 function PeerCard({
   peer,
@@ -434,6 +308,7 @@ function InvitePanel({
           {result?.invite && (
             <>
               <HandshakeString label={t("邀请串（发给对方，粘贴即完成）")} value={result.invite} />
+              <InviteChecklist myUrl={result.myUrl} />
               <div className="text-[11px] text-base-content/50">
                 {t("24h 内有效、只能用一次。对方接入后你会收到通知。")}
               </div>
@@ -451,71 +326,6 @@ function InvitePanel({
           )}
         </div>
       )}
-    </section>
-  );
-}
-
-/** 粘贴对方的邀请串,一步接入。默认不反向开放任何 agent。 */
-function JoinPanel({ onChanged }: { onChanged: () => void }) {
-  const t = useT();
-  const [paste, setPaste] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [result, setResult] = useState<ActionResult | null>(null);
-
-  const submit = async () => {
-    setBusy(true);
-    setMsg("");
-    const r = await peersAction({ action: "join-auto", invite: paste.trim() });
-    setBusy(false);
-    if (r.ok) {
-      setResult(r);
-      setPaste("");
-      onChanged();
-    } else {
-      setMsg(r.error || t("操作失败"));
-    }
-  };
-
-  return (
-    <section className="rounded-xl bg-base-200/60 p-4">
-      <span className="text-[13.5px] font-semibold">{t("加入对方")}</span>
-      <div className="mt-2 space-y-2">
-        <textarea
-          value={paste}
-          onChange={(e) => {
-            setPaste(e.target.value);
-            setResult(null);
-          }}
-          placeholder={t("粘贴对方的邀请串，一步完成")}
-          rows={2}
-          className="textarea textarea-bordered w-full font-mono text-[10px] leading-tight"
-        />
-        {msg && <div className="text-xs text-error">{msg}</div>}
-        {result?.ok && (
-          <div className="text-xs text-success">
-            {t("已接入")} 「{result.peer}」
-            {Array.isArray(result.remoteAgents) && result.remoteAgents.length > 0 && (
-              <span className="text-base-content/60">
-                {" · "}
-                {t("可访问：")}
-                {/* join-auto 的 remoteAgents 是 string[]（redeem 响应的 scope 名单） */}
-                {(result.remoteAgents as unknown as string[]).map((a) => String(a)).join(", ")}
-              </span>
-            )}
-            <div className="mt-0.5 text-[11px] text-base-content/50">
-              {t("默认未向对方开放你的 agent；需要对称访问就生成一张自己的邀请发回去。")}
-            </div>
-          </div>
-        )}
-        {!!paste.trim() && !result?.ok && (
-          <div className="flex justify-end">
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void submit()}>
-              {busy ? <span className="loading loading-spinner loading-xs" /> : t("加入")}
-            </button>
-          </div>
-        )}
-      </div>
     </section>
   );
 }
@@ -655,7 +465,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
               )}
               <PendingInvites invites={pendingInvites} onChanged={() => void reload()} />
               <InvitePanel localAgents={localAgents} suggestedUrls={suggestedUrls} onChanged={() => void reload()} />
-              <JoinPanel onChanged={() => void reload()} />
+              <JoinPanel localAgents={localAgents} onChanged={() => void reload()} />
             </>
           )}
         </div>
