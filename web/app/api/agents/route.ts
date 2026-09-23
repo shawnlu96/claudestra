@@ -5,7 +5,7 @@ import { loadAgents } from "@/lib/chat/agents";
 import { bridgePost } from "@/lib/chat/bridge-api";
 import { isAuthed } from "@/lib/api-auth";
 import { st } from "@/lib/server-lang";
-import { getUnreadCounts } from "@/lib/push/dispatcher";
+import { getUnreadCounts, pruneUnread } from "@/lib/push/dispatcher";
 
 /** agent 列表：代理 Bridge GET /api/v1/agents（master 在 token scope 内时置顶入列）。 */
 export async function GET(request: Request) {
@@ -16,6 +16,8 @@ export async function GET(request: Request) {
     const list = await loadAgents();
     // 未读数合并(2026-09-16):服务端计数,键为去掉 agent- 前缀的短名(与 push_read 同键)。
     // 侧栏每 15s 轮询本接口,未读随之刷新,不另开长连接。
+    // 列表里已经没有的 agent(已删除 / master)的未读先清掉,否则 App 角标永远归不了零
+    if (list.length) pruneUnread(list.map((a) => a.name));
     const unread = getUnreadCounts();
     const data = list.map((a) => {
       const n = unread[a.name.replace(/^agent-/, "")] ?? 0;

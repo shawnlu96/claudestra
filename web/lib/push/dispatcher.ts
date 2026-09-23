@@ -3,6 +3,7 @@ import net from "net";
 import { getDb } from "@/lib/db";
 import { ensureVapid } from "./vapid";
 import { apnsConfigured, apnsSend, apnsTokenDead, type ApnsMessage } from "./apns";
+import { countsUnread, unreadOrphans } from "./unread-keys";
 
 /**
  * Web Push 派发器(owner 2026-07-16「做 pwa 推送」+「谁发的谁回」)。
@@ -109,13 +110,34 @@ export function markAgentRead(agent: string): void {
   } catch { /* 表缺失等,不影响 dismiss */ }
   // 未读归零(2026-09-16 未读功能)。只在真有未读时才向各端同步角标——绝大多数
   // 打开会话动作本来就没未读,别为它们白发推送。
-  const had = clearUnread(a);
-  const badge = had ? totalUnread() : undefined;
-  void sendToAll({ type: "dismiss", agent: a, ts, ...(badge !== undefined ? { badge } : {}) }, dismissSafe);
-  if (badge !== undefined) {
-    // iOS 图标角标只能由推送或 App 自己改;原生壳没有 badge 插件,靠一条仅带
-    // badge 的静默 APNs 让图标数回落(alert/sound 都不带,通知中心不多一条)。
-    void apnsSendAll({ silent: true, badge, title: "", body: "", agent: a, url: "/chat", ts, tag: `cstra-badge-${ts}` });
+  if (clearUnread(a)) syncBadge([a], ts);
+  else void sendToAll({ type: "dismiss", agent: a, ts }, dismissSafe);
+}
+
+/** 未读总数变了 → 各端角标跟上:非 iOS 订阅收 dismiss(带 badge),原生壳收一条静默 APNs。 */
+function syncBadge(agents: string[], ts: number): void {
+  const badge = totalUnread();
+  for (const agent of agents) void sendToAll({ type: "dismiss", agent, ts, badge }, dismissSafe);
+  // iOS 图标角标只能由推送或 App 自己改;原生壳没有 badge 插件,靠一条仅带
+  // badge 的静默 APNs 让图标数回落(alert/sound 都不带,通知中心不多一条)。
+  void apnsSendAll({ silent: true, badge, title: "", body: "", agent: agents[0] || "", url: "/chat", ts, tag: `cstra-badge-${ts}` });
+}
+
+/**
+ * 删掉列表里已经没有的 agent 的未读行(规则见 unread-keys.ts),真删掉了未读就同步角标。
+ * /api/agents 每次拿到完整列表后调用;列表为空时不调(拿不准是不是真的一个都没有)。
+ */
+export function pruneUnread(liveNames: string[]): void {
+  try {
+    const rows = getDb("settings").prepare("SELECT agent, count FROM agent_unread").all() as { agent: string; count: number }[];
+    const { agents, hadUnread } = unreadOrphans(rows, liveNames);
+    if (!agents.length) return;
+    const del = getDb("settings").prepare("DELETE FROM agent_unread WHERE agent = ?");
+    for (const a of agents) del.run(a);
+    if (hadUnread) syncBadge(agents, Date.now());
+  } catch (e) {
+    // 删不掉只是角标多几个数,下一轮轮询再试;不能让它把 agent 列表接口带挂
+    console.error("[push] 清理失效未读失败:", (e as Error).message);
   }
 }
 
@@ -197,7 +219,7 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
   const ts = Date.now();
   // 未读 +1(2026-09-16):badge = 全局未读总数,随两种推送下发(iOS 图标角标 /
   // SW setAppBadge)。计数发生在推送之前,与是否有订阅者无关——没装推送也要有未读。
-  const badge = bumpUnread(agent, ts);
+  const badge = countsUnread(agent) ? bumpUnread(agent, ts) : totalUnread();
   // 原生壳:APNs(iOS 已读靠打开 App 时按 push_read 水位清通知,见 lib/push/native.ts)
   void apnsSendAll({ title: agent, body, agent, url: `/chat?agent=${encodeURIComponent(agent)}`, ts, tag: `cstra-${agent}-${ts}`, badge });
   void sendToAll({
