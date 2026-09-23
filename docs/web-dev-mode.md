@@ -29,6 +29,7 @@
 |---|---|
 | stats.js 三格 | FPS / MS / 帧间隔（第三格是自定义 panel，合成器卡住时 rAF 也会迟到） |
 | 性能 | 最大帧间隔、输入到下一帧（pointerdown→双 rAF 手测；Safari 没有 Event Timing API）、long task（Safari 没有 → n/a）、DOM 节点数、已渲染消息数（`[data-mid]`）、气泡渲染速率、store produce 速率、提交突发次数 |
+| 渲染基准 | 「滚到顶」→「开始滚动基准」：rAF 步进把消息列表匀速滚到底（速度可调），结果一行进事件列表：帧间隔 p50 / p95 / 最大、>50ms / >100ms 帧数、DOM 节点、已挂气泡、long task。改渲染前后用它同口径对比（`docs/design-render-perf.md`） |
 | Store | activeAgent / agents / messages / streaming / syncState / streamDown / loadingHistory / bgTasks |
 | 视口 | `navigator.standalone`、inner、visualViewport、安全区 `env()` 实测、layoutMode、`data-streaming`、hash；开关：底部对齐线（`fixed bottom:0` 红线）、元素轮廓 |
 | 动作 | 清空事件、重置计数、复制事件到剪贴板、刷新、关闭开发者模式 |

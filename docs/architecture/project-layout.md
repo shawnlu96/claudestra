@@ -126,6 +126,7 @@ tests/                     pure-logic suites only (run `bun test` for the live c
                            mergeContiguousAssistant) — root tsconfig maps "@/*" → web/* so tests/ can import web pure logic
   web-dev-mode.test.ts     web developer mode: `?dev=` vs stored flag resolution, log line → event kind, event ring
                            cap / truncation / versioning, counters + rate sampler, section registry (web/features/devtools)
+  web-bench-stats.test.ts  render bench statistics (percentile / summarizeFrames / formatBench) behind the dev panel's scroll bench
   web-dev-sections.test.ts guard: every registerDevSection() outside web/features/devtools must carry a
                            `dev-section: YYYY-MM-DD` comment within 3 lines above (workflow in docs/web-dev-mode.md)
 install.sh               One-line installer

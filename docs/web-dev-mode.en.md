@@ -29,6 +29,7 @@ When on, a bottom-right badge `🛠 60fps · gap 17ms · burst 0` opens the pane
 |---|---|
 | stats.js meters | FPS / MS / frame gap (the third is a custom panel; when the compositor stalls, rAF is late too) |
 | Perf | max frame gap, input→next frame (pointerdown→double rAF by hand; Safari has no Event Timing API), long tasks (Safari: n/a), DOM node count, rendered messages (`[data-mid]`), bubble render rate, store produce rate, commit-burst count |
+| Bench | "scroll to top" → "start scroll bench": rAF-stepped constant-speed scroll of the message list to the bottom (speed adjustable); one result line lands in the event list: frame-gap p50 / p95 / max, frames >50ms / >100ms, DOM nodes, mounted bubbles, long tasks. Use it before and after any rendering change (`docs/design-render-perf.md`) |
 | Store | activeAgent / agents / messages / streaming / syncState / streamDown / loadingHistory / bgTasks |
 | Viewport | `navigator.standalone`, inner, visualViewport, measured safe-area `env()`, layoutMode, `data-streaming`, hash; toggles: bottom-alignment line (red line at `fixed bottom:0`), element outlines |
 | Actions | clear events, reset counters, copy events to clipboard, reload, turn developer mode off |

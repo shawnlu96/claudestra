@@ -61,8 +61,11 @@ features/devtools/      开发者模式：设置 → 实验 → 「开发者模�
                         打 html[data-dev]；window.__cstraDev 给控制台用
   dev-meters.ts         采样 hook：stats.js 三格（FPS / MS / 帧间隔）、rAF 最大帧间隔、输入到下一帧
                         （Safari 无 Event Timing → pointerdown→双 rAF 手测）、long task（Safari 无 → n/a）
-  dev-panel-sections.ts 内置分区：性能 / Store / 视口（standalone / inner / visualViewport / 安全区实测 /
+  dev-panel-sections.ts 内置分区：性能 / 渲染基准 / Store / 视口（standalone / inner / visualViewport / 安全区实测 /
                         底部对齐线 / 元素轮廓——容器规则 6 那个反复手写的浮层）/ 动作
+  bench-section.ts      渲染基准：rAF 步进把 #cstra-msgs 从顶滚到底，帧间隔 p50/p95/最大 + DOM/气泡数 + long task
+                        → 一行结论进事件列表（docs/design-render-perf.md 阶段 0 的尺子，改渲染前后同口径对比）
+  bench-stats.ts        上面那把尺子的纯统计（percentile / summarizeFrames / formatBench，bun test 覆盖）
   dev-overlay.tsx       面板壳：徽章 ↔ 面板、lil-gui 生命周期（注册分区变了整个重建）、事件列表。
                         portal 到 body，根元素 stopPropagation（portal 合成事件会冒泡到横滑手势）
 features/chat/
