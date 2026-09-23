@@ -124,6 +124,10 @@ tests/                     pure-logic suites only (run `bun test` for the live c
   web-send-dedupe.test.ts  v2.23.2+ web client duplicate-send guard (same agent + same payload within 1.5s)
   web-live-merge.test.ts   v2.23.2+ web client live/history dedup by seq (pruneLiveBubbles / coveredByCursor /
                            mergeContiguousAssistant) — root tsconfig maps "@/*" → web/* so tests/ can import web pure logic
+  web-dev-mode.test.ts     web developer mode: `?dev=` vs stored flag resolution, log line → event kind, event ring
+                           cap / truncation / versioning, counters + rate sampler, section registry (web/features/devtools)
+  web-dev-sections.test.ts guard: every registerDevSection() outside web/features/devtools must carry a
+                           `dev-section: YYYY-MM-DD` comment within 3 lines above (workflow in docs/web-dev-mode.md)
 install.sh               One-line installer
 SETUP.md                 User-facing installation guide
 ```

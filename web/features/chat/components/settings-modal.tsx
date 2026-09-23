@@ -21,7 +21,7 @@ import { usePushToggle, PushSection } from "./settings/push-section";
 import { useBruteForce, BruteForceSection } from "./settings/brute-force-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./settings/memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./settings/auto-compact-section";
-import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection } from "./settings/interface-sections";
+import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./settings/interface-sections";
 
 /**
  * 全局设置弹窗（侧栏 ⚙️ 进入）：个人资料（我的 + Claude 的头像/昵称,
@@ -138,8 +138,8 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         {/* ── 语音识别 Key ─────────────── */}
         <GroqKeySection groq={groq} busy={busy} />
         <GroupLabel>{t("实验")}</GroupLabel>
-        {/* ── iOS 键盘修正(实验,2026-07-27 重构) ─────────────── */}
         <KbFixSection kbFix={kbFix} />
+        <DevModeSection />
 
         </div>
     </CenteredModal>

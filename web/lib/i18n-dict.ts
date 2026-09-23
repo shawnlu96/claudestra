@@ -408,6 +408,9 @@ export const DICT: Record<string, string> = {
   "未送达": "Not delivered",
   "重新发送": "Resend",
   "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
+  "开发者模式": "Developer mode",
+  "右下角出现调试面板：帧率 / 帧间隔 / 提交突发 / DOM 与消息计数 / 视口实测值 / 最近事件。URL 加 ?dev=1 也能打开。":
+    "Shows a debug panel in the bottom-right corner: FPS / frame gap / commit bursts / DOM & message counts / measured viewport values / recent events. ?dev=1 in the URL also enables it.",
   "Telegram 式文档流布局：修正 iOS 弹键盘时输入光标/附件菜单错位。有任何异常关掉即恢复原布局。":
     "Telegram-style document-flow layout: fixes caret/attachment-menu misplacement with the iOS keyboard. Toggle off to restore the original layout if anything glitches.",
   "暂无 peer。生成邀请发给对方，或粘贴对方的邀请加入。":

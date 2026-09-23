@@ -70,6 +70,7 @@ features/terminal/      remote terminal (🖥️ button in the session detail �
                         scrollback, and the tmux pane history is empty too) — use ^O to read
                         transcript history (CC transcript mode, scrollable); the viewer session has
                         tmux mouse enabled (so wheel-into-copy-mode works in shell scenarios)
+features/devtools/      developer-mode panel. Tune UI values on the panel first, hard-code after — docs/web-dev-mode.en.md
 features/chat/
   type.ts               ChatMessage / AgentSession / ToolCallView / PendingPermission / PendingAsk
   stream.ts             consumeSSEStream + processStreamEvent + StreamSink (protocol v1, untouched by
@@ -194,9 +195,8 @@ On iOS standalone, "fills to the bottom of the screen + never budges + seamless 
    rendered inside the container ends up positioned a full screen off-view (clicking it "does nothing",
    and it "suddenly appears" when you go back to the list and the container slides back). Desktop has
    translate=0 and cannot reproduce it — this must be verified at a narrow viewport.
-6. **How to debug this**: don't eyeball screenshots and guess. Drop in a temporary diagnostic overlay that
-   reads `navigator.standalone` / `innerHeight` / the measured `env()` probe values, and draw a line at
-   `fixed bottom:0` to see whether it reaches the bottom of the screen — one screenshot localises it.
+6. **How to debug this**: don't eyeball screenshots and guess. Turn on developer mode (`?dev=1`) and read
+   the Viewport section's measured values + the bottom-line toggle.
    Icon regeneration: `node scripts/make-icons.mjs` (sharp; the manifest lives in app/manifest.ts).
 
 ## Running & troubleshooting

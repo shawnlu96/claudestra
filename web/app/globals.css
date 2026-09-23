@@ -665,3 +665,12 @@ body[data-cstra-select="1"] .cstra-selecting * {
         animation: none;
     }
 }
+
+/* ── 开发者模式(features/devtools):面板里的「元素轮廓」开关 + lil-gui 宽度跟随宿主 ── */
+html[data-dev-outline] * {
+  outline: 1px solid rgba(255, 64, 64, 0.25) !important;
+}
+.cstra-dev-gui .lil-gui.root {
+  width: 100% !important;
+  --width: 100%;
+}

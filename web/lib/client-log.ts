@@ -8,7 +8,11 @@
  * 例外：layout.tsx 的内联脚本在 React 之前跑、是一段字符串，import 不了，保留它自己那份
  * （带 keepalive）。
  */
+import { devEventFromLog } from "@/features/devtools/dev-events";
+
 export function postClientLog(msg: string): void {
+  // 开发者模式的面板事件列表读同一份打点(features/devtools),关着时只是进个环形缓冲
+  devEventFromLog(msg);
   try {
     void fetch("/api/client-log", {
       method: "POST",
