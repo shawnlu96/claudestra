@@ -18,6 +18,7 @@ import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/c
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
 import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
+import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
 // MCP server），退出 = 该 agent 永久失联、只能人工 /mcp。记录死因就够了。
@@ -564,55 +565,7 @@ one round trip instead of many.`,
     },
     {
       name: "send_to_agent",
-      description: `Send a message to another agent. Use for agent-to-agent collaboration — 包括跨 Claudestra peer 调用。
-
-**⚠️ 通知 / 询问别的 agent 一律用这个工具，不要用 \`reply(chat_id=对方频道)\`。** \`reply\` 是「发到 Discord 频道给人看」的，发到别的 agent 的频道时 v2.0.15 之前对方 claude 进程**根本收不到**（只贴了 Discord，没 forward 给对方 ws），对方会"无动于衷"。v2.0.15+ 已经兜底也会 forward 了，但 \`send_to_agent\` 才是正路 —— 它有 pushBack 推回、有 \`expecting\` 上下文注入、对方 claude 一定收到。
-
-**target 格式**（v1.9.22+ 新增 peer 语法）：
-- \`"agent_name"\` 或 \`"predict"\` — 本地 agent（自动补 "agent-" 前缀）
-- \`"peer:ahh.future_data"\` — HTTP peer「ahh」的 future_data agent（长格式）
-- \`"future_data@ahh"\` — 同上（短格式）
-
-**什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段，看看 owner 配置了哪些 peer 实例（v2.11+ HTTP peer）。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
-
-**回复机制（v1.9.21+ 推回，不再轮询）**：
-- send_to_agent 返回的 \`pushBack: true\` 说明对方（本地 agent 或 peer agent）回复时 bridge 会自动把 text 推回你作为新消息 \`[🤖 xxx 回复] ...\`。**不要** fetch_messages 轮询。
-- 只要 end_turn 等那条 push 消息触发下一轮，读它、继续下一步就行。
-- 如果对方超过几分钟没回复，你收到任何消息都没有，可以主动用 reply 告诉用户"对方没响应"。
-
-**\`expecting\` 字段（v2.0.12+ 强烈建议填）**：
-- \`send_to_agent\` 现在多一个**可选** \`expecting\` 字段，写"对方答完后我应该做啥"。例：
-  \`\`\`
-  send_to_agent({
-    target: "qingniao-backend",
-    text: "AI 接口 spec 是 X，能搞定吗？",
-    expecting: "等后端确认 OK 后，我要把前端 useMock 切 false + 跑 build:weapp + 出体验版"
-  })
-  \`\`\`
-- bridge 在把对方 reply push 回你的 ws 时，**会在最前面注入一段 \`[💡 你之前期望：...]\` 提醒**，你重新接到 push 时不靠"自己记得"也能续上动作。
-- 不填 expecting 不会出错，但实际经验是 caller 经常收到 reply 后忘了原计划，只把对方答复转告用户就 end_turn 了。**协作场景一定填**。
-
-收到 inter-agent 消息（格式 \`[🤖 xxx 回复] ...\` 或 \`[🤖 来自 xxx] ...\`）时，**先分类再行动**：
-
-1. **完成信号 + 包含你下一步动作**（"done, 你切 useMock"、"接口 ready, 你跑 build"）
-   → **立即执行**对方告诉你的下一步动作，不要只是 ack。
-   → 执行完用 \`reply\` 到自己频道告诉用户进度（"X 切完了 → 跑 Y"），然后继续等下一步或主动接续。
-
-2. **进度更新**（"卡了一下"、"还在搞"、"5 分钟后好"）
-   → 用 \`reply\` 简短转告用户，**不动手**。等下一条 push。
-
-3. **直接问你**（"X 接口长啥样？"、"你那边 schema 是啥"）
-   → 答它，用 \`send_to_agent\` 反向 reply 回去（target 就是发起方）。同时 \`reply\` 到自己频道留痕。
-
-4. **完成信号但没说下一步**（"done"、"全部修完了"，但没指示你做啥）
-   → \`send_to_agent\` 反问对方"下一步要我做啥 / 我现在能测了吗？"，**绝对不要原地静默 end_turn 等**。
-
-**绝对禁止**：收到 peer push 后沉默 end_turn 不做任何事。哪怕你判断它只是 informational，也至少 \`reply\` 一句"收到 [转告内容]"让用户看到协作链条在动。assistant 纯文字到不了 Discord，沉默 = 用户以为你死了。
-
-Examples:
-- \`send_to_agent({ target: "predict", text: "分析 ~/data/sales.csv" })\` — 本地
-- \`send_to_agent({ target: "future_data@ahh", text: "查 SKYAI 的大户多空比" })\` — 跨 HTTP peer
-- \`send_to_agent({ target: "future_data@claudestra_ahh", text: "..." })\` — 跨 peer 短格式`,
+      description: SEND_TO_AGENT_DESCRIPTION,
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -634,6 +587,19 @@ Examples:
           },
         },
         required: ["target", "text"],
+      },
+    },
+    {
+      name: "forward_to_agent",
+      description: FORWARD_TO_AGENT_DESCRIPTION,
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          message_id: { type: "string", description: "要转交的用户消息的 message_id（<channel> 标签里的）" },
+          target: { type: "string", description: "接手的 agent 名，例如 'gc-car-chat'" },
+          reason: { type: "string", description: "一句话理由，接手方会看到，例如「用户问的是聊天机器人，归你管」" },
+        },
+        required: ["message_id", "target"],
       },
     },
     {
@@ -672,6 +638,40 @@ Good for: a second opinion from a different model family, cross-review of a desi
     },
   ]),
 }));
+
+/** forward_to_agent：转交（规则 lib/forward.ts，投递 bridge/forward.ts） */
+async function forwardTool(args: any) {
+  const r = await bridgeRequest({ type: "forward_to_agent", messageId: args?.message_id || "", target: args?.target || "", reason: args?.reason || "" });
+  return { content: [{ type: "text" as const, text: `已转给 ${r.target}，它会直接回答用户。**不要再 reply**，结束本轮即可。` }] };
+}
+
+/** send_to_agent：从工具分发里原样搬出（分发函数太长） */
+async function sendToAgentTool(args: any) {
+  const oneShot = args?.oneShot === true;
+  const result = await bridgeRequest({
+    type: "route_to_agent",
+    targetName: args?.target || "",
+    text: args?.text || "",
+    expecting: typeof args?.expecting === "string" ? args.expecting : undefined,
+    oneShot,
+  });
+  // v1.9.21+: bridge 现在会自动把对方的下一条 reply push 回你的 ws，
+  // 你不用 fetch_messages 轮询。直接 end_turn，等对方那条 push 消息触发下一轮。
+  // v2.4.16+: oneShot=true 时 bridge 既不挂 pending 也不会 push-back，advice 反映这点。
+  const advice = oneShot
+    ? `消息已 fire-and-forget 发给 ${result.targetName}。**不期待任何 push-back**。对方收到会自己判断要不要回，可能直接 end_turn。end_turn 等用户下一步指示即可。`
+    : result.pushBack
+    ? `消息已发送给 ${result.targetName}。**不要轮询 fetch_messages** —— bridge 会在对方 reply 时自动把回复 push 到你这边作为新的入站消息，结束本轮等即可。`
+    : `消息已发送给 ${result.targetName}。如需获取回复，可用 fetch_messages 轮询频道 ${result.targetChannelId}`;
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: advice,
+      },
+    ],
+  };
+}
 
 // 处理工具调用
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -777,32 +777,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case "send_to_agent": {
-      const oneShot = args?.oneShot === true;
-      const result = await bridgeRequest({
-        type: "route_to_agent",
-        targetName: args?.target || "",
-        text: args?.text || "",
-        expecting: typeof args?.expecting === "string" ? args.expecting : undefined,
-        oneShot,
-      });
-      // v1.9.21+: bridge 现在会自动把对方的下一条 reply push 回你的 ws，
-      // 你不用 fetch_messages 轮询。直接 end_turn，等对方那条 push 消息触发下一轮。
-      // v2.4.16+: oneShot=true 时 bridge 既不挂 pending 也不会 push-back，advice 反映这点。
-      const advice = oneShot
-        ? `消息已 fire-and-forget 发给 ${result.targetName}。**不期待任何 push-back**。对方收到会自己判断要不要回，可能直接 end_turn。end_turn 等用户下一步指示即可。`
-        : result.pushBack
-        ? `消息已发送给 ${result.targetName}。**不要轮询 fetch_messages** —— bridge 会在对方 reply 时自动把回复 push 到你这边作为新的入站消息，结束本轮等即可。`
-        : `消息已发送给 ${result.targetName}。如需获取回复，可用 fetch_messages 轮询频道 ${result.targetChannelId}`;
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: advice,
-          },
-        ],
-      };
-    }
+    case "forward_to_agent":
+      return forwardTool(args);
+
+    case "send_to_agent":
+      return sendToAgentTool(args);
 
     default:
       throw new Error(`Unknown tool: ${name}`);

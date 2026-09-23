@@ -456,4 +456,15 @@ export const DICT: Record<string, string> = {
   "每 30 分钟检查一次，所有 agent 都空闲时才升；关掉后只提醒不升级。": "Checks every 30 minutes and updates only when every agent is idle; when off, it only notifies you.",
   "自动升级 Claude Code": "Auto-update Claude Code",
   "每周检查一次，同样只在所有 agent 都空闲时才升。": "Checks weekly and likewise updates only when every agent is idle.",
+  // ── Peer 协作 · 邀请准备 / 双向加入 ──────────────────────
+  "同时向对方开放我的 agent（双向）": "Also open my agents to them (two-way)",
+  "对方要能连到你的 bridge 才用得上：你的机器要共享给对方，bridge 端口要对 tailnet 开放。": "Only works if they can reach your bridge: share your machine with them and open the bridge port to the tailnet.",
+  "已向对方开放：": "Opened to them: ",
+  "发给对方之前，确认这几件事：": "Before you send it, make sure:",
+  "对方要能连到": "They can reach",
+  "：把本机共享给对方（Tailscale 后台 → Machines → 本机 → Share），或让对方加入你的 tailnet。共享是单向的，对方共享给你不算。":
+    ": share this machine with them (Tailscale admin → Machines → this machine → Share), or have them join your tailnet. Sharing is one-way — them sharing with you doesn't count.",
+  "如果你给 bridge 端口加了防火墙白名单，要放行对方的地址（对方加入失败时，报错里会显示他的地址）。": "If your bridge port has a firewall allowlist, allow their address (their join error shows it).",
+  "默认单向：对方只能访问你勾选的 agent，你的 agent 能回复他；要你也能主动找他，让他加入时勾选「同时向对方开放」。":
+    "One-way by default: they reach only the agents you picked, and your agents can reply. For you to reach them too, have them tick “Also open my agents” when joining.",
 };

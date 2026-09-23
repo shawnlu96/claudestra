@@ -10,7 +10,7 @@ import { shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
-import { hasActiveBgActivities } from "./bridge/bg-activity-watcher.js";
+import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
 
 // ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
@@ -71,7 +71,8 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
+import { configuredPeerIngressPort, startPeerIngress } from "./bridge/peer-ingress.js";
+import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
@@ -805,12 +806,12 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
-  // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer
-  // 回复」——Stop 不该 @ 用户(与 Discord peer pushback 的 set "agent" 对齐,
-  // review 2026-07-19 #2)
+  // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer 回复」——Stop 不该
+  // @ 用户(与 Discord peer pushback 的 set "agent" 对齐,review 2026-07-19 #2)
   if (env.meta.triggerKind === "peer_http") lastMessageSource.set(to.channelId, "agent");
   // chat_id 是 agent reply() 时要传回的 id：消息从哪个会话来，回复就发回那里。
   const replyBackChannel = resolveReplyBackChannel(env);
+  rememberInbound(env, to.channelId); // 转交（bridge/forward.ts）只能转最近收到的用户原话
   const meta: Record<string, string> = {
     chat_id: replyBackChannel,
     message_id: env.meta.messageId,
@@ -910,16 +911,13 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    // v2.6.0+ 事件埋点：入站消息镜像 + agent 进入思考态（旁路，不影响主流程）
-    // srcKind:入站来源类型(user=Discord 人类/api=Web 用户/local=agent/bridge)。
-    // web 前端据此把「他端用户发言」实时画成用户气泡(跨端同步),并排除 agent/
-    // bridge 注入(那些不是用户消息,2026-07-24 owner 报跨端同步慢)。
+    // 事件埋点：入站消息镜像 + agent 进入思考态（旁路）。srcKind(user=Discord 人类/api=Web 用户/
+    // local=agent/bridge):web 据此把「他端用户发言」实时画成用户气泡,排除 agent/bridge 注入
+    // (那些不是用户消息,2026-07-24 owner 报跨端同步慢)。
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: { direction: "in", from: meta.user || "?", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId } });
-    // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,
-    // pending-start 已放弃 → watcher 永久缺位——工具/文本从不直播、Stop done
-    // 挂 '?' 名下 busy 卡「工作中」)。每条入站消息核对该频道 watcher 在位,
-    // 缺位按 registry 重建;jsonl 还没出现会重新进 pending-wait,回合开始后
-    // 几秒内落盘即绑上。同步 map 查询,常态零开销。
+    // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
+    // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按
+    // registry 重建;jsonl 还没出现会重新 pending-wait。同步 map 查询,常态零开销。
     if (!agentNameForChannel(to.channelId) && to.channelId !== CONTROL_CHANNEL_ID) {
       void (async () => {
         try {
@@ -2346,6 +2344,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {
       try {
         // 找发送方的 channelId
@@ -3549,9 +3548,8 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 
 const server = Bun.serve({
   port: BRIDGE_PORT,
-  // v2.6.0+ 默认只绑回环 —— /hook /stats /skills/rescan 一直无鉴权，之前默认
-  // 0.0.0.0 等于把它们暴露在内网。跨机器场景（自定义 BRIDGE_URL 指向远程）用
-  // BRIDGE_BIND=0.0.0.0 显式放开，网络边界（反代/TLS/防火墙）由用户自己负责。
+  // 默认只绑回环：/hook /stats /skills/rescan 无鉴权，绑 0.0.0.0 等于暴露在内网。peer 走 HTTPS
+  // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",
   async fetch(req, server) {
     const reqOrigin = req.headers.get("Origin");
@@ -3662,6 +3660,8 @@ const server = Bun.serve({
 });
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
+startPeerIngress({ port: configuredPeerIngressPort(), handleApi: serveApiRequest });
+initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

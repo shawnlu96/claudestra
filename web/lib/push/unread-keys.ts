@@ -26,3 +26,13 @@ export function unreadOrphans(
   const gone = rows.filter((r) => !countsUnread(r.agent) || !live.has(r.agent));
   return { agents: gone.map((r) => r.agent), hadUnread: gone.some((r) => r.count > 0) };
 }
+
+/**
+ * 这条发给 api: 地址的回复算不算「我的」对话（推送 + 计未读）。只有本 web 自己的 token 算：
+ * peer 和其它 token 跟 agent 的往来不打扰 owner（2026-09-23：peer 每问一次 agent，owner 手机就响）。
+ * myChatId 拿不到（老 bridge 没有 /whoami）时退回旧行为：所有 api: 对话都算。
+ */
+export function isMyApiChat(chatId: string, myChatId: string | null): boolean {
+  if (!chatId.startsWith("api:")) return false;
+  return !myChatId || chatId === myChatId;
+}

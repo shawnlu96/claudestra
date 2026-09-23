@@ -48,3 +48,13 @@ export function bridgeUrlPortMismatch(
   if (!Number.isInteger(urlPort) || !Number.isInteger(envPort) || urlPort === envPort) return null;
   return `BRIDGE_URL 指向 :${urlPort}，但 BRIDGE_PORT 是 ${envPort} —— channel-server 会连到没人听的端口，所有 agent 都会显示离线`;
 }
+
+/**
+ * peer 专用入口端口（bridge/peer-ingress.ts）。**只认 .env 显式配的 PEER_INGRESS_PORT，没配就不开**：
+ * 升级不能凭空多占一个端口（「bridge 端口 + 1」可能正被别的服务用，bridge 先起还会把它抢走），
+ * 也不能随 BRIDGE_PORT 改动漂走（反代规则指着的是写死的端口）。由 setup 的 HTTPS 步骤写入。
+ */
+export function configuredPeerIngressPort(env: Record<string, string | undefined> = process.env): number | null {
+  const v = Number(env.PEER_INGRESS_PORT || "");
+  return Number.isInteger(v) && v > 0 && v < 65536 ? v : null;
+}

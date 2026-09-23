@@ -304,6 +304,24 @@ way.
   (`StartCalendarInterval`, `WorkingDirectory` = the repo root so `.env` loads);
   on days with nothing to renew it exits without changing anything.
 
+### Peers over the same HTTPS entry
+
+Claudestra peers (other instances that call your agents) can use this HTTPS entry instead of the bridge port, so the bridge never has to listen beyond loopback and new peers don't need firewall allowlist entries — only a route to this machine (e.g. share it with them in Tailscale).
+
+1. Pick a free loopback port for the peer entrance and add it to the repo's `.env`, e.g. `PEER_INGRESS_PORT=3848`, then restart the bridge. It serves only `/api/v1` with peer tokens — no control routes, no websocket, and the full-scope web token is refused there.
+2. Route `/api/v1/*` to it inside the `ts.net` site block, **before** the web `handle`:
+
+   ```caddyfile
+   handle /api/v1/* {
+       reverse_proxy 127.0.0.1:3848
+   }
+   ```
+
+   Never point this at the bridge port itself: requests through Caddy arrive from `127.0.0.1`, and the bridge trusts loopback for its control routes.
+3. `peer-invite-new` then writes the `https://` address into invites automatically (it probes `/api/v1` through the entry first and falls back to the bridge address if the probe fails). Set `PEER_PUBLIC_URL` in `.env` to force a specific base URL.
+
+With `tailscale serve`, `bun run setup` adds the equivalent `--set-path /api/v1` handler and writes `PEER_INGRESS_PORT` when you let it configure HTTPS.
+
 ### Protocol choice on lossy links (h2/h3 vs plain h1)
 
 Caddy speaks h2 + h3 by default, and on a clean network that is what you want.

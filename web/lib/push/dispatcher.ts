@@ -3,7 +3,7 @@ import net from "net";
 import { getDb } from "@/lib/db";
 import { ensureVapid } from "./vapid";
 import { apnsConfigured, apnsSend, apnsTokenDead, type ApnsMessage } from "./apns";
-import { countsUnread, unreadOrphans } from "./unread-keys";
+import { countsUnread, isMyApiChat, unreadOrphans } from "./unread-keys";
 
 /**
  * Web Push 派发器(owner 2026-07-16「做 pwa 推送」+「谁发的谁回」)。
@@ -198,6 +198,18 @@ export function totalUnread(): number {
 const BRIDGE = process.env.BRIDGE_HTTP_URL || "http://127.0.0.1:3847";
 const TOKEN = process.env.CLAUDESTRA_API_TOKEN || "";
 
+/** 本 web 自己的 token 对应的 chatId（api:<tokenId>），规则见 unread-keys.ts isMyApiChat */
+let myChatId: string | null = null;
+async function resolveMyChatId(): Promise<void> {
+  try {
+    const r = await fetch(`${BRIDGE}/api/v1/whoami`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const j = (await r.json()) as { tokenId?: string };
+    if (r.ok && j.tokenId) myChatId = `api:${j.tokenId}`;
+  } catch {
+    /* bridge 没起来或是老版本：下次重连再取，期间按旧行为推 */
+  }
+}
+
 /** 事件 → 推送的翻译:reply 给 api 用户 → 通知;Discord 里用户说话 → 已读联动。 */
 function maybePush(evt: { type: string; agent: string; chatId: string; data: Record<string, unknown> }) {
   if (evt.type !== "chat_message") return;
@@ -211,7 +223,8 @@ function maybePush(evt: { type: string; agent: string; chatId: string; data: Rec
     return;
   }
   if (d.direction !== "out") return;
-  if (!chatId.startsWith("api:")) return; // 只推 Web 发起的对话
+  if (d.notice) return; // 转交留在原对话里的「↪ 已转给 X」只是提示，不推送、不计未读（接手方的回复会推）
+  if (!isMyApiChat(chatId, myChatId)) return; // 只推本 web 自己发起的对话（peer / 其它 token 的不推）
   const agent = String(evt.agent || "").replace(/^agent-/, "");
   const text = String(d.text ?? "").replace(/\s+/g, " ").trim();
   if (!text) return;
@@ -245,6 +258,7 @@ async function runLoop() {
   const g = globalThis as any;
   for (;;) {
     try {
+      if (!myChatId) await resolveMyChatId();
       const res = await fetch(`${BRIDGE}/api/v1/events`, {
         headers: { Authorization: `Bearer ${TOKEN}`, Accept: "text/event-stream" },
       });

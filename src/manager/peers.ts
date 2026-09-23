@@ -7,6 +7,7 @@ import { repoEnvVar } from "../lib/env-file.js";
 import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
+import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
@@ -61,11 +62,8 @@ async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tok
 }
 
 /**
- * peer 握手的 `--url` 没给时自动探测本机对外地址。
- *
- * 手抄这个地址是三步握手里最容易出错的一环：IP 记错一位、忘带端口、或者把
- * 127.0.0.1 填进去（对方永远连不上，而错误要拖到 peer-http-test 才暴露）。
- * 探测优先 Tailscale（100.64/10，唯一跨网络可达），其次内网地址。
+ * peer 握手的 `--url` 没给时自动探测本机对外地址（手抄最容易错：IP 记错、忘带端口、填 127.0.0.1）。
+ * 优先实测可用的 HTTPS 入口（lib/peer-url.ts），其次 Tailscale 地址（100.64/10），再次内网。
  * 返回 null 表示确实探不到，调用方照旧报错要求人工给 --url。
  */
 async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
@@ -76,6 +74,8 @@ async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: 
     ? `⚠️ bridge 当前只监听 ${bind}（BRIDGE_BIND 未开放）——对方无法连入。在 .env 设 BRIDGE_BIND=0.0.0.0（或 Tailscale IP）并重启 bridge 后邀请才可用。`
     : "";
   if (myUrl) return { url: myUrl, note: bindWarn || undefined };
+  const https = await (await import("../lib/peer-url.js")).httpsPeerUrl(repoEnvVar("PEER_PUBLIC_URL") || "");
+  if (https) return { url: https, note: `用 HTTPS 入口 ${https}（反代 → 本机 peer 专用入口，bridge 端口不必对外开放）` };
   const { detectBridgeUrls } = await import("../lib/net-addr.js");
   const port = parseInt(repoEnvVar("BRIDGE_PORT") || String(DEFAULT_BRIDGE_PORT));
   const cands = detectBridgeUrls(port);
@@ -476,13 +476,14 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   // 撞名:同 baseUrl 视为同一 peer(重新加入/换 token),否则后缀防覆盖
   const finalName = await uniquePeerName(hs.name, (p) => p.baseUrl === hs.url);
   const before = structuredClone(await findHttpPeer(finalName));
-  let myTokenId = "", mySecret = "";
+  let myTokenId = "", mySecret = "", reverseNote = "";
   if (agents.length > 0) {
     const check = await checkPeerScope(agents, force);
     if (check.error) { output({ ok: false, error: check.error }); return; }
     const resolved = await resolveMyBridgeUrl(myUrl);
     if (!resolved) { output({ ok: false, error: "反向开放需要我方对外地址,探测失败——请给 --url" }); return; }
     myUrl = resolved.url.replace(/\/+$/, "");
+    reverseNote = resolved.note ?? "";
     const issued = await issuePeerToken(finalName, agents);
     myTokenId = issued.tokenId;
     mySecret = issued.secret;
@@ -494,7 +495,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   // 回调对方 redeem——失败必须回滚:半截 peer 会在列表里装成能用的样子
   type RedeemRes = { ok?: boolean; error?: string; agents?: string[]; peer?: string } | null;
   let redeemRes: RedeemRes = null;
-  let redeemErr = "";
+  let redeemErr = "", failKind: JoinFailureKind = "other";
   try {
     const res = await fetch(`${hs.url}/api/v1/peers/redeem`, {
       method: "POST",
@@ -507,8 +508,10 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     });
     redeemRes = (await res.json().catch(() => null)) as RedeemRes;
     if (!res.ok || !redeemRes?.ok) redeemErr = redeemRes?.error || `对方返回 ${res.status}`;
+    if (redeemErr && res.status >= 400 && res.status < 500) failKind = "rejected";
   } catch (e) {
     redeemErr = `连不上对方 bridge: ${(e as Error).message}`;
+    failKind = classifyJoinError(e as Error & { code?: unknown });
   }
   if (redeemErr) {
     if (before) {
@@ -521,15 +524,10 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     if (myTokenId) await disableTokenById(myTokenId, false);
     // 连接类失败 → 扫 tailnet 同端口找可达的 bridge 候选(只做无凭据的 GET 探测,
     // 兑换凭据绝不往未确认的地址发)。跨 tailnet 共享的映射地址错位就靠这提示自救。
-    let hint = "确认对方 bridge 在线、地址对外可达、邀请未过期未撤销";
-    if (/连不上对方 bridge/.test(redeemErr)) {
-      const cands = await scanTailnetBridges(hs.url).catch(() => [] as string[]);
-      if (cands.length) {
-        hint = `邀请串里的地址不可达,但 tailnet 里这些地址有 bridge 在响应: ${cands.join(", ")}` +
-          `。跨 tailnet 设备共享下邀请嵌的是对方视角 IP——很可能就是其中之一,用 --peer-url <地址> 重试(邀请串原样保留)。`;
-      }
-    }
-    output({ ok: false, error: `加入失败（已回滚）: ${redeemErr}`, hint });
+    const net = failKind === "timeout" || failKind === "refused";
+    const candidates = net ? await scanTailnetBridges(hs.url).catch(() => [] as string[]) : [];
+    output({ ok: false, error: `加入失败（已回滚）: ${redeemErr}`, failKind,
+      hint: joinFailureHint(failKind, { peerUrl: hs.url, myAddr: net ? await localTailnetAddr() : undefined, candidates }) });
     return;
   }
   output({
@@ -538,5 +536,6 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     exposedAgents: agents,
     note: `已接入。send_to_agent 目标写法: "<对方agent>@${finalName}"` +
       (agents.length === 0 ? "。当前未向对方开放任何 agent——需要对称访问就生成一张自己的邀请发回去。" : ""),
+    ...(reverseNote ? { warnings: [reverseNote] } : {}),
   });
 }
