@@ -17,7 +17,7 @@ import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import {
   isHistoryBubble,
   coveredByCursor,
-  mergeContiguousAssistant,
+  mergeContiguousAssistant, dropCoveredDelta,
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
@@ -898,16 +898,13 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /**
-   * v2.16 差量对齐(唤醒秒画)——cursor 模型的核心动作:只拉游标之后的新消息,
-   * 追加到现有视图,几 KB/1 秒级,代替全量重拉(560KB/跨境 14s)。
-   *
-   * 自动回退全量(loadMessages)的情形:服务端报轮转(/clear、restart 换了
-   * session)、差量比一页还大(离场太久)、请求失败/超时(重试一次后)。
+   * v2.16 差量对齐(唤醒秒画)——cursor 模型的核心动作:只拉游标之后的新消息,追加到现有视图,
+   * 几 KB/1 秒级,代替全量重拉(560KB/跨境 14s)。自动回退全量(loadMessages):服务端报轮转
+   * (/clear、restart 换了 session)、差量比一页还大(离场太久)、请求失败/超时(重试一次后)。
    * 差量为空 = 没错过任何东西,零动作。
    *
-   * 已知小窗口:差量读到 jsonl 尾 → 新流(不带 since)建立之间 ~秒级事件可能
-   * 两边都不覆盖——两拍反向对齐(refreshAgents)与下次唤醒差量兜底,不为它
-   * 引入 since 重放(重放的 chat_message 与差量气泡必然重复)。
+   * 已知小窗口:差量读到 jsonl 尾 → 新流(不带 since)建立之间 ~秒级事件可能两边都不覆盖——两拍
+   * 反向对齐(refreshAgents)与下次唤醒差量兜底,不为它引入 since 重放(重放与差量气泡必然重复)。
    */
   private async syncDelta(name: string, gen: number, attempt = 0, quiet = false): Promise<void> {
     const cur = this.historyCursor;
@@ -933,6 +930,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         hasMore?: boolean;
       };
       if (gen !== this.openGen) return; // 已切走
+      // 游标已被并发的对齐（全量 / 另一次差量）推进：这份差量过期，再应用就整段重复；只收掉自己亮的 pill
+      if (this.historyCursor !== cur) return void (!quiet && this.produce((s) => { s.syncState = null; }));
       if (json.rotated || json.hasMore) {
         // quiet 心跳不接管全量(会闪 loading);留给 reconnect/openAgent 处理轮转
         if (quiet) return;
@@ -965,7 +964,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 用现有视图代替重拉
         const base = s.messages.filter((m) => m.id.startsWith("h"));
         // 同一回合被 7s 差量切成的多段历史气泡拼回一泡(见 live-merge.ts)
-        const history = mergeContiguousAssistant(base, delta);
+        const history = mergeContiguousAssistant(base, dropCoveredDelta(base, delta));
         const v = composeView({
           current: s.messages,
           history,

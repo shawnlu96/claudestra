@@ -272,7 +272,7 @@
     "size:src/setup.ts": 2097,
     "size:tests/modal-parser.test.ts": 1116,
     "size:tests/session-history.test.ts": 781,
-    "size:web/features/chat/chat-store.ts": 2598,
+    "size:web/features/chat/chat-store.ts": 2597,
     "size:web/features/chat/components/chat.tsx": 777,
     "size:web/features/chat/components/composer.tsx": 907,
     "size:web/features/chat/components/message-list.tsx": 924,

@@ -186,3 +186,24 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
   };
   return [...base.slice(0, -1), merged, ...delta.slice(1)];
 }
+
+/**
+ * 差量里已被现有历史覆盖的气泡（首 seq ≤ 同会话历史气泡的最大 seq）丢掉。两次对齐并发（唤醒差量 +
+ * 7s 心跳、全量重载与在飞的差量）会拿同一个旧游标拉回同一段，照单全收就是整段重复（2026-09-23
+ * owner 截图：按钮消息 + 两个工具卡片叠了 4 遍，当时页面在 70s 冻结与服务重启间反复重连）。
+ * chat-store 侧另有「游标已被推进就丢弃这份差量」，这里按 seq 再兜一层。
+ */
+export function dropCoveredDelta(base: ChatMessage[], delta: ChatMessage[]): ChatMessage[] {
+  const maxBySid = new Map<string, number>();
+  for (const m of base) {
+    const fs = firstSeq(m);
+    if (fs === null || !m.sid) continue;
+    const end = typeof m.seqEnd === "number" ? Math.max(fs, m.seqEnd) : fs;
+    maxBySid.set(m.sid, Math.max(maxBySid.get(m.sid) ?? -Infinity, end));
+  }
+  return delta.filter((m) => {
+    const fs = firstSeq(m);
+    const max = m.sid ? maxBySid.get(m.sid) : undefined;
+    return fs === null || max === undefined || fs > max;
+  });
+}
