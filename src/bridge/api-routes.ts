@@ -1098,13 +1098,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
   if (path === "/events" && req.method === "GET") {
-    let scopeAgents: string[] | undefined;
-    if (!principal.agents.includes("*")) {
-      // 双向兼容前缀：scope 里存裸名时补 agent- 前缀的变体
-      scopeAgents = principal.agents.flatMap((a) => [a, `agent-${a}`]);
-    }
+    // 双向兼容前缀：scope 里存裸名时补 agent- 前缀的变体
+    const scopeAgents = principal.agents.includes("*") ? undefined : principal.agents.flatMap((a) => [a, `agent-${a}`]);
     return deps.handleEventsRequest(req, scopeAgents ? { agents: scopeAgents } : undefined);
   }
+
+  // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送据此只推自己的对话，不推 peer / 其它 token 的）
+  if (path === "/whoami" && req.method === "GET") return apiJson(200, { ok: true, tokenId, name: principal.name ?? null, peer: principal.peer ?? null });
 
   // GET /api/v1/threads/:threadId —— wait 超时后的轮询兜底
   const threadMatch = path.match(/^\/threads\/([^/]+)$/);
