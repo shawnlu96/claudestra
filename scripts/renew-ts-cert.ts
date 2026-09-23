@@ -8,12 +8,15 @@
  *
  * **默认只演练（dry-run）**：打印会做什么，不动任何文件。加 --apply 才真的签发并替换。
  * 流程照抄 Oppi：签到临时文件 → 校验 SAN / 有效期 / 私钥配对 → 备份旧文件 → 原子替换；
- * 任何一步失败都保留旧证书。替换后反代要重启/重载才会读新文件 —— 本脚本不替你重启
- * （那是机器级动作，用哪个 label、要不要定时跑，由使用者决定）。
+ * 任何一步失败都保留旧证书。替换后反代要重启才会读新文件：默认不替你重启（用哪个 label
+ * 是机器级决定），给了 --reload-label 才在替换成功后 `launchctl kickstart -k` 它。
+ * 无人值守（LaunchAgent 定时跑）时加 --notify：失败发到 #control（lib/notify.ts），否则
+ * 续签坏了没人知道，要等入口断了才发现。
  *
  * 用法:
  *   bun scripts/renew-ts-cert.ts [--cert <path>] [--key <path>] [--host <ts.net 名>]
  *                                [--min-days 30] [--force] [--apply]
+ *                                [--reload-label <launchd label>] [--notify]
  * 默认路径 ~/.claude-orchestrator/web/tls/mac.{crt,key}（web/SETUP.md 的手工方案用的位置）；
  * --host 缺省取 `tailscale status --json` 的 Self.DNSName。
  */
@@ -21,7 +24,8 @@
 import { X509Certificate, createPrivateKey } from "crypto";
 import { existsSync, readFileSync, renameSync, copyFileSync, unlinkSync, chmodSync } from "fs";
 import { dirname, basename } from "path";
-import { findTailscaleCli, readTailscaleStatus, validateCertCandidate } from "../src/lib/tailscale";
+import { findTailscaleCli, readTailscaleStatus, tailscaleCliEnv, validateCertCandidate } from "../src/lib/tailscale";
+import { notify } from "../src/lib/notify";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -35,6 +39,25 @@ const KEY = arg("key") || `${HOME}/.claude-orchestrator/web/tls/mac.key`;
 const MIN_DAYS = Number(arg("min-days") || 30);
 const APPLY = has("apply");
 const FORCE = has("force");
+const RELOAD_LABEL = arg("reload-label");
+const NOTIFY = has("notify");
+
+/** 失败时的出口：打 stderr；--notify 时同时发 #control（notify 永不抛，发不出会留痕） */
+async function fail(msg: string): Promise<number> {
+  console.error(msg);
+  if (NOTIFY) {
+    await notify({ source: "renew-ts-cert", chatId: process.env.CONTROL_CHANNEL_ID || "", text: `🔐 ts.net 证书自动续签失败：${msg}` });
+  }
+  return 1;
+}
+
+/** 替换成功后重启反代让它读新文件（Caddy 配了 admin off 没法热重载，只能 kickstart -k） */
+function reloadProxy(label: string): string | null {
+  const uid = process.getuid?.();
+  if (uid === undefined) return "当前平台没有 launchd";
+  const p = Bun.spawnSync(["launchctl", "kickstart", "-k", `gui/${uid}/${label}`], { stdout: "pipe", stderr: "pipe" });
+  return p.exitCode === 0 ? null : (p.stderr.toString().trim() || `exit ${p.exitCode}`);
+}
 
 function inspect(certPath: string, keyPath: string) {
   const cert = new X509Certificate(readFileSync(certPath));
@@ -45,9 +68,9 @@ function inspect(certPath: string, keyPath: string) {
 
 export async function main(): Promise<number> {
   const cli = await findTailscaleCli();
-  if (!cli) { console.error("✗ 找不到 tailscale CLI（PATH / App 包内 / brew 位置都没有）"); return 1; }
+  if (!cli) return fail("✗ 找不到 tailscale CLI（PATH / App 包内 / brew 位置都没有）");
   const host = arg("host") || (await readTailscaleStatus(cli))?.dnsName || "";
-  if (!host) { console.error("✗ 拿不到 ts.net 主机名：Tailscale 没登录或 MagicDNS 没开；也可用 --host 显式给"); return 1; }
+  if (!host) return fail("✗ 拿不到 ts.net 主机名：Tailscale 没登录或 MagicDNS 没开；也可用 --host 显式给");
 
   if (existsSync(CERT)) {
     const cur = inspect(CERT, KEY);
@@ -69,26 +92,30 @@ export async function main(): Promise<number> {
     console.log("\n[演练] 将执行:");
     console.log("  " + cmd.map((s) => (/\s/.test(s) ? `'${s}'` : s)).join(" "));
     console.log(`  校验 SAN 含 ${host}、有效期 ≥ ${MIN_DAYS} 天、私钥配对 → 备份为 *.bak → 原子替换 ${CERT} / ${KEY}`);
-    console.log("  之后需重启/重载你的反代让它读新证书。加 --apply 真正执行。");
+    console.log(RELOAD_LABEL ? `  替换成功后 launchctl kickstart -k ${RELOAD_LABEL}。加 --apply 真正执行。` : "  之后需重启/重载你的反代让它读新证书。加 --apply 真正执行。");
     return 0;
   }
 
   const cleanup = () => { for (const f of [tmpCert, tmpKey]) try { unlinkSync(f); } catch { /* 不存在 */ } };
-  const proc = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
+  // env 必须带 TERM：launchd 下没有它，App 内置 CLI 会去拉 GUI 而不是签证书（见 tailscaleCliEnv）
+  const proc = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe", env: tailscaleCliEnv(), timeout: 120_000 });
   if (proc.exitCode !== 0) {
     cleanup();
-    console.error(`✗ tailscale cert 失败（旧证书保留）: ${proc.stderr.toString().trim()}`);
-    return 1;
+    return fail(`✗ tailscale cert 失败（旧证书保留）: ${proc.stderr.toString().trim()}`);
   }
   const next = inspect(tmpCert, tmpKey);
   const v = validateCertCandidate({ host, ...next, minDays: MIN_DAYS });
-  if (!v.ok) { cleanup(); console.error(`✗ 新证书不合格（旧证书保留）: ${v.reason}`); return 1; }
+  if (!v.ok) { cleanup(); return fail(`✗ 新证书不合格（旧证书保留）: ${v.reason}`); }
 
   for (const f of [CERT, KEY]) if (existsSync(f)) copyFileSync(f, `${f}.bak`);
   chmodSync(tmpKey, 0o600);
   renameSync(tmpCert, CERT);
   renameSync(tmpKey, KEY);
-  console.log(`✓ 已替换，新证书剩 ${Math.floor(v.daysLeft)} 天；旧文件备份为 *.bak。记得重启/重载反代。`);
+  console.log(`✓ 已替换，新证书剩 ${Math.floor(v.daysLeft)} 天；旧文件备份为 *.bak。`);
+  if (!RELOAD_LABEL) { console.log("  记得重启/重载反代（或下次加 --reload-label <label>）。"); return 0; }
+  const err = reloadProxy(RELOAD_LABEL);
+  if (err) return fail(`✗ 证书已替换，但重启 ${RELOAD_LABEL} 失败（反代仍在用旧证书）: ${err}`);
+  console.log(`✓ 已重启 ${RELOAD_LABEL}`);
   return 0;
 }
 

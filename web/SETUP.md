@@ -297,10 +297,12 @@ way.
   load-balancing the same port instead of failing loudly.
 - Non-root processes may bind 443 on modern macOS (wildcard address).
 - **Certificate renewal** — `tailscale cert` certificates last ~90 days and do
-  not auto-renew here. Check expiry with
-  `openssl x509 -enddate -noout -in ~/.claude-orchestrator/web/tls/mac.crt`,
-  re-run the `tailscale cert` command above, then
-  `launchctl kickstart -k gui/$(id -u)/<your-caddy-label>`.
+  not auto-renew here. `bun scripts/renew-ts-cert.ts` checks expiry and is a
+  dry run by default; `--apply --reload-label <your-caddy-label> --notify`
+  renews once fewer than 30 days remain, restarts Caddy, and posts failures
+  to #control. To automate it, schedule that command daily from a LaunchAgent
+  (`StartCalendarInterval`, `WorkingDirectory` = the repo root so `.env` loads);
+  on days with nothing to renew it exits without changing anything.
 
 ### Protocol choice on lossy links (h2/h3 vs plain h1)
 
