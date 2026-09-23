@@ -680,7 +680,12 @@ html[data-dev-outline] * {
    定位、prepend 的 scrollHeight 补偿全不动）。`auto 120px`：渲染过的行记住上次真实高度，
    从没渲染过的行先占 120px——占位与真实的差只在向上滑进该行时露出（iOS Safari 无
    overflow-anchor 会顿一下；Chrome / Firefox 自动锚定）。估值升级点：把 120px 换成按行算出的数。 */
-#cstra-msgs [data-mid] {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
+/* 只在有滚动锚定（overflow-anchor）的浏览器上开：iOS Safari 没有，从没渲染过的行一进视口就从 120px
+   换成真实高度，上方内容一变高、正在看的内容就被往下推——打开长对话第一次往上滑，每条都会顿一下
+   （owner 主力设备是 iPhone）。拖侧栏的收益本来就在桌面；Safari 哪天支持了会自动生效。 */
+@supports (overflow-anchor: auto) {
+  #cstra-msgs [data-mid] {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 120px;
+  }
 }

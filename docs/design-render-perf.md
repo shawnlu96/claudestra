@@ -46,6 +46,8 @@
 
 每个 `[data-mid]` 包装层 `content-visibility: auto; contain-intrinsic-size: auto 120px`（globals.css）。屏外气泡跳过样式 / 布局 / 绘制，DOM 保留，选字、查找、`[data-mid]` 定位、prepend 的 `scrollHeight` 补偿全部照旧。iOS 18+ 支持。owner 用拖侧栏复现：每个 pointermove 都让全部已挂气泡重新折行，屏幕上其实只有十来条需要——这条 CSS 正对这个。
 
+**2026-09-23 合并时收窄（审查意见）**：整条规则包进 `@supports (overflow-anchor: auto)`，只在有滚动锚定的浏览器上生效。理由：未渲染行不止「显示更早」prepend 的那批——打开会话时一次性挂上的几百条里，视口外的也从没渲染过，iOS 上第一次往上滑每进一条都会顿一下，而 owner 主力设备是 iPhone；拖侧栏的收益本来在桌面。Safari 哪天支持 overflow-anchor 会自动生效，或者做下面的升级点 ③ 后去掉这层 @supports。
+
 屏外行的高度由 `contain-intrinsic-size` 决定：渲染过的行记住上次真实高度，从没渲染过的（「显示更早」prepend 进来的）先占 120px，宽度变过的行保留旧宽度下的高度。差值只在**向上滑**进该行时露出：Chrome / Firefox 有 `overflow-anchor` 自动锚定，iOS Safari 没有，会顿一下。
 
 **结果（owner 实测 2026-09-23）**：约 10 万像素高的对话，反复拖侧栏——改前 FPS 跌到 40 左右（基准 120），改后基本不动。重排成本被压到视口附近那十来条。
