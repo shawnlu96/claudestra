@@ -14,6 +14,7 @@ import { buildAgentMenu, moveTargets, type AgentMenuAction } from "../agent-menu
 import { assignAgentProject } from "../project-actions";
 import type { AgentSession, ProjectMeta } from "../type";
 import { useT } from "@/lib/i18n";
+import { useArmedConfirm } from "../use-armed-confirm";
 import { ClearAgentModal } from "./clear-agent-modal";
 
 const MENU_W = 200;
@@ -60,6 +61,8 @@ function MenuPanel({ s, page, targets, onAction, onMove, onBack }: {
   onBack: () => void;
 }) {
   const t = useT();
+  // 归档要二次确认（owner 2026-09-24）：点一下变「确认归档?」，4s 没再点自动复原；菜单关了状态随之消失
+  const arch = useArmedConfirm(4000);
   const items = buildAgentMenu(s.agent) ?? [];
   const rows = page === "main" ? items.length : 1 + Math.max(1, targets.length);
   const h = rows * ROW_H + 30;
@@ -80,9 +83,19 @@ function MenuPanel({ s, page, targets, onAction, onMove, onBack }: {
           {page === "move" ? t("移动到") : t(s.agent.displayName)}
         </div>
         {page === "main" &&
-          items.map((it) => (
-            <Item key={it.id} icon={it.icon} label={t(it.label)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
-          ))}
+          items.map((it) =>
+            it.id === "archive" ? (
+              <Item
+                key={it.id}
+                icon={it.icon}
+                label={arch.armed ? t("确认归档?") : t(it.label)}
+                danger={arch.armed}
+                onClick={() => (arch.armed ? onAction("archive") : arch.arm())}
+              />
+            ) : (
+              <Item key={it.id} icon={it.icon} label={t(it.label)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
+            ),
+          )}
         {page === "move" && (
           <>
             <Item icon="‹" label={t("返回")} onClick={onBack} />

@@ -80,7 +80,7 @@ features/chat/
                         / composer（streaming 时出「停止」）/ chat(Provider)
     agent-row.tsx       会话行：左滑（置顶/归档/删除）+ 右键/长按菜单触发 + 可拖 + 放置目标
     agent-menu.tsx      单实例浮层（手势同 bubble-menu：桌面右键、长按 450ms、挪 >12px 作废；portal 到 body）；
-                        「移动到」是同一浮层里的二级页
+                        「移动到」是同一浮层里的二级页；「归档」两段式确认（4s 复原）
     agent-dnd.tsx       HTML5 拖拽接线：dragHandlers（仅 hover+fine pointer 设备）/ useAgentDrop（悬停高亮、松手 assign）
     project-group.tsx   project 组头 + 组块（放置目标）；status-dot.tsx 行首状态点
 lib/

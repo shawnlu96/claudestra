@@ -29,6 +29,7 @@ export const DICT: Record<string, string> = {
   "启动": "Start",
   "移动到": "Move to",
   "归档": "Archive",
+  "确认归档?": "Archive?",
   "没有别的 project": "No other project",
   "移动失败:": "Move failed: ",
   "启动失败:": "Start failed: ",
