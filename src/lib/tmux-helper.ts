@@ -335,6 +335,15 @@ function trimTrailingBlank(lines: string[]): string[] {
   return lines.slice(0, end);
 }
 
+/** `❯` 判据该看的行:输入框的 `❯` 行(上一行是顶边框 `────`,可带名字标签)到底。按结构找而不数
+ *  「最后 5 行」:页脚高度不固定(窄窗口里状态栏 / banner / 右侧通知各折一行),数行会把 `❯` 挤出去
+ *  ⇒ 空闲恒判忙。只搜尾部 15 行,找不到退回最后 5 行。用例见 tests/prompt-zone.test.ts。 */
+function promptZone(lines: string[]): string[] {
+  for (let i = lines.length - 1; i > 0 && i >= lines.length - 15; i--)
+    if (/^\s*❯/.test(lines[i]!) && /^\s*─{8,}/.test(lines[i - 1]!)) return lines.slice(i);
+  return lines.slice(-5);
+}
+
 /**
  * TUI 契约探针（纯函数，便于单测）。
  *
@@ -365,24 +374,15 @@ export function probeTuiContract(pane: string): {
 /** 纯函数版：给定 pane 文本判断是否 idle。便于单测。 */
 export function paneLooksIdle(pane: string): boolean {
   const lines = trimTrailingBlank(pane.split("\n")); // 尾部空行会把页脚挤出窗口(P0,见 trimTrailingBlank)
-  const last5 = lines.slice(-5);
-  // 忙碌标记先于一切:进行中的 TUI 照样画着 `❯` 输入框(甚至是 `❯\u00a0` 这种能被
-  // 严格模式命中的形态),先看有没有 spinner 行。spinner 在输入框上方,输入框可能
-  // 多行 / 下面还有 hint 行,取 15 行(与 probeTuiContract 同宽);spinner 是 Ink 动态区,
-  // 回合结束即被擦掉,不会残留在 scrollback 里造成假忙。
+  const zone = promptZone(lines);
+  // 忙碌标记先于一切:进行中的 TUI 照样画着 `❯` 输入框(甚至是能被严格模式命中的 `❯\u00a0`)。
+  // spinner 在输入框上方,取 15 行(与 probeTuiContract 同宽);它是 Ink 动态区,回合结束即擦掉,
+  // 不会残留在 scrollback 里造成假忙。
   if (CC_BUSY_RE.test(lines.slice(-15).join("\n"))) return false;
-  // 模式 1: 严格匹配 — 老 Claude Code 行为
-  if (last5.some((line) => /^\s*❯\s*$/.test(line))) return true;
-  // 模式 2: 宽松匹配 — 新 Claude Code 输入框可能带光标 / placeholder
-  // v2.0.14+: "bypass permissions" 检查收紧到 last 10 行。
-  // 之前 `pane.includes(...)` / 全 pane regex 会把 scrollback 里 stale 的旧 TUI banner
-  // 字符串误命中，dev-channels modal 时假阳性返回 true → wedge / launch polling 提前
-  // 退出根本没机会按 Enter dismiss modal。Claude Code TUI 的 bypass banner 永远在
-  // 输入框下面 1-2 行 = 真 idle 时一定在 last 10。
-  const last10Joined = lines.slice(-10).join("\n");
-  const hasPrompt = /❯/.test(last5.join("\n"));
-  const hasBanner = CC_MODE_BANNER_RE.test(last10Joined);
-  return hasPrompt && hasBanner;
+  if (zone.some((line) => /^\s*❯\s*$/.test(line))) return true; // 模式 1: 严格匹配(空输入框)
+  // 模式 2: 输入框带光标 / placeholder + 模式 banner。banner 只认尾部 10 行:scrollback 里残留的
+  // 旧 banner 会让 dev-channels modal 假阳性判空闲(git log -S last10Joined)
+  return /❯/.test(zone.join("\n")) && CC_MODE_BANNER_RE.test(lines.slice(-10).join("\n"));
 }
 
 export async function isIdle(target: string): Promise<boolean> {
@@ -465,7 +465,7 @@ export async function idleVerdict(target: string): Promise<IdleVerdict> {
  * 然后误清理一个其实已经就绪的 agent。
  *
  * 改成两个**联合**信号：
- * 1. ❯ 出现在 pane 最后 5 行（容忍 ❯ 后面有任何字符）
+ * 1. ❯ 出现在输入框位置（见 promptZone；容忍 ❯ 后面有任何字符）
  * 2. pane 里出现 "bypass permissions" — Claude Code TUI 状态栏的固定文字
  *
  * 同时满足才算 ready。这个组合在 restart 路径（startClaudeInWindow）已经用了
@@ -475,12 +475,12 @@ export function isClaudeReady(pane: string): boolean {
   // bypass 首启确认框贴在 pane 底部时，`❯ No, exit` + 警告正文里的 "Bypass Permissions"
   // 恰好同时满足下面两个信号——不排除就会把卡在确认框上的会话报成就绪
   if (detectBypassConsentPrompt(pane)) return false;
-  const lines = pane.split("\n");
+  const lines = trimTrailingBlank(pane.split("\n"));
   // v2.0.14+: bypass banner 检查从 `pane.includes(...)` 收紧到 last 10 行，避免
   // 旧 claude session 残留在 scrollback 的 banner 字符串造成假阳性。具体 bug：
   // restart 流程里 startClaudeInWindow 的 polling 第一次轮询就误以为 ready，跳过
   // hasPromptToConfirm 分支没机会按 Enter，dev-channels modal 永远卡在那儿。
-  const hasPrompt = /❯/.test(lines.slice(-5).join("\n"));
+  const hasPrompt = /❯/.test(promptZone(lines).join("\n"));
   const hasBanner = CC_MODE_BANNER_RE.test(lines.slice(-10).join("\n"));
   return hasPrompt && hasBanner;
 }
