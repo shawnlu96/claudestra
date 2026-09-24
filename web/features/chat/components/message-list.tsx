@@ -24,6 +24,9 @@ import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 import { isNearBottom, tailAppendedCount } from "../scroll-follow";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { devCount } from "../../devtools/dev-mode";
+import { ProgressNote } from "./progress-note";
+import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
+import { SourceHeader } from "./source-header";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -71,36 +74,6 @@ function ReplyDivider() {
   );
 }
 
-/**
- * v2.21.3+ 进度句(💭):Fable 5.1 在长工具链里把「接下来我会…」写进 progress-update
- * thinking 块而不是 text。比旁白(TextBlock muted)再弱一档——纯文本、斜体、无竖线,
- * 只为让人知道 agent 没停、在干什么;点一下显示时间。
- */
-const ProgressNote = memo(function ProgressNote({ text, ts }: { text: string; ts?: string }) {
-  const [showTs, setShowTs] = useState(false);
-  return (
-    <div
-      // break-words 不是装饰：进度句是**裸文本**（不过 DOMD，拿不到它的
-      // word-wrap: break-word），而模型爱在里面写
-      // `loadCommands`/`loadExecutions`/`toNumber` 这种没有空格的长串。
-      // 缺了它那一串不断行 → 撑破 342px 的气泡 → 整个消息区可以横向拖动
-      // （owner 2026-09-22「pi agent 还是出现下面多个滑动条导致乱套」，
-      //  实测那条进度句超框 110px，消息区 scrollWidth 比可视宽多 86px）。
-      className="my-1 break-words pl-2.5 text-[12.5px] italic leading-snug text-base-content/45"
-      onClick={() => {
-        if (hasLiveSelection()) return;
-        setShowTs((v) => !v);
-      }}
-    >
-      <span className="mr-1 not-italic">💭</span>
-      {text}
-      {showTs && ts && (
-        <div className="mt-0.5 font-mono text-[10px] not-italic tabular-nums opacity-40">{fmtTs(ts)}</div>
-      )}
-    </div>
-  );
-});
-
 /** 叙述/回复的文本块：点击显示**该段自己**的秒级时间（不是整个回合的开场时间——
  *  长回合一个气泡跨一小时，整体时间对「这句话什么时候说的」没意义）。
  *  streamed 语义 = 「本段还在生长」：只有它用纯文本（DOMD 只读一次,不适合增量
@@ -114,9 +87,12 @@ const TextBlock = memo(function TextBlock({
   streamed,
   muted,
   fullText,
+  foldKey,
 }: {
   /** 所属消息 id（长按/右键菜单「删除」用） */
   msgId?: string;
+  /** 旁白的收起 / 展开键（消息 id + 段序），只有 muted 段传；规则见 ../narration-fold.ts */
+  foldKey?: string;
   text: string;
   ts?: string;
   streamed?: boolean;
@@ -132,6 +108,7 @@ const TextBlock = memo(function TextBlock({
   const [showTs, setShowTs] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, messageId: msgId, getEl: () => bodyRef.current }));
+  const folded = useNarrationFold(muted ? foldKey : undefined);
   return (
     <QuoteSwipe quote={text} blockLevel>
       <div
@@ -144,7 +121,8 @@ const TextBlock = memo(function TextBlock({
               // 根本穿不进去。narration-muted(globals.css)按 specificity 打穿,
               // 这里的 12.5px + 45% 灰才真正落到正文元素上。
               // 12.5px/45% 又被打回「眼睛疼」——回调到 13.5px/50%,靠竖线+字号差保持区分
-              "narration-muted border-l-2 border-base-content/20 pl-2.5 text-[13.5px] leading-snug text-base-content/50"
+              // 触屏上收起条常显、会盖住末行右端(peer review #40)→ 只在无 hover 的设备给底部留白
+              "narration-muted group relative border-l-2 border-base-content/20 pl-2.5 text-[13.5px] leading-snug text-base-content/50 [@media(hover:none)]:pb-5"
             : ""
         }`}
         onClick={(e) => {
@@ -159,6 +137,7 @@ const TextBlock = memo(function TextBlock({
         {...press.handlers}
       >
         {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
+        {folded && foldKey ? <NarrationFolded text={text} foldKey={foldKey} /> : (
         <div ref={bodyRef} className="cstra-bubble">
           {streamed ? (
             // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
@@ -170,9 +149,11 @@ const TextBlock = memo(function TextBlock({
             <Domd initMd={text} bodyClassName="chat-domd" />
           )}
         </div>
+        )}
         {showTs && ts && (
           <div className="mt-0.5 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(ts)}</div>
         )}
+        {muted && foldKey && <NarrationFoldBar foldKey={foldKey} />}
       </div>
     </QuoteSwipe>
   );
@@ -249,6 +230,7 @@ function AssistantBody({
             streamed={m.streamed && i === segs!.length - 1}
             fullText={full}
             muted
+            foldKey={`${m.id}:${i}`}
           />
         ) : seg.kind === "reply" ? (
           // 空 reply 段不渲染（否则是一条「回复」分隔线 + 空白块的幽灵气泡）。
@@ -278,7 +260,7 @@ function AssistantBody({
       )}
     </>
   ) : hasNarration && !isEchoSegment(m, m.content) ? (
-    <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted />
+    <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} />
   ) : null;
 
   return (
@@ -331,16 +313,13 @@ const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: C
     // v2.20.2+ 外源入站(peer/其它 agent/Discord 用户)与本人区分(owner 实报
     // 「看起来像我说的」):来源 chip + 信息色描边,正文走 Domd 渲染 markdown
     // (peer 的 bug 报告是全格式 markdown,纯文本糊成一坨)。本人消息保持原样。
-    const srcIcon = !isSelf ? (m.from!.startsWith("peer-") ? "🤝" : m.from!.startsWith("agent-") || m.from!.endsWith("(agent)") ? "🤖" : "👤") : "";
     const label = isSelf ? profile.nickname : "";
     return (
-      <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col items-end gap-2`}>
+      // 布局规则(owner 2026-09-24):只有本人靠右,peer / 其它 agent / 别的用户一律靠左;
+      // 圆角:靠右的右上角小、靠左的左上角小,其余大——尖角指向说话的一侧
+      <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col gap-2 ${isSelf ? "items-end" : "items-start"}`}>
         {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14) */}
-        {!isSelf && (
-          <span className="flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-[10.5px] font-medium text-info">
-            {srcIcon} {m.from}
-          </span>
-        )}
+        {!isSelf && <SourceHeader from={m.from!} />}
         {(label || showAvatar) && (
           <div className="flex items-center gap-1.5">
             {label && <span className="text-[10px] opacity-50">{label}</span>}
@@ -355,10 +334,10 @@ const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: C
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
               ref={bubbleRef}
-              className={`cstra-bubble break-words rounded-[15px_15px_4px_15px] border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
+              className={`cstra-bubble break-words border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
                 isSelf
-                  ? "whitespace-pre-wrap border-base-content/5 bg-base-300"
-                  : "border-info/25 bg-info/[0.06]"
+                  ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
+                  : "rounded-[4px_15px_15px_15px] border-info/25 bg-info/[0.06]"
               }`}
               onClick={() => {
                 // 划选后松手、长按松手都算 click——都不该顺手切时间戳

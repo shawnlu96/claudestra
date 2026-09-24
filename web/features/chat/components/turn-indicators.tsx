@@ -73,9 +73,9 @@ export function ClaudeHeader({ pulsing = false }: { pulsing?: boolean }) {
     <div className="mb-[9px] flex items-center gap-2">
       {profile.claudeAvatar ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={profile.claudeAvatar} alt="" className={`size-[21px] rounded-md object-cover ${pulse}`} />
+        <img src={profile.claudeAvatar} alt="" className={`size-[22px] rounded-full object-cover ${pulse}`} />
       ) : (
-        <span className={`flex size-[21px] items-center justify-center rounded-md bg-accent text-[11px] text-white ${pulse}`}>
+        <span className={`flex size-[22px] items-center justify-center rounded-full bg-accent text-[11px] text-white ${pulse}`}>
           ✦
         </span>
       )}
