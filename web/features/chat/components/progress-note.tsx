@@ -2,6 +2,7 @@
 import { memo, useState } from "react";
 import { fmtTs } from "../fmt-time";
 import { hasLiveSelection } from "../select-mode";
+import { useIsExport } from "../export-context";
 
 /**
  * v2.21.3+ 进度句(💭)（从 message-list.tsx 原样搬出）:Fable 5.1 在长工具链里把
@@ -10,6 +11,8 @@ import { hasLiveSelection } from "../select-mode";
  */
 export const ProgressNote = memo(function ProgressNote({ text, ts }: { text: string; ts?: string }) {
   const [showTs, setShowTs] = useState(false);
+  const exporting = useIsExport();
+  if (exporting) return null; // 导出里去掉 thinking 类内容（owner 2026-09-24）
   return (
     <div
       // break-words 不是装饰：进度句是**裸文本**（不过 DOMD，拿不到它的
