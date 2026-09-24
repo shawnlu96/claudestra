@@ -338,6 +338,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
               ref={bubbleRef}
+              data-bubble="user"
               className={`cstra-bubble break-words border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
                 isSelf
                   ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"

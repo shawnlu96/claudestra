@@ -74,7 +74,15 @@ export async function inlineImages(root: HTMLElement): Promise<void> {
 const EXPORT_CSS = `
 .cstra-export-page{max-width:820px;margin:0 auto;padding:24px 16px 48px}
 .cstra-export-page *{animation:none!important;transition:none!important}
-@media print{@page{margin:14mm} .cstra-export-page{max-width:none;padding:0} [data-mid]{break-inside:avoid}}
+@media print{
+  @page{margin:14mm}
+  .cstra-export-page{max-width:none;padding:0}
+  /* 不许整条消息内分页是错的：一条 assistant 常比一页还高，浏览器先把整块推到下一页
+     （上一页大片留白，owner 2026-09-25 实报），推过去还是得在里面断。只保护小单元。 */
+  [data-tool-row],[data-bubble="user"],img,pre{break-inside:avoid}
+  p,li{orphans:3;widows:3}
+  h1,h2,h3,h4{break-after:avoid}
+}
 `;
 
 export function buildHtmlDoc(opts: {

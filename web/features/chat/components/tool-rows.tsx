@@ -87,7 +87,7 @@ export const HistoryToolRow = memo(function HistoryToolRow({ tool }: { tool: Too
   const tone = TOOL_TONE[tool.state] ?? TOOL_TONE.done;
   return (
     <QuoteSwipe quote={`${tool.name} ${summary}`}>
-    <div className={`rounded-lg border ${tone.box}`}>
+    <div data-tool-row="" className={`rounded-lg border ${tone.box}`}>
       <div
         className="flex cursor-pointer select-none items-center gap-1.5 px-2.5 py-1.5 font-mono text-xs"
         onClick={() => setOpen((v) => !v)}
