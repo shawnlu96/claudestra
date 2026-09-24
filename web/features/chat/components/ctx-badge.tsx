@@ -4,6 +4,7 @@ import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { CTX_ADVICE, ctxView, type CtxLevel } from "../ctx-level";
 import { useT } from "@/lib/i18n";
+import { useKeepInViewport } from "@/lib/keep-in-viewport";
 
 /** 请求压缩时发给 agent 的话——与 composer 警示条的按钮同一句(一处改两处同步)。 */
 export const COMPACT_REQUEST_TEXT =
@@ -36,6 +37,8 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
   const [open, setOpen] = useState(false);
   const [sent, setSent] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useKeepInViewport(popRef, open);
 
   // 点面板外任意处关闭(与 ClaudeSwitcher 同款)
   useEffect(() => {
@@ -72,7 +75,7 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
         ctx {k}k
       </button>
       {open && (
-        <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-72 max-w-[88vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
+        <div ref={popRef} className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-72 max-w-[88vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-2 flex items-baseline justify-between">
             <span className="text-[12px] font-semibold">{t("上下文")}</span>
             <span className="font-mono text-[11px] tabular-nums text-base-content/60">

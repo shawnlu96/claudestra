@@ -4,6 +4,7 @@ import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { PI_THINKING_LEVELS, piModelLabel } from "../claude-options";
 import { useT } from "@/lib/i18n";
+import { useKeepInViewport } from "@/lib/keep-in-viewport";
 import { postRuntimeSwitch, useDismiss } from "../runtime-switch";
 import { EffortButtons, SwitcherBadge } from "./switcher-parts";
 
@@ -40,6 +41,8 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useKeepInViewport(popRef, open);
   const close = useCallback(() => setOpen(false), []);
 
   // 面板外点击 / Esc 关闭（与 CC 面板同款交互）
@@ -91,7 +94,7 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
     <div ref={wrapRef} className="relative shrink-0">
       <SwitcherBadge label={piModelLabel(agent.model)} effort={agent.effort} title={t("Pi 会话：当前模型与思考档位，点击切换")} maxW="max-w-[110px]" onClick={toggle} />
       {open && (
-        <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-64 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
+        <div ref={popRef} className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-64 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
           <div className="mb-2.5 max-h-56 overflow-y-auto">
             {loading && !models ? (

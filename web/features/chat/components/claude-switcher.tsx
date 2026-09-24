@@ -7,6 +7,7 @@ import { useClaudeModelCatalog } from "../claude-models";
 import { PiModelSwitcher } from "./pi-model-switcher";
 import { CodexModelSwitcher } from "./codex-model-switcher";
 import { useT } from "@/lib/i18n";
+import { useKeepInViewport } from "@/lib/keep-in-viewport";
 
 /**
  * TopBar 的会话级模型/effort 徽章 + 快速切换器（owner 2026-07-23）。
@@ -23,6 +24,8 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useKeepInViewport(popRef, open);
   const catalog = useClaudeModelCatalog(open), models = catalog.models;
 
   // 点面板外任意处关闭
@@ -88,7 +91,7 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
         </svg>
       </button>
       {open && (
-        <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-56 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
+        <div ref={popRef} className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-56 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
           <div className="mb-2.5 flex flex-wrap gap-1">
             {models.length === 0 && <ModelCatalogStatus loading={catalog.loading} error={catalog.error} retry={catalog.retry} />}

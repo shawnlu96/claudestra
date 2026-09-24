@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { useT } from "@/lib/i18n";
+import { useKeepInViewport } from "@/lib/keep-in-viewport";
 import { postRuntimeSwitch, useDismiss } from "../runtime-switch";
 import { EffortButtons, SwitcherBadge } from "./switcher-parts";
 
@@ -34,6 +35,8 @@ export function CodexModelSwitcher({ agent }: { agent: AgentSession }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useKeepInViewport(popRef, open);
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, wrapRef);
 
@@ -85,7 +88,7 @@ export function CodexModelSwitcher({ agent }: { agent: AgentSession }) {
         onClick={toggle}
       />
       {open && (
-        <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-60 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
+        <div ref={popRef} className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-60 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
           {loading && !models && <div className="px-1 py-1 text-[11px] text-base-content/40">{t("加载中…")}</div>}
           <ModelList models={models ?? []} current={agent.model} saving={saving} disabled={locked} onPick={(id) => apply({ model: id })} />
