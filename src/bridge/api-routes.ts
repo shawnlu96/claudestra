@@ -478,7 +478,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       // sessionTailInfo 注释）。contextTokens:当前上下文占用(web 端超标提示)。
       {
         const { readRegistryAgents } = await import("../lib/registry.js");
-        const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
         const regs = await readRegistryAgents();
         const regByName = new Map(regs.map((r) => [r.name, r]));
         const bySessions = new Map<string, SessionTailInfo>();
@@ -536,6 +535,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
             ? (info?.effort ?? piSnap?.thinking ?? r?.effort ?? null)
             : (ov.effort ?? freshOrNull(info?.effort, info?.effortTs) ?? r?.effort ?? gEffort ?? info?.effort ?? null);
         }
+        await (await import("../lib/update-hints.js")).attachUpdateHints(agents as any[], regByName); // 「该重启/该 pi update」提示
       }
       // ?include=stopped：registry 里已停止的 agent 也入列（additive；
       // web 侧栏保留 stopped 会话入口，其历史经归档仍可读——正是归档的意义）。

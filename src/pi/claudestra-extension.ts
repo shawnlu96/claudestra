@@ -32,19 +32,19 @@ import { join } from "node:path";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
-// ⚠ 这个文件由 Pi 用 --extension 直接加载，**只依赖 node: 内置模块**（引仓库里的
-//   lib 会把它的加载路径变复杂），所以这里内联同一条规则而不是 import
-//   lib/bridge-url.ts：兜底要从 BRIDGE_PORT 推，写死 3847 会让改过端口的机器上
-//   Pi agent 静默连不上 bridge。正常情况下 pi-launch 已经把 BRIDGE_URL 传进来了。
+// 本进程加载的 Pi 版本（进快照 → 网页「重启生效」提示）。Pi 把自己的包作为虚拟模块提供给扩展；用变量名绕开 tsc 解析
+let RUNNING_PI_VERSION: string | undefined;
+import("@earendil-works/pi-coding-agent" as string).then((m) => { RUNNING_PI_VERSION = typeof m?.VERSION === "string" ? m.VERSION : undefined; },
+  () => { /* 老版本 Pi 包名不同：拿不到只是不提示重启，通道照常 */ });
+// ⚠ 本文件由 Pi 直接加载、只依赖 node: 内置模块，所以内联 lib/bridge-url.ts 的规则：兜底从 BRIDGE_PORT 推，
+//   写死 3847 会让改过端口的机器上 Pi agent 静默连不上 bridge（正常由 pi-launch 传 BRIDGE_URL）。
 const BRIDGE_URL = (
   process.env.BRIDGE_URL?.trim() || `ws://localhost:${Number(process.env.BRIDGE_PORT) || 3847}`
 ).trim();
 const BRIDGE_HTTP = BRIDGE_URL.replace(/^ws/, "http").replace(/\/+$/, "");
 
-/** keepalive 间隔，与 channel-server 一致（防 bridge 的 ws idle 超时） */
-const PING_MS = 25_000;
-/** 单次 bridge 请求超时（reply 可能带文件上传，给足） */
-const REQUEST_TIMEOUT_MS = 120_000;
+const PING_MS = 25_000; // keepalive 间隔，与 channel-server 一致（防 bridge 的 ws idle 超时）
+const REQUEST_TIMEOUT_MS = 120_000; // 单次 bridge 请求超时（reply 可能带文件上传，给足）
 const RECONNECT_MIN_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
 /** 就绪标记写在 tmux window 上，manager 创建 agent 时轮询它判断「起来了」 */
@@ -194,7 +194,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         agent: AGENT_NAME,
         sessionId: sessionId || undefined,
         cwd: process.cwd(),
-        piVersion: process.env.PI_VERSION || undefined,
+        piVersion: RUNNING_PI_VERSION,
         toolCount: tools.length,
         tools,
         activeTools: active,

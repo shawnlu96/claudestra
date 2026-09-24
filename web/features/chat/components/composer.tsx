@@ -6,6 +6,7 @@ import { COMPACT_REQUEST_TEXT } from "./ctx-badge";
 import { SkillsSheet } from "./skills-sheet";
 import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
+import { UpdateHintBanner } from "./update-hint-banner";
 
 
 const MAX_FILES = 5;
@@ -165,8 +166,7 @@ export function Composer() {
   const quoteDraft = useChatStore((s) => s.state.quoteDraft);
   const agents = useChatStore((s) => s.state.agents);
   const store = useChatStoreApi();
-  // 上下文超标警示(2026-07-14 owner:到限制要在聊天界面提醒)。每会话可关闭。
-  const [ctxDismissedFor, setCtxDismissedFor] = useState("");
+  const [ctxDismissedFor, setCtxDismissedFor] = useState(""); // 上下文超标警示,每会话可关闭
   // 「请求压缩」一次性:点完整条警示立即消失,不给点第二次的机会(owner 2026-07-14
   // 连点两下发了两条)。压缩成功 → compact_done 把 ctxTokens 打回低位,条自然不再出;
   // agent 没执行的兜底:10 分钟后 ctx 仍超标才重新亮出来。按 agent 记。
@@ -596,8 +596,8 @@ export function Composer() {
       // 键盘盖着 home 条区,34px 的垫会显示成键盘上方的一截空白
       style={{ paddingBottom: "max(var(--cstra-kb-safe, env(safe-area-inset-bottom)), 0.75rem)" }}
     >
-      {/* v2.21.1+ 限宽跟 message-list 同步放宽(桌面 92%/1600px),输入框与消息列对齐 */}
-      <div className="mx-auto w-full max-w-3xl lg:max-w-[min(92%,1600px)]">
+      <div className="mx-auto w-full max-w-3xl lg:max-w-[min(92%,1600px)]">{/* 限宽与 message-list 同步,输入框与消息列对齐 */}
+        <UpdateHintBanner agent={agentInfo} />
         {showCtxWarn && (
           <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs">
             <span className="min-w-0 truncate">
