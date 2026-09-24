@@ -20,14 +20,22 @@ export function useNarrationFold(key?: string) {
   return { agent, all: state.all, folded: key ? isFolded(state, key) : false };
 }
 
-const BTN = "rounded px-1 py-0.5 text-[11px] text-base-content/40 transition-colors hover:bg-base-content/10 hover:text-base-content/70";
+const BTN = "rounded px-1 py-0.5 text-[11px] text-base-content/50 transition-colors hover:bg-base-content/10 hover:text-base-content/80";
 
+/** 绝对定位钉在块右下角、不占行高（owner 2026-09-24「否则会多出一行」），hover 才显；
+ *  无 hover 的触摸设备常显（否则永远点不到）。父块要有 relative + group。 */
 export function NarrationFoldBar({ foldKey }: { foldKey: string }) {
   const t = useT();
   const { agent, all, folded } = useNarrationFold(foldKey);
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   return (
-    <div className="mt-0.5 flex justify-end gap-1 select-none" onClick={stop}>
+    <div
+      className={
+        "absolute bottom-0 right-0 flex gap-0.5 select-none rounded-md bg-base-100/85 px-0.5 backdrop-blur-sm " +
+        "opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+      }
+      onClick={stop}
+    >
       <button type="button" className={BTN} onClick={() => setFoldOne(agent, foldKey, !folded)}>
         {folded ? t("▾ 展开") : t("▴ 收起")}
       </button>
