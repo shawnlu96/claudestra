@@ -4,10 +4,12 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { repoEnvVar } from "../lib/env-file.js";
-import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { hostname } from "os";
 import { loadRegistry, output } from "./core.js";
 import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
+import { resolveMyBridgeUrl, scanTailnetBridges } from "./peers-net.js";
+import { instanceIdSync } from "../lib/instance-id.js";
+import type { PeerInviteV2 } from "../lib/peers.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
@@ -59,36 +61,6 @@ async function issuePeerToken(peerName: string, agents: string[]): Promise<{ tok
   file.principals.push(p);
   await writePrincipals(file);
   return { tokenId: tokenIdOf(p), secret: p.secret! };
-}
-
-/**
- * peer 握手的 `--url` 没给时自动探测本机对外地址（手抄最容易错：IP 记错、忘带端口、填 127.0.0.1）。
- * 顺序：实测可用的 HTTPS 入口（lib/peer-url.ts）→ 主端口只听本机（默认）时 peer 专用端口直连
- * （lib/peer-ingress-config.ts）→ bridge 端口的 Tailscale / 内网地址。返回 null = 确实探不到，调用方要求人工给 --url。
- */
-async function resolveMyBridgeUrl(myUrl: string): Promise<{ url: string; note?: string } | null> {
-  // 主端口只听本机时，写它的对外地址对方也连不进来——生成邀请这一刻就说明白（显式 --url 同理）
-  const bind = (repoEnvVar("BRIDGE_BIND") || "127.0.0.1").trim();
-  const bindWarn = bind === "127.0.0.1" || bind === "localhost" || bind === "::1"
-    ? `⚠️ bridge 当前只监听 ${bind}（BRIDGE_BIND 未开放）——对方无法连入。在 .env 设 BRIDGE_BIND=0.0.0.0（或 Tailscale IP）并重启 bridge 后邀请才可用。`
-    : "";
-  if (myUrl) return { url: myUrl, note: bindWarn || undefined };
-  const https = await (await import("../lib/peer-url.js")).httpsPeerUrl(repoEnvVar("PEER_PUBLIC_URL") || "");
-  if (https) return { url: https, note: `用 HTTPS 入口 ${https}（反代 → 本机 peer 专用入口，bridge 端口不必对外开放）` };
-  const port = parseInt(repoEnvVar("BRIDGE_PORT") || String(DEFAULT_BRIDGE_PORT));
-  const direct = bindWarn ? await (await import("../lib/peer-ingress-config.js")).openDirectPeerIngress(port) : null;
-  if (direct) return direct;
-  const cands = (await import("../lib/net-addr.js")).detectBridgeUrls(port);
-  if (cands.length === 0) return null;
-  const best = cands[0]!;
-  const others = cands.slice(1).map((c) => `${c.url}(${c.kind})`);
-  return {
-    url: best.url,
-    note: `--url 未给，自动用 ${best.kind === "tailscale" ? "Tailscale" : "内网"} 地址 ${best.url}（网卡 ${best.iface}）` +
-      (others.length ? `；其它候选: ${others.join(", ")}` : "") +
-      (best.kind === "lan" ? "。⚠️ 内网地址只在同一局域网可达，跨网络请改用 Tailscale 或反代域名。" : "") +
-      (bindWarn ? ` ${bindWarn}` : ""),
-  };
 }
 
 export async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myUrl: string, force: boolean, rotate: boolean) {
@@ -299,7 +271,7 @@ async function sweepExpiredInvites(): Promise<number> {
 
 /** 自报名净化 + 撞名后缀。对方的名字是自报的——撞上已有 peer 时必须换名,
  *  否则一张新邀请就能顶掉既有 peer 的 baseUrl/outToken(peer 劫持)。
- *  sameAs 返回 true 表示「就是同一个 peer」(合并而非后缀)。 */
+ *  sameAs 命中的记录不论叫什么都直接沿用它的名字(一个对方一条记录,lib/peers.ts 的 isSame*)。 */
 async function uniquePeerName(
   rawName: string,
   sameAs: (existing: import("../lib/peers.js").HttpPeer) => boolean,
@@ -308,10 +280,11 @@ async function uniquePeerName(
   const base = rawName.trim().replace(/[^\w-]/g, "").slice(0, 24) || "peer";
   const data = await readPeers();
   const all = data.httpPeers || [];
+  const same = all.find(sameAs);
+  if (same) return same.name;
   let name = base;
   for (let n = 2; n < 100; n++) {
-    const hit = all.find((p) => p.name === name);
-    if (!hit || sameAs(hit)) return name;
+    if (!all.some((p) => p.name === name)) return name;
     name = `${base}-${n}`;
   }
   return `${base}-${Date.now() % 10000}`;
@@ -384,11 +357,11 @@ export async function cmdPeerInviteRevoke(id: string) {
   output({ ok: true, revoked: id, tokenDisabled: revoked, note: "邀请串已作废，其内嵌 token 已吊销" });
 }
 
-/** 兑换（我是邀请方,bridge /api/v1/peers/redeem 委托进来）。对方自报
- *  name/url/token——url+token 可缺:缺 = 单向 peer(对方能访问我,我访问不了对方)。 */
-export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string) {
-  const { findPendingInviteByJoinSecret, removePendingInvite, upsertHttpPeer, inviteExpired } = await import("../lib/peers.js");
-  const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
+/** 兑换（我是邀请方,bridge /api/v1/peers/redeem 委托进来）。对方自报 name/url/token/iid——
+ *  url+token 可缺:缺 = 这次没给我反方向。iid 命中已有记录 = 同一个对方,合进那条。 */
+export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string, iid = "") {
+  const { findPendingInviteByJoinSecret, removePendingInvite, upsertHttpPeer, inviteExpired, isSameRedeemer } = await import("../lib/peers.js");
+  const { readPrincipals, writePrincipals, tokenIdOf } = await import("../lib/principals.js");
   if (!joinSecret || !peerName) { output({ ok: false, error: "peer-invite-redeem --join <secret> --name <对方名> [--url <对方地址>] [--token <对方token>]" }); return; }
   const inv = await findPendingInviteByJoinSecret(joinSecret);
   if (!inv) { output({ ok: false, error: "邀请无效或已被使用" }); return; }
@@ -399,8 +372,8 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
     return;
   }
   if (peerUrl && !/^https?:\/\//.test(peerUrl)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头" }); return; }
-  // 撞名后缀:同 inTokenId 视为同一 peer(幂等重放),否则换名防劫持
-  const finalName = await uniquePeerName(peerName, (p) => p.inTokenId === inv.inTokenId);
+  const url = peerUrl.replace(/\/+$/, "");
+  const finalName = await uniquePeerName(peerName, (p) => isSameRedeemer(p, { inTokenId: inv.inTokenId, iid, url }));
   // 预签 token 的占位 peer 名改成对方真名——GET /peers 的 principals ⋈ 靠它
   const file = await readPrincipals();
   const tok = file.principals.find((x) => x.id === `token:${inv.inTokenId}`);
@@ -411,52 +384,74 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
   }
   tok.peer = finalName;
   tok.name = `peer-${finalName}`;
+  // 一个对方只留一张有效入站 token：同一个人重新加入过，之前那张已被这张取代
+  const superseded = file.principals.filter((x) => x !== tok && x.peer === finalName && !x.disabled);
+  for (const x of superseded) x.disabled = true;
   await writePrincipals(file);
-  await upsertHttpPeer({
+  const rec = await upsertHttpPeer({
     name: finalName, inTokenId: inv.inTokenId,
-    ...(peerUrl ? { baseUrl: peerUrl.replace(/\/+$/, "") } : {}),
+    ...(url ? { baseUrl: url } : {}),
     ...(peerToken ? { outToken: peerToken } : {}),
+    ...(iid ? { instanceId: iid } : {}),
   });
   await removePendingInvite(inv.id);
-  output({ ok: true, peer: finalName, agents: inv.agents, oneWay: !peerToken, inviteId: inv.id });
+  output({
+    ok: true, peer: finalName, agents: inv.agents, oneWay: !rec.outToken, inviteId: inv.id,
+    ...(superseded.length ? { revokedTokens: superseded.map(tokenIdOf) } : {}),
+  });
 }
 
-/** v2.16.1 跨 tailnet 候选扫描:邀请地址连不上时,扫本机 tailscale 视角的
- *  peer IP 同端口找活着的 bridge(1.5s 超时并行 GET /api/v1/agents,有 HTTP
- *  响应即候选——401 也算,那正是 token 门禁在工作)。只探测不发凭据。 */
-async function scanTailnetBridges(failedUrl: string): Promise<string[]> {
-  const port = (() => { try { return new URL(failedUrl).port || String(DEFAULT_BRIDGE_PORT); } catch { return String(DEFAULT_BRIDGE_PORT); } })();
-  const failedHost = (() => { try { return new URL(failedUrl).hostname; } catch { return ""; } })();
-  // CLI 定位统一走 lib/tailscale（PATH → App 包内 → 常见位置），与 setup / doctor / bridge 同一套
-  const { readTailscaleStatusRaw } = await import("../lib/tailscale.js");
-  const raw = await readTailscaleStatusRaw();
-  if (!raw) return [];
-  const ips: string[] = [];
+type Reverse = { tokenId: string; secret: string; url: string; note: string; kept?: string[] };
+
+/** 加入时的反向开放（我→他之外再给他一张 token）。这条记录已有有效入站 token 时不重签：
+ *  issuePeerToken 会禁用同名旧 token，兑换一旦失败回滚，对方就两头落空；要改范围去卡片里改。 */
+async function prepareReverse(name: string, agents: string[], myUrl: string, force: boolean): Promise<Reverse | { error: string }> {
+  const { readPrincipals } = await import("../lib/principals.js");
+  const cur = (await readPrincipals()).principals.find((x) => x.peer === name && !x.disabled);
+  const none: Reverse = { tokenId: "", secret: "", url: "", note: "" };
+  if (cur) return { ...none, kept: cur.agents, note: agents.length ? "对方本来就能访问你（范围不变，要改在卡片里改）" : "" };
+  if (agents.length === 0) return none;
+  const check = await checkPeerScope(agents, force);
+  if (check.error) return { error: check.error };
+  const resolved = await resolveMyBridgeUrl(myUrl);
+  if (!resolved) return { error: "反向开放需要我方对外地址,探测失败——请给 --url" };
+  const issued = await issuePeerToken(name, agents);
+  return { ...issued, url: resolved.url.replace(/\/+$/, ""), note: resolved.note ?? "" };
+}
+
+type RedeemRes = { ok?: boolean; error?: string; agents?: string[]; peer?: string } | null;
+
+/** 回调对方 /peers/redeem。带上本机实例 id：对方据此把我合进他已有的那条记录 */
+async function postRedeem(hs: PeerInviteV2, rev: Reverse): Promise<{ res: RedeemRes; err: string; failKind: JoinFailureKind }> {
+  let res: RedeemRes = null;
+  let err = "", failKind: JoinFailureKind = "other";
+  const iid = instanceIdSync();
   try {
-    const j = raw as { Peer?: Record<string, { TailscaleIPs?: string[]; Online?: boolean }> };
-    for (const p of Object.values(j.Peer || {})) {
-      if (p.Online === false) continue;
-      const v4 = (p.TailscaleIPs || []).find((ip) => /^100\./.test(ip));
-      if (v4 && v4 !== failedHost) ips.push(v4);
-    }
-  } catch { return []; }
-  const hits = await Promise.all(
-    ips.slice(0, 20).map(async (ip) => {
-      try {
-        await fetch(`http://${ip}:${port}/api/v1/agents`, { signal: AbortSignal.timeout(1500) });
-        return `http://${ip}:${port}`; // 任何 HTTP 响应(含 401)= 有 bridge
-      } catch {
-        return null;
-      }
-    })
-  );
-  return hits.filter((x): x is string => !!x);
+    const r = await fetch(`${hs.url}/api/v1/peers/redeem`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        join: hs.join, name: selfPeerName(),
+        ...(iid ? { iid } : {}),
+        ...(rev.secret ? { url: rev.url, token: rev.secret } : {}),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    res = (await r.json().catch(() => null)) as RedeemRes; // 回的不是 JSON（反代错页）→ 按失败处理，状态码照样判
+    if (!r.ok || !res?.ok) err = res?.error || `对方返回 ${r.status}`;
+    if (err && r.status >= 400 && r.status < 500) failKind = "rejected";
+  } catch (e) {
+    err = `连不上对方 bridge: ${(e as Error).message}`;
+    failKind = classifyJoinError(e as Error & { code?: unknown });
+  }
+  return { res, err, failKind };
 }
 
 /** 加入（我是被邀方）：粘贴 v2 邀请串一步完成。默认不向对方开放任何 agent
  *  （--agents 显式给才反向开放）——对称访问 = 对方也生成一张邀请给我。 */
 export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUrl: string, force: boolean, peerUrlOverride = "") {
-  const { parsePeerInviteV2, parsePeerHandshake, upsertHttpPeer, removeHttpPeer, readPeers, writePeers, findHttpPeer } = await import("../lib/peers.js");
+  const { parsePeerInviteV2, parsePeerHandshake, upsertHttpPeer, removeHttpPeer, readPeers, writePeers, findHttpPeer, isSameInviter } =
+    await import("../lib/peers.js");
   if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--peer-url <对方地址覆盖>] [--force]" }); return; }
   const hs = parsePeerInviteV2(inviteStr);
   // v2.16.1 跨 tailnet 纠偏:邀请串嵌的是**发方视角**的 tailscale IP,跨 tailnet
@@ -473,46 +468,18 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     return;
   }
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
-  // 撞名:同 baseUrl 视为同一 peer(重新加入/换 token),否则后缀防覆盖
-  const finalName = await uniquePeerName(hs.name, (p) => p.baseUrl === hs.url);
+  // 同地址 / 同实例 id（他先连过我）→ 合进那条；否则撞名后缀防覆盖
+  const finalName = await uniquePeerName(hs.name, (p) => isSameInviter(p, hs));
   const before = structuredClone(await findHttpPeer(finalName));
-  let myTokenId = "", mySecret = "", reverseNote = "";
-  if (agents.length > 0) {
-    const check = await checkPeerScope(agents, force);
-    if (check.error) { output({ ok: false, error: check.error }); return; }
-    const resolved = await resolveMyBridgeUrl(myUrl);
-    if (!resolved) { output({ ok: false, error: "反向开放需要我方对外地址,探测失败——请给 --url" }); return; }
-    myUrl = resolved.url.replace(/\/+$/, "");
-    reverseNote = resolved.note ?? "";
-    const issued = await issuePeerToken(finalName, agents);
-    myTokenId = issued.tokenId;
-    mySecret = issued.secret;
-  }
+  const rev = await prepareReverse(finalName, agents, myUrl, force);
+  if ("error" in rev) { output({ ok: false, error: rev.error }); return; }
   await upsertHttpPeer({
     name: finalName, baseUrl: hs.url, outToken: hs.token,
-    ...(myTokenId ? { inTokenId: myTokenId } : {}),
+    ...(hs.iid ? { instanceId: hs.iid } : {}),
+    ...(rev.tokenId ? { inTokenId: rev.tokenId } : {}),
   });
   // 回调对方 redeem——失败必须回滚:半截 peer 会在列表里装成能用的样子
-  type RedeemRes = { ok?: boolean; error?: string; agents?: string[]; peer?: string } | null;
-  let redeemRes: RedeemRes = null;
-  let redeemErr = "", failKind: JoinFailureKind = "other";
-  try {
-    const res = await fetch(`${hs.url}/api/v1/peers/redeem`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        join: hs.join, name: selfPeerName(),
-        ...(mySecret ? { url: myUrl, token: mySecret } : {}),
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    redeemRes = (await res.json().catch(() => null)) as RedeemRes;
-    if (!res.ok || !redeemRes?.ok) redeemErr = redeemRes?.error || `对方返回 ${res.status}`;
-    if (redeemErr && res.status >= 400 && res.status < 500) failKind = "rejected";
-  } catch (e) {
-    redeemErr = `连不上对方 bridge: ${(e as Error).message}`;
-    failKind = classifyJoinError(e as Error & { code?: unknown });
-  }
+  const { res: redeemRes, err: redeemErr, failKind } = await postRedeem(hs, rev);
   if (redeemErr) {
     if (before) {
       const data = await readPeers();
@@ -521,7 +488,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
     } else {
       await removeHttpPeer(finalName);
     }
-    if (myTokenId) await disableTokenById(myTokenId, false);
+    if (rev.tokenId) await disableTokenById(rev.tokenId, false);
     // 连接类失败 → 扫 tailnet 同端口找可达的 bridge 候选(只做无凭据的 GET 探测,
     // 兑换凭据绝不往未确认的地址发)。跨 tailnet 共享的映射地址错位就靠这提示自救。
     const net = failKind === "timeout" || failKind === "refused";
@@ -533,9 +500,9 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   output({
     ok: true, peer: finalName, peerUrl: hs.url,
     remoteAgents: redeemRes?.agents ?? [],
-    exposedAgents: agents,
+    exposedAgents: rev.kept ?? agents,
     note: `已接入。send_to_agent 目标写法: "<对方agent>@${finalName}"` +
-      (agents.length === 0 ? "。当前未向对方开放任何 agent——需要对称访问就生成一张自己的邀请发回去。" : ""),
-    ...(reverseNote ? { warnings: [reverseNote] } : {}),
+      (!rev.kept && agents.length === 0 ? "。当前未向对方开放任何 agent——需要对称访问就生成一张自己的邀请发回去。" : ""),
+    ...(rev.note ? { warnings: [rev.note] } : {}),
   });
 }
