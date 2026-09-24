@@ -57,7 +57,7 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
     <div ref={wrapRef} className="relative shrink-0">
       <button
         type="button"
-        className={`rounded-full px-2 py-0.5 font-mono text-[10.5px] tabular-nums transition-opacity hover:opacity-80 ${BADGE[level]}`}
+        className={`flex items-center rounded-full px-2 py-0.5 font-mono text-[10.5px] tabular-nums transition-opacity hover:opacity-80 ${BADGE[level]}`}
         title={t("当前会话上下文占用,点开看压缩建议")}
         onClick={() => setOpen((v) => !v)}
       >
