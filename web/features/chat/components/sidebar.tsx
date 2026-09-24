@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { SettingsModal } from "./settings-modal";
@@ -168,6 +169,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   // 大总管独立入口(owner 2026-07-14:「跟普通 agent 区分开」)——不进列表、
   // 不参与搜索过滤,常驻列表区顶部的边框卡片
   const master = agents.find((a) => a.pinnedMaster);
+  // 大总管卡不走 AgentRow，【草稿】标单独订阅一份（agent-row.tsx 同款）
+  const masterDraft = useSyncExternalStore(subscribeDrafts, () => (master ? hasDraft(master.name) : false), () => false);
   const workers = agents.filter((a) => !a.pinnedMaster);
   // 只按「置顶」分层,⚠ 未读不参与排序——规则与缘由见 sidebar-entries.ts
   const filtered = filterAndRankWorkers(workers, q, pinSet);
@@ -453,7 +456,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               <MasterIcon className="size-[18px]" />
             </span>
             <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-[15px] font-medium sm:text-sm">{t(master.displayName)}</span>
+              <span className="truncate text-[15px] font-medium sm:text-sm">
+                {t(master.displayName)}
+                {masterDraft && active !== master.name && <span className="badge badge-ghost badge-xs ml-1 align-middle">{t("草稿")}</span>}
+              </span>
               <span className="truncate text-[11px] text-base-content/45">{t("总控调度 · 新建会话找它")}</span>
             </span>
             {(master.busy || master.compacting || (active === master.name && streaming)) && (
