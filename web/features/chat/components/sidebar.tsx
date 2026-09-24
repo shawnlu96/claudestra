@@ -14,6 +14,7 @@ import { ArchivedSessions } from "./archived-sessions";
 import { buildSidebarEntries, filterAndRankWorkers, splitDormant, type SidebarEntry } from "../sidebar-entries";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
+import { PeersButton } from "./peers-button";
 import { Chevron, ProjectGroup } from "./project-group";
 import type { AgentSession } from "../type";
 import { swipeReg } from "./agent-row-swipe";
@@ -267,6 +268,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               </svg>
             )}
           </button>
+          <PeersButton />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("用量看板")}

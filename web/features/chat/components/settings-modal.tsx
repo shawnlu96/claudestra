@@ -4,7 +4,6 @@ import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 import { useClaudeModels } from "../claude-models";
 import { isNativeShell } from "@/lib/native";
-import { PeersModal } from "./peers-modal";
 import { CronModal } from "./cron-modal";
 import { RemoteAccessSection } from "./remote-access-section";
 import { Section, GroupLabel } from "./settings/section";
@@ -55,7 +54,6 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const hygiene = useMemoryHygiene(open);
   const autoCompact = useAutoCompact(open);
   // HTTP peer 管理(owner 2026-07-24):独立弹窗
-  const [showPeers, setShowPeers] = useState(false);
   // 定时任务管理(owner 2026-08-26):独立弹窗
   const [showCron, setShowCron] = useState(false);
 
@@ -124,16 +122,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
         <PasskeySection />
 
         <GroupLabel>{t("连接与集成")}</GroupLabel>
-        {/* ── HTTP peer 协作 ─────────────── */}
-        <Section
-          title={t("Peer 协作")}
-          aside={
-            <button className="btn btn-sm" onClick={() => setShowPeers(true)}>
-              {t("管理")}
-            </button>
-          }
-          desc={t("跨 Claudestra 实例互访：查看/编辑对方的访问权限、测试连通、完成握手。")}
-        />
+        {/* Peer 协作已挪到侧栏顶部的独立按钮（peers-button.tsx） */}
 
         {/* ── 语音识别 Key ─────────────── */}
         <GroqKeySection groq={groq} busy={busy} />
@@ -143,7 +132,6 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
 
         </div>
     </CenteredModal>
-    <PeersModal open={showPeers} onClose={() => setShowPeers(false)} />
     <CronModal open={showCron} onClose={() => setShowCron(false)} />
     </>
   );
