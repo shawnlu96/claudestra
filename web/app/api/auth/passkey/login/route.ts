@@ -1,7 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { createSession, SESSION_COOKIE, checkRateLimit } from "@/lib/services/auth.service";
+import { createSession, sessionCookie, checkRateLimit } from "@/lib/services/auth.service";
 import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
 import { beginAuthentication, finishAuthentication } from "@/lib/services/webauthn.service";
 import { requestClientIp } from "@/lib/client-ip";
@@ -20,8 +20,6 @@ import { requestClientIp } from "@/lib/client-ip";
  * 用户验证（指纹/面容/PIN）」的双因素，再叠一层动态码没有安全收益，只有体验
  * 损耗。这与主流实现（Google/Apple/GitHub）一致。
  */
-
-const SESSION_DAYS = 7;
 
 function rlKeyOf(request: Request): string {
   // 直连时不信 XFF（客户端可伪造），见 client-ip.ts
@@ -69,13 +67,7 @@ export async function POST(request: Request) {
     // 用户名取本机登录名：passkey 是设备绑定的，这套系统本就是单用户
     const session = createSession(process.env.USER || "claudestra");
     const res = NextResponse.json({ data: { username: session.username, via: r.credName } });
-    res.cookies.set(SESSION_COOKIE, session.id, {
-      httpOnly: true,
-      sameSite: "strict",
-      secure: process.env.COOKIE_SECURE === "on",
-      path: "/",
-      maxAge: SESSION_DAYS * 24 * 60 * 60,
-    });
+    res.cookies.set(sessionCookie(session.id));
     return res;
   }
 

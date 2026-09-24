@@ -7,6 +7,17 @@ import type { Session } from "../types";
 export const SESSION_COOKIE = "cstra_session";
 const SESSION_DAYS = 7;
 
+/**
+ * 会话 cookie 的唯一写法（密码登录 / passkey / 落盘跳转三处共用——属性不一致浏览器会当成两个 cookie）。
+ * Secure 默认关：这套 web 常经 Tailscale / 本机明文 HTTP 访问，Secure cookie 在 HTTP 下会被直接丢弃
+ * → 登录成功却存不下、一直跳回登录页；只有前面是 HTTPS 反代的部署才设 COOKIE_SECURE=on。
+ * （httpOnly + sameSite=strict 已防 XSS/CSRF，Secure 只防明文窃听。）
+ */
+export function sessionCookie(id: string, maxAgeSec = SESSION_DAYS * 24 * 60 * 60) {
+  const secure = process.env.COOKIE_SECURE === "on";
+  return { name: SESSION_COOKIE, value: id, httpOnly: true, sameSite: "strict" as const, secure, path: "/", maxAge: maxAgeSec };
+}
+
 // ---- SSH/PAM authentication ----
 // 通过连接本机 SSH 服务校验账号密码（等价 PAM）。成功即视为鉴权通过。
 //

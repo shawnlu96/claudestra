@@ -1,10 +1,14 @@
 "use client";
 
 import { Suspense, useState, useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 
 /** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
+// 登录成功后整页跳这里再进 /chat（而不是前端路由跳转）：让会话 cookie 在一次页面导航的响应里落盘，
+// 原因见 app/api/auth/commit/route.ts
+const COMMIT_URL = "/api/auth/commit";
+
 const FORM_ERRORS: Record<string, string> = {
   cred: "用户名或密码错误",
   rate: "登录尝试过于频繁，请稍后再试",
@@ -31,7 +35,6 @@ function LoginInner() {
   const [needTotp, setNeedTotp] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
   // 未水合的原生提交走 303 重定向回 /login?e=<code>——SSR 也能渲染出错误文案
   const urlErrCode = useSearchParams().get("e") || "";
   const urlError = FORM_ERRORS[urlErrCode] || "";
@@ -67,7 +70,7 @@ function LoginInner() {
       });
       const fj = await f.json();
       if (!f.ok) { setError(fj.error || "Passkey 登录失败"); return; }
-      router.push("/");
+      window.location.replace(COMMIT_URL);
     } catch (e) {
       // 用户取消指纹弹窗也走这里——不当错误刷屏
       const msg = (e as Error).message || "";
@@ -102,7 +105,7 @@ function LoginInner() {
         sessionStorage.setItem("cstra_recovery_note", String(json.data.recovery.remaining ?? 0));
       } catch { /* 隐私模式 */ }
     }
-    router.push("/");
+    window.location.replace(COMMIT_URL);
   };
 
   return (
