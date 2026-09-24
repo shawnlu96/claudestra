@@ -10,6 +10,7 @@ import { useT } from "@/lib/i18n";
 import { useShare } from "./share-ui";
 import { Composer } from "./composer";
 import { Message } from "./message-list";
+import { ExportHeader, type ExportMeta } from "./export-header";
 
 /**
  * 分享模式的底部 dock（顶替输入框的位置）：已选数量 / 导出 HTML / 导出 PDF / 返回对话。
@@ -18,7 +19,9 @@ import { Message } from "./message-list";
  * ChatStoreProvider 之下，所以 Message 里的 store 订阅照常工作），等 markdown / 代码
  * 高亮落地后把 DOM 序列化，内联全部 CSS 和图片，得到自包含 HTML（share-export.ts）。
  * PDF 不自己生成——同一份 HTML 走系统打印，用户在对话框里「存为 PDF」。
- * 分享面板 / 打印都要用户手势，所以是两步：先「生成」，好了再点「保存 / 打印」。
+ * 分享面板 / 打印都要用户手势，所以是两步：先「生成」，好了再点「保存 / 打印」；
+ * 生成结果绑定当时的选区——选区一变就作废回到第一步，也有「取消」可退（owner 2026-09-25
+ * 「回退不了了，必须退出再重进」）。
  */
 export function ComposerOrDock() {
   const { on } = useShare();
@@ -26,14 +29,15 @@ export function ComposerOrDock() {
 }
 
 type Kind = "html" | "pdf";
-type Job = { kind: Kind; msgs: ChatMessage[] };
-type Ready = { kind: Kind; html: string; name: string };
+type Job = { kind: Kind; key: string; msgs: ChatMessage[] };
+type Ready = { kind: Kind; key: string; html: string; name: string };
 
-/** 导出树：ExportContext 打开 → 旁白强制展开、进度句不渲染；每条外面保留 data-mid（打印分页用） */
-function ExportDoc({ msgs }: { msgs: ChatMessage[] }) {
+/** 导出树：抬头 + 选中消息；ExportContext 打开 → 旁白强制展开、进度句不渲染；每条外面保留 data-mid */
+function ExportDoc({ msgs, meta, agent }: { msgs: ChatMessage[]; meta: ExportMeta; agent: string }) {
   return (
     <ExportContext.Provider value={true}>
       <div className="text-base-content">
+        <ExportHeader meta={meta} agent={agent} count={msgs.length} at={new Date()} />
         {msgs.map((m) => (
           <div key={m.id} data-mid={m.id}>
             <Message m={m} streaming={false} isLast={false} awaiting={false} />
@@ -68,6 +72,28 @@ async function packExport(host: HTMLElement, title: string): Promise<string> {
   return buildHtmlDoc({ title, bodyHtml: host.innerHTML, css, links, htmlAttrs, bodyClass: document.body.className });
 }
 
+/** 抬头用的版本 / 导出人：进 dock 时拉一次，拉不到就留空 */
+function useExportMeta(): ExportMeta {
+  const nickname = useChatStore((s) => s.state.profile.nickname);
+  const [meta, setMeta] = useState<ExportMeta>({ version: "", commit: "", exporter: "" });
+  useEffect(() => {
+    let dead = false;
+    Promise.all([
+      fetch("/api/version").then((r) => (r.ok ? r.json() : null)).catch(() => null /* 版本拿不到抬头就不写版本，导出照常 */),
+      fetch("/api/auth/me").then((r) => (r.ok ? r.json() : null)).catch(() => null /* 用户名拿不到就用昵称或留空，导出照常 */),
+    ]).then(([v, me]) => {
+      if (dead) return;
+      const ver = (v ?? {}) as { version?: string; commit?: string };
+      const user = ((me ?? {}) as { data?: { username?: string } }).data?.username ?? "";
+      setMeta({ version: ver.version ?? "", commit: ver.commit ?? "", exporter: user });
+    });
+    return () => {
+      dead = true;
+    };
+  }, []);
+  return { ...meta, exporter: nickname || meta.exporter };
+}
+
 export function ShareDock() {
   const t = useT();
   const { sel } = useShare();
@@ -78,8 +104,11 @@ export function ShareDock() {
   const order = useMemo(() => messages.map((m) => m.id), [messages]);
   const range = selRange(sel, order);
   const count = range ? range.hi - range.lo + 1 : 0;
+  const selKey = sel ? `${sel.a}|${sel.b}` : "";
+  const meta = useExportMeta();
   const [job, setJob] = useState<Job | null>(null);
-  const [ready, setReady] = useState<Ready | null>(null);
+  const [readyRaw, setReady] = useState<Ready | null>(null);
+  const ready = readyRaw && readyRaw.key === selKey ? readyRaw : null; // 选区变了就作废
   const [err, setErr] = useState("");
   const [host, setHost] = useState<HTMLDivElement | null>(null);
   useEffect(() => () => host?.remove(), [host]);
@@ -90,7 +119,7 @@ export function ShareDock() {
     packExport(host, title)
       .then((html) => {
         if (cancelled) return;
-        setReady({ kind: job.kind, html, name: exportFileName(title) });
+        setReady({ kind: job.kind, key: job.key, html, name: exportFileName(title) });
         setJob(null);
       })
       .catch((e: unknown) => {
@@ -108,7 +137,7 @@ export function ShareDock() {
     setErr("");
     setReady(null);
     if (!host) setHost(makeHost());
-    setJob({ kind, msgs: messages.slice(range.lo, range.hi + 1) });
+    setJob({ kind, key: selKey, msgs: messages.slice(range.lo, range.hi + 1) });
   };
   const finish = () => {
     if (!ready) return;
@@ -126,9 +155,14 @@ export function ShareDock() {
         {err && <span className="text-xs text-error/80">{t("导出失败:")}{err}</span>}
         <span className="ml-auto flex items-center gap-1.5">
           {ready ? (
-            <button className="btn btn-primary btn-sm" onClick={finish}>
-              {ready.kind === "pdf" ? t("打开打印（存为 PDF）") : t("保存 HTML")}
-            </button>
+            <>
+              <button className="btn btn-primary btn-sm" onClick={finish}>
+                {ready.kind === "pdf" ? t("打开打印（存为 PDF）") : t("保存 HTML")}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setReady(null)}>
+                {t("取消")}
+              </button>
+            </>
           ) : (
             <>
               <button className="btn btn-sm" disabled={!count || !!job} onClick={() => start("html")}>
@@ -137,14 +171,14 @@ export function ShareDock() {
               <button className="btn btn-sm" disabled={!count || !!job} onClick={() => start("pdf")}>
                 {job?.kind === "pdf" ? <span className="loading loading-spinner loading-xs" /> : null} {t("导出 PDF")}
               </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShareOn(false)}>
+                {t("返回对话")}
+              </button>
             </>
           )}
-          <button className="btn btn-ghost btn-sm" onClick={() => setShareOn(false)}>
-            {t("返回对话")}
-          </button>
         </span>
       </div>
-      {job && host && createPortal(<ExportDoc msgs={job.msgs} />, host)}
+      {job && host && createPortal(<ExportDoc msgs={job.msgs} meta={meta} agent={title} />, host)}
     </div>
   );
 }
