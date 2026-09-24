@@ -3379,9 +3379,8 @@ switch (cmd) {
     await cmdPeerHttpScope(pos[0] || "", agentsCsv, force);
     break;
   }
-  case "peer-http-remove":
-    await cmdPeerHttpRemove(args[0] || "");
-    break;
+  case "peer-http-remove": await cmdPeerHttpRemove(args[0] || ""); break;
+  case "peer-http-tidy": await (await import("./manager/peers-tidy.js")).cmdPeerHttpTidy(args.includes("--apply")); break;
 
   // v2.15+ 一键邀请（免回执自动握手）
   case "peer-invite-new": {
@@ -3404,15 +3403,16 @@ switch (cmd) {
     await cmdPeerInviteRevoke(args[0] || "");
     break;
   case "peer-invite-redeem": {
-    let join = "", name = "", url = "", token = "";
+    let join = "", name = "", url = "", token = "", iid = "";
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
       if (a === "--join") join = args[++i] || "";
       else if (a === "--name") name = args[++i] || "";
       else if (a === "--url") url = args[++i] || "";
       else if (a === "--token") token = args[++i] || "";
+      else if (a === "--iid") iid = args[++i] || "";
     }
-    await cmdPeerInviteRedeem(join, name, url, token);
+    await cmdPeerInviteRedeem(join, name, url, token, iid);
     break;
   }
   case "peer-join-auto": {

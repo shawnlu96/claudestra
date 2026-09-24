@@ -6,7 +6,8 @@ import { useArmedConfirm } from "../use-armed-confirm";
 import { peersAction, ScopePicker, ForceRow, HandshakeString, type ActionResult, type LocalAgent } from "./peers-shared";
 import { JoinPanel } from "./peers-join-panel";
 import { InviteChecklist } from "./peers-invite-checklist";
-import { PresenceLine, PresenceSummary, sortByPresence, type PeerPresenceInfo } from "./peers-presence";
+import { LastVisit, PresenceLine, PresenceSummary, sortByPresence, type PeerPresenceInfo } from "./peers-presence";
+import { PeersTidyBanner, type TidyGroupInfo } from "./peers-tidy-banner";
 
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
@@ -98,20 +99,16 @@ function PeerCard({
     else setMsg(r.error || t("移除失败"));
   };
 
+  // 一个对方一张卡：两个方向各一行。他→我 = 我签给他的有效 token（exposedAgents 为空 = 没有 / 已吊销）；
+  // 我→他 = 我存着他的地址 + token（handshakeDone）。不再用「握手 / 单向」这类说法。
+  const inbound = peer.exposedAgents.length > 0;
+  const row = "mt-3 flex items-start gap-3";
+  const label = "w-12 shrink-0 pt-0.5 text-[11.5px] font-medium text-base-content/50";
   return (
     <section className="rounded-xl bg-base-200/60 p-4">
       <div className="flex items-center gap-2">
-        <span className="text-[13.5px] font-semibold">🤝 {peer.name}</span>
-        {peer.disabled ? (
-          <span className="badge badge-ghost badge-xs">{t("已禁用")}</span>
-        ) : peer.handshakeDone ? (
-          <span className="badge badge-success badge-xs">{t("握手完成")}</span>
-        ) : peer.inTokenId ? (
-          // v2.15+ 一键邀请的单向形态:对方能访问我,我没有对方的地址/token
-          <span className="badge badge-info badge-xs">{t("单向（对方→我）")}</span>
-        ) : (
-          <span className="badge badge-warning badge-xs">{t("等待对方回执")}</span>
-        )}
+        <span className="text-[13.5px] font-semibold">{peer.name}</span>
+        {peer.disabled && <span className="badge badge-ghost badge-xs">{t("已禁用")}</span>}
         <button
           className={`btn btn-ghost btn-xs ml-auto ${confirmRm ? "text-error" : "text-base-content/50"}`}
           disabled={removing}
@@ -120,96 +117,80 @@ function PeerCard({
           {removing ? "…" : confirmRm ? t("确认移除?") : t("移除")}
         </button>
       </div>
-      {peer.baseUrl && (
-        <div className="mt-0.5 truncate font-mono text-[11px] text-base-content/50">{peer.baseUrl}</div>
-      )}
-      <PresenceLine presence={peer.presence} />
 
-      {/* 入站:对方可访问我这边哪些 agent */}
-      <div className="mt-3">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-base-content/60">{t("对方可访问我的")}</span>
-          {!editing && (
-            <button
-              className="btn btn-ghost btn-xs"
-              onClick={() => {
-                setSel(peer.exposedAgents);
-                setMsg("");
-                setNeedForce(false);
-                setEditing(true);
-              }}
-            >
-              {t("编辑")}
-            </button>
+      <div className={row}>
+        <span className={label}>{t("他 → 我")}</span>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <div>
+              <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} />
+              {needForce && msg ? (
+                <ForceRow msg={msg} busy={saving} onForce={() => void saveScope(true)} forceLabel="确认风险，强制保存" />
+              ) : (
+                msg && <div className="mt-1 text-xs text-error">{msg}</div>
+              )}
+              <div className="mt-2 flex justify-end gap-2">
+                <button className="btn btn-ghost btn-xs" disabled={saving} onClick={() => setEditing(false)}>
+                  {t("取消")}
+                </button>
+                <button className="btn btn-primary btn-xs" disabled={saving || sel.length === 0} onClick={() => void saveScope(false)}>
+                  {t("保存")}
+                </button>
+              </div>
+            </div>
+          ) : inbound ? (
+            <>
+              <div className="flex flex-wrap items-center gap-1 text-[11.5px] text-base-content/60">
+                {t("可以找你的")}:
+                {peer.exposedAgents.map((a) => (
+                  <span key={a} className="badge badge-outline badge-sm font-mono">{a}</span>
+                ))}
+                <button
+                  className="btn btn-ghost btn-xs"
+                  onClick={() => {
+                    setSel(peer.exposedAgents);
+                    setMsg("");
+                    setNeedForce(false);
+                    setEditing(true);
+                  }}
+                >
+                  {t("修改")}
+                </button>
+              </div>
+              <LastVisit presence={peer.presence} />
+            </>
+          ) : (
+            <div className="text-[11.5px] text-base-content/45">{t("他还连不上你——生成一张邀请发给他")}</div>
           )}
         </div>
-        {editing ? (
-          <div className="mt-1">
-            <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} />
-            {needForce && msg ? (
-              <ForceRow msg={msg} busy={saving} onForce={() => void saveScope(true)} forceLabel="确认风险，强制保存" />
-            ) : (
-              msg && <div className="mt-1 text-xs text-error">{msg}</div>
-            )}
-            <div className="mt-2 flex justify-end gap-2">
-              <button className="btn btn-ghost btn-xs" disabled={saving} onClick={() => setEditing(false)}>
-                {t("取消")}
-              </button>
-              <button
-                className="btn btn-primary btn-xs"
-                disabled={saving || sel.length === 0}
-                onClick={() => void saveScope(false)}
-              >
-                {t("保存")}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-1 flex flex-wrap gap-1">
-            {peer.exposedAgents.length ? (
-              peer.exposedAgents.map((a) => (
-                <span key={a} className="badge badge-outline badge-sm font-mono">
-                  {a}
-                </span>
-              ))
-            ) : (
-              <span className="text-xs text-base-content/40">{t("（无有效 token）")}</span>
-            )}
-          </div>
-        )}
       </div>
 
-      {/* 出站:我在对方那边可访问哪些 agent(实时探测) */}
-      <div className="mt-3">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-base-content/60">{t("我可访问对方的")}</span>
-          <button className="btn btn-ghost btn-xs" disabled={testing || !peer.handshakeDone} onClick={() => void runTest()}>
-            {testing ? <span className="loading loading-spinner loading-xs" /> : t("测试连通")}
-          </button>
-        </div>
-        {testRes && (
-          <div className="mt-1">
-            {testRes.ok ? (
-              <div className="flex flex-wrap items-center gap-1">
-                <span className="badge badge-success badge-xs">{t("连通正常")}</span>
-                {(testRes.remoteAgents || []).map((a) => (
-                  <span key={a.name} className="badge badge-outline badge-sm font-mono">
-                    {a.name}
-                    <span className={`ml-1 size-1.5 rounded-full ${a.status === "active" ? "bg-success" : "bg-base-content/30"}`} />
-                  </span>
-                ))}
-                {(testRes.remoteAgents || []).length === 0 && (
-                  <span className="text-xs text-base-content/40">{t("（对方未开放任何 agent）")}</span>
-                )}
+      <div className={row}>
+        <span className={label}>{t("我 → 他")}</span>
+        <div className="min-w-0 flex-1">
+          {peer.handshakeDone ? (
+            <>
+              <div className="flex items-start gap-1">
+                <div className="min-w-0 flex-1 [&>div]:mt-0">
+                  <PresenceLine presence={peer.presence} />
+                </div>
+                <button className="btn btn-ghost btn-xs" disabled={testing} onClick={() => void runTest()}>
+                  {testing ? <span className="loading loading-spinner loading-xs" /> : t("测试")}
+                </button>
               </div>
-            ) : (
-              <div className="text-xs text-error">{testRes.error}</div>
-            )}
-          </div>
-        )}
-        {!peer.handshakeDone && !testRes && (
-          <div className="mt-1 text-xs text-base-content/40">{t("握手完成后可测试")}</div>
-        )}
+              <div className="mt-0.5 truncate font-mono text-[10.5px] text-base-content/40">{peer.baseUrl}</div>
+              {testRes && (
+                <div className={`mt-1 text-[11.5px] ${testRes.ok ? "text-success" : "text-error"}`}>
+                  {testRes.ok
+                    ? `${t("连通正常")}${(testRes.remoteAgents || []).length ? ` · ${(testRes.remoteAgents || []).map((a) => a.name.replace(/^agent-/, "")).join(", ")}` : ` · ${t("（对方未开放任何 agent）")}`}`
+                    : testRes.error}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-[11.5px] text-base-content/45">{t("你还连不上他——让他发邀请给你，在下面「加入」里粘贴")}</div>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -392,16 +373,18 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [localAgents, setLocalAgents] = useState<LocalAgent[]>([]);
   const [pendingInvites, setPendingInvites] = useState<PendingInviteInfo[]>([]);
+  const [tidy, setTidy] = useState<TidyGroupInfo[]>([]);
 
   const reload = useCallback(async () => {
     setErr("");
     try {
       const res = await fetch("/api/peers");
-      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[]; pendingInvites?: PendingInviteInfo[] };
+      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[]; pendingInvites?: PendingInviteInfo[]; tidy?: TidyGroupInfo[] };
       if (j.ok) {
         setPeers(j.peers || []);
         setLocalAgents(j.localAgents || []);
         setPendingInvites(j.pendingInvites || []);
+        setTidy(j.tidy || []);
       } else {
         setErr(j.error || t("加载失败"));
       }
@@ -442,6 +425,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
             </div>
           ) : (
             <>
+              <PeersTidyBanner groups={tidy} onDone={() => void reload()} />
               <PresenceSummary peers={peers} />
               {sortByPresence(peers).map((p) => (
                 <PeerCard key={p.name} peer={p} localAgents={localAgents} onChanged={() => void reload()} />

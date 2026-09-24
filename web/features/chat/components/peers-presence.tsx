@@ -46,10 +46,10 @@ export function PresenceSummary({ peers }: { peers: { presence?: PeerPresenceInf
   );
 }
 
+/** 「我 → 他」这一行的状态：在线 / 离线原因 / 上次在线 / 他开放给我的 agent（入站来访见 LastVisit） */
 export function PresenceLine({ presence }: { presence?: PeerPresenceInfo }) {
   const t = useT();
   const p = presence ?? { online: null };
-  const inbound = ms(p.lastInboundAt);
   const dot = p.online === true ? "bg-success" : p.online === false ? "bg-error" : "bg-base-content/25";
   let head: string;
   if (p.online === true) head = `${t("在线")}${p.latencyMs !== undefined ? ` · ${p.latencyMs}ms` : ""}`;
@@ -67,10 +67,16 @@ export function PresenceLine({ presence }: { presence?: PeerPresenceInfo }) {
       )}
       {!!p.remoteAgents?.length && (
         <div className="pl-3 text-base-content/45">
-          {t("对方开放给我")}: {p.remoteAgents.map((a) => a.name.replace(/^agent-/, "")).join(", ")}
+          {t("他开放给你的")}: {p.remoteAgents.map((a) => a.name.replace(/^agent-/, "")).join(", ")}
         </div>
       )}
-      {inbound && <div className="pl-3 text-base-content/45">{`${t("对方最近来访")} ${fmtAgo(inbound)}`}</div>}
     </div>
   );
+}
+
+/** 「他 → 我」这一行的最近来访（单向 peer 只能靠它判断对方还在不在用） */
+export function LastVisit({ presence }: { presence?: PeerPresenceInfo }) {
+  const t = useT();
+  const at = ms(presence?.lastInboundAt);
+  return at ? <div className="text-[11.5px] text-base-content/45">{`${t("最近来找你")} ${fmtAgo(at)}`}</div> : null;
 }

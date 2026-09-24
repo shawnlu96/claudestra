@@ -30,7 +30,7 @@ export const POST = authedLegacy(async (request: Request) => {
     return NextResponse.json({ ok: false, error: "action 不能为空" }, { status: 400 });
   }
   // v2.15+ 一键邀请系 action 不需要 name（对方名字是兑换时自报的）
-  const namelessActions = new Set(["invite-new", "join-auto", "invite-revoke"]);
+  const namelessActions = new Set(["invite-new", "join-auto", "invite-revoke", "tidy"]);
   const safeName = typeof name === "string" ? name.trim() : "";
   if (!namelessActions.has(action) && !safeName) {
     return NextResponse.json({ ok: false, error: "name 不能为空" }, { status: 400 });
@@ -47,6 +47,9 @@ export const POST = authedLegacy(async (request: Request) => {
       break;
     case "invite-revoke":
       result = await bridgePost(`/peers/invite-revoke`, { id: body.id });
+      break;
+    case "tidy":
+      result = await bridgePost(`/peers/tidy`, {});
       break;
     case "invite":
     case "join":

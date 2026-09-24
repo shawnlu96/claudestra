@@ -21,7 +21,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "create", "resume", "adopt", "kill", "remove", "restart", "rename", "archive",
   "cron-add", "cron-remove", "cron-toggle", "cron-edit",
   "install-hooks",
-  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove",
+  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy",
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-migrate",

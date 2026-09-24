@@ -146,3 +146,18 @@ peer 全删了就退回本机；`hold` 顶住「邀请 token 还没签出来」�
 - v1 范围：CLI 全流程 + bridge transport + 注入头 + 测试。Web 管理页（可视化
   暴露/历史）v2 再做——CLI 先把地基打对。
 - 版本：v2.11.0（minor，新用户能力）。
+
+## 6d. 一个对方一条记录（instanceId）+ 整理旧重复（2026-09-24）
+
+owner：「peer 界面乱的要死……Alex 两边都握手了，为什么一个已握手一个单向？」根子是同一个对方被存成多条：
+他兑换我的邀请 → 只有入站的记录；我加入他的邀请撞名 → 只有出站的 `-2`；他重新加入 → `-3`。
+
+- **实例 id**：每个 Claudestra 在 `STATE_DIR/instance-id` 有一个固定随机 id（`lib/instance-id.ts`）。邀请串带 `iid`，
+  兑换回调 body 带 `iid`，记录存 `instanceId`。加入（`isSameInviter`）：同出站地址，或同实例 id 且还没有我→他 = 同一对方，
+  补进原记录；兑换（`isSameRedeemer`）：同实例 id = 他重新加入，合进原记录并吊销被取代的旧入站 token。
+  已有别的出站地址时不合并——实例 id 是自报的，一张邀请不能把既有 peer 的流量改道。
+- **旧重复整理**：`peer-http-tidy`（默认只出计划，`--apply` 才写；`lib/peer-tidy.ts` 纯规划）。按去掉 `-N` 的名字分组：
+  出站多条只在 host 相同时合并（不同 host 可能是两个人，整组不动）；入站 token 留最新签的、更早的吊销；两个方向都没有的删掉。
+  GET /api/v1/peers 带 `tidy` 预览，Peer 弹窗顶部显示并二次确认后执行（POST /api/v1/peers/tidy）。
+- **卡片**：一个对方一张，两行「他 → 我」（我签给他的有效 token、最近来访）/「我 → 他」（在线状态、他开放给我的 agent），
+  不再用「握手完成 / 单向 / 等待回执」这些说法。/peers 路由整体搬到 `src/bridge/peers-routes.ts`。

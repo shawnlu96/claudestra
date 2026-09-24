@@ -79,6 +79,7 @@ import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LE
 import { isPiThinkingLevel } from "../lib/pi-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
+import { handlePeersRoutes } from "./peers-routes.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -371,10 +372,11 @@ async function handlePeerRedeem(req: Request): Promise<Response> {
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const peerUrl = typeof body?.url === "string" ? body.url.trim() : "";
   const token = typeof body?.token === "string" ? body.token.trim() : "";
+  const iid = typeof body?.iid === "string" && /^[\w-]{1,64}$/.test(body.iid) ? body.iid : ""; // 对方实例 id：同一对方合进同一条记录
   if (!join || !name) return apiJson(400, { ok: false, error: '"join" and "name" required' });
   const r: any = await runManager(
     "peer-invite-redeem", "--join", join, "--name", name,
-    ...(peerUrl ? ["--url", peerUrl] : []), ...(token ? ["--token", token] : []),
+    ...(peerUrl ? ["--url", peerUrl] : []), ...(token ? ["--token", token] : []), ...(iid ? ["--iid", iid] : []),
   );
   if (r?.ok) {
     recordMetric("peer_managed", { meta: { action: "redeem", peer: r.peer } });
@@ -382,7 +384,7 @@ async function handlePeerRedeem(req: Request): Promise<Response> {
     void deps?.notifyOwner?.(
       `🤝 新 peer「${r.peer}」通过一键邀请接入，可访问: ${(r.agents || []).join(", ") || "（无）"}` +
         (r.oneWay ? "（单向：对方访问我，我未获对方权限）" : "") +
-        `。撤销：Web 设置 → Peer 协作 → 移除，或 \`peer-http-remove ${r.peer}\``,
+        `。撤销：侧栏顶部 Peer 按钮 → 移除，或 \`peer-http-remove ${r.peer}\``,
     ).catch(() => {});
   }
   // 失败一律 400 且不细分原因等级——这是个无鉴权端点，不给探测者更多信息面
@@ -2330,127 +2332,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(405, { ok: false, error: "method not allowed" });
   }
 
-  // ── v2.11.1+ /peers —— HTTP peer 管理面（web UI 后端;owner 2026-07-24
-  // 「前端要能管理 peer 的权限以及在哪些远端有权限」）。全部 mutation 走
-  // runManager 复用 CLI 的 R1 校验/token 签发/原子写,bridge 不直写 principals。
-  if (path === "/peers" || path.startsWith("/peers/")) {
-    if (!isFullScope(principal)) return forbidden("peers management requires a full-scope token");
-
-    // GET /peers —— 清单:peers.json ⋈ principals(入站 scope) + 本地 agent 表(scope 编辑器数据源)
-    if (path === "/peers" && req.method === "GET") {
-      const [peersData, pf, regAgents] = await Promise.all([
-        readPeers(),
-        readPrincipals(),
-        readRegistryAgents(),
-      ]);
-      const { peerPresence } = await import("./peer-presence.js");
-      const peers = (peersData.httpPeers || []).map((p) => {
-        const tok = pf.principals.find((x) => x.peer === p.name && !x.disabled);
-        return {
-          name: p.name,
-          baseUrl: p.baseUrl || null,
-          handshakeDone: !!(p.outToken && p.baseUrl),
-          disabled: !!p.disabled,
-          addedAt: p.addedAt,
-          inTokenId: tok ? tokenIdOf(tok) : p.inTokenId ?? null,
-          /** 对方 token 的 scope = 对方能访问我这边哪些 agent */
-          exposedAgents: tok?.agents ?? [],
-          presence: peerPresence(p.name), // 在线状态 + 最近来访（bridge/peer-presence.ts）
-        };
-      });
-      const localAgents = regAgents.map((a) => ({
-        name: a.name.startsWith("agent-") ? a.name.slice(6) : a.name,
-        external: !!a.external,
-        status: a.status ?? "unknown",
-      }));
-      // v2.15+ 待兑换的一键邀请（peer-invite-list 顺带清扫过期 + 吊销其 token）
-      const invRes: any = await runManager("peer-invite-list");
-      const pendingInvites = invRes?.ok ? invRes.invites || [] : [];
-      return apiJson(200, { ok: true, peers, localAgents, pendingInvites });
-    }
-
-    // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke
-    // —— 一键邀请（免回执自动握手）。mutation 照旧全部委托 runManager。
-    if (req.method === "POST" && (path === "/peers/invite-new" || path === "/peers/join-auto" || path === "/peers/invite-revoke")) {
-      const body: any = await readJsonBody(req);
-      if (body === INVALID_JSON) return invalidJsonBody();
-      const agentsCsv = Array.isArray(body?.agents)
-        ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
-        : "";
-      const flags: string[] = body?.force ? ["--force"] : [];
-      let r: any;
-      if (path === "/peers/invite-new") {
-        if (!agentsCsv) return apiJson(400, { ok: false, error: '"agents" must be a non-empty array' });
-        r = await runManager("peer-invite-new", "--agents", agentsCsv,
-          ...(body?.url ? ["--url", String(body.url)] : []), ...flags);
-      } else if (path === "/peers/join-auto") {
-        const invite = String(body?.invite ?? "").trim();
-        if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
-        r = await runManager("peer-join-auto", invite,
-          ...(agentsCsv ? ["--agents", agentsCsv] : []),
-          ...(body?.url ? ["--url", String(body.url)] : []), ...flags);
-      } else {
-        const id = String(body?.id ?? "").trim();
-        if (!id) return apiJson(400, { ok: false, error: '"id" required' });
-        r = await runManager("peer-invite-revoke", id);
-      }
-      if (r?.ok) recordMetric("peer_managed", { meta: { action: path.slice("/peers/".length), peer: r.peer ?? r.id ?? r.revoked ?? "" } });
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-
-    // POST /peers/invite | /peers/join | /peers/accept —— 握手三步
-    if (req.method === "POST" && (path === "/peers/invite" || path === "/peers/join" || path === "/peers/accept")) {
-      const body: any = await readJsonBody(req);
-      if (body === INVALID_JSON) return invalidJsonBody();
-      const name = typeof body?.name === "string" ? body.name.trim() : "";
-      if (!name) return apiJson(400, { ok: false, error: '"name" required' });
-      const agentsCsv = Array.isArray(body?.agents)
-        ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
-        : "";
-      const flags: string[] = [];
-      if (body?.force) flags.push("--force");
-      if (body?.rotate) flags.push("--rotate");
-      let r: any;
-      if (path === "/peers/invite") {
-        r = await runManager("peer-http-invite", name, "--agents", agentsCsv, "--url", String(body?.url ?? ""), ...flags);
-      } else if (path === "/peers/join") {
-        r = await runManager("peer-http-join", name, String(body?.invite ?? ""), "--agents", agentsCsv, "--url", String(body?.url ?? ""), ...flags);
-      } else {
-        r = await runManager("peer-http-accept", name, String(body?.receipt ?? ""));
-      }
-      if (r?.ok) recordMetric("peer_managed", { meta: { action: path.slice("/peers/".length), peer: name } });
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-
-    // POST /peers/:name/test | /peers/:name/scope | /peers/:name/remove
-    const peerActionMatch = path.match(/^\/peers\/([^/]+)\/(test|scope|remove)$/);
-    if (peerActionMatch && req.method === "POST") {
-      const pname = decodeURIComponent(peerActionMatch[1]);
-      const action = peerActionMatch[2];
-      if (action === "test") {
-        // 连通探测(顺带回答「我在对方那边有哪些 agent 可访问」)。失败也是数据不是服务错,一律 200
-        const r = await runManager("peer-http-test", pname);
-        return apiJson(200, r ?? { ok: false, error: "manager failed" });
-      }
-      if (action === "remove") {
-        const r = await runManager("peer-http-remove", pname);
-        if (r?.ok) recordMetric("peer_managed", { meta: { action: "remove", peer: pname } });
-        return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-      }
-      // scope —— 改对方入站可访问的 agent 白名单(R1 校验在 manager 侧)
-      const body: any = await readJsonBody(req);
-      if (body === INVALID_JSON) return invalidJsonBody();
-      const agentsCsv = Array.isArray(body?.agents)
-        ? body.agents.map((s: unknown) => String(s).trim()).filter(Boolean).join(",")
-        : "";
-      if (!agentsCsv) return apiJson(400, { ok: false, error: '"agents" must be a non-empty array' });
-      const r = await runManager("peer-http-scope", pname, "--agents", agentsCsv, ...(body?.force ? ["--force"] : []));
-      if (r?.ok) recordMetric("peer_managed", { meta: { action: "scope", peer: pname, agents: agentsCsv } });
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-
-    return apiJson(404, { ok: false, error: "unknown peers endpoint" });
-  }
+  const peersRes = await handlePeersRoutes(req, path, principal, runManager); // /peers*（bridge/peers-routes.ts）
+  if (peersRes) return peersRes;
 
   return apiJson(404, { ok: false, error: "unknown endpoint" });
 }
