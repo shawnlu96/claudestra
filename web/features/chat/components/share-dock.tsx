@@ -11,6 +11,7 @@ import { useShare } from "./share-ui";
 import { Composer } from "./composer";
 import { Message } from "./message-list";
 import { ExportHeader, type ExportMeta } from "./export-header";
+import { getGrammarVersion } from "@/components/domd/prism";
 
 /**
  * 分享模式的底部 dock（顶替输入框的位置）：已选数量 / 导出语言 / 导出 HTML / 导出 PDF / 返回对话。
@@ -61,7 +62,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 离屏树挂上后：等一拍让 Prism 语法 / 图片落地 → 内联图片 → 抄样式 → 拼文档 */
 async function packExport(host: HTMLElement, title: string, lang: Lang): Promise<string> {
-  await sleep(600);
+  await waitRendered(host);
   await inlineImages(host);
   const { css, links } = await collectCss(document);
   const root = document.documentElement;
@@ -72,26 +73,41 @@ async function packExport(host: HTMLElement, title: string, lang: Lang): Promise
   return buildHtmlDoc({ title, bodyHtml: host.innerHTML, css, links, htmlAttrs, bodyClass: document.body.className });
 }
 
-/** 抬头用的版本 / 导出人：进 dock 时拉一次，拉不到就留空 */
+/** 抬头用的版本：进 dock 时拉一次，拉不到就留空。导出人只用个人资料昵称——不回退到登录名，
+ *  那是本机 SSH 账号，不该跟着文件发出去（peer review #43）。 */
 function useExportMeta(): ExportMeta {
   const nickname = useChatStore((s) => s.state.profile.nickname);
-  const [meta, setMeta] = useState<ExportMeta>({ version: "", commit: "", exporter: "" });
+  const [ver, setVer] = useState<{ version: string; commit: string }>({ version: "", commit: "" });
   useEffect(() => {
     let dead = false;
-    Promise.all([
-      fetch("/api/version").then((r) => (r.ok ? r.json() : null)).catch(() => null /* 版本拿不到抬头就不写版本，导出照常 */),
-      fetch("/api/auth/me").then((r) => (r.ok ? r.json() : null)).catch(() => null /* 用户名拿不到就用昵称或留空，导出照常 */),
-    ]).then(([v, me]) => {
-      if (dead) return;
-      const ver = (v ?? {}) as { version?: string; commit?: string };
-      const user = ((me ?? {}) as { data?: { username?: string } }).data?.username ?? "";
-      setMeta({ version: ver.version ?? "", commit: ver.commit ?? "", exporter: user });
-    });
+    fetch("/api/version")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((v: { version?: string; commit?: string } | null) => {
+        if (!dead && v) setVer({ version: v.version ?? "", commit: v.commit ?? "" });
+      })
+      .catch(() => null /* 版本拿不到抬头就不写版本，导出照常 */);
     return () => {
       dead = true;
     };
   }, []);
-  return { ...meta, exporter: nickname || meta.exporter };
+  return { ...ver, exporter: nickname };
+}
+
+/** 等离屏树真正渲染完再打包（peer review #43「固定等 600ms 选得多可能没渲染完」）：
+ *  字体就绪、图片加载完、Prism 语法 300ms 内没再加载新的；下限 300ms、上限 5s。 */
+async function waitRendered(host: HTMLElement): Promise<void> {
+  const started = Date.now();
+  await sleep(300);
+  await document.fonts?.ready;
+  const imgs = Array.from(host.querySelectorAll("img")).filter((i) => !i.complete);
+  await Promise.all(imgs.map((i) => new Promise<void>((r) => { i.onload = i.onerror = () => r(); })));
+  let ver = getGrammarVersion();
+  for (;;) {
+    await sleep(300);
+    const now = getGrammarVersion();
+    if (now === ver || Date.now() - started > 5000) return;
+    ver = now;
+  }
 }
 
 /** 导出任务的生命周期：离屏容器、生成、结果、错误；结果绑定 key（选区 + 语言），key 变了即作废 */

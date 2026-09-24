@@ -186,6 +186,9 @@ export async function deliverFile(file: File): Promise<"shared" | "downloaded"> 
 export function printHtml(html: string): void {
   const frame = document.createElement("iframe");
   frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+  // 导出内容本来没有脚本；sandbox 兜底（peer review #43）。allow-same-origin 是为了拿 contentWindow
+  // 调 print，allow-modals 是打印对话框本身。
+  frame.setAttribute("sandbox", "allow-same-origin allow-modals");
   frame.srcdoc = html;
   frame.onload = () => {
     const win = frame.contentWindow;

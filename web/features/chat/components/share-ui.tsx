@@ -2,6 +2,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { getShare, subscribeShare, toggleShare, clickMessage, setShareOn, type ShareState } from "../share-mode";
 import { useT } from "@/lib/i18n";
+import { useChatStore } from "../chat-store";
 import type { ChatMessage } from "../type";
 
 /** 分享模式下消息行的包装类:留出 checkbox 那一格(本人右、其余左),选中加底色 */
@@ -41,9 +42,14 @@ export function useShare(): ShareState {
 export function ShareButton({ busy = false }: { busy?: boolean }) {
   const t = useT();
   const { on } = useShare();
+  const active = useChatStore((s) => s.state.activeAgent);
   useEffect(() => {
     if (busy && on) setShareOn(false);
   }, [busy, on]);
+  // 切会话即退出分享模式（peer review #43「切换会话后分享模式还开着」）；本来就关着时是空操作
+  useEffect(() => {
+    setShareOn(false);
+  }, [active]);
   const label = busy ? t("工作中不能分享") : on ? t("退出分享") : t("分享");
   return (
     <button

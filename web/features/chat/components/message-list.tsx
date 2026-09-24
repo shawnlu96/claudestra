@@ -33,6 +33,7 @@ import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
+const NO_ORDER: string[] = [];
 
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
    user 右对齐圆角矩形，工具调用 active（转圈）/ history（可展开）两态。
@@ -693,7 +694,8 @@ export function MessageList() {
   }, [active]);
   // 分享模式（hooks 必须在下面的早退之前）：范围规则见 share-mode.ts
   const share = useShare();
-  const order = useMemo(() => messages.map((x) => x.id), [messages]);
+  // 只在分享模式开着时算 id 列表——关着时长对话流式每拍白算一遍（peer review #43）
+  const order = useMemo(() => (share.on ? messages.map((x) => x.id) : NO_ORDER), [messages, share.on]);
   const shareRange = share.on ? selRange(share.sel, order) : null;
 
   if (!active) {
