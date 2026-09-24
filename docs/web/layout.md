@@ -79,6 +79,8 @@ features/chat/
                         master / mock 无菜单（纯函数，tests/web-agent-menu）
   sidebar-dnd.ts        桌面拖拽改 project 的判定 + 模块级拖拽态（同 project / 自己 / 无归属目标不可放）
   project-actions.ts    /api/projects 写入口（projAction / assignAgentProject），弹窗、菜单、拖拽共用
+  narration-fold.ts     旁白收起 / 展开：会话级默认（按 agent 写 localStorage `cstra_narr_fold:<agent>`，新会话默认展开）
+                        + 单块内存覆盖；「全部」一按清空覆盖（纯逻辑 + 模块级状态，tests/web-narration-fold）
   components/           sidebar / new-agent-modal / message-list（permission-card + ask-question-card）
                         / composer（streaming 时出「停止」）/ chat(Provider)
     agent-row.tsx       会话行：左滑（置顶/归档/删除）+ 右键/长按菜单触发 + 可拖 + 放置目标

@@ -24,6 +24,8 @@ import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
 import { isNearBottom, tailAppendedCount } from "../scroll-follow";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { devCount } from "../../devtools/dev-mode";
+import { ProgressNote } from "./progress-note";
+import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -71,36 +73,6 @@ function ReplyDivider() {
   );
 }
 
-/**
- * v2.21.3+ 进度句(💭):Fable 5.1 在长工具链里把「接下来我会…」写进 progress-update
- * thinking 块而不是 text。比旁白(TextBlock muted)再弱一档——纯文本、斜体、无竖线,
- * 只为让人知道 agent 没停、在干什么;点一下显示时间。
- */
-const ProgressNote = memo(function ProgressNote({ text, ts }: { text: string; ts?: string }) {
-  const [showTs, setShowTs] = useState(false);
-  return (
-    <div
-      // break-words 不是装饰：进度句是**裸文本**（不过 DOMD，拿不到它的
-      // word-wrap: break-word），而模型爱在里面写
-      // `loadCommands`/`loadExecutions`/`toNumber` 这种没有空格的长串。
-      // 缺了它那一串不断行 → 撑破 342px 的气泡 → 整个消息区可以横向拖动
-      // （owner 2026-09-22「pi agent 还是出现下面多个滑动条导致乱套」，
-      //  实测那条进度句超框 110px，消息区 scrollWidth 比可视宽多 86px）。
-      className="my-1 break-words pl-2.5 text-[12.5px] italic leading-snug text-base-content/45"
-      onClick={() => {
-        if (hasLiveSelection()) return;
-        setShowTs((v) => !v);
-      }}
-    >
-      <span className="mr-1 not-italic">💭</span>
-      {text}
-      {showTs && ts && (
-        <div className="mt-0.5 font-mono text-[10px] not-italic tabular-nums opacity-40">{fmtTs(ts)}</div>
-      )}
-    </div>
-  );
-});
-
 /** 叙述/回复的文本块：点击显示**该段自己**的秒级时间（不是整个回合的开场时间——
  *  长回合一个气泡跨一小时，整体时间对「这句话什么时候说的」没意义）。
  *  streamed 语义 = 「本段还在生长」：只有它用纯文本（DOMD 只读一次,不适合增量
@@ -114,9 +86,12 @@ const TextBlock = memo(function TextBlock({
   streamed,
   muted,
   fullText,
+  foldKey,
 }: {
   /** 所属消息 id（长按/右键菜单「删除」用） */
   msgId?: string;
+  /** 旁白的收起 / 展开键（消息 id + 段序），只有 muted 段传；规则见 ../narration-fold.ts */
+  foldKey?: string;
   text: string;
   ts?: string;
   streamed?: boolean;
@@ -132,6 +107,7 @@ const TextBlock = memo(function TextBlock({
   const [showTs, setShowTs] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, messageId: msgId, getEl: () => bodyRef.current }));
+  const fold = useNarrationFold(muted ? foldKey : undefined);
   return (
     <QuoteSwipe quote={text} blockLevel>
       <div
@@ -159,6 +135,7 @@ const TextBlock = memo(function TextBlock({
         {...press.handlers}
       >
         {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
+        {fold.folded && foldKey ? <NarrationFolded text={text} foldKey={foldKey} /> : (
         <div ref={bodyRef} className="cstra-bubble">
           {streamed ? (
             // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
@@ -170,9 +147,11 @@ const TextBlock = memo(function TextBlock({
             <Domd initMd={text} bodyClassName="chat-domd" />
           )}
         </div>
+        )}
         {showTs && ts && (
           <div className="mt-0.5 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(ts)}</div>
         )}
+        {muted && foldKey && <NarrationFoldBar foldKey={foldKey} />}
       </div>
     </QuoteSwipe>
   );
@@ -249,6 +228,7 @@ function AssistantBody({
             streamed={m.streamed && i === segs!.length - 1}
             fullText={full}
             muted
+            foldKey={`${m.id}:${i}`}
           />
         ) : seg.kind === "reply" ? (
           // 空 reply 段不渲染（否则是一条「回复」分隔线 + 空白块的幽灵气泡）。
@@ -278,7 +258,7 @@ function AssistantBody({
       )}
     </>
   ) : hasNarration && !isEchoSegment(m, m.content) ? (
-    <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted />
+    <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} />
   ) : null;
 
   return (
