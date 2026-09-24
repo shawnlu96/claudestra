@@ -338,8 +338,14 @@ export function piCommandsFor(agent: string, home?: string): PiCommandInfo[] {
   return [...fromSnapshot, ...builtins];
 }
 
+/** Pi 可执行文件名或路径。预检（piAvailable）、启动命令（pi-launch）、版本探测（update-hints）必须同源：
+ *  一处认 PI_BIN 另一处写死 "pi" → 预检通过、窗口里 command not found（见 pi-launch.ts 注释）。 */
+export function piBinName(): string {
+  return process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi";
+}
+
 export async function piAvailable(): Promise<boolean> {
-  const bin = process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi";
+  const bin = piBinName();
   const finder = process.platform === "win32" ? "where" : "which";
   return new Promise((resolve) => {
     try {

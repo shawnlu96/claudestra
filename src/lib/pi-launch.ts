@@ -21,7 +21,7 @@ import { bridgePortOf } from "./bridge-port.js";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { shellEscape } from "./claude-launch.js";
-import { piEnvFlags, type PiEnvProfile } from "./pi-env.js";
+import { piBinName, piEnvFlags, type PiEnvProfile } from "./pi-env.js";
 
 /** Claudestra 注入的 Pi 扩展：绝对路径（扩展必须能被 Pi 直接 -e 加载） */
 export const PI_EXTENSION_PATH = join(
@@ -75,7 +75,7 @@ export function buildPiCommand(opts: PiLaunchOptions): string {
   // 可执行文件名与 piAvailable() 的探测**同源**：tmux 窗口不继承 manager 的 env，
   // 这里写死 "pi" 而预检认 PI_BIN 的话 → 预检通过、窗口里 command not found、
   // 120s 假超时、create 把刚建的 agent 清掉。
-  const parts: string[] = [shellEscape(process.env.PI_BIN || process.env.PI_CODING_AGENT_BIN || "pi")];
+  const parts: string[] = [shellEscape(piBinName())];
 
   // ⚠ 参数顺序有语义（实测 pi 0.85.1）：
   //   ① 信任开关 → ② 发现开关与额外扩展（包源必须在路径之前，见 pi-env.ts 注释）

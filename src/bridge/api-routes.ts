@@ -478,7 +478,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       // sessionTailInfo 注释）。contextTokens:当前上下文占用(web 端超标提示)。
       {
         const { readRegistryAgents } = await import("../lib/registry.js");
-        const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
         const regs = await readRegistryAgents();
         const regByName = new Map(regs.map((r) => [r.name, r]));
         const bySessions = new Map<string, SessionTailInfo>();
@@ -523,9 +522,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
             gModel ??
             info?.model ??
             null;
-          // Pi 的 thinking 档位来自会话里的 thinking_level_change（通常只在开场写一次，
-          // 拿"实测是否新鲜"去卡它 ⇒ 永远被判陈旧 ⇒ 回落 Claude Code 全局默认
-          // （owner 实测：Pi agent 顶栏显示 xhigh，实际是 off）
           const piRuntime = r?.runtime === "pi";
           // Pi 的 thinking 档位通常只在开场写一条 thinking_level_change，落在会话文件的
           // **头部**，而 session-tail 只扫尾部窗口 ⇒ 扫不到、回落全局默认（实测顶栏显示
@@ -536,6 +532,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
             ? (info?.effort ?? piSnap?.thinking ?? r?.effort ?? null)
             : (ov.effort ?? freshOrNull(info?.effort, info?.effortTs) ?? r?.effort ?? gEffort ?? info?.effort ?? null);
         }
+        // 「该重启/该 pi update」提示：不给 peer（不向别的实例透露本机确切版本）；出任何错都只少个提示，不能让整张列表 500
+        if (!principal.peer) await import("../lib/update-hints.js").then((m) => m.attachUpdateHints(agents as any[], regByName))
+          .catch((e) => console.warn("⚠️ [api] 更新提示附加失败（列表照常返回）:", e));
       }
       // ?include=stopped：registry 里已停止的 agent 也入列（additive；
       // web 侧栏保留 stopped 会话入口，其历史经归档仍可读——正是归档的意义）。

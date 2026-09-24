@@ -141,6 +141,17 @@ export const DICT: Record<string, string> = {
   "，建议压缩以保持质量": ", compacting recommended to keep quality", // 值首带逗号+空格
   "请求压缩": "Compact",
   "本会话不再提示": "Don't remind again this session",
+  // 更新提示横幅(update-hint-banner.tsx;拆段拼接,空格对齐语序)
+  "可更新（已装": "is available (installed:",
+  "）——在终端运行": ") — run",
+  "，再重启会话": "in a terminal, then restart the session",
+  "已装好，本会话还在": "is installed; this session still runs",
+  "——重启后生效": "— restart to apply",
+  "回合结束后再重启": "Restart after the current turn ends",
+  "重启失败": "Restart failed",
+  "Pi 可更新": "Pi update available",
+  "重启后生效新版本": "Restart to run the new version",
+  "这个版本不再提示": "Don't remind me about this version",
   "思考中…": "Thinking…",
   "思考中": "Thinking",
   "正在同步最新消息…": "Syncing latest messages…",
