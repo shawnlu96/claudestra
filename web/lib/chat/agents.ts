@@ -81,21 +81,17 @@ export async function loadAgents(): Promise<AgentSession[]> {
     "/agents?include=stopped",
     { timeoutMs: 5000 }
   );
-  const list = (json.agents || [])
-    // 大总管在桥接侧有**多个来源**（注册表历史条目 `agent-master`、api-routes 的
-    // master 注入、cmdList 的补条目）——不去重时侧栏会冒出「大总管卡片 + 一条
-    // 分组里的 master」（owner 2026-09-14 手机截图实报）。这里收敛成一条：
-    // 丢掉 `agent-master` 这种带前缀的历史条目，同名只保留**第一个带 runtime 的**
-    .filter((a) => !/^agent-master$/.test(String(a.name || "")))
-    .filter((a) => {
-      const bare = String(a.name || "").replace(/^agent-/, "");
-      if (bare !== "master") return true;
-      if (typeof a.runtime === "string" && a.runtime) return true;
-      // runtime 为空的 master 条目（旧注入路径）在有带 runtime 的那条时丢弃
-      return !(json.agents || []).some(
-        (b) => String(b.name || "").replace(/^agent-/, "") === "master" && typeof b.runtime === "string" && b.runtime,
-      );
-    })
+  const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
+  // 大总管在桥接侧有**多个来源**（注册表历史条目 `agent-master`、api-routes 的
+  // master 注入、cmdList 的补条目）——不去重时侧栏会冒出「大总管卡片 + 一条
+  // 分组里的 master」（owner 2026-09-14 手机截图实报）。这里收敛成一条：
+  // 丢掉 `agent-master` 这种带前缀的历史条目，同名只保留**第一个带 runtime 的**（没有带的就第一个）。
+  // 注入条目排在最前、带 master 会话的实测（上下文、模型），所以新桥接下留下的是它
+  const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
+  const keepMaster =
+    all.find((a) => isMaster(a) && typeof a.runtime === "string" && a.runtime) ?? all.find(isMaster);
+  const list = all
+    .filter((a) => !isMaster(a) || a === keepMaster)
     // 已归档的 agent 不进工作列表（owner 2026-09-14「被归档，但是还是在列表里」）：
     // 归档区里有它的目录 = 被收起来了；恢复（清掉归档目录）后自动回来。
     .filter((a) => (a as { archived?: boolean }).archived !== true)
