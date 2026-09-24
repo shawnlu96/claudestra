@@ -73,7 +73,8 @@ export async function collectCss(doc: Document): Promise<{ css: string; links: s
 
 async function toDataUrl(src: string): Promise<string | null> {
   try {
-    const res = await fetch(src, { credentials: "include" });
+    // 15s 上限：一张不回的图降级成 alt 文本，别让整个导出卡住
+    const res = await fetch(src, { credentials: "include", signal: AbortSignal.timeout(15_000) });
     if (!res.ok) return null;
     const blob = await res.blob();
     if (blob.size > IMG_INLINE_MAX) return null;
@@ -186,6 +187,9 @@ export async function deliverFile(file: File): Promise<"shared" | "downloaded"> 
 export function printHtml(html: string): void {
   const frame = document.createElement("iframe");
   frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+  // 导出内容本来没有脚本；sandbox 兜底（peer review #43）。allow-same-origin 是为了拿 contentWindow
+  // 调 print，allow-modals 是打印对话框本身。
+  frame.setAttribute("sandbox", "allow-same-origin allow-modals");
   frame.srcdoc = html;
   frame.onload = () => {
     const win = frame.contentWindow;

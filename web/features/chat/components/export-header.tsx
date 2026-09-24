@@ -4,7 +4,7 @@ import { tIn, type Lang } from "@/lib/i18n";
 export interface ExportMeta {
   version: string;
   commit: string;
-  /** 导出人：个人资料昵称，没有就登录用户名 */
+  /** 导出人：个人资料昵称；没设就不写这一行（不回退到登录名） */
   exporter: string;
 }
 
@@ -37,9 +37,11 @@ export function ExportHeader({ meta, agent, count, at, lang }: { meta: ExportMet
         </div>
       </div>
       <div className="shrink-0 text-right font-mono text-[11px] leading-relaxed text-base-content/50">
-        <div>
-          {t("导出人")} {meta.exporter || "—"}
-        </div>
+        {meta.exporter && (
+          <div>
+            {t("导出人")} {meta.exporter}
+          </div>
+        )}
         <div>{stamp}</div>
         <div>
           {count} {t("条消息")}
