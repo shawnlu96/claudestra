@@ -26,6 +26,7 @@ import { installTapRescue } from "@/lib/tap-rescue";
 import { devCount } from "../../devtools/dev-mode";
 import { ProgressNote } from "./progress-note";
 import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
+import { SourceHeader } from "./source-header";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -311,18 +312,13 @@ const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: C
     // v2.20.2+ 外源入站(peer/其它 agent/Discord 用户)与本人区分(owner 实报
     // 「看起来像我说的」):来源 chip + 信息色描边,正文走 Domd 渲染 markdown
     // (peer 的 bug 报告是全格式 markdown,纯文本糊成一坨)。本人消息保持原样。
-    const srcIcon = !isSelf ? (m.from!.startsWith("peer-") ? "🤝" : m.from!.startsWith("agent-") || m.from!.endsWith("(agent)") ? "🤖" : "👤") : "";
     const label = isSelf ? profile.nickname : "";
     return (
       // 布局规则(owner 2026-09-24):只有本人靠右,peer / 其它 agent / 别的用户一律靠左;
       // 圆角:靠右的右上角小、靠左的左上角小,其余大——尖角指向说话的一侧
       <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col gap-2 ${isSelf ? "items-end" : "items-start"}`}>
         {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14) */}
-        {!isSelf && (
-          <span className="flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-[10.5px] font-medium text-info">
-            {srcIcon} {m.from}
-          </span>
-        )}
+        {!isSelf && <SourceHeader from={m.from!} />}
         {(label || showAvatar) && (
           <div className="flex items-center gap-1.5">
             {label && <span className="text-[10px] opacity-50">{label}</span>}

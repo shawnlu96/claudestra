@@ -28,6 +28,7 @@ export const DICT: Record<string, string> = {
   "返回": "Back",
   "启动": "Start",
   "草稿": "Draft",
+  "通知": "Notice",
   "▴ 收起": "▴ Collapse",
   "▾ 展开": "▾ Expand",
   "收起全部": "Collapse all",

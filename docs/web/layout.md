@@ -79,6 +79,8 @@ features/chat/
                         master / mock 无菜单（纯函数，tests/web-agent-menu）
   sidebar-dnd.ts        桌面拖拽改 project 的判定 + 模块级拖拽态（同 project / 自己 / 无归属目标不可放）
   project-actions.ts    /api/projects 写入口（projAction / assignAgentProject），弹窗、菜单、拖拽共用
+  source-label.ts       外源消息 `from` 解析：`peer-<token名>`=对方主动打来→「通知」、`peer <peer>/<agent>`=我们外呼的回复→「回复」、
+                        agent-… / …(agent)=本地 agent、其余真人（tests/web-source-label）；渲染 components/source-header.tsx
   drafts.ts             输入框草稿（localStorage `cstra_draft_<agent>`，空白即删）+ 订阅：只在「有 ↔ 无」翻转时通知，
                         侧栏给非激活且有草稿的会话打【草稿】标（tests/web-drafts）
   narration-fold.ts     旁白收起 / 展开：会话级默认（按 agent 写 localStorage `cstra_narr_fold:<agent>`，新会话默认展开）
