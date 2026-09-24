@@ -567,11 +567,10 @@ async function checkAgent(
     // thinking 但真闲」的死状态,但 agent 大量异步等待时 pane idle 是常态,不是
     // 卡死。两类可靠的「真在忙」信号并集豁免:
     //   ① externallyBusy:bridge 经手的长 MCP 调用(ask_codex,实测 303s)
-    //   ② hasActiveBgActivities:bg-activity-watcher 追踪的后台 shell task /
-    //      subagent 仍在写输出(3min 不增长才判 finished)
+    //   ② hasActiveBgActivities:bg-activity-watcher 追踪的后台 shell task(3min 不增长判结束) /
+    //      subagent(交了答复或被中断才结束,在跑工具静默最多挂 30min,见 lib/subagent-progress.ts)
     // 命中任一 → 不收敛 done + 重置计时器,真闲下来后重新累计 120s 才判。
-    // 残留边界:静默 bg task(3min 不写输出)会被判 finished,之后若仍 idle 可能
-    // 误判——那种少见,且此刻 agent 确实无可观测活动。
+    // 残留边界:静默 bg shell(3min 不写输出)会被判结束,之后若仍 idle 可能误判——少见,且此刻无可观测活动。
     const logicallyBusy = isChannelExternallyBusy(channelId) || hasActiveBgActivities(agentName);
     if (getAgentStatus(agentName) === "thinking" && paneIdleNow && !logicallyBusy) {
       const first = idleWhileThinking.get(channelId);

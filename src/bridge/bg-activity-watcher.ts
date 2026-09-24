@@ -14,8 +14,8 @@
  * 事件：bg_task_started / bg_task_update / bg_task_completed（SSE 同步可见，
  * web 前端可以不依赖 Discord 自行渲染进度线）。
  *
- * 结束判定：subagent 认记录里的真信号（end_turn / meta 的 stoppedByUser，见 lib/subagent-progress.ts），
- * 长时间静默只标「静默」不收尾；后台 shell 仍是 IDLE_DONE_MS 不增长即结束。
+ * 结束判定：subagent 认记录里的真信号（答复 / 中断 / meta 的 stoppedByUser，规则见 lib/subagent-progress.ts），
+ * 在跑工具时静默再久也不收尾；后台 shell 仍是 IDLE_DONE_MS 不增长即结束。
  *
  * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 只记 baseline（已存在的
  * 文件全部标记 seen 不开流），之后只对新出现的文件开活动 —— bridge 重启不会把历史
@@ -40,12 +40,12 @@ import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type
 const POLL_MS = 10_000;
 const FLUSH_MS = 2_500; // 子区推送 debounce（Discord 限速友好）
 const IDLE_DONE_MS = 3 * 60_000; // 后台 shell：文件 3min 不增长 → 活动结束
-const SUBAGENT_SILENT_LIMIT_MS = 30 * 60_000; // subagent 没有 end_turn 也没被停止、却 30min 一行不写 → 按「无动静」收尾
+const SUBAGENT_SILENT_LIMIT_MS = 30 * 60_000; // subagent 既没交答复也没被停止（在跑工具 / 等模型）、却 30min 一行不写 → 按「无动静」收尾
 const MAX_MSG_LEN = 1900;
 const MAX_ACTIVE_PER_AGENT = 8; // 防 thread 轰炸（workflow 大扇出时超出的只发事件）
 const MAX_TEXT_PER_ITEM = 400; // subagent 单条文本进子区的截断长度
 
-export type BgActivityKind = "subagent" | "shell";
+type BgActivityKind = "subagent" | "shell";
 
 interface Activity {
   key: string; // 全局唯一（文件路径）
@@ -235,9 +235,12 @@ async function consume(act: Activity): Promise<void> {
     return;
   }
   if (size <= act.offset) return;
-  const chunk = await Bun.file(act.filePath).slice(act.offset, size).text();
-  act.offset = size;
-  act.lastGrowth = Date.now();
+  const buf = new Uint8Array(await Bun.file(act.filePath).slice(act.offset, size).arrayBuffer());
+  // jsonl 只消费到最后一个换行（字节偏移）：CC 可能正写到半行，跳过它会丢掉恰好是收尾信号的那条记录
+  const used = act.kind === "shell" ? buf.length : buf.lastIndexOf(10) + 1;
+  const chunk = new TextDecoder().decode(buf.subarray(0, used));
+  act.offset += used;
+  if (used) act.lastGrowth = Date.now(); // 只剩同一段半行残尾不算增长，否则崩溃留下的残行会让静默计时永远归零
 
   if (act.kind === "shell") {
     for (const line of chunk.split("\n")) {

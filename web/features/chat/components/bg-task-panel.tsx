@@ -83,10 +83,12 @@ function useNow(ms: number): number {
 
 const QUIET_MS = 3 * 60_000; // subagent 超过这么久没写记录 → 标「静默」（仍在跑，只是在等命令/CI）
 
-/** 卡片右侧的状态：运行中 = 转圈 + 耗时 + 上下文 + 静默提示；结束 = 真实收尾状态 + 时长 */
-function BgStatus({ t, now }: { t: BgTaskView; now: number }) {
+/** 卡片右侧的状态：运行中 = 转圈 + 耗时 + 上下文 + 静默提示；结束 = 真实收尾状态 + 时长。
+ *  每秒走的时钟只放在这里——放到面板上会让每张卡（连同最多 500 行的进度视口）每秒重渲染一遍 */
+function BgStatus({ t }: { t: BgTaskView }) {
   const tr = useT();
   const p = t.progress;
+  const now = useNow(t.status === "running" && p?.startedTs ? 1000 : 0);
   if (t.status !== "running") {
     if (t.endStatus === "stopped") return <span className="ml-1 shrink-0 opacity-50">⏹ {tr("已停止")} {fmtDuration(t.durationMs)}</span>;
     if (t.endStatus === "idle") return <span className="ml-1 shrink-0 opacity-50">⏸ {tr("无动静结束")} {fmtDuration(t.durationMs)}</span>;
@@ -96,7 +98,7 @@ function BgStatus({ t, now }: { t: BgTaskView; now: number }) {
   return (
     <span className="ml-1 flex shrink-0 items-center gap-1.5 font-mono tabular-nums text-warning/80">
       <span className="loading loading-spinner loading-xs text-warning" />
-      {!!p?.startedTs && now > 0 && <span>{fmtClock(now - p.startedTs)}</span>}
+      {!!p?.startedTs && <span>{fmtClock(now - p.startedTs)}</span>}
       {!!p?.ctxTokens && <span className="opacity-60">{Math.round(p.ctxTokens / 1000)}k</span>}
       {quietMs > QUIET_MS && <span className="font-sans opacity-70">{tr("静默")} {fmtClock(quietMs).replace(/ \d+s$/, "")}</span>}
     </span>
@@ -109,7 +111,7 @@ function cleanLine(s: string): string {
 }
 
 // memo：bg-update 事件只替换被更新任务的对象引用（immer），其余卡不重渲染
-const BgTaskCard = memo(function BgTaskCard({ t, now }: { t: BgTaskView; now: number }) {
+const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
   const tr = useT(); // 译名用 tr——prop t 是任务对象
   const running = t.status === "running";
   const store = useChatStoreApi();
@@ -131,7 +133,7 @@ const BgTaskCard = memo(function BgTaskCard({ t, now }: { t: BgTaskView; now: nu
             </span>
           )}
         </span>
-        <BgStatus t={t} now={now} />
+        <BgStatus t={t} />
         {!t.progress && t.lines.length > 0 && (
           <span className="ml-auto shrink-0 opacity-40">{getLang() === "en" ? `${t.lines.length} line${t.lines.length > 1 ? "s" : ""}` : `${t.lines.length} 行`}</span>
         )}
@@ -210,7 +212,6 @@ export function BgTaskPanel() {
   // 输入框上方占满，而完成信息的价值随时间快速衰减，内容在聊天流里也留着。
   // 展开后仍是原来的完整卡片，不丢任何东西。
   const [showDone, setShowDone] = useState(false);
-  const now = useNow(tasks.some((t) => t.status === "running" && t.progress?.startedTs) ? 1000 : 0);
   if (!tasks.length) return null;
   const running = tasks.filter((t) => t.status === "running");
   const done = tasks.filter((t) => t.status !== "running");
@@ -221,7 +222,7 @@ export function BgTaskPanel() {
         <span className="opacity-60">{tasks.length}</span>
       </div>
       {running.map((t) => (
-        <BgTaskCard key={t.id} t={t} now={now} />
+        <BgTaskCard key={t.id} t={t} />
       ))}
       {done.length > 0 &&
         (showDone ? (
@@ -233,7 +234,7 @@ export function BgTaskPanel() {
               {tr("收起已完成")}
             </button>
             {done.map((t) => (
-              <BgTaskCard key={t.id} t={t} now={0} />
+              <BgTaskCard key={t.id} t={t} />
             ))}
           </>
         ) : (
