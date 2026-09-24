@@ -20,13 +20,49 @@ function sheetText(sheet: SheetLike): string | null {
   }
 }
 
-export function collectCss(doc: Document): { css: string; links: string[] } {
+/**
+ * 优先拿**原文**：同源的 <link> 样式表 fetch 回来、<style> 直接读 textContent。
+ * 不能靠 cssRules[].cssText 再序列化——浏览器会把 `color-mix(in srgb, currentColor 10%, transparent)`
+ * 写成 `color-mix(currentcolor 10%, transparent)`，别的解析器（Safari）当非法丢掉，留下 Lightning CSS
+ * 的兜底 `background: currentColor`，行内按钮就成了黑底（owner 2026-09-25 实报）。
+ * adoptedStyleSheets（do-md）没有原文，只能序列化。
+ */
+export async function collectCss(doc: Document): Promise<{ css: string; links: string[] }> {
   const parts: string[] = [];
   const links: string[] = [];
+  const origin = doc.location?.origin ?? "";
   for (const sheet of Array.from(doc.styleSheets)) {
-    const text = sheetText(sheet);
-    if (text !== null) parts.push(text);
-    else if (sheet.href) links.push(sheet.href);
+    if (sheet.href) {
+      const sameOrigin = (() => {
+        try {
+          return new URL(sheet.href, doc.baseURI).origin === origin;
+        } catch {
+          return false; // 解析不了的 href 当跨域，退回 <link>
+        }
+      })();
+      if (sameOrigin) {
+        try {
+          const res = await fetch(sheet.href, { credentials: "include" });
+          if (res.ok) {
+            parts.push(await res.text());
+            continue;
+          }
+        } catch {
+          /* 拿不到原文就走下面的序列化兜底 */
+        }
+      }
+      const text = sameOrigin ? sheetText(sheet) : null;
+      if (text !== null) parts.push(text);
+      else links.push(sheet.href);
+      continue;
+    }
+    const node = sheet.ownerNode as HTMLElement | null;
+    const raw = node?.textContent;
+    if (raw) parts.push(raw);
+    else {
+      const text = sheetText(sheet);
+      if (text) parts.push(text);
+    }
   }
   for (const sheet of doc.adoptedStyleSheets ?? []) {
     const text = sheetText(sheet);

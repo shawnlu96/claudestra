@@ -63,7 +63,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function packExport(host: HTMLElement, title: string): Promise<string> {
   await sleep(600);
   await inlineImages(host);
-  const { css, links } = collectCss(document);
+  const { css, links } = await collectCss(document);
   const root = document.documentElement;
   const htmlAttrs: Record<string, string> = { lang: root.lang || "zh-CN" };
   // 只带主题，不抄 html 的 class：canvas-list / kb-open 那些是壳的运行态（画布色、键盘），导出文件不要
