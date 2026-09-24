@@ -75,7 +75,11 @@ async function listPeers(runManager: RunManager): Promise<Response> {
   const invRes: any = await runManager("peer-invite-list");
   const pendingInvites = invRes?.ok ? invRes.invites || [] : [];
   const { activePeerTokens, planPeerTidy } = await import("../lib/peer-tidy.js"); // 重复 / 没用的旧记录，面板顶部给「整理」
-  return apiJson(200, { ok: true, peers, localAgents, pendingInvites, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals)) });
+  // 近 7 天的交接汇总（lib/handoff-log.ts）：面板顶部一行数字 + 每张卡片自己的次数
+  const { readHandoffs, summarizeHandoffs } = await import("../lib/handoff-log.js");
+  const since = Date.now() - 7 * 86400_000;
+  const handoffs = summarizeHandoffs(await readHandoffs(since), since);
+  return apiJson(200, { ok: true, peers, localAgents, pendingInvites, handoffs, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals)) });
 }
 
 // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke

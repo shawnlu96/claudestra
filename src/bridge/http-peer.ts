@@ -17,6 +17,7 @@ import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
 import { newThreadId } from "./router.js";
 import type { HttpPeer } from "../lib/peers.js";
+import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 
@@ -101,12 +102,31 @@ export function routeToHttpPeer(
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   inflightHttpPeerCalls.add(callId);
   inflightByCaller.set(callId, fromChannelId);
+  // oneShot 是 FYI 通知，不等回复，不算一次交接
+  if (!oneShot) void handoffStart(callId, { dir: "out", peer: peer.name, localAgent: fromName, remoteAgent: peerAgentName }, text.length);
   void runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot).finally(() => {
     inflightHttpPeerCalls.delete(callId);
     inflightByCaller.delete(callId);
     cancelledCalls.delete(callId);
   });
   return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: !oneShot };
+}
+
+/**
+ * 一次出站调用的结局：运维 metric 照记，再给交接记录结账（lib/handoff-log.ts）。
+ * 「对方回合结束但没文本」（empty）还会继续轮询，不算结局。
+ */
+function settle(
+  callId: string,
+  caller: CallerRef,
+  metric: "http_peer_out_ok" | "http_peer_out_error" | "http_peer_out_timeout",
+  meta: Record<string, unknown>,
+  replyChars?: number,
+): void {
+  recordMetric(metric, { channelId: caller.channelId, meta });
+  if (meta.empty || meta.mode === "oneshot") return;
+  if (metric === "http_peer_out_ok") void handoffEnd(callId, "reply", replyChars !== undefined ? { chars: replyChars } : {});
+  else void handoffEnd(callId, metric === "http_peer_out_timeout" ? "timeout" : "error", { detail: String(meta.kind ?? "") });
 }
 
 async function runCall(
@@ -151,7 +171,7 @@ async function runCall(
         : `[⚠️ peer 调用失败] ${label} 网络不可达：${(e as Error).message}。请确认对方实例在线（peer-http-test ${peer.name}）。`,
       peer, peerAgentName, false, callId,
     );
-    recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: isTimeout ? "post_timeout" : "network" } });
+    settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: isTimeout ? "post_timeout" : "network" });
     return;
   }
 
@@ -164,23 +184,23 @@ async function runCall(
 
   if (res.status === 401 || res.status === 403) {
     await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${body?.error || "token 无效或 agent 不在授权范围"}）。可能对方已 revoke——联系对方确认或重新握手。`, peer, peerAgentName, false, callId);
-    recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "auth", status: res.status } });
+    settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth", status: res.status });
     return;
   }
   if (res.status === 404 || res.status === 409) {
     await pushToCaller(caller, `[⚠️ peer 调用失败] ${label}：${body?.error || `对方 agent 不存在或离线（${res.status}）`}`, peer, peerAgentName, false, callId);
-    recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "target", status: res.status } });
+    settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "target", status: res.status });
     return;
   }
   if (!res.ok && res.status !== 202) {
     await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 返回 ${res.status}：${body?.error || "未知错误"}`, peer, peerAgentName, false, callId);
-    recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "http", status: res.status } });
+    settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "http", status: res.status });
     return;
   }
 
   // oneShot:对方已接收(2xx)即完成——不取回复不轮询,让对方按 FYI 处理
   if (oneShot) {
-    recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "oneshot" } });
+    settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "oneshot" });
     return;
   }
 
@@ -188,7 +208,7 @@ async function runCall(
   const replyText = extractReplyText(body);
   if (replyText) {
     await pushReply(caller, peer, peerAgentName, replyText, expecting, callId);
-    recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "wait" } });
+    settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "wait" }, replyText.length);
     return;
   }
   // v2.17.2 任务#84:200 且 reply 空 = 对方回合结束但没有文本回复。此前这里直接
@@ -199,13 +219,14 @@ async function runCall(
   if (res.status === 200 && body && body.ok && "reply" in body && !String(body.reply ?? "").trim()) {
     emptyNoticed = true;
     await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。我会继续盯 2 小时——对方补回复会自动送达。`, peer, peerAgentName, false, callId);
-    recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "wait", empty: true } });
+    settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "wait", empty: true });
   }
 
   // 202 / wait 超时未答 → thread 轮询兜底
   const threadId: string | undefined = typeof body?.thread_id === "string" ? body.thread_id : typeof body?.threadId === "string" ? body.threadId : undefined;
   if (!threadId) {
     await pushToCaller(caller, `[⚠️ peer 调用] ${label} 已接收请求但未返回可追踪的 thread——对方版本可能过旧，回复无法自动送达。`, peer, peerAgentName, false, callId);
+    void handoffEnd(callId, "error", { detail: "no_thread" });
     return;
   }
   const pollMs = d.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -222,7 +243,7 @@ async function runCall(
       // 再误报「超时」(review 2026-07-19 #7)
       if (pr.status === 401 || pr.status === 403) {
         await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——对方可能已 revoke,需要重新握手。`, peer, peerAgentName, false, callId);
-        recordMetric("http_peer_out_error", { channelId: caller.channelId, meta: { peer: peer.name, kind: "auth_poll", status: pr.status } });
+        settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth_poll", status: pr.status });
         return;
       }
       if (!pr.ok) continue;            // 瞬时故障,下轮再试
@@ -230,7 +251,7 @@ async function runCall(
       const t = extractReplyText(pb);
       if (t) {
         await pushReply(caller, peer, peerAgentName, t, expecting, callId);
-        recordMetric("http_peer_out_ok", { channelId: caller.channelId, meta: { peer: peer.name, mode: "poll" } });
+        settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "poll" }, t.length);
         return;
       }
       // 空回合结束:通知一次后继续轮询(任务#84,同上——迟到回复会按 threadId
@@ -250,7 +271,7 @@ async function runCall(
       : `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`,
     peer, peerAgentName, false, callId,
   );
-  recordMetric("http_peer_out_timeout", { channelId: caller.channelId, meta: { peer: peer.name } });
+  settle(callId, caller, "http_peer_out_timeout", { peer: peer.name });
 }
 
 /** 对方 messages/threads 响应里提取回复正文（wait 命中与轮询兑现同构）。

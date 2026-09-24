@@ -80,6 +80,7 @@ import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-h
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
+import { trackInboundHandoff } from "./handoff-tracker.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -1399,6 +1400,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(502, { ok: false, error: `delivery failed: ${reason || "unknown"}` });
     }
 
+    if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${text}`).catch(() => {});
     deps.startTypingWithSafety(agent.channelId);

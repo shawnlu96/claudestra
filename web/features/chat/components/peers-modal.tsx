@@ -10,6 +10,7 @@ import { JoinPanel } from "./peers-join-panel";
 import { InviteChecklist } from "./peers-invite-checklist";
 import { LastVisit, PresenceLine, PresenceSummary, sortByPresence, type PeerPresenceInfo } from "./peers-presence";
 import { PeersTidyBanner, type TidyGroupInfo } from "./peers-tidy-banner";
+import { HandoffSummaryCard, PeerHandoffLine, type HandoffSummaryInfo } from "./peers-handoff-stats";
 
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
@@ -34,6 +35,17 @@ interface PeerInfo {
   presence?: PeerPresenceInfo;
 }
 
+/** GET /api/peers 的回包（桥接 bridge/peers-routes.ts listPeers） */
+interface PeersListResponse {
+  ok?: boolean;
+  error?: string;
+  peers?: PeerInfo[];
+  localAgents?: LocalAgent[];
+  pendingInvites?: PendingInviteInfo[];
+  tidy?: TidyGroupInfo[];
+  handoffs?: HandoffSummaryInfo;
+}
+
 interface PendingInviteInfo {
   id: string;
   agents: string[];
@@ -46,10 +58,12 @@ interface PendingInviteInfo {
 function PeerCard({
   peer,
   localAgents,
+  handoffs,
   onChanged,
 }: {
   peer: PeerInfo;
   localAgents: LocalAgent[];
+  handoffs: HandoffSummaryInfo | null;
   onChanged: () => void;
 }) {
   const t = useT();
@@ -160,6 +174,7 @@ function PeerCard({
                 </button>
               </div>
               <LastVisit presence={peer.presence} />
+              <PeerHandoffLine summary={handoffs} peer={peer.name} />
             </>
           ) : (
             <div className="text-[11.5px] text-base-content/45">{t("他还连不上你——生成一张邀请发给他")}</div>
@@ -376,17 +391,19 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [localAgents, setLocalAgents] = useState<LocalAgent[]>([]);
   const [pendingInvites, setPendingInvites] = useState<PendingInviteInfo[]>([]);
   const [tidy, setTidy] = useState<TidyGroupInfo[]>([]);
+  const [handoffs, setHandoffs] = useState<HandoffSummaryInfo | null>(null);
 
   const reload = useCallback(async () => {
     setErr("");
     try {
       const res = await fetch("/api/peers");
-      const j = (await res.json()) as { ok?: boolean; error?: string; peers?: PeerInfo[]; localAgents?: LocalAgent[]; pendingInvites?: PendingInviteInfo[]; tidy?: TidyGroupInfo[] };
+      const j = (await res.json()) as PeersListResponse;
       if (j.ok) {
         setPeers(j.peers || []);
         setLocalAgents(j.localAgents || []);
         setPendingInvites(j.pendingInvites || []);
         setTidy(j.tidy || []);
+        setHandoffs(j.handoffs ?? null);
       } else {
         setErr(j.error || t("加载失败"));
       }
@@ -429,8 +446,9 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
             <>
               <PeersTidyBanner groups={tidy} onDone={() => void reload()} />
               <PresenceSummary peers={peers} />
+              {peers.length > 0 && <HandoffSummaryCard summary={handoffs} />}
               {sortByPresence(peers).map((p) => (
-                <PeerCard key={p.name} peer={p} localAgents={localAgents} onChanged={() => void reload()} />
+                <PeerCard key={p.name} peer={p} localAgents={localAgents} handoffs={handoffs} onChanged={() => void reload()} />
               ))}
               {peers.length === 0 && !err && (
                 <div className="py-2 text-center text-xs text-base-content/40">
