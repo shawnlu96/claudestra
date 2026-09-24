@@ -42,14 +42,15 @@ export function SourceHeader({ from }: { from: string }) {
   const s = parseSource(from);
   const icon = ICONS[s.kind] ?? ICONS["peer-notify"];
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full bg-info/15 text-info">
+    // 尺寸 22px = 本人头像 / AI ✦ 同款；蓝底白 icon、名字用 AI 名字的字体（owner 2026-09-24）
+    <div className="flex items-center gap-2">
+      <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full bg-info text-white">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           {icon}
         </svg>
       </span>
       {s.badge && <span className="badge badge-outline badge-info badge-xs">{t(s.badge)}</span>}
-      <span className="text-[10px] opacity-50">{s.name}</span>
+      <span className="text-xs font-semibold text-base-content/60">{s.name}</span>
     </div>
   );
 }
