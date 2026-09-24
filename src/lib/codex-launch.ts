@@ -84,13 +84,14 @@ export function codexPermissionFlags(mode: string | undefined): string[] {
   throw new Error(`Codex agent 不支持权限模式「${m}」：只支持 bypassPermissions（其它档位会弹审批框，没人能点）`);
 }
 
-export const CODEX_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+/** Codex 的推理档位全集（各模型支持其中一段，见 codex-catalog 的 efforts；max / ultra 是 0.15x 新增的） */
+export const CODEX_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
-/** Claude Code 的 effort → Codex 的 model_reasoning_effort；max 映射到 Codex 的最高档 */
+/** effort → Codex 的 model_reasoning_effort；ultracode 是 Claude Code 独有的运行档，折成 xhigh */
 export function codexEffort(effort: string | undefined): string | null {
   const e = (effort || "").trim();
   if (!e || e === "default" || e === "auto") return null;
-  if (e === "max" || e === "ultracode") return "xhigh";
+  if (e === "ultracode") return "xhigh";
   if ((CODEX_EFFORT_LEVELS as readonly string[]).includes(e)) return e;
   throw new Error(`Codex 不认识的 effort「${e}」（可用：${CODEX_EFFORT_LEVELS.join(" / ")}）`);
 }

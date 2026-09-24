@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
-import { CTX_ADVICE, CTX_WINDOW, ctxLevel, type CtxLevel } from "../ctx-level";
+import { CTX_ADVICE, ctxView, type CtxLevel } from "../ctx-level";
 import { useT } from "@/lib/i18n";
 
 /** 请求压缩时发给 agent 的话——与 composer 警示条的按钮同一句(一处改两处同步)。 */
@@ -48,10 +48,18 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
   }, [open]);
 
   const tokens = agent.contextTokens;
-  if (typeof tokens !== "number" || tokens < 200_000) return null;
-  const level = ctxLevel(tokens);
+  if (typeof tokens !== "number") return null;
+  // 会话自带窗口的运行时（Codex）一直显示、按百分比分档——窗口小，和它 TUI 里常驻的「剩余上下文」一个意思；
+  // Claude Code 照旧 <200k 不打扰
+  const { level, pct, window, scaled } = ctxView(tokens, agent.contextWindow);
+  if (!scaled && tokens < 200_000) return null;
   const k = Math.round(tokens / 1000);
-  const pct = Math.round((tokens / CTX_WINDOW) * 100);
+  const requestCompact = () => {
+    if (sent) return; // 双击兜底
+    setSent(true);
+    void store.send(COMPACT_REQUEST_TEXT);
+    setOpen(false);
+  };
 
   return (
     <div ref={wrapRef} className="relative shrink-0">
@@ -68,43 +76,63 @@ export function CtxBadge({ agent }: { agent: AgentSession }) {
           <div className="mb-2 flex items-baseline justify-between">
             <span className="text-[12px] font-semibold">{t("上下文")}</span>
             <span className="font-mono text-[11px] tabular-nums text-base-content/60">
-              {k}k · {pct}% / 1M
+              {k}k · {pct}% / {window >= 1_000_000 ? `${window / 1_000_000}M` : `${Math.round(window / 1000)}k`}
             </span>
           </div>
-          <div className="mb-2 text-[11px] leading-snug text-base-content/55">
-            {t("按任务边界压,别盯死数字——上下文只决定找边界的紧迫程度。压之前先存记忆(save-compact)。")}
-          </div>
-          <div className="flex flex-col gap-0.5">
-            {CTX_ADVICE.map((row) => {
-              const on = row.level === level;
-              return (
-                <div
-                  key={row.level}
-                  className={`flex items-start gap-2 rounded-md px-2 py-1 text-[11.5px] leading-snug ${
-                    on ? ROW_ON[level] + " font-medium" : "text-base-content/60"
-                  }`}
-                >
-                  <span className="w-[5.2rem] shrink-0 font-mono tabular-nums">{row.range}</span>
-                  <span className="min-w-0">{t(row.advice)}</span>
-                </div>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            className="btn btn-warning btn-xs mt-2.5 w-full"
-            disabled={sent || agent.compacting === true}
-            onClick={() => {
-              if (sent) return; // 双击兜底
-              setSent(true);
-              void store.send(COMPACT_REQUEST_TEXT);
-              setOpen(false);
-            }}
-          >
-            {agent.compacting ? t("压缩中…") : sent ? t("已请求") : `🧹 ${t("存记忆 + Compact")}`}
-          </button>
+          {scaled ? (
+            <ScaledAdvice />
+          ) : (
+            <ClaudeAdvice level={level} sent={sent} compacting={agent.compacting === true} onCompact={requestCompact} />
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+/** 会话自带窗口的运行时（Codex）：它快满时自己压缩；我们的「存记忆 + Compact」是 Claude Code 的技能，不给按钮 */
+function ScaledAdvice() {
+  const t = useT();
+  return (
+    <div className="text-[11px] leading-snug text-base-content/55">
+      {t("Codex 快满时会自动压缩上下文；想提前压，在终端里输入 /compact。")}
+    </div>
+  );
+}
+
+/** Claude Code：四档建议表 + 一键「存记忆 + Compact」 */
+function ClaudeAdvice(p: { level: CtxLevel; sent: boolean; compacting: boolean; onCompact: () => void }) {
+  const t = useT();
+  const level = p.level;
+  return (
+    <>
+      <div className="mb-2 text-[11px] leading-snug text-base-content/55">
+        {t("按任务边界压,别盯死数字——上下文只决定找边界的紧迫程度。压之前先存记忆(save-compact)。")}
+      </div>
+      <div className="flex flex-col gap-0.5">
+        {CTX_ADVICE.map((row) => {
+          const on = row.level === level;
+          return (
+            <div
+              key={row.level}
+              className={`flex items-start gap-2 rounded-md px-2 py-1 text-[11.5px] leading-snug ${
+                on ? ROW_ON[level] + " font-medium" : "text-base-content/60"
+              }`}
+            >
+              <span className="w-[5.2rem] shrink-0 font-mono tabular-nums">{row.range}</span>
+              <span className="min-w-0">{t(row.advice)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        className="btn btn-warning btn-xs mt-2.5 w-full"
+        disabled={p.sent || p.compacting}
+        onClick={p.onCompact}
+      >
+        {p.compacting ? t("压缩中…") : p.sent ? t("已请求") : `🧹 ${t("存记忆 + Compact")}`}
+      </button>
+    </>
   );
 }

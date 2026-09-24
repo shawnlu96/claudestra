@@ -431,6 +431,10 @@ export const DICT: Record<string, string> = {
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
   // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
   "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
+  "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",
+  "推理档位": "Reasoning",
+  "切换会重启会话，接着原来的对话，上下文不丢": "Switching restarts the session and resumes the same conversation — context is kept",
+  "Codex 快满时会自动压缩上下文；想提前压，在终端里输入 /compact。": "Codex compacts on its own when the context is nearly full; to compact earlier, type /compact in the terminal.",
   "思考档位": "Thinking level",
   "支持图片": "Supports images",
   "支持思考": "Supports reasoning",

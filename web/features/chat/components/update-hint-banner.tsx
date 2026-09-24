@@ -48,7 +48,7 @@ export function UpdateHintBanner({ agent }: { agent?: AgentSession }) {
           </>
         ) : (
           <>
-            🔄 {agent.runtime === "pi" ? "Pi" : "Claude Code"} {hint.installed} {t("已装好，本会话还在")} {hint.running}
+            🔄 {agent.runtime === "pi" ? "Pi" : agent.runtime === "codex" ? "Codex" : "Claude Code"} {hint.installed} {t("已装好，本会话还在")} {hint.running}
             {t("——重启后生效")}
           </>
         )}

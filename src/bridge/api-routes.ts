@@ -76,10 +76,13 @@ import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } f
 import { piCommandsFor } from "../lib/pi-env.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
-import { isPiThinkingLevel } from "../lib/pi-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
+import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
+import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
+import { displayModelEffort } from "../lib/display-model.js";
+import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
 
 /**
@@ -303,7 +306,7 @@ export async function sessionTailInfo(path: string): Promise<SessionTailInfo | n
     const hit = tailInfoCache.get(path);
     if (hit && hit.mtimeMs === st.mtimeMs) return hit.info;
     let info: SessionTailInfo = {
-      convTs: null, ctxTokens: null, model: null, modelTs: null, effort: null, effortTs: null,
+      convTs: null, ctxTokens: null, ctxWindow: null, model: null, modelTs: null, effort: null, effortTs: null,
     };
     for (const win of TAIL_WINDOWS) {
       const start = Math.max(0, st.size - win);
@@ -316,47 +319,6 @@ export async function sessionTailInfo(path: string): Promise<SessionTailInfo | n
   } catch {
     return null;
   }
-}
-
-/**
- * claude-settings 切换的乐观显示（owner 2026-07-27:「切换完直接把模型显示成
- * 新的，读到 jsonl 不一样再改」）。注入 /model、/effort 成功后先记在这里，
- * agents 列表优先显示；一旦 jsonl 里实测到**切换之后**的记录（无论值是否一致），
- * 实测重新接管并清掉本条——注入静默失败最多骗到下一条消息为止。
- * 内存态，bridge 重启即退回纯实测链（可接受:只差一条消息的显示滞后）。
- */
-const claudeSwitchOverride = new Map<
-  string,
-  { model?: { v: string; ts: number }; effort?: { v: string; ts: number } }
->();
-const overrideKey = (name: string) => String(name).replace(/^agent-/, "");
-
-/** 记一次"刚切换"的乐观值（Claude Code 与 Pi 两条切换路径共用） */
-function rememberSwitchOverride(name: string, patch: { model?: string; effort?: string }): void {
-  const key = overrideKey(name);
-  const prev = claudeSwitchOverride.get(key) ?? {};
-  const now = Date.now();
-  claudeSwitchOverride.set(key, {
-    model: patch.model ? { v: patch.model, ts: now } : prev.model,
-    effort: patch.effort ? { v: patch.effort, ts: now } : prev.effort,
-  });
-}
-
-/** jsonl 实测超过此时限视为陈旧——重启后一轮没跑过的 agent,老会话里的模型
- *  读数是老黄历(2026-07-27 实例:5 月的 opus-4-7 盖过了 registry 钉的 opus-5),
- *  显示回退到 registry/全局配置更接近「下一轮会用什么」。 */
-const CLAUDE_READ_STALE_MS = 7 * 24 * 3600_000;
-const freshOrNull = <T>(v: T | null | undefined, ts: number | null | undefined): T | null =>
-  v != null && ts != null && Date.now() - ts < CLAUDE_READ_STALE_MS ? v : null;
-/** 列表侧取乐观值:比实测记录新才算数;两个字段都被实测追上就顺手清掉 */
-function pickClaudeOverride(name: string, info: SessionTailInfo | null | undefined) {
-  const key = overrideKey(name);
-  const ov = claudeSwitchOverride.get(key);
-  if (!ov) return { model: null as string | null, effort: null as string | null };
-  const model = ov.model && ov.model.ts > (info?.modelTs ?? 0) ? ov.model.v : null;
-  const effort = ov.effort && ov.effort.ts > (info?.effortTs ?? 0) ? ov.effort.v : null;
-  if (model === null && effort === null) claudeSwitchOverride.delete(key);
-  return { model, effort };
 }
 
 // ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
@@ -488,10 +450,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const bySessions = new Map<string, SessionTailInfo>();
         for (const r of regs) {
           if (!r.cwd || !r.sessionId) continue;
-          // v2.23+ runtime 感知：Pi 的会话文件在 ~/.pi/agent/sessions/ 下，拿 CC 路径
-          // 去找必然空手 → model/effort 回落全局默认（owner 实测：Pi agent 顶栏显示
-          // 「Opus 5 · xhigh」，实际是 deepseek-v4.1-flash + thinking off）
-          const path = sessionJsonlPath(r.runtime, r.cwd, r.sessionId);
+          // 按运行时找会话文件（Pi 在 ~/.pi/agent/sessions/；Codex 的 rollout 路径推不出来、按 id 找，有缓存）
+          const path = sessionJsonlPath(r.runtime, r.cwd, r.sessionId) ?? (r.runtime === "codex" ? findSessionJsonlBySessionId(r.runtime, r.sessionId) : null);
           if (!path) continue;
           const info = await sessionTailInfo(path);
           if (info) bySessions.set(r.name, info);
@@ -513,29 +473,18 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           (a as any).projectId = r?.projectId ?? null;
           // 运行时徽章 + 顶栏挂哪种切换器的数据源：如实透传（未知/缺失 = claude-code），只认 pi 的话 Codex 会拿到 CC 面板
           (a as any).runtime = sourceFor(r?.runtime).id;
-          // 当前模型/effort。显示链:刚切换的乐观值(实测追上前) → jsonl 实测
-          // (会话内切换即时反映,防 registry 漂移) → registry 钉的(创建/切换
-          // 端点写入) → 全局默认
-          const ov = pickClaudeOverride(a.name, info);
-          // 实测过旧(重启后没跑过回合)不参与,回退 registry/全局;全部落空才用陈旧值兜底
-          (a as any).model =
-            ov.model ??
-            freshOrNull(info?.model, info?.modelTs) ??
-            // Pi 的 model 是 provider/id（如 cc-switch-open-code-go/deepseek-v4.1-flash），
-            // 不能拿 Claude Code 的别名表去改写它
-            (r?.model ? (r.runtime === "pi" ? r.model : resolveModelAlias(r.model)) : null) ??
-            gModel ??
-            info?.model ??
-            null;
-          const piRuntime = r?.runtime === "pi";
-          // Pi 的 thinking 档位通常只在开场写一条 thinking_level_change，落在会话文件的
-          // **头部**，而 session-tail 只扫尾部窗口 ⇒ 扫不到、回落全局默认（实测顶栏显示
-          // xhigh 而实际是 off/max）。扩展在启动时把运行实况写进了快照，这里用它兜底；
-          // tail 扫到更新鲜的值时优先（会话内切换思考档位的情况）。
-          const piSnap = piRuntime ? readPiRuntimeSnapshot(a.name) : null;
-          (a as any).effort = piRuntime
-            ? (info?.effort ?? piSnap?.thinking ?? r?.effort ?? null)
-            : (ov.effort ?? freshOrNull(info?.effort, info?.effortTs) ?? r?.effort ?? gEffort ?? info?.effort ?? null);
+          // 当前模型 / 档位的兜底链按运行时分叉（lib/display-model.ts）；Codex 的窗口随会话记录走（258K 之类）
+          (a as any).contextWindow = info?.ctxWindow ?? null;
+          Object.assign(a as any, displayModelEffort({
+            runtime: (a as any).runtime,
+            override: pickSwitchOverride(a.name, info),
+            tail: info,
+            reg: r,
+            claudeGlobal: { model: gModel, effort: gEffort },
+            piSnapThinking: r?.runtime === "pi" ? (readPiRuntimeSnapshot(a.name)?.thinking ?? null) : null,
+            codex: r?.runtime === "codex" ? { catalog: cachedCodexCatalog(), config: readCodexConfigDefaults() } : undefined,
+            resolveAlias: resolveModelAlias,
+          }));
         }
         // 「该重启/该 pi update」提示：不给 peer（不向别的实例透露本机确切版本）；出任何错都只少个提示，不能让整张列表 500
         if (!principal.peer) await import("../lib/update-hints.js").then((m) => m.attachUpdateHints(agents as any[], regByName))
@@ -564,6 +513,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
             lastActivityTs: ts,
             created: (r as any).created,
             projectId: r.projectId ?? null,
+            runtime: sourceFor(r.runtime).id,
             archived: existsSyncFs(`${USER_ARCHIVE_ROOT}/${String(r.name).replace(/^agent-/, "")}`),
           } as any);
         }
@@ -589,7 +539,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           if (typeof s.model === "string") mgModel = s.model;
           if (typeof s.effortLevel === "string") mgEffort = s.effortLevel;
         } catch { /* 无全局默认 */ }
-        const mOv = pickClaudeOverride("master", mInfo);
+        const mShown = displayModelEffort({
+          runtime: "claude-code", override: pickSwitchOverride("master", mInfo), tail: mInfo, reg: undefined,
+          claudeGlobal: { model: mgModel, effort: mgEffort }, resolveAlias: resolveModelAlias,
+        });
         agents.unshift({
           name: "master",
           status: deps.clients.has(CONTROL_CHANNEL_ID) ? "active" : "stopped",
@@ -597,8 +550,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           purpose: "master orchestrator (大总管)",
           busy: isBusyStatus(getAgentStatus("master")),
           compacting: getAgentStatus("master") === "compacting",
-          model: mOv.model ?? freshOrNull(mInfo?.model, mInfo?.modelTs) ?? mgModel ?? mInfo?.model ?? null,
-          effort: mOv.effort ?? freshOrNull(mInfo?.effort, mInfo?.effortTs) ?? mgEffort ?? mInfo?.effort ?? null,
+          runtime: "claude-code",
+          contextTokens: mInfo?.ctxTokens ?? null,
+          ...mShown,
         } as any);
       }
       return apiJson(200, { ok: true, agents });
@@ -622,33 +576,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           return owner ? agentInScope(principal, owner) : false;
         });
     return apiJson(200, { ok: true, sessions: visible });
-  }
-
-  // v2.23+ GET /api/v1/pi-models —— Pi provider 配了哪些模型（web 模型选择器用）。
-  // 与 /config/claude-defaults 的分工：那个是 Claude Code 的全局默认；这个是 Pi 侧
-  // ~/.pi/agent/models.json 里 providers[].models[]，给 Pi agent 的选择器渲染用。
-  if (path === "/pi-models" && req.method === "GET") {
-    if (!isFullScope(principal)) return forbidden("pi-models requires a full-scope token");
-    try {
-      const raw = JSON.parse(await Bun.file(`${process.env.HOME}/.pi/agent/models.json`).text());
-      const models: Array<Record<string, unknown>> = [];
-      for (const [provider, cfg] of Object.entries<any>(raw?.providers ?? {})) {
-        for (const m of cfg?.models ?? []) {
-          models.push({
-            id: `${provider}/${m.id}`,
-            provider,
-            name: m.name ?? m.id,
-            input: Array.isArray(m.input) ? m.input : ["text"],
-            images: Array.isArray(m.input) && m.input.includes("image"),
-            thinking: m.reasoning === true,
-            contextWindow: m.contextWindow ?? null,
-          });
-        }
-      }
-      return apiJson(200, { ok: true, count: models.length, models });
-    } catch (e) {
-      return apiJson(500, { ok: false, error: `读取 models.json 失败: ${(e as Error).message}` });
-    }
   }
 
   // GET /api/v1/remote-access —— 网页「手机访问」面板：Tailscale 状态、每个入口（可达 / 证书剩余天数）、
@@ -679,64 +606,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const { loadModelCatalog } = await import("../lib/model-catalog.js");
     const catalog = await loadModelCatalog();
     return apiJson(200, { ok: true, source: catalog.source, count: catalog.models.length, models: catalog.models });
-  }
-
-  // v2.23+ POST /api/v1/agents/:name/pi-settings —— Pi agent 切模型/思考档位。
-  // 与 claude-settings 的分工：那个注入 Claude Code 的 `/model`、`/effort`；Pi 侧
-  // 的 `/model` 是**打开选择器**的交互语义（未验证收不收参数），所以走我们自己扩展
-  // 注册的确定性命令 `/claudestra-model <provider/id>`、`/claudestra-thinking <level>`
-  // （扩展内部直接调 setModel/setThinkingLevel），注入方式与 CC 相同：tmux send-keys。
-  const piSetMatch = path.match(/^\/agents\/([^/]+)\/pi-settings$/);
-  if (piSetMatch && req.method === "POST") {
-    if (!isFullScope(principal)) return forbidden("pi-settings requires a full-scope token");
-    const agentName = decodeURIComponent(piSetMatch[1]);
-    const canonical = agentName.startsWith("agent-") ? agentName : `agent-${agentName}`;
-    if (!agentInScope(principal, canonical)) return notInScope(canonical);
-    const body: any = await readJsonBody(req);
-    if (body === INVALID_JSON) return invalidJsonBody();
-    const model = String(body?.model || "").trim();
-    const effort = String(body?.effort || "").trim();
-    if (!model && !effort) {
-      return apiJson(400, { ok: false, error: 'body must be {"model"?,"effort"?}' });
-    }
-    // effort 原样进 tmux send-keys -l：不校验 = 换行即可向 agent TUI 注入第二行任意输入
-    if (effort && !isPiThinkingLevel(effort)) {
-      return apiJson(400, { ok: false, error: `未知的 thinking 档位：${effort}` });
-    }
-    if (model && !/^[A-Za-z0-9._\/@:-]+$/.test(model)) {
-      return apiJson(400, { ok: false, error: "model 含非法字符" });
-    }
-    const agents = await readRegistryAgents();
-    const reg = agents.find((a) => a.name === canonical);
-    if (!reg) return apiJson(404, { ok: false, error: `agent "${canonical}" not found` });
-    if (reg.runtime !== "pi") {
-      return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 Pi agent（用 /claude-settings）` });
-    }
-    // 模型 id 先对着 models.json 校验：扩展内部解析不到会拒绝，而桥接这边的"乐观显示"
-    // 没法知道注入的结果 ⇒ 假 id 会在顶栏显示一个根本不存在的模型（实测踩过）。
-    if (model) {
-      try {
-        const raw = JSON.parse(await Bun.file(`${process.env.HOME}/.pi/agent/models.json`).text());
-        const ids = new Set<string>();
-        for (const [provider, cfg] of Object.entries<any>(raw?.providers ?? {})) {
-          for (const m of cfg?.models ?? []) ids.add(`${provider}/${m.id}`);
-        }
-        if (ids.size && !ids.has(model)) {
-          return apiJson(400, { ok: false, error: `未知的 Pi 模型：${model}` });
-        }
-      } catch { /* 读不到清单就不拦（扩展侧仍会拒绝） */ }
-    }
-    const { tmuxSendLine, windowTarget } = await import("../lib/tmux-helper.js");
-    const target = windowTarget(canonical);
-    try {
-      if (model) await tmuxSendLine(target, `/claudestra-model ${model}`);
-      if (effort) await tmuxSendLine(target, `/claudestra-thinking ${effort}`);
-    } catch (e) {
-      return apiJson(500, { ok: false, error: `注入失败: ${(e as Error).message}` });
-    }
-    // 乐观显示：与 claude-settings 同款（切换生效前让顶栏先跟着变）
-    rememberSwitchOverride(canonical, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
-    return apiJson(200, { ok: true, agent: canonical, model: model || null, effort: effort || null });
   }
 
   // v2.23+ GET /api/v1/session-list —— 机器上所有会话（两种 runtime，活的+历史的）。
@@ -1757,14 +1626,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     {
       // 乐观显示:注入已成功,列表立即按新值显示;jsonl 实测追上后自动接管
       rememberSwitchOverride(agent.name, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
-      const key = overrideKey(agent.name);
-      const prev = claudeSwitchOverride.get(key) ?? {};
-      const now = Date.now();
-      claudeSwitchOverride.set(key, {
-        ...prev,
-        ...(model ? { model: { v: model, ts: now } } : {}),
-        ...(effort ? { effort: { v: effort, ts: now } } : {}),
-      });
     }
     if (!isMasterSet) {
       try {
@@ -2336,6 +2197,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   const peersRes = await handlePeersRoutes(req, path, principal, runManager); // /peers*（bridge/peers-routes.ts）
   if (peersRes) return peersRes;
+  const rtRes = await handleRuntimeSettingsRoutes(req, path, principal, runManager); // /pi-*、/codex-*（bridge/runtime-settings-routes.ts）
+  if (rtRes) return rtRes;
 
   return apiJson(404, { ok: false, error: "unknown endpoint" });
 }

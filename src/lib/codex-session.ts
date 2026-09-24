@@ -29,12 +29,13 @@
  *     而且每条都是几 KB，混进历史面板就是刷屏；
  *   - `reasoning` **丢掉**：`encrypted_content` 读不了、`summary` 实测恒空，
  *     留下来只会变成一堆空气泡；
- *   - `event_msg` 只取 `item_completed` 里的结构化工具记录（见 codexLineToClaudeShape），
- *     其余与 `world_state` / `turn_context` 一样**丢掉**：遥测与内部状态；
+ *   - `event_msg` 取 `item_completed` 里的结构化工具记录（见 codexLineToClaudeShape），
+ *     `token_count` 与 `turn_context` 翻成 system 记录给顶栏读占用 / 模型 / 档位（codexStateRecord），
+ *     其余与 `world_state` 一样**丢掉**：遥测与内部状态；
  *   - `token_usage_record` 暂不翻译（用量归并是另一条链路，没接就别假装有）。
  */
 
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -83,12 +84,20 @@ export function listCodexSessionFiles(root: string = codexSessionsRoot()): strin
 
 export function findCodexSessionPath(sessionId: string, root: string = codexSessionsRoot()): string | null {
   if (!sessionId) return null;
+  const hit = foundPaths.get(`${root}\0${sessionId}`);
+  if (hit && existsSync(hit)) return hit;
   for (const p of listCodexSessionFiles(root)) {
     const id = codexSessionIdFromFilename(p.split("/").pop() || "");
-    if (id === sessionId || (sessionId.length >= 8 && id?.startsWith(sessionId))) return p;
+    if (id === sessionId || (sessionId.length >= 8 && id?.startsWith(sessionId))) {
+      foundPaths.set(`${root}\0${sessionId}`, p);
+      return p;
+    }
   }
   return null;
 }
+
+/** 一个线程的 rollout 文件名定下就不变：agents 列表每次轮询都要找，全树扫一遍太贵（文件被删才重扫） */
+const foundPaths = new Map<string, string>();
 
 /**
  * 读完整的第一行（`session_meta`）并取出 sessionId / cwd。
@@ -209,6 +218,28 @@ function codexItemToolUse(item: AnyRecord): { id: string; name: string; input: A
 }
 
 /**
+ * 顶栏要的三样东西（session-tail 按 subtype 读，与 Pi 的 thinking_level_change 同一路子）：
+ * - turn_context 每轮一条，写着本轮实际的 model 和推理档位；没设档位时 effort 缺、reasoning_effort
+ *   为 null（= 模型默认档，由调用方按目录补），所以 effort 为 null 也要带出去，不能当「没读到」。
+ * - token_count 的 last_token_usage 是最近一次请求的输入 + 输出（input 已含缓存命中）≈ 当前上下文；
+ *   model_context_window 是这个模型的窗口。只有限流信息、info 为 null 的那种跳过。
+ */
+function codexStateRecord(type: string, p: AnyRecord, ts: string | undefined): AnyRecord | null {
+  if (type === "turn_context") {
+    const s: AnyRecord = p.collaboration_mode?.settings ?? {};
+    const model = typeof p.model === "string" && p.model ? p.model : typeof s.model === "string" ? s.model : null;
+    const effort = typeof p.effort === "string" && p.effort ? p.effort : typeof s.reasoning_effort === "string" ? s.reasoning_effort : null;
+    return model ? { type: "system", subtype: "model_state", timestamp: ts, model, effort } : null;
+  }
+  const last: AnyRecord | undefined = p.info?.last_token_usage;
+  if (!last) return null;
+  const tokens = typeof last.total_tokens === "number" ? last.total_tokens : (last.input_tokens ?? 0) + (last.output_tokens ?? 0);
+  if (!(tokens > 0)) return null;
+  const window = typeof p.info.model_context_window === "number" ? p.info.model_context_window : null;
+  return { type: "system", subtype: "context_usage", timestamp: ts, tokens, window };
+}
+
+/**
  * 一行 Codex 记录 → Claude Code 形状（不是对话内容就返回 null）。
  *
  * 新版 Codex（0.149+ 的 code mode）把工具调用包在 `custom_tool_call name:"exec"` 里
@@ -230,6 +261,7 @@ export function codexLineToClaudeShape(line: string, state?: CodexTranslateState
   if (e.type === "session_meta") {
     return { type: "system", subtype: "codex_session_start", timestamp: ts, sessionId: p.session_id ?? p.id, cwd: p.cwd };
   }
+  if (e.type === "turn_context" || (e.type === "event_msg" && p.type === "token_count")) return codexStateRecord(e.type, p, ts);
   if (e.type === "event_msg") {
     if (p.type === "task_started") {
       if (state) { state.turnHasItems = false; state.bootstrapTurn = false; state.droppedCalls.clear(); }

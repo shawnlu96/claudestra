@@ -112,7 +112,7 @@ describe("buildCodexCommand", () => {
   });
 
   test("model / effort 映射；Claude 的档位直接报错", async () => {
-    const { argv } = await shellArgv(buildCodexCommand(spec({ model: "gpt-5.5", effort: "max" }), "R"));
+    const { argv } = await shellArgv(buildCodexCommand(spec({ model: "gpt-5.5", effort: "ultracode" }), "R"));
     expect(argv).toContain("-m");
     expect(argv[argv.indexOf("-m") + 1]).toBe("gpt-5.5");
     expect(argv).toContain('model_reasoning_effort="xhigh"');
@@ -131,7 +131,10 @@ describe("权限 / effort / model", () => {
     expect(codexEffort(undefined)).toBeNull();
     expect(codexEffort("default")).toBeNull();
     expect(codexEffort("high")).toBe("high");
-    expect(codexEffort("max")).toBe("xhigh");
+    // Codex 自己有 max / ultra 档（0.15x 起），原样透传；ultracode 是 Claude Code 独有的，折成 xhigh
+    expect(codexEffort("max")).toBe("max");
+    expect(codexEffort("ultra")).toBe("ultra");
+    expect(codexEffort("ultracode")).toBe("xhigh");
     expect(() => codexEffort("turbo")).toThrow();
   });
   test("model", () => {

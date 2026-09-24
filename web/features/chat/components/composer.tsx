@@ -177,7 +177,9 @@ export function Composer() {
   const reqAt = compactReqAt[active] || 0;
   // 阈值对齐 ctx-level 深红档(1M 窗的 75%)——此前按 200k 窗的 170k,1M 模型
   // 才用 17% 就催压缩,太吵(owner 2026-07-14 更正窗口口径)
+  // 只给 Claude Code：一键请求的是它的 save-compact 技能；Codex 快满时自己压（见 ctx-badge 的 ScaledAdvice）
   const showCtxWarn =
+    (agentInfo?.runtime ?? "claude-code") === "claude-code" &&
     ctxTokens >= 750_000 &&
     ctxDismissedFor !== active &&
     // 读当前时间决定要不要提示压缩。改成定时 tick 驱动才算"纯"，但那是为一个提示

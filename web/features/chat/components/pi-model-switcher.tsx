@@ -1,9 +1,11 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { PI_THINKING_LEVELS, piModelLabel } from "../claude-options";
 import { useT } from "@/lib/i18n";
+import { postRuntimeSwitch, useDismiss } from "../runtime-switch";
+import { EffortButtons, SwitcherBadge } from "./switcher-parts";
 
 /**
  * Pi 会话的模型 / 思考档位切换器（TopBar）。
@@ -38,23 +40,10 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [err, setErr] = useState("");
   const wrapRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   // 面板外点击 / Esc 关闭（与 CC 面板同款交互）
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: PointerEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  useDismiss(open, close, wrapRef);
 
   // 模型清单只在**首次展开**时拉一次（在点开的事件里发起，不进 effect）；
   // 失败留在面板里可重试（下次点开再拉）。
@@ -85,27 +74,13 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
   };
 
   const apply = async (patch: { model?: string; effort?: string }) => {
-    const key = patch.model ?? patch.effort ?? "";
-    setSaving(key);
+    setSaving(patch.model ?? patch.effort ?? "");
     setErr("");
-    try {
-      const res = await fetch("/api/agents/pi-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent: agent.name, ...patch }),
-      });
-      const j = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setErr(j.error || t("切换失败"));
-        return;
-      }
-      store.refreshAgents();
-      setOpen(false);
-    } catch {
-      setErr(t("切换失败"));
-    } finally {
-      setSaving(null);
-    }
+    const e = await postRuntimeSwitch("/api/agents/pi-settings", { agent: agent.name, ...patch }, t("切换失败"));
+    setSaving(null);
+    if (e) return setErr(e);
+    store.refreshAgents();
+    setOpen(false);
   };
 
   // 当前模型可能带 `:thinking` 后缀（provider/model:low），比对时剥掉
@@ -114,18 +89,7 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
 
   return (
     <div ref={wrapRef} className="relative shrink-0">
-      <button
-        className="flex items-center gap-1 rounded-full bg-base-200 px-2 py-0.5 font-mono text-[10.5px] text-base-content/60 transition-colors hover:bg-base-300"
-        title={t("Pi 会话：当前模型与思考档位，点击切换")}
-        onClick={toggle}
-      >
-        <span className="max-w-[110px] truncate">{piModelLabel(agent.model)}</span>
-        <span className="opacity-40">·</span>
-        <span>{agent.effort || "?"}</span>
-        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className="opacity-50">
-          <path d="M6 9l6 6 6-6" />
-        </svg>
-      </button>
+      <SwitcherBadge label={piModelLabel(agent.model)} effort={agent.effort} title={t("Pi 会话：当前模型与思考档位，点击切换")} maxW="max-w-[110px]" onClick={toggle} />
       {open && (
         <div className="panel-pop absolute left-0 top-full z-30 mt-1.5 w-64 max-w-[80vw] rounded-xl border border-base-content/10 bg-base-100 p-3 shadow-lg">
           <div className="mb-1 text-[11px] text-base-content/50">{t("模型")}</div>
@@ -170,18 +134,7 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
           </div>
 
           <div className="mb-1 text-[11px] text-base-content/50">{t("思考档位")}</div>
-          <div className="flex flex-wrap gap-1">
-            {PI_THINKING_LEVELS.map((e) => (
-              <button
-                key={e}
-                className={`btn btn-xs font-mono ${agent.effort === e ? "btn-primary" : "btn-ghost bg-base-200"}`}
-                disabled={saving !== null}
-                onClick={() => apply({ effort: e })}
-              >
-                {saving === e ? "…" : e}
-              </button>
-            ))}
-          </div>
+          <EffortButtons levels={PI_THINKING_LEVELS} current={agent.effort} saving={saving} disabled={saving !== null} onPick={(e) => apply({ effort: e })} />
           <div className="mt-1 text-[10px] leading-snug text-base-content/35">
             {t("Pi 的档位与 Claude Code 的 effort 不是一套值（off 是 Pi 独有）")}
           </div>

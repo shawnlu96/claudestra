@@ -3,10 +3,10 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
-import { ctxLevel, CTX_WINDOW } from "../ctx-level";
+import { ctxView } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
-import { RuntimeBadge } from "./unmanaged-sessions";
+import { RuntimeBadge } from "./runtime-badge";
 import { MasterIcon } from "./master-icon";
 import { swipeReg } from "./agent-row-swipe";
 import { SwipeActions } from "./agent-row-actions";
@@ -108,14 +108,16 @@ export function AgentRow({
   // v2.21.4 曾改成行底 2px 细线,owner 2026-09-06「有点丑,回滚之前的再优化一下」:
   // 保留填充,右缘用 mask 渐隐(不再是一块硬边色块,读起来像仪表而不像选中高亮),
   // 浓度各降一档;「工作中」自此用闪烁外框表达,填充只剩「占用」一种含义。
+  // 会话自带窗口的（Codex，约 258K）按自己的窗口算比例和色阶，见 ctx-level.ctxView
   const ctx = a.status === "active" && typeof a.contextTokens === "number" ? a.contextTokens : 0;
-  const ctxPct = Math.min(100, Math.round((ctx / CTX_WINDOW) * 100));
+  const cv = ctxView(ctx, a.contextWindow);
+  const ctxPct = Math.min(100, cv.pct);
   const ctxTone = {
     deep: "bg-error/30",
     high: "bg-error/14",
     mid: "bg-warning/12",
     none: "bg-base-content/[0.04]",
-  }[ctxLevel(ctx)];
+  }[cv.level];
   // 忙碌态 = 行外框(owner 2026-09-06:「工作中给它加一个不断闪烁的黄色边框」);
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
   const busyNow = !!(a.busy || busyLive);

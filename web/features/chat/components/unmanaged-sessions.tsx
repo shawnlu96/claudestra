@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
+import { RuntimeBadge } from "./runtime-badge";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -51,26 +52,6 @@ interface HistoryMsg {
 /** 临时目录（测试/探针/子代理 scratchpad）的会话不算「未纳管」噪声源，列表与计数都不含它们 */
 function isTempSession(cwd: string): boolean {
   return /^(\/tmp|\/private\/tmp|\/var\/folders|\/private\/var\/folders)\//.test(cwd || "");
-}
-
-export function RuntimeBadge({ runtime, className = "" }: { runtime: string; className?: string }) {
-  // claude-code 是默认，不加徽章（列表里绝大多数是它，标了反而全是噪声）
-  if (runtime === "pi") {
-    return (
-      <span className={`badge badge-xs border-primary/40 bg-primary/10 text-[10px] text-primary ${className}`}>
-        Pi
-      </span>
-    );
-  }
-  if (runtime === "codex") {
-    // v2.24+ Codex：能收编（入站走 `codex queue`）。徽章用中性色，与 Pi 区分开。
-    return (
-      <span className={`badge badge-xs border-base-content/25 bg-base-content/10 text-[10px] text-base-content/70 ${className}`}>
-        Codex
-      </span>
-    );
-  }
-  return null;
 }
 
 /** 能不能收编成可对话的 agent：以 bridge 的 manageable 为准（加运行时前端不用改）；老 bridge 按旧规则 */

@@ -159,6 +159,8 @@ export interface AgentSession {
   unread?: number;
   /** 当前上下文占用 token 数 → TopBar 超标提示。 */
   contextTokens?: number | null;
+  /** 会话记录自带的上下文窗口（Codex 有；Claude Code 为 null → 按 1M 绝对刻度），见 ctx-level.ctxView */
+  contextWindow?: number | null;
   /** 当前模型 id（jsonl 实测 → registry → 全局默认;null=未知）→ TopBar 徽章。 */
   model?: string | null;
   /** 当前 effort 档位（同上兜底链）→ TopBar 徽章。 */

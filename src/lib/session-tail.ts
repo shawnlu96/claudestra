@@ -23,6 +23,8 @@ export interface SessionTailInfo {
   convTs: number | null;
   /** 最近一条 assistant 的 usage 合计 ≈ 当前上下文占用 token 数 */
   ctxTokens: number | null;
+  /** 会话记录自带的上下文窗口（Codex 的 token_count 有；Claude Code 没有 → null，前端按 1M 刻度） */
+  ctxWindow: number | null;
   /** 最近一条 assistant 实际用的 model id（会话内 /model 切换后即时反映，防 registry 漂移） */
   model: string | null;
   /** model 读取自的那条 assistant 记录的时间——切换端点的乐观显示靠它判断实测是否已追上 */
@@ -41,100 +43,119 @@ const CMD_RECORD_RE = /^\s*<(command-name|command-message|local-command-stdout|l
 /** restart/resume 回放排队命令时 CC 产出的礼节性回复——不是对话 */
 const NO_RESPONSE_RE = /^\s*No response requested\.?\s*$/;
 
+/** 扫描中的累加器：每个字段取逆序首个命中（= 时间上最后一条） */
+interface TailAcc extends SessionTailInfo {
+  /** Codex 的「没设档位」是显式的 null（= 模型默认档），读到它就不能再往前找旧值 */
+  effortSettled: boolean;
+}
+
+const tsOf = (rec: any): number | null => {
+  const t = Date.parse(rec.timestamp);
+  return Number.isFinite(t) ? t : null;
+};
+
+/** 上下文占用（及 Codex 自带的窗口） */
+function takeContext(rec: any, acc: TailAcc): void {
+  if (acc.ctxTokens !== null) return;
+  // Codex：token_count 翻成的 context_usage（codex-session.codexStateRecord）
+  if (rec.type === "system" && rec.subtype === "context_usage") {
+    acc.ctxTokens = rec.tokens;
+    acc.ctxWindow = rec.window ?? null;
+    return;
+  }
+  // compact 边界比最近一条 assistant 更新时,占用以 postTokens 为准——
+  // 否则压缩刚完、新回合未跑的窗口里,轮询会把 ctx 徽章顶回压缩前的值
+  if (rec.type === "system" && rec.subtype === "compact_boundary") {
+    const post = rec.compactMetadata?.postTokens;
+    if (typeof post === "number") acc.ctxTokens = post;
+    return;
+  }
+  // 上下文占用:最近一条带 usage 的 assistant——input + cache 读写就是
+  // 本轮进模型的全部上下文(web 端「context 快满」指示的数据源)。
+  // 合计为 0 的跳过:restart 回放命令产生的「No response requested.」等
+  // 合成记录 usage 全 0,采纳它会让全列表 ctx 归零(2026-07-14 CC 升级
+  // 全量 restart 后「各会话上下文占用只剩一个」的根因)
+  if (rec.type === "assistant") {
+    const u = rec.message?.usage;
+    if (u && typeof u.input_tokens === "number") {
+      const total = u.input_tokens + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      if (total > 0) acc.ctxTokens = total;
+    }
+  }
+}
+
+/** 当前模型与 effort / 思考档位 */
+function takeModelEffort(rec: any, acc: TailAcc): void {
+  const effortOpen = acc.effort === null && !acc.effortSettled;
+  // Codex：turn_context 翻成的 model_state，模型与档位一起读（档位 null = 模型默认档）
+  if (rec.type === "system" && rec.subtype === "model_state") {
+    if (acc.model === null) [acc.model, acc.modelTs] = [rec.model, tsOf(rec)];
+    if (effortOpen) [acc.effort, acc.effortTs, acc.effortSettled] = [rec.effort ?? null, tsOf(rec), true];
+    return;
+  }
+  // 当前模型:最近一条 assistant 的 message.model(错误占位的 "<synthetic>" 跳过)
+  if (acc.model === null && rec.type === "assistant") {
+    const m = rec.message?.model;
+    if (typeof m === "string" && m && !m.startsWith("<")) [acc.model, acc.modelTs] = [m, tsOf(rec)];
+  }
+  if (!effortOpen) return;
+  // v2.23+ Pi:思考档位是独立记录(thinking_level_change),不是命令自述
+  if (rec.type === "system" && rec.subtype === "thinking_level_change") {
+    const lvl = rec.thinkingLevel;
+    if (typeof lvl === "string" && lvl) [acc.effort, acc.effortTs] = [lvl, tsOf(rec)];
+  }
+  // 会话内 /effort 切换:stdout 自述("Kept/Set effort level as/to xxx")
+  if (rec.type === "user") {
+    const c = rec.message?.content;
+    const body = typeof c === "string" ? c : "";
+    const em = body.includes("local-command-stdout") ? body.match(/(?:Kept|Set) effort level (?:as|to) (\w+)/) : null;
+    if (em) [acc.effort, acc.effortTs] = [em[1], tsOf(rec)];
+  }
+}
+
+/** 最后一条真实对话的时间 */
+function takeConvTs(rec: any, acc: TailAcc): void {
+  if (acc.convTs !== null || (rec.type !== "user" && rec.type !== "assistant") || typeof rec.timestamp !== "string") return;
+  // TUI 命令记录（批量 /model 之类）不算对话——不跳过的话一次批量维护
+  // 会让全部 agent 的「最后对话」并列在同一时刻
+  if (rec.type === "user") {
+    const c = rec.message?.content;
+    if (CMD_RECORD_RE.test(typeof c === "string" ? c : "")) return;
+  }
+  // restart/resume 回放排队命令时,CC 会产出一条礼节性 assistant
+  // 「No response requested.」——不是真对话,不排除的话每次 restart
+  // 都把该 agent 顶到列表最前(owner 2026-07-14:「重启不算用户真正的会话」)
+  if (rec.type === "assistant") {
+    const c = rec.message?.content;
+    const txt = Array.isArray(c)
+      ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("")
+      : typeof c === "string" ? c : "";
+    if (NO_RESPONSE_RE.test(txt)) return;
+  }
+  acc.convTs = tsOf(rec);
+}
+
 /** 逆序扫描一段 jsonl 文本，取每个字段的首个命中（= 时间上最后一条） */
 export function scanSessionTail(text: string, runtime?: string): SessionTailInfo {
   const lines = text.split("\n");
-  let convTs: number | null = null;
-  let ctxTokens: number | null = null;
-  let model: string | null = null;
-  let modelTs: number | null = null;
-  let effort: string | null = null;
-  let effortTs: number | null = null;
-  for (
-    let i = lines.length - 1;
-    i >= 0 && (convTs === null || ctxTokens === null || model === null || effort === null);
-    i--
-  ) {
+  const acc: TailAcc = {
+    convTs: null, ctxTokens: null, ctxWindow: null, model: null, modelTs: null, effort: null, effortTs: null, effortSettled: false,
+  };
+  const done = () => acc.convTs !== null && acc.ctxTokens !== null && acc.model !== null && (acc.effort !== null || acc.effortSettled);
+  for (let i = lines.length - 1; i >= 0 && !done(); i--) {
     const line = lines[i].trim();
     if (!line) continue;
     try {
-      // v2.23+ runtime 感知：Pi 的行在这里归一（usage 键名、model 位置、thinkingLevel）
+      // v2.23+ runtime 感知：Pi / Codex 的行在这里归一（usage 键名、model 位置、档位记录）
       const rec = translateSessionLine(runtime, line);
       if (!rec) continue;
-      // compact 边界比最近一条 assistant 更新时,占用以 postTokens 为准——
-      // 否则压缩刚完、新回合未跑的窗口里,轮询会把 ctx 徽章顶回压缩前的值
-      if (ctxTokens === null && rec.type === "system" && rec.subtype === "compact_boundary") {
-        const post = rec.compactMetadata?.postTokens;
-        if (typeof post === "number") ctxTokens = post;
-      }
-      // 上下文占用:最近一条带 usage 的 assistant——input + cache 读写就是
-      // 本轮进模型的全部上下文(web 端「context 快满」指示的数据源)。
-      // 合计为 0 的跳过:restart 回放命令产生的「No response requested.」等
-      // 合成记录 usage 全 0,采纳它会让全列表 ctx 归零(2026-07-14 CC 升级
-      // 全量 restart 后「各会话上下文占用只剩一个」的根因)
-      if (ctxTokens === null && rec.type === "assistant") {
-        const u = rec.message?.usage;
-        if (u && typeof u.input_tokens === "number") {
-          const total =
-            u.input_tokens + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-          if (total > 0) ctxTokens = total;
-        }
-      }
-      // 当前模型:最近一条 assistant 的 message.model(错误占位的 "<synthetic>" 跳过)
-      if (model === null && rec.type === "assistant") {
-        const m = rec.message?.model;
-        if (typeof m === "string" && m && !m.startsWith("<")) {
-          model = m;
-          const t = Date.parse(rec.timestamp);
-          modelTs = Number.isFinite(t) ? t : null;
-        }
-      }
-      // v2.23+ Pi:思考档位是独立记录(thinking_level_change),不是命令自述
-      if (effort === null && rec.type === "system" && rec.subtype === "thinking_level_change") {
-        const lvl = rec.thinkingLevel;
-        if (typeof lvl === "string" && lvl) {
-          effort = lvl;
-          const t = Date.parse(rec.timestamp);
-          effortTs = Number.isFinite(t) ? t : null;
-        }
-      }
-      // 会话内 /effort 切换:stdout 自述("Kept/Set effort level as/to xxx")
-      if (effort === null && rec.type === "user") {
-        const c = rec.message?.content;
-        const body = typeof c === "string" ? c : "";
-        const em = body.includes("local-command-stdout")
-          ? body.match(/(?:Kept|Set) effort level (?:as|to) (\w+)/)
-          : null;
-        if (em) {
-          effort = em[1];
-          const t = Date.parse(rec.timestamp);
-          effortTs = Number.isFinite(t) ? t : null;
-        }
-      }
-      if (convTs === null && (rec.type === "user" || rec.type === "assistant") && typeof rec.timestamp === "string") {
-        // TUI 命令记录（批量 /model 之类）不算对话——不跳过的话一次批量维护
-        // 会让全部 agent 的「最后对话」并列在同一时刻
-        if (rec.type === "user") {
-          const c = rec.message?.content;
-          const body = typeof c === "string" ? c : "";
-          if (CMD_RECORD_RE.test(body)) continue;
-        }
-        // restart/resume 回放排队命令时,CC 会产出一条礼节性 assistant
-        // 「No response requested.」——不是真对话,不排除的话每次 restart
-        // 都把该 agent 顶到列表最前(owner 2026-07-14:「重启不算用户真正的会话」)
-        if (rec.type === "assistant") {
-          const c = rec.message?.content;
-          const txt = Array.isArray(c)
-            ? c.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("")
-            : typeof c === "string" ? c : "";
-          if (NO_RESPONSE_RE.test(txt)) continue;
-        }
-        const t = Date.parse(rec.timestamp);
-        if (Number.isFinite(t)) convTs = t;
-      }
+      takeContext(rec, acc);
+      takeModelEffort(rec, acc);
+      takeConvTs(rec, acc);
     } catch {
       /* tail 起点切到半行 */
     }
   }
-  return { convTs, ctxTokens, model, modelTs, effort, effortTs };
+  const { effortSettled: _settled, ...info } = acc;
+  return info;
 }

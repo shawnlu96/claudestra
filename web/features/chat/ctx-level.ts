@@ -34,3 +34,14 @@ export function ctxLevel(tokens: number): CtxLevel {
   if (tokens >= 200_000) return "mid";
   return "none";
 }
+
+/**
+ * 按窗口算档位：会话记录自带窗口的运行时（Codex，258K 左右）按百分比分档——拿 1M 的绝对刻度，
+ * 它到自动压缩都不会变色。没带窗口的（Claude Code）照旧用上面的绝对档位。
+ */
+export function ctxView(tokens: number, window: number | null | undefined): { level: CtxLevel; pct: number; window: number; scaled: boolean } {
+  if (!window || window <= 0) return { level: ctxLevel(tokens), pct: Math.round((tokens / CTX_WINDOW) * 100), window: CTX_WINDOW, scaled: false };
+  const pct = Math.round((tokens / window) * 100);
+  const level: CtxLevel = pct >= 85 ? "deep" : pct >= 65 ? "high" : pct >= 40 ? "mid" : "none";
+  return { level, pct, window, scaled: true };
+}

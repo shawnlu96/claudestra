@@ -5,7 +5,7 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { getLang, t, useT } from "@/lib/i18n";
-import { RuntimeBadge } from "./unmanaged-sessions";
+import { RuntimeBadge } from "./runtime-badge";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
