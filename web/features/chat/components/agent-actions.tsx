@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { useT } from "@/lib/i18n";
@@ -83,14 +83,53 @@ function MoreIcon() {
   );
 }
 
+/** 选项点击后主动 blur：daisyUI focus 模式的下拉靠失焦收起 */
+export function closeDropdown() {
+  (document.activeElement as HTMLElement | null)?.blur?.();
+}
+
+/** ⋮ 下拉（daisyUI focus 模式，点外部/blur 自动收起）。AgentActions 与顶栏窄屏的折叠菜单共用 */
+export function MoreMenu({ busy = false, children }: { busy?: boolean; children: ReactNode }) {
+  const t = useT();
+  return (
+    <div className="dropdown dropdown-end">
+      <div
+        tabIndex={0}
+        role="button"
+        aria-label={t("更多操作")}
+        className={`btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content ${
+          busy ? "btn-disabled" : ""
+        }`}
+      >
+        {busy ? (
+          <span className="loading loading-spinner loading-xs" />
+        ) : (
+          <MoreIcon />
+        )}
+      </div>
+      <ul
+        tabIndex={0}
+        className="dropdown-content menu z-50 mt-1 w-44 rounded-box border border-base-300 bg-base-100 p-1 shadow-lg"
+      >
+        {children}
+      </ul>
+    </div>
+  );
+}
+
+/** AgentActions 会不会渲染 ⋮ 下拉——必须与下面组件里的分支一致，顶栏据此决定把次要操作并进来还是另起菜单 */
+export function hasActionMenu(agent: AgentSession): boolean {
+  return !agent.pinnedMaster && !agent.mock && agent.status === "active";
+}
+
 /**
  * 会话详情顶栏右侧的操作区。
  * - 大总管不渲染任何操作（clear 底层能力保留，UI 不放；生命周期归 launcher）。
  * - active：清空/重启/停止收进一个 ⋮ 下拉（owner 2026-07-11：顶栏按钮太多）。
- * - 非 active：保持原样——只有恒显的重启按钮。
- * - 下拉用 daisyUI focus 模式（点外部/blur 自动收起），选项点击后主动 blur 收起。
+ *   menuLead = 顶栏窄屏时并进来的次要操作（分享/搜索/终端），排在最上面。
+ * - 非 active：保持原样——只有恒显的重启按钮（menuLead 不用，顶栏会另起菜单）。
  */
-export function AgentActions({ agent }: { agent: AgentSession }) {
+export function AgentActions({ agent, menuLead }: { agent: AgentSession; menuLead?: ReactNode }) {
   const store = useChatStoreApi();
   const t = useT();
   const [busy, setBusy] = useState<"" | "kill" | "restart">("");
@@ -98,10 +137,6 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
   const [showClear, setShowClear] = useState(false);
 
   if (agent.pinnedMaster || agent.mock) return null;
-
-  const closeDropdown = () => {
-    (document.activeElement as HTMLElement | null)?.blur?.();
-  };
 
   const act = async (action: "kill" | "restart") => {
     if (busy) return;
@@ -129,7 +164,7 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
   };
 
   const errorBadge = error ? (
-    <span className="mr-1 max-w-40 truncate text-xs text-error" title={t(error)}>
+    <span className="mr-1 max-w-24 truncate text-xs text-error @xl:max-w-40" title={t(error)}>
       {t(error)}
     </span>
   ) : null;
@@ -159,56 +194,38 @@ export function AgentActions({ agent }: { agent: AgentSession }) {
   return (
     <span className="flex shrink-0 items-center gap-0.5">
       {errorBadge}
-      <div className="dropdown dropdown-end">
-        <div
-          tabIndex={0}
-          role="button"
-          aria-label={t("更多操作")}
-          className={`btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content ${
-            busy ? "btn-disabled" : ""
-          }`}
-        >
-          {busy ? (
-            <span className="loading loading-spinner loading-xs" />
-          ) : (
-            <MoreIcon />
-          )}
-        </div>
-        <ul
-          tabIndex={0}
-          className="dropdown-content menu z-50 mt-1 w-44 rounded-box border border-base-300 bg-base-100 p-1 shadow-lg"
-        >
-          <li>
-            <button onClick={() => act("restart")} disabled={busy !== ""}>
-              <RestartIcon />
-              {t("重启")}
-            </button>
-          </li>
-          <li>
-            <button
-              className="text-error"
-              onClick={() => act("kill")}
-              disabled={busy !== ""}
-            >
-              <PowerIcon />
-              {t("停止")}
-            </button>
-          </li>
-          {/* 清空放最下（owner 2026-07-11）：破坏性最低但最常误触，远离手指起点 */}
-          <li>
-            <button
-              onClick={() => {
-                closeDropdown();
-                setShowClear(true);
-              }}
-              disabled={busy !== ""}
-            >
-              <EraserIcon />
-              {t("清空")}
-            </button>
-          </li>
-        </ul>
-      </div>
+      <MoreMenu busy={busy !== ""}>
+        {menuLead}
+        <li>
+          <button onClick={() => act("restart")} disabled={busy !== ""}>
+            <RestartIcon />
+            {t("重启")}
+          </button>
+        </li>
+        <li>
+          <button
+            className="text-error"
+            onClick={() => act("kill")}
+            disabled={busy !== ""}
+          >
+            <PowerIcon />
+            {t("停止")}
+          </button>
+        </li>
+        {/* 清空放最下（owner 2026-07-11）：破坏性最低但最常误触，远离手指起点 */}
+        <li>
+          <button
+            onClick={() => {
+              closeDropdown();
+              setShowClear(true);
+            }}
+            disabled={busy !== ""}
+          >
+            <EraserIcon />
+            {t("清空")}
+          </button>
+        </li>
+      </MoreMenu>
 
       {showClear && (
         <ClearAgentModal agent={agent} onClose={() => setShowClear(false)} />

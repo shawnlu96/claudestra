@@ -13,11 +13,8 @@ import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
 import { UpdateToast } from "./update-toast";
 import { ComposerOrDock } from "./share-dock";
-import { ShareButton } from "./share-ui";
 import { Splash } from "./splash";
-import { AgentActions } from "./agent-actions";
-import { TerminalButton } from "../../terminal/terminal-button";
-import { SessionSearchButton } from "./session-search";
+import { TopBarActions } from "./topbar-actions";
 import { ManagePanel } from "./manage-panel";
 import { ClaudeSwitcher } from "./claude-switcher";
 import { CtxBadge } from "./ctx-badge";
@@ -266,9 +263,12 @@ function TopBar() {
     else setShowManage(false);
   };
   return (
-    // 安全区顶部由面板自己垫（bg=base-100，条带与内容同色无缝）
+    // 安全区顶部由面板自己垫（bg=base-100，条带与内容同色无缝）。@container：右侧操作组按顶栏
+    // 自身宽度折叠（topbar-actions.tsx）；部分浏览器的 container-type 带 layout containment，header
+    // 会自成层叠上下文，里面弹出面板/下拉的 z 就只在 header 内比——所以显式 z-40：高于消息区的
+    // sticky(z-10)、分享勾选(z-20)、同步横幅(z-30)，低于启动页(z-60)
     <header
-      className="flex min-h-12 shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-3 sm:px-4"
+      className="@container relative z-40 flex min-h-12 shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-3 sm:px-4"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       {/* 移动端：返回会话列表（走 history.back 触发系统返回同款滑动）。桌面端双栏，隐藏 */}
@@ -281,48 +281,38 @@ function TopBar() {
           <path d="M15 18l-6-6 6-6" />
         </svg>
       </button>
-      <span className="truncate font-semibold">
-        {info ? t(info.displayName) : active || "Claudestra"}
-      </span>
-      {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
-          顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
-      {busy && (
-        <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-info/10 px-2 py-0.5 text-[11px] font-medium text-info">
-          <span className="relative flex size-1.5">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-info opacity-60 motion-reduce:hidden" />
-            <span className="relative inline-flex size-1.5 rounded-full bg-info" />
+      {/* 标题区：窄顶栏「名字 + 思考中」独占第一行、其余徽章排第二行（顶栏高度不随回合进出
+          跳动）；放不下就换行而不是裁切——徽章的弹出面板相对徽章 absolute 定位，overflow 会把
+          面板一起切掉。cwd 用 basis-0 grow：只吃剩余空间、永不触发换行，没地方就截断到看不见 */}
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 py-1">
+        <div className="flex min-w-0 basis-full items-center gap-2 @xl:basis-auto">
+          <span className="min-w-0 truncate font-semibold">
+            {info ? t(info.displayName) : active || "Claudestra"}
           </span>
-          {t("思考中")}
-        </span>
-      )}
-      {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)——v2.21.3+
-          点开是「什么时候压」建议卡 + 一键存记忆+Compact,见 ctx-badge.tsx */}
-      {info && <CtxBadge agent={info} />}
-      {/* 会话级模型/effort 徽章 + 快速切换（owner 2026-07-23） */}
-      {info && <ClaudeSwitcher agent={info} />}
-      {info?.cwd && (
-        <span className="hidden truncate font-mono text-xs opacity-50 sm:inline">
-          {info.cwd}
-        </span>
-      )}
-      {/* 右侧操作组（⚠ 外层统一 ml-auto 靠右——子组件各自 ml-auto 会均分剩余空间，终端按钮浮到中间） */}
-      {info && (
-        <span className="ml-auto flex shrink-0 items-center gap-0.5">
-          <ShareButton busy={busy} />
-          {info.pinnedMaster && (
-            <button
-              className="btn btn-ghost btn-sm px-2 text-[13px]"
-              title={t("Agent 管理(生命周期操作,不经过 LLM)")}
-              onClick={openManage}
-            >
-              {t("管理")}
-            </button>
+          {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
+              顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
+          {busy && (
+            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-info/10 px-2 py-0.5 text-[11px] font-medium text-info">
+              <span className="relative flex size-1.5">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-info opacity-60 motion-reduce:hidden" />
+                <span className="relative inline-flex size-1.5 rounded-full bg-info" />
+              </span>
+              {t("思考中")}
+            </span>
           )}
-          <SessionSearchButton agentName={info.name} />
-          <TerminalButton agent={info} />
-          <AgentActions agent={info} />
-        </span>
-      )}
+        </div>
+        {/* 上下文占用徽章(2026-07-14 owner:context 超标 web 端毫无提示)——v2.21.3+
+            点开是「什么时候压」建议卡 + 一键存记忆+Compact,见 ctx-badge.tsx */}
+        {info && <CtxBadge agent={info} />}
+        {/* 会话级模型/effort 徽章 + 快速切换（owner 2026-07-23） */}
+        {info && <ClaudeSwitcher agent={info} />}
+        {info?.cwd && (
+          <span className="hidden min-w-0 grow basis-0 truncate font-mono text-xs opacity-50 sm:inline">
+            {info.cwd}
+          </span>
+        )}
+      </div>
+      {info && <TopBarActions agent={info} busy={busy} onManage={openManage} />}
       <ManagePanel open={showManage} onClose={closeManage} />
     </header>
   );
@@ -346,7 +336,7 @@ function ChatInner() {
   useLayoutEffect(() => {
     // 带 #terminal / #manage 刷新进入：页面态不可恢复（termId 已随连接销毁 /
     // showManage 初始 false），降级回会话内容页（#chat），避免 hash 悬空。
-    // #terminal 额外留恢复标记——TerminalButton 挂载后自动重开终端页
+    // #terminal 额外留恢复标记——useTerminalEntry 挂载后自动重开终端页
     // (iOS PWA 冷恢复=整页重载,用户本来就在终端里,别把人丢回聊天框)
     const hash0 = window.location.hash.split("?")[0];
     if (["#terminal", "#manage"].includes(hash0)) {

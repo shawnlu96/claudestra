@@ -5,36 +5,40 @@ import { getLang, useT } from "@/lib/i18n";
 import { ResponsiveShell } from "./responsive-shell";
 import { useChatStoreApi } from "../chat-store";
 
+/** 放大镜（顶栏平铺按钮与窄屏折叠菜单项共用） */
+export function SearchIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <path d="M21 21l-4.3-4.3" />
+    </svg>
+  );
+}
+
+/** 顶栏平铺的 🔍 入口，只管触发；打开状态在 TopBarActions（窄屏入口在折叠菜单里，两处共用一份覆盖层） */
+export function SessionSearchButton({ onClick }: { onClick: () => void }) {
+  const t = useT();
+  return (
+    <button
+      className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content"
+      title={t("搜索本会话聊天记录")}
+      aria-label={t("搜索本会话聊天记录")}
+      onClick={onClick}
+    >
+      <SearchIcon />
+    </button>
+  );
+}
+
 /**
  * 会话内搜索（owner 2026-07-14:「每个会话右上角加搜索按钮,只搜本 session」）。
- * 🔍 按钮 → 全屏覆盖层(输入 + 结果)。搜索范围是当前 agent 的全部历史会话
+ * 全屏覆盖层(输入 + 结果)。搜索范围是当前 agent 的全部历史会话
  * (含归档)——比字面「本 session」更宽,compact 轮转后的旧 session 也在,
  * 这正是「找回忘掉的事」要覆盖的。
  * ⚠ 覆盖层必须 createPortal 到 body——移动端会话页在 transform 横滑容器里,
  * 容器内 fixed 会定位到屏幕外（页面规矩 5.5）。
  */
-export function SessionSearchButton({ agentName }: { agentName: string }) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button
-        className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content"
-        title={t("搜索本会话聊天记录")}
-        aria-label={t("搜索本会话聊天记录")}
-        onClick={() => setOpen(true)}
-      >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="11" cy="11" r="7" />
-          <path d="M21 21l-4.3-4.3" />
-        </svg>
-      </button>
-      {open && <SearchOverlay agentName={agentName} onClose={() => setOpen(false)} />}
-    </>
-  );
-}
-
-function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () => void }) {
+export function SearchOverlay({ agentName, onClose }: { agentName: string; onClose: () => void }) {
   const t = useT();
   const store = useChatStoreApi();
   const [query, setQuery] = useState("");

@@ -37,11 +37,29 @@ export function useShare(): ShareState {
   return useSyncExternalStore(subscribeShare, getShare, getShare);
 }
 
+function ShareIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="m8.59 13.51 6.83 3.98" />
+      <path d="m15.41 6.51-6.82 3.98" />
+    </svg>
+  );
+}
+
+/** 分享入口的开关态 + 文案（顶栏按钮与窄屏菜单项同一套：工作中禁用并说明原因） */
+function useShareEntry(busy: boolean): { on: boolean; label: string } {
+  const t = useT();
+  const { on } = useShare();
+  return { on, label: busy ? t("工作中不能分享") : on ? t("退出分享") : t("分享") };
+}
+
 /** 顶栏分享按钮：进入 / 退出选择模式，激活态高亮（owner 2026-09-24）。
  *  会话工作中禁用；正选着的时候回合开始了就自动退出（owner 2026-09-25「工作中的会话禁止分享」）。 */
 export function ShareButton({ busy = false }: { busy?: boolean }) {
-  const t = useT();
-  const { on } = useShare();
+  const { on, label } = useShareEntry(busy);
   const active = useChatStore((s) => s.state.activeAgent);
   useEffect(() => {
     if (busy && on) setShareOn(false);
@@ -50,7 +68,6 @@ export function ShareButton({ busy = false }: { busy?: boolean }) {
   useEffect(() => {
     setShareOn(false);
   }, [active]);
-  const label = busy ? t("工作中不能分享") : on ? t("退出分享") : t("分享");
   return (
     <button
       className={`btn btn-ghost btn-sm px-2 ${on ? "bg-primary/10 text-primary" : "text-base-content/60 hover:text-base-content"}`}
@@ -60,14 +77,29 @@ export function ShareButton({ busy = false }: { busy?: boolean }) {
       disabled={busy}
       onClick={toggleShare}
     >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="18" cy="5" r="3" />
-        <circle cx="6" cy="12" r="3" />
-        <circle cx="18" cy="19" r="3" />
-        <path d="m8.59 13.51 6.83 3.98" />
-        <path d="m15.41 6.51-6.82 3.98" />
-      </svg>
+      <ShareIcon size={16} />
     </button>
+  );
+}
+
+/** 窄屏折叠菜单里的分享项：纯触发，禁用语义同 ShareButton（上面两个自动退出的守卫只在 ShareButton 里跑一份） */
+export function ShareMenuItem({ busy, className, onPick }: { busy: boolean; className?: string; onPick: () => void }) {
+  const { on, label } = useShareEntry(busy);
+  return (
+    <li className={className}>
+      <button
+        className={on ? "text-primary" : undefined}
+        aria-pressed={on}
+        disabled={busy}
+        onClick={() => {
+          onPick();
+          toggleShare();
+        }}
+      >
+        <ShareIcon size={15} />
+        {label}
+      </button>
+    </li>
   );
 }
 
