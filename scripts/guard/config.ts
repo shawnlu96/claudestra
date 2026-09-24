@@ -38,6 +38,7 @@ export const PUBLIC_ROUTES = [
   "web/app/api/auth/logout/route.ts",
   "web/app/api/auth/me/route.ts",
   "web/app/api/auth/passkey/login/route.ts",
+  "web/app/api/auth/resume/route.ts",
 ];
 
 /** bridge 的枢纽模块：只允许 bridge.ts（入口）import。 */

@@ -366,6 +366,7 @@ export const DICT: Record<string, string> = {
   "登录尝试过于频繁，请稍后再试": "Too many login attempts — try again later",
   "用户名和密码不能为空": "Username and password are required",
   "本机 SSH 账号登录": "Sign in with your local SSH account",
+  "正在恢复登录…": "Restoring your sign-in…",
   "账号": "Username",
   "密码": "Password",
   "登录": "Sign in",
