@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState, useEffect, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { hasShellResumeToken, tryShellResume } from "@/lib/shell-resume";
@@ -10,6 +10,8 @@ function afterLogin(): string {
   const next = new URLSearchParams(window.location.search).get("next") || "";
   return /^\/(?!\/)/.test(next) ? next + window.location.hash : "/";
 }
+
+const noopSubscribe = () => () => {};
 
 /** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
 const FORM_ERRORS: Record<string, string> = {
@@ -46,12 +48,14 @@ function LoginInner() {
   const showCode = needTotp || urlErrCode === "totp" || urlErrCode === "totpbad";
 
   // 原生壳冷启动常丢 cookie：手上有「记住登录」凭证就先拿它换会话，换成了直接进应用（lib/shell-resume.ts）
-  const [resuming, setResuming] = useState(false);
+  // 有没有凭证只在浏览器里知道（服务端渲染按没有）；换失败才落回登录表单——不在 effect 里同步 setState
+  const hasResume = useSyncExternalStore(noopSubscribe, hasShellResumeToken, () => false);
+  const [resumeFailed, setResumeFailed] = useState(false);
   useEffect(() => {
-    if (!hasShellResumeToken()) return;
-    setResuming(true);
-    void tryShellResume().then((ok) => (ok ? router.replace(afterLogin()) : setResuming(false)));
-  }, [router]);
+    if (!hasResume) return;
+    void tryShellResume().then((ok) => (ok ? router.replace(afterLogin()) : setResumeFailed(true)));
+  }, [hasResume, router]);
+  const resuming = hasResume && !resumeFailed;
 
   // Passkey 登录（第三期）。仅在当前入口支持 WebAuthn 且该域注册过凭据时出现——
   // 明文 IP 访问下浏览器根本不给 API，展示按钮只会让人点了报错。
