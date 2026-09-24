@@ -33,13 +33,17 @@ export function nativePlugin(name: string): Record<string, (...a: unknown[]) => 
  * v2.21.3+ 壳的服务器地址(ios/App/App/ServerConfig.swift):地址不编进包,存在本机。
  * clear() 后原生侧重建 WebView 回到首次设置页——调用方不会收到后续回调。
  */
-export function nativeServerConfig(): { get: () => Promise<string>; clear: () => Promise<void> } | null {
+export function nativeServerConfig(): { get: () => Promise<string>; set: (url: string) => Promise<void>; clear: () => Promise<void> } | null {
   const p = nativePlugin("ServerConfig");
   if (!p) return null;
   return {
     get: async () => {
       const r = (await p.get()) as { url?: string } | undefined;
       return r?.url ?? "";
+    },
+    // set 存下地址并重建整个 WebView，从该地址重新加载（原生侧 ServerConfig.relaunch）——调用方同样收不到后续回调
+    set: async (url: string) => {
+      await p.set({ url });
     },
     clear: async () => {
       await p.clear();
