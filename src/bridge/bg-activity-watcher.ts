@@ -14,9 +14,8 @@
  * 事件：bg_task_started / bg_task_update / bg_task_completed（SSE 同步可见，
  * web 前端可以不依赖 Discord 自行渲染进度线）。
  *
- * 结束判定（v1 务实策略）：文件连续 IDLE_DONE_MS 不增长 → 视为结束。subagent
- * 没有权威的"完成"落盘标记，等主 session 的 tool_result 匹配过于耦合；display
- * 通道晚归档几分钟无伤大雅。
+ * 结束判定：subagent 认记录里的真信号（end_turn / meta 的 stoppedByUser，见 lib/subagent-progress.ts），
+ * 长时间静默只标「静默」不收尾；后台 shell 仍是 IDLE_DONE_MS 不增长即结束。
  *
  * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 只记 baseline（已存在的
  * 文件全部标记 seen 不开流），之后只对新出现的文件开活动 —— bridge 重启不会把历史
@@ -26,7 +25,7 @@
  */
 
 import { existsSync } from "fs";
-import { readdir, stat } from "fs/promises";
+import { lstat, readdir, stat } from "fs/promises";
 import { join, basename } from "path";
 import { projectsSlug, projectJsonlPath } from "../lib/jsonl-cost.js";
 import { readActiveAgents } from "../lib/registry.js";
@@ -36,10 +35,12 @@ import { emitEvent } from "./event-bus.js";
 import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
+import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress } from "../lib/subagent-progress.js";
 
 const POLL_MS = 10_000;
 const FLUSH_MS = 2_500; // 子区推送 debounce（Discord 限速友好）
-const IDLE_DONE_MS = 3 * 60_000; // 文件 3min 不增长 → 活动结束
+const IDLE_DONE_MS = 3 * 60_000; // 后台 shell：文件 3min 不增长 → 活动结束
+const SUBAGENT_SILENT_LIMIT_MS = 30 * 60_000; // subagent 没有 end_turn 也没被停止、却 30min 一行不写 → 按「无动静」收尾
 const MAX_MSG_LEN = 1900;
 const MAX_ACTIVE_PER_AGENT = 8; // 防 thread 轰炸（workflow 大扇出时超出的只发事件）
 const MAX_TEXT_PER_ITEM = 400; // subagent 单条文本进子区的截断长度
@@ -67,6 +68,8 @@ interface Activity {
   /** 已 flush 的渲染行尾部环形缓冲（封顶 RECENT_MAX）——web 端刷新/连流后
    *  replay 活跃任务用（GET /api/v1/agents/:name/bg-tasks），不然面板一刷新就空 */
   recent: string[];
+  meta: SubagentMeta; // subagent 才有内容（描述 / 类型 / 模型 / 是否被停止），每轮 tick 重读
+  progress: SubagentProgress;
 }
 
 const RECENT_MAX = 100;
@@ -167,16 +170,13 @@ async function startActivity(
   filePath: string,
 ): Promise<void> {
   seen.add(filePath);
-  const title = titleFor(kind, filePath);
+  const meta = kind === "subagent" ? readSubagentMeta(filePath) : {};
+  const title = meta.description ? `🤖 ${meta.description}` : titleFor(kind, filePath);
   const { transport } = parseChatId(agent.channelId);
   const adapter = adapterFor(transport);
 
-  // v2.14+ 按来源分流：上一回合是从 Web/API 来的，就**不要**在 Discord 建子区。
-  // 此前无条件建，而 agent.channelId 永远是 Discord 频道 —— 于是纯 Web 用户每起
-  // 一个 subagent / 后台命令就被推送一条 Discord 线程通知（owner 2026-07-25 报：
-  // 「之前不是说了把 Web 端跟 Discord 端分开吗」）。Web 侧本来就有 bg_task_* SSE
-  // 事件渲染同样的进度，子区对它是纯粹的噪音。
-  // 不确定来源时（undefined）保持建子区的老行为，宁可多一条通知也不丢可观测性。
+  // 按来源分流：上一回合从 Web/API 来就不在 Discord 建子区（agent.channelId 永远是 Discord 频道，无条件建
+  // 会让纯 Web 用户每起一个 subagent 就收一条 Discord 通知；Web 靠 bg_task_* 事件渲染）。来源不明保持建。
   const src = sourceProvider?.(agent.channelId);
   const wantThread = src !== "api";
 
@@ -207,6 +207,8 @@ async function startActivity(
     eventCount: 0,
     finished: false,
     recent: [],
+    meta,
+    progress: EMPTY_PROGRESS,
   };
   activities.set(filePath, act);
   console.log(
@@ -218,7 +220,7 @@ async function startActivity(
     agent: agent.name,
     chatId: agent.channelId,
     type: "bg_task_started",
-    data: { kind, id: act.id, threadId, title },
+    data: { kind, id: act.id, threadId, title, agentType: meta.agentType, model: meta.model },
   });
 }
 
@@ -229,7 +231,7 @@ async function consume(act: Activity): Promise<void> {
     size = (await stat(act.filePath)).size;
   } catch {
     // 文件消失（session 清理）→ 直接收尾
-    await finalize(act, "文件已消失");
+    await finalize(act, "idle", "文件已消失");
     return;
   }
   if (size <= act.offset) return;
@@ -250,6 +252,7 @@ async function consume(act: Activity): Promise<void> {
       } catch {
         continue;
       }
+      act.progress = nextProgress(act.progress, rec);
       if (rec.type !== "assistant") continue;
       const content = rec.message?.content;
       if (!Array.isArray(content)) continue;
@@ -286,7 +289,7 @@ async function flush(act: Activity): Promise<void> {
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_update",
-    data: { kind: act.kind, id: act.id, lines: lines.length, items: lines, threadId: act.threadId },
+    data: { kind: act.kind, id: act.id, lines: lines.length, items: lines, threadId: act.threadId, progress: progressView(act) },
   });
   if (!act.threadId || !act.adapter) return;
 
@@ -304,24 +307,32 @@ async function flush(act: Activity): Promise<void> {
   }
 }
 
-async function finalize(act: Activity, reason = "结束"): Promise<void> {
+/** 卡片进度（web 渲染耗时 / 上下文 / 静默时长用）；shell 没有这些，只给 null */
+function progressView(act: Activity) {
+  const p = act.progress;
+  return act.kind === "subagent" ? { startedTs: p.firstTs ?? act.startedAt, lastTs: p.lastTs, ctxTokens: p.ctxTokens, toolCount: p.toolCount } : null;
+}
+
+async function finalize(act: Activity, status: "done" | "stopped" | "idle" = "idle", reason: string = status): Promise<void> {
   if (act.finished) return;
   act.finished = true;
   await flush(act).catch(() => {});
   activities.delete(act.key);
-  const mins = ((Date.now() - act.startedAt) / 60_000).toFixed(1);
+  const t0 = act.progress.firstTs ?? act.startedAt;
+  const durationMs = (status === "done" ? (act.progress.lastTs ?? Date.now()) : Date.now()) - t0;
+  const mins = (durationMs / 60_000).toFixed(1);
   console.log(`🧵 bg 活动结束: ${act.agentName} ${basename(act.filePath)}（${mins}min, ${reason}）`);
   recordMetric("bg_activity_completed", { agent: act.agentName, meta: { kind: act.kind } });
   emitEvent({
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_completed",
-    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs: Date.now() - act.startedAt },
+    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status },
   });
   if (act.threadId && act.adapter) {
     try {
       await act.adapter.send(act.threadId, {
-        text: `✅ ${act.kind === "subagent" ? "subagent 结束" : "后台任务结束"} · ${mins}min${act.eventCount ? ` · ${act.eventCount} 条动态` : ""}`,
+        text: `${{ done: "✅", stopped: "⏹", idle: "⏸" }[status]} ${act.kind === "subagent" ? "subagent 结束" : "后台任务结束"} · ${mins}min${act.eventCount ? ` · ${act.eventCount} 条动态` : ""}`,
       });
       await act.adapter.archiveThread?.(act.threadId);
     } catch { /* non-critical */ }
@@ -341,18 +352,9 @@ async function tick(): Promise<void> {
 }
 
 /**
- * 「洪水闸」阈值（2026-09-14 owner 实报「重启 session 之后冒出来超级多 agent」）。
- *
- * 病灶：baseline 只能标记**扫描那一刻已存在**的文件。实测日志 22:34:43 同一秒为
- * agent-market-maker 开了 ~330 个 subagent 活动 —— 它的 subagents 目录在
- * restart/resume 后的首轮扫描时是空的（baseline 无物可标），随后 Claude Code
- * 一次性把几百个**存量** subagent 文件落了盘 ⇒ 一个个都被当成「新任务」，
- * SSE 里刷出 330 张卡，web 端后台任务面板直接淹没。
- *
- * 真任务不会在一个 poll（5s）窗口里冒出这么多——真工作流是陆续 spawn 的。所以
- * 单轮单 agent 新增文件数超过这个阈值时，按存量处理（标 seen、不开流）+ 记账，
- * 宁可少开几张卡，也不要淹没界面；门槛留得比正常爆发高（夜班工作流一次十几个
- * subagent 是正常的）。
+ * 「洪水闸」：baseline 只能标记扫描那一刻已存在的文件；restart/resume 后 CC 可能一次性把几百个**存量**
+ * subagent 文件落盘，逐个当新任务开流会刷出几百张卡（git log -S BURST_LIMIT）。真工作流是陆续 spawn 的，
+ * 所以单轮单 agent 新增超过阈值就按存量处理（标 seen 不开流）；门槛高于正常爆发（一次十几个 subagent 常见）。
  */
 const BURST_LIMIT = 30;
 
@@ -382,7 +384,12 @@ async function tickInner(): Promise<void> {
           seen.add(f); // baseline：存量文件不重播
           continue;
         }
-        // shell：先确认是真 bg 任务（前台 Bash 的瞬时 .output 不开子区）
+        // shell：先确认是真 bg 任务（前台 Bash 的瞬时 .output 不开子区）。后台 subagent 的 .output 是指向它
+        // 对话记录的软链——当 shell 开会多出一张卡、满屏原始 JSON，它已经作为 subagent 在跟了
+        if (kind === "shell" && (await lstat(f).catch(() => null))?.isSymbolicLink()) { // lstat 失败 = 文件刚被删，当普通文件走下面的确认
+          seen.add(f);
+          continue;
+        }
         if (kind === "shell") {
           const taskId = basename(f).replace(/\.output$/, "");
           if (!(await isRealBgTask(agent, taskId))) {
@@ -411,9 +418,11 @@ async function tickInner(): Promise<void> {
   // 消费 + 结束判定
   for (const act of [...activities.values()]) {
     await consume(act).catch(() => {});
-    if (!act.finished && Date.now() - act.lastGrowth > IDLE_DONE_MS) {
-      await finalize(act).catch(() => {});
-    }
+    if (act.finished) continue;
+    const silentMs = Date.now() - act.lastGrowth;
+    if (act.kind === "subagent") act.meta = readSubagentMeta(act.filePath); // 停止是事后写进 meta 的
+    const end = act.kind === "subagent" ? subagentEndStatus(act.progress, act.meta, silentMs, SUBAGENT_SILENT_LIMIT_MS) : silentMs > IDLE_DONE_MS ? "idle" : null;
+    if (end) await finalize(act, end).catch(() => {});
   }
 
   // seen 集合瘦身（约每小时一次）：源文件已被清理的条目不会再出现，安全移除
@@ -427,12 +436,9 @@ async function tickInner(): Promise<void> {
 }
 
 /**
- * 「最后一个**人类**是从哪儿跟这个 agent 说话的」，由 bridge 注入。
- *
- * 必须是「人类来源」而不是「最后一条消息的来源」：后者会被 agent→agent 转发、
- * peer pushback、看门狗 nudge 刷成 "agent"，用它判断会失准（2026-07-25 实测，
- * 纯 Web 会话的值是 "agent"，子区照样建到了 Discord）。
- * 返回 undefined = 没有人类交互记录 → 按 Discord 处理（保守，保持老行为）。
+ * 「最后一个**人类**是从哪儿跟这个 agent 说话的」，由 bridge 注入。必须是人类来源：最后一条消息的来源会被
+ * agent→agent 转发 / peer pushback / nudge 刷成 "agent"，纯 Web 会话也会被建 Discord 子区。
+ * undefined = 没有人类交互记录 → 按 Discord 处理（保守）。
  */
 export type SourceProvider = (channelId: string) => "user" | "api" | undefined;
 let sourceProvider: SourceProvider | null = null;
@@ -451,23 +457,14 @@ export function activeBgActivities(): number {
 
 /** web 连流后的 replay：某 agent 当前活跃（未 finalize）的 bg 任务快照。
  *  lines = 已 flush 的尾部行（≤RECENT_MAX）;刷新后前端据此重建面板。 */
-export function activeBgTasksFor(agentName: string): Array<{
-  id: string;
-  kind: BgActivityKind;
-  title: string;
-  startedAt: number;
-  lines: string[];
-}> {
-  const out: Array<{ id: string; kind: BgActivityKind; title: string; startedAt: number; lines: string[] }> = [];
+type BgTaskSnapshot = { id: string; kind: BgActivityKind; title: string; startedAt: number; lines: string[] } & Record<string, unknown>;
+export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
+  const out: BgTaskSnapshot[] = [];
   for (const act of activities.values()) {
     if (act.agentName !== agentName || act.finished) continue;
-    out.push({
-      id: act.id,
-      kind: act.kind,
-      title: titleFor(act.kind, act.filePath),
-      startedAt: act.startedAt,
-      lines: [...act.recent],
-    });
+    const title = act.meta.description ? `🤖 ${act.meta.description}` : titleFor(act.kind, act.filePath);
+    const { agentType, model } = act.meta;
+    out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType, model, progress: progressView(act) });
   }
   return out.sort((a, b) => a.startedAt - b.startedAt);
 }

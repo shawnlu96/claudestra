@@ -38,7 +38,7 @@ function revokeBlobUrls(urls: string[]) {
 /** 大总管保留名(与 lib/chat/bridge-api 的 MASTER_AGENT_NAME 同值;不 import——
  *  那个模块在 server 侧读 env,拖进 client bundle 没意义)。 */
 const MASTER_AGENT_NAME = "__master__";
-import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
+import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 
@@ -2346,22 +2346,20 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     void this.send(`请立即停止后台任务「${t.title || t.id}」(task id: ${t.id})，用 TaskStop。`);
   }
 
-  public bgTaskStart(id: string, kind: "subagent" | "shell", title: string) {
+  public bgTaskStart(id: string, kind: "subagent" | "shell", title: string, meta: BgMeta = {}) {
     if (!id) return;
     this.produce((s) => {
       const existing = s.bgTasks.find((t) => t.id === id);
       if (existing) {
-        // 同 id 重开（restart 后 baseline 再触发）→ 重置为 running
-        existing.status = "running";
-        existing.title = title || existing.title;
-        existing.lastEventAt = Date.now();
+        // 同 id 重开（restart 后 baseline 再触发 / 连流 replay）→ 重置为 running，带上最新的类型/进度
+        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined }, meta);
       } else {
-        s.bgTasks.push({ id, kind, title, lines: [], status: "running", lastEventAt: Date.now() });
+        s.bgTasks.push({ id, kind, title, lines: [], status: "running", lastEventAt: Date.now(), ...meta });
       }
     });
   }
 
-  public bgTaskUpdate(id: string, items: string[]) {
+  public bgTaskUpdate(id: string, items: string[], progress?: BgProgress) {
     if (!id || !items.length) return;
     this.produce((s) => {
       let t = s.bgTasks.find((x) => x.id === id);
@@ -2371,6 +2369,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         s.bgTasks.push(t);
       }
       t.lastEventAt = Date.now();
+      if (progress) t.progress = progress;
       t.lines.push(...items);
       if (t.lines.length > ChatStore.BG_MAX_LINES) {
         t.lines = t.lines.slice(-ChatStore.BG_MAX_LINES);
@@ -2378,13 +2377,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  public bgTaskDone(id: string, durationMs?: number) {
+  public bgTaskDone(id: string, durationMs?: number, status?: BgEndStatus) {
     if (!id) return;
     this.produce((s) => {
       const t = s.bgTasks.find((x) => x.id === id);
       if (t) {
         t.status = "done";
         t.durationMs = durationMs;
+        t.endStatus = status;
       }
       ChatStore.trimDoneBgTasks(s);
     });
@@ -2403,16 +2403,16 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  /** bg 卡陈旧收敛(2026-07-24 owner:「bg task 总是不能正确关掉」):
-   *  working 卡超 4min 无任何事件 → 置完成,镜像 bridge「3min 无活动即完成」
-   *  规则。completed 事件在断档/冻结窗口漏收时,此前只有重连时刻的 bg-sync
-   *  一次收敛机会,错过就永远 working。搭 15s 轮询便车,零新计时器。 */
+  /** bg 卡陈旧收敛：completed 事件在断档/冻结窗口漏收时的兜底，镜像 bridge 的收尾规则再多给 1 分钟——
+   *  后台 shell 3min 无活动即完成；subagent 只在 30min 完全无动静时收尾
+   *  （等 CI 时十几分钟不写一行是正常的，按 4min 收会把还在跑的 subagent 标成完成）。
+   *  搭 15s 轮询便车，零新计时器。 */
   public sweepStaleBgTasks() {
-    const cutoff = Date.now() - 4 * 60_000;
-    if (!this.state.bgTasks.some((t) => t.status === "running" && (t.lastEventAt ?? 0) < cutoff)) return;
+    const stale = (t: BgTaskView) => t.status === "running" && (t.lastEventAt ?? 0) < Date.now() - (t.kind === "subagent" ? 31 : 4) * 60_000;
+    if (!this.state.bgTasks.some(stale)) return;
     this.produce((s) => {
       for (const t of s.bgTasks) {
-        if (t.status === "running" && (t.lastEventAt ?? 0) < cutoff) t.status = "done";
+        if (stale(t)) t.status = "done";
       }
       ChatStore.trimDoneBgTasks(s);
     });

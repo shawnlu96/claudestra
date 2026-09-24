@@ -1,6 +1,6 @@
 export const runtime = "nodejs";
 
-import { SSE_DONE, type WebStreamEvent, type AnchoredStreamEvent, type WebAuqQuestion, type WebComponentRow } from "@/lib/chat/events";
+import { SSE_DONE, bgEndStatusOf, bgMetaOf, bgProgressOf, type WebStreamEvent, type AnchoredStreamEvent, type WebAuqQuestion, type WebComponentRow } from "@/lib/chat/events";
 import { apiAgentName, bridgeGet, bridgeAuthHeaders, BRIDGE } from "@/lib/chat/bridge-api";
 import { extractAttachments } from "@/lib/chat/attachments";
 import { isAuthed } from "@/lib/api-auth";
@@ -231,14 +231,14 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
         t: "bg-start",
         id: String(d.id ?? ""),
         kind: d.kind === "shell" ? "shell" : "subagent",
-        title: String(d.title ?? ""),
+        title: String(d.title ?? ""), ...bgMetaOf(d),
       };
     case "bg_task_update":
       // items 缺失（老 bridge）→ 无内容可渲染，丢弃（避免空更新扰动 UI）
       if (!Array.isArray(d.items) || d.items.length === 0) return null;
-      return { t: "bg-update", id: String(d.id ?? ""), items: (d.items as unknown[]).map(String) };
+      return { t: "bg-update", id: String(d.id ?? ""), items: (d.items as unknown[]).map(String), progress: bgProgressOf(d.progress) };
     case "bg_task_completed":
-      return { t: "bg-done", id: String(d.id ?? ""), durationMs: typeof d.durationMs === "number" ? d.durationMs : undefined };
+      return { t: "bg-done", id: String(d.id ?? ""), durationMs: typeof d.durationMs === "number" ? d.durationMs : undefined, status: bgEndStatusOf(d.status) };
     case "turn_duration":
       // 回合耗时 → 完成标记行的「· 12.3s」(2026-07-14 owner:完成要有明确提示)
       return typeof d.durationMs === "number" ? { t: "turn", ms: d.durationMs } : null;
@@ -339,10 +339,10 @@ export async function GET(request: Request) {
       try {
         const bg = await bridgeGet<{
           ok: boolean;
-          tasks: { id: string; kind: "subagent" | "shell"; title: string; lines: string[] }[];
+          tasks: ({ id: string; kind: "subagent" | "shell"; title: string; lines: string[] } & Record<string, unknown>)[];
         }>(`/agents/${encodeURIComponent(apiName)}/bg-tasks`, { timeoutMs: 5000 });
         for (const t of bg.tasks || []) {
-          send({ t: "bg-start", id: t.id, kind: t.kind, title: t.title });
+          send({ t: "bg-start", id: t.id, kind: t.kind, title: t.title, ...bgMetaOf(t) });
           if (t.lines?.length) send({ t: "bg-update", id: t.id, items: t.lines });
         }
         // 快照全集下发（空数组也发）：前端把不在此列的 running 卡标完成——

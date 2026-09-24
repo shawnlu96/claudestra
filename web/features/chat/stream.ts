@@ -1,4 +1,4 @@
-import type { WebStreamEvent, WebComponentRow } from "@/lib/chat/events";
+import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { PendingPermission, PendingAsk } from "./type";
 import type { RecordSrc } from "./live-merge";
 
@@ -42,9 +42,9 @@ export interface StreamSink {
   setPermission(p: PendingPermission | null): void;
   setAsk(a: PendingAsk | null): void;
   /** 后台任务（subagent / bg shell）跟踪。 */
-  bgTaskStart(id: string, kind: "subagent" | "shell", title: string): void;
-  bgTaskUpdate(id: string, items: string[]): void;
-  bgTaskDone(id: string, durationMs?: number): void;
+  bgTaskStart(id: string, kind: "subagent" | "shell", title: string, meta?: BgMeta): void;
+  bgTaskUpdate(id: string, items: string[], progress?: BgProgress): void;
+  bgTaskDone(id: string, durationMs?: number, status?: BgEndStatus): void;
   /** 活跃任务全集快照：不在 ids 里的 running 卡标完成（bridge 重启丢事件兜底）。 */
   bgTaskSync(ids: string[]): void;
   /** compact 完成：插系统分隔线 + 该 agent contextTokens 即时更新为 post。 */
@@ -108,13 +108,13 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       sink.setAsk(null);
       break;
     case "bg-start":
-      sink.bgTaskStart(evt.id, evt.kind, evt.title);
+      sink.bgTaskStart(evt.id, evt.kind, evt.title, { agentType: evt.agentType, model: evt.model, progress: evt.progress });
       break;
     case "bg-update":
-      sink.bgTaskUpdate(evt.id, evt.items);
+      sink.bgTaskUpdate(evt.id, evt.items, evt.progress);
       break;
     case "bg-done":
-      sink.bgTaskDone(evt.id, evt.durationMs);
+      sink.bgTaskDone(evt.id, evt.durationMs, evt.status);
       break;
     case "bg-sync":
       sink.bgTaskSync(evt.ids);
