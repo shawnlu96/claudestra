@@ -12,6 +12,9 @@ describe("parseSource（外源消息来源标签）", () => {
     expect(parseSource("agent-harmonie")).toEqual({ kind: "agent", name: "harmonie" });
     expect(parseSource("harmonie (agent)")).toEqual({ kind: "agent", name: "harmonie" });
   });
+  test("大总管转来的是机器，不是真人", () => {
+    expect(parseSource("master")).toEqual({ kind: "agent", name: "master" });
+  });
   test("其余是真人用户，原样显示", () => {
     expect(parseSource("Sekai")).toEqual({ kind: "user", name: "Sekai" });
     expect(parseSource("web-ui")).toEqual({ kind: "user", name: "web-ui" });

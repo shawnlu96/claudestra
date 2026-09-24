@@ -19,6 +19,7 @@ export interface SourceLabel {
 export function parseSource(from: string): SourceLabel {
   if (from.startsWith("peer-")) return { kind: "peer-notify", name: from.slice(5), badge: "通知" };
   if (from.startsWith("peer ")) return { kind: "peer-reply", name: from.slice(5), badge: "回复" };
+  if (from === "master") return { kind: "agent", name: from }; // 大总管转来的：机器,不是真人(peer review #40)
   if (from.startsWith("agent-")) return { kind: "agent", name: from.slice(6) };
   if (from.endsWith("(agent)")) return { kind: "agent", name: from.slice(0, -7).trim() };
   return { kind: "user", name: from };

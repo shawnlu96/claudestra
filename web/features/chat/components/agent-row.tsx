@@ -9,6 +9,7 @@ import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./unmanaged-sessions";
 import { MasterIcon } from "./master-icon";
 import { swipeReg } from "./agent-row-swipe";
+import { SwipeActions } from "./agent-row-actions";
 import { StatusDot } from "./status-dot";
 import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
@@ -83,9 +84,6 @@ export function AgentRow({
   const canRemove = !a.pinnedMaster && !a.mock;
   const swipeEnabled = canRemove && !manage; // 多选模式下手势让位
   const [swipeX, setSwipeX] = useState(0);
-  const [archiving, setArchiving] = useState(false);
-  const [confirmDel, setConfirmDel] = useState(false);
-  const [removing, setRemoving] = useState(false);
   // v2.21.3+ 拖动期间不再每帧 setState(整行 + 订阅链重渲,owner「左滑特别卡」):
   // 手指跟随直接写 style.transform,dragging 只在识别到滑动/松手时各切一次
   // (挂载操作钮、关过渡);swipeX 只在松手吸附时提交。transform 从不经 React 的
@@ -100,7 +98,6 @@ export function AgentRow({
   const closeSwipe = () => {
     applyX(0);
     setSwipeX(0);
-    setConfirmDel(false);
     swipeReg.clear(closeSwipe);
   };
   // 卸载时别把自己留在「当前滑开」槽里
@@ -161,54 +158,9 @@ export function AgentRow({
   return (
     <li>
       <div className={`relative overflow-hidden rounded-lg ${drop.over ? "ring-2 ring-primary/50" : ""}`} {...drop.handlers}>
-        {/* 左滑露出的操作钮(在滑动层下面):置顶 + 删除 */}
+        {/* 左滑露出的操作钮(在滑动层下面):置顶 / 归档 / 删除,见 agent-row-actions.tsx */}
         {(swipeX < 0 || dragging) && (
-          <div className="absolute inset-y-0 right-0 z-0 flex" style={{ width: ACTIONS_W }}>
-            <button
-              className="flex flex-1 items-center justify-center bg-base-content/70 text-[13px] font-medium text-base-100"
-              onClick={() => {
-                onTogglePin();
-                closeSwipe();
-              }}
-            >
-              {pinned ? t("取消置顶") : t("置顶")}
-            </button>
-            {/* v2.23+ 归档：只给当前会话做快照（非破坏性），不动 agent 本身 ——
-                owner 2026-09-14「给工作列表的也加入一个左滑归档按钮」 */}
-            <button
-              className="flex flex-1 items-center justify-center bg-base-300/80 text-[13px] font-medium text-base-content/80"
-              onClick={async () => {
-                if (archiving) return;
-                setArchiving(true);
-                const r = await store.archiveAgent(a.name);
-                setArchiving(false);
-                closeSwipe();
-                if (!r.ok) alert(`${t("归档失败:")}${t(r.error || "操作失败")}`);
-              }}
-            >
-              {archiving ? "…" : t("归档")}
-            </button>
-            <button
-              className="flex flex-1 items-center justify-center bg-error text-[13px] font-medium text-error-content"
-              onClick={async () => {
-                if (removing) return;
-                if (!confirmDel) {
-                  setConfirmDel(true);
-                  return;
-                }
-                setRemoving(true);
-                const r = await store.removeAgent(a.name);
-                if (!r.ok) {
-                  setRemoving(false);
-                  closeSwipe();
-                  alert(`${t("删除失败:")}${t(r.error || "操作失败")}`);
-                }
-                // 成功时本行随列表数据一起消失,无需复位
-              }}
-            >
-              {removing ? "…" : confirmDel ? t("确认?") : t("删除")}
-            </button>
-          </div>
+          <SwipeActions name={a.name} width={ACTIONS_W} pinned={pinned} onTogglePin={onTogglePin} closeSwipe={closeSwipe} />
         )}
         <div
           ref={slideRef}
@@ -270,7 +222,6 @@ export function AgentRow({
                   setDragging(false);
                   setSwipeX(snap);
                   if (snap === 0) {
-                    setConfirmDel(false);
                     swipeReg.clear(closeSwipe);
                   } else {
                     swipeReg.set(closeSwipe);
