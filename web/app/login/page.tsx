@@ -1,13 +1,26 @@
 "use client";
 
 import { Suspense, useState, useEffect } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 
 /** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
-// 登录成功后整页跳这里再进 /chat（而不是前端路由跳转）：让会话 cookie 在一次页面导航的响应里落盘，
-// 原因见 app/api/auth/commit/route.ts
-const COMMIT_URL = "/api/auth/commit";
+/** 登录成功后让会话 cookie 在一次文档导航的响应里再写一遍（原因见 app/api/auth/commit/route.ts）。
+ *  用隐藏 iframe：整页跳转在原生壳里会被判成站外、踢去系统浏览器。3s 没加载完也照常进入，最坏退回旧行为。 */
+function commitSessionCookie(): Promise<void> {
+  return new Promise((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.style.display = "none";
+    const done = () => {
+      frame.remove();
+      resolve();
+    };
+    frame.onload = done;
+    setTimeout(done, 3000);
+    frame.src = "/api/auth/commit";
+    document.body.appendChild(frame);
+  });
+}
 
 const FORM_ERRORS: Record<string, string> = {
   cred: "用户名或密码错误",
@@ -36,6 +49,7 @@ function LoginInner() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   // 未水合的原生提交走 303 重定向回 /login?e=<code>——SSR 也能渲染出错误文案
+  const router = useRouter();
   const urlErrCode = useSearchParams().get("e") || "";
   const urlError = FORM_ERRORS[urlErrCode] || "";
   // 原生表单路径下服务端要码时也得把输入框亮出来
@@ -70,7 +84,8 @@ function LoginInner() {
       });
       const fj = await f.json();
       if (!f.ok) { setError(fj.error || "Passkey 登录失败"); return; }
-      window.location.replace(COMMIT_URL);
+      await commitSessionCookie();
+      router.push("/");
     } catch (e) {
       // 用户取消指纹弹窗也走这里——不当错误刷屏
       const msg = (e as Error).message || "";
@@ -105,7 +120,8 @@ function LoginInner() {
         sessionStorage.setItem("cstra_recovery_note", String(json.data.recovery.remaining ?? 0));
       } catch { /* 隐私模式 */ }
     }
-    window.location.replace(COMMIT_URL);
+    await commitSessionCookie();
+    router.push("/");
   };
 
   return (
