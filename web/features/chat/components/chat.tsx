@@ -308,7 +308,7 @@ function TopBar() {
       {/* 右侧操作组（⚠ 外层统一 ml-auto 靠右——子组件各自 ml-auto 会均分剩余空间，终端按钮浮到中间） */}
       {info && (
         <span className="ml-auto flex shrink-0 items-center gap-0.5">
-          <ShareButton />
+          <ShareButton busy={busy} />
           {info.pinnedMaster && (
             <button
               className="btn btn-ghost btn-sm px-2 text-[13px]"

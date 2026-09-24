@@ -31,6 +31,7 @@ export const DICT: Record<string, string> = {
   "通知": "Notice",
   "分享": "Share",
   "退出分享": "Exit share",
+  "工作中不能分享": "Can't share while working",
   "已选": "Selected",
   "先点消息旁的方框选一段": "Tick the boxes next to messages to pick a range",
   "导出 HTML": "Export HTML",

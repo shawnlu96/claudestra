@@ -1,6 +1,6 @@
 "use client";
-import { useSyncExternalStore } from "react";
-import { getShare, subscribeShare, toggleShare, clickMessage, type ShareState } from "../share-mode";
+import { useEffect, useSyncExternalStore } from "react";
+import { getShare, subscribeShare, toggleShare, clickMessage, setShareOn, type ShareState } from "../share-mode";
 import { useT } from "@/lib/i18n";
 import type { ChatMessage } from "../type";
 
@@ -36,16 +36,22 @@ export function useShare(): ShareState {
   return useSyncExternalStore(subscribeShare, getShare, getShare);
 }
 
-/** 顶栏分享按钮：进入 / 退出选择模式，激活态高亮（owner 2026-09-24） */
-export function ShareButton() {
+/** 顶栏分享按钮：进入 / 退出选择模式，激活态高亮（owner 2026-09-24）。
+ *  会话工作中禁用；正选着的时候回合开始了就自动退出（owner 2026-09-25「工作中的会话禁止分享」）。 */
+export function ShareButton({ busy = false }: { busy?: boolean }) {
   const t = useT();
   const { on } = useShare();
+  useEffect(() => {
+    if (busy && on) setShareOn(false);
+  }, [busy, on]);
+  const label = busy ? t("工作中不能分享") : on ? t("退出分享") : t("分享");
   return (
     <button
       className={`btn btn-ghost btn-sm px-2 ${on ? "bg-primary/10 text-primary" : "text-base-content/60 hover:text-base-content"}`}
-      title={on ? t("退出分享") : t("分享")}
-      aria-label={on ? t("退出分享") : t("分享")}
+      title={label}
+      aria-label={label}
       aria-pressed={on}
+      disabled={busy}
       onClick={toggleShare}
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
