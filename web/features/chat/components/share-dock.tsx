@@ -96,16 +96,18 @@ function useExportMeta(): ExportMeta {
 /** 等离屏树真正渲染完再打包（peer review #43「固定等 600ms 选得多可能没渲染完」）：
  *  字体就绪、图片加载完、Prism 语法 300ms 内没再加载新的；下限 300ms、上限 5s。 */
 async function waitRendered(host: HTMLElement): Promise<void> {
-  const started = Date.now();
+  const deadline = Date.now() + 5000;
+  const left = () => sleep(Math.max(0, deadline - Date.now()));
   await sleep(300);
-  await document.fonts?.ready;
+  await Promise.race([document.fonts?.ready, left()]);
+  // 图片也受 5s 上限：一张卡住不回的图不该让导出一直转圈（没等到的由 inlineImages 照常处理）
   const imgs = Array.from(host.querySelectorAll("img")).filter((i) => !i.complete);
-  await Promise.all(imgs.map((i) => new Promise<void>((r) => { i.onload = i.onerror = () => r(); })));
+  await Promise.race([Promise.all(imgs.map((i) => new Promise<void>((r) => { i.onload = i.onerror = () => r(); }))), left()]);
   let ver = getGrammarVersion();
-  for (;;) {
+  while (Date.now() < deadline) {
     await sleep(300);
     const now = getGrammarVersion();
-    if (now === ver || Date.now() - started > 5000) return;
+    if (now === ver) return;
     ver = now;
   }
 }

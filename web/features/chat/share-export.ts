@@ -73,7 +73,8 @@ export async function collectCss(doc: Document): Promise<{ css: string; links: s
 
 async function toDataUrl(src: string): Promise<string | null> {
   try {
-    const res = await fetch(src, { credentials: "include" });
+    // 15s 上限：一张不回的图降级成 alt 文本，别让整个导出卡住
+    const res = await fetch(src, { credentials: "include", signal: AbortSignal.timeout(15_000) });
     if (!res.ok) return null;
     const blob = await res.blob();
     if (blob.size > IMG_INLINE_MAX) return null;
