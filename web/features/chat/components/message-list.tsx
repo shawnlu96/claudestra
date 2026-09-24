@@ -314,7 +314,9 @@ const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: C
     const srcIcon = !isSelf ? (m.from!.startsWith("peer-") ? "🤝" : m.from!.startsWith("agent-") || m.from!.endsWith("(agent)") ? "🤖" : "👤") : "";
     const label = isSelf ? profile.nickname : "";
     return (
-      <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col items-end gap-2`}>
+      // 布局规则(owner 2026-09-24):只有本人靠右,peer / 其它 agent / 别的用户一律靠左;
+      // 圆角:靠右的右上角小、靠左的左上角小,其余大——尖角指向说话的一侧
+      <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col gap-2 ${isSelf ? "items-end" : "items-start"}`}>
         {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14) */}
         {!isSelf && (
           <span className="flex items-center gap-1 rounded-full border border-info/30 bg-info/10 px-2 py-0.5 text-[10.5px] font-medium text-info">
@@ -335,10 +337,10 @@ const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: C
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
               ref={bubbleRef}
-              className={`cstra-bubble break-words rounded-[15px_15px_4px_15px] border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
+              className={`cstra-bubble break-words border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
                 isSelf
-                  ? "whitespace-pre-wrap border-base-content/5 bg-base-300"
-                  : "border-info/25 bg-info/[0.06]"
+                  ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
+                  : "rounded-[4px_15px_15px_15px] border-info/25 bg-info/[0.06]"
               }`}
               onClick={() => {
                 // 划选后松手、长按松手都算 click——都不该顺手切时间戳
