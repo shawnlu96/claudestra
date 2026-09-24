@@ -32,10 +32,10 @@ import { join } from "node:path";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
-// 本进程加载的 Pi 版本（进快照 → 网页「重启生效」提示）。Pi 把自己的包作为虚拟模块提供给扩展；用变量名绕开 tsc 解析
-let RUNNING_PI_VERSION: string | undefined;
-import("@earendil-works/pi-coding-agent" as string).then((m) => { RUNNING_PI_VERSION = typeof m?.VERSION === "string" ? m.VERSION : undefined; },
-  () => { /* 老版本 Pi 包名不同：拿不到只是不提示重启，通道照常 */ });
+// 本进程加载的 Pi 版本（进快照 → 网页「重启生效」提示）。Pi 把自己的包作为虚拟模块提供给扩展；`as string` 绕开 tsc 解析。
+// 留着 promise 由写快照处 await：session_start 可能早于 import 落定。老版本 Pi 包名不同 → undefined，只是不提示重启，通道照常
+const RUNNING_PI_VERSION: Promise<string | undefined> = import("@earendil-works/pi-coding-agent" as string)
+  .then((m) => (typeof m?.VERSION === "string" ? m.VERSION : undefined), () => undefined);
 // ⚠ 本文件由 Pi 直接加载、只依赖 node: 内置模块，所以内联 lib/bridge-url.ts 的规则：兜底从 BRIDGE_PORT 推，
 //   写死 3847 会让改过端口的机器上 Pi agent 静默连不上 bridge（正常由 pi-launch 传 BRIDGE_URL）。
 const BRIDGE_URL = (
@@ -170,13 +170,12 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
 
   /**
    * 把「这个会话实际加载了什么」写成快照（manager pi-env / 网页端读）。
-   *
    * 为什么要落文件而不是发 bridge：bridge 对 registry 只读（唯一写者是 manager），
    * 而这份快照需要在 bridge 挂了、会话已死之后仍然可读（排查用）。落点与 registry 同
    * 目录家族，0600。
    * 记的是**实况**而不是配置：`--no-extensions` 到底关掉了什么，只有这里看得见。
    */
-  function writeEnvSnapshot(ctx?: PiContext) {
+  async function writeEnvSnapshot(ctx?: PiContext) {
     if (!AGENT_NAME) return;
     try {
       const tools = (pi.getAllTools?.() ?? [])
@@ -194,7 +193,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         agent: AGENT_NAME,
         sessionId: sessionId || undefined,
         cwd: process.cwd(),
-        piVersion: RUNNING_PI_VERSION,
+        piVersion: undefined as string | undefined,
         toolCount: tools.length,
         tools,
         activeTools: active,
@@ -203,6 +202,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         model: model?.id || model?.name || undefined,
         thinking: (() => { try { return pi.getThinkingLevel?.(); } catch { return undefined; } })(),
       };
+      snap.piVersion = await RUNNING_PI_VERSION; // 实况在上面同步取齐（ctx 只在事件回调里可靠），最后才等版本号
       const dir = join(process.env.CLAUDESTRA_STATE_DIR?.trim() || join(homedir(), ".claude-orchestrator"), "pi-env"); // = lib/paths STATE_DIR
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeFileSync(join(dir, `${AGENT_NAME}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
@@ -441,7 +441,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     } catch { /* 老版本没有这两个方法时留空，不影响收发 */ }
     // 能力快照要在扩展/工具都注册完之后写 —— session_start 时本扩展自己的工具已注册，
     // 但 MCP 等懒加载的工具可能还没进 getAllTools（那时数量偏少，属已知误差）。
-    writeEnvSnapshot(ctx);
+    void writeEnvSnapshot(ctx);
     setLinkStatus(false);
     connect();
   });
