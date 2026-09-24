@@ -1,5 +1,6 @@
 import { isNativeShell, hideNativeSplash } from "@/lib/native";
 import { postClientLog } from "@/lib/client-log";
+import { alignShellServerUrl } from "@/lib/shell-url";
 
 /**
  * v2.21.3+ 启动计时(owner 2026-09-04「性能会更好吗」——拿数字答,不靠感觉):agents 首次
@@ -11,7 +12,10 @@ export function reportBootAndHideSplash() {
   if (bootReported) return;
   bootReported = true;
   const shell = isNativeShell();
-  if (shell) hideNativeSplash();
+  if (shell) {
+    hideNativeSplash();
+    void alignShellServerUrl().catch(() => {}); // 只影响壳里的导航判定，失败不影响启动
+  }
   try {
     const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
     const kind = shell ? "shell" : window.matchMedia("(display-mode: standalone)").matches ? "pwa" : "browser";
