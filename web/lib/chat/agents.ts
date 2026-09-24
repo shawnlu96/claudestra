@@ -9,6 +9,11 @@ export { MASTER_AGENT_NAME };
  * Bridge 的 GET /api/v1/agents（token scope 过滤；master 显式列入 scope 时
  * 由 Bridge 置入列表，fork 增强）。BFF 不再碰 registry / 文件系统。
  */
+/** 会话级「该重启 / 该 pi update」提示（bridge lib/update-hints.ts 算好透传） */
+export type UpdateHint =
+  | { kind: "restart"; running: string; installed: string }
+  | { kind: "pi-update"; installed: string; latest: string };
+
 export interface AgentSession {
   /** agent 名，作为会话 id（大总管用保留名 __master__） */
   name: string;
@@ -36,6 +41,7 @@ export interface AgentSession {
   effort?: string | null;
   /** v2.21+ 归属 project id（master 无；侧栏按它分组） */
   projectId?: string | null;
+  updateHint?: UpdateHint | null;
 }
 
 interface ApiAgent {
@@ -61,6 +67,7 @@ interface ApiAgent {
   created?: string;
   /** v2.21+ 归属 project id */
   projectId?: string | null;
+  updateHint?: UpdateHint | null;
 }
 
 /**

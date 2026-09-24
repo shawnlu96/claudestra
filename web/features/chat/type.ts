@@ -1,4 +1,5 @@
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
+import type { UpdateHint } from "@/lib/chat/agents";
 
 export interface ToolCallView {
   /** tool_use id——直播里 tool-state（失败标红）按它找回这张卡。 */
@@ -170,6 +171,8 @@ export interface AgentSession {
    * 没有 CC 那套别名与 /model 热切换语义）。
    */
   runtime?: string | null;
+  /** 该重启 / 该 pi update（null = 已是新版或判不了）→ composer 横幅 + 侧栏小标 */
+  updateHint?: UpdateHint | null;
 }
 
 /** v2.21+ project 元数据（GET /api/projects）→ 侧栏组头 + 项目管理弹窗。 */

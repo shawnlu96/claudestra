@@ -33,6 +33,8 @@ export interface CcSessionEntry {
   procStart?: string;
   /** cli / sdk-ts / … */
   entrypoint?: string;
+  /** 该进程**启动时**的 Claude Code 版本——磁盘上装了新版后，它就是「还没重启」的证据 */
+  version?: string;
 }
 
 export function ccSessionsDir(): string {
@@ -57,6 +59,7 @@ export function parseCcSessionEntry(raw: string): CcSessionEntry | null {
       ...(typeof j.kind === "string" ? { kind: j.kind } : {}),
       ...(typeof j.procStart === "string" ? { procStart: j.procStart } : {}),
       ...(typeof j.entrypoint === "string" ? { entrypoint: j.entrypoint } : {}),
+      ...(typeof j.version === "string" ? { version: j.version } : {}),
     };
   } catch {
     return null;
