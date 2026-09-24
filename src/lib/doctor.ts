@@ -42,7 +42,7 @@ const ORCH_DIR = STATE_DIR;
 
 async function sh(cmd: string[], timeoutMs = 8000): Promise<{ ok: boolean; out: string; err: string }> {
   try {
-    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", env: { ...process.env, DISCORD_CHANNEL_ID: "" } }); // 置空=inert:否则 mcp list 拉起的 channel-server 顶掉本 agent 频道
     const timer = setTimeout(() => { try { p.kill(); } catch { /* 已退出 */ } }, timeoutMs);
     const [out, err] = await Promise.all([
       new Response(p.stdout).text(),
