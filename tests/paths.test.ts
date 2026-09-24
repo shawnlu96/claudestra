@@ -13,22 +13,38 @@ import {
 import { buildClaudeCommand } from "../src/lib/claude-launch";
 import { REGISTRY_PATH } from "../src/lib/registry";
 
-const hasOverride = !!(process.env.CLAUDESTRA_STATE_DIR || process.env.CLAUDESTRA_RUNTIME_DIR);
+/** 在去掉两个 override 的子进程里求值（测试进程本身被 tests/preload.ts 指到了临时状态目录） */
+function evalClean(expr: string): unknown {
+  const env = { ...process.env };
+  delete env.CLAUDESTRA_STATE_DIR;
+  delete env.CLAUDESTRA_RUNTIME_DIR;
+  const root = join(import.meta.dir, "../src/lib");
+  const script =
+    `import * as p from ${JSON.stringify(join(root, "paths.ts"))};` +
+    `import { REGISTRY_PATH } from ${JSON.stringify(join(root, "registry.ts"))};` +
+    `import { buildClaudeCommand } from ${JSON.stringify(join(root, "claude-launch.ts"))};` +
+    `console.log(JSON.stringify(${expr}));`;
+  const r = spawnSync(process.execPath, ["-e", script], { env, encoding: "utf8" });
+  return JSON.parse(r.stdout.trim().split("\n").pop() || "null");
+}
 
 describe("paths 默认值", () => {
-  test.skipIf(hasOverride)("与收口前的字面量一致", () => {
+  test("与收口前的字面量一致", () => {
     const home = homedir();
-    expect(STATE_DIR).toBe(`${home}/.claude-orchestrator`);
-    expect(RUNTIME_DIR).toBe("/tmp/claude-orchestrator");
-    expect(TMUX_SOCK).toBe("/tmp/claude-orchestrator/master.sock");
-    expect(REGISTRY_PATH).toBe(`${home}/.claude-orchestrator/registry.json`);
-    expect(CONFIG_PATH).toBe(`${home}/.claude-orchestrator/config.json`);
-    expect(LOG_DIR).toBe(`${home}/.claude-orchestrator/logs`);
-    expect(ARCHIVE_ROOT).toBe(`${home}/.claude-orchestrator/archive`);
-    expect(INBOX_DIR).toBe(`${home}/.claude-orchestrator/inbox`);
-    expect(UPDATE_LOCK).toBe(`${home}/.claude-orchestrator/update.lock`);
-    expect(CRON_HISTORY_PATH).toBe(`${home}/.claude-orchestrator/cron-history.json`);
-    expect(statePath("principals.json")).toBe(`${home}/.claude-orchestrator/principals.json`);
+    const [state, run, sock, reg, cfg, log, arch, inbox, lock, cronH, princ] = evalClean(
+      "[p.STATE_DIR, p.RUNTIME_DIR, p.TMUX_SOCK, REGISTRY_PATH, p.CONFIG_PATH, p.LOG_DIR, p.ARCHIVE_ROOT, p.INBOX_DIR, p.UPDATE_LOCK, p.CRON_HISTORY_PATH, p.statePath('principals.json')]",
+    ) as string[];
+    expect(state).toBe(`${home}/.claude-orchestrator`);
+    expect(run).toBe("/tmp/claude-orchestrator");
+    expect(sock).toBe("/tmp/claude-orchestrator/master.sock");
+    expect(reg).toBe(`${home}/.claude-orchestrator/registry.json`);
+    expect(cfg).toBe(`${home}/.claude-orchestrator/config.json`);
+    expect(log).toBe(`${home}/.claude-orchestrator/logs`);
+    expect(arch).toBe(`${home}/.claude-orchestrator/archive`);
+    expect(inbox).toBe(`${home}/.claude-orchestrator/inbox`);
+    expect(lock).toBe(`${home}/.claude-orchestrator/update.lock`);
+    expect(cronH).toBe(`${home}/.claude-orchestrator/cron-history.json`);
+    expect(princ).toBe(`${home}/.claude-orchestrator/principals.json`);
   });
 
   test("stateDirIn 不看 override", () => {
@@ -44,8 +60,9 @@ describe("pathOverrideEnv", () => {
       .toEqual({ CLAUDESTRA_STATE_DIR: "/s", CLAUDESTRA_RUNTIME_DIR: "/r" });
   });
 
-  test.skipIf(hasOverride)("不设 override 时启动命令里没有它们", () => {
-    const cmd = buildClaudeCommand({ channelId: "123", bridgeUrl: "ws://localhost:3847" } as never);
+  test("不设 override 时启动命令里没有它们", () => {
+    const cmd = evalClean('buildClaudeCommand({ channelId: "123", bridgeUrl: "ws://localhost:3847" })') as string;
+    expect(cmd).toContain("DISCORD_CHANNEL_ID=123"); // 真拿到了命令，而不是子进程报错后的空串
     expect(cmd).not.toContain("CLAUDESTRA_STATE_DIR");
     expect(cmd).not.toContain("CLAUDESTRA_RUNTIME_DIR");
   });

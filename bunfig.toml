@@ -1,0 +1,3 @@
+[test]
+# 测试隔离到临时状态目录（见 tests/preload.ts）
+preload = ["./tests/preload.ts"]
