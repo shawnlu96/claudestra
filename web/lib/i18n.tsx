@@ -91,6 +91,12 @@ export function t(s: string): string {
   return DICT[s] ?? s;
 }
 
+/** 指定语言翻译（不看全局语言）：导出文件的抬头等「界面之外」的文案按用户选的语言出。 */
+export function tIn(l: Lang, s: string): string {
+  if (l === "zh") return s;
+  return DICT[s] ?? s;
+}
+
 /** 组件用：订阅语言变化 + 返回 t。 */
 export function useT(): typeof t {
   useLang();

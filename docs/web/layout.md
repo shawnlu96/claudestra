@@ -79,6 +79,13 @@ features/chat/
                         master / mock 无菜单（纯函数，tests/web-agent-menu）
   sidebar-dnd.ts        桌面拖拽改 project 的判定 + 模块级拖拽态（同 project / 自己 / 无归属目标不可放）
   project-actions.ts    /api/projects 写入口（projAction / assignAgentProject），弹窗、菜单、拖拽共用
+  share-mode.ts         分享模式状态：连续范围选择（记两端消息 id，按当前顺序换算 [lo,hi]；范围外点=扩、范围内点=近端收缩）
+                        + 模块级 store（tests/web-share-mode）；UI 在 components/share-ui.tsx（顶栏按钮、行旁 checkbox）
+  share-export.ts       导出打包（无 React）：抄页面全部 CSS（含 adoptedStyleSheets）、图片转 data URL 内联、拼自包含 HTML、
+                        分享 / 下载、隐藏 iframe 打印（PDF = 系统打印对话框「存为 PDF」）
+  export-context.ts     「正在为导出渲染」开关：旁白强制展开不出收起条、💭 进度句不渲染；工具卡本就默认折叠
+  components/share-dock.tsx  分享模式底部 dock（顶替输入框）：已选数 / 导出 HTML / 导出 PDF / 返回；导出 = 选中消息用
+                        同一套 Message 组件 portal 到离屏容器再序列化；分享 / 打印要手势，所以「生成」与「保存 / 打印」两步
   source-label.ts       外源消息 `from` 解析：`peer-<token名>`=对方主动打来→「通知」、`peer <peer>/<agent>`=我们外呼的回复→「回复」、
                         agent-… / …(agent)=本地 agent、其余真人（tests/web-source-label）；渲染 components/source-header.tsx
   drafts.ts             输入框草稿（localStorage `cstra_draft_<agent>`，空白即删）+ 订阅：只在「有 ↔ 无」翻转时通知，

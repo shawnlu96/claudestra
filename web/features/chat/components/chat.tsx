@@ -12,7 +12,8 @@ import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
 import { UpdateToast } from "./update-toast";
-import { Composer } from "./composer";
+import { ComposerOrDock } from "./share-dock";
+import { ShareButton } from "./share-ui";
 import { Splash } from "./splash";
 import { AgentActions } from "./agent-actions";
 import { TerminalButton } from "../../terminal/terminal-button";
@@ -304,11 +305,10 @@ function TopBar() {
           {info.cwd}
         </span>
       )}
-      {/* 右侧操作组：终端（master 也有）+ 会话操作区（清空/重启/停止，大总管不渲染）。
-          ⚠ 外层统一 ml-auto 靠右——两个子组件各自 ml-auto 会均分剩余空间（auto margin
-          语义），终端按钮会浮到中间。内层残留的 ml-auto 无自由空间，无害。 */}
+      {/* 右侧操作组（⚠ 外层统一 ml-auto 靠右——子组件各自 ml-auto 会均分剩余空间，终端按钮浮到中间） */}
       {info && (
         <span className="ml-auto flex shrink-0 items-center gap-0.5">
+          <ShareButton busy={busy} />
           {info.pinnedMaster && (
             <button
               className="btn btn-ghost btn-sm px-2 text-[13px]"
@@ -755,7 +755,7 @@ function ChatInner() {
               <UpdateToast />
             </div>
             <MessageList />
-            <Composer />
+            <ComposerOrDock />
           </main>
         </div>
         </div>

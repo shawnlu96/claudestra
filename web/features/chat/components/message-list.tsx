@@ -27,6 +27,9 @@ import { devCount } from "../../devtools/dev-mode";
 import { ProgressNote } from "./progress-note";
 import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
 import { SourceHeader } from "./source-header";
+import { useIsExport } from "../export-context";
+import { inRange, selRange } from "../share-mode";
+import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -108,7 +111,8 @@ const TextBlock = memo(function TextBlock({
   const [showTs, setShowTs] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, messageId: msgId, getEl: () => bodyRef.current }));
-  const folded = useNarrationFold(muted ? foldKey : undefined);
+  const exporting = useIsExport(); // 导出树里旁白强制展开、不出收起条
+  const folded = useNarrationFold(muted && !exporting ? foldKey : undefined);
   return (
     <QuoteSwipe quote={text} blockLevel>
       <div
@@ -153,7 +157,7 @@ const TextBlock = memo(function TextBlock({
         {showTs && ts && (
           <div className="mt-0.5 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(ts)}</div>
         )}
-        {muted && foldKey && <NarrationFoldBar foldKey={foldKey} />}
+        {muted && foldKey && !exporting && <NarrationFoldBar foldKey={foldKey} />}
       </div>
     </QuoteSwipe>
   );
@@ -284,7 +288,7 @@ function AssistantBody({
  * 消息的对象引用稳定，memo 后每事件只有正在流式的最后一个气泡重渲染。移动端
  * 列表页与会话页并排都在 DOM——会话页的重渲染风暴会卡死列表页的滚动。
  */
-const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean }) {
+export const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean }) {
   devCount("bubble-render"); // 开发者面板的「气泡渲染速率」:memo 失效时这里会飙
   // 点击消息（user 气泡 / ✦ 头）切换秒级时间显示；长按/右键出菜单
   const [showTs, setShowTs] = useState(false);
@@ -334,6 +338,7 @@ const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: C
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
               ref={bubbleRef}
+              data-bubble="user"
               className={`cstra-bubble break-words border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
                 isSelf
                   ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
@@ -686,6 +691,10 @@ export function MessageList() {
       offRescue();
     };
   }, [active]);
+  // 分享模式（hooks 必须在下面的早退之前）：范围规则见 share-mode.ts
+  const share = useShare();
+  const order = useMemo(() => messages.map((x) => x.id), [messages]);
+  const shareRange = share.on ? selRange(share.sel, order) : null;
 
   if (!active) {
     return (
@@ -706,7 +715,8 @@ export function MessageList() {
   // 就是 visible 最后一条，isLast 语义不变）
   const windowSize = 30 + extraVisible;
   const visible = messages.length > windowSize ? messages.slice(-windowSize) : messages;
-  const hiddenCount = messages.length - visible.length;
+  const offset = messages.length - visible.length;
+  const hiddenCount = offset;
   // 形态②的复述：历史按 jsonl 记录切段，agent 复述那份会独立成一条纯 text 消息。
   // 整个列表扫一遍（不是 visible——回合边界可能在窗口之外），拿到该藏的 id。
   const echoIds = replyEchoMessageIds(messages);
@@ -808,8 +818,13 @@ export function MessageList() {
         )}
         {visible.map((m, i) => (
           // data-mid 包装层:搜索跳转按它定位;命中气泡加一闪动画。普通渲染
-          // 是零成本透明块(块级流内,不改 flex-col 布局)。
-          <div key={m.id} data-mid={m.id} className={flashId === m.id ? "cstra-flash" : undefined}>
+          // 是零成本透明块(块级流内,不改 flex-col 布局)。分享模式下加 checkbox
+          // (本人右、其余左,share-ui.tsx)与选中底色,范围规则见 share-mode.ts。
+          <div key={m.id} data-mid={m.id} className={shareRowClass(m, flashId === m.id, share.on, inRange(shareRange, offset + i))}>
+            {share.on && (
+              <ShareCheck id={m.id} order={order} checked={inRange(shareRange, offset + i)} side={m.role === "user" && !m.from ? "right" : "left"} />
+            )}
+            {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
               <Message
                 m={m}
