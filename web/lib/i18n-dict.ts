@@ -151,6 +151,7 @@ export const DICT: Record<string, string> = {
   "重启失败": "Restart failed",
   "Pi 可更新": "Pi update available",
   "重启后生效新版本": "Restart to run the new version",
+  "这个版本不再提示": "Don't remind me about this version",
   "思考中…": "Thinking…",
   "思考中": "Thinking",
   "正在同步最新消息…": "Syncing latest messages…",

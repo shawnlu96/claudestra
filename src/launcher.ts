@@ -33,8 +33,6 @@ import {
   acceptTrustPrompt,
   detectSessionIdlePrompt,
   CC_MODE_BANNER_RE,
-  listAgentWindows,
-  windowTarget,
   clearShellInitPrompts,
   MASTER_SESSION as SESSION_NAME,
   MASTER_WINDOW_NAME,
@@ -85,6 +83,7 @@ initDaemonLogs("launcher");
 // v2.19.0 认主守卫（见 lib/owner-guard.ts）——launcher 尤其危险:它会照着 rsync
 // 过来的 registry 把别人的 agent 全拉起来（2026-08-15 实测一口气 14 个）。
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
+import { busyAgentWindows } from "./lib/busy-windows.js";
 await assertPrimaryOrExit("launcher");
 
 
@@ -334,8 +333,9 @@ async function checkBetaUpdates(autoOn: boolean) {
     }).catch(() => {});
     return;
   }
-  if (!(await allAgentsIdle())) {
-    console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),有 agent 在忙,下次再试`);
+  const busyNow = await busyAgentWindows(MASTER_WINDOW);
+  if (busyNow.length) {
+    console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),在忙: ${busyNow.join(", ")},下次再试`);
     return;
   }
   // v2.17.2(peer 报告「beta 只 pull 不 apply,形同虚设」的两个真凶):
@@ -430,8 +430,9 @@ async function checkForUpdates() {
   }
 
   // 自动更新开启 → 等所有 agent 空闲再更新
-  if (!(await allAgentsIdle())) {
-    console.log(`🆙 Claudestra ${release.tag} 有新版本，但有 agent 在忙，下次再试`);
+  const busyNow = await busyAgentWindows(MASTER_WINDOW);
+  if (busyNow.length) {
+    console.log(`🆙 Claudestra ${release.tag} 有新版本，但在忙: ${busyNow.join(", ")}，下次再试`);
     return;
   }
 
@@ -622,15 +623,6 @@ async function noteUnknownInstall(path: string): Promise<void> {
   await Bun.write(UNKNOWN_INSTALL_NOTED, path).catch(() => {});
 }
 
-/** 所有 agent + master 是否都空闲 */
-async function allAgentsIdle(): Promise<boolean> {
-  if (!(await tmuxIsIdle(MASTER_WINDOW))) return false;
-  const agents = await listAgentWindows();
-  for (const name of agents) {
-    if (!(await tmuxIsIdle(windowTarget(name)))) return false;
-  }
-  return true;
-}
 
 /**
  * 扫 registry 找 "active 但 tmux window 丢了" 的 agent，对每个单独调
@@ -965,7 +957,7 @@ async function checkClaudeCodeUpdate() {
   console.log(`🆙 Claude Code 有新版本: ${current} → ${latest} (${install.kind})`);
 
   // 等所有 agent 空闲再更新（避免打断正在进行的任务）
-  if (!(await allAgentsIdle())) {
+  if ((await busyAgentWindows(MASTER_WINDOW)).length) {
     // 「下次再试」如果按周期语义就是 7 天后——升级窗口稍纵即逝。把检查时间戳
     // 拨回去,30 分钟后重试,直到逮到全员空闲的窗口
     lastClaudeUpdateCheck = Date.now() - CLAUDE_UPDATE_CHECK_INTERVAL_MS + 30 * 60_000;

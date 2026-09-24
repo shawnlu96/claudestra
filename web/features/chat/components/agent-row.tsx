@@ -9,6 +9,7 @@ import { RuntimeBadge } from "./unmanaged-sessions";
 import { MasterIcon } from "./master-icon";
 import { swipeReg } from "./agent-row-swipe";
 import { StatusDot } from "./status-dot";
+import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 
@@ -70,6 +71,7 @@ export function AgentRow({
 }) {
   const store = useChatStoreApi();
   const t = useT(); // 也订阅语言切换,保证 fmtAgo 标签随切换重渲
+  const hintDismissed = useUpdateHintDismissed(a); // 横幅上关掉的提示,侧栏 ⬆ 一起收起
   // 相对时间(owner 2026-07-14):x秒前/x分钟前/x小时x分前/x天前;
   // Sidebar 的 30s tick 让它保鲜
   const lastAt = fmtAgo(a.lastActivityTs);
@@ -356,14 +358,14 @@ export function AgentRow({
               </span>
             )}
           </span>
+          {a.updateHint && !hintDismissed && (
+            <span className="shrink-0 pl-1 text-[11px] text-info/80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
+          )}
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
               期间时间冻结在回合开始前)→ 显示「工作中」更诚实 */}
           {/* 未读数(2026-09-16):服务端计数,任一设备打开该会话即清。放在时间/状态之前,
               名字同时加粗——一眼能扫出「谁回了我还没看」 */}
-          {a.updateHint && (
-            <span className="shrink-0 pl-1 text-[11px] text-info/80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
-          )}
           {!!a.unread && (
             <span className="ml-1 inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold leading-none text-white">
               {a.unread > 99 ? "99+" : a.unread}

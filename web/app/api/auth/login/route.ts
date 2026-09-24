@@ -5,13 +5,12 @@ import {
   verifySSH,
   checkRateLimit,
   createSession,
-  SESSION_COOKIE,
+  sessionCookie,
 } from "@/lib/services/auth.service";
 import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
 import { totpEnabled, verifySecondFactor } from "@/lib/services/totp.service";
 import { requestClientIp } from "@/lib/client-ip";
 
-const SESSION_DAYS = 7;
 
 export async function POST(request: Request) {
   // host/port 不再从 body 取——verifySSH 硬编码本机（防未认证 SSH-target 注入 + SSRF）
@@ -110,20 +109,7 @@ export async function POST(request: Request) {
   const res = isForm
     ? formRedirect("/chat")
     : NextResponse.json({ data: { username, ...(recoveryNote ? { recovery: recoveryNote } : {}) } });
-  const maxAge = SESSION_DAYS * 24 * 60 * 60;
-  // Secure 默认**关**：这套 web 常经 Tailscale / 本机的明文 HTTP 访问，Secure cookie
-  // 在 HTTP 下会被浏览器直接丢弃 → 登录成功但 cookie 存不下、一直跳回登录页。
-  // 只有前面是 HTTPS 反代终止 TLS 的部署才设 COOKIE_SECURE=on 显式开。
-  // (httpOnly + sameSite=strict 已提供 XSS/CSRF 防护，Secure 只防明文窃听。)
-  const secure = process.env.COOKIE_SECURE === "on";
-
-  res.cookies.set(SESSION_COOKIE, session.id, {
-    httpOnly: true,
-    sameSite: "strict",
-    secure,
-    path: "/",
-    maxAge,
-  });
+  res.cookies.set(sessionCookie(session.id));
 
   return res;
 }
