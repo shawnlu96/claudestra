@@ -9,6 +9,7 @@ import { join } from "path";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { writeJsonAtomic } from "../lib/state-file.js";
+import { signedFor } from "../lib/instance-key.js";
 import { mergeProbe, probeErrorOf, probeResultOf, type PeerPresence, type ProbeResult } from "../lib/peer-presence.js";
 
 export const PEER_PRESENCE_PATH = join(STATE_DIR, "peer-presence.json");
@@ -31,8 +32,9 @@ async function probe(p: HttpPeer): Promise<ProbeResult | null> {
   if (!p.baseUrl || !p.outToken) return null; // 单向：只有对方连我，没法主动探
   const t0 = Date.now();
   try {
-    const r = await fetch(`${p.baseUrl.replace(/\/+$/, "")}/api/v1/agents`, {
-      headers: { Authorization: `Bearer ${p.outToken}` },
+    const url = `${p.baseUrl.replace(/\/+$/, "")}/api/v1/agents`;
+    const r = await fetch(url, {
+      headers: { Authorization: `Bearer ${p.outToken}`, ...signedFor("GET", url, "") },
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
     const body = await r.json().catch(() => null); // 非 JSON（对方前面是网页 / 反代错页）按空列表处理，状态码照样判

@@ -18,6 +18,7 @@ import type { Envelope, Delivery } from "./router.js";
 import { newThreadId } from "./router.js";
 import type { HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
+import { signedFor } from "../lib/instance-key.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 
@@ -151,13 +152,16 @@ async function runCall(
 
   let res: Response;
   try {
-    res = await f(`${base}/api/v1/agents/${encodeURIComponent(peerAgentName)}/messages`, {
+    const url = `${base}/api/v1/agents/${encodeURIComponent(peerAgentName)}/messages`;
+    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC });
+    res = await f(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${peer.outToken || ""}`,
         "Content-Type": "application/json",
+        ...signedFor("POST", url, body), // 实例签名（lib/instance-key.ts），对方只记录不拦
       },
-      body: JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC }),
+      body,
       signal: AbortSignal.timeout(postTimeoutMs),
     });
   } catch (e) {
@@ -234,8 +238,9 @@ async function runCall(
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs));
     try {
-      const pr = await f(`${base}/api/v1/threads/${encodeURIComponent(threadId)}`, {
-        headers: { Authorization: `Bearer ${peer.outToken || ""}` },
+      const pollUrl = `${base}/api/v1/threads/${encodeURIComponent(threadId)}`;
+      const pr = await f(pollUrl, {
+        headers: { Authorization: `Bearer ${peer.outToken || ""}`, ...signedFor("GET", pollUrl, "") },
         signal: AbortSignal.timeout(15_000),
       });
       if (pr.status === 404) continue; // 还没答

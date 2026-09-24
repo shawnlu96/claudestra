@@ -81,6 +81,7 @@ import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
+import { notePeerSignature } from "./peer-signature.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -236,6 +237,7 @@ async function authApi(req: Request, url: URL): Promise<Principal | Response> {
   // 文案跟着上面的常量走 —— 曾经硬写 30 而实际是 120,撞限流的人拿到的是个假数字
   if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${API_RATE_LIMIT_PER_MIN} req/min)` });
   if (p.peer) void import("./peer-presence.js").then((m) => m.notePeerInbound(p.peer!)); // 在线 peer 列表的「最近来访」
+  if (p.peer) void notePeerSignature(req, url, p.peer); // 验签：只记录不拦（bridge/peer-signature.ts）
   return p;
 }
 

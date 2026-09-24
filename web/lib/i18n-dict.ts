@@ -434,6 +434,13 @@ export const DICT: Record<string, string> = {
   "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",
   "推理档位": "Reasoning",
   // ── Peer 交接记录 ─────────────────────────────────────
+  "签名已验证": "Signature verified",
+  "对方版本还不会签名": "Their version does not sign requests yet",
+  "签名对不上": "Signature mismatch",
+  "签名时间戳过期（两边时钟差太多？）": "Signature timestamp expired (clocks too far apart?)",
+  "对方换了密钥——先确认是他本人换的": "Their key changed — confirm it was really them",
+  "本机指纹": "This instance's fingerprint",
+  "（对方面板里显示的应该一样）": "(should match what their panel shows)",
   "秒": "s",
   "分钟": "min",
   "小时": "h",

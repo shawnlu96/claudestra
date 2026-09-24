@@ -11,6 +11,7 @@ import { InviteChecklist } from "./peers-invite-checklist";
 import { LastVisit, PresenceLine, PresenceSummary, sortByPresence, type PeerPresenceInfo } from "./peers-presence";
 import { PeersTidyBanner, type TidyGroupInfo } from "./peers-tidy-banner";
 import { HandoffSummaryCard, PeerHandoffLine, type HandoffSummaryInfo } from "./peers-handoff-stats";
+import { SelfFingerprint, SignatureLine, type PeerSignatureInfo } from "./peers-signature";
 
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
@@ -33,6 +34,7 @@ interface PeerInfo {
   inTokenId: string | null;
   exposedAgents: string[];
   presence?: PeerPresenceInfo;
+  signature?: PeerSignatureInfo | null;
 }
 
 /** GET /api/peers 的回包（桥接 bridge/peers-routes.ts listPeers） */
@@ -44,6 +46,7 @@ interface PeersListResponse {
   pendingInvites?: PendingInviteInfo[];
   tidy?: TidyGroupInfo[];
   handoffs?: HandoffSummaryInfo;
+  self?: { fingerprint: string } | null;
 }
 
 interface PendingInviteInfo {
@@ -175,6 +178,7 @@ function PeerCard({
               </div>
               <LastVisit presence={peer.presence} />
               <PeerHandoffLine summary={handoffs} peer={peer.name} />
+              <SignatureLine sig={peer.signature} />
             </>
           ) : (
             <div className="text-[11.5px] text-base-content/45">{t("他还连不上你——生成一张邀请发给他")}</div>
@@ -392,6 +396,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
   const [pendingInvites, setPendingInvites] = useState<PendingInviteInfo[]>([]);
   const [tidy, setTidy] = useState<TidyGroupInfo[]>([]);
   const [handoffs, setHandoffs] = useState<HandoffSummaryInfo | null>(null);
+  const [selfFp, setSelfFp] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setErr("");
@@ -404,6 +409,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
         setPendingInvites(j.pendingInvites || []);
         setTidy(j.tidy || []);
         setHandoffs(j.handoffs ?? null);
+        setSelfFp(j.self?.fingerprint ?? null);
       } else {
         setErr(j.error || t("加载失败"));
       }
@@ -447,6 +453,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
               <PeersTidyBanner groups={tidy} onDone={() => void reload()} />
               <PresenceSummary peers={peers} />
               {peers.length > 0 && <HandoffSummaryCard summary={handoffs} />}
+              <SelfFingerprint fingerprint={selfFp} />
               {sortByPresence(peers).map((p) => (
                 <PeerCard key={p.name} peer={p} localAgents={localAgents} handoffs={handoffs} onChanged={() => void reload()} />
               ))}

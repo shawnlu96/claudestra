@@ -7,6 +7,8 @@ import { readPrincipals, tokenIdOf } from "../lib/principals.js";
 import { readPeers } from "../lib/peers.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { recordMetric } from "../lib/metrics.js";
+import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
+import { peerSignatureState } from "./peer-signature.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -64,6 +66,7 @@ async function listPeers(runManager: RunManager): Promise<Response> {
       /** 对方 token 的 scope = 对方能访问我这边哪些 agent */
       exposedAgents: tok?.agents ?? [],
       presence: peerPresence(p.name), // 在线状态 + 最近来访（bridge/peer-presence.ts）
+      signature: peerSignatureState(p.name), // 对方请求的验签结果与钉住的指纹（bridge/peer-signature.ts）
     };
   });
   const localAgents = regAgents.map((a) => ({
@@ -79,7 +82,9 @@ async function listPeers(runManager: RunManager): Promise<Response> {
   const { readHandoffs, summarizeHandoffs } = await import("../lib/handoff-log.js");
   const since = Date.now() - 7 * 86400_000;
   const handoffs = summarizeHandoffs(await readHandoffs(since), since);
-  return apiJson(200, { ok: true, peers, localAgents, pendingInvites, handoffs, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals)) });
+  const me = instanceKeySync();
+  const self = me ? { fingerprint: keyFingerprint(me.publicKey) } : null; // 本机指纹：给对方核对用
+  return apiJson(200, { ok: true, peers, localAgents, pendingInvites, handoffs, self, tidy: planPeerTidy(peersData.httpPeers || [], activePeerTokens(pf.principals)) });
 }
 
 // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke
