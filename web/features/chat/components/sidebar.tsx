@@ -456,12 +456,12 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               <MasterIcon className="size-[18px]" />
             </span>
             <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-[15px] font-medium sm:text-sm">
-                {t(master.displayName)}
-                {masterDraft && active !== master.name && <span className="badge badge-ghost badge-xs ml-1 align-middle">{t("草稿")}</span>}
-              </span>
+              <span className="truncate text-[15px] font-medium sm:text-sm">{t(master.displayName)}</span>
               <span className="truncate text-[11px] text-base-content/45">{t("总控调度 · 新建会话找它")}</span>
             </span>
+            {masterDraft && active !== master.name && (
+              <span className="badge badge-outline badge-warning badge-xs shrink-0">{t("草稿")}</span>
+            )}
             {(master.busy || master.compacting || (active === master.name && streaming)) && (
               <span className={`size-2 shrink-0 rounded-full ${master.compacting || (active === master.name && compactingLive) ? "bg-info" : "bg-warning"}`} />
             )}

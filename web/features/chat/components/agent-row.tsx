@@ -359,9 +359,12 @@ export function AgentRow({
                 mock
               </span>
             )}
-            {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失 */}
-            {draft && !active && <span className="badge badge-ghost badge-xs ml-1 align-middle">{t("草稿")}</span>}
           </span>
+          {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
+              放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}
+          {draft && !active && (
+            <span className="badge badge-outline badge-warning badge-xs shrink-0 align-middle">{t("草稿")}</span>
+          )}
           {a.updateHint && !hintDismissed && (
             <span className="shrink-0 pl-1 text-[11px] text-info/80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
           )}
