@@ -136,6 +136,8 @@ export interface HistoryMessage {
   model?: string;
   /** 入站消息的发送者标签（<channel> 的 user 属性：API token 名 / Discord 用户名 / 来源 agent） */
   from?: string;
+  /** 发送者 id（user_id 属性：api:<tokenId> / Discord 用户 id）——web 据此认出「本人的所有来源」 */
+  fromId?: string;
 }
 
 /**
@@ -324,13 +326,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): { text: string; from?: string } | null {
+export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string } | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
+  const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const text = stripChannelHeader(m[2].trim()).trim();
   if (!text) return null;
-  return { text, from };
+  return { text, from, fromId };
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {
@@ -565,7 +568,7 @@ function parseHistoryLines(
           const mid = channelMessageId(queued);
           if (!mid || !seenChannelIds.has(mid)) {
             const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-            if (un.from) msg.from = un.from;
+            if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
             all.push(msg);
           }
         }
@@ -610,13 +613,10 @@ function parseHistoryLines(
         // 其余 isMeta（caveat / local-command 输出等）照旧过滤
         const un = unwrapChannelMessage(text);
         if (!un) continue;
-        // bridge 内部注入(看门狗 nudge 等管线提示,user="bridge:*")不进
-        // 历史——那是发给 agent 的指令,不是对话。直播侧 srcKind 过滤已同款
-        // 排除,历史侧对齐(2026-07-24 用户截图:nudge 全文以用户气泡出现在
-        // migration 历史里,像系统故障)。
+        // bridge 内部注入(看门狗 nudge 等,user="bridge:*")是发给 agent 的指令,不是对话,不进历史(直播侧 srcKind 同款排除)
         if (un.from && /^bridge(:|$)/.test(un.from)) continue;
         const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-        if (un.from) msg.from = un.from;
+        if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
         all.push(msg);
         continue;
       }

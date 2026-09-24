@@ -911,10 +911,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    // 事件埋点：入站消息镜像 + agent 进入思考态（旁路）。srcKind(user=Discord 人类/api=Web 用户/
-    // local=agent/bridge):web 据此把「他端用户发言」实时画成用户气泡,排除 agent/bridge 注入
-    // (那些不是用户消息,2026-07-24 owner 报跨端同步慢)。
-    emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: { direction: "in", from: meta.user || "?", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId } });
+    // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
+    // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
+    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId };
+    emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inData });
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
     // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按
     // registry 重建;jsonl 还没出现会重新 pending-wait。同步 map 查询,常态零开销。

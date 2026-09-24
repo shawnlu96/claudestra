@@ -29,7 +29,7 @@ import {
 } from "./api-respond.js";
 import { interruptAgent } from "../lib/runtimes/window-ops.js";
 import { existsSync, readdirSync, statSync } from "fs";
-import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT } from "./config.js";
+import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
   readPrincipals,
   findByBearer,
@@ -1103,8 +1103,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return deps.handleEventsRequest(req, scopeAgents ? { agents: scopeAgents } : undefined);
   }
 
-  // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送据此只推自己的对话，不推 peer / 其它 token 的）
-  if (path === "/whoami" && req.method === "GET") return apiJson(200, { ok: true, tokenId, name: principal.name ?? null, peer: principal.peer ?? null });
+  // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送只推自己的对话）；ownerIds = 本人的 Discord 账号（ALLOWED_USER_IDS 第一个 = 装机时填的自己），web 据此把本人从 Discord 发的也放右边；不告诉 peer
+  if (path === "/whoami" && req.method === "GET") {
+    return apiJson(200, { ok: true, tokenId, name: principal.name ?? null, peer: principal.peer ?? null, ...(principal.peer ? {} : { ownerIds: ALLOWED_USER_IDS.slice(0, 1) }) });
+  }
 
   // GET /api/v1/threads/:threadId —— wait 超时后的轮询兜底
   const threadMatch = path.match(/^\/threads\/([^/]+)$/);

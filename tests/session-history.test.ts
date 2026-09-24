@@ -51,12 +51,12 @@ const SAMPLE = [
 describe("unwrapChannelMessage", () => {
   const wrap = (attrs: string, body: string) => `<channel ${attrs}>\n${body}\n</channel>`;
 
-  test("API 用户消息：剥 wrapper + [🌐 …] header，提取 user 属性", () => {
+  test("API 用户消息：剥 wrapper + [🌐 …] header，提取 user / user_id 属性", () => {
     const raw = wrap(
       'source="claudestra" chat_id="api:tok_x" user="web-ui" user_id="api:tok_x" api="true"',
       "[🌐 来自 API 用户「web-ui」（外部 token 接入，非 Discord）。\n直接用 reply() 回答到本 chat_id 即可；对方看不到本频道历史。]\n\n帮我修一下渲染"
     );
-    expect(unwrapChannelMessage(raw)).toEqual({ text: "帮我修一下渲染", from: "web-ui" });
+    expect(unwrapChannelMessage(raw)).toEqual({ text: "帮我修一下渲染", from: "web-ui", fromId: "api:tok_x" });
   });
 
   test("agent↔agent：剥 [🤖 …] header（header 内含 ] 不截断正文）", () => {

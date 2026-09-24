@@ -10,6 +10,7 @@ import { st } from "@/lib/server-lang";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { attachmentFromPath, extractAttachments } from "@/lib/chat/attachments";
+import { getSelfIds, isSelfSource } from "@/lib/chat/me";
 
 /**
  * 某 agent 的历史消息（打开会话时先拉，刷新不丢）。
@@ -38,10 +39,10 @@ interface NeutralMessage {
   progress?: string;
   /** 入站消息发送者标签（<channel> user 属性：API token 名 / Discord 用户名 / 来源 agent） */
   from?: string;
+  /** 发送者 id（user_id）：认本人的所有来源（lib/chat/me.ts） */
+  fromId?: string;
 }
 
-/** 本前端自己的 token 名（manager token-add web-ui）——自己发的消息不用再标来源。 */
-const SELF_FROM = new Set(["web-ui"]);
 
 // 附件标记解析移到 lib/chat/attachments.ts —— stream 路由(user-in 跨端同步)共用
 
@@ -57,7 +58,7 @@ const SELF_FROM = new Set(["web-ui"]);
  */
 /** 在带组件的气泡里找该点击对应的 choiceId + 人类可读 label（不在组里返回 null）。 */
 
-function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: string; isHidden?: (seq: number) => boolean }): ChatMessage[] {
+function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: string; isHidden?: (seq: number) => boolean; selfIds?: ReadonlySet<string> }): ChatMessage[] {
   const sid = opts?.sid;
   const out: ChatMessage[] = [];
   let group: ChatMessage | null = null; // 当前正在累积的 assistant 回合气泡
@@ -107,7 +108,7 @@ function toChatMessages(items: NeutralMessage[], opts?: { tail?: boolean; sid?: 
         out.push({ id: `h${m.seq}`, role: "system", content: cmdMatch[1], ts: m.ts, sid, seqEnd: m.seq });
         continue;
       }
-      const from = m.from && !SELF_FROM.has(m.from) ? m.from : undefined;
+      const from = isSelfSource(m.from, m.fromId, opts?.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
       // 按钮/选单点击的机器 payload → 渲染成组件里的 label，与 live 乐观气泡**同形**
       // （形态不一致会让乐观/历史对账失败,乐观 label 气泡被当「未送达」挂到列表
       // 末尾——出现在后续回复之后,2026-07-16 真机截图）;组件气泡不在本页时才
@@ -233,10 +234,11 @@ export async function GET(request: Request) {
   }
   const name = encodeURIComponent(apiAgentName(agent));
   const agentKey = apiAgentName(agent);
+  const selfIds = await getSelfIds();
   // v2.23.1+ 「删除」的隐藏区间在合并气泡的循环里跳过（user/system 仍作分组断点）；
   // lastSeq/hasMore 按整页算，尾部记录被隐藏时游标照样追到尾
   const shape = (items: NeutralMessage[], sid: string, tail?: boolean) =>
-    slimForWire(toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: hiddenPredicate(agentKey, sid) }));
+    slimForWire(toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: hiddenPredicate(agentKey, sid), selfIds }));
   // 向上分页(owner 2026-07-16「往上滑看全部历史」):before=<seq> + session=<sid>
   // → 钉在同一 session 往前翻(seq 空间 per-session,不能跨 session 混用)
   const before = url.searchParams.get("before");

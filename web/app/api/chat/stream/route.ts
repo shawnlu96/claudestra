@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { SSE_DONE, bgEndStatusOf, bgMetaOf, bgProgressOf, type WebStreamEvent, type AnchoredStreamEvent, type WebAuqQuestion, type WebComponentRow } from "@/lib/chat/events";
 import { apiAgentName, bridgeGet, bridgeAuthHeaders, BRIDGE } from "@/lib/chat/bridge-api";
 import { extractAttachments } from "@/lib/chat/attachments";
+import { getSelfIds, isSelfSource } from "@/lib/chat/me";
 import { isAuthed } from "@/lib/api-auth";
 import { serverLang } from "@/lib/server-lang";
 
@@ -71,7 +72,7 @@ function recordSrc(d: Record<string, unknown>): { seq?: number; sid?: string } {
 }
 
 /** BridgeEvent → WebStreamEvent（null = 该事件 v1 不消费）。 */
-function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
+function translate(evt: BridgeEvent, lang: "zh" | "en", selfIds: ReadonlySet<string>): WebStreamEvent | null {
   const d = evt.data || {};
   switch (evt.type) {
     case "agent_status":
@@ -121,9 +122,9 @@ function translate(evt: BridgeEvent, lang: "zh" | "en"): WebStreamEvent | null {
           // 对账去重失配 → 同一条消息双份(2026-07-24 用户截图实锤)
           const { content, attachments } = extractAttachments(d.text);
           if (!content && !attachments?.length) return null;
-          // v2.20.2+ 带来源:peer/其它用户的发言在 UI 上要与本人区分(owner 实报
-          // 「看起来像我说的」)。web-ui 是本前端自己的 token,不标
-          const fromLabel = typeof d.from === "string" && d.from && d.from !== "web-ui" && d.from !== "?" ? d.from : undefined;
+          // 带来源:peer / 其它人的发言要与本人区分;本人的所有来源(自己的 web / Discord,lib/chat/me.ts)不标
+          const from = typeof d.from === "string" && d.from !== "?" ? d.from : undefined;
+          const fromLabel = isSelfSource(from, typeof d.fromId === "string" ? d.fromId : undefined, selfIds) ? undefined : from;
           return {
             t: "user-in",
             text: content,
@@ -258,7 +259,7 @@ export async function GET(request: Request) {
   if (!(await isAuthed(request))) {
     return new Response("未登录", { status: 401 });
   }
-  const lang = await serverLang();
+  const [lang, selfIds] = await Promise.all([serverLang(), getSelfIds()]);
   const url = new URL(request.url);
   const agent = url.searchParams.get("agent");
   if (!agent) return new Response("missing agent", { status: 400 });
@@ -374,7 +375,7 @@ export async function GET(request: Request) {
               continue; // 心跳/坏帧
             }
             if (!nameVariants.has(evt.agent)) continue;
-            const mapped = translate(evt, lang);
+            const mapped = translate(evt, lang, selfIds);
             // eid = bridge seq:前端的断点续传锚(下次重连 ?since=<eid>)
             if (mapped) send({ ...mapped, eid: evt.seq });
           }
