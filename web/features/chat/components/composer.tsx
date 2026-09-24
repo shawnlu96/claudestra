@@ -7,6 +7,7 @@ import { SkillsSheet } from "./skills-sheet";
 import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
 import { UpdateHintBanner } from "./update-hint-banner";
+import { clearDraft, loadDraft, saveDraft } from "../drafts";
 
 
 const MAX_FILES = 5;
@@ -236,20 +237,13 @@ export function Composer() {
   // 流式中也可发（插入会话）——不再要求 !streaming。
   const canSend = !disabled && hasContent;
 
-  // ── 草稿持久化（2026-07-13 owner）：未发送文字按 agent 存 localStorage，
-  //    切走会话 / 退出 App 再回来原样恢复；发送成功即清。 ──
-  const draftKey = (a: string) => `cstra_draft_${a}`;
-  const saveDraft = (agent: string, value: string) => {
-    try {
-      if (value.trim()) localStorage.setItem(draftKey(agent), value);
-      else localStorage.removeItem(draftKey(agent));
-    } catch { /* 隐私模式等 */ }
-  };
+  // ── 草稿持久化（2026-07-13 owner）：未发送文字按 agent 存 localStorage（../drafts.ts，
+  //    侧栏【草稿】标同一数据源），切走会话 / 退出 App 再回来原样恢复；发送成功即清。 ──
   // 切会话：cleanup 把旧 agent 的当前输入存盘，effect 载入新 agent 草稿；
   // App 退后台（iOS 可能直接回收进程）立即存盘。
   useEffect(() => {
     if (!active) return;
-    try { setText(localStorage.getItem(draftKey(active)) || ""); } catch { /* 同上 */ }
+    setText(loadDraft(active));
     // v2.21.1+ 切会话清空待发附件(owner 2026-09-02:「粘贴文件后切到别的对话,
     // 文件还挂在框上」)。文字草稿是 per-agent 持久化的,附件不是——File 对象
     // 存不进 localStorage,留在 state 里就等于跟着你串台,一不留神发错人。
@@ -506,9 +500,7 @@ export function Composer() {
     store.send(cur, files.length ? files : undefined);
     setText("");
     setFiles([]);
-    if (active) {
-      try { localStorage.removeItem(draftKey(active)); } catch { /* 忽略 */ }
-    }
+    if (active) clearDraft(active);
   };
 
   const addFiles = (picked: File[]) => {

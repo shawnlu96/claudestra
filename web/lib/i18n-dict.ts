@@ -27,6 +27,7 @@ export const DICT: Record<string, string> = {
   "重试": "Retry",
   "返回": "Back",
   "启动": "Start",
+  "草稿": "Draft",
   "▴ 收起": "▴ Collapse",
   "▾ 展开": "▾ Expand",
   "收起全部": "Collapse all",

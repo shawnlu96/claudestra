@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
@@ -75,6 +76,7 @@ export function AgentRow({
   // 相对时间(owner 2026-07-14):x秒前/x分钟前/x小时x分前/x天前;
   // Sidebar 的 30s tick 让它保鲜
   const lastAt = fmtAgo(a.lastActivityTs);
+  const draft = useSyncExternalStore(subscribeDrafts, () => hasDraft(a.name), () => false);
   // 左滑删除(owner 2026-07-14:「临时起的 agent 污染列表,永久删除」):
   // 横滑露出红色删除钮,二次点击确认后 removeAgent(kill + registry 条目删,
   // 归档保留)。纵向意图让路给列表滚动;master/mock 不可删。
@@ -357,6 +359,8 @@ export function AgentRow({
                 mock
               </span>
             )}
+            {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失 */}
+            {draft && !active && <span className="badge badge-ghost badge-xs ml-1 align-middle">{t("草稿")}</span>}
           </span>
           {a.updateHint && !hintDismissed && (
             <span className="shrink-0 pl-1 text-[11px] text-info/80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
