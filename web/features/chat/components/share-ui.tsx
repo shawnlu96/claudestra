@@ -8,9 +8,27 @@ import type { ChatMessage } from "../type";
 export function shareRowClass(m: ChatMessage, flash: boolean, on: boolean, selected: boolean): string | undefined {
   const parts: string[] = [];
   if (flash) parts.push("cstra-flash");
-  if (on) parts.push("relative rounded-xl", m.role === "user" && !m.from ? "pr-8" : "pl-8");
-  if (selected) parts.push("bg-primary/[0.08]");
+  if (on) parts.push("relative", m.role === "user" && !m.from ? "pr-8" : "pl-8");
+  // 直角、淡蓝（owner 2026-09-25「不必有圆角…背景稍微淡一点，用蓝色系」）
+  if (selected) parts.push("bg-info/[0.06]");
   return parts.length ? parts.join(" ") : undefined;
+}
+
+/**
+ * 选择模式下罩在每条消息上的透明 mask：点整条即选中 / 取消，顺便挡住底下组件的交互
+ * （owner 2026-09-25「不必非要点击那个 checkbox」）。checkbox 在它上面一层，点到也是同一件事。
+ */
+export function ShareMask({ id, order }: { id: string; order: readonly string[] }) {
+  return (
+    <div
+      className="absolute inset-0 z-10 cursor-pointer"
+      role="presentation"
+      onClick={(e) => {
+        e.stopPropagation();
+        clickMessage(id, order);
+      }}
+    />
+  );
 }
 
 /** 分享模式状态（组件订阅入口；规则在 ../share-mode.ts） */
@@ -51,7 +69,7 @@ export function ShareCheck({ id, order, checked, side }: { id: string; order: re
       type="button"
       role="checkbox"
       aria-checked={checked}
-      className={`absolute top-0 flex size-[22px] items-center justify-center rounded-md border transition-colors ${
+      className={`absolute top-0 z-20 flex size-[22px] items-center justify-center rounded-md border transition-colors ${
         side === "right" ? "right-0" : "left-0"
       } ${checked ? "border-primary bg-primary text-primary-content" : "border-base-content/30 bg-base-100 hover:border-base-content/60"}`}
       onClick={(e) => {

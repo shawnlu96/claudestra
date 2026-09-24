@@ -29,7 +29,7 @@ import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
 import { inRange, selRange } from "../share-mode";
-import { ShareCheck, shareRowClass, useShare } from "./share-ui";
+import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -824,6 +824,7 @@ export function MessageList() {
             {share.on && (
               <ShareCheck id={m.id} order={order} checked={inRange(shareRange, offset + i)} side={m.role === "user" && !m.from ? "right" : "left"} />
             )}
+            {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
               <Message
                 m={m}
