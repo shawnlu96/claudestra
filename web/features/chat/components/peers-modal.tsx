@@ -6,6 +6,7 @@ import { useArmedConfirm } from "../use-armed-confirm";
 import { peersAction, ScopePicker, ForceRow, HandshakeString, type ActionResult, type LocalAgent } from "./peers-shared";
 import { JoinPanel } from "./peers-join-panel";
 import { InviteChecklist } from "./peers-invite-checklist";
+import { PresenceLine, PresenceSummary, sortByPresence, type PeerPresenceInfo } from "./peers-presence";
 
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
@@ -27,6 +28,7 @@ interface PeerInfo {
   addedAt: string;
   inTokenId: string | null;
   exposedAgents: string[];
+  presence?: PeerPresenceInfo;
 }
 
 interface PendingInviteInfo {
@@ -121,6 +123,7 @@ function PeerCard({
       {peer.baseUrl && (
         <div className="mt-0.5 truncate font-mono text-[11px] text-base-content/50">{peer.baseUrl}</div>
       )}
+      <PresenceLine presence={peer.presence} />
 
       {/* 入站:对方可访问我这边哪些 agent */}
       <div className="mt-3">
@@ -412,6 +415,9 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
     if (!open) return;
     setLoading(true);
     void reload();
+    // 开着时跟上 bridge 每分钟一次的在线检测
+    const iv = setInterval(() => void reload(), 30_000);
+    return () => clearInterval(iv);
   }, [open, reload]);
 
   if (!open) return null;
@@ -436,7 +442,8 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
             </div>
           ) : (
             <>
-              {peers.map((p) => (
+              <PresenceSummary peers={peers} />
+              {sortByPresence(peers).map((p) => (
                 <PeerCard key={p.name} peer={p} localAgents={localAgents} onChanged={() => void reload()} />
               ))}
               {peers.length === 0 && !err && (

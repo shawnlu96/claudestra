@@ -10,7 +10,7 @@ export const SEND_TO_AGENT_DESCRIPTION = `Send a message to another agent. Use f
 - \`"peer:ahh.future_data"\` — HTTP peer「ahh」的 future_data agent（长格式）
 - \`"future_data@ahh"\` — 同上（短格式）
 
-**什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段，看看 owner 配置了哪些 peer 实例（v2.11+ HTTP peer）。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
+**什么时候用跨 peer**：如果你**不能**自己完成一个任务（比如数据不在本地、专业领域不是你的 cwd 管的），**先查一下** \`~/.claude-orchestrator/peers.json\` 的 \`httpPeers\` 字段，看看 owner 配置了哪些 peer 实例（v2.11+ HTTP peer）。发之前可以看 \`~/.claude-orchestrator/peer-presence.json\`：bridge 每分钟探一次，记着每个 peer 在不在线、对方开放了哪些 agent（离线的发了只会超时）。有就直接用 \`send_to_agent({ target: "peer:X.Y", ... })\`，比自己硬怼强。本地调也一样：遇到能力不对口的任务先看有没有同事 agent 能帮忙。
 
 **回复机制（v1.9.21+ 推回，不再轮询）**：
 - send_to_agent 返回的 \`pushBack: true\` 说明对方（本地 agent 或 peer agent）回复时 bridge 会自动把 text 推回你作为新消息 \`[🤖 xxx 回复] ...\`。**不要** fetch_messages 轮询。

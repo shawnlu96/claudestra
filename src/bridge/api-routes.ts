@@ -229,6 +229,7 @@ async function authApi(req: Request, url: URL): Promise<Principal | Response> {
   }
   // 文案跟着上面的常量走 —— 曾经硬写 30 而实际是 120,撞限流的人拿到的是个假数字
   if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${API_RATE_LIMIT_PER_MIN} req/min)` });
+  if (p.peer) void import("./peer-presence.js").then((m) => m.notePeerInbound(p.peer!)); // 在线 peer 列表的「最近来访」
   return p;
 }
 
@@ -2340,6 +2341,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         readPrincipals(),
         readRegistryAgents(),
       ]);
+      const { peerPresence } = await import("./peer-presence.js");
       const peers = (peersData.httpPeers || []).map((p) => {
         const tok = pf.principals.find((x) => x.peer === p.name && !x.disabled);
         return {
@@ -2351,6 +2353,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           inTokenId: tok ? tokenIdOf(tok) : p.inTokenId ?? null,
           /** 对方 token 的 scope = 对方能访问我这边哪些 agent */
           exposedAgents: tok?.agents ?? [],
+          presence: peerPresence(p.name), // 在线状态 + 最近来访（bridge/peer-presence.ts）
         };
       });
       const localAgents = regAgents.map((a) => ({
@@ -2358,14 +2361,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         external: !!a.external,
         status: a.status ?? "unknown",
       }));
-      // v2.14+ 顺带给出本机对外地址候选：握手时 --url / web 输入框预填用。
-      // 手抄这个地址是三步握手里最容易错的一环，错了要拖到 peer-http-test 才暴露。
-      const { detectBridgeUrls } = await import("../lib/net-addr.js");
-      const suggestedUrls = detectBridgeUrls(parseInt(process.env.BRIDGE_PORT || "3847"));
       // v2.15+ 待兑换的一键邀请（peer-invite-list 顺带清扫过期 + 吊销其 token）
       const invRes: any = await runManager("peer-invite-list");
       const pendingInvites = invRes?.ok ? invRes.invites || [] : [];
-      return apiJson(200, { ok: true, peers, localAgents, suggestedUrls, pendingInvites });
+      return apiJson(200, { ok: true, peers, localAgents, pendingInvites });
     }
 
     // v2.15+ POST /peers/invite-new | /peers/join-auto | /peers/invite-revoke

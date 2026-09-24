@@ -18,6 +18,7 @@ import type { Envelope, Delivery } from "./router.js";
 import { newThreadId } from "./router.js";
 import type { HttpPeer } from "../lib/peers.js";
 import { recordMetric } from "../lib/metrics.js";
+import { startPeerPresence } from "./peer-presence.js";
 
 export interface HttpPeerDeps {
   deliver: (env: Envelope) => Promise<Delivery>;
@@ -34,6 +35,7 @@ export interface HttpPeerDeps {
 let deps: HttpPeerDeps | null = null;
 export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
+  startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
 }
 
 /** 出站 wait 秒数。v2.17.2 从 120 降到 25(peer 实锤两次丢回复):长挂 POST 跨
