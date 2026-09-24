@@ -104,9 +104,9 @@ export type WebStreamEvent =
   | { t: "ask"; id: string; questions: WebAuqQuestion[] }
   | { t: "ask-cleared" }
   // 后台任务（subagent / bg shell）子会话跟踪：Discord 侧开子区，web 侧渲染折叠面板。
-  | { t: "bg-start"; id: string; kind: "subagent" | "shell"; title: string }
-  | { t: "bg-update"; id: string; items: string[] }
-  | { t: "bg-done"; id: string; durationMs?: number }
+  | ({ t: "bg-start"; id: string; kind: "subagent" | "shell"; title: string } & BgMeta)
+  | { t: "bg-update"; id: string; items: string[]; progress?: BgProgress }
+  | { t: "bg-done"; id: string; durationMs?: number; status?: BgEndStatus }
   /** 连流后的活跃任务全集快照：不在 ids 里的 running 卡应标记完成——
    *  bridge 重启会丢 bg-done 事件,幽灵「working」卡靠它收敛。 */
   | { t: "bg-sync"; ids: string[] }
@@ -125,3 +125,36 @@ export type WebStreamEvent =
 export type AnchoredStreamEvent = WebStreamEvent & { eid?: number };
 
 export const SSE_DONE = "[DONE]";
+
+/** subagent 卡的进度（bridge lib/subagent-progress.ts 算好）：耗时起点 / 最后动静 / 上下文 / 工具调用数 */
+export interface BgProgress {
+  startedTs?: number;
+  lastTs?: number;
+  ctxTokens?: number;
+  toolCount?: number;
+}
+/** 真实收尾状态：done = subagent 交回最终答复；stopped = 被用户停掉；idle = 长时间无动静收尾 */
+export type BgEndStatus = "done" | "stopped" | "idle";
+export interface BgMeta {
+  agentType?: string;
+  model?: string;
+  progress?: BgProgress;
+}
+
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+
+/** bridge 事件里的进度字段只留数字；老 bridge 没这些字段 → undefined，卡片退回老样子 */
+export function bgProgressOf(x: unknown): BgProgress | undefined {
+  if (!x || typeof x !== "object") return undefined;
+  const o = x as Record<string, unknown>;
+  return { startedTs: num(o.startedTs), lastTs: num(o.lastTs), ctxTokens: num(o.ctxTokens), toolCount: num(o.toolCount) };
+}
+
+export function bgMetaOf(d: Record<string, unknown>): BgMeta {
+  return { agentType: str(d.agentType), model: str(d.model), progress: bgProgressOf(d.progress) };
+}
+
+export function bgEndStatusOf(x: unknown): BgEndStatus | undefined {
+  return x === "done" || x === "stopped" || x === "idle" ? x : undefined;
+}

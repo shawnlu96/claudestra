@@ -206,6 +206,8 @@ export const DICT: Record<string, string> = {
   "收起": "Dismiss",
   "收起任务卡": "Dismiss task card",
   "等待输出…": "Waiting for output…",
+  "无动静结束": "ended (no activity)",
+  "静默": "quiet",
   "后台任务": "Background tasks",
 
   // ── 用量看板 ─────────────────────────────────────────

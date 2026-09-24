@@ -63,6 +63,48 @@ function fmtDuration(ms?: number): string {
   return `${Math.round(ms / 1000)}s`;
 }
 
+/** 运行中耗时：27m 47s / 1h 3m / 45s（与 CC 底栏同一种读法） */
+function fmtClock(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+}
+
+/** 每 ms 毫秒刷新一次的「现在」；ms=0 不起定时器（没有在跑的 subagent 时不白白重渲染） */
+function useNow(ms: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!ms) return;
+    const id = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(id);
+  }, [ms]);
+  return now;
+}
+
+const QUIET_MS = 3 * 60_000; // subagent 超过这么久没写记录 → 标「静默」（仍在跑，只是在等命令/CI）
+
+/** 卡片右侧的状态：运行中 = 转圈 + 耗时 + 上下文 + 静默提示；结束 = 真实收尾状态 + 时长。
+ *  每秒走的时钟只放在这里——放到面板上会让每张卡（连同最多 500 行的进度视口）每秒重渲染一遍 */
+function BgStatus({ t }: { t: BgTaskView }) {
+  const tr = useT();
+  const p = t.progress;
+  const now = useNow(t.status === "running" && p?.startedTs ? 1000 : 0);
+  if (t.status !== "running") {
+    if (t.endStatus === "stopped") return <span className="ml-1 shrink-0 opacity-50">⏹ {tr("已停止")} {fmtDuration(t.durationMs)}</span>;
+    if (t.endStatus === "idle") return <span className="ml-1 shrink-0 opacity-50">⏸ {tr("无动静结束")} {fmtDuration(t.durationMs)}</span>;
+    return <span className="ml-1 shrink-0 text-success">✓ {fmtDuration(t.durationMs)}</span>;
+  }
+  const quietMs = p?.lastTs ? now - p.lastTs : 0;
+  return (
+    <span className="ml-1 flex shrink-0 items-center gap-1.5 font-mono tabular-nums text-warning/80">
+      <span className="loading loading-spinner loading-xs text-warning" />
+      {!!p?.startedTs && <span>{fmtClock(now - p.startedTs)}</span>}
+      {!!p?.ctxTokens && <span className="opacity-60">{Math.round(p.ctxTokens / 1000)}k</span>}
+      {quietMs > QUIET_MS && <span className="font-sans opacity-70">{tr("静默")} {fmtClock(quietMs).replace(/ \d+s$/, "")}</span>}
+    </span>
+  );
+}
+
 /** subagent 行去掉 Discord 的 `-# ` 小字前缀；shell 行原样。 */
 function cleanLine(s: string): string {
   return s.replace(/^-#\s+/, "");
@@ -77,17 +119,22 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
     <details className="group rounded-lg border border-warning/25 bg-warning/[0.06] [&>summary]:list-none" open={running}>
       <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-1.5 text-xs">
         <KindIcon kind={t.kind} />
-        <span className="truncate font-medium text-warning/90 max-w-[55vw] lg:max-w-[30vw]">
-          {/* bridge 给的 title 带 🐚/🧵 emoji 前缀(Discord 线程名用)——web 已有
-              线性 kind 图标,剥掉免重复 */}
-          {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵]\s*/u, "")}
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate font-medium text-warning/90">
+            {/* bridge 给的 title 带 🐚/🧵/🤖 emoji 前缀(Discord 线程名用)——web 已有线性 kind 图标,剥掉免重复 */}
+            {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵🤖]\s*/u, "")}
+          </span>
+          {/* 类型 · 模型 · 最近一步在做什么（CC 底栏那句摘要只在它内存里，拿不到；最近一次工具调用是最接近的替身） */}
+          {(t.agentType || (running && t.lines.length > 0)) && (
+            <span className="truncate text-[11px] opacity-50">
+              {[t.agentType, t.model].filter(Boolean).join(" · ")}
+              {t.agentType && running && t.lines.length > 0 ? " · " : ""}
+              {running && t.lines.length > 0 ? cleanLine(t.lines[t.lines.length - 1]!) : ""}
+            </span>
+          )}
         </span>
-        {running ? (
-          <span className="loading loading-spinner loading-xs ml-1 text-warning" />
-        ) : (
-          <span className="ml-1 shrink-0 text-success">✓ {fmtDuration(t.durationMs)}</span>
-        )}
-        {t.lines.length > 0 && (
+        <BgStatus t={t} />
+        {!t.progress && t.lines.length > 0 && (
           <span className="ml-auto shrink-0 opacity-40">{getLang() === "en" ? `${t.lines.length} line${t.lines.length > 1 ? "s" : ""}` : `${t.lines.length} 行`}</span>
         )}
         {/* 停止 = 请 agent 用 TaskStop(bridge 无 kill 权柄);✕ = 收起卡片(纯前端)。
