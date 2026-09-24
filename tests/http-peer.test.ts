@@ -276,12 +276,14 @@ describe("用户接管取消在飞调用", () => {
 import { encodePeerInviteV2, parsePeerInviteV2, inviteExpired, type PeerInviteV2 } from "../src/lib/peers";
 
 describe("invite v2 encode/parse", () => {
+  // 显式带 iid：不带时 encode 会去读写本机 STATE_DIR/instance-id，测试不该碰真实状态目录
   const good: PeerInviteV2 = {
     v: 2,
     name: "shawn",
     url: "http://100.64.0.7:3847",
     token: "a".repeat(64),
     join: "b".repeat(48),
+    iid: "0123456789abcdef01234567",
   };
 
   test("roundtrip", () => {
@@ -318,6 +320,73 @@ describe("invite v2 encode/parse", () => {
   test("拒绝:垃圾输入", () => {
     expect(parsePeerInviteV2("")).toBeNull();
     expect(parsePeerInviteV2("not-base64!!!")).toBeNull();
+  });
+
+  test("iid 可缺(老版本的串)——照样能解析", () => {
+    const { iid: _drop, ...old } = good;
+    const s = Buffer.from(JSON.stringify(old)).toString("base64url");
+    expect(parsePeerInviteV2(s)).toEqual(old);
+  });
+
+  test("iid 形状不对就当没带，不拒整张邀请", () => {
+    for (const iid of ["has space", "a.b", "x".repeat(65), 42, ""]) {
+      const s = Buffer.from(JSON.stringify({ ...good, iid })).toString("base64url");
+      const r = parsePeerInviteV2(s);
+      expect(r).not.toBeNull();
+      expect(r?.iid).toBeUndefined();
+    }
+  });
+});
+
+import { isSameInviter, isSameRedeemer } from "../src/lib/peers";
+
+describe("一个对方一条记录：join / redeem 的合并判定", () => {
+  const at = "2026-09-01T00:00:00Z";
+  const inboundOnly: HttpPeer = { name: "Alex", inTokenId: "tok_old", instanceId: "iidA", addedAt: at };
+  const full: HttpPeer = { name: "Alex", baseUrl: "http://100.1.1.1:3847", outToken: "t".repeat(32), instanceId: "iidA", addedAt: at };
+  const legacyOut: HttpPeer = { name: "Alex-2", baseUrl: "http://100.1.1.1:3847", outToken: "t".repeat(32), addedAt: at };
+
+  test("join：同一出站地址 = 同一人（重新加入 / 换 token）", () => {
+    expect(isSameInviter(legacyOut, { url: "http://100.1.1.1:3847" })).toBe(true);
+    expect(isSameInviter(full, { url: "http://100.1.1.1:3847", iid: "iidA" })).toBe(true);
+  });
+
+  test("join：他先连过我（只有入站），同一实例 id → 补上我→他", () => {
+    expect(isSameInviter(inboundOnly, { url: "http://100.1.1.1:3847", iid: "iidA" })).toBe(true);
+    expect(isSameInviter(inboundOnly, { url: "http://100.1.1.1:3847" })).toBe(false);
+    expect(isSameInviter(inboundOnly, { url: "http://100.1.1.1:3847", iid: "iidB" })).toBe(false);
+  });
+
+  test("join：实例 id 相同但已有别的出站地址 → 不改道", () => {
+    expect(isSameInviter(full, { url: "http://100.9.9.9:3847", iid: "iidA" })).toBe(false);
+  });
+
+  test("join：同地址但实例 id 冲突 → 不同实例，不合并", () => {
+    expect(isSameInviter(full, { url: "http://100.1.1.1:3847", iid: "iidB" })).toBe(false);
+  });
+
+  test("join：停用的记录不参与合并", () => {
+    expect(isSameInviter({ ...legacyOut, disabled: true }, { url: "http://100.1.1.1:3847" })).toBe(false);
+  });
+
+  test("redeem：同一张邀请 token = 幂等重放", () => {
+    expect(isSameRedeemer({ ...inboundOnly, inTokenId: "tok_new" }, { inTokenId: "tok_new" })).toBe(true);
+  });
+
+  test("redeem：同一实例 id 重新加入 → 合并（调用方吊销旧 token）", () => {
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidA" })).toBe(true);
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA" })).toBe(true);
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", url: "http://100.1.1.1:3847" })).toBe(true);
+  });
+
+  test("redeem：没带 iid / iid 不同 / 老记录没有 iid → 不合并（走撞名后缀）", () => {
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new" })).toBe(false);
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidB" })).toBe(false);
+    expect(isSameRedeemer(legacyOut, { inTokenId: "tok_new", iid: "iidA" })).toBe(false);
+  });
+
+  test("redeem：带来的地址与已有出站地址不同 → 不改道", () => {
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", url: "http://100.9.9.9:3847" })).toBe(false);
   });
 });
 

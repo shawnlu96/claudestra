@@ -9,6 +9,7 @@
 
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
+import { instanceIdSync, isInstanceId } from "./instance-id.js";
 import { existsSync } from "fs";
 import { mkdir } from "fs/promises";
 
@@ -31,6 +32,30 @@ export interface HttpPeer {
   inTokenId?: string;
   addedAt: string;
   disabled?: boolean;
+  /** 对方实例 id（lib/instance-id.ts，对方自报）：认「是不是同一个对方」用；老记录没有 */
+  instanceId?: string;
+}
+
+/**
+ * 加入别人的邀请时：这条既有记录是不是邀请方本人。同一出站地址 = 同一个对方（重新加入 / 换 token）；
+ * 同一实例 id 且这条还没有「我→他」= 他先连过我，现在补上反方向。已有别的出站地址就不合并：
+ * 实例 id 是自报的，一张邀请不能把既有 peer 的流量改道到新地址。两边实例 id 都有却不同 = 不同实例。
+ */
+export function isSameInviter(p: HttpPeer, inv: { url: string; iid?: string }): boolean {
+  if (p.disabled) return false;
+  if (inv.iid && p.instanceId && p.instanceId !== inv.iid) return false;
+  if (p.baseUrl) return p.baseUrl === inv.url;
+  return !!inv.iid && p.instanceId === inv.iid;
+}
+
+/**
+ * 对方兑换我的邀请时：这条既有记录是不是他。同一张邀请 token = 重放（幂等）；同一实例 id = 他重新加入过
+ * （旧入站 token 由调用方吊销）。他带来的地址跟记录里已有的出站地址不同则不合并——理由同上，防改道。
+ */
+export function isSameRedeemer(p: HttpPeer, r: { inTokenId: string; iid?: string; url?: string }): boolean {
+  if (p.inTokenId === r.inTokenId) return true;
+  if (p.disabled || !r.iid || p.instanceId !== r.iid) return false;
+  return !r.url || !p.baseUrl || p.baseUrl === r.url;
 }
 
 /**
@@ -180,10 +205,14 @@ export interface PeerInviteV2 {
   token: string;
   /** 一次性兑换凭据（redeem 的鉴权依据） */
   join: string;
+  /** 邀请方实例 id（lib/instance-id.ts）。老版本生成的串没有 */
+  iid?: string;
 }
 
+/** 没给 iid 就带上本机的（本机 id 读写失败时不带，握手照常） */
 export function encodePeerInviteV2(i: PeerInviteV2): string {
-  return Buffer.from(JSON.stringify(i), "utf8").toString("base64url");
+  const iid = i.iid ?? instanceIdSync();
+  return Buffer.from(JSON.stringify(iid ? { ...i, iid } : i), "utf8").toString("base64url");
 }
 
 export function parsePeerInviteV2(s: string): PeerInviteV2 | null {
@@ -194,7 +223,8 @@ export function parsePeerInviteV2(s: string): PeerInviteV2 | null {
     if (typeof raw.url !== "string" || !/^https?:\/\//.test(raw.url)) return null;
     if (typeof raw.token !== "string" || raw.token.length < 16) return null;
     if (typeof raw.join !== "string" || raw.join.length < 16) return null;
-    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join };
+    const iid = isInstanceId(raw.iid) ? { iid: raw.iid } : {}; // 形状不对就当没带（只影响合并，不拒整张邀请）
+    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join, ...iid };
   } catch {
     return null;
   }
