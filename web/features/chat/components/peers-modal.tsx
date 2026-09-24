@@ -1,9 +1,11 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { CenteredModal } from "./centered-modal";
-import { useT } from "@/lib/i18n";
+import { getLang, useT } from "@/lib/i18n";
 import { useArmedConfirm } from "../use-armed-confirm";
-import { peersAction, ScopePicker, ForceRow, HandshakeString, type ActionResult, type LocalAgent } from "./peers-shared";
+import { peersAction, ScopePicker, ForceRow, type ActionResult, type LocalAgent } from "./peers-shared";
+import { InviteShare } from "./peers-invite-share";
+import { inviteMessage } from "../invite-link";
 import { JoinPanel } from "./peers-join-panel";
 import { InviteChecklist } from "./peers-invite-checklist";
 import { LastVisit, PresenceLine, PresenceSummary, sortByPresence, type PeerPresenceInfo } from "./peers-presence";
@@ -276,7 +278,7 @@ function InvitePanel({ localAgents, onChanged }: { localAgents: LocalAgent[]; on
           )}
           {result?.invite && (
             <>
-              <HandshakeString label={t("邀请串（发给对方，粘贴即完成）")} value={result.invite} />
+              <InviteShare code={result.invite} agents={sel} />
               <InviteChecklist myUrl={result.myUrl} />
               <div className="text-[11px] text-base-content/50">
                 {t("24h 内有效、只能用一次。对方接入后你会收到通知。")}
@@ -338,7 +340,7 @@ function PendingInvites({ invites, onChanged }: { invites: PendingInviteInfo[]; 
                 {t("有效期至")} {new Date(inv.expiresAt).toLocaleString()}
               </span>
               {inv.invite && (
-                <CopyInviteButton value={inv.invite} />
+                <CopyInviteButton value={inviteMessage(inv.invite, inv.agents, getLang()) ?? inv.invite} />
               )}
             </div>
           </div>
@@ -361,7 +363,7 @@ function CopyInviteButton({ value }: { value: string }) {
         });
       }}
     >
-      {copied ? t("已复制") : t("复制邀请串")}
+      {copied ? t("已复制") : t("复制邀请")}
     </button>
   );
 }
@@ -437,7 +439,7 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
               )}
               <PendingInvites invites={pendingInvites} onChanged={() => void reload()} />
               <InvitePanel localAgents={localAgents} onChanged={() => void reload()} />
-              <JoinPanel localAgents={localAgents} onChanged={() => void reload()} />
+              <JoinPanel onChanged={() => void reload()} />
             </>
           )}
         </div>

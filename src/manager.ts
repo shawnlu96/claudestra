@@ -3360,9 +3360,8 @@ switch (cmd) {
   case "peer-http-accept":
     await cmdPeerHttpAccept(args[0] || "", args[1] || "");
     break;
-  case "peer-http-test":
-    await cmdPeerHttpTest(args[0] || "");
-    break;
+  case "peer-http-test": await cmdPeerHttpTest(args[0] || ""); break;
+  case "peer-invite-inspect": await (await import("./manager/peers-inspect.js")).cmdPeerInviteInspect(args[0] || ""); break;
   case "peer-http-list":
     await cmdPeerHttpList();
     break;

@@ -16,6 +16,7 @@ import { buildSidebarEntries, filterAndRankWorkers, splitDormant, type SidebarEn
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { PeersButton } from "./peers-button";
+import { InviteIntake } from "./invite-intake";
 import { Chevron, ProjectGroup } from "./project-group";
 import type { AgentSession } from "../type";
 import { swipeReg } from "./agent-row-swipe";
@@ -595,6 +596,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
       <ProjectsModal open={showProjects} onClose={() => setShowProjects(false)} />
       <AgentMenu />
+      <InviteIntake />
     </aside>
   );
 }

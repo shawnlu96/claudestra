@@ -47,8 +47,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
-        // Called when the app was launched with a url. Feel free to add additional processing here,
-        // but if you want the App API to support tracking app url opens, make sure to keep this call
+        // claudestra://join#<邀请码>：别人发来的 peer 邀请（邀请落地页 src/bridge/invite-page.ts 的「在 Claudestra App 中打开」）
+        // → 在本 App 已配置的服务器上打开 /join 确认页（web/app/join/page.tsx）。邀请码只放在 # 里，不上服务器。
+        // 还没配置服务器（首次设置页）就不处理；其余链接照旧交给 Capacitor。
+        if url.scheme == "claudestra", url.host == "join", let code = url.fragment, !code.isEmpty,
+           let server = ServerConfig.url,
+           let target = URL(string: server.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/join#" + code),
+           let vc = window?.rootViewController as? CAPBridgeViewController {
+            vc.webView?.load(URLRequest(url: target))
+            return true
+        }
         return ApplicationDelegateProxy.shared.application(app, open: url, options: options)
     }
 

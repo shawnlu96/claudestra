@@ -161,3 +161,21 @@ owner：「peer 界面乱的要死……Alex 两边都握手了，为什么一�
   GET /api/v1/peers 带 `tidy` 预览，Peer 弹窗顶部显示并二次确认后执行（POST /api/v1/peers/tidy）。
 - **卡片**：一个对方一张，两行「他 → 我」（我签给他的有效 token、最近来访）/「我 → 他」（在线状态、他开放给我的 agent），
   不再用「握手完成 / 单向 / 等待回执」这些说法。/peers 路由整体搬到 `src/bridge/peers-routes.ts`。
+
+## 6e. 邀请链接：点开 → 回自己的 Claudestra 确认（2026-09-24）
+
+owner：「像 Tailscale 邀请那样点开链接、点一下确认」，而且**绝不让对方填自己的地址**。没有中心服务器，所以链接指向
+**邀请方**机器上的落地页 `GET /api/v1/invite#<邀请码>`（`src/bridge/invite-page.ts`，不要 token，# 不进服务器日志，
+页面不发请求不存东西；挂 /api/v1 是因为 HTTPS 反代和 peer 专用端口只转发这段）。落地页只负责把人送回**他自己的**
+Claudestra（加入必须由他那边的 bridge 做）：
+
+- 手机：`claudestra://join#码` → iOS App（`native/ios/App/App/AppDelegate.swift`）在已配置的服务器上打开 `/join#码`；
+- 电脑：`web+claudestra:码` → 他的 Claudestra 向浏览器登记过（`web/features/chat/components/invite-intake.tsx`，
+  没确认前隔 3 天提醒一次；桌面 PWA 由 manifest `protocol_handlers` 接）→ `/join?i=…`（进来即视为登记生效）；
+- 都不行：「复制邀请」，他打开自己的 Claudestra 时从剪贴板认出来（已授权才自动读；否则 Peer 面板「粘贴邀请」），
+  或在任意输入框粘贴带邀请的文字直接弹确认。
+
+`/join` 页 = 加入确认卡（`peers-join-confirm.tsx`）：先 `POST /api/v1/peers/inspect` → `peer-invite-inspect`
+（只读，用邀请里的 token 探对方 /agents：通 = 顺带拿到能找的 agent；不通给原因与下一步），能连上才让点「加入」。
+没登录时 proxy 送 `/login?next=`，登录后带着 # 回来。已知限制：邀请码里仍是预签的长期 token（Codex 建议改成短期
+一次性票据，确认后再换长期 token——待双方都升级后做）。

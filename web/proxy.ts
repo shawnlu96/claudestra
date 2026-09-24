@@ -16,12 +16,14 @@ export function proxy(request: NextRequest) {
 
   const sessionCookie = request.cookies.get("cstra_session")?.value;
   if (!sessionCookie) {
-    return NextResponse.redirect(new URL("/login", request.url));
+    // 登录后回到原页（/join 的邀请码在 # 里，浏览器跟着重定向带过去）
+    const next = pathname === "/" ? "" : `?next=${encodeURIComponent(pathname + request.nextUrl.search)}`;
+    return NextResponse.redirect(new URL(`/login${next}`, request.url));
   }
   return NextResponse.next();
 }
 
 export const config = {
   // 只匹配页面路由；API 由 handler 自守，不经 proxy
-  matcher: ["/", "/chat", "/chat/:path*"],
+  matcher: ["/", "/chat", "/chat/:path*", "/join"],
 };

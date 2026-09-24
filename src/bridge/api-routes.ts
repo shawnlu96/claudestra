@@ -80,6 +80,7 @@ import { isPiThinkingLevel } from "../lib/pi-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
+import { invitePageResponse } from "./invite-page.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -417,6 +418,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (url.pathname === "/api/v1/peers/redeem" && req.method === "POST") {
     return handlePeerRedeem(req);
   }
+  if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;

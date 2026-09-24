@@ -24,6 +24,15 @@ export async function handlePeersRoutes(req: Request, path: string, principal: P
     if (r?.ok && r.applied) recordMetric("peer_managed", { meta: { action: "tidy", peer: (r.peers || []).join(",") } });
     return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
   }
+  // POST /peers/inspect —— 加入前先看一眼：能不能连到对方、加入后能找哪些 agent（只读，不兑换）
+  if (path === "/peers/inspect" && req.method === "POST") {
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
+    const invite = String(body?.invite ?? "").trim();
+    if (!invite) return apiJson(400, { ok: false, error: '"invite" required' });
+    const r = await runManager("peer-invite-inspect", invite);
+    return apiJson(200, r ?? { ok: false, error: "manager failed" }); // 连不上是数据不是服务错，同 /test
+  }
   if (req.method === "POST" && (path === "/peers/invite-new" || path === "/peers/join-auto" || path === "/peers/invite-revoke")) {
     return inviteAction(req, path, runManager);
   }

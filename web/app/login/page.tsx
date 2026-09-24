@@ -22,6 +22,12 @@ function commitSessionCookie(): Promise<void> {
   });
 }
 
+/** 登录后去哪：?next= 只认站内路径（防开放跳转），# 原样带上（/join 的邀请码在里面） */
+function afterLogin(): string {
+  const next = new URLSearchParams(window.location.search).get("next") || "";
+  return /^\/(?!\/)/.test(next) ? next + window.location.hash : "/";
+}
+
 const FORM_ERRORS: Record<string, string> = {
   cred: "用户名或密码错误",
   rate: "登录尝试过于频繁，请稍后再试",
@@ -85,7 +91,7 @@ function LoginInner() {
       const fj = await f.json();
       if (!f.ok) { setError(fj.error || "Passkey 登录失败"); return; }
       await commitSessionCookie();
-      router.push("/");
+      router.push(afterLogin());
     } catch (e) {
       // 用户取消指纹弹窗也走这里——不当错误刷屏
       const msg = (e as Error).message || "";
@@ -121,7 +127,7 @@ function LoginInner() {
       } catch { /* 隐私模式 */ }
     }
     await commitSessionCookie();
-    router.push("/");
+    router.push(afterLogin());
   };
 
   return (

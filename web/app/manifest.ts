@@ -18,6 +18,8 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/chat",
     scope: "/",
     display: "standalone",
+    // 邀请落地页的「在我的 Claudestra 中打开」（web+claudestra:），装成桌面 PWA 时也由本应用接
+    protocol_handlers: [{ protocol: "web+claudestra", url: "/join?i=%s" }],
     orientation: "any",
     background_color: "#171819",
     theme_color: "#171819",
