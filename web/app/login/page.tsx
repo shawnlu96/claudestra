@@ -1,26 +1,9 @@
 "use client";
 
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState, useEffect, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
-
-/** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
-/** 登录成功后让会话 cookie 在一次文档导航的响应里再写一遍（原因见 app/api/auth/commit/route.ts）。
- *  用隐藏 iframe：整页跳转在原生壳里会被判成站外、踢去系统浏览器。3s 没加载完也照常进入，最坏退回旧行为。 */
-function commitSessionCookie(): Promise<void> {
-  return new Promise((resolve) => {
-    const frame = document.createElement("iframe");
-    frame.style.display = "none";
-    const done = () => {
-      frame.remove();
-      resolve();
-    };
-    frame.onload = done;
-    setTimeout(done, 3000);
-    frame.src = "/api/auth/commit";
-    document.body.appendChild(frame);
-  });
-}
+import { hasShellResumeToken, tryShellResume } from "@/lib/shell-resume";
 
 /** 登录后去哪：?next= 只认站内路径（防开放跳转），# 原样带上（/join 的邀请码在里面） */
 function afterLogin(): string {
@@ -28,6 +11,9 @@ function afterLogin(): string {
   return /^\/(?!\/)/.test(next) ? next + window.location.hash : "/";
 }
 
+const noopSubscribe = () => () => {};
+
+/** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
 const FORM_ERRORS: Record<string, string> = {
   cred: "用户名或密码错误",
   rate: "登录尝试过于频繁，请稍后再试",
@@ -61,6 +47,16 @@ function LoginInner() {
   // 原生表单路径下服务端要码时也得把输入框亮出来
   const showCode = needTotp || urlErrCode === "totp" || urlErrCode === "totpbad";
 
+  // 原生壳冷启动常丢 cookie：手上有「记住登录」凭证就先拿它换会话，换成了直接进应用（lib/shell-resume.ts）
+  // 有没有凭证只在浏览器里知道（服务端渲染按没有）；换失败才落回登录表单——不在 effect 里同步 setState
+  const hasResume = useSyncExternalStore(noopSubscribe, hasShellResumeToken, () => false);
+  const [resumeFailed, setResumeFailed] = useState(false);
+  useEffect(() => {
+    if (!hasResume) return;
+    void tryShellResume().then((ok) => (ok ? router.replace(afterLogin()) : setResumeFailed(true)));
+  }, [hasResume, router]);
+  const resuming = hasResume && !resumeFailed;
+
   // Passkey 登录（第三期）。仅在当前入口支持 WebAuthn 且该域注册过凭据时出现——
   // 明文 IP 访问下浏览器根本不给 API，展示按钮只会让人点了报错。
   const [passkeyReady, setPasskeyReady] = useState(false);
@@ -90,7 +86,6 @@ function LoginInner() {
       });
       const fj = await f.json();
       if (!f.ok) { setError(fj.error || "Passkey 登录失败"); return; }
-      await commitSessionCookie();
       router.push(afterLogin());
     } catch (e) {
       // 用户取消指纹弹窗也走这里——不当错误刷屏
@@ -126,9 +121,12 @@ function LoginInner() {
         sessionStorage.setItem("cstra_recovery_note", String(json.data.recovery.remaining ?? 0));
       } catch { /* 隐私模式 */ }
     }
-    await commitSessionCookie();
     router.push(afterLogin());
   };
+
+  if (resuming) {
+    return <div className="flex min-h-dvh items-center justify-center bg-base-200 text-sm text-base-content/60">{t("正在恢复登录…")}</div>;
+  }
 
   return (
     <div className="flex min-h-dvh items-center justify-center bg-base-200 px-4">

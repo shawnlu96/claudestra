@@ -281,5 +281,12 @@
     "size:web/features/chat/components/unmanaged-sessions.tsx": 622,
     "size:web/features/terminal/terminal-view.tsx": 697
   },
-  "raised": []
+  "raised": [
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "PUBLIC_ROUTES 加 web/app/api/auth/resume/route.ts：原生壳冷启动丢 cookie 后用续期凭证换会话，此时恰恰没有 cookie，只能是公开路由（凭证 ≈256bit + 限流 + 一次一换）"
+    }
+  ]
 }
