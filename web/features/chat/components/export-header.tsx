@@ -1,5 +1,5 @@
 "use client";
-import { useT } from "@/lib/i18n";
+import { tIn, type Lang } from "@/lib/i18n";
 
 export interface ExportMeta {
   version: string;
@@ -12,9 +12,10 @@ export interface ExportMeta {
  * 导出文件顶部的抬头（owner 2026-09-25「标明我们的软件、版本、会话 name、导出人」）：
  * 左边品牌 + 版本 + 会话名，右边导出人 / 时间 / 条数，一条细线与正文隔开。
  * 只在导出树里渲染（share-dock.tsx 的 ExportDoc），页面里没有。
+ * 文案语言由 dock 的下拉决定（owner「语言只影响聊天记录外的额外部分」），不看界面语言。
  */
-export function ExportHeader({ meta, agent, count, at }: { meta: ExportMeta; agent: string; count: number; at: Date }) {
-  const t = useT();
+export function ExportHeader({ meta, agent, count, at, lang }: { meta: ExportMeta; agent: string; count: number; at: Date; lang: Lang }) {
+  const t = (s: string) => tIn(lang, s);
   const pad = (n: number) => String(n).padStart(2, "0");
   const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
   return (

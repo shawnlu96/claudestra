@@ -42,6 +42,7 @@ export const DICT: Record<string, string> = {
   "会话名": "Session",
   "导出人": "Exported by",
   "条消息": "messages",
+  "导出语言": "Export language",
   "▴ 收起": "▴ Collapse",
   "▾ 展开": "▾ Expand",
   "收起全部": "Collapse all",
