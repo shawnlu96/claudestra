@@ -67,7 +67,7 @@ export function TotpSection() {
 
   return (
     <Section
-      title={t("登录安全 · 两步验证")}
+      title={t("两步验证")}
       aside={
         enabled ? (
           <button className="btn btn-sm btn-ghost text-error" disabled={busy} onClick={() => void turnOff()}>

@@ -80,7 +80,7 @@ export function PasskeySection() {
 
   return (
     <Section
-      title={t("登录安全 · Passkey")}
+      title={"Passkey"}
       aside={
         supported ? (
           <button className="btn btn-sm" disabled={busy} onClick={() => void register()}>

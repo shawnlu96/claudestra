@@ -45,7 +45,7 @@ export function BruteForceSection({ sec }: { sec: ReturnType<typeof useBruteForc
   const { bruteForceOn, secBusy, toggleBruteForce } = sec;
   return (
         <Section
-          title={t("登录安全 · 失败封禁")}
+          title={t("失败封禁")}
           aside={
             <input
               type="checkbox"
