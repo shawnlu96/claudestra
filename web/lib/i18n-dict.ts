@@ -447,6 +447,13 @@ export const DICT: Record<string, string> = {
   "恢复默认": "Reset",
   "应用": "Apply",
   "字体": "Fonts",
+  "会话历史": "Chat history",
+  "会话历史区的正文字号、行高与旁白字号，拖动即时生效；Markdown 里的标题、代码随正文同比缩放。只存在本设备。":
+    "Body size, line height and narration size in the chat history; changes apply as you drag. Headings and code scale with the body. Stored on this device only.",
+  "正文字号": "Body size",
+  "行高": "Line height",
+  "旁白字号": "Narration size",
+  "默认": "default",
   "整站字体族：正文（界面与会话）、衬线、等宽（代码）。可填多个用逗号分隔，本机没装的会按顺序回退；只存在本设备。":
     "Site-wide font families: body (UI and chat), serif, monospace (code). Comma-separate several; missing ones fall back in order. Stored on this device only.",
   "留空 = 跟随系统": "Empty = system default",

@@ -20,6 +20,7 @@ import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
 import { ThemeVarsSection } from "./theme-vars-section";
 import { FontSection } from "./font-section";
+import { ChatPrefsSection } from "./chat-prefs-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -116,6 +117,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
           <AppearanceSection />
           <ThemeVarsSection />
           <FontSection />
+          <ChatPrefsSection />
         </>
       );
     case "connect":
