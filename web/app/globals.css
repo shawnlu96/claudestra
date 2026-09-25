@@ -398,6 +398,10 @@ html.kb-open {
     font-size: inherit;
     font-family: inherit;
 }
+/* do-md 给段落钉了 line-height 1.625，根元素上的行高传不到文字；默认值照旧，滑杆一设即跟随 */
+.cstra-bubble .DOMD-Root p {
+    line-height: var(--chat-line-height, 1.625);
+}
 .narration-muted .DOMD-Root,
 .narration-muted .DOMD-Root :is(p, li, td, th, blockquote, strong, em, a, h1, h2, h3, h4) {
     font-size: inherit;
