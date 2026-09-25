@@ -1,27 +1,82 @@
 "use client";
 
-/** 运行时徽章（侧栏行、用量看板、会话列表共用）：三家都标，谁也不是默认——只标非默认的，就等于说 Claude Code 是本体 */
+/**
+ * 运行时徽章（侧栏行、用量看板、会话列表共用）：三家都标，谁也不是默认——只标非默认的，就等于说 Claude Code 是本体。
+ * 图标代替文字省空间、三家布局一致（owner 2026-09-25）：18px 圆角方块，品牌色描线 / 填充 + 同色淡底。
+ * 品牌色取自 owner 给的官方 svg：Claude #ff7043、Codex #5061f7；Pi 的 svg 没带颜色，用中性深色。
+ */
+const BOX = "inline-flex size-[18px] shrink-0 items-center justify-center rounded-md";
+
+function ClaudeIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="#ff7043" aria-hidden="true">
+      <path d="m14.375 6.48l.49.28v.209l-.14.489l-5.937 1.397l-.558-1.387zm0 0" />
+      <path d="m12.155 2.373l.683.143l.182.224l.173.535l-.072.342l-3.983 5.447L7.81 7.737l3.673-4.82z" />
+      <path d="m8.719 1.522l.419-.28l.349.14l.349.49l-.957 5.748l-.65-.441l-.279-.769l.49-4.33z" />
+      <path d="m4.239 1.614l.43-.55L4.95 1l.558.081l.275.216l2.004 4.442l.724 2.11l-.848.471l-3.231-5.864z" />
+      <path d="m2.154 4.665l-.14-.56l.42-.488l.488.07h.14l2.933 2.165l.908.698l1.257.978l-.698 1.187l-.629-.489l-.419-.419l-4.05-2.863z" />
+      <path d="M1.316 8.296L1 7.946v-.31l.316-.108l3.562.21l3.491.279l-.113.695l-6.66-.346z" />
+      <path d="M3.411 11.931h-.698l-.278-.32v-.382l1.186-.838l4.82-3.068l.487.833z" />
+      <path d="m4.738 13.883l-.28.07l-.418-.21l.07-.35l4.12-5.446l.558.768l-3.072 4.05z" />
+      <path d="m8.23 14.581l-.21.28l-.419.14l-.349-.28l-.21-.42L8.09 8.646l.629.07z" />
+      <path d="M11.791 13.045v.558l-.07.21l-.279.14l-.489-.066l-3.356-4.996l1.331-1.014l1.117 2.025l.105.733z" />
+      <path d="m13.398 12.207l.07.349l-.21.279l-.21-.07l-1.187-.838l-1.815-1.606l-1.397-.978l.419-1.326l.698.419l.42.768z" />
+      <path d="m12.49 8.645l1.746.14l.419.28l.279.418v.302l-.768.327l-3.911-.978l-1.606-.07l.419-1.466l1.117.838z" />
+    </svg>
+  );
+}
+
+function PiIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 800 800" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M165.29 165.29h352.07V400H400v117.36H282.65v117.36H165.29Zm117.36 117.36V400H400V282.65Z" />
+      <path d="M517.36 400h117.36v234.72H517.36Z" />
+    </svg>
+  );
+}
+
+function CodexIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 128 128" fill="#5061f7" aria-hidden="true">
+      <path
+        // 路径数据按段拼接（单行 ≤200 字符是仓库规矩；路径命令之间可以断行）
+        d={
+          "M43.125 2.437A32.56 32.56 0 0 1 59.37.224q10.664 1.225 19.008 9.067a.62.62 0 0 0 .571.155q11.265-2.768 21.659 1.952l.336.16l.821.405" +
+          "c7.237 3.749 12.427 9.44 15.563 17.056a30 30 0 0 1 2.245 11.339a30.2 30.2 0 0 1-.96 8.699a.89.89 0 0 0 .213.827a31.9 31.9 0 0 1 8.416 15.419" +
+          "c2.053 10.139-.053 19.28-6.309 27.413l-.971 1.173a32.34 32.34 0 0 1-15.648 9.872a.86.86 0 0 0-.576.544c-1.36 3.925-2.725 7.275-5.264 10.624" +
+          "c-6.395 8.437-15.797 13.131-26.389 13.072q-12.663-.066-22.453-9.259a.77.77 0 0 0-.747-.171c-2.763.891-5.547 1.019-8.555.987" +
+          "a31.6 31.6 0 0 1-13.84-3.317a32.3 32.3 0 0 1-11.445-9.499c-1.083-1.435-2.155-2.784-2.939-4.379a41.3 41.3 0 0 1-2.64-6.843" +
+          "a32.6 32.6 0 0 1-.091-16.341a.9.9 0 0 0 .043-.395a.6.6 0 0 0-.197-.341a31.8 31.8 0 0 1-7.36-11.744a27.7 27.7 0 0 1-1.776-8.475" +
+          "a36.9 36.9 0 0 1 1.003-11.371q3.6-11.871 13.744-18.629c1.504-1.003 2.933-1.781 4.277-2.336a43 43 0 0 1 4.592-1.621a.69.69 0 0 0 .464-.464" +
+          "a32.1 32.1 0 0 1 5.888-11.483q5.44-6.77 13.072-9.883m-4.288 41.867a4.523 4.523 0 0 0-7.856 4.491l9.035 15.813l-9.003 15.189" +
+          "a4.528 4.528 0 0 0 7.787 4.608l10.347-17.451a4.53 4.53 0 0 0 .037-4.555zm29.045 33.28a4.528 4.528 0 0 0 0 9.04h25.856a4.528 4.528 0 0 0 0-9.045H67.882z"
+        }
+      />
+    </svg>
+  );
+}
+
 export function RuntimeBadge({ runtime, className = "" }: { runtime: string; className?: string }) {
   // 空串 = 老 bridge / 老 registry 没带 runtime，那时只有 Claude Code，照它标
   if (runtime === "claude-code" || runtime === "") {
     return (
-      <span className={`badge badge-xs border-orange-500/35 bg-orange-500/10 text-[10px] text-orange-700 dark:text-orange-300 ${className}`}>
-        Claude
+      <span className={`${BOX} bg-[#ff7043]/12 ${className}`} title="Claude Code" aria-label="Claude Code">
+        <ClaudeIcon />
       </span>
     );
   }
   if (runtime === "pi") {
     return (
-      <span className={`badge badge-xs border-primary/40 bg-primary/10 text-[10px] text-primary ${className}`}>
-        Pi
+      <span className={`${BOX} bg-base-content/10 text-base-content/80 ${className}`} title="Pi" aria-label="Pi">
+        <PiIcon />
       </span>
     );
   }
   if (runtime === "codex") {
-    // v2.24+ Codex：能收编（入站走 `codex queue`）。徽章用中性色，与 Pi 区分开。
+    // v2.24+ Codex：能收编（入站走 `codex queue`）
     return (
-      <span className={`badge badge-xs border-base-content/25 bg-base-content/10 text-[10px] text-base-content/70 ${className}`}>
-        Codex
+      <span className={`${BOX} bg-[#5061f7]/12 ${className}`} title="Codex" aria-label="Codex">
+        <CodexIcon />
       </span>
     );
   }
