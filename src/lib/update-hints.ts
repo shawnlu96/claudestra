@@ -49,6 +49,8 @@ export interface VersionCache {
   get(key: string): string | undefined;
   /** 后台重探过期项；同一时刻最多一轮（共享 in-flight，不会并发重复起进程/打外网）。永不 reject */
   refresh(probes: VersionProbe[]): Promise<void>;
+  /** 丢掉一项，下一轮列表请求就会重探（刚装了新版本时用，不必等 TTL） */
+  forget(key: string): void;
 }
 
 export function makeVersionCache(now: () => number = Date.now): VersionCache {
@@ -65,6 +67,7 @@ export function makeVersionCache(now: () => number = Date.now): VersionCache {
   };
   return {
     get: (key) => cache.get(key)?.v,
+    forget: (key) => void cache.delete(key),
     refresh(probes) {
       if (inflight) return inflight;
       const due = probes.filter((p) => {
@@ -94,6 +97,11 @@ const PROBE_CC: VersionProbe = { key: "installed:claude", ttl: INSTALLED_TTL_MS,
 const PROBE_PI: VersionProbe = { key: "installed:pi", ttl: INSTALLED_TTL_MS, load: () => probeInstalled(piBinName()) };
 const PROBE_PI_LATEST: VersionProbe = { key: "latest:pi", ttl: LATEST_TTL_MS, load: fetchLatestPi };
 const versions = makeVersionCache();
+
+/** 网页刚替用户跑完 `pi update`：马上重探已装版本，横幅立刻翻成「重启生效」，不用等 2 分钟 TTL */
+export function forgetInstalledPi(): void {
+  versions.forget(PROBE_PI.key);
+}
 
 /** sessionId → 该会话**活着的**进程启动时的版本（同一 session 被重启过多次时取最新那次）。只读本地文件，重启后提示立刻消失 */
 async function ccRunningVersions(): Promise<Map<string, string>> {

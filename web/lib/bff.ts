@@ -138,7 +138,7 @@ export function proxyPost(path: string, opts?: { timeoutMs?: number }) {
 }
 
 /** agents/{kill,restart,remove}：body {name} → POST /agents/:name/<action> */
-export function agentAction(action: "kill" | "restart" | "remove", timeoutMs: number) {
+export function agentAction(action: "kill" | "restart" | "remove" | "pi-update", timeoutMs: number) {
   return authed(async (req) => {
     const { name } = (await req.json().catch(() => ({}))) as { name?: unknown };
     if (!name || typeof name !== "string") throw new HttpError(400, "name 不能为空");

@@ -77,6 +77,16 @@ describe("makeVersionCache — 列表请求绝不等探测", () => {
     await c.refresh([probe]);
     expect(c.get("k")).toBe("1.0.2");
   });
+  test("forget：TTL 内也立刻重探（刚替用户装完新版本）", async () => {
+    const c = makeVersionCache(() => 0);
+    let calls = 0;
+    const probe = { key: "k", ttl: 60_000, load: async () => `0.8${++calls}.0` };
+    await c.refresh([probe]);
+    c.forget("k");
+    expect(c.get("k")).toBeUndefined();
+    await c.refresh([probe]);
+    expect(c.get("k")).toBe("0.82.0");
+  });
   test("探测抛错：不 reject，记成 undefined，TTL 内不再打", async () => {
     const c = makeVersionCache(() => 0);
     let calls = 0;
@@ -95,6 +105,7 @@ describe("attachUpdateHints", () => {
     const cache = {
       get: (k: string) => ({ "installed:pi": "0.86.1", "latest:pi": "0.87.1" })[k],
       refresh: (probes: { key: string }[]) => (asked.push(probes.map((p) => p.key)), new Promise<void>(() => {})),
+      forget: () => {},
     };
     const agents: any[] = [{ name: "p1", status: "active" }, { name: "p2", status: "stopped" }, { name: "x", status: "active" }];
     await attachUpdateHints(agents, regs, cache);
@@ -104,7 +115,7 @@ describe("attachUpdateHints", () => {
     expect(asked).toEqual([["installed:pi", "latest:pi"]]); // 只有 Pi 会话 → 不去探 claude
   });
   test("冷缓存 → 这一轮不带提示", async () => {
-    const cache = { get: () => undefined, refresh: () => Promise.resolve() };
+    const cache = { get: () => undefined, refresh: () => Promise.resolve(), forget: () => {} };
     const agents: any[] = [{ name: "p1", status: "active" }];
     await attachUpdateHints(agents, regs, cache);
     expect(agents[0].updateHint).toBeNull();

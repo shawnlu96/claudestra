@@ -581,8 +581,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return r;
   }
 
-  private async lifecycleAction(
-    action: "kill" | "restart" | "remove" | "archive",
+  public async lifecycleAction(
+    action: "kill" | "restart" | "remove" | "archive" | "pi-update",
     name: string
   ): Promise<{ ok: boolean; error?: string }> {
     try {
