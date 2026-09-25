@@ -186,6 +186,7 @@ import {
   probeTuiContract,
   MASTER_SESSION,
   paneLooksWorking,
+  paneMainTurnBusy,
 } from "./lib/tmux-helper.js";
 import {
   scanGlobal as scanGlobalSkills,
@@ -847,15 +848,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   // 上下文都在,agent 带着前一条的进度优先响应补充,而不是把补充压到回复之后。
   // 只对人类的 request 生效(Discord user / API user);agent↔agent、peer、bridge
   // 系统消息、response 回执不抢占目标的工作。
-  // 「工作中」三信号 OR(2026-07-14 深夜实锤:CC 2.1.209 的 spinner 行轮换显示
-  // tips,"esc to interrupt" 大部分时间不在——只认它会静默漏掉抢占):
-  //   ① pane 有 "esc to interrupt"(老版文案,轮换恰好在时最准);
-  //   ② pane 有 spinner 时间模式「✶ Xxx… (2m 7s · ↓ 4.6k tokens)」;
-  //   ③ event-bus 最近状态 = thinking(投递时自 emit,同进程可靠;bridge 重启后
-  //      第一回合内为空,由①②补)。
-  // 误伤面:空闲被误判时单发一次 C-c 只清输入行不退出 CC(退出需短窗内连按两次,
-  // 4s 冷却隔开了);paneLooksIdle 不用——工作中的空 ❯ 输入行会假阳性。
-  // 同频道 4s 冷却,三连发不叠加打断。
+  // 「主回合在跑」= pane 主回合信号(paneMainTurnBusy)或 event-bus 最近状态 thinking。
+  // 不能用 paneLooksWorking:主回合结束、只剩后台 subagent 时它照样判忙,而那时的 C-c 会把
+  // 后台 agent 全停掉;消息本来就能直接投递,不需要腾空。paneLooksIdle 不用——工作中的空 ❯ 会假阳性。
+  // 误判空闲时单发一次 C-c 只清输入行不退出 CC(退出要短窗内连按两次);同频道 4s 冷却,连发不叠加打断。
   if (
     // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,
     // C-c 掐断本机正跑的回合等于让外机打断本机用户的活(review 2026-07-19 #1)
@@ -877,7 +873,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
       const tail10 = win
         ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
         : "";
-      const working = paneLooksWorking(tail10) || getAgentStatus(evAgent) === "thinking";
+      const working = paneMainTurnBusy(tail10) || getAgentStatus(evAgent) === "thinking";
       // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
       // v2.23+ 能把消息 steer / 排进回合的运行时(Pi)**人类消息一律不打断**:打断反而把
       // 干到一半的回合掐了(2026-09-14 实测)。由 control.preemptOnHumanMessage 声明。
