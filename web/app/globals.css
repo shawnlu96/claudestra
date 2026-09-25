@@ -357,7 +357,9 @@ html.kb-open {
     background: color-mix(in srgb, currentColor 8%, transparent);
     border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
     overflow-x: auto;
-    font-size: 0.8em;
+    /* 跟正文同比缩放，但托底 12.7px（改成 em 之前的固定值）：旁白 13.5 / 思考 12.5 / peer 气泡 14.5 里的
+       代码块按 0.8em 会掉到 10~11.6px，比原来小一截 */
+    font-size: max(0.8em, 12.7px);
     line-height: 1.7;
 }
 .chat-domd pre code {
