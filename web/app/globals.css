@@ -398,6 +398,14 @@ html.kb-open {
     font-size: inherit;
     font-family: inherit;
 }
+/* 工具调用行的字号（会话历史滑杆 --chat-tool-size，默认 12px；展开的输出小 1px）。写成类而不是 Tailwind 任意值：
+   tool-rows 里多处同构的行加长后会触发克隆检测。 */
+.cstra-tool-text {
+    font-size: var(--chat-tool-size, 12px);
+}
+.cstra-tool-sub {
+    font-size: calc(var(--chat-tool-size, 12px) - 1px);
+}
 /* do-md 给段落钉了 line-height 1.625，根元素上的行高传不到文字；默认值照旧，滑杆一设即跟随 */
 .cstra-bubble .DOMD-Root p {
     line-height: var(--chat-line-height, 1.625);

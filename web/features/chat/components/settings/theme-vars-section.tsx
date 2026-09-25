@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { parseThemeVars, setThemeVars, useThemeVars } from "@/lib/theme-vars";
 import { Section } from "./section";
+import { ResetIcon } from "./reset-icon";
 
 const GENERATOR_URL = "https://daisyui.com/theme-generator/";
 
@@ -49,7 +50,8 @@ export function ThemeVarsSection() {
       aside={
         <div className="flex gap-1.5">
           <button
-            className="btn btn-ghost btn-sm border-base-300"
+            className="btn btn-ghost btn-sm gap-1.5 border-base-300"
+            title={t("恢复默认")}
             disabled={!hasSaved && !light.trim() && !dark.trim()}
             onClick={() => {
               setLight("");
@@ -57,6 +59,7 @@ export function ThemeVarsSection() {
               setThemeVars({ light: "", dark: "" });
             }}
           >
+            <ResetIcon />
             {t("恢复默认")}
           </button>
           <button className="btn btn-primary btn-sm" disabled={!dirty} onClick={() => setThemeVars({ light, dark })}>

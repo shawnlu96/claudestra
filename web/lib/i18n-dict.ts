@@ -451,6 +451,7 @@ export const DICT: Record<string, string> = {
   "正文字号：本人 / peer 气泡与 AI 正文；旁白字号：旁白与思考；工具字号：工具调用行。拖动即时生效，只存在本设备。":
     "Body: your and peer bubbles plus AI text; narration: narration and thinking; tool: tool-call rows. Applies as you drag; stored on this device only.",
   "工具调用字号": "Tool call size",
+  "全部恢复默认": "Reset all to defaults",
   "正文字号": "Body size",
   "行高": "Line height",
   "旁白字号": "Narration size",

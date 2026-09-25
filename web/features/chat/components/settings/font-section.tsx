@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { type FontPrefs, localFontsSupported, readLocalFonts, setFontPrefs, useFontPrefs } from "@/lib/font-prefs";
 import { Section } from "./section";
+import { ResetIcon } from "./reset-icon";
 
 const LIST_ID = "cstra-font-families";
 
@@ -107,7 +108,8 @@ export function FontSection() {
       aside={
         <div className="flex gap-1.5">
           <button
-            className="btn btn-ghost btn-sm border-base-300"
+            className="btn btn-ghost btn-sm gap-1.5 border-base-300"
+            title={t("恢复默认")}
             disabled={!anySet}
             onClick={() => {
               const empty: FontPrefs = { sans: "", serif: "", mono: "", chatSerif: false };
@@ -115,6 +117,7 @@ export function FontSection() {
               setFontPrefs(empty);
             }}
           >
+            <ResetIcon />
             {t("恢复默认")}
           </button>
           <button className="btn btn-primary btn-sm" disabled={!dirty} onClick={() => setFontPrefs(draft)}>
