@@ -624,11 +624,10 @@ function parseHistoryLines(
       // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
       //   <command-name>/x</command-name> ± <command-message>…（顺序不定）→ system 轻条目「/x」
       //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
-      // 不处理会把原始标签 + ANSI 转义裸渲染成用户气泡（2026-07-12 真机截图）。
+      //   Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」
+      // 不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡。
       const trimmed = text.trim();
-      // harness 注入的后台任务完成通知(<task-notification>,裸 user 记录
-      // 不带 isMeta)不是用户打的字——渲染成用户气泡就像「用户发了段 XML」
-      // (2026-07-14 真机截图,master 频道)。取 summary 转 system 轻条目。
+      // harness 注入的后台任务完成通知(<task-notification>,裸 user 记录不带 isMeta)同理,取 summary 转 system 轻条目。
       if (/^<task-notification>/.test(trimmed)) {
         const sum = /<summary>([\s\S]*?)<\/summary>/.exec(trimmed);
         const body = sum?.[1]?.trim();
@@ -647,10 +646,10 @@ function parseHistoryLines(
         all.push({ seq, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
         continue;
       }
-      // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条
-      // 纯文本 user 记录，紧接着还有 <command-name> 记录 → 不跳过就同一命令渲染成
-      // 「用户气泡 + 分隔条」双份（2026-07-13）。channel 入站消息是 isMeta 包装，
-      // TUI 直敲的合法命令只落 <command-name> 记录，都不走这条路径。
+      const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
+      if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
+      // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条纯文本 user 记录，紧接着还有
+      // <command-name> 记录 → 不跳过就渲染成双份。channel 入站是 isMeta 包装、TUI 直敲只落 <command-name>，都不走这里。
       if (/^\/[\w:-]+$/.test(trimmed)) continue;
       const msg: HistoryMessage = { seq, ts, role: "user", text };
       if (rec.isCompactSummary === true) msg.compactSummary = true;
@@ -987,7 +986,7 @@ export async function searchSessionHistory(
         const trimmed = text.trim();
         // 与 readSessionHistory 同规则：机器产物不当用户消息搜
         if (!trimmed) continue;
-        if (/^<(task-notification|command-name|command-message|local-command-stdout)>/.test(trimmed)) continue;
+        if (/^<(task-notification|command-name|command-message|local-command-stdout)>|^<skill name="/.test(trimmed)) continue;
         if (/^\/[\w:-]+$/.test(trimmed)) continue;
       }
       const lower = body.toLowerCase();
