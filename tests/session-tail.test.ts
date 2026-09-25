@@ -91,6 +91,20 @@ describe("scanSessionTail — 上下文 / 模型 / effort", () => {
     expect(info.ctxTokens).toBe(42_000);
   });
 
+  test("Pi 压缩记录没有压缩后占用 → 未知(null)，不回退到压缩前的 assistant", () => {
+    const asst = (ts: string, input: number) =>
+      JSON.stringify({
+        type: "message",
+        timestamp: ts,
+        message: { role: "assistant", model: "deepseek-v4", usage: { input, output: 10, cacheRead: 0, cacheWrite: 0 }, content: [] },
+      });
+    const compaction = JSON.stringify({ type: "compaction", timestamp: "2026-09-25T16:12:37Z", firstKeptEntryId: "x", tokensBefore: 692_265, summary: "…" });
+    const text = [asst("2026-09-25T16:10:38Z", 692_183), compaction].join("\n");
+    expect(scanSessionTail(text, "pi").ctxTokens).toBeNull();
+    const after = text + "\n" + asst("2026-09-25T16:20:00Z", 80_000);
+    expect(scanSessionTail(after, "pi").ctxTokens).toBe(80_000);
+  });
+
   test("model 取最近一条 assistant，<synthetic> 占位跳过", () => {
     const info = scanSessionTail(
       jsonl([

@@ -47,6 +47,8 @@ const NO_RESPONSE_RE = /^\s*No response requested\.?\s*$/;
 interface TailAcc extends SessionTailInfo {
   /** Codex 的「没设档位」是显式的 null（= 模型默认档），读到它就不能再往前找旧值 */
   effortSettled: boolean;
+  /** 压缩边界没带压缩后占用（Pi 只记 tokensBefore）：此刻占用未知，不能往前取压缩前的旧值 */
+  ctxSettled: boolean;
 }
 
 const tsOf = (rec: any): number | null => {
@@ -56,7 +58,7 @@ const tsOf = (rec: any): number | null => {
 
 /** 上下文占用（及 Codex 自带的窗口） */
 function takeContext(rec: any, acc: TailAcc): void {
-  if (acc.ctxTokens !== null) return;
+  if (acc.ctxTokens !== null || acc.ctxSettled) return;
   // Codex：token_count 翻成的 context_usage（codex-session.codexStateRecord）
   if (rec.type === "system" && rec.subtype === "context_usage") {
     acc.ctxTokens = rec.tokens;
@@ -68,6 +70,7 @@ function takeContext(rec: any, acc: TailAcc): void {
   if (rec.type === "system" && rec.subtype === "compact_boundary") {
     const post = rec.compactMetadata?.postTokens;
     if (typeof post === "number") acc.ctxTokens = post;
+    else acc.ctxSettled = true; // 下一轮 assistant 带 usage 后自然恢复真实值
     return;
   }
   // 上下文占用:最近一条带 usage 的 assistant——input + cache 读写就是
@@ -139,9 +142,9 @@ function takeConvTs(rec: any, acc: TailAcc): void {
 export function scanSessionTail(text: string, runtime?: string): SessionTailInfo {
   const lines = text.split("\n");
   const acc: TailAcc = {
-    convTs: null, ctxTokens: null, ctxWindow: null, model: null, modelTs: null, effort: null, effortTs: null, effortSettled: false,
+    convTs: null, ctxTokens: null, ctxWindow: null, model: null, modelTs: null, effort: null, effortTs: null, effortSettled: false, ctxSettled: false,
   };
-  const done = () => acc.convTs !== null && acc.ctxTokens !== null && acc.model !== null && (acc.effort !== null || acc.effortSettled);
+  const done = () => acc.convTs !== null && (acc.ctxTokens !== null || acc.ctxSettled) && acc.model !== null && (acc.effort !== null || acc.effortSettled);
   for (let i = lines.length - 1; i >= 0 && !done(); i--) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -156,6 +159,6 @@ export function scanSessionTail(text: string, runtime?: string): SessionTailInfo
       /* tail 起点切到半行 */
     }
   }
-  const { effortSettled: _settled, ...info } = acc;
+  const { effortSettled: _settled, ctxSettled: _ctx, ...info } = acc;
   return info;
 }
