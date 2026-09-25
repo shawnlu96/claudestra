@@ -406,7 +406,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           name: a.name,
           status: a.status,
           idle: a.idle,
-          purpose: a.purpose, cwd: a.cwd, // cwd：web 的「在 Finder 中显示」要用（registry 值，manager list 原样带出）
+          purpose: a.purpose, cwd: principal.peer ? undefined : a.cwd, // cwd 给 web「在 Finder 中显示」用；peer 拿不到我方本机路径
           created: a.created,
         }));
       // busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
