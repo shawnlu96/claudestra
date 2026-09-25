@@ -8,7 +8,7 @@ import { useT } from "@/lib/i18n";
  * 图标手抄自 lucide(24 viewBox、stroke),与侧栏按钮同源——仓库不引 icon 库。
  * 手机(< sm)上没有左栏的空间：同一份菜单横向滚动排在标题栏下面，图标 + 文字并排。
  */
-export type SettingsPageId = "general" | "sessions" | "appearance" | "connect" | "security" | "labs" | "claude";
+export type SettingsPageId = "general" | "sessions" | "appearance" | "connect" | "peers" | "security" | "labs" | "claude";
 
 export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNode }[] = [
   {
@@ -67,6 +67,18 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
         <path d="M9 8V2" />
         <path d="M15 8V2" />
         <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+      </>
+    ),
+  },
+  {
+    id: "peers",
+    label: "Peer 协作",
+    icon: (
+      <>
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
       </>
     ),
   },

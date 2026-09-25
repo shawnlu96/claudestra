@@ -2,6 +2,7 @@
 import { useT } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
 import { RemoteAccessSection } from "../remote-access-section";
+import { PeersPanel } from "../peers-modal";
 import { Section, GroupLabel } from "./section";
 import { TotpSection } from "./totp-section";
 import { PasskeySection } from "./passkey-section";
@@ -22,7 +23,7 @@ import type { SettingsPageId } from "./nav";
 /**
  * 设置弹窗的七个页面(菜单在 ./nav.tsx)。带状态的分区其状态仍由 SettingsModal 的 useXxx(open)
  * 持有并经 `state` 传进来——页面切换只是分区组件的挂载/卸载，不碰数据；自管状态的分区
- * (两步验证 / Passkey / 归档保留 / 后端版本 / 全体重启 / 服务器地址 / 手机访问)本来就随挂载拉取。
+ * (两步验证 / Passkey / 归档保留 / 后端版本 / 全体重启 / 服务器地址 / 手机访问 / Peer 协作)本来就随挂载拉取。
  */
 export interface SettingsState {
   busy: boolean;
@@ -111,6 +112,8 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
       return <AppearanceSection />;
     case "connect":
       return <ConnectPage s={s} />;
+    case "peers":
+      return <PeersPanel />;
     case "security":
       return <SecurityPage s={s} />;
     case "labs":

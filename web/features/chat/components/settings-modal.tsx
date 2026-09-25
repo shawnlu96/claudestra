@@ -25,8 +25,18 @@ import { SettingsPage } from "./settings/pages";
  * 也挂载（下面 `if (!open) return null`），状态跨开关保留、打开时重置 + 拉取——改成分区自管
  * (随打开/切页挂载)会让重开或切页时先闪默认值。hook 的调用顺序 = 拆分前那个打开 effect 里的
  * 请求顺序，别随手调换。
+ *
+ * initialPage：外部入口直达某一页(侧栏 Peer 按钮 → "peers")；用户在弹窗里切页后以切的为准，关闭即忘。
  */
-export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsModal({
+  open,
+  onClose,
+  initialPage = "general",
+}: {
+  open: boolean;
+  onClose: () => void;
+  initialPage?: SettingsPageId;
+}) {
   const modelOptions = useClaudeModels();
   const t = useT();
   // 「保存资料」与「语音 Key」共用的保存中标志（见 SharedBusy）
@@ -44,11 +54,12 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const autoCompact = useAutoCompact(open);
   // 定时任务管理(owner 2026-08-26):独立弹窗
   const [showCron, setShowCron] = useState(false);
-  const [page, setPage] = useState<SettingsPageId>("general");
-  // 关闭时回到第一页：下次打开从「通用」开始，跟侧栏 ⚙️ 的心智一致
+  // null = 还没在弹窗里切过页 → 显示入口指定的 initialPage；关闭清掉，下次打开重新听入口的
+  const [picked, setPicked] = useState<SettingsPageId | null>(null);
+  const page = picked ?? initialPage;
   const close = () => {
     onClose();
-    setPage("general");
+    setPicked(null);
   };
 
   if (!open) return null;
@@ -69,7 +80,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
           </button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          <SettingsNav page={page} onSelect={setPage} />
+          <SettingsNav page={page} onSelect={setPicked} />
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-3">
             <SettingsPage page={page} s={state} />
           </div>

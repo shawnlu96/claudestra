@@ -1,6 +1,5 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { CenteredModal } from "./centered-modal";
 import { getLang, useT } from "@/lib/i18n";
 import { useArmedConfirm } from "../use-armed-confirm";
 import { peersAction, ScopePicker, ForceRow, type ActionResult, type LocalAgent } from "./peers-shared";
@@ -387,7 +386,11 @@ function CopyInviteButton({ value }: { value: string }) {
   );
 }
 
-export function PeersModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+/**
+ * Peer 协作面板(owner 2026-09-25「将 Peer 协作也放回设置中」)：作为设置弹窗的一页挂载，
+ * 侧栏顶部的 Peer 按钮只是这一页的直达入口。挂载即拉取，卸载即停轮询。
+ */
+export function PeersPanel() {
   const t = useT();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -420,26 +423,15 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
   }, [t]);
 
   useEffect(() => {
-    if (!open) return;
     setLoading(true);
     void reload();
     // 开着时跟上 bridge 每分钟一次的在线检测
     const iv = setInterval(() => void reload(), 30_000);
     return () => clearInterval(iv);
-  }, [open, reload]);
+  }, [reload]);
 
-  if (!open) return null;
-
-  // 本弹窗从设置弹窗内打开：遮罩点击的 stopPropagation 由外壳负责，不拦会连设置弹窗一起关
   return (
-    <CenteredModal onClose={onClose}>
-        <div className="flex items-center justify-between px-5 pb-2 pt-4">
-          <span className="text-base font-semibold">{t("Peer 协作")}</span>
-          <button className="btn btn-ghost btn-sm" aria-label={t("关闭")} onClick={onClose}>
-            ✕
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-1">
+        <div className="space-y-3">
           <p className="text-xs leading-relaxed text-base-content/50">
             {t("跨 Claudestra 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。")}
           </p>
@@ -468,6 +460,5 @@ export function PeersModal({ open, onClose }: { open: boolean; onClose: () => vo
             </>
           )}
         </div>
-    </CenteredModal>
   );
 }

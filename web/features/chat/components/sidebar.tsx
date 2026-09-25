@@ -4,6 +4,7 @@ import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { SettingsModal } from "./settings-modal";
+import type { SettingsPageId } from "./settings/nav";
 import { ProjectsModal } from "./projects-modal";
 import { InstallBanner } from "./install-banner";
 import { PushBanner } from "./push-banner";
@@ -106,7 +107,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   };
   // agent 搜索（2026-07-13 owner）：名称/用途 大小写不敏感即时过滤，纯前端
   const [query, setQuery] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
+  // 设置弹窗：null = 关；否则是打开时直达的页(⚙️ → 通用，Peer 按钮 → peers)
+  const [settingsPage, setSettingsPage] = useState<SettingsPageId | null>(null);
   // 左下角版本徽标(owner 2026-07-31):服务端版本+commit,/api/version 一次性拉
   const [verInfo, setVerInfo] = useState<{ version?: string; commit?: string } | null>(null);
   useEffect(() => {
@@ -272,7 +274,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               </svg>
             )}
           </button>
-          <PeersButton />
+          <PeersButton onClick={() => setSettingsPage("peers")} />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("用量看板")}
@@ -290,7 +292,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("设置")}
             aria-label={t("设置")}
-            onClick={() => setShowSettings(true)}
+            onClick={() => setSettingsPage("general")}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
@@ -592,7 +594,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </div>
         </>
       )}
-      <SettingsModal open={showSettings} onClose={() => setShowSettings(false)} />
+      <SettingsModal open={settingsPage !== null} initialPage={settingsPage ?? "general"} onClose={() => setSettingsPage(null)} />
       <StatsPanel open={showStats} onClose={() => setShowStats(false)} />
       <ProjectsModal open={showProjects} onClose={() => setShowProjects(false)} />
       <AgentMenu />
