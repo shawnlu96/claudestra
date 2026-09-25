@@ -2,6 +2,8 @@
 import type { ReactNode } from "react";
 import type { SidebarEntry } from "../sidebar-entries";
 import { useAgentDrop } from "./agent-dnd";
+import { useProjectMenuTrigger } from "./project-menu";
+import { useHostInfo } from "../host-info";
 
 type GroupEntry = Extract<SidebarEntry, { kind: "group" }>;
 
@@ -48,6 +50,9 @@ export function ProjectGroup({
   children: ReactNode;
 }) {
   const { over, handlers } = useAgentDrop({ projectId: e.id });
+  // 组头右键 / 长按 = 打开目录菜单（project-menu.tsx）；只在本机且探测到程序时挂手势
+  const host = useHostInfo();
+  const menu = useProjectMenuTrigger(() => e.meta!, Boolean(e.meta) && host.openers.length > 0);
   return (
     <li
       className={`rounded-xl p-1 transition-colors ${over ? "bg-primary/15 ring-1 ring-primary/40" : "bg-base-300/25"}`}
@@ -56,7 +61,12 @@ export function ProjectGroup({
       <button
         type="button"
         className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
-        onClick={onToggle}
+        style={{ WebkitTouchCallout: "none" }}
+        onClick={() => {
+          if (menu.consumedClick()) return; // 长按松手的 click 不切换折叠
+          onToggle();
+        }}
+        {...menu.handlers}
       >
         <Chevron open={!collapsed} className="text-base-content/40" />
         <span className="shrink-0 text-[13px] opacity-80">{e.meta?.emoji || (collapsed ? "📁" : "📂")}</span>
