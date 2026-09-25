@@ -1,9 +1,8 @@
 "use client";
 
-import { Suspense, useState, useEffect, useSyncExternalStore } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
-import { hasShellResumeToken, tryShellResume } from "@/lib/shell-resume";
 
 /** 登录后去哪：?next= 只认站内路径（防开放跳转），# 原样带上（/join 的邀请码在里面） */
 function afterLogin(): string {
@@ -11,7 +10,6 @@ function afterLogin(): string {
   return /^\/(?!\/)/.test(next) ? next + window.location.hash : "/";
 }
 
-const noopSubscribe = () => () => {};
 
 /** 原生表单提交(未水合路径)失败后带回的错误码 → 文案。 */
 const FORM_ERRORS: Record<string, string> = {
@@ -47,15 +45,14 @@ function LoginInner() {
   // 原生表单路径下服务端要码时也得把输入框亮出来
   const showCode = needTotp || urlErrCode === "totp" || urlErrCode === "totpbad";
 
-  // 原生壳冷启动常丢 cookie：手上有「记住登录」凭证就先拿它换会话，换成了直接进应用（lib/shell-resume.ts）
-  // 有没有凭证只在浏览器里知道（服务端渲染按没有）；换失败才落回登录表单——不在 effect 里同步 setState
-  const hasResume = useSyncExternalStore(noopSubscribe, hasShellResumeToken, () => false);
-  const [resumeFailed, setResumeFailed] = useState(false);
+  // 已经登录却落在登录页（原生壳保存的服务器地址带了 /login、书签指着 /login）就直接进应用——
+  // 不然 cookie 明明有效，人却每次都被要求重输密码（2026-09-24 壳里就是这样，见 lib/shell-url-match.ts）
   useEffect(() => {
-    if (!hasResume) return;
-    void tryShellResume().then((ok) => (ok ? router.replace(afterLogin()) : setResumeFailed(true)));
-  }, [hasResume, router]);
-  const resuming = hasResume && !resumeFailed;
+    void fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((j: { data?: unknown }) => { if (j?.data) router.replace(afterLogin()); })
+      .catch(() => {}); // 查不到就照常显示登录表单
+  }, [router]);
 
   // Passkey 登录（第三期）。仅在当前入口支持 WebAuthn 且该域注册过凭据时出现——
   // 明文 IP 访问下浏览器根本不给 API，展示按钮只会让人点了报错。
@@ -123,10 +120,6 @@ function LoginInner() {
     }
     router.push(afterLogin());
   };
-
-  if (resuming) {
-    return <div className="flex min-h-dvh items-center justify-center bg-base-200 text-sm text-base-content/60">{t("正在恢复登录…")}</div>;
-  }
 
   return (
     <div className="flex min-h-dvh items-center justify-center bg-base-200 px-4">
