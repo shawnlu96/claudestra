@@ -152,6 +152,8 @@ export const DICT: Record<string, string> = {
   "实验": "Labs",
   "自动化": "Automation",
   "登录安全": "Login security",
+  "失败封禁": "Failed-login lockout",
+  "两步验证": "Two-factor authentication",
   "访问": "Access",
   "集成": "Integrations",
   "设置": "Settings",
