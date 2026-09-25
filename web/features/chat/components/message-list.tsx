@@ -143,7 +143,7 @@ const TextBlock = memo(function TextBlock({
       >
         {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
         {folded && foldKey ? <NarrationFolded text={text} foldKey={foldKey} /> : (
-        <div ref={bodyRef} className="cstra-bubble text-[length:var(--chat-font-size,16px)]">
+        <div ref={bodyRef} className={muted ? "cstra-bubble" : "cstra-bubble text-[length:var(--chat-font-size,16px)]"}>
           {streamed ? (
             // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
             // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
