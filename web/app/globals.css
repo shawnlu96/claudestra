@@ -273,7 +273,7 @@ html.kb-open {
  * 自动跟随明暗主题。代码 token 上色见 components/domd/prism-themes.css。
  */
 .chat-domd {
-    line-height: 1.72;
+    line-height: var(--chat-line-height, 1.72);
     word-break: break-word;
     overflow-wrap: anywhere;
 }
@@ -357,7 +357,7 @@ html.kb-open {
     background: color-mix(in srgb, currentColor 8%, transparent);
     border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
     overflow-x: auto;
-    font-size: 12.7px;
+    font-size: 0.8em;
     line-height: 1.7;
 }
 .chat-domd pre code {
@@ -391,6 +391,13 @@ html.kb-open {
  * 字号/颜色强制跟随 wrapper(12.5px + 45% 灰)。code/pre 不动,
  * 保留代码块自己的排版。
  */
+/* 正文气泡里的 Markdown（AI 正文、peer 气泡）同样要跟 wrapper：DOMD-Root 自带 16px 与
+   --domd-font-family 钉值，会话字号滑杆与字体设置都穿不进去；只放开根元素，标题 / 代码的 em 比例照旧。 */
+.cstra-bubble .DOMD-Root,
+.cstra-bubble.DOMD-Root {
+    font-size: inherit;
+    font-family: inherit;
+}
 .narration-muted .DOMD-Root,
 .narration-muted .DOMD-Root :is(p, li, td, th, blockquote, strong, em, a, h1, h2, h3, h4) {
     font-size: inherit;

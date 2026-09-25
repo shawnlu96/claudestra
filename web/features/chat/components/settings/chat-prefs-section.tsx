@@ -13,7 +13,7 @@ function SliderRow({ k, label, unit, prefs }: { k: Key; label: string; unit: str
   const shown = v ?? CHAT_DEFAULTS[k];
   return (
     <label className="flex items-center gap-3 text-[13px]">
-      <span className="w-16 shrink-0 text-xs font-medium text-base-content/70">{label}</span>
+      <span className="w-20 shrink-0 text-xs font-medium text-base-content/70">{label}</span>
       <input
         type="range"
         className="range range-xs flex-1"
@@ -33,13 +33,14 @@ function SliderRow({ k, label, unit, prefs }: { k: Key; label: string; unit: str
 }
 
 /**
- * 外观 · 会话历史：正文字号 / 行高 / 旁白字号。跟主题 / 字体不同，这里不设「应用」——滑杆天然
- * 期待即时反馈，桌面上弹窗背后就是会话区能直接看到。「恢复默认」清空。
+ * 外观 · 会话历史：正文字号（本人 / peer 气泡 + AI 正文）、行高、旁白字号（旁白 + 思考）、
+ * 工具调用字号。跟主题 / 字体不同，这里不设「应用」——滑杆天然期待即时反馈，桌面上弹窗背后
+ * 就是会话区能直接看到。「恢复默认」清空。
  */
 export function ChatPrefsSection() {
   const t = useT();
   const prefs = useChatPrefs();
-  const dirty = prefs.fontSize !== null || prefs.lineHeight !== null || prefs.narrSize !== null;
+  const dirty = prefs.fontSize !== null || prefs.lineHeight !== null || prefs.narrSize !== null || prefs.toolSize !== null;
   return (
     <Section
       title={t("会话历史")}
@@ -48,12 +49,13 @@ export function ChatPrefsSection() {
           {t("恢复默认")}
         </button>
       }
-      desc={t("会话历史区的正文字号、行高与旁白字号，拖动即时生效；Markdown 里的标题、代码随正文同比缩放。只存在本设备。")}
+      desc={t("正文字号：本人 / peer 气泡与 AI 正文；旁白字号：旁白与思考；工具字号：工具调用行。拖动即时生效，只存在本设备。")}
     >
       <div className="space-y-3">
         <SliderRow k="fontSize" label={t("正文字号")} unit="px" prefs={prefs} />
         <SliderRow k="lineHeight" label={t("行高")} unit="" prefs={prefs} />
         <SliderRow k="narrSize" label={t("旁白字号")} unit="px" prefs={prefs} />
+        <SliderRow k="toolSize" label={t("工具调用字号")} unit="px" prefs={prefs} />
       </div>
     </Section>
   );

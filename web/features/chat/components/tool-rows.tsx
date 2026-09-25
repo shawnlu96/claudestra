@@ -40,7 +40,7 @@ export const ActiveToolRow = memo(function ActiveToolRow({ tool, active }: { too
     <QuoteSwipe quote={`${tool.name} ${summary}`}>
     <div className={`tool-in rounded-lg border ${tone.box}`}>
       <div
-        className="flex cursor-pointer items-center gap-1.5 px-2.5 py-1.5 font-mono text-xs"
+        className="flex cursor-pointer items-center gap-1.5 px-2.5 py-1.5 font-mono text-[length:var(--chat-tool-size,12px)]"
         onClick={() => setOpen((v) => !v)}
       >
         {active && tool.state === "running" ? (
@@ -63,7 +63,7 @@ export const ActiveToolRow = memo(function ActiveToolRow({ tool, active }: { too
           {tool.detail ? (
             <ToolDetailView name={tool.name} detail={tool.detail} />
           ) : (
-            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-base-content/50">
+            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[length:calc(var(--chat-tool-size,12px)_-_1px)] text-base-content/50">
               {summary || tool.name}
             </pre>
           )}
@@ -89,7 +89,7 @@ export const HistoryToolRow = memo(function HistoryToolRow({ tool }: { tool: Too
     <QuoteSwipe quote={`${tool.name} ${summary}`}>
     <div data-tool-row="" className={`rounded-lg border ${tone.box}`}>
       <div
-        className="flex cursor-pointer select-none items-center gap-1.5 px-2.5 py-1.5 font-mono text-xs"
+        className="flex cursor-pointer select-none items-center gap-1.5 px-2.5 py-1.5 font-mono text-[length:var(--chat-tool-size,12px)]"
         onClick={() => setOpen((v) => !v)}
       >
         <span className="shrink-0 opacity-70">
@@ -115,7 +115,7 @@ export const HistoryToolRow = memo(function HistoryToolRow({ tool }: { tool: Too
           {tool.detail ? (
             <ToolDetailView name={tool.name} detail={tool.detail} />
           ) : (
-            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[11px] text-base-content/50">
+            <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[length:calc(var(--chat-tool-size,12px)_-_1px)] text-base-content/50">
               {summary || tool.name}
             </pre>
           )}
@@ -159,7 +159,7 @@ function ToolDetailView({ name, detail }: { name: string; detail: string }) {
     if (m) {
       const lang = langForPath(m[1]);
       return (
-        <div className="max-h-72 space-y-1 overflow-y-auto font-mono text-[11px]">
+        <div className="max-h-72 space-y-1 overflow-y-auto font-mono text-[length:calc(var(--chat-tool-size,12px)_-_1px)]">
           <div className="break-all text-base-content/50">{m[1].trim()}</div>
           <DiffBlock text={m[2]} kind="del" lang={lang} />
           <DiffBlock text={m[3]} kind="add" lang={lang} />
@@ -172,7 +172,7 @@ function ToolDetailView({ name, detail }: { name: string; detail: string }) {
     if (idx >= 0) {
       const head = detail.slice(0, idx).trim();
       return (
-        <div className="max-h-72 space-y-1 overflow-y-auto font-mono text-[11px]">
+        <div className="max-h-72 space-y-1 overflow-y-auto font-mono text-[length:calc(var(--chat-tool-size,12px)_-_1px)]">
           <div className="break-all text-base-content/50">{head}</div>
           <DiffBlock text={detail.slice(idx + 5)} kind="add" lang={langForPath(head)} />
         </div>
@@ -183,7 +183,7 @@ function ToolDetailView({ name, detail }: { name: string; detail: string }) {
     // description ─── command 或纯 command
     const idx = detail.indexOf("\n───\n");
     return (
-      <div className="max-h-72 space-y-1 overflow-y-auto font-mono text-[11px]">
+      <div className="max-h-72 space-y-1 overflow-y-auto font-mono text-[length:calc(var(--chat-tool-size,12px)_-_1px)]">
         {idx >= 0 && <div className="break-all text-base-content/50">{detail.slice(0, idx).trim()}</div>}
         <CodeBlock text={idx >= 0 ? detail.slice(idx + 5) : detail} lang="bash" />
       </div>
@@ -192,7 +192,7 @@ function ToolDetailView({ name, detail }: { name: string; detail: string }) {
   // MCP 工具等:入参 pretty JSON → json 高亮;其余纯文本
   const looksJson = /^[{[]/.test(detail.trimStart());
   return (
-    <div className="max-h-64 overflow-y-auto font-mono text-[11px]">
+    <div className="max-h-64 overflow-y-auto font-mono text-[length:calc(var(--chat-tool-size,12px)_-_1px)]">
       <CodeBlock text={detail} lang={looksJson ? "json" : undefined} />
     </div>
   );
