@@ -17,7 +17,7 @@ function SliderRow({ k, label, unit, prefs }: { k: Key; label: string; unit: str
   const shown = v ?? CHAT_DEFAULTS[k];
   return (
     <div className="flex items-center gap-3 text-[13px]">
-      <span className="w-20 shrink-0 text-xs font-medium text-base-content/70">{label}</span>
+      <span className="w-24 shrink-0 text-xs font-medium text-base-content/70">{label}</span>
       <input
         type="range"
         aria-label={label}
