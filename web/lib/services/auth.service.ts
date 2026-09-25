@@ -84,11 +84,10 @@ export function checkRateLimit(key: string): boolean {
 
 // ---- Session ----
 
-/** expiresAt：续期换来的会话沿用原登录的到期时间（不借续期给登录续命），缺省 = 现在 + 7 天 */
-export function createSession(username: string, expiresAt?: Date): Session {
+export function createSession(username: string): Session {
   const db = getDb();
   const now = new Date();
-  const expires = expiresAt ?? new Date(now.getTime() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+  const expires = new Date(now.getTime() + SESSION_DAYS * 24 * 60 * 60 * 1000);
   const session: Session = {
     id: nanoid(32),
     username,
