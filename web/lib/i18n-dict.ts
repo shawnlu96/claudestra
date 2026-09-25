@@ -145,6 +145,15 @@ export const DICT: Record<string, string> = {
   "已配置": "Configured",
 
   // ── 设置弹窗 ─────────────────────────────────────────
+  "通用": "General",
+  "会话与自动化": "Sessions & Automation",
+  "连接与集成": "Connections & Integrations",
+  "安全": "Security",
+  "实验": "Labs",
+  "自动化": "Automation",
+  "登录安全": "Login security",
+  "访问": "Access",
+  "集成": "Integrations",
   "设置": "Settings",
   "个人资料": "Profile",
   "头像和昵称显示在对话里（只影响本界面展示,不进对话数据）。":

@@ -19,6 +19,7 @@ export function CenteredModal({
   children,
   layer = "top",
   tall = true,
+  wide = false,
 }: {
   onClose: () => void;
   children: React.ReactNode;
@@ -26,7 +27,10 @@ export function CenteredModal({
   layer?: "base" | "top";
   /** 最大高度 88dvh；false = 85dvh（用量看板） */
   tall?: boolean;
+  /** 设置弹窗：宽到能放下左栏菜单 + 内容(max-w-3xl)，且桌面上定高，切页时外框不跳 */
+  wide?: boolean;
 }) {
+  const size = wide ? "max-w-3xl sm:h-[min(640px,88dvh)]" : "max-w-md";
   return createPortal(
     <div
       className={`overlay-in fixed inset-0 ${layer === "base" ? "z-[80]" : "z-[90]"} grid grid-cols-[minmax(0,1fr)] place-items-center bg-black/50 p-4`}
@@ -36,7 +40,7 @@ export function CenteredModal({
       }}
     >
       <div
-        className={`panel-pop flex ${tall ? "max-h-[88dvh]" : "max-h-[85dvh]"} w-full min-w-0 max-w-md flex-col rounded-2xl bg-base-100 shadow-xl`}
+        className={`panel-pop flex ${tall ? "max-h-[88dvh]" : "max-h-[85dvh]"} w-full min-w-0 ${size} flex-col rounded-2xl bg-base-100 shadow-xl`}
         onClick={(e) => e.stopPropagation()}
       >
         {children}
