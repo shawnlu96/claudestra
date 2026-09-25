@@ -6,11 +6,10 @@ import type { AgentSession } from "../type";
 import { ctxView } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
-import { RuntimeBadge } from "./runtime-badge";
 import { MasterIcon } from "./master-icon";
 import { swipeReg } from "./agent-row-swipe";
 import { SwipeActions } from "./agent-row-actions";
-import { StatusDot } from "./status-dot";
+import { RuntimeStatusIcon } from "./status-dot";
 import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
@@ -284,17 +283,13 @@ export function AgentRow({
               )}
             </span>
           )}
+          {/* 行首 = 运行时图标 + 状态点合一（status-dot.tsx）。必须在下面那个 `truncate` 容器
+              **外面**且 shrink-0——放里面时名字一长就被省略号整块吃掉，看着像"没渲染"。 */}
           {a.pinnedMaster ? (
             <MasterIcon className="size-4 shrink-0 text-base-content/60" />
           ) : (
-            <StatusDot status={a.status} busy={a.busy || busyLive} compacting={compacting} />
+            <RuntimeStatusIcon a={a} busy={a.busy || busyLive} compacting={compacting} />
           )}
-          {/* v2.23+ 运行时徽章：列表里看不出哪些是 Pi 会话，而两者的模型/工具/
-              行为都不同（owner 2026-09-14「第一个 pi 加入标识」）。
-              ① 位置在**名字前面**（owner 2026-09-14 再反馈「位置放在前面啊」）；
-              ② 必须在下面那个 `truncate` 容器**外面**且 shrink-0 —— 放里面时名字
-                 一长（agent-claudestraworker）就被省略号整块吃掉，看着像"没渲染"。 */}
-          <RuntimeBadge runtime={a.runtime ?? ""} className="shrink-0 align-middle" />
           <span className={`min-w-0 flex-1 truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
             {t(a.displayName)}
