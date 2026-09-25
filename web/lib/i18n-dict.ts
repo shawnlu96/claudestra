@@ -435,6 +435,16 @@ export const DICT: Record<string, string> = {
 
   // ── 外观 ─────────────────────────────────────────────
   "外观": "Appearance",
+  "自定义主题变量": "Custom theme variables",
+  "把 daisyUI 主题生成器输出的整段粘进来即可，只读取 --变量: 值 这类行，其余忽略；立即生效，只存在本设备。":
+    "Paste the daisyUI theme generator output as is; only `--variable: value` lines are read. Applies at once, stored on this device only.",
+  "打开生成器": "Open the generator",
+  "识别到": "Found",
+  "个变量": "variables",
+  "忽略": "ignored",
+  "行": "lines",
+  "恢复默认": "Reset",
+  "应用": "Apply",
   "跟随系统": "System",
   "浅色": "Light",
   "深色": "Dark",
