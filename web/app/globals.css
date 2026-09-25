@@ -344,7 +344,7 @@ html.kb-open {
     border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent);
 }
 .chat-domd code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 0.85em;
     background: color-mix(in srgb, currentColor 12%, transparent);
     padding: 0.12em 0.42em;

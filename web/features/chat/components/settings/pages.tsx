@@ -19,6 +19,7 @@ import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
 import { ThemeVarsSection } from "./theme-vars-section";
+import { FontSection } from "./font-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -114,6 +115,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         <>
           <AppearanceSection />
           <ThemeVarsSection />
+          <FontSection />
         </>
       );
     case "connect":
