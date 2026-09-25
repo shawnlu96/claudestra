@@ -9,7 +9,7 @@ import { loadRegistry, output } from "./core.js";
 import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
 import { resolveMyBridgeUrl, scanTailnetBridges } from "./peers-net.js";
 import { instanceIdSync } from "../lib/instance-id.js";
-import type { PeerInviteV2 } from "../lib/peers.js";
+import { isPeerBaseUrl, type PeerInviteV2 } from "../lib/peers.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
@@ -88,8 +88,8 @@ export async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myU
       return;
     }
   }
-  if (!/^https?:\/\//.test(myUrl)) {
-    output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址（Tailscale IP / 内网 IP / 反代域名）` });
+  if (!isPeerBaseUrl(myUrl)) {
+    output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址（Tailscale IP / 内网 IP / 反代域名）或 relay://<本机指纹>` });
     return;
   }
   const check = await checkPeerScope(agents, force);
@@ -306,8 +306,8 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
     return;
   }
   myUrl = resolved.url.replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(myUrl)) {
-    output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址` });
+  if (!isPeerBaseUrl(myUrl)) {
+    output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址或 relay://<本机指纹>` });
     return;
   }
   const check = await checkPeerScope(agents, force);
@@ -371,7 +371,7 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
     output({ ok: false, error: "邀请已过期（24h）——请对方重新生成" });
     return;
   }
-  if (peerUrl && !/^https?:\/\//.test(peerUrl)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头" }); return; }
+  if (peerUrl && !isPeerBaseUrl(peerUrl)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头或 relay://<对方指纹>" }); return; }
   const url = peerUrl.replace(/\/+$/, "");
   const finalName = await uniquePeerName(peerName, (p) => isSameRedeemer(p, { inTokenId: inv.inTokenId, iid, url }));
   // 预签 token 的占位 peer 名改成对方真名——GET /peers 的 principals ⋈ 靠它

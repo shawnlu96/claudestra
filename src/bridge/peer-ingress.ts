@@ -70,7 +70,7 @@ async function hasPeerTokens(): Promise<boolean> {
  * 按 .env（每次现读：manager 生成邀请时才写进去）+ 当前 peer 情况，把入口开到该开的地方；已是目标状态就不动。
  * 端口没配就不开；起不来（端口被占等）只记日志：附加能力，不能拖垮 bridge。
  */
-async function syncPeerIngress(hold = false): Promise<{ port: number | null; host: Host | null }> {
+export async function syncPeerIngress(hold = false): Promise<{ port: number | null; host: Host | null }> {
   if (hold) holdUntil = Date.now() + HOLD_MS;
   const port = configuredPeerIngressPort({ PEER_INGRESS_PORT: repoEnvVar("PEER_INGRESS_PORT") });
   const host = port ? ingressHost(repoEnvVar("PEER_INGRESS_PUBLIC") === "1", await hasPeerTokens(), holdUntil, Date.now()) : null;

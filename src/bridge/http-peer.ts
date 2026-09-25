@@ -21,6 +21,7 @@ import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
+import { peerFetch, startRelayLink } from "./relay-link.js";
 
 export interface HttpPeerDeps {
   deliver: (env: Envelope) => Promise<Delivery>;
@@ -38,6 +39,7 @@ let deps: HttpPeerDeps | null = null;
 export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
   startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
+  if (!d.fetchImpl) void startRelayLink(); // 中继链路（relay-link.ts）；单测注入 fake fetch 时不连
 }
 
 /** 出站 wait 秒数。v2.17.2 从 120 降到 25(peer 实锤两次丢回复):长挂 POST 跨
@@ -154,7 +156,7 @@ async function runCall(
   try {
     const url = `${base}/api/v1/agents/${encodeURIComponent(peerAgentName)}/messages`;
     const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC });
-    res = await f(url, {
+    res = await peerFetch(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${peer.outToken || ""}`,
@@ -163,7 +165,7 @@ async function runCall(
       },
       body,
       signal: AbortSignal.timeout(postTimeoutMs),
-    });
+    }, { fetchImpl: f, timeoutMs: postTimeoutMs }); // relay:// 的 peer 经中继（relay-link.ts），其余原样 fetch
   } catch (e) {
     // v2.17.2 结局分类(peer 报告:超时被统一说成「网络不可达」,而消息多半已
     // 送达——误导性文案诱发整个 peer 网络的重复投递)
@@ -239,10 +241,10 @@ async function runCall(
     await new Promise((r) => setTimeout(r, pollMs));
     try {
       const pollUrl = `${base}/api/v1/threads/${encodeURIComponent(threadId)}`;
-      const pr = await f(pollUrl, {
+      const pr = await peerFetch(pollUrl, {
         headers: { Authorization: `Bearer ${peer.outToken || ""}`, ...signedFor("GET", pollUrl, "") },
         signal: AbortSignal.timeout(15_000),
-      });
+      }, { fetchImpl: f, timeoutMs: 15_000 });
       if (pr.status === 404) continue; // 还没答
       // 鉴权失败不是瞬时故障——对方 revoke/轮换了 token,继续轮只是空转 10 分钟
       // 再误报「超时」(review 2026-07-19 #7)

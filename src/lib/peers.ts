@@ -176,12 +176,26 @@ export function encodePeerHandshake(h: PeerHandshake): string {
   return Buffer.from(JSON.stringify(h), "utf8").toString("base64url");
 }
 
+/**
+ * peer 基址认两种：直连的 http(s)://，和经中继的 relay://<对方指纹>（bridge/relay-link.ts；指纹格式同
+ * instance-key.ts 的 keyFingerprint）。邀请串、CLI 参数、peers.json 都用这一个判定。
+ */
+export function isPeerBaseUrl(url: unknown): url is string {
+  return typeof url === "string" && (/^https?:\/\//.test(url) || relayPeerFingerprint(url) !== null);
+}
+
+/** relay://<指纹> 里的指纹；不是中继地址 → null */
+export function relayPeerFingerprint(url: string): string | null {
+  const m = /^relay:\/\/([0-9a-f]{4}(?:-[0-9a-f]{4}){3})\/?$/i.exec(url);
+  return m ? m[1].toLowerCase() : null;
+}
+
 export function parsePeerHandshake(s: string): PeerHandshake | null {
   try {
     const raw = JSON.parse(Buffer.from(s.trim(), "base64url").toString("utf8"));
     if (raw?.v !== 1) return null;
     if (typeof raw.name !== "string" || !raw.name) return null;
-    if (typeof raw.url !== "string" || !/^https?:\/\//.test(raw.url)) return null;
+    if (!isPeerBaseUrl(raw.url)) return null;
     if (typeof raw.token !== "string" || raw.token.length < 16) return null;
     return { v: 1, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token };
   } catch {
@@ -220,7 +234,7 @@ export function parsePeerInviteV2(s: string): PeerInviteV2 | null {
     const raw = JSON.parse(Buffer.from(s.trim(), "base64url").toString("utf8"));
     if (raw?.v !== 2) return null;
     if (typeof raw.name !== "string" || !raw.name) return null;
-    if (typeof raw.url !== "string" || !/^https?:\/\//.test(raw.url)) return null;
+    if (!isPeerBaseUrl(raw.url)) return null;
     if (typeof raw.token !== "string" || raw.token.length < 16) return null;
     if (typeof raw.join !== "string" || raw.join.length < 16) return null;
     const iid = isInstanceId(raw.iid) ? { iid: raw.iid } : {}; // 形状不对就当没带（只影响合并，不拒整张邀请）

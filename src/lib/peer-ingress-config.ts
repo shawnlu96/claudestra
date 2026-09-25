@@ -30,7 +30,7 @@ export function pickIngressPort(bridgePort: number, busy: (p: number) => boolean
 }
 
 /** .env 已配就沿用；否则挑一个空闲端口写进去。lsof 失败按「占用」算，宁可不开也不抢别人的端口 */
-async function ensurePeerIngressPort(bridgePort: number, webPort?: number, envPath = `${REPO_ROOT}/.env`): Promise<number | null> {
+export async function ensurePeerIngressPort(bridgePort: number, webPort?: number, envPath = `${REPO_ROOT}/.env`): Promise<number | null> {
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
   const cur = Number(parseEnvRaw(text ?? "").PEER_INGRESS_PORT || "");
   if (Number.isInteger(cur) && cur > 0) return cur;
