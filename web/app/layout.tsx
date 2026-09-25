@@ -50,11 +50,15 @@ export default function RootLayout({
       {/* body 不设 bg：iOS 取画布色时 body 的 bg 会盖过 html，画布色跟随（globals.css
           canvas-list）必须落在 html 上。页面自身背景由应用壳根容器/面板各自绘制。 */}
       <body className="min-h-full text-base-content antialiased">
-        {/* 明暗偏好 paint 前应用(lib/theme.ts 的 localStorage 键)——放 React 里
-            要等水合,暗色用户会先白闪一帧 */}
+        {/* 明暗偏好 + 自定义主题变量(lib/theme.ts / lib/theme-vars.ts 的 localStorage 键)paint 前应用——
+            放 React 里要等水合,暗色用户会先白闪一帧;自定义主题变量 / 字体 / 会话字号是 lib/css-pref-store.ts 预生成好的 CSS,这里只注入 */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `try{var t=localStorage.getItem("cstra_theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}`,
+            __html:
+              `try{var t=localStorage.getItem("cstra_theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);` +
+              `[["cstra_theme_vars_css","cstra-theme-vars"],["cstra_font_prefs_css","cstra-font-prefs"],` +
+              `["cstra_chat_prefs_css","cstra-chat-prefs"]].forEach(function(k){var c=localStorage.getItem(k[0]);` +
+              `if(c){var s=document.createElement("style");s.id=k[1];s.textContent=c;document.head.appendChild(s)}})}catch(e){}`,
           }}
         />
         {/* v2.17.2 启动看门狗(peer 报告:慢链路(DERP 中继)上主 bundle 加载失败/

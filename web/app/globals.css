@@ -273,7 +273,7 @@ html.kb-open {
  * 自动跟随明暗主题。代码 token 上色见 components/domd/prism-themes.css。
  */
 .chat-domd {
-    line-height: 1.72;
+    line-height: var(--chat-line-height, 1.72);
     word-break: break-word;
     overflow-wrap: anywhere;
 }
@@ -344,7 +344,7 @@ html.kb-open {
     border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent);
 }
 .chat-domd code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 0.85em;
     background: color-mix(in srgb, currentColor 12%, transparent);
     padding: 0.12em 0.42em;
@@ -357,7 +357,9 @@ html.kb-open {
     background: color-mix(in srgb, currentColor 8%, transparent);
     border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
     overflow-x: auto;
-    font-size: 12.7px;
+    /* 跟正文同比缩放，但托底 12.7px（改成 em 之前的固定值）：旁白 13.5 / 思考 12.5 / peer 气泡 14.5 里的
+       代码块按 0.8em 会掉到 10~11.6px，比原来小一截 */
+    font-size: max(0.8em, 12.7px);
     line-height: 1.7;
 }
 .chat-domd pre code {
@@ -391,6 +393,25 @@ html.kb-open {
  * 字号/颜色强制跟随 wrapper(12.5px + 45% 灰)。code/pre 不动,
  * 保留代码块自己的排版。
  */
+/* 正文气泡里的 Markdown（AI 正文、peer 气泡）同样要跟 wrapper：DOMD-Root 自带 16px 与
+   --domd-font-family 钉值，会话字号滑杆与字体设置都穿不进去；只放开根元素，标题 / 代码的 em 比例照旧。 */
+.cstra-bubble .DOMD-Root,
+.cstra-bubble.DOMD-Root {
+    font-size: inherit;
+    font-family: inherit;
+}
+/* 工具调用行的字号（会话历史滑杆 --chat-tool-size，默认 12px；展开的输出小 1px）。写成类而不是 Tailwind 任意值：
+   tool-rows 里多处同构的行加长后会触发克隆检测。 */
+.cstra-tool-text {
+    font-size: var(--chat-tool-size, 12px);
+}
+.cstra-tool-sub {
+    font-size: calc(var(--chat-tool-size, 12px) - 1px);
+}
+/* do-md 给段落钉了 line-height 1.625，根元素上的行高传不到文字；默认值照旧，滑杆一设即跟随 */
+.cstra-bubble .DOMD-Root p {
+    line-height: var(--chat-line-height, 1.625);
+}
 .narration-muted .DOMD-Root,
 .narration-muted .DOMD-Root :is(p, li, td, th, blockquote, strong, em, a, h1, h2, h3, h4) {
     font-size: inherit;

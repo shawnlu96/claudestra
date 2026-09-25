@@ -18,6 +18,9 @@ import { useBruteForce, BruteForceSection } from "./brute-force-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
+import { ThemeVarsSection } from "./theme-vars-section";
+import { FontSection } from "./font-section";
+import { ChatPrefsSection } from "./chat-prefs-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -109,7 +112,14 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
     case "sessions":
       return <SessionsPage s={s} />;
     case "appearance":
-      return <AppearanceSection />;
+      return (
+        <>
+          <AppearanceSection />
+          <ThemeVarsSection />
+          <FontSection />
+          <ChatPrefsSection />
+        </>
+      );
     case "connect":
       return <ConnectPage s={s} />;
     case "peers":

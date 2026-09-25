@@ -57,7 +57,8 @@ export const DICT: Record<string, string> = {
   "对方还没开放任何 agent 给你": "They haven't shared any agents with you yet",
   "找我的 agent": "reach my agents",
   "对方点开链接，在他自己的 Claudestra 里点一下「加入」就完成。": "They open the link and tap Join in their own Claudestra. That's it.",
-  "允许用这个 Claudestra 打开协作邀请链接？以后别人发来的邀请点一下就能直接到这里确认。": "Let this Claudestra open collaboration invite links? Invites people send you will open right here in one tap.",
+  "允许用这个 Claudestra 打开协作邀请链接？以后别人发来的邀请点一下就能直接到这里确认。":
+    "Let this Claudestra open collaboration invite links? Invites people send you will open right here in one tap.",
   "回到 Claudestra": "Back to Claudestra",
   "查看": "View",
   "检测到": "Found",
@@ -435,6 +436,39 @@ export const DICT: Record<string, string> = {
 
   // ── 外观 ─────────────────────────────────────────────
   "外观": "Appearance",
+  "自定义主题变量": "Custom theme variables",
+  "把 daisyUI 主题生成器输出的整段粘进来即可，只读取 --变量: 值 这类行，其余忽略；立即生效，只存在本设备。":
+    "Paste the daisyUI theme generator output as is; only `--variable: value` lines are read. Applies at once, stored on this device only.",
+  "打开生成器": "Open the generator",
+  "识别到": "Found",
+  "个变量": "variables",
+  "忽略": "ignored",
+  "行": "lines",
+  "恢复默认": "Reset",
+  "应用": "Apply",
+  "字体": "Fonts",
+  "会话历史": "Chat history",
+  "正文字号：本人 / peer 气泡与 AI 正文；旁白字号：旁白与思考；工具字号：工具调用行。拖动即时生效，只存在本设备。":
+    "Body: your and peer bubbles plus AI text; narration: narration and thinking; tool: tool-call rows. Applies as you drag; stored on this device only.",
+  "工具调用字号": "Tool call size",
+  "全部恢复默认": "Reset all to defaults",
+  "正文字号": "Body size",
+  "行高": "Line height",
+  "旁白字号": "Narration size",
+  "默认": "default",
+  "整站字体族：正文（界面与会话）、衬线、等宽（代码）。可填多个用逗号分隔，本机没装的会按顺序回退；只存在本设备。":
+    "Site-wide font families: body (UI and chat), serif, monospace (code). Comma-separate several; missing ones fall back in order. Stored on this device only.",
+  "留空 = 跟随系统": "Empty = system default",
+  "正文": "Body",
+  "衬线": "Serif",
+  "等宽": "Mono",
+  "会话正文用衬线体": "Serif for chat body",
+  "读取本机字体": "Read local fonts",
+  "已读取": "Loaded",
+  "个字体族，输入框可下拉选择": "font families; pick them from the inputs",
+  "读取被拒绝或失败": "Permission denied or failed",
+  "本浏览器不能读本机字体（仅桌面 Chrome / Edge，且需 HTTPS 或 localhost）；可直接输入字体名。":
+    "This browser cannot list local fonts (desktop Chrome / Edge only, over HTTPS or localhost); type a font name instead.",
   "跟随系统": "System",
   "浅色": "Light",
   "深色": "Dark",
@@ -464,9 +498,11 @@ export const DICT: Record<string, string> = {
   "我找": "from me",
   "没正式回复": "no formal reply",
   "近 7 天交接": "Handoffs in the last 7 days:",
-  "近 7 天还没有跨实例交接。双方 agent 互相找时会自动记在这里（只记时间和长度，不记内容）。": "No cross-instance handoffs in the last 7 days. They are logged here automatically (timing and length only, never content).",
+  "近 7 天还没有跨实例交接。双方 agent 互相找时会自动记在这里（只记时间和长度，不记内容）。":
+    "No cross-instance handoffs in the last 7 days. They are logged here automatically (timing and length only, never content).",
   "切换会重启会话，接着原来的对话，上下文不丢": "Switching restarts the session and resumes the same conversation — context is kept",
-  "Codex 快满时会自动压缩上下文；想提前压，在终端里输入 /compact。": "Codex compacts on its own when the context is nearly full; to compact earlier, type /compact in the terminal.",
+  "Codex 快满时会自动压缩上下文；想提前压，在终端里输入 /compact。":
+    "Codex compacts on its own when the context is nearly full; to compact earlier, type /compact in the terminal.",
   "思考档位": "Thinking level",
   "支持图片": "Supports images",
   "支持思考": "Supports reasoning",
@@ -597,13 +633,15 @@ export const DICT: Record<string, string> = {
   "每周检查一次，同样只在所有 agent 都空闲时才升。": "Checks weekly and likewise updates only when every agent is idle.",
   // ── Peer 协作 · 邀请准备 / 双向加入 ──────────────────────
   "同时向对方开放我的 agent（双向）": "Also open my agents to them (two-way)",
-  "对方要能连到你的 bridge 才用得上：你的机器要共享给对方，bridge 端口要对 tailnet 开放。": "Only works if they can reach your bridge: share your machine with them and open the bridge port to the tailnet.",
+  "对方要能连到你的 bridge 才用得上：你的机器要共享给对方，bridge 端口要对 tailnet 开放。":
+    "Only works if they can reach your bridge: share your machine with them and open the bridge port to the tailnet.",
   "已向对方开放：": "Opened to them: ",
   "发给对方之前，确认这几件事：": "Before you send it, make sure:",
   "对方要能连到": "They can reach",
   "：把本机共享给对方（Tailscale 后台 → Machines → 本机 → Share），或让对方加入你的 tailnet。共享是单向的，对方共享给你不算。":
     ": share this machine with them (Tailscale admin → Machines → this machine → Share), or have them join your tailnet. Sharing is one-way — them sharing with you doesn't count.",
-  "如果你给 bridge 端口加了防火墙白名单，要放行对方的地址（对方加入失败时，报错里会显示他的地址）。": "If your bridge port has a firewall allowlist, allow their address (their join error shows it).",
+  "如果你给 bridge 端口加了防火墙白名单，要放行对方的地址（对方加入失败时，报错里会显示他的地址）。":
+    "If your bridge port has a firewall allowlist, allow their address (their join error shows it).",
   "默认单向：对方只能访问你勾选的 agent，你的 agent 能回复他；要你也能主动找他，让他加入时勾选「同时向对方开放」。":
     "One-way by default: they reach only the agents you picked, and your agents can reply. For you to reach them too, have them tick “Also open my agents” when joining.",
 };

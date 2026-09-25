@@ -127,7 +127,7 @@ const TextBlock = memo(function TextBlock({
               // 这里的 12.5px + 45% 灰才真正落到正文元素上。
               // 12.5px/45% 又被打回「眼睛疼」——回调到 13.5px/50%,靠竖线+字号差保持区分
               // 触屏上收起条常显、会盖住末行右端(peer review #40)→ 只在无 hover 的设备给底部留白
-              "narration-muted group relative border-l-2 border-base-content/20 pl-2.5 text-[13.5px] leading-snug text-base-content/50 [@media(hover:none)]:pb-5"
+              "narration-muted group relative border-l-2 border-base-content/20 pl-2.5 text-[length:var(--chat-narr-size,13.5px)] leading-snug text-base-content/50 [@media(hover:none)]:pb-5"
             : ""
         }`}
         onClick={(e) => {
@@ -143,7 +143,7 @@ const TextBlock = memo(function TextBlock({
       >
         {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
         {folded && foldKey ? <NarrationFolded text={text} foldKey={foldKey} /> : (
-        <div ref={bodyRef} className="cstra-bubble">
+        <div ref={bodyRef} className={muted ? "cstra-bubble" : "cstra-bubble text-[length:var(--chat-font-size,16px)]"}>
           {streamed ? (
             // 生长中的段也实时富文本（2026-07-14 owner「边输出边渲染」）：DOMD 只读
             // 一次 → 用 key 按内容长度强制重挂,每次 80ms 合批后重新解析整段。段落
@@ -340,7 +340,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             <div
               ref={bubbleRef}
               data-bubble="user"
-              className={`cstra-bubble break-words border px-[15px] py-[11px] text-[14.5px] leading-[1.6] text-base-content/90 ${
+              className={`cstra-bubble break-words border px-[15px] py-[11px] text-[length:var(--chat-font-size,14.5px)] leading-[var(--chat-line-height,1.6)] text-base-content/90 ${
                 isSelf
                   ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
                   : "rounded-[4px_15px_15px_15px] border-info/25 bg-info/[0.06]"
