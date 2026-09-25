@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import WebKit
 import Capacitor
 
 /// 服务器地址的运行时配置(owner 2026-09-04:「不希望把我的 Tailscale 地址写死在代码里,
@@ -40,10 +41,25 @@ enum ServerConfig {
     static func relaunch() {
         DispatchQueue.main.async {
             guard let window = (UIApplication.shared.delegate as? AppDelegate)?.window else { return }
+            let old = (window.rootViewController as? CAPBridgeViewController)?.webView
             let vc = ClaudestraViewController()
             window.rootViewController = vc
             window.makeKeyAndVisible()
+            retire(old)
         }
+    }
+
+    /// 换掉的旧 WebView 不会随 VC 释放(实测回前台时几个页面同时重载),它在后台照样连流;
+    /// WebContent 进程被系统回收后 Capacitor 会自动重载它,而它判站外用的还是旧地址 →
+    /// 重载被当成站外导航、App 一激活就踢去 Chrome。摘掉代理(不再判站外 / 不再自动重载)并清空页面。
+    private static func retire(_ webView: WKWebView?) {
+        guard let webView else { return }
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        webView.stopLoading()
+        webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        webView.loadHTMLString("", baseURL: nil)
+        webView.removeFromSuperview()
     }
 }
 
