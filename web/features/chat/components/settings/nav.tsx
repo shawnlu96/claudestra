@@ -1,10 +1,9 @@
 "use client";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 
 /**
- * 设置弹窗左侧菜单(owner 2026-09-25「增加 dialog 左侧菜单，将现有的内容进行功能分离」)。
- * 七个页面的顺序、图标、标题都定在这里；页面内容在 ./pages.tsx，一页一个组件。
+ * 设置弹窗左侧菜单：八个页面的顺序、图标、标题都定在这里；页面内容在 ./pages.tsx，一页一个组件。
  * 图标手抄自 lucide(24 viewBox、stroke),与侧栏按钮同源——仓库不引 icon 库。
  * 手机(< sm)上没有左栏的空间：同一份菜单横向滚动排在标题栏下面，图标 + 文字并排。
  */
@@ -129,8 +128,21 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
 /** 左栏(sm+)/顶部横条(手机)二合一：同一组按钮，靠响应式类切方向。 */
 export function SettingsNav({ page, onSelect }: { page: SettingsPageId; onSelect: (id: SettingsPageId) => void }) {
   const t = useT();
+  const navRef = useRef<HTMLElement>(null);
+  // 手机横条一屏放不下八项：从侧栏 Peer 按钮直达时当前项在屏外，看不出在哪一页。打开 / 切页时
+  // 把当前项横向滚到中间；只改横条自己的 scrollLeft——scrollIntoView 在 iOS 上会连带滚外层。
+  // 桌面竖排没有横向溢出，直接跳过。
+  useEffect(() => {
+    const nav = navRef.current;
+    const el = nav?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!nav || !el || nav.scrollWidth <= nav.clientWidth) return;
+    const n = nav.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    if (r.left < n.left || r.right > n.right) nav.scrollLeft += r.left - n.left - (n.width - r.width) / 2;
+  }, [page]);
   return (
     <nav
+      ref={navRef}
       aria-label={t("设置")}
       className={
         "flex shrink-0 gap-1 overflow-x-auto border-b border-base-300 px-3 pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden " +

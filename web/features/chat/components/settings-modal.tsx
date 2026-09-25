@@ -17,7 +17,7 @@ import { SettingsPage } from "./settings/pages";
 
 /**
  * 全局设置弹窗（侧栏 ⚙️ 进入）。portal 到 body（规则 5.5）。
- * 布局(owner 2026-09-25)：加宽的弹窗，左栏是 icon+文字的七项菜单(./settings/nav.tsx)，右侧
+ * 布局：加宽的弹窗，左栏是 icon+文字的八项菜单(./settings/nav.tsx)，右侧
  * 只渲染当前页(./settings/pages.tsx)；页内再用 GroupLabel 分组。手机上左栏变成标题下的横向菜单条。
  *
  * ⚠ 带状态的分区（资料 / 语音 Key / 全局默认 / 推送 / 失败封禁 / 记忆卫生 / 自动 Compact）

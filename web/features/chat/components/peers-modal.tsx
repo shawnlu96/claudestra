@@ -387,7 +387,7 @@ function CopyInviteButton({ value }: { value: string }) {
 }
 
 /**
- * Peer 协作面板(owner 2026-09-25「将 Peer 协作也放回设置中」)：作为设置弹窗的一页挂载，
+ * Peer 协作面板：作为设置弹窗的一页挂载，
  * 侧栏顶部的 Peer 按钮只是这一页的直达入口。挂载即拉取，卸载即停轮询。
  */
 export function PeersPanel() {
