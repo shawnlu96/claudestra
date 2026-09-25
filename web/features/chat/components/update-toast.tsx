@@ -97,16 +97,14 @@ export function UpdateToast() {
  *     参数取 commit 而不是时间戳：同一版本只产生一个 URL，拿到新 bundle 后
  *     commit 就对上了、不会再弹，自然收敛；下个版本自动换成新值。
  *
- * ⚠ 原生壳里 ② 和普通 `location.reload()` 都不行：壳按「保存的服务器地址」字符串前缀判站外，页面里的任何导航
- *   都可能被踢去系统浏览器（见 lib/shell-url-match.ts）。壳里 ① 照做后交给原生侧重建 WebView 重载。
+ * ⚠ 原生壳按「保存的服务器地址」字符串前缀判站外（lib/shell-url-match.ts）：地址与页面 origin 写法不一致时
+ *   ② 会被踢去系统浏览器，这时交给原生侧重建 WebView（reloadShell）；已对齐就和浏览器一样走 ②。
  */
 async function hardReload(commit: string): Promise<void> {
   try {
     await fetch(window.location.href, { cache: "reload", credentials: "same-origin" });
   } catch { /* 网络抖动等：直接走下面，它本身就不依赖缓存被刷新 */ }
 
-  // 原生壳：不碰地址，避免被壳判成站外导航后踢去系统浏览器
-  // 原生壳：交给原生侧重载，页面里的任何导航（哪怕 location.reload()）都可能被判站外、踢去系统浏览器（lib/shell-url-match.ts）
   try {
     if (await reloadShell()) return;
   } catch {

@@ -22,11 +22,14 @@ export async function alignShellServerUrl(): Promise<void> {
   await cfg.set(origin).catch((e: unknown) => postClientLog(`[shell] 对齐失败: ${(e as Error)?.message ?? e}`));
 }
 
-/** 壳里的「刷新」：交给原生侧重建 WebView 并从服务器地址重新加载，不产生会被判站外的页面导航。
- *  返回 false = 不在壳里 / 插件不可用，调用方自己刷新。 */
+/** 壳里的「刷新」：保存的地址和页面 origin 写法不一致时，页面自己导航会被判站外，只能交给原生侧重建 WebView。
+ *  已对齐就返回 false 让调用方照常刷新——重建会在后台留下一个没释放的旧 WebView，它回前台重载时拿旧地址判站外、踢去 Chrome。
+ *  返回 false = 不在壳里 / 插件不可用 / 地址已对齐，调用方自己刷新。 */
 export async function reloadShell(): Promise<boolean> {
   const cfg = isNativeShell() ? nativeServerConfig() : null;
   if (!cfg) return false;
-  await cfg.set(window.location.origin);
+  const origin = window.location.origin;
+  if ((await cfg.get()) === origin) return false;
+  await cfg.set(origin);
   return true;
 }
