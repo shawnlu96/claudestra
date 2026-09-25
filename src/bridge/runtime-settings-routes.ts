@@ -13,6 +13,7 @@ import { codexDisplayDefaults, loadCodexCatalog, readCodexConfigDefaults, valida
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { rememberSwitchOverride } from "./switch-override.js";
+import { handlePiUpdate, PI_UPDATE_PATH } from "./pi-update.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
 
@@ -24,6 +25,7 @@ export async function handleRuntimeSettingsRoutes(
 ): Promise<Response | null> {
   if (path === "/pi-models" && req.method === "GET") return piModels(principal);
   if (path === "/codex-models" && req.method === "GET") return codexModels(principal);
+  if (PI_UPDATE_PATH.test(path) && req.method === "POST") return handlePiUpdate(path, principal, runManager); // 横幅「更新并重启」
   const set = path.match(/^\/agents\/([^/]+)\/(pi|codex)-settings$/);
   if (!set || req.method !== "POST") return null;
   const which = set[2] === "pi" ? "pi-settings" : "codex-settings";
