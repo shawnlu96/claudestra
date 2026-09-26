@@ -9,6 +9,7 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { recordMetric } from "../lib/metrics.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import { peerSignatureState } from "./peer-signature.js";
+import { refreshRelayContacts } from "./relay-link.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -65,7 +66,7 @@ async function listPeers(runManager: RunManager): Promise<Response> {
       inTokenId: tok ? tokenIdOf(tok) : p.inTokenId ?? null,
       /** 对方 token 的 scope = 对方能访问我这边哪些 agent */
       exposedAgents: tok?.agents ?? [],
-      presence: peerPresence(p.name), // 在线状态 + 最近来访（bridge/peer-presence.ts）
+      presence: peerPresence(p.name, p), // 在线状态 + 最近来访（bridge/peer-presence.ts；经中继的 peer 用中继推的状态）
       signature: peerSignatureState(p.name), // 对方请求的验签结果与钉住的指纹（bridge/peer-signature.ts）
     };
   });
@@ -113,6 +114,7 @@ async function inviteAction(req: Request, path: string, runManager: RunManager):
     r = await runManager("peer-invite-revoke", id);
   }
   if (r?.ok) recordMetric("peer_managed", { meta: { action: path.slice("/peers/".length), peer: r.peer ?? r.id ?? r.revoked ?? "" } });
+  if (r?.ok) void refreshRelayContacts(); // 加入 / 撤销改了 peers.json：中继那边的联系人清单立刻跟上（relay-link.ts）
   return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
 }
 

@@ -9,7 +9,8 @@ import { loadRegistry, output } from "./core.js";
 import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
 import { resolveMyBridgeUrl, scanTailnetBridges } from "./peers-net.js";
 import { instanceIdSync } from "../lib/instance-id.js";
-import { isPeerBaseUrl, type PeerInviteV2 } from "../lib/peers.js";
+import { inviteLink, isPeerBaseUrl, relayUrlOf, type PeerInviteV2 } from "../lib/peers.js";
+import { myFingerprint, peerCliFetch, relayStatus } from "./relay.js";
 
 // ── v2.11+ HTTP peer 握手（docs/design-http-peers.md §3）─────────────────
 
@@ -172,7 +173,7 @@ export async function cmdPeerHttpTest(peerName: string) {
     return;
   }
   try {
-    const res = await fetch(`${peer.baseUrl}/api/v1/agents`, {
+    const res = await peerCliFetch(`${peer.baseUrl}/api/v1/agents`, {
       headers: { Authorization: `Bearer ${peer.outToken}` },
       signal: AbortSignal.timeout(10_000),
     });
@@ -300,11 +301,9 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
     return;
   }
   await sweepExpiredInvites();
-  const resolved = await resolveMyBridgeUrl(myUrl);
-  if (!resolved) {
-    output({ ok: false, error: "探测不到本机对外地址（没有 Tailscale 也没有内网网卡），请显式给 --url <http://host:port>" });
-    return;
-  }
+  const relay = myUrl ? null : await relayStatus(); // 没显式给地址且中继已连：邀请写中继地址，对方不需要能直连我
+  const resolved: { url: string; note?: string } | null = relay?.connected && relay.fp ? { url: relayUrlOf(relay.fp) } : await resolveMyBridgeUrl(myUrl);
+  if (!resolved) { output({ ok: false, error: "探测不到本机对外地址（没有 Tailscale 也没有内网网卡），请显式给 --url <http://host:port>，或配 RELAY_URL 走中继" }); return; }
   myUrl = resolved.url.replace(/\/+$/, "");
   if (!isPeerBaseUrl(myUrl)) {
     output({ ok: false, error: `--url 必须是 http(s):// 开头的对外可达地址或 relay://<本机指纹>` });
@@ -323,12 +322,12 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + INVITE_TTL_MS).toISOString(),
   });
-  const invite = encodePeerInviteV2({ v: 2, name: selfPeerName(), url: myUrl, token: secret, join: joinSecret });
+  const invite = encodePeerInviteV2({ v: 2, name: selfPeerName(), url: myUrl, token: secret, join: joinSecret, fp: myFingerprint() });
   output({
     ok: true, id, agents, myUrl, expiresAt: new Date(now + INVITE_TTL_MS).toISOString(),
     warnings: resolved.note ? [...check.warnings, resolved.note] : check.warnings,
-    invite,
-    next: "把邀请串发给对方（走任意私聊渠道）→ 对方粘贴即完成。24h 未兑换自动作废。",
+    invite, ...(relay?.connected && relay.base ? { link: inviteLink(relay.base, invite), fp: relay.fp } : {}),
+    next: relay?.connected ? "把链接发给对方，点开即完成（没装 Claudestra 的人会看到安装指引）。24h 未兑换自动作废。" : "把邀请串发给对方（走任意私聊渠道）→ 对方粘贴即完成。24h 未兑换自动作废。",
   });
 }
 
@@ -342,7 +341,7 @@ export async function cmdPeerInviteList() {
     return {
       id: i.id, agents: i.agents, createdAt: i.createdAt, expiresAt: i.expiresAt,
       // token secret 还在才拼得出完整串（供「再复制一次」;secret 本就落在本机文件里）
-      invite: tok?.secret ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret }) : null,
+      invite: tok?.secret ? encodePeerInviteV2({ v: 2, name: selfPeerName(), url: i.url, token: tok.secret, join: i.joinSecret, fp: myFingerprint() }) : null,
     };
   });
   output({ ok: true, count: invites.length, invites, ...(swept ? { sweptExpired: swept } : {}) });
@@ -359,7 +358,7 @@ export async function cmdPeerInviteRevoke(id: string) {
 
 /** 兑换（我是邀请方,bridge /api/v1/peers/redeem 委托进来）。对方自报 name/url/token/iid——
  *  url+token 可缺:缺 = 这次没给我反方向。iid 命中已有记录 = 同一个对方,合进那条。 */
-export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string, iid = "") {
+export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string, iid = "", fp = "") {
   const { findPendingInviteByJoinSecret, removePendingInvite, upsertHttpPeer, inviteExpired, isSameRedeemer } = await import("../lib/peers.js");
   const { readPrincipals, writePrincipals, tokenIdOf } = await import("../lib/principals.js");
   if (!joinSecret || !peerName) { output({ ok: false, error: "peer-invite-redeem --join <secret> --name <对方名> [--url <对方地址>] [--token <对方token>]" }); return; }
@@ -392,7 +391,7 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
     name: finalName, inTokenId: inv.inTokenId,
     ...(url ? { baseUrl: url } : {}),
     ...(peerToken ? { outToken: peerToken } : {}),
-    ...(iid ? { instanceId: iid } : {}),
+    ...(iid ? { instanceId: iid } : {}), ...(fp ? { fp } : {}),
   });
   await removePendingInvite(inv.id);
   output({
@@ -427,7 +426,7 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse): Promise<{ res: Redeem
   let err = "", failKind: JoinFailureKind = "other";
   const iid = instanceIdSync();
   try {
-    const r = await fetch(`${hs.url}/api/v1/peers/redeem`, {
+    const r = await peerCliFetch(`${hs.url}/api/v1/peers/redeem`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -475,7 +474,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   if ("error" in rev) { output({ ok: false, error: rev.error }); return; }
   await upsertHttpPeer({
     name: finalName, baseUrl: hs.url, outToken: hs.token,
-    ...(hs.iid ? { instanceId: hs.iid } : {}),
+    ...(hs.iid ? { instanceId: hs.iid } : {}), ...(hs.fp ? { fp: hs.fp } : {}),
     ...(rev.tokenId ? { inTokenId: rev.tokenId } : {}),
   });
   // 回调对方 redeem——失败必须回滚:半截 peer 会在列表里装成能用的样子

@@ -26,6 +26,8 @@ export type ActionResult = {
   exposedAgents?: string[];
   /** join-auto 失败时的下一步说明（src/lib/peer-join-hints.ts） */
   hint?: string;
+  /** 经中继的邀请：bridge 给的可分享链接（中继落地页 /i#邀请码） */
+  link?: string;
 };
 
 export async function peersAction(body: Record<string, unknown>): Promise<ActionResult> {
@@ -39,6 +41,25 @@ export async function peersAction(body: Record<string, unknown>): Promise<Action
   } catch {
     return { ok: false, error: "网络错误" };
   }
+}
+
+/** 「复制 → 已复制」小按钮：Peer 面板里复制邀请 / 地址 / 链接都用它，别再各写一份剪贴板回调 */
+export function CopyButton({ text, label, resetMs = 2000 }: { text: string; label: string; resetMs?: number }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="btn btn-ghost btn-xs"
+      onClick={() => {
+        void navigator.clipboard?.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), resetMs);
+        });
+      }}
+    >
+      {copied ? t("已复制") : t(label)}
+    </button>
+  );
 }
 
 /** scope 勾选器：全部(*) + master + 每个本地 agent。external 未标的带 ⚠。 */

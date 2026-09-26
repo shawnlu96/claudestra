@@ -70,7 +70,7 @@ jobs:
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
       - name: Build entrypoints
         run: |
-          for entry in bridge channel-server manager launcher cron setup; do
+          for entry in bridge channel-server manager launcher cron setup relay; do
             echo "── building src/$entry.ts"
             bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
           done

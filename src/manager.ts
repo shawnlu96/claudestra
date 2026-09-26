@@ -3357,14 +3357,13 @@ switch (cmd) {
     await cmdPeerHttpJoin(pos[0] || "", pos[1] || "", agentsCsv, myUrl, force, rotate);
     break;
   }
-  case "peer-http-accept":
-    await cmdPeerHttpAccept(args[0] || "", args[1] || "");
-    break;
+  case "peer-http-accept": await cmdPeerHttpAccept(args[0] || "", args[1] || ""); break;
   case "peer-http-test": await cmdPeerHttpTest(args[0] || ""); break;
   case "peer-invite-inspect": await (await import("./manager/peers-inspect.js")).cmdPeerInviteInspect(args[0] || ""); break;
-  case "peer-http-list":
-    await cmdPeerHttpList();
-    break;
+  case "peer-http-list": await cmdPeerHttpList(); break;
+  // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
+  case "pair": await (await import("./manager/relay.js")).cmdPair(args.includes("--json")); break;
+  case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
   case "peer-http-scope": {
     const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
     let agentsCsv = "";
@@ -3395,14 +3394,10 @@ switch (cmd) {
     await cmdPeerInviteNew(agentsCsv, myUrl, force);
     break;
   }
-  case "peer-invite-list":
-    await cmdPeerInviteList();
-    break;
-  case "peer-invite-revoke":
-    await cmdPeerInviteRevoke(args[0] || "");
-    break;
+  case "peer-invite-list": await cmdPeerInviteList(); break;
+  case "peer-invite-revoke": await cmdPeerInviteRevoke(args[0] || ""); break;
   case "peer-invite-redeem": {
-    let join = "", name = "", url = "", token = "", iid = "";
+    let join = "", name = "", url = "", token = "", iid = "", fp = "";
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
       if (a === "--join") join = args[++i] || "";
@@ -3410,8 +3405,9 @@ switch (cmd) {
       else if (a === "--url") url = args[++i] || "";
       else if (a === "--token") token = args[++i] || "";
       else if (a === "--iid") iid = args[++i] || "";
+      else if (a === "--fp") fp = args[++i] || ""; // 经中继兑换时 bridge 带上的对方指纹
     }
-    await cmdPeerInviteRedeem(join, name, url, token, iid);
+    await cmdPeerInviteRedeem(join, name, url, token, iid, fp);
     break;
   }
   case "peer-join-auto": {
@@ -3620,6 +3616,8 @@ switch (cmd) {
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
+        "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",
+        "relay-status                    — show the relay connection (address, fingerprint, contacts online)",
         "metrics [--today|--week|--since <ISO>] [--agent <n>] [--raw]  — summarise the bridge event log",
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
         "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",

@@ -10,6 +10,7 @@
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 import { instanceIdSync, isInstanceId } from "./instance-id.js";
+import { FP_RE } from "./relay-protocol.js";
 import { existsSync } from "fs";
 import { mkdir } from "fs/promises";
 
@@ -34,6 +35,8 @@ export interface HttpPeer {
   disabled?: boolean;
   /** 对方实例 id（lib/instance-id.ts，对方自报）：认「是不是同一个对方」用；老记录没有 */
   instanceId?: string;
+  /** 对方实例指纹（lib/instance-key.ts keyFingerprint）：中继的联系人门控与在线状态按它认人；老记录没有 */
+  fp?: string;
 }
 
 /**
@@ -190,6 +193,16 @@ export function relayPeerFingerprint(url: string): string | null {
   return m ? m[1].toLowerCase() : null;
 }
 
+/** peer 基址的中继写法（relayPeerFingerprint 的反向） */
+export function relayUrlOf(fp: string): string {
+  return `relay://${fp.toLowerCase()}`;
+}
+
+/** 邀请链接：中继 base 上的 /i 页，邀请码在 # 后面（不进任何服务器日志；docs/relay/protocol.md §6） */
+export function inviteLink(base: string, code: string): string {
+  return `https://${base}/i#${code}`;
+}
+
 export function parsePeerHandshake(s: string): PeerHandshake | null {
   try {
     const raw = JSON.parse(Buffer.from(s.trim(), "base64url").toString("utf8"));
@@ -221,6 +234,8 @@ export interface PeerInviteV2 {
   join: string;
   /** 邀请方实例 id（lib/instance-id.ts）。老版本生成的串没有 */
   iid?: string;
+  /** 邀请方实例指纹：被邀方记进 peer 记录，之后中继按它放行对方的帧、推在线状态 */
+  fp?: string;
 }
 
 /** 没给 iid 就带上本机的（本机 id 读写失败时不带，握手照常） */
@@ -238,7 +253,8 @@ export function parsePeerInviteV2(s: string): PeerInviteV2 | null {
     if (typeof raw.token !== "string" || raw.token.length < 16) return null;
     if (typeof raw.join !== "string" || raw.join.length < 16) return null;
     const iid = isInstanceId(raw.iid) ? { iid: raw.iid } : {}; // 形状不对就当没带（只影响合并，不拒整张邀请）
-    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join, ...iid };
+    const fp = typeof raw.fp === "string" && FP_RE.test(raw.fp.toLowerCase()) ? { fp: raw.fp.toLowerCase() } : {};
+    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join, ...iid, ...fp };
   } catch {
     return null;
   }

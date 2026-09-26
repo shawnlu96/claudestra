@@ -6,6 +6,21 @@
  */
 import { output } from "./core.js";
 import { classifyJoinError, joinFailureHint, localTailnetAddr, type JoinFailureKind } from "../lib/peer-join-hints.js";
+import { relayPeerFingerprint } from "../lib/peers.js";
+import { relayStatus } from "./relay.js";
+
+/**
+ * 经中继的邀请没法预检对方：对方还没把我列为联系人，中继只放行兑换那一条路（docs/relay/protocol.md §4）。
+ * 能检查的只有「本机 bridge 连着中继」——连着就让人点加入，能找哪些 agent 以兑换结果为准。
+ */
+async function inspectViaRelay(base: { ok: boolean; name: string; url: string; existing?: string }) {
+  const st = await relayStatus();
+  if (st?.connected) {
+    return { ...base, reachable: true, viaRelay: true, agents: [], note: "这张邀请经中继加入：点「加入」时才真正连到对方，能找哪些 agent 以加入结果为准。" };
+  }
+  const why = !st ? "本机 bridge 没在跑" : !st.enabled ? "本机 .env 没配 RELAY_URL" : `本机 bridge 还没连上中继（${st.state ?? "unknown"}）`;
+  return { ...base, reachable: false, failKind: "other" as JoinFailureKind, hint: `这张邀请要经中继加入，但${why}。配好 RELAY_URL、重启 bridge 后再测一次。` };
+}
 
 export async function cmdPeerInviteInspect(inviteStr: string) {
   const { parsePeerInviteV2, readPeers, isSameInviter } = await import("../lib/peers.js");
@@ -17,6 +32,7 @@ export async function cmdPeerInviteInspect(inviteStr: string) {
   // 已经连着这个对方了：加入会刷新那条记录的地址 / token，确认卡上提一句
   const existing = (await readPeers()).httpPeers?.find((p) => isSameInviter(p, hs))?.name;
   const base = { ok: true, name: hs.name, url: hs.url, ...(existing ? { existing } : {}) };
+  if (relayPeerFingerprint(hs.url)) return output(await inspectViaRelay(base));
   let failKind: JoinFailureKind = "other";
   try {
     const r = await fetch(`${hs.url}/api/v1/agents`, { headers: { Authorization: `Bearer ${hs.token}` }, signal: AbortSignal.timeout(6000) });

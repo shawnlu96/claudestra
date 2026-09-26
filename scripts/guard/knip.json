@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
-    "src/{bridge,manager,channel-server,launcher,cron,setup,discord-reply,html2png,ansi2html}.ts",
+    "src/{bridge,manager,channel-server,launcher,cron,setup,relay,discord-reply,html2png,ansi2html}.ts",
     "src/hooks/*.ts",
     "src/pi/claudestra-extension.ts",
     "src/cli/*.ts",
