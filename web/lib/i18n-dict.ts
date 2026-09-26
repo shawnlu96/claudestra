@@ -396,6 +396,8 @@ export const DICT: Record<string, string> = {
   "用户名和密码不能为空": "Username and password are required",
   "本机 SSH 账号登录": "Sign in with your local SSH account",
   "用配对码登录": "Sign in with a pairing code",
+  "经中继加入": "Joining via relay",
+  "这张邀请经中继加入：点「加入」时才真正连到对方，能找哪些 agent 以加入结果为准。": "This invite goes through the relay: the actual connection happens when you click Join, and the join result tells you which agents you can reach.",
   "用账号密码登录": "Sign in with username and password",
   "用配对码把这个浏览器接到你的电脑": "Pair this browser with your computer using a code",
   "配对码": "Pairing code",
