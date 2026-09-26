@@ -11,7 +11,7 @@ import { STATE_DIR } from "../lib/paths.js";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { signedFor } from "../lib/instance-key.js";
 import { mergeProbe, probeErrorOf, probeResultOf, type PeerPresence, type ProbeResult } from "../lib/peer-presence.js";
-import { peerFetch } from "./relay-link.js";
+import { peerFetch, relayPresence } from "./relay-link.js";
 
 export const PEER_PRESENCE_PATH = join(STATE_DIR, "peer-presence.json");
 const PROBE_EVERY_MS = 60_000;
@@ -25,8 +25,12 @@ export function notePeerInbound(peer: string): void {
   presence.set(peer, { ...(presence.get(peer) ?? { online: null }), lastInboundAt: new Date().toISOString() });
 }
 
-export function peerPresence(name: string): PeerPresence {
-  return presence.get(name) ?? { online: null };
+/** 经中继的 peer 用中继实时推的在线状态（比每分钟一次的探测准）；探测带回的 agent 列表、延迟照留 */
+export function peerPresence(name: string, peer?: Pick<HttpPeer, "baseUrl" | "fp">): PeerPresence {
+  const cur = presence.get(name) ?? { online: null };
+  const rp = peer?.baseUrl?.startsWith("relay://") ? relayPresence(peer.fp) : null;
+  if (!rp) return cur;
+  return { ...cur, online: rp.online, lastOnlineAt: rp.online ? new Date().toISOString() : rp.lastSeen || cur.lastOnlineAt, error: rp.online ? undefined : cur.error };
 }
 
 async function probe(p: HttpPeer): Promise<ProbeResult | null> {

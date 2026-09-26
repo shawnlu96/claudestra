@@ -4,14 +4,15 @@ import { getLang, useT } from "@/lib/i18n";
 import { inviteLink, inviteMessage } from "../invite-link";
 
 /**
- * 生成邀请后的「发给对方」：复制的是一整段能直接转发的话（谁邀请、能找谁、链接、链接打不开时怎么办），
- * 对方点链接到我方落地页，再回到他自己的 Claudestra 确认（src/bridge/invite-page.ts）。
+ * 生成邀请后的「发给对方」：复制的是一整段能直接转发的话（谁邀请、能找谁、链接、链接打不开时怎么办）。
+ * 直连邀请：对方点链接到我方落地页，再回到他自己的 Claudestra 确认（src/bridge/invite-page.ts）；
+ * 经中继的邀请：链接由 bridge 给（中继落地页 /i），对方点开就被送回他自己的 Claudestra。
  */
-export function InviteShare({ code, agents }: { code: string; agents: string[] }) {
+export function InviteShare({ code, agents, link: given }: { code: string; agents: string[]; link?: string }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
-  const msg = inviteMessage(code, agents, getLang()) ?? code;
-  const link = inviteLink(code);
+  const msg = inviteMessage(code, agents, getLang(), given) ?? code;
+  const link = inviteLink(code, given);
   return (
     <div className="space-y-1.5 rounded-lg bg-base-100 p-3">
       <button

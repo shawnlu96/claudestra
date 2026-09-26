@@ -26,6 +26,8 @@ export type ActionResult = {
   exposedAgents?: string[];
   /** join-auto 失败时的下一步说明（src/lib/peer-join-hints.ts） */
   hint?: string;
+  /** 经中继的邀请：bridge 给的可分享链接（中继落地页 /i#邀请码） */
+  link?: string;
 };
 
 export async function peersAction(body: Record<string, unknown>): Promise<ActionResult> {

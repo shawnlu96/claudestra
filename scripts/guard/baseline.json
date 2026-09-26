@@ -293,6 +293,18 @@
       "from": 0,
       "to": 0,
       "why": "PUBLIC_ROUTES 删掉 web/app/api/auth/resume/route.ts：「记住登录」续期凭证整体撤掉（真因是原生壳保存的服务器地址带了 /login，#41 已自愈），公开路由随之移除"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "PUBLIC_ROUTES 加 web/app/api/auth/pair/route.ts：配对码登录发生在还没有会话的时候，只能是公开路由；短码一次性 + bridge 侧每分钟 5 次 + 路由每 IP 限流"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "入口加 src/relay.ts：中继服务端并进主仓库（docs/relay/protocol.md），它是独立进程的入口，导出只被自己用"
     }
   ]
 }

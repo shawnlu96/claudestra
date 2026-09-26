@@ -296,7 +296,7 @@ function InvitePanel({ localAgents, onChanged }: { localAgents: LocalAgent[]; on
           )}
           {result?.invite && (
             <>
-              <InviteShare code={result.invite} agents={sel} />
+              <InviteShare code={result.invite} agents={sel} link={result.link} />
               <InviteChecklist myUrl={result.myUrl} />
               <div className="text-[11px] text-base-content/50">
                 {t("24h 内有效、只能用一次。对方接入后你会收到通知。")}

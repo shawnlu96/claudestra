@@ -1,0 +1,46 @@
+# /etc/systemd/system/claudestra-relay.service（deploy/relay/install.sh 第一次拷过去，之后由主机自己维护）
+[Unit]
+Description=Claudestra relay (rendezvous + tunnel for bridges)
+Documentation=https://github.com/shawnlu96/claudestra
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=/opt/claudestra
+Environment=HOME=/var/lib/claudestra-relay
+# 只听本机，由 nginx 做 TLS 与 wss；RELAY_TRUST_PROXY=1 让限流与子域名按 X-Forwarded-* 算
+Environment=RELAY_HOST=127.0.0.1
+Environment=RELAY_PORT=8787
+Environment=RELAY_DATA=/var/lib/claudestra-relay/data
+Environment=RELAY_TRUST_PROXY=1
+# 必填：中继的公网主机名。实例的网页是 https://<slug>.<RELAY_BASE>
+Environment=RELAY_BASE=relay.example.com
+# 代码目录运行时只读，关掉 bun 的转译缓存写盘
+Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+ExecStart=/var/lib/claudestra-relay/.bun/bin/bun run src/relay.ts
+Restart=always
+RestartSec=2
+# SIGTERM → 服务端给所有连接发 1012，实例立刻重连
+KillSignal=SIGTERM
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+# 加固：整个文件系统只读，只有数据目录可写
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/claudestra-relay/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

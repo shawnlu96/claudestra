@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useState, useEffect } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 
@@ -202,6 +203,11 @@ function LoginInner() {
               )}
             </button>
           </form>
+
+          {/* 配对码登录：手机 / 别的浏览器不用记 SSH 密码，电脑上 claudestra pair 出一个 8 位码就行（/pair） */}
+          <Link href="/pair" className="btn btn-ghost btn-xs mt-2 w-full text-base-content/60">
+            {t("用配对码登录")}
+          </Link>
 
           {/* Passkey 免密登录（第三期）。放表单外——它不参与原生表单提交路径，
               而且点了要唤起系统指纹弹窗，不能被 form 的 submit 抢走。 */}
