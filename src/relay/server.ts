@@ -88,7 +88,7 @@ class RelayServer implements Relay {
     this.touchEveryMs = opts.touchEveryMs ?? 60_000;
     this.front = new Front({
       base: opts.base, trustProxy: opts.trustProxy ?? false, version: opts.version ?? "dev", commit: opts.commit,
-      headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes,
+      headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes, limits: this.lim,
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
       send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code),
       bySlug: (slug) => {

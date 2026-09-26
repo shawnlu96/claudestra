@@ -5,6 +5,7 @@
  *   - from = 对方指纹：peer 调 /api/v1，先验签（指纹 ↔ 签名头公钥 ↔ 签名）再打 peer 专用回环入口。
  * 纯逻辑（验签、重放缓存）单独导出给 tests/relay-link.test.ts；fetch 可注入。
  */
+import { randomBytes } from "node:crypto";
 import { SIG_HEADERS, isPublicKey, keyFingerprint, verifySigned } from "../lib/instance-key.js";
 import { RELAY_FROM, RELAY_FROM_HEADER, apiPathOk, isRedeemRequest, type Headers } from "../lib/relay-protocol.js";
 import { collectBody, dropForPeer, forwardHeaders, headersToObject, rewriteLocation } from "../lib/relay-stream.js";
@@ -13,6 +14,26 @@ import { RelayError, type InboundContext, type InboundHandler, type InboundReque
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
 const MAX_PEER_BODY = 2 * 1024 * 1024;
 const REPLAY_TTL_MS = 10 * 60_000;
+
+/**
+ * 只有经中继进来的 peer 请求才带的标记头。peer 入口靠它决定要不要相信 x-claudestra-relay-from：
+ * 直连（Tailscale / Caddy）进来的 peer 也能自己写那个头，把任意指纹塞进兑换记录的联系人名单。
+ * 标记是进程内随机值：不落盘、不进配置，bridge 重启就换，本机之外没人知道。
+ */
+export const RELAY_MARK_HEADER = "x-claudestra-relay-mark";
+let mark: string | null = null;
+
+export function relayMark(): string {
+  return (mark ??= randomBytes(32).toString("base64url"));
+}
+
+/** peer 入口用：标记对不上就删掉来源指纹头（可能是直连 peer 伪造的）；标记头本身永远不往 API 传。返回是否可信 */
+export function sanitizeRelayFrom(h: globalThis.Headers, expectedMark: string): boolean {
+  const trusted = h.get(RELAY_MARK_HEADER) === expectedMark;
+  h.delete(RELAY_MARK_HEADER);
+  if (!trusted) h.delete(RELAY_FROM_HEADER);
+  return trusted;
+}
 
 export interface InboundDeps {
   /** 本机 Web：http://127.0.0.1:<webPort> */
@@ -115,6 +136,7 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
   if (!base) throw new RelayError("local_unreachable", "peer", "peer ingress port not configured on this instance");
   const headers = forwardHeaders(req.headers, dropForPeer);
   headers[RELAY_FROM_HEADER] = from;
+  headers[RELAY_MARK_HEADER] = relayMark();
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let r: Response;
   try {

@@ -10,9 +10,17 @@ import { randomBytes } from "node:crypto";
 import { newRequestId, normalizeCode, RELAY_BASE_HEADER, RELAY_FROM, SLUG_RE, SUBPROTOCOL, type ResFrame } from "../lib/relay-protocol.js";
 import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, recordToHeaders, streamSink, type StreamSink } from "../lib/relay-stream.js";
 import type { InstanceRecord } from "./directory.js";
-import { homePage, invitePage, offlinePage } from "./pages.js";
+import { KeyedWindows } from "./limiter.js";
+import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
 import type { Router } from "./router.js";
 import type { Conn, ConnData, Logger } from "./server.js";
+
+/** front 自己用到的三项配额（§6.1）；server 把整个 Limits 传进来，这里只挑这三个 */
+interface FrontLimits {
+  codeLookupPerIpPerMinute: number;
+  tunnelPerIpPerMinute: number;
+  maxTunnelInflightPerInstance: number;
+}
 
 export interface FrontDeps {
   base: string;
@@ -21,6 +29,7 @@ export interface FrontDeps {
   commit?: string;
   headTimeoutMs: number;
   maxChunkBytes: number;
+  limits: FrontLimits;
   online(): number;
   pending(): number;
   router: Router<Conn>;
@@ -52,8 +61,25 @@ function cookieValue(header: string | null, name: string): string | null {
   return null;
 }
 
+const SWEEP_EVERY_MS = 60_000;
+
 export class Front {
-  constructor(private readonly d: FrontDeps) {}
+  private readonly codeWindows: KeyedWindows;
+  private readonly tunnelWindows: KeyedWindows;
+  private lastSweep = 0;
+
+  constructor(private readonly d: FrontDeps) {
+    this.codeWindows = new KeyedWindows(d.limits.codeLookupPerIpPerMinute);
+    this.tunnelWindows = new KeyedWindows(d.limits.tunnelPerIpPerMinute);
+  }
+
+  /** 限流窗口按请求顺带清扫（front 没有自己的定时器，不然 stop 时还得记着停它） */
+  private sweep(now: number): void {
+    if (now - this.lastSweep < SWEEP_EVERY_MS) return;
+    this.lastSweep = now;
+    this.codeWindows.sweep(now);
+    this.tunnelWindows.sweep(now);
+  }
 
   /** 请求来自哪个主机名：反代之后认 X-Forwarded-Host；去端口、小写 */
   private hostOf(req: Request): string {
@@ -68,14 +94,16 @@ export class Front {
 
   handle(req: Request, srv: Server<ConnData>): Response | Promise<Response> | undefined {
     const url = new URL(req.url);
+    this.sweep(Date.now());
     // /v1/ws 与 /healthz 不看主机名：反代可能不透传 Host，握手不能因此失败
     if (url.pathname === "/v1/ws") return this.ws(req, srv);
     if (url.pathname === "/healthz") return this.healthz();
     const host = this.hostOf(req);
-    if (host === this.d.base) return this.basePages(req, url);
+    const ip = this.clientIp(req, srv);
+    if (host === this.d.base) return this.basePages(req, url, ip);
     if (host.endsWith(`.${this.d.base}`)) {
       const slug = host.slice(0, -(this.d.base.length + 1));
-      if (SLUG_RE.test(slug)) return this.tunnel(req, url, slug, host, this.clientIp(req, srv));
+      if (SLUG_RE.test(slug)) return this.tunnel(req, url, slug, host, ip);
     }
     return text(404, "unknown host");
   }
@@ -91,12 +119,12 @@ export class Front {
     return this.d.upgrade(req, srv, this.clientIp(req, srv));
   }
 
-  private basePages(req: Request, url: URL): Response {
+  private basePages(req: Request, url: URL, ip: string): Response {
     if (req.method !== "GET" && req.method !== "HEAD") return text(405, "method not allowed");
     const p = url.pathname;
     if (p === "/") return html(200, homePage(this.d.base, url.searchParams.get("e") ?? undefined));
     if (p === "/c") return redirect(`/c/${encodeURIComponent(url.searchParams.get("code") ?? "")}`);
-    if (p.startsWith("/c/")) return this.byCode(decodeURIComponent(p.slice(3)));
+    if (p.startsWith("/c/")) return this.byCode(decodeURIComponent(p.slice(3)), ip);
     if (p === "/i") {
       const home = cookieValue(req.headers.get("cookie"), "cstra_home");
       return home && SLUG_RE.test(home) ? redirect(`https://${home}.${this.d.base}/join`) : html(200, invitePage(this.d.base));
@@ -104,8 +132,12 @@ export class Front {
     return text(404, "not found");
   }
 
-  /** 短码 → 实例网页的 /pair#<code>。302 的 Location 带 fragment，浏览器会原样保留 */
-  private byCode(raw: string): Response {
+  /** 短码 → 实例网页的 /pair#<code>。302 的 Location 带 fragment，浏览器会原样保留。同一地址每分钟只能查几十次：短码 40 位，别让人枚举 */
+  private byCode(raw: string, ip: string): Response {
+    if (!this.codeWindows.tryAcquire(ip)) {
+      this.d.log("info", `short code lookup rate limited ip=${ip}`);
+      return html(429, tooManyPage(this.d.base));
+    }
     const code = normalizeCode(raw);
     const rec = code ? this.d.lookupCode(code) : null;
     if (!code || !rec) {
@@ -117,11 +149,29 @@ export class Front {
 
   // ── 隧道 ───────────────────────────────────────────────────────────────
 
-  private async tunnel(req: Request, url: URL, slug: string, host: string, ip: string): Promise<Response> {
-    if (req.headers.get("upgrade")) return text(426, "websocket is not tunnelled by the relay");
+  /** 隧道请求进门前的三道闸（§6.1）：每 IP 限流、目标登记且在线、每实例在途上限。返回 Response 就是被挡下了 */
+  private admit(slug: string, ip: string): Response | { record: InstanceRecord; conn: Conn } {
+    if (!this.tunnelWindows.tryAcquire(ip)) {
+      this.d.log("info", `tunnel ${slug} rate limited ip=${ip}`);
+      const headers = { "retry-after": "60", "content-type": "text/plain; charset=utf-8" };
+      return withHsts(new Response("too many requests from this address", { status: 429, headers }));
+    }
     const { record, conn } = this.d.bySlug(slug);
     if (!record) return html(404, offlinePage(slug, this.d.base, false));
     if (!conn) return html(503, offlinePage(slug, this.d.base, true));
+    if (this.d.router.tunnelInflightOf(conn) >= this.d.limits.maxTunnelInflightPerInstance) {
+      // 一台实例的在途隧道请求撑满了：多半是它的 Web 卡住不回或被人灌，再往上加只会把中继的内存一起拖进去
+      this.d.log("warn", `tunnel ${slug} inflight cap ${this.d.limits.maxTunnelInflightPerInstance} reached`);
+      return withHsts(Response.json({ ok: false, error: "too many concurrent requests" }, { status: 503, headers: { "retry-after": "5" } }));
+    }
+    return { record, conn };
+  }
+
+  private async tunnel(req: Request, url: URL, slug: string, host: string, ip: string): Promise<Response> {
+    if (req.headers.get("upgrade")) return text(426, "websocket is not tunnelled by the relay");
+    const admitted = this.admit(slug, ip);
+    if (admitted instanceof Response) return admitted;
+    const { record, conn } = admitted;
     const id = newRequestId(randomBytes);
     const method = req.method.toUpperCase();
     const headers = forwardHeaders(headersToObject(req.headers), (k) => k.startsWith("x-forwarded-") || k === RELAY_BASE_HEADER);

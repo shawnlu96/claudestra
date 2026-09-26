@@ -1,8 +1,12 @@
 /**
  * 中继运行配置只从环境变量来（systemd 的 Environment= 或仓库根 .env，Bun 自动读后者）。
  * RELAY_BASE 是公网主机名，front 靠它切子域名、实例靠它拼网页地址——没配就起不来，宁可报错也别把 slug 路由算错。
+ * commit 号：RELAY_COMMIT 没设就读仓库根 .relay-commit（deploy/relay/deploy.sh 每次部署写入），/healthz 带出去，
+ * 才能一眼核对线上跑的是哪一版；两处都没有就不带，healthz 照常。
  */
+import { readFileSync } from "node:fs";
 import { LIMITS } from "../lib/relay-protocol.js";
+import { REPO_ROOT } from "../lib/repo-root.js";
 
 export interface RelayEnv {
   port: number;
@@ -15,6 +19,8 @@ export interface RelayEnv {
 }
 
 const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const COMMIT_RE = /^[0-9a-f]{7,40}$/;
+const COMMIT_FILE = ".relay-commit";
 
 const num = (v: string | undefined, d: number): number => (v && Number.isFinite(Number(v)) ? Number(v) : d);
 
@@ -25,8 +31,20 @@ function dbPathFromEnv(env: Record<string, string | undefined>): string {
   return "data/relay.sqlite";
 }
 
+/** 仓库根 .relay-commit 的一行短 sha；没有文件或内容不像 sha 都算没有 */
+export function commitFromFile(read: (path: string) => string = (p) => readFileSync(p, "utf8")): string | undefined {
+  let raw: string;
+  try {
+    raw = read(`${REPO_ROOT}/${COMMIT_FILE}`);
+  } catch {
+    return undefined; // 没部署脚本写过这个文件（本地开发、手工 rsync）：healthz 不带 commit 即可
+  }
+  const s = raw.trim().toLowerCase();
+  return COMMIT_RE.test(s) ? s : undefined;
+}
+
 /** base 必须是合法主机名（小写、带点）；不是就抛，调用方决定怎么退出 */
-export function relayEnv(env: Record<string, string | undefined> = process.env): RelayEnv {
+export function relayEnv(env: Record<string, string | undefined> = process.env, readCommit: () => string | undefined = commitFromFile): RelayEnv {
   const base = (env.RELAY_BASE || "").trim().toLowerCase().replace(/\.+$/, "");
   if (!HOST_RE.test(base)) throw new Error("RELAY_BASE 必须是中继的公网主机名（如 relay.example.com），front 靠它区分子域名");
   return {
@@ -36,6 +54,6 @@ export function relayEnv(env: Record<string, string | undefined> = process.env):
     db: dbPathFromEnv(env),
     trustProxy: env.RELAY_TRUST_PROXY === "1",
     maxFrameBytes: num(env.RELAY_MAX_FRAME_BYTES, LIMITS.maxFrameBytes),
-    commit: env.RELAY_COMMIT?.trim() || undefined,
+    commit: env.RELAY_COMMIT?.trim() || readCommit(),
   };
 }

@@ -80,3 +80,11 @@ export function offlinePage(slug: string, base: string, known: boolean): string 
 <a class="btn sec" href="https://${esc(base)}/">用配对码进入 · Use a pairing code</a>`;
   return page(known ? "电脑不在线" : "未知的 Claudestra", body);
 }
+
+/** 短码查询被限流（同一地址一分钟内试太多次）：一句话 + 回首页，不透露哪些码存在 */
+export function tooManyPage(base: string): string {
+  const body = `<h1>试得太快了</h1>
+<p>这个地址一分钟内查了太多配对码，请稍等一分钟再试。<br>Too many attempts from this address. Try again in a minute.</p>
+<a class="btn sec" href="https://${esc(base)}/">回到首页 · Home</a>`;
+  return page("请稍后再试", body);
+}

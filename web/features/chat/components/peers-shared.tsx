@@ -43,6 +43,25 @@ export async function peersAction(body: Record<string, unknown>): Promise<Action
   }
 }
 
+/** 「复制 → 已复制」小按钮：Peer 面板里复制邀请 / 地址 / 链接都用它，别再各写一份剪贴板回调 */
+export function CopyButton({ text, label, resetMs = 2000 }: { text: string; label: string; resetMs?: number }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="btn btn-ghost btn-xs"
+      onClick={() => {
+        void navigator.clipboard?.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), resetMs);
+        });
+      }}
+    >
+      {copied ? t("已复制") : t(label)}
+    </button>
+  );
+}
+
 /** scope 勾选器：全部(*) + master + 每个本地 agent。external 未标的带 ⚠。 */
 export function ScopePicker({
   localAgents,

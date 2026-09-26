@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { peerFetch, relayInfo, setRelayClientForTest } from "../src/bridge/relay-link.js";
-import { makeInboundHandler, ReplayCache, verifyPeerRequest } from "../src/bridge/relay-inbound.js";
+import { makeInboundHandler, relayMark, ReplayCache, verifyPeerRequest } from "../src/bridge/relay-inbound.js";
 import { RelayError, type RelayClient, type RelayRequest, type RelayResponse } from "../src/lib/relay-client.js";
 import { encodePeerInviteV2, inviteLink, isPeerBaseUrl, parsePeerInviteV2, relayPeerFingerprint, relayUrlOf } from "../src/lib/peers.js";
 import { collectBody } from "../src/lib/relay-stream.js";
@@ -121,6 +121,7 @@ describe("入站分流（relay-inbound.ts）", () => {
     expect(h.calls[0].url).toBe("http://127.0.0.1:1/api/v1/peers/redeem");
     const sent = h.calls[0].init.headers as Record<string, string>;
     expect(sent["x-claudestra-relay-from"]).toBe(myFp);
+    expect(sent["x-claudestra-relay-mark"]).toBe(relayMark()); // peer 入口凭它相信 relay-from（直连 peer 伪造不了）
     expect(sent.host).toBeUndefined();
     expect(sent["x-forwarded-for"]).toBeUndefined();
     expect(sent.authorization).toBe("Bearer t");

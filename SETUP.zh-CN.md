@@ -65,6 +65,23 @@ bun run setup
 - **非 external agent 要 `--force`**：给不是 `--external` 创建的 agent 签 token 需要加 `--force`（Web UI 里是确认弹层）—— 和你自己对话共享上下文的 agent 不该随手暴露（R1 守卫）。
 - **连通性**：两边 bridge 要能互相访问，而 bridge 默认只监听 `127.0.0.1`——记得设 `BRIDGE_BIND`（生成邀请时如果还是回环会直接警告）。双方都不需要公网 IP：两台机器都装个 [Tailscale](https://tailscale.com) 是最省事的私有加密通路（邀请串会自动优先用 Tailscale 地址），但不是必须——任何内网互通或 HTTPS 反代都行。
 
+### 从外面访问：中继（可选）
+
+Tailscale 是从外面连回自己电脑的一条路；中继是另一条，手机和对方电脑上什么都不用装。你的 bridge 只向外连一条 WebSocket 到中继，中继就把 `https://<你的名字>.<中继域名>` 当成这台机器的网页（打开就是 Web 客户端），并转发别的实例对你的 peer 调用（peer 地址写 `relay://<指纹>`）。不需要公网 IP、不开端口、不配证书。
+
+1. `.env` 加两行，重启 bridge：
+
+   ```
+   RELAY_URL=wss://relay.example.com    # 用哪台中继（官方托管或自建）
+   RELAY_NAME=mini                      # 你的子域名标签；不配就按主机名生成
+   ```
+
+   bridge 日志会打出 `🛰 中继: … https://mini.relay.example.com`。名字被占了中继会追加一段指纹，以日志里的地址为准。
+2. 电脑上运行 `claudestra pair`：打印二维码、链接和一个 8 位码（10 分钟有效、只能用一次）。手机相机扫码、任何浏览器打开链接、或在 `https://relay.example.com` 输入短码——不用 SSH 密码就登录了（`/pair`，登录页也有入口）。Web 客户端的 Peer 面板顶部也显示这个地址，并有「配对新设备」按钮。
+3. 邀请变成链接：设置 → Peer 协作 → 「生成邀请」得到 `https://relay.example.com/i#…`，对方点开就到他自己的 Claudestra 的加入页；没装的人会被引导先安装。
+
+一句实话：这版中继是 TLS 的终点，看得见隧道里的明文（包括你的会话 cookie）——信任托管中继等于信任它的运营方，和任何反向代理一样。自己跑一台见 [docs/relay/self-host.md](docs/relay/self-host.md)，协议与边界见 [docs/relay/protocol.md](docs/relay/protocol.md)。
+
 ### 装完有什么
 
 - **多 agent 编排** — `#control` 里的大总管给每个 agent 开独立 Discord 频道、路由消息、挂截图、处理打断。

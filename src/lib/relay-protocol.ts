@@ -35,6 +35,10 @@ export const LIMITS = {
   maxCodesPerInstance: 5,
   codeTtlMs: 10 * 60_000,
   fatalRetryMs: 300_000,
+  /** front（§6.1）：短码查询按 IP 限流；隧道请求按 IP 限流（一页几十个资源，别卡正常浏览）；每台实例在途隧道请求上限 */
+  codeLookupPerIpPerMinute: 30,
+  tunnelPerIpPerMinute: 600,
+  maxTunnelInflightPerInstance: 256,
 } as const;
 
 /** WebSocket 关闭码（§8）；1009 是 Bun 在硬上限处自己发的 */

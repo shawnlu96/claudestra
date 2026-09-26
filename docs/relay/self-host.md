@@ -30,18 +30,20 @@ acme.sh --install-cert -d relay.example.com \
 
 ## 3. 代码与服务
 
-```sh
-# 本机：把主仓库同步到主机（中继只用 src/ 与 package.json，web / native 不用传）
-rsync -az --delete --exclude node_modules --exclude web --exclude native --exclude legacy --exclude .git \
-  ~/repos/claude-orchestrator/ root@<host>:/opt/claudestra/
+第一次：
 
-# 主机
-bash /opt/claudestra/deploy/relay/install.sh
+```sh
+# 开发机：写 .relay-commit、rsync 主仓库（中继只用 src/ 与 package.json，web / native 不传）、远端跑 install.sh、重启、看 healthz
+deploy/relay/deploy.sh root@<host>            # 第二个参数可改远端目录，默认 /opt/claudestra
+
+# 主机：把单元文件里的 RELAY_BASE 改成你的域名，再启用
 sed -i 's/RELAY_BASE=relay.example.com/RELAY_BASE=relay.yourdomain.com/' /etc/systemd/system/claudestra-relay.service
 systemctl daemon-reload
 systemctl enable --now claudestra-relay
 journalctl -u claudestra-relay -n 20
 ```
+
+第一次跑 deploy.sh 时单元文件还是模板值，服务会因为 RELAY_BASE 不合法退出（退出码 2）——改完 RELAY_BASE 再 `systemctl restart` 即可；之后每次升级就是再跑一遍 `deploy/relay/deploy.sh root@<host>`。
 
 环境变量（都在单元文件里）：
 
@@ -52,7 +54,7 @@ journalctl -u claudestra-relay -n 20
 | `RELAY_DATA` | — | 数据目录，SQLite 在其下 `relay.sqlite`；或 `RELAY_DB` 直接指定文件 |
 | `RELAY_TRUST_PROXY` | `0` | 反代之后设 `1`：客户端地址与主机名按 `X-Forwarded-*` 算。直接对外时别开 |
 | `RELAY_MAX_FRAME_BYTES` | 262144 | 单帧上限；正文按块走，一般不用改 |
-| `RELAY_COMMIT` | — | 写进 `/healthz`，方便核对线上跑的是哪个版本 |
+| `RELAY_COMMIT` | — | 写进 `/healthz`，方便核对线上跑的是哪个版本；没设就读仓库根 `.relay-commit`（deploy.sh 每次部署写入） |
 
 ## 4. nginx
 
@@ -75,7 +77,7 @@ curl -sI https://anything.relay.yourdomain.com/ | head -1   # HTTP/2 404：通�
 
 ## 6. 升级与运维
 
-- 升级 = 再 rsync 一次 + `systemctl restart claudestra-relay`。重启时中继给所有连接发 1012，实例秒级重连；在途请求会失败一次（与断网同一种失败），没有别的状态要迁。
+- 升级 = 再跑一遍 `deploy/relay/deploy.sh root@<host>`（rsync + install.sh + restart + healthz）。重启时中继给所有连接发 1012，实例秒级重连；在途请求会失败一次（与断网同一种失败），没有别的状态要迁。`/healthz` 的 `commit` 就是刚部署的短 sha，对得上才算部署成功。
 - 备份：只有 `RELAY_DATA/relay.sqlite`。丢了也只是实例要重新登记，联系人关系在实例本机。
 - 日志只记信封（谁、给谁、路径前缀、大小、耗时），不含请求头、正文、短码值。
-- 限流写在 [protocol.md §3.4、§4](./protocol.md)：每连接 120 请求 / 分钟、64 在途，握手每 IP 10 次 / 分钟，兑换邀请每发起方 6 次 / 分钟。
+- 限流写在 [protocol.md](./protocol.md)：连接侧（§3.4、§4）每连接 120 请求 / 分钟、64 在途，握手每 IP 10 次 / 分钟，兑换邀请每发起方 6 次 / 分钟；front 侧（§6.1）短码查询每 IP 30 次 / 分钟，隧道请求每 IP 600 次 / 分钟，每台实例 256 条在途隧道请求。数值在 `src/lib/relay-protocol.ts` 的 `LIMITS`。

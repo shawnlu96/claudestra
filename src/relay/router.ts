@@ -71,6 +71,13 @@ export class Router<C> {
     return n;
   }
 
+  /** 某实例作为隧道接收方在飞的请求数（fromConn 为 null = 中继替浏览器发的；front 的每实例上限） */
+  tunnelInflightOf(conn: C): number {
+    let n = 0;
+    for (const p of this.pending.values()) if (p.fromConn === null && p.toConn === conn) n++;
+    return n;
+  }
+
   add(p: Pick<Pending<C>, "id" | "from" | "to" | "fromConn" | "toConn" | "waiter">, timeoutMs: number, h: PendingHandlers<C>): Pending<C> {
     const key = Router.key(p.from, p.id);
     const now = Date.now();

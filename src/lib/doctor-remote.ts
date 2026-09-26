@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from "fs";
 import type { Check } from "./doctor.js";
 import { webPortFromStartScript } from "./cli-install.js";
+import { checkRelay } from "./doctor-relay.js";
 import { certVerdict, collectRemoteAccess, isWildcardBind, workingHttpsEntry, type RemoteAccessReport } from "./tailscale.js";
 
 const G = "手机访问";
@@ -104,7 +105,8 @@ export function readWebPort(repoRoot: string): number {
 export async function checkRemoteAccess(repoRoot: string): Promise<Check[]> {
   if (!existsSync(`${repoRoot}/web/.env.local`)) return []; // 没配 web 的实例不出这组
   try {
-    return remoteAccessChecks(await collectRemoteAccess(readWebPort(repoRoot)));
+    const checks = remoteAccessChecks(await collectRemoteAccess(readWebPort(repoRoot)));
+    return [...checks, ...(await checkRelay(G))]; // 中继是 Tailscale 之外的另一条出门路（lib/doctor-relay.ts）
   } catch (e) {
     return [{ group: G, name: "探测", status: "warn", detail: `探测失败：${(e as Error).message}` }];
   }

@@ -1,6 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import { configuredPeerIngressPort, ingressApiPath, ingressHost, ingressSecret, ingressVerdict } from "../src/bridge/peer-ingress";
+import { RELAY_MARK_HEADER, relayMark, sanitizeRelayFrom } from "../src/bridge/relay-inbound";
 import { pickIngressPort } from "../src/lib/peer-ingress-config";
+
+describe("来源指纹头只认经中继进来的（relay-inbound 盖进程内标记，peer 入口验）", () => {
+  const FROM = "x-claudestra-relay-from";
+  test("标记对得上：保留指纹头、去掉标记头", () => {
+    const h = new Headers({ [FROM]: "16f9-b5d1-30fb-8923", [RELAY_MARK_HEADER]: "m1", authorization: "Bearer t" });
+    expect(sanitizeRelayFrom(h, "m1")).toBe(true);
+    expect(h.get(FROM)).toBe("16f9-b5d1-30fb-8923");
+    expect(h.get(RELAY_MARK_HEADER)).toBeNull();
+    expect(h.get("authorization")).toBe("Bearer t");
+  });
+  test("没有标记 / 标记不对：直连 peer 伪造的指纹头被剥掉，标记头也不往 API 传", () => {
+    const spoof = new Headers({ [FROM]: "dead-beef-dead-beef" });
+    expect(sanitizeRelayFrom(spoof, "m1")).toBe(false);
+    expect(spoof.get(FROM)).toBeNull();
+    const wrong = new Headers({ [FROM]: "dead-beef-dead-beef", [RELAY_MARK_HEADER]: "guess" });
+    expect(sanitizeRelayFrom(wrong, "m1")).toBe(false);
+    expect(wrong.get(FROM)).toBeNull();
+    expect(wrong.get(RELAY_MARK_HEADER)).toBeNull();
+  });
+  test("进程内标记：足够长、进程内稳定", () => {
+    expect(relayMark()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(relayMark()).toBe(relayMark());
+  });
+});
 
 describe("peer 入口（HTTPS 反代 → 回环上的 peer 专用端口）", () => {
   test("端口只认 .env 显式配置：没配就不开（升级不凭空多占端口、不随 BRIDGE_PORT 漂）", () => {

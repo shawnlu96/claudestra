@@ -121,15 +121,15 @@ claudestra-relay-auth-v2
   "headers": { "content-type": "text/event-stream" }, "body": "", "more": true }
 ```
 
-`status` 照抄；`headers` 去掉 hop-by-hop 与 `content-length`（流式后长度未知），其余原样。`headers` 是单值表，唯一的例外是 `set-cookie`：多条以 `\n` 连接（cookie 里不可能出现换行，而逗号会撞上 `Expires`），front 拆回多个头——登录一次常常同时下发两条 cookie，合成一条浏览器只认第一段。**隧道请求（`from:"relay"`）的 `res` / `data` / `end` / `error` 不带 `to`**——发起方是中继自己，中继按本连接 + `id` 找 pending；peer 路径的 `to` = 请求帧的 `from`。`more: true` 之后跟 `data*` + `end`。SSE 与长响应就靠这条：中继 front 收到 `res` 立刻把状态与头回给浏览器，之后每个 `data` 原样写出。
+`status` 照抄；`headers` 去掉 hop-by-hop 与 `content-length`（流式后长度未知），其余原样。`headers` 是单值表，唯一的例外是 `set-cookie`：多条以 `\n` 连接（cookie 里不可能出现换行，而逗号会撞上 `Expires`），front 拆回多个头——登录一次常常同时下发两条 cookie，合成一条浏览器只认第一段。`more: true` 之后跟 `data*` + `end`。SSE 与长响应就靠这条：中继 front 收到 `res` 立刻把状态与头回给浏览器，之后每个 `data` 原样写出（front 要等到第一个非空 `data` 才能把头交给浏览器——运行时不发空流的响应头——所以实例回 `more: true` 后 SHOULD 尽快跟上首块）。
 
 答**隧道请求**（收到的 `req` 带 `from: "relay"`）时，实例发出的 `res` / `data` / `end` / `cancel` / `error` **不带 `to`**——发起方是中继自己，不是某个指纹；中继按 `id` 对回它替浏览器登记的 pending。答 peer 请求时 `to` = 请求帧的 `from`。
 
 ### 3.4 pending、超时与顺序
 
-- 中继为每个 `req` 登记 pending `(from, to, id)`。`res` 头到达前超过 `timeoutMs` → 给发起方 `error timeout`、给接收方 `cancel`。
-- `res` 头到达后 pending 转为**流态**：连续 `streamIdleMs`（默认 600 000）没有 `data` / `end` → 双向 `cancel`；总时长上限 `streamMaxMs`（默认 3 600 000）。
-- 同一连接上 `id` 与未完成的 pending 重复 → `error duplicate_id`。每连接在途 pending ≤ 64，请求帧 ≤ 120 / 分钟（隧道请求不计入实例的配额——那是中继替浏览器发的）。
+- 中继为每个 `req` 登记 pending `(from, to, id)`。`res` 头到达前超过 `timeoutMs` → 给发起方 `error timeout`、给接收方 `cancel`。隧道请求的这个时长是中继自己的 `frontHeadTimeoutMs`（默认 120 000：浏览器那边的 API 调用可能长挂），不是 peer 的 40 000。
+- `res` 头到达后 pending 转为**流态**：连续 `streamIdleMs`（默认 600 000）没有 `data` / `end` → 发起方收 `error stream_idle`、接收方收 `cancel`；总时长超过 `streamMaxMs`（默认 3 600 000）→ 同样处理，错误码 `stream_max`。隧道那头 HTTP 流中间没法报错，浏览器看到的只是提前结束的正文。
+- 同一连接上 `id` 与未完成的 pending 重复 → `error duplicate_id`。每连接在途 pending ≤ 64，请求帧 ≤ 120 / 分钟（隧道请求不计入实例的配额——那是中继替浏览器发的；它们的上限在 §6.1）。
 - 帧在一条连接上按序到达；中继 MUST 按收到顺序转发同一 `id` 的 `data`。不做重传：断线即失败，与直连 HTTP 断线同一种失败。
 
 ## 4. 联系人门控与 peer 路由
@@ -140,8 +140,8 @@ claudestra-relay-auth-v2
 
 实例在 welcome 后 MUST 发一次，之后清单变化时重发（全量替换，≤ 500 条）。中继在内存里记 `contacts[fp] = Set(fps)`，用于两件事：
 
-1. **路由门控**：A 发 `req` 给 B，中继放行当且仅当 `contacts[B]` 含 A，**或**这是兑换邀请（`method === "POST" && path === "/api/v1/peers/redeem"`，每个发起方每分钟 ≤ 6 次——B 还不认识 A 时唯一允许的敲门方式；B 的 bridge 自己按一次性 join 口令决定收不收）。其余一律 `error peer_unknown`，不区分「不存在」「不在线」「没把你列为联系人」，免得泄露目录。放行后 B 不在线 → `error peer_offline`。
-2. **在线状态**：中继回 `peers` 帧并在之后推 `presence`，只包含**双向**联系人（A 列了 B 且 B 列了 A）；单向的出现在 `peers` 里但 `mutual: false`、不带在线状态。
+1. **路由门控**：A 发 `req` 给 B，中继放行当且仅当 B **在线且** `contacts[B]` 含 A，**或**这是兑换邀请（`method === "POST" && path === "/api/v1/peers/redeem"`，每个发起方每分钟 ≤ 6 次——B 还不认识 A 时唯一允许的敲门方式；B 的 bridge 自己按一次性 join 口令决定收不收）。其余一律 `error peer_unknown`，不区分「不存在」「不在线」「没把你列为联系人」——离线实例的联系人清单不在内存里，中继判不出你是否被列入，所以**联系人离线也是 `peer_unknown`**，免得泄露目录；只有兑换邀请打到离线目标才回 `error peer_offline`。
+2. **在线状态**：中继回 `peers` 帧并在之后推 `presence`，只对**双向且双方在线**的联系人（A 列了 B、B 列了 A、两边都连着）。`peers` 只含目录里查得到的指纹（没登记过的静默略去）；单向的、或对方离线的（同样因为离线方的清单不在内存）一律 `online: false, mutual: false`，`lastSeen` 取目录里的最近在线时间。
 
 ```json
 { "t": "peers", "peers": [ { "fp": "…", "slug": "alex", "name": "Alex 的 MBP", "online": true, "lastSeen": "2026-09-27T01:00:00.000Z", "mutual": true } ] }
@@ -162,13 +162,13 @@ claudestra-relay-auth-v2
 
 ### 4.2 隧道请求（`from: "relay"`）
 
-实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里保留 `host`（= `<slug>.<base>`）与 `x-forwarded-*`，去掉 hop-by-hop 与 `content-length`。响应头 `location` 若以 `http://<slug>.<base>` 开头 MUST 改写为 `https://`（Web 在明文端口上算出的绝对地址）。
+实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里 `host` 设为中继盖的 `x-forwarded-host`（= `<slug>.<base>`，front 已剥掉浏览器自带的 `x-forwarded-*`），保留 `x-forwarded-*`，去掉 hop-by-hop、`content-length` 与 `accept-encoding`（让 Web 回未压缩正文：实例侧 fetch 会解码，再带着 `content-encoding` 浏览器会解两次）。响应去掉 `content-encoding`；`location` 若以 `http://<slug>.<base>` 或 `http://127.0.0.1:<WEB_PORT>` 开头 MUST 改写为 `https://<slug>.<base>`（Web 在明文端口上算出的绝对地址，浏览器连不到）。
 
 ## 5. 目录、slug、配对短码
 
 ### 5.1 slug 分配
 
-握手时实例给出想要的 slug；中继：这个 slug 没人用或就是本指纹在用 → 照给；被别的指纹占着 → 追加 `-<指纹前 4 位>`，还冲突再追加 `-<前 8 位>`。welcome 里返回最终值。同一指纹换 slug（`.env` 改了 `RELAY_NAME`）→ 目录里更新，旧 slug 释放。中继 MUST NOT 让两把钥匙同时持有一个 slug。
+握手时实例给出想要的 slug；中继：这个 slug 没人用或就是本指纹在用 → 照给；被别的指纹占着 → 追加 `-<指纹前 4 位>`，还冲突再追加 `-<前 8 位>`，仍冲突用整个指纹去横线的 16 位十六进制（这一步不可能再撞：那就是本指纹自己）。welcome 里返回最终值。同一指纹换 slug（`.env` 改了 `RELAY_NAME`）→ 目录里更新，旧 slug 释放。中继 MUST NOT 让两把钥匙同时持有一个 slug。
 
 ### 5.2 配对短码
 
@@ -177,7 +177,7 @@ claudestra-relay-auth-v2
 { "t": "code", "op": "del", "code": "K7PM2XQ9" }
 ```
 
-实例生成 8 位短码（字母表 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`，无 0/O/1/I；展示时 `K7PM-2XQ9`，输入不分大小写、可带中划线），登记到中继（`exp` ≤ 15 分钟后），中继只存 `code → fp`，front 靠它把只有键盘的用户送到正确的实例（§6）。**短码的校验在实例本机**（bridge 侧一次性、10 分钟、每分钟 5 次尝试），中继只做映射；中继上过期即删。每实例同时最多 5 个短码。
+实例生成 8 位短码（字母表 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`，无 0/O/1/I；展示时 `K7PM-2XQ9`，输入不分大小写、可带中划线），登记到中继，中继只存 `code → fp`，front 靠它把只有键盘的用户送到正确的实例（§6）。`exp` 是 Unix 秒，中继把它 clamp 到最多 15 分钟后（`codeTtlMs` + 5 分钟余量）。**短码的校验在实例本机**（bridge 侧一次性、10 分钟、每分钟 5 次尝试），中继只做映射；中继上过期即删。每实例同时最多 5 个短码，超过、或这个码已被别的实例占着 → `error rate_limited`（不带 `id`，message 说明）；`del` 不存在的码静默忽略。
 
 ### 5.3 目录持久化
 
@@ -191,15 +191,29 @@ front 按 `Host`（反代之后按 `X-Forwarded-Host`）分两种：
 
 | 路径 | 行为 |
 |---|---|
-| `GET /healthz` | `{"ok":true,"online":N,"pending":M,"version":"…"}`，无身份信息 |
-| `GET /v1/ws` | WebSocket 升级（§1） |
-| `GET /` | 一页静态 HTML：输入配对短码 → 跳 `/c/<code>`；说明「这是一台中继，要用 Claudestra 先在你的电脑上装 bridge」 |
-| `GET /c/<code>` | 短码有效 → `302 https://<slug>.<base>/pair#<code>`（浏览器把 # 带过去）；无效 → 回 `/`?e=code |
-| `GET /i` | 邀请落地。带 cookie `cstra_home=<slug>` → `302 https://<slug>.<base>/join`（邀请载荷在 #，浏览器原样带过去）；没有 → 一页 HTML：读 # 里的邀请、显示「谁邀你」，让用户输入自己的 slug 或短码后跳到自己的实例 `/join#…`，或引导安装 |
+| `GET /healthz` | `{"ok":true,"online":N,"pending":M,"version":"…","commit":"…"}`（`commit` 有才带：`RELAY_COMMIT` 或部署脚本写的 `.relay-commit`），无身份信息；不看主机名 |
+| `GET /v1/ws` | WebSocket 升级（§1）；不看主机名 |
+| `GET /` | 一页静态 HTML：输入配对短码 → 跳 `/c/<code>`；说明「这是一台中继，要用 Claudestra 先在你的电脑上装 bridge」。`?e=code` 显示「无效或已过期」 |
+| `GET /c?code=…` | 无 JS 的表单提交 → `302 /c/<code>` |
+| `GET /c/<code>` | 短码有效 → `302 https://<slug>.<base>/pair#<code>`（浏览器把 # 带过去）；无效 → `302 /?e=code`；同一地址查太多次 → `429` 页（§6.1） |
+| `GET /i` | 邀请落地。带 cookie `cstra_home=<slug>`（形状合法）→ `302 https://<slug>.<base>/join`（邀请载荷在 #，浏览器原样带过去）；没有或形状不对 → 一页 HTML：读 # 里的邀请、显示「谁邀你」，让用户输入自己的 slug 或短码后跳到自己的实例 `/join#…`，或引导安装 |
+| 其它 | `404`；非 GET / HEAD → `405` |
 
-**`<slug>.<base>`**（隧道）：找 slug 对应的在线实例，没有 → `503` 页「这台电脑不在线」（离线也给页面，不是裸错误）；有 → 转成 `req` 帧（§3.1，`from:"relay"`），请求正文 > `maxChunkBytes` 就切成 `data` 帧；收到 `res` 立刻回状态与头，`data` 逐块写给浏览器，`end` 收尾；浏览器断开 → 发 `cancel`。WebSocket 升级请求在隧道上 → `426`（本版不隧道 WS；Web 用的是 SSE）。
+**`<slug>.<base>`**（隧道）：slug 形状不合法或主机名不属于 `<base>` → `404 unknown host`；slug 没登记过 → `404` 页「没有叫这个名字的 Claudestra」；登记过但不在线 → `503` 页「这台电脑不在线」（离线也给页面，不是裸错误）；在线 → 转成 `req` 帧（§3.1，`from:"relay"`），请求正文 > `maxChunkBytes` 就切成 `data` 帧；收到 `res` 立刻回状态与头，`data` 逐块写给浏览器，`end` 收尾；浏览器断开 → 发 `cancel`；实例回 `error` 或等不到头 → `502` JSON `{ok:false,error:<code>,message}`。WebSocket 升级请求在隧道上 → `426`（本版不隧道 WS；Web 用的是 SSE）。
 
 front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存。
+
+### 6.1 front 的限流与上限
+
+这些都是中继自己扛流量的闸，与实例连接上的配额（§3.4、§4）无关；数值在 `LIMITS`，`RelayOptions.limits` 可覆盖。
+
+| 项 | 默认 | 超限 |
+|---|---|---|
+| 短码查询 `/c/<code>`，每 IP | 30 / 分钟 | `429` 页；`/c?code=` 的 302 不计数 |
+| 隧道请求，每 IP | 600 / 分钟（一页几十个资源，别卡正常浏览） | `429` 文本，`retry-after: 60`，不进实例 |
+| 每台实例同时在途的隧道请求 | 256 | `503` JSON `{ok:false,error:"too many concurrent requests"}`，`retry-after: 5`；多半是它的 Web 卡住不回 |
+
+IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-For` 第一项，否则取连接对端。
 
 ## 7. 错误帧与错误码
 
@@ -222,12 +236,14 @@ front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存�
 | `peer_unknown` | relay | 目标不存在 / 没把你列为联系人 | 不重试 |
 | `peer_offline` | relay | 目标不在线 | 不重试，报「对方不在线」 |
 | `duplicate_id` | relay | `id` 撞了在途请求 | bug |
-| `rate_limited` | relay | 超过 §3.4 / §4 配额 | 按 429 报 |
+| `rate_limited` | relay | 超过 §3.4 / §4 配额，或短码登记超过每实例上限 / 撞码（§5.2） | 按 429 报 |
+| `auth_timeout` / `heartbeat_timeout` | relay | 10 秒内没 auth / 75 秒内没任何帧，紧跟关闭 4408 | 退避重连 |
 | `timeout` | relay | `timeoutMs` 内没有 `res` | 不重试 POST |
-| `stream_idle` | relay | 流态空闲超时 | 不重试 |
+| `stream_idle` / `stream_max` | relay | 流态空闲超时 / 总时长超限 | 不重试 |
 | `peer_disconnected` | relay | 等待期间对方断线 | 不重试 POST |
-| `unknown_request` | relay | `res` / `data` 对不上 pending | 记日志 |
+| `unknown_request` | relay | `res` / `data` / `end` / `cancel` 对不上 pending（已超时、发起方已断、或 `to` 填错） | 记日志 |
 | `bad_signature` / `replay` / `path_forbidden` | peer | §4.1 | 不重试 |
+| `payload_too_large` | peer | peer 请求正文超过接收方上限（bridge 侧 2 MiB；正文要收齐验签，不能无限收） | 不重试 |
 | `local_unreachable` / `local_timeout` | peer | 接收方连不上 / 等不到本机入口 | 不重试 |
 
 ## 8. 心跳、重连、关闭码
@@ -238,9 +254,10 @@ front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存�
 | 判死 | 实例 20 秒没 pong → 断开重连；中继 75 秒没收到任何帧 → 关闭 4408 |
 | 重连退避 | 1, 2, 4, 8, 16, 30, 30 … 秒 ±20%；稳定 ≥ 60 秒后归零 |
 | 致命错误退避 | 300 秒（`auth_failed` `fingerprint_conflict` `protocol_version` `replaced`） |
-| 断线时的在途请求 | 发起方本地以 `connection_lost` 拒绝全部；中继清掉涉及该连接的 pending 并通知另一头 |
+| 断线时的在途请求 | 发起方本地以 `connection_lost` 拒绝全部；中继清掉涉及该连接的 pending 并通知另一头（发起方收 `peer_disconnected`，接收方收 `cancel`） |
+| 中继侧限流 | 握手每 IP 10 / 分钟（关闭 4429）；每连接 120 请求 / 分钟、64 在途；兑换邀请每发起方 6 / 分钟；front 的三项见 §6.1 |
 
-关闭码：1000 主动关；1012 中继重启（立即重连）；4400 协议违规；4401 认证失败；4403 目录拒绝；4408 超时；4409 被顶替；4413 帧过大；4429 握手洪水。
+关闭码：1000 主动关；1012 中继重启（立即重连）；4400 协议违规（含二进制帧、连续 3 个坏 JSON、未认证先发业务帧）；4401 认证失败 / nonce 过期；4403 目录拒绝（`fingerprint_conflict`）；4408 超时（`auth_timeout` / `heartbeat_timeout`）；4409 被顶替；4413 帧过大；4429 握手洪水。
 
 ## 9. 安全边界（本版）
 

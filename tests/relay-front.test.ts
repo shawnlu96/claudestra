@@ -219,3 +219,63 @@ describe("隧道", () => {
     expect(await off.text()).toContain("不在线");
   });
 });
+
+describe("front 限流与在途上限（§6.1，用小配额验证）", () => {
+  let tight: Relay;
+  let thttp: string;
+  let inst: TestClient;
+  const from = (ip: string, host: string, path: string, init: RequestInit = {}) =>
+    fetch(`${thttp}${path}`, { ...init, redirect: "manual", headers: { "x-forwarded-host": host, "x-forwarded-for": ip } });
+
+  beforeAll(async () => {
+    tight = createRelay({
+      base: "tight.test", port: 0, db: ":memory:", trustProxy: true, frontHeadTimeoutMs: 2000, sweepMs: 50,
+      limits: { codeLookupPerIpPerMinute: 2, tunnelPerIpPerMinute: 3, maxTunnelInflightPerInstance: 1, authPerIpPerMinute: 1000 },
+      log: () => {},
+    });
+    thttp = `http://127.0.0.1:${tight.port}`;
+    inst = await TestClient.connect(`ws://127.0.0.1:${tight.port}/v1/ws`, keyFromSeed(seedOf(201)), { slug: "box" });
+  });
+  afterAll(() => tight.stop());
+
+  test("短码查询每 IP 限次：第 3 次 429 页，别的地址不受影响；/c?code= 的 302 不计数", async () => {
+    tight.directory.putCode("K7PM2XQ9", inst.fp, Date.now() + 60_000);
+    expect((await from("198.51.100.1", "tight.test", "/c/K7PM2XQ9")).status).toBe(302);
+    expect((await from("198.51.100.1", "tight.test", "/c/ZZZZZZZZ")).status).toBe(302);
+    const third = await from("198.51.100.1", "tight.test", "/c/K7PM2XQ9");
+    expect(third.status).toBe(429);
+    expect(await third.text()).toContain("稍等");
+    expect((await from("198.51.100.1", "tight.test", "/c?code=K7PM2XQ9")).status).toBe(302);
+    expect((await from("198.51.100.2", "tight.test", "/c/K7PM2XQ9")).status).toBe(302);
+  });
+
+  test("隧道请求每 IP 限次：第 4 次 429 带 retry-after，不进实例", async () => {
+    // 逐条发、逐条答：在途上限是 1，并发发三条会先撞上 503 而不是这里要测的每 IP 计数
+    const one = async (ip: string) => {
+      const browser = from(ip, "box.tight.test", "/x");
+      const r = await inst.next((f) => f.t === "req");
+      inst.send({ t: "res", id: r.id, status: 200, headers: {}, body: "" });
+      return (await browser).status;
+    };
+    for (let i = 0; i < 3; i++) expect(await one("198.51.100.7")).toBe(200);
+    const fourth = await from("198.51.100.7", "box.tight.test", "/x");
+    expect(fourth.status).toBe(429);
+    expect(fourth.headers.get("retry-after")).toBe("60");
+    expect(await inst.none((f) => f.t === "req")).toBe(true);
+    expect(await one("198.51.100.8")).toBe(200);
+  });
+
+  test("每实例在途隧道请求上限：第 2 条 503 JSON；第 1 条答完后再来就放行", async () => {
+    const pendingReq = from("198.51.100.20", "box.tight.test", "/slow");
+    const req = await inst.next((f) => f.t === "req");
+    const capped = await from("198.51.100.21", "box.tight.test", "/x");
+    expect(capped.status).toBe(503);
+    expect(await capped.json()).toEqual({ ok: false, error: "too many concurrent requests" });
+    inst.send({ t: "res", id: req.id, status: 200, headers: {}, body: "" });
+    expect((await pendingReq).status).toBe(200);
+    const after = from("198.51.100.22", "box.tight.test", "/x");
+    const r2 = await inst.next((f) => f.t === "req");
+    inst.send({ t: "res", id: r2.id, status: 200, headers: {}, body: "" });
+    expect((await after).status).toBe(200);
+  });
+});
