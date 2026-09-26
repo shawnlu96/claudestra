@@ -8,7 +8,7 @@
 import type { Server } from "bun";
 import { randomBytes } from "node:crypto";
 import { newRequestId, normalizeCode, RELAY_BASE_HEADER, RELAY_FROM, SLUG_RE, SUBPROTOCOL, type ResFrame } from "../lib/relay-protocol.js";
-import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, streamSink, type StreamSink } from "../lib/relay-stream.js";
+import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, recordToHeaders, streamSink, type StreamSink } from "../lib/relay-stream.js";
 import type { InstanceRecord } from "./directory.js";
 import { homePage, invitePage, offlinePage } from "./pages.js";
 import type { Router } from "./router.js";
@@ -144,7 +144,7 @@ export class Front {
     const finish = (status: number, headers: Record<string, string>, body: Uint8Array | ReadableStream<Uint8Array> | null) => {
       headDone = true;
       done(status);
-      resolveHead(new Response(NULL_BODY_STATUS.has(status) || method === "HEAD" ? null : body, { status, headers }));
+      resolveHead(new Response(NULL_BODY_STATUS.has(status) || method === "HEAD" ? null : body, { status, headers: recordToHeaders(headers) }));
     };
     const openStream = (status: number, headers: Record<string, string>, first: Uint8Array) => {
       sink = streamSink(cancel);

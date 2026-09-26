@@ -20,7 +20,7 @@ import { REPO_ROOT } from "../lib/repo-root.js";
 import { webPortFromStartScript } from "../lib/cli-install.js";
 import { readPeers } from "../lib/peers.js";
 import { FP_RE, slugify, type PeerRecord } from "../lib/relay-protocol.js";
-import { NULL_BODY_STATUS } from "../lib/relay-stream.js";
+import { NULL_BODY_STATUS, recordToHeaders } from "../lib/relay-stream.js";
 import { syncPeerIngress } from "./peer-ingress.js";
 import { makeInboundHandler } from "./relay-inbound.js";
 
@@ -155,5 +155,5 @@ export async function peerFetch(
   } catch (e) {
     throw relayFetchError(e);
   }
-  return new Response(NULL_BODY_STATUS.has(r.status) ? null : r.body, { status: r.status, headers: r.headers });
+  return new Response(NULL_BODY_STATUS.has(r.status) ? null : r.body, { status: r.status, headers: recordToHeaders(r.headers) });
 }

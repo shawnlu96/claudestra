@@ -22,12 +22,30 @@ export function forwardHeaders(h: Headers, drop: (k: string) => boolean = () => 
 /** peer 路径要额外去掉的头（§4.1） */
 export const dropForPeer = (k: string): boolean => k === "host" || k.startsWith("x-forwarded-") || k.startsWith("x-claudestra-relay-");
 
-/** fetch 的 Headers 对象 → 小写键的普通对象；同名多值 fetch 已用 ", " 合并 */
+/** set-cookie 是唯一不能用逗号合并的多值头（Expires 里就有逗号）：帧里多条以 \n 连接，recordToHeaders 再拆回去 */
+export const SET_COOKIE_SEP = "\n";
+
+/** fetch 的 Headers 对象 → 小写键的普通对象；同名多值 fetch 已用 ", " 合并，set-cookie 单独按 \n 连接 */
 export function headersToObject(h: globalThis.Headers): Headers {
   const out: Headers = {};
   h.forEach((v, k) => {
     out[k.toLowerCase()] = v;
   });
+  const cookies = typeof h.getSetCookie === "function" ? h.getSetCookie() : [];
+  if (cookies.length) out["set-cookie"] = cookies.join(SET_COOKIE_SEP);
+  return out;
+}
+
+/** 帧里的头 → fetch 的 Headers：set-cookie 按 \n 拆成多条 append（一条合并的 set-cookie 浏览器只认第一段） */
+export function recordToHeaders(h: Headers): globalThis.Headers {
+  const out = new globalThis.Headers();
+  for (const [k, v] of Object.entries(h)) {
+    if (k.toLowerCase() !== "set-cookie") {
+      out.set(k, v);
+      continue;
+    }
+    for (const c of v.split(SET_COOKIE_SEP)) if (c) out.append("set-cookie", c);
+  }
   return out;
 }
 

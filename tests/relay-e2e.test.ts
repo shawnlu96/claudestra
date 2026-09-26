@@ -57,6 +57,12 @@ beforeAll(async () => {
       }
       if (u.pathname === "/echo") return new Response(await req.arrayBuffer(), { headers: { "content-type": "application/octet-stream" } });
       if (u.pathname === "/redirect") return new Response(null, { status: 302, headers: { location: `http://${req.headers.get("host")}/login` } });
+      if (u.pathname === "/cookies") {
+        const h = new Headers({ "content-type": "text/plain" });
+        h.append("set-cookie", "cstra_session=abc; Path=/; HttpOnly; SameSite=strict");
+        h.append("set-cookie", "cstra_home=mini; Path=/; Domain=relay.test; Expires=Sun, 26 Sep 2027 18:45:18 GMT");
+        return new Response("ok", { headers: h });
+      }
       if (u.pathname === "/sse") {
         const stream = new ReadableStream<Uint8Array>({
           async start(c) {
@@ -135,6 +141,15 @@ describe("隧道：浏览器 → front → 实例 → 本机 Web", () => {
     expect(r.headers.get("content-type")).toBe("text/event-stream");
     const text = new TextDecoder().decode(await collectBody(r.body, 1 << 20));
     expect(text).toBe("data: 1\n\ndata: 2\n\n");
+  });
+
+  test("两条 Set-Cookie 原样到达浏览器（登录同时下发会话 cookie 与 cstra_home）", async () => {
+    const r = await front(`mini.${BASE}`, "/cookies");
+    expect(r.status).toBe(200);
+    const cookies = r.headers.getSetCookie();
+    expect(cookies).toHaveLength(2);
+    expect(cookies[0]).toContain("cstra_session=abc");
+    expect(cookies[1]).toContain("Expires=Sun, 26 Sep 2027");
   });
 
   test("明文 Web 算出的 http:// Location 被改写成 https://", async () => {

@@ -103,3 +103,22 @@ describe("头处理", () => {
     expect(rewriteLocation({ location: "http://h/x" }, "").location).toBe("http://h/x");
   });
 });
+
+import { headersToObject as h2o, recordToHeaders, SET_COOKIE_SEP } from "../src/lib/relay-stream.ts";
+
+describe("set-cookie 多值：帧里 \\n 连接，出帧拆回多条", () => {
+  test("两条 Set-Cookie 不会被合成一条", () => {
+    const h = new Headers();
+    h.append("set-cookie", "a=1; Path=/; Expires=Sun, 26 Sep 2027 18:45:18 GMT");
+    h.append("set-cookie", "b=2; Path=/; HttpOnly");
+    h.set("content-type", "application/json");
+    const rec = h2o(h);
+    expect(rec["set-cookie"]).toBe(`a=1; Path=/; Expires=Sun, 26 Sep 2027 18:45:18 GMT${SET_COOKIE_SEP}b=2; Path=/; HttpOnly`);
+    const back = recordToHeaders(rec);
+    expect(back.getSetCookie()).toEqual(["a=1; Path=/; Expires=Sun, 26 Sep 2027 18:45:18 GMT", "b=2; Path=/; HttpOnly"]);
+    expect(back.get("content-type")).toBe("application/json");
+  });
+  test("没有 cookie 时不产生 set-cookie 键", () => {
+    expect(h2o(new Headers({ "x-a": "1" }))).toEqual({ "x-a": "1" });
+  });
+});

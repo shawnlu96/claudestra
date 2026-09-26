@@ -121,7 +121,7 @@ claudestra-relay-auth-v2
   "headers": { "content-type": "text/event-stream" }, "body": "", "more": true }
 ```
 
-`status` 照抄；`headers` 去掉 hop-by-hop 与 `content-length`（流式后长度未知），其余原样。**隧道请求（`from:"relay"`）的 `res` / `data` / `end` / `error` 不带 `to`**——发起方是中继自己，中继按本连接 + `id` 找 pending；peer 路径的 `to` = 请求帧的 `from`。`more: true` 之后跟 `data*` + `end`。SSE 与长响应就靠这条：中继 front 收到 `res` 立刻把状态与头回给浏览器，之后每个 `data` 原样写出。
+`status` 照抄；`headers` 去掉 hop-by-hop 与 `content-length`（流式后长度未知），其余原样。`headers` 是单值表，唯一的例外是 `set-cookie`：多条以 `\n` 连接（cookie 里不可能出现换行，而逗号会撞上 `Expires`），front 拆回多个头——登录一次常常同时下发两条 cookie，合成一条浏览器只认第一段。**隧道请求（`from:"relay"`）的 `res` / `data` / `end` / `error` 不带 `to`**——发起方是中继自己，中继按本连接 + `id` 找 pending；peer 路径的 `to` = 请求帧的 `from`。`more: true` 之后跟 `data*` + `end`。SSE 与长响应就靠这条：中继 front 收到 `res` 立刻把状态与头回给浏览器，之后每个 `data` 原样写出。
 
 答**隧道请求**（收到的 `req` 带 `from: "relay"`）时，实例发出的 `res` / `data` / `end` / `cancel` / `error` **不带 `to`**——发起方是中继自己，不是某个指纹；中继按 `id` 对回它替浏览器登记的 pending。答 peer 请求时 `to` = 请求帧的 `from`。
 
