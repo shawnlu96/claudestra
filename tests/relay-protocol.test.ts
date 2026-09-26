@@ -134,3 +134,14 @@ describe("slug、短码、路径", () => {
     expect(newRequestId((n) => new Uint8Array(n))).toMatch(/^r_\d+_[A-Za-z0-9]{1,6}$/);
   });
 });
+
+import { relayWsEndpoint } from "../src/lib/relay-protocol.ts";
+
+describe("relayWsEndpoint：.env 只写主机名时补 /v1/ws", () => {
+  test("裸主机名 / 带斜杠 → /v1/ws；自带路径照用", () => {
+    expect(relayWsEndpoint("wss://relay.example.com")).toBe("wss://relay.example.com/v1/ws");
+    expect(relayWsEndpoint("wss://relay.example.com/")).toBe("wss://relay.example.com/v1/ws");
+    expect(relayWsEndpoint("ws://127.0.0.1:8787/v1/ws")).toBe("ws://127.0.0.1:8787/v1/ws");
+    expect(relayWsEndpoint("wss://example.com/relay/v1/ws")).toBe("wss://example.com/relay/v1/ws");
+  });
+});

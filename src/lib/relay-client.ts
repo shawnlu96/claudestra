@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import type { InstanceKey } from "./instance-key.js";
 import {
   FATAL_CODES, LIMITS, PROTOCOL_VERSION, RELAY_FROM, SUBPROTOCOL, asData, asEndOrCancel, asReq, asRes, authSignature, parseFrame,
-  type ErrorFrame, type PeerRecord,
+  relayWsEndpoint, type ErrorFrame, type PeerRecord,
 } from "./relay-protocol.js";
 import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
@@ -142,7 +142,7 @@ export class RelayClient {
     this.retryAt = null;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(this.o.relayUrl, [SUBPROTOCOL]);
+      ws = new WebSocket(relayWsEndpoint(this.o.relayUrl), [SUBPROTOCOL]);
     } catch (e) {
       this.lastError = `bad relay url: ${(e as Error).message}`;
       return this.scheduleReconnect(false);

@@ -257,3 +257,10 @@ export function newRequestId(random: (n: number) => Uint8Array): string {
   const tail = Buffer.from(random(4)).toString("base64url").replace(/[^A-Za-z0-9]/g, "").slice(0, 6) || "x";
   return `r_${Date.now()}_${tail}`;
 }
+
+/** .env 里通常只写 wss://<base>；协议端点是 /v1/ws（§1），没写路径就补上，写了别的路径（反代挂在子路径下）照用 */
+export function relayWsEndpoint(relayUrl: string): string {
+  const u = new URL(relayUrl);
+  if (u.pathname === "" || u.pathname === "/") u.pathname = "/v1/ws";
+  return u.toString();
+}
