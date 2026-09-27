@@ -36,6 +36,8 @@ export interface DispatcherDeps {
 
 export interface Dispatcher {
   onEvent(evt: ChatEventLike): Promise<void>;
+  /** 不属于任何会话的系统提醒（新设备配对等）：推给 owner 的所有设备，不计未读 */
+  notice(n: { title: string; body: string; url?: string }): Promise<void>;
   /** 退订 onAgentRead（测试用） */
   stop(): void;
 }
@@ -125,6 +127,11 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
         apnsAll({ title: agent, body, agent, url, ts, tag, badge }),
         webPushAll({ title: agent, body, badge, url, agent, ts, tag }),
       ]);
+    },
+    async notice(n) {
+      const ts = now();
+      const msg = { title: n.title, body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
+      await Promise.all([apnsAll(msg), webPushAll(msg)]);
     },
     stop: unsubscribe,
   };

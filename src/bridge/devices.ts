@@ -54,6 +54,16 @@ async function grantCredential(
   return out;
 }
 
+/**
+ * 新设备经配对码拿到凭据（扫码 / 批准手输短码）→ 推送给 owner 的所有设备：不是自己加的能马上发现、去撤销。
+ * 本机一键配对、旧登录迁移不推（那是本机浏览器自己）。动态 import：单测不起推送子系统。
+ */
+function noticePaired(deviceName: string, guest?: string): void {
+  void import("./push/init.js")
+    .then((m) => m.pushOwnerNotice("新设备已配对", `「${deviceName}」刚配对了这台电脑${guest ? `（给 ${guest} 用）` : ""}。不是你加的就去 设置 · 设备 撤销。`))
+    .catch((e) => console.error(`⚠️ 新设备配对提醒没发出去: ${(e as Error).message}`));
+}
+
 /** 直托管 Path=/；经中继 Path 写成 /m/<fp>/（中继还会再钉一次） */
 function cookieFor(ctx: RequestContext, token: string | null): string {
   return deviceCookieHeader(token, { path: ctx.pathPrefix ? `${ctx.pathPrefix}/` : "/", secure: ctx.https || ctx.source === "relay" });
@@ -114,7 +124,9 @@ async function pair(req: Request): Promise<Response> {
     if (!challenges.consume(b.proof.challenge)) return apiJson(400, { ok: false, error: "challenge invalid or expired", code: "challenge_invalid" });
     const r = redeemPairingByProof(relayClient(), b.proof.challenge, b.proof.hmac);
     if (!r.ok) return pairFailure(r.reason);
-    return pairedResponse(ctx, await grantCredential(deviceName, r.grant, r.guest, ctx.clientIp, { issuedBy: r.issuer }));
+    const out = await grantCredential(deviceName, r.grant, r.guest, ctx.clientIp, { issuedBy: r.issuer });
+    noticePaired(deviceName, r.guest);
+    return pairedResponse(ctx, out);
   }
   if (typeof b.code === "string") {
     const r = redeemPairingCode(relayClient(), b.code);
@@ -226,6 +238,7 @@ export async function decideApproval(id: string, approve: boolean, approver?: Pr
   try {
     const out = await grantCredential(a.deviceName, a.grant, a.guest, a.clientIp, { issuedBy: a.issuer, approvedBy: approver?.credential ?? "cli" });
     approvals.settle(id, true, { token: out.token, credentialId: out.credentialId, principalId: out.principalId, expiresAt: out.expiresAt });
+    noticePaired(a.deviceName, a.guest);
     return { ok: true, id, state: "approved", credentialId: out.credentialId, principalId: out.principalId, deviceName: a.deviceName };
   } catch (e) {
     approvals.release(id); // 签凭据失败（principals.json 写不进）：放回待批，别卡死在 approving
