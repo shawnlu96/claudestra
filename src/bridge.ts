@@ -3059,7 +3059,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // v2.4.16+: 最多 nudge **1** 次（之前是 2 次，跟 drain兜底 no-text push
             // 叠加导致 agent 反复 wake-up 抓 LLM turn，是"聊不停"的另一个根因）。
             // 1 次未响应直接放弃，少打扰对面 + 少烧 token。
-            const iaPending = ownTurn ? pendingInterAgentMsg.get(cid) : undefined;
+            // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错
+            const iaPending = ownTurn && event !== "StopFailure" ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);
