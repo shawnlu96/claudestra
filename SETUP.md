@@ -15,8 +15,8 @@ This file exists as a reference for:
 > chat, a live remote terminal, and chat-history search. It logs in with your OS
 > account (SSH username/password), depends on no third party, and by the time the
 > wizard finishes it is already installed for autostart and you have a URL. The
-> wizard also walks you through Tailscale so your phone can reach it from any
-> network.
+> wizard also sets up phone access: the relay by default (nothing to install on
+> the phone; ENTER picks the official relay), or Tailscale if you prefer.
 >
 > **Discord is optional** (you would create your own bot — 5 extra steps) and is
 > only asked about if you pick it at the "Pick your frontends" step. The Discord
@@ -69,9 +69,11 @@ Notes:
 - **`--force` for non-external agents**: exposing an agent not created with `--external` requires `--force` (a confirm dialog in the web UI) — agents sharing context with your own conversations shouldn't be casually exposed (the R1 guard).
 - **Connectivity**: the two bridges must be able to reach each other, and the bridge listens on `127.0.0.1` only by default — set `BRIDGE_BIND` (invite generation warns you if it's still loopback). Neither side needs a public IP: installing [Tailscale](https://tailscale.com) on both machines is the easiest way to get a private encrypted path (invite URLs auto-prefer the Tailscale address), but it's optional — any private network or an HTTPS reverse proxy works just as well.
 
-### Reach it from anywhere: the relay (optional)
+### Reach it from anywhere: the relay (default) or Tailscale
 
-Tailscale is one way to reach your machine from outside; the relay is the other, and it needs nothing installed on the phone or the other computer. Your bridge keeps one outbound WebSocket to a relay; the relay then serves `https://<your-name>.<relay-domain>` — that page *is* this machine's web client — and forwards other instances' peer calls (`relay://<fingerprint>` as the peer address). No public IP, no open port, no certificate on your side.
+The relay is the default way out, and it needs nothing installed on the phone or the other computer. Your bridge keeps one outbound WebSocket to a relay; the relay then serves `https://<your-name>.<relay-domain>` — that page *is* this machine's web client — and forwards other instances' peer calls (`relay://<fingerprint>` as the peer address). No public IP, no open port, no certificate on your side. Tailscale is the alternative (traffic stays inside your own private network, no third party): pick option 2 in the wizard's *Phone access* step.
+
+`bun run setup`'s *Phone access* step configures the relay by default: ENTER takes the official relay `wss://relay.sunstriker.cc`, you pick a name, and right after install it prints a pairing QR code — scan it and the phone is signed in. Doing it by hand is equivalent to:
 
 1. Two lines in `.env`, then restart the bridge:
 
@@ -358,7 +360,7 @@ The same applies if Discord is still showing an old command list after a Claudes
 
 ## Next steps
 
-- **Set up the web client** — [web/SETUP.md](./web/SETUP.md): PWA chat + live terminal + history search, and how to reach it from your phone outside your home network (Tailscale recommended), plus production deployment: launchd service, HTTPS termination (tailscale serve or Caddy + `tailscale cert`), certificate renewal, and the full port map.
+- **Set up the web client** — [web/SETUP.md](./web/SETUP.md): PWA chat + live terminal + history search, and how to reach it from your phone outside your home network (relay by default, Tailscale optional), plus production deployment: launchd service, HTTPS termination (tailscale serve or Caddy + `tailscale cert`), certificate renewal, and the full port map.
 - Read [CLAUDE.md](./CLAUDE.md) for an architecture overview (written for contributors and agents).
 - Try `send_to_agent` MCP tool for agent-to-agent workflows.
 - Set up a cron job that runs every morning and reports to your control channel.

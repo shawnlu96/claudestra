@@ -22,11 +22,26 @@ const https = (over: Partial<EntryProbe> = {}): EntryProbe => ({
 const by = (checks: ReturnType<typeof remoteAccessChecks>, name: string) => checks.filter((c) => c.name === name);
 
 describe("remoteAccessChecks", () => {
-  test("没装 / 没登录只给 warn，不继续往下查", () => {
-    expect(remoteAccessChecks(report({}, { installed: false }))).toMatchObject([{ name: "Tailscale", status: "warn" }]);
+  test("没装 / 没登录只给 warn，不继续往下查；提示先想到中继", () => {
+    const ni = remoteAccessChecks(report({}, { installed: false }));
+    expect(ni).toMatchObject([{ name: "Tailscale", status: "warn" }]);
+    expect(ni[0].detail).toContain("也没配中继");
+    expect(ni[0].fix).toContain("中继");
     const nl = remoteAccessChecks(report({}, { running: false, backendState: "NeedsLogin" }));
     expect(nl).toHaveLength(1);
     expect(nl[0].detail).toContain("NeedsLogin");
+    expect(remoteAccessChecks(report({}, { installed: false }), { enabled: true, connected: false })[0].detail).toContain("中继也没连上");
+  });
+
+  test("中继连着：Tailscale 没装 / 没连只是 ok 的备注，不告警；有 Tailscale 没 HTTPS 入口也不告警", () => {
+    const relay = { enabled: true, connected: true };
+    expect(remoteAccessChecks(report({}, { installed: false }), relay)).toMatchObject([{ name: "Tailscale", status: "ok" }]);
+    expect(remoteAccessChecks(report({}, { running: false, backendState: "Stopped" }), relay)[0]).toMatchObject({ status: "ok" });
+    const c = remoteAccessChecks(report(), relay);
+    expect(c.every((x) => x.status === "ok")).toBe(true);
+    expect(by(c, "HTTPS 入口")[0].detail).toContain("中继");
+    // 装了 serve / 反代的照样查证书：中继连着不等于旧入口可以烂掉
+    expect(by(remoteAccessChecks(report({ entries: [https({ certDaysLeft: 5 })] }), relay), "证书剩余")[0].status).toBe("fail");
   });
 
   test("健康：入口 ok + 证书 ok", () => {

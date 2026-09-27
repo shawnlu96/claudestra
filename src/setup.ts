@@ -18,6 +18,7 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 import { gateSetupAdoption } from "./lib/setup-adoption.js";
 import { mergeEnvContent, parseEnvRaw } from "./lib/env-file.js";
+import type { RemoteAccessChoice } from "./lib/setup-remote-access.js";
 
 /**
  * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
@@ -911,6 +912,9 @@ interface Config {
   BRIDGE_PORT: string;
   USER_NAME: string;
   MCP_NAME: string;
+  /** 「手机访问」选了中继才有；没选不动 .env 里已有的值 */
+  RELAY_URL?: string;
+  RELAY_NAME?: string;
 }
 
 /** 在现有 .env 上就地合并（手加的键、注释不丢；值没变的行逐字节保留）。见 lib/env-file.ts */
@@ -923,6 +927,7 @@ function buildEnvContent(cfg: Config, existing: string | null): string {
     BRIDGE_PORT: cfg.BRIDGE_PORT,
     USER_NAME: cfg.USER_NAME,
     MCP_NAME: cfg.MCP_NAME,
+    ...(cfg.RELAY_URL ? { RELAY_URL: cfg.RELAY_URL, ...(cfg.RELAY_NAME ? { RELAY_NAME: cfg.RELAY_NAME } : {}) } : {}),
   }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
@@ -1594,42 +1599,34 @@ async function stepAdoptSessions(bridgePort: string): Promise<string[]> {
 }
 
 // ============================================================
-// 手机访问（Tailscale）—— v2.24+
+// 手机访问：中继（默认）/ Tailscale（可选）/ 只用局域网
 // ============================================================
 
+/** 终端原语打包给 lib/setup-remote-access.ts（lib 不能反向 import 入口文件） */
+const ui = { t, print, br, ok, warn, hint, prompt, confirm, c };
+
+/** 选路与中继配置在 lib/setup-remote-access.ts；选了 Tailscale 才走下面保留的 Tailscale 流程 */
+async function stepPhoneAccess(webPort: number, bridgePort: string, existing: Partial<Config>): Promise<RemoteAccessChoice> {
+  header(nextStep(), t("手机访问", "Phone access"));
+  const { chooseRemoteAccess } = await import("./lib/setup-remote-access.js");
+  const { detectBridgeUrls } = await import("./lib/net-addr.js");
+  const pick = await chooseRemoteAccess(ui, { existing, lanUrl: detectBridgeUrls(webPort).find((x) => x.kind === "lan")?.url });
+  return pick.kind === "tailscale" ? { kind: "tailscale", url: (await stepRemoteAccess(webPort, bridgePort)).url } : pick;
+}
+
 /**
- * Web 端（next start -p <port>，不带 -H）监听所有网卡：本机、局域网、tailnet 都能直连明文 HTTP，
- * 网页自带登录。要在手机上用，两台设备得互相看得见：
- *   - 同一个局域网 → LAN 地址就行，但换个网络（出门、4G）就断；
- *   - Tailscale → 给每台设备一个稳定的私有地址（100.64.0.0/10），换网不换址，
- *     不用端口转发、也不把服务暴露到公网。
- *
- * 流程（lib/tailscale.ts 的 planHttps 决策，纯函数有单测）：检测 → 没装就引导安装 →
- * 没登录就等登录 → 已有能用的 HTTPS 入口就复用（零改动）→ 否则经用户同意配
- * `tailscale serve`（443 空闲用 443，被占用 8443）→ 用 /api/version 验证 → 打二维码。
- * 主地址优先 HTTPS：Passkey 按域名绑定、PWA 装在哪个 origin 就绑在哪，换地址要全部重来，
- * 所以第一次就给对的地址，比事后迁移便宜得多。
- *
- * ⚠ 只打印**运行时探测到的**地址，绝不内置任何具体地址：这个仓库是要给别人用的。
- * ⚠ 凡是动整台机器的步骤（装 Tailscale、sudo tailscale up、serve）都先问；永远不 reset serve、
- *   不开 funnel（公网暴露）。
+ * Tailscale 这条路（lib/tailscale.ts 的 planHttps 决策有单测）：检测 → 没装就引导安装 → 没登录就等登录 →
+ * 已有能用的 HTTPS 入口就复用 → 否则经用户同意配 `tailscale serve`（443 空闲用 443，被占用 8443）→ 验证 → 二维码。
+ * 主地址优先 HTTPS：Passkey 按域名绑定、PWA 装在哪个 origin 就绑在哪，第一次就给对的地址比事后迁移便宜。
+ * ⚠ 只打印运行时探测到的地址，绝不内置任何具体地址；动整台机器的步骤（装 Tailscale、sudo tailscale up、serve）
+ *   都先问；永远不 reset serve、不开 funnel。
  */
 async function stepRemoteAccess(webPort: number, bridgePort: string): Promise<{ url?: string }> {
-  header(nextStep(), t("手机访问（Tailscale）", "Phone access (Tailscale)"));
   const ts = await import("./lib/tailscale.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
   const ifaceUrls = detectBridgeUrls(webPort);
   const lan = ifaceUrls.find((x) => x.kind === "lan"), isMac = process.platform === "darwin";
-
-  print(t(
-    "Web 端装在本机,在这台机器上开浏览器就能用。要在**手机**上用,两边得互相看得见:",
-    "The web frontend runs on this machine — a browser here just works. To use it from your **phone**, the two devices must be able to reach each other:",
-  ));
   br();
-  print(`  ${c.dim}•${c.reset} ${t("同一个 Wi-Fi → 局域网地址够用,但出门换到 4G 就断了", "Same Wi-Fi → a LAN address works, but breaks the moment you leave on cellular")}`);
-  print(`  ${c.dim}•${c.reset} ${t("Tailscale → 每台设备一个固定私有地址,换网不换址,不用端口转发,也不把服务暴露到公网", "Tailscale → a stable private address per device; survives network changes, no port forwarding, nothing exposed publicly")}`);
-  br();
-
   // ── S0 检测 / 安装 / 登录 ──
   // 以「能不能跑出 status --json」区分三态：没装 / 装了没连上 / 在线。此前只看网卡上有没有
   // 100.x 地址，「装了但没登录」会被当成没装，默认 Y 去重装。
@@ -1854,20 +1851,8 @@ function printManualHttps(): void {
   ));
 }
 
-/**
- * 终端二维码。复用 web 已有的依赖 uqr（此步只在装了 web 之后才走，web/node_modules 一定在），
- * 根目录不为它新增依赖；加载失败就只留上面那行 URL。只编码 URL，不编码任何凭据。
- */
-async function printQr(url: string): Promise<void> {
-  try {
-    const m = (await import(`${REPO_ROOT}/web/node_modules/uqr/dist/index.mjs`)) as {
-      renderUnicodeCompact: (d: string, o?: { border?: number }) => string;
-    };
-    br();
-    print(m.renderUnicodeCompact(url, { border: 1 }).split("\n").map((l) => `  ${l}`).join("\n"));
-    br();
-  } catch { /* 没有 uqr 就只打印 URL */ }
-}
+/** 终端二维码（只编码 URL，不编码任何凭据）；实现在 lib/setup-remote-access.ts，中继那条路也用它 */
+const printQr = async (url: string): Promise<void> => (await import("./lib/setup-remote-access.js")).printQr(ui, url);
 
 // ============================================================
 // 完成
@@ -2061,12 +2046,12 @@ async function main() {
     ({ guildId, userId, controlChannelId } = await stepCollectIds());
   }
   const { userName, mcpName, bridgePort } = await stepPreferences(existing);
-  let phoneUrl: string | undefined;
+  let remote: RemoteAccessChoice | undefined;
   const laterFailures: string[] = [];
   if (fronts.web) {
     await stepWebSetup(bridgePort);
     laterFailures.push(...(await stepWebLogin()));
-    phoneUrl = (await stepRemoteAccess(await readWebPort(), bridgePort)).url;
+    remote = await stepPhoneAccess(await readWebPort(), bridgePort, existing);
   }
 
   const cfg: Config = {
@@ -2077,9 +2062,12 @@ async function main() {
     BRIDGE_PORT: bridgePort,
     USER_NAME: userName,
     MCP_NAME: mcpName,
+    ...(remote?.kind === "relay" ? { RELAY_URL: remote.relayUrl, RELAY_NAME: remote.relayName } : {}),
   };
 
   const fin = await stepFinalize(cfg);
+  // 中继的最终地址要等 daemon 装起来、bridge 连上才知道，顺手签配对码打二维码；用户自己起 daemon（deferred）就不等
+  const phoneUrl = remote?.kind === "relay" ? await (await import("./lib/setup-remote-access.js")).confirmRelayLink(ui, remote, fin.deferred ? 0 : undefined) : remote?.url;
   // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后；能不能收编见 gateSetupAdoption
   const gate = gateSetupAdoption({ ...fin, laterFailures, discord: fronts.discord, webInstalled: fin.web?.installed === true });
   fin.failures = gate.failures;

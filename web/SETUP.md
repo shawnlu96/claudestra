@@ -139,8 +139,17 @@ there is no separate "new session" button by design.
 
 ## 6. Access from your phone (remote access)
 
-The whole point of Claudestra is driving your workstation from your phone. Three
+The whole point of Claudestra is driving your workstation from your phone. Four
 tiers, in order of recommendation:
+
+### Relay (default — nothing to install on the phone)
+
+`bun run setup`'s *Phone access* step configures this by default: the bridge keeps
+one outbound WebSocket to the relay, and `https://<your-name>.<relay-domain>` is
+this machine's web client from any network — HTTPS included, so the PWA, push and
+passkeys all work. `claudestra pair` prints a QR code that signs the phone in.
+Details, self-hosting and the trust boundary: [../docs/relay/README.md](../docs/relay/README.md).
+The tiers below are for when you'd rather not route through a relay at all.
 
 ### Same Wi-Fi (zero setup)
 
@@ -150,10 +159,11 @@ Details*, or `ipconfig getifaddr en0`). Log in with the same OS username/passwor
 
 Good for a quick test; useless once you leave the house.
 
-### Tailscale (recommended)
+### Tailscale (alternative: your own private network, no third party)
 
 [Tailscale](https://tailscale.com) gives every device a stable private IP over
-WireGuard — no port forwarding, no public exposure, free for personal use:
+WireGuard — no port forwarding, no public exposure, free for personal use. Pick
+option 2 in the wizard's *Phone access* step and it walks you through this:
 
 1. Install Tailscale on the workstation and on your phone, log both into the same
    tailnet.

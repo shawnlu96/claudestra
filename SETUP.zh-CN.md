@@ -13,7 +13,8 @@
 > **两个前门，Web 是默认那个。** v2.24 起向导默认只装 **Web 客户端**——可安装到
 > 手机主屏的 PWA（Next.js），带流式聊天、实时远程终端、聊天记录搜索；它用本机系统
 > 账号（SSH 用户名密码）登录，不依赖任何第三方，向导跑完就已经装成开机自启并给你
-> 一个网址。向导还会引导你装 Tailscale，好让手机在任何网络下都能连上。
+> 一个网址。向导还会帮你配好手机访问：默认走中继（手机什么都不装、回车即官方中继），
+> 也可以选 Tailscale。
 >
 > **Discord 是可选项**（要自己去开发者后台建 bot，多 5 个步骤），在向导的「选择前端」
 > 那步勾上才会问。本文档下面的 Discord 章节只对选了它的人有意义。
@@ -65,9 +66,11 @@ bun run setup
 - **非 external agent 要 `--force`**：给不是 `--external` 创建的 agent 签 token 需要加 `--force`（Web UI 里是确认弹层）—— 和你自己对话共享上下文的 agent 不该随手暴露（R1 守卫）。
 - **连通性**：两边 bridge 要能互相访问，而 bridge 默认只监听 `127.0.0.1`——记得设 `BRIDGE_BIND`（生成邀请时如果还是回环会直接警告）。双方都不需要公网 IP：两台机器都装个 [Tailscale](https://tailscale.com) 是最省事的私有加密通路（邀请串会自动优先用 Tailscale 地址），但不是必须——任何内网互通或 HTTPS 反代都行。
 
-### 从外面访问：中继（可选）
+### 从外面访问：中继（默认）或 Tailscale
 
-Tailscale 是从外面连回自己电脑的一条路；中继是另一条，手机和对方电脑上什么都不用装。你的 bridge 只向外连一条 WebSocket 到中继，中继就把 `https://<你的名字>.<中继域名>` 当成这台机器的网页（打开就是 Web 客户端），并转发别的实例对你的 peer 调用（peer 地址写 `relay://<指纹>`）。不需要公网 IP、不开端口、不配证书。
+中继是默认的那条路，手机和对方电脑上什么都不用装。你的 bridge 只向外连一条 WebSocket 到中继，中继就把 `https://<你的名字>.<中继域名>` 当成这台机器的网页（打开就是 Web 客户端），并转发别的实例对你的 peer 调用（peer 地址写 `relay://<指纹>`）。不需要公网 IP、不开端口、不配证书。Tailscale 是另一条路（流量只走你自己的私有网络，不经任何第三方），向导「手机访问」一步选 2 就走它。
+
+`bun run setup` 的「手机访问」一步默认就配中继：回车用官方中继 `wss://relay.sunstriker.cc`，填名字，装完直接打出配对二维码，手机扫一下就登录。手动配等价于：
 
 1. `.env` 加两行，重启 bridge：
 
@@ -353,7 +356,7 @@ Claudestra 升级后 Discord 里命令列表还是老的 —— 同样处理。
 
 ## 接下来
 
-- **装 Web 客户端** — [web/SETUP.md](./web/SETUP.md)：PWA 聊天 + 实时终端 + 记录搜索，以及在家庭网络之外用手机访问的方案（推荐 Tailscale）；另含生产部署：launchd 常驻、HTTPS 终结（tailscale serve 或 Caddy + `tailscale cert`）、证书续期与完整端口清单。
+- **装 Web 客户端** — [web/SETUP.md](./web/SETUP.md)：PWA 聊天 + 实时终端 + 记录搜索，以及在家庭网络之外用手机访问的方案（默认中继，Tailscale 可选）；另含生产部署：launchd 常驻、HTTPS 终结（tailscale serve 或 Caddy + `tailscale cert`）、证书续期与完整端口清单。
 - 读 [CLAUDE.zh-CN.md](./CLAUDE.zh-CN.md) 了解架构（给贡献者和 agent 看的）。
 - 试试 `send_to_agent` MCP 工具搭建多 agent 协作流。
 - 建个每天早上跑的定时任务，让它汇报到控制频道。

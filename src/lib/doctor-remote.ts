@@ -1,5 +1,6 @@
 /**
- * doctor 的「手机访问」分组：Tailscale / HTTPS 入口 / 证书剩余天数 / serve 冲突 / 明文入口。
+ * doctor 的「手机访问」分组：中继（默认的出门路，lib/doctor-relay.ts）/ Tailscale / HTTPS 入口 / 证书剩余天数 /
+ * serve 冲突 / 明文入口。
  *
  * 为什么要有：2026-09 诊断发现生产 HTTPS 入口的 ts.net 证书只剩 19 天、没有任何续签任务，
  * doctor 却显示「全部正常」。证书一过期，手机上的 PWA / 推送 / 语音 / Passkey 一起断，
@@ -7,17 +8,23 @@
  *
  * 只读：判定是纯函数（remoteAccessChecks，单测覆盖），I/O 全在 lib/tailscale 的
  * collectRemoteAccess。修复建议里不写死任何主机名 / LaunchAgent label，都从运行时状态来。
+ * 中继连着时 Tailscale 只是备用：没装 / 没连 / 没 HTTPS 入口都不再告警（已有的证书照样查——装了就要能用）。
  */
 
 import { existsSync, readFileSync } from "fs";
 import type { Check } from "./doctor.js";
 import { webPortFromStartScript } from "./cli-install.js";
-import { checkRelay } from "./doctor-relay.js";
+import { fetchRelayStatus, relayChecks } from "./doctor-relay.js";
 import { certVerdict, collectRemoteAccess, isWildcardBind, workingHttpsEntry, type RemoteAccessReport } from "./tailscale.js";
 
 const G = "手机访问";
 
-export function remoteAccessChecks(r: RemoteAccessReport): Check[] {
+/** 中继链路的两位状态（fetchRelayStatus 的摘要）：enabled = .env 配了 RELAY_URL，connected = 此刻连着 */
+export interface RelayLinkState { enabled: boolean; connected: boolean }
+
+const NO_RELAY: RelayLinkState = { enabled: false, connected: false };
+
+export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState = NO_RELAY): Check[] {
   const out: Check[] = [];
   const ts = r.tailscale;
 
@@ -27,14 +34,17 @@ export function remoteAccessChecks(r: RemoteAccessReport): Check[] {
       fix: "bun src/manager.ts install-cli 重装 daemon，或看 web 日志（launchctl list | grep claudestra）" });
   }
 
-  if (!ts.installed) {
-    out.push({ group: G, name: "Tailscale", status: "warn", detail: "没装 —— 手机只能在同一局域网里用，出门就断",
-      fix: "重跑 bun run setup 的「手机访问」一步，会引导安装" });
-    return out;
-  }
-  if (!ts.running) {
-    out.push({ group: G, name: "Tailscale", status: "warn", detail: `已装但没连上（${ts.backendState || "未运行"}）`,
-      fix: "打开 Tailscale 登录；macOS 首次还要在「系统设置」里允许系统扩展与 VPN 配置" });
+  if (!ts.installed || !ts.running) {
+    const state = !ts.installed ? "没装" : `已装但没连上（${ts.backendState || "未运行"}）`;
+    if (relay.connected) {
+      out.push({ group: G, name: "Tailscale", status: "ok", detail: `${state}（可选）—— 出门访问走中继` });
+      return out;
+    }
+    out.push({ group: G, name: "Tailscale", status: "warn",
+      detail: `${state}${relay.enabled ? "，中继也没连上" : "，也没配中继"} —— 手机只能在同一局域网里用，出门就断`,
+      fix: !ts.installed
+        ? "重跑 bun run setup 的「手机访问」一步：默认配中继（手机不装任何东西），也可选 Tailscale"
+        : "打开 Tailscale 登录（macOS 首次还要在「系统设置」里允许系统扩展与 VPN 配置）；或重跑 bun run setup 的「手机访问」改走中继" });
     return out;
   }
   out.push({ group: G, name: "Tailscale", status: "ok",
@@ -48,6 +58,8 @@ export function remoteAccessChecks(r: RemoteAccessReport): Check[] {
     out.push({ group: G, name: "HTTPS 入口", status: "ok",
       detail: `${working.url}（${working.source === "serve" ? "tailscale serve" : "外部反代"}）` +
         (wildcard.length ? `；web 同时监听 ${wildcard.join(" ")}，明文入口也开着` : "") });
+  } else if (https.length === 0 && relay.connected) {
+    out.push({ group: G, name: "HTTPS 入口", status: "ok", detail: "Tailscale 侧没配（可选）—— HTTPS 由中继地址提供" });
   } else if (https.length === 0) {
     out.push({ group: G, name: "HTTPS 入口", status: "warn",
       detail: "没有 —— 明文入口下语音输入、推送、Passkey、完整 PWA 都用不了（浏览器要求安全上下文）",
@@ -105,8 +117,11 @@ export function readWebPort(repoRoot: string): number {
 export async function checkRemoteAccess(repoRoot: string): Promise<Check[]> {
   if (!existsSync(`${repoRoot}/web/.env.local`)) return []; // 没配 web 的实例不出这组
   try {
-    const checks = remoteAccessChecks(await collectRemoteAccess(readWebPort(repoRoot)));
-    return [...checks, ...(await checkRelay(G))]; // 中继是 Tailscale 之外的另一条出门路（lib/doctor-relay.ts）
+    const st = await fetchRelayStatus(); // 先问中继：它连着时 Tailscale 的缺席不算问题
+    const rows = remoteAccessChecks(await collectRemoteAccess(readWebPort(repoRoot)), { enabled: !!st?.enabled, connected: !!st?.connected });
+    // 顺序：web 服务（有问题时）→ 中继 → Tailscale …；bridge 不在跑（st 为 null）不出「中继」项，checkBridge 已经报了
+    const at = rows[0]?.name === "web 服务" ? 1 : 0;
+    return [...rows.slice(0, at), ...(st ? relayChecks(st, G) : []), ...rows.slice(at)];
   } catch (e) {
     return [{ group: G, name: "探测", status: "warn", detail: `探测失败：${(e as Error).message}` }];
   }
