@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { LOCAL_FP } from "@/lib/app-config";
+import { upgradeLegacySession } from "@/lib/api/devices";
 import { machines } from "@/lib/machines";
 import { useT } from "@/lib/i18n";
 import { bootMachines, useMachines } from "./use-machines";
@@ -23,6 +24,7 @@ export function MachineGate({ children }: { children: ReactNode }) {
         const fp = cfg.fp || LOCAL_FP;
         if (!machines.get(fp)) await machines.add({ fp, name: cfg.machineName });
         if (machines.currentFp() !== fp) await machines.setCurrent(fp);
+        await upgradeLegacySession(); // 从旧 web 服务升上来：旧登录 cookie 换设备凭据，不用重新配对
       } else if (!machines.currentFp()) {
         // 带上来处：/join#<邀请码> 这类页面配完机器要回来（# 只在浏览器里，一起带走）
         const here = `${window.location.pathname}${window.location.search}${window.location.hash}`;

@@ -1,5 +1,5 @@
 /**
- * manager migrate-web-state（src/manager/migrate-web-state.ts + lib/web-state-migrate.ts）：先 tar 备份整个 web 目录，
+ * manager migrate-web-state（lib/web-state-migrate.ts）：先 tar 备份整个 web 目录，
  * 再把旧 settings.db 的 8 张表 INSERT OR IGNORE 进新库（重复执行不重复插入），config.json 的 groqApiKey / lang 只补缺。
  */
 import { Database } from "bun:sqlite";
@@ -7,9 +7,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { copyWebStateTables } from "../src/lib/web-state-migrate.js";
 import { closeWebState, openWebState, WEB_STATE_TABLES } from "../src/lib/web-state.js";
-import { migrateWebState, type MigrateResult } from "../src/manager/migrate-web-state.js";
+import { copyWebStateTables, migrateWebState, type MigrateResult } from "../src/lib/web-state-migrate.js";
 
 let root: string;
 let webDir: string;

@@ -7,9 +7,11 @@
 import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
-  Approvals, attachCredential, canManage, ChallengeStore, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant, newGuestPrincipal,
-  normalizeGrant, type Grant,
+  Approvals, attachCredential, canManage, ChallengeStore, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant,
+  newGuestPrincipal, normalizeGrant, type Grant,
 } from "../lib/devices.js";
+import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
+import { webDb } from "./local-api/db.js";
 import { readPrincipalsStrict, updatePrincipals, type Principal } from "../lib/principals.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
@@ -76,7 +78,26 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
   if (p === "/api/v1/devices/pair" && req.method === "POST") return pair(req);
   if (p === "/api/v1/devices/pair/status" && req.method === "GET") return pairStatus(req, url);
   if (p === "/api/v1/devices/local" && req.method === "POST") return pairLocal(req);
+  if (p === "/api/v1/devices/legacy-session" && req.method === "POST") return legacySession(req);
   return null;
+}
+
+/**
+ * 旧 web 的登录 cookie（cstra_session）→ 一次性换 owner 全权设备凭据（lib/legacy-web.ts）：从旧 web 服务升上来的机器，
+ * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立——中继路径模式只放 cstra_dev，旧 cookie 到不了这里。
+ * 会话 id 是 nanoid(32)（≈190 位）且只能换一次，不另设限流。
+ */
+async function legacySession(req: Request): Promise<Response> {
+  if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
+  const ctx = requestContextOf(req);
+  const sid = cookieValueFrom(req.headers.get("cookie"), LEGACY_SESSION_COOKIE);
+  if (!sid || ctx.source === "relay") return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
+  if (!redeemLegacySession(webDb(), sid)) return apiJson(401, { ok: false, error: "legacy session expired or already used", code: "legacy_session_invalid" });
+  const body = await readJsonBody(req);
+  const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "升级前已登录的浏览器";
+  const res = pairedResponse(ctx, await grantCredential(deviceName, fullGrant(), undefined, ctx.clientIp));
+  res.headers.append("set-cookie", `${LEGACY_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`); // 旧 cookie 用过即清
+  return res;
 }
 
 /** 二维码：{proof:{challenge,hmac}} 直接发凭据；手输：{code} 进待确认，Mac 侧点头才发 */

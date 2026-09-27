@@ -2,6 +2,7 @@
  * 设备凭据与配对（docs/design-hosted-frontend.md §13.1）。配对时机器还没进清单，所以每个调用都显式传 {fp}：
  * 中继模式打 `/m/<fp>/api/v1/devices/…`，直托管打同源。成功响应带 Set-Cookie，api() 的 credentials:"include" 让浏览器收下它。
  */
+import { defaultDeviceName } from "@/lib/pairing";
 import { api, apiRaw, apiErrorFrom, type ApiError } from "./client";
 
 export interface PairedInfo {
@@ -51,6 +52,27 @@ export async function pairStatus(fp: string, approvalId: string, signal?: AbortS
   if (res.status === 410) return { state: body.state === "denied" ? "denied" : "expired" };
   if (!res.ok) throw apiErrorFrom(res.status, body, fp);
   return { state: "paired", info: body as unknown as PairedInfo };
+}
+
+/**
+ * 直托管：从旧 web 服务升上来的浏览器还带着旧登录 cookie（cstra_session，HttpOnly 看不见）→ 一次性换成设备凭据
+ * （bridge POST /api/v1/devices/legacy-session），已登录的不用重新配对。先探 whoami：已有凭据就什么都不做。
+ * 故意不走 api()/apiRaw()：那两个遇 401 会把机器标成「需重新配对」，而这里的 401 是预期的探测结果。
+ */
+export async function upgradeLegacySession(): Promise<boolean> {
+  try {
+    const who = await fetch("/api/v1/whoami", { credentials: "include", cache: "no-store" });
+    if (who.status !== 401) return false;
+    const r = await fetch("/api/v1/devices/legacy-session", {
+      method: "POST", credentials: "include", cache: "no-store",
+      headers: { "Content-Type": "application/json", "x-cstra-device": "1" },
+      body: JSON.stringify({ deviceName: defaultDeviceName(navigator.userAgent, navigator.platform) }),
+    });
+    return r.ok;
+  } catch (e) {
+    console.warn("[pair] 旧登录换凭据失败，按普通配对处理:", (e as Error).message);
+    return false;
+  }
 }
 
 /** 直托管 + 本机回环：一键配对（bridge 只认真实回环 socket + x-cstra-device 头） */
