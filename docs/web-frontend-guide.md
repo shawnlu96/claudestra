@@ -104,14 +104,25 @@ Base URL：`http://127.0.0.1:3847`（`BRIDGE_PORT` 可改）。
     "raw": "...(/status 面板原文)..."
   },
   "agents": [{
-    "name": "agent-x", "contextTokens": 239000, "contextEstimated": false,
+    "name": "agent-x", "runtime": "claude-code",   // claude-code | codex | pi
+    "contextTokens": 239000, "contextEstimated": false,
     "model": "claude-fable-5-1",
-    "today": {"tokens": 85000000, "requests": 12}, "week": {...}
+    "today": {"tokens": 85000000, "requests": 12, "costUsd": 51.2, "reportedCostUsd": 0}, "week": {...}
+  }],
+  "quotas": [{   // Claude 之外的额度卡；没有 Codex rollout 的机器是 []，老 bridge 没有这个字段
+    "source": "codex-rollout", "plan": "plus",
+    "windows": [{"id": "5h", "windowMinutes": 300, "pct": 67, "resets": "9/28 08:41",
+                 "resetsAtMs": 1790552469000, "resetPassed": false}, {"id": "7d", ...}],
+    "credits": {"hasCredits": false, "unlimited": false, "balance": "0"}, "limitReached": null,
+    "observedAt": 1790538161066, "sessionId": "01a0d336-…", "cwd": "/…", "agent": "agent-codex"
   }]
 }
 ```
 
 - `contextEstimated: true` = 该 agent 刚 compact 完、还没新对话，上下文是估算值（渲染成 `~239K（刚 compact）`）。
+- 钱分两种、互不重叠：`costUsd` 按 API 牌价折算（没有牌价的模型为 0，如 Codex）；`reportedCostUsd` 是运行时报告的费用（目前只有 Pi 的 `usage.cost`，Pi 按自己的价目表算，不是账单），带了它的记录不再计入 `costUsd`。
+- Codex 的 token 由 rollout 里 `token_count.total_token_usage` 的累计值做差（计数器重开、重复落盘、窗口截断都处理了）；compact 请求不进这个计数器，比 `token_usage_record` 的合计略少。
+- `quotas` 是**最近一次 Codex 会话看到的**额度：rollout 里没有账号身份，不代表所有 Codex agent，前端要写明会话与观测时间。`resetPassed: true` = 已过重置时刻，`pct` 是上一个窗口的旧值，显示「待刷新」而不是 0%。
 - `sessionResets` 是上游 `/status` 面板原文，**观测过上游把 5pm 印成 5am**。判断可疑的约束：5h 窗口的 reset 必落在 `scrapedAt + 5h` 内。Discord 看板的做法是原样显示 + 超约束时加 ⚠️（不要自作聪明纠正，教训见 commit 7c45f38）。
 
 ## 6. 历史 API 详解（对话视图的主数据源）

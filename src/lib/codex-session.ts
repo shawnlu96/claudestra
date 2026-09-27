@@ -32,7 +32,7 @@
  *   - `event_msg` 取 `item_completed` 里的结构化工具记录（见 codexLineToClaudeShape），
  *     `token_count` 与 `turn_context` 翻成 system 记录给顶栏读占用 / 模型 / 档位（codexStateRecord），
  *     其余与 `world_state` 一样**丢掉**：遥测与内部状态；
- *   - `token_usage_record` 暂不翻译（用量归并是另一条链路，没接就别假装有）。
+ *   - `token_usage_record` 不翻译：用量统计另走 token_count 的累计值做差（codex-usage.ts）。
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -218,23 +218,34 @@ function codexItemToolUse(item: AnyRecord): { id: string; name: string; input: A
 }
 
 /**
+ * token_count 里一组 usage 的总量：input（已含缓存命中）+ output，优先用自带的 total_tokens。
+ * 不是对象 / 两样都没有 → null（上下文显示与用量统计都据此跳过这条）。
+ */
+export function codexUsageTotal(u: unknown): number | null {
+  if (!u || typeof u !== "object") return null;
+  const r = u as AnyRecord;
+  if (typeof r.total_tokens === "number" && Number.isFinite(r.total_tokens)) return r.total_tokens;
+  const inp = typeof r.input_tokens === "number" ? r.input_tokens : null;
+  const out = typeof r.output_tokens === "number" ? r.output_tokens : null;
+  return inp === null && out === null ? null : (inp ?? 0) + (out ?? 0);
+}
+
+/**
  * 顶栏要的三样东西（session-tail 按 subtype 读，与 Pi 的 thinking_level_change 同一路子）：
  * - turn_context 每轮一条，写着本轮实际的 model 和推理档位；没设档位时 effort 缺、reasoning_effort
  *   为 null（= 模型默认档，由调用方按目录补），所以 effort 为 null 也要带出去，不能当「没读到」。
  * - token_count 的 last_token_usage 是最近一次请求的输入 + 输出（input 已含缓存命中）≈ 当前上下文；
  *   model_context_window 是这个模型的窗口。只有限流信息、info 为 null 的那种跳过。
  */
-function codexStateRecord(type: string, p: AnyRecord, ts: string | undefined): AnyRecord | null {
+export function codexStateRecord(type: string, p: AnyRecord, ts: string | undefined): AnyRecord | null {
   if (type === "turn_context") {
     const s: AnyRecord = p.collaboration_mode?.settings ?? {};
     const model = typeof p.model === "string" && p.model ? p.model : typeof s.model === "string" ? s.model : null;
     const effort = typeof p.effort === "string" && p.effort ? p.effort : typeof s.reasoning_effort === "string" ? s.reasoning_effort : null;
     return model ? { type: "system", subtype: "model_state", timestamp: ts, model, effort } : null;
   }
-  const last: AnyRecord | undefined = p.info?.last_token_usage;
-  if (!last) return null;
-  const tokens = typeof last.total_tokens === "number" ? last.total_tokens : (last.input_tokens ?? 0) + (last.output_tokens ?? 0);
-  if (!(tokens > 0)) return null;
+  const tokens = codexUsageTotal(p.info?.last_token_usage);
+  if (!(tokens !== null && tokens > 0)) return null;
   const window = typeof p.info.model_context_window === "number" ? p.info.model_context_window : null;
   return { type: "system", subtype: "context_usage", timestamp: ts, tokens, window };
 }
