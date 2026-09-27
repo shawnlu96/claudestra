@@ -30,6 +30,8 @@ export function printMachineChanges(ui: SetupUi, mcpName: string): void {
   ui.print(t("会改到这台电脑上仓库以外的这些地方，先说清楚：", "These changes land outside the repo on this machine — listed up front:"));
   item("~/.claude/settings.json");
   sub(t("加 Stop / StopFailure / Notification 三个 hook（不在 Claudestra 会话里时静默退出）", "adds Stop / StopFailure / Notification hooks (they exit silently outside Claudestra sessions)"));
+  sub(t("加一个 SessionStart hook：开 Claude Code 会话时注入该项目上次留下的 HANDOFF 交接（没有就什么也不做）",
+        "adds a SessionStart hook: new Claude Code sessions get the project's last HANDOFF note injected (nothing if there is none)"));
   sub(t("把已装 MCP 服务的工具加进 permissions.allow（你自己开的 Claude Code 会话也会生效）", "adds your installed MCP servers' tools to permissions.allow (applies to your own Claude Code sessions too)"));
   sub(t("记下你刚才同意的 bypass 模式", "records the bypass-mode consent you just gave"));
   item(t(`Claude Code 用户级 MCP：注册 ${mcpName}`, `Claude Code user-level MCP: registers ${mcpName}`));
