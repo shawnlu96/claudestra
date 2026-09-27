@@ -17,7 +17,7 @@ export function UsersIcon({ size = 12 }: { size?: number }) {
  *  桌面端悬停出 peer 名单（owner 2026-09-28，移动端没有 hover 不展示——数字够用）。 */
 export function ExternalBadge({ count, peers = [] }: { count: number; peers?: string[] }) {
   const t = useT();
-  const title = count > 0 ? `${t("对外共享（external）")} · ${t("已共享给")} ${count} peer` : t("对外共享（external）");
+  const title = count > 0 ? `${t("对外共享（external）")} · ${t("已共享给 {n} 个 peer", { n: count })}` : t("对外共享（external）");
   return (
     <span
       className="group/ext relative inline-flex shrink-0 items-center justify-center rounded-md bg-base-content/[0.08] p-1 text-base-content/60"

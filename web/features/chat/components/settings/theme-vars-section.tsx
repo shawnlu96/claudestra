@@ -17,7 +17,7 @@ function VarsBox({ label, value, onChange }: { label: string; value: string; onC
         <span className="font-medium text-base-content/70">{label}</span>
         <span className="text-base-content/40">
           {value.trim()
-            ? `${t("识别到")} ${vars.length} ${t("个变量")}${ignored ? ` · ${t("忽略")} ${ignored} ${t("行")}` : ""}`
+            ? `${t("识别到 {n} 个变量", { n: vars.length })}${ignored ? ` · ${t("忽略 {n} 行", { n: ignored })}` : ""}`
             : t("未设置")}
         </span>
       </div>

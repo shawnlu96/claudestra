@@ -18,11 +18,11 @@ const POLL_MS = 3000;
 export const APPROVALS_CHANGED = "cstra:pair-approvals";
 
 /** 「全部会话、终端、管理」/「给 Alex：gc-car、relay」：让批准的人知道自己在给什么 */
-export function grantSummary(t: (k: string) => string, grant: PendingApproval["grant"], guest?: string): string {
+export function grantSummary(t: (k: string, params?: Record<string, string | number>) => string, grant: PendingApproval["grant"], guest?: string): string {
   const agents = grant.agents === "*" || grant.agents.includes("*") ? t("全部会话") : grant.agents.filter((a) => a !== "master").join("、");
   const extras = [grant.terminal ? t("终端") : "", grant.manage ? t("管理") : ""].filter(Boolean).join("、");
   const scope = extras ? `${agents}、${extras}` : agents;
-  return guest ? `${t("给")} ${guest}：${scope}` : scope;
+  return guest ? t("给 {guest}：{scope}", { guest, scope }) : scope;
 }
 
 export function ApprovalRow({ a, onDone }: { a: PendingApproval; onDone: (approved: boolean) => void }) {
