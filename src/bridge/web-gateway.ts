@@ -148,14 +148,16 @@ export function controlAccessVerdict(opts: {
   pathname: string;
   providedToken: string | null;
   controlToken: string;
-  /** 静态例外的三个条件；不传 = 没有静态托管（与 v2.21.1 判定逐字相同） */
+  /** 静态例外的两个条件；不传 = 没有静态托管（与 v2.21.1 判定逐字相同） */
   method?: string;
   staticHosting?: boolean;
+  /** 请求带 Upgrade 头：bridge.ts 随后对任何路径都会 server.upgrade()，升级出来的 ws 能发 route_to_agent */
   websocket?: boolean;
 }): { allow: boolean; reason: string } {
   if (opts.loopback) return { allow: true, reason: "loopback" };
-  // /api/v1/* 有自己的 Bearer 鉴权(peer 入站走这里),放行给它自处理
-  if (opts.pathname.startsWith("/api/v1/")) return { allow: true, reason: "api-bearer" };
+  // /api/v1/* 有自己的 Bearer 鉴权(peer 入站走这里),放行给它自处理——但 ws 升级不算：升级发生在 API 鉴权之前，
+  // 放行就等于把 route_to_agent 交给任何能连到端口的人（tests/web-gateway.test.ts）
+  if (opts.pathname.startsWith("/api/v1/") && !opts.websocket) return { allow: true, reason: "api-bearer" };
   // 静态前端：GET/HEAD 非控制路由放给静态文件；ws 升级也是 GET，单独排除（route_to_agent 面不能被顺带打开）
   const readOnly = opts.method === "GET" || opts.method === "HEAD";
   if (opts.staticHosting && readOnly && !opts.websocket && !isControlRoute(opts.pathname)) return { allow: true, reason: "static" };

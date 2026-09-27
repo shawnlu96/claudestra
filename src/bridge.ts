@@ -3559,7 +3559,7 @@ const server = Bun.serve({
       const loopback = isDirectLoopback(ip?.address, req.headers.get("x-forwarded-for"));
       setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: ip?.address ?? null, https: req.headers.get("x-forwarded-proto") === "https" });
       const verdict = controlAccessVerdict({
-        loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // 静态托管：非回环 GET/HEAD 可取前端文件，ws 升级 / 控制路由除外
+        loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // ws 升级在 API 鉴权之前：/api/v1 与静态的放行都不覆盖它
         pathname: url0.pathname,
         providedToken: extractControlToken(req, url0),
         controlToken: CONTROL_TOKEN,
