@@ -15,6 +15,12 @@ import { codeFromFragment, compactCode, defaultDeviceName, formatCode, isLoopbac
 import { bootMachines, useMachines } from "../machines/use-machines";
 import { usePairFlow } from "./use-pair-flow";
 
+/** 配对后去哪：?next= 只认站内路径（防开放跳转；/join#<邀请码> 经 MachineGate 绕来时带着），缺省 /chat */
+function afterPair(): string {
+  const next = new URLSearchParams(window.location.search).get("next") || "";
+  return /^\/(?!\/)/.test(next) ? next : "/chat";
+}
+
 export function PairScreen() {
   const t = useT();
   const router = useRouter();
@@ -23,7 +29,7 @@ export function PairScreen() {
   const [code, setCode] = useState("");
   const [deviceName, setDeviceName] = useState("");
   const [loopback, setLoopback] = useState(false);
-  const flow = usePairFlow(cfg, () => router.replace("/chat"));
+  const flow = usePairFlow(cfg, () => router.replace(afterPair()));
   const autoRan = useRef(false);
 
   // 进页：拉配置；地址里带东西就自动走（扫码 / 老短码链接），等首帧渲染完再动（effect 里同步 setState 会级联重渲染）

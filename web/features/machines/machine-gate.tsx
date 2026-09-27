@@ -24,7 +24,9 @@ export function MachineGate({ children }: { children: ReactNode }) {
         if (!machines.get(fp)) await machines.add({ fp, name: cfg.machineName });
         if (machines.currentFp() !== fp) await machines.setCurrent(fp);
       } else if (!machines.currentFp()) {
-        router.replace("/pair");
+        // 带上来处：/join#<邀请码> 这类页面配完机器要回来（# 只在浏览器里，一起带走）
+        const here = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+        router.replace(here === "/chat" ? "/pair" : `/pair?next=${encodeURIComponent(here)}`);
         return;
       }
       if (!dead) setReady(true);

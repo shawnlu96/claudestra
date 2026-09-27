@@ -3,8 +3,10 @@
 **English** · [简体中文](./SETUP.zh-CN.md)
 
 The **Next.js web frontend** for Claudestra — a second front door beside Discord.
-It is a standard **Node/npm** app that talks only to the Bridge's HTTP API
-(`/api/v1` + `/api/v1/events`); it does **not** embed the Bun backend.
+It is a **static export** (`out/`) that the relay or the Bridge itself serves; the
+browser talks straight to the Bridge's HTTP API (`/api/v1` + `/api/v1/events`).
+There is no web server process, no BFF and no account system: signing in means
+**pairing this browser with your Mac** (`claudestra pair`).
 
 What you get:
 
@@ -37,17 +39,13 @@ What you get:
 
 - **Node.js ≥ 20** + npm (Next 16 / React 19). The web app runs on Node, entirely
   separate from the Bun backend — two independent dependency trees.
-- **The Claudestra Bridge must be running** and reachable at `BRIDGE_HTTP_URL`
-  (default `http://127.0.0.1:3847`). Two ways to get there:
+- **The Claudestra Bridge must be running** (default `http://127.0.0.1:3847`). Two ways to get there:
   - **A — you already run Claudestra with Discord** (see [`../SETUP.md`](../SETUP.md)):
     the Bridge, the `claudestra` MCP server, and the Stop hook are already wired by
     `bun run setup`. Skip to [Install the web app](#1-install-the-web-app).
   - **B — Web-only, no Discord bot**: see
     [Run the backend in Web-only mode](#web-only-backend-no-discord) first.
-- **Bun** — only needed to run the backend and to issue the API token below.
-- **SSH login enabled on the machine.** The web app authenticates against your OS
-  account via local SSH/PAM (no separate account system). On macOS enable
-  *System Settings → General → Sharing → Remote Login*; otherwise login fails.
+- **Bun** — only needed to run the backend.
 
 ---
 
@@ -66,40 +64,16 @@ under `web/.packages/` (committed, resolved via `tsconfig.json` paths).
 
 ## 2. Configure environment
 
-```bash
-cp .env.example .env.local
-```
+Nothing is required for a build. The only optional variable is for the **dev server**:
 
-Fill `.env.local`:
+| Variable | Notes |
+|---|---|
+| `WEB_DEV_ORIGINS` | Comma-separated extra origins allowed to reach the dev server's `_next` assets — your tailnet IP / LAN IP / `*.ts.net` hostname. Without it, HMR websocket handshakes fail from those addresses and the dev page reloads in a loop. |
 
-| Variable | Required | Notes |
-|---|---|---|
-| `CLAUDESTRA_API_TOKEN` | **yes** | Bridge `/api/v1` Bearer token. Issue it (see below). The BFF sends it server-side; the browser never sees it. |
-| `BRIDGE_HTTP_URL` | yes | Default `http://127.0.0.1:3847`. **Use `127.0.0.1`, not `localhost`** — the Bridge binds IPv4 only; the `::1` ambiguity causes intermittent 10s `fetch failed` timeouts. |
-| `INTERNAL_API_KEY` | yes | Random secret (`openssl rand -hex 32`). Alternative auth (`x-api-key`) for scripts hitting protected API routes. |
-| `WEB_DEV_ORIGINS` | no | Comma-separated extra origins allowed to reach the **dev** server's `_next` assets — your tailnet IP / LAN IP / `*.ts.net` hostname. Without it, HMR websocket handshakes fail from those addresses and the dev page reloads in a loop. Not needed for `next start`. |
-| `GROQ_API_KEY` | no | Voice transcription. Unset → the transcribe endpoint returns 501; you can also set it from the in-app Settings dialog. |
-| `COOKIE_SECURE` | no | Set `on` to mark the session cookie `Secure`. Off by default so plaintext LAN/Tailscale access still works. |
-| `PUSH_VAPID_SUBJECT` | no | `mailto:` or URL identifying the push sender. |
-| `PUSH_LOCK_PORT` | no | Cross-process lock port for the push dispatcher (default `3339`) — guarantees only one dispatcher sends, whatever the process mix. |
-| `CLAUDESTRA_DATA_ROOT` | no | Overrides the web data dir itself (default `~/.claude-orchestrator/web`): SQLite (auth sessions + per-agent settings), `config.json`, VAPID keys, uploads, `client.log`. Before 2026-09 the SQLite treated this as the *parent* of `web/` — if you set it that way, point it at `…/web` now. |
-
-**Issue the API token** (from the repo root, replace `bun` path as needed):
-
-```bash
-bun src/manager.ts token-add web-ui --agents '*,master' --force --terminal
-```
-
-- `--agents '*,master'` — `*` covers all non-master agents; **`master` must be
-  listed explicitly** (the wildcard excludes it).
-- `--force` — acknowledges the shared-context guard for non-`--external` agents.
-- `--terminal` — grants the **remote terminal** (the 🖥️ live-tmux feature). This is
-  **host-shell-level access**: a terminal can Ctrl-C out of Claude Code into a raw
-  shell, bypassing `--disallowedTools`. It is a separate capability from messaging,
-  so it must be granted explicitly. Drop `--terminal` if you don't want the web
-  terminal — chat/history/interrupt all work without it.
-
-Copy the printed token into `CLAUDESTRA_API_TOKEN`.
+Everything that used to live in `.env.local` (API token, internal key, SQLite,
+VAPID keys, Groq key) is gone with the BFF: the Bridge holds that state now
+(`~/.claude-orchestrator/web-state.sqlite`, `config.json`), and the voice key is
+set in the in-app Settings.
 
 ---
 
@@ -116,21 +90,36 @@ macOS gotchas (only if your shell exports these globally):
 - Turbopack cold start: the first few requests after a restart may 401/502 while
   env/compilation settles — just refresh.
 
-## 4. Run (production)
+## 4. Build (static export)
 
 ```bash
-npm run build
-npm run start      # → http://localhost:3333
+npm run build      # → web/out/
 ```
 
-Ports are deliberately non-default (dev `33333` / prod `3333`) to avoid clashing
-with sibling apps on the same machine.
+`out/` is a plain static site. Who serves it:
 
-## 5. Log in
+- **Relay (default)** — the relay hosts one copy for everyone (`RELAY_STATIC_DIR`), at `https://relay.<domain>/`.
+- **Bridge directly** — set `BRIDGE_STATIC_DIR=/path/to/web/out` on the bridge (`https://<mac>:3847/` via Tailscale or your own certificate).
 
-Open the app → you're redirected to `/login`. Enter your **OS username + password**
-— verified by a local SSH connection to `127.0.0.1:22` (PAM). On success a
-7-day HttpOnly `cstra_session` cookie is set and you land on `/chat`.
+Both serve `/chat` as `chat.html`, unknown paths as `404.html`, `/_next/static/*` with long caching and HTML with `no-cache` (`src/lib/static-site.ts`). The
+export reads `/app-config.json` from its host to learn whether it runs in relay or direct mode.
+
+## 5. Pair (this replaces logging in)
+
+Open the app → you land on `/pair`. On the Mac run `claudestra pair`: it prints a QR
+code, a link and an 8-character code, all valid for 10 minutes and single use.
+
+- **Scan the QR / open the link** — the browser proves it holds the secret (HMAC over
+  a challenge; the secret never leaves the browser) and gets a device credential
+  right away.
+- **Type the code** — the Mac shows "device X wants to pair, grant Y"; confirm there
+  and the page continues on its own.
+- **On the Mac itself** (`localhost`) — one-tap pairing.
+
+The credential is an HttpOnly cookie signed and checked by your own Bridge; the
+relay only routes. One browser can pair several machines and switch between them
+from the top bar; *Settings → Devices* lists every paired device, revokes them,
+and "Sign out" revokes this browser's own credential.
 
 New agents are created by talking to the master orchestrator (👑 大总管) in chat —
 there is no separate "new session" button by design.
@@ -207,51 +196,11 @@ Once the app is reachable over HTTPS (or you accept degraded mode over HTTP):
 
 ---
 
-## Run it as a service (macOS launchd)
+## Run it as a service
 
-`npm run start` dies with your terminal. For an always-on deployment, register
-the web app as a LaunchAgent — `~/Library/LaunchAgents/com.claudestra.web.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.claudestra.web</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string>
-    <string>-c</string>
-    <string>exec ./node_modules/.bin/next start -p 3333</string>
-  </array>
-  <key>WorkingDirectory</key><string>/Users/YOU/path/to/claude-orchestrator/web</string>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/claudestra-web.log</string>
-  <key>StandardErrorPath</key><string>/tmp/claudestra-web.err</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-</dict>
-</plist>
-```
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudestra.web.plist
-
-# after every web/ code update:
-cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web
-```
-
-- ⚠ **`exec` straight into `next`, not `npm run start`** — an npm intermediary
-  process can leave an orphaned `next-server` behind when launchd kills the job.
-  The orphan keeps its push dispatcher alive with no listening port, and every
-  web push then arrives **twice** (July 2026 incident: 5 days of duplicated
-  notifications).
-- The push dispatcher takes an exclusive lock on `127.0.0.1:3339`
-  (`PUSH_LOCK_PORT`) so that even if two server processes coexist (prod + dev,
-  or a leaked orphan), only one sends pushes. `lsof -iTCP:3339` shows the holder.
+There is nothing to run: the web app is static files served by the Bridge or the
+relay, and `install-cli` no longer installs a `com.claudestra.web` daemon. After
+every web update just rebuild (`npm run build`) and point the host at the new `out/`.
 
 ## HTTPS when `tailscale serve` won't cooperate (Caddy + `tailscale cert`)
 
@@ -410,13 +359,10 @@ entry point, not exposure.
 | Port  | Bind         | What |
 |-------|--------------|------|
 | 443   | all (tailnet-reachable) | Caddy TLS/h2 → 3333 (only on the Caddy path) |
-| 3333  | all interfaces | Next.js web app, production |
-| 33333 | all interfaces | Next.js dev server |
-| 3847  | 127.0.0.1    | Bridge HTTP + WebSocket (`BRIDGE_PORT`/`BRIDGE_BIND`) |
-| 3339  | 127.0.0.1    | Web-push dispatcher lock (`PUSH_LOCK_PORT`) |
+| 33333 | all interfaces | Next.js dev server (development only) |
+| 3847  | 127.0.0.1    | Bridge HTTP + WebSocket + static `out/` (`BRIDGE_PORT`/`BRIDGE_BIND`/`BRIDGE_STATIC_DIR`) |
 
-Request path: phone → Caddy `:443` (TLS, tailnet-only) → Next.js `:3333`
-(BFF, session cookie) → Bridge `:3847` (Bearer token) → tmux / Claude Code.
+Request path: phone → relay (or Caddy `:443` → Bridge `:3847`) → Bridge (device cookie) → tmux / Claude Code.
 
 ---
 

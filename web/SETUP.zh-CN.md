@@ -43,10 +43,7 @@ Claudestra 的 **Next.js Web 前端** —— Discord 之外的第二道前门。
     直接跳到 [安装 Web 应用](#1-安装-web-应用)。
   - **B —— 只要 Web，不要 Discord bot**：先看
     [以 Web-only 模式运行后端](#web-only-后端不接-discord)。
-- **Bun** —— 只在跑后端和签发下面那个 API token 时才需要。
-- **本机开启 SSH 登录。** Web 应用通过本地 SSH/PAM 校验你的操作系统
-  账号（没有独立的账号体系）。macOS 上到
-  *系统设置 → 通用 → 共享 → 远程登录* 打开；否则登录会失败。
+- **Bun** —— 只用来跑后端。
 
 ---
 
@@ -65,40 +62,14 @@ npm install
 
 ## 2. 配置环境变量
 
-```bash
-cp .env.example .env.local
-```
+构建不需要任何配置。唯一可选的变量只给 **dev server** 用：
 
-填 `.env.local`：
+| 变量 | 说明 |
+|---|---|
+| `WEB_DEV_ORIGINS` | 逗号分隔的额外放行来源（你的 tailnet IP / 局域网 IP / `*.ts.net` 主机名）。不填的话从这些地址访问 dev server 会 HMR 握手失败、页面反复整页刷新。 |
 
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `CLAUDESTRA_API_TOKEN` | **是** | Bridge `/api/v1` 的 Bearer token。签发方式见下。BFF 在服务端携带它，浏览器永远看不到。 |
-| `BRIDGE_HTTP_URL` | 是 | 默认 `http://127.0.0.1:3847`。**用 `127.0.0.1`，别用 `localhost`** —— Bridge 只绑 IPv4，`::1` 的歧义会造成偶发的 10 秒 `fetch failed` 超时。 |
-| `INTERNAL_API_KEY` | 是 | 随机密钥（`openssl rand -hex 32`）。给脚本访问受保护 API 路由用的另一种鉴权方式（`x-api-key`）。 |
-| `WEB_DEV_ORIGINS` | 否 | 逗号分隔的额外来源，允许它们访问 **dev** server 的 `_next` 资源 —— 你的 tailnet IP / 局域网 IP / `*.ts.net` 主机名。不配的话，从这些地址访问时 HMR websocket 握手会失败，dev 页面会反复重载。`next start` 不需要。 |
-| `GROQ_API_KEY` | 否 | 语音转写。不设 → transcribe 端点返回 501；也可以在应用内的设置对话框里填。 |
-| `COOKIE_SECURE` | 否 | 设成 `on` 会给 session cookie 打上 `Secure`。默认关闭，这样明文的局域网 / Tailscale 访问仍然可用。 |
-| `PUSH_VAPID_SUBJECT` | 否 | 标识推送发送方的 `mailto:` 或 URL。 |
-| `PUSH_LOCK_PORT` | 否 | 推送派发器的跨进程锁端口（默认 `3339`）—— 保证无论进程怎么组合，都只有一个派发器在发。 |
-| `CLAUDESTRA_DATA_ROOT` | 否 | 覆盖 web 数据目录**本身**（默认 `~/.claude-orchestrator/web`）：SQLite（鉴权 session + per-agent 设置）、`config.json`、VAPID 密钥、上传文件、`client.log` 都在这里。2026-09 之前 SQLite 把它当 `web/` 的**父目录**读——按那种口径设过的，改成指向 `…/web`。 |
-
-**签发 API token**（在仓库根目录执行，`bun` 的路径按需替换）：
-
-```bash
-bun src/manager.ts token-add web-ui --agents '*,master' --force --terminal
-```
-
-- `--agents '*,master'` —— `*` 覆盖所有非 master 的 agent；
-  **`master` 必须显式列出**（通配符不含它）。
-- `--force` —— 表示你确认接受针对非 `--external` agent 的共享上下文防护提示。
-- `--terminal` —— 授予**远程终端**（🖥️ 实时 tmux 功能）。这是
-  **宿主 shell 级别的访问权**：在终端里可以 Ctrl-C 退出 Claude Code 进入
-  裸 shell，绕过 `--disallowedTools`。它跟 messaging 是两种独立能力，
-  所以必须显式授予。不想要 Web 终端就去掉 `--terminal` ——
-  chat / 历史 / 中断都不受影响。
-
-把打印出来的 token 填进 `CLAUDESTRA_API_TOKEN`。
+过去放在 `.env.local` 里的东西（API token、内部 key、SQLite、VAPID 密钥、Groq key）随 BFF 一起没了：
+这些状态现在归 bridge（`~/.claude-orchestrator/web-state.sqlite`、`config.json`），语音 key 在应用内「设置」里填。
 
 ---
 
@@ -115,24 +86,32 @@ macOS 上的注意事项（仅当你的 shell 全局导出了这些变量时）�
 - Turbopack 冷启动：重启后头几个请求可能返回 401/502（env / 编译尚未就绪）
   —— 刷新一下即可。
 
-## 4. 运行（生产）
+## 4. 构建（静态导出）
 
 ```bash
-npm run build
-npm run start      # → http://localhost:3333
+npm run build      # → web/out/
 ```
 
-端口刻意选了非默认值（dev `33333` / 生产 `3333`），以免和同一台机器上的
-兄弟应用撞车。
+`out/` 是一个纯静态站。谁来托管：
 
-## 5. 登录
+- **中继（默认）** —— 中继给所有人托管同一份（`RELAY_STATIC_DIR`），地址 `https://relay.<域名>/`。
+- **bridge 直托管** —— 给 bridge 设 `BRIDGE_STATIC_DIR=/path/to/web/out`（`https://<mac>:3847/`，走 Tailscale 或自带证书）。
 
-打开应用 → 会被重定向到 `/login`。输入你的**操作系统用户名 + 密码**
-—— 通过本地 SSH 连接到 `127.0.0.1:22`（PAM）来校验。成功后会种下一个
-7 天有效的 HttpOnly `cstra_session` cookie，然后落到 `/chat`。
+两者都按导出布局服务：`/chat` → `chat.html`，未知路径 → `404.html`，`/_next/static/*` 长缓存、HTML `no-cache`（`src/lib/static-site.ts`）。
+前端从托管方读 `/app-config.json` 判断自己跑在中继还是直托管模式。
 
-新 agent 是在 chat 里跟大总管（👑 大总管）对话创建的 ——
-设计上就没有单独的「新建会话」按钮。
+## 5. 配对（取代登录）
+
+打开应用 → 落在 `/pair`。在电脑上运行 `claudestra pair`：会打印二维码、链接和一个 8 位码，10 分钟内有效、只能用一次。
+
+- **扫二维码 / 点链接** —— 浏览器用链接里的秘密对挑战做 HMAC（秘密不出浏览器），当场拿到设备凭据。
+- **手输短码** —— 电脑上提示「设备 X 请求配对，授予 Y」，确认后网页自动进入。
+- **在电脑本机**（`localhost`）—— 一键配对。
+
+凭据是你自己的 bridge 签发、校验的 HttpOnly cookie；中继只做路由。一个浏览器可以配对多台机器，顶栏切换；
+*设置 → 设备* 列出全部已配对设备、可撤销，「退出登录」= 撤销本浏览器自己的那条。
+
+新 agent 是在 chat 里跟大总管（👑 大总管）对话创建的 —— 设计上就没有单独的「新建会话」按钮。
 
 ---
 
@@ -194,50 +173,10 @@ tailscale serve --bg 3333
 
 ---
 
-## 作为服务常驻（macOS launchd）
+## 作为服务常驻
 
-`npm run start` 会随终端一起死掉。想要常驻部署，就把 Web 应用注册成
-LaunchAgent —— `~/Library/LaunchAgents/com.claudestra.web.plist`：
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.claudestra.web</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string>
-    <string>-c</string>
-    <string>exec ./node_modules/.bin/next start -p 3333</string>
-  </array>
-  <key>WorkingDirectory</key><string>/Users/YOU/path/to/claude-orchestrator/web</string>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/claudestra-web.log</string>
-  <key>StandardErrorPath</key><string>/tmp/claudestra-web.err</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-</dict>
-</plist>
-```
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudestra.web.plist
-
-# 每次更新 web/ 代码之后：
-cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web
-```
-
-- ⚠ **直接 `exec` 到 `next`，不要用 `npm run start`** —— launchd 杀掉这个
-  job 时，中间那层 npm 进程可能留下一个孤儿 `next-server`。孤儿没有
-  监听端口，但它的推送派发器还活着，于是每条 Web Push 都会**收到两遍**
-  （2026 年 7 月的事故：重复通知持续了 5 天）。
-- 推送派发器会在 `127.0.0.1:3339`（`PUSH_LOCK_PORT`）上取一把独占锁，
-  这样即使两个 server 进程共存（生产 + dev，或者漏掉的孤儿），
-  也只有一个在发推送。`lsof -iTCP:3339` 能看到谁持有锁。
+没有东西要常驻：网页是 bridge 或中继托管的静态文件（`npm run build` → `out/`），`install-cli` 不再装 `com.claudestra.web`。
+每次更新 web 之后重新 build、让托管方指向新的 `out/` 即可。
 
 ## `tailscale serve` 不配合时的 HTTPS 方案（Caddy + `tailscale cert`）
 

@@ -3,7 +3,7 @@
  * /join：加入确认页。两种进来法——
  *   /join#<邀请码>：邀请落地页（src/bridge/invite-page.ts）或 iOS App 链接送过来；
  *   /join?i=web+claudestra:<邀请码>：浏览器登记过的链接（invite-intake.tsx），能进来就说明登记已生效。
- * 邀请码只在浏览器里读（# 不上服务器）；没登录时 proxy 送去 /login?next=，登录后原样回来。
+ * 邀请码只在浏览器里读（# 不上服务器）；还没配对机器时 MachineGate 送去 /pair?next=，配完原样回来。
  */
 import { useEffect, useSyncExternalStore } from "react";
 import Link from "next/link";
@@ -11,11 +11,20 @@ import { useT } from "@/lib/i18n";
 import { JoinConfirm } from "@/features/chat/components/peers-join-confirm";
 import { findInviteCode } from "@/features/chat/invite-link";
 import { setHandlerState } from "@/features/chat/invite-intake";
+import { MachineGate } from "@/features/machines/machine-gate";
 
 const noopSubscribe = () => () => {};
 const readLocation = () => `${new URLSearchParams(window.location.search).get("i") || ""}#${window.location.hash.slice(1)}`;
 
 export default function JoinPage() {
+  return (
+    <MachineGate>
+      <JoinInner />
+    </MachineGate>
+  );
+}
+
+function JoinInner() {
   const t = useT();
   // 服务端渲染时没有地址栏：null = 还没读到（先不显示「链接不完整」）
   const raw = useSyncExternalStore(noopSubscribe, readLocation, () => null);
