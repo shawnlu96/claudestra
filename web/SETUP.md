@@ -2,11 +2,10 @@
 
 **English** · [简体中文](./SETUP.zh-CN.md)
 
-The **Next.js web frontend** for Claudestra — a second front door beside Discord.
-It is a **static export** (`out/`) that the relay or the Bridge itself serves; the
-browser talks straight to the Bridge's HTTP API (`/api/v1` + `/api/v1/events`).
-There is no web server process, no BFF and no account system: signing in means
-**pairing this browser with your Mac** (`claudestra pair`).
+The **web frontend** for Claudestra — a second front door beside Discord. It is a
+**static Next.js export** (`web/out`): no server of its own, no login database.
+The bridge serves the files itself and answers every API call; browsers are
+**paired** to a machine with a device credential instead of logging in.
 
 What you get:
 
@@ -22,133 +21,117 @@ What you get:
   button next to the composer; pin favourites, the rest auto-sort by usage.
 - **Background-task threads** — subagents and background shells stream into
   collapsible panels instead of flooding the main conversation.
+- **Several machines in one browser** — pair each machine once, switch in the top bar.
 - **PWA-installable** — add to your phone's home screen for a full-screen app feel,
-  with self-hosted Web Push (VAPID keys are generated on first use — no third-party
-  account, no signup).
+  with Web Push (through the relay, or self-signed VAPID when served by the bridge).
 - Profile customisation (your + Claude's avatar/nickname), session management
   (create / kill / restart / clear / multi-select delete), per-agent init messages.
 
 > Architecture & internals live in [`web/CLAUDE.md`](./CLAUDE.md). The wire
 > contract (auth, history pagination, SSE events) is in
-> [`docs/web-frontend-guide.md`](../docs/web-frontend-guide.md). This file is just
-> "how do I install and run it."
+> [`docs/web-frontend-guide.md`](../docs/web-frontend-guide.md); the hosted-frontend
+> design (pairing, relay path mode, trust boundary) in
+> [`docs/design-hosted-frontend.md`](../docs/design-hosted-frontend.md). This file is
+> just "how do I build, serve and reach it."
 
 ---
 
 ## Prerequisites
 
-- **Node.js ≥ 20** + npm (Next 16 / React 19). The web app runs on Node, entirely
-  separate from the Bun backend — two independent dependency trees.
-- **The Claudestra Bridge must be running** (default `http://127.0.0.1:3847`). Two ways to get there:
-  - **A — you already run Claudestra with Discord** (see [`../SETUP.md`](../SETUP.md)):
-    the Bridge, the `claudestra` MCP server, and the Stop hook are already wired by
-    `bun run setup`. Skip to [Install the web app](#1-install-the-web-app).
-  - **B — Web-only, no Discord bot**: see
-    [Run the backend in Web-only mode](#web-only-backend-no-discord) first.
-- **Bun** — only needed to run the backend.
+- **Node.js ≥ 20** + npm — only to **build** the bundle (Next 16 / React 19). Nothing
+  Node-based runs afterwards; the bridge (Bun) serves the output.
+- **The Claudestra Bridge must be running** (`bun run setup` installs it as
+  `com.claudestra.bridge`; Web-only without Discord: see
+  [Web-only backend](#web-only-backend-no-discord)).
+- Nothing else: no SSH / Remote Login, no `.env.local`, no API token to issue.
 
----
-
-## 1. Install the web app
+## 1. Build
 
 ```bash
 cd web
 npm install
+npm run build          # → web/out (static export)
 ```
 
 No monorepo checkout is required: `@do-md/zenith` and `@do-md/common` are vendored
 under `web/.packages/` (committed, resolved via `tsconfig.json` paths).
-`@do-md/core-react` comes from npm like any other dependency.
 
----
+`bun run setup` does exactly this in its *Build the web frontend* step, and
+`claudestra update` / `bun src/manager.ts install-cli` rebuild `web/out` whenever the
+last commit touching `web/` moved (`src/lib/web-build.ts`: the previous `.next` and
+`out` are cloned first and restored if the build fails, so a broken build never
+leaves the site 404). The bridge reads `out/` per request — no restart after a build.
 
-## 2. Configure environment
+## 2. Serve
 
-Nothing is required for a build. The only optional variable is for the **dev server**:
+The bridge serves the bundle when `.env` has
 
-| Variable | Notes |
-|---|---|
-| `WEB_DEV_ORIGINS` | Comma-separated extra origins allowed to reach the dev server's `_next` assets — your tailnet IP / LAN IP / `*.ts.net` hostname. Without it, HMR websocket handshakes fail from those addresses and the dev page reloads in a loop. |
-
-Everything that used to live in `.env.local` (API token, internal key, SQLite,
-VAPID keys, Groq key) is gone with the BFF: the Bridge holds that state now
-(`~/.claude-orchestrator/web-state.sqlite`, `config.json`), and the voice key is
-set in the in-app Settings.
-
----
-
-## 3. Run (development)
-
-```bash
-npm run dev        # → http://localhost:33333
+```
+BRIDGE_STATIC_DIR=/absolute/path/to/claudestra/web/out
 ```
 
-macOS gotchas (only if your shell exports these globally):
+`bun run setup` writes that line when you pick the Web frontend; by hand, add it and
+`launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`. Then open
+`http://127.0.0.1:3847/` (your `BRIDGE_PORT`). `GET /app-config.json` tells the page
+it is in *direct* mode (`{ mode: "direct", fp, machineName }`); through the relay the
+same bundle runs in *relay* mode against `/m/<fingerprint>/api/v1`.
 
-- Global `NODE_ENV=production` shadows dev mode → `NODE_ENV=development npm run dev`.
-- Global `INTERNAL_API_KEY` shadows `.env.local` → `env -u INTERNAL_API_KEY npm run dev`.
-- Turbopack cold start: the first few requests after a restart may 401/502 while
-  env/compilation settles — just refresh.
+`bun src/manager.ts doctor` has a *前端静态包* group: build freshness, whether
+`BRIDGE_STATIC_DIR` points at an existing `index.html`, and — under *launchd daemon* —
+a reminder if the pre-2026-09 `com.claudestra.web` plist is still around.
 
-## 4. Build (static export)
+## 3. Pair a browser
+
+There is no password. A browser becomes a **device** of your machine:
 
 ```bash
-npm run build      # → web/out/
+claudestra pair                      # you: all agents + master + terminal + manage
+claudestra pair --guest ana --agents a,b --no-terminal   # someone else: a scoped guest
+claudestra pair --url https://mac.tail0000.ts.net        # direct entry: QR/link for that address
 ```
 
-`out/` is a plain static site. Who serves it:
+It prints a QR code, a link (`<entry>/pair#<fp>.<secret>`) and an 8-character code
+(10 minutes, single use). Scan or open the link and the browser is paired
+immediately; typing the code on `/pair` puts the phone into *waiting* until you
+confirm in the terminal (or the Devices panel) — a guessed code gets nobody in.
+The credential is an HttpOnly cookie issued and verified by *your* bridge; revoke
+any device from the Devices panel or `DELETE /api/v1/devices/:id`. A browser on the
+machine itself (loopback) pairs automatically. `/login` redirects to `/pair`.
 
-- **Relay (default)** — the relay hosts one copy for everyone (`RELAY_STATIC_DIR`), at `https://relay.<domain>/`.
-- **Bridge directly** — set `BRIDGE_STATIC_DIR=/path/to/web/out` on the bridge (`https://<mac>:3847/` via Tailscale or your own certificate).
+## 4. Development
 
-Both serve `/chat` as `chat.html`, unknown paths as `404.html`, `/_next/static/*` with long caching and HTML with `no-cache` (`src/lib/static-site.ts`). The
-export reads `/app-config.json` from its host to learn whether it runs in relay or direct mode.
+```bash
+npm run dev            # → http://localhost:33333, see web/CLAUDE.md for pointing it at a bridge
+```
 
-## 5. Pair (this replaces logging in)
-
-Open the app → you land on `/pair`. On the Mac run `claudestra pair`: it prints a QR
-code, a link and an 8-character code, all valid for 10 minutes and single use.
-
-- **Scan the QR / open the link** — the browser proves it holds the secret (HMAC over
-  a challenge; the secret never leaves the browser) and gets a device credential
-  right away.
-- **Type the code** — the Mac shows "device X wants to pair, grant Y"; confirm there
-  and the page continues on its own.
-- **On the Mac itself** (`localhost`) — one-tap pairing.
-
-The credential is an HttpOnly cookie signed and checked by your own Bridge; the
-relay only routes. One browser can pair several machines and switch between them
-from the top bar; *Settings → Devices* lists every paired device, revokes them,
-and "Sign out" revokes this browser's own credential.
-
-New agents are created by talking to the master orchestrator (👑 大总管) in chat —
-there is no separate "new session" button by design.
+macOS gotcha: a global `NODE_ENV=production` shadows dev mode →
+`NODE_ENV=development npm run dev`.
 
 ---
 
-## 6. Access from your phone (remote access)
+## 5. Access from your phone (remote access)
 
-The whole point of Claudestra is driving your workstation from your phone. Four
-tiers, in order of recommendation:
+The whole point of Claudestra is driving your workstation from your phone. In order
+of recommendation:
 
-### Relay (default — nothing to install on the phone)
+### Relay (default — one address, nothing to install)
 
 `bun run setup`'s *Phone access* step configures this by default: the bridge keeps
-one outbound WebSocket to the relay, and `https://<your-name>.<relay-domain>` is
-this machine's web client from any network — HTTPS included, so the PWA, push and
-passkeys all work. `claudestra pair` prints a QR code that signs the phone in.
-Details, self-hosting and the trust boundary: [../docs/relay/README.md](../docs/relay/README.md).
+one outbound WebSocket to the relay, and **`https://<relay-domain>/`** is the web
+client for every machine you pair — HTTPS included, so PWA and push work. Pair with
+`claudestra pair` (QR) or type the code on the relay's front page. Details,
+self-hosting and the trust boundary: [../docs/relay/README.md](../docs/relay/README.md).
 The tiers below are for when you'd rather not route through a relay at all.
 
-### Same Wi-Fi (zero setup)
+### Same Wi-Fi (degraded)
 
-`npm run start` listens on all interfaces, so any device on the same network can
-open `http://<your-mac-lan-ip>:3333` (find the IP under *System Settings → Wi-Fi →
-Details*, or `ipconfig getifaddr en0`). Log in with the same OS username/password.
+With `BRIDGE_BIND=0.0.0.0` the bridge listens on all interfaces, so any device on
+the same network can open `http://<your-mac-lan-ip>:3847/` (find the IP under
+*System Settings → Wi-Fi → Details*, or `ipconfig getifaddr en0`). Pair with
+`claudestra pair --url http://<lan-ip>:3847`. Plain HTTP: no service worker, no push,
+no voice input — fine for a quick test, useless once you leave the house.
 
-Good for a quick test; useless once you leave the house.
-
-### Tailscale (alternative: your own private network, no third party)
+### Tailscale (your own private network, no third party)
 
 [Tailscale](https://tailscale.com) gives every device a stable private IP over
 WireGuard — no port forwarding, no public exposure, free for personal use. Pick
@@ -156,31 +139,30 @@ option 2 in the wizard's *Phone access* step and it walks you through this:
 
 1. Install Tailscale on the workstation and on your phone, log both into the same
    tailnet.
-2. From your phone, open `http://<machine-name>:3333` (MagicDNS) or
-   `http://100.x.y.z:3333`.
+2. Let Tailscale terminate TLS in front of the **bridge port** (the wizard runs this
+   after asking):
 
-For **HTTPS** (required for PWA service workers and web push — plain-HTTP access
-works for chat but installs as a degraded PWA), let Tailscale terminate TLS with a
-real certificate:
+   ```bash
+   tailscale serve --bg http://127.0.0.1:3847
+   # → https://<machine-name>.<tailnet>.ts.net
+   ```
 
-```bash
-tailscale serve --bg 3333
-# → https://<machine-name>.<tailnet>.ts.net
-```
-
-That URL is reachable only from inside your tailnet, but carries a browser-trusted
-certificate — the ideal endpoint to install the PWA from.
+   That URL is reachable only from inside your tailnet, but carries a browser-trusted
+   certificate — the ideal endpoint to install the PWA from. Requests through
+   `tailscale serve` reach the bridge from 127.0.0.1 with an `X-Forwarded-For`
+   header; the bridge treats those as **non-loopback**, so the proxy does not inherit
+   the loopback exemption of the control routes.
+3. Pair: `claudestra pair --url https://<machine-name>.<tailnet>.ts.net`.
 
 ### Public reverse proxy (advanced, only if you know why you need it)
 
-Put Caddy/nginx with TLS in front of port `3333` on a domain you own. Keep in mind:
+Put Caddy/nginx with TLS in front of the bridge port on a domain you own. Keep in mind:
 
-- **Never** port-forward `3333` (or Bridge's `3847`) raw to the internet. The web
-  login is your **OS account password** — brute-forcing it is brute-forcing your
-  machine.
-- Add your own rate limiting / IP allowlist / 2FA layer at the proxy.
-- `BRIDGE_BIND` stays `127.0.0.1` — only the Next.js app needs to be reachable;
-  the browser never talks to the Bridge directly.
+- **Never** port-forward `3847` raw to the internet; put rate limiting / an IP
+  allowlist at the proxy. The pairing flow is brute-force-limited, but the surface
+  is still your machine.
+- Route `/api/v1/*` for **peers** to the peer-only ingress port (below), not to the
+  bridge port.
 
 ### Install as a PWA
 
@@ -196,11 +178,30 @@ Once the app is reachable over HTTPS (or you accept degraded mode over HTTP):
 
 ---
 
-## Run it as a service
+## Upgrading from the pre-2026-09 web service
 
-There is nothing to run: the web app is static files served by the Bridge or the
-relay, and `install-cli` no longer installs a `com.claudestra.web` daemon. After
-every web update just rebuild (`npm run build`) and point the host at the new `out/`.
+Before the hosted frontend the web client ran as its own Next.js server
+(`com.claudestra.web`, port 3333, SSH login, `~/.claude-orchestrator/web/`). After
+updating to a bridge that serves `web/out`:
+
+1. `claudestra migrate-web-state` — tars `~/.claude-orchestrator/web/` into
+   `~/.claude-orchestrator/backups/web-<ts>.tgz`, then copies the 8 settings tables
+   (profile, agent settings, skill prefs, push subscriptions, hidden ranges, unread
+   marks, APNs devices) and `groqApiKey` into the bridge's `web-state.sqlite`.
+   Idempotent; the old data is left in place.
+2. Open the new entry (`http://127.0.0.1:3847/`, the relay, or your Tailscale URL),
+   pair once and check chat + push.
+3. `claudestra retire-web` — refuses until `BRIDGE_STATIC_DIR` is served
+   (`/app-config.json` answers) **and** a backup from step 1 exists; then
+   `launchctl bootout`s the old daemon and moves its plist to
+   `~/.claude-orchestrator/backups/com.claudestra.web.plist.<ts>`, printing the
+   rollback command. `~/.claude-orchestrator/web/` is never deleted.
+
+`doctor` nags about the old plist until step 3 is done. Passkeys, TOTP and the SSH
+login are gone; the browser session cookie `cstra_session` is replaced by the device
+cookie `cstra_dev`.
+
+---
 
 ## HTTPS when `tailscale serve` won't cooperate (Caddy + `tailscale cert`)
 
@@ -213,14 +214,14 @@ connections-per-host and crawls on mobile.
 
 ```bash
 brew install caddy
-mkdir -p ~/.claude-orchestrator/web/tls ~/.claude-orchestrator/web/caddy
+mkdir -p ~/.claude-orchestrator/tls ~/.claude-orchestrator/caddy
 tailscale cert \
-  --cert-file ~/.claude-orchestrator/web/tls/mac.crt \
-  --key-file  ~/.claude-orchestrator/web/tls/mac.key \
+  --cert-file ~/.claude-orchestrator/tls/mac.crt \
+  --key-file  ~/.claude-orchestrator/tls/mac.key \
   <machine>.<tailnet>.ts.net
 ```
 
-`~/.claude-orchestrator/web/caddy/Caddyfile`:
+`~/.claude-orchestrator/caddy/Caddyfile`:
 
 ```
 {
@@ -229,15 +230,15 @@ tailscale cert \
 }
 
 https://<machine>.<tailnet>.ts.net:443 {
-	tls /Users/YOU/.claude-orchestrator/web/tls/mac.crt /Users/YOU/.claude-orchestrator/web/tls/mac.key
+	tls /Users/YOU/.claude-orchestrator/tls/mac.crt /Users/YOU/.claude-orchestrator/tls/mac.key
 	# Response compression — not optional if clients come in over slow links.
-	# Neither `next start` nor the bridge compresses; without this a large chat
-	# history JSON (hundreds of kB) ships raw and can take 10s+ on a lossy
-	# cross-border path (2026-07-24: 560 kB → 102 kB, 13.9s → 0.3s). SSE is
-	# safe: caddy's encode flushes per event, verified no buffering.
+	# The bridge does not compress; without this a large chat history JSON
+	# (hundreds of kB) ships raw and can take 10s+ on a lossy cross-border path
+	# (2026-07-24: 560 kB → 102 kB, 13.9s → 0.3s). SSE is safe: caddy's encode
+	# flushes per event, verified no buffering.
 	encode zstd gzip
 	handle {
-		reverse_proxy 127.0.0.1:3333
+		reverse_proxy 127.0.0.1:3847
 	}
 }
 ```
@@ -245,16 +246,18 @@ https://<machine>.<tailnet>.ts.net:443 {
 (Other projects on the same machine may add their own routes to this
 Caddyfile — that is between them and Caddy, out of scope here.)
 
-Then a second LaunchAgent (same skeleton as `com.claudestra.web.plist` above)
-whose `ProgramArguments` runs
-`/opt/homebrew/bin/caddy run --config /Users/YOU/.claude-orchestrator/web/caddy/Caddyfile`,
-with logs pointed at `~/.claude-orchestrator/web/caddy/`. Bootstrap it the same
-way.
+Then a LaunchAgent (label of your choice, `RunAtLoad` + `KeepAlive`) whose
+`ProgramArguments` runs
+`/opt/homebrew/bin/caddy run --config /Users/YOU/.claude-orchestrator/caddy/Caddyfile`,
+with logs pointed at `~/.claude-orchestrator/caddy/`, bootstrapped with
+`launchctl bootstrap gui/$(id -u) <plist>`.
 
 - Register **exactly one** caddy LaunchAgent. Caddy binds 443 with
   `SO_REUSEPORT`, so a duplicate registration silently starts a *second* copy
   load-balancing the same port instead of failing loudly.
 - Non-root processes may bind 443 on modern macOS (wildcard address).
+- Caddy sets `X-Forwarded-For`, so the bridge treats proxied requests as
+  non-loopback (see the Tailscale section) — that is what you want.
 - **Certificate renewal** — `tailscale cert` certificates last ~90 days and do
   not auto-renew here. `bun scripts/renew-ts-cert.ts` checks expiry and is a
   dry run by default; `--apply --reload-label <your-caddy-label> --notify`
@@ -265,9 +268,9 @@ way.
 
 ### Peers over the same HTTPS entry
 
-Claudestra peers (other instances that call your agents) can use this HTTPS entry instead of the bridge port, so the bridge never has to listen beyond loopback and new peers don't need firewall allowlist entries — only a route to this machine (e.g. share it with them in Tailscale).
+Claudestra peers (other instances that call your agents) can use this HTTPS entry instead of the bridge port, so new peers don't need firewall allowlist entries — only a route to this machine (e.g. share it with them in Tailscale).
 
-1. Pick a free loopback port for the peer entrance and add it to the repo's `.env`, e.g. `PEER_INGRESS_PORT=3848`, then restart the bridge. It serves only `/api/v1` with peer tokens — no control routes, no websocket, and the full-scope web token is refused there.
+1. Pick a free loopback port for the peer entrance and add it to the repo's `.env`, e.g. `PEER_INGRESS_PORT=3848`, then restart the bridge. It serves only `/api/v1` with peer tokens — no control routes, no websocket, no device cookies.
 2. Route `/api/v1/*` to it inside the `ts.net` site block, **before** the web `handle`:
 
    ```caddyfile
@@ -276,10 +279,10 @@ Claudestra peers (other instances that call your agents) can use this HTTPS entr
    }
    ```
 
-   Never point this at the bridge port itself: requests through Caddy arrive from `127.0.0.1`, and the bridge trusts loopback for its control routes.
+   Keep peers on the dedicated port rather than the bridge port: the bridge port also carries device-cookie sessions and the control routes, and the peer entrance is the surface that is meant to be reachable by other machines.
 3. `peer-invite-new` then writes the `https://` address into invites automatically (it probes `/api/v1` through the entry first and falls back to the bridge address if the probe fails). Set `PEER_PUBLIC_URL` in `.env` to force a specific base URL.
 
-With `tailscale serve`, `bun run setup` adds the equivalent `--set-path /api/v1` handler and writes `PEER_INGRESS_PORT` when you let it configure HTTPS.
+With `tailscale serve`, `bun run setup` adds the equivalent `--set-path /api/v1` handler and writes `PEER_INGRESS_PORT` when you let it configure HTTPS. On the relay none of this is needed — peer addresses are `relay://<fingerprint>`.
 
 No HTTPS entry and the bridge still bound to loopback (the default)? You don't need to open the bridge port either: `peer-invite-new` then opens the same peer-only entrance on all interfaces (`PEER_INGRESS_PUBLIC=1` in `.env`, only while peer tokens exist) and writes `http://<tailnet IP>:<that port>` into the invite. The bridge port keeps listening on loopback only.
 
@@ -291,7 +294,7 @@ loss) the defaults can *lose* to plain HTTP/1.1: h2 multiplexes everything over
 one TCP connection, so a single lost packet head-of-line-blocks every stream;
 h3/QUIC avoids that but rides UDP, which intermediate carriers on such routes
 often throttle or blackhole. Telltale: browsing through Caddy feels much slower
-than hitting `:3333` directly (the direct hit uses the browser's six parallel
+than hitting `:3847` directly (the direct hit uses the browser's six parallel
 h1 connections). Fix — force h1 in the global options:
 
 ```
@@ -329,8 +332,8 @@ entry point, not exposure.
    ```bash
    acme.sh --issue --dns dns_cf -d 'your-domain.com' -d '*.your-domain.com'
    acme.sh --install-cert -d 'your-domain.com' \
-     --fullchain-file ~/.claude-orchestrator/web/tls/custom/fullchain.pem \
-     --key-file       ~/.claude-orchestrator/web/tls/custom/key.pem \
+     --fullchain-file ~/.claude-orchestrator/tls/custom/fullchain.pem \
+     --key-file       ~/.claude-orchestrator/tls/custom/key.pem \
      --reloadcmd "launchctl kickstart -k gui/$(id -u)/<your-caddy-label>"
    ```
 
@@ -339,10 +342,10 @@ entry point, not exposure.
 
    ```
    https://claude.your-domain.com:443 {
-   	tls /Users/YOU/.claude-orchestrator/web/tls/custom/fullchain.pem /Users/YOU/.claude-orchestrator/web/tls/custom/key.pem
+   	tls /Users/YOU/.claude-orchestrator/tls/custom/fullchain.pem /Users/YOU/.claude-orchestrator/tls/custom/key.pem
    	encode zstd gzip
    	handle {
-   		reverse_proxy 127.0.0.1:3333
+   		reverse_proxy 127.0.0.1:3847
    	}
    }
    ```
@@ -354,15 +357,17 @@ entry point, not exposure.
    `--reloadcmd` above restarts Caddy with the fresh cert. The `ts.net` block
    can stay alongside as a second entry point.
 
-## Port map (production)
+## Port map
 
 | Port  | Bind         | What |
 |-------|--------------|------|
-| 443   | all (tailnet-reachable) | Caddy TLS/h2 → 3333 (only on the Caddy path) |
+| 443   | all (tailnet-reachable) | `tailscale serve` or Caddy TLS/h2 → 3847 |
+| 3847  | 127.0.0.1 (default) | Bridge: HTTP API + WebSocket **+ the web client** (`BRIDGE_PORT` / `BRIDGE_BIND` / `BRIDGE_STATIC_DIR`) |
+| 3848… | 127.0.0.1 | Peer-only `/api/v1` ingress (`PEER_INGRESS_PORT`, picked by setup) |
 | 33333 | all interfaces | Next.js dev server (development only) |
-| 3847  | 127.0.0.1    | Bridge HTTP + WebSocket + static `out/` (`BRIDGE_PORT`/`BRIDGE_BIND`/`BRIDGE_STATIC_DIR`) |
 
-Request path: phone → relay (or Caddy `:443` → Bridge `:3847`) → Bridge (device cookie) → tmux / Claude Code.
+Request path: phone → relay (or Caddy / tailscale serve `:443`) → Bridge `:3847`
+(static files + `/api/v1`, device cookie) → tmux / Claude Code.
 
 ---
 
@@ -370,7 +375,7 @@ Request path: phone → relay (or Caddy `:443` → Bridge `:3847`) → Bridge (d
 
 If you don't want a Discord bot, run the Bridge in **Web-only mode** — it detects
 the absence of `DISCORD_BOT_TOKEN` and skips all Discord init while still serving
-the `/api/v1` + `/api/v1/events` the web app needs.
+the static bundle and the `/api/v1` + `/api/v1/events` the web app needs.
 
 ### One-time backend prerequisites
 
@@ -398,7 +403,7 @@ the `/api/v1` + `/api/v1/events` the web app needs.
 ```bash
 # from repo root
 unset DISCORD_BOT_TOKEN
-CONTROL_CHANNEL_ID=local-master-control bun run src/bridge.ts
+CONTROL_CHANNEL_ID=local-master-control BRIDGE_STATIC_DIR=$(pwd)/web/out bun run src/bridge.ts
 ```
 
 ### Create an agent
@@ -435,6 +440,8 @@ launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge
 ## Reference
 
 - [`web/CLAUDE.md`](./CLAUDE.md) — internal architecture, data flow, PWA gotchas.
+- [`docs/design-hosted-frontend.md`](../docs/design-hosted-frontend.md) — pairing,
+  device credentials, relay path mode, trust boundary, migration order.
 - [`docs/web-frontend-guide.md`](../docs/web-frontend-guide.md) — the `/api/v1` +
   `/events` contract (auth, history pagination, SSE event types).
 - [`docs/design-multi-frontend.md`](../docs/design-multi-frontend.md) — multi-frontend

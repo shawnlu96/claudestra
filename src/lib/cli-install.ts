@@ -46,18 +46,15 @@ import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSetti
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
-import { rebuildWebIfStale, restartWebService, type WebBuildResult } from "./web-build.js";
+import { rebuildWebIfStale, type WebBuildResult } from "./web-build.js";
+import { legacyWebPlistPath, staticIndexExists, webStaticState, webStaticWarnings } from "./web-static.js";
 
 
-export interface DaemonSpec {
+interface DaemonSpec {
   label: string;
   stem: string;
-  /** bun 跑的仓库内脚本（与 exec 二选一） */
-  script?: string;
-  /** 自带 argv + 工作目录（web 前端走这条：next start，不经 bun） */
-  exec?: { cwd: string; argv: string[] };
-  /** 已存在同名 plist 就不覆盖（给 web：用户可能手写过自己的） */
-  keepExisting?: boolean;
+  /** bun 跑的仓库内脚本 */
+  script: string;
 }
 
 /** 常驻 daemon 的 launchd 定义。改这里 = 改启动链。 */
@@ -71,92 +68,14 @@ export const DAEMONS: DaemonSpec[] = [
   { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
 ];
 
-/**
- * 生成标记。写进我们自己生成的每一份 plist。
- *
- * ⚠ 为什么必须有：`keepExisting` 原本是「文件已存在就不覆盖」，用来保护用户手写的
- * plist（改过端口 / 日志落点 / 挂在反代后面）。但它同时也保护了**我们上一版生成的
- * 那一份**——试装用户 2026-09-22 就栽在这：他先用带 shebang bug 的版本跑过一次
- * install-cli，生成了一份起不来的 web plist（launchctl 报 exit 127 = 命令找不到）；
- * 之后拉了修复版再跑，`keepExisting` 原样保留那份坏文件，**修复根本没机会生效**。
- * 「不覆盖用户的」和「永远不更新自己的」是两件事，靠这个标记分开。
- */
-const GENERATED_MARKER = "ClaudestraGenerated";
-
-/**
- * 我们**历史上生成过**的 web plist 长什么样（用来认出「标记出现之前生成的那些」）。
- *
- * ⚠ 光有标记不够 —— 标记是 2026-09-22 才加的，在那之前生成的 plist 一个标记都没有，
- * 于是被永远当成「用户手写的」保护起来、再也更新不了。试装现场就卡死在这：
- * install-cli 回 `keptExisting: true`，而那份文件正是上一版生成的坏文件
- * （`env: node: No such file or directory`）。
- *
- * 判据只认**独立的绝对路径**元素，不做子串匹配：用户手写的那种
- * `/bin/sh -c 'exec ./node_modules/.bin/next start -p 3333'` 里虽然也出现
- * `./node_modules/.bin/next`，但它是一整条命令字符串、不是绝对路径元素，
- * 所以不会被误判成我们的（实测 owner 本机那份仍被判为用户手写）。
- */
-const LEGACY_GENERATED_ARGV = [
-  /<string>\/[^<]*\/node_modules\/\.bin\/next<\/string>/,
-  /<string>\/[^<]*\/node_modules\/next\/dist\/bin\/next<\/string>/,
-];
-
-/** 这份 plist 是我们自己生成的吗（不是 ⇒ 用户手写，永不覆盖） */
-export function isGeneratedPlist(content: string): boolean {
-  if (content.includes(`<key>${GENERATED_MARKER}</key>`)) return true;
-  return LEGACY_GENERATED_ARGV.some((re) => re.test(content));
-}
-
-/** web 前端的默认端口（web/package.json 的 `start` 脚本没写明时用它） */
+/** 旧 web 服务的默认端口（web/package.json 的 `start` 脚本没写明时用它）；只剩中继的子域名兼容隧道在用 */
 export const WEB_PORT_FALLBACK = 3333;
 
-/**
- * 从 `web/package.json` 的 `start` 脚本里抠出端口（纯函数，单测覆盖）。
- *
- * 端口的**唯一真源**是那个脚本（`next start -p 3333`）：plist 里再写一遍就会有两份
- * 会漂的配置——改了 package.json 却忘了重装 plist，网页就 502 在一个没人监听的端口上。
- */
+/** 从 `web/package.json` 的 `start` 脚本里抠出端口（纯函数，单测覆盖）——脚本是这个端口的唯一真源 */
 export function webPortFromStartScript(startScript: string | undefined): number {
   const m = /(?:-p|--port)[\s=]+(\d{2,5})/.exec(startScript ?? "");
   const n = m ? Number(m[1]) : NaN;
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : WEB_PORT_FALLBACK;
-}
-
-/**
- * web 前端够不够格装成 daemon（纯函数，单测覆盖）。
- *
- * 四个条件缺一不可，因为 `next start` 对三种缺失的报错都很难懂：
- *  - 没有 `web/package.json` = 上游精简版，压根没有前端；
- *  - 没装依赖（`node_modules/.bin/next`）= 启动即 command not found；
- *  - 没 build（`.next/BUILD_ID`）= next start 直接退出让你先 build；
- *  - 没有 `web/.env.local` = 没签 API token，页面起来了也连不上 bridge。
- */
-export function webDaemonReadiness(has: {
-  pkg: boolean; nextBin: boolean; build: boolean; envLocal: boolean;
-}): { ready: boolean; reason?: string } {
-  if (!has.pkg) return { ready: false, reason: "本 checkout 没有 web/ 前端" };
-  if (!has.envLocal) return { ready: false, reason: "web/.env.local 还没生成（跑 bun run setup 选上 Web）" };
-  if (!has.nextBin) return { ready: false, reason: "web 依赖没装（cd web && npm install）" };
-  if (!has.build) return { ready: false, reason: "web 还没构建（cd web && npm run build）" };
-  return { ready: true };
-}
-
-/**
- * web daemon 的 spec。**只在文件不存在时写**（keepExisting）：这台机器上可能已经有一份
- * 手写的 plist（改过端口、日志落点、或挂在反代后面），install-cli 每次 update 都会跑，
- * 无条件覆盖等于每次升级都把用户的定制悄悄抹掉。
- */
-export function webDaemonSpec(repoRoot: string, port: number, nodePath?: string | null): DaemonSpec {
-  const webDir = `${repoRoot}/web`;
-  // ⚠ 不要直接 exec `node_modules/.bin/next`：它是 `#!/usr/bin/env node` 的 shim，
-  //   解析 node 靠的是 **plist 里那份固定 PATH**。用 nvm / fnm / volta 装 node 的机器
-  //   （相当常见）node 在 ~/.nvm/versions/node/vX/bin 之类的地方，不在那份列表里 ⇒
-  //   launchd 起不来这个 daemon，端口永远不监听，用户看到的就是「装完网页打不开」，
-  //   而且 KeepAlive 会让它安静地重试到天荒地老。拿到 node 绝对路径就直接 exec 它。
-  const argv = nodePath
-    ? [nodePath, `${webDir}/node_modules/next/dist/bin/next`, "start", "-p", String(port)]
-    : [`${webDir}/node_modules/.bin/next`, "start", "-p", String(port)];
-  return { label: "com.claudestra.web", stem: "web", keepExisting: true, exec: { cwd: webDir, argv } };
 }
 
 /** 老 pm2 启动名（用于 stop 老的、避免跟新 launchd 抢） */
@@ -181,8 +100,6 @@ export interface DaemonInstall {
   plistPath: string;
   loaded: boolean;
   warning?: string;
-  /** 已有同名 plist，原样保留、也没重新 load（见 webDaemonSpec 的 keepExisting） */
-  keptExisting?: boolean;
 }
 
 export interface InstallCliResult {
@@ -206,13 +123,11 @@ export interface InstallCliResult {
   allowedMcpTools?: { added: string[]; servers: string[] } | null;
   /** v2.5.4+ repo skills/ 里随包分发的 skill，symlink 到 ~/.claude/skills/ 的结果 */
   bundledSkills?: { linked: string[]; skipped: string[] };
-  /** v2.24+ web 前端 daemon：装上了就给 url，没装给不够格的原因 */
-  webDaemon?:
-    | { installed: true; port: number; url: string; serving: boolean; error?: string; log?: string[] }
-    | { installed: false; reason?: string };
+  /** 前端静态包：.env 的 BRIDGE_STATIC_DIR（空 = bridge 不托管网页）+ web/out/index.html 在不在 */
+  web: { staticDir: string; built: boolean };
   /** v2.24+ 装完逐个探活；不健康的自动 kickstart 一次再探 */
   daemonHealth?: DaemonHealth[];
-  /** web 构建过期（按 hash 判）就在 reload 之前重建；失败只进 warnings */
+  /** web 静态包过期（按 hash 判）就在 reload 之前重建；失败只进 warnings */
   webBuild?: WebBuildResult;
   errors: string[];
   warnings: string[];
@@ -307,7 +222,7 @@ function getUid(): string {
 function buildEnvPath(): string {
   const home = homedir();
   // node 的实际所在目录排在最前：nvm / fnm / volta 的路径不在下面这份固定列表里，
-  // 而 web daemon 与它派生的子进程都要用到 node（见 webDaemonSpec 的注释）。
+  // 而 launcher 派生的自动更新会跑 `npm run build`（web 静态包），npm 脚本要找得到 node。
   const nodeDir = (() => {
     const p = stableBinPath("node");
     return p ? dirname(p) : null;
@@ -484,18 +399,13 @@ function buildDaemonPlist(
 ): string {
   const home = homedir();
   const envPath = buildEnvPath();
-  const cwd = daemon.exec?.cwd ?? repoRoot;
-  const argv = daemon.exec?.argv ?? [bunPath, `${repoRoot}/${daemon.script}`];
+  const argv = [bunPath, `${repoRoot}/${daemon.script}`];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>${daemon.label}</string>
-  <!-- 这一条是 Claudestra 生成的。keepExisting 的 daemon 靠它区分「用户手写的」
-       和「我们上一版生成的」：手写的永远不覆盖，自己生成的必须能被新版替换。 -->
-  <key>${GENERATED_MARKER}</key>
-  <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -503,7 +413,7 @@ function buildDaemonPlist(
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>WorkingDirectory</key>
-  <string>${cwd}</string>
+  <string>${repoRoot}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
@@ -535,26 +445,12 @@ ${argv.map((a) => `    <string>${a}</string>`).join("\n")}
 `;
 }
 
-async function writeDaemonPlists(
-  repoRoot: string,
-  bunPath: string,
-  extra: DaemonSpec[] = [],
-): Promise<{ label: string; plistPath: string; kept?: boolean }[]> {
+async function writeDaemonPlists(repoRoot: string, bunPath: string): Promise<{ label: string; plistPath: string }[]> {
   const dir = `${homedir()}/Library/LaunchAgents`;
   await mkdir(dir, { recursive: true });
-  const out: { label: string; plistPath: string; kept?: boolean }[] = [];
-  for (const d of [...DAEMONS, ...extra]) {
+  const out: { label: string; plistPath: string }[] = [];
+  for (const d of DAEMONS) {
     const plistPath = `${dir}/${d.label}.plist`;
-    // keepExisting：只保留**用户手写的**。我们自己生成的必须能被新版替换，
-    // 否则一旦生成过一份坏的，后续所有修复都进不来（见 GENERATED_MARKER）。
-    if (d.keepExisting && existsSync(plistPath)) {
-      let mine = false;
-      try { mine = isGeneratedPlist(readFileSync(plistPath, "utf-8")); } catch { /* 读不了就当是用户的 */ }
-      if (!mine) {
-        out.push({ label: d.label, plistPath, kept: true });
-        continue;
-      }
-    }
     await writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d));
     out.push({ label: d.label, plistPath });
   }
@@ -898,6 +794,7 @@ export async function installClaudestraCli(
   const result: InstallCliResult = {
     cliWrapper: "",
     daemons: [],
+    web: { staticDir: "", built: false },
     pm2Stopped: [],
     removedOldAutostartWrapper: false,
     migratedHookCommand: false,
@@ -931,13 +828,10 @@ export async function installClaudestraCli(
   try { result.cliWrapper = await writeCliWrapper(repoRoot, bunPath); }
   catch (e) { errors.push(`CLI wrapper: ${(e as Error).message}`); return result; }
 
-  const webDir = `${repoRoot}/web`;
-
-  // 1b) web 构建过期就重建。必须排在第 6 步 reload 之前：update 子进程由 launcher 派生，
-  //     bootout launcher 会把它连坐回收，构建若在后面会被中途杀掉、留下被清空的 .next。
-  //     也要在 readiness 之前：新的 BUILD_ID 参与判断能不能装 web daemon。
-  //     没有 .env.local = 没选 web，不花这个钱。
-  if (!opts.skipWebBuild && existsSync(`${webDir}/.env.local`)) {
+  // 1b) web 静态包过期就重建。必须排在第 6 步 reload 之前：update 子进程由 launcher 派生，
+  //     bootout launcher 会把它连坐回收，构建若在后面会被中途杀掉、留下被清空的 .next / out。
+  //     rebuildWebIfStale 自己判「有没有 web/、装没装依赖」，没有就 skipped，不花这个钱。
+  if (!opts.skipWebBuild) {
     try {
       result.webBuild = await rebuildWebIfStale(repoRoot);
       if (result.webBuild.error) {
@@ -945,38 +839,12 @@ export async function installClaudestraCli(
       }
     } catch (e) { warnings.push(`web 构建: ${(e as Error).message}`); }
   }
+  result.web = webStaticState(repoRoot);
+  warnings.push(...webStaticWarnings(result.web, { staticIndex: staticIndexExists(result.web.staticDir), legacyPlist: existsSync(legacyWebPlistPath()) }));
 
-  // 2) 写 daemon plist（3 个常驻 + web 前端，后者够格才装）
-  let webPkgStart: string | undefined;
-  try {
-    webPkgStart = JSON.parse(readFileSync(`${webDir}/package.json`, "utf-8"))?.scripts?.start;
-  } catch { /* 没有 web/ 或读不了：下面 readiness 会说明 */ }
-  const webReady = webDaemonReadiness({
-    pkg: existsSync(`${webDir}/package.json`),
-    nextBin: existsSync(`${webDir}/node_modules/.bin/next`),
-    build: existsSync(`${webDir}/.next/BUILD_ID`),
-    envLocal: existsSync(`${webDir}/.env.local`),
-  });
-  const webPort = webPortFromStartScript(webPkgStart);
-  const nodePath = stableBinPath("node");
-  // ⚠ 找不到 node 就**不装**。退回 next 的 shebang 形式等于装一个必然失败的服务：
-  //   launchd 的 PATH 是固定那几条，`env node` 找不到就 exit 127，而 KeepAlive 会
-  //   安静地一直重试 —— 用户看到的是「命令一路 ok，网页打不开」，日志里只有
-  //   `env: node: No such file or directory`（2026-09-22 试装现场就是这一幕）。
-  //   宁可不装并把原因说清楚。
-  const webInstallable = webReady.ready && !!nodePath;
-  const extraDaemons = webInstallable ? [webDaemonSpec(repoRoot, webPort, nodePath)] : [];
-  if (webReady.ready && !nodePath) {
-    warnings.push("找不到可执行的 node（which / 登录 shell / 常见路径都试过）—— web 服务没装。装好 node 后重跑 install-cli");
-  }
-  result.webDaemon = webInstallable
-    ? { installed: true, port: webPort, url: `http://localhost:${webPort}`, serving: false }
-    : { installed: false, reason: webReady.ready
-        ? "找不到可执行的 node（which / 登录 shell / 常见路径都试过）"
-        : webReady.reason };
-
-  let plists: { label: string; plistPath: string; kept?: boolean }[];
-  try { plists = await writeDaemonPlists(repoRoot, bunPath, extraDaemons); }
+  // 2) 写 3 个 daemon plist
+  let plists: { label: string; plistPath: string }[];
+  try { plists = await writeDaemonPlists(repoRoot, bunPath); }
   catch (e) { errors.push(`写 daemon plist: ${(e as Error).message}`); return result; }
 
   // 3) 迁移老 plist
@@ -1025,17 +893,6 @@ export async function installClaudestraCli(
   // 6) bootstrap 新 plist
   const uid = getUid();
   for (const p of plists) {
-    // keepExisting 且本来就在：那是用户自己的 plist，连 reload 都不碰——它可能被
-    // 刻意 unload 着（挂在别的反代后面 / 临时停用），我们没资格替他重新拉起。
-    if (p.kept) {
-      // 但刚重建过 web 的话，正在跑的服务手里是旧构建（文件还被删过一轮）：它若是 load 着的就
-      // 重启一下（restartWebService 只 kickstart 已 load 的服务，不替人拉起）
-      if (p.label === "com.claudestra.web" && result.webBuild?.attempted) {
-        result.webBuild.restarted = restartWebService();
-      }
-      result.daemons.push({ label: p.label, plistPath: p.plistPath, loaded: true, keptExisting: true });
-      continue;
-    }
     const r = reloadDaemon(p.plistPath, uid);
     const item: DaemonInstall = { label: p.label, plistPath: p.plistPath, loaded: r.ok };
     if (!r.ok) {
@@ -1050,15 +907,8 @@ export async function installClaudestraCli(
   //   launchd 的 bootstrap 成功只代表「plist 被接受了」，不代表进程活着。
   //   服务起不来的真话只在 web.err 里，而没人会主动去看它。
   // 装完逐个探活，不健康的自动 kickstart 一次再探（见 healDaemons）
-  result.daemonHealth = await healDaemons(repoRoot, uid, result.webDaemon?.installed ? result.webDaemon.port : null);
+  result.daemonHealth = await healDaemons(repoRoot, uid);
   for (const h of result.daemonHealth) {
-    if (h.label === "com.claudestra.web" && result.webDaemon?.installed) {
-      result.webDaemon.serving = h.healthy;
-      if (!h.healthy) {
-        result.webDaemon.error = h.conflict ?? `装好了但 ${result.webDaemon.port} 端口没人监听——服务起来就退出了`;
-        if (h.log?.length) result.webDaemon.log = h.log;
-      }
-    }
     if (!h.healthy) {
       warnings.push(
         `${h.name} 不健康${h.conflict ? `：${h.conflict}` : h.repaired ? "（已自动重启一次仍无效）" : ""}。日志末尾：` +
@@ -1083,11 +933,7 @@ export async function installClaudestraCli(
  * 所以每个能探活的 daemon 都探一次，不健康就**自动 kickstart 一次**再探。
  * 只修一次：修不好说明是代码或配置的问题，再重启十次也一样，那时该把日志摆给人看。
  */
-async function healDaemons(
-  repoRoot: string,
-  uid: string,
-  webPort: number | null,
-): Promise<DaemonHealth[]> {
+async function healDaemons(repoRoot: string, uid: string): Promise<DaemonHealth[]> {
   const bridgePort = readBridgePort(repoRoot);
   const probes: Array<{ label: string; name: string; probe: () => Promise<boolean>; stem: string }> = [];
   if (bridgePort) {
@@ -1097,14 +943,6 @@ async function healDaemons(
       stem: "bridge",
       // 端口在听不够 —— 必须真的答一个 HTTP，这正是试装现场那一幕
       probe: () => httpOk(`http://127.0.0.1:${bridgePort}/stats`, 4_000),
-    });
-  }
-  if (webPort) {
-    probes.push({
-      label: "com.claudestra.web",
-      name: `web :${webPort}`,
-      stem: "web",
-      probe: () => portListening(webPort),
     });
   }
 
@@ -1117,11 +955,10 @@ async function healDaemons(
       repaired = true;
       healthy = await waitFor(p.probe, 15_000);
     }
-    // 「有人应答」不等于「是我们的进程在应答」：3333 这类常见开发端口被别的程序占着时，
+    // 「有人应答」不等于「是我们的进程在应答」：端口被别的程序（遗留 pm2 bridge 之类）占着时，
     // launchd 那份 EADDRINUSE 崩溃循环，探活却照样通过。属主不对就如实报，不 kickstart
     // （重启解决不了占用）。
-    const port = p.label === "com.claudestra.web" ? webPort : bridgePort;
-    const conflict = healthy && port ? portOwnerConflict(listenersOf(port), launchdPidOf(p.label)) : null;
+    const conflict = healthy && bridgePort ? portOwnerConflict(listenersOf(bridgePort), launchdPidOf(p.label)) : null;
     if (conflict) healthy = false;
     out.push({
       label: p.label,
@@ -1150,7 +987,7 @@ export function portOwnerConflict(
 }
 
 /** 端口上的监听进程及其祖先链（最多 6 层） */
-export function listenersOf(port: number): Array<{ pid: string; ancestors: string[] }> {
+function listenersOf(port: number): Array<{ pid: string; ancestors: string[] }> {
   const r = spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8" });
   const pids = [...new Set((r.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean))];
   return pids.map((pid) => {
@@ -1167,7 +1004,7 @@ export function listenersOf(port: number): Array<{ pid: string; ancestors: strin
 }
 
 /** `launchctl list <label>` 里的 PID；没在跑 / 没 load 返回 null */
-export function launchdPidOf(label: string): string | null {
+function launchdPidOf(label: string): string | null {
   const r = spawnSync("launchctl", ["list", label], { encoding: "utf8" });
   if (r.status !== 0) return null;
   const m = /"PID"\s*=\s*(\d+)/.exec(r.stdout || "");
@@ -1201,11 +1038,6 @@ async function waitFor(probe: () => Promise<boolean>, timeoutMs: number): Promis
     await new Promise((r) => setTimeout(r, 700));
   }
   return false;
-}
-
-function portListening(port: number): Promise<boolean> {
-  const r = spawnSync("/usr/sbin/lsof", ["-iTCP:" + port, "-sTCP:LISTEN", "-n", "-P"], { encoding: "utf8" });
-  return Promise.resolve(r.status === 0 && !!(r.stdout || "").trim());
 }
 
 function tailFile(path: string, n: number): string[] {

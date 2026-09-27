@@ -290,7 +290,7 @@ export function isWildcardBind(addr: string): boolean {
   return /^(\*|0\.0\.0\.0|\[::\]|::):\d+$/.test(addr);
 }
 
-/** 本地 /api/version 与入口返回的是否同一个 web（比 version + webCommit，兼容旧版没有 webCommit） */
+/** 本地 /app-config.json 与入口返回的是否同一个 bridge（比 version + commit；旧 web 的 /api/version 用 webCommit） */
 export function sameWebVersion(a: unknown, b: unknown): boolean {
   if (!isObj(a) || !isObj(b)) return false;
   if (typeof a.version !== "string" || a.version !== b.version) return false;
@@ -463,7 +463,7 @@ export interface EntryProbe {
   secure: boolean;
   source: "serve" | "external" | "tailnet-ip";
   reachable: boolean;
-  /** 返回的 /api/version 与本机 web 一致（本机 web 不在时退化为「像 Claudestra」） */
+  /** 返回的 /app-config.json 与本机 bridge 一致（本机 bridge 不在时退化为「像 Claudestra」） */
   matchesLocal: boolean;
   certDaysLeft?: number;
   certLifetimeDays?: number;
@@ -476,7 +476,7 @@ export async function probeEntry(
   local: unknown | null,
 ): Promise<EntryProbe> {
   const secure = url.startsWith("https://");
-  const v = await fetchJson(`${url}/api/version`);
+  const v = await fetchJson(`${url}/app-config.json`); // bridge 托管前端的入口配置（不鉴权），带 version + commit
   const probe: EntryProbe = {
     url, secure, source,
     reachable: v !== null,
@@ -514,15 +514,15 @@ export interface RemoteAccessReport {
   others443: string[];
   /** 443 被 serve 以外的进程占着（连接探测为准，见 portBusyByOthers） */
   port443Busy: boolean;
-  /** 本机 web 的 /api/version 能不能通 —— 后面所有入口都以它为前提 */
+  /** 本机 bridge 的 /app-config.json 能不能通（它托管前端）—— 后面所有入口都以它为前提 */
   webUp: boolean;
   /** planHttps 的结论（复用 / 建议 serve 端口 / 引导） */
   plan: HttpsPlan;
 }
 
 /**
- * 汇总一次「手机访问」现状：只读，bridge / doctor / setup 共用。
- * 候选入口：serve 里指向 web 的处理器 → ts.net 的 443（可能是 Caddy 之类外部反代）→ tailnet IP 明文。
+ * 汇总一次「手机访问」现状：只读，bridge / doctor / setup 共用。webPort = 前端入口端口，现在就是 bridge 端口（它托管 web/out）。
+ * 候选入口：serve 里指向它的处理器 → ts.net 的 443（可能是 Caddy 之类外部反代）→ tailnet IP 明文。
  */
 export async function collectRemoteAccess(webPort: number): Promise<RemoteAccessReport> {
   const cli = await findTailscaleCli();
@@ -531,7 +531,7 @@ export async function collectRemoteAccess(webPort: number): Promise<RemoteAccess
     readServeStatus(cli),
     listListeners(webPort),
     listListeners(443),
-    fetchJson(`http://127.0.0.1:${webPort}/api/version`, 2000),
+    fetchJson(`http://127.0.0.1:${webPort}/app-config.json`, 2000),
   ]);
   const tailnetIp = status?.ipv4[0];
   const [port443Busy, port8443Busy] = await Promise.all([

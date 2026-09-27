@@ -86,6 +86,7 @@ describe("formatDoctor", () => {
 describe("webBuildVerdict（按 hash 判，与 install-cli 自动重建共用）", () => {
   const T = 1_700_000_000_000;
   const base = {
+    outIndex: true,
     buildId: "B1",
     buildIdMtimeMs: T,
     marker: null,
@@ -97,6 +98,12 @@ describe("webBuildVerdict（按 hash 判，与 install-cli 自动重建共用）
     const v = webBuildVerdict({ ...base, buildId: null, buildIdMtimeMs: null });
     expect(v.stale).toBe(true);
     expect(v.status).toBe("warn");
+  });
+  // bridge 托管的是 web/out：.next 再新、hash 再对，没有 index.html 网页就是打不开
+  test("没有 web/out/index.html → stale，哪怕 .next 与代码一致", () => {
+    const v = webBuildVerdict({ ...base, outIndex: false });
+    expect(v.stale).toBe(true);
+    expect(v.detail).toContain("web/out/index.html");
   });
   test("烤入 hash 与 web 最新提交一致 → ok", () => {
     expect(webBuildVerdict(base)).toMatchObject({ status: "ok", stale: false });

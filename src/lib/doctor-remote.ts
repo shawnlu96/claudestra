@@ -7,13 +7,13 @@
  * 而那时人通常不在电脑前。
  *
  * 只读：判定是纯函数（remoteAccessChecks，单测覆盖），I/O 全在 lib/tailscale 的
- * collectRemoteAccess。修复建议里不写死任何主机名 / LaunchAgent label，都从运行时状态来。
+ * collectRemoteAccess。修复建议里不写死任何主机名，都从运行时状态来。入口探的是 bridge（它托管前端）。
  * 中继连着时 Tailscale 只是备用：没装 / 没连 / 没 HTTPS 入口都不再告警（已有的证书照样查——装了就要能用）。
  */
 
-import { existsSync, readFileSync } from "fs";
 import type { Check } from "./doctor.js";
-import { webPortFromStartScript } from "./cli-install.js";
+import { resolveBridgePort } from "./bridge-url.js";
+import { readDotenvFileSync } from "./env-file.js";
 import { fetchRelayStatus, relayChecks } from "./doctor-relay.js";
 import { certVerdict, collectRemoteAccess, isWildcardBind, workingHttpsEntry, type RemoteAccessReport } from "./tailscale.js";
 
@@ -28,10 +28,10 @@ export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState 
   const out: Check[] = [];
   const ts = r.tailscale;
 
-  // 所有入口都以本机 web 在跑为前提 —— 先查它（checkDaemons 只查 bridge / launcher / cron）
+  // 所有入口都以 bridge 在托管前端为前提 —— 先查它（网页由 bridge 直接服务，没有单独的 web 进程）
   if (!r.webUp) {
-    out.push({ group: G, name: "web 服务", status: "warn", detail: `127.0.0.1:${r.webPort} 没有应答 /api/version —— 手机上哪个地址都打不开`,
-      fix: "bun src/manager.ts install-cli 重装 daemon，或看 web 日志（launchctl list | grep claudestra）" });
+    out.push({ group: G, name: "前端（bridge 托管）", status: "warn", detail: `127.0.0.1:${r.webPort} 没有应答 /app-config.json —— 手机上哪个地址都打不开`,
+      fix: "看上面「launchd daemon」「bridge」两组：bridge 没起来就 launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge；起来了就查 .env 的 BRIDGE_STATIC_DIR" });
   }
 
   if (!ts.installed || !ts.running) {
@@ -73,8 +73,8 @@ export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState 
         out.push({ group: G, name: "HTTPS 入口", status: "warn", detail: `${e.url} TLS 握得上但 HTTP 不通（证书无效/过期、反代后端没起，或一时超时）`,
           fix: "先看下面的证书剩余天数；证书没问题就查反代进程和 web daemon" });
       } else if (!e.matchesLocal) {
-        out.push({ group: G, name: "HTTPS 入口", status: "warn", detail: `${e.url} 通到的不是本机当前版本的 web（/api/version 对不上）`,
-          fix: "反代可能指错了端口，或 web 还是旧进程 —— 对比 curl <入口>/api/version 与本机 127.0.0.1 的输出" });
+        out.push({ group: G, name: "HTTPS 入口", status: "warn", detail: `${e.url} 通到的不是本机的 bridge（/app-config.json 对不上）`,
+          fix: `反代可能还指着旧 web 端口 3333 —— 改成 bridge 端口 ${r.webPort}（tailscale serve --bg http://127.0.0.1:${r.webPort}），再对比 curl <入口>/app-config.json` });
       }
     }
   }
@@ -107,20 +107,19 @@ export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState 
   return out;
 }
 
-/** web 端口的唯一真源是 web/package.json 的 start 脚本（与 install-cli 同一判据）；bridge 端点也用它 */
-export function readWebPort(repoRoot: string): number {
-  let start: string | undefined;
-  try { start = JSON.parse(readFileSync(`${repoRoot}/web/package.json`, "utf-8"))?.scripts?.start; } catch { /* 用默认端口 */ }
-  return webPortFromStartScript(start);
+/** 前端由 bridge 托管：手机访问的入口端口就是 .env 的 BRIDGE_PORT（web/package.json 的 3333 不再是入口）；bridge 端点也用它 */
+export function readFrontendPort(repoRoot: string): number {
+  return resolveBridgePort(readDotenvFileSync(`${repoRoot}/.env`) ?? {});
 }
 
 export async function checkRemoteAccess(repoRoot: string): Promise<Check[]> {
-  if (!existsSync(`${repoRoot}/web/.env.local`)) return []; // 没配 web 的实例不出这组
+  const env = readDotenvFileSync(`${repoRoot}/.env`);
+  if (!env?.BRIDGE_STATIC_DIR && !env?.RELAY_URL) return []; // 没有前端入口（没选 web、也没配中继）的实例不出这组
   try {
     const st = await fetchRelayStatus(); // 先问中继：它连着时 Tailscale 的缺席不算问题
-    const rows = remoteAccessChecks(await collectRemoteAccess(readWebPort(repoRoot)), { enabled: !!st?.enabled, connected: !!st?.connected });
-    // 顺序：web 服务（有问题时）→ 中继 → Tailscale …；bridge 不在跑（st 为 null）不出「中继」项，checkBridge 已经报了
-    const at = rows[0]?.name === "web 服务" ? 1 : 0;
+    const rows = remoteAccessChecks(await collectRemoteAccess(readFrontendPort(repoRoot)), { enabled: !!st?.enabled, connected: !!st?.connected });
+    // 顺序：前端（有问题时）→ 中继 → Tailscale …；bridge 不在跑（st 为 null）不出「中继」项，checkBridge 已经报了
+    const at = rows[0]?.name === "前端（bridge 托管）" ? 1 : 0;
     return [...rows.slice(0, at), ...(st ? relayChecks(st, G) : []), ...rows.slice(at)];
   } catch (e) {
     return [{ group: G, name: "探测", status: "warn", detail: `探测失败：${(e as Error).message}` }];
