@@ -1,13 +1,14 @@
 /**
- * setup 向导「手机访问」一步（lib/setup-remote-access.ts）：中继默认、Tailscale 可选、只用局域网三选一，
+ * setup 向导「手机访问」一步（lib/setup-remote-access.ts）：中继默认、Tailscale、只用局域网、自己的域名四选一，
  * 以及中继地址 / 名字的整形与装完后的连接判定。交互用脚本化的假终端跑，不碰网络。
  */
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_RELAY_URL,
   chooseRemoteAccess,
+  bindsAllInterfaces,
   normalizeRelayUrl,
-  predictRelayUrl,
+  relayEntryUrl,
   relayHttpsBase,
   relayLinkVerdict,
   relayNameError,
@@ -66,12 +67,18 @@ describe("normalizeRelayUrl", () => {
   });
 });
 
-describe("relayHttpsBase / predictRelayUrl / relayNameError", () => {
-  test("wss → https、ws → http，端口跟着走；预测地址用 slugify 后的名字", () => {
+describe("relayHttpsBase / relayEntryUrl / bindsAllInterfaces / relayNameError", () => {
+  test("wss → https、ws → http，端口跟着走；手机地址是中继首页，不再是 <名字>.<中继域名>", () => {
     expect(relayHttpsBase("wss://relay.example.com")).toBe("https://relay.example.com");
     expect(relayHttpsBase("ws://localhost:8787")).toBe("http://localhost:8787");
-    expect(predictRelayUrl("wss://relay.example.com", "mini")).toBe("https://mini.relay.example.com");
-    expect(predictRelayUrl("wss://relay.example.com:8443", "Shawn's Mac")).toBe("https://shawn-s-mac.relay.example.com:8443");
+    expect(relayEntryUrl(null, "wss://relay.example.com:8443")).toBe("https://relay.example.com:8443");
+    expect(relayEntryUrl({ base: "relay.example.com" }, "wss://relay.example.com")).toBe("https://relay.example.com");
+    expect(relayEntryUrl({ base: null }, "ws://localhost:8787")).toBe("http://localhost:8787");
+  });
+
+  test("BRIDGE_BIND 只有通配地址才算监听所有网卡（引号、空白容忍）", () => {
+    for (const v of ["0.0.0.0", "::", "[::]", "*", ' "0.0.0.0" ']) expect(bindsAllInterfaces(v)).toBe(true);
+    for (const v of [undefined, "", "127.0.0.1", "192.168.1.2", "localhost"]) expect(bindsAllInterfaces(v)).toBe(false);
   });
 
   test("名字校验：合法给 null，不合法附建议", () => {
@@ -83,30 +90,33 @@ describe("relayHttpsBase / predictRelayUrl / relayNameError", () => {
 
 describe("relayLinkVerdict（装完后 GET /relay/status 的解读）", () => {
   const base = { enabled: true, state: "online" as const, fp: "aaaa", slug: "mini", base: "relay.example.com", relayUrl: "wss://relay.example.com", retryAt: null, lastError: null };
-  test("拿不到状态 → no-bridge；连上且地址如预期 → connected 不改名；被改名 → renamed", () => {
-    expect(relayLinkVerdict(null, "https://mini.relay.example.com")).toEqual({ kind: "no-bridge" });
-    const ok = relayLinkVerdict({ ...base, connected: true, url: "https://mini.relay.example.com" }, "https://mini.relay.example.com");
-    expect(ok).toEqual({ kind: "connected", url: "https://mini.relay.example.com", renamed: false });
-    const renamed = relayLinkVerdict({ ...base, connected: true, url: "https://mini-9109.relay.example.com" }, "https://mini.relay.example.com");
+  test("拿不到状态 → no-bridge；连上 → 报中继首页；中继给的名字和填的不一样 → renamed", () => {
+    expect(relayLinkVerdict(null, "wss://relay.example.com", "mini")).toEqual({ kind: "no-bridge" });
+    const ok = relayLinkVerdict({ ...base, connected: true, url: "https://mini.relay.example.com" }, "wss://relay.example.com", "mini");
+    expect(ok).toEqual({ kind: "connected", url: "https://relay.example.com", renamed: false });
+    const renamed = relayLinkVerdict({ ...base, slug: "mini-9109", connected: true, url: "https://mini-9109.relay.example.com" }, "wss://relay.example.com", "Mini");
     expect(renamed).toMatchObject({ kind: "connected", renamed: true });
   });
 
   test("没连上 → waiting，带状态与原因", () => {
-    const v = relayLinkVerdict({ ...base, connected: false, url: null, state: "offline", lastError: "socket error" }, "x");
+    const v = relayLinkVerdict({ ...base, connected: false, url: null, state: "offline", lastError: "socket error" }, "wss://relay.example.com", "mini");
     expect(v).toEqual({ kind: "waiting", why: "offline: socket error" });
   });
 });
 
-describe("chooseRemoteAccess（三选一）", () => {
-  test("一路回车 = 中继 + 官方地址 + 主机名 slug；探测在线打版本；预测地址给出来", async () => {
+describe("chooseRemoteAccess（四选一）", () => {
+  test("一路回车 = 中继 + 官方地址 + 主机名 slug；探测在线打版本；手机地址是中继首页；选之前讲清中继的风险", async () => {
     const { ui, lines } = fakeUi(["", "", ""]);
     const r = await chooseRemoteAccess(ui, { existing: {}, probe: up });
     expect(r.kind).toBe("relay");
     if (r.kind !== "relay") return;
     expect(r.relayUrl).toBe(DEFAULT_RELAY_URL);
     expect(r.relayName).toMatch(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/);
-    expect(r.url).toBe(predictRelayUrl(DEFAULT_RELAY_URL, r.relayName));
-    expect(lines.join("\n")).toContain("v2.28.0");
+    expect(r.url).toBe(relayHttpsBase(DEFAULT_RELAY_URL));
+    const out = lines.join("\n");
+    expect(out).toContain("v2.28.0");
+    expect(out).toContain("中继不是必选");
+    expect(out).toContain("冒用你已配对的设备");
   });
 
   test("续装：现有 RELAY_URL / RELAY_NAME 做默认；输入的地址与名字会被整形 / 校验", async () => {
@@ -114,7 +124,7 @@ describe("chooseRemoteAccess（三选一）", () => {
     const r = await chooseRemoteAccess(ui, { existing: { RELAY_URL: '"wss://old.relay.test"', RELAY_NAME: "old" }, probe: up });
     expect(r).toMatchObject({ kind: "relay", relayUrl: "wss://old.relay.test", relayName: "old" });
     const r2 = await chooseRemoteAccess(ui, { existing: {}, probe: up });
-    expect(r2).toMatchObject({ kind: "relay", relayUrl: "wss://my.relay.test", relayName: "mini", url: "https://mini.my.relay.test" });
+    expect(r2).toMatchObject({ kind: "relay", relayUrl: "wss://my.relay.test", relayName: "mini", url: "https://my.relay.test" });
     expect(lines.join("\n")).toContain("建议：bad-name");
   });
 
@@ -130,18 +140,29 @@ describe("chooseRemoteAccess（三选一）", () => {
     expect(await chooseRemoteAccess(keep.ui, { existing: {}, probe: down })).toMatchObject({ kind: "relay", relayUrl: "wss://typo.relay.test" });
   });
 
-  test("选 2 只返回 Tailscale 意向；选 3 带回局域网地址", async () => {
+  test("选 2 只返回 Tailscale 意向；选 4 只指路；输错重问", async () => {
     expect(await chooseRemoteAccess(fakeUi(["2"]).ui, { existing: {} })).toEqual({ kind: "tailscale", url: undefined });
-    expect(await chooseRemoteAccess(fakeUi(["3"]).ui, { existing: {}, lanUrl: "http://192.168.1.2:3333" })).toEqual({ kind: "lan", url: "http://192.168.1.2:3333" });
-    const bad = fakeUi(["9", "3"]);
-    expect(await chooseRemoteAccess(bad.ui, { existing: {} })).toEqual({ kind: "lan", url: undefined });
-    expect(bad.lines.join("\n")).toContain("输入 1、2 或 3");
+    const custom = fakeUi(["4"]);
+    expect(await chooseRemoteAccess(custom.ui, { existing: {} })).toEqual({ kind: "custom" });
+    expect(custom.lines.join("\n")).toContain("claudestra pair --url");
+    const bad = fakeUi(["9", "2"]);
+    expect((await chooseRemoteAccess(bad.ui, { existing: {} })).kind).toBe("tailscale");
+    expect(bad.lines.join("\n")).toContain("输入 1、2、3 或 4");
+  });
+
+  test("选 3：bridge 只听本机时先讲风险再问（默认不改）；同意才带 bind；已经是通配就不问", async () => {
+    const lan = "http://192.168.1.2:3847";
+    expect(await chooseRemoteAccess(fakeUi(["3", ""]).ui, { existing: {}, lanUrl: lan })).toEqual({ kind: "lan" });
+    expect(await chooseRemoteAccess(fakeUi(["3", "y"]).ui, { existing: {}, lanUrl: lan })).toEqual({ kind: "lan", url: lan, bind: "0.0.0.0" });
+    const already = fakeUi(["3"]);
+    expect(await chooseRemoteAccess(already.ui, { existing: { BRIDGE_BIND: "0.0.0.0" }, lanUrl: lan })).toEqual({ kind: "lan", url: lan });
+    expect(already.answers).toHaveLength(0);
   });
 
   test("原本配着中继却改选 2 / 3：问要不要停用，默认留着；答 y 才带 disableRelay", async () => {
     const existing = { RELAY_URL: "wss://relay.example.com" };
     expect(await chooseRemoteAccess(fakeUi(["2", ""]).ui, { existing })).toMatchObject({ kind: "tailscale", disableRelay: false });
-    expect(await chooseRemoteAccess(fakeUi(["3", "y"]).ui, { existing })).toMatchObject({ kind: "lan", disableRelay: true });
+    expect(await chooseRemoteAccess(fakeUi(["3", "n", "y"]).ui, { existing })).toMatchObject({ kind: "lan", disableRelay: true });
     const asked = fakeUi(["2", "n"]);
     await chooseRemoteAccess(asked.ui, { existing });
     expect(asked.answers).toHaveLength(0); // 确实问了

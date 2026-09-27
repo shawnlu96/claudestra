@@ -26,6 +26,11 @@ export function relayMode(s: RelayStatusView | null | undefined): RelayMode {
   return s.connected && s.url ? "online" : "connecting";
 }
 
+/** 「我的中继地址」：中继首页（路径模式，别的设备在这里扫码配对）；旧 bridge 不报 base 时退回子域名 */
+export function relayHome(s: RelayStatusView | null | undefined): string | null {
+  return s?.base ? `https://${s.base}` : (s?.url ?? null);
+}
+
 /** 没配中继时给人复制的两行；已知中继地址就填进去，否则给示例 */
 export function envSnippet(relayUrl?: string | null, slug?: string | null): string {
   return `RELAY_URL=${relayUrl || "wss://relay.example.com"}\nRELAY_NAME=${slug || "my-mac"}`;

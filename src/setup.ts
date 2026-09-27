@@ -4,8 +4,8 @@
  *
  * 用法：bun run setup
  *
- * 这个脚本把所有 Discord 配置步骤都内置了，你不需要读文档。
- * 跟着它走，它会告诉你每一步点哪里、复制什么、粘贴到哪。
+ * 依赖检查、Web 前端、手机访问（中继 / Tailscale / 局域网 / 自己的域名）、可选的 Discord bot 都在这里，
+ * 每一步点哪里、复制什么、会改到机器上的哪些地方，向导都会先说。
  */
 
 import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
@@ -18,7 +18,8 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 import { gateSetupAdoption } from "./lib/setup-adoption.js";
 import { mergeEnvContent, parseEnvRaw } from "./lib/env-file.js";
-import type { RemoteAccessChoice } from "./lib/setup-remote-access.js";
+import { bindsAllInterfaces, type RemoteAccessChoice } from "./lib/setup-remote-access.js";
+import { frontendChoiceLines, printAccessSummary, printBypassExtras, printMachineChanges } from "./lib/setup-disclosure.js";
 
 /**
  * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
@@ -499,6 +500,32 @@ async function stepCheckDeps(): Promise<void> {
 
   br();
   ok(t("系统依赖就绪 ✨", "System dependencies ready ✨"));
+  await checkClaudeAccount();
+}
+
+/** 用户选了先跳过 Claude Code 登录：装完的横幅要说实话（main 里并进 failures） */
+let claudeLoginSkipped = false;
+const CC_LOGIN_EN = "Claude Code isn't signed in: run `claude auth login`, then `bun src/manager.ts restart --include-master`";
+
+/** 没登录 master 起不来、向导却会报「安装完成」：依赖装齐后查版本与登录（lib/claude-account.ts），没登录就等用户登好 */
+async function checkClaudeAccount(): Promise<void> {
+  const { MIN_CLAUDE_VERSION, claudeTooOld, probeClaude } = await import("./lib/claude-account.js");
+  let p = await probeClaude(run);
+  if (claudeTooOld(p.version)) {
+    fail(t(`Claude Code ${p.version} 太旧，Claudestra 需要 ${MIN_CLAUDE_VERSION} 以上`, `Claude Code ${p.version} is too old; Claudestra needs ${MIN_CLAUDE_VERSION}+`));
+    hint(t("升级：npm i -g @anthropic-ai/claude-code@latest，然后重跑 bun run setup", "Upgrade: npm i -g @anthropic-ai/claude-code@latest, then rerun `bun run setup`"));
+    process.exit(1);
+  }
+  while (p.auth && !p.auth.loggedIn) {
+    warn(t("Claude Code 还没登录：不登录的话大总管和 Claude Code 的 agent 都起不来。", "Claude Code isn't signed in; the master and every Claude Code agent need it."));
+    hint(t("新开一个终端跑 claude auth login，登好后回来按回车；输入 s 先跳过。", "Open another terminal and run `claude auth login`, then press ENTER here; type s to skip for now."));
+    if ((await prompt(t("登好了吗", "Signed in?"), "")).trim().toLowerCase() === "s") {
+      claudeLoginSkipped = true;
+      return;
+    }
+    p = await probeClaude(run);
+  }
+  if (p.auth?.loggedIn) ok(t(`Claude Code 已登录${p.version ? `（${p.version}）` : ""}`, `Claude Code is signed in${p.version ? ` (${p.version})` : ""}`));
 }
 
 /**
@@ -914,6 +941,8 @@ interface Config {
   RELAY_NAME?: string;
   /** 选了 Web 前端才有：bridge 托管的静态包目录（<repo>/web/out，绝对路径）；undefined = 不动 .env 里已有的值 */
   BRIDGE_STATIC_DIR?: string;
+  /** 「手机访问」选局域网并同意监听所有网卡才有（0.0.0.0）；undefined = 不动 .env 里已有的值 */
+  BRIDGE_BIND?: string;
 }
 
 /** 在现有 .env 上就地合并（手加的键、注释不丢；值没变的行逐字节保留）。见 lib/env-file.ts */
@@ -928,6 +957,7 @@ function buildEnvContent(cfg: Config, existing: string | null): string {
     MCP_NAME: cfg.MCP_NAME,
     ...(cfg.RELAY_URL !== undefined ? { RELAY_URL: cfg.RELAY_URL, ...(cfg.RELAY_NAME ? { RELAY_NAME: cfg.RELAY_NAME } : {}) } : {}),
     ...(cfg.BRIDGE_STATIC_DIR ? { BRIDGE_STATIC_DIR: cfg.BRIDGE_STATIC_DIR } : {}),
+    ...(cfg.BRIDGE_BIND ? { BRIDGE_BIND: cfg.BRIDGE_BIND } : {}),
   }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
@@ -1028,8 +1058,9 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   print(`  ${c.dim}•${c.reset} ${c.cyan}bun install${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}npx playwright@1.58.2 install chromium${c.reset}  ${c.dim}${t("(终端截图用)", "(for terminal screenshots)")}${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}claude mcp add ${cfg.MCP_NAME} ...${c.reset}  ${c.dim}${t("(注册 MCP server)", "(register MCP server)")}${c.reset}`);
-  print(`  ${c.dim}•${c.reset} ${c.cyan}${t("注册 typing hooks", "register typing hooks")}${c.reset}  ${c.dim}${t("(写入 ~/.claude/settings.json)", "(write to ~/.claude/settings.json)")}${c.reset}`);
   print(`  ${c.dim}•${c.reset} ${c.cyan}${t("装 claudestra 命令 + 3 个 launchd daemon", "install claudestra CLI + 3 launchd daemons")}${c.reset}  ${c.dim}${t("(开机自启 + KeepAlive)", "(boot autostart + KeepAlive)")}${c.reset}`);
+  br();
+  printMachineChanges(ui, cfg.MCP_NAME);
   br();
 
   if (!(await confirm(t("要我一键帮你跑完吗？", "Run them all now?"), true))) {
@@ -1227,6 +1258,7 @@ async function stepBypassConsent(): Promise<void> {
     "Claudestra 的 master 和每个 agent 默认都以 bypassPermissions 运行——你在手机上没法逐条批准工具调用。它自带的命令黑名单只防手滑，不是安全边界：每个 agent 实际上等于一个以你身份运行、不受限的 shell。",
     "Claudestra's master and every agent run with bypassPermissions by default — you cannot approve each tool call from your phone. Its command blocklist only prevents accidents; it is not a security boundary: every agent is effectively an unrestricted shell running as you.",
   ));
+  printBypassExtras(ui);
   hint(t(`同意后写入 ${claudeUserSettingsPath()} 的 ${BYPASS_CONSENT_KEY}: true（等同于在确认框里选 Yes, I accept）`,
          `Accepting writes ${BYPASS_CONSENT_KEY}: true to ${claudeUserSettingsPath()} (same as choosing "Yes, I accept" in that dialog)`));
   br();
@@ -1270,11 +1302,9 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
   header(nextStep(), t("选择前端", "Pick your frontends"));
   print(t("Claudestra 有两种入口,可以同时启用,也可以只要一个:", "Claudestra has two frontends. Enable either or both:"));
   br();
-  print(`  ${c.bold}${c.yellow}1${c.reset}  ${c.bold}Web${c.reset} ${c.dim}${t("(推荐)", "(recommended)")}${c.reset} — ${t(
-    "浏览器 / PWA,由 bridge 直接托管,手机用配对码登录,不依赖任何第三方,装完就能用",
-    "browser / PWA served by the bridge itself, phones sign in with a pairing code, no third-party dependency, usable right after install",
-  )}`);
-  print(`  ${c.bold}${c.yellow}2${c.reset}  ${c.bold}Discord${c.reset} — ${t("手机 App / 推送通知 / 按钮交互(需要 Discord 账号 + 自己建 bot,多 5 个步骤)", "phone app / push notifications / buttons (needs a Discord account + your own bot; 5 extra steps)")}`);
+  const lines = frontendChoiceLines(t);
+  print(`  ${c.bold}${c.yellow}1${c.reset}  ${c.bold}Web${c.reset} ${c.dim}${t("(推荐)", "(recommended)")}${c.reset} — ${lines.web}`);
+  print(`  ${c.bold}${c.yellow}2${c.reset}  ${c.bold}Discord${c.reset} — ${lines.discord}`);
   br();
   // 默认:老用户按现有配置推断;全新安装默认 **Web** —— 它零第三方依赖、装完即用,
   // 而 Discord 要先去开发者后台建 bot、开 intents、邀请进服务器(5 步)。
@@ -1321,8 +1351,8 @@ async function stepWebSetup(): Promise<void> {
   const webDir = `${REPO_ROOT}/web`;
   if (!(await fileExists(`${webDir}/package.json`))) {
     warn(t(
-      "本仓库不含 web/ 前端(上游版本)。Web 入口需要 fork 版,先跳过。",
-      "This checkout has no web/ frontend (upstream build). Skipping.",
+      "这份代码里没有 web/ 目录，跳过 Web 前端。",
+      "This checkout has no web/ directory; skipping the web frontend.",
     ));
     return;
   }
@@ -1521,7 +1551,7 @@ async function stepPhoneAccess(bridgePort: string, existing: Partial<Config>): P
   const { chooseRemoteAccess } = await import("./lib/setup-remote-access.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
   const pick = await chooseRemoteAccess(ui, { existing, lanUrl: detectBridgeUrls(Number(bridgePort) || DEFAULT_BRIDGE_PORT).find((x) => x.kind === "lan")?.url });
-  return pick.kind === "tailscale" ? { ...pick, url: (await stepRemoteAccess(bridgePort)).url } : pick;
+  return pick.kind === "tailscale" ? { ...pick, url: (await stepRemoteAccess(bridgePort, bindsAllInterfaces(existing.BRIDGE_BIND))).url } : pick;
 }
 
 /**
@@ -1532,7 +1562,8 @@ async function stepPhoneAccess(bridgePort: string, existing: Partial<Config>): P
  * ⚠ 只打印运行时探测到的地址，绝不内置任何具体地址；动整台机器的步骤（装 Tailscale、sudo tailscale up、serve）
  *   都先问；永远不 reset serve、不开 funnel。
  */
-async function stepRemoteAccess(bridgePort: string): Promise<{ url?: string }> {
+/** bindAll：.env 的 BRIDGE_BIND 监听所有网卡。否则 tailnet / 局域网的明文地址打不开，只给 HTTPS 入口 */
+async function stepRemoteAccess(bridgePort: string, bindAll: boolean): Promise<{ url?: string }> {
   const ts = await import("./lib/tailscale.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
   const webPort = Number(bridgePort) || DEFAULT_BRIDGE_PORT;
@@ -1548,6 +1579,14 @@ async function stepRemoteAccess(bridgePort: string): Promise<{ url?: string }> {
     // 找不到 CLI 但网卡上已有 tailnet 地址 = Tailscale 在跑、只是 CLI 装在我们不认识的位置。
     // 这时绝不能默认 Y 去重装：照旧给出 tailnet 明文地址，并提示用 TAILSCALE_CLI 指路。
     const tailnet = ifaceUrls.find((x) => x.kind === "tailscale");
+    if (tailnet && !bindAll) {
+      warn(t(
+        "Tailscale 在运行，但找不到它的命令行工具，配不了 HTTPS 入口；bridge 只监听本机，tailnet 的明文地址也打不开。",
+        "Tailscale is running but its CLI couldn't be found, so no HTTPS entry; the bridge listens on this machine only, so the plain tailnet address won't work either.",
+      ));
+      hint(t("设置 TAILSCALE_CLI=<tailscale 可执行文件的绝对路径> 后重跑 bun run setup。", "Set TAILSCALE_CLI=<absolute path to the tailscale binary> and rerun `bun run setup`."));
+      return {};
+    }
     if (tailnet) {
       warn(t("Tailscale 在运行，但找不到它的命令行工具，没法配 HTTPS 入口。", "Tailscale is running, but its CLI couldn't be found, so HTTPS can't be configured."));
       hint(t(
@@ -1556,7 +1595,7 @@ async function stepRemoteAccess(bridgePort: string): Promise<{ url?: string }> {
       ));
       br();
       ok(t(`手机上用这个: ${c.cyan}${tailnet.url}${c.reset}`, `Use this on your phone: ${c.cyan}${tailnet.url}${c.reset}`));
-      hint(t("明文地址下语音输入、推送、Passkey 用不了（浏览器要求 HTTPS）。", "Voice input, push and passkeys need HTTPS; they won't work on the plain address."));
+      hint(t("明文地址下语音输入、推送用不了（浏览器要求 HTTPS）。", "Voice input and push need HTTPS; they won't work on the plain address."));
       await printQr(tailnet.url);
       return { url: tailnet.url };
     }
@@ -1569,7 +1608,7 @@ async function stepRemoteAccess(bridgePort: string): Promise<{ url?: string }> {
       "Tailscale 登录之后重跑 bun run setup（或 bun src/manager.ts doctor 查看现状）就能拿到手机可用的网址。",
       "After signing in to Tailscale, rerun `bun run setup` (or check `bun src/manager.ts doctor`) to get the phone URL.",
     ));
-    return lan ? { url: lan.url } : {};
+    return lan && bindAll ? { url: lan.url } : {};
   }
   const tsCli = cli;
   ok(t(`Tailscale 在线${status.dnsName ? `: ${status.dnsName}` : ""}`, `Tailscale is up${status.dnsName ? `: ${status.dnsName}` : ""}`));
@@ -1643,9 +1682,13 @@ async function stepRemoteAccess(bridgePort: string): Promise<{ url?: string }> {
   }
 
   // ── S4 输出：主地址优先 HTTPS ──
-  const plainUrl = status.ipv4[0] ? `http://${status.ipv4[0]}:${webPort}` : lan?.url;
+  // bridge 只听 127.0.0.1 时明文地址打不开（tailscale serve 走本机回环不受影响），就不给
+  const plainUrl = !bindAll ? undefined : status.ipv4[0] ? `http://${status.ipv4[0]}:${webPort}` : lan?.url;
   const primary = httpsUrl ?? plainUrl;
-  if (!primary) return {};
+  if (!primary) {
+    hint(t("还没有手机能打开的地址：把上面的 HTTPS 入口配好后重跑 bun run setup。", "No phone-reachable address yet: finish the HTTPS entry above, then rerun `bun run setup`."));
+    return {};
+  }
   br();
   ok(t(`手机上用这个: ${c.cyan}${primary}${c.reset}`, `Use this on your phone: ${c.cyan}${primary}${c.reset}`));
   if (httpsUrl && plainUrl) hint(t(`备用（明文，语音输入 / 推送不可用）: ${plainUrl}`, `Fallback (plain HTTP — no voice input / push): ${plainUrl}`));
@@ -1777,7 +1820,7 @@ const printQr = async (url: string): Promise<void> => (await import("./lib/setup
 // 完成
 // ============================================================
 
-function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?: string): void {
+function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?: string, access?: RemoteAccessChoice["kind"]): void {
   br();
   // 装没装成，横幅就得说实话 —— 否则用户盯着「✨ 安装完成」而 bot 根本不理他。
   if (fin.failures.length > 0) {
@@ -1822,6 +1865,7 @@ function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?
         print(`  ${c.dim}②${c.reset} ${t("手机要用的话,重跑 bun run setup 走「手机访问」一步（默认中继,一个地址走天下）",
                                         "To use it from your phone, rerun `bun run setup` and take the Phone access step (relay by default, one address everywhere)")}`);
       }
+      printAccessSummary(ui, access);
       hint(t("网页由 bridge 托管(.env 的 BRIDGE_STATIC_DIR → web/out),没有单独的 web 服务;升级时自动重建",
              "The bridge serves the web client itself (.env BRIDGE_STATIC_DIR → web/out) — no separate web service; rebuilt automatically on update"));
     } else {
@@ -1887,19 +1931,21 @@ async function stepPickLanguage(): Promise<void> {
 // 主流程
 // ============================================================
 
-async function main() {
+/** 标题 + 选语言（第一件事，后续所有 prompt/hint/error 按选的语言走） + 一句介绍 */
+async function welcome(): Promise<void> {
   print("");
   print(`${c.bold}${c.cyan}   ░█▀▀░█░░░█▀█░█░█░█▀▄░█▀▀░█▀▀░▀█▀░█▀▄░█▀█${c.reset}`);
   print(`${c.bold}${c.cyan}   ░█░░░█░░░█▀█░█░█░█░█░█▀▀░▀▀█░░█░░█▀▄░█▀█${c.reset}`);
   print(`${c.bold}${c.cyan}   ░▀▀▀░▀▀▀░▀░▀░▀▀▀░▀▀░░▀▀▀░▀▀▀░░▀░░▀░▀░▀░▀${c.reset}`);
-
-  // v1.9.30+: 第一件事选语言，后续所有 prompt/hint/error 按选的语言走
   await stepPickLanguage();
-
   print("");
   print(`   ${c.dim}${t("从手机(Discord / Web)管理本地 Claude Code session", "Manage local Claude Code sessions from your phone (Discord / Web)")}${c.reset}`);
   print(`   ${c.dim}${t("跟着向导走,大概 10 分钟搞定", "Follow the wizard — about 10 minutes total")}${c.reset}`);
   print("");
+}
+
+async function main() {
+  await welcome();
 
   // 读现有 .env 作为默认值
   let existing: Partial<Config> = {};
@@ -1970,6 +2016,7 @@ async function main() {
     ...(remote?.kind === "relay" ? { RELAY_URL: remote.relayUrl, RELAY_NAME: remote.relayName } : remote?.disableRelay ? { RELAY_URL: "" } : {}),
     // 选了 Web 就让 bridge 托管静态包（绝对路径：daemon 的 cwd 是仓库根，但别指望它）
     ...(fronts.web ? { BRIDGE_STATIC_DIR: `${REPO_ROOT}/web/out` } : {}),
+    ...(remote?.kind === "lan" && remote.bind ? { BRIDGE_BIND: remote.bind } : {}),
   };
 
   const fin = await stepFinalize(cfg);
@@ -1978,9 +2025,10 @@ async function main() {
   // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后；能不能收编见 gateSetupAdoption
   const gate = gateSetupAdoption({ ...fin, laterFailures: [], discord: fronts.discord, webInstalled: fin.web?.installed === true });
   fin.failures = gate.failures;
+  if (claudeLoginSkipped) fin.failures.push(t("Claude Code 没登录：跑 claude auth login，然后 bun src/manager.ts restart --include-master", CC_LOGIN_EN));
   if (gate.verdict === "adopt") fin.failures.push(...(await stepAdoptSessions(bridgePort)));
   else if (gate.skipHint) hint(t(...gate.skipHint));
-  stepDone(cfg, fronts, fin, phoneUrl);
+  stepDone(cfg, fronts, fin, phoneUrl, remote?.kind);
 
   process.exit(0);
 }

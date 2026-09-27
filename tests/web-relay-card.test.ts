@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { envSnippet, fmtRemaining, relayMode, remainingSeconds } from "@/features/chat/relay-card-logic";
+import { envSnippet, fmtRemaining, relayHome, relayMode, remainingSeconds } from "@/features/chat/relay-card-logic";
 
 describe("Peer 面板「中继」卡的纯逻辑", () => {
   test("状态归类：读不到 / 没配 / 连接中 / 在线", () => {
@@ -25,5 +25,13 @@ describe("Peer 面板「中继」卡的纯逻辑", () => {
     expect(fmtRemaining(598, "en")).toBe("9m 58s");
     expect(fmtRemaining(42, "zh")).toBe("42 秒");
     expect(fmtRemaining(42, "en")).toBe("42s");
+  });
+});
+
+describe("relayHome", () => {
+  test("有 base 报中继首页（路径模式）；旧 bridge 没 base 退回子域名；都没有 → null", () => {
+    expect(relayHome({ base: "relay.example.com", url: "https://mini.relay.example.com" })).toBe("https://relay.example.com");
+    expect(relayHome({ url: "https://mini.relay.example.com" })).toBe("https://mini.relay.example.com");
+    expect(relayHome(null)).toBeNull();
   });
 });

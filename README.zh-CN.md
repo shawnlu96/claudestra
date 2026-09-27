@@ -4,7 +4,7 @@
 
 > 在自己电脑上跑编码 agent（Claude Code、Pi 都是一等运行时），用手机通过内置的 Web 应用指挥它们 —— Discord 可选。
 
-Claudestra 让你在自己的电脑上运行编码 agent（**Claude Code** 与 **Pi** 都是一等运行时），然后从任何地方（手机、平板、另一台电脑）指挥它们。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，用你本机的系统账号登录，不经过任何第三方。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
+Claudestra 让你在自己的电脑上运行编码 agent（**Claude Code** 与 **Pi** 都是一等运行时），然后从任何地方（手机、平板、另一台电脑）指挥它们。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，设备扫码配对；手机可以走中继、Tailscale、局域网或你自己的域名（默认中继，但不是必选）。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -28,7 +28,7 @@ Claude Code 是一个只能在终端里用的工具——不在电脑前你就�
 ```
  你的手机
         │
-        ├──  Web 客户端 (PWA)  ──  HTTP/SSE，用本机系统账号登录    ← 默认
+        ├──  Web 客户端 (PWA)  ──  HTTP/SSE，扫码配对的设备        ← 默认
         └──  Discord bot       ──  一个 token，多个频道            ← 可选
         │
         ▼
@@ -69,7 +69,7 @@ Discord 之外的第二道前门 —— 完全建立在多前端 API 之上的 *
 - **后台任务子会话** — subagent 和后台 shell 各自流入可折叠的子面板。
 - 头像昵称自定义、会话多选管理、per-agent 开机指令。
 
-安装 + 手机远程访问（Tailscale / PWA 安装）：**[web/SETUP.md](./web/SETUP.md)**。
+安装 + 手机远程访问（中继 / Tailscale / 局域网 / 自己的域名，PWA 安装）：**[web/SETUP.md](./web/SETUP.md)**。
 
 ### Discord UI
 - **交互式组件** — 按钮、下拉菜单、Slash 命令。
@@ -291,9 +291,20 @@ bun src/manager.ts install-cli
 请把**「谁能给 agent 发消息」直接理解成「谁能在这台机器上执行命令」**。
 
 **网络暴露面。** Bridge 默认只绑 `127.0.0.1`，且它的 WebSocket 控制面会拒绝跨源
-升级，所以你随手访问的网页驱动不了它。一旦设 `BRIDGE_BIND=0.0.0.0` 或把 3847
-端口转发出去，这层保护就没了——控制面本身没有任何鉴权。需要远程访问就放到
-Tailscale 后面，或者用带鉴权的反向代理，别直接暴露端口。
+升级，所以你随手访问的网页驱动不了它。设了 `BRIDGE_BIND=0.0.0.0`（安装向导的
+「只在同一网络用」）端口就对所有网卡开放：网页和配对入口是公开的，其余 API 要已配对
+的设备，裸控制路由对不带 `BRIDGE_CONTROL_TOKEN` 的非本机请求一律拒绝——但流量是明文，
+登录凭据可能在同一网络里被截获。要从外面访问，
+用中继、Tailscale 或 HTTPS 反向代理，绝不要把端口直接转发到公网。
+
+**已配对设备。** 按默认全部权限配对的设备，等于这台电脑的一把 shell 钥匙。受限的
+设备（少几个会话、没有终端、访客）在产品里能做的事会被限制，但它能指挥的 agent 仍然
+有这台电脑上的工具，所以只给信得过的设备配对。设备丢了就在网页的「设备」面板撤销。
+
+**中继。** 中继是手机连回电脑的默认方式，但不是必选。它是 HTTPS 的终点，网页脚本
+也由它下发，所以运营方技术上能看到你的对话，也能冒用你已配对的设备。端到端加密
+还没做。介意的话改用 Tailscale 或你自己的域名，或者自建中继
+（[docs/relay/self-host.md](./docs/relay/self-host.md)）。
 
 **Discord。** `ALLOWED_USER_IDS` 是唯一的门禁，且是 fail-closed 的：名单为空等于
 谁都不放行，而不是谁都放行。agent 频道创建时默认对 `@everyone` 隐藏，只显式放行
