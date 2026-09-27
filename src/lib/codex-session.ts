@@ -251,6 +251,25 @@ export function codexStateRecord(type: string, p: AnyRecord, ts: string | undefi
 }
 
 /**
+ * 回合以错误结束（task_complete 带 error）→ Claude Code 的错误条目形状，jsonl-watcher 照常处理：额度用完（原文
+ * "You've hit your usage limit…"）走 ⛔ 显示、不自动续跑；其它错误标 isApiErrorMessage、文字带 "API Error: "，
+ * 60s 后自动续跑一次（lib/api-error-resume.ts）。回合收尾见 bridge/codex-turn-failure.ts（失败的回合 Codex 不发 hook）。
+ */
+const CODEX_QUOTA_RE = /usage limit|rate limit/i;
+function codexTurnError(p: AnyRecord, ts: string | undefined): AnyRecord | null {
+  const msg = typeof p.error?.message === "string" ? p.error.message.trim() : "";
+  if (!msg) return null;
+  const quota = CODEX_QUOTA_RE.test(msg);
+  return {
+    type: "assistant",
+    timestamp: ts,
+    isApiErrorMessage: !quota,
+    error: msg,
+    message: { content: [{ type: "text", text: quota ? msg : `API Error: ${msg}` }] },
+  };
+}
+
+/**
  * 一行 Codex 记录 → Claude Code 形状（不是对话内容就返回 null）。
  *
  * 新版 Codex（0.149+ 的 code mode）把工具调用包在 `custom_tool_call name:"exec"` 里
@@ -278,6 +297,7 @@ export function codexLineToClaudeShape(line: string, state?: CodexTranslateState
       if (state) { state.turnHasItems = false; state.bootstrapTurn = false; state.droppedCalls.clear(); }
       return null;
     }
+    if (p.type === "task_complete") return state?.bootstrapTurn ? null : codexTurnError(p, ts);
     if (p.type !== "item_completed" || !p.item || typeof p.item !== "object") return null;
     if (state) state.turnHasItems = true;
     if (state?.bootstrapTurn) return null;
