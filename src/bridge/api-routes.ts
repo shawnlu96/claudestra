@@ -78,6 +78,7 @@ import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LE
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
+import { handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
@@ -441,6 +442,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           (a as any).contextTokens = info?.ctxTokens ?? null;
           // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
           (a as any).projectId = r?.projectId ?? null;
+          (a as any).external = r?.external === true; // 详情弹窗 / Peer 面板的闸门状态
           // 运行时徽章 + 顶栏挂哪种切换器的数据源：如实透传（未知/缺失 = claude-code），只认 pi 的话 Codex 会拿到 CC 面板
           (a as any).runtime = sourceFor(r?.runtime).id;
           // 当前模型 / 档位的兜底链按运行时分叉（lib/display-model.ts）；Codex 的窗口随会话记录走（258K 之类）
@@ -483,7 +485,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
             lastActivityTs: ts,
             created: (r as any).created,
             projectId: r.projectId ?? null,
-            runtime: sourceFor(r.runtime).id,
+            runtime: sourceFor(r.runtime).id, external: r.external === true,
             archived: existsSyncFs(`${USER_ARCHIVE_ROOT}/${String(r.name).replace(/^agent-/, "")}`),
           } as any);
         }
@@ -2170,6 +2172,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (peersRes) return peersRes;
   const rtRes = await handleRuntimeSettingsRoutes(req, path, principal, runManager); // /pi-*、/codex-*（bridge/runtime-settings-routes.ts）
   if (rtRes) return rtRes;
+  const infoRes = await handleAgentInfoRoutes(req, path, principal, runManager); // /agents/:name/info|external（bridge/agent-info-routes.ts）
+  if (infoRes) return infoRes;
 
   return apiJson(404, { ok: false, error: "unknown endpoint" });
 }

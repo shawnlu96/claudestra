@@ -133,16 +133,17 @@ bun src/manager.ts cron-history [name|id]
 # Cross-Claudestra HTTP peers (design: docs/design-http-peers.md). v2.15+ one-click invite: A generates (a link on the
 # relay, else a string), B opens/pastes it, B's bridge redeems at A. Single-use, 24h TTL, revoke kills the embedded token;
 # joining exposes nothing of B (one-way grant) — symmetric = B sends an invite back.
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (URL: relay, else HTTPS entry / peer port)
-bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = reverse exposure)
+# Scopes only take agents with `external` on (lib/peer-scope-gate.ts): "*" and master are always refused, --force no longer overrides.
+bun src/manager.ts peer-invite-new --agents <a,b> [--url <my-bridge-url>]  # A: print one-click invite (URL: relay, else HTTPS entry / peer port)
+bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>]  # B: paste invite, done (--agents = reverse exposure)
 bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
 bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + its embedded token
 # Legacy 3-step handshake (other side pre-v2.15): peer-http-invite <name> --agents <a,b> [--url] → peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> → peer-http-accept <name> '<receipt>'
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
-bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged)
+bun src/manager.ts peer-http-scope <name> --agents <a,b>  # v2.11.1+: change inbound scope in place (token unchanged)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
-# send_to_agent target: "<agent>@<peer>" | "peer:<peer>.<agent>"; master is NEVER shareable to peers (v2.15+ hard rule, --force does not override)
+# send_to_agent target: "<agent>@<peer>" | "peer:<peer>.<agent>"
 
 # Health check (read-only; the first thing to run when something is broken)
 bun src/manager.ts doctor [--json]
@@ -166,7 +167,7 @@ bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly pol
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
 bun src/manager.ts token-list
 bun src/manager.ts token-revoke <tokenId|name>
-bun src/manager.ts create <name> <dir> --external   # mark agent as safe-to-expose (R1 guard)
+bun src/manager.ts create <name> <dir> --external   # mark safe-to-expose (R1 guard); toggle later: external <agent> on|off
 
 # Token usage aggregation (parses ~/.claude/projects/<slug>/<sessionId>.jsonl)
 bun src/manager.ts cost [--agent <name>] [--today|--week]

@@ -128,16 +128,17 @@ bun src/manager.ts cron-history [name|id]
 
 # 跨 Claudestra HTTP peers（docs/design-http-peers.md）。v2.15+ 一键邀请：A 生成（连着中继是链接，否则邀请串）、
 # B 点开或粘贴，B 的 bridge 自动回调 A 兑换；一次性、24h 过期，撤销连带吊销内嵌 token；默认单向授权，对称 = B 也发一张。
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口/peer 端口）
-bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>] [--force]  # B: 粘贴即完成（--agents = 反向开放）
+# scope 只收已开 external 的 agent，"*"/大总管一律拒（lib/peer-scope-gate.ts）
+bun src/manager.ts peer-invite-new --agents <a,b> [--url <我方bridge地址>]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口/peer 端口）
+bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>]  # B: 粘贴即完成（--agents = 反向开放）
 bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期并吊销 token）
 bun src/manager.ts peer-invite-revoke <inv_id>    # 作废未兑换的邀请 + 其内嵌 token
 # 旧三步握手（对方是 v2.15 之前的版本）：peer-http-invite <name> --agents <a,b> [--url] → peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址> → peer-http-accept <name> '<回执串>'
 bun src/manager.ts peer-http-test <name>          # GET 对方 /agents — 验证连通 + scope
 bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状态
-bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: 原地改入站 scope（token 不变）
+bun src/manager.ts peer-http-scope <name> --agents <a,b>  # 原地改入站 scope（token 不变）
 bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
-# send_to_agent 的 target："<agent>@<peer>" 或 "peer:<peer>.<agent>"；大总管永远不可分享给 peer（v2.15+ 硬规则，--force 也不放行）
+# send_to_agent 的 target："<agent>@<peer>" 或 "peer:<peer>.<agent>"
 
 # 体检（只读；出问题时第一个该跑的）
 bun src/manager.ts doctor [--json]
@@ -160,7 +161,7 @@ bun src/manager.ts auto-update claude on|off       # Claude Code CLI（每周轮
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
 bun src/manager.ts token-list
 bun src/manager.ts token-revoke <tokenId|name>
-bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）
+bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）；切换：external <agent> on|off
 
 # token 用量统计（解析 ~/.claude/projects/<slug>/<sessionId>.jsonl）
 bun src/manager.ts cost [--agent <name>] [--today|--week]

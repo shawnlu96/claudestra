@@ -51,6 +51,8 @@ export interface AgentSession {
   projectId?: string | null;
   /** 未读回复数（bridge 计数，跨设备一致）；0 / 缺省 = 无未读 */
   unread?: number;
+  /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
+  external?: boolean;
   updateHint?: UpdateHint | null;
 }
 
@@ -71,6 +73,8 @@ interface ApiAgent {
   projectId?: string | null;
   unread?: number;
   archived?: boolean;
+  /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
+  external?: boolean;
   updateHint?: UpdateHint | null;
 }
 

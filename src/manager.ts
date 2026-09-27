@@ -2964,9 +2964,8 @@ switch (cmd) {
     await cmdProjectAssign(agentName, projectId);
     break;
   }
-  case "project-migrate":
-    await cmdProjectMigrate();
-    break;
+  case "project-migrate": await cmdProjectMigrate(); break;
+  case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {
