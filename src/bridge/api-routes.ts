@@ -82,7 +82,7 @@ import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
-import { handleExtensionRoutes } from "./api-extensions.js";
+import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -844,7 +844,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // 选了一个点了才报错的选项。轻量、无副作用，任何 token 都能读。
   if (path === "/capabilities" && req.method === "GET") {
     const { piAvailable } = await import("../lib/pi-env.js");
-    return apiJson(200, { ok: true, piAvailable: await piAvailable() });
+    return apiJson(200, { ok: true, piAvailable: await piAvailable(), ...apiFeatures() }); // apiVersion / features：bridge/api-extensions.ts
   }
 
   // v2.23+ POST /api/v1/sessions/:sessionId/manage —— 未纳管会话的处置（仅全权 token）。

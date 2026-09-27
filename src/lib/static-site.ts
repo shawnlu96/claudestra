@@ -26,8 +26,8 @@ function isFile(p: string): boolean {
   }
 }
 
-/** 解码一次并钉在根目录内；非法编码、../ 穿越 → null。bridge 的静态托管（web-gateway.ts）与这里共用 */
-export function safePathUnderRoot(rootDir: string, pathname: string): { root: string; rel: string } | null {
+/** 解码一次并钉在根目录内；非法编码、../ 穿越 → null（中继与 bridge 的静态托管都经 resolveExportedPath 走这里） */
+function safePathUnderRoot(rootDir: string, pathname: string): { root: string; rel: string } | null {
   if (!rootDir) return null;
   const root = resolve(rootDir);
   let rel: string;
