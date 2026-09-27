@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { renderSVG } from "uqr";
 import { getLang, useT } from "@/lib/i18n";
-import { envSnippet, fmtRemaining, relayMode, remainingSeconds, type PairView, type RelayStatusView } from "../relay-card-logic";
+import { envSnippet, fmtRemaining, relayHome, relayMode, remainingSeconds, type PairView, type RelayStatusView } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 import { relayPairNew, relayStatus } from "@/lib/api/system";
 
@@ -62,6 +62,7 @@ function PairBlock({ pair, onAgain, busy }: { pair: PairView; onAgain: () => voi
 function OnlineBlock({ status }: { status: RelayStatusView }) {
   const t = useT();
   const [pair, setPair] = useState<PairView | null>(null);
+  const home = relayHome(status);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const newCode = async () => {
@@ -87,8 +88,8 @@ function OnlineBlock({ status }: { status: RelayStatusView }) {
     <div className="mt-2 space-y-1.5 text-xs">
       <div className="flex items-center gap-1">
         <span className="text-base-content/55">{t("我的中继地址")}</span>
-        <a href={status.url ?? "#"} target="_blank" rel="noreferrer" className="link link-hover min-w-0 truncate font-mono text-[12px]">{status.url}</a>
-        <CopyButton text={status.url ?? ""} label="复制" />
+        <a href={home ?? "#"} target="_blank" rel="noreferrer" className="link link-hover min-w-0 truncate font-mono text-[12px]">{home}</a>
+        <CopyButton text={home ?? ""} label="复制" />
       </div>
       <p className="leading-relaxed text-base-content/55">{t("手机 / 别的浏览器不装任何东西、不开 Tailscale 就能打开这个地址。")}</p>
       {!pair && (

@@ -1,8 +1,10 @@
 /**
  * setup 向导「手机访问」一步：先选路，再配。默认是中继（手机什么都不装，这台机器只向外连一条 WebSocket，
- * docs/relay/README.md）；Tailscale 退为可选（选了才走 setup.ts 里保留的 Tailscale 流程）；第三项只用局域网。
+ * docs/relay/README.md）；Tailscale 可选（选了才走 setup.ts 里保留的 Tailscale 流程）；第三项只用局域网
+ * （要让 bridge 监听所有网卡，否则给出的地址打不开）；第四项自己的域名 / 反代，向导只指路。
+ * 每条路的代价和谁能看到内容都在选之前讲清：中继不是必选，几条路可以并存。
  * 终端原语（t / print / prompt…）由 setup.ts 注入：lib 不能反向 import 入口文件。
- * 判定都是纯函数（normalizeRelayUrl / predictRelayUrl / relayLinkVerdict），tests/setup-remote-access.test.ts。
+ * 判定都是纯函数（normalizeRelayUrl / relayEntryUrl / bindsAllInterfaces / relayLinkVerdict），tests/setup-remote-access.test.ts。
  */
 import { hostname } from "node:os";
 import { bridgeHttpBase } from "./bridge-port.js";
@@ -26,10 +28,12 @@ export interface SetupUi {
 }
 
 /** disableRelay：机器原本配着中继而用户改选别的路，且同意停用（setup 把 RELAY_URL 写空，bridge 视为没配） */
+/** bind：选了局域网并同意监听所有网卡时写进 .env 的 BRIDGE_BIND */
 export type RemoteAccessChoice =
   | { kind: "relay"; relayUrl: string; relayName: string; url: string }
   | { kind: "tailscale"; url?: string; disableRelay?: boolean }
-  | { kind: "lan"; url?: string; disableRelay?: boolean };
+  | { kind: "lan"; url?: string; disableRelay?: boolean; bind?: string }
+  | { kind: "custom"; url?: undefined; disableRelay?: boolean };
 
 // ── 纯函数 ────────────────────────────────────────────────────────────────
 
@@ -56,13 +60,21 @@ export function relayHttpsBase(relayUrl: string): string {
   return `${u.protocol === "ws:" ? "http:" : "https:"}//${u.host}`;
 }
 
-/** 装完之前预测的网页地址；名字被占时中继会加后缀，最终以 bridge 连上后报的为准 */
-export function predictRelayUrl(relayUrl: string, name: string): string {
-  const u = new URL(relayUrl);
-  return `${u.protocol === "ws:" ? "http:" : "https:"}//${slugify(name)}.${u.hostname}${u.port ? `:${u.port}` : ""}`;
+/**
+ * 手机要打开的地址：中继首页（路径模式，配对后浏览器记住是哪台机器）。旧的 <名字>.<中继域名> 子域名入口已废弃，
+ * 向导不再给出它——那个地址扫码后停在「等待确认」，子域名下线后直接失效。
+ */
+export function relayEntryUrl(st: Pick<RelayLinkInfo, "base"> | null, relayUrl: string): string {
+  const home = relayHttpsBase(relayUrl);
+  return st?.base ? `${new URL(home).protocol}//${st.base}` : home;
 }
 
-/** 子域名标签的校验：不合法就给出 slugify 后的建议 */
+/** .env 的 BRIDGE_BIND 是否监听所有网卡（局域网 / tailnet 的明文地址只有这时才打得开） */
+export function bindsAllInterfaces(bind: string | undefined): boolean {
+  return /^(0\.0\.0\.0|::|\[::\]|\*)$/.test((bind ?? "").trim().replace(/^["']|["']$/g, ""));
+}
+
+/** 名字的校验（中继目录里的机器名，也用作旧子域名标签）：不合法就给出 slugify 后的建议 */
 export function relayNameError(v: string, t: SetupUi["t"]): string | null {
   const s = slugify(v);
   if (s === v) return null;
@@ -74,10 +86,10 @@ export type RelayLinkVerdict =
   | { kind: "waiting"; why: string }
   | { kind: "no-bridge" };
 
-/** bridge 的 GET /relay/status（或拿不到它）→ 装完后该对用户说什么 */
-export function relayLinkVerdict(st: RelayLinkInfo | null, predicted: string): RelayLinkVerdict {
+/** bridge 的 GET /relay/status（或拿不到它）→ 装完后该对用户说什么；renamed = 中继给的名字和填的不一样（被占了加了后缀） */
+export function relayLinkVerdict(st: RelayLinkInfo | null, relayUrl: string, name: string): RelayLinkVerdict {
   if (!st) return { kind: "no-bridge" };
-  if (st.connected && st.url) return { kind: "connected", url: st.url, renamed: st.url !== predicted };
+  if (st.connected) return { kind: "connected", url: relayEntryUrl(st, relayUrl), renamed: !!st.slug && st.slug !== slugify(name) };
   return { kind: "waiting", why: `${st.state ?? "unknown"}${st.lastError ? `: ${st.lastError}` : ""}` };
 }
 
@@ -87,50 +99,94 @@ export type RelayProbe = (relayUrl: string) => Promise<{ ok: true; version?: str
 
 export interface ChooseOpts {
   /** 现有 .env 的值（续装时做默认） */
-  existing: { RELAY_URL?: string; RELAY_NAME?: string };
+  existing: { RELAY_URL?: string; RELAY_NAME?: string; BRIDGE_BIND?: string };
   /** 探测到的局域网地址（第三项只用它） */
   lanUrl?: string;
   /** 单测注入；生产用 probeRelay（GET /healthz） */
   probe?: RelayProbe;
 }
 
-/** 三选一。选了 Tailscale 只返回意向，具体流程在 setup.ts */
+/** 四选一。选了 Tailscale 只返回意向，具体流程在 setup.ts */
 export async function chooseRemoteAccess(ui: SetupUi, opts: ChooseOpts): Promise<RemoteAccessChoice> {
+  const { t } = ui;
+  printChoices(ui);
+  const pick = (await ui.prompt(t("选择", "Choose"), "1", (v) => (["1", "2", "3", "4"].includes(v.trim()) ? null : t("输入 1、2、3 或 4", "Enter 1, 2, 3 or 4")))).trim();
+  if (pick === "1") return configureRelay(ui, opts.existing, opts.probe ?? probeRelay);
+  const base = pick === "2" ? { kind: "tailscale" as const, url: opts.lanUrl } : pick === "3" ? await chooseLan(ui, opts) : chooseCustom(ui);
+  const current = normalizeRelayUrl(opts.existing.RELAY_URL ?? "");
+  if (!current) return base;
+  // 原本走着中继却改选别的路：问一句要不要停用，默认留着（几条路并存无害，删了才是不可逆的）
+  const disableRelay = await ui.confirm(
+    t(`这台机器目前配着中继（${current}）。停用它吗？（默认留着，两条路可以同时用）`, `This machine is currently on the relay (${current}). Disable it? (default: keep it — both paths can be used at once)`),
+    false,
+  );
+  return { ...base, disableRelay };
+}
+
+function printChoices(ui: SetupUi): void {
   const { t, c } = ui;
   ui.print(t(
-    "Web 端装在本机，在这台机器上开浏览器就能用。要在**手机**上用，三条路选一条：",
-    "The web client runs on this machine — a browser here just works. To use it from your **phone**, pick one of three ways:",
+    "这台电脑的浏览器已经能用了。要在手机或别的电脑上用，从下面选一条。中继不是必选；这几条路可以同时开着，以后重跑 bun run setup 随时换。",
+    "A browser on this machine already works. To use Claudestra from your phone or another computer, pick a path below. The relay is optional; " +
+      "paths can run side by side, and you can switch any time by rerunning `bun run setup`.",
   ));
   ui.br();
   ui.print(`  ${c.bold}1${c.reset}  ${t(
-    "中继（推荐）—— 手机什么都不装。这台机器向外连一条加密 WebSocket 到中继，手机在任何网络打开 https://<你的名字>.<中继域名> 就是这里的网页；不需要公网 IP、不开端口、不配证书。",
-    "Relay (recommended) — nothing to install on the phone. This machine keeps one encrypted WebSocket to the relay; the phone opens https://<your-name>.<relay-domain> from any network. No public IP, no open port, no certificates.",
+    "中继（默认，最省事）—— 手机什么都不装。这台电脑向外连一条 WebSocket，手机在任何网络打开中继首页、扫码配对。不开端口、不要公网 IP、不配证书。",
+    "Relay (default, easiest) — nothing to install on the phone. This machine keeps one outbound WebSocket; the phone opens the relay's home page " +
+      "from any network and pairs by QR code. No open port, no public IP, no certificates.",
   )}`);
   ui.hint(t(
-    "中继是 TLS 的终点，看得见经它的流量（和任何反向代理一样）。官方中继免费；也可以自建：docs/relay/self-host.md",
-    "The relay terminates TLS and can read the traffic through it (like any reverse proxy). The official relay is free; you can also run your own: docs/relay/self-host.md",
+    "⚠ 中继是 HTTPS 的终点，网页脚本也由它下发：运营方技术上能看到你和 agent 的对话，也能冒用你已配对的设备给 agent 下命令（agent 在这台电脑上等于一个不受限的 shell）。官方中继由 Claudestra 维护者运营，端到端加密还没做。介意就选 2，或自建中继：docs/relay/self-host.md",
+    "⚠ The relay terminates HTTPS and serves the web app's scripts, so its operator can technically read your conversations with agents and act " +
+      "as one of your paired devices (an agent is an unrestricted shell on this machine). The official relay is run by the Claudestra maintainers; " +
+      "end-to-end encryption is not built yet. If that matters, pick 2 or self-host a relay: docs/relay/self-host.md",
   ));
   ui.print(`  ${c.bold}2${c.reset}  ${t(
-    "Tailscale —— 两边都装 Tailscale，流量只走你自己的私有网络、不经任何第三方；要装 App、登录账号，再配 HTTPS。",
-    "Tailscale — install it on both devices; traffic stays inside your own private network, no third party. Needs the app, an account, then HTTPS.",
+    "Tailscale —— 两边都装 Tailscale、登录同一个账号，内容只在你自己的设备之间走；向导可以替你装好并配 HTTPS。代价：要装 App；开 HTTPS 证书后机器名会进入公开的证书透明日志。",
+    "Tailscale — install it on both devices with the same account; traffic stays between your own devices. The wizard can install it and set up " +
+      "HTTPS. Cost: an app on the phone; with HTTPS certificates the machine name lands in public Certificate Transparency logs.",
   )}`);
   ui.print(`  ${c.bold}3${c.reset}  ${t(
-    `先不配 —— 只在同一 Wi-Fi 下用局域网地址${opts.lanUrl ? `（${opts.lanUrl}）` : ""}，出门就断。`,
-    `Not now — LAN address only${opts.lanUrl ? ` (${opts.lanUrl})` : ""}, stops working once you leave the Wi-Fi.`,
+    "只在同一 Wi-Fi 用（临时试用）—— bridge 要监听所有网卡。明文 HTTP，同一网络的人能看到流量；推送、语音、PWA 用不了，出门就断。",
+    "Same Wi-Fi only (quick trial) — the bridge must listen on all interfaces. Plain HTTP, visible to anyone on the network; no push, voice or PWA; stops working once you leave.",
+  )}`);
+  ui.print(`  ${c.bold}4${c.reset}  ${t(
+    "我有自己的域名 / 反向代理（高级）—— 向导不自动配，给你文档和配对命令。",
+    "My own domain / reverse proxy (advanced) — not automated; the wizard points you to the docs and the pairing command.",
   )}`);
   ui.br();
-  const pick = (await ui.prompt(t("选择", "Choose"), "1", (v) => (["1", "2", "3"].includes(v.trim()) ? null : t("输入 1、2 或 3", "Enter 1, 2 or 3")))).trim();
-  if (pick === "1") return configureRelay(ui, opts.existing, opts.probe ?? probeRelay);
-  if (pick === "3") ui.hint(t("之后想配，重跑 bun run setup 走到这一步即可。", "Rerun `bun run setup` any time to set this up."));
-  const kind = pick === "2" ? "tailscale" : "lan";
-  const current = normalizeRelayUrl(opts.existing.RELAY_URL ?? "");
-  if (!current) return { kind, url: opts.lanUrl };
-  // 原本走着中继却改选别的路：问一句要不要停用，默认留着（两条路并存无害，删了才是不可逆的）
-  const disableRelay = await ui.confirm(
-    t(`这台机器目前配着中继（${current}）。停用它吗？（停用后手机只能走你现在选的这条路）`, `This machine is currently on the relay (${current}). Disable it? (the phone would then only have the path you just picked)`),
-    false,
-  );
-  return { kind, url: opts.lanUrl, disableRelay };
+}
+
+/** 选 3：bridge 默认只听 127.0.0.1，不改 BRIDGE_BIND 给出的局域网地址打不开，所以先讲风险再问要不要改 */
+async function chooseLan(ui: SetupUi, opts: ChooseOpts): Promise<Extract<RemoteAccessChoice, { kind: "lan" }>> {
+  const { t } = ui;
+  if (bindsAllInterfaces(opts.existing.BRIDGE_BIND)) return { kind: "lan", url: opts.lanUrl };
+  ui.hint(t(
+    "bridge 现在只监听本机（127.0.0.1）。改成监听所有网卡后，同一网络的任何设备都能连到它的端口（仍要配对才能用，但流量是明文）。咖啡馆、公司这类公共网络不要开。",
+    "The bridge listens on this machine only (127.0.0.1). Listening on all interfaces lets any device on the network reach its port (pairing is " +
+      "still required, but traffic is plain text). Don't do this on public networks such as cafés or offices.",
+  ));
+  if (await ui.confirm(t("让 bridge 监听所有网卡（.env 写 BRIDGE_BIND=0.0.0.0）？", "Let the bridge listen on all interfaces (.env BRIDGE_BIND=0.0.0.0)?"), false)) {
+    return { kind: "lan", url: opts.lanUrl, bind: "0.0.0.0" };
+  }
+  ui.hint(t("没改。手机暂时用不了；之后想配，重跑 bun run setup。", "Unchanged. The phone can't connect for now; rerun `bun run setup` when you want to set this up."));
+  return { kind: "lan" };
+}
+
+/** 选 4：只指路。反代要把 HTTPS 转到 bridge 端口，并带 X-Forwarded-Proto / -Host（bridge 按它们判同源） */
+function chooseCustom(ui: SetupUi): Extract<RemoteAccessChoice, { kind: "custom" }> {
+  const { t, c } = ui;
+  ui.print(t(
+    `照 ${c.cyan}web/SETUP.md${c.reset} 的「Public reverse proxy」和「Custom domain」两节，用 Caddy / nginx 加证书，把 HTTPS 转到 bridge 端口（带上 X-Forwarded-Proto 和 X-Forwarded-Host）。`,
+    `Follow the "Public reverse proxy" and "Custom domain" sections of ${c.cyan}web/SETUP.md${c.reset}: Caddy or nginx with a certificate, ` +
+      `forwarding HTTPS to the bridge port (with X-Forwarded-Proto and X-Forwarded-Host).`,
+  ));
+  ui.hint(t(
+    "对公网开放时必须加限流或 IP 白名单。配好后用 claudestra pair --url https://<你的域名> 出配对二维码。",
+    "If it faces the internet, add rate limiting or an IP allowlist. Once it works, `claudestra pair --url https://<your-domain>` prints a pairing QR code.",
+  ));
+  return { kind: "custom" };
 }
 
 async function configureRelay(ui: SetupUi, existing: ChooseOpts["existing"], probe: RelayProbe): Promise<RemoteAccessChoice> {
@@ -153,13 +209,15 @@ async function configureRelay(ui: SetupUi, existing: ChooseOpts["existing"], pro
     if (await ui.confirm(t("仍然写入这个地址？（bridge 会自己重试；选 n 重输）", "Keep this address anyway? (the bridge retries on its own; n = re-enter)"), false)) break;
   }
   const relayName = await ui.prompt(
-    `${c.bold}${t("你的名字（子域名标签）", "Your name (subdomain label)")}${c.reset}`,
+    `${c.bold}${t("这台电脑的显示名", "Display name for this machine")}${c.reset} ${c.dim}${t(
+      "(中继目录、配对页和联系人的通讯录里都看得到；不想暴露真名或公司名就换一个)",
+      "(shown in the relay directory, on pairing pages and in your contacts' lists — change it if the hostname reveals too much)",
+    )}${c.reset}`,
     existing.RELAY_NAME && !relayNameError(existing.RELAY_NAME, t) ? existing.RELAY_NAME : slugify(hostname()),
     (v) => relayNameError(v, t),
   );
-  const url = predictRelayUrl(relayUrl, relayName);
-  ui.ok(t(`手机上打开: ${c.cyan}${url}${c.reset}`, `On your phone: ${c.cyan}${url}${c.reset}`));
-  ui.hint(t("名字被别人占了会自动加一段后缀，装完以实际连上的地址为准（下面会再确认一次）。", "If the name is taken the relay appends a suffix; the final address is confirmed after install below."));
+  const url = relayEntryUrl(null, relayUrl);
+  ui.ok(t(`手机上打开: ${c.cyan}${url}${c.reset}（装完会出配对二维码）`, `On your phone: ${c.cyan}${url}${c.reset} (a pairing QR code follows after install)`));
   return { kind: "relay", relayUrl, relayName, url };
 }
 
@@ -175,13 +233,14 @@ const probeRelay: RelayProbe = async (relayUrl) => {
   }
 };
 
-interface PairInfo { ok: boolean; url: string; display: string; expiresAt: string; error?: string }
+/** link = 中继首页 + #<指纹>.<密钥>（扫码直接完成配对）；url 是旧子域名入口的字段，只在没有 link 的旧 bridge 上兜底 */
+interface PairInfo { ok: boolean; link?: string | null; url?: string | null; display: string; expiresAt: string; error?: string }
 
 /**
  * 装完（daemon 已起）之后：等 bridge 连上中继，报最终地址，并直接签一个配对码打成二维码——手机扫一下就登录，
  * 不用先找密码。等不到就告诉用户之后怎么拿（claudestra pair）。返回该写进「完成」横幅的手机地址。
  */
-export async function confirmRelayLink(ui: SetupUi, choice: { relayUrl: string; url: string }, waitMs = 20_000): Promise<string> {
+export async function confirmRelayLink(ui: SetupUi, choice: { relayUrl: string; relayName: string; url: string }, waitMs = 20_000): Promise<string> {
   const { t, c } = ui;
   const predicted = choice.url;
   ui.br();
@@ -194,7 +253,7 @@ export async function confirmRelayLink(ui: SetupUi, choice: { relayUrl: string; 
     if (st?.connected || Date.now() >= deadline || (r && !r.ok)) break; // 非 2xx = 跑着没有 /relay 路由的旧 bridge，等也没用
     await new Promise((res) => setTimeout(res, 1000));
   }
-  const v = relayLinkVerdict(st, predicted);
+  const v = relayLinkVerdict(st, choice.relayUrl, choice.relayName);
   if (v.kind === "no-bridge") {
     ui.hint(t(
       "bridge 还没起来（或者你选了自己启动 daemon）。起来后运行 claudestra pair 拿配对码，手机扫码即登录。",
@@ -208,20 +267,25 @@ export async function confirmRelayLink(ui: SetupUi, choice: { relayUrl: string; 
     return predicted;
   }
   ui.ok(t(`已连上中继: ${c.cyan}${v.url}${c.reset}`, `Connected to the relay: ${c.cyan}${v.url}${c.reset}`));
-  if (v.renamed) ui.hint(t("名字被占了，中继分配了这个地址。", "The name was taken; the relay assigned this address."));
+  if (v.renamed && st?.slug) ui.hint(t(`名字被占了，中继上显示为 ${st.slug}。`, `The name was taken; the relay lists this machine as ${st.slug}.`));
   const pair = await fetch(`${bridgeHttpBase()}/relay/pair/new`, { method: "POST", signal: AbortSignal.timeout(5000) })
     .then((r) => r.json() as Promise<PairInfo>)
     .catch(() => null); // 签不出配对码不是安装失败：下面提示用 claudestra pair 再拿
-  if (!pair?.ok) {
+  const link = pair?.link ?? pair?.url;
+  if (!pair?.ok || !link) {
     ui.hint(t("配对码稍后用 claudestra pair 拿（手机扫码即登录）。", "Get a pairing code later with `claudestra pair` (scan to sign in)."));
     return v.url;
   }
   ui.br();
-  ui.print(t("手机相机扫这个码，打开就登录了（10 分钟内有效，只能用一次）：", "Scan this with the phone camera — it opens signed in (valid 10 minutes, single use):"));
-  await printQr(ui, pair.url);
-  ui.print(`  ${t("链接", "Link")}: ${c.cyan}${pair.url}${c.reset}`);
+  ui.print(t("手机相机扫这个码，打开就配对好了（10 分钟内有效，只能用一次）：", "Scan this with the phone camera — it opens already paired (valid 10 minutes, single use):"));
+  await printQr(ui, link);
+  ui.print(`  ${t("链接", "Link")}: ${c.cyan}${link}${c.reset}`);
   ui.print(`  ${t("短码", "Code")}: ${c.bold}${pair.display}${c.reset}  ${c.dim}${t(`（在 ${relayHttpsBase(choice.relayUrl)} 首页输入也行）`, `(or type it at ${relayHttpsBase(choice.relayUrl)})`)}${c.reset}`);
-  ui.hint(t("以后给别的手机配对：claudestra pair；网页的 Peer 面板顶部也有「配对新设备」。", "To pair another phone later: `claudestra pair`, or the *Pair a new device* button in the web client's Peer panel."));
+  ui.hint(t(
+    "扫码的这台设备会拥有这台电脑的全部权限（全部 agent、终端、管理）；丢了就去网页「设备」面板撤销。以后给别的设备配对：claudestra pair。",
+    "The device that scans gets full access to this machine (all agents, terminal, management); if it's lost, revoke it in the web client's " +
+      "Devices panel. Pair more devices later with `claudestra pair`.",
+  ));
   return v.url;
 }
 

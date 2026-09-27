@@ -281,10 +281,10 @@ Claudestra runs as three launchd user agents. Everything below works from any di
 launchctl list | grep claudestra
 
 # Logs — stdout and stderr are separate files per daemon
-tail -f /tmp/claudestra-bridge.out      # routing, registrations, deliveries
-tail -f /tmp/claudestra-bridge.err      # stack traces
-tail -f /tmp/claudestra-launcher.out    # master guardian, agent revival
-tail -f /tmp/claudestra-cron.out        # scheduled jobs
+tail -f ~/.claude-orchestrator/logs/bridge.out      # routing, registrations, deliveries
+tail -f ~/.claude-orchestrator/logs/bridge.err      # stack traces
+tail -f ~/.claude-orchestrator/logs/launcher.out    # master guardian, agent revival
+tail -f ~/.claude-orchestrator/logs/cron.out        # scheduled jobs
 
 # Restart one service (-k kills it first, then reloads)
 launchctl kickstart -k "gui/$(id -u)/com.claudestra.bridge"
@@ -304,7 +304,7 @@ Run it from inside the repo: `cd ~/repos/claudestra && bun run setup`.
 Check **Privileged Intents** — all three must be enabled on the Developer Portal. Discord silently drops events the bot isn't entitled to.
 
 ```bash
-tail -n 50 /tmp/claudestra-bridge.out
+tail -n 50 ~/.claude-orchestrator/logs/bridge.out
 ```
 
 If there are no "received message" lines, intents are the problem.
@@ -316,7 +316,7 @@ Your user ID is probably missing from `ALLOWED_USER_IDS`. Re-run `bun run setup`
 ### Master agent never comes online
 
 ```bash
-tail -n 50 /tmp/claudestra-launcher.out
+tail -n 50 ~/.claude-orchestrator/logs/launcher.out
 ```
 
 Common causes:
@@ -328,7 +328,7 @@ Common causes:
 ### Bridge keeps restarting
 
 ```bash
-tail -n 100 /tmp/claudestra-bridge.err
+tail -n 100 ~/.claude-orchestrator/logs/bridge.err
 ```
 
 Usually means the bot token is wrong or `.env` has a typo. Regenerate the token in the Developer Portal and re-run `bun run setup`.

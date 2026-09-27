@@ -13,6 +13,8 @@ export interface RelayStatusLike {
   connected?: boolean;
   state?: string | null;
   url?: string | null;
+  /** 中继主机名：手机打开 https://<base> 配对（路径模式）；旧的 url 是已废弃的子域名入口 */
+  base?: string | null;
   relayUrl?: string | null;
   retryAt?: number | null;
   lastError?: string | null;
@@ -24,8 +26,9 @@ export function relayChecks(st: RelayStatusLike, group: string, now = Date.now()
     return [{ group, name, status: "ok",
       detail: "没配（可选）—— 出门访问只能靠 Tailscale；重跑 bun run setup 的「手机访问」一步选中继（手机不装任何东西），或 .env 加 RELAY_URL / RELAY_NAME 后重启 bridge" }];
   }
-  if (st.connected && st.url) {
-    return [{ group, name, status: "ok", detail: `${st.url}（手机 / 浏览器不装任何东西就能打开；claudestra pair 出配对码）` }];
+  const entry = st.base ? `https://${st.base}` : st.url;
+  if (st.connected && entry) {
+    return [{ group, name, status: "ok", detail: `${entry}（手机 / 浏览器不装任何东西就能打开；claudestra pair 出配对码）` }];
   }
   const retry = st.retryAt && st.retryAt > now ? `，${Math.ceil((st.retryAt - now) / 1000)} 秒后重试` : "";
   const why = `${st.state ?? "unknown"}${st.lastError ? `: ${st.lastError}` : ""}`;
