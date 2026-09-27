@@ -7,10 +7,12 @@ import { machines } from "@/lib/machines";
 import { listDevices, revokeDevice, type DeviceInfo } from "@/lib/api/devices";
 import { useMachines } from "../../../machines/use-machines";
 import { Section } from "./section";
+import { AddDevicePanel } from "./add-device";
 
 /**
  * 设置 · 设备：这台机器上所有已配对的设备（GET /api/v1/devices，要 manage 权限），本浏览器那条高亮；
  * 撤销别的设备 = 让那台手机 / 电脑下线；撤销自己 = 退出登录（bridge 回删 cookie，这里把机器从清单里摘掉）。
+ * 「添加设备」在这里直接给新设备发配对码（add-device.tsx），手输短码的请求就地批准，不用回电脑终端。
  * 下面是本浏览器配对过的机器（IndexedDB，只有名字和指纹）与「添加另一台机器」。
  */
 export function DevicesSection() {
@@ -21,6 +23,7 @@ export function DevicesSection() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [armed, setArmed] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   const load = useCallback(() => {
     listDevices()
@@ -55,7 +58,18 @@ export function DevicesSection() {
   };
 
   return (
-    <Section title={t("已配对的设备")} desc={current ? `${current.name} · ${current.fp}` : undefined}>
+    <Section
+      title={t("已配对的设备")}
+      desc={current ? `${current.name} · ${current.fp}` : undefined}
+      aside={
+        devices && !adding ? (
+          <button className="btn btn-sm" onClick={() => setAdding(true)}>
+            {t("添加设备")}
+          </button>
+        ) : undefined
+      }
+    >
+      {adding && <AddDevicePanel onClose={() => setAdding(false)} onPaired={load} />}
       {err && <div className="mb-2 text-xs text-error">{t(err)}</div>}
       {devices === null && !err && <span className="loading loading-spinner loading-xs" />}
       {devices && devices.length === 0 && <div className="text-xs text-base-content/50">{t("还没有设备")}</div>}

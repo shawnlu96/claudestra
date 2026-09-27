@@ -44,9 +44,6 @@ export function stats<T>(refresh: boolean): Promise<T> {
 export function relayStatus<T>(): Promise<T> {
   return api<T>("/relay/status", { timeoutMs: 5000 });
 }
-export function relayPairNew<T>(): Promise<T> {
-  return api<T>("/relay/pair", { method: "POST", json: {}, timeoutMs: 5000 });
-}
 
 // ── 手机访问面板（探测要起子进程 + TLS 握手，bridge 缓存 60s）──
 export function remoteAccess<T>(fresh: boolean): Promise<T> {

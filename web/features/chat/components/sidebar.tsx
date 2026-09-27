@@ -6,8 +6,7 @@ import { installTapRescue } from "@/lib/tap-rescue";
 import { SettingsModal } from "./settings-modal";
 import type { SettingsPageId } from "./settings/nav";
 import { ProjectsModal } from "./projects-modal";
-import { InstallBanner } from "./install-banner";
-import { PushBanner } from "./push-banner";
+import { SidebarBanners } from "./sidebar-banners";
 import { StatsPanel } from "./stats-panel";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
@@ -354,10 +353,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         )}
       </div>
 
-      {/* 添加到主屏幕引导（浏览器标签页访问且未 dismiss 时显示） */}
-      <InstallBanner />
-      {/* 开启推送引导（已具备推送能力且没问过权限时显示,与安装引导天然互斥） */}
-      <PushBanner />
+      <SidebarBanners />
 
       {/* 2026-09-11 回弹恢复(owner:「没回弹总以为是卡住了」)。回弹/减速尾巴期间
           点行丢 click 的问题改由容器上的 installTapRescue 兜底:抬手 450ms 没等到真 click

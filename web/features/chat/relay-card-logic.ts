@@ -31,13 +31,6 @@ export function envSnippet(relayUrl?: string | null, slug?: string | null): stri
   return `RELAY_URL=${relayUrl || "wss://relay.example.com"}\nRELAY_NAME=${slug || "my-mac"}`;
 }
 
-export interface PairView {
-  code: string;
-  display: string;
-  url: string;
-  expiresAt: string;
-}
-
 /** 距过期还有几秒；解析不了或已过 → 0 */
 export function remainingSeconds(expiresAt: string, now: number): number {
   const t = Date.parse(expiresAt);

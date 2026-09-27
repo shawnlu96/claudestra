@@ -17,7 +17,7 @@ import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
 import { relayClient } from "./relay-link.js";
-import { issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
+import { activePairingCodeList, issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
 import { requestContextOf, type RequestContext } from "./request-context.js";
 
 const challenges = new ChallengeStore();
@@ -151,7 +151,8 @@ export async function handleDevicesManaged(req: Request, url: URL, principal: Pr
   const del = p.match(/^\/api\/v1\/devices\/(dev_[0-9a-f]+)$/);
   if (del && req.method === "DELETE") return revokeDevice(req, principal, del[1]);
   if (p === "/api/v1/devices/approvals" && req.method === "GET") {
-    return canManage(principal) ? apiJson(200, { ok: true, approvals: pendingApprovals() }) : forbidden(MANAGE_MSG);
+    // activeCodes：还没被用掉的码——网页据此看出自己发出去的码已经被扫码配走（与回环 /relay/pair/approvals 同形）
+    return canManage(principal) ? apiJson(200, { ok: true, approvals: pendingApprovals(), activeCodes: activePairingCodeList() }) : forbidden(MANAGE_MSG);
   }
   const dec = p.match(/^\/api\/v1\/devices\/approvals\/([A-Za-z0-9_-]+)$/);
   if (dec && req.method === "POST") {

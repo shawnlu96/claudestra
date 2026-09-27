@@ -108,14 +108,57 @@ export function revokeDevice(id: string): Promise<void> {
   return api(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
 }
 
+// ── 在网页里发配对码、批准别的设备（要 manage；bridge/local-api/control.ts 与 devices.ts 的管理端点）──
+
+/** 手输短码等着这台机器点头的设备 */
+export interface PendingApproval {
+  id: string;
+  code: string;
+  deviceName: string;
+  clientIp: string | null;
+  grant: PairedInfo["grant"];
+  guest?: string;
+  expiresAt: string;
+}
+
+/** activeCodes：还没被用掉的码（旧 bridge 不给 → undefined，调用方就不判「已被扫码配走」） */
+export async function listApprovals(): Promise<{ approvals: PendingApproval[]; activeCodes?: string[] }> {
+  const j = await api<{ approvals?: PendingApproval[]; activeCodes?: string[] }>("/devices/approvals", { timeoutMs: 5000 });
+  return { approvals: j.approvals ?? [], activeCodes: j.activeCodes };
+}
+
+export function decideApproval(id: string, approve: boolean): Promise<void> {
+  return api(`/devices/approvals/${encodeURIComponent(id)}`, { method: "POST", json: { approve } }).then(() => undefined);
+}
+
+export interface ShareCode {
+  code: string;
+  display: string;
+  /** 扫码 / 点开即配好的链接（入口 + /pair#<指纹>.<秘密>） */
+  link: string;
+  expiresAt: string;
+}
+
+/**
+ * 签一个配对码。guest = 给别人的设备（独立身份、只含选中的会话、无终端无管理），不给就是自己的设备（全权）。
+ * link：bridge 知道入口时给（中继首页）；没给就用当前页面的 origin 拼——前端就托管在这个源上。老 bridge 只有 url（子域名）。
+ */
+export async function newShareCode(opts: { guest?: string; agents?: string[] } = {}): Promise<ShareCode> {
+  type R = { ok?: boolean; error?: string; code?: string; display?: string; link?: string | null; fragment?: string; url?: string | null; expiresAt?: string };
+  const j = await api<R>("/relay/pair", { method: "POST", json: opts, timeoutMs: 5000 });
+  const link = j.link || (j.fragment ? `${window.location.origin}/pair#${j.fragment}` : j.url);
+  if (!j.ok || !j.code || !link) throw new Error(j.error || "配对码生成失败");
+  return { code: j.code, display: j.display ?? j.code, link, expiresAt: j.expiresAt ?? "" };
+}
+
 /** 配对页给用户看的错误文案（中文 key，渲染点 t() 兜底翻译）。local = 本机一键配对那条路径：只有它的 403 意味着「不是本机」 */
 export function pairErrorText(e: unknown, local = false): string {
   const err = e as ApiError & { code?: string };
   switch (err?.code) {
     case "code_invalid":
-      return "配对码无效或已过期，请在电脑上重新运行 claudestra pair";
+      return "配对码无效或已过期，请重新生成一个";
     case "challenge_invalid":
-      return "链接已过期，请在电脑上重新生成二维码";
+      return "链接已过期，请重新生成二维码";
     case "rate_limited":
       return "尝试太频繁，请稍后再试";
     case "machine_unknown":

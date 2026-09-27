@@ -131,6 +131,26 @@ describe("手输短码：进待确认，Mac 侧点头才发凭据", () => {
   });
 });
 
+describe("网页里批准配对（管理端点）", () => {
+  const owner: Principal = { id: OWNER_PRINCIPAL_ID, role: "owner", agents: ["*", "master"], createdAt: "2026-01-01T00:00:00Z" };
+  const managed = async (method: string, path: string, body?: unknown) =>
+    (await handleDevicesManaged(req(method, path, RELAY, body === undefined ? {} : { body }), new URL(`http://x${path}`), owner))!;
+  test("列表带还没用掉的码；码被输入后进待确认、不再算「没用掉」；网页批准即发凭据", async () => {
+    const info = issuePairing(machine, { guest: "Alex", agents: ["worker-a"] });
+    const code = String(info.code);
+    const before = (await (await managed("GET", "/api/v1/devices/approvals")).json()) as { activeCodes: string[] };
+    expect(before.activeCodes).toContain(code);
+    const r = (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { code, deviceName: "Alex iPhone" } }))!;
+    const { approvalId } = (await r.json()) as { approvalId: string };
+    const mid = (await (await managed("GET", "/api/v1/devices/approvals")).json()) as { activeCodes: string[]; approvals: Array<{ id: string; code: string; guest?: string }> };
+    expect(mid.activeCodes).not.toContain(code);
+    expect(mid.approvals.find((a) => a.id === approvalId)).toMatchObject({ code, guest: "Alex" });
+    const dec = await managed("POST", `/api/v1/devices/approvals/${approvalId}`, { approve: true });
+    expect(await dec.json()).toMatchObject({ ok: true, state: "approved", deviceName: "Alex iPhone" });
+    expect((await managed("POST", `/api/v1/devices/approvals/${approvalId}`, { approve: true })).status).toBe(404);
+  });
+});
+
 describe("本机回环自动配对", () => {
   test("隧道来源（source relay）打不到；LAN 打不到；回环缺自定义头 / 跨源都拒；回环 + 头 + 同源 → 凭据，cookie 不带 Secure、Path=/", async () => {
     expect((await pub("POST", "/api/v1/devices/local", RELAY, { headers: { "x-cstra-device": "1" } }))!.status).toBe(403);
