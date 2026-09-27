@@ -428,41 +428,12 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
   }
 }
 
-/** 押后队列投递:Stop hook / 周期扫描调用。目标还忙就原样留队等下一次触发;
- *  投递中途目标又开新回合时,deliverToLocal 的忙检会把剩余消息重新押上(串行化)。 */
-async function flushHeldLocalMsgs(channelId: string, reason: string) {
-  const q = heldLocalMsgs.get(channelId);
-  if (!q || q.length === 0) return;
-  const evAgent = q[0].to.agentName || channelId;
-  // v2.21.2+ 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
-  if (getAgentStatus(evAgent) === "compacting") return;
-  if (!heldLocalMsgs.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
-  try {
-    const working = await localAgentWorking(channelId, evAgent);
-    // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
-    // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
-    // 快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
-    const due = working ? q.filter((i) => isHumanRequest(i.env)) : q.filter((i) => !leaseActive(i)); // check_inbox 领走、租约内的不投(bridge/inbox.ts)
-    for (const item of due) {
-      // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
-      const fresh = clients.get(channelId);
-      if (!fresh) break;
-      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
-      if (!heldLocalMsgs.get(channelId)?.includes(item)) continue;
-      const to: RouterLocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
-      const d = await deliverToLocal(item.env, to);
-      if (d.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
-      // 目标又忙了:deliverToLocal 押回时 hold 认出原条目还在(同一封)就不另加——原条目留着,首次入队 / 已提醒时间不重置,
-      // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份(codex 2026-09-28 复核)。等下一次触发
-      if (d.outcome.kind === "sent" && d.outcome.note === "queued") break;
-      // push-back 的失效钟从真正送达起算(先于出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉)
-      if (d.outcome.kind === "sent") pendingAgentCalls.touch(channelId);
-      heldLocalMsgs.remove(channelId, item);
-      if (d.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
-    }
-  } finally {
-    heldLocalMsgs.release(channelId);
-  }
+/** 押后队列投递:Stop hook / 压缩结束 / 周期扫描调用(规则与交错场景见 bridge/held-flush.ts 及其测试) */
+function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
+  return flushHeld({
+    held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest,
+    client: (c) => clients.get(c), deliver: deliverToLocal, touch: (c) => pendingAgentCalls.touch(c),
+  }, channelId, reason);
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
@@ -577,7 +548,8 @@ import type {
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
-import { ageHeld, heldNoticeText, HeldQueue, leaseActive } from "./bridge/held-queue.js";
+import { ageHeld, heldNoticeText, HeldQueue } from "./bridge/held-queue.js";
+import { flushHeld } from "./bridge/held-flush.js";
 import { AgentCallBook, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
