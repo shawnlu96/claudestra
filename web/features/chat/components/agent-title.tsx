@@ -16,7 +16,7 @@ export function AgentTitle({ info, fallback }: { info?: AgentSession; fallback: 
         {info.label || t(info.displayName)}
         {info.label && <span className="ml-1.5 text-[12px] font-normal text-base-content/45">| {info.displayName}</span>}
       </span>
-      {info.external && <ExternalBadge count={info.sharedPeers ?? 0} />}
+      {info.external && <ExternalBadge count={info.sharedPeers ?? 0} peers={info.sharedWith ?? []} />}
     </>
   );
 }

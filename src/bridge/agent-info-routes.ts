@@ -33,12 +33,16 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
   const full = isFullScope(principal) && !principal.peer;
   const principals = full ? (await io.readPrincipals()).principals : [];
   const archived = (name: string) => existsSync(`${USER_ARCHIVE_ROOT}/${name.replace(/^agent-/, "")}`);
-  return (name, r) => ({
-    external: r?.external === true,
-    label: r?.label ?? null,
-    archived: archived(name),
-    ...(full ? { sharedPeers: peersSharingAgent(principals, name).length } : {}),
-  });
+  return (name, r) => {
+    const sharedWith = full ? peersSharingAgent(principals, name) : null;
+    return {
+      external: r?.external === true,
+      label: r?.label ?? null,
+      archived: archived(name),
+      // 顶栏徽章的数字 + 悬停时的 peer 名单（owner 2026-09-28）
+      ...(sharedWith ? { sharedPeers: sharedWith.length, sharedWith } : {}),
+    };
+  };
 }
 
 export async function handleAgentInfoRoutes(

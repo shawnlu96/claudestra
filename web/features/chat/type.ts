@@ -171,6 +171,8 @@ export interface AgentSession {
   external?: boolean;
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
   label?: string | null;
+  /** 全权 token 才有：共享给哪些 peer（顶栏徽章悬停名单）/ 几个（角标数字） */
+  sharedWith?: string[];
   sharedPeers?: number;
   /**
    * v2.23+ 运行时：`"pi"` = Pi coding agent，`"claude-code"`/缺失 = Claude Code。
