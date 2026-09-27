@@ -447,6 +447,8 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = clients.get(channelId);
       if (!fresh) break;
+      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
+      if (!heldLocalMsgs.get(channelId)?.includes(item)) continue;
       const to: RouterLocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       const d = await deliverToLocal(item.env, to);
       if (d.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
