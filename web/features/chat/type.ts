@@ -1,5 +1,6 @@
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
+import type { MissionInfo } from "@/lib/chat/agents";
 
 export interface ToolCallView {
   /** tool_use id——直播里 tool-state（失败标红）按它找回这张卡。 */
@@ -174,6 +175,8 @@ export interface AgentSession {
   /** 全权 token 才有：共享给哪些 peer（顶栏徽章悬停名单）/ 几个（角标数字） */
   sharedWith?: string[];
   sharedPeers?: number;
+  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏 / 顶栏「⏱ 值守 → 11:00」、菜单「开始 / 结束值守」 */
+  mission?: MissionInfo | null;
   /**
    * v2.23+ 运行时：`"pi"` = Pi coding agent，`"claude-code"`/缺失 = Claude Code。
    * 侧栏徽章、TopBar 模型/effort 展示都按它分叉（Pi 的模型来自 provider 配置，

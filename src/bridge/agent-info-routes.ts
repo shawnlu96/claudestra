@@ -11,6 +11,7 @@ import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import type { Principal, PrincipalsFile } from "../lib/principals.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
+import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
@@ -19,8 +20,10 @@ type RunManager = (...args: string[]) => Promise<any>;
 export interface AgentInfoIo {
   readRegistryAgents: () => Promise<RegistryAgent[]>;
   readPrincipals: () => Promise<PrincipalsFile>;
+  /** 值守状态（lib/missions.ts）；单测不给 = 没有值守 */
+  readMissions?: () => Promise<MissionMap>;
 }
-const defaultIo: AgentInfoIo = { readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals() };
+const defaultIo: AgentInfoIo = { readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals(), readMissions: () => readMissions() };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
 export type AgentListExtras = (name: string, r?: { external?: boolean; label?: string }) => Record<string, unknown>;
@@ -29,9 +32,10 @@ export type AgentListExtras = (name: string, r?: { external?: boolean; label?: s
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
  * 不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。sharedPeers 对 peer / 受限 token 不给——谁在共享是 owner 的事。
  */
-export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals"> = defaultIo): Promise<AgentListExtras> {
+export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions"> = defaultIo): Promise<AgentListExtras> {
   const full = isFullScope(principal) && !principal.peer;
   const principals = full ? (await io.readPrincipals()).principals : [];
+  const missions = principal.peer ? {} : ((await io.readMissions?.()) ?? {});
   const archived = (name: string) => existsSync(`${USER_ARCHIVE_ROOT}/${name.replace(/^agent-/, "")}`);
   return (name, r) => {
     const sharedWith = full ? peersSharingAgent(principals, name) : null;
@@ -41,8 +45,16 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       archived: archived(name),
       // 顶栏徽章的数字 + 悬停时的 peer 名单（owner 2026-09-28）
       ...(sharedWith ? { sharedPeers: sharedWith.length, sharedWith } : {}),
+      ...missionField(missions, name),
     };
   };
+}
+
+/** 进行中的值守（侧栏 / 顶栏「⏱ 值守 → 11:00」、菜单切换「开始 / 结束值守」）；peer 看不到 */
+function missionField(missions: MissionMap, name: string): { mission?: Record<string, unknown> } {
+  const m = missions[missionKey(name)];
+  if (!m || m.status !== "active") return {};
+  return { mission: { goal: m.goal, until: m.until, nudges: m.nudges, ...(m.resumeAt ? { resumeAt: m.resumeAt } : {}), ...(m.lastNudgeAt ? { lastNudgeAt: m.lastNudgeAt } : {}) } };
 }
 
 export async function handleAgentInfoRoutes(

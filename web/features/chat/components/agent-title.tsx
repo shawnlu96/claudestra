@@ -2,6 +2,7 @@
 import { useT } from "@/lib/i18n";
 import type { AgentSession } from "../type";
 import { ExternalBadge } from "./external-badge";
+import { MissionBadge } from "./mission-ui";
 
 /**
  * 会话顶栏的标题（从 chat.tsx 搬出，owner 2026-09-27）：external 徽章跟在名字后面、ctx 徽章之前（共享给几个 peer 就挂几），
@@ -17,6 +18,7 @@ export function AgentTitle({ info, fallback }: { info?: AgentSession; fallback: 
         {info.label && <span className="ml-1.5 text-[12px] font-normal text-base-content/45">| {info.displayName}</span>}
       </span>
       {info.external && <ExternalBadge count={info.sharedPeers ?? 0} peers={info.sharedWith ?? []} />}
+      {info.mission && <MissionBadge mission={info.mission} />}
     </>
   );
 }

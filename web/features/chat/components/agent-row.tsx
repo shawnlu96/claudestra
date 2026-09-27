@@ -13,6 +13,7 @@ import { RuntimeStatusIcon } from "./status-dot";
 import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
+import { MissionBadge } from "./mission-ui";
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
    tapIntent 是模块级单例——所有行实例共享；swipeReg 在 agent-row-swipe.ts（AgentRow 与 Sidebar 共用同一实例）。 */
@@ -294,6 +295,7 @@ export function AgentRow({
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
             {a.label || t(a.displayName)}
             {a.label && <span className="ml-1 text-[12px] font-normal text-base-content/40">| {a.displayName}</span>}
+            {a.mission && <span className="ml-1 align-middle"><MissionBadge mission={a.mission} compact /></span>}
             {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}

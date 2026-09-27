@@ -1,5 +1,14 @@
 import { api } from "@/lib/api/client";
 
+/** 值守（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
+export interface MissionInfo {
+  goal: string;
+  until: string;
+  nudges: number;
+  resumeAt?: string;
+  lastNudgeAt?: string;
+}
+
 /** 大总管的前端保留名 ↔ API 的 "master"。 */
 export const MASTER_AGENT_NAME = "__master__";
 
@@ -59,6 +68,8 @@ export interface AgentSession {
   sharedPeers?: number;
   sharedWith?: string[];
   updateHint?: UpdateHint | null;
+  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏 / 顶栏「⏱ 11:00」、菜单「开始 / 结束值守」 */
+  mission?: MissionInfo | null;
 }
 
 interface ApiAgent {
@@ -85,6 +96,7 @@ interface ApiAgent {
   sharedPeers?: number;
   sharedWith?: string[];
   updateHint?: UpdateHint | null;
+  mission?: MissionInfo | null;
 }
 
 function mapAgent(a: ApiAgent): AgentSession {
@@ -149,4 +161,14 @@ export async function loadAgents(): Promise<AgentSession[]> {
     if (pin) return pin;
     return (b.lastActivityTs ?? 0) - (a.lastActivityTs ?? 0);
   });
+}
+
+/**
+ * agentsSignature（features/chat/chat-store.ts）里不断新增的字段拼在这里：chat-store 只许缩，新字段加一处就好。
+ * 漏掉的字段 = 列表轮询判「没变」、界面不更新（external / 显示名、值守标记都踩过）。
+ */
+export function agentExtraSig(a: AgentSession): string {
+  const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
+  const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
+  return hint + m;
 }
