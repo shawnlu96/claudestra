@@ -2285,7 +2285,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       // v2.21+ project-assign 时频道随归属挪 category。web-only(local-*)无平台面,no-op
       try {
         if (!WEB_ONLY && !String(msg.channelId || "").startsWith("local-")) {
-          await discordMoveChannel(discord, msg.channelId, String(msg.category || ""));
+          await discordMoveChannel(discord, msg.channelId, String(msg.category || ""), msg.renameFrom ? String(msg.renameFrom) : undefined);
         }
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
       } catch (err) {

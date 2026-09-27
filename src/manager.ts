@@ -91,7 +91,7 @@ import { archiveSession, listArchivedSessions } from "./lib/session-archive.js";
 import {
   readProjects,
   writeProjects,
-  resolveProjectForDir,
+  resolveProjectForDirOrMain,
   slugifyProjectId,
   normalizeDir,
   isMisfiledByUmbrella,
@@ -395,7 +395,7 @@ async function resolveOrCreateProject(
     }
     return { project: p, created: false };
   }
-  const hit = resolveProjectForDir(data.projects, dir);
+  const hit = resolveProjectForDirOrMain(data.projects, dir); // worktree 归主仓的 project
   if (hit) return { project: hit, created: false };
   const nd = normalizeDir(dir);
   const base = nd.split("/").filter(Boolean).pop() || "proj";
