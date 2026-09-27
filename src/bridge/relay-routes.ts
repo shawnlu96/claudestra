@@ -68,8 +68,8 @@ async function relayRequest(req: Request): Promise<Response> {
   const headers = { ...normalizeHeaders(body.headers), ...signedHeaders(method, path, bytes) };
   try {
     const r = await c.request(to, { method, path, headers, body: bytes.length ? bytes : null }, { timeoutMs });
-    const bytes = await collectBody(r.body, MAX_CLI_RESPONSE);
-    return json(200, { ok: true, status: r.status, headers: r.headers, body: b64.enc(bytes) });
+    const out = await collectBody(r.body, MAX_CLI_RESPONSE);
+    return json(200, { ok: true, status: r.status, headers: r.headers, body: b64.enc(out) });
   } catch (e) {
     if (e instanceof RelayError) return json(502, { ok: false, code: e.code, origin: e.origin, error: e.message });
     return json(502, { ok: false, code: "local_error", error: (e as Error).message });
