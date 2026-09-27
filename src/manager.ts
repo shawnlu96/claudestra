@@ -3150,6 +3150,7 @@ switch (cmd) {
 
   case "list": await cmdList(); break;
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
+  case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
 
   // v2.4.19+ 给现存 active agent 补发置顶 focus 公告（新建/恢复的自动发，这个
   // 是给"feature 上线前就在跑"的老 agent 用的一次性 backfill）
