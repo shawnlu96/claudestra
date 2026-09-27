@@ -42,7 +42,7 @@ export function useHostInfo(): HostInfo {
   );
 }
 
-/** 用本机程序打开会话目录 / project 目录（index = project 多目录时的下标）。只认回环，远端来的 403。 */
+/** 用本机程序打开会话目录 / project 目录（index = project 多目录时的下标）。只认本机浏览器（bridge/local-api/host.ts），远端来的 403。 */
 export async function openLocal(kind: "agent" | "project", key: string, target: string, index = 0): Promise<{ ok: boolean; error?: string }> {
   try {
     await (kind === "agent" ? openAgentDir(key, target) : openProjectDir(key, target, index));

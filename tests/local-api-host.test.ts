@@ -1,6 +1,7 @@
 /**
- * 本地 API：GET /api/v1/host、POST /api/v1/agents/:name/open、POST /api/v1/projects/:id/open——只认 source:"loopback"
- * （relay / lan 一律 {local:false} / 403，X-Forwarded-For 不算）；打开方式的候选表与 argv 拼装（lib/host-openers.ts）直测。
+ * 本地 API：GET /api/v1/host、POST /api/v1/agents/:name/open、POST /api/v1/projects/:id/open——本机 = 真实回环，或本机反代转来、
+ * 来源地址是本机网卡（lib/same-host.ts，另见 tests/same-host.test.ts）；直连客户端自己写的 X-Forwarded-For 不算；
+ * 经中继的永远不算本机，直托管时回 localEntry。打开方式的候选表与 argv 拼装（lib/host-openers.ts）直测。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -17,6 +18,8 @@ const GUEST: Principal = { id: "guest:1234", role: "external", name: "friend", a
 const RELAY: RequestContext = { source: "relay", clientIp: "127.0.0.1", relayBase: "relay.test", pathPrefix: "/m/16f9-b5d1-30fb-8923", https: true };
 const LAN: RequestContext = { source: "lan", clientIp: "192.168.1.9", https: false };
 const LOOPBACK: RequestContext = { source: "loopback", clientIp: "127.0.0.1", https: false };
+/** 本机反代（Caddy / tailscale serve）转来：对端是回环、带 XFF，所以 source 是 lan */
+const VIA_PROXY: RequestContext = { source: "lan", clientIp: "127.0.0.1", https: true };
 
 let dir: string;
 let workerDir: string;
@@ -62,6 +65,31 @@ describe("GET /api/v1/host", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true, local: false });
       expect(res.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+  test("本机反代转来：XFF 最右一跳是本机地址 → 本机；是外部地址（手机 / 别的电脑）→ 不是；左边伪造的不算", async () => {
+    const local = async (xff: string) => ((await (await call("GET", "/api/v1/host", VIA_PROXY, OWNER, undefined, xff)).json()) as { local: boolean }).local;
+    expect(await local("127.0.0.1")).toBe(true);
+    expect(await local("::1")).toBe(true);
+    expect(await local("100.64.9.9")).toBe(false);
+    expect(await local("127.0.0.1, 100.64.9.9")).toBe(false);
+    opened.length = 0;
+    expect((await call("POST", "/api/v1/agents/worker/open", VIA_PROXY, OWNER, { with: "finder" }, "127.0.0.1")).status).toBe(200);
+    expect((await call("POST", "/api/v1/agents/worker/open", VIA_PROXY, OWNER, { with: "finder" }, "100.64.9.9")).status).toBe(403);
+    expect(opened).toEqual([["finder", workerDir]]);
+    opened.length = 0;
+  });
+  test("经中继 + 直托管前端 → localEntry {port, sameNetwork}（同网提示来自中继）；没直托管 / 非中继 → 没有", async () => {
+    const prev = process.env.BRIDGE_STATIC_DIR;
+    process.env.BRIDGE_STATIC_DIR = dir;
+    try {
+      const entryOf = async (ctx: RequestContext) => ((await (await call("GET", "/api/v1/host", ctx, OWNER)).json()) as { localEntry?: unknown }).localEntry;
+      expect(await entryOf(RELAY)).toEqual({ port: expect.any(Number), sameNetwork: false });
+      expect(await entryOf({ ...RELAY, sameNetwork: true })).toEqual({ port: expect.any(Number), sameNetwork: true });
+      expect(await entryOf(LAN)).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.BRIDGE_STATIC_DIR;
+      else process.env.BRIDGE_STATIC_DIR = prev;
     }
   });
   test("回环 → local:true + platform + openers（每项 id/label/kind）", async () => {

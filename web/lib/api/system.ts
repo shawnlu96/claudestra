@@ -1,5 +1,5 @@
 /**
- * 机器级端点：主机信息与本机打开目录（只认回环）、用量看板、中继状态 / 配对码、手机访问、peer / cron / project 管理、
+ * 机器级端点：主机信息与本机打开目录（只认本机浏览器）、偏好交接、用量看板、中继状态 / 配对码、手机访问、peer / cron / project 管理、
  * 会话清单与归档、后台任务（升级 / 全体重启）、语音转写、client-log。BFF 时代的 {data} 包装在这里还原成组件既有形状。
  */
 import { api, apiRaw, DEVICE_HEADER, type ApiError } from "./client";
@@ -9,13 +9,24 @@ export interface HostInfo {
   local: boolean;
   platform: "darwin" | "linux" | "win32";
   openers: { id: string; label: string; kind: "files" | "terminal" | "ide" }[];
+  /** 经中继、且这台机器直托管前端时才有：本机入口端口 + 中继判的「同一出口 IP」（features/machines/local-hop.ts） */
+  localEntry?: { port: number; sameNetwork: boolean };
 }
 export function hostInfo(): Promise<HostInfo> {
   return api<Partial<HostInfo>>("/host", { timeoutMs: 8000 }).then((j) => ({
     local: j.local === true,
     platform: j.platform ?? "darwin",
     openers: j.local && Array.isArray(j.openers) ? j.openers : [],
+    ...(j.localEntry && Number.isInteger(j.localEntry.port) ? { localEntry: { port: j.localEntry.port, sameNetwork: j.localEntry.sameNetwork === true } } : {}),
   }));
+}
+
+// ── 切到本机直连时带走浏览器偏好（bridge/local-api/handoff.ts：一次性、2 分钟、同一身份才取得出）──
+export function createHandoff(entries: Record<string, string>): Promise<{ id: string }> {
+  return api<{ id: string }>("/handoff", { method: "POST", json: { entries }, timeoutMs: 8000 });
+}
+export function takeHandoff(id: string): Promise<{ entries: Record<string, unknown> }> {
+  return api<{ entries: Record<string, unknown> }>(`/handoff/${encodeURIComponent(id)}`, { timeoutMs: 8000 });
 }
 export function openAgentDir(name: string, target: string): Promise<{ ok: true; dir?: string }> {
   return api(`/agents/${encodeURIComponent(name)}/open`, { method: "POST", json: { with: target }, timeoutMs: 20_000 });

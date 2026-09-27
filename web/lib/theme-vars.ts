@@ -32,3 +32,4 @@ const store = createCssPrefStore<ThemeVarsText>({
 export const getThemeVars = store.get;
 export const setThemeVars = store.set;
 export const useThemeVars = store.useValue;
+export const reloadThemeVars = store.reload;

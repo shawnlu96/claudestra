@@ -7,7 +7,7 @@ Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）：**纯静�
 ## 技术栈
 
 - Next.js 16 + React 19 + TypeScript + Tailwind 4 + daisyUI；状态管理 zenith（`@do-md/zenith`，复制式 `.packages/`）。
-- 依赖树独立于仓库根的 Bun 后端。dev：`npm run dev`（33333）；产物：`npm run build` → `out/`（Turbopack 在 worktree 里认不出软链 node_modules，用 `npx next build --webpack`）。
+- 依赖树独立于仓库根的 Bun 后端。dev：`npm run dev` → http://127.0.0.1:33333（`scripts/dev-proxy.ts`：页面转 next dev，`/api/v1` 转本机 bridge）；产物：`npm run build` → `out/`（Turbopack 在 worktree 里认不出软链 node_modules，用 `npx next build --webpack`）。
 
 ## 目录结构
 
@@ -58,7 +58,7 @@ public/sw.js          Web Push：点通知向发通知那台机器回 read
 ## 运行 & 排障
 
 - 后端只有 `com.claudestra.bridge`（+ launcher / cron）；**没有 web 服务**。改后端 → `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`；改 web → `npm run build`，托管方拿 `out/`。
-- 本机 shell 全局有 `NODE_ENV=production`：`NODE_ENV=development npm run dev`；dev 对着本机 bridge 时没有 `/app-config.json` → 按 direct 单机兜底。
+- dev 代理替 next dev 设好 `NODE_ENV=development`（本机 shell 全局是 production）；bridge 在代理眼里是同源本机，`/app-config.json` 也由它答（direct 模式）。
 - `/events` SSE：bridge 连接即发 `: connected` + 5s ping；流「偶尔收不到」先查这里没被改回去。
 - 排障日志在 bridge 的 client.log（`POST /api/v1/client-log`，boot.js 与 `lib/client-log.ts` 都打这里）。
 - Next 16：`_` 开头目录不路由；macOS 无 `timeout`，测 SSE 用 `curl --max-time N`。

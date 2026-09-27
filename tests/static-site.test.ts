@@ -64,7 +64,7 @@ describe("CSP：内联脚本哈希", () => {
   test("staticSiteCsp：哈希追加在 script-src 'self' 后；其余指令不变", () => {
     expect(staticSiteCsp()).toContain("script-src 'self'; style-src");
     expect(staticSiteCsp([sha("x")])).toContain(`script-src 'self' ${sha("x")}; style-src`);
-    for (const d of ["default-src 'self'", "connect-src 'self'", "worker-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"]) {
+    for (const d of ["default-src 'self'", "connect-src 'self' blob: http://127.0.0.1:*", "worker-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"]) {
       expect(staticSiteCsp()).toContain(d);
     }
   });

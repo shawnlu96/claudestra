@@ -155,8 +155,8 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 | `GET /api/v1/agents`（owner）加 `unread: number` · `POST /api/v1/agents/:name/read` · `GET /api/v1/reads` | `{reads: Record<agent, isoTs>}` |
 | `POST /api/v1/transcribe`（multipart `audio`，≤ 20 MB，并发 2，30 s） | `{text}`；没 key 501 |
 | `POST /api/v1/client-log`（文本或 `{lines:string[]}`，每行 ≤ 2 KB，每凭据 60 行/分钟） | `{ok}` |
-| `GET /api/v1/host` | 回环 `{local:true, platform, openers:[{id,label}]}`；非回环 `{local:false}` |
-| `POST /api/v1/agents/:name/open {with}` · `POST /api/v1/projects/:id/open {with}` | 只认回环，否则 403 |
+| `GET /api/v1/host` | 本机 `{local:true, platform, openers:[{id,label}]}`；否则 `{local:false, localEntry?}`（本机的判定见 §14） |
+| `POST /api/v1/agents/:name/open {with}` · `POST /api/v1/projects/:id/open {with}` | 只认本机，否则 403 |
 | `GET /api/v1/attachments/:name` | BFF chat/attachment 的搬运（上传目录 → 收件箱 → 后缀匹配），owner 专用 |
 | `GET /api/v1/relay/status` · `POST /api/v1/relay/pair` · `GET /api/v1/stats` | 控制路由的 manage 版 |
 | 状态库 | `~/.claude-orchestrator/web-state.sqlite`（bun:sqlite）：`agent_settings`、`user_profile`、`skill_prefs`、`push_subscriptions`、`push_read`、`hidden_messages`、`agent_unread`、`apns_devices`；`manager migrate-web-state` 从 `~/.claude-orchestrator/web/db/settings.db` 搬（先 tar 备份，幂等） |
@@ -172,3 +172,12 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 - 机器列表（IndexedDB，不存凭据）`{fp, name, addedAt, lastUsedAt}[]`；`/pair`：`#<fp>.<secret>` 走挑战应答，手输短码走 codes/lookup + pending 轮询（1.5 s，≤10 分钟）。
 - `chat/history` 与 `chat/stream` 的变换搬进 `web/lib/chat/history-shape.ts` / `stream-shape.ts`；「我发的」= `chatId === "api:owner:self"`（guest 是它自己的 principalId，取自配对响应）。
 - 静态导出：`output:"export"`；删 `app/api/**`、`proxy.ts`、`instrumentation.ts`、服务端 lib；`/login` → `/pair`；CSP 与 markdown 清洗按 §8.7。
+
+## 14. 本机识别与本机直连（2026-09-28 补：v2.29 把「本机」收窄成只认 127.0.0.1，本机功能在 Tailscale / 局域网 / 中继下全没了）
+
+- **直连入口**（bridge 自己的端口，含本机 Caddy / tailscale serve 反代）：来源地址属于本机任一网卡就算本机（`lib/same-host.ts`）。对端是回环且带 XFF → 取最右一跳（本机反代追加的）；对端不是回环 → 只认对端。只给「打开目录」这类低危功能用；配对与控制面豁免仍只认真实回环。
+- **中继入口**：网络位置判不了。中继在浏览器出口 IP = 实例连中继的出口 IP 时给机器请求加 `x-claudestra-relay-same-net: 1`（浏览器自带的剥掉）；`GET /host` 经中继且直托管时回 `localEntry {port, sameNetwork}`。前端（`web/features/machines/local-hop.ts`）在同网 + 桌面浏览器时直接请求 `http://127.0.0.1:<port>/local-probe`（只答真实回环、跨源只放中继 origin、预检回 PNA 头），fp 对得上就整页切到 `http://127.0.0.1:<port>/chat`：回环自动配对，本机功能齐全，不再绕中继。探到别的实例（fp 不同）= 不是这台，什么都不做；Safari 拦「https → http 回环」探不通 → 底部横幅手动切（Chrome / Firefox 探不通就当不是这台，免得同网其它电脑冒横幅）；`?relay=1` 或关掉横幅 = 留在中继。
+- **偏好交接**：两个网址的 localStorage 不通。切换前中继页面把白名单里的原始偏好与草稿（不含预生成的 CSS、API 基址）`POST /api/v1/handoff` 存进 bridge（内存、2 分钟、一次性、只有同一身份取得出），本机页面配对后 `GET /api/v1/handoff/:id` 取回、只补缺、按解析器重建 CSS 后重载一次。不把数据放进链接：链接谁都能伪造。
+- CSP 相应放宽：`connect-src` 加 `http://127.0.0.1:*`（探测）与 `blob:`（分享导出读附件图）；`img-src` 加 `https:`（回复里的外链图）。
+- 开发：`web/scripts/dev-proxy.ts`（`npm run dev`）在 127.0.0.1:33333 前挡 next dev，`/api/v1` 去掉 Origin 转本机 bridge——bridge 眼里是本机同源页面。
+

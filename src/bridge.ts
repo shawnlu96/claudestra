@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
+import { initPeerIngress, localProbeResponse, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
@@ -3566,6 +3566,7 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
       }
     }
 
+    { const probe = localProbeResponse(req); if (probe) return probe; } // 中继网页探「是不是就在这台电脑上」：跨源拒绝之前接，只放中继 origin（bridge/local-probe.ts）
     // v2.13.1+ ws 跨源防护。WebSocket 不受同源策略约束 —— 用户访问的任意网页都能
     // 连上这个端口并发 route_to_agent，等价于在这台机器上执行任意命令。回环绑定
     // 挡不住它（实测：伪造 Origin 的连接被接受并拿到全部频道）。合法客户端

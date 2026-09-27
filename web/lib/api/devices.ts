@@ -55,22 +55,27 @@ export async function pairStatus(fp: string, approvalId: string, signal?: AbortS
 }
 
 /**
- * 直托管：从旧 web 服务升上来的浏览器还带着旧登录 cookie（cstra_session，HttpOnly 看不见）→ 一次性换成设备凭据
- * （bridge POST /api/v1/devices/legacy-session），已登录的不用重新配对。先探 whoami：已有凭据就什么都不做。
- * 故意不走 api()/apiRaw()：那两个遇 401 会把机器标成「需重新配对」，而这里的 401 是预期的探测结果。
+ * 直托管开机时把凭据备好，返回最后有没有凭据。先探 whoami：已有凭据就什么都不做。没有时依次试：
+ *   ① 从旧 web 服务升上来的浏览器还带着旧登录 cookie（cstra_session，HttpOnly 看不见）→ 一次性换成设备凭据（POST /devices/legacy-session）；
+ *   ② 本机回环打开的（含中继页面切过来的本机直连）→ 一键配对（POST /devices/local，bridge 只认真实回环 socket）。
+ * 前两步故意不走 api()/apiRaw()：那两个遇 401 会把机器标成「需重新配对」，而这里的 401 是预期的探测结果。
  */
-export async function upgradeLegacySession(): Promise<boolean> {
+export async function ensureDirectCredential(fp: string, loopback: boolean): Promise<boolean> {
+  const deviceName = defaultDeviceName(navigator.userAgent, navigator.platform);
   try {
     const who = await fetch("/api/v1/whoami", { credentials: "include", cache: "no-store" });
-    if (who.status !== 401) return false;
+    if (who.status !== 401) return who.ok;
     const r = await fetch("/api/v1/devices/legacy-session", {
       method: "POST", credentials: "include", cache: "no-store",
       headers: { "Content-Type": "application/json", "x-cstra-device": "1" },
-      body: JSON.stringify({ deviceName: defaultDeviceName(navigator.userAgent, navigator.platform) }),
+      body: JSON.stringify({ deviceName }),
     });
-    return r.ok;
+    if (r.ok) return true;
+    if (!loopback) return false;
+    await pairLocal(fp, deviceName);
+    return true;
   } catch (e) {
-    console.warn("[pair] 旧登录换凭据失败，按普通配对处理:", (e as Error).message);
+    console.warn("[pair] 直托管自动取凭据失败，按普通配对处理:", (e as Error).message);
     return false;
   }
 }

@@ -79,13 +79,12 @@ claudestra pair --url https://mac.tail0000.ts.net        # 直连入口：给这
 ## 4. 开发
 
 ```bash
-npm run dev            # → http://localhost:33333，怎么指向一台 bridge 见 web/CLAUDE.md
+npm run dev            # → http://127.0.0.1:33333（热更新）
 ```
 
-macOS 坑：全局 `NODE_ENV=production` 会盖掉 dev 模式 → `NODE_ENV=development npm run dev`。
-
-从别的设备（tailnet / 局域网里的手机）访问 dev server，要把那个地址写进 `web/.env.local` 的 `WEB_DEV_ORIGINS`（逗号分隔），
-否则 HMR 的 websocket 握手失败、页面反复整页刷新。`.env.local` 现在只剩这一个用途。
+`npm run dev` 在 33334 起 `next dev`，前面挡一层 33333 的小代理（`scripts/dev-proxy.ts`）：页面和热更新走 Next，
+`/api/v1` 转给本机 bridge（`http://127.0.0.1:3847`，`CLAUDESTRA_DEV_BRIDGE` 可改）。bridge 把它当成本机页面：自动配对，
+「在 Finder / 终端 / IDE 打开」这类本机功能都能用。代理只听 127.0.0.1；要在手机上测，`npm run build` 后走 bridge 直托管的入口。
 
 ---
 
@@ -283,7 +282,7 @@ h2 把所有流复用在一条 TCP 上，丢一个包所有流一起队头阻塞
 | 443   | 全部（tailnet 可达） | `tailscale serve` 或 Caddy TLS/h2 → 3847 |
 | 3847  | 127.0.0.1（默认） | Bridge：HTTP API + WebSocket **+ 网页**（`BRIDGE_PORT` / `BRIDGE_BIND` / `BRIDGE_STATIC_DIR`） |
 | 3848… | 127.0.0.1 | peer 专用 `/api/v1` 入口（`PEER_INGRESS_PORT`，setup 挑选） |
-| 33333 | 所有网卡 | Next.js dev server（仅开发） |
+| 33333 / 33334 | 127.0.0.1 | dev 代理 / `next dev`（仅开发） |
 
 请求路径：手机 → 中继（或 Caddy / tailscale serve `:443`）→ Bridge `:3847`（静态文件 + `/api/v1`，设备 cookie）→ tmux / Claude Code。
 

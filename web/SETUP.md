@@ -101,16 +101,15 @@ machine itself (loopback) pairs automatically. `/login` redirects to `/pair`.
 ## 4. Development
 
 ```bash
-npm run dev            # → http://localhost:33333, see web/CLAUDE.md for pointing it at a bridge
+npm run dev            # → http://127.0.0.1:33333 (hot reload)
 ```
 
-macOS gotcha: a global `NODE_ENV=production` shadows dev mode →
-`NODE_ENV=development npm run dev`.
-
-Reaching the dev server from another device (phone on the tailnet / LAN) needs its
-address in `WEB_DEV_ORIGINS` (comma-separated, in `web/.env.local`) — otherwise the
-HMR websocket handshake fails and the page reloads in a loop. That is the only thing
-`.env.local` is still for.
+`npm run dev` starts `next dev` on 33334 behind a small proxy on 33333 (`scripts/dev-proxy.ts`):
+pages and HMR go to Next, `/api/v1` goes to the bridge on this machine (`http://127.0.0.1:3847`,
+override with `CLAUDESTRA_DEV_BRIDGE`). To the bridge it looks like a page on the machine itself,
+so the browser pairs automatically and local-only features (open in Finder / terminal / IDE) work.
+The proxy only listens on 127.0.0.1. To test on a phone, `npm run build` and open the bridge's own
+entry, which serves `out/` directly.
 
 ---
 
@@ -371,7 +370,7 @@ entry point, not exposure.
 | 443   | all (tailnet-reachable) | `tailscale serve` or Caddy TLS/h2 → 3847 |
 | 3847  | 127.0.0.1 (default) | Bridge: HTTP API + WebSocket **+ the web client** (`BRIDGE_PORT` / `BRIDGE_BIND` / `BRIDGE_STATIC_DIR`) |
 | 3848… | 127.0.0.1 | Peer-only `/api/v1` ingress (`PEER_INGRESS_PORT`, picked by setup) |
-| 33333 | all interfaces | Next.js dev server (development only) |
+| 33333 / 33334 | 127.0.0.1 | dev proxy / `next dev` (development only) |
 
 Request path: phone → relay (or Caddy / tailscale serve `:443`) → Bridge `:3847`
 (static files + `/api/v1`, device cookie) → tmux / Claude Code.

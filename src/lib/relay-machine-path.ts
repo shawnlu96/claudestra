@@ -15,6 +15,8 @@ export const RELAY_MODE_HEADER = "x-claudestra-relay-mode";
 export const RELAY_MODE_API = "api";
 /** 请求头：这台机器在中继上的路径前缀 `/m/<fp>`（实例拼绝对地址、设 cookie Path 时用） */
 export const RELAY_PREFIX_HEADER = "x-claudestra-relay-prefix";
+/** 请求头 "1"：浏览器与这台实例的出口 IP 相同（中继盖；本机直连的提示，web/features/machines/local-hop.ts） */
+export const RELAY_SAME_NET_HEADER = "x-claudestra-relay-same-net";
 
 export interface MachinePath {
   fp: string;

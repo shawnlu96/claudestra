@@ -185,6 +185,16 @@ describe("路径模式：进程内 dispatch（relay-dispatch.ts）", () => {
     expect(dec(await collectBody(res.body, 1 << 16))).toBe('{"ok":true,"body":"{\\"text\\":\\"hi\\"}"}');
   });
 
+  test("中继的同网提示 → 上下文 sameNetwork:true，头本身不进 API", async () => {
+    let seen: Request | null = null;
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, handleApi: async (r) => ((seen = r), new Response("ok")) });
+    const headers = { [RELAY_MODE_HEADER]: "api", [RELAY_PREFIX_HEADER]: `/m/${FP}`, "x-claudestra-relay-same-net": "1", "x-forwarded-for": "203.0.113.5" };
+    await handler({ method: "GET", path: "/api/v1/host", headers, body: bodyStream("") }, ctx("relay"));
+    const r = seen as unknown as Request;
+    expect(requestContextOf(r).sameNetwork).toBe(true);
+    expect(r.headers.get("x-claudestra-relay-same-net")).toBeNull();
+  });
+
   test("带模式头但路径不在 /api/v1 下 → path_forbidden；没注入 handleApi 时退回旧隧道", async () => {
     const web = (async () => new Response("web")) as unknown as typeof fetch;
     const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl: web, handleApi: async () => new Response("api") });
