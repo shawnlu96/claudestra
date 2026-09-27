@@ -237,7 +237,7 @@
     "size:src/lib/session-history.ts": 1019,
     "size:src/lib/tailscale.ts": 623,
     "size:src/lib/tmux-helper.ts": 1366,
-    "size:src/manager.ts": 3625,
+    "size:src/manager.ts": 3571,
     "size:src/manager/peers.ts": 491,
     "size:src/pi/claudestra-extension.ts": 639,
     "size:src/setup.ts": 2042,

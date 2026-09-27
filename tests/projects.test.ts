@@ -8,6 +8,7 @@ import {
   writeProjects,
   resolveProjectForDir,
   resolveProjectForDirOrMain,
+  addDirIfUncovered,
   slugifyProjectId,
   normalizeDir,
   PROJECT_ID_RE,
@@ -54,6 +55,18 @@ describe("resolveProjectForDirOrMain（worktree 归主仓）", () => {
     expect(git("-C", repo, "worktree", "add", "-q", wt)).toBe(0);
     const ps = [proj("main", [repo])];
     expect(resolveProjectForDirOrMain(ps, wt)?.id).toBe("main");
+  });
+});
+
+describe("addDirIfUncovered（create 显式 --project 时把目录记进去）", () => {
+  test("不在名下就加；已覆盖（含子目录）不加；傘形根不加", () => {
+    const p = proj("claudestra", ["/r/claude-orchestrator"]);
+    expect(addDirIfUncovered(p, "/r/claudestra-relay")).toBe(true);
+    expect(p.dirs).toEqual(["/r/claude-orchestrator", "/r/claudestra-relay"]);
+    expect(addDirIfUncovered(p, "/r/claude-orchestrator/web")).toBe(false);
+    expect(addDirIfUncovered(p, "/tmp")).toBe(false);
+    expect(addDirIfUncovered(p, HOME)).toBe(false);
+    expect(p.dirs).toHaveLength(2);
   });
 });
 
