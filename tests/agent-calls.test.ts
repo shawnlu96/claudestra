@@ -3,7 +3,7 @@
  * 坏文件不让 bridge 起不来；touch 重新起算失效钟并落盘。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentCallBook, type PendingAgentCall } from "../src/bridge/agent-calls.js";
@@ -42,13 +42,17 @@ describe("AgentCallBook", () => {
     expect(book.has("c-nobody")).toBe(false);
   });
 
-  test("坏文件 / 形状不对：不抛、不恢复，下一次 set 覆盖", () => {
-    const p = join(dir, "d.json");
+  test("坏文件 / 形状不对：不抛、不恢复，原文件挪成 .corrupt-* 保留，之后正常落盘", () => {
+    const sub = mkdtempSync(join(dir, "bad-"));
+    const p = join(sub, "d.json");
     writeFileSync(p, "{not json");
     expect(new AgentCallBook(p).size).toBe(0);
     writeFileSync(p, JSON.stringify({ "c-codex": { callerChannelId: "c-me" } }));
     const book = new AgentCallBook(p);
     expect(book.size).toBe(0);
+    const kept = readdirSync(sub).filter((f) => f.startsWith("d.json.corrupt-"));
+    expect(kept.length).toBe(2);
+    expect(kept.map((f) => readFileSync(join(sub, f), "utf8")).sort()).toEqual(['{"c-codex":{"callerChannelId":"c-me"}}', "{not json"]);
     book.set("c-codex", call(1));
     expect(new AgentCallBook(p).get("c-codex")?.ts).toBe(1);
   });

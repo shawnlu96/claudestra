@@ -4,7 +4,7 @@
  *   1. 落盘：~/.claude-orchestrator/held-messages.json，bridge 重启不丢（ws 不落盘，投递时按 channelId 取最新连接）
  *   2. 不按时间丢：押满 30 分钟只告诉发送方一声「还在排队」，消息留着等目标这一轮结束；押满 24 小时才放弃并通知——
  *      值守让一轮能跑一两个小时，以前 30 分钟就扔会让同事的回复全丢（2026-09-28 codex 的 10 条复核就是这么没的）
- *   3. 出队在投出之后才落盘：投递中途崩溃，重启后会再投一次（至少一次；收件方看 message_id 去重）
+ *   3. 投出之后才出队：投递中途崩溃，重启后会再投一次（至少一次；收件方看 message_id 去重）；每个频道只有一个投递者
  */
 import type { Envelope, LocalEndpoint } from "./router.js";
 import { statePath } from "../lib/paths.js";
@@ -38,16 +38,20 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return this;
   }
 
-  /** 摘掉一条但先不落盘：调用方投出去之后再 persist()，投递中途崩溃时文件里还有它 */
-  detach(channelId: string, item: HeldItem): void {
-    const rest = (this.get(channelId) ?? []).filter((i) => i !== item);
-    if (rest.length) this.setQuiet(channelId, rest);
-    else this.deleteQuiet(channelId);
+  /** 投出去之后才摘掉并落盘：投递中途崩溃 / 别处 set 触发整表落盘时，盘上都还有它（至少投一次，收件方看 message_id 去重） */
+  remove(channelId: string, item: HeldItem): void {
+    this.set(channelId, (this.get(channelId) ?? []).filter((i) => i !== item));
   }
 
-  /** 投递失败：放回队首 */
-  restore(channelId: string, item: HeldItem): void {
-    this.set(channelId, [item, ...(this.get(channelId) ?? [])]);
+  /** 每个频道同一时刻只允许一个投递者（Stop / 压缩结束 / 每分钟扫描可能撞在一起，否则同一条会投两次）。进程内状态，不落盘 */
+  private readonly flushing = new Set<string>();
+  claim(channelId: string): boolean {
+    if (this.flushing.has(channelId)) return false;
+    this.flushing.add(channelId);
+    return true;
+  }
+  release(channelId: string): void {
+    this.flushing.delete(channelId);
   }
 }
 

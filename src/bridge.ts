@@ -6,7 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { shouldSweepPac } from "./lib/held-pac.js";
+import { pacStillHeld, shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
@@ -435,26 +435,52 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
   const evAgent = q[0].to.agentName || channelId;
   // v2.21.2+ 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (getAgentStatus(evAgent) === "compacting") return;
-  const working = await localAgentWorking(channelId, evAgent);
-  // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
-  // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
-  const due = working ? q.filter((i) => isHumanRequest(i.env)) : q;
-  for (const item of due) {
-    // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
-    const fresh = clients.get(channelId);
-    if (!fresh) break;
-    const to: RouterLocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
-    heldLocalMsgs.detach(channelId, item); // 先摘不落盘:投出去之后才持久化,中途崩溃重启还会再投
-    const d = await deliverToLocal(item.env, to);
-    if (d.outcome.kind === "error") heldLocalMsgs.restore(channelId, item);
-    else heldLocalMsgs.persist();
-    if (d.outcome.kind === "sent") {
-      // push-back 的 10min 失效窗从真正送达起算——否则目标长回合期间
-      // pendingAgentCalls 被扫掉,对方回了 caller 也收不到(本次事故的次生伤)
-      pendingAgentCalls.touch(channelId);
-      console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
+  if (!heldLocalMsgs.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
+  try {
+    const working = await localAgentWorking(channelId, evAgent);
+    // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
+    // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
+    // 快照:目标又忙时 deliverToLocal 会把消息原地追加回这个队列,直接遍历 q 会一直追着新追加的那条投
+    const due = working ? q.filter((i) => isHumanRequest(i.env)) : [...q];
+    for (const item of due) {
+      // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
+      const fresh = clients.get(channelId);
+      if (!fresh) break;
+      const to: RouterLocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
+      const d = await deliverToLocal(item.env, to);
+      if (d.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
+      // push-back 的失效钟从真正送达起算(先于出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉)
+      if (d.outcome.kind === "sent") pendingAgentCalls.touch(channelId);
+      heldLocalMsgs.remove(channelId, item); // 目标又忙时 deliverToLocal 已把它重新押到队尾
+      if (d.outcome.kind === "sent") {
+        console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
+      }
     }
+  } finally {
+    heldLocalMsgs.release(channelId);
   }
+}
+
+/** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
+function heldFromOf(targetChannelId: string) {
+  return heldLocalMsgs.get(targetChannelId)?.map((i) => ({
+    fromKind: i.env.from.kind,
+    fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined,
+  }));
+}
+
+/** target 此刻的产出能不能算作对 pac 的答复:caller 的请求还押在 target 队里(target 根本没看到)就不能——
+ *  否则 target 手头那个无关回合的 reply / Stop 收尾会被当成答复推给 caller,而真答复到时回程已被消费 */
+function answerablePac(targetChannelId: string): PendingAgentCall | undefined {
+  const pac = pendingAgentCalls.get(targetChannelId);
+  return pac && !pacStillHeld(pac.callerChannelId, heldFromOf(targetChannelId)) ? pac : undefined;
+}
+
+/** caller 当时填的 expecting 放在答复最前面,caller 不靠自己记得也能接着干 */
+function withExpecting(pac: PendingAgentCall, reply: string): string {
+  return pac.expecting
+    ? `[💡 你之前 send_to_agent 给 ${pac.targetName} 时填的期望：${pac.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${reply}`
+    : reply;
 }
 
 /** target 的答复推回 caller。caller 的 ws 按 channelId 现取(回程簿落盘不存 ws,caller 重连 / bridge 重启后旧连接已失效);
@@ -1071,11 +1097,16 @@ async function forwardReplyToAgentClaude(
     if (!fromAgentName) fromAgentName = agents.find((a) => a.channelId === fromEndpoint.channelId)?.name;
     targetAgentName = agents.find((a) => a.channelId === targetChannelId)?.name;
   } catch { /* non-critical */ }
+  // 这条正是 target 在答复等它的 caller(直接 reply 到 caller 的频道,codex 常这么答):按答复送、带上 expecting,
+  // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
+  const pac = answerablePac(fromEndpoint.channelId);
+  const answering = pac?.callerChannelId === targetChannelId ? pac : undefined;
+  const text = content.replace(/<@!?\d+>\s*/g, "").trim();
   const fwdEnv: RouterEnvelope = {
     from: { kind: "local", agentName: fromAgentName, channelId: fromEndpoint.channelId, ws: fromEndpoint.ws },
     to: { kind: "local", agentName: targetAgentName, channelId: targetChannelId, ws: targetClient.ws, cwd: targetClient.cwd },
-    intent: "notification",
-    content: content.replace(/<@!?\d+>\s*/g, "").trim(),
+    intent: answering ? "response" : "notification",
+    content: answering ? withExpecting(answering, text) : text,
     meta: {
       messageId: `reply_fwd_${Date.now()}`,
       triggerKind: "agent_tool",
@@ -1085,6 +1116,7 @@ async function forwardReplyToAgentClaude(
   };
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
+    if (answering) pendingAgentCalls.delete(fromEndpoint.channelId);
     lastMessageSource.set(targetChannelId, "agent");
     console.log(`📨 reply→别agent频道: ${fromAgentName || "?"} 的消息同时 forward 给 ${targetAgentName || targetChannelId} 的 claude`);
     recordMetric("reply_cross_agent_forward", { channelId: targetChannelId, meta: { from: fromAgentName || "" } });
@@ -1961,7 +1993,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 判据见 lib/pushback-scope.ts：key 就是 target 的 channelId，所以
         // 「发送方自己的频道 == 这条 reply 的目的频道」才成立。
         const pending = isTargetsOwnReply(msg.chatId, fromChannelId, ws, clients.get(msg.chatId)?.ws)
-          ? pendingAgentCalls.get(msg.chatId)
+          ? answerablePac(msg.chatId)
           : undefined;
         if (pending) {
           try {
@@ -1973,12 +2005,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             // 这是旧行为，保守兜底。
             const replyBackHint = pending.originalReplyChannel || msg.chatId;
             const cleanedReply = text.replace(/<@!?\d+>\s*/g, "").trim();
-            // v2.0.12+: 如果 caller 当时填了 `expecting`，在 push 的最前面注入
-            // 一段提醒，让 caller LLM 不靠"自己记得"也知道这次答复后该续什么动作。
-            const pushBody = pending.expecting
-              ? `[💡 你之前 send_to_agent 给 ${pending.targetName} 时填的期望：${pending.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${cleanedReply}`
-              : cleanedReply;
-            const outcome = await pushBackToCaller(pending, ws, replyBackHint, pushBody, "agent_reply");
+            const outcome = await pushBackToCaller(pending, ws, replyBackHint, withExpecting(pending, cleanedReply), "agent_reply");
             if (outcome.kind === "sent") {
               lastMessageSource.set(pending.callerChannelId, "agent");
               console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
@@ -2445,15 +2472,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           pendingReplies.delete(key);
         }
 
-        const delivery = await deliver(env);
-        if (delivery.outcome.kind !== "sent") {
-          const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `deliver 失败: ${reason}` }));
-          break;
-        }
-
-        // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
-        lastMessageSource.set(target.channelId, "agent");
+        // 发的正是在答复一个正在等我的 caller(target 回发 send_to_agent 给问它的人)→ 投出去之后那条回程算答完了
+        const answering = answerablePac(fromChannelId)?.callerChannelId === target.channelId;
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
@@ -2465,6 +2485,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // v2.4.16+: 支持 oneShot=true —— fire-and-forget 模式，不挂 pending（不会
         // pushback），同时下游 deliverToLocal 跳过给 target 挂 pendingInterAgentMsg
         // watchdog。用于 status sync / ack / FYI 等 agent 之间不期待回应的消息。
+        // 先记回程再投递:投出去 / 进押后队列之后 bridge 崩溃,重启恢复的也是「有消息、有回程」
         if (fromChannelId && !oneShot) {
           let originalReplyChannel: string | undefined;
           for (const [, p] of pendingReplies.entries()) {
@@ -2482,6 +2503,20 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: Date.now(),
           });
         }
+
+        const delivery = await deliver(env);
+        if (delivery.outcome.kind !== "sent") {
+          if (fromChannelId && !oneShot && pendingAgentCalls.get(target.channelId)?.callerChannelId === fromChannelId) {
+            pendingAgentCalls.delete(target.channelId);
+          }
+          const reason = delivery.outcome.kind === "dropped" ? delivery.outcome.reason : String((delivery.outcome as any).error);
+          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `deliver 失败: ${reason}` }));
+          break;
+        }
+
+        if (answering) pendingAgentCalls.delete(fromChannelId);
+        // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
+        lastMessageSource.set(target.channelId, "agent");
 
         ws.send(JSON.stringify({
           type: "response",
@@ -2711,21 +2746,15 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 }
 
 
-/** v1.9.21+ 每分钟扫一次，清超过 10min 仍未被 agent 回复消化的 pendingAgentCalls。
- * 正常情况下 agent 会在几十秒内回 → 被 reply handler 清掉。残留条目只会发生在
- * agent 挂了 / 忘了回 / fetch_messages 被用户取消等极端场景。留太多占内存。
- * v2.23.1+ 例外：消息还押在 heldLocalMsgs 里（目标长回合）时**不清**——失效钟从
- * 真正投递起算（flushHeldLocalMsgs 投递时刷新 ts）。2026-09-17 master→claudestra
- * 的回程就是这样被扫没的：目标回合 >10min，pac 先于投递被清，回复无路可回。 */
+/** 每分钟扫一次：回程簿里送达后 2 小时还没被消化的条目清掉（target 的 Stop / reply / 回发 send_to_agent 都会消化它，
+ * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = 值守一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
+ * 押在 heldLocalMsgs 里（target 还没看到）时不清，失效钟从真正送达起算（flushHeldLocalMsgs 投递时 touch）。 */
+const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
   const STALE_MS = 10 * 60_000;
   for (const [channelId, pending] of pendingAgentCalls.entries()) {
-    const held = heldLocalMsgs.get(channelId)?.map((i) => ({
-      fromKind: i.env.from.kind,
-      fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined,
-    }));
-    if (!shouldSweepPac(pending, held, now, STALE_MS)) continue;
+    if (!shouldSweepPac(pending, heldFromOf(channelId), now, PAC_STALE_MS)) continue;
     pendingAgentCalls.delete(channelId);
     console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
   }
@@ -2960,7 +2989,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             //   再标 ✅），但下面三个消费点都在回答「谁欠谁一个回应」，拿别人的收尾
             //   去结算就是张冠李戴。
             const ownTurn = isOwnStopChannel(cid, channelId, thisClientForStatus?.ws, clients.get(cid)?.ws);
-            const pendingAgent = ownTurn ? pendingAgentCalls.get(cid) : undefined;
+            const pendingAgent = ownTurn ? answerablePac(cid) : undefined;
             if (pendingAgent) {
               if (!drainedText) {
                 // v2.4.16+ no-text 静默清掉 pending，**不 push** 回 caller。
@@ -3440,6 +3469,9 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId);
+        // 押给它的消息(含推回给它的答复)不再有人收:丢掉并留日志,别等 24 小时,也别投给日后复用这个频道的新 agent
+        const dropped = heldLocalMsgs.get(body.channelId)?.length ?? 0;
+        if (heldLocalMsgs.delete(body.channelId)) console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped} 条消息 (channel=${body.channelId})`);
         // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
         // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
         // 建了又删的 agent 会一路堆积。
