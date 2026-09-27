@@ -912,7 +912,7 @@ interface Config {
   BRIDGE_PORT: string;
   USER_NAME: string;
   MCP_NAME: string;
-  /** 「手机访问」选了中继才有；没选不动 .env 里已有的值 */
+  /** 「手机访问」选了中继才有；undefined = 不动 .env 里已有的值，"" = 用户改选别的路并要求停用中继 */
   RELAY_URL?: string;
   RELAY_NAME?: string;
 }
@@ -927,7 +927,7 @@ function buildEnvContent(cfg: Config, existing: string | null): string {
     BRIDGE_PORT: cfg.BRIDGE_PORT,
     USER_NAME: cfg.USER_NAME,
     MCP_NAME: cfg.MCP_NAME,
-    ...(cfg.RELAY_URL ? { RELAY_URL: cfg.RELAY_URL, ...(cfg.RELAY_NAME ? { RELAY_NAME: cfg.RELAY_NAME } : {}) } : {}),
+    ...(cfg.RELAY_URL !== undefined ? { RELAY_URL: cfg.RELAY_URL, ...(cfg.RELAY_NAME ? { RELAY_NAME: cfg.RELAY_NAME } : {}) } : {}),
   }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
@@ -1611,7 +1611,7 @@ async function stepPhoneAccess(webPort: number, bridgePort: string, existing: Pa
   const { chooseRemoteAccess } = await import("./lib/setup-remote-access.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
   const pick = await chooseRemoteAccess(ui, { existing, lanUrl: detectBridgeUrls(webPort).find((x) => x.kind === "lan")?.url });
-  return pick.kind === "tailscale" ? { kind: "tailscale", url: (await stepRemoteAccess(webPort, bridgePort)).url } : pick;
+  return pick.kind === "tailscale" ? { ...pick, url: (await stepRemoteAccess(webPort, bridgePort)).url } : pick;
 }
 
 /**
@@ -2062,7 +2062,7 @@ async function main() {
     BRIDGE_PORT: bridgePort,
     USER_NAME: userName,
     MCP_NAME: mcpName,
-    ...(remote?.kind === "relay" ? { RELAY_URL: remote.relayUrl, RELAY_NAME: remote.relayName } : {}),
+    ...(remote?.kind === "relay" ? { RELAY_URL: remote.relayUrl, RELAY_NAME: remote.relayName } : remote?.disableRelay ? { RELAY_URL: "" } : {}),
   };
 
   const fin = await stepFinalize(cfg);

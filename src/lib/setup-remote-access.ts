@@ -25,10 +25,11 @@ export interface SetupUi {
   c: { bold: string; dim: string; cyan: string; reset: string };
 }
 
+/** disableRelay：机器原本配着中继而用户改选别的路，且同意停用（setup 把 RELAY_URL 写空，bridge 视为没配） */
 export type RemoteAccessChoice =
   | { kind: "relay"; relayUrl: string; relayName: string; url: string }
-  | { kind: "tailscale"; url?: string }
-  | { kind: "lan"; url?: string };
+  | { kind: "tailscale"; url?: string; disableRelay?: boolean }
+  | { kind: "lan"; url?: string; disableRelay?: boolean };
 
 // ── 纯函数 ────────────────────────────────────────────────────────────────
 
@@ -118,13 +119,18 @@ export async function chooseRemoteAccess(ui: SetupUi, opts: ChooseOpts): Promise
     `Not now — LAN address only${opts.lanUrl ? ` (${opts.lanUrl})` : ""}, stops working once you leave the Wi-Fi.`,
   )}`);
   ui.br();
-  const pick = await ui.prompt(t("选择", "Choose"), "1", (v) => (["1", "2", "3"].includes(v.trim()) ? null : t("输入 1、2 或 3", "Enter 1, 2 or 3")));
-  if (pick.trim() === "2") return { kind: "tailscale" };
-  if (pick.trim() === "3") {
-    ui.hint(t("之后想配，重跑 bun run setup 走到这一步即可。", "Rerun `bun run setup` any time to set this up."));
-    return { kind: "lan", url: opts.lanUrl };
-  }
-  return configureRelay(ui, opts.existing, opts.probe ?? probeRelay);
+  const pick = (await ui.prompt(t("选择", "Choose"), "1", (v) => (["1", "2", "3"].includes(v.trim()) ? null : t("输入 1、2 或 3", "Enter 1, 2 or 3")))).trim();
+  if (pick === "1") return configureRelay(ui, opts.existing, opts.probe ?? probeRelay);
+  if (pick === "3") ui.hint(t("之后想配，重跑 bun run setup 走到这一步即可。", "Rerun `bun run setup` any time to set this up."));
+  const kind = pick === "2" ? "tailscale" : "lan";
+  const current = normalizeRelayUrl(opts.existing.RELAY_URL ?? "");
+  if (!current) return { kind, url: opts.lanUrl };
+  // 原本走着中继却改选别的路：问一句要不要停用，默认留着（两条路并存无害，删了才是不可逆的）
+  const disableRelay = await ui.confirm(
+    t(`这台机器目前配着中继（${current}）。停用它吗？（停用后手机只能走你现在选的这条路）`, `This machine is currently on the relay (${current}). Disable it? (the phone would then only have the path you just picked)`),
+    false,
+  );
+  return { kind, url: opts.lanUrl, disableRelay };
 }
 
 async function configureRelay(ui: SetupUi, existing: ChooseOpts["existing"], probe: RelayProbe): Promise<RemoteAccessChoice> {

@@ -131,10 +131,20 @@ describe("chooseRemoteAccess（三选一）", () => {
   });
 
   test("选 2 只返回 Tailscale 意向；选 3 带回局域网地址", async () => {
-    expect(await chooseRemoteAccess(fakeUi(["2"]).ui, { existing: {} })).toEqual({ kind: "tailscale" });
+    expect(await chooseRemoteAccess(fakeUi(["2"]).ui, { existing: {} })).toEqual({ kind: "tailscale", url: undefined });
     expect(await chooseRemoteAccess(fakeUi(["3"]).ui, { existing: {}, lanUrl: "http://192.168.1.2:3333" })).toEqual({ kind: "lan", url: "http://192.168.1.2:3333" });
     const bad = fakeUi(["9", "3"]);
     expect(await chooseRemoteAccess(bad.ui, { existing: {} })).toEqual({ kind: "lan", url: undefined });
     expect(bad.lines.join("\n")).toContain("输入 1、2 或 3");
+  });
+
+  test("原本配着中继却改选 2 / 3：问要不要停用，默认留着；答 y 才带 disableRelay", async () => {
+    const existing = { RELAY_URL: "wss://relay.example.com" };
+    expect(await chooseRemoteAccess(fakeUi(["2", ""]).ui, { existing })).toMatchObject({ kind: "tailscale", disableRelay: false });
+    expect(await chooseRemoteAccess(fakeUi(["3", "y"]).ui, { existing })).toMatchObject({ kind: "lan", disableRelay: true });
+    const asked = fakeUi(["2", "n"]);
+    await chooseRemoteAccess(asked.ui, { existing });
+    expect(asked.answers).toHaveLength(0); // 确实问了
+    expect((await chooseRemoteAccess(fakeUi(["2"]).ui, { existing: {} })).kind).toBe("tailscale"); // 没配过中继就不问
   });
 });

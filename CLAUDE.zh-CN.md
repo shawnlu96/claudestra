@@ -128,11 +128,10 @@ bun src/manager.ts cron-history [name|id]
 
 # 跨 Claudestra peer 协作 — HTTP peers（不依赖 Discord，直接走 /api/v1；
 # 设计见 docs/design-http-peers.md）
-# v2.15+ 一键邀请（推荐）：A 生成、B 粘贴，B 的 bridge 自动回调 A 的
-# /api/v1/peers/redeem——免回执/accept。一次性、24h 过期，过期/撤销连带吊销
-# 内嵌 token。B 加入时默认不反向开放任何 agent（单向授权）；对称访问 = B 也
-# 生成一张邀请发回来。
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请串（URL 自动：HTTPS 入口，否则 peer 专用端口）
+# v2.15+ 一键邀请（推荐）：A 生成（连着中继是链接，否则是邀请串）、B 点开或
+# 粘贴，B 的 bridge 自动回调 A 兑换——免回执/accept。一次性、24h 过期，过期/
+# 撤销连带吊销内嵌 token。B 加入默认不反向开放（单向授权）；对称 = B 也发一张。
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口 / peer 端口）
 bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>] [--force]  # B: 粘贴即完成（--agents = 可选的反向开放）
 bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期 + 吊销其 token）
 bun src/manager.ts peer-invite-revoke <inv_id>    # 作废未兑换的邀请 + 其内嵌 token

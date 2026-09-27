@@ -132,11 +132,11 @@ bun src/manager.ts cron-history [name|id]
 
 # Cross-Claudestra peer collaboration — HTTP peers (no Discord dependency;
 # peers talk over the /api/v1 surface directly. Design: docs/design-http-peers.md)
-# v2.15+ one-click invite (recommended): A generates, B pastes, B's bridge calls
-# A's /api/v1/peers/redeem automatically — no receipt/accept. Single-use, 24h TTL,
-# expiry/revoke also revokes the embedded token. Joining exposes nothing of B by
-# default (one-way grant); symmetric access = B sends an invite of their own.
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (auto-URL: HTTPS entry, else the peer-only port)
+# v2.15+ one-click invite (recommended): A generates (a link when on the relay,
+# else a string), B opens/pastes it; B's bridge redeems at A automatically.
+# Single-use, 24h TTL, expiry/revoke also revokes the embedded token. Joining
+# exposes nothing of B (one-way grant); symmetric = B sends an invite back.
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (URL: relay if connected, else HTTPS entry/peer port)
 bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = optional reverse exposure)
 bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
 bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + its embedded token

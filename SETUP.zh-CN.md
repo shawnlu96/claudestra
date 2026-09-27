@@ -50,8 +50,8 @@ bun run setup
 
 **一键邀请（v2.15+，推荐）** —— 两步完成，零表单：
 
-1. **A 生成邀请**：Web 客户端 设置 → Peer 协作 → 「生成邀请」（勾选要开放的 agent），或 `bun src/manager.ts peer-invite-new --agents <a,b>`。把邀请串发给对方（走任意私聊渠道）。
-2. **B 粘贴**：设置 → Peer 协作 → 「加入」，或 `bun src/manager.ts peer-join-auto '<邀请串>'`。B 的 bridge 自动回调 A 完成登记——搞定，A 会收到接入通知。
+1. **A 生成邀请**：Web 客户端 设置 → Peer 协作 → 「生成邀请」（勾选要开放的 agent），或 `bun src/manager.ts peer-invite-new --agents <a,b>`。连着中继时得到的是一条链接（`https://<中继>/i#…`），没中继是一段邀请串。发给对方（走任意私聊渠道）。
+2. **B 点开**（链接直接落到他自己 Claudestra 的加入页，点一下完成）**或粘贴**：设置 → Peer 协作 → 「加入」，或 `bun src/manager.ts peer-join-auto '<邀请>'`。B 的 bridge 自动回调 A 完成登记——搞定，A 会收到接入通知。
 
 邀请串一次性、24h 过期（过期/撤销都会连带吊销内嵌 token；`peer-invite-list` / `peer-invite-revoke <id>` 管理待兑换的）。B 粘贴加入时**默认不开放自己的任何 agent**——这是单向授权（B 可调用 A 开放的 agent）；要对称访问，B 也生成一张邀请发回去即可，条目会自动合并成同一个 peer。
 
@@ -64,7 +64,7 @@ bun run setup
 - **token scope 就是权限模型**：只有邀请里勾选的 agent 可被调用，越界一律 403。之后想改开放范围用 `peer-http-scope <peer> --agents ...`，不用重新握手。
 - **大总管永远不可分享** —— v2.15 起硬规则，`--force` 也不放行（历史 peer token 里列了 master 的也会在 API 层被截断）。
 - **非 external agent 要 `--force`**：给不是 `--external` 创建的 agent 签 token 需要加 `--force`（Web UI 里是确认弹层）—— 和你自己对话共享上下文的 agent 不该随手暴露（R1 守卫）。
-- **连通性**：两边 bridge 要能互相访问，而 bridge 默认只监听 `127.0.0.1`——记得设 `BRIDGE_BIND`（生成邀请时如果还是回环会直接警告）。双方都不需要公网 IP：两台机器都装个 [Tailscale](https://tailscale.com) 是最省事的私有加密通路（邀请串会自动优先用 Tailscale 地址），但不是必须——任何内网互通或 HTTPS 反代都行。
+- **连通性**：走中继（下一节，默认）什么都不用做——两边都只有一条出站连接，peer 地址就是 `relay://<指纹>`。没中继时两边 bridge 要能直接互访：bridge 默认只监听 `127.0.0.1`，记得设 `BRIDGE_BIND`（生成邀请时如果还是回环会直接警告），再给它们一条私有通路——两台机器都装 [Tailscale](https://tailscale.com)（邀请串会自动优先用 Tailscale 地址）、任何内网互通，或 HTTPS 反代。
 
 ### 从外面访问：中继（默认）或 Tailscale
 

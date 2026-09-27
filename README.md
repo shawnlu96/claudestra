@@ -55,7 +55,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 - **Multi-frontend API (v2.6.0+)** — Discord is just the first frontend. `GET /events` streams tool calls / assistant text / agent status over SSE; `POST /api/v1/agents/:name/messages` lets external users talk to a scoped set of agents with a Bearer token (sync `wait`, file upload, audit mirroring back to Discord). Build a web UI or a Telegram bot on the same contracts — see `docs/design-multi-frontend.md` (design notes, written in Chinese).
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
 - **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
-- **Cross-Claudestra peer collaboration (HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. v2.15+ makes it a **one-click invite**: pick the agents to share, send one string, the other side pastes it — handshake completes automatically (single-use, 24h expiry, revocable; the master orchestrator can never be shared). After that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly. No public IP needed on either side — any private path works (Tailscale is the easiest, but optional).
+- **Cross-Claudestra peer collaboration (HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. v2.15+ makes it a **one-click invite**: pick the agents to share, send one link (or string), the other side opens it — handshake completes automatically (single-use, 24h expiry, revocable; the master orchestrator can never be shared). After that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly. No public IP needed on either side — through the relay (v2.28+, the default) nothing is opened at all; without one, any private path works (Tailscale, LAN, a reverse proxy).
 - **LLM-free management** — status / kill / restart / cron buttons execute directly on the Bridge, zero-token overhead and near-instant response.
 
 ### Web client (v2.10+)
@@ -69,7 +69,7 @@ The default front door — a **PWA-installable Next.js app** built entirely on t
 - **Background-task threads** — subagents and background shells stream into collapsible sub-conversations.
 - Profile customisation, multi-select session management, per-agent init messages.
 
-Setup + phone remote access (Tailscale / PWA install): **[web/SETUP.md](./web/SETUP.md)**.
+Setup + phone remote access (relay by default, Tailscale optional / PWA install): **[web/SETUP.md](./web/SETUP.md)**.
 
 ### Discord UI
 - **Interactive components** — buttons, select menus, slash commands.

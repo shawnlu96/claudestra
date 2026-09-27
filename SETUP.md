@@ -53,8 +53,8 @@ Two Claudestra instances can share specialist agents without a shared Discord se
 
 **One-click invite (v2.15+, recommended)** — two steps, no forms:
 
-1. **A creates an invite**: in the web client, Settings → Peer collaboration → *Create invite* (pick which agents to expose), or `bun src/manager.ts peer-invite-new --agents <a,b>`. Send the resulting string to the other side over any private channel (DM, Signal, whatever).
-2. **B pastes it**: Settings → Peer collaboration → *Join*, or `bun src/manager.ts peer-join-auto '<invite-string>'`. B's bridge calls A back automatically — done. A gets a notification with the new peer's name.
+1. **A creates an invite**: in the web client, Settings → Peer collaboration → *Create invite* (pick which agents to expose), or `bun src/manager.ts peer-invite-new --agents <a,b>`. On the relay this is a link (`https://<relay>/i#…`); without a relay it's a string. Send it to the other side over any private channel (DM, Signal, whatever).
+2. **B opens it** (link → lands in their own Claudestra's join page, one click) **or pastes it**: Settings → Peer collaboration → *Join*, or `bun src/manager.ts peer-join-auto '<invite>'`. B's bridge calls A back automatically — done. A gets a notification with the new peer's name.
 
 Invites are single-use and expire after 24h (the embedded token is revoked on expiry/revocation — `peer-invite-list` / `peer-invite-revoke <id>` manage pending ones). Joining exposes **nothing** of B by default: it's a one-way grant (B can call A's shared agents). For two-way access, B sends A an invite of their own — the entries merge into one peer.
 
@@ -67,7 +67,7 @@ Notes:
 - **Token scope is the permission model**: only agents named in the invite are callable; anything else gets a 403. `peer-http-scope <peer> --agents ...` changes it later without re-handshaking.
 - **The master orchestrator can never be shared** — hard rule since v2.15, `--force` does not override it (and legacy peer tokens that list master are cut off at the API layer).
 - **`--force` for non-external agents**: exposing an agent not created with `--external` requires `--force` (a confirm dialog in the web UI) — agents sharing context with your own conversations shouldn't be casually exposed (the R1 guard).
-- **Connectivity**: the two bridges must be able to reach each other, and the bridge listens on `127.0.0.1` only by default — set `BRIDGE_BIND` (invite generation warns you if it's still loopback). Neither side needs a public IP: installing [Tailscale](https://tailscale.com) on both machines is the easiest way to get a private encrypted path (invite URLs auto-prefer the Tailscale address), but it's optional — any private network or an HTTPS reverse proxy works just as well.
+- **Connectivity**: on the relay (next section, the default) there is nothing to do — both sides only hold an outbound connection, and peer addresses are `relay://<fingerprint>`. Without a relay the two bridges must reach each other directly: the bridge listens on `127.0.0.1` only by default, so set `BRIDGE_BIND` (invite generation warns you if it's still loopback), and give them a private path — [Tailscale](https://tailscale.com) on both machines (invite URLs auto-prefer the Tailscale address), any private network, or an HTTPS reverse proxy.
 
 ### Reach it from anywhere: the relay (default) or Tailscale
 
