@@ -426,10 +426,9 @@ const pendingAgentCalls = new Map<string, PendingAgentCall>();
  * 起始的推理流窗口里到达的通知被静默丢弃(miniapp 08:00:22 → backend 回合始于
  * 08:00:05、首个 assistant 输出 08:00:49,消息永远没落 jsonl)。CC 内部窗口我们
  * 管不了 → bridge 侧根治:目标在回合中就不 ws.send,压进本队列,Stop hook 后
- * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙),押满 30min 通知 caller 放弃。
+ * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
-const heldLocalMsgs = new Map<string, { env: RouterEnvelope; to: RouterLocalEndpoint; heldAt: number }[]>();
-const HELD_MSG_MAX_MS = 30 * 60_000;
+const heldLocalMsgs = new HeldQueue();
 
 /** 人类 request(Discord 用户 / 非 peer 的 API 用户)——抢占与押后规则的分野。 */
 function isHumanRequest(env: RouterEnvelope): boolean {
@@ -466,15 +465,15 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
   // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
   // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
   const due = working ? q.filter((i) => isHumanRequest(i.env)) : q;
-  if (due.length === 0) return;
-  const rest = q.filter((i) => !due.includes(i));
-  if (rest.length) heldLocalMsgs.set(channelId, rest);
-  else heldLocalMsgs.delete(channelId);
   for (const item of due) {
-    // ws 可能已换代(channel-server 重连):按 channelId 取最新连接
+    // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
     const fresh = clients.get(channelId);
-    const to: RouterLocalEndpoint = fresh ? { ...item.to, ws: fresh.ws, cwd: fresh.cwd } : item.to;
+    if (!fresh) break;
+    const to: RouterLocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
+    heldLocalMsgs.detach(channelId, item); // 先摘不落盘:投出去之后才持久化,中途崩溃重启还会再投
     const d = await deliverToLocal(item.env, to);
+    if (d.outcome.kind === "error") heldLocalMsgs.restore(channelId, item);
+    else heldLocalMsgs.persist();
     if (d.outcome.kind === "sent") {
       // push-back 的 10min 失效窗从真正送达起算——否则目标长回合期间
       // pendingAgentCalls 被扫掉,对方回了 caller 也收不到(本次事故的次生伤)
@@ -556,6 +555,7 @@ import type {
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
+import { ageHeld, heldNoticeText, HeldQueue } from "./bridge/held-queue.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -2758,31 +2758,19 @@ setInterval(() => {
     pendingAgentCalls.delete(channelId);
     console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
   }
-  // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押满 30min
-  // 通知 caller 放弃(不能让消息无声蒸发——那正是本次要修的病)。
-  for (const [channelId, q] of heldLocalMsgs.entries()) {
-    const expired = q.filter((i) => now - i.heldAt > HELD_MSG_MAX_MS);
-    if (expired.length > 0) {
-      heldLocalMsgs.set(channelId, q.filter((i) => now - i.heldAt <= HELD_MSG_MAX_MS));
-      if (heldLocalMsgs.get(channelId)!.length === 0) heldLocalMsgs.delete(channelId);
-      for (const item of expired) {
-        console.log(`🧹 押后消息过期放弃: → ${item.to.agentName || channelId}`);
-        if (item.env.from.kind === "local") {
-          try {
-            const caller = clients.get(item.env.from.channelId);
-            caller?.ws.send(JSON.stringify({
-              type: "message",
-              content: `[⚠️ bridge] 你 30 分钟前发给 ${item.to.agentName || channelId} 的消息始终无法送达(对方持续处于回合中),已放弃。如仍需要,请重发。原文开头: ${String(item.env.content).slice(0, 150)}`,
-              meta: {
-                chat_id: item.env.from.channelId, message_id: `held_fail_${Date.now()}`,
-                ts: new Date().toISOString(), trigger: "system", intent: "notification",
-                thread_id: newThreadId(), user: "bridge", user_id: "bridge", is_bridge: "true",
-              },
-            }));
-          } catch { /* caller 也没了就算了 */ }
-        }
-      }
-    }
+  // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押久了告诉 caller(held-queue.ts ageHeld)
+  for (const n of ageHeld(heldLocalMsgs, now)) {
+    console.log(`${n.kind === "gave-up" ? "🧹 押后消息放弃" : "⏳ 押后消息仍在排队"}: → ${n.item.to.agentName || n.channelId}`);
+    const from = n.item.env.from;
+    const caller = from.kind === "local" ? clients.get(from.channelId) : undefined;
+    try {
+      caller?.ws.send(JSON.stringify({ type: "message", content: heldNoticeText(n), meta: {
+        chat_id: (from as RouterLocalEndpoint).channelId, message_id: `held_${n.kind}_${now}`, ts: new Date().toISOString(), trigger: "system",
+        intent: "notification", thread_id: newThreadId(), user: "bridge", user_id: "bridge", is_bridge: "true",
+      } }));
+    } catch { /* caller 也没了就算了:消息本身按上面的规则留着 / 已放弃 */ }
+  }
+  for (const channelId of heldLocalMsgs.keys()) {
     if (heldLocalMsgs.get(channelId)?.length) void flushHeldLocalMsgs(channelId, "sweep");
   }
   // v2.6.0+ API 会话状态 TTL（10min）：pending 请求、轮询结果、附件登记
