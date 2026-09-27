@@ -127,6 +127,15 @@ export function isLoopbackAddress(addr: string | null | undefined): boolean {
   );
 }
 
+/**
+ * 「真本机」= 回环 socket 且没有 X-Forwarded-For。本机反代（Caddy / tailscale serve / 中继子域名隧道）转进来的请求
+ * socket 也是 127.0.0.1，但它们一定带 XFF——按回环算的话，控制面豁免（/hook、/relay/pair/approve、ws route_to_agent）
+ * 就对反代后面的所有人敞开了。控制面闸门与请求来源（/devices/local）都用它（tests/web-gateway.test.ts）。
+ */
+export function isDirectLoopback(addr: string | null | undefined, forwardedFor: string | null | undefined): boolean {
+  return isLoopbackAddress(addr) && !forwardedFor;
+}
+
 /** 裸控制路由：非回环访问永远要 control token，静态托管的例外不覆盖它们（/api/v1/* 在这之前已单独放行） */
 const CONTROL_ROUTES = new Set(["/hook", "/stats", "/stats/refresh", "/skills/rescan", "/agent/cleanup", "/events"]);
 const CONTROL_PREFIXES = ["/peer-ingress/", "/relay/"];

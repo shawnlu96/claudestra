@@ -95,7 +95,7 @@ import {
   serveStaticSite, appConfigResponse,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
-  isLoopbackAddress,
+  isDirectLoopback,
   controlAccessVerdict,
 } from "./bridge/web-gateway.js";
 // v2.6.0+ HTTP API 身份与授权（设计 §3.4 / §5）
@@ -3555,10 +3555,9 @@ const server = Bun.serve({
     // 判定不会把本机 agent 误拦。
     {
       const ip = server.requestIP(req);
-      const loopback = isLoopbackAddress(ip?.address);
-      // 来源上下文：只有真实回环 socket 才是 loopback（bridge/request-context.ts）
-      const direct = loopback && !req.headers.get("x-forwarded-for"); // tailscale serve 之类的本机反代转进来的请求带 XFF，不算回环（否则 tailnet 里任何设备都能打 /devices/local）
-      setRequestContext(req, { source: direct ? "loopback" : "lan", clientIp: ip?.address ?? null, https: req.headers.get("x-forwarded-proto") === "https" });
+      // 本机反代转进来的（带 XFF）不算回环：控制面豁免与请求来源（/devices/local）同一口径（web-gateway.ts isDirectLoopback）
+      const loopback = isDirectLoopback(ip?.address, req.headers.get("x-forwarded-for"));
+      setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: ip?.address ?? null, https: req.headers.get("x-forwarded-proto") === "https" });
       const verdict = controlAccessVerdict({
         loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // 静态托管：非回环 GET/HEAD 可取前端文件，ws 升级 / 控制路由除外
         pathname: url0.pathname,

@@ -12,6 +12,7 @@ import {
   isCrossOrigin,
   isOriginExplicitlyAllowed,
   isLoopbackAddress,
+  isDirectLoopback,
   isControlRoute,
   controlAccessVerdict,
 } from "../src/bridge/web-gateway.js";
@@ -166,6 +167,24 @@ describe("isLoopbackAddress", () => {
     expect(isLoopbackAddress(null)).toBe(false);
     expect(isLoopbackAddress(undefined)).toBe(false);
     expect(isLoopbackAddress("")).toBe(false);
+  });
+});
+
+describe("isDirectLoopback（本机反代转进来的不算回环）", () => {
+  test("回环 socket 且无 XFF 才是真本机；带 XFF（Caddy / tailscale serve / 中继隧道）一律不是", () => {
+    expect(isDirectLoopback("127.0.0.1", null)).toBe(true);
+    expect(isDirectLoopback("::1", undefined)).toBe(true);
+    expect(isDirectLoopback("127.0.0.1", "203.0.113.9")).toBe(false);
+    expect(isDirectLoopback("127.0.0.1", "127.0.0.1")).toBe(false); // 反代自己填的回环也不信：只要走过反代就不是
+    expect(isDirectLoopback("100.82.126.45", null)).toBe(false);
+    expect(isDirectLoopback(null, null)).toBe(false);
+  });
+  test("接上控制面闸门：反代转来的 /relay/pair/approve 与 ws 升级都要 control token", () => {
+    const viaProxy = isDirectLoopback("127.0.0.1", "203.0.113.9");
+    const base = { loopback: viaProxy, method: "POST", staticHosting: true, providedToken: null, controlToken: "" }; // 未配 token = fail-closed
+    expect(controlAccessVerdict({ ...base, pathname: "/relay/pair/approve", websocket: false }).allow).toBe(false);
+    expect(controlAccessVerdict({ ...base, method: "GET", pathname: "/", websocket: true }).allow).toBe(false);
+    expect(controlAccessVerdict({ ...base, method: "GET", pathname: "/chat", websocket: false }).allow).toBe(true); // 静态文件照常
   });
 });
 
