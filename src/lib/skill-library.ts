@@ -5,7 +5,8 @@
  *
  * 搜索根（2026-09-28 核对）：
  *   Claude Code  ~/.claude/skills（个人）· <项目>/.claude/skills · 插件 <installPath>/skills（名字带 插件名: 前缀）·
- *                ~/.claude/skills/synced/<账号>/（claude.ai 同步）。同名：个人 > 项目；同步的输给任何别的（官方文档）
+ *                ~/.claude/skills/synced/<账号>/（claude.ai 同步，调用名一律 anthropic-skills:<名>——2026-09-28 CC 2.1.281 实测，
+ *                没撞名也带前缀）。同名：个人 > 项目；插件、同步都带前缀，和别的不冲突
  *   Codex        ~/.codex/skills · ~/.codex/skills/.system（自带）· ~/.agents/skills · <项目>/.agents/skills（codex 0.153 二进制里的路径）
  *   Pi           ~/.pi/agent/skills · settings.json 的 skills[] · ~/.agents/skills · <项目>/.pi/skills · <项目>/.agents/skills（lib/pi-env.ts）
  * Codex / Pi 的同名优先级没有文档，不猜，只标「同名还有 N 处」。
@@ -129,7 +130,7 @@ async function scanRoot(root: SkillRoot, repoSkillsDir: string, home: string): P
       out.push({
         runtime: root.runtime,
         scope: root.scope,
-        name: root.plugin ? `${root.plugin}:${meta.name}` : meta.name,
+        name: root.plugin ? `${root.plugin}:${meta.name}` : root.scope === "synced" ? `anthropic-skills:${meta.name}` : meta.name,
         description: meta.description.slice(0, 300),
         dir,
         ...(root.project ? { project: root.project } : {}),
@@ -144,8 +145,8 @@ async function scanRoot(root: SkillRoot, repoSkillsDir: string, home: string): P
   return out;
 }
 
-/** Claude Code 的同名规则：个人 > 项目（同一项目内），同步的输给任何别的；插件带前缀不冲突（纯函数） */
-const CC_RANK: Partial<Record<SkillScope, number>> = { personal: 3, project: 2, synced: 1 };
+/** Claude Code 的同名规则：个人 > 项目（同一项目内）；插件、同步的带前缀，不跟别的撞（纯函数） */
+const CC_RANK: Partial<Record<SkillScope, number>> = { personal: 3, project: 2 };
 export function markShadowing(skills: LibrarySkill[]): LibrarySkill[] {
   const groups = new Map<string, LibrarySkill[]>();
   for (const s of skills) {
