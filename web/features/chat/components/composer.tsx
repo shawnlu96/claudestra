@@ -585,7 +585,7 @@ export function Composer() {
         {showCtxWarn && (
           <div className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-1.5 text-xs">
             <span className="min-w-0 truncate">
-              ⚠️ {t("上下文已")} {Math.round(ctxTokens / 1000)}k{t("——别等了,找个句号就存记忆 + Compact")}
+              ⚠️ {t("上下文已 {n}k——别等了,找个句号就存记忆 + Compact", { n: Math.round(ctxTokens / 1000) })}
             </span>
             <button
               className="btn btn-warning btn-xs ml-auto shrink-0"

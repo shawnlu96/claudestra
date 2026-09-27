@@ -6,7 +6,7 @@
  * 载一次，后续用 `t(zh, en)` 返回当前语言版本。
  *
  * 为什么不直接每次读 config 文件？—— `t()` 调用高频（bridge 每条消息都会走），
- * 同步读文件太慢。一次载入内存，进程生命周期内都有效。config 变了要重启服务。
+ * 同步读文件太慢。一次载入内存，进程生命周期内都有效。config 变了要重启服务（bridge 的 PUT /settings 写完即 setLangInMemory）。
  *
  * initLang **同步** 读文件（readFileSync）：各入口在模块顶层调用它，同步读保证之后任何
  * t() 都拿到已载入的语言。最初是因为 pm2 fork mode 不支持 top-level await 才这么定；
@@ -43,6 +43,19 @@ export function setLangInMemory(lang: AppLang): void {
  */
 export function t(zh: string, en: string): string {
   return cachedLang === "en" ? en : zh;
+}
+
+/**
+ * setup 选语言的默认值：CLAUDESTRA_LANG（与 install.sh 同一个开关，它 exec 过来时带着）优先，
+ * 其次按 POSIX locale LC_ALL > LC_MESSAGES > LANG 取第一个非空的；zh 开头 → 中文，其余（没设、C、en_US…）→ 英文。
+ * daemon 不用它：那边以 config.lang 为准（launchd 注入的 LANG 不代表用户选择）。
+ */
+export function langFromLocaleEnv(env: Record<string, string | undefined> = process.env): AppLang {
+  const forced = (env.CLAUDESTRA_LANG ?? "").trim().toLowerCase();
+  if (/^(zh|cn)/.test(forced)) return "zh";
+  if (/^en/.test(forced)) return "en";
+  const loc = [env.LC_ALL, env.LC_MESSAGES, env.LANG].map((v) => (v ?? "").trim()).find(Boolean) ?? "";
+  return /^zh/i.test(loc) ? "zh" : "en";
 }
 
 /** debug / log 用：返回一个说明当前语言状态的字符串 */

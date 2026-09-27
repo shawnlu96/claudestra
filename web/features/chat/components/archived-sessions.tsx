@@ -148,7 +148,7 @@ export function ArchivedSessions() {
                     </span>
                   </span>
                   <span className="truncate font-mono text-[11px] text-base-content/40">
-                    {(e.sessions ?? 0)} {t("个会话")} · {fmtBytes(e.bytes ?? 0)}
+                    {t("{n} 个会话", { n: e.sessions ?? 0 })} · {fmtBytes(e.bytes ?? 0)}
                   </span>
                 </div>
                 </SwipeActions>

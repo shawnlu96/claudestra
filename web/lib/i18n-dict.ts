@@ -5,6 +5,7 @@
  * - key 必须与源码里的原文**逐字一致**（含全角/半角标点、前后空格——拆段
  *   拼接的条目靠空格对齐语序，行尾注释标注了这类条目）。
  * - 句中片段（如「重置」「已重启」）英文故意小写、无句号。
+ * - 带变量的句子整句做 key，变量写 {name}（t(s, { name })）；译文保留同名占位，tests/web-i18n.test.ts 查。
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 export const DICT: Record<string, string> = {
@@ -106,7 +107,6 @@ export const DICT: Record<string, string> = {
   "上次在线": "Last online",
   "还没连上过": "Never reached yet",
   "对方开放给我": "Shared with me",
-  "对方最近来访": "Last visit from them",
   "单向：只有对方能连你，这边没法主动检测": "One-way: only they can reach you, so it can't be checked from here",
   "连接超时：对方机器可能关机，或没在 Tailscale 里共享给你": "Timed out: their machine may be off, or not shared with you in Tailscale",
   "连接被拒：对方 bridge 没对外开放这个端口": "Refused: their bridge isn't open on this port",
@@ -229,15 +229,7 @@ export const DICT: Record<string, string> = {
     "Not configured. Sign up free at console.groq.com and create a key on the API Keys page.",
   "已保存,语音输入即时生效": "Saved — voice input works immediately",
   // BFF route 下发的固定错误/引导串(渲染点 t() 兜底,2026-07-18 review 补齐)
-  "语音识别未配置——点侧栏 ⚙️ 设置里填入 Groq API Key": "Speech-to-text not configured — add a Groq API Key in Settings (⚙️ in the sidebar)",
-  "音频过大（>20MB）": "Audio too large (>20MB)",
-  "需要 model 或 effort": "model or effort required",
   "写入失败": "Write failed",
-  "groqApiKey 必须是字符串（空串=清除）": "groqApiKey must be a string (empty = clear)",
-  "key 格式不像有效的 API key": "That doesn't look like a valid API key",
-  "agent/action 非法": "Invalid agent/action",
-  "agent 和 action 不能为空": "agent and action are required",
-  "agent 和内容不能为空": "agent and message are required",
 
   // ── 侧栏 / 会话列表 ──────────────────────────────────
   "会话": "Sessions",
@@ -277,8 +269,6 @@ export const DICT: Record<string, string> = {
   "识别请求失败": "Transcription request failed",
   "无法访问麦克风（权限被拒,或当前模式不支持录音）":
     "Can't access the microphone (permission denied, or recording unsupported in this mode)",
-  "上下文已": "Context at",
-  "，建议压缩以保持质量": ", compacting recommended to keep quality", // 值首带逗号+空格
   "请求压缩": "Compact",
   "本会话不再提示": "Don't remind again this session",
   // 更新提示横幅(update-hint-banner.tsx;拆段拼接,空格对齐语序)
@@ -333,7 +323,6 @@ export const DICT: Record<string, string> = {
   "加载更早的消息…": "Load earlier messages…",
   "加载更晚的消息…": "Load later messages…",
   "返回会话列表": "Back to session list",
-  "当前会话上下文占用(建议在对话里让 agent /compact)": "Context usage of this session (ask the agent to /compact)",
   "Agent 管理(生命周期操作,不经过 LLM)": "Agent management (lifecycle ops, no LLM)",
   " 失败": " failed", // key/值均带前导空格
   "更多操作": "More actions",
@@ -359,8 +348,6 @@ export const DICT: Record<string, string> = {
     "Fetching account usage… it will show in a few seconds, or tap refresh (top right) to force a re-scrape",
   "本时段用量": "Current period usage",
   "本周用量": "Weekly usage",
-  "今日全机用量": "Today (all agents)",
-  "本周全机用量": "This week (all agents)",
   "成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计":
     "Cost estimated at API list prices (subscriptions aren't billed this way) · active agents combined",
   "账号用量抓取于": "Account usage scraped",
@@ -396,6 +383,190 @@ export const DICT: Record<string, string> = {
   "例如：读 xx 文件 / 加载项目上下文…": "e.g. read file xx / load project context…",
   "clear 失败": "Clear failed",
   "确认清空": "Confirm clear",
+  "在指定目录起一个 Pi coding agent（经 Bridge）。工具集与 Claude Code 不同。":
+    "Start a Pi coding agent in a given directory (via the Bridge). Its tool set differs from Claude Code's.",
+  "在指定目录起一个 Codex agent（经 Bridge）。只支持免审批模式，职责在建线程时写入。":
+    "Start a Codex agent in a given directory (via the Bridge). Only no-approval mode is supported; the purpose is set when the thread is created.",
+  "所属 project": "Project",
+  "自动（按目录归属/新建）": "Auto (match by directory, or create one)",
+  "自定义路径…": "Custom path…",
+  "Review 员": "Reviewer",
+  "测试员": "Tester",
+  "Claude Code（默认）": "Claude Code (default)",
+  "能力档案": "Capability profile",
+  "继承全局（你桌面装的那套扩展）": "Inherit global (the extensions installed on your desktop)",
+  "最小集（只带内置工具 + 通道）": "Minimal (built-in tools + channel only)",
+  "最小集不继承 ~/.pi/agent 里的包（联网搜索、子代理等），cron / 无人值守场景更合适。":
+    "Minimal skips the packages in ~/.pi/agent (web search, subagents, etc.) — a better fit for cron and unattended runs.",
+  "provider/model-id（留空 = Pi 默认）": "provider/model-id (empty = Pi default)",
+  "Codex 模型 id（留空 = Codex 默认）": "Codex model id (empty = Codex default)",
+
+  // ── 项目管理 ─────────────────────────────────────────
+  "项目管理": "Projects",
+  "project = 一组工作目录 + 一组 agent。每个 agent 必属一个 project;新建 agent 不选时按目录自动归属。":
+    "A project is a set of working directories plus a set of agents. Every agent belongs to exactly one project; a new agent without one is assigned by directory.",
+  "还没有 project(新建 agent 会自动生成)": "No projects yet (creating an agent makes one automatically)",
+  "新建 project": "New project",
+  "id(小写)": "id (lowercase)",
+  "显示名(可中文)": "Display name (any language)",
+  "工作目录,一行一个,如 ~/repos/qingniao/miniapp": "Working directories, one per line, e.g. ~/repos/acme/app",
+  "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
+  "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
+  "至少要一个工作目录": "At least one working directory is required",
+  "{n} 个 agent": "{n} agents",
+  "成员": "Members",
+  "转移到…": "Move to…",
+  "确认删除": "Confirm delete",
+  "有成员时不可删除(先转移)": "Can't delete while it has members (move them first)",
+
+  // ── 定时任务 ─────────────────────────────────────────
+  "定时任务": "Scheduled tasks",
+  "到点起临时 agent 执行指令。查看/新建/原地编辑频率与指令/停用。":
+    "Runs a prompt in a temporary agent on a schedule. View, create, edit the schedule or prompt in place, or disable.",
+  "到点起一个临时 agent 执行指令,完成后报告并清理。改频率/指令是原地编辑,不丢运行历史。":
+    "On schedule, a temporary agent runs the prompt, reports back and is cleaned up. Editing the schedule or prompt happens in place, so run history is kept.",
+  "还没有定时任务": "No scheduled tasks yet",
+  "新建定时任务": "New scheduled task",
+  "任务名(唯一)": "Task name (unique)",
+  "工作目录(默认 ~)": "Working directory (default ~)",
+  "临时 agent 的 effort 档": "Effort level for the temporary agent",
+  "临时 agent 归属的项目": "Project for the temporary agent",
+  "按目录自动归类": "Auto (by directory)",
+  "任务指令:到点起一个临时 agent 执行,完成后自动清理并报告": "Prompt: a temporary agent runs it on schedule, reports back and is cleaned up",
+  "表达式": "Expression",
+  "任务指令": "Prompt",
+  "目录": "Directory",
+  "下次": "Next run:", // 后接时间或「已停用」
+  "上次": "Last run:",
+  "已停用": "disabled",
+
+  // ── 未纳管会话 / 归档 ────────────────────────────────
+  "未纳管会话": "Unmanaged sessions",
+  "没有未纳管的会话": "No unmanaged sessions",
+  "会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）": "Session file written in the last 2 minutes — probably still running (heuristic)",
+  "活跃": "Active",
+  "已归档并从列表移除（内容留在归档目录，可找回）": "Archived and removed from the list (the content stays in the archive and can be restored)",
+  "已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。":
+    "Accepted — adopting in the background (about 10–40 s). It will show up in the agent list when done.",
+  "这个会话还没有消息": "This session has no messages yet",
+  "用户": "User",
+  "助手": "Assistant",
+  "系统": "System",
+  "agent 名字": "Agent name",
+  "收编": "Adopt",
+  "收编为 agent": "Adopt as agent",
+  "← 返回": "← Back",
+  "这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。":
+    "This session isn't managed, so it can't receive messages. Adopting it opens a window for it, lets you chat with it and adds it to the agent list.",
+  "这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。":
+    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Claudestra can't send messages into them yet.",
+  "刷新": "Refresh",
+  "归档是空的": "The archive is empty",
+  "恢复": "Restore",
+  "{n} 个会话": "{n} sessions",
+  "归档失败:": "Archive failed: ", // 值尾带空格
+  "沉寂": "Dormant",
+
+  // ── 上下文徽章 / 存记忆 + Compact ─────────────────────
+  "上下文": "Context",
+  "当前会话上下文占用,点开看压缩建议": "Context usage of this session — tap for compaction advice",
+  "按任务边界压,别盯死数字——上下文只决定找边界的紧迫程度。压之前先存记忆(save-compact)。":
+    "Compact at task boundaries, not at a fixed number — context size only sets how urgently to find one. Save memory first (save-compact).",
+  "不用管": "Nothing to do",
+  "开始留意:下一个自然收尾点就存记忆 + Compact": "Start watching: save memory + Compact at the next natural stopping point",
+  "下一个边界必压;别在这个区间开新的大任务": "Compact at the next boundary; don't start big new tasks in this range",
+  "别等了,找个句号就压": "Don't wait — compact at the next full stop",
+  "压缩中…": "Compacting…",
+  "已请求": "Requested",
+  "存记忆 + Compact": "Save memory + Compact",
+  "上下文已 {n}k——别等了,找个句号就存记忆 + Compact": "Context at {n}k — don't wait, save memory + Compact at the next full stop",
+  "全机合计": "All agents",
+  "今日": "Today",
+  "本周": "This week",
+
+  // ── 后台任务 / 杂项 ──────────────────────────────────
+  "后台任务继续中": "Background tasks still running",
+  "⏮ 以上是更早的会话（{sid}）": "⏮ Earlier session above ({sid})",
+  "收起已完成": "Hide completed",
+  "展开已完成的后台任务": "Show completed background tasks",
+  "{n} 个已完成": "{n} completed",
+  "回到底部": "Scroll to bottom",
+  "这台机器需要升级 Claudestra 才能配合这个版本的网页": "This machine needs a Claudestra update to work with this version of the web app",
+  "xhigh + 动态 workflow 编排;仅本 session,需 CC 开启 dynamic workflows":
+    "xhigh + dynamic workflow orchestration; this session only, needs dynamic workflows enabled in Claude Code",
+  "ultracode = xhigh + 动态编排,仅本 session(重启回落);需 CC /config 开启 dynamic workflows":
+    "ultracode = xhigh + dynamic orchestration, this session only (reverts on restart); enable dynamic workflows in Claude Code's /config",
+  "不在原生壳内": "Not running in the native app",
+  "通知权限被拒绝——请到 设置 → Claudestra → 通知 里允许": "Notification permission denied — allow it in Settings → Claudestra → Notifications",
+  "已开启:agent 回复时会推送到这台设备": "Enabled: agent replies will be pushed to this device",
+  "这台机器 / 中继没有配置推送密钥": "This machine / relay has no push key configured",
+  "开启失败:{msg}": "Enable failed: {msg}",
+
+  // ── 设置 · 自动化 / 记忆 / 归档 / App 服务器 ─────────
+  "记忆卫生（mem0）": "Memory hygiene (mem0)",
+  "定期审查 mem0 记忆库:找出过时/矛盾/重复的记忆,出报告供处置——只报告不动手。":
+    "Periodically reviews the mem0 store for stale, conflicting or duplicate memories and writes a report for you to act on — it only reports, never changes anything.",
+  "频率": "Frequency",
+  "每周（周一）": "Weekly (Monday)",
+  "半月（1/15 号）": "Twice a month (1st & 15th)",
+  "每月（1 号）": "Monthly (1st)",
+  "当前为手工表达式": "Custom expression in use:",
+  "自动存记忆 + Compact": "Auto save memory + Compact",
+  "常规线:上下文超过阈值且闲置满时长后,先抢救记忆再压缩上下文,对所有 agent 生效;实际触发线取「此阈值」与「该 agent 真实窗口 85%」的较小者。救命线:涨到真实窗口 93%(1M = 930K)时无视闲置门槛强制触发一次——Claude Code 自己在 ~967K 裸压且不存记忆,这是最后一道兜底,常规线关了它也在。":
+    "Regular trigger: once context passes the threshold and the agent has been idle long enough, memory is saved and then the context is compacted; " +
+    "applies to every agent, and fires at the lower of this threshold and 85% of the agent's real window. Safety net: at 93% of the real window " +
+    "(930K for 1M) it fires once regardless of idle time — Claude Code compacts on its own at ~967K without saving memory, so this is the last line of defense, even with the regular trigger off.",
+  "上下文阈值": "Context threshold",
+  "闲置时长": "Idle time",
+  "立即": "Immediately",
+  "93% 救命线": "93% safety net",
+  "归档保留": "Archive retention",
+  "已退役会话的归档保留天数；超期由每日兜底清理，0 = 永不清理（归档是「可找回的过期会话」，不是永久仓库）。":
+    "How many days to keep archives of retired sessions. A daily sweep removes older ones; 0 = keep forever (the archive holds recoverable old sessions, it isn't permanent storage).",
+  "永不清理": "Keep forever",
+  "{n} 天": "{n} days",
+  "App 连接的服务器": "Server this app connects to",
+  "(读取中…)": "(loading…)",
+  "更换服务器": "Change server",
+  "确认更换": "Confirm change",
+  "升级中…": "Updating…",
+
+  // ── 设置 · 访问 · Tailscale 入口 ─────────────────────
+  "未安装": "Not installed",
+  "未连接": "Not connected",
+  "重新检测": "Recheck",
+  "走 Tailscale 时手机用哪个地址打开这里。优先用 HTTPS 地址，并在装到主屏（PWA）之前就用它——换地址要重新配对、重装 PWA、重新订阅推送。":
+    "The address your phone uses to open this page over Tailscale. Prefer the HTTPS one, and use it before adding to the Home Screen (PWA) — " +
+    "switching later means pairing again, reinstalling the PWA and re-subscribing to push.",
+  "没探测到可用入口": "No working entry found",
+  "外部反代": "External reverse proxy",
+  "tailnet IP（明文）": "tailnet IP (plain HTTP)",
+  "二维码": "QR code",
+  "可用": "Works",
+  "通到的不是本机当前的 web": "Reaches a different web app, not this one",
+  "证书已过期 {n} 天": "Cert expired {n} days ago",
+  "证书剩 {n} 天": "Cert expires in {n} days",
+  "语音输入 / 推送在明文地址下不可用": "Voice input and push don't work over plain HTTP",
+  "这台电脑还没装 Tailscale。装好并登录后，手机在任何网络下都能用固定地址打开这里。在终端重跑 bun run setup 会一步步引导。":
+    "Tailscale isn't installed on this computer. Once it's installed and signed in, your phone can open this page at a fixed address from any network. " +
+    "Rerun `bun run setup` in a terminal for a guided setup.",
+  "Tailscale 已安装但没连上（{state}）。": "Tailscale is installed but not connected ({state}). ", // 值尾带空格，后面紧接下一句
+  "打开 Tailscale 登录；macOS 首次还要在「系统设置」里允许系统扩展与 VPN 配置。":
+    "Open Tailscale and sign in. The first time on macOS, also allow the system extension and VPN configuration in System Settings.",
+  "tailnet 没开 MagicDNS，拿不到 ts.net 域名，也就签不了 HTTPS 证书。去 Tailscale 管理后台的 DNS 页开启。":
+    "MagicDNS is off for your tailnet, so there's no ts.net name and no way to get an HTTPS certificate. Turn it on in the DNS page of the Tailscale admin console.",
+  "tailnet 还没开 HTTPS 证书。去 Tailscale 管理后台 DNS 页开启 HTTPS Certificates（注意：证书会进入公开的证书透明日志，机器名和 tailnet 名可被查到），然后重跑 bun run setup。":
+    "HTTPS certificates aren't enabled for your tailnet. Turn on HTTPS Certificates in the DNS page of the Tailscale admin console " +
+    "(note: certificates go into public Certificate Transparency logs, so your machine and tailnet names can be looked up), then rerun `bun run setup`.",
+  "还没有 HTTPS 入口。在这台电脑的终端执行下面这条（只给本 web 加一个 tailnet 内的 HTTPS 入口，不对公网开放），或重跑 bun run setup：":
+    "No HTTPS entry yet. Run this in a terminal on this computer (it adds an HTTPS entry for this web app inside your tailnet only, " +
+    "not on the public internet), or rerun `bun run setup`:",
+  "443 与 8443 都被占用，没法自动配 HTTPS 入口。按 web/SETUP.md 的「证书 + 反代」手工方案配置。":
+    "Ports 443 and 8443 are both taken, so the HTTPS entry can't be set up automatically. Follow the manual certificate + reverse proxy steps in web/SETUP.md.",
+  "为什么需要 HTTPS？": "Why HTTPS?",
+  "浏览器只在安全上下文（HTTPS 或 localhost）里开放麦克风、Service Worker 和推送。经 tailnet IP 的明文地址能打开页面，但语音输入、离线和推送都会失效。Tailscale 的 HTTPS 只在你的 tailnet 内可达，不对公网开放。":
+    "Browsers only allow the microphone, Service Workers and push in a secure context (HTTPS or localhost). The plain-HTTP tailnet IP address opens the page, " +
+    "but voice input, offline mode and push won't work. Tailscale's HTTPS is reachable only inside your tailnet, not from the public internet.",
 
   // ── Skills / 会话内搜索 ──────────────────────────────
   "关闭 Skills": "Close Skills",
@@ -547,7 +718,6 @@ export const DICT: Record<string, string> = {
   "用 {app} 打开": "Open with {app}",
   "选择目录": "Choose a folder",
   "打开失败:": "Failed to open: ",
-  "只能在本机打开": "Only available on this machine",
   "目录不存在": "Folder does not exist",
   "不支持的打开方式": "Unsupported opener",
   "正文字号": "Body size",
@@ -611,47 +781,26 @@ export const DICT: Record<string, string> = {
 
   // ── HTTP peer 管理 ───────────────────────────────────
   "Peer 协作": "Peers",
-  "跨 Claudestra 实例互访：查看/编辑对方的访问权限、测试连通、完成握手。":
-    "Cross-instance collaboration: view/edit what peers can access, test reachability, complete handshakes.",
   "跨 Claudestra 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。":
     "Each side issues the other a scoped token; send_to_agent(\"<agent>@<peer>\") reaches remote agents. Removing revokes instantly.",
-  "暂无 peer。用下方「邀请」或「加入」发起握手。": "No peers yet. Start a handshake with Invite or Join below.",
   "握手完成": "Connected",
   "等待对方回执": "Awaiting receipt",
   "已禁用": "Disabled",
-  "对方可访问我的": "They can access",
-  "我可访问对方的": "I can access",
-  "（无有效 token）": "(no active token)",
   "（对方未开放任何 agent）": "(peer exposes no agents)",
   "测试连通": "Test",
   "连通正常": "Reachable",
-  "握手完成后可测试": "Available after handshake completes",
   "确认移除?": "Confirm remove?",
   "移除失败": "Remove failed",
   "全部普通 agent（*）": "All regular agents (*)",
-  "⚠ 不含 master": "⚠ excludes master",
-  "⚠ 大总管，风险极高": "⚠ orchestrator — high risk",
-  "⚠ 未标 external": "⚠ not external",
   "确认风险，强制保存": "Accept risk, force save",
   "确认风险，强制执行": "Accept risk, force run",
-  "确认轮换 token": "Confirm token rotation",
-  "添加 peer": "Add peer",
   "邀请": "Invite",
   "加入": "Join",
   "回执": "Receipt",
-  "我方发起选「邀请」；拿到对方邀请串选「加入」；对方回执串回来后选「回执」完成。":
-    "Choose Invite to start; Join if you got an invite string; Receipt to finish when their receipt comes back.",
-  "peer 名（字母/数字/-/_）": "Peer name (letters/digits/-/_)",
   "留空 = 自动（优先 HTTPS 入口）": "Leave empty = auto (HTTPS entry first)",
-  "粘贴对方的邀请串": "Paste their invite string",
-  "粘贴对方的回执串": "Paste their receipt string",
   "向对方开放的 agent": "Agents to expose",
   "生成邀请串": "Generate invite",
-  "生成回执串": "Generate receipt",
   "完成握手": "Complete handshake",
-  "邀请串（发给对方）": "Invite string (send to peer)",
-  "回执串（发回对方）": "Receipt string (send back)",
-  "握手完成，可在上方卡片测试连通。": "Handshake complete — test reachability on the card above.",
   "已复制": "Copied",
   "复制": "Copy",
   "网络错误": "Network error",
@@ -663,21 +812,13 @@ export const DICT: Record<string, string> = {
   "勾选要开放的 agent → 生成邀请串发给对方 → 对方粘贴即完成。24h 有效、一次性。":
     "Pick agents to expose → send the invite string → they paste it and you're connected. Valid 24h, single-use.",
   "高级：自定义我方地址（默认自动探测）": "Advanced: custom local URL (auto-detected by default)",
-  "邀请串（发给对方，粘贴即完成）": "Invite string (send it — pasting completes setup)",
   "24h 内有效、只能用一次。对方接入后你会收到通知。":
     "Valid for 24h, single-use. You'll be notified when they join.",
   "加入对方": "Join a peer",
-  "粘贴对方的邀请串，一步完成": "Paste their invite string — done in one step",
   "已接入": "Connected",
-  "可访问：": "Can access: ",
-  "默认未向对方开放你的 agent；需要对称访问就生成一张自己的邀请发回去。":
-    "None of your agents are exposed by default; for two-way access, send them an invite of your own.",
   "待兑换的邀请": "Pending invites",
   "撤销": "Revoke",
   "有效期至": "Valid until",
-  "复制邀请串": "Copy invite",
-  "单向（对方→我）": "One-way (them → me)",
-  "未送达——请重新发送": "Not delivered — please resend",
   "未送达": "Not delivered",
   "重新发送": "Resend",
   "iOS 键盘修正（实验）": "iOS keyboard fix (experimental)",
@@ -730,10 +871,6 @@ export const DICT: Record<string, string> = {
   "自动升级 Claude Code": "Auto-update Claude Code",
   "每周检查一次，同样只在所有 agent 都空闲时才升。": "Checks weekly and likewise updates only when every agent is idle.",
   // ── Peer 协作 · 邀请准备 / 双向加入 ──────────────────────
-  "同时向对方开放我的 agent（双向）": "Also open my agents to them (two-way)",
-  "对方要能连到你的 bridge 才用得上：你的机器要共享给对方，bridge 端口要对 tailnet 开放。":
-    "Only works if they can reach your bridge: share your machine with them and open the bridge port to the tailnet.",
-  "已向对方开放：": "Opened to them: ",
   "发给对方之前，确认这几件事：": "Before you send it, make sure:",
   "对方要能连到": "They can reach",
   "：把本机共享给对方（Tailscale 后台 → Machines → 本机 → Share），或让对方加入你的 tailnet。共享是单向的，对方共享给你不算。":

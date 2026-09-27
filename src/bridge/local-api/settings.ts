@@ -6,6 +6,7 @@
  */
 import { readConfig, setGroqApiKey, setLang, type AppConfig, type AppLang } from "../../lib/config-store.js";
 import { canManage } from "../../lib/devices.js";
+import { setLangInMemory } from "../../lib/i18n.js";
 import type { Principal } from "../../lib/principals.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
 import { webDb } from "./db.js";
@@ -21,7 +22,13 @@ interface Store {
   setLang: (lang: AppLang) => Promise<unknown>;
   setGroqApiKey: (key: string) => Promise<unknown>;
 }
-const realStore: Store = { read: readConfig, setLang, setGroqApiKey };
+// 写完文件立刻刷 bridge 内存：lib/i18n 只在启动时 initLang 读一次，不刷的话 Discord 上「思考中 / 完成 / 打断」
+// 要等 bridge 重启才换语言。launcher / cron 是别的进程，仍要重启才跟上。
+const persistLang = async (lang: AppLang) => {
+  await setLang(lang);
+  setLangInMemory(lang);
+};
+const realStore: Store = { read: readConfig, setLang: persistLang, setGroqApiKey };
 let store = realStore;
 /** 单测换成内存实现；生产不调 */
 export function setSettingsStoreForTest(s: Store | undefined): void {
