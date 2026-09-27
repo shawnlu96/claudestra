@@ -15,11 +15,17 @@ import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity
 import { openWebState } from "../../lib/web-state.js";
 import { subscribeEvents } from "../event-bus.js";
 import { relayClient } from "../relay-link.js";
-import { createDispatcher, OWNER_CHAT_ID, ownerChatIds } from "./dispatcher.js";
+import { createDispatcher, OWNER_CHAT_ID, ownerChatIds, type Dispatcher } from "./dispatcher.js";
 import { configurePushRoutes } from "./routes.js";
 import { createPushSender, type DirectBackends } from "./sender.js";
 
 const PRINCIPALS_REFRESH_MS = 60_000;
+let dispatcherRef: Dispatcher | null = null;
+
+/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身） */
+export function pushOwnerNotice(title: string, body: string): void {
+  dispatcherRef?.notice({ title, body }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
+}
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 let started = false;
 
@@ -55,6 +61,7 @@ export function initPush(): void {
   configurePushRoutes({ db, sender, liveAgents: async () => (await readRegistryAgents()).map((a) => a.name) });
   const key = instanceKeySync();
   const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
+  dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");
 }
