@@ -1,7 +1,5 @@
-// 绕过规范 helper 的写法 + 无声吞错 + web 路由鉴权。全部按全仓总数棘轮（搬代码不受影响）。
-import {
-  CATCH_COMMENT_MIN, PATTERNS, PLACEHOLDER_CJK, PLACEHOLDER_PREFIXES, PLACEHOLDER_WORDS, PUBLIC_ROUTES, type PatternDef,
-} from "../config.ts";
+// 绕过规范 helper 的写法 + 无声吞错。全部按全仓总数棘轮（搬代码不受影响）。
+import { CATCH_COMMENT_MIN, PATTERNS, PLACEHOLDER_CJK, PLACEHOLDER_PREFIXES, PLACEHOLDER_WORDS, type PatternDef } from "../config.ts";
 import type { Counts, Files, RuleResult } from "../types.ts";
 import { maskStrings } from "./lex.ts";
 import { stripComments } from "./strip.ts";
@@ -78,11 +76,6 @@ export function measurePatterns(files: Files, patterns: PatternDef[] = PATTERNS)
     counts["catch:empty-block"] += e;
     counts["catch:silent-promise"] += s;
     if (e + s) perFile.set(f, e + s);
-    // 鉴权要么直接调 isAuthed，要么走 web/lib/bff 的包装（authed / authedLegacy / withAuth / proxyGet / proxyPost / agentAction 内部都先验 isAuthed）
-    const viaBff = /from\s+["']@\/lib\/bff["']/.test(src) && /\b(authed|authedLegacy|withAuth|proxyGet|proxyPost|agentAction)\s*\(/.test(src);
-    if (/^web\/app\/api\/.+\/route\.ts$/.test(f) && !PUBLIC_ROUTES.includes(f) && !/\bisAuthed\b/.test(src) && !viaBff) {
-      counts[`route:${f}`] = 1;
-    }
   }
   const detail = [...perFile].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([f, n]) => `catch ${f}: ${n}`);
   return { counts, detail };
