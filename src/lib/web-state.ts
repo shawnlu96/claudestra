@@ -48,4 +48,7 @@ function migrate(db: Database): void {
     agent TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, last_reply_ts INTEGER NOT NULL DEFAULT 0)`);
   db.exec(`CREATE TABLE IF NOT EXISTS apns_devices (
     token TEXT PRIMARY KEY, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_seen TEXT NOT NULL)`);
+  // 旧 web 的登录会话（只存 sha256）：升级后浏览器带着旧 cstra_session 来，一次性换成设备凭据（lib/legacy-web.ts）
+  db.exec(`CREATE TABLE IF NOT EXISTS legacy_sessions (
+    id_hash TEXT PRIMARY KEY, username TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, used_at TEXT)`);
 }

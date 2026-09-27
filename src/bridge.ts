@@ -92,7 +92,7 @@ import { apiErrorResponse } from "./bridge/api-respond.js";
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import {
   corsHeadersFor,
-  serveStaticSite, appConfigResponse,
+  serveStaticSite, appConfigResponse, startLegacyWebPort,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
   isDirectLoopback,
@@ -3538,12 +3538,8 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
     return staticRes ?? new Response("Claude Orchestrator Bridge", { status: 200 });
 }
 
-const server = Bun.serve({
-  port: BRIDGE_PORT,
-  // 默认只绑回环：/hook /stats /skills/rescan 无鉴权，绑 0.0.0.0 等于暴露在内网。peer 走 HTTPS
-  // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
-  hostname: process.env.BRIDGE_BIND || "127.0.0.1",
-  async fetch(req, server) {
+// 主端口与接管的旧 web 端口（bridge/legacy-web-port.ts）共用这一个处理函数：同一道控制面闸门
+async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) {
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url);
     const url0 = new URL(req.url);
@@ -3595,7 +3591,14 @@ const server = Bun.serve({
     const resp = await handleHttpRoutes(req, url);
     if (cors) for (const [k, v] of Object.entries(cors)) resp.headers.set(k, v);
     return resp;
-  },
+}
+
+const server = Bun.serve({
+  port: BRIDGE_PORT,
+  // 默认只绑回环：/hook /stats /skills/rescan 无鉴权，绑 0.0.0.0 等于暴露在内网。peer 走 HTTPS
+  // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
+  hostname: process.env.BRIDGE_BIND || "127.0.0.1",
+  fetch: bridgeFetch,
   // D5-11 兜底：fetch 里逃逸的异常（/api/v1 以外的路由、终端 API 等）回 JSON，
   // 不再是 Bun 未设 NODE_ENV 时的 67KB HTML 调试页。/api/v1 自己已在 handleApiRequest 里接住。
   error(e) {
@@ -3651,7 +3654,7 @@ const server = Bun.serve({
 });
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
-initPeerIngress(serveApiRequest);
+initPeerIngress(serveApiRequest); startLegacyWebPort(bridgeFetch); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，

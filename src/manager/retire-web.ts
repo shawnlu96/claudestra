@@ -6,12 +6,12 @@
  *   ~/.claude-orchestrator/backups/web-*.tgz 存在（= migrate-web-state 跑过）。
  * 做的事：launchctl bootout（没 load 也无妨）+ 把 plist 挪进 backups/ 并打印回滚命令。永不删 ~/.claude-orchestrator/web/。
  */
-import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import { bridgeHttpBase } from "../lib/bridge-port.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
+import { retireLegacyWebDaemon } from "../lib/legacy-web.js";
 import { LEGACY_WEB_DAEMON, legacyWebPlistPath, staticIndexExists, webStaticState } from "../lib/web-static.js";
 import { output } from "./core.js";
 
@@ -71,15 +71,7 @@ export async function cmdRetireWeb(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const uid = process.getuid?.() ?? 501;
-  // 非 0 多半是「没 load」（早就停了 / 从没装过）：目标状态一致，照常挪 plist
-  const bootedOut = spawnSync("launchctl", ["bootout", `gui/${uid}/${LEGACY_WEB_DAEMON}`], { encoding: "utf8" }).status === 0;
-  let backupPlist: string | null = null;
-  if (plan.plistExists) {
-    mkdirSync(backupDir, { recursive: true });
-    backupPlist = join(backupDir, `${LEGACY_WEB_DAEMON}.plist.${new Date().toISOString().replace(/[:.]/g, "-")}`);
-    renameSync(legacyWebPlistPath(), backupPlist);
-  }
+  const { bootedOut, plist: backupPlist } = retireLegacyWebDaemon(backupDir); // lib/legacy-web.ts（install-cli 的自动迁移也用它）
   output({
     ok: true,
     bootedOut,
