@@ -1,7 +1,8 @@
 /**
  * 回环控制路由的 manage 版（docs/design-hosted-frontend.md §9 A†）：老 web BFF 在本机直打 /relay/status、/relay/pair/new、/stats，
  * 静态前端经中继 / 局域网进来时不是回环，只能走 /api/v1 + 凭据。体与响应和控制路由完全一致（同一个函数）：
- *   GET  /api/v1/relay/status · POST /api/v1/relay/pair {agents?, terminal?, manage?, guest?} · GET /api/v1/stats
+ *   GET  /api/v1/relay/status · POST /api/v1/relay/pair {agents?, terminal?, manage?, guest?} · GET /api/v1/stats[?refresh=1]
+ * ?refresh=1 = 老 BFF 转成 POST /stats/refresh 的那条路：强制重抓账号用量（最长 ~20 s，前端给 30 s）。
  * 动态 import：relay-routes / stats-dashboard 拖着中继连接与 Discord 客户端，本地 API 其余端点族的单测不该为它们付出加载代价。
  */
 import { canManage } from "../../lib/devices.js";
@@ -16,7 +17,10 @@ export async function handleControl(req: Request, path: string, principal: Princ
   const stats = path === "/stats" && req.method === "GET";
   if (!status && !pair && !stats) return null;
   if (!canManage(principal)) return forbidden(MANAGE_MSG);
-  if (stats) return (await import("../stats-dashboard.js")).handleStatsRequest();
+  if (stats) {
+    const dash = await import("../stats-dashboard.js");
+    return new URL(req.url).searchParams.get("refresh") === "1" ? dash.handleStatsRefreshRequest() : dash.handleStatsRequest();
+  }
   const relay = await import("../relay-routes.js");
   return status ? relay.relayStatusResponse() : relay.pairNew(req);
 }
