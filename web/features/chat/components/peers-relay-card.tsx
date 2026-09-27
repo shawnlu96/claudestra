@@ -68,13 +68,15 @@ function OnlineBlock({ status }: { status: RelayStatusView }) {
     setBusy(true);
     setErr("");
     try {
-      const j = await relayPairNew<Partial<PairView> & { ok?: boolean; error?: string; link?: string }>();
-      if (!j.ok || !j.code || !(j.link || j.url)) {
+      const j = await relayPairNew<Partial<PairView> & { ok?: boolean; error?: string; link?: string | null; fragment?: string }>();
+      // link = 托管入口的 /pair#<fp>.<secret>（bridge 知道入口地址时给）；没给就用当前页面的 origin 拼——托管前端就在这个源上。
+      // 老 bridge 只有 url（子域名 /pair#<code>）
+      const link = j.link || (j.fragment ? `${window.location.origin}/pair#${j.fragment}` : j.url);
+      if (!j.ok || !j.code || !link) {
         setErr(j.error || t("配对码生成失败"));
         return;
       }
-      // link = 新前端的 /pair#<fp>.<secret>（扫码直接握手）；老 bridge 只有 url（子域名 /pair#<code>）
-      setPair({ code: j.code, display: j.display ?? j.code, url: j.link || j.url!, expiresAt: j.expiresAt ?? "" });
+      setPair({ code: j.code, display: j.display ?? j.code, url: link, expiresAt: j.expiresAt ?? "" });
     } catch {
       setErr(t("配对码生成失败")); // 网络层失败：给一句人话，细节在网络面板
     } finally {

@@ -35,7 +35,10 @@ function currentMachine() {
   });
 }
 
-/** 已读回执：POST <base>/api/v1/agents/<agent>/read（+ notify-read 清 Discord 完成 @）。base 由 fp 推（中继 /m/<fp>）或取当前机器 */
+/**
+ * 已读回执：POST <base>/api/v1/agents/<agent>/read（+ notify-read 清 Discord 完成 @）。
+ * CONTRACT: 推送 payload 若带 fp（发通知的那台机器），base 取 /m/<fp>；没带就退回 IndexedDB 里记的当前机器（直托管 base 为空）。
+ */
 async function markRead(agent, fp) {
   const cur = await currentMachine();
   const base = fp && cur && cur.fp !== fp && cur.base ? `/m/${fp}` : cur ? cur.base : fp ? `/m/${fp}` : "";
