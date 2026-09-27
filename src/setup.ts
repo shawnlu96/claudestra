@@ -14,6 +14,7 @@ import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
 import { ensureRecallHook, readClaudeSettings, writeClaudeSettings } from "./lib/session-recall.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
+import { langFromLocaleEnv } from "./lib/i18n.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 import { gateSetupAdoption } from "./lib/setup-adoption.js";
@@ -66,7 +67,7 @@ const c = {
 // ============================================================
 // 语言切换 / i18n
 // ============================================================
-// 全局 lang 变量。main() 开头第 0 步让用户选，默认中文。
+// 全局 lang 变量。main() 开头第 0 步让用户选，默认值见 lib/i18n.ts langFromLocaleEnv（CLAUDESTRA_LANG / locale 推断）。
 // 后续每个用户面对的字符串用 t(zh, en) 返回对应语言。
 let lang: "zh" | "en" = "zh";
 function t(zh: string, en: string): string {
@@ -1900,9 +1901,10 @@ async function stepPickLanguage(): Promise<void> {
   print(`  ${c.yellow}1${c.reset})  中文`);
   print(`  ${c.yellow}2${c.reset})  English`);
   print("");
+  const guess = langFromLocaleEnv();
   while (true) {
-    write(`${c.bold}Choose / 选择 [1]${c.reset}: `);
-    const answer = (await readLine()).trim() || "1";
+    write(`${c.bold}Choose / 选择 [${guess === "zh" ? 1 : 2}]${c.reset}: `);
+    const answer = (await readLine()).trim() || guess;
     if (answer === "1" || answer.toLowerCase() === "zh" || answer.toLowerCase() === "中文") {
       lang = "zh";
       break;
