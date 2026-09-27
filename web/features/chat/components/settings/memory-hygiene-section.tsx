@@ -4,7 +4,7 @@ import { useT } from "@/lib/i18n";
 import { Section } from "./section";
 import { getMemoryHygiene, postMemoryHygiene } from "@/lib/api/settings";
 
-type Hyg = { exists: boolean; enabled: boolean; freq: string | null; schedule: string | null; lastRun: string | null; nextRun: string | null };
+type Hyg = { exists: boolean; available?: boolean; enabled: boolean; freq: string | null; schedule: string | null; lastRun: string | null; nextRun: string | null };
 type HygResp = Hyg & { ok?: boolean; error?: string };
 
 /** 记忆卫生(owner 2026-08-26):mem0 定期审查的开关+频率,事实源是 cron 任务 */
@@ -48,6 +48,8 @@ export function useMemoryHygiene(open: boolean) {
 export function MemoryHygieneSection({ hygiene }: { hygiene: ReturnType<typeof useMemoryHygiene> }) {
   const t = useT();
   const { hyg, hygBusy, hygMsg, saveHyg } = hygiene;
+  // 没挂 mem0 MCP 又从没开过：整项不显示（开了也必然失败）；已经建过任务的照常显示，好让人能关掉
+  if (hyg && hyg.available === false && !hyg.exists) return null;
   return (
         <Section
           title={t("记忆卫生（mem0）")}
@@ -60,7 +62,7 @@ export function MemoryHygieneSection({ hygiene }: { hygiene: ReturnType<typeof u
               onChange={() => void saveHyg(!hyg?.enabled, hyg?.freq && hyg.freq !== "custom" ? hyg.freq : "weekly")}
             />
           }
-          desc={t("定期审查 mem0 记忆库:找出过时/矛盾/重复的记忆,出报告供处置——只报告不动手。")}
+          desc={t("定期审查 mem0 记忆库：删掉超过 14 天的进度快照、合并写入时已标记的近重复；其余过时 / 矛盾 / 重复的只出报告，由你处置。")}
         >
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-[13px]">

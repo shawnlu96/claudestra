@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 /**
  * mem0 记忆卫生(v2.20+):把「定期审查记忆库」收编成产品特性。
  *
@@ -7,7 +11,7 @@
  * cron-add/remove/toggle,与 CLI 手工管理完全等价、互不打架。
  *
  * owner 2026-08-26:「mem0 日积月累会变成粪坑」——原月度 cron 太稀,默认改周。
- * 审查是**只报告不动手**的(处置由 owner 决定),prompt 里这条红线不许改。
+ * 审查默认只报告、处置由 owner 决定,prompt 里这条红线不许改。
  * 两处例外(2026-09-06 记忆架构评估):①type=progress 且写入超过 14 天的进度快照由
  * cron 直接删(agent-mem0 转达 owner 批准)——这类条目按 owner 自己的写入纪律本就不该进
  * mem0,TTL 只是补刀;②写入护栏标记过的近重复(metadata.near_dup_of)由 cron 直接
@@ -18,6 +22,20 @@
 export const HYGIENE_JOB_NAME = "mem0-hygiene";
 
 export type HygieneFreq = "weekly" | "biweekly" | "monthly";
+
+/**
+ * 卫生 prompt 用的是 mcp__mem0__* 工具，cron 在家目录起 agent：这台机器的 Claude Code 没挂名为 mem0 的 MCP（用户级，
+ * 或家目录这个项目级）时设置页不显示这一项——别人打开只会开出一个必然失败的 cron。~/.claude.json 读不了按没挂算。
+ */
+export function mem0McpConfigured(home = homedir(), claudeJson = join(home, ".claude.json")): boolean {
+  let j: { mcpServers?: object; projects?: Record<string, { mcpServers?: object }> };
+  try {
+    j = JSON.parse(readFileSync(claudeJson, "utf8"));
+  } catch {
+    return false; // 没装过 Claude Code / 文件写到一半：两种情况都开不出能跑的卫生任务，隐藏正确
+  }
+  return [j?.mcpServers, j?.projects?.[home]?.mcpServers].some((m) => !!m && typeof m === "object" && "mem0" in m);
+}
 
 /** 预设频率 → cron 表达式(都在上午 10 点本地时间,避开夜里跑完没人看)。 */
 export const HYGIENE_FREQS: Record<HygieneFreq, { schedule: string; label: string }> = {
