@@ -441,21 +441,24 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
     const working = await localAgentWorking(channelId, evAgent);
     // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
     // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
-    // 快照:目标又忙时 deliverToLocal 会把消息原地追加回这个队列,直接遍历 q 会一直追着新追加的那条投
+    // 快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
     const due = working ? q.filter((i) => isHumanRequest(i.env)) : [...q];
     for (const item of due) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = clients.get(channelId);
       if (!fresh) break;
+      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
+      if (!heldLocalMsgs.get(channelId)?.includes(item)) continue;
       const to: RouterLocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       const d = await deliverToLocal(item.env, to);
       if (d.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
+      // 目标又忙了:deliverToLocal 押回时 hold 认出原条目还在(同一封)就不另加——原条目留着,首次入队 / 已提醒时间不重置,
+      // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份(codex 2026-09-28 复核)。等下一次触发
+      if (d.outcome.kind === "sent" && d.outcome.note === "queued") break;
       // push-back 的失效钟从真正送达起算(先于出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉)
       if (d.outcome.kind === "sent") pendingAgentCalls.touch(channelId);
-      heldLocalMsgs.remove(channelId, item); // 目标又忙时 deliverToLocal 已把它重新押到队尾
-      if (d.outcome.kind === "sent") {
-        console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
-      }
+      heldLocalMsgs.remove(channelId, item);
+      if (d.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
     }
   } finally {
     heldLocalMsgs.release(channelId);

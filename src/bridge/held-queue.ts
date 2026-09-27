@@ -40,9 +40,16 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return this;
   }
 
-  /** 追加一条并落盘，返回这个频道排队的条数。换新数组不原地 push：flush 遍历的快照不受影响 */
+  /**
+   * 追加一条并落盘，返回这个频道排队的条数。同一封（messageId + threadId 都相同；messageId 只是「前缀_毫秒」会撞）已在队里就不再加：
+   * flush 投到一半目标又忙，deliverToLocal 会把正在投的那条再 hold 一次——原条目留着，首次入队 / 提醒时间不被刷新。
+   * 换新数组不原地 push：flush 遍历的快照不受影响。
+   */
   hold(channelId: string, item: HeldItem): number {
-    const q = [...(this.get(channelId) ?? []), item];
+    const cur = this.get(channelId) ?? [];
+    const same = (i: HeldItem) => i.env.meta.messageId === item.env.meta.messageId && i.env.meta.threadId === item.env.meta.threadId;
+    if (cur.some(same)) return cur.length;
+    const q = [...cur, item];
     this.set(channelId, q);
     return q.length;
   }

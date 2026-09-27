@@ -59,6 +59,16 @@ describe("HeldQueue 落盘", () => {
     expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["一", "二"]);
   });
 
+  test("hold：同一封（messageId + threadId）再押一次不重复、不刷新入队时间；只撞 messageId 的另一封照加", () => {
+    const q = new HeldQueue(null);
+    const first = item("复核", 1000);
+    q.hold("c-me", first);
+    expect(q.hold("c-me", { ...first, heldAt: 9999 })).toBe(1); // flush 投到一半目标又忙，deliverToLocal 把同一封再押一次
+    expect(q.get("c-me")![0].heldAt).toBe(1000);
+    const sameMsgId = { ...first, env: { ...first.env, meta: { ...first.env.meta, threadId: "thr_2" } } } as HeldItem; // 同一毫秒的另一封
+    expect(q.hold("c-me", sameMsgId)).toBe(2);
+  });
+
   test("claim：同一频道同一时刻只有一个投递者，release 之后可再领", () => {
     const q = new HeldQueue(null);
     expect(q.claim("c-me")).toBe(true);

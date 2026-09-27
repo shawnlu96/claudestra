@@ -48,11 +48,12 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now()):
       const mins = Math.max(0, Math.round((now - it.heldAt) / 60_000));
       parts.push(`── ${k + 1}/${items.length} · 来自 ${from} · message_id=${it.env.meta.messageId} · 排队 ${mins} 分钟 ──\n${await d.render(it.env)}`);
     }
+    // 先 touch 再出队（和押后投递同序）：出队落盘后、touch 前崩溃，重启时回程簿会带着旧钟被当成过期扫掉
+    d.calls.touch(channelId); // 对方的请求这会儿才真正到它手上：回程失效钟从现在起算
     for (const it of items) {
       d.held.remove(channelId, it);
       d.emitIn(channelId, it.env);
     }
-    d.calls.touch(channelId); // 对方的请求这会儿才真正到它手上：回程失效钟从现在起算
     const left = (d.held.get(channelId) ?? []).filter(isAgentMsg).length;
     const head = `[📬 收件箱：取回 ${items.length} 条排队的消息${left ? `，还剩 ${left} 条，处理完再调一次 check_inbox` : ""}。答复别的 agent 用 send_to_agent。]`;
     return { result: { n: items.length, text: [head, ...parts].join("\n\n") } };

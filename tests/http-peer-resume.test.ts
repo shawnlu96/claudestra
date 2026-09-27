@@ -81,6 +81,18 @@ describe("跨机调用重启续轮询", () => {
     expect(h.held[0].meta.skipInterAgentWatchdog).toBe(true);
   });
 
+  test("发起方在线但投递失败（连接刚断）：推回进押后队列，记录照常摘掉也不丢", async () => {
+    const path = join(dir, "f.json");
+    seed(path);
+    const h = boot(path, async () => json(200, { ok: true, reply: "答案", threadId: "th1" }), {
+      getClientWs: () => fakeWs,
+      deliver: async (env) => ({ envelope: env, outcome: { kind: "error", error: new Error("ws closed") } }),
+    });
+    await sleep(60);
+    expect(h.held.map((e) => e.content)).toEqual(["答案"]);
+    expect(readBook(path)).toEqual({});
+  });
+
   test("peer 已被删：告诉发起方、摘掉记录，不轮询", async () => {
     const path = join(dir, "c.json");
     seed(path, { peerName: "gone" });
