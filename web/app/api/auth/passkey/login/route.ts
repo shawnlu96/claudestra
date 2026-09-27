@@ -1,5 +1,6 @@
 export const runtime = "nodejs";
 
+import { relayHomeCookie } from "@/lib/relay-home-cookie";
 import { NextResponse } from "next/server";
 import { createSession, sessionCookie, checkRateLimit } from "@/lib/services/auth.service";
 import { checkLockout, recordFailure, clearFailures } from "@/lib/services/auth-hardening";
@@ -68,6 +69,8 @@ export async function POST(request: Request) {
     const session = createSession(process.env.USER || "claudestra");
     const res = NextResponse.json({ data: { username: session.username, via: r.credName } });
     res.cookies.set(sessionCookie(session.id));
+    const home = relayHomeCookie(request.headers); // 经中继登录的：记住「我的 Claudestra 在哪」，邀请链接才能直达
+    if (home) res.cookies.set(home);
     return res;
   }
 

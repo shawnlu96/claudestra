@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { checkRateLimit, createSession, sessionCookie } from "@/lib/services/auth.service";
 import { BRIDGE } from "@/lib/chat/bridge-api";
 import { requestClientIp } from "@/lib/client-ip";
+import { relayHomeCookie } from "@/lib/relay-home-cookie";
 
 /**
  * 配对码登录（公开路由，guard PUBLIC_ROUTES 已登记）：`claudestra pair` 在这台机器上生成的一次性短码，
@@ -11,9 +12,6 @@ import { requestClientIp } from "@/lib/client-ip";
  * 短码的真伪、一次性、尝试次数都由 bridge 的回环控制路由判（src/bridge/relay-pairing.ts），这里只做
  * 每 IP 限流 + 发会话：bridge 不在跑就配不了对，和密码登录依赖本机 SSH 是一个道理。
  */
-const HOME_COOKIE = "cstra_home";
-const HOME_COOKIE_DAYS = 365;
-
 export async function POST(request: Request) {
   const j = (await request.json().catch(() => ({}))) as { code?: unknown }; // 不是 JSON 就当没带 code，下面按 400 拒
   const code = typeof j.code === "string" ? j.code.trim() : "";
@@ -43,16 +41,7 @@ export async function POST(request: Request) {
   const session = createSession(body.username);
   const res = NextResponse.json({ data: { username: body.username } });
   res.cookies.set(sessionCookie(session.id));
-  // 经中继进来的：在中继的父域记一个只含 slug 的 cookie，中继落地页 /i 靠它把邀请送回这台机器
-  // （docs/relay/protocol.md §6）。Lax 才会随点链接的顶层跳转一起发；Strict 会被跨站导航丢掉。
-  const base = request.headers.get("x-claudestra-relay-base") || "";
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "";
-  if (base && host.toLowerCase().endsWith(`.${base.toLowerCase()}`)) {
-    const slug = host.slice(0, host.length - base.length - 1);
-    res.cookies.set({
-      name: HOME_COOKIE, value: slug, domain: base, path: "/", secure: true, sameSite: "lax", httpOnly: true,
-      maxAge: HOME_COOKIE_DAYS * 24 * 3600,
-    });
-  }
+  const home = relayHomeCookie(request.headers); // 经中继进来的：记住「我的 Claudestra 在哪」，邀请链接才能直达
+  if (home) res.cookies.set(home);
   return res;
 }
