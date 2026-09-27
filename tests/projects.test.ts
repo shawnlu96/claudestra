@@ -68,6 +68,17 @@ describe("addDirIfUncovered（create 显式 --project 时把目录记进去）",
     expect(addDirIfUncovered(p, HOME)).toBe(false);
     expect(p.dirs).toHaveLength(2);
   });
+
+  test("仓库外的链接 worktree 不记（用完即删，记了留死路径）；仓内子目录照记", () => {
+    const p = proj("claudestra", ["/r/claude-orchestrator"]);
+    const other = proj("other", ["/r/other"]);
+    const mainOf = (d: string) => (d.startsWith("/private/tmp/wt-") || d.startsWith("/r/claude-orchestrator") ? "/r/claude-orchestrator" : null);
+    expect(addDirIfUncovered(p, "/private/tmp/wt-peer", mainOf)).toBe(false);
+    expect(addDirIfUncovered(other, "/private/tmp/wt-peer", mainOf)).toBe(false); // 指给别的 project 也不记
+    expect(addDirIfUncovered(other, "/r/claude-orchestrator/web", mainOf)).toBe(true); // 仓内子目录不是 worktree
+    expect(addDirIfUncovered(p, "/r/other-repo", mainOf)).toBe(true);
+    expect(p.dirs).toEqual(["/r/claude-orchestrator", "/r/other-repo"]);
+  });
 });
 
 describe("resolveProjectForDir", () => {
