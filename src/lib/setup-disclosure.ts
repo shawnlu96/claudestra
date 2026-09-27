@@ -7,13 +7,14 @@ import { homedir } from "node:os";
 import { STATE_DIR } from "./paths.js";
 import type { SetupUi } from "./setup-remote-access.js";
 
-/** 选前端时的两行：Web 在本机不经第三方，手机怎么连下一步单独选；Discord 的对话内容会存在 Discord 上 */
+/** 选前端时的两行：Web 的浏览器↔bridge 这段不经第三方，手机怎么连下一步单独选；Discord 的对话内容会存在 Discord 上 */
 export function frontendChoiceLines(t: SetupUi["t"]): { web: string; discord: string } {
   return {
     web: t(
-      "浏览器 / 可以装到手机主屏的 PWA，由本机 bridge 直接托管；在这台电脑上开浏览器就能用，不经过任何第三方。手机怎么连，下一步单独选（中继 / Tailscale / 局域网 / 自己的域名）",
-      "browser / installable PWA served by the bridge on this machine; a browser here works with no third party. How your phone reaches it is the " +
-        "next step (relay / Tailscale / LAN / your own domain)",
+      "浏览器 / 可以装到手机主屏的 PWA，由本机 bridge 直接托管；在这台电脑上开浏览器就能用，浏览器到 bridge 这段不经过第三方（模型调用照常发给各家模型服务）。" +
+        "手机怎么连，下一步单独选（中继 / Tailscale / 局域网 / 自己的域名）",
+      "browser / installable PWA served by the bridge on this machine; a browser here reaches the bridge with no third party in between " +
+        "(model calls still go to the model providers). How your phone reaches it is the next step (relay / Tailscale / LAN / your own domain)",
     ),
     discord: t(
       "在 Discord 里和 agent 对话。要自己建一个 bot（多 5 步），所有对话内容都会经过并保存在 Discord 的服务器上",
@@ -36,11 +37,16 @@ export function printMachineChanges(ui: SetupUi, mcpName: string): void {
   sub(t("记下你刚才同意的 bypass 模式", "records the bypass-mode consent you just gave"));
   item(t(`Claude Code 用户级 MCP：注册 ${mcpName}`, `Claude Code user-level MCP: registers ${mcpName}`));
   item(t("~/Library/LaunchAgents：bridge / launcher / cron 三个开机自启服务", "~/Library/LaunchAgents: three autostart services (bridge / launcher / cron)"));
-  item(t("~/.local/bin/claudestra 命令；登录 shell 找不到它时在 profile（zsh 是 ~/.zprofile）末尾补一行 PATH", "the ~/.local/bin/claudestra command; if your login shell can't find it, one PATH line is appended to its profile (~/.zprofile for zsh)"));
-  item(t("~/.claude/skills：链接仓库自带的 save-clear / save-compact（已有同名的不覆盖）", "~/.claude/skills: links the bundled save-clear / save-compact skills (existing ones with the same name are left alone)"));
+  item(t("~/.local/bin/claudestra 命令，外加 ~/.bun/bin/claudestra 软链；登录 shell 找不到它时在 profile（zsh 是 ~/.zprofile）末尾补一行 PATH",
+         "the ~/.local/bin/claudestra command plus a ~/.bun/bin/claudestra symlink; if your login shell can't find it, one PATH line is appended to its profile (~/.zprofile for zsh)"));
+  item(t("~/.claude/skills：链接仓库自带的技能（目前是 save-clear / save-compact）；同名的目录和指向别处的软链都不动",
+         "~/.claude/skills: links the bundled skills (currently save-clear / save-compact); same-name directories and symlinks pointing elsewhere are left alone"));
+  item(t("从旧版本升上来时：停掉旧的 pm2 服务、卸掉旧的 LaunchAgent、迁移旧 Web 服务的数据（先备份）；每次安装都会重载三个服务",
+         "when upgrading from an older version: stops old pm2 services, unloads old LaunchAgents and migrates the old web service's data (backed up first); every install reloads the three services"));
   item(t("iTerm 偏好 TmuxDashboardLimit（装了 iTerm 才改）", "iTerm preference TmuxDashboardLimit (only if iTerm is installed)"));
   const state = STATE_DIR.replace(homedir(), "~");
-  item(t(`运行时数据都在 ${state}（会话归档不加密）`, `runtime data lives in ${state} (session archives are not encrypted)`));
+  item(t(`Claudestra 自己的状态与会话归档在 ${state}（归档不加密；各 runtime 的原始会话记录仍在它们自己的目录）`,
+         `Claudestra's own state and session archive live in ${state} (the archive is not encrypted; each runtime keeps its raw session logs in its own directory)`));
   ui.hint(t("卸载：SETUP.md 的「卸载」一节", "To uninstall: the Uninstalling section of SETUP.md"));
 }
 
@@ -49,8 +55,8 @@ export function printBypassExtras(ui: SetupUi): void {
   const { t } = ui;
   ui.print(t("还有两件事：", "Two more things:"));
   ui.print(t(
-    "  ① 每一台配对过的手机或浏览器，都等于这台电脑的一把 shell 钥匙。丢了设备就去网页「设备」面板撤销。",
-    "  ① Every paired phone or browser is effectively a shell key to this machine. If a device is lost, revoke it in the web client's Devices panel.",
+    "  ① 按默认全部权限配对的每一台手机或浏览器，都等于这台电脑的一把 shell 钥匙。丢了设备就去网页「设备」面板撤销。",
+    "  ① Every phone or browser paired with the default full grant is effectively a shell key to this machine. If one is lost, revoke it in the web client's Devices panel.",
   ));
   ui.print(t(
     "  ② Claudestra 依赖 Claude Code 还在研究预览阶段的 Channels 能力，Claude Code 升级后可能暂时用不了，我们会跟着修。",

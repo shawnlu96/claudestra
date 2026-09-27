@@ -126,9 +126,9 @@ export async function chooseRemoteAccess(ui: SetupUi, opts: ChooseOpts): Promise
 function printChoices(ui: SetupUi): void {
   const { t, c } = ui;
   ui.print(t(
-    "这台电脑的浏览器已经能用了。要在手机或别的电脑上用，从下面选一条。中继不是必选；这几条路可以同时开着，以后重跑 bun run setup 随时换。",
-    "A browser on this machine already works. To use Claudestra from your phone or another computer, pick a path below. The relay is optional; " +
-      "paths can run side by side, and you can switch any time by rerunning `bun run setup`.",
+    "装完后在这台电脑上开浏览器就能用。要在手机或别的电脑上用，从下面选一条。中继不是必选；这几条路可以同时开着，以后重跑 bun run setup 随时换。",
+    "Once installed, a browser on this machine just works. To use Claudestra from your phone or another computer, pick a path below. " +
+      "The relay is optional; paths can run side by side, and you can switch any time by rerunning `bun run setup`.",
   ));
   ui.br();
   ui.print(`  ${c.bold}1${c.reset}  ${t(
@@ -148,8 +148,10 @@ function printChoices(ui: SetupUi): void {
       "HTTPS. Cost: an app on the phone; with HTTPS certificates the machine name lands in public Certificate Transparency logs.",
   )}`);
   ui.print(`  ${c.bold}3${c.reset}  ${t(
-    "只在同一 Wi-Fi 用（临时试用）—— bridge 要监听所有网卡。明文 HTTP，同一网络的人能看到流量；推送、语音、PWA 用不了，出门就断。",
-    "Same Wi-Fi only (quick trial) — the bridge must listen on all interfaces. Plain HTTP, visible to anyone on the network; no push, voice or PWA; stops working once you leave.",
+    "只在同一网络用（临时试用）—— bridge 要监听所有网卡。明文 HTTP，同一网络的人能看到流量；扫码配对、推送、语音、PWA 都用不了" +
+      "（在配对页手输短码，再在这台电脑或已配对设备上批准），出门就断。",
+    "Same network only (quick trial) — the bridge must listen on all interfaces. Plain HTTP, visible to anyone on the network; no QR pairing, " +
+      "push, voice or PWA (type the short code on the pairing page, then approve it on this machine or a paired device); stops working once you leave.",
   )}`);
   ui.print(`  ${c.bold}4${c.reset}  ${t(
     "我有自己的域名 / 反向代理（高级）—— 向导不自动配，给你文档和配对命令。",
@@ -163,9 +165,11 @@ async function chooseLan(ui: SetupUi, opts: ChooseOpts): Promise<Extract<RemoteA
   const { t } = ui;
   if (bindsAllInterfaces(opts.existing.BRIDGE_BIND)) return { kind: "lan", url: opts.lanUrl };
   ui.hint(t(
-    "bridge 现在只监听本机（127.0.0.1）。改成监听所有网卡后，同一网络的任何设备都能连到它的端口（仍要配对才能用，但流量是明文）。咖啡馆、公司这类公共网络不要开。",
-    "The bridge listens on this machine only (127.0.0.1). Listening on all interfaces lets any device on the network reach its port (pairing is " +
-      "still required, but traffic is plain text). Don't do this on public networks such as cafés or offices.",
+    "bridge 现在只监听本机（127.0.0.1）。改成监听所有网卡（0.0.0.0 = 这台电脑所有的 IPv4 接口，不只是 Wi-Fi）后，能连到这些接口的设备都能访问它的端口：" +
+      "网页和配对入口是公开的，其余接口要配对后才能用，但流量是明文，登录凭据可能被同网络的人截获复用。咖啡馆、公司这类公共网络不要开。",
+    "The bridge listens on this machine only (127.0.0.1). Listening on all interfaces (0.0.0.0 = every IPv4 interface, not just Wi-Fi) lets any " +
+      "device that can reach them hit its port: the web page and pairing entry are public, the rest needs pairing, but traffic is plain text and " +
+      "a login cookie can be sniffed and replayed. Don't do this on public networks such as cafés or offices.",
   ));
   if (await ui.confirm(t("让 bridge 监听所有网卡（.env 写 BRIDGE_BIND=0.0.0.0）？", "Let the bridge listen on all interfaces (.env BRIDGE_BIND=0.0.0.0)?"), false)) {
     return { kind: "lan", url: opts.lanUrl, bind: "0.0.0.0" };
@@ -174,13 +178,22 @@ async function chooseLan(ui: SetupUi, opts: ChooseOpts): Promise<Extract<RemoteA
   return { kind: "lan" };
 }
 
-/** 选 4：只指路。反代要把 HTTPS 转到 bridge 端口，并带 X-Forwarded-Proto / -Host（bridge 按它们判同源） */
+/**
+ * 选 4：只指路。反代必须设置（覆盖）X-Forwarded-For：bridge 把「回环 socket 且没有 XFF」认成本机（可一键全权配对、
+ * 免控制面鉴权），nginx 只配 Proto / Host 时公网请求就成了「本机」。Proto / Host 用来判同源。
+ */
 function chooseCustom(ui: SetupUi): Extract<RemoteAccessChoice, { kind: "custom" }> {
   const { t, c } = ui;
   ui.print(t(
-    `照 ${c.cyan}web/SETUP.md${c.reset} 的「Public reverse proxy」和「Custom domain」两节，用 Caddy / nginx 加证书，把 HTTPS 转到 bridge 端口（带上 X-Forwarded-Proto 和 X-Forwarded-Host）。`,
-    `Follow the "Public reverse proxy" and "Custom domain" sections of ${c.cyan}web/SETUP.md${c.reset}: Caddy or nginx with a certificate, ` +
-      `forwarding HTTPS to the bridge port (with X-Forwarded-Proto and X-Forwarded-Host).`,
+    `照 ${c.cyan}web/SETUP.md${c.reset} 的「Public reverse proxy」和「Custom domain」两节，用 Caddy / nginx 加证书，把 HTTPS 转到 bridge 端口。`,
+    `Follow the "Public reverse proxy" and "Custom domain" sections of ${c.cyan}web/SETUP.md${c.reset}: Caddy or nginx with a certificate, forwarding HTTPS to the bridge port.`,
+  ));
+  ui.warn(t(
+    "反代必须设置（覆盖掉客户端自带的）X-Forwarded-For，再带上 X-Forwarded-Proto 和 X-Forwarded-Host。漏了 X-Forwarded-For，外网请求会被 bridge 当成「本机」，" +
+      "能一键拿到全部权限。Caddy 默认会设；nginx 要写 proxy_set_header X-Forwarded-For $remote_addr;",
+    "The proxy must set (overwriting any client value) X-Forwarded-For, plus X-Forwarded-Proto and X-Forwarded-Host. Without X-Forwarded-For, " +
+      "internet requests look like this machine to the bridge and can pair with full access in one click. Caddy sets it by default; " +
+      "nginx needs proxy_set_header X-Forwarded-For $remote_addr;",
   ));
   ui.hint(t(
     "对公网开放时必须加限流或 IP 白名单。配好后用 claudestra pair --url https://<你的域名> 出配对二维码。",
@@ -273,14 +286,21 @@ export async function confirmRelayLink(ui: SetupUi, choice: { relayUrl: string; 
     .catch(() => null); // 签不出配对码不是安装失败：下面提示用 claudestra pair 再拿
   const link = pair?.link ?? pair?.url;
   if (!pair?.ok || !link) {
-    ui.hint(t("配对码稍后用 claudestra pair 拿（手机扫码即登录）。", "Get a pairing code later with `claudestra pair` (scan to sign in)."));
+    ui.hint(t("配对码稍后用 claudestra pair 拿。", "Get a pairing code later with `claudestra pair`."));
     return v.url;
   }
   ui.br();
-  ui.print(t("手机相机扫这个码，打开就配对好了（10 分钟内有效，只能用一次）：", "Scan this with the phone camera — it opens already paired (valid 10 minutes, single use):"));
+  // 只有新版 bridge 给的 link（#指纹.密钥）扫了才直接配好；旧 bridge 只有子域名 #短码，还要电脑批准
+  ui.print(pair.link
+    ? t("手机相机扫这个码，打开就配对好了（10 分钟内有效，只能用一次）：", "Scan this with the phone camera — it opens already paired (valid 10 minutes, single use):")
+    : t("手机相机扫这个码（旧版入口：打开后还要在这台电脑上批准；10 分钟内有效）：", "Scan this with the phone camera (legacy entry: approve it on this machine afterwards; valid 10 minutes):"));
   await printQr(ui, link);
   ui.print(`  ${t("链接", "Link")}: ${c.cyan}${link}${c.reset}`);
-  ui.print(`  ${t("短码", "Code")}: ${c.bold}${pair.display}${c.reset}  ${c.dim}${t(`（在 ${relayHttpsBase(choice.relayUrl)} 首页输入也行）`, `(or type it at ${relayHttpsBase(choice.relayUrl)})`)}${c.reset}`);
+  const home = relayEntryUrl(st, choice.relayUrl);
+  ui.print(`  ${t("短码", "Code")}: ${c.bold}${pair.display}${c.reset}  ${c.dim}${t(
+    `（也可以在 ${home} 首页手输；手输的还要在这台电脑或已配对设备上批准）`,
+    `(or type it at ${home}; a typed code must then be approved on this machine or a paired device)`,
+  )}${c.reset}`);
   ui.hint(t(
     "扫码的这台设备会拥有这台电脑的全部权限（全部 agent、终端、管理）；丢了就去网页「设备」面板撤销。以后给别的设备配对：claudestra pair。",
     "The device that scans gets full access to this machine (all agents, terminal, management); if it's lost, revoke it in the web client's " +

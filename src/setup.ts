@@ -517,7 +517,7 @@ async function checkClaudeAccount(): Promise<void> {
     process.exit(1);
   }
   while (p.auth && !p.auth.loggedIn) {
-    warn(t("Claude Code 还没登录：不登录的话大总管和所有 agent 都起不来。", "Claude Code isn't signed in; the master and every agent need it."));
+    warn(t("Claude Code 还没登录：不登录的话大总管和 Claude Code 的 agent 都起不来。", "Claude Code isn't signed in; the master and every Claude Code agent need it."));
     hint(t("新开一个终端跑 claude auth login，登好后回来按回车；输入 s 先跳过。", "Open another terminal and run `claude auth login`, then press ENTER here; type s to skip for now."));
     if ((await prompt(t("登好了吗", "Signed in?"), "")).trim().toLowerCase() === "s") {
       claudeLoginSkipped = true;

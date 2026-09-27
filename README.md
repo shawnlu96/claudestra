@@ -295,14 +295,17 @@ boundary: it prefix-matches command strings, so `/bin/rm -rf`, `rm -fr`,
 **Network exposure.** The Bridge binds `127.0.0.1` by default and its WebSocket
 control plane refuses cross-origin upgrades, so a random web page you visit cannot
 drive it. Setting `BRIDGE_BIND=0.0.0.0` (the setup wizard's "same Wi-Fi" option)
-opens the port to your network: the web API still requires a paired device and the
-raw control routes refuse non-loopback callers unless `BRIDGE_CONTROL_TOKEN` is set,
-but the traffic is plain HTTP. For access from outside, use the relay, Tailscale, or
+opens the port on every interface: the web page and pairing entry points are public,
+the rest of the API requires a paired device, and the raw control routes refuse
+non-loopback callers unless they carry `BRIDGE_CONTROL_TOKEN` — but the traffic is
+plain HTTP, so a login cookie can be sniffed on the same network. For access from outside, use the relay, Tailscale, or
 an HTTPS reverse proxy; never forward the port to the internet directly.
 
-**Paired devices.** Every paired phone or browser is a shell key to this machine
-(unless it was paired as a guest). Revoke lost devices in the web client's Devices
-panel.
+**Paired devices.** A device paired with the default full grant is a shell key to
+this machine. Restricted devices (fewer sessions, no terminal, guest) are limited in
+what the product lets them do, but the agents they can talk to still have this
+machine's tools, so only pair devices you trust. Revoke lost devices in the web
+client's Devices panel.
 
 **The relay.** The relay is the default way for phones to reach the machine, and it
 is optional. It terminates HTTPS and serves the web app's scripts, so whoever runs it
