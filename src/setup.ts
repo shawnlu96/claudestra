@@ -12,7 +12,7 @@ import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
 import { readFile, writeFile, access, chmod, mkdir } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
 import { resolve } from "path";
-import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./lib/session-recall.js";
+import { ensureRecallHook, readClaudeSettings, writeClaudeSettings } from "./lib/session-recall.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
@@ -989,8 +989,8 @@ async function registerHooks(hookCmd: string, recallCmd?: string): Promise<void>
     }
     settings.hooks[event] = existing;
   }
-  // v2.21.5+ SessionStart 记忆召回(本机有 ~/mem0-mcp/recall.py 才挂;lib/session-recall.ts)
-  if (recallCmd && recallAvailable()) ensureRecallHook(settings, recallCmd);
+  // SessionStart:HANDOFF 注入 + 有 mem0 时的召回(lib/session-recall.ts;没有 recall.py 时 hook 自己跳过那一段)
+  if (recallCmd) ensureRecallHook(settings, recallCmd);
 
   await writeClaudeSettings(settingsPath, settings);
 }

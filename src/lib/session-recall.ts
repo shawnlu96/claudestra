@@ -10,8 +10,8 @@
  *
  * 这个模块是纯逻辑(路径推导 + settings.json 合并),hook 本体在
  * src/hooks/recall-hook.ts;注册走 setup.ts / install-cli / `manager install-hooks`,
- * 三处共用这里的 ensureRecallHook,幂等。recall.py 不存在的机器一律跳过——
- * Claudestra 要发给别人用,mem0 是 owner 自己的设施,不能成为硬依赖。
+ * 三处共用这里的 ensureRecallHook,幂等。hook 无条件注册(HANDOFF 人人都要);recall.py 不存在的
+ * 机器只是没有 mem0 那一段——Claudestra 要发给别人用,mem0 是 owner 自己的设施,不能成为硬依赖。
  */
 import { writeJsonAtomic } from "./state-file.js";
 import { existsSync } from "fs";
@@ -36,7 +36,7 @@ export function recallPythonPath(home = homedir()): string {
   return existsSync(venv) ? venv : "python3";
 }
 
-/** 这台机器有没有装 mem0 召回 —— 没有就不注册 hook、doctor 也不报 warn。 */
+/** 这台机器有没有装 mem0 召回 —— 没有时 hook 只注入 HANDOFF,doctor 的说明跟着变。 */
 export function recallAvailable(home = homedir()): boolean {
   return existsSync(recallScriptPath(home));
 }

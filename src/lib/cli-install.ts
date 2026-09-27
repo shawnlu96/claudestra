@@ -42,7 +42,7 @@ import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { resolveBunPath } from "./bun-path.js";
-import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./session-recall.js";
+import { ensureRecallHook, readClaudeSettings, writeClaudeSettings } from "./session-recall.js";
 import { installRepoSkills } from "./skills-install.js";
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
@@ -118,8 +118,8 @@ export interface InstallCliResult {
   removedOldAutostartWrapper: boolean;
   /** Claude Code 的 ~/.claude/settings.json 里 typing-hook command 是否被迁移成 bun 绝对路径 */
   migratedHookCommand: boolean;
-  /** v2.21.5+ SessionStart 记忆召回 hook:installed=本次写入 / present=早就有 / skipped=本机没有 ~/mem0-mcp/recall.py */
-  recallHook?: "installed" | "present" | "skipped";
+  /** SessionStart hook(HANDOFF 注入 + 有 mem0 时的召回):installed=本次写入 / present=早就有 */
+  recallHook?: "installed" | "present";
   /** iTerm 的 TmuxDashboardLimit 是否被调高（默认 10 → 200），从 oldValue → 200。null = iTerm 没装跳过；undefined = 已经 ≥ 200 无需改 */
   bumpedTmuxDashboardLimit?: { from: number; to: number; needsITermRestart?: boolean } | null;
   /** ~/.claude/settings.json permissions.allow 加进去的 mcp__<server>__* wildcard 规则（已存在的不重加） */
@@ -560,13 +560,12 @@ async function stopLegacyPm2Daemons(): Promise<string[]> {
  * 替换为 bun **绝对路径**，幂等（已经是绝对路径就 no-op）。
  */
 /**
- * v2.21.5+ SessionStart 记忆召回 hook(lib/session-recall.ts):本机装了 ~/mem0-mcp/recall.py
- * 才注册,幂等——已有就只校正命令/matcher/timeout。setup / install-cli / update /
- * `manager install-hooks` 四处共用。
+ * SessionStart hook(lib/session-recall.ts):开场注入 HANDOFF.md,本机有 ~/mem0-mcp/recall.py 时再加 mem0 召回。
+ * 无条件注册——只在有 mem0 的机器上挂,别人的 HANDOFF 写了也永远没人读;hook 自己在没有 recall.py 时跳过那一段。
+ * 幂等——已有就只校正命令/matcher/timeout。setup / install-cli / update / `manager install-hooks` 四处共用。
  */
-export async function ensureRecallHookInstalled(bunPath: string, repoRoot: string): Promise<{ status: "installed" | "present" | "skipped"; command: string }> {
+export async function ensureRecallHookInstalled(bunPath: string, repoRoot: string): Promise<{ status: "installed" | "present"; command: string }> {
   const command = `${bunPath} ${resolve(repoRoot)}/src/hooks/recall-hook.ts`;
-  if (!recallAvailable()) return { status: "skipped", command };
   const settingsPath = `${homedir()}/.claude/settings.json`;
   // 解析失败会抛——宁可不挂 hook,也不能把 owner 的 settings.json 覆写成只剩我们一条
   const settings = await readClaudeSettings(settingsPath);
