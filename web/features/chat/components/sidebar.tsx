@@ -237,8 +237,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       >
         <div className="flex items-center pb-2.5">
           <span className="font-semibold">{t("会话")}</span>
-          {/* 多机切换（中继模式 ≥2 台才出现）；切换后整页重载，store 从新机器重新起 */}
-          <span className="ml-auto"><MachineSwitcher onSwitched={() => window.location.reload()} /></span>
+          {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
+          <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
           {/* v2.21+ 项目管理入口 */}
           <button
             className="flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
