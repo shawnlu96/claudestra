@@ -103,8 +103,11 @@ describe("POST /api/v1/devices/legacy-session", () => {
 
 describe("旧 web 端口由 bridge 接管", () => {
   test("没配 / 配错端口不监听；配了：请求交给同一个处理函数（带 server），WebSocket 升级一律 426", async () => {
-    const handler = async (req: Request, server: { requestIP(r: Request): { address: string } | null }) =>
-      new Response(JSON.stringify({ path: new URL(req.url).pathname, ip: server.requestIP(req)?.address ?? null }));
+    // 与 bridgeFetch 一样：每个请求都先试 server.upgrade()（没配 websocket 的 listener 上 Bun 会抛，接管端口必须兜住）
+    const handler = async (req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) => {
+      if (server.upgrade(req)) return undefined;
+      return new Response(JSON.stringify({ path: new URL(req.url).pathname, ip: server.requestIP(req)?.address ?? null }));
+    };
     expect(startLegacyWebPort(handler, {})).toBeNull();
     expect(startLegacyWebPort(handler, { BRIDGE_LEGACY_WEB_PORT: "abc" })).toBeNull();
     const port = 20000 + Math.floor(Math.random() * 20000);

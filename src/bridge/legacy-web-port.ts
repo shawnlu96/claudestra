@@ -17,7 +17,9 @@ export function startLegacyWebPort(handler: Handler, env: Record<string, string 
       hostname,
       fetch: async (req, server) => {
         if (req.headers.get("upgrade")) return new Response("websocket is not available on the legacy web port", { status: 426 });
-        return (await handler(req, server)) ?? new Response("upgrade refused", { status: 426 });
+        // 处理函数对每个请求都会先试 server.upgrade()；这个 listener 没配 websocket，Bun 会直接抛——升级前面已拒，这里恒为 false
+        const view = { requestIP: (r: Request) => server.requestIP(r), upgrade: () => false };
+        return (await handler(req, view)) ?? new Response("upgrade refused", { status: 426 });
       },
     });
     console.log(`🌐 旧 web 端口 ${hostname}:${port} 由 bridge 接管（前端静态包 + /api/v1，与主端口同一道闸门）`);
