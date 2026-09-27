@@ -36,19 +36,26 @@ describe("HeldQueue 落盘", () => {
     expect(back[0].env.meta.messageId).toBe("m-复核 1/7");
   });
 
-  test("detach 先不落盘，persist 之后才从文件里消失；投递失败 restore 回队首", () => {
+  test("投递中别处 set 触发整表落盘，未投出的那条仍在盘上；投出后 remove 才消失", () => {
     const p = join(dir, "b.json");
     const q = new HeldQueue(p);
     const a = item("a", 1), b = item("b", 2);
     q.set("c-me", [a, b]);
-    q.detach("c-me", a);
-    expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["a", "b"]); // 投递中途崩溃：盘上还有
-    q.persist();
-    expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["b"]);
-    q.restore("c-me", a);
+    q.set("c-other", [item("x", 3)]); // 投 a 的 await 期间别的频道入队
     expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["a", "b"]);
-    q.delete("c-me");
-    expect(new HeldQueue(p).size).toBe(0);
+    q.remove("c-me", a);
+    expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["b"]);
+    q.remove("c-me", b);
+    expect(new HeldQueue(p).has("c-me")).toBe(false);
+  });
+
+  test("claim：同一频道同一时刻只有一个投递者，release 之后可再领", () => {
+    const q = new HeldQueue(null);
+    expect(q.claim("c-me")).toBe(true);
+    expect(q.claim("c-me")).toBe(false);
+    expect(q.claim("c-other")).toBe(true);
+    q.release("c-me");
+    expect(q.claim("c-me")).toBe(true);
   });
 
   test("文件坏了：不恢复、不抛", () => {
