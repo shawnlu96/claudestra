@@ -15,8 +15,8 @@ import type { ApiError } from "@/lib/api/client";
  * TopBar 的会话级模型/effort 徽章 + 快速切换器（owner 2026-07-23）。
  *
  * 徽章常显当前值（`Fable 5 · xhigh`，数据来自 agents 列表的兜底链:jsonl 实测 →
- * registry → 全局默认）；点开下拉面板直接点选切换——走 BFF /api/agents/
- * claude-settings → Bridge 注入原生 /model、/effort（与 TUI 手打同一路径）。
+ * registry → 全局默认）；点开下拉面板直接点选切换——直打 bridge /api/v1/agents/:name/
+ * claude-settings → 注入原生 /model、/effort（与 TUI 手打同一路径）。
  * 回合进行中 Bridge 409，就地提示不打断。切换成功 refreshAgents 拉回真值。
  */
 export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {

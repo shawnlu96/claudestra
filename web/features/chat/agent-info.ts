@@ -10,6 +10,7 @@ import { apiAgentName } from "@/lib/chat/agents";
 export interface AgentInfo {
   name: string;
   displayName: string | null;
+  label: string | null;
   purpose: string;
   cwd: string | null;
   status: string | null;
@@ -64,6 +65,10 @@ async function call<T>(path: string, init?: ApiInit): Promise<Res<T>> {
 
 export function fetchAgentInfo(name: string): Promise<Res<{ agent: AgentInfo }>> {
   return call(`/agents/${encodeURIComponent(apiAgentName(name))}/info`);
+}
+
+export function setAgentLabel(name: string, label: string): Promise<Res<{ label: string | null }>> {
+  return call(`/agents/${encodeURIComponent(apiAgentName(name))}/label`, { method: "POST", json: { label } });
 }
 
 /** 关闭且正在共享时后端要 confirm=会话名，否则回 409 needConfirm（前端据此弹输入确认框）。

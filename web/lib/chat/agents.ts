@@ -53,6 +53,9 @@ export interface AgentSession {
   unread?: number;
   /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
   external?: boolean;
+  /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
+  label?: string | null;
+  sharedPeers?: number;
   updateHint?: UpdateHint | null;
 }
 
@@ -75,6 +78,9 @@ interface ApiAgent {
   archived?: boolean;
   /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
   external?: boolean;
+  /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
+  label?: string | null;
+  sharedPeers?: number;
   updateHint?: UpdateHint | null;
 }
 

@@ -1,4 +1,38 @@
-import { loadRegistry, saveRegistry, output } from "./core.js";
+import { loadRegistry, saveRegistry, output, type Registry } from "./core.js";
+
+/** 按裸名 / 带前缀名找 registry 条目；找不到就 output 错误并返回 null（两个命令共用） */
+async function findAgent(bare: string): Promise<{ reg: Registry; key: string } | null> {
+  const reg = await loadRegistry();
+  const key = reg.agents[`agent-${bare}`] ? `agent-${bare}` : reg.agents[bare] ? bare : null;
+  if (!key) output({ ok: false, error: `agent "${bare}" 不存在` });
+  return key ? { reg, key } : null;
+}
+
+/** `label <agent> [text]`：设 / 清「显示名」（registry label，owner 2026-09-27）。空文本 = 清除；≤40 字符，去首尾空白。 */
+export async function cmdAgentLabel(name: string, text: string) {
+  const bare = name.replace(/^agent-/, "");
+  if (!bare) {
+    output({ ok: false, error: "label <agent> [text]" });
+    return;
+  }
+  const label = text.trim();
+  if (label.length > 40) {
+    output({ ok: false, error: "显示名最多 40 个字符" });
+    return;
+  }
+  // 控制字符 / 方向控制符（RLO 之类）会让侧栏里的名字看起来像别的会话
+  if (/[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/.test(label)) {
+    output({ ok: false, error: "显示名不能含控制字符或方向控制符" });
+    return;
+  }
+  const hit = await findAgent(bare);
+  if (!hit) return;
+  const { reg, key } = hit;
+  if (label) reg.agents[key].label = label;
+  else delete reg.agents[key].label;
+  await saveRegistry(reg);
+  output({ ok: true, agent: bare, label: label || null });
+}
 
 /**
  * `external <agent> on|off`：切换 registry 的 external 闸门（owner 2026-09-27，之前只能在 create 时带 --external）。
@@ -15,12 +49,9 @@ export async function cmdAgentExternal(name: string, mode: string) {
     output({ ok: false, error: "大总管不可标记 external（永不共享给 peer）" });
     return;
   }
-  const reg = await loadRegistry();
-  const key = reg.agents[`agent-${bare}`] ? `agent-${bare}` : reg.agents[bare] ? bare : null;
-  if (!key) {
-    output({ ok: false, error: `agent "${bare}" 不存在` });
-    return;
-  }
+  const hit = await findAgent(bare);
+  if (!hit) return;
+  const { reg, key } = hit;
   const on = mode === "on";
   reg.agents[key].external = on;
   await saveRegistry(reg);
