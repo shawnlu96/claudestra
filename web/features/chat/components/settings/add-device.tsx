@@ -7,7 +7,7 @@ import { PairCodeCard } from "../pair-share";
 
 /**
  * 设置 · 设备「添加设备」：在手机上直接把这台电脑分享给一台新设备，不用开终端跑 claudestra pair。
- *   我自己的设备 = 全部会话、终端、管理（和 claudestra pair 默认一样）
+ *   我自己的设备 = 全部会话、终端、管理（和 claudestra pair 默认一样；bridge 会按发码设备自己的权限封顶）
  *   给别人      = 独立身份，只含选中的会话；不含大总管、没有终端和管理（claudestra pair --guest）
  * 生成后是 PairCodeCard：扫码 / 链接直接配好，手输短码的就地允许或拒绝。
  */
@@ -40,7 +40,7 @@ export function AddDevicePanel({ onClose, onPaired }: { onClose: () => void; onP
   if (pair) {
     return (
       <div className="mb-3">
-        <PairCodeCard pair={pair} full={who === "me"} busy={busy} onAgain={() => void issue()} onPaired={onPaired} />
+        <PairCodeCard key={pair.code} pair={pair} full={who === "me"} busy={busy} onAgain={() => void issue()} onPaired={onPaired} />
         <button className="btn btn-ghost btn-xs mt-1" onClick={onClose}>
           {t("完成")}
         </button>
@@ -59,7 +59,7 @@ export function AddDevicePanel({ onClose, onPaired }: { onClose: () => void; onP
   return (
     <div className="mb-3 space-y-2 rounded-lg bg-base-200/60 p-3">
       <div className="grid gap-1.5 sm:grid-cols-2">
-        {option("me", t("我自己的设备"), t("全部会话、终端和管理，和现在这台一样"))}
+        {option("me", t("我自己的设备"), t("全部会话、终端和管理（不会超过你这台设备自己的权限）"))}
         {option("guest", t("给别人"), t("只能用你选的会话；不含大总管，没有终端和管理"))}
       </div>
       {who === "guest" && (

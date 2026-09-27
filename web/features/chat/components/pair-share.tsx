@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { renderSVG } from "uqr";
 import { getLang, useT } from "@/lib/i18n";
-import { decideApproval, listApprovals, type PendingApproval, type ShareCode } from "@/lib/api/devices";
+import { decideApproval, listApprovals, listDevices, type PendingApproval, type ShareCode } from "@/lib/api/devices";
 import { fmtRemaining, remainingSeconds } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 
@@ -45,12 +45,13 @@ export function ApprovalRow({ a, onDone }: { a: PendingApproval; onDone: (approv
     <div className="flex flex-wrap items-center gap-2 rounded-lg bg-warning/10 px-2.5 py-2 text-xs">
       <span className="min-w-0 flex-1">
         <span className="block font-medium">
-          {a.deviceName} {t("输入了短码，请求配对")}
+          {a.deviceName} {t("输入了短码")} <span className="font-mono">{a.code.slice(0, 4)}-{a.code.slice(4)}</span>
         </span>
         <span className="block truncate text-base-content/55">
           {grantSummary(t, a.grant, a.guest)}
           {a.clientIp ? ` · ${a.clientIp}` : ""}
         </span>
+        <span className="block text-[10.5px] text-base-content/45">{t("设备名是对方自己填的；短码对得上再允许")}</span>
         {err && <span className="block text-error">{err}</span>}
       </span>
       <span className="flex shrink-0 gap-1">
@@ -65,18 +66,26 @@ export function ApprovalRow({ a, onDone }: { a: PendingApproval; onDone: (approv
   );
 }
 
-/** used = 码被人手输过、又被别处（横幅 / 终端）处理掉了：不知道结果，只说用掉了 */
-type Phase = "waiting" | "paired" | "denied" | "used";
+/**
+ * paired   新设备已经出现在设备列表里（扫码 / 点链接那条路：领凭据和配对是同一个请求）
+ * approved 在这张卡上批准了手输短码的请求（凭据已签，对方页面下一次轮询才领走）
+ * denied   在这张卡上拒绝了
+ * gone     码已经不在了、也没人等批准、设备列表里又没找到新设备：可能被用掉、过期、或 bridge 重启丢了——不猜结果
+ */
+type Phase = "waiting" | "paired" | "approved" | "denied" | "gone";
+/** 设备的 createdAt 是 Mac 的时钟、发码时刻是这台的：留两分钟余量，免得手机和电脑差几秒就认不出 */
+const CLOCK_SLACK_MS = 120_000;
 
 /**
- * 码有效期内每 3 秒看一次待确认与「没用掉的码」：手输了这个码的请求放进 pending；码被用掉且没人等批准 = 已配好
- * （见过 pending 又消失 = 在别处被处理了，只说用掉了）。onPaired 走 ref：父组件重渲染不重启轮询。
+ * 码有效期内每 3 秒看一次待确认与「没用掉的码」：手输了这个码的请求放进 pending；码不在了就去设备列表找发码之后
+ * 新出现的设备，找到才说配好了，找不到只说码不在了（codex 复核：「码没了」不能当「配好了」）。onPaired 走 ref。
  */
 function usePairWatch(code: string, expiresAt: string, onPaired?: () => void) {
   const [now, setNow] = useState(() => Date.now());
+  const [issuedAt] = useState(() => Date.now());
   const [pending, setPending] = useState<PendingApproval[]>([]);
   const [phase, setPhase] = useState<Phase>("waiting");
-  const seenPending = useRef(false);
+  const [who, setWho] = useState("");
   const paired = useRef(onPaired);
   useEffect(() => {
     paired.current = onPaired; // 轮询闭包里用最新的回调，又不因父组件重渲染而重启轮询
@@ -90,17 +99,21 @@ function usePairWatch(code: string, expiresAt: string, onPaired?: () => void) {
   useEffect(() => {
     if (phase !== "waiting" || expired) return;
     let stop = false;
+    const settleGone = async () => {
+      const fresh = (await listDevices()).filter((d) => Date.parse(d.createdAt) >= issuedAt - CLOCK_SLACK_MS && !d.current);
+      if (stop) return;
+      const newest = fresh.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+      setWho(newest?.deviceName ?? "");
+      setPhase(newest ? "paired" : "gone");
+      paired.current?.();
+    };
     const tick = () =>
       void listApprovals()
-        .then(({ approvals, activeCodes }) => {
+        .then(async ({ approvals, activeCodes }) => {
           if (stop) return;
           const mine = approvals.filter((a) => a.code === code);
           setPending(mine);
-          if (mine.length) seenPending.current = true;
-          if (activeCodes && !activeCodes.includes(code) && mine.length === 0) {
-            setPhase(seenPending.current ? "used" : "paired");
-            paired.current?.();
-          }
+          if (activeCodes && !activeCodes.includes(code) && mine.length === 0) await settleGone();
         })
         .catch((e: Error) => console.warn("[pair] 查待确认失败，下一拍再试:", e.message));
     tick();
@@ -109,22 +122,26 @@ function usePairWatch(code: string, expiresAt: string, onPaired?: () => void) {
       stop = true;
       clearInterval(iv);
     };
-  }, [code, phase, expired]);
-  const settle = (id: string, ok: boolean) => {
-    setPending((xs) => xs.filter((x) => x.id !== id));
-    setPhase(ok ? "paired" : "denied");
+  }, [code, phase, expired, issuedAt]);
+  const settle = (a: PendingApproval, ok: boolean) => {
+    setPending((xs) => xs.filter((x) => x.id !== a.id));
+    setWho(a.deviceName);
+    setPhase(ok ? "approved" : "denied");
     if (ok) paired.current?.();
   };
-  return { left, expired, pending, phase, settle };
+  return { left, expired, pending, phase, who, settle };
 }
 
-function PairDone({ phase, busy, onAgain }: { phase: Phase; busy: boolean; onAgain: () => void }) {
+function PairDone({ phase, who, busy, onAgain }: { phase: Phase; who: string; busy: boolean; onAgain: () => void }) {
   const t = useT();
+  const text =
+    phase === "paired" ? `${t("已配好：")}${who}`
+      : phase === "approved" ? `${t("已批准：")}${who}`
+        : phase === "denied" ? t("已拒绝这次配对")
+          : t("这个码已经用不了了（被用掉或已失效），看下面的设备列表确认");
   return (
     <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-base-100 p-3 text-xs">
-      <span className={phase === "paired" ? "text-success" : "text-base-content/60"}>
-        {phase === "paired" ? t("已配好，新设备可以用了") : phase === "denied" ? t("已拒绝这次配对") : t("这个码已经用掉了")}
-      </span>
+      <span className={phase === "paired" || phase === "approved" ? "text-success" : "text-base-content/60"}>{text}</span>
       <button className="btn btn-ghost btn-xs" disabled={busy} onClick={onAgain}>
         {t("再配一台")}
       </button>
@@ -141,8 +158,8 @@ export function PairCodeCard({ pair, full, onAgain, busy, onPaired }: {
   onPaired?: () => void;
 }) {
   const t = useT();
-  const { left, expired, pending, phase, settle } = usePairWatch(pair.code, pair.expiresAt, onPaired);
-  if (phase !== "waiting") return <PairDone phase={phase} busy={busy} onAgain={onAgain} />;
+  const { left, expired, pending, phase, who, settle } = usePairWatch(pair.code, pair.expiresAt, onPaired);
+  if (phase !== "waiting") return <PairDone phase={phase} who={who} busy={busy} onAgain={onAgain} />;
   const canShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
   const share = () =>
     void navigator.share({ title: t("配对 Claudestra"), text: t("10 分钟内打开这个链接，就能用这台电脑上的 Claudestra"), url: pair.link }).catch((e: Error) => {
@@ -174,7 +191,7 @@ export function PairCodeCard({ pair, full, onAgain, busy, onPaired }: {
       {pending.length > 0 && (
         <div className="mt-2 flex flex-col gap-1.5">
           {pending.map((a) => (
-            <ApprovalRow key={a.id} a={a} onDone={(ok) => settle(a.id, ok)} />
+            <ApprovalRow key={a.id} a={a} onDone={(ok) => settle(a, ok)} />
           ))}
         </div>
       )}

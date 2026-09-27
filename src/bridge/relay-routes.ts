@@ -8,6 +8,7 @@
  *   POST /relay/pair/redeem {code}      旧 Web 的 /api/auth/pair 拿用户输入的码来换会话 → { ok, username }（兼容期）
  *   POST /relay/request {to,…}          manager 的 peer 命令经中继调对方（bridge 才有中继连接，manager 是另一个进程）
  */
+import type { Principal } from "../lib/principals.js";
 import { userInfo } from "node:os";
 import { FP_RE, normalizeHeaders } from "../lib/relay-protocol.js";
 import { RelayError } from "../lib/relay-client.js";
@@ -47,11 +48,11 @@ export function relayStatusResponse(): Response {
 
 /** POST /relay/pair/new 与 manage 版 POST /api/v1/relay/pair 同一个响应 */
 /** 连着中继：短码登记到中继、链接指向中继首页；没连：直托管入口也能配对，链接只有 CLI 给了 --url 才有 */
-export async function pairNew(req: Request): Promise<Response> {
+export async function pairNew(req: Request, issuer?: Principal): Promise<Response> {
   const i = relayInfo();
   const body = await readJson(req);
-  const r = relayClient() && i.connected ? issuePairing({ url: i.url, base: i.base, slug: i.slug, fp: i.fp }, body) : issuePairing({}, body);
-  return json(r.ok ? 200 : 500, r);
+  const r = relayClient() && i.connected ? issuePairing({ url: i.url, base: i.base, slug: i.slug, fp: i.fp }, body, issuer) : issuePairing({}, body, issuer);
+  return json(r.ok ? 200 : issuer ? 403 : 500, r);
 }
 
 async function pairRedeem(req: Request): Promise<Response> {

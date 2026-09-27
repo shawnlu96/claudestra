@@ -56,7 +56,7 @@ function OnlineBlock({ status }: { status: RelayStatusView }) {
         </button>
       )}
       {err && <div className="text-error">{err}</div>}
-      {pair && <PairCodeCard pair={pair} full busy={busy} onAgain={() => void newCode()} />}
+      {pair && <PairCodeCard key={pair.code} pair={pair} full busy={busy} onAgain={() => void newCode()} />}
     </div>
   );
 }
