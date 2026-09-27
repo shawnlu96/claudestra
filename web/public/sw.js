@@ -101,7 +101,10 @@ self.addEventListener("notificationclick", (event) => {
           return;
         }
       }
-      await self.clients.openWindow(url);
+      // 冷启动：把发通知的机器一起带给页面（machine-gate 读 ?fp= 先切机器，再由 ?agent= 打开会话）
+      const u = new URL(url, self.location.origin);
+      if (data.fp) u.searchParams.set("fp", data.fp);
+      await self.clients.openWindow(u.pathname + u.search);
     })(),
   );
 });

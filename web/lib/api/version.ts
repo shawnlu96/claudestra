@@ -18,9 +18,9 @@ export interface VersionInfo {
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
-/** 当前机器（直托管 = bridge；中继 = 中继发布的前端）的版本 */
+/** 当前机器（直托管 = bridge；中继 = 中继发布的前端）的版本；中继模式重拉 app-config，否则常驻页面永远看不到新 webCommit */
 export async function fetchVersion(): Promise<VersionInfo> {
-  const cfg = await loadAppConfig();
+  const cfg = await loadAppConfig({ refresh: true });
   if (cfg.mode === "relay") return { version: cfg.version, commit: cfg.commit ?? "", ...(cfg.webCommit ? { webCommit: cfg.webCommit } : {}) };
   const j = await api<Record<string, unknown>>("/version", { timeoutMs: 8_000 });
   return {

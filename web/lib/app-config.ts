@@ -61,13 +61,19 @@ export function directFallback(): DirectConfig {
 let pending: Promise<AppConfig> | null = null;
 let loaded: AppConfig | null = null;
 
-export function loadAppConfig(): Promise<AppConfig> {
-  if (loaded) return Promise.resolve(loaded);
+/**
+ * 默认只拉一次；`refresh` 重新拉一次并更新缓存（版本检查用：中继模式下「前端有没有新版」看的是 app-config 的 webCommit，
+ * 常驻的 PWA 只在启动时拉一次就永远发现不了新版）。刷新拉不到（离线）时保留已有配置，绝不让一次网络抖动把模式改成 direct。
+ */
+export function loadAppConfig(opts: { refresh?: boolean } = {}): Promise<AppConfig> {
+  if (loaded && !opts.refresh) return Promise.resolve(loaded);
   pending ??= fetch("/app-config.json", { cache: "no-store", credentials: "omit" })
     .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null) // 网络错误与 404 同样按兜底处理；下面 parseAppConfig 对 null 返回 fallback
+    .catch(() => null) // 网络错误与 404 同样按兜底处理；下面首次加载对 null 返回 fallback、刷新时保留旧值
     .then((j) => {
-      loaded = parseAppConfig(j, directFallback());
+      const prev = loaded;
+      loaded = j || !prev ? parseAppConfig(j, directFallback()) : prev;
+      pending = null;
       return loaded;
     });
   return pending;

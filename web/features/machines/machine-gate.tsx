@@ -28,6 +28,10 @@ export function MachineGate({ children }: { children: ReactNode }) {
         const here = `${window.location.pathname}${window.location.search}${window.location.hash}`;
         router.replace(here === "/chat" ? "/pair" : `/pair?next=${encodeURIComponent(here)}`);
         return;
+      } else {
+        // 通知冷启动带来的 ?fp=（sw.js）：先切到发通知的那台机器，chat 再按 ?agent= 开会话；不认识的 fp 忽略
+        const want = new URLSearchParams(window.location.search).get("fp");
+        if (want && machines.get(want) && machines.currentFp() !== want) await machines.setCurrent(want);
       }
       if (!dead) setReady(true);
     });
