@@ -3464,11 +3464,8 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": {
-    const res = await migrateWorkerToAgent();
-    output({ ok: true, ...res });
-    break;
-  }
+  case "migrate": output({ ok: true, ...(await migrateWorkerToAgent()) }); break;
+  case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
 
   case "permissions":
   case "perm":
@@ -3608,6 +3605,7 @@ switch (cmd) {
         "tmux-help                       — print the tmux crash course (incl. iTerm2 -CC mode)",
         "doctor [--json]                 — health-check the whole install (runtime, config, daemons, bridge, MCP, agents)",
         "install-skills                  — symlink the repo's skills/ (save-compact …) into ~/.claude/skills (idempotent; update/install-cli run it too)",
+        "migrate-web-state               — copy the old web BFF's settings.db tables + groqApiKey/lang into the bridge (tar backup of the web data dir first; idempotent)",
         "version                         — show the current version and whether an update is available",
         "update                          — git pull and reload the three launchd daemons",
         "auto-update status              — show auto-update toggles",

@@ -39,7 +39,13 @@ function notConnected(): Response {
   return json(409, { ok: false, error: why, ...i });
 }
 
-async function pairNew(req: Request): Promise<Response> {
+/** GET /relay/status 与 manage 版 GET /api/v1/relay/status（bridge/local-api/control.ts）同一个响应 */
+export function relayStatusResponse(): Response {
+  return json(200, { ok: true, ...relayInfo(), peers: relayClient()?.peers() ?? [], pairingCodes: activePairingCodes() });
+}
+
+/** POST /relay/pair/new 与 manage 版 POST /api/v1/relay/pair 同一个响应 */
+export async function pairNew(req: Request): Promise<Response> {
   const i = relayInfo();
   if (!relayClient() || !i.connected || !i.url || !i.base || !i.slug || !i.fp) return notConnected();
   return json(200, issuePairing({ url: i.url, base: i.base, slug: i.slug, fp: i.fp }, await readJson(req)));
@@ -88,9 +94,7 @@ async function relayRequest(req: Request): Promise<Response> {
 export async function relayControlRoutes(req: Request, url: URL): Promise<Response> {
   const p = url.pathname;
   if (p === "/peer-ingress/sync" && req.method === "POST") return peerIngressSyncRoute(req);
-  if (p === "/relay/status" && req.method === "GET") {
-    return json(200, { ok: true, ...relayInfo(), peers: relayClient()?.peers() ?? [], pairingCodes: activePairingCodes() });
-  }
+  if (p === "/relay/status" && req.method === "GET") return relayStatusResponse();
   if (p === "/relay/pair/new" && req.method === "POST") return pairNew(req);
   if (p === "/relay/pair/approvals" && req.method === "GET") return json(200, { ok: true, approvals: pendingApprovals(), activeCodes: activePairingCodeList() });
   if (p === "/relay/pair/approve" && req.method === "POST") return pairApprove(req);

@@ -5,13 +5,14 @@
  *
  * 两者都默认关闭（环境变量不设 = 行为与 v2.9 完全一致）：
  *   BRIDGE_CORS_ORIGIN  逗号分隔 origin 白名单，或 "*"
- *   BRIDGE_STATIC_DIR   要托管的静态目录（SPA 前端构建产物）
+ *   BRIDGE_STATIC_DIR   要托管的静态目录（Next `output: "export"` 的产物，布局见 lib/static-site.ts）
  */
 
-import { existsSync, statSync } from "fs";
-import { join } from "path";
-import { safePathUnderRoot } from "../lib/static-site.js";
 import { timingSafeEqual } from "crypto";
+import { resolveExportedPath } from "../lib/static-site.js";
+
+/** bridge.ts 只从这一个模块 import 静态托管相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
+export { appConfigResponse } from "./local-api/version.js";
 
 /** 常量时间 token 比较(security-audit review nit-a):长度不等直接 false
  *  (长度泄露风险极小,且 timingSafeEqual 要求等长 buffer)。 */
@@ -103,15 +104,12 @@ export function isOriginExplicitlyAllowed(
  * 判据(纯函数,单测):
  *   - 回环(127/8、::1、::ffff:127.*)→ 放行,豁免一切(信任本机)
  *   - 非回环 + /api/v1/* → 放行,交给 handleApiRequest 自己的 Bearer 鉴权(peer)
+ *   - 非回环 + 静态托管开着 + 只读方法 + 不是控制路由 + 不是 ws 升级 → 放行给静态文件（前端本体不需要凭据，数据都走 /api/v1）
  *   - 非回环 + 其余 → 要求 control token 命中,否则拒
  *
  * fail-closed:BRIDGE_CONTROL_TOKEN 未设时,非回环非-/api/v1 一律拒(当前无此类
  * 合法流量,零影响;要开放远程直连裸路由再设 token)。requestIP 取不到地址(null)
  * 按非回环处理——实测本机回环的 http/ws-upgrade 都稳定返回 127.0.0.1,不会误伤。
- *
- * ⚠ fail-closed 是**全集拒**(不是列举路由):将来若用 BRIDGE_STATIC_DIR 对外
- * 托管前端,非回环静态访问也会被这道闸拦——到时要么设 CONTROL_TOKEN,要么给
- * 静态路径单开例外(security-audit review 2026-09-01 提醒)。
  */
 export function isLoopbackAddress(addr: string | null | undefined): boolean {
   if (!addr) return false;
@@ -129,15 +127,29 @@ export function isLoopbackAddress(addr: string | null | undefined): boolean {
   );
 }
 
+/** 裸控制路由：非回环访问永远要 control token，静态托管的例外不覆盖它们（/api/v1/* 在这之前已单独放行） */
+const CONTROL_ROUTES = new Set(["/hook", "/stats", "/stats/refresh", "/skills/rescan", "/agent/cleanup", "/events"]);
+const CONTROL_PREFIXES = ["/peer-ingress/", "/relay/"];
+export function isControlRoute(pathname: string): boolean {
+  return CONTROL_ROUTES.has(pathname) || CONTROL_PREFIXES.some((p) => pathname.startsWith(p));
+}
+
 export function controlAccessVerdict(opts: {
   loopback: boolean;
   pathname: string;
   providedToken: string | null;
   controlToken: string;
+  /** 静态例外的三个条件；不传 = 没有静态托管（与 v2.21.1 判定逐字相同） */
+  method?: string;
+  staticHosting?: boolean;
+  websocket?: boolean;
 }): { allow: boolean; reason: string } {
   if (opts.loopback) return { allow: true, reason: "loopback" };
   // /api/v1/* 有自己的 Bearer 鉴权(peer 入站走这里),放行给它自处理
   if (opts.pathname.startsWith("/api/v1/")) return { allow: true, reason: "api-bearer" };
+  // 静态前端：GET/HEAD 非控制路由放给静态文件；ws 升级也是 GET，单独排除（route_to_agent 面不能被顺带打开）
+  const readOnly = opts.method === "GET" || opts.method === "HEAD";
+  if (opts.staticHosting && readOnly && !opts.websocket && !isControlRoute(opts.pathname)) return { allow: true, reason: "static" };
   // 其余控制路由 + ws 升级:非回环必须命中 control token(常量时间比较)
   if (opts.controlToken && opts.providedToken && safeTokenEqual(opts.providedToken, opts.controlToken)) {
     return { allow: true, reason: "control-token" };
@@ -145,25 +157,22 @@ export function controlAccessVerdict(opts: {
   return { allow: false, reason: opts.controlToken ? "bad-token" : "no-token-configured" };
 }
 
+/** 托管的 HTML 一律带：前端不再有内联脚本，第三方脚本 / 外链连接一个都不许（机器输出突破清洗时的最后一道） */
+export const HTML_CSP = [
+  "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:", "connect-src 'self'",
+  "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'",
+].join("; ");
+
 /**
- * 静态文件路径解析：穿越防护 + SPA fallback。
- * - 命中真实文件 → 绝对路径
- * - 路径不存在且不像资源文件（最后一段无扩展名）→ index.html（前端路由 fallback）
- * - 穿越出 root / 资源文件缺失 / root 未设 → null（调用方 404）
+ * 静态导出站点的响应：页面 → .html、目录 → index.html、未知页面 → 404.html（状态 404）、资源缺失 / 穿越 → null（调用方兜底）。
+ * 缓存头跟路径走（_next/static 永久，HTML 永不长缓存）；HTML 加 CSP；HEAD 不带体。
  */
-export function resolveStaticPath(rootDir: string, pathname: string): string | null {
-  const safe = safePathUnderRoot(rootDir, pathname); // 解码 + 穿越防护与中继的静态托管同一份（lib/static-site.ts）
-  if (!safe) return null;
-  const { root, rel } = safe;
-  const candidate = join(root, rel);
-  try {
-    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
-  } catch {
-    return null;
-  }
-  // 资源文件（.js/.css/.png…）缺失就该 404，不能回 index.html 造成诡异的 MIME 错误
-  const lastSeg = rel.split("/").pop() || "";
-  if (lastSeg.includes(".")) return null;
-  const index = join(root, "index.html");
-  return existsSync(index) ? index : null;
+export function serveStaticSite(rootDir: string, pathname: string, method = "GET"): Response | null {
+  const hit = resolveExportedPath(rootDir, pathname);
+  if (!hit) return null;
+  const file = Bun.file(hit.path);
+  const html = hit.path.endsWith(".html");
+  const headers: Record<string, string> = { "Content-Type": file.type, "Cache-Control": hit.cacheControl, "X-Content-Type-Options": "nosniff" };
+  if (html) headers["Content-Security-Policy"] = HTML_CSP;
+  return new Response(method === "HEAD" ? null : file, { status: hit.status, headers });
 }

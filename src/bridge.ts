@@ -92,7 +92,7 @@ import { apiErrorResponse } from "./bridge/api-respond.js";
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import {
   corsHeadersFor,
-  resolveStaticPath,
+  serveStaticSite, appConfigResponse,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
   isLoopbackAddress,
@@ -3532,14 +3532,10 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       return new Response(JSON.stringify({ ok: false, error: "discord peer removed (v2.11) — use peer-http-* commands" }), { status: 410, headers: { "Content-Type": "application/json" } });
     }
 
-    // v2.10+ 静态托管（BRIDGE_STATIC_DIR）：以上路由都没接住的 GET 落到这里，
-    // web 前端构建产物可由 bridge 直接 serve（含 SPA fallback），免配反代。
-    if (STATIC_DIR && req.method === "GET") {
-      const staticPath = resolveStaticPath(STATIC_DIR, url.pathname);
-      if (staticPath) return new Response(Bun.file(staticPath));
-    }
-
-    return new Response("Claude Orchestrator Bridge", { status: 200 });
+    if (url.pathname === "/app-config.json" && req.method === "GET") return appConfigResponse(); // 直托管前端的入口配置 {mode:"direct", fp, machineName, version}（local-api/version.ts）
+    // 静态托管（BRIDGE_STATIC_DIR，Next 导出布局 + CSP，bridge/web-gateway.ts）：以上路由都没接住的 GET/HEAD 落到这里
+    const staticRes = STATIC_DIR && (req.method === "GET" || req.method === "HEAD") ? serveStaticSite(STATIC_DIR, url.pathname, req.method) : null;
+    return staticRes ?? new Response("Claude Orchestrator Bridge", { status: 200 });
 }
 
 const server = Bun.serve({
@@ -3563,7 +3559,7 @@ const server = Bun.serve({
       // 来源上下文：只有真实回环 socket 才是 loopback（bridge/request-context.ts）
       setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: ip?.address ?? null, https: req.headers.get("x-forwarded-proto") === "https" });
       const verdict = controlAccessVerdict({
-        loopback,
+        loopback, method: req.method, staticHosting: !!STATIC_DIR, websocket: !!req.headers.get("upgrade"), // 静态托管：非回环 GET/HEAD 可取前端文件，ws 升级 / 控制路由除外
         pathname: url0.pathname,
         providedToken: extractControlToken(req, url0),
         controlToken: CONTROL_TOKEN,
