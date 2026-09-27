@@ -172,4 +172,13 @@ describe("controlAccessVerdict", () => {
   test("非回环 ws 升级(根路径)未配 token → 拒(route_to_agent RCE 面)", () => {
     expect(controlAccessVerdict({ loopback: false, pathname: "/", providedToken: null, controlToken: "" }).allow).toBe(false);
   });
+  test("非回环 ws 升级挂在 /api/v1/ 路径下也拒：升级发生在 API 鉴权之前，api-bearer 放行不能覆盖它", () => {
+    for (const pathname of ["/api/v1/", "/api/v1/agents", "/api/v1/events"]) {
+      const v = controlAccessVerdict({ loopback: false, websocket: true, pathname, providedToken: null, controlToken: "" });
+      expect(v.allow).toBe(false);
+    }
+    expect(controlAccessVerdict({ loopback: false, websocket: true, pathname: "/api/v1/x", providedToken: CT, controlToken: CT }).allow).toBe(true);
+    expect(controlAccessVerdict({ loopback: true, websocket: true, pathname: "/api/v1/x", providedToken: null, controlToken: "" }).allow).toBe(true);
+    expect(controlAccessVerdict({ loopback: false, websocket: false, pathname: "/api/v1/agents", providedToken: null, controlToken: "" }).allow).toBe(true);
+  });
 });

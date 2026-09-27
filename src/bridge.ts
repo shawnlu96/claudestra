@@ -3561,7 +3561,7 @@ const server = Bun.serve({
       const ip = server.requestIP(req);
       const loopback = isLoopbackAddress(ip?.address);
       const verdict = controlAccessVerdict({
-        loopback,
+        loopback, websocket: !!req.headers.get("upgrade"), // 升级在 API 鉴权之前：/api/v1 的放行不能覆盖它
         pathname: url0.pathname,
         providedToken: extractControlToken(req, url0),
         controlToken: CONTROL_TOKEN,
