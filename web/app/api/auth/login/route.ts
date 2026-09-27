@@ -111,7 +111,6 @@ export async function POST(request: Request) {
     ? formRedirect("/chat")
     : NextResponse.json({ data: { username, ...(recoveryNote ? { recovery: recoveryNote } : {}) } });
   res.cookies.set(sessionCookie(session.id));
-  const home = relayHomeCookie(request.headers); // 经中继登录的：记住「我的 Claudestra 在哪」，邀请链接才能直达（lib/relay-home-cookie.ts）
-  if (home) res.cookies.set(home);
+  const home = relayHomeCookie(request.headers); if (home) res.cookies.set(home); // 经中继登录：记住「我的 Claudestra 在哪」，邀请链接才能直达
   return res;
 }

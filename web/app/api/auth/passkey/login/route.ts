@@ -69,8 +69,7 @@ export async function POST(request: Request) {
     const session = createSession(process.env.USER || "claudestra");
     const res = NextResponse.json({ data: { username: session.username, via: r.credName } });
     res.cookies.set(sessionCookie(session.id));
-    const home = relayHomeCookie(request.headers); // 经中继登录的：记住「我的 Claudestra 在哪」，邀请链接才能直达
-    if (home) res.cookies.set(home);
+    const home = relayHomeCookie(request.headers); if (home) res.cookies.set(home); // 经中继登录：记住「我的 Claudestra 在哪」，邀请链接才能直达
     return res;
   }
 

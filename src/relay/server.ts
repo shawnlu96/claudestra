@@ -101,8 +101,7 @@ class RelayServer implements Relay {
     this.sweepTimer = setInterval(() => this.sweep(), opts.sweepMs ?? 5_000);
     this.server = Bun.serve<ConnData>({
       port: opts.port ?? 8787,
-      hostname: opts.hostname ?? "127.0.0.1",
-      idleTimeout: 0, // Bun 默认 10 s 没写字节就掐 HTTP 连接，隧道里 10 s 一次的 SSE 心跳正好撞线；流的空闲由 router 按 streamIdleMs 判
+      hostname: opts.hostname ?? "127.0.0.1", idleTimeout: 0, // Bun 默认 10 s 没写字节就掐 HTTP 连接，隧道里 10 s 一次的 SSE 心跳正好撞线；流的空闲由 router 判
       fetch: (req, srv) => this.front.handle(req, srv),
       websocket: {
         // 硬上限交给 Bun（超过关 1009）；协议上限在 onMessage 里自己判，才能回 frame_too_large + 4413
