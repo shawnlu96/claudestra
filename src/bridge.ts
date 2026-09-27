@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, peerIngressSyncRoute } from "./bridge/peer-ingress.js";
+import { initPeerIngress, relayControlRoutes } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
@@ -3449,7 +3449,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
       return serveApiRequest(req, url);
     }
 
-    if (url.pathname === "/peer-ingress/sync" && req.method === "POST") return peerIngressSyncRoute(req); // manager 生成直连邀请前调
+    if (url.pathname.startsWith("/peer-ingress/") || url.pathname.startsWith("/relay/")) return relayControlRoutes(req, url); // 回环控制路由：peer 入口收放、中继状态 / 配对 / 代调（bridge/relay-routes.ts）
     if (url.pathname === "/skills/rescan" && req.method === "POST") { // Skills 重新扫描（manager 在 create/resume/kill 后调）
       try {
         const body = (await req.json().catch(() => ({}))) as {

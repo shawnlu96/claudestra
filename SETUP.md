@@ -69,6 +69,23 @@ Notes:
 - **`--force` for non-external agents**: exposing an agent not created with `--external` requires `--force` (a confirm dialog in the web UI) — agents sharing context with your own conversations shouldn't be casually exposed (the R1 guard).
 - **Connectivity**: the two bridges must be able to reach each other, and the bridge listens on `127.0.0.1` only by default — set `BRIDGE_BIND` (invite generation warns you if it's still loopback). Neither side needs a public IP: installing [Tailscale](https://tailscale.com) on both machines is the easiest way to get a private encrypted path (invite URLs auto-prefer the Tailscale address), but it's optional — any private network or an HTTPS reverse proxy works just as well.
 
+### Reach it from anywhere: the relay (optional)
+
+Tailscale is one way to reach your machine from outside; the relay is the other, and it needs nothing installed on the phone or the other computer. Your bridge keeps one outbound WebSocket to a relay; the relay then serves `https://<your-name>.<relay-domain>` — that page *is* this machine's web client — and forwards other instances' peer calls (`relay://<fingerprint>` as the peer address). No public IP, no open port, no certificate on your side.
+
+1. Two lines in `.env`, then restart the bridge:
+
+   ```
+   RELAY_URL=wss://relay.example.com    # the relay you use (hosted, or one you run yourself)
+   RELAY_NAME=mini                      # your subdomain label; defaults to a slugified hostname
+   ```
+
+   The bridge log prints `🛰 中继: … https://mini.relay.example.com`. If the name is taken, the relay appends part of your fingerprint — the log has the final address.
+2. On the computer run `claudestra pair`: it prints a QR code, a link and an 8-character code (10 minutes, single use). Scan the QR with the phone camera, open the link in any browser, or type the code at `https://relay.example.com` — the browser is signed in without the SSH password (`/pair`; the login page links to it too). The web client's Peer panel shows the same address and a *Pair a new device* button.
+3. Invites become links: Settings → Peer collaboration → *Create invite* yields `https://relay.example.com/i#…`. The other side opens it and lands in their own Claudestra's join page; someone without one is guided to install first.
+
+Honest note: this version of the relay terminates TLS, so it can read tunnelled traffic (including your session cookie) — trusting a hosted relay means trusting its operator, like any reverse proxy. Run your own with [docs/relay/self-host.md](docs/relay/self-host.md); protocol and boundaries are in [docs/relay/protocol.md](docs/relay/protocol.md).
+
 ### What you get out of the box
 
 - **Multi-agent orchestration** — the master in `#control` spawns per-agent Discord channels, routes messages, attaches screenshots, handles interrupts.

@@ -14,6 +14,7 @@
 import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
+import { relayMark, sanitizeRelayFrom } from "./relay-inbound.js";
 
 export { configuredPeerIngressPort };
 
@@ -116,7 +117,10 @@ function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
         return json(403, { ok: false, error: "this entrance only serves peer tokens" });
       }
       const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
-      return opts.handleApi(new Request(url.toString(), { method: req.method, headers: req.headers, body }), url);
+      // 来源指纹头只认经中继进来的（relay-inbound.ts 盖了进程内标记）；直连 peer 自带的一律剥掉
+      const headers = new Headers(req.headers);
+      sanitizeRelayFrom(headers, relayMark());
+      return opts.handleApi(new Request(url.toString(), { method: req.method, headers, body }), url);
     },
   });
 }

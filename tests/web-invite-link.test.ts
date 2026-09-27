@@ -28,3 +28,21 @@ describe("邀请链接 / 转发文案", () => {
     expect(findInviteCode(m)).toBe(CODE);
   });
 });
+
+describe("经中继的邀请（url 是 relay://<指纹>）", () => {
+  const RELAY = enc({ v: 2, name: "小明", url: "relay://16f9-b5d1-30fb-8923", token: "t".repeat(64), join: "j".repeat(48), fp: "16f9-b5d1-30fb-8923" });
+  const LINK = `https://relay.example.com/i#${RELAY}`;
+  test("能解出、能从文字里找出", () => {
+    expect(decodeInvite(RELAY)).toEqual({ name: "小明", url: "relay://16f9-b5d1-30fb-8923" });
+    expect(findInviteCode(`看这个 ${LINK} 谢谢`)).toBe(RELAY);
+  });
+  test("没有 bridge 给的链接就没有链接；给了就原样用", () => {
+    expect(inviteLink(RELAY)).toBeNull();
+    expect(inviteMessage(RELAY, [])).toBeNull();
+    expect(inviteLink(RELAY, LINK)).toBe(LINK);
+    expect(inviteMessage(RELAY, ["claudestra"], "en", LINK)).toContain(LINK);
+  });
+  test("直连邀请也可以用 bridge 给的链接覆盖", () => {
+    expect(inviteLink(CODE, LINK)).toBe(LINK);
+  });
+});

@@ -6,3 +6,5 @@ node_modules
 master/CLAUDE.md
 master/.claude/
 .playwright-mcp/
+# deploy/relay/deploy.sh 每次部署写入的短 sha，只随 rsync 走
+.relay-commit

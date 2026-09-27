@@ -1,12 +1,15 @@
 /**
  * 一键邀请的链接与「发给对方的一段话」（纯函数，tests/web-invite-link.test.ts）。
- * 邀请码 = base64url 的 JSON {v:2,name,url,token,join,iid?}（src/lib/peers.ts encodePeerInviteV2）。
- * 链接 = 邀请方地址 + /api/v1/invite#邀请码：打开的是邀请方机器上的落地页（src/bridge/invite-page.ts），
- * 邀请码在 # 后面，不进任何服务器日志。这里只解出展示用的 name / url；完整校验在服务端（peer-invite-inspect）。
+ * 邀请码 = base64url 的 JSON {v:2,name,url,token,join,iid?,fp?}（src/lib/peers.ts encodePeerInviteV2）。
+ * 链接两种：直连地址的邀请 = 邀请方地址 + /api/v1/invite#邀请码（邀请方机器上的落地页，src/bridge/invite-page.ts）；
+ * 经中继的邀请（url 是 relay://<指纹>）没有可打开的邀请方地址，链接由 bridge 给（https://<中继>/i#邀请码，
+ * docs/relay/protocol.md §6），调用方传进来。邀请码都在 # 后面，不进任何服务器日志。
  */
 
 /** 能认出邀请码的一段：base64url 的 {"v":2, 开头固定是 eyJ2IjoyL */
 const CODE_RE = /eyJ2IjoyL[A-Za-z0-9_-]{40,}/;
+/** 邀请方地址：直连 http(s)，或经中继 relay://<指纹> */
+const URL_RE = /^https?:\/\/|^relay:\/\/[0-9a-f]{4}(-[0-9a-f]{4}){3}\/?$/i;
 
 function b64urlDecode(s: string): string {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -19,7 +22,7 @@ function b64urlDecode(s: string): string {
 export function decodeInvite(code: string): { name: string; url: string } | null {
   try {
     const j = JSON.parse(b64urlDecode(code.trim())) as { v?: unknown; name?: unknown; url?: unknown };
-    if (j.v !== 2 || typeof j.name !== "string" || !j.name || typeof j.url !== "string" || !/^https?:\/\//.test(j.url)) return null;
+    if (j.v !== 2 || typeof j.name !== "string" || !j.name || typeof j.url !== "string" || !URL_RE.test(j.url)) return null;
     return { name: j.name, url: j.url.replace(/\/+$/, "") };
   } catch {
     return null; // 不是 base64 / 不是 JSON：就不是邀请码
@@ -32,15 +35,18 @@ export function findInviteCode(text: string): string | null {
   return m && decodeInvite(m[0]) ? m[0] : null;
 }
 
-export function inviteLink(code: string): string | null {
+/** bridge 给了链接就用它（经中继的邀请只有这一种链接）；直连邀请按邀请方地址拼；relay:// 又没给链接 → null */
+export function inviteLink(code: string, given?: string): string | null {
+  if (given) return given;
   const inv = decodeInvite(code);
-  return inv ? `${inv.url}/api/v1/invite#${code}` : null;
+  if (!inv || inv.url.startsWith("relay://")) return null;
+  return `${inv.url}/api/v1/invite#${code}`;
 }
 
 /** 复制给对方的一整段话：谁邀请、能找谁、怎么加入（链接打不开时的退路也写上） */
-export function inviteMessage(code: string, agents: string[], lang: "zh" | "en" = "zh"): string | null {
+export function inviteMessage(code: string, agents: string[], lang: "zh" | "en" = "zh", givenLink?: string): string | null {
   const inv = decodeInvite(code);
-  const link = inviteLink(code);
+  const link = inviteLink(code, givenLink);
   if (!inv || !link) return null;
   const list = agents.join(", ");
   return lang === "en"

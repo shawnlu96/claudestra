@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getLang, useT } from "@/lib/i18n";
 import { useArmedConfirm } from "../use-armed-confirm";
-import { peersAction, ScopePicker, ForceRow, type ActionResult, type LocalAgent } from "./peers-shared";
+import { peersAction, CopyButton, ScopePicker, ForceRow, type ActionResult, type LocalAgent } from "./peers-shared";
 import { InviteShare } from "./peers-invite-share";
 import { inviteMessage } from "../invite-link";
 import { JoinPanel } from "./peers-join-panel";
@@ -11,7 +11,7 @@ import { LastVisit, PresenceLine, PresenceSummary, sortByPresence, type PeerPres
 import { PeersTidyBanner, type TidyGroupInfo } from "./peers-tidy-banner";
 import { HandoffSummaryCard, PeerHandoffLine, type HandoffSummaryInfo } from "./peers-handoff-stats";
 import { SelfFingerprint, SignatureLine, type PeerSignatureInfo } from "./peers-signature";
-
+import { RelayCard } from "./peers-relay-card";
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
  * - 列表:每个 peer 的握手状态 / 对方可访问我哪些 agent(入站 scope,可编辑) /
@@ -23,7 +23,6 @@ import { SelfFingerprint, SignatureLine, type PeerSignatureInfo } from "./peers-
  * 弹「强制执行」二次确认——服务端是唯一裁判,前端不复刻规则。
  * master 不出现在勾选器:服务端硬禁(--force 也不放行),前端连选项都不给。
  */
-
 interface PeerInfo {
   name: string;
   baseUrl: string | null;
@@ -56,7 +55,6 @@ interface PendingInviteInfo {
   /** 完整邀请串（再复制用）;token 已被吊销时为 null */
   invite: string | null;
 }
-
 function PeerCard({
   peer,
   localAgents,
@@ -127,6 +125,7 @@ function PeerCard({
       <div className="flex items-center gap-2">
         <span className="text-[13.5px] font-semibold">{peer.name}</span>
         {peer.disabled && <span className="badge badge-ghost badge-xs">{t("已禁用")}</span>}
+        {peer.baseUrl?.startsWith("relay://") && <span className="badge badge-ghost badge-xs">{t("经中继")}</span>}
         <button
           className={`btn btn-ghost btn-xs ml-auto ${confirmRm ? "text-error" : "text-base-content/50"}`}
           disabled={removing}
@@ -296,7 +295,7 @@ function InvitePanel({ localAgents, onChanged }: { localAgents: LocalAgent[]; on
           )}
           {result?.invite && (
             <>
-              <InviteShare code={result.invite} agents={sel} />
+              <InviteShare code={result.invite} agents={sel} link={result.link} />
               <InviteChecklist myUrl={result.myUrl} />
               <div className="text-[11px] text-base-content/50">
                 {t("24h 内有效、只能用一次。对方接入后你会收到通知。")}
@@ -369,21 +368,7 @@ function PendingInvites({ invites, onChanged }: { invites: PendingInviteInfo[]; 
 }
 
 function CopyInviteButton({ value }: { value: string }) {
-  const t = useT();
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      className="btn btn-ghost btn-xs"
-      onClick={() => {
-        void navigator.clipboard?.writeText(value).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        });
-      }}
-    >
-      {copied ? t("已复制") : t("复制邀请")}
-    </button>
-  );
+  return <CopyButton text={value} label="复制邀请" resetMs={1500} />;
 }
 
 /**
@@ -435,6 +420,7 @@ export function PeersPanel() {
           <p className="text-xs leading-relaxed text-base-content/50">
             {t("跨 Claudestra 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。")}
           </p>
+          <RelayCard />
           {err && <div className="alert alert-error px-3 py-2 text-xs">{err}</div>}
           {loading ? (
             <div className="grid place-items-center py-8">

@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ForceRow, peersAction, ScopePicker, type LocalAgent } from "./peers-shared";
 
-type Inspect = { ok?: boolean; error?: string; name?: string; reachable?: boolean; agents?: string[]; hint?: string; existing?: string };
+type Inspect = { ok?: boolean; error?: string; name?: string; reachable?: boolean; agents?: string[]; hint?: string; existing?: string; note?: string };
 type Joined = { ok?: boolean; peer?: string; error?: string; hint?: string; warnings?: string[] };
 
 export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer: string) => void }) {
@@ -102,9 +102,9 @@ function InspectStatus({ info, onRetry }: { info: Inspect | null; onRetry: () =>
       <div className="text-xs text-error">{info.error}</div>
     ) : info.reachable ? (
       <div className="space-y-0.5 text-xs">
-        <div className="text-success">✓ {t("能连到对方")}</div>
+        <div className="text-success">✓ {info.note ? t("经中继加入") : t("能连到对方")}</div>
         <div className="text-base-content/70">
-          {info.agents?.length ? `${t("加入后你可以找")}: ${info.agents.join(", ")}` : t("对方还没开放任何 agent 给你")}
+          {info.note ? t(info.note) : info.agents?.length ? `${t("加入后你可以找")}: ${info.agents.join(", ")}` : t("对方还没开放任何 agent 给你")}
         </div>
         {info.existing && <div className="text-base-content/50">{`${t("你已经连着")}「${info.existing}」${t("，加入会刷新这条连接")}`}</div>}
       </div>
