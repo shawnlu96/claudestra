@@ -58,7 +58,7 @@ export function accessRows(a: AccessPathsInfo | null, snap: EntriesView | null):
     const lan = a.lan;
     rows.push(
       lan.bindAll
-        ? { id: "lan", state: "on", url: lan.urls[0], note: "只在同一 Wi-Fi 下能用；明文，推送和语音输入用不了" }
+        ? { id: "lan", state: "on", url: lan.urls[0], note: "只在同一 Wi-Fi 下能用；明文，推送和语音输入用不了。手机打不开先查这台电脑的防火墙" }
         : { id: "lan", state: "off", note: "bridge 只监听本机。要用就在 .env 写 BRIDGE_BIND=0.0.0.0 后重启 bridge（公共网络别开）" },
     );
   }

@@ -4,7 +4,7 @@
 
 > Run your coding agents — Claude Code and Pi — on your workstation, and drive them from your phone through the built-in web app (Discord optional).
 
-Claudestra lets you run coding agents on your workstation — **Claude Code** and **Pi** are both first-class runtimes — and drive them from anywhere: phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, logged in with your own OS account, no third party involved. **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
+Claudestra lets you run coding agents on your workstation — **Claude Code** and **Pi** are both first-class runtimes — and drive them from anywhere: phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, paired to your devices by QR code; phones reach it through a relay, Tailscale, your LAN or your own domain (the relay is the default, never required). **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -28,7 +28,7 @@ Coding agents are terminal-only tools: if you aren't at your computer, you aren'
 ```
  Your phone
         │
-        ├──  Web client (PWA)   ──  HTTP/SSE, your OS account          ← default
+        ├──  Web client (PWA)   ──  HTTP/SSE, paired devices           ← default
         └──  Discord bot        ──  one token, many channels           ← optional
         │
         ▼
@@ -294,10 +294,24 @@ boundary: it prefix-matches command strings, so `/bin/rm -rf`, `rm -fr`,
 
 **Network exposure.** The Bridge binds `127.0.0.1` by default and its WebSocket
 control plane refuses cross-origin upgrades, so a random web page you visit cannot
-drive it. Setting `BRIDGE_BIND=0.0.0.0` or port-forwarding 3847 removes that
-protection entirely — the control plane itself has no authentication. If you need
-remote access, put it behind Tailscale or a reverse proxy with its own auth; do not
-expose the port directly.
+drive it. Setting `BRIDGE_BIND=0.0.0.0` (the setup wizard's "same Wi-Fi" option)
+opens the port on every interface: the web page and pairing entry points are public,
+the rest of the API requires a paired device, and the raw control routes refuse
+non-loopback callers unless they carry `BRIDGE_CONTROL_TOKEN` — but the traffic is
+plain HTTP, so a login cookie can be sniffed on the same network. For access from outside, use the relay, Tailscale, or
+an HTTPS reverse proxy; never forward the port to the internet directly.
+
+**Paired devices.** A device paired with the default full grant is a shell key to
+this machine. Restricted devices (fewer sessions, no terminal, guest) are limited in
+what the product lets them do, but the agents they can talk to still have this
+machine's tools, so only pair devices you trust. Revoke lost devices in the web
+client's Devices panel.
+
+**The relay.** The relay is the default way for phones to reach the machine, and it
+is optional. It terminates HTTPS and serves the web app's scripts, so whoever runs it
+can technically read your conversations and act as one of your paired devices.
+End-to-end encryption is not built yet. If that matters, use Tailscale or your own
+domain instead, or run your own relay ([docs/relay/self-host.md](./docs/relay/self-host.md)).
 
 **Discord.** `ALLOWED_USER_IDS` is the only gate on who may drive your agents, and
 it is fail-closed: an empty list rejects everyone rather than admitting everyone.

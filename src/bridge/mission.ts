@@ -11,6 +11,7 @@ import { getAgentStatus, isBusyStatus, subscribeEvents } from "./event-bus.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readSessionCtx } from "../lib/usage-cache.js";
+import { idleVerdict, windowTarget } from "../lib/tmux-helper.js";
 import {
   backoffMs, missionKey, MISSIONS_PATH, nextFastTurns, nudgeKind, nudgeText, readMissions, updateMissions, type Mission,
 } from "../lib/missions.js";
@@ -19,10 +20,20 @@ import { newThreadId, type Envelope } from "./router.js";
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
 let GRACE_MS = 45_000;
 let path = MISSIONS_PATH;
-/** 单测：状态文件指到临时目录、宽限期缩短；生产不调 */
-export function setMissionTestHooks(h: { path?: string; graceMs?: number }): void {
+/**
+ * 事件总线只在 bridge 投递时才知道「在忙」：bridge 刚重启、或 agent 自己续着干，状态表是空的。递提醒前再看一眼画面，
+ * 只有明确 busy 才让位（unknown 放行——认不出画面就挡，值守会永远递不出去）。
+ */
+let paneBusy = async (agent: string): Promise<boolean> => {
+  const win = agent === "master" ? "master" : readRegistryAgentsSync().find((a) => missionKey(a.name) === agent)?.name;
+  if (!win) return false;
+  return (await idleVerdict(windowTarget(win)).catch(() => "unknown")) === "busy"; // 抓不到画面（窗口没了）= 不知道，放行
+};
+/** 单测：状态文件指到临时目录、宽限期缩短、画面判忙换成假的；生产不调 */
+export function setMissionTestHooks(h: { path?: string; graceMs?: number; paneBusy?: (agent: string) => Promise<boolean> }): void {
   if (h.path) path = h.path;
   if (h.graceMs !== undefined) GRACE_MS = h.graceMs;
+  if (h.paneBusy) paneBusy = h.paneBusy;
 }
 
 interface Client { ws: ServerWebSocket<unknown>; channelId: string; cwd?: string }
@@ -68,6 +79,7 @@ async function fire(agent: string): Promise<void> {
   if (kind !== "deadline" && m.resumeAt && Date.parse(m.resumeAt) > now) return schedule(agent, Date.parse(m.resumeAt) - now);
   // 人在跟它说话（或它自己还在干）：让位，等下一次回合结束
   if (isBusyStatus(getAgentStatus(agent)) || isBusyStatus(getAgentStatus(`agent-${agent}`))) return;
+  if (await paneBusy(agent)) return; // 正干着：它这一轮结束会触发下一次 done 再排
   const channelId = channelOf(agent);
   const client = channelId ? deps.clients.get(channelId) : undefined;
   if (!channelId || !client) {

@@ -25,8 +25,9 @@ async function put(over: Partial<Mission>): Promise<void> {
   await updateMissions((all) => void (all.master = m), path);
 }
 
+let paneBusy = false;
 beforeAll(() => {
-  setMissionTestHooks({ path, graceMs: 50 });
+  setMissionTestHooks({ path, graceMs: 50, paneBusy: async () => paneBusy });
   initMission({
     clients: new Map([["ctl", { ws: {} as never, channelId: "ctl", cwd: "/tmp" }]]),
     deliver: async (env) => void sent.push(env),
@@ -52,6 +53,15 @@ describe("值守推进", () => {
     done();
     thinking();
     await sleep(250);
+    expect(sent.length).toBe(0);
+  });
+  test("画面还在忙（bridge 刚重启、状态表是空的）→ 不递，等它这一轮结束", async () => {
+    sent.length = 0;
+    await put({ lastNudgeAt: new Date(Date.now() - 600_000).toISOString() });
+    paneBusy = true;
+    done();
+    await sleep(250);
+    paneBusy = false;
     expect(sent.length).toBe(0);
   });
   test("提醒后很快又结束两次 → 进入退避（resumeAt 约 5 分钟后），这次不递", async () => {
