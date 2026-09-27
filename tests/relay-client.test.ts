@@ -101,6 +101,7 @@ describe("请求往返", () => {
     const a = client(relay, "A");
     const b = client(relay, "B", echo);
     await Promise.all([relay.waitOnline(a.fp), relay.waitOnline(b.fp)]);
+    await until(() => a.c.state === "online" && b.c.state === "online"); // 中继先登记连接、客户端收到 welcome 才转 online：只等前者会偶发 connection_lost
     const r1 = await a.c.request(b.fp, { method: "post", path: "/api/v1/agents/x/messages?q=1", headers: { "x-in": "v" }, body: enc("hello") });
     expect(r1.status).toBe(201);
     expect(r1.headers["x-echo"]).toBe("v");
@@ -126,6 +127,7 @@ describe("请求往返", () => {
     const a = client(relay, "A2");
     const b = client(relay, "B2", echo);
     await Promise.all([relay.waitOnline(a.fp), relay.waitOnline(b.fp)]);
+    await until(() => a.c.state === "online" && b.c.state === "online"); // 中继先登记连接、客户端收到 welcome 才转 online：只等前者会偶发 connection_lost
     await expect(a.c.request(b.fp, { method: "GET", path: "/api/v1/fail", headers: {} })).rejects.toMatchObject({ code: "bad_signature", origin: "peer", message: "nope" });
     await expect(a.c.request(b.fp, { method: "GET", path: "/api/v1/boom", headers: {} })).rejects.toMatchObject({ code: "local_unreachable", origin: "peer" });
     await expect(a.c.request(b.fp, { method: "GET", path: "/hook", headers: {} })).rejects.toMatchObject({ code: "path_forbidden", origin: "client" });
@@ -155,6 +157,7 @@ describe("请求往返", () => {
     const a = client(relay, "A4");
     const b = client(relay, "B4", slow);
     await Promise.all([relay.waitOnline(a.fp), relay.waitOnline(b.fp)]);
+    await until(() => a.c.state === "online" && b.c.state === "online"); // 中继先登记连接、客户端收到 welcome 才转 online：只等前者会偶发 connection_lost
     const ac = new AbortController();
     const p = a.c.request(b.fp, { method: "GET", path: "/api/v1/agents", headers: {} }, { signal: ac.signal });
     await relay.waitFor((r) => r.fp === a.fp && r.frame.t === "req");
@@ -212,6 +215,7 @@ describe("断线、重连、退避", () => {
     const a = client(relay, "A5");
     const b = client(relay, "B5", never);
     await Promise.all([relay.waitOnline(a.fp), relay.waitOnline(b.fp)]);
+    await until(() => a.c.state === "online" && b.c.state === "online"); // 中继先登记连接、客户端收到 welcome 才转 online：只等前者会偶发 connection_lost
     a.c.setContacts([b.fp]);
     await relay.waitFor((r) => r.fp === a.fp && r.frame.t === "contacts");
     const p = a.c.request(b.fp, { method: "GET", path: "/api/v1/agents", headers: {} });
