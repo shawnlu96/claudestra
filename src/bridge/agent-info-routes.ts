@@ -1,5 +1,5 @@
 /**
- * /api/v1/agents/:name/info（GET）与 /api/v1/agents/:name/external（POST）——web「会话详情」弹窗的后端
+ * /api/v1/agents/:name/info（GET）、/external（POST）、/label（POST，显示名）——web「会话详情」弹窗的后端
  * （owner 2026-09-27）。只给全权 token：详情里有本机路径 / sessionId / Discord 频道，peer 不该看到。
  * 关闭 external 时若该 agent 正在某个 peer 的 scope 里，必须带 confirm=<会话名> 才执行（前端要求输入会话名），
  * 否则 409 并回 sharedWith 让前端弹确认。改动本身走 runManager("external")，bridge 不直写 registry。
@@ -13,7 +13,7 @@ import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJso
 type RunManager = (...args: string[]) => Promise<any>;
 
 export async function handleAgentInfoRoutes(req: Request, path: string, principal: Principal, runManager: RunManager): Promise<Response | null> {
-  const m = path.match(/^\/agents\/([^/]+)\/(info|external)$/);
+  const m = path.match(/^\/agents\/([^/]+)\/(info|external|label)$/);
   if (!m) return null;
   if (!isFullScope(principal)) return forbidden(`agent ${m[2]} requires a full-scope token`);
   const bare = decodeURIComponent(m[1]).replace(/^agent-/, "");
@@ -29,6 +29,7 @@ export async function handleAgentInfoRoutes(req: Request, path: string, principa
       agent: {
         name: bare,
         displayName: a.displayName ?? null,
+        label: a.label ?? null,
         purpose: a.purpose ?? "",
         cwd: a.cwd ?? null,
         status: a.status ?? null,
@@ -52,6 +53,13 @@ export async function handleAgentInfoRoutes(req: Request, path: string, principa
       return apiJson(409, { ok: false, error: `agent "${bare}" 正共享给 peer：${sharedWith.join(", ")}——关闭需输入会话名确认`, sharedWith, needConfirm: true });
     }
     const r = await runManager("external", bare, on ? "on" : "off");
+    return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+  }
+  if (m[2] === "label" && req.method === "POST") {
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
+    if (typeof body?.label !== "string") return apiJson(400, { ok: false, error: '"label" (string) required' });
+    const r = await runManager("label", bare, body.label);
     return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
   }
   return apiJson(405, { ok: false, error: "method not allowed" });

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { useChatStore, useChatStoreApi } from "../chat-store";
-import { closeAgentInfo, fetchAgentInfo, setAgentExternal, useAgentInfoTarget, type AgentInfo } from "../agent-info";
+import { closeAgentInfo, fetchAgentInfo, setAgentExternal, setAgentLabel, useAgentInfoTarget, type AgentInfo } from "../agent-info";
 import { fmtTs } from "../fmt-time";
 import { CenteredModal } from "./centered-modal";
 
@@ -56,6 +56,42 @@ function ConfirmOff({ name, peers, busy, onCancel, onConfirm }: ConfirmOffProps)
   );
 }
 
+/** 「显示名」行：输入 + 保存（owner 2026-09-27），空 = 清除；保存后回调刷新详情与列表 */
+function LabelRow({ name, current, onSaved }: { name: string; current: string; onSaved: () => void }) {
+  const t = useT();
+  const [v, setV] = useState(current);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => setV(current), [current]);
+  const save = async () => {
+    setBusy(true);
+    setErr("");
+    const r = await setAgentLabel(name, v.trim());
+    setBusy(false);
+    if (!r.ok) setErr(r.error);
+    else onSaved();
+  };
+  return (
+    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-2 py-1.5 text-[13px]">
+      <div className="text-base-content/45">{t("显示名")}</div>
+      <div className="min-w-0">
+        <div className="flex gap-1.5">
+          <input
+            className="input input-bordered input-xs min-w-0 flex-1"
+            placeholder={t("留空则只显示会话名")}
+            value={v}
+            maxLength={40}
+            disabled={busy}
+            onChange={(e) => setV(e.target.value)}
+          />
+          <button className="btn btn-primary btn-xs" disabled={busy || v.trim() === current} onClick={() => void save()}>{t("保存")}</button>
+        </div>
+        {err && <div className="mt-1 text-[11px] text-error">{err}</div>}
+      </div>
+    </div>
+  );
+}
+
 function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
   const t = useT();
   const store = useChatStoreApi();
@@ -106,6 +142,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
         {err && <div className="mb-2 rounded-lg bg-error/10 px-3 py-2 text-[12px] text-error">{t("加载失败")}: {err}</div>}
         <Row k={t("名称")} v={name} mono />
+        <LabelRow name={name} current={info?.label ?? ""} onSaved={() => { void load(); void store.refreshAgents(); }} />
         <Row k={t("用途")} v={info?.purpose || live?.purpose || null} />
         <Row k={t("工作目录")} v={info?.cwd} mono />
         <Row k="Project" v={project ? `${project.emoji ? project.emoji + " " : ""}${project.name || project.id}` : (info?.projectId ?? null)} />
