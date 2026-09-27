@@ -1,4 +1,5 @@
 import { getLang } from "@/lib/i18n";
+import { fmtTsParts } from "./fmt-ts-parts";
 
 /** 相对时间标签(owner 2026-07-14:「显示多少秒前/分钟前/小时分前/天前」)。
  *  消费方注意保鲜:相对时间会过期,长驻视图配个 30s tick 重渲染。
@@ -20,17 +21,10 @@ export function fmtAgo(ts?: number | null): string {
   return en ? `${d}d ago` : `${d}天前`;
 }
 
-/** 秒级时间戳（消息/工具卡点开时显示）。跨天带日期，当天只时分秒。 */
+/** 秒级时间戳（工具行展开 / 长按菜单）。跨天带 `MM-DD`，当天只时分秒——与侧槽 / 头行的
+ *  消息时间同一套拆分（fmt-ts-parts.ts），两边的日期写法才不会一个 `9-25` 一个 `09-25`。 */
 export function fmtTs(iso?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const hms = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  return sameDay ? hms : `${d.getMonth() + 1}-${pad(d.getDate())} ${hms}`;
+  const p = fmtTsParts(iso);
+  if (!p) return "";
+  return p.date ? `${p.date} ${p.hms}` : p.hms;
 }
