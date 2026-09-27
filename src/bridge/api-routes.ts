@@ -82,6 +82,7 @@ import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
+import { handleExtensionRoutes } from "./api-extensions.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -352,7 +353,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (auth instanceof Response) return auth;
   const principal = auth;
   const tokenId = tokenIdOf(principal);
-  const dev = await handleDevicesManaged(req, url, principal); // 设备列表 / 撤销 / 待确认（manage grant）
+  const dev = (await handleDevicesManaged(req, url, principal)) ?? (await handleExtensionRoutes(req, url, principal)); // 设备端点；其余新端点族在 api-extensions.ts 登记
   if (dev) return dev;
   const path = url.pathname.slice("/api/v1".length);
 
