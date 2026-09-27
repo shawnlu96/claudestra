@@ -76,7 +76,7 @@ export function InviteIntake() {
       {(ask || found) && (
         <div className="fixed bottom-[max(env(safe-area-inset-bottom),16px)] left-1/2 z-[60] w-[min(92vw,420px)] -translate-x-1/2 space-y-2">
           {found && (
-            <Toast text={`${t("检测到")} ${name} ${t("的协作邀请")}`} primary={t("查看")} onPrimary={() => { setOpen(found); setFound(null); }} onClose={() => setFound(null)} />
+            <Toast text={t("检测到 {name} 的协作邀请", { name: name ?? "" })} primary={t("查看")} onPrimary={() => { setOpen(found); setFound(null); }} onClose={() => setFound(null)} />
           )}
           {ask && !found && (
             <Toast

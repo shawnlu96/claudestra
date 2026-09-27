@@ -348,7 +348,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             ) : (
               <span className="opacity-60">💬</span>
             )}
-            {searching ? t("正在搜聊天记录…") : `${t("搜聊天记录「")}${query.trim()}${t("」")}`}
+            {searching ? t("正在搜聊天记录…") : t("搜聊天记录「{q}」", { q: query.trim() })}
           </button>
         )}
       </div>
@@ -554,7 +554,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             {batchBusy ? (
               <span className="loading loading-spinner loading-xs" />
             ) : confirmBatch ? (
-              `${t("确认删除 ")}${sel.size}${t(" 个?")}`
+              t("确认删除 {n} 个?", { n: sel.size })
             ) : getLang() === "en" ? (
               `Delete${sel.size ? ` ${sel.size}` : ""}`
             ) : (

@@ -50,13 +50,13 @@ export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer
   if (done?.ok) return <JoinedView done={done} />;
   return (
     <div className="space-y-2.5 text-[13px]">
-      <div className="text-[15px] font-semibold">{`${name} ${t("邀请你一起协作")}`}</div>
+      <div className="text-[15px] font-semibold">{t("{name} 邀请你一起协作", { name })}</div>
       <InspectStatus info={info} onRetry={() => { setInfo(null); setRound((n) => n + 1); }} />
       {info?.reachable && (
         <>
           <label className="flex cursor-pointer items-center gap-2 text-xs">
             <input type="checkbox" className="checkbox checkbox-xs" checked={twoWay} onChange={(e) => setTwoWay(e.target.checked)} />
-            <span>{`${t("也让")} ${name} ${t("找我的 agent")}`}</span>
+            <span>{t("也让 {name} 找我的 agent", { name })}</span>
           </label>
           {twoWay && <ScopePicker localAgents={localAgents} sel={sel} onChange={setSel} />}
           {done && !done.ok && (done.error || "").includes("--force") ? (
@@ -104,9 +104,9 @@ function InspectStatus({ info, onRetry }: { info: Inspect | null; onRetry: () =>
       <div className="space-y-0.5 text-xs">
         <div className="text-success">✓ {info.note ? t("经中继加入") : t("能连到对方")}</div>
         <div className="text-base-content/70">
-          {info.note ? t(info.note) : info.agents?.length ? `${t("加入后你可以找")}: ${info.agents.join(", ")}` : t("对方还没开放任何 agent 给你")}
+          {info.note ? t(info.note) : info.agents?.length ? t("加入后你可以找：{agents}", { agents: info.agents.join(", ") }) : t("对方还没开放任何 agent 给你")}
         </div>
-        {info.existing && <div className="text-base-content/50">{`${t("你已经连着")}「${info.existing}」${t("，加入会刷新这条连接")}`}</div>}
+        {info.existing && <div className="text-base-content/50">{t("你已经连着「{name}」，加入会刷新这条连接", { name: info.existing })}</div>}
       </div>
     ) : (
       <div className="space-y-1 text-xs">

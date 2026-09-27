@@ -83,7 +83,7 @@ function LocalFontsButton({ onFonts }: { onFonts: (families: string[]) => void }
       >
         {t("读取本机字体")}
       </button>
-      {state === "ok" && `${t("已读取")} ${count} ${t("个字体族，输入框可下拉选择")}`}
+      {state === "ok" && t("已读取 {n} 个字体族，输入框可下拉选择", { n: count })}
       {state === "denied" && t("读取被拒绝或失败")}
     </span>
   );

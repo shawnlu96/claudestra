@@ -38,7 +38,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
     setMsg("");
     const r = kind === "restart" ? await store.restartAgent(name) : await store.killAgent(name);
     setBusyKey("");
-    setMsg(r.ok ? `${name} ${t(kind === "restart" ? "已重启" : "已停止")}` : r.error || t("操作失败"));
+    setMsg(r.ok ? t(kind === "restart" ? "{name} 已重启" : "{name} 已停止", { name }) : r.error || t("操作失败"));
   };
 
   const rows = agents.filter((a) => !a.pinnedMaster);
