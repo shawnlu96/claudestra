@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 从开发机部署中继到一台主机：记下 commit → rsync 主仓库 → 远端 install.sh（幂等）→ 重启服务 → 看 healthz。
 # 用法：deploy/relay/deploy.sh <user@host> [远端目录，默认 /opt/claudestra]
-# 环境：RELAY_WITH_WEB=1 先在本机构建前端静态导出（web/out）并一起 rsync 到远端 web/out（中继托管前端，单元里的 RELAY_STATIC_DIR 指它）。
+# 环境：RELAY_WITH_WEB=1 先在本机构建前端静态导出（web/out）并一起 rsync 到远端 web/out（中继托管前端，单元里的 RELAY_STATIC_DIR 指它）；
+#       RELAY_WEB_BUILD_FLAGS 追加给 next build（软链 node_modules 的 git worktree 里 Turbopack 起不来，传 --webpack）。
 # 前提：远端能免密 ssh、是 root（install.sh 要建用户与装 systemd 单元）；第一次部署后还要按 self-host.md 改单元里的 RELAY_BASE 与配 nginx。
 set -euo pipefail
 
@@ -21,7 +22,8 @@ rsync -az --delete \
 # 前端静态站：构建与 rsync 是两步、不进管道，任何一步失败都停在这里（管道会吞掉 build 的退出码）
 if [ "${RELAY_WITH_WEB:-0}" = "1" ]; then
   echo "→ 构建前端静态导出（web/out）"
-  npm --prefix "${ROOT:?}/web" run build
+  # shellcheck disable=SC2086 # 故意按空格拆成多个 flag
+  npm --prefix "${ROOT:?}/web" run build -- ${RELAY_WEB_BUILD_FLAGS:-}
   [ -f "${ROOT:?}/web/out/index.html" ] || { echo "web/out 里没有 index.html：next.config 还不是 output: export？" >&2; exit 1; }
   rsync -az --delete "${ROOT:?}/web/out/" "${TARGET:?}:${REMOTE_DIR:?}/web/out/"
 fi
