@@ -3,7 +3,7 @@
  * serve 冲突 / 明文入口。
  *
  * 为什么要有：2026-09 诊断发现生产 HTTPS 入口的 ts.net 证书只剩 19 天、没有任何续签任务，
- * doctor 却显示「全部正常」。证书一过期，手机上的 PWA / 推送 / 语音 / Passkey 一起断，
+ * doctor 却显示「全部正常」。证书一过期，手机上的 PWA / 推送 / 语音一起断，
  * 而那时人通常不在电脑前。
  *
  * 只读：判定是纯函数（remoteAccessChecks，单测覆盖），I/O 全在 lib/tailscale 的
@@ -41,7 +41,7 @@ export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState 
       return out;
     }
     out.push({ group: G, name: "Tailscale", status: "warn",
-      detail: `${state}${relay.enabled ? "，中继也没连上" : "，也没配中继"} —— 手机只能在同一局域网里用，出门就断`,
+      detail: `${state}${relay.enabled ? "，中继也没连上" : "，也没配中继"} —— 手机只能在同一局域网里用（还要 BRIDGE_BIND=0.0.0.0，默认只有本机能开），出门就断`,
       fix: !ts.installed
         ? "重跑 bun run setup 的「手机访问」一步：默认配中继（手机不装任何东西），也可选 Tailscale"
         : "打开 Tailscale 登录（macOS 首次还要在「系统设置」里允许系统扩展与 VPN 配置）；或重跑 bun run setup 的「手机访问」改走中继" });
@@ -62,7 +62,7 @@ export function remoteAccessChecks(r: RemoteAccessReport, relay: RelayLinkState 
     out.push({ group: G, name: "HTTPS 入口", status: "ok", detail: "Tailscale 侧没配（可选）—— HTTPS 由中继地址提供" });
   } else if (https.length === 0) {
     out.push({ group: G, name: "HTTPS 入口", status: "warn",
-      detail: "没有 —— 明文入口下语音输入、推送、Passkey、完整 PWA 都用不了（浏览器要求安全上下文）",
+      detail: "没有 —— 明文入口下语音输入、推送、完整 PWA 都用不了（浏览器要求安全上下文）",
       fix: ts.httpsEnabled
         ? "重跑 bun run setup 的「手机访问」一步（会先查 443 占用，经你同意再配 tailscale serve）"
         : "先在 Tailscale 管理后台 DNS 页开启 HTTPS Certificates，再重跑 bun run setup" });

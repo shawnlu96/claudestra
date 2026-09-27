@@ -12,6 +12,7 @@
  */
 
 import { resolveBridgePort } from "./bridge-url.js";
+import { claudeAccountChecks, parseAuthStatus, parseClaudeVersion } from "./claude-account.js";
 import { parseDotenv, readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR, TMUX_SOCK } from "./paths.js";
 import { checkStateFiles, checkUndeliveredAlerts, staleInstallEnvCheck } from "./doctor-state.js";
@@ -93,6 +94,10 @@ async function checkRuntime(): Promise<Check[]> {
     ? { group: g, name: "claude", status: "ok", detail: firstLine(claude.out) }
     : { group: g, name: "claude", status: "fail", detail: "PATH 里找不到 claude",
         fix: "装 Claude Code：npm i -g @anthropic-ai/claude-code（或 brew install --cask claude-code）" });
+  if (claude.ok) {
+    const auth = parseAuthStatus((await sh(["claude", "auth", "status", "--json"])).out);
+    out.push(...claudeAccountChecks({ version: parseClaudeVersion(claude.out), auth }, g));
+  }
 
   const tmux = await sh(["tmux", "-V"]);
   out.push(tmux.ok

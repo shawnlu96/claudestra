@@ -165,6 +165,11 @@ Put Caddy/nginx with TLS in front of the bridge port on a domain you own. Keep i
 - **Never** port-forward `3847` raw to the internet; put rate limiting / an IP
   allowlist at the proxy. The pairing flow is brute-force-limited, but the surface
   is still your machine.
+- The proxy **must set `X-Forwarded-For`** (overwriting whatever the client sent), plus
+  `X-Forwarded-Proto` and `X-Forwarded-Host`. The bridge treats "loopback socket with no
+  `X-Forwarded-For`" as this machine — one-click full pairing and no control-plane
+  token — so a proxy that forwards to `127.0.0.1` without it hands that to the internet.
+  Caddy sets it by default; nginx needs `proxy_set_header X-Forwarded-For $remote_addr;`.
 - Route `/api/v1/*` for **peers** to the peer-only ingress port (below), not to the
   bridge port.
 
