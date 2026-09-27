@@ -6,6 +6,7 @@ import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { getLang, t, useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./runtime-badge";
+import { stats } from "@/lib/api/system";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
@@ -77,9 +78,8 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
     // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
     // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
     store.refreshAgents();
-    fetch(force ? "/api/stats?refresh=1" : "/api/stats")
-      .then((r) => r.json())
-      .then((j: { global?: GlobalStats; agents?: StatAgent[] }) => {
+    stats<{ global?: GlobalStats; agents?: StatAgent[] }>(force)
+      .then((j) => {
         setG(j.global ?? null);
         setStatAgents(Array.isArray(j.agents) ? j.agents : []);
         // bridge 刚重启时账号 gauge 缓存为空——本次请求已在服务端触发后台抓取,

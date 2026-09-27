@@ -12,6 +12,7 @@ import { Composer } from "./composer";
 import { Message } from "./message-list";
 import { ExportHeader, type ExportMeta } from "./export-header";
 import { getGrammarVersion } from "@/components/domd/prism";
+import { useVersionInfo } from "../../machines/use-version";
 
 /**
  * 分享模式的底部 dock（顶替输入框的位置）：已选数量 / 导出语言 / 导出 HTML / 导出 PDF / 返回对话。
@@ -77,20 +78,8 @@ async function packExport(host: HTMLElement, title: string, lang: Lang): Promise
  *  那是本机 SSH 账号，不该跟着文件发出去（peer review #43）。 */
 function useExportMeta(): ExportMeta {
   const nickname = useChatStore((s) => s.state.profile.nickname);
-  const [ver, setVer] = useState<{ version: string; commit: string }>({ version: "", commit: "" });
-  useEffect(() => {
-    let dead = false;
-    fetch("/api/version")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((v: { version?: string; commit?: string } | null) => {
-        if (!dead && v) setVer({ version: v.version ?? "", commit: v.commit ?? "" });
-      })
-      .catch(() => null /* 版本拿不到抬头就不写版本，导出照常 */);
-    return () => {
-      dead = true;
-    };
-  }, []);
-  return { ...ver, exporter: nickname };
+  const ver = useVersionInfo(); // 版本拿不到抬头就不写版本，导出照常
+  return { version: ver?.version ?? "", commit: ver?.commit ?? "", exporter: nickname };
 }
 
 /** 等离屏树真正渲染完再打包（peer review #43「固定等 600ms 选得多可能没渲染完」）：

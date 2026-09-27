@@ -6,6 +6,7 @@ import { PI_THINKING_LEVELS, piModelLabel } from "../claude-options";
 import { useT } from "@/lib/i18n";
 import { useKeepInViewport } from "@/lib/keep-in-viewport";
 import { postRuntimeSwitch, useDismiss } from "../runtime-switch";
+import { runtimeModels } from "@/lib/api/agents";
 import { EffortButtons, SwitcherBadge } from "./switcher-parts";
 
 /**
@@ -55,13 +56,8 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
     setLoading(true);
     setErr("");
     try {
-      const r = await fetch("/api/agents/pi-settings");
-      const j = (await r.json().catch(() => ({}))) as {
-        data?: { models?: PiModelOption[] };
-        error?: string;
-      };
-      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-      setModels(j.data?.models ?? []);
+      const j = await runtimeModels<{ models?: PiModelOption[] }>("pi");
+      setModels(j.models ?? []);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -79,7 +75,7 @@ export function PiModelSwitcher({ agent }: { agent: AgentSession }) {
   const apply = async (patch: { model?: string; effort?: string }) => {
     setSaving(patch.model ?? patch.effort ?? "");
     setErr("");
-    const e = await postRuntimeSwitch("/api/agents/pi-settings", { agent: agent.name, ...patch }, t("切换失败"));
+    const e = await postRuntimeSwitch("pi", agent.name, patch, t("切换失败"));
     setSaving(null);
     if (e) return setErr(e);
     store.refreshAgents();

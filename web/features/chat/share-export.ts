@@ -2,8 +2,8 @@
  * 导出的「打包」环节（无 React）：把离屏渲染好的 DOM 变成一个自包含 HTML 文件。
  *  - collectCss：把页面当前生效的全部样式抄进去——Next 编译出的 CSS chunk、do-md 用
  *    adoptedStyleSheets 挂的构造样式表、Prism 主题；跨域样式表读不到 cssRules，退回 <link>。
- *  - inlineImages：附件图片走带登录态的 BFF 端点，离线文件打不开 → 取回来转 data URL
- *    内联（单张超上限只留 alt）。
+ *  - inlineImages：附件图片在页面里已是 object URL（<AuthImg> 带凭据取回的 blob）→ 转 data URL
+ *    内联（单张超上限只留 alt）；同源 <link> 样式表照常 fetch。
  *  - buildHtmlDoc：拼成完整文档，主题按导出那一刻的明 / 暗定死，附打印样式。
  *  - deliverFile / printHtml：给到用户。分享 / 打印都要用户手势，调用方放在按钮里。
  */
@@ -42,7 +42,7 @@ export async function collectCss(doc: Document): Promise<{ css: string; links: s
       })();
       if (sameOrigin) {
         try {
-          const res = await fetch(sheet.href, { credentials: "include" });
+          const res = await fetch(sheet.href);
           if (res.ok) {
             parts.push(await res.text());
             continue;
@@ -74,7 +74,7 @@ export async function collectCss(doc: Document): Promise<{ css: string; links: s
 async function toDataUrl(src: string): Promise<string | null> {
   try {
     // 15s 上限：一张不回的图降级成 alt 文本，别让整个导出卡住
-    const res = await fetch(src, { credentials: "include", signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(src, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) return null;
     const blob = await res.blob();
     if (blob.size > IMG_INLINE_MAX) return null;

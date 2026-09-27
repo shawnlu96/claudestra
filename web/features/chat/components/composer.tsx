@@ -8,6 +8,9 @@ import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
 import { UpdateHintBanner } from "./update-hint-banner";
 import { clearDraft, loadDraft, saveDraft } from "../drafts";
+import { agentSkills } from "@/lib/api/chat";
+import { skillUsed } from "@/lib/api/settings";
+import { transcribe } from "@/lib/api/system";
 
 
 const MAX_FILES = 5;
@@ -206,11 +209,9 @@ export function Composer() {
     }
     setSkills([]);
     let dead = false;
-    fetch(`/api/chat/skills?agent=${encodeURIComponent(active)}`)
-      .then((r) => r.json())
-      .then((j: { commands?: SlashCmd[] }) => {
+    agentSkills<SlashCmd>(active)
+      .then((cmds) => {
         if (dead) return;
-        const cmds = Array.isArray(j.commands) ? j.commands : [];
         skillsCacheRef.current[active] = cmds;
         setSkills(cmds);
       })
@@ -323,18 +324,11 @@ export function Composer() {
         }
         setRecState("busy");
         try {
-          const fd = new FormData();
-          fd.append("audio", blob, `rec.${type.includes("mp4") ? "m4a" : "webm"}`);
-          const res = await fetch("/api/chat/transcribe", { method: "POST", body: fd });
-          const j = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
-          if (res.ok && typeof j.text === "string") {
-            if (j.text) setText((prev) => (prev ? `${prev}${j.text}` : j.text!));
-            else flashRecErr("没听清，再试一次");
-          } else {
-            flashRecErr(j.error || "识别失败");
-          }
-        } catch {
-          flashRecErr("识别请求失败");
+          const j = await transcribe(blob, `rec.${type.includes("mp4") ? "m4a" : "webm"}`);
+          if (j.text) setText((prev) => (prev ? `${prev}${j.text}` : j.text!));
+          else flashRecErr("没听清，再试一次");
+        } catch (e) {
+          flashRecErr((e as Error).message || "识别请求失败");
         } finally {
           setRecState("idle");
         }
@@ -493,11 +487,7 @@ export function Composer() {
     // Skill 使用计数埋点(面板排序的频次数据源)——手打 / 和面板选择都覆盖
     const m = /^\/([\w:-]+)/.exec(cur.trim());
     if (m) {
-      void fetch("/api/skills/prefs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: m[1] }),
-      }).catch(() => {});
+      void skillUsed(m[1]).catch(() => {}); // 计数埋点丢了只影响面板排序
     }
     store.send(cur, files.length ? files : undefined);
     setText("");

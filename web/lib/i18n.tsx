@@ -2,6 +2,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 // 字典集中在 lib/i18n-dict.ts（纯数据，中文原文 → 英文）
 import { DICT } from "./i18n-dict";
+import { putSettings } from "./api/settings";
 
 /**
  * 轻量 i18n（owner 2026-07-18「英文版 + 切换语言」）。
@@ -36,16 +37,13 @@ export function setLang(l: Lang) {
   try {
     document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
   } catch {}
-  // 同步落盘服务端(fire-and-forget):单用户部署,BFF 生成的带变量文案
-  // (识别失败/Bridge 错误/auto 拦截提示等)跟随此偏好(lib/server-lang.ts)
-  try {
-    void fetch("/api/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lang: l }),
-    }).catch(() => {});
-  } catch {}
+  syncLang(l);
   subs.forEach((f) => f());
+}
+
+/** 同步落盘当前机器（fire-and-forget）：bridge 生成的带变量文案（转写失败 / 拦截提示等）跟随此偏好 */
+function syncLang(l: Lang) {
+  void putSettings({ lang: l }).catch(() => {}); // 机器离线 / 还没配对：偏好本地已生效，下次切换再同步
 }
 
 /** mount 后初始化：显式选择 > 系统语言 > zh。不落盘（跟随系统的用户换系统语言要跟着变）。 */
@@ -63,15 +61,9 @@ function initLang() {
     } catch {}
     subs.forEach((f) => f());
   }
-  // 把实际生效的语言同步到服务端(幂等 fire-and-forget)——「跟随系统」推断
-  // 出 en 时,服务端 config 若还停在默认 zh,BFF 文案会跟界面错位
-  try {
-    void fetch("/api/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lang }),
-    }).catch(() => {});
-  } catch {}
+  // 把实际生效的语言同步到当前机器(幂等)——「跟随系统」推断出 en 时,机器若还停在默认 zh,文案会跟界面错位。
+  // 机器要等配置 + 清单就位（MachineGate）才有基址，这里晚一拍再发
+  setTimeout(() => syncLang(lang), 3000);
 }
 
 export function useLang(): Lang {

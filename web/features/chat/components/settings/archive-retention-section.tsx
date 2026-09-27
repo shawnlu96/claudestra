@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { Section } from "./section";
+import { getArchiveRetention, putArchiveRetention } from "@/lib/api/settings";
 
 /** 归档保留天数（0 = 永不自动清理）。缺省 90 天 —— 超期由 bridge 的每日兜底删除。 */
 export function ArchiveRetentionSection() {
@@ -10,23 +11,16 @@ export function ArchiveRetentionSection() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
-    fetch("/api/settings/archive-retention")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { data?: { days?: number } } | null) => setDays(j?.data?.days ?? 90))
+    getArchiveRetention()
+      .then((j) => setDays(j.days ?? 90))
       .catch(() => setDays(90));
   }, []);
   const save = async (next: number) => {
     setSaving(true);
     setSaved(false);
     try {
-      const res = await fetch("/api/settings/archive-retention", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ days: next }),
-      });
-      const j = (await res.json()) as { data?: { days?: number }; error?: string };
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
-      setDays(j.data?.days ?? next);
+      const j = await putArchiveRetention(next);
+      setDays(j.days ?? next);
       setSaved(true);
     } catch {
       setSaved(false);

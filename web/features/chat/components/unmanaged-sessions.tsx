@@ -1,7 +1,9 @@
 "use client";
 import { useCallback, useEffect, useState, useRef } from "react";
 import { fmtAgo } from "../fmt-time";
-import { useT } from "@/lib/i18n";
+import { getLang, useT } from "@/lib/i18n";
+import { resumeSession } from "@/lib/api/agents";
+import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
 
 /**
@@ -147,13 +149,7 @@ export function UnmanagedSessions() {
 
   /** 拉一次会话清单（纯取数，不改状态）——挂载 effect 与 load() 共用一份 */
   const fetchSessions = useCallback(async (): Promise<SessionRow[]> => {
-    const res = await fetch("/api/sessions");
-    const json = (await res.json()) as {
-      data?: { sessions?: SessionRow[] };
-      error?: string;
-    };
-    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
-    return json.data?.sessions ?? [];
+    return (await sessionList<SessionRow>()).sessions;
   }, []);
 
   const load = useCallback(async () => {
@@ -200,13 +196,7 @@ export function UnmanagedSessions() {
   /** 列表里左滑直接处置（不必点进抽屉）；成功后重拉列表 */
   const manageFromList = async (s: SessionRow, action: "archive" | "delete") => {
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/manage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, runtime: s.runtime, cwd: s.cwd }),
-      });
-      const json = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      await sessionManage(s.sessionId, { action, runtime: s.runtime, cwd: s.cwd });
       setConfirming(null);
       await load();
     } catch (e) {
@@ -389,18 +379,12 @@ function SessionViewer({
   useEffect(() => {
     let cancelled = false;
     const qs = new URLSearchParams({ runtime: session.runtime, cwd: session.cwd, limit: "200" });
-    fetch(`/api/sessions/${encodeURIComponent(session.sessionId)}/history?${qs.toString()}`)
-      .then(async (res) => {
-        const json = (await res.json()) as {
-          data?: { messages?: HistoryMsg[] };
-          error?: string;
-        };
-        if (cancelled) return;
-        if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
-        setMessages(json.data?.messages ?? []);
+    sessionHistory<{ messages?: HistoryMsg[] }>(session.sessionId, qs)
+      .then((json) => {
+        if (!cancelled) setMessages(json.messages ?? []);
       })
-      .catch((e: Error) => {
-        if (!cancelled) setError(e.message);
+      .catch((e: unknown) => {
+        if (!cancelled) setError(sessionHistoryError(e, getLang() === "zh"));
       });
     return () => {
       cancelled = true;
@@ -415,13 +399,7 @@ function SessionViewer({
     setBusy(true);
     setError("");
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(session.sessionId)}/manage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, runtime: session.runtime, cwd: session.cwd }),
-      });
-      const json = (await res.json()) as { data?: { archived?: boolean }; error?: string };
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      await sessionManage(session.sessionId, { action, runtime: session.runtime, cwd: session.cwd });
       setNotice(
         action === "archive"
           ? t("已归档并从列表移除（内容留在归档目录，可找回）")
@@ -441,20 +419,9 @@ function SessionViewer({
     if (!n) return;
     setBusy(true);
     try {
-      const res = await fetch("/api/agents/resume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent: n,
-          sessionId: session.sessionId,
-          runtime: session.runtime,
-          cwd: session.cwd,
-        }),
-      });
-      const json = (await res.json()) as { data?: { hint?: string }; error?: string };
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      const json = (await resumeSession({ agent: n, sessionId: session.sessionId, runtime: session.runtime, cwd: session.cwd })) as { hint?: string };
       setNotice(
-        json.data?.hint ||
+        json.hint ||
           t("已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。")
       );
       setTimeout(onAdopted, 1500);

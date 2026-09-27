@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../chat-store";
 import { reportBootAndHideSplash } from "../boot-report";
 import { useT } from "@/lib/i18n";
-import { CLIENT_WEB_COMMIT } from "@/lib/build-info";
+import { CLIENT_COMMIT, CLIENT_VERSION, CLIENT_WEB_COMMIT } from "@/lib/build-info";
+import { bundleStale } from "@/lib/version-check";
+import { useVersionInfo } from "../../machines/use-version";
 
 /**
  * 全屏启动页：landing + 加载一体（2026-07-13 owner：进入先卡「暂无会话」很久、
@@ -31,21 +33,7 @@ export function Splash() {
   const [fading, setFading] = useState(false);
   const [gone, setGone] = useState(false);
   // 底部署名:版本 + commit id（owner:不一定每次改动都发版,commit 才定位得准）
-  const [ver, setVer] = useState<{ version: string; commit: string; webCommit: string } | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/version")
-      .then((r) => r.json())
-      .then((j: { version?: string; commit?: string; webCommit?: string }) => {
-        if (alive && (j.version || j.commit))
-          setVer({ version: j.version ?? "", commit: j.commit ?? "", webCommit: j.webCommit ?? "" });
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const ver = useVersionInfo();
 
   useEffect(() => {
     if (!ready || fading || gone) return;
@@ -97,15 +85,9 @@ export function Splash() {
           {ver.version && `v${ver.version}`}
           {ver.version && ver.commit && " · "}
           {ver.commit}
-          {/* 客户端 bundle 是否滞后(owner 2026-07-27 要的「对一下版本」)。
-              比的是「最后一个动过 web/ 的 commit」,不是 HEAD——拿 HEAD 比对时任何
-              只改 src/ 的后端提交都会亮黄字,而 bundle 一个字节都没变,是假警
-              (owner 2026-08-15 实报「一直显示有一个黄色」)。
-              CLIENT_WEB_COMMIT 由 build-info.ts 提供(构建前生成的源码文件),不再
-              走 DefinePlugin —— 那条路会被 webpack 缓存钉住旧号(owner 2026-08-22
-              「版本号还是不同」)。两边都取不到(裸包无 git)时不显示,别拿空串当不一致。 */}
-          {CLIENT_WEB_COMMIT && ver.webCommit && CLIENT_WEB_COMMIT !== ver.webCommit && (
-            <span className="text-warning/70"> · 本地 {CLIENT_WEB_COMMIT}</span>
+          {/* 客户端 bundle 是否滞后（规则见 lib/version-check.ts bundleStale）：有 webCommit 精确比，否则比 HEAD */}
+          {bundleStale(ver, { commit: CLIENT_COMMIT, webCommit: CLIENT_WEB_COMMIT, version: CLIENT_VERSION }) && (
+            <span className="text-warning/70"> · 本地 {CLIENT_WEB_COMMIT || CLIENT_COMMIT}</span>
           )}
         </div>
       )}

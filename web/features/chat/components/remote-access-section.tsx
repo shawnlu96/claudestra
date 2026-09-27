@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { renderSVG } from "uqr";
 import { useT } from "@/lib/i18n";
 import { copyText } from "@/features/chat/select-mode";
+import { remoteAccess } from "@/lib/api/system";
 
 /**
  * 设置 →「手机访问」：这台机器现在能从手机经哪些地址打开，每个地址能不能用、证书还剩几天。
@@ -159,10 +160,7 @@ function PlanHint({ snap }: { snap: Snapshot }) {
 
 async function fetchSnapshot(fresh = false): Promise<{ snap?: Snapshot; err?: string }> {
   try {
-    const r = await fetch(`/api/remote-access${fresh ? "?fresh=1" : ""}`);
-    const j = (await r.json()) as { data?: Snapshot; error?: string };
-    if (!r.ok || !j.data) return { err: j.error || `HTTP ${r.status}` };
-    return { snap: j.data };
+    return { snap: await remoteAccess<Snapshot>(fresh) };
   } catch (e) {
     return { err: (e as Error).message };
   }

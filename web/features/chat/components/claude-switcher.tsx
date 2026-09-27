@@ -8,6 +8,8 @@ import { PiModelSwitcher } from "./pi-model-switcher";
 import { CodexModelSwitcher } from "./codex-model-switcher";
 import { useT } from "@/lib/i18n";
 import { useKeepInViewport } from "@/lib/keep-in-viewport";
+import { claudeSettings } from "@/lib/api/agents";
+import type { ApiError } from "@/lib/api/client";
 
 /**
  * TopBar 的会话级模型/effort 徽章 + 快速切换器（owner 2026-07-23）。
@@ -54,20 +56,12 @@ export function ClaudeSwitcher({ agent }: { agent: AgentSession }) {
     setSaving(key);
     setErr("");
     try {
-      const res = await fetch("/api/agents/claude-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent: agent.name, ...patch }),
-      });
-      const j = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setErr(res.status === 409 ? t("回合进行中，等结束后再切") : j.error || t("切换失败"));
-        return;
-      }
+      await claudeSettings(agent.name, patch);
       store.refreshAgents();
       setOpen(false);
-    } catch {
-      setErr(t("切换失败"));
+    } catch (e) {
+      // 409 = agent 回合进行中（bridge 原样给状态码）
+      setErr((e as ApiError).status === 409 ? t("回合进行中，等结束后再切") : (e as Error).message || t("切换失败"));
     } finally {
       setSaving(null);
     }

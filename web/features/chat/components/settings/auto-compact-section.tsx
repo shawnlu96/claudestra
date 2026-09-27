@@ -3,6 +3,9 @@ import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { autoCompactOptions, fmtTokens, type AutoCompactState } from "./auto-compact-options";
 import { Section } from "./section";
+import { getAutoCompact, postAutoCompact } from "@/lib/api/settings";
+
+type AcResp = AutoCompactState & { ok?: boolean; error?: string };
 
 /** 自动存记忆+Compact(owner 2026-08-27「设置里看不到」):阈值+闲置门槛,写 config.json */
 export function useAutoCompact(open: boolean) {
@@ -15,8 +18,7 @@ export function useAutoCompact(open: boolean) {
     // autoCompact 配置
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开时重置：拆分前与语音 Key 同属一个 effect（那条 warning 留在 groq-key-section），不新增基线
     setAcMsg("");
-    fetch("/api/auto-compact")
-      .then((r) => r.json())
+    getAutoCompact<AcResp>()
       .then((j) => {
         if (j?.ok) setAc(j);
         else setAcMsg(j?.error || "读取失败");
@@ -29,12 +31,7 @@ export function useAutoCompact(open: boolean) {
     setAcBusy(true);
     setAcMsg("");
     try {
-      const r = await fetch("/api/auto-compact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const j = await r.json();
+      const j = await postAutoCompact<AcResp>(patch);
       if (j?.ok) setAc(j);
       else setAcMsg(j?.error || "保存失败");
     } catch {

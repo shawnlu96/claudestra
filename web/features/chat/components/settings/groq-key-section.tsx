@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import type { SharedBusy } from "./profile-section";
 import { Section } from "./section";
+import { getSettings, putSettings } from "@/lib/api/settings";
 
 /**
  * 语音识别的 Groq API Key。完整 key 永不回显——已配置时展示尾四位提示。
@@ -17,9 +18,8 @@ export function useGroqKey(open: boolean, { setBusy }: SharedBusy) {
     if (!open) return;
     setKeyInput("");
     setMsg("");
-    fetch("/api/settings")
-      .then((r) => r.json())
-      .then((j: { groqApiKeySet?: boolean; groqApiKeyHint?: string }) => {
+    getSettings()
+      .then((j) => {
         setHint(j.groqApiKeySet ? j.groqApiKeyHint || "已配置" : "");
       })
       .catch(() => {});
@@ -29,21 +29,12 @@ export function useGroqKey(open: boolean, { setBusy }: SharedBusy) {
     setBusy(true);
     setMsg("");
     try {
-      const res = await fetch("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ groqApiKey: value }),
-      });
-      const j = (await res.json()) as { ok?: boolean; error?: string; groqApiKeyHint?: string };
-      if (res.ok && j.ok) {
-        setHint(j.groqApiKeyHint || "");
-        setKeyInput("");
-        setMsg(value ? "已保存,语音输入即时生效" : "已清除");
-      } else {
-        setMsg(j.error || "保存失败");
-      }
-    } catch {
-      setMsg("保存失败");
+      const j = await putSettings({ groqApiKey: value });
+      setHint(j.groqApiKeyHint || "");
+      setKeyInput("");
+      setMsg(value ? "已保存,语音输入即时生效" : "已清除");
+    } catch (e) {
+      setMsg((e as Error).message || "保存失败");
     } finally {
       setBusy(false);
     }

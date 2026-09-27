@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ForceRow, peersAction, ScopePicker, type LocalAgent } from "./peers-shared";
+import { peersList } from "@/lib/api/system";
 
 type Inspect = { ok?: boolean; error?: string; name?: string; reachable?: boolean; agents?: string[]; hint?: string; existing?: string; note?: string };
 type Joined = { ok?: boolean; peer?: string; error?: string; hint?: string; warnings?: string[] };
@@ -32,9 +33,8 @@ export function JoinConfirm({ code, onJoined }: { code: string; onJoined?: (peer
   // 反向开放要勾本机 agent：勾选框第一次打开时才拉本机 agent 列表
   useEffect(() => {
     if (!twoWay || localAgents.length) return;
-    void fetch("/api/peers")
-      .then((r) => r.json())
-      .then((j: { localAgents?: LocalAgent[] }) => setLocalAgents(j.localAgents || []))
+    void peersList<{ localAgents?: LocalAgent[] }>()
+      .then((j) => setLocalAgents(j.localAgents || []))
       .catch(() => setLocalAgents([])); // 拉不到就是空列表，勾选器显示「无」，不影响单向加入
   }, [twoWay, localAgents.length]);
 

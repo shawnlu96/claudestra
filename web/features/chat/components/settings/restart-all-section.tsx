@@ -19,7 +19,7 @@ export function RestartAllSection() {
   const t = useT();
   const { armed, arm, disarm } = useArmedConfirm(8000);
   const job = useBackgroundJob({
-    endpoint: "/api/restart-all",
+    job: "restart-all",
     deadlineMs: 20 * 60_000,
     deadlineMsg: t("等了 20 分钟还没重启完，去看 restart-all.log"),
   });

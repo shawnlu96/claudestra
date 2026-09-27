@@ -20,6 +20,7 @@ import { ProjectMenu } from "./project-menu";
 import { PeersButton } from "./peers-button";
 import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
+import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
 import { Chevron, ProjectGroup } from "./project-group";
 import type { AgentSession } from "../type";
@@ -158,9 +159,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
     if (term.length < 2 || searching) return;
     setSearching(true);
     try {
-      const res = await fetch(`/api/chat/search?q=${encodeURIComponent(term)}`);
-      const json = (await res.json()) as { data?: ChatSearchHit[] };
-      setChatHits(Array.isArray(json.data) ? json.data : []);
+      setChatHits((await searchHistory(term)) as ChatSearchHit[]);
     } catch {
       setChatHits([]);
     }

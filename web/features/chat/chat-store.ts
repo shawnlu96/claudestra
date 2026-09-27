@@ -35,12 +35,18 @@ function revokeBlobUrls(urls: string[]) {
   }
 }
 
-/** 大总管保留名(与 lib/chat/bridge-api 的 MASTER_AGENT_NAME 同值;不 import——
- *  那个模块在 server 侧读 env,拖进 client bundle 没意义)。 */
-const MASTER_AGENT_NAME = "__master__";
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
+import { ApiError, DeviceInvalidError } from "@/lib/api/client";
+import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
+import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
+import { fetchHistory } from "@/lib/api/history";
+import { openAgentEventStream } from "@/lib/api/stream";
+import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
+import { getProfile, putProfile } from "@/lib/api/settings";
+import { projectsList } from "@/lib/api/system";
+import { markRead } from "@/lib/api/push";
 
 /**
  * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
@@ -248,12 +254,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
     this.lastHidden = { msg: m, index: idx, agent, sid, from, to, view: this.viewKey() };
     try {
-      const r = await fetch("/api/chat/messages/hide", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ agent, session: sid, from, to, hide: true }),
-      });
-      if (!r.ok) throw new Error(String(r.status));
+      await setHidden(agent, sid, from, to, true);
       this.clientLog(`hide: agent=${agent} sid=${sid.slice(0, 8)} seq=${from}-${to}`);
       return { ok: true };
     } catch {
@@ -268,14 +269,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!h) return false;
     this.restoreHidden(false);
     try {
-      const r = await fetch("/api/chat/messages/hide", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ agent: h.agent, session: h.sid, from: h.from, to: h.to, hide: false }),
-      });
-      return r.ok;
+      await setHidden(h.agent, h.sid, h.from, h.to, false);
+      return true;
     } catch {
-      return false;
+      return false; // 撤销没送到：本地已恢复显示，服务端仍隐藏，下次全量拉历史会再消失——用户再删一次即可
     }
   }
 
@@ -315,33 +312,19 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** 拉取个人资料（应用启动时调一次;失败保持空,不打扰）。 */
   public async loadProfile() {
     try {
-      const res = await fetch("/api/profile");
-      if (!res.ok) return;
-      const json = (await res.json()) as {
-        data?: { nickname?: string; avatar?: string; claudeNickname?: string; claudeAvatar?: string };
-      };
+      const p = await getProfile();
       this.produce((s) => {
-        s.profile = {
-          nickname: json.data?.nickname ?? "",
-          avatar: json.data?.avatar ?? "",
-          claudeNickname: json.data?.claudeNickname ?? "",
-          claudeAvatar: json.data?.claudeAvatar ?? "",
-        };
+        s.profile = p;
       });
     } catch {
-      /* 非关键 */
+      /* 资料是展示层数据：拿不到保持空，气泡显示默认头像 */
     }
   }
 
   /** 保存个人资料并更新本地状态。返回是否成功（设置面板据此提示）。 */
   public async saveProfile(p: ChatState["profile"]): Promise<boolean> {
     try {
-      const res = await fetch("/api/profile", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(p),
-      });
-      if (!res.ok) return false;
+      await putProfile(p);
       this.produce((s) => {
         s.profile = {
           nickname: p.nickname.trim().slice(0, 32),
@@ -360,10 +343,6 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return `cm${++this.seq}`;
   }
 
-  private gotoLogin() {
-    if (typeof window !== "undefined") window.location.href = "/login";
-  }
-
   // ─── agent 列表 ──────────────────────────────────────────
 
   public async loadAgents() {
@@ -371,15 +350,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.loadingAgents = true;
     });
     try {
-      const res = await fetch("/api/agents");
-      if (res.status === 401) return this.gotoLogin();
-      const json = (await res.json()) as { data?: AgentSession[] };
-      // 非 2xx（bridge 重启窗口的 502）别把列表清空——agents 一空,TopBar 的
-      // info 变 undefined,已打开的终端页/操作区整体卸载(2026-07-14 实证:
-      // 用户在终端页被「丢回聊天框」的元凶之一)。保留旧列表等下一轮。
-      if (!res.ok || !Array.isArray(json.data)) throw new Error(`HTTP ${res.status}`);
+      // 失败（bridge 重启窗口 / 凭据失效）别把列表清空——agents 一空,TopBar 的 info 变 undefined,
+      // 已打开的终端页/操作区整体卸载(2026-07-14 实证)。保留旧列表等下一轮。
+      const list = await apiLoadAgents();
       this.produce((s) => {
-        s.agents = json.data!;
+        s.agents = list;
         s.loadingAgents = false;
         s.agentsReady = true;
       });
@@ -398,9 +373,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    */
   public async loadProjects() {
     try {
-      const res = await fetch("/api/projects", { signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) return;
-      const json = (await res.json()) as { ok?: boolean; projects?: ProjectMeta[] };
+      const json = await projectsList<{ ok?: boolean; projects?: ProjectMeta[] }>();
       if (!json.ok || !Array.isArray(json.projects)) return;
       const next = json.projects;
       if (JSON.stringify(next) === JSON.stringify(this.state.projects)) return;
@@ -422,13 +395,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public async refreshAgents() {
     this.sweepStaleBgTasks(); // bg 卡陈旧收敛与网络无关,轮询节拍顺带跑
     try {
-      const res = await fetch("/api/agents", { signal: AbortSignal.timeout(10_000) });
-      if (res.status === 401) return;
-      const json = (await res.json()) as { data?: AgentSession[] };
-      // 同 loadAgents:502/坏响应不清列表(否则 15s 轮询撞上 bridge 重启窗口,
-      // 终端页随 TopBar 卸载而蒸发)
-      if (!res.ok || !Array.isArray(json.data)) return;
-      const next = json.data;
+      // 同 loadAgents:失败走 catch 不清列表(否则 15s 轮询撞上 bridge 重启窗口,终端页随 TopBar 卸载而蒸发)
+      const next = await apiLoadAgents();
       // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
       // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁。
       const cur = next.find((a) => a.name === this.state.activeAgent);
@@ -505,30 +473,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     opts?: { model?: string; effort?: string; project?: string; runtime?: string; piBase?: string }
   ): Promise<{ ok: boolean; error?: string; agent?: string }> {
     try {
-      const res = await fetch("/api/agents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name, dir, purpose,
-          model: opts?.model, effort: opts?.effort,
-          ...(opts?.project ? { project: opts.project } : {}),
-          // v2.23+ 运行时（Pi）/ 能力档案（继承全局 | 最小集）——Web 上也能建 Pi agent
-          ...(opts?.runtime ? { runtime: opts.runtime } : {}),
-          ...(opts?.piBase ? { piBase: opts.piBase } : {}),
-        }),
-      });
-      if (res.status === 401) {
-        this.gotoLogin();
-        return { ok: false, error: "未登录" };
-      }
-      const json = (await res.json()) as {
-        ok?: boolean;
-        error?: string;
-        agent?: string;
-      };
-      if (!res.ok || json.ok === false) {
-        return { ok: false, error: json.error || "创建失败" };
-      }
+      // 运行时（Pi / Codex）与能力档案随 opts 透传——Web 上也能建 Pi agent
+      const json = await apiCreateAgent({ name, dir, purpose, ...opts });
+      if (json.ok === false) return { ok: false, error: json.error || "创建失败" };
       await this.loadAgents();
       const created = json.agent || name;
       await this.openAgent(created);
@@ -586,17 +533,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     name: string
   ): Promise<{ ok: boolean; error?: string }> {
     try {
-      const res = await fetch(`/api/agents/${action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      if (res.status === 401) {
-        this.gotoLogin();
-        return { ok: false, error: "未登录" };
-      }
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || json.ok === false) {
+      const json = (await apiLifecycle(action, name)) as { ok?: boolean; error?: string };
+      if (json.ok === false) {
         return {
           ok: false,
           error:
@@ -633,13 +571,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     try { localStorage.setItem("cstra_last_agent", name); } catch { /* 隐私模式等 */ }
     // v2.21.1+ 打开会话 = 已读:联动清掉其他设备/平台上该 agent 的通知
     // (owner 2026-08-30「一处点完,他处取消」)。fire-and-forget,失败无感。
-    if (name !== MASTER_AGENT_NAME) {
-      void fetch("/api/push/read", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent: name }),
-      }).catch(() => {});
-    }
+    if (name !== MASTER_AGENT_NAME) void markRead(name).catch(() => {}); // 失败无感：下次打开 / 收到回复再补
     // 切走前把当前会话快照进缓存，回来时原样恢复（见 messageCache 注释）。
     // ⚠ 只存非空快照:加载中/加载失败时切走会把 [] 存进去,下次打开命中
     // 空缓存(truthy!)→ 跳过 loading 态直接渲染「发送第一条消息」空态,
@@ -728,17 +660,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.loadingOlder = true;
     });
     try {
-      const res = await fetch(
-        `/api/chat/history?agent=${encodeURIComponent(name)}&before=${beforeSeq}&session=${encodeURIComponent(sid)}`
-      );
-      if (res.status === 401) return this.gotoLogin();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as {
-        data?: ChatMessage[];
-        sessionId?: string;
-        stitched?: boolean;
-        hasMore?: boolean;
-      };
+      const json = await fetchHistory(name, { before: beforeSeq, session: sid });
       if (gen !== this.openGen) return; // 已切走
       const raw = json.data ?? [];
       const respSid = json.sessionId || sid;
@@ -805,13 +727,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.telemetry = null;
     });
     try {
-      const res = await fetch(
-        `/api/chat/history?agent=${encodeURIComponent(name)}&session=${encodeURIComponent(sessionId)}&before=${seq + 26}`,
-        { signal: AbortSignal.timeout(30_000) }
-      );
-      if (res.status === 401) return this.gotoLogin();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as { data?: ChatMessage[]; hasMore?: boolean };
+      const json = await fetchHistory(name, { session: sessionId, before: seq + 26, signal: AbortSignal.timeout(30_000) });
       if (gen !== this.openGen) return; // 已切走/已退出
       this.produce((s) => {
         s.messages = hydrateHistoryMessages(json.data ?? []);
@@ -850,13 +766,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.loadingNewer = true;
     });
     try {
-      const res = await fetch(
-        `/api/chat/history?agent=${encodeURIComponent(name)}&after=${afterSeq}&session=${encodeURIComponent(sid)}&browse=1`,
-        { signal: AbortSignal.timeout(30_000) }
-      );
-      if (res.status === 401) return this.gotoLogin();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as { data?: ChatMessage[]; hasMore?: boolean };
+      const json = await fetchHistory(name, { after: afterSeq, session: sid, browse: true, signal: AbortSignal.timeout(30_000) });
       if (gen !== this.openGen) return;
       const msgs = hydrateHistoryMessages(json.data ?? []);
       this.produce((s) => {
@@ -915,20 +825,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 只在真差到东西时补,免得心跳把「同步中」闪个不停。
     if (!quiet && gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
     try {
-      const res = await fetch(
-        `/api/chat/history?agent=${encodeURIComponent(name)}&session=${encodeURIComponent(cur.sid)}&after=${cur.lastSeq}`,
-        // 8s 短超时:唤醒头几秒网络栈未醒的悬挂要快速失败快速重试,
-        // 别像全量的 30s 那样把用户晾在空等里(2026-07-28 推送点入 20s 无消息)
-        { signal: AbortSignal.timeout(8_000) }
-      );
-      if (res.status === 401) return this.gotoLogin();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as {
-        data?: ChatMessage[];
-        rotated?: boolean;
-        lastSeq?: number;
-        hasMore?: boolean;
-      };
+      // 8s 短超时:唤醒头几秒网络栈未醒的悬挂要快速失败快速重试,
+      // 别像全量的 30s 那样把用户晾在空等里(2026-07-28 推送点入 20s 无消息)
+      const json = await fetchHistory(name, { session: cur.sid, after: cur.lastSeq, signal: AbortSignal.timeout(8_000) });
       if (gen !== this.openGen) return; // 已切走
       // 游标已被并发的对齐（全量 / 另一次差量）推进：这份差量过期，再应用就整段重复；只收掉自己亮的 pill
       if (this.historyCursor !== cur) return void (!quiet && this.produce((s) => { s.syncState = null; }));
@@ -1039,12 +938,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** 拉取当前 agent 的 Claude Code 原生任务清单(TaskCreate 落盘文件)。 */
   private async refreshCcTasks(name: string) {
     try {
-      const res = await fetch(`/api/chat/tasks?agent=${encodeURIComponent(name)}`);
-      if (!res.ok) return;
-      const j = (await res.json()) as { data?: CcTaskView[] };
+      const tasks = await agentTasks<CcTaskView>(name);
       if (this.state.activeAgent !== name) return; // 已切走
       this.produce((s) => {
-        s.ccTasks = j.data ?? [];
+        s.ccTasks = tasks;
       });
     } catch {
       /* 拉取失败不打扰,下次工具触发再试 */
@@ -1097,22 +994,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (gen === this.openGen) this.produce((s) => { s.syncState = "syncing"; });
     this.historyLoad = { agent: name, at: Date.now() };
     try {
-      const res = await fetch(
-        `/api/chat/history?agent=${encodeURIComponent(name)}`,
-        // 解冻窗口 fetch 悬挂 → 超时走既有重试。30s 不是拍脑袋:中日跨境慢链路
-        // 上 560kB 历史实测 13.9-15s,原 15s 线把「将成而未成」的请求斩于门前
-        // (2026-07-24 DevTools 截图:两笔 200 精确停在 15.00/15.01s,再来一发就是
-        // TimeoutError 三连→「历史加载失败」)
-        { signal: AbortSignal.timeout(30_000) }
-      );
-      if (res.status === 401) return this.gotoLogin();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as {
-        data?: ChatMessage[];
-        sessionId?: string;
-        lastSeq?: number | null;
-        hasMore?: boolean;
-      };
+      // 解冻窗口 fetch 悬挂 → 超时走既有重试。30s 不是拍脑袋:中日跨境慢链路
+      // 上 560kB 历史实测 13.9-15s,原 15s 线把「将成而未成」的请求斩于门前
+      // (2026-07-24 DevTools 截图:两笔 200 精确停在 15.00/15.01s,再来一发就是
+      // TimeoutError 三连→「历史加载失败」)
+      const json = await fetchHistory(name, { signal: AbortSignal.timeout(30_000) });
       if (gen !== this.openGen) return; // 已切走，丢弃
       // wire 瘦身还原:assistant 气泡的 content/toolCalls/replyText 从 segments 派生
       if (json.data?.length) json.data = hydrateHistoryMessages(json.data);
@@ -1309,11 +1195,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       const a = s.agents.find((x) => x.name === name);
       if (a && a.unread) a.unread = 0;
     });
-    void fetch("/api/push/read", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent: name }),
-    }).catch(() => {});
+    void markRead(name).catch(() => {}); // 失败无感：看着时的下一条回复会再触发
   }
 
   /** 打开某 agent 的持久 SSE 输出流。会话切换 / 重连共用。
@@ -1330,29 +1212,19 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const connCtrl = new AbortController();
     const connTimer = setTimeout(() => connCtrl.abort(), 10_000);
     try {
-      const res = await fetch(
-        `/api/chat/stream?agent=${encodeURIComponent(name)}${since ? `&since=${since}` : ""}`,
-        { signal: connCtrl.signal }
-      );
+      // 浏览器直接订阅 bridge /api/v1/events，按 agent 过滤 + 翻译成协议 v1 + 连流补拉 pending / bg 快照都在 lib/api/stream.ts
+      const body = await openAgentEventStream(name, { since, signal: connCtrl.signal, lang: getLang() });
       clearTimeout(connTimer);
       // v2.17.2 连接泄漏修复(peer 报告:单手机 40 条 ESTABLISHED,HTTP/1.1 池
       // 6 条耗尽后所有请求永久排队——iOS 上「一直加载中」):iOS Safari 对 fetch
       // body 的 reader.cancel() **不关底层 TCP 连接**,必须 AbortController.abort()。
       // connCtrl 从「只管握手超时」升级为流的全生命周期中止句柄;各早退路径
       // 也必须 abort,否则刚建立的连接就地成为僵尸。
-      if (res.status === 401) {
-        connCtrl.abort();
-        return this.gotoLogin();
-      }
       if (gen !== this.streamGen) {
         connCtrl.abort(); // 已切走——这条刚开的连接没人管了,必须亲手关掉
         return;
       }
-      const rawReader = res.body?.getReader();
-      if (!rawReader) {
-        connCtrl.abort();
-        return;
-      }
+      const rawReader = body.getReader();
       this.streamReader = rawReader;
       this.streamAbort = connCtrl;
       this.streamAgent = name;
@@ -1410,8 +1282,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         }
         processStreamEvent(this, evt);
       });
-    } catch {
-      /* 断流：保持静默，由下面的自动重连续 */
+    } catch (e) {
+      // 断流：保持静默，由下面的自动重连续。凭据失效除外——重连只会再吃一个 401，横幅（MachineGate）已在提示重新配对
+      if (e instanceof DeviceInvalidError) this.deviceInvalid = true;
     } finally {
       clearTimeout(connTimer);
       if (this.streamDog) {
@@ -1462,7 +1335,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 记录直播全丢，也不重拉历史（2026-07-12 真机：bridge 重启后用户盯着页面，
       // 后续处理过程 web 上完全没有）。仍是当前流才自动重连；走 maybeReconnect
       // 完整对齐（重拉历史把断流期间的消息补回来）。后台页交给 visibilitychange。
-      if (gen === this.streamGen && this.state.activeAgent === name) {
+      if (gen === this.streamGen && this.state.activeAgent === name && !this.deviceInvalid) {
         // v2.17.2+ 流断开可视化:该活着的流死了(含连接失败),顶栏亮「重连中」。
         // 稳态断连 1-10s 内就恢复,pill 一闪而过;网络真断则持续可见——用户看到
         // 的是「在重连」而不是无声的死页面(owner 2026-08-08)
@@ -1480,6 +1353,45 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         }, this.reconnectDelay);
       }
     }
+  }
+
+  /** 当前机器的凭据被拒（401）：停止自动重连，等用户重新配对（MachineGate 横幅）；切机器时复位 */
+  private deviceInvalid = false;
+
+  /**
+   * 切机器（顶栏 MachineSwitcher）：同一个 store 换数据源——断流、清空一切 per-机器状态（列表 / 消息 / 快照 / 游标），
+   * 从新机器重新拉。API 客户端已在 machines.setCurrent 时中止旧机器的在途请求，迟到的响应也不会落进来（machine_switched）。
+   */
+  public resetForMachine() {
+    this.detachActiveStream();
+    this.openGen++;
+    this.messageCache.clear();
+    this.pendingSends.clear();
+    this.historySessionId = null;
+    this.historyCursor = null;
+    this.olderCursor = null;
+    this.lastEventSeq = 0;
+    this.lastEventAgent = "";
+    this.deviceInvalid = false;
+    this.produce((s) => {
+      s.agents = [];
+      s.projects = [];
+      s.activeAgent = "";
+      s.messages = [];
+      s.agentsReady = false;
+      s.streaming = false;
+      s.awaitingChunk = false;
+      s.pendingAsk = null;
+      s.pendingPermission = null;
+      s.bgTasks = [];
+      s.ccTasks = [];
+      s.browsing = null;
+      s.historyError = false;
+      s.syncState = null;
+      s.streamDown = false;
+    });
+    void this.loadAgents();
+    void this.loadProfile();
   }
 
   /** 切走当前 agent：断前端流但不 abort 后端会话；自增代号令旧回调失效。 */
@@ -1744,80 +1656,49 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       });
     };
     try {
-      let res: Response;
-      // multipart：不手动设 Content-Type，浏览器自动带 boundary。抽成函数是因为
-      // 503 重连重试要原样重发一次（FormData 消费过不能复用）。
-      const buildForm = () => {
-        const fd = new FormData();
-        fd.append("agent", agent);
-        fd.append("text", wire);
-        for (const f of files!) fd.append("files", f);
-        return fd;
-      };
       // ⚠ 超时必须有(2026-07-27 丢消息实锤):iOS 上带附件的 multipart fetch
       // 可以既不 resolve 也不 reject 地永久挂起——没有超时的话失败完全静默,
       // 乐观气泡装作已送达,用户只在重开 PWA 后发现消息没了。附件上传给宽些。
+      // multipart 直接打 bridge 的 messages 端点（每次重试重建 FormData——消费过的不能复用）。
       const sendTimeout = () => AbortSignal.timeout(hasFiles ? 60_000 : 20_000);
-      if (hasFiles) {
-        res = await fetch("/api/chat/send", { method: "POST", body: buildForm(), signal: sendTimeout() });
-      } else {
-        res = await fetch("/api/chat/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent, text: wire }),
-          signal: sendTimeout(),
-        });
-      }
-      if (res.status === 401) return this.gotoLogin();
-      // 503 retryable = agent 活着、只是 channel-server 链路在重连（几秒内自愈）。
+      let result: SendResult | undefined;
+      // 503 / retryable = agent 活着、只是 channel-server 链路在重连（几秒内自愈）。
       // 静默退避重试，别弹「已断开」——owner 2026-07-25:「我进 console 看，你那边
-      // 还正在进行着上一轮的对话呢」。
-      for (let attempt = 0; res.status === 503 && attempt < 4; attempt++) {
-        await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
-        res = hasFiles
-          ? await fetch("/api/chat/send", { method: "POST", body: buildForm(), signal: sendTimeout() })
-          : await fetch("/api/chat/send", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ agent, text: wire }),
-              signal: sendTimeout(),
-            });
-        if (res.status === 401) return this.gotoLogin();
-      }
-      if (!res.ok) {
-        // 发送失败（agent 离线→502 / 超限→400 等）：解锁 + 附错误提示，
-        // 别让「停止」按钮 + 思考态一直卡死（此前给离线 agent 发消息就会一直转）。
-        const j = (await res.json().catch(() => ({}))) as { error?: string };
-        fail(j.error || `HTTP ${res.status}`);
-      }
-      else {
-        this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
-        // slash 直通（/compact、/context 这类 CC 原生命令走 tmux 注入）：没有常规
-        // 回合,不会有 done 事件——立即解除「正在回复」,并插一条系统线告知已注入。
-        const j = (await res.json().catch(() => ({}))) as {
-          data?: { slash?: boolean; ccText?: string };
-        };
-        if (j.data?.slash) {
-          this.produce((s) => {
-            s.streaming = false;
-            s.awaitingChunk = false;
-            // 撤掉乐观 user 气泡:slash 在 jsonl 里落 <command-name> → 历史渲染
-            // 成 system 分隔线,不是 user 消息——对账(只扫 user)永远配不上,
-            // 气泡会在每次 realign 后挂到列表末尾(与按钮点击同款错乱)。
-            // 信息由下面的注入提示线承载,刷新后与历史形态一致。
-            s.messages = s.messages.filter((m) => m.id !== optimisticId);
-            s.messages.push({
-              id: this.nextId(),
-              role: "system",
-              content:
-                getLang() === "zh"
-                  ? `⚡ 已注入 ${j.data?.ccText || "命令"} — 由 Claude Code 原生执行`
-                  : `⚡ Injected ${j.data?.ccText || "command"} — run natively by Claude Code`,
-              ts: new Date().toISOString(),
-            });
-          });
+      // 还正在进行着上一轮的对话呢」。发送失败（agent 离线 / 超限等）则解锁 + 附错误提示，
+      // 别让「停止」按钮 + 思考态一直卡死。
+      for (let attempt = 0; ; attempt++) {
+        try {
+          result = await sendMessage(agent, wire, files, sendTimeout());
+          break;
+        } catch (e) {
+          if (!(e instanceof ApiError && e.retryable) || attempt >= 4) throw e;
+          await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
         }
-        // 普通消息：输出经已打开的持久流回来
+      }
+      this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
+      // slash 直通（/compact、/context 这类 CC 原生命令走 tmux 注入）：没有常规
+      // 回合,不会有 done 事件——立即解除「正在回复」,并插一条系统线告知已注入。
+      // 普通消息：输出经已打开的持久流回来。
+      if (result?.slash) {
+        const ccText = result.ccText;
+        this.produce((s) => {
+          s.streaming = false;
+          s.awaitingChunk = false;
+          // 撤掉乐观 user 气泡:slash 在 jsonl 里落 <command-name> → 历史渲染
+          // 成 system 分隔线,不是 user 消息——对账(只扫 user)永远配不上,
+          // 气泡会在每次 realign 后挂到列表末尾(与按钮点击同款错乱)。
+          // 信息由下面的注入提示线承载,刷新后与历史形态一致。
+          s.messages = s.messages.filter((m) => m.id !== optimisticId);
+          s.messages.push({
+            id: this.nextId(),
+            role: "system",
+            content:
+              getLang() === "zh"
+                ? `⚡ 已注入 ${ccText || "命令"} — 由 Claude Code 原生执行`
+                : `⚡ Injected ${ccText || "command"} — run natively by Claude Code`,
+            ts: new Date().toISOString(),
+          });
+        });
       }
     } catch (e) {
       const timedOut = (e as Error).name === "TimeoutError";
@@ -2454,30 +2335,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
-  /** POST 一个交互回传（interrupt/permission/auq）到 BFF，统一处理 401/错误。 */
-  private async postAction(
-    path: string,
-    payload: Record<string, unknown>
-  ): Promise<{ ok: boolean; error?: string }> {
+  /** 跑一个交互回传（interrupt / permission / auq / clear），统一把 ApiError 变成 {ok, error}。 */
+  private async postAction(run: () => Promise<{ ok?: boolean; error?: string }>): Promise<{ ok: boolean; error?: string }> {
     try {
-      const res = await fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.status === 401) {
-        this.gotoLogin();
-        return { ok: false, error: "未登录" };
-      }
-      const json = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-      };
-      if (!res.ok || json.ok === false)
-        return { ok: false, error: json.error || "操作失败" };
+      const json = await run();
+      if (json.ok === false) return { ok: false, error: json.error || "操作失败" };
       return { ok: true };
     } catch (e) {
-      return { ok: false, error: (e as Error).message };
+      return { ok: false, error: (e as Error).message || "操作失败" };
     }
   }
 
@@ -2495,7 +2360,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     initMessage?: string
   ): Promise<{ ok: boolean; error?: string }> {
     if (this.state.activeAgent !== name) await this.openAgent(name);
-    const res = await this.postAction("/api/chat/clear", { agent: name });
+    const res = await this.postAction(() => clearAgentSession(name));
     if (!res.ok) return res;
     this.messageCache.delete(name);
     this.produce((s) => {
@@ -2523,7 +2388,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!agent) return { ok: false, error: "无活动会话" };
     if (Date.now() - this.lastInterruptAt < 3_000) return { ok: true };
     this.lastInterruptAt = Date.now();
-    const res = await this.postAction("/api/chat/interrupt", { agent });
+    const res = await this.postAction(() => interruptAgent(agent));
     // done 会经 SSE 回来解锁；这里乐观收敛
     if (res.ok)
       this.produce((s) => {
@@ -2543,7 +2408,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       s.pendingPermission = null;
     });
-    return this.postAction("/api/chat/permission", { agent, action });
+    return this.postAction(() => answerPermission(agent, action));
   }
 
   /** 提交 AskUserQuestion 选择。selections[i]=第 i 题选中的 option index 数组。 */
@@ -2555,11 +2420,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       s.pendingAsk = null;
     });
-    return this.postAction("/api/chat/auq", {
-      agent,
-      action: "submit",
-      selections,
-    });
+    return this.postAction(() => answerAuq(agent, "submit", selections));
   }
 
   /** 取消 AskUserQuestion（给 agent 发 Esc）。 */
@@ -2569,7 +2430,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       s.pendingAsk = null;
     });
-    return this.postAction("/api/chat/auq", { agent, action: "cancel" });
+    return this.postAction(() => answerAuq(agent, "cancel"));
   }
 }
 

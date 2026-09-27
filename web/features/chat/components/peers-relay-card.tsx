@@ -9,6 +9,7 @@ import { renderSVG } from "uqr";
 import { getLang, useT } from "@/lib/i18n";
 import { envSnippet, fmtRemaining, relayMode, remainingSeconds, type PairView, type RelayStatusView } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
+import { relayPairNew, relayStatus } from "@/lib/api/system";
 
 function OffBlock({ status }: { status: RelayStatusView }) {
   const t = useT();
@@ -67,13 +68,13 @@ function OnlineBlock({ status }: { status: RelayStatusView }) {
     setBusy(true);
     setErr("");
     try {
-      const res = await fetch("/api/relay/pair", { method: "POST" });
-      const j = (await res.json().catch(() => ({}))) as Partial<PairView> & { ok?: boolean; error?: string }; // 非 JSON（反代错页）按失败
-      if (!res.ok || !j.ok || !j.url || !j.code) {
+      const j = await relayPairNew<Partial<PairView> & { ok?: boolean; error?: string; link?: string }>();
+      if (!j.ok || !j.code || !(j.link || j.url)) {
         setErr(j.error || t("配对码生成失败"));
         return;
       }
-      setPair({ code: j.code, display: j.display ?? j.code, url: j.url, expiresAt: j.expiresAt ?? "" });
+      // link = 新前端的 /pair#<fp>.<secret>（扫码直接握手）；老 bridge 只有 url（子域名 /pair#<code>）
+      setPair({ code: j.code, display: j.display ?? j.code, url: j.link || j.url!, expiresAt: j.expiresAt ?? "" });
     } catch {
       setErr(t("配对码生成失败")); // 网络层失败：给一句人话，细节在网络面板
     } finally {
@@ -104,9 +105,7 @@ export function RelayCard() {
   const [status, setStatus] = useState<RelayStatusView | null | undefined>(undefined);
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/relay/status");
-      const j = (await res.json().catch(() => ({ ok: false }))) as RelayStatusView; // 非 JSON 按读不到
-      setStatus(res.ok ? j : { ...j, ok: false });
+      setStatus(await relayStatus<RelayStatusView>());
     } catch {
       setStatus({ ok: false }); // 请求本身失败：卡片显示读不到，30 秒后下一轮再试
     }

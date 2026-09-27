@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
+import { peersAction as peersApiAction } from "@/lib/api/system";
 
 /** Peer 弹窗各面板共用的类型与小组件（从 peers-modal.tsx 原样搬出，只加 export）。 */
 
@@ -32,14 +33,10 @@ export type ActionResult = {
 
 export async function peersAction(body: Record<string, unknown>): Promise<ActionResult> {
   try {
-    const res = await fetch("/api/peers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return (await res.json()) as ActionResult;
-  } catch {
-    return { ok: false, error: "网络错误" };
+    return await peersApiAction<ActionResult>(body);
+  } catch (e) {
+    // bridge 的 4xx 语义错误（R1 --force 提示等）message 原样透传给 UI
+    return { ok: false, error: (e as Error).message || "网络错误" };
   }
 }
 
