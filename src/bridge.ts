@@ -49,7 +49,7 @@ import {
   discordEditMessage,
   discordCreateChannel,
   discordDeleteChannel,
-  discordMoveChannel,
+  moveChannelRequest,
 } from "./bridge/discord-api.js";
 import {
   runManager,
@@ -73,6 +73,7 @@ import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { initPeerIngress, localProbeResponse, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
+import { initInbox, takeInbox } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
@@ -2281,18 +2282,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
-    case "move_channel": {
-      // v2.21+ project-assign 时频道随归属挪 category。web-only(local-*)无平台面,no-op
-      try {
-        if (!WEB_ONLY && !String(msg.channelId || "").startsWith("local-")) {
-          await discordMoveChannel(discord, msg.channelId, String(msg.category || ""), msg.renameFrom ? String(msg.renameFrom) : undefined);
-        }
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { ok: true } }));
-      } catch (err) {
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
-      }
-      break;
-    }
+    case "move_channel": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await moveChannelRequest(discord, WEB_ONLY, msg)) })); break;
+    case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws)) })); break;
 
     case "project_info": {
       // v2.21+ Phase 2:agent 自查项目归属——成员(在线状态/purpose)+ 目录。
@@ -3630,6 +3621,12 @@ const server = Bun.serve({
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
 initPeerIngress(serveApiRequest); startLegacyWebPort(bridgeFetch); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
+initInbox({
+  clients, held: heldLocalMsgs, calls: pendingAgentCalls, render: renderContentForLocal,
+  emitIn: (chatId, env) => emitEvent({ agent: agentLabelForChannel(chatId), chatId, type: "chat_message", data: {
+    direction: "in", from: env.from.kind === "local" ? env.from.agentName ?? "agent" : "?", fromId: "agent", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId,
+  } }),
+});
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，

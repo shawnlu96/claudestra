@@ -152,7 +152,7 @@ export async function discordEditMessage(
  * 频道随 agent 的 project 归属走。lockPermissions:false 保留频道自身的权限覆盖
  * (allowlist 隐藏策略是建频道时写在频道上的,同步 category 权限会把它冲掉)。
  */
-export async function discordMoveChannel(
+async function discordMoveChannel(
   discord: Client,
   channelId: string,
   categoryName: string,
@@ -276,5 +276,17 @@ export async function discordDeleteChannel(
   const channel = await discord.channels.fetch(channelId);
   if (channel && "delete" in channel) {
     await (channel as TextChannel).delete();
+  }
+}
+
+/** bridge 的 move_channel 请求（project-assign / 改名 / 合并）：web-only 或 local-* 频道没有 Discord 面，直接算成功 */
+export async function moveChannelRequest(discord: Client, webOnly: boolean, msg: any): Promise<{ result: { ok: true } } | { error: string }> {
+  try {
+    if (!webOnly && !String(msg.channelId || "").startsWith("local-")) {
+      await discordMoveChannel(discord, msg.channelId, String(msg.category || ""), msg.renameFrom ? String(msg.renameFrom) : undefined);
+    }
+    return { result: { ok: true } };
+  } catch (err) {
+    return { error: (err as Error).message };
   }
 }
