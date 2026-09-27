@@ -14,6 +14,16 @@ export interface StaticHit {
   cacheControl: string;
 }
 
+/**
+ * 托管前端 HTML 的 CSP（docs/design-hosted-frontend.md §8.7）：脚本只许同源文件（layout 里不再有内联脚本），样式允许内联
+ * （Tailwind 运行时注入的 style 属性 / daisyUI 主题），图片允许 data: / blob:（头像、附件的 object URL），worker 同源（SW），
+ * 不许被嵌 iframe。中继与 bridge 直托管都发同一份；改这里要两边一起验。
+ */
+export const STATIC_SITE_CSP = [
+  "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:", "font-src 'self' data:",
+  "connect-src 'self'", "worker-src 'self'", "manifest-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'",
+].join("; ");
+
 export const CACHE_IMMUTABLE = "public, max-age=31536000, immutable";
 export const CACHE_HTML = "no-cache, must-revalidate";
 export const CACHE_ASSET = "public, max-age=600";

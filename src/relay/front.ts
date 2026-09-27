@@ -13,7 +13,7 @@ import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, recor
 import {
   filterMachineRequestHeaders, filterMachineResponseHeaders, MACHINE_PREFIX, parseMachinePath, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, type MachinePath,
 } from "../lib/relay-machine-path.js";
-import { resolveExportedPath } from "../lib/static-site.js";
+import { resolveExportedPath, STATIC_SITE_CSP } from "../lib/static-site.js";
 import type { InstanceRecord } from "./directory.js";
 import { KeyedWindows } from "./limiter.js";
 import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
@@ -153,7 +153,8 @@ export class Front {
     const hit = this.d.staticDir ? resolveExportedPath(this.d.staticDir, p) : null;
     if (hit) {
       const file = Bun.file(hit.path);
-      return withHsts(new Response(req.method === "HEAD" ? null : file, { status: hit.status, headers: { "content-type": file.type, "cache-control": hit.cacheControl } }));
+      const csp = hit.path.endsWith(".html") ? { "content-security-policy": STATIC_SITE_CSP } : {};
+      return withHsts(new Response(req.method === "HEAD" ? null : file, { status: hit.status, headers: { "content-type": file.type, "cache-control": hit.cacheControl, ...csp } }));
     }
     if (p === "/") return html(200, homePage(this.d.base, url.searchParams.get("e") ?? undefined));
     return text(404, "not found");
