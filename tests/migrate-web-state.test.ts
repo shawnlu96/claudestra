@@ -50,6 +50,12 @@ beforeAll(() => {
   targetDb = join(root, "web-state.sqlite");
   mkdirSync(join(webDir, "db"), { recursive: true });
   writeLegacySettingsDb(join(webDir, "db", "settings.db"));
+  // 旧 web 的登录会话在另一个库 auth.db（与 settings.db 分开）
+  const auth = new Database(join(webDir, "db", "auth.db"));
+  auth.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)");
+  auth.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?)").run("live-session-000000000000000000", "shawn", "2099-01-01T00:00:00.000Z", "2026-09-20T00:00:00.000Z");
+  auth.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?)").run("dead-session-000000000000000000", "shawn", "2026-09-01T00:00:00.000Z", "2026-08-20T00:00:00.000Z");
+  auth.close();
   writeFileSync(join(webDir, "config.json"), JSON.stringify({ groqApiKey: "gsk_legacy_key_00000000000", lang: "en" }));
   writeFileSync(join(webDir, "client.log"), "old log\n");
 });
@@ -77,7 +83,9 @@ describe("migrateWebState", () => {
     });
     expect(r.config).toEqual({ groqApiKey: true, lang: true });
     expect(adopted).toEqual([{ groqApiKey: "gsk_legacy_key_00000000000", lang: "en" }]);
+    expect(r.sessions).toBe(1); // auth.db 里没过期的那条；过期的不搬
     const db = openWebState(targetDb);
+    expect(db.prepare("SELECT count(*) AS n FROM legacy_sessions").get()).toEqual({ n: 1 });
     expect(db.prepare("SELECT init_message FROM agent_settings WHERE agent = ?").get("agent-worker")).toEqual({ init_message: "读 HANDOFF" });
     expect(db.prepare("SELECT nickname, claude_nickname FROM user_profile WHERE id = 1").get()).toEqual({ nickname: "Shawn", claude_nickname: "小克" });
     expect(db.prepare("SELECT seq_from, seq_to FROM hidden_messages").all()).toEqual([{ seq_from: 3, seq_to: 5 }]);

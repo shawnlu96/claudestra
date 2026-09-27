@@ -140,12 +140,14 @@ export async function migrateWebState(o: MigrateOpts = {}): Promise<MigrateResul
   const settingsDb = join(webDir, "db", "settings.db");
   let tables: Record<string, TableCopy> | null = null;
   let sessions = 0;
-  if (existsSync(settingsDb)) {
-    const src = openSource(settingsDb);
+  // 旧 web 分两个库：设置在 settings.db，登录会话在 auth.db（web/lib/db/migrations/auth.ts）——会话两个都找，有表才搬
+  for (const file of [settingsDb, join(webDir, "db", "auth.db")]) {
+    if (!existsSync(file)) continue;
+    const src = openSource(file);
     try {
       const dst = openWebState(o.targetDb);
-      tables = copyWebStateTables(src, dst);
-      sessions = importLegacySessions(src, dst, now);
+      if (file === settingsDb) tables = copyWebStateTables(src, dst);
+      sessions += importLegacySessions(src, dst, now);
     } finally {
       src.close();
       if (o.targetDb) closeWebState(o.targetDb);
