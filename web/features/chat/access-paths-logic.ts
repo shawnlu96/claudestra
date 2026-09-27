@@ -48,7 +48,7 @@ export function accessRows(a: AccessPathsInfo | null, snap: EntriesView | null):
     const ts = snap.entries.find((e) => usable(e) && isTsNet(e.url));
     rows.push(
       ts
-        ? { id: "tailscale", state: "on", url: ts.url, note: "内容只在你自己的设备之间走；手机要装 Tailscale 并登录同一个账号" }
+        ? { id: "tailscale", state: "on", url: ts.url, note: "连接只在你自己的设备之间走（模型调用照常发给各家服务）；手机要装 Tailscale 并登录同一个账号" }
         : snap.tailscale.running
           ? { id: "tailscale", state: "partial", note: "Tailscale 连着，但还没有能用的 HTTPS 入口，见下方" }
           : { id: "tailscale", state: "off", note: snap.tailscale.installed ? "装了但没连上，见下方" : "没装。重跑 bun run setup 选「Tailscale」会一步步引导" },
@@ -58,7 +58,7 @@ export function accessRows(a: AccessPathsInfo | null, snap: EntriesView | null):
     const lan = a.lan;
     rows.push(
       lan.bindAll
-        ? { id: "lan", state: "on", url: lan.urls[0], note: "只在同一 Wi-Fi 下能用；明文，推送和语音输入用不了。手机打不开先查这台电脑的防火墙" }
+        ? { id: "lan", state: "on", url: lan.urls[0], note: "只在同一网络里能用；明文 http：扫码配对、推送、语音都用不了，要在配对页手输短码再批准。手机打不开先查这台电脑的防火墙" }
         : { id: "lan", state: "off", note: "bridge 只监听本机。要用就在 .env 写 BRIDGE_BIND=0.0.0.0 后重启 bridge（公共网络别开）" },
     );
   }
