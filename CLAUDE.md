@@ -136,20 +136,20 @@ bun src/manager.ts cron-history [name|id]
 # else a string), B opens/pastes it; B's bridge redeems at A automatically.
 # Single-use, 24h TTL, expiry/revoke also revokes the embedded token. Joining
 # exposes nothing of B (one-way grant); symmetric = B sends an invite back.
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (URL: relay if connected, else HTTPS entry/peer port)
-bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = optional reverse exposure)
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>]  # A: print one-click invite (URL: relay if connected, else HTTPS entry/peer port)
+bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>]  # B: paste invite, done (--agents = optional reverse exposure)
 bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
 bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + its embedded token
 # Legacy 3-step handshake (needed when the other side runs pre-v2.15):
-bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <my-bridge-url>] [--force] [--rotate]  # A: print invite string (--url is auto-detected if omitted: Tailscale first, then LAN)
-bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> [--force]           # B: store A, print receipt
+bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <my-bridge-url>] [--rotate]  # A: print invite string (--url is auto-detected if omitted: Tailscale first, then LAN)
+bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url>           # B: store A, print receipt
 bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
-bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged, effective immediately)
+bun src/manager.ts peer-http-scope <name> --agents <a,b|*>  # v2.11.1+: change inbound scope in place (token unchanged, effective immediately)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
 # send_to_agent target syntax: "<agent>@<peer>" or "peer:<peer>.<agent>"
-# master is NEVER shareable to peers (hard rule v2.15+, --force does not override;
+# master is NEVER shareable to peers (hard rule v2.15+;
 # legacy peer tokens listing master are cut off in agentInScope)
 
 # Versioning
@@ -171,7 +171,7 @@ bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly pol
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
 bun src/manager.ts token-list
 bun src/manager.ts token-revoke <tokenId|name>
-bun src/manager.ts create <name> <dir> --external   # mark agent as safe-to-expose (R1 guard)
+bun src/manager.ts create <name> <dir> --external   # mark safe-to-expose (R1 guard); toggle later: external <agent> on|off
 
 # Token usage aggregation (parses ~/.claude/projects/<slug>/<sessionId>.jsonl)
 bun src/manager.ts cost [--agent <name>] [--today|--week]

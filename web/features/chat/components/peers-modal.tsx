@@ -19,8 +19,8 @@ import { RelayCard } from "./peers-relay-card";
  * - v2.15+ 一键邀请(owner 2026-07-27「简化」):生成邀请 → 对方粘贴 → 自动完成,
  *   免掉旧三步握手的回执/accept。旧三步只剩 CLI(跨版本兼容),UI 不再展示。
  * - 移除 = 立即吊销对方 token;待兑换邀请可撤销(连带吊销内嵌 token)
- * R1 校验(未标 external / "*")在 manager 侧,UI 收到 --force 提示后
- * 弹「强制执行」二次确认——服务端是唯一裁判,前端不复刻规则。
+ * external 闸门(2026-09-27 起是正式闸门,lib/peer-scope-gate.ts):未开闸的 agent 与 "*" 服务端直接拒,
+ * 勾选器里也选不上(ScopePicker);--force 只剩 --rotate 类提示,UI 见到才弹「强制执行」。服务端是唯一裁判。
  * master 不出现在勾选器:服务端硬禁(--force 也不放行),前端连选项都不给。
  */
 interface PeerInfo {

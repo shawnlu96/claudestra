@@ -19,6 +19,8 @@ import type { AgentSession, ProjectMeta } from "../type";
 import { useT } from "@/lib/i18n";
 import { useArmedConfirm } from "../use-armed-confirm";
 import { ClearAgentModal } from "./clear-agent-modal";
+import { AgentInfoModal } from "./agent-info-modal";
+import { openAgentInfo } from "../agent-info";
 
 type MenuState = { agent: AgentSession; x: number; y: number } | null;
 type Page = "main" | "move" | "open-terminal" | "open-ide";
@@ -124,7 +126,8 @@ export function AgentMenu() {
       return;
     }
     closeAgentMenu();
-    if (id.startsWith("open:")) void openLocal("agent", name, id.slice(5)).then((r) => fail("打开失败:", r));
+    if (id === "info") openAgentInfo(name);
+    else if (id.startsWith("open:")) void openLocal("agent", name, id.slice(5)).then((r) => fail("打开失败:", r));
     else if (id === "clear") setClearFor(s.agent);
     else if (id === "kill") void store.killAgent(name).then((r) => fail("停止失败:", r));
     else if (id === "archive") void store.archiveAgent(name).then((r) => fail("归档失败:", r));
@@ -158,6 +161,8 @@ export function AgentMenu() {
         />
       )}
       {clearFor && <ClearAgentModal agent={clearFor} onClose={() => setClearFor(null)} />}
+      {/* 会话详情弹窗也在这里挂单实例（侧栏文件只许缩）；顶栏 ⓘ 与 Peer 面板都通过 ../agent-info 打开它 */}
+      <AgentInfoModal />
     </>,
     document.body,
   );

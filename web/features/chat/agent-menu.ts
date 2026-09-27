@@ -2,7 +2,7 @@ import type { AgentSession, ProjectMeta } from "./type";
 
 /**
  * 侧栏会话右键 / 长按菜单的**内容**（纯函数，无 React；渲染在 components/agent-menu.tsx）。
- * 菜单项随会话状态切换：运行中 = 重启 / 停止 / 清空 / 移动到 / 归档；已停止 = 启动 / 移动到 / 归档。
+ * 菜单项随会话状态切换：运行中 = 详情 / 重启 / 停止 / 清空 / 移动到 / 归档；已停止 = 详情 / 启动 / 移动到 / 归档。
  * 本机打开时（/api/host 报 local 且探测到程序）末尾再接「在 Finder 中显示 / 在终端打开 / 用 IDE 打开」，
  * project 菜单复用同一段 openItems。单测见 tests/web-agent-menu.test.ts。
  */
@@ -15,7 +15,7 @@ export interface MenuOpener {
 }
 
 export type OpenAction = `open:${string}` | "open-terminal" | "open-ide";
-export type AgentMenuAction = "restart" | "kill" | "clear" | "start" | "move" | "archive" | OpenAction;
+export type AgentMenuAction = "info" | "restart" | "kill" | "clear" | "start" | "move" | "archive" | OpenAction;
 
 export interface AgentMenuItem {
   id: AgentMenuAction;
@@ -48,12 +48,14 @@ export function buildAgentMenu(a: AgentSession, openers: MenuOpener[] = [], plat
   if (a.mock) return null;
   const open = openItems(openers, platform);
   if (a.pinnedMaster) return open.length ? open : null;
+  const info: AgentMenuItem = { id: "info", label: "详情", icon: "ⓘ" };
   const move: AgentMenuItem = { id: "move", label: "移动到", icon: "📁", submenu: true };
   const archive: AgentMenuItem = { id: "archive", label: "归档", icon: "🗄" };
   if (a.status !== "active") {
-    return [{ id: "start", label: "启动", icon: "▶" }, move, archive, ...open];
+    return [info, { id: "start", label: "启动", icon: "▶" }, move, archive, ...open];
   }
   return [
+    info,
     { id: "restart", label: "重启", icon: "↻" },
     { id: "kill", label: "停止", icon: "⏻", danger: true },
     // 清空放最下的生命周期项（顶栏菜单同款理由：破坏性最低但最常误触）

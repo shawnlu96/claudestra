@@ -9,14 +9,14 @@ const pj = (id: string, name = id, emoji?: string): ProjectMeta => ({ id, name, 
 const ids = (xs: { id: string }[]) => xs.map((x) => x.id);
 
 describe("buildAgentMenu（侧栏右键 / 长按菜单内容）", () => {
-  test("运行中：重启 / 停止 / 清空 / 移动到 / 归档，停止标红，移动到带二级", () => {
+  test("运行中：详情 / 重启 / 停止 / 清空 / 移动到 / 归档，停止标红，移动到带二级", () => {
     const items = buildAgentMenu(ag("w"))!;
-    expect(ids(items)).toEqual(["restart", "kill", "clear", "move", "archive"]);
+    expect(ids(items)).toEqual(["info", "restart", "kill", "clear", "move", "archive"]);
     expect(items.find((i) => i.id === "kill")?.danger).toBe(true);
     expect(items.find((i) => i.id === "move")?.submenu).toBe(true);
   });
   test("已停止：启动 / 移动到 / 归档——没有停止和清空", () => {
-    expect(ids(buildAgentMenu(ag("w", { status: "stopped" }))!)).toEqual(["start", "move", "archive"]);
+    expect(ids(buildAgentMenu(ag("w", { status: "stopped" }))!)).toEqual(["info", "start", "move", "archive"]);
   });
   test("大总管 / mock 没有菜单", () => {
     expect(buildAgentMenu(ag("m", { pinnedMaster: true }))).toBeNull();
