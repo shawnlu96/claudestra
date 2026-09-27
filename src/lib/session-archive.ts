@@ -15,9 +15,11 @@ import { ARCHIVE_ROOT as STATE_ARCHIVE_ROOT } from "./paths.js";
 import { agentRuntime } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
 import { existsSync, readdirSync } from "fs";
-import { copyFile, mkdir, readdir, stat } from "fs/promises";
+import { mkdir, readdir } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
+import { copyIfLarger } from "./archive-copy.js";
+import { archiveWorkflowDirs } from "./workflow-archive.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 
@@ -37,21 +39,6 @@ export interface ArchiveResult {
   ok: boolean;
   archived: string[]; // 归档产物的绝对路径
   note: string;
-}
-
-/** 源比已有归档大才复制（追加式 jsonl：更大 = 更全） */
-async function copyIfLarger(src: string, dest: string): Promise<boolean> {
-  try {
-    const s = await stat(src);
-    if (existsSync(dest)) {
-      const d = await stat(dest);
-      if (d.size >= s.size) return false;
-    }
-    await copyFile(src, dest);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Pi 的子代理产物：<stem>/<runId>/run-N/session.jsonl → 归档用的 id 与路径 */
@@ -83,7 +70,7 @@ function listPiSubagentJsonls(mainPath: string): Array<{ id: string; path: strin
 
 /**
  * 归档一个 agent 的某个 session：主 jsonl + subagents/*.jsonl（Pi 的子代理产物会
- * 落成与 Claude Code 同构的布局，见下方 listPiSubagentJsonls）。
+ * 落成与 Claude Code 同构的布局，见下方 listPiSubagentJsonls）+ workflow 目录（workflow-archive.ts）。
  * 落点 ~/.claude-orchestrator/archive/<agent>/<sessionId>[.jsonl|/subagents/]。
  * 源不存在（已被 CC 清理）→ ok:false 但不抛错，调用方 best-effort。
  */
@@ -140,6 +127,7 @@ export async function archiveSession(
       }
     } catch { /* best-effort */ }
   }
+  archived.push(...(await archiveWorkflowDirs(src.replace(/\.jsonl$/, ""), join(dir, sessionId))));
 
   return {
     ok: true,
