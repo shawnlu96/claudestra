@@ -155,6 +155,15 @@ describe("本机回环自动配对", () => {
 
 // 放最后：这一组把状态机的每分钟错误窗口打满，后面再跑别的配对都会 429
 describe("穷举防护", () => {
+  test("没连中继也能签：没有入口地址就只给短码与 fragment；--url 给了入口就拼出链接；指纹取本机实例密钥", () => {
+    const bare = issuePairing({}, {});
+    expect(bare).toMatchObject({ ok: true, link: null, url: null, base: null, slug: null });
+    expect(String(bare.fragment)).toMatch(/^[0-9a-f]{4}(-[0-9a-f]{4}){3}\.[A-Za-z0-9_-]{22}$/);
+    const withUrl = issuePairing({}, { url: "https://mac.ts.net/" });
+    expect(String(withUrl.link)).toBe(`https://mac.ts.net/pair#${withUrl.fragment}`);
+    expect(withUrl.fp).toBe(String(bare.fragment).split(".")[0]);
+  });
+
   test("HMAC 对不上 → 400 code invalid；连错 5 次 → 429", async () => {
     issuePairing(machine, {});
     for (let i = 0; i < 6; i++) {

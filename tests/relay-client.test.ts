@@ -165,6 +165,45 @@ describe("请求往返", () => {
   });
 });
 
+describe("推送（push / push-ack）", () => {
+  const SUB = { endpoint: "https://web.push.apple.com/x", keys: { p256dh: "p", auth: "a" } };
+  test("push 帧带 id 与请求体，ack 按 id 对回：ok / gone；welcome 的 push 能力进 info()", async () => {
+    const relay = startFakeRelay({
+      pushCaps: { vapidPublicKey: "PUB", apns: true },
+      pushAck: (f) => (f.kind === "apns" ? { t: "push-ack", id: f.id, ok: false, status: 410, gone: true, error: "Unregistered" } : { t: "push-ack", id: f.id, ok: true, status: 201 }),
+    });
+    opened.push(relay);
+    const { c, fp } = client(relay, "P1");
+    await until(() => c.state === "online");
+    expect(c.info().push).toEqual({ vapidPublicKey: "PUB", apns: true });
+    const [ok, gone] = await Promise.all([
+      c.push({ kind: "webpush", subscription: SUB, payload: "{}", ttl: 60 }),
+      c.push({ kind: "apns", token: "ab".repeat(32), payload: "{}", badge: 2 }),
+    ]);
+    expect(ok).toEqual({ ok: true, status: 201 });
+    expect(gone).toEqual({ ok: false, status: 410, gone: true, error: "Unregistered" });
+    const frames = relay.received.filter((r) => r.fp === fp && r.frame.t === "push");
+    expect(frames).toHaveLength(2);
+    expect(frames[0].frame).toMatchObject({ kind: "webpush", subscription: SUB, payload: "{}", ttl: 60 });
+    expect(typeof frames[0].frame.id).toBe("string");
+    expect(frames[0].frame.id).not.toBe(frames[1].frame.id);
+  });
+  test("老中继：info().push 为 null；不回 ack → pushTimeoutMs 后 timeout；断线在途全拒；离线直接拒 connection_lost", async () => {
+    const relay = startFakeRelay({ pushAck: () => null });
+    opened.push(relay);
+    const { c, fp } = client(relay, "P2", undefined, { timing: { ...FAST, pushTimeoutMs: 120 } });
+    await until(() => c.state === "online");
+    expect(c.info().push).toBeNull();
+    await expect(c.push({ kind: "webpush", subscription: SUB, payload: "{}" })).rejects.toMatchObject({ code: "timeout", origin: "client" });
+    const p = c.push({ kind: "webpush", subscription: SUB, payload: "{}" });
+    await relay.waitFor((r) => r.fp === fp && r.frame.t === "push" && relay.received.filter((x) => x.fp === fp && x.frame.t === "push").length === 2);
+    relay.drop(fp);
+    await expect(p).rejects.toMatchObject({ code: "connection_lost" });
+    await until(() => c.state !== "online");
+    await expect(c.push({ kind: "webpush", subscription: SUB, payload: "{}" })).rejects.toMatchObject({ code: "connection_lost" });
+  });
+});
+
 describe("断线、重连、退避", () => {
   test("在途请求以 connection_lost 拒绝；重连后 contacts 补发；info 报 offline", async () => {
     const relay = startFakeRelay();

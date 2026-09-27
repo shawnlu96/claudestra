@@ -76,10 +76,11 @@ claudestra-relay-auth-v2
 ### 2.4 welcome
 
 ```json
-{ "t": "welcome", "v": 2, "fp": "16f9-b5d1-30fb-8923", "slug": "mini", "name": "Shawn 的 Mac mini", "base": "relay.example.com" }
+{ "t": "welcome", "v": 2, "fp": "16f9-b5d1-30fb-8923", "slug": "mini", "name": "Shawn 的 Mac mini", "base": "relay.example.com",
+  "push": { "vapidPublicKey": "BJ…", "apns": true } }
 ```
 
-`slug` 是中继最终分配的（§5.1），实例 MUST 以它为准；`base` 让实例拼出自己的网页地址 `https://<slug>.<base>` 与配对 / 邀请链接。welcome 之后连接进入**在线**状态，才允许发业务帧。
+`slug` 是中继最终分配的（§5.1），实例 MUST 以它为准；`base` 让实例拼出自己的网页地址 `https://<slug>.<base>` 与配对 / 邀请链接。`push` 是中继的推送网关能力（§3.5）：有 `vapidPublicKey` 才能替实例投 Web Push，`apns` 说明有没有 APNs 凭据；老中继不带这个字段，实例按「不能推」处理、自己直发。welcome 之后连接进入**在线**状态，才允许发业务帧。
 
 ## 3. 请求、响应与流
 
@@ -131,6 +132,28 @@ claudestra-relay-auth-v2
 - `res` 头到达后 pending 转为**流态**：连续 `streamIdleMs`（默认 600 000）没有 `data` / `end` → 发起方收 `error stream_idle`、接收方收 `cancel`；总时长超过 `streamMaxMs`（默认 3 600 000）→ 同样处理，错误码 `stream_max`。隧道那头 HTTP 流中间没法报错，浏览器看到的只是提前结束的正文。
 - 同一连接上 `id` 与未完成的 pending 重复 → `error duplicate_id`。每连接在途 pending ≤ 64，请求帧 ≤ 120 / 分钟（隧道请求不计入实例的配额——那是中继替浏览器发的；它们的上限在 §6.1）。
 - 帧在一条连接上按序到达；中继 MUST 按收到顺序转发同一 `id` 的 `data`。不做重传：断线即失败，与直连 HTTP 断线同一种失败。
+
+### 3.5 push / push-ack（推送网关）
+
+一个 origin 只能有一份 Web Push 订阅，所以中继模式下浏览器用**中继的** VAPID 公钥订阅（`/app-config.json` 的 `vapidPublicKey`），把订阅交给每台已配对机器；机器要推时不自己签，而是请中继投递（设计：docs/design-hosted-frontend.md §7）。APNs 同理：官方 p8 只在中继上。持有完整订阅即视为有权推送——endpoint 只有订阅者与它交给的机器知道。
+
+```json
+{ "t": "push", "id": "r_…", "kind": "webpush", "subscription": { "endpoint": "https://…", "keys": { "p256dh": "…", "auth": "…" } }, "payload": "{\"title\":…}", "ttl": 3600 }
+{ "t": "push", "id": "r_…", "kind": "apns", "token": "<hex 设备 token>", "payload": "{\"title\":…}", "badge": 3 }
+{ "t": "push-ack", "id": "r_…", "ok": false, "status": 410, "gone": true }
+```
+
+| 字段 | 规定 |
+|---|---|
+| `id` | 同 `req`：发起方生成，本连接内唯一；`push-ack` 原样带回。不进 pending 表，与在途 `req` 的 `id` 互不相干 |
+| `kind` | `webpush` 或 `apns`；其它值 → `push-ack ok:false error:frame_invalid` |
+| `subscription` | 浏览器 `PushSubscription.toJSON()` 的 `endpoint` + `keys.p256dh` / `keys.auth`。endpoint MUST 是 https，且主机不能是回环 / 私网 / 链路本地的 IP 字面量或 `localhost`（SSRF），否则 `error: endpoint_forbidden` |
+| `payload` | 通知正文的 JSON **字符串**，≤ 4096 字符（`PUSH_MAX_PAYLOAD_CHARS`）；中继原样加密投递（Web Push）或按 APNs 形状包装（`aps.alert` 等，`src/lib/apns.ts`），不解释其它字段。中继看得见正文（与隧道明文同级） |
+| `ttl` / `badge` | 可选。`ttl` 秒（缺省 3600）；`badge` 覆盖 payload 里的角标数（给 APNs `aps.badge`） |
+| `token` | APNs 设备 token，32–256 位十六进制 |
+| `push-ack` | `ok` 投递成功；`status` 推送服务回的 HTTP 状态；`gone: true` = 订阅 / 设备已永久失效（Web Push 404 / 410；APNs 410 或 `BadDeviceToken` / `Unregistered` / `DeviceTokenNotForTopic`），实例 MUST 删记录；`error` 短码：`frame_invalid` `rate_limited` `endpoint_forbidden` `payload_invalid` `webpush_unavailable` `apns_unavailable`（中继没配对应凭据）`upstream_error` `send_failed`（网络层） |
+
+每台实例每分钟 ≤ 60 个 push 帧（`pushPerFpPerMinute`），超过回 `rate_limited`，不断线。实例侧等 `push-ack` 15 秒。中继日志只记 fp、kind、状态、耗时，不记 payload。
 
 ## 4. 联系人门控与 peer 路由
 
@@ -215,6 +238,28 @@ front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存�
 
 IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-For` 第一项，否则取连接对端。
 
+### 6.2 路径模式：`<base>/m/<fp>/api/v1/…`（docs/design-hosted-frontend.md）
+
+同一个主源下按机器指纹路由，前端由中继托管、按机器只转 API。与子域名模式并存到兼容截止；两者走同一条隧道（§3），差别只在 front：
+
+| 项 | 路径模式 |
+|---|---|
+| 匹配 | `^/m/<fp>(/…)?$`，fp 大小写不敏感；fp 形状不对 → `404 {ok:false,error:"machine_unknown"}` |
+| 路径规范化 | 去掉前缀后解一次百分号编码：必须落在 `/api/v1` 下；含 `.`/`..` 段、连续 `/`、`\`、控制字符、编码过的 `/` `\` `%` `.` → `400 {ok:false,error:"path_forbidden"}`；带 `Upgrade` → `426`。中继不是任意转发器，控制路由与静态文件永远到不了实例 |
+| 目标 | `byFp`：没登记 → `404 machine_unknown`；不在线 → `503 {ok:false,error:"machine_offline"}` + `retry-after: 10`（都是 JSON，调用方是 API 客户端） |
+| 发给实例的 req 帧 | `path` = 去前缀后的路径 + 查询串；头里客户端自带的 `x-forwarded-*` / `x-claudestra-relay-*` 一律丢弃后再加：`x-forwarded-for`、`x-forwarded-proto: https`、`x-forwarded-host: <base>`、`x-claudestra-relay-base`、**`x-claudestra-relay-mode: api`**、**`x-claudestra-relay-prefix: /m/<fp>`**；`Cookie` 只保留 `cstra_dev=…` 这一对（主源上别的 cookie 与这台机器无关） |
+| 实例侧 | 看到模式头就在进程内直接调 API（不经回环 HTTP，来源标记为 relay，不享回环豁免）；没有模式头 = 旧子域名隧道，照旧打本机 Web |
+| 回给浏览器的响应头 | `Set-Cookie` 只放名为 `cstra_dev` 的，属性一律改写为 `Path=/m/<fp>/; HttpOnly; Secure; SameSite=Strict`（保留 `Max-Age` / `Expires`；值为空 = 删除）；`clear-site-data`、`service-worker-allowed`、`alt-svc` 丢弃；根相对 `Location` 补上 `/m/<fp>` 前缀。一台机器影响不到主源上别的机器 |
+| 限流 | 与隧道相同（每 IP、每实例在途） |
+
+`<base>` 上为路径模式新增的端点：
+
+| 路径 | 行为 |
+|---|---|
+| `POST /api/v1/codes/lookup` `{code}` | 短码 → `{ok, fp, name, slug}`；无效 / 坏 JSON → `404 {ok:false,error:"code_invalid"}`；与 `/c/` 共用每 IP 限流；非 POST → `405` |
+| `GET /app-config.json` | 前端入口配置 `{mode:"relay", relayBase, version, commit?, vapidPublicKey?}`，`no-store` |
+| 静态站 | 配了 `RELAY_STATIC_DIR`（前端的 Next 静态导出目录）时，`<base>` 上没被上面接住的 GET/HEAD 按导出布局服务：`/chat` → `chat.html`，目录 → `index.html`，未知页面 → `404.html`（状态 404），`/_next/static/*` 永久缓存，HTML `no-cache`；`/`、`/i` 在有静态站时也由它服务（`/i` 带 `cstra_home` cookie 时仍 302 到子域名，兼容期） |
+
 ## 7. 错误帧与错误码
 
 ```json
@@ -255,7 +300,7 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 | 重连退避 | 1, 2, 4, 8, 16, 30, 30 … 秒 ±20%；稳定 ≥ 60 秒后归零 |
 | 致命错误退避 | 300 秒（`auth_failed` `fingerprint_conflict` `protocol_version` `replaced`） |
 | 断线时的在途请求 | 发起方本地以 `connection_lost` 拒绝全部；中继清掉涉及该连接的 pending 并通知另一头（发起方收 `peer_disconnected`，接收方收 `cancel`） |
-| 中继侧限流 | 握手每 IP 10 / 分钟（关闭 4429）；每连接 120 请求 / 分钟、64 在途；兑换邀请每发起方 6 / 分钟；front 的三项见 §6.1 |
+| 中继侧限流 | 握手每 IP 10 / 分钟（关闭 4429）；每连接 120 请求 / 分钟、64 在途；兑换邀请每发起方 6 / 分钟；push 帧每实例 60 / 分钟（§3.5）；front 的三项见 §6.1 |
 
 关闭码：1000 主动关；1012 中继重启（立即重连）；4400 协议违规（含二进制帧、连续 3 个坏 JSON、未认证先发业务帧）；4401 认证失败 / nonce 过期；4403 目录拒绝（`fingerprint_conflict`）；4408 超时（`auth_timeout` / `heartbeat_timeout`）；4409 被顶替；4413 帧过大；4429 握手洪水。
 

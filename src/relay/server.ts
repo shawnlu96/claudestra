@@ -3,7 +3,7 @@
  * 状态三处：目录（directory.ts，SQLite）、在线连接与联系人（这里，内存）、在途请求（router.ts，内存）。
  * 中继只读信封字段，headers / body 原样搬运、不记日志——日志只有谁、给谁、id、大小、耗时。
  */
-import type { Server, ServerWebSocket } from "bun";
+import type { Server } from "bun";
 import { randomBytes } from "node:crypto";
 import {
   asAuth, asCode, asContacts, asData, asEndOrCancel, asPeerError, asReq, asRes, CLOSE, isPublicKey, isRedeemRequest,
@@ -12,57 +12,13 @@ import {
 import { Directory, type InstanceRecord } from "./directory.js";
 import { Front } from "./front.js";
 import { KeyedWindows, SlidingWindow } from "./limiter.js";
+import { pushGatewayFor, type PushGateway } from "./push.js";
 import { Router, type Pending } from "./router.js";
+import type { Conn, ConnData, Limits, Logger, Relay, RelayOptions } from "./types.js";
 
-export type Logger = (level: "info" | "warn" | "error", msg: string) => void;
-type Limits = Record<keyof typeof LIMITS, number>; // 协议默认值可按项覆盖（测试把超时调短）
-
-export interface RelayOptions {
-  /** 公网主机名：front 按它切子域名 */
-  base: string;
-  port?: number;
-  hostname?: string;
-  /** SQLite 路径；测试用 ":memory:" */
-  db?: string;
-  /** 反代之后才开：用 X-Forwarded-* 当客户端地址与主机名。直接对外时开了等于限流可绕 */
-  trustProxy?: boolean;
-  version?: string;
-  commit?: string;
-  limits?: Partial<Limits>;
-  /** 隧道请求等响应头的时长（浏览器那边的 API 调用可能长挂） */
-  frontHeadTimeoutMs?: number;
-  /** 前端静态导出目录；配了 front 就在 base 主机名下托管它 */
-  staticDir?: string;
-  sweepMs?: number;
-  touchEveryMs?: number;
-  log?: Logger;
-}
-
-export interface ConnData {
-  ip: string;
-  openedAt: number;
-  lastFrameAt: number;
-  lastTouch: number;
-  /** 发过 hello、还没收到 auth 时非空；auth 一到就清，成败都不再接受第二次（nonce 一次性） */
-  nonce: string | null;
-  fp: string | null;
-  key: string | null;
-  slug: string;
-  name: string;
-  contacts: Set<string>;
-  reqWindow: SlidingWindow;
-  badFrames: number;
-}
-export type Conn = ServerWebSocket<ConnData>;
+export type { Relay, RelayOptions } from "./types.js";
 type Obj = Record<string, unknown>;
 
-export interface Relay {
-  port: number;
-  directory: Directory;
-  online(): string[];
-  dropConnection(fp: string, code?: number, reason?: string): boolean; // 测试用：模拟中继重启 / 网络抖动
-  stop(): void;
-}
 const errorFrame = (code: string, message?: string, id?: string) => ({ t: "error", ...(id ? { id } : {}), code, ...(message ? { message } : {}), origin: "relay" });
 
 class RelayServer implements Relay {
@@ -76,6 +32,7 @@ class RelayServer implements Relay {
   private readonly front: Front;
   private readonly authWindows: KeyedWindows;
   private readonly redeemWindows: KeyedWindows;
+  private readonly push: PushGateway;
   private readonly sweepTimer: ReturnType<typeof setInterval>;
   private readonly server: Server<ConnData>;
   private readonly touchEveryMs: number;
@@ -87,9 +44,10 @@ class RelayServer implements Relay {
     this.router = new Router<Conn>({ streamIdleMs: this.lim.streamIdleMs, streamMaxMs: this.lim.streamMaxMs });
     this.authWindows = new KeyedWindows(this.lim.authPerIpPerMinute);
     this.redeemWindows = new KeyedWindows(this.lim.redeemPerMinute);
+    this.push = pushGatewayFor(opts.push, this.lim.pushPerFpPerMinute, this.log);
     this.touchEveryMs = opts.touchEveryMs ?? 60_000;
     this.front = new Front({
-      base: opts.base, trustProxy: opts.trustProxy ?? false, version: opts.version ?? "dev", commit: opts.commit,
+      base: opts.base, trustProxy: opts.trustProxy ?? false, version: opts.version ?? "dev", commit: opts.commit, vapidPublicKey: opts.push?.vapid?.publicKey,
       headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes, limits: this.lim,
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
       send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
@@ -190,6 +148,7 @@ class RelayServer implements Relay {
       case "error": return this.onPeerError(ws, f);
       case "contacts": return this.onContacts(ws, f);
       case "code": return this.onCode(ws, f);
+      case "push": return void this.push.handle(ws.data.fp!, f).then((a) => this.send(ws, a ?? errorFrame("frame_invalid", "push frame malformed")));
       case "auth": return this.send(ws, errorFrame("frame_invalid", "already authenticated"));
       default: return this.send(ws, errorFrame("frame_invalid", `unknown frame type ${f.t}`, id));
     }
@@ -226,6 +185,7 @@ class RelayServer implements Relay {
     this.directory.sweepCodes(now);
     this.authWindows.sweep(now);
     this.redeemWindows.sweep(now);
+    this.push.sweep(now);
   }
 
   // ── 握手与目录 ─────────────────────────────────────────────────────────
@@ -251,7 +211,7 @@ class RelayServer implements Relay {
     }
     Object.assign(ws.data, { fp, key: f.key, slug: reg.slug, name: f.name, lastTouch: Date.now() });
     this.onlineMap.set(fp, ws);
-    this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, fp, slug: reg.slug, name: f.name, base: this.opts.base });
+    this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, fp, slug: reg.slug, name: f.name, base: this.opts.base, push: this.push.capabilities() });
     this.log("info", `${fp}「${f.name}」上线 slug=${reg.slug} ip=${ws.data.ip}`);
   }
 

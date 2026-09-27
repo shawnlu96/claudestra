@@ -374,10 +374,12 @@ describe("托管前端静态站（staticDir）", () => {
     expect(await home.text()).toBe("<h1>app</h1>");
     expect(home.headers.get("cache-control")).toBe("no-cache, must-revalidate");
     expect(home.headers.get("content-type")).toContain("text/html");
+    expect(home.headers.get("content-security-policy")).toContain("script-src 'self'");
     expect(await (await get("/chat")).text()).toBe("<h1>chat</h1>");
     const js = await get("/_next/static/x.js");
     expect(js.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(js.headers.get("content-type")).toContain("javascript");
+    expect(js.headers.get("content-security-policy")).toBeNull();
     const nope = await get("/nope");
     expect(nope.status).toBe(404);
     expect(await nope.text()).toBe("<h1>nope</h1>");
