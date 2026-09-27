@@ -67,7 +67,23 @@ export function filterMachineRequestHeaders(h: Headers, cookieName = DEVICE_COOK
   return out;
 }
 
-const DROP_RESPONSE_HEADERS: ReadonlySet<string> = new Set(["clear-site-data", "service-worker-allowed", "set-cookie2", "alt-svc"]);
+const DROP_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
+  "clear-site-data", "service-worker-allowed", "set-cookie2", "alt-svc",
+  "content-security-policy", "content-security-policy-report-only", "x-content-type-options", "x-frame-options",
+]);
+
+/**
+ * 机器的响应和托管前端同一个源：机器回 text/html / SVG 时脚本会跑在中继源上，能带着别的机器的 cookie 调它们（codex 复核）。
+ * 所以 /m/<fp>/ 下的响应一律由中继钉 CSP sandbox（不透明源、无脚本、无表单）+ nosniff；fetch / SSE / <img> 不受文档 CSP 影响。
+ * PDF 例外：sandbox 会让浏览器的 PDF 查看器拒绝渲染，而 PDF 里的脚本跑在查看器自己的源里，碰不到中继源。
+ */
+function pinnedMachineHeaders(contentType: string): Headers {
+  const pdf = /^application\/pdf\b/i.test(contentType.trim());
+  return {
+    "x-content-type-options": "nosniff",
+    "content-security-policy": pdf ? "frame-ancestors 'none'" : "sandbox; default-src 'none'; frame-ancestors 'none'",
+  };
+}
 const COOKIE_VALUE_RE = /^[A-Za-z0-9_-]{0,512}$/;
 const KEEP_COOKIE_ATTR_RE = /^(max-age|expires)=/i;
 
@@ -99,5 +115,5 @@ export function filterMachineResponseHeaders(h: Headers, prefix: string, cookieN
     } else if (key === "location") out[key] = prefixLocation(v, prefix);
     else out[key] = v;
   }
-  return out;
+  return { ...out, ...pinnedMachineHeaders(out["content-type"] ?? "") };
 }

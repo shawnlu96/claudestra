@@ -30,7 +30,8 @@
 
 import { randomBytes } from "node:crypto";
 import { TMUX_SOCK, MASTER_SESSION } from "../lib/tmux-helper.js";
-import { terminalAllowed, tokenIdOf, type Principal } from "../lib/principals.js";
+import type { Principal } from "../lib/principals.js";
+import { terminalAllowedFor, terminalIoDenied, terminalOwnerKey } from "./terminal-auth.js";
 import { authenticateApi } from "./api-auth.js";
 import { revocable } from "./credential-revocation.js";
 
@@ -269,9 +270,8 @@ export async function handleTerminalApi(req: Request, url: URL): Promise<Respons
     if (auth instanceof Response) return auth;
     const sess = termSessions.get(ioMatch[1]);
     if (!sess) return json(404, { ok: false, error: "terminal session not found (expired?)" });
-    if (sess.tokenId !== tokenIdOf(auth)) {
-      return json(403, { ok: false, error: "terminal session belongs to another token" });
-    }
+    const denied = terminalIoDenied(auth, sess); // 属主按设备凭据判 + 每次重验终端授权（bridge/terminal-auth.ts）
+    if (denied) return json(403, { ok: false, error: denied });
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     if (ioMatch[2] === "input") {
       const d = typeof body.d === "string" ? body.d : "";
@@ -322,7 +322,7 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
   if (auth instanceof Response) return auth;
   const principal = auth;
   // B2：终端 = 宿主 shell 级访问，须显式 terminal 授予（不复用裸 messaging scope）
-  if (!terminalAllowed(principal, agentParam) && !terminalAllowed(principal, `agent-${agentParam}`)) {
+  if (!terminalAllowedFor(principal, agentParam)) {
     return json(403, {
       ok: false,
       error: `terminal access not granted for agent "${agentParam}" (needs a token with terminal scope: token-add --terminal)`,
@@ -466,7 +466,7 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
       }
       const sess: TermSession = {
         id: termId,
-        tokenId: tokenIdOf(principal),
+        tokenId: terminalOwnerKey(principal),
         agent: agentParam,
         viewerSession,
         windowRef,

@@ -98,9 +98,19 @@ describe("PushGateway（注入假后端）", () => {
   test("capabilities：有公钥 + apns", () => {
     expect(gw.capabilities()).toEqual({ vapidPublicKey: "PUB", apns: true });
   });
+  test("Web Push 的 fp 按发送方钉死：机器自报的 fp（含路径注入）被覆盖；payload 不是 JSON 对象 → payload_invalid", async () => {
+    const got: string[] = [];
+    const g = new PushGateway({ perFpPerMinute: 10, log: () => {}, vapidPublicKey: "PUB", webPush: async (_s, p) => (got.push(p), 201), apns: null });
+    const evil = JSON.stringify({ title: "x", agent: "a", fp: "9109-17c6-8e77-dfff/api/v1/restart-all?x=" });
+    expect(await g.handle("fp-z", frame({ id: "pf1", payload: evil }))).toMatchObject({ ok: true });
+    expect(JSON.parse(got[0]).fp).toBe("fp-z");
+    expect(await g.handle("fp-z", frame({ id: "pf2", payload: "not json" }))).toMatchObject({ ok: false, error: "payload_invalid" });
+    expect(await g.handle("fp-z", frame({ id: "pf3", payload: "[1,2]" }))).toMatchObject({ ok: false, error: "payload_invalid" });
+    expect(got).toHaveLength(1);
+  });
   test("201 → ok；404 / 410 → gone；500 → upstream_error；网络异常 → send_failed；ttl 缺省 3600；日志不含 payload", async () => {
     expect(await gw.handle("fp-a", frame({ id: "p1" }))).toEqual({ t: "push-ack", id: "p1", ok: true, status: 201 });
-    expect(sent[0]).toEqual({ endpoint: SUB.endpoint, payload, ttl: 3600 });
+    expect(sent[0]).toEqual({ endpoint: SUB.endpoint, payload: JSON.stringify({ title: "a", body: "b", fp: "fp-a" }), ttl: 3600 }); // fp 由中继按发送方钉
     webStatus = 410;
     expect(await gw.handle("fp-a", frame({ id: "p2", ttl: 5 }))).toEqual({ t: "push-ack", id: "p2", ok: false, status: 410, gone: true });
     expect(sent[1].ttl).toBe(5);

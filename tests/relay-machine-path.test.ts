@@ -52,12 +52,23 @@ describe("机器响应头过滤", () => {
   test("多条 Set-Cookie 以分隔符连接：过滤后重新连接；全丢就没有这个头", () => {
     const h = filterMachineResponseHeaders({ "set-cookie": ["cstra_session=x; Path=/", "cstra_dev=dev_1; Path=/"].join(SET_COOKIE_SEP), "content-type": "application/json" }, prefix);
     expect(h["set-cookie"]).toBe(`cstra_dev=dev_1; Path=${prefix}/; HttpOnly; Secure; SameSite=Strict`);
-    expect(filterMachineResponseHeaders({ "set-cookie": "a=1" }, prefix)).toEqual({});
+    expect(filterMachineResponseHeaders({ "set-cookie": "a=1" }, prefix)["set-cookie"]).toBeUndefined();
   });
   test("能影响整个主源的头丢掉；Location 根相对补前缀，绝对与 // 不动", () => {
     const h = filterMachineResponseHeaders({ "clear-site-data": '"*"', "service-worker-allowed": "/", "alt-svc": "h3", location: "/chat", "x-other": "1" }, prefix);
-    expect(h).toEqual({ location: `${prefix}/chat`, "x-other": "1" });
+    expect(h).toMatchObject({ location: `${prefix}/chat`, "x-other": "1" });
+    for (const k of ["clear-site-data", "service-worker-allowed", "alt-svc"]) expect(h[k]).toBeUndefined();
     expect(prefixLocation("https://relay.example.com/x", prefix)).toBe("https://relay.example.com/x");
     expect(prefixLocation("//evil.example/x", prefix)).toBe("//evil.example/x");
+  });
+  test("活动内容边界：机器的 HTML / SVG 在共享源上跑不了脚本——中继钉 CSP sandbox + nosniff，机器自带的 CSP / XFO 作废", () => {
+    const html = filterMachineResponseHeaders({ "content-type": "text/html", "content-security-policy": "script-src *", "x-frame-options": "ALLOWALL" }, prefix);
+    expect(html["content-security-policy"]).toBe("sandbox; default-src 'none'; frame-ancestors 'none'");
+    expect(html["x-content-type-options"]).toBe("nosniff");
+    expect(html["x-frame-options"]).toBeUndefined();
+    expect(filterMachineResponseHeaders({ "content-type": "image/svg+xml" }, prefix)["content-security-policy"]).toContain("sandbox");
+    expect(filterMachineResponseHeaders({}, prefix)["content-security-policy"]).toContain("sandbox"); // 没声明类型（嗅探）同样沙箱
+    expect(filterMachineResponseHeaders({ "content-type": "application/json" }, prefix)["content-security-policy"]).toContain("sandbox");
+    expect(filterMachineResponseHeaders({ "content-type": "application/pdf" }, prefix)["content-security-policy"]).toBe("frame-ancestors 'none'");
   });
 });

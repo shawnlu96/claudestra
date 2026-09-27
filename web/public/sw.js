@@ -8,8 +8,8 @@
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
-/** 当前机器（web 端 lib/machines.ts 写进 IndexedDB meta 表：{fp, base}）；读不到 → null */
-function currentMachine() {
+/** IndexedDB「cstra」库（web 端 lib/machines.ts：machines 表 = 配对过的机器，meta.current = {fp, base}）里的一条；读不到 → null */
+function idbGet(store, key) {
   return new Promise((resolve) => {
     try {
       const req = indexedDB.open("cstra", 1);
@@ -22,7 +22,7 @@ function currentMachine() {
       };
       req.onsuccess = () => {
         try {
-          const get = req.result.transaction("meta", "readonly").objectStore("meta").get("current");
+          const get = req.result.transaction(store, "readonly").objectStore(store).get(key);
           get.onsuccess = () => resolve(get.result || null);
           get.onerror = () => resolve(null);
         } catch {
@@ -35,13 +35,23 @@ function currentMachine() {
   });
 }
 
+const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
+
 /**
- * 已读回执：POST <base>/api/v1/agents/<agent>/read（+ notify-read 清 Discord 完成 @）。
- * CONTRACT: 推送 payload 若带 fp（发通知的那台机器），base 取 /m/<fp>；没带就退回 IndexedDB 里记的当前机器（直托管 base 为空）。
+ * 已读回执发给谁：payload.fp（中继按发送方钉死，relay/push.ts bindSenderFp）。直托管只有一台机器，基址恒为 ""；
+ * 中继模式下 fp 必须是合法指纹且是本浏览器配对过的机器，否则不发——payload 是机器写的，不能让它把带凭据的 POST 指向别处。
  */
+async function receiptBase(fp) {
+  const cur = await idbGet("meta", "current");
+  if (cur && !cur.base) return "";
+  if (!fp || (cur && cur.fp === fp)) return cur ? cur.base : "";
+  return FP_RE.test(fp) && (await idbGet("machines", fp)) ? `/m/${fp}` : null;
+}
+
+/** 已读回执：POST <base>/api/v1/agents/<agent>/read（+ notify-read 清 Discord 完成 @） */
 async function markRead(agent, fp) {
-  const cur = await currentMachine();
-  const base = fp && cur && cur.fp !== fp && cur.base ? `/m/${fp}` : cur ? cur.base : fp ? `/m/${fp}` : "";
+  const base = await receiptBase(fp);
+  if (base === null) return;
   const headers = { "Content-Type": "application/json", "x-cstra-device": "1" };
   const post = (p) => fetch(`${base}/api/v1/agents/${encodeURIComponent(agent)}/${p}`, { method: "POST", headers, body: "{}", credentials: "include" }).catch(() => {});
   await post("read");
@@ -89,7 +99,8 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
   const url = data.url || "/chat";
-  if (data.agent) event.waitUntil(markRead(data.agent, data.fp));
+  const agent = typeof data.agent === "string" ? data.agent : "";
+  if (agent) event.waitUntil(markRead(agent, data.fp));
   event.waitUntil(
     (async () => {
       const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
@@ -97,13 +108,15 @@ self.addEventListener("notificationclick", (event) => {
         if ("focus" in w) {
           await w.focus();
           // 已有窗口：postMessage 让页面原地切到该 agent 会话（比 navigate 整页刷新顺滑）
-          if (data.agent) w.postMessage({ type: "cstra-open-agent", agent: data.agent, fp: data.fp || "" });
+          if (agent) w.postMessage({ type: "cstra-open-agent", agent, fp: data.fp || "" });
           return;
         }
       }
-      // 冷启动：把发通知的机器一起带给页面（machine-gate 读 ?fp= 先切机器，再由 ?agent= 打开会话）
-      const u = new URL(url, self.location.origin);
-      if (data.fp) u.searchParams.set("fp", data.fp);
+      // 冷启动：只回 /chat（url 是机器写的，别让它把新窗口开到 /m/<别的机器>/… 上）；带上发通知的机器，
+      // machine-gate 读 ?fp=（只认配对过的）先切机器，再由 ?agent= 打开会话
+      let u = new URL(url, self.location.origin);
+      if (u.origin !== self.location.origin || u.pathname !== "/chat") u = new URL("/chat", self.location.origin);
+      if (typeof data.fp === "string" && FP_RE.test(data.fp)) u.searchParams.set("fp", data.fp);
       await self.clients.openWindow(u.pathname + u.search);
     })(),
   );

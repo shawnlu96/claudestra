@@ -36,6 +36,21 @@ export interface PushGatewayDeps {
 
 const ack = (id: string, ok: boolean, extra: Omit<PushAckFrame, "t" | "id" | "ok"> = {}): PushAckFrame => ({ t: "push-ack", id, ok, ...extra });
 
+/**
+ * Web Push 的 fp 由中继按「谁发的」钉死：浏览器的 SW 点通知时拿 payload.fp 拼 /m/<fp>/… 带凭据发已读回执，
+ * 让机器自报 fp 就能冒充别的机器、甚至塞路径（"<B>/api/v1/restart-all?x="）打 B 的管理端点（codex 复核）。
+ * payload 必须是 JSON 对象，否则拒（tests/relay-push.test.ts）。
+ */
+function bindSenderFp(payload: string, fp: string): string | null {
+  let o: unknown;
+  try {
+    o = JSON.parse(payload);
+  } catch {
+    return null; // 不是 JSON：SW 会按默认值处理成「当前机器」，也可能被当成别的东西——直接拒更干净
+  }
+  return o && typeof o === "object" && !Array.isArray(o) ? JSON.stringify({ ...(o as Record<string, unknown>), fp }) : null;
+}
+
 export class PushGateway {
   private readonly windows: KeyedWindows;
 
@@ -64,7 +79,9 @@ export class PushGateway {
     return ack(f.id, result.ok, result);
   }
 
-  private async webPush(fp: string, sub: { endpoint: string; keys: { p256dh: string; auth: string } }, payload: string, ttl?: number): Promise<Omit<PushAckFrame, "t" | "id">> {
+  private async webPush(fp: string, sub: { endpoint: string; keys: { p256dh: string; auth: string } }, raw: string, ttl?: number): Promise<Omit<PushAckFrame, "t" | "id">> {
+    const payload = bindSenderFp(raw, fp);
+    if (!payload) return { ok: false, error: "payload_invalid" };
     const problem = pushEndpointProblem(sub.endpoint, { allowPrivate: this.d.allowPrivateEndpoints });
     if (problem) {
       this.d.log("warn", `push ${fp} webpush endpoint 被拒（${problem}）`);
