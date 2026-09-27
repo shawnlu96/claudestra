@@ -16,6 +16,7 @@
  * agent 上下文里已有什么。CLI 会对未标 external 的 agent 要求 --force。
  */
 
+import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
 import { isMasterAgent } from "./registry.js";
 import { timingSafeEqual } from "crypto";
@@ -83,6 +84,32 @@ export async function readPrincipalsStrict(path = PRINCIPALS_PATH): Promise<Prin
   if (r.status === "ok") return r.data as PrincipalsFile;
   if (r.status === "missing") return { principals: [] };
   throw new StateCorruptError(path, r.error);
+}
+
+/** principals.json 的跨进程写锁（lib/file-lock.ts 的目录锁）；manager 写 principals 的命令整条持有（manager.ts） */
+export const principalsLockPath = (path = PRINCIPALS_PATH): string => `${path}.lock`;
+
+/**
+ * principals.json 的读改写统一入口：锁内 strict 读 → mutate → changed 才写。bridge 的设备凭据续期 / 配对 / 撤销都走这里——
+ * 各自「读 → await → 写」时，续期拿着撤销前的旧副本晚一步写回，会把刚撤销的凭据复活（codex 复核）。
+ * 锁是 advisory：拿不到时 onBusy="skip" 直接返回 null（续期这种可有可无的写），默认 "proceed" 降级照写并告警。
+ */
+export async function updatePrincipals<T>(
+  mutate: (file: PrincipalsFile) => { changed: boolean; result: T },
+  opts: { path?: string; waitMs?: number; onBusy?: "proceed" | "skip" } = {},
+): Promise<T | null> {
+  const path = opts.path ?? PRINCIPALS_PATH;
+  const lock = await acquireLock(principalsLockPath(path), opts.waitMs ?? 5_000);
+  if (!lock && opts.onBusy === "skip") return null;
+  if (!lock) console.warn("⚠️ principals.json 写锁未拿到，降级继续（可能与并发写者互相覆盖）");
+  try {
+    const file = await readPrincipalsStrict(path);
+    const { changed, result } = mutate(file);
+    if (changed) await writePrincipals(file, path);
+    return result;
+  } finally {
+    lock?.release();
+  }
 }
 
 export async function writePrincipals(data: PrincipalsFile, path = PRINCIPALS_PATH): Promise<void> {

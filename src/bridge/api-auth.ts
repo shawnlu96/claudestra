@@ -4,7 +4,7 @@
  * 非 GET/HEAD 必须带 x-cstra-device 头（cookie 浏览器会自动附上，这个头跨站表单附不上）。
  * 限流按 principal：owner 的所有设备共用 api:owner:self 一个身份，配额相应放大。api-routes 与 web-terminal 都调这里。
  */
-import { findByBearer, readPrincipals, readPrincipalsStrict, SlidingWindowLimiter, tokenIdOf, writePrincipals, type Principal } from "../lib/principals.js";
+import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
 import { notePeerSignature } from "./peer-signature.js";
@@ -65,9 +65,11 @@ async function touchLater(credentialId: string, ip: string | null): Promise<void
   if (now - (lastTouchWrite.get(credentialId) ?? 0) < TOUCH_WRITE_EVERY_MS) return;
   lastTouchWrite.set(credentialId, now);
   try {
-    const file = await readPrincipalsStrict(principalsPath);
-    const cred = file.principals.flatMap((p) => p.credentials ?? []).find((c) => c.id === credentialId);
-    if (cred && touchCredential(cred, new Date(now), ip)) await writePrincipals(file, principalsPath);
+    // 锁内重读再改（lib/principals.ts updatePrincipals）：别拿旧副本覆盖掉并发的撤销；锁忙就跳过这次续期
+    await updatePrincipals((file) => {
+      const cred = file.principals.flatMap((p) => p.credentials ?? []).find((c) => c.id === credentialId);
+      return { changed: !!cred && touchCredential(cred, new Date(now), ip), result: null };
+    }, { path: principalsPath, waitMs: 1_000, onBusy: "skip" });
   } catch (e) {
     console.error(`⚠️ 设备凭据 ${credentialId} 记录最近使用失败: ${(e as Error).message}`);
   }

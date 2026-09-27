@@ -106,7 +106,7 @@ import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
-import { isWriteInvocation } from "./manager/write-commands.js";
+import { isWriteInvocation, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
@@ -2826,6 +2826,9 @@ if (isWriteInvocation(cmd, args)) {
   writeLock = await acquireLock(statePath(".manager-write.lock"));
   if (!writeLock) console.error("⚠ 写锁 20s 未拿到,降级继续(并发写命令可能竞态)");
   else process.on("exit", () => writeLock?.release());
+  // 写 principals 的命令另持 principals 锁，与 bridge 的设备凭据写（updatePrincipals）互斥
+  const pLock = PRINCIPALS_WRITE_COMMANDS.has(cmd) ? await acquireLock((await import("./lib/principals.js")).principalsLockPath()) : null;
+  if (pLock) process.on("exit", () => pLock.release());
 }
 
 try {

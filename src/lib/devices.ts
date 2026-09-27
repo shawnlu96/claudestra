@@ -7,6 +7,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Principal, PrincipalsFile } from "./principals.js";
+import { isMasterAgent } from "./registry.js";
 
 export const OWNER_PRINCIPAL_ID = "owner:self";
 export const DEVICE_COOKIE = "cstra_dev";
@@ -60,7 +61,7 @@ export function normalizeGrant(input: Partial<{ agents: unknown; terminal: unkno
 }
 
 /** guest 的默认：不碰 master、不开终端、不管理 */
-export const guestGrant = (agents: string[]): Grant => ({ agents: agents.filter((a) => a !== "master"), terminal: false, manage: false });
+export const guestGrant = (agents: string[]): Grant => ({ agents: agents.filter((a) => !isMasterAgent(a)), terminal: false, manage: false });
 
 function newDeviceToken(random: Random = defaultRandom): string {
   return `dev_${Buffer.from(random(32)).toString("base64url")}`;
@@ -92,7 +93,7 @@ export function newGuestPrincipal(name: string, grant: Grant, now: Date = new Da
     id: `guest:${Buffer.from(random(4)).toString("hex")}`,
     role: "external",
     name,
-    agents: grant.agents.filter((a) => a !== "master"),
+    agents: grant.agents.filter((a) => !isMasterAgent(a)), // "agent-master" 也是大总管：agentInScope 对它逐字匹配
     ...(grant.terminal ? { terminal: true } : {}),
     mirror: true,
     createdAt: now.toISOString(),
@@ -152,11 +153,12 @@ export function intersectAgents(principalAgents: string[], grantAgents: string[]
   if (pAll && gAll) out.add("*");
   for (const a of grantAgents) {
     if (a === "*") continue;
-    if (a === "master") {
-      if (principalAgents.includes("master")) out.add("master");
+    // master 的两种写法都只能来自 principal 显式列的 master——"*" 不含它，别让 "agent-master" 借 pAll 混进去
+    if (isMasterAgent(a)) {
+      if (principalAgents.some(isMasterAgent)) out.add("master");
     } else if (pAll || principalAgents.includes(a)) out.add(a);
   }
-  if (gAll) for (const a of principalAgents) if (a !== "*" && a !== "master") out.add(a);
+  if (gAll) for (const a of principalAgents) if (a !== "*" && !isMasterAgent(a)) out.add(a);
   return [...out];
 }
 

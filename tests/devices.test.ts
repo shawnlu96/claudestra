@@ -72,6 +72,13 @@ describe("grant 与生效视图", () => {
     expect(intersectAgents(["a", "b"], ["*"])).toEqual(["a", "b"]);
     expect(intersectAgents(["a"], ["b", "master"])).toEqual([]);
   });
+  test("agent-master 别名也是大总管：guest 剔掉、收窄时不能借 \"*\" 混进来（codex 复核）", () => {
+    expect(guestGrant(["agent-master", "x"]).agents).toEqual(["x"]);
+    expect(newGuestPrincipal("friend", { agents: ["agent-master", "master", "x"], terminal: false, manage: false }, T0).agents).toEqual(["x"]);
+    expect(intersectAgents(["*"], ["agent-master", "a"])).toEqual(["a"]);
+    expect(intersectAgents(["*", "master"], ["agent-master"])).toEqual(["master"]);
+    expect(intersectAgents(["agent-master", "a"], ["*"])).toEqual(["a"]);
+  });
   test("effectivePrincipal：id / mirror 不变；终端关则 role 降 external；manage 跟 grant；canManage 据此判", () => {
     const file = fresh();
     const owner = ensureOwnerPrincipal(file, T0);

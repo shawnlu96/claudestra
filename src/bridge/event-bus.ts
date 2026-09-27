@@ -60,8 +60,10 @@ export interface BridgeEvent {
 export type EventFilter = {
   /** 只要这个 agent 的事件；省略 = 全部 */
   agent?: string;
-  /** 只要这些 agent 的事件（token scope 过滤用）；省略 = 不限 */
+  /** 只要这些 agent 的事件；省略 = 不限 */
   agents?: string[];
+  /** 逐条判定（token scope 过滤用：agentInScope——"*" 不含 master 这类规则列表表达不了） */
+  allow?: (agent: string) => boolean;
 };
 
 type Subscriber = {
@@ -114,6 +116,7 @@ const agentDoneAt = new Map<string, number>();
 function matches(evt: BridgeEvent, filter: EventFilter): boolean {
   if (filter.agent && evt.agent !== filter.agent) return false;
   if (filter.agents && !filter.agents.includes(evt.agent)) return false;
+  if (filter.allow && !filter.allow(evt.agent)) return false;
   return true;
 }
 

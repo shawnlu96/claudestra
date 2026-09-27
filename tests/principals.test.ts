@@ -15,9 +15,12 @@ import {
   SlidingWindowLimiter,
   readPrincipals,
   writePrincipals,
+  updatePrincipals,
+  principalsLockPath,
   type Principal,
   type PrincipalsFile,
 } from "../src/lib/principals.ts";
+import { acquireLock } from "../src/lib/file-lock.ts";
 
 describe("newTokenPrincipal", () => {
   test("生成 token: 前缀 id + 64 hex secret + 默认 mirror", () => {
@@ -191,5 +194,32 @@ describe("readPrincipals / writePrincipals（临时文件）", () => {
     const path = join(tmpdir(), `principals-bad-${Date.now()}.json`);
     await Bun.write(path, "{not json");
     expect((await readPrincipals(path)).principals).toEqual([]);
+  });
+});
+
+describe("updatePrincipals（锁内读改写）", () => {
+  test("锁内重读：并发的撤销不会被拿旧副本的续期写回来（codex 复核的撤销写竞态）", async () => {
+    const path = join(tmpdir(), `principals-update-${Date.now()}.json`);
+    const p = newTokenPrincipal("dev", ["*"]);
+    await writePrincipals({ principals: [{ ...p, credentials: [{ id: "dev_1" } as never] }] }, path);
+    const revoke = updatePrincipals((f) => {
+      f.principals[0].credentials = [];
+      return { changed: true, result: "revoked" };
+    }, { path });
+    const touch = updatePrincipals((f) => ({ changed: !!f.principals[0].credentials?.length, result: f.principals[0].credentials?.length ?? 0 }), { path });
+    expect(await revoke).toBe("revoked");
+    expect(await touch).toBe(0); // 续期在锁里重读，看到的已是撤销后的文件
+    expect((await readPrincipals(path)).principals[0].credentials).toEqual([]);
+  });
+  test("锁被占且 onBusy=skip → 不读不写返回 null；锁释放后照常", async () => {
+    const path = join(tmpdir(), `principals-busy-${Date.now()}.json`);
+    await writePrincipals({ principals: [] }, path);
+    const held = await acquireLock(principalsLockPath(path));
+    expect(held).not.toBeNull();
+    let called = false;
+    expect(await updatePrincipals(() => ((called = true), { changed: false, result: 1 }), { path, waitMs: 50, onBusy: "skip" })).toBeNull();
+    expect(called).toBe(false);
+    held!.release();
+    expect(await updatePrincipals(() => ({ changed: false, result: 2 }), { path, waitMs: 50, onBusy: "skip" })).toBe(2);
   });
 });

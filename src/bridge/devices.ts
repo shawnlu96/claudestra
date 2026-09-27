@@ -10,7 +10,7 @@ import {
   Approvals, attachCredential, canManage, ChallengeStore, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant, newGuestPrincipal,
   normalizeGrant, type Grant,
 } from "../lib/devices.js";
-import { readPrincipalsStrict, writePrincipals, type Principal } from "../lib/principals.js";
+import { readPrincipalsStrict, updatePrincipals, type Principal } from "../lib/principals.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
@@ -39,12 +39,14 @@ const str = (v: unknown, max = 64): string | undefined => (typeof v === "string"
 
 /** 凭据落盘：owner 的设备挂 owner:self；guest 新建一个 principal（不含 master、无终端、无管理） */
 async function grantCredential(deviceName: string, grant: Grant, guest: string | undefined, ip: string | null): Promise<PairOutcome> {
-  const file = await readPrincipalsStrict(principalsPath);
-  const principal = guest ? newGuestPrincipal(guest, grant) : ensureOwnerPrincipal(file);
-  if (guest) file.principals.push(principal);
-  const { token, credential } = attachCredential(principal, deviceName, guest ? guestGrant(grant.agents) : grant, { ip });
-  await writePrincipals(file, principalsPath);
-  return { token, principalId: principal.id, credentialId: credential.id, grant: credential.grant, expiresAt: credential.expiresAt };
+  const out = await updatePrincipals((file) => {
+    const principal = guest ? newGuestPrincipal(guest, grant) : ensureOwnerPrincipal(file);
+    if (guest) file.principals.push(principal);
+    const { token, credential } = attachCredential(principal, deviceName, guest ? guestGrant(grant.agents) : grant, { ip });
+    return { changed: true, result: { token, principalId: principal.id, credentialId: credential.id, grant: credential.grant, expiresAt: credential.expiresAt } };
+  }, { path: principalsPath });
+  if (!out) throw new Error("principals.json 写锁未拿到"); // 默认 onBusy=proceed 不会走到这里：只为收窄类型
+  return out;
 }
 
 /** 直托管 Path=/；经中继 Path 写成 /m/<fp>/（中继还会再钉一次） */
@@ -154,14 +156,16 @@ async function listDevices(principal: Principal): Promise<Response> {
 async function revokeDevice(req: Request, principal: Principal, id: string): Promise<Response> {
   const own = principal.credential === id;
   if (!own && !canManage(principal)) return forbidden(MANAGE_MSG);
-  const file = await readPrincipalsStrict(principalsPath);
-  const holder = file.principals.find((p) => (p.credentials ?? []).some((c) => c.id === id));
-  if (!holder) return apiJson(404, { ok: false, error: "device not found" });
-  holder.credentials = (holder.credentials ?? []).filter((c) => c.id !== id);
-  if (holder.id.startsWith("guest:") && holder.credentials.length === 0) holder.disabled = true;
-  await writePrincipals(file, principalsPath);
+  const holderId = await updatePrincipals((file) => {
+    const holder = file.principals.find((p) => (p.credentials ?? []).some((c) => c.id === id));
+    if (!holder) return { changed: false, result: null };
+    holder.credentials = (holder.credentials ?? []).filter((c) => c.id !== id);
+    if (holder.id.startsWith("guest:") && holder.credentials.length === 0) holder.disabled = true;
+    return { changed: true, result: holder.id };
+  }, { path: principalsPath });
+  if (!holderId) return apiJson(404, { ok: false, error: "device not found" });
   emitCredentialRevoked(id); // 在途的 SSE / 终端流随之中止
-  const res = apiJson(200, { ok: true, revoked: id, principal: holder.id });
+  const res = apiJson(200, { ok: true, revoked: id, principal: holderId });
   if (own) res.headers.append("set-cookie", cookieFor(requestContextOf(req), null));
   return res;
 }
