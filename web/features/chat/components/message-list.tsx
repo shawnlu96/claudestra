@@ -28,6 +28,7 @@ import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
 import { GutterTime, HeaderTime } from "./msg-time";
+import { groupSegments } from "../time-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
@@ -50,7 +51,7 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
   if (/^已被用户中断/.test(m.content)) return <TurnMark kind="interrupted" animate={!m.id.startsWith("h")} />;
   return (
     <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
-      <GutterTime ts={m.ts} side="left" />
+      <GutterTime ts={m.ts} side="left" lead="system" />
       <span className="h-px flex-1 bg-base-content/10" />
       <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
         {t(m.content)}
@@ -125,7 +126,6 @@ const TextBlock = memo(function TextBlock({
         }`}
         {...press.handlers}
       >
-        <GutterTime ts={ts} side="left" />
         {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
         {folded && foldKey ? <NarrationFolded text={text} foldKey={foldKey} /> : (
         <div ref={bodyRef} className={muted ? "cstra-bubble" : "cstra-bubble text-[length:var(--chat-font-size,16px)]"}>
@@ -201,64 +201,56 @@ function AssistantBody({
   if (m.streamed && liveEmpty && !hasReply && !hasSegs) return <ThinkingDots />;
   if (!hasNarration && !hasReply) return null;
 
+  // 段按时间分组（../time-groups.ts）：每组一个 relative 包装 + 侧槽 sticky 时间标签，组滚过时标签贴顶
+  // 跟随、被下一组顶走；日期行只在消息的首标签。段本身的渲染分支不变（进度句 / 旁白 / 回复 / 工具）。
+  const renderSeg = (seg: AssistantSegment, i: number) =>
+    seg.kind === "text" && seg.progress ? (
+      <ProgressNote key={i} text={seg.text} ts={seg.ts ?? m.ts} />
+    ) : // agent 把自己刚发的 reply 又当普通文本复述了一遍 → 藏掉这份灰的（features/chat/reply-echo.ts）
+    seg.kind === "text" && isEchoSegment(m, seg.text) ? null : seg.kind === "text" ? (
+      // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
+      <TextBlock msgId={m.id} key={i} text={seg.text} ts={seg.ts ?? m.ts} streamed={m.streamed && i === segs!.length - 1} fullText={full} muted foldKey={`${m.id}:${i}`} />
+    ) : seg.kind === "reply" ? (
+      // 空 reply 段不渲染（源头在 chat-store.setReplyText 拦截，这里兜历史快照里的旧空段）
+      !seg.text?.trim() ? null : (
+        <div key={i}>
+          {i > 0 && <ReplyDivider />}
+          <TextBlock msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
+        </div>
+      )
+    ) : (
+      <div key={i} className="my-2 space-y-1">
+        {seg.tools.map((t, j) =>
+          streamingLast ? <ActiveToolRow key={j} tool={t} active={i === segs!.length - 1 && j === seg.tools.length - 1} /> : <HistoryToolRow key={j} tool={t} />,
+        )}
+      </div>
+    );
   const narration = hasSegs ? (
     <>
-      {segs!.map((seg: AssistantSegment, i) =>
-        seg.kind === "text" && seg.progress ? (
-          <ProgressNote key={i} text={seg.text} ts={seg.ts ?? m.ts} />
-        ) : // agent 把自己刚发的 reply 又当普通文本复述了一遍 → 藏掉这份灰的
-        // （判据见 features/chat/reply-echo.ts；owner 2026-09-22 实报同一段话显示两份）
-        seg.kind === "text" && isEchoSegment(m, seg.text) ? null : seg.kind === "text" ? (
-          // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
-          <TextBlock msgId={m.id}
-            key={i}
-            text={seg.text}
-            ts={seg.ts ?? m.ts}
-            streamed={m.streamed && i === segs!.length - 1}
-            fullText={full}
-            muted
-            foldKey={`${m.id}:${i}`}
-          />
-        ) : seg.kind === "reply" ? (
-          // 空 reply 段不渲染（否则是一条「回复」分隔线 + 空白块的幽灵气泡）。
-          // 源头已在 chat-store.setReplyText 拦截，这里兜历史快照里的旧空段。
-          !seg.text?.trim() ? null : (
-            <div key={i}>
-              {i > 0 && <ReplyDivider />}
-              {/* reply 到达即完整,永远直接富文本 */}
-              <TextBlock msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
-            </div>
-          )
-        ) : (
-          <div key={i} className="my-2 space-y-1">
-            {seg.tools.map((t, j) =>
-              streamingLast ? (
-                <ActiveToolRow
-                  key={j}
-                  tool={t}
-                  active={i === segs!.length - 1 && j === seg.tools.length - 1}
-                />
-              ) : (
-                <HistoryToolRow key={j} tool={t} />
-              )
-            )}
-          </div>
-        )
-      )}
+      {groupSegments(segs!, m.ts).map((g, gi) => (
+        <div key={g.start} className="relative">
+          <GutterTime ts={g.ts} side="left" lead={g.lead} showDate={gi === 0} />
+          {segs!.slice(g.start, g.end).map((seg, k) => renderSeg(seg, g.start + k))}
+        </div>
+      ))}
     </>
   ) : hasNarration && !isEchoSegment(m, m.content) ? (
-    <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} />
+    <div className="relative">
+      <GutterTime ts={m.ts} side="left" lead="narr" />
+      <TextBlock msgId={m.id} text={m.content} ts={m.ts} streamed={m.streamed} fullText={full} muted foldKey={`${m.id}:c`} />
+    </div>
   ) : null;
 
   return (
     <InlineActionContext.Provider value={inlineCtx}>
       {narration}
       {hasReply && !hasReplySeg && (
-        <>
+        <div className="relative">
+          <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" showDate={!hasNarration} />
           {hasNarration && <ReplyDivider />}
           {/* reply 到达即完整,直接富文本 */}
           <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
-        </>
+        </div>
       )}
     </InlineActionContext.Provider>
   );
@@ -304,7 +296,6 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
       // 布局规则(owner 2026-09-24):只有本人靠右,peer / 其它 agent / 别的用户一律靠左;
       // 圆角:靠右的右上角小、靠左的左上角小,其余大——尖角指向说话的一侧
       <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} relative mb-[22px] flex flex-col gap-2 ${isSelf ? "items-end" : "items-start"}`}>
-        <GutterTime ts={m.ts} side={isSelf ? "right" : "left"} />
         {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14);移动端时间在头行另一端(owner 2026-09-27) */}
         {!isSelf && (
           <div className="flex w-full items-center justify-between gap-2">
@@ -331,13 +322,14 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             <div
               ref={bubbleRef}
               data-bubble="user"
-              className={`cstra-bubble break-words border px-[15px] py-[11px] text-[length:var(--chat-font-size,14.5px)] leading-[var(--chat-line-height,1.6)] text-base-content/90 ${
+              className={`cstra-bubble relative break-words border px-[15px] py-[11px] text-[length:var(--chat-font-size,14.5px)] leading-[var(--chat-line-height,1.6)] text-base-content/90 ${
                 isSelf
                   ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
                   : "rounded-[4px_15px_15px_15px] border-info/25 bg-info/[0.06]"
               }`}
               {...press.handlers}
             >
+              <GutterTime ts={m.ts} side={isSelf ? "right" : "left"} lead="user" />
               {userQuoted && (
                 <div className="mb-2 border-l-2 border-base-content/25 pl-2 text-[12px] leading-snug text-base-content/50">
                   {userQuoted}
@@ -386,9 +378,9 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
   return (
     <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} relative mb-[22px] w-full`}>
       {/* 头行：✦ Claude 头 + 移动端时间（PC 端时间在各段左槽）。复制整条走正文段的长按菜单 */}
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-center justify-between gap-2">
         <ClaudeHeader pulsing={liveEmpty} />
-        <HeaderTime ts={m.ts} className="mt-[3px]" />
+        <HeaderTime ts={m.ts} className="mb-[9px]" />
       </div>
       <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
