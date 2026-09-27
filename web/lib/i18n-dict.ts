@@ -179,7 +179,7 @@ export const DICT: Record<string, string> = {
   "Tailscale 连着，但还没有能用的 HTTPS 入口，见下方": "Tailscale is connected but there is no working HTTPS entry yet — see below",
   "装了但没连上，见下方": "Installed but not connected — see below",
   "没装。重跑 bun run setup 选「Tailscale」会一步步引导": "Not installed. Rerun `bun run setup` and pick Tailscale for a guided setup",
-  "只在同一 Wi-Fi 下能用；明文，推送和语音输入用不了": "Same Wi-Fi only; plain HTTP, so no push or voice input",
+  "只在同一 Wi-Fi 下能用；明文，推送和语音输入用不了。手机打不开先查这台电脑的防火墙": "Same Wi-Fi only; plain HTTP, so no push or voice input. If the phone can't open it, check this computer's firewall",
   "bridge 只监听本机。要用就在 .env 写 BRIDGE_BIND=0.0.0.0 后重启 bridge（公共网络别开）": "The bridge listens on this machine only. To use it, set BRIDGE_BIND=0.0.0.0 in .env and restart the bridge (not on public networks)",
   "经你自己的反向代理": "Through your own reverse proxy",
   "高级：自己的域名 + Caddy / nginx，见 web/SETUP.md「Public reverse proxy」": "Advanced: your own domain with Caddy / nginx — see \"Public reverse proxy\" in web/SETUP.md",
