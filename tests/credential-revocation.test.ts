@@ -53,7 +53,7 @@ describe("revocable", () => {
   });
 });
 
-async function drain(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+async function drain(reader: { read(): Promise<{ done: boolean }> }): Promise<void> {
   for (let i = 0; i < 50; i++) {
     const { done } = await reader.read();
     if (done) return;
