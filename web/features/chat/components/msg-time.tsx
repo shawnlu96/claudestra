@@ -9,7 +9,9 @@ import type { LeadKind } from "../time-groups";
  * - ≥lg：GutterTime 放在条目侧槽——消息列 ≥1024px 时左右有 ≥29px margin + 28px padding，够放两行；
  *   absolute 铺满所属块高度的窄列里放一个 sticky 标签，块滚过时标签贴顶跟随。AI 消息按时间分组
  *   （../time-groups.ts），一组一个标签；本人在右槽、其他在左槽。
- *   标签行高取所属块第一行的行高（不继承 padding，保证 sticky 贴顶时各类标签同高）；日期行只在消息的首标签。
+ *   标签行高取所属块第一行的行高（不继承 padding，保证 sticky 贴顶时各类标签同高）；非今天的带日期行，
+ *   两行时行高改 1.5（继承正文行高会让两行间隔过大，owner 2026-09-27）。
+ *   hover 形态：AI 消息的每个非组首段也有一个标签，平时透明、鼠标悬停该段时显示（./seg-groups.tsx）。
  * 导出稿（分享）没有侧槽：HeaderTime 常显、GutterTime 不渲染。
  */
 export function HeaderTime({ ts, className = "" }: { ts?: string; className?: string }) {
@@ -36,17 +38,19 @@ const LEAD: Record<GutterLead, string> = {
   system: "16px",
 };
 
-export function GutterTime({ ts, side, lead, showDate = true }: { ts?: string; side: "left" | "right"; lead: GutterLead; showDate?: boolean }) {
+export function GutterTime({ ts, side, lead, hover = false }: { ts?: string; side: "left" | "right"; lead: GutterLead; hover?: boolean }) {
   const exporting = useIsExport();
   const p = fmtTsParts(ts);
   if (!p || exporting) return null;
   return (
     <div
       aria-hidden
-      className={`pointer-events-none absolute inset-y-0 hidden w-[52px] lg:block ${side === "left" ? "-left-[56px] text-right" : "-right-[56px] text-left"}`}
+      className={`pointer-events-none absolute inset-y-0 hidden w-[52px] lg:block ${side === "left" ? "-left-[56px] text-right" : "-right-[56px] text-left"} ${
+        hover ? "opacity-0 transition-opacity group-hover/seg:opacity-100" : ""
+      }`}
     >
-      <div className="sticky top-1 font-mono text-[10px] tabular-nums text-base-content/35" style={{ lineHeight: LEAD[lead] }}>
-        {showDate && p.date && <div>{p.date}</div>}
+      <div className="sticky top-1 font-mono text-[10px] tabular-nums text-base-content/35" style={{ lineHeight: p.date ? 1.5 : LEAD[lead] }}>
+        {p.date && <div>{p.date}</div>}
         <div>{p.hms}</div>
       </div>
     </div>

@@ -28,7 +28,7 @@ import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
 import { GutterTime, HeaderTime } from "./msg-time";
-import { groupSegments } from "../time-groups";
+import { SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
@@ -201,11 +201,10 @@ function AssistantBody({
   if (m.streamed && liveEmpty && !hasReply && !hasSegs) return <ThinkingDots />;
   if (!hasNarration && !hasReply) return null;
 
-  // 段按时间分组（../time-groups.ts）：每组一个 relative 包装 + 侧槽 sticky 时间标签，组滚过时标签贴顶
-  // 跟随、被下一组顶走；日期行只在消息的首标签。段本身的渲染分支不变（进度句 / 旁白 / 回复 / 工具）。
+  // 段的时间轨道在 ./seg-groups.tsx（分组常显 + 逐段 hover）；这里只管段本身的渲染分支（进度句 / 旁白 / 回复 / 工具）。
   const renderSeg = (seg: AssistantSegment, i: number) =>
     seg.kind === "text" && seg.progress ? (
-      <ProgressNote key={i} text={seg.text} ts={seg.ts ?? m.ts} />
+      <ProgressNote key={i} text={seg.text} />
     ) : // agent 把自己刚发的 reply 又当普通文本复述了一遍 → 藏掉这份灰的（features/chat/reply-echo.ts）
     seg.kind === "text" && isEchoSegment(m, seg.text) ? null : seg.kind === "text" ? (
       // 只有「最后一段且回合仍在流式」在生长——其余段已封笔,立即富文本
@@ -226,14 +225,7 @@ function AssistantBody({
       </div>
     );
   const narration = hasSegs ? (
-    <>
-      {groupSegments(segs!, m.ts).map((g, gi) => (
-        <div key={g.start} className="relative">
-          <GutterTime ts={g.ts} side="left" lead={g.lead} showDate={gi === 0} />
-          {segs!.slice(g.start, g.end).map((seg, k) => renderSeg(seg, g.start + k))}
-        </div>
-      ))}
-    </>
+    <SegGroups segs={segs!} ts={m.ts} render={renderSeg} />
   ) : hasNarration && !isEchoSegment(m, m.content) ? (
     <div className="relative">
       <GutterTime ts={m.ts} side="left" lead="narr" />
@@ -246,7 +238,7 @@ function AssistantBody({
       {narration}
       {hasReply && !hasReplySeg && (
         <div className="relative">
-          <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" showDate={!hasNarration} />
+          <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" />
           {hasNarration && <ReplyDivider />}
           {/* reply 到达即完整,直接富文本 */}
           <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />

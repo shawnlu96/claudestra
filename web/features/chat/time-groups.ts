@@ -25,11 +25,11 @@ export interface SegGroup {
 
 export const GROUP_GAP_MS = 2 * 60_000;
 
-function segTs(s: SegLike): string | undefined {
+export function segTs(s: SegLike): string | undefined {
   return s.kind === "tools" ? s.tools[0]?.ts : s.ts;
 }
 
-function leadOf(s: SegLike): LeadKind {
+export function leadOf(s: SegLike): LeadKind {
   if (s.kind === "tools") return "tool";
   if (s.kind === "reply") return "body";
   return s.progress ? "note" : "narr";

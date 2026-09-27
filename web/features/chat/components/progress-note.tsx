@@ -1,16 +1,14 @@
 "use client";
-import { memo, useState } from "react";
-import { fmtTs } from "../fmt-time";
-import { hasLiveSelection } from "../select-mode";
+import { memo } from "react";
 import { useIsExport } from "../export-context";
 
 /**
  * v2.21.3+ 进度句(💭)（从 message-list.tsx 原样搬出）:Fable 5.1 在长工具链里把
  * 「接下来我会…」写进 progress-update thinking 块而不是 text。比旁白(TextBlock muted)
- * 再弱一档——纯文本、斜体、无竖线,只为让人知道 agent 没停、在干什么;点一下显示时间。
+ * 再弱一档——纯文本、斜体、无竖线,只为让人知道 agent 没停、在干什么。
+ * 时间不再点击开关（owner 2026-09-27）：PC 端由侧槽标签给（./msg-time.tsx），移动端不显示。
  */
-export const ProgressNote = memo(function ProgressNote({ text, ts }: { text: string; ts?: string }) {
-  const [showTs, setShowTs] = useState(false);
+export const ProgressNote = memo(function ProgressNote({ text }: { text: string }) {
   const exporting = useIsExport();
   if (exporting) return null; // 导出里去掉 thinking 类内容（owner 2026-09-24）
   return (
@@ -22,16 +20,9 @@ export const ProgressNote = memo(function ProgressNote({ text, ts }: { text: str
       // （owner 2026-09-22「pi agent 还是出现下面多个滑动条导致乱套」，
       //  实测那条进度句超框 110px，消息区 scrollWidth 比可视宽多 86px）。
       className="my-1 break-words pl-2.5 text-[length:calc(var(--chat-narr-size,13.5px)_-_1px)] italic leading-snug text-base-content/45"
-      onClick={() => {
-        if (hasLiveSelection()) return;
-        setShowTs((v) => !v);
-      }}
     >
       <span className="mr-1 not-italic">💭</span>
       {text}
-      {showTs && ts && (
-        <div className="mt-0.5 font-mono text-[10px] not-italic tabular-nums opacity-40">{fmtTs(ts)}</div>
-      )}
     </div>
   );
 });
