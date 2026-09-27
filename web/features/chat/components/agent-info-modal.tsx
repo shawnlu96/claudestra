@@ -129,8 +129,9 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
     if (r.data.removedFromPeers?.length) setNote(`${t("已从以下 peer 的共享范围移除：")}${r.data.removedFromPeers.join(", ")}`);
     // 全量 "*" 授权的 peer 摘不掉（scope 里没有它的名字）：关了闸门仍可访问，必须说出来
     if (r.data.stillSharedWith?.length) setWarn(`${t("以下 peer 持有全量（*）授权，仍可访问，请在 Peer 面板调整其范围：")}${r.data.stillSharedWith.join(", ")}`);
-    await load();
+    // 先踢列表刷新再重拉详情：侧栏角标 / 顶栏徽章跟着闸门一起变，不等详情那一趟（owner 2026-09-28）
     void store.refreshAgents();
+    await load();
   };
   const project = projects.find((p) => p.id === (info?.projectId ?? live?.projectId));
   const status = live ? (live.status === "active" ? (live.busy ? t("工作中") : t("运行中")) : t("已停止")) : info?.status;
