@@ -158,4 +158,18 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
       expect(x.sharedWith).toBeUndefined(); // peer 名单同一道门：peer / 受限 token 看不到谁在共享
     }
   });
+  test("进行中的值守随列表下发（按去前缀的名字对）；已结束的不发；peer 看不到", async () => {
+    const until = "2026-09-28T02:00:00.000Z";
+    const withMissions = {
+      ...io,
+      readMissions: async () => ({
+        open: { agent: "open", goal: "g", until, createdAt: until, status: "active" as const, nudges: 2, fastTurns: 0, resumeAt: until },
+        priv: { agent: "priv", goal: "g", until, createdAt: until, status: "done" as const, nudges: 5, fastTurns: 0 },
+      }),
+    };
+    const own = await agentListExtras(owner, withMissions);
+    expect(own("agent-open", {}).mission).toEqual({ goal: "g", until, nudges: 2, resumeAt: until });
+    expect(own("agent-priv", {}).mission).toBeUndefined();
+    expect((await agentListExtras(peerStar, withMissions))("agent-open", {}).mission).toBeUndefined();
+  });
 });
