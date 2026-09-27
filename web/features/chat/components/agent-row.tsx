@@ -79,9 +79,6 @@ export function AgentRow({
   // Sidebar 的 30s tick 让它保鲜
   const lastAt = fmtAgo(a.lastActivityTs);
   const draft = useSyncExternalStore(subscribeDrafts, () => hasDraft(a.name), () => false);
-  // 多目录 project 里标出它在哪个仓（名字里已经带仓名就不标，见 agent-repo.ts）
-  const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
-  const repo = agentRepoLabel(a, projDirs);
   // 左滑删除(owner 2026-07-14:「临时起的 agent 污染列表,永久删除」):
   // 横滑露出红色删除钮,二次点击确认后 removeAgent(kill + registry 条目删,
   // 归档保留)。纵向意图让路给列表滚动;master/mock 不可删。
@@ -303,17 +300,7 @@ export function AgentRow({
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
             {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
-            {repo && <span className="ml-1.5 font-mono text-[11px] font-normal text-base-content/40">{repo}</span>}
-            {a.pinnedMaster && (
-              <span className="badge badge-primary badge-xs ml-1 align-middle">
-                {t("总控")}
-              </span>
-            )}
-            {a.mock && (
-              <span className="badge badge-ghost badge-xs ml-1 align-middle">
-                mock
-              </span>
-            )}
+            <NameTags a={a} />
           </span>
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
@@ -349,5 +336,19 @@ export function AgentRow({
         </div>
       </div>
     </li>
+  );
+}
+
+/** 名字后面的小标：所在仓（多目录 project，见 agent-repo.ts）、总控、mock */
+function NameTags({ a }: { a: AgentSession }) {
+  const t = useT();
+  const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
+  const repo = agentRepoLabel(a, projDirs);
+  return (
+    <>
+      {repo && <span className="ml-1.5 font-mono text-[11px] font-normal text-base-content/40">{repo}</span>}
+      {a.pinnedMaster && <span className="badge badge-primary badge-xs ml-1 align-middle">{t("总控")}</span>}
+      {a.mock && <span className="badge badge-ghost badge-xs ml-1 align-middle">mock</span>}
+    </>
   );
 }
