@@ -106,7 +106,7 @@ export function projectsDir(cwd: string): string {
 }
 
 /**
- * 根据项目 slug 自动推 JSONL 路径。
+ * 根据项目 slug 自动推 JSONL 路径（推算落空时按 sessionId 全库找，见函数末尾）。
  * 兼容垫片:新规则路径不存在而旧规则(只转 `/`)路径存在时回退旧路径——
  * 兜住 CC slug 规则与我们推断有出入的任何字符类(如 CJK 路径行为未实证),
  * 存量正常读,不因规则修正引入新盲区。
@@ -117,7 +117,9 @@ export function projectJsonlPath(cwd: string, sessionId: string): string {
   if (existsSync(primary)) return primary;
   const legacy = `${root}/${legacySlug(cwd)}/${sessionId}.jsonl`;
   if (legacy !== primary && existsSync(legacy)) return legacy;
-  return primary;
+  // 会话搬家了：Claude Code 的 EnterWorktree 把整个会话文件挪进 worktree 的项目目录（记录里一条 relocated），
+  // registry 的 cwd 还是原目录。按 id 找新家；哪都没有（还没生成）才返回推算路径
+  return findJsonlBySessionId(sessionId) ?? primary;
 }
 
 /** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session */
