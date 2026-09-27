@@ -114,6 +114,22 @@ describe("scanCodexStatsWindow", () => {
     expect(oldestTs).toBe(weekTs - DAY); // 已越过周界 → readFileStats 不用再扩窗
   });
 
+  test("有 token_usage_record 的请求按它计：计数器重开那条丢了也不少算；紧跟的 token_count 不重复计", () => {
+    const rec = (ms: number, n: number) => ({ timestamp: iso(ms), type: "token_usage_record", payload: { usage: { input_tokens: n - 5, output_tokens: 5, total_tokens: n } } });
+    const recs = [
+      tokenCount(T0, 100, 100), // 老版本写的：没有 record，按做差
+      rec(T0 + 1, 50), tokenCount(T0 + 1, 150, 50),
+      rec(T0 + 2, 80), tokenCount(T0 + 2, 120, 80), // 计数器重开（丢了重开那条）：做差只能拿 120，record 给准数 80
+      tokenCount(T0 + 3, 120, 80), // 重复落盘：没有 record，做差 0
+      rec(T0 + 4, 40), tokenCount(T0 + 4, 160, 40),
+    ];
+    const { stats } = scanCodexStatsWindow(lines(recs), dayTs, weekTs, true);
+    expect(stats.week.tokens).toBe(100 + 50 + 80 + 40);
+    expect(stats.week.requests).toBe(4);
+    expect(stats.today.tokens).toBe(270);
+    expect(stats.contextTokens).toBe(40);
+  });
+
   test("接进 readFileStats：首行 session_meta 认出 Codex；小窗口扩窗后与全读一致", async () => {
     const now = Date.now();
     const recs: object[] = [meta(), turnContext(now, "gpt-6")];
