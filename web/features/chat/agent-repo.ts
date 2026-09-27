@@ -17,3 +17,7 @@ export function agentRepoLabel(a: { name: string; displayName: string; label?: s
   const names = [a.name, a.displayName, a.label ?? ""].map((n) => n.toLowerCase());
   return names.some((n) => n.includes(repo.toLowerCase())) ? null : repo;
 }
+
+/** 侧栏一行放得下名字 + 小标的字数上限（桌面侧栏约 300px）：超了就不标，免得名字和小标一起被截成省略号；工作目录在 agent 详情里看 */
+export const REPO_TAG_FIT = 24;
+export const repoTagFits = (name: string, repo: string) => name.length + repo.length <= REPO_TAG_FIT;

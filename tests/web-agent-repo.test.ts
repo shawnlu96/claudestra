@@ -1,6 +1,6 @@
 /** web/features/chat/agent-repo.ts：侧栏 agent 后面的「所在仓」短名 */
 import { describe, expect, test } from "bun:test";
-import { agentRepoLabel } from "@/features/chat/agent-repo";
+import { agentRepoLabel, repoTagFits } from "@/features/chat/agent-repo";
 
 const a = (name: string, cwd: string, label: string | null = null) => ({ name: `agent-${name}`, displayName: name, label, cwd });
 const QN = ["/r/qingniao-miniapp", "/r/qingniao-backend"];
@@ -20,5 +20,9 @@ describe("agentRepoLabel", () => {
   });
   test("cwd 不在任何目录下（显式 --project 指到别处）：用 cwd 自己的目录名", () => {
     expect(agentRepoLabel(a("reviewer", "/elsewhere/tool/"), QN)).toBe("tool");
+  });
+  test("侧栏放不下名字 + 小标就不标（alipan-resource + ali-operate 超了）", () => {
+    expect(repoTagFits("reviewer", "qingniao-backend")).toBe(true);
+    expect(repoTagFits("alipan-resource", "ali-operate")).toBe(false);
   });
 });

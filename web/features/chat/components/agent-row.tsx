@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStore, useChatStoreApi } from "../chat-store";
-import { agentRepoLabel } from "../agent-repo";
+import { agentRepoLabel, repoTagFits } from "../agent-repo";
 import type { AgentSession } from "../type";
 import { ctxView } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
@@ -355,6 +355,6 @@ function NameTags({ a, projEmoji }: { a: AgentSession; projEmoji?: string }) {
 function RepoTag({ a }: { a: AgentSession }) {
   const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
   const repo = agentRepoLabel(a, projDirs);
-  if (!repo) return null;
+  if (!repo || !repoTagFits(a.label || a.displayName, repo)) return null;
   return <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>;
 }
