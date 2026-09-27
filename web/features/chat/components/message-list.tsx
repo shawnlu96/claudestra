@@ -28,7 +28,7 @@ import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
 import { GutterTime, HeaderTime } from "./msg-time";
-import { SegGroups } from "./seg-groups";
+import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
@@ -56,22 +56,11 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
       <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
         {t(m.content)}
       </span>
+      <HeaderTime ts={m.ts} />
       <span className="h-px flex-1 bg-base-content/10" />
     </div>
   );
 });
-
-/** 过程叙述 ↔ 最终回复 之间的淡分隔线（仅两者都在时出现）。 */
-function ReplyDivider() {
-  const t = useT();
-  return (
-    <div className="my-2.5 flex items-center gap-2" aria-hidden>
-      <span className="h-px flex-1 bg-base-content/10" />
-      <span className="text-[10px] font-medium tracking-wide text-base-content/30">{t("回复")}</span>
-      <span className="h-px flex-1 bg-base-content/10" />
-    </div>
-  );
-}
 
 /** 叙述/回复的文本块：点击显示**该段自己**的秒级时间（不是整个回合的开场时间——
  *  长回合一个气泡跨一小时，整体时间对「这句话什么时候说的」没意义）。
@@ -121,7 +110,8 @@ const TextBlock = memo(function TextBlock({
               // 这里的 12.5px + 45% 灰才真正落到正文元素上。
               // 12.5px/45% 又被打回「眼睛疼」——回调到 13.5px/50%,靠竖线+字号差保持区分
               // 触屏上收起条常显、会盖住末行右端(peer review #40)→ 只在无 hover 的设备给底部留白
-              "narration-muted group relative border-l-2 border-base-content/20 pl-2.5 text-[length:var(--chat-narr-size,13.5px)] leading-snug text-base-content/50 [@media(hover:none)]:pb-5"
+              "narration-muted group relative border-l-2 border-base-content/20 pl-2.5 text-[length:var(--chat-narr-size,13.5px)] " +
+                "leading-[var(--cstra-lead-narr)] text-base-content/50 [@media(hover:none)]:pb-5"
             : "relative"
         }`}
         {...press.handlers}
@@ -212,10 +202,7 @@ function AssistantBody({
     ) : seg.kind === "reply" ? (
       // 空 reply 段不渲染（源头在 chat-store.setReplyText 拦截，这里兜历史快照里的旧空段）
       !seg.text?.trim() ? null : (
-        <div key={i}>
-          {i > 0 && <ReplyDivider />}
-          <TextBlock msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
-        </div>
+        <TextBlock key={i} msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
       )
     ) : (
       <div key={i} className="my-2 space-y-1">
@@ -237,12 +224,14 @@ function AssistantBody({
     <InlineActionContext.Provider value={inlineCtx}>
       {narration}
       {hasReply && !hasReplySeg && (
-        <div className="relative">
-          <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" />
+        <>
           {hasNarration && <ReplyDivider />}
-          {/* reply 到达即完整,直接富文本 */}
-          <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
-        </div>
+          <div className="relative">
+            <GutterTime ts={m.replyTs ?? m.ts} side="left" lead="body" />
+            {/* reply 到达即完整,直接富文本 */}
+            <TextBlock msgId={m.id} text={m.replyText!} ts={m.replyTs ?? m.ts} streamed={false} fullText={full} />
+          </div>
+        </>
       )}
     </InlineActionContext.Provider>
   );
@@ -314,7 +303,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             <div
               ref={bubbleRef}
               data-bubble="user"
-              className={`cstra-bubble relative break-words border px-[15px] py-[11px] text-[length:var(--chat-font-size,14.5px)] leading-[var(--chat-line-height,1.6)] text-base-content/90 ${
+              className={`cstra-bubble relative break-words border px-[15px] py-[11px] text-[length:var(--chat-font-size,14.5px)] leading-[var(--cstra-lead-user)] text-base-content/90 ${
                 isSelf
                   ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
                   : "rounded-[4px_15px_15px_15px] border-info/25 bg-info/[0.06]"
