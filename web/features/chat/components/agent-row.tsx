@@ -299,9 +299,9 @@ export function AgentRow({
             {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
-            {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
-            <NameTags a={a} />
+            <NameTags a={a} projEmoji={projEmoji} />
           </span>
+          <RepoTag a={a} />
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
               放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}
@@ -339,16 +339,22 @@ export function AgentRow({
   );
 }
 
-/** 名字后面的小标：所在仓（多目录 project，见 agent-repo.ts）、总控、mock */
-function NameTags({ a }: { a: AgentSession }) {
+/** 名字后面的小标：单人 project 的 emoji、总控、mock（在名字的省略容器里） */
+function NameTags({ a, projEmoji }: { a: AgentSession; projEmoji?: string }) {
   const t = useT();
-  const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
-  const repo = agentRepoLabel(a, projDirs);
   return (
     <>
-      {repo && <span className="ml-1.5 font-mono text-[11px] font-normal text-base-content/40">{repo}</span>}
+      {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
       {a.pinnedMaster && <span className="badge badge-primary badge-xs ml-1 align-middle">{t("总控")}</span>}
       {a.mock && <span className="badge badge-ghost badge-xs ml-1 align-middle">mock</span>}
     </>
   );
+}
+
+/** 所在仓（多目录 project，见 agent-repo.ts）：放在名字容器外、限宽先缩——侧栏窄时不能把名字挤成省略号 */
+function RepoTag({ a }: { a: AgentSession }) {
+  const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
+  const repo = agentRepoLabel(a, projDirs);
+  if (!repo) return null;
+  return <span className="min-w-0 max-w-[35%] shrink-[3] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>;
 }
