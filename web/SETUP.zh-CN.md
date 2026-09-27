@@ -84,6 +84,9 @@ npm run dev            # → http://localhost:33333，怎么指向一台 bridge 
 
 macOS 坑：全局 `NODE_ENV=production` 会盖掉 dev 模式 → `NODE_ENV=development npm run dev`。
 
+从别的设备（tailnet / 局域网里的手机）访问 dev server，要把那个地址写进 `web/.env.local` 的 `WEB_DEV_ORIGINS`（逗号分隔），
+否则 HMR 的 websocket 握手失败、页面反复整页刷新。`.env.local` 现在只剩这一个用途。
+
 ---
 
 ## 5. 从手机访问（远程访问）

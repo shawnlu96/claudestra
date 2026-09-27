@@ -107,6 +107,11 @@ npm run dev            # → http://localhost:33333, see web/CLAUDE.md for point
 macOS gotcha: a global `NODE_ENV=production` shadows dev mode →
 `NODE_ENV=development npm run dev`.
 
+Reaching the dev server from another device (phone on the tailnet / LAN) needs its
+address in `WEB_DEV_ORIGINS` (comma-separated, in `web/.env.local`) — otherwise the
+HMR websocket handshake fails and the page reloads in a loop. That is the only thing
+`.env.local` is still for.
+
 ---
 
 ## 5. Access from your phone (remote access)
