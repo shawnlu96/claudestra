@@ -58,6 +58,21 @@ describe("codexLineToClaudeShape", () => {
     expect(e.cwd).toBe("/w");
   });
 
+  test("回合以错误结束：额度用完 → ⛔ 文本、不标 API 错误（不自动续跑）；其它错误 → API Error 条目；正常结束 → null", () => {
+    const done = (error: unknown) => codexLineToClaudeShape(L({
+      timestamp: TS, type: "event_msg", payload: { type: "task_complete", turn_id: "t1", last_agent_message: null, error },
+    }));
+    const quota = done({ message: "You've hit your usage limit. Upgrade to Pro … or try again at 8:41 AM." })!;
+    expect(quota.type).toBe("assistant");
+    expect(quota.isApiErrorMessage).toBe(false);
+    expect(quota.message.content[0].text).toStartWith("You've hit your usage limit");
+    const other = done({ message: "stream disconnected before completion" })!;
+    expect(other.isApiErrorMessage).toBe(true);
+    expect(other.message.content[0].text).toBe("API Error: stream disconnected before completion");
+    expect(done(null)).toBeNull();
+    expect(done({ message: "  " })).toBeNull();
+  });
+
   test("user 消息 → Claude Code 的 user 行（content 是字符串）", () => {
     const e = codexLineToClaudeShape(L({
       timestamp: TS, type: "response_item",

@@ -575,6 +575,7 @@ import type {
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue } from "./bridge/held-queue.js";
 import { AgentCallBook, type PendingAgentCall } from "./bridge/agent-calls.js";
+import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -1252,6 +1253,10 @@ discord.once("ready", async () => {
   // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
 
+  // Codex 回合失败时不发 hook ⇒ 替它补 StopFailure（bridge/codex-turn-failure.ts）
+  startCodexTurnFailureWatch(async (channelId) => {
+    await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
+  });
   // v2.24+ 回合以 API 错误结束 ⇒ 60s 无活动自动续跑一次（owner 2026-09-18；规则见 lib/api-error-resume.ts）
   const apiErrorStates = new Map<string, ApiErrorState>();
   subscribeEvents({}, (evt) => {

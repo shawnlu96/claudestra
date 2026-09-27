@@ -579,7 +579,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               // 像 "You've hit your limit · resets 2am (Asia/Shanghai)"。不应该按
               // 常规 💬 发（会让 agent 看着像正常输出），换成 ⛔ 标记 + 置 flag
               // 让后面的 turn_duration 也跳过。
-              if (/You['']?ve hit your limit|Hit your (rate )?limit/i.test(t)) {
+              if (/You['']?ve hit your (usage )?limit|Hit your (rate |usage )?limit/i.test(t)) {
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, seq, sid: state.sessionId } });
