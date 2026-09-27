@@ -181,6 +181,25 @@ describe("网页里批准配对（管理端点）", () => {
   });
 });
 
+describe("审计：新凭据记下谁签的码、谁批准的", () => {
+  const creds = async () => (await readPrincipalsStrict(join(dir, "principals.json"))).principals.flatMap((p) => p.credentials ?? []);
+  test("网页发的码扫码配对 → issuedBy = 发码设备；终端发的码手输后网页批准 → issuedBy cli、approvedBy = 批准设备", async () => {
+    const phone: Principal = { id: OWNER_PRINCIPAL_ID, role: "owner", agents: ["*", "master"], createdAt: "", credential: "dev_phone" };
+    const info = issuePairing(machine, {}, phone);
+    const ch = (await (await pub("GET", "/api/v1/devices/pair/challenge", RELAY))!.json()) as { challenge: string };
+    const res = (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { proof: { challenge: ch.challenge, hmac: proofFor(secretOf(info), ch.challenge) }, deviceName: "audit-ipad" } }))!;
+    const { credentialId } = (await res.json()) as { credentialId: string };
+    expect((await creds()).find((c) => c.id === credentialId)).toMatchObject({ issuedBy: "dev_phone" });
+    expect((await creds()).find((c) => c.id === credentialId)?.approvedBy).toBeUndefined();
+
+    const cli = issuePairing(machine, {});
+    const r = (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { code: String(cli.code), deviceName: "audit-mac" } }))!;
+    const { approvalId } = (await r.json()) as { approvalId: string };
+    const out = (await decideApproval(approvalId, true, phone))!;
+    expect((await creds()).find((c) => c.id === out.credentialId)).toMatchObject({ issuedBy: "cli", approvedBy: "dev_phone" });
+  });
+});
+
 describe("本机回环自动配对", () => {
   test("隧道来源（source relay）打不到；LAN 打不到；回环缺自定义头 / 跨源都拒；回环 + 头 + 同源 → 凭据，cookie 不带 Secure、Path=/", async () => {
     expect((await pub("POST", "/api/v1/devices/local", RELAY, { headers: { "x-cstra-device": "1" } }))!.status).toBe(403);

@@ -43,6 +43,9 @@ export interface DeviceCredential {
   lastSeenAt?: string;
   lastIp?: string;
   disabled?: boolean;
+  /** 审计：谁签的配对码 / 谁批准的手输短码（凭据 id，本机终端是 "cli"；本机一键配对、旧登录迁移没有） */
+  issuedBy?: string;
+  approvedBy?: string;
 }
 
 export type Random = (n: number) => Uint8Array;
@@ -106,7 +109,7 @@ export function attachCredential(
   p: Principal,
   deviceName: string,
   grant: Grant,
-  opts: { now?: Date; ip?: string | null; random?: Random } = {},
+  opts: { now?: Date; ip?: string | null; random?: Random; issuedBy?: string; approvedBy?: string } = {},
 ): { token: string; credential: DeviceCredential } {
   const now = opts.now ?? new Date();
   const random = opts.random ?? defaultRandom;
@@ -116,6 +119,8 @@ export function attachCredential(
     deviceName: deviceName.trim().slice(0, 64) || "device", grant,
     createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + CREDENTIAL_TTL_MS).toISOString(),
     ...(opts.ip ? { lastIp: opts.ip } : {}),
+    ...(opts.issuedBy ? { issuedBy: opts.issuedBy } : {}),
+    ...(opts.approvedBy ? { approvedBy: opts.approvedBy } : {}),
   };
   (p.credentials ??= []).push(credential);
   return { token, credential };
@@ -261,6 +266,8 @@ export interface Approval {
   clientIp: string | null;
   grant: Grant;
   guest?: string;
+  /** 这个短码是谁签的（审计，见 pairing-codes IssuedCode.issuer） */
+  issuer?: string;
   createdAt: number;
   expiresAt: number;
   /** approving = 有人点了批准、正在签凭据：不再出现在待批列表，别人的批准 / 拒绝都进不来 */
@@ -274,7 +281,7 @@ export class Approvals {
   private readonly items = new Map<string, Approval>();
   constructor(private readonly now: () => number = Date.now, private readonly random: Random = defaultRandom, private readonly ttlMs = APPROVAL_TTL_MS) {}
 
-  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string }): Approval {
+  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string; issuer?: string }): Approval {
     this.prune();
     const item: Approval = { id: Buffer.from(this.random(16)).toString("base64url"), ...a, createdAt: this.now(), expiresAt: this.now() + this.ttlMs, state: "pending" };
     this.items.set(item.id, item);

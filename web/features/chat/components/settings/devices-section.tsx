@@ -37,6 +37,11 @@ export function DevicesSection() {
     load();
   }, [load, current?.fp]);
 
+  // 审计：这台是谁加的（凭据 id → 设备名；电脑终端发的码记作 cli；源设备已撤销就说已撤销）
+  const nameOf = (id: string) => (id === "cli" ? t("电脑终端") : (devices?.find((x) => x.id === id)?.deviceName ?? t("已撤销的设备")));
+  const origin = (d: DeviceInfo) =>
+    d.approvedBy ? t("由「{who}」批准添加", { who: nameOf(d.approvedBy) }) : d.issuedBy ? t("由「{who}」添加", { who: nameOf(d.issuedBy) }) : "";
+  const children = (d: DeviceInfo) => (devices ?? []).filter((x) => x.issuedBy === d.id || x.approvedBy === d.id).length;
   const revoke = async (d: DeviceInfo) => {
     if (armed !== d.id) return setArmed(d.id);
     setArmed(null);
@@ -87,6 +92,7 @@ export function DevicesSection() {
                   {d.lastSeenAt ? ` · ${t("最近")} ${new Date(d.lastSeenAt).toLocaleString()}` : ""}
                   {d.lastIp ? ` · ${d.lastIp}` : ""}
                 </span>
+                {origin(d) && <span className="block truncate text-base-content/40">{origin(d)}</span>}
               </span>
               <button
                 className={`btn btn-xs ${armed === d.id ? "btn-error" : "btn-ghost text-error"}`}
@@ -94,7 +100,11 @@ export function DevicesSection() {
                 onClick={() => void revoke(d)}
                 onBlur={() => setArmed((a) => (a === d.id ? null : a))}
               >
-                {busy === d.id ? <span className="loading loading-spinner loading-xs" /> : armed === d.id ? t("确定？") : d.current ? t("退出登录") : t("撤销")}
+                {busy === d.id ? (
+                  <span className="loading loading-spinner loading-xs" />
+                ) : armed === d.id ? (
+                  children(d) ? t("确定？它加的 {n} 台不会一起撤销", { n: children(d) }) : t("确定？")
+                ) : d.current ? t("退出登录") : t("撤销")}
               </button>
             </li>
           ))}

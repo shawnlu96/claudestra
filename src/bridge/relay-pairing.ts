@@ -11,9 +11,9 @@ import type { RelayClient } from "../lib/relay-client.js";
 const codes = new PairingCodes();
 
 /** 签一组码并登记到中继；顶掉 / 过期的顺手注销 */
-export function issuePairingCode(client: RelayClient | null, grant?: Grant, guest?: string): IssuedCode {
+export function issuePairingCode(client: RelayClient | null, grant?: Grant, guest?: string, issuer?: string): IssuedCode {
   for (const c of codes.prune()) client?.delCode(c);
-  const r = codes.issue(grant, guest);
+  const r = codes.issue(grant, guest, issuer);
   for (const c of r.evicted) client?.delCode(c);
   client?.putCode(r.code, Math.floor(r.expiresAt / 1000));
   return r;

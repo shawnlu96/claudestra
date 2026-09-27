@@ -41,11 +41,13 @@ function machineFp(): string | null {
 const str = (v: unknown, max = 64): string | undefined => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined);
 
 /** 凭据落盘：owner 的设备挂 owner:self；guest 新建一个 principal（不含 master、无终端、无管理） */
-async function grantCredential(deviceName: string, grant: Grant, guest: string | undefined, ip: string | null): Promise<PairOutcome> {
+async function grantCredential(
+  deviceName: string, grant: Grant, guest: string | undefined, ip: string | null, audit: { issuedBy?: string; approvedBy?: string } = {},
+): Promise<PairOutcome> {
   const out = await updatePrincipals((file) => {
     const principal = guest ? newGuestPrincipal(guest, grant) : ensureOwnerPrincipal(file);
     if (guest) file.principals.push(principal);
-    const { token, credential } = attachCredential(principal, deviceName, guest ? guestGrant(grant.agents) : grant, { ip });
+    const { token, credential } = attachCredential(principal, deviceName, guest ? guestGrant(grant.agents) : grant, { ip, ...audit });
     return { changed: true, result: { token, principalId: principal.id, credentialId: credential.id, grant: credential.grant, expiresAt: credential.expiresAt } };
   }, { path: principalsPath });
   if (!out) throw new Error("principals.json 写锁未拿到"); // 默认 onBusy=proceed 不会走到这里：只为收窄类型
@@ -112,12 +114,12 @@ async function pair(req: Request): Promise<Response> {
     if (!challenges.consume(b.proof.challenge)) return apiJson(400, { ok: false, error: "challenge invalid or expired", code: "challenge_invalid" });
     const r = redeemPairingByProof(relayClient(), b.proof.challenge, b.proof.hmac);
     if (!r.ok) return pairFailure(r.reason);
-    return pairedResponse(ctx, await grantCredential(deviceName, r.grant, r.guest, ctx.clientIp));
+    return pairedResponse(ctx, await grantCredential(deviceName, r.grant, r.guest, ctx.clientIp, { issuedBy: r.issuer }));
   }
   if (typeof b.code === "string") {
     const r = redeemPairingCode(relayClient(), b.code);
     if (!r.ok) return pairFailure(r.reason);
-    const a = approvals.add({ code: r.code, deviceName, clientIp: ctx.clientIp, grant: r.grant, guest: r.guest });
+    const a = approvals.add({ code: r.code, deviceName, clientIp: ctx.clientIp, grant: r.grant, guest: r.guest, issuer: r.issuer });
     return apiJson(202, { ok: true, pending: true, approvalId: a.id, expiresAt: new Date(a.expiresAt).toISOString(), machineName: hostname() });
   }
   return apiJson(400, { ok: false, error: '"code" or "proof" required' });
@@ -174,6 +176,7 @@ async function listDevices(principal: Principal): Promise<Response> {
   const devices = file.principals.flatMap((p) => (p.credentials ?? []).map((c) => ({
     id: c.id, deviceName: c.deviceName, principal: p.id, principalName: p.name ?? p.id, grant: c.grant, createdAt: c.createdAt,
     lastSeenAt: c.lastSeenAt ?? null, lastIp: c.lastIp ?? null, expiresAt: c.expiresAt, disabled: !!c.disabled, current: c.id === principal.credential,
+    issuedBy: c.issuedBy ?? null, approvedBy: c.approvedBy ?? null,
   })));
   return apiJson(200, { ok: true, devices });
 }
@@ -221,7 +224,7 @@ export async function decideApproval(id: string, approve: boolean, approver?: Pr
     return { ok: true, id, state: "denied" };
   }
   try {
-    const out = await grantCredential(a.deviceName, a.grant, a.guest, a.clientIp);
+    const out = await grantCredential(a.deviceName, a.grant, a.guest, a.clientIp, { issuedBy: a.issuer, approvedBy: approver?.credential ?? "cli" });
     approvals.settle(id, true, { token: out.token, credentialId: out.credentialId, principalId: out.principalId, expiresAt: out.expiresAt });
     return { ok: true, id, state: "approved", credentialId: out.credentialId, principalId: out.principalId, deviceName: a.deviceName };
   } catch (e) {
@@ -246,7 +249,7 @@ export function issuePairing(
   // 网页里发码（issuer = 那台设备）：给出去的不能比它自己的大；本机终端（CLI）不传 issuer，照旧
   const grant = issuer ? capGrant(asked, issuer) : asked;
   if (!grant) return { ok: false, error: "你这台设备能用的会话里没有这些，签不了" };
-  const r = issuePairingCode(relayClient(), guest ? guestGrant(grant.agents) : grant, guest);
+  const r = issuePairingCode(relayClient(), guest ? guestGrant(grant.agents) : grant, guest, issuer?.credential ?? "cli");
   const entry = str(body.url, 256)?.replace(/\/+$/, "") ?? (i.base ? `https://${i.base}` : null);
   const fragment = `${fp}.${r.secret}`;
   return {
