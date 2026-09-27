@@ -1,4 +1,5 @@
 "use client";
+import { AgentTitle } from "./agent-title";
 import {
   useCallback,
   useEffect,
@@ -286,9 +287,7 @@ function TopBar() {
           面板一起切掉。cwd 用 basis-0 grow：只吃剩余空间、永不触发换行，没地方就截断到看不见 */}
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 py-1">
         <div className="flex min-w-0 basis-full items-center gap-2 @xl:basis-auto">
-          <span className="min-w-0 truncate font-semibold">
-            {info ? t(info.displayName) : active || "Claudestra"}
-          </span>
+          <AgentTitle info={info} fallback={active || "Claudestra"} />
           {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
               顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
           {busy && (

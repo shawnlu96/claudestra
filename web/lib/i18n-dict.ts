@@ -713,4 +713,6 @@ export const DICT: Record<string, string> = {
   "未开闸": "external off",
   "开启 external 闸门": "Turn on external",
   "暂不提供：请逐个选择已开闸的会话": "Unavailable for now: pick external-enabled sessions one by one",
+  "显示名": "Display name",
+  "留空则只显示会话名": "Leave empty to show only the session name",
 };

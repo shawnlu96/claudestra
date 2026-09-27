@@ -43,6 +43,8 @@ export interface RegistryAgent {
   cwd?: string;
   purpose?: string;
   displayName?: string;
+  /** owner 2026-09-27「显示名」：用户给会话起的别名，默认空；web 侧栏 / 顶栏显示「显示名 | name」 */
+  label?: string;
   model?: string;
   effort?: string;
   /** create --external 标记：可安全暴露给 API token / peer（R1 守卫） */
@@ -78,6 +80,7 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
       cwd: str("cwd") ?? str("dir"),
       purpose: str("purpose"),
       displayName: str("displayName"),
+      label: str("label"),
       model: str("model"),
       effort: str("effort"),
       // ⚠ 布尔字段不走 str() 帮手——external 曾因此被整个丢掉(所有 agent 在

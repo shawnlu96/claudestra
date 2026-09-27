@@ -8,6 +8,7 @@ import { useSyncExternalStore } from "react";
 export interface AgentInfo {
   name: string;
   displayName: string | null;
+  label: string | null;
   purpose: string;
   cwd: string | null;
   status: string | null;
@@ -61,6 +62,10 @@ async function call<T>(input: RequestInfo, init?: RequestInit): Promise<Res<T>> 
 
 export function fetchAgentInfo(name: string): Promise<Res<{ agent: AgentInfo }>> {
   return call(`/api/agents/info?name=${encodeURIComponent(name)}`);
+}
+
+export function setAgentLabel(name: string, label: string): Promise<Res<{ label: string | null }>> {
+  return call("/api/agents/label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, label }) });
 }
 
 /** 关闭且正在共享时后端要 confirm=会话名，否则回 409 needConfirm（前端据此弹输入确认框）。

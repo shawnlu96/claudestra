@@ -292,7 +292,8 @@ export function AgentRow({
           )}
           <span className={`min-w-0 flex-1 truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
-            {t(a.displayName)}
+            {a.label || t(a.displayName)}
+            {a.label && <span className="ml-1 text-[12px] font-normal text-base-content/40">| {a.displayName}</span>}
             {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
