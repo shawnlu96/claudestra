@@ -48,6 +48,7 @@ import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
 import { rebuildWebIfStale, type WebBuildResult } from "./web-build.js";
 import { legacyWebPlistPath, staticIndexExists, webStaticState, webStaticWarnings } from "./web-static.js";
+import { cliPathNotes } from "./cli-path.js";
 
 
 interface DaemonSpec {
@@ -845,6 +846,7 @@ export async function installClaudestraCli(
   // 1) CLI wrapper
   try { result.cliWrapper = await writeCliWrapper(repoRoot, bunPath); }
   catch (e) { errors.push(`CLI wrapper: ${(e as Error).message}`); return result; }
+  warnings.push(...cliPathNotes()); // 新开终端找不到 claudestra（~/.local/bin 不在登录 PATH）就补进 profile（lib/cli-path.ts）
 
   // 1b) web 静态包过期就重建。必须排在第 6 步 reload 之前：update 子进程由 launcher 派生，
   //     bootout launcher 会把它连坐回收，构建若在后面会被中途杀掉、留下被清空的 .next / out。

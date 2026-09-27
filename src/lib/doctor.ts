@@ -565,6 +565,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkWebBuild(repoRoot),
     checkDeployment(),
     import("./doctor-remote.js").then((m) => m.checkRemoteAccess(repoRoot)),
+    import("./cli-path.js").then((m) => m.checkCliOnPath()), // 新开终端能不能直接敲 claudestra
   ]);
   return groups.flat();
 }
