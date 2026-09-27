@@ -21,7 +21,9 @@ describe("parseMachinePath / apiPathAllowed", () => {
     expect(parseMachinePath(`/m/${FP}`)).toBe("path_forbidden"); // 没有 rest = "/"，不在 /api/v1 下
   });
   test("只放 /api/v1：控制路由、穿越、编码穿越、连续斜线、控制字符、反斜线全拒", () => {
-    for (const bad of ["/hook", "/events", "/api/v2/x", "/api/v1/../hook", "/api/v1/./x", "/api/v1//x", "/api/v1/%2e%2e/hook", "/api/v1/a%2fb", "/api/v1/%25", "/api/v1/x\u0000", "/api/v1/a\\b", "/api/v1/%zz", "/apiv1/x", "/api/v10/x"]) {
+    const bads = ["/hook", "/events", "/api/v2/x", "/api/v1/../hook", "/api/v1/./x", "/api/v1//x", "/api/v1/%2e%2e/hook", "/api/v1/a%2fb", "/api/v1/%25",
+      "/api/v1/x\u0000", "/api/v1/a\\b", "/api/v1/%zz", "/apiv1/x", "/api/v10/x"];
+    for (const bad of bads) {
       expect(apiPathAllowed(bad)).toBe(false);
       expect(parseMachinePath(`/m/${FP}${bad}`)).toBe("path_forbidden");
     }

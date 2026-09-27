@@ -283,7 +283,7 @@ describe("front 限流与在途上限（§6.1，用小配额验证）", () => {
 describe("路径模式 /m/<fp>（docs/design-hosted-frontend.md §4）", () => {
   const mpath = (rest: string) => `/m/${mini.fp}${rest}`;
 
-  test("GET：路径去前缀、带模式头与前缀头；浏览器自带的模式头与多余 cookie 不进实例；响应 Set-Cookie 只留 cstra_dev 且 Path 钉死，Location 补前缀", async () => {
+  test("GET：路径去前缀、带模式头与前缀头；浏览器自带的模式头与多余 cookie 不进实例；响应只留 cstra_dev 且 Path 钉死，Location 补前缀", async () => {
     const browser = at("relay.test", mpath("/api/v1/agents?x=1"), { headers: { "x-claudestra-relay-mode": "evil", cookie: "cstra_home=mini; cstra_dev=dev_abc; other=1" } });
     const req = await answer((r) => mini.send({
       t: "res", id: r.id, status: 302, more: false,
@@ -365,7 +365,8 @@ describe("托管前端静态站（staticDir）", () => {
     hosted = createRelay({ base: "app.test", port: 0, db: ":memory:", trustProxy: true, version: "1.2.3", staticDir: dir, limits: { authPerIpPerMinute: 1000 }, log: () => {} });
   });
   afterAll(() => hosted.stop());
-  const get = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${hosted.port}${path}`, { ...init, redirect: "manual", headers: { "x-forwarded-host": "app.test", "x-forwarded-for": "203.0.113.10" } });
+  const get = (path: string, init: RequestInit = {}) =>
+    fetch(`http://127.0.0.1:${hosted.port}${path}`, { ...init, redirect: "manual", headers: { "x-forwarded-host": "app.test", "x-forwarded-for": "203.0.113.10" } });
 
   test("/ 与 /chat 是导出的 HTML（不长缓存）；_next/static 永久缓存；未知页面回 404.html 且状态 404；HEAD 无正文", async () => {
     const home = await get("/");

@@ -26,8 +26,8 @@ function isFile(p: string): boolean {
   }
 }
 
-/** 路径 → 文件；穿越出根目录、非法编码 → null */
-export function resolveExportedPath(rootDir: string, pathname: string, fileExists: (p: string) => boolean = isFile): StaticHit | null {
+/** 解码一次并钉在根目录内；非法编码、../ 穿越 → null。bridge 的静态托管（web-gateway.ts）与这里共用 */
+export function safePathUnderRoot(rootDir: string, pathname: string): { root: string; rel: string } | null {
   if (!rootDir) return null;
   const root = resolve(rootDir);
   let rel: string;
@@ -36,14 +36,18 @@ export function resolveExportedPath(rootDir: string, pathname: string, fileExist
   } catch {
     return null; // 非法 %-编码
   }
-  const inRoot = (p: string): string | null => {
-    const c = normalize(join(root, p));
-    return c === root || c.startsWith(`${root}/`) ? c : null;
-  };
-  if (!inRoot(rel)) return null; // ../ 穿越：直接拒，连 404 页都不给
+  const abs = normalize(join(root, rel));
+  return abs === root || abs.startsWith(`${root}/`) ? { root, rel } : null;
+}
+
+/** 路径 → 导出布局里的文件（页面 → .html、目录 → index.html、未知页面 → 404.html）；穿越、非法编码 → null */
+export function resolveExportedPath(rootDir: string, pathname: string, fileExists: (p: string) => boolean = isFile): StaticHit | null {
+  const safe = safePathUnderRoot(rootDir, pathname);
+  if (!safe) return null; // 穿越：直接拒，连 404 页都不给
+  const { root, rel } = safe;
   const hit = (p: string, status: 200 | 404 = 200): StaticHit | null => {
-    const abs = inRoot(p);
-    return abs && fileExists(abs) ? { path: abs, status, cacheControl: cachePolicy(p) } : null;
+    const abs = normalize(join(root, p)); // rel 已钉在根内，追加 .html / index.html / 404.html 不会再出去
+    return fileExists(abs) ? { path: abs, status, cacheControl: cachePolicy(p) } : null;
   };
   if (rel.endsWith("/")) return hit(`${rel}index.html`) ?? notFound(hit);
   const last = rel.split("/").pop() ?? "";

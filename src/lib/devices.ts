@@ -13,11 +13,11 @@ export const DEVICE_COOKIE = "cstra_dev";
 /** 非 GET/HEAD 必须带的头：cookie 会被浏览器自动附上，这个头浏览器不会——跨站表单打不进来 */
 export const DEVICE_HEADER = "x-cstra-device";
 /** 90 天不用就失效；每次使用往后滑 */
-export const CREDENTIAL_TTL_MS = 90 * 24 * 60 * 60_000;
+const CREDENTIAL_TTL_MS = 90 * 24 * 60 * 60_000;
 /** lastSeenAt 至少隔这么久才落盘一次：每个请求都写 principals.json 是自找麻烦 */
-export const TOUCH_PERSIST_MS = 10 * 60_000;
-export const APPROVAL_TTL_MS = 10 * 60_000;
-export const CHALLENGE_TTL_MS = 2 * 60_000;
+const TOUCH_PERSIST_MS = 10 * 60_000;
+const APPROVAL_TTL_MS = 10 * 60_000;
+const CHALLENGE_TTL_MS = 2 * 60_000;
 
 export interface Grant {
   /** 与 Principal.agents 同一写法："*" = 全部普通 agent，master 要显式列 */
@@ -62,7 +62,7 @@ export function normalizeGrant(input: Partial<{ agents: unknown; terminal: unkno
 /** guest 的默认：不碰 master、不开终端、不管理 */
 export const guestGrant = (agents: string[]): Grant => ({ agents: agents.filter((a) => a !== "master"), terminal: false, manage: false });
 
-export function newDeviceToken(random: Random = defaultRandom): string {
+function newDeviceToken(random: Random = defaultRandom): string {
   return `dev_${Buffer.from(random(32)).toString("base64url")}`;
 }
 
@@ -70,11 +70,11 @@ export function hashDeviceToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export function newCredentialId(random: Random = defaultRandom): string {
+function newCredentialId(random: Random = defaultRandom): string {
   return `dev_${Buffer.from(random(4)).toString("hex")}`;
 }
 
-export function ownerPrincipal(file: PrincipalsFile): Principal | null {
+function ownerPrincipal(file: PrincipalsFile): Principal | null {
   return file.principals.find((p) => p.id === OWNER_PRINCIPAL_ID) ?? null;
 }
 
@@ -243,11 +243,12 @@ export interface Approval {
   deviceName: string;
   clientIp: string | null;
   grant: Grant;
+  guest?: string;
   createdAt: number;
   expiresAt: number;
   state: "pending" | "approved" | "denied";
   /** 批准后由 bridge 填：浏览器下一次轮询取走即删 */
-  result?: { token: string; credentialId: string; principalId: string };
+  result?: { token: string; credentialId: string; principalId: string; expiresAt: string };
 }
 
 /** 手输短码的待确认队列：浏览器兑换成功 → pending → Mac 侧 approve/deny → 浏览器轮询取结果 */
@@ -255,7 +256,7 @@ export class Approvals {
   private readonly items = new Map<string, Approval>();
   constructor(private readonly now: () => number = Date.now, private readonly random: Random = defaultRandom, private readonly ttlMs = APPROVAL_TTL_MS) {}
 
-  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant }): Approval {
+  add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string }): Approval {
     this.prune();
     const item: Approval = { id: Buffer.from(this.random(16)).toString("base64url"), ...a, createdAt: this.now(), expiresAt: this.now() + this.ttlMs, state: "pending" };
     this.items.set(item.id, item);

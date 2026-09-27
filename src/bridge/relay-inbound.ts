@@ -1,15 +1,18 @@
 /**
  * 经中继送进来的请求在本机怎么走（docs/relay/protocol.md §4）：
- *   - from = "relay"：浏览器打到 https://<slug>.<base>/… 的隧道流量，原样重放到本机 Web（Next.js），不验签——
- *     身份由 Web 自己的会话 cookie 决定，与 Tailscale 直连时一样；响应流式回传（SSE 靠这个）。
+ *   - from = "relay" 且带模式头 api：路径模式 https://<base>/m/<fp>/api/v1/…，在进程内直接调 API（relay-dispatch.ts），
+ *     身份由设备凭据 / Bearer 决定；
+ *   - from = "relay" 没有模式头：旧子域名隧道，原样重放到本机 Web（Next.js），身份由 Web 自己的会话 cookie 决定；
  *   - from = 对方指纹：peer 调 /api/v1，先验签（指纹 ↔ 签名头公钥 ↔ 签名）再打 peer 专用回环入口。
  * 纯逻辑（验签、重放缓存）单独导出给 tests/relay-link.test.ts；fetch 可注入。
  */
 import { randomBytes } from "node:crypto";
 import { SIG_HEADERS, isPublicKey, keyFingerprint, verifySigned } from "../lib/instance-key.js";
 import { RELAY_FROM, RELAY_FROM_HEADER, apiPathOk, isRedeemRequest, type Headers } from "../lib/relay-protocol.js";
+import { RELAY_MODE_API, RELAY_MODE_HEADER } from "../lib/relay-machine-path.js";
 import { collectBody, dropForPeer, forwardHeaders, headersToObject, rewriteLocation } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundHandler, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
+import { dispatchMachineRequest, type ApiHandler } from "./relay-dispatch.js";
 
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
 const MAX_PEER_BODY = 2 * 1024 * 1024;
@@ -44,6 +47,8 @@ export interface InboundDeps {
   now?: () => number;
   /** 一次兑换邀请成功后调（联系人清单变了，要重发给中继） */
   onRedeemed?: () => void;
+  /** 路径模式请求的进程内 API 处理器（bridge.ts 注入：终端端点 + serveApiRequest）；没注入就只有旧隧道 */
+  handleApi?: ApiHandler;
 }
 
 /** 非幂等方法的签名 10 分钟内只认一次（签名含时间戳与正文哈希，同一 sig = 同一请求） */
@@ -155,5 +160,9 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
 
 export function makeInboundHandler(d: InboundDeps): InboundHandler {
   const cache = new ReplayCache();
-  return (req, ctx) => (ctx.from === RELAY_FROM ? forwardTunnel(req, ctx, d) : forwardPeer(ctx.from, req, ctx, d, cache));
+  return (req, ctx) => {
+    if (ctx.from !== RELAY_FROM) return forwardPeer(ctx.from, req, ctx, d, cache);
+    const pathMode = req.headers[RELAY_MODE_HEADER] === RELAY_MODE_API;
+    return pathMode && d.handleApi ? dispatchMachineRequest(req, ctx, d.handleApi) : forwardTunnel(req, ctx, d);
+  };
 }

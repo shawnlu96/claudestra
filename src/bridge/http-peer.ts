@@ -33,13 +33,15 @@ export interface HttpPeerDeps {
   /** 单测覆盖:轮询间隔/放弃时限(生产别动) */
   pollIntervalMs?: number;
   pollGiveUpMs?: number;
+  /** 经中继路径模式进来的请求在进程内调它（终端端点 + /api/v1），bridge.ts 注入 */
+  handleApi?: (req: Request) => Promise<Response>;
 }
 
 let deps: HttpPeerDeps | null = null;
 export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
   startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
-  if (!d.fetchImpl) void startRelayLink(); // 中继链路（relay-link.ts）；单测注入 fake fetch 时不连
+  if (!d.fetchImpl) void startRelayLink({ handleApi: d.handleApi }); // 中继链路（relay-link.ts）；单测注入 fake fetch 时不连
 }
 
 /** 出站 wait 秒数。v2.17.2 从 120 降到 25(peer 实锤两次丢回复):长挂 POST 跨

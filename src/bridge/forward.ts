@@ -13,7 +13,7 @@ import { discordReply } from "./discord-api.js";
 import type { Envelope, LocalEndpoint } from "./router.js";
 import { newThreadId } from "./router.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { agentInScope, readPrincipals } from "../lib/principals.js";
+import { agentInScope, findByTokenId, readPrincipals } from "../lib/principals.js";
 import { forwardHeader, forwardNotice, forwardVerdict } from "../lib/forward.js";
 
 const RECENT_MAX = 300;
@@ -61,7 +61,8 @@ export async function handleForward(ws: ServerWebSocket<unknown>, msg: Record<st
   const from = orig.env.from;
   let inScope = true;
   if (from.kind === "api") {
-    const p = (await readPrincipals()).principals.find((x) => x.id === `token:${from.tokenId}` && !x.disabled);
+    const found = findByTokenId(await readPrincipals(), from.tokenId);
+    const p = found && !found.disabled ? found : null;
     inScope = !!p && agentInScope(p, targetName);
   }
   const err = forwardVerdict({

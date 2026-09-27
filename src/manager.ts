@@ -3362,7 +3362,7 @@ switch (cmd) {
   case "peer-invite-inspect": await (await import("./manager/peers-inspect.js")).cmdPeerInviteInspect(args[0] || ""); break;
   case "peer-http-list": await cmdPeerHttpList(); break;
   // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
-  case "pair": await (await import("./manager/relay.js")).cmdPair(args.includes("--json")); break;
+  case "pair": await (await import("./manager/pair.js")).cmdPair(args); break;
   case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
   case "peer-http-scope": {
     const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");

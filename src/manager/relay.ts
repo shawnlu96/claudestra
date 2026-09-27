@@ -1,10 +1,9 @@
 /**
  * manager 侧的中继相关（bridge/relay-routes.ts 的回环路由是它的后端）：
- *   - `claudestra pair`：向 bridge 要一个配对短码，终端打印二维码 / 链接 / 短码；
+ *   - `claudestra pair` 在 manager/pair.ts（签码、打印 grant、等手输短码的确认）；
  *   - `claudestra relay-status`：中继连接状态；
  *   - peerCliFetch：peer 命令里对 relay:// 地址的 fetch 替身——只有 bridge 持有中继连接，manager 请它代调。
  */
-import { toString as qrToString } from "qrcode";
 import { bridgeHttpBase } from "../lib/bridge-port.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import { relayPeerFingerprint } from "../lib/peers.js";
@@ -54,42 +53,6 @@ export async function peerCliFetch(url: string, init: { method?: string; headers
   }
   const status = j.status ?? 502;
   return new Response(NULL_BODY_STATUS.has(status) ? null : b64.dec(j.body ?? ""), { status, headers: j.headers ?? {} });
-}
-
-interface PairInfo { ok: boolean; code: string; display: string; url: string; base: string; slug: string; expiresAt: string; error?: string }
-
-export async function cmdPair(asJson: boolean): Promise<void> {
-  let r: Response;
-  try {
-    r = await fetch(`${bridgeHttpBase()}/relay/pair/new`, { method: "POST", signal: AbortSignal.timeout(5000) });
-  } catch (e) {
-    output({ ok: false, error: `bridge 没有响应（${(e as Error).message}）——先确认 bridge 在跑：claudestra doctor` });
-    return;
-  }
-  const fallback = { ok: false, error: `bridge 返回 ${r.status} 且不是 JSON——多半还在跑没有 /relay 路由的旧版本，重启 bridge 到新代码` };
-  const info = (await r.json().catch(() => fallback)) as PairInfo; // 非 JSON 响应按失败：状态码与这句提示就是全部信息
-  if (!info.ok) {
-    output({
-      ok: false, error: info.error ?? "无法签发配对码",
-      hint: "在仓库根 .env 写 RELAY_URL=wss://<中继地址>（可选 RELAY_NAME=<子域名标签>），重启 bridge 后再跑 pair",
-    });
-    return;
-  }
-  if (asJson) return output({ ...info });
-  const qr = await qrToString(info.url, { type: "terminal", small: true }).catch(() => ""); // 终端不支持时只少一张二维码，链接与短码照给
-  const lines = [
-    `用手机相机扫码，或在任何浏览器打开下面的链接，或在 https://${info.base} 输入短码——三选一：`,
-    "",
-    qr.trimEnd(),
-    "",
-    `链接：${info.url}`,
-    `短码：${info.display}`,
-    "",
-    `这台机器的网页：https://${info.slug}.${info.base}`,
-    `${new Date(info.expiresAt).toLocaleTimeString()} 前有效，只能用一次；配对后的浏览器不用再登录。`,
-  ];
-  // 人看的命令，bridge 从不调它（要机器可读加 --json 走 output()）；二维码是多行文本，塞进 JSON 没人读得了
-  process.stdout.write(lines.join("\n") + "\n");
 }
 
 export async function cmdRelayStatus(): Promise<void> {

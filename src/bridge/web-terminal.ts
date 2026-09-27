@@ -30,13 +30,8 @@
 
 import { randomBytes } from "node:crypto";
 import { TMUX_SOCK, MASTER_SESSION } from "../lib/tmux-helper.js";
-import {
-  readPrincipals,
-  findByBearer,
-  terminalAllowed,
-  tokenIdOf,
-  type Principal,
-} from "../lib/principals.js";
+import { terminalAllowed, tokenIdOf, type Principal } from "../lib/principals.js";
+import { authenticateApi } from "./api-auth.js";
 
 // ---------- tmux 小工具（独立于 tmux-helper 的 tmuxRaw：这里需要 exitCode） ----------
 
@@ -107,16 +102,8 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-/** Bearer 鉴权（同 authApi 但不限流——终端输入逐键回传，30 req/min 秒超）。 */
-async function authNoLimit(req: Request): Promise<Principal | Response> {
-  const auth = req.headers.get("Authorization") || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return json(401, { ok: false, error: "missing Authorization: Bearer <secret>" });
-  const file = await readPrincipals();
-  const p = findByBearer(file, m[1].trim());
-  if (!p) return json(401, { ok: false, error: "invalid or revoked token" });
-  return p;
-}
+/** 鉴权同 /api/v1（Bearer 或设备 cookie，api-auth.ts）但不限流——终端输入逐键回传，按分钟限次会秒超 */
+const authNoLimit = (req: Request): Promise<Principal | Response> => authenticateApi(req, new URL(req.url), { rateLimit: false });
 
 /**
  * agent 名 → master session 里的 window 引用。

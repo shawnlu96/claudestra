@@ -6,7 +6,7 @@
  *             绝不能因为「bridge 在 127.0.0.1 上」被当成回环。
  * 上下文挂在 Request 对象上（WeakMap），入口处设、鉴权处读；没设过的按 lan（最小权限）。
  */
-export type RequestSource = "loopback" | "lan" | "relay";
+type RequestSource = "loopback" | "lan" | "relay";
 
 export interface RequestContext {
   source: RequestSource;

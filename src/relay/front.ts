@@ -214,7 +214,8 @@ export class Front {
 
   /** 发给实例的头：客户端自带的 x-forwarded-* / x-claudestra-relay-* 一律不信；路径模式再过滤 cookie 并加模式头 */
   private tunnelHeaders(req: Request, ip: string, host: string, mode?: MachinePath): Record<string, string> {
-    const headers = forwardHeaders(headersToObject(req.headers), (k) => k.startsWith("x-forwarded-") || k === RELAY_BASE_HEADER || k.startsWith("x-claudestra-relay-"));
+    const untrusted = (k: string) => k.startsWith("x-forwarded-") || k === RELAY_BASE_HEADER || k.startsWith("x-claudestra-relay-");
+    const headers = forwardHeaders(headersToObject(req.headers), untrusted);
     Object.assign(headers, { "x-forwarded-for": ip, "x-forwarded-proto": "https", "x-forwarded-host": host, [RELAY_BASE_HEADER]: this.d.base });
     return mode ? { ...filterMachineRequestHeaders(headers), [RELAY_MODE_HEADER]: RELAY_MODE_API, [RELAY_PREFIX_HEADER]: mode.prefix } : headers;
   }

@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, relayControlRoutes } from "./bridge/relay-routes.js";
+import { initPeerIngress, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
@@ -100,7 +100,7 @@ import {
 } from "./bridge/web-gateway.js";
 // v2.6.0+ HTTP API 身份与授权（设计 §3.4 / §5）
 import {
-  readPrincipals,
+  readPrincipals, findByTokenId,
   syncDiscordOwnersFromEnv,
   listDiscordPrincipalIds,
   isDiscordSnowflake,
@@ -754,7 +754,7 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
   if (!agentChannelId) return;
   try {
     const file = await readPrincipals();
-    const p = file.principals.find((x) => x.id === `token:${to.tokenId}`);
+    const p = findByTokenId(file, to.tokenId);
     if (p?.mirror === false) return;
     await deliver({
       from: { kind: "bridge", label: "api-mirror" },
@@ -2676,7 +2676,7 @@ async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | 
     let name = parsed.id;
     try {
       const file = await readPrincipals();
-      const p = file.principals.find((x) => x.id === `token:${parsed.id}`);
+      const p = findByTokenId(file, parsed.id);
       if (p?.name) name = p.name;
     } catch { /* 名字仅展示用，查不到就用 tokenId */ }
     return { kind: "api", tokenId: parsed.id, name };
@@ -3278,7 +3278,10 @@ initApiRoutes({
 });
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
-initHttpPeer({ deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null });
+initHttpPeer({
+  deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
+  handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
+});
 
 const CORS_ORIGIN_SETTING = process.env.BRIDGE_CORS_ORIGIN || "";
 const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
@@ -3526,10 +3529,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 
     // v2.11: Discord peer 通告端点已移除，留 410 tombstone——peer 协作走 HTTP transport
     if (url.pathname === "/peer/announce" && req.method === "POST") {
-      return new Response(JSON.stringify({ ok: false, error: "discord peer removed (v2.11) — use peer-http-* commands" }), {
-        status: 410,
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(JSON.stringify({ ok: false, error: "discord peer removed (v2.11) — use peer-http-* commands" }), { status: 410, headers: { "Content-Type": "application/json" } });
     }
 
     // v2.10+ 静态托管（BRIDGE_STATIC_DIR）：以上路由都没接住的 GET 落到这里，
@@ -3560,6 +3560,8 @@ const server = Bun.serve({
     {
       const ip = server.requestIP(req);
       const loopback = isLoopbackAddress(ip?.address);
+      // 来源上下文：只有真实回环 socket 才是 loopback（bridge/request-context.ts）
+      setRequestContext(req, { source: loopback ? "loopback" : "lan", clientIp: ip?.address ?? null, https: req.headers.get("x-forwarded-proto") === "https" });
       const verdict = controlAccessVerdict({
         loopback,
         pathname: url0.pathname,
@@ -3579,17 +3581,14 @@ const server = Bun.serve({
     // 因此这道闸对它们完全透明。
     if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
       if (crossOrigin && !isOriginExplicitlyAllowed(reqOrigin, CORS_ORIGIN_SETTING)) {
-        console.warn(`🚫 拒绝跨源 WebSocket 升级: Origin=${reqOrigin}`);
-        return new Response("cross-origin websocket refused", { status: 403 });
+        console.warn(`🚫 拒绝跨源 WebSocket 升级: Origin=${reqOrigin}`); return new Response("cross-origin websocket refused", { status: 403 });
       }
     }
     if (server.upgrade(req)) return undefined;
     const url = new URL(req.url);
     // v2.10+ CORS（BRIDGE_CORS_ORIGIN 未设 = 不发头，行为同旧版）
     const cors = corsHeadersFor(reqOrigin, CORS_ORIGIN_SETTING);
-    if (req.method === "OPTIONS" && cors) {
-      return new Response(null, { status: 204, headers: cors });
-    }
+    if (req.method === "OPTIONS" && cors) return new Response(null, { status: 204, headers: cors });
     // v2.13.1+ 跨源 HTTP 一并拒掉：/hook、/skills/rescan、/agent/cleanup 等控制端点
     // 没有 CSRF token，而简单 POST 不触发 preflight，浏览器页面可以直接打进来。
     // cors 非 null ⇒ 该 origin 已在 BRIDGE_CORS_ORIGIN 白名单（或用户设了 "*"）。

@@ -132,7 +132,7 @@ describe("ChallengeStore / Approvals", () => {
     const a = q.add({ code: "ABCD2345", deviceName: "iPhone", clientIp: "1.2.3.4", grant: fullGrant() });
     expect(q.pending().map((x) => x.id)).toEqual([a.id]);
     expect(q.take(a.id)).toEqual({ state: "pending" });
-    expect(q.decide(a.id, true, { token: "dev_t", credentialId: "dev_1", principalId: OWNER_PRINCIPAL_ID })).toMatchObject({ state: "approved" });
+    expect(q.decide(a.id, true, { token: "dev_t", credentialId: "dev_1", principalId: OWNER_PRINCIPAL_ID, expiresAt: "2027-01-01T00:00:00.000Z" })).toMatchObject({ state: "approved" });
     expect(q.decide(a.id, false)).toBeNull(); // 已决定
     expect(q.take(a.id)).toMatchObject({ state: "approved", result: { token: "dev_t" } });
     expect(q.take(a.id)).toEqual({ state: "expired" }); // 拿过就没了

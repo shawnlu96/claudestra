@@ -9,7 +9,8 @@
  */
 
 import { existsSync, statSync } from "fs";
-import { join, normalize, resolve } from "path";
+import { join } from "path";
+import { safePathUnderRoot } from "../lib/static-site.js";
 import { timingSafeEqual } from "crypto";
 
 /** 常量时间 token 比较(security-audit review nit-a):长度不等直接 false
@@ -151,16 +152,10 @@ export function controlAccessVerdict(opts: {
  * - 穿越出 root / 资源文件缺失 / root 未设 → null（调用方 404）
  */
 export function resolveStaticPath(rootDir: string, pathname: string): string | null {
-  if (!rootDir) return null;
-  const root = resolve(rootDir);
-  let rel: string;
-  try {
-    rel = decodeURIComponent(pathname);
-  } catch {
-    return null; // 非法 %-编码
-  }
-  const candidate = normalize(join(root, rel));
-  if (candidate !== root && !candidate.startsWith(root + "/")) return null; // ../ 穿越
+  const safe = safePathUnderRoot(rootDir, pathname); // 解码 + 穿越防护与中继的静态托管同一份（lib/static-site.ts）
+  if (!safe) return null;
+  const { root, rel } = safe;
+  const candidate = join(root, rel);
   try {
     if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
   } catch {

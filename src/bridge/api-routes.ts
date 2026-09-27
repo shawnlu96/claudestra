@@ -32,7 +32,6 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
   readPrincipals,
-  findByBearer,
   agentInScope,
   tokenIdOf,
   SlidingWindowLimiter,
@@ -81,7 +80,8 @@ import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
-import { notePeerSignature } from "./peer-signature.js";
+import { authenticateApi } from "./api-auth.js";
+import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -138,16 +138,7 @@ export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
 export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string }>();
 /** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
 export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
-/**
- * API 每 token 每分钟配额。**唯一真值** —— 限流器与 429 文案都从这里取。
- * 曾经限流器写 120、文案硬写 30、三份设计文档各说各话（30/30/120），
- * 撞限流的人拿到的是个假数字。
- * 120 是 2026-07-14 从 30 提上来的：web 重度使用下 SSE 重连风暴（每次重连烧
- * 连流+历史+列表轮询+pending 一整套）会打爆 30，触发 429 循环 → 直播流死掉。
- */
-export const API_RATE_LIMIT_PER_MIN = 120;
-/** per-token 限流器（内存态，60s 滑动窗口） */
-const apiLimiters = new Map<string, SlidingWindowLimiter>();
+// 每 principal 每分钟配额与限流器在 api-auth.ts（唯一真值，429 文案从同一常量取）
 // v2.16 拆双 TTL(外部用户报「>10 分钟的长任务收不到回复/推送」实锤):
 // pending 队列的 TTL 就是「迟到 reply 还能找回原 threadId」的窗口——10 分钟
 // 对长任务远远不够,被清后 reply 落到新造的 threadId 下,轮询方(HTTP API
@@ -208,38 +199,8 @@ export function initApiRoutes(d: ApiDeps): void {
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
 
-/**
- * Bearer 鉴权 + 限流。失败直接返回 Response，成功返回 principal。
- * v2.10+ 也接受 ?token=<secret>（header 优先）：浏览器 EventSource 不能带
- * Authorization header，SSE 场景的标准折衷。secret 进 URL 的暴露面由「bridge
- * 默认只绑回环 + 对外自备反代/TLS」的既有边界兜住；非 SSE 调用仍应走 header。
- */
-async function authApi(req: Request, url: URL): Promise<Principal | Response> {
-  const auth = req.headers.get("Authorization") || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  // ?token= 只对 SSE 端点放行(EventSource 不能带 header 的折衷本意)——此前对
-  // 全部 /api/v1/* 放行,secret 会进代理日志/浏览历史(Codex review 2026-08-26)
-  const sseTokenOk = req.method === "GET" && url.pathname === "/api/v1/events";
-  const secret = m?.[1]?.trim() || (sseTokenOk ? url.searchParams.get("token") || "" : "");
-  if (!secret) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> (only GET /events may use ?token=)" });
-  const file = await readPrincipals();
-  const p = findByBearer(file, secret);
-  if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
-  const tid = tokenIdOf(p);
-  let limiter = apiLimiters.get(tid);
-  if (!limiter) {
-    // 120/min:默认 30 在 web 重度使用下会被打爆——SSE 重连风暴(每次重连烧
-    // 连流+历史+列表轮询+pending 一整套)循环触发 429 → 直播流死掉 → 「收不到
-    // 回复/没有思考中」(2026-07-14 真机)。个人部署,提额比精打细算更实际。
-    limiter = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN);
-    apiLimiters.set(tid, limiter);
-  }
-  // 文案跟着上面的常量走 —— 曾经硬写 30 而实际是 120,撞限流的人拿到的是个假数字
-  if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${API_RATE_LIMIT_PER_MIN} req/min)` });
-  if (p.peer) void import("./peer-presence.js").then((m) => m.notePeerInbound(p.peer!)); // 在线 peer 列表的「最近来访」
-  if (p.peer) void notePeerSignature(req, url, p.peer); // 验签：只记录不拦（bridge/peer-signature.ts）
-  return p;
-}
+/** Bearer 或设备 cookie 鉴权 + 限流，逻辑在 api-auth.ts（web-terminal 也用它，只是不限流） */
+const authApi = (req: Request, url: URL): Promise<Principal | Response> => authenticateApi(req, url, { rateLimit: true });
 
 /** registry 名双向兼容（"worker" ↔ "agent-worker"），返回 manager list 里的条目 */
 async function findApiAgent(name: string): Promise<{ name: string; channelId: string; idle?: boolean; status?: string; purpose?: string; cwd?: string; sessionId?: string } | null> {
@@ -384,11 +345,15 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return handlePeerRedeem(req);
   }
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
+  const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
+  if (pub) return pub;
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;
   const principal = auth;
   const tokenId = tokenIdOf(principal);
+  const dev = await handleDevicesManaged(req, url, principal); // 设备列表 / 撤销 / 待确认（manage grant）
+  if (dev) return dev;
   const path = url.pathname.slice("/api/v1".length);
 
   // GET /api/v1/agents —— scope 内的 agent 快照

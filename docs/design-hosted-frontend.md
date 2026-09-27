@@ -133,3 +133,42 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 | T7 | **从纵切起就跑**：Playwright 经中继（配对 → 聊天 → SSE → 终端 → 推送）、直托管、回环；负向清单：配对抢兑 / 穷举、隧道打 local、路径穿越、peer 调管理端点、A 输出攻击 B 凭据、撤销已连接终端、切机发错目标 | 持续 | 验证记录 |
 
 分支 `feat/hosted-frontend`；T1+T2 主 agent 亲自做完纵切并合进分支后，T3 / T4 / T5 各一个 worktree 由子 agent 并行，每块自带 `bun run check` 与负向测试；主 agent 合并、跑 T7、发 PR。最容易反噬的是 T2（一次改 owner / master / terminal / 回环 / 旧 principal 的默认值），所以纵切阶段不并行。
+
+## 13. 接口契约（T0 冻结；T3 / T4 / T5 并行开发的依据，改这里要三方同步）
+
+### 13.1 已实现（纵切，feat/hosted-frontend）
+- 中继：`https://<base>/m/<fp>/api/v1/…`（lib/relay-machine-path.ts 的规范化规则；请求头加 `x-claudestra-relay-mode: api`、`x-claudestra-relay-prefix: /m/<fp>`；响应只放 `cstra_dev` 一个 Set-Cookie 并钉属性）；`POST /api/v1/codes/lookup {code}` → `{ok, fp, name, slug}`；`GET /app-config.json` → `{mode:"relay", relayBase, version, commit?}`；`RELAY_STATIC_DIR` 托管前端静态站（lib/static-site.ts 的导出布局）。
+- bridge 鉴权（bridge/api-auth.ts）：Bearer 或 cookie `cstra_dev`；cookie 路径的非 GET/HEAD 必须带 `x-cstra-device: 1`（否则 403 `{code:"csrf"}`）；凭据无效 / 过期 401 `{code:"device_invalid"}`。经中继的请求在进程内 dispatch（bridge/relay-dispatch.ts），`RequestContext.source = "relay"`，回环豁免只认真实 socket。
+- 设备（bridge/devices.ts）：`GET /api/v1/devices/pair/challenge` → `{challenge, expiresAt, fp, machineName}`；`POST /api/v1/devices/pair {proof:{challenge,hmac}, deviceName}`（hmac = base64url(HMAC-SHA256(base64url 解出的秘密, challenge))）→ 200 + Set-Cookie + `{fp, machineName, principalId, credentialId, grant, expiresAt}`；`POST /api/v1/devices/pair {code, deviceName}` → 202 `{pending:true, approvalId, expiresAt, machineName}`；`GET /api/v1/devices/pair/status?approval=<id>` → 202 pending / 200 + cookie / 410 `{state:"denied"|"expired"}`；`POST /api/v1/devices/local {deviceName}`（只认回环 + `x-cstra-device` + 同源）；`GET /api/v1/devices`（manage）→ `{devices:[{id, deviceName, principal, principalName, grant, createdAt, lastSeenAt, lastIp, expiresAt, current}]}`；`DELETE /api/v1/devices/:id`（manage，或自己那条 = 退出登录，回删 cookie）；`GET /api/v1/devices/approvals`、`POST /api/v1/devices/approvals/:id {approve}`（manage）。
+- CLI：`claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--json]`；回环控制路由 `POST /relay/pair/new {agents?,terminal?,manage?,guest?}` → `{code, display, url(旧子域名), link(https://<base>/pair#<fp>.<secret>), base, slug, fp, grant, guest?, expiresAt}`、`GET /relay/pair/approvals` → `{approvals, activeCodes}`、`POST /relay/pair/approve {id, approve}`。
+- 管理门：`isFullScope(principal)` 现在等于 `canManage`（owner 或过渡期的全 scope 非 peer token；设备凭据看 grant.manage）。
+
+### 13.2 T4：bridge 本地 API（替代 BFF 的 B 类路由；全部走同一鉴权）
+| 端点 | 形状 |
+|---|---|
+| `GET /api/v1/version` | `{version, commit, apiVersion: 1, minClient: "<semver>"}`；`GET /api/v1/capabilities` 加 `apiVersion`、`features: string[]` |
+| `GET/PUT /api/v1/settings` | `{lang: "zh"\|"en", groqApiKeyHint: string\|null}`；PUT 体 `{lang?, groqApiKey?}`（空串 = 清除） |
+| `GET/PUT /api/v1/agents/:name/settings` | `{initMessage: string\|null}` |
+| `GET/PUT /api/v1/profile` | `{user:{nickname, avatar}, claude:{nickname, avatar}}`（avatar data URL ≤ 256 KB） |
+| `GET /api/v1/skills/prefs` · `PUT /api/v1/skills/prefs/:name {pinned}` · `POST /api/v1/skills/prefs/:name/used` | `{prefs:[{name, pinned, usedCount}]}` |
+| `GET /api/v1/agents/:name/hidden` · `POST /api/v1/agents/:name/hidden {sessionId, fromSeq, toSeq, hide}` | `{ranges:[{sessionId, fromSeq, toSeq}]}` |
+| `GET /api/v1/agents`（owner）加 `unread: number` · `POST /api/v1/agents/:name/read` · `GET /api/v1/reads` | `{reads: Record<agent, isoTs>}` |
+| `POST /api/v1/transcribe`（multipart `audio`，≤ 20 MB，并发 2，30 s） | `{text}`；没 key 501 |
+| `POST /api/v1/client-log`（文本或 `{lines:string[]}`，每行 ≤ 2 KB，每凭据 60 行/分钟） | `{ok}` |
+| `GET /api/v1/host` | 回环 `{local:true, platform, openers:[{id,label}]}`；非回环 `{local:false}` |
+| `POST /api/v1/agents/:name/open {with}` · `POST /api/v1/projects/:id/open {with}` | 只认回环，否则 403 |
+| `GET /api/v1/attachments/:name` | BFF chat/attachment 的搬运（上传目录 → 收件箱 → 后缀匹配），owner 专用 |
+| `GET /api/v1/relay/status` · `POST /api/v1/relay/pair` · `GET /api/v1/stats` | 控制路由的 manage 版 |
+| 状态库 | `~/.claude-orchestrator/web-state.sqlite`（bun:sqlite）：`agent_settings`、`user_profile`、`skill_prefs`、`push_subscriptions`、`push_read`、`hidden_messages`、`agent_unread`、`apns_devices`；`manager migrate-web-state` 从 `~/.claude-orchestrator/web/db/settings.db` 搬（先 tar 备份，幂等） |
+
+### 13.3 T3：推送
+- 中继帧（协议 v2 新增，向后兼容——老 bridge 不发）：bridge → 中继 `{t:"push", id, kind:"webpush", subscription:{endpoint, keys:{p256dh, auth}}, payload:<JSON 字符串 ≤ 4 KB>, ttl?}` / `{t:"push", id, kind:"apns", token, payload, badge?}`；中继 → bridge `{t:"push-ack", id, ok, status?, gone?: true, error?}`（`gone` = 订阅 / 设备已失效，bridge 删记录）。中继限每 fp 60 次 / 分钟；endpoint 只许 https 且非私网 / 回环 / 链路本地。
+- `/app-config.json` 加 `vapidPublicKey`（中继模式浏览器用它订阅）。中继 env：`RELAY_VAPID_KEYS`（文件路径，缺则首次启动生成）、`RELAY_VAPID_SUBJECT`、`RELAY_APNS_KEY_PATH`、`RELAY_APNS_KEY_ID`、`RELAY_APNS_TEAM_ID`、`RELAY_APNS_TOPIC`、`RELAY_APNS_ENV`。
+- bridge：`GET /api/v1/push/config` → `{webPush:{vapidPublicKey}|null, apns: boolean, mode:"direct"|"relay"}`（直托管 = 自签 VAPID 直发；中继连着 = 网关）；`POST /api/v1/push/subscriptions {subscription, userAgent}` · `DELETE /api/v1/push/subscriptions {endpoint}` · `POST /api/v1/push/apns {token}` · `DELETE /api/v1/push/apns/:token`。派发规则照 BFF（订阅进程内 event-bus）。
+
+### 13.4 T5：前端
+- 入口配置 `GET /app-config.json`（直托管由 bridge 服务：`{mode:"direct", fp, machineName, vapidPublicKey?}`）。
+- API 客户端：基址 `/m/<fp>`（relay）或 `""`（direct）；`credentials:"include"`；非 GET 自动带 `x-cstra-device: 1`；401 `device_invalid` → 该机器进入「需重新配对」；请求捕获目标机器，切机器中止在途 SSE。
+- 机器列表（IndexedDB，不存凭据）`{fp, name, addedAt, lastUsedAt}[]`；`/pair`：`#<fp>.<secret>` 走挑战应答，手输短码走 codes/lookup + pending 轮询（1.5 s，≤10 分钟）。
+- `chat/history` 与 `chat/stream` 的变换搬进 `web/lib/chat/history-shape.ts` / `stream-shape.ts`；「我发的」= `chatId === "api:owner:self"`（guest 是它自己的 principalId，取自配对响应）。
+- 静态导出：`output:"export"`；删 `app/api/**`、`proxy.ts`、`instrumentation.ts`、服务端 lib；`/login` → `/pair`；CSP 与 markdown 清洗按 §8.7。

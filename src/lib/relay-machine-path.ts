@@ -7,6 +7,7 @@
  */
 import { FP_RE, type Headers } from "./relay-protocol.js";
 import { SET_COOKIE_SEP } from "./relay-stream.js";
+import { DEVICE_COOKIE } from "./devices.js";
 
 export const MACHINE_PREFIX = "/m/";
 /** 请求头："api" = 路径模式，实例在进程内 dispatch；没有这个头 = 旧的子域名隧道，实例原样打本机 Web */
@@ -14,8 +15,6 @@ export const RELAY_MODE_HEADER = "x-claudestra-relay-mode";
 export const RELAY_MODE_API = "api";
 /** 请求头：这台机器在中继上的路径前缀 `/m/<fp>`（实例拼绝对地址、设 cookie Path 时用） */
 export const RELAY_PREFIX_HEADER = "x-claudestra-relay-prefix";
-/** 设备凭据 cookie（lib/devices.ts 签发；中继只认这个名字） */
-export const DEVICE_COOKIE_NAME = "cstra_dev";
 
 export interface MachinePath {
   fp: string;
@@ -55,7 +54,7 @@ export function parseMachinePath(pathname: string): MachinePath | MachinePathErr
 }
 
 /** 浏览器发来的头里，Cookie 只把设备凭据那一对带给机器：主源上别的 cookie 与这台机器无关 */
-export function filterMachineRequestHeaders(h: Headers, cookieName = DEVICE_COOKIE_NAME): Headers {
+export function filterMachineRequestHeaders(h: Headers, cookieName = DEVICE_COOKIE): Headers {
   const out: Headers = {};
   for (const [k, v] of Object.entries(h)) {
     if (k.toLowerCase() !== "cookie") {
@@ -73,7 +72,7 @@ const COOKIE_VALUE_RE = /^[A-Za-z0-9_-]{0,512}$/;
 const KEEP_COOKIE_ATTR_RE = /^(max-age|expires)=/i;
 
 /** 只放设备 cookie，且不管机器怎么写，属性一律改成这一组；值为空 = 删除 cookie，照放 */
-export function pinDeviceCookie(cookie: string, prefix: string, cookieName = DEVICE_COOKIE_NAME): string | null {
+export function pinDeviceCookie(cookie: string, prefix: string, cookieName = DEVICE_COOKIE): string | null {
   const [nameValue = "", ...attrs] = cookie.split(";").map((s) => s.trim());
   const eq = nameValue.indexOf("=");
   if (eq <= 0 || nameValue.slice(0, eq).trim() !== cookieName) return null;
@@ -89,7 +88,7 @@ export function prefixLocation(location: string, prefix: string): string {
 }
 
 /** 机器响应头 → 可以交给浏览器的头（Set-Cookie 多值以 SET_COOKIE_SEP 连接，见 relay-stream.ts） */
-export function filterMachineResponseHeaders(h: Headers, prefix: string, cookieName = DEVICE_COOKIE_NAME): Headers {
+export function filterMachineResponseHeaders(h: Headers, prefix: string, cookieName = DEVICE_COOKIE): Headers {
   const out: Headers = {};
   for (const [k, v] of Object.entries(h)) {
     const key = k.toLowerCase();

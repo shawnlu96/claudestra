@@ -23,6 +23,7 @@ import { FP_RE, slugify, type PeerRecord } from "../lib/relay-protocol.js";
 import { NULL_BODY_STATUS, recordToHeaders } from "../lib/relay-stream.js";
 import { syncPeerIngress } from "./peer-ingress.js";
 import { makeInboundHandler } from "./relay-inbound.js";
+import type { ApiHandler } from "./relay-dispatch.js";
 
 let client: RelayClient | null = null;
 let contactsTimer: ReturnType<typeof setInterval> | null = null;
@@ -80,7 +81,7 @@ function resolveWebPort(): number {
 }
 
 /** bridge 启动时调一次。没配 RELAY_URL 立刻返回；连接失败由客户端库自己退避重连，这里不抛 */
-export async function startRelayLink(): Promise<void> {
+export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Promise<void> {
   const relayUrl = repoEnvVar("RELAY_URL").trim();
   if (!relayUrl || client) return;
   const key = instanceKeySync();
@@ -107,6 +108,7 @@ export async function startRelayLink(): Promise<void> {
       webBase,
       ingressBase: () => (ingressPort ? `http://127.0.0.1:${ingressPort}` : null),
       onRedeemed: () => void refreshRelayContacts(),
+      handleApi: deps.handleApi,
     }),
     onWelcome: (i) => {
       log("info", `这台机器的网页地址：https://${i.slug}.${i.base}（手机 / 浏览器不装任何东西就能打开）`);

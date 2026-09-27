@@ -21,10 +21,12 @@ export interface IssuedCode {
   code: string;
   secret: string;
   grant: Grant;
+  /** 给别人的设备：凭据挂到一个新的 guest principal 上，而不是 owner */
+  guest?: string;
   expiresAt: number;
 }
 
-export type RedeemResult = { ok: true; code: string; secret: string; grant: Grant } | { ok: false; reason: "invalid" | "expired" | "rate_limited" };
+export type RedeemResult = { ok: true; code: string; secret: string; grant: Grant; guest?: string } | { ok: false; reason: "invalid" | "expired" | "rate_limited" };
 
 /** 二维码里的秘密对挑战做 HMAC-SHA256，base64url；浏览器与 bridge 同一算法 */
 export function proofFor(secret: string, challenge: string): string {
@@ -54,7 +56,7 @@ export class PairingCodes {
   }
 
   /** 签一组新码；超过上限先顶掉最旧的（返回给调用方去中继注销） */
-  issue(grant: Grant = fullGrant()): IssuedCode & { evicted: string[] } {
+  issue(grant: Grant = fullGrant(), guest?: string): IssuedCode & { evicted: string[] } {
     this.prune();
     const evicted: string[] = [];
     while (this.active.size >= this.maxActive) {
@@ -64,7 +66,7 @@ export class PairingCodes {
     }
     let code = randomCode(this.random);
     while (this.active.has(code)) code = randomCode(this.random);
-    const issued: IssuedCode = { code, secret: Buffer.from(this.random(16)).toString("base64url"), grant, expiresAt: this.now() + this.ttlMs };
+    const issued: IssuedCode = { code, secret: Buffer.from(this.random(16)).toString("base64url"), grant, ...(guest ? { guest } : {}), expiresAt: this.now() + this.ttlMs };
     this.active.set(code, issued);
     return { ...issued, evicted };
   }
@@ -105,7 +107,7 @@ export class PairingCodes {
       this.failures.push(this.now());
       return { ok: false, reason: "expired" };
     }
-    return { ok: true, code: hit.code, secret: hit.secret, grant: hit.grant };
+    return { ok: true, code: hit.code, secret: hit.secret, grant: hit.grant, ...(hit.guest ? { guest: hit.guest } : {}) };
   }
 
   activeCodes(): IssuedCode[] {
