@@ -1,33 +1,26 @@
 /**
- * v2.11+ HTTP peer 出站 transport（design docs/design-http-peers.md §4）。
- *
- * peer = 另一个 Claudestra 实例。出站 = 拿对方签的 Bearer POST 它的
- * /api/v1/agents/:name/messages（wait 同步等回复）；对方的入站处理与
- * web-ui 完全同路（scope/mirror/history 白拿），无需对方任何新代码。
- *
- * caller 交互协议与 Discord peer 完全一致（agent 无感知差异）：
- *   send_to_agent 返回 {ok, pushBack:true} → 回复以合成 user 消息
- *   「[🤖 来自 peer X/Y] ...」推回 caller ws；失败也以合成消息告知，不静默。
- *
- * 超时链：wait=120s 同步等 → 对方回 202/网络超时 → 每 30s GET /threads/:id
- * 轮询，10 分钟放弃。**不自动重试 POST**——消息投递非幂等，重试=双发。
+ * HTTP peer 出站 transport（design docs/design-http-peers.md §4）。peer = 另一个 Claudestra 实例：拿对方签的 Bearer
+ * POST 它的 /api/v1/agents/:name/messages，对方入站与 web 客户端同路，无需对方新代码。
+ * caller 看到的协议与本机 send_to_agent 一致：返回 {ok, pushBack:true}，回复 / 失败都以合成消息推回，不静默。
+ * 超时链：wait=25s 同步等 → 202 → 每 30s GET /threads/:id 轮询，2 小时放弃；轮询中的调用落盘（peer-call-book.ts），
+ * bridge 重启后接着轮询。**不自动重试 POST**——消息投递非幂等，重试=双发。
  */
 
 import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
 import { newThreadId } from "./router.js";
-import type { HttpPeer } from "../lib/peers.js";
+import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
 import { peerFetch, startRelayLink } from "./relay-link.js";
+import { PEER_CALLS_PATH, PeerCallBook, type PendingPeerCall } from "./peer-call-book.js";
 
 export interface HttpPeerDeps {
   deliver: (env: Envelope) => Promise<Delivery>;
-  /** 按 channelId 取 caller 当前 ws——pushback 时原 ws 可能已随 channel-server
-   *  重连失效(长轮询 10 分钟窗口内完全可能),失败后用它重查最新连接再投一次 */
+  /** 按 channelId 取 caller 当前 ws：原 ws 可能已随 channel-server 重连失效，恢复的调用则根本没有 */
   getClientWs?: (channelId: string) => ServerWebSocket<unknown> | null;
   /** 覆盖注入点（单测 fake fetch 用）；默认 globalThis.fetch */
   fetchImpl?: typeof fetch;
@@ -36,33 +29,39 @@ export interface HttpPeerDeps {
   pollGiveUpMs?: number;
   /** 经中继路径模式进来的请求在进程内调它（终端端点 + /api/v1），bridge.ts 注入 */
   handleApi?: (req: Request) => Promise<Response>;
+  /** caller 此刻不在线（bridge 刚重启、channel-server 还没连上）时把推回放进押后队列，连上后投 */
+  hold?: (env: Envelope) => void;
+  /** 等回复的调用簿落盘位置；单测注入 fake fetch 时缺省不落盘 */
+  callBookPath?: string | null;
+  /** 恢复轮询时按名字取 peer（单测注入）；缺省读 peers.json */
+  findPeer?: (name: string) => Promise<HttpPeer | null>;
 }
 
 let deps: HttpPeerDeps | null = null;
+let book = new PeerCallBook(null);
 export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
+  book = new PeerCallBook(d.callBookPath !== undefined ? d.callBookPath : d.fetchImpl ? null : PEER_CALLS_PATH);
+  void resumePeerCalls();
   startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
   if (d.fetchImpl) return; // 单测注入 fake fetch：不连中继、不起推送（两者都要真实的磁盘状态）
   void startRelayLink({ handleApi: d.handleApi }); // 中继链路（relay-link.ts）
   initPush(); // 推送派发器 + /api/v1/push 路由（push/init.ts）；出口按中继在不在线选网关 / 直发
 }
 
-/** 出站 wait 秒数。v2.17.2 从 120 降到 25(peer 实锤两次丢回复):长挂 POST 跨
- *  tailnet 常被中间设备掐,fetch 在拿到 202 之前就超时 → **连 threadId 都没有**,
- *  后续轮询无从谈起,对方的迟到回复必丢,还报「网络不可达」误导重发。短 wait
- *  保证回执线程几乎必达,慢回复交给轮询(30s 一拍)+ 空回合守候(2h)。 */
+/** 出站 wait 秒数。长挂 POST 跨 tailnet 常被中间设备掐，拿到 202 之前就断 → 连 threadId 都没有、回复必丢；
+ *  短 wait 保证回执线程几乎必达，慢回复交给轮询 + 空回合守候（git log -S WAIT_SEC）。 */
 const WAIT_SEC = 25;
 /** 单次 POST 的硬超时（wait + 网络余量） */
 const POST_TIMEOUT_MS = (WAIT_SEC + 15) * 1000;
 /** thread 轮询间隔 / 放弃时限 */
 const POLL_INTERVAL_MS = 30_000;
-// v2.16: 10 分钟放弃对长任务(编译/审计/大重构动辄 30-60 分钟)是硬伤——
-// 外部用户实报「>10 分钟收不到回复」。放宽到 2h,30s 一拍共 ~240 次轻量
-// GET,本地/tailnet 链路无压力;对侧结果留存窗口已配套放宽(api-routes)。
+// 长任务（编译 / 审计 / 大重构）动辄 30–60 分钟，所以等 2 小时；对侧结果留存窗口配套放宽（api-routes）
 const POLL_GIVE_UP_MS = 2 * 3600_000;
 
 interface CallerRef {
-  ws: ServerWebSocket<unknown>;
+  /** 发起时的连接；从调用簿恢复的调用没有，推回时按 channelId 现取 */
+  ws?: ServerWebSocket<unknown>;
   channelId: string;
   name: string;
 }
@@ -108,16 +107,21 @@ export function routeToHttpPeer(
 ): { ok: true; targetName: string; pushBack: boolean } {
   const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName };
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  inflightHttpPeerCalls.add(callId);
-  inflightByCaller.set(callId, fromChannelId);
   // oneShot 是 FYI 通知，不等回复，不算一次交接
   if (!oneShot) void handoffStart(callId, { dir: "out", peer: peer.name, localAgent: fromName, remoteAgent: peerAgentName }, text.length);
-  void runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot).finally(() => {
+  track(callId, fromChannelId, () => runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot));
+  return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: !oneShot };
+}
+
+/** 在飞登记（用户接管 / kill 时按 caller 频道取消），无论什么结局都清掉 */
+function track(callId: string, callerChannelId: string, run: () => Promise<void>): void {
+  inflightHttpPeerCalls.add(callId);
+  inflightByCaller.set(callId, callerChannelId);
+  void run().finally(() => {
     inflightHttpPeerCalls.delete(callId);
     inflightByCaller.delete(callId);
     cancelledCalls.delete(callId);
   });
-  return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: !oneShot };
 }
 
 /**
@@ -240,50 +244,94 @@ async function runCall(
     void handoffEnd(callId, "error", { detail: "no_thread" });
     return;
   }
-  const pollMs = d.pollIntervalMs ?? POLL_INTERVAL_MS;
   const deadline = Date.now() + (d.pollGiveUpMs ?? POLL_GIVE_UP_MS);
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollMs));
-    try {
-      const pollUrl = `${base}/api/v1/threads/${encodeURIComponent(threadId)}`;
-      const pr = await peerFetch(pollUrl, {
-        headers: { Authorization: `Bearer ${peer.outToken || ""}`, ...signedFor("GET", pollUrl, "") },
-        signal: AbortSignal.timeout(15_000),
-      }, { fetchImpl: f, timeoutMs: 15_000 });
-      if (pr.status === 404) continue; // 还没答
-      // 鉴权失败不是瞬时故障——对方 revoke/轮换了 token,继续轮只是空转 10 分钟
-      // 再误报「超时」(review 2026-07-19 #7)
-      if (pr.status === 401 || pr.status === 403) {
-        await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——对方可能已 revoke,需要重新握手。`, peer, peerAgentName, false, callId);
-        settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth_poll", status: pr.status });
+  const rec: PendingPeerCall = { callerChannelId: caller.channelId, callerName: caller.name, peerName: peer.name, peerAgent: peerAgentName, threadId, expecting, emptyNoticed, deadline };
+  book.set(callId, rec);
+  await pollThread(callId, caller, peer, rec);
+}
+
+/** 轮询对方 thread，直到拿到回复 / 鉴权被拒 / 发起方被用户接管 / 过了截止时间；每种结局都从调用簿摘掉 */
+async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec: PendingPeerCall): Promise<void> {
+  const d = deps;
+  if (!d) return;
+  const f = d.fetchImpl ?? fetch;
+  const base = (peer.baseUrl || "").replace(/\/+$/, "");
+  const { threadId, expecting, peerAgent: peerAgentName } = rec;
+  const label = `peer ${peer.name}/${peerAgentName}`;
+  const pollMs = d.pollIntervalMs ?? POLL_INTERVAL_MS;
+  try {
+    while (Date.now() < rec.deadline) {
+      await new Promise((r) => setTimeout(r, pollMs));
+      if (cancelledCalls.has(callId)) {
+        void handoffEnd(callId, "error", { detail: "cancelled" });
         return;
       }
-      if (!pr.ok) continue;            // 瞬时故障,下轮再试
-      const pb: any = await pr.json().catch(() => null);
-      const t = extractReplyText(pb);
-      if (t) {
-        await pushReply(caller, peer, peerAgentName, t, expecting, callId);
-        settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "poll" }, t.length);
-        return;
+      try {
+        const pollUrl = `${base}/api/v1/threads/${encodeURIComponent(threadId)}`;
+        const pr = await peerFetch(pollUrl, {
+          headers: { Authorization: `Bearer ${peer.outToken || ""}`, ...signedFor("GET", pollUrl, "") },
+          signal: AbortSignal.timeout(15_000),
+        }, { fetchImpl: f, timeoutMs: 15_000 });
+        if (pr.status === 404) continue; // 还没答
+        // 鉴权失败不是瞬时故障——对方 revoke/轮换了 token,继续轮只是空转 10 分钟
+        // 再误报「超时」(review 2026-07-19 #7)
+        if (pr.status === 401 || pr.status === 403) {
+          await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——对方可能已 revoke,需要重新握手。`, peer, peerAgentName, false, callId);
+          settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth_poll", status: pr.status });
+          return;
+        }
+        if (!pr.ok) continue;            // 瞬时故障,下轮再试
+        const pb: any = await pr.json().catch(() => null);
+        const t = extractReplyText(pb);
+        if (t) {
+          await pushReply(caller, peer, peerAgentName, t, expecting, callId);
+          settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "poll" }, t.length);
+          return;
+        }
+        // 空回合结束:通知一次后继续轮询(任务#84,同上——迟到回复会按 threadId
+        // 覆写结果,下一拍就能取到;弃守=永久丢失)
+        if (!rec.emptyNoticed && pb && pb.ok && "reply" in pb && !String(pb.reply ?? "").trim()) {
+          rec.emptyNoticed = true;
+          book.set(callId, rec);
+          await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。我会继续盯 2 小时——对方补回复会自动送达。`, peer, peerAgentName, false, callId);
+        }
+      } catch {
+        /* 单轮失败不放弃 */
       }
-      // 空回合结束:通知一次后继续轮询(任务#84,同上——迟到回复会按 threadId
-      // 覆写结果,下一拍就能取到;弃守=永久丢失)
-      if (!emptyNoticed && pb && pb.ok && "reply" in pb && !String(pb.reply ?? "").trim()) {
-        emptyNoticed = true;
-        await pushToCaller(caller, `[🤖 peer ${peer.name}/${peerAgentName}] 对方回合已结束但没有文本回复。我会继续盯 2 小时——对方补回复会自动送达。`, peer, peerAgentName, false, callId);
-      }
-    } catch {
-      /* 单轮失败不放弃 */
     }
+    await pushToCaller(
+      caller,
+      rec.emptyNoticed
+        ? `[ℹ️ peer 调用收尾] ${label} 空回合结束后 ${Math.round(POLL_GIVE_UP_MS / 60000)} 分钟内没有补回复，线程停止跟踪。需要的话稍后再问一次。`
+        : `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`,
+      peer, peerAgentName, false, callId,
+    );
+    settle(callId, caller, "http_peer_out_timeout", { peer: peer.name });
+  } finally {
+    book.delete(callId);
   }
-  await pushToCaller(
-    caller,
-    emptyNoticed
-      ? `[ℹ️ peer 调用收尾] ${label} 空回合结束后 ${Math.round(POLL_GIVE_UP_MS / 60000)} 分钟内没有补回复，线程停止跟踪。需要的话稍后再问一次。`
-      : `[⚠️ peer 调用超时] ${label} 在 ${Math.round((WAIT_SEC * 1000 + POLL_GIVE_UP_MS) / 60000)} 分钟内没有回复。对方可能仍在处理——需要的话稍后再问一次。`,
-    peer, peerAgentName, false, callId,
-  );
-  settle(callId, caller, "http_peer_out_timeout", { peer: peer.name });
+}
+
+/**
+ * bridge 启动时把上次没等到回复的跨机调用接着轮询（截止时间不重算）。peer 已被删的直接告诉发起方、摘掉；
+ * 发起方此刻多半还没连上，推回走 pushToCaller 的押后分支。
+ */
+async function resumePeerCalls(): Promise<void> {
+  const d = deps;
+  if (!d || !book.size) return;
+  console.log(`♻️ 恢复等待中的跨机调用 ${book.size} 条（接着轮询对方的回复）`);
+  for (const [callId, rec] of [...book]) {
+    const caller: CallerRef = { channelId: rec.callerChannelId, name: rec.callerName };
+    // peers.json 读不了不等于 peer 被删：记录留在盘上，下次启动再恢复
+    const peer = await (d.findPeer ?? findHttpPeer)(rec.peerName).catch((e) => (console.error(`peers.json 读不了，跨机调用 ${callId} 留到下次启动:`, e), undefined));
+    if (peer === undefined) continue;
+    if (!peer) {
+      book.delete(callId);
+      await pushToCaller(caller, `[⚠️ peer 调用] bridge 重启后找不到 peer ${rec.peerName}（已删除？），${rec.peerAgent} 的回复不再跟踪。`, { name: rec.peerName } as HttpPeer, rec.peerAgent);
+      continue;
+    }
+    track(callId, rec.callerChannelId, () => pollThread(callId, caller, peer, rec));
+  }
 }
 
 /** 对方 messages/threads 响应里提取回复正文（wait 命中与轮询兑现同构）。
@@ -313,19 +361,10 @@ async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, 
     console.log(`🚫 HTTP peer 调用已被用户接管取消,丢弃 pushback (${peer.name}/${peerAgent} → ${caller.channelId})`);
     return;
   }
+  const ws = (caller.ws ?? d.getClientWs?.(caller.channelId) ?? undefined) as ServerWebSocket<unknown>;
   const env: Envelope = {
-    from: {
-      kind: "local",
-      agentName: `peer ${peer.name}/${peerAgent}`,
-      channelId: caller.channelId,
-      ws: caller.ws,
-    },
-    to: {
-      kind: "local",
-      agentName: caller.name,
-      channelId: caller.channelId,
-      ws: caller.ws,
-    },
+    from: { kind: "local", agentName: `peer ${peer.name}/${peerAgent}`, channelId: caller.channelId, ws },
+    to: { kind: "local", agentName: caller.name, channelId: caller.channelId, ws },
     intent: isReply ? "response" : "notification",
     content,
     meta: {
@@ -335,12 +374,18 @@ async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, 
       threadId: newThreadId(),
     },
   };
+  if (!ws) {
+    // 发起方此刻不在线（多半是 bridge 刚重启、它的 channel-server 还没连上）：进押后队列，连上后投
+    if (d.hold) d.hold(env);
+    console.log(`⏸ ${caller.name} 不在线,peer ${peer.name}/${peerAgent} 的推回${d.hold ? "进押后队列" : "丢弃（没有押后队列）"}`);
+    return;
+  }
   try {
     let delivery = await d.deliver(env);
     if (delivery.outcome.kind !== "sent" && d.getClientWs) {
       // 原 ws 已随 channel-server 重连失效——重查最新连接重投一次
       const freshWs = d.getClientWs(caller.channelId);
-      if (freshWs && freshWs !== caller.ws) {
+      if (freshWs && freshWs !== ws) {
         (env.from as { ws?: unknown }).ws = freshWs;
         (env.to as { ws?: unknown }).ws = freshWs;
         delivery = await d.deliver(env);

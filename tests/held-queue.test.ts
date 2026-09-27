@@ -49,6 +49,16 @@ describe("HeldQueue 落盘", () => {
     expect(new HeldQueue(p).has("c-me")).toBe(false);
   });
 
+  test("hold：追加并落盘、返回条数；换新数组，正在遍历的快照不被改", () => {
+    const p = join(dir, "hold.json");
+    const q = new HeldQueue(p);
+    expect(q.hold("c-me", item("一", 1))).toBe(1);
+    const snapshot = q.get("c-me")!;
+    expect(q.hold("c-me", item("二", 2))).toBe(2);
+    expect(snapshot.length).toBe(1);
+    expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["一", "二"]);
+  });
+
   test("claim：同一频道同一时刻只有一个投递者，release 之后可再领", () => {
     const q = new HeldQueue(null);
     expect(q.claim("c-me")).toBe(true);

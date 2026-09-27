@@ -498,7 +498,7 @@ async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<u
     meta: { messageId: `${idPrefix}_${Date.now()}`, triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
   if (live) return (await deliver(env)).outcome;
-  heldLocalMsgs.set(pac.callerChannelId, [...(heldLocalMsgs.get(pac.callerChannelId) ?? []), { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() }]);
+  heldLocalMsgs.hold(pac.callerChannelId, { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() });
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
 }
@@ -919,10 +919,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
   // v2.21.2+ 压缩上下文中一律押(人类消息也押:上面已跳过 C-c;压缩结束事件会放行)
   const compactingNow = getAgentStatus(evAgent) === "compacting";
   if (compactingNow || (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent)))) {
-    const q = heldLocalMsgs.get(to.channelId) ?? [];
-    q.push({ env, to, heldAt: Date.now() });
-    heldLocalMsgs.set(to.channelId, q);
-    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${q.length} 条`);
+    const n = heldLocalMsgs.hold(to.channelId, { env, to, heldAt: Date.now() });
+    console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
   }
@@ -3241,6 +3239,7 @@ initApiRoutes({
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
   deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
+  hold: (env) => void heldLocalMsgs.hold((env.to as RouterLocalEndpoint).channelId, { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() }),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });
 
