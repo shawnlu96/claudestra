@@ -3657,6 +3657,7 @@ const server = Bun.serve({
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
 initPeerIngress(serveApiRequest); startLegacyWebPort(bridgeFetch); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
+void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。
