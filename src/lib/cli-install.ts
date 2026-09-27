@@ -250,13 +250,13 @@ function buildEnvPath(): string {
  * spawnSync 之后 iTerm 不识别 control 协议 → 看到普通 tmux attach。
  * 改成 bash `exec tmux -CC ...` 替换当前进程，tmux 字节流直送 iTerm PTY。
  */
-async function writeCliWrapper(repoRoot: string, _bunPath: string): Promise<string> {
+async function writeCliWrapper(repoRoot: string, bunPath: string): Promise<string> {
   const home = homedir();
   const primary = `${home}/.local/bin/claudestra`;
   const fallback = `${home}/.bun/bin/claudestra`;
   await mkdir(`${home}/.local/bin`, { recursive: true });
   await mkdir(`${home}/.bun/bin`, { recursive: true });
-  const content = cliWrapperScript(repoRoot);
+  const content = cliWrapperScript(repoRoot, bunPath);
   // 老版本可能在 primary 写过 symlink（甚至 ~/.local/bin <-> ~/.bun/bin 循环），
   // writeFile 会 ELOOP；先 unlink 容错再写真实文件。
   await unlink(primary).catch(() => {});
@@ -271,7 +271,7 @@ async function writeCliWrapper(repoRoot: string, _bunPath: string): Promise<stri
 }
 
 /** `claudestra` 包装脚本的内容（纯函数，单测做 bash -n 语法检查） */
-export function cliWrapperScript(repoRoot: string): string {
+export function cliWrapperScript(repoRoot: string, bunPath = "bun"): string {
   const daemonLabels = DAEMONS.map((d) => `"${d.label}"`).join(" ");
   return `#!/usr/bin/env bash
 # claudestra — one-shot launcher (Claudestra-installed, v2.4.1+)
@@ -280,6 +280,8 @@ export function cliWrapperScript(repoRoot: string): string {
 #   claudestra attach --plain  强制普通 tmux attach（任何终端都能用）
 #   claudestra attach --iterm  不在 iTerm 里也唤起 iTerm 新窗口走 -CC
 #   claudestra ls              列出 master session 里的窗口（agent）
+#   claudestra relay           relay-status 的简写（中继连接状态）
+#   claudestra <命令> [参数]   其余一律交给 manager（pair / doctor / version / create …），在仓库目录里跑
 # 流程：
 #   1) launchctl 检查 3 个 daemon，没 load 的 bootstrap
 #   2) 已在 tmux 嵌套，提示 + 退出
@@ -295,11 +297,12 @@ DAEMONS=(${daemonLabels})
 PLIST_DIR="$HOME/Library/LaunchAgents"
 ATTACH=(tmux -S "$SOCK" -CC attach -t master)
 PLAIN_ATTACH=(tmux -S "$SOCK" attach -t master)
+BUN=${JSON.stringify(bunPath)}
 
 MODE=auto
 case "\${1:-}" in
   ls|list)
-    echo "会话在私有 socket（$SOCK）里，普通 tmux ls 看不到是正常的。"
+    echo "会话在私有 socket（\${SOCK}）里，普通 tmux ls 看不到是正常的。"
     exec tmux -S "$SOCK" list-windows -t master -F '#{window_index}  #{window_name}'
     ;;
   attach)
@@ -311,9 +314,24 @@ case "\${1:-}" in
   --plain) MODE=plain ;;
   --iterm) MODE=iterm ;;
   "") ;;
+  -h|--help|help)
+    echo "用法: claudestra [attach [--plain|--iterm] | ls | relay | <manager 命令> ...]"
+    echo "manager 命令（在 $REPO 里跑）："
+    cd "$REPO" && "$BUN" run src/manager.ts help 2>/dev/null | "$BUN" -e 'const t = await Bun.stdin.text(); try { for (const u of JSON.parse(t).usage) console.log("  " + u) } catch { console.log(t) }'
+    exit 0
+    ;;
+  relay) shift; cd "$REPO" && exec "$BUN" run src/manager.ts relay-status "$@" ;;
   *)
-    echo "用法: claudestra [attach [--plain|--iterm] | ls]"
-    exit 2
+    # 在仓库目录里跑（与 daemon 的 WorkingDirectory 一致，也不会读到调用者当前目录里别的项目的 .env）；
+    # 所以先把 . / .. / ./x / ../x 这种相对路径参数换成绝对路径（create / resume / cron-add 的目录参数）
+    ARGS=()
+    for a in "$@"; do
+      case "$a" in
+        .|..|./*|../*) ARGS+=("$(cd "$a" 2>/dev/null && pwd || echo "$PWD/$a")") ;;
+        *) ARGS+=("$a") ;;
+      esac
+    done
+    cd "$REPO" && exec "$BUN" run src/manager.ts "\${ARGS[@]}"
     ;;
 esac
 
