@@ -257,9 +257,9 @@ function AssistantBody({
  */
 export const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean }) {
   devCount("bubble-render"); // 开发者面板的「气泡渲染速率」:memo 失效时这里会飙
-  // 点击消息（user 气泡 / ✦ 头）切换秒级时间显示；长按/右键出菜单
   /** user 气泡本体 —— 长按菜单里「选择文字」要框住的范围。 */
   const bubbleRef = useRef<HTMLDivElement>(null);
+  const exporting = useIsExport(); // 导出稿没有侧槽:本人头行的 lg 隐藏 / 右对齐不生效,时间才不会随浏览宽度消失
   // hook 必须无条件调用(下面有 system/user 两处提前 return),所以正文在长按那一刻
   // 现算,不依赖分支里的局部变量
   const press = useBubbleMenuTrigger(() => ({
@@ -296,8 +296,8 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
           </div>
         )}
         {isSelf && (
-          // 本人头行常在：时间靠左、头像 + 昵称靠右；没设昵称 / 头像时 PC 端整行隐藏（那里时间在右槽）
-          <div className={`flex w-full items-center justify-between gap-1.5 lg:justify-end ${label || showAvatar ? "" : "lg:hidden"}`}>
+          // 本人头行常在：时间靠左、头像 + 昵称靠右；没设昵称 / 头像时 PC 端整行隐藏（那里时间在右槽）；导出稿不分 PC
+          <div className={`flex w-full items-center justify-between gap-1.5 ${exporting ? "" : `lg:justify-end ${label || showAvatar ? "" : "lg:hidden"}`}`}>
             <HeaderTime ts={m.ts} />
             <span className="flex items-center gap-1.5">
               {label && <span className="text-[10px] opacity-50">{label}</span>}
@@ -727,8 +727,10 @@ export function MessageList() {
       {/* 横向留白对齐 claude-os thread（px-7=28px + 居中限宽），手机端稍收到 24px，
           原 px-4(16px) 太满不透气（owner 反馈）。滚动条落在最外层边缘更干净。
           v2.21.1+ 桌面放宽(owner 2026-08-29「PC 明明可以用更宽的地方」):lg 起
-          92% 宽、1600px 封顶——宽屏不再中间一窄条;与 composer 的限宽保持一致。 */}
-      <div className="mx-auto flex w-full max-w-3xl flex-col px-6 pb-4 pt-6 sm:px-7 lg:max-w-[min(92%,1600px)]">
+          92% 宽、1600px 封顶——宽屏不再中间一窄条;与 composer 的限宽保持一致。
+          `100% - 56px`:条目盒 lg:-mx-14 各伸 28px 放侧槽时间,4% 的边距在窄列(<700px,侧栏拖宽时)
+          不够 28px 会把滚动器撑出横向滚动,这一项保证两侧至少各留 28px。 */}
+      <div className="mx-auto flex w-full max-w-3xl flex-col px-6 pb-4 pt-6 sm:px-7 lg:max-w-[min(92%,100%_-_56px,1600px)]">
         {loadingHistory && (
           <div className="flex items-center justify-center gap-2 py-6 text-sm opacity-40">
             <span className="loading loading-spinner loading-sm" />

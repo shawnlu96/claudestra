@@ -1,6 +1,7 @@
 "use client";
 import { fmtTsParts } from "../fmt-ts-parts";
 import { useIsExport } from "../export-context";
+import { useShare } from "./share-ui";
 import type { LeadKind } from "../time-groups";
 
 /**
@@ -13,6 +14,7 @@ import type { LeadKind } from "../time-groups";
  *   两行时行高改 1.5（继承正文行高会让两行间隔过大，owner 2026-09-27）。
  *   hover 形态：AI 消息的每个非组首段也有一个标签，平时透明、鼠标悬停该段时显示（./seg-groups.tsx）。
  * 导出稿（分享）没有侧槽：HeaderTime 常显、GutterTime 不渲染。
+ * 分享选择模式下 GutterTime 也不渲染：ShareCheck 的 checkbox 就落在同一侧槽里（share-ui.tsx），会压在数字上。
  */
 export function HeaderTime({ ts, className = "" }: { ts?: string; className?: string }) {
   const exporting = useIsExport();
@@ -40,8 +42,9 @@ const LEAD: Record<GutterLead, string> = {
 
 export function GutterTime({ ts, side, lead, hover = false }: { ts?: string; side: "left" | "right"; lead: GutterLead; hover?: boolean }) {
   const exporting = useIsExport();
+  const sharing = useShare().on;
   const p = fmtTsParts(ts);
-  if (!p || exporting) return null;
+  if (!p || exporting || sharing) return null;
   return (
     <div
       aria-hidden
