@@ -4,14 +4,16 @@
  * 客户端 IP 取中继转来的 X-Forwarded-For，只作展示与节流。路径再核一次必须在 /api/v1 下（中继已核，两端都查）。
  */
 import { apiPathOk, RELAY_BASE_HEADER } from "../lib/relay-protocol.js";
-import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER } from "../lib/relay-machine-path.js";
+import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER } from "../lib/relay-machine-path.js";
 import { forwardHeaders, headersToObject } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { setRequestContext } from "./request-context.js";
 
 export type ApiHandler = (req: Request) => Promise<Response>;
 
-const DROP_REQUEST: ReadonlySet<string> = new Set(["host", RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_BASE_HEADER, "x-claudestra-relay-mark", "x-claudestra-relay-from"]);
+const DROP_REQUEST: ReadonlySet<string> = new Set([
+  "host", RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER, RELAY_BASE_HEADER, "x-claudestra-relay-mark", "x-claudestra-relay-from",
+]);
 
 export async function dispatchMachineRequest(req: InboundRequest, ctx: InboundContext, handleApi: ApiHandler): Promise<InboundResponse> {
   if (!apiPathOk(req.path)) throw new RelayError("path_forbidden", "client", `${req.path} is not under /api/v1`);
@@ -26,6 +28,7 @@ export async function dispatchMachineRequest(req: InboundRequest, ctx: InboundCo
     clientIp: req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null,
     ...(req.headers[RELAY_BASE_HEADER] ? { relayBase: req.headers[RELAY_BASE_HEADER] } : {}),
     ...(req.headers[RELAY_PREFIX_HEADER] ? { pathPrefix: req.headers[RELAY_PREFIX_HEADER] } : {}),
+    ...(req.headers[RELAY_SAME_NET_HEADER] === "1" ? { sameNetwork: true } : {}),
   });
   const r = await handleApi(request);
   return { status: r.status, headers: headersToObject(r.headers), body: r.body };

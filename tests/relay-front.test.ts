@@ -304,6 +304,16 @@ describe("路径模式 /m/<fp>（docs/design-hosted-frontend.md §4）", () => {
     expect(r.headers.get("x-ok")).toBe("1");
   });
 
+  test("同网提示：浏览器出口 IP 与实例连中继的 IP 相同才加 same-net 头；浏览器自带的一律剥掉", async () => {
+    const forged = at("relay.test", mpath("/api/v1/host"), { headers: { "x-claudestra-relay-same-net": "1" } });
+    const far = await answer((r) => mini.send({ t: "res", id: r.id, status: 200, more: false, headers: {}, body: "" }));
+    await forged;
+    expect((far.headers as Record<string, string>)["x-claudestra-relay-same-net"]).toBeUndefined();
+    const sameIp = fetch(`${http}${mpath("/api/v1/host")}`, { headers: { "x-forwarded-host": "relay.test" } }); // 不带 XFF：与假实例同为回环 socket 地址
+    const near = await answer((r) => mini.send({ t: "res", id: r.id, status: 200, more: false, headers: {}, body: "" }));
+    await sameIp;
+    expect((near.headers as Record<string, string>)["x-claudestra-relay-same-net"]).toBe("1");
+  });
   test("只放 /api/v1：控制路由、穿越、编码穿越 400 且不进实例；未知指纹 404；WebSocket 升级 426", async () => {
     for (const bad of ["/hook", "/api/v1/../hook", "/api/v1/%2e%2e/hook", "/events", ""]) {
       const r = await at("relay.test", mpath(bad));

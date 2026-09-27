@@ -51,10 +51,15 @@ export async function versionResponse(): Promise<Response> {
   return apiJson(200, { ok: true, version, commit, ...webCommitField(), apiVersion: API_VERSION, minClient: MIN_CLIENT });
 }
 
+/** 这台机器在中继上的指纹与名字（直托管入口配置与本机探测 bridge/local-probe.ts 共用）；没有实例密钥时 fp 为 null */
+export function machineIdentity(): { fp: string | null; machineName: string } {
+  const key = instanceKeySync();
+  return { fp: key ? keyFingerprint(key.publicKey) : null, machineName: hostname() };
+}
+
 /** 直托管入口配置：与中继模式的 /app-config.json 同名同用途（bridge.ts 在静态托管之前接它） */
 export async function appConfigResponse(): Promise<Response> {
-  const key = instanceKeySync();
   const { version, commit } = await versionInfo();
-  const body = { mode: "direct", fp: key ? keyFingerprint(key.publicKey) : null, machineName: hostname(), version, commit, ...webCommitField() };
+  const body = { mode: "direct", ...machineIdentity(), version, commit, ...webCommitField() };
   return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }

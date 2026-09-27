@@ -164,6 +164,7 @@ export const DICT: Record<string, string> = {
   "选择机器": "Pick a machine",
   "需重新配对": "Needs re-pairing",
   "这台机器的配对已失效 · 点按重新配对": "This machine's pairing has expired · tap to pair again",
+  "在这台电脑上？切到本机直连": "On this computer? Switch to the local connection",
   "访问": "Access",
   "集成": "Integrations",
   "设置": "Settings",

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 33333",
+    "dev": "bun scripts/dev-proxy.ts",
     "build": "next build",
     "lint": "eslint",
     "prebuild": "node scripts/gen-build-info.mjs",

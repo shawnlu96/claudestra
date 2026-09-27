@@ -1,18 +1,20 @@
 /**
  * 主机能力（原 web BFF 的 host / agents/open / projects/open）——只对**本机浏览器**有意义：
- *   GET  /api/v1/host                     回环 { local:true, platform, openers:[{id,label,kind}] }；非回环 { local:false }（装了什么软件不告诉远端）
+ *   GET  /api/v1/host                     本机 { local:true, platform, openers:[{id,label,kind}] }；否则 { local:false, localEntry? }（装了什么软件不告诉远端）
  *   POST /api/v1/agents/:name/open {with} 用本机程序打开会话的工作目录（registry 的 cwd；master 用 MASTER_DIR）
  *   POST /api/v1/projects/:id/open {with, index?} 打开 project 的第 index 个目录
- * 「本机」只认 requestContextOf(req).source === "loopback"（真实回环 socket）：X-Forwarded-For 可伪造，经中继 dispatch 的请求 source 是 relay。
+ * 「本机」= 真实回环，或来源地址是本机网卡地址（lib/same-host.ts：localhost / 局域网 IP / 自己的 tailnet 域名都算，只信本机反代加的 XFF）。
+ * 经中继的请求判不了网络位置：直托管时回 localEntry {port, sameNetwork}，前端自己探回环后切到本机直连（web/features/machines/local-hop.ts）。
  * 目录来自 registry / projects.json，程序 id 只在 lib/host-openers.ts 的表里被认——路径与命令都不接受外部输入。
  */
 import { canManage } from "../../lib/devices.js";
 import { currentPlatform, openDirectory, probeOpeners, type OpenResult } from "../../lib/host-open.js";
 import type { Principal } from "../../lib/principals.js";
 import { readProjects } from "../../lib/projects.js";
+import { isSameHostRequest } from "../../lib/same-host.js";
 import { isMasterAgent, readRegistryAgents } from "../../lib/registry.js";
 import { apiJson, forbidden, inScopeEitherName, INVALID_JSON, invalidJsonBody, notInScope, readJsonBody } from "../api-respond.js";
-import { MASTER_DIR } from "../config.js";
+import { BRIDGE_PORT, MASTER_DIR } from "../config.js";
 import { requestContextOf } from "../request-context.js";
 
 interface Deps {
@@ -28,7 +30,19 @@ export function setHostDepsForTest(d: Partial<Deps> | undefined): void {
   deps = d ? { ...realDeps, ...d } : realDeps;
 }
 
-const isLocal = (req: Request): boolean => requestContextOf(req).source === "loopback";
+function isLocal(req: Request): boolean {
+  const ctx = requestContextOf(req);
+  if (ctx.source === "loopback") return true;
+  return ctx.source === "lan" && isSameHostRequest(ctx.clientIp, req.headers.get("x-forwarded-for"));
+}
+
+/** 经中继来的请求：这台机器直托管前端时告诉前端本机入口的端口（中继页面本就知道 fp，端口不算新信息） */
+function localEntry(req: Request): { port: number; sameNetwork: boolean } | undefined {
+  const ctx = requestContextOf(req);
+  if (ctx.source !== "relay" || !process.env.BRIDGE_STATIC_DIR) return undefined;
+  return { port: BRIDGE_PORT, sameNetwork: ctx.sameNetwork === true };
+}
+
 const NOT_LOCAL = "opening directories is only available from this machine";
 
 export async function handleHost(req: Request, path: string, principal: Principal): Promise<Response | null> {
@@ -41,9 +55,10 @@ export async function handleHost(req: Request, path: string, principal: Principa
 }
 
 function hostInfo(req: Request): Response {
+  const entry = localEntry(req);
   const res = isLocal(req)
     ? apiJson(200, { ok: true, local: true, platform: currentPlatform(), openers: probeOpeners() })
-    : apiJson(200, { ok: true, local: false });
+    : apiJson(200, { ok: true, local: false, ...(entry ? { localEntry: entry } : {}) });
   res.headers.set("cache-control", "no-store");
   return res;
 }

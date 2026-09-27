@@ -26,3 +26,4 @@ const store = createCssPrefStore<ChatPrefs>({
 export const getChatPrefs = store.get;
 export const setChatPrefs = store.set;
 export const useChatPrefs = store.useValue;
+export const reloadChatPrefs = store.reload;

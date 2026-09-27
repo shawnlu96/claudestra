@@ -13,6 +13,8 @@ export interface CssPrefStore<T> {
   set(next: T): void;
   /** 订阅当前值（设置面板用）。SSR 恒为 empty。 */
   useValue(): T;
+  /** 原始偏好被外部写进 localStorage 后（切到本机直连时的交接）重读、重建 CSS 并生效 */
+  reload(): void;
 }
 
 export function createCssPrefStore<T>(opt: {
@@ -50,8 +52,9 @@ export function createCssPrefStore<T>(opt: {
     el.textContent = css;
   };
 
-  return {
+  const store: CssPrefStore<T> = {
     get: () => current,
+    reload: () => store.set(read()),
     set(next) {
       current = next;
       const css = opt.isEmpty(next) ? "" : opt.build(next);
@@ -80,4 +83,5 @@ export function createCssPrefStore<T>(opt: {
       );
     },
   };
+  return store;
 }

@@ -7,7 +7,7 @@ Claudestra's Next.js web front door (the second entry point beside Discord). It 
 ## Stack
 
 - Next.js 16 + React 19 + TypeScript + Tailwind 4 + daisyUI; state via zenith (`@do-md/zenith`, vendored into `.packages/`).
-- Its dependency tree is independent of the Bun backend at the repo root. Dev: `npm run dev` (port 33333). Artifact: `npm run build` → `out/` (inside a worktree with a symlinked `node_modules` Turbopack panics; use `npx next build --webpack`).
+- Its dependency tree is independent of the Bun backend at the repo root. Dev: `npm run dev` → http://127.0.0.1:33333 (`scripts/dev-proxy.ts`: pages go to next dev, `/api/v1` to the local bridge). Artifact: `npm run build` → `out/` (inside a worktree with a symlinked `node_modules` Turbopack panics; use `npx next build --webpack`).
 
 ## Layout
 
@@ -58,7 +58,7 @@ Opening an agent: `fetchHistory` (bridge `/agents/:name/history[/:sid]`) → `op
 ## Running & troubleshooting
 
 - The backend is only `com.claudestra.bridge` (+ launcher / cron); **there is no web service any more**. Backend change → `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`; web change → `npm run build`, the host serves `out/`.
-- This machine's shell exports `NODE_ENV=production`: use `NODE_ENV=development npm run dev`. Dev against a local bridge has no `/app-config.json` → direct single-machine fallback.
+- The dev proxy sets `NODE_ENV=development` for next dev (this machine's shell exports production); the bridge sees the proxy as a same-origin local page and answers `/app-config.json` too (direct mode).
 - `/events` SSE: the bridge sends `: connected` on connect + a 5s ping; when the stream "sometimes doesn't arrive", check that first.
 - Client logs land in the bridge's client.log (`POST /api/v1/client-log`, used by both boot.js and `lib/client-log.ts`).
 - Next 16: directories starting with `_` are not routed; macOS has no `timeout`, test SSE with `curl --max-time N`.

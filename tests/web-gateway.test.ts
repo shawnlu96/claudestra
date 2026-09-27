@@ -115,9 +115,10 @@ describe("serveStaticSite（Next 导出布局 + CSP）", () => {
     expect(serveStaticSite(root, "/")!.status).toBe(200);
   });
 
-  test("CSP 内容：脚本只许同源（+ 本页内联哈希）、不许第三方连接、不许被嵌", () => {
+  test("CSP 内容：脚本只许同源（+ 本页内联哈希）、连接只到同源 / blob / 本机回环、不许被嵌", () => {
     expect(staticSiteCsp()).toBe(
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; " +
+        "connect-src 'self' blob: http://127.0.0.1:*; " +
         "worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
   });

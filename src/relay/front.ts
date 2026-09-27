@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { newRequestId, normalizeCode, RELAY_BASE_HEADER, RELAY_FROM, SLUG_RE, SUBPROTOCOL, type ResFrame } from "../lib/relay-protocol.js";
 import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, recordToHeaders, streamSink, type StreamSink } from "../lib/relay-stream.js";
 import {
-  filterMachineRequestHeaders, filterMachineResponseHeaders, MACHINE_PREFIX, parseMachinePath, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, type MachinePath,
+  filterMachineRequestHeaders, filterMachineResponseHeaders, MACHINE_PREFIX, parseMachinePath, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER, type MachinePath,
 } from "../lib/relay-machine-path.js";
 import { readBuildInfo, resolveExportedPath, staticResponse } from "../lib/static-site.js";
 import type { InstanceRecord } from "./directory.js";
@@ -219,12 +219,18 @@ export class Front {
     return { record, conn };
   }
 
-  /** 发给实例的头：客户端自带的 x-forwarded-* / x-claudestra-relay-* 一律不信；路径模式再过滤 cookie 并加模式头 */
-  private tunnelHeaders(req: Request, ip: string, host: string, mode?: MachinePath): Record<string, string> {
+  /**
+   * 发给实例的头：客户端自带的 x-forwarded-* / x-claudestra-relay-* 一律不信；路径模式再过滤 cookie 并加模式头。
+   * 浏览器出口 IP 与实例连中继的出口 IP 相同时加同网提示：实例据此让前端去探「是不是就在这台电脑上」（不是身份，只省一次无谓的探测）。
+   */
+  private tunnelHeaders(req: Request, ip: string, host: string, conn: Conn, mode?: MachinePath): Record<string, string> {
     const untrusted = (k: string) => k.startsWith("x-forwarded-") || k === RELAY_BASE_HEADER || k.startsWith("x-claudestra-relay-");
     const headers = forwardHeaders(headersToObject(req.headers), untrusted);
     Object.assign(headers, { "x-forwarded-for": ip, "x-forwarded-proto": "https", "x-forwarded-host": host, [RELAY_BASE_HEADER]: this.d.base });
-    return mode ? { ...filterMachineRequestHeaders(headers), [RELAY_MODE_HEADER]: RELAY_MODE_API, [RELAY_PREFIX_HEADER]: mode.prefix } : headers;
+    if (!mode) return headers;
+    const out: Record<string, string> = { ...filterMachineRequestHeaders(headers), [RELAY_MODE_HEADER]: RELAY_MODE_API, [RELAY_PREFIX_HEADER]: mode.prefix };
+    if (ip && ip === conn.data.ip) out[RELAY_SAME_NET_HEADER] = "1";
+    return out;
   }
 
   /** slug 模式 label = slug；路径模式 label = fp 且带 mode（去前缀、过滤） */
@@ -235,7 +241,7 @@ export class Front {
     const { record, conn } = admitted;
     const id = newRequestId(randomBytes);
     const method = req.method.toUpperCase();
-    const headers = this.tunnelHeaders(req, ip, host, mode);
+    const headers = this.tunnelHeaders(req, ip, host, conn, mode);
     const hasBody = !NO_BODY.has(method) && req.body !== null;
     const t0 = Date.now();
     const path = (mode ? mode.rest : url.pathname) + url.search;

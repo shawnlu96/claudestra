@@ -18,6 +18,8 @@ export interface RequestContext {
   pathPrefix?: string;
   /** 浏览器看到的是不是 https（回环 http 不能设 Secure cookie） */
   https: boolean;
+  /** 经中继时：中继看到的浏览器出口 IP 与这台机器连中继的出口 IP 相同（同一网络，不代表同一台电脑） */
+  sameNetwork?: boolean;
 }
 
 const contexts = new WeakMap<Request, RequestContext>();

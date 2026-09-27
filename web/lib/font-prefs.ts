@@ -26,6 +26,7 @@ const store = createCssPrefStore<FontPrefs>({
 export const getFontPrefs = store.get;
 export const setFontPrefs = store.set;
 export const useFontPrefs = store.useValue;
+export const reloadFontPrefs = store.reload;
 
 export interface LocalFontsResult {
   families: string[];
