@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
+import { openAgentInfo } from "../agent-info";
 
 /** Peer 弹窗各面板共用的类型与小组件（从 peers-modal.tsx 原样搬出，只加 export）。 */
 
@@ -62,7 +63,8 @@ export function CopyButton({ text, label, resetMs = 2000 }: { text: string; labe
   );
 }
 
-/** scope 勾选器：全部(*) + master + 每个本地 agent。external 未标的带 ⚠。 */
+/** scope 勾选器（owner 2026-09-27 闸门化）：external 未开的 agent 不可勾选，旁边一个按钮直达会话详情去开；
+ *  "*" 暂不提供（只有历史 scope 已是 * 时可见可取消）。服务端 lib/peer-scope-gate.ts 是同一条规则的硬闸。 */
 export function ScopePicker({
   localAgents,
   sel,
@@ -77,31 +79,35 @@ export function ScopePicker({
   const toggle = (n: string) =>
     onChange(sel.includes(n) ? sel.filter((x) => x !== n) : [...sel, n]);
   // master 不提供勾选:服务端硬禁,peer 永远拿不到大总管(owner 2026-07-27)
-  const toggleStar = () => onChange(star ? [] : ["*"]);
   return (
     <div className="max-h-44 space-y-1 overflow-y-auto rounded-lg border border-base-300 bg-base-100 p-2">
-      <label className="flex cursor-pointer items-center gap-2 text-sm">
-        <input type="checkbox" className="checkbox checkbox-xs" checked={star} onChange={toggleStar} />
+      <label className={`flex items-center gap-2 text-sm ${star ? "cursor-pointer" : "opacity-50"}`}>
+        <input type="checkbox" className="checkbox checkbox-xs" checked={star} disabled={!star} onChange={() => onChange([])} />
         <span>{t("全部普通 agent（*）")}</span>
-        <span className="text-[10px] text-warning">{t("⚠ 不含 master")}</span>
+        <span className="text-[10px] text-base-content/50">{t("暂不提供：请逐个选择已开闸的会话")}</span>
       </label>
-      {localAgents.map((a) => (
-        <label key={a.name} className="flex cursor-pointer items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="checkbox checkbox-xs"
-            checked={star || sel.includes(a.name)}
-            disabled={star}
-            onChange={() => toggle(a.name)}
-          />
-          <span className={a.status === "active" ? "" : "opacity-50"}>{a.name}</span>
-          {a.external ? (
-            <span className="badge badge-ghost badge-xs">external</span>
-          ) : (
-            <span className="text-[10px] text-warning">{t("⚠ 未标 external")}</span>
-          )}
-        </label>
-      ))}
+      {localAgents.map((a) => {
+        const locked = !a.external && !sel.includes(a.name);
+        return (
+          <label key={a.name} className={`flex items-center gap-2 text-sm ${locked || star ? "" : "cursor-pointer"}`}>
+            <input
+              type="checkbox"
+              className="checkbox checkbox-xs"
+              checked={star || sel.includes(a.name)}
+              disabled={star || locked}
+              onChange={() => toggle(a.name)}
+            />
+            <span className={a.status === "active" ? "" : "opacity-50"}>{a.name}</span>
+            {a.external ? (
+              <span className="badge badge-ghost badge-xs">external</span>
+            ) : (
+              <button type="button" className="btn btn-ghost btn-xs h-5 min-h-0 gap-1 px-1.5 text-[10px] text-warning" title={t("开启 external 闸门")} onClick={() => openAgentInfo(a.name)}>
+                🔒 {t("未开闸")}
+              </button>
+            )}
+          </label>
+        );
+      })}
     </div>
   );
 }

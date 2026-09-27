@@ -41,6 +41,8 @@ export interface AgentSession {
   effort?: string | null;
   /** v2.21+ 归属 project id（master 无；侧栏按它分组） */
   projectId?: string | null;
+  /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
+  external?: boolean;
   updateHint?: UpdateHint | null;
 }
 
@@ -67,6 +69,8 @@ interface ApiAgent {
   created?: string;
   /** v2.21+ 归属 project id */
   projectId?: string | null;
+  /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
+  external?: boolean;
   updateHint?: UpdateHint | null;
 }
 

@@ -167,6 +167,8 @@ export interface AgentSession {
   effort?: string | null;
   /** v2.21+ 归属 project id（master 无）→ 侧栏分组。 */
   projectId?: string | null;
+  /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
+  external?: boolean;
   /**
    * v2.23+ 运行时：`"pi"` = Pi coding agent，`"claude-code"`/缺失 = Claude Code。
    * 侧栏徽章、TopBar 模型/effort 展示都按它分叉（Pi 的模型来自 provider 配置，

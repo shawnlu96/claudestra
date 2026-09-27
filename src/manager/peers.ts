@@ -25,29 +25,13 @@ function selfPeerName(): string {
   return repoEnvVar("USER_NAME").trim().replace(/[^\w-]/g, "") || hostname().split(".")[0];
 }
 
-/** invite/join 共用的 scope 校验（token-add 同款 R1 规则,不动原函数避免回归） */
-async function checkPeerScope(agents: string[], force: boolean): Promise<{ error?: string; warnings: string[] }> {
+/** invite/join/scope 共用的 scope 校验。external 是正式闸门（owner 2026-09-27）：未开闸的 agent、"*"、master
+ *  一律拦，--force 不再放行——force 只剩 --rotate 之类别的用途。规则本体在 lib/peer-scope-gate.ts（有单测）。 */
+async function checkPeerScope(agents: string[], _force: boolean): Promise<{ error?: string; warnings: string[] }> {
+  const { scopeGateError } = await import("../lib/peer-scope-gate.js");
   const reg = await loadRegistry();
-  const warnings: string[] = [];
-  for (const a of agents) {
-    if (a === "*") {
-      if (!force) return { error: `--agents "*" 会把全部 agent 开放给 peer（R1 共享上下文风险）。确认请加 --force。`, warnings };
-      warnings.push(`"*" scope：所有普通 agent 都对此 peer 可见`);
-      continue;
-    }
-    if (a === "master") {
-      // v2.15+ 无条件拒绝，--force 也不行（owner 2026-07-27:「大总管不可能被
-      // peer 分享出去」）。消费侧 agentInScope 对 peer token 有同款硬闸兜历史。
-      return { error: `大总管不可开放给 peer——这是硬规则，--force 也不放行。`, warnings };
-    }
-    const info = reg.agents[a] || reg.agents[`agent-${a}`];
-    if (!info) return { error: `agent "${a}" 不存在`, warnings };
-    if (!info.external && !force) {
-      return { error: `agent "${a}" 未标 external——peer 可套出其上下文既有内容（R1）。建议为 peer 用途 create --external 专用 agent；确实要开放就加 --force。`, warnings };
-    }
-    if (!info.external) warnings.push(`"${a}" 未标 external，已用 --force 强制开放`);
-  }
-  return { warnings };
+  const error = scopeGateError(agents, reg.agents as Record<string, { external?: boolean | null } | undefined>);
+  return error ? { error, warnings: [] } : { warnings: [] };
 }
 
 /** 为 peer 签 token 并登记 principal。返回 {tokenId, secret} */

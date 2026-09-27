@@ -7,6 +7,7 @@ import { SearchIcon, SearchOverlay, SessionSearchButton } from "./session-search
 import { TerminalButton, TerminalIcon, useTerminalEntry } from "../../terminal/terminal-button";
 import { AgentActions, MoreMenu, closeDropdown, hasActionMenu } from "./agent-actions";
 import { OpenButton } from "./open-button";
+import { InfoButton } from "./info-button";
 
 /** 管理：四宫格（lucide layout-grid），只在折叠菜单里用——平铺时仍是文字按钮 */
 function ManageIcon() {
@@ -70,6 +71,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
     <span className="ml-auto flex shrink-0 items-center gap-0.5">
       {/* 打开目录下拉：本机打开网页时才渲染（组件内判），窄顶栏也不收进 ⋮——只有一个图标 */}
       <OpenButton agent={agent} />
+      <InfoButton agent={agent} />
       {/* 窄顶栏只是 CSS 隐藏，不能改成条件渲染：ShareButton 里的「工作中 / 切会话自动退出分享」守卫靠它挂着 */}
       <span className="hidden items-center gap-0.5 @xl:flex">
         <ShareButton busy={busy} />
