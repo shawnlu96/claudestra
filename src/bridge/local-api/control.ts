@@ -5,7 +5,7 @@
  * ?refresh=1 = 老 BFF 转成 POST /stats/refresh 的那条路：强制重抓账号用量（最长 ~20 s，前端给 30 s）。
  * 动态 import：relay-routes / stats-dashboard 拖着中继连接与 Discord 客户端，本地 API 其余端点族的单测不该为它们付出加载代价。
  */
-import { canManage } from "../../lib/devices.js";
+import { canAdministerPairing, canManage } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { forbidden } from "../api-respond.js";
 
@@ -17,10 +17,12 @@ export async function handleControl(req: Request, path: string, principal: Princ
   const stats = path === "/stats" && req.method === "GET";
   if (!status && !pair && !stats) return null;
   if (!canManage(principal)) return forbidden(MANAGE_MSG);
+  // 发配对码只认设备凭据：老的全 scope Bearer token 能过 canManage，但不该签出带终端和管理的新设备
+  if (pair && !canAdministerPairing(principal)) return forbidden("pairing requires a device credential with manage grant");
   if (stats) {
     const dash = await import("../stats-dashboard.js");
     return new URL(req.url).searchParams.get("refresh") === "1" ? dash.handleStatsRefreshRequest() : dash.handleStatsRequest();
   }
   const relay = await import("../relay-routes.js");
-  return status ? relay.relayStatusResponse() : relay.pairNew(req);
+  return status ? relay.relayStatusResponse() : relay.pairNew(req, principal);
 }

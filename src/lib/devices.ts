@@ -179,6 +179,21 @@ export function canManage(p: Principal): boolean {
   return p.role === "owner" || (p.agents.includes("*") && !p.peer);
 }
 
+/**
+ * 在网页里发配对码 / 批准配对的门：要 manage，而且得是设备凭据——老的全 scope Bearer token 过渡期还能过 canManage，
+ * 但不该拿它签出带终端和管理的新设备（codex 复核 #67）。本机终端走回环控制路由，不经这里。
+ */
+export function canAdministerPairing(p: Principal): boolean {
+  return canManage(p) && !!p.credential;
+}
+
+/** 给出去的权限不能比自己手里的大：会话取交集，终端 / 管理要自己有才给得出。一个会话都不剩 → null */
+export function capGrant(g: Grant, issuer: Principal): Grant | null {
+  const agents = intersectAgents(issuer.agents, g.agents);
+  if (!agents.length) return null;
+  return { agents, terminal: g.terminal && (issuer.role === "owner" || issuer.terminal === true), manage: g.manage && canManage(issuer) };
+}
+
 /** 记一次使用：lastSeenAt / lastIp / 到期往后滑。返回 true = 变化大到该落盘了 */
 export function touchCredential(c: DeviceCredential, now: Date, ip: string | null): boolean {
   const last = c.lastSeenAt ? Date.parse(c.lastSeenAt) : 0;
@@ -248,7 +263,8 @@ export interface Approval {
   guest?: string;
   createdAt: number;
   expiresAt: number;
-  state: "pending" | "approved" | "denied";
+  /** approving = 有人点了批准、正在签凭据：不再出现在待批列表，别人的批准 / 拒绝都进不来 */
+  state: "pending" | "approving" | "approved" | "denied";
   /** 批准后由 bridge 填：浏览器下一次轮询取走即删 */
   result?: { token: string; credentialId: string; principalId: string; expiresAt: string };
 }
@@ -275,12 +291,32 @@ export class Approvals {
     return this.items.get(id) ?? null;
   }
 
-  /** Mac 侧的决定；已决定 / 不存在返回 null */
-  decide(id: string, approve: boolean, result?: Approval["result"]): Approval | null {
+  /** 抢占一条待批：只有一个人能赢（多台设备同时点批准 / 一边批准一边拒绝）；已被抢 / 不存在返回 null */
+  claim(id: string): Approval | null {
     const a = this.get(id);
     if (!a || a.state !== "pending") return null;
+    a.state = "approving";
+    return a;
+  }
+
+  /** 抢到之后的结论；签凭据失败时 release 放回待批，别人还能再批 */
+  settle(id: string, approve: boolean, result?: Approval["result"]): void {
+    const a = this.items.get(id);
+    if (!a || a.state !== "approving") return;
     a.state = approve ? "approved" : "denied";
     if (approve && result) a.result = result;
+  }
+
+  release(id: string): void {
+    const a = this.items.get(id);
+    if (a?.state === "approving") a.state = "pending";
+  }
+
+  /** 一步到位的决定（claim + settle）；已决定 / 不存在返回 null */
+  decide(id: string, approve: boolean, result?: Approval["result"]): Approval | null {
+    const a = this.claim(id);
+    if (!a) return null;
+    this.settle(id, approve, result);
     return a;
   }
 
@@ -288,7 +324,7 @@ export class Approvals {
   take(id: string): { state: "pending" } | { state: "approved"; result: NonNullable<Approval["result"]>; approval: Approval } | { state: "denied" | "expired" } {
     const a = this.get(id);
     if (!a) return { state: "expired" };
-    if (a.state === "pending") return { state: "pending" };
+    if (a.state === "pending" || a.state === "approving") return { state: "pending" };
     this.items.delete(id);
     return a.state === "approved" && a.result ? { state: "approved", result: a.result, approval: a } : { state: "denied" };
   }

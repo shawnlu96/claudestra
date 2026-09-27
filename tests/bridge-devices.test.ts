@@ -131,6 +131,56 @@ describe("手输短码：进待确认，Mac 侧点头才发凭据", () => {
   });
 });
 
+describe("网页里批准配对（管理端点）", () => {
+  const owner: Principal = { id: OWNER_PRINCIPAL_ID, role: "owner", agents: ["*", "master"], createdAt: "2026-01-01T00:00:00Z", credential: "dev_owner" };
+  const managed = async (method: string, path: string, body?: unknown, p: Principal = owner) =>
+    (await handleDevicesManaged(req(method, path, RELAY, body === undefined ? {} : { body }), new URL(`http://x${path}`), p))!;
+  test("列表带还没用掉的码；码被输入后进待确认、不再算「没用掉」；网页批准即发凭据", async () => {
+    const info = issuePairing(machine, { guest: "Alex", agents: ["worker-a"] });
+    const code = String(info.code);
+    const before = (await (await managed("GET", "/api/v1/devices/approvals")).json()) as { activeCodes: string[] };
+    expect(before.activeCodes).toContain(code);
+    const r = (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { code, deviceName: "Alex iPhone" } }))!;
+    const { approvalId } = (await r.json()) as { approvalId: string };
+    const mid = (await (await managed("GET", "/api/v1/devices/approvals")).json()) as { activeCodes: string[]; approvals: Array<{ id: string; code: string; guest?: string }> };
+    expect(mid.activeCodes).not.toContain(code);
+    expect(mid.approvals.find((a) => a.id === approvalId)).toMatchObject({ code, guest: "Alex" });
+    const dec = await managed("POST", `/api/v1/devices/approvals/${approvalId}`, { approve: true });
+    expect(await dec.json()).toMatchObject({ ok: true, state: "approved", deviceName: "Alex iPhone" });
+    expect((await managed("POST", `/api/v1/devices/approvals/${approvalId}`, { approve: true })).status).toBe(404);
+  });
+
+  test("老的全 scope Bearer token（没有设备凭据）看不到也批不了；会话受限的管理设备批不了比自己大的请求", async () => {
+    const token: Principal = { id: "token:tok_x", role: "owner", agents: ["*"], createdAt: "2026-01-01T00:00:00Z" };
+    expect((await managed("GET", "/api/v1/devices/approvals", undefined, token)).status).toBe(403);
+    const info = issuePairing(machine, {});
+    const r = (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { code: String(info.code), deviceName: "big" } }))!;
+    const { approvalId } = (await r.json()) as { approvalId: string };
+    const narrow: Principal = { id: OWNER_PRINCIPAL_ID, role: "external", agents: ["*"], createdAt: "", manage: true, terminal: false, credential: "dev_n" };
+    const refused = await managed("POST", `/api/v1/devices/approvals/${approvalId}`, { approve: true }, narrow);
+    expect(refused.status).toBe(403);
+    expect(pendingApprovals().some((a) => a.id === approvalId)).toBe(true); // 没被吃掉，全权设备还能批
+    expect(await decideApproval(approvalId, false)).toMatchObject({ state: "denied" });
+  });
+
+  test("两台设备同时批准：只有一个赢，只签一张凭据", async () => {
+    const info = issuePairing(machine, { agents: ["worker-a"], terminal: false, manage: false });
+    const r = (await pub("POST", "/api/v1/devices/pair", RELAY, { body: { code: String(info.code), deviceName: "race" } }))!;
+    const { approvalId } = (await r.json()) as { approvalId: string };
+    const [a, b] = await Promise.all([decideApproval(approvalId, true, owner), decideApproval(approvalId, true, owner)]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    expect(await decideApproval(approvalId, false)).toBeNull();
+  });
+
+  test("网页发码：给出去的不能比发码设备自己的大（没有终端 / 大总管的管理设备签不出带它们的码）", () => {
+    const narrow: Principal = { id: OWNER_PRINCIPAL_ID, role: "external", agents: ["*"], createdAt: "", manage: true, terminal: false, credential: "dev_n" };
+    expect(issuePairing(machine, {}, narrow)).toMatchObject({ ok: true, grant: { agents: ["*"], terminal: false, manage: true } });
+    const one: Principal = { ...narrow, agents: ["worker-a"], manage: false };
+    expect(issuePairing(machine, { agents: ["other"] }, one)).toMatchObject({ ok: false });
+    expect(issuePairing(machine, {}, owner)).toMatchObject({ ok: true, grant: { agents: ["*", "master"], terminal: true, manage: true } });
+  });
+});
+
 describe("本机回环自动配对", () => {
   test("隧道来源（source relay）打不到；LAN 打不到；回环缺自定义头 / 跨源都拒；回环 + 头 + 同源 → 凭据，cookie 不带 Secure、Path=/", async () => {
     expect((await pub("POST", "/api/v1/devices/local", RELAY, { headers: { "x-cstra-device": "1" } }))!.status).toBe(403);
