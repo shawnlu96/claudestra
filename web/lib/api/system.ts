@@ -48,6 +48,11 @@ export function relayPairNew<T>(): Promise<T> {
   return api<T>("/relay/pair", { method: "POST", json: {}, timeoutMs: 5000 });
 }
 
+// ── 「访问」页总览：中继 + 局域网（便宜；Tailscale 那半走下面的 remote-access）──
+export function accessPaths<T>(): Promise<T> {
+  return api<T>("/access-paths", { timeoutMs: 5000 });
+}
+
 // ── 手机访问面板（探测要起子进程 + TLS 握手，bridge 缓存 60s）──
 export function remoteAccess<T>(fresh: boolean): Promise<T> {
   return api<T>(`/remote-access${fresh ? "?fresh=1" : ""}`, { timeoutMs: 15_000 });
