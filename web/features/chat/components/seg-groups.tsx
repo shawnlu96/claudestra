@@ -20,6 +20,10 @@ export function ReplyDivider() {
   );
 }
 
+/** 组首是「会渲染出来的」reply 段才出分隔线：空 reply 段（历史快照里的旧空段）render 返回 null，
+ *  但它带时间、与上一组差 ≥2 分钟时仍会开组，不加这一判断就剩一条孤零零的「回复」线。 */
+const opensReply = (s: AssistantSegment) => s.kind === "reply" && s.text.trim() !== "";
+
 /**
  * AI 消息段的时间轨道（PC ≥lg 才可见，标签本身 hidden lg:block）：按 ../time-groups.ts 分组，每组一个
  * relative 包装 + 常显 sticky 标签，组滚过时贴顶跟随、被下一组顶走。组内其余段各自再包一层 group/seg，
@@ -39,7 +43,7 @@ export function SegGroups({
     <>
       {groupSegments(segs, ts).map((g) => (
         <div key={g.start}>
-          {g.start > 0 && segs[g.start].kind === "reply" && <ReplyDivider />}
+          {g.start > 0 && opensReply(segs[g.start]) && <ReplyDivider />}
           <div className="relative">
             <GutterTime ts={g.ts} side="left" lead={g.lead} />
             {segs.slice(g.start, g.end).map((seg, k) => {

@@ -31,7 +31,6 @@ export function HeaderTime({ ts, className = "" }: { ts?: string; className?: st
 
 export type GutterLead = LeadKind | "user" | "system";
 
-
 export function GutterTime({ ts, side, lead, hover = false }: { ts?: string; side: "left" | "right"; lead: GutterLead; hover?: boolean }) {
   const exporting = useIsExport();
   const sharing = useShare().on;
