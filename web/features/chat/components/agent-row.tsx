@@ -292,7 +292,7 @@ export function AgentRow({
           ) : (
             <RuntimeStatusIcon a={a} busy={a.busy || busyLive} compacting={compacting} />
           )}
-          <span className={`min-w-0 flex-1 truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
+          <span className={`min-w-0 flex-auto truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
             {a.label || t(a.displayName)}
             {a.label && <span className="ml-1 text-[12px] font-normal text-base-content/40">| {a.displayName}</span>}
@@ -356,5 +356,5 @@ function RepoTag({ a }: { a: AgentSession }) {
   const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
   const repo = agentRepoLabel(a, projDirs);
   if (!repo) return null;
-  return <span className="min-w-0 max-w-[35%] shrink-[3] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>;
+  return <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>;
 }
