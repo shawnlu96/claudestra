@@ -101,7 +101,7 @@ export async function archiveSession(
   const archived: string[] = [];
 
   const destMain = join(dir, `${sessionId}.jsonl`);
-  if (await copyIfLarger(src, destMain)) archived.push(destMain);
+  if ((await copyIfLarger(src, destMain)) === "copied") archived.push(destMain);
 
   // subagents 对话（与主会话同级的 <sessionId>/subagents/ 目录）
   // Pi 的子代理产物布局与 CC 不同：<会话 stem>/<runId>/run-N/session.jsonl。
@@ -112,7 +112,7 @@ export async function archiveSession(
     const destSub = join(dir, sessionId, "subagents");
     await mkdir(destSub, { recursive: true });
     const dest = join(destSub, `${id}.jsonl`);
-    if (await copyIfLarger(subPath, dest)) archived.push(dest);
+    if ((await copyIfLarger(subPath, dest)) === "copied") archived.push(dest);
   }
   const subDir = join(src.replace(/\.jsonl$/, ""), "subagents");
   if (existsSync(subDir)) {
@@ -121,18 +121,19 @@ export async function archiveSession(
     try {
       for (const f of await readdir(subDir)) {
         if (!f.endsWith(".jsonl")) continue;
-        if (await copyIfLarger(join(subDir, f), join(destSub, f))) {
+        if ((await copyIfLarger(join(subDir, f), join(destSub, f))) === "copied") {
           archived.push(join(destSub, f));
         }
       }
     } catch { /* best-effort */ }
   }
-  archived.push(...(await archiveWorkflowDirs(src.replace(/\.jsonl$/, ""), join(dir, sessionId))));
+  const wf = await archiveWorkflowDirs(src.replace(/\.jsonl$/, ""), join(dir, sessionId));
+  archived.push(...wf.copied);
 
   return {
     ok: true,
     archived,
-    note: archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）",
+    note: (archived.length ? `已归档 ${archived.length} 个文件` : "归档已是最新（无变化）") + (wf.failed.length ? `；workflow 有 ${wf.failed.length} 个文件没拷上（下次再试）` : ""),
   };
 }
 
