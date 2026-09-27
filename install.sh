@@ -452,7 +452,7 @@ printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━
 printf "${BOLD}${GREEN}  ✨ $(L "系统已就绪，现在跑配置向导" "Everything is ready — time for the setup wizard")${RESET}\n"
 printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
 
-printf "%s\n" "$(L "配置向导默认只装 Web 端：写 .env、签 API token、构建前端、装成开机自启，跑完给你一个网址。" "The wizard installs the Web frontend by default: writes .env, issues an API token, builds the frontend, installs it for autostart, and prints you a URL.")"
+printf "%s\n" "$(L "配置向导默认只装 Web 端：写 .env、构建前端、装成开机自启，再帮你选手机怎么连（中继 / Tailscale / 局域网 / 自己的域名），跑完给你配对二维码。" "The wizard installs the Web frontend by default: writes .env, builds the frontend, installs it for autostart, helps you pick how your phone connects (relay / Tailscale / LAN / your own domain), and ends with a pairing QR code.")"
 printf "%s\n" "$(L "Discord 是可选项（要自己建 bot，多 5 个步骤）——向导里选上才会问。" "Discord is optional (you would create your own bot — 5 extra steps); the wizard only asks if you pick it.")"
 printf "%s\n\n" "$(L "预计 5-15 分钟（大头是依赖下载与前端构建）。" "Budget 5-15 minutes — mostly downloads and the frontend build.")"
 

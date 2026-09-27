@@ -7,7 +7,7 @@
 import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
-  Approvals, attachCredential, canManage, ChallengeStore, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant,
+  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant,
   newGuestPrincipal, normalizeGrant, type Grant,
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
@@ -17,12 +17,13 @@ import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
 import { relayClient } from "./relay-link.js";
-import { issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
+import { activePairingCodeList, issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
 import { requestContextOf, type RequestContext } from "./request-context.js";
 
 const challenges = new ChallengeStore();
 const approvals = new Approvals();
 const MANAGE_MSG = "device management requires a credential with manage grant";
+const PAIR_ADMIN_MSG = "pairing management requires a device credential with manage grant";
 /** 单测把 principals.json 指到临时目录；生产不调 */
 let principalsPath: string | undefined;
 export function setDevicesPrincipalsPathForTest(path: string | undefined): void {
@@ -151,15 +152,19 @@ export async function handleDevicesManaged(req: Request, url: URL, principal: Pr
   const del = p.match(/^\/api\/v1\/devices\/(dev_[0-9a-f]+)$/);
   if (del && req.method === "DELETE") return revokeDevice(req, principal, del[1]);
   if (p === "/api/v1/devices/approvals" && req.method === "GET") {
-    return canManage(principal) ? apiJson(200, { ok: true, approvals: pendingApprovals() }) : forbidden(MANAGE_MSG);
+    // activeCodes：还没被用掉的码——网页据此看出自己发出去的码已经不在了（与回环 /relay/pair/approvals 同形）
+    if (!canAdministerPairing(principal)) return forbidden(PAIR_ADMIN_MSG);
+    const res = apiJson(200, { ok: true, approvals: pendingApprovals(), activeCodes: activePairingCodeList() });
+    res.headers.set("cache-control", "no-store");
+    return res;
   }
   const dec = p.match(/^\/api\/v1\/devices\/approvals\/([A-Za-z0-9_-]+)$/);
   if (dec && req.method === "POST") {
-    if (!canManage(principal)) return forbidden(MANAGE_MSG);
+    if (!canAdministerPairing(principal)) return forbidden(PAIR_ADMIN_MSG);
     const body = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
-    const r = await decideApproval(dec[1], (body as Body)?.approve === true);
-    return apiJson(r ? 200 : 404, r ?? { ok: false, error: "approval not found or already decided" });
+    const r = await decideApproval(dec[1], (body as Body)?.approve === true, principal);
+    return apiJson(!r ? 404 : r.ok === false ? 403 : 200, r ?? { ok: false, error: "approval not found or already decided" });
   }
   return null;
 }
@@ -200,25 +205,47 @@ export function pendingApprovals(): Array<Record<string, unknown>> {
   }));
 }
 
-/** Mac 侧的决定：批准就此刻签凭据挂进待确认，浏览器下次轮询取走 */
-export async function decideApproval(id: string, approve: boolean): Promise<Record<string, unknown> | null> {
-  const a = approvals.get(id);
-  if (!a || a.state !== "pending") return null;
-  if (!approve) return approvals.decide(id, false) ? { ok: true, id, state: "denied" } : null;
-  const out = await grantCredential(a.deviceName, a.grant, a.guest, a.clientIp);
-  approvals.decide(id, true, { token: out.token, credentialId: out.credentialId, principalId: out.principalId, expiresAt: out.expiresAt });
-  return { ok: true, id, state: "approved", credentialId: out.credentialId, principalId: out.principalId, deviceName: a.deviceName };
+/**
+ * 批准 / 拒绝：先 claim（多台设备同时点只有一个赢），批准就此刻签凭据挂进待确认，浏览器下次轮询取走。
+ * approver = 网页里点批准的那台设备：请求的权限超过它自己手里的就拒（本机终端走回环路由，不传）。
+ */
+export async function decideApproval(id: string, approve: boolean, approver?: Principal): Promise<Record<string, unknown> | null> {
+  const peek = approvals.get(id);
+  if (approve && approver && peek?.state === "pending" && JSON.stringify(capGrant(peek.grant, approver)) !== JSON.stringify(peek.grant)) {
+    return { ok: false, id, state: "pending", error: "这个请求要的权限比你这台设备的还大，批准不了；到电脑上或用全权设备批准" };
+  }
+  const a = approvals.claim(id);
+  if (!a) return null;
+  if (!approve) {
+    approvals.settle(id, false);
+    return { ok: true, id, state: "denied" };
+  }
+  try {
+    const out = await grantCredential(a.deviceName, a.grant, a.guest, a.clientIp);
+    approvals.settle(id, true, { token: out.token, credentialId: out.credentialId, principalId: out.principalId, expiresAt: out.expiresAt });
+    return { ok: true, id, state: "approved", credentialId: out.credentialId, principalId: out.principalId, deviceName: a.deviceName };
+  } catch (e) {
+    approvals.release(id); // 签凭据失败（principals.json 写不进）：放回待批，别卡死在 approving
+    throw e;
+  }
 }
 
 /**
  * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备）；短码给中继（连着的话），秘密只进链接的 # 片段。
  * 没连中继也能签（直托管入口）：link 要有入口地址才拼得出（CLI 的 --url），否则只给短码与 fragment 让用户手动进配对页。
  */
-export function issuePairing(i: { url?: string | null; base?: string | null; slug?: string | null; fp?: string | null }, body: Body): Record<string, unknown> {
+export function issuePairing(
+  i: { url?: string | null; base?: string | null; slug?: string | null; fp?: string | null },
+  body: Body,
+  issuer?: Principal,
+): Record<string, unknown> {
   const fp = i.fp ?? machineFp();
   if (!fp) return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败），签不了配对码" };
   const guest = str(body.guest);
-  const grant = normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, guest ? guestGrant(["*"]) : fullGrant());
+  const asked = normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, guest ? guestGrant(["*"]) : fullGrant());
+  // 网页里发码（issuer = 那台设备）：给出去的不能比它自己的大；本机终端（CLI）不传 issuer，照旧
+  const grant = issuer ? capGrant(asked, issuer) : asked;
+  if (!grant) return { ok: false, error: "你这台设备能用的会话里没有这些，签不了" };
   const r = issuePairingCode(relayClient(), guest ? guestGrant(grant.agents) : grant, guest);
   const entry = str(body.url, 256)?.replace(/\/+$/, "") ?? (i.base ? `https://${i.base}` : null);
   const fragment = `${fp}.${r.secret}`;

@@ -44,9 +44,6 @@ export function stats<T>(refresh: boolean): Promise<T> {
 export function relayStatus<T>(): Promise<T> {
   return api<T>("/relay/status", { timeoutMs: 5000 });
 }
-export function relayPairNew<T>(): Promise<T> {
-  return api<T>("/relay/pair", { method: "POST", json: {}, timeoutMs: 5000 });
-}
 
 // ── 「访问」页总览：中继 + 局域网（便宜；Tailscale 那半走下面的 remote-access）──
 export function accessPaths<T>(): Promise<T> {

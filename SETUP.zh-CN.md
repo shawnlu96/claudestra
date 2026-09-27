@@ -276,10 +276,10 @@ Claudestra 跑成三个 launchd user agent。下面的命令在任何目录下�
 launchctl list | grep claudestra
 
 # 日志 —— 每个 daemon 的 stdout / stderr 是分开的两个文件
-tail -f /tmp/claudestra-bridge.out      # 路由、注册、投递
-tail -f /tmp/claudestra-bridge.err      # 堆栈报错
-tail -f /tmp/claudestra-launcher.out    # 大总管守护、agent 复活
-tail -f /tmp/claudestra-cron.out        # 定时任务
+tail -f ~/.claude-orchestrator/logs/bridge.out      # 路由、注册、投递
+tail -f ~/.claude-orchestrator/logs/bridge.err      # 堆栈报错
+tail -f ~/.claude-orchestrator/logs/launcher.out    # 大总管守护、agent 复活
+tail -f ~/.claude-orchestrator/logs/cron.out        # 定时任务
 
 # 重启单个服务（-k 先杀掉再重载）
 launchctl kickstart -k "gui/$(id -u)/com.claudestra.bridge"
@@ -299,7 +299,7 @@ bridge 重启后大约要 15 秒才恢复：各 agent 的 channel-server 按指�
 检查 **Privileged Intents**。三个必须全部在 Developer Portal 开启。少一个 Discord 就会静默丢弃 bot 无权接收的事件。
 
 ```bash
-tail -n 50 /tmp/claudestra-bridge.out
+tail -n 50 ~/.claude-orchestrator/logs/bridge.out
 ```
 
 没有 "received message" 日志 = intent 问题。
@@ -311,7 +311,7 @@ tail -n 50 /tmp/claudestra-bridge.out
 ### 大总管一直不上线
 
 ```bash
-tail -n 50 /tmp/claudestra-launcher.out
+tail -n 50 ~/.claude-orchestrator/logs/launcher.out
 ```
 
 常见原因：
@@ -323,7 +323,7 @@ tail -n 50 /tmp/claudestra-launcher.out
 ### Bridge 一直重启
 
 ```bash
-tail -n 100 /tmp/claudestra-bridge.err
+tail -n 100 ~/.claude-orchestrator/logs/bridge.err
 ```
 
 通常是 bot token 错了或 `.env` 有错字。去 Developer Portal 重新生成 token，重跑 `bun run setup`。
