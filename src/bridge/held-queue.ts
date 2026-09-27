@@ -40,6 +40,13 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return this;
   }
 
+  /** 追加一条并落盘，返回这个频道排队的条数。换新数组不原地 push：flush 遍历的快照不受影响 */
+  hold(channelId: string, item: HeldItem): number {
+    const q = [...(this.get(channelId) ?? []), item];
+    this.set(channelId, q);
+    return q.length;
+  }
+
   /** 投出去之后才摘掉并落盘：投递中途崩溃 / 别处 set 触发整表落盘时，盘上都还有它（至少投一次，收件方看 message_id 去重） */
   remove(channelId: string, item: HeldItem): void {
     this.set(channelId, (this.get(channelId) ?? []).filter((i) => i !== item));
