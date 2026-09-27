@@ -3,7 +3,7 @@
  * registry / principals 用注入的假数据，runManager 用记录器——不碰真实状态文件，也不起 bridge。
  */
 import { describe, expect, test } from "bun:test";
-import { handleAgentInfoRoutes, type AgentInfoIo } from "../src/bridge/agent-info-routes";
+import { agentListExtras, handleAgentInfoRoutes, type AgentInfoIo } from "../src/bridge/agent-info-routes";
 import type { Principal } from "../src/lib/principals";
 
 const now = "2026-09-27T00:00:00.000Z";
@@ -131,5 +131,30 @@ describe("agent-info-routes：POST external", () => {
     const r2 = await json(await call(owner, "/agents/priv/external", req("POST", "{not json")));
     expect(r2.status).toBe(400);
     expect(r2.body.error).toBe("invalid JSON body");
+  });
+});
+
+describe("agent-info-routes：POST label", () => {
+  test("全权 token → runManager label <name> <text>；label 不是字符串 → 400；peer / scoped → 403 且不调 manager", async () => {
+    const rec = recorder({ ok: true, label: "我的前端" });
+    expect((await json(await call(owner, "/agents/open/label", req("POST", { label: "我的前端" }), rec.run))).status).toBe(200);
+    expect(rec.calls).toEqual([["label", "open", "我的前端"]]);
+    expect((await json(await call(owner, "/agents/open/label", req("POST", { label: 3 }), rec.run))).status).toBe(400);
+    expect((await json(await call(peerStar, "/agents/open/label", req("POST", { label: "x" }), rec.run))).status).toBe(403);
+    expect((await json(await call(scoped, "/agents/open/label", req("POST", { label: "x" }), rec.run))).status).toBe(403);
+    expect(rec.calls).toHaveLength(1);
+  });
+});
+
+describe("agentListExtras（GET /agents 的附加字段）", () => {
+  test("external / label 人人可见；sharedPeers 只给全权非 peer（谁在共享是 owner 的事）", async () => {
+    const own = await agentListExtras(owner, io);
+    expect(own("agent-open", { external: true, label: "L" })).toMatchObject({ external: true, label: "L", sharedPeers: 2 });
+    expect(own("agent-priv", {})).toMatchObject({ external: false, label: null, sharedPeers: 1 }); // "*" peer 也算
+    for (const p of [peerStar, scoped]) {
+      const x = (await agentListExtras(p, io))("agent-open", { external: true });
+      expect(x.external).toBe(true);
+      expect(x.sharedPeers).toBeUndefined();
+    }
   });
 });

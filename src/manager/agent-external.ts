@@ -20,6 +20,11 @@ export async function cmdAgentLabel(name: string, text: string) {
     output({ ok: false, error: "显示名最多 40 个字符" });
     return;
   }
+  // 控制字符 / 方向控制符（RLO 之类）会让侧栏里的名字看起来像别的会话
+  if (/[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/.test(label)) {
+    output({ ok: false, error: "显示名不能含控制字符或方向控制符" });
+    return;
+  }
   const hit = await findAgent(bare);
   if (!hit) return;
   const { reg, key } = hit;

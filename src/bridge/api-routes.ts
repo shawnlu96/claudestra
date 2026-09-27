@@ -78,7 +78,8 @@ import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/sess
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
-import { handlePeersRoutes } from "./peers-routes.js"; import { handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { handlePeersRoutes } from "./peers-routes.js";
+import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { notePeerSignature } from "./peer-signature.js";
@@ -395,11 +396,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (path === "/agents" && req.method === "GET") {
     try {
       const listResult = await runManager("list");
-      // v2.23+「已归档」标记：归档区里有这个 agent 的话标出来，网页据此把它从工作列表
-      // 隐藏（归档 = 收起来，不是删掉；恢复时归档目录被清掉，它自然回到列表）。
-      // 为什么不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。
-      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js"); const { peersSharingAgent } = await import("../lib/peer-scope-gate.js");
-      const { existsSync: existsSyncFs } = await import("node:fs"); const prin = (await (await import("../lib/principals.js")).readPrincipals()).principals;
+      const extras = await agentListExtras(principal); // external / 显示名 / 已归档 / 共享数（bridge/agent-info-routes.ts）
       const agents = ((listResult.agents || []) as any[])
         .filter((a) => agentInScope(principal, a.name))
         .map((a) => ({
@@ -473,7 +470,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           (a as any).lastActivityTs = info?.convTs ?? null;
           (a as any).contextTokens = info?.ctxTokens ?? null;
           // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
-          (a as any).projectId = r?.projectId ?? null; (a as any).external = r?.external === true; (a as any).label = r?.label ?? null; (a as any).sharedPeers = peersSharingAgent(prin, a.name).length;
+          (a as any).projectId = r?.projectId ?? null;
+          Object.assign(a, { ...extras(a.name, r), archived: (a as any).archived }); // archived 以上面 Promise.all 那段为准（生效路径）
           // 运行时徽章 + 顶栏挂哪种切换器的数据源：如实透传（未知/缺失 = claude-code），只认 pi 的话 Codex 会拿到 CC 面板
           (a as any).runtime = sourceFor(r?.runtime).id;
           // 当前模型 / 档位的兜底链按运行时分叉（lib/display-model.ts）；Codex 的窗口随会话记录走（258K 之类）
@@ -516,8 +514,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
             lastActivityTs: ts,
             created: (r as any).created,
             projectId: r.projectId ?? null,
-            runtime: sourceFor(r.runtime).id, external: r.external === true, label: r.label ?? null, sharedPeers: peersSharingAgent(prin, r.name).length,
-            archived: existsSyncFs(`${USER_ARCHIVE_ROOT}/${String(r.name).replace(/^agent-/, "")}`),
+            runtime: sourceFor(r.runtime).id,
+            ...extras(r.name, r),
           } as any);
         }
       }
