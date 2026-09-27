@@ -172,4 +172,11 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     expect(own("agent-priv", {}).mission).toBeUndefined();
     expect((await agentListExtras(peerStar, withMissions))("agent-open", {}).mission).toBeUndefined();
   });
+  test("排队中的消息数按频道对上；没排队不带字段；peer 看不到", async () => {
+    const withHeld = { ...io, heldCounts: () => ({ "c-open": 3 }) };
+    const own = await agentListExtras(owner, withHeld);
+    expect(own("agent-open", { channelId: "c-open" }).queued).toBe(3);
+    expect(own("agent-priv", { channelId: "c-priv" }).queued).toBeUndefined();
+    expect((await agentListExtras(peerStar, withHeld))("agent-open", { channelId: "c-open" }).queued).toBeUndefined();
+  });
 });

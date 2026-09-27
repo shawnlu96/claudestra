@@ -167,6 +167,8 @@ export const DICT: Record<string, string> = {
   "这台机器的配对已失效 · 点按重新配对": "This machine's pairing has expired · tap to pair again",
   "在这台电脑上？切到本机直连": "On this computer? Switch to the local connection",
   "手机怎么连到这台电脑": "How your phone reaches this computer",
+  "{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）":
+    "{n} message from other agents queued (arrives when its turn ends or it calls check_inbox)|{n} messages from other agents queued (arrive when its turn ends or it calls check_inbox)",
   // ── 设置 · 技能 ──
   "技能库": "Skills",
   "这台电脑上的技能": "Skills on this computer",

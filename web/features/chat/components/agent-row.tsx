@@ -351,10 +351,31 @@ function NameTags({ a, projEmoji }: { a: AgentSession; projEmoji?: string }) {
   );
 }
 
-/** 所在仓（多目录 project，见 agent-repo.ts）：放在名字容器外、限宽先缩——侧栏窄时不能把名字挤成省略号 */
+/** 名字容器外的小标：所在仓（多目录 project，见 agent-repo.ts；限宽先缩，不把名字挤成省略号）、排队中的消息数 */
 function RepoTag({ a }: { a: AgentSession }) {
+  const t = useT();
   const projDirs = useChatStore((s) => s.state.projects.find((p) => p.id === a.projectId)?.dirs);
   const repo = agentRepoLabel(a, projDirs);
-  if (!repo || !repoTagFits(a.label || a.displayName, repo)) return null;
-  return <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>;
+  const showRepo = !!repo && repoTagFits(a.label || a.displayName, repo);
+  return (
+    <>
+      {showRepo && <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>}
+      {!!a.queued && (
+        <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-info/80" title={t("{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）", { n: a.queued })}>
+          <InboxIcon />
+          {a.queued}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** lucide inbox（线条图标，不用 emoji） */
+function InboxIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-3" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </svg>
+  );
 }

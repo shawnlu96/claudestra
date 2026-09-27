@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, heldNoticeText, HeldQueue, type HeldItem } from "../src/bridge/held-queue.js";
+import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, heldAgentCounts, heldNoticeText, HeldQueue, type HeldItem } from "../src/bridge/held-queue.js";
 
 const dir = mkdtempSync(join(tmpdir(), "held-queue-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -76,5 +76,16 @@ describe("ageHeld", () => {
     expect(ageHeld(q, now + 60_000)).toEqual([]);
     expect(heldNoticeText(first[0])).toContain("不用重发");
     expect(heldNoticeText(first[1])).toContain("已放弃");
+  });
+});
+
+describe("heldAgentCounts（侧栏「排队 N 条」读落盘文件）", () => {
+  test("按频道数 agent 消息；文件没有 / 坏了 = 空", () => {
+    const p = join(dir, "counts.json");
+    new HeldQueue(p).set("c-me", [item("a", 1), item("b", 2)]);
+    expect(heldAgentCounts(p)).toEqual({ "c-me": 2 });
+    expect(heldAgentCounts(join(dir, "nope.json"))).toEqual({});
+    writeFileSync(join(dir, "bad2.json"), "{oops");
+    expect(heldAgentCounts(join(dir, "bad2.json"))).toEqual({});
   });
 });
