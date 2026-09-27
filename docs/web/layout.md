@@ -42,7 +42,7 @@ lib/                    无 React 的共享逻辑（i18n.tsx 例外）
   build-info.ts         @generated（gitignore）：CLIENT_COMMIT / CLIENT_WEB_COMMIT / CLIENT_VERSION
   client-log.ts         前端 → 当前机器 client.log 的唯一出口（同时喂 devtools 事件环）；iOS 没有 console，事故取证只有这条时间线
   native.ts             Capacitor iOS 壳识别与插件句柄（ServerConfig / Keyboard / StatusBar / SplashScreen）；web 不打包 @capacitor
-  i18n.tsx i18n-dict.ts 中文原文即 key；lang 存 localStorage cstra_lang（缺省看 navigator.language），切换时同步到 bridge /settings
+  i18n.tsx i18n-dict.ts 中文原文即 key，带变量整句写 {name}（i18n-fill.ts）；lang 只存本设备 localStorage cstra_lang（缺省看 navigator.language），不写机器 config.lang
   theme.ts css-pref-store.ts theme-vars(-parse).ts font-prefs(-parse).ts chat-prefs(-parse).ts
                         按设备存的外观偏好：*-parse 是无 import 的纯函数，store 把预生成 CSS 写进 localStorage 供 boot.js 首帧注入
   tap-rescue.ts keep-in-viewport.ts   WebKit 抬手后节点变了不派 click 的合成兜底；弹层不出屏

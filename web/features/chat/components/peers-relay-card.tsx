@@ -1,15 +1,16 @@
 "use client";
 /**
- * Peer 面板顶部的「中继」卡：这台机器在中继上的地址、连接状态，以及网页里直接「配对新设备」（二维码 + 短码），
- * 不用开终端跑 claudestra pair。状态来自 /api/relay/status，短码来自 /api/relay/pair（都经 bridge 的回环控制路由）。
+ * Peer 面板顶部的「中继」卡：这台机器在中继上的地址、连接状态，以及网页里直接「配对新设备」（pair-share.tsx，
+ * 与设置 · 设备「添加设备」同一张卡），不用开终端跑 claudestra pair。状态来自 /api/v1/relay/status，短码来自 /api/v1/relay/pair。
  * 纯逻辑在 ../relay-card-logic.ts。
  */
 import { useCallback, useEffect, useState } from "react";
-import { renderSVG } from "uqr";
-import { getLang, useT } from "@/lib/i18n";
-import { envSnippet, fmtRemaining, relayMode, remainingSeconds, type PairView, type RelayStatusView } from "../relay-card-logic";
+import { useT } from "@/lib/i18n";
+import { envSnippet, relayHome, relayMode, type RelayStatusView } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
-import { relayPairNew, relayStatus } from "@/lib/api/system";
+import { PairCodeCard } from "./pair-share";
+import { relayStatus } from "@/lib/api/system";
+import { newShareCode, type ShareCode } from "@/lib/api/devices";
 
 function OffBlock({ status }: { status: RelayStatusView }) {
   const t = useT();
@@ -25,60 +26,19 @@ function OffBlock({ status }: { status: RelayStatusView }) {
   );
 }
 
-function PairBlock({ pair, onAgain, busy }: { pair: PairView; onAgain: () => void; busy: boolean }) {
-  const t = useT();
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const iv = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(iv);
-  }, []);
-  const left = remainingSeconds(pair.expiresAt, now);
-  const expired = left === 0;
-  return (
-    <div className={`mt-3 rounded-lg bg-base-100 p-3 ${expired ? "opacity-60" : ""}`}>
-      <div className="flex flex-col items-center gap-2 sm:flex-row sm:items-start sm:gap-4">
-        <div className="w-36 shrink-0 rounded bg-white p-1 [&>svg]:h-auto [&>svg]:w-full" dangerouslySetInnerHTML={{ __html: renderSVG(pair.url) }} />
-        <div className="min-w-0 flex-1 space-y-1.5 text-center sm:text-left">
-          <div className="font-mono text-2xl tracking-[0.15em]">{pair.display}</div>
-          <div className={`text-xs ${expired ? "text-error" : "text-base-content/60"}`}>
-            {expired ? t("已过期，再生成一个") : `${t("剩余")} ${fmtRemaining(left, getLang())}`}
-          </div>
-          <div className="break-all font-mono text-[10.5px] leading-tight text-base-content/45">{pair.url}</div>
-          <div className="flex flex-wrap justify-center gap-1 sm:justify-start">
-            <CopyButton text={pair.url} label="复制链接" />
-            <button className="btn btn-ghost btn-xs" disabled={busy} onClick={onAgain}>
-              {busy ? <span className="loading loading-spinner loading-xs" /> : t("再来一个")}
-            </button>
-          </div>
-        </div>
-      </div>
-      <p className="mt-2 text-[11px] leading-relaxed text-base-content/50">
-        {t("用手机相机扫码，或把链接发给自己，或在中继首页输入短码。10 分钟内有效，只能用一次。")}
-      </p>
-    </div>
-  );
-}
-
 function OnlineBlock({ status }: { status: RelayStatusView }) {
   const t = useT();
-  const [pair, setPair] = useState<PairView | null>(null);
+  const [pair, setPair] = useState<ShareCode | null>(null);
+  const home = relayHome(status);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const newCode = async () => {
     setBusy(true);
     setErr("");
     try {
-      const j = await relayPairNew<Partial<PairView> & { ok?: boolean; error?: string; link?: string | null; fragment?: string }>();
-      // link = 托管入口的 /pair#<fp>.<secret>（bridge 知道入口地址时给）；没给就用当前页面的 origin 拼——托管前端就在这个源上。
-      // 老 bridge 只有 url（子域名 /pair#<code>）
-      const link = j.link || (j.fragment ? `${window.location.origin}/pair#${j.fragment}` : j.url);
-      if (!j.ok || !j.code || !link) {
-        setErr(j.error || t("配对码生成失败"));
-        return;
-      }
-      setPair({ code: j.code, display: j.display ?? j.code, url: link, expiresAt: j.expiresAt ?? "" });
-    } catch {
-      setErr(t("配对码生成失败")); // 网络层失败：给一句人话，细节在网络面板
+      setPair(await newShareCode());
+    } catch (e) {
+      setErr((e as Error).message || t("配对码生成失败"));
     } finally {
       setBusy(false);
     }
@@ -87,8 +47,8 @@ function OnlineBlock({ status }: { status: RelayStatusView }) {
     <div className="mt-2 space-y-1.5 text-xs">
       <div className="flex items-center gap-1">
         <span className="text-base-content/55">{t("我的中继地址")}</span>
-        <a href={status.url ?? "#"} target="_blank" rel="noreferrer" className="link link-hover min-w-0 truncate font-mono text-[12px]">{status.url}</a>
-        <CopyButton text={status.url ?? ""} label="复制" />
+        <a href={home ?? "#"} target="_blank" rel="noreferrer" className="link link-hover min-w-0 truncate font-mono text-[12px]">{home}</a>
+        <CopyButton text={home ?? ""} label="复制" />
       </div>
       <p className="leading-relaxed text-base-content/55">{t("手机 / 别的浏览器不装任何东西、不开 Tailscale 就能打开这个地址。")}</p>
       {!pair && (
@@ -97,7 +57,7 @@ function OnlineBlock({ status }: { status: RelayStatusView }) {
         </button>
       )}
       {err && <div className="text-error">{err}</div>}
-      {pair && <PairBlock pair={pair} busy={busy} onAgain={() => void newCode()} />}
+      {pair && <PairCodeCard key={pair.code} pair={pair} full busy={busy} onAgain={() => void newCode()} />}
     </div>
   );
 }

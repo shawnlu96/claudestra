@@ -5,6 +5,7 @@
  */
 import { isNativeShell, nativePlugin } from "@/lib/native";
 import { apnsRegister, markRead } from "@/lib/api/push";
+import { t } from "@/lib/i18n";
 
 type Listener = (ev: unknown) => void;
 interface PushPlugin {
@@ -84,7 +85,7 @@ export async function enableNativePush(): Promise<{ ok: boolean; msg: string }> 
     await p.register();
     return { ok: true, msg: "已开启:agent 回复时会推送到这台设备" };
   } catch (e) {
-    return { ok: false, msg: `开启失败:${(e as Error).message}` };
+    return { ok: false, msg: t("开启失败:{msg}", { msg: (e as Error).message }) };
   }
 }
 

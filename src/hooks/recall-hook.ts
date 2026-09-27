@@ -39,7 +39,8 @@ async function readHandoff(cwd: string): Promise<string> {
     const d = st.mtime;
     const pad = (n: number) => String(n).padStart(2, "0");
     const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    return `## HANDOFF · 上次会话交接(写于 ${when},${Math.floor(ageDays)} 天前)\n${text}`;
+    // 按目录共享、不分 agent：同目录的别的会话也会读到它，所以标明是历史参考
+    return `## HANDOFF · 上次会话交接(写于 ${when},${Math.floor(ageDays)} 天前;历史参考,先确认是否仍有效,别直接续旧任务)\n${text}`;
   } catch {
     return "";
   }

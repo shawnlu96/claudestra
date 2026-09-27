@@ -2,7 +2,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 // 字典集中在 lib/i18n-dict.ts（纯数据，中文原文 → 英文）
 import { DICT } from "./i18n-dict";
-import { putSettings } from "./api/settings";
+import { fillParams, type I18nParams } from "./i18n-fill";
 
 /**
  * 轻量 i18n（owner 2026-07-18「英文版 + 切换语言」）。
@@ -15,8 +15,11 @@ import { putSettings } from "./api/settings";
  * mount 后读 localStorage / navigator.language 再切换（two-pass）——首帧
  * 中文一闪，/chat 有 Splash 盖着无感。
  *
- * 动态消息：store / 异步回调里照旧塞中文串，渲染点包 t() 兜底翻译——
- * 已知整串命中字典即翻，带变量的在生成处按 getLang() 分支。
+ * 动态消息：store / 异步回调里照旧塞中文串，渲染点包 t() 兜底翻译——已知整串命中字典即翻。
+ * 带变量的整句进字典、变量写成 {name} 占位：t("证书剩 {n} 天", { n })。
+ *
+ * 界面语言只属于本设备，不写机器的 config.lang（Discord / launcher 通知用的那份）：
+ * 设备顺带写会变成「最后启动 / 最后切换的设备说了算」，guest 设备还会每次 403。
  */
 
 export type Lang = "zh" | "en";
@@ -37,13 +40,7 @@ export function setLang(l: Lang) {
   try {
     document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
   } catch {}
-  syncLang(l);
   subs.forEach((f) => f());
-}
-
-/** 同步落盘当前机器（fire-and-forget）：bridge 生成的带变量文案（转写失败 / 拦截提示等）跟随此偏好 */
-function syncLang(l: Lang) {
-  void putSettings({ lang: l }).catch(() => {}); // 机器离线 / 还没配对：偏好本地已生效，下次切换再同步
 }
 
 /** mount 后初始化：显式选择 > 系统语言 > zh。不落盘（跟随系统的用户换系统语言要跟着变）。 */
@@ -61,9 +58,6 @@ function initLang() {
     } catch {}
     subs.forEach((f) => f());
   }
-  // 把实际生效的语言同步到当前机器(幂等)——「跟随系统」推断出 en 时,机器若还停在默认 zh,文案会跟界面错位。
-  // 机器要等配置 + 清单就位（MachineGate）才有基址，这里晚一拍再发
-  setTimeout(() => syncLang(lang), 3000);
 }
 
 export function useLang(): Lang {
@@ -78,15 +72,13 @@ export function useLang(): Lang {
 }
 
 /** 纯函数翻译（store / 工具函数用）。组件渲染里用 useT() 保证切语言即时重渲。 */
-export function t(s: string): string {
-  if (lang === "zh") return s;
-  return DICT[s] ?? s;
+export function t(s: string, params?: I18nParams): string {
+  return fillParams(lang === "zh" ? s : (DICT[s] ?? s), params);
 }
 
 /** 指定语言翻译（不看全局语言）：导出文件的抬头等「界面之外」的文案按用户选的语言出。 */
-export function tIn(l: Lang, s: string): string {
-  if (l === "zh") return s;
-  return DICT[s] ?? s;
+export function tIn(l: Lang, s: string, params?: I18nParams): string {
+  return fillParams(l === "zh" ? s : (DICT[s] ?? s), params);
 }
 
 /** 组件用：订阅语言变化 + 返回 t。 */

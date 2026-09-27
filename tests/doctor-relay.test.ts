@@ -18,6 +18,12 @@ describe("doctor 的「中继」一项（relayChecks）", () => {
     expect(c.detail).toContain("https://mini.relay.example.com");
   });
 
+  test("连上且知道中继主机：报中继首页（路径模式），不报已废弃的子域名", () => {
+    const [c] = relayChecks({ enabled: true, connected: true, url: "https://mini.relay.example.com", base: "relay.example.com" }, G, NOW);
+    expect(c.detail).toContain("https://relay.example.com（");
+    expect(c.detail).not.toContain("mini.");
+  });
+
   test("配了没连上：warn，带状态、原因、几秒后重试与排查步骤", () => {
     const [c] = relayChecks({ enabled: true, connected: false, state: "offline", relayUrl: "wss://relay.example.com", lastError: "socket error", retryAt: NOW + 12_400 }, G, NOW);
     expect(c.status).toBe("warn");

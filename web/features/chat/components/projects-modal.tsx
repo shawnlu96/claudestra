@@ -68,7 +68,7 @@ function ProjectRow({
             <code className="shrink-0 rounded bg-base-content/10 px-1.5 py-0.5 text-[11px]">{proj.id}</code>
           )}
           <span className="ml-auto shrink-0 text-[11px] opacity-50">
-            {members.length} {t("个 agent")}
+            {t("{n} 个 agent", { n: members.length })}
           </span>
         </div>
         <div className="mt-0.5 truncate text-[11px] text-base-content/50">

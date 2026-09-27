@@ -3151,6 +3151,7 @@ switch (cmd) {
   case "list": await cmdList(); break;
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
   case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
+  case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 
   // v2.4.19+ 给现存 active agent 补发置顶 focus 公告（新建/恢复的自动发，这个
   // 是给"feature 上线前就在跑"的老 agent 用的一次性 backfill）
@@ -3504,12 +3505,11 @@ switch (cmd) {
   }
 
   case "install-hooks": {
-    // v2.21.5+ SessionStart 记忆召回 hook(~/mem0-mcp/recall.py + HANDOFF.md 注入)。
+    // SessionStart hook(HANDOFF.md 注入;有 ~/mem0-mcp/recall.py 时加 mem0 召回)。
     // setup / install-cli / update 都会顺手跑;这条给「只想挂/修 hook、不想动 daemon」的场合。
     const { ensureRecallHookInstalled } = await import("./lib/cli-install.js");
     const r = await ensureRecallHookInstalled(resolveBunPath(), REPO_ROOT);
-    output({ ok: true, recallHook: r.status, command: r.command,
-      note: r.status === "skipped" ? "本机没有 ~/mem0-mcp/recall.py,未注册(可设 MEM0_RECALL_SCRIPT)" : undefined });
+    output({ ok: true, recallHook: r.status, command: r.command });
     break;
   }
 
@@ -3596,6 +3596,7 @@ switch (cmd) {
         "tmux-help                       — print the tmux crash course (incl. iTerm2 -CC mode)",
         "doctor [--json]                 — health-check the whole install (runtime, config, daemons, bridge, MCP, agents)",
         "install-skills                  — symlink the repo's skills/ (save-compact …) into ~/.claude/skills (idempotent; update/install-cli run it too)",
+        "archive-workflows               — backfill Dynamic Workflow records (run JSON, scripts, journals) into the session archive (idempotent)",
         "migrate-web-state               — copy the old web BFF's settings.db tables + groqApiKey/lang into the bridge (tar backup of the web data dir first; idempotent)",
         "retire-web                      — unload + back up the old com.claudestra.web daemon (the bridge serves web/out now); refuses until BRIDGE_STATIC_DIR is served and migrate-web-state ran",
         "version                         — show the current version and whether an update is available",

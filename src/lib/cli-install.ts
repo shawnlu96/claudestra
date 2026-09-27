@@ -42,7 +42,8 @@ import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { resolveBunPath } from "./bun-path.js";
-import { ensureRecallHook, readClaudeSettings, recallAvailable, writeClaudeSettings } from "./session-recall.js";
+import { ensureRecallHook, readClaudeSettings, writeClaudeSettings } from "./session-recall.js";
+import { installRepoSkills } from "./skills-install.js";
 import { spawnSync } from "child_process";
 import { join, resolve, dirname } from "path";
 import { readActiveAgents } from "./registry.js";
@@ -117,8 +118,8 @@ export interface InstallCliResult {
   removedOldAutostartWrapper: boolean;
   /** Claude Code 的 ~/.claude/settings.json 里 typing-hook command 是否被迁移成 bun 绝对路径 */
   migratedHookCommand: boolean;
-  /** v2.21.5+ SessionStart 记忆召回 hook:installed=本次写入 / present=早就有 / skipped=本机没有 ~/mem0-mcp/recall.py */
-  recallHook?: "installed" | "present" | "skipped";
+  /** SessionStart hook(HANDOFF 注入 + 有 mem0 时的召回):installed=本次写入 / present=早就有 */
+  recallHook?: "installed" | "present";
   /** iTerm 的 TmuxDashboardLimit 是否被调高（默认 10 → 200），从 oldValue → 200。null = iTerm 没装跳过；undefined = 已经 ≥ 200 无需改 */
   bumpedTmuxDashboardLimit?: { from: number; to: number; needsITermRestart?: boolean } | null;
   /** ~/.claude/settings.json permissions.allow 加进去的 mcp__<server>__* wildcard 规则（已存在的不重加） */
@@ -559,13 +560,12 @@ async function stopLegacyPm2Daemons(): Promise<string[]> {
  * 替换为 bun **绝对路径**，幂等（已经是绝对路径就 no-op）。
  */
 /**
- * v2.21.5+ SessionStart 记忆召回 hook(lib/session-recall.ts):本机装了 ~/mem0-mcp/recall.py
- * 才注册,幂等——已有就只校正命令/matcher/timeout。setup / install-cli / update /
- * `manager install-hooks` 四处共用。
+ * SessionStart hook(lib/session-recall.ts):开场注入 HANDOFF.md,本机有 ~/mem0-mcp/recall.py 时再加 mem0 召回。
+ * 无条件注册——只在有 mem0 的机器上挂,别人的 HANDOFF 写了也永远没人读;hook 自己在没有 recall.py 时跳过那一段。
+ * 幂等——已有就只校正命令/matcher/timeout。setup / install-cli / update / `manager install-hooks` 四处共用。
  */
-export async function ensureRecallHookInstalled(bunPath: string, repoRoot: string): Promise<{ status: "installed" | "present" | "skipped"; command: string }> {
+export async function ensureRecallHookInstalled(bunPath: string, repoRoot: string): Promise<{ status: "installed" | "present"; command: string }> {
   const command = `${bunPath} ${resolve(repoRoot)}/src/hooks/recall-hook.ts`;
-  if (!recallAvailable()) return { status: "skipped", command };
   const settingsPath = `${homedir()}/.claude/settings.json`;
   // 解析失败会抛——宁可不挂 hook,也不能把 owner 的 settings.json 覆写成只剩我们一条
   const settings = await readClaudeSettings(settingsPath);
@@ -748,40 +748,6 @@ async function removeOldAutostartWrapper(): Promise<boolean> {
  * Idempotent —— 跑多次只是重写同一份文件 + 重新 load，无害。每次 update 走一次。
  */
 /**
- * v2.5.4+ 把 repo skills/ 下随包分发的 skill symlink 到 ~/.claude/skills/。
- * 用 symlink 而不是拷贝：update 后 skill 内容自动跟着 repo 走，无需重装。
- * 幂等规则：目标不存在或已是 symlink → (重)建指向本 repo；目标是用户自己的真实
- * 目录 → 不动（尊重用户自定义），记进 skipped。
- */
-async function installBundledSkills(repoRoot: string): Promise<{ linked: string[]; skipped: string[] }> {
-  const srcRoot = join(repoRoot, "skills");
-  const dstRoot = join(homedir(), ".claude", "skills");
-  const linked: string[] = [];
-  const skipped: string[] = [];
-  if (!existsSync(srcRoot)) return { linked, skipped };
-  const { readdir, lstat, rm } = await import("fs/promises");
-  await mkdir(dstRoot, { recursive: true });
-  for (const name of await readdir(srcRoot)) {
-    const src = join(srcRoot, name);
-    if (!existsSync(join(src, "SKILL.md"))) continue;
-    const dst = join(dstRoot, name);
-    try {
-      const st = await lstat(dst).catch(() => null);
-      if (st && !st.isSymbolicLink()) {
-        skipped.push(name); // 用户自己的同名 skill，不覆盖
-        continue;
-      }
-      if (st) await rm(dst); // 旧 symlink（可能指向老路径）→ 重建
-      await symlink(src, dst);
-      linked.push(name);
-    } catch {
-      skipped.push(name);
-    }
-  }
-  return { linked, skipped };
-}
-
-/**
  * 非 macOS 平台的替代方案提示：一个可直接抄用的 systemd user unit 模板。
  * 三个 daemon 只有入口脚本不同，故只给一份带占位的模板。
  */
@@ -910,8 +876,12 @@ export async function installClaudestraCli(
   try { result.allowedMcpTools = await ensureMcpToolsAllowed(repoRoot); }
   catch (e) { warnings.push(`allow mcp__*__* 工具: ${(e as Error).message}`); }
 
-  // 5e) repo skills/ 里的随包 skill → symlink 到 ~/.claude/skills/（save-compact 等）
-  try { result.bundledSkills = await installBundledSkills(repoRoot); }
+  // 5e) repo skills/ 里的随包 skill → symlink 到 ~/.claude/skills/（save-compact 等）。只动缺失 / 悬空 / 本仓库的软链，
+  //     指向别处的软链和用户自己的目录一律不碰（lib/skills-install.ts；以前这里另有一份会替换任意同名软链）
+  try {
+    const rs = installRepoSkills(repoRoot);
+    result.bundledSkills = { linked: rs.filter((r) => r.action !== "warn").map((r) => r.name), skipped: rs.filter((r) => r.action === "warn").map((r) => r.name) };
+  }
   catch (e) { warnings.push(`装 bundled skills: ${(e as Error).message}`); }
 
   // 6) bootstrap 新 plist

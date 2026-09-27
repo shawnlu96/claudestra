@@ -245,7 +245,7 @@ export function BgTaskPanel() {
           >
             <span className="text-success/70">✓</span>
             <span>
-              {done.length} {tr("个已完成")}
+              {tr("{n} 个已完成", { n: done.length })}
             </span>
             <span className="opacity-50">›</span>
           </button>

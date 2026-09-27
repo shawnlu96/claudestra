@@ -97,8 +97,8 @@ function EntryRow({ e }: { e: Entry }) {
         {e.certDaysLeft !== undefined && (
           <span className={certTone(e.certDaysLeft, e.certLifetimeDays)}>
             {e.certDaysLeft < 0
-              ? `${t("证书已过期")} ${Math.ceil(-e.certDaysLeft)} ${t("天")}`
-              : `${t("证书剩")} ${Math.floor(e.certDaysLeft)} ${t("天")}`}
+              ? t("证书已过期 {n} 天", { n: Math.ceil(-e.certDaysLeft) })
+              : t("证书剩 {n} 天", { n: Math.floor(e.certDaysLeft) })}
           </span>
         )}
         {!e.secure && <span>{t("语音输入 / 推送在明文地址下不可用")}</span>}
@@ -128,7 +128,8 @@ function PlanHint({ snap }: { snap: Snapshot }) {
     case "need-login":
       return box(
         <>
-          {t("Tailscale 已安装但没连上")}（{p.backendState || "?"}）。{t("打开 Tailscale 登录；macOS 首次还要在「系统设置」里允许系统扩展与 VPN 配置。")}
+          {t("Tailscale 已安装但没连上（{state}）。", { state: p.backendState || "?" })}
+          {t("打开 Tailscale 登录；macOS 首次还要在「系统设置」里允许系统扩展与 VPN 配置。")}
           {p.authUrl && (
             <div className="mt-1 flex items-center gap-2">
               <span className="truncate font-mono">{p.authUrl}</span>

@@ -36,7 +36,7 @@ function revokeBlobUrls(urls: string[]) {
 }
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
-import { getLang } from "@/lib/i18n";
+import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
 import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
@@ -680,7 +680,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           ? [{
               id: `sessdiv_${respSid}`,
               role: "system",
-              content: `⏮ 以上是更早的会话（${respSid.slice(0, 8)}）`,
+              content: tr("⏮ 以上是更早的会话（{sid}）", { sid: respSid.slice(0, 8) }),
               ts: msgs[msgs.length - 1]?.ts ?? new Date().toISOString(),
             } as ChatMessage]
           : [];

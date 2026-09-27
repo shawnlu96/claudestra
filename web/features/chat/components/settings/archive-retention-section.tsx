@@ -41,7 +41,7 @@ export function ArchiveRetentionSection() {
         >
           {[30, 90, 180, 365, 0].map((d) => (
             <option key={d} value={d}>
-              {d === 0 ? t("永不清理") : `${d} ${t("天")}`}
+              {d === 0 ? t("永不清理") : t("{n} 天", { n: d })}
             </option>
           ))}
         </select>
