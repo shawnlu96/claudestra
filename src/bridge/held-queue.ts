@@ -6,10 +6,9 @@
  *      值守让一轮能跑一两个小时，以前 30 分钟就扔会让同事的回复全丢（2026-09-28 codex 的 10 条复核就是这么没的）
  *   3. 出队在投出之后才落盘：投递中途崩溃，重启后会再投一次（至少一次；收件方看 message_id 去重）
  */
-import { existsSync } from "node:fs";
 import type { Envelope, LocalEndpoint } from "./router.js";
 import { statePath } from "../lib/paths.js";
-import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
+import { PersistedMap } from "./persisted-map.js";
 
 export interface HeldItem {
   env: Envelope;
@@ -21,60 +20,34 @@ export interface HeldItem {
 
 export const HELD_NOTIFY_MS = 30 * 60_000;
 export const HELD_GIVE_UP_MS = 24 * 3_600_000;
-const HELD_PATH = statePath("held-messages.json");
 
-/** ws 是进程内对象：落盘时剥掉，读回来是 undefined，投递前由调用方换成最新连接 */
-const dropWs = (key: string, value: unknown) => (key === "ws" ? undefined : value);
-const isQueueFile = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d)
-  && Object.values(d as object).every((q) => Array.isArray(q) && q.every((i) => i && typeof i === "object" && "env" in i && "to" in i));
+const isQueue = (q: unknown): boolean => Array.isArray(q) && q.every((i) => i && typeof i === "object" && "env" in i && "to" in i);
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
-export class HeldQueue extends Map<string, HeldItem[]> {
-  constructor(private readonly path: string | null = HELD_PATH) {
-    super();
-    if (!path || !existsSync(path)) return;
-    const r = readJsonStateSync(path, isQueueFile);
-    if (r.status !== "ok") {
-      console.error(`🚨 押后消息文件读不了（${r.status === "corrupt" ? r.error : r.status}），这次启动不恢复:`, path);
-      return;
-    }
-    for (const [ch, items] of Object.entries(r.data as Record<string, HeldItem[]>)) if (items.length) super.set(ch, items);
-    const n = [...super.values()].reduce((s, q) => s + q.length, 0);
+export class HeldQueue extends PersistedMap<HeldItem[]> {
+  constructor(path: string | null = statePath("held-messages.json")) {
+    super(path, "押后消息", isQueue);
+    for (const [ch, items] of [...this.entries()]) if (!items.length) this.deleteQuiet(ch);
+    const n = [...this.values()].reduce((s, q) => s + q.length, 0);
     if (n) console.log(`♻️ 恢复押后消息 ${n} 条（bridge 重启前没投出去的）`);
   }
 
   override set(channelId: string, items: HeldItem[]): this {
-    if (items.length) super.set(channelId, items);
-    else super.delete(channelId);
-    this.persist();
+    if (items.length) return super.set(channelId, items);
+    this.delete(channelId);
     return this;
-  }
-
-  override delete(channelId: string): boolean {
-    const had = super.delete(channelId);
-    if (had) this.persist();
-    return had;
   }
 
   /** 摘掉一条但先不落盘：调用方投出去之后再 persist()，投递中途崩溃时文件里还有它 */
   detach(channelId: string, item: HeldItem): void {
-    const rest = (super.get(channelId) ?? []).filter((i) => i !== item);
-    if (rest.length) super.set(channelId, rest);
-    else super.delete(channelId);
+    const rest = (this.get(channelId) ?? []).filter((i) => i !== item);
+    if (rest.length) this.setQuiet(channelId, rest);
+    else this.deleteQuiet(channelId);
   }
 
   /** 投递失败：放回队首 */
   restore(channelId: string, item: HeldItem): void {
-    this.set(channelId, [item, ...(super.get(channelId) ?? [])]);
-  }
-
-  persist(): void {
-    if (!this.path) return;
-    try {
-      writeJsonAtomicSync(this.path, JSON.parse(JSON.stringify(Object.fromEntries(this), dropWs)));
-    } catch (e) {
-      console.error("🚨 押后消息落盘失败（内存里还在，bridge 重启前不丢）:", (e as Error).message);
-    }
+    this.set(channelId, [item, ...(this.get(channelId) ?? [])]);
   }
 }
 
