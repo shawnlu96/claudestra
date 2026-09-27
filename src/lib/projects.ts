@@ -125,18 +125,15 @@ export function resolveProjectForDir(projects: ProjectDef[], dir: string): Proje
 }
 
 /**
- * create 显式 --project 时，目录不在这个 project 名下就记进去（台账 i08 1.3）：下次在这个目录建 agent 按目录也能归对。
- * 傘形根（家目录、/tmp、/）不记——记了会把底下所有目录都吸进来。仓库外的链接 worktree（/tmp、scratchpad 下）也不记：
- * 用完即删，记了就在 dirs 里永久留一条死路径；它归哪个 project 按主仓就能认出来。返回是否改了。
+ * 目录没被任何 project 覆盖时，看以前在这个目录（精确路径）建过的 agent 被显式分到了哪个 project：只有一个、且那个 project
+ * 还在，就沿用。显式 --project 只绑定 agent、不改 project 的目录清单——自动追加会把外部审查仓、临时 clone、已属别的
+ * project 的目录永久并进来（codex 2026-09-28 复核；#94 曾这样做，已撤回）。
  */
-export function addDirIfUncovered(p: ProjectDef, dir: string, mainOf: (dir: string) => string | null = gitMainWorktree): boolean {
-  const d = normalizeDir(dir);
-  if (!d || isUmbrellaDir(d) || resolveProjectForDir([p], d)) return false;
-  const main = mainOf(d);
-  const [rd, rm] = [realOr(d), main ? realOr(normalizeDir(main)) : ""];
-  if (rm && rd !== rm && !rd.startsWith(`${rm}/`)) return false;
-  p.dirs = [...p.dirs, d];
-  return true;
+export function projectFromAssignments(projects: ProjectDef[], agents: { cwd?: string; projectId?: string }[], dir: string): ProjectDef | null {
+  const d = realOr(normalizeDir(dir));
+  const ids = new Set(agents.filter((a) => a.projectId && a.cwd && realOr(normalizeDir(a.cwd)) === d).map((a) => a.projectId!));
+  const hits = projects.filter((p) => ids.has(p.id));
+  return ids.size === 1 && hits.length === 1 ? hits[0] : null;
 }
 
 /**

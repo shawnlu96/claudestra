@@ -92,7 +92,7 @@ import {
   readProjects,
   writeProjects,
   resolveProjectForDirOrMain,
-  addDirIfUncovered,
+  projectFromAssignments,
   slugifyProjectId,
   normalizeDir,
   isMisfiledByUmbrella,
@@ -394,10 +394,10 @@ async function resolveOrCreateProject(
         error: `project "${explicitId}" 不存在。先 project-add,或省略 --project 按目录自动归属。已有: ${data.projects.map((x) => x.id).join(", ") || "(无)"}`,
       };
     }
-    if (addDirIfUncovered(p, dir)) await writeProjects(data); // 显式指定且目录不在它名下：记进去，下次按目录也能归对
-    return { project: p, created: false };
+    return { project: p, created: false }; // 只绑定 agent，不改 project 的目录清单（lib/projects.ts projectFromAssignments）
   }
-  const hit = resolveProjectForDirOrMain(data.projects, dir); // worktree 归主仓的 project
+  // worktree 归主仓的 project；都不中再看这个目录以前的 agent 被显式分到哪个 project
+  const hit = resolveProjectForDirOrMain(data.projects, dir) ?? projectFromAssignments(data.projects, Object.values((await loadRegistry()).agents), dir);
   if (hit) return { project: hit, created: false };
   const nd = normalizeDir(dir);
   const base = nd.split("/").filter(Boolean).pop() || "proj";
