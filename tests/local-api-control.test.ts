@@ -49,9 +49,12 @@ describe("relay 端点（进程里没有中继连接）", () => {
       expect(typeof j.pairingCodes).toBe("number");
     }
   });
-  test("POST /relay/pair：没连上中继 → 409，体里说明原因", async () => {
+  test("POST /relay/pair：没连上中继也能签（直托管入口配对）——没有链接与中继名字，只有短码 / fragment / grant", async () => {
     const res = (await call("POST", "/api/v1/relay/pair", OWNER, { agents: ["worker"], terminal: false }))!;
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ ok: false, connected: false });
+    expect(res.status).toBe(200);
+    const j = (await res.json()) as Record<string, unknown>;
+    expect(j).toMatchObject({ ok: true, link: null, url: null, base: null, grant: { agents: ["worker"], terminal: false, manage: true } });
+    expect(String(j.display)).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    expect(String(j.fragment)).toMatch(/^[0-9a-f]{4}(-[0-9a-f]{4}){3}\./);
   });
 });

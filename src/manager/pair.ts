@@ -1,5 +1,5 @@
 /**
- * `claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--json]`（docs/design-hosted-frontend.md §4）：
+ * `claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--url <入口地址>] [--json]`（docs/design-hosted-frontend.md §4）：
  * 让 bridge 签一组配对码，打印二维码 / 链接 / 短码，并**明确打印这条凭据的 grant**（默认全权：所有 agent + master + 终端 + 管理；
  * --guest 给别人的设备：独立身份、不含 master、无终端、无管理）。手输短码的设备会进「待确认」：这里轮询并提示 Y/n，
  * 生成码的人就在 Mac 前，点头才发凭据。扫码 / 点链接走挑战应答，不需要确认——码被消费掉即视为配好。
@@ -10,7 +10,7 @@ import type { Grant } from "../lib/devices.js";
 import { output } from "./core.js";
 
 interface PairInfo {
-  ok: boolean; code: string; display: string; url: string; link: string; base: string; slug: string; fp: string;
+  ok: boolean; code: string; display: string; fragment: string; url: string | null; link: string | null; base: string | null; slug: string | null; fp: string;
   grant: Grant; guest?: string; expiresAt: string; error?: string;
 }
 interface Approval { id: string; code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string }
@@ -25,10 +25,12 @@ function flagValue(args: string[], name: string): string | undefined {
 export function parsePairArgs(args: string[]): { body: Record<string, unknown>; json: boolean } {
   const agents = flagValue(args, "--agents");
   const guest = flagValue(args, "--guest");
+  const url = flagValue(args, "--url");
   return {
     json: args.includes("--json"),
     body: {
       ...(agents ? { agents: agents.split(",").map((s) => s.trim()).filter(Boolean) } : {}),
+      ...(url ? { url } : {}),
       ...(args.includes("--no-terminal") ? { terminal: false } : {}),
       ...(args.includes("--no-manage") ? { manage: false } : {}),
       ...(guest ? { guest } : {}),
@@ -59,12 +61,14 @@ export async function cmdPair(args: string[]): Promise<void> {
     return output({ ok: false, error: info.error ?? "无法签发配对码", hint: "在仓库根 .env 写 RELAY_URL=wss://<中继地址>（可选 RELAY_NAME=<子域名标签>），重启 bridge 后再跑 pair" });
   }
   if (json) return output({ ...info });
-  const qr = await qrToString(info.url, { type: "terminal", small: true }).catch(() => ""); // 终端不支持时只少一张二维码，链接与短码照给
+  const qr = info.link ? await qrToString(info.link, { type: "terminal", small: true }).catch(() => "") : ""; // 终端不支持时只少一张二维码，链接与短码照给
+  const where = info.base ? `在 https://${info.base} 输入短码` : "在你打开这台机器网页的地方（http://<局域网 IP>:<bridge 端口>/ 或 Tailscale 地址）进入配对页输入短码";
   const lines = [
-    `用手机相机扫码，或在任何浏览器打开下面的链接，或在 https://${info.base} 输入短码——三选一：`, "", qr.trimEnd(), "",
-    `链接：${info.url}`, `短码：${info.display}`, "",
+    info.link ? `用手机相机扫码，或在任何浏览器打开下面的链接，或${where}——三选一：` : `没连中继：${where}；要二维码 / 链接请加 --url <入口地址>`,
+    "", qr.trimEnd(), "",
+    ...(info.link ? [`链接：${info.link}`] : [`手动进配对页时也可直接打开 <入口地址>/pair#${info.fragment}`]), `短码：${info.display}`, "",
     `这条凭据的权限——${describeGrant(info.grant, info.guest)}`, `（缩小范围：--agents a,b  --no-terminal  --no-manage；给别人：--guest 名字）`, "",
-    `这台机器的网页：https://${info.slug}.${info.base}`, `${new Date(info.expiresAt).toLocaleTimeString()} 前有效，只能用一次。`,
+    ...(info.base ? [`这台机器在中继上的名字：${info.slug}（旧版网页：${info.url}）`] : []), `${new Date(info.expiresAt).toLocaleTimeString()} 前有效，只能用一次。`,
   ];
   process.stdout.write(lines.join("\n") + "\n"); // 人看的命令，bridge 从不调它（要机器可读加 --json）
   if (process.stdin.isTTY) await waitForApproval(info);
