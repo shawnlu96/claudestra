@@ -124,16 +124,29 @@ export function piSubagentDir(cwd: string, sessionId: string, agentDir = piAgent
 
 type AnyRecord = Record<string, any>;
 
-/** Pi 的 usage → Claude Code 的 usage 字段名（下游的用量统计认后者） */
+/**
+ * Pi 的 usage → Claude Code 的 usage 字段名（下游的用量统计认后者）。
+ * `usage.cost` 是 Pi 按它自己的模型价目表算出的费用——「运行时报告的费用」，不是账单实付；
+ * 放进 runtime_reported_cost_usd 带下去，统计时与按牌价估算的钱分开记（agent-stats）。
+ */
 export function piUsageToClaude(usage: AnyRecord | undefined): AnyRecord | undefined {
   if (!usage || typeof usage !== "object") return undefined;
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-  return {
+  const out: AnyRecord = {
     input_tokens: num(usage.input),
     output_tokens: num(usage.output),
     cache_read_input_tokens: num(usage.cacheRead),
     cache_creation_input_tokens: num(usage.cacheWrite),
   };
+  const cost = piReportedCost(usage.cost);
+  if (cost !== null) out.runtime_reported_cost_usd = cost;
+  return out;
+}
+
+/** Pi 的 cost 是 `{input, output, cacheRead, cacheWrite, total}`（美元）；也认裸数字。认不出 → null（不记这笔） */
+function piReportedCost(cost: unknown): number | null {
+  const v = cost && typeof cost === "object" ? (cost as AnyRecord).total : cost;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
 

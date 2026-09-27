@@ -21,6 +21,8 @@
  * 「给一个只读来源建 agent」这种事——而不是等到运行时报一句看不懂的错。
  */
 
+import type { StatsWindowScanner } from "../agent-stats.js";
+
 export type AnyRecord = Record<string, any>;
 
 /** 会话列表里的一条（三种来源统一成这个形状） */
@@ -83,6 +85,12 @@ export interface SessionSourceAdapter {
    * 就是无状态的，调用方直接用它。
    */
   newTranslator?(): (line: string) => AnyRecord | null;
+
+  /**
+   * 用量统计的尾读窗口扫描（今日 / 本周 token、上下文、模型）。不实现 = 翻译后按 Claude Code 的
+   * assistant.usage 逐条累加；只有累计计数器的格式（Codex 的 token_count）要按文件顺序做差，自己扫。
+   */
+  readonly scanStatsWindow?: StatsWindowScanner;
 }
 
 // ── 生命周期层 ─────────────────────────────────────────────────────────

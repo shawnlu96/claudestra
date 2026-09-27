@@ -35,12 +35,8 @@ import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "
 import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
-import {
-  computeAgentStats,
-  formatTokens,
-  type AgentStat,
-  type AgentLike,
-} from "../lib/agent-stats.js";
+import { computeAgentStats, formatTokens, type AgentStat, type AgentLike } from "../lib/agent-stats.js";
+import { withCodexQuota, type CodexQuotaObservation } from "../lib/codex-usage.js";
 
 const DASHBOARD_CHANNEL_NAME = "📊-claudestra-stats";
 const ACCOUNT_TTL_MS = 3 * 60 * 1000; // 账号级 %，慢变化，3min 才重抓
@@ -65,6 +61,8 @@ export interface StatsSnapshot {
   global: AccountUsage | null;
   agents: AgentStat[];
   updatedAt: number;
+  /** Claude 之外的额度卡（目前只有「最近一次 Codex 会话看到的额度」）；没有就是空数组 */
+  quotas?: CodexQuotaObservation[];
 }
 
 // ── 账号级 /status 抓取 ────────────────────────────────────────────────
@@ -471,7 +469,7 @@ export async function buildSnapshot(blockGauge = true): Promise<StatsSnapshot> {
     getAccountUsage(blockGauge),
   ]);
   agents.sort((a, b) => b.contextTokens - a.contextTokens);
-  return { global, agents, updatedAt: Date.now() };
+  return withCodexQuota({ global, agents, updatedAt: Date.now() });
 }
 
 // ── Discord 渲染 ───────────────────────────────────────────────────────

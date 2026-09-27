@@ -16,9 +16,15 @@
  * 是纯函数、可单测。哪天中间层出现，删掉 translate 即可。
  */
 
+import type { StatsWindowScanner } from "./agent-stats.js";
 import { sourceFor, sourceIdForPath } from "./runtimes/index.js";
 
 type AnyRecord = Record<string, any>;
+
+/** 这种运行时自带的用量扫描器；null = 按翻译后的 assistant.usage 逐条累加（agent-stats 的默认路径） */
+export function statsScannerFor(runtime: string | undefined): StatsWindowScanner | null {
+  return sourceFor(runtime).scanStatsWindow ?? null;
+}
 
 /**
  * 定位 agent 当前会话的记录文件。**找不到返回 null** —— Pi 与 Codex 的文件名都带

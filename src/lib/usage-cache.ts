@@ -141,15 +141,23 @@ export function readSessionCtx(sessionId: string, path = USAGE_CACHE_PATH): Sess
  */
 export function deriveStaleUsage(c: CachedUsage, nowMs: number): CachedUsage {
   const out = { ...c };
-  if (out.sessionResetsAtMs !== null && nowMs >= out.sessionResetsAtMs) {
+  if (resetPassed(out.sessionResetsAtMs, nowMs)) {
     out.sessionPct = out.sessionPct === null ? null : 0;
     out.sessionResets = "";
     out.sessionResetsAtMs = null;
   }
-  if (out.weekResetsAtMs !== null && nowMs >= out.weekResetsAtMs) {
+  if (resetPassed(out.weekResetsAtMs, nowMs)) {
     out.weekPct = out.weekPct === null ? null : 0;
     out.weekResets = "";
     out.weekResetsAtMs = null;
   }
   return out;
+}
+
+/**
+ * 额度窗口的重置时刻是否已过——Claude 的陈旧推算与 Codex 额度卡共用这一条判据
+ * （时刻未知 = 判不出来，按「没过」处理，调用方照常显示观测值）。
+ */
+export function resetPassed(resetsAtMs: number | null, nowMs: number): boolean {
+  return resetsAtMs !== null && nowMs >= resetsAtMs;
 }

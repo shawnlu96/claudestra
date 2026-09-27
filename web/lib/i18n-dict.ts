@@ -363,9 +363,28 @@ export const DICT: Record<string, string> = {
   "本周全机用量": "This week (all agents)",
   "成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计":
     "Cost estimated at API list prices (subscriptions aren't billed this way) · active agents combined",
-  "账号用量抓取于": "Account usage scraped",
-  "⚠️ 数据偏旧": "⚠️ may be stale",
+  "数据偏旧": "may be stale",
   "各会话上下文占用": "Context usage by session",
+  "Claude 订阅额度": "Claude subscription quota",
+  "最近一次 Codex 会话看到的额度": "Quota seen in the latest Codex session",
+  "已过重置时间，待刷新": "Past reset time, awaiting refresh",
+  "来源：Claude Code 状态栏": "Source: Claude Code status line",
+  "来源：Claude Code 状态栏（已停写，过了重置时间的窗口按 0% 推算）":
+    "Source: Claude Code status line (no longer updating; windows past their reset are estimated at 0%)",
+  "来源：/status 面板抓取": "Source: scraped from the /status panel",
+  "来源：Codex 会话记录": "Source: Codex session log",
+  "账号用量": "Account usage",
+  "已撞到限额": "Limit reached",
+  "Credits 余额": "Credits balance",
+  "不限": "unlimited",
+  "token 与花费": "Tokens & cost",
+  "今日": "Today",
+  "本周": "This week",
+  "全机合计": "All agents",
+  "运行时报告的费用": "Runtime-reported cost",
+  "「—」= 没有牌价可折算（如 Codex 的模型）": "“—” = no list price to estimate with (e.g. Codex models)",
+  "运行时报告的费用：Pi 会话记录里的 usage.cost，是 Pi 按自己的价目表算的，不是账单；与牌价折算分开记":
+    "Runtime-reported cost: usage.cost from Pi's session log, computed by Pi from its own price table — not a bill; kept separate from the list-price estimate",
 
   // ── Agent 管理面板 / 新建 / 清空 ──────────────────────
   "Agent 管理": "Manage Agents",

@@ -18,6 +18,7 @@ import {
   findSessionJsonlBySessionId,
   runtimeForSessionPath,
   sessionJsonlPath,
+  statsScannerFor,
   translateSessionLine,
 } from "./session-source.js";
 import { readSessionCtx } from "./usage-cache.js";
@@ -27,6 +28,15 @@ export interface UsageWindow {
   requests: number;
   /** 按 API 牌价折算的成本（USD）。订阅制不按此扣费，仅供参考。 */
   costUsd: number;
+  /**
+   * 运行时报告的费用（USD，目前只有 Pi 在会话记录里写 usage.cost）。带了它的记录不再按
+   * 牌价折算进 costUsd——两种钱互不重叠，前端分开显示；老前端只读 costUsd，不受影响。
+   */
+  reportedCostUsd: number;
+}
+
+function emptyUsageWindow(): UsageWindow {
+  return { tokens: 0, requests: 0, costUsd: 0, reportedCostUsd: 0 };
 }
 
 /**
@@ -77,7 +87,7 @@ export interface AgentStat {
   today: UsageWindow;
   week: UsageWindow;
   jsonl: string | null;
-  /** v2.23+ 运行时（claude-code | pi）：用量看板按它分开看——两者窗口/计费口径不同 */
+  /** 运行时（claude-code | codex | pi）：用量看板按它分行——各家窗口/计费口径不同 */
   runtime: string;
 }
 
@@ -120,14 +130,31 @@ export function weekStartTs(now = new Date()): number {
   return d.getTime();
 }
 
-interface FileStats {
+export interface FileStats {
   contextTokens: number;
   contextEstimated: boolean;
   today: UsageWindow;
   week: UsageWindow;
   /** 最后一条 assistant 实际用的 model（真相），可能跟 registry 钉的不一样 */
   model: string;
+  /** 会话记录自带的上下文窗口（Codex 的 model_context_window）；没有 = 用 statusline 缓存或 1M */
+  contextWindow?: number | null;
 }
+
+function emptyFileStats(): FileStats {
+  return { contextTokens: 0, contextEstimated: false, today: emptyUsageWindow(), week: emptyUsageWindow(), model: "" };
+}
+
+/**
+ * 一个尾读窗口 → 统计。`fromFileStart` = 窗口从文件第一字节开始（累计计数器可从 0 起算）；
+ * `oldestTs` 由扫描器自己定义「窗口已回溯到哪」，readFileStats 据此决定要不要扩窗。
+ */
+export type StatsWindowScanner = (
+  lines: string[],
+  dayTs: number,
+  weekTs: number,
+  fromFileStart: boolean,
+) => { stats: FileStats; oldestTs: number };
 
 const fileCache = new Map<string, { key: string; stats: FileStats }>();
 
@@ -152,8 +179,8 @@ export function scanStatsWindow(
   /** v2.23+ 会话 runtime；由 readFileStats 按路径判定**一次**传入，别在每行里重算 */
   runtime?: string,
 ): { stats: FileStats; oldestTs: number } {
-  const today: UsageWindow = { tokens: 0, requests: 0, costUsd: 0 };
-  const week: UsageWindow = { tokens: 0, requests: 0, costUsd: 0 };
+  const today = emptyUsageWindow();
+  const week = emptyUsageWindow();
   let contextTokens = 0;
   let contextEstimated = false;
   let model = "";
@@ -209,15 +236,15 @@ export function scanStatsWindow(
       Number(u.cache_creation_input_tokens || 0) +
       Number(u.cache_read_input_tokens || 0) +
       Number(u.output_tokens || 0);
-    // 折算成本按**该条记录自己的 model** 计价——会话中途换过模型的历史各按各价
-    const cost = costOfUsage(String(rec?.message?.model || ""), u);
-    week.tokens += tok;
-    week.requests += 1;
-    week.costUsd += cost;
-    if (ts >= dayTs) {
-      today.tokens += tok;
-      today.requests += 1;
-      today.costUsd += cost;
+    // 折算成本按**该条记录自己的 model** 计价——会话中途换过模型的历史各按各价；
+    // 运行时自己报了费用（Pi）就记那一笔，不再按牌价估一遍（两种钱不重叠）
+    const reported = typeof u.runtime_reported_cost_usd === "number" ? u.runtime_reported_cost_usd : null;
+    const cost = reported === null ? costOfUsage(String(rec?.message?.model || ""), u) : 0;
+    for (const w of ts >= dayTs ? [week, today] : [week]) {
+      w.tokens += tok;
+      w.requests += 1;
+      w.costUsd += cost;
+      w.reportedCostUsd += reported ?? 0;
     }
   }
   return { stats: { contextTokens, contextEstimated, today, week, model }, oldestTs };
@@ -229,13 +256,7 @@ export async function readFileStats(
   /** 尾读起始窗口；单测可调小来在小 fixture 上验扩窗路径（与 readSessionHistory 的 maxFullReadBytes 同约定） */
   opts: { tailStartBytes?: number } = {},
 ): Promise<FileStats> {
-  const empty: FileStats = {
-    contextTokens: 0,
-    contextEstimated: false,
-    today: { tokens: 0, requests: 0, costUsd: 0 },
-    week: { tokens: 0, requests: 0, costUsd: 0 },
-    model: "",
-  };
+  const empty = emptyFileStats();
   if (!existsSync(path)) return empty;
   const dayTs = dayStartTs();
   const weekTs = weekStartTs();
@@ -263,13 +284,15 @@ export async function readFileStats(
   // ⚠ 为什么不在反向扫描里遇到 `ts < weekTs` 就 break：sidechain / tool_result 这类记录
   // 可能轻微乱序，提前 break 会少算用量。判断「整窗最早」对乱序免疫，而窗口本来就小。
   const runtime = runtimeForSessionPath(path);
+  // 只有累计计数器的运行时（Codex）自带扫描器；其余按 assistant.usage 逐条累加
+  const scan: StatsWindowScanner = statsScannerFor(runtime) ?? ((l, d, w) => scanStatsWindow(l, d, w, runtime));
   let win = Math.max(1, opts.tailStartBytes ?? STATS_TAIL_START_BYTES);
   for (;;) {
     const cut = Math.max(0, size - win);
     // slice 从半行中间起头：截断的首行 JSON.parse 会失败 → 被 catch 丢掉，天然安全，
     // 不需要额外对齐到行首。
     const lines = (await Bun.file(path).slice(cut).text()).split("\n");
-    const { stats, oldestTs } = scanStatsWindow(lines, dayTs, weekTs, runtime);
+    const { stats, oldestTs } = scan(lines, dayTs, weekTs, cut === 0);
     if (oldestTs < weekTs || cut === 0 || win >= STATS_TAIL_MAX_BYTES) {
       fileCache.set(path, { key, stats });
       return stats;
@@ -295,9 +318,7 @@ export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[
   for (const a of agents) {
     if (a.status && a.status !== "active") continue;
     const jsonl = resolveJsonl(a);
-    const fs = jsonl
-      ? await readFileStats(jsonl)
-      : { contextTokens: 0, contextEstimated: false, today: { tokens: 0, requests: 0, costUsd: 0 }, week: { tokens: 0, requests: 0, costUsd: 0 }, model: "" };
+    const fs = jsonl ? await readFileStats(jsonl) : emptyFileStats();
     out.push({
       name: a.name,
       channelId: a.channelId || "",
@@ -314,7 +335,7 @@ export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[
       // 假到没法看)。缓存没有该 session → 退回 1M 天花板,行为如旧。
       contextPct: (() => {
         const ctx = a.sessionId ? readSessionCtx(a.sessionId) : null;
-        const ceiling = ctx && ctx.window > 0 ? ctx.window : CONTEXT_CEILING;
+        const ceiling = ctx && ctx.window > 0 ? ctx.window : fs.contextWindow || CONTEXT_CEILING;
         return Math.min(100, Math.round((fs.contextTokens / ceiling) * 100));
       })(),
       contextEstimated: fs.contextEstimated,

@@ -104,14 +104,25 @@ Base URL: `http://127.0.0.1:3847` (changeable via `BRIDGE_PORT`).
     "raw": "...(verbatim text of the /status panel)..."
   },
   "agents": [{
-    "name": "agent-x", "contextTokens": 239000, "contextEstimated": false,
+    "name": "agent-x", "runtime": "claude-code",   // claude-code | codex | pi
+    "contextTokens": 239000, "contextEstimated": false,
     "model": "claude-fable-5-1",
-    "today": {"tokens": 85000000, "requests": 12}, "week": {...}
+    "today": {"tokens": 85000000, "requests": 12, "costUsd": 51.2, "reportedCostUsd": 0}, "week": {...}
+  }],
+  "quotas": [{   // quota cards besides Claude; [] on machines without Codex rollouts, absent on older bridges
+    "source": "codex-rollout", "plan": "plus",
+    "windows": [{"id": "5h", "windowMinutes": 300, "pct": 67, "resets": "9/28 08:41",
+                 "resetsAtMs": 1790552469000, "resetPassed": false}, {"id": "7d", ...}],
+    "credits": {"hasCredits": false, "unlimited": false, "balance": "0"}, "limitReached": null,
+    "observedAt": 1790538161066, "sessionId": "01a0d336-…", "cwd": "/…", "agent": "agent-codex"
   }]
 }
 ```
 
 - `contextEstimated: true` = this agent just finished a compact and hasn't had a new turn yet, so the context number is an estimate (render it as `~239K (just compacted)`).
+- Two kinds of money that never overlap: `costUsd` is estimated at API list prices (0 for models without a list price, e.g. Codex); `reportedCostUsd` is the runtime-reported cost (today only Pi's `usage.cost`, which Pi computes from its own price table — not a bill). Records that carry it are not counted in `costUsd`.
+- Codex tokens are deltas of the cumulative `token_count.total_token_usage` in the rollout (counter restarts, duplicate records and truncated windows are handled); compaction requests never reach that counter, so the total runs slightly below the `token_usage_record` sum.
+- `quotas` is the quota **seen in the latest Codex session**: rollouts carry no account identity, so it does not stand for every Codex agent — show which session and when. `resetPassed: true` = the reset time has passed and `pct` is the previous window's value; show "awaiting refresh", not 0%.
 - `sessionResets` is verbatim text from the upstream `/status` panel, and **we have observed upstream printing 5pm as 5am**. The constraint for spotting a suspicious value: a 5h window's reset must fall within `scrapedAt + 5h`. What the Discord dashboard does is display it as-is and add a ⚠️ when the constraint is violated (do not try to be clever and correct it — see commit `7c45f38` for that lesson).
 
 ## 6. History API in detail (the main data source for the conversation view)

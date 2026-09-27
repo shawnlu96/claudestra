@@ -1,59 +1,20 @@
 "use client";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CenteredModal } from "./centered-modal";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
-import { getLang, t, useT } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./runtime-badge";
 import { stats } from "@/lib/api/system";
+import { Bar, ClaudeQuotaCard, CodexQuotaCard, UsageTable, type GlobalStats } from "./quota-cards";
+import { codexQuotas, type QuotaView, type StatAgent } from "../usage-view";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
- * 顶部 = 全局订阅用量(Bridge /stats);列表 = 各 agent 上下文占用条
- * (200k 参考刻度)+ 忙碌态 + 最后对话时间。侧栏 📊 进入,portal 到 body。
+ * 顶部 = 额度卡（Claude 订阅 + 最近一次 Codex 会话看到的）与按 runtime 分行的 token / 花费
+ * (Bridge /stats);列表 = 各 agent 上下文占用条 + 忙碌态 + 最后对话时间。侧栏 📊 进入,portal 到 body。
  */
-
-interface GlobalStats {
-  sessionPct?: number;
-  sessionResets?: string;
-  weekPct?: number;
-  weekResets?: string;
-  totalCost?: string;
-  /** 账号 gauge 抓取时刻——不标年龄用户会把旧缓存当实时（owner 2026-07-14「停在 15%」） */
-  scrapedAt?: number;
-}
-
-function fmtAge(ts: number): string {
-  const ms = Date.now() - ts;
-  if (ms < 90_000) return t("刚刚");
-  if (ms < 3_600_000)
-    return getLang() === "en" ? `${Math.round(ms / 60_000)} min ago` : `${Math.round(ms / 60_000)} 分钟前`;
-  return getLang() === "en" ? `${(ms / 3_600_000).toFixed(1)} h ago` : `${(ms / 3_600_000).toFixed(1)} 小时前`;
-}
-
-function Bar({ pct, tone }: { pct: number; tone: string }) {
-  return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-base-content/10">
-      <div className={`h-full rounded-full ${tone}`} style={{ width: `${Math.min(100, pct)}%` }} />
-    </div>
-  );
-}
-
-/** bridge /stats agents 项（只取本面板要用的字段） */
-interface StatAgent {
-  name: string;
-  today?: { tokens: number; costUsd?: number };
-  week?: { tokens: number; costUsd?: number };
-  /** v2.23+ claude-code | pi（用量按 runtime 分开看） */
-  runtime?: string | null;
-}
-
-function fmtTok(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1000)}k`;
-  return String(n);
-}
 
 // 相对时间与侧栏列表统一口径(x秒前/x分钟前/x小时x分前/x天前)
 const fmtRel = fmtAgo;
@@ -64,6 +25,8 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const agents = useChatStore((s) => s.state.agents);
   const [g, setG] = useState<GlobalStats | null>(null);
   const [statAgents, setStatAgents] = useState<StatAgent[]>([]);
+  // 老 bridge 没有 quotas 字段 → 空数组，不画 Codex 卡
+  const [quotas, setQuotas] = useState<QuotaView[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   // 冷启动自动补拉只试一次/每次打开(openRef 防面板已关还在拉)
   const retriedRef = useRef(false);
@@ -78,10 +41,11 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
     // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
     // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
     store.refreshAgents();
-    stats<{ global?: GlobalStats; agents?: StatAgent[] }>(force)
+    stats<{ global?: GlobalStats; agents?: StatAgent[]; quotas?: unknown }>(force)
       .then((j) => {
         setG(j.global ?? null);
         setStatAgents(Array.isArray(j.agents) ? j.agents : []);
+        setQuotas(codexQuotas(j.quotas));
         // bridge 刚重启时账号 gauge 缓存为空——本次请求已在服务端触发后台抓取,
         // ~6.5s 后静默重拉补上,不用用户手点刷新
         if (!j.global && !retriedRef.current) {
@@ -152,85 +116,17 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5">
           {/* 账号 gauge 还没到手(bridge 冷启动首抓中)——给占位而不是整块消失 */}
           {!g && (
-            <div className="mb-4 rounded-xl bg-base-200 p-3.5 text-xs text-base-content/50">
+            <div className="mb-3 rounded-xl bg-base-200 p-3.5 text-xs text-base-content/50">
               {t("账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓")}
             </div>
           )}
-          {/* 全局订阅用量 */}
-          {g && (
-            <div className="mb-4 space-y-3 rounded-xl bg-base-200 p-3.5">
-              <div>
-                <div className="mb-1 flex justify-between text-xs">
-                  <span className="text-base-content/60">{t("本时段用量")}</span>
-                  <span className="font-mono tabular-nums">
-                    {g.sessionPct ?? "?"}%
-                    {g.sessionResets && <span className="ml-1.5 opacity-50">{t("重置")} {g.sessionResets}</span>}
-                  </span>
-                </div>
-                <Bar pct={g.sessionPct ?? 0} tone={(g.sessionPct ?? 0) >= 80 ? "bg-error" : "bg-primary"} />
-              </div>
-              <div>
-                <div className="mb-1 flex justify-between text-xs">
-                  <span className="text-base-content/60">{t("本周用量")}</span>
-                  <span className="font-mono tabular-nums">
-                    {g.weekPct ?? "?"}%
-                    {g.weekResets && <span className="ml-1.5 opacity-50">{t("重置")} {g.weekResets}</span>}
-                  </span>
-                </div>
-                <Bar pct={g.weekPct ?? 0} tone={(g.weekPct ?? 0) >= 80 ? "bg-error" : "bg-primary"} />
-              </div>
-              {/* 全机折算成本（owner 2026-07-14 点选替换掉误导性的「累计成本」——
-                  旧值是被借去抓 /status 的那个窗口单会话的数）：Σ 所有活跃 agent
-                  的今日/本周 token × 各模型 API 牌价。订阅制不按此扣费,仅参考。 */}
-              {statAgents.length > 0 && (() => {
-                // v2.23+ 用量分开看（owner 2026-09-14）：Pi 与 Claude Code 的窗口/计费
-                // 口径不同（Pi 走 cc-switch 网关，不吃订阅额度），混着看等于互相淹没。
-                const isPi = (a: StatAgent) => a.runtime === "pi";
-                const piList = statAgents.filter(isPi);
-                // 没有 Pi agent 时不显示 Pi 那一行（没装 Pi 的用户不该看到空分组）
-                const groups: { label: string; list: StatAgent[] }[] = [
-                  { label: t("全机合计"), list: statAgents },
-                  ...(piList.length > 0
-                    ? [
-                        { label: "Claude Code", list: statAgents.filter((a) => !isPi(a)) },
-                        { label: "Pi", list: piList },
-                      ]
-                    : []),
-                ];
-                const sum = (l: StatAgent[], pick: (a: StatAgent) => number) =>
-                  l.reduce((s, a) => s + pick(a), 0);
-                const cell = (l: StatAgent[], win: "today" | "week") =>
-                  `${fmtTok(sum(l, (a) => a[win]?.tokens || 0))} · $${sum(l, (a) => a[win]?.costUsd || 0).toFixed(2)}`;
-                return (
-                  <>
-                    <div className="grid grid-cols-[1fr_auto_auto] items-baseline gap-x-3 gap-y-0.5 text-xs">
-                      <span />
-                      <span className="text-right text-[10.5px] text-base-content/40">{t("今日")}</span>
-                      <span className="text-right text-[10.5px] text-base-content/40">{t("本周")}</span>
-                      {groups.map((gr) => (
-                        <Fragment key={gr.label}>
-                          <span className="text-base-content/60">{gr.label}</span>
-                          <span className="text-right font-mono tabular-nums">{cell(gr.list, "today")}</span>
-                          <span className="text-right font-mono tabular-nums">{cell(gr.list, "week")}</span>
-                        </Fragment>
-                      ))}
-                    </div>
-                    <div className="text-[10.5px] text-base-content/35">
-                      {t("成本为 API 牌价折算（订阅制实际不按此扣费）· 活跃 agent 合计")}
-                    </div>
-                  </>
-                );
-              })()}
-              {typeof g.scrapedAt === "number" && g.scrapedAt > 0 && (
-                <div className="text-[10.5px] text-base-content/35">
-                  {t("账号用量抓取于")} {fmtAge(g.scrapedAt)}
-                  {/* eslint-disable-next-line react-hooks/purity -- 同 composer：读当前时间判断数据是否偏旧，
-                      面板本来就是打开时拉一次的快照，不值得为此常驻定时器 */}
-                  {Date.now() - g.scrapedAt > 15 * 60_000 && ` ${t("⚠️ 数据偏旧")}`}
-                </div>
-              )}
-            </div>
-          )}
+          {/* 额度卡：Claude 订阅 + 最近一次 Codex 会话看到的（没有 Codex rollout 的机器没有这张） */}
+          {g && <ClaudeQuotaCard g={g} />}
+          {quotas.map((q) => (
+            <CodexQuotaCard key={`${q.source}:${q.sessionId ?? ""}`} q={q} />
+          ))}
+          {/* token 与花费按 runtime 分行（Claude Code / Codex / Pi 口径各不相同，混着看互相淹没） */}
+          {statAgents.length > 0 && <UsageTable agents={statAgents} />}
 
           {/* 各 agent 上下文占用(1M 参考刻度) */}
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-base-content/40">
