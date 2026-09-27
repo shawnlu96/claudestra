@@ -22,7 +22,7 @@ import { ClearAgentModal } from "./clear-agent-modal";
 import { AgentInfoModal } from "./agent-info-modal";
 import { openAgentInfo } from "../agent-info";
 import { stopMission } from "@/lib/api/agents";
-import { MissionModal, openMissionModal } from "./mission-ui";
+import { MissionIcon, MissionModal, MissionStopIcon, openMissionModal } from "./mission-ui";
 
 type MenuState = { agent: AgentSession; x: number; y: number } | null;
 type Page = "main" | "move" | "open-terminal" | "open-ide";
@@ -81,7 +81,7 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
               onClick={() => (arch.armed ? onAction("archive") : arch.arm())}
             />
           ) : (
-            <MenuItem key={it.id} icon={it.icon} label={menuLabel(t, it.label, it.arg)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
+            <MenuItem key={it.id} icon={it.id !== "mission" ? it.icon : s.agent.mission ? <MissionStopIcon size={14} /> : <MissionIcon size={14} />} label={menuLabel(t, it.label, it.arg)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
           ),
         )}
       {page !== "main" && <MenuItem icon="‹" label={t("返回")} onClick={onBack} />}

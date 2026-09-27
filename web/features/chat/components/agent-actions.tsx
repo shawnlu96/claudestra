@@ -5,7 +5,7 @@ import type { AgentSession } from "../type";
 import { useT } from "@/lib/i18n";
 import { ClearAgentModal } from "./clear-agent-modal";
 import { stopMission } from "@/lib/api/agents";
-import { openMissionModal } from "./mission-ui";
+import { MissionIcon, MissionStopIcon, openMissionModal } from "./mission-ui";
 
 /** 清空：橡皮擦（lucide eraser，比扫帚干净利落） */
 function EraserIcon() {
@@ -208,7 +208,7 @@ export function AgentActions({ agent, menuLead }: { agent: AgentSession; menuLea
                 .finally(() => void store.refreshAgents());
             }}
           >
-            <span aria-hidden>{agent.mission ? "⏹" : "⏱"}</span>
+            {agent.mission ? <MissionStopIcon /> : <MissionIcon size={15} />}
             {agent.mission ? t("结束值守") : t("开始值守…")}
           </button>
         </li>

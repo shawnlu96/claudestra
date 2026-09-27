@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
 export const MENU_W = 200;
 export const ROW_H = 40;
 
-export function MenuItem({ icon, label, onClick, danger, chevron }: { icon: string; label: string; onClick: () => void; danger?: boolean; chevron?: boolean }) {
+export function MenuItem({ icon, label, onClick, danger, chevron }: { icon: ReactNode; label: string; onClick: () => void; danger?: boolean; chevron?: boolean }) {
   return (
     <button
       type="button"
@@ -18,7 +18,7 @@ export function MenuItem({ icon, label, onClick, danger, chevron }: { icon: stri
       }`}
       onClick={onClick}
     >
-      <span className="w-4 shrink-0 text-center opacity-70">{icon}</span>
+      <span className="flex w-4 shrink-0 justify-center opacity-70">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {chevron && <span className="shrink-0 text-[11px] opacity-40">▸</span>}
     </button>

@@ -22,6 +22,7 @@ export interface AgentMenuItem {
   id: AgentMenuAction;
   /** 中文 key，渲染时过 t()；含 {app} 时用 arg 替换 */
   label: string;
+  /** 文字符号；空串 = 组件自己画线条图标（值守项，components/mission-ui.tsx） */
   icon: string;
   danger?: boolean;
   /** 有二级菜单（移动到 ▸ / 多个终端 ▸ / 多个 IDE ▸） */
@@ -48,7 +49,7 @@ export function openItems(openers: MenuOpener[], platform: string): AgentMenuIte
 export function buildAgentMenu(a: AgentSession, openers: MenuOpener[] = [], platform = "darwin"): AgentMenuItem[] | null {
   if (a.mock) return null;
   const open = openItems(openers, platform);
-  const mission: AgentMenuItem = a.mission ? { id: "mission", label: "结束值守", icon: "⏹" } : { id: "mission", label: "开始值守…", icon: "⏱" };
+  const mission: AgentMenuItem = a.mission ? { id: "mission", label: "结束值守", icon: "" } : { id: "mission", label: "开始值守…", icon: "" };
   if (a.pinnedMaster) return a.status === "active" ? [mission, ...open] : open.length ? open : null;
   const info: AgentMenuItem = { id: "info", label: "详情", icon: "ⓘ" };
   const move: AgentMenuItem = { id: "move", label: "移动到", icon: "📁", submenu: true };

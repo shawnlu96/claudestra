@@ -295,7 +295,6 @@ export function AgentRow({
             {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
             {a.label || t(a.displayName)}
             {a.label && <span className="ml-1 text-[12px] font-normal text-base-content/40">| {a.displayName}</span>}
-            {a.mission && <span className="ml-1 align-middle"><MissionBadge mission={a.mission} compact /></span>}
             {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
@@ -311,6 +310,7 @@ export function AgentRow({
               </span>
             )}
           </span>
+          {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
               放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}
           {draft && !active && (
