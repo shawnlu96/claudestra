@@ -9,7 +9,7 @@ import {
   asAuth, asCode, asContacts, asData, asEndOrCancel, asPeerError, asReq, asRes, CLOSE, isPublicKey, isRedeemRequest,
   keyFingerprint, LIMITS, NAME_RE, parseFrame, PROTOCOL_VERSION, RELAY_FROM, SLUG_RE, slugify, verifyAuthSignature, type PeerRecord, type ResFrame,
 } from "../lib/relay-protocol.js";
-import { Directory } from "./directory.js";
+import { Directory, type InstanceRecord } from "./directory.js";
 import { Front } from "./front.js";
 import { KeyedWindows, SlidingWindow } from "./limiter.js";
 import { Router, type Pending } from "./router.js";
@@ -31,6 +31,8 @@ export interface RelayOptions {
   limits?: Partial<Limits>;
   /** 隧道请求等响应头的时长（浏览器那边的 API 调用可能长挂） */
   frontHeadTimeoutMs?: number;
+  /** 前端静态导出目录；配了 front 就在 base 主机名下托管它 */
+  staticDir?: string;
   sweepMs?: number;
   touchEveryMs?: number;
   log?: Logger;
@@ -90,11 +92,8 @@ class RelayServer implements Relay {
       base: opts.base, trustProxy: opts.trustProxy ?? false, version: opts.version ?? "dev", commit: opts.commit,
       headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes, limits: this.lim,
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
-      send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code),
-      bySlug: (slug) => {
-        const record = this.directory.bySlug(slug);
-        return { record, conn: record ? this.onlineMap.get(record.fp) ?? null : null };
-      },
+      send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
+      bySlug: (slug) => this.located(this.directory.bySlug(slug)), byFp: (fp) => this.located(this.directory.byFp(fp)),
       upgrade: (req, srv, ip) => this.upgrade(req, srv, ip), log: this.log,
     });
     // 定时扫 auth 超时、心跳判死、last_seen 落盘。不用 Bun 的 idleTimeout 是为了关闭码可控（4408）
@@ -118,10 +117,12 @@ class RelayServer implements Relay {
 
   online = (): string[] => [...this.onlineMap.keys()];
 
+  private located(record: InstanceRecord | null): { record: InstanceRecord | null; conn: Conn | null } {
+    return { record, conn: record ? this.onlineMap.get(record.fp) ?? null : null };
+  }
+
   dropConnection(fp: string, code: number = CLOSE.RESTART, reason = "dropped"): boolean {
-    const ws = this.onlineMap.get(fp);
-    ws?.close(code, reason);
-    return !!ws;
+    const ws = this.onlineMap.get(fp); ws?.close(code, reason); return !!ws;
   }
 
   stop(): void {
@@ -143,8 +144,7 @@ class RelayServer implements Relay {
   }
 
   private reject(ws: Conn, code: string, closeCode: number, message?: string): void {
-    this.send(ws, errorFrame(code, message));
-    ws.close(closeCode, code);
+    this.send(ws, errorFrame(code, message)); ws.close(closeCode, code);
   }
 
   private upgrade(req: Request, srv: Server<ConnData>, ip: string): Response | undefined {

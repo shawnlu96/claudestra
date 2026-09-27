@@ -50,6 +50,12 @@ export interface Principal {
    * 的 name）。入站注入头据此渲染成「peer 跨机请求」而非「Web 端用户」。
    */
   peer?: string;
+  /** 设备凭据（lib/devices.ts）：owner:self / guest:* 这类 principal 靠它们鉴权，没有 secret */
+  credentials?: import("./devices.js").DeviceCredential[];
+  /** 只出现在请求内生效的视图上（effectivePrincipal）：false = 这条凭据不许碰管理端点 */
+  manage?: boolean;
+  /** 只出现在请求内生效的视图上：这次请求是哪条凭据 */
+  credential?: string;
 }
 
 export interface PrincipalsFile {
@@ -136,6 +142,11 @@ export function findByBearer(file: PrincipalsFile, secret: string): Principal | 
       !x.disabled,
   );
   return p ?? null;
+}
+
+/** 聊天身份 api:<tokenId> 反查 principal：token 类是 "token:<id>"，owner:self / guest:* 的 tokenId 就是完整 id */
+export function findByTokenId(file: PrincipalsFile, tokenId: string): Principal | null {
+  return file.principals.find((x) => x.id === `token:${tokenId}` || x.id === tokenId) ?? null;
 }
 
 /** 按 token 短 id 或 name 找（CLI revoke/show 用） */

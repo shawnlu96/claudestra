@@ -16,6 +16,8 @@ export interface RelayEnv {
   trustProxy: boolean;
   maxFrameBytes: number;
   commit?: string;
+  /** RELAY_STATIC_DIR：前端静态导出目录（web/out）；没配就不托管前端 */
+  staticDir?: string;
 }
 
 const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
@@ -55,5 +57,6 @@ export function relayEnv(env: Record<string, string | undefined> = process.env, 
     trustProxy: env.RELAY_TRUST_PROXY === "1",
     maxFrameBytes: num(env.RELAY_MAX_FRAME_BYTES, LIMITS.maxFrameBytes),
     commit: env.RELAY_COMMIT?.trim() || readCommit(),
+    ...(env.RELAY_STATIC_DIR?.trim() ? { staticDir: env.RELAY_STATIC_DIR.trim() } : {}),
   };
 }

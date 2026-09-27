@@ -1,14 +1,19 @@
 /**
- * front：中继的 HTTPS 入口（docs/relay/protocol.md §6）。按主机名分两种：
- *   `<base>`          中继自己的页面（首页输短码、/c/<code>、/i 邀请落地、/healthz、/v1/ws 升级）；
- *   `<slug>.<base>`   隧道——把浏览器的 HTTP 请求变成 req 帧发给那台实例，响应帧流回浏览器。
- * 隧道不看路径、不验身份：浏览器没有实例密钥，身份由实例本机 Web 的会话决定。front 是 HTTPS 终点，能看见一切，
- * 所以日志只记方法、路径前缀、状态、耗时，不记头、正文、短码。
+ * front：中继的 HTTPS 入口（docs/relay/protocol.md §6；路径模式见 docs/design-hosted-frontend.md §4）。按主机名与路径分三种：
+ *   `<base>/…`          中继自己的页面与 API（首页、/c/<code>、/i、/healthz、/v1/ws、/api/v1/codes/lookup、/app-config.json）；
+ *                       配了 staticDir 就在这里托管前端静态站（lib/static-site.ts 的导出布局）；
+ *   `<base>/m/<fp>/…`   路径模式：转给指纹 fp 的实例，只放 /api/v1 下的路径，请求与响应头按 lib/relay-machine-path.ts 过滤；
+ *   `<slug>.<base>/…`   旧子域名模式：路径与头原样转给实例（保留到兼容截止）。
+ * 隧道不验身份：身份由实例自己判。日志只记方法、路径前缀、状态、耗时，不记头、正文、短码。
  */
 import type { Server } from "bun";
 import { randomBytes } from "node:crypto";
 import { newRequestId, normalizeCode, RELAY_BASE_HEADER, RELAY_FROM, SLUG_RE, SUBPROTOCOL, type ResFrame } from "../lib/relay-protocol.js";
 import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, recordToHeaders, streamSink, type StreamSink } from "../lib/relay-stream.js";
+import {
+  filterMachineRequestHeaders, filterMachineResponseHeaders, MACHINE_PREFIX, parseMachinePath, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, type MachinePath,
+} from "../lib/relay-machine-path.js";
+import { resolveExportedPath } from "../lib/static-site.js";
 import type { InstanceRecord } from "./directory.js";
 import { KeyedWindows } from "./limiter.js";
 import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
@@ -36,6 +41,9 @@ export interface FrontDeps {
   send(conn: Conn, frame: object): void;
   lookupCode(code: string): InstanceRecord | null;
   bySlug(slug: string): { record: InstanceRecord | null; conn: Conn | null };
+  byFp(fp: string): { record: InstanceRecord | null; conn: Conn | null };
+  /** 前端静态导出目录（RELAY_STATIC_DIR）；没配就只有中继自己的页面 */
+  staticDir?: string;
   upgrade(req: Request, srv: Server<ConnData>, ip: string): Response | undefined;
   log: Logger;
 }
@@ -51,6 +59,8 @@ const html = (status: number, body: string): Response =>
   withHsts(new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } }));
 const text = (status: number, body: string): Response => withHsts(new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } }));
 const redirect = (to: string): Response => withHsts(new Response(null, { status: 302, headers: { location: to, "cache-control": "no-store" } }));
+const json = (status: number, body: unknown, headers: Record<string, string> = {}): Response =>
+  withHsts(Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } }));
 
 /** Cookie 头里某个名字的值（只取第一个；这里只读 cstra_home，值形状再用 SLUG_RE 校验） */
 function cookieValue(header: string | null, name: string): string | null {
@@ -126,17 +136,45 @@ export class Front {
     return this.d.upgrade(req, srv, this.clientIp(req, srv));
   }
 
-  private basePages(req: Request, url: URL, ip: string): Response {
-    if (req.method !== "GET" && req.method !== "HEAD") return text(405, "method not allowed");
+  private basePages(req: Request, url: URL, ip: string): Response | Promise<Response> {
     const p = url.pathname;
-    if (p === "/") return html(200, homePage(this.d.base, url.searchParams.get("e") ?? undefined));
+    if (p.startsWith(MACHINE_PREFIX)) return this.machine(req, url, ip);
+    if (p === "/api/v1/codes/lookup") return req.method === "POST" ? this.codeLookup(req, ip) : text(405, "method not allowed");
+    if (req.method !== "GET" && req.method !== "HEAD") return text(405, "method not allowed");
+    if (p === "/app-config.json") return json(200, { mode: "relay", relayBase: this.d.base, version: this.d.version, ...(this.d.commit ? { commit: this.d.commit } : {}) });
     if (p === "/c") return redirect(`/c/${encodeURIComponent(url.searchParams.get("code") ?? "")}`);
     if (p.startsWith("/c/")) return this.byCode(decodeURIComponent(p.slice(3)), ip);
     if (p === "/i") {
       const home = cookieValue(req.headers.get("cookie"), "cstra_home");
-      return home && SLUG_RE.test(home) ? redirect(`https://${home}.${this.d.base}/join`) : html(200, invitePage(this.d.base));
+      if (home && SLUG_RE.test(home)) return redirect(`https://${home}.${this.d.base}/join`);
+      if (!this.d.staticDir) return html(200, invitePage(this.d.base));
     }
+    // 托管的前端静态站：命中就发文件（HTML 不长缓存、_next/static 永久缓存）；没配或没命中再落到中继自己的页面
+    const hit = this.d.staticDir ? resolveExportedPath(this.d.staticDir, p) : null;
+    if (hit) {
+      const file = Bun.file(hit.path);
+      return withHsts(new Response(req.method === "HEAD" ? null : file, { status: hit.status, headers: { "content-type": file.type, "cache-control": hit.cacheControl } }));
+    }
+    if (p === "/") return html(200, homePage(this.d.base, url.searchParams.get("e") ?? undefined));
     return text(404, "not found");
+  }
+
+  /** POST /api/v1/codes/lookup {code} → 这个短码属于哪台机器（新前端的配对页用）；与 /c/ 共用一个限流窗口 */
+  private async codeLookup(req: Request, ip: string): Promise<Response> {
+    if (!this.codeWindows.tryAcquire(ip)) return json(429, { ok: false, error: "rate_limited" }, { "retry-after": "60" });
+    const body = (await req.json().catch(() => null)) as { code?: unknown } | null; // 坏 JSON 按没带码处理，下面回 404
+    const code = typeof body?.code === "string" ? normalizeCode(body.code) : null;
+    const rec = code ? this.d.lookupCode(code) : null;
+    if (!rec) return json(404, { ok: false, error: "code_invalid" });
+    return json(200, { ok: true, fp: rec.fp, name: rec.name, slug: rec.slug });
+  }
+
+  /** /m/<fp>/api/v1/…：错误全是 JSON——调用方是前端的 API 客户端，不是人看的页面 */
+  private machine(req: Request, url: URL, ip: string): Response | Promise<Response> {
+    const m = parseMachinePath(url.pathname);
+    if (m === "path_forbidden") return json(400, { ok: false, error: "path_forbidden" });
+    if (typeof m === "string") return json(404, { ok: false, error: "machine_unknown" });
+    return this.tunnel(req, url, m.fp, this.d.base, ip, m);
   }
 
   /** 短码 → 实例网页的 /pair#<code>。302 的 Location 带 fragment，浏览器会原样保留。同一地址每分钟只能查几十次：短码 40 位，别让人枚举 */
@@ -156,37 +194,44 @@ export class Front {
 
   // ── 隧道 ───────────────────────────────────────────────────────────────
 
-  /** 隧道请求进门前的三道闸（§6.1）：每 IP 限流、目标登记且在线、每实例在途上限。返回 Response 就是被挡下了 */
-  private admit(slug: string, ip: string): Response | { record: InstanceRecord; conn: Conn } {
+  /** 隧道请求进门前的三道闸（§6.1）：每 IP 限流、目标登记且在线、每实例在途上限。返回 Response 就是被挡下了；路径模式的错误是 JSON */
+  private admit(target: { record: InstanceRecord | null; conn: Conn | null }, label: string, ip: string, api: boolean): Response | { record: InstanceRecord; conn: Conn } {
     if (!this.tunnelWindows.tryAcquire(ip)) {
-      this.d.log("info", `tunnel ${slug} rate limited ip=${ip}`);
+      this.d.log("info", `tunnel ${label} rate limited ip=${ip}`);
       const headers = { "retry-after": "60", "content-type": "text/plain; charset=utf-8" };
       return withHsts(new Response("too many requests from this address", { status: 429, headers }));
     }
-    const { record, conn } = this.d.bySlug(slug);
-    if (!record) return html(404, offlinePage(slug, this.d.base, false));
-    if (!conn) return html(503, offlinePage(slug, this.d.base, true));
+    const { record, conn } = target;
+    if (!record) return api ? json(404, { ok: false, error: "machine_unknown" }) : html(404, offlinePage(label, this.d.base, false));
+    if (!conn) return api ? json(503, { ok: false, error: "machine_offline" }, { "retry-after": "10" }) : html(503, offlinePage(label, this.d.base, true));
     if (this.d.router.tunnelInflightOf(conn) >= this.d.limits.maxTunnelInflightPerInstance) {
       // 一台实例的在途隧道请求撑满了：多半是它的 Web 卡住不回或被人灌，再往上加只会把中继的内存一起拖进去
-      this.d.log("warn", `tunnel ${slug} inflight cap ${this.d.limits.maxTunnelInflightPerInstance} reached`);
+      this.d.log("warn", `tunnel ${label} inflight cap ${this.d.limits.maxTunnelInflightPerInstance} reached`);
       return withHsts(Response.json({ ok: false, error: "too many concurrent requests" }, { status: 503, headers: { "retry-after": "5" } }));
     }
     return { record, conn };
   }
 
-  private async tunnel(req: Request, url: URL, slug: string, host: string, ip: string): Promise<Response> {
+  /** 发给实例的头：客户端自带的 x-forwarded-* / x-claudestra-relay-* 一律不信；路径模式再过滤 cookie 并加模式头 */
+  private tunnelHeaders(req: Request, ip: string, host: string, mode?: MachinePath): Record<string, string> {
+    const headers = forwardHeaders(headersToObject(req.headers), (k) => k.startsWith("x-forwarded-") || k === RELAY_BASE_HEADER || k.startsWith("x-claudestra-relay-"));
+    Object.assign(headers, { "x-forwarded-for": ip, "x-forwarded-proto": "https", "x-forwarded-host": host, [RELAY_BASE_HEADER]: this.d.base });
+    return mode ? { ...filterMachineRequestHeaders(headers), [RELAY_MODE_HEADER]: RELAY_MODE_API, [RELAY_PREFIX_HEADER]: mode.prefix } : headers;
+  }
+
+  /** slug 模式 label = slug；路径模式 label = fp 且带 mode（去前缀、过滤） */
+  private async tunnel(req: Request, url: URL, label: string, host: string, ip: string, mode?: MachinePath): Promise<Response> {
     if (req.headers.get("upgrade")) return text(426, "websocket is not tunnelled by the relay");
-    const admitted = this.admit(slug, ip);
+    const admitted = this.admit(mode ? this.d.byFp(mode.fp) : this.d.bySlug(label), label, ip, !!mode);
     if (admitted instanceof Response) return admitted;
     const { record, conn } = admitted;
     const id = newRequestId(randomBytes);
     const method = req.method.toUpperCase();
-    const headers = forwardHeaders(headersToObject(req.headers), (k) => k.startsWith("x-forwarded-") || k === RELAY_BASE_HEADER);
-    Object.assign(headers, { "x-forwarded-for": ip, "x-forwarded-proto": "https", "x-forwarded-host": host, [RELAY_BASE_HEADER]: this.d.base });
+    const headers = this.tunnelHeaders(req, ip, host, mode);
     const hasBody = !NO_BODY.has(method) && req.body !== null;
     const t0 = Date.now();
-    const path = url.pathname + url.search;
-    const done = (status: number | string) => this.d.log("info", `tunnel ${slug} ${method} ${url.pathname.slice(0, 60)} → ${status} ${Date.now() - t0}ms`);
+    const path = (mode ? mode.rest : url.pathname) + url.search;
+    const done = (status: number | string) => this.d.log("info", `tunnel ${label} ${method} ${url.pathname.slice(0, 60)} → ${status} ${Date.now() - t0}ms`);
 
     let resolveHead!: (r: Response) => void;
     const head = new Promise<Response>((r) => (resolveHead = r));
@@ -213,7 +258,7 @@ export class Front {
         id, from: RELAY_FROM, to: record.fp, fromConn: null, toConn: conn,
         waiter: {
           head: (res: ResFrame) => {
-            const h = forwardHeaders(res.headers);
+            const h = mode ? filterMachineResponseHeaders(forwardHeaders(res.headers), mode.prefix) : forwardHeaders(res.headers);
             h["strict-transport-security"] = HSTS;
             const first = res.body ? b64.dec(res.body) : new Uint8Array();
             if (!res.more) return finish(res.status, h, first);
@@ -258,7 +303,7 @@ export class Front {
       pumpBody(req.body, emit, req.signal, this.d.maxChunkBytes)
         .catch((e) => {
           // 浏览器半路断了或正文读失败：接收方那边的处理已无人接收，取消掉即可
-          this.d.log("info", `tunnel ${slug} request body aborted: ${(e as Error).message}`);
+          this.d.log("info", `tunnel ${label} request body aborted: ${(e as Error).message}`);
           cancel();
           p.waiter!.fail("aborted", "request body aborted");
         });

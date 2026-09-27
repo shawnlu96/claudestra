@@ -279,3 +279,117 @@ describe("front 限流与在途上限（§6.1，用小配额验证）", () => {
     expect((await after).status).toBe(200);
   });
 });
+
+describe("路径模式 /m/<fp>（docs/design-hosted-frontend.md §4）", () => {
+  const mpath = (rest: string) => `/m/${mini.fp}${rest}`;
+
+  test("GET：路径去前缀、带模式头与前缀头；浏览器自带的模式头与多余 cookie 不进实例；响应 Set-Cookie 只留 cstra_dev 且 Path 钉死，Location 补前缀", async () => {
+    const browser = at("relay.test", mpath("/api/v1/agents?x=1"), { headers: { "x-claudestra-relay-mode": "evil", cookie: "cstra_home=mini; cstra_dev=dev_abc; other=1" } });
+    const req = await answer((r) => mini.send({
+      t: "res", id: r.id, status: 302, more: false,
+      headers: { "set-cookie": ["cstra_session=s; Path=/", "cstra_dev=dev_new; Path=/; Max-Age=60; SameSite=Lax"].join("\n"), location: "/api/v1/whoami", "clear-site-data": '"*"', "x-ok": "1" },
+      body: "",
+    }));
+    expect(req.path).toBe("/api/v1/agents?x=1");
+    const h = req.headers as Record<string, string>;
+    expect(h["x-claudestra-relay-mode"]).toBe("api");
+    expect(h["x-claudestra-relay-prefix"]).toBe(`/m/${mini.fp}`);
+    expect(h["x-forwarded-host"]).toBe("relay.test");
+    expect(h.cookie).toBe("cstra_dev=dev_abc");
+    const r = await browser;
+    expect(r.status).toBe(302);
+    expect(r.headers.getSetCookie()).toEqual([`cstra_dev=dev_new; Path=/m/${mini.fp}/; Max-Age=60; HttpOnly; Secure; SameSite=Strict`]);
+    expect(r.headers.get("location")).toBe(`/m/${mini.fp}/api/v1/whoami`);
+    expect(r.headers.get("clear-site-data")).toBeNull();
+    expect(r.headers.get("x-ok")).toBe("1");
+  });
+
+  test("只放 /api/v1：控制路由、穿越、编码穿越 400 且不进实例；未知指纹 404；WebSocket 升级 426", async () => {
+    for (const bad of ["/hook", "/api/v1/../hook", "/api/v1/%2e%2e/hook", "/events", ""]) {
+      const r = await at("relay.test", mpath(bad));
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ ok: false, error: "path_forbidden" });
+    }
+    expect(await mini.none((f) => f.t === "req")).toBe(true);
+    const unknown = await at("relay.test", "/m/0000-0000-0000-0000/api/v1/agents");
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ ok: false, error: "machine_unknown" });
+    expect((await at("relay.test", "/m/nope/api/v1/agents")).status).toBe(404);
+    expect((await at("relay.test", mpath("/api/v1/x"), { headers: { upgrade: "websocket" } })).status).toBe(426);
+  });
+
+  test("登记过但下线的实例 → 503 machine_offline 带 retry-after", async () => {
+    const box = await TestClient.connect(`ws://127.0.0.1:${relay.port}/v1/ws`, keyFromSeed(seedOf(777)), { name: "Box", slug: "box-off" });
+    const fp = box.fp;
+    box.close();
+    await new Promise((r) => setTimeout(r, 100));
+    const r = await at("relay.test", `/m/${fp}/api/v1/agents`);
+    expect(r.status).toBe(503);
+    expect(r.headers.get("retry-after")).toBe("10");
+    expect(await r.json()).toEqual({ ok: false, error: "machine_offline" });
+  });
+
+  test("POST /api/v1/codes/lookup：短码 → 指纹；无效 / 坏 JSON 404；GET 405", async () => {
+    mini.send({ t: "code", op: "put", code: "ABCDEFGH", exp: Math.floor(Date.now() / 1000) + 300 });
+    await new Promise((r) => setTimeout(r, 50));
+    const ok = await at("relay.test", "/api/v1/codes/lookup", { method: "POST", body: JSON.stringify({ code: "abcd-efgh" }), headers: { "content-type": "application/json" } });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true, fp: mini.fp, name: "Mini", slug: "mini" });
+    const bad = await at("relay.test", "/api/v1/codes/lookup", { method: "POST", body: JSON.stringify({ code: "ZZZZZZZZ" }) });
+    expect(bad.status).toBe(404);
+    expect(await bad.json()).toEqual({ ok: false, error: "code_invalid" });
+    expect((await at("relay.test", "/api/v1/codes/lookup", { method: "POST", body: "{not json" })).status).toBe(404);
+    expect((await at("relay.test", "/api/v1/codes/lookup")).status).toBe(405);
+  });
+
+  test("/app-config.json：入口模式的公开配置", async () => {
+    const r = await at("relay.test", "/app-config.json");
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ mode: "relay", relayBase: "relay.test", version: "9.9.9-test" });
+    expect(r.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("托管前端静态站（staticDir）", () => {
+  let hosted: Relay;
+  let dir: string;
+  beforeAll(async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    dir = mkdtempSync(`${tmpdir()}/relay-static-`);
+    mkdirSync(`${dir}/_next/static`, { recursive: true });
+    writeFileSync(`${dir}/index.html`, "<h1>app</h1>");
+    writeFileSync(`${dir}/chat.html`, "<h1>chat</h1>");
+    writeFileSync(`${dir}/404.html`, "<h1>nope</h1>");
+    writeFileSync(`${dir}/_next/static/x.js`, "console.log(1)");
+    hosted = createRelay({ base: "app.test", port: 0, db: ":memory:", trustProxy: true, version: "1.2.3", staticDir: dir, limits: { authPerIpPerMinute: 1000 }, log: () => {} });
+  });
+  afterAll(() => hosted.stop());
+  const get = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${hosted.port}${path}`, { ...init, redirect: "manual", headers: { "x-forwarded-host": "app.test", "x-forwarded-for": "203.0.113.10" } });
+
+  test("/ 与 /chat 是导出的 HTML（不长缓存）；_next/static 永久缓存；未知页面回 404.html 且状态 404；HEAD 无正文", async () => {
+    const home = await get("/");
+    expect(home.status).toBe(200);
+    expect(await home.text()).toBe("<h1>app</h1>");
+    expect(home.headers.get("cache-control")).toBe("no-cache, must-revalidate");
+    expect(home.headers.get("content-type")).toContain("text/html");
+    expect(await (await get("/chat")).text()).toBe("<h1>chat</h1>");
+    const js = await get("/_next/static/x.js");
+    expect(js.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(js.headers.get("content-type")).toContain("javascript");
+    const nope = await get("/nope");
+    expect(nope.status).toBe(404);
+    expect(await nope.text()).toBe("<h1>nope</h1>");
+    expect((await get("/_next/static/missing.js")).status).toBe(404);
+    const head = await get("/chat", { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+  });
+
+  test("中继自己的端点不被静态站盖住：healthz、/c、/app-config.json、/m/…", async () => {
+    expect((await get("/healthz")).status).toBe(200);
+    expect((await get("/c/ZZZZZZZZ")).status).toBe(302);
+    expect(await (await get("/app-config.json")).json()).toEqual({ mode: "relay", relayBase: "app.test", version: "1.2.3" });
+    expect((await get("/m/0000-0000-0000-0000/api/v1/agents")).status).toBe(404);
+  });
+});

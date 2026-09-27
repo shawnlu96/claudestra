@@ -16,7 +16,7 @@ try {
 
 const relay = createRelay({
   base: env.base, port: env.port, hostname: env.hostname, db: env.db, trustProxy: env.trustProxy,
-  limits: { maxFrameBytes: env.maxFrameBytes }, version: pkg.version, commit: env.commit,
+  limits: { maxFrameBytes: env.maxFrameBytes }, version: pkg.version, commit: env.commit, staticDir: env.staticDir,
 });
 
 const shutdown = (sig: string) => {
