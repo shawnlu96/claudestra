@@ -8,7 +8,7 @@ import { remoteAccess } from "@/lib/api/system";
 /**
  * 设置 →「手机访问」：这台机器现在能从手机经哪些地址打开，每个地址能不能用、证书还剩几天。
  *
- * 为什么放在网页里：换入口（明文 IP → HTTPS 域名）要重新注册 Passkey、重装 PWA、重新订阅
+ * 为什么放在网页里：换入口（明文 IP → HTTPS 域名）要重新配对、重装 PWA、重新订阅
  * 推送，所以用户最该在**装 PWA 之前**就看到「主地址是哪个」；证书临期也要在手机上就能看到，
  * 而不是等入口断了才发现。
  *
@@ -101,7 +101,7 @@ function EntryRow({ e }: { e: Entry }) {
               : `${t("证书剩")} ${Math.floor(e.certDaysLeft)} ${t("天")}`}
           </span>
         )}
-        {!e.secure && <span>{t("语音输入 / 推送 / Passkey 在明文地址下不可用")}</span>}
+        {!e.secure && <span>{t("语音输入 / 推送在明文地址下不可用")}</span>}
       </div>
       {qr && (
         <div
@@ -200,15 +200,15 @@ export function RemoteAccessSection() {
     <section className="rounded-xl bg-base-200/60 p-4">
       <div className="flex min-h-8 items-center justify-between gap-3">
         <span className="flex items-center gap-2 text-[13.5px] font-semibold">
-          {t("手机访问")}
-          {badge && <span className={`badge badge-sm ${badge.cls}`}>Tailscale · {badge.text}</span>}
+          {t("Tailscale 入口")}
+          {badge && <span className={`badge badge-sm ${badge.cls}`}>{badge.text}</span>}
         </span>
         <button className="btn btn-ghost btn-sm border-base-300" disabled={loading} onClick={reload}>
           {loading ? t("检测中…") : t("重新检测")}
         </button>
       </div>
       <p className="mt-0.5 text-xs leading-relaxed text-base-content/50">
-        {t("手机上用哪个地址打开这里。优先用 HTTPS 地址，并在装到主屏（PWA）之前就用它——换地址要重新注册 Passkey、重装 PWA、重新订阅推送。")}
+        {t("走 Tailscale 时手机用哪个地址打开这里。优先用 HTTPS 地址，并在装到主屏（PWA）之前就用它——换地址要重新配对、重装 PWA、重新订阅推送。")}
       </p>
       <div className="mt-3 space-y-2">
         {err && <div className="text-xs text-error">{t("读取失败")}: {err}</div>}
@@ -222,7 +222,7 @@ export function RemoteAccessSection() {
         </button>
         {why && (
           <p className="text-[11px] leading-relaxed text-base-content/50">
-            {t("浏览器只在安全上下文（HTTPS 或 localhost）里开放麦克风、Service Worker、推送和 Passkey。经 tailnet IP 的明文地址能打开页面，但语音输入、离线/推送、指纹登录都会失效。Tailscale 的 HTTPS 只在你的 tailnet 内可达，不对公网开放。")}
+            {t("浏览器只在安全上下文（HTTPS 或 localhost）里开放麦克风、Service Worker 和推送。经 tailnet IP 的明文地址能打开页面，但语音输入、离线和推送都会失效。Tailscale 的 HTTPS 只在你的 tailnet 内可达，不对公网开放。")}
           </p>
         )}
       </div>

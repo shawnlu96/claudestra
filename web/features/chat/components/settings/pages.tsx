@@ -2,6 +2,7 @@
 import { useT } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
 import { RemoteAccessSection } from "../remote-access-section";
+import { AccessPathsSection } from "../access-paths";
 import { PeersPanel } from "../peers-modal";
 import { Section, GroupLabel } from "./section";
 import { DevicesSection, MachinesSection } from "./devices-section";
@@ -81,6 +82,7 @@ function ConnectPage({ s }: { s: SettingsState }) {
   return (
     <>
       <GroupLabel>{t("访问")}</GroupLabel>
+      <AccessPathsSection />
       <RemoteAccessSection />
       {isNativeShell() && <ShellServerSection />}
       <GroupLabel>{t("集成")}</GroupLabel>
