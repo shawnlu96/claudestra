@@ -2,7 +2,7 @@
  * Discord API 操作：发消息、获取历史、反应、编辑、创建/删除频道
  */
 
-import { TextChannel, PermissionFlagsBits, type Client } from "discord.js";
+import { TextChannel, PermissionFlagsBits, type CategoryChannel, type Client } from "discord.js";
 import { buildComponents } from "./components.js";
 // guild id 走 config 的唯一导出，别各处直读 env（D7-10）
 import { DISCORD_GUILD_ID } from "./config.js";
@@ -155,14 +155,19 @@ export async function discordEditMessage(
 export async function discordMoveChannel(
   discord: Client,
   channelId: string,
-  categoryName: string
+  categoryName: string,
+  /** project 改名时的旧 category 名：新名字的还没有、旧的在 ⇒ 把旧的原地改名，不另建 */
+  renameFrom?: string,
 ): Promise<void> {
   const guildId = DISCORD_GUILD_ID;
   if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
   const guild =
     discord.guilds.cache.get(guildId) ?? (await discord.guilds.fetch(guildId).catch(() => null));
   if (!guild) throw new Error(`Bot 未加入 guild ${guildId}`);
-  let cat = guild.channels.cache.find((c) => c.name === categoryName && c.type === 4);
+  const findCat = (name: string) => guild.channels.cache.find((c) => c.name === name && c.type === 4);
+  let cat = findCat(categoryName);
+  const old = !cat && renameFrom ? findCat(renameFrom) : undefined;
+  if (old) cat = await (old as CategoryChannel).setName(categoryName);
   if (!cat) {
     cat = await guild.channels.create({ name: categoryName, type: 4 });
   }

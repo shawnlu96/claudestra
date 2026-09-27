@@ -66,6 +66,7 @@ export async function cmdProjectEdit(
     output({ ok: false, error: `project "${id}" 不存在` });
     return;
   }
+  const oldName = p.name;
   if (opts.name !== undefined) p.name = opts.name.trim() || p.id;
   if (opts.emoji !== undefined) {
     if (opts.emoji) p.emoji = opts.emoji;
@@ -84,7 +85,22 @@ export async function cmdProjectEdit(
     else delete p.description;
   }
   await writeProjects(data);
+  if (p.name !== oldName) await renameProjectCategory(id, oldName, p.name);
   output({ ok: true, project: p });
+}
+
+/**
+ * 改名同步 Discord category：原地改名（保住位置和权限覆盖），成员频道本来就在里面；改完后续成员只是确认一下归属。
+ * 以前改名后 category 还叫旧名，下一个 project-assign 进来的 agent 会另建一个新名字的 category（台账 i08 1.2）。
+ */
+async function renameProjectCategory(id: string, from: string, to: string) {
+  const reg = await loadRegistry();
+  for (const a of Object.values(reg.agents)) {
+    if (a.projectId !== id || !a.channelId) continue;
+    await bridgeRequest({ type: "move_channel", channelId: a.channelId, category: to, renameFrom: from }).catch((e: Error) => {
+      console.error(`project 改名：Discord category 没跟上（bridge 离线 / web-only 时正常，下次 project-assign 会补）: ${e.message}`);
+    });
+  }
 }
 
 export async function cmdProjectRemove(id: string) {

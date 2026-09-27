@@ -7,6 +7,7 @@ import {
   readProjects,
   writeProjects,
   resolveProjectForDir,
+  resolveProjectForDirOrMain,
   slugifyProjectId,
   normalizeDir,
   PROJECT_ID_RE,
@@ -27,6 +28,32 @@ describe("normalizeDir", () => {
     expect(normalizeDir("/a/b/")).toBe("/a/b");
     expect(normalizeDir("/a/b///")).toBe("/a/b");
     expect(normalizeDir("/")).toBe("/");
+  });
+});
+
+describe("resolveProjectForDirOrMain（worktree 归主仓）", () => {
+  const projects = [proj("claudestra", ["/r/claude-orchestrator"]), proj("tmp", ["/tmp"])];
+  test("目录本身命中就不问 git", () => {
+    const main = () => { throw new Error("不该调"); };
+    expect(resolveProjectForDirOrMain(projects, "/r/claude-orchestrator/web", main)?.id).toBe("claudestra");
+  });
+  test("仓库外的 worktree（/tmp 下）按主工作树归到主仓的 project，不再新建", () => {
+    expect(resolveProjectForDirOrMain(projects, "/tmp/wt-feature", () => "/r/claude-orchestrator")?.id).toBe("claudestra");
+  });
+  test("不是 git 仓库 / 主工作树就是自己 / 主仓也没归属 → null（照旧新建）", () => {
+    expect(resolveProjectForDirOrMain(projects, "/elsewhere", () => null)).toBeNull();
+    expect(resolveProjectForDirOrMain(projects, "/elsewhere", () => "/elsewhere")).toBeNull();
+    expect(resolveProjectForDirOrMain(projects, "/tmp/x", () => "/r/unknown")).toBeNull();
+  });
+  test("真 git：本仓库自己的 worktree 认得出主仓", () => {
+    const repo = mkdtempSync(join(tmpdir(), "pj-main-"));
+    const wt = join(tmpdir(), `pj-wt-${Date.now()}`);
+    const git = (...a: string[]) => Bun.spawnSync(["git", ...a], { stdout: "ignore", stderr: "ignore" }).exitCode;
+    expect(git("-C", repo, "init", "-q")).toBe(0);
+    expect(git("-C", repo, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "i")).toBe(0);
+    expect(git("-C", repo, "worktree", "add", "-q", wt)).toBe(0);
+    const ps = [proj("main", [repo])];
+    expect(resolveProjectForDirOrMain(ps, wt)?.id).toBe("main");
   });
 });
 

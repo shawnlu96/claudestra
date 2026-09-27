@@ -11,6 +11,7 @@
  * 历史遗留的 `project` 字段——那里存的是创建时的原始 dir 字符串)。
  */
 
+import { realpathSync } from "node:fs";
 import { STATE_DIR } from "./paths.js";
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 
@@ -121,6 +122,44 @@ export function resolveProjectForDir(projects: ProjectDef[], dir: string): Proje
     }
   }
   return best?.p ?? null;
+}
+
+/**
+ * 按目录找 project；找不到再看它是不是某个 git 仓库的 worktree，是就归主仓的 project（台账 i08 1.4）。
+ * 仓库外的 worktree（/tmp、scratchpad 下）以前会各自新建一个 project；主工作树 = git common dir 的上一级。
+ */
+export function resolveProjectForDirOrMain(
+  projects: ProjectDef[],
+  dir: string,
+  mainOf: (dir: string) => string | null = gitMainWorktree,
+): ProjectDef | null {
+  const hit = resolveProjectForDir(projects, dir);
+  if (hit) return hit;
+  const main = mainOf(dir);
+  if (!main || normalizeDir(main) === normalizeDir(dir)) return null;
+  // git 给的是真实路径（/tmp → /private/tmp、/var → /private/var），project 目录也换成真实路径再比
+  const real = projects.map((p) => ({ ...p, dirs: p.dirs.map((d) => realOr(normalizeDir(d))) }));
+  const hit2 = resolveProjectForDir(real, main);
+  return hit2 ? projects.find((p) => p.id === hit2.id) ?? null : null;
+}
+
+function realOr(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p; // 目录已不在：按原样比
+  }
+}
+
+/** 目录所在仓库的主工作树；不是 git 仓库、bare 仓库、git 不在 → null（按目录的结果照旧） */
+function gitMainWorktree(dir: string): string | null {
+  try {
+    const r = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"], { stdout: "pipe", stderr: "ignore" });
+    const common = r.exitCode === 0 ? r.stdout.toString().trim() : "";
+    return common.endsWith("/.git") ? common.slice(0, -"/.git".length) : null;
+  } catch {
+    return null; // git 不在 PATH：只按目录归属
+  }
 }
 
 /**
