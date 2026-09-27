@@ -541,8 +541,8 @@ export const DICT: Record<string, string> = {
 
   // ── 设置 · 自动化 / 记忆 / 归档 / App 服务器 ─────────
   "记忆卫生（mem0）": "Memory hygiene (mem0)",
-  "定期审查 mem0 记忆库:找出过时/矛盾/重复的记忆,出报告供处置——只报告不动手。":
-    "Periodically reviews the mem0 store for stale, conflicting or duplicate memories and writes a report for you to act on — it only reports, never changes anything.",
+  "定期审查 mem0 记忆库：删掉超过 14 天的进度快照、合并写入时已标记的近重复；其余过时 / 矛盾 / 重复的只出报告，由你处置。":
+    "Periodically reviews mem0: deletes progress snapshots older than 14 days and merges flagged near-duplicates; other stale, conflicting or duplicate memories are only reported.",
   "频率": "Frequency",
   "每周（周一）": "Weekly (Monday)",
   "半月（1/15 号）": "Twice a month (1st & 15th)",

@@ -41,7 +41,7 @@ import { runManager } from "./management.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { readPeers } from "../lib/peers.js";
 import { loadJobs } from "../cron.js";
-import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, type HygieneFreq } from "../lib/memory-hygiene.js";
+import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
@@ -2109,16 +2109,15 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(405, { ok: false, error: "method not allowed" });
   }
 
-  // ── v2.20+ /memory-hygiene —— mem0 记忆卫生(owner 2026-08-26「mem0 会变粪坑,
-  // 做进产品+可配置」)。事实源 = cron 系统里的 mem0-hygiene 任务;这里只是
-  // 设置界面的读写面,mutation 全走 runManager 的 cron-add/remove/toggle,
-  // 与 CLI 手管等价。全权 token 门禁与 /peers 同级。
+  // ── /memory-hygiene —— mem0 记忆卫生。事实源 = cron 系统里的 mem0-hygiene 任务;这里只是设置界面的读写面,
+  // mutation 全走 runManager 的 cron-add/remove/toggle,与 CLI 手管等价。全权 token 门禁与 /peers 同级。
   if (path === "/memory-hygiene") {
     if (!isFullScope(principal)) return forbidden("memory hygiene requires a full-scope token");
     const findJob = async () => (await loadJobs()).find((j) => j.name === HYGIENE_JOB_NAME) ?? null;
     const stateOf = (j: Awaited<ReturnType<typeof findJob>>) => ({
       ok: true,
       exists: !!j,
+      available: mem0McpConfigured(), // 没挂 mem0 MCP 的机器设置页不显示(lib/memory-hygiene.ts)
       enabled: !!j?.enabled,
       freq: j ? freqOfSchedule(j.schedule) : null,
       schedule: j?.schedule ?? null,
