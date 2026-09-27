@@ -390,34 +390,8 @@ async function agentLabelForChannelAsync(channelId: string): Promise<string> {
   return "?";
 }
 
-/**
- * v1.9.21+ send_to_agent 推回机制：记录一条 outstanding send_to_agent 调用，
- * 当 target agent 下一次 reply 到自己 channel 时，bridge 自动把那段文字也 push
- * 回 caller 的 ws 作为"[agent-X 回复] …"合成消息，caller 不再需要 fetch_messages
- * 轮询。key = target agent 的 channelId。
- */
-interface PendingAgentCall {
-  callerChannelId: string;   // 谁发起的（master 或某个 agent）
-  callerWs: ServerWebSocket<unknown>;
-  callerName: string;
-  targetName: string;
-  /**
-   * caller 发起 send_to_agent 时手头正在处理的 inbound 请求的
-   * intendedReplyChannel —— 通常是 caller 自己的频道。target 回来之后，push
-   * 给 caller 的合成消息 meta.chat_id 用这个值，避免 caller LLM 误用 target
-   * 的私频当作回复目标。没有正在处理的请求时是 undefined。
-   */
-  originalReplyChannel?: string;
-  /**
-   * v2.0.12+ caller 在 send_to_agent 时填的"答完后我应该做啥"。
-   * bridge 在把 target 的 reply push 回 caller ws 时，前缀注入这段文字
-   * （[💡 你之前期望：...]），帮 caller LLM 不靠"自己记得"也能续上动作。
-   * 修 self-develop 链路里 caller 收到答复后只 relay 不 act 的根因之一。
-   */
-  expecting?: string;
-  ts: number;
-}
-const pendingAgentCalls = new Map<string, PendingAgentCall>();
+/** send_to_agent 回程路由簿：target 答复时推回 caller。落盘、caller 的 ws 推回时现取，见 bridge/agent-calls.ts */
+const pendingAgentCalls = new AgentCallBook();
 
 /**
  * v2.21.1+ 目标回合中的 agent→agent 消息押后队列(owner 2026-08-28「miniapp 发
@@ -477,11 +451,29 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
     if (d.outcome.kind === "sent") {
       // push-back 的 10min 失效窗从真正送达起算——否则目标长回合期间
       // pendingAgentCalls 被扫掉,对方回了 caller 也收不到(本次事故的次生伤)
-      const pac = pendingAgentCalls.get(channelId);
-      if (pac) pac.ts = Date.now();
+      pendingAgentCalls.touch(channelId);
       console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
     }
   }
+}
+
+/** target 的答复推回 caller。caller 的 ws 按 channelId 现取(回程簿落盘不存 ws,caller 重连 / bridge 重启后旧连接已失效);
+ *  caller 此刻不在线就进押后队列,它连上后的每分钟扫描会投。fromChannel = 推回的 meta.chat_id(见 originalReplyChannel)。 */
+async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string) {
+  const live = clients.get(pac.callerChannelId);
+  // 不在线时没有可用的 ws:押后队列落盘本来就剥掉 ws、投递时换最新连接,这里同样留空
+  const callerWs = live?.ws as ServerWebSocket<unknown>;
+  const env: RouterEnvelope = {
+    from: { kind: "local", agentName: pac.targetName, channelId: fromChannel, ws: fromWs ?? callerWs },
+    to: { kind: "local", agentName: pac.callerName, channelId: pac.callerChannelId, ws: callerWs, cwd: live?.cwd },
+    intent: "response",
+    content,
+    meta: { messageId: `${idPrefix}_${Date.now()}`, triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
+  };
+  if (live) return (await deliver(env)).outcome;
+  heldLocalMsgs.set(pac.callerChannelId, [...(heldLocalMsgs.get(pac.callerChannelId) ?? []), { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() }]);
+  console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
+  return { kind: "sent" as const, note: "queued" };
 }
 
 // v2.21.2+ 压缩上下文结束(jsonl compact_boundary 主路 / pane 兜底)→ 放行压缩期间
@@ -556,6 +548,7 @@ import type {
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue } from "./bridge/held-queue.js";
+import { AgentCallBook, type PendingAgentCall } from "./bridge/agent-calls.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
@@ -1955,7 +1948,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // channel，说明 agent 在它自己的 channel 里发了答案（discord 看得到，供审计）；
         // bridge 同时把这段 text push 回 caller 的 ws 作为合成消息，caller 不用再轮询。
         //
-        // v2.0.0 Phase 4b：这条推回从直接 pending.callerWs.send 改成 deliver(envelope)。
+        // 推回走 pushBackToCaller → deliver(envelope)，caller 的 ws 现取。
         // from=local(target agent), to=local(caller agent), intent=response。
         // renderContentForLocal 的 from.kind==="local" 分支会拼 "[🤖 来自 <name>]"
         // 前缀（原来写的是 "[🤖 target 回复]"，语义等价 —— 都是标识"这条是别的
@@ -1985,35 +1978,13 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             const pushBody = pending.expecting
               ? `[💡 你之前 send_to_agent 给 ${pending.targetName} 时填的期望：${pending.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${cleanedReply}`
               : cleanedReply;
-            const pushEnv: RouterEnvelope = {
-              from: {
-                kind: "local",
-                agentName: pending.targetName,
-                channelId: replyBackHint,
-                ws,
-              },
-              to: {
-                kind: "local",
-                agentName: pending.callerName,
-                channelId: pending.callerChannelId,
-                ws: pending.callerWs,
-              },
-              intent: "response",
-              content: pushBody,
-              meta: {
-                messageId: `agent_reply_${Date.now()}`,
-                triggerKind: "agent_tool",
-                ts: new Date().toISOString(),
-                threadId: newThreadId(),
-              },
-            };
-            const delivery = await deliver(pushEnv);
-            if (delivery.outcome.kind === "sent") {
+            const outcome = await pushBackToCaller(pending, ws, replyBackHint, pushBody, "agent_reply");
+            if (outcome.kind === "sent") {
               lastMessageSource.set(pending.callerChannelId, "agent");
               console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
               recordMetric("agent_pushback", { channelId: pending.callerChannelId, meta: { targetName: pending.targetName } });
-            } else if (delivery.outcome.kind === "error") {
-              console.error("AGENT PUSH-BACK 发送失败:", delivery.outcome.error);
+            } else if (outcome.kind === "error") {
+              console.error("AGENT PUSH-BACK 发送失败:", outcome.error);
             }
           } catch (e) {
             console.error("AGENT PUSH-BACK 异常:", e);
@@ -2504,7 +2475,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
           pendingAgentCalls.set(target.channelId, {
             callerChannelId: fromChannelId,
-            callerWs: ws,
             callerName: fromName,
             targetName,
             originalReplyChannel,
@@ -3014,31 +2984,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                     ? `[💡 你之前 send_to_agent 给 ${pendingAgent.targetName} 时填的期望：${pendingAgent.expecting}]\n`
                     : "";
                   const pushBody = `${callerCtxLine}[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`;
-                  const stopWsClient = clients.get(cid);
-                  const replyBackHint = pendingAgent.originalReplyChannel || cid;
-                  const drainPushEnv: RouterEnvelope = {
-                    from: {
-                      kind: "local",
-                      agentName: pendingAgent.targetName,
-                      channelId: replyBackHint,
-                      ws: stopWsClient?.ws ?? pendingAgent.callerWs,
-                    },
-                    to: {
-                      kind: "local",
-                      agentName: pendingAgent.callerName,
-                      channelId: pendingAgent.callerChannelId,
-                      ws: pendingAgent.callerWs,
-                    },
-                    intent: "response",
-                    content: pushBody,
-                    meta: {
-                      messageId: `agent_drain_${Date.now()}`,
-                      triggerKind: "agent_tool",
-                      ts: new Date().toISOString(),
-                      threadId: newThreadId(),
-                    },
-                  };
-                  await deliver(drainPushEnv);
+                  await pushBackToCaller(pendingAgent, clients.get(cid)?.ws, pendingAgent.originalReplyChannel || cid, pushBody, "agent_drain");
                   pendingAgentCalls.delete(cid);
                   console.log(`📨 AGENT PUSH-BACK (drain兜底): ${pendingAgent.targetName} → ${pendingAgent.callerName}（drain 文字）`);
                   recordMetric("agent_pushback_drain", { channelId: pendingAgent.callerChannelId, meta: { hadText: "yes" } });
