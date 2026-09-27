@@ -15,7 +15,7 @@
 | 端点 | `wss://<base>/v1/ws`，实例出站连接；中继在 TLS 反代之后时反代到中继这一跳走 `ws://`，对外 MUST 是 TLS |
 | 子协议 | `Sec-WebSocket-Protocol: claudestra-relay.v2`。缺失或不认识 → HTTP 426。大版本升级换子协议名，不做帧内协商 |
 | 帧编码 | 每个 WebSocket **文本帧**是一个 UTF-8 JSON 对象，`t` 是帧类型。二进制帧 → 关闭 4400 |
-| 帧上限 | 默认 256 KiB（`RELAY_MAX_FRAME_BYTES`）。正文分块走 `data` 帧，单块原始字节 ≤ `maxChunkBytes`（默认 160 KiB，base64 后仍在帧上限内） |
+| 帧上限 | 默认 256 KiB（`RELAY_MAX_FRAME_BYTES`）。正文分块走 `data` 帧，单块原始字节 ≤ `maxChunkBytes`（默认 64 KiB：一条连接上多路复用，小块让并发的小响应能插空，base64 后也远在帧上限内） |
 | 未知字段 | 双方 MUST 忽略不认识的字段；未知 `t` → 回 `error frame_invalid`（有 `id` 就带上），不断线。**服务端只加字段不改字段**：实例各自升级，中继必须兼容上一版实例 |
 
 中继只读信封字段（`t` `id` `to` `from` `timeoutMs` `more` 与 `req` 的 `method` / `path`）。`headers` / `body` 原样搬运、不记日志。
@@ -35,7 +35,7 @@
 
 ```json
 { "t": "hello", "v": 2, "nonce": "<base64url 32 字节>", "ts": 1790000000,
-  "limits": { "maxFrameBytes": 262144, "maxChunkBytes": 163840, "maxReqTimeoutMs": 180000, "heartbeatMs": 25000 } }
+  "limits": { "maxFrameBytes": 262144, "maxChunkBytes": 65536, "maxReqTimeoutMs": 180000, "heartbeatMs": 25000 } }
 ```
 
 nonce 每连接一个、60 秒内有效、只能用一次。实例 MUST 在 10 秒内发 `auth`，否则关闭 4408。`ts` 供实例比对本机时钟（偏差 > 300 秒 SHOULD 在日志里警告——请求签名允许的偏差就是 ±300 秒）。

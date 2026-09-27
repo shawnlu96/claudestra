@@ -57,6 +57,11 @@ beforeAll(async () => {
       }
       if (u.pathname === "/echo") return new Response(await req.arrayBuffer(), { headers: { "content-type": "application/octet-stream" } });
       if (u.pathname === "/redirect") return new Response(null, { status: 302, headers: { location: `http://${req.headers.get("host")}/login` } });
+      if (u.pathname === "/gz") {
+        // 浏览器带 accept-encoding 时本机 Web 回 gzip 正文：隧道要原样透传压缩字节与 content-encoding
+        if (!(req.headers.get("accept-encoding") ?? "").includes("gzip")) return new Response("plain");
+        return new Response(Bun.gzipSync(new TextEncoder().encode("gzipped-body-".repeat(64))), { headers: { "content-type": "text/plain", "content-encoding": "gzip" } });
+      }
       if (u.pathname === "/cookies") {
         const h = new Headers({ "content-type": "text/plain" });
         h.append("set-cookie", "cstra_session=abc; Path=/; HttpOnly; SameSite=strict");
@@ -141,6 +146,13 @@ describe("隧道：浏览器 → front → 实例 → 本机 Web", () => {
     expect(r.headers.get("content-type")).toBe("text/event-stream");
     const text = new TextDecoder().decode(await collectBody(r.body, 1 << 20));
     expect(text).toBe("data: 1\n\ndata: 2\n\n");
+  });
+
+  test("压缩正文原样过隧道：content-encoding 保留，浏览器侧解出原文", async () => {
+    const r = await front(`mini.${BASE}`, "/gz", { headers: { "accept-encoding": "gzip" } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-encoding")).toBe("gzip");
+    expect(await r.text()).toBe("gzipped-body-".repeat(64));
   });
 
   test("两条 Set-Cookie 原样到达浏览器（登录同时下发会话 cookie 与 cstra_home）", async () => {

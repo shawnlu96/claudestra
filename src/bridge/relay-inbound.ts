@@ -85,8 +85,10 @@ function localError(e: unknown, signal: AbortSignal): RelayError {
   return new RelayError("local_unreachable", "peer", (e as Error).message);
 }
 
-const dropForTunnelReq = (k: string): boolean => k === "accept-encoding"; // 让 Web 回未压缩正文：fetch 会解码，再带 content-encoding 头浏览器就解两次
+/** peer 路径的响应由 fetch 解压后再转，content-encoding 就不能再带（对方按头解一次就坏了） */
 const dropForResponse = (k: string): boolean => k === "content-encoding";
+/** 隧道路径让压缩正文原样过：Bun 的 fetch 支持 decompress:false，浏览器自己解——JS 块经此少传六成，慢上行的机器体感差别很大 */
+const TUNNEL_FETCH: Record<string, unknown> = typeof Bun !== "undefined" ? { decompress: false } : {};
 
 /** 本机 Web 按自己的监听地址算出的绝对 Location（http://127.0.0.1:3333/…）也改到公网地址，浏览器才不会跳到它连不上的回环 */
 function rewriteLocalLocation(headers: Headers, webBase: string, publicHost: string): Headers {
@@ -103,13 +105,16 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
   // 浏览器看到的主机名以中继盖的 x-forwarded-host 为准（front 已剥掉客户端自带的）；Host 也改成它，
   // 本机 Web 才会按公网地址算相对跳转，而不是按它自己的回环监听地址
   const publicHost = req.headers["x-forwarded-host"] || req.headers.host || "";
-  const headers = forwardHeaders(req.headers, dropForTunnelReq);
+  const headers = forwardHeaders(req.headers);
   if (publicHost) headers.host = publicHost;
+  // Node 的 fetch 没有 decompress 开关会自动解压：那时不能把 accept-encoding 传过去，否则 content-encoding 头对不上正文
+  if (!("decompress" in TUNNEL_FETCH)) delete headers["accept-encoding"];
   const init: RequestInit & { duplex?: "half" } = {
     method: req.method,
     headers,
     redirect: "manual",
     signal: ctx.signal,
+    ...TUNNEL_FETCH,
     ...(hasBody ? { body: req.body, duplex: "half" } : {}),
   };
   let r: Response;
@@ -118,7 +123,7 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
   } catch (e) {
     throw localError(e, ctx.signal);
   }
-  const out = rewriteLocation(forwardHeaders(headersToObject(r.headers), dropForResponse), publicHost);
+  const out = rewriteLocation(forwardHeaders(headersToObject(r.headers), "decompress" in TUNNEL_FETCH ? undefined : dropForResponse), publicHost);
   return { status: r.status, headers: rewriteLocalLocation(out, d.webBase, publicHost), body: r.body };
 }
 

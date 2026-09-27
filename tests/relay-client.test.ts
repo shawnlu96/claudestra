@@ -7,7 +7,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync } from "../src/lib/instance-key.js";
-import { keyFingerprint } from "../src/lib/relay-protocol.js";
+import { keyFingerprint, LIMITS } from "../src/lib/relay-protocol.js";
 import { collectBody } from "../src/lib/relay-stream.js";
 import { connect, RelayError, type InboundHandler, type InboundResponse, type RelayClient } from "../src/lib/relay-client.js";
 import { startFakeRelay, type FakeRelay } from "./relay-fake-relay.js";
@@ -110,7 +110,7 @@ describe("请求往返", () => {
     const r2 = await a.c.request(b.fp, { method: "POST", path: "/api/v1/agents/x/messages", headers: {}, body: big });
     const got = JSON.parse(dec(await collectBody(r2.body, 1e6)));
     expect(got.body.length).toBe(350_000);
-    expect(relay.received.filter((r) => r.fp === a.fp && r.frame.t === "data").length).toBe(3);
+    expect(relay.received.filter((r) => r.fp === a.fp && r.frame.t === "data").length).toBe(Math.ceil(350_000 / LIMITS.maxChunkBytes));
     const r3 = await a.c.request(b.fp, { method: "GET", path: "/api/v1/stream", headers: {} });
     expect(r3.headers["content-type"]).toBe("text/event-stream");
     const text = dec(await collectBody(r3.body, 1e6));

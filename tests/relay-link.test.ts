@@ -87,17 +87,18 @@ describe("入站分流（relay-inbound.ts）", () => {
   const ctx = (from: string, signal = new AbortController().signal) => ({ from, signal });
   const signed = (method: string, path: string, body = "") => ({ ...signedHeaders(method, path, body, key, NOW) });
 
-  test("隧道：原样打本机 Web，保留 host / x-forwarded-*，去 accept-encoding；响应去 content-encoding、Location 改 https", async () => {
+  test("隧道：原样打本机 Web，保留 host / x-forwarded-* / accept-encoding（Bun 下 decompress:false 让压缩正文直通）；响应保留 content-encoding、Location 改 https", async () => {
     const h = harness(() => new Response("page", { status: 303, headers: { location: "http://mini.relay.test/login", "content-encoding": "gzip", "x-keep": "1" } }));
     const headers = { host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip", connection: "close" };
     const res = await h.handler({ method: "GET", path: "/chat?x=1", headers, body: bodyStream("") }, ctx("relay"));
     expect(h.calls[0].url).toBe("http://127.0.0.1:2/chat?x=1");
     expect(h.calls[0].init.method).toBe("GET");
-    expect(h.calls[0].init.headers).toEqual({ host: "mini.relay.test", "x-forwarded-proto": "https" });
+    expect(h.calls[0].init.headers).toEqual({ host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip" });
+    expect((h.calls[0].init as { decompress?: boolean }).decompress).toBe(false);
     expect(h.calls[0].init.redirect).toBe("manual");
     expect(h.calls[0].init.body).toBeUndefined();
     expect(res.status).toBe(303);
-    expect(res.headers).toEqual({ location: "https://mini.relay.test/login", "x-keep": "1" });
+    expect(res.headers).toEqual({ location: "https://mini.relay.test/login", "content-encoding": "gzip", "x-keep": "1" });
     expect(dec(await collectBody(res.body, 100))).toBe("page");
   });
   test("隧道 POST 带正文流；Web 连不上 → local_unreachable；被取消 → local_timeout", async () => {

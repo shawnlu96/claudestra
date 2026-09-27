@@ -17,7 +17,7 @@ export const REDEEM_PATH = "/api/v1/peers/redeem";
 
 export const LIMITS = {
   maxFrameBytes: 256 * 1024,
-  maxChunkBytes: 160 * 1024,
+  maxChunkBytes: 64 * 1024,
   maxReqTimeoutMs: 180_000,
   defaultReqTimeoutMs: 40_000,
   heartbeatMs: 25_000,
