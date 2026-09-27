@@ -1,10 +1,10 @@
 /**
- * bridge/inbox.ts：agent 调 check_inbox 取回排队给它的 agent 消息——取走即出队、和 Stop 投递共用频道锁、
- * 一次最多 10 条、人类消息不碰、认不出调用方就报错。
+ * bridge/inbox.ts：agent 调 check_inbox 领取排队给它的 agent 消息——领取是租约不是出队（ack 才出队、过期可重领）、
+ * 和 Stop 投递共用频道锁、一批最多 10 条 / 16000 字、人类消息不碰、认不出调用方就报错。
  */
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
-import { HeldQueue, type HeldItem } from "../src/bridge/held-queue.js";
+import { HeldQueue, INBOX_LEASE_MS, leaseActive, type HeldItem } from "../src/bridge/held-queue.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 
 const me = { tag: "claudestra-ws" } as never;
@@ -35,32 +35,64 @@ function setup(items: HeldItem[]) {
 }
 
 describe("takeInbox", () => {
-  test("取回 agent 消息：带来源和 message_id、出队、网页镜像、回程失效钟重新起算；人类消息留在队里", async () => {
+  test("领取：带批次号 / 来源 / message_id，不出队只落租约，网页镜像，回程钟重起；人类消息不碰", async () => {
     const { held, calls, mirrored } = setup([item("复核意见 1", "local", 0), item("人类补充", "user"), item("复核意见 2", "local", 0)]);
     const r = await takeInbox(me, 5 * 60_000);
     if ("error" in r) throw new Error(r.error);
     expect(r.result.n).toBe(2);
-    expect(r.result.text).toContain("取回 2 条");
-    expect(r.result.text).toContain("来自 agent-codex · message_id=m-复核意见 1 · 排队 5 分钟");
-    expect(r.result.text).toContain("复核意见 2");
-    expect(held.get("c-me")!.map((i) => i.env.content)).toEqual(["人类补充"]);
+    expect(r.result.text).toContain("领到 2 条");
+    expect(r.result.text).toContain("1/2 · 来自 agent-codex · message_id=m-复核意见 1 · 排队 5 分钟");
+    expect(r.result.text).toMatch(/ack: "inbox_\w+"/);
+    const q = held.get("c-me")!;
+    expect(q.map((i) => i.env.content)).toEqual(["复核意见 1", "人类补充", "复核意见 2"]); // 还在队里
+    expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(2);
     expect(mirrored).toEqual(["复核意见 1", "复核意见 2"]);
     expect(calls.get("c-me")!.ts).toBeGreaterThan(1);
   });
 
-  test("一次最多 10 条，提示还剩几条", async () => {
+  test("租约内再领领不到同一批；过期没确认的可以重领（工具结果丢了 / 回合被取消不丢）", async () => {
+    setup([item("a"), item("b")]);
+    const first = await takeInbox(me, 1000);
+    expect("result" in first && first.result.n).toBe(2);
+    const again = await takeInbox(me, 2000);
+    expect("result" in again && again.result.text).toContain("没有可领取");
+    const later = await takeInbox(me, 1000 + INBOX_LEASE_MS + 1);
+    expect("result" in later && later.result.n).toBe(2);
+  });
+
+  test("ack：这批出队并顺带领下一批；错的 / 已确认过的批次号只提示", async () => {
     const { held } = setup(Array.from({ length: 12 }, (_, i) => item(`m${i}`)));
-    const r = await takeInbox(me);
-    if ("error" in r) throw new Error(r.error);
-    expect(r.result.n).toBe(10);
-    expect(r.result.text).toContain("还剩 2 条");
+    const r1 = await takeInbox(me, 1000);
+    if ("error" in r1) throw new Error(r1.error);
+    const batch = /inbox_\w+/.exec(r1.result.text)![0];
+    expect(r1.result.text).toContain("还有 2 条");
+    const r2 = await takeInbox(me, 2000, batch);
+    if ("error" in r2) throw new Error(r2.error);
+    expect(r2.result.text).toContain(`已确认 ${batch}（10 条出队）`);
+    expect(r2.result.n).toBe(2);
     expect(held.get("c-me")).toHaveLength(2);
+    const r3 = await takeInbox(me, 3000, batch);
+    expect("result" in r3 && r3.result.text).toContain("没有待确认的条目");
+  });
+
+  test("字数预算：一批不超过 16000 字，单条超长的不放进批（回合结束时完整送达）", async () => {
+    const big = (c: string, id: string) => {
+      const i = item(c);
+      i.env.meta.messageId = id; // helper 的 message_id 带正文，长正文会把抬头也撑长
+      return i;
+    };
+    const { held } = setup([big("x".repeat(9000), "m-x"), big("y".repeat(9000), "m-y"), big("z".repeat(20_000), "m-z")]);
+    const r = await takeInbox(me, 1000);
+    if ("error" in r) throw new Error(r.error);
+    expect(r.result.n).toBe(1);
+    expect(r.result.text).toContain("另有 1 条太长");
+    expect(held.get("c-me")!.filter((i) => i.lease).length).toBe(1);
   });
 
   test("空的 / 正在被 Stop 投递（频道锁被占）/ 认不出调用方", async () => {
     const { held } = setup([]);
     const empty = await takeInbox(me);
-    expect("result" in empty && empty.result.text).toContain("收件箱是空的");
+    expect("result" in empty && empty.result.text).toContain("没有可领取");
     held.set("c-me", [item("x")]);
     held.claim("c-me");
     const busy = await takeInbox(me);

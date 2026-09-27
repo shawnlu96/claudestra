@@ -63,7 +63,7 @@ export const FORWARD_TO_AGENT_DESCRIPTION = `**转交**：用户这条消息明�
 原话由 bridge 从你刚收到的消息里原样取出（含附件），你只需给 message_id（<channel> 标签里的 message_id）。
 调用成功后直接结束本轮，不要再 reply。`;
 
-export const CHECK_INBOX_DESCRIPTION = `**取收件箱**：别的 agent 用 send_to_agent 发给你、因为你正在回合里而排着队的消息，现在就取回来（原本要等你这一轮结束才送到）。取走的回合结束时不会再送一遍。
+export const CHECK_INBOX_DESCRIPTION = `**领收件箱**：别的 agent 用 send_to_agent 发给你、因为你正在回合里而排着队的消息，现在就领回来（原本要等你这一轮结束才送到）。
 
-什么时候用：长任务 / 值守里每做完一步查一次；你刚问过同事、在等它的答复时。没有排队的就返回「收件箱是空的」，不用反复查。
-取到的消息照常处理：问你的就用 send_to_agent 回，要动手的先把手上这步做完再接。`;
+什么时候用：长任务 / 值守里每做完一步查一次；你刚问过同事、在等它的答复时。没有可领取的就说「没有」，不用反复查。
+领到的是一批（批次号 inbox_xxx）：照常处理——问你的用 send_to_agent 回，要动手的先把手上这步做完再接；**处理完再调一次 check_inbox 并传 ack=批次号**确认（会顺带领下一批）。不确认的那批 15 分钟后会在你回合结束时按普通消息重新送来（message_id 不变，见过的别重复处理）。`;
