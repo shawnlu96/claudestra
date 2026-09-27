@@ -9,6 +9,7 @@
 import type { Envelope, LocalEndpoint } from "./router.js";
 import { statePath } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
+import { readJsonStateSync } from "../lib/state-file.js";
 
 export interface HeldItem {
   env: Envelope;
@@ -21,11 +22,12 @@ export interface HeldItem {
 export const HELD_NOTIFY_MS = 30 * 60_000;
 export const HELD_GIVE_UP_MS = 24 * 3_600_000;
 
+const HELD_PATH = statePath("held-messages.json");
 const isQueue = (q: unknown): boolean => Array.isArray(q) && q.every((i) => i && typeof i === "object" && "env" in i && "to" in i);
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
 export class HeldQueue extends PersistedMap<HeldItem[]> {
-  constructor(path: string | null = statePath("held-messages.json")) {
+  constructor(path: string | null = HELD_PATH) {
     super(path, "押后消息", isQueue);
     for (const [ch, items] of [...this.entries()]) if (!items.length) this.deleteQuiet(ch);
     const n = [...this.values()].reduce((s, q) => s + q.length, 0);
@@ -91,4 +93,16 @@ export function heldNoticeText(n: HeldNotice): string {
   return n.kind === "still-queued"
     ? `[⏳ bridge] 你发给 ${who} 的消息已排队 30 分钟：对方一直在一个长回合里，这一轮结束就会送到，不用重发。原文开头: ${head}`
     : `[⚠️ bridge] 你发给 ${who} 的消息排了 24 小时仍没送到（对方一直不空闲或不在线），已放弃。如仍需要，请重发。原文开头: ${head}`;
+}
+
+/** 各频道排队中的 agent 消息数（网页侧栏「排队 N 条」）：直接读落盘文件——队列每次变动都同步落盘，不用碰 bridge 的内存 */
+export function heldAgentCounts(path: string = HELD_PATH): Record<string, number> {
+  const r = readJsonStateSync(path);
+  if (r.status !== "ok" || !r.data || typeof r.data !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [ch, q] of Object.entries(r.data as Record<string, unknown>)) {
+    const n = isQueue(q) ? (q as HeldItem[]).filter((i) => i.env?.from?.kind === "local").length : 0;
+    if (n) out[ch] = n;
+  }
+  return out;
 }

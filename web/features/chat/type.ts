@@ -177,6 +177,8 @@ export interface AgentSession {
   sharedPeers?: number;
   /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开始 / 结束值守」 */
   mission?: MissionInfo | null;
+  /** 别的 agent 发来、它还在回合里没收到的消息数 → 侧栏「排队」小标 */
+  queued?: number;
   /**
    * v2.23+ 运行时：`"pi"` = Pi coding agent，`"claude-code"`/缺失 = Claude Code。
    * 侧栏徽章、TopBar 模型/effort 展示都按它分叉（Pi 的模型来自 provider 配置，

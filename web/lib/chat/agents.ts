@@ -70,6 +70,8 @@ export interface AgentSession {
   updateHint?: UpdateHint | null;
   /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开始 / 结束值守」 */
   mission?: MissionInfo | null;
+  /** 别的 agent 发来、它还在回合里没收到的消息数（等回合结束或它调 check_inbox）→ 侧栏小标 */
+  queued?: number;
 }
 
 interface ApiAgent {
@@ -172,5 +174,5 @@ export async function loadAgents(): Promise<AgentSession[]> {
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m;
+  return hint + m + (a.queued ? `q${a.queued}` : "");
 }
