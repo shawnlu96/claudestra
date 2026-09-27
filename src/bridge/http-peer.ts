@@ -388,10 +388,10 @@ async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, 
         delivery = await d.deliver(env);
       }
     }
-    if (delivery.outcome.kind !== "sent") {
-      console.error(`HTTP peer pushback 投递失败 (${peer.name}/${peerAgent}):`, delivery.outcome);
-    }
+    if (delivery.outcome.kind === "sent") return;
+    console.error(`HTTP peer pushback 投递失败 (${peer.name}/${peerAgent})，进押后队列:`, delivery.outcome);
   } catch (e) {
-    console.error("HTTP peer pushback 异常:", e);
+    console.error("HTTP peer pushback 异常，进押后队列:", e);
   }
+  d.hold?.(env); // 调用方接着会把这条调用从簿里摘掉：投不出去也得有持久的地方接住，否则对方的回复就丢了（codex 2026-09-28 复核）
 }
