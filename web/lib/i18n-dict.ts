@@ -499,9 +499,6 @@ export const DICT: Record<string, string> = {
   "已请求": "Requested",
   "存记忆 + Compact": "Save memory + Compact",
   "上下文已 {n}k——别等了,找个句号就存记忆 + Compact": "Context at {n}k — don't wait, save memory + Compact at the next full stop",
-  "全机合计": "All agents",
-  "今日": "Today",
-  "本周": "This week",
 
   // ── 后台任务 / 杂项 ──────────────────────────────────
   "后台任务继续中": "Background tasks still running",
