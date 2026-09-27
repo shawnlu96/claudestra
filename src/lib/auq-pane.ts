@@ -142,13 +142,64 @@ export function parsePiSelectPane(pane: string): AuqPaneParse | null {
   return { form: "single", sections: ["Pi 确认"], question: text, options, multiSelect: false };
 }
 
+/**
+ * Codex 的选择框（额度快满时「要不要换便宜模型」、命令审批等）。以前 bridge 完全看不见：Codex 的回合照样能跑，
+ * 框一直挂在屏幕底部，手机侧无感（2026-09-28 codex 额度用完那晚挂了一小时）。Codex 0.153 渲染成：
+ *
+ * ```
+ *   Approaching rate limits
+ *   Switch to gpt-5.6-luna for lower credit usage?
+ *
+ * › 1. Switch to gpt-5.6-luna                 Older fast and efficient model.
+ *   2. Keep current model
+ *
+ *   Press enter to confirm or esc to go back
+ * ```
+ *
+ * 选项行是「编号. 名字  两个以上空格  说明」，光标 `›` 只在一行上；键位与 Pi 相同（↑↓ + Enter，Esc 取消），
+ * 翻译成 AuqPaneParse 后下游不用改。
+ */
+const CODEX_FOOTER_RE = /^\s*Press enter to confirm or esc to (go back|cancel)\b/i;
+const CODEX_OPTION_RE = /^\s*(›\s+)?\d+\.\s+(.*\S)\s*$/;
+
+function parseCodexSelectPane(pane: string): AuqPaneParse | null {
+  const lines = pane.split("\n");
+  let footerIdx = -1;
+  for (let i = lines.length - 1; i >= 0 && lines.length - i <= MAX_SCAN_LINES; i--) {
+    if (CODEX_FOOTER_RE.test(lines[i])) {
+      footerIdx = i;
+      break;
+    }
+  }
+  if (footerIdx < 0) return null;
+  const { block: optLines, next } = piBlockAbove(lines, footerIdx - 1);
+  if (optLines.length < 2 || optLines.length > 8) return null;
+  const options: AuqPaneOption[] = [];
+  for (const l of optLines) {
+    const m = l.match(CODEX_OPTION_RE);
+    if (!m) return null; // 选项块里混了别的行 ⇒ 不是这种框，宁可不认
+    const [label, ...rest] = m[2].split(/\s{2,}/);
+    const description = rest.join(" ").trim();
+    options.push({ label: label.slice(0, 100), cursor: !!m[1], checked: false, ...(description ? { description: description.slice(0, 100) } : {}) });
+  }
+  if (options.filter((o) => o.cursor).length !== 1) return null;
+  // 标题紧贴选项（中间最多一个空行）；隔得更远的是上面别的输出（比如「■ You've hit your usage limit」），不当问题
+  const gap = lines[next]?.trim() === "" ? 1 : 0;
+  if (lines[next - gap]?.trim() === "") return null;
+  const question = piBlockAbove(lines, next).block.map((l) => l.trim()).filter(Boolean).join(" ").slice(0, 300);
+  if (!question) return null;
+  return { form: "single", sections: ["Codex"], question, options, multiSelect: false };
+}
+
 export function parseAuqPane(pane: string): AuqPaneParse | null {
   const lines = pane.split("\n");
 
-  // Pi 的对话框长得完全不一样（无 `❯ N.` 无 CC footer），先试它；
-  // 两边 footer 签名互斥，不会互相误命中。
+  // Pi / Codex 的对话框长得完全不一样（无 `❯ N.` 无 CC footer），先试它们；
+  // 三家 footer 签名互斥，不会互相误命中。
   const pi = parsePiSelectPane(pane);
   if (pi) return pi;
+  const codex = parseCodexSelectPane(pane);
+  if (codex) return codex;
 
   // 1) footer 提示行在场才可能是 AUQ 弹窗
   let footerIdx = -1;

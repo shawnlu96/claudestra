@@ -142,7 +142,7 @@ export async function postAskUserQuestionMessage(
     const textCh = ch as TextChannel;
 
     const headerLines = [
-      `🎛 **agent 在等你选**（Claude Code AskUserQuestion）`,
+      `🎛 **agent 在等你选**`, // Claude Code 的 AskUserQuestion、Pi / Codex 的选择框都走这张卡
       ``,
       ...questions.map((q, i) => {
         const tag = q.multiSelect ? "（可多选）" : "（单选）";

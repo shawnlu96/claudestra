@@ -178,3 +178,45 @@ describe("parseAuqTabSections", () => {
     expect(parseAuqTabSections("←  ☐ 图表类型  ✔ Submit  →")).toEqual(["图表类型"]);
   });
 });
+
+describe("parseAuqPane：Codex 的选择框", () => {
+  // 2026-09-28 codex 额度用完时的真实画面（capture-pane -J）
+  const CODEX_RATE_PROMPT = [
+    "■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again at 8:41 AM.",
+    "",
+    "",
+    "  Approaching rate limits",
+    "  Switch to gpt-5.6-luna for lower credit usage?",
+    "",
+    "› 1. Switch to gpt-5.6-luna                 Older fast and efficient model.",
+    "  2. Keep current model",
+    "  3. Keep current model (never show again)  Hide future rate limit reminders about switching models.",
+    "",
+    "  Press enter to confirm or esc to go back",
+    "",
+  ].join("\n");
+
+  test("额度提醒框：问题、选项、说明、光标都认出来", () => {
+    const p = parseAuqPane(CODEX_RATE_PROMPT)!;
+    expect(p.form).toBe("single");
+    expect(p.sections).toEqual(["Codex"]);
+    expect(p.question).toBe("Approaching rate limits Switch to gpt-5.6-luna for lower credit usage?");
+    expect(p.options.map((o) => o.label)).toEqual(["Switch to gpt-5.6-luna", "Keep current model", "Keep current model (never show again)"]);
+    expect(p.options[0].description).toBe("Older fast and efficient model.");
+    expect(p.options[1].description).toBeUndefined();
+    expect(p.options.map((o) => o.cursor)).toEqual([true, false, false]);
+    expect(p.multiSelect).toBe(false);
+  });
+
+  test("光标挪到第 2 项、审批框的 esc to cancel 也认", () => {
+    const moved = CODEX_RATE_PROMPT.replace("› 1.", "  1.").replace("  2. Keep", "› 2. Keep").replace("go back", "cancel");
+    expect(parseAuqPane(moved)!.options.map((o) => o.cursor)).toEqual([false, true, false]);
+  });
+
+  test("不是这种框就不认：选项块混了别的行 / 没有光标 / 没有问题 / 没有 footer", () => {
+    expect(parseAuqPane(CODEX_RATE_PROMPT.replace("  2. Keep current model", "  随便一行正文"))).toBeNull();
+    expect(parseAuqPane(CODEX_RATE_PROMPT.replace("› 1.", "  1."))).toBeNull();
+    expect(parseAuqPane(CODEX_RATE_PROMPT.replace("  Approaching rate limits\n  Switch to gpt-5.6-luna for lower credit usage?\n", ""))).toBeNull();
+    expect(parseAuqPane(CODEX_RATE_PROMPT.replace("Press enter to confirm or esc to go back", "› Ask Codex to do anything"))).toBeNull();
+  });
+});
