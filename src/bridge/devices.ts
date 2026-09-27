@@ -13,6 +13,7 @@ import {
 import { readPrincipalsStrict, writePrincipals, type Principal } from "../lib/principals.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
+import { emitCredentialRevoked } from "./credential-revocation.js";
 import { relayClient } from "./relay-link.js";
 import { issuePairingCode, redeemPairingByProof, redeemPairingCode } from "./relay-pairing.js";
 import { requestContextOf, type RequestContext } from "./request-context.js";
@@ -159,6 +160,7 @@ async function revokeDevice(req: Request, principal: Principal, id: string): Pro
   holder.credentials = (holder.credentials ?? []).filter((c) => c.id !== id);
   if (holder.id.startsWith("guest:") && holder.credentials.length === 0) holder.disabled = true;
   await writePrincipals(file, principalsPath);
+  emitCredentialRevoked(id); // 在途的 SSE / 终端流随之中止
   const res = apiJson(200, { ok: true, revoked: id, principal: holder.id });
   if (own) res.headers.append("set-cookie", cookieFor(requestContextOf(req), null));
   return res;

@@ -16,8 +16,10 @@ Environment=RELAY_HOST=127.0.0.1
 Environment=RELAY_PORT=8787
 Environment=RELAY_DATA=/var/lib/claudestra-relay/data
 Environment=RELAY_TRUST_PROXY=1
-# 必填：中继的公网主机名。实例的网页是 https://<slug>.<RELAY_BASE>
+# 必填：中继的公网主机名。实例的网页是 https://<RELAY_BASE>/（路径模式）；旧子域名 https://<slug>.<RELAY_BASE> 兼容期内仍在
 Environment=RELAY_BASE=relay.example.com
+# 前端静态导出目录（deploy.sh 带 RELAY_WITH_WEB=1 时同步到这里）；不配就只有中继自己的页面
+Environment=RELAY_STATIC_DIR=/opt/claudestra/web/out
 # 代码目录运行时只读，关掉 bun 的转译缓存写盘
 Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 ExecStart=/var/lib/claudestra-relay/.bun/bin/bun run src/relay.ts

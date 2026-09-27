@@ -32,6 +32,7 @@ import { randomBytes } from "node:crypto";
 import { TMUX_SOCK, MASTER_SESSION } from "../lib/tmux-helper.js";
 import { terminalAllowed, tokenIdOf, type Principal } from "../lib/principals.js";
 import { authenticateApi } from "./api-auth.js";
+import { revocable } from "./credential-revocation.js";
 
 // ---------- tmux 小工具（独立于 tmux-helper 的 tmuxRaw：这里需要 exitCode） ----------
 
@@ -504,13 +505,13 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
     },
   });
 
-  return new Response(stream, {
+  return revocable(new Response(stream, { // 设备凭据一撤，终端流立刻断（credential-revocation.ts）
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     },
-  });
+  }), principal);
 }
 
 /** 单条 PTY 会话的最长存活（TTL 兜底）。正常关闭走 SSE 断开；这里防的是

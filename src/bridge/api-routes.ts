@@ -83,6 +83,7 @@ import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { handleExtensionRoutes } from "./api-extensions.js";
+import { revocable } from "./credential-revocation.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -942,7 +943,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (path === "/events" && req.method === "GET") {
     // 双向兼容前缀：scope 里存裸名时补 agent- 前缀的变体
     const scopeAgents = principal.agents.includes("*") ? undefined : principal.agents.flatMap((a) => [a, `agent-${a}`]);
-    return deps.handleEventsRequest(req, scopeAgents ? { agents: scopeAgents } : undefined);
+    return revocable(deps.handleEventsRequest(req, scopeAgents ? { agents: scopeAgents } : undefined), principal); // 设备凭据一撤，这条 SSE 立刻断（credential-revocation.ts）
   }
 
   // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送只推自己的对话）；ownerIds = 本人的 Discord 账号（ALLOWED_USER_IDS 第一个 = 装机时填的自己），web 据此把本人从 Discord 发的也放右边；不告诉 peer

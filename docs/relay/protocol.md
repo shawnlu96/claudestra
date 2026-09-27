@@ -215,6 +215,28 @@ front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存�
 
 IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-For` 第一项，否则取连接对端。
 
+### 6.2 路径模式：`<base>/m/<fp>/api/v1/…`（docs/design-hosted-frontend.md）
+
+同一个主源下按机器指纹路由，前端由中继托管、按机器只转 API。与子域名模式并存到兼容截止；两者走同一条隧道（§3），差别只在 front：
+
+| 项 | 路径模式 |
+|---|---|
+| 匹配 | `^/m/<fp>(/…)?$`，fp 大小写不敏感；fp 形状不对 → `404 {ok:false,error:"machine_unknown"}` |
+| 路径规范化 | 去掉前缀后解一次百分号编码：必须落在 `/api/v1` 下；含 `.`/`..` 段、连续 `/`、`\`、控制字符、编码过的 `/` `\` `%` `.` → `400 {ok:false,error:"path_forbidden"}`；带 `Upgrade` → `426`。中继不是任意转发器，控制路由与静态文件永远到不了实例 |
+| 目标 | `byFp`：没登记 → `404 machine_unknown`；不在线 → `503 {ok:false,error:"machine_offline"}` + `retry-after: 10`（都是 JSON，调用方是 API 客户端） |
+| 发给实例的 req 帧 | `path` = 去前缀后的路径 + 查询串；头里客户端自带的 `x-forwarded-*` / `x-claudestra-relay-*` 一律丢弃后再加：`x-forwarded-for`、`x-forwarded-proto: https`、`x-forwarded-host: <base>`、`x-claudestra-relay-base`、**`x-claudestra-relay-mode: api`**、**`x-claudestra-relay-prefix: /m/<fp>`**；`Cookie` 只保留 `cstra_dev=…` 这一对（主源上别的 cookie 与这台机器无关） |
+| 实例侧 | 看到模式头就在进程内直接调 API（不经回环 HTTP，来源标记为 relay，不享回环豁免）；没有模式头 = 旧子域名隧道，照旧打本机 Web |
+| 回给浏览器的响应头 | `Set-Cookie` 只放名为 `cstra_dev` 的，属性一律改写为 `Path=/m/<fp>/; HttpOnly; Secure; SameSite=Strict`（保留 `Max-Age` / `Expires`；值为空 = 删除）；`clear-site-data`、`service-worker-allowed`、`alt-svc` 丢弃；根相对 `Location` 补上 `/m/<fp>` 前缀。一台机器影响不到主源上别的机器 |
+| 限流 | 与隧道相同（每 IP、每实例在途） |
+
+`<base>` 上为路径模式新增的端点：
+
+| 路径 | 行为 |
+|---|---|
+| `POST /api/v1/codes/lookup` `{code}` | 短码 → `{ok, fp, name, slug}`；无效 / 坏 JSON → `404 {ok:false,error:"code_invalid"}`；与 `/c/` 共用每 IP 限流；非 POST → `405` |
+| `GET /app-config.json` | 前端入口配置 `{mode:"relay", relayBase, version, commit?, vapidPublicKey?}`，`no-store` |
+| 静态站 | 配了 `RELAY_STATIC_DIR`（前端的 Next 静态导出目录）时，`<base>` 上没被上面接住的 GET/HEAD 按导出布局服务：`/chat` → `chat.html`，目录 → `index.html`，未知页面 → `404.html`（状态 404），`/_next/static/*` 永久缓存，HTML `no-cache`；`/`、`/i` 在有静态站时也由它服务（`/i` 带 `cstra_home` cookie 时仍 302 到子域名，兼容期） |
+
 ## 7. 错误帧与错误码
 
 ```json
