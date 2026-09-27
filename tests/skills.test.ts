@@ -78,10 +78,15 @@ describe("discoverProjectSkills", () => {
         "---",
         "name: auto-only",
         "description: Auto-triggered only.",
+        "user-invocable: false",
         "---",
         "body",
       ].join("\n")
     );
+    // 没写 name / description / user-invocable：官方缺省 = 目录名、正文第一行、可以 /name 调用
+    const skillDir3 = join(tmpDir, ".claude", "skills", "bare-skill");
+    mkdirSync(skillDir3, { recursive: true });
+    writeFileSync(join(skillDir3, "SKILL.md"), ["---", "---", "", "# 帮你做点事", "正文"].join("\n"));
   });
 
   afterAll(() => {
@@ -90,10 +95,16 @@ describe("discoverProjectSkills", () => {
 
   test("扫 cwd/.claude/skills 拿到 user-invocable skill", async () => {
     const res = await discoverProjectSkills("test-agent", tmpDir);
-    expect(res.length).toBe(1);
-    expect(res[0].invokeName).toBe("my-project-skill");
-    expect(res[0].scope).toBe("project");
-    expect(res[0].agentName).toBe("test-agent");
+    const mine = res.find((s) => s.invokeName === "my-project-skill")!;
+    expect(mine.scope).toBe("project");
+    expect(mine.agentName).toBe("test-agent");
+  });
+
+  test("没写 name / description / user-invocable 的也认：目录名、正文第一行、默认可调用", async () => {
+    const res = await discoverProjectSkills("test-agent", tmpDir);
+    const bare = res.find((s) => s.invokeName === "bare-skill")!;
+    expect(bare.description).toBe("帮你做点事");
+    expect(res.map((s) => s.invokeName).sort()).toEqual(["bare-skill", "my-project-skill"]);
   });
 
   test("跳过 user-invocable=false 的 skill", async () => {

@@ -50,6 +50,11 @@ export function accessPaths<T>(): Promise<T> {
   return api<T>("/access-paths", { timeoutMs: 5000 });
 }
 
+// ── 设置 ·「技能」页：本机有效技能清单（只读，manage 才给）──
+export function skillLibrary<T>(): Promise<T> {
+  return api<T>("/skills/library", { timeoutMs: 8000 });
+}
+
 // ── 手机访问面板（探测要起子进程 + TLS 握手，bridge 缓存 60s）──
 export function remoteAccess<T>(fresh: boolean): Promise<T> {
   return api<T>(`/remote-access${fresh ? "?fresh=1" : ""}`, { timeoutMs: 15_000 });

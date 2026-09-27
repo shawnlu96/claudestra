@@ -50,30 +50,49 @@ function parseFrontmatter(content: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of body.split("\n")) {
     const m = line.match(/^(\w[\w-]*)\s*:\s*(.+)$/);
-    if (m) result[m[1]] = m[2].trim();
+    if (m) result[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, "$2"); // YAML 引号包起来的值（name: "openai-docs"）
   }
   return result;
 }
 
-async function readSkillMd(path: string): Promise<{ name: string; description: string; userInvocable: boolean } | null> {
+export interface SkillMeta {
+  name: string;
+  description: string;
+  /** frontmatter `user-invocable`，缺省 true（官方文档）：false 才从 / 菜单里藏起来 */
+  userInvocable: boolean;
+  /** frontmatter `disable-model-invocation: true` ⇒ false：模型不会自己加载，只能手动 /name */
+  modelInvocable: boolean;
+}
+
+const FALSEY_RE = /^(false|no|0)$/i;
+const TRUTHY_RE = /^(true|yes|1)$/i;
+
+/**
+ * 读一个技能目录的 SKILL.md。缺省值照 Claude Code 官方文档：name 缺省用目录名，description 缺省用正文第一行非空文字，
+ * user-invocable 缺省 true。以前 name 缺了整个技能就不认、user-invocable 没写就当 false——没写这两个键的技能
+ * （比如 home-media-pipeline）在 Discord / 网页的命令面板里都消失了。
+ */
+export async function readSkillMd(path: string, dirName: string): Promise<SkillMeta | null> {
   try {
     const content = await Bun.file(path).text();
     const fm = parseFrontmatter(content);
-    if (!fm.name) return null;
-    const userInvocable = /^(true|yes|1)$/i.test(fm["user-invocable"] || "");
+    const body = content.startsWith("---") ? content.slice(content.indexOf("\n---", 3) + 4) : content;
+    const firstLine = body.split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).find(Boolean) ?? "";
     return {
-      name: fm.name.trim(),
-      description: (fm.description || "").trim(),
-      userInvocable,
+      name: (fm.name || dirName).trim(),
+      description: (fm.description || firstLine).trim(),
+      userInvocable: !FALSEY_RE.test(fm["user-invocable"] || ""),
+      modelInvocable: !TRUTHY_RE.test(fm["disable-model-invocation"] || ""),
     };
-  } catch {
+  } catch (e) {
+    console.warn(`读 SKILL.md 失败（跳过这个技能）: ${path}: ${(e as Error).message}`);
     return null;
   }
 }
 
-async function scanSkillDir(dir: string): Promise<Array<{ name: string; description: string; userInvocable: boolean }>> {
+async function scanSkillDir(dir: string): Promise<SkillMeta[]> {
   if (!existsSync(dir)) return [];
-  const out: Array<{ name: string; description: string; userInvocable: boolean }> = [];
+  const out: SkillMeta[] = [];
   let entries: string[] = [];
   try {
     entries = readdirSync(dir);
@@ -83,7 +102,7 @@ async function scanSkillDir(dir: string): Promise<Array<{ name: string; descript
   for (const entry of entries) {
     const skillPath = join(dir, entry, "SKILL.md");
     if (!existsSync(skillPath)) continue;
-    const parsed = await readSkillMd(skillPath);
+    const parsed = await readSkillMd(skillPath, entry);
     if (parsed) out.push(parsed);
   }
   return out;

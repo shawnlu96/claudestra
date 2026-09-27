@@ -20,6 +20,7 @@ import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevMo
 import { ThemeVarsSection } from "./theme-vars-section";
 import { FontSection } from "./font-section";
 import { ChatPrefsSection } from "./chat-prefs-section";
+import { SkillsSection } from "./skills-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -122,6 +123,8 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
       return <PeersPanel />;
     case "security":
       return <DevicesPage />;
+    case "skills":
+      return <SkillsSection />;
     case "labs":
       return (
         <>
