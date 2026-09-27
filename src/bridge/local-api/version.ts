@@ -11,6 +11,7 @@ import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { REPO_ROOT } from "../../lib/repo-root.js";
 import { readBuildInfo } from "../../lib/static-site.js";
 import { apiJson } from "../api-respond.js";
+import { relayInfo } from "../relay-link.js";
 
 export const API_VERSION = 1;
 /**
@@ -57,9 +58,21 @@ export function machineIdentity(): { fp: string | null; machineName: string } {
   return { fp: key ? keyFingerprint(key.publicKey) : null, machineName: hostname() };
 }
 
+/** 连着的中继主机名（没连上时从 RELAY_URL 取）：前端据此认出自己开在已废弃的子域名入口上（web/features/machines/legacy-subdomain.ts） */
+function relayBaseField(): { relayBase?: string } {
+  const info = relayInfo();
+  let base = info.base;
+  try {
+    base ??= info.relayUrl ? new URL(info.relayUrl).hostname : null;
+  } catch {
+    base = null; // RELAY_URL 写坏了：不报 relayBase，前端只是认不出旧入口
+  }
+  return base ? { relayBase: base } : {};
+}
+
 /** 直托管入口配置：与中继模式的 /app-config.json 同名同用途（bridge.ts 在静态托管之前接它） */
 export async function appConfigResponse(): Promise<Response> {
   const { version, commit } = await versionInfo();
-  const body = { mode: "direct", ...machineIdentity(), version, commit, ...webCommitField() };
+  const body = { mode: "direct", ...machineIdentity(), version, commit, ...webCommitField(), ...relayBaseField() };
   return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }

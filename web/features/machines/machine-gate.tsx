@@ -8,6 +8,7 @@ import { machines } from "@/lib/machines";
 import { isLoopbackHost } from "@/lib/pairing";
 import { useT } from "@/lib/i18n";
 import { bootMachines, useMachines } from "./use-machines";
+import { leaveLegacySubdomain } from "./legacy-subdomain";
 import { dismissLocalHop, hopToLocal, maybeHopToLocal, receiveHandoff, useLocalHopBanner } from "./local-hop";
 
 /**
@@ -23,6 +24,7 @@ export function MachineGate({ children }: { children: ReactNode }) {
     let dead = false;
     void bootMachines().then(async (cfg) => {
       if (cfg.mode === "direct") {
+        if (await leaveLegacySubdomain(cfg)) return; // 开在已废弃的子域名入口上：换到新入口（iOS 壳改服务器地址）
         const fp = cfg.fp || LOCAL_FP;
         if (!machines.get(fp)) await machines.add({ fp, name: cfg.machineName });
         if (machines.currentFp() !== fp) await machines.setCurrent(fp);

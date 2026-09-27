@@ -75,7 +75,7 @@ export function usePairFlow(cfg: AppConfig | null, onPaired: () => void) {
         const fp = cfg.fp || LOCAL_FP;
         await done(await pairLocal(fp, name || defaultDeviceName(navigator.userAgent)), fp);
       } catch (e) {
-        fail(e);
+        setPhase({ kind: "error", message: pairErrorText(e, true) });
       }
     },
     [cfg, done],

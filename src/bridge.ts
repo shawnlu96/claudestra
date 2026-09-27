@@ -3541,7 +3541,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 // 主端口与接管的旧 web 端口（bridge/legacy-web-port.ts）共用这一个处理函数：同一道控制面闸门
 async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) {
     const reqOrigin = req.headers.get("Origin");
-    const crossOrigin = isCrossOrigin(reqOrigin, req.url);
+    const crossOrigin = isCrossOrigin(reqOrigin, req.url, req.headers);
     const url0 = new URL(req.url);
 
     // v2.21.1+ 控制面非回环鉴权(security-audit P0,2026-09-01)。最前置,回环是

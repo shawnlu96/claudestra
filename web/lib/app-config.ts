@@ -17,6 +17,8 @@ export interface DirectConfig {
   mode: "direct";
   fp: string;
   machineName: string;
+  /** 这台机器连着的中继（有才报）：认出已废弃的子域名入口 <slug>.<relayBase> 用 */
+  relayBase?: string;
   version: string;
   commit?: string;
   webCommit?: string;
@@ -41,9 +43,18 @@ export function parseAppConfig(raw: unknown, fallback: DirectConfig): AppConfig 
   };
   if (o.mode === "relay" && str(o.relayBase)) return { mode: "relay", relayBase: str(o.relayBase)!, ...common };
   if (o.mode === "direct") {
-    return { mode: "direct", fp: str(o.fp) ?? fallback.fp, machineName: str(o.machineName) ?? fallback.machineName, ...common };
+    const relayBase = str(o.relayBase);
+    return { mode: "direct", fp: str(o.fp) ?? fallback.fp, machineName: str(o.machineName) ?? fallback.machineName, ...(relayBase ? { relayBase } : {}), ...common };
   }
   return fallback;
+}
+
+/** 已废弃的子域名入口 <slug>.<中继>（中继主机本身不算；web/features/machines/legacy-subdomain.ts 据此搬家） */
+export function isLegacySubdomain(hostname: string, relayBase: string | undefined): boolean {
+  if (!relayBase) return false;
+  const h = hostname.toLowerCase();
+  const base = relayBase.toLowerCase();
+  return h !== base && h.endsWith(`.${base}`);
 }
 
 /** 请求的基址：中继模式按机器加 `/m/<fp>`；直托管就是同源根 */
