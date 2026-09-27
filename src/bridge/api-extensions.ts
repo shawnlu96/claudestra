@@ -4,11 +4,12 @@
  * handler 返回 null = 不是我的路径；数组顺序即优先级；异常由 serveApiRequest 统一转成 JSON 错误。
  */
 import type { Principal } from "../lib/principals.js";
+import { pushRoutes } from "./push/routes.js";
 
-type ExtensionHandler = (req: Request, url: URL, principal: Principal) => Promise<Response | null> | Response | null;
+export type ExtensionHandler = (req: Request, url: URL, principal: Principal) => Promise<Response | null> | Response | null;
 
 /** 端点族在这里登记（import 它的 handler 后加进数组） */
-const EXTENSIONS: ExtensionHandler[] = [];
+const EXTENSIONS: ExtensionHandler[] = [pushRoutes];
 
 export async function handleExtensionRoutes(req: Request, url: URL, principal: Principal): Promise<Response | null> {
   for (const h of EXTENSIONS) {

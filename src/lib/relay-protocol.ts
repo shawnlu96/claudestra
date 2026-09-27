@@ -39,7 +39,14 @@ export const LIMITS = {
   codeLookupPerIpPerMinute: 30,
   tunnelPerIpPerMinute: 600,
   maxTunnelInflightPerInstance: 256,
+  /** 推送网关（§3.5）：每台实例每分钟的 push 帧上限 */
+  pushPerFpPerMinute: 60,
 } as const;
+
+/** push 帧的 payload（通知正文的 JSON 字符串）上限，按字符计 */
+export const PUSH_MAX_PAYLOAD_CHARS = 4096;
+/** APNs 设备 token：十六进制，Apple 现行 64 字节 → 128 hex，留余量 */
+export const APNS_TOKEN_RE = /^[0-9a-f]{32,256}$/i;
 
 /** WebSocket 关闭码（§8）；1009 是 Bun 在硬上限处自己发的 */
 export const CLOSE = {
@@ -160,6 +167,16 @@ export interface CancelFrame { t: "cancel"; id: string; to?: string; from?: stri
 export interface ErrorFrame { t: "error"; id?: string; to?: string; from?: string; code: string; message?: string; origin: "relay" | "peer" | "client" }
 export interface ContactsFrame { t: "contacts"; fps: string[] }
 export interface CodeFrame { t: "code"; op: "put" | "del"; code: string; exp?: number }
+/** 浏览器 PushSubscription.toJSON() 里的两样：endpoint + 两把密钥（p256dh / auth，base64url） */
+export interface WebPushSubscription { endpoint: string; keys: { p256dh: string; auth: string } }
+export interface WebPushFrame { t: "push"; id: string; kind: "webpush"; subscription: WebPushSubscription; payload: string; ttl?: number }
+export interface ApnsPushFrame { t: "push"; id: string; kind: "apns"; token: string; payload: string; badge?: number }
+/** 实例 → 中继：请中继用它的 VAPID / APNs 凭据投递一条通知（§3.5） */
+export type PushFrame = WebPushFrame | ApnsPushFrame;
+/** 中继 → 实例：投递结果；gone = 订阅 / 设备已失效，实例该删记录 */
+export interface PushAckFrame { t: "push-ack"; id: string; ok: boolean; status?: number; gone?: true; error?: string }
+/** welcome 里中继报的推送能力：没有 vapidPublicKey = 中继不做 Web Push；老中继不带这个字段 */
+export interface RelayPushCapabilities { vapidPublicKey?: string; apns: boolean }
 export interface PeerRecord { fp: string; slug: string; name: string; online: boolean; lastSeen: string; mutual?: boolean }
 
 /** 文本 → 对象；不是带字符串 t 的 JSON 对象都算坏帧 */
@@ -236,6 +253,45 @@ export function asCode(f: Obj): CodeFrame | null {
   const exp = typeof f.exp === "number" && Number.isFinite(f.exp) ? f.exp : undefined;
   if (f.op === "put" && exp === undefined) return null;
   return { t: "code", op: f.op, code, exp };
+}
+
+/** 订阅对象的形状：endpoint 必须是 https URL（私网 / 回环的判定在 lib/push-endpoint.ts），两把密钥非空。bridge 收订阅、中继收 push 帧都用它 */
+export function asWebPushSubscription(v: unknown): WebPushSubscription | null {
+  if (!v || typeof v !== "object") return null;
+  const s = v as Obj;
+  const keys = s.keys && typeof s.keys === "object" ? (s.keys as Obj) : null;
+  if (!str(s.endpoint) || s.endpoint.length > 2048 || !keys || !str(keys.p256dh) || !str(keys.auth)) return null;
+  try {
+    if (new URL(s.endpoint).protocol !== "https:") return null;
+  } catch {
+    return null; // 解析不了的 endpoint 不可能是推送服务的地址
+  }
+  return { endpoint: s.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } };
+}
+
+export function asPush(f: Obj): PushFrame | null {
+  if (f.t !== "push" || !str(f.id) || !ID_RE.test(f.id)) return null;
+  if (!str(f.payload) || f.payload.length > PUSH_MAX_PAYLOAD_CHARS) return null;
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.trunc(v) : undefined);
+  if (f.kind === "webpush") {
+    const subscription = asWebPushSubscription(f.subscription);
+    if (!subscription || (f.ttl !== undefined && num(f.ttl) === undefined)) return null;
+    return { t: "push", id: f.id, kind: "webpush", subscription, payload: f.payload, ...(f.ttl !== undefined ? { ttl: num(f.ttl) } : {}) };
+  }
+  if (f.kind === "apns") {
+    if (!str(f.token) || !APNS_TOKEN_RE.test(f.token) || (f.badge !== undefined && num(f.badge) === undefined)) return null;
+    return { t: "push", id: f.id, kind: "apns", token: f.token.toLowerCase(), payload: f.payload, ...(f.badge !== undefined ? { badge: num(f.badge) } : {}) };
+  }
+  return null;
+}
+
+export function asPushAck(f: Obj): PushAckFrame | null {
+  if (f.t !== "push-ack" || !str(f.id) || !ID_RE.test(f.id) || typeof f.ok !== "boolean") return null;
+  const status = typeof f.status === "number" && Number.isFinite(f.status) ? Math.trunc(f.status) : undefined;
+  return {
+    t: "push-ack", id: f.id, ok: f.ok, ...(status !== undefined ? { status } : {}),
+    ...(f.gone === true ? { gone: true } : {}), ...(str(f.error) ? { error: f.error } : {}),
+  };
 }
 
 /** 请求路径规整后必须在 /api/v1 下（peer 路径两端都查） */

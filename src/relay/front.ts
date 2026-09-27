@@ -18,7 +18,7 @@ import type { InstanceRecord } from "./directory.js";
 import { KeyedWindows } from "./limiter.js";
 import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
 import type { Router } from "./router.js";
-import type { Conn, ConnData, Logger } from "./server.js";
+import type { Conn, ConnData, Logger } from "./types.js";
 
 /** front 自己用到的三项配额（§6.1）；server 把整个 Limits 传进来，这里只挑这三个 */
 interface FrontLimits {
@@ -32,6 +32,8 @@ export interface FrontDeps {
   trustProxy: boolean;
   version: string;
   commit?: string;
+  /** 中继模式的浏览器用它订阅 Web Push（/app-config.json）；中继没配 VAPID 就不带 */
+  vapidPublicKey?: string;
   headTimeoutMs: number;
   maxChunkBytes: number;
   limits: FrontLimits;
@@ -141,7 +143,10 @@ export class Front {
     if (p.startsWith(MACHINE_PREFIX)) return this.machine(req, url, ip);
     if (p === "/api/v1/codes/lookup") return req.method === "POST" ? this.codeLookup(req, ip) : text(405, "method not allowed");
     if (req.method !== "GET" && req.method !== "HEAD") return text(405, "method not allowed");
-    if (p === "/app-config.json") return json(200, { mode: "relay", relayBase: this.d.base, version: this.d.version, ...(this.d.commit ? { commit: this.d.commit } : {}) });
+    if (p === "/app-config.json") {
+      const extra = { ...(this.d.commit ? { commit: this.d.commit } : {}), ...(this.d.vapidPublicKey ? { vapidPublicKey: this.d.vapidPublicKey } : {}) };
+      return json(200, { mode: "relay", relayBase: this.d.base, version: this.d.version, ...extra });
+    }
     if (p === "/c") return redirect(`/c/${encodeURIComponent(url.searchParams.get("code") ?? "")}`);
     if (p.startsWith("/c/")) return this.byCode(decodeURIComponent(p.slice(3)), ip);
     if (p === "/i") {
