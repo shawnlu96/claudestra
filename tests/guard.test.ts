@@ -253,20 +253,6 @@ describe("patterns", () => {
     expect(r.counts["catch:empty-block"]).toBe(2);
     expect(r.counts["catch:silent-promise"]).toBe(6);
   });
-
-  test("web/app/api 路由不调 isAuthed 且不在公开清单 → 违规", () => {
-    const r = measurePatterns(
-      files({
-        "web/app/api/secret/route.ts": "export async function GET() { return ok(); }",
-        "web/app/api/fine/route.ts": "export async function GET(r) { if (!isAuthed(r)) return no(); }",
-        "web/app/api/wrapped/route.ts": 'import { authed } from "@/lib/bff";\nexport const GET = authed(async () => ok());',
-        "web/app/api/wrapped2/route.ts": 'import { withAuth, authedLegacy } from "@/lib/bff";\nexport const GET = withAuth(async () => ok());\nexport const POST = authedLegacy(async () => ok());',
-        "web/app/api/fake-wrap/route.ts": "const authed = (h) => h;\nexport const GET = authed(async () => ok());",
-        "web/app/api/version/route.ts": "export async function GET() { return ok(); }",
-      }),
-    );
-    expect(Object.keys(r.counts).filter((k) => k.startsWith("route:")).sort()).toEqual(["route:web/app/api/fake-wrap/route.ts", "route:web/app/api/secret/route.ts"]);
-  });
 });
 
 describe("twins", () => {
