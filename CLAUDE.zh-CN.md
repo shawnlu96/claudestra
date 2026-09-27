@@ -131,20 +131,20 @@ bun src/manager.ts cron-history [name|id]
 # v2.15+ 一键邀请（推荐）：A 生成（连着中继是链接，否则是邀请串）、B 点开或
 # 粘贴，B 的 bridge 自动回调 A 兑换——免回执/accept。一次性、24h 过期，过期/
 # 撤销连带吊销内嵌 token。B 加入默认不反向开放（单向授权）；对称 = B 也发一张。
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口 / peer 端口）
-bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>] [--force]  # B: 粘贴即完成（--agents = 可选的反向开放）
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口 / peer 端口）
+bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>]  # B: 粘贴即完成（--agents = 可选的反向开放）
 bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期 + 吊销其 token）
 bun src/manager.ts peer-invite-revoke <inv_id>    # 作废未兑换的邀请 + 其内嵌 token
 # 旧三步握手（对方跑 v2.15 之前的版本时用）：
-bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <我方bridge地址>] [--force] [--rotate]  # A: 打印邀请串（--url 不给则自动探测：Tailscale 优先，其次内网）
-bun src/manager.ts peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址> [--force]           # B: 存下 A 并打印回执
+bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <我方bridge地址>] [--rotate]  # A: 打印邀请串（--url 不给则自动探测：Tailscale 优先，其次内网）
+bun src/manager.ts peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址>           # B: 存下 A 并打印回执
 bun src/manager.ts peer-http-accept <name> '<回执串>'                                                  # A: 完成握手
 bun src/manager.ts peer-http-test <name>          # GET 对方 /agents — 验证连通 + scope
 bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状态
-bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: 原地改入站 scope（token 不变，立即生效）
+bun src/manager.ts peer-http-scope <name> --agents <a,b|*>  # v2.11.1+: 原地改入站 scope（token 不变，立即生效）
 bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
 # send_to_agent 的 target 语法："<agent>@<peer>" 或 "peer:<peer>.<agent>"
-# 大总管永远不可分享给 peer（v2.15+ 硬规则，--force 也不放行；历史 peer token
+# 大总管永远不可分享给 peer（v2.15+ 硬规则；历史 peer token
 # 列了 master 的在 agentInScope 层被截断）
 
 # 体检（只读；出问题时第一个该跑的）
@@ -163,7 +163,7 @@ bun src/manager.ts auto-update claude on|off       # Claude Code CLI（每周轮
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
 bun src/manager.ts token-list
 bun src/manager.ts token-revoke <tokenId|name>
-bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）
+bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）；之后用 external <agent> on|off 切换
 
 # token 用量统计（解析 ~/.claude/projects/<slug>/<sessionId>.jsonl）
 bun src/manager.ts cost [--agent <name>] [--today|--week]

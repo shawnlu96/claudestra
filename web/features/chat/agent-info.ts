@@ -63,7 +63,8 @@ export function fetchAgentInfo(name: string): Promise<Res<{ agent: AgentInfo }>>
   return call(`/api/agents/info?name=${encodeURIComponent(name)}`);
 }
 
-/** 关闭且正在共享时后端要 confirm=会话名，否则回 409 needConfirm（前端据此弹输入确认框） */
-export function setAgentExternal(name: string, on: boolean, confirm?: string): Promise<Res<{ removedFromPeers?: string[] }>> {
+/** 关闭且正在共享时后端要 confirm=会话名，否则回 409 needConfirm（前端据此弹输入确认框）。
+ *  stillSharedWith = 持全量 "*" 授权、关了闸门仍能访问的 peer（要去 Peer 面板改 scope）。 */
+export function setAgentExternal(name: string, on: boolean, confirm?: string): Promise<Res<{ removedFromPeers?: string[]; stillSharedWith?: string[] }>> {
   return call("/api/agents/external", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, on, confirm }) });
 }

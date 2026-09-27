@@ -1,24 +1,38 @@
 /**
  * /api/v1/agents/:name/info（GET）与 /api/v1/agents/:name/external（POST）——web「会话详情」弹窗的后端
- * （owner 2026-09-27）。只给全权 token：详情里有本机路径 / sessionId / Discord 频道，peer 不该看到。
- * 关闭 external 时若该 agent 正在某个 peer 的 scope 里，必须带 confirm=<会话名> 才执行（前端要求输入会话名），
+ * （owner 2026-09-27）。只给全权且非 peer 的 token：详情里有本机路径 / sessionId / Discord 频道，peer 不该看到
+ * （老版本能给 peer 签 "*" scope，只看 isFullScope 会把这种历史 token 放进来）。
+ * 关闭 external 时若该 agent 正在某个 peer 的 scope 里，必须带 confirm=<会话名>（逐字符相等）才执行，
  * 否则 409 并回 sharedWith 让前端弹确认。改动本身走 runManager("external")，bridge 不直写 registry。
+ * registry / principals 的读取可注入：tests/agent-info-routes.test.ts 用假数据覆盖鉴权与确认分支。
  */
-import type { Principal } from "../lib/principals.js";
+import type { Principal, PrincipalsFile } from "../lib/principals.js";
 import { readPrincipals } from "../lib/principals.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
 
-export async function handleAgentInfoRoutes(req: Request, path: string, principal: Principal, runManager: RunManager): Promise<Response | null> {
+export interface AgentInfoIo {
+  readRegistryAgents: () => Promise<RegistryAgent[]>;
+  readPrincipals: () => Promise<PrincipalsFile>;
+}
+const defaultIo: AgentInfoIo = { readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals() };
+
+export async function handleAgentInfoRoutes(
+  req: Request,
+  path: string,
+  principal: Principal,
+  runManager: RunManager,
+  io: AgentInfoIo = defaultIo,
+): Promise<Response | null> {
   const m = path.match(/^\/agents\/([^/]+)\/(info|external)$/);
   if (!m) return null;
-  if (!isFullScope(principal)) return forbidden(`agent ${m[2]} requires a full-scope token`);
+  if (!isFullScope(principal) || principal.peer) return forbidden(`agent ${m[2]} requires a full-scope (non-peer) token`);
   const bare = decodeURIComponent(m[1]).replace(/^agent-/, "");
   if (bare === "master") return apiJson(400, { ok: false, error: "master has no registry details" });
-  const [agents, pf] = await Promise.all([readRegistryAgents(), readPrincipals()]);
+  const [agents, pf] = await Promise.all([io.readRegistryAgents(), io.readPrincipals()]);
   const a = agents.find((x) => x.name === `agent-${bare}` || x.name === bare);
   if (!a) return apiJson(404, { ok: false, error: `agent "${bare}" not found` });
   const sharedWith = peersSharingAgent(pf.principals, bare);

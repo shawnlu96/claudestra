@@ -25,12 +25,16 @@ export async function cmdAgentExternal(name: string, mode: string) {
   reg.agents[key].external = on;
   await saveRegistry(reg);
   let removedFromPeers: string[] = [];
+  let stillSharedWith: string[] = [];
   if (!on) {
     const { readPrincipals, writePrincipals } = await import("../lib/principals.js");
-    const { dropAgentFromPeerScopes } = await import("../lib/peer-scope-gate.js");
+    const { dropAgentFromPeerScopes, peersSharingAgent } = await import("../lib/peer-scope-gate.js");
     const file = await readPrincipals();
     removedFromPeers = dropAgentFromPeerScopes(file.principals, bare);
     if (removedFromPeers.length) await writePrincipals(file);
+    // 持有全量 "*" 授权的历史 peer token 没有可摘的名字，闸门关了它照样能访问：如实报出来，
+    // 前端据此提示去 Peer 面板改那条 scope——不然「已关闭」会造成安全错觉
+    stillSharedWith = peersSharingAgent(file.principals, bare);
   }
-  output({ ok: true, agent: bare, external: on, removedFromPeers });
+  output({ ok: true, agent: bare, external: on, removedFromPeers, stillSharedWith });
 }

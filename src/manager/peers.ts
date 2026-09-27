@@ -26,7 +26,7 @@ function selfPeerName(): string {
 }
 
 /** invite/join/scope 共用的 scope 校验。external 是正式闸门（owner 2026-09-27）：未开闸的 agent、"*"、master
- *  一律拦，--force 不再放行——force 只剩 --rotate 之类别的用途。规则本体在 lib/peer-scope-gate.ts（有单测）。 */
+ *  一律拦。--force 对这些命令已无作用（flag 仍被接受，旧脚本不报错）；规则本体在 lib/peer-scope-gate.ts（有单测）。 */
 async function checkPeerScope(agents: string[], _force: boolean): Promise<{ error?: string; warnings: string[] }> {
   const { scopeGateError } = await import("../lib/peer-scope-gate.js");
   const reg = await loadRegistry();
@@ -52,7 +52,7 @@ export async function cmdPeerHttpInvite(peerName: string, agentsCsv: string, myU
   const { upsertHttpPeer, encodePeerHandshake, findHttpPeer } = await import("../lib/peers.js");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   if (!peerName || agents.length === 0) {
-    output({ ok: false, error: "peer-http-invite <peerName> --agents <a,b> [--url <我方bridge地址>] [--force] [--rotate]（--url 不给会自动探测本机 Tailscale/内网地址）" });
+    output({ ok: false, error: "peer-http-invite <peerName> --agents <a,b> [--url <我方bridge地址>] [--rotate]（--url 不给会自动探测本机 Tailscale/内网地址）" });
     return;
   }
   const resolvedI = await resolveMyBridgeUrl(myUrl);
@@ -95,7 +95,7 @@ export async function cmdPeerHttpJoin(peerName: string, handshakeStr: string, ag
   const { upsertHttpPeer, parsePeerHandshake, encodePeerHandshake, findHttpPeer } = await import("../lib/peers.js");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   if (!peerName || !handshakeStr || agents.length === 0) {
-    output({ ok: false, error: "peer-http-join <peerName> '<邀请串>' --agents <a,b> [--url <我方地址>] [--force] [--rotate]（--url 不给会自动探测本机 Tailscale/内网地址）" });
+    output({ ok: false, error: "peer-http-join <peerName> '<邀请串>' --agents <a,b> [--url <我方地址>] [--rotate]（--url 不给会自动探测本机 Tailscale/内网地址）" });
     return;
   }
   const resolvedJ = await resolveMyBridgeUrl(myUrl);
@@ -192,7 +192,7 @@ export async function cmdPeerHttpScope(peerName: string, agentsCsv: string, forc
   const { findHttpPeer } = await import("../lib/peers.js");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   if (!peerName || agents.length === 0) {
-    output({ ok: false, error: "peer-http-scope <peerName> --agents <a,b|*> [--force]" });
+    output({ ok: false, error: "peer-http-scope <peerName> --agents <a,b|*>" });
     return;
   }
   const peer = await findHttpPeer(peerName);
@@ -281,7 +281,7 @@ export async function cmdPeerInviteNew(agentsCsv: string, myUrl: string, force: 
   const { randomBytes } = await import("crypto");
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   if (agents.length === 0) {
-    output({ ok: false, error: "peer-invite-new --agents <a,b|*> [--url <我方地址>] [--force]" });
+    output({ ok: false, error: "peer-invite-new --agents <a,b|*> [--url <我方地址>]" });
     return;
   }
   await sweepExpiredInvites();
@@ -435,7 +435,7 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse): Promise<{ res: Redeem
 export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUrl: string, force: boolean, peerUrlOverride = "") {
   const { parsePeerInviteV2, parsePeerHandshake, upsertHttpPeer, removeHttpPeer, readPeers, writePeers, findHttpPeer, isSameInviter } =
     await import("../lib/peers.js");
-  if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--peer-url <对方地址覆盖>] [--force]" }); return; }
+  if (!inviteStr) { output({ ok: false, error: "peer-join-auto '<邀请串>' [--agents <a,b>] [--url <我方地址>] [--peer-url <对方地址覆盖>]" }); return; }
   const hs = parsePeerInviteV2(inviteStr);
   // v2.16.1 跨 tailnet 纠偏:邀请串嵌的是**发方视角**的 tailscale IP,跨 tailnet
   // 设备共享下接方看到的是映射地址(2026-07-31 实战:串里 .46,我方视角 .45)。
