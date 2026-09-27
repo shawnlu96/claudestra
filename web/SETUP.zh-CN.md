@@ -147,7 +147,8 @@ Claudestra 的全部意义就是用手机操控工作站。按推荐顺序：
 
 1. `claudestra migrate-web-state` —— 把 `~/.claude-orchestrator/web/` 打包进 `~/.claude-orchestrator/backups/web-<时间戳>.tgz`，
    再把 8 张设置表（资料、agent 设置、skill 偏好、推送订阅、隐藏区间、已读标记、APNs 设备）和 `groqApiKey` 复制进 bridge 的
-   `web-state.sqlite`。幂等；旧数据原地不动。
+   `web-state.sqlite`，并把 `web/.env.local` 里的 `APNS_*` / `PUSH_VAPID_SUBJECT` 补进根 `.env`（bridge 的推送只读根 `.env`）。
+   幂等；旧数据原地不动。
 2. 打开新入口（`http://127.0.0.1:3847/`、中继或你的 Tailscale 地址），配对一次，确认能聊、能收推送。
 3. `claudestra retire-web` —— `BRIDGE_STATIC_DIR` 没在托管（`/app-config.json` 不应答）**或**没有第 1 步的备份时拒绝；
    否则 `launchctl bootout` 旧 daemon、把 plist 挪到 `~/.claude-orchestrator/backups/com.claudestra.web.plist.<时间戳>`，

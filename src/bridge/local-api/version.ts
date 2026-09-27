@@ -13,8 +13,12 @@ import { readBuildInfo } from "../../lib/static-site.js";
 import { apiJson } from "../api-respond.js";
 
 export const API_VERSION = 1;
-/** 低于这个版本的前端不认这套 API（前端据此提示升级） */
-export const MIN_CLIENT = "2.29.0";
+/**
+ * 低于这个版本的前端不认这套 API（前端据此提示「托管的前端太旧，让中继更新」）。= 这套 /api/v1 首次出现时仓库的版本号；
+ * 只在 /api/v1 发生前端不兼容的变化时才抬，抬到那次发版的版本。注意它比的是 bundle 烤入的仓库版本（web/lib/build-info.ts），
+ * 写得比当前 package.json 还高会让刚构建的前端都被判太旧。
+ */
+export const MIN_CLIENT = "2.28.0";
 const CACHE_MS = 30_000;
 
 let cache: { version: string; commit: string; at: number } | null = null;

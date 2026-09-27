@@ -4,7 +4,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { copyWebStateTables } from "../src/lib/web-state-migrate.js";
@@ -108,6 +108,19 @@ describe("migrateWebState", () => {
     expect(r.settingsDb).toBeNull();
     expect(r.tables).toBeNull();
     expect(r.config).toEqual({ groqApiKey: false, lang: false });
+    expect(r.env).toEqual([]); // 没传 env 选项 = 不碰任何 .env
+  });
+  test("推送配置：web/.env.local 的 APNS_* / PUSH_VAPID_SUBJECT 补进根 .env，已有的键不动，别的键不搬；幂等；没 .env.local 就跳过", async () => {
+    const webEnvLocal = join(root, "env.local");
+    const envFile = join(root, "dotenv");
+    writeFileSync(webEnvLocal, "APNS_TEAM_ID=G3TEAM\nAPNS_ENV=production\nPUSH_VAPID_SUBJECT=mailto:a@b\nINTERNAL_API_KEY=nope\n");
+    writeFileSync(envFile, "BRIDGE_PORT=3847\nAPNS_ENV=sandbox\n");
+    const opts = { webDir, backupDir: join(root, "backups4"), targetDb, adopt: fakeAdopt, env: { webEnvLocal, envFile } };
+    expect(((await migrateWebState(opts)) as MigrateResult).env).toEqual(["APNS_TEAM_ID", "PUSH_VAPID_SUBJECT"]);
+    expect(readFileSync(envFile, "utf8")).toBe("BRIDGE_PORT=3847\nAPNS_ENV=sandbox\nAPNS_TEAM_ID=G3TEAM\nPUSH_VAPID_SUBJECT=mailto:a@b\n");
+    expect(((await migrateWebState(opts)) as MigrateResult).env).toEqual([]);
+    expect(((await migrateWebState({ ...opts, env: { webEnvLocal: join(root, "none"), envFile } })) as MigrateResult).env).toEqual([]);
+    expect(readFileSync(envFile, "utf8")).toBe("BRIDGE_PORT=3847\nAPNS_ENV=sandbox\nAPNS_TEAM_ID=G3TEAM\nPUSH_VAPID_SUBJECT=mailto:a@b\n");
   });
 });
 

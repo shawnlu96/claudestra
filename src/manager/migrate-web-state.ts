@@ -3,13 +3,16 @@
  *   1. 先把 ~/.claude-orchestrator/web/ 整目录 tar 进 ~/.claude-orchestrator/backups/web-<时间戳>.tgz（回滚 = 还原它）
  *   2. web/db/settings.db 的 8 张表 INSERT OR IGNORE 进 web-state.sqlite（lib/web-state-migrate.ts；可重复执行）
  *   3. web/config.json 的 groqApiKey / lang 补进 bridge 的 config.json（已设过的不覆盖）
+ *   4. 仓库 web/.env.local 的 APNS_* / PUSH_VAPID_SUBJECT 补进仓库根 .env（bridge/push/init.ts 只读根 .env；不搬 iOS 推送会静默失效）
  * 旧数据只作废不删；旧 Next 可以继续跑（它只读自己那份）。
  */
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { adoptWebSettings } from "../lib/config-store.js";
+import { mergeEnvContent, readDotenvFileSync } from "../lib/env-file.js";
 import { STATE_DIR } from "../lib/paths.js";
+import { REPO_ROOT } from "../lib/repo-root.js";
 import { closeWebState, openWebState } from "../lib/web-state.js";
 import { copyWebStateTables, type TableCopy } from "../lib/web-state-migrate.js";
 import { output } from "./core.js";
@@ -21,6 +24,8 @@ export interface MigrateOpts {
   targetDb?: string;
   /** 单测换成不碰生产 config.json 的实现 */
   adopt?: typeof adoptWebSettings;
+  /** 推送配置的搬运：cmdMigrateWebState 传仓库真实路径；不传 = 不搬（单测不会碰到真 .env） */
+  env?: { webEnvLocal: string; envFile: string };
   now?: Date;
 }
 
@@ -30,6 +35,22 @@ export interface MigrateResult {
   settingsDb: string | null;
   tables: Record<string, TableCopy> | null;
   config: { groqApiKey: boolean; lang: boolean };
+  /** 补进根 .env 的键 */
+  env: string[];
+}
+
+const PUSH_ENV_RE = /^(APNS_[A-Z_]+|PUSH_VAPID_SUBJECT)$/;
+
+/** 旧 .env.local 里的推送配置补进根 .env：只补缺、不改已有的值；返回补了哪些键 */
+function carryPushEnv(webEnvLocal: string, envFile: string): string[] {
+  const src = readDotenvFileSync(webEnvLocal);
+  if (!src) return [];
+  const have = readDotenvFileSync(envFile) ?? {};
+  const updates = Object.fromEntries(Object.entries(src).filter(([k, v]) => PUSH_ENV_RE.test(k) && v && !(k in have)));
+  const keys = Object.keys(updates);
+  if (!keys.length) return [];
+  writeFileSync(envFile, mergeEnvContent(existsSync(envFile) ? readFileSync(envFile, "utf8") : null, updates, "# Claudestra"));
+  return keys;
 }
 
 async function tarBackup(webDir: string, backupDir: string, now: Date): Promise<string> {
@@ -78,9 +99,10 @@ export async function migrateWebState(o: MigrateOpts = {}): Promise<MigrateResul
     }
   }
   const config = await (o.adopt ?? adoptWebSettings)(readWebConfig(join(webDir, "config.json")));
-  return { ok: true, backup, settingsDb: tables ? settingsDb : null, tables, config };
+  const env = o.env ? carryPushEnv(o.env.webEnvLocal, o.env.envFile) : [];
+  return { ok: true, backup, settingsDb: tables ? settingsDb : null, tables, config, env };
 }
 
 export async function cmdMigrateWebState(): Promise<void> {
-  output({ ...(await migrateWebState()) });
+  output({ ...(await migrateWebState({ env: { webEnvLocal: join(REPO_ROOT, "web", ".env.local"), envFile: join(REPO_ROOT, ".env") } })) });
 }

@@ -192,8 +192,10 @@ updating to a bridge that serves `web/out`:
 1. `claudestra migrate-web-state` — tars `~/.claude-orchestrator/web/` into
    `~/.claude-orchestrator/backups/web-<ts>.tgz`, then copies the 8 settings tables
    (profile, agent settings, skill prefs, push subscriptions, hidden ranges, unread
-   marks, APNs devices) and `groqApiKey` into the bridge's `web-state.sqlite`.
-   Idempotent; the old data is left in place.
+   marks, APNs devices) and `groqApiKey` into the bridge's `web-state.sqlite`, and
+   carries `APNS_*` / `PUSH_VAPID_SUBJECT` from `web/.env.local` into the root `.env`
+   (the bridge's push sender only reads the root `.env`). Idempotent; the old data is
+   left in place.
 2. Open the new entry (`http://127.0.0.1:3847/`, the relay, or your Tailscale URL),
    pair once and check chat + push.
 3. `claudestra retire-web` — refuses until `BRIDGE_STATIC_DIR` is served
