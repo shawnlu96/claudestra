@@ -8,7 +8,7 @@ import {
   writeProjects,
   resolveProjectForDir,
   resolveProjectForDirOrMain,
-  addDirIfUncovered,
+  projectFromAssignments,
   slugifyProjectId,
   normalizeDir,
   PROJECT_ID_RE,
@@ -58,26 +58,21 @@ describe("resolveProjectForDirOrMain（worktree 归主仓）", () => {
   });
 });
 
-describe("addDirIfUncovered（create 显式 --project 时把目录记进去）", () => {
-  test("不在名下就加；已覆盖（含子目录）不加；傘形根不加", () => {
-    const p = proj("claudestra", ["/r/claude-orchestrator"]);
-    expect(addDirIfUncovered(p, "/r/claudestra-relay")).toBe(true);
-    expect(p.dirs).toEqual(["/r/claude-orchestrator", "/r/claudestra-relay"]);
-    expect(addDirIfUncovered(p, "/r/claude-orchestrator/web")).toBe(false);
-    expect(addDirIfUncovered(p, "/tmp")).toBe(false);
-    expect(addDirIfUncovered(p, HOME)).toBe(false);
-    expect(p.dirs).toHaveLength(2);
+describe("projectFromAssignments（目录没被覆盖时沿用以前的显式分配，不改 dirs）", () => {
+  const projects = [proj("claudestra", ["/r/claude-orchestrator"]), proj("audit", ["/r/audit"])];
+  test("同一精确目录以前的 agent 都分在同一个 project → 沿用", () => {
+    const agents = [{ cwd: "/r/ext-review", projectId: "audit" }, { cwd: "/r/ext-review/", projectId: "audit" }];
+    expect(projectFromAssignments(projects, agents, "/r/ext-review")?.id).toBe("audit");
   });
-
-  test("仓库外的链接 worktree 不记（用完即删，记了留死路径）；仓内子目录照记", () => {
-    const p = proj("claudestra", ["/r/claude-orchestrator"]);
-    const other = proj("other", ["/r/other"]);
-    const mainOf = (d: string) => (d.startsWith("/private/tmp/wt-") || d.startsWith("/r/claude-orchestrator") ? "/r/claude-orchestrator" : null);
-    expect(addDirIfUncovered(p, "/private/tmp/wt-peer", mainOf)).toBe(false);
-    expect(addDirIfUncovered(other, "/private/tmp/wt-peer", mainOf)).toBe(false); // 指给别的 project 也不记
-    expect(addDirIfUncovered(other, "/r/claude-orchestrator/web", mainOf)).toBe(true); // 仓内子目录不是 worktree
-    expect(addDirIfUncovered(p, "/r/other-repo", mainOf)).toBe(true);
-    expect(p.dirs).toEqual(["/r/claude-orchestrator", "/r/other-repo"]);
+  test("分歧 / 只在子目录 / project 已删 / 没记录 → null（按目录名新建，不猜）", () => {
+    expect(projectFromAssignments(projects, [{ cwd: "/r/x", projectId: "audit" }, { cwd: "/r/x", projectId: "claudestra" }], "/r/x")).toBeNull();
+    expect(projectFromAssignments(projects, [{ cwd: "/r/x/sub", projectId: "audit" }], "/r/x")).toBeNull();
+    expect(projectFromAssignments(projects, [{ cwd: "/r/x", projectId: "gone" }], "/r/x")).toBeNull();
+    expect(projectFromAssignments(projects, [], "/r/x")).toBeNull();
+  });
+  test("只读：不改 project 的 dirs", () => {
+    projectFromAssignments(projects, [{ cwd: "/r/ext-review", projectId: "audit" }], "/r/ext-review");
+    expect(projects[1].dirs).toEqual(["/r/audit"]);
   });
 });
 
