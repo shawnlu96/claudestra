@@ -117,7 +117,7 @@ export interface InstallCliResult {
   removedOldAutostartWrapper: boolean;
   /** Claude Code 的 ~/.claude/settings.json 里 typing-hook command 是否被迁移成 bun 绝对路径 */
   migratedHookCommand: boolean;
-  /** v2.21.5+ SessionStart 记忆召回 hook:installed=本次写入 / present=早就有 / skipped=本机没有 ~/mem0-mcp/recall.py */
+  /** SessionStart hook(HANDOFF 注入 + 有 mem0 时的召回):installed=本次写入 / present=早就有 */
   recallHook?: "installed" | "present";
   /** iTerm 的 TmuxDashboardLimit 是否被调高（默认 10 → 200），从 oldValue → 200。null = iTerm 没装跳过；undefined = 已经 ≥ 200 无需改 */
   bumpedTmuxDashboardLimit?: { from: number; to: number; needsITermRestart?: boolean } | null;
