@@ -655,22 +655,14 @@ async function sendToAgentTool(args: any) {
     expecting: typeof args?.expecting === "string" ? args.expecting : undefined,
     oneShot,
   });
-  // v1.9.21+: bridge 现在会自动把对方的下一条 reply push 回你的 ws，
-  // 你不用 fetch_messages 轮询。直接 end_turn，等对方那条 push 消息触发下一轮。
-  // v2.4.16+: oneShot=true 时 bridge 既不挂 pending 也不会 push-back，advice 反映这点。
+  // bridge 会把对方的下一条 reply push 回来（oneShot 不会）；queued = 对方在回合中、已排队落盘，这一轮结束才收到，别当成没发出去重发
+  const sent = result.queued ? `${result.targetName} 正在忙，消息已排队（bridge 重启也不丢），它这一轮结束就会收到。` : "";
   const advice = oneShot
-    ? `消息已 fire-and-forget 发给 ${result.targetName}。**不期待任何 push-back**。对方收到会自己判断要不要回，可能直接 end_turn。end_turn 等用户下一步指示即可。`
+    ? `${sent}消息已 fire-and-forget 发给 ${result.targetName}。**不期待任何 push-back**。对方收到会自己判断要不要回，可能直接 end_turn。end_turn 等用户下一步指示即可。`
     : result.pushBack
-    ? `消息已发送给 ${result.targetName}。**不要轮询 fetch_messages** —— bridge 会在对方 reply 时自动把回复 push 到你这边作为新的入站消息，结束本轮等即可。`
+    ? `${sent}消息已发送给 ${result.targetName}。**不要轮询 fetch_messages** —— bridge 会在对方 reply 时自动把回复 push 到你这边作为新的入站消息，结束本轮等即可。`
     : `消息已发送给 ${result.targetName}。如需获取回复，可用 fetch_messages 轮询频道 ${result.targetChannelId}`;
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: advice,
-      },
-    ],
-  };
+  return { content: [{ type: "text" as const, text: advice }] };
 }
 
 // 处理工具调用

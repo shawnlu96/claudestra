@@ -902,8 +902,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
     q.push({ env, to, heldAt: Date.now() });
     heldLocalMsgs.set(to.channelId, q);
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${q.length} 条`);
-    // 对调用方语义仍是「已受理投递」;真正 ws.send 在 Stop/扫描时发生
-    return { envelope: env, outcome: { kind: "sent" } };
+    // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
+    return { envelope: env, outcome: { kind: "sent", note: "queued" } };
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
@@ -2521,6 +2521,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             targetChannelId: target.channelId,
             targetName,
             pushBack: !oneShot,
+            queued: delivery.outcome.note === "queued", // 对方在回合中:已排队落盘,它这一轮结束才收到
           },
         }));
       } catch (err) {
