@@ -149,12 +149,13 @@ describe("agent-info-routes：POST label", () => {
 describe("agentListExtras（GET /agents 的附加字段）", () => {
   test("external / label 人人可见；sharedPeers 只给全权非 peer（谁在共享是 owner 的事）", async () => {
     const own = await agentListExtras(owner, io);
-    expect(own("agent-open", { external: true, label: "L" })).toMatchObject({ external: true, label: "L", sharedPeers: 2 });
-    expect(own("agent-priv", {})).toMatchObject({ external: false, label: null, sharedPeers: 1 }); // "*" peer 也算
+    expect(own("agent-open", { external: true, label: "L" })).toMatchObject({ external: true, label: "L", sharedPeers: 2, sharedWith: ["A", "B"] });
+    expect(own("agent-priv", {})).toMatchObject({ external: false, label: null, sharedPeers: 1, sharedWith: ["B"] }); // "*" peer 也算
     for (const p of [peerStar, scoped]) {
       const x = (await agentListExtras(p, io))("agent-open", { external: true });
       expect(x.external).toBe(true);
       expect(x.sharedPeers).toBeUndefined();
+      expect(x.sharedWith).toBeUndefined(); // peer 名单同一道门：peer / 受限 token 看不到谁在共享
     }
   });
 });
