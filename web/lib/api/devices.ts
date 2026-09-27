@@ -26,6 +26,9 @@ export interface DeviceInfo {
   expiresAt?: string;
   /** 就是本浏览器这一条 */
   current?: boolean;
+  /** 审计：谁签的配对码 / 谁批准的（凭据 id；"cli" = 电脑终端） */
+  issuedBy?: string | null;
+  approvedBy?: string | null;
 }
 
 const m = (fp: string) => ({ fp });
