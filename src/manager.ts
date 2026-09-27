@@ -3504,12 +3504,11 @@ switch (cmd) {
   }
 
   case "install-hooks": {
-    // v2.21.5+ SessionStart 记忆召回 hook(~/mem0-mcp/recall.py + HANDOFF.md 注入)。
+    // SessionStart hook(HANDOFF.md 注入;有 ~/mem0-mcp/recall.py 时加 mem0 召回)。
     // setup / install-cli / update 都会顺手跑;这条给「只想挂/修 hook、不想动 daemon」的场合。
     const { ensureRecallHookInstalled } = await import("./lib/cli-install.js");
     const r = await ensureRecallHookInstalled(resolveBunPath(), REPO_ROOT);
-    output({ ok: true, recallHook: r.status, command: r.command,
-      note: r.status === "skipped" ? "本机没有 ~/mem0-mcp/recall.py,未注册(可设 MEM0_RECALL_SCRIPT)" : undefined });
+    output({ ok: true, recallHook: r.status, command: r.command });
     break;
   }
 
