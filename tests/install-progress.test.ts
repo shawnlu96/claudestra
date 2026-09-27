@@ -3,18 +3,13 @@
  *
  * 由来：试装的人装到一半断了，重跑向导时收尾那步见到 .env 已存在会问「要覆盖吗？」
  * 且默认**否** → 一路回车就 exit(1)，重跑比第一次还难走通。判据一律取落盘事实。
+ * 前端由 bridge 托管静态包后，「web/.env.local」「com.claudestra.web」两项不再存在，多了 web/out。
  */
 import { describe, test, expect } from "bun:test";
 import { assessInstall, parseClientWebCommit, progressChecklist, skippableSteps, webBuildFresh, webDepsFresh } from "../src/lib/install-progress.js";
 
-const none = {
-  envFile: false, webEnvLocal: false, webNextBin: false,
-  webBuildId: false, bridgePlist: false, webPlist: false,
-};
-const all = {
-  envFile: true, webEnvLocal: true, webNextBin: true,
-  webBuildId: true, bridgePlist: true, webPlist: true,
-};
+const none = { envFile: false, webNextBin: false, webBuildId: false, webOut: false, bridgePlist: false };
+const all = { envFile: true, webNextBin: true, webBuildId: true, webOut: true, bridgePlist: true };
 
 describe("assessInstall", () => {
   test("全新机器：既不是续装也不是装完", () => {
@@ -41,13 +36,16 @@ describe("skippableSteps", () => {
   });
 
   test("有构建产物但依赖没了 → 不能跳过构建", () => {
-    // .next 里烤的是上一份依赖的产物；依赖重装过就必须重新构建。
-    const p = assessInstall({ ...none, webBuildId: true, webNextBin: false });
-    expect(p.webBuildId).toBe(true);
+    // .next / out 里烤的是上一份依赖的产物；依赖重装过就必须重新构建。
+    const p = assessInstall({ ...none, webBuildId: true, webOut: true, webNextBin: false });
     expect(skippableSteps(p).webBuild).toBe(false);
   });
 
-  test("依赖和产物都在才跳过构建", () => {
+  test("有 .next 但 web/out 没了（手动清过）→ 必须重建：bridge 托管的正是 out", () => {
+    expect(skippableSteps(assessInstall({ ...all, webOut: false })).webBuild).toBe(false);
+  });
+
+  test("依赖、.next、out 都在才跳过构建", () => {
     expect(skippableSteps(assessInstall(all)).webBuild).toBe(true);
   });
 
@@ -94,11 +92,9 @@ describe("新鲜度：文件在 ≠ 是这一版的（切版本后重跑 setup�
 });
 
 describe("progressChecklist", () => {
-  test("六项都列出来，顺序稳定（横幅逐行渲染它）", () => {
+  test("五项都列出来，顺序稳定（横幅逐行渲染它）", () => {
     const rows = progressChecklist(assessInstall({ ...none, envFile: true }));
-    expect(rows.map((r) => r.key)).toEqual([
-      "envFile", "webEnvLocal", "webNextBin", "webBuildId", "bridgePlist", "webPlist",
-    ]);
+    expect(rows.map((r) => r.key)).toEqual(["envFile", "webNextBin", "webBuildId", "webOut", "bridgePlist"]);
     expect(rows[0].done).toBe(true);
     expect(rows[1].done).toBe(false);
   });
