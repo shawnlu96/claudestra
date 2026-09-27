@@ -8,12 +8,11 @@
 import { watch, type FSWatcher } from "fs";
 import { stat } from "fs/promises";
 import { existsSync, realpathSync } from "fs";
-import { join } from "path";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
 import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
 import { discordReply } from "./discord-api.js";
-import { projectsSlug, findJsonlBySessionId } from "../lib/jsonl-cost.js";
+import { projectJsonlPath } from "../lib/jsonl-cost.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath, translateSessionLine } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, sourceFor } from "../lib/runtimes/index.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
@@ -221,28 +220,6 @@ async function flushText(state: WatcherState, discord: Client) {
   state.tools = state.tools.filter(t => !t.done);
 }
 
-export function getJsonlPath(cwd: string, sessionId: string): string {
-  return join(process.env.HOME || "~", ".claude", "projects", projectsSlug(cwd), `${sessionId}.jsonl`);
-}
-
-/**
- * agent session jsonl 的最近写入时间（ms epoch），没有则 null。
- *
- * 用于 wedge-watcher 判断 agent 是否真在干活：Claude 思考 / 调工具时 jsonl 一直
- * 在追加，mtime 会很新。只看 tmux pane 指纹会把"思考中但屏幕暂时没变"误判成卡死，
- * jsonl mtime 是权威进度信号。
- */
-export async function getJsonlMtime(cwd: string, sessionId: string, runtime?: string): Promise<number | null> {
-  try {
-    const p = sessionJsonlPath(runtime, cwd, sessionId);
-    if (!p) return null;
-    const s = await stat(p);
-    return s.mtimeMs;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * v2.4.17+ 检测当前 turn 末尾是不是 agent 在用 ScheduleWakeup 安排后续唤醒。
  *
@@ -263,7 +240,7 @@ export async function hasRecentScheduleWakeup(
     // 上限只限制了**解析**行数，读取本身仍然把整个文件拉进内存：本机最大的 session
     // jsonl 已经 96MB，而这里只需要最后 60 行。每个回合都这么来一次。
     // 512KB 尾巴足够覆盖 60 行（单行再长也很少超过几 KB）。
-    const jsonlPath = getJsonlPath(cwd, sessionId);
+    const jsonlPath = projectJsonlPath(cwd, sessionId);
     const TAIL_BYTES = 512 * 1024;
     const f = Bun.file(jsonlPath);
     const size = f.size;
@@ -342,6 +319,18 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
  * 见下面 v2.0.18 注释。hoist 到模块级，Stop hook 也能直接调来"强制吃完 jsonl 再
  * flush"（见 drainChannelWatcher）。
  */
+/** 原路径读不到：Claude Code 的 EnterWorktree 会把会话文件整个挪进 worktree 的项目目录（记录里一条 relocated），
+ *  按 id 找到新家接着读。内容原样搬走，lastSize / lineNo 照旧有效；哪都找不到（真被删了）这一拍什么都不做。 */
+async function followMovedSession(state: WatcherState, discord: Client) {
+  const moved = findSessionJsonlBySessionId(state.runtime, state.sessionId);
+  if (!moved || moved === state.jsonlPath) return null;
+  console.log(`🚚 会话文件搬家了（进了 worktree）: ${state.agentName} → ${moved}`);
+  state.watcher.close();
+  state.jsonlPath = moved;
+  state.watcher = watch(moved, (eventType) => { if (eventType === "change") processNewData(state, discord); });
+  return stat(moved);
+}
+
 async function processNewData(state: WatcherState, discord: Client): Promise<void> {
   // v2.0.18+ race fix: 之前是 `if (state.processing) return` 直接 bail。问题：
   // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
@@ -366,8 +355,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
   }
   state.processing = true;
   try {
-    const newStat = await stat(state.jsonlPath);
-    if (newStat.size <= state.lastSize) return;
+    const newStat = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord));
+    if (!newStat || newStat.size <= state.lastSize) return;
     const newData = await Bun.file(state.jsonlPath).slice(state.lastSize, newStat.size).text();
     state.lastSize = newStat.size;
 

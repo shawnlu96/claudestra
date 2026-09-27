@@ -16,6 +16,7 @@
  * 是纯函数、可单测。哪天中间层出现，删掉 translate 即可。
  */
 
+import { stat } from "node:fs/promises";
 import type { StatsWindowScanner } from "./agent-stats.js";
 import { sourceFor, sourceIdForPath } from "./runtimes/index.js";
 
@@ -36,6 +37,16 @@ export function sessionJsonlPath(
   sessionId: string,
 ): string | null {
   return sourceFor(runtime).sessionPath(cwd, sessionId);
+}
+
+/**
+ * agent 会话文件的最近写入时间（ms），没有则 null。wedge-watcher 用它判「真在干活」：思考 / 调工具时文件一直在追加，
+ * 只看 tmux 画面会把「思考中但屏幕没变」误判成卡死。
+ */
+export async function sessionFileMtime(cwd: string, sessionId: string, runtime?: string): Promise<number | null> {
+  const p = sessionJsonlPath(runtime, cwd, sessionId);
+  if (!p) return null;
+  return stat(p).then((s) => s.mtimeMs, () => null); // 还没生成 / 刚被挪走：当没有写入记录，卡死判定照常按画面走
 }
 
 /** 全库兜底查找（cwd 记错或路径推断失准时用） */

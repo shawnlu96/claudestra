@@ -20,7 +20,7 @@ import {
 import { buildComponents } from "./components.js";
 import { runManager } from "./management.js";
 import { listAgentsLatched, createFailureLatch } from "../lib/run-manager.js";
-import { getJsonlMtime } from "./jsonl-watcher.js";
+import { sessionFileMtime } from "../lib/session-source.js";
 import { recordMetric } from "../lib/metrics.js";
 import { emitEvent } from "./event-bus.js";
 import { originFooter } from "../lib/instance-tag.js";
@@ -208,7 +208,7 @@ async function checkAgent(
   // 只对"claude 在跑"分支生效：at-shell 是 claude 已退出、jsonl 本来就不更新，
   // 那条掉线检测单独按 atShell 走，不受这里影响。
   if (!atShell) {
-    const mtime = await getJsonlMtime(cwd, sessionId, runtime);
+    const mtime = await sessionFileMtime(cwd, sessionId, runtime);
     if (mtime !== null && now - mtime < WEDGE_THRESHOLD_MS) {
       agentStates.delete(agentName);
       return;

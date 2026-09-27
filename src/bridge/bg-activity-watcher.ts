@@ -26,7 +26,7 @@
 
 import { existsSync } from "fs";
 import { lstat, readdir, stat } from "fs/promises";
-import { join, basename } from "path";
+import { basename, dirname, join } from "path";
 import { projectsSlug, projectJsonlPath } from "../lib/jsonl-cost.js";
 import { readActiveAgents } from "../lib/registry.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
@@ -95,9 +95,8 @@ let tickCount = 0;
 // ── 目录定位 ───────────────────────────────────────────────────────────
 
 function subagentsDirFor(cwd: string, sessionId: string): string {
-  return join(
-    process.env.HOME || "~", ".claude", "projects", projectsSlug(cwd), sessionId, "subagents",
-  );
+  // 跟着会话文件走：进了 worktree 的会话整个搬进新的项目目录（见 projectJsonlPath）
+  return join(dirname(projectJsonlPath(cwd, sessionId)), sessionId, "subagents");
 }
 
 function shellTasksDirFor(cwd: string, sessionId: string): string {

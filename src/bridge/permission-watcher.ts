@@ -391,13 +391,11 @@ const compactPctSeen = new Map<string, number>();
 async function jsonlWrittenAgoMs(agentName: string): Promise<number | null> {
   try {
     const { readRegistryAgents } = await import("../lib/registry.js");
-    const { getJsonlPath } = await import("./jsonl-watcher.js");
-    const { stat } = await import("node:fs/promises");
+    const { sessionFileMtime } = await import("../lib/session-source.js");
     const r = (await readRegistryAgents()).find((a) => a.name === agentName);
     if (!r?.cwd || !r.sessionId) return null;
-    const cwd = r.cwd.replace(/^~/, process.env.HOME || "~");
-    const st = await stat(getJsonlPath(cwd, r.sessionId));
-    return Math.max(0, Date.now() - st.mtimeMs);
+    const mtime = await sessionFileMtime(r.cwd.replace(/^~/, process.env.HOME || "~"), r.sessionId, r.runtime);
+    return mtime === null ? null : Math.max(0, Date.now() - mtime);
   } catch {
     return null;
   }
