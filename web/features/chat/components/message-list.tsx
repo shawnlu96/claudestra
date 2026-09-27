@@ -10,7 +10,6 @@ import { ReplyComponents } from "./reply-components";
 import { BgTaskPanel } from "./bg-task-panel";
 import { CcTaskPanel } from "./cc-task-panel";
 import { useT, getLang } from "@/lib/i18n";
-import { fmtTs } from "../fmt-time";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext, type InlineActionCtx } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
@@ -20,7 +19,7 @@ import { ActiveToolRow, HistoryToolRow, ToolCallsBlock } from "./tool-rows";
 import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, WorkingLine } from "./turn-indicators";
 import { QuoteSwipe } from "./quote-swipe";
 import { AttachmentStrip } from "./attachments";
-import { exitSelectMode, hasLiveSelection, isSelectMode } from "../select-mode";
+import { exitSelectMode, isSelectMode } from "../select-mode";
 import { isNearBottom, tailAppendedCount } from "../scroll-follow";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { devCount } from "../../devtools/dev-mode";
@@ -28,6 +27,7 @@ import { ProgressNote } from "./progress-note";
 import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
+import { GutterTime, HeaderTime } from "./msg-time";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
@@ -40,26 +40,20 @@ const NO_ORDER: string[] = [];
    配色走 daisyUI token 跟随明暗主题：✦ 头用 accent，工具活动用 info。 */
 
 /** system 级事件（compact / 斜杠命令 / 中断 / 命令输出）的通用居中分隔条。
- *  与消息气泡视觉解耦：无头像无名字，两侧细线 + 小灰字；点击附带秒级时间。 */
+ *  与消息气泡视觉解耦：无头像无名字，两侧细线 + 小灰字；PC 端时间在左槽（msg-time.tsx）。 */
 const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
   const t = useT();
-  const [showTs, setShowTs] = useState(false);
   // 进场动画只给实时新增(本地 id)——历史加载/对账替换的 h{seq} 节点不播,
   // 否则打开会话/切回对齐时整页一起闪一遍(owner 2026-07-16「更丝滑」)
   const anim = m.id.startsWith("h") ? "" : "chat-msg-in";
   // 历史里的中断记录统一成 TurnMark 同款黄色分隔线(直播/历史视觉一致)
   if (/^已被用户中断/.test(m.content)) return <TurnMark kind="interrupted" animate={!m.id.startsWith("h")} />;
   return (
-    <div
-      className={`${anim} mb-[22px] flex cursor-pointer select-none items-center gap-3`}
-      onClick={() => setShowTs((v) => !v)}
-    >
+    <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
+      <GutterTime ts={m.ts} side="left" />
       <span className="h-px flex-1 bg-base-content/10" />
       <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
         {t(m.content)}
-        {showTs && m.ts && (
-          <span className="ml-1.5 font-mono text-[10px] tabular-nums opacity-70">{fmtTs(m.ts)}</span>
-        )}
       </span>
       <span className="h-px flex-1 bg-base-content/10" />
     </div>
@@ -106,10 +100,9 @@ const TextBlock = memo(function TextBlock({
    *  正文拉开格式差（owner 2026-07-14:分不清哪些是正文哪些是 console 碎碎念）。 */
   muted?: boolean;
 }) {
-  // 单击 = 切时间戳（老语义）；**长按 / 右键** = 浮层菜单（复制 / 选择文字 /
-  // 引用）。第一版做成「点一下展开一条内联按钮条」被 owner 打回：点击太廉价、
-  // 内联条还把下面的排版顶下去（2026-08-22）。菜单见 ./bubble-menu。
-  const [showTs, setShowTs] = useState(false);
+  // **长按 / 右键** = 浮层菜单（复制 / 选择文字 / 引用），见 ./bubble-menu。第一版「点一下展开
+  // 内联按钮条」被 owner 打回（2026-08-22）；点击开关时间戳也去掉了（owner 2026-09-27：高度突变），
+  // 时间改为 PC 端左槽常显（msg-time.tsx）。
   const bodyRef = useRef<HTMLDivElement>(null);
   const press = useBubbleMenuTrigger(() => ({ text, fullText, ts, messageId: msgId, getEl: () => bodyRef.current }));
   const exporting = useIsExport(); // 导出树里旁白强制展开、不出收起条
@@ -118,7 +111,7 @@ const TextBlock = memo(function TextBlock({
     <QuoteSwipe quote={text} blockLevel>
       <div
         // 正文不用 cursor-pointer——桌面端整段文字变小手像可点链接(owner 2026-07-24
-        // 「点完链接手放哪都是小手」);点击切时间戳的行为保留,光标用默认
+        // 「点完链接手放哪都是小手」)
         className={`${
           muted
             ? // 首版 13px/60% 被 owner 打回「区分不够」——真因是 DOMD 组件用
@@ -128,19 +121,11 @@ const TextBlock = memo(function TextBlock({
               // 12.5px/45% 又被打回「眼睛疼」——回调到 13.5px/50%,靠竖线+字号差保持区分
               // 触屏上收起条常显、会盖住末行右端(peer review #40)→ 只在无 hover 的设备给底部留白
               "narration-muted group relative border-l-2 border-base-content/20 pl-2.5 text-[length:var(--chat-narr-size,13.5px)] leading-snug text-base-content/50 [@media(hover:none)]:pb-5"
-            : ""
+            : "relative"
         }`}
-        onClick={(e) => {
-          // 行内 code 的点击已被「点击复制」占用(滚动器委托)——同一下点击再切
-          // 时间戳会两件事一起发生,复制浮标和时间戳挤在一起(owner 2026-07-28)
-          const el = e.target as HTMLElement;
-          if (el.closest?.("code") && !el.closest("pre")) return;
-          // 划选后松手、长按松手都算一次 click——这两种都不该顺手切时间戳
-          if (hasLiveSelection() || press.consumedClick()) return;
-          setShowTs((v) => !v);
-        }}
         {...press.handlers}
       >
+        <GutterTime ts={ts} side="left" />
         {/* 这层 div 是「选择文字」的选区范围;cstra-bubble 让触摸端关掉原生长按 */}
         {folded && foldKey ? <NarrationFolded text={text} foldKey={foldKey} /> : (
         <div ref={bodyRef} className={muted ? "cstra-bubble" : "cstra-bubble text-[length:var(--chat-font-size,16px)]"}>
@@ -154,9 +139,6 @@ const TextBlock = memo(function TextBlock({
             <Domd initMd={text} bodyClassName="chat-domd" />
           )}
         </div>
-        )}
-        {showTs && ts && (
-          <div className="mt-0.5 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(ts)}</div>
         )}
         {muted && foldKey && !exporting && <NarrationFoldBar foldKey={foldKey} />}
       </div>
@@ -292,7 +274,6 @@ function AssistantBody({
 export const Message = memo(function Message({ m, streaming, isLast, awaiting }: { m: ChatMessage; streaming: boolean; isLast: boolean; awaiting: boolean }) {
   devCount("bubble-render"); // 开发者面板的「气泡渲染速率」:memo 失效时这里会飙
   // 点击消息（user 气泡 / ✦ 头）切换秒级时间显示；长按/右键出菜单
-  const [showTs, setShowTs] = useState(false);
   /** user 气泡本体 —— 长按菜单里「选择文字」要框住的范围。 */
   const bubbleRef = useRef<HTMLDivElement>(null);
   // hook 必须无条件调用(下面有 system/user 两处提前 return),所以正文在长按那一刻
@@ -322,16 +303,26 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
     return (
       // 布局规则(owner 2026-09-24):只有本人靠右,peer / 其它 agent / 别的用户一律靠左;
       // 圆角:靠右的右上角小、靠左的左上角小,其余大——尖角指向说话的一侧
-      <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] flex flex-col gap-2 ${isSelf ? "items-end" : "items-start"}`}>
-        {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14) */}
-        {!isSelf && <SourceHeader from={m.from!} />}
-        {(label || showAvatar) && (
-          <div className="flex items-center gap-1.5">
-            {label && <span className="text-[10px] opacity-50">{label}</span>}
-            {showAvatar && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={profile.avatar} alt="" className="size-[22px] rounded-full object-cover" />
-            )}
+      <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} relative mb-[22px] flex flex-col gap-2 ${isSelf ? "items-end" : "items-start"}`}>
+        <GutterTime ts={m.ts} side={isSelf ? "right" : "left"} />
+        {/* 头行:昵称 + 头像落在气泡上方,不占气泡宽度(owner 2026-07-14);移动端时间在头行另一端(owner 2026-09-27) */}
+        {!isSelf && (
+          <div className="flex w-full items-center justify-between gap-2">
+            <SourceHeader from={m.from!} />
+            <HeaderTime ts={m.ts} />
+          </div>
+        )}
+        {isSelf && (
+          // 本人头行常在：时间靠左、头像 + 昵称靠右；没设昵称 / 头像时 PC 端整行隐藏（那里时间在右槽）
+          <div className={`flex w-full items-center justify-between gap-1.5 lg:justify-end ${label || showAvatar ? "" : "lg:hidden"}`}>
+            <HeaderTime ts={m.ts} />
+            <span className="flex items-center gap-1.5">
+              {label && <span className="text-[10px] opacity-50">{label}</span>}
+              {showAvatar && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={profile.avatar} alt="" className="size-[22px] rounded-full object-cover" />
+              )}
+            </span>
           </div>
         )}
         {atts.length > 0 && <AttachmentStrip items={atts} />}
@@ -345,11 +336,6 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
                   ? "whitespace-pre-wrap rounded-[15px_4px_15px_15px] border-base-content/5 bg-base-300"
                   : "rounded-[4px_15px_15px_15px] border-info/25 bg-info/[0.06]"
               }`}
-              onClick={() => {
-                // 划选后松手、长按松手都算 click——都不该顺手切时间戳
-                if (hasLiveSelection() || press.consumedClick()) return;
-                setShowTs((v) => !v);
-              }}
               {...press.handlers}
             >
               {userQuoted && (
@@ -389,9 +375,6 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             </button>
           </div>
         )}
-        {showTs && m.ts && (
-          <div className="pr-1 font-mono text-[10px] tabular-nums opacity-40">{fmtTs(m.ts)}</div>
-        )}
       </div>
     );
   }
@@ -401,22 +384,12 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
   const liveEmpty = streamingLast && awaiting && !m.content && !m.segments?.length;
   const hasSegs = !!m.segments?.length;
   return (
-    <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} mb-[22px] w-full`}>
-      {/* 点 ✦ Claude 头显示/隐藏本条消息时间（秒级）。复制整条走正文段的长按菜单 */}
-      <div
-        className="cursor-pointer"
-        onClick={() => {
-          if (hasLiveSelection()) return;
-          setShowTs((v) => !v);
-        }}
-      >
+    <div className={`${m.id.startsWith("h") ? "" : "chat-msg-in"} relative mb-[22px] w-full`}>
+      {/* 头行：✦ Claude 头 + 移动端时间（PC 端时间在各段左槽）。复制整条走正文段的长按菜单 */}
+      <div className="flex items-start justify-between gap-2">
         <ClaudeHeader pulsing={liveEmpty} />
+        <HeaderTime ts={m.ts} className="mt-[3px]" />
       </div>
-      {showTs && m.ts && (
-        <div className="-mt-1.5 mb-1.5 font-mono text-[10px] tabular-nums opacity-40">
-          {fmtTs(m.ts)}
-        </div>
-      )}
       <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
         {!hasSegs && !!m.toolCalls?.length && (
@@ -819,10 +792,12 @@ export function MessageList() {
           </button>
         )}
         {visible.map((m, i) => (
+          // lg:-mx-14 lg:px-14：条目盒向两侧各伸 56px 进列的 padding+margin（≥1024 时 ≥57px），让侧槽时间
+          // 落在盒内——[data-mid] 有 content-visibility:auto 的 paint 包含，盒外的 absolute 子元素画不出来。
           // data-mid 包装层:搜索跳转按它定位;命中气泡加一闪动画。普通渲染
           // 是零成本透明块(块级流内,不改 flex-col 布局)。分享模式下加 checkbox
           // (本人右、其余左,share-ui.tsx)与选中底色,范围规则见 share-mode.ts。
-          <div key={m.id} data-mid={m.id} className={shareRowClass(m, flashId === m.id, share.on, inRange(shareRange, offset + i))}>
+          <div key={m.id} data-mid={m.id} className={`lg:-mx-14 lg:px-14 ${shareRowClass(m, flashId === m.id, share.on, inRange(shareRange, offset + i))}`}>
             {share.on && (
               <ShareCheck id={m.id} order={order} checked={inRange(shareRange, offset + i)} side={m.role === "user" && !m.from ? "right" : "left"} />
             )}
