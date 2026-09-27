@@ -77,6 +77,8 @@ describe("跨机调用重启续轮询", () => {
     expect(h.held.length).toBe(1);
     expect(h.held[0].content).toBe("答案");
     expect(h.held[0].to).toMatchObject({ kind: "local", channelId: "chan", agentName: "caller" });
+    // 押后投递时 from.ws 已被剥掉，看门狗不能再靠 ws 相等识别「bridge 合成的推回」
+    expect(h.held[0].meta.skipInterAgentWatchdog).toBe(true);
   });
 
   test("peer 已被删：告诉发起方、摘掉记录，不轮询", async () => {

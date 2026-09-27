@@ -367,12 +367,9 @@ async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, 
     to: { kind: "local", agentName: caller.name, channelId: caller.channelId, ws },
     intent: isReply ? "response" : "notification",
     content,
-    meta: {
-      messageId: `hp_reply_${Date.now()}`,
-      triggerKind: "peer_http",
-      ts: new Date().toISOString(),
-      threadId: newThreadId(),
-    },
+    // bridge 替跨机调用合成的推回，不是哪个 agent 等着回应的话：不挂「收到 agent 消息没回应」看门狗。以前靠 from.ws === to.ws
+    // 躲开，推回进押后队列后 ws 被剥掉、投递时只补了 to.ws，就对不上了（tests/http-peer-resume.test.ts）
+    meta: { messageId: `hp_reply_${Date.now()}`, triggerKind: "peer_http", ts: new Date().toISOString(), threadId: newThreadId(), skipInterAgentWatchdog: true },
   };
   if (!ws) {
     // 发起方此刻不在线（多半是 bridge 刚重启、它的 channel-server 还没连上）：进押后队列，连上后投
