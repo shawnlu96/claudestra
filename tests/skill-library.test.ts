@@ -1,6 +1,6 @@
 /**
  * lib/skill-library.ts：本机有效技能清单——搜索根、来源（软链进本仓库 / CC Switch）、同步技能多一层账号目录、
- * Claude Code 的同名规则（个人 > 项目、同步的输给任何别的、不同项目互不遮挡）。
+ * Claude Code 的同名规则（个人 > 项目、不同项目互不遮挡；同步的一律带 anthropic-skills: 前缀）。
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -44,13 +44,12 @@ describe("markShadowing（Claude Code 官方同名规则）", () => {
     runtime, scope, name: "deploy", description: "", dir: `/${scope}/${project ?? ""}`, linkTarget: null, managedBy: null,
     userInvocable: true, modelInvocable: true, sameNameElsewhere: 0, ...(project ? { project } : {}),
   });
-  test("个人 > 项目；同步的输给任何别的；不同项目互不遮挡", () => {
-    const [personal, projA, projB, synced] = markShadowing([s("personal"), s("project", "/a"), s("project", "/b"), s("synced")]);
+  test("个人 > 项目；不同项目互不遮挡", () => {
+    const [personal, projA, projB] = markShadowing([s("personal"), s("project", "/a"), s("project", "/b")]);
     expect(personal.shadowedBy).toBeUndefined();
     expect(projA.shadowedBy).toBe("personal");
     expect(projB.shadowedBy).toBe("personal");
-    expect(synced.shadowedBy).toBe("personal");
-    expect(personal.sameNameElsewhere).toBe(3);
+    expect(personal.sameNameElsewhere).toBe(2);
     const [a, b] = markShadowing([s("project", "/a"), s("project", "/b")]);
     expect(a.shadowedBy).toBeUndefined();
     expect(b.shadowedBy).toBeUndefined();
@@ -77,7 +76,7 @@ describe("buildSkillLibrary（真扫盘）", () => {
     expect(by("save").managedBy).toBe("claudestra");
     expect(by("save").linkTarget).toContain("/repo/skills/save");
     expect(by("bg-only").userInvocable).toBe(false);
-    expect(by("pdf").scope).toBe("synced");
+    expect(by("anthropic-skills:pdf").scope).toBe("synced");
     expect(by("imagegen").description).toBe("画图");
     expect(by("imagegen").scope).toBe("system");
     expect(lib.skills.some((x) => x.name === "synced")).toBe(false);
