@@ -25,6 +25,8 @@ if [ "${RELAY_WITH_WEB:-0}" = "1" ]; then
   # shellcheck disable=SC2086 # 故意按空格拆成多个 flag
   npm --prefix "${ROOT:?}/web" run build -- ${RELAY_WEB_BUILD_FLAGS:-}
   [ -f "${ROOT:?}/web/out/index.html" ] || { echo "web/out 里没有 index.html：next.config 还不是 output: export？" >&2; exit 1; }
+  # 上面的 rsync 排除了 web/，第一次部署时远端没有 web/ 父目录——macOS 自带的 openrsync 不会替你建，只会断连报 unexpected end of file
+  ssh "${TARGET:?}" "mkdir -p '${REMOTE_DIR:?}/web/out'"
   rsync -az --delete "${ROOT:?}/web/out/" "${TARGET:?}:${REMOTE_DIR:?}/web/out/"
 fi
 
