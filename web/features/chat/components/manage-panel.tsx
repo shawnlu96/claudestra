@@ -86,7 +86,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm">{t(a.displayName)}</div>
                     {a.purpose && (
-                      <div className="truncate text-[11px] text-base-content/40">{a.purpose}</div>
+                      <div className="truncate text-[11px] text-base-content/40">{t(a.purpose)}</div>
                     )}
                   </div>
                   {typeof a.contextTokens === "number" && a.contextTokens >= 200_000 && (

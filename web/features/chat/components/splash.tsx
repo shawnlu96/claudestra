@@ -87,7 +87,7 @@ export function Splash() {
           {ver.commit}
           {/* 客户端 bundle 是否滞后（规则见 lib/version-check.ts bundleStale）：有 webCommit 精确比，否则比 HEAD */}
           {bundleStale(ver, { commit: CLIENT_COMMIT, webCommit: CLIENT_WEB_COMMIT, version: CLIENT_VERSION }) && (
-            <span className="text-warning/70"> · 本地 {CLIENT_WEB_COMMIT || CLIENT_COMMIT}</span>
+            <span className="text-warning/70"> · {t("本地")} {CLIENT_WEB_COMMIT || CLIENT_COMMIT}</span>
           )}
         </div>
       )}

@@ -256,6 +256,8 @@ export const DICT: Record<string, string> = {
   "会话": "Sessions",
   "总控": "Master",
   "大总管": "Master",
+  "调度员：管理/派发多个 agent": "Dispatcher: manages and assigns work to agents",
+  "本地": "local",
   "工作中": "Working",
   "暂无会话": "No sessions",
   "取消置顶": "Unpin",

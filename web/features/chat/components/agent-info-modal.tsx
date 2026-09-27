@@ -135,12 +135,13 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
   };
   const project = projects.find((p) => p.id === (info?.projectId ?? live?.projectId));
   const status = live ? (live.status === "active" ? (live.busy ? t("工作中") : t("运行中")) : t("已停止")) : info?.status;
+  const purpose = info?.purpose || live?.purpose || null; // 大总管没填用途时是网页给的中文兜底，要过字典
   return (
     <>
       <div className="flex items-center justify-between gap-2 border-b border-base-300 px-5 py-3">
         <div className="min-w-0">
           <div className="text-[11px] text-base-content/45">{t("会话详情")}</div>
-          <div className="truncate text-base font-semibold">{live?.displayName ?? info?.displayName ?? name}</div>
+          <div className="truncate text-base font-semibold">{t(live?.displayName ?? info?.displayName ?? name)}</div>
         </div>
         <button className="btn btn-ghost btn-sm btn-circle" aria-label={t("关闭")} onClick={onClose}>✕</button>
       </div>
@@ -148,7 +149,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
         {err && <div className="mb-2 rounded-lg bg-error/10 px-3 py-2 text-[12px] text-error">{t("加载失败")}: {err}</div>}
         <Row k={t("名称")} v={name} mono />
         <LabelRow name={name} current={info?.label ?? ""} onSaved={() => { void load(); void store.refreshAgents(); }} />
-        <Row k={t("用途")} v={info?.purpose || live?.purpose || null} />
+        <Row k={t("用途")} v={purpose && t(purpose)} />
         <Row k={t("工作目录")} v={info?.cwd} mono />
         <Row k="Project" v={project ? `${project.emoji ? project.emoji + " " : ""}${project.name || project.id}` : (info?.projectId ?? null)} />
         <Row k={t("运行时")} v={info?.runtime ?? live?.runtime ?? null} />
