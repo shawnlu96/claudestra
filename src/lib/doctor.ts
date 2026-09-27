@@ -569,7 +569,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
-    checkDeployment(),
+    checkDeployment(), import("./doctor-ccswitch.js").then((m) => m.checkCcSwitch()), // API 源 / CC Switch 会不会冲掉 hooks
     import("./doctor-remote.js").then((m) => m.checkRemoteAccess(repoRoot)),
     import("./cli-path.js").then((m) => m.checkCliOnPath()), // 新开终端能不能直接敲 claudestra
   ]);
