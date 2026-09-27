@@ -13,6 +13,13 @@ describe("fillParams / 整句插值", () => {
     expect(fillParams("证书剩 {n} 天", { n: 30 })).toBe("证书剩 30 天");
     expect(fillParams("在 {app} 中打开")).toBe("在 {app} 中打开");
   });
+  test("英文单复数：译文「单数|复数」按 n 选；中文不受影响", () => {
+    expect(en("{n} 个会话", { n: 1 })).toBe("1 session");
+    expect(en("{n} 个会话", { n: 2 })).toBe("2 sessions");
+    expect(en("{n} 个会话", { n: 0 })).toBe("0 sessions");
+    expect(en("证书剩 {n} 天", { n: 1 })).toBe("Cert expires in 1 day");
+    expect(fillParams("{n} 个会话", { n: 1 })).toBe("1 个会话");
+  });
   test("英文先查字典再填变量；params 里没有的占位原样留着", () => {
     expect(en("证书已过期 {n} 天", { n: 3 })).toBe("Cert expired 3 days ago");
     expect(en("{n} 个会话", { n: 0 })).toBe("0 sessions");
@@ -22,7 +29,7 @@ describe("fillParams / 整句插值", () => {
 
 describe("字典", () => {
   test("每条译文的 {占位} 与原文一致（漏一个就会把 {n} 原样露给用户）", () => {
-    const bad = Object.entries(DICT).filter(([zh, v]) => placeholders(zh).join() !== placeholders(v).join());
+    const bad = Object.entries(DICT).filter(([zh, v]) => v.split("|").some((form) => placeholders(zh).join() !== placeholders(form).join()));
     expect(bad).toEqual([]);
   });
 });

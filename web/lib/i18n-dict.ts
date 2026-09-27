@@ -6,6 +6,7 @@
  *   拼接的条目靠空格对齐语序，行尾注释标注了这类条目）。
  * - 句中片段（如「重置」「已重启」）英文故意小写、无句号。
  * - 带变量的句子整句做 key，变量写 {name}（t(s, { name })）；译文保留同名占位，tests/web-i18n.test.ts 查。
+ * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 export const DICT: Record<string, string> = {
@@ -450,7 +451,7 @@ export const DICT: Record<string, string> = {
   "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
   "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
   "至少要一个工作目录": "At least one working directory is required",
-  "{n} 个 agent": "{n} agents",
+  "{n} 个 agent": "{n} agent|{n} agents",
   "成员": "Members",
   "转移到…": "Move to…",
   "确认删除": "Confirm delete",
@@ -500,7 +501,7 @@ export const DICT: Record<string, string> = {
   "刷新": "Refresh",
   "归档是空的": "The archive is empty",
   "恢复": "Restore",
-  "{n} 个会话": "{n} sessions",
+  "{n} 个会话": "{n} session|{n} sessions",
   "归档失败:": "Archive failed: ", // 值尾带空格
   "沉寂": "Dormant",
 
@@ -558,7 +559,7 @@ export const DICT: Record<string, string> = {
   "已退役会话的归档保留天数；超期由每日兜底清理，0 = 永不清理（归档是「可找回的过期会话」，不是永久仓库）。":
     "How many days to keep archives of retired sessions. A daily sweep removes older ones; 0 = keep forever (the archive holds recoverable old sessions, it isn't permanent storage).",
   "永不清理": "Keep forever",
-  "{n} 天": "{n} days",
+  "{n} 天": "{n} day|{n} days",
   "App 连接的服务器": "Server this app connects to",
   "(读取中…)": "(loading…)",
   "更换服务器": "Change server",
@@ -578,8 +579,8 @@ export const DICT: Record<string, string> = {
   "二维码": "QR code",
   "可用": "Works",
   "通到的不是本机当前的 web": "Reaches a different web app, not this one",
-  "证书已过期 {n} 天": "Cert expired {n} days ago",
-  "证书剩 {n} 天": "Cert expires in {n} days",
+  "证书已过期 {n} 天": "Cert expired {n} day ago|Cert expired {n} days ago",
+  "证书剩 {n} 天": "Cert expires in {n} day|Cert expires in {n} days",
   "语音输入 / 推送在明文地址下不可用": "Voice input and push don't work over plain HTTP",
   "这台电脑还没装 Tailscale。装好并登录后，手机在任何网络下都能用固定地址打开这里。在终端重跑 bun run setup 会一步步引导。":
     "Tailscale isn't installed on this computer. Once it's installed and signed in, your phone can open this page at a fixed address from any network. " +
