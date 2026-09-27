@@ -89,8 +89,15 @@ export class Front {
 
   private clientIp(req: Request, srv: Server<ConnData>): string {
     const fwd = this.d.trustProxy ? req.headers.get("x-forwarded-for")?.split(",")[0].trim() : undefined;
+    // 反代前面还有一层四层分流（nginx stream 按 SNI 转发）又没开 PROXY protocol 时，反代看到的客户端全是回环地址，
+    // 按 IP 的限流就悄悄变成全局限流。只提醒一次，修法在 docs/relay/self-host.md §4
+    if (fwd && !this.warnedSharedIp && /^(127\.|::1$|::ffff:127\.)/.test(fwd)) {
+      this.warnedSharedIp = true;
+      this.d.log("warn", `X-Forwarded-For 里是回环地址 ${fwd}：反代没拿到真实客户端 IP，按 IP 的限流会变成全局限流（见 self-host.md §4）`);
+    }
     return fwd || srv.requestIP(req)?.address || "?";
   }
+  private warnedSharedIp = false;
 
   handle(req: Request, srv: Server<ConnData>): Response | Promise<Response> | undefined {
     const url = new URL(req.url);

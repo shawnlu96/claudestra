@@ -66,6 +66,8 @@ nginx -t && systemctl reload nginx
 
 要点：`/v1/ws` 带 Upgrade 头；所有路径 `proxy_buffering off`、`proxy_read_timeout 3600s`（SSE 与长连接）；`Host` 与 `X-Forwarded-Host` 原样传给中继——它靠主机名分流。
 
+**443 前面还有一层四层分流时（nginx `stream` 按 SNI 转发、HAProxy tcp 模式等）必须把真实 IP 传下来**，否则 http 这层看到的客户端全是 127.0.0.1，`X-Forwarded-For` 也就是 127.0.0.1，中继按 IP 的限流会变成全局限流（中继日志会警告一次「X-Forwarded-For 里是回环地址」）。做法是 PROXY protocol：stream 侧 `proxy_protocol on;`，中继站点 `listen 127.0.0.1:<port> ssl proxy_protocol;` 加 `set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol;`；同一台上不认 PROXY 头的其它后端（比如 DERP、别的站点）各经一个 `listen <port> proxy_protocol; proxy_pass <原后端>;` 的 stream server 剥掉再转。
+
 ## 5. 验证
 
 ```sh
