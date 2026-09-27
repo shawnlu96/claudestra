@@ -64,14 +64,24 @@ export function corsHeadersFor(
  * - Origin 与本次请求同源 → 自家页面（BRIDGE_STATIC_DIR 托管的前端；注意同源
  *   fetch 也会带 Origin，不能一见 Origin 就拒）
  * - 其余 → 跨源
+ * 「本次请求的源」按浏览器看到的算：反代（Caddy / tailscale serve / 中继子域名隧道）终结了 TLS、可能改了 Host，
+ * bridge 自己只看到 http，所以以 X-Forwarded-Proto / -Host 为准——不认它们时反代后面的同源 POST 全被当成跨源拒掉。
+ * 信它们放不进外站：浏览器的跨站请求带这两个头必须先预检，bridge 不答预检（tests/web-gateway.test.ts）。
  */
-export function isCrossOrigin(reqOrigin: string | null, requestUrl: string): boolean {
+export function isCrossOrigin(reqOrigin: string | null, requestUrl: string, headers?: { get(name: string): string | null }): boolean {
   if (!reqOrigin) return false;
   try {
-    return reqOrigin !== new URL(requestUrl).origin;
+    return reqOrigin !== publicOrigin(new URL(requestUrl), headers);
   } catch {
     return true; // URL 解析不了就按最坏情况算
   }
+}
+
+function publicOrigin(url: URL, headers?: { get(name: string): string | null }): string {
+  const first = (name: string): string | null => headers?.get(name)?.split(",")[0]?.trim() || null;
+  const proto = first("x-forwarded-proto");
+  const scheme = proto === "https" || proto === "http" ? `${proto}:` : url.protocol;
+  return `${scheme}//${first("x-forwarded-host") ?? url.host}`;
 }
 
 /**

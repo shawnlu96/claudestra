@@ -419,6 +419,7 @@ export const DICT: Record<string, string> = {
   "这台机器没有连上中继": "That machine is not connected to the relay",
   "还没有选择机器": "No machine selected yet",
   "只能在电脑本机的浏览器里一键配对": "One-tap pairing only works in a browser on that computer itself",
+  "配对请求被这台机器拒绝了": "This machine refused the pairing request",
   "经中继加入": "Joining via relay",
   "经中继": "via relay",
   "中继": "Relay",

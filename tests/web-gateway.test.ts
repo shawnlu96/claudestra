@@ -40,6 +40,19 @@ describe("跨源判定（ws 控制面防护）", () => {
     expect(isCrossOrigin("http://localhost:3847", BRIDGE)).toBe(true);
   });
 
+  test("反代后面（TLS 终结 / 改 Host）：按 X-Forwarded-Proto / -Host 算本站源，同源 POST 不再被误拒；外站照旧跨源", () => {
+    const h = (o: Record<string, string>) => new Headers(o);
+    const tunnel = h({ "x-forwarded-proto": "https", "x-forwarded-host": "mini.relay.test" });
+    expect(isCrossOrigin("https://mini.relay.test", "http://mini.relay.test/api/v1/devices/pair", tunnel)).toBe(false);
+    expect(isCrossOrigin("https://claude.example.com", "http://claude.example.com/api/v1/settings", h({ "x-forwarded-proto": "https" }))).toBe(false);
+    expect(isCrossOrigin("https://mac.tail0.ts.net", "http://127.0.0.1:3847/x", h({ "x-forwarded-proto": "https, http", "x-forwarded-host": "mac.tail0.ts.net" }))).toBe(false);
+    expect(isCrossOrigin("https://evil.example.com", "http://mini.relay.test/x", tunnel)).toBe(true);
+    expect(isCrossOrigin("http://mini.relay.test", "http://mini.relay.test/x", tunnel)).toBe(true);
+    expect(isCrossOrigin("https://mini.relay.test", "http://mini.relay.test/x", h({ "x-forwarded-proto": "gopher" }))).toBe(true);
+    // 没有反代头：与旧行为一致（http 请求配 https 来源 = 跨源）
+    expect(isCrossOrigin("https://mini.relay.test", "http://mini.relay.test/x", h({}))).toBe(true);
+  });
+
   test("请求 URL 不可解析 → 按最坏情况算跨源", () => {
     expect(isCrossOrigin("https://evil.example.com", "not-a-url")).toBe(true);
   });

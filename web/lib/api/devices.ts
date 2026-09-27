@@ -108,8 +108,8 @@ export function revokeDevice(id: string): Promise<void> {
   return api(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
 }
 
-/** 配对页给用户看的错误文案（中文 key，渲染点 t() 兜底翻译） */
-export function pairErrorText(e: unknown): string {
+/** 配对页给用户看的错误文案（中文 key，渲染点 t() 兜底翻译）。local = 本机一键配对那条路径：只有它的 403 意味着「不是本机」 */
+export function pairErrorText(e: unknown, local = false): string {
   const err = e as ApiError & { code?: string };
   switch (err?.code) {
     case "code_invalid":
@@ -123,6 +123,6 @@ export function pairErrorText(e: unknown): string {
     case "no_machine":
       return "还没有选择机器";
   }
-  if (err?.status === 403) return "只能在电脑本机的浏览器里一键配对";
+  if (err?.status === 403) return local ? "只能在电脑本机的浏览器里一键配对" : "配对请求被这台机器拒绝了";
   return err?.message || "配对失败";
 }
