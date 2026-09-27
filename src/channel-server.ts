@@ -750,7 +750,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "send_to_agent":
       return sendToAgentTool(bridgeRequest, args);
     case "check_inbox":
-      return checkInboxTool(bridgeRequest);
+      return checkInboxTool(bridgeRequest, args);
 
     default:
       throw new Error(`Unknown tool: ${name}`);

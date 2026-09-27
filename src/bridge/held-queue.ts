@@ -17,7 +17,13 @@ export interface HeldItem {
   heldAt: number;
   /** 已经告诉过发送方「还在排队」的时刻 */
   notifiedAt?: number;
+  /** 被 check_inbox 领走、还没确认（bridge/inbox.ts）：租约内 Stop 不再投，过期后照常投 */
+  lease?: { batchId: string; at: number };
 }
+
+/** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
+export const INBOX_LEASE_MS = 15 * 60_000;
+export const leaseActive = (i: HeldItem, now = Date.now()): boolean => !!i.lease && now - i.lease.at < INBOX_LEASE_MS;
 
 export const HELD_NOTIFY_MS = 30 * 60_000;
 export const HELD_GIVE_UP_MS = 24 * 3_600_000;

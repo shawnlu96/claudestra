@@ -442,7 +442,7 @@ async function flushHeldLocalMsgs(channelId: string, reason: string) {
     // 人类消息只因「别掐压缩」被押,压缩一结束就该到——不等回合空闲,deliverToLocal
     // 自带抢占(C-c)语义;agent→agent 仍等空闲(回合中通知有丢弃窗口)。
     // 快照:遍历中别处可能往这个频道 hold 新消息,只投这一刻到期的
-    const due = working ? q.filter((i) => isHumanRequest(i.env)) : [...q];
+    const due = working ? q.filter((i) => isHumanRequest(i.env)) : q.filter((i) => !leaseActive(i)); // check_inbox 领走、租约内的不投(bridge/inbox.ts)
     for (const item of due) {
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = clients.get(channelId);
@@ -577,7 +577,7 @@ import type {
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
-import { ageHeld, heldNoticeText, HeldQueue } from "./bridge/held-queue.js";
+import { ageHeld, heldNoticeText, HeldQueue, leaseActive } from "./bridge/held-queue.js";
 import { AgentCallBook, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
@@ -2284,7 +2284,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "move_channel": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await moveChannelRequest(discord, WEB_ONLY, msg)) })); break;
-    case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws)) })); break;
+    case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws, Date.now(), typeof msg.ack === "string" ? msg.ack : undefined)) })); break;
 
     case "project_info": {
       // v2.21+ Phase 2:agent 自查项目归属——成员(在线状态/purpose)+ 目录。

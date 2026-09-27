@@ -35,11 +35,14 @@ export async function sendToAgentTool(bridgeRequest: BridgeRequest, args: any) {
 export const CHECK_INBOX_TOOL = {
   name: "check_inbox",
   description: CHECK_INBOX_DESCRIPTION,
-  inputSchema: { type: "object" as const, properties: {} },
+  inputSchema: {
+    type: "object" as const,
+    properties: { ack: { type: "string", description: "上一次领到的批次号（inbox_xxx）：确认它已处理完，顺带领下一批" } },
+  },
 };
 
-/** check_inbox：把排队给我的消息取回来（bridge/inbox.ts）；取走的回合结束时不会再送一遍 */
-export async function checkInboxTool(bridgeRequest: BridgeRequest) {
-  const r = await bridgeRequest({ type: "check_inbox" });
+/** check_inbox：领取排队给我的消息（bridge/inbox.ts），ack 确认上一批后才出队 */
+export async function checkInboxTool(bridgeRequest: BridgeRequest, args: Record<string, unknown> = {}) {
+  const r = await bridgeRequest({ type: "check_inbox", ...(typeof args.ack === "string" && args.ack ? { ack: args.ack } : {}) });
   return { content: [{ type: "text" as const, text: String(r.text || "收件箱是空的。") }] };
 }
