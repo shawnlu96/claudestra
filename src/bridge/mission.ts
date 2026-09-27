@@ -13,7 +13,7 @@ import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readSessionCtx } from "../lib/usage-cache.js";
 import { idleVerdict, windowTarget } from "../lib/tmux-helper.js";
 import {
-  backoffMs, missionKey, MISSIONS_PATH, nextFastTurns, nudgeKind, nudgeText, readMissions, updateMissions, type Mission,
+  backoffMs, missionKey, MISSIONS_PATH, nextFastTurns, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind,
 } from "../lib/missions.js";
 import { newThreadId, type Envelope } from "./router.js";
 
@@ -69,22 +69,34 @@ function schedule(agent: string, delayMs: number): void {
   timers.set(agent, setTimeout(() => void fire(agent), Math.max(0, delayMs)));
 }
 
-async function fire(agent: string): Promise<void> {
-  timers.delete(agent);
-  if (!deps) return;
-  const m = (await readMissions(path))[agent];
-  if (!m || m.status !== "active") return;
-  const now = Date.now();
-  const kind = nudgeKind(m, now, ctxRatio(agent));
-  if (kind !== "deadline" && m.resumeAt && Date.parse(m.resumeAt) > now) return schedule(agent, Date.parse(m.resumeAt) - now);
+/** 到点：先把这一代标 expired（不管 agent 忙不忙、在不在线，值守立刻不再续跑），收尾那句另行投递 */
+async function expire(agent: string, id: string | undefined): Promise<Mission | null> {
+  return updateMissions((all): Mission | null => {
+    const cur = all[agent];
+    if (!cur || cur.status !== "active" || cur.id !== id) return null;
+    Object.assign(cur, { status: "expired", finishedAt: new Date().toISOString() });
+    delete cur.resumeAt;
+    return { ...cur };
+  }, path);
+}
+/** 到点时 agent 正忙 / 不在线：收尾那句等它下一次回合结束再递（只在内存，bridge 重启就不补了——值守已经关了） */
+const wrapups = new Map<string, Mission>();
+
+/** 递一句；忙 / 不在线 / 这一代已经不是它（续跑类）就不递，返回 false */
+async function tryDeliver(agent: string, m: Mission, kind: NudgeKind, now: number): Promise<boolean> {
+  if (!deps) return false;
   // 人在跟它说话（或它自己还在干）：让位，等下一次回合结束
-  if (isBusyStatus(getAgentStatus(agent)) || isBusyStatus(getAgentStatus(`agent-${agent}`))) return;
-  if (await paneBusy(agent)) return; // 正干着：它这一轮结束会触发下一次 done 再排
+  if (isBusyStatus(getAgentStatus(agent)) || isBusyStatus(getAgentStatus(`agent-${agent}`))) return false;
+  if (await paneBusy(agent)) return false;
   const channelId = channelOf(agent);
   const client = channelId ? deps.clients.get(channelId) : undefined;
   if (!channelId || !client) {
     console.warn(`⏱ 值守 ${agent}: agent 不在线，等它连上后的下一次回合结束`);
-    return;
+    return false;
+  }
+  if (kind !== "deadline") {
+    const cur = (await readMissions(path))[agent];
+    if (cur?.status !== "active" || cur.id !== m.id) return false; // 这期间被 stop / 重开了：旧一代的提醒不发
   }
   deps.lastMessageSource.set(channelId, "agent"); // 这条是 bridge 发的：处理完的 Stop 不去 @ 用户
   await deps.deliver({
@@ -94,25 +106,48 @@ async function fire(agent: string): Promise<void> {
     content: nudgeText(m, kind, now, DONE_CMD(agent)),
     meta: { messageId: `mission_${now}`, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
   });
+  console.log(`⏱ 值守 ${agent}: 递出 ${kind}（第 ${m.nudges + 1} 次）`);
+  return true;
+}
+
+async function fire(agent: string): Promise<void> {
+  timers.delete(agent);
+  if (!deps) return;
+  const m = (await readMissions(path))[agent];
+  if (!m || m.status !== "active") return;
+  const now = Date.now();
+  const kind = nudgeKind(m, now, ctxRatio(agent));
+  if (kind === "deadline") {
+    const gone = await expire(agent, m.id);
+    if (gone && !(await tryDeliver(agent, gone, "deadline", now))) wrapups.set(agent, gone);
+    return;
+  }
+  if (m.resumeAt && Date.parse(m.resumeAt) > now) return schedule(agent, Date.parse(m.resumeAt) - now);
+  if (!(await tryDeliver(agent, m, kind, now))) return;
   awaitingTurn.set(agent, now);
   await updateMissions((all) => {
     const cur = all[agent];
-    if (!cur || cur.status !== "active") return;
+    if (!cur || cur.status !== "active" || cur.id !== m.id) return;
     cur.nudges += 1;
     cur.lastNudgeAt = new Date(now).toISOString();
-    if (kind === "deadline") Object.assign(cur, { status: "expired", finishedAt: cur.lastNudgeAt });
   }, path);
-  console.log(`⏱ 值守 ${agent}: 递出 ${kind}（第 ${m.nudges + 1} 次）`);
 }
 
-/** 回合结束：记空转、必要时退避，然后排下一次提醒 */
+/** 回合结束：先补递欠着的收尾；有进行中的值守才记空转、必要时退避，然后排下一次提醒 */
 async function onTurnDone(agentLabel: string): Promise<void> {
   const agent = missionKey(agentLabel);
   const now = Date.now();
   awaitingTurn.delete(agent);
+  const owed = wrapups.get(agent);
+  if (owed) {
+    if (await tryDeliver(agent, owed, "deadline", now)) wrapups.delete(agent);
+    return;
+  }
+  const pre = (await readMissions(path))[agent];
+  if (!pre || pre.status !== "active") return; // 没有值守的 agent 不碰文件
   const m = await updateMissions((all): Mission | null => {
     const cur = all[agent];
-    if (!cur || cur.status !== "active") return null;
+    if (!cur || cur.status !== "active" || cur.id !== pre.id) return null;
     cur.fastTurns = nextFastTurns(cur, now);
     const wait = backoffMs(cur.fastTurns);
     if (wait) cur.resumeAt = new Date(now + wait).toISOString();
@@ -125,16 +160,23 @@ async function onTurnDone(agentLabel: string): Promise<void> {
   schedule(agent, Math.min(Math.max(GRACE_MS, resumeMs), Math.max(untilMs, 0) + GRACE_MS));
 }
 
-/** 按文件重排：新开的值守（agent 正空闲）尽快递第一句；关掉的撤定时器；截止时间到了的补一句收尾 */
+/**
+ * 按文件重排：新开的值守（agent 正空闲）尽快递第一句；关掉的撤定时器；到点的立刻收。刚递过提醒、还在等它这一轮的，
+ * 只排到点那一下。文件监听 + 每分钟一次兜底：漏了 done 事件、或文件没人写，也不会永远停住。
+ */
 async function reconcile(): Promise<void> {
   const all = await readMissions(path);
   for (const agent of timers.keys()) if (all[agent]?.status !== "active") clearTimeout(timers.get(agent)), timers.delete(agent);
   const now = Date.now();
   for (const m of Object.values(all)) {
     if (m.status !== "active" || timers.has(m.agent)) continue;
-    if (now - (awaitingTurn.get(m.agent) ?? 0) < AWAIT_TURN_MAX_MS) continue;
+    const untilIn = Math.max(Date.parse(m.until) - now, 0) + 5_000;
+    if (now - (awaitingTurn.get(m.agent) ?? 0) < AWAIT_TURN_MAX_MS) {
+      schedule(m.agent, untilIn);
+      continue;
+    }
     const resume = m.resumeAt ? Date.parse(m.resumeAt) - now : 0;
-    schedule(m.agent, Math.min(Math.max(5_000, resume), Math.max(Date.parse(m.until) - now, 0) + 5_000));
+    schedule(m.agent, Math.min(Math.max(5_000, resume), untilIn));
   }
 }
 
@@ -144,6 +186,8 @@ export function initMission(d: MissionDeps): void {
     if (evt.type !== "agent_status" || (evt.data as { status?: unknown })?.status !== "done") return;
     onTurnDone(evt.agent).catch((e) => console.error("⏱ 值守回合结束处理失败:", (e as Error).message));
   });
-  watchFile(path, { interval: 5_000 }, () => void reconcile().catch((e) => console.error("⏱ 值守重排失败:", (e as Error).message)));
-  setTimeout(() => void reconcile().catch((e) => console.error("⏱ 值守启动重排失败:", (e as Error).message)), 20_000).unref?.();
+  const rerun = (why: string) => () => void reconcile().catch((e) => console.error(`⏱ 值守${why}失败:`, (e as Error).message));
+  watchFile(path, { interval: 5_000 }, rerun("重排"));
+  setTimeout(rerun("启动重排"), 20_000).unref?.();
+  setInterval(rerun("巡检"), 60_000).unref?.();
 }

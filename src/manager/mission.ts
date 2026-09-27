@@ -6,7 +6,7 @@
  *   mission list
  * bridge 监听 missions.json，开了之后 agent 空闲就会收到第一句提醒。
  */
-import { missionKey, parseUntil, readMissions, updateMissions, type Mission } from "../lib/missions.js";
+import { missionKey, newMission, parseUntil, readMissions, updateMissions } from "../lib/missions.js";
 import { extractStringFlag, loadRegistry, output } from "./core.js";
 
 async function agentExists(agent: string): Promise<boolean> {
@@ -29,10 +29,7 @@ async function start(args: string[]): Promise<void> {
   const until = parseUntil(u.value);
   if (!until) return output({ ok: false, error: `截止时间「${u.value}」看不懂或不在未来 7 天内（例：11:00、+3h、2026-09-28T11:00:00+09:00）` });
   if (!(await agentExists(agent))) return output({ ok: false, error: `agent "${agent}" 不存在` });
-  const m: Mission = {
-    agent, goal, until: until.toISOString(), createdAt: new Date().toISOString(), status: "active", nudges: 0, fastTurns: 0,
-    ...(l.value ? { ledger: l.value } : {}),
-  };
+  const m = newMission({ agent, goal, until, ledger: l.value });
   await updateMissions((all) => void (all[agent] = m));
   output({ ok: true, mission: m });
 }

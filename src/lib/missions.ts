@@ -4,11 +4,14 @@
  * 推进在 bridge/mission.ts：每回合结束（所有 runtime 共用的 Stop → agent_status done）等一小会儿、确认仍空闲，
  * 递一句「接着推进」。这里只放状态读写与纯裁决（tests/missions.test.ts）。
  */
+import { randomBytes } from "node:crypto";
 import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 
 export interface Mission {
+  /** 这一代值守的 id：stop 后再 start 是新的一代。bridge 递提醒前后都比对它，旧一代的提醒 / 到点不会记到新一代头上 */
+  id?: string;
   /** registry 里去掉 agent- 前缀的名字；master 就是 "master" */
   agent: string;
   goal: string;
@@ -34,22 +37,40 @@ const LOCK_SUFFIX = ".lock";
 
 export const missionKey = (agent: string): string => agent.replace(/^agent-/, "");
 
-const isMap = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d);
+const isMission = (m: unknown): boolean => {
+  const x = m as Partial<Mission> | null;
+  return !!x && typeof x === "object" && typeof x.agent === "string" && typeof x.until === "string" && typeof x.status === "string";
+};
+/** 顶层是对象、每一项都像一条值守：写坏的文件读成空、写之前也拦住，别把半截数据当状态 */
+const isMap = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d) && Object.values(d as object).every(isMission);
+
+/** 新开一代值守（manager 与网页共用，保证都带 id） */
+export function newMission(f: { agent: string; goal: string; until: Date; ledger?: string }, now = new Date()): Mission {
+  return {
+    id: randomBytes(6).toString("hex"), agent: f.agent, goal: f.goal, until: f.until.toISOString(), createdAt: now.toISOString(),
+    status: "active", nudges: 0, fastTurns: 0, ...(f.ledger ? { ledger: f.ledger } : {}),
+  };
+}
 
 export async function readMissions(path = MISSIONS_PATH): Promise<MissionMap> {
   return readJsonLenient<MissionMap>(path, {}, { validate: isMap, who: "missions" });
 }
 
-/** 加锁读改写；mutate 返回的值原样带出（拿锁超时降级照写，同 file-lock 的 advisory 约定） */
-export async function updateMissions<T>(mutate: (m: MissionMap) => T, path = MISSIONS_PATH): Promise<T> {
-  const lock = await acquireLock(path + LOCK_SUFFIX, 10_000);
+/**
+ * 加锁读改写；mutate 返回的值原样带出。拿不到锁就抛、绝不照写（manager stop 与 bridge 记账并发时，照写会把停止状态盖掉）；
+ * 内容没变就不写（别的 agent 的回合结束不该碰这个文件）。
+ */
+export async function updateMissions<T>(mutate: (m: MissionMap) => T, path = MISSIONS_PATH, lockMs = 10_000): Promise<T> {
+  const lock = await acquireLock(path + LOCK_SUFFIX, lockMs);
+  if (!lock) throw new Error(`missions.json 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没改，稍后重试`);
   try {
     const all = await readMissions(path);
+    const before = JSON.stringify(all);
     const out = mutate(all);
-    await writeJsonStateGuarded(path, all, { validate: isMap });
+    if (JSON.stringify(all) !== before) await writeJsonStateGuarded(path, all, { validate: isMap });
     return out;
   } finally {
-    lock?.release();
+    lock.release();
   }
 }
 

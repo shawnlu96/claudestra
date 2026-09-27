@@ -83,6 +83,20 @@ describe("值守推进", () => {
     expect(sent[0].content).toContain("值守已关闭");
     expect((await readMissions(path)).master.status).toBe("expired");
   });
+  test("到点时 agent 正忙：值守照样立刻变 expired（不再续跑），收尾那句等它这一轮结束再递", async () => {
+    sent.length = 0;
+    await put({ until: new Date(Date.now() - 1000).toISOString() });
+    paneBusy = true;
+    done();
+    await sleep(250);
+    expect(sent.length).toBe(0);
+    expect((await readMissions(path)).master.status).toBe("expired");
+    paneBusy = false;
+    done();
+    await sleep(100);
+    expect(sent.length).toBe(1);
+    expect(sent[0].content).toContain("值守已关闭");
+  });
   test("不在进行中的值守不管", async () => {
     sent.length = 0;
     await put({ status: "done" });

@@ -1,6 +1,7 @@
 /** lib/missions.ts：截止时间解析、空转计数与退避、提醒种类与文案、加锁读改写 */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { acquireLock } from "../src/lib/file-lock.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -75,5 +76,27 @@ describe("updateMissions", () => {
     }, path);
     expect(r).toBe(1);
     expect((await readMissions(path)).claudestra.goal).toBe("按台账推进");
+  });
+});
+
+describe("updateMissions 的写入纪律", () => {
+  test("拿不到锁就抛、文件不动；内容没变就不写", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "missions-lock-"));
+    const p = join(dir, "missions.json");
+    await updateMissions((all) => void (all.claudestra = base()), p);
+    const before = statSync(p).mtimeMs;
+    const held = await acquireLock(p + ".lock", 1000);
+    await expect(updateMissions((all) => void (all.claudestra.status = "stopped"), p, 50)).rejects.toThrow("没拿到锁");
+    held?.release();
+    expect((await readMissions(p)).claudestra.status).toBe("active");
+    await new Promise((r) => setTimeout(r, 20));
+    await updateMissions(() => undefined, p);
+    expect(statSync(p).mtimeMs).toBe(before);
+  });
+  test("每一项都要像一条值守：写坏的文件读成空，不把半截数据当状态", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "missions-bad-"));
+    const p = join(dir, "missions.json");
+    writeFileSync(p, JSON.stringify({ claudestra: { agent: "claudestra" } }));
+    expect(await readMissions(p)).toEqual({});
   });
 });
