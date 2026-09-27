@@ -86,6 +86,8 @@ describe("extractReplyText — 对方 messages/threads 响应契约", () => {
 import { initHttpPeer, routeToHttpPeer } from "../src/bridge/http-peer";
 import type { HttpPeer } from "../src/lib/peers";
 
+const PEER: HttpPeer = { name: "t", baseUrl: "http://x", outToken: "k".repeat(32), addedAt: "" };
+
 function makeHarness(responses: Array<() => Response>) {
   const pushed: string[] = [];
   let i = 0;
@@ -101,11 +103,11 @@ function makeHarness(responses: Array<() => Response>) {
     }) as unknown as typeof fetch,
     pollIntervalMs: 10,
     pollGiveUpMs: 300,
+    findPeer: async () => PEER, // 轮询每拍按名字重读 peer；不注入就会去读本机真实的 peers.json
   });
   return { pushed };
 }
 
-const PEER: HttpPeer = { name: "t", baseUrl: "http://x", outToken: "k".repeat(32), addedAt: "" };
 const fakeWs = {} as any;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
