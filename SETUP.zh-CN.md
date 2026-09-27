@@ -10,11 +10,11 @@
 - 了解向导在幕后做了什么。
 - 偏好手动配置的人用作参考。
 
-> **两个前门，Web 是默认那个。** v2.24 起向导默认只装 **Web 客户端**——可安装到
-> 手机主屏的 PWA（Next.js），带流式聊天、实时远程终端、聊天记录搜索；它用本机系统
-> 账号（SSH 用户名密码）登录，不依赖任何第三方，向导跑完就已经装成开机自启并给你
-> 一个网址。向导还会帮你配好手机访问：默认走中继（手机什么都不装、回车即官方中继），
-> 也可以选 Tailscale。
+> **两个前门，Web 是默认那个。** 向导默认装 **Web 客户端**——可安装到手机主屏的
+> PWA，带流式聊天、实时远程终端、聊天记录搜索。它是一份静态文件（`web/out`），由
+> bridge 自己托管：没有第二个服务、没有账号密码——浏览器**配对**一次（`claudestra pair`
+> 出二维码 / 链接 / 8 位码）以后打开直接进。向导还会帮你配好手机访问：默认走中继
+> （所有机器同一个地址，手机什么都不装、回车即官方中继），也可以选 Tailscale。
 >
 > **Discord 是可选项**（要自己去开发者后台建 bot，多 5 个步骤），在向导的「选择前端」
 > 那步勾上才会问。本文档下面的 Discord 章节只对选了它的人有意义。
@@ -68,22 +68,22 @@ bun run setup
 
 ### 从外面访问：中继（默认）或 Tailscale
 
-中继是默认的那条路，手机和对方电脑上什么都不用装。你的 bridge 只向外连一条 WebSocket 到中继，中继就把 `https://<你的名字>.<中继域名>` 当成这台机器的网页（打开就是 Web 客户端），并转发别的实例对你的 peer 调用（peer 地址写 `relay://<指纹>`）。不需要公网 IP、不开端口、不配证书。Tailscale 是另一条路（流量只走你自己的私有网络，不经任何第三方），向导「手机访问」一步选 2 就走它。
+中继是默认的那条路，手机和对方电脑上什么都不用装。你的 bridge 只向外连一条 WebSocket 到中继；中继托管网页，**一个地址** `https://<中继域名>/` 走天下，`/m/<指纹>/api/v1/…` 转给你正在看的那台机器的 bridge，并转发别的实例对你的 peer 调用（peer 地址写 `relay://<指纹>`）。不需要公网 IP、不开端口、不配证书。Tailscale 是另一条路（流量只走你自己的私有网络，不经任何第三方），向导「手机访问」一步选 2 就走它——`tailscale serve` 指向 **bridge 端口**，地址是 `https://<mac>.<tailnet>.ts.net/`。
 
-`bun run setup` 的「手机访问」一步默认就配中继：回车用官方中继 `wss://relay.sunstriker.cc`，填名字，装完直接打出配对二维码，手机扫一下就登录。手动配等价于：
+`bun run setup` 的「手机访问」一步默认就配中继：回车用官方中继 `wss://relay.sunstriker.cc`，装完直接打出配对二维码，手机扫一下就配好。手动配等价于：
 
-1. `.env` 加两行，重启 bridge：
+1. `.env` 加一行，重启 bridge：
 
    ```
    RELAY_URL=wss://relay.example.com    # 用哪台中继（官方托管或自建）
-   RELAY_NAME=mini                      # 你的子域名标签；不配就按主机名生成
+   RELAY_NAME=mini                      # 可选：中继目录里的显示名（也是旧版子域名标签）；不配就按主机名生成
    ```
 
-   bridge 日志会打出 `🛰 中继: … https://mini.relay.example.com`。名字被占了中继会追加一段指纹，以日志里的地址为准。
-2. 电脑上运行 `claudestra pair`：打印二维码、链接和一个 8 位码（10 分钟有效、只能用一次）。手机相机扫码、任何浏览器打开链接、或在 `https://relay.example.com` 输入短码——不用 SSH 密码就登录了（`/pair`，登录页也有入口）。Web 客户端的 Peer 面板顶部也显示这个地址，并有「配对新设备」按钮。
+   bridge 日志会打出 `🛰 中继: 已连接 …`。机器在中继上的身份是密钥指纹（`claudestra relay-status`），不是主机名。
+2. 电脑上运行 `claudestra pair`：打印二维码、链接（`https://relay.example.com/pair#…`）和一个 8 位码（10 分钟有效、只能用一次）。手机相机扫码、任何浏览器打开链接、或在 `https://relay.example.com/` 输入短码——输短码的要在终端（或网页「设备」面板）点头确认。之后这个浏览器持有由**你自己的 bridge** 签发的设备凭据，没有密码这回事；一个浏览器可以配对多台机器，顶栏切换。Web 客户端的 Peer 面板也有「配对新设备」按钮。
 3. 邀请变成链接：设置 → Peer 协作 → 「生成邀请」得到 `https://relay.example.com/i#…`，对方点开就到他自己的 Claudestra 的加入页；没装的人会被引导先安装。
 
-一句实话：这版中继是 TLS 的终点，看得见隧道里的明文（包括你的会话 cookie）——信任托管中继等于信任它的运营方，和任何反向代理一样。自己跑一台见 [docs/relay/self-host.md](docs/relay/self-host.md)，协议与边界见 [docs/relay/protocol.md](docs/relay/protocol.md)。
+一句实话：这版中继是 TLS 的终点、也托管网页的 JS，看得见隧道里的明文（包括设备 cookie）——信任托管中继等于信任它的运营方，和任何 SaaS 一样。自己跑一台见 [docs/relay/self-host.md](docs/relay/self-host.md)，协议与边界见 [docs/relay/protocol.md](docs/relay/protocol.md)，整体设计见 [docs/design-hosted-frontend.md](docs/design-hosted-frontend.md)。
 
 ### 装完有什么
 
@@ -96,7 +96,7 @@ bun run setup
 - **`manager.ts cost` + `metrics`** — 从 JSONL 汇总 token 消耗 + bridge 事件日志聚合。
 - **新消息自动打断** — 你在 Discord 发新消息时，如果 agent 正在干活，bridge 自动 Ctrl+C 让新消息覆盖当前任务。
 - **多前端 API（v2.6+）** — Bearer token 鉴权的 HTTP API（`/api/v1` + SSE `/events`），任何前端都能接上你的 agent：`bun src/manager.ts token-add <name> --agents <a,b|*>` 签发按 agent 限定范围的 token。下面的 Web 客户端完全建在这套 API 上。
-- **Web 客户端（v2.10+）** — 可 PWA 安装的 Next.js 应用：流式聊天（工具卡 + diff 着色）、实时远程终端、聊天记录搜索、Skills 面板、后台任务子会话。安装 + 手机远程访问见 [web/SETUP.md](./web/SETUP.md)。
+- **Web 客户端（v2.10+）** — 可 PWA 安装：流式聊天（工具卡 + diff 着色）、实时远程终端、聊天记录搜索、Skills 面板、后台任务子会话。一份静态包，由 bridge 自己（或中继）托管；浏览器用配对码而不是登录。构建、配对、手机访问见 [web/SETUP.md](./web/SETUP.md)。
 - **会话归档与历史（v2.8+）** — 每个退役 session 的 JSONL 自动快照到 `~/.claude-orchestrator/archive/`，外加每日全量扫描；聊天记录不再被 Claude Code 的 `cleanupPeriodDays` 清掉，agent 被 kill 之后历史照样可读。
 - **后台活动子线程（v2.8+）** — subagent 和后台 shell 任务各开一条 Discord thread 流式输出（完成后自动归档），不再刷爆 agent 主频道。
 - **Claude Code agents-mode 防护（v2.7+）** — 检测并自愈 Claude Code 后台 agent 守护进程造出的「分身」session（← 键误触陷阱）：`/agents` 清单面板、一键收编/清理、restart 自动 `--fork-session` 重试。
@@ -105,7 +105,7 @@ bun run setup
 
 ## 向导到底做了什么
 
-`bun run setup` 会走一串编号步骤 —— 具体几步取决于你选了哪些前端（Discord 多五步、Web 客户端多一步），通常 8~10 步，外加开头的语言选择：
+`bun run setup` 会走一串编号步骤 —— 具体几步取决于你选了哪些前端（Discord 多五步；Web 客户端多两步：「构建 Web 前端」= `npm install` + `npm run build` 导出到 `web/out`，以及「手机访问」），通常 8~13 步，外加开头的语言选择：
 
 1. **检查系统依赖** — 确认 `git` / `tmux` / `bun` / `claude` 都装了，缺的给出安装命令。
 2. **创建 Discord 应用** — 打开 Developer Portal，告诉你点哪个按钮。
@@ -114,15 +114,15 @@ bun run setup
 5. **邀请 Bot** — 带你走 OAuth2 URL Generator，告诉你精确的 scope 和 permission。
 6. **收集 Discord ID** — 打开开发者模式，依次问 Guild ID / User ID / 控制频道 ID，每个都校验是 17-20 位 snowflake。
 7. **个人偏好** — 你的称呼、MCP 服务名（默认 `claudestra`）、Bridge 端口（默认 `3847`）。
-8. **收尾** — 写 `.env`、渲染 `master/CLAUDE.md`，然后可选地自动跑 `bun install` + `playwright install` + `claude mcp add` + `manager.ts install-cli`（写入并加载三个 launchd daemon）。
+8. **收尾** — 写 `.env`（选了 Web 就带上 `BRIDGE_STATIC_DIR=<仓库>/web/out`）、渲染 `master/CLAUDE.md`，然后可选地自动跑 `bun install` + `playwright install` + `claude mcp add` + `manager.ts install-cli`（写入并加载三个 launchd daemon）。
 
-向导跑完后，打开 Discord 在控制频道随便说句话，大总管几秒内就会回。
+向导跑完后，本机浏览器打开 `http://127.0.0.1:3847/`（或它打印的手机地址）；配了 Discord 的在控制频道随便说句话，大总管几秒内就会回。
 
 ---
 
 ## 配置参考
 
-向导会写入 `.env`，包含 7 个变量：
+向导会写入 `.env`，包含这些变量：
 
 | 变量 | 用途 |
 |------|------|
@@ -133,6 +133,8 @@ bun run setup
 | `BRIDGE_PORT` | WebSocket 端口（默认 `3847`） |
 | `USER_NAME` | 大总管在回复里怎么叫你 |
 | `MCP_NAME` | `claude mcp add` 用的 MCP 服务名（默认 `claudestra`） |
+| `BRIDGE_STATIC_DIR` | 网页静态包的绝对路径（`<仓库>/web/out`）；选了 Web 前端才写——bridge 在 `http://127.0.0.1:<BRIDGE_PORT>/` 托管它 |
+| `RELAY_URL` / `RELAY_NAME` | 连哪台中继（手机访问）、可选的显示名——见上文「从外面访问」 |
 
 直接改 `.env`，然后重载 bridge：
 
@@ -356,7 +358,7 @@ Claudestra 升级后 Discord 里命令列表还是老的 —— 同样处理。
 
 ## 接下来
 
-- **装 Web 客户端** — [web/SETUP.md](./web/SETUP.md)：PWA 聊天 + 实时终端 + 记录搜索，以及在家庭网络之外用手机访问的方案（默认中继，Tailscale 可选）；另含生产部署：launchd 常驻、HTTPS 终结（tailscale serve 或 Caddy + `tailscale cert`）、证书续期与完整端口清单。
+- **Web 客户端细节** — [web/SETUP.md](./web/SETUP.md)：构建静态包、配对设备、在家庭网络之外用手机访问（默认中继，Tailscale 可选）、bridge 前面的 HTTPS 终结（tailscale serve 或 Caddy + `tailscale cert`）、证书续期、端口清单，以及退掉 2026-09 之前那个 `com.claudestra.web` 服务（`claudestra migrate-web-state` → `claudestra retire-web`）。
 - 读 [CLAUDE.zh-CN.md](./CLAUDE.zh-CN.md) 了解架构（给贡献者和 agent 看的）。
 - 试试 `send_to_agent` MCP 工具搭建多 agent 协作流。
 - 建个每天早上跑的定时任务，让它汇报到控制频道。

@@ -130,39 +130,34 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# Cross-Claudestra peer collaboration — HTTP peers (no Discord dependency;
-# peers talk over the /api/v1 surface directly. Design: docs/design-http-peers.md)
-# v2.15+ one-click invite (recommended): A generates (a link when on the relay,
-# else a string), B opens/pastes it; B's bridge redeems at A automatically.
-# Single-use, 24h TTL, expiry/revoke also revokes the embedded token. Joining
-# exposes nothing of B (one-way grant); symmetric = B sends an invite back.
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (URL: relay if connected, else HTTPS entry/peer port)
-bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = optional reverse exposure)
+# Cross-Claudestra HTTP peers (design: docs/design-http-peers.md). v2.15+ one-click invite: A generates (a link on the
+# relay, else a string), B opens/pastes it, B's bridge redeems at A. Single-use, 24h TTL, revoke kills the embedded token;
+# joining exposes nothing of B (one-way grant) — symmetric = B sends an invite back.
+bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]  # A: print one-click invite (URL: relay, else HTTPS entry / peer port)
+bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>] [--force]  # B: paste invite, done (--agents = reverse exposure)
 bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
 bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + its embedded token
-# Legacy 3-step handshake (needed when the other side runs pre-v2.15):
-bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <my-bridge-url>] [--force] [--rotate]  # A: print invite string (--url is auto-detected if omitted: Tailscale first, then LAN)
-bun src/manager.ts peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> [--force]           # B: store A, print receipt
-bun src/manager.ts peer-http-accept <name> '<receipt>'                                                # A: complete handshake
+# Legacy 3-step handshake (other side pre-v2.15): peer-http-invite <name> --agents <a,b> [--url] → peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> → peer-http-accept <name> '<receipt>'
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
-bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged, effective immediately)
+bun src/manager.ts peer-http-scope <name> --agents <a,b|*> [--force]  # v2.11.1+: change inbound scope in place (token unchanged)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
-# send_to_agent target syntax: "<agent>@<peer>" or "peer:<peer>.<agent>"
-# master is NEVER shareable to peers (hard rule v2.15+, --force does not override;
-# legacy peer tokens listing master are cut off in agentInScope)
+# send_to_agent target: "<agent>@<peer>" | "peer:<peer>.<agent>"; master is NEVER shareable to peers (v2.15+ hard rule, --force does not override)
 
-# Versioning
 # Health check (read-only; the first thing to run when something is broken)
 bun src/manager.ts doctor [--json]
 
 # Versioning
 bun src/manager.ts version   # current version + whether an update is available
-bun src/manager.ts update    # git pull + reload the 3 launchd daemons
+bun src/manager.ts update    # git pull + rebuild web/out if stale + reload the 3 launchd daemons
 
-# Auto-update toggles (both default on; launcher polls on a schedule and only upgrades when all agents are idle;
-# after a Claude Code upgrade the launcher probes the binary agents actually run and auto-repairs a quarantine hang,
-# alerting #control only if the repair fails — see lib/claude-binary.ts)
+# Hosted frontend (docs/design-hosted-frontend.md): the bridge serves web/out (BRIDGE_STATIC_DIR); browsers pair, no password
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <name>] [--url <entry>] [--json]  # QR / link / 8-char code
+bun src/manager.ts migrate-web-state   # old Next BFF settings.db + groqApiKey → bridge (tar backup first; idempotent)
+bun src/manager.ts retire-web          # unload + back up old com.claudestra.web; refuses until the bridge serves web/out and a backup exists
+
+# Auto-update toggles (both default on; launcher polls and upgrades only when all agents are idle; after a Claude Code
+# upgrade it probes the binary and auto-repairs a quarantine hang, alerting #control only if that fails — lib/claude-binary.ts)
 bun src/manager.ts auto-update status
 bun src/manager.ts auto-update claudestra on|off   # Claudestra self-update (30 min poll)
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly poll)
@@ -196,7 +191,7 @@ bun test
 | `BRIDGE_BIND` | HTTP/ws bind address (default `127.0.0.1`; set `0.0.0.0` to expose — bring your own reverse proxy/TLS) |
 | `BRIDGE_CONTROL_TOKEN` | v2.21.1+ control-plane token for **non-loopback** access to the bare routes (`/hook` `/stats` `/skills/rescan` `/agent/cleanup` `/events`) and the ws upgrade (`route_to_agent` = host RCE). Loopback is always exempt; `/api/v1/*` keeps its own Bearer (peers unaffected). Unset = **fail-closed**: non-loopback control access is refused outright (current legal traffic is 100% loopback, so the default is zero-impact). Only set it if you deliberately need remote direct access to those routes. Supply it via `Authorization: Bearer` or `X-Bridge-Token` (preferred — `?control_token=` works for browser WS that can't set headers, but leaks into access logs). |
 | `BRIDGE_CORS_ORIGIN` | v2.10+ CORS allowlist: comma-separated origins or `*` (default unset = no CORS headers) |
-| `BRIDGE_STATIC_DIR` | v2.10+ static dir served by the bridge (SPA fallback included; default unset = off) |
+| `BRIDGE_STATIC_DIR` | Static web client served by the bridge (`web/out`, Next export layout; setup writes it; unset = API only) |
 
 ## tmux topology
 

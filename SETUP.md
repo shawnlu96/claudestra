@@ -10,13 +10,14 @@ This file exists as a reference for:
 - Understanding what the wizard does under the hood.
 - Operators who prefer to configure things by hand.
 
-> **Two front doors — the web client is the default.** Since v2.24 the wizard
-> installs the **web client** only: a PWA-installable Next.js app with streaming
-> chat, a live remote terminal, and chat-history search. It logs in with your OS
-> account (SSH username/password), depends on no third party, and by the time the
-> wizard finishes it is already installed for autostart and you have a URL. The
-> wizard also sets up phone access: the relay by default (nothing to install on
-> the phone; ENTER picks the official relay), or Tailscale if you prefer.
+> **Two front doors — the web client is the default.** The wizard installs the
+> **web client** by default: a PWA-installable app with streaming chat, a live
+> remote terminal and chat-history search. It is a static bundle (`web/out`)
+> that the bridge serves itself — no second service, no account, no password:
+> a browser is **paired** to your machine once (`claudestra pair`, QR / link /
+> 8-char code) and then just opens. The wizard also sets up phone access: the
+> relay by default (one address for every machine, nothing to install on the
+> phone; ENTER picks the official relay), or Tailscale if you prefer.
 >
 > **Discord is optional** (you would create your own bot — 5 extra steps) and is
 > only asked about if you pick it at the "Pick your frontends" step. The Discord
@@ -71,22 +72,22 @@ Notes:
 
 ### Reach it from anywhere: the relay (default) or Tailscale
 
-The relay is the default way out, and it needs nothing installed on the phone or the other computer. Your bridge keeps one outbound WebSocket to a relay; the relay then serves `https://<your-name>.<relay-domain>` — that page *is* this machine's web client — and forwards other instances' peer calls (`relay://<fingerprint>` as the peer address). No public IP, no open port, no certificate on your side. Tailscale is the alternative (traffic stays inside your own private network, no third party): pick option 2 in the wizard's *Phone access* step.
+The relay is the default way out, and it needs nothing installed on the phone or the other computer. Your bridge keeps one outbound WebSocket to a relay; the relay hosts the web client at **one address** — `https://<relay-domain>/` — and routes `/m/<fingerprint>/api/v1/…` to whichever paired machine you are looking at; it also forwards other instances' peer calls (`relay://<fingerprint>` as the peer address). No public IP, no open port, no certificate on your side. Tailscale is the alternative (traffic stays inside your own private network, no third party): pick option 2 in the wizard's *Phone access* step — it points `tailscale serve` at the **bridge port**, so the address is `https://<mac>.<tailnet>.ts.net/`.
 
-`bun run setup`'s *Phone access* step configures the relay by default: ENTER takes the official relay `wss://relay.sunstriker.cc`, you pick a name, and right after install it prints a pairing QR code — scan it and the phone is signed in. Doing it by hand is equivalent to:
+`bun run setup`'s *Phone access* step configures the relay by default: ENTER takes the official relay `wss://relay.sunstriker.cc`, and right after install it prints a pairing QR code — scan it and the phone is paired. Doing it by hand is equivalent to:
 
-1. Two lines in `.env`, then restart the bridge:
+1. One line in `.env`, then restart the bridge:
 
    ```
    RELAY_URL=wss://relay.example.com    # the relay you use (hosted, or one you run yourself)
-   RELAY_NAME=mini                      # your subdomain label; defaults to a slugified hostname
+   RELAY_NAME=mini                      # optional display name in the relay directory (also the legacy subdomain label)
    ```
 
-   The bridge log prints `🛰 中继: … https://mini.relay.example.com`. If the name is taken, the relay appends part of your fingerprint — the log has the final address.
-2. On the computer run `claudestra pair`: it prints a QR code, a link and an 8-character code (10 minutes, single use). Scan the QR with the phone camera, open the link in any browser, or type the code at `https://relay.example.com` — the browser is signed in without the SSH password (`/pair`; the login page links to it too). The web client's Peer panel shows the same address and a *Pair a new device* button.
+   The bridge log prints `🛰 中继: 已连接 …`. The machine's identity on the relay is its key fingerprint (`claudestra relay-status`), not a hostname.
+2. On the computer run `claudestra pair`: it prints a QR code, a link (`https://relay.example.com/pair#…`) and an 8-character code (10 minutes, single use). Scan the QR with the phone camera, open the link in any browser, or type the code at `https://relay.example.com/` — short-code pairings wait for you to confirm in the terminal (or the web client's Devices panel). The browser then holds a device credential issued by *your* bridge; there is no password. One browser can pair several machines and switch between them in the top bar. The web client's Peer panel has a *Pair a new device* button for the same thing.
 3. Invites become links: Settings → Peer collaboration → *Create invite* yields `https://relay.example.com/i#…`. The other side opens it and lands in their own Claudestra's join page; someone without one is guided to install first.
 
-Honest note: this version of the relay terminates TLS, so it can read tunnelled traffic (including your session cookie) — trusting a hosted relay means trusting its operator, like any reverse proxy. Run your own with [docs/relay/self-host.md](docs/relay/self-host.md); protocol and boundaries are in [docs/relay/protocol.md](docs/relay/protocol.md).
+Honest note: this version of the relay terminates TLS and hosts the page's JavaScript, so it can read tunnelled traffic (including the device cookie) — trusting a hosted relay means trusting its operator, like any SaaS. Run your own with [docs/relay/self-host.md](docs/relay/self-host.md); protocol and boundaries are in [docs/relay/protocol.md](docs/relay/protocol.md), the full design in [docs/design-hosted-frontend.md](docs/design-hosted-frontend.md).
 
 ### What you get out of the box
 
@@ -99,7 +100,7 @@ Honest note: this version of the relay terminates TLS, so it can read tunnelled 
 - **`manager.ts cost` + `metrics`** — token-usage rollup from JSONL files + bridge event log summary.
 - **Auto-interrupt on new message** — sending a Discord text while Claude is mid-task auto-injects Ctrl+C so the new message redirects instead of queuing.
 - **Multi-frontend API (v2.6+)** — Bearer-token HTTP API (`/api/v1` + SSE `/events`) so any frontend can talk to your agents: `bun src/manager.ts token-add <name> --agents <a,b|*>` issues scoped tokens. The web client below is built entirely on this.
-- **Web client (v2.10+)** — PWA-installable Next.js app: streaming chat with tool cards and diffs, live remote terminal, chat-history search, Skills panel, background-task threads. Setup + phone remote access: [web/SETUP.md](./web/SETUP.md).
+- **Web client (v2.10+)** — PWA-installable app: streaming chat with tool cards and diffs, live remote terminal, chat-history search, Skills panel, background-task threads. A static bundle served by the bridge itself (or by the relay); browsers pair with a code instead of logging in. Build, pairing and phone access: [web/SETUP.md](./web/SETUP.md).
 - **Session archive & history (v2.8+)** — every retired session's JSONL is snapshotted to `~/.claude-orchestrator/archive/`, plus a daily sweep of live sessions; chat history survives Claude Code's `cleanupPeriodDays` pruning and stays readable via the history API even after an agent is killed.
 - **Background-activity threads (v2.8+)** — subagents and background shell tasks stream into their own Discord threads (auto-archived on completion) instead of flooding the agent's main channel.
 - **Claude Code agents-mode guards (v2.7+)** — detects and heals "doppelganger" background sessions created by Claude Code's bg-agent daemon (the ← key trap): `/agents` inventory panel, one-click adopt/cleanup, automatic `--fork-session` retry on restart.
@@ -108,7 +109,7 @@ Honest note: this version of the relay terminates TLS, so it can read tunnelled 
 
 ## What the wizard actually does
 
-The `bun run setup` command runs through numbered steps — how many depends on which frontends you pick (Discord adds five, the web client adds one), so expect 8–10 plus an initial language prompt:
+The `bun run setup` command runs through numbered steps — how many depends on which frontends you pick (Discord adds five; the web client adds two: *Build the web frontend* — `npm install` + `npm run build` into `web/out` — and *Phone access*), so expect 8–13 plus an initial language prompt:
 
 1. **Check system dependencies** — verifies `git`, `tmux`, `bun`, `claude` are installed and prints install commands for anything missing.
 2. **Create a Discord application** — opens the Developer Portal and tells you which button to click.
@@ -117,15 +118,15 @@ The `bun run setup` command runs through numbered steps — how many depends on 
 5. **Invite the bot** — walks through the OAuth2 URL Generator with the exact scopes and permissions to select.
 6. **Collect Discord IDs** — enables Developer Mode, then asks for guild ID, user ID, and control channel ID, validating each as a 17–20 digit snowflake.
 7. **Set preferences** — your display name, MCP server name (default `claudestra`), and bridge port (default `3847`).
-8. **Finalize** — writes `.env`, renders `master/CLAUDE.md` from the template, then optionally runs `bun install`, `playwright install`, `claude mcp add`, and `manager.ts install-cli` (which writes and loads the launchd daemons) automatically.
+8. **Finalize** — writes `.env` (including `BRIDGE_STATIC_DIR=<repo>/web/out` when you picked the web client), renders `master/CLAUDE.md` from the template, then optionally runs `bun install`, `playwright install`, `claude mcp add`, and `manager.ts install-cli` (which writes and loads the launchd daemons) automatically.
 
-After the wizard finishes, open Discord and say anything to the bot in your control channel. The master orchestrator will reply within a few seconds.
+After the wizard finishes, open `http://127.0.0.1:3847/` in a browser on the machine (or the phone address it printed), or — with Discord — say anything to the bot in your control channel. The master orchestrator will reply within a few seconds.
 
 ---
 
 ## Configuration reference
 
-The wizard writes `.env` with seven variables:
+The wizard writes `.env` with these variables:
 
 | Variable | Purpose |
 |----------|---------|
@@ -136,6 +137,8 @@ The wizard writes `.env` with seven variables:
 | `BRIDGE_PORT` | WebSocket port (default `3847`) |
 | `USER_NAME` | How the master agent addresses you in replies |
 | `MCP_NAME` | MCP server name used by `claude mcp add` (default `claudestra`) |
+| `BRIDGE_STATIC_DIR` | Absolute path of the web client's static bundle (`<repo>/web/out`); written when you pick the web frontend — the bridge serves it at `http://127.0.0.1:<BRIDGE_PORT>/` |
+| `RELAY_URL` / `RELAY_NAME` | Relay to connect to (phone access), optional display name — see *Reach it from anywhere* above |
 
 Edit `.env` directly, then reload the bridge:
 
@@ -360,7 +363,7 @@ The same applies if Discord is still showing an old command list after a Claudes
 
 ## Next steps
 
-- **Set up the web client** — [web/SETUP.md](./web/SETUP.md): PWA chat + live terminal + history search, and how to reach it from your phone outside your home network (relay by default, Tailscale optional), plus production deployment: launchd service, HTTPS termination (tailscale serve or Caddy + `tailscale cert`), certificate renewal, and the full port map.
+- **Web client details** — [web/SETUP.md](./web/SETUP.md): building the static bundle, pairing devices, reaching it from your phone outside your home network (relay by default, Tailscale optional), HTTPS termination in front of the bridge (tailscale serve or Caddy + `tailscale cert`), certificate renewal, the port map, and retiring the pre-2026-09 `com.claudestra.web` service (`claudestra migrate-web-state` → `claudestra retire-web`).
 - Read [CLAUDE.md](./CLAUDE.md) for an architecture overview (written for contributors and agents).
 - Try `send_to_agent` MCP tool for agent-to-agent workflows.
 - Set up a cron job that runs every morning and reports to your control channel.
