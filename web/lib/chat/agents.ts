@@ -45,7 +45,7 @@ export interface AgentSession {
   external?: boolean;
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
   label?: string | null;
-  sharedPeers?: number;
+  sharedPeers?: number; sharedWith?: string[]; // 全权 token 才有：共享给几个 / 哪些 peer
   updateHint?: UpdateHint | null;
 }
 
@@ -77,6 +77,7 @@ interface ApiAgent {
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
   label?: string | null;
   sharedPeers?: number;
+  sharedWith?: string[];
   updateHint?: UpdateHint | null;
 }
 
