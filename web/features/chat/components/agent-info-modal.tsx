@@ -30,7 +30,7 @@ function ConfirmOff({ name, peers, busy, onCancel, onConfirm }: ConfirmOffProps)
       <div className="p-5">
         <h3 className="text-base font-semibold text-error">{t("关闭 external 闸门")}</h3>
         <p className="mt-2 text-[13px] text-base-content/80">
-          {t("该会话正在共享给以下 peer，关闭后他们将立刻失去访问。输入会话名以确认：")}
+          {t("该会话正在共享给以下 peer，关闭后会从他们的共享范围里移除。输入会话名以确认：")}
         </p>
         <div className="mt-2 flex flex-wrap gap-1">
           {peers.map((p) => (
@@ -100,6 +100,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
   const [info, setInfo] = useState<AgentInfo | null>(null);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
+  const [warn, setWarn] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<string[] | null>(null);
   const load = () =>
@@ -116,6 +117,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
     setBusy(true);
     setErr("");
     setNote("");
+    setWarn("");
     const r = await setAgentExternal(name, on, typed);
     setBusy(false);
     if (!r.ok) {
@@ -125,6 +127,8 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
     }
     setConfirm(null);
     if (r.data.removedFromPeers?.length) setNote(`${t("已从以下 peer 的共享范围移除：")}${r.data.removedFromPeers.join(", ")}`);
+    // 全量 "*" 授权的 peer 摘不掉（scope 里没有它的名字）：关了闸门仍可访问，必须说出来
+    if (r.data.stillSharedWith?.length) setWarn(`${t("以下 peer 持有全量（*）授权，仍可访问，请在 Peer 面板调整其范围：")}${r.data.stillSharedWith.join(", ")}`);
     await load();
     void store.refreshAgents();
   };
@@ -176,6 +180,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
             ))}
           </div>
           {note && <div className="mt-2 text-[12px] text-success">{note}</div>}
+          {warn && <div className="mt-2 text-[12px] text-warning">{warn}</div>}
         </div>
       </div>
       {confirm && (
