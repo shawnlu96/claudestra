@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getLang, useT } from "@/lib/i18n";
 import { ResponsiveShell } from "./responsive-shell";
+import { getSkillPrefs, pinSkill } from "@/lib/api/settings";
 
 /** 与 composer 的 SlashCmd 同形（bridge /skills 端点）。 */
 export interface SkillItem {
@@ -88,12 +89,9 @@ export function SkillsSheet({
   const [q, setQ] = useState("");
 
   useEffect(() => {
-    fetch("/api/skills/prefs")
-      .then((r) => r.json())
-      .then((j: { data?: SkillPrefs }) => {
-        if (j.data) setPrefs({ pins: j.data.pins || [], counts: j.data.counts || {} });
-      })
-      .catch(() => {});
+    getSkillPrefs()
+      .then((p) => setPrefs(p))
+      .catch(() => {}); // 偏好拿不到就按默认排序，下次打开再拉
   }, []);
 
   const togglePin = (name: string) => {
@@ -103,11 +101,7 @@ export function SkillsSheet({
       ...p,
       pins: pinned ? [...p.pins, name] : p.pins.filter((n) => n !== name),
     }));
-    void fetch("/api/skills/prefs", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, pinned }),
-    }).catch(() => {});
+    void pinSkill(name, pinned).catch(() => {}); // 乐观更新已生效，失败不回滚（下次打开会校准）
   };
 
   const term = q.trim().toLowerCase();

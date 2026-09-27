@@ -1,13 +1,21 @@
-import { bridgeGet, MASTER_AGENT_NAME } from "./bridge-api";
+import { api } from "@/lib/api/client";
 
-export { MASTER_AGENT_NAME };
+/** 大总管的前端保留名 ↔ API 的 "master"。 */
+export const MASTER_AGENT_NAME = "__master__";
+
+/** 前端会话名 → /api/v1 的 agent 名（__master__ → master，其余原样）。 */
+export function apiAgentName(agent: string): string {
+  return agent === MASTER_AGENT_NAME ? "master" : agent;
+}
+
+/** bridge 侧 agent 名（master / agent-xxx / xxx）→ 前端会话名 */
+export function uiAgentName(name: string): string {
+  return name === "master" ? MASTER_AGENT_NAME : name.replace(/^agent-/, "");
+}
 
 /**
- * Web 会话 = claudestra 的一个 agent。
- *
- * 2026-07-10 迁移：列表来源从「BFF 直读 registry.json + /web/master」换成
- * Bridge 的 GET /api/v1/agents（token scope 过滤；master 显式列入 scope 时
- * 由 Bridge 置入列表，fork 增强）。BFF 不再碰 registry / 文件系统。
+ * Web 会话 = claudestra 的一个 agent。列表来源是 bridge 的 GET /api/v1/agents（凭据 grant 过滤；
+ * master 在 grant 内时由 bridge 置入列表）。此前这段映射在 BFF（lib/chat/agents.ts 的服务端版）——托管前端后搬进浏览器，逻辑原样。
  */
 /** 会话级「该重启 / 该 pi update」提示（bridge lib/update-hints.ts 算好透传） */
 export type UpdateHint =
@@ -41,6 +49,8 @@ export interface AgentSession {
   effort?: string | null;
   /** v2.21+ 归属 project id（master 无；侧栏按它分组） */
   projectId?: string | null;
+  /** 未读回复数（bridge 计数，跨设备一致）；0 / 缺省 = 无未读 */
+  unread?: number;
   /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
   external?: boolean;
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
@@ -54,24 +64,18 @@ interface ApiAgent {
   status?: string;
   idle?: boolean;
   purpose?: string;
-  /** agent 当前 session jsonl 的 mtime（ms epoch），Bridge fork 字段；无 session 为 null */
   lastActivityTs?: number | null;
-  /** 正在回合中（Bridge hook 驱动的 agent_status，比 tmux idle 探测可靠） */
   busy?: boolean;
-  /** v2.21.2+ 正在压缩上下文（agent_status=compacting） */
   compacting?: boolean;
-  /** 当前上下文占用 token 数（最近一条 assistant 的 usage 合计） */
   contextTokens?: number | null;
-  /** 当前模型 id（jsonl 实测 → registry → 全局默认） */
   model?: string | null;
-  /** v2.23+ 运行时（同上） */
   runtime?: string | null;
-  /** 当前 effort 档位（同上兜底链） */
   effort?: string | null;
   /** agent 创建时间（ISO，registry.created）——新建但还没说过话的 agent 靠它排序 */
   created?: string;
-  /** v2.21+ 归属 project id */
   projectId?: string | null;
+  unread?: number;
+  archived?: boolean;
   /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
   external?: boolean;
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
@@ -80,78 +84,63 @@ interface ApiAgent {
   updateHint?: UpdateHint | null;
 }
 
-/**
- * 读取 agent 列表（GET /api/v1/agents）。
- * master（token scope 显式含 "master" 时 Bridge 会置入）映射为置顶的 __master__。
- * Bridge 不可达时抛错（由路由层转成 5xx；不再有 mock 回退）。
- */
-export async function loadAgents(): Promise<AgentSession[]> {
-  // include=stopped：已停止的 agent 也入列（保留入口，历史经归档 API 仍可读）
-  const json = await bridgeGet<{ ok: boolean; agents: ApiAgent[] }>(
-    "/agents?include=stopped",
-    { timeoutMs: 5000 }
-  );
-  const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
-  // 大总管在桥接侧有**多个来源**（注册表历史条目 `agent-master`、api-routes 的
-  // master 注入、cmdList 的补条目）——不去重时侧栏会冒出「大总管卡片 + 一条
-  // 分组里的 master」（owner 2026-09-14 手机截图实报）。这里收敛成一条：
-  // 丢掉 `agent-master` 这种带前缀的历史条目，同名只保留**第一个带 runtime 的**（没有带的就第一个）。
-  // 注入条目排在最前、带 master 会话的实测（上下文、模型），所以新桥接下留下的是它
-  const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
-  const keepMaster =
-    all.find((a) => isMaster(a) && typeof a.runtime === "string" && a.runtime) ?? all.find(isMaster);
-  const list = all
-    .filter((a) => !isMaster(a) || a === keepMaster)
-    // 已归档的 agent 不进工作列表（owner 2026-09-14「被归档，但是还是在列表里」）：
-    // 归档区里有它的目录 = 被收起来了；恢复（清掉归档目录）后自动回来。
-    .filter((a) => (a as { archived?: boolean }).archived !== true)
-    .map((a): AgentSession => {
-    if (a.name === "master") {
-      return {
-        // ⚠ 展开桥接的原始字段再覆盖 —— 这个映射此前是**逐项挑字段**的，桥接新增
-        // 一个字段（runtime / contextTokens …）忘了在这里加，网页就永远读不到
-        // （2026-09-14 一天内踩了两次：Pi 徽章不显示、Pi 只读模型面板不生效）。
-        // 展开之后新字段自动流过，只有需要**改名/兜底**的才在后面显式写。
-        ...a,
-        name: MASTER_AGENT_NAME,
-        displayName: "大总管",
-        purpose: a.purpose || "调度员：管理/派发多个 agent",
-        cwd: "",
-        status: a.status === "stopped" ? "stopped" : "active",
-        pinnedMaster: true,
-        lastActivityTs: a.lastActivityTs ?? null,
-        busy: a.busy === true,
-        compacting: a.compacting === true,
-        contextTokens: a.contextTokens ?? null,
-        model: a.model ?? null,
-        runtime: a.runtime ?? null,
-        effort: a.effort ?? null,
-      };
-    }
-    const bare = a.name.replace(/^agent-/, "");
+function mapAgent(a: ApiAgent): AgentSession {
+  if (a.name === "master") {
     return {
-      ...a, // 同上：新字段自动流过，别改回逐项挑
-      name: bare,
-      displayName: bare,
-      purpose: a.purpose || "",
+      // ⚠ 展开原始字段再覆盖：逐项挑字段时 bridge 新增一个字段（runtime / contextTokens …）忘了加，网页就永远读不到
+      // （2026-09-14 一天内踩了两次）。展开之后新字段自动流过，只有需要改名 / 兜底的才显式写。
+      ...a,
+      name: MASTER_AGENT_NAME,
+      displayName: "大总管",
+      purpose: a.purpose || "调度员：管理/派发多个 agent",
       cwd: "",
       status: a.status === "stopped" ? "stopped" : "active",
-      // 刚建出来的 agent 还没说过话，jsonl 没内容 → lastActivityTs 为 null，
-      // 而排序用 `?? 0` 兜底，于是新 agent 直接沉到列表最底下（owner 2026-07-25
-      // 报「新建的能不能放最前面」）。用创建时间兜底：没活动过就按建的时间排，
-      // 刚建的自然在最上面，一旦说过话就被真实活动时间接管。
-      lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
-      // Bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
-      busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
-      compacting: a.status !== "stopped" && a.compacting === true,
+      pinnedMaster: true,
+      lastActivityTs: a.lastActivityTs ?? null,
+      busy: a.busy === true,
+      compacting: a.compacting === true,
       contextTokens: a.contextTokens ?? null,
       model: a.model ?? null,
       runtime: a.runtime ?? null,
       effort: a.effort ?? null,
-      projectId: a.projectId ?? null,
     };
-  });
-  // 排序：master 置顶 → 其余按最近活动降序（无时间戳的沉底，registry 序兜底稳定）
+  }
+  const bare = a.name.replace(/^agent-/, "");
+  return {
+    ...a,
+    name: bare,
+    displayName: bare,
+    purpose: a.purpose || "",
+    cwd: "",
+    status: a.status === "stopped" ? "stopped" : "active",
+    // 刚建出来的 agent 还没说过话 → lastActivityTs 为 null 会沉底；用创建时间兜底，刚建的自然在最上面
+    lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
+    // bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
+    busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
+    compacting: a.status !== "stopped" && a.compacting === true,
+    contextTokens: a.contextTokens ?? null,
+    model: a.model ?? null,
+    runtime: a.runtime ?? null,
+    effort: a.effort ?? null,
+    projectId: a.projectId ?? null,
+  };
+}
+
+/**
+ * 读取 agent 列表（include=stopped：已停止的也入列，历史经归档 API 仍可读）。
+ * 大总管在桥接侧有多个来源（历史条目 agent-master、注入的 master、cmdList 补条目）——只留一条：丢掉带前缀的历史条目，
+ * 同名只保留第一个带 runtime 的（注入条目排最前、带实测字段）。已归档的不进工作列表。bridge 不可达时抛错（无 mock 回退）。
+ */
+export async function loadAgents(): Promise<AgentSession[]> {
+  const json = await api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs: 5000 });
+  const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
+  const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
+  const keepMaster = all.find((a) => isMaster(a) && typeof a.runtime === "string" && a.runtime) ?? all.find(isMaster);
+  const list = all
+    .filter((a) => !isMaster(a) || a === keepMaster)
+    .filter((a) => a.archived !== true)
+    .map(mapAgent);
+  // 排序：master 置顶 → 其余按最近活动降序（无时间戳的沉底）
   return list.sort((a, b) => {
     const pin = Number(!!b.pinnedMaster) - Number(!!a.pinnedMaster);
     if (pin) return pin;

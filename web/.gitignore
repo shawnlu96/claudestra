@@ -23,3 +23,4 @@ next-env.d.ts
 
 # 构建前自动生成(scripts/gen-build-info.mjs);commit 落成源码,勿提交
 /lib/build-info.ts
+/public/build-info.json

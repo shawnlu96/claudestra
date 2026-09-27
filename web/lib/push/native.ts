@@ -1,9 +1,10 @@
 /**
  * v2.22+ 原生壳(Capacitor iOS)推送客户端。壳里没有 Service Worker,Web Push 不可用;
  * 走 Capacitor 的 PushNotifications 插件(经注入的 window.Capacitor.Plugins 调用,
- * 网页不打包 @capacitor/* 依赖)。token 登记到 /api/push/apns,服务端经 APNs 直推。
+ * 网页不打包 @capacitor/* 依赖)。token 登记到当前机器的 /api/v1/push/apns，由 bridge（或经中继网关）推 APNs。
  */
 import { isNativeShell, nativePlugin } from "@/lib/native";
+import { apnsRegister, markRead } from "@/lib/api/push";
 
 type Listener = (ev: unknown) => void;
 interface PushPlugin {
@@ -49,11 +50,7 @@ export function bindNativePushListeners(openAgent: (agent: string) => void): voi
     const token = String((ev as { value?: string })?.value || "");
     if (!token) return;
     const device = `${/iPad/i.test(navigator.userAgent) ? "iPad" : "iPhone"} · ${navigator.platform || "iOS"}`;
-    void fetch("/api/push/apns", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, device }),
-    }).catch(() => {});
+    void apnsRegister(token, device).catch(() => {}); // 登记失败下次启动会再 register，不打扰用户
   });
   void p.addListener("registrationError", (ev) => {
     console.warn("[native-push] registration error", ev);
@@ -62,7 +59,7 @@ export function bindNativePushListeners(openAgent: (agent: string) => void): voi
     const data = ((ev as { notification?: { data?: Record<string, unknown> } })?.notification?.data || {}) as { agent?: string };
     if (data.agent) {
       // 点了通知 = 读过了:同 SW 的 notificationclick,通知服务端做跨端已读联动
-      void fetch("/api/push/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent: data.agent }) }).catch(() => {});
+      void markRead(data.agent).catch(() => {}); // 已读回执丢了下一次打开会话会再发
       onOpenAgent?.(data.agent);
     }
   });

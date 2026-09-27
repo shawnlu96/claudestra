@@ -1,5 +1,8 @@
 import type { MetadataRoute } from "next";
 
+/** 静态导出（output: "export"）要求元数据路由显式声明为静态，否则 build 在收集页面数据时报错 */
+export const dynamic = "force-static";
+
 /**
  * PWA manifest（Next 原生约定 → 自动注入 <link rel="manifest">，输出 /manifest.webmanifest）。
  *

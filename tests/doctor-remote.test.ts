@@ -6,8 +6,8 @@ import type { RemoteAccessReport, EntryProbe } from "../src/lib/tailscale";
 const HOST = "my-mac.tail0000.ts.net";
 const report = (over: Partial<RemoteAccessReport> = {}, ts: Partial<RemoteAccessReport["tailscale"]> = {}): RemoteAccessReport => ({
   tailscale: { installed: true, cli: "/x/tailscale", backendState: "Running", running: true, dnsName: HOST, ipv4: ["100.64.0.1"], magicDNS: true, httpsEnabled: true, ...ts },
-  webPort: 3333,
-  webBind: ["127.0.0.1:3333"],
+  webPort: 3847,
+  webBind: ["127.0.0.1:3847"],
   servePorts: [],
   entries: [],
   others443: [],
@@ -83,9 +83,10 @@ describe("remoteAccessChecks", () => {
     expect(v(6, 45)).toBe("fail");
   });
 
-  test("本机 web 不应答 → 单独一条 warn，并且排在最前", () => {
+  test("本机 bridge 不托管前端（/app-config.json 不应答）→ 单独一条 warn，并且排在最前", () => {
     const c = remoteAccessChecks(report({ webUp: false }));
-    expect(c[0]).toMatchObject({ name: "web 服务", status: "warn" });
+    expect(c[0]).toMatchObject({ name: "前端（bridge 托管）", status: "warn" });
+    expect(c[0].detail).toContain("3847");
   });
 
   test("没有 HTTPS 入口 → warn；tailnet 没开 HTTPS 时建议先去后台开", () => {
@@ -105,8 +106,8 @@ describe("remoteAccessChecks", () => {
   });
 
   test("web 听通配地址不单独告警（有人有意留明文备用），只写进 HTTPS 入口的 detail", () => {
-    const c = remoteAccessChecks(report({ webBind: ["*:3333"], entries: [https()] }));
+    const c = remoteAccessChecks(report({ webBind: ["*:3847"], entries: [https()] }));
     expect(c.every((x) => x.status === "ok")).toBe(true);
-    expect(by(c, "HTTPS 入口")[0].detail).toContain("*:3333");
+    expect(by(c, "HTTPS 入口")[0].detail).toContain("*:3847");
   });
 });

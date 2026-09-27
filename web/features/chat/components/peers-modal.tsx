@@ -12,6 +12,7 @@ import { PeersTidyBanner, type TidyGroupInfo } from "./peers-tidy-banner";
 import { HandoffSummaryCard, PeerHandoffLine, type HandoffSummaryInfo } from "./peers-handoff-stats";
 import { SelfFingerprint, SignatureLine, type PeerSignatureInfo } from "./peers-signature";
 import { RelayCard } from "./peers-relay-card";
+import { peersList } from "@/lib/api/system";
 /**
  * HTTP peer 管理弹窗（设置 → Peer 协作 → 管理）：
  * - 列表:每个 peer 的握手状态 / 对方可访问我哪些 agent(入站 scope,可编辑) /
@@ -389,8 +390,7 @@ export function PeersPanel() {
   const reload = useCallback(async () => {
     setErr("");
     try {
-      const res = await fetch("/api/peers");
-      const j = (await res.json()) as PeersListResponse;
+      const j = await peersList<PeersListResponse>();
       if (j.ok) {
         setPeers(j.peers || []);
         setLocalAgents(j.localAgents || []);

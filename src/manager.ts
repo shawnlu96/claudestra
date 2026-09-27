@@ -106,7 +106,7 @@ import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
-import { isWriteInvocation } from "./manager/write-commands.js";
+import { isWriteInvocation, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
@@ -2218,21 +2218,19 @@ async function cmdVersion() {
 /** v2.16.3 update 附带的 web 构建。返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。
  *  判据与 install-cli / doctor 共用(lib/web-build.ts,按 hash 比对):此前按「本次 diff 是否触及
  *  web/」触发,某一轮构建失败后下一轮 diff 不再含 web/,就永远不重试。 */
-async function maybeBuildWeb(): Promise<{ built: boolean; restarted?: boolean; restored?: boolean; skipped?: string; error?: string }> {
+async function maybeBuildWeb(): Promise<{ built: boolean; restored?: boolean; skipped?: string; error?: string }> {
   const { rebuildWebIfStale } = await import("./lib/web-build.js");
   // 没装 web 的实例跳过,不拖垮整体 update
   if (!existsSync(`${REPO_ROOT}/web/node_modules`)) return { built: false, skipped: "web 未安装(无 node_modules)" };
-  // 构建会删掉正在服务的 .next(成败都一样),所以构建后一律重启 launchd 托管的 web
-  const r = await rebuildWebIfStale(REPO_ROOT, { restartService: true });
+  // bridge 按请求读 web/out,构建完即生效,不用重启任何服务
+  const r = await rebuildWebIfStale(REPO_ROOT);
   if (!r.attempted) return { built: false, ...(r.error ? { error: r.error } : { skipped: r.skipped }) };
   if (!r.ok) {
     const tail = (r.log ?? []).join("\n");
     console.error(`[update] web 构建失败:\n${tail}`);
-    return { built: false, restarted: r.restarted, restored: r.restored, error: `${r.error ?? "web 构建失败"}: ${tail.slice(0, 500)}` };
+    return { built: false, restored: r.restored, error: `${r.error ?? "web 构建失败"}: ${tail.slice(0, 500)}` };
   }
-  return r.restarted
-    ? { built: true, restarted: true }
-    : { built: true, restarted: false, skipped: "web 非 launchd 托管——已构建,请自行重启 web 进程" };
+  return { built: true };
 }
 
 /** update.lock 互斥。锁文件里是持有者 pid——已有锁时先验持有者是否还活着:
@@ -2828,6 +2826,9 @@ if (isWriteInvocation(cmd, args)) {
   writeLock = await acquireLock(statePath(".manager-write.lock"));
   if (!writeLock) console.error("⚠ 写锁 20s 未拿到,降级继续(并发写命令可能竞态)");
   else process.on("exit", () => writeLock?.release());
+  // 写 principals 的命令另持 principals 锁，与 bridge 的设备凭据写（updatePrincipals）互斥
+  const pLock = PRINCIPALS_WRITE_COMMANDS.has(cmd) ? await acquireLock((await import("./lib/principals.js")).principalsLockPath()) : null;
+  if (pLock) process.on("exit", () => pLock.release());
 }
 
 try {
@@ -3360,7 +3361,7 @@ switch (cmd) {
   case "peer-invite-inspect": await (await import("./manager/peers-inspect.js")).cmdPeerInviteInspect(args[0] || ""); break;
   case "peer-http-list": await cmdPeerHttpList(); break;
   // 中继（bridge/relay-link.ts）：配对短码 / 二维码给手机与浏览器，状态查询；实现在 manager/relay.ts
-  case "pair": await (await import("./manager/relay.js")).cmdPair(args.includes("--json")); break;
+  case "pair": await (await import("./manager/pair.js")).cmdPair(args); break;
   case "relay-status": await (await import("./manager/relay.js")).cmdRelayStatus(); break;
   case "peer-http-scope": {
     const { rest: afterForce, value: force } = extractBoolFlag(args, "--force");
@@ -3462,11 +3463,9 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": {
-    const res = await migrateWorkerToAgent();
-    output({ ok: true, ...res });
-    break;
-  }
+  case "migrate": output({ ok: true, ...(await migrateWorkerToAgent()) }); break;
+  case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
+  case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
 
   case "permissions":
   case "perm":
@@ -3529,19 +3528,11 @@ switch (cmd) {
       output({
         ok: true,
         cliWrapper: result.cliWrapper,
-        daemons: result.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning, ...(d.keptExisting ? { keptExisting: true } : {}) })),
-        // v2.24+ web 服务装没装上 —— 装上了给 url，没装给**缺什么**。
-        // 这条不输出的话，前置条件缺一项（比如没跑过 setup、没有 web/.env.local）
-        // 就是彻底静默：daemon 不装、端口不监听、命令行一个字都不说，
-        // 用户只能看到「装完了但网页打不开」。
-        webDaemon: result.webDaemon,
+        daemons: result.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),
+        // 前端静态包：bridge 按 .env 的 BRIDGE_STATIC_DIR 托管 web/out；没配 / 没构建 / 旧 web 服务还在都在 warnings 里点名
+        web: result.web,
         // web 构建过期时的自动重建结果（没重建 = 构建与代码一致或被闸门拦下，skipped 说明原因）
         webBuild: result.webBuild,
-        // 装完自验的结论提到最外层:「命令报成功但网页打不开」来回过六轮,
-        // 就是因为成败藏在一个要自己去翻的字段里。
-        ...(result.webDaemon?.installed && !result.webDaemon.serving
-          ? { webServiceFailed: result.webDaemon.error, webServiceLog: result.webDaemon.log }
-          : {}),
         pm2Stopped: result.pm2Stopped.length > 0 ? result.pm2Stopped : undefined,
         oldAutostartPlist: result.oldAutostartPlist,
         oldPm2StartupPlist: result.oldPm2StartupPlist,
@@ -3550,9 +3541,7 @@ switch (cmd) {
         bumpedTmuxDashboardLimit: result.bumpedTmuxDashboardLimit,
         allowedMcpTools: result.allowedMcpTools,
         warnings: result.warnings,
-        hint: result.webDaemon?.installed && !result.webDaemon.serving
-          ? "⚠️ web 服务装上了但没跑起来 —— 看上面的 webServiceLog；其余 daemon 正常。"
-          : "打 `claudestra` 试试 —— launchd 3 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
+        hint: "打 `claudestra` 试试 —— launchd 3 个 daemon + 进 master TUI。重启机器后服务也会自动起来。",
       });
     }
     break;
@@ -3606,6 +3595,8 @@ switch (cmd) {
         "tmux-help                       — print the tmux crash course (incl. iTerm2 -CC mode)",
         "doctor [--json]                 — health-check the whole install (runtime, config, daemons, bridge, MCP, agents)",
         "install-skills                  — symlink the repo's skills/ (save-compact …) into ~/.claude/skills (idempotent; update/install-cli run it too)",
+        "migrate-web-state               — copy the old web BFF's settings.db tables + groqApiKey/lang into the bridge (tar backup of the web data dir first; idempotent)",
+        "retire-web                      — unload + back up the old com.claudestra.web daemon (the bridge serves web/out now); refuses until BRIDGE_STATIC_DIR is served and migrate-web-state ran",
         "version                         — show the current version and whether an update is available",
         "update                          — git pull and reload the three launchd daemons",
         "auto-update status              — show auto-update toggles",

@@ -30,13 +30,10 @@
 
 import { randomBytes } from "node:crypto";
 import { TMUX_SOCK, MASTER_SESSION } from "../lib/tmux-helper.js";
-import {
-  readPrincipals,
-  findByBearer,
-  terminalAllowed,
-  tokenIdOf,
-  type Principal,
-} from "../lib/principals.js";
+import type { Principal } from "../lib/principals.js";
+import { terminalAllowedFor, terminalIoDenied, terminalOwnerKey } from "./terminal-auth.js";
+import { authenticateApi } from "./api-auth.js";
+import { revocable } from "./credential-revocation.js";
 
 // ---------- tmux 小工具（独立于 tmux-helper 的 tmuxRaw：这里需要 exitCode） ----------
 
@@ -107,16 +104,8 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-/** Bearer 鉴权（同 authApi 但不限流——终端输入逐键回传，30 req/min 秒超）。 */
-async function authNoLimit(req: Request): Promise<Principal | Response> {
-  const auth = req.headers.get("Authorization") || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return json(401, { ok: false, error: "missing Authorization: Bearer <secret>" });
-  const file = await readPrincipals();
-  const p = findByBearer(file, m[1].trim());
-  if (!p) return json(401, { ok: false, error: "invalid or revoked token" });
-  return p;
-}
+/** 鉴权同 /api/v1（Bearer 或设备 cookie，api-auth.ts）但不限流——终端输入逐键回传，按分钟限次会秒超 */
+const authNoLimit = (req: Request): Promise<Principal | Response> => authenticateApi(req, new URL(req.url), { rateLimit: false });
 
 /**
  * agent 名 → master session 里的 window 引用。
@@ -281,9 +270,8 @@ export async function handleTerminalApi(req: Request, url: URL): Promise<Respons
     if (auth instanceof Response) return auth;
     const sess = termSessions.get(ioMatch[1]);
     if (!sess) return json(404, { ok: false, error: "terminal session not found (expired?)" });
-    if (sess.tokenId !== tokenIdOf(auth)) {
-      return json(403, { ok: false, error: "terminal session belongs to another token" });
-    }
+    const denied = terminalIoDenied(auth, sess); // 属主按设备凭据判 + 每次重验终端授权（bridge/terminal-auth.ts）
+    if (denied) return json(403, { ok: false, error: denied });
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     if (ioMatch[2] === "input") {
       const d = typeof body.d === "string" ? body.d : "";
@@ -334,7 +322,7 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
   if (auth instanceof Response) return auth;
   const principal = auth;
   // B2：终端 = 宿主 shell 级访问，须显式 terminal 授予（不复用裸 messaging scope）
-  if (!terminalAllowed(principal, agentParam) && !terminalAllowed(principal, `agent-${agentParam}`)) {
+  if (!terminalAllowedFor(principal, agentParam)) {
     return json(403, {
       ok: false,
       error: `terminal access not granted for agent "${agentParam}" (needs a token with terminal scope: token-add --terminal)`,
@@ -478,7 +466,7 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
       }
       const sess: TermSession = {
         id: termId,
-        tokenId: tokenIdOf(principal),
+        tokenId: terminalOwnerKey(principal),
         agent: agentParam,
         viewerSession,
         windowRef,
@@ -517,13 +505,13 @@ async function openTerminal(req: Request, url: URL, agentParam: string): Promise
     },
   });
 
-  return new Response(stream, {
+  return revocable(new Response(stream, { // 设备凭据一撤，终端流立刻断（credential-revocation.ts）
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     },
-  });
+  }), principal);
 }
 
 /** 单条 PTY 会话的最长存活（TTL 兜底）。正常关闭走 SSE 断开；这里防的是

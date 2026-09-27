@@ -2,131 +2,63 @@
 
 [English](./CLAUDE.en.md) · **简体中文**
 
-Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）。可 PWA 安装、自托管 VAPID Web Push（零第三方账号）、多会话流式 Chat。
+Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）：**纯静态导出**（`output: "export"`），由中继（`RELAY_STATIC_DIR`）或 bridge（`BRIDGE_STATIC_DIR`）托管，浏览器直接打 bridge 的 `/api/v1/*`。没有服务端、没有 BFF、没有登录体系——登录 = 设备配对（`docs/design-hosted-frontend.md`）。
 
-**2026-07-10 起数据面全面走多前端 API**（`docs/web-frontend-guide.md` +
-`docs/design-multi-frontend.md`）：BFF 消费 Bridge 的 `/api/v1/*`（Bearer token）与
-`/api/v1/events`（SSE），早期的 `/web/*` 网关与 web-hub 已删除。web 独有的那几个
-端点（interrupt / AUQ 回传 / 生命周期 / Web-only 模式）都是在这套 API 上 additive 加的。
-
-## 技术栈 & 端口
+## 技术栈
 
 - Next.js 16 + React 19 + TypeScript + Tailwind 4 + daisyUI；状态管理 zenith（`@do-md/zenith`，复制式 `.packages/`）。
-- 端口：**dev 33333 / 生产 3333**（避让 claude-os 的 22222/2222）。
-- 运行时是标准 Node/npm（`npm run dev`），**独立于仓库根的 Bun 后端**（bridge/manager 那套）。两套依赖树互不干扰。
+- 依赖树独立于仓库根的 Bun 后端。dev：`npm run dev`（33333）；产物：`npm run build` → `out/`（Turbopack 在 worktree 里认不出软链 node_modules，用 `npx next build --webpack`）。
 
 ## 目录结构
 
-逐文件说明（含踩坑记录）见 [docs/web/layout.md](../docs/web/layout.md)。
+逐文件说明见 [docs/web/layout.md](../docs/web/layout.md)。
 
 ```
-app/                  页面（chat / login）+ api/ 下的 BFF 路由（每个路由自己调 isAuthed，公开路由登记在 guard 的 PUBLIC_ROUTES）
-features/chat/        Chat：type / stream（SSE 协议 v1）/ chat-store（zenith 中枢）/ components
-features/terminal/    远程终端：窄屏全屏页、宽屏模态、xterm 视图、控制键条
-features/devtools/    开发者模式面板。UI 调参先在面板上拖、定稿再写死，规矩见 docs/web-dev-mode.md
-lib/                  db、auth.service、api-auth（isAuthed）、chat/（bridge-api 客户端、agents、events 协议）
-proxy.ts              Next16 proxy：只拦页面 cookie，API 由 handler 自守
+app/                  页面：/ 分流 · /chat · /pair 配对 · /login → /pair · /join /i 协作邀请。全是客户端组件，无 api/
+features/chat/        Chat：type / stream（协议 v1）/ chat-store（zenith 中枢）/ components
+features/machines/    机器清单：MachineGate（配置 + 清单就位再渲染，凭据失效横幅）、MachineSwitcher、版本检查
+features/pair/        配对页：扫码挑战应答 / 手输短码轮询 / 本机一键
+features/terminal/    远程终端；features/devtools/ 开发者面板（docs/web-dev-mode.md）
+lib/app-config.ts     /app-config.json → relay | direct（缺失按 direct 单机兜底）
+lib/machines.ts       IndexedDB 机器清单 {fp,name,addedAt,lastUsedAt,principalId?}，不存凭据；当前机器镜像给 SW / boot.js
+lib/api/client.ts     唯一的 fetch 出口：基址 /m/<fp> 或 ""，credentials include，非 GET 带 x-cstra-device，401 → 机器标 repair
+lib/api/<域>.ts       agents / chat / history / stream / settings / system / push / terminal / devices / version：BFF 的形状包装在这里
+lib/chat/             history-shape / stream-shape（原 BFF 的纯变换）、events（协议 v1）、attachments、inline-buttons（twin）
+public/boot.js        原 layout 内联脚本（主题 / 看门狗 / 探针），静态文件才能过 script-src 'self'
+public/sw.js          Web Push：点通知向发通知那台机器回 read
 ```
 
-防腐规则与仓库根一致（见根目录 CLAUDE.md「防腐规则」）：web 同样受 `scripts/guard` 约束（文件 ≤400 行、函数 ≤100 行、无声吞错、web 与 src 互不 import）。
+防腐规则与仓库根一致（根 CLAUDE.md「防腐规则」）；web 与 src 互不 import，共用逻辑只能是 twin。
 
-## 鉴权模型（复用 claude-os SSH/PAM + Bearer）
+## 身份与请求
 
-- 登录：`verifySSH` 连本机 SSH 校验账号密码 → 写 SQLite session → HttpOnly cookie `cstra_session`（7天）。
-- 双认证 `isAuthed()`：浏览器 cookie session，或外部脚本 `x-api-key === INTERNAL_API_KEY`。
-- **分层**：`proxy.ts` 只拦「页面」（无 cookie → /login）；API 路由各自在 handler 调 `isAuthed()`（遵 prin-475132；且 proxy 跑 edge 运行时读不到 `.env.local`）。
-- cookie 名用 `cstra_session`（不是 claude-os 的 `cos_session`）——localhost 下 cookie 按 host 不按端口隔离，必须避名。
-- **BFF → Bridge 的鉴权**：`CLAUDESTRA_API_TOKEN`（`.env.local`）。签发：
-  `bun src/manager.ts token-add web-ui --agents '*,master' --force --terminal`（master 必须显式列，`"*"` 不含；
-  `--terminal` 显式授予远程终端 = 宿主 shell 级访问，独立于 messaging scope，不加则 🖥️ 终端 403，chat/历史/中断照常）。
-  BFF 在 server 端带 `Authorization: Bearer`，浏览器永不直连 3847，也天然绕开
-  EventSource 不能带 header 的坑（guide §4.3）。
+- 一个浏览器 × 一台机器 = 一条 HttpOnly cookie `cstra_dev`（中继 Path=/m/<fp>/），bridge 签发与校验；JS 拿不到，`<AuthImg>` 取附件走 fetch+blob。
+- 所有请求经 `lib/api/client.ts`：**发出时捕获目标机器**，切机器中止旧机器在途请求 / SSE，迟到响应不落到新机器；`DeviceInvalidError` 由 MachineGate 横幅统一提示，组件不用各自处理 401。
+- 「哪条是我发的」= `chatId === "api:owner:self"`（guest = 配对回的 principalId）+ whoami 的 ownerIds（`lib/chat/history-shape.ts`）。
+- 版本：`lib/version-check.ts`——有 webCommit 精确比，否则比 HEAD；机器 apiVersion 过低 → 「这台机器需要升级」。
 
-## 数据流（/api/v1 + /events）
+## 数据流
 
-会话 = 一个 claudestra agent。打开 agent：先拉历史（`GET /api/chat/history`），再建一条持久 SSE 流（`GET /api/chat/stream`）；`send` fire-and-forget（wait=0），输出经流回来。完整说明（事件翻译表、cursor 差量同步、判重规则、master 特判）见 [docs/web/data-flow.md](../docs/web/data-flow.md)。必须守住的几条：
+打开 agent：`fetchHistory`（bridge `/agents/:name/history[/:sid]`）→ `openAgentEventStream`（订阅 `/events`，本地按 agent 过滤 + 翻译 + 连流补拉 `/pending` `/bg-tasks`）；`send` fire-and-forget，输出经流回来。完整说明见 [docs/web/data-flow.md](../docs/web/data-flow.md)。必须守住：
 
-- **BFF 不直读 jsonl / registry**：列表、历史、发消息、事件全走 Bridge 的 `/api/v1/*`（Bearer 在 server 端带，浏览器永不直连 3847）。
-- **唤醒对齐 = cursor 差量同步**：游标 `{sessionId, lastSeq}`，先差量后开流（串行），流不带 `since`；轮转/超一页/连败自动回退全量。
-- **直播 ↔ 历史判重按 seq**（`features/chat/live-merge.ts`）：⚠ 别再用时间戳猜重复。
-- **重复发送闸**（`features/chat/send-dedupe.ts`）：同 agent + 同载荷 1.5s 内只发一次，去标点后相同 5s 内只发一次。
+- **唤醒对齐 = cursor 差量**：游标 `{sessionId, lastSeq}`，先差量后开流（串行），流不带 `since`；轮转 / 超一页 / 连败回退全量。
+- **直播 ↔ 历史判重按 seq**（`features/chat/live-merge.ts`），别用时间戳猜。
+- **重复发送闸**（`send-dedupe.ts`）：同 agent 同载荷 1.5s 内只发一次。
+- 中断 / 权限卡 / AUQ：事件下行 → 卡片 → `POST /agents/:name/{interrupt,answer}` → tmux 按键。权限卡下行暂缺（permission-watcher 只面向 Discord）。
 
-## 富交互（中断 / 权限卡 / AskUserQuestion 卡）
+## PWA 容器（真机收敛的不变式，勿单点改动）
 
-三者都「Bridge 事件下行 → 前端渲染卡片 → BFF 回传 fork 端点 → tmux 按键」，复用 Discord
-侧同款 keystroke 逻辑（buildAuqKeystrokes / 权限 keySeqMap + 发键前 tmuxCapture 重验）：
-
-- **AUQ**：`question` 事件（jsonl-watcher 检测，data.questions）→ ask 卡 →
-  `POST /api/v1/agents/:name/answer {kind:"auq", action, selections[][]}`。应答后双侧
-  （API/Discord 按钮）发 `question_cleared` 收卡；迟到订阅用 `/pending` 补拉。
-- **中断**：streaming 时 composer 出「■ 停止」→ `POST .../interrupt` → C-c（master → master:0）。
-- **清空会话（🧹）**：侧栏列表项按钮 → 确认弹窗（可编辑「开机指令」，per-agent 持久化
-  在 settings 表）→ `POST .../clear`（Bridge 打原生 /clear + 后台轮转 sessionId/归档/
-  watcher 重绑）→ 本地视图清零 → 开机指令非空则自动作为第一条消息发出（可见可审计，
-  知识注入藏在指令文本里，产品层对图谱零感知）。master 可 clear 但无需开机指令
-  （CLAUDE.md 自动重载）。⚠ CC 原生 auto-memory 跨 /clear 存活（原生行为）。
-- **权限卡 ⚠ 已知缺口**：迁移后权限弹窗**事件下行暂缺**（permission-watcher 只面向
-  Discord 且 web-only 模式未启动它）——卡片不会自动弹出；上行 `answer {kind:"permission"}` 保留
-  （发键前 Bridge 重验弹窗在场）。agent 默认 bypassPermissions，此卡本就罕见。session-idle
-  应答已随迁移移除。
-
-## PWA 容器方案（真机踩坑收敛的不变式，勿单点改动）
-
-> 完整通用版沉淀在用户知识库 `iOS-PWA-standalone-全屏容器与安全区避坑.md`。以下为本项目落点。
-
-iOS standalone 的「铺满屏底 + 纹丝不动 + 安全区无缝」由这几件事共同构成（2026-07-10 六轮真机迭代收敛）：
-
-0. **【真凶·最隐蔽】globals.css 里 html 千万别锁死高度**——`html,body{height:100%}` 会让
-   iOS standalone 把 `position:fixed` 钳到「安全区内缩的短视口」，`fixed inset-0` 的 `bottom:0`
-   **到不了真正屏底**（列表+会话底部都浮在安全区上方一截）。迷惑点：此时 `env()` 仍正常、容器每层
-   `height` 也各自铺满 844——是短视口本身没到底。改用 **`body{min-height:100vh}` + html 不锁高度**
-   （对齐 claude-os）即铺满。同理 html/body 别加 `overflow:hidden`（同样钳短视口）。
-1. **应用壳根容器 `fixed inset-0 overflow-hidden`**（chat.tsx）**是锁滚动的全部**：出流 →
-   body 无流内容 → 文档天然不滚；滚动只在内部 `overflow-y-auto`。⚠ 不要改回 in-flow `h-dvh`
-   ——body 有 100dvh 流内容会被拖着微滚/橡皮筋、加载停偏移位，已证伪。
-2. **安全区 padding 归各面板自己垫、带自身 bg**：TopBar/会话列表头 `env(safe-area-inset-top)`、
-   composer/列表 footer 底部。⚠ 不放应用壳根层——根是 base-100，压在 base-200 列表上就是
-   上下色差条（claude-os 把 pt-safe-top 放根层，正是它没解决的那个毛病）。
-3. **底部一律 `max(env(safe-area-inset-bottom), 常规间距)` 不叠加**——home 条区本身够高，
-   `env + 12px` 双层叠出「过高的底部」。
-4. **画布色跟随当前面板**：iOS 给布局视口外/安全区条带涂「画布色」（body 设了 bg 用 body 的，
-   否则用 html 的）→ body 一律不设 bg（layout.tsx），chat.tsx 按视图给 `<html>` 挂/摘
-   `canvas-list` 类（globals.css：列表=base-200 / 会话=base-100），条带永远与所在页同色。
-5. 改 viewport/manifest 后 iOS 需**删主屏图标重新添加**才生效（安装时缓存）。
-5b. **模态框/任何 position:fixed 浮层必须 createPortal 到 body**——移动端会话页在
-   transform 横滑容器内（chat.tsx translate-x），CSS 规定 transform 祖先成为 fixed
-   的定位基准：容器内渲染 .modal 会整个定位到屏幕外一屏（点了「没反应」，返回列表
-   时容器滑回弹窗才「突然出现」）。桌面 translate=0 复现不了，必须窄视口验证。
-6. **排查方法**：别肉眼猜截图。开开发者模式（`?dev=1`）看「视口」分区实测值 + 底部对齐线。
-   图标重生成：`node scripts/make-icons.mjs`（sharp，manifest 在 app/manifest.ts）。
+0. **html 别锁高度**：`html,body{height:100%}` 让 iOS standalone 把 fixed 钳到安全区内缩的短视口，底部到不了屏底。用 `body{min-height:100vh}`；html/body 不加 `overflow:hidden`。
+1. 应用壳根 `fixed inset-0 overflow-hidden`（chat.tsx）就是全部滚动锁；别改回 in-flow `h-dvh`。
+2. 安全区 padding 归各面板自己垫、带自身 bg；不放根层（色差条）。底部 `max(env(safe-area-inset-bottom), 常规间距)` 不叠加。
+3. 画布色跟随面板：body 不设 bg，chat.tsx 给 `<html>` 挂 / 摘 `canvas-list`。
+4. 模态框 / fixed 浮层必须 `createPortal` 到 body（移动端会话页在 transform 横滑容器内）；改 viewport/manifest 后 iOS 要删主屏图标重加。
+5. 排查开 `?dev=1` 看视口实测值；图标 `node scripts/make-icons.mjs`。
 
 ## 运行 & 排障
 
-- **实际在跑的 launchd 服务**（`launchctl list | grep claudestra` 一看便知，别照抄记忆里的名字——
-  这里曾长期写着 `com.claudestra.web-bridge` / `.web-launcher`，而那两个标签根本不存在，
-  按它 kickstart 会拿到 exit 113）：
-  - `com.claudestra.bridge` — 后端 Bridge（Web-only 模式也是它，只是不设 DISCORD_BOT_TOKEN）
-  - `com.claudestra.web` — Next.js 生产服务（plist 必须 `exec ./node_modules/.bin/next start`，见下条）
-  - `com.claudestra.launcher` / `com.claudestra.cron` — 后端守护，与 web 无关
-  - `com.claudestra.tls-proxy` — Caddy 做 h2 TLS 终结
-
-  改后端代码 → `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`（等 15-20s）；
-  改 web 代码 → `cd web && npm run build && launchctl kickstart -k gui/$(id -u)/com.claudestra.web`。
-- **⚠ 正式服务 `com.claudestra.web` 的 plist 必须 `exec ./node_modules/.bin/next start`，
-  不能 `npm run start`**：npm 中间层被 kickstart 杀掉时子 next-server 可能成孤儿——它没有
-  监听端口但推送派发器（出站 SSE+出站推送）还活着，每条推送必重复（2026-07-16 泄漏一个，
-  用户连收 5 天双推送才发现）。兜底：dispatcher 有跨进程端口锁（127.0.0.1:3339，
-  `PUSH_LOCK_PORT` 可调），任何进程组合下只有一个推送者；排障时 `lsof -iTCP:3339` 看谁持锁。
-- 起 dev：`npm run dev`（已在跑别重开；探测 `curl localhost:33333`）。
-- **⚠ 本机 shell 全局有 `NODE_ENV=production`**：用 `NODE_ENV=development npm run dev` 强制。
-- **⚠ `INTERNAL_API_KEY` 全局导出会盖过 `.env.local`**：`env -u INTERNAL_API_KEY` 起 dev。
-- **⚠ BRIDGE_HTTP_URL 必须用 `127.0.0.1` 不是 `localhost`**：Bridge 只绑 IPv4，localhost 的
-  ::1 歧义会让 Node fetch 偶发 connect 10s 超时（"fetch failed"）。
-- **⚠ /events SSE 空闲断流（已修）**：Bun.serve 默认 HTTP idleTimeout≈10s，早期的 30s ping
-  活不到第一轮——事件间隙 >10s 的订阅者被静默掐掉。fork 已改为连接即发 `: connected` + 5s ping
-  （bridge.ts handleEventsRequest）。流「偶尔收不到」时先查这里有没有被改回去。
-- **⚠ turbopack 冷启动**：dev 重启后的头几个 API 请求可能 401/502（env/编译未就绪），刷新即好。
-- **⚠ curl 验证 CSS 会看到陈旧 chunk**：turbopack dev 对静态 CSS chunk 不因 curl 请求重编译，
-  新样式经 HMR 推给真浏览器/整页刷新才生效——「curl grep 不到新规则」≠ 没编译进去，先在浏览器里确认。
-- cookie 7 天过期后页面自动跳 /login，重登即可。
-- Next 16 冷知识：`_` 开头目录不路由；macOS 无 `timeout`，测 SSE 用 `curl --max-time N`。
+- 后端只有 `com.claudestra.bridge`（+ launcher / cron）；**没有 web 服务**。改后端 → `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`；改 web → `npm run build`，托管方拿 `out/`。
+- 本机 shell 全局有 `NODE_ENV=production`：`NODE_ENV=development npm run dev`；dev 对着本机 bridge 时没有 `/app-config.json` → 按 direct 单机兜底。
+- `/events` SSE：bridge 连接即发 `: connected` + 5s ping；流「偶尔收不到」先查这里没被改回去。
+- 排障日志在 bridge 的 client.log（`POST /api/v1/client-log`，boot.js 与 `lib/client-log.ts` 都打这里）。
+- Next 16：`_` 开头目录不路由；macOS 无 `timeout`，测 SSE 用 `curl --max-time N`。

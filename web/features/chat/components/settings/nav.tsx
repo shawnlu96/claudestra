@@ -83,7 +83,7 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
   },
   {
     id: "security",
-    label: "安全",
+    label: "设备",
     icon: (
       <path
         d={

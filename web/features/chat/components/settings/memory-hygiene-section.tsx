@@ -2,17 +2,14 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { Section } from "./section";
+import { getMemoryHygiene, postMemoryHygiene } from "@/lib/api/settings";
+
+type Hyg = { exists: boolean; enabled: boolean; freq: string | null; schedule: string | null; lastRun: string | null; nextRun: string | null };
+type HygResp = Hyg & { ok?: boolean; error?: string };
 
 /** 记忆卫生(owner 2026-08-26):mem0 定期审查的开关+频率,事实源是 cron 任务 */
 export function useMemoryHygiene(open: boolean) {
-  const [hyg, setHyg] = useState<{
-    exists: boolean;
-    enabled: boolean;
-    freq: string | null;
-    schedule: string | null;
-    lastRun: string | null;
-    nextRun: string | null;
-  } | null>(null);
+  const [hyg, setHyg] = useState<Hyg | null>(null);
   const [hygBusy, setHygBusy] = useState(false);
   const [hygMsg, setHygMsg] = useState("");
 
@@ -21,8 +18,7 @@ export function useMemoryHygiene(open: boolean) {
     // 记忆卫生状态
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开时重置：拆分前与语音 Key 同属一个 effect（那条 warning 留在 groq-key-section），不新增基线
     setHygMsg("");
-    fetch("/api/memory-hygiene")
-      .then((r) => r.json())
+    getMemoryHygiene<HygResp>()
       .then((j) => {
         if (j?.ok) setHyg(j);
         else setHygMsg(j?.error || "读取失败");
@@ -35,12 +31,7 @@ export function useMemoryHygiene(open: boolean) {
     setHygBusy(true);
     setHygMsg("");
     try {
-      const r = await fetch("/api/memory-hygiene", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled, freq }),
-      });
-      const j = await r.json();
+      const j = await postMemoryHygiene<HygResp>({ enabled, freq });
       if (j?.ok) setHyg(j);
       else setHygMsg(j?.error || "保存失败");
     } catch {

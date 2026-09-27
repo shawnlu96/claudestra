@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { getUpdateSettings, postUpdateSettings, updateCheck } from "@/lib/api/settings";
 
 /**
  * 「版本与更新」里的通道 / 自动更新开关，以及「能升到哪个版本」的检查。
@@ -10,20 +11,13 @@ export type UpdateChannel = "release" | "beta";
 export type UpdatePrefs = { channel: UpdateChannel; claudestra: boolean; claudeCode: boolean };
 export type UpdateCheck = { channel: UpdateChannel; latest: string | null; behind?: number; upToDate: boolean | null; error?: string };
 
-async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, { cache: "no-store", ...init });
-  const j = (await r.json().catch(() => ({}))) as T & { error?: string }; // 非 JSON 错误页按空体处理，下面按状态码报错
-  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
-  return j;
-}
-
 /** 通道 + 两个开关：读一次，改哪项 POST 哪项，以服务端回来的为准 */
 export function useUpdatePrefs() {
   const [prefs, setPrefs] = useState<UpdatePrefs | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   useEffect(() => {
-    getJson<{ autoUpdate: UpdatePrefs }>("/api/update/settings")
+    getUpdateSettings<{ autoUpdate: UpdatePrefs }>()
       .then((j) => setPrefs(j.autoUpdate))
       .catch((e: Error) => setErr(e.message));
   }, []);
@@ -31,11 +25,7 @@ export function useUpdatePrefs() {
     setBusy(true);
     setErr("");
     try {
-      const j = await getJson<{ autoUpdate: UpdatePrefs }>("/api/update/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
+      const j = await postUpdateSettings<{ autoUpdate: UpdatePrefs }>(patch);
       setPrefs(j.autoUpdate);
     } catch (e) {
       setErr((e as Error).message);
@@ -53,7 +43,7 @@ export function useUpdateCheck(key: string) {
   useEffect(() => {
     if (!key) return;
     let live = true;
-    getJson<UpdateCheck>("/api/update/check")
+    updateCheck<UpdateCheck>()
       .then((check) => live && setRes({ key, check, err: "" }))
       .catch((e: Error) => live && setRes({ key, check: null, err: e.message }));
     return () => {

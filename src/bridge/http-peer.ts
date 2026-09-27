@@ -21,6 +21,7 @@ import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { signedFor } from "../lib/instance-key.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
+import { initPush } from "./push/init.js";
 import { peerFetch, startRelayLink } from "./relay-link.js";
 
 export interface HttpPeerDeps {
@@ -33,13 +34,17 @@ export interface HttpPeerDeps {
   /** 单测覆盖:轮询间隔/放弃时限(生产别动) */
   pollIntervalMs?: number;
   pollGiveUpMs?: number;
+  /** 经中继路径模式进来的请求在进程内调它（终端端点 + /api/v1），bridge.ts 注入 */
+  handleApi?: (req: Request) => Promise<Response>;
 }
 
 let deps: HttpPeerDeps | null = null;
 export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
   startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
-  if (!d.fetchImpl) void startRelayLink(); // 中继链路（relay-link.ts）；单测注入 fake fetch 时不连
+  if (d.fetchImpl) return; // 单测注入 fake fetch：不连中继、不起推送（两者都要真实的磁盘状态）
+  void startRelayLink({ handleApi: d.handleApi }); // 中继链路（relay-link.ts）
+  initPush(); // 推送派发器 + /api/v1/push 路由（push/init.ts）；出口按中继在不在线选网关 / 直发
 }
 
 /** 出站 wait 秒数。v2.17.2 从 120 降到 25(peer 实锤两次丢回复):长挂 POST 跨

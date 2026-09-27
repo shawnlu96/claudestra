@@ -12,11 +12,11 @@
 
 export interface InstallProgressInput {
   envFile: boolean;
-  webEnvLocal: boolean;
   webNextBin: boolean;
   webBuildId: boolean;
+  /** web/out/index.html：bridge 托管的静态包（没有它 .next 再新也打不开网页） */
+  webOut: boolean;
   bridgePlist: boolean;
-  webPlist: boolean;
   /**
    * 文件在 ≠ 是这一版的：重跑 install.sh 切到新版本后 node_modules / .next 都还是旧的。
    * false = 确知过期；省略 = 判断不了（按旧行为当新鲜），见 webDepsFresh / webBuildFresh。
@@ -59,7 +59,7 @@ export interface InstallProgress extends InstallProgressInput {
 }
 
 export function assessInstall(x: InstallProgressInput): InstallProgress {
-  const flags = [x.envFile, x.webEnvLocal, x.webNextBin, x.webBuildId, x.bridgePlist, x.webPlist];
+  const flags = [x.envFile, x.webNextBin, x.webBuildId, x.webOut, x.bridgePlist];
   return { ...x, partial: flags.some(Boolean), complete: flags.every(Boolean) };
 }
 
@@ -68,8 +68,8 @@ export function skippableSteps(p: InstallProgress): { webInstall: boolean; webBu
   const webInstall = p.webNextBin && p.webDepsFresh !== false;
   return {
     webInstall,
-    // 依赖重装过就得重新构建：.next 里烤着上一份依赖的产物
-    webBuild: p.webBuildId && p.webBuildFresh !== false && webInstall,
+    // 依赖重装过就得重新构建：.next / out 里烤着上一份依赖的产物；out 没了（手动清过）也得重建
+    webBuild: p.webBuildId && p.webOut && p.webBuildFresh !== false && webInstall,
   };
 }
 
@@ -77,10 +77,9 @@ export function skippableSteps(p: InstallProgress): { webInstall: boolean; webBu
 export function progressChecklist(p: InstallProgress): Array<{ key: keyof InstallProgressInput; done: boolean }> {
   return [
     { key: "envFile", done: p.envFile },
-    { key: "webEnvLocal", done: p.webEnvLocal },
     { key: "webNextBin", done: p.webNextBin },
     { key: "webBuildId", done: p.webBuildId },
+    { key: "webOut", done: p.webOut },
     { key: "bridgePlist", done: p.bridgePlist },
-    { key: "webPlist", done: p.webPlist },
   ];
 }

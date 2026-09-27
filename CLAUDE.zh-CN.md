@@ -126,33 +126,31 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# 跨 Claudestra peer 协作 — HTTP peers（不依赖 Discord，直接走 /api/v1；
-# 设计见 docs/design-http-peers.md）
-# v2.15+ 一键邀请（推荐）：A 生成（连着中继是链接，否则是邀请串）、B 点开或
-# 粘贴，B 的 bridge 自动回调 A 兑换——免回执/accept。一次性、24h 过期，过期/
-# 撤销连带吊销内嵌 token。B 加入默认不反向开放（单向授权）；对称 = B 也发一张。
-bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口 / peer 端口）
-bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>]  # B: 粘贴即完成（--agents = 可选的反向开放）
-bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期 + 吊销其 token）
+# 跨 Claudestra HTTP peers（docs/design-http-peers.md）。v2.15+ 一键邀请：A 生成（连着中继是链接，否则邀请串）、
+# B 点开或粘贴，B 的 bridge 自动回调 A 兑换；一次性、24h 过期，撤销连带吊销内嵌 token；默认单向授权，对称 = B 也发一张。
+# scope 只收已开 external 的 agent，"*"/大总管一律拒（lib/peer-scope-gate.ts）
+bun src/manager.ts peer-invite-new --agents <a,b> [--url <我方bridge地址>]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口/peer 端口）
+bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>]  # B: 粘贴即完成（--agents = 反向开放）
+bun src/manager.ts peer-invite-list               # 待兑换邀请（顺带清扫过期并吊销 token）
 bun src/manager.ts peer-invite-revoke <inv_id>    # 作废未兑换的邀请 + 其内嵌 token
-# 旧三步握手（对方跑 v2.15 之前的版本时用）：
-bun src/manager.ts peer-http-invite <name> --agents <a,b> [--url <我方bridge地址>] [--rotate]  # A: 打印邀请串（--url 不给则自动探测：Tailscale 优先，其次内网）
-bun src/manager.ts peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址>           # B: 存下 A 并打印回执
-bun src/manager.ts peer-http-accept <name> '<回执串>'                                                  # A: 完成握手
+# 旧三步握手（对方是 v2.15 之前的版本）：peer-http-invite <name> --agents <a,b> [--url] → peer-http-join <name> '<邀请串>' --agents <x,y> --url <我方地址> → peer-http-accept <name> '<回执串>'
 bun src/manager.ts peer-http-test <name>          # GET 对方 /agents — 验证连通 + scope
 bun src/manager.ts peer-http-list                 # 列 HTTP peers + 握手状态
-bun src/manager.ts peer-http-scope <name> --agents <a,b|*>  # v2.11.1+: 原地改入站 scope（token 不变，立即生效）
+bun src/manager.ts peer-http-scope <name> --agents <a,b>  # 原地改入站 scope（token 不变）
 bun src/manager.ts peer-http-remove <name>        # 删 peer + 撤销我方签发的 token
-# send_to_agent 的 target 语法："<agent>@<peer>" 或 "peer:<peer>.<agent>"
-# 大总管永远不可分享给 peer（v2.15+ 硬规则；历史 peer token
-# 列了 master 的在 agentInScope 层被截断）
+# send_to_agent 的 target："<agent>@<peer>" 或 "peer:<peer>.<agent>"
 
 # 体检（只读；出问题时第一个该跑的）
 bun src/manager.ts doctor [--json]
 
 # 版本
 bun src/manager.ts version   # 当前版本 + 是否有更新
-bun src/manager.ts update    # git pull + 重载 3 个 launchd daemon
+bun src/manager.ts update    # git pull + 重建过期的 web/out + 重载 3 个 daemon
+
+# 托管前端（docs/design-hosted-frontend.md）：bridge 托管 web/out（BRIDGE_STATIC_DIR）；浏览器配对即进
+bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest <名字>] [--url <入口>] [--json]  # 二维码 / 链接 / 8 位码
+bun src/manager.ts migrate-web-state   # 旧 Next BFF 的 settings.db + groqApiKey → bridge（先备份，幂等）
+bun src/manager.ts retire-web          # 卸旧 com.claudestra.web、备份 plist；bridge 没托管 web/out 或没备份就拒绝
 
 # 自动更新开关（两者默认开；launcher 定期轮询，只在所有 agent 空闲时才升级）
 bun src/manager.ts auto-update status
@@ -163,7 +161,7 @@ bun src/manager.ts auto-update claude on|off       # Claude Code CLI（每周轮
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
 bun src/manager.ts token-list
 bun src/manager.ts token-revoke <tokenId|name>
-bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）；之后用 external <agent> on|off 切换
+bun src/manager.ts create <name> <dir> --external   # 标记 agent 可安全对外（R1 守卫）；切换：external <agent> on|off
 
 # token 用量统计（解析 ~/.claude/projects/<slug>/<sessionId>.jsonl）
 bun src/manager.ts cost [--agent <name>] [--today|--week]
@@ -188,7 +186,7 @@ bun test
 | `BRIDGE_BIND` | HTTP/ws 绑定地址（默认 `127.0.0.1`；`0.0.0.0` 对外开放，反代/TLS 自理） |
 | `BRIDGE_CONTROL_TOKEN` | v2.21.1+ 控制面 token：**非回环**访问裸路由（`/hook` `/stats` `/skills/rescan` `/agent/cleanup` `/events`）与 ws 升级（`route_to_agent` = 主机 RCE）时要求命中。回环永远豁免；`/api/v1/*` 走自己的 Bearer（peer 不受影响）。不设 = **fail-closed**：非回环控制访问一律拒（当前合法流量 100% 回环，默认零影响）。仅当确需远程直连这些路由时才设。 |
 | `BRIDGE_CORS_ORIGIN` | v2.10+ CORS 白名单：逗号分隔 origin 或 `*`（默认不设 = 不发 CORS 头） |
-| `BRIDGE_STATIC_DIR` | v2.10+ bridge 直接托管的静态目录（含 SPA fallback；默认不设 = 关闭） |
+| `BRIDGE_STATIC_DIR` | bridge 托管的网页静态包（`web/out`，Next 导出布局；setup 写入；不设 = 只有 API） |
 
 ## tmux 拓扑
 

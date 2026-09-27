@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CenteredModal } from "./centered-modal";
 import { useT } from "@/lib/i18n";
 import { useChatStore } from "../chat-store";
+import { cronAction as cronApiAction, cronList } from "@/lib/api/system";
 
 /**
  * 定时任务管理弹窗(设置 → 自动化 → 定时任务;owner 2026-08-26「cron 没有 UI」)。
@@ -55,12 +56,7 @@ const EFFORT_CHOICES = ["medium", "low", "high", "xhigh", "max"] as const;
 
 async function cronAction(body: Record<string, unknown>): Promise<{ ok?: boolean; error?: string }> {
   try {
-    const r = await fetch("/api/cron", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return (await r.json()) as { ok?: boolean; error?: string };
+    return await cronApiAction<{ ok?: boolean; error?: string }>(body);
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
@@ -303,8 +299,7 @@ export function CronModal({ open, onClose }: { open: boolean; onClose: () => voi
   const reload = useCallback(async () => {
     setErr("");
     try {
-      const r = await fetch("/api/cron");
-      const j = (await r.json()) as { ok?: boolean; error?: string; jobs?: CronJobView[] };
+      const j = await cronList<{ ok?: boolean; error?: string; jobs?: CronJobView[] }>();
       if (j.ok) setJobs(j.jobs || []);
       else setErr(j.error || t("加载失败"));
     } catch {

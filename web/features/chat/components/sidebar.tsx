@@ -18,6 +18,9 @@ import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
 import { PeersButton } from "./peers-button";
+import { MachineSwitcher } from "../../machines/machine-switcher";
+import { useVersionInfo } from "../../machines/use-version";
+import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
 import { Chevron, ProjectGroup } from "./project-group";
 import type { AgentSession } from "../type";
@@ -110,14 +113,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const [query, setQuery] = useState("");
   // 设置弹窗：null = 关；否则是打开时直达的页(⚙️ → 通用，Peer 按钮 → peers)
   const [settingsPage, setSettingsPage] = useState<SettingsPageId | null>(null);
-  // 左下角版本徽标(owner 2026-07-31):服务端版本+commit,/api/version 一次性拉
-  const [verInfo, setVerInfo] = useState<{ version?: string; commit?: string } | null>(null);
-  useEffect(() => {
-    fetch("/api/version")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => j && setVerInfo(j))
-      .catch(() => {});
-  }, []);
+  // 左下角版本徽标(owner 2026-07-31):当前机器的版本+commit,挂载时拉一次
+  const verInfo = useVersionInfo();
   const [showStats, setShowStats] = useState(false);
   const q = query.trim().toLowerCase();
   // 多选管理(owner 2026-07-16:「agent 页面做管理功能,多选删除」)
@@ -162,9 +159,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
     if (term.length < 2 || searching) return;
     setSearching(true);
     try {
-      const res = await fetch(`/api/chat/search?q=${encodeURIComponent(term)}`);
-      const json = (await res.json()) as { data?: ChatSearchHit[] };
-      setChatHits(Array.isArray(json.data) ? json.data : []);
+      setChatHits((await searchHistory(term)) as ChatSearchHit[]);
     } catch {
       setChatHits([]);
     }
@@ -242,9 +237,11 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       >
         <div className="flex items-center pb-2.5">
           <span className="font-semibold">{t("会话")}</span>
+          {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
+          <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
           {/* v2.21+ 项目管理入口 */}
           <button
-            className="ml-auto flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
+            className="flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("项目管理")}
             aria-label={t("项目管理")}
             onClick={() => setShowProjects(true)}

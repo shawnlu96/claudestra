@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { SwipeActions } from "./unmanaged-sessions";
+import { archivedList, archivedRestore } from "@/lib/api/system";
 
 interface ArchivedEntry {
   /** agent 名或会话 id（「归档」区里的目录名） */
@@ -43,11 +44,8 @@ export function ArchivedSessions() {
     setBusyId(id);
     setError("");
     try {
-      const res = await fetch(`/api/sessions/archived/${encodeURIComponent(id)}/restore`, {
-        method: "POST",
-      });
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || json.ok === false) throw new Error(json.error || `HTTP ${res.status}`);
+      const json = (await archivedRestore(id)) as { ok?: boolean; error?: string };
+      if (json.ok === false) throw new Error(json.error || "restore failed");
       // agent 的恢复是异步受理（起窗口 + CC 冷启动 1-2 分钟），先给个提示再刷新
       setError("");
       await load();
@@ -63,10 +61,7 @@ export function ArchivedSessions() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/sessions/archived");
-      const json = (await res.json()) as { data?: { entries?: ArchivedEntry[] }; error?: string };
-      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
-      setEntries(json.data?.entries ?? []);
+      setEntries(await archivedList<ArchivedEntry>());
     } catch (e) {
       setError((e as Error).message);
     } finally {

@@ -5,6 +5,7 @@ import type { AgentSession } from "../type";
 import { useT } from "@/lib/i18n";
 import { useKeepInViewport } from "@/lib/keep-in-viewport";
 import { postRuntimeSwitch, useDismiss } from "../runtime-switch";
+import { runtimeModels } from "@/lib/api/agents";
 import { EffortButtons, SwitcherBadge } from "./switcher-parts";
 
 /**
@@ -45,13 +46,9 @@ export function CodexModelSwitcher({ agent }: { agent: AgentSession }) {
     if (models !== null || loading) return;
     setLoading(true);
     try {
-      const r = await fetch("/api/agents/codex-settings");
-      const j = (await r.json().catch(() => ({}) /* 回包不是 JSON（代理错误页之类）：按空处理，下面报错 */)) as {
-        data?: { models?: CodexModelOption[]; error?: string };
-        error?: string;
-      };
-      if (!r.ok || !j.data?.models) throw new Error(j.data?.error || j.error || `HTTP ${r.status}`);
-      setModels(j.data.models);
+      const j = await runtimeModels<{ models?: CodexModelOption[]; error?: string }>("codex");
+      if (!j.models) throw new Error(j.error || "no models");
+      setModels(j.models);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -62,7 +59,7 @@ export function CodexModelSwitcher({ agent }: { agent: AgentSession }) {
   const apply = async (patch: { model?: string; effort?: string }) => {
     setSaving(patch.model ?? patch.effort ?? "");
     setErr("");
-    const e = await postRuntimeSwitch("/api/agents/codex-settings", { agent: agent.name, ...patch }, t("切换失败"));
+    const e = await postRuntimeSwitch("codex", agent.name, patch, t("切换失败"));
     setSaving(null);
     if (e) return setErr(e);
     store.refreshAgents();

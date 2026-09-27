@@ -1,5 +1,7 @@
 "use client";
 import { useSyncExternalStore } from "react";
+import { api, ApiError, type ApiInit } from "@/lib/api/client";
+import { apiAgentName } from "@/lib/chat/agents";
 
 /**
  * 「会话详情」弹窗的打开状态（哪个 agent）+ 数据访问（owner 2026-09-27）。独立小 store，同 host-info.ts 的做法，
@@ -49,27 +51,28 @@ export function useAgentInfoTarget(): string | null {
 
 type Res<T> = { ok: true; data: T } | { ok: false; error: string; needConfirm?: boolean; sharedWith?: string[] };
 
-async function call<T>(input: RequestInfo, init?: RequestInit): Promise<Res<T>> {
+/** 打当前机器的 bridge（lib/api/client.ts）；失败折成 Res，409 的 needConfirm / sharedWith 从 ApiError.body 取 */
+async function call<T>(path: string, init?: ApiInit): Promise<Res<T>> {
   try {
-    const r = await fetch(input, init);
-    const j = (await r.json().catch(() => ({}) /* 非 JSON 回包（代理错误页）：按空处理，用状态码报错 */)) as Record<string, unknown>;
-    if (r.ok && j.ok !== false) return { ok: true, data: j as T };
-    return { ok: false, error: String(j.error || r.status), needConfirm: j.needConfirm === true, sharedWith: Array.isArray(j.sharedWith) ? (j.sharedWith as string[]) : undefined };
+    const data = await api<T & { ok?: boolean; error?: string }>(path, init);
+    return data.ok === false ? { ok: false, error: String(data.error ?? "failed") } : { ok: true, data };
   } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    const b = e instanceof ApiError ? e.body : {};
+    const sharedWith = Array.isArray(b.sharedWith) ? (b.sharedWith as string[]) : undefined;
+    return { ok: false, error: (e as Error).message, needConfirm: b.needConfirm === true, sharedWith };
   }
 }
 
 export function fetchAgentInfo(name: string): Promise<Res<{ agent: AgentInfo }>> {
-  return call(`/api/agents/info?name=${encodeURIComponent(name)}`);
+  return call(`/agents/${encodeURIComponent(apiAgentName(name))}/info`);
 }
 
 export function setAgentLabel(name: string, label: string): Promise<Res<{ label: string | null }>> {
-  return call("/api/agents/label", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, label }) });
+  return call(`/agents/${encodeURIComponent(apiAgentName(name))}/label`, { method: "POST", json: { label } });
 }
 
 /** 关闭且正在共享时后端要 confirm=会话名，否则回 409 needConfirm（前端据此弹输入确认框）。
  *  stillSharedWith = 持全量 "*" 授权、关了闸门仍能访问的 peer（要去 Peer 面板改 scope）。 */
 export function setAgentExternal(name: string, on: boolean, confirm?: string): Promise<Res<{ removedFromPeers?: string[]; stillSharedWith?: string[] }>> {
-  return call("/api/agents/external", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, on, confirm }) });
+  return call(`/agents/${encodeURIComponent(apiAgentName(name))}/external`, { method: "POST", json: { on, confirm } });
 }

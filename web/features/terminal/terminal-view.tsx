@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { ControlBar } from "./control-bar";
 import { useT } from "@/lib/i18n";
+import { terminalInput, terminalResize, terminalStream } from "@/lib/api/terminal";
 
 /**
  * 复制:剪贴板 API 优先;局域网明文 http(非安全上下文)下它不存在,回退
@@ -157,11 +158,7 @@ export function TerminalView({
       pendingRef.current = "";
       if (!id || !d) return;
       sendChainRef.current = sendChainRef.current.then(() =>
-        fetch("/api/terminal/input", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, d: b64encode(d) }),
-        }).then(
+        terminalInput(id, b64encode(d)).then(
           () => undefined,
           () => undefined
         )
@@ -311,26 +308,16 @@ export function TerminalView({
     async function connect() {
       let res: Response;
       try {
-        res = await fetch(
-          `/api/terminal/stream?agent=${encodeURIComponent(agent)}&cols=${cols}&rows=${rows}`,
-          { signal: abort.signal }
-        );
-      } catch {
+        res = await terminalStream(agent, cols, rows, abort.signal);
+      } catch (e) {
+        // 非 2xx（404 没这个 agent / 403 凭据没有 terminal 权限）与网络错误都到这里，bridge 的 error 文案原样给用户
         if (!disposed) {
           setStatus("error");
-          setErrMsg("连接失败");
+          setErrMsg((e as Error).message || "连接失败");
         }
         return;
       }
-      if (!res.ok || !res.body) {
-        const text = await res.text().catch(() => "");
-        if (!disposed) {
-          setStatus("error");
-          setErrMsg(text || `${t("连接失败")} (${res.status})`);
-        }
-        return;
-      }
-      const reader = res.body.getReader();
+      const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       try {
@@ -373,13 +360,8 @@ export function TerminalView({
                   setMirror({ cols: c, rows: r });
                 };
                 if (wc !== evt.cols || wr !== evt.rows) {
-                  fetch("/api/terminal/resize", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ id: evt.id, cols: wc, rows: wr }),
-                  })
-                    .then((r) => r.json())
-                    .then((j: { cols?: number; rows?: number }) => apply(j.cols ?? wc, j.rows ?? wr))
+                  terminalResize(evt.id, wc, wr)
+                    .then((j) => apply(j.cols ?? wc, j.rows ?? wr))
                     .catch(() => apply(evt.cols!, evt.rows!));
                 } else {
                   apply(evt.cols, evt.rows);
@@ -439,13 +421,8 @@ export function TerminalView({
         if (id && (term.cols !== lastCols || term.rows !== lastRows)) {
           lastCols = term.cols;
           lastRows = term.rows;
-          fetch("/api/terminal/resize", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id, cols: term.cols, rows: term.rows }),
-          })
-            .then((r) => r.json())
-            .then((j: { cols?: number; rows?: number }) => {
+          terminalResize(id, term.cols, term.rows)
+            .then((j) => {
               // 后端按 tmux window 实际尺寸 clamp 过（iTerm 钳制时 < 请求值），
               // xterm 收敛到实际值——视口=window 才没有填充点区域。
               if (

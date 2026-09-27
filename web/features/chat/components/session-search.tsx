@@ -4,6 +4,7 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { getLang, useT } from "@/lib/i18n";
 import { ResponsiveShell } from "./responsive-shell";
 import { useChatStoreApi } from "../chat-store";
+import { searchHistory } from "@/lib/api/chat";
 
 /** 放大镜（顶栏平铺按钮与窄屏折叠菜单项共用） */
 export function SearchIcon() {
@@ -52,11 +53,7 @@ export function SearchOverlay({ agentName, onClose }: { agentName: string; onClo
     if (term.length < 2 || searching) return;
     setSearching(true);
     try {
-      const res = await fetch(
-        `/api/chat/search?q=${encodeURIComponent(term)}&agent=${encodeURIComponent(agentName)}`
-      );
-      const json = (await res.json()) as { data?: ChatSearchHit[] };
-      setHits(Array.isArray(json.data) ? json.data : []);
+      setHits((await searchHistory(term, agentName)) as ChatSearchHit[]);
     } catch {
       setHits([]);
     }

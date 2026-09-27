@@ -1,5 +1,5 @@
 /**
- * v2.10+ web-gateway 单测：CORS 白名单匹配 / 静态路径解析（穿越防护 + SPA fallback）
+ * v2.10+ web-gateway 单测：CORS 白名单匹配 / 控制面非回环闸（含静态托管例外）/ 静态导出站点的响应（CSP、缓存、404）
  */
 
 import { describe, test, expect } from "bun:test";
@@ -8,12 +8,15 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   corsHeadersFor,
-  resolveStaticPath,
+  serveStaticSite,
   isCrossOrigin,
   isOriginExplicitlyAllowed,
   isLoopbackAddress,
+  isDirectLoopback,
+  isControlRoute,
   controlAccessVerdict,
 } from "../src/bridge/web-gateway.js";
+import { staticSiteCsp } from "../src/lib/static-site.js";
 
 describe("跨源判定（ws 控制面防护）", () => {
   const BRIDGE = "http://127.0.0.1:3847/";
@@ -88,37 +91,63 @@ describe("corsHeadersFor", () => {
   });
 });
 
-describe("resolveStaticPath", () => {
+describe("serveStaticSite（Next 导出布局 + CSP）", () => {
   function setup() {
     const root = mkdtempSync(join(tmpdir(), "static-"));
     writeFileSync(join(root, "index.html"), "<html>app</html>");
-    mkdirSync(join(root, "assets"));
-    writeFileSync(join(root, "assets", "app.js"), "js");
+    writeFileSync(join(root, "chat.html"), "<html>chat</html>");
+    writeFileSync(join(root, "404.html"), "<html>nope</html>");
+    mkdirSync(join(root, "_next", "static"), { recursive: true });
+    writeFileSync(join(root, "_next", "static", "app.js"), "js");
+    writeFileSync(join(root, "sw.js"), "sw");
     return root;
   }
 
-  test("命中真实文件", () => {
+  test("页面 → .html，带 CSP、不长缓存、nosniff", async () => {
     const root = setup();
-    expect(resolveStaticPath(root, "/assets/app.js")).toBe(join(root, "assets", "app.js"));
-    expect(resolveStaticPath(root, "/index.html")).toBe(join(root, "index.html"));
+    const res = serveStaticSite(root, "/chat")!;
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<html>chat</html>");
+    expect(res.headers.get("content-security-policy")).toBe(staticSiteCsp()); // 这页没有内联脚本 → 不带哈希（哈希用例在 tests/static-site.test.ts）
+    expect(res.headers.get("cache-control")).toBe("no-cache, must-revalidate");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(serveStaticSite(root, "/")!.status).toBe(200);
   });
 
-  test("SPA fallback：无扩展名路径回 index.html，缺失资源文件 404", () => {
-    const root = setup();
-    expect(resolveStaticPath(root, "/")).toBe(join(root, "index.html"));
-    expect(resolveStaticPath(root, "/agents/claudestra")).toBe(join(root, "index.html"));
-    expect(resolveStaticPath(root, "/assets/missing.js")).toBeNull();
+  test("CSP 内容：脚本只许同源（+ 本页内联哈希）、不许第三方连接、不许被嵌", () => {
+    expect(staticSiteCsp()).toBe(
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
+        "worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    );
   });
 
-  test("路径穿越与非法编码拦截", () => {
+  test("资源：_next/static 永久缓存且不带 CSP；缺失资源 null（不能回 HTML 造成 MIME 错误）", () => {
     const root = setup();
-    expect(resolveStaticPath(root, "/../../etc/passwd")).toBeNull();
-    expect(resolveStaticPath(root, "/%2e%2e/%2e%2e/etc/passwd")).toBeNull();
-    expect(resolveStaticPath(root, "/%zz")).toBeNull();
+    const js = serveStaticSite(root, "/_next/static/app.js")!;
+    expect(js.status).toBe(200);
+    expect(js.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(js.headers.get("content-security-policy")).toBeNull();
+    expect(serveStaticSite(root, "/sw.js")!.headers.get("cache-control")).toBe("public, max-age=600");
+    expect(serveStaticSite(root, "/_next/static/missing.js")).toBeNull();
   });
 
-  test("root 未设 → null", () => {
-    expect(resolveStaticPath("", "/index.html")).toBeNull();
+  test("未知页面 → 404.html 且状态 404；HEAD 不带体", async () => {
+    const root = setup();
+    const res = serveStaticSite(root, "/agents/claudestra")!;
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("<html>nope</html>");
+    const head = serveStaticSite(root, "/chat", "HEAD")!;
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+  });
+
+  test("路径穿越与非法编码拦截；root 未设 → null", () => {
+    const root = setup();
+    expect(serveStaticSite(root, "/../../etc/passwd")).toBeNull();
+    expect(serveStaticSite(root, "/%2e%2e/%2e%2e/etc/passwd")).toBeNull();
+    expect(serveStaticSite(root, "/%zz")).toBeNull();
+    expect(serveStaticSite("", "/index.html")).toBeNull();
   });
 });
 
@@ -138,6 +167,24 @@ describe("isLoopbackAddress", () => {
     expect(isLoopbackAddress(null)).toBe(false);
     expect(isLoopbackAddress(undefined)).toBe(false);
     expect(isLoopbackAddress("")).toBe(false);
+  });
+});
+
+describe("isDirectLoopback（本机反代转进来的不算回环）", () => {
+  test("回环 socket 且无 XFF 才是真本机；带 XFF（Caddy / tailscale serve / 中继隧道）一律不是", () => {
+    expect(isDirectLoopback("127.0.0.1", null)).toBe(true);
+    expect(isDirectLoopback("::1", undefined)).toBe(true);
+    expect(isDirectLoopback("127.0.0.1", "203.0.113.9")).toBe(false);
+    expect(isDirectLoopback("127.0.0.1", "127.0.0.1")).toBe(false); // 反代自己填的回环也不信：只要走过反代就不是
+    expect(isDirectLoopback("100.82.126.45", null)).toBe(false);
+    expect(isDirectLoopback(null, null)).toBe(false);
+  });
+  test("接上控制面闸门：反代转来的 /relay/pair/approve 与 ws 升级都要 control token", () => {
+    const viaProxy = isDirectLoopback("127.0.0.1", "203.0.113.9");
+    const base = { loopback: viaProxy, method: "POST", staticHosting: true, providedToken: null, controlToken: "" }; // 未配 token = fail-closed
+    expect(controlAccessVerdict({ ...base, pathname: "/relay/pair/approve", websocket: false }).allow).toBe(false);
+    expect(controlAccessVerdict({ ...base, method: "GET", pathname: "/", websocket: true }).allow).toBe(false);
+    expect(controlAccessVerdict({ ...base, method: "GET", pathname: "/chat", websocket: false }).allow).toBe(true); // 静态文件照常
   });
 });
 
@@ -180,5 +227,34 @@ describe("controlAccessVerdict", () => {
     expect(controlAccessVerdict({ loopback: false, websocket: true, pathname: "/api/v1/x", providedToken: CT, controlToken: CT }).allow).toBe(true);
     expect(controlAccessVerdict({ loopback: true, websocket: true, pathname: "/api/v1/x", providedToken: null, controlToken: "" }).allow).toBe(true);
     expect(controlAccessVerdict({ loopback: false, websocket: false, pathname: "/api/v1/agents", providedToken: null, controlToken: "" }).allow).toBe(true);
+  });
+});
+
+describe("controlAccessVerdict：静态托管例外", () => {
+  const base = { loopback: false, providedToken: null, controlToken: "", staticHosting: true };
+  test("非回环 GET/HEAD 的非控制路由放给静态文件（页面、资源、/app-config.json）", () => {
+    for (const pathname of ["/", "/chat", "/_next/static/app.js", "/app-config.json", "/manifest.webmanifest"]) {
+      expect(controlAccessVerdict({ ...base, pathname, method: "GET" })).toEqual({ allow: true, reason: "static" });
+      expect(controlAccessVerdict({ ...base, pathname, method: "HEAD" }).allow).toBe(true);
+    }
+  });
+  test("写方法不放", () => {
+    expect(controlAccessVerdict({ ...base, pathname: "/", method: "POST" }).allow).toBe(false);
+    expect(controlAccessVerdict({ ...base, pathname: "/chat", method: "DELETE" }).allow).toBe(false);
+  });
+  test("控制路由照旧要 token：/hook /stats /stats/refresh /skills/rescan /agent/cleanup /events /peer-ingress/* /relay/*", () => {
+    for (const pathname of ["/hook", "/stats", "/stats/refresh", "/skills/rescan", "/agent/cleanup", "/events", "/peer-ingress/sync", "/relay/pair/new"]) {
+      expect(isControlRoute(pathname)).toBe(true);
+      expect(controlAccessVerdict({ ...base, pathname, method: "GET" })).toEqual({ allow: false, reason: "no-token-configured" });
+    }
+    expect(isControlRoute("/chat")).toBe(false);
+    expect(isControlRoute("/statsx")).toBe(false);
+  });
+  test("ws 升级是 GET，但不属于静态例外（route_to_agent 面不能被顺带打开）", () => {
+    expect(controlAccessVerdict({ ...base, pathname: "/", method: "GET", websocket: true }).allow).toBe(false);
+  });
+  test("没开静态托管 / 不传 method → 与 v2.21.1 判定逐字相同", () => {
+    expect(controlAccessVerdict({ ...base, staticHosting: false, pathname: "/", method: "GET" }).allow).toBe(false);
+    expect(controlAccessVerdict({ loopback: false, providedToken: null, controlToken: "", pathname: "/chat" }).allow).toBe(false);
   });
 });

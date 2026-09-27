@@ -1,142 +1,103 @@
 "use client";
 import { t, getLang } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
+import { pushSubscribe, pushUnsubscribe, reads, vapidPublicKey } from "@/lib/api/push";
 
 /**
- * Web Push 客户端共用逻辑(owner 2026-07-16「引导用户允许推送权限」):
- * 设置页开关与首页引导条共用同一套订阅/退订流程。
- * 注意:Notification.requestPermission 必须发生在用户手势里(浏览器强制,
- * iOS 尤其严格)——调用方只能是按钮 onClick。
+ * Web Push 客户端共用逻辑：设置页开关与首页引导条共用同一套订阅 / 退订流程。
+ * 一个 origin 一份订阅：中继模式用中继的 VAPID 公钥订阅一次，订阅交给当前机器（bridge 要推时发 push 帧给中继投递，§7）；
+ * 直托管用 bridge 自签的公钥。Notification.requestPermission 必须发生在用户手势里——调用方只能是按钮 onClick。
  */
 
-/** base64url VAPID 公钥 → Uint8Array(pushManager.subscribe 要求)。 */
-function urlB64ToUint8(base64: string): Uint8Array {
+/** base64url VAPID 公钥 → Uint8Array（pushManager.subscribe 要求） */
+function urlB64ToUint8(base64: string): Uint8Array<ArrayBuffer> {
   const pad = "=".repeat((4 - (base64.length % 4)) % 4);
   const raw = atob((base64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
-  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
 }
 
-/** 当前环境是否具备推送能力(iOS 非主屏打开时 PushManager 不存在)。 */
+/** 当前环境是否具备推送能力（iOS 非主屏打开时 PushManager 不存在） */
 export function pushSupported(): boolean {
   return typeof navigator !== "undefined" && "serviceWorker" in navigator && typeof window !== "undefined" && "PushManager" in window;
 }
 
-/** 本设备现有订阅(null=未订阅/不支持)。 */
+/** 本设备现有订阅（null = 未订阅 / 不支持） */
 export async function getPushSubscription(): Promise<PushSubscription | null> {
   if (!pushSupported()) return null;
   try {
     const reg = await navigator.serviceWorker.getRegistration();
     return (await reg?.pushManager.getSubscription()) ?? null;
   } catch {
-    return null;
+    return null; // SW 注册读不到（隐私模式等）就当没订阅
   }
 }
 
-/** 开启推送:权限 → 订阅 → 入库。必须在用户手势里调用。 */
+/** 开启推送：权限 → 订阅 → 交给当前机器。必须在用户手势里调用。 */
 export async function enablePush(): Promise<{ ok: boolean; msg: string }> {
-  if (!pushSupported()) {
-    return { ok: false, msg: "此环境不支持推送(iOS 需先「添加到主屏幕」并从主屏打开)" };
-  }
+  if (!pushSupported()) return { ok: false, msg: "此环境不支持推送(iOS 需先「添加到主屏幕」并从主屏打开)" };
   try {
     const reg = (await navigator.serviceWorker.getRegistration()) ?? (await navigator.serviceWorker.register("/sw.js"));
     const perm = await Notification.requestPermission();
-    if (perm !== "granted") {
-      return { ok: false, msg: "通知权限被拒绝——请在系统设置里允许后重试" };
-    }
-    const keyRes = await fetch("/api/push");
-    const keyJson = (await keyRes.json()) as { data?: { publicKey: string } };
-    if (!keyJson.data?.publicKey) throw new Error("no key");
-    // 每次「开启」都强制换全新订阅身份:先退掉残留的旧订阅再 subscribe。
-    // 一版 getSubscription()??subscribe() 会复用旧订阅——用户「关了再开」想
-    // 重置时身份根本没换,被 iOS 端作废的订阅救不回来(2026-07-16 排障实锤)。
+    if (perm !== "granted") return { ok: false, msg: "通知权限被拒绝——请在系统设置里允许后重试" };
+    const key = await vapidPublicKey();
+    if (!key) return { ok: false, msg: "这台机器 / 中继没有配置推送密钥" };
+    // 每次「开启」都换全新订阅身份：先退掉残留的旧订阅再 subscribe（复用旧订阅救不回被 iOS 作废的那份）。
+    // ⚠ 换公钥（切机器 / 中继换了 key）必须先退订，同一 registration 不能用另一把 key 订。
     const stale = await reg.pushManager.getSubscription();
-    if (stale) await stale.unsubscribe().catch(() => {});
-    const sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlB64ToUint8(keyJson.data.publicKey) as BufferSource,
-    });
-    const res = await fetch("/api/push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscription: sub.toJSON() }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    // 本地测试通知(不走 APNs):立刻能看到=展示层正常,之后收不到就是投递层
+    if (stale) await stale.unsubscribe().catch(() => {}); // 退不掉也照样重订，subscribe 会报错再说
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(key) });
+    await pushSubscribe(sub.toJSON(), navigator.userAgent);
+    // 本地测试通知（不走推送服务）：立刻能看到 = 展示层正常，之后收不到就是投递层
     try {
-      await reg.showNotification(t("推送已开启 ✅"), {
-        body: t("这条是本地测试——能看到它,说明通知展示没问题"),
-        tag: "cstra-local-test",
-        icon: "/icons/icon-192.png",
-      });
+      await reg.showNotification(t("推送已开启 ✅"), { body: t("这条是本地测试——能看到它,说明通知展示没问题"), tag: "cstra-local-test", icon: "/icons/icon-192.png" });
     } catch {
-      /* 本地测试失败不影响订阅 */
+      /* 本地测试通知弹不出来不影响订阅本身 */
     }
     return { ok: true, msg: "已开启:应该立刻弹了一条本地测试通知" };
   } catch (e) {
     return {
       ok: false,
-      msg:
-        getLang() === "zh"
-          ? `开启失败:${(e as Error).message}(需要 HTTPS 或安装到主屏幕)`
-          : `Enable failed: ${(e as Error).message} (requires HTTPS or install to Home Screen)`,
+      msg: getLang() === "zh" ? `开启失败:${(e as Error).message}(需要 HTTPS 或安装到主屏幕)` : `Enable failed: ${(e as Error).message} (requires HTTPS or install to Home Screen)`,
     };
   }
 }
 
 /**
- * v2.21.1+ 打开 App 时的本机通知补清(跨端已读对账的 iOS 半边):别处已读的
- * agent,其存量通知在本机通知中心里静默关掉。非 iOS 设备平时靠 dismiss push
- * 实时清,这里是兜底;iOS 收不到静默 push(展示惩罚),只能靠这条打开即清。
- * mount + visibility 恢复时各跑一次;失败静默(无 SW/未登录都正常)。
+ * 打开 App 时的本机通知补清（跨端已读对账的 iOS 半边）：别处已读的 agent，其存量通知在本机通知中心里静默关掉。
+ * 非 iOS 平时靠 dismiss push 实时清，这里是兜底；iOS 收不到静默 push（展示惩罚），只能靠这条。失败静默。
  */
 export async function cleanupReadNotifications(): Promise<void> {
   try {
-    // v2.22+ 原生壳:没有 SW,通知在系统通知中心,走 Capacitor 插件清
     if (isNativeShell()) {
-      const res = await fetch("/api/push/read");
-      if (!res.ok) return;
-      const j = (await res.json()) as { reads?: Record<string, number> };
       const { cleanupDeliveredNative } = await import("./native");
-      await cleanupDeliveredNative(j.reads || {});
+      await cleanupDeliveredNative(await reads());
       return;
     }
     if (!pushSupported()) return;
     const reg = await navigator.serviceWorker.getRegistration();
-    if (!reg) return;
-    const ns = await reg.getNotifications();
+    const ns = (await reg?.getNotifications()) ?? [];
     if (!ns.length) return;
-    const res = await fetch("/api/push/read");
-    if (!res.ok) return;
-    const j = (await res.json()) as { reads?: Record<string, number> };
-    const reads = j.reads || {};
+    const r = await reads();
     for (const n of ns) {
       const d = (n.data || {}) as { agent?: string; ts?: number };
-      if (d.agent && reads[d.agent] && (d.ts || 0) <= reads[d.agent]) n.close();
+      if (d.agent && r[d.agent] && (d.ts || 0) <= r[d.agent]) n.close();
     }
   } catch {
-    /* 静默 */
+    /* 无 SW / 凭据失效 / 机器离线都正常：留着通知不影响使用 */
   }
 }
 
-/** 关闭推送:退订 + 从服务端删除。 */
+/** 关闭推送：退订 + 从当前机器删除 */
 export async function disablePush(): Promise<{ ok: boolean; msg: string }> {
   const sub = await getPushSubscription();
   if (!sub) return { ok: true, msg: "本设备未订阅" };
   try {
-    await fetch("/api/push", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint: sub.endpoint }),
-    });
+    await pushUnsubscribe(sub.endpoint);
     await sub.unsubscribe();
     return { ok: true, msg: "已关闭本设备推送" };
   } catch (e) {
-    return {
-      ok: false,
-      msg:
-        getLang() === "zh"
-          ? `关闭失败:${(e as Error).message}`
-          : `Disable failed: ${(e as Error).message}`,
-    };
+    return { ok: false, msg: getLang() === "zh" ? `关闭失败:${(e as Error).message}` : `Disable failed: ${(e as Error).message}` };
   }
 }

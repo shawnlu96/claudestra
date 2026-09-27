@@ -4,6 +4,7 @@ import { useT } from "@/lib/i18n";
 import { EFFORT_OPTIONS } from "../../claude-options";
 import type { ClaudeModelOption } from "../../claude-models";
 import { Section } from "./section";
+import { getClaudeDefaults, putClaudeDefaults } from "@/lib/api/settings";
 
 /** 全局默认 effort 选项——与会话级切换器共用（claude-options.ts）；模型清单见 useClaudeModels */
 const GLOBAL_EFFORT_OPTIONS = EFFORT_OPTIONS;
@@ -20,14 +21,11 @@ export function useClaudeDefaults(open: boolean) {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 打开时重置：拆分前与语音 Key 同属一个 effect（那条 warning 留在 groq-key-section），不新增基线
     setGMsg("");
     setGLoaded(false);
-    fetch("/api/settings/claude-defaults")
-      .then((r) => r.json())
-      .then((j: { data?: { model: string | null; effort: string | null } }) => {
-        if (j.data) {
-          setGModel(j.data.model || "");
-          setGEffort(j.data.effort || "");
-          setGLoaded(true);
-        }
+    getClaudeDefaults()
+      .then((d) => {
+        setGModel(d.model || "");
+        setGEffort(d.effort || "");
+        setGLoaded(true);
       })
       .catch(() => setGMsg("读取失败"));
   }, [open]);
@@ -35,21 +33,12 @@ export function useClaudeDefaults(open: boolean) {
   const saveGlobalDefault = async (patch: { model?: string; effort?: string }) => {
     setGMsg("保存中…");
     try {
-      const res = await fetch("/api/settings/claude-defaults", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const j = (await res.json()) as { data?: { model: string | null; effort: string | null }; error?: string };
-      if (res.ok && j.data) {
-        setGModel(j.data.model || "");
-        setGEffort(j.data.effort || "");
-        setGMsg("已保存");
-      } else {
-        setGMsg(j.error || "保存失败");
-      }
-    } catch {
-      setGMsg("保存失败");
+      const d = await putClaudeDefaults(patch);
+      setGModel(d.model || "");
+      setGEffort(d.effort || "");
+      setGMsg("已保存");
+    } catch (e) {
+      setGMsg((e as Error).message || "保存失败");
     }
   };
 

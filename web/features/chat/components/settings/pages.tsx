@@ -4,8 +4,7 @@ import { isNativeShell } from "@/lib/native";
 import { RemoteAccessSection } from "../remote-access-section";
 import { PeersPanel } from "../peers-modal";
 import { Section, GroupLabel } from "./section";
-import { TotpSection } from "./totp-section";
-import { PasskeySection } from "./passkey-section";
+import { DevicesSection, MachinesSection } from "./devices-section";
 import { ShellServerSection } from "./shell-server-section";
 import { ArchiveRetentionSection } from "./archive-retention-section";
 import { BackendUpdateSection } from "./backend-update-section";
@@ -14,7 +13,6 @@ import { useProfileDraft, ProfileSection } from "./profile-section";
 import { useGroqKey, GroqKeySection } from "./groq-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
 import { usePushToggle, PushSection } from "./push-section";
-import { useBruteForce, BruteForceSection } from "./brute-force-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
@@ -26,7 +24,7 @@ import type { SettingsPageId } from "./nav";
 /**
  * 设置弹窗的八个页面(菜单在 ./nav.tsx)。带状态的分区其状态仍由 SettingsModal 的 useXxx(open)
  * 持有并经 `state` 传进来——页面切换只是分区组件的挂载/卸载，不碰数据；自管状态的分区
- * (两步验证 / Passkey / 归档保留 / 后端版本 / 全体重启 / 服务器地址 / 手机访问 / Peer 协作)本来就随挂载拉取。
+ * (设备 / 归档保留 / 后端版本 / 全体重启 / 服务器地址 / 手机访问 / Peer 协作)本来就随挂载拉取。
  */
 export interface SettingsState {
   busy: boolean;
@@ -35,7 +33,6 @@ export interface SettingsState {
   defaults: ReturnType<typeof useClaudeDefaults>;
   modelOptions: Parameters<typeof ClaudeDefaultsSection>[0]["modelOptions"];
   push: ReturnType<typeof usePushToggle>;
-  sec: ReturnType<typeof useBruteForce>;
   hygiene: ReturnType<typeof useMemoryHygiene>;
   autoCompact: ReturnType<typeof useAutoCompact>;
   kbFix: ReturnType<typeof useKbFixToggle>;
@@ -92,15 +89,12 @@ function ConnectPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 安全：失败封禁 / 两步验证 / Passkey */
-function SecurityPage({ s }: { s: SettingsState }) {
-  const t = useT();
+/** 设备：这台机器上已配对的设备（撤销 / 退出登录）+ 本浏览器配对过的机器 */
+function DevicesPage() {
   return (
     <>
-      <GroupLabel>{t("登录安全")}</GroupLabel>
-      <BruteForceSection sec={s.sec} />
-      <TotpSection />
-      <PasskeySection />
+      <DevicesSection />
+      <MachinesSection />
     </>
   );
 }
@@ -125,7 +119,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
     case "peers":
       return <PeersPanel />;
     case "security":
-      return <SecurityPage s={s} />;
+      return <DevicesPage />;
     case "labs":
       return (
         <>

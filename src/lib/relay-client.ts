@@ -7,15 +7,16 @@
 import { randomBytes } from "node:crypto";
 import type { InstanceKey } from "./instance-key.js";
 import {
-  FATAL_CODES, LIMITS, PROTOCOL_VERSION, RELAY_FROM, SUBPROTOCOL, asData, asEndOrCancel, asReq, asRes, authSignature, parseFrame,
-  relayWsEndpoint, type ErrorFrame, type PeerRecord,
+  FATAL_CODES, LIMITS, PROTOCOL_VERSION, RELAY_FROM, SUBPROTOCOL, asData, asEndOrCancel, asPushAck, asReq, asRes, authSignature, parseFrame,
+  relayWsEndpoint, type ErrorFrame, type PeerRecord, type RelayPushCapabilities,
 } from "./relay-protocol.js";
 import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
-import { RelayError, type InboundHandler, type RelayInfo, type RelayRequest, type RelayResponse, type RelayState } from "./relay-client-types.js";
+import { PushTable } from "./relay-client-push.js";
+import { RelayError, type InboundHandler, type PushAck, type PushRequest, type RelayInfo, type RelayRequest, type RelayResponse, type RelayState } from "./relay-client-types.js";
 
 export { RelayError };
-export type { InboundHandler, InboundResponse, RelayInfo, RelayRequest, RelayResponse, RelayState } from "./relay-client-types.js";
+export type { InboundHandler, InboundResponse, PushAck, PushRequest, RelayInfo, RelayRequest, RelayResponse, RelayState } from "./relay-client-types.js";
 
 /** 测试把这些调小；生产用 LIMITS 的默认值 */
 export interface RelayTiming {
@@ -28,6 +29,8 @@ export interface RelayTiming {
   fatalRetryMs: number;
   /** 等响应头时在中继超时之外再多等的余量 */
   headGraceMs: number;
+  /** push 帧等 push-ack 的时长（中继投递给推送服务本身有 10 s 超时） */
+  pushTimeoutMs: number;
 }
 
 export interface ConnectOptions {
@@ -49,6 +52,7 @@ const DEFAULT_TIMING: RelayTiming = {
   stableMs: 60_000,
   fatalRetryMs: LIMITS.fatalRetryMs,
   headGraceMs: 5_000,
+  pushTimeoutMs: 15_000,
 };
 
 const jitter = (ms: number): number => Math.round(ms * (0.8 + Math.random() * 0.4));
@@ -60,6 +64,7 @@ export class RelayClient {
   private fp: string | null = null;
   private slug: string | null = null;
   private base: string | null = null;
+  private pushCaps: RelayPushCapabilities | null = null;
   private contacts: string[] | null = null;
   private readonly codes = new Map<string, number>();
   private readonly peersMap = new Map<string, PeerRecord>();
@@ -74,6 +79,7 @@ export class RelayClient {
   private readonly log: Logger;
   private readonly outbound: OutboundTable;
   private readonly inbound: InboundRouter;
+  private readonly pushes: PushTable;
 
   constructor(private readonly o: ConnectOptions) {
     this.timing = { ...DEFAULT_TIMING, ...o.timing };
@@ -81,6 +87,7 @@ export class RelayClient {
     const send = (f: object) => this.send(f);
     this.outbound = new OutboundTable(send, rand, LIMITS.maxChunkBytes, this.timing.headGraceMs);
     this.inbound = new InboundRouter(send, o.onInbound, this.log);
+    this.pushes = new PushTable(send, rand, this.timing.pushTimeoutMs);
     this.open();
   }
 
@@ -90,7 +97,7 @@ export class RelayClient {
 
   info(): RelayInfo & { retryAt: number | null; lastError: string | null } {
     return {
-      state: this._state, connected: this._state === "online", fp: this.fp, slug: this.slug, base: this.base,
+      state: this._state, connected: this._state === "online", fp: this.fp, slug: this.slug, base: this.base, push: this.pushCaps,
       relayUrl: this.o.relayUrl, retryAt: this.retryAt, lastError: this.lastError,
     };
   }
@@ -122,6 +129,12 @@ export class RelayClient {
     return this.outbound.request(to, req, opts);
   }
 
+  /** 请中继投递一条通知（§3.5）；没连上直接拒，调用方退回直发 */
+  push(req: PushRequest): Promise<PushAck> {
+    if (this._state !== "online") return Promise.reject(new RelayError("connection_lost", "client", `relay not connected (${this._state})`));
+    return this.pushes.push(req);
+  }
+
   /** 主动关闭：不再重连 */
   close(): void {
     this._state = "closed";
@@ -131,6 +144,7 @@ export class RelayClient {
     this.ws?.close(1000, "client closing");
     this.ws = null;
     this.outbound.rejectAll(new RelayError("closed", "client", "client closed"));
+    this.pushes.rejectAll(new RelayError("closed", "client", "client closed"));
     this.inbound.abortAll();
   }
 
@@ -175,7 +189,9 @@ export class RelayClient {
     const fatal = FATAL_CODES.has(this.lastError ?? "");
     const wasOnline = this._state === "online";
     if (this._state !== "closed") this._state = "offline";
-    this.outbound.rejectAll(new RelayError("connection_lost", "client", `relay connection closed (${code} ${reason || this.lastError || ""})`.trim()));
+    const lost = new RelayError("connection_lost", "client", `relay connection closed (${code} ${reason || this.lastError || ""})`.trim());
+    this.outbound.rejectAll(lost);
+    this.pushes.rejectAll(lost);
     this.inbound.abortAll();
     if (wasOnline) this.log("warn", `中继连接断开 code=${code} ${reason}`);
     this.scheduleReconnect(fatal);
@@ -263,6 +279,11 @@ export class RelayClient {
       }
       case "end":
       case "cancel": return this.onEndOrCancel(f, from);
+      case "push-ack": {
+        const a = asPushAck(f);
+        if (a && !this.pushes.onAck(a)) this.log("warn", `push-ack 对不上任何在途推送 id=${a.id}`);
+        return;
+      }
       case "error": return this.onError(f as unknown as ErrorFrame, from);
       default: return this.log("warn", `未知帧类型 ${String(f.t)}`);
     }
@@ -296,6 +317,8 @@ export class RelayClient {
     this.fp = typeof f.fp === "string" ? f.fp : null;
     this.slug = typeof f.slug === "string" ? f.slug : null;
     this.base = typeof f.base === "string" ? f.base : null;
+    const push = f.push as Partial<RelayPushCapabilities> | undefined;
+    this.pushCaps = push && typeof push === "object" ? { ...(typeof push.vapidPublicKey === "string" ? { vapidPublicKey: push.vapidPublicKey } : {}), apns: push.apns === true } : null;
     this._state = "online";
     this.lastError = null;
     this.onlineSince = Date.now();

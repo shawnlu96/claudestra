@@ -12,6 +12,8 @@ import { makeInboundHandler, relayMark, ReplayCache, verifyPeerRequest } from ".
 import { RelayError, type RelayClient, type RelayRequest, type RelayResponse } from "../src/lib/relay-client.js";
 import { encodePeerInviteV2, inviteLink, isPeerBaseUrl, parsePeerInviteV2, relayPeerFingerprint, relayUrlOf } from "../src/lib/peers.js";
 import { collectBody } from "../src/lib/relay-stream.js";
+import { requestContextOf } from "../src/bridge/request-context.js";
+import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER } from "../src/lib/relay-machine-path.js";
 
 const FP = "16f9-b5d1-30fb-8923";
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -146,5 +148,49 @@ describe("入站分流（relay-inbound.ts）", () => {
     const get = { method: "GET", path: "/api/v1/agents", headers: signed("GET", "/api/v1/agents"), body: enc("") };
     expect(verifyPeerRequest(myFp, get, cache, NOW)).toBeNull();
     expect(verifyPeerRequest(myFp, get, cache, NOW)).toBeNull();
+  });
+});
+
+describe("路径模式：进程内 dispatch（relay-dispatch.ts）", () => {
+  const ctx = (from: string) => ({ from, signal: new AbortController().signal });
+
+  test("带模式头：不打本机 Web，直接调注入的 API 处理器；上下文 source=relay、带前缀与客户端 IP；模式头 / host 不进 API", async () => {
+    let seen: Request | null = null;
+    const fetchCalls: string[] = [];
+    const fetchImpl = (async (url: string) => { fetchCalls.push(url); return new Response("web"); }) as unknown as typeof fetch;
+    const handler = makeInboundHandler({
+      webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl,
+      handleApi: async (r) => {
+        seen = r;
+        return new Response(JSON.stringify({ ok: true, body: await r.text() }), { status: 201, headers: { "content-type": "application/json", "set-cookie": "cstra_dev=x; Path=/" } });
+      },
+    });
+    const headers = {
+      host: "relay.test", [RELAY_MODE_HEADER]: "api", [RELAY_PREFIX_HEADER]: `/m/${FP}`, "x-claudestra-relay-base": "relay.test",
+      "x-forwarded-for": "203.0.113.5, 10.0.0.1", "x-forwarded-proto": "https", "x-cstra-device": "1", cookie: "cstra_dev=dev_abc", "content-type": "application/json",
+    };
+    const res = await handler({ method: "POST", path: "/api/v1/agents/a/messages?wait=0", headers, body: bodyStream('{"text":"hi"}') }, ctx("relay"));
+    expect(fetchCalls).toEqual([]);
+    const r = seen as unknown as Request;
+    expect(new URL(r.url).pathname + new URL(r.url).search).toBe("/api/v1/agents/a/messages?wait=0");
+    expect(r.method).toBe("POST");
+    expect(r.headers.get(RELAY_MODE_HEADER)).toBeNull();
+    expect(r.headers.get(RELAY_PREFIX_HEADER)).toBeNull();
+    expect(r.headers.get("x-claudestra-relay-base")).toBeNull();
+    expect(r.headers.get("cookie")).toBe("cstra_dev=dev_abc");
+    expect(r.headers.get("x-cstra-device")).toBe("1");
+    expect(requestContextOf(r)).toEqual({ source: "relay", https: true, clientIp: "203.0.113.5", relayBase: "relay.test", pathPrefix: `/m/${FP}` });
+    expect(res.status).toBe(201);
+    expect(res.headers["set-cookie"]).toBe("cstra_dev=x; Path=/");
+    expect(dec(await collectBody(res.body, 1 << 16))).toBe('{"ok":true,"body":"{\\"text\\":\\"hi\\"}"}');
+  });
+
+  test("带模式头但路径不在 /api/v1 下 → path_forbidden；没注入 handleApi 时退回旧隧道", async () => {
+    const web = (async () => new Response("web")) as unknown as typeof fetch;
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl: web, handleApi: async () => new Response("api") });
+    await expect(handler({ method: "GET", path: "/hook", headers: { [RELAY_MODE_HEADER]: "api" }, body: bodyStream("") }, ctx("relay"))).rejects.toMatchObject({ code: "path_forbidden" });
+    const legacy = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl: web });
+    const res = await legacy({ method: "GET", path: "/api/v1/agents", headers: { [RELAY_MODE_HEADER]: "api" }, body: bodyStream("") }, ctx("relay"));
+    expect(dec(await collectBody(res.body, 1 << 16))).toBe("web");
   });
 });

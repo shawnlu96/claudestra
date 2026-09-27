@@ -298,6 +298,18 @@
       "from": 0,
       "to": 0,
       "why": "入口加 src/relay.ts：中继服务端并进主仓库（docs/relay/protocol.md），它是独立进程的入口，导出只被自己用"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "删 PUBLIC_ROUTES 与 route 规则文案：托管前端后 web/app/api（Next BFF）整个删除，鉴权只在 bridge /api/v1 一处（docs/design-hosted-frontend.md），规则没有对象了"
+    },
+    {
+      "key": "guard:scripts/guard/rules/patterns.ts",
+      "from": 0,
+      "to": 0,
+      "why": "删 web/app/api 路由鉴权检查（route:<file>）：目录已不存在，检查永远命中 0 个文件；其余 pattern / catch 规则不变"
     }
   ]
 }

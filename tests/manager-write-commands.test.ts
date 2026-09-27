@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { WRITE_COMMANDS, isWriteInvocation } from "../src/manager/write-commands";
+import { PRINCIPALS_WRITE_COMMANDS, WRITE_COMMANDS, isWriteInvocation } from "../src/manager/write-commands";
 
 const MANAGER_SRC = readFileSync(join(import.meta.dir, "..", "src", "manager.ts"), "utf8");
 
@@ -63,5 +63,14 @@ describe("manager 写命令分类", () => {
     for (const c of [...WRITE_COMMANDS, "takeover", "permissions", "effort", "mode", "model", "auto-update"]) {
       expect(MANAGER_SRC.includes(`case "${c}":`)).toBe(true);
     }
+  });
+});
+
+describe("PRINCIPALS_WRITE_COMMANDS", () => {
+  test("写 principals 的命令都另持 principals 锁，且都是写命令（先过认主与命令级写锁）", () => {
+    for (const c of ["token-add", "token-revoke", "peer-http-scope", "peer-invite-new", "peer-join-auto", "peer-invite-redeem", "external"]) {
+      expect(PRINCIPALS_WRITE_COMMANDS.has(c)).toBe(true);
+    }
+    for (const c of PRINCIPALS_WRITE_COMMANDS) expect(isWriteInvocation(c, [])).toBe(true);
   });
 });

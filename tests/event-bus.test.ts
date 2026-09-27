@@ -18,6 +18,7 @@ import {
   forgetAgent,
   type BridgeEvent,
 } from "../src/bridge/event-bus.js";
+import { agentInScope, type Principal } from "../src/lib/principals.js";
 
 function mk(agent: string, type: BridgeEvent["type"] = "assistant_text", data: Record<string, unknown> = {}) {
   return emitEvent({ agent, chatId: `chan-${agent}`, type, data });
@@ -74,6 +75,18 @@ describe("subscribeEvents", () => {
     mk("a3");
     mk("a2");
     expect(got).toEqual(["a1", "a2"]);
+  });
+
+  test("allow 逐条判定（/api/v1/events 用 agentInScope）：\"*\" token 收不到 master 的事件，实时与补发都一样", () => {
+    const star: Principal = { id: "token:tok_star", role: "external", agents: ["*"], createdAt: "2026-09-27T00:00:00Z" };
+    const allow = (a: string) => agentInScope(star, a);
+    const got: string[] = [];
+    subscribeEvents({ allow }, (e) => got.push(e.agent));
+    mk("agent-worker");
+    mk("master");
+    mk("agent-master");
+    expect(got).toEqual(["agent-worker"]);
+    expect(replayEventsSince(0, { allow }).map((e) => e.agent)).toEqual(["agent-worker"]);
   });
 
   test("订阅者回调抛异常不影响后续订阅者与主流程", () => {

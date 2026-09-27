@@ -35,6 +35,9 @@ export interface AppConfig {
   /** v2.23+ 归档保留天数（缺省 90；0 = 永不自动清理）。归档目录里的条目超过
    *  这个天数就由每日兜底清掉——归档是"可找回的过期会话"，不是永久仓库。 */
   archiveRetentionDays?: number;
+  /** 语音转写用的 Groq API key（bridge/local-api：PUT /api/v1/settings 写、GET 只回尾四位提示；env GROQ_API_KEY 兜底）。
+   *  以前在 web BFF 的 ~/.claude-orchestrator/web/config.json，manager migrate-web-state 搬过来。 */
+  groqApiKey?: string;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -76,6 +79,9 @@ function merge(base: AppConfig, raw: any): AppConfig {
             ...(typeof raw.autoCompact.emergency === "boolean" ? { emergency: raw.autoCompact.emergency } : {}),
           }
         : base.autoCompact,
+    // 以前漏在这里：任何 set*（读→改→写）都会把磁盘上的 archiveRetentionDays 抹掉
+    ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
+    ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
   };
 }
 
@@ -186,6 +192,32 @@ export async function setAutoCompact(patch: { window?: number; idleHours?: numbe
   };
   await writeConfig(cfg);
   return cfg;
+}
+
+/** 空串 = 清除 */
+export async function setGroqApiKey(key: string): Promise<AppConfig> {
+  const cfg = await readConfig();
+  if (key) cfg.groqApiKey = key;
+  else delete cfg.groqApiKey;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/**
+ * manager migrate-web-state：把旧 web config.json 的 groqApiKey / lang 搬进来，**只补缺**——bridge 这边已经设过的不覆盖
+ * （lang 有缺省值，所以按磁盘上的原始 JSON 判「设过没有」，不能看合并后的配置）。返回哪几项真的搬了。
+ */
+export async function adoptWebSettings(web: { groqApiKey?: unknown; lang?: unknown }): Promise<{ groqApiKey: boolean; lang: boolean }> {
+  const r = await readJsonState(CONFIG_PATH);
+  if (r.status === "corrupt") throw new Error(`${CONFIG_PATH} 已损坏，先修好再迁移: ${r.error}`);
+  const raw = (r.status === "ok" && r.data && typeof r.data === "object" ? r.data : {}) as Record<string, unknown>;
+  const cfg = merge(defaults(), raw);
+  const takeKey = typeof web.groqApiKey === "string" && !!web.groqApiKey && typeof raw.groqApiKey !== "string";
+  const takeLang = (web.lang === "zh" || web.lang === "en") && raw.lang !== "zh" && raw.lang !== "en";
+  if (takeKey) cfg.groqApiKey = web.groqApiKey as string;
+  if (takeLang) cfg.lang = web.lang as AppLang;
+  if (takeKey || takeLang) await writeConfig(cfg);
+  return { groqApiKey: takeKey, lang: takeLang };
 }
 
 export { CONFIG_PATH, DEFAULT_CONFIG };

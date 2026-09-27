@@ -39,9 +39,7 @@ const RENDERED_PATH = `${process.env.MASTER_DIR || `${REPO_ROOT}/master`}/CLAUDE
 // 0 = 还不知道总数（要等「选择前端」那步定下来）—— 此时只显示 [n]，不显示 [n/8]，
 // 否则前两步先报一个猜的分母、选完前端又跳成别的数，看着像出错了。
 /** 上次装到哪一步（main() 开头探一次，后续步骤据此跳过已完成的耗时动作） */
-let progress: InstallProgress = assessInstall({
-  envFile: false, webEnvLocal: false, webNextBin: false, webBuildId: false, bridgePlist: false, webPlist: false,
-});
+let progress: InstallProgress = assessInstall({ envFile: false, webNextBin: false, webBuildId: false, webOut: false, bridgePlist: false });
 
 let TOTAL_STEPS = 0;
 let stepNo = 0;
@@ -529,11 +527,10 @@ function printResumeBanner(): void {
   // 第四列：文件在但不是这一版的（切版本后重跑）——显示「过期」，别打 ✓
   const L: Array<[boolean, string, string, boolean?]> = [
     [progress.envFile, ".env", t("主配置", "main config")],
-    [progress.webEnvLocal, "web/.env.local", t("Web 配置 + API token", "web config + API token")],
     [progress.webNextBin, "web/node_modules", t("Web 依赖", "web dependencies"), progress.webDepsFresh === false],
     [progress.webBuildId, "web/.next", t("Web 构建产物", "web build output"), progress.webBuildFresh === false],
+    [progress.webOut, "web/out", t("Web 静态包（bridge 托管）", "web static bundle (served by the bridge)")],
     [progress.bridgePlist, "com.claudestra.bridge", t("后台服务", "background daemons")],
-    [progress.webPlist, "com.claudestra.web", t("Web 服务", "web service")],
   ];
   br();
   print(`${c.bold}${c.cyan}${t("检测到上次的安装痕迹 —— 接着装，不从头来", "Found a previous install — resuming instead of starting over")}${c.reset}`);
@@ -915,6 +912,8 @@ interface Config {
   /** 「手机访问」选了中继才有；undefined = 不动 .env 里已有的值，"" = 用户改选别的路并要求停用中继 */
   RELAY_URL?: string;
   RELAY_NAME?: string;
+  /** 选了 Web 前端才有：bridge 托管的静态包目录（<repo>/web/out，绝对路径）；undefined = 不动 .env 里已有的值 */
+  BRIDGE_STATIC_DIR?: string;
 }
 
 /** 在现有 .env 上就地合并（手加的键、注释不丢；值没变的行逐字节保留）。见 lib/env-file.ts */
@@ -928,6 +927,7 @@ function buildEnvContent(cfg: Config, existing: string | null): string {
     USER_NAME: cfg.USER_NAME,
     MCP_NAME: cfg.MCP_NAME,
     ...(cfg.RELAY_URL !== undefined ? { RELAY_URL: cfg.RELAY_URL, ...(cfg.RELAY_NAME ? { RELAY_NAME: cfg.RELAY_NAME } : {}) } : {}),
+    ...(cfg.BRIDGE_STATIC_DIR ? { BRIDGE_STATIC_DIR: cfg.BRIDGE_STATIC_DIR } : {}),
   }, "# Claudestra 运行时配置 (由 bun run setup 生成)");
 }
 
@@ -974,7 +974,7 @@ async function registerHooks(hookCmd: string, recallCmd?: string): Promise<void>
 interface FinalizeResult {
   deferred: boolean;
   failures: string[];
-  /** install-cli 报回来的 web daemon 结果(装上了给 url,没装给缺什么) */
+  /** 网页能不能打开：bridge 在托管 web/out 就给 url，否则给缺什么 */
   web?: { installed: true; url: string } | { installed: false; reason?: string };
 }
 
@@ -1171,23 +1171,19 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
           `${h.name} was installed but does not respond${h.repaired ? " (an automatic restart did not help)" : ""}. Log tail: ${tail}`,
         ));
       }
-      // v2.24+ web 前端 daemon:装上了就把 URL 带到收尾提示里(别再让用户
-      // 自己开一个前台 npm run dev)。装上 ≠ 在服务：没在监听就如实报原因
-      if (r.webDaemon?.installed && !r.webDaemon.serving) {
-        webResult = { installed: false, reason: r.webDaemon.error || t("web 服务没在监听", "the web service is not listening") };
-      } else if (r.webDaemon?.installed) {
-        webResult = { installed: true, url: r.webDaemon.url };
-        const kept = r.daemons.find((d) => d.label === "com.claudestra.web")?.keptExisting;
-        ok(t(
-          kept
-            ? `web 服务已有自己的 plist,原样保留 → ${c.cyan}${r.webDaemon.url}${c.reset}`
-            : `web 服务已装成开机自启 → ${c.cyan}${r.webDaemon.url}${c.reset}`,
-          kept
-            ? `web service already had its own plist — left untouched → ${c.cyan}${r.webDaemon.url}${c.reset}`
-            : `web service installed for autostart → ${c.cyan}${r.webDaemon.url}${c.reset}`,
-        ));
-      } else if (r.webDaemon) {
-        webResult = { installed: false, reason: r.webDaemon.reason };
+      // 网页 = bridge 托管的 web/out（.env 的 BRIDGE_STATIC_DIR），没有单独的 web 服务。
+      // 能打开 ≠ 装完：没构建 / 没配 / bridge 没起来都如实报原因，收尾横幅据此说话
+      const bridgeUp = (r.daemonHealth ?? []).every((h) => h.healthy);
+      if (r.web.built && r.web.staticDir && bridgeUp) {
+        const webUrl = `http://127.0.0.1:${cfg.BRIDGE_PORT}/`;
+        webResult = { installed: true, url: webUrl };
+        ok(t(`网页由 bridge 托管 → ${c.cyan}${webUrl}${c.reset}`, `Web client served by the bridge → ${c.cyan}${webUrl}${c.reset}`));
+      } else if (cfg.BRIDGE_STATIC_DIR || r.web.built) {
+        webResult = { installed: false, reason: !r.web.built
+          ? t("web 还没构建（cd web && npm run build）", "the web frontend is not built yet (cd web && npm run build)")
+          : !r.web.staticDir
+            ? t(".env 里没有 BRIDGE_STATIC_DIR（重跑 bun run setup 选上 Web）", "BRIDGE_STATIC_DIR is missing from .env (rerun bun run setup and pick Web)")
+            : t("bridge 没起来（见上面的探活结果）", "the bridge is not up (see the health probe above)") };
       }
     }
   } catch (e) {
@@ -1264,52 +1260,6 @@ async function stepBypassConsent(): Promise<void> {
 // Web 登录前置：本机 sshd（v2.24+）
 // ============================================================
 
-/**
- * 网页用本机系统账号登录（后端拿账号密码 SSH 127.0.0.1:22）。macOS 默认关着「远程登录」，
- * 关着就一律「密码错误」。这里探一次，没开就打开共享面板引导用户开，最多 3 轮。
- * 返回失败说明（计入收尾横幅）；探测复用 doctor 的 checkWebLogin。
- */
-async function stepWebLogin(): Promise<string[]> {
-  header(nextStep(), t("网页登录（本机远程登录）", "Web login (Remote Login on this Mac)"));
-  const { checkWebLogin } = await import("./lib/doctor.js");
-  const { userInfo } = await import("os");
-  const username = userInfo().username;
-  print(t(`网页登录用本机账号：登录名 ${c.bold}${c.yellow}${username}${c.reset}（不是全名，也不是 Apple ID），密码是开机密码。`,
-          `The web UI logs in with this Mac's account: username ${c.bold}${c.yellow}${username}${c.reset} (not your full name or Apple ID), password = your login password.`));
-  if (process.platform !== "darwin") {
-    // checkWebLogin 的探测用的是 macOS nc 的语法（-G），别的平台上 sshd 开着也会报失败
-    hint(t("非 macOS：请自行确认 sshd 在 127.0.0.1:22 上监听（例如 systemctl status ssh）。",
-           "Not macOS: make sure sshd is listening on 127.0.0.1:22 yourself (e.g. `systemctl status ssh`)."));
-    br();
-    return [];
-  }
-  for (let round = 0; round < 3; round++) {
-    const [r] = await checkWebLogin(REPO_ROOT);
-    if (!r) {
-      // checkWebLogin 只在 web/.env.local 存在时出结论：web 没配好，这一步无从谈起
-      hint(t("web 还没配置好，跳过登录检测。", "The web UI is not configured yet — skipping the login check."));
-      br();
-      return [];
-    }
-    if (r.status === "ok") {
-      ok(t("远程登录已开启（sshd 在听 22）", "Remote Login is on (sshd is listening on 22)"));
-      br();
-      return [];
-    }
-    warn(t("「远程登录」没开：网页登录会一律报「密码错误」。", "Remote Login is off: web login will always say \"wrong password\"."));
-    await run(["open", "x-apple.systempreferences:com.apple.Sharing-Settings.extension"]);
-    print(t(`已打开「系统设置 → 通用 → 共享」：打开 ${c.bold}远程登录${c.reset}，并确认「允许访问」里包含 ${c.bold}${username}${c.reset}。`,
-            `Opened System Settings → General → Sharing: turn on ${c.bold}Remote Login${c.reset} and make sure ${c.bold}${username}${c.reset} is allowed.`));
-    hint(t("命令行备选：sudo systemsetup -setremotelogin on（新版 macOS 可能要求终端有完全磁盘访问权限）",
-           "CLI alternative: sudo systemsetup -setremotelogin on (newer macOS may require Full Disk Access for the terminal)"));
-    await waitEnter(t("开好后按 ENTER 重新检测", "Press ENTER to check again"));
-    br();
-  }
-  br();
-  return [t("「远程登录」没开：网页登录会失败——系统设置 → 通用 → 共享 → 远程登录",
-            "Remote Login is off, so web login will fail — System Settings → General → Sharing → Remote Login")];
-}
-
 // ============================================================
 // 前端选择（v2.10+：Discord 成为选项而非必然,可只配 Web）
 // ============================================================
@@ -1320,20 +1270,23 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
   header(nextStep(), t("选择前端", "Pick your frontends"));
   print(t("Claudestra 有两种入口,可以同时启用,也可以只要一个:", "Claudestra has two frontends. Enable either or both:"));
   br();
-  print(`  ${c.bold}${c.yellow}1${c.reset}  ${c.bold}Web${c.reset} ${c.dim}${t("(推荐)", "(recommended)")}${c.reset} — ${t("浏览器 / PWA,本机系统账号(SSH 用户名密码)登录,不依赖任何第三方,装完就能用", "browser / PWA, logs in with your OS account (SSH username/password), no third-party dependency, usable right after install")}`);
+  print(`  ${c.bold}${c.yellow}1${c.reset}  ${c.bold}Web${c.reset} ${c.dim}${t("(推荐)", "(recommended)")}${c.reset} — ${t(
+    "浏览器 / PWA,由 bridge 直接托管,手机用配对码登录,不依赖任何第三方,装完就能用",
+    "browser / PWA served by the bridge itself, phones sign in with a pairing code, no third-party dependency, usable right after install",
+  )}`);
   print(`  ${c.bold}${c.yellow}2${c.reset}  ${c.bold}Discord${c.reset} — ${t("手机 App / 推送通知 / 按钮交互(需要 Discord 账号 + 自己建 bot,多 5 个步骤)", "phone app / push notifications / buttons (needs a Discord account + your own bot; 5 extra steps)")}`);
   br();
   // 默认:老用户按现有配置推断;全新安装默认 **Web** —— 它零第三方依赖、装完即用,
   // 而 Discord 要先去开发者后台建 bot、开 intents、邀请进服务器(5 步)。
   // (2026-09-22 owner:「最好是有 Claude Code 的人,一个安装命令下来,就可以用
   //  我这个 Web 端。Discord 端可以暂时先不用配置,或者做成可选项。一切以 Web 端优先。」)
-  const hasWebEnv = await fileExists(`${REPO_ROOT}/web/.env.local`);
+  const hasWeb = progress.webOut || !!existing.BRIDGE_STATIC_DIR;
   // 全新安装时 existing 来自 .env.example，里面的 "your-bot-token" 占位符不算已配 Discord
   const hadDiscord = !!existing.DISCORD_BOT_TOKEN && !validateToken(existing.DISCORD_BOT_TOKEN);
   const def = hadDiscord
-    ? hasWebEnv ? "1,2" : "2"
+    ? hasWeb ? "1,2" : "2"
     : "1";
-  if (hadDiscord && !hasWebEnv) {
+  if (hadDiscord && !hasWeb) {
     hint(t("现在有 Web 端了（推荐）：输入 1,2 即可和 Discord 同时启用。", "There is a Web UI now (recommended): enter 1,2 to enable it alongside Discord."));
   }
   while (true) {
@@ -1347,10 +1300,10 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
       fail(t("至少选一个(输入 1、2 或 1,2)", "Pick at least one (enter 1, 2, or 1,2)"));
       continue;
     }
-    // 步骤总数定下来:基础 6 步(依赖/发现/前端/偏好/收尾/收编) + Discord 5 步 + Web 3 步(配置 + 登录 + 手机访问)
+    // 步骤总数定下来:基础 6 步(依赖/发现/前端/偏好/收尾/收编) + Discord 5 步 + Web 2 步(构建 + 手机访问)
     // + bypass 同意 1 步(以前同意过就没有)。沿用现有 Discord 配置时 main 再减掉那 5 步
     const { readBypassConsent } = await import("./lib/bypass-consent.js");
-    TOTAL_STEPS = 6 + (fronts.discord ? 5 : 0) + (fronts.web ? 3 : 0) + ((await readBypassConsent()) ? 0 : 1);
+    TOTAL_STEPS = 6 + (fronts.discord ? 5 : 0) + (fronts.web ? 2 : 0) + ((await readBypassConsent()) ? 0 : 1);
     if (!fronts.discord) {
       hint(t("跳过 Discord 的 5 个配置步骤(以后想加,重跑 bun run setup 即可)", "Skipping the 5 Discord steps (rerun `bun run setup` anytime to add it later)"));
     }
@@ -1359,16 +1312,11 @@ async function stepPickFrontends(existing: Partial<Config>): Promise<Frontends> 
 }
 
 // ============================================================
-// Web 前端配置（v2.10+）
+// Web 前端：静态包（bridge 托管 web/out，没有单独的 web 服务、没有登录密码）
 // ============================================================
 
-/** 解析 web/.env.local 现有键值（保留已有 token,不重复签发） */
-function parseDotEnv(content: string): Record<string, string> {
-  return parseEnvRaw(content);
-}
-
-async function stepWebSetup(bridgePort: string): Promise<void> {
-  header(nextStep(), t("Web 前端配置", "Web frontend setup"));
+async function stepWebSetup(): Promise<void> {
+  header(nextStep(), t("构建 Web 前端（静态包）", "Build the web frontend (static bundle)"));
 
   const webDir = `${REPO_ROOT}/web`;
   if (!(await fileExists(`${webDir}/package.json`))) {
@@ -1378,61 +1326,24 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
     ));
     return;
   }
+  print(t(
+    "网页是一份静态文件（web/out），由 bridge 自己托管：没有第二个服务进程、没有账号密码，手机靠配对码认设备。",
+    "The web client is a static bundle (web/out) served by the bridge itself: no second service, no password — phones are recognised by a pairing code.",
+  ));
 
-  // 1) web/.env.local:保留现有值,缺什么补什么
-  const envPath = `${webDir}/.env.local`;
-  const cur = (await fileExists(envPath)) ? parseDotEnv(await readFile(envPath, "utf-8")) : {};
-
-  if (!cur.INTERNAL_API_KEY) {
-    cur.INTERNAL_API_KEY = [...crypto.getRandomValues(new Uint8Array(24))]
-      .map((b) => b.toString(16).padStart(2, "0")).join("");
-    ok(t("生成 INTERNAL_API_KEY(BFF 内部调用凭证)", "Generated INTERNAL_API_KEY (BFF internal credential)"));
-  }
-  cur.BRIDGE_HTTP_URL = `http://127.0.0.1:${bridgePort}`;
-
-  if (!cur.CLAUDESTRA_API_TOKEN) {
-    // 签发 web-ui token(scope: 全部 agent + master + 远程终端)——写 principals.json,
-    // 不需要 bridge 在跑
-    write(`${c.dim}▶${c.reset} ${t("签发 web-ui API token", "Issuing web-ui API token")}… `);
-    const r = await run([
-      resolveBunPath(), `${REPO_ROOT}/src/manager.ts`, "token-add", "web-ui",
-      "--agents", "*,master", "--force", "--terminal",
-    ], { cwd: REPO_ROOT });
-    let secret = "";
-    try { secret = JSON.parse(r.out)?.secret || ""; } catch { /* 输出非 JSON */ }
-    if (r.ok && secret) {
-      cur.CLAUDESTRA_API_TOKEN = secret;
-      print(`${c.green}✓${c.reset}`);
-    } else {
-      print(`${c.red}✗${c.reset}`);
-      warn(t(
-        "token 签发失败。稍后手动跑: bun src/manager.ts token-add web-ui --agents '*,master' --force --terminal,把 secret 填进 web/.env.local 的 CLAUDESTRA_API_TOKEN",
-        "Token issue failed. Run later: bun src/manager.ts token-add web-ui --agents '*,master' --force --terminal, then put the secret into CLAUDESTRA_API_TOKEN in web/.env.local",
-      ));
-    }
-  } else {
-    ok(t("已有 CLAUDESTRA_API_TOKEN,不重复签发", "CLAUDESTRA_API_TOKEN already present — not re-issuing"));
-  }
-
-  const lines = Object.entries(cur).map(([k, v]) => `${k}=${v}`);
-  await writeFile(envPath, "# Claudestra web 前端配置 (由 bun run setup 生成)\n" + lines.join("\n") + "\n");
-  // 0600：里面是全权（*,master,--terminal）的 Bridge API token。
-  await chmod(envPath, 0o600).catch(() => {});
-  ok(t(`写入 ${c.bold}web/.env.local${c.reset}`, `Wrote ${c.bold}web/.env.local${c.reset}`));
-
-  // 2) npm 依赖(web 是独立的 Node/npm 依赖树,与根的 bun 互不干扰)
+  // npm 依赖(web 是独立的 Node/npm 依赖树,与根的 bun 互不干扰)
   if (!(await which("npm"))) {
     warn(t(
-      "找不到 npm(web 前端用 Node 运行)。装好 Node 后跑: cd web && npm install",
-      "npm not found (the web frontend runs on Node). After installing Node: cd web && npm install",
+      "找不到 npm(构建 web 前端要用 Node)。装好 Node 后跑: cd web && npm install && npm run build",
+      "npm not found (building the web frontend needs Node). After installing Node: cd web && npm install && npm run build",
     ));
     return;
   }
   // 续装：已经装好/构建过的就别再花几分钟重来一遍（判据见 lib/install-progress.ts）
   const skip = skippableSteps(progress);
   if (skip.webInstall && skip.webBuild) {
-    ok(t("web 依赖与构建产物都在,跳过（要重来就删掉 web/.next 再跑）",
-         "web dependencies and build output are both present — skipping (delete web/.next to force a rebuild)"));
+    ok(t("web 依赖与静态包都在,跳过（要重来就删掉 web/out 再跑）",
+         "web dependencies and the static bundle are both present — skipping (delete web/out to force a rebuild)"));
     return;
   }
   if (await confirm(t("现在安装并构建 web 前端吗?(npm install + build,可能要几分钟)", "Install and build the web frontend now? (npm install + build, may take a few minutes)"), true)) {
@@ -1446,12 +1357,11 @@ async function stepWebSetup(bridgePort: string): Promise<void> {
         return;
       }
     }
-    // ⚠ 必须 build:开机自启那个 daemon 跑的是 `next start`(生产模式),没有 .next/
-    //   它会直接退出,而 KeepAlive 会把它无限重启。install-cli 因此也把「构建产物
-    //   在不在」列为装 daemon 的前置条件(见 lib/cli-install.ts 的 webDaemonReadiness)。
+    // build 导出 web/out；bridge 按请求读它，之后 manager update 会按提交 hash 自动重建（lib/web-build.ts）
     say_run("npm run build");
     if (!(await runInteractive(["npm", "run", "build"], { cwd: webDir }))) {
-      warn(t("web 构建失败,稍后跑: cd web && npm run build(不构建就没有开机自启的 web 服务)", "web build failed — run later: cd web && npm run build (without it there is no auto-started web service)"));
+      warn(t("web 构建失败,稍后跑: cd web && npm run build(bridge 托管的就是它导出的 web/out)",
+             "web build failed — run later: cd web && npm run build (the bridge serves the web/out it exports)"));
     }
   } else {
     hint(t("稍后自己跑: cd web && npm install && npm run build", "Run later: cd web && npm install && npm run build"));
@@ -1531,7 +1441,7 @@ async function stepAdoptSessions(bridgePort: string): Promise<string[]> {
   const { existsSync, realpathSync } = await import("fs");
   const realpath = (p: string) => { try { return realpathSync(p); } catch { return p; } };
   let envMasterDir = "";
-  try { envMasterDir = parseDotEnv(await readFile(ENV_PATH, "utf-8")).MASTER_DIR || ""; } catch { /* 没有 .env */ }
+  try { envMasterDir = parseEnvRaw(await readFile(ENV_PATH, "utf-8")).MASTER_DIR || ""; } catch { /* 没有 .env */ }
   const masterDirs = [process.env.MASTER_DIR, envMasterDir, `${REPO_ROOT}/master`]
     .filter((d): d is string => !!d).map(realpath);
   const plan = planAdoption(listing?.candidates ?? [], sessions?.sessions ?? [], managed,
@@ -1605,25 +1515,27 @@ async function stepAdoptSessions(bridgePort: string): Promise<string[]> {
 /** 终端原语打包给 lib/setup-remote-access.ts（lib 不能反向 import 入口文件） */
 const ui = { t, print, br, ok, warn, hint, prompt, confirm, c };
 
-/** 选路与中继配置在 lib/setup-remote-access.ts；选了 Tailscale 才走下面保留的 Tailscale 流程 */
-async function stepPhoneAccess(webPort: number, bridgePort: string, existing: Partial<Config>): Promise<RemoteAccessChoice> {
+/** 选路与中继配置在 lib/setup-remote-access.ts；选了 Tailscale 才走下面保留的 Tailscale 流程。直接入口的端口 = bridge 端口（它托管网页） */
+async function stepPhoneAccess(bridgePort: string, existing: Partial<Config>): Promise<RemoteAccessChoice> {
   header(nextStep(), t("手机访问", "Phone access"));
   const { chooseRemoteAccess } = await import("./lib/setup-remote-access.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
-  const pick = await chooseRemoteAccess(ui, { existing, lanUrl: detectBridgeUrls(webPort).find((x) => x.kind === "lan")?.url });
-  return pick.kind === "tailscale" ? { ...pick, url: (await stepRemoteAccess(webPort, bridgePort)).url } : pick;
+  const pick = await chooseRemoteAccess(ui, { existing, lanUrl: detectBridgeUrls(Number(bridgePort) || DEFAULT_BRIDGE_PORT).find((x) => x.kind === "lan")?.url });
+  return pick.kind === "tailscale" ? { ...pick, url: (await stepRemoteAccess(bridgePort)).url } : pick;
 }
 
 /**
  * Tailscale 这条路（lib/tailscale.ts 的 planHttps 决策有单测）：检测 → 没装就引导安装 → 没登录就等登录 →
  * 已有能用的 HTTPS 入口就复用 → 否则经用户同意配 `tailscale serve`（443 空闲用 443，被占用 8443）→ 验证 → 二维码。
- * 主地址优先 HTTPS：Passkey 按域名绑定、PWA 装在哪个 origin 就绑在哪，第一次就给对的地址比事后迁移便宜。
+ * serve 指向 **bridge 端口**（网页由它托管）：经 serve 进来的请求带 X-Forwarded-For，bridge 把它们按非回环处理，
+ * 所以回环豁免不会漏给 tailnet。主地址优先 HTTPS：PWA 装在哪个 origin 就绑在哪，第一次就给对的地址比事后迁移便宜。
  * ⚠ 只打印运行时探测到的地址，绝不内置任何具体地址；动整台机器的步骤（装 Tailscale、sudo tailscale up、serve）
  *   都先问；永远不 reset serve、不开 funnel。
  */
-async function stepRemoteAccess(webPort: number, bridgePort: string): Promise<{ url?: string }> {
+async function stepRemoteAccess(bridgePort: string): Promise<{ url?: string }> {
   const ts = await import("./lib/tailscale.js");
   const { detectBridgeUrls } = await import("./lib/net-addr.js");
+  const webPort = Number(bridgePort) || DEFAULT_BRIDGE_PORT;
   const ifaceUrls = detectBridgeUrls(webPort);
   const lan = ifaceUrls.find((x) => x.kind === "lan"), isMac = process.platform === "darwin";
   br();
@@ -1690,8 +1602,8 @@ async function stepRemoteAccess(webPort: number, bridgePort: string): Promise<{ 
     case "serve": {
       const cmd = [ts.shellQuote(tsCli), ...plan.args].join(" ");
       print(t(
-        "可以用 tailscale serve 给网页加一个 HTTPS 入口（只在你的 tailnet 内可达，不对公网开放，证书由 Tailscale 自动续）:",
-        "tailscale serve can give the web app an HTTPS entry (reachable only inside your tailnet, not public; Tailscale renews the certificate):",
+        "可以用 tailscale serve 给网页加一个 HTTPS 入口（反代到 bridge 端口；只在你的 tailnet 内可达，不对公网开放，证书由 Tailscale 自动续）:",
+        "tailscale serve can give the web client an HTTPS entry (proxied to the bridge port; reachable only inside your tailnet, not public; Tailscale renews the certificate):",
       ));
       print(`  ${c.cyan}${cmd}${c.reset}`);
       if (plan.port !== 443) {
@@ -1703,10 +1615,11 @@ async function stepRemoteAccess(webPort: number, bridgePort: string): Promise<{ 
         const r = await ts.applyServe(tsCli, plan.port, webPort);
         if (r.ok) {
           ok(t(`已配置: ${plan.url}`, `Configured: ${plan.url}`));
-          hint(await (await import("./lib/peer-ingress-config.js")).setupPeerHttps(t, tsCli, plan.port, Number(bridgePort) || DEFAULT_BRIDGE_PORT, webPort));
+          hint(await (await import("./lib/peer-ingress-config.js")).setupPeerHttps(t, tsCli, plan.port, webPort, webPort));
           httpsUrl = plan.url;
           await verifyHttpsEntry(ts, plan.url, webPort);
-          if (!isMac) hint(t("Linux 上 web 服务还不会自动常驻（没有 systemd 安装），serve 背后的 web 要你自己保证在跑。", "On Linux the web service is not auto-installed as a systemd unit yet — keep it running yourself behind serve."));
+          if (!isMac) hint(t("Linux 上 bridge 还不会自动常驻（没有 systemd 安装），serve 背后的 bridge 要你自己保证在跑。",
+                             "On Linux the bridge is not auto-installed as a systemd unit yet — keep it running yourself behind serve."));
         } else {
           warn(t(`配置失败: ${r.detail}`, `Failed: ${r.detail}`));
           printManualHttps();
@@ -1735,11 +1648,16 @@ async function stepRemoteAccess(webPort: number, bridgePort: string): Promise<{ 
   if (!primary) return {};
   br();
   ok(t(`手机上用这个: ${c.cyan}${primary}${c.reset}`, `Use this on your phone: ${c.cyan}${primary}${c.reset}`));
-  if (httpsUrl && plainUrl) hint(t(`备用（明文，语音输入 / 推送 / Passkey 不可用）: ${plainUrl}`, `Fallback (plain HTTP — no voice input / push / passkeys): ${plainUrl}`));
-  if (!httpsUrl) hint(t("明文地址下语音输入、推送、Passkey 用不了（浏览器要求 HTTPS）。", "Voice input, push and passkeys need HTTPS; they won't work on the plain address."));
+  if (httpsUrl && plainUrl) hint(t(`备用（明文，语音输入 / 推送不可用）: ${plainUrl}`, `Fallback (plain HTTP — no voice input / push): ${plainUrl}`));
+  if (!httpsUrl) hint(t("明文地址下语音输入、推送用不了（浏览器要求 HTTPS）。", "Voice input and push need HTTPS; they won't work on the plain address."));
   hint(t(
-    "在把网页添加到主屏幕（PWA）之前就用这个地址——换地址要重新注册 Passkey、重装 PWA、重新订阅推送。",
-    "Use this address before adding the app to your home screen — switching later means re-registering passkeys, reinstalling the PWA and re-subscribing to push.",
+    `第一次打开走配对：手机开 ${primary}/pair 输短码（终端 claudestra pair 出码并确认），或 claudestra pair --url ${primary} 直接出二维码。`,
+    `First open pairs the device: open ${primary}/pair on the phone and type the code from \`claudestra pair\` (confirm in the terminal),`
+      + ` or run \`claudestra pair --url ${primary}\` for a QR code.`,
+  ));
+  hint(t(
+    "在把网页添加到主屏幕（PWA）之前就用这个地址——换地址要重装 PWA、重新配对、重新订阅推送。",
+    "Use this address before adding the app to your home screen — switching later means reinstalling the PWA, re-pairing and re-subscribing to push.",
   ));
   await printQr(primary);
   return { url: primary };
@@ -1832,11 +1750,12 @@ async function waitForTailscaleLogin(
   return status;
 }
 
-/** 刚配好的入口验证：TLS 校验通过 + /api/version 与本机 web 一致才算成功 */
+/** 刚配好的入口验证：TLS 校验通过 + /app-config.json 与本机 bridge 一致才算成功 */
 async function verifyHttpsEntry(ts: typeof import("./lib/tailscale.js"), url: string, webPort: number): Promise<void> {
-  const local = await ts.fetchJson(`http://127.0.0.1:${webPort}/api/version`, 2000);
+  const local = await ts.fetchJson(`http://127.0.0.1:${webPort}/app-config.json`, 2000);
   if (!local) {
-    hint(t("web 服务会在后面一步装好，届时才能真正打开；装完用 bun src/manager.ts doctor 复查「手机访问」。", "The web service is installed in a later step; afterwards run `bun src/manager.ts doctor` to re-check phone access."));
+    hint(t("bridge 会在收尾一步装好，届时才能真正打开；装完用 bun src/manager.ts doctor 复查「手机访问」。",
+           "The bridge is installed in the finalize step; afterwards run `bun src/manager.ts doctor` to re-check phone access."));
     return;
   }
   const p = await ts.probeEntry(url, "serve", local);
@@ -1857,17 +1776,6 @@ const printQr = async (url: string): Promise<void> => (await import("./lib/setup
 // ============================================================
 // 完成
 // ============================================================
-
-/** web 端口的唯一真源是 web/package.json 的 start 脚本（与 install-cli 同一判据）。 */
-async function readWebPort(): Promise<number> {
-  const { webPortFromStartScript } = await import("./lib/cli-install.js");
-  try {
-    const pkg = JSON.parse(await readFile(`${REPO_ROOT}/web/package.json`, "utf-8"));
-    return webPortFromStartScript(pkg?.scripts?.start);
-  } catch {
-    return webPortFromStartScript(undefined);
-  }
-}
 
 function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?: string): void {
   br();
@@ -1906,19 +1814,19 @@ function stepDone(cfg: Config, fronts: Frontends, fin: FinalizeResult, phoneUrl?
   if (fronts.web) {
     print(`${c.bold}${t("试一下(Web):", "Try it (Web):")}${c.reset}`);
     if (fin.web?.installed) {
-      // daemon 已经在跑了 —— 别再让用户去开一个前台 `npm run dev`(关掉终端就没了)。
-      print(`  ${c.dim}①${c.reset} ${t("已经在跑了,浏览器打开", "Already running — open in your browser:")} ${url(fin.web.url)}`);
-      print(`  ${c.dim}②${c.reset} ${t("用本机系统账号(SSH 用户名密码)登录,手机上可「添加到主屏幕」装成 PWA", "Log in with your OS account (SSH username/password). On phones, Add to Home Screen for the PWA")}`);
+      print(`  ${c.dim}①${c.reset} ${t("本机浏览器打开", "Open in a browser on this machine:")} ${url(fin.web.url)}`);
       if (phoneUrl) {
-        print(`  ${c.dim}③${c.reset} ${t("手机上用这个:", "On your phone:")} ${url(phoneUrl)}`);
+        const pairHint = t("(第一次用配对码: claudestra pair)", "(first time: pair with `claudestra pair`)");
+        print(`  ${c.dim}②${c.reset} ${t("手机上用这个:", "On your phone:")} ${url(phoneUrl)}  ${c.dim}${pairHint}${c.reset}`);
       } else {
-        print(`  ${c.dim}③${c.reset} ${t("手机要用的话,装上 Tailscale 两边登录同一个账号,再回来重跑 bun run setup 拿地址", "To use it from your phone: install Tailscale on both and sign in with the same account, then rerun `bun run setup` for the address")}`);
+        print(`  ${c.dim}②${c.reset} ${t("手机要用的话,重跑 bun run setup 走「手机访问」一步（默认中继,一个地址走天下）",
+                                        "To use it from your phone, rerun `bun run setup` and take the Phone access step (relay by default, one address everywhere)")}`);
       }
-      hint(t("它由 launchd 托管(com.claudestra.web),关终端不掉、重启机器自动回来", "It is managed by launchd (com.claudestra.web): survives closing the terminal and machine reboots"));
+      hint(t("网页由 bridge 托管(.env 的 BRIDGE_STATIC_DIR → web/out),没有单独的 web 服务;升级时自动重建",
+             "The bridge serves the web client itself (.env BRIDGE_STATIC_DIR → web/out) — no separate web service; rebuilt automatically on update"));
     } else {
       print(`  ${c.dim}①${c.reset} ${t("先补上缺的这步:", "Finish this first:")} ${c.yellow}${fin.web?.reason || t("cd web && npm install && npm run build", "cd web && npm install && npm run build")}${c.reset}`);
-      print(`  ${c.dim}②${c.reset} ${t("然后跑", "Then run")} ${c.cyan}bun src/manager.ts install-cli${c.reset} ${t("把 web 服务装成开机自启", "to install the web service for autostart")}`);
-      print(`  ${c.dim}③${c.reset} ${t("临时试跑也行:", "Or try it in the foreground:")} ${c.cyan}cd web && npm run dev${c.reset}`);
+      print(`  ${c.dim}②${c.reset} ${t("然后用", "Then run")} ${c.cyan}bun src/manager.ts doctor${c.reset} ${t("复查「前端静态包」", "to re-check the static bundle")}`);
     }
     br();
   }
@@ -2003,12 +1911,11 @@ async function main() {
 
   progress = assessInstall({
     envFile: await fileExists(ENV_PATH),
-    webEnvLocal: await fileExists(`${REPO_ROOT}/web/.env.local`),
     webNextBin: await fileExists(`${REPO_ROOT}/web/node_modules/.bin/next`),
     webBuildId: await fileExists(`${REPO_ROOT}/web/.next/BUILD_ID`),
+    webOut: await fileExists(`${REPO_ROOT}/web/out/index.html`),
     ...(await webFreshness()),
     bridgePlist: await fileExists(`${process.env.HOME}/Library/LaunchAgents/com.claudestra.bridge.plist`),
-    webPlist: await fileExists(`${process.env.HOME}/Library/LaunchAgents/com.claudestra.web.plist`),
   });
   if (progress.partial) printResumeBanner();
 
@@ -2047,11 +1954,9 @@ async function main() {
   }
   const { userName, mcpName, bridgePort } = await stepPreferences(existing);
   let remote: RemoteAccessChoice | undefined;
-  const laterFailures: string[] = [];
   if (fronts.web) {
-    await stepWebSetup(bridgePort);
-    laterFailures.push(...(await stepWebLogin()));
-    remote = await stepPhoneAccess(await readWebPort(), bridgePort, existing);
+    await stepWebSetup();
+    remote = await stepPhoneAccess(bridgePort, existing);
   }
 
   const cfg: Config = {
@@ -2063,13 +1968,15 @@ async function main() {
     USER_NAME: userName,
     MCP_NAME: mcpName,
     ...(remote?.kind === "relay" ? { RELAY_URL: remote.relayUrl, RELAY_NAME: remote.relayName } : remote?.disableRelay ? { RELAY_URL: "" } : {}),
+    // 选了 Web 就让 bridge 托管静态包（绝对路径：daemon 的 cwd 是仓库根，但别指望它）
+    ...(fronts.web ? { BRIDGE_STATIC_DIR: `${REPO_ROOT}/web/out` } : {}),
   };
 
   const fin = await stepFinalize(cfg);
   // 中继的最终地址要等 daemon 装起来、bridge 连上才知道，顺手签配对码打二维码；用户自己起 daemon（deferred）就不等
   const phoneUrl = remote?.kind === "relay" ? await (await import("./lib/setup-remote-access.js")).confirmRelayLink(ui, remote, fin.deferred ? 0 : undefined) : remote?.url;
   // 收编要经 bridge 建频道，必须等 stepFinalize 把 daemon 装起来之后；能不能收编见 gateSetupAdoption
-  const gate = gateSetupAdoption({ ...fin, laterFailures, discord: fronts.discord, webInstalled: fin.web?.installed === true });
+  const gate = gateSetupAdoption({ ...fin, laterFailures: [], discord: fronts.discord, webInstalled: fin.web?.installed === true });
   fin.failures = gate.failures;
   if (gate.verdict === "adopt") fin.failures.push(...(await stepAdoptSessions(bridgePort)));
   else if (gate.skipHint) hint(t(...gate.skipHint));

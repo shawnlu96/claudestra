@@ -5,6 +5,7 @@ import { useT } from "@/lib/i18n";
 // 模型清单来自 CC 自己的模型目录(值 = 完整 model id,manager 原样透传);别在这里另维护一份
 // ——写死的表跟后端别名表一起漂移过两次(2026-09-15 缺 Sonnet 5、09-22 缺 Opus 5.5)
 import { useClaudeModels } from "../claude-models";
+import { piAvailable as fetchPiAvailable, runtimes } from "@/lib/api/agents";
 
 /** Effort 选项(经 --effort 传 CC,session 级,不写全局默认)。 */
 const EFFORT_OPTIONS = [
@@ -24,12 +25,9 @@ function useRuntimeAvailable(id: string): boolean {
   const [available, setAvailable] = useState(false);
   useEffect(() => {
     let alive = true;
-    fetch("/api/runtimes")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { data?: { runtimes?: { id: string; available: boolean }[] } } | null) => {
-        if (alive) setAvailable(j?.data?.runtimes?.some((r) => r.id === id && r.available) === true);
-      })
-      .catch(() => {}); // 查不到就当不可用：不显示这个选项，是安全方向
+    void runtimes().then((list) => {
+      if (alive) setAvailable(list.some((r) => r.id === id && r.available)); // 查不到就当不可用：不显示这个选项，是安全方向
+    });
     return () => {
       alive = false;
     };
@@ -69,12 +67,9 @@ export function NewAgentModal({
   const [piAvailable, setPiAvailable] = useState(false);
   useEffect(() => {
     let alive = true;
-    fetch("/api/capabilities")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j: { data?: { piAvailable?: boolean } } | null) => {
-        if (alive) setPiAvailable(j?.data?.piAvailable === true);
-      })
-      .catch(() => {});
+    void fetchPiAvailable().then((v) => {
+      if (alive) setPiAvailable(v);
+    });
     return () => {
       alive = false;
     };

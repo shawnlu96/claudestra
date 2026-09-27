@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import type { ApiError } from "@/lib/api/client";
+import { jobLog, jobStart, type JobKind } from "@/lib/api/system";
 
 /**
  * 「点火即走 + 轮询日志」的后台任务（升级后端 / 全体重启）共用的一套逻辑。
@@ -35,8 +37,8 @@ const POLL_MS = 3000;
 const RUN_ID_RE = /^\d{1,16}$/;
 
 export function useBackgroundJob(opts: {
-  /** BFF 路由：POST 点火，GET 读日志（?run=<runId>） */
-  endpoint: string;
+  /** bridge 的后台任务：POST /<job> 点火，GET /<job>/log?run=<runId> 读日志 */
+  job: JobKind;
   /** 本轮最长等待；过了就停轮询并提示 */
   deadlineMs: number;
   deadlineMsg: string;
@@ -87,8 +89,7 @@ export function useBackgroundJob(opts: {
         if (!alive.current || runRef.current !== key) return;
         let j: JobLogResp | null = null;
         try {
-          const q = runId ? `?run=${runId}` : "";
-          j = (await (await fetch(`${optsRef.current.endpoint}${q}`, { cache: "no-store" })).json()) as JobLogResp;
+          j = await jobLog<JobLogResp>(optsRef.current.job, runId);
         } catch {
           /* bridge 重启期间接口会抖，正常 */
         }
@@ -116,7 +117,7 @@ export function useBackgroundJob(opts: {
     alive.current = true;
     void (async () => {
       try {
-        const j = (await (await fetch(optsRef.current.endpoint, { cache: "no-store" })).json()) as JobLogResp;
+        const j = await jobLog<JobLogResp>(optsRef.current.job);
         if (!alive.current || runRef.current !== null) return;
         if (j.running && j.runId && RUN_ID_RE.test(j.runId)) {
           setBusy(true);
@@ -143,18 +144,19 @@ export function useBackgroundJob(opts: {
     setLines([]);
     let runId: string | null = null;
     try {
-      const res = await fetch(optsRef.current.endpoint, { method: "POST" });
-      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; runId?: string };
-      const rid = typeof j.runId === "string" && RUN_ID_RE.test(j.runId) ? j.runId : null;
-      if (res.status === 409 && rid) {
-        // 上一轮还在跑：不再点一次，接着看那一轮
-        setNote(j.error || t("上一轮还没结束，接着看它的进度"));
-        runId = rid;
-      } else if (!res.ok || j.ok === false) {
-        throw new Error(j.error || `HTTP ${res.status}`);
-      } else {
-        runId = rid;
+      let j: { ok?: boolean; error?: string; runId?: string };
+      try {
+        j = await jobStart<{ ok?: boolean; error?: string; runId?: string }>(optsRef.current.job);
+      } catch (e) {
+        // 上一轮还在跑：bridge 回 409 + 那一轮的 runId——不再点一次，接着看那一轮
+        const err = e as ApiError;
+        const prev = typeof err.body?.runId === "string" && RUN_ID_RE.test(err.body.runId) ? err.body.runId : null;
+        if (!(err.status === 409 && prev)) throw e;
+        setNote(err.message || t("上一轮还没结束，接着看它的进度"));
+        j = { runId: prev };
       }
+      if (j.ok === false) throw new Error(j.error || "failed");
+      runId = typeof j.runId === "string" && RUN_ID_RE.test(j.runId) ? j.runId : null;
     } catch (e) {
       runRef.current = null;
       if (!alive.current) return;

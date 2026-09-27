@@ -17,6 +17,10 @@ export interface FakeRelayOptions {
   peersFor?: (fp: string, fps: string[]) => PeerRecord[];
   /** welcome 里的 slug 覆盖（模拟中继改名） */
   slug?: string;
+  /** welcome 里的推送能力；不给就像老中继一样不带 push 字段 */
+  pushCaps?: { vapidPublicKey?: string; apns: boolean };
+  /** push 帧的应答；返回 null = 不回（测超时）。默认回 ok + 201 */
+  pushAck?: (frame: Record<string, unknown>) => Record<string, unknown> | null;
 }
 
 interface Data { nonce: string; fp: string | null; slug: string }
@@ -86,12 +90,16 @@ export function startFakeRelay(opts: FakeRelayOptions = {}): FakeRelay {
           ws.data.fp = fp;
           ws.data.slug = opts.slug ?? String(f.slug);
           conns.set(fp, ws);
-          return send(ws, { t: "welcome", v: PROTOCOL_VERSION, fp, slug: ws.data.slug, name: f.name, base });
+          return send(ws, { t: "welcome", v: PROTOCOL_VERSION, fp, slug: ws.data.slug, name: f.name, base, ...(opts.pushCaps ? { push: opts.pushCaps } : {}) });
         }
         const fp = ws.data.fp;
         if (!fp) return;
         received.push({ fp, frame: f });
         if (f.t === "ping") return opts.noPong ? undefined : send(ws, { t: "pong", ts: f.ts });
+        if (f.t === "push") {
+          const ack = opts.pushAck ? opts.pushAck(f) : { t: "push-ack", id: f.id, ok: true, status: 201 };
+          return ack ? send(ws, ack) : undefined;
+        }
         if (f.t === "contacts") return send(ws, { t: "peers", peers: opts.peersFor?.(fp, f.fps as string[]) ?? [] });
         if (typeof f.to === "string") {
           const target = conns.get(f.to);

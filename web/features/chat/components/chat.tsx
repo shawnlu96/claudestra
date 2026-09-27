@@ -22,6 +22,7 @@ import { CtxBadge } from "./ctx-badge";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
+import { hopThenOpen } from "@/features/machines/notification-hop";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
 import { DevToolsMount } from "../../devtools/dev-mount";
@@ -548,11 +549,10 @@ function ChatInner() {
     }
     if (!("serviceWorker" in navigator)) return;
     const onMsg = (e: MessageEvent) => {
-      const d = e.data as { type?: string; agent?: string };
-      if (d?.type === "cstra-open-agent" && d.agent) {
-        void store.openAgent(d.agent);
-        toContent();
-      }
+      const d = e.data as { type?: string; agent?: string; fp?: string };
+      if (d?.type !== "cstra-open-agent" || !d.agent) return;
+      void hopThenOpen(d.fp, () => store.resetForMachine(), () => store.openAgent(String(d.agent))); // 别的机器发的通知：先切机器再开会话
+      toContent();
     };
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);

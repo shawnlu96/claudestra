@@ -31,6 +31,16 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "set-session", "set-claude", "announce-focus", "migrate", "peer-invite-redeem", "peer-invite-list",
 ]);
 
+/**
+ * 会写 principals.json 的命令：整条命令另持 principals 锁（lib/principals.ts principalsLockPath），与 bridge 的设备凭据
+ * 续期 / 配对 / 撤销（updatePrincipals）互斥——否则 bridge 拿旧副本写回会把 token-revoke / peer 撤销吃掉。
+ */
+export const PRINCIPALS_WRITE_COMMANDS: ReadonlySet<string> = new Set([
+  "peer-http-invite", "peer-http-join", "peer-http-accept", "peer-http-scope", "peer-http-remove", "peer-http-tidy",
+  "peer-invite-new", "peer-join-auto", "peer-invite-revoke", "peer-invite-redeem", "peer-invite-list",
+  "token-add", "token-revoke", "external",
+]);
+
 /** 读写混合的命令族：只有这些子命令算写（其余 list/get/presets/status 是读） */
 const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   permissions: new Set(["set", "reset"]),

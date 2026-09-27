@@ -5,6 +5,7 @@ import { useT } from "@/lib/i18n";
 import { useChatStoreApi } from "../chat-store";
 import type { ProjectMeta } from "../type";
 import { projAction } from "../project-actions";
+import { projectsList } from "@/lib/api/system";
 
 /**
  * v2.21+ 项目管理弹窗(侧栏 📁 进入;owner 2026-08-28「project 概念 + UI 方便管理」)。
@@ -295,8 +296,7 @@ export function ProjectsModal({ open, onClose }: { open: boolean; onClose: () =>
   const reload = useCallback(async () => {
     setErr("");
     try {
-      const r = await fetch("/api/projects");
-      const j = (await r.json()) as { ok?: boolean; error?: string; projects?: ProjectMeta[] };
+      const j = await projectsList<{ ok?: boolean; error?: string; projects?: ProjectMeta[] }>();
       if (j.ok) setProjects(j.projects || []);
       else setErr(j.error || t("加载失败"));
     } catch {

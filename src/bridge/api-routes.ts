@@ -32,7 +32,6 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
   readPrincipals,
-  findByBearer,
   agentInScope,
   tokenIdOf,
   SlidingWindowLimiter,
@@ -82,7 +81,10 @@ import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
-import { notePeerSignature } from "./peer-signature.js";
+import { authenticateApi } from "./api-auth.js";
+import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
+import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
+import { revocable } from "./credential-revocation.js";
 import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -139,16 +141,7 @@ export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
 export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string }>();
 /** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
 export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
-/**
- * API 每 token 每分钟配额。**唯一真值** —— 限流器与 429 文案都从这里取。
- * 曾经限流器写 120、文案硬写 30、三份设计文档各说各话（30/30/120），
- * 撞限流的人拿到的是个假数字。
- * 120 是 2026-07-14 从 30 提上来的：web 重度使用下 SSE 重连风暴（每次重连烧
- * 连流+历史+列表轮询+pending 一整套）会打爆 30，触发 429 循环 → 直播流死掉。
- */
-export const API_RATE_LIMIT_PER_MIN = 120;
-/** per-token 限流器（内存态，60s 滑动窗口） */
-const apiLimiters = new Map<string, SlidingWindowLimiter>();
+// 每 principal 每分钟配额与限流器在 api-auth.ts（唯一真值，429 文案从同一常量取）
 // v2.16 拆双 TTL(外部用户报「>10 分钟的长任务收不到回复/推送」实锤):
 // pending 队列的 TTL 就是「迟到 reply 还能找回原 threadId」的窗口——10 分钟
 // 对长任务远远不够,被清后 reply 落到新造的 threadId 下,轮询方(HTTP API
@@ -209,38 +202,8 @@ export function initApiRoutes(d: ApiDeps): void {
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
 
-/**
- * Bearer 鉴权 + 限流。失败直接返回 Response，成功返回 principal。
- * v2.10+ 也接受 ?token=<secret>（header 优先）：浏览器 EventSource 不能带
- * Authorization header，SSE 场景的标准折衷。secret 进 URL 的暴露面由「bridge
- * 默认只绑回环 + 对外自备反代/TLS」的既有边界兜住；非 SSE 调用仍应走 header。
- */
-async function authApi(req: Request, url: URL): Promise<Principal | Response> {
-  const auth = req.headers.get("Authorization") || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  // ?token= 只对 SSE 端点放行(EventSource 不能带 header 的折衷本意)——此前对
-  // 全部 /api/v1/* 放行,secret 会进代理日志/浏览历史(Codex review 2026-08-26)
-  const sseTokenOk = req.method === "GET" && url.pathname === "/api/v1/events";
-  const secret = m?.[1]?.trim() || (sseTokenOk ? url.searchParams.get("token") || "" : "");
-  if (!secret) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> (only GET /events may use ?token=)" });
-  const file = await readPrincipals();
-  const p = findByBearer(file, secret);
-  if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
-  const tid = tokenIdOf(p);
-  let limiter = apiLimiters.get(tid);
-  if (!limiter) {
-    // 120/min:默认 30 在 web 重度使用下会被打爆——SSE 重连风暴(每次重连烧
-    // 连流+历史+列表轮询+pending 一整套)循环触发 429 → 直播流死掉 → 「收不到
-    // 回复/没有思考中」(2026-07-14 真机)。个人部署,提额比精打细算更实际。
-    limiter = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN);
-    apiLimiters.set(tid, limiter);
-  }
-  // 文案跟着上面的常量走 —— 曾经硬写 30 而实际是 120,撞限流的人拿到的是个假数字
-  if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${API_RATE_LIMIT_PER_MIN} req/min)` });
-  if (p.peer) void import("./peer-presence.js").then((m) => m.notePeerInbound(p.peer!)); // 在线 peer 列表的「最近来访」
-  if (p.peer) void notePeerSignature(req, url, p.peer); // 验签：只记录不拦（bridge/peer-signature.ts）
-  return p;
-}
+/** Bearer 或设备 cookie 鉴权 + 限流，逻辑在 api-auth.ts（web-terminal 也用它，只是不限流） */
+const authApi = (req: Request, url: URL): Promise<Principal | Response> => authenticateApi(req, url, { rateLimit: true });
 
 /** registry 名双向兼容（"worker" ↔ "agent-worker"），返回 manager list 里的条目 */
 async function findApiAgent(name: string): Promise<{ name: string; channelId: string; idle?: boolean; status?: string; purpose?: string; cwd?: string; sessionId?: string } | null> {
@@ -385,11 +348,15 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return handlePeerRedeem(req);
   }
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
+  const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
+  if (pub) return pub;
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;
   const principal = auth;
   const tokenId = tokenIdOf(principal);
+  const dev = (await handleDevicesManaged(req, url, principal)) ?? (await handleExtensionRoutes(req, url, principal)); // 设备端点；其余新端点族在 api-extensions.ts 登记
+  if (dev) return dev;
   const path = url.pathname.slice("/api/v1".length);
 
   // GET /api/v1/agents —— scope 内的 agent 快照
@@ -588,11 +555,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(403, { ok: false, error: "remote-access requires a full-scope token" });
     }
     const { remoteAccessSnapshot } = await import("../lib/tailscale.js");
-    const { readWebPort } = await import("../lib/doctor-remote.js");
+    const { readFrontendPort } = await import("../lib/doctor-remote.js");
     try {
       // ?fresh=1：面板上的「重新检测」要绕过 60 秒缓存（刚配完 serve / 刚续完证书就想看结果）
       const maxAge = url.searchParams.get("fresh") === "1" ? 0 : 60_000;
-      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readWebPort(REPO_ROOT), maxAge)) });
+      return apiJson(200, { ok: true, ...(await remoteAccessSnapshot(readFrontendPort(REPO_ROOT), maxAge)) });
     } catch (e) {
       return apiJson(500, { ok: false, error: `探测失败: ${(e as Error).message}` });
     }
@@ -876,7 +843,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // 选了一个点了才报错的选项。轻量、无副作用，任何 token 都能读。
   if (path === "/capabilities" && req.method === "GET") {
     const { piAvailable } = await import("../lib/pi-env.js");
-    return apiJson(200, { ok: true, piAvailable: await piAvailable() });
+    return apiJson(200, { ok: true, piAvailable: await piAvailable(), ...apiFeatures() }); // apiVersion / features：bridge/api-extensions.ts
   }
 
   // v2.23+ POST /api/v1/sessions/:sessionId/manage —— 未纳管会话的处置（仅全权 token）。
@@ -972,9 +939,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
   if (path === "/events" && req.method === "GET") {
-    // 双向兼容前缀：scope 里存裸名时补 agent- 前缀的变体
-    const scopeAgents = principal.agents.includes("*") ? undefined : principal.agents.flatMap((a) => [a, `agent-${a}`]);
-    return deps.handleEventsRequest(req, scopeAgents ? { agents: scopeAgents } : undefined);
+    // 逐条按 agentInScope 过滤（"*" 不含 master、peer 永不含 master、前缀双认）——原先 "*" 直接不过滤，master 的事件全漏给 "*" token
+    const allow = (agent: string) => agentInScope(principal, agent);
+    return revocable(deps.handleEventsRequest(req, { allow }), principal); // 设备凭据一撤，这条 SSE 立刻断（credential-revocation.ts）
   }
 
   // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送只推自己的对话）；ownerIds = 本人的 Discord 账号（ALLOWED_USER_IDS 第一个 = 装机时填的自己），web 据此把本人从 Discord 发的也放右边；不告诉 peer
@@ -2199,8 +2166,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   const peersRes = await handlePeersRoutes(req, path, principal, runManager); // /peers*（bridge/peers-routes.ts）
   if (peersRes) return peersRes;
-  const rtRes = (await handleRuntimeSettingsRoutes(req, path, principal, runManager)) ?? (await handleAgentInfoRoutes(req, path, principal, runManager)); // 设置类 + 会话详情路由
+  const rtRes = await handleRuntimeSettingsRoutes(req, path, principal, runManager); // /pi-*、/codex-*（bridge/runtime-settings-routes.ts）
   if (rtRes) return rtRes;
+  const infoRes = await handleAgentInfoRoutes(req, path, principal, runManager); // /agents/:name/info|external（bridge/agent-info-routes.ts）
+  if (infoRes) return infoRes;
 
   return apiJson(404, { ok: false, error: "unknown endpoint" });
 }

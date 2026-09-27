@@ -4,6 +4,7 @@ import { useT } from "@/lib/i18n";
 import { useBackgroundJob, JobLog } from "../background-job";
 import { Section } from "./section";
 import { UpdatePrefsPanel, UpdateTarget, useUpdateCheck, useUpdatePrefs } from "./update-prefs";
+import { fetchMachineVersion } from "@/lib/api/version";
 
 /**
  * 版本与更新：一键升级 Claudestra（前后端一起）+ 能升到哪个版本 + 通道 / 自动更新开关。
@@ -26,9 +27,7 @@ export function BackendUpdateSection() {
 
   const readVersion = async () => {
     try {
-      const j = (await (await fetch("/api/version", { cache: "no-store" })).json()) as {
-        version?: string; commit?: string;
-      };
+      const j = await fetchMachineVersion();
       if (j.commit) setCommit(j.commit);
       if (j.version) setVersion(j.version);
       return j.commit || "";
@@ -42,7 +41,7 @@ export function BackendUpdateSection() {
   const [checkRound, setCheckRound] = useState(0);
   // 完成判据：本轮日志的结果行（含「已是最新」）；bridge 重启把结果行吞掉时，commit 变了也算
   const job = useBackgroundJob({
-    endpoint: "/api/update",
+    job: "update",
     deadlineMs: 10 * 60_000,
     deadlineMsg: t("等了 10 分钟还没升完，去看 update.log"),
     extraDone: async () => {

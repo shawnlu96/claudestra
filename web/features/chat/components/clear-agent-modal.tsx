@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useChatStoreApi } from "../chat-store";
 import type { AgentSession } from "../type";
 import { useT } from "@/lib/i18n";
+import { getAgentSettings, putAgentSettings } from "@/lib/api/settings";
 
 /**
  * 清空会话确认弹窗。
@@ -33,13 +34,8 @@ export function ClearAgentModal({
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(
-          `/api/agents/settings?agent=${encodeURIComponent(agent.name)}`
-        );
-        const json = (await res.json().catch(() => ({}))) as {
-          data?: { initMessage?: string };
-        };
-        if (!cancelled) setInitMessage(json.data?.initMessage ?? "");
+        const j = await getAgentSettings(agent.name);
+        if (!cancelled) setInitMessage(j.initMessage);
       } catch {
         /* 读不到就空白 */
       } finally {
@@ -55,11 +51,7 @@ export function ClearAgentModal({
     setBusy(true);
     setError("");
     // 先持久化开机指令（下次 clear 还是这份）
-    fetch("/api/agents/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent: agent.name, initMessage }),
-    }).catch(() => {});
+    void putAgentSettings(agent.name, initMessage).catch(() => {}); // 开机指令存不上不影响本次 clear，下次打开还能改
     const res = await store.clearAgent(agent.name, initMessage);
     setBusy(false);
     if (!res.ok) {

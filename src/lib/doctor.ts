@@ -21,6 +21,7 @@ import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
 import { resolveBunPath } from "./bun-path.js";
 import { readRegistryAgents, isMasterAgent } from "./registry.js";
+import { legacyWebDaemonCheck, legacyWebPlistPath, staticIndexExists, webStaticChecks, webStaticState } from "./web-static.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -182,11 +183,7 @@ async function checkDaemons(): Promise<Check[]> {
   if (process.platform !== "darwin") return out;
 
   const list = await sh(["launchctl", "list"]);
-  // web 服务只在装过（plist 存在）时才查：没选 web 的实例不该因此亮灯
-  const webPlist = `${HOME}/Library/LaunchAgents/com.claudestra.web.plist`;
-  const labels = ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron",
-    ...(existsSync(webPlist) ? ["com.claudestra.web"] : [])];
-  for (const label of labels) {
+  for (const label of ["com.claudestra.bridge", "com.claudestra.launcher", "com.claudestra.cron"]) {
     const plist = `${HOME}/Library/LaunchAgents/${label}.plist`;
     const line = list.out.split("\n").find((l) => l.endsWith(label) || l.includes(`\t${label}`));
     if (!line) {
@@ -208,6 +205,9 @@ async function checkDaemons(): Promise<Check[]> {
         : v.status === "warn" ? `看日志 ${logFile}` : undefined,
     });
   }
+  // 旧 web 服务（v2.24–v2.28 的 next start）：前端现由 bridge 托管，它的 plist 还在就提醒退场（lib/web-static.ts）
+  const legacy = legacyWebDaemonCheck(existsSync(legacyWebPlistPath()), g);
+  if (legacy) out.push(legacy);
   return out;
 }
 
@@ -472,63 +472,12 @@ async function checkWorktreeClean(repoRoot: string): Promise<Check[]> {
   }
 }
 
-/**
- * Web 端登录的硬前置：本机 sshd。
- *
- * 网页用**本机系统账号**登录 —— 后端拿用户名密码去 SSH `127.0.0.1:22`（等价 PAM，
- * 见 web/lib/services/auth.service.ts）。而 macOS 的「远程登录」**默认是关的**，
- * 关着就没人听 22 端口，于是密码再对也一律登录失败，页面只说「用户名或密码错误」
- * ——人会去反复试密码，根本想不到是系统设置。2026-09-22 试装到这一步才发现
- * setup 和 doctor 都没查过它。
- *
- * ⚠ 探法用 `nc -z` 而不是 `lsof -iTCP:22`：sshd 的监听套接字属 root，普通用户的
- * lsof 看不见它，会得到「没人监听」的假阴性（本机实测）。
- */
-export async function checkWebLogin(repoRoot: string): Promise<Check[]> {
-  if (!existsSync(`${repoRoot}/web/.env.local`)) return []; // 没配 web 的实例不出这条
-  const r = await sh(["nc", "-z", "-G", "2", "127.0.0.1", "22"]);
-  return [r.ok
-    ? { group: "web", name: "登录(本机 SSH)", status: "ok", detail: "sshd 在听 22 —— 用本机系统账号的用户名密码登录" }
-    : {
-        group: "web",
-        name: "登录(本机 SSH)",
-        status: "fail",
-        detail: "22 端口没人听 —— 网页登录一定失败(它拿账号密码验本机 SSH)，且页面只会说「密码错误」",
-        fix: "打开「系统设置 → 通用 → 共享 → 远程登录」；命令行: sudo systemsetup -setremotelogin on",
-      }];
-}
-
+/** 前端静态包（bridge 托管 web/out）：构建时效 + BRIDGE_STATIC_DIR 指向是否有效；判定在 lib/web-static.ts */
 async function checkWebBuild(repoRoot: string): Promise<Check[]> {
-  if (!existsSync(`${repoRoot}/web/node_modules`)) return []; // 未装 web 的实例不出这条
+  const state = webStaticState(repoRoot);
+  if (!state.staticDir && !existsSync(`${repoRoot}/web/node_modules`)) return []; // 没选 web 的实例不出这组
   const { readWebBuildFacts, webBuildVerdict } = await import("./web-build.js");
-  const v = webBuildVerdict(readWebBuildFacts(repoRoot));
-  return [{
-    group: "web",
-    name: "构建产物时效",
-    status: v.status,
-    detail: v.detail,
-    // manager update 在已是最新时不会构建；install-cli 每次都按同一判据检查并重建
-    ...(v.status !== "ok" ? { fix: "bun src/manager.ts install-cli" } : {}),
-  } as Check, ...(await checkWebPort(repoRoot))];
-}
-
-/** web 端口：有没有人听、听的是不是 launchd 托管的那份（常见开发端口被占时服务会崩溃循环） */
-async function checkWebPort(repoRoot: string): Promise<Check[]> {
-  if (process.platform !== "darwin" || !existsSync(`${HOME}/Library/LaunchAgents/com.claudestra.web.plist`)) return [];
-  const { webPortFromStartScript, listenersOf, launchdPidOf, portOwnerConflict } = await import("./cli-install.js");
-  let start: string | undefined;
-  try { start = JSON.parse(await readFile(`${repoRoot}/web/package.json`, "utf-8"))?.scripts?.start; } catch { /* 用默认端口 */ }
-  const port = webPortFromStartScript(start);
-  const listeners = listenersOf(port);
-  if (listeners.length === 0) {
-    return [{ group: "web", name: `端口 ${port}`, status: "fail", detail: "没有进程在监听 —— 网页打不开",
-      fix: `看日志 ${resolveLogPath("web", "err")}，再 launchctl kickstart -k gui/$(id -u)/com.claudestra.web` }];
-  }
-  const conflict = portOwnerConflict(listeners, launchdPidOf("com.claudestra.web"));
-  return [conflict
-    ? { group: "web", name: `端口 ${port}`, status: "fail", detail: conflict,
-        fix: `lsof -nP -iTCP:${port} -sTCP:LISTEN 找出占用者并停掉，再 launchctl kickstart -k gui/$(id -u)/com.claudestra.web` }
-    : { group: "web", name: `端口 ${port}`, status: "ok", detail: `由 launchd 托管进程监听（pid ${listeners[0]!.pid}）` }];
+  return webStaticChecks(state, { staticIndex: staticIndexExists(state.staticDir) }, webBuildVerdict(readWebBuildFacts(repoRoot)));
 }
 
 // ────────────────────────────────────────────
@@ -614,7 +563,6 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),
-    checkWebLogin(repoRoot),
     checkDeployment(),
     import("./doctor-remote.js").then((m) => m.checkRemoteAccess(repoRoot)),
   ]);

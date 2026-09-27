@@ -8,7 +8,6 @@ import { useProfileDraft } from "./settings/profile-section";
 import { useGroqKey } from "./settings/groq-key-section";
 import { useClaudeDefaults } from "./settings/claude-defaults-section";
 import { usePushToggle } from "./settings/push-section";
-import { useBruteForce } from "./settings/brute-force-section";
 import { useMemoryHygiene } from "./settings/memory-hygiene-section";
 import { useAutoCompact } from "./settings/auto-compact-section";
 import { useKbFixToggle } from "./settings/interface-sections";
@@ -20,7 +19,7 @@ import { SettingsPage } from "./settings/pages";
  * 布局：加宽的弹窗，左栏是 icon+文字的八项菜单(./settings/nav.tsx)，右侧
  * 只渲染当前页(./settings/pages.tsx)；页内再用 GroupLabel 分组。手机上左栏变成标题下的横向菜单条。
  *
- * ⚠ 带状态的分区（资料 / 语音 Key / 全局默认 / 推送 / 失败封禁 / 记忆卫生 / 自动 Compact）
+ * ⚠ 带状态的分区（资料 / 语音 Key / 全局默认 / 推送 / 记忆卫生 / 自动 Compact）
  * 的状态由这里调用各自的 useXxx(open) 持有，而不是分区组件自己持有：SettingsModal 关着时
  * 也挂载（下面 `if (!open) return null`），状态跨开关保留、打开时重置 + 拉取——改成分区自管
  * (随打开/切页挂载)会让重开或切页时先闪默认值。hook 的调用顺序 = 拆分前那个打开 effect 里的
@@ -49,7 +48,6 @@ export function SettingsModal({
   const groq = useGroqKey(open, shared);
   const defaults = useClaudeDefaults(open);
   const push = usePushToggle(open);
-  const sec = useBruteForce(open);
   const hygiene = useMemoryHygiene(open);
   const autoCompact = useAutoCompact(open);
   // 定时任务管理(owner 2026-08-26):独立弹窗
@@ -65,7 +63,7 @@ export function SettingsModal({
   if (!open) return null;
 
   const state = {
-    busy, profile, groq, defaults, modelOptions, push, sec, hygiene, autoCompact, kbFix,
+    busy, profile, groq, defaults, modelOptions, push, hygiene, autoCompact, kbFix,
     openCron: () => setShowCron(true),
   };
 
