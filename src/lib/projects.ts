@@ -125,6 +125,17 @@ export function resolveProjectForDir(projects: ProjectDef[], dir: string): Proje
 }
 
 /**
+ * create 显式 --project 时，目录不在这个 project 名下就记进去（台账 i08 1.3）：下次在这个目录建 agent 按目录也能归对。
+ * 傘形根（家目录、/tmp、/）不记——记了会把底下所有目录都吸进来。返回是否改了。
+ */
+export function addDirIfUncovered(p: ProjectDef, dir: string): boolean {
+  const d = normalizeDir(dir);
+  if (!d || isUmbrellaDir(d) || resolveProjectForDir([p], d)) return false;
+  p.dirs = [...p.dirs, d];
+  return true;
+}
+
+/**
  * 按目录找 project；找不到再看它是不是某个 git 仓库的 worktree，是就归主仓的 project（台账 i08 1.4）。
  * 仓库外的 worktree（/tmp、scratchpad 下）以前会各自新建一个 project；主工作树 = git common dir 的上一级。
  */

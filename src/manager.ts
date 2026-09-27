@@ -92,6 +92,7 @@ import {
   readProjects,
   writeProjects,
   resolveProjectForDirOrMain,
+  addDirIfUncovered,
   slugifyProjectId,
   normalizeDir,
   isMisfiledByUmbrella,
@@ -99,7 +100,7 @@ import {
   type ProjectDef,
 } from "./lib/projects.js";
 import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
-import { cmdProjectAdd, cmdProjectList, cmdProjectEdit, cmdProjectRemove, cmdProjectAssign } from "./manager/projects.js";
+import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
@@ -393,6 +394,7 @@ async function resolveOrCreateProject(
         error: `project "${explicitId}" 不存在。先 project-add,或省略 --project 按目录自动归属。已有: ${data.projects.map((x) => x.id).join(", ") || "(无)"}`,
       };
     }
+    if (addDirIfUncovered(p, dir)) await writeProjects(data); // 显式指定且目录不在它名下：记进去，下次按目录也能归对
     return { project: p, created: false };
   }
   const hit = resolveProjectForDirOrMain(data.projects, dir); // worktree 归主仓的 project
@@ -2908,65 +2910,9 @@ switch (cmd) {
   }
 
   // v2.21+ Projects(owner 2026-08-28)
-  case "project-add": {
-    const opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string } = {};
-    const pos: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--name") opts.name = args[++i];
-      else if (a === "--emoji") opts.emoji = args[++i];
-      else if (a === "--dirs") opts.dirs = (args[++i] || "").split(",").map((s) => s.trim()).filter(Boolean);
-      else if (a === "--desc") opts.desc = args[++i];
-      else pos.push(a);
-    }
-    const [id] = pos;
-    if (!id) {
-      output({ ok: false, error: "project-add <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>]" });
-      break;
-    }
-    await cmdProjectAdd(id, opts);
+  case "project-add": case "project-list": case "project-edit": case "project-remove": case "project-assign": case "project-merge":
+    await runProjectCommand(cmd, args);
     break;
-  }
-  case "project-list":
-    await cmdProjectList();
-    break;
-  case "project-edit": {
-    const opts: { name?: string; emoji?: string; dirs?: string[]; desc?: string } = {};
-    const pos: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--name") opts.name = args[++i] ?? "";
-      else if (a === "--emoji") opts.emoji = args[++i] ?? "";
-      else if (a === "--dirs") opts.dirs = (args[++i] || "").split(",").map((s) => s.trim()).filter(Boolean);
-      else if (a === "--desc") opts.desc = args[++i] ?? "";
-      else pos.push(a);
-    }
-    const [id] = pos;
-    if (!id) {
-      output({ ok: false, error: "project-edit <id> [--name <显示名>] [--emoji <e>] [--dirs <a,b>] [--desc <说明>]" });
-      break;
-    }
-    await cmdProjectEdit(id, opts);
-    break;
-  }
-  case "project-remove": {
-    const [id] = args;
-    if (!id) {
-      output({ ok: false, error: "project-remove <id>(须先清空成员)" });
-      break;
-    }
-    await cmdProjectRemove(id);
-    break;
-  }
-  case "project-assign": {
-    const [agentName, projectId] = args;
-    if (!agentName || !projectId) {
-      output({ ok: false, error: "project-assign <agent> <projectId>" });
-      break;
-    }
-    await cmdProjectAssign(agentName, projectId);
-    break;
-  }
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
 
