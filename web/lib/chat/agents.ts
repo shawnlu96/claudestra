@@ -68,7 +68,7 @@ export interface AgentSession {
   sharedPeers?: number;
   sharedWith?: string[];
   updateHint?: UpdateHint | null;
-  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏 / 顶栏「⏱ 11:00」、菜单「开始 / 结束值守」 */
+  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开始 / 结束值守」 */
   mission?: MissionInfo | null;
 }
 
