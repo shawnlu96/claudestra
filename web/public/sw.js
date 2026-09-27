@@ -44,8 +44,9 @@ const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
 async function receiptBase(fp) {
   const cur = await idbGet("meta", "current");
   if (cur && !cur.base) return "";
-  if (!fp || (cur && cur.fp === fp)) return cur ? cur.base : "";
-  return FP_RE.test(fp) && (await idbGet("machines", fp)) ? `/m/${fp}` : null;
+  // 中继模式的推送一定经中继（VAPID 是中继的），fp 必然被钉上；没 fp 的只可能是旧通知，别默认发给眼下的另一台机器
+  if (!fp || !FP_RE.test(fp) || !(await idbGet("machines", fp))) return null;
+  return `/m/${fp}`;
 }
 
 /** 已读回执：POST <base>/api/v1/agents/<agent>/read（+ notify-read 清 Discord 完成 @） */

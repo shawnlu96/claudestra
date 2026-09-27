@@ -76,12 +76,17 @@ const DROP_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
  * 机器的响应和托管前端同一个源：机器回 text/html / SVG 时脚本会跑在中继源上，能带着别的机器的 cookie 调它们（codex 复核）。
  * 所以 /m/<fp>/ 下的响应一律由中继钉 CSP sandbox（不透明源、无脚本、无表单）+ nosniff；fetch / SSE / <img> 不受文档 CSP 影响。
  * PDF 例外：sandbox 会让浏览器的 PDF 查看器拒绝渲染，而 PDF 里的脚本跑在查看器自己的源里，碰不到中继源。
+ * 脚本类（JS / wasm）类型改成 text/plain：托管页的 script-src 'self' 会信任同源的一切，nosniff + 非脚本类型才能让
+ * <script src="/m/A/…"> / new Worker 拒绝执行它。/api/v1 没有正当的脚本响应。
  */
+const SCRIPT_TYPE_RE = /^\s*(?:(?:application|text)\/(?:x-)?(?:java|ecma)script|application\/wasm|text\/jscript|module\/)/i;
+
 function pinnedMachineHeaders(contentType: string): Headers {
   const pdf = /^application\/pdf\b/i.test(contentType.trim());
   return {
     "x-content-type-options": "nosniff",
     "content-security-policy": pdf ? "frame-ancestors 'none'" : "sandbox; default-src 'none'; frame-ancestors 'none'",
+    ...(SCRIPT_TYPE_RE.test(contentType) ? { "content-type": "text/plain; charset=utf-8" } : {}),
   };
 }
 const COOKIE_VALUE_RE = /^[A-Za-z0-9_-]{0,512}$/;

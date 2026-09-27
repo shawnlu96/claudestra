@@ -71,4 +71,12 @@ describe("机器响应头过滤", () => {
     expect(filterMachineResponseHeaders({ "content-type": "application/json" }, prefix)["content-security-policy"]).toContain("sandbox");
     expect(filterMachineResponseHeaders({ "content-type": "application/pdf" }, prefix)["content-security-policy"]).toBe("frame-ancestors 'none'");
   });
+  test("脚本类响应改成 text/plain（配 nosniff）：托管页的 script-src 'self' 不会把机器的 JS / wasm 当脚本执行", () => {
+    for (const t of ["application/javascript", "text/javascript; charset=utf-8", "application/x-javascript", "text/ecmascript", "application/wasm"]) {
+      expect(filterMachineResponseHeaders({ "content-type": t }, prefix)["content-type"]).toBe("text/plain; charset=utf-8");
+    }
+    expect(filterMachineResponseHeaders({ "content-type": "application/json" }, prefix)["content-type"]).toBe("application/json");
+    expect(filterMachineResponseHeaders({ "content-type": "text/event-stream" }, prefix)["content-type"]).toBe("text/event-stream");
+    expect(filterMachineResponseHeaders({ "content-type": "image/png" }, prefix)["content-type"]).toBe("image/png");
+  });
 });
