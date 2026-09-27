@@ -13,7 +13,7 @@ import { b64, forwardHeaders, headersToObject, NULL_BODY_STATUS, pumpBody, recor
 import {
   filterMachineRequestHeaders, filterMachineResponseHeaders, MACHINE_PREFIX, parseMachinePath, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, type MachinePath,
 } from "../lib/relay-machine-path.js";
-import { resolveExportedPath, STATIC_SITE_CSP } from "../lib/static-site.js";
+import { readBuildInfo, resolveExportedPath, staticResponse } from "../lib/static-site.js";
 import type { InstanceRecord } from "./directory.js";
 import { KeyedWindows } from "./limiter.js";
 import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
@@ -144,7 +144,12 @@ export class Front {
     if (p === "/api/v1/codes/lookup") return req.method === "POST" ? this.codeLookup(req, ip) : text(405, "method not allowed");
     if (req.method !== "GET" && req.method !== "HEAD") return text(405, "method not allowed");
     if (p === "/app-config.json") {
-      const extra = { ...(this.d.commit ? { commit: this.d.commit } : {}), ...(this.d.vapidPublicKey ? { vapidPublicKey: this.d.vapidPublicKey } : {}) };
+      // webCommit = 正在托管的 bundle 自己报的（web/out/build-info.json），浏览器拿它判「前端有没有新版」；commit 是中继进程的
+      const webCommit = this.d.staticDir ? readBuildInfo(this.d.staticDir)?.webCommit : undefined;
+      const extra = {
+        ...(this.d.commit ? { commit: this.d.commit } : {}), ...(webCommit ? { webCommit } : {}),
+        ...(this.d.vapidPublicKey ? { vapidPublicKey: this.d.vapidPublicKey } : {}),
+      };
       return json(200, { mode: "relay", relayBase: this.d.base, version: this.d.version, ...extra });
     }
     if (p === "/c") return redirect(`/c/${encodeURIComponent(url.searchParams.get("code") ?? "")}`);
@@ -154,13 +159,9 @@ export class Front {
       if (home && SLUG_RE.test(home)) return redirect(`https://${home}.${this.d.base}/join`);
       if (!this.d.staticDir) return html(200, invitePage(this.d.base));
     }
-    // 托管的前端静态站：命中就发文件（HTML 不长缓存、_next/static 永久缓存）；没配或没命中再落到中继自己的页面
+    // 托管的前端静态站：命中就发文件（HTML 不长缓存 + 含内联脚本哈希的 CSP、_next/static 永久缓存）；没配或没命中再落到中继自己的页面
     const hit = this.d.staticDir ? resolveExportedPath(this.d.staticDir, p) : null;
-    if (hit) {
-      const file = Bun.file(hit.path);
-      const csp = hit.path.endsWith(".html") ? { "content-security-policy": STATIC_SITE_CSP } : {};
-      return withHsts(new Response(req.method === "HEAD" ? null : file, { status: hit.status, headers: { "content-type": file.type, "cache-control": hit.cacheControl, ...csp } }));
-    }
+    if (hit) return withHsts(staticResponse(hit, req.method));
     if (p === "/") return html(200, homePage(this.d.base, url.searchParams.get("e") ?? undefined));
     return text(404, "not found");
   }

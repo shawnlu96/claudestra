@@ -14,8 +14,8 @@ import {
   isLoopbackAddress,
   isControlRoute,
   controlAccessVerdict,
-  HTML_CSP,
 } from "../src/bridge/web-gateway.js";
+import { staticSiteCsp } from "../src/lib/static-site.js";
 
 describe("跨源判定（ws 控制面防护）", () => {
   const BRIDGE = "http://127.0.0.1:3847/";
@@ -107,16 +107,17 @@ describe("serveStaticSite（Next 导出布局 + CSP）", () => {
     const res = serveStaticSite(root, "/chat")!;
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("<html>chat</html>");
-    expect(res.headers.get("content-security-policy")).toBe(HTML_CSP);
+    expect(res.headers.get("content-security-policy")).toBe(staticSiteCsp()); // 这页没有内联脚本 → 不带哈希（哈希用例在 tests/static-site.test.ts）
     expect(res.headers.get("cache-control")).toBe("no-cache, must-revalidate");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("content-type")).toContain("text/html");
     expect(serveStaticSite(root, "/")!.status).toBe(200);
   });
 
-  test("CSP 内容：无内联脚本、不许第三方连接、不许被嵌", () => {
-    expect(HTML_CSP).toBe(
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  test("CSP 内容：脚本只许同源（+ 本页内联哈希）、不许第三方连接、不许被嵌", () => {
+    expect(staticSiteCsp()).toBe(
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
+        "worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
   });
 

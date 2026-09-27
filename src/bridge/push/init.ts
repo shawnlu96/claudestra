@@ -7,6 +7,7 @@
 import { join } from "node:path";
 import { ApnsClient, apnsConfigFromEnv } from "../../lib/apns.js";
 import { repoEnvVar } from "../../lib/env-file.js";
+import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { readPrincipals } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
@@ -52,7 +53,8 @@ export function initPush(): void {
   void refresh();
   setInterval(() => void refresh(), PRINCIPALS_REFRESH_MS).unref();
   configurePushRoutes({ db, sender, liveAgents: async () => (await readRegistryAgents()).map((a) => a.name) });
-  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id) });
+  const key = instanceKeySync();
+  const dispatcher = createDispatcher({ db, sender, isOwnerChat: (id) => owner.has(id), ...(key ? { fp: keyFingerprint(key.publicKey) } : {}) });
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");
 }

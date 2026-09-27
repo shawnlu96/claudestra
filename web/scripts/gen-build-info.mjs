@@ -48,6 +48,9 @@ export const CLIENT_WEB_COMMIT = ${JSON.stringify(webCommit)};
 export const CLIENT_VERSION = ${JSON.stringify(version)};
 `;
 writeFileSync(join(webDir, "lib", "build-info.ts"), out);
+// 同一份信息再落成 public/build-info.json → 随静态导出进 web/out：托管方（中继 / bridge）读它给 /app-config.json 与
+// /api/v1/version 的 webCommit（src/lib/static-site.ts readBuildInfo）——「前端有没有新版」比的是正在发的 bundle，不是托管方的 git HEAD。
+writeFileSync(join(webDir, "public", "build-info.json"), `${JSON.stringify({ commit, webCommit, version })}\n`);
 console.log(`[build-info] commit=${commit || "(none)"} webCommit=${webCommit || "(none)"}`);
 // ⚠️ 构建时工作区有未提交改动 ⇒ bundle 烤入的是**旧 commit**，而服务端 /api/version
 // 报的是新 commit ⇒ 客户端「新版本已就绪」胶囊永远亮（2026-09-14 一天踩了两次：

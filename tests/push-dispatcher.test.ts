@@ -59,6 +59,21 @@ describe("出站回复 → 未读 + 推送", () => {
     expect(apns).toHaveLength(1);
     expect(apns[0].payload).toEqual({ title: "alpha", body: "hello there", agent: "alpha", url: "/chat?agent=alpha", ts: now, tag: `cstra-alpha-${now}`, badge: 1 });
   });
+  test("给了 fp：每条 Web Push（含 dismiss）都带本机指纹，APNs 不带", async () => {
+    dispatcher.stop();
+    dispatcher = createDispatcher({ db, sender, fp: "9109-17c6-8e77-dfff", isOwnerChat: (id) => id === OWNER_CHAT_ID, now: () => now, log: () => {} });
+    await dispatcher.onEvent(evt({}));
+    const web = sent.filter((s) => s.kind === "web");
+    expect(web).toHaveLength(3);
+    for (const w of web) expect(w.payload).toMatchObject({ fp: "9109-17c6-8e77-dfff", agent: "alpha" });
+    expect(sent.find((s) => s.kind === "apns")!.payload.fp).toBeUndefined();
+    sent.length = 0;
+    markAgentRead(db, "alpha", now + 1);
+    await flush();
+    const dismiss = sent.filter((s) => s.kind === "web");
+    expect(dismiss.length).toBeGreaterThan(0);
+    for (const w of dismiss) expect(w.payload).toMatchObject({ type: "dismiss", fp: "9109-17c6-8e77-dfff" });
+  });
   test("旧 web-ui token 的 chatId 也算 owner；peer / 别的 token / Discord 的出站不推不计", async () => {
     await dispatcher.onEvent(evt({ chatId: "api:tok_web" }));
     expect(unreadCounts(db)).toEqual({ alpha: 1 });

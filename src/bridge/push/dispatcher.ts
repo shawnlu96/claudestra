@@ -5,6 +5,7 @@
  *   · 用户在 agent 的 Discord 频道里说话（chatId 纯数字、in、user）→ 他已经看到了回复 → 标已读；
  *   · 任何已读（onAgentRead）→ 非 iOS 订阅收 dismiss（带角标）、原生壳收一条只带 badge 的静默 APNs；iOS 订阅不发 dismiss。
  * 失效订阅 / 设备（gone）随手清理。不再自己开 SSE 连自己，也不需要 3339 端口锁：bridge 只有一个进程。
+ * Web Push 的每条 payload 都带本机指纹 fp：托管前端一个 SW 管多台机器，点通知要知道去哪台标已读（web/public/sw.js）。
  */
 import type { Database } from "bun:sqlite";
 import type { ApnsMessage } from "../../lib/apns.js";
@@ -27,6 +28,8 @@ export interface DispatcherDeps {
   sender: PushSender;
   /** 这个 chatId 是不是 owner 本人的网页身份（api:owner:self，或旧 web-ui token 的 api:<tokenId>） */
   isOwnerChat: (chatId: string) => boolean;
+  /** 本机实例指纹；没有实例密钥时不带（SW 退回「当前机器」） */
+  fp?: string;
   now?: () => number;
   log?: (msg: string) => void;
 }
@@ -62,7 +65,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
   async function webPushAll(payload: Record<string, unknown>, filter?: (s: PushSubscriptionRow) => boolean): Promise<void> {
     const subs = listPushSubscriptions(d.db).filter((s) => !filter || filter(s));
     if (!subs.length) return;
-    const json = JSON.stringify(payload);
+    const json = JSON.stringify(d.fp ? { fp: d.fp, ...payload } : payload);
     await Promise.all(subs.map(async (s) => {
       const r = await d.sender.sendWebPush(s, json);
       if (r.gone) {

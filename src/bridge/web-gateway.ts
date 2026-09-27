@@ -9,7 +9,7 @@
  */
 
 import { timingSafeEqual } from "crypto";
-import { resolveExportedPath } from "../lib/static-site.js";
+import { resolveExportedPath, staticResponse } from "../lib/static-site.js";
 
 /** bridge.ts 只从这一个模块 import 静态托管相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { appConfigResponse } from "./local-api/version.js";
@@ -157,22 +157,11 @@ export function controlAccessVerdict(opts: {
   return { allow: false, reason: opts.controlToken ? "bad-token" : "no-token-configured" };
 }
 
-/** 托管的 HTML 一律带：前端不再有内联脚本，第三方脚本 / 外链连接一个都不许（机器输出突破清洗时的最后一道） */
-export const HTML_CSP = [
-  "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:", "connect-src 'self'",
-  "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'",
-].join("; ");
-
 /**
  * 静态导出站点的响应：页面 → .html、目录 → index.html、未知页面 → 404.html（状态 404）、资源缺失 / 穿越 → null（调用方兜底）。
- * 缓存头跟路径走（_next/static 永久，HTML 永不长缓存）；HTML 加 CSP；HEAD 不带体。
+ * 缓存头、CSP（含该页内联脚本哈希）、nosniff 都在 lib/static-site.ts 的 staticResponse——与中继托管同一份。
  */
 export function serveStaticSite(rootDir: string, pathname: string, method = "GET"): Response | null {
   const hit = resolveExportedPath(rootDir, pathname);
-  if (!hit) return null;
-  const file = Bun.file(hit.path);
-  const html = hit.path.endsWith(".html");
-  const headers: Record<string, string> = { "Content-Type": file.type, "Cache-Control": hit.cacheControl, "X-Content-Type-Options": "nosniff" };
-  if (html) headers["Content-Security-Policy"] = HTML_CSP;
-  return new Response(method === "HEAD" ? null : file, { status: hit.status, headers });
+  return hit ? staticResponse(hit, method) : null;
 }
