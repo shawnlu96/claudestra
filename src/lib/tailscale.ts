@@ -358,10 +358,10 @@ export async function readServeStatus(cli?: string | null): Promise<ServeState> 
   try { return parseServeStatus(JSON.parse(r.out || "{}")); } catch { return { ports: [], handlers: [] }; }
 }
 
-/** 谁在监听这个端口；lsof 不可用返回 null（调用方按「未知」处理，不当成空闲） */
+/** 谁在监听这个端口；lsof 不可用返回 null（调用方按「未知」处理）。launchd 的 PATH 常没有 /usr/sbin，所以先用绝对路径 */
 export async function listListeners(port: number): Promise<{ command: string; addr: string }[] | null> {
   try {
-    const proc = Bun.spawn(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fcn"], { stdout: "pipe", stderr: "ignore" });
+    const proc = Bun.spawn([existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fcn"], { stdout: "pipe", stderr: "ignore" });
     // 与 certDaysLeft 同理：doctor / bridge 面板都 await 这里，lsof 偶发卡住（僵死挂载）不能拖死整条链
     const timer = setTimeout(() => proc.kill(), 3000);
     const out = await new Response(proc.stdout).text();

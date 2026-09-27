@@ -322,8 +322,7 @@ function buildEnvPath(): string {
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
     "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
+    "/usr/bin", "/bin", "/usr/sbin", "/sbin", // lsof / netstat 在 /usr/sbin：bridge 探端口、doctor 查监听都会 shell 出去找它
   ].join(":");
 }
 

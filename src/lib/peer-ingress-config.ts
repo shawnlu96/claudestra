@@ -11,7 +11,7 @@ import { existsSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { REPO_ROOT } from "./repo-root.js";
 import { mergeEnvContent, parseEnvRaw } from "./env-file.js";
-import { listListeners, runCli } from "./tailscale.js";
+import { listListeners, runCli, tcpOpen } from "./tailscale.js";
 import { detectBridgeUrls } from "./net-addr.js";
 import { bridgeHttpBase } from "./bridge-port.js";
 import { probeBridgeApi } from "./peer-url.js";
@@ -29,16 +29,27 @@ export function pickIngressPort(bridgePort: number, busy: (p: number) => boolean
   return null;
 }
 
-/** .env 已配就沿用；否则挑一个空闲端口写进去。lsof 失败按「占用」算，宁可不开也不抢别人的端口 */
+/**
+ * 端口占没占（纯函数，tests/peer-ingress.test.ts）：lsof 看得到就以它为准；lsof 不可用（launchd 的 PATH 常没有
+ * /usr/sbin）就退回连接探测——能连上就是有人在听。以前 lsof 不可用一律按「占用」算，结果 10 个端口全被判满、入口开不出来。
+ */
+export function portBusy(listeners: { command: string; addr: string }[] | null, tcpConnected: boolean): boolean {
+  return listeners ? listeners.length > 0 : tcpConnected;
+}
+
+/** .env 已配就沿用；否则挑一个空闲端口写进去 */
 export async function ensurePeerIngressPort(bridgePort: number, webPort?: number, envPath = `${REPO_ROOT}/.env`): Promise<number | null> {
   const text = existsSync(envPath) ? await readFile(envPath, "utf8") : null;
   const cur = Number(parseEnvRaw(text ?? "").PEER_INGRESS_PORT || "");
   if (Number.isInteger(cur) && cur > 0) return cur;
   const busy = new Set<number>();
+  let lsofMissing = false;
   for (let p = bridgePort + 1; p <= bridgePort + 10; p++) {
     const l = await listListeners(p);
-    if (l === null || l.length) busy.add(p);
+    if (l === null) lsofMissing = true;
+    if (portBusy(l, l === null ? await tcpOpen("127.0.0.1", p, 800) : false)) busy.add(p);
   }
+  if (lsofMissing) console.warn("⚠️ lsof 跑不起来（PATH 里没有 /usr/sbin？），peer 入口端口改用连接探测判断占用");
   const port = pickIngressPort(bridgePort, (p) => busy.has(p), webPort);
   if (port) await writeFile(envPath, mergeEnvContent(text, { PEER_INGRESS_PORT: String(port) }, ENV_HEADER));
   return port;

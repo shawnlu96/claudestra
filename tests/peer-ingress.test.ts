@@ -72,3 +72,16 @@ describe("peer 入口（HTTPS 反代 → 回环上的 peer 专用端口）", () 
     expect(ingressHost(true, false, now - 1, now)).toBe("127.0.0.1"); // hold 过期又没有 peer
   });
 });
+
+import { portBusy } from "../src/lib/peer-ingress-config";
+
+describe("portBusy：lsof 优先，lsof 不可用退回连接探测", () => {
+  test("lsof 有结果就以它为准，连接探测不参与", () => {
+    expect(portBusy([{ command: "bun", addr: "127.0.0.1:3848" }], false)).toBe(true);
+    expect(portBusy([], true)).toBe(false);
+  });
+  test("lsof 不可用（null）时看连接探测", () => {
+    expect(portBusy(null, true)).toBe(true);
+    expect(portBusy(null, false)).toBe(false);
+  });
+});
