@@ -412,6 +412,17 @@ html.kb-open {
 .cstra-bubble .DOMD-Root p {
     line-height: var(--chat-line-height, 1.625);
 }
+/* 侧槽时间标签（msg-time.tsx GutterTime）与各类块首行共用的行高——只在这里定义，两边自然同步。
+   narr / note / user 由渲染处 leading-[var(--cstra-lead-*)] 直接引用；body 是上面 p 行高的 px 换算；
+   tool / system 是工具行、系统分隔线的首行盒高（1280 宽逐类实测），改那两处的 padding / 字号要跟着改。 */
+:root {
+    --cstra-lead-narr: calc(var(--chat-narr-size, 13.5px) * 1.375);
+    --cstra-lead-note: calc((var(--chat-narr-size, 13.5px) - 1px) * 1.375);
+    --cstra-lead-body: calc(var(--chat-font-size, 16px) * var(--chat-line-height, 1.625));
+    --cstra-lead-tool: calc(var(--chat-tool-size, 12px) + 16px);
+    --cstra-lead-user: calc(var(--chat-font-size, 14.5px) * var(--chat-line-height, 1.6));
+    --cstra-lead-system: 16px;
+}
 .narration-muted .DOMD-Root,
 .narration-muted .DOMD-Root :is(p, li, td, th, blockquote, strong, em, a, h1, h2, h3, h4) {
     font-size: inherit;
