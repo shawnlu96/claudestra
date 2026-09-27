@@ -5,6 +5,7 @@
  * 才能一眼核对线上跑的是哪一版；两处都没有就不带，healthz 照常。
  */
 import { readFileSync } from "node:fs";
+import { apnsConfigFromEnv, type ApnsConfig } from "../lib/apns.js";
 import { LIMITS } from "../lib/relay-protocol.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 
@@ -18,6 +19,13 @@ export interface RelayEnv {
   commit?: string;
   /** RELAY_STATIC_DIR：前端静态导出目录（web/out）；没配就不托管前端 */
   staticDir?: string;
+  /** RELAY_VAPID_KEYS：VAPID 密钥对文件；默认与 SQLite 同目录的 vapid.json，缺文件首次启动生成（src/relay.ts） */
+  vapidKeysPath: string;
+  /** RELAY_VAPID_SUBJECT：默认 mailto:relay@<base>（Apple 校验它必须是合法 mailto / https） */
+  vapidSubject: string;
+  /** RELAY_APNS_*（KEY_PATH / KEY_ID / TEAM_ID / TOPIC / ENV）：全给了才开 APNs；apnsWhy 说明为什么没开 */
+  apns?: ApnsConfig;
+  apnsWhy?: string;
 }
 
 const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
@@ -26,11 +34,12 @@ const COMMIT_FILE = ".relay-commit";
 
 const num = (v: string | undefined, d: number): number => (v && Number.isFinite(Number(v)) ? Number(v) : d);
 
-/** SQLite 落点：RELAY_DB 指定文件 > RELAY_DATA 目录下的 relay.sqlite > 仓库根 data/relay.sqlite */
+/** 数据目录：RELAY_DATA > 仓库根 data；SQLite 与 VAPID 密钥文件都落在这里 */
+const dataDirFromEnv = (env: Record<string, string | undefined>): string => (env.RELAY_DATA ? env.RELAY_DATA.replace(/\/+$/, "") : "data");
+
+/** SQLite 落点：RELAY_DB 指定文件 > 数据目录下的 relay.sqlite */
 function dbPathFromEnv(env: Record<string, string | undefined>): string {
-  if (env.RELAY_DB) return env.RELAY_DB;
-  if (env.RELAY_DATA) return `${env.RELAY_DATA.replace(/\/+$/, "")}/relay.sqlite`;
-  return "data/relay.sqlite";
+  return env.RELAY_DB || `${dataDirFromEnv(env)}/relay.sqlite`;
 }
 
 /** 仓库根 .relay-commit 的一行短 sha；没有文件或内容不像 sha 都算没有 */
@@ -49,6 +58,7 @@ export function commitFromFile(read: (path: string) => string = (p) => readFileS
 export function relayEnv(env: Record<string, string | undefined> = process.env, readCommit: () => string | undefined = commitFromFile): RelayEnv {
   const base = (env.RELAY_BASE || "").trim().toLowerCase().replace(/\.+$/, "");
   if (!HOST_RE.test(base)) throw new Error("RELAY_BASE 必须是中继的公网主机名（如 relay.example.com），front 靠它区分子域名");
+  const apns = apnsConfigFromEnv((k) => env[k], { prefix: "RELAY_APNS_" });
   return {
     port: num(env.RELAY_PORT, 8787),
     hostname: env.RELAY_HOST || "127.0.0.1",
@@ -58,5 +68,8 @@ export function relayEnv(env: Record<string, string | undefined> = process.env, 
     maxFrameBytes: num(env.RELAY_MAX_FRAME_BYTES, LIMITS.maxFrameBytes),
     commit: env.RELAY_COMMIT?.trim() || readCommit(),
     ...(env.RELAY_STATIC_DIR?.trim() ? { staticDir: env.RELAY_STATIC_DIR.trim() } : {}),
+    vapidKeysPath: env.RELAY_VAPID_KEYS?.trim() || `${dataDirFromEnv(env)}/vapid.json`,
+    vapidSubject: env.RELAY_VAPID_SUBJECT?.trim() || `mailto:relay@${base}`,
+    ...(apns.config ? { apns: apns.config } : { apnsWhy: apns.why }),
   };
 }

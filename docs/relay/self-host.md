@@ -55,9 +55,11 @@ journalctl -u claudestra-relay -n 20
 | `RELAY_DATA` | — | 数据目录，SQLite 在其下 `relay.sqlite`；或 `RELAY_DB` 直接指定文件 |
 | `RELAY_TRUST_PROXY` | `0` | 反代之后设 `1`：客户端地址与主机名按 `X-Forwarded-*` 算。直接对外时别开 |
 | `RELAY_MAX_FRAME_BYTES` | 262144 | 单帧上限；正文按块走，一般不用改 |
-| `RELAY_COMMIT` | — | 写进 `/healthz`；没设就读仓库根 `.relay-commit`（deploy.sh 每次部署写入） |
-| `RELAY_VAPID_KEYS` / `RELAY_VAPID_SUBJECT` | 自动生成 / `mailto:relay@<base>` | 推送网关的 Web Push 密钥文件（首次启动生成，0600）与 VAPID subject（protocol.md 推送一节） |
-| `RELAY_APNS_KEY_PATH` / `RELAY_APNS_KEY_ID` / `RELAY_APNS_TEAM_ID` / `RELAY_APNS_TOPIC` / `RELAY_APNS_ENV` | — | 给原生 iOS 壳推送的 APNs 凭据；自建中继没有官方 App 的 p8 就不配（网页 / PWA 用 Web Push 不受影响） |
+| `RELAY_COMMIT` | — | 写进 `/healthz`，方便核对线上跑的是哪个版本；没设就读仓库根 `.relay-commit`（deploy.sh 每次部署写入） |
+| `RELAY_VAPID_KEYS` | `<数据目录>/vapid.json` | 推送网关（protocol.md §3.5）的 VAPID 密钥对文件；不存在就首次启动生成（0600）。**别换、别丢**：换钥匙 = 所有浏览器的推送订阅作废 |
+| `RELAY_VAPID_SUBJECT` | `mailto:relay@<RELAY_BASE>` | VAPID subject；必须是合法 `mailto:` 或 `https://`（Apple 的推送服务严格校验） |
+| `RELAY_APNS_KEY_PATH` / `RELAY_APNS_KEY_ID` / `RELAY_APNS_TEAM_ID` | — | 原生 iOS 壳的 APNs 凭据（.p8 路径、Key ID、团队 ID）。三个都给才开 APNs；自建中继一般只做 Web Push，不配即可。KEY_ID 没给时从文件名 `AuthKey_<ID>.p8` 解析 |
+| `RELAY_APNS_TOPIC` / `RELAY_APNS_ENV` | `com.claudestra.app` / `sandbox` | bundle id 与环境（`sandbox` \| `production`）。发布版 App 用 `production`；配错环境 Apple 回 BadDeviceToken，实例会把好 token 当失效删掉 |
 
 ## 4. nginx
 

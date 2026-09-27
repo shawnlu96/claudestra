@@ -2,7 +2,7 @@
  * 中继客户端（src/lib/relay-client.ts 及其出站 / 入站两个子模块）对外的类型与错误类。
  * 单独一个文件是为了让子模块与调用方（bridge/relay-link.ts）都能 import 而不形成环。
  */
-import type { Headers } from "./relay-protocol.js";
+import type { ApnsPushFrame, Headers, PushAckFrame, RelayPushCapabilities, WebPushFrame } from "./relay-protocol.js";
 
 export type RelayErrorOrigin = "relay" | "peer" | "client";
 
@@ -57,6 +57,11 @@ export interface InboundResponse {
 /** 处理方抛 RelayError 时其 code 会原样送回发起方（peer 路径）；其他异常按 local_unreachable */
 export type InboundHandler = (req: InboundRequest, ctx: InboundContext) => Promise<InboundResponse>;
 
+/** 请中继投递一条通知（协议 §3.5）；id 由客户端补 */
+export type PushRequest = Omit<WebPushFrame, "t" | "id"> | Omit<ApnsPushFrame, "t" | "id">;
+/** 中继的投递结果；gone = 订阅 / 设备已失效，调用方删记录 */
+export type PushAck = Omit<PushAckFrame, "t" | "id">;
+
 export type RelayState = "connecting" | "online" | "offline" | "closed";
 
 export interface RelayInfo {
@@ -66,6 +71,8 @@ export interface RelayInfo {
   slug: string | null;
   base: string | null;
   relayUrl: string;
+  /** welcome 里中继报的推送能力；老中继不报 → null（当作不能推） */
+  push: RelayPushCapabilities | null;
 }
 
 /** bridge 对外（GET /relay/status、manager）报的中继链路状态；bridge/relay-link.ts 生产，manager/relay.ts 消费 */

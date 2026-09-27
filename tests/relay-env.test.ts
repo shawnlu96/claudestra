@@ -15,6 +15,16 @@ describe("relayEnv", () => {
     expect(relayEnv({ RELAY_BASE: "r.test", RELAY_DB: "/tmp/a.sqlite", RELAY_DATA: "/x" }, () => undefined).db).toBe("/tmp/a.sqlite");
     expect(relayEnv({ RELAY_BASE: "r.test", RELAY_TRUST_PROXY: "1", RELAY_PORT: "9000" }, () => undefined)).toMatchObject({ trustProxy: true, port: 9000 });
   });
+  test("推送网关：VAPID 文件默认在数据目录、subject 默认 mailto:relay@<base>；APNs 三项不全就不开并说明原因", () => {
+    const e = relayEnv({ RELAY_BASE: "r.test" }, () => undefined);
+    expect(e).toMatchObject({ vapidKeysPath: "data/vapid.json", vapidSubject: "mailto:relay@r.test" });
+    expect(e.apns).toBeUndefined();
+    expect(e.apnsWhy).toContain("AuthKey");
+    const custom = relayEnv({ RELAY_BASE: "r.test", RELAY_DATA: "/var/lib/x/", RELAY_VAPID_SUBJECT: " https://relay.example " }, () => undefined);
+    expect(custom).toMatchObject({ vapidKeysPath: "/var/lib/x/vapid.json", vapidSubject: "https://relay.example" });
+    expect(relayEnv({ RELAY_BASE: "r.test", RELAY_VAPID_KEYS: "/etc/relay/vapid.json" }, () => undefined).vapidKeysPath).toBe("/etc/relay/vapid.json");
+    expect(relayEnv({ RELAY_BASE: "r.test", RELAY_APNS_KEY_PATH: "/nonexistent/AuthKey_X.p8", RELAY_APNS_TEAM_ID: "T" }, () => undefined).apnsWhy).toContain("AuthKey");
+  });
   test("commit：环境变量优先，其次 .relay-commit 文件；文件内容不像 sha 就当没有", () => {
     expect(relayEnv({ RELAY_BASE: "r.test", RELAY_COMMIT: " abc1234 " }, () => "ffffff1").commit).toBe("abc1234");
     expect(relayEnv({ RELAY_BASE: "r.test" }, () => "ffffff1").commit).toBe("ffffff1");
