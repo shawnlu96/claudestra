@@ -75,6 +75,8 @@ export interface AgentSession {
 interface ApiAgent {
   name: string;
   status?: string;
+  /** 工作目录（registry.cwd）：侧栏标「所在仓」用（features/chat/agent-repo.ts） */
+  cwd?: string;
   idle?: boolean;
   purpose?: string;
   lastActivityTs?: number | null;
@@ -126,7 +128,7 @@ function mapAgent(a: ApiAgent): AgentSession {
     name: bare,
     displayName: bare,
     purpose: a.purpose || "",
-    cwd: "",
+    cwd: a.cwd || "",
     status: a.status === "stopped" ? "stopped" : "active",
     // 刚建出来的 agent 还没说过话 → lastActivityTs 为 null 会沉底；用创建时间兜底，刚建的自然在最上面
     lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
