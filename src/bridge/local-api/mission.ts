@@ -6,7 +6,7 @@
  * 要 manage 权限：值守会让 agent 在没人看着的时候一直干活，等同替 owner 下长期指令。
  */
 import { canManage } from "../../lib/devices.js";
-import { MISSIONS_PATH, missionKey, parseUntil, updateMissions, type Mission } from "../../lib/missions.js";
+import { MISSIONS_PATH, missionKey, newMission, parseUntil, updateMissions } from "../../lib/missions.js";
 import type { Principal } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
 import { apiJson, forbidden, inScopeEitherName, INVALID_JSON, invalidJsonBody, notInScope, readJsonBody } from "../api-respond.js";
@@ -46,10 +46,7 @@ export async function handleMissionApi(req: Request, path: string, principal: Pr
   if (!goal) return apiJson(400, { ok: false, error: '"goal" required' });
   if (!until) return apiJson(400, { ok: false, error: '"until" must be HH:MM, +3h or an ISO time within 7 days' });
   const ledger = str(body.ledger, 500);
-  const mission: Mission = {
-    agent, goal, until: until.toISOString(), createdAt: new Date().toISOString(), status: "active", nudges: 0, fastTurns: 0,
-    ...(ledger ? { ledger } : {}),
-  };
+  const mission = newMission({ agent, goal, until, ledger });
   await updateMissions((all) => void (all[agent] = mission), paths.missions);
   return apiJson(200, { ok: true, mission });
 }
