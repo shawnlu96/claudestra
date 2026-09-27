@@ -15,6 +15,14 @@ export function isDesktopBrowser(ua: string, maxTouchPoints: number): boolean {
   return !(/Macintosh/.test(ua) && maxTouchPoints > 1);
 }
 
+/**
+ * 探不通时要不要给手动横幅：只有 Safari——它拦「https 页面 → http 回环」，探测注定失败，而用户可能正坐在这台 Mac 前。
+ * Chrome / Firefox 探得通（Chrome 先弹授权），探不通就说明不是这台电脑（或用户拒了），同网的其它电脑上不该冒出横幅。
+ */
+export function probeBlockedByBrowser(ua: string): boolean {
+  return /Safari\//.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Firefox|Edg\//.test(ua);
+}
+
 /** 本机入口（直托管前端的 bridge）：固定用 127.0.0.1，与探测同一个地址；只保留 /chat 认的查询参数 */
 export function localEntryUrl(port: number, search: string, handoffId?: string): string {
   const keep = new URLSearchParams();

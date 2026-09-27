@@ -7,6 +7,7 @@ import {
   isDesktopBrowser,
   isHandoffKey,
   localEntryUrl,
+  probeBlockedByBrowser,
   probeMatches,
 } from "@/features/machines/local-hop-logic";
 
@@ -33,6 +34,16 @@ describe("isDesktopBrowser", () => {
     expect(isDesktopBrowser(IPHONE, 5)).toBe(false);
     expect(isDesktopBrowser(ANDROID, 5)).toBe(false);
     expect(isDesktopBrowser(MAC, 5)).toBe(false);
+  });
+});
+
+describe("probeBlockedByBrowser", () => {
+  test("只有 Safari 算「探测注定被拦」；Chrome / Edge / Firefox 不算", () => {
+    const SAFARI = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+    expect(probeBlockedByBrowser(SAFARI)).toBe(true);
+    expect(probeBlockedByBrowser(MAC)).toBe(false);
+    expect(probeBlockedByBrowser(`${MAC} Edg/140.0`)).toBe(false);
+    expect(probeBlockedByBrowser("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0) Gecko/20100101 Firefox/140.0")).toBe(false);
   });
 });
 

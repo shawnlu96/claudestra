@@ -56,7 +56,7 @@ export function MachineGate({ children }: { children: ReactNode }) {
   );
 }
 
-/** 中继页面探不通本机（Safari 拦、授权被拒）但中继说同网时：给一个手动切到本机直连的入口，可永久关掉 */
+/** 中继说同网、但 Safari 拦了回环探测：给一个手动切到本机直连的入口，可永久关掉 */
 function LocalHopBanner() {
   const t = useT();
   const hop = useLocalHopBanner();

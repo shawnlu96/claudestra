@@ -4,12 +4,12 @@ import { createHandoff, hostInfo, takeHandoff } from "@/lib/api/system";
 import { reloadChatPrefs } from "@/lib/chat-prefs";
 import { reloadFontPrefs } from "@/lib/font-prefs";
 import { reloadThemeVars } from "@/lib/theme-vars";
-import { applyHandoff, collectHandoff, handoffIdFromHash, isDesktopBrowser, localEntryUrl, probeMatches } from "./local-hop-logic";
+import { applyHandoff, collectHandoff, handoffIdFromHash, isDesktopBrowser, localEntryUrl, probeBlockedByBrowser, probeMatches } from "./local-hop-logic";
 
 /**
  * 在这台电脑上打开中继网页时，不绕东京中继一圈：确认是同一台电脑就整页切到本机直托管入口（http://127.0.0.1:<端口>），
  * 那里是回环——免配对、本机打开目录等本机功能齐全。判定与键白名单见 local-hop-logic.ts；偏好经 bridge 一次性交接（local-api/handoff.ts）。
- * 探不通（Safari 拦「https 页面 → http 回环」、用户拒了 Chrome 的授权）时压一条横幅，点一下同样切过去。
+ * Safari 拦「https 页面 → http 回环」，探不通时压一条横幅，点一下同样切过去；探到的是别的实例（fp 不同）= 不是这台，什么都不做。
  * `?relay=1` 打开 = 这个标签页留在中继（调试中继本身用）。
  */
 const STAY_KEY = "cstra_stay_relay";
@@ -33,12 +33,12 @@ function stayOnRelay(): boolean {
   }
 }
 
-async function probe(port: number, fp: string): Promise<boolean> {
+async function probe(port: number, fp: string): Promise<"same" | "other" | "unreachable"> {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/local-probe`, { cache: "no-store", credentials: "omit", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-    return r.ok && probeMatches(await r.json(), fp);
+    return r.ok && probeMatches(await r.json(), fp) ? "same" : "other";
   } catch {
-    return false; // 被浏览器拦 / 授权被拒 / 本机没在听：一律当探不到，由横幅兜底
+    return "unreachable"; // 被浏览器拦 / 授权被拒 / 本机没在听：分不清，交给调用方按浏览器决定要不要横幅
   }
 }
 
@@ -59,8 +59,9 @@ export async function maybeHopToLocal(fp: string): Promise<void> {
   if (stayOnRelay() || !isDesktopBrowser(navigator.userAgent, navigator.maxTouchPoints ?? 0)) return;
   const entry = (await hostInfo().catch(() => null))?.localEntry; // 拉不到主机信息：留在中继，不影响使用
   if (!entry?.sameNetwork) return;
-  if (await probe(entry.port, fp)) return hopToLocal(entry.port);
-  setBanner({ port: entry.port });
+  const found = await probe(entry.port, fp);
+  if (found === "same") return hopToLocal(entry.port);
+  if (found === "unreachable" && probeBlockedByBrowser(navigator.userAgent)) setBanner({ port: entry.port });
 }
 
 export function dismissLocalHop(): void {

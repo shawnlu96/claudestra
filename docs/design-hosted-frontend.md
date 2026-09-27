@@ -176,7 +176,7 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 ## 14. 本机识别与本机直连（2026-09-28 补：v2.29 把「本机」收窄成只认 127.0.0.1，本机功能在 Tailscale / 局域网 / 中继下全没了）
 
 - **直连入口**（bridge 自己的端口，含本机 Caddy / tailscale serve 反代）：来源地址属于本机任一网卡就算本机（`lib/same-host.ts`）。对端是回环且带 XFF → 取最右一跳（本机反代追加的）；对端不是回环 → 只认对端。只给「打开目录」这类低危功能用；配对与控制面豁免仍只认真实回环。
-- **中继入口**：网络位置判不了。中继在浏览器出口 IP = 实例连中继的出口 IP 时给机器请求加 `x-claudestra-relay-same-net: 1`（浏览器自带的剥掉）；`GET /host` 经中继且直托管时回 `localEntry {port, sameNetwork}`。前端（`web/features/machines/local-hop.ts`）在同网 + 桌面浏览器时直接请求 `http://127.0.0.1:<port>/local-probe`（只答真实回环、跨源只放中继 origin、预检回 PNA 头），fp 对得上就整页切到 `http://127.0.0.1:<port>/chat`：回环自动配对，本机功能齐全，不再绕中继。探不通（Safari 拦混合内容、Chrome 授权被拒）→ 底部横幅手动切；`?relay=1` 或关掉横幅 = 留在中继。
+- **中继入口**：网络位置判不了。中继在浏览器出口 IP = 实例连中继的出口 IP 时给机器请求加 `x-claudestra-relay-same-net: 1`（浏览器自带的剥掉）；`GET /host` 经中继且直托管时回 `localEntry {port, sameNetwork}`。前端（`web/features/machines/local-hop.ts`）在同网 + 桌面浏览器时直接请求 `http://127.0.0.1:<port>/local-probe`（只答真实回环、跨源只放中继 origin、预检回 PNA 头），fp 对得上就整页切到 `http://127.0.0.1:<port>/chat`：回环自动配对，本机功能齐全，不再绕中继。探到别的实例（fp 不同）= 不是这台，什么都不做；Safari 拦「https → http 回环」探不通 → 底部横幅手动切（Chrome / Firefox 探不通就当不是这台，免得同网其它电脑冒横幅）；`?relay=1` 或关掉横幅 = 留在中继。
 - **偏好交接**：两个网址的 localStorage 不通。切换前中继页面把白名单里的原始偏好与草稿（不含预生成的 CSS、API 基址）`POST /api/v1/handoff` 存进 bridge（内存、2 分钟、一次性、只有同一身份取得出），本机页面配对后 `GET /api/v1/handoff/:id` 取回、只补缺、按解析器重建 CSS 后重载一次。不把数据放进链接：链接谁都能伪造。
 - CSP 相应放宽：`connect-src` 加 `http://127.0.0.1:*`（探测）与 `blob:`（分享导出读附件图）；`img-src` 加 `https:`（回复里的外链图）。
 - 开发：`web/scripts/dev-proxy.ts`（`npm run dev`）在 127.0.0.1:33333 前挡 next dev，`/api/v1` 去掉 Origin 转本机 bridge——bridge 眼里是本机同源页面。
