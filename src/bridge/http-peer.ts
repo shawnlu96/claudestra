@@ -16,7 +16,7 @@ import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
 import { peerFetch, startRelayLink } from "./relay-link.js";
-import { PEER_CALLS_PATH, PeerCallBook, type PendingPeerCall } from "./peer-call-book.js";
+import { PEER_CALLS_PATH, PeerCallBook, currentPeer, peerIdOf, resumePeerCalls, type PendingPeerCall } from "./peer-call-book.js";
 
 export interface HttpPeerDeps {
   deliver: (env: Envelope) => Promise<Delivery>;
@@ -33,8 +33,10 @@ export interface HttpPeerDeps {
   hold?: (env: Envelope) => void;
   /** 等回复的调用簿落盘位置；单测注入 fake fetch 时缺省不落盘 */
   callBookPath?: string | null;
-  /** 恢复轮询时按名字取 peer（单测注入）；缺省读 peers.json */
+  /** 恢复 / 轮询时按名字取 peer（单测注入）；缺省读 peers.json */
   findPeer?: (name: string) => Promise<HttpPeer | null>;
+  /** 单测覆盖：peers.json 读不了时恢复的重试间隔 */
+  resumeRetryMs?: number;
 }
 
 let deps: HttpPeerDeps | null = null;
@@ -42,7 +44,7 @@ let book = new PeerCallBook(null);
 export function initHttpPeer(d: HttpPeerDeps) {
   deps = d;
   book = new PeerCallBook(d.callBookPath !== undefined ? d.callBookPath : d.fetchImpl ? null : PEER_CALLS_PATH);
-  void resumePeerCalls();
+  resumeFromBook();
   startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
   if (d.fetchImpl) return; // 单测注入 fake fetch：不连中继、不起推送（两者都要真实的磁盘状态）
   void startRelayLink({ handleApi: d.handleApi }); // 中继链路（relay-link.ts）
@@ -84,6 +86,7 @@ export function cancelHttpPeerCallsForChannel(channelId: string): number {
   for (const [callId, ch] of inflightByCaller.entries()) {
     if (ch === channelId) {
       cancelledCalls.add(callId);
+      book.delete(callId); // 取消要落盘：否则轮询还没退出时重启，会把已取消的调用又恢复出来
       n++;
     }
   }
@@ -245,7 +248,8 @@ async function runCall(
     return;
   }
   const deadline = Date.now() + (d.pollGiveUpMs ?? POLL_GIVE_UP_MS);
-  const rec: PendingPeerCall = { callerChannelId: caller.channelId, callerName: caller.name, peerName: peer.name, peerAgent: peerAgentName, threadId, expecting, emptyNoticed, deadline };
+  const rec: PendingPeerCall = { callerChannelId: caller.channelId, callerName: caller.name, peerName: peer.name, peerAgent: peerAgentName,
+    threadId, expecting, emptyNoticed, deadline, peerId: peerIdOf(peer) };
   book.set(callId, rec);
   await pollThread(callId, caller, peer, rec);
 }
@@ -255,7 +259,6 @@ async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec
   const d = deps;
   if (!d) return;
   const f = d.fetchImpl ?? fetch;
-  const base = (peer.baseUrl || "").replace(/\/+$/, "");
   const { threadId, expecting, peerAgent: peerAgentName } = rec;
   const label = `peer ${peer.name}/${peerAgentName}`;
   const pollMs = d.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -266,6 +269,15 @@ async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec
         void handoffEnd(callId, "error", { detail: "cancelled" });
         return;
       }
+      // 每拍重读：token 轮换后用新的；peer 删了 / 同名换成别的实例就别再拿旧凭据去问（读不了 peers.json 这拍照旧）
+      const cur = await currentPeer(rec, d.findPeer ?? findHttpPeer);
+      if (cur === null) {
+        await pushToCaller(caller, `[⚠️ peer 调用] ${label} 在等回复期间被删除或换成了别的实例，回复不再跟踪。`, peer, peerAgentName, false, callId);
+        void handoffEnd(callId, "error", { detail: "peer_gone" });
+        return;
+      }
+      if (cur) peer = cur;
+      const base = (peer.baseUrl || "").replace(/\/+$/, "");
       try {
         const pollUrl = `${base}/api/v1/threads/${encodeURIComponent(threadId)}`;
         const pr = await peerFetch(pollUrl, {
@@ -312,26 +324,16 @@ async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec
   }
 }
 
-/**
- * bridge 启动时把上次没等到回复的跨机调用接着轮询（截止时间不重算）。peer 已被删的直接告诉发起方、摘掉；
- * 发起方此刻多半还没连上，推回走 pushToCaller 的押后分支。
- */
-async function resumePeerCalls(): Promise<void> {
+/** bridge 启动时把上次没等到回复的跨机调用接着轮询（截止时间不重算；发起方多半还没连上，推回走押后分支） */
+function resumeFromBook(): void {
   const d = deps;
   if (!d || !book.size) return;
   console.log(`♻️ 恢复等待中的跨机调用 ${book.size} 条（接着轮询对方的回复）`);
-  for (const [callId, rec] of [...book]) {
-    const caller: CallerRef = { channelId: rec.callerChannelId, name: rec.callerName };
-    // peers.json 读不了不等于 peer 被删：记录留在盘上，下次启动再恢复
-    const peer = await (d.findPeer ?? findHttpPeer)(rec.peerName).catch((e) => (console.error(`peers.json 读不了，跨机调用 ${callId} 留到下次启动:`, e), undefined));
-    if (peer === undefined) continue;
-    if (!peer) {
-      book.delete(callId);
-      await pushToCaller(caller, `[⚠️ peer 调用] bridge 重启后找不到 peer ${rec.peerName}（已删除？），${rec.peerAgent} 的回复不再跟踪。`, { name: rec.peerName } as HttpPeer, rec.peerAgent);
-      continue;
-    }
-    track(callId, rec.callerChannelId, () => pollThread(callId, caller, peer, rec));
-  }
+  const callerOf = (rec: PendingPeerCall): CallerRef => ({ channelId: rec.callerChannelId, name: rec.callerName });
+  resumePeerCalls(book, d.findPeer ?? findHttpPeer, {
+    poll: (callId, rec, peer) => track(callId, rec.callerChannelId, () => pollThread(callId, callerOf(rec), peer, rec)),
+    gone: (rec) => pushToCaller(callerOf(rec), `[⚠️ peer 调用] 重启后找不到 peer ${rec.peerName}（已删除或换了实例），${rec.peerAgent} 的回复不再跟踪。`, { name: rec.peerName } as HttpPeer, rec.peerAgent),
+  }, d.resumeRetryMs);
 }
 
 /** 对方 messages/threads 响应里提取回复正文（wait 命中与轮询兑现同构）。
@@ -362,14 +364,15 @@ async function pushToCaller(caller: CallerRef, content: string, peer: HttpPeer, 
     return;
   }
   const ws = (caller.ws ?? d.getClientWs?.(caller.channelId) ?? undefined) as ServerWebSocket<unknown>;
+  // messageId 按 callId 派生：重启后同一条推回再推一次时 ID 不变，收件方认得出是重复
+  const messageId = callId ? `hp_${callId}_${isReply ? "reply" : Bun.hash(content).toString(36)}` : `hp_reply_${Date.now()}`;
   const env: Envelope = {
     from: { kind: "local", agentName: `peer ${peer.name}/${peerAgent}`, channelId: caller.channelId, ws },
     to: { kind: "local", agentName: caller.name, channelId: caller.channelId, ws },
     intent: isReply ? "response" : "notification",
     content,
-    // bridge 替跨机调用合成的推回，不是哪个 agent 等着回应的话：不挂「收到 agent 消息没回应」看门狗。以前靠 from.ws === to.ws
-    // 躲开，推回进押后队列后 ws 被剥掉、投递时只补了 to.ws，就对不上了（tests/http-peer-resume.test.ts）
-    meta: { messageId: `hp_reply_${Date.now()}`, triggerKind: "peer_http", ts: new Date().toISOString(), threadId: newThreadId(), skipInterAgentWatchdog: true },
+    // bridge 合成的推回不挂「没回应」看门狗；以前靠 from.ws === to.ws 躲开，押后剥掉 ws 后就对不上了（tests/http-peer-resume.test.ts）
+    meta: { messageId, triggerKind: "peer_http", ts: new Date().toISOString(), threadId: newThreadId(), skipInterAgentWatchdog: true },
   };
   if (!ws) {
     // 发起方此刻不在线（多半是 bridge 刚重启、它的 channel-server 还没连上）：进押后队列，连上后投
