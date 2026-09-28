@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  decideLp, inputStateOf, lastLpEcho, LP_MENU_LABEL, LP_WAIT_LABEL, menuKeysTo, paneQuotaState, parseMenu, readLpPane, selectedLabel, stripAnsi,
+  decideLp, inputStateOf, lastLpEcho, LP_MENU_LABEL, paneQuotaState, parseMenu, readLpPane, stripAnsi,
   type LpMode, type LpRead, type PaneQuotaState,
 } from "../src/lib/lp-state.js";
 
@@ -101,45 +101,29 @@ describe("决策表：设成开 / 设成关", () => {
     ["fresh-placeholder", "on", "refuse"], // 没撞墙：CC 只会回 isn't available
     ["fresh-unavailable", "off", "skip"],
     ["walled-typing", "on", "refuse"], // 输入框有草稿不动
-    ["menu-5-items", "on", "send"],
+    ["menu-5-items", "on", "refuse"], // 看到菜单一个键都不按（PM 09-29 定），要开请人手在菜单里选
+    ["menu-on-credits", "on", "refuse"],
     ["menu-5-items", "off", "skip"],
-    ["menu-no-lp", "on", "escape-fail"],
+    ["menu-no-lp", "on", "refuse"],
   ];
   for (const [name, want, kind] of table) test(`${name} · 设成${want === "on" ? "开" : "关"} → ${kind}`, () => expect(decideLp(want, read(name)).kind).toBe(kind as never));
 
-  test("菜单挡着时走菜单，不往输入框敲命令", () => {
-    expect(decideLp("on", read("menu-on-credits"))).toEqual({ kind: "send", via: "menu" });
-    expect(decideLp("on", read("walled"))).toEqual({ kind: "send", via: "command" });
+  test("菜单挡着：refuse 里写明没按键，有 LP 项时提示人手去选", () => {
+    const d = decideLp("on", read("menu-on-credits"));
+    expect(d.kind === "refuse" && d.reason).toContain("没按任何键");
+    expect(d.kind === "refuse" && d.reason).toContain(LP_MENU_LABEL);
+    expect(decideLp("on", read("walled"))).toEqual({ kind: "send" });
   });
 });
 
-describe("额度菜单导航：只朝精确文案的允许项走", () => {
-  test("光标在 Switch to usage credits 上 → 按一次 Up 到 LP", () => {
-    const m = read("menu-on-credits").menu!;
-    expect(selectedLabel(m)).toBe("Switch to usage credits");
-    expect(menuKeysTo(m, LP_MENU_LABEL)).toEqual(["Up"]);
-  });
-
-  test("菜单项数会变（5 项 / 4 项），所以按文案算步数，不按固定步数", () => {
-    expect(menuKeysTo(read("menu-5-items").menu!, LP_MENU_LABEL)).toEqual(["Down", "Down", "Down"]);
-    expect(menuKeysTo(read("menu-on-lp").menu!, LP_MENU_LABEL)).toEqual([]);
-  });
-
-  test("危险项一律不导航：usage credits / Upgrade / Team plan / 领 credit", () => {
-    const m = read("menu-5-items").menu!;
-    for (const bad of ["Switch to usage credits", "Upgrade to Max", "Team plan", "While you wait, start a new cloud session by claiming a $250 credit", "Stop and wait for limit to reset"]) {
-      expect(menuKeysTo(m, bad)).toBeNull();
-    }
-    expect(menuKeysTo(m, LP_WAIT_LABEL)).toBeNull(); // 允许但菜单里没有 → null
-  });
-
-  test("菜单里只剩危险项 → escape-fail（按 Esc 退出、报失败）", () => {
+describe("额度菜单：认得出，但不导航", () => {
+  test("菜单里只剩危险项（usage credits / Upgrade / Team plan / 领 credit）→ 拒绝，连 Esc 也不按", () => {
     const opts = ["Switch to usage credits", "Upgrade to Max for higher limits", "Switch to Team plan", "While you wait, start a new cloud session by claiming a $250 credit"];
     const raw = ["▔".repeat(80), "   What do you want to do?", "", ...opts.map((o, i) => `   ${i === 0 ? "❯ " : "  "}${i + 1}. ${o}`), "", "   Enter to confirm · Esc to cancel"].join("\n");
     const r = readLpPane(raw);
     expect(r.menu?.options).toHaveLength(4);
-    expect(decideLp("on", r).kind).toBe("escape-fail");
-    expect(opts.every((o) => menuKeysTo(r.menu!, o) === null)).toBe(true);
+    expect(r).toMatchObject({ modal: true, walled: true });
+    expect(decideLp("on", r).kind).toBe("refuse");
   });
 
   test("弯引号归一：Don’t → Don't", () => {
@@ -179,13 +163,18 @@ describe("paneQuotaState（T36 注入闸门的精简视图）", () => {
     ["lp-on-allowance", { wall: false, lp: "on", menu: false, draft: false }],
     ["lp-on-suggestion", { lp: "on", draft: false }],
     ["compacting", { compacting: true, menu: false }],
-    ["busy-queued", { menu: false, draft: false }], // 排队提示不是草稿；排没排队由 T36 自己的 QUEUED_RE 看
+    ["busy-queued", { menu: false, draft: true }], // PM 约定：输入框不是确定的空一律当有草稿，排队也算
     ["draft", { menu: false, draft: true }],
     ["fresh-placeholder", { wall: false, lp: "off", menu: false, draft: false }],
     // 下面三份是 T36 在私有 tmux 里抓的真实 CC 画面（reviews/T36-samples）
     ["input-suggestion", { menu: false, draft: false }],
     ["input-draft", { menu: false, draft: true }],
     ["input-draft-multiline", { menu: false, draft: true }],
+    // 沙箱实测：bash 模式（! 提示符，这时敲 /compact 会被当 shell 命令跑）、16 行长草稿（CC 把框封顶 7 行滚动显示）、草稿里带整行横线
+    ["input-bash-empty", { menu: false, draft: true }],
+    ["input-bash-typed", { menu: false, draft: true }],
+    ["input-draft-long", { menu: false, draft: true }],
+    ["input-draft-rule", { menu: false, draft: true }],
     ["menu-5-items", { wall: true, lp: "off", menu: true }],
     ["menu-no-lp", { wall: true, lp: "unknown", menu: true }],
     ["modal-permission", { wall: false, lp: "unknown", menu: true, draft: true }],
@@ -228,5 +217,33 @@ describe("额度菜单以外的对话框：认成模态，而且决策表不许�
     expect(r.walled).toBe(false);
     expect(decideLp("on", r).kind).toBe("refuse");
     expect(decideLp("off", r).kind).toBe("refuse");
+  });
+});
+
+describe("adv1 / r1 的 P2 与 T36 约定", () => {
+  test("判忙看整个可见区：spinner 下面挂着很长的 todo 列表也算忙", () => {
+    const todos = Array.from({ length: 9 }, (_, i) => `     ☐ todo item ${i + 1}`);
+    expect(readLpPane(pane({ above: ["✢ Hatching… (12s · ↓ 10 tokens)", "  ⎿  Todos", ...todos], footer: ["Opus 5.5"] })).busy).toBe(true);
+  });
+
+  test("对话里大写的「Esc to cancel」不算忙（剥除不分大小写，与 CC_BUSY_RE 一致）", () => {
+    expect(readLpPane(pane({ above: ["⏺ 菜单底部写着 Esc to cancel", "✻ Worked for 3s · done 1:00 AM"], footer: ["Opus 5.5"] })).busy).toBe(false);
+  });
+
+  test("草稿超过 14 行：边框之间多长都认得出输入框", () => {
+    const rule = "─".repeat(80);
+    const lines = ["❯ line 1", ...Array.from({ length: 15 }, (_, i) => `  line ${i + 2}`)];
+    const raw = ["⏺ hi", rule, ...lines, rule, "  Opus 5.5"].join("\n");
+    expect(paneQuotaState(raw, raw)).toMatchObject({ menu: false, draft: true });
+  });
+
+  test("重置时刻带日期（until Oct 1, 3:20am）取全", () => {
+    const p = pane({ footer: ["⚠ Lower priority until Oct 1, 3:20am · 90% allowance left · /low-priority to stop", "Opus 5.5"] });
+    expect(readLpPane(p)).toMatchObject({ lowPriority: "on", resetsAt: "Oct 1, 3:20am", allowancePct: 90 });
+  });
+
+  test("bash 模式的输入框：不管有没有字都当草稿（敲进去的 /compact 会被当成 shell 命令）", () => {
+    expect(inputStateOf(["! "], ["! "])).toBe("draft");
+    expect(readLpPane(fx("input-bash-empty")).inputText).toContain("Try");
   });
 });
