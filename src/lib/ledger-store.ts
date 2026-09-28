@@ -68,11 +68,12 @@ CREATE TABLE meta (
 `;
 
 /**
- * v2「待你处理」（docs 13 §4.2）：唯一由 bridge 写的表（ledger-asks.ts）；阶段机与 items / tasks 仍只有 CLI 写。
+ * 「待你处理」（docs 13 §4.2）：唯一由 bridge 写的表（ledger-asks.ts）；阶段机与 items / tasks 仍只有 CLI 写。
+ * 建表 / 建索引都带 IF NOT EXISTS：分支上提前打开过的库再按合并后的顺序迁移时，不会撞「already exists」。
  * project = "master" 表示大总管发的（它不属于任何项目）；blocking NULL = 自动建的、不知道卡不卡活。
  */
-const SCHEMA_V2 = `
-CREATE TABLE asks (
+const SCHEMA_ASKS = `
+CREATE TABLE IF NOT EXISTS asks (
   id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, taskId TEXT,
   fromAgent TEXT NOT NULL, fromChannelId TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('reply','auq','permission','codex')),
@@ -85,15 +86,15 @@ CREATE TABLE asks (
   state TEXT NOT NULL CHECK (state IN ('open','answered','expired','cancelled')),
   answer TEXT, outboxMessageId TEXT, extra TEXT NOT NULL DEFAULT '{}',
   createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
-CREATE INDEX asks_state_project ON asks(state, project);
-CREATE INDEX asks_from_state ON asks(fromAgent, state);
+CREATE INDEX IF NOT EXISTS asks_state_project ON asks(state, project);
+CREATE INDEX IF NOT EXISTS asks_from_state ON asks(fromAgent, state);
 `;
 
 /**
  * 下标 i 把库从版本 i 升到 i+1。只许在末尾追加，不写死版本号：几条分支各自加一步时，谁后合并谁排在后面，
  * 版本号跟着 length 走就不会撞。单测用 LEDGER_MIGRATIONS[0] 造旧库，后面追加的步骤（ALTER TABLE 之类）才有完整的 v1 表可改。
  */
-export const LEDGER_MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2];
+export const LEDGER_MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_ASKS];
 /** PRAGMA user_version 的最新值 = 迁移步数 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 

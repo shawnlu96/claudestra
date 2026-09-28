@@ -168,7 +168,7 @@ function mergeAnswer(a: Ask, next: AskAnswer): { merged: AskAnswer; done: boolea
 }
 
 /**
- * owner 作答，同一事务里追加 decision 事件（actor = owner，text 是人话，data 带原话与所选）。多行 reply 逐行点时先记部分答案、
+ * owner 作答，同一事务里追加 decision 事件（actor = 作答的凭据 / Discord 用户，取不到记 unknown；text 是人话，data 带原话与所选）。多行 reply 逐行点时先记部分答案、
  * 状态仍是 open，所有组都答完才 answered。已结案 → conflict；这组答过了 → conflict（current.dup）；
  * 到点还没被扫成 expired 的，这里先记成 expired（事务照常提交）再报 conflict（current.expiredNow，调用方据此补发过期通知）——
  * 在事务里抛错会把这笔回滚掉。
@@ -184,7 +184,7 @@ export function answerAsk(db: Database, id: string, answer: AskAnswer): Ask {
     const out = setState(db, id, m.done ? "answered" : "open", answer.at, m.merged);
     const said = [answer.labels.join("；"), answer.text ? `「${answer.text}」` : ""].filter(Boolean).join(" ");
     const data = { via: answer.via, choices: answer.choices, labels: answer.labels, ownerWords: answer.text, principal: answer.principal, partial: !m.done };
-    addEvent(db, out, "decision", "owner", said || out.title, data, answer.at);
+    addEvent(db, out, "decision", answer.principal || "unknown", said || out.title, data, answer.at);
     return { ask: out };
   });
   if (r.err === "dup") throw new LedgerError("conflict", `ask ${id} 这一项已经答过了`, { state: r.ask.state, answer: r.ask.answer, dup: true });

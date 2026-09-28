@@ -24,6 +24,7 @@ const OWNER_BASE: Principal = { id: "owner:self", role: "owner", agents: ["*", "
 const owner = (grant: Grant = { agents: ["*"], terminal: true, manage: true }) =>
   effectivePrincipal({ principal: OWNER_BASE, credential: { id: "dev_1", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" } });
 const PEER: Principal = { id: "token:tok_peer", role: "external", agents: ["*"], peer: "P", createdAt: at };
+const LEGACY_STAR_TOKEN: Principal = { id: "token:tok_int", role: "external", name: "integration", agents: ["*"], createdAt: at };
 
 const ws = { tag: "ws" } as never;
 const COMPONENTS = [{ type: "buttons", buttons: [{ id: "go", label: "✅ 发" }, { id: "no", label: "取消" }] }];
@@ -227,7 +228,7 @@ describe("改投、过期、运行时弹框", () => {
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     expect(delivered[0].to).toMatchObject({ channelId: "222", agentName: "agent-pm" });
     expect(delivered[0].content.split("\n")[0]).toContain("原本是 agent-x 问的");
-    expect(getAsk(openLedger(path), a.id)?.extra).toEqual({ redirectedTo: "agent-pm" });
+    expect(getAsk(openLedger(path), a.id)?.extra).toEqual({ parent: "agent-pm", redirectedTo: "agent-pm" });
     const b = (await reply())!;
     clients.clear();
     setAsksForTest({ path, deps: mkDeps(), registry: [], ownerChats: ["api:owner:self"] });
@@ -385,5 +386,78 @@ describe("第一轮审查的复现", () => {
     settleRuntimeAsk("permission", "111", "discord", "✅ 已允许");
     const [p] = listAsks(openLedger(path), { source: "permission" });
     expect(p).toMatchObject({ state: "answered", answer: { via: "discord", labels: ["✅ 已允许"] } });
+  });
+});
+
+describe("第二轮审查的复现", () => {
+  test("P1-3 两行按钮各答各的：第 1 行 202 仍 open，第 2 行 202 才结案，agent 收到 2 条", async () => {
+    await reply("api:owner:self", [
+      { type: "buttons", buttons: [{ id: "a1", label: "甲" }, { id: "a2", label: "乙" }] },
+      { type: "buttons", buttons: [{ id: "b1", label: "丙" }] },
+    ]);
+    const r1 = (await answerFromChat({ agent: "agent-x", text: "[button:a1]", principal: owner() }))!;
+    expect(await r1.json()).toMatchObject({ ask: { state: "open" } });
+    const r2 = (await answerFromChat({ agent: "agent-x", text: "[button:b1]", principal: owner() }))!;
+    expect(await r2.json()).toMatchObject({ ask: { state: "answered" } });
+    expect(delivered).toHaveLength(2);
+  });
+
+  test("P1-2 运行时 ask 的作答记到真正作答的人：Discord 用户 / 网页凭据；取不到记 unknown，不再一律 owner", async () => {
+    const actorOf = (source: "auq" | "permission") => {
+      const [x] = listAsks(openLedger(path), { source });
+      return listEvents(openLedger(path), { project: "p" }).find((e) => e.kind === "decision" && e.data.askId === x.id)?.actor;
+    };
+    await openRuntimeAsk({ source: "permission", channelId: "111", agentName: "agent-x", kind: "authorize", title: "t", context: "c", options: [] });
+    settleRuntimeAsk("permission", "111", "discord", "✅ 已允许", { principal: "discord:u9" });
+    expect(actorOf("permission")).toBe("discord:u9");
+    await openRuntimeAsk({ source: "auq", channelId: "111", agentName: "agent-x", kind: "decide", title: "t", context: "c", options: [] });
+    settleRuntimeAsk("auq", "111", "interact");
+    expect(actorOf("auq")).toBe("unknown");
+  });
+
+  test("P2-3 发起方被 kill（registry 条目已删）：答复仍先投给建 ask 时记下的派发者", async () => {
+    const a = (await reply())!;
+    expect(a.extra).toEqual({ parent: "agent-pm" });
+    clients.delete("111");
+    setAsksForTest({ path, deps: mkDeps(), registry: [REGISTRY[1]], ownerChats: ["api:owner:self"] });
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    expect(delivered[0].to).toMatchObject({ channelId: "222", agentName: "agent-pm" });
+  });
+
+  test("P2-2 过期通知：改投派发者时写明原发起方；只能落到大总管的不发", async () => {
+    const a = (await reply())!;
+    const b = (await reply())!;
+    clients.delete("111");
+    setAsksForTest({ path, deps: mkDeps(), registry: [REGISTRY[1]], ownerChats: ["api:owner:self"] });
+    openLedger(path).run("UPDATE asks SET expiresAt = 1 WHERE id = ?", [a.id]);
+    await sweepExpired();
+    expect(delivered[0].to).toMatchObject({ agentName: "agent-pm" });
+    expect(delivered[0].content).toContain("agent-x（已不在，改投给你）");
+    delivered = [];
+    setAsksForTest({ path, deps: mkDeps(), registry: [], ownerChats: ["api:owner:self"] });
+    openLedger(path).run("UPDATE asks SET expiresAt = 1, extra = '{}' WHERE id = ?", [b.id]);
+    await sweepExpired();
+    expect(getAsk(openLedger(path), b.id)?.state).toBe("expired");
+    expect([...delivered, ...held]).toEqual([]);
+  });
+
+  test("P2-4 卡片只选了部分行就提交：结案，答复里写明还有几项没选", async () => {
+    const a = (await reply("api:owner:self", [
+      { type: "select", id: "model", options: [{ label: "Opus", value: "opus" }] },
+      { type: "buttons", buttons: [{ id: "go", label: "开干" }] },
+    ]))!;
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("answered");
+    expect(delivered[0].content.split("\n")[0]).toContain("还有 1 项 owner 没选");
+  });
+
+  test("P2-6 关了终端的 owner 设备（role 降成 external）仍能作答；P2-7 /presence 只认 owner 设备", async () => {
+    const noTerm = { ...owner({ agents: ["*"], terminal: false, manage: true }), role: "external" as const };
+    const a = (await reply())!;
+    expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, noTerm)).status).toBe(202);
+    const post = (who: Principal) => handleAsksApi(new Request("http://x/api/v1/presence", { method: "POST", body: JSON.stringify({ visible: true }) }), "/presence", who);
+    expect((await post(LEGACY_STAR_TOKEN))!.status).toBe(403);
+    expect((await post(owner()))!.status).toBe(200);
+    ownerPresence.setVisible("dev_1", false);
   });
 });

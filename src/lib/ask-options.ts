@@ -45,13 +45,14 @@ function askRows(text: string, components: unknown): AskRow[] {
 }
 
 /**
- * 作答分组：所有按钮行算一组（按钮是「做哪件事」，agent 常为 Discord 每行 5 个的上限拆成几行），每个单选 / 多选行各算一组。
- * 一条 ask 每组答过一次就算这组答完；所有组都答完才结案（聊天里逐行点，bug ① 的按行作答语义）。
+ * 作答分组：每一行各算一组——按钮行按行号（buttons:<行号>），单选 / 多选按 id。和聊天气泡的按行作答（bug ①，replyRowKey）一致：
+ * 一条 reply 里几行按钮各答各的。每组答过一次就算这组答完；所有组都答完才结案。web 的 asks-model.rowGroup 同规则。
  */
 export function answerGroups(rows: AskRow[]): string[] {
-  const out = rows.map((r) => (r.type === "buttons" ? "buttons" : `select:${r.id}`));
-  return [...new Set(out)];
+  return [...new Set(rows.map(rowGroupOf))];
 }
+
+const rowGroupOf = (r: AskRow, i: number): string => (r.type === "buttons" ? `buttons:${i}` : `select:${r.id}`);
 
 export interface ReplyAskDraft {
   title: string;
@@ -105,9 +106,9 @@ export interface WireMatch {
 export function matchWire(rows: AskRow[], line: string): WireMatch | null {
   const btn = /^\[button:([\w:-]+)\]$/.exec(line);
   if (btn) {
-    for (const r of rows) {
+    for (const [i, r] of rows.entries()) {
       const b = r.type === "buttons" ? r.buttons.find((x) => x.id === btn[1]) : undefined;
-      if (b) return { wire: line, label: plainLabel(b.label) || b.id, group: "buttons" };
+      if (b) return { wire: line, label: plainLabel(b.label) || b.id, group: rowGroupOf(r, i) };
     }
     return null;
   }

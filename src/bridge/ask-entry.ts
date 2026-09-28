@@ -6,7 +6,7 @@
  * 已结案的 ask 再点：网页带了 askId 才回 409 code=ask_closed（没带的不猜，照常投）；Discord 按原消息 id 认，悄悄告诉点的人「已处理」。
  */
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
-import { canReadLedger } from "../lib/devices.js";
+import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
 import { answerAsk, findAskByDiscordMessage, getAsk, listAsks, type Ask } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
@@ -20,9 +20,15 @@ export function canSeeAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
   return canReadLedger(p) && (a.fromAgent !== "master" || agentInScope(p, "master"));
 }
 
-/** 能作答：owner 本人的设备凭据（答复以 owner 名义投给 agent，不能让集成 token 冒充），且看得见这条 */
+/**
+ * owner 本人的设备凭据（owner:self 这个 principal + 设备凭据）：答复以 owner 名义投给 agent，不能让集成 token、guest 冒充。
+ * 不看 role——配对时关了终端（--no-terminal）的设备 role 会降成 external，但它仍是 owner 的设备（§4.7：canManage、非 peer、scope 含 *）
+ */
+export const isOwnerDevice = (p: Principal): boolean => p.id === OWNER_PRINCIPAL_ID && !!p.credential && !p.peer;
+
+/** 能作答：owner 本人的设备，且看得见这条 */
 export function canAnswerAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
-  return p.role === "owner" && !!p.credential && canSeeAsk(p, a);
+  return isOwnerDevice(p) && canSeeAsk(p, a);
 }
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
@@ -85,7 +91,7 @@ const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p)
  */
 export async function answerFromChat(req: { agent: string; text: string; principal: Principal; askId?: string | null }): Promise<Response | null> {
   const p = req.principal;
-  if (p.role !== "owner" || !p.credential || !canReadLedger(p)) return null;
+  if (!isOwnerDevice(p) || !canReadLedger(p)) return null;
   const { wires, rest } = splitWire(req.text);
   const hit = findAskForWires(req.agent, wires, req.askId);
   if (!hit || !canAnswerAsk(p, hit.ask)) return null;

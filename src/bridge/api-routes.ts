@@ -1625,7 +1625,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         } catch { /* non-critical：状态照清 */ }
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api", by: tokenId, credential: principal.credential } });
         return apiJson(200, { ok: true, cancelled: true });
       }
       // submit：body.selections 覆盖状态（web 前端一次性提交所有选择）
@@ -1648,7 +1648,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       const auqParse = auqPane ? parseAuqPane(auqPane) : null;
       if (auqPane && !auqParse) {
         clearAuqState(agent.channelId);
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api", by: tokenId, credential: principal.credential } });
         return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
       }
       const keys = buildAuqKeystrokes(state, auqParse);
@@ -1660,17 +1660,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       }
       clearAuqState(agent.channelId);
       recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
-      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
+      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api", by: tokenId, credential: principal.credential } });
       return apiJson(200, { ok: true, keys: keys.length });
     }
 
     if (kind === "permission") {
       const action = String(body?.action || "");
-      const keySeqMap: Record<string, string[]> = {
-        allow: ["1", "Enter"],
-        allow_session: ["2", "Enter"],
-        deny: ["3", "Enter"],
-      };
+      const keySeqMap: Record<string, string[]> = { allow: ["1", "Enter"], allow_session: ["2", "Enter"], deny: ["3", "Enter"] };
       const keySeq = keySeqMap[action];
       if (!keySeq) return apiJson(400, { ok: false, error: 'action must be "allow" | "allow_session" | "deny"' });
       const targetWindow = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
@@ -1684,6 +1680,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       } catch (e) {
         return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
       }
+      // 「待你处理」里对应的权限 ask 记成是谁答的（ask-runtime.ts），不然弹框消失时会被当成撤销——网页里所有权限卡都走这里
+      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", action, { principal: tokenId, device: principal.credential }));
       return apiJson(200, { ok: true });
     }
 

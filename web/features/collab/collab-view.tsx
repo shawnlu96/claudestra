@@ -26,7 +26,7 @@ const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digi
 function Headline({ v, tr, connected, now, projectName }: { v: HomeView; tr: Tr; connected: boolean; now: number; projectName: string }) {
   const parts: { cls?: string; text: string }[] = [{ text: tr("{n} 条在推进", { n: v.headline.advancing }) }];
   if (v.headline.problem) parts.push({ cls: s.bad, text: tr("{n} 条出问题", { n: v.headline.problem }) });
-  if (v.headline.owner) parts.push({ cls: s.stuck, text: tr("{n} 件等你", { n: v.headline.owner }) });
+  if (v.headline.owner) parts.push({ cls: s.stuck, text: tr("{n} 条等你", { n: v.headline.owner }) });
   if (v.headline.stuck) parts.push({ cls: s.stuck, text: tr("{n} 条卡住", { n: v.headline.stuck }) });
   return (
     <div className={s.top}>

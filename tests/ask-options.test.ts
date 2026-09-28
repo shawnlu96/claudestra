@@ -36,16 +36,18 @@ describe("draftFromReply", () => {
   });
 });
 
-test("作答分组：所有按钮行算一组，单选 / 多选各一组；groupsLeft 数还剩几组", () => {
-  expect(answerGroups(rows)).toEqual(["buttons", "select:pick", "select:m:x"]);
-  expect(answerGroups([...rows, { type: "buttons", buttons: [{ id: "more", label: "更多" }] }])).toHaveLength(3);
+test("作答分组：每一行各一组（按钮行按行号，单选 / 多选按 id）；groupsLeft 数还剩几组", () => {
+  expect(answerGroups(rows)).toEqual(["buttons:0", "select:pick", "select:m:x"]);
+  const more: AskRow[] = [...rows, { type: "buttons", buttons: [{ id: "more", label: "更多" }] }];
+  expect(answerGroups(more)).toEqual(["buttons:0", "select:pick", "select:m:x", "buttons:3"]);
+  expect(matchWire(more, "[button:more]")?.group).toBe("buttons:3");
   expect(groupsLeft(rows, ["[button:cancel]", "[select:pick:a]"])).toBe(1);
   expect(groupsLeft(rows, [])).toBe(3);
 });
 
 describe("matchWire", () => {
   test("按钮：id 对上给出去掉样式的 label；不在选项里 → null", () => {
-    expect(matchWire(rows, "[button:release_v2_go]")).toEqual({ wire: "[button:release_v2_go]", label: "✅ 发", group: "buttons" });
+    expect(matchWire(rows, "[button:release_v2_go]")).toEqual({ wire: "[button:release_v2_go]", label: "✅ 发", group: "buttons:0" });
     expect(matchWire(rows, "[button:nope]")).toBeNull();
   });
 

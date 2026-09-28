@@ -926,7 +926,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             permissionMessages.delete(targetChannelId);
           }
           // 「待你处理」里对应的权限 ask 记成 answered（ask-runtime.ts），不然弹框消失时会被当成撤销
-          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action]));
+          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
         }
@@ -954,7 +954,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             const auqParse = auqPane ? parseAuqPane(auqPane) : null;
             if (auqPane && !auqParse) {
               clearAuqState(auqChannel);
-              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord" } });
+              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord", uid: interaction.user.id } });
               await interaction.editReply({ content: `⚠️ 弹窗已在终端侧被应答/关闭，本次提交作废。`, components: [] }).catch(() => {});
               return;
             }
@@ -975,7 +975,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
             // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord" } });
+            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
           } else if (action === "cancel") {
             await tmuxSendEscape(state.tmuxTarget);
             await interaction.editReply({
@@ -985,7 +985,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             recordMetric("auq_cancel", { channelId: auqChannel });
             clearAuqState(auqChannel);
             // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord" } });
+            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord", uid: interaction.user.id } });
           }
         } catch (e) {
           console.error("AUQ button 处理异常:", e);

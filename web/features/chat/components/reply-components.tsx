@@ -53,7 +53,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         const key = replyRowKey(row, ri);
         // Discord 同款语义：没答过的行一直可点（用户习惯隔几条消息再回来点）。
         // bug ① 前这里是 !!m.replyClickedId（整条消息级）——多行时答一行锁全部。
-        const rowAnswered = clicks[key] != null || rowLocked(row);
+        const rowAnswered = clicks[key] != null || rowLocked(row, ri);
         const rowBusy = busy === key;
         if (row.type === "buttons") {
           return (

@@ -57,6 +57,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.context, options: r.options, allowText: false, chatId: r.channelId,
+      ...(who.parent ? { extra: { parent: who.parent } } : {}),
     });
     publishAsk(a);
     // 建的途中弹框已经没了（settle 先到、删了占位）：立刻结案，别留一条永远开着的
@@ -72,8 +73,11 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   }
 }
 
-/** 弹框没了 / 答了：带 answeredVia 的记 answered（label = 选的是哪个），其余（终端里答了、取消、回合结束）记 cancelled */
-export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answeredVia?: AskVia, label?: string): void {
+/**
+ * 弹框没了 / 答了：带 answeredVia 的记 answered（label = 选的是哪个，who = 作答的凭据 / Discord 用户，取不到记 unknown——
+ * 按键端点只查 scope，guest、部分 scope 的设备也能答，不能一律记成 owner），其余（终端里答了、取消、回合结束）记 cancelled
+ */
+export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answeredVia?: AskVia, label?: string, who?: { principal?: string; device?: string }): void {
   const key = rtKey(source, channelId);
   const id = runtimeOpen.get(key);
   if (id === undefined) return;
@@ -82,7 +86,7 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
   try {
     const db = askDb();
     const a = answeredVia
-      ? answerAsk(db, id, { choices: [], labels: label ? [label] : [], text: "", principal: "owner", via: answeredVia, at: Date.now() })
+      ? answerAsk(db, id, { choices: [], labels: label ? [label] : [], text: "", principal: who?.principal || "unknown", device: who?.device, via: answeredVia, at: Date.now() })
       : closeAsk(db, id, "cancelled", t("弹框已关闭", "dialog closed"));
     if (a) publishAsk(a);
   } catch (e) {
@@ -143,7 +147,10 @@ export function initRuntimeAsks(): void {
       const context = qs.map((q) => q.question ?? "").join("\n").slice(0, 300);
       void openRuntimeAsk({ source: "auq", channelId: evt.chatId, agentName: evt.agent, kind: "decide", title: auqTitle(qs), context, options: qs });
     } else if (evt.type === "question_cleared") {
-      settleRuntimeAsk("auq", evt.chatId, data.reason === "submit" ? (data.via === "discord" ? "discord" : "interact") : undefined);
+      // 谁答的：网页 API 带 by（凭据）/ credential，Discord 带 uid；都没有记 unknown
+      const by = typeof data.by === "string" ? data.by : typeof data.uid === "string" ? `discord:${data.uid}` : undefined;
+      const who = { principal: by, device: typeof data.credential === "string" ? data.credential : undefined };
+      settleRuntimeAsk("auq", evt.chatId, data.reason === "submit" ? (data.via === "discord" ? "discord" : "interact") : undefined, undefined, who);
     }
   });
 }

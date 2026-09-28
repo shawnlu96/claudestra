@@ -107,12 +107,14 @@ export interface Who {
   name: string;
   project: string;
   channelId: string;
+  /** 派发者（registry parent）：建 ask 时就记进 extra——kill 会删掉 registry 条目，到答复时再查就查不到了 */
+  parent?: string;
 }
 
 export async function whoIs(channelId: string): Promise<Who | null> {
   if (deps && channelId === deps.controlChannelId) return { name: "master", project: MASTER_PROJECT, channelId };
   const r = (await readRegistry()).find((a) => a.channelId === channelId);
-  return r ? { name: r.name, project: r.projectId || MASTER_PROJECT, channelId } : null;
+  return r ? { name: r.name, project: r.projectId || MASTER_PROJECT, channelId, ...(r.parent ? { parent: r.parent } : {}) } : null;
 }
 
 export function taskOf(name: string): string | null {
@@ -143,6 +145,7 @@ async function openAskForReply(env: Envelope, chatId: string, fromChannelId: str
   const a = openAsk(askDb(), {
     project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
     title: draft.title, context: draft.context, body: env.content, options: draft.options, kindHint: draft.kindHint, chatId, threadId: env.meta.threadId,
+    ...(who.parent ? { extra: { parent: who.parent } } : {}),
   });
   publishAsk(a);
   return a;
@@ -193,8 +196,12 @@ interface Target {
 export function answerContent(a: Ask, picks: WireMatch[], text: string, original?: string, to?: Target): string {
   const title = /[。？！?!.]$/.test(a.title) ? a.title : `${a.title}。`;
   const chose = picks.length ? t(`选择：${picks.map((p) => p.label).join("；")}。`, `Chose: ${picks.map((p) => p.label).join("; ")}. `) : "";
-  const left = a.state === "open" ? groupsLeft(a.options as AskRow[], a.answer?.choices ?? []) : 0;
-  const more = left ? t(`这条还有 ${left} 项没答，答了会再发给你。`, `${left} more part(s) still unanswered. `) : "";
+  const left = a.source === "reply" ? groupsLeft(a.options as AskRow[], a.answer?.choices ?? []) : 0;
+  const more = !left
+    ? ""
+    : a.state === "open"
+      ? t(`这条还有 ${left} 项没答，答了会再发给你。`, `${left} more part(s) still unanswered. `)
+      : t(`还有 ${left} 项 owner 没选（从卡片一次提交，没选的就是不选）。`, `${left} part(s) left unpicked (submitted from the card = not chosen). `);
   const whose = to?.redirected ? t(`（原本是 ${a.fromAgent} 问的，它已经不在，改投给你）`, ` (asked by ${a.fromAgent}, who is gone — redirected to you)`) : "";
   const head = t(
     `[✅ owner 回复了${whose ? "" : "你"} ${hhmm(a.createdAt)} 的「待你处理」（${a.id}）${whose}：${title}${chose}${more}下面是 owner 发的原文]`,
@@ -203,14 +210,18 @@ export function answerContent(a: Ask, picks: WireMatch[], text: string, original
   return [head, original ?? [...picks.map((p) => p.wire), text].filter(Boolean).join("\n")].join("\n");
 }
 
-/** 发起方还在就投它；被 kill 了改投它的派发者（registry parent），派发者也不在就投大总管 */
+/**
+ * 发起方还在就投它；不在了（停了或被 kill）改投它的派发者，派发者也不在就投大总管。派发者优先看 registry，
+ * 被 kill 的已经从 registry 删掉了，就用建 ask 时记下的 extra.parent（设计 §4.6-3）。
+ */
 async function answerTarget(a: Ask): Promise<Target> {
   const d = deps!;
   if (d.clients.has(a.fromChannelId) || a.fromChannelId === d.controlChannelId) return { channelId: a.fromChannelId, agentName: a.fromAgent };
   const regs = await readRegistry();
   const self = regs.find((r) => r.channelId === a.fromChannelId);
   if (self?.status === "active") return { channelId: a.fromChannelId, agentName: a.fromAgent };
-  const parent = self?.parent ? regs.find((r) => r.name === self.parent && r.status === "active" && r.channelId) : undefined;
+  const parentName = self?.parent ?? (typeof a.extra.parent === "string" ? a.extra.parent : undefined);
+  const parent = parentName ? regs.find((r) => r.name === parentName && r.status === "active" && r.channelId) : undefined;
   if (parent?.channelId) return { channelId: parent.channelId, agentName: parent.name, redirected: parent.name };
   return { channelId: d.controlChannelId, agentName: "master", redirected: "master" };
 }
@@ -279,16 +290,22 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
 
 // ── 过期 ──
 
-/** 刚结成 expired 的一条：发 SSE；reply 类再通知发起方「没人批，按未批准处理」（没人点 ≠ 同意；部分答了的说清哪些答了） */
+/**
+ * 刚结成 expired 的一条：发 SSE；reply 类再通知发起方「没人批，按未批准处理」（没人点 ≠ 同意；部分答了的说清哪些答了）。
+ * 发起方不在了：改投派发者时写明原发起方；连派发者也没有、只能落到大总管的不发（被 kill 的 agent 留下的一堆过期 ask 不该刷大总管）。
+ */
 async function noticeExpired(a: Ask): Promise<void> {
   publishAsk(a);
   if (a.source !== "reply" || !deps) return;
+  const to = await answerTarget(a);
+  if (to.redirected === "master") return;
   const got = a.answer?.labels.length ? t(`其中已答：${a.answer.labels.join("；")}；没答的部分`, `Answered so far: ${a.answer.labels.join("; ")}; the rest`) : "";
+  const whose = to.redirected ? t(`${a.fromAgent}（已不在，改投给你）`, `${a.fromAgent} (gone — redirected to you)`) : t("你", "Your");
   const text = t(
-    `[⌛ 你 ${hhmm(a.createdAt)} 发的「待你处理」（${a.id}）：${a.title} —— 到期没人处理。${got}按未批准处理，不要当成同意。还需要就重新问。]`,
-    `[⌛ Your ${hhmm(a.createdAt)} ask (${a.id}): ${a.title} expired. ${got} treat as NOT approved. Ask again if still needed.]`,
+    `[⌛ ${whose} ${hhmm(a.createdAt)} 发的「待你处理」（${a.id}）：${a.title} —— 到期没人处理。${got}按未批准处理，不要当成同意。还需要就重新问。]`,
+    `[⌛ ${whose} ${hhmm(a.createdAt)} ask (${a.id}): ${a.title} expired. ${got} treat as NOT approved. Ask again if still needed.]`,
   );
-  await sendCalm({ kind: "bridge", label: "ask-expire" }, await answerTarget(a), "notification", text, a.id, "bridge_synth");
+  await sendCalm({ kind: "bridge", label: "ask-expire" }, to, "notification", text, a.id, "bridge_synth");
 }
 
 /** 到期的一律 expired；库还不存在就什么都不做（不建库） */

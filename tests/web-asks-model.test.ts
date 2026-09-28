@@ -74,11 +74,11 @@ describe("气泡 ↔ ask", () => {
     expect(answerSummary(ask({ answer: { choices: ["[button:go]"], text: "", via: "x", at: 1 } }))).toBe("[button:go]");
   });
 
-  test("按组判断哪些行答过了：所有按钮行一组，单选 / 多选各一组（同 bridge 的 answerGroups）", () => {
+  test("按组判断哪些行答过了：每一行各一组，按钮行按行号（同 bridge 的 answerGroups）", () => {
     const more: WebComponentRow[] = [...rows, { type: "buttons", buttons: [{ id: "later", label: "再说" }] }];
-    expect(more.map(rowGroup)).toEqual(["buttons", "select:f", "buttons"]);
-    expect([...answeredGroups(more, ["[button:later]"])]).toEqual(["buttons"]);
-    expect([...answeredGroups(more, ["[select:f:a]"])]).toEqual(["select:f"]);
+    expect(more.map(rowGroup)).toEqual(["buttons:0", "select:f", "buttons:2"]);
+    expect([...answeredGroups(more, ["[button:later]"])]).toEqual(["buttons:2"]);
+    expect([...answeredGroups(more, ["[select:f:a]", "[button:go]"])].sort()).toEqual(["buttons:0", "select:f"]);
   });
 });
 

@@ -29,7 +29,7 @@ describe("ask 生命周期", () => {
     expect(evs.map((e) => [e.kind, e.actor, e.target, e.data.askId])).toEqual([["ask", "agent-x", "T9", a.id]]);
   });
 
-  test("答：open → answered，同一事务追加 decision 事件（actor owner）；再答一次 → conflict，库里保持第一次的答案", () => {
+  test("答：open → answered，同一事务追加 decision 事件（actor = 作答的凭据）；再答一次 → conflict，库里保持第一次的答案", () => {
     const d = db();
     const a = openAsk(d, base, 1000);
     const out = answerAsk(d, a.id, ans(2000, { text: "只做 Codex" }));
@@ -37,7 +37,7 @@ describe("ask 生命周期", () => {
     const dec = listEvents(d, { project: "p" }).filter((e) => e.kind === "decision");
     expect(dec).toHaveLength(1);
     // decision 记人话（按钮文字 + 原话），wire 原文放在 data 里
-    expect(dec[0]).toMatchObject({ actor: "owner", target: "T9", text: "发 「只做 Codex」", data: { askId: a.id, ownerWords: "只做 Codex", choices: ["[button:go]"], labels: ["发"] } });
+    expect(dec[0]).toMatchObject({ actor: "owner:self", target: "T9", text: "发 「只做 Codex」", data: { askId: a.id, ownerWords: "只做 Codex", choices: ["[button:go]"], labels: ["发"] } });
     let err: unknown;
     try {
       answerAsk(d, a.id, ans(3000, { choices: ["[button:no]"], via: "discord" }));
@@ -108,7 +108,7 @@ describe("多行 reply：逐行作答", () => {
   ];
   const row = (at: number, w: string, l: string, extra: Partial<AskAnswer> = {}) => ans(at, { choices: [w], labels: [l], ...extra });
 
-  test("每组答一次：部分答案累积、状态仍 open；所有组答完才 answered；同一组再答 → conflict(dup)；按钮行算一组", () => {
+  test("每组答一次：部分答案累积、状态仍 open；所有组答完才 answered；同一组再答 → conflict(dup)；两行按钮各算一组", () => {
     const d = db();
     const a = openAsk(d, { ...base, options: rows }, 1000);
     expect(answerAsk(d, a.id, row(2000, "[select:model:opus]", "Opus")).state).toBe("open");
@@ -120,10 +120,13 @@ describe("多行 reply：逐行作答", () => {
     }
     expect(err?.current).toMatchObject({ dup: true, state: "open" });
     expect(answerAsk(d, a.id, row(2200, "[button:later]", "再说")).state).toBe("open");
-    const done = answerAsk(d, a.id, row(2300, "[select:effort:high]", "high", { text: "先这样" }));
-    expect(done).toMatchObject({ state: "answered", answer: { choices: ["[select:model:opus]", "[button:later]", "[select:effort:high]"], labels: ["Opus", "再说", "high"], text: "先这样" } });
-    const dec = listEvents(d, { project: "p" }).filter((e) => e.kind === "decision").map((e) => e.data.partial);
-    expect(dec).toEqual([true, true, false]);
+    expect(answerAsk(d, a.id, row(2250, "[select:effort:high]", "high", { text: "先这样" })).state).toBe("open");
+    const done = answerAsk(d, a.id, row(2300, "[button:go]", "开干"));
+    expect(done).toMatchObject({ state: "answered", answer: { choices: ["[select:model:opus]", "[button:later]", "[select:effort:high]", "[button:go]"], text: "先这样" } });
+    const dec = listEvents(d, { project: "p" }).filter((e) => e.kind === "decision");
+    expect(dec.map((e) => e.data.partial)).toEqual([true, true, true, false]);
+    // decision 的 actor 是作答的凭据，不写死 owner
+    expect(dec[0].actor).toBe("owner:self");
   });
 
   test("卡片一次提交（final）或只写了话：不管还有没有没答的组都结案", () => {

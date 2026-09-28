@@ -32,5 +32,6 @@ export const LEDGER_DICT: Record<string, string> = {
   "待你处理 · 已答 {n} 项": "Needs you · {n} answered",
   "已提交": "Submitted",
   "已提交给弹框": "Submitted to the dialog",
+  "这一项刚在别处答过了，已刷新，剩下的还能答": "This part was just answered elsewhere; refreshed — the rest is still open",
   "已答：{s}": "Answered so far: {s}",
 };

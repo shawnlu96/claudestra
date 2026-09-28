@@ -10,7 +10,7 @@
 import { canReadLedger } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { apiJson, forbidden } from "../api-respond.js";
-import { answerFromCard, canSeeAsk } from "../ask-entry.js";
+import { answerFromCard, canSeeAsk, isOwnerDevice } from "../ask-entry.js";
 import { listForWeb, ownerPresence } from "../asks.js";
 
 const decode = (s: string): string | null => {
@@ -38,6 +38,8 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
   if (!canReadLedger(principal)) return forbidden("asks require a full-scope owner credential");
   if (path === "/presence") {
     if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
+    // 只认 owner 本人的设备：集成 token 一直报「在」会把卡活推送全压掉
+    if (!isOwnerDevice(principal)) return forbidden("presence requires the owner's own device credential");
     const b = await jsonBody(req);
     if (!b || typeof b.visible !== "boolean") return apiJson(400, { ok: false, error: "body {visible: boolean}" });
     ownerPresence.setVisible(principal.credential ?? principal.id, b.visible);

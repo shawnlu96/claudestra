@@ -64,19 +64,21 @@ export function agentLabel(name: string, t: (s: string) => string): string {
 }
 
 /**
- * 作答分组（同 bridge 的 lib/ask-options.ts answerGroups）：所有按钮行算一组，每个单选 / 多选行各一组。
- * 多行 reply 逐行作答时，答过的组锁住、别的行照样能点；bridge 也按组判「这一项答过了」。
+ * 作答分组（同 bridge 的 lib/ask-options.ts answerGroups）：每一行各一组——按钮行按行号，单选 / 多选按 id。
+ * 多行 reply 逐行作答时，答过的行锁住、别的行照样能点；bridge 也按组判「这一项答过了」。
  */
-export function rowGroup(row: WebComponentRow): string {
-  return row.type === "buttons" ? "buttons" : `select:${row.id}`;
+export function rowGroup(row: WebComponentRow, ri: number): string {
+  return row.type === "buttons" ? `buttons:${ri}` : `select:${row.id}`;
 }
 
 /** 已答的 wire 落在哪些组 */
 export function answeredGroups(rows: WebComponentRow[], choices: string[]): Set<string> {
   const out = new Set<string>();
   for (const w of choices) {
-    if (w.startsWith("[button:")) out.add("buttons");
-    else for (const r of rows) if (r.type !== "buttons" && w.startsWith(`[select:${r.id}:`)) out.add(rowGroup(r));
+    rows.forEach((r, ri) => {
+      const hit = r.type === "buttons" ? r.buttons.some((b) => w === `[button:${b.id}]`) : w.startsWith(`[select:${r.id}:`);
+      if (hit) out.add(rowGroup(r, ri));
+    });
   }
   return out;
 }

@@ -135,5 +135,7 @@ describe("等你（T11a：features/asks 的开着的 ask 喂进来）", () => {
     const v = homeView(overview([task("P", "fix")]), NOW, undefined, [wait("ask_1", "P", "agent-task-p")]);
     expect(v.lines[0].attention).toBe("problem");
     expect(homeView(overview([task("B", "build")]), NOW).headline.owner).toBe(0);
+    // 标题栏数的是归到「等你」的线：挂不到线上的 ask（别的 agent 发的）不算，和各条线对得上
+    expect(homeView(overview([task("B", "build")]), NOW, undefined, [wait("ask_9", null, "agent-other")]).headline.owner).toBe(0);
   });
 });

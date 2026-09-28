@@ -30,8 +30,10 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
       await fn();
       setNote({ ok: true, text: runtime ? t("已提交给弹框") : t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) });
     } catch (e) {
-      const closed = e instanceof ApiError && e.status === 409;
-      setNote({ ok: false, text: closed ? t("这件已经处理过了（或已过期）") : (e as Error).message });
+      // 409 分两种：整条已结案（别处答了 / 过期），或多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它）
+      const code = e instanceof ApiError && e.status === 409 ? e.code : undefined;
+      const why = code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : code ? t("这件已经处理过了（或已过期）") : (e as Error).message;
+      setNote({ ok: false, text: why });
     }
     setBusy(false);
     void asksStore.refresh();
@@ -39,7 +41,7 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
   // 多行 reply 在聊天 / Discord 里已答过的组不再给选（bridge 会回「这一项已经答过了」），已答内容在下面「已答：…」那行
   const all = ask.options as WebComponentRow[];
   const done = answeredGroups(all, ask.answer?.choices ?? []);
-  const rows = all.filter((r) => !done.has(rowGroup(r)));
+  const rows = all.filter((r, ri) => !done.has(rowGroup(r, ri)));
   // 权限弹框：先按键（原有端点），再补记是谁、选了什么——不然弹框消失时这条会被当成撤销
   const pickPermission = (action: string, label: string) =>
     run(() => answerPermission(ask.fromAgent, action).then(() => answerAskCard(ask.project, ask.id, { label }).catch(() => undefined /* 补记失败不影响按键已生效，最多记成撤销 */)));

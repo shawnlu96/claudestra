@@ -117,7 +117,7 @@ export interface Headline {
   advancing: number;
   problem: number;
   stuck: number;
-  /** 这个项目里开着、等 owner 处理的 ask 数（验收类不算） */
+  /** 归到「等你」的线数（和各条线上的「等你」对得上；没挂到任何线上的 ask 只在侧栏「待你处理」里） */
   owner: number;
 }
 
@@ -326,7 +326,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       advancing: lines.length,
       problem: lines.filter((l) => l.attention === "problem").length,
       stuck: lines.filter((l) => l.attention === "stuck").length,
-      owner: waits.length,
+      owner: lines.filter((l) => l.attention === "owner").length,
     },
     todayDone: ov.tasks
       .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics.endTs ?? t.updatedAt) >= midnight)
