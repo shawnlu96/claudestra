@@ -11,7 +11,8 @@
   color: var(--text-2); font-size: var(--fs-2);
 }
 .root {
-  position: relative; display: flex; min-height: 0; flex: 1; background: var(--bg); color: var(--text-2); font-size: var(--fs-2);
+  /* min-width: 0：覆盖层是 flex 容器，不设的话首页不换行的内容（英文的 PM 窄条）会把整块撑宽，详情面板被挤出屏幕 */
+  position: relative; display: flex; min-width: 0; min-height: 0; flex: 1; background: var(--bg); color: var(--text-2); font-size: var(--fs-2);
 }
 @media (prefers-color-scheme: light) {
   :global(html:not([data-theme="dark"])) .tokens {
