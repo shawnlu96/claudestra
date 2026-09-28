@@ -4,6 +4,8 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { NewAgentModal } from "./new-agent-modal";
 import { useT } from "@/lib/i18n";
 import { ResponsiveShell } from "./responsive-shell";
+import { FleetPanel } from "@/features/fleet/fleet-panel";
+import { SnailIcon } from "@/features/fleet/lp-badge";
 
 /**
  * Agent 管理页（2026-07-14 owner：大总管做成「聊天 + UI」双轨——能点按钮
@@ -20,6 +22,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
   const agents = useChatStore((s) => s.state.agents);
   const store = useChatStoreApi();
   const [showNew, setShowNew] = useState(false);
+  const [showFleet, setShowFleet] = useState(false);
   /** 待二次确认的操作 key:`restart:<name>` / `kill:<name>` */
   const [arming, setArming] = useState("");
   const [busyKey, setBusyKey] = useState("");
@@ -56,7 +59,11 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
           </svg>
         </button>
         <span className="truncate font-semibold">{t("Agent 管理")}</span>
-        <button className="btn btn-primary btn-sm ml-auto" onClick={() => setShowNew(true)}>
+        <button className="btn btn-ghost btn-sm ml-auto gap-1" onClick={() => setShowFleet(true)}>
+          <SnailIcon className="size-4" />
+          {t("批量管理")}
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
           {t("＋ 新建")}
         </button>
         <button className="btn btn-ghost btn-sm max-sm:hidden" aria-label={t("关闭")} onClick={onClose}>
@@ -128,6 +135,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
         </ul>
       </div>
       <NewAgentModal open={showNew} onClose={() => setShowNew(false)} />
+      <FleetPanel open={showFleet} onClose={() => setShowFleet(false)} />
     </ResponsiveShell>
   );
 }

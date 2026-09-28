@@ -18,6 +18,7 @@ import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
 import { LedgerStageChip } from "./ledger-stage-chip";
 import type { RowSlots } from "./team-group"; // lead = 行按钮前的开合控件，tail = 名字后的小标（派出 N 个 / 下一期的阶段）
+import { LpBadge } from "@/features/fleet/lp-badge";
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
    tapIntent 是模块级单例——所有行实例共享；swipeReg 在 agent-row-swipe.ts（AgentRow 与 Sidebar 共用同一实例）。 */
@@ -369,6 +370,7 @@ function RepoTag({ a }: { a: AgentSession }) {
   return (
     <>
       {showRepo && <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>}
+      <LpBadge lp={a.lowPriority} />
       {!!a.queued && (
         <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-info/80" title={t("{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）", { n: a.queued })}>
           <InboxIcon />

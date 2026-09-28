@@ -14,11 +14,13 @@ import { LEDGER_DICT } from "./i18n-dict-ledger";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
+import { FLEET_DICT } from "./i18n-dict-fleet";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT,
   ...COLLAB_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
+  ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   // ── 通用 ─────────────────────────────────────────────

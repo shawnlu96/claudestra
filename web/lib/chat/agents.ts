@@ -1,4 +1,5 @@
 import { api } from "@/lib/api/client";
+import type { LpState } from "@/lib/api/fleet";
 
 /** Autopilot（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
 export interface MissionInfo {
@@ -93,6 +94,8 @@ export interface AgentSession {
   /** 任务短名（≤40 字）→ 侧栏名字后的压淡小标 */
   task?: string | null;
   ledgerTask?: LedgerTaskRef | null;
+  /** low-priority 状态（bridge/fleet/lp-monitor.ts 的缓存，mapAgent 展开原字段流过来）：侧栏徽章、批量面板 */
+  lowPriority?: LpState | null;
 }
 
 interface ApiAgent {
@@ -127,6 +130,7 @@ interface ApiAgent {
   task?: string | null;
   /** 原样不可信，mapAgent 经 parseLedgerTask 过一遍 */
   ledgerTask?: unknown;
+  lowPriority?: LpState | null;
 }
 
 /** bridge 的状态串 → 网页三态；dead 等未知值按 active（旧行为），creating 单列（不能发消息） */
@@ -202,6 +206,7 @@ export async function loadAgents(): Promise<AgentSession[]> {
 }
 
 const ledgerSig = (lt?: LedgerTaskRef | null) => (lt ? `|${lt.id}:${lt.stage}:${lt.round}` : "");
+const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}:${lp.resetsAt ?? ""}` : "");
 
 /**
  * agentsSignature（features/chat/chat-store.ts）里不断新增的字段拼在这里：chat-store 只许缩，新字段加一处就好。
@@ -210,5 +215,5 @@ const ledgerSig = (lt?: LedgerTaskRef | null) => (lt ? `|${lt.id}:${lt.stage}:${
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask);
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + lpSig(a.lowPriority);
 }
