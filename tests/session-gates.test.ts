@@ -3,7 +3,7 @@
  * scope 为 "*" 的 guest（默认 guestGrant(["*"])）和 peer 都能进：列出全部会话 id、收编 owner 的会话，
  * 或 resume takeover 把 owner 正在跑的 CC 进程 SIGTERM 掉。
  *
- * 八种凭据 × 六个接口，全部走真实鉴权（api-auth：Bearer / 设备 cookie）。沙箱见 tests/api-runner-harness.ts。
+ * 八种凭据 × 七个接口（另加只认 owner 本人的 /answer），全部走真实鉴权（api-auth：Bearer / 设备 cookie）。沙箱见 tests/api-runner-harness.ts。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { runnerHome, type RunnerHome, type RunnerResult } from "./api-runner-harness";
@@ -45,7 +45,11 @@ const CREDS: Record<string, { device?: string; bearer?: string }> = {
 };
 const ALLOWED = new Set(["owner 设备", "老的 * Bearer（web-ui）"]);
 
-const ENDPOINTS: Record<string, { method: string; path: string; body?: string; ok: number[] }> = {
+/** 以 owner 名义拍板的接口（/answer）只认 owner 本人（isOwnerPrincipal）：owner 的 manage=false 设备也算，老 web-ui token 过渡期也算 */
+const OWNER_ONLY = new Set(["owner 设备", "owner 设备 manage=false", "老的 * Bearer（web-ui）"]);
+
+type Endpoint = { method: string; path: string; body?: string; ok: number[]; owner?: true; error?: string };
+const ENDPOINTS: Record<string, Endpoint> = {
   "session-list": { method: "GET", path: "/api/v1/session-list", ok: [200] },
   runtimes: { method: "GET", path: "/api/v1/runtimes", ok: [200] },
   // 空 body 过了门就是 400：能走到参数校验 = 门放行了
@@ -54,6 +58,11 @@ const ENDPOINTS: Record<string, { method: string; path: string; body?: string; o
   clear: { method: "POST", path: "/api/v1/agents/cc/clear", body: "{}", ok: [409, 502] },
   // 机器网络盘点：过了门以后真去探测，结果随本机而定，只断言「不是 403」
   "remote-access": { method: "GET", path: "/api/v1/remote-access", ok: [] },
+  // 替 agent 批准权限弹框：过了门以后假 tmux 抓不到弹框 → 409「permission dialog no longer active」
+  answer: {
+    method: "POST", path: "/api/v1/agents/cc/answer", body: JSON.stringify({ kind: "permission", action: "allow" }), ok: [409],
+    owner: true, error: "answering requires the owner's own credential",
+  },
 };
 
 let sandbox: RunnerHome | null = null;
@@ -71,13 +80,13 @@ afterAll(() => sandbox?.cleanup());
 
 describe("权限矩阵：八种凭据 × 会话管理类接口", () => {
   for (const cred of Object.keys(CREDS)) {
-    test(`${cred}：${ALLOWED.has(cred) ? "过门" : "一律 403 requires a full-scope token"}`, () => {
+    test(`${cred}：${ALLOWED.has(cred) ? "过门" : "会话管理类一律 403 requires a full-scope token"}`, () => {
       for (const [ep, e] of Object.entries(ENDPOINTS)) {
         const r = results.find((x) => x.name === `${cred} ${ep}`)!;
-        if (!ALLOWED.has(cred)) {
-          expect([ep, r.status, JSON.parse(r.body!).error]).toEqual([ep, 403, `${ep} requires a full-scope token`]);
+        if (!(e.owner ? OWNER_ONLY : ALLOWED).has(cred)) {
+          expect([ep, r.status, JSON.parse(r.body!).error]).toEqual([ep, 403, e.error ?? `${ep} requires a full-scope token`]);
         } else if (e.ok.length) {
-          expect([ep, e.ok.includes(r.status!)]).toEqual([ep, true]);
+          expect([ep, e.ok.includes(r.status!) ? "ok" : `${r.status} ${r.body}`]).toEqual([ep, "ok"]);
         } else {
           expect([ep, r.status]).not.toEqual([ep, 403]);
         }

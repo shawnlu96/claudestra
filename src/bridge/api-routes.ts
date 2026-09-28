@@ -1591,13 +1591,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, { ok: true, agent: agent.name, model: model ?? null, effort: effort ?? null, ...(warnings.length ? { warning: warnings.join("；") } : {}) });
   }
 
-  // POST /api/v1/agents/:name/answer —— 交互卡回传。
-  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]}
-  //   或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
+  // POST /api/v1/agents/:name/answer —— 交互卡回传。只给 owner 本人：批准权限弹框、替 agent 回答 = 以 owner 名义拍板（与 ask-entry.ts canAnswerAsk 同一判定）
+  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
   if (answerMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(answerMatch[1]);
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isOwnerPrincipal(principal)) return forbidden("answering requires the owner's own credential");
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const body: any = await readJsonBody(req);
