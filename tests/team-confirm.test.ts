@@ -195,8 +195,18 @@ describe("贴卡片与点击", () => {
     await updateProposals((all) => void (all[pmsOnly.id] = pmsOnly), NOW, path);
     await post(pmsOnly, path, ["m-pms"]);
     const r = await handleTeamButton(buttonIds(pmsOnly, proposalMac(KEY, pmsOnly, "c-pm")).ok, "Discord", { chatId: "c-pm", messageId: "m-pms" }, deps());
-    expect(r).toContain("PM 名单已改为 agent-pm");
+    expect(r).toContain("PM 名单已改为 pm（");
     expect(r).not.toContain("撤下");
+  });
+
+  test("提议后台账名单变了：--check 那步就停，什么都没建、什么都没改", async () => {
+    await post(p, path);
+    setMeta(db, { actor: "owner", now: 1 }, { project: "p", key: "pms", value: ["agent-someone"] });
+    const r = await handleTeamButton(okId(), "Discord", at, deps());
+    expect(r).toContain("已经变了");
+    expect(r).toContain("什么都没改");
+    expect(calls).toEqual([["ledger", "team-apply", p.id, "--check"]]);
+    expect(getMeta(db, "p").pms).toEqual(["agent-someone"]);
   });
 
   test("提案文件里被改了名单：内容哈希对不上，不执行；不是班子按钮 → null", async () => {

@@ -90,11 +90,13 @@ async function apply(p: TeamProposal, who: string, d: ConfirmDeps): Promise<stri
     if (!r || r.ok === false || r.error) {
       const why = `第 ${i + 1}/${steps.length} 步（manager ${args.slice(0, 3).join(" ")}）失败：${r?.error ?? "无输出"}`;
       await finish(p.id, true, `${who} 确认；${why}`, d);
-      return `❌ 班子提案 ${p.id} 没有全部生效：${why}。前面的步骤已执行，修好后重新 team up / down`;
+      const left = i === 0 ? "什么都没改" : "前面的步骤已执行（不回滚）";
+      return `❌ 班子提案 ${p.id} 没有生效：${why}。${left}，请按现状重新提议`;
     }
   }
   await finish(p.id, false, `${who} 确认，已生效`, d);
-  const done = { up: "编排班子已生效", down: "编排班子已撤下", pms: `PM 名单已改为 ${p.pms.join("、") || "（空）"}` } as const;
+  const names = p.pms.map((a) => a.replace(/^agent-/, "")).join("、") || "（空）";
+  const done = { up: "编排班子已生效", down: "编排班子已撤下", pms: `PM 名单已改为 ${names}` } as const;
   return `✅ 项目「${p.project}」的${done[p.kind]}（提案 ${p.id}）`;
 }
 
