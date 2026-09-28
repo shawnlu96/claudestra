@@ -15,6 +15,8 @@ export interface PinnedPeerKey {
   fingerprint?: string;
   pinnedAt?: string;
   lastCheck?: { at: string; result: SigResult };
+  /** 最近一次验签通过的时刻：doctor 据此分辨「一直不通过」和「有人拿 token 乱签了一次」 */
+  lastOkAt?: string;
 }
 
 export function judgeSignature(
@@ -28,6 +30,7 @@ export function judgeSignature(
     ...prev,
     ...pin,
     lastCheck: { at: now, result },
+    ...(result === "ok" ? { lastOkAt: now } : {}),
   });
   if (!hdr.key || !hdr.ts || !hdr.sig) return done("unsigned");
   if (!isPublicKey(hdr.key)) return done("bad");

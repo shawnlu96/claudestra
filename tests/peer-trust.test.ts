@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import {
-  currentPin, expectedPeerFp, frameBearer, LEGACY_PEER_DEADLINE, legacyPeerDeadline, loadRelayPeerView, peerAuthHint, peerSigVerdict, recordPeerFp,
+  currentPin, expectedPeerFp, frameBearer, LEGACY_PEER_DEADLINE, legacyPeerDeadline, loadRelayPeerView, peerAnchorOf, peerAuthHint, peerSigVerdict, recordPeerFp,
   relayPeerRefusal, type RelayPeerView,
 } from "../src/lib/peer-trust.js";
-import { failingPeerChecks, legacyPeerChecks } from "../src/lib/doctor-peers.js";
+import { failingPeerChecks, legacyPeerChecks, orphanPeerChecks, persistentlyFailing } from "../src/lib/doctor-peers.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
 import { setRequestContext } from "../src/bridge/request-context.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
@@ -77,7 +77,7 @@ describe("期望指纹与裁决（纯逻辑）", () => {
   });
 });
 
-describe("截止日覆盖、钉住记录作废、提示文案、doctor 第二项（纯逻辑）", () => {
+describe("截止日覆盖、钉住记录作废、提示文案、doctor、合并锚点", () => {
   test("PEER_LEGACY_DEADLINE 可覆盖；解析不了用默认", () => {
     expect(legacyPeerDeadline("")).toBe(LEGACY_PEER_DEADLINE);
     expect(legacyPeerDeadline("not a date")).toBe(LEGACY_PEER_DEADLINE);
@@ -94,6 +94,7 @@ describe("截止日覆盖、钉住记录作废、提示文案、doctor 第二项
     expect(peerAuthHint(null)).toMatch(/重新握手/);
     expect(peerAuthHint({ code: "peer_signature", reason: "replay" })).toMatch(/不要原样重发/);
     expect(peerAuthHint({ code: "peer_signature", reason: "stale" })).toMatch(/时间/);
+    expect(peerAuthHint({ code: "peer_signature", reason: "before_start" })).toMatch(/刚重启.*校准本机时间/);
     expect(peerAuthHint({ code: "peer_signature", reason: "key_changed" })).toMatch(/重新给你发一张邀请/);
     expect(peerAuthHint({ code: "peer_signature", reason: "key_changed" })).not.toMatch(/重新握手/);
   });
@@ -102,6 +103,31 @@ describe("截止日覆盖、钉住记录作废、提示文案、doctor 第二项
     const c = failingPeerChecks([{ name: "he", result: "stale" }])[0]!;
     expect(c).toMatchObject({ status: "warn", name: "peer 验签失败" });
     expect(c.detail).toContain("he: stale");
+  });
+  test("doctor：只在持续没通过时报——10 分钟内通过过的（有人拿 token 乱签了一次）不报", () => {
+    const at = "2026-09-29T10:00:00.000Z";
+    expect(persistentlyFailing(undefined)).toBeNull();
+    expect(persistentlyFailing({ lastCheck: { at, result: "ok" }, lastOkAt: at })).toBeNull();
+    expect(persistentlyFailing({ lastCheck: { at, result: "key_changed" }, lastOkAt: "2026-09-29T09:59:00.000Z" })).toBeNull();
+    expect(persistentlyFailing({ lastCheck: { at, result: "key_changed" }, lastOkAt: "2026-09-29T09:40:00.000Z" })).toBe("key_changed");
+    expect(persistentlyFailing({ lastCheck: { at, result: "stale" } })).toBe("stale");
+  });
+  test("doctor：入站 token 的 peer 名在 peers.json 里找不到的单独列出", () => {
+    expect(orphanPeerChecks([])).toEqual([]);
+    expect(orphanPeerChecks(["sekai-old"])[0]).toMatchObject({ status: "warn", name: "peer 名对不上" });
+  });
+  test("合并用的期望指纹：记录的 fp 优先，其次仍有效的钉住钥匙；早于记录建立的钉住不算", async () => {
+    const pin = (fp: string, pinnedAt: string) => ({ publicKey: "k", fingerprint: fp, pinnedAt });
+    writeFileSync(join(STATE_DIR, "peer-keys.json"), JSON.stringify({ peers: {
+      "an-pin": pin(fpB, "2026-09-10T00:00:00.000Z"), "an-old": pin(fpB, "2026-09-01T00:00:00.000Z"), "an-fp": pin(fpB, "2026-09-10T00:00:00.000Z"),
+    } }));
+    const anchorOf = await peerAnchorOf();
+    const rec = (name: string, extra: object = {}) => ({ name, addedAt: "2026-09-05T00:00:00.000Z", ...extra });
+    expect(anchorOf(rec("an-fp", { fp: fpA }))).toBe(fpA);
+    expect(anchorOf(rec("an-pin"))).toBe(fpB);
+    expect(anchorOf(rec("an-old"))).toBeNull();
+    expect(anchorOf(rec("an-none"))).toBeNull();
+    rmSync(join(STATE_DIR, "peer-keys.json"), { force: true });
   });
 });
 

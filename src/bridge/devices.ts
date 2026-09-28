@@ -97,7 +97,7 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
 
 /**
  * 旧 web 的登录 cookie（cstra_session）→ 一次性换 owner 全权设备凭据（lib/legacy-web.ts）：从旧 web 服务升上来的机器，
- * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立——中继路径模式只放 cstra_dev，旧 cookie 到不了这里。
+ * 已登录的浏览器 / iOS App 不用重新配对。只在直托管同源成立——经中继来的（路径模式只放 cstra_dev、子域名隧道来源是 relay）一律 404。
  * 会话 id 是 nanoid(32)（≈190 位）且只能换一次，不另设限流。
  */
 async function legacySession(req: Request): Promise<Response> {

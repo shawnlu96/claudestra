@@ -154,8 +154,9 @@ owner：「peer 界面乱的要死……Alex 两边都握手了，为什么一�
 
 - **实例 id**：每个 Claudestra 在 `STATE_DIR/instance-id` 有一个固定随机 id（`lib/instance-id.ts`）。邀请串带 `iid`，
   兑换回调 body 带 `iid`，记录存 `instanceId`。加入（`isSameInviter`）：同出站地址，或同实例 id 且还没有我→他 = 同一对方，
-  补进原记录；兑换（`isSameRedeemer`）：同实例 id = 他重新加入，合进原记录并吊销被取代的旧入站 token。
-  已有别的出站地址时不合并——实例 id 是自报的，一张邀请不能把既有 peer 的流量改道。
+  补进原记录；兑换（`isSameRedeemer`）：同实例 id 且签名指纹等于原记录的期望指纹 = 他重新加入，合进原记录并吊销被取代的旧入站 token。
+  已有别的出站地址时不合并——实例 id 是自报的，一张邀请不能把既有 peer 的流量改道；同理，原记录有期望指纹（记下的 fp 或钉住的钥匙）时，
+  加入要求邀请里的 fp 与它一致，兑换要求签名指纹与它一致（兑换方向没有期望指纹也不合并），否则另建一条。
 - **旧重复整理**：`peer-http-tidy`（默认只出计划，`--apply` 才写；`lib/peer-tidy.ts` 纯规划）。按去掉 `-N` 的名字分组：
   出站多条只在 host 相同时合并（不同 host 可能是两个人，整组不动）；入站 token 留最新签的、更早的吊销；两个方向都没有的删掉。
   GET /api/v1/peers 带 `tidy` 预览，Peer 弹窗顶部显示并二次确认后执行（POST /api/v1/peers/tidy）。

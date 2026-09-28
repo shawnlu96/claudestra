@@ -60,7 +60,8 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
     if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)` });
   }
-  if (sig?.once && isPeerReplay(sig.once)) return peerSigRejected("replay");
+  const replay = sig?.once ? isPeerReplay(sig.once) : false;
+  if (replay) return peerSigRejected(replay);
   if (p.peer) {
     const peer = p.peer;
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」

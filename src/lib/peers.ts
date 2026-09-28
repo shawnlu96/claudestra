@@ -43,21 +43,26 @@ export interface HttpPeer {
  * 加入别人的邀请时：这条既有记录是不是邀请方本人。同一出站地址 = 同一个对方（重新加入 / 换 token）；
  * 同一实例 id 且这条还没有「我→他」= 他先连过我，现在补上反方向。已有别的出站地址就不合并：
  * 实例 id 是自报的，一张邀请不能把既有 peer 的流量改道到新地址。两边实例 id 都有却不同 = 不同实例。
+ * anchor 是这条记录现在的期望指纹（lib/peer-trust.ts peerAnchorOf）：有就必须等于邀请里的 fp，否则合并会改掉它。
  */
-export function isSameInviter(p: HttpPeer, inv: { url: string; iid?: string }): boolean {
+export function isSameInviter(p: HttpPeer, inv: { url: string; iid?: string; fp?: string }, anchor: string | null): boolean {
   if (p.disabled) return false;
+  if (anchor && anchor !== inv.fp?.toLowerCase()) return false;
   if (inv.iid && p.instanceId && p.instanceId !== inv.iid) return false;
   if (p.baseUrl) return p.baseUrl === inv.url;
   return !!inv.iid && p.instanceId === inv.iid;
 }
 
 /**
- * 对方兑换我的邀请时：这条既有记录是不是他。同一张邀请 token = 重放（幂等）；同一实例 id = 他重新加入过
- * （旧入站 token 由调用方吊销）。他带来的地址跟记录里已有的出站地址不同则不合并——理由同上，防改道。
+ * 对方兑换我的邀请时：这条既有记录是不是他。同一张邀请 token = 重放（幂等）；同一实例 id 且兑换签名的指纹（fp）
+ * 等于这条记录的期望指纹（anchor）= 他重新加入过（旧入站 token 由调用方吊销）。实例 id 谁都能自报，只凭它合并
+ * 就能顶掉别人的记录；没有 anchor 或没签名的也不合并（另建一条），换了钥匙只能删掉再邀请。
+ * 他带来的地址跟记录里已有的出站地址不同则不合并——理由同上，防改道。
  */
-export function isSameRedeemer(p: HttpPeer, r: { inTokenId: string; iid?: string; url?: string }): boolean {
+export function isSameRedeemer(p: HttpPeer, r: { inTokenId: string; iid?: string; url?: string; fp?: string }, anchor: string | null): boolean {
   if (p.inTokenId === r.inTokenId) return true;
   if (p.disabled || !r.iid || p.instanceId !== r.iid) return false;
+  if (!anchor || anchor !== r.fp?.toLowerCase()) return false;
   return !r.url || !p.baseUrl || p.baseUrl === r.url;
 }
 

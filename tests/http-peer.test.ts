@@ -344,51 +344,68 @@ import { isSameInviter, isSameRedeemer } from "../src/lib/peers";
 
 describe("一个对方一条记录：join / redeem 的合并判定", () => {
   const at = "2026-09-01T00:00:00Z";
+  const FA = "aaaa-bbbb-cccc-dddd", FM = "1111-2222-3333-4444";
   const inboundOnly: HttpPeer = { name: "Alex", inTokenId: "tok_old", instanceId: "iidA", addedAt: at };
   const full: HttpPeer = { name: "Alex", baseUrl: "http://100.1.1.1:3847", outToken: "t".repeat(32), instanceId: "iidA", addedAt: at };
   const legacyOut: HttpPeer = { name: "Alex-2", baseUrl: "http://100.1.1.1:3847", outToken: "t".repeat(32), addedAt: at };
+  const U = "http://100.1.1.1:3847";
 
   test("join：同一出站地址 = 同一人（重新加入 / 换 token）", () => {
-    expect(isSameInviter(legacyOut, { url: "http://100.1.1.1:3847" })).toBe(true);
-    expect(isSameInviter(full, { url: "http://100.1.1.1:3847", iid: "iidA" })).toBe(true);
+    expect(isSameInviter(legacyOut, { url: U }, null)).toBe(true);
+    expect(isSameInviter(full, { url: U, iid: "iidA", fp: FA }, FA)).toBe(true);
   });
 
   test("join：他先连过我（只有入站），同一实例 id → 补上我→他", () => {
-    expect(isSameInviter(inboundOnly, { url: "http://100.1.1.1:3847", iid: "iidA" })).toBe(true);
-    expect(isSameInviter(inboundOnly, { url: "http://100.1.1.1:3847" })).toBe(false);
-    expect(isSameInviter(inboundOnly, { url: "http://100.1.1.1:3847", iid: "iidB" })).toBe(false);
+    expect(isSameInviter(inboundOnly, { url: U, iid: "iidA", fp: FA }, FA)).toBe(true);
+    expect(isSameInviter(inboundOnly, { url: U }, null)).toBe(false);
+    expect(isSameInviter(inboundOnly, { url: U, iid: "iidB" }, null)).toBe(false);
+  });
+
+  test("join：记录有期望指纹时，邀请里的 fp 必须一样（大小写不论）；不一样或没带 → 不合并，另建一条", () => {
+    expect(isSameInviter(full, { url: U, iid: "iidA", fp: FA.toUpperCase() }, FA)).toBe(true);
+    expect(isSameInviter(full, { url: U, iid: "iidA", fp: FM }, FA)).toBe(false);
+    expect(isSameInviter(full, { url: U, iid: "iidA" }, FA)).toBe(false);
+    expect(isSameInviter(inboundOnly, { url: U, iid: "iidA", fp: FM }, FA)).toBe(false);
+    expect(isSameInviter(full, { url: U, iid: "iidA", fp: FM }, null)).toBe(true); // 没有期望指纹的老记录照旧按地址合并
   });
 
   test("join：实例 id 相同但已有别的出站地址 → 不改道", () => {
-    expect(isSameInviter(full, { url: "http://100.9.9.9:3847", iid: "iidA" })).toBe(false);
+    expect(isSameInviter(full, { url: "http://100.9.9.9:3847", iid: "iidA", fp: FA }, FA)).toBe(false);
   });
 
   test("join：同地址但实例 id 冲突 → 不同实例，不合并", () => {
-    expect(isSameInviter(full, { url: "http://100.1.1.1:3847", iid: "iidB" })).toBe(false);
+    expect(isSameInviter(full, { url: U, iid: "iidB", fp: FA }, FA)).toBe(false);
   });
 
   test("join：停用的记录不参与合并", () => {
-    expect(isSameInviter({ ...legacyOut, disabled: true }, { url: "http://100.1.1.1:3847" })).toBe(false);
+    expect(isSameInviter({ ...legacyOut, disabled: true }, { url: U }, null)).toBe(false);
   });
 
   test("redeem：同一张邀请 token = 幂等重放", () => {
-    expect(isSameRedeemer({ ...inboundOnly, inTokenId: "tok_new" }, { inTokenId: "tok_new" })).toBe(true);
+    expect(isSameRedeemer({ ...inboundOnly, inTokenId: "tok_new" }, { inTokenId: "tok_new" }, null)).toBe(true);
   });
 
-  test("redeem：同一实例 id 重新加入 → 合并（调用方吊销旧 token）", () => {
-    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidA" })).toBe(true);
-    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA" })).toBe(true);
-    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", url: "http://100.1.1.1:3847" })).toBe(true);
+  test("redeem：同一实例 id、签名指纹等于记录的期望指纹 → 合并（调用方吊销旧 token）", () => {
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidA", fp: FA }, FA)).toBe(true);
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", fp: FA }, FA)).toBe(true);
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", url: U, fp: FA }, FA)).toBe(true);
+  });
+
+  test("redeem：别人拿着一张邀请、报出已有联系人的实例 id → 指纹不同 / 没签名 / 记录没有期望指纹都不合并", () => {
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", fp: FM }, FA)).toBe(false);
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA" }, FA)).toBe(false);
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidA", fp: FM }, null)).toBe(false);
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidA" }, null)).toBe(false);
   });
 
   test("redeem：没带 iid / iid 不同 / 老记录没有 iid → 不合并（走撞名后缀）", () => {
-    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new" })).toBe(false);
-    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidB" })).toBe(false);
-    expect(isSameRedeemer(legacyOut, { inTokenId: "tok_new", iid: "iidA" })).toBe(false);
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", fp: FA }, FA)).toBe(false);
+    expect(isSameRedeemer(inboundOnly, { inTokenId: "tok_new", iid: "iidB", fp: FA }, FA)).toBe(false);
+    expect(isSameRedeemer(legacyOut, { inTokenId: "tok_new", iid: "iidA", fp: FA }, FA)).toBe(false);
   });
 
   test("redeem：带来的地址与已有出站地址不同 → 不改道", () => {
-    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", url: "http://100.9.9.9:3847" })).toBe(false);
+    expect(isSameRedeemer(full, { inTokenId: "tok_new", iid: "iidA", url: "http://100.9.9.9:3847", fp: FA }, FA)).toBe(false);
   });
 });
 

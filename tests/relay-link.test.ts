@@ -186,20 +186,23 @@ describe("入站分流（relay-inbound.ts）", () => {
     for (const v of variants) {
       expect(Buffer.from(v, "base64url").equals(Buffer.from(sig, "base64url"))).toBe(true); // 确实解出同样的字节
       expect(verifyPeerRequest(myFp, req(v), cache, NOW)?.code).toBe("bad_signature");
-      expect(cache.seen(v, h["x-claudestra-ts"], NOW)).toBe(true);
+      expect(cache.seen(v, h["x-claudestra-ts"], NOW)).toBe("replay");
     }
   });
-  test("ReplayCache：签名时间早于进程启动一律当重放；满了挤掉最老的；按插入顺序过期", () => {
+  test("ReplayCache：早于进程启动 → before_start；满了挤掉最老的、它的签名时间成为下限；按插入顺序过期", () => {
     const start = Math.floor(NOW / 1000);
     const c = new ReplayCache(1000, 2, start);
     const sigOf = (n: number) => Buffer.alloc(64, n).toString("base64url");
-    expect(c.seen(sigOf(1), String(start - 1), NOW)).toBe(true);
-    expect(c.seen(sigOf(1), String(start), NOW)).toBe(false);
-    expect(c.seen(sigOf(2), String(start), NOW)).toBe(false);
-    expect(c.seen(sigOf(3), String(start), NOW)).toBe(false); // 挤掉 1
-    expect(c.seen(sigOf(2), String(start), NOW)).toBe(true);
-    expect(c.seen(sigOf(1), String(start), NOW)).toBe(false);
-    expect(c.seen(sigOf(3), String(start), NOW + 1001)).toBe(false); // 过期后清掉
+    const at = (d: number) => String(start + d);
+    expect(c.seen(sigOf(1), at(-1), NOW)).toBe("before_start");
+    expect(c.seen(sigOf(1), at(0), NOW)).toBe(false);
+    expect(c.seen(sigOf(2), at(1), NOW)).toBe(false);
+    expect(c.seen(sigOf(3), at(2), NOW)).toBe(false); // 挤掉 1，下限 = start
+    expect(c.seen(sigOf(2), at(1), NOW)).toBe("replay");
+    expect(c.seen(sigOf(1), at(0), NOW)).toBe("replay"); // 1 已没有记录，但签名时间不晚于下限：不放过
+    expect(c.seen(sigOf(4), at(0), NOW)).toBe("replay"); // 被灌满时，下限那一秒的新签名也误拒
+    expect(c.seen(sigOf(5), at(1), NOW)).toBe(false); // 晚于下限照常；挤掉 2，下限 = start + 1
+    expect(c.seen(sigOf(3), at(2), NOW + 1001)).toBe(false); // 过期后清掉；过期不抬下限
   });
 });
 

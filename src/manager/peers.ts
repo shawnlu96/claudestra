@@ -256,16 +256,16 @@ async function sweepExpiredInvites(): Promise<number> {
 
 /** 自报名净化 + 撞名后缀。对方的名字是自报的——撞上已有 peer 时必须换名,
  *  否则一张新邀请就能顶掉既有 peer 的 baseUrl/outToken(peer 劫持)。
- *  sameAs 命中的记录不论叫什么都直接沿用它的名字(一个对方一条记录,lib/peers.ts 的 isSame*)。 */
+ *  sameAs 命中的记录不论叫什么都直接沿用它的名字(一个对方一条记录,lib/peers.ts 的 isSame*);anchor = 那条记录现在的期望指纹。 */
 async function uniquePeerName(
   rawName: string,
-  sameAs: (existing: import("../lib/peers.js").HttpPeer) => boolean,
+  sameAs: (existing: import("../lib/peers.js").HttpPeer, anchor: string | null) => boolean,
 ): Promise<string> {
-  const { readPeers } = await import("../lib/peers.js");
+  const [{ readPeers }, anchorOf] = await Promise.all([import("../lib/peers.js"), import("../lib/peer-trust.js").then((m) => m.peerAnchorOf())]);
   const base = rawName.trim().replace(/[^\w-]/g, "").slice(0, 24) || "peer";
   const data = await readPeers();
   const all = data.httpPeers || [];
-  const same = all.find(sameAs);
+  const same = all.find((p) => sameAs(p, anchorOf(p)));
   if (same) return same.name;
   let name = base;
   for (let n = 2; n < 100; n++) {
@@ -341,7 +341,7 @@ export async function cmdPeerInviteRevoke(id: string) {
 }
 
 /** 兑换（我是邀请方,bridge /api/v1/peers/redeem 委托进来）。对方自报 name/url/token/iid——
- *  url+token 可缺:缺 = 这次没给我反方向。iid 命中已有记录 = 同一个对方,合进那条。 */
+ *  url+token 可缺:缺 = 这次没给我反方向。iid 命中已有记录、且签名指纹 fp 对得上那条的期望指纹 = 同一个对方,合进那条。 */
 export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, peerUrl: string, peerToken: string, iid = "", fp = "") {
   const { findPendingInviteByJoinSecret, removePendingInvite, upsertHttpPeer, inviteExpired, isSameRedeemer } = await import("../lib/peers.js");
   const { readPrincipals, writePrincipals, tokenIdOf } = await import("../lib/principals.js");
@@ -356,7 +356,7 @@ export async function cmdPeerInviteRedeem(joinSecret: string, peerName: string, 
   }
   if (peerUrl && !isPeerBaseUrl(peerUrl)) { output({ ok: false, error: "对方 url 必须是 http(s):// 开头或 relay://<对方指纹>" }); return; }
   const url = peerUrl.replace(/\/+$/, "");
-  const finalName = await uniquePeerName(peerName, (p) => isSameRedeemer(p, { inTokenId: inv.inTokenId, iid, url }));
+  const finalName = await uniquePeerName(peerName, (p, anchor) => isSameRedeemer(p, { inTokenId: inv.inTokenId, iid, url, fp }, anchor));
   // 预签 token 的占位 peer 名改成对方真名——GET /peers 的 principals ⋈ 靠它
   const file = await readPrincipals();
   const tok = file.principals.find((x) => x.id === `token:${inv.inTokenId}`);
@@ -452,7 +452,7 @@ export async function cmdPeerJoinAuto(inviteStr: string, agentsCsv: string, myUr
   }
   const agents = agentsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   // 同地址 / 同实例 id（他先连过我）→ 合进那条；否则撞名后缀防覆盖
-  const finalName = await uniquePeerName(hs.name, (p) => isSameInviter(p, hs));
+  const finalName = await uniquePeerName(hs.name, (p, anchor) => isSameInviter(p, hs, anchor));
   const before = structuredClone(await findHttpPeer(finalName));
   const rev = await prepareReverse(finalName, agents, myUrl, force);
   if ("error" in rev) { output({ ok: false, error: rev.error }); return; }

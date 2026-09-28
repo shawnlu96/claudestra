@@ -5,7 +5,11 @@
  *   期望指纹 = peers.json 的 fp（邀请 / 兑换时记下）→ relay://<fp> 基址里的 fp → peer-keys.json 钉住的指纹；
  *   三样都没有的老 peer 截止日前放行并告警，之后同样拒绝。
  */
-import { readPeers, relayPeerFingerprint } from "./peers.js";
+import { join } from "node:path";
+import { readPeers, relayPeerFingerprint, type HttpPeer } from "./peers.js";
+import type { PinnedPeerKey } from "./peer-keys.js";
+import { STATE_DIR } from "./paths.js";
+import { readJsonLenient } from "./state-file.js";
 import { findByBearer, readPrincipals } from "./principals.js";
 import { repoEnvVar } from "./env-file.js";
 import { isRedeemRequest } from "./relay-protocol.js";
@@ -17,31 +21,42 @@ const REPLAY_MAX_ENTRIES = 50_000;
 /** 本进程启动时刻（秒）：缓存不落盘，重启前签出的非 GET 请求一律当重放 */
 const PROCESS_START_S = Math.floor(Date.now() / 1000);
 
+/** seen 的结果：false = 第一次见；replay = 见过（或可能见过、记录已被挤掉）；before_start = 签名时间早于本进程启动 */
+export type ReplayVerdict = false | "replay" | "before_start";
+
 /**
  * 非幂等方法的签名在窗口内只认一次（签名含时间戳与正文哈希，同一签名 = 同一请求）。键是解码后的签名字节，
  * 不是原串——同一签名不能靠换一种 base64url 写法变成新键（验签那边也只认规范写法，两头都防）。
+ * 满了挤掉最老的条目时记下它的签名时间（floorTs）：不晚于它的签名可能见过、已无记录，一律当重放——
+ * 被灌满时误拒这一小段，而不是放过重放。
  * 中继 peer 帧（bridge/relay-inbound.ts）与 authApi 的 peer 验签（bridge/peer-signature.ts）各持一份：
  * 经中继来的请求两份各见一次不算重放，截获后换一条路重放则会撞上 authApi 那份。
  */
 export class ReplayCache {
-  private readonly seenAt = new Map<string, number>();
+  private readonly seenAt = new Map<string, { at: number; ts: number }>();
+  private floorTs = -Infinity;
   constructor(
     private readonly ttlMs = REPLAY_TTL_MS,
     private readonly max = REPLAY_MAX_ENTRIES,
     private readonly startS = PROCESS_START_S,
   ) {}
 
-  /** true = 重放：见过，或签名时间早于本进程启动（那之前见过什么已无从得知） */
-  seen(sig: string, ts: string, now: number): boolean {
-    if (!(Number(ts) >= this.startS)) return true;
-    for (const [k, t] of this.seenAt) {
-      if (now - t <= this.ttlMs) break; // 按插入顺序过期，遇到第一条没过期的就停
+  seen(sig: string, ts: string, now: number): ReplayVerdict {
+    const t = Number(ts);
+    if (!(t >= this.startS)) return "before_start"; // 那之前见过什么已无从得知
+    if (t <= this.floorTs) return "replay";
+    for (const [k, e] of this.seenAt) {
+      if (now - e.at <= this.ttlMs) break; // 按插入顺序过期，遇到第一条没过期的就停
       this.seenAt.delete(k);
     }
     const key = Buffer.from(sig, "base64url").toString("hex");
-    if (this.seenAt.has(key)) return true;
-    if (this.seenAt.size >= this.max) this.seenAt.delete(this.seenAt.keys().next().value!);
-    this.seenAt.set(key, now);
+    if (this.seenAt.has(key)) return "replay";
+    if (this.seenAt.size >= this.max) {
+      const [oldest, e] = this.seenAt.entries().next().value!;
+      this.seenAt.delete(oldest);
+      this.floorTs = Math.max(this.floorTs, e.ts);
+    }
+    this.seenAt.set(key, { at: now, ts: t });
     return false;
   }
 }
@@ -53,6 +68,13 @@ export const LEGACY_PEER_DEADLINE = "2026-11-01T00:00:00Z";
 export function legacyPeerDeadline(raw = repoEnvVar("PEER_LEGACY_DEADLINE").trim()): string {
   const t = raw ? Date.parse(raw) : NaN;
   return Number.isFinite(t) ? new Date(t).toISOString() : LEGACY_PEER_DEADLINE;
+}
+
+let deadlineMemo = { at: -Infinity, value: LEGACY_PEER_DEADLINE };
+/** 验签路径用：.env 是同步读的，一分钟最多读一次 */
+function currentLegacyDeadline(now: number): string {
+  if (now - deadlineMemo.at > 60_000) deadlineMemo = { at: now, value: legacyPeerDeadline() };
+  return deadlineMemo.value;
 }
 
 type PeerAnchorRecord = { fp?: string; baseUrl?: string };
@@ -76,6 +98,18 @@ export function expectedPeerFp(rec: PeerAnchorRecord | null | undefined, pinnedF
   return recordPeerFp(rec) ?? (pinnedFp?.toLowerCase() || null);
 }
 
+/** peer-keys.json 里的钉住记录（bridge 是唯一写者；这里只读，给 manager 与 doctor 用） */
+export async function readPeerPins(): Promise<Record<string, PinnedPeerKey>> {
+  const file = await readJsonLenient<{ peers?: Record<string, PinnedPeerKey> }>(join(STATE_DIR, "peer-keys.json"), {}, { who: "peer-keys" });
+  return file.peers ?? {};
+}
+
+/** 合并判定（lib/peers.ts isSameRedeemer / isSameInviter）用：每条记录现在的期望指纹，没有返回 null */
+export async function peerAnchorOf(): Promise<(p: HttpPeer) => string | null> {
+  const pins = await readPeerPins();
+  return (p) => expectedPeerFp(p, currentPin(pins[p.name], p)?.fingerprint);
+}
+
 /** once：验签通过的非 GET/HEAD 请求要在限速之后再过一次防重放（bridge/api-auth.ts） */
 export type PeerSigVerdict = { allow: true; legacy: boolean; once?: { sig: string; ts: string } } | { allow: false; reason: string };
 
@@ -83,10 +117,10 @@ export type PeerSigVerdict = { allow: true; legacy: boolean; once?: { sig: strin
  * 验签结果 → 放不放行。有期望指纹（anchored）时只认 ok；没有时截止日前一律放行（legacy，调用方告警），
  * 截止日后按 unanchored 拒——那时还没签过名的 peer 要重新邀请。
  */
-export function peerSigVerdict(result: string, anchored: boolean, now: number, deadline = legacyPeerDeadline()): PeerSigVerdict {
+export function peerSigVerdict(result: string, anchored: boolean, now: number, deadline?: string): PeerSigVerdict {
   if (anchored) return result === "ok" ? { allow: true, legacy: false } : { allow: false, reason: result };
   if (result === "ok") return { allow: true, legacy: false };
-  return now < Date.parse(deadline) ? { allow: true, legacy: true } : { allow: false, reason: "unanchored" };
+  return now < Date.parse(deadline ?? currentLegacyDeadline(now)) ? { allow: true, legacy: true } : { allow: false, reason: "unanchored" };
 }
 
 /** 中继 req 帧里的 peer 凭据：Bearer，或（与 authApi 同口径）GET /api/v1/events 的 ?token= */
@@ -144,6 +178,7 @@ export function peerAuthHint(raw: unknown): string {
   const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; reason?: unknown };
   if (body.code !== "peer_signature") return "token 无效或已被对方 revoke——联系对方确认，或重新握手";
   if (body.reason === "replay") return "这条请求被对方当成了重放（同一个签名用了两次）——不要原样重发，稍后重新发一条即可";
+  if (body.reason === "before_start") return "对方 bridge 刚重启，这条请求的签名时间早于它启动（本机时钟比对方慢）——先校准本机时间，再重新发";
   if (body.reason === "stale") return "两台机器时钟差超过 5 分钟，签名被判过期——先校准两边的系统时间";
   return "对方认不出本机的签名钥匙（本机重装过，或对方记下的指纹不是本机）——请对方删掉这个 peer 后重新给你发一张邀请";
 }

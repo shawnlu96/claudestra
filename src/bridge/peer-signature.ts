@@ -11,7 +11,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
 import { judgeSignature, type PinnedPeerKey } from "../lib/peer-keys.js";
 import { readPeers } from "../lib/peers.js";
-import { currentPin, peerSigVerdict, recordPeerFp, ReplayCache, type PeerSigVerdict } from "../lib/peer-trust.js";
+import { currentPin, peerSigVerdict, recordPeerFp, ReplayCache, type PeerSigVerdict, type ReplayVerdict } from "../lib/peer-trust.js";
 
 const PEER_KEYS_PATH = join(STATE_DIR, "peer-keys.json");
 let keys: Map<string, PinnedPeerKey> | null = null;
@@ -36,8 +36,8 @@ const legacyWarnedAt = new Map<string, number>();
 /** 所有入口（直连、peer 入口、经中继）的 peer 请求共用；authApi 在限速之后才写，拿不到签名的请求碰不到它 */
 const replays = new ReplayCache();
 
-/** 验签通过的非 GET/HEAD 请求：true = 这个签名已经用过（或早于本进程启动） */
-export function isPeerReplay(once: { sig: string; ts: string }): boolean {
+/** 验签通过的非 GET/HEAD 请求：非 false = 这个签名已经用过（或早于本进程启动），值是拒绝原因 */
+export function isPeerReplay(once: { sig: string; ts: string }): ReplayVerdict {
   return replays.seen(once.sig, once.ts, Date.now());
 }
 
@@ -67,10 +67,24 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
   return verdict.allow && result === "ok" && !idempotent ? { ...verdict, once: { sig: hdr.sig!, ts: hdr.ts! } } : verdict;
 }
 
-/** 对方每分钟探测、每 30s 轮询都会进来：结果或钉住的钥匙变了才立刻写，否则一分钟最多写一次；写失败不影响这次判定 */
+/**
+ * 钉住的钥匙变了立刻写；只是验签结果变了一分钟最多写一次（拿着 token 交替发坏签名也只是一分钟一次），
+ * 没写的由定时器在一分钟后补上。写失败不影响这次判定。
+ */
 async function persist(peer: string, prev: PinnedPeerKey | undefined, next: PinnedPeerKey): Promise<void> {
   loaded().set(peer, next);
-  if (prev?.lastCheck?.result === next.lastCheck?.result && prev?.publicKey === next.publicKey && Date.now() - lastWrite < 60_000) return;
+  if (prev?.publicKey === next.publicKey && Date.now() - lastWrite < 60_000) {
+    flushTimer ??= setTimeout(() => void flush(peer), 60_000 - (Date.now() - lastWrite));
+    flushTimer.unref?.();
+    return;
+  }
+  await flush(peer);
+}
+
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+async function flush(peer: string): Promise<void> {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = null;
   lastWrite = Date.now();
   try {
     await writeJsonAtomic(PEER_KEYS_PATH, { updatedAt: new Date().toISOString(), peers: Object.fromEntries(loaded()) });
