@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { generateEcdh } from "../src/lib/e2e/primitives.ts";
-import { isSealedRedeem, openRedeemRequest, openRedeemResponse, sealRedeemRequest, sealRedeemResponse } from "../src/lib/peer-e2e-redeem.ts";
+import { isSealedRedeem, openRedeemRequest, openRedeemResponse, readRedeemResponse, sealRedeemRequest, sealRedeemResponse } from "../src/lib/peer-e2e-redeem.ts";
 
 const FP = "abcd-ef01-2345-6789";
 const payload = { join: "j".repeat(32), name: "bob", idk: "k".repeat(43) };
@@ -50,5 +50,24 @@ describe("兑换邀请的 HPKE 信封", () => {
     expect(await openRedeemResponse(two.session, { ...res2, nonce: "AAAA" })).toBeNull();
     expect(isSealedRedeem({ join: "x", name: "bob" })).toBe(false);
     expect(isSealedRedeem(null)).toBe(false);
+  });
+});
+
+describe("兑换方怎么看回答（中继能伪造明文）", () => {
+  test("加密的成功才算成功；明文的「成功」、改过的密文、任何失败都只是一句报错", async () => {
+    const m = await generateEcdh();
+    const { body, session } = await sealRedeemRequest(m.pub, FP, payload);
+    const r = (await openRedeemRequest(m, FP, body))!;
+    const good = await sealRedeemResponse(r.session, { ok: true, token: "real" });
+    expect(await readRedeemResponse(session, 200, good)).toEqual({ ok: true, value: { ok: true, token: "real" } });
+    const forgedOk = await readRedeemResponse(session, 200, { ok: true, peer: "alice", token: "relay-token" });
+    expect(forgedOk).toMatchObject({ ok: false, code: "redeem_unsealed" });
+    expect(JSON.stringify(forgedOk)).not.toContain("relay-token");
+    const bad = { ...good, ct: Buffer.from(Buffer.from(good.ct, "base64url").map((x, i) => (i === 0 ? x ^ 1 : x))).toString("base64url") };
+    expect(await readRedeemResponse(session, 200, bad)).toMatchObject({ ok: false, code: "redeem_tampered" });
+    expect(await readRedeemResponse(session, 403, { ok: false, error: "e2e_required <script>" })).toEqual({
+      ok: false, code: "redeem_failed", message: "inviter refused (403): e2e_required script; retry",
+    });
+    expect(await readRedeemResponse(session, 502, "bad gateway")).toMatchObject({ ok: false, code: "redeem_failed" });
   });
 });

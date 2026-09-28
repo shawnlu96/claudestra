@@ -76,3 +76,23 @@ export async function openRedeemResponse(s: RedeemSession, body: unknown): Promi
     return null; // 同上：解得开却不是 JSON
   }
 }
+
+export type RedeemOutcome = { ok: true; value: unknown } | { ok: false; code: "redeem_failed" | "redeem_unsealed" | "redeem_tampered"; message: string };
+
+/**
+ * 兑换方怎么看待邀请方的回答。成功必须是解得开的加密响应；失败响应是明文、没认证，中继能伪造，所以：
+ *   - 明文的「成功」（哪怕 {ok:true, token}）一律当失败——那正是中继塞自己 token 的办法；
+ *   - 任何失败只给一句展示用的话，调用方只报错、提示重试，不改本地状态（不落盘、不把 peer 标失败、不回退明文）。
+ * 所以 manager 只在 ok:true 之后才写 peers.json，失败时没有需要回滚的东西。
+ */
+export async function readRedeemResponse(s: RedeemSession, status: number, body: unknown): Promise<RedeemOutcome> {
+  const sealed = !!body && typeof body === "object" && (body as { v?: unknown }).v === 1 && typeof (body as { ct?: unknown }).ct === "string";
+  if (status === 200 && sealed) {
+    const value = await openRedeemResponse(s, body);
+    return value === null ? { ok: false, code: "redeem_tampered", message: "invite response failed authentication; retry" } : { ok: true, value };
+  }
+  if (status === 200) return { ok: false, code: "redeem_unsealed", message: "inviter answered without encryption; refusing (retry, or ask for a new invite)" };
+  const err = (body as { error?: unknown } | null)?.error;
+  const shown = typeof err === "string" ? err.replace(/[^\p{L}\p{N} .,:;_()'/-]/gu, "").slice(0, 200) : "";
+  return { ok: false, code: "redeem_failed", message: `inviter refused (${status})${shown ? `: ${shown}` : ""}; retry` };
+}
