@@ -142,16 +142,33 @@ export interface ShareCode {
   expiresAt: string;
 }
 
+/** 给 guest 开放 "*" 时的提醒（发码前的二次确认、批准时的警告共用） */
+export const GUEST_ALL_WARNING = "这等于开放全部非大总管 agent，以后新建的也算";
+
+/** grant 是不是「全部会话」（"*"）：给 guest 时要单独提醒 */
+export function grantsAllAgents(grant: PairedInfo["grant"]): boolean {
+  return grant.agents === "*" || grant.agents.includes("*");
+}
+
 /**
  * 签一个配对码。guest = 给别人的设备（独立身份、只含选中的会话、无终端无管理），不给就是自己的设备（全权）。
+ * guest 必须带 agents（bridge 拒空，guest_agents_required）；agents 是 ["*"] 还要 confirmAllAgents，否则 guest_all_needs_confirm。
  * link：bridge 知道入口时给（中继首页）；没给就用当前页面的 origin 拼——前端就托管在这个源上。老 bridge 只有 url（子域名）。
  */
-export async function newShareCode(opts: { guest?: string; agents?: string[] } = {}): Promise<ShareCode> {
+export async function newShareCode(opts: { guest?: string; agents?: string[]; confirmAllAgents?: boolean } = {}): Promise<ShareCode> {
   type R = { ok?: boolean; error?: string; code?: string; display?: string; link?: string | null; fragment?: string; url?: string | null; expiresAt?: string };
   const j = await api<R>("/relay/pair", { method: "POST", json: opts, timeoutMs: 5000 });
   const link = j.link || (j.fragment ? `${window.location.origin}/pair#${j.fragment}` : j.url);
   if (!j.ok || !j.code || !link) throw new Error(j.error || "配对码生成失败");
   return { code: j.code, display: j.display ?? j.code, link, expiresAt: j.expiresAt ?? "" };
+}
+
+/** 签码失败给用户看的文案（中文 key，渲染点 t()）：bridge 的校验码换成界面上的话，其它原样 */
+export function shareCodeErrorText(e: unknown): string {
+  const code = (e as ApiError)?.code;
+  if (code === "guest_agents_required") return "至少选一个会话";
+  if (code === "guest_all_needs_confirm") return GUEST_ALL_WARNING;
+  return (e as Error)?.message || "配对码生成失败";
 }
 
 /** 配对页给用户看的错误文案（中文 key，渲染点 t() 兜底翻译）。local = 本机一键配对那条路径：只有它的 403 意味着「不是本机」 */

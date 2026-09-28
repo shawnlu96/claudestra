@@ -7,8 +7,8 @@
 import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
-  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal, fullGrant, guestGrant,
-  newGuestPrincipal, normalizeGrant, type Grant,
+  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, checkGuestAgents, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, ensureOwnerPrincipal,
+  fullGrant, guestGrant, newGuestPrincipal, normalizeGrant, type Grant,
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
@@ -247,7 +247,7 @@ export async function decideApproval(id: string, approve: boolean, approver?: Pr
 }
 
 /**
- * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备）；短码给中继（连着的话），秘密只进链接的 # 片段。
+ * `claudestra pair` 的签码：grant 由 CLI 给（默认全权；--guest 给别人的设备，agents 必须写明，见 checkGuestAgents）；短码给中继（连着的话），秘密只进链接的 # 片段。
  * 没连中继也能签（直托管入口）：link 要有入口地址才拼得出（CLI 的 --url），否则只给短码与 fragment 让用户手动进配对页。
  */
 export function issuePairing(
@@ -255,10 +255,12 @@ export function issuePairing(
   body: Body,
   issuer?: Principal,
 ): Record<string, unknown> {
+  const guest = str(body.guest);
+  const guestAgents = guest ? checkGuestAgents(body.agents, body.confirmAllAgents) : null;
+  if (guestAgents && !guestAgents.ok) return { ok: false, code: guestAgents.code, error: guestAgents.error };
   const fp = i.fp ?? machineFp();
   if (!fp) return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败），签不了配对码" };
-  const guest = str(body.guest);
-  const asked = normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, guest ? guestGrant(["*"]) : fullGrant());
+  const asked = guestAgents?.ok ? guestGrant(guestAgents.agents) : normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, fullGrant());
   // 网页里发码（issuer = 那台设备）：给出去的不能比它自己的大；本机终端（CLI）不传 issuer，照旧
   const grant = issuer ? capGrant(asked, issuer) : asked;
   if (!grant) return { ok: false, error: "你这台设备能用的会话里没有这些，签不了" };
