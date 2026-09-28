@@ -1,13 +1,19 @@
 /** lib/agent-settings.ts：按 agent 的设置文件（skillOverrides）读写与启动参数；状态目录由 tests/preload.ts 隔离到临时目录 */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+// runtimes/index 要先于 runtimes/claude-code 加载（main 上原有的循环依赖；单独跑本文件时顺序反了会 TDZ）
+import "../src/lib/runtimes/index.js";
 import {
   agentSettingsPath,
   allSkillOverrides,
   applySkillOverride,
   isSettingsAgentName,
+  isSkillName,
+  outsideSkillOverrides,
   removeAgentSettings,
+  resetSettingsForFreshLaunch,
   renameAgentSettings,
   setSkillOverride,
   settingsLaunchArgs,
@@ -31,6 +37,10 @@ describe("applySkillOverride / skillOverridesOf（纯函数）", () => {
     const o = skillOverridesOf({ skillOverrides: { ok: "off", bad: "maybe", "a b": "off", on1: "on", "anthropic-skills:pdf": "user-invocable-only" } });
     expect(o).toEqual({ ok: "off", "anthropic-skills:pdf": "user-invocable-only" });
     expect(skillOverridesOf({ skillOverrides: ["x"] })).toEqual({});
+  });
+  test("技能名：首字符要字母数字（挡 __proto__、- 开头）", () => {
+    for (const ok of ["pdf", "anthropic-skills:pdf", "discord:access", "a.b_c-d"]) expect(isSkillName(ok)).toBe(true);
+    for (const bad of ["__proto__", "-x", ":x", "a b", "a/b", "", "x".repeat(129)]) expect(isSkillName(bad)).toBe(false);
   });
   test("agent 名挡掉逃出目录的写法", () => {
     for (const bad of ["", "../x", "a/b", "a\\b", ".hidden"]) expect(isSettingsAgentName(bad)).toBe(false);
@@ -58,6 +68,41 @@ describe("setSkillOverride（写者）", () => {
     await expect(setSkillOverride("agent-t2", "pdf", "off")).rejects.toThrow();
     expect(readFileSync(p, "utf8")).toBe("{oops");
   });
+  test("aliases：同步技能的裸名别名一并清掉", async () => {
+    const p = agentSettingsPath("agent-t5");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ skillOverrides: { docx: "off", save: "off" } }));
+    await setSkillOverride("agent-t5", "anthropic-skills:docx", "name-only", ["docx"]);
+    expect(readJson(p)).toEqual({ skillOverrides: { save: "off", "anthropic-skills:docx": "name-only" } });
+  });
+  test("rename 到一个删过的名字：源文件不在也要清掉目标位置的旧文件；删 / 挪失败只报警不抛", async () => {
+    await setSkillOverride("agent-stale", "pdf", "off");
+    renameAgentSettings("agent-none", "agent-stale");
+    expect(existsSync(agentSettingsPath("agent-stale"))).toBe(false);
+    mkdirSync(agentSettingsPath("agent-dir"), { recursive: true }); // 同名的是个目录：unlink 抛 EISDIR / EPERM
+    expect(() => removeAgentSettings("agent-dir")).not.toThrow();
+  });
+  test("全新启动清旧文件：mode=new 或 registry 里还没有；restart / 从停止再起（已登记）保留", async () => {
+    for (const [mode, registered, kept] of [["new", true, false], ["resume", false, false], ["fork", false, false], ["resume", true, true], ["fork", true, true]] as const) {
+      await setSkillOverride("agent-t6", "pdf", "off");
+      resetSettingsForFreshLaunch("agent-t6", mode, registered);
+      expect(existsSync(agentSettingsPath("agent-t6"))).toBe(kept);
+    }
+  });
+  test("outsideSkillOverrides：全局 / 项目 / 项目本地三处；cwd 就是家目录时不重复算", () => {
+    const home = mkdtempSync(join(tmpdir(), "outside-home-"));
+    const cwd = join(home, "proj");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    mkdirSync(join(cwd, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ skillOverrides: { pdf: "off", on1: "on" } }));
+    writeFileSync(join(cwd, ".claude", "settings.local.json"), JSON.stringify({ skillOverrides: { save: "name-only" } }));
+    writeFileSync(join(cwd, ".claude", "settings.json"), "{bad");
+    expect(outsideSkillOverrides(cwd, home)).toEqual([
+      { source: "user", overrides: { pdf: "off" } },
+      { source: "local", overrides: { save: "name-only" } },
+    ]);
+    expect(outsideSkillOverrides(home, home)).toEqual([{ source: "user", overrides: { pdf: "off" } }]);
+  });
   test("allSkillOverrides / rename / remove", async () => {
     await setSkillOverride("agent-t3", "pdf", "off");
     expect(allSkillOverrides()["agent-t3"]).toEqual({ pdf: "off" });
@@ -71,16 +116,17 @@ describe("setSkillOverride（写者）", () => {
 });
 
 describe("启动参数", () => {
-  test("settingsLaunchArgs：文件在且非空才带路径", () => {
-    expect(settingsLaunchArgs({ path: null, settings: null })).toEqual([]);
-    expect(settingsLaunchArgs({ path: "/s/a.json", settings: {} })).toEqual([]);
-    expect(settingsLaunchArgs({ path: "/s/a.json", settings: { skillOverrides: { a: "off" } } })).toEqual(["--settings", "/s/a.json"]);
+  test("settingsLaunchArgs：非空才带，内联 JSON", () => {
+    expect(settingsLaunchArgs({})).toEqual([]);
+    expect(settingsLaunchArgs({ skillOverrides: { a: "off" } })).toEqual(["--settings", '{"skillOverrides":{"a":"off"}}']);
   });
-  test("buildClaudeCommand：没文件不带 --settings；有文件带路径；坏文件不带（宁可不带也不能让 CC 起不来）", async () => {
+  test("buildClaudeCommand：没文件不带 --settings；有文件内联传内容（不传路径：CC 读之前文件被删也起得来）；坏文件不带", async () => {
     const base = { channelId: "1", bridgeUrl: "ws://localhost:3847", sessionId: "s" };
     expect(buildClaudeCommand({ ...base, settingsAgent: "agent-t4" })).not.toContain("--settings");
     await setSkillOverride("agent-t4", "pdf", "off");
-    expect(buildClaudeCommand({ ...base, settingsAgent: "agent-t4" })).toContain(`--settings ${agentSettingsPath("agent-t4")}`);
+    const cmd = buildClaudeCommand({ ...base, settingsAgent: "agent-t4" });
+    expect(cmd).toContain(`--settings '{"skillOverrides":{"pdf":"off"}}'`);
+    expect(cmd).not.toContain(agentSettingsPath("agent-t4"));
     expect(buildClaudeCommand(base)).not.toContain("--settings");
     writeFileSync(agentSettingsPath("agent-t4"), "not json");
     expect(buildClaudeCommand({ ...base, settingsAgent: "agent-t4" })).not.toContain("--settings");

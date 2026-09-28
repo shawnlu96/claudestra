@@ -330,8 +330,8 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   if (mode === "auto") mode = "bypassPermissions";
 
   const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
-  const own = launchSettingsFor(opts.settingsAgent); // agent 设置文件（lib/agent-settings.ts）；沙箱与沙箱覆盖合成一份，只传一次 --settings
-  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own.settings ?? {}).map(shellEscape));
+  const own = launchSettingsFor(opts.settingsAgent); // agent 设置（lib/agent-settings.ts），内联传；沙箱与沙箱覆盖合成一份，只传一次 --settings
+  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own).map(shellEscape));
   else parts.push(...settingsLaunchArgs(own).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它

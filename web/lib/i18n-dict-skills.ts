@@ -45,4 +45,11 @@ export const SKILLS_DICT: Record<string, string> = {
   "模型和 / 菜单都看不到": "Hidden from both the model and the / menu",
   "大总管的技能": "Master's skills",
   "在 {n} 个会话里调过档位": "Adjusted in {n} session|Adjusted in {n} sessions",
+  "这里只管这个会话自己的开关。全局或项目设置里的技能开关这里改不了，只在对应技能旁标出。":
+    "This only controls this session's own switches. Skill switches in the global or project settings can't be changed here; they're flagged next to the skill.",
+  "在 CC 自己的设置文件里设的，这里改不了": "Set in Claude Code's own settings files; can't be changed here",
+  "全局设置": "Global settings",
+  "项目设置": "Project settings",
+  "项目本地设置": "Project local settings",
+  "跟着整个目录一起加载，单独关不掉：": "Loaded together with its whole folder, can't be turned off alone: ",
 };

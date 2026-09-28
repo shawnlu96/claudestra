@@ -734,6 +734,8 @@ async function launchInWindow(
   opts: { waitShell?: boolean; cwd?: string } = {},
 ): Promise<{ result: ReadyResult; baseline?: unknown }> {
   const win = tmuxWindowOps(tmuxName);
+  // 全新 agent（create、resume / takeover 起的新名字）不继承同名旧 agent 的技能开关
+  (await import("./lib/agent-settings.js")).resetSettingsForFreshLaunch(tmuxName, spec.mode, !!(await loadRegistry()).agents[tmuxName]);
   if (opts.waitShell && !(await waitForShell(tmuxName))) {
     return { result: { ready: false, reason: "timeout", detail: "shell 未就绪", recoveredFullSession: false } };
   }
@@ -1035,7 +1037,6 @@ async function cmdKill(name: string) {
     }
   }
   await saveRegistry(reg);
-  (await import("./lib/agent-settings.js")).removeAgentSettings(tmuxName); // 同名重建的 agent 不该继承旧的技能开关
 
   await triggerSkillsRescan("remove", tmuxName);
 
@@ -1076,9 +1077,7 @@ async function cmdRemove(name: string) {
     output({ ok: false, error: `${tmuxName} 不存在` });
     return;
   }
-  if (await windowExists(tmuxName)) {
-    await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
-  }
+  if (await windowExists(tmuxName)) await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
   if (info?.sessionId) {
     await archiveSession(tmuxName, info.cwd, info.sessionId).catch(() => {});
   }
@@ -1093,6 +1092,7 @@ async function cmdRemove(name: string) {
   }
   (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // 清掉子 agent 指向它的 parent，免得同名重建被旧孤儿认作父
   await saveRegistry(reg);
+  (await import("./lib/agent-settings.js")).removeAgentSettings(tmuxName); // 按 agent 的技能开关随永久删除一起清掉（kill 只是停止，保留）
   await triggerSkillsRescan("remove", tmuxName);
   if (info?.channelId) {
     const { bridgeHttpBase } = await import("./lib/bridge-port.js");

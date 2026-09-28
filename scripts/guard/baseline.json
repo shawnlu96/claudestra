@@ -137,7 +137,7 @@
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1140,
-    "fn:overflow": 9562,
+    "fn:overflow": 9560,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:ArchivedSessions": 1,

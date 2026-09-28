@@ -5,12 +5,14 @@
  */
 import { allSkillOverrides } from "../../lib/agent-settings.js";
 import { canManage } from "../../lib/devices.js";
-import type { Principal } from "../../lib/principals.js";
+import { agentInScope, type Principal } from "../../lib/principals.js";
 import { localSkillLibrary } from "../../lib/skill-library.js";
 import { apiJson, forbidden } from "../api-respond.js";
 
 export async function handleSkillLibrary(req: Request, path: string, principal: Principal): Promise<Response | null> {
   if (path !== "/skills/library" || req.method !== "GET") return null;
   if (!canManage(principal)) return forbidden("skills/library requires a credential with manage grant");
-  return apiJson(200, { ok: true, ...(await localSkillLibrary()), overrides: allSkillOverrides() });
+  // 只报凭据 scope 内的 agent（scope 外的 agent 名和档位不该漏给部分授权的设备）
+  const overrides = Object.fromEntries(Object.entries(allSkillOverrides()).filter(([agent]) => agentInScope(principal, agent)));
+  return apiJson(200, { ok: true, ...(await localSkillLibrary()), overrides });
 }

@@ -6,7 +6,7 @@
  * - Codex：本期不支持。
  */
 import { isSkillName, isSkillState, setSkillOverride, skillOverridesOf, type SkillState } from "../lib/agent-settings.js";
-import { piCandidates, piSkillEntryMatches } from "../lib/agent-skills.js";
+import { piCandidates, piParentEntryFor, piSkillEntryMatches, syncedAliases } from "../lib/agent-skills.js";
 import { normalizePiEnvProfile } from "../lib/pi-env.js";
 import { agentRuntime } from "../lib/registry.js";
 import { expandHome, localSkillLibrary } from "../lib/skill-library.js";
@@ -19,7 +19,7 @@ export async function cmdSkillToggle(args: string[]): Promise<void> {
   if (!name || !skill || !state) return output({ ok: false, error: USAGE });
   if (!isSkillName(skill)) return output({ ok: false, error: `技能名不合法: ${JSON.stringify(skill)}` });
   if (!isSkillState(state)) return output({ ok: false, error: `未知档位 "${state}"。${USAGE}` });
-  if (name === "master") return toggleClaude("master", skill, state);
+  if (name === "master") return toggleClaude("master", null, skill, state);
   const reg = await loadRegistry();
   const key = normalizeName(name);
   const info = reg.agents[key];
@@ -27,11 +27,13 @@ export async function cmdSkillToggle(args: string[]): Promise<void> {
   const rt = agentRuntime(info);
   if (rt === "codex") return output({ ok: false, error: "Codex agent 暂不支持按 agent 启停技能（它的技能目录是全局的）" });
   if (rt === "pi") return togglePi(reg, key, skill, state);
-  return toggleClaude(key, skill, state);
+  return toggleClaude(key, info.cwd ? expandHome(String(info.cwd)) : null, skill, state);
 }
 
-async function toggleClaude(agent: string, skill: string, state: SkillState): Promise<void> {
-  const next = await setSkillOverride(agent, skill, state);
+async function toggleClaude(agent: string, cwd: string | null, skill: string, state: SkillState): Promise<void> {
+  // 同步技能顺手清掉裸名别名键：CC 两种都认，留着的话界面上的档位和实际对不上（lib/agent-skills.ts syncedAliases）
+  const aliases = skill.startsWith("anthropic-skills:") ? syncedAliases(skill, (await localSkillLibrary(cwd ? { cwd, runtime: "claude-code" } : undefined)).skills, cwd) : [];
+  const next = await setSkillOverride(agent, skill, state, aliases);
   output({
     ok: true,
     agent,
@@ -51,9 +53,11 @@ async function togglePi(reg: Registry, key: string, skill: string, state: SkillS
   }
   if (state !== "on" && state !== "off") return output({ ok: false, error: "Pi 的技能只有开 / 关两档" });
   const cwd = info.cwd ? expandHome(String(info.cwd)) : null;
-  const target = piCandidates((await localSkillLibrary()).skills, cwd).find((s) => s.name === skill);
+  const target = piCandidates((await localSkillLibrary(cwd ? { cwd, runtime: "pi" } : undefined)).skills, cwd).find((s) => s.name === skill);
+  const parent = target && piParentEntryFor(env.skills ?? [], target);
+  if (parent && state === "off") return output({ ok: false, error: `「${skill}」是跟着整个目录 ${parent} 一起加载的，单独关不掉；要关就先把这一项从档案里拿掉（pi-env-set --reset 后重加）` });
   const kept = (env.skills ?? []).filter((e) => !(target ? piSkillEntryMatches(e, target) : e.endsWith(`/${skill}`)));
-  if (state === "on") {
+  if (state === "on" && !parent) {
     if (!target) return output({ ok: false, error: `Pi 的技能目录里没有「${skill}」` });
     kept.push(target.dir);
   }

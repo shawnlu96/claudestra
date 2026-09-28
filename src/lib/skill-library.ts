@@ -195,9 +195,13 @@ function readInstalledPlugins(home: string): RootEnv["plugins"] {
 /** registry 里的 cwd 可能写成 ~/…，与技能库里的项目根比较前展开 */
 export const expandHome = (p: string, home = homedir()) => p.replace(/^~(?=$|\/)/, home);
 
-/** 本机现状建一份技能库（设置 · 技能页、会话详情的技能开关、manager skill-toggle 共用） */
-export async function localSkillLibrary(): Promise<Awaited<ReturnType<typeof buildSkillLibrary>>> {
+/**
+ * 本机现状建一份技能库（设置 · 技能页、会话详情的技能开关、manager skill-toggle 共用）。
+ * include：额外要扫项目技能的 agent（已停止的 agent 不在 active 列表里，看它自己的技能时要带上）。
+ */
+export async function localSkillLibrary(include?: { cwd: string; runtime: AgentRuntime }): Promise<Awaited<ReturnType<typeof buildSkillLibrary>>> {
   const home = homedir();
   const agents = (await readActiveAgents()).filter((a) => a.cwd).map((a) => ({ cwd: expandHome(a.cwd!, home), runtime: agentRuntime(a) }));
+  if (include) agents.push(include); // skillRoots 按 runtime|目录去重，重复没关系
   return buildSkillLibrary({ home, agents, plugins: readInstalledPlugins(home), piSkillPaths: readPiGlobalEnv().skillPaths }, `${REPO_ROOT}/skills`);
 }

@@ -1,6 +1,6 @@
 /** lib/agent-skills.ts：某个 agent 能看到哪些技能、各是什么档位（会话详情的技能栏、manager skill-toggle 的 Pi 分支） */
 import { describe, expect, test } from "bun:test";
-import { agentSkillView, piCandidates, piSkillEntryMatches } from "../src/lib/agent-skills.js";
+import { agentSkillView, piCandidates, piParentEntryFor, piSkillEntryMatches, syncedAliases } from "../src/lib/agent-skills.js";
 import type { LibrarySkill } from "../src/lib/skill-library.js";
 
 const sk = (name: string, over: Partial<LibrarySkill> = {}): LibrarySkill => ({
@@ -33,6 +33,36 @@ describe("Claude Code", () => {
   });
 });
 
+describe("同步技能的裸名别名、外部设置", () => {
+  const lib = [
+    sk("docx", { scope: "synced", name: "anthropic-skills:docx" }),
+    sk("pdf", { scope: "synced", name: "anthropic-skills:pdf" }),
+    sk("pdf"), // 个人技能同名：裸名 pdf 归它，不算同步那个的别名
+  ];
+  test("syncedAliases：没有同名的个人 / 项目技能才把裸名算作别名", () => {
+    expect(syncedAliases("anthropic-skills:docx", lib, null)).toEqual(["docx"]);
+    expect(syncedAliases("anthropic-skills:pdf", lib, null)).toEqual([]);
+    expect(syncedAliases("save", lib, null)).toEqual([]);
+  });
+  test("手写的裸名 docx=off 显示在同步技能那一行，不再多出一行「已不存在」；裸名 pdf 仍归个人技能", () => {
+    const v = agentSkillView("claude-code", lib, { cwd: null, overrides: { docx: "off", pdf: "off" }, piEnv: {} });
+    expect(v.rows.map((r) => [r.name, r.scope, r.state])).toEqual([
+      ["anthropic-skills:docx", "synced", "off"],
+      ["anthropic-skills:pdf", "synced", "on"],
+      ["pdf", "personal", "off"],
+    ]);
+  });
+  test("全局 / 项目设置里的开关标在对应行上（含别名）", () => {
+    const v = agentSkillView("claude-code", lib, {
+      cwd: null, overrides: {}, piEnv: {},
+      outside: [{ source: "user", overrides: { docx: "off" } }, { source: "local", overrides: { pdf: "name-only" } }],
+    });
+    expect(v.rows.find((r) => r.name === "anthropic-skills:docx")?.outside).toEqual([{ source: "user", state: "off" }]);
+    expect(v.rows.find((r) => r.name === "pdf")?.outside).toEqual([{ source: "local", state: "name-only" }]);
+    expect(v.rows.find((r) => r.name === "anthropic-skills:pdf")?.outside).toBeUndefined();
+  });
+});
+
 describe("Pi / Codex", () => {
   const lib = [
     sk("a", { runtime: "pi", dir: "/h/.pi/agent/skills/a" }),
@@ -55,6 +85,13 @@ describe("Pi / Codex", () => {
   });
   test("Codex 本期不支持", () => {
     expect(agentSkillView("codex", lib, { cwd: null, overrides: {}, piEnv: {} })).toEqual({ runtime: "codex", supported: false, reason: "codex", rows: [] });
+  });
+  test("档案里写的是 SKILL.md 文件也认；装着多个技能的父目录：显示开、单独关不掉", () => {
+    expect(piSkillEntryMatches("/h/.pi/agent/skills/a/SKILL.md", { name: "a", dir: "/h/.pi/agent/skills/a" })).toBe(true);
+    expect(piParentEntryFor(["/h/.agents/skills/"], { dir: "/h/.agents/skills/b" })).toBe("/h/.agents/skills/");
+    const v = agentSkillView("pi", lib, { cwd: null, overrides: {}, piEnv: { base: "minimal", skills: ["/h/.agents/skills"] } });
+    expect(v.rows.find((r) => r.name === "b")).toMatchObject({ state: "on", lockedBy: "/h/.agents/skills" });
+    expect(v.rows.find((r) => r.name === "a")).toMatchObject({ state: "off" });
   });
   test("piSkillEntryMatches", () => {
     expect(piSkillEntryMatches("/h/.pi/agent/skills/a/", { name: "a", dir: "/h/.pi/agent/skills/a" })).toBe(true);

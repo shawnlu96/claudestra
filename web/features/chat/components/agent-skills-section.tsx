@@ -1,10 +1,10 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ApiError } from "@/lib/api/client";
 import { useChatStoreApi } from "../chat-store";
 import { fetchAgentSkills, markSkillsPending, setAgentSkill, useSkillsPending } from "../agent-skills-api";
-import { displaySkillName, SKILL_STATES, sortRows, STATE_HINT, STATE_LABEL, type AgentSkillRow, type AgentSkillView, type SkillState } from "../agent-skills-logic";
+import { displaySkillName, OUTSIDE_LABEL, SKILL_STATES, sortRows, STATE_HINT, STATE_LABEL, type AgentSkillRow, type AgentSkillView, type SkillState } from "../agent-skills-logic";
 import { SCOPE_LABEL } from "../skills-library-logic";
 
 /**
@@ -17,19 +17,24 @@ export function AgentSkillsSection({ name, master = false }: { name: string; mas
   const [view, setView] = useState<AgentSkillView | null>(null);
   const [hidden, setHidden] = useState(false);
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
+  // 按技能记忙：连点两个开关时，先回来的那个不能把另一个的忙状态清掉
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [full, setFull] = useState(false);
   const [q, setQ] = useState("");
-  const load = () =>
-    fetchAgentSkills(name)
-      .then((r) => setView(r.view))
-      .catch((e: Error) => (e instanceof ApiError && e.status === 403 ? setHidden(true) : setErr(e.message)));
+  const seq = useRef(0);
+  // 每次改完都重拉；只认最新一次的结果，后到的旧响应不许盖掉新状态
+  const load = () => {
+    const my = ++seq.current;
+    return fetchAgentSkills(name)
+      .then((r) => my === seq.current && setView(r.view))
+      .catch((e: Error) => my === seq.current && (e instanceof ApiError && e.status === 403 ? setHidden(true) : setErr(e.message)));
+  };
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只按 name 重拉
   }, [name]);
   const change = async (skill: string, state: SkillState) => {
-    setBusy(skill);
+    setBusy((b) => new Set(b).add(skill));
     setErr("");
     try {
       const r = await setAgentSkill(name, skill, state);
@@ -39,7 +44,11 @@ export function AgentSkillsSection({ name, master = false }: { name: string; mas
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setBusy(null);
+      setBusy((b) => {
+        const n = new Set(b);
+        n.delete(skill);
+        return n;
+      });
     }
   };
   if (hidden) return null;
@@ -61,6 +70,9 @@ export function AgentSkillsSection({ name, master = false }: { name: string; mas
           </button>
         )}
       </div>
+      {fourStates && (
+        <div className="mt-1 text-[11.5px] text-base-content/50">{t("这里只管这个会话自己的开关。全局或项目设置里的技能开关这里改不了，只在对应技能旁标出。")}</div>
+      )}
       {master && <div className="mt-2 text-[12px] text-warning">{t("大总管的技能被关可能影响它的日常流程，比如 save-compact。")}</div>}
       <PendingBar name={name} master={master} />
       {err && <div className="mt-2 text-[12px] text-error">{err}</div>}
@@ -76,7 +88,7 @@ export function AgentSkillsSection({ name, master = false }: { name: string; mas
       {view && view.rows.length > 0 && (
         <ul className="mt-2 flex max-h-72 list-none flex-col gap-1 overflow-y-auto p-0">
           {rows.map((r) => (
-            <SkillToggleRow key={r.name} r={r} full={full && fourStates} readOnly={!view.supported} busy={busy === r.name} onChange={(s) => void change(r.name, s)} />
+            <SkillToggleRow key={r.name} r={r} full={full && fourStates} readOnly={!view.supported || !!r.lockedBy} busy={busy.has(r.name)} onChange={(s) => void change(r.name, s)} />
           ))}
         </ul>
       )}
@@ -122,8 +134,14 @@ function SkillToggleRow({ r, full, readOnly, busy, onChange }: { r: AgentSkillRo
           <span className={`min-w-0 truncate font-mono text-[12.5px] ${r.state === "off" ? "text-base-content/45 line-through" : ""}`} title={r.name}>{displaySkillName(r)}</span>
           <span className="badge badge-ghost badge-xs shrink-0">{r.scope === "missing" ? t("已不存在") : t(SCOPE_LABEL[r.scope])}</span>
           {!full && r.state !== "on" && r.state !== "off" && <span className="badge badge-info badge-outline badge-xs shrink-0">{t(STATE_LABEL[r.state])}</span>}
+          {r.outside?.map((o) => (
+            <span key={o.source} className="badge badge-warning badge-outline badge-xs shrink-0" title={t("在 CC 自己的设置文件里设的，这里改不了")}>
+              {t(OUTSIDE_LABEL[o.source])}: {t(STATE_LABEL[o.state as SkillState] ?? o.state)}
+            </span>
+          ))}
         </div>
         {r.description && <p className="mt-0.5 truncate text-[11px] text-base-content/55" title={r.description}>{r.description}</p>}
+        {r.lockedBy && <p className="mt-0.5 truncate text-[11px] text-base-content/55" title={r.lockedBy}>{t("跟着整个目录一起加载，单独关不掉：")}{r.lockedBy}</p>}
       </div>
       {busy && <span className="loading loading-spinner loading-xs shrink-0" />}
       {full ? (

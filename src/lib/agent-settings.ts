@@ -1,14 +1,16 @@
 /**
- * 每个 Claude Code agent 一份设置文件 `<state>/agent-settings/<registry 名>.json`，启动时 `--settings <文件>` 带进去
+ * 每个 Claude Code agent 一份设置文件 `<state>/agent-settings/<registry 名>.json`，启动时读出来以内联 JSON 传给 `--settings`
  * （lib/claude-launch.ts）。现在只放 skillOverrides（按 agent 启停技能），读写按 key 合并，以后按 agent 切源等键放进来互不干扰。
  * 写者只有 manager（skill-toggle）；bridge 只读。不碰全局 ~/.claude/settings.json：CC Switch 切供应商会整份重写它。
  *
  * 实测（CC 2.1.283，docs 02-03 附录 C2）：
- * - 文件不存在时 `--settings` 直接报错退出 → 只有文件在、且能解析时才带 flag；
+ * - `--settings <路径>` 指向的文件不存在时 CC 直接报错退出 → 不传路径传内容：生成命令到 CC 读文件之间文件被删 / 挪也起得来；
  * - 会话运行中改文件不生效（/reload-skills 也不行），重启（含 --resume）后生效 → 界面只提示「重启后生效」；
  * - 显式写 "on" 会让 /skills 菜单里那一项变成「locked by flag」→ on 一律删键，不写 "on"。
  */
 import { existsSync, readdirSync, renameSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, reportCorrupt, writeJsonStateGuarded } from "./state-file.js";
 
@@ -18,8 +20,8 @@ export type AgentSettings = Record<string, unknown>;
 
 export const isSkillState = (v: unknown): v is SkillState => typeof v === "string" && (SKILL_STATES as readonly string[]).includes(v);
 
-/** 技能调用名：个人技能 `name`，插件 / 同步 `前缀:name`。挡掉路径分隔、空白和引号，它会进 JSON 键和日志 */
-export const isSkillName = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(v);
+/** 技能调用名：个人技能 `name`，插件 / 同步 `前缀:name`。挡掉路径分隔、空白和引号（会进 JSON 键和日志）；首字符要字母数字，顺带挡掉 __proto__ */
+export const isSkillName = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(v);
 
 /** registry 名（agent-xxx，历史上有中文名）或 master；只挡会逃出目录的写法 */
 export function isSettingsAgentName(name: string): boolean {
@@ -61,12 +63,15 @@ export function applySkillOverride(settings: AgentSettings, skill: string, state
   return next;
 }
 
-/** 写者（manager）：磁盘上是坏文件就拒写；改完为空就删文件，免得每次启动白带一个空 --settings */
-export async function setSkillOverride(agent: string, skill: string, state: SkillState): Promise<AgentSettings> {
+/**
+ * 写者（manager）：磁盘上是坏文件就拒写；改完为空就删文件，免得每次启动白带一个空 --settings。
+ * aliases：同一个技能的别名键一并清掉（同步技能的裸名写法，CC 两种都认，留着会和界面上的档位对不上）。
+ */
+export async function setSkillOverride(agent: string, skill: string, state: SkillState, aliases: string[] = []): Promise<AgentSettings> {
   const path = agentSettingsPath(agent);
   const cur = readJsonStateSync(path, isPlainObject);
   const base = cur.status === "ok" ? (cur.data as AgentSettings) : {};
-  const next = applySkillOverride(base, skill, state);
+  const next = applySkillOverride(aliases.reduce((acc, a) => applySkillOverride(acc, a, "on"), base), skill, state);
   if (Object.keys(next).length === 0 && cur.status !== "corrupt") {
     if (existsSync(path)) unlinkSync(path);
     return next;
@@ -75,28 +80,41 @@ export async function setSkillOverride(agent: string, skill: string, state: Skil
   return next;
 }
 
-/** kill 时删、rename 时跟着挪；文件不在是常态（大多数 agent 没改过设置） */
+/**
+ * remove（永久删除）时删；全新 agent（create、resume / takeover 起新名字）启动前删同名旧文件；rename 时跟着挪。
+ * 都在 registry 已经落盘之后调：失败只报警、不抛，别让一个残留文件把命令的后半截（频道清理、rescan）断掉。
+ */
 export function removeAgentSettings(agent: string): void {
-  const path = agentSettingsPath(agent);
-  if (existsSync(path)) unlinkSync(path);
+  try {
+    const path = agentSettingsPath(agent);
+    if (existsSync(path)) unlinkSync(path);
+  } catch (e) {
+    console.error(`⚠ 删除 agent 设置文件失败（${agent}）：${(e as Error).message}`);
+  }
 }
+/** 启动前：全新 agent（mode=new，或 registry 里还没有它——create / resume 都是启动后才写 registry）不继承同名旧文件 */
+export function resetSettingsForFreshLaunch(agent: string, mode: string, registered: boolean): void {
+  if (mode === "new" || !registered) removeAgentSettings(agent);
+}
+/** 源文件不在时也要删掉目标位置的旧文件：改名到一个删过的名字，不能继承那个旧 agent 的开关 */
 export function renameAgentSettings(from: string, to: string): void {
-  const src = agentSettingsPath(from);
-  if (existsSync(src)) renameSync(src, agentSettingsPath(to));
+  try {
+    const src = agentSettingsPath(from);
+    if (existsSync(src)) renameSync(src, agentSettingsPath(to));
+    else removeAgentSettings(to);
+  } catch (e) {
+    console.error(`⚠ 迁移 agent 设置文件失败（${from} → ${to}）：${(e as Error).message}`);
+  }
 }
 
-/** 生产的启动参数：文件在、能解析、非空才带路径（沙箱另走 sandboxLaunchArgs 合成一份内联 JSON）。纯函数 */
-export function settingsLaunchArgs(own: { path: string | null; settings: AgentSettings | null }): string[] {
-  return own.path && own.settings && Object.keys(own.settings).length ? ["--settings", own.path] : [];
+/** 生产的启动参数：非空就以内联 JSON 传（沙箱另走 sandboxLaunchArgs，和沙箱覆盖合成一份）。纯函数 */
+export function settingsLaunchArgs(settings: AgentSettings): string[] {
+  return Object.keys(settings).length ? ["--settings", JSON.stringify(settings)] : [];
 }
 
-/** 给启动器：读这个 agent 的设置文件（损坏 / 不存在 → null，不带 flag，宁可不带也不能让 CC 启动失败） */
-export function launchSettingsFor(agent: string | undefined): { path: string | null; settings: AgentSettings | null } {
-  if (!agent || !isSettingsAgentName(agent)) return { path: null, settings: null };
-  const path = agentSettingsPath(agent);
-  const r = readJsonStateSync(path, isPlainObject);
-  if (r.status === "corrupt") reportCorrupt(path, r.error, "agent-settings");
-  return r.status === "ok" ? { path, settings: r.data as AgentSettings } : { path: null, settings: null };
+/** 给启动器：这个 agent 的设置（损坏 / 不存在 → {}，不带 flag；宁可不带也不能让 CC 启动失败） */
+export function launchSettingsFor(agent: string | undefined): AgentSettings {
+  return agent && isSettingsAgentName(agent) ? readAgentSettings(agent) : {};
 }
 
 /** 所有 agent 的 skillOverrides（技能库页「在哪些 agent 里关着」）：{ agent: { skill: 档位 } }，没有覆盖的 agent 不出现 */
@@ -111,6 +129,22 @@ export function allSkillOverrides(): Record<string, Record<string, Exclude<Skill
   for (const n of names.filter(isSettingsAgentName)) {
     const o = skillOverridesOf(readAgentSettings(n));
     if (Object.keys(o).length) out[n] = o;
+  }
+  return out;
+}
+
+/**
+ * CC 自己的设置文件里的 skillOverrides（全局 ~/.claude/settings.json、项目 .claude/settings.json / settings.local.json）。
+ * 这里不写它们，只拿来在界面上标出「那边关了」：--settings 里删键开不回来。读不到 / 坏了都当没有。
+ */
+export function outsideSkillOverrides(cwd: string | null, home = homedir()): Array<{ source: "user" | "project" | "local"; overrides: Record<string, string> }> {
+  const files: Array<["user" | "project" | "local", string]> = [["user", join(home, ".claude", "settings.json")]];
+  if (cwd && resolve(cwd) !== resolve(home)) files.push(["project", join(cwd, ".claude", "settings.json")], ["local", join(cwd, ".claude", "settings.local.json")]);
+  const out: Array<{ source: "user" | "project" | "local"; overrides: Record<string, string> }> = [];
+  for (const [source, path] of files) {
+    const r = readJsonStateSync(path, isPlainObject);
+    const o = r.status === "ok" ? skillOverridesOf(r.data as AgentSettings) : {};
+    if (Object.keys(o).length) out.push({ source, overrides: o });
   }
   return out;
 }

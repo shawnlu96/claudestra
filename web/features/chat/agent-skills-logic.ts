@@ -24,7 +24,13 @@ export interface AgentSkillRow {
   state: SkillState;
   userInvocable: boolean;
   modelInvocable: boolean;
+  /** Pi：跟着档案里整个父目录一起加载的那一项，单独关不掉 */
+  lockedBy?: string;
+  /** CC 自己的设置文件（全局 / 项目 / 项目本地）里对它的开关，这里改不了 */
+  outside?: Array<{ source: OutsideSource; state: string }>;
 }
+export type OutsideSource = "user" | "project" | "local";
+export const OUTSIDE_LABEL: Record<OutsideSource, string> = { user: "全局设置", project: "项目设置", local: "项目本地设置" };
 export interface AgentSkillView {
   runtime: "claude-code" | "pi" | "codex";
   supported: boolean;
