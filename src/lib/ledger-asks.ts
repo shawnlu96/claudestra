@@ -205,6 +205,23 @@ export function closeAsk(db: Database, id: string, state: "expired" | "cancelled
   });
 }
 
+/**
+ * 答复没送到（押着等目标空闲时收件的 agent 被 kill 了）：已答 / 答了一部分 → 回到 open、清掉答案，owner 再答一次时重新找收件方。
+ * 到期时间至少再给 REOPEN_MS，否则过期扫描会马上把它结掉。没答过的、已结成别的状态的返回 null。
+ */
+export function reopenAsk(db: Database, id: string, reason: string, now = Date.now()): Ask | null {
+  return tx(db, () => {
+    const a = getAsk(db, id);
+    if (!a || !a.answer || (a.state !== "answered" && a.state !== "open")) return null;
+    db.prepare("UPDATE asks SET state = 'open', answer = NULL, outboxMessageId = NULL, expiresAt = MAX(expiresAt, ?), updatedAt = ? WHERE id = ?")
+      .run(now + REOPEN_MS, now, id);
+    const out = getAsk(db, id) as Ask;
+    addEvent(db, out, "ask_reopen", "bridge", reason, { reason }, now);
+    return out;
+  });
+}
+const REOPEN_MS = 24 * 3_600_000;
+
 /** 投递信息补记（Discord 消息 id、答复消息 id、改投记录）：不改状态、不记事件 */
 export function patchAsk(db: Database, id: string, p: { discordMessageIds?: string[]; outboxMessageId?: string; extra?: Record<string, unknown> }, now = Date.now()): void {
   tx(db, () => {

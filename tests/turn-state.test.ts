@@ -6,7 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
-import { agentMsgMustWait, paneLooksWorking, paneShowsApiRetry, paneShowsCompacting, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
+import {
+  agentMsgMustWait, paneClearlyIdle, paneLooksWorking, paneShowsApiRetry, paneShowsCompacting, STUCK_THINKING_QUIET_MS, thinkingLooksStuck, turnState, type TurnInput,
+} from "../src/lib/turn-state.js";
 
 const RULE = "─".repeat(80);
 const footer = (agentsBar: string[]) =>
@@ -192,3 +194,32 @@ describe("压缩中碰上 API 重试（N7 定向复验 P3）", () => {
   });
 });
 
+
+describe("事件态卡在 thinking、画面明确空闲：以画面为准（T13c / 对抗式 P1-1）", () => {
+  const COMPACTING = ["✻ Compacting conversation… (12s)", "", footer([])].join("\n");
+  const RETRYING = ["✻ Repeated 529 Overloaded errors · Retrying in 38s", "", footer([])].join("\n");
+  const SUSPECT = [RULE, "some new TUI copy", RULE].join("\n");
+  const stuck = (over: Partial<TurnInput>) => turnState(at({ status: "thinking", paneAgain: CC_IDLE, quietMs: STUCK_THINKING_QUIET_MS, ...over }));
+
+  test("两帧都空闲、足够安静 → idle（只剩后台 agent 在跑也一样）", () => {
+    expect(stuck({}).main).toBe("idle");
+    expect(stuck({ pane: ONLY_BG, paneAgain: ONLY_BG }).main).toBe("idle");
+  });
+  test("回合刚开始：画面还没出 spinner，但刚投过消息 / 会话记录刚写 → 仍按忙", () => {
+    expect(stuck({ quietMs: 300 }).main).toBe("busy");
+    expect(stuck({ quietMs: undefined }).main).toBe("busy");
+  });
+  test("只抓了一帧 / 第二帧出了 spinner → 忙", () => {
+    expect(stuck({ paneAgain: undefined }).main).toBe("busy");
+    expect(stuck({ paneAgain: MAIN_BUSY_WITH_BG }).main).toBe("busy");
+  });
+  test("压缩中 / API 重试横幅 / 认不出画面 → 不算明确空闲，保持原判", () => {
+    expect(stuck({ pane: COMPACTING, paneAgain: COMPACTING }).main).toBe("compacting");
+    expect(stuck({ pane: RETRYING, paneAgain: RETRYING }).main).toBe("busy");
+    expect(stuck({ pane: SUSPECT, paneAgain: SUSPECT }).main).toBe("busy");
+    expect(paneClearlyIdle(SUSPECT)).toBe(false);
+  });
+  test("Codex / Pi 只看事件态：画面再空也不改判", () => {
+    for (const runtime of ["codex", "pi"]) expect(stuck({ runtime }).main).toBe("busy");
+  });
+});
