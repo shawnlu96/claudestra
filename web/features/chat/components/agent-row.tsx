@@ -329,7 +329,7 @@ export function AgentRow({
               {a.unread > 99 ? "99+" : a.unread}
             </span>
           )}
-          {compacting ? (
+          {a.status === "creating" ? <span className="shrink-0 pl-1 text-[11px] text-info/80">{t("创建中")}</span> : compacting ? (
             <span className="shrink-0 pl-1 text-[11px] text-info/80">{t("压缩中")}</span>
           ) : (a.busy || busyLive) ? (
             <span className="shrink-0 pl-1 text-[11px] text-warning/80">{t("工作中")}</span>

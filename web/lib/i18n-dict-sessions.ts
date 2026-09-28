@@ -29,4 +29,12 @@ export const SESSIONS_DICT: Record<string, string> = {
   "{n} 个会话": "{n} session|{n} sessions",
   "归档失败:": "Archive failed: ", // 值尾带空格
   "沉寂": "Dormant",
+  // 子会话收编确认（components/adopt-panel.tsx）
+  "另一个会话": "another session",
+  "确认收编子会话": "Confirm adopting a sub-session",
+  "这是「{parent}」的自动审查线程，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？":
+    "This is an auto-review thread of “{parent}” and usually doesn't need adopting on its own — it follows the main session. Adopt it as a separate agent anyway?",
+  "这是「{parent}」的子会话，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？":
+    "This is a sub-session of “{parent}” and usually doesn't need adopting on its own — it follows the main session. Adopt it as a separate agent anyway?",
+  "仍然收编": "Adopt anyway",
 };

@@ -15,6 +15,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   sessionTarget,
+  windowTarget,
   formatTmuxFailure,
   MASTER_SESSION,
 } from "../src/lib/tmux-helper.js";
@@ -38,6 +39,14 @@ describe("sessionTarget", () => {
   test("拼进 new-window 参数里的形状", () => {
     const args = ["new-window", "-t", sessionTarget(), "-n", "agent-x", "-c", "/tmp"];
     expect(args).toEqual(["new-window", "-t", "master:", "-n", "agent-x", "-c", "/tmp"]);
+  });
+});
+
+describe("windowTarget", () => {
+  // 实测 tmux 3.7：`send-keys -t master:agent-foo` 在 agent-foo 不在时按前缀落到 agent-foobar；
+  // `master:=agent-foo` 则报 can't find window 退出 1
+  test("窗口名精确匹配，不按前缀落到别的窗口", () => {
+    expect(windowTarget("agent-foo")).toBe(`${MASTER_SESSION}:=agent-foo`);
   });
 });
 

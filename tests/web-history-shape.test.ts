@@ -73,6 +73,12 @@ describe("toChatMessages（历史记录 → 气泡）", () => {
     expect(ext[0].content).toBe("看这个");
     expect(ext[0].attachments?.[0]).toMatchObject({ name: "pic.png", kind: "image", url: "/api/v1/attachments/123_pic.png" });
   });
+  test("外源的纯附件消息（T23）：正文以 [attachment: …] 开头，不能当来源头剥掉", () => {
+    const pure = u(1, "[attachment: /x/inbox/api_1790603315324_pic.png]\n[attachment: /x/inbox/api_1790603315400_a.pdf]", { from: "dev", fromId: "api:tok_1" });
+    const out = toChatMessages([pure], { selfIds: new Set(["api:owner:self"]) });
+    expect(out[0].content).toBe("");
+    expect(out[0].attachments?.map((x) => [x.name, x.kind])).toEqual([["pic.png", "image"], ["a.pdf", "file"]]);
+  });
   test("CRLF 归一 + 进度句自成一段不进 content", () => {
     const out = toChatMessages([a(1, { text: "x\r\ny", progress: "正在读文件" })]);
     expect(out[0].content).toBe("x\ny");
