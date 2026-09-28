@@ -42,8 +42,9 @@ export async function cmdWebRelease(args: string[]): Promise<void> {
     return;
   }
   if (sub === "deploy") {
+    // deployed 才表示这次真的构建并上线了；skipped（已是最新 / 构建锁忙 / 缺依赖）不算，自动化按它判断
     const r = await maybeBuildWeb();
-    output({ ok: !r.error, ...r });
+    output({ ok: !r.error, deployed: r.built, ...r });
     if (r.error) process.exitCode = 1;
   } else if (sub === "migrate") {
     output({ ok: true, notes: await migrateStaticDirToReleases(REPO_ROOT, () => publishWebOut(REPO_ROOT)) });
