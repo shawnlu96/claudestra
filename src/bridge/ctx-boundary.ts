@@ -14,10 +14,10 @@ import { tmuxRawStrict, tmuxSendLine, windowKey, windowTarget } from "../lib/tmu
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
 import { compactCommand, effectiveAction, isExecutor, matchPolicy, resolvePolicies, type CompactAction, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
-import { readLpPane, stripAnsi } from "../lib/lp-state.js";
+import { paneQuotaState, stripAnsi, type PaneQuotaState } from "../lib/lp-state.js";
 import {
-  boundaryDecision, boundaryView, globalBoundary, paneStateFromLp, policyBoundary, SKIP_REASON_TEXT,
-  type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type PaneQuotaState, type SkipReason,
+  boundaryDecision, boundaryView, globalBoundary, policyBoundary, SKIP_REASON_TEXT,
+  type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 
 const TICK_MS = 60_000;
@@ -31,7 +31,7 @@ const INJECT_GUARD_MS = 15 * 60_000;
 const POLICY_CACHE_MS = 2_000;
 const QUEUED_RE = /Press up to edit queued messages/i;
 /** 不做画面判定时的「画面」：什么都不挡（旧口径） */
-const UNGATED: PaneQuotaState = { wall: false, lp: "unknown", menu: false, compacting: false, draft: false };
+const UNGATED: PaneQuotaState = { wall: false, lp: "unknown", exhausted: false, menu: false, compacting: false, draft: false };
 
 /** 往哪个窗口注入、按不按执行者对待（执行者不跑 save-compact，见 lib effectiveAction） */
 export interface InjectTarget {
@@ -63,7 +63,7 @@ export interface CtxBoundaryDeps {
   now(): number;
   agents(): Promise<BoundaryAgent[]>;
   capture(target: string): Promise<PaneCapture | null>;
-  paneState(esc: string): PaneQuotaState;
+  paneState(plain: string, esc: string): PaneQuotaState;
   send(target: string, line: string): Promise<void>;
   autoCompact(): (GlobalAutoCompact & { policies?: unknown }) | undefined;
   log(line: string): void;
@@ -156,7 +156,7 @@ export async function injectCompact(
 ): Promise<InjectResult> {
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
   // 读不到画面（多半是窗口不在）不管 gate 都不发：tmux 往不存在的窗口 send-keys 不报错，发了也只会假报「已开始」
-  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.esc));
+  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.plain, pane.esc));
   if (reason || !pane) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
   const line = compactCommand(effectiveAction(t.executor, opts.action), opts.keep ?? null);
   try {
@@ -185,7 +185,7 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     window: b.window,
     hardCap: b.hardCap,
     idle: idleEnough(a, b, pane, now),
-    pane: !gate ? UNGATED : pane === null ? null : deps.paneState(pane.esc),
+    pane: !gate ? UNGATED : pane === null ? null : deps.paneState(pane.plain, pane.esc),
     queued: pane !== null && QUEUED_RE.test(pane.plain),
     injectedRecently: compactInjectedRecently(a.target, now),
     lastTrig: lastTrig.get(a.name) ?? 0,
@@ -323,7 +323,7 @@ const liveDeps: CtxBoundaryDeps = {
   now: () => Date.now(),
   agents: liveAgents,
   capture: capturePane,
-  paneState: (esc) => paneStateFromLp(readLpPane(esc)),
+  paneState: paneQuotaState,
   send: (t, line) => tmuxSendLine(t, line),
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),

@@ -1,59 +1,56 @@
 /**
- * 上下文边界接 T35 的 lp-state：readLpPane（一次 -e 抓屏）→ paneStateFromLp → 注入闸。
- * fixtures/ctx-boundary/ 是私有 tmux 里起真实 CC 界面抓的（2.1.283，没发消息）；长草稿 / bash 模式 / 草稿里的整行横线从空框样本改出来。
+ * 上下文边界的注入闸接 T35 的 lp-state：paneQuotaState(plain, escaped)（一次 -e 抓屏，plain 是它去色后的样子）。
+ * 样本是 T35 的 fixtures/lp/：input-*（私有 tmux 里真实 CC 2.1.283 的输入框）、modal-*（沙箱抓的权限框 / AUQ / Rewind）；
+ * 长草稿 / bash 模式 / 草稿里的整行横线从空框样本改出来。
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { readLpPane } from "../src/lib/lp-state.js";
-import { paneStateFromLp } from "../src/lib/ctx-boundary-decision.js";
+import { paneQuotaState, stripAnsi } from "../src/lib/lp-state.js";
 import { ctxBoundaryTick, injectCompact, resetCtxBoundaryState, type BoundaryAgent, type CtxBoundaryDeps } from "../src/bridge/ctx-boundary.js";
 
-const fx = (n: string) => readFileSync(join(import.meta.dir, "fixtures/ctx-boundary", `${n}.ansi`), "utf8");
-const state = (raw: string) => paneStateFromLp(readLpPane(raw));
+const fx = (n: string) => readFileSync(join(import.meta.dir, "fixtures/lp", `${n}.ansi`), "utf8");
+const state = (raw: string) => paneQuotaState(stripAnsi(raw), raw);
 
 /** 把空框样本里「❯ 灰色提示」那一行换成给定的几行（模拟各种输入框内容） */
 function withInput(lines: string[]): string {
-  return fx("empty")
+  return fx("input-suggestion")
     .split("\n")
     .flatMap((l) => (l.includes("❯") && l.includes("\x1b[2m") ? lines : [l]))
     .join("\n");
 }
 
-describe("paneStateFromLp：真实样本", () => {
-  test("空框（只有灰色提示）→ 不算草稿，也不挡", () => {
-    expect(state(fx("empty"))).toEqual({ wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false });
+describe("注入闸看到的画面（真实样本）", () => {
+  test("空框（只有灰色提示）→ 不挡", () => {
+    const s = state(fx("input-suggestion"));
+    expect([s.draft, s.menu, s.wall, s.compacting]).toEqual([false, false, false, false]);
   });
   test("单行 / 多行草稿 → 草稿", () => {
-    expect(state(fx("draft")).draft).toBe(true);
-    expect(state(fx("draft-multiline")).draft).toBe(true);
+    expect(state(fx("input-draft")).draft).toBe(true);
+    expect(state(fx("input-draft-multiline")).draft).toBe(true);
+  });
+  test("权限框 / AUQ / Rewind → 挡（menu 或 draft 至少一个为真）", () => {
+    for (const f of ["modal-permission", "modal-auq", "modal-rewind"]) {
+      const s = state(fx(f));
+      expect(s.menu || s.draft).toBe(true);
+    }
   });
 });
 
-describe("认不出的输入框一律当草稿（unknown 也算）", () => {
+describe("认不出的输入框一律当草稿", () => {
   const cases: [string, string[]][] = [
     ["14 行以上的长草稿", ["\x1b[39m❯\xa0line 1", ...Array.from({ length: 15 }, (_, i) => `  line ${i + 2}`)]],
     ["bash 模式（! 提示符）", ["\x1b[39m!\xa0ls -la"]],
     ["草稿里带整行横线", ["\x1b[39m❯\xa0above", "  " + "─".repeat(60), "  below"]],
   ];
-  for (const [name, lines] of cases) {
-    test(name, () => {
-      const r = readLpPane(withInput(lines));
-      expect(r.input).not.toBe("empty");
-      expect(state(withInput(lines)).draft).toBe(true);
-    });
-  }
-  test("有排队消息（输入框本身空）→ 不算草稿；自动压缩那边另由「已排队」一步挡住", () => {
-    const raw = withInput(["\x1b[39m❯\xa0/compact x", "  Press up to edit queued messages"]);
-    expect(readLpPane(raw).input).toBe("queued");
-    expect(state(raw).draft).toBe(false);
-  });
-  test("纯文本（没带 -e）分不清灰字和草稿 → 也当草稿", () => {
-    expect(state(fx("empty").replace(/\x1b\[[0-9;]*m/g, "")).draft).toBe(true);
+  for (const [name, lines] of cases) test(name, () => expect(state(withInput(lines)).draft).toBe(true));
+  test("只有纯文本（没带 -e）分不清灰字和草稿 → 也当草稿", () => {
+    const plain = stripAnsi(fx("input-suggestion"));
+    expect(paneQuotaState(plain, "").draft).toBe(true);
   });
 });
 
-describe("接上真实判定后的执行器：长草稿 / bash 模式过硬上限也不注入", () => {
+describe("执行器接上真实判定：草稿 / 对话框过硬上限也一个键都不敲", () => {
   function run(raw: string) {
     resetCtxBoundaryState();
     const sent: string[] = [];
@@ -61,8 +58,8 @@ describe("接上真实判定后的执行器：长草稿 / bash 模式过硬上�
     const deps: CtxBoundaryDeps = {
       now: () => 1_000_000_000,
       agents: async () => [a],
-      capture: async () => ({ plain: raw.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ""), esc: raw }),
-      paneState: (esc) => state(esc),
+      capture: async () => ({ plain: stripAnsi(raw), esc: raw }),
+      paneState: paneQuotaState,
       send: async (_t, line) => void sent.push(line),
       autoCompact: () => undefined,
       log: () => {},
@@ -70,16 +67,26 @@ describe("接上真实判定后的执行器：长草稿 / bash 模式过硬上�
     };
     return { deps, sent, a };
   }
-  test("空框样本 → 硬上限照常注入", async () => {
-    const { deps, sent } = run(fx("empty"));
+  test("空框 → 硬上限照常注入", async () => {
+    const { deps, sent } = run(fx("input-suggestion"));
     expect((await ctxBoundaryTick(deps))[0].verdict).toEqual({ fire: true, kind: "hard-cap" });
     expect(sent.length).toBe(1);
   });
-  test("各种草稿 → 跳过（草稿），一个键都不敲", async () => {
-    for (const raw of [fx("draft"), fx("draft-multiline"), withInput(["\x1b[39m!\xa0ls -la"]), withInput(["\x1b[39m❯\xa0l1", ...Array.from({ length: 15 }, () => "  x")])]) {
+  test("草稿 / 长草稿 / bash 模式 / 权限框 / AUQ / Rewind → 不发", async () => {
+    const screens = [
+      fx("input-draft"),
+      fx("input-draft-multiline"),
+      withInput(["\x1b[39m!\xa0ls -la"]),
+      withInput(["\x1b[39m❯\xa0l1", ...Array.from({ length: 15 }, () => "  x")]),
+      fx("modal-permission"),
+      fx("modal-auq"),
+      fx("modal-rewind"),
+    ];
+    for (const raw of screens) {
       const { deps, sent, a } = run(raw);
-      expect((await ctxBoundaryTick(deps))[0].verdict).toEqual({ fire: false, reason: "draft" });
-      expect(await injectCompact(a, { action: "compact" }, deps)).toMatchObject({ status: "skipped", reason: "draft" });
+      const v = (await ctxBoundaryTick(deps))[0].verdict;
+      expect(v.fire).toBe(false);
+      expect(await injectCompact(a, { action: "compact" }, deps)).toMatchObject({ status: "skipped" });
       expect(sent.length).toBe(0);
     }
   });

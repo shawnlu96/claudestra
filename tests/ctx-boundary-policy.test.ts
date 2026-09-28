@@ -3,9 +3,8 @@ import {
   BUILTIN_POLICIES, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globMatch, isExecutor, matchPolicy, resolvePolicies,
   type CtxPolicy,
 } from "../src/lib/ctx-boundary-policy.js";
-import {
-  boundaryDecision, boundaryView, globalBoundary, policyBoundary, type BoundaryInput, type PaneQuotaState,
-} from "../src/lib/ctx-boundary-decision.js";
+import { boundaryDecision, boundaryView, globalBoundary, policyBoundary, type BoundaryInput } from "../src/lib/ctx-boundary-decision.js";
+import type { PaneQuotaState } from "../src/lib/lp-state.js";
 
 const byId = (ps: CtxPolicy[], id: string) => ps.find((p) => p.id === id);
 
@@ -150,7 +149,7 @@ describe("policyBoundary", () => {
 });
 
 describe("boundaryDecision：决策表", () => {
-  const clear: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, draft: false };
+  const clear: PaneQuotaState = { wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false };
   const base: BoundaryInput = {
     ctx: 210_000, window: 200_000, hardCap: 250_000, idle: true, pane: clear, queued: false, injectedRecently: false,
     lastTrig: 0, now: 1_000_000_000, retryMs: 30 * 60_000,
@@ -293,7 +292,7 @@ describe("第 1 轮审查补的：match 替换语义 / 宽模式抢执行者 / �
     expect(resolvePolicies([{ id: "executor", enabled: false }, { id: "x", window: 1, match: { names: ["agent-*"] } }]).warnings).toEqual([]);
   });
   test("决策表：输入框有草稿 → 不注入，硬上限也不例外；LP 余量用完 → 按撞墙处理", () => {
-    const pane: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, draft: true };
+    const pane: PaneQuotaState = { wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: true };
     const base: BoundaryInput = { ctx: 900_000, window: 200_000, hardCap: 250_000, idle: false, pane, queued: false, injectedRecently: false, lastTrig: 0, now: 1, retryMs: 1 };
     expect(boundaryDecision(base)).toEqual({ fire: false, reason: "draft" });
     expect(boundaryDecision({ ...base, pane: { ...pane, draft: false, wall: true, lp: "on", exhausted: true } })).toEqual({ fire: false, reason: "quota-wall" });

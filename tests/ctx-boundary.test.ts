@@ -4,7 +4,7 @@ import {
   type BoundaryAgent, type CtxBoundaryDeps,
 } from "../src/bridge/ctx-boundary.js";
 import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
-import type { PaneQuotaState } from "../src/lib/ctx-boundary-decision.js";
+import type { PaneQuotaState } from "../src/lib/lp-state.js";
 
 const MIN = 60_000;
 const IDLE_PANE = "some output\n❯ \n";
@@ -17,7 +17,7 @@ function harness(
   let now = 1_000_000_000;
   const sent: { target: string; line: string }[] = [];
   const logs: string[] = [];
-  const state: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, draft: false, ...opts.state };
+  const state: PaneQuotaState = { wall: false, lp: "off", exhausted: false, menu: false, compacting: false, draft: false, ...opts.state };
   const deps: CtxBoundaryDeps = {
     now: () => now,
     agents: async () => agents,
