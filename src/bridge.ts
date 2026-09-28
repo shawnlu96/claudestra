@@ -73,7 +73,7 @@ import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { initPeerIngress, localProbeResponse, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
-import { initInbox, takeInbox } from "./bridge/inbox.js";
+import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
@@ -2250,7 +2250,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "move_channel": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await moveChannelRequest(discord, WEB_ONLY, msg)) })); break;
-    case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws, Date.now(), typeof msg.ack === "string" ? msg.ack : undefined)) })); break;
+    case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws, Date.now(), inboxOpts(msg))) })); break;
 
     case "project_info": {
       // v2.21+ Phase 2:agent 自查项目归属——成员(在线状态/purpose)+ 目录。

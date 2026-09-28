@@ -37,12 +37,17 @@ export const CHECK_INBOX_TOOL = {
   description: CHECK_INBOX_DESCRIPTION,
   inputSchema: {
     type: "object" as const,
-    properties: { ack: { type: "string", description: "上一次领到的批次号（inbox_xxx）：确认它已处理完，顺带领下一批" } },
+    properties: {
+      ack: { type: "string", description: "上一次领到的批次号（inbox_xxx）：确认它已处理完，顺带领下一批" },
+      read: { type: "string", description: "分页读一条太长、没放进批里的消息（填它的 message_id）" },
+      page: { type: "number", description: "配合 read：第几页，从 1 开始" },
+    },
   },
 };
 
 /** check_inbox：领取排队给我的消息（bridge/inbox.ts），ack 确认上一批后才出队 */
 export async function checkInboxTool(bridgeRequest: BridgeRequest, args: Record<string, unknown> = {}) {
-  const r = await bridgeRequest({ type: "check_inbox", ...(typeof args.ack === "string" && args.ack ? { ack: args.ack } : {}) });
+  const pick = (k: string) => (args[k] !== undefined && args[k] !== "" ? { [k]: args[k] } : {});
+  const r = await bridgeRequest({ type: "check_inbox", ...pick("ack"), ...pick("read"), ...pick("page") });
   return { content: [{ type: "text" as const, text: String(r.text || "收件箱是空的。") }] };
 }
