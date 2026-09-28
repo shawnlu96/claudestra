@@ -14,6 +14,7 @@ import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
+import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
 import { VERIFY_CMD } from "./ledger-verify.js";
 import { READ_CMDS } from "./ledger-read-cmds.js";
@@ -28,6 +29,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...DEP_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
+  ...AUDIT_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]", run: importCmd },
 };
 

@@ -11,7 +11,7 @@ import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } fro
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps"] as const;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -122,13 +122,30 @@ function migrateDeps(db: Database): void {
   run("CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project)");
 }
 
+/**
+ * 巡检结果（T29，lib/ledger-audit-store.ts）。放单独一张表而不是事件族：findings 要改 lastSeen / resolvedAt，
+ * events 只能追加；而且当事件写会挤进 taskView.lastEvent 与 projectEvents（T11a 审查 P1-5 的坑）。
+ * changedAt 只在开 / 关 / 重开时更新（读侧变更推送的游标）；queuedAs = 通知押在押后队列里的 messageId，投出去才算推过。
+ */
+const SCHEMA_AUDIT: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS audit_findings (
+  key TEXT PRIMARY KEY, project TEXT NOT NULL, taskId TEXT, rule TEXT NOT NULL,
+  firstSeen INTEGER NOT NULL, lastSeen INTEGER NOT NULL, resolvedAt INTEGER,
+  since INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '', suggestion TEXT NOT NULL DEFAULT '',
+  notify TEXT, notifiedAt INTEGER, queuedAs TEXT, changedAt INTEGER NOT NULL)`,
+  "CREATE INDEX IF NOT EXISTS audit_findings_open ON audit_findings(project, resolvedAt)",
+  "CREATE INDEX IF NOT EXISTS audit_findings_changed ON audit_findings(changedAt)",
+];
+
 /** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
 type Migration = readonly string[] | ((db: Database) => void);
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
-export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps];
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT];
 const MIGRATIONS = LEDGER_MIGRATIONS;
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
+/** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
+export const AUDIT_SCHEMA_VERSION = MIGRATIONS.indexOf(SCHEMA_AUDIT) + 1;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -215,11 +232,13 @@ const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   tasks: ["assigneeKind", "assignee"],
   task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
   asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+  audit_findings: ["key", "project", "rule", "resolvedAt", "notify", "notifiedAt", "queuedAs", "changedAt"],
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
   asks: ["asks_state_project", "asks_from_state"],
   task_deps: ["task_deps_to", "task_deps_project"],
+  audit_findings: ["audit_findings_open", "audit_findings_changed"],
 };
 
 /** 按 LEDGER_TABLES、REQUIRED_COLUMNS、REQUIRED_INDEXES 找缺的表 / 列 / 索引；空数组 = 完整 */

@@ -23,6 +23,7 @@
 - **精确空闲检测** — Claude Code `Stop` / `Notification` hooks 精确驱动 Discord typing indicator；30 分钟安全超时兜底。
 - **大总管守护** — launchd 管理的 launcher 保持大总管 tmux session 存活，自动处理 Claude Code 确认弹窗。
 - **防手滑护栏（不是安全边界）** — 每个 spawn 的 agent 都带 `--disallowedTools` 黑名单（`rm -rf`、`git push --force`、`git reset --hard`、`chmod 777`、fork bomb）。规则是**对命令字符串做前缀匹配**，等价写法（`/bin/rm -rf`、`rm -fr`、`find … -delete`、`python -c`、变量拼接）都能绕过，且没有 `PreToolUse` 钩子兜底。加上 `DEFAULT_PERMISSION_MODE` 就是 `bypassPermissions`（见 `lib/claude-launch.ts`），每个 agent 实质上是一个以用户身份运行的无限制 shell —— 黑名单只防意外，挡不住任何有意为之的 prompt。
+- **台账巡检（T29，`docs/architecture/ledger-audit.md`）** — bridge 每 15 分钟跑一次 `manager.ts ledger audit`（不经 LLM），只把新发现的「可能漏了」推给 PM / 调度助理（review 没人审、执行者空闲、押着给 PM 的消息、merge/live 停滞、执行者没回收或成了孤儿、owner 的要求久未完成）；结果存进台账的 `audit_findings` 表，`GET /api/v1/ledger/:project` 以 `audit` 字段返回。
 
 ### 跨 Claudestra peer 协作
 

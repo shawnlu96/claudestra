@@ -100,7 +100,7 @@ describe("GET /ledger/:project", () => {
   test("总览：事项、任务带 lastEvent 与服务端算的指标（与 ledger-metrics 一致）、冻结状态、项目级事件", async () => {
     const res = await get("/ledger/p");
     const body = (await res.json()) as any;
-    expect(body).toMatchObject({ ok: true, project: "p", exists: true, schema: LEDGER_SCHEMA_VERSION });
+    expect(body).toMatchObject({ ok: true, project: "p", exists: true, schema: LEDGER_SCHEMA_VERSION, audit: [] });
     expect(body.meta).toMatchObject({ docsDir: docs, queueFrozen: { frozen: true, reason: "等 T1 上线" } });
     expect(body.items.map((i: { id: string }) => i.id)).toEqual(["i1"]);
     expect(body.tasks.map((t: { id: string }) => t.id)).toEqual(["T1", "T2"]);
