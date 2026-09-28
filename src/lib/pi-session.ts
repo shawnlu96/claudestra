@@ -210,7 +210,9 @@ export function wrapPiInboundAsChannel(text: string): string {
   if (!hasInboundHeader(text)) return text;
   const head = text.split(/\]\r?\n\r?\n/)[0];
   const from = /[「"]([^」"]+)[」"]/.exec(head)?.[1] ?? "";
-  return `<channel source="claudestra"${from ? ` user="${from}"` : ""}>\n${text}\n</channel>`;
+  // 注入标记与 Claude Code 的 channel 属性同形：解包只对带它的剥头（lib/inbound-body.ts 的 channelBodyText）
+  const mark = /^\s*\[🤖/.test(text) ? ' is_agent="true"' : ' api="true"';
+  return `<channel source="claudestra"${from ? ` user="${from}"` : ""}${mark}>\n${text}\n</channel>`;
 }
 
 /** 把 content（字符串或块数组）转成"可包 channel 的正文" */

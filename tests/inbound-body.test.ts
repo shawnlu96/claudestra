@@ -29,9 +29,10 @@ const ATTRS = (paths: string[]) =>
 const wrap = (attrs: string, body: string) => `<channel ${attrs}>\n${body}\n</channel>`;
 
 describe("stripChannelHeader", () => {
-  test("正文为空（纯附件）：trim 之后没有空行边界，也要整段剥掉", () => {
+  test("正文为空（纯附件）：有空行边界照剥；trim 掉空行后只在确知是注入头时整段剥", () => {
     expect(stripChannelHeader(webBody(""))).toBe("");
-    expect(stripChannelHeader(webBody("").trim())).toBe("");
+    expect(stripChannelHeader(webBody("").trim(), true)).toBe("");
+    expect(stripChannelHeader(webBody("").trim())).toBe(webBody("").trim());
   });
 
   test("有正文：只剥头；头里的 ] 不截断", () => {
@@ -41,7 +42,17 @@ describe("stripChannelHeader", () => {
 
   test("其它来源的头（🤖 / 🤝）正文为空时也剥干净", () => {
     expect(stripChannelHeader("[🤖 来自 agent-a 的 inbound 消息（非 FYI）。\n规则：有干货才说话。]\n\n")).toBe("");
-    expect(stripChannelHeader("[🤝 来自 peer 实例「he」的跨机请求。\n用 reply() 回答。]")).toBe("");
+    expect(stripChannelHeader("[🤝 来自 peer 实例「he」的跨机请求。\n用 reply() 回答。]", true)).toBe("");
+  });
+
+  test("审查 P2-1：用户自己打的方括号文字不会被当成头整段吃掉", () => {
+    expect(stripChannelHeader("[🌐 其实] 普通 [话]")).toBe("[🌐 其实] 普通 [话]");
+    expect(stripChannelHeader("[🤖 hi]")).toBe("[🤖 hi]");
+    expect(channelBodyText('user="tao" user_id="123"', "[🌐 其实] 普通 [话]")).toBe("[🌐 其实] 普通 [话]");
+    expect(channelBodyText('user="tao" user_id="123"', "[🤖 hi]")).toBe("[🤖 hi]");
+    // 5 月旧格式 agent 通知：几行方括号叠在一起、没有空行，是正文不是头（带 is_agent 也不能吃掉）
+    const may = "[🤖 来自 agent-b]\n[💡 你之前 send_to_agent 时填的期望：等后端确认。]\n[⚠️ 对方还没回复。]";
+    expect(channelBodyText('user="agent-b" is_agent="true"', may)).toBe(may);
   });
 
   test("不是注入头的 [ 开头文本原样保留", () => {
@@ -70,7 +81,13 @@ describe("withAttachmentLines / channelAttachmentPaths", () => {
 
   test("channelBodyText：剥头 + 补附件行", () => {
     expect(channelBodyText(ATTRS([IMG]), webBody(""))).toBe(`[attachment: ${IMG}]`);
-    expect(channelBodyText('user="x"', webBody(""))).toBe("");
+    expect(channelBodyText('user="x" api="true"', webBody(""))).toBe("");
+  });
+
+  test("审查 P2-5：正文里已有附件行就不按属性补（文件名带分号会被 ; 拆成假路径）", () => {
+    const semi = "/x/inbox/123_a;b.png";
+    const body = `看图\n\n[attachment: ${semi}]`;
+    expect(channelBodyText(`user="tao" attachment_count="1" attachments="${semi}"`, body)).toBe(body);
   });
 });
 
@@ -91,7 +108,7 @@ describe("CC 历史解包（unwrapChannelMessage）", () => {
   });
 
   test("只有头、没有附件也没有正文 → 不进历史（null），而不是显示抬头", () => {
-    expect(unwrapChannelMessage(wrap('user="owner"', webBody("")))).toBeNull();
+    expect(unwrapChannelMessage(wrap('user="owner" api="true"', webBody("")))).toBeNull();
   });
 });
 
@@ -100,6 +117,7 @@ describe("Pi 裸记录（wrapPiInboundAsChannel → unwrap）", () => {
     const text = webBody(withAttachmentLines("", [IMG]));
     expect(hasInboundHeader(text)).toBe(true);
     expect(unwrapChannelMessage(wrapPiInboundAsChannel(text))).toEqual({ text: `[attachment: ${IMG}]`, from: "owner" });
+    expect(wrapPiInboundAsChannel(text)).toContain('api="true"');
   });
 
   test("Pi 旧记录只有抬头（当时扩展没收到附件）→ 丢掉，不显示抬头", () => {
@@ -129,8 +147,8 @@ describe("web 还原（extractAttachments）", () => {
 describe("出本机的文本不带路径（Discord 镜像 / 转交原话）", () => {
   test("API 镜像：纯附件给个数，附件+文字只留文字；都不含本机路径", () => {
     const pure = withAttachmentLines("", [IMG, PDF]);
-    expect(apiMirrorBody(pure, 2)).toBe("📎 2 个附件");
-    expect(apiMirrorBody("", 1)).toBe("📎 1 个附件");
+    expect(apiMirrorBody(pure, 2)).toMatch(/^📎 2 (个附件|attachments)$/);
+    expect(apiMirrorBody("", 1)).toMatch(/^📎 1 (个附件|attachment)$/);
     expect(apiMirrorBody(withAttachmentLines("看图", [IMG]), 1)).toBe("看图");
     for (const t of [apiMirrorBody(pure, 2), apiMirrorBody(withAttachmentLines("看图", [IMG]), 1)]) {
       expect(t).not.toContain("/Users/");

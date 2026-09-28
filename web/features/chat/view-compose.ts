@@ -74,18 +74,51 @@ export function survivingPending(
   });
 }
 
-/** 对账容许的本地/服务端时钟差：再大就可能配上几十秒前另一条同样只有图的消息 */
-const ATTACH_ONLY_SKEW_MS = 30_000;
-
 /**
- * 纯附件的乐观消息（正文为空）与历史条目配对：正文都空、附件数相同、历史不早于发送时刻。
- * 只比「正文都为空」会配上更早的另一条纯图片消息，把刚发的气泡提前吞掉。
+ * 发送时刻的历史游标（视图里最后一条带 jsonl 行号的消息）：乐观消息记下它，对账时只认这之后落盘的记录。
+ * 纯附件消息没有正文可比，不记游标就会配上更早的另一条纯图片（审查实测）；按时间窗比又怕手机时钟不准。
  */
+export function sendCursor(messages: readonly ChatMessage[]): Pick<ChatMessage, "sentAfter"> {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (typeof m.seqEnd === "number") return { sentAfter: { seq: m.seqEnd, ...(m.sid ? { sid: m.sid } : {}) } };
+  }
+  return {};
+}
+
+/** 纯附件的乐观消息与历史条目配对：正文都空、附件数相同、在发送时的游标之后（换了会话就不比行号） */
 function sameAttachmentOnly(m: ChatMessage, h: ChatMessage): boolean {
   if (h.content.trim() || (m.attachments?.length ?? 0) !== (h.attachments?.length ?? 0)) return false;
-  const sent = m.ts ? Date.parse(m.ts) : NaN;
-  const seen = h.ts ? Date.parse(h.ts) : NaN;
-  return Number.isNaN(sent) || Number.isNaN(seen) || seen >= sent - ATTACH_ONLY_SKEW_MS;
+  const c = m.sentAfter;
+  if (!c || typeof h.seqEnd !== "number" || (c.sid && h.sid && c.sid !== h.sid)) return true;
+  return h.seqEnd > c.seq;
+}
+
+/** 服务端落盘文件名的清洗（src/bridge/api-routes.ts 上传处同一条规则）：本地乐观气泡只有原始文件名 */
+const serverName = (name: string) => name.replace(/[^\w.\-]/g, "_");
+
+/** 两组附件是不是同一批：有 API 地址的比地址；本地乐观气泡（blob: 或没有地址）比清洗后的文件名 */
+function sameAttachments(a: ChatMessage["attachments"], b: ChatMessage["attachments"]): boolean {
+  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
+  return (a ?? []).every((x, i) => {
+    const y = b![i];
+    const local = (u?: string) => !u || u.startsWith("blob:");
+    if (!local(x.url) && !local(y.url)) return x.url === y.url;
+    return serverName(x.name) === serverName(y.name);
+  });
+}
+
+/**
+ * 他端用户发言（stream user-in）是不是视图里已有的某条（本端乐观消息的回声 / 历史已有）：有正文比正文（含注入头无关比对）；
+ * 纯附件比附件本身——只比「附件数相同」会把别的设备连发的第二张纯图当成回声吞掉（审查 P2-3）。
+ */
+export function isUserEcho(m: ChatMessage, text: string, attachments?: ChatMessage["attachments"]): boolean {
+  if (m.role !== "user") return false;
+  const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
+  const t = norm(text);
+  const raw = m.wire ?? m.content ?? "";
+  if (t) return norm(raw) === t || norm(stripInboundHeader(raw)) === t;
+  return !norm(raw) && sameAttachments(m.attachments, attachments);
 }
 
 /**
