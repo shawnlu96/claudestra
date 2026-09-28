@@ -92,7 +92,7 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
     case "deploy":
       return tr("上线 {v}", { v: typeof d.version === "string" ? d.version : "" }).trim() + (tail ? `${colon}${tail}` : "");
     case "verify":
-      return tr(d.result === "fail" ? "线上验证失败" : "线上验证通过") + (tail ? `${colon}${tail}` : "");
+      return tr(verifyHeadline(d.result)) + (tail ? `${colon}${tail}` : "");
     case "rollback":
       return tr("{who} 回滚", { who }) + (tail ? `${colon}${tail}` : "");
     case "note":
@@ -184,4 +184,100 @@ export function participants(d: Pick<TaskDetail, "task" | "events">): Participan
   }
   for (const [name, rounds] of byReviewer) out.push({ name, role: "reviewer", rounds });
   return out;
+}
+
+/** verify 事件的结论一句话（unknown = 有项查不到，也没推进 verified） */
+export function verifyHeadline(result: unknown): string {
+  return result === "pass" ? "线上验证通过" : result === "unknown" ? "线上验证查不到结果" : "线上验证失败";
+}
+
+export type CheckStatus = "pass" | "fail" | "unknown";
+
+export interface CheckRow {
+  id: string;
+  label: string;
+  status: CheckStatus;
+  /** 中文全文；有 tpl 时界面按 tpl + params 翻译（模板与 src/lib/ledger-probes.ts 同一份字面量） */
+  detail: string;
+  tpl: string | null;
+  params: Record<string, string | number>;
+  /** PM / owner 豁免的理由；有它就不挡 verified */
+  waived: string | null;
+}
+
+export type ChecklistSource = "files" | "files+extra" | "extra" | "evidence";
+
+export interface ChecklistView {
+  result: CheckStatus;
+  ts: number;
+  actor: string;
+  rows: CheckRow[];
+  /** 通过的结论里有几项是豁免放行的 */
+  waived: number;
+  source: ChecklistSource | null;
+  /** 推断不出检查单（结论只能是查不到）；reason 为原因的中文句子，界面再翻译 */
+  incomplete: boolean;
+  incompleteText: string | null;
+  /** 非本仓库项目只核证据等说明：tpl + params 可翻译，老数据只有中文全文 */
+  note: { text: string; tpl: string | null; params: Record<string, string | number> } | null;
+}
+
+/** 推断不全的原因（src/lib/ledger-probes.ts 的 IncompleteReason） */
+const INCOMPLETE_TEXT: Record<string, string> = {
+  files: "拿不到 PR 的文件列表，推断不出检查单",
+  ownership: "判断不了任务所属项目是不是本仓库，不知道该核什么",
+};
+
+/** 检查单来源的一句话 */
+export const SOURCE_TEXT: Record<ChecklistSource, string> = {
+  files: "按 PR 改动的文件推断",
+  "files+extra": "按 PR 文件推断，另有手工追加项",
+  extra: "拿不到文件列表，手工指定",
+  evidence: "只核证据文件",
+};
+
+/** 探针 id → 检查项名（与 src/lib/ledger-probes.ts 的 PROBE_IDS 对应；不认识的 id 原样显示） */
+const PROBE_LABEL: Record<string, string> = {
+  "pr-merged": "PR 已合并",
+  "web-local": "本机网页已部署",
+  "web-relay": "中继网页已部署",
+  "daemon-bridge": "bridge 已重启",
+  "daemon-cron": "cron 已重启",
+  "daemon-launcher": "launcher 已重启",
+  "manual-evidence": "证据文件",
+};
+
+const asStatus = (v: unknown): CheckStatus => (v === "pass" || v === "fail" ? v : "unknown");
+const asParams = (v: unknown): Record<string, string | number> =>
+  v && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v).filter(([, x]) => typeof x === "string" || typeof x === "number") as [string, string | number][])
+    : {};
+
+/** 最近一次系统核对的完成检查单；老的手填 verify 事件没有 checks，不算 */
+export function latestChecklist(events: readonly LedgerEventView[]): ChecklistView | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind !== "verify" || !Array.isArray(e.data.checks)) continue;
+    const rows = (e.data.checks as Record<string, unknown>[]).map((c) => ({
+      id: String(c.id ?? ""),
+      label: PROBE_LABEL[String(c.id)] ?? String(c.id ?? ""),
+      status: asStatus(c.status),
+      detail: typeof c.detail === "string" ? c.detail : "",
+      tpl: typeof c.tpl === "string" && c.tpl ? c.tpl : null,
+      params: asParams(c.params),
+      waived: typeof c.waived === "string" && c.waived ? c.waived : null,
+    }));
+    const src = e.data.checklistSource;
+    return {
+      result: asStatus(e.data.result), ts: e.ts, actor: e.actor, rows,
+      waived: rows.filter((r) => r.waived && r.status !== "pass").length,
+      source: typeof src === "string" && src in SOURCE_TEXT ? (src as ChecklistSource) : null,
+      incomplete: e.data.incomplete === true,
+      incompleteText: e.data.incomplete === true ? INCOMPLETE_TEXT[String(e.data.incompleteReason ?? "files")] ?? INCOMPLETE_TEXT.files : null,
+      note: typeof e.data.note === "string" && e.data.note
+        ? { text: e.data.note, tpl: typeof e.data.noteTpl === "string" && e.data.noteTpl ? e.data.noteTpl : null, params: asParams(e.data.noteParams) }
+        : null,
+    };
+  }
+  return null;
 }

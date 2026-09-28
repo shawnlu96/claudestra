@@ -609,7 +609,7 @@ export function Composer() {
                     <span className="animate-cstra-breathe absolute inline-flex size-3 rounded-full bg-error" />
                     <span className="relative inline-flex size-2 rounded-full bg-error" />
                   </span>
-                  <span className="text-[14px] font-medium text-error/90">
+                  <span className="text-[14px] font-medium text-error-soft-90">
                     {t("正在录音")} {recSecs}s · {t("松开结束")}
                   </span>
                 </>
@@ -730,7 +730,7 @@ export function Composer() {
               )}
             </button>
             {recErr && recState === "idle" && (
-              <span className="truncate text-[11px] text-error/70">{t(recErr)}</span>
+              <span className="truncate text-[11px] text-error-soft-70">{t(recErr)}</span>
             )}
 
             <div className="ml-auto flex items-center gap-1.5">
