@@ -35,6 +35,11 @@ export class TurnCuts {
   private readonly replies = new Map<string, number[]>();
   /** 最近的 tool_start（lateInflight 要拿 tool_done 对回它的 start） */
   private readonly starts = new Map<string, CutEvent>();
+  /**
+   * Codex 频道：上次 Stop 之后被打断过（Esc 之后 codex queue 会卡住，下一条入站要打进 TUI，见 lib/codex-tui-submit.ts）。
+   * 只在内存：bridge 重启丢了，最坏是那一条又卡在队列里，和改之前一样
+   */
+  private readonly codexPaused = new Set<string>();
 
   constructor(path: string | null = statePath("turn-cuts.json"), private readonly now: () => number = Date.now) {
     this.cuts = new PersistedMap<Cut>(path, "打断记录", isCut, []);
@@ -77,7 +82,13 @@ export class TurnCuts {
       this.cuts.get(i.channelId),
     );
     this.cuts.set(i.channelId, cut);
+    if (i.runtime === "codex") this.codexPaused.add(i.channelId);
     return cut;
+  }
+
+  /** 投递前调：Codex 上次 Stop 之后被打断过 → 这一条标 after_interrupt（只标一条：它打出的那一轮结束后队列就恢复了） */
+  takeAfterInterrupt(channelId: string): boolean {
+    return this.codexPaused.delete(channelId);
   }
 
   /** 「停」但这次没发键（本来就空闲 / 刚打断过）：之前没收尾的 cut 也不再提醒 */
@@ -94,6 +105,7 @@ export class TurnCuts {
 
   /** 回合结束：该提醒就返回提醒正文（并标 hinted，只提醒一次），否则 null */
   onStop(channelId: string, event: string): string | null {
+    if (event === "Stop") this.codexPaused.delete(channelId); // Codex 正常结束一轮 = 队列已恢复（打断回报是 StopFailure，不算）
     const cut = this.cuts.get(channelId);
     if (!cut) return null;
     const d = onStop(cut, event, this.now());

@@ -172,6 +172,11 @@ export interface CodexQueueSinkDeps {
   notify(chatId: string | undefined, text: string): Promise<void>;
   log?(line: string): void;
   /**
+   * 打断之后的第一条（bridge 在 meta.after_interrupt 标出）改成粘进 TUI 回车：Esc 之后 queue 会一直卡住（lib/codex-tui-submit.ts）。
+   * ok:false = 没打进去、输入框也没留下它，照常走 queue
+   */
+  typeIn?(text: string): Promise<{ ok: true; unconfirmed?: true } | { ok: false; why: string }>;
+  /**
    * 重启 / 收编后第一条成功投递前附的前言（codex-launch.codexContextPreamble）。只附一次，
    * 投递失败不算用掉——下一条再附。
    */
@@ -224,9 +229,14 @@ export class CodexQueueSink implements InboundSink {
         d.log?.(`🔀 Codex 线程已切换 ${d.getSessionId() ?? "?"} → ${decision.sid}`);
         d.onSwitch(decision.sid);
       }
-      const wrapped = wrapChannelContent(content, meta, d.source, codexReplyHint(d.source));
+      const { after_interrupt: afterInterrupt, ...shown } = meta ?? {};
+      const wrapped = wrapChannelContent(content, shown, d.source, codexReplyHint(d.source));
       const preamble = this.preamblePending;
-      const r = await d.queue(decision.sid, preamble ? `${preamble}\n\n${wrapped}` : wrapped);
+      const text = preamble ? `${preamble}\n\n${wrapped}` : wrapped;
+      const typed = afterInterrupt === "true" && d.typeIn ? await d.typeIn(text) : undefined;
+      if (typed && !typed.ok) d.log?.(`⌨️ 打断后改打字投递没做成（${typed.why}），退回 codex queue`);
+      if (typed?.ok) d.log?.(typed.unconfirmed ? "⚠️ 打断后已粘进 Codex 输入框，但没看到提交，需要人看一眼" : "⌨️ 打断后的消息已直接打进 Codex");
+      const r: CmdResult = typed?.ok ? { ok: true, out: "", err: "" } : await d.queue(decision.sid, text);
       if (r.ok && preamble) this.preamblePending = undefined;
       if (!r.ok) {
         const detail = (r.err || r.out || "unknown").trim().split("\n").slice(-1)[0].slice(0, 300);

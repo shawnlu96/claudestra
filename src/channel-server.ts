@@ -17,6 +17,7 @@ import { decideAfterReplaced } from "./lib/link-policy.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
+import { typeIntoOwnPane } from "./lib/codex-tui-submit.js";
 import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
@@ -395,10 +396,9 @@ const codexSink = new CodexQueueSink({
     }
   },
   queue: (sid, text) => defaultRunner(codexQueueArgs(CODEX_BIN, sid, text), 30_000),
-  notify: async (chatId, text) => {
-    await bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text });
-  },
+  notify: (chatId, text) => bridgeRequest({ type: "reply", chatId: chatId || CHANNEL_ID, text }).then(() => undefined),
   log: (line) => console.error(line),
+  typeIn: typeIntoOwnPane, // Codex 被打断后 queue 会卡住，打断后的第一条直接打进自己的 pane
   preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 
