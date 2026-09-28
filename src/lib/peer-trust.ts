@@ -33,16 +33,24 @@ export class ReplayCache {
 
   /** true = 重放：见过，或签名时间早于本进程启动（那之前见过什么已无从得知） */
   seen(sig: string, ts: string, now: number): boolean {
-    if (!(Number(ts) >= this.startS)) return true;
+    return this.verdict(sig, ts, now) !== null;
+  }
+
+  /**
+   * 同 seen，但说明是哪一种：签名早于本进程启动 = 对方多半是在我重启前签的、请求没被处理，可以重发；
+   * 见过 = 已经处理过，不能重发。E2E 的发起方按它给调用方不同的话（docs/relay/e2e-design.md §5.1「已知代价」）
+   */
+  verdict(sig: string, ts: string, now: number): "replay" | "replay_before_restart" | null {
+    if (!(Number(ts) >= this.startS)) return "replay_before_restart";
     for (const [k, t] of this.seenAt) {
       if (now - t <= this.ttlMs) break; // 按插入顺序过期，遇到第一条没过期的就停
       this.seenAt.delete(k);
     }
     const key = Buffer.from(sig, "base64url").toString("hex");
-    if (this.seenAt.has(key)) return true;
+    if (this.seenAt.has(key)) return "replay";
     if (this.seenAt.size >= this.max) this.seenAt.delete(this.seenAt.keys().next().value!);
     this.seenAt.set(key, now);
-    return false;
+    return null;
   }
 }
 
@@ -144,6 +152,7 @@ export function peerAuthHint(raw: unknown): string {
   const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; reason?: unknown };
   if (body.code !== "peer_signature") return "token 无效或已被对方 revoke——联系对方确认，或重新握手";
   if (body.reason === "replay") return "这条请求被对方当成了重放（同一个签名用了两次）——不要原样重发，稍后重新发一条即可";
+  if (body.reason === "replay_before_restart") return "对方重启过，这条没被处理，请重发";
   if (body.reason === "stale") return "两台机器时钟差超过 5 分钟，签名被判过期——先校准两边的系统时间";
   return "对方认不出本机的签名钥匙（本机重装过，或对方记下的指纹不是本机）——请对方删掉这个 peer 后重新给你发一张邀请";
 }

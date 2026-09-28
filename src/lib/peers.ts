@@ -88,6 +88,8 @@ export interface PendingInvite {
   url: string;
   createdAt: string;
   expiresAt: string;
+  /** 带密钥的邀请（缺省；--allow-legacy 生成的没有）：只收加密兑换，明文兑换被拒并作废（docs/relay/e2e-design.md §5.1） */
+  e2e?: boolean;
 }
 
 export const INVITE_TTL_MS = 24 * 60 * 60 * 1000;

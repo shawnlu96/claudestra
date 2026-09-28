@@ -22,6 +22,8 @@ export interface RequestContext {
   sameNetwork?: boolean;
   /** 经中继 peer 帧来、且 peer 入口核过进程内标记的发件人指纹（peer-ingress.ts）；别的入口永远没有，别读原始头 */
   relayFrom?: string;
+  /** 由 E2E 会话解开的内层请求：会话发起方的指纹（bridge/peer-e2e-route.ts 设）。peerGate 据此要求 token 的主人就是他 */
+  e2e?: { peerFp: string };
 }
 
 const contexts = new WeakMap<Request, RequestContext>();

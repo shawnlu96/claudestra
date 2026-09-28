@@ -36,9 +36,9 @@ const legacyWarnedAt = new Map<string, number>();
 /** 所有入口（直连、peer 入口、经中继）的 peer 请求共用；authApi 在限速之后才写，拿不到签名的请求碰不到它 */
 const replays = new ReplayCache();
 
-/** 验签通过的非 GET/HEAD 请求：true = 这个签名已经用过（或早于本进程启动） */
-export function isPeerReplay(once: { sig: string; ts: string }): boolean {
-  return replays.seen(once.sig, once.ts, Date.now());
+/** 验签通过的非 GET/HEAD 请求：这个签名用过 → "replay"；早于本进程启动 → "replay_before_restart"；否则 null */
+export function peerReplayReason(once: { sig: string; ts: string }): "replay" | "replay_before_restart" | null {
+  return replays.verdict(once.sig, once.ts, Date.now());
 }
 
 export async function checkPeerSignature(req: Request, url: URL, peer: string): Promise<PeerSigVerdict> {

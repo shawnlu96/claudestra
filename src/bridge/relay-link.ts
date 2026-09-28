@@ -11,7 +11,8 @@ import { hostname } from "node:os";
 import { readFileSync } from "node:fs";
 import { connect, RelayError, type RelayClient } from "../lib/relay-client.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
-import { instanceKeySync } from "../lib/instance-key.js";
+import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
+import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
 import { ensurePeerIngressPort } from "../lib/peer-ingress-config.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
@@ -125,7 +126,7 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
 export interface PeerFetchInit {
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  body?: string | Uint8Array;
   signal?: AbortSignal;
 }
 
@@ -139,21 +140,30 @@ function relayFetchError(e: unknown): Error {
   return err;
 }
 
+/** 发往 required peer 的一律包进 E2E 会话（lib/peer-e2e-outbound.ts）；外层签名在这里加，内层由调用方照旧签 */
+const e2eOutbound = createE2eOutbound({ ...defaultOutboundDeps(), sign: (method, path, body) => signedHeaders(method, path, body) });
+type PeerFetchOpts = { fetchImpl?: typeof fetch; timeoutMs?: number };
+
 /**
- * fetch 的替身：`relay://<指纹>/api/v1/...` 经中继，其余原样交给 fetchImpl。
+ * 所有 peer 调用的唯一出口：目标是 required peer → 走 E2E（走不了就抛错，绝不退回明文）；否则明文照旧。
+ * 调用方的 signal / 超时一并带进会话里的每一次外层请求。
+ */
+export async function peerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts = {}): Promise<Response> {
+  const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawPeerFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }, opts));
+  return viaE2e ?? rawPeerFetch(url, init, opts);
+}
+
+/**
+ * 传输层：`relay://<指纹>/api/v1/...` 经中继，其余原样交给 fetchImpl。
  * 路径取 URL 的 pathname + search——与 instance-key.ts 的 signedFor 同一口径，对方按同一串验签。
  */
-export async function peerFetch(
-  url: string,
-  init: PeerFetchInit,
-  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
-): Promise<Response> {
-  if (!url.startsWith("relay://")) return (opts.fetchImpl ?? fetch)(url, init);
+async function rawPeerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts): Promise<Response> {
+  if (!url.startsWith("relay://")) return (opts.fetchImpl ?? fetch)(url, init as RequestInit);
   const u = new URL(url);
   if (!client) throw new Error(`relay 未启用：本机 .env 没配 RELAY_URL，调不了 ${u.hostname}`);
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(init.headers ?? {})) headers[k.toLowerCase()] = v;
-  const body = init.body ? new TextEncoder().encode(init.body) : null;
+  const body = !init.body ? null : typeof init.body === "string" ? new TextEncoder().encode(init.body) : init.body;
   let r;
   try {
     r = await client.request(u.hostname, { method: (init.method ?? "GET").toUpperCase(), path: u.pathname + u.search, headers, body }, { timeoutMs: opts.timeoutMs, signal: init.signal });

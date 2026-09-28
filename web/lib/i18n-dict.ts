@@ -247,7 +247,9 @@ export const DICT: Record<string, string> = {
   "推送通知": "Push notifications",
   "推送不带正文": "Hide content in notifications",
   "推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。":
-    "You won't see the content in notifications — only after opening the app. Notifications from this computer just say “New message”, with no agent name or message text; tapping one opens the conversation list. Notifications pass through the relay and Apple / Google push services, which then can't see the content. Applies to every device paired with this computer.",
+    "You won't see the content in notifications — only after opening the app. " +
+    "Notifications from this computer just say “New message”, with no agent name or message text; tapping one opens the conversation list. " +
+    "Notifications pass through the relay and Apple / Google push services, which then can't see the content. Applies to every device paired with this computer.",
   "Web 端发起的对话有回复时,推送到本设备(页面开着时不打扰)。Discord 发起的照旧走 Discord @。":
     "Get notified on this device when a web conversation gets a reply (quiet while the page is open). Discord conversations still ping via Discord.",
   "语音识别 · Groq API Key": "Speech-to-text · Groq API Key",

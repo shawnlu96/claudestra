@@ -7,7 +7,8 @@
 import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
-import { checkPeerSignature, isPeerReplay } from "./peer-signature.js";
+import { checkPeerSignature, peerReplayReason } from "./peer-signature.js";
+import { peerE2eRefusal, readHttpPeers } from "../lib/peer-e2e-local.js";
 import { isPublicKey, keyFingerprint, SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
 import type { PeerSigVerdict } from "../lib/peer-trust.js";
 import { requestContextOf } from "./request-context.js";
@@ -60,7 +61,8 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
     if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)` });
   }
-  if (sig?.once && isPeerReplay(sig.once)) return peerSigRejected("replay");
+  const replay = sig?.once ? peerReplayReason(sig.once) : null; // 两种理由分开给：重启前签的可以重发，见过的不能
+  if (replay) return peerSigRejected(replay);
   if (p.peer) {
     const peer = p.peer;
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
@@ -70,7 +72,10 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
 
 /** peer token 的来源与签名：经中继来的（路径模式、隧道，source=relay）一律 403；签名钥匙必须是这个 peer 的（lib/peer-trust.ts） */
 async function peerGate(req: Request, url: URL, peer: string): Promise<Extract<PeerSigVerdict, { allow: true }> | Response> {
-  if (requestContextOf(req).source === "relay") return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
+  const ctx = requestContextOf(req);
+  if (ctx.source === "relay") return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
+  const e2e = peerE2eRefusal(peer, ctx.e2e?.peerFp, await readHttpPeers()); // required peer 的明文请求、会话与 token 对不上的，都拒
+  if (e2e) return apiJson(403, { ok: false, error: e2e === "e2e_required" ? "this peer must use end-to-end encryption" : "token does not belong to the session's peer", code: e2e });
   const v = await checkPeerSignature(req, url, peer);
   return v.allow ? v : peerSigRejected(v.reason);
 }
