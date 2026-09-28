@@ -10,7 +10,10 @@ const MIN = 60_000;
 const IDLE_PANE = "some output\n❯ \n";
 const BUSY_PANE = "· Thinking… (esc to interrupt)\n❯ \n";
 
-function harness(agents: BoundaryAgent[], opts: { panes?: Record<string, string | null>; state?: Partial<PaneQuotaState>; autoCompact?: any } = {}) {
+function harness(
+  agents: BoundaryAgent[],
+  opts: { panes?: Record<string, string | null>; state?: Partial<PaneQuotaState>; autoCompact?: any; gateGlobal?: boolean } = {},
+) {
   let now = 1_000_000_000;
   const sent: { target: string; line: string }[] = [];
   const logs: string[] = [];
@@ -26,13 +29,14 @@ function harness(agents: BoundaryAgent[], opts: { panes?: Record<string, string 
     send: async (target, line) => void sent.push({ target, line }),
     autoCompact: () => opts.autoCompact,
     log: (l) => void logs.push(l),
+    gateGlobal: opts.gateGlobal ?? false,
   };
   return { deps, sent, logs, state, advance: (ms: number) => (now += ms), get now() { return now; } };
 }
 
 const agent = (o: Partial<BoundaryAgent>): BoundaryAgent => {
   const name = o.name ?? "agent-task-t1";
-  return { name, projectId: "orch", target: `master:${name}`, executor: name.startsWith("agent-task-"), ctx: 0, convTs: 0, realWindow: null, ...o };
+  return { name, projectId: "orch", target: `master:${name}`, executor: name.startsWith("agent-task-"), ctx: 0, convTs: 0, mtime: 0, realWindow: null, ...o };
 };
 const tgt = (name: string, executor = false) => ({ name, target: `master:${name}`, executor });
 
@@ -173,6 +177,41 @@ describe("ctxBoundaryTick", () => {
     expect((await ctxBoundaryTick(h.deps))[0].inject?.status).toBe("executed");
     expect(h.sent.length).toBe(1);
   });
+  test("lp-state 到位前（占位判定 = 有菜单 + 草稿）：具名策略不注入；个人 agent 走全局旧口径，过线照样压，93% 救命线照常", async () => {
+    const placeholder = { state: { menu: true, draft: true, lp: "unknown" as const }, autoCompact: { window: 450_000, idleHours: 0.2 } };
+    const h = harness([], placeholder);
+    h.deps.agents = async () => [
+      agent({ ctx: 300_000, convTs: 0 }),
+      agent({ name: "agent-car-talk", projectId: "personal", ctx: 800_000, convTs: 0 }),
+      agent({ name: "agent-gc-car", projectId: "personal", ctx: 935_000, convTs: h.now, mtime: h.now, realWindow: 1_000_000 }),
+    ];
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r.map((x) => [x.agent, x.verdict])).toEqual([
+      ["agent-task-t1", { fire: false, reason: "menu" }],
+      ["agent-car-talk", { fire: true, kind: "idle" }],
+      ["agent-gc-car", { fire: true, kind: "hard-cap" }], // 在忙也照样过救命线
+    ]);
+    expect(h.sent.map((x) => x.line)).toEqual(["/save-compact", "/save-compact"]);
+  });
+
+  test("全局路径的闲置 = 新口径且旧 mtime 口径：最后对话早了但文件刚写过 → 不算闲；具名策略只看新口径", async () => {
+    const h = harness([], { autoCompact: { window: 450_000, idleHours: 0.2 } });
+    h.deps.agents = async () => [
+      agent({ name: "agent-car-talk", projectId: "personal", ctx: 800_000, convTs: 0, mtime: h.now - 5 * MIN }),
+      agent({ ctx: 210_000, convTs: h.now - 5 * MIN, mtime: h.now }),
+    ];
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r.map((x) => [x.agent, x.verdict])).toEqual([
+      ["agent-car-talk", { fire: false, reason: "busy" }],
+      ["agent-task-t1", { fire: true, kind: "idle" }],
+    ]);
+  });
+
+  test("gateGlobal 打开（lp-state 合进来之后）：个人 agent 也过画面判定", async () => {
+    const h = harness([], { state: { menu: true }, autoCompact: { window: 450_000, idleHours: 0 }, gateGlobal: true });
+    h.deps.agents = async () => [agent({ name: "agent-car-talk", projectId: "personal", ctx: 800_000 })];
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "menu" });
+  });
 });
 
 describe("injectCompact（T35 批量动作的入口）", () => {
@@ -206,5 +245,11 @@ describe("injectCompact（T35 批量动作的入口）", () => {
       throw new Error("no window");
     };
     expect(await injectCompact(tgt("gone"), { action: "compact" }, h.deps)).toEqual({ status: "failed", error: "no window" });
+  });
+
+  test("gate:false（Discord 手动按钮，lp-state 到位前）：不看画面照发；执行者照样改 compact", async () => {
+    const h = harness([], { state: { menu: true, draft: true } });
+    expect(await injectCompact(tgt("car"), { action: "save-compact", gate: false }, h.deps)).toEqual({ status: "executed", line: "/save-compact" });
+    expect(await injectCompact(tgt("agent-task-t1", true), { action: "save-compact", gate: false }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
   });
 });

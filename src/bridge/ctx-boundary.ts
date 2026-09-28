@@ -29,6 +29,8 @@ const INJECT_GUARD_MS = 15 * 60_000;
 /** 面板 / agent 列表一次请求里每个 agent 都要看策略：线上依赖读配置、解析一次管 2 秒 */
 const POLICY_CACHE_MS = 2_000;
 const QUEUED_RE = /Press up to edit queued messages/i;
+/** 不做画面判定时的「画面」：什么都不挡（旧口径） */
+const UNGATED: PaneQuotaState = { wall: false, lp: "unknown", menu: false, compacting: false, draft: false };
 
 /** 往哪个窗口注入、按不按执行者对待（执行者不跑 save-compact，见 lib effectiveAction） */
 export interface InjectTarget {
@@ -41,8 +43,10 @@ export interface BoundaryAgent extends InjectTarget {
   projectId: string | null;
   /** null = 读不到会话文件 */
   ctx: number | null;
-  /** 最后一条真实对话的时间（不用 mtime：CC 会周期性 touch 会话文件） */
+  /** 最后一条真实对话的时间（不单用 mtime：CC 会周期性 touch 会话文件） */
   convTs: number | null;
+  /** 会话文件 mtime：全局路径（个人 agent）沿用的旧闲置口径，和新口径同时满足才算闲（PM 09-29 定，保持今天的行为） */
+  mtime: number | null;
   /** statusline 落盘的真实窗口；null = 没配 statusline */
   realWindow: number | null;
 }
@@ -61,6 +65,8 @@ export interface CtxBoundaryDeps {
   send(target: string, line: string): Promise<void>;
   autoCompact(): (GlobalAutoCompact & { policies?: unknown }) | undefined;
   log(line: string): void;
+  /** 全局路径（没命中具名策略的个人 agent）要不要过画面判定。lp-state 到位前 false：旧口径不看画面，救命线照常 */
+  gateGlobal: boolean;
 }
 
 type InjectSkip = Extract<SkipReason, "pane-unknown" | "quota-wall" | "menu" | "draft" | "compacting">;
@@ -139,15 +145,18 @@ function paneGate(ps: PaneQuotaState): InjectSkip | null {
  * 注入一次压缩（Discord 手动按钮、T35 的批量动作也走这里；拿不准目标时用 injectTargetFor(name)）。
  * 先读画面：读不到 / 撞墙没开 LP / 有选择菜单 / 输入框有草稿 / 正在压缩 → 不敲键。执行者的 save-compact 改成 compact。
  * 忙的时候敲进去会排队到回合结束（queued），闲着就是立刻执行（executed）。只有真发出去了才记注入守卫。
+ * gate:false = 不做画面判定（旧口径，lp-state 到位前全局路径和 Discord 手动按钮用）。
  */
 export async function injectCompact(
   t: InjectTarget,
-  opts: { action: CompactAction; keep?: string | null; pane?: PaneCapture | null },
+  opts: { action: CompactAction; keep?: string | null; pane?: PaneCapture | null; gate?: boolean },
   deps: Pick<CtxBoundaryDeps, "capture" | "paneState" | "send" | "now"> = liveDeps,
 ): Promise<InjectResult> {
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
-  const reason: InjectSkip | null = pane ? paneGate(deps.paneState(pane.plain, pane.esc)) : "pane-unknown";
-  if (reason || !pane) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
+  if (opts.gate !== false) {
+    const reason: InjectSkip | null = pane ? paneGate(deps.paneState(pane.plain, pane.esc)) : "pane-unknown";
+    if (reason) return { status: "skipped", reason, text: SKIP_REASON_TEXT[reason] };
+  }
   const line = compactCommand(effectiveAction(t.executor, opts.action), opts.keep ?? null);
   try {
     await deps.send(t.target, line);
@@ -155,24 +164,27 @@ export async function injectCompact(
     return { status: "failed", error: (e as Error).message };
   }
   noteCompactInjected(t.target, deps.now());
-  return { status: paneLooksWorking(pane.plain) ? "queued" : "executed", line };
+  return { status: pane && paneLooksWorking(pane.plain) ? "queued" : "executed", line };
 }
 
-function idleEnough(a: BoundaryAgent, idleMs: number, pane: PaneCapture | null, now: number): boolean {
-  if (idleMs <= 0) return true;
+/** 新口径：最后一条对话满 idleMs 且画面不忙。全局路径另加旧口径（mtime 满 idleMs），两者都满足才算闲 */
+function idleEnough(a: BoundaryAgent, b: Boundary, pane: PaneCapture | null, now: number): boolean {
+  if (b.idleMs <= 0) return true;
   if (a.convTs === null || pane === null) return false;
-  return now - a.convTs >= idleMs && !paneLooksWorking(pane.plain);
+  const fresh = now - a.convTs >= b.idleMs && !paneLooksWorking(pane.plain);
+  return b.policy === "global" ? fresh && a.mtime !== null && now - a.mtime >= b.idleMs : fresh;
 }
 
 async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: CtxBoundaryDeps): Promise<TickOutcome> {
   const pane = await deps.capture(a.target);
   const now = deps.now();
+  const gate = b.policy !== "global" || deps.gateGlobal;
   const verdict = boundaryDecision({
     ctx: a.ctx,
     window: b.window,
     hardCap: b.hardCap,
-    idle: idleEnough(a, b.idleMs, pane, now),
-    pane: pane === null ? null : deps.paneState(pane.plain, pane.esc),
+    idle: idleEnough(a, b, pane, now),
+    pane: !gate ? UNGATED : pane === null ? null : deps.paneState(pane.plain, pane.esc),
     queued: pane !== null && QUEUED_RE.test(pane.plain),
     injectedRecently: compactInjectedRecently(a.target, now),
     lastTrig: lastTrig.get(a.name) ?? 0,
@@ -187,7 +199,7 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     return { agent: a.name, boundary: b, verdict };
   }
   lastSkip.delete(a.name);
-  const inject = await injectCompact(a, { action: b.action, keep: b.keep, pane }, deps);
+  const inject = await injectCompact(a, { action: b.action, keep: b.keep, pane, gate }, deps);
   if (inject.status === "executed" || inject.status === "queued") lastTrig.set(a.name, now);
   else if (inject.status === "failed") lastTrig.set(a.name, now - RETRY_MS + FAIL_RETRY_MS);
   const why = inject.status === "failed" ? `（${inject.error}）` : inject.status === "skipped" ? `（${inject.text}）` : "";
@@ -263,7 +275,7 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
   for (const r of await readRegistryAgents()) {
     // 只管 Claude Code：注入的是 CC 的斜杠命令，画面判定也是 CC 的；Codex / Pi 有各自的压缩
     if ((r.status && r.status !== "active") || agentRuntime(r) !== "claude-code" || !r.sessionId) continue;
-    const info = await tailOf(r);
+    const { info, mtime } = await tailOf(r);
     out.push({
       name: r.name,
       projectId: r.projectId ?? null,
@@ -271,6 +283,7 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
       executor: isExecutor({ name: r.name, worktree: isLinkedWorktree(r.cwd) }),
       ctx: info?.ctxTokens ?? null,
       convTs: info?.convTs ?? null,
+      mtime,
       realWindow: readSessionCtx(r.sessionId)?.window ?? null,
     });
   }
@@ -279,7 +292,14 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
 
 async function tailOf(r: RegistryAgent) {
   const path = (r.cwd ? sessionJsonlPath(r.runtime, r.cwd, r.sessionId!) : null) ?? findSessionJsonlBySessionId(r.runtime, r.sessionId!);
-  return path ? sessionTailInfo(path) : null;
+  if (!path) return { info: null, mtime: null };
+  let mtime: number | null = null;
+  try {
+    mtime = statSync(path).mtimeMs;
+  } catch {
+    mtime = null; // 文件刚被挪走：旧口径判不出闲置，全局路径就不走闲置触发（救命线不受影响）
+  }
+  return { info: await sessionTailInfo(path), mtime };
 }
 
 async function capturePane(t: string): Promise<PaneCapture | null> {
@@ -300,6 +320,7 @@ const liveDeps: CtxBoundaryDeps = {
   send: (t, line) => tmuxSendLine(t, line),
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),
+  gateGlobal: false, // 过渡期：个人 agent 照旧口径走，lp-state 合进来的增量再改 true（PM 09-29 定的 P1-1 方案 A）
 };
 
 let timer: ReturnType<typeof setInterval> | null = null;

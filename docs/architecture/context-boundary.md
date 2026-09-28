@@ -66,7 +66,11 @@ First match wins:
 
 Step 5 also covers "low-priority allowance exhausted" (`exhausted`). A failed send (window gone, tmux error) keeps the error text in the log, records no injection guard, and retries after 5 minutes instead of 30.
 
-"Idle" = the last real conversation record is at least `idleMinutes` old **and** the pane shows no spinner / background work. File mtime is not used: CC touches session files on its own.
+"Idle" = the last real conversation record is at least `idleMinutes` old **and** the pane shows no spinner / background work (CC touches session files on its own, so mtime alone is unreliable, and a long tool call leaves it untouched). The global path (personal agents) additionally keeps the old condition — session-file mtime at least `idleHours` old — so personal agents are compacted no more often than before; named policies use only the new definition.
+
+### Transition until `lp-state` lands
+
+Until T35's `paneQuotaState` is merged, the live pane reader is a placeholder that reports "menu + draft" (never type). It gates **only named policies**. The global path and the Discord "save + compact" button run ungated, exactly as the old stats-dashboard code did (450K / idle hours / 93% emergency line). `CtxBoundaryDeps.gateGlobal` and `injectCompact({gate})` switch the global path and the button onto the pane checks in the increment that brings `lp-state`.
 
 Pane facts (`wall`, `lp`, `exhausted`, `menu`, `compacting`, `draft`) come from `paneQuotaState(plain, escaped)` in `src/lib/lp-state.ts` (T35). The pane is captured twice, plain and with `-e`: in the plain capture an empty input box still shows CC's grey suggestion (`❯ Try "write a test for <filepath>"`), which only the `ESC[2m` in the escaped capture tells apart from a real draft (`❯ owner half typed msg`). A multi-line draft continues on indented lines inside the box. Samples: ledger `reviews/T36-samples/`.
 
