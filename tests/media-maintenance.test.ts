@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeMediaIndex, openMediaIndex } from "../src/lib/media-index.js";
-import { canonicalAgent, copyOutboundFiles, inboxOwner, ledgerCopy, ownedByOther, saveUpload } from "../src/lib/media-outbound.js";
-import { clearThumbs, pruneThumbs } from "../src/lib/media-thumb.js";
+import { canonicalAgent, copyOutboundFiles, inboxOwner, ledgerCopy, ownedByOther, saveDiscordDownload, saveUpload } from "../src/lib/media-outbound.js";
+import { clearThumbs, convertedImage, pruneThumbs } from "../src/lib/media-thumb.js";
 
 let root: string;
 beforeAll(() => {
@@ -49,6 +49,10 @@ describe("缩略图缓存", () => {
     expect(left).toEqual(["t6.thumb.jpg", "t7.thumb.jpg", "t8.thumb.jpg", "t9.thumb.jpg"]);
     clearThumbs(d);
     expect(readdirSync(d)).toEqual(["keep.txt"]);
+  });
+  test("PDF 不做缩略图：直接回占位（failed），不跑 sips（adv2 P2-d）", async () => {
+    expect(await convertedImage(join(root, "thumbs"), "0".repeat(24), "i:x.pdf", "thumb", "/nonexistent/x.pdf", "x.pdf")).toBe("failed");
+    expect(await convertedImage(join(root, "thumbs"), "0".repeat(24), "i:x.PDF", "display", "/nonexistent/x.PDF", "x.PDF")).toBe("failed");
   });
 });
 
@@ -130,6 +134,26 @@ describe("出站副本账本", () => {
     expect(readdirSync(inbox).filter((f) => f.endsWith("_b.png"))).toEqual([]);
     expect((db.prepare("SELECT COUNT(*) AS n FROM out_copies WHERE dest LIKE '%_b.png'").get() as { n: number }).n).toBe(0);
     closeMediaIndex(p);
+  });
+  test("Discord 附件落盘：原名取 basename 再清洗（../ / \\ ; 控制字符），不出 inbox、不带 ;；id 必须是雪花；重复投递不覆盖（adv2 P2-b）", async () => {
+    const inbox = join(root, "discord-inbox");
+    const id = "1525028954195361932";
+    const data = new TextEncoder().encode("D");
+    const names = ["../../escaped.txt", "a/b/c.png", "..\\..\\win.png", "x.png;/etc/passwd", "a;b.png", "ctl\x00\x1f\x7f.png", "..", "", "图 片 1.png"];
+    for (const [i, n] of names.entries()) {
+      const dest = await saveDiscordDownload(inbox, `${id.slice(0, -2)}${String(i).padStart(2, "0")}`, n, data);
+      expect(dest.startsWith(`${inbox}/`)).toBe(true);
+      const file = dest.slice(inbox.length + 1);
+      expect(file).toMatch(/^\d{19}_[\p{L}\p{N}._-]+$/u);
+      expect(existsSync(dest)).toBe(true);
+    }
+    expect(readdirSync(inbox).every((f) => /^\d{19}_/.test(f))).toBe(true);
+    expect(existsSync(join(root, "escaped.txt")) || existsSync(join(inbox, "escaped.txt"))).toBe(false);
+    for (const bad of ["123", "../1525028954195361932", "1525028954195361932/x", "api_1700000000000"]) {
+      await expect(saveDiscordDownload(inbox, bad, "x.png", data)).rejects.toThrow();
+    }
+    const again = await saveDiscordDownload(inbox, `${id.slice(0, -2)}00`, "../../escaped.txt", new TextEncoder().encode("OTHER"));
+    expect(readFileSync(again, "utf8")).toBe("D");
   });
   test("agent 名规范成 registry 形状", () => {
     expect([canonicalAgent("worker"), canonicalAgent("agent-x"), canonicalAgent("master"), canonicalAgent("?")]).toEqual(["agent-worker", "agent-x", "master", "?"]);

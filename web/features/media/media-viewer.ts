@@ -18,6 +18,7 @@ import { placePage, wantsDisplayVariant, whoLabel } from "./media-logic";
 const PAGE = 40;
 const EDGE = 4;
 const MAX_DECODED = 12;
+const BUSY_RETRIES = 3;
 /** 索引首建时等它建完再开（否则总数会在翻看中途变），最多等这么多轮、每轮 1 秒 */
 const BUILD_POLLS = 8;
 
@@ -65,10 +66,30 @@ export async function shareOrSave(url: string, name: string): Promise<void> {
   }
 }
 
-/** 一个查看器实例的图片缓存：地址 → object URL + 原图宽高（PhotoSwipe 要宽高才能排版）；超出 MAX_DECODED 按最久未用回收 */
+/**
+ * 一个查看器实例的图片缓存：地址 → object URL + 原图宽高（PhotoSwipe 要宽高才能排版）；超出 MAX_DECODED 按最久未用回收。
+ * 取不到 / 解不了的记进 failed，那一格显示占位而不是一直转圈；转换服务忙（503）不算失败，BUSY_RETRIES 次以后才算。
+ */
 class Decoder {
   private done = new Map<string, { src: string; w: number; h: number }>();
   private pending = new Map<string, Promise<void>>();
+  private failed = new Map<string, "gone" | "broken">();
+  private busy = new Map<string, number>();
+
+  failure(url: string): "gone" | "broken" | undefined {
+    return this.failed.get(url);
+  }
+
+  /** 失败后能不能再试：只有「忙」且没超过次数的能 */
+  private noteFailure(url: string, e: Error): boolean {
+    const n = /\b503\b/.test(e.message) ? (this.busy.get(url) ?? 0) + 1 : Infinity;
+    if (n <= BUSY_RETRIES) {
+      this.busy.set(url, n);
+      return true;
+    }
+    this.failed.set(url, /\b404\b/.test(e.message) ? "gone" : "broken");
+    return false;
+  }
 
   get(url: string): { src: string; w: number; h: number } | undefined {
     const hit = this.done.get(url);
@@ -98,6 +119,9 @@ class Decoder {
             };
             img.src = src;
           });
+        })
+        .catch((e: Error) => {
+          if (this.noteFailure(url, e)) throw new Error("busy");
         })
         .finally(() => this.pending.delete(url));
       this.pending.set(url, p);
@@ -169,7 +193,10 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
     if (s.item && !s.item.available) return { html: note(text.t(s.item.restricted ? "这张图来源不唯一，只有管理设备能查看" : "文件已不在本机")) };
     const d = dec.get(s.url);
     if (d) return { src: d.src, width: d.w, height: d.h, alt: s.name };
-    dec.load(s.url).then(() => pswp.refreshSlideContent(i), () => undefined); // 解码失败：这一格留着转圈，旁边的照常翻
+    const bad = dec.failure(s.url);
+    if (bad) return { html: note(text.t(bad === "gone" ? "文件已不在本机" : "无法预览这张图")) };
+    // 取完（成功或失败）都刷新这一格：成功出图、失败出占位；服务忙隔一会儿再取
+    dec.load(s.url).then(() => pswp.refreshSlideContent(i), () => setTimeout(() => pswp.refreshSlideContent(i), 2000));
     return { html: SPINNER };
   });
   const current = (): ViewerSlide | null => {

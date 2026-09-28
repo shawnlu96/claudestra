@@ -561,6 +561,7 @@ initDaemonLogs("bridge");
 
 // v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
+import { saveDiscordDownload } from "./lib/media-outbound.js";
 await assertPrimaryOrExit("bridge");
 
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
@@ -1406,8 +1407,6 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 处理附件
   const attachmentPaths: string[] = [];
   if (msg.attachments.size > 0) {
-    const inboxDir = INBOX_DIR;
-    await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
     for (const [, att] of msg.attachments) {
       try {
         // 这是全仓库唯一一个没有超时的 fetch，而它就坐在 messageCreate 处理路径上：
@@ -1426,9 +1425,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
           console.warn(`⚠️ 附件 ${att.name} 实际大小超限，丢弃`);
           continue;
         }
-        const filePath = `${inboxDir}/${att.id}_${att.name}`;
-        await Bun.write(filePath, buf);
-        attachmentPaths.push(filePath);
+        attachmentPaths.push(await saveDiscordDownload(INBOX_DIR, att.id, att.name, new Uint8Array(buf)));
       } catch (err) {
         console.error(`下载附件失败: ${att.name}`, err);
       }

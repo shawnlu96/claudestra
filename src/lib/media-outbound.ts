@@ -8,7 +8,7 @@
 import type { Database } from "bun:sqlite";
 import { constants } from "node:fs";
 import { copyFile, mkdir, open, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 
 /** 副本相对 reply 记录时间的认领窗：拷贝在 reply 调用后发生，往前只留时钟误差，往后给慢投递 */
@@ -81,6 +81,33 @@ export async function saveUpload(dir: string, name: string, data: Uint8Array, ag
     return dest;
   }
   throw new Error(`no free upload name for ${base}`);
+}
+
+/**
+ * Discord 附件落 inbox：`<附件雪花 id>_<清洗名>`，不记账（媒体索引按名字形状放行，见 media-index resolveRef）。
+ * 原名先取 basename 再清洗：原样拼路径时 `/../` 会让 Bun.write 建目录写出 inbox、`;` 会被附件头拆成两条可信路径（T22 adv2 P2-b）。
+ * open(wx)：同一附件重复投递时已有的就是同一份内容，直接复用，不覆盖。
+ */
+export async function saveDiscordDownload(dir: string, id: string, name: string, data: Uint8Array): Promise<string> {
+  if (!/^\d{17,20}$/.test(id)) throw new Error(`unexpected Discord attachment id: ${id.slice(0, 40)}`);
+  await mkdir(dir, { recursive: true });
+  const dest = join(dir, `${id}_${sanitizeAttachmentBase(basename(name)) || "file"}`);
+  let fh;
+  try {
+    fh = await open(dest, "wx");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return dest;
+    throw e;
+  }
+  try {
+    await fh.writeFile(data);
+  } catch (e) {
+    await unlink(dest).catch((u) => console.error(`附件写入失败后清理 ${dest} 失败:`, (u as Error).message));
+    throw e;
+  } finally {
+    await fh.close();
+  }
+  return dest;
 }
 
 /**

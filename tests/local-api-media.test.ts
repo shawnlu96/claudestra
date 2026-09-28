@@ -80,11 +80,12 @@ beforeAll(async () => {
   writeFileSync(jl.master, "");
   // owner 往 master 上传 image.png（记了账），collide 里有一条可信头指向同一个文件、master 的记录还没落盘（adv1 P1-1 复现 2）
   const secret = await saveUploadToInbox(new File(["OWNER-SECRET"], "image.png"), "master");
-  // 再加一个没账的老 API 上传（修复前落盘的）：可信头指向它也不给 guest
-  writeFileSync(join(inbox, "api_1700000000777_legacy.png"), "LEGACY");
+  // 再加几个没账的：老 API 上传、老出站副本、数字前缀但不是雪花 id 的 → 可信头指向也不给 guest；Discord 雪花名不靠账（adv2 P1-1）
+  const noLedger = ["api_1700000000777_legacy.png", "1700000000778_old-copy.png", "123456_short.png", "1525028954195361999_dm.png"];
+  for (const n of noLedger) writeFileSync(join(inbox, n), "LEGACY");
   writeFileSync(jl["agent-collide"], [
     inLine(NOW - 100, "c1", [secret], "看", "friend"),
-    inLine(NOW - 90, "c2", [join(inbox, "api_1700000000777_legacy.png")], "看", "friend"),
+    ...noLedger.map((n, i) => inLine(NOW - 90 + i, `c${i + 2}`, [join(inbox, n)], "看", "friend")),
     "",
   ].join("\n"));
   // 手写标记指向旧上传目录里一个在、一个不在的文件（审查 r3：拿锚点请求的 200 / 404 探测文件在不在）
@@ -184,10 +185,14 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     expect([...bodies]).toHaveLength(1);
     expect([...bodies][0]).toStartWith("404 ");
   });
-  test("入站行指向账上属于别的 agent 的上传、或没账的老 API 上传：对 guest 就是「不存在」，不必等另一方的记录进索引（adv1 P1-1）", async () => {
+  test("入站行指向账上属于别的 agent 的上传、或没账的 inbox 文件：对 guest 就是「不存在」；只有 Discord 雪花名不靠账（adv1 / adv2 P1-1）", async () => {
     const guest: Principal = { ...GUEST, id: "guest:4", agents: ["collide"], credential: "dev_g4" };
-    const items = (await list("agent=collide", guest)).items;
-    expect(items.map((i: any) => i.name).sort()).toEqual(["image.png", "legacy.png"]);
+    const all = (await list("agent=collide", guest)).items;
+    const dm = all.find((i: any) => i.name === "dm.png");
+    expect(dm).toMatchObject({ available: true });
+    expect(await (await get(`/media/${dm.id}/raw`, guest)).text()).toBe("LEGACY");
+    const items = all.filter((i: any) => i !== dm);
+    expect(items.map((i: any) => i.name).sort()).toEqual(["image.png", "legacy.png", "old-copy.png", "short.png"]);
     for (const it of items) {
       expect(it).toMatchObject({ available: false, size: null, mime: null });
       expect((await get(`/media/${it.id}/raw`, guest)).status).toBe(404);

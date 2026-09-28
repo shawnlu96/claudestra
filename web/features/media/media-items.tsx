@@ -23,7 +23,8 @@ function Thumb({ item, onOpen }: { item: MediaItem; onOpen: () => void }) {
     return () => io.disconnect();
   }, []);
   const { src, error: err } = useBlobUrl(near && item.available ? mediaThumbUrl(item.id) : null);
-  const tip = item.restricted ? t("这张图来源不唯一，只有管理设备能查看") : !item.available || err ? t("文件已不在本机") : item.name;
+  const noThumb = item.available && err === "unconvertible";
+  const tip = item.restricted ? t("这张图来源不唯一，只有管理设备能查看") : noThumb ? t("无法生成缩略图") : !item.available || err ? t("文件已不在本机") : item.name;
   return (
     <button
       ref={ref}
@@ -36,7 +37,10 @@ function Thumb({ item, onOpen }: { item: MediaItem; onOpen: () => void }) {
         // eslint-disable-next-line @next/next/no-img-element
         <img src={src} alt={item.name} className="h-full w-full object-cover" />
       ) : (
-        <span className="absolute inset-0 grid place-items-center text-base-content/30">{(!item.available || err) && <ImageOffIcon size={22} />}</span>
+        <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-1 text-center text-base-content/30">
+          {(!item.available || err) && <ImageOffIcon size={22} />}
+          {noThumb && <span className="text-[10px] leading-3 text-base-content/45">{t("无法生成缩略图")}</span>}
+        </span>
       )}
       {item.dir === "out" && <span className="absolute bottom-1 left-1 rounded bg-black/45 px-1 text-[10px] leading-4 text-white/90">{uiAgentName(item.agent)}</span>}
     </button>

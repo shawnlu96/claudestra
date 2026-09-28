@@ -27,6 +27,8 @@ export const MEDIA_DICT: Record<string, string> = {
   "最近一年": "Last year",
   "这张图来源不唯一，只有管理设备能查看": "This image can’t be matched to a single source, so only a device with manage rights can open it",
   "文件已不在本机": "File is no longer on this machine",
+  "无法生成缩略图": "Can’t generate a thumbnail",
+  "无法预览这张图": "Can’t preview this image",
   "仅管理设备可取": "manage-rights devices only",
   "未知时间": "Unknown time",
   "昨天": "Yesterday",

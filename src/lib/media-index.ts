@@ -137,18 +137,18 @@ function ledgerFor(ctx: Ctx, agent: string): OutboundLedger {
   };
 }
 
-/** bridge 按毫秒拼名写进 inbox 的文件：API 上传 api_<数字>_、出站副本 <13 位毫秒>_ */
-const MS_NAMED = /^(?:api_\d+|\d{13})_/;
+/** Discord 下载落 inbox 的名字 <附件雪花 id>_<清洗名>（bridge 的 saveDiscordDownload）：id 由 Discord 分配，一个附件一个名字 */
+const DISCORD_NAMED = /^\d{17,20}_/;
 
 function resolveRef(ctx: Ctx, agent: string, r: { dir: string; path: string; ts: string | null; trusted: boolean }): Promise<Resolved | null> | Resolved | null {
   if (r.dir !== "in") return resolveOutbound(r.path, r.ts, ctx.dirs, ctx.cat(), ledgerFor(ctx, agent));
   const hit = resolveInbound(r.path, ctx.dirs, r.trusted);
   if (!hit?.trusted || !hit.loc.startsWith("i")) return hit;
-  // inbox 文件的归属以账为准（原子占名、先记账后落盘，一次写入只属于一方）：账上属于别的 agent → 不可信，不必等另一方的记录
-  // 进索引才判成共享。按毫秒拼名的（api_ 上传、13 位毫秒前缀的出站副本）没账 = 修复前的老文件（当时同名同毫秒会被覆盖）
-  // 或记账失败，同样不可信；Discord 下载是 <附件雪花 id>_<名>，一个附件一个名字，不靠账。owner 照常能看（T22 adv1 P1-1）
+  // inbox 文件的归属以账为准（原子占名、占名后先记账再写内容，一次写入只属于一方）：账上属于别的 agent → 不可信，不必等另一方的
+  // 记录进索引才判成共享。没账的只放行 Discord 下载名（白名单，不能放宽成 ^\d+_）；其余没账的（修复前的老 api_ 上传 / 出站副本、
+  // 记账失败、库重建丢账）一律不可信，owner 照常能看（T22 adv1 P1-1 / adv2 P1-1）
   const owner = inboxOwner(ctx.db, hit.name);
-  return (owner !== null ? owner !== agent : MS_NAMED.test(hit.name)) ? { ...hit, trusted: false } : hit;
+  return (owner !== null ? owner !== agent : !DISCORD_NAMED.test(hit.name)) ? { ...hit, trusted: false } : hit;
 }
 
 /**
