@@ -440,11 +440,20 @@ describe("P2-9：只有人类信号和真实的新回合才放行待命", () => 
     await settle();
     expect((await cur()).wake?.hold).toBe("standby");
   });
-  test("reconcile 补发的 done（之前没有活动）不放行", async () => {
+  test("Stop 之后才读到的本回合最后几行（reply 工具、最后一句话）不会重新点亮，随后的重复 done 不放行", async () => {
     await intoStandby();
-    ev("agent_status", { status: "done", trigger: "reconcile" });
+    ev("tool_start", { name: "mcp__claudestra__reply", detail: "{}" });
+    ev("reply_pending", {});
+    ev("assistant_text", { text: "查完了，没有要推进的。" });
+    done();
     await settle();
     expect((await cur()).wake?.hold).toBe("standby");
+  });
+  test("reconcile 补发的 done：生产里只在 thinking 卡住时补发（一个真实回合没收到 Stop），放行", async () => {
+    await intoStandby();
+    thinking(); // jsonl_activity：终端里直接开了个回合
+    ev("agent_status", { status: "done", trigger: "reconcile" });
+    await until(async () => (await cur()).wake?.hold === undefined);
   });
   test("人类消息之后的回合结束放行", async () => {
     await intoStandby();
@@ -452,11 +461,34 @@ describe("P2-9：只有人类信号和真实的新回合才放行待命", () => 
     done();
     await until(async () => (await cur()).wake?.hold === undefined);
   });
+  test("待命期间 watcher 缺位：人类消息挂在「?」名下，照样让位", async () => {
+    await intoStandby();
+    emitEvent({ agent: "?", chatId: "ctl", type: "chat_message", data: { direction: "in", srcKind: "user", text: "我来了" } });
+    thinking();
+    done();
+    await until(async () => (await cur()).wake?.hold === undefined);
+    await settle();
+    expect(sent.length).toBe(1); // 放行了，但人刚说过话 → 让位，不立刻递
+  });
   test("真实的新回合（有 thinking / 工具活动）结束放行", async () => {
     await intoStandby();
     thinking();
     ev("tool_start", { name: "Read" });
     done();
     await until(async () => (await cur()).wake?.hold === undefined);
+  });
+});
+
+describe("T14f 第 1 轮审查补的流程用例", () => {
+  test("run 结束后下一回合的 thinking 先到、本回合的撞额度后到：仍判 rate_limited，按额度挂起", async () => {
+    await startAndNudge();
+    done(); // run 的回合结束
+    thinking(); // 押后的 agent 消息紧跟着开了新回合
+    await sleep(5);
+    ev("api_error_turn", { error: "rate_limit" });
+    ev("assistant_text", { text: "You've hit your limit · resets 3am (Asia/Tokyo)" });
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("rate_limited");
+    expect((await cur()).wake?.hold).toBe("rate_limit");
   });
 });

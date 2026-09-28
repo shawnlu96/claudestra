@@ -1,6 +1,7 @@
 /** lib/autopilot-tools.ts：哪些工具调用算「有实质进展」——只读工具、通信工具、只读 shell 都不算 */
 import { describe, expect, test } from "bun:test";
-import { bashCommandOf, countsAsTool, isMutatingTool, isReadOnlyBash } from "../src/lib/autopilot-tools.js";
+import { bashCommandOf, countsAsTool, isMutatingTool } from "../src/lib/autopilot-tools.js";
+import { isReadOnlyBash } from "../src/lib/shell-readonly.js";
 
 describe("countsAsTool / isMutatingTool", () => {
   test("通信工具（MCP 名和 Pi 裸名）不算调工具，也不算写", () => {
@@ -76,6 +77,8 @@ describe("对抗式探针（t14-r3）", () => {
     expect(isMutatingTool("mcp__claudestra__ask_codex")).toBe(false);
     expect(isMutatingTool("mcp__mem0__memory_search")).toBe(false);
     expect(isMutatingTool("Agent", '{"subagent_type":"Explore","prompt":"x"}')).toBe(false);
+    expect(isMutatingTool("Agent", '{"subagent_type":"Plan","prompt":"x"}')).toBe(false);
+    expect(isMutatingTool("Agent", '{"subagent_type":"claude-code-guide","prompt":"x"}')).toBe(true); // 带 Bash：只有 Explore / Plan 算只读
     expect(isMutatingTool("Agent", '{"subagent_type":"general-purpose","prompt":"x"}')).toBe(true);
     expect(isMutatingTool("exec_command", '{"cmd":"git status"}')).toBe(false);
     expect(isMutatingTool("shell", '{"command":["git","push"]}')).toBe(true);

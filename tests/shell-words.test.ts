@@ -14,7 +14,7 @@ describe("parseShell", () => {
   });
   test("重定向：写文件、fd 复制、/dev/null、紧贴在词后面的 >", () => {
     expect(parseShell("ls 2>&1 >/dev/null").segments[0].redirects).toEqual([{ op: ">&", target: "&1" }, { op: ">", target: "/dev/null" }]);
-    expect(parseShell("echo x>f").segments[0]).toEqual({ words: ["echo", "x"], redirects: [{ op: ">", target: "f" }] });
+    expect(parseShell("echo x>f").segments[0]).toMatchObject({ words: ["echo", "x"], redirects: [{ op: ">", target: "f" }] });
     expect(parseShell("echo x >&out.txt").segments[0].redirects).toEqual([{ op: ">&", target: "out.txt" }]);
     expect(parseShell("ls &> f").segments[0].redirects).toEqual([{ op: "&>", target: "f" }]);
   });

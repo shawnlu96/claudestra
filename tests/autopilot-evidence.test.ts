@@ -179,15 +179,61 @@ describe("第 3 轮复验补的", () => {
   });
 });
 
-describe("P2-9：回合活动", () => {
-  test("每个 done 只消费一次：有活动 → true，紧跟的重复 Stop → false；按 agent 名或频道都能取到", () => {
-    onAutopilotEvent(evt("agent-w", "tool_start", { name: "Read" }, "chw"));
+describe("P2-9：回合活动只认 thinking", () => {
+  test("每个 done 只消费一次；按 agent 名或频道都能取到；工具 / 文字 / 人类入站都不算新回合", () => {
+    onAutopilotEvent(evt("agent-w", "agent_status", { status: "thinking" }, "chw"));
     expect(takeTurnActivity("w", "chw")).toBe(true);
     expect(takeTurnActivity("w", "chw")).toBe(false);
     onAutopilotEvent(evt("chw", "agent_status", { status: "thinking" }, "chw")); // agent 字段是频道 id
     expect(takeTurnActivity("w", "chw")).toBe(true);
-    onAutopilotEvent(evt("w", "chat_message", { direction: "in", srcKind: "user" }, "chw")); // 人类入站本身不算回合活动
+    onAutopilotEvent(evt("w", "tool_start", { name: "mcp__claudestra__reply" }, "chw")); // Stop 之后才读到的本回合最后几行
+    onAutopilotEvent(evt("w", "assistant_text", { text: "查完了" }, "chw"));
+    onAutopilotEvent(evt("w", "chat_message", { direction: "in", srcKind: "user" }, "chw"));
     expect(takeTurnActivity("w", "chw")).toBe(false);
+  });
+  test("12 小时前点亮、一直没被取走的（改名 / 换频道留下的旧键）不算", () => {
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" }, "chw"), 1000);
+    expect(takeTurnActivity("w", "chw", 1000 + 12 * 3_600_000)).toBe(false);
   });
 });
 
+describe("第 1 轮常规审查补的（T14f）", () => {
+  test("冻结后仍收本回合迟到的撞额度：run 结束 → 下一回合 thinking 先到 → 迟到的 rate_limit 报错和原文", () => {
+    track("w", "r1");
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" }));
+    onAutopilotEvent(evt("w", "agent_status", { status: "done" }));
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" })); // 押后消息开了下一个回合
+    onAutopilotEvent(evt("w", "api_error_turn", { error: "rate_limit" }));
+    onAutopilotEvent(evt("w", "assistant_text", { text: "You've hit your limit · resets 3am (Asia/Tokyo)" }));
+    onAutopilotEvent(evt("w", "tool_start", { name: "Edit" })); // 下一个回合的工具照样不算
+    const ev = takeEvidence("w", "r1");
+    expect(classifyRun(ev).outcome).toBe("rate_limited");
+    expect(ev.rateLimitText).toContain("resets 3am");
+    expect(ev.mutating).toBe(0);
+  });
+  test("冻结后的其它 API 报错：记录时间早于 run 结束的算本回合，晚于的是下一个回合", () => {
+    track("w", "r1");
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" }), 1000);
+    onAutopilotEvent(evt("w", "agent_status", { status: "done" }), Date.parse("2026-09-28T12:00:00Z"));
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" }));
+    onAutopilotEvent(evt("w", "api_error_turn", { error: "overloaded", ts: "2026-09-28T12:00:05Z" }));
+    expect(takeEvidence("w", "r1").failure).toBeUndefined();
+    track("w", "r2");
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" }));
+    onAutopilotEvent(evt("w", "agent_status", { status: "done" }), Date.parse("2026-09-28T12:00:00Z"));
+    onAutopilotEvent(evt("w", "agent_status", { status: "thinking" }));
+    onAutopilotEvent(evt("w", "api_error_turn", { error: "overloaded", ts: "2026-09-28T11:59:59Z" }));
+    expect(takeEvidence("w", "r2").failure).toContain("overloaded");
+  });
+  test("peer 经 API 打断（事件带 peer）不算人类信号；人点打断算", () => {
+    onAutopilotEvent(evt("w", "agent_status", { status: "done", trigger: "interrupt", peer: "sekai" }), 1000);
+    expect(lastHumanMessageAt("w")).toBeUndefined();
+    onAutopilotEvent(evt("w", "agent_status", { status: "done", trigger: "interrupt" }), 2000);
+    expect(lastHumanMessageAt("w")).toBe(2000);
+  });
+  test("人类消息按频道也记一份：watcher 缺位时挂在「?」名下也查得到", () => {
+    onAutopilotEvent(evt("?", "chat_message", { direction: "in", srcKind: "user" }, "chw"), 3000);
+    expect(lastHumanMessageAt("w")).toBeUndefined();
+    expect(lastHumanMessageAt("w", "chw")).toBe(3000);
+  });
+});

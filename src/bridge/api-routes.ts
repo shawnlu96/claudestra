@@ -1436,7 +1436,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const evAgentInt =
       agentNameForChannel(agent.channelId) ||
       (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
-    emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
+    emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(principal.peer ? { peer: principal.peer } : {}) } });
     console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
     return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
   }

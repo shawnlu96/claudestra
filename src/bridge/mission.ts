@@ -169,7 +169,7 @@ async function deliverWrapup(agent: string, m: Mission, now: number): Promise<vo
 
 /** 让位：主回合在跑、人刚说过话（含点了打断）、agent 不在线。排太久记一行「未推进」（每条唤醒只记一次） */
 async function yieldIfNeeded(agent: string, m: Mission, now: number): Promise<boolean> {
-  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent) }, now);
+  const why = yieldReason({ online: !!clientOf(agent), turnBusy: await busyNow(agent), lastHumanAt: lastHumanMessageAt(agent, channelOf(agent) ?? undefined) }, now);
   if (!why) return false;
   const logged = await upd((all) => {
     const cur = all[agent];
@@ -299,7 +299,7 @@ async function onTurnDone(agent: string, snap: ReturnType<typeof trackedTurn>, a
   }
   if (pre.status !== "active") return;
   // 只有真实的新回合（上一个 done 之后有活动）或人类信号才放行待命 / 等人拍板；重复的 Stop、reconcile 补发的 done 不算
-  const humanSince = (lastHumanMessageAt(agent) ?? 0) > Date.parse(pre.lastRun?.endedAt ?? "1970-01-01T00:00:00Z");
+  const humanSince = (lastHumanMessageAt(agent, channelOf(agent) ?? undefined) ?? 0) > Date.parse(pre.lastRun?.endedAt ?? "1970-01-01T00:00:00Z");
   if (!active && !humanSince) return;
   const m = await upd((all) => {
     const cur = all[agent];
