@@ -99,7 +99,7 @@ describe("buildReviewPack", () => {
     const p = buildReviewPack(input({ specText: null, specPath: null, worktree: null, deliver: null, prev }));
     expect(p.prompt).toContain("worktree：（没定位到，向派发者要）");
     expect(p.prompt).toContain("规格卡里没找到「验收」一节");
-    expect(p.prompt).toContain("上一轮审查（没有 md，只有一句话）：一句话结论");
+    expect(p.prompt).toContain("上一轮审查（没有 md，只有一句话，引用）：「一句话结论」");
     expect(p.prompt).toContain("执行者报告：（交付事件没带证据路径）");
   });
 

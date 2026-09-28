@@ -1,5 +1,5 @@
 /**
- * 编排班子的确定性步骤（docs/team/orchestration-team.md）：调度助理 / PM 不再手写审查员 prompt、不再手拼记账命令。
+ * 编排班子的确定性步骤（docs 10-ledger「附：编排班子」）：调度助理 / PM 不再手写审查员 prompt、不再手拼记账命令。
  *   review-pack <T>  只读：按规格卡、交付事件、上一轮结论生成审查员 prompt
  *   dispatch <T>     核对 head → 记 dispatch 事件 → 输出同一份审查包（同一轮重复调用幂等，返回原事件）
  *   escalate <T|->   升级给 PM / owner；bridge 的事件路由据此通知 PM
@@ -19,7 +19,7 @@ import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
-/** 审查结论统一落在这里：<T>-r<N>.md，临时文件 <T>-r<N>-work/ */
+/** 审查结论统一落在这里：<T>-r<N>.md（对抗式 <T>-r<N>-adv.md），临时文件 <T>-r<N>[-adv]-work/ */
 const REVIEWS_DIR = statePath("ledger", "reviews");
 
 const readText = (path: string | null): string | null => {
@@ -71,33 +71,41 @@ interface PackPlan {
   adversarial: boolean;
   worktree: string | null;
   deliverEvent: LedgerEvent | undefined;
+  /** 规格卡要求对抗式（「审查」一行提到对抗）：常规轮通过后还要再派一轮 */
+  wantsAdversarialRound: boolean;
   pack: ReviewPack & { subagentType: string };
 }
 
-/** 第几轮 = 已有 review 事件数 + 1（与指标「审查轮数」同一口径），--round 可覆盖；--adversarial 强制对抗式 */
+/**
+ * 第几轮 = task.round（进 review 时 +1，与 deliver / review 事件、通知里的「第 N 轮」同一口径），--round 可覆盖；
+ * 同一轮的对抗式另起文件 <T>-r<N>-adv.md，不和常规轮的结论撞名。--adversarial 强制对抗式。
+ */
 async function plan(c: LedgerCli): Promise<PackPlan> {
   const task = c.task(c.p.pos[1]);
   const events = listEvents(c.db, { project: task.project, target: task.id });
   const reviews = events.filter((e) => e.kind === "review");
-  const round = intFlag(c.p, "round") ?? reviews.length + 1;
+  const round = intFlag(c.p, "round") ?? Math.max(task.round, 1);
   if (round < 1) throw new LedgerError("invalid", "--round 从 1 起");
   const prev = toPrev(reviews.at(-1));
   const specPath = specPathOf(c, task);
   const specText = readText(specPath);
-  const adversarial = c.p.bools.has("adversarial") || wantsAdversarial(reviewPolicy(specText), prev);
+  const policy = reviewPolicy(specText);
+  const adversarial = c.p.bools.has("adversarial") || wantsAdversarial(policy, prev);
   const worktree = await worktreeOf(c, task);
   const deliverEvent = events.findLast((e) => e.kind === "deliver");
   const dd = deliverEvent?.data ?? {};
   const str = (v: unknown) => (typeof v === "string" && v ? v : null);
-  const reviewPath = join(REVIEWS_DIR, `${task.id}-r${round}.md`);
+  const tag = `${task.id}-r${round}${adversarial ? "-adv" : ""}`;
+  const reviewPath = join(REVIEWS_DIR, `${tag}.md`);
   const pack = buildReviewPack({
     task, round, adversarial, worktree, specPath, specText, prev, reviewPath,
     deliver: deliverEvent ? { headSHA: str(dd.headSHA), evidence: str(dd.evidence), text: deliverEvent.text } : null,
-    workDir: join(REVIEWS_DIR, `${task.id}-r${round}-work`),
+    workDir: join(REVIEWS_DIR, `${tag}-work`),
     prod: { stateDir: STATE_DIR, tmuxSocket: TMUX_SOCK, bridgePort: resolveBridgePort({ BRIDGE_PORT: repoEnvVar("BRIDGE_PORT") }) },
   });
   // subagentType：编排班子内置的审查员 agent（启动时经 --agents 注入，lib/team-roles.ts）
-  return { task, round, adversarial, worktree, deliverEvent, pack: { ...pack, subagentType: REVIEWER_AGENT[adversarial ? "adversarial" : "regular"] } };
+  const subagentType = REVIEWER_AGENT[adversarial ? "adversarial" : "regular"];
+  return { task, round, adversarial, worktree, deliverEvent, wantsAdversarialRound: !!policy?.includes("对抗"), pack: { ...pack, subagentType } };
 }
 
 async function reviewPack(c: LedgerCli): Promise<Result> {
@@ -123,8 +131,10 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   if (p.task.stage !== "review") throw new LedgerError("invalid", `任务 ${p.task.id} 在 ${p.task.stage}，不在 review，不派审查员`, { stage: p.task.stage });
   const headNote = checkHead(p, c.deps.gitHead ?? gitHead);
   const reviewer = p.adversarial ? "adversarial" : "regular";
-  const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}` };
-  const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath };
+  // 去重键带 head：同一轮重新交付了新 head 再派，是新的一次派审，不能拿回带旧 head 的那条
+  const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}:${p.task.headSHA ?? "-"}` };
+  // adversarialNext：这轮是常规、规格卡还要对抗式 → 这轮通过也不归 PM（路由与 currentHandler 据此判断）
+  const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath, adversarialNext: !p.adversarial && p.wantsAdversarialRound };
   const r = appendEvent(c.db, ctx, { project: p.task.project, target: p.task.id, kind: "dispatch", text: p.pack.description, data });
   return { ok: true, event: r.event, duplicate: r.duplicate, ...(headNote ? { headNote } : {}), ...p.pack };
 }

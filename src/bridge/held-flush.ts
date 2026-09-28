@@ -20,6 +20,14 @@ export interface FlushDeps {
   touch: (channelId: string, env: Envelope) => void;
 }
 
+type DeliveredHook = (channelId: string, env: Envelope) => void;
+const deliveredHooks: DeliveredHook[] = [];
+
+/** 押后消息真正送达（sent 且不是又押回）之后的回调：班子通知这时才标消息来源（bridge/team-router.ts） */
+export function onHeldDelivered(fn: DeliveredHook): void {
+  deliveredHooks.push(fn);
+}
+
 export async function flushHeld(d: FlushDeps, channelId: string, reason: string): Promise<void> {
   const q = d.held.get(channelId);
   if (!q || q.length === 0) return;
@@ -44,7 +52,10 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份。等下一次触发
       if (r.outcome.kind === "sent" && r.outcome.note === "queued") break;
       // 先 touch 再出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉
-      if (r.outcome.kind === "sent") d.touch(channelId, item.env);
+      if (r.outcome.kind === "sent") {
+        d.touch(channelId, item.env);
+        for (const fn of deliveredHooks) fn(channelId, item.env);
+      }
       d.held.remove(channelId, item);
       if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
     }

@@ -4,7 +4,7 @@
  * 不在线 / 压缩中 / 别人正在投都不动；投递报错留着下次再投。
  */
 import { describe, expect, test } from "bun:test";
-import { flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
+import { flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
@@ -123,6 +123,16 @@ describe("flushHeld", () => {
       expect(h.delivered).toEqual([]);
       expect(h.contents()).toEqual(["a"]);
     }
+  });
+
+  test("真正送达才调 onHeldDelivered（押回 queued 的不算）", async () => {
+    const seen: string[] = [];
+    onHeldDelivered((c, env) => void seen.push(`${c}:${String(env.content)}`));
+    const h = harness([item("a"), item("b")]);
+    let n = 0;
+    h.deps.deliver = async (env) => (n++ === 0 ? sent(env) : sent(env, "queued"));
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(seen).toEqual(["c-me:a"]);
   });
 
   test("投递报错：留在队里、不 touch，后面的照投；结束后释放频道锁", async () => {

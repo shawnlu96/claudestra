@@ -50,6 +50,7 @@ export function planUp(i: UpInput): ProposalDraft | { error: string } {
   } else if (i.dispatcher) {
     const agent = normalizeName(i.dispatcher);
     if (!i.agents[agent]) return { error: `registry 里没有 ${agent}` };
+    if (i.agents[agent].status && i.agents[agent].status !== "active") return { error: `${agent} 状态是 ${i.agents[agent].status}，调度助理要 active 的 agent` };
     if (agent === pm) return { error: "调度助理和 PM 不能是同一个 agent" };
     dispatcher = { agent, create: false };
   }
