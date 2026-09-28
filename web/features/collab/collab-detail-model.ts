@@ -215,11 +215,18 @@ export interface ChecklistView {
   /** 通过的结论里有几项是豁免放行的 */
   waived: number;
   source: ChecklistSource | null;
-  /** 拿不到 PR 文件列表、推断不出检查单 */
+  /** 推断不出检查单（结论只能是查不到）；reason 为原因的中文句子，界面再翻译 */
   incomplete: boolean;
-  /** 非本仓库项目只核证据等说明 */
-  note: string | null;
+  incompleteText: string | null;
+  /** 非本仓库项目只核证据等说明：tpl + params 可翻译，老数据只有中文全文 */
+  note: { text: string; tpl: string | null; params: Record<string, string | number> } | null;
 }
+
+/** 推断不全的原因（src/lib/ledger-probes.ts 的 IncompleteReason） */
+const INCOMPLETE_TEXT: Record<string, string> = {
+  files: "拿不到 PR 的文件列表，推断不出检查单",
+  ownership: "判断不了任务所属项目是不是本仓库，不知道该核什么",
+};
 
 /** 检查单来源的一句话 */
 export const SOURCE_TEXT: Record<ChecklistSource, string> = {
@@ -266,7 +273,10 @@ export function latestChecklist(events: readonly LedgerEventView[]): ChecklistVi
       waived: rows.filter((r) => r.waived && r.status !== "pass").length,
       source: typeof src === "string" && src in SOURCE_TEXT ? (src as ChecklistSource) : null,
       incomplete: e.data.incomplete === true,
-      note: typeof e.data.note === "string" && e.data.note ? e.data.note : null,
+      incompleteText: e.data.incomplete === true ? INCOMPLETE_TEXT[String(e.data.incompleteReason ?? "files")] ?? INCOMPLETE_TEXT.files : null,
+      note: typeof e.data.note === "string" && e.data.note
+        ? { text: e.data.note, tpl: typeof e.data.noteTpl === "string" && e.data.noteTpl ? e.data.noteTpl : null, params: asParams(e.data.noteParams) }
+        : null,
     };
   }
   return null;

@@ -84,16 +84,18 @@ type PrFacts = NonNullable<VerifyFacts["pr"]>;
 
 /** 文件列表走 REST 分页（gh pr view 的 files 最多 100 个；squash / rebase 合并时也不依赖合并提交的形状） */
 async function prFacts(d: FactsDeps, ref: string): Promise<PrFacts> {
-  const base: PrFacts = { ref, state: null, head: null, branch: null, mergeCommit: null, mergedAt: null, files: null };
+  const base: PrFacts = { ref, state: null, head: null, branch: null, base: null, mergeCommit: null, mergedAt: null, files: null };
   const id = parsePrRef(ref);
   if (!id) return { ...base, error: `认不出 PR 编号：${ref}` };
-  const r = await d.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,mergedAt,headRefOid,headRefName"]);
+  const r = await d.run(["gh", "pr", "view", ref, "--json", "state,mergeCommit,mergedAt,headRefOid,headRefName,baseRefOid"]);
   if (r.code !== 0) return { ...base, error: firstLine(r.stderr) || `gh 退出码 ${r.code}` };
   let pr: PrFacts;
   try {
-    const o = JSON.parse(r.stdout) as { state?: string; mergeCommit?: { oid?: string } | null; mergedAt?: string | null; headRefOid?: string; headRefName?: string };
+    const o = JSON.parse(r.stdout) as {
+      state?: string; mergeCommit?: { oid?: string } | null; mergedAt?: string | null; headRefOid?: string; headRefName?: string; baseRefOid?: string;
+    };
     const mergedAt = o.mergedAt ? Date.parse(o.mergedAt) : NaN;
-    pr = { ...base, state: o.state ?? null, head: o.headRefOid ?? null, branch: o.headRefName ?? null, mergeCommit: o.mergeCommit?.oid ?? null,
+    pr = { ...base, state: o.state ?? null, head: o.headRefOid ?? null, branch: o.headRefName ?? null, base: o.baseRefOid ?? null, mergeCommit: o.mergeCommit?.oid ?? null,
       mergedAt: Number.isFinite(mergedAt) ? mergedAt : null };
   } catch (e) {
     return { ...base, error: `gh 输出解析不了：${(e as Error).message}` };
@@ -101,6 +103,25 @@ async function prFacts(d: FactsDeps, ref: string): Promise<PrFacts> {
   const f = await d.run(["gh", "api", "--paginate", `repos/${id.repo}/pulls/${id.number}/files?per_page=100`, "--jq", ".[].filename"]);
   pr.files = f.code === 0 ? f.stdout.split("\n").map((s) => s.trim()).filter(Boolean) : null;
   return pr;
+}
+
+/**
+ * gh 拿不到文件列表时从本地 git 推：真正的 merge commit（两个父提交）对第一父提交做 diff；
+ * squash / rebase 合并的合并提交只代表最后一步，改为 fetch PR 的 head 后做 base...head（拿不到就仍为 null → 推断不全）。
+ */
+async function localFileList(d: FactsDeps, pr: PrFacts): Promise<string[] | null> {
+  if (!pr.mergeCommit) return null;
+  const names = (r: { code: number | null; stdout: string }) => (r.code === 0 ? r.stdout.split("\n").map((s) => s.trim()).filter(Boolean) : []);
+  const parents = (await git(d, d.repoRoot, "rev-list", "--parents", "-n", "1", pr.mergeCommit)).stdout.trim().split(/\s+/);
+  if (parents.length === 3) {
+    const files = names(await git(d, d.repoRoot, "diff", "--name-only", `${pr.mergeCommit}^1`, pr.mergeCommit));
+    return files.length ? files : null;
+  }
+  const n = parsePrRef(pr.ref)?.number;
+  if (!n || !pr.base || !pr.head) return null;
+  if ((await git(d, d.repoRoot, "fetch", "--quiet", "origin", `refs/pull/${n}/head`)).code !== 0) return null;
+  const files = names(await git(d, d.repoRoot, "diff", "--name-only", `${pr.base}...${pr.head}`));
+  return files.length ? files : null;
 }
 
 /** expected 是 deployed 本身或其祖先；本机 git 认不出 deployed → null */
@@ -129,21 +150,23 @@ async function relayWeb(d: FactsDeps, expected: string | null): Promise<VerifyFa
   return { applicable: true, ...(await deployed(d, commit, expected, commit ? undefined : `https://${host}/build-info.json 拿不到`)) };
 }
 
-async function launchdPid(d: FactsDeps, label: string): Promise<{ pid: string | null; error?: string }> {
+type PidFacts = { pid: string | null; installed?: boolean; error?: string };
+
+async function launchdPid(d: FactsDeps, label: string): Promise<PidFacts> {
   const r = await d.run(["launchctl", "list"]);
   if (r.code !== 0) return { pid: null, error: "launchctl list 失败" };
   const line = r.stdout.split("\n").find((l) => l.split("\t")[2]?.trim() === label);
-  if (!line) return { pid: null };
+  if (!line) return { pid: null, installed: false };
   const pid = line.split("\t")[0].trim();
-  return { pid: /^\d+$/.test(pid) ? pid : null };
+  return { pid: /^\d+$/.test(pid) ? pid : null, installed: true };
 }
 
 /** bridge 先按端口找监听者（沙箱里的 bridge 不归 launchd 管），找不到再问 launchd；cron / launcher 只问 launchd */
-async function daemonPid(d: FactsDeps, daemon: Daemon): Promise<{ pid: string | null; error?: string }> {
+async function daemonPid(d: FactsDeps, daemon: Daemon): Promise<PidFacts> {
   const port = daemon === "bridge" ? d.bridgePort() : null;
   if (port) {
     const pid = firstLine((await d.run(["lsof", "-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"])).stdout);
-    if (/^\d+$/.test(pid)) return { pid };
+    if (/^\d+$/.test(pid)) return { pid, installed: true };
   }
   return launchdPid(d, LABEL[daemon]);
 }
@@ -164,19 +187,29 @@ async function headSince(d: FactsDeps, repo: string, merge: string, mergedAt: nu
   return since;
 }
 
+/** 代码目录的状态：是 git 仓库 → HEAD 含合并提交 → PR 改到的源码在工作区里与 HEAD 一致（reset --soft / 手改会留下旧文件） */
+async function codeFacts(d: FactsDeps, cwd: string, pr: PrFacts): Promise<Pick<DaemonFacts, "codeHasMerge" | "headSince" | "worktreeClean" | "codeError">> {
+  if ((await git(d, cwd, "rev-parse", "--git-dir")).code !== 0) return { codeError: "不是 git 仓库" };
+  const merge = pr.mergeCommit as string;
+  const has = (await git(d, cwd, "cat-file", "-e", `${merge}^{commit}`)).code === 0
+    ? ancestry((await git(d, cwd, "merge-base", "--is-ancestor", merge, "HEAD")).code)
+    : false; // 那边的仓库里还没有这个提交对象：HEAD 不可能包含它
+  if (has !== true) return { codeHasMerge: has };
+  const paths = pr.files?.filter((f) => f.startsWith("src/")).slice(0, 500) ?? [];
+  const diff = await git(d, cwd, "diff", "--quiet", "HEAD", "--", ...(paths.length ? paths : ["src"]));
+  return { codeHasMerge: true, worktreeClean: ancestry(diff.code), headSince: await headSince(d, cwd, merge, pr.mergedAt as number) };
+}
+
 async function daemonFacts(d: FactsDeps, daemon: Daemon, pr: PrFacts | null): Promise<DaemonFacts> {
-  const { pid, error } = await daemonPid(d, daemon);
-  if (!pid) return { pid: null, startedAt: null, ...(error ? { error } : {}) };
+  const { pid, installed, error } = await daemonPid(d, daemon);
+  if (!pid) return { pid: null, startedAt: null, ...(installed !== undefined ? { installed } : {}), ...(error ? { error } : {}) };
   const ps = await d.run(["ps", "-o", "lstart=", "-p", pid]);
   const t = Date.parse(firstLine(ps.stdout)); // LC_ALL=C 下形如 "Mon Sep 28 21:03:26 2026"（本地时区，秒级）
   const startedAt = ps.code === 0 && Number.isFinite(t) ? t : null;
   const cwdLine = (await d.run(["lsof", "-a", "-d", "cwd", "-p", pid, "-Fn"])).stdout.split("\n").find((l) => l.startsWith("n/"));
   const cwd = cwdLine ? cwdLine.slice(1) : null;
-  if (!cwd || !pr?.mergeCommit || !pr.mergedAt) return { pid, startedAt, cwd };
-  const has = (await git(d, cwd, "cat-file", "-e", `${pr.mergeCommit}^{commit}`)).code === 0
-    ? ancestry((await git(d, cwd, "merge-base", "--is-ancestor", pr.mergeCommit, "HEAD")).code)
-    : false; // 那边的仓库里还没有这个提交对象：HEAD 不可能包含它
-  return { pid, startedAt, cwd, codeHasMerge: has, headSince: has ? await headSince(d, cwd, pr.mergeCommit, pr.mergedAt) : null };
+  if (!cwd || !pr?.mergeCommit || !pr.mergedAt) return { pid, installed: true, startedAt, cwd };
+  return { pid, installed: true, startedAt, cwd, ...(await codeFacts(d, cwd, pr)) };
 }
 
 export type PrStage = Pick<VerifyFacts, "pr" | "mergeInMain" | "fetchError">;
@@ -190,6 +223,7 @@ export async function collectPrStage(d: FactsDeps, ref: string | null): Promise<
   const f = await git(d, d.repoRoot, "fetch", "--quiet", "origin", "main");
   if (f.code !== 0) out.fetchError = firstLine(f.stderr) || (f.code === null ? "超时" : `git fetch 退出码 ${f.code}`);
   if (pr.mergeCommit) out.mergeInMain = ancestry((await git(d, d.repoRoot, "merge-base", "--is-ancestor", pr.mergeCommit, "origin/main")).code);
+  if (!pr.files?.length) pr.files = await localFileList(d, pr);
   return out;
 }
 
@@ -217,9 +251,22 @@ export async function collectVerifyFacts(
   return facts;
 }
 
-/** 这个仓库的主工作树（worktree 里跑也返回主树）：判断任务所属项目是否拥有本仓库 */
+/** 这个仓库的主工作树（worktree 里跑也返回主树）；git 读不到为 null */
 export async function mainRepoRoot(d: FactsDeps): Promise<string | null> {
   const r = await git(d, d.repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const dir = firstLine(r.stdout);
   return r.code === 0 && dir ? dirname(dir) : null;
+}
+
+/** origin 的 GitHub owner/repo（小写）；不是 GitHub 远端或读不到为 null */
+export async function originRepo(d: FactsDeps): Promise<string | null> {
+  const r = await git(d, d.repoRoot, "remote", "get-url", "origin");
+  const m = firstLine(r.stdout).match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
+  return r.code === 0 && m ? m[1].toLowerCase() : null;
+}
+
+/** PR 链接里的 owner/repo（小写）；#12 这种写法没有 */
+export function prRepo(ref: string): string | null {
+  const r = parsePrRef(ref)?.repo;
+  return r && !r.startsWith("{") ? r.toLowerCase() : null;
 }

@@ -23,7 +23,7 @@ function facts(over: Partial<VerifyFacts> = {}): VerifyFacts {
     expectedWeb: "cccc333",
     webLocal: { commit: "cccc333", contains: true },
     webRelay: { applicable: true, commit: "cccc333", contains: true },
-    daemons: { bridge: { pid: "42", startedAt: PULLED_AT + 60_000, cwd: "/repo", codeHasMerge: true, headSince: PULLED_AT } },
+    daemons: { bridge: { pid: "42", installed: true, startedAt: PULLED_AT + 60_000, cwd: "/repo", codeHasMerge: true, worktreeClean: true, headSince: PULLED_AT } },
     evidence: { path: null, bytes: null },
     ...over,
   };
@@ -108,6 +108,21 @@ describe("daemon-*", () => {
     const r = judgeProbe("daemon-bridge", bridge({ startedAt: MERGED_AT + 30_000, headSince: PULLED_AT }));
     expect(r).toMatchObject({ status: "fail", detail: expect.stringContaining("还没重启") });
   });
+  test("HEAD 含合并提交但工作区还是旧文件（reset --soft / 手改）→ fail", () => {
+    expect(judgeProbe("daemon-bridge", bridge({ worktreeClean: false }))).toMatchObject({ status: "fail", detail: expect.stringContaining("和 HEAD 不一致") });
+  });
+  test("工作目录不是 git 仓库 → unknown 并写明原因（不再说成「不含合并提交」）", () => {
+    expect(judgeProbe("daemon-bridge", bridge({ codeError: "不是 git 仓库", codeHasMerge: undefined }))).toMatchObject({ status: "unknown", detail: expect.stringContaining("不是 git 仓库") });
+  });
+  test("没装与装了没在跑分开报；没装提示可以豁免", () => {
+    expect(judgeProbe("daemon-bridge", bridge({ pid: null, installed: false })).detail).toContain("--waive");
+    expect(judgeProbe("daemon-bridge", bridge({ pid: null, installed: true })).detail).toContain("装了但没在跑");
+  });
+  test("启动与代码更新落在同一分钟：显示到秒", () => {
+    const same = judgeProbe("daemon-bridge", bridge({ startedAt: PULLED_AT + 20_000, headSince: PULLED_AT + 5_000 }));
+    expect(String(same.params.started)).toMatch(/:\d\d:\d\d$/);
+    expect(String(judgeProbe("daemon-bridge", facts()).params.started)).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d$/);
+  });
   test("没在跑 → fail；读不到启动时间 / 工作目录 / reflog / 合并时间 → unknown", () => {
     expect(status("daemon-bridge", bridge({ pid: null }))).toBe("fail");
     expect(status("daemon-bridge", bridge({ startedAt: null }))).toBe("unknown");
@@ -124,7 +139,9 @@ describe("manual-evidence", () => {
     expect(status("manual-evidence", facts())).toBe("fail");
     expect(status("manual-evidence", facts({ evidence: { path: "a.md", bytes: null } }))).toBe("fail");
     expect(status("manual-evidence", facts({ evidence: { path: "a.md", bytes: 0 } }))).toBe("fail");
-    expect(judgeProbe("manual-evidence", facts({ evidence: { path: "a.md", bytes: 12 } }))).toMatchObject({ status: "pass", tpl: "证据 {path}（{bytes} 字节）", params: { path: "a.md", bytes: 12 } });
+    expect(judgeProbe("manual-evidence", facts({ evidence: { path: "a.md", bytes: 12 } }))).toMatchObject({
+      status: "pass", tpl: "证据 {path}（{bytes} 字节）", params: { path: "a.md", bytes: 12 },
+    });
   });
 });
 
@@ -161,5 +178,6 @@ describe("总结论、豁免、事务内复核", () => {
     expect(checksAllClear([{ ...ok[1], status: "fail", waived: "  " }])).toBe(false);
     expect(checksAllClear([{ ...ok[0], status: "fail", waived: "理由" }])).toBe(false);
     expect(checksAllClear([{ id: "nope", status: "pass" }])).toBe(false);
+    expect(checksAllClear(ok, true)).toBe(false); // 检查单推断不全：全过也不放行
   });
 });

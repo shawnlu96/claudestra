@@ -55,9 +55,19 @@ type ChecklistSource = "files" | "files+extra" | "extra" | "evidence";
 export interface ChecklistPlan {
   probes: ProbeId[];
   source: ChecklistSource;
-  /** 有 PR 但拿不到文件列表（或列表为空）、也没手工指定：推断不出该跑什么，结论只能是 unknown，豁免也救不了 */
+  /** 推断不出该跑什么，结论只能是 unknown，豁免也救不了 */
   incomplete: boolean;
+  /** files = 有 PR 但拿不到文件列表（或为空）又没手工指定；ownership = 判断不了任务所属项目是不是本仓库 */
+  incompleteReason?: IncompleteReason;
 }
+
+export type IncompleteReason = "files" | "ownership";
+
+/** 推断不全的原因（CLI 报错与网页共用字面量，网页按它查英文词条） */
+export const INCOMPLETE_TEXT: Record<IncompleteReason, string> = {
+  files: "拿不到 PR 的文件列表，推断不出检查单——gh 恢复后重跑，或在 task extra.checks 里手工指定",
+  ownership: "判断不了任务所属项目是不是本仓库（git 读不到本仓库，或 PR 链接与 origin 对不上），不知道该核什么",
+};
 
 /** extra.checks：不写 → null；写了必须是已知组名的非空数组，否则抛错（打错一个字就少核一项；空数组没有意义） */
 export function parseExtraChecks(raw: unknown): string[] | null {
@@ -79,7 +89,7 @@ export function planChecklist(input: { hasPr: boolean; files: readonly string[] 
     return { probes: ["pr-merged", ...probesOf(groups)], source: extra.length ? "files+extra" : "files", incomplete: false };
   }
   if (extra.length) return { probes: ["pr-merged", ...probesOf(extra)], source: "extra", incomplete: false };
-  return { probes: ["pr-merged"], source: "files", incomplete: true };
+  return { probes: ["pr-merged"], source: "files", incomplete: true, incompleteReason: "files" };
 }
 
 /** 已部署的网页版本：commit 是 build-info 的 webCommit；contains = 期望的提交是它自己或它的祖先（本机 git 认不出为 null） */
@@ -91,6 +101,8 @@ export interface DeployedWeb {
 
 export interface DaemonFacts {
   pid: string | null;
+  /** launchd 里有没有这个服务（bridge 按端口找到时视为有）；false = 这台机器没装 */
+  installed?: boolean;
   startedAt: number | null;
   /** 进程的工作目录（它加载代码的仓库） */
   cwd?: string | null;
@@ -98,6 +110,10 @@ export interface DaemonFacts {
   codeHasMerge?: boolean | null;
   /** cwd 的 HEAD 从什么时候起一直包含合并提交（reflog）；查不到为 null */
   headSince?: number | null;
+  /** cwd 的工作区里 PR 改到的源码与 HEAD 一致（没有 reset --soft / 手改留下的旧文件）；没核为 null */
+  worktreeClean?: boolean | null;
+  /** cwd 不是 git 仓库等：核对不了代码的原因 */
+  codeError?: string;
   error?: string;
 }
 
@@ -109,6 +125,8 @@ export interface VerifyFacts {
     head: string | null;
     /** PR 的源分支 */
     branch: string | null;
+    /** PR 的目标分支提交（本地推文件列表用） */
+    base?: string | null;
     mergeCommit: string | null;
     mergedAt: number | null;
     files: string[] | null;
@@ -129,8 +147,12 @@ export interface VerifyFacts {
 }
 
 const short = (s: string | null | undefined) => (s ? s.slice(0, 9) : "?");
-/** 跑 verify 那台机器的本地时间（台账是单机的，看的人和跑的人在同一时区）；精确值在 evidence 里 */
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString("sv-SE").slice(0, 16) : "?");
+/** 跑 verify 那台机器的本地时间（台账是单机的，看的人和跑的人在同一时区）；两个时刻落在同一分钟就显示到秒，免得「00:19 早于 00:19」 */
+function whenPair(a: number, b: number): [string, string] {
+  const fmt = (ms: number, sec: boolean) => new Date(ms).toLocaleString("sv-SE").slice(0, sec ? 19 : 16);
+  const sec = Math.floor(a / 60_000) === Math.floor(b / 60_000);
+  return [fmt(a, sec), fmt(b, sec)];
+}
 
 /** PR 链接显示成 #141；不是 GitHub 链接就原样 */
 function prName(ref: string): string {
@@ -169,10 +191,18 @@ function judgeWeb(id: "web-local" | "web-relay", d: DeployedWeb, expected: strin
   const p = { expected: short(expected), deployed: short(d.commit) };
   if (!expected) return result(id, "unknown", "找不到合并提交里动 web/ 的提交", {}, ev);
   if (d.error) return result(id, "unknown", local ? "读不到本机的网页版本：{error}" : "读不到中继的网页版本：{error}", { error: d.error }, ev);
-  if (!d.commit) return result(id, "fail", local ? "本机没有托管的网页版本（build-info.json 里没有 webCommit）" : "中继没有托管的网页版本（build-info.json 里没有 webCommit）", {}, ev);
+  if (!d.commit) {
+    const tpl = local ? "本机没有托管的网页版本（build-info.json 里没有 webCommit）" : "中继没有托管的网页版本（build-info.json 里没有 webCommit）";
+    return result(id, "fail", tpl, {}, ev);
+  }
   if (d.contains === true) return result(id, "pass", local ? "本机网页 {deployed} 已包含 {expected}" : "中继网页 {deployed} 已包含 {expected}", p, ev);
-  if (d.contains === false) return result(id, "fail", local ? "本机网页是 {deployed}，不包含 {expected}——还没部署" : "中继网页是 {deployed}，不包含 {expected}——还没部署", p, ev);
-  return result(id, "unknown", local ? "本机 git 认不出本机的网页版本 {deployed}，判断不了是否包含 {expected}" : "本机 git 认不出中继的网页版本 {deployed}，判断不了是否包含 {expected}", p, ev);
+  if (d.contains === false) {
+    return result(id, "fail", local ? "本机网页是 {deployed}，不包含 {expected}——还没部署" : "中继网页是 {deployed}，不包含 {expected}——还没部署", p, ev);
+  }
+  const tpl = local
+    ? "本机 git 认不出本机的网页版本 {deployed}，判断不了是否包含 {expected}"
+    : "本机 git 认不出中继的网页版本 {deployed}，判断不了是否包含 {expected}";
+  return result(id, "unknown", tpl, p, ev);
 }
 
 function judgeRelay(f: VerifyFacts): ProbeResult {
@@ -188,15 +218,21 @@ function judgeDaemon(id: ProbeId, daemon: Daemon, f: VerifyFacts): ProbeResult {
     headSince: d?.headSince ?? null, mergedAt, ...(d?.error ? { error: d.error } : {}) };
   const p: Params = { daemon, pid: d?.pid ?? "?", cwd: d?.cwd ?? "?", merge: short(f.pr?.mergeCommit) };
   if (!d || d.error) return result(id, "unknown", "查不到 {daemon} 进程：{error}", { ...p, error: d?.error ?? "没采集" }, ev);
-  if (!d.pid) return result(id, "fail", "{daemon} 没在跑", p, ev);
+  if (d.installed === false) return result(id, "fail", "{daemon} 没装（launchd 里没有它）——这台机器不用它就 --waive 带理由", p, ev);
+  if (!d.pid) return result(id, "fail", "{daemon} 装了但没在跑", p, ev);
   if (!d.startedAt) return result(id, "unknown", "读不到 {daemon}（pid {pid}）的启动时间", p, ev);
   if (!mergedAt) return result(id, "unknown", "不知道合并时间，比不了", p, ev);
   if (!d.cwd) return result(id, "unknown", "查不到 {daemon}（pid {pid}）的工作目录，核对不了它跑的代码", p, ev);
+  if (d.codeError) return result(id, "unknown", "{daemon} 的工作目录 {cwd} 核对不了：{error}", { ...p, error: d.codeError }, ev);
   if (d.codeHasMerge === false) return result(id, "fail", "{daemon} 的代码目录 {cwd} 还不含合并提交 {merge}——先把那里更新到 main 再重启", p, ev);
   if (d.codeHasMerge !== true) return result(id, "unknown", "判断不了 {daemon} 的代码目录 {cwd} 是否包含合并提交 {merge}", p, ev);
+  if (d.worktreeClean === false) {
+    return result(id, "fail", "{daemon} 的代码目录 {cwd} 里 PR 改到的文件和 HEAD 不一致（工作区还是旧文件或有改动）——先让工作区回到 HEAD 再重启", p, ev);
+  }
   if (!d.headSince) return result(id, "unknown", "reflog 里找不到 {cwd} 从何时起包含合并提交，比不了重启时间", p, ev);
   const since = Math.max(mergedAt, d.headSince);
-  const t = { ...p, started: when(d.startedAt), since: when(since) };
+  const [started, sinceText] = whenPair(d.startedAt, since);
+  const t = { ...p, started, since: sinceText };
   if (d.startedAt > since) return result(id, "pass", "{daemon} 启动于 {started}，晚于代码更新到合并提交的 {since}", t, ev);
   return result(id, "fail", "{daemon} 启动于 {started}，早于代码更新到合并提交的 {since}——还没重启", t, ev);
 }
@@ -247,9 +283,9 @@ export function checklistVerdict(plan: ChecklistPlan, results: ProbeResult[], wa
   return { result, checks, blocking };
 }
 
-/** recordVerify 在事务里再核一遍：非空，且每项都通过或带了豁免理由（调用方传错 result 也推不进 verified） */
-export function checksAllClear(checks: unknown): boolean {
-  if (!Array.isArray(checks) || !checks.length) return false;
+/** recordVerify 在事务里再核一遍：检查单完整、非空，且每项都通过或带了豁免理由（调用方传错 result 也推不进 verified） */
+export function checksAllClear(checks: unknown, incomplete?: unknown): boolean {
+  if (incomplete === true || !Array.isArray(checks) || !checks.length) return false;
   return checks.every((c) => {
     const r = c as Partial<ProbeResult>;
     if (!PROBE_IDS.includes(r.id as ProbeId)) return false;
@@ -260,6 +296,6 @@ export function checksAllClear(checks: unknown): boolean {
 /** CLI / 报错里的一句话：哪些项没过 */
 export function blockingSummary(v: ChecklistVerdict, plan: ChecklistPlan): string {
   const parts = v.blocking.map((r) => `${r.id}（${r.status}）：${r.detail}`);
-  if (plan.incomplete) parts.unshift("拿不到 PR 的文件列表，推断不出检查单——gh 恢复后重跑，或在 task extra.checks 里手工指定");
+  if (plan.incomplete) parts.unshift(INCOMPLETE_TEXT[plan.incompleteReason ?? "files"]);
   return parts.join("；");
 }

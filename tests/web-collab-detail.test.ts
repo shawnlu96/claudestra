@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { actorName, eventLine, fmtEventTime, latestChecklist, participants, recentThree, reviewRows, SOURCE_TEXT, stageSegments } from "../web/features/collab/collab-detail-model";
 import { COLLAB_DICT } from "../web/lib/i18n-dict-collab";
+import { INCOMPLETE_TEXT } from "../src/lib/ledger-probes";
 import type { LedgerEventView, LedgerTaskView } from "../web/features/collab/collab-model";
 import { fillParams } from "../web/lib/i18n-fill";
 
@@ -123,18 +124,26 @@ describe("完成检查单", () => {
       { id: "new-probe", label: "new-probe", status: "unknown", detail: "", tpl: null, params: {}, waived: null },
     ]);
     expect(latestChecklist([ev("verify", { result: "unknown", checks: [], checklistSource: "bogus", incomplete: true, note: "只核证据" })])).toMatchObject({
-      source: null, incomplete: true, note: "只核证据",
+      source: null, incomplete: true, incompleteText: "拿不到 PR 的文件列表，推断不出检查单", note: { text: "只核证据", tpl: null, params: {} },
     });
+    const owned = latestChecklist([ev("verify", {
+      result: "unknown", checks: [], incomplete: true, incompleteReason: "ownership",
+      note: "项目 p 的目录里没有本仓库", noteTpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", noteParams: { project: "p" },
+    })]);
+    expect(owned).toMatchObject({ incompleteText: expect.stringContaining("判断不了"), note: { tpl: expect.stringContaining("{project}"), params: { project: "p" } } });
   });
   test("verify 事件一句话：pass / fail / unknown 三种", () => {
     expect(eventLine(ev("verify", { result: "pass" }))).toBe("线上验证通过");
     expect(eventLine(ev("verify", { result: "unknown" }))).toBe("线上验证查不到结果");
   });
-  test("探针说明模板（src/lib/ledger-probes.ts 的中文字面量）在英文词表里都有译文，占位符一致", () => {
-    const src = readFileSync(join(import.meta.dir, "../src/lib/ledger-probes.ts"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-    const lits = [...new Set([...src.matchAll(/"([^"\n]*[\u4e00-\u9fff][^"\n]*)"/g)].map((m) => m[1]))];
-    // 「没采集」是参数值、推断不全那句只进 CLI 报错，不走网页模板
-    const tpls = lits.filter((l) => l !== "没采集" && !l.startsWith("拿不到 PR 的文件列表，推断不出检查单——"));
+  test("探针说明与 note 模板（ledger-probes.ts / ledger-verify.ts 的中文字面量）在英文词表里都有译文，占位符一致", () => {
+    const strip = (f: string) => readFileSync(join(import.meta.dir, f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const probes = strip("../src/lib/ledger-probes.ts");
+    const verifyTpls = [...strip("../src/manager/ledger-verify.ts").matchAll(/tpl: "([^"\n]+)"/g)].map((m) => m[1]);
+    const lits = [...new Set([...probes.matchAll(/"([^"\n]*[\u4e00-\u9fff][^"\n]*)"/g)].map((m) => m[1]))];
+    // 「没采集」是参数值；INCOMPLETE_TEXT 只进 CLI 报错（网页用自己的短句，见 collab-detail-model 的 INCOMPLETE_TEXT）
+    const tpls = [...lits.filter((l) => l !== "没采集" && !Object.values(INCOMPLETE_TEXT).includes(l)), ...verifyTpls];
+    expect(verifyTpls.length).toBe(2);
     expect(tpls.length).toBeGreaterThan(30);
     const holes = (t: string) => [...t.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
     for (const t of tpls) {
@@ -142,5 +151,6 @@ describe("完成检查单", () => {
       expect(holes(COLLAB_DICT[t]), t).toEqual(holes(t));
     }
     for (const k of Object.values(SOURCE_TEXT)) expect(COLLAB_DICT[k], k).toBeString();
+    for (const k of ["拿不到 PR 的文件列表，推断不出检查单", "判断不了任务所属项目是不是本仓库，不知道该核什么"]) expect(COLLAB_DICT[k], k).toBeString();
   });
 });

@@ -281,7 +281,9 @@ export function recordVerify(
     if (dup) return dup;
     if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
     if (task.stage !== "live") throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 live`, { stage: task.stage, rev: task.rev });
-    if (input.result === "pass" && !checksAllClear(input.data.checks)) throw new LedgerError("invalid", "结论是 pass 但检查单为空，或有没通过也没豁免的项");
+    if (input.result === "pass" && !checksAllClear(input.data.checks, input.data.incomplete)) {
+      throw new LedgerError("invalid", "结论是 pass 但检查单不全 / 为空，或有没通过也没豁免的项");
+    }
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "verify", text: input.text, data: { ...input.data, result: input.result } }, true);
     if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false).task;
     return { row: task, event, duplicate: false };

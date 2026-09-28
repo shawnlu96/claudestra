@@ -39,6 +39,11 @@ let sc: {
   relayWeb: string | null;
   bridgeStart: number;
   codeHasMerge: boolean;
+  cwdIsRepo: boolean;
+  worktreeClean: boolean;
+  origin: string | null;
+  mainRepoOk: boolean;
+  mergeParents: number;
   projectDirs: string[] | null;
   sizes: Record<string, number>;
 };
@@ -61,7 +66,12 @@ function fakeRun(argv: string[]) {
   if (cmd.startsWith("git -C /repo log -1 --format=%H m1 -- web")) return out(0, "w1\n");
   if (cmd.startsWith("git -C /repo cat-file -e")) return out(["w1^{commit}", "w2^{commit}", "old^{commit}"].includes(argv.at(-1)!) ? 0 : 128);
   if (cmd.startsWith("git -C /repo merge-base --is-ancestor w1 ")) return out(["w1", "w2"].includes(argv.at(-1)!) ? 0 : 1);
-  if (at("/repo", "rev-parse --path-format=absolute --git-common-dir")) return out(0, "/repo/.git\n");
+  if (at("/repo", "rev-parse --path-format=absolute --git-common-dir")) return sc.mainRepoOk ? out(0, "/repo/.git\n") : out(128, "", "fatal");
+  if (at("/repo", "remote get-url origin")) return sc.origin ? out(0, `${sc.origin}\n`) : out(2, "", "no such remote");
+  if (at("/repo", "rev-list --parents -n 1 m1")) return out(0, ["m1", "p0", "p9"].slice(0, sc.mergeParents + 1).join(" ") + "\n");
+  if (at("/repo", "diff --name-only m1^1 m1")) return out(0, "src/bridge/x.ts\nweb/a.tsx\n");
+  if (at(DAEMON_CWD, "rev-parse --git-dir")) return sc.cwdIsRepo ? out(0, ".git\n") : out(128, "", "fatal: not a git repository");
+  if (cmd.startsWith(`git -C ${DAEMON_CWD} diff --quiet HEAD --`)) return out(sc.worktreeClean ? 0 : 1);
   if (at(DAEMON_CWD, "cat-file -e m1^{commit}")) return out(sc.codeHasMerge ? 0 : 128);
   if (at(DAEMON_CWD, "merge-base --is-ancestor m1 HEAD")) return out(sc.codeHasMerge ? 0 : 1);
   if (cmd.startsWith(`git -C ${DAEMON_CWD} reflog`)) return out(0, `aaaa002 HEAD@{${PULLED / 1000}}\naaaa001 HEAD@{${(MERGED - 60_000) / 1000}}\n`);
@@ -105,7 +115,8 @@ function liveTask(id = "T9", over: Record<string, unknown> = {}) {
 beforeEach(() => {
   calls = [];
   sc = { files: ["web/a.tsx", "src/bridge/x.ts"], state: "MERGED", branch: "task/t9", ghFails: false, mergeInMain: true, localWeb: "w1",
-    relay: { enabled: true, base: "relay.example" }, relayWeb: "w2", bridgeStart: PULLED + 60_000, codeHasMerge: true, projectDirs: ["/repo"], sizes: {} };
+    relay: { enabled: true, base: "relay.example" }, relayWeb: "w2", bridgeStart: PULLED + 60_000, codeHasMerge: true,
+    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, projectDirs: ["/repo"], sizes: {} };
   db = openLedger(":memory:");
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   liveTask();
@@ -129,6 +140,16 @@ describe("ledger verify：全过与没过", () => {
     expect(r).toMatchObject({ ok: false, code: "unverified", moved: false, result: "fail", task: { stage: "live" } });
     expect(r.error).toContain("daemon-bridge（fail）");
     expect(stages()).toEqual([]);
+  });
+  test("代码目录 HEAD 含合并提交但工作区还是旧文件 → fail；工作目录不是 git 仓库 → unknown 写明原因", async () => {
+    sc.worktreeClean = false;
+    expect((await pm("verify", "T9", "--dry-run")).blocking).toContain("和 HEAD 不一致");
+    sc.worktreeClean = true;
+    sc.cwdIsRepo = false;
+    calls = [];
+    const r = await pm("verify", "T9", "--dry-run");
+    expect(r).toMatchObject({ result: "unknown", blocking: expect.stringContaining("不是 git 仓库") });
+    expect(calls.some((c) => c.includes(`${DAEMON_CWD} cat-file`))).toBe(false);
   });
   test("bridge 的代码目录还没更新到合并提交：fail（哪怕进程启动晚于合并）", async () => {
     sc.codeHasMerge = false;
@@ -159,11 +180,22 @@ describe("检查单：extra 只加不减、推断不全、改动的文件决定 
     expect(r.checks.map((c: any) => c.id)).toEqual(["pr-merged", "daemon-bridge", "daemon-cron"]);
     expect(relayAsked).toBe(false);
   });
-  test("文件列表拿不到（gh api 失败）→ incomplete → unknown；空列表同样", async () => {
+  test("gh 拿不到文件列表：真正的 merge commit 从本地 diff 推；推不出（squash / rebase 又拿不到 PR head）→ incomplete → unknown", async () => {
     sc.files = null;
+    const r = await pm("verify", "T9", "--dry-run");
+    expect(r).toMatchObject({ result: "pass", checklistSource: "files" });
+    expect(r.checks.map((c: any) => c.id)).toEqual(["pr-merged", "web-local", "web-relay", "daemon-bridge"]);
+    sc.mergeParents = 1;
     expect(await pm("verify", "T9", "--dry-run")).toMatchObject({ result: "unknown", blocking: expect.stringContaining("推断不出检查单") });
     sc.files = [];
     expect((await pm("verify", "T9", "--dry-run")).result).toBe("unknown");
+  });
+  test("task-new / task-set 写 extra.checks 时就校验（空数组、未知组名当场报错）", async () => {
+    const rev = getTask(db, "T9")!.rev;
+    expect(await pm("task-set", "T9", "--rev", String(rev), "--extra", '{"checks":[]}')).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("非空数组") });
+    expect(await pm("task-set", "T9", "--rev", String(rev), "--extra", '{"checks":["webb"]}')).toMatchObject({ ok: false, code: "invalid" });
+    expect(await pm("task-set", "T9", "--rev", String(rev), "--extra", '{"checks":["cron"],"goal":"g"}')).toMatchObject({ ok: true });
+    expect(await pm("task-new", "T18", "--title", "t", "--kind", "code", "--extra", '{"checks":"web"}')).toMatchObject({ ok: false, code: "invalid" });
   });
 });
 
@@ -207,16 +239,42 @@ describe("没 PR 与别的项目", () => {
     expect(await pm("verify", "T14", "--evidence", "docs/T14.report.md")).toMatchObject({ ok: true, moved: true });
     expect(calls.filter((c) => !c.includes("rev-parse"))).toEqual([]);
   });
-  test("项目目录里没有本仓库：只核证据文件，结果带说明", async () => {
-    sc.projectDirs = ["/somewhere/else"];
+  test("明确不属于本仓库：PR 链接的 owner/repo 与 origin 不同 / ops 任务的项目目录不含本仓库 → 只核证据文件，带可翻译的说明", async () => {
+    sc.origin = "https://github.com/other/repo.git";
     const r = await pm("verify", "T9", "--dry-run");
-    expect(r).toMatchObject({ checklistSource: "evidence", note: expect.stringContaining("只核证据文件") });
+    expect(r).toMatchObject({ checklistSource: "evidence", noteTpl: expect.stringContaining("{prRepo}"), noteParams: { prRepo: "x/y", origin: "other/repo" } });
     expect(r.checks.map((c: any) => c.id)).toEqual(["manual-evidence"]);
+    liveTask("T15", { pr: null, kind: "ops" });
+    sc.projectDirs = ["/somewhere/else"];
+    expect(await pm("verify", "T15", "--dry-run")).toMatchObject({ checklistSource: "evidence", note: expect.stringContaining("项目 claude-orchestrator") });
+  });
+  test("判断不了归属（origin 读不到 / git 读不到本仓库）→ 推断不全、不放行，证据文件也救不了", async () => {
+    sc.origin = null;
+    sc.sizes["/etc/hosts"] = 100;
+    const r = await pm("verify", "T9", "--evidence", "/etc/hosts");
+    expect(r).toMatchObject({ ok: false, result: "unknown", blocking: expect.stringContaining("判断不了任务所属项目"), task: { stage: "live" } });
+    expect(r.event.data).toMatchObject({ incomplete: true, incompleteReason: "ownership" });
+    liveTask("T16", { pr: null, kind: "ops" });
+    sc.mainRepoOk = false;
+    expect(await pm("verify", "T16", "--evidence", "/etc/hosts")).toMatchObject({ ok: false, result: "unknown" });
+  });
+  test("项目目录登记的是本仓库的上级目录：算拥有，按全套核（不降级）", async () => {
+    liveTask("T17", { pr: null, kind: "ops" });
+    sc.projectDirs = ["/"];
+    const r = await pm("verify", "T17", "--dry-run");
+    expect(r.checklistSource).toBe("evidence"); // ops 无 PR 本来就只核证据；关键是没有降级说明
+    expect(r.note).toBeUndefined();
   });
   test("没配中继 → web-relay 不适用算过；本机网页是后代版本也算过", async () => {
     sc.relay = { enabled: false };
     sc.localWeb = "w2";
     expect(await pm("verify", "T9")).toMatchObject({ ok: true, moved: true });
+  });
+  test("dedup：成功推进 verified 之后同一个键重试 → duplicate，而不是报「不在 live」；键用在别处 → dedup_mismatch", async () => {
+    expect(await pm("verify", "T9", "--dedup", "ok1")).toMatchObject({ ok: true, moved: true });
+    expect(await pm("verify", "T9", "--dedup", "ok1")).toMatchObject({ ok: true, duplicate: true });
+    await pm("note", "T9", "随手记", "--dedup", "n1");
+    expect(await pm("verify", "T9", "--dedup", "n1")).toMatchObject({ ok: false, code: "dedup_mismatch" });
   });
   test("dedup 重放：结论以当时记下的为准", async () => {
     sc.bridgeStart = MERGED - 1000;
@@ -241,6 +299,9 @@ describe("进 verified 只有一条路", () => {
     recordVerify(db, { actor: PM }, { taskId: "T9", result: "pass", data: { checks: clear } });
     moveStage(db, { actor: PM }, { taskId: "T9", from: "verified", to: "blocked" });
     expect(moveStage(db, { actor: PM }, { taskId: "T9", from: "blocked", to: "verified" }).row.stage).toBe("verified");
+  });
+  test("recordVerify：pass 但检查单推断不全 → invalid", () => {
+    expect(code(() => recordVerify(db, { actor: PM }, { taskId: "T9", result: "pass", data: { checks: clear, incomplete: true } }))).toBe("invalid");
   });
   test("recordVerify：pass 但 checks 空 / 有没过没豁免 → invalid；执行者 → forbidden；不在 live → conflict", () => {
     expect(code(() => recordVerify(db, { actor: PM }, { taskId: "T9", result: "pass", data: {} }))).toBe("invalid");

@@ -33,8 +33,8 @@ export function ChecklistSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
         <span className={s.tm}>{tr("{who} 核对于 {t}", { who: actorName(c.actor, tr), t: fmtEventTime(c.ts, d.now, tr) })}</span>
       </div>
       {c.source && <div className={s.ckMeta}>{tr(SOURCE_TEXT[c.source])}</div>}
-      {c.incomplete && <div className={`${s.ckMeta} ${s.ckFailText}`}>{tr("拿不到 PR 的文件列表，推断不出检查单")}</div>}
-      {c.note && <div className={s.ckMeta}>{c.note}</div>}
+      {c.incompleteText && <div className={`${s.ckMeta} ${s.ckFailText}`}>{tr(c.incompleteText)}</div>}
+      {c.note && <div className={s.ckMeta}>{c.note.tpl ? tr(c.note.tpl, c.note.params) : c.note.text}</div>}
       {c.rows.map((r) => {
         const look = ROW_LOOK[r.waived ? "waived" : r.status];
         return (

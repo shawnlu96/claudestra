@@ -78,7 +78,6 @@ export const COLLAB_DICT: Record<string, string> = {
   "reflog 里找不到 {cwd} 从何时起包含合并提交，比不了重启时间": "Reflog doesn’t show when {cwd} picked up the merge commit; can’t compare the restart time",
   "{daemon} 启动于 {started}，早于代码更新到合并提交的 {since}——还没重启": "{daemon} started {started}, before its code reached the merge commit at {since} — not restarted yet",
   "{daemon} 启动于 {started}，晚于代码更新到合并提交的 {since}": "{daemon} started {started}, after its code reached the merge commit at {since}",
-  "{daemon} 没在跑": "{daemon} isn’t running",
   "{daemon} 的代码目录 {cwd} 还不含合并提交 {merge}——先把那里更新到 main 再重启": "{daemon}’s code dir {cwd} doesn’t contain merge commit {merge} yet — update it to main, then restart",
   "不知道合并时间，比不了": "Merge time unknown; can’t compare",
   "中继没有托管的网页版本（build-info.json 里没有 webCommit）": "The relay serves no web build (no webCommit in build-info.json)",
@@ -112,4 +111,12 @@ export const COLLAB_DICT: Record<string, string> = {
   "按 PR 文件推断，另有手工追加项": "Inferred from the PR’s files, plus manual additions",
   "拿不到文件列表，手工指定": "File list unavailable; set manually",
   "只核证据文件": "Evidence file only",
+  "判断不了任务所属项目是不是本仓库，不知道该核什么": "Can’t tell whether the task’s project is this repository, so there’s nothing to check against",
+  "PR 属于 {prRepo}，不是本仓库 {origin}，只核证据文件（--evidence）": "The PR belongs to {prRepo}, not this repository {origin}; only the evidence file is checked (--evidence)",
+  "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）": "Project {project} doesn’t include this repository; only the evidence file is checked (--evidence)",
+  "{daemon} 没装（launchd 里没有它）——这台机器不用它就 --waive 带理由": "{daemon} isn’t installed (not in launchd) — if this machine doesn’t use it, --waive with a reason",
+  "{daemon} 装了但没在跑": "{daemon} is installed but not running",
+  "{daemon} 的工作目录 {cwd} 核对不了：{error}": "Can’t check {daemon}’s working dir {cwd}: {error}",
+  "{daemon} 的代码目录 {cwd} 里 PR 改到的文件和 HEAD 不一致（工作区还是旧文件或有改动）——先让工作区回到 HEAD 再重启":
+    "In {daemon}’s code dir {cwd}, files the PR changed differ from HEAD (stale or modified working tree) — reset the working tree to HEAD, then restart",
 };
