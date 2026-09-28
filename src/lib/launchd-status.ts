@@ -1,6 +1,6 @@
 /**
  * 读 `launchctl list` 判断一个 launchd 服务的状态。doctor 和菜单栏小程序（desktop-cli status）共用这一份，
- * 两边对同一台机器必须给出同一个结论。纯函数，tests/launchd-status.test.ts / tests/doctor.test.ts。
+ * 两边对同一台机器必须给出同一个结论。纯函数，tests/desktop-status.test.ts / tests/doctor.test.ts。
  */
 
 import type { CheckStatus } from "./doctor.js";

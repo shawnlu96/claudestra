@@ -23,6 +23,17 @@ export function desktopLabels(env: Record<string, string | undefined> = process.
   return labels;
 }
 
+/** Bun 启动时自动加载的 env 文件（.env、.env.local、.env.$NODE_ENV）：覆盖写进任何一个都会长期生效 */
+export const BUN_AUTO_ENV_FILES = [".env", ".env.local", ".env.development", ".env.production", ".env.test"];
+
+/** 哪些自动加载的 env 文件里写了 label 覆盖（read 读不到文件返回 null） */
+export function labelsOverrideFiles(read: (file: string) => Record<string, string> | null): string[] {
+  return BUN_AUTO_ENV_FILES.filter((f) => {
+    const vars = read(f);
+    return vars !== null && LABELS_ENV in vars;
+  });
+}
+
 /** 汇总成菜单栏一盏灯：有 fail 就红，有 warn 就黄，全 ok 才绿 */
 export function overallStatus(states: { status: CheckStatus }[]): CheckStatus {
   if (states.some((s) => s.status === "fail")) return "fail";

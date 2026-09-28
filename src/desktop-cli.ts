@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, statSync } from "fs";
 import { resolve } from "path";
 import { resolveBridgePort } from "./lib/bridge-url.js";
-import { desktopLabels, LABELS_ENV, overallStatus, updateHolder } from "./lib/desktop-status.js";
+import { desktopLabels, LABELS_ENV, labelsOverrideFiles, overallStatus, updateHolder } from "./lib/desktop-status.js";
 import { checkRuntime, runDoctor } from "./lib/doctor.js";
 import { readDotenvFileSync } from "./lib/env-file.js";
 import { daemonState } from "./lib/launchd-status.js";
@@ -29,9 +29,10 @@ async function run(cmd: string[]): Promise<{ code: number; out: string; err: str
   return { code: await p.exited, out, err: err.trim() };
 }
 
-/** Bun 会自动加载仓库 .env：label 覆盖写进去就会长期生效、悄悄改掉线上行为，所以只认进程环境 */
-function labels(dotenv: Record<string, string> | null): string[] {
-  if (dotenv && LABELS_ENV in dotenv) throw new Error(`${LABELS_ENV} 不能写在 .env 里（只给开发时临时 export）`);
+/** Bun 会自动加载仓库里的 env 文件：label 覆盖写进去就会长期生效、悄悄改掉线上行为，所以只认进程环境 */
+function labels(): string[] {
+  const files = labelsOverrideFiles((f) => readDotenvFileSync(`${REPO_ROOT}/${f}`));
+  if (files.length) throw new Error(`${LABELS_ENV} 不能写在 ${files.join(" / ")} 里（只给开发时临时 export）`);
   return desktopLabels();
 }
 
@@ -39,7 +40,7 @@ async function status() {
   const dotenv = readDotenvFileSync(`${REPO_ROOT}/.env`);
   const list = await run(["launchctl", "list"]);
   if (list.code !== 0) return { ok: false, error: `launchctl list 失败：${list.err}` };
-  const daemons = labels(dotenv).map((label) =>
+  const daemons = labels().map((label) =>
     daemonState(list.out, label, existsSync(`${HOME}/Library/LaunchAgents/${label}.plist`)));
   return {
     ok: true,
@@ -72,7 +73,7 @@ function pidAlive(pid: number): boolean {
 
 async function restart() {
   refuseInSandbox("重启 launchd 服务");
-  const targets = labels(readDotenvFileSync(`${REPO_ROOT}/.env`));
+  const targets = labels();
   const holder = updateHolder(readUpdateLock(), Date.now(), pidAlive);
   if (holder) return { ok: false, error: `自动更新正在进行（pid ${holder}），等它跑完再重启，否则会把更新砍在半路` };
   const uid = process.getuid?.() ?? 0;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { desktopLabels, overallStatus, updateHolder, LABELS_ENV } from "../src/lib/desktop-status";
+import { desktopLabels, labelsOverrideFiles, overallStatus, updateHolder, BUN_AUTO_ENV_FILES, LABELS_ENV } from "../src/lib/desktop-status";
 import { daemonState, launchctlEntry } from "../src/lib/launchd-status";
 
 const LIST = [
@@ -57,6 +57,24 @@ describe("desktopLabels", () => {
     expect(() => desktopLabels({ [LABELS_ENV]: "a;rm" })).toThrow();
     expect(() => desktopLabels({ [LABELS_ENV]: "com.apple.Finder" })).toThrow();
     expect(() => desktopLabels({ [LABELS_ENV]: "ok.label,COM.APPLE.x" })).toThrow();
+  });
+});
+
+describe("labelsOverrideFiles", () => {
+  test("Bun 自动加载的每个 env 文件都查：写在 .env.local / .env.$NODE_ENV 里同样拒绝", () => {
+    const files: Record<string, Record<string, string>> = {
+      ".env": { BRIDGE_PORT: "3847" },
+      ".env.local": { [LABELS_ENV]: "com.x.dummy" },
+      ".env.test": { [LABELS_ENV]: "" },
+    };
+    expect(labelsOverrideFiles((f) => files[f] ?? null)).toEqual([".env.local", ".env.test"]);
+  });
+  test("都没写（或文件都不存在）→ 空", () => {
+    expect(labelsOverrideFiles(() => null)).toEqual([]);
+    expect(labelsOverrideFiles(() => ({ BRIDGE_PORT: "1" }))).toEqual([]);
+  });
+  test("覆盖 .env、.env.local 和三个 NODE_ENV 变体", () => {
+    expect(BUN_AUTO_ENV_FILES).toEqual([".env", ".env.local", ".env.development", ".env.production", ".env.test"]);
   });
 });
 
