@@ -7,7 +7,10 @@ import { matchStopWord, ownerStopOf } from "../src/lib/stop-words.js";
 
 describe("整句停字", () => {
   const yes = ["停", "停。", "停！", "停下", "停止", "先停", "停一下", "停停停", "别做了", "别跑了", "不要做了", "取消", "取消。",
-    "等一下", "等一下。", "等等", "stop", "Stop.", "STOP!", "stop stop", "abort", "cancel", "halt", "wait", "Wait!", "wait…", "  停  ", "ｓｔｏｐ"];
+    "等一下", "等一下。", "等等", "stop", "Stop.", "STOP!", "stop stop", "abort", "cancel", "halt", "wait", "Wait!", "wait…", "  停  ", "ｓｔｏｐ",
+    // owner 09-29 批的扩表
+    "停下来", "停下来！", "暂停", "暂停。", "暂停一下", "先暂停", "暂停一下再说", "暂停一下，再说", "暂停再说", "打住", "打住！", "中止",
+    "hold on", "Hold on!", "hold on…", "HOLD ON"];
   for (const s of yes) {
     test(`「${s}」`, () => expect(matchStopWord(s).stop).toBe(true));
   }
@@ -25,6 +28,9 @@ describe("不是停", () => {
     "wait for CI", "等等再说", "稍等一下我发你文件", "等一下我发你文件", "停车场", "停止按钮不好用",
     "", "我等一下再看", "先别部署了，看下 X", "stopwatch 组件怎么写", "please stop", "不要停",
     "停停停停停停停停停停", // 超过 8 个字：多半是语音转写跑飞
+    // 扩表之后仍不算停：原来判对的不回退，新词在句子里当普通词用的也不算
+    "等一下我再说", "wait for it", "先别停", "等等再说",
+    "暂停 cron 任务", "暂停一下 CI 再合", "别暂停", "中止条件怎么写", "打住了没", "hold on to this", "hold on, 我先看下日志", "暂停，继续",
   ];
   for (const s of no) {
     test(`「${s}」`, () => expect(matchStopWord(s).stop).toBe(false));
