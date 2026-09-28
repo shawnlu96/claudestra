@@ -101,10 +101,13 @@ function senderOf(from: Record<string, unknown> | undefined): string | null {
   return typeof name === "string" && name ? name : String(kind);
 }
 
-function readHeld(path: string, byChannel: ReadonlyMap<string, string>): AuditHeld[] | null {
+/** 取不到时 value = null，reason 写进 CLI 输出的 skipped */
+type Got<T> = { value: T | null; reason?: string };
+
+function readHeld(path: string, byChannel: ReadonlyMap<string, string>): Got<AuditHeld[]> {
   const r = readJsonStateSync(path);
-  if (r.status === "missing") return [];
-  if (r.status !== "ok" || !r.data || typeof r.data !== "object") return null;
+  if (r.status === "missing") return { value: [] };
+  if (r.status !== "ok" || !r.data || typeof r.data !== "object") return { value: null, reason: `押后队列文件读不了：${path}` };
   const out: AuditHeld[] = [];
   for (const [ch, q] of Object.entries(r.data as Record<string, unknown>)) {
     const to = byChannel.get(ch);
@@ -115,21 +118,22 @@ function readHeld(path: string, byChannel: ReadonlyMap<string, string>): AuditHe
       out.push({ to, from, messageId: i.env?.meta?.messageId ?? String(i.heldAt), heldAt: i.heldAt, leaseAt: typeof i.lease?.at === "number" ? i.lease.at : null });
     }
   }
-  return out;
+  return { value: out };
 }
 
-/** ownerInbox 在 docsDir 旁边的 ledger.json（PM 手写的老台账）；没有这个文件 = 空，坏了 = null */
-function readOwnerInbox(docsDir: string | null): AuditInboxEntry[] | null {
-  if (!docsDir) return [];
-  const r = readJsonStateSync(join(dirname(docsDir), "ledger.json"));
-  if (r.status === "missing") return [];
-  if (r.status !== "ok") return null;
+/** ownerInbox 在 docsDir 上一级的 ledger.json（PM 手写的老台账）：没有 docsDir / 没有这个文件 / 坏了都不跑，写明原因 */
+function readOwnerInbox(docsDir: string | null): Got<AuditInboxEntry[]> {
+  if (!docsDir) return { value: null, reason: "项目没有 meta.docsDir，找不到 ownerInbox" };
+  const file = join(dirname(docsDir), "ledger.json");
+  const r = readJsonStateSync(file);
+  if (r.status === "missing") return { value: null, reason: `${file} 不存在` };
+  if (r.status !== "ok") return { value: null, reason: `${file} 读不了` };
   const list = (r.data as { ownerInbox?: unknown } | null)?.ownerInbox;
-  if (!Array.isArray(list)) return [];
-  return list.map((m: Record<string, unknown>) => {
+  if (!Array.isArray(list)) return { value: null, reason: `${file} 里没有 ownerInbox` };
+  return { value: list.map((m: Record<string, unknown>) => {
     const ts = typeof m.ts === "string" ? Date.parse(m.ts) : Number.NaN;
     return { ts: Number.isFinite(ts) ? ts : null, text: String(m.text ?? ""), status: String(m.status ?? ""), to: String(m.to ?? "") };
-  });
+  }) };
 }
 
 /** 有 PM 名单的项目（没有名单的项目没人收推送，也就不巡检） */
@@ -138,14 +142,14 @@ export function auditedProjects(db: Database): string[] {
   return rows.map((r) => r.project).filter((p) => getMeta(db, p).pms.length > 0);
 }
 
-async function readAgents(src: SnapshotSources, want: ReadonlySet<string>): Promise<{ list: RegistryAgent[]; agents: AuditAgent[] } | null> {
+async function readAgents(src: SnapshotSources, want: ReadonlySet<string>): Promise<{ list: RegistryAgent[]; agents: AuditAgent[] } | string> {
   let list: RegistryAgent[];
   try {
     list = await src.registry();
-  } catch {
-    return null; // registry 读不到：依赖它的规则这一轮不跑
+  } catch (e) {
+    return `registry 读不了：${(e as Error).message}`; // 依赖它的规则这一轮不跑，原因进 skipped
   }
-  const windows = await src.windows().catch(() => null); // tmux 出错同上：只有回收规则不跑
+  const windows = await src.windows().catch(() => null); // tmux 出错：windowAlive 全为 null，只有回收规则不跑
   const agents = await Promise.all(list.map(async (a): Promise<AuditAgent> => ({
     name: a.name,
     projectId: a.projectId,
@@ -169,19 +173,28 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
     p.meta.pms.forEach((x) => want.add(x));
     for (const { task } of p.tasks) if (task.agent && (task.stage === "build" || task.stage === "fix")) want.add(task.agent);
   }
-  const reg = await readAgents(src, want);
+  const got = await readAgents(src, want);
+  const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
-  const held = reg ? readHeld(src.heldPath, byChannel) : null;
+  const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
   return perProject.map(({ project, meta, tasks }) => {
     const pmAgents = (reg?.list ?? []).filter((a) => meta.pms.includes(a.name));
+    const inbox = readOwnerInbox(meta.docsDir);
+    const unavailable: AuditSnapshot["unavailable"] = {
+      ...(typeof got === "string" ? { agents: got } : {}),
+      ...(reg?.agents.some((a) => a.windowAlive === null) ? { windows: "tmux 没列出窗口" } : {}),
+      ...(held.reason ? { held: held.reason } : {}),
+      ...(inbox.reason ? { ownerInbox: inbox.reason } : {}),
+    };
     return {
       project,
       pms: meta.pms,
       tasks,
       agents: reg?.agents ?? null,
       reviewers: reg ? pmAgents.flatMap((a) => src.reviewers(a, now)) : null,
-      held,
-      ownerInbox: readOwnerInbox(meta.docsDir),
+      held: held.value,
+      ownerInbox: inbox.value,
+      unavailable,
     };
   });
 }

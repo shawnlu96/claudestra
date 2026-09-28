@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import type { AuditFinding, AuditRule } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { LedgerReader, ledgerFeedTicker, projectView } from "../src/lib/ledger-read.js";
-import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const ALL: AuditRule[] = ["review_no_reviewer", "pm_held", "ship_stalled"];
@@ -101,11 +101,11 @@ describe("reconcileFindings", () => {
 });
 
 describe("读侧", () => {
-  test("v1 库（还没有 audit_findings 表）→ 总览 audit 为空，变更推送照常", () => {
+  test("巡检之前版本的库（还没有 audit_findings 表）→ 总览 audit 为空，变更推送照常", () => {
     const path = tempLedgerPath("ledger-audit-v1-");
     seedLedger(path);
     const raw = new Database(path);
-    raw.exec("DROP TABLE audit_findings; PRAGMA user_version = 1");
+    raw.exec(`DROP TABLE audit_findings; PRAGMA user_version = ${LEDGER_SCHEMA_VERSION - 1}`);
     raw.close();
     const reader = new LedgerReader(path);
     const db = reader.get();

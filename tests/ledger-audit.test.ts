@@ -205,8 +205,17 @@ describe("ownerInbox 处理中太久", () => {
   test("done、时间缺失、恰好 30 分钟都不报", () => {
     expect(only(snap({ ownerInbox: [e(NOW - 60 * MIN, "done"), e(null), e(NOW - TH.ownerInboxDoingMs)] }), "owner_inbox_stale")).toEqual([]);
   });
-  test("ledger.json 读坏了（null）→ 不跑", () => {
-    expect(auditLedger(snap({ ownerInbox: null }), NOW).evaluated).not.toContain("owner_inbox_stale");
+  test("ledger.json 取不到（null）→ 不跑，skipped 里写明原因", () => {
+    const r = auditLedger(snap({ ownerInbox: null, unavailable: { ownerInbox: "项目没有 meta.docsDir，找不到 ownerInbox" } }), NOW);
+    expect(r.evaluated).not.toContain("owner_inbox_stale");
+    expect(r.skipped).toEqual([{ rule: "owner_inbox_stale", reason: "项目没有 meta.docsDir，找不到 ownerInbox" }]);
+  });
+  test("registry 取不到 → 依赖它的规则全部进 skipped，原因一致", () => {
+    const r = auditLedger(snap({ agents: null, reviewers: null, held: null, unavailable: { agents: "registry 读不了" } }), NOW);
+    expect(r.skipped.map((x) => x.rule).sort()).toEqual(
+      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor", "review_no_reviewer", "task_agent_missing"]);
+    expect(new Set(r.skipped.map((x) => x.reason))).toEqual(new Set(["registry 读不了"]));
+    expect(auditLedger(snap(), NOW).skipped).toEqual([]);
   });
 });
 

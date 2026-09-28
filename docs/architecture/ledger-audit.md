@@ -8,7 +8,7 @@ A deterministic, LLM-free check that runs over the built-in ledger every 15 minu
 |---|---|---|
 | Rules | `src/lib/ledger-audit.ts` | `auditLedger(snapshot, now)` — pure; thresholds in `AUDIT_THRESHOLDS` |
 | Snapshot | `src/lib/ledger-audit-snapshot.ts` | Reads ledger, registry, tmux, session files, subagents, held queue, `ledger.json` |
-| Store | `src/lib/ledger-audit-store.ts` | `audit_findings` table (schema v2): open / still open / resolved / reopened, `notifiedAt` dedup |
+| Store | `src/lib/ledger-audit-store.ts` | `audit_findings` table (`SCHEMA_AUDIT` migration): open / still open / resolved / reopened, `notifiedAt` dedup |
 | CLI | `src/manager/ledger-audit-cmd.ts` | `ledger audit [--project <id>] [--dry-run] [--json]`, `ledger audit --ack <key,key>` |
 | Timer | `src/bridge/ledger-audit-service.ts` | Every 15 min (first run 90 s after start): run the CLI, push pending findings, ack |
 | Read side | `src/lib/ledger-read.ts` | `GET /api/v1/ledger/:project` returns `audit` (unresolved findings); SSE `ledger` fires when a finding opens or closes |
@@ -45,7 +45,7 @@ A finding's key is `project|rule|object|state fingerprint` (e.g. task + round + 
 - **Pushed once:** a finding is pushed while it is open with `notifiedAt` empty. The timer acks after a successful delivery (including "put in the held queue"). A missing recipient or a failed delivery leaves it for the next run.
 - **Resolved:** a finding that no longer appears gets `resolvedAt`. Nothing is pushed for that.
 - **Reopened:** if the same key appears again it is reopened (`firstSeen` reset, `notifiedAt` cleared) and pushed again. A new state, such as a new review round or a new idle spell, is a new key.
-- **Source failures don't resolve anything:** if a source could not be read (registry, held-queue file, tmux window list, `ledger.json`), the rules that depend on it are left out of `evaluated`, and their open findings stay open.
+- **Source failures don't resolve anything:** if a source could not be read (registry, held-queue file, tmux window list, `ledger.json`), the rules that depend on it are left out of `evaluated`, and their open findings stay open. The CLI output lists them under `skipped` with the reason (e.g. `owner_inbox_stale` for a project without `docsDir`) — never silently.
 
 Findings live in their own table, not as ledger events. `events` is append-only, and audit events would crowd `lastEvent` / `projectEvents` (the T11a P1-5 problem).
 

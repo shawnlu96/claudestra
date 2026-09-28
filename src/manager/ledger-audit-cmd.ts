@@ -34,13 +34,13 @@ async function audit(c: LedgerCli): Promise<Result> {
   for (const s of snaps) {
     const r = auditLedger(s, now);
     if (dry) {
-      out.push({ project: s.project, open: r.findings.map(full ? (f) => f : brief) });
+      out.push({ project: s.project, open: r.findings.map(full ? (f) => f : brief), skipped: r.skipped });
       continue;
     }
     const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now);
     pending.push(...rec.pending);
     const open = openFindings(c.db, s.project);
-    out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, open: full ? open : open.map(brief) });
+    out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, open: full ? open : open.map(brief), skipped: r.skipped });
   }
   return { ok: true, now, dryRun: dry, projects: out, ...(full && !dry ? { pending } : {}) };
 }

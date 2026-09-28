@@ -78,6 +78,8 @@ export interface AuditSnapshot {
   reviewers: readonly { taskId: string; round: number | null }[] | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
+  /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
+  unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
 
 export interface AuditFinding {
@@ -98,6 +100,8 @@ export interface AuditResult {
   findings: AuditFinding[];
   /** 这一轮真正跑过的规则：只有这些规则下、这次没再出现的旧异常才标已解决 */
   evaluated: AuditRule[];
+  /** 没跑的规则和原因 */
+  skipped: { rule: AuditRule; reason: string }[];
 }
 
 const isDispatcher = (name: string) => /dispatch/.test(name);
@@ -231,6 +235,9 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
 export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
+  const skipped: AuditResult["skipped"] = [];
+  const why = (src: keyof NonNullable<AuditSnapshot["unavailable"]>) => s.unavailable?.[src] ?? "取不到";
+  const skip = (reason: string, ...rs: AuditRule[]) => rs.forEach((rule) => skipped.push({ rule, reason }));
   const emit: Emit = ({ keyParts, ...f }) =>
     findings.push({ ...f, project: s.project, key: [s.project, f.rule, ...keyParts].join("|"), notify: auditRecipient(f.rule, s.pms) });
   const ts = s.tasks.map((t) => facts(t, now));
@@ -238,24 +245,25 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   if (s.reviewers) {
     reviewRules(ts, s.reviewers, now, emit);
     evaluated.push("review_no_reviewer", "deliver_not_in_review");
-  }
+  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "deliver_not_in_review");
   if (s.agents) {
     executorIdle(ts, agents, now, emit);
     registryRules(s, ts, agents, now, emit);
     evaluated.push("executor_idle", "task_agent_missing", "orphan_executor");
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
-  }
+    else skip(why("windows"), "reclaim_executor");
+  } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
   shipStalled(ts, now, emit);
   evaluated.push("ship_stalled");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit);
     evaluated.push("pm_held");
-  }
+  } else skip(why(s.agents ? "held" : "agents"), "pm_held");
   if (s.ownerInbox) {
     ownerInbox(s.ownerInbox, now, emit);
     evaluated.push("owner_inbox_stale");
-  }
-  return { findings, evaluated };
+  } else skip(why("ownerInbox"), "owner_inbox_stale");
+  return { findings, evaluated, skipped };
 }
 
 /** 推给 PM / 调度助理的一条通知（bridge/ledger-audit-service.ts 发）：一轮新出现的合成一条，每条一行「对象 · 建议 — 现象」 */

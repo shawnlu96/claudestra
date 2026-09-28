@@ -79,6 +79,12 @@ describe("取数", () => {
     expect((await collectAuditSnapshots(db, [P], NOW, sources()))[0].held).toBeNull();
   });
 
+  test("ownerInbox：ledger.json 不存在 → null，并写明原因", async () => {
+    const [s] = await collectAuditSnapshots(db, [P], NOW, sources());
+    expect(s.ownerInbox).toBeNull();
+    expect(s.unavailable?.ownerInbox).toContain("ledger.json 不存在");
+  });
+
   test("ownerInbox 从 docsDir 旁边的 ledger.json 读，带时区的时间照解析", async () => {
     writeFileSync(join(dir, "ledger", "ledger.json"), JSON.stringify({ ownerInbox: [{ ts: "2026-09-28T17:00:32+0900", text: "t", status: "doing", to: "T8" }] }));
     const [s] = await collectAuditSnapshots(db, [P], NOW, sources());
@@ -88,12 +94,14 @@ describe("取数", () => {
   test("registry 读不到 → agents / reviewers / held 都是 null", async () => {
     const [s] = await collectAuditSnapshots(db, [P], NOW, sources({ registry: async () => { throw new Error("坏了"); } }));
     expect([s.agents, s.reviewers, s.held]).toEqual([null, null, null]);
+    expect(s.unavailable?.agents).toBe("registry 读不了：坏了");
   });
 
   test("tmux 没列出窗口 → windowAlive 为 null；只给 build/fix 执行者和 PM 抓屏", async () => {
     const asked: string[] = [];
     const [s] = await collectAuditSnapshots(db, [P], NOW, sources({ windows: async () => null, turn: async (a) => (asked.push(a.name), "busy") }));
     expect(s.agents?.every((a) => a.windowAlive === null)).toBe(true);
+    expect(s.unavailable?.windows).toBe("tmux 没列出窗口");
     expect(asked).toEqual([PM]); // T1 在 review，执行者不用抓屏
   });
 
@@ -149,6 +157,7 @@ describe("ledger audit", () => {
     expect(a.pending.map((f: any) => [f.rule, f.taskId, f.notify])).toEqual([["review_no_reviewer", "T1", PM]]);
     const b = await cli("owner", "--json");
     expect(b.projects[0]).toMatchObject({ opened: 0, resolved: 0 });
+    expect(b.projects[0].skipped).toEqual([{ rule: "owner_inbox_stale", reason: expect.stringContaining("ledger.json 不存在") }]);
   });
 
   test("--ack 之后 pending 清空；执行者不能 ack", async () => {
