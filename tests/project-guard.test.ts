@@ -1,0 +1,77 @@
+/**
+ * src/manager/project-guard.ts：改项目目录只许 owner / master / 任一项目的 PM，其它 agent 和认不出的频道都拒绝；
+ * 以及 manager 的 project-add / edit / merge 真的接上了目录校验与角色校验（临时状态目录里跑子进程）。
+ */
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { setMeta } from "../src/lib/ledger-write.js";
+import type { ProjectDef } from "../src/lib/projects.js";
+import { projectWriterError } from "../src/manager/project-guard.js";
+import { tempLedgerPath } from "./ledger-test-helpers.js";
+
+const path = tempLedgerPath("project-guard-");
+const db = openLedger(path);
+setMeta(db, { actor: "owner" }, { project: "q", key: "pms", value: ["agent-pm"] });
+afterAll(() => closeLedger(path));
+
+const agents = { "agent-pm": { channelId: "1" }, "agent-exec": { channelId: "2" }, "agent-codex": { channelId: "3" } };
+const as = (channelId?: string, targets = ["q"], ledger = path) => projectWriterError({ channelId, controlChannelId: "9" }, agents, targets, ledger);
+
+describe("projectWriterError", () => {
+  test("owner（没有频道：终端 / bridge / 网页）、master（控制频道）、目标项目的 PM 放行", () => {
+    expect(as(undefined)).toBeNull();
+    expect(as("9")).toBeNull();
+    expect(as("1")).toBeNull();
+  });
+  test("只认目标项目的 PM：是 q 的 PM 也不能改 p；merge 要两边都是", () => {
+    expect(as("1", ["p"])?.error).toBe("agent-pm 不是项目 p 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）");
+    expect(as("1", ["q", "p"])).toMatchObject({ tpl: expect.stringContaining("{projects}"), params: { actor: "agent-pm", projects: "q / p" } });
+    expect(as("1", ["new-proj"])).not.toBeNull(); // 新建项目还没有 PM：只剩 owner / master
+  });
+  test("执行者、非台账 agent 拒绝，报错里写找谁；认不出的频道也拒绝", () => {
+    expect(as("2")?.error).toContain("agent-exec 不是项目 q 的 PM");
+    expect(as("3")?.error).toContain("找 PM 或 owner");
+    expect(as("777")?.error).toContain("认不出身份");
+  });
+  test("台账库还没建：只剩 owner / master", () => {
+    expect(as("1", ["q"], "/no/such/ledger.sqlite")).not.toBeNull();
+    expect(as(undefined, ["q"], "/no/such/ledger.sqlite")).toBeNull();
+  });
+});
+
+describe("manager project-* 接线（临时 CLAUDESTRA_STATE_DIR）", () => {
+  const state = mkdtempSync(join(tmpdir(), "project-cmds-"));
+  writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents: { "agent-exec": { channelId: "222", status: "active" } } }));
+  const manager = join(import.meta.dir, "../src/manager.ts");
+  const run = (args: string[], channel?: string) => {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, DISCORD_CHANNEL_ID: channel };
+    if (!channel) delete env.DISCORD_CHANNEL_ID;
+    const r = Bun.spawnSync([process.execPath, manager, ...args], { env, stdout: "pipe", stderr: "pipe" });
+    return JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!) as Record<string, any>;
+  };
+  test("add 校验目录；执行者跑 add / edit --dirs / merge 被拒，edit 不带 --dirs 放行", () => {
+    expect(run(["project-add", "aa", "--dirs", "/no/such/a"])).toMatchObject({ ok: true, project: { dirs: ["/no/such/a"] } });
+    expect(run(["project-add", "bb", "--dirs", "/no/such/a/"])).toMatchObject({ ok: false, error: expect.stringContaining("已登记在项目 aa 下") });
+    expect(run(["project-add", "cc", "--dirs", "rel/x"])).toMatchObject({ ok: false, error: expect.stringContaining("绝对路径") });
+    expect(run(["project-add", "bb", "--dirs", "/no/such/b"])).toMatchObject({ ok: true });
+    for (const args of [["project-add", "dd", "--dirs", "/no/such/d"], ["project-edit", "aa", "--dirs", "/no/such/z"], ["project-merge", "aa", "bb"]]) {
+      expect(run(args, "222")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("找 PM 或 owner") });
+    }
+    expect(run(["project-edit", "aa", "--name", "A"], "222")).toMatchObject({ ok: true, project: { name: "A" } });
+    expect(run(["project-edit", "aa", "--dirs", "/no/such/b"])).toMatchObject({ ok: false, error: expect.stringContaining("已登记在项目 bb 下") });
+    expect(JSON.parse(readFileSync(join(state, "projects.json"), "utf8")).projects.map((p: ProjectDef) => p.dirs)).toEqual([["/no/such/a"], ["/no/such/b"]]);
+    // merge 也照 add 校验：合出来的目录和第三个项目撞 → 拒绝；不撞 → 按真实路径去重合并
+    expect(run(["project-add", "cc", "--dirs", "/no/such/c"])).toMatchObject({ ok: true });
+    const file = join(state, "projects.json");
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    data.projects[1].dirs.push("/no/such/c"); // 旧数据里已经撞了的（写入校验之前留下的）
+    writeFileSync(file, JSON.stringify(data));
+    expect(run(["project-merge", "bb", "aa"])).toMatchObject({ ok: false, error: expect.stringContaining("已登记在项目 cc 下") });
+    data.projects[1].dirs = ["/no/such/b", "/no/such/a/"];
+    writeFileSync(file, JSON.stringify(data));
+    expect(run(["project-merge", "bb", "aa"])).toMatchObject({ ok: true, dirs: ["/no/such/a", "/no/such/b"] });
+  }, 60_000); // 串行起十几个 manager 子进程，机器负载高时单个要近半秒
+});

@@ -192,7 +192,7 @@ function PeerCard({
             <>
               <div className="flex items-start gap-1">
                 <div className="min-w-0 flex-1 [&>div]:mt-0">
-                  <PresenceLine presence={peer.presence} />
+                  <PresenceLine presence={peer.presence} peer={peer.name} />
                 </div>
                 <button className="btn btn-ghost btn-xs" disabled={testing} onClick={() => void runTest()}>
                   {testing ? <span className="loading loading-spinner loading-xs" /> : t("测试")}
