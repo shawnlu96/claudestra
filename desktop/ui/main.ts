@@ -13,12 +13,28 @@ let pollTimer: number | undefined;
 const pages: Record<Tab, HTMLElement> = { status: h("div"), doctor: h("div"), setup: h("div") };
 const pill = h("span", { class: "pill" });
 
-function setPill(overall: string | null): void {
+const notice = h("div", { class: "notice", role: "alert", hidden: "" });
+
+/** 菜单里的操作失败时，Rust 打开窗口并把原因送到这里；窗口里的按钮失败也走这里 */
+function showNotice(msg: string): void {
+  notice.replaceChildren(h("span", {}, msg), button(t("知道了", "Dismiss"), "x", () => { notice.hidden = true; }, "ghost"));
+  notice.hidden = false;
+}
+
+/** 按钮触发的调用：失败一律进提示条，不能静默 */
+function act(cmd: string): void {
+  invoke(cmd).catch((e) => showNotice(errText(e)));
+}
+
+function setPill(overall: string | null, restarting = false): void {
   const text: Record<string, string> = {
     ok: t("运行正常", "Running"), warn: t("有警告", "Warnings"), fail: t("有服务没在运行", "Service down"),
   };
-  pill.className = `pill st-${overall ?? "unknown"}`;
-  pill.replaceChildren(statusIcon(overall ?? "unknown"), h("span", {}, overall ? text[overall] ?? overall : t("未安装", "Not installed")));
+  // 刚重启完先灰着：kickstart 后马上读到的是新 pid，看着健康，其实还没起来
+  const key = restarting ? "unknown" : overall ?? "unknown";
+  const label = restarting ? t("正在重启…", "Restarting…") : overall ? text[overall] ?? overall : t("未安装", "Not installed");
+  pill.className = `pill st-${key}`;
+  pill.replaceChildren(statusIcon(key), h("span", {}, label));
 }
 
 function restartButton(onDone: () => void): HTMLButtonElement {
@@ -27,7 +43,7 @@ function restartButton(onDone: () => void): HTMLButtonElement {
   return button(idle, "refresh", async (b) => {
     // 两步确认：重启 bridge 会打断正在推送的消息流，误点一下不该就发生
     if (armed === undefined) {
-      setLabel(b, t("再点一次确认重启", "Click again to confirm"));
+      setLabel(b, t("确认重启？会打断正在推送的消息", "Confirm? Interrupts messages being streamed"));
       b.classList.add("danger");
       armed = window.setTimeout(() => { armed = undefined; setLabel(b, idle); b.classList.remove("danger"); }, 4000);
       return;
@@ -39,13 +55,11 @@ function restartButton(onDone: () => void): HTMLButtonElement {
     b.classList.add("busy");
     setLabel(b, t("重启中…", "Restarting…"));
     try {
-      const r = await invoke<RestartResult>("restart");
-      const bad = r.results.filter((x) => !x.ok);
-      setLabel(b, bad.length ? t(`${bad.length} 个没重启成功`, `${bad.length} failed`) : t("已重启", "Restarted"));
-      if (bad.length) b.title = bad.map((x) => `${x.label}: ${x.error}`).join("\n");
+      await invoke<RestartResult>("restart");
+      setLabel(b, t("已重启", "Restarted"));
     } catch (e) {
       setLabel(b, t("重启失败", "Restart failed"));
-      b.title = errText(e);
+      showNotice(`${t("重启失败", "Restart failed")}：${errText(e)}`);
     } finally {
       b.disabled = false;
       b.classList.remove("busy");
@@ -81,9 +95,9 @@ function buildStatusView(): { list: HTMLElement; facts: HTMLElement } {
   pages.status.replaceChildren(
     h("section", { class: "card" }, h("h3", {}, t("后台服务", "Services")), list),
     h("div", { class: "actions" },
-      button(t("打开 Claudestra 网页", "Open Claudestra"), "globe", () => void invoke("open_web"), "primary"),
+      button(t("打开 Claudestra 网页", "Open Claudestra"), "globe", () => act("open_web"), "primary"),
       restartButton(() => void refreshStatus()),
-      button(t("打开日志目录", "Open log folder"), "folder", () => void invoke("open_logs")),
+      button(t("打开日志目录", "Open log folder"), "folder", () => act("open_logs")),
       button(t("体检", "Health check"), "stethoscope", () => show("doctor"))),
     facts);
   return { list, facts };
@@ -93,7 +107,7 @@ async function refreshStatus(): Promise<void> {
   if (!info) return;
   try {
     const s = await invoke<Status>("status");
-    setPill(s.overall);
+    setPill(s.overall, s.restarting);
     statusView ??= buildStatusView();
     statusView.list.replaceChildren(daemonList(s));
     statusView.facts.replaceChildren(
@@ -136,8 +150,9 @@ async function boot(): Promise<void> {
   document.body.replaceChildren(
     h("header", { class: "top" }, h("h1", {}, "Claudestra"), pill, h("span", { class: "version" }, `v${info.version}`)),
     nav,
+    notice,
     h("main", {}, ...Object.values(pages)));
-  (window as unknown as { __claudestraNav: (tab: Tab) => void }).__claudestraNav = show;
+  Object.assign(window, { __claudestraNav: show, __claudestraNotice: showNotice });
   show(current);
   // 窗口开着才刷新（安装页也刷，装完顶上的状态会自己变绿）；菜单栏自己的轮询在 Rust 侧
   pollTimer = window.setInterval(() => { if (!document.hidden && current !== "doctor") void refreshStatus(); }, POLL_MS);

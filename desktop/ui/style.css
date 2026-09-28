@@ -81,6 +81,11 @@ body {
 .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 .tab:hover { color: var(--text); }
 
+.notice { display: flex; align-items: flex-start; gap: 8px; margin: 12px 20px 0; padding: 8px 8px 8px 12px; border-radius: 8px;
+  background: var(--fail-bg); color: var(--fail); white-space: pre-wrap; -webkit-user-select: text; user-select: text; }
+.notice[hidden] { display: none; }
+.notice > span { flex: 1; padding-top: 3px; }
+.notice .btn.ghost { color: var(--fail); flex: none; }
 main { padding: 16px 20px 24px; }
 main > div { display: flex; flex-direction: column; gap: 14px; }
 main > div[hidden] { display: none; }

@@ -42,11 +42,17 @@ pub async fn probe_tools(app: AppHandle) -> Result<Value, String> {
     blocking(move || Ok(cli::probe_tools(&app.state::<AppState>().install()))).await
 }
 
+/// Shared by the menu and the window. Refused while another restart runs or settles; desktop-cli
+/// itself refuses during an auto-update. `results` present = kickstart was attempted (maybe only
+/// partly), so the grey settle window applies; a refusal before that leaves the light alone.
 pub fn restart_now(app: &AppHandle) -> Result<Value, String> {
-    let result = cli::desktop_cli(&app.state::<AppState>().install(), "restart");
+    let state = app.state::<AppState>();
+    state.begin_restart()?;
+    let raw = cli::desktop_cli_raw(&state.install(), "restart");
+    state.end_restart(raw.as_ref().is_ok_and(|v| v["results"].is_array()));
     let status = tray::refresh(app);
     tray::apply(app, &status);
-    result
+    raw.and_then(cli::check_error)
 }
 
 #[tauri::command]

@@ -8,6 +8,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub const BRIDGE_LABEL: &str = "com.claudestra.bridge";
@@ -89,8 +90,14 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(bool, S
 }
 
 /// PATH from an interactive login shell (bun's installer writes to .zshrc, not .zprofile).
-/// Markers keep rc-file chatter out of the value.
+/// Markers keep rc-file chatter out of the value. Cached: before setup, `locate()` runs on every
+/// poll, and an interactive shell each time would re-run the user's whole rc stack every 8 s.
 fn login_shell_path() -> Option<String> {
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE.get_or_init(read_login_shell_path).clone()
+}
+
+fn read_login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut cmd = Command::new(shell);
     cmd.args(["-ilc", "printf '\\n__CSPATH__%s__CSPATH__\\n' \"$PATH\""]);

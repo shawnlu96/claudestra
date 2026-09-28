@@ -16,7 +16,8 @@ pub struct TrayHandles {
     pub icon: TrayIcon,
     menu: Menu<Wry>,
     pub summary: MenuItem<Wry>,
-    pub daemons: Vec<MenuItem<Wry>>,
+    /// one row per daemon, (name, item); built from the first status result, not hard-coded here
+    daemons: Vec<(String, MenuItem<Wry>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -67,20 +68,19 @@ pub fn render_icon(light: Light) -> (Image<'static>, bool) {
 
 pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let summary = MenuItem::with_id(app, "summary", tr("正在读取状态…", "Reading status…"), false, None::<&str>)?;
-    let daemons: Vec<MenuItem<Wry>> = ["bridge", "launcher", "cron"]
-        .iter()
-        .map(|n| MenuItem::with_id(app, format!("d-{n}"), format!("    {n}"), false, None::<&str>))
-        .collect::<tauri::Result<_>>()?;
-    let restart_confirm = MenuItem::with_id(app, "restart", tr("确定重启 bridge / launcher / cron", "Restart bridge / launcher / cron"), true, None::<&str>)?;
+    let restart_confirm = MenuItem::with_id(
+        app,
+        "restart",
+        tr("确定重启（会打断正在推送的消息）", "Restart now (interrupts messages being streamed)"),
+        true,
+        None::<&str>,
+    )?;
     let restart = Submenu::with_items(app, tr("重启服务", "Restart services"), true, &[&restart_confirm])?;
     let sep = || PredefinedMenuItem::separator(app);
     let item = |id: &str, zh: &str, en: &str| MenuItem::with_id(app, id, tr(zh, en), true, None::<&str>);
 
     let menu = Menu::new(app)?;
     menu.append(&summary)?;
-    for d in &daemons {
-        menu.append(d)?;
-    }
     menu.append(&sep()?)?;
     menu.append(&item("open-web", "打开 Claudestra 网页", "Open Claudestra")?)?;
     menu.append(&item("show-doctor", "体检…", "Health check…")?)?;
@@ -99,51 +99,77 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, ev| crate::on_menu(app, ev.id().as_ref()))
         .build(app)?;
-    Ok(TrayHandles { icon, menu, summary, daemons })
+    Ok(TrayHandles { icon, menu, summary, daemons: Vec::new() })
 }
 
-fn daemon_line(d: &Value) -> String {
-    let name = d["name"].as_str().unwrap_or("?");
-    let mark = match d["status"].as_str() {
+fn daemon_line(name: &str, status: Option<&str>, detail: &str) -> String {
+    let mark = match status {
         Some("ok") => "●",
         Some("warn") => "▲",
         _ => "○",
     };
-    let detail = d["detail"].as_str().unwrap_or("");
     format!("{mark}  {name}  —  {detail}")
 }
 
+/// Keep one menu row per daemon in the status result, right under the summary line.
+fn sync_rows(app: &AppHandle, h: &mut TrayHandles, list: &[Value]) {
+    let names: Vec<String> = list.iter().map(|d| d["name"].as_str().unwrap_or("?").to_string()).collect();
+    if h.daemons.iter().map(|(n, _)| n).ne(names.iter()) {
+        for (_, row) in h.daemons.drain(..) {
+            // remove only fails if the row is already gone, which is the goal
+            let _ = h.menu.remove(&row);
+        }
+        for (i, name) in names.iter().enumerate() {
+            if let Ok(row) = MenuItem::with_id(app, format!("d-{name}"), name, false, None::<&str>) {
+                if h.menu.insert(&row, i + 1).is_ok() {
+                    h.daemons.push((name.clone(), row));
+                }
+            }
+        }
+    }
+    for ((name, row), d) in h.daemons.iter().zip(list) {
+        // set_text only fails if the menu is gone (app quitting); nothing to update then
+        let _ = row.set_text(daemon_line(name, d["status"].as_str(), d["detail"].as_str().unwrap_or("")));
+    }
+}
+
+/// First line, bounded: the menu is not the place for a stack of stderr.
+fn short(e: &str) -> String {
+    let line = e.lines().next().unwrap_or("");
+    let cut: String = line.chars().take(70).collect();
+    if cut.len() < line.len() { format!("{cut}…") } else { cut }
+}
+
 /// Push one status result into the menu and icon. Called from the poll thread and after restart.
+/// While a restart settles, the light stays grey: right after kickstart every daemon briefly looks
+/// healthy (new pid, exit -15) before it has actually come up.
 pub fn apply(app: &AppHandle, status: &Result<Value, String>) {
     let state = app.state::<AppState>();
+    let restarting = state.restarting();
     let mut guard = state.tray.lock().unwrap();
     let Some(h) = guard.as_mut() else { return };
     let (light, summary) = match status {
         Ok(v) => {
+            if let Some(list) = v["daemons"].as_array() {
+                sync_rows(app, h, list);
+            }
             let light = Light::from_status(v["overall"].as_str().unwrap_or(""));
             let text = match light {
                 Light::Ok => tr("Claudestra 运行正常", "Claudestra is running"),
                 Light::Warn => tr("Claudestra 有警告", "Claudestra has warnings"),
                 _ => tr("Claudestra 有服务没在运行", "A Claudestra service is down"),
             };
-            if let Some(list) = v["daemons"].as_array() {
-                // by position, not name: the dev override (fake labels) must show up in the same rows;
-                // rows beyond the list are dropped for good (the label set is fixed for the app's lifetime)
-                while h.daemons.len() > list.len() {
-                    if let Some(extra) = h.daemons.pop() {
-                        // remove only fails if the item is already gone, which is the goal
-                        let _ = h.menu.remove(&extra);
-                    }
-                }
-                for (item, d) in h.daemons.iter().zip(list) {
-                    // set_text only fails if the menu is gone (app quitting); nothing to update then
-                    let _ = item.set_text(daemon_line(d));
-                }
-            }
             (light, text)
         }
-        Err(e) => (Light::Unknown, format!("{}：{e}", tr("读不到状态", "Status unavailable"))),
+        Err(e) => {
+            // the last known pids are stale now; keep the rows but stop claiming anything about them
+            for (name, row) in &h.daemons {
+                let _ = row.set_text(daemon_line(name, None, "?"));
+            }
+            (Light::Unknown, short(e))
+        }
     };
+    let (light, summary) = if restarting { (Light::Unknown, tr("正在重启…", "Restarting…")) } else { (light, summary) };
     let _ = h.summary.set_text(summary);
     let (img, template) = render_icon(light);
     // icon updates only fail while the tray is being torn down at quit
@@ -156,9 +182,13 @@ pub fn apply(app: &AppHandle, status: &Result<Value, String>) {
 pub fn refresh(app: &AppHandle) -> Result<Value, String> {
     let state = app.state::<AppState>();
     let inst = state.install();
-    let result = cli::desktop_cli(&inst, "status");
-    if let Ok(v) = &result {
-        *state.last_status.lock().unwrap() = Some(v.clone());
+    let mut result = cli::desktop_cli(&inst, "status");
+    match &mut result {
+        Ok(v) => {
+            v["restarting"] = Value::Bool(state.restarting());
+            *state.last_status.lock().unwrap() = Some(v.clone());
+        }
+        Err(_) => *state.last_status.lock().unwrap() = None,
     }
     result
 }

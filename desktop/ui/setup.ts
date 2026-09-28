@@ -27,11 +27,12 @@ async function loadDeps(box: HTMLElement, inst: Install): Promise<void> {
   try {
     const { tools } = await invoke<{ tools: Tool[] }>("probe_tools");
     const list = h("ul", { class: "checks" }, ...tools.map(toolRow));
-    // 仓库在时再补几行：claude 版本够不够、有没有登录（desktop-cli deps = doctor 的「运行时」分区）；
+    // 仓库在时再补上面版本行之外的运行时检查（claude 版本够不够、有没有登录、bun PTY 等，即 doctor 的「运行时」分区）；
     // 取不到就只显示上面的版本行，登录状态由终端里的安装向导再查一遍
     if (inst.cli_available) {
       const deps = await invoke<ChecksResult>("check", { kind: "deps" }).catch(() => null);
-      const account = deps?.checks.filter((c) => c.name.startsWith("claude ") || c.name === "bun PTY") ?? [];
+      const shown = new Set(tools.map((x) => x.name));
+      const account = deps?.checks.filter((c) => !shown.has(c.name)) ?? [];
       list.append(...account.map(checkItem));
     }
     box.replaceChildren(list);

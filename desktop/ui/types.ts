@@ -19,6 +19,8 @@ export interface Status {
   logDir: string;
   repoRoot: string;
   configured: boolean;
+  /** Rust 侧加的：重启进行中或刚重启完的 15 秒内 */
+  restarting?: boolean;
 }
 
 export interface Check { group: string; name: string; status: string; detail: string; fix?: string }

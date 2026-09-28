@@ -6,7 +6,7 @@ macOS 菜单栏里的一个小图标，负责 bridge 之外的那一半：bridge
 - **窗口**：「状态 / 体检 / 安装」三页。安装页用图形界面检测依赖，真正的安装交给「终端」里的 `bun run setup`（向导要一问一答，逻辑不重写）；还没有仓库时改跑官方 `install.sh`。
 - **不做**：聊天（继续用网页）、自动更新、Windows、开机自启。
 
-定位是实验，只给团队内部用，不承诺产品化。设计见台账 `04-05-desktop-installer.md` §3、§5。
+定位是实验，只给团队内部用，不承诺产品化。
 
 ## 结构
 
@@ -25,6 +25,11 @@ desktop/
 哪些服务、怎样算健康、网页端口是多少，都和 `doctor` / `install-cli` 共用 TS 里的同一套口径。
 
 **菜单栏的状态灯不轮询 doctor。** doctor 跑一次十几秒，状态灯只读 `launchctl list`，一次约 70 ms，每 8 秒刷一次。体检是按需的。
+
+**重启有三道闸：**
+1. 菜单和窗口里都要二次确认，确认文案会提醒「会打断正在推送的消息」；
+2. 同一时间只允许一次重启；重启后状态灯灰 15 秒，显示「正在重启…」。kickstart 之后马上读到的是新 pid，看着健康，其实服务还没起来；
+3. 自动更新正在进行时（`update.lock` 的持有进程还活着），desktop-cli 拒绝重启，否则会把更新砍在半路。
 
 **仓库和 bun 的位置从 bridge 的 launchd plist 里读**（`WorkingDirectory`、`ProgramArguments[0]`、`EnvironmentVariables.PATH`），所以小程序看到的就是守护进程看到的。没装过的机器默认用 `~/repos/claudestra`（和 install.sh 一致），PATH 取登录 shell 的。
 

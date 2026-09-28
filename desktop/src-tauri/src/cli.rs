@@ -2,6 +2,7 @@
 //! the repo's `src/desktop-cli.ts`; this file only spawns it and hands back its JSON.
 
 use crate::env::{home, run_with_timeout, sh_quote, Install};
+use crate::i18n::tr;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -19,10 +20,27 @@ fn timeout_for(sub: &str) -> Duration {
     }
 }
 
-/// `bun src/desktop-cli.ts <sub>` in the checkout; the last stdout line is the JSON result.
+/// `{ok:false, error}` is a failed command and becomes Err here, so every caller (menu, window,
+/// tray) shows the real reason. doctor's `ok:false` without `error` only means "has failures".
 pub fn desktop_cli(inst: &Install, sub: &str) -> Result<Value, String> {
+    desktop_cli_raw(inst, sub).and_then(check_error)
+}
+
+pub fn check_error(v: Value) -> Result<Value, String> {
+    match v.get("error").and_then(Value::as_str) {
+        Some(e) => Err(e.to_string()),
+        None => Ok(v),
+    }
+}
+
+/// `bun src/desktop-cli.ts <sub>` in the checkout; the last stdout line is the JSON result, as is.
+pub fn desktop_cli_raw(inst: &Install, sub: &str) -> Result<Value, String> {
     if !inst.cli_available {
-        return Err(format!("{} has no src/desktop-cli.ts (not installed, or older than this app)", inst.repo.display()));
+        return Err(if inst.has_checkout {
+            tr("这份 Claudestra 比小程序旧，先更新（claudestra update）", "This Claudestra checkout is older than the app; update it first")
+        } else {
+            tr("Claudestra 还没装好，打开「安装向导…」", "Claudestra isn't set up yet; open Setup…")
+        });
     }
     let mut cmd = Command::new(&inst.bun);
     cmd.arg("src/desktop-cli.ts")
@@ -56,9 +74,9 @@ pub fn probe_tools(inst: &Install) -> Value {
     json!({ "tools": rows })
 }
 
-fn open(target: &str) -> Result<(), String> {
-    let status = Command::new("/usr/bin/open").arg(target).status().map_err(|e| e.to_string())?;
-    status.success().then_some(()).ok_or_else(|| format!("open {target} failed"))
+fn open(args: &[&str]) -> Result<(), String> {
+    let status = Command::new("/usr/bin/open").args(args).status().map_err(|e| e.to_string())?;
+    status.success().then_some(()).ok_or_else(|| format!("open {} failed", args.join(" ")))
 }
 
 /// `http://127.0.0.1:<digits>` and nothing else — a bare prefix check would let `…:1@host` through.
@@ -70,16 +88,17 @@ fn is_loopback_url(u: &str) -> bool {
 /// Only ever a loopback bridge URL: the value comes from desktop-cli, but the app never opens anything else.
 pub fn open_web(url: Option<&str>) -> Result<(), String> {
     let url = url.filter(|u| is_loopback_url(u)).unwrap_or(FALLBACK_WEB);
-    open(url)
+    open(&[url])
 }
 
 pub fn open_logs(dir: Option<&str>) -> Result<(), String> {
     let fallback = home().join(".claude-orchestrator/logs");
     let dir = dir.map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or(fallback);
     if !dir.is_dir() {
-        return Err(format!("{} does not exist yet (nothing installed?)", dir.display()));
+        return Err(tr("还没有日志目录（还没装好？）", "No log folder yet (not set up?)"));
     }
-    open(&dir.to_string_lossy())
+    // Finder explicitly: a bare `open <dir>` goes to whatever app claims folders (IDEs sometimes do)
+    open(&["-a", "Finder", &dir.to_string_lossy()])
 }
 
 /// The setup wizard is interactive and needs a real terminal (it reads /dev/tty), so we hand it
@@ -125,7 +144,8 @@ mod tests {
     #[test]
     #[ignore]
     fn restart_via_desktop_cli() {
-        assert!(std::env::var("CLAUDESTRA_DESKTOP_LABELS").is_ok_and(|v| !v.is_empty()), "set a throwaway label");
+        let labels = std::env::var("CLAUDESTRA_DESKTOP_LABELS").unwrap_or_default();
+        assert!(!labels.trim().is_empty(), "set a throwaway label");
         let inst = crate::env::locate();
         let before = desktop_cli(&inst, "status").expect("status");
         let r = desktop_cli(&inst, "restart").expect("restart");
