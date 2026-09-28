@@ -7,10 +7,9 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { defaultInlineRules } from "@do-md/core-react";
-import { Domd } from "@/components/domd";
+import { Domd, domdTooHeavy } from "@/components/domd";
 import { useT } from "@/lib/i18n";
 import { clipPreview, openMode, textFlavor, type TextFlavor } from "@/lib/chat/attachment-open";
-import { mdTooHeavy } from "@/lib/chat/md-guard";
 import { isNativeShell } from "@/lib/native";
 import { shareFile, type ShareResult } from "../attachment-share";
 import { fetchAuthBlob, saveBlob } from "./auth-img";
@@ -117,7 +116,7 @@ function TextBody({ flavor, text }: { flavor: TextFlavor; text: string }) {
   const t = useT();
   const { shown, truncated } = useMemo(() => clipPreview(text), [text]);
   // 交给 do-md 会卡死或栈溢出的 md（阈值与实测见 lib/chat/md-guard.ts）按纯文本显示；Domd 自己也会兜，这里多给一行提示
-  const heavy = useMemo(() => flavor === "markdown" && mdTooHeavy(shown), [flavor, shown]);
+  const heavy = useMemo(() => flavor === "markdown" && domdTooHeavy(shown), [flavor, shown]);
   return (
     <>
       {truncated && <Notice>{t("内容过长，仅显示开头")}</Notice>}

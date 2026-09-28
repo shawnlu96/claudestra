@@ -20,6 +20,8 @@ import { padTableBlocks } from "./normalize-md";
 import { InlineButton, CopyChip, AgentChip, BadgeChip } from "./inline-button";
 import { SAFE_NODES } from "./safe-nodes";
 import { mdTooHeavy } from "@/lib/chat/md-guard";
+import { ErrorBoundary } from "@/lib/error-boundary";
+import { reportBoundaryError } from "@/lib/runtime-error";
 import "./prism-themes.css";
 
 /**
@@ -43,6 +45,13 @@ const INLINE_RULES: InlineRule[] = [
     },
   },
 ];
+
+const DOMD_ERR = (err: Error, stack: string) => reportBoundaryError("domd", err, stack);
+
+/** 这段 md 交给 Domd 会不会被降级成纯文本（和 Domd 自己判定用同一份输入；附件预览据此显示提示条） */
+export function domdTooHeavy(md: string): boolean {
+  return mdTooHeavy(padTableBlocks(md));
+}
 
 type ProviderProps = ComponentProps<typeof DOMDProvider>;
 
@@ -72,26 +81,30 @@ export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
   useEffect(() => subscribeGrammarLoad(() => setGrammarV(getGrammarVersion())), []);
   // 段内定界符过多 / 缩进过深的 md 交给 do-md 会卡死或栈溢出（lib/chat/md-guard.ts 有实测数字）：按纯文本显示
   const heavy = useMemo(() => typeof initMd === "string" && mdTooHeavy(initMd), [initMd]);
-  if (heavy) return <div className={bodyClassName}><div className="whitespace-pre-wrap break-words">{initMd}</div></div>;
+  const plain = <div className={bodyClassName}><div className="whitespace-pre-wrap break-words">{initMd}</div></div>;
+  if (heavy) return plain;
+  // 护栏没拦住的（渲染里栈溢出等）也退回纯文本，并上报一次好补阈值
   return (
-    <DOMDProvider
-      key={grammarV}
-      editable={false}
-      codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
-      inlineRules={INLINE_RULES}
-      renderComponent={SAFE_NODES}
-      {...provider}
-      initMd={initMd}
-    >
-      {bodyClassName ? (
-        <div className={bodyClassName}>
+    <ErrorBoundary fallback={() => plain} onError={DOMD_ERR} resetKey={initMd}>
+      <DOMDProvider
+        key={grammarV}
+        editable={false}
+        codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
+        inlineRules={INLINE_RULES}
+        renderComponent={SAFE_NODES}
+        {...provider}
+        initMd={initMd}
+      >
+        {bodyClassName ? (
+          <div className={bodyClassName}>
+            <DOMD />
+          </div>
+        ) : (
           <DOMD />
-        </div>
-      ) : (
-        <DOMD />
-      )}
-      {children}
-    </DOMDProvider>
+        )}
+        {children}
+      </DOMDProvider>
+    </ErrorBoundary>
   );
 }
 
