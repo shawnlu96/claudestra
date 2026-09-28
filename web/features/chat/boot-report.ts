@@ -1,5 +1,7 @@
 import { isNativeShell, hideNativeSplash } from "@/lib/native";
 import { postClientLog } from "@/lib/client-log";
+import { appConfigSync } from "@/lib/app-config";
+import { CLIENT_WEB_COMMIT } from "@/lib/build-info";
 
 /**
  * 启动计时（owner 2026-09-04「性能会更好吗」——拿数字答，不靠感觉）：agents 首次就绪时记一条
@@ -17,7 +19,9 @@ export function reportBootAndHideSplash() {
     const ms = (v: number | undefined) => (typeof v === "number" ? Math.round(v) : -1);
     // kb=:壳里 Keyboard 插件的 resize 模式(public/boot.js 设置;iPad 为 none)
     const kb = shell ? ` kb=${(window as unknown as { __cstraKbMode?: string }).__cstraKbMode ?? "?"}` : "";
-    postClientLog(`[boot] ${kind} ttfb=${ms(nav?.responseStart)}ms dcl=${ms(nav?.domContentLoadedEventEnd)}ms ready=${Math.round(performance.now())}ms nav=${nav?.type ?? "?"}${kb}`);
+    // web= / via=：这个页面实际跑的是哪份网页、从哪儿托管来的——中继托管的是它自己的一份，本机发布了不代表手机拿到了
+    const src = ` web=${CLIENT_WEB_COMMIT || "?"} via=${appConfigSync()?.mode ?? "?"}`;
+    postClientLog(`[boot] ${kind} ttfb=${ms(nav?.responseStart)}ms dcl=${ms(nav?.domContentLoadedEventEnd)}ms ready=${Math.round(performance.now())}ms nav=${nav?.type ?? "?"}${kb}${src}`);
   } catch {
     /* performance API 缺席（极老 WebView）：少一条计时日志而已 */
   }

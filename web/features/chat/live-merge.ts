@@ -179,12 +179,31 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
     ...(attachments.length ? { attachments } : {}),
     ...(replyText ? { replyText } : {}),
     ...(last.replyTs || first.replyTs ? { replyTs: last.replyTs ?? first.replyTs } : {}),
-    ...(first.replyComponents ?? last.replyComponents ? { replyComponents: first.replyComponents ?? last.replyComponents } : {}),
-    ...(last.replyClicks || first.replyClicks ? { replyClicks: { ...(last.replyClicks ?? {}), ...(first.replyClicks ?? {}) } } : {}),
+    ...joinReplyComponents(last, first),
     ...(typeof first.turnMs === "number" ? { turnMs: first.turnMs } : {}),
     seqEnd: typeof first.seqEnd === "number" ? first.seqEnd : last.seqEnd,
   };
   return [...base.slice(0, -1), merged, ...delta.slice(1)];
+}
+
+/**
+ * 两段都带组件时按先后拼起来（与整段拉历史时 lib/chat/history-shape.ts 的 accumulate 拼法一致）——只取一段，另一段的按钮 / 表单
+ * 就从气泡里消失了。按钮行的已答键是下标（replyRowKey 的 `b<ri>`），后一段的要平移前一段的行数；
+ * 选单（m:/s:<id>）与行内按钮（i:<id>）的键不含下标，原样合并。
+ */
+function joinReplyComponents(last: ChatMessage, first: ChatMessage): Pick<ChatMessage, "replyComponents" | "replyClicks"> {
+  const head = last.replyComponents ?? [];
+  const tail = first.replyComponents ?? [];
+  const shifted = Object.fromEntries(
+    Object.entries(first.replyClicks ?? {}).map(([k, v]) => {
+      const b = /^b(\d+)$/.exec(k);
+      return [b ? `b${Number(b[1]) + head.length}` : k, v];
+    }),
+  );
+  return {
+    ...(head.length || tail.length ? { replyComponents: [...head, ...tail] } : {}),
+    ...(last.replyClicks || first.replyClicks ? { replyClicks: { ...(last.replyClicks ?? {}), ...shifted } } : {}),
+  };
 }
 
 /**

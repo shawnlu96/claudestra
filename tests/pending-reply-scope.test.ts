@@ -7,7 +7,8 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { hangsPendingReply, ownsPendingReply, pendingKeysOwedBy } from "../src/lib/pending-reply-scope.js";
+import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
   test("Web/API 入站：即便 skipInterAgentWatchdog=true 也要挂（补 reply 拦截靠它）", () => {
@@ -113,5 +114,69 @@ describe("pendingKeysOwedBy", () => {
     expect(pendingKeysOwedBy(book(), undefined, WEB)).toEqual([]);
     expect(pendingKeysOwedBy(book(), null, WEB)).toEqual([]);
     expect(pendingKeysOwedBy(book(), wsMmPm, "")).toEqual([]);
+  });
+});
+
+describe("N7：kill 之后的欠账 + 拦截只追非 agent 来源", () => {
+  // 09-28 17:00:09 实况：T3 的请求投给 PM → pendingReplies{targetWs=PM, 回信=T3 频道}；17:02:34 kill T3；17:05:24 PM 的 Stop 被拦
+  const PM = { tag: "pm-ws" };
+  const T5 = { tag: "t5-ws" };
+  type Entry = { targetWs: unknown; intendedReplyChannel: string; ts: number; fromKind?: string };
+  const local = (channelId: string) => ({ kind: "local", channelId });
+  function state() {
+    const replies = new Map<string, Entry>([
+      ["thr-t3", { targetWs: PM, intendedReplyChannel: "c-t3", ts: 1, fromKind: "local" }],
+      ["thr-owner", { targetWs: PM, intendedReplyChannel: "api:owner", ts: 2, fromKind: "api" }],
+      ["thr-pm", { targetWs: T5, intendedReplyChannel: "c-pm", ts: 3, fromKind: "local" }],
+    ]);
+    const threads = new Map<string, ThreadEnds>([
+      ["thr-t3", { request: { from: local("c-t3"), to: local("c-pm") } }],
+      ["thr-to-t3", { request: { from: local("c-pm"), to: local("c-t3") } }],
+      ["thr-owner", { request: { from: { kind: "api" }, to: local("c-pm") } }],
+    ]);
+    // 看门狗以接收方频道为 key：T3 发给 PM 的还没回应；PM 发给 T5 的还没回应；旧条目没有 fromChannelId
+    const watchdogs = new Map<string, { fromChannelId?: string }>([["c-pm", { fromChannelId: "c-t3" }], ["c-t5", { fromChannelId: "c-pm" }], ["c-x", {}]]);
+    return { replies, threads, watchdogs };
+  }
+  const stopPick = (replies: Map<string, Entry>, ws: unknown, originFilter: boolean) =>
+    pickUnrepliedForNudge(
+      [...replies].filter(([, p]) => p.targetWs === ws && (!originFilter || nudgesForOrigin(p.fromKind))).map(([key, p]) => ({ key, ts: p.ts })),
+      { event: "Stop", stopHookActive: false, now: 10_000 },
+    );
+
+  test("cleanup 销掉回信地址是它的欠账、发给它和由它发起的 thread、它发出去的看门狗；别人的不动", () => {
+    const { replies, threads, watchdogs } = state();
+    expect(dropPendingsForChannel(replies, threads, watchdogs, "c-t3")).toBe(4);
+    expect([...replies.keys()]).toEqual(["thr-owner", "thr-pm"]);
+    expect([...threads.keys()]).toEqual(["thr-owner"]);
+    expect([...watchdogs.keys()]).toEqual(["c-t5", "c-x"]);
+  });
+
+  test("cleanup 之后 PM 的 Stop 不再被逼着 reply 到已删的频道（不加来源过滤也成立）", () => {
+    const { replies, threads, watchdogs } = state();
+    replies.delete("thr-owner");
+    expect(stopPick(replies, PM, false)?.key).toBe("thr-t3");
+    dropPendingsForChannel(replies, threads, watchdogs, "c-t3");
+    expect(stopPick(replies, PM, false)).toBeNull();
+    expect(watchdogs.has("c-pm")).toBe(false); // 看门狗也不会再催 PM 回一个已销毁的 agent
+  });
+
+  test("拦截对 agent 来源不触发（T5 被逼着 reply 到 PM 频道）；人类 / peer / bridge 照拦", () => {
+    const { replies } = state();
+    expect(stopPick(replies, T5, true)).toBeNull();
+    expect(stopPick(replies, PM, true)?.key).toBe("thr-owner");
+    expect(nudgesForOrigin("local")).toBe(false);
+    for (const k of ["user", "api", "bridge", undefined]) expect(nudgesForOrigin(k)).toBe(true);
+  });
+});
+
+describe("hangsInterAgentWatchdog（N7 复核 P2-5）", () => {
+  test("被 kill 的 A 押在 B 队列里的消息，A 死后才投出：内容照投，但不给 B 挂看门狗", () => {
+    expect(hangsInterAgentWatchdog(false, undefined, false)).toBe(false);
+  });
+  test("发送方在线的普通请求照挂；发给自己、oneShot 不挂", () => {
+    expect(hangsInterAgentWatchdog(false, undefined, true)).toBe(true);
+    expect(hangsInterAgentWatchdog(true, undefined, true)).toBe(false);
+    expect(hangsInterAgentWatchdog(false, true, true)).toBe(false);
   });
 });

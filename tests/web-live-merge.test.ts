@@ -178,6 +178,16 @@ describe("mergeContiguousAssistant — 差量续接同一回合", () => {
     expect(mergeContiguousAssistant([hist(2, 30)], [hist(12, 20)])).toHaveLength(2);
   });
 
+  test("两段都带组件 → 按先后拼起来，后一段按钮行的已答键平移（T10b：原先只留后一段，前一段的按钮 / 表单消失）", () => {
+    const btn = (id: string) => ({ type: "buttons" as const, buttons: [{ id, label: id }] });
+    const form = { type: "multiselect" as const, id: "f", options: [{ label: "A", value: "a" }] };
+    const base = [hist(2, 9, { replyComponents: [btn("reset_auto"), form], replyClicks: { b0: "reset_auto" } })];
+    const delta = [hist(12, 20, { replyComponents: [btn("go")], replyClicks: { b0: "go", "i:x": "x" } })];
+    const m = mergeContiguousAssistant(base, delta)[0];
+    expect(m.replyComponents?.map((r) => (r.type === "buttons" ? r.buttons[0].id : r.id))).toEqual(["reset_auto", "f", "go"]);
+    expect(m.replyClicks).toEqual({ b0: "reset_auto", b2: "go", "i:x": "x" });
+  });
+
   test("空输入原样返回", () => {
     expect(mergeContiguousAssistant([], [hist(1, 2)])).toHaveLength(1);
     expect(mergeContiguousAssistant([hist(1, 2)], [])).toHaveLength(1);
