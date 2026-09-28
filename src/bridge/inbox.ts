@@ -72,7 +72,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     if (!picked.length) return { result: { n: 0, text: `${ackNote}收件箱里没有可领取的消息。${longNote}`.trim() } };
     const batchId = `inbox_${now.toString(36)}`;
     // 先 touch 再落租约（和押后投递同序）：落盘后、touch 前崩溃，重启时回程簿会带着旧钟被当成过期扫掉
-    d.calls.touch(channelId); // 对方的请求这会儿才真正到它手上：回程失效钟从现在起算
+    for (const { it } of picked) d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined); // 这些请求这会儿才真正到它手上
     for (const { it } of picked) {
       it.lease = { batchId, at: now };
       d.emitIn(channelId, it.env);
