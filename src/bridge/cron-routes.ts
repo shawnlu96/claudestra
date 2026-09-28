@@ -6,7 +6,7 @@
  * runManager / loadJobs 由调用方注入：一个在 management.ts（hub），一个在 src/cron.ts（入口），bridge 模块都不能 import。
  */
 import { isOwnerPrincipal, type Principal } from "../lib/principals.js";
-import { textFieldsProblem } from "../lib/flag-like.js";
+import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import type { CronJob } from "../lib/cron-job.js";
 import { apiJson, forbidden, inScopeEitherName, invalidJsonBody, INVALID_JSON, isFullScope, notInScope, readJsonBody } from "./api-respond.js";
 
@@ -24,6 +24,19 @@ const cronWriterDenied = (principal: Principal): Response | null => (isOwnerPrin
 /** prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master（任何写法，inScopeEitherName → isMasterName）。按 src/cron.ts 的解析补成 agent-<名> 再判 */
 const targetDenied = (principal: Principal, target: string | null | undefined): Response | null =>
   target && !inScopeEitherName(principal, target.startsWith("agent-") ? target : `agent-${target}`) ? notInScope(target) : null;
+
+/**
+ * body 的入口闸：类型 / 控制字符（textFieldsProblem，先于 trim）；透传给 manager 的值不许以 "-" 开头（trim 之后看，与实际传过去的
+ * 一致）——manager 的 cron-add 在整个 argv 里找 --target-agent / --channel，project 写成 "--target-agent" 就能绕过 targetDenied
+ * （reviews/T32-adv5.md P2-1）。不放行 → 400 响应，放行 → null
+ */
+const CRON_ARG_FIELDS = ["name", "schedule", "prompt", "dir", "effort", "project", "targetAgent"];
+function cronBodyDenied(body: any): Response | null {
+  const textBad = textFieldsProblem(body);
+  if (textBad) return apiJson(400, textBad);
+  const f = firstFlagLikeField(Object.fromEntries(CRON_ARG_FIELDS.filter((k) => typeof body?.[k] === "string").map((k) => [k, body[k].trim()])));
+  return f ? apiJson(400, { ok: false, code: "flag_like", field: f, error: `「${f}」不能以 "-" 开头 / "${f}" must not start with "-"` }) : null;
+}
 
 export async function handleCronRoutes(req: Request, path: string, principal: Principal, deps: CronRouteDeps): Promise<Response | null> {
   if (path !== "/cron" && !path.startsWith("/cron/")) return null;
@@ -53,8 +66,8 @@ export async function handleCronRoutes(req: Request, path: string, principal: Pr
     if (writer) return writer;
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
-    const textBad = textFieldsProblem(body);
-    if (textBad) return apiJson(400, textBad);
+    const bad = cronBodyDenied(body);
+    if (bad) return bad;
     const target = targetDenied(principal, body?.targetAgent);
     if (target) return target;
     const name = String(body?.name ?? "").trim();
@@ -85,8 +98,8 @@ export async function handleCronRoutes(req: Request, path: string, principal: Pr
       if (action === "toggle") return cronResult(await deps.runManager("cron-toggle", id));
       const body: any = await readJsonBody(req);
       if (body === INVALID_JSON) return invalidJsonBody();
-      const textBad = textFieldsProblem(body);
-      if (textBad) return apiJson(400, textBad);
+      const bad = cronBodyDenied(body);
+      if (bad) return bad;
       const flags: string[] = [];
       if (body?.schedule) flags.push("--schedule", String(body.schedule));
       if (body?.prompt) flags.push("--prompt", String(body.prompt));

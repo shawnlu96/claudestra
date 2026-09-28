@@ -12,7 +12,8 @@ describe("promptProblem", () => {
     for (const p of ["a\nb", "a\r\nb", "a\rb", "LS-A\u2028/clear", "a\u2029b", "a\u0085b"]) expect([p, promptProblem(p)]).toEqual([p, "定时任务的 prompt 只能一行"]);
   });
   test("其它控制字符（Tab、Esc、\\x03）→ 单独说明", () => {
-    for (const p of ["a\tb", "a\u001b[Z", "a\u0003", "a\u200eb", "a\u202eb", "a\u2066b", "a\ufeffb"]) expect([p, promptProblem(p)]).toEqual([p, "任务指令里有看不见的控制字符（比如 Tab），请删掉"]);
+    const hidden = ["a\tb", "a\u001b[Z", "a\u0003", "a\u200bb", "a\u200eb", "a\u202eb", "a\u2066b", "a\ufeffb", "a\u{E0041}b"];
+    for (const p of hidden) expect([p, promptProblem(p)]).toEqual([p, "任务指令里有看不见的控制字符（比如 Tab），请删掉"]);
   });
   test("提示文案都有英文", () => {
     for (const k of ["定时任务的 prompt 只能一行", "任务指令里有看不见的控制字符（比如 Tab），请删掉"]) expect(DICT[k]).toBeTruthy();

@@ -19,11 +19,12 @@ export function firstControlCharField(fields: unknown): string | null {
 }
 
 /**
- * 敲进 TUI 会出事的字符：\p{Cc}（C0 / C1：换行、\r、Tab、\x03、\x1b…会被当成按键）；U+2028 / U+2029（CC 输入框当换行，跟着的
- * Enter 提交不了）；方向控制符（界面上看到的顺序和实际敲进去的不一样）；字符串中间的 U+FEFF。ZWJ、ZWNJ、软连字符、变体选择符
- * 放行：👨‍👩‍👧 这类 emoji 序列要靠它们，也不会被当成按键。cron（含调度器）、create、claude-settings、pi-settings 同一个判定。
+ * 敲进 TUI 的文字不许有：\p{Cc}（C0 / C1：换行、\r、Tab、\x03、\x1b…会被当成按键）；U+2028 / U+2029（CC 输入框当换行）；
+ * \p{Cf} 整类（零宽空格、BOM、方向控制符、tag 字符 U+E0020–E007F：看不见，能藏一段 owner 核对不出的 prompt）。
+ * 只放行 ZWNJ、ZWJ、软连字符：emoji 序列和正常排版要用，不改变显示顺序、不当按键（变体选择符是 Mn，本来不在 Cf 里）。
+ * cron（含调度器）、create、claude-settings、pi-settings 同一个判定；网页 cron 表单是同一口径的拷贝（web/lib/cron-prompt.ts）。
  */
-export const hasControlChar = (s: string) => /[\p{Cc}\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]|(?<!^)\ufeff/u.test(s);
+export const hasControlChar = (s: string) => /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(s.replace(/[\u200c\u200d\u00ad]/g, ""));
 
 /** 该是文字的字段传成了对象、数组、数字… → 第一个这样的字段名；null / undefined 不算（= 没传） */
 export function firstNonStringField(fields: unknown): string | null {
@@ -49,8 +50,8 @@ export const CRON_PROMPT_REFUSED =
 
 /** 给人看的原因：哪个字段、为什么不行。网页按 code + field 自己出文案（features/chat/components/cron-modal.tsx） */
 export const controlCharError = (field: string) =>
-  `「${field}」里有换行或看不见的控制字符（比如 Tab、Esc、方向控制符）。这段文字会原样敲进终端：换行会让它提前提交，控制字符会被当成按键，所以只能写成一行普通文字。` +
-  ` / "${field}" contains a line break or an invisible control character (such as Tab, Esc or a direction mark). It is typed into the terminal as-is —` +
+  `「${field}」里有换行或看不见的控制字符（比如 Tab、Esc、零宽字符）。这段文字会原样敲进终端：换行会让它提前提交，控制字符会被当成按键，所以只能写成一行普通文字。` +
+  ` / "${field}" contains a line break or an invisible control character (such as Tab, Esc or a zero-width character). It is typed into the terminal as-is —` +
   " a line break submits early and control characters act as key presses — so it must be a single line of plain text.";
 
 /** 400 响应体：code 固定、field 给出是哪个字段 */
