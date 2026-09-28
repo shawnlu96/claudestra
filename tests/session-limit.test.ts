@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { limitByMainSessions } from "../src/lib/session-limit";
-import { sessionRowKey, sessionTree } from "../web/lib/session-nesting";
+import { capSubsPerMain, limitByMainSessions } from "../src/lib/session-limit";
+import { managedAgentOf, sessionRowKey, sessionTree } from "../web/lib/session-nesting";
 
 const row = (sessionId: string, parentId?: string, managed = false) => ({ sessionId, name: "w", managed, ...(parentId ? { sub: { parentId, kind: "subagent" } } : {}) });
 
@@ -12,6 +12,32 @@ describe("limitByMainSessions：上限只数主会话，子线程跟着主会话
   test("追不到主会话（父文件已删）、成环：各自按主会话算，不丢行", () => {
     const rows = [row("x", "gone"), row("p", "q"), row("q", "p")];
     expect(limitByMainSessions(rows, 10).map((r) => r.sessionId)).toEqual(["x", "p", "q"]);
+  });
+});
+
+describe("capSubsPerMain：每个主会话只带最新 N 个子线程，多的只报 moreSubs", () => {
+  const fmt = (rows: Array<{ sessionId: string; moreSubs?: number }>) => rows.map((r) => r.sessionId + (r.moreSubs ? `+${r.moreSubs}` : "")).join(" ");
+  test("按原顺序（新→旧）留前 N 个，省掉的个数记在主会话行上；各主会话分开算", () => {
+    const rows = [row("a1", "A"), row("b1", "B"), row("a2", "A"), row("A"), row("a3", "A"), row("B"), row("b2", "B")];
+    expect(fmt(capSubsPerMain(rows, 2))).toBe("a1 b1 a2 A+1 B b2");
+  });
+  test("被省掉的子线程下面的孙辈一起省掉、一起计数（留着会追不到父会话，浮成顶层）", () => {
+    const rows = [row("a1", "A"), row("a2", "A"), row("a3", "A"), row("g", "a3"), row("gg", "g"), row("A")];
+    expect(fmt(capSubsPerMain(rows, 2))).toBe("a1 a2 A+3");
+  });
+  test("孙辈也占名额；主会话、父文件已删的孤儿、成环的都不受限", () => {
+    const rows = [row("a1", "A"), row("g1", "a1"), row("a2", "A"), row("A"), row("x", "gone"), row("p", "q"), row("q", "p")];
+    expect(fmt(capSubsPerMain(rows, 2))).toBe("a1 g1 A+1 x p q");
+  });
+  test("没超上限：原样返回，不带 moreSubs", () => {
+    const rows = [row("a1", "A"), row("A")];
+    expect(capSubsPerMain(rows, 50)).toEqual(rows);
+  });
+  test("3 个主会话 × 400 子线程：每个只剩 50 个 + moreSubs 350", () => {
+    const rows = ["A", "B", "C"].flatMap((m) => [row(m), ...Array.from({ length: 400 }, (_, i) => row(`${m}${i}`, m))]);
+    const out = capSubsPerMain(rows, 50);
+    expect(out.length).toBe(3 * 51);
+    expect(out.filter((r) => !r.sub).map((r) => r.moreSubs)).toEqual([350, 350, 350]);
   });
 });
 
@@ -30,5 +56,23 @@ describe("sessionTree：子会话默认收起；主会话已纳管时挂在分�
   });
   test("已纳管又没有未纳管子会话的，不出分组头", () => {
     expect(sessionTree([row("M", undefined, true), row("N")], shown, new Set()).map((r) => r.row.sessionId)).toEqual(["N"]);
+  });
+  test("后端省掉的子线程数原样带到树行上", () => {
+    const tree = sessionTree([{ ...row("A"), moreSubs: 7 }, row("a1", "A")], () => true, new Set());
+    expect(tree.map((r) => [r.row.sessionId, r.kids, r.more])).toEqual([["A", 1, 7]]);
+  });
+});
+
+describe("分组头的「已纳管」只看 agentName（临时目录的父会话也会当分组头，但没纳管）", () => {
+  test("父会话 cwd=/tmp/x、未纳管，子线程 cwd=/p：是分组头，但不标已纳管", () => {
+    const parent = { sessionId: "P", name: "x", cwd: "/tmp/x", agentName: null };
+    const kid = { sessionId: "k", name: "x", cwd: "/p", agentName: null, sub: { parentId: "P", kind: "subagent" } };
+    const isUnmanaged = (s: { cwd: string; agentName: string | null }) => !s.agentName && !s.cwd.startsWith("/tmp/");
+    const [head] = sessionTree([parent, kid], isUnmanaged, new Set());
+    expect([head.row.sessionId, head.anchor, head.kids]).toEqual(["P", true, 1]);
+    expect(managedAgentOf(head.row)).toBeNull();
+  });
+  test("已纳管：去掉 agent- 前缀", () => {
+    expect(managedAgentOf({ agentName: "agent-codex-w" })).toBe("codex-w");
   });
 });

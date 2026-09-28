@@ -9,6 +9,8 @@ export interface SubSessionRow {
   sessionId: string;
   name: string;
   sub?: SubSessionInfo;
+  /** bridge 每个主会话只带最新 50 个子线程，省掉的个数记在主会话行上（src/lib/session-limit.ts capSubsPerMain） */
+  moreSubs?: number;
 }
 
 /**
@@ -19,13 +21,20 @@ export function sessionRowKey(r: { runtime?: string; cwd?: string; sessionId: st
   return `${r.runtime ?? ""}:${r.cwd ?? ""}:${r.sessionId}`;
 }
 
+/** 分组头上要标「已纳管」的 agent 短名；没有 agentName（例如临时目录里没纳管的主会话）返回 null，只给中性分组头 */
+export function managedAgentOf(r: { agentName?: string | null }): string | null {
+  return r.agentName ? r.agentName.replace(/^agent-/, "") : null;
+}
+
 export interface TreeRow<T> {
   row: T;
   depth: number;
   /** 这一行下面（含孙辈）要显示的子会话数；> 0 才给折叠开关 */
   kids: number;
-  /** 行本身不在列表里（已纳管的主会话），只当分组头挂它的子会话 */
+  /** 行本身不列（已纳管，或在临时目录里的主会话），只当分组头挂它的子会话；「已纳管」徽章要另看 agentName */
   anchor: boolean;
+  /** 后端省掉、没带过来的子线程数（只有主会话行可能 > 0），展开时报个数 */
+  more: number;
 }
 
 /**
@@ -62,7 +71,7 @@ export function sessionTree<T extends SubSessionRow>(all: T[], shown: (r: T) => 
     done.add(r);
     const n = count(r, new Set([r]));
     if (!shown(r) && n === 0) return;
-    out.push({ row: r, depth, kids: n, anchor: !shown(r) });
+    out.push({ row: r, depth, kids: n, anchor: !shown(r), more: r.moreSubs ?? 0 });
     if (n > 0 && expanded.has(sessionRowKey(r))) for (const k of kids.get(r) ?? []) walk(k, depth + 1);
   };
   for (const r of roots) walk(r, 0);
