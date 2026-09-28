@@ -7,6 +7,7 @@
 import { matchClickedRow } from "./reply-clicks";
 import { FormLookup } from "./form-restore";
 import { parseInlineButtons, plainLabel } from "./inline-buttons";
+import { stripMentionDirective } from "./mention-directive";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "./events";
 import { attachmentFromPath, extractAttachments } from "./attachments";
@@ -101,7 +102,7 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
   // 多选表单的回投（点「提交」或输入框同步行发出）统一还原成「【标题】✓ …」，与发送时的气泡一致
-  let raw = forms.restore(text) ?? resolveClick(text, anchor, forms) ?? text;
+  let raw = forms.restore(text) ?? resolveClick(text, anchor, forms) ?? stripMentionDirective(text); // @ 委托指令行只给 agent 看
   // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
   if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
