@@ -126,16 +126,34 @@ export async function readCodexMeta(path: string): Promise<{ sessionId: string; 
       // id 是本线程自己的；session_id 是根会话的——子线程两者不同（主会话相同）
       const sessionId = String(p.id ?? p.session_id ?? "");
       if (!cwd || !sessionId) return null;
-      return p.session_id && p.id && p.session_id !== p.id ? { sessionId, cwd, sub: codexSubOf(p) } : { sessionId, cwd };
+      return isCodexSubThread(p) ? { sessionId, cwd, sub: codexSubOf(p) } : { sessionId, cwd };
     } catch {
       return null;
     }
   }
 }
 
-/** 子线程的直接父会话、来源（subagent / guardian_review 自动审查）与昵称（subagent 才有，如 Popper） */
+const SUB_SOURCES = new Set(["subagent", "guardian_review"]);
+
+/**
+ * session_meta 的 payload 是不是子线程：id ≠ session_id，或者带 parent_thread_id，或者来源是 subagent / 自动审查。
+ * fork 出来的会话 id = session_id、两个字段都没有——它是独立会话，不能被当成子线程（tests/codex-sub-sessions.test.ts）。
+ */
+export function isCodexSubThread(p: AnyRecord): boolean {
+  if (p.session_id && p.id && p.session_id !== p.id) return true;
+  return (typeof p.parent_thread_id === "string" && p.parent_thread_id !== "") || SUB_SOURCES.has(p.thread_source);
+}
+
+/** 按 sessionId 找 Codex 线程的归属（收编前判「是不是子会话」用）；找不到文件 / 不是子线程 = null */
+export async function codexSubSessionOf(sessionId: string, root?: string): Promise<SubSessionInfo | null> {
+  const path = findCodexSessionPath(sessionId, root);
+  return (path ? (await readCodexMeta(path))?.sub : null) ?? null;
+}
+
+/** 子线程的直接父会话、来源（subagent / guardian_review 自动审查）与昵称（subagent 才有，如 Popper）；父会话不明 = "" */
 function codexSubOf(p: AnyRecord): SubSessionInfo {
-  const sub: SubSessionInfo = { parentId: String(p.parent_thread_id ?? p.session_id), kind: String(p.thread_source ?? "subagent") };
+  const root = p.session_id && p.session_id !== p.id ? p.session_id : "";
+  const sub: SubSessionInfo = { parentId: String(p.parent_thread_id || root), kind: String(p.thread_source ?? "subagent") };
   return typeof p.agent_nickname === "string" && p.agent_nickname ? { ...sub, nickname: p.agent_nickname } : sub;
 }
 

@@ -37,7 +37,8 @@ export async function lifecycleAction(action: LifecycleAction, name: string): Pr
 }
 
 /** 收编一个会话成正式 agent；bridge 同步执行（起窗口 + 等就绪约 10-40s），失败原因在这一跳带回 */
-export function resumeSession(body: { agent: string; sessionId: string; runtime?: string; cwd?: string }): Promise<Record<string, unknown>> {
+/** confirmSubSession：用户已确认要单独收编一个子会话（bridge 对 Codex 子会话不带它回 409，见 src/bridge/subsession-guard.ts） */
+export function resumeSession(body: { agent: string; sessionId: string; runtime?: string; cwd?: string; confirmSubSession?: boolean }): Promise<Record<string, unknown>> {
   return api("/agents/resume", { method: "POST", json: body, timeoutMs: 180_000 });
 }
 
