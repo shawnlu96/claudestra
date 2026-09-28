@@ -14,7 +14,16 @@ const PI_BUSY = piPane("── ⠧ Working " + "─".repeat(40));
 const CC_IDLE = [`${"─".repeat(40)} x ─`, "❯ ", RULE, "  ⏵⏵ bypass permissions on (shift+tab to cycle)"].join("\n");
 const CC_BUSY = ["✶ Processing… (2m 12s · ↓ 7.8k tokens)", "", CC_IDLE].join("\n");
 
+// Codex（0.158 实抓）：空闲是「» Ask Codex…」+ 上一回合的「Worked for …」，在跑是「• Working (12s • esc to interrupt)」
+const CODEX_IDLE = ["  Worked for 11m 10s · 23:02", "» Ask Codex to do anything", "  GPT-6-Sol ultra · ~/x · Main [default]", "  ? for shortcuts"].join("\n");
+const CODEX_BUSY = ["• Working (12s • esc to interrupt)", "» Ask Codex to do anything", "  GPT-6-Sol ultra · ~/x · Main [default]"].join("\n");
+
 describe("windowLooksIdle", () => {
+  test("Codex 空闲窗口不再恒判忙（曾挡住自动更新一整晚），在跑照样挡", () => {
+    expect(windowLooksIdle("codex", CODEX_IDLE)).toBe(true);
+    expect(windowLooksIdle("codex", CODEX_BUSY)).toBe(false);
+  });
+
   test("Pi 空闲窗口：CC 判据说忙（旧 bug），按运行时判是空闲", () => {
     expect(paneLooksIdle(PI_IDLE)).toBe(false);
     expect(windowLooksIdle("pi", PI_IDLE)).toBe(true);
