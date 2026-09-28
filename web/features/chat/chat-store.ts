@@ -37,8 +37,7 @@ import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
 import { agentTasks, answerAuq, answerPermission, clearAgentSession, interruptAgent, sendMessage, setHidden, type SendResult } from "@/lib/api/chat";
 import { getProfile, putProfile } from "@/lib/api/settings";
-import { projectsList } from "@/lib/api/system";
-import { markRead } from "@/lib/api/push";
+import { markRead, projectsList } from "./scoped-requests"; // 非全权设备不发（接口要全权）
 
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */

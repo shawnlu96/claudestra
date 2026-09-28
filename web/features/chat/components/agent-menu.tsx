@@ -25,6 +25,7 @@ import { stopMission } from "@/lib/api/agents";
 import { MissionIcon, MissionModal, MissionStopIcon, openMissionModal } from "./mission-ui";
 import { FolderIcon, menuItemIcon } from "./line-icons";
 import { LedgerStageLine } from "./ledger-stage-chip";
+import { useFullScope } from "../contacts-data";
 
 type MenuState = { agent: AgentSession; x: number; y: number } | null;
 type Page = "main" | "move" | "open-terminal" | "open-ide";
@@ -66,7 +67,9 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
   const t = useT();
   // 归档要二次确认（owner 2026-09-24）：点一下变「确认归档?」，4s 没再点自动复原；菜单关了状态随之消失
   const arch = useArmedConfirm(4000);
-  const items = buildAgentMenu(s.agent, openers, platform) ?? [];
+  const full = useFullScope() === true;
+  const items = buildAgentMenu(s.agent, openers, platform, full) ?? [];
+  if (page === "main" && !items.length) return null; // 非全权设备又没得本机打开：长按不弹空壳
   const sub = page === "open-terminal" ? openers.filter((o) => o.kind === "terminal") : page === "open-ide" ? openers.filter((o) => o.kind === "ide") : [];
   // 主页标题下多一行台账阶段（LedgerStageLine），按半行算进高度，免得贴底弹出时被切掉
   const rows = page === "main" ? items.length + (s.agent.ledgerTask ? 0.5 : 0) : 1 + Math.max(1, page === "move" ? targets.length : sub.length);
