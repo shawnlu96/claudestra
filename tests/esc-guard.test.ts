@@ -106,27 +106,20 @@ describe("按「发完」计时", () => {
 });
 
 describe("拿不到锁（对抗式第 3 轮 P2-1：负载 107 时 7 路并发，第 6、7 发间隔 2ms 开出 Rewind）", () => {
-  test("同一进程里没锁也按窗口排队，不会两发同时出去", async () => {
-    const w = world({ ids: { t: "@1" }, noLock: true, sendMs: 300 });
+  test("同一进程里按窗口排队，不会两发同时出去", async () => {
+    const w = world({ ids: { t: "@1" }, sendMs: 300 });
     const esc = createEscGuard(w.deps);
     await Promise.all(Array.from({ length: 7 }, () => esc("t")));
     expect(w.sent.length).toBe(7);
     for (const g of gaps(w.sent)) expect(g).toBeGreaterThanOrEqual(ESC_DOUBLE_TAP_MS);
   });
-  test("没锁时睡醒要重读共享时刻：别的进程在这期间刚发过，就再等一轮", async () => {
+  test("等不到锁就不发（fail-closed）：strict（打断键）抛错如实回报，其余只告警", async () => {
     const w = world({ ids: { t: "@1" }, noLock: true });
-    w.shared.set("@1", 1_000_000 - 1_000); // 别的进程 1 秒前发过
-    let slept = 0;
-    let otherAt = 0;
-    const sleep = w.deps.sleep;
-    w.deps.sleep = async (ms) => {
-      await sleep(ms);
-      if (slept++ === 0) w.shared.set("@1", (otherAt = w.deps.now() - 100)); // 醒来前另一个进程又发了一下
-    };
     const esc = createEscGuard(w.deps);
+    await expect(esc("t", { strict: true })).rejects.toThrow("等不到窗口锁");
     await esc("t");
-    expect(w.sent[0].at - otherAt).toBeGreaterThanOrEqual(ESC_DOUBLE_TAP_MS);
-    expect(slept).toBe(2);
+    expect(w.sent).toEqual([]);
+    expect(w.shared.get("@1")).toBeUndefined(); // 没发就不记时
   });
   test("lastSentAt：按同一个窗口身份读最后一次发完的时刻（认出会话记录里的打断是程序发的键）", async () => {
     const w = world({ ids: { "master:0": "@1", "master:=master": "@1" } });

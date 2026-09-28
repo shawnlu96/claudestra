@@ -5,7 +5,7 @@
  * - 窗口按 tmux 的 #{window_id} 认：`master:0`、`master:=master`、`@3` 是同一个窗口（大总管的打断走 master:0、取消 AUQ 走 windowTarget("master")）；
  *   解析不出来（窗口不在）退回 windowKey；
  * - 同一进程里按窗口排队；跨进程（bridge、manager 子进程都会发 Esc）发键全程持锁。锁等得比过期久（持锁进程崩了也能等到回收）；
- *   真拿不到（前面排了一长串）也不直接发：反复重读共享时刻，等到离最后一发够 1.2 秒才发。
+ *   真拿不到就不发（fail-closed）：告警，strict 调用方（打断键）收到错误如实回报——少发一下 Esc 能重按，开出 Rewind 会挡住窗口。
  * 单测 tests/esc-guard.test.ts。
  */
 import { createKeyedSerial } from "./keyed-serial.js";
@@ -16,7 +16,7 @@ export const ESC_DOUBLE_TAP_MS = 1200;
 export interface EscGuardDeps {
   /** 目标 → tmux 的 #{window_id}（如 "@3"）；窗口不在 / 出错 = null */
   windowId(target: string): Promise<string | null>;
-  /** 按窗口的跨进程锁；拿不到 = null（降级为反复重读共享时刻） */
+  /** 按窗口的跨进程锁；拿不到 = null（这一发不发） */
   lock(key: string): Promise<{ release(): void } | null>;
   /** 跨进程共享的「上一次发完」时刻（没有 = 0） */
   readShared(key: string): number;
@@ -37,15 +37,21 @@ export function createEscGuard(deps: EscGuardDeps) {
   }
   async function sendLocked(key: string, target: string, strict: boolean): Promise<void> {
     const lock = await deps.lock(key);
+    if (!lock) {
+      const msg = `Esc 没发（${target}）：等不到窗口锁，前面排着的 Esc 太多或锁卡住了，不持锁发可能开出 Rewind`;
+      console.warn(`⚠️ ${msg}`);
+      if (strict) throw new Error(msg);
+      return;
+    }
     try {
-      // 持锁时一轮就够；没拿到锁时别的进程可能在这期间又发了一下，所以每次睡醒都重读
-      for (let wait = lastAt(key) + ESC_DOUBLE_TAP_MS - deps.now(); wait > 0; wait = lastAt(key) + ESC_DOUBLE_TAP_MS - deps.now()) await deps.sleep(wait);
+      const wait = lastAt(key) + ESC_DOUBLE_TAP_MS - deps.now();
+      if (wait > 0) await deps.sleep(wait);
       await deps.send(target, strict);
     } finally {
       const done = deps.now(); // 发完才记：键一定已经落地
       lastDone.set(key, done);
       deps.writeShared(key, done);
-      lock?.release();
+      lock.release();
     }
   }
   /** 这个窗口最后一次经这里发完 Esc 的时刻（跨进程；没发过 = 0）：认出会话记录里的打断是不是程序发的键 */
