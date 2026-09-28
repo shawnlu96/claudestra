@@ -117,7 +117,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
         t: "tool",
         name: String(d.name ?? "?"),
         summary: String(d.summary ?? ""),
-        state: "running",
+        state: d.done ? "done" : "running", // AUQ 作答补的卡落地就是完成的（src/lib/auq-echo.ts）
         ...(typeof d.toolId === "string" && d.toolId ? { id: d.toolId } : {}),
         ...(typeof d.detail === "string" && d.detail ? { detail: d.detail } : {}),
         ...recordSrc(d),

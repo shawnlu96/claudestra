@@ -13,8 +13,10 @@ import { openRuntimeAsk, resetRuntimeAsksForTest, settleAuq } from "../src/bridg
 import { setAsksForTest } from "../src/bridge/asks.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
 import type { Envelope } from "../src/bridge/router.js";
+import { auqAnswerSummary, auqEchoCard } from "../src/lib/auq-echo.js";
 import { answerEcho, channelAskId } from "../src/lib/inbound-body.js";
 import { getAsk, listAsks, openAsk, patchAsk, type NewAsk } from "../src/lib/ledger-asks.js";
+import { readSessionHistory } from "../src/lib/session-history.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { detectCodexRuntimeDialog, parseDialogRules } from "../src/lib/runtime-dialogs.js";
@@ -109,6 +111,28 @@ describe("AUQ", () => {
     await openRuntimeAsk({ source: "auq", channelId: "111", agentName: "agent-x", kind: "decide", title: "q", context: "", options: [qs[0]] });
     settleAuq("111", "discord", { questions: [qs[0]], selections: [[0, 1]] }, { principal: "discord:42" });
     expect(listAsks(openLedger(path), { source: "auq" })[0].answer?.labels).toEqual(["Opus、Sonnet"]);
+  });
+});
+
+describe("AUQ 作答在聊天里留痕（第 7 条，PM 定 A）", () => {
+  const questions = [{ question: "用哪个模型？", options: [] }, { question: "要不要跑测试？", options: [] }];
+  const result = (answers: Record<string, string>) => ({
+    type: "user", timestamp: "2026-09-29T00:00:05Z", toolUseResult: { questions, answers },
+    message: { content: [{ type: "tool_result", tool_use_id: "tu_1", content: "Your questions have been answered: ..." }] },
+  });
+  test("摘要按「问题 · 选项」，多问用「；」连；没答（取消）或不是 AUQ 的结果 → null", () => {
+    expect(auqAnswerSummary(result({ "用哪个模型？": "Opus", "要不要跑测试？": "跑, 只跑单测" }))).toBe("💬 答复：用哪个模型？ · Opus；要不要跑测试？ · 跑, 只跑单测");
+    expect(auqAnswerSummary(result({}))).toBeNull();
+    expect(auqAnswerSummary({ type: "user", toolUseResult: { stdout: "x" } })).toBeNull();
+  });
+  test("历史：AUQ 工具卡的摘要换成作答；直播：补一张已完成的卡，摘要一样", async () => {
+    const rec = result({ "用哪个模型？": "Opus" });
+    const auqUse = { type: "tool_use", id: "tu_1", name: "AskUserQuestion", input: { questions } };
+    const p = join(dir, "s-auq.jsonl");
+    writeFileSync(p, [{ type: "assistant", timestamp: "2026-09-29T00:00:00Z", message: { content: [auqUse] } }, rec].map((r) => JSON.stringify(r)).join("\n"));
+    const page = await readSessionHistory(p, { formatToolFn: (n: string) => `🔧 ${n}` });
+    expect(page.messages[0].tools?.[0]).toMatchObject({ name: "AskUserQuestion", summary: "💬 答复：用哪个模型？ · Opus" });
+    expect(auqEchoCard(rec, () => "d")).toEqual({ toolId: "tu_1", name: "AskUserQuestion", summary: "💬 答复：用哪个模型？ · Opus", detail: "d", done: true });
   });
 });
 

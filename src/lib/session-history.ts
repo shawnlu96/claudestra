@@ -19,6 +19,7 @@ import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
 import { channelAskId, channelBodyText, senderOf } from "./inbound-body.js";
+import { settleToolCard } from "./auq-echo.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -576,16 +577,8 @@ function parseHistoryLines(
 
     if (rec.type === "user") {
       const c = rec.message?.content;
-      // tool_result 的 is_error 回填到对应工具卡（web 标红失败的调用）。
-      // 回填不影响本条 user 记录自身的过滤逻辑，继续走原流程。
-      if (Array.isArray(c)) {
-        for (const b of c) {
-          if (b?.type === "tool_result" && b.tool_use_id && b.is_error === true) {
-            const tc = toolById.get(b.tool_use_id);
-            if (tc) tc.error = true;
-          }
-        }
-      }
+      // tool_result 回填到对应工具卡（失败标红、AUQ 换成作答摘要）；不影响本条 user 记录自身的过滤，继续走原流程。
+      if (Array.isArray(c)) for (const b of c) if (b?.type === "tool_result") settleToolCard(toolById.get(b.tool_use_id), b, rec);
       const text =
         typeof c === "string"
           ? c
