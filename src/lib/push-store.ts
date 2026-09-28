@@ -9,6 +9,8 @@ import type { WebPushSubscription } from "./relay-protocol.js";
 export interface PushSubscriptionRow extends WebPushSubscription {
   /** 订阅时的 User-Agent；iOS 判定靠它（空 = 老订阅，按 iOS 保守对待） */
   ua: string;
+  /** 订阅用的 VAPID 公钥；null = 不知道（换钥匙前的老订阅），投递时两把都试、成功的那把记回来 */
+  vapidKey: string | null;
 }
 
 /** iOS 对「push 到达不展示」有惩罚：dismiss 型静默 push 不能发给它们（iOS 靠打开 App 时按 push_read 补清） */
@@ -26,21 +28,26 @@ function parseKeys(raw: string): WebPushSubscription["keys"] | null {
 }
 
 export function listPushSubscriptions(db: Database): PushSubscriptionRow[] {
-  const rows = db.prepare("SELECT endpoint, keys, ua FROM push_subscriptions").all() as { endpoint: string; keys: string; ua: string }[];
+  const rows = db.prepare("SELECT endpoint, keys, ua, vapid_key FROM push_subscriptions").all() as { endpoint: string; keys: string; ua: string; vapid_key: string | null }[];
   const out: PushSubscriptionRow[] = [];
   for (const r of rows) {
     const keys = parseKeys(r.keys);
-    if (keys) out.push({ endpoint: r.endpoint, keys, ua: r.ua });
+    if (keys) out.push({ endpoint: r.endpoint, keys, ua: r.ua, vapidKey: r.vapid_key });
   }
   return out;
 }
 
-/** endpoint 主键 upsert：同一浏览器重新订阅会换密钥，UA 也顺手刷新 */
-export function savePushSubscription(db: Database, sub: WebPushSubscription, ua: string, now: Date = new Date()): void {
+/** endpoint 主键 upsert：同一浏览器重新订阅会换密钥（也可能换了 VAPID 公钥），UA 也顺手刷新 */
+export function savePushSubscription(db: Database, sub: WebPushSubscription, ua: string, vapidKey: string | null = null, now: Date = new Date()): void {
   db.prepare(
-    `INSERT INTO push_subscriptions (endpoint, keys, ua, created_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, ua = excluded.ua`,
-  ).run(sub.endpoint, JSON.stringify({ p256dh: sub.keys.p256dh, auth: sub.keys.auth }), ua.slice(0, 300), now.toISOString());
+    `INSERT INTO push_subscriptions (endpoint, keys, ua, created_at, vapid_key) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, ua = excluded.ua, vapid_key = excluded.vapid_key`,
+  ).run(sub.endpoint, JSON.stringify({ p256dh: sub.keys.p256dh, auth: sub.keys.auth }), ua.slice(0, 300), now.toISOString(), vapidKey);
+}
+
+/** 投递成功后记下实际对上的那把公钥（老订阅 / 登记时记错的，下次直接走对的路） */
+export function setPushSubscriptionKey(db: Database, endpoint: string, vapidKey: string): void {
+  db.prepare("UPDATE push_subscriptions SET vapid_key = ? WHERE endpoint = ?").run(vapidKey, endpoint);
 }
 
 export function deletePushSubscription(db: Database, endpoint: string): boolean {

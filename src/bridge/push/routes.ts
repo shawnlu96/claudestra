@@ -1,7 +1,7 @@
 /**
  * 推送与未读的 /api/v1 端点（契约 docs/design-hosted-frontend.md §13.3；在 bridge/api-extensions.ts 登记）：
  *   GET  /push/config                          {webPush:{vapidPublicKey}|null, apns, mode}
- *   POST /push/subscriptions {subscription, userAgent} · DELETE /push/subscriptions {endpoint}
+ *   POST /push/subscriptions {subscription, userAgent, vapidKey?} · DELETE /push/subscriptions {endpoint}
  *   POST /push/apns {token, device?}           · DELETE /push/apns/:token
  *   GET  /unread → {counts}   POST /agents/:name/read → {ok}   GET /reads → {reads: {agent: isoTs}}
  * 全部只给 owner（canManage：owner 设备凭据 / 过渡期的全 scope token）——推送订阅与未读是 owner 一个人的状态。
@@ -84,7 +84,10 @@ function subscribe(d: PushRouteDeps, req: Request, b: Record<string, unknown>): 
   const problem = pushEndpointProblem(sub.endpoint);
   if (problem) return apiJson(400, { ok: false, error: "endpoint_forbidden" });
   const ua = typeof b.userAgent === "string" && b.userAgent ? b.userAgent : req.headers.get("user-agent") || "";
-  savePushSubscription(d.db, sub, ua);
+  // 浏览器报的公钥只认本机签得了的；老前端不报就按此刻 config 给出去的那把记（记错了投递时会换路并改正）
+  const known = d.sender.webPushKeys();
+  const vapidKey = typeof b.vapidKey === "string" && known.includes(b.vapidKey) ? b.vapidKey : (d.sender.config().webPush?.vapidPublicKey ?? null);
+  savePushSubscription(d.db, sub, ua, vapidKey);
   return apiJson(200, { ok: true });
 }
 

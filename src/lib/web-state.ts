@@ -40,6 +40,10 @@ function migrate(db: Database): void {
     name TEXT PRIMARY KEY, pinned INTEGER NOT NULL DEFAULT 0, used_count INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)`);
   db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint TEXT PRIMARY KEY, keys TEXT NOT NULL, ua TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`);
+  // 订阅是用哪把 VAPID 公钥订的（中继的 / 本机的）：投递按它选路（bridge/push/sender.ts）。老库补列，老行 NULL，第一次投成功时记上
+  if (!(db.prepare("PRAGMA table_info(push_subscriptions)").all() as { name: string }[]).some((c) => c.name === "vapid_key")) {
+    db.exec("ALTER TABLE push_subscriptions ADD COLUMN vapid_key TEXT");
+  }
   db.exec(`CREATE TABLE IF NOT EXISTS push_read (agent TEXT PRIMARY KEY, ts INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE IF NOT EXISTS hidden_messages (
     agent TEXT NOT NULL, session_id TEXT NOT NULL, seq_from INTEGER NOT NULL, seq_to INTEGER NOT NULL, hidden_at INTEGER NOT NULL,

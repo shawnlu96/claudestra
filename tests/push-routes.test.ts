@@ -17,6 +17,7 @@ const guest: Principal = { id: "guest:1", role: "external", agents: ["alpha"], c
 const peer: Principal = { id: "token:tok_p", role: "external", agents: ["*"], createdAt: "", peer: "other" };
 const noManage: Principal = { ...owner, manage: false };
 const sender: PushSender = {
+  webPushKeys: () => ["PUB", "OTHER"],
   config: () => ({ mode: "direct", webPush: { vapidPublicKey: "PUB" }, apns: false }),
   sendWebPush: async () => ({ ok: true, gone: false }),
   sendApns: async () => ({ ok: true, gone: false }),
@@ -64,6 +65,14 @@ describe("推送订阅", () => {
     expect(await json(await post({ subscription: SUB, userAgent: "UA-body" }))).toEqual({ status: 200, body: { ok: true } });
     expect(await json(await post({ subscription: { ...SUB, endpoint: "https://web.push.apple.com/def" } }))).toEqual({ status: 200, body: { ok: true } });
     expect(listPushSubscriptions(db).map((s) => s.ua).sort()).toEqual(["UA-body", "UA-header"]);
+    // 浏览器报的公钥：本机签得了才认，否则（或不报）按 config 此刻给出的那把记
+    const keyOf = async (vapidKey: unknown) => {
+      await post({ subscription: SUB, vapidKey });
+      return listPushSubscriptions(db).find((s) => s.endpoint === SUB.endpoint)?.vapidKey;
+    };
+    expect(await keyOf("OTHER")).toBe("OTHER");
+    expect(await keyOf("FORGED")).toBe("PUB");
+    expect(await keyOf(undefined)).toBe("PUB");
     expect(await json(await post({ subscription: { ...SUB, endpoint: "https://10.0.0.8/x" } }))).toEqual({ status: 400, body: { ok: false, error: "endpoint_forbidden" } });
     expect(await json(await call(handler, "POST", "/api/v1/push/subscriptions", { subscription: { ...SUB, endpoint: "http://web.push.apple.com/x" } }))).toMatchObject({ status: 400 });
     expect(await json(await call(handler, "POST", "/api/v1/push/subscriptions", {}))).toMatchObject({ status: 400 });
