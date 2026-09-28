@@ -25,13 +25,17 @@ const device = (id: string, grant: Grant): DeviceCredential => ({
   id: `dev_${id}`, v: 1, type: "bearer", hash: hashDeviceToken(`dev_${id}`), deviceName: id, grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z",
 });
 const PRINCIPALS = [
-  { id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], createdAt: at, credentials: [device("owner", { agents: ["*", "master"], terminal: false, manage: true })] },
+  {
+    id: "owner:self", role: "owner", name: "owner", agents: ["*", "master"], createdAt: at,
+    credentials: [device("owner", { agents: ["*", "master"], terminal: false, manage: true }), device("owner-star", { agents: ["*"], terminal: false, manage: true })],
+  },
   { id: "guest:all", role: "external", name: "friend", agents: ["*"], createdAt: at, credentials: [device("guest", guestGrant(["*"]))] },
   { id: "token:tok_star", role: "external", name: "legacy-star", agents: ["*"], secret: "s-star", createdAt: at },
   { id: "token:tok_cc", role: "external", name: "cc-only", agents: ["cc"], secret: "s-cc", createdAt: at },
 ];
 const OWNER = { device: "dev_owner" };
 const STAR = { bearer: "s-star" };
+const OWNER_STAR = { device: "dev_owner-star" }; // owner 本人的设备，但 grant 只给了 "*"：特意不让碰大总管
 const CREDS = { "guest *": { device: "dev_guest" }, "老 * Bearer": STAR, "scoped token": { bearer: "s-cc" } };
 // 全角 ｍ（U+FF4D）、全角大写整词经 NFKC 都变回 master
 const MASTER_NAMES = ["master", "agent-master", "agent-agent-master", "__master__", "Master", "MASTER", "agent-Master", "AGENT-master", "ｍaster", "ＭＡＳＴＥＲ"];
@@ -120,6 +124,14 @@ beforeAll(() => {
       req(`star resume master ${JSON.stringify(o)}`, "POST", "/api/v1/agents/resume", STAR, JSON.stringify({ agent: "probe", sessionId: SID_MS, ...o }))),
     req("star resume worktree master fork", "POST", "/api/v1/agents/resume", STAR, JSON.stringify({ agent: "probe", sessionId: SID_WT, fork: true })),
     req("owner resume master fork", "POST", "/api/v1/agents/resume", OWNER, JSON.stringify({ agent: "probe2", sessionId: SID_MS, fork: true })),
+    // grant 只有 "*" 的 owner 设备：不因 owner 本人放行（T32 adv6 P2-1）
+    req("owner-star master session", "GET", `/api/v1/sessions/${SID_MS}/history`, OWNER_STAR),
+    req("owner-star adopt master", "POST", `/api/v1/sessions/${SID_MS}/adopt`, OWNER_STAR, JSON.stringify({ agent: "cc" })),
+    ...[{ fork: true }, { takeover: true }].map((o) =>
+      req(`owner-star resume master ${JSON.stringify(o)}`, "POST", "/api/v1/agents/resume", OWNER_STAR, JSON.stringify({ agent: "probe3", sessionId: SID_MS, ...o }))),
+    req("owner-star wild session", "GET", `/api/v1/sessions/${SID_W}/history`, OWNER_STAR),
+    req("owner adopt master", "POST", `/api/v1/sessions/${SID_MS}/adopt`, OWNER, JSON.stringify({ agent: "cc" })),
+    req("owner resume master takeover", "POST", "/api/v1/agents/resume", OWNER, JSON.stringify({ agent: "probe4", sessionId: SID_MS, takeover: true })),
   ];
   results = sandbox.run(specs, { RUNNER_PRINCIPALS: JSON.stringify(PRINCIPALS), MASTER_DIR: masterDir });
 }, 120_000);
@@ -185,7 +197,7 @@ describe("archive / agent-info", () => {
   });
 });
 
-describe("按会话 id：大总管的会话只给显式列了 master 的凭据或 owner 本人", () => {
+describe("按会话 id：大总管的会话只给生效 scope 里显式有 master 的凭据", () => {
   test("老 * Bearer 读 / 删 master 工作目录下的会话 → 403，文件还在；owner 照读；别处的野生会话照常", () => {
     expect([status("star master session"), leaks("star master session")]).toEqual([403, false]);
     expect(status("star delete master session")).toBe(403);
@@ -210,6 +222,17 @@ describe("按会话 id：大总管的会话只给显式列了 master 的凭据�
     expect(calls).toContain(`resume probe2 ${SID_MS}`);
   });
 
+  test('grant 只有 "*" 的 owner 设备：大总管会话的 history、adopt、fork、takeover 都 403，manager 没收到；["*","master"] 的照常', () => {
+    const denied = ["owner-star master session", "owner-star adopt master",
+      ...[{ fork: true }, { takeover: true }].map((o) => `owner-star resume master ${JSON.stringify(o)}`)];
+    for (const n of denied) expect([n, status(n), leaks(n)]).toEqual([n, 403, false]);
+    expect(sandbox!.managerCalls()).not.toContain("probe3");
+    expect(status("owner-star wild session")).toBe(200);
+    expect([status("owner master session"), status("owner adopt master")]).toEqual([200, 202]);
+    for (const n of ["owner resume master fork", "owner resume master takeover"]) expect([n, status(n) === 403]).toEqual([n, false]);
+    expect(sandbox!.managerCalls()).toContain(`takeover ${SID_MS} --name probe4`);
+  });
+
   test("GET /sessions（visibleSessions）：master 的会话不把 id 递给老 * Bearer", () => {
     const p = (agents: string[], extra: Partial<Principal> = {}): Principal => ({ id: "token:x", role: "external", name: "x", agents, createdAt: at, secret: "s", ...extra });
     const list: NeutralSessionInfo[] = [
@@ -223,7 +246,7 @@ describe("按会话 id：大总管的会话只给显式列了 master 的凭据�
     const ids = (q: Principal) => visibleSessions(list, q, "/r/m").map((s) => s.sessionId);
     expect(ids(p(["*"]))).toEqual(["s-cc", "s-wild"]);
     expect(ids(p(["*", "master"]))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild", "s-wt"]);
-    expect(ids(p(["*"], { id: "owner:self" }))).toEqual(["s-cc", "s-am", "s-dopp", "s-mdir", "s-wild", "s-wt"]);
+    expect(ids(p(["*"], { id: "owner:self" }))).toEqual(["s-cc", "s-wild"]); // owner 本人但生效 scope 不含 master：同样滤掉
   });
 });
 

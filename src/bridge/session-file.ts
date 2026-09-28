@@ -7,7 +7,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync } from "fs";
 import { basename, dirname, join, relative, sep } from "path";
 import { projectsDir, projectsSlug } from "../lib/jsonl-cost.js";
-import { agentInScope, isOwnerPrincipal, type Principal } from "../lib/principals.js";
+import { agentInScope, type Principal } from "../lib/principals.js";
 import { isMasterName } from "../lib/registry.js";
 import { ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "../lib/session-source.js";
@@ -22,8 +22,11 @@ export function locateSessionFile(sid: string, runtime: string | undefined, cwd:
   return file && existsSync(file) ? file : null;
 }
 
-/** 看得见 master 的会话：scope 显式列了 master，或 owner 本人（isOwnerPrincipal） */
-export const masterSessionsAllowed = (p: Principal): boolean => agentInScope(p, "master") || isOwnerPrincipal(p);
+/**
+ * 看得见 / 动得了 master 的会话：只看凭据生效后的 scope 里有没有 master（agentInScope 用的是 grant 交集后的 agents），和 cron 同一口径。
+ * 不因 owner 本人放行：grant 只给 ["*"] 的 owner 设备就是特意不让碰大总管的（reviews/T32-adv6.md P2-1）。
+ */
+export const masterSessionsAllowed = (p: Principal): boolean => agentInScope(p, "master");
 
 /**
  * 这个会话文件是不是大总管的（任一条成立）：在大总管工作目录或它的 worktree（EnterWorktree 会把会话挪过去，HF182-r2 P2-B）
