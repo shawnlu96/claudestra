@@ -161,6 +161,51 @@ describe("v1 → 依赖边版本", () => {
     }
   });
 
+  test("task_deps 缺关键列（先建了只有三列的表，索引照样建得出来）→ 核对查出来、报错回滚，不带着 dep-add 必挂的库往下走", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const raw = new Database(path);
+      raw.exec("CREATE TABLE task_deps (project TEXT, fromTask TEXT, toTask TEXT)");
+      raw.close();
+      expect(() => openLedger(path)).toThrow(/task_deps\.kind.*已回滚，库仍是 v1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("旧 CLI（不认识负责人列、只改 agent）写过之后再用新代码打开：按 agent 列纠正负责人，幂等；人 / 对面实例的负责人不动", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const db = openLedger(path);
+      db.exec("UPDATE tasks SET agent = NULL, assigneeKind = 'human', assignee = 'local:owner:self' WHERE id = 'T3'");
+      closeLedger(path);
+      // 旧代码的写法：set --agent 只动 agent 列、新建任务不写负责人列、清掉 agent 也不动 kind
+      const raw = new Database(path);
+      raw.exec("UPDATE tasks SET agent = 'agent-new' WHERE id = 'T1'");
+      raw.exec("INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt) VALUES ('T4', 'p', '旧建', 'code', 'spec', 'agent-old', 0, 0)");
+      raw.exec("INSERT INTO tasks (id, project, title, kind, stage, agent, assigneeKind, assignee, createdAt, updatedAt) VALUES ('T5', 'p', '旧清', 'code', 'spec', NULL, 'agent', 'agent-gone', 0, 0)");
+      raw.exec("UPDATE tasks SET agent = 'agent-late' WHERE id = 'T2'");
+      raw.close();
+      const who = (d: ReturnType<typeof openLedger>, id: string) => [getTask(d, id)?.agent ?? null, getTask(d, id)?.assigneeKind ?? null, getTask(d, id)?.assignee ?? null];
+      const expected = {
+        T1: ["agent-new", "agent", "agent-new"],
+        T2: ["agent-late", "agent", "agent-late"],
+        T3: [null, "human", "local:owner:self"],
+        T4: ["agent-old", "agent", "agent-old"],
+        T5: [null, null, null],
+      };
+      for (let round = 0; round < 2; round++) {
+        const again = openLedger(path);
+        expect(Object.fromEntries(Object.keys(expected).map((id) => [id, who(again, id)]))).toEqual(expected);
+        closeLedger(path);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("8 个进程同时打开同一个旧库并写边，连跑 3 轮：全部成功、只迁移一次、边 8 条", async () => {
     for (let round = 0; round < 3; round++) {
       const { dir, path } = tmp();

@@ -175,6 +175,7 @@ export function openLedger(path: string = LEDGER_PATH): Database {
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec("PRAGMA foreign_keys = ON");
       migrate(db);
+      reconcileAssignees(db);
     });
   } catch (e) {
     db.close();
@@ -182,6 +183,22 @@ export function openLedger(path: string = LEDGER_PATH): Database {
   }
   cache.set(path, db);
   return db;
+}
+
+/** 与 agent 列对不上的行：agent 有值却不是 kind=agent 且同值；agent 空了 kind 却还是 agent */
+const ASSIGNEE_DRIFT = `(agent IS NOT NULL AND agent != '' AND (assigneeKind IS NOT 'agent' OR assignee IS NOT agent))
+  OR ((agent IS NULL OR agent = '') AND assigneeKind = 'agent')`;
+
+/**
+ * 不认识负责人列的旧代码（回滚、旧分支的 CLI）只改 agent 列，迁移时的回填不会再跑：每次打开按 agent 列纠正，幂等。
+ * 新代码写的行永远满足「kind=agent ⇔ agent = assignee」，对不上就说明 agent 是后写的，以它为准；先只读查，没有就不拿写锁。
+ */
+function reconcileAssignees(db: Database): void {
+  if (!db.prepare(`SELECT 1 FROM tasks WHERE ${ASSIGNEE_DRIFT} LIMIT 1`).get()) return;
+  db.transaction(() => {
+    db.prepare(`UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE agent IS NOT NULL AND agent != '' AND (${ASSIGNEE_DRIFT})`).run();
+    db.prepare(`UPDATE tasks SET assigneeKind = NULL, assignee = NULL WHERE ${ASSIGNEE_DRIFT}`).run();
+  }).immediate();
 }
 
 export function closeLedger(path: string = LEDGER_PATH): void {
@@ -196,6 +213,7 @@ export function schemaVersion(db: Database): number {
 /** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   tasks: ["assigneeKind", "assignee"],
+  task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
   asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
