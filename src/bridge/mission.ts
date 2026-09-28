@@ -17,7 +17,7 @@ import { probeTurnAt } from "./turn-probe.js";
 import {
   backoffMs, missionKey, MISSIONS_PATH, nextFastTurns, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind,
 } from "../lib/missions.js";
-import { newThreadId, type Envelope } from "./router.js";
+import { newMessageId, newThreadId, type Envelope } from "./router.js";
 
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
 let GRACE_MS = 45_000;
@@ -107,7 +107,7 @@ async function tryDeliver(agent: string, m: Mission, kind: NudgeKind, now: numbe
     to: { kind: "local", channelId, ws: client.ws, cwd: client.cwd },
     intent: "notification",
     content: nudgeText(m, kind, now, DONE_CMD(agent)),
-    meta: { messageId: `mission_${now}`, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
+    meta: { messageId: newMessageId("mission"), triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
   });
   console.log(`⏱ 值守 ${agent}: 递出 ${kind}（第 ${m.nudges + 1} 次）`);
   return true;
