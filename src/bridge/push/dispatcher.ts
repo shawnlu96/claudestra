@@ -39,10 +39,18 @@ export interface DispatcherDeps {
 export interface Dispatcher {
   onEvent(evt: ChatEventLike): Promise<void>;
   /** 不属于任何会话的系统提醒（新设备配对等）：推给 owner 的所有设备，不计未读 */
-  notice(n: { title: string; body: string; url?: string }): Promise<void>;
+  notice(n: { title: string; body: string; url?: string }): Promise<NoticeOutcome>;
   /** 退订 onAgentRead（测试用） */
   stop(): void;
 }
+
+/** 系统提醒的送达台数（订阅失效被清理的算 failed）；两个都是 0 = 一台设备也没登记 */
+export interface NoticeOutcome {
+  sent: number;
+  failed: number;
+}
+const NO_SEND: NoticeOutcome = { sent: 0, failed: 0 };
+const sumOutcomes = (xs: NoticeOutcome[]): NoticeOutcome => ({ sent: xs.reduce((a, x) => a + x.sent, 0), failed: xs.reduce((a, x) => a + x.failed, 0) });
 
 export const OWNER_CHAT_ID = `api:${OWNER_PRINCIPAL_ID}`;
 const BODY_MAX = 180;
@@ -71,36 +79,41 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
   const now = d.now ?? Date.now;
   const log = d.log ?? ((m: string) => console.log(`🔔 ${m}`));
 
-  async function webPushAll(payload: Record<string, unknown>, filter?: (s: PushSubscriptionRow) => boolean): Promise<void> {
+  async function webPushAll(payload: Record<string, unknown>, filter?: (s: PushSubscriptionRow) => boolean): Promise<NoticeOutcome> {
     const subs = listPushSubscriptions(d.db).filter((s) => !filter || filter(s));
-    if (!subs.length) return;
+    if (!subs.length) return NO_SEND;
     const json = JSON.stringify(d.fp ? { fp: d.fp, ...payload } : payload);
-    await Promise.all(subs.map(async (s) => {
+    return sumOutcomes(await Promise.all(subs.map(async (s) => {
       const r = await d.sender.sendWebPush(s, json);
       if (r.ok && r.vapidKey && r.vapidKey !== s.vapidKey) setPushSubscriptionKey(d.db, s, r.vapidKey);
       if (r.gone) {
         deletePushSubscription(d.db, s.endpoint);
         log(`订阅已失效，已清理（${r.status ?? r.error}）`);
       } else if (!r.ok) log(`Web Push 发送失败: ${r.status ?? ""} ${r.error ?? ""}`.trim());
-    }));
+      return r.ok ? { sent: 1, failed: 0 } : { sent: 0, failed: 1 };
+    })));
   }
 
-  async function apnsAll(msg: ApnsMessage): Promise<void> {
-    if (!d.sender.config().apns) return;
+  async function apnsAll(msg: ApnsMessage): Promise<NoticeOutcome> {
+    if (!d.sender.config().apns) return NO_SEND;
     const tokens = listApnsDevices(d.db);
-    if (!tokens.length) return;
-    await Promise.all(tokens.map(async (t) => {
+    if (!tokens.length) return NO_SEND;
+    return sumOutcomes(await Promise.all(tokens.map(async (t) => {
       const r = await d.sender.sendApns(t, msg);
       if (r.gone) {
         deleteApnsDevice(d.db, t);
         log(`APNs token 失效已清理（${r.status} ${r.error ?? ""}）`);
       } else if (!r.ok) log(`APNs 发送失败: ${r.status ?? ""} ${r.error ?? ""}`.trim());
-    }));
+      return r.ok ? { sent: 1, failed: 0 } : { sent: 0, failed: 1 };
+    })));
   }
 
   /** 已读 → 各端收尾。未读真变了才同步角标（绝大多数打开会话动作本来就没未读，别为它们白发推送） */
   async function onRead(e: ReadEvent): Promise<void> {
-    if (!e.hadUnread) return webPushAll({ type: "dismiss", agent: e.agent, ts: e.ts }, dismissSafe);
+    if (!e.hadUnread) {
+      await webPushAll({ type: "dismiss", agent: e.agent, ts: e.ts }, dismissSafe);
+      return;
+    }
     const badge = totalUnread(d.db);
     await Promise.all([
       webPushAll({ type: "dismiss", agent: e.agent, ts: e.ts, badge }, dismissSafe),
@@ -139,7 +152,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     async notice(n) {
       const ts = now();
       const msg = { title: notificationBody(n.title), body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
-      await Promise.all([apnsAll(msg), webPushAll(msg)]);
+      return sumOutcomes(await Promise.all([apnsAll(msg), webPushAll(msg)]));
     },
     stop: unsubscribe,
   };

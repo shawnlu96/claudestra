@@ -1,13 +1,7 @@
 "use client";
 import { AgentTitle } from "./agent-title";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { closingCollab, CollabSwitch } from "@/features/collab/collab-switch";
 import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store";
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
@@ -534,15 +528,15 @@ function ChatInner() {
     const qa = new URLSearchParams(window.location.search).get("agent");
     if (qa) {
       window.history.replaceState(null, "", window.location.pathname);
+      closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
       void store.openAgent(qa);
-      toContent();
     }
     // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
     if (isNativeShell()) {
       void import("@/lib/push/native").then((m) => {
         m.bindNativePushListeners((agent) => {
+          closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
           void store.openAgent(agent);
-          toContent();
         });
         void m.refreshNativeRegistration();
       });
@@ -551,8 +545,8 @@ function ChatInner() {
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; agent?: string; fp?: string };
       if (d?.type !== "cstra-open-agent" || !d.agent) return;
+      closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
       void hopThenOpen(d.fp, () => store.resetForMachine(), () => store.openAgent(String(d.agent))); // 别的机器发的通知：先切机器再开会话
-      toContent();
     };
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);
@@ -733,12 +727,12 @@ function ChatInner() {
               : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
-          <Sidebar onSelect={toContent} />
+          <Sidebar onSelect={closingCollab(toContent)} />
 
-          <main className="flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
+          <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
+            <CollabSwitch />
             <TopBar />
-            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,
-                不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
+            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
             <div className="relative">
               <SyncBanner />
               <UpdateToast />

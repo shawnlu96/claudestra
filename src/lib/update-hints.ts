@@ -82,7 +82,7 @@ export function makeVersionCache(now: () => number = Date.now): VersionCache {
 }
 
 /** 与 tmux 里 agent 同一口径：裸名按登录 shell 的 PATH 解析；PI_BIN 给的是路径就直接探它 */
-async function probeInstalled(bin: string): Promise<string | undefined> {
+export async function probeInstalled(bin: string): Promise<string | undefined> {
   const real = bin.includes("/") ? bin : (await resolveLoginBinary(defaultRunner, bin))?.real;
   return (real && (await probeClaudeVersion(defaultRunner, real))) || undefined;
 }

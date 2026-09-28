@@ -4,6 +4,7 @@ import type { SidebarEntry } from "../sidebar-entries";
 import { useAgentDrop } from "./agent-dnd";
 import { useProjectMenuTrigger } from "./project-menu";
 import { useHostInfo } from "../host-info";
+import { CollabEntry } from "@/features/collab/collab-entry";
 
 type GroupEntry = Extract<SidebarEntry, { kind: "group" }>;
 
@@ -75,7 +76,10 @@ export function ProjectGroup({
         {collapsed && groupBusy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
       </button>
       {!collapsed && (
-        <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">{children}</ul>
+        <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">
+          <CollabEntry projectId={e.id} />
+          {children}
+        </ul>
       )}
     </li>
   );
