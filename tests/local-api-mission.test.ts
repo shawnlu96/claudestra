@@ -1,4 +1,4 @@
-/** bridge/local-api/mission.ts：网页开 / 关值守——要 manage、要在 scope 内、agent 要存在、目标与截止时间要合法 */
+/** bridge/local-api/mission.ts：网页开 / 关 Autopilot——要 manage、要在 scope 内、agent 要存在、目标与截止时间要合法 */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
