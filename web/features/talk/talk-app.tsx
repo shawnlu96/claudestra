@@ -36,7 +36,12 @@ function TalkPage() {
         <WorkspaceSwitch active="talk" />
         <span className="flex-1" />
         {s.me && (
-          <button className="flex h-7 items-center rounded-lg px-1.5 text-base-content/60 hover:bg-base-300 hover:text-base-content" title={t("新对话")} aria-label={t("新对话")} onClick={() => setCreating(true)}>
+          <button
+            className="flex h-7 items-center rounded-lg px-1.5 text-base-content/60 hover:bg-base-300 hover:text-base-content"
+            title={t("新对话")}
+            aria-label={t("新对话")}
+            onClick={() => setCreating(true)}
+          >
             <PlusIcon size={18} />
           </button>
         )}
