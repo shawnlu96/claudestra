@@ -44,7 +44,7 @@ function RootFallback({ error }: { error: Error }) {
       <AlertIcon className="size-8 text-warning" />
       <div className="text-lg font-semibold text-base-content">{t("出错了")}</div>
       <p className="max-w-sm text-sm text-base-content/70">{t("页面遇到了一个错误，已经记下来了。重新加载通常就能恢复。")}</p>
-      <p className="max-w-sm break-all font-mono text-xs text-base-content/50">{error.message}</p>
+      <p className="line-clamp-3 max-w-sm break-all font-mono text-xs text-base-content/50">{error.message}</p>
       <div className="mt-2 flex flex-col items-center gap-2">
         <button type="button" className="btn btn-primary btn-sm min-w-40" onClick={() => window.location.reload()}>
           {t("重新加载")}
@@ -70,7 +70,7 @@ function PaneFallback({ error, reset, onClose }: { error: Error; reset: () => vo
     <div role="alert" className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-2 bg-base-100 px-6 text-center">
       <AlertIcon className="size-6 text-warning" />
       <div className="text-sm font-medium text-base-content">{t("这部分出错了")}</div>
-      <p className="max-w-sm break-all font-mono text-xs text-base-content/50">{error.message}</p>
+      <p className="line-clamp-3 max-w-sm break-all font-mono text-xs text-base-content/50">{error.message}</p>
       <div className="mt-1 flex gap-2">
         <button type="button" className="btn btn-sm" onClick={reset}>
           {t("重试")}
