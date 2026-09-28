@@ -3544,7 +3544,7 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
-void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占，忙就押后
+void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占（押后由 waitForIdle 标记）
   clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
 }));
 

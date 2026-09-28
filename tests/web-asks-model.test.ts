@@ -1,6 +1,6 @@
 /** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
-import { answerSummary, askCounts, askForReply, clicksFromAnswer, groupAsks, spanText, type WebAsk } from "@/features/asks/asks-model";
+import { agentLabel, answeredGroups, answerSummary, askCounts, askForReply, clicksFromAnswer, groupAsks, rowGroup, spanText, type WebAsk } from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
 import { fillParams } from "@/lib/i18n-fill";
@@ -27,6 +27,16 @@ describe("分组与计数", () => {
     expect(g.accept.map((a) => a.id)).toEqual(["v"]);
     expect(g.recent.map((a) => a.id)).toEqual(["new", "old"]);
     expect(askCounts(list)).toEqual({ waiting: 2, accept: 1 });
+  });
+
+  test("等你处理：急的在前，卡活的其次，同档里等得久的在前", () => {
+    const g = groupAsks([ask({ id: "old", createdAt: 1 }), ask({ id: "blk", blocking: true, createdAt: 5 }), ask({ id: "urg", urgency: "urgent", createdAt: 9 })]);
+    expect(g.waiting.map((a) => a.id)).toEqual(["urg", "blk", "old"]);
+  });
+
+  test("大总管显示成人话，不露内部名", () => {
+    expect(agentLabel("master", (s) => s)).toBe("大总管");
+    expect(agentLabel("agent-x", (s) => s)).toBe("x");
   });
 });
 
@@ -58,9 +68,17 @@ describe("气泡 ↔ ask", () => {
     expect(clicksFromAnswer(rows, ["[button:zzz]"])).toEqual({});
   });
 
-  test("答案人话：wire 换成按钮 / 选项文字，接上 owner 的话", () => {
-    const a = ask({ state: "answered", answer: { choices: ["[button:go]", "[select:f:b]"], text: "先别打 tag", via: "web_card", at: 1 } });
+  test("答案人话：用 bridge 记下的按钮 / 选项文字，接上 owner 的话；老数据没有 labels 退回 wire", () => {
+    const a = ask({ state: "answered", answer: { choices: ["[button:go]", "[select:f:b]"], labels: ["发", "乙"], text: "先别打 tag", via: "web_card", at: 1 } });
     expect(answerSummary(a)).toBe("发；乙；「先别打 tag」");
+    expect(answerSummary(ask({ answer: { choices: ["[button:go]"], text: "", via: "x", at: 1 } }))).toBe("[button:go]");
+  });
+
+  test("按组判断哪些行答过了：所有按钮行一组，单选 / 多选各一组（同 bridge 的 answerGroups）", () => {
+    const more: WebComponentRow[] = [...rows, { type: "buttons", buttons: [{ id: "later", label: "再说" }] }];
+    expect(more.map(rowGroup)).toEqual(["buttons", "select:f", "buttons"]);
+    expect([...answeredGroups(more, ["[button:later]"])]).toEqual(["buttons"]);
+    expect([...answeredGroups(more, ["[select:f:a]"])]).toEqual(["select:f"]);
   });
 });
 

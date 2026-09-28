@@ -23,6 +23,14 @@ const EVENT_KINDS = [
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
+/**
+ * 「待你处理」这一族事件（ledger-asks.ts 写）：开出 / 过期 / 撤销，以及作答写下的 decision（data 带 askId）。
+ * 它们不算任务的「最近一条」、也不进项目级事件列表——否则一条 ask 就能盖掉「线上验证失败」这类问题态（协作视图靠它）。
+ */
+export function isAskEvent(e: { kind: string; data: Record<string, unknown> }): boolean {
+  return e.kind === "ask" || e.kind === "ask_expire" || e.kind === "ask_cancel" || (e.kind === "decision" && typeof e.data.askId === "string");
+}
+
 export type ReviewVerdict = "pass" | "changes" | "block";
 
 export interface LedgerItem {

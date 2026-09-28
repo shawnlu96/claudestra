@@ -2,14 +2,16 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, patchAsk, type AskAnswer, type NewAsk } from "../src/lib/ledger-asks.js";
+import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
+import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 let path = "";
 afterEach(() => closeLedger(path));
 
 const base: NewAsk = { project: "p", fromAgent: "agent-x", fromChannelId: "111", source: "reply", kind: "decide", title: "发 v2.31.0 吗", taskId: "T9" };
-const ans = (at: number, extra: Partial<AskAnswer> = {}): AskAnswer => ({ choices: ["[button:go]"], text: "", principal: "owner:self", via: "web_card", at, ...extra });
+const ans = (at: number, extra: Partial<AskAnswer> = {}): AskAnswer => ({ choices: ["[button:go]"], labels: ["发"], text: "", principal: "owner:self", via: "web_card", at, ...extra });
 
 function db() {
   path = tempLedgerPath("ledger-asks-");
@@ -34,7 +36,8 @@ describe("ask 生命周期", () => {
     expect(out).toMatchObject({ state: "answered", answer: { choices: ["[button:go]"], text: "只做 Codex", via: "web_card" } });
     const dec = listEvents(d, { project: "p" }).filter((e) => e.kind === "decision");
     expect(dec).toHaveLength(1);
-    expect(dec[0]).toMatchObject({ actor: "owner", target: "T9", data: { askId: a.id, ownerWords: "只做 Codex" } });
+    // decision 记人话（按钮文字 + 原话），wire 原文放在 data 里
+    expect(dec[0]).toMatchObject({ actor: "owner", target: "T9", text: "发 「只做 Codex」", data: { askId: a.id, ownerWords: "只做 Codex", choices: ["[button:go]"], labels: ["发"] } });
     let err: unknown;
     try {
       answerAsk(d, a.id, ans(3000, { choices: ["[button:no]"], via: "discord" }));
@@ -52,7 +55,13 @@ describe("ask 生命周期", () => {
     const a = openAsk(d, { ...base, expiresAt: 5000 }, 1000);
     expect(dueAsks(d, 4999)).toHaveLength(0);
     expect(dueAsks(d, 5000).map((x) => x.id)).toEqual([a.id]);
-    expect(() => answerAsk(d, a.id, ans(6000))).toThrow(LedgerError);
+    let err: LedgerError | undefined;
+    try {
+      answerAsk(d, a.id, ans(6000));
+    } catch (e) {
+      err = e as LedgerError;
+    }
+    expect(err?.current).toMatchObject({ state: "expired", expiredNow: true });
     expect(getAsk(d, a.id)?.state).toBe("expired");
     expect(listEvents(d, { project: "p" }).map((e) => e.kind)).toEqual(["ask", "ask_expire"]);
     expect(dueAsks(d, 9999)).toHaveLength(0);
@@ -87,6 +96,59 @@ describe("ask 生命周期", () => {
     expect(listAsks(d, { project: "p" }).map((a) => a.id)).toEqual([old.id, newer.id, done.id, stale.id]);
     expect(listAsks(d, { project: "p", closedSince: 1000 }).map((a) => a.id)).toEqual([old.id, newer.id, done.id]);
     expect(listAsks(d, { project: "q" })).toEqual([]);
+  });
+});
+
+describe("多行 reply：逐行作答", () => {
+  const rows = [
+    { type: "select", id: "model", options: [{ label: "Opus", value: "opus" }, { label: "Sonnet", value: "sonnet" }] },
+    { type: "select", id: "effort", options: [{ label: "high", value: "high" }] },
+    { type: "buttons", buttons: [{ id: "go", label: "开干" }] },
+    { type: "buttons", buttons: [{ id: "later", label: "再说" }] },
+  ];
+  const row = (at: number, w: string, l: string, extra: Partial<AskAnswer> = {}) => ans(at, { choices: [w], labels: [l], ...extra });
+
+  test("每组答一次：部分答案累积、状态仍 open；所有组答完才 answered；同一组再答 → conflict(dup)；按钮行算一组", () => {
+    const d = db();
+    const a = openAsk(d, { ...base, options: rows }, 1000);
+    expect(answerAsk(d, a.id, row(2000, "[select:model:opus]", "Opus")).state).toBe("open");
+    let err: LedgerError | undefined;
+    try {
+      answerAsk(d, a.id, row(2100, "[select:model:sonnet]", "Sonnet"));
+    } catch (e) {
+      err = e as LedgerError;
+    }
+    expect(err?.current).toMatchObject({ dup: true, state: "open" });
+    expect(answerAsk(d, a.id, row(2200, "[button:later]", "再说")).state).toBe("open");
+    const done = answerAsk(d, a.id, row(2300, "[select:effort:high]", "high", { text: "先这样" }));
+    expect(done).toMatchObject({ state: "answered", answer: { choices: ["[select:model:opus]", "[button:later]", "[select:effort:high]"], labels: ["Opus", "再说", "high"], text: "先这样" } });
+    const dec = listEvents(d, { project: "p" }).filter((e) => e.kind === "decision").map((e) => e.data.partial);
+    expect(dec).toEqual([true, true, false]);
+  });
+
+  test("卡片一次提交（final）或只写了话：不管还有没有没答的组都结案", () => {
+    const d = db();
+    const a = openAsk(d, { ...base, options: rows }, 1000);
+    expect(answerAsk(d, a.id, row(2000, "[button:go]", "开干", { final: true })).state).toBe("answered");
+    const b = openAsk(d, { ...base, options: rows }, 1000);
+    expect(answerAsk(d, b.id, ans(2000, { choices: [], labels: [], text: "都不要，换个思路" })).state).toBe("answered");
+  });
+});
+
+describe("台账读侧不被 ask 事件盖掉", () => {
+  test("挂在任务上的 ask / 撤销 / 作答不算任务的最近一条；没挂任务的 ask 不挤进项目级事件", () => {
+    const d = db();
+    createItem(d, { actor: "owner", now: 1 }, { project: "p", id: "i1", title: "x", status: "doing" });
+    createTask(d, { actor: "owner", now: 2 }, { project: "p", id: "T9", title: "t", kind: "code", itemId: "i1", agent: "agent-x" });
+    appendEvent(d, { actor: "owner", now: 3 }, { project: "p", target: "T9", kind: "verify", text: "线上验证失败", data: { result: "fail" } });
+    appendEvent(d, { actor: "owner", now: 4 }, { project: "p", target: "", kind: "note", text: "项目级" });
+    const onTask = openAsk(d, base, 5);
+    answerAsk(d, onTask.id, ans(6));
+    closeAsk(d, openAsk(d, base, 7).id, "cancelled", "", 8);
+    for (let i = 0; i < 25; i++) openAsk(d, { ...base, taskId: undefined, title: `q${i}` }, 10 + i);
+    const v = projectView(d, "p", 100);
+    expect(v.tasks[0].lastEvent).toMatchObject({ kind: "verify", data: { result: "fail" } });
+    expect(v.projectEvents.map((e) => e.kind)).toEqual(["note"]);
   });
 });
 

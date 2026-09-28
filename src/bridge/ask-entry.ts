@@ -1,17 +1,29 @@
 /**
  * 「待你处理」的作答入口（docs 13 §4.4 §4.7）：聊天里的按钮 / 表单同步发送（POST /agents/:name/messages）、Discord 交互、网页卡片。
  * 三条路都先认出这是哪条 ask，再交给 asks.ts 的 commitAnswer——答复是 intent=response，不抢占正在干活的 agent。
- * 已结案的 ask 再点：网页回 409 code=ask_closed（聊天里是一句「已经处理过了」，气泡本身也已按 ask 状态锁住），Discord 回一条只有点的人看得见的「已处理」，都不再投给 agent。
- * 只有 canReadLedger 的 owner 凭据（非 peer、全 scope）和 Discord 的 ALLOWED_USER_IDS 能作答；别的 token 发 [button:x] 照旧是普通消息。
+ * 权限：看 = canReadLedger，大总管的 ask 还要 scope 含 master；答 = 再要 owner 本人的设备凭据（老的「*」Bearer、guest、peer 都不行），
+ * Discord 只有 ALLOWED_USER_IDS 点得到。不能答的凭据发 [button:x] 照旧是普通消息。
+ * 已结案的 ask 再点：网页带了 askId 才回 409 code=ask_closed（没带的不猜，照常投）；Discord 按原消息 id 认，悄悄告诉点的人「已处理」。
  */
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { canReadLedger } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { findAskByDiscordMessage, getAsk, listAsks, type Ask } from "../lib/ledger-asks.js";
+import { answerAsk, findAskByDiscordMessage, getAsk, listAsks, type Ask } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
-import { tokenIdOf, type Principal } from "../lib/principals.js";
-import { apiJson } from "./api-respond.js";
-import { askReadDb, commitAnswer, initAsks, type AsksDeps } from "./asks.js";
+import { agentInScope, tokenIdOf, type Principal } from "../lib/principals.js";
+import { apiJson, forbidden } from "./api-respond.js";
+import { initRuntimeAsks } from "./ask-runtime.js";
+import { askDb, askReadDb, commitAnswer, initAsks, ownerPresence, publishAsk, type AsksDeps } from "./asks.js";
+
+/** 看得见这条 ask：台账的门；大总管的 ask 另要 scope 含 master（「*」不含 master，和 SSE / agent 列表同一口径） */
+export function canSeeAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
+  return canReadLedger(p) && (a.fromAgent !== "master" || agentInScope(p, "master"));
+}
+
+/** 能作答：owner 本人的设备凭据（答复以 owner 名义投给 agent，不能让集成 token 冒充），且看得见这条 */
+export function canAnswerAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
+  return p.role === "owner" && !!p.credential && canSeeAsk(p, a);
+}
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
 export function picksFor(a: Ask, wires: string[]): WireMatch[] | null {
@@ -24,33 +36,44 @@ export function picksFor(a: Ask, wires: string[]): WireMatch[] | null {
   return out;
 }
 
-/** 这些 wire 答的是 agent 的哪条 ask：优先网页带来的 askId，否则取最新一条开着且对得上的；都没有再看已结案的（给「已处理」） */
+/**
+ * 这些 wire 答的是 agent 的哪条 ask：网页带了 askId 就只认它（已结案也返回，给「已处理」）；
+ * 没带就取最新一条开着且对得上的——不拿已结案的去对，否则新按钮撞上旧 ask 的同名 id 会被吞掉。
+ */
 export function findAskForWires(agent: string, wires: string[], hint?: string | null): { ask: Ask; picks: WireMatch[] } | null {
   if (!wires.length) return null;
   const db = askReadDb();
   if (!db) return null;
   const hinted = hint ? getAsk(db, hint) : null;
-  const pool = hinted && hinted.fromAgent === agent ? [hinted] : listAsks(db, { fromAgent: agent, source: "reply", limit: 100 });
-  const open = pool.filter((a) => a.state === "open").reverse();
-  const closed = pool.filter((a) => a.state !== "open");
-  for (const a of [...open, ...closed]) {
+  const pool = hinted && hinted.fromAgent === agent ? [hinted] : listAsks(db, { fromAgent: agent, source: "reply", states: ["open"], limit: 100 }).reverse();
+  for (const a of pool) {
     const picks = picksFor(a, wires);
     if (picks) return { ask: a, picks };
   }
   return null;
 }
 
-/** 409 的体：code 给程序判，error 是网页失败提示里直接显示的那句 */
-const closedBody = (a: Ask) => ({ ok: false, code: "ask_closed", error: t("这件「待你处理」已经处理过了（或已过期）", "This ask was already handled (or expired)"), askId: a.id, state: a.state, answer: a.answer });
+/** 已结案那一句（Discord 悄悄话、网页 409 的提示）：人话 + 当时选了什么 */
+export function closedWords(a: Pick<Ask, "state" | "answer">): string {
+  const picked = a.answer?.labels.join("、");
+  if (a.state === "answered") return picked ? t(`已处理：${picked}`, `Already handled: ${picked}`) : t("已处理", "Already handled");
+  if (a.state === "expired") return t("已过期，按未批准处理", "Expired — treated as not approved");
+  return t("已撤销", "Withdrawn");
+}
 
-/** 冲突（刚被别处答了 / 到点过期）→ 409，其余错误照抛 */
+/** 409 的体：code 给程序判，error 是网页提示里直接显示的那句 */
+const closedBody = (a: Pick<Ask, "id" | "state" | "answer">) => ({ ok: false, code: "ask_closed", error: closedWords(a), askId: a.id, state: a.state, answer: a.answer });
+
+/** 冲突（刚被别处答了 / 这一项答过了 / 到点过期）→ 409，其余错误照抛 */
 async function commitOr409(run: () => Promise<Ask>, fallback: Ask): Promise<Response> {
   try {
     const a = await run();
     return apiJson(202, { ok: true, accepted: true, askAnswered: true, ask: { id: a.id, state: a.state }, agent: a.fromAgent });
   } catch (e) {
-    if (e instanceof LedgerError && e.code === "conflict") return apiJson(409, { ...closedBody(fallback), state: e.current?.state ?? "answered", answer: e.current?.answer ?? null });
-    throw e;
+    if (!(e instanceof LedgerError && e.code === "conflict")) throw e;
+    const cur = e.current as { state?: Ask["state"]; answer?: Ask["answer"]; dup?: boolean } | undefined;
+    if (cur?.dup) return apiJson(409, { ok: false, code: "ask_part_answered", error: t("这一项已经答过了", "This part was already answered"), askId: fallback.id });
+    return apiJson(409, closedBody({ id: fallback.id, state: cur?.state ?? "answered", answer: cur?.answer ?? null }));
   }
 }
 
@@ -58,31 +81,44 @@ const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p)
 
 /**
  * POST /agents/:name/messages 里的一行调用：消息里的 wire 行答的是这个 agent 的某条 ask → 当答复处理，返回响应；
- * 不是 → null，调用方照常投递。
+ * 不是（或这个凭据不能答）→ null，调用方照常投递。
  */
 export async function answerFromChat(req: { agent: string; text: string; principal: Principal; askId?: string | null }): Promise<Response | null> {
-  if (!canReadLedger(req.principal)) return null;
+  const p = req.principal;
+  if (p.role !== "owner" || !p.credential || !canReadLedger(p)) return null;
   const { wires, rest } = splitWire(req.text);
   const hit = findAskForWires(req.agent, wires, req.askId);
-  if (!hit) return null;
+  if (!hit || !canAnswerAsk(p, hit.ask)) return null;
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
-  const p = req.principal;
   return commitOr409(() => commitAnswer({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
 }
 
-/** 网页卡片：POST /ledger/:project/asks/:id/answer，body {choices: wire[], text?} */
-export async function answerFromCard(project: string, id: string, body: { choices?: unknown; text?: unknown }, p: Principal): Promise<Response> {
+/**
+ * 网页卡片：POST /ledger/:project/asks/:id/answer，body {choices: wire[], text?}。卡片是一次提交：不管多行 reply 还有没有没答的组都结案。
+ * 运行时弹框（AUQ / 权限）：卡片先按原有端点发了键，再调这里补记是谁、选了什么（只记账，不再投给 agent）。
+ */
+export async function answerFromCard(project: string, id: string, body: { choices?: unknown; text?: unknown; label?: unknown }, p: Principal): Promise<Response> {
   const db = askReadDb();
   const a = db ? getAsk(db, id) : null;
-  if (!a || a.project !== project) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
-  if (a.source !== "reply") return apiJson(400, { ok: false, error: "runtime dialog: answer via POST /agents/:name/answer" });
+  if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
+  if (!canAnswerAsk(p, a)) return forbidden("answering requires the owner's own device credential");
   if (a.state !== "open") return apiJson(409, closedBody(a));
+  if (a.source !== "reply") return recordRuntimeAnswer(a, typeof body.label === "string" ? body.label.slice(0, 80) : "", p);
   const wires = Array.isArray(body.choices) ? body.choices.filter((c): c is string => typeof c === "string") : [];
   const text = typeof body.text === "string" ? body.text.trim().slice(0, 4000) : "";
   const picks = picksFor(a, wires);
   if (!picks) return apiJson(400, { ok: false, error: "choice does not match this ask's options" });
   if (!picks.length && !(a.allowText && text)) return apiJson(400, { ok: false, error: "pick an option or write something" });
-  return commitOr409(() => commitAnswer({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card" }), a);
+  return commitOr409(() => commitAnswer({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true }), a);
+}
+
+function recordRuntimeAnswer(a: Ask, label: string, p: Principal): Promise<Response> {
+  return commitOr409(async () => {
+    const out = answerAsk(askDb(), a.id, { choices: [], labels: label ? [label] : [], text: "", principal: p.id, device: p.credential, via: "web_card", at: Date.now() });
+    ownerPresence.touch();
+    publishAsk(out);
+    return out;
+  }, a);
 }
 
 /** Discord 交互里要用到的那一小撮（不 import discord.js 的类型，单测好造） */
@@ -95,11 +131,14 @@ export interface DiscordClick {
   edit: (content: string) => Promise<unknown>;
   /** 只有点的人看得见的一句话 */
   whisper: (content: string) => Promise<unknown>;
+  /** 起 typing（agent 收到答复就要干活）；单测不给 */
+  typing?: () => void;
 }
 
 /**
- * Discord 按钮 / 选单（discord-interactions.ts 两处各一行）：按原消息 id 找 ask。找不到 → false，照旧投；
- * 已结案 → 悄悄告诉点的人「已处理」；开着 → 作答（不抢占），原消息改成已点击。
+ * Discord 按钮 / 选单（discord-interactions.ts 两处各一行，排在「agent 在不在线」之前：离线也能答，答复进押后队列 / 改投）。
+ * 按原消息 id 找 ask：找不到 → false，照旧投；已结案 → 悄悄告诉点的人；开着 → 作答（不抢占）。
+ * 多行 reply 只答了其中一组：原消息不动（别的行还要点），只悄悄说一句已收到；全部答完才把原消息改成已点击、去掉按钮。
  */
 export async function answerFromDiscord(c: DiscordClick, wire: string): Promise<boolean> {
   const db = askReadDb();
@@ -107,18 +146,19 @@ export async function answerFromDiscord(c: DiscordClick, wire: string): Promise<
   if (!a) return false;
   const picks = picksFor(a, [wire]);
   if (!picks) return false;
-  const done = (x: Ask) => t(`已处理：${x.answer?.choices.join(" ") || x.state}`, `Already handled: ${x.answer?.choices.join(" ") || x.state}`);
   if (a.state !== "open") {
-    await c.whisper(done(a));
+    await c.whisper(closedWords(a));
     return true;
   }
   try {
     const from = { kind: "user" as const, userId: c.user.id, channelId: c.channelId, username: c.user.username };
-    await commitAnswer({ ask: a, picks, text: "", from, principal: `discord:${c.user.id}`, via: "discord" });
-    await c.edit(`${c.origContent}\n\n✅ ${t("已点击", "Clicked")}：**${picks[0].label}**`);
+    const out = await commitAnswer({ ask: a, picks, text: "", from, principal: `discord:${c.user.id}`, via: "discord" });
+    c.typing?.();
+    if (out.state === "open") await c.whisper(t(`已收到：${picks[0].label}（这条还有别的项没答）`, `Got it: ${picks[0].label} (other parts still open)`));
+    else await c.edit(`${c.origContent}\n\n✅ ${t("已点击", "Clicked")}：**${(out.answer?.labels ?? [picks[0].label]).join("、")}**`);
   } catch (e) {
     if (!(e instanceof LedgerError && e.code === "conflict")) throw e;
-    await c.whisper(t("这条已经处理过或过期了", "This was already handled or has expired"));
+    await c.whisper((e.current as { dup?: boolean } | undefined)?.dup ? t("这一项已经答过了", "This part was already answered") : closedWords(getAsk(askDb(), a.id) ?? a));
   }
   return true;
 }
@@ -131,13 +171,18 @@ export interface DiscordInteractionLike {
   followUp(o: { content: string; ephemeral: boolean }): Promise<unknown>;
 }
 
-/** discord-interactions.ts 的一行调用：`if (!client || (await answerDiscordInteraction(interaction, channelId, wire))) return;` */
-export function answerDiscordInteraction(i: DiscordInteractionLike, channelId: string, wire: string): Promise<boolean> {
+/** discord-interactions.ts 的一行调用：`if ((await answerDiscordInteraction(interaction, channelId, wire, typing)) || !client) return;` */
+export function answerDiscordInteraction(i: DiscordInteractionLike, channelId: string, wire: string, typing?: () => void): Promise<boolean> {
   return answerFromDiscord({
-    messageId: i.message?.id, user: i.user, channelId, origContent: i.message?.content ?? "",
+    messageId: i.message?.id, user: i.user, channelId, origContent: i.message?.content ?? "", typing,
     edit: (content) => i.editReply({ content, components: [] }),
     whisper: (content) => i.followUp({ content, ephemeral: true }),
   }, wire);
+}
+
+/** 选单版（discord-interactions.ts 一行）：多选的值用逗号连成 `[select:id:v1,v2]`，与网页同一个 wire */
+export function answerDiscordSelect(i: DiscordInteractionLike & { values: string[] }, channelId: string, id: string, typing?: () => void): Promise<boolean> {
+  return answerDiscordInteraction(i, channelId, `[select:${id}:${i.values.join(",")}]`, typing);
 }
 
 /** Discord 客户端里改消息用到的那一点（不 import discord.js 的类型） */
@@ -159,8 +204,9 @@ export function discordAskEditor(discord: DiscordLike): (a: Ask, label: string) 
   };
 }
 
-/** bridge.ts 启动时的一行：接上投递 / 押后队列，Discord 模式下带上「改原消息为已处理」 */
+/** bridge.ts 启动时的一行：接上投递 / 押后队列，Discord 模式下带上「改原消息为已处理」；撤掉上次留下的运行时 ask 并订阅 AUQ 事件 */
 export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: DiscordLike | null }): void {
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
+  initRuntimeAsks();
 }

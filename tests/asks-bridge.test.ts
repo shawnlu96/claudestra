@@ -1,13 +1,14 @@
 /**
- * 「待你处理」的 bridge 接线（bridge/asks.ts、ask-entry.ts、local-api/asks.ts）：reply 自动建 ask、三条作答入口、
- * 旧按钮显示已处理、答复不抢占（intent=response + waitForIdle）、改投派发者、过期通知、运行时弹框、权限门。库是临时文件。
+ * 「待你处理」的 bridge 接线（bridge/asks.ts、ask-runtime.ts、ask-entry.ts、local-api/asks.ts）：reply 自动建 ask、三条作答入口、
+ * 旧按钮显示已处理、答复不抢占（intent=response + waitForIdle 标记，押后的接线归 T13a）、改投派发者、过期通知、运行时弹框、权限门、
+ * 多行 reply 逐行作答、bridge 重启清理。第一轮审查（t11a-rev/*.ts）的复现都在这里。库是临时文件。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
-import { deliverReplyWithAsk, noteRuntimeDialogs, openRuntimeAsk, ownerPresence, sweepExpired, setAsksForTest, settleRuntimeAsk, type AsksDeps } from "../src/bridge/asks.js";
+import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
+import { deliverReplyWithAsk, ownerPresence, sweepExpired, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
-import { flushHeld } from "../src/bridge/held-flush.js";
-import { HeldQueue } from "../src/bridge/held-queue.js";
+import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
 import type { Delivery, Envelope } from "../src/bridge/router.js";
 import { effectivePrincipal, type Grant } from "../src/lib/devices.js";
@@ -55,6 +56,7 @@ function setup(registry = REGISTRY) {
   events = [];
   clients = new Map([["111", { ws }], ["222", { ws }]]);
   setAsksForTest({ path, deps: mkDeps(), registry, ownerChats: ["api:owner:self"] });
+  resetRuntimeAsksForTest();
   unsub = subscribeEvents({}, (e) => void (e.type === "ask" && events.push(e)));
 }
 beforeEach(() => setup());
@@ -116,13 +118,14 @@ describe("作答 → 答复不抢占", () => {
     expect(listEvents(openLedger(path), { project: "p" }).map((e) => e.kind)).toEqual(["ask", "decision"]);
   });
 
-  test("旧按钮再点：409 ask_closed，不再投给 agent", async () => {
-    await reply();
+  test("旧按钮再点：网页带了 askId → 409 ask_closed（提示是人话），不再投；没带 askId 不猜，照常当普通消息（不吞掉新按钮）", async () => {
+    const a = (await reply())!;
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     delivered = [];
-    const res = (await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: owner() }))!;
+    const res = (await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: owner(), askId: a.id }))!;
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ code: "ask_closed", state: "answered" });
+    expect(await res.json()).toMatchObject({ code: "ask_closed", state: "answered", error: "已处理：✅ 发" });
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:no]", principal: owner() })).toBeNull();
     expect(delivered).toEqual([]);
   });
 
@@ -158,22 +161,6 @@ describe("作答 → 答复不抢占", () => {
     expect(getAsk(openLedger(path), second.id)?.state).toBe("answered");
   });
 
-  test("押后队列：目标主回合在忙时答复留着（不是人类 request），空闲才投", async () => {
-    await reply();
-    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
-    const q = new HeldQueue(null);
-    q.holdEnv(delivered[0]);
-    const out: string[] = [];
-    const deps = {
-      held: q, compacting: () => false, working: async () => true, client: () => ({ ws }), touch: () => {},
-      isHumanRequest: (env: Envelope) => (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request",
-      deliver: async (env: Envelope) => (out.push(env.content), { envelope: env, outcome: { kind: "sent" as const } }),
-    };
-    await flushHeld(deps, "111", "scan");
-    expect(out).toEqual([]);
-    await flushHeld({ ...deps, working: async () => false }, "111", "stop");
-    expect(out).toHaveLength(1);
-  });
 });
 
 describe("Discord 与卡片", () => {
@@ -195,12 +182,12 @@ describe("Discord 与卡片", () => {
     expect(c1.log[0]).toContain("✅");
     const c2 = click("d1");
     expect(await answerDiscordInteraction(c2.i, "555", "[button:no]")).toBe(true);
-    expect(c2.log[0]).toMatch(/^whisper:/);
+    expect(c2.log[0]).toBe("whisper:已处理：✅ 发");
     expect(delivered).toHaveLength(1);
     expect(await answerDiscordInteraction(click("other").i, "555", "[button:go]")).toBe(false);
   });
 
-  test("卡片：选项对不上 400、项目不对 404、既不选也不写 400、正常 202；运行时弹框类让走按键端点", async () => {
+  test("卡片：选项对不上 400、项目不对 404、既不选也不写 400、正常 202；运行时弹框类只补记（按键已由原端点发过）", async () => {
     const a = (await reply())!;
     expect((await answerFromCard("p", a.id, { choices: ["[button:zzz]"] }, owner())).status).toBe(400);
     expect((await answerFromCard("q", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(404);
@@ -209,7 +196,12 @@ describe("Discord 与卡片", () => {
     expect(getAsk(openLedger(path), a.id)?.answer).toMatchObject({ via: "web_card", text: "好" });
     await openRuntimeAsk({ source: "permission", channelId: "111", agentName: "agent-x", kind: "authorize", title: "t", context: "c", options: [] });
     const rt = listAsks(openLedger(path), { source: "permission" })[0];
-    expect((await answerFromCard("p", rt.id, { choices: [] }, owner())).status).toBe(400);
+    delivered = [];
+    expect((await answerFromCard("p", rt.id, { label: "允许" }, owner())).status).toBe(202);
+    expect(getAsk(openLedger(path), rt.id)).toMatchObject({ state: "answered", answer: { via: "web_card", labels: ["允许"] } });
+    expect(delivered).toEqual([]);
+    settleRuntimeAsk("permission", "111"); // 弹框随后消失：已答的不会被改成撤销
+    expect(getAsk(openLedger(path), rt.id)?.state).toBe("answered");
   });
 
   test("HTTP：门是 canReadLedger；列表跨项目；presence 按设备记", async () => {
@@ -234,6 +226,7 @@ describe("改投、过期、运行时弹框", () => {
     setAsksForTest({ path, deps: mkDeps(), registry: [{ ...REGISTRY[0], status: "stopped" } as RegistryAgent, REGISTRY[1]], ownerChats: ["api:owner:self"] });
     await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
     expect(delivered[0].to).toMatchObject({ channelId: "222", agentName: "agent-pm" });
+    expect(delivered[0].content.split("\n")[0]).toContain("原本是 agent-x 问的");
     expect(getAsk(openLedger(path), a.id)?.extra).toEqual({ redirectedTo: "agent-pm" });
     const b = (await reply())!;
     clients.clear();
@@ -247,9 +240,10 @@ describe("改投、过期、运行时弹框", () => {
     openLedger(path).run("UPDATE asks SET expiresAt = 1 WHERE id = ?", [a.id]);
     expect(await sweepExpired()).toBe(1);
     expect(getAsk(openLedger(path), a.id)?.state).toBe("expired");
-    expect(delivered[0]).toMatchObject({ intent: "notification", from: { kind: "bridge" }, meta: { waitForIdle: true } });
+    // 过期通知不是 owner 的答复：trigger 用 bridge_synth，ask_answer 只留给 owner 作答
+    expect(delivered[0]).toMatchObject({ intent: "notification", from: { kind: "bridge" }, meta: { waitForIdle: true, triggerKind: "bridge_synth" } });
     expect(delivered[0].content).toContain("未批准");
-    expect((await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() }))!.status).toBe(409);
+    expect((await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: a.id }))!.status).toBe(409);
   });
 
   test("运行时弹框：同频道同来源只开一条；有下游挂在它名下算急；提交记 answered、其余关掉记 cancelled；换新弹框先结旧的", async () => {
@@ -280,5 +274,116 @@ describe("改投、过期、运行时弹框", () => {
     const db = openLedger(path);
     expect(listAsks(db, { source: "permission" }).map((a) => [a.context, a.state])).toEqual([["Edit 文件: a.ts", "cancelled"], ["执行命令: rm x", "cancelled"]]);
     expect(listAsks(db, { source: "codex" })).toEqual([]);
+  });
+});
+
+describe("第一轮审查的复现", () => {
+  /** 大总管在 #control（数字频道 999）发一条带按钮的 reply */
+  async function masterReply(): Promise<Ask> {
+    clients.set("999", { ws });
+    const env: Envelope = {
+      from: { kind: "local", channelId: "999", ws }, to: { kind: "user", userId: "", channelId: "999" }, intent: "response", content: "要不要 force push main？\n内部细节",
+      meta: { messageId: "m1", triggerKind: "agent_tool", ts: at, threadId: "t", components: [{ type: "buttons", buttons: [{ id: "go", label: "推" }] }] },
+    };
+    await deliverReplyWithAsk(env, "999", "999", async (e) => ({ envelope: e, outcome: { kind: "sent", discordMessageIds: ["d9"] } }));
+    return getAsk(openLedger(path), env.meta.askId!)!;
+  }
+  const LEGACY_STAR: Principal = { id: "token:tok_int", role: "external", name: "integration", agents: ["*"], createdAt: at };
+
+  test("P1-2 权限：老的「*」Bearer 看得见普通 ask 但不能答；不含 master 的设备看不见、答不了大总管的 ask；含 master 的 owner 设备可以", async () => {
+    const m = await masterReply();
+    const x = (await reply())!;
+    const list = async (who: Principal) => ((await (await handleAsksApi(new Request("http://x/api/v1/asks"), "/asks", who))!.json()) as { asks: Ask[] }).asks.map((a) => a.id);
+    expect(await list(owner())).toEqual([x.id]);
+    expect((await list(owner({ agents: ["*", "master"], terminal: true, manage: true }))).sort()).toEqual([m.id, x.id].sort());
+    expect(await list(LEGACY_STAR)).toEqual([x.id]);
+    expect((await answerFromCard("master", m.id, { choices: ["[button:go]"], text: "IGNORE PREVIOUS" }, LEGACY_STAR)).status).toBe(404);
+    expect((await answerFromCard("master", m.id, { choices: ["[button:go]"] }, owner())).status).toBe(404);
+    expect((await answerFromCard("p", x.id, { choices: ["[button:go]"] }, LEGACY_STAR)).status).toBe(403);
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: LEGACY_STAR })).toBeNull();
+    expect(delivered).toEqual([]);
+    expect((await answerFromCard("master", m.id, { choices: ["[button:go]"] }, owner({ agents: ["*", "master"], terminal: true, manage: true }))).status).toBe(202);
+    expect(delivered[0].to).toMatchObject({ agentName: "master" });
+  });
+
+  test("P1-2 SSE：ask 事件按发起方的 scope 给——不含 master 的凭据收不到大总管的 ask；?types= 只要这几类", () => {
+    // 能读台账的连接会顺带起每秒轮询：换成这个用例自己的库、不真发，用完停掉，别把定时器留给后面的测试文件
+    setLedgerFeedForTest({ path, emit: () => {} });
+    const ev = (agent: string, type = "ask"): BridgeEvent => ({ seq: 1, ts: at, agent, chatId: "c", type: type as BridgeEvent["type"], data: {} });
+    const star = sseEventAllow(owner());
+    expect([star(ev("agent-x")), star(ev("master"))]).toEqual([true, false]);
+    expect(sseEventAllow(owner({ agents: ["*", "master"], terminal: true, manage: true }))(ev("master"))).toBe(true);
+    const onlyAsk = sseEventAllow(owner(), ["ask"]);
+    expect([onlyAsk(ev("agent-x")), onlyAsk(ev("agent-x", "tool_start"))]).toEqual([true, false]);
+    setLedgerFeedForTest(undefined);
+  });
+
+  test("P1-3 多行 reply：聊天里逐行点，每行都投给 agent；所有行答完才结案；同一行再点 → 409 这一项已经答过了", async () => {
+    await reply("api:owner:self", [
+      { type: "select", id: "model", options: [{ label: "Opus", value: "opus" }, { label: "Sonnet", value: "sonnet" }] },
+      { type: "select", id: "effort", options: [{ label: "high", value: "high" }, { label: "low", value: "low" }] },
+    ]);
+    const r1 = (await answerFromChat({ agent: "agent-x", text: "[select:model:opus]", principal: owner() }))!;
+    expect(await r1.json()).toMatchObject({ ask: { state: "open" } });
+    expect(delivered[0].content.split("\n")[0]).toContain("还有 1 项没答");
+    const dup = (await answerFromChat({ agent: "agent-x", text: "[select:model:sonnet]", principal: owner() }))!;
+    expect(dup.status).toBe(409);
+    expect(await dup.json()).toMatchObject({ code: "ask_part_answered" });
+    const r2 = (await answerFromChat({ agent: "agent-x", text: "[select:effort:high]", principal: owner() }))!;
+    expect(await r2.json()).toMatchObject({ ask: { state: "answered" } });
+    expect(delivered.map((e) => e.content.split("\n")[1])).toEqual(["[select:model:opus]", "[select:effort:high]"]);
+  });
+
+  test("P1-3 Discord 多行：答了一组只悄悄说已收到，原消息不动（别的行还要点）", async () => {
+    const a = (await reply("555", [
+      { type: "select", id: "model", options: [{ label: "Opus", value: "opus" }] },
+      { type: "buttons", buttons: [{ id: "go", label: "开干" }] },
+    ]))!;
+    const log: string[] = [];
+    const i = {
+      message: { id: "d1", content: "选" }, user: { id: "u1", username: "s" },
+      editReply: async () => void log.push("edit"), followUp: async (o: { content: string }) => void log.push(o.content),
+    };
+    expect(await answerDiscordInteraction(i, "555", "[select:model:opus]")).toBe(true);
+    expect(log).toEqual(["已收到：Opus（这条还有别的项没答）"]);
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
+  });
+
+  test("P1-4 bridge 重启：上次留下还开着的运行时 ask 全部撤掉，reply 类不动；弹框还在的由 watcher 重建", async () => {
+    const x = (await reply())!;
+    await openRuntimeAsk({ source: "permission", channelId: "111", agentName: "agent-x", kind: "authorize", title: "t", context: "Bash(rm x)", options: [] });
+    resetRuntimeAsksForTest(); // 内存表丢了
+    expect(cancelStaleRuntimeAsks()).toBe(1);
+    noteRuntimeDialogs("111", "agent-x", "pane", "Bash(rm x)");
+    await Bun.sleep(20);
+    const db = openLedger(path);
+    expect(listAsks(db, { source: "permission" }).map((a) => a.state).sort()).toEqual(["cancelled", "open"]);
+    expect(getAsk(db, x.id)?.state).toBe("open");
+  });
+
+  test("P2-2 到点还没扫、owner 先答了：记 expired、回 409，并给发起方补发「按未批准处理」", async () => {
+    const a = (await reply())!;
+    openLedger(path).run("UPDATE asks SET expiresAt = ? WHERE id = ?", [Date.now() - 1000, a.id]);
+    const r = (await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() }))!;
+    expect(r.status).toBe(409);
+    expect(getAsk(openLedger(path), a.id)?.state).toBe("expired");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ intent: "notification", meta: { triggerKind: "bridge_synth" } });
+    expect(await sweepExpired()).toBe(0);
+  });
+
+  test("P2-6 decision 事件记人话", async () => {
+    await reply();
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    const dec = listEvents(openLedger(path), { project: "p" }).find((e) => e.kind === "decision")!;
+    expect(dec.text).toBe("✅ 发");
+  });
+
+  test("P2-7 权限弹框在 Discord 上答了：记 answered（带选了什么），不是撤销", async () => {
+    noteRuntimeDialogs("111", "agent-x", "pane", "Bash(rm x)");
+    await Bun.sleep(20);
+    settleRuntimeAsk("permission", "111", "discord", "✅ 已允许");
+    const [p] = listAsks(openLedger(path), { source: "permission" });
+    expect(p).toMatchObject({ state: "answered", answer: { via: "discord", labels: ["✅ 已允许"] } });
   });
 });

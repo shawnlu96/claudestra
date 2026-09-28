@@ -29,4 +29,8 @@ export const LEDGER_DICT: Record<string, string> = {
   "已处理": "Handled",
   "已过期，按未批准处理": "Expired — treated as not approved",
   "已撤销": "Withdrawn",
+  "待你处理 · 已答 {n} 项": "Needs you · {n} answered",
+  "已提交": "Submitted",
+  "已提交给弹框": "Submitted to the dialog",
+  "已答：{s}": "Answered so far: {s}",
 };

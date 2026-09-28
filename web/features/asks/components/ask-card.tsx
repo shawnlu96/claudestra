@@ -3,10 +3,9 @@ import { useState } from "react";
 import { answerAskCard } from "@/lib/api/asks";
 import { answerAuq, answerPermission } from "@/lib/api/chat";
 import { ApiError } from "@/lib/api/client";
-import { uiAgentName } from "@/lib/chat/agents";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { useT } from "@/lib/i18n";
-import { answerSummary, closedText, spanText, type WebAsk } from "../asks-model";
+import { agentLabel, answerSummary, closedText, spanText, type WebAsk } from "../asks-model";
 import { asksStore } from "../asks-store";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
 import { ChatIcon, ClockIcon, TerminalIcon } from "./ask-icons";
@@ -21,14 +20,15 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
   const [showBody, setShowBody] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const open = ask.state === "open";
-  const agent = uiAgentName(ask.fromAgent);
+  const agent = agentLabel(ask.fromAgent, t);
+  const runtime = ask.source !== "reply";
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setNote(null);
     try {
       await fn();
-      setNote({ ok: true, text: t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) });
+      setNote({ ok: true, text: runtime ? t("已提交给弹框") : t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) });
     } catch (e) {
       const closed = e instanceof ApiError && e.status === 409;
       setNote({ ok: false, text: closed ? t("这件已经处理过了（或已过期）") : (e as Error).message });
@@ -37,6 +37,9 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
     void asksStore.refresh();
   };
   const rows = ask.options as WebComponentRow[];
+  // 权限弹框：先按键（原有端点），再补记是谁、选了什么——不然弹框消失时这条会被当成撤销
+  const pickPermission = (action: string, label: string) =>
+    run(() => answerPermission(ask.fromAgent, action).then(() => answerAskCard(ask.project, ask.id, { label }).catch(() => undefined /* 补记失败不影响按键已生效，最多记成撤销 */)));
 
   return (
     <article
@@ -65,7 +68,7 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
       {open && (
         <div className="mt-3">
           {ask.source === "reply" && (
-            <ReplyChoices rows={rows} allowText={ask.allowText} busy={busy} onAnswer={(choices, text) => run(() => answerAskCard(ask.project, ask.id, choices, text))} />
+            <ReplyChoices rows={rows} allowText={ask.allowText} busy={busy} onAnswer={(choices, text) => run(() => answerAskCard(ask.project, ask.id, { choices, text }))} />
           )}
           {ask.source === "auq" && (
             <AuqChoices
@@ -75,7 +78,9 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
               onCancel={() => run(() => answerAuq(ask.fromAgent, "cancel"))}
             />
           )}
-          {ask.source === "permission" && <PermissionChoices rows={rows} busy={busy} onPick={(a) => run(() => answerPermission(ask.fromAgent, a))} />}
+          {ask.source === "permission" && (
+            <PermissionChoices rows={rows} busy={busy} onPick={pickPermission} />
+          )}
           {ask.source === "codex" && (
             <p className="flex items-center gap-1.5 text-[13px] opacity-75">
               <TerminalIcon />
@@ -84,7 +89,7 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
           )}
         </div>
       )}
-      {!open && answerSummary(ask) && <p className="mt-2 text-[12.5px] opacity-75">{answerSummary(ask)}</p>}
+      {answerSummary(ask) && <p className="mt-2 text-[12.5px] opacity-75">{open ? t("已答：{s}", { s: answerSummary(ask) }) : answerSummary(ask)}</p>}
       {note && <p className={`mt-2 text-[12.5px] ${note.ok ? "text-success" : "text-error"}`}>{note.text}</p>}
 
       <footer className="mt-3 flex items-center gap-2 text-[12px]">

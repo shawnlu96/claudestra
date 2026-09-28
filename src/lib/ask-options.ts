@@ -3,7 +3,7 @@
  * 以及回投 wire（`[button:id]` / `[select:id:v1,v2]`，adapters.ts 的冻结合同）和选项的互认。纯函数，单测 tests/ask-options.test.ts。
  * select 的 id 允许带冒号（按钮 id 白名单 ^[\w:-]+$），所以 wire 不能先切再查，只能拿选项行去对前缀。
  */
-import { parseInlineButtons, plainLabel, toButtonRows } from "./inline-buttons.js";
+import { parseInlineButtons, plainLabel } from "./inline-buttons.js";
 import { markdownToPlain } from "./plain-text.js";
 
 interface AskButton {
@@ -37,11 +37,20 @@ function isRow(r: unknown): r is AskRow {
   return (x?.type === "select" || x?.type === "multiselect") && typeof x.id === "string" && Array.isArray(x.options) && x.options.length > 0;
 }
 
-/** components（agent 给的，形状不可信）与行内按钮合成选项行；一个能点的都没有 → [] */
+/** components（agent 给的，形状不可信）与行内按钮合成选项行；行内按钮合成一行（卡片自己换行）。一个能点的都没有 → [] */
 function askRows(text: string, components: unknown): AskRow[] {
   const rows = (Array.isArray(components) ? components : []).filter(isRow);
-  const inline = parseInlineButtons(text);
-  return inline.length ? [...rows, ...toButtonRows(inline)] : rows;
+  const inline = parseInlineButtons(text).map((b) => ({ id: b.id, label: plainLabel(b.label).slice(0, 80) || b.id, style: b.style }));
+  return inline.length ? [...rows, { type: "buttons", buttons: inline }] : rows;
+}
+
+/**
+ * 作答分组：所有按钮行算一组（按钮是「做哪件事」，agent 常为 Discord 每行 5 个的上限拆成几行），每个单选 / 多选行各算一组。
+ * 一条 ask 每组答过一次就算这组答完；所有组都答完才结案（聊天里逐行点，bug ① 的按行作答语义）。
+ */
+export function answerGroups(rows: AskRow[]): string[] {
+  const out = rows.map((r) => (r.type === "buttons" ? "buttons" : `select:${r.id}`));
+  return [...new Set(out)];
 }
 
 export interface ReplyAskDraft {
@@ -78,10 +87,18 @@ function componentIds(rows: AskRow[]): string[] {
   return rows.flatMap((r) => (r.type === "buttons" ? r.buttons.map((b) => b.id) : [r.id]));
 }
 
+/** 这些已答的 wire 之外还有几组没答（部分作答时告诉 agent「还有 N 项」） */
+export function groupsLeft(rows: AskRow[], choices: string[]): number {
+  const got = new Set(choices.map((w) => matchWire(rows, w)?.group));
+  return answerGroups(rows).filter((g) => !got.has(g)).length;
+}
+
 export interface WireMatch {
   wire: string;
   /** 给人看的：按钮 label / 选中项 label 用「、」连 */
   label: string;
+  /** 属于哪一组（answerGroups） */
+  group: string;
 }
 
 /** 一行 wire 对上这组选项 → 规范化的 wire + label；对不上（id 不在、值不在选项里、多选数量越界）→ null */
@@ -90,7 +107,7 @@ export function matchWire(rows: AskRow[], line: string): WireMatch | null {
   if (btn) {
     for (const r of rows) {
       const b = r.type === "buttons" ? r.buttons.find((x) => x.id === btn[1]) : undefined;
-      if (b) return { wire: line, label: plainLabel(b.label) || b.id };
+      if (b) return { wire: line, label: plainLabel(b.label) || b.id, group: "buttons" };
     }
     return null;
   }
@@ -102,7 +119,7 @@ export function matchWire(rows: AskRow[], line: string): WireMatch | null {
     if (!values.length || picked.some((o) => !o) || new Set(values).size !== values.length) continue;
     if (r.type === "select" && values.length !== 1) continue;
     if (r.type === "multiselect" && (values.length < (r.min ?? 1) || (r.max !== undefined && values.length > r.max))) continue;
-    return { wire: `[select:${r.id}:${values.join(",")}]`, label: picked.map((o) => o!.label).join("、") };
+    return { wire: `[select:${r.id}:${values.join(",")}]`, label: picked.map((o) => o!.label).join("、"), group: `select:${r.id}` };
   }
   return null;
 }

@@ -6,6 +6,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { EventKind } from "./ledger-stages.js";
+import { answerGroups, matchWire, type AskRow } from "./ask-options.js";
 import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
 
 export type AskKind = "decide" | "authorize" | "owner_action" | "accept";
@@ -22,14 +23,18 @@ export const ASK_TTL_MS: Record<AskKind, number> = { decide: 24 * HOUR, authoriz
 export type AskVia = "web_card" | "web_chat" | "discord" | "interact" | "terminal";
 
 export interface AskAnswer {
-  /** 回投给 agent 的 wire 行：`[button:id]` / `[select:id:v1,v2]` */
+  /** 回投给 agent 的 wire 行：`[button:id]` / `[select:id:v1,v2]`；多行 reply 逐行点时是累积的 */
   choices: string[];
+  /** choices 的人话（按钮 / 选项文字）：decision 事件、卡片、Discord 提示都用它 */
+  labels: string[];
   /** owner 另外写的话（卡片文本框 / 输入框里表单同步行之外的文字） */
   text: string;
   principal: string;
   device?: string;
   via: AskVia;
   at: number;
+  /** 卡片一次提交 = 这就是全部答案：不管还有没有没答的组都结案 */
+  final?: boolean;
 }
 
 export interface Ask {
@@ -142,22 +147,49 @@ function expireRow(db: Database, a: Ask, now: number): Ask {
   return out;
 }
 
+type AnswerOutcome = { ask: Ask; err?: "closed" | "expired_now" | "dup" };
+
+/** reply 类的逐行作答：并进已有的部分答案；这组答过了 → dup；所有组都答完（或卡片一次提交 / 只写了话）才算结案 */
+function mergeAnswer(a: Ask, next: AskAnswer): { merged: AskAnswer; done: boolean } | null {
+  if (a.source !== "reply") return { merged: next, done: true };
+  const rows = a.options as AskRow[];
+  const groupOf = (w: string) => matchWire(rows, w)?.group ?? w;
+  const prev = a.answer;
+  const had = new Set((prev?.choices ?? []).map(groupOf));
+  if (next.choices.some((w) => had.has(groupOf(w)))) return null;
+  const merged: AskAnswer = {
+    ...next,
+    choices: [...(prev?.choices ?? []), ...next.choices],
+    labels: [...(prev?.labels ?? []), ...next.labels],
+    text: [prev?.text, next.text].filter(Boolean).join("\n"),
+  };
+  const got = new Set(merged.choices.map(groupOf));
+  return { merged, done: !!next.final || next.choices.length === 0 || answerGroups(rows).every((g) => got.has(g)) };
+}
+
 /**
- * owner 作答：open → answered，同一事务里追加 decision 事件（actor = owner，data 带原话与所选）。
- * 已结案 → conflict；到点还没被扫成 expired 的，这里先记成 expired（事务照常提交）再报 conflict——在事务里抛错会把这笔回滚掉。
+ * owner 作答，同一事务里追加 decision 事件（actor = owner，text 是人话，data 带原话与所选）。多行 reply 逐行点时先记部分答案、
+ * 状态仍是 open，所有组都答完才 answered。已结案 → conflict；这组答过了 → conflict（current.dup）；
+ * 到点还没被扫成 expired 的，这里先记成 expired（事务照常提交）再报 conflict（current.expiredNow，调用方据此补发过期通知）——
+ * 在事务里抛错会把这笔回滚掉。
  */
 export function answerAsk(db: Database, id: string, answer: AskAnswer): Ask {
-  const r = tx(db, (): { ask: Ask; done: boolean } => {
+  const r = tx(db, (): AnswerOutcome => {
     const a = getAsk(db, id);
     if (!a) throw new LedgerError("not_found", `ask ${id} 不存在`);
-    if (a.state === "open" && a.expiresAt <= answer.at) return { ask: expireRow(db, a, answer.at), done: false };
-    if (a.state !== "open") return { ask: a, done: false };
-    const out = setState(db, id, "answered", answer.at, answer);
-    const text = [answer.choices.join(" "), answer.text].filter(Boolean).join("；");
-    addEvent(db, out, "decision", "owner", text || out.title, { via: answer.via, choices: answer.choices, ownerWords: answer.text, principal: answer.principal }, answer.at);
-    return { ask: out, done: true };
+    if (a.state === "open" && a.expiresAt <= answer.at) return { ask: expireRow(db, a, answer.at), err: "expired_now" };
+    if (a.state !== "open") return { ask: a, err: "closed" };
+    const m = mergeAnswer(a, answer);
+    if (!m) return { ask: a, err: "dup" };
+    const out = setState(db, id, m.done ? "answered" : "open", answer.at, m.merged);
+    const said = [answer.labels.join("；"), answer.text ? `「${answer.text}」` : ""].filter(Boolean).join(" ");
+    const data = { via: answer.via, choices: answer.choices, labels: answer.labels, ownerWords: answer.text, principal: answer.principal, partial: !m.done };
+    addEvent(db, out, "decision", "owner", said || out.title, data, answer.at);
+    return { ask: out };
   });
-  if (!r.done) throw closedError(r.ask);
+  if (r.err === "dup") throw new LedgerError("conflict", `ask ${id} 这一项已经答过了`, { state: r.ask.state, answer: r.ask.answer, dup: true });
+  if (r.err === "expired_now") throw new LedgerError("conflict", `ask ${id} 已过期`, { state: "expired", answer: r.ask.answer, expiredNow: true });
+  if (r.err) throw closedError(r.ask);
   return r.ask;
 }
 

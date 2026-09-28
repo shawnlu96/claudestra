@@ -1,6 +1,6 @@
 /** reply → ask 草稿、wire 与选项互认（lib/ask-options.ts） */
 import { describe, expect, test } from "bun:test";
-import { draftFromReply, matchWire, splitWire, type AskRow } from "../src/lib/ask-options.js";
+import { answerGroups, draftFromReply, groupsLeft, matchWire, splitWire, type AskRow } from "../src/lib/ask-options.js";
 
 const rows: AskRow[] = [
   { type: "buttons", buttons: [{ id: "release_v2_go", label: "✅ **发**" }, { id: "cancel", label: "取消" }] },
@@ -29,21 +29,31 @@ describe("draftFromReply", () => {
   test("正文里的行内按钮也算选项，排在 components 之后；按钮在标题里显示成 [文字]", () => {
     const d = draftFromReply("[[{#fwd_ok .primary}转过去]]", undefined)!;
     expect(d.options).toEqual([{ type: "buttons", buttons: [{ id: "fwd_ok", label: "转过去", style: "primary" }] }]);
+    // 行内按钮不按 5 个一行切开：卡片自己换行，作答分组也只算一组
+    const many = draftFromReply(Array.from({ length: 7 }, (_, i) => `[[{#b${i}}按钮${i}]]`).join(" "), undefined)!;
+    expect(many.options).toHaveLength(1);
     expect(d.title).toBe("[转过去]");
   });
 });
 
+test("作答分组：所有按钮行算一组，单选 / 多选各一组；groupsLeft 数还剩几组", () => {
+  expect(answerGroups(rows)).toEqual(["buttons", "select:pick", "select:m:x"]);
+  expect(answerGroups([...rows, { type: "buttons", buttons: [{ id: "more", label: "更多" }] }])).toHaveLength(3);
+  expect(groupsLeft(rows, ["[button:cancel]", "[select:pick:a]"])).toBe(1);
+  expect(groupsLeft(rows, [])).toBe(3);
+});
+
 describe("matchWire", () => {
   test("按钮：id 对上给出去掉样式的 label；不在选项里 → null", () => {
-    expect(matchWire(rows, "[button:release_v2_go]")).toEqual({ wire: "[button:release_v2_go]", label: "✅ 发" });
+    expect(matchWire(rows, "[button:release_v2_go]")).toEqual({ wire: "[button:release_v2_go]", label: "✅ 发", group: "buttons" });
     expect(matchWire(rows, "[button:nope]")).toBeNull();
   });
 
   test("单选只收一个值；多选按 min / max 与去重；id 带冒号也能认", () => {
-    expect(matchWire(rows, "[select:pick:b]")).toEqual({ wire: "[select:pick:b]", label: "乙" });
+    expect(matchWire(rows, "[select:pick:b]")).toEqual({ wire: "[select:pick:b]", label: "乙", group: "select:pick" });
     expect(matchWire(rows, "[select:pick:a,b]")).toBeNull();
     expect(matchWire(rows, "[select:pick:z]")).toBeNull();
-    expect(matchWire(rows, "[select:m:x:1, 3]")).toEqual({ wire: "[select:m:x:1,3]", label: "一、三" });
+    expect(matchWire(rows, "[select:m:x:1, 3]")).toEqual({ wire: "[select:m:x:1,3]", label: "一、三", group: "select:m:x" });
     expect(matchWire(rows, "[select:m:x:1,2,3]")).toBeNull();
     expect(matchWire(rows, "[select:m:x:1,1]")).toBeNull();
   });

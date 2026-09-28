@@ -4,14 +4,18 @@
  */
 import type { WebAsk } from "@/features/asks/asks-model";
 import { api } from "./client";
+import { followEventStream } from "./ledger";
 
 export function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; presence?: string; now: number }> {
   return api("/asks", { signal, timeoutMs: 10_000 });
 }
 
-/** 卡片作答：choices = 回投 wire（[button:id] / [select:id:v1,v2]），text = 文本框里的话。409 = 已被别处处理 / 已过期 */
-export function answerAskCard(project: string, id: string, choices: string[], text: string): Promise<{ ok: boolean }> {
-  return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/answer`, { method: "POST", json: { choices, text }, timeoutMs: 15_000 });
+/**
+ * 卡片作答：choices = 回投 wire（[button:id] / [select:id:v1,v2]），text = 文本框里的话；卡片是一次提交，bridge 按全部答完结案。
+ * 运行时弹框（权限）：按键已由 answerPermission 发过，这里只带 label 补记选了什么。409 = 已被别处处理 / 已过期
+ */
+export function answerAskCard(project: string, id: string, body: { choices?: string[]; text?: string; label?: string }): Promise<{ ok: boolean }> {
+  return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/answer`, { method: "POST", json: body, timeoutMs: 15_000 });
 }
 
 export function postPresence(visible: boolean): Promise<unknown> {
@@ -37,8 +41,7 @@ export function takeAskHint(agent: string, wire: string): string | null {
   return h && Date.now() - h.at < 10_000 ? h.askId : null;
 }
 
-/** SSE 里的 ask 事件（agent 流按会话过滤之前先截下来）→ 窗口事件，asks-store 收到就重拉 */
-export const ASK_EVENT = "cstra-ask";
-export function notifyAskEvent(): void {
-  if (typeof window !== "undefined") window.dispatchEvent(new Event(ASK_EVENT));
+/** 侧栏「待你处理」的轻量事件流：bridge 只推 ask 事件（?types=ask），收到就重拉列表 */
+export function followAskEvents(opts: { signal: AbortSignal; onOpen: () => void; onAsk: () => void }): Promise<void> {
+  return followEventStream("/events?types=ask", { signal: opts.signal, onOpen: opts.onOpen, onEvent: (e) => e.type === "ask" && opts.onAsk() });
 }

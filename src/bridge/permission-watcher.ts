@@ -37,7 +37,7 @@ import {
   type AuqQuestion,
 } from "./ask-user-question.js";
 import { emitEvent } from "./event-bus.js";
-import { noteRuntimeDialogs } from "./asks.js";
+import { noteRuntimeDialogs } from "./ask-runtime.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { controlFor } from "../lib/runtimes/index.js";

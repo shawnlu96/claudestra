@@ -24,7 +24,8 @@ export interface WebAsk {
   blocking: boolean | null;
   urgency: "normal" | "urgent";
   state: AskState;
-  answer: { choices: string[]; text: string; via: string; at: number } | null;
+  /** 多行 reply 逐行作答时，state 仍是 open、这里是已答的部分 */
+  answer: { choices: string[]; labels?: string[]; text: string; via: string; at: number } | null;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
@@ -39,8 +40,11 @@ export interface AskGroups {
   recent: WebAsk[];
 }
 
+/** 等你处理的排序：急的在前，卡活的其次，同一档里等得久的在前 */
+const rank = (a: WebAsk) => (a.urgency === "urgent" ? 0 : a.blocking === true ? 1 : 2);
+
 export function groupAsks(asks: WebAsk[]): AskGroups {
-  const open = asks.filter((a) => a.state === "open").sort((x, y) => x.createdAt - y.createdAt);
+  const open = asks.filter((a) => a.state === "open").sort((x, y) => rank(x) - rank(y) || x.createdAt - y.createdAt);
   return {
     waiting: open.filter((a) => a.kind !== "accept"),
     accept: open.filter((a) => a.kind === "accept"),
@@ -52,6 +56,29 @@ export function groupAsks(asks: WebAsk[]): AskGroups {
 export function askCounts(asks: WebAsk[]): { waiting: number; accept: number } {
   const g = groupAsks(asks);
   return { waiting: g.waiting.length, accept: g.accept.length };
+}
+
+/** 卡片 / 横幅上给人看的名字：大总管不显示内部名 */
+export function agentLabel(name: string, t: (s: string) => string): string {
+  return name === "master" ? t("大总管") : uiAgentName(name);
+}
+
+/**
+ * 作答分组（同 bridge 的 lib/ask-options.ts answerGroups）：所有按钮行算一组，每个单选 / 多选行各一组。
+ * 多行 reply 逐行作答时，答过的组锁住、别的行照样能点；bridge 也按组判「这一项答过了」。
+ */
+export function rowGroup(row: WebComponentRow): string {
+  return row.type === "buttons" ? "buttons" : `select:${row.id}`;
+}
+
+/** 已答的 wire 落在哪些组 */
+export function answeredGroups(rows: WebComponentRow[], choices: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const w of choices) {
+    if (w.startsWith("[button:")) out.add("buttons");
+    else for (const r of rows) if (r.type !== "buttons" && w.startsWith(`[select:${r.id}:`)) out.add(rowGroup(r));
+  }
+  return out;
 }
 
 /** ask 里的是 bridge 名（master / agent-xxx），聊天里的是前端会话名：都换成前端名再比 */
@@ -114,21 +141,9 @@ export function closedText(a: WebAsk, t: (s: string, p?: Record<string, string |
   return t("已撤销");
 }
 
-/** 已答的 wire 换回人话（按钮文字 / 选项文字），再接上 owner 写的话；对不上的 wire 原样给 */
+/** 答案的人话：bridge 记下的按钮 / 选项文字（老数据没有就退回 wire），再接上 owner 写的话 */
 export function answerSummary(a: WebAsk): string {
   if (!a.answer) return "";
-  const rows = (a.source === "reply" ? a.options : []) as WebComponentRow[];
-  const label = (w: string): string => {
-    for (const row of rows) {
-      if (row.type === "buttons") {
-        const b = row.buttons.find((x) => w === `[button:${x.id}]`);
-        if (b) return b.label;
-      } else if (w.startsWith(`[select:${row.id}:`)) {
-        const vals = w.slice(`[select:${row.id}:`.length, -1).split(",");
-        return vals.map((v) => row.options.find((o) => o.value === v)?.label ?? v).join("、");
-      }
-    }
-    return w;
-  };
-  return [...a.answer.choices.map(label), a.answer.text ? `「${a.answer.text}」` : ""].filter(Boolean).join("；");
+  const picked = a.answer.labels?.length ? a.answer.labels : a.answer.choices;
+  return [...picked, a.answer.text ? `「${a.answer.text}」` : ""].filter(Boolean).join("；");
 }

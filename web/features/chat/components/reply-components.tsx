@@ -36,7 +36,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
   // busy = 正在回投的那一行的 rowKey（只锁该行，不锁全条）。
   const [busy, setBusy] = useState("");
   // 每行的已答值：优先 replyClicks（新），回退老快照的单值；对应的「待你处理」已结案就整条锁住
-  const { clicks, locked, status, beforeSend } = useReplyAsk(m);
+  const { clicks, rowLocked, status, beforeSend } = useReplyAsk(m);
   if (!rows || rows.length === 0) return null;
 
   // 某一行的一次作答。rowKey 定位到行；choiceValue 存进 replyClicks 供高亮。
@@ -53,7 +53,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         const key = replyRowKey(row, ri);
         // Discord 同款语义：没答过的行一直可点（用户习惯隔几条消息再回来点）。
         // bug ① 前这里是 !!m.replyClickedId（整条消息级）——多行时答一行锁全部。
-        const rowAnswered = clicks[key] != null || locked;
+        const rowAnswered = clicks[key] != null || rowLocked(row);
         const rowBusy = busy === key;
         if (row.type === "buttons") {
           return (

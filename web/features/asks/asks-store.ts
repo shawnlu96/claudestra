@@ -1,12 +1,12 @@
 /**
  * 「待你处理」的网页状态（docs 13 §4.4）：侧栏入口、抽屉、聊天气泡上的状态都读这一份。
- * 刷新时机：挂载、SSE ask 事件（lib/api/stream.ts 转成窗口事件）、回到前台、可见时每 30 秒兜底。
+ * 刷新时机：挂载、自己那条只收 ask 的 SSE（/events?types=ask，没开会话时也实时）、回到前台、可见时每 30 秒兜底。
  * 顺带报网页可见性（POST /presence，推送规则据此判 owner 在不在）：切前台 / 后台各一次，可见时每分钟一次。
  * 凭据读不了台账（403）就当没有待办，也不再轮询。切机器由调用方换 key 重挂（start 见到新 key 先清空）。
  */
 import { useSyncExternalStore } from "react";
 import { ApiError } from "@/lib/api/client";
-import { ASK_EVENT, fetchAsks, postPresence } from "@/lib/api/asks";
+import { fetchAsks, followAskEvents, postPresence } from "@/lib/api/asks";
 import type { WebAsk } from "./asks-model";
 
 export interface AsksSnap {
@@ -84,7 +84,15 @@ export const asksStore = {
     };
     const poll = setInterval(() => visible() && void refresh(), 30_000);
     const beat = setInterval(() => visible() && presence(true), 60_000);
-    window.addEventListener(ASK_EVENT, soon);
+    const ctrl = new AbortController();
+    void (async () => {
+      // 断了就退避重连（5s → 60s）；连上先重拉一次，断线期间的变化不会丢
+      for (let wait = 5_000; !ctrl.signal.aborted; wait = Math.min(wait * 2, 60_000)) {
+        await followAskEvents({ signal: ctrl.signal, onOpen: () => ((wait = 2_500), void refresh()), onAsk: soon }).catch(() => undefined); // 断线 / 403：等一会儿再连
+        if (denied) return;
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    })();
     // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
     const onSw = (e: MessageEvent) => {
       const d = e.data as { type?: string; ask?: string };
@@ -106,7 +114,7 @@ export const asksStore = {
       if (timer) clearTimeout(timer);
       clearInterval(poll);
       clearInterval(beat);
-      window.removeEventListener(ASK_EVENT, soon);
+      ctrl.abort();
       navigator.serviceWorker?.removeEventListener("message", onSw);
       document.removeEventListener("visibilitychange", onVis);
     };

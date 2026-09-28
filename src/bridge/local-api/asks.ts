@@ -1,15 +1,16 @@
 /**
- * 「待你处理」的 HTTP 口（docs 13 §4.4）；门与台账一样是 canReadLedger（全 scope、非 peer 的 owner 凭据）：
+ * 「待你处理」的 HTTP 口（docs 13 §4.4）。门：看 = canReadLedger，大总管的 ask 另要 scope 含 master；答 = owner 本人的设备凭据
+ * （ask-entry.ts 的 canSeeAsk / canAnswerAsk）：
  *   GET  /api/v1/asks                              跨项目（侧栏计数、抽屉；大总管的 ask 只在这里，project = "master"）
  *   GET  /api/v1/ledger/:project/asks              单个项目
- *   POST /api/v1/ledger/:project/asks/:id/answer   卡片作答 {choices: wire[], text?}；已结案 409 ask_closed
+ *   POST /api/v1/ledger/:project/asks/:id/answer   卡片作答 {choices: wire[], text?}；已结案 409 ask_closed；运行时弹框只补记 {label}
  *   POST /api/v1/presence                          网页可见性 {visible}：可见时每分钟一次、切后台时一次（推送规则判 owner 在不在）
- * 运行时弹框类（AUQ / 权限）的作答仍走 POST /agents/:name/answer 的按键，这里只列出来。实时靠 SSE ask 事件，收到就重拉。
+ * 运行时弹框类（AUQ / 权限）的按键仍走 POST /agents/:name/answer，卡片按完再来这里补记是谁选了什么。实时靠 SSE ask 事件，收到就重拉。
  */
 import { canReadLedger } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { apiJson, forbidden } from "../api-respond.js";
-import { answerFromCard } from "../ask-entry.js";
+import { answerFromCard, canSeeAsk } from "../ask-entry.js";
 import { listForWeb, ownerPresence } from "../asks.js";
 
 const decode = (s: string): string | null => {
@@ -53,7 +54,7 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
   }
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
   try {
-    return apiJson(200, { ok: true, asks: listForWeb(project), presence: ownerPresence.state(), now: Date.now() });
+    return apiJson(200, { ok: true, asks: listForWeb((a) => canSeeAsk(principal, a), project), presence: ownerPresence.state(), now: Date.now() });
   } catch (e) {
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }
