@@ -55,7 +55,8 @@ async function notify(d: LedgerAuditDeps, to: string, list: readonly StoredFindi
     to: { kind: "local", channelId, ws: client.ws, cwd: client.cwd, agentName: to },
     intent: "notification",
     content: auditNoticeText(list, AUDIT_CMD),
-    meta: { messageId: newMessageId("audit"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() },
+    // waitForIdle 目前只是标记（router.ts），T13a 接进 deliverToLocal 前靠下面自己判忙 + 押后
+    meta: { messageId: newMessageId("audit"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true },
   };
   const busy = d.busy ?? (async (ch, agent) => agentMsgMustWait(await probeTurn(ch, agent, process.env.CONTROL_CHANNEL_ID || "")));
   if (await busy(channelId, to)) {

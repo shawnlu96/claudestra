@@ -7,7 +7,8 @@ import type { Database } from "bun:sqlite";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AuditAgent, AuditHeld, AuditInboxEntry, AuditSnapshot, MainTurn } from "./ledger-audit.js";
-import { getMeta, listEvents, listTasks } from "./ledger-store.js";
+import { blockedBy, depViews } from "./ledger-deps.js";
+import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
@@ -154,7 +155,9 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const perProject = projects.map((project) => {
     const byTarget = new Map<string, LedgerEvent[]>();
     for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
-    const tasks = listTasks(db, project).map((task) => ({ task, events: byTarget.get(task.id) ?? [] }));
+    const all = listTasks(db, project);
+    const deps = depViews(listDeps(db, project), all);
+    const tasks = all.map((task) => ({ task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from) }));
     return { project, meta: getMeta(db, project), tasks };
   });
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）和各项目 PM 名单（押后规则）

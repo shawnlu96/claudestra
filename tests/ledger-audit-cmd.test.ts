@@ -9,6 +9,7 @@ import type { Envelope } from "../src/bridge/router.js";
 import { projectsSlug } from "../src/lib/jsonl-cost.js";
 import { parseReviewDescription, runningReviewers } from "../src/lib/ledger-audit-reviewers.js";
 import { collectAuditSnapshots, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
+import { addDep } from "../src/lib/ledger-deps-write.js";
 import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_MIGRATIONS, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
@@ -72,6 +73,18 @@ describe("取数", () => {
     }));
     const [s] = await collectAuditSnapshots(db, [P], NOW, sources());
     expect(s.held).toEqual([{ to: PM, from: "agent-task-t9", messageId: "m1", heldAt: 5, leaseAt: 7 }]);
+  });
+
+  test("依赖：前置任务还没上线 → 后续任务带 blockedBy；前置上线后清空", async () => {
+    const owner = { actor: "owner", now: 0 };
+    createTask(db, owner, { project: P, id: "T0", title: "前置", kind: "code", agent: EXE, pm: PM, stage: "review" });
+    addDep(db, owner, { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" });
+    const blocked = (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1");
+    expect(blocked?.blockedBy).toEqual(["T0"]);
+    moveStage(db, owner, { taskId: "T0", from: "review", to: "merge" });
+    moveStage(db, owner, { taskId: "T0", from: "merge", to: "live" });
+    const freed = (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1");
+    expect(freed?.blockedBy).toEqual([]);
   });
 
   test("押后文件不存在 = 空；坏了 = null（规则不跑）", async () => {
@@ -294,7 +307,7 @@ describe("bridge 定时器", () => {
     const tick = ledgerAuditTicker(d);
     await tick();
     expect(sent.map(who)).toEqual([["deliver", "agent-pm-dispatch"], ["deliver", PM]]);
-    expect(sent[0].env).toMatchObject({ from: { kind: "bridge", label: "ledger-audit" }, intent: "notification", meta: { triggerKind: "bridge_synth" } });
+    expect(sent[0].env).toMatchObject({ from: { kind: "bridge", label: "ledger-audit" }, intent: "notification", meta: { triggerKind: "bridge_synth", waitForIdle: true } });
     expect(String(sent[1].env.content)).toContain("check_inbox");
     expect(acks).toEqual([["k1"], ["k2"]]);
     expect(sources).toEqual(["c-dis", "c-pm"]);

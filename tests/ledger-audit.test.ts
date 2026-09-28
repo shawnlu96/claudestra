@@ -183,6 +183,12 @@ describe("merge / live 没推进", () => {
     expect(only(snap({ tasks: [entered("T1", "merge", NOW - 60 * MIN)], queueFrozen: true }), "ship_stalled")).toEqual([]);
     expect(only(snap({ tasks: [entered("T1", "live", NOW - 60 * MIN)], queueFrozen: true }), "ship_stalled")).toHaveLength(1);
   });
+  test("依赖上还在等前置任务上线：merge 停着不报；前置已放行（blockedBy 空）照报；live 不看依赖", () => {
+    const merge = entered("T1", "merge", NOW - 60 * MIN);
+    expect(only(snap({ tasks: [{ ...merge, blockedBy: ["T0"] }] }), "ship_stalled")).toEqual([]);
+    expect(only(snap({ tasks: [{ ...merge, blockedBy: [] }] }), "ship_stalled")).toHaveLength(1);
+    expect(only(snap({ tasks: [{ ...entered("T1", "live", NOW - 60 * MIN), blockedBy: ["T0"] }] }), "ship_stalled")).toHaveLength(1);
+  });
   test("live 恰好 30 分钟不报，多 1ms 报", () => {
     expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.shipStallMs)] }), "ship_stalled")).toEqual([]);
     expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.shipStallMs - 1)] }), "ship_stalled")).toHaveLength(1);

@@ -23,7 +23,7 @@ The bridge stays a read-only ledger client: the timer calls `ledger audit --json
 | `executor_idle` | Task in `build` / `fix`, executor's main turn not busy, its session file unwritten for > 15 min (and ≥ 15 min in the stage), no `deliver` since entering | Ask the executor | dispatcher, else PM |
 | `deliver_not_in_review` | Task in `build` / `fix`, a `deliver` recorded **after** entering that stage > 30 min ago, no `review` event after it (a skipped review `review→merge`, a send-back to `fix`, `blocked` never fire) | Check the stage | dispatcher, else PM |
 | `pm_held` | A message to someone on the PM list has been held > 10 min **while that agent is idle**, or was claimed by `check_inbox` > 10 min ago without an ack | `check_inbox` | PM |
-| `ship_stalled` | Task in `merge` / `live` > 30 min with no `deploy` / `verify` event since; `merge` is exempt while `meta.queueFrozen` | Deploy / verify, then move the stage | PM |
+| `ship_stalled` | Task in `merge` / `live` > 30 min with no `deploy` / `verify` event since; `merge` is exempt while `meta.queueFrozen` or while a dependency still blocks the task (`ledger-deps.ts` `blockedBy`: a code predecessor counts once it is live) | Deploy / verify, then move the stage | PM |
 | `reclaim_executor` | An `agent-task-*` whose tasks are all `done` / `cancelled` for > 30 min still has a tmux window | Kill it | PM |
 | `task_agent_missing` | A task in `restate` / `build` / `review` / `fix` names an agent that is not in the registry | Reassign | PM |
 | `orphan_executor` | An `agent-task-*` in this project's registry, created > 15 min ago (session-file birth time), has no task in the ledger | Create the task or reclaim | PM |
@@ -56,9 +56,9 @@ One notification per recipient per run, from `bridge:ledger-audit`, intent `noti
 - If the recipient's main turn is running or compacting, the message goes into the held queue and arrives with the other queued messages when the turn ends. `lastMessageSource` is left alone: that turn is probably handling an owner message, and the owner must still get the completion @.
 - Otherwise it is delivered directly, and the recipient's `lastMessageSource` is set to `agent` so the Stop after handling it does not @ the owner.
 
-If the dispatcher can't be reached for 2 runs in a row, rules 1–3 go to the PM (`fallback` in the CLI output) until it is back online; the switch is logged once. Changes in `skipped` are logged once per change, so a source that stays unreadable is visible in the bridge log without repeating every run. After T11a merges, the busy check + hold should be replaced by its `meta.waitForIdle`.
+If the dispatcher can't be reached for 2 runs in a row, rules 1–3 go to the PM (`fallback` in the CLI output) until it is back online; the switch is logged once. Changes in `skipped` are logged once per change, so a source that stays unreadable is visible in the bridge log without repeating every run. Notices carry `meta.waitForIdle: true`, which is only a marker until T13a wires it into `deliverToLocal`.
 
 ## Follow-ups
 
 - **After T30 merges:** take the dispatcher from `meta.team.dispatcher` (null = no dispatcher, everything goes to the PM) instead of guessing by name; route by `currentHandler`; let rules 1 and 3 read `dispatch` events (`data.round`) before falling back to subagent descriptions; honour the `meta.team.audit` switch. Automatic escalations (`data.auto: true`) must be told apart if the audit ever counts escalations.
-- **After T8h merges:** rule 5 should skip tasks blocked by a dependency.
+- **After T13a wires `meta.waitForIdle` into delivery:** drop the busy check + hold in `ledger-audit-service.ts` and just deliver.

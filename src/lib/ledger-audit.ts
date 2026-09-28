@@ -79,8 +79,8 @@ export interface AuditInboxEntry {
 export interface AuditSnapshot {
   project: string;
   pms: readonly string[];
-  /** 本项目的任务，各自带 target = 任务 id 的事件（seq 升序） */
-  tasks: readonly { task: LedgerTask; events: readonly LedgerEvent[] }[];
+  /** 本项目的任务，各自带 target = 任务 id 的事件（seq 升序）；blockedBy = 依赖上还挡着它的前置任务（ledger-deps.ts） */
+  tasks: readonly AuditTask[];
   agents: readonly AuditAgent[] | null;
   /** 在跑的审查员审的任务（本项目各 agent 的 subagents 解析出来，任务号一律小写） */
   reviewers: readonly { taskId: string; round: number | null }[] | null;
@@ -126,14 +126,14 @@ export function auditRecipient(rule: AuditRule, pms: readonly string[]): string 
 
 const mins = (ms: number) => `${Math.floor(ms / MIN)} 分钟`;
 
-interface TaskFacts {
-  task: LedgerTask;
-  events: readonly LedgerEvent[];
+type AuditTask = { task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[] };
+
+interface TaskFacts extends AuditTask {
   /** 进入当前阶段的时刻；导入推断的近似时间 = null（不拿它判超时） */
   stageSince: number | null;
 }
 
-function facts(t: { task: LedgerTask; events: readonly LedgerEvent[] }, now: number): TaskFacts {
+function facts(t: AuditTask, now: number): TaskFacts {
   const approx = currentStageMark(t.events)?.data.approxTime === true;
   const from = stageTimeline(t.events, now).at(-1)?.from ?? null;
   return { ...t, stageSince: approx ? null : from };
@@ -182,8 +182,10 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
 }
 
 function shipStalled(ts: readonly TaskFacts[], frozen: boolean, now: number, emit: Emit): void {
-  for (const { task, events, stageSince } of ts) {
-    if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null || (frozen && task.stage === "merge")) continue;
+  for (const { task, events, stageSince, blockedBy } of ts) {
+    if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
+    // merge 停着是预期的：合并队列冻结，或依赖上还在等前置任务上线（T8h：code 上线才算满足）
+    if (task.stage === "merge" && (frozen || (blockedBy?.length ?? 0) > 0)) continue;
     const since = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
     if (now - since <= AUDIT_THRESHOLDS.shipStallMs) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
