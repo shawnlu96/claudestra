@@ -6,18 +6,21 @@
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { ownerStopOf } from "../lib/stop-words.js";
-import { preemptHeadline, stopHeadline } from "../lib/turn-cuts.js";
+import { preemptHeadline, stopHeadline, stopWaitReply } from "../lib/turn-cuts.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
 import type { PreemptResult } from "../lib/interrupt-gate.js";
 import { interruptGate } from "./interrupt-gate.js";
-import { lastAbortResult } from "./pi-abort.js";
+import { holdStopWait, lastAbortResult } from "./pi-abort.js";
 import type { Envelope } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { agentWindow, turnCuts } from "./turn-cuts.js";
 
 const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
+/** bridge.ts 接的线：清掉这个频道上 agent 间的待回账（看门狗、回程槽、在飞的 peer 调用；bridge.ts clearInterAgentPendingsForChannel） */
+let clearAgentPendings: (channelId: string) => unknown = () => undefined;
+export const setStopHooks = (h: { clearAgentPendings: typeof clearAgentPendings }) => void (clearAgentPendings = h.clearAgentPendings);
 
 function senderName(env: Envelope): string {
   return env.from.kind === "user" ? (env.from.username ?? "用户") : env.from.kind === "api" ? env.from.name : "用户";
@@ -35,11 +38,13 @@ const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(ag
  * （压掉续做提醒、Autopilot 不推进），抬头照实写打断没打断。发键失败只记日志，消息照常投递。
  * 停字和「解除叫停」只认 owner：外源（非 owner 的 API 用户）的「停」按普通消息处理，也解不开 owner 的「停」。
  */
-/** 返回这条是不是 owner 的「停」：调用方据此清掉这个频道上 agent 间的待回账（停 = owner 接管，看门狗别在停之后又把 agent 拉起来） */
-export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<boolean> {
+export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<void> {
   const { owner, stop } = ownerStopOf(env);
   if (owner) turnCuts.noteHuman(channelId, stop);
+  // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）
+  if (stop) clearAgentPendings(channelId);
   const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
+  const stopWait = stop && runtime === "pi" ? holdStopWait(env, channelId, agent) : undefined;
   const tools = toolsAt(agent, runtime);
   const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
   let r: PreemptResult = { fired: false, why: "not_allowed" };
@@ -48,22 +53,22 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   } catch (e) {
     console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
-  if (!r.fired && !stop) return false;
+  if (!r.fired && !stop) return;
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
     byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] }, interrupted: r.fired,
   });
   if (!stop) {
     env.meta.interruptNote = preemptHeadline(cut);
-    return false;
+    return;
   }
   // Pi 的中止靠扩展里的 abort()：有回执 = 真停了，等不到回执如实写「已请求」；扩展回「本来就空闲」= 没有在跑的回合
   const pi = runtime === "pi" ? lastAbortResult(channelId) : undefined;
   const outcome = r.fired ? (runtime === "pi" && pi?.result !== "aborted" ? "requested" : "fired")
     : r.why === "not_busy" || (runtime === "pi" && r.why === "no_keys") ? "not_busy" : "failed";
   env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore, r.fired ? (pi?.inEditor ?? 0) : 0);
+  stopWait?.(stopWaitReply(agent, outcome));
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
-  return true;
 }
 
 /**
@@ -76,6 +81,7 @@ export async function manualInterrupt(
   channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string } = { owner: true },
 ): Promise<{ keys: readonly string[]; deduped?: true }> {
   const tools = toolsAt(agent, runtime);
+  if (by.owner) clearAgentPendings(channelId); // 同停字：发键之前清，Pi 停下报的 Stop 不再被看门狗拿去催
   const r = await interruptGate.manual(channelId, win, runtime);
   if (r.deduped) return r; // 刚按过一次停：那一次已经记过、收过尾
   // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下

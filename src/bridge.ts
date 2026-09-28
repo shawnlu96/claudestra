@@ -175,7 +175,7 @@ import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRun
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
-import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
+import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
 import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
@@ -417,7 +417,8 @@ const pendingAgentCalls = new AgentCallBook();
  */
 const heldLocalMsgs = new HeldQueue();
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
-setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls }) });
+setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
+setStopHooks({ clearAgentPendings: (ch) => clearInterAgentPendingsForChannel(ch) }); // owner 的停：发键之前清 agent 间的待回账（bridge/preempt.ts）
 
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
@@ -834,7 +835,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const evAgent = to.agentName || agentLabelForChannel(to.channelId);
   // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
   // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占
-  if (isHumanRequest(env) && (await preemptForHuman(env, to.channelId, evAgent))) clearInterAgentPendingsForChannel(to.channelId); // owner 的停：看门狗别再催
+  if (isHumanRequest(env)) await preemptForHuman(env, to.channelId, evAgent);
   if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
   const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
   // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
@@ -2740,11 +2741,11 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // 走下面的 Stop 收尾会把等待中的 API / agent 请求按被砍的回合结算、还给 owner 发假的完成 @
     if (body.interrupt && turnCuts.keySentWithin(channelId, Date.now(), "preempt")) return new Response("ok");
 
-    // v2.22.x 补 reply 拦截(owner 2026-09-07「agent 总是忘了调 reply」):这回合有
-    // 投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在
-    // 一切 Stop 副作用(done 事件 / 停 typing / 完成 ping / drain / 清 pending)之前
-    // 返回——回合还没完。规则见 lib/reply-nudge.ts。Pi 叫停之后的第一次 Stop 不拦：拦了等于 bridge 把刚停住的 Pi 又拉起一轮（bridge/pi-abort.ts）
-    if (event === "Stop" && !stopAfterAbort(channelId)) {
+    // 补 reply 拦截:这回合有投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在一切 Stop 副作用
+    // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
+    // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
+    const afterAbort = event === "Stop" && stopAfterAbort(channelId);
+    if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
         const cands = [...pendingReplies.entries()]
@@ -2965,14 +2966,10 @@ async function handleHookRequest(req: Request): Promise<Response> {
               }
             }
 
-            // v2.0.16+ inter-agent 看门狗: 这一轮结束时如果 cid 还挂着 inter-agent
-            // 消息 pending（agent 既没 reply 也没 send_to_agent —— 大概率收到消息后
-            // 啥也没干或没报告），注一条 nudge 到它的 ws 提醒处理 + reply() 报告。
-            // v2.4.16+: 最多 nudge **1** 次（之前是 2 次，跟 drain兜底 no-text push
-            // 叠加导致 agent 反复 wake-up 抓 LLM turn，是"聊不停"的另一个根因）。
-            // 1 次未响应直接放弃，少打扰对面 + 少烧 token。
+            // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），
+            // 注一条 nudge 提醒处理 + reply() 报告。最多 nudge 1 次：多了会和 drain 兜底的 push 叠加，agent 反复被叫醒「聊不停」。
             // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错
-            const iaPending = ownTurn && event !== "StopFailure" ? pendingInterAgentMsg.get(cid) : undefined;
+            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);

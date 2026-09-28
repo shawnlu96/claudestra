@@ -7,7 +7,7 @@ import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { inputHash } from "../src/lib/program-input.js";
 import { isHumanRequest, type Envelope } from "../src/bridge/router.js";
 import {
-  completedOnlyFrom, settleBy, CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
+  completedOnlyFrom, settleBy, CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, stopWaitReply, withInterruptNote,
   transcriptUserEvent,
   type Cut, type CutEvent, type NewCutInput,
 } from "../src/lib/turn-cuts.js";
@@ -314,5 +314,14 @@ describe("transcriptUserEvent：会话记录里的 user 记录（打断标记 / 
     expect(transcriptUserEvent(txt("hi"), "codex")).toBeNull();
     expect(transcriptUserEvent(txt("hi"), "claude-code")).toMatchObject({ type: "terminal_input", data: { stop: false }, transient: true });
     expect(transcriptUserEvent(txt("[Request interrupted by user]"), "pi")).toEqual({ type: "turn_interrupted", data: {} });
+  });
+});
+
+describe("stopWaitReply（adv5 P2-1：Pi 停字自己的同步等待结成固定一句，不是 reply:null）", () => {
+  test("照实写中止回执", () => {
+    expect(stopWaitReply("agent-pi", "fired")).toContain("已叫停 agent-pi：Pi 回执：已中止当前回合");
+    expect(stopWaitReply("agent-pi", "requested")).toContain("没等到回执");
+    expect(stopWaitReply("agent-pi", "not_busy")).toContain("本来就空闲");
+    expect(stopWaitReply("agent-pi", "failed")).toContain("中止没发出去");
   });
 });

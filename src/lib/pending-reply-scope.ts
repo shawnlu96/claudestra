@@ -134,6 +134,8 @@ export interface VoidableBooks {
   pendingThreads: Map<string, unknown>;
   pendingInterAgentMsg: Map<string, { fromChannelId?: string; ts: number }>;
   pendingAgentCalls: { dropRequest(target: string, caller: string, messageId: string): void };
+  /** API 请求队列（bridge/pi-abort.ts holdStopWait 摘停字自己的同步等待） */
+  pendingApiRequests?: Map<string, ApiWait[]>;
 }
 
 /**
@@ -164,4 +166,18 @@ export function takeApiPending<T extends { messageId?: string }>(queue: T[], inR
   if (!inReplyTo) return queue.shift();
   const k = queue.findIndex((p) => p.messageId === inReplyTo);
   return k >= 0 ? queue.splice(k, 1)[0] : undefined;
+}
+
+type ApiWait = { messageId?: string; resolve?: unknown };
+
+/** 按 messageId 从各 API 队列里摘下一条在同步等待的请求（有 resolve 的），返回它和它所在队列的 key（结它之前要放回去，deliverToApi 才认领得到） */
+export function takeApiWaitById<T extends ApiWait>(queues: Map<string, T[]>, messageId: string): { key: string; p: T } | undefined {
+  for (const [key, q] of queues) {
+    const k = q.findIndex((p) => p.messageId === messageId && !!p.resolve);
+    if (k < 0) continue;
+    const [p] = q.splice(k, 1);
+    if (!q.length) queues.delete(key);
+    return { key, p };
+  }
+  return undefined;
 }

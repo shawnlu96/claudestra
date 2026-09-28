@@ -292,6 +292,15 @@ export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBef
   return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}${also}${editor}]`;
 }
 
+/** Pi 的停字自己的 API 同步等待拿到的答复（bridge/pi-abort.ts holdStopWait）：照实写中止回执，停字随后作为新一轮送到它 */
+export function stopWaitReply(agent: string, outcome: StopOutcome): string {
+  const what = outcome === "fired" ? "Pi 回执：已中止当前回合"
+    : outcome === "requested" ? "已请 Pi 中止当前回合，没等到回执"
+    : outcome === "not_busy" ? "它本来就空闲，没有在跑的回合"
+    : "中止没发出去，它可能还在跑";
+  return `[⏹ bridge] 已叫停 ${agent}：${what}。这条「停」随后作为新一轮送到它。`;
+}
+
 /** 押在叫停之前、叫停之后才送到的消息（忙时作答的 ask 答复、agent 请求）的抬头：它不是「停之后用户又让你做」 */
 export function heldAcrossStopNote(heldAt: number, stopAt: number): string {
   const [h, s] = [hhmmss(heldAt).slice(0, 5), hhmmss(stopAt).slice(0, 5)];

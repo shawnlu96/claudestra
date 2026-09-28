@@ -10,7 +10,7 @@ import { emitEvent } from "./event-bus.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
-import { dropVoidedPendings, type VoidableBooks } from "../lib/pending-reply-scope.js";
+import { dropVoidedPendings, takeApiWaitById, type VoidableBooks } from "../lib/pending-reply-scope.js";
 
 type Socket = { send(data: string): void };
 interface EchoDeps {
@@ -73,6 +73,25 @@ export const lastAbortResult = (channelId: string): { result: AbortResult; inEdi
 export function stopAfterAbort(channelId: string, now = Date.now()): boolean {
   const at = abortedAt.get(channelId);
   return abortedAt.delete(channelId) && at !== undefined && now - at < ABORT_STOP_MS;
+}
+
+/**
+ * Pi 的停字自己的 API 同步等待：叫停引起的那次 Stop 会把挂着的 API 请求按空答复结掉，连这条「停」也算进去（adv5 P2-1），
+ * 所以发中止之前先从账上摘下，停完调返回的函数结成一句固定的「已叫停」（lib/turn-cuts.ts stopWaitReply）。
+ * 没有同步等待（网页 wait:0）就不摘：它照常看 agent 自己的回复。
+ */
+export function holdStopWait(env: Envelope, channelId: string, agent: string): ((text: string) => void) | undefined {
+  const queues = echo?.books().pendingApiRequests;
+  if (!echo || !queues || env.from.kind !== "api") return undefined;
+  const got = takeApiWaitById(queues, env.meta.messageId);
+  if (!got) return undefined;
+  const d = echo, { tokenId, name } = env.from, to: Endpoint = { kind: "api", tokenId, name };
+  return (text) => {
+    queues.set(got.key, [...(queues.get(got.key) ?? []), got.p]); // 放回去再投：deliverToApi 按 inReplyTo 认领它
+    const from: Endpoint = { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> };
+    const meta = { messageId: newMessageId("stopped"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: env.meta.messageId };
+    void d.deliver({ from, to, intent: "response", content: text, meta }).catch((e: Error) => console.error(`⚠️ 「已叫停」答复发给 ${name} 失败: ${e.message}`));
+  };
 }
 
 /** 请 Pi 扩展中止当前回合：真中止了 / 没回执 = ["abort"]，本来就空闲 = []；没连着、扩展太旧不会中止 = 抛错（调用方如实回报，不说「已打断」） */
