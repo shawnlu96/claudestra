@@ -71,12 +71,15 @@ CREATE TABLE meta (
 /**
  * 依赖边 + 负责人类型（T8h）。when / from / to 是 SQL 关键字，列名用 cond / fromTask / toTask，行映射成 when / from / to。
  * 旧任务有 agent 的回填成 assigneeKind=agent；两端都要是已有任务、不许自环，环与同项目在写入层判（ledger-deps-write.ts）。
+ * 每一步都可重跑（PM 定的迁移规矩）：版本号撞过、表或列已在时照样走通。SQLite 的 ADD COLUMN 没有 IF NOT EXISTS，先查列再加。
  */
-const SCHEMA_DEPS = `
-ALTER TABLE tasks ADD COLUMN assigneeKind TEXT CHECK (assigneeKind IN ('agent','human','peer_agent'));
-ALTER TABLE tasks ADD COLUMN assignee TEXT;
-UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE agent IS NOT NULL AND agent != '';
-CREATE TABLE task_deps (
+function migrateDeps(db: Database): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
+  if (!cols.has("assigneeKind")) db.exec("ALTER TABLE tasks ADD COLUMN assigneeKind TEXT CHECK (assigneeKind IN ('agent','human','peer_agent'))");
+  if (!cols.has("assignee")) db.exec("ALTER TABLE tasks ADD COLUMN assignee TEXT");
+  db.exec(`
+UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE assigneeKind IS NULL AND agent IS NOT NULL AND agent != '';
+CREATE TABLE IF NOT EXISTS task_deps (
   project TEXT NOT NULL,
   fromTask TEXT NOT NULL REFERENCES tasks(id), toTask TEXT NOT NULL REFERENCES tasks(id),
   kind TEXT NOT NULL CHECK (kind IN ('blocks','branch')),
@@ -85,17 +88,20 @@ CREATE TABLE task_deps (
   rev INTEGER NOT NULL DEFAULT 1, createdBy TEXT NOT NULL,
   createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
   PRIMARY KEY (fromTask, toTask), CHECK (fromTask <> toTask));
-CREATE INDEX task_deps_to ON task_deps(toTask);
-CREATE INDEX task_deps_project ON task_deps(project);
-`;
+CREATE INDEX IF NOT EXISTS task_deps_to ON task_deps(toTask);
+CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project);
+`);
+}
 
-/** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方改号即可，常量都由下标算） */
-export const LEDGER_MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_DEPS];
+/** 一步迁移：一段 SQL，或要先查现状的函数（如加列） */
+type Migration = string | ((db: Database) => void);
+/** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateDeps];
 const MIGRATIONS = LEDGER_MIGRATIONS;
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
 /** 从这个版本起库里有 task_deps 与 assignee 列：bridge 读到还没被 CLI 迁移的旧库时据此跳过 */
-export const DEPS_SCHEMA_VERSION = MIGRATIONS.indexOf(SCHEMA_DEPS) + 1;
+export const DEPS_SCHEMA_VERSION = MIGRATIONS.indexOf(migrateDeps) + 1;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -165,7 +171,9 @@ function migrate(db: Database): void {
   if (schemaVersion(db) >= MIGRATIONS.length) return;
   db.transaction(() => {
     for (let v = schemaVersion(db); v < MIGRATIONS.length; v++) {
-      db.exec(MIGRATIONS[v]);
+      const step = MIGRATIONS[v];
+      if (typeof step === "string") db.exec(step);
+      else step(db);
       db.exec(`PRAGMA user_version = ${v + 1}`);
     }
   }).immediate();

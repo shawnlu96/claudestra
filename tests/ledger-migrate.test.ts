@@ -16,7 +16,7 @@ function tmp(): { dir: string; path: string } {
 function makeV1(path: string): void {
   const raw = new Database(path);
   raw.exec("PRAGMA journal_mode = WAL");
-  raw.exec(LEDGER_MIGRATIONS[0]);
+  raw.exec(LEDGER_MIGRATIONS[0] as string);
   raw.exec("PRAGMA user_version = 1");
   const ins = raw.prepare("INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt) VALUES (?, 'p', ?, 'code', ?, ?, 0, 0)");
   ins.run("T1", "有人", "build", "agent-exec");
@@ -63,6 +63,25 @@ describe("v1 → 依赖边版本", () => {
       expect([getTask(db, "T2")?.assigneeKind, getTask(db, "T2")?.assignee]).toEqual([null, null]);
       expect(getTask(db, "T3")?.assigneeKind).toBeNull();
       expect(listDeps(db, "p")).toEqual([]);
+      closeLedger(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("迁移可重跑：已有 task_deps 与 assignee 列、版本号却被退回 1（撞号），再打开照样走通，边与已设的负责人不被覆盖", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const db = openLedger(path);
+      db.exec("INSERT INTO task_deps (project, fromTask, toTask, kind, cond, createdBy, createdAt, updatedAt) VALUES ('p', 'T1', 'T2', 'blocks', 'x', 'owner', 0, 0)");
+      db.exec("UPDATE tasks SET assigneeKind = 'human', assignee = 'local:owner:self', agent = NULL WHERE id = 'T1'");
+      db.exec("PRAGMA user_version = 1");
+      closeLedger(path);
+      const again = openLedger(path);
+      expect(schemaVersion(again)).toBe(LEDGER_SCHEMA_VERSION);
+      expect(listDeps(again, "p").map((d) => [d.from, d.to])).toEqual([["T1", "T2"]]);
+      expect([getTask(again, "T1")?.assigneeKind, getTask(again, "T1")?.assignee]).toEqual(["human", "local:owner:self"]);
       closeLedger(path);
     } finally {
       rmSync(dir, { recursive: true, force: true });
