@@ -13,6 +13,7 @@
 import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
+import { apiMirrorBody, withAttachmentLines } from "../lib/inbound-body.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
 import {
@@ -1239,8 +1240,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const form = await req.formData();
         text = String(form.get("text") || "");
         waitSec = Number(form.get("wait") || 0);
-        const inboxDir = INBOX_DIR;
-        await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
+        await Bun.spawn(["mkdir", "-p", INBOX_DIR]).exited;
         // 不用 `f is File` 类型谓词：Bun 的全局 File 与 node:buffer 的 File 在类型
         // 上不兼容（缺 webkitRelativePath/slice），谓词写法会被 tsc 拒。运行时判据
         // 仍是 instanceof File，只是把窄化交给 typeof 排除字符串项。
@@ -1250,7 +1250,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
-          const dest = `${inboxDir}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;
+          const dest = `${INBOX_DIR}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;
           await Bun.write(dest, f);
           attachments.push(dest);
         }
@@ -1332,7 +1332,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}) },
       to: { kind: "local", agentName: agent.name, channelId: agent.channelId, ws: client.ws as any, cwd: client.cwd },
       intent: "request",
-      content: text,
+      content: withAttachmentLines(text, attachments), // 附件照 Discord 入口写进正文：Pi 只认正文，历史/直播靠它还原缩略图
       meta: {
         messageId: `api_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         triggerKind: "system",
@@ -1367,8 +1367,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     }
 
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
-    // R2 入站镜像
-    deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${text}`).catch(() => {});
+    // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
+    deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
     deps.startTypingWithSafety(agent.channelId);
     // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
     deps.lastMessageSource.set(agent.channelId, "agent");
