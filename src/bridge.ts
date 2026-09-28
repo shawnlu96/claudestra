@@ -175,7 +175,9 @@ import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRun
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
-import { interruptGate } from "./bridge/interrupt-gate.js";
+import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
+import { resumeNoticeEnv, turnCuts } from "./bridge/turn-cuts.js";
+import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
@@ -794,7 +796,6 @@ function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, still
 
 /** 只经 deliverLocalInOrder 调用 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
   // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer 回复」——Stop 不该
@@ -833,25 +834,15 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     meta.attachments = env.meta.attachments.join(";");
   }
   const evAgent = to.agentName || agentLabelForChannel(to.channelId);
-  // ── 人类连发抢占（owner 2026-07-14:「后一条消息应该直接打断前一条,优先处理
-  // 后面的,这样用户可以随时补充」）──目标正在回合中时,先 C-c 掐掉当前回合再投递:
-  // 上下文都在,agent 带着前一条的进度优先响应补充,而不是把补充压到回复之后。
-  // 只对人类的 request 生效(Discord user / API user);agent↔agent、peer、bridge
-  // 系统消息、response 回执不抢占目标的工作。
-  // 判忙、冷却、串行都在 interruptGate(lib/interrupt-gate.ts):只看主回合、压缩中和 Pi / Codex 不打断,打断后等 CC 收尾一拍。
-  // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,C-c 掐断本机正跑的回合等于让外机打断本机用户的活
-  if ((env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request") {
-    try {
-      await interruptGate.preempt(to.channelId, evAgent);
-    } catch (e) {
-      console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
-    }
-  }
+  // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
+  // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占
+  if (isHumanRequest(env)) await preemptForHuman(env, to.channelId, evAgent);
+  const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
   // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
-  const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
+  const busy = compactingNow || ((env.from.kind === "local" || !!env.meta.waitForIdle) && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
@@ -862,6 +853,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    turnCuts.noteDelivered(env, to.channelId);
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
     const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId };
@@ -1063,6 +1055,8 @@ async function forwardReplyToAgentClaude(
  * 对应的 header 模板。这一处统一做，messageCreate 不再就地拼 header。
  */
 async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
+  const note = env.meta.interruptNote; // 打断抬头放在来源头之后、正文之前(lib/turn-cuts.ts withInterruptNote)
+  if (note) return withInterruptNote(await renderContentForLocal({ ...env, meta: { ...env.meta, interruptNote: undefined } }), note);
   const from = env.from;
 
   // bridge 系统消息（notifyMaster 广播 / hook 事件文字 等）：原样投递，不加
@@ -1460,15 +1454,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
 
   if (!content) return;
 
-  // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
+  // 抢占(agent 在忙先打断)在下面 deliver → deliverToLocal 里做,与 Web / API 同一道
   {
-    try {
-      // 与 deliverToLocal 那道是同一个闸（interruptGate）：这里打断了，那边在冷却期内不会再发第二次 C-c
-      await interruptGate.preempt(channelId, await agentLabelForChannelAsync(channelId));
-    } catch (e) {
-      console.log(`⚠️ Discord 入站抢占失败,按常规投递: ${(e as Error).message}`);
-    }
-
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
     // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
     // drain兜底 / nudge，把用户刚说的 "停下来" 拽回 agent-to-agent 链里去。
@@ -1852,6 +1839,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         if (!fromChannelId && typeof msg.fromChannelId === "string") {
           fromChannelId = msg.fromChannelId;
         }
+        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId); // 打断收尾提醒据此列「还没回复」
         if (!fromChannelId) {
           // 认不出来源就明确失败,绝不静默投给 "?"。
           ws.send(JSON.stringify({
@@ -2741,7 +2729,7 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
@@ -2781,6 +2769,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         updateStatsDashboard(discord);
         // v2.6.0+ 事件埋点：turn 结束（在去抖/通知判断之前 —— 事件流忠实反映 hook）
         const evAgent = await agentLabelForChannelAsync(channelId);
+        if (body.interrupt) onCodexInterrupt(channelId, evAgent); // Codex 被打断(typing-hook 报成 StopFailure):先记 cut 再置 done
         // v2.20.2+ 回合结束≠任务完成:后台还有活(subagent/bg shell)时带上
         // bgPending,web 端把绿勾换成「后台继续中」(owner 实报提前完成误导)
         const bgPending = hasActiveBgActivities(evAgent);
@@ -2788,6 +2777,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
         // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
         void maybeHealRotatedSession(channelId);
+        // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
+        const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event);
+        if (cutNotice) heldLocalMsgs.holdEnv(resumeNoticeEnv(channelId, evAgent, cutNotice));
         // v2.21.1+ 回合结束 → 投递押后的 agent→agent 消息(2s 让 TUI 回到提示符)
         if (heldLocalMsgs.get(channelId)?.length) {
           setTimeout(() => void flushHeldLocalMsgs(channelId, "stop"), 2000);

@@ -56,11 +56,12 @@ export { BLOCKING_DIALOG_RE, CODEX_READY_OPTION, OCCUPIED_RE } from "./codex-rea
 /**
  * bridge 侧的约束：
  * - 空闲的 Codex 收到一次 C-c 会在 0.8s 内直接退出（2026-09-23 实测），打断只能发 Esc
- * - `codex queue` 对忙着的线程是排到下一轮（不插进当前回合），不需要也不该抢占
+ * - `codex queue` 对忙着的线程是排到下一轮（不插进当前回合），所以人类消息到达时先 Esc 打断、再排进去，
+ *   和 CC 一样即时生效（owner 2026-09-28 拍板；Codex 自己会提示被中断的命令可能部分执行）
  */
 export const CODEX_CONTROL: RuntimeControl = {
   interruptKeys: ["Escape"],
-  preemptOnHumanMessage: false,
+  preemptOnHumanMessage: true,
   idleSource: "hook",
   modelEnforcement: "launch-flag",
   paneHeuristics: false,

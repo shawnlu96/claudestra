@@ -282,16 +282,16 @@ const CHANNEL_WRAP_RE = /^\s*<channel\s+([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/channel
  * 剥掉 bridge renderContentForLocal 注入的 framing header：正文开头的
  * [🌐 …] / [🤖 …] 方括号块是给 agent 的路由/行为指示，不是用户输入。header 内可能
  * 出现 "]"（如 [DIRECT] 标记），所以用 "]\n\n" 或行尾 "]" + 空行做块边界，而不是
- * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。
+ * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。来源头后面可能还跟一块打断抬头
+ * （⚡ / ⏹，lib/turn-cuts.ts withInterruptNote），所以逐块剥。
  */
 function stripChannelHeader(body: string): string {
-  if (!/^\[(🌐|🤖|🤝|📢|📣)/.test(body)) return body;
-  // header 块与正文用空行分隔——兼容 LF 与 CRLF（L7：CRLF jsonl 下 "]\n\n" 匹配不到
-  // 会把 framing 头留在正文）。仍要求"]"+空行做边界，不用单个换行（正文里可能出现
-  // "]\n"，会误切）。
+  if (!/^\[(🌐|🤖|🤝|📢|📣|⚡|⏹)/.test(body)) return body;
+  // header 块与正文用空行分隔，兼容 LF 与 CRLF（L7：CRLF 下 "]\n\n" 匹配不到会把 framing 头留在正文）。
+  // 仍要求"]"+空行做边界，不用单个换行（正文里可能出现 "]\n"，会误切）。
   const m = body.match(/]\r?\n\r?\n/);
   if (!m || m.index === undefined) return body;
-  return body.slice(m.index + m[0].length).trim();
+  return stripChannelHeader(body.slice(m.index + m[0].length).trim());
 }
 
 /** attachment 记录是否为「被队列吸收的用户消息」,是则返回原始 prompt(含 channel 包装)。 */

@@ -204,14 +204,15 @@ export function mapPiToolCall(name: string, args: unknown): { name: string; inpu
  * 重复。这里把它**还原成 Claude Code 的 <channel> 形状**，后面的解包 / 剥头 / 作者标签
  * 就全部复用既有逻辑（session-history.unwrapChannelMessage + stripChannelHeader）。
  */
-const BRIDGE_INBOUND_RE = /^\s*\[(🌐|🤖|🤝|📢|📣)[^\]]*\]/;
+const BRIDGE_INBOUND_RE = /^\s*\[(🌐|🤖|🤝|📢|📣|⚡|⏹)[^\]]*\]/;
 
 export function wrapPiInboundAsChannel(text: string): string {
   if (!BRIDGE_INBOUND_RE.test(text)) return text;
   // header 块与正文之间必有空行（bridge 的拼装方式）；没有就当普通消息
   if (!/\]\r?\n\r?\n/.test(text)) return text;
   const head = text.split(/\]\r?\n\r?\n/)[0];
-  const from = /[「"]([^」"]+)[」"]/.exec(head)?.[1] ?? "";
+  // 打断抬头（⚡ / ⏹）里的「」是命令和消息摘录，不是发送者
+  const from = /^\s*\[(⚡|⏹)/.test(head) ? "" : /[「"]([^」"]+)[」"]/.exec(head)?.[1] ?? "";
   return `<channel source="claudestra"${from ? ` user="${from}"` : ""}>\n${text}\n</channel>`;
 }
 

@@ -138,6 +138,10 @@ export interface Envelope {
     skipInterAgentWatchdog?: boolean;
     /** 这条是「转交」过来的用户消息（bridge/forward.ts）：接手方不能再转，防来回踢皮球 */
     forwarded?: boolean;
+    /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
+    interruptNote?: string;
+    /** 目标主回合在跑就押到空闲再投（与 agent→agent 同规则）：打断收尾提醒用，回合中裸发会落进丢弃窗口 */
+    waitForIdle?: boolean;
   };
 }
 

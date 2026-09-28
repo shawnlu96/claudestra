@@ -36,17 +36,19 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
   return {
     /**
      * 人类消息到达：目标主回合在跑就打断并等收尾，返回是否打断了。只看 main==="busy"：只剩后台 subagent 时 C-c 会把它们全停掉；
-     * 压缩中不打断（会掐掉压缩）；Pi / Codex 不打断（preemptOnHumanMessage=false，消息 steer / 排进回合）。
+     * 压缩中不打断（会掐掉压缩）；Pi 不打断（preemptOnHumanMessage=false，消息 steer 进回合）。
+     * stop（停字）：人明确要停——不看 preemptOnHumanMessage（Pi 也打断），冷却按手动的最小间隔（刚抢占完紧接着说「停」必须生效），
+     * 判据失效（unknown）也发键；只有确认空闲或压缩中才不发。
      */
-    preempt(channelId: string, agent: string): Promise<boolean> {
+    preempt(channelId: string, agent: string, opts: { stop?: boolean } = {}): Promise<boolean> {
       return serial(channelId, async () => {
         // 刚打断过（抢占或手动）就不再打：连发的补充消息不叠加打断，也不会离上一次发键太近
-        if (sinceKey(channelId) <= cooldownMs) return false;
+        if (sinceKey(channelId) <= (opts.stop ? MANUAL_GAP_MS : cooldownMs)) return false;
         const { win, runtime } = await deps.resolve(channelId);
-        if (!win || !controlFor(runtime).preemptOnHumanMessage) return false;
+        if (!win || (!opts.stop && !controlFor(runtime).preemptOnHumanMessage)) return false;
         const { main } = await deps.probe(win, runtime, agent);
-        if (main === "unknown") console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
-        if (main !== "busy") return false;
+        if (main === "unknown" && !opts.stop) console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
+        if (main !== "busy" && !(opts.stop && main === "unknown")) return false;
         lastKeyAt.set(channelId, now());
         await deps.interrupt(win, runtime);
         deps.onPreempted(agent, channelId);

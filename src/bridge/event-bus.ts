@@ -10,6 +10,7 @@
  * - schema additive-only：BridgeEvent 只加字段不删不改语义（对前端作者的
  *   兼容承诺，设计 D7）。
  */
+import { inflightFrom } from "../lib/turn-cuts.js";
 
 export type BridgeEventType =
   | "tool_start"
@@ -210,6 +211,11 @@ export function replayEventsSince(
   }
   out.sort((a, b) => a.seq - b.seq);
   return out;
+}
+
+/** 打断那一刻本回合还在跑的工具和最后做完的一步（打断记录用，扫的是这个 agent 的环形缓冲，规则见 lib/turn-cuts.ts） */
+export function inflightTools(agent: string): ReturnType<typeof inflightFrom> {
+  return inflightFrom(rings.get(agent) ?? []);
 }
 
 /** 当前订阅者数量（测试/诊断用） */

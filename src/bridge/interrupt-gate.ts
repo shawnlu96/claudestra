@@ -4,9 +4,7 @@
  */
 import { createInterruptGate } from "../lib/interrupt-gate.js";
 import { recordMetric } from "../lib/metrics.js";
-import { readRegistryAgents } from "../lib/registry.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
-import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
 import { emitEvent } from "./event-bus.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
 
@@ -24,11 +22,3 @@ export const interruptGate = createInterruptGate({
   },
   sleep: (ms) => Bun.sleep(ms),
 });
-
-/** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
-export async function interruptAgentByName(name: string, channelId: string): Promise<{ keys: readonly string[]; deduped?: true }> {
-  const isMaster = name === "master" || name === "0";
-  const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就当 CC 发 C-c：人要停，宁可发
-  const runtime = regs.find((a) => a.name === name)?.runtime;
-  return interruptGate.manual(channelId, isMaster ? `${MASTER_SESSION}:0` : windowTarget(name), runtime);
-}

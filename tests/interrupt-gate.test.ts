@@ -55,12 +55,19 @@ describe("preempt：人类消息抢占", () => {
     }
   });
 
-  test("Pi / Codex 不抢占：连画面都不看", async () => {
-    for (const runtime of ["pi", "codex"]) {
-      const h = harness({ runtime });
-      expect(await h.gate.preempt("ch", "agent-a")).toBe(false);
-      expect(h.probes()).toBe(0);
-    }
+  test("Pi 不抢占（消息 steer 进回合）：连画面都不看", async () => {
+    const h = harness({ runtime: "pi" });
+    expect(await h.gate.preempt("ch", "agent-a")).toBe(false);
+    expect(h.probes()).toBe(0);
+  });
+
+  test("Codex 来了就打断（owner 09-28 拍板）：主回合在跑发 Esc，空闲不发", async () => {
+    const h = harness({ runtime: "codex" });
+    expect(await h.gate.preempt("ch", "agent-a")).toBe(true);
+    expect(h.keys).toEqual(["Escape"]);
+    const idle = harness({ runtime: "codex", main: "idle" });
+    expect(await idle.gate.preempt("ch", "agent-a")).toBe(false);
+    expect(idle.keys).toEqual([]);
   });
 
   test("两条人类消息几乎同时到（判忙中间有 await）：只发一次 C-c", async () => {
@@ -101,6 +108,36 @@ describe("preempt：人类消息抢占", () => {
     expect(first.status).toBe("rejected");
     expect(second).toEqual({ status: "fulfilled", value: true });
     expect(keys).toEqual(["C-c"]);
+  });
+});
+
+describe("preempt stop：停字", () => {
+  test("Pi 平时不抢占，停字照样发 C-c；Codex 发 Esc", async () => {
+    const pi = harness({ runtime: "pi" });
+    expect(await pi.gate.preempt("ch", "agent-a", { stop: true })).toBe(true);
+    expect(pi.keys).toEqual(["C-c"]);
+    const cx = harness({ runtime: "codex" });
+    expect(await cx.gate.preempt("ch", "agent-a", { stop: true })).toBe(true);
+    expect(cx.keys).toEqual(["Escape"]);
+  });
+
+  test("刚抢占完 2s 紧接着说「停」：不被 4s 冷却吞掉；1.5s 内才去重", async () => {
+    const h = harness();
+    await h.gate.preempt("ch", "agent-a");
+    h.advance(1_000);
+    expect(await h.gate.preempt("ch", "agent-a", { stop: true })).toBe(false);
+    h.advance(1_000);
+    expect(await h.gate.preempt("ch", "agent-a", { stop: true })).toBe(true);
+    expect(h.keys).toEqual(["C-c", "C-c"]);
+  });
+
+  test("判据失效（unknown）也发键；确认空闲 / 压缩中不发", async () => {
+    expect(await harness({ main: "unknown" }).gate.preempt("ch", "a", { stop: true })).toBe(true);
+    for (const m of ["idle", "compacting"] as const) {
+      const h = harness({ main: m });
+      expect(await h.gate.preempt("ch", "a", { stop: true })).toBe(false);
+      expect(h.keys).toEqual([]);
+    }
   });
 });
 

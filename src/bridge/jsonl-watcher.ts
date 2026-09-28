@@ -597,13 +597,12 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
           if (!Array.isArray(content)) continue;
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
+              // 并行调用的每个 tool_use 各占一条 jsonl，新一条会清空 state.tools：前面几个的结果在这里找不到，
+              // 但它们的 tool_start 已经发过——tool_done 照发（网页工具卡和打断记录都靠它判「做完了」）
               const tool = state.tools.find((t) => t.id === block.tool_use_id);
-              if (tool && !tool.done) {
-                tool.done = true;
-                tool.error = !!block.is_error;
-                toolsChanged = true;
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_done", data: { toolId: block.tool_use_id, error: tool.error } });
-              }
+              if (tool?.done) continue;
+              if (tool) [tool.done, tool.error, toolsChanged] = [true, !!block.is_error, true];
+              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_done", data: { toolId: block.tool_use_id, error: !!block.is_error } });
             }
           }
         }

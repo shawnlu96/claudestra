@@ -170,7 +170,7 @@ export type ReadyResult =
 export interface RuntimeControl {
   /** 打断当前回合发什么键。CC / Pi 是 C-c；空闲 Codex 收到 C-c 会直接退出 */
   interruptKeys: readonly string[];
-  /** 人类消息到达且目标在忙时，是否先打断再投递（Pi 能 steer 进回合，不打断） */
+  /** 人类消息到达且目标在忙时，是否先打断再投递（Pi 能 steer 进回合，不打断；停字不看这个，三种运行时都打断） */
   preemptOnHumanMessage: boolean;
   /** 忙闲信号从哪来：pane = 看屏幕文案；hook = 只信回合结束上报（isAgentIdle 恒答空闲） */
   idleSource: "pane" | "hook";
