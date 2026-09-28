@@ -15,8 +15,9 @@ import { readRegistryAgents } from "../../lib/registry.js";
 import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity } from "../../lib/web-push.js";
 import { openWebState } from "../../lib/web-state.js";
 import { subscribeEvents } from "../event-bus.js";
+import type { Delivery, Envelope } from "../router.js";
 import { relayClient } from "../relay-link.js";
-import { createDispatcher, OWNER_CHAT_ID, ownerChatIds, type Dispatcher } from "./dispatcher.js";
+import { createDispatcher, OWNER_CHAT_ID, ownerChatIds, type Dispatcher, type NoticeOutcome } from "./dispatcher.js";
 import { configurePushRoutes } from "./routes.js";
 import { createPushSender, type DirectBackends } from "./sender.js";
 
@@ -26,6 +27,12 @@ let dispatcherRef: Dispatcher | null = null;
 /** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身） */
 export function pushOwnerNotice(title: string, body: string): void {
   dispatcherRef?.notice({ title, body }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
+}
+/**
+ * 要知道送没送到的系统提醒（订阅额度快过期：失败的渠道要单独重试）。推送子系统没起来（沙箱 / 启动前）→ null。
+ */
+export async function pushOwnerNoticeTracked(title: string, body: string): Promise<NoticeOutcome | null> {
+  return dispatcherRef ? dispatcherRef.notice({ title, body }) : null;
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 let started = false;
@@ -43,7 +50,8 @@ function directBackends(): DirectBackends {
   return { vapidPublicKey: vapid?.publicKey ?? null, webPush: vapid ? webPushSender(vapid) : null, apns: apns.config ? new ApnsClient(apns.config) : null };
 }
 
-export function initPush(): void {
+/** deliver：订阅额度提醒的 Discord 渠道要用（quota-service.ts）；额度提醒依赖推送，随推送一起起、沙箱里一起不起 */
+export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   if (started || sandboxDisabled("推送")) return; // 沙箱不发 APNs / Web Push；/api/v1/push 路由也就不挂（lib/sandbox.ts）
   started = true;
   const db = openWebState();
@@ -65,4 +73,9 @@ export function initPush(): void {
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");
+  if (!deliver) return;
+  // 动态 import：额度服务拖着全机用量子进程与 bridge/config，推送的单测不该为它付加载代价
+  void import("../quota-service.js")
+    .then((q) => q.startQuotaService({ push: pushOwnerNoticeTracked, discord: q.controlChannelSender(deliver) }))
+    .catch((e) => console.error(`⚠️ 订阅额度服务没起来（看板退回本机数据）: ${(e as Error).message}`));
 }

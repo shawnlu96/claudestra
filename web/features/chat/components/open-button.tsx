@@ -4,15 +4,7 @@ import type { AgentSession } from "../type";
 import { openLocal, useHostInfo } from "../host-info";
 import { menuLabel } from "./menu-shell";
 import { closeDropdown } from "./agent-actions";
-
-/** 打开目录：lucide folder-open */
-function FolderOpenIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
-    </svg>
-  );
-}
+import { FolderOpenIcon } from "./line-icons";
 
 /**
  * 会话顶栏的「打开」下拉（owner 2026-09-25「在会话详情顶部的 header 上，增加一个 Open 图标，点击是下拉菜单」）：
@@ -36,7 +28,7 @@ export function OpenButton({ agent }: { agent: AgentSession }) {
   return (
     <div className="dropdown dropdown-end">
       <div tabIndex={0} role="button" aria-label={t("打开目录")} title={t("打开目录")} className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content">
-        <FolderOpenIcon />
+        <FolderOpenIcon size={15} />
       </div>
       <ul tabIndex={0} className="dropdown-content menu z-50 mt-1 w-52 rounded-box border border-base-300 bg-base-100 p-1 shadow-lg">
         {files.map((o) => (

@@ -6,7 +6,7 @@
  */
 import { apiAgentName } from "@/lib/chat/agents";
 import { SSE_DONE, type AnchoredStreamEvent } from "@/lib/chat/events";
-import { agentNameVariants, bgReplayEvents, frameData, pendingEvents, translate, type BridgeEvent, type Lang } from "@/lib/chat/stream-shape";
+import { agentNameVariants, bgReplayEvents, drainFrames, pendingEvents, translate, type Lang } from "@/lib/chat/stream-shape";
 import { notifyAskEvent } from "./asks";
 import { api, apiStream } from "./client";
 import { selfIds } from "./history";
@@ -48,19 +48,10 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
     async pull(controller) {
       const { done, value } = await upstream.read();
       if (done) return controller.close();
-      buffer += dec.decode(value, { stream: true });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() || "";
+      const { events, rest } = drainFrames(buffer + dec.decode(value, { stream: true }));
+      buffer = rest;
       let emitted = 0;
-      for (const f of frames) {
-        const data = frameData(f);
-        if (data === null) continue; // 注释 / 心跳帧：下面统一补一个 [DONE] 让读端知道流活着
-        let evt: BridgeEvent;
-        try {
-          evt = JSON.parse(data) as BridgeEvent;
-        } catch {
-          continue; // 坏帧丢弃，流继续
-        }
+      for (const evt of events) {
         if (evt.type === "ask") notifyAskEvent(); // 「待你处理」变了：不属于哪个会话，侧栏入口自己重拉
         if (!variants.has(evt.agent)) continue;
         const mapped = translate(evt, opts.lang, ids);
@@ -68,6 +59,7 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
         controller.enqueue(frame({ ...mapped, eid: evt.seq })); // eid = bridge seq：下次重连 ?since=<eid>
         emitted++;
       }
+      // 这一块全是心跳 / 注释 / 别的 agent 的帧：补一个 [DONE] 让读端知道流活着
       if (!emitted) controller.enqueue(frame(SSE_DONE));
     },
     cancel(reason) {

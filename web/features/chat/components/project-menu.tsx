@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useCloseOnNavigate, useLongPressMenu } from "./menu-gestures";
 import { MenuItem, MenuShell, menuLabel } from "./menu-shell";
+import { FolderIcon, menuItemIcon } from "./line-icons";
 import { openItems, type AgentMenuAction } from "../agent-menu";
 import { openLocal, useHostInfo, type Opener } from "../host-info";
 import type { ProjectMeta } from "../type";
@@ -67,10 +68,10 @@ function ProjectPanel({ s, openers, platform }: { s: NonNullable<MenuState>; ope
   return (
     <MenuShell x={s.x} y={s.y} rows={rows} title={title} onClose={closeProjectMenu}>
       {page.kind === "main" &&
-        items.map((it) => <MenuItem key={it.id} icon={it.icon} label={menuLabel(t, it.label, it.arg)} chevron={it.submenu} onClick={() => onMain(it.id)} />)}
+        items.map((it) => <MenuItem key={it.id} icon={menuItemIcon(it)} label={menuLabel(t, it.label, it.arg)} chevron={it.submenu} onClick={() => onMain(it.id)} />)}
       {page.kind !== "main" && <MenuItem icon="‹" label={t("返回")} onClick={() => setPage({ kind: "main" })} />}
       {page.kind === "list" && list.map((o) => <MenuItem key={o.id} icon="›" label={o.label} onClick={() => pick(o.id)} />)}
-      {page.kind === "dirs" && dirs.map((d, i) => <MenuItem key={d} icon="📁" label={baseName(d)} onClick={() => openDir(i)} />)}
+      {page.kind === "dirs" && dirs.map((d, i) => <MenuItem key={d} icon={<FolderIcon size={14} />} label={baseName(d)} onClick={() => openDir(i)} />)}
     </MenuShell>
   );
 }

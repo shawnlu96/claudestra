@@ -8,6 +8,7 @@ import { Section, GroupLabel } from "./section";
 import { DevicesSection, MachinesSection } from "./devices-section";
 import { ShellServerSection } from "./shell-server-section";
 import { ArchiveRetentionSection } from "./archive-retention-section";
+import { QuotaLiveSection } from "./quota-live-section";
 import { BackendUpdateSection } from "./backend-update-section";
 import { RestartAllSection } from "./restart-all-section";
 import { useProfileDraft, ProfileSection } from "./profile-section";
@@ -77,7 +78,7 @@ function SessionsPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 连接与集成：手机访问 / App 服务器地址(仅原生壳) ‖ 语音识别 Key */
+/** 连接与集成：手机访问 / App 服务器地址(仅原生壳) ‖ 语音识别 Key / 订阅额度实时读取 */
 function ConnectPage({ s }: { s: SettingsState }) {
   const t = useT();
   return (
@@ -88,6 +89,7 @@ function ConnectPage({ s }: { s: SettingsState }) {
       {isNativeShell() && <ShellServerSection />}
       <GroupLabel>{t("集成")}</GroupLabel>
       <GroqKeySection groq={s.groq} busy={s.busy} />
+      <QuotaLiveSection />
     </>
   );
 }
