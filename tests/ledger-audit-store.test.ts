@@ -1,10 +1,10 @@
-/** 巡检结果落库（lib/ledger-audit-store.ts）：开 / 仍在 / 解决 / 重开、取数失败不误关、ack 去重；读侧总览带 audit、v1 库兼容、变更推送 */
+/** 巡检结果落库（lib/ledger-audit-store.ts）：开 / 仍在 / 解决 / 重开、取数失败不误关、ack 去重；读侧总览带 audit、v1 库兼容、变更推送；audit_findings 迁移补齐 */
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import type { AuditFinding, AuditRule } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { LedgerReader, ledgerFeedTicker, projectView } from "../src/lib/ledger-read.js";
-import { AUDIT_SCHEMA_VERSION, closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const ALL: AuditRule[] = ["review_no_reviewer", "pm_held", "ship_stalled"];
@@ -171,5 +171,54 @@ describe("读侧", () => {
     expect(emitted).toEqual(["q", "q"]);
     closeLedger(path);
     reader.close();
+  });
+});
+
+describe("audit_findings 迁移", () => {
+  const schemaNames = (db: Database) =>
+    (db.query("SELECT name FROM sqlite_master WHERE name LIKE 'audit_findings%' ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+  const ALL_AUDIT = ["audit_findings", "audit_findings_changed", "audit_findings_open"];
+
+  test("版本号已到最新、表和索引却不在（别的分支代码先打开过库）→ 打开时补齐", () => {
+    const path = tempLedgerPath("ledger-audit-gap-");
+    seedLedger(path);
+    const raw = new Database(path);
+    raw.exec("DROP TABLE audit_findings");
+    expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
+    raw.close();
+    const db = openLedger(path);
+    expect(schemaNames(db)).toEqual(ALL_AUDIT);
+    expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
+    expect(listEvents(db, { project: "p" }).length).toBeGreaterThan(0);
+    closeLedger(path);
+  });
+
+  test("只缺一个索引 → 补上，已有的巡检记录不动", () => {
+    const path = tempLedgerPath("ledger-audit-idx-");
+    const w = openLedger(path);
+    reconcileFindings(w, "p", [finding("a")], ALL, 100);
+    closeLedger(path);
+    const raw = new Database(path);
+    raw.exec("DROP INDEX audit_findings_changed");
+    raw.close();
+    const db = openLedger(path);
+    expect(schemaNames(db)).toEqual(ALL_AUDIT);
+    expect(openFindings(db, "p").map((f) => f.key)).toEqual(["p|review_no_reviewer|a"]);
+    closeLedger(path);
+  });
+
+  test("迁移中某条语句失败 → 打开报错，整步回滚、版本号不往前推", () => {
+    const path = tempLedgerPath("ledger-audit-fail-");
+    seedLedger(path);
+    const raw = new Database(path);
+    raw.exec("DROP TABLE audit_findings");
+    raw.exec("CREATE TABLE audit_findings_open (x)"); // 占掉索引名：CREATE INDEX IF NOT EXISTS 会报「已有同名表」
+    raw.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
+    raw.close();
+    expect(() => openLedger(path)).toThrow(/audit_findings_open/);
+    const check = new Database(path, { readonly: true });
+    expect(check.query("PRAGMA user_version").get()).toEqual({ user_version: AUDIT_SCHEMA_VERSION - 1 });
+    expect(check.query("SELECT name FROM sqlite_master WHERE name = 'audit_findings'").get()).toBeNull();
+    check.close();
   });
 });

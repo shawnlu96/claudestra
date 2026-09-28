@@ -8,7 +8,7 @@ A deterministic, LLM-free check that runs over the built-in ledger every 15 minu
 |---|---|---|
 | Rules | `src/lib/ledger-audit.ts` | `auditLedger(snapshot, now)` — pure; thresholds in `AUDIT_THRESHOLDS` |
 | Snapshot | `src/lib/ledger-audit-snapshot.ts`, `ledger-audit-reviewers.ts` | Reads ledger, registry, tmux, session files, subagents, held queue, `ledger.json` |
-| Store | `src/lib/ledger-audit-store.ts` | `audit_findings` table (`SCHEMA_AUDIT` migration): open / still open / resolved / reopened, `notifiedAt` dedup |
+| Store | `src/lib/ledger-audit-store.ts` | `audit_findings` table (`migrateAudit` step; after migrating, `openLedger` checks the table and its two indexes exist and re-runs the steps if a parallel branch skipped them): open / still open / resolved / reopened, `notifiedAt` dedup |
 | CLI | `src/manager/ledger-audit-cmd.ts` | `ledger audit [--project <id>] [--dry-run] [--json]`, `ledger audit --ack <key,key> [--queued <messageId>]` |
 | Timer | `src/bridge/ledger-audit-service.ts` | Every 15 min (first run 90 s after start): run the CLI, push pending findings, ack |
 | Read side | `src/lib/ledger-read.ts` | `GET /api/v1/ledger/:project` returns `audit` (unresolved findings); SSE `ledger` fires when a finding opens or closes |

@@ -238,7 +238,7 @@ describe("ledger audit 的权限与只读", () => {
     const state = mkdtempSync(join(tmpdir(), "ledger-audit-ro-"));
     const raw = new Database(join(state, "ledger.sqlite"));
     raw.exec("PRAGMA journal_mode = WAL");
-    raw.exec(LEDGER_MIGRATIONS[0]);
+    raw.exec(LEDGER_MIGRATIONS[0] as string);
     raw.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
     raw.close();
     const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
