@@ -222,11 +222,11 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
             <MissionIcon size={16} />
           </span>
           <span className="min-w-0 truncate">
-            {t("开启 Autopilot（自动推进）")} · {agent.label || t(agent.displayName)}
+            {t("开启 Autopilot")} · {agent.label || t(agent.displayName)}
           </span>
         </h3>
         <p className="mt-1 text-xs leading-relaxed text-base-content/60">
-          {t("它每干完一轮，停一会儿确认你没在跟它说话，就自动接着推进；做完它自己宣告结束，到截止时间就收尾。Claude Code、Codex、Pi 都能用。")}
+          {t("Autopilot（自动推进）：它每干完一轮，停一会儿确认你没在跟它说话，就自动接着推进；做完它自己宣告结束，到截止时间就收尾。Claude Code、Codex、Pi 都能用。")}
         </p>
         <label className="mt-4 block text-xs font-medium" htmlFor="mission-goal">
           {t("目标")}
