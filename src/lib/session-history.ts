@@ -18,7 +18,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
-import { ownerWordsOfAnswer, stripChannelHeader } from "./channel-body.js";
+import { channelBodyText } from "./inbound-body.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -316,7 +316,7 @@ export function unwrapChannelMessage(raw: string): { text: string; from?: string
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
-  const text = ownerWordsOfAnswer(m[1], stripChannelHeader(m[2].trim()).trim());
+  const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
   if (!text) return null;
   return { text, from, fromId };
 }

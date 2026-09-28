@@ -593,7 +593,7 @@ async function checkAgent(
   // 场景(iTerm -CC 原生滚动不进 copy-mode;web 终端滚轮是已知触发源)——
   // 持续 3 分钟就 cancel。短暂停留放过:可能是 owner 恰好在裸 tmux 里选文本。
   try {
-    const inMode = (await tmuxRaw(["display-message", "-p", "-t", windowTarget(agentName), "#{pane_in_mode}"])).trim();
+    const inMode = (await tmuxRaw(["list-panes", "-t", windowTarget(agentName), "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空，不退回当前窗口
     if (inMode !== "" && inMode !== "0") {
       const first = copyModeFirstSeen.get(channelId);
       if (first === undefined) {

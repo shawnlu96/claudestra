@@ -273,7 +273,7 @@ async function focusITermTab(targetChannelId: string, controlId: string, runMana
     if (!agent) {
       return { ok: false, found: false, label: "?", note: "❌ 找不到对应 agent（可能已被 kill）" };
     }
-    targetWindow = `${MASTER_SESSION}:${agent.name}`;
+    targetWindow = windowTarget(agent.name);
     label = agent.name;
   }
 
@@ -385,8 +385,8 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
-    noteSaveCompactInjected(`master:${agent.name}`);
-    await tmuxSendLine(`master:${agent.name}`, "/save-compact");
+    noteSaveCompactInjected(windowTarget(agent.name));
+    await tmuxSendLine(windowTarget(agent.name), "/save-compact");
     console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId})`);
     await interaction
       .followUp({
@@ -466,7 +466,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const listResult = await runManager("list");
         const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
         if (agent) {
-          const r = await interruptGate.manual(channelId, `master:${agent.name}`, agent.runtime).catch((e: Error) => e);
+          const r = await interruptGate.manual(channelId, windowTarget(agent.name), agent.runtime).catch((e: Error) => e);
           if (r instanceof Error) return void (await interaction.reply(`❌ 发送打断键失败: ${r.message}`));
           const keys = r.keys;
           if (!keys.length) return void (await interaction.reply(r.deduped ? `⏳ ${agent.name} 刚被打断过` : `💤 ${agent.name} 当前空闲，无需打断`));
@@ -549,7 +549,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         } catch { /* non-critical */ }
 
         // 如果没找到 agent，就是 master channel（control channel）
-        const targetWindow = agentName ? `master:${agentName}` : `master:0`;
+        const targetWindow = agentName ? windowTarget(agentName) : `master:0`;
         const targetLabel = agentName || "master";
 
         // 收集 option 值
@@ -675,7 +675,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       if (id.startsWith("wedge_esc:")) {
         const agentName = id.slice("wedge_esc:".length);
         try {
-          await tmuxSendEscape(`master:${agentName}`);
+          await tmuxSendEscape(windowTarget(agentName));
           clearWedgeState(agentName);
           await interaction.followUp({ content: `✅ 已发 Esc 到 ${agentName}`, ephemeral: true }).catch(() => {});
         } catch (e) {
@@ -713,7 +713,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             await interaction.followUp({ content: "❌ 找不到对应 agent", ephemeral: true }).catch(() => {});
             return;
           }
-          const win = `master:${agent.name}`;
+          const win = windowTarget(agent.name);
           const pane = await tmuxCapture(windowTarget(agent.name), 12);
           const cur = detectPermissionMode(pane);
           if (!cur) {
@@ -819,7 +819,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
               await interaction.followUp({ content: "❌ 打断失败：找不到对应 agent", ephemeral: true }).catch(() => {});
               return;
             }
-            targetWindow = `master:${agent.name}`;
+            targetWindow = windowTarget(agent.name);
             agentLabel = agent.name;
             targetRuntime = agent.runtime;
           }
@@ -906,7 +906,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           }
 
           const proc = Bun.spawn(
-            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", `master:${agent.name}`, ...keySeq],
+            ["tmux", "-S", TMUX_SOCK, "send-keys", "-t", windowTarget(agent.name), ...keySeq],
             { stdout: "pipe", stderr: "pipe" }
           );
           await proc.exited;

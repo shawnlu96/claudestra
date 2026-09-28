@@ -60,7 +60,7 @@ export function survivingPending(
       (h, i) =>
         !used.has(i) &&
         h.role === "user" &&
-        (norm(h.content) === t ||
+        ((t ? norm(h.content) === t : sameAttachmentOnly(m, h)) ||
           // Pi：历史带注入头、本地只有正文 ⇒ 与两侧各自的裸文本比对
           (tBare.length > 0 && norm(stripInboundHeader(h.content)) === tBare) ||
           (!!w && h.content.includes(w)) ||
@@ -72,6 +72,60 @@ export function survivingPending(
     }
     return true;
   });
+}
+
+/**
+ * 发送时刻的历史游标（视图里最后一条带 jsonl 行号的消息）：乐观消息记下它，对账时只认这之后落盘的记录。
+ * 纯附件消息没有正文可比，不记游标就会配上更早的另一条纯图片（审查实测）；按时间窗比又怕手机时钟不准。
+ */
+export function sendCursor(messages: readonly ChatMessage[]): Pick<ChatMessage, "sentAfter"> {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (typeof m.seqEnd === "number") return { sentAfter: { seq: m.seqEnd, ...(m.sid ? { sid: m.sid } : {}) } };
+  }
+  return {};
+}
+
+/** 纯附件的乐观消息与历史条目配对：本人发的、正文都空、同一批附件、在发送时的游标之后（换了会话就不比行号） */
+function sameAttachmentOnly(m: ChatMessage, h: ChatMessage): boolean {
+  if (h.from || h.content.trim() || !sameAttachments(m.attachments, h.attachments)) return false;
+  const c = m.sentAfter;
+  if (!c || typeof h.seqEnd !== "number" || (c.sid && h.sid && c.sid !== h.sid)) return true;
+  return h.seqEnd > c.seq;
+}
+
+/** 服务端落盘文件名的清洗（src/bridge/api-routes.ts 上传处同一条规则）：本地乐观气泡只有原始文件名 */
+const serverName = (name: string) => name.replace(/[^\w.\-]/g, "_");
+
+/** 两组附件是不是同一批：有 API 地址的比地址；本地乐观气泡（blob: 或没有地址）比清洗后的文件名 */
+function sameAttachments(a: ChatMessage["attachments"], b: ChatMessage["attachments"]): boolean {
+  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
+  return (a ?? []).every((x, i) => {
+    const y = b![i];
+    const local = (u?: string) => !u || u.startsWith("blob:");
+    if (!local(x.url) && !local(y.url)) return x.url === y.url;
+    return serverName(x.name) === serverName(y.name);
+  });
+}
+
+/** 一条他端发言的指纹（正文 + 附件地址）：本端乐观气泡认领第一个回声时记下，之后只认同一条（重放）的回声 */
+export function echoKeyOf(text: string, attachments?: ChatMessage["attachments"]): string {
+  return [text.replace(/\r\n?/g, "\n").trim(), ...(attachments ?? []).map((a) => a.url ?? a.name)].join("\n");
+}
+
+/**
+ * 他端用户发言（stream user-in）是不是视图里已有的某条（本端乐观消息的回声 / 历史已有）：有正文比正文（含注入头无关比对）；
+ * 纯附件比附件本身——只比「附件数相同」会把别的设备连发的第二张纯图当成回声吞掉（审查 P2-3）。
+ * 外源（from）发言不可能是本端乐观消息的回声；乐观气泡已认领过回声（echoKey）就只认那一条，同名的第二张 image.png 不再被吞。
+ */
+export function isUserEcho(m: ChatMessage, text: string, attachments?: ChatMessage["attachments"], from?: string): boolean {
+  if (m.role !== "user" || (from && m.local)) return false;
+  if (m.local && m.echoKey !== undefined) return m.echoKey === echoKeyOf(text, attachments);
+  const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
+  const t = norm(text);
+  const raw = m.wire ?? m.content ?? "";
+  if (t) return norm(raw) === t || norm(stripInboundHeader(raw)) === t;
+  return !norm(raw) && sameAttachments(m.attachments, attachments);
 }
 
 /**
