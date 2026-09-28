@@ -11,7 +11,10 @@ import { inlineButtonsToText } from "./inline-buttons.js";
 
 const MAX_INPUT = 4000;
 const TABLE_SEPARATOR = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
-const HTML_TAGS = "a|abbr|b|big|blockquote|br|center|code|del|details|div|em|font|h[1-6]|hr|i|img|ins|kbd|li|mark|ol|p|pre|q|s|small|span|strike|strong|sub|summary|sup|table|tbody|td|th|thead|tr|u|ul";
+const HTML_TAGS = [
+  "a|abbr|b|big|blockquote|br|center|code|del|details|div|em|font|h[1-6]|hr|i|img|ins|kbd",
+  "li|mark|ol|p|pre|q|s|small|span|strike|strong|sub|summary|sup|table|tbody|td|th|thead|tr|u|ul",
+].join("|");
 const HTML_TAG_RE = new RegExp(`<\\/?(?:${HTML_TAGS})(?:\\s[^<>]*)?\\/?>`, "gi");
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
 /** 占位符用私有区字符：正文里不会自然出现，也不会被下面任何一条规则吃掉 */
