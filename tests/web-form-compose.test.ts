@@ -7,6 +7,7 @@ import {
   composeFormSend,
   formTitles,
   lineOwners,
+  lineScan,
   oneLine,
   parseFormLine,
   pickedFromText,
@@ -19,7 +20,7 @@ import {
   type SyncForm,
 } from "@/lib/chat/form-compose";
 import { restoreFormReply } from "@/lib/chat/form-restore";
-import { createEditQueue } from "@/features/chat/ime-queue";
+import { createEditQueue, shiftCaret } from "@/features/chat/ime-queue";
 import { toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
 import type { ChatMessage } from "@/features/chat/type";
 
@@ -62,6 +63,20 @@ describe("formTitles / oneLine / syncable", () => {
     for (const v of ["a,b", "a]", "a\n[select:go:yes"]) expect(syncable(mk([{ label: "A", value: v }]))).toBe(false);
     expect(syncable(mk([{ label: "A", value: "a" }], "bad]id"))).toBe(false);
   });
+  test("placeholder 或 label 带【】整组不同步（锚点边界靠它们，带了能伪造成别的表单的行）", () => {
+    const mk = (placeholder: string, label: string): MultiRow => ({ type: "multiselect", id: "x", placeholder, options: [{ label, value: "a" }] });
+    expect(syncable(mk("选【一个】", "A"))).toBe(false);
+    expect(syncable(mk("请选", "A】【别的表单】✓ B"))).toBe(false);
+    expect(syncable(mk("请选", "A"))).toBe(true);
+  });
+  test("零宽 / 双向控制字符单行化时去掉；去掉后为空的 label 不合格", () => {
+    expect(oneLine("A\u200b\u200fB\u202e\u2066C\ufeff")).toBe("ABC");
+    expect(formTitles([{ ...design, placeholder: "\u202e标题\u2069" }]).get(design.id)).toBe("标题");
+    const zw: MultiRow = { type: "multiselect", id: "z", options: [{ label: "\u200b\u200d", value: "a" }] };
+    expect(syncable(zw)).toBe(false);
+    const hidden: MultiRow = { type: "multiselect", id: "h", options: [{ label: "A", value: "a" }, { label: "A\u200b", value: "b" }] };
+    expect(syncable(hidden)).toBe(false); // 去掉零宽后重名
+  });
 });
 
 describe("renderFormLine / parseFormLine", () => {
@@ -78,11 +93,11 @@ describe("renderFormLine / parseFormLine", () => {
   test("标题已是 placeholder · id 时不再认裸 placeholder", () => {
     expect(parseFormLine(`【${T}】✓ 先出原型`, design, `${T} · d_t8_design_form`)).toBeNull();
   });
-  test("label 里带 ；、placeholder 里带 】 也不切错；前缀 label 最长匹配 + 边界", () => {
-    const row: MultiRow = { type: "multiselect", id: "x", placeholder: "选【一个】", options: [{ label: "甲；乙", value: "ab" }, { label: "丙", value: "c" }] };
-    const line = renderFormLine(row, "选【一个】", ["ab", "c"]);
-    expect(line).toBe("【选【一个】】✓ 甲；乙；✓ 丙");
-    expect(parseFormLine(line, row, "选【一个】")?.values).toEqual(["ab", "c"]);
+  test("label 里带 ；不切错；前缀 label 最长匹配 + 边界", () => {
+    const row: MultiRow = { type: "multiselect", id: "x", placeholder: "选一个", options: [{ label: "甲；乙", value: "ab" }, { label: "丙", value: "c" }] };
+    const line = renderFormLine(row, "选一个", ["ab", "c"]);
+    expect(line).toBe("【选一个】✓ 甲；乙；✓ 丙");
+    expect(parseFormLine(line, row, "选一个")?.values).toEqual(["ab", "c"]);
     const p: MultiRow = { type: "multiselect", id: "p", options: [{ label: "A", value: "a" }, { label: "AB", value: "ab" }] };
     expect(parseFormLine("【p】✓ AB；✓ A", p, "p")?.values).toEqual(["ab", "a"]);
     expect(parseFormLine("【p】✓ ABC", p, "p")).toEqual({ values: [], rest: "✓ ABC" });
@@ -127,11 +142,14 @@ describe("lineOwners（勾选显示、勾 / 取消、发送共用一条认行规
     expect(composeFormSend("【请选择】✓ 全部", forms)).toEqual({ wire: "【请选择】✓ 全部", answered: [] });
     expect(composeFormSend("【请选择 · f2】✓ 全部", forms).wire).toBe("[select:f2:all2]");
   });
-  test("一行能被两个表单解析（锚点都认 id 相同的写法）也算歧义", () => {
+  test("一行能被两个表单解析（锚点都认 id 相同的写法）也算歧义；lineScan 报出这两个表单（UI 退回本地勾选）", () => {
     const a: MultiRow = { type: "multiselect", id: "a", placeholder: "b", options: [{ label: "X", value: "x" }] };
     const b: MultiRow = { type: "multiselect", id: "b", options: [{ label: "X", value: "y" }] };
     const forms: SyncForm[] = [{ row: a, title: "b", messageId: "1", rowKey: "m:a" }, { row: b, title: "b", messageId: "2", rowKey: "m:b" }];
-    expect(lineOwners("【b】✓ X", forms).size).toBe(0);
+    const scan = lineScan("【b】✓ X", forms);
+    expect(scan.owners.size).toBe(0);
+    expect([...scan.ambiguous].sort()).toEqual(["a", "b"]);
+    expect(lineScan(`${LINE}\n【用量】✓ 今日`, [F, G]).ambiguous.size).toBe(0);
   });
   test("两行带同一锚点：跳过没解析出选项的行，勾选显示与发送认同一行", () => {
     const text = `【${T}】随便写\n【${T}】✓ 先出原型`;
@@ -161,6 +179,9 @@ describe("toggle / setFormValues（就地更新不伤草稿）", () => {
     expect(toggleFormValue("", F, ALL, "v3")).toBe(`【${T}】✓ 按 v3 开工\n`);
     expect(toggleFormValue("先说一句", F, ALL, "v3")).toBe(`先说一句\n【${T}】✓ 按 v3 开工\n`);
     expect(toggleFormValue("先说一句\n", F, ALL, "v3")).toBe(`先说一句\n【${T}】✓ 按 v3 开工\n`);
+  });
+  test("勾了又取消：输入框回到原样", () => {
+    expect(toggleFormValue(toggleFormValue("先说一句", F, ALL, "v3"), F, ALL, "v3")).toBe("先说一句");
   });
   test("再勾一项就地改；取消移除；全取消删行；只剩这一行时清空", () => {
     expect(toggleFormValue(`开头\n【${T}】✓ 按 v3 开工\n补充`, F, ALL, "night_wake")).toBe(`开头\n${LINE}\n补充`);
@@ -273,6 +294,14 @@ describe("还原（历史 + 他端实时）", () => {
     const out = toChatMessages([a(1, { replyText: "?", replyComponents: [sel] }), u(2, "[select:sev:hi]")]);
     expect(out[1].content).toBe("高");
   });
+  test("P2 乐观气泡：本端发送用 commit=false 还原 wire，与刷新后历史还原逐字一致、且不动消息", () => {
+    const wire = "> 引用\n\n[select:d_t8_design_form:v3,night_wake]\n周三前";
+    const live: ChatMessage[] = [{ id: "x1", role: "assistant", content: "", ts: ts(1), replyComponents: [design] }];
+    const optimistic = restoreFormReply(wire, live, false);
+    expect(live[0].replyClicks).toBeUndefined();
+    const hist = toChatMessages([a(1, { replyText: "?", replyComponents: [design] }), u(2, wire)]);
+    expect(hist[1].content).toBe(optimistic!);
+  });
   test("P2 他端实时：restoreFormReply 在当前消息上还原并标已答", () => {
     const msgs: ChatMessage[] = [{ id: "x1", role: "assistant", content: "", ts: ts(1), replyComponents: [design] }];
     expect(restoreFormReply("[select:d_t8_design_form:v3]\n补充", msgs)).toBe(`【${T}】✓ 按 v3 开工\n补充`);
@@ -323,5 +352,48 @@ describe("P2 输入法组合期的改写排队（模拟 composer：组合期 set
     const { c, setText } = fakeComposer();
     createEditQueue(setText, c.composing).edit(tick);
     expect(c.dom).toBe(`【${T}】✓ 按 v3 开工\n`);
+  });
+});
+
+describe("P2 输入法剩余三项：排队可见、发送带上、光标不乱跳", () => {
+  test("组合期点过的勾立刻按 preview 显示；再点一次是取消而不是重复", () => {
+    const composing = { current: true };
+    const applied: string[] = [];
+    const q = createEditQueue((fn) => void applied.push(fn("")), composing);
+    q.edit((p) => toggleFormValue(p, F, ALL, "v3"));
+    expect(pickedFromText(q.preview("你"), F, ALL)?.parsed.values).toEqual(["v3"]);
+    q.edit((p) => toggleFormValue(p, F, ALL, "v3"));
+    expect(q.preview("你")).toBe("你");
+    expect(applied).toEqual([]);
+  });
+  test("组合中直接发送：drain 把排队的改写并进要发的文字，队列清空", () => {
+    const q = createEditQueue(() => {}, { current: true });
+    q.edit((p) => toggleFormValue(p, F, ALL, "v3"));
+    const cur = q.drain("你好");
+    expect(composeFormSend(cur, ALL).wire).toBe("你好\n[select:d_t8_design_form:v3]");
+    expect(q.preview("x")).toBe("x");
+  });
+  test("shiftCaret：改动在光标后不动、在光标前按长度差平移、光标在改动区里放到改动区末尾", () => {
+    expect(shiftCaret("abc", "abc\nLINE\n", 3)).toBe(3);
+    expect(shiftCaret("L1\nabc", "L1L2\nabc", 6)).toBe(8);
+    expect(shiftCaret("abcdef", "abXYZef", 3)).toBe(5);
+    expect(shiftCaret("abc", "abc", 1)).toBe(1);
+  });
+  test("改写时保住选区：同步行在光标前面，光标跟着平移", () => {
+    const box = {
+      value: `【${T}】✓ 按 v3 开工\n补充一句`,
+      selectionStart: 0,
+      selectionEnd: 0,
+      setSelectionRange(s0: number, s1: number) {
+        this.selectionStart = s0;
+        this.selectionEnd = s1;
+      },
+    };
+    const end = box.value.length;
+    box.selectionStart = box.selectionEnd = end - 2; // 光标在「补充|一句」
+    const q = createEditQueue((fn) => void (box.value = fn(box.value)), { current: false }, { current: box });
+    q.edit((p) => toggleFormValue(p, F, ALL, "proto"));
+    expect(box.value).toBe(`【${T}】✓ 按 v3 开工；✓ 先出原型\n补充一句`);
+    expect(box.value.slice(0, box.selectionStart)).toBe(`【${T}】✓ 按 v3 开工；✓ 先出原型\n补充`);
   });
 });

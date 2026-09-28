@@ -25,8 +25,8 @@ export class FormLookup {
     }
     return fallback;
   }
-  /** 多选表单的 select 行还原成「【标题】✓ …」并回填已答；没有可还原的行 → null（交给按钮 / 单选的老路径） */
-  restore(text: string): string | null {
+  /** 多选表单的 select 行还原成「【标题】✓ …」并（commit 时）回填已答；没有可还原的行 → null（交给按钮 / 单选的老路径） */
+  restore(text: string, commit = true): string | null {
     if (!text.includes("[select:")) return null;
     const rows = this.anchors.flatMap((g) => g.replyComponents!.filter((r): r is MultiRow => r.type === "multiselect"));
     const titles = formTitles(rows);
@@ -35,15 +35,18 @@ export class FormLookup {
       const ri = g?.replyComponents!.findIndex((r) => r.type === "multiselect" && r.id === id) ?? -1;
       if (!g || ri < 0) return null;
       const row = g.replyComponents![ri] as MultiRow;
-      const commit = (values: string[]) => void ((g.replyClicks ??= {})[replyRowKey(row, ri)] = `${id}:${values.join(",")}`);
-      return { row, title: titles.get(id) ?? id, commit };
+      const mark = (values: string[]) => void (commit && ((g.replyClicks ??= {})[replyRowKey(row, ri)] = `${id}:${values.join(",")}`));
+      return { row, title: titles.get(id) ?? id, commit: mark };
     });
   }
 }
 
-/** 实时路径：在当前消息列表上还原（messages 可以是 produce 里的草稿，回填直接落进去） */
-export function restoreFormReply(text: string, messages: ChatMessage[]): string | null {
+/**
+ * 实时路径：在当前消息列表上还原。commit=true 时 messages 须是 produce 里的草稿（回填直接落进去）；
+ * 本端发送算乐观气泡的显示用 commit=false——与刷新后历史还原同一写法，对账才对得上。
+ */
+export function restoreFormReply(text: string, messages: ChatMessage[], commit = true): string | null {
   const lookup = new FormLookup();
   messages.forEach((m) => lookup.add(m));
-  return lookup.restore(text);
+  return lookup.restore(text, commit);
 }

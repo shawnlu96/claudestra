@@ -71,7 +71,7 @@ export function Composer() {
     }
   };
   useEffect(() => () => void (textRafRef.current != null && cancelAnimationFrame(textRafRef.current)), []);
-  const flushFormEdits = useComposerBus(text, setText, composingRef); // 多选表单勾选 = 输入框里的同步行（form-sync）
+  const formEdits = useComposerBus(text, setText, composingRef, taRef); // 多选表单勾选 = 输入框里的同步行（form-sync）
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   // v2.15+ 思考遥测:耗时 + ↓token 跳动(token 在涨 = 模型活着,消除「卡住」错觉)
@@ -391,7 +391,7 @@ export function Composer() {
 
   const submit = () => {
     // 读「此刻」的值:状态镜像最多落后一帧,Enter 紧跟最后一个字时不能丢字
-    const cur = textRef.current;
+    const cur = formEdits.drain(textRef.current); // 组合期还在排队的表单勾选也算进这条
     if (disabled || (!cur.trim() && files.length === 0)) return;
     // Skill 使用计数埋点(面板排序的频次数据源)——手打 / 和面板选择都覆盖
     const m = /^\/([\w:-]+)/.exec(cur.trim());
@@ -638,7 +638,7 @@ export function Composer() {
             onCompositionStart={() => void (composingRef.current = true)}
             onCompositionEnd={() => {
               composingRef.current = false;
-              requestAnimationFrame(flushFormEdits); // 组合期勾的表单：等收尾的 input 把 DOM 值落进 textRef 再补做
+              requestAnimationFrame(formEdits.flush); // 组合期勾的表单：等收尾的 input 把 DOM 值落进 textRef 再补做
             }}
             onFocus={() => setTaFocused(true)}
             onBlur={() => setTaFocused(false)}

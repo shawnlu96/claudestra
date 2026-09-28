@@ -2,7 +2,7 @@
  * 多选表单 ↔ 输入框同步行 `【标题】✓ label；✓ label`。输入框文字是唯一事实来源：勾选框显示、
  * 勾 / 取消、发送转换都经 lineOwners 这一条规则认行，三处不会对不上。发送时同步行换成
  * `[select:<id>:<v1>,<v2>]`，与点「提交」一致。agent 给的 label / placeholder 先单行化，
- * 选项不合格（空、重名、带 ✓、value 会破坏 wire）的表单整组不同步——否则能伪造出别的表单的回投。
+ * 选项不合格（空、重名、带 ✓【】、value 会破坏 wire）的表单整组不同步——否则能伪造出别的表单的回投。
  * 单测：tests/web-form-compose.test.ts。
  */
 import type { WebComponentRow } from "./events";
@@ -17,20 +17,26 @@ export interface SyncForm {
   rowKey?: string;
 }
 
-/** 换行、控制字符、连续空白压成一个空格再 trim——agent 给的文字进输入框前一律过这里 */
+/** 去掉零宽 / 双向控制字符，换行、控制字符、连续空白压成一个空格再 trim——agent 给的文字进输入框前一律过这里 */
 export function oneLine(s: string | undefined): string {
-  return (s ?? "").replace(/[\u0000-\u001f\u007f\u2028\u2029\s]+/g, " ").trim();
+  return (s ?? "")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029\s]+/g, " ")
+    .trim();
 }
 
 const BAD_VALUE = /[\u0000-\u001f\u007f\u2028\u2029,\]]/;
 
-/** 能否同步进输入框：id 合法；label 单行化后非空、不重名、不含 ✓；value 非空、不重复、不含破坏 wire 的字符 */
+/**
+ * 能否同步进输入框：id 合法；label 单行化后非空、不重名、不含 ✓【】；placeholder 不含【】（锚点边界靠它们，
+ * 带了就能伪造成别的表单的行）；value 非空、不重复、不含破坏 wire 的字符
+ */
 export function syncable(row: MultiRow): boolean {
-  if (!/^[\w-]+$/.test(row.id) || row.options.length === 0) return false;
+  if (!/^[\w-]+$/.test(row.id) || row.options.length === 0 || /[【】]/.test(oneLine(row.placeholder))) return false;
   const labels = row.options.map((o) => oneLine(o.label));
   const values = row.options.map((o) => o.value);
   return (
-    labels.every((l) => l && !l.includes("✓")) &&
+    labels.every((l) => l && !/[✓【】]/.test(l)) &&
     new Set(labels).size === labels.length &&
     values.every((v) => v && !BAD_VALUE.test(v)) &&
     new Set(values).size === values.length
@@ -104,12 +110,14 @@ export interface LineOwner {
 
 /**
  * 认行规则（勾选显示、勾 / 取消、发送共用）：代码块里的行不算；一行只有恰好一个可同步表单能从中
- * 解析出 ≥1 个选项才归它（两个以上 = 歧义，按普通文字）；同一表单只认第一行。forms 按 id 去重，先到先得。
+ * 解析出 ≥1 个选项才归它（两个以上 = 歧义：按普通文字发，这几个表单退回本地勾选）；同一表单只认第一行。
+ * forms 按 id 去重，先到先得。
  */
-export function lineOwners(text: string, forms: SyncForm[]): Map<string, LineOwner> {
+export function lineScan(text: string, forms: SyncForm[]): { owners: Map<string, LineOwner>; ambiguous: Set<string> } {
   const uniq: SyncForm[] = [];
   for (const f of forms) if (syncable(f.row) && !uniq.some((u) => u.row.id === f.row.id)) uniq.push(f);
   const out = new Map<string, LineOwner>();
+  const ambiguous = new Set<string>();
   let fenced = false;
   text.split("\n").forEach((line, index) => {
     if (/^\s*```/.test(line)) fenced = !fenced;
@@ -118,11 +126,16 @@ export function lineOwners(text: string, forms: SyncForm[]): Map<string, LineOwn
       const parsed = parseFormLine(line, f.row, f.title);
       return parsed && parsed.values.length > 0 ? [{ f, parsed }] : [];
     });
+    if (hits.length > 1) hits.forEach((h) => ambiguous.add(h.f.row.id));
     if (hits.length !== 1 || out.has(hits[0].f.row.id)) return;
     const { f, parsed } = hits[0];
     out.set(f.row.id, { index, parsed, over: parsed.values.length > (Number(f.row.max) || f.row.options.length) });
   });
-  return out;
+  return { owners: out, ambiguous };
+}
+
+export function lineOwners(text: string, forms: SyncForm[]): Map<string, LineOwner> {
+  return lineScan(text, forms).owners;
 }
 
 /** 输入框里该表单当前勾了哪些（勾选框的显示状态就是它） */
@@ -138,7 +151,11 @@ export function setFormValues(text: string, form: SyncForm, forms: SyncForm[], v
   if (found) {
     const next = [body, found.parsed.rest].filter(Boolean).join(" ");
     if (next) lines[found.index] = next;
-    else lines.splice(found.index, 1);
+    else {
+      lines.splice(found.index, 1);
+      // 删的是末尾追加的那行：连同追加时补的换行一起撤，勾了又取消输入框回到原样
+      if (found.index > 0 && found.index === lines.length - 1 && lines[found.index] === "") lines.pop();
+    }
     const out = lines.join("\n");
     return out.trim() ? out : "";
   }

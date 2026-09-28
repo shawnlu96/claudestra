@@ -5,7 +5,7 @@ import type { WebComponentRow } from "@/lib/chat/events";
 import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
 import { editComposer, useComposerSnap, useOpenForms } from "../form-sync";
-import { pickedFromText, renderFormLine, setFormValues, syncable, toggleFormValue } from "@/lib/chat/form-compose";
+import { lineScan, renderFormLine, setFormValues, syncable, toggleFormValue } from "@/lib/chat/form-compose";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -169,9 +169,12 @@ function MultiSelectRow({
   const composer = useComposerSnap();
   const forms = useOpenForms();
   const form = forms.find((f) => f.messageId === messageId && f.row.id === row.id);
-  const synced = !!form && composer.present && syncable(row) && forms.find((f) => f.row.id === row.id) === form;
+  const eligible = !!form && composer.present && syncable(row) && forms.find((f) => f.row.id === row.id) === form;
+  const scan = eligible ? lineScan(composer.text, forms) : null;
+  // 输入框里有歧义行（别的表单也能认领）时也退回本地勾选：往输入框写只会每点一次多一行
+  const synced = !!scan && !scan.ambiguous.has(row.id);
   const [local, setLocal] = useState<string[]>([]);
-  const owner = synced ? pickedFromText(composer.text, form, forms) : null;
+  const owner = scan?.owners.get(row.id) ?? null;
   // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则读输入框里的同步行 / 本地勾选
   const answered = answeredValue?.startsWith(`${row.id}:`)
     ? answeredValue.slice(row.id.length + 1).split(",").filter(Boolean)
@@ -182,7 +185,7 @@ function MultiSelectRow({
   const max = Number(row.max) || row.options.length;
   const toggle = (v: string) => {
     if (locked) return;
-    if (synced) editComposer((prev) => toggleFormValue(prev, form, forms, v));
+    if (synced) editComposer((prev) => toggleFormValue(prev, form!, forms, v));
     else setLocal((p) => (p.includes(v) ? p.filter((x) => x !== v) : p.length >= max ? p : [...p, v]));
   };
   const canSubmit = !locked && picked.length >= min && picked.length <= max;
@@ -224,7 +227,7 @@ function MultiSelectRow({
           disabled={!canSubmit}
           onClick={() => {
             // 快速提交 = 这组已答，输入框里它的同步行一并撤掉（补充文字留着）
-            if (synced) editComposer((prev) => setFormValues(prev, form, forms, []));
+            if (synced) editComposer((prev) => setFormValues(prev, form!, forms, []));
             onSubmit(picked, renderFormLine(row, form?.title ?? row.id, picked));
           }}
           className="btn btn-primary btn-sm mt-1 self-start"

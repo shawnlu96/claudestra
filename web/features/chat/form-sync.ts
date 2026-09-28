@@ -8,44 +8,56 @@ import { useEffect, useMemo, useSyncExternalStore, type RefObject } from "react"
 import type { ChatMessage } from "./type";
 import type { ChatStore } from "./chat-store";
 import { useChatStore, useChatStoreApi } from "./chat-store";
-import { createEditQueue } from "./ime-queue";
+import { createEditQueue, type EditQueue } from "./ime-queue";
 import { deriveClicksFromLegacy, replyRowKey } from "@/lib/chat/reply-clicks";
 import { composeFormSend, formTitles, type MultiRow, type SyncForm } from "@/lib/chat/form-compose";
+import { restoreFormReply } from "@/lib/chat/form-restore";
 
 type Update = (prev: string) => string;
 
 // ── 输入框文字总线：同一时刻只有一个 composer；没挂 composer（分享模式换成 ShareDock）时表单走本地勾选 ──
+let raw = "";
+let active: EditQueue | null = null;
 let snap = { text: "", present: false };
-let editor: ((fn: Update) => void) | null = null;
 const subs = new Set<() => void>();
 
-function publish(next: Partial<typeof snap>): void {
-  if ((next.text ?? snap.text) === snap.text && (next.present ?? snap.present) === snap.present) return;
-  snap = { ...snap, ...next };
+/** 对外的 text = 输入框文字 + 输入法组合期还在排队的改写（见 ime-queue） */
+function refresh(present = snap.present): void {
+  const text = active ? active.preview(raw) : raw;
+  if (text === snap.text && present === snap.present) return;
+  snap = { text, present };
   subs.forEach((f) => f());
 }
 
 export function editComposer(update: Update): void {
-  editor?.(update);
+  if (!active) return;
+  active.edit(update);
+  refresh();
 }
 
-/**
- * composer 用：广播当前文字、注册程序化写入口。输入法组合期间改写会被组合结束时的 DOM 值盖掉
- * （setText 组合期不写 DOM），所以组合期的改写先排队，返回的 flush 由 onCompositionEnd 在下一帧调。
- */
-export function useComposerBus(current: string, setText: (fn: Update) => void, composingRef: RefObject<boolean>): () => void {
-  const queue = useMemo(() => createEditQueue(setText, composingRef), [setText, composingRef]);
-  useEffect(() => publish({ text: current }), [current]);
+/** composer 用：广播当前文字、注册程序化写入口。返回的队列：onCompositionEnd 下一帧 flush，发送前 drain */
+export function useComposerBus(
+  current: string,
+  setText: (fn: Update) => void,
+  composingRef: RefObject<boolean>,
+  taRef: RefObject<HTMLTextAreaElement | null>,
+): EditQueue {
+  const queue = useMemo(() => createEditQueue(setText, composingRef, taRef), [setText, composingRef, taRef]);
   useEffect(() => {
-    editor = queue.edit;
-    publish({ present: true });
+    raw = current;
+    refresh();
+  }, [current]);
+  useEffect(() => {
+    active = queue;
+    refresh(true);
     return () => {
-      if (editor !== queue.edit) return;
-      editor = null;
-      publish({ text: "", present: false }); // 卸载后别拿旧草稿推勾选
+      if (active !== queue) return;
+      active = null;
+      raw = ""; // 卸载后别拿旧草稿推勾选
+      refresh(false);
     };
   }, [queue]);
-  return queue.flush;
+  return queue;
 }
 
 export function useComposerSnap(): { text: string; present: boolean } {
@@ -98,6 +110,8 @@ export function sendComposed(store: ChatStore, cur: string, files?: File[]): voi
     void store.send(cur, files);
     return;
   }
+  // 乐观气泡的显示按 wire 还原（与刷新后历史还原同一写法）：写法不同对账认不出，刷新后会多出一条
+  const display = restoreFormReply(wire, store.state.messages, false) ?? cur;
   answered.forEach((a) => store.markReplyAnswered(a.messageId, a.rowKey, a.choiceValue));
-  void store.send(cur, files, wire, true);
+  void store.send(display, files, wire, true);
 }
