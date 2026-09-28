@@ -16,7 +16,7 @@ import type { RegistryAgent } from "../src/lib/registry.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
-import { tempLedgerPath } from "./ledger-test-helpers.js";
+import { baselineAudit, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const MIN = 60_000;
 const NOW = 1_000 * MIN;
@@ -52,6 +52,7 @@ function seed(): void {
   setMeta(db, owner, { project: P, key: "pms", value: [PM] });
   mkdirSync(join(dir, "ledger", "docs"), { recursive: true });
   setMeta(db, owner, { project: P, key: "docsDir", value: join(dir, "ledger", "docs") });
+  baselineAudit(db, P); // 首轮静默另有专门的测试（ledger-audit-store.test.ts）
 }
 
 beforeEach(() => {
@@ -239,7 +240,7 @@ describe("ledger audit", () => {
   test("第一次跑：落库并给出 pending；再跑一次仍开着但不再算新开", async () => {
     const a = await cli("owner", "--json");
     expect(a.ok).toBe(true);
-    expect(a.projects[0]).toMatchObject({ project: P, opened: 1, resolved: 0 });
+    expect(a.projects[0]).toMatchObject({ project: P, opened: 1, resolved: 0, silenced: 0 });
     expect(a.pending.map((f: any) => [f.rule, f.taskId, f.notify])).toEqual([["review_no_reviewer", "T1", PM]]);
     const b = await cli("owner", "--json");
     expect(b.projects[0]).toMatchObject({ opened: 0, resolved: 0 });

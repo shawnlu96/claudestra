@@ -12,7 +12,7 @@ import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings"] as const;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */

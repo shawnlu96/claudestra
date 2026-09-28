@@ -215,13 +215,13 @@ describe("merge / live 没推进", () => {
   });
   test("合并队列冻结中：merge 停着不报，live 照报", () => {
     expect(only(snap({ tasks: [entered("T1", "merge", NOW - 60 * MIN)], queueFrozen: true }), "ship_stalled")).toEqual([]);
-    expect(only(snap({ tasks: [entered("T1", "live", NOW - 60 * MIN)], queueFrozen: true }), "ship_stalled")).toHaveLength(1);
+    expect(only(snap({ tasks: [entered("T1", "live", NOW - 61 * MIN)], queueFrozen: true }), "ship_stalled")).toHaveLength(1);
   });
   test("依赖上还在等前置任务上线：merge 停着不报；前置已放行（blockedBy 空）照报；live 不看依赖", () => {
     const merge = entered("T1", "merge", NOW - 60 * MIN);
     expect(only(snap({ tasks: [{ ...merge, blockedBy: ["T0"] }] }), "ship_stalled")).toEqual([]);
     expect(only(snap({ tasks: [{ ...merge, blockedBy: [] }] }), "ship_stalled")).toHaveLength(1);
-    expect(only(snap({ tasks: [{ ...entered("T1", "live", NOW - 60 * MIN), blockedBy: ["T0"] }] }), "ship_stalled")).toHaveLength(1);
+    expect(only(snap({ tasks: [{ ...entered("T1", "live", NOW - 61 * MIN), blockedBy: ["T0"] }] }), "ship_stalled")).toHaveLength(1);
   });
   test("merge 停滞从解冻 / 依赖放行时算起；live 不看这两个", () => {
     const merge = entered("T1", "merge", NOW - 120 * MIN);
@@ -232,9 +232,13 @@ describe("merge / live 没推进", () => {
     const live = { ...entered("T1", "live", NOW - 120 * MIN), unblockedAt: NOW - 10 * MIN };
     expect(only(snap({ tasks: [live], unfrozenAt: NOW - 10 * MIN }), "ship_stalled")).toHaveLength(1);
   });
-  test("live 恰好 30 分钟不报，多 1ms 报", () => {
-    expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.shipStallMs)] }), "ship_stalled")).toEqual([]);
-    expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.shipStallMs - 1)] }), "ship_stalled")).toHaveLength(1);
+  test("阈值分开：merge 恰好 30 分钟不报、多 1ms 报；live 恰好 60 分钟不报、多 1ms 报（31 分钟的 live 不报）", () => {
+    expect(TH.liveStallMs).toBe(60 * MIN);
+    expect(only(snap({ tasks: [entered("T1", "merge", NOW - TH.mergeStallMs)] }), "ship_stalled")).toEqual([]);
+    expect(only(snap({ tasks: [entered("T1", "merge", NOW - TH.mergeStallMs - 1)] }), "ship_stalled")).toHaveLength(1);
+    expect(only(snap({ tasks: [entered("T1", "live", NOW - 31 * MIN)] }), "ship_stalled")).toEqual([]);
+    expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.liveStallMs)] }), "ship_stalled")).toEqual([]);
+    expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.liveStallMs - 1)] }), "ship_stalled")).toHaveLength(1);
   });
 });
 

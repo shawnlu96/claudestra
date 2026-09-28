@@ -21,8 +21,10 @@ export const AUDIT_THRESHOLDS = {
   deliverNoReviewMs: 30 * MIN,
   /** 发给 PM 的消息押着（PM 已空闲）或被 check_inbox 领走没确认 */
   pmHeldMs: 10 * MIN,
-  /** merge / live 阶段没有部署 / 验证推进 */
-  shipStallMs: 30 * MIN,
+  /** merge 阶段没有部署推进（从进入 merge / 解冻 / 依赖放行里最晚的那个算） */
+  mergeStallMs: 30 * MIN,
+  /** live 阶段没有验证推进：PM 部署完通常马上 verify，给足 60 分钟 */
+  liveStallMs: 60 * MIN,
   /** 任务结束后执行者还没回收的宽限 */
   reclaimGraceMs: 30 * MIN,
   /** ownerInbox 条目 doing 的时长（从 owner 发话算，条目没记开工时间） */
@@ -201,7 +203,7 @@ function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: numb
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
     const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity) : -Infinity;
     const since = Math.max(stageSince, cleared, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
-    if (now - since <= AUDIT_THRESHOLDS.shipStallMs) continue;
+    if (now - since <= (task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs)) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
     emit({ rule: "ship_stalled", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince],
       detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进`, suggestion: `补做${want}，做完推阶段` });

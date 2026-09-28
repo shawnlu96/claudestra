@@ -55,7 +55,7 @@ async function audit(c: LedgerCli): Promise<Result> {
     const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true });
     pending.push(...rec.pending);
     const open = openFindings(c.db, s.project);
-    out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, open: full ? open : open.map(brief), skipped: r.skipped });
+    out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length, open: full ? open : open.map(brief), skipped: r.skipped });
   }
   return { ok: true, now, dryRun: dry, projects: out, ...(full && !dry ? { pending: pending.map((f) => withFallback(c, f)) } : {}) };
 }

@@ -5,7 +5,7 @@ import type { AuditFinding, AuditRule } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { LedgerReader, ledgerFeedTicker, projectView } from "../src/lib/ledger-read.js";
 import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
+import { baselineAudit, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const ALL: AuditRule[] = ["review_no_reviewer", "pm_held", "ship_stalled"];
 
@@ -15,7 +15,9 @@ function finding(key: string, rule: AuditRule = "review_no_reviewer", over: Part
 
 function fresh() {
   const path = tempLedgerPath("ledger-audit-");
-  return { path, db: openLedger(path) };
+  const db = openLedger(path);
+  baselineAudit(db, "p");
+  return { path, db };
 }
 
 describe("reconcileFindings", () => {
@@ -131,6 +133,40 @@ describe("reconcileFindings", () => {
     expect(after.projectEvents).toEqual(before.projectEvents);
     expect(after.tasks.map((t) => t.lastEvent)).toEqual(before.tasks.map((t) => t.lastEvent));
     closeLedger(path);
+  });
+});
+
+describe("首轮静默（audit_baseline）", () => {
+  const raw = () => {
+    const path = tempLedgerPath("ledger-audit-base-");
+    return openLedger(path);
+  };
+  test("项目第一次跑：已有的发现落库、记成已推过，不进 pending；之后新出现的照推", () => {
+    const db = raw();
+    const a = reconcileFindings(db, "p", [finding("old")], ALL, 100);
+    expect([a.opened, a.pending, a.silenced]).toEqual([["p|review_no_reviewer|old"], [], ["p|review_no_reviewer|old"]]);
+    expect(openFindings(db, "p")[0]).toMatchObject({ notifiedAt: 100, resolvedAt: null });
+    const b = reconcileFindings(db, "p", [finding("old"), finding("new")], ALL, 200);
+    expect([b.pending.map((f) => f.key), b.silenced]).toEqual([["p|review_no_reviewer|new"], []]);
+  });
+  test("第一次跑什么都没发现也记下基线：下一轮第一条发现照推", () => {
+    const db = raw();
+    expect(reconcileFindings(db, "p", [], ALL, 100).silenced).toEqual([]);
+    expect(reconcileFindings(db, "p", [finding("a")], ALL, 200).pending.map((f) => f.key)).toEqual(["p|review_no_reviewer|a"]);
+  });
+  test("按规则记：首轮没跑的规则（取数失败），第一次跑起来那轮同样静默；已跑过的规则照推", () => {
+    const db = raw();
+    reconcileFindings(db, "p", [], ["review_no_reviewer"], 100);
+    const r = reconcileFindings(db, "p", [finding("a"), finding("h", "pm_held")], ["review_no_reviewer", "pm_held"], 200);
+    expect(r.pending.map((f) => f.key)).toEqual(["p|review_no_reviewer|a"]);
+    expect(r.silenced).toEqual(["p|pm_held|h"]);
+  });
+  test("按项目记：别的项目跑过不算；已解决后又出现（重开）照推", () => {
+    const db = raw();
+    reconcileFindings(db, "q", [], ALL, 100);
+    expect(reconcileFindings(db, "p", [finding("a")], ALL, 200).pending).toEqual([]);
+    reconcileFindings(db, "p", [], ALL, 300);
+    expect(reconcileFindings(db, "p", [finding("a")], ALL, 400).pending.map((f) => f.key)).toEqual(["p|review_no_reviewer|a"]);
   });
 });
 

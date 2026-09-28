@@ -37,6 +37,8 @@ export interface ReconcileResult {
   resolved: string[];
   /** 本项目还开着、还没推过、有收件人的（推送方投递成功后调 ackFindings） */
   pending: StoredFinding[];
+  /** 规则在本项目第一次跑：它开着的发现静默记成已推过（不进 pending） */
+  silenced: string[];
 }
 
 type Row = Record<string, unknown>;
@@ -83,12 +85,31 @@ export function reconcileFindings(
         if (opts.stillQueued?.(q.queuedAs) ?? true) continue;
         db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE key = ?").run(now, q.key);
       }
+      const silenced = silenceFirstRun(db, project, evaluated, now);
       const pending = (db.prepare(`SELECT * FROM audit_findings WHERE project = ? AND resolvedAt IS NULL AND notifiedAt IS NULL AND queuedAs IS NULL
         AND notify IS NOT NULL ORDER BY firstSeen, key`)
         .all(project) as Row[]).map(toFinding);
-      return { opened, resolved, pending };
+      return { opened, resolved, pending, silenced };
     }).immediate(),
   );
+}
+
+/**
+ * 某条规则在这个项目上第一次真正跑（evaluated 里有、audit_baseline 里没有）：记下基线，并把它开着、没推过的发现标成已推过——
+ * 上线首轮、或某个来源第一次取到数时，已经积压的旧事不一次推一大批，只推之后新出现的。按规则记而不是按项目：
+ * 首轮因取数失败没跑的规则，等它第一次跑起来时同样静默。
+ */
+function silenceFirstRun(db: Database, project: string, evaluated: readonly AuditRule[], now: number): string[] {
+  const seen = new Set((db.prepare("SELECT rule FROM audit_baseline WHERE project = ?").all(project) as { rule: string }[]).map((r) => r.rule));
+  const fresh = evaluated.filter((r) => !seen.has(r));
+  const out: string[] = [];
+  for (const rule of fresh) {
+    db.prepare("INSERT INTO audit_baseline (project, rule, since) VALUES (?, ?, ?)").run(project, rule, now);
+    const keys = db.prepare("SELECT key FROM audit_findings WHERE project = ? AND rule = ? AND resolvedAt IS NULL AND notifiedAt IS NULL").all(project, rule) as { key: string }[];
+    db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE project = ? AND rule = ? AND resolvedAt IS NULL AND notifiedAt IS NULL").run(now, project, rule);
+    out.push(...keys.map((k) => k.key));
+  }
+  return out;
 }
 
 /**
