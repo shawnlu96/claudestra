@@ -11,7 +11,9 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { publishWebOut, rollbackWebOut } from "../lib/web-build.js";
-import { currentRelease, listReleases, migrateStaticDirToReleases, RELEASES_DIR } from "../lib/web-releases.js";
+import { currentLink, currentRelease, listReleases, migrateStaticDirToReleases, RELEASES_DIR } from "../lib/web-releases.js";
+import { relayWebReminder } from "../lib/doctor-relay-web.js";
+import { readBuildInfo } from "../lib/static-site.js";
 import { output } from "./core.js";
 
 /** v2.16.3 update 附带的 web 构建。返回值进 update 输出的 webBuild 字段——skipped/ok/error 三态,绝不静默。
@@ -32,6 +34,12 @@ export async function maybeBuildWeb(): Promise<{ built: boolean; published?: boo
   return { built: true, ...(r.published ? { published: true } : {}), ...(r.error ? { warning: r.error } : {}) }; // warning：已上线但清理旧版本失败等
 }
 
+/** 中继托管的是另一份前端：本机发完它还旧就在输出里说一句（手机经中继打开，拿不到本机这份） */
+async function relayNote(): Promise<{ relayWeb?: string }> {
+  const note = await relayWebReminder(REPO_ROOT, currentLink(), (d) => readBuildInfo(d)?.webCommit ?? null);
+  return note ? { relayWeb: note } : {};
+}
+
 export async function cmdWebRelease(args: string[]): Promise<void> {
   const sub = args[0];
   // 链接出去的 worktree 里 .git 是文件不是目录
@@ -44,13 +52,13 @@ export async function cmdWebRelease(args: string[]): Promise<void> {
   if (sub === "deploy") {
     // deployed 才表示这次真的构建并上线了；skipped（已是最新 / 构建锁忙 / 缺依赖）不算，自动化按它判断
     const r = await maybeBuildWeb();
-    output({ ok: !r.error, deployed: r.built || !!r.published, ...r });
+    output({ ok: !r.error, deployed: r.built || !!r.published, ...r, ...(await relayNote()) });
     if (r.error) process.exitCode = 1;
   } else if (sub === "migrate") {
     output({ ok: true, notes: await migrateStaticDirToReleases(REPO_ROOT, () => publishWebOut(REPO_ROOT)) });
   } else if (sub === "publish") {
     const r = await publishWebOut(REPO_ROOT);
-    output({ ...r });
+    output({ ...r, ...(r.ok ? await relayNote() : {}) });
     if (!r.ok) process.exitCode = 1;
   } else if (sub === "rollback") {
     const r = await rollbackWebOut();

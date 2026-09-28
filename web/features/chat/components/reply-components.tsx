@@ -4,8 +4,8 @@ import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
-import { editComposer, useComposerSnap, useOpenForms } from "../form-sync";
-import { lineScan, renderFormLine, setFormValues, syncable, toggleFormValue } from "@/lib/chat/form-compose";
+import { editComposer, logLocalTick, useComposerSnap, useOpenForms } from "../form-sync";
+import { lineScan, renderFormLine, setFormValues, syncBlock, toggleFormValue } from "@/lib/chat/form-compose";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -169,10 +169,11 @@ function MultiSelectRow({
   const composer = useComposerSnap();
   const forms = useOpenForms();
   const form = forms.find((f) => f.messageId === messageId && f.row.id === row.id);
-  const eligible = !!form && composer.present && syncable(row) && forms.find((f) => f.row.id === row.id) === form;
-  const scan = eligible ? lineScan(composer.text, forms) : null;
+  const pre = syncBlock(row, form, forms, composer.present);
+  const scan = pre ? null : lineScan(composer.text, forms);
   // 输入框里有歧义行（别的表单也能认领）时也退回本地勾选：往输入框写只会每点一次多一行
-  const synced = !!scan && !scan.ambiguous.has(row.id);
+  const block = pre ?? (scan?.ambiguous.has(row.id) ? "ambiguous" : null);
+  const synced = !block;
   const [local, setLocal] = useState<string[]>([]);
   const owner = scan?.owners.get(row.id) ?? null;
   // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则读输入框里的同步行 / 本地勾选
@@ -186,7 +187,10 @@ function MultiSelectRow({
   const toggle = (v: string) => {
     if (locked) return;
     if (synced) editComposer((prev) => toggleFormValue(prev, form!, forms, v));
-    else setLocal((p) => (p.includes(v) ? p.filter((x) => x !== v) : p.length >= max ? p : [...p, v]));
+    else {
+      logLocalTick(row.id, block);
+      setLocal((p) => (p.includes(v) ? p.filter((x) => x !== v) : p.length >= max ? p : [...p, v]));
+    }
   };
   const canSubmit = !locked && picked.length >= min && picked.length <= max;
 

@@ -43,6 +43,20 @@ export function syncable(row: MultiRow): boolean {
   );
 }
 
+/** 勾选退回本地（不进输入框）的原因码：写进 client.log，线上不用再猜是哪一条不满足 */
+export type SyncBlock = "no-composer" | "not-open" | "unsyncable" | "superseded";
+
+/**
+ * 这一行表单能否走输入框同步；不能就给原因。输入框里的歧义行（lineScan 的 ambiguous）要看文字，另算。
+ * 顺序即优先级：没有输入框 → 不在可作答表单里 → 选项不合格 → 同 id 有更新的一条（它才同步）。
+ */
+export function syncBlock(row: MultiRow, form: SyncForm | undefined, forms: SyncForm[], present: boolean): SyncBlock | null {
+  if (!present) return "no-composer";
+  if (!form) return "not-open";
+  if (!syncable(row)) return "unsyncable";
+  return forms.find((f) => f.row.id === row.id) === form ? null : "superseded";
+}
+
 /** 每个表单 id 的显示标题：placeholder（单行化）；不同表单 placeholder 重名时 `placeholder · id`；没有 placeholder 用 id */
 export function formTitles(rows: MultiRow[]): Map<string, string> {
   const idsByPh = new Map<string, Set<string>>();

@@ -12,6 +12,7 @@ import { createEditQueue, type EditQueue } from "./ime-queue";
 import { deriveClicksFromLegacy, replyRowKey } from "@/lib/chat/reply-clicks";
 import { composeFormSend, formTitles, type MultiRow, type SyncForm } from "@/lib/chat/form-compose";
 import { restoreFormReply } from "@/lib/chat/form-restore";
+import { postClientLog } from "@/lib/client-log";
 
 type Update = (prev: string) => string;
 
@@ -69,6 +70,15 @@ export function useComposerSnap(): { text: string; present: boolean } {
     () => snap,
     () => snap,
   );
+}
+
+/** 勾选退回本地时记一行 client.log（只带表单 id 与原因码，不带选项内容）；同一表单同一原因每次页面加载只记一次 */
+const loggedBlocks = new Set<string>();
+export function logLocalTick(rowId: string, reason: string): void {
+  const id = /^[\w-]{1,64}$/.test(rowId) ? rowId : "?";
+  if (loggedBlocks.has(`${id}\u0000${reason}`)) return;
+  loggedBlocks.add(`${id}\u0000${reason}`);
+  postClientLog(`[form] 本地勾选 id=${id} reason=${reason}`);
 }
 
 // ── 表单收集 ──
