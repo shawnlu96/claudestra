@@ -51,6 +51,13 @@ describe("气泡 ↔ ask", () => {
     expect(askForReply([ask({ fromAgent: "master" })], "__master__", rows, ts)?.id).toBe("ask_1");
   });
 
+  test("只有行内按钮的气泡也认得出（按 id 对 bridge 合成的最后一行）：点之前才带得上 askId", () => {
+    const inline = ask({ id: "inl", options: [{ type: "buttons", buttons: [{ id: "go", label: "批准", style: "success" }, { id: "no", label: "算了" }] }] });
+    expect(askForReply([inline], "x", [], ts, ["go", "no"])?.id).toBe("inl");
+    expect(askForReply([inline], "x", undefined, ts, ["go"])).toBeNull();
+    expect(askForReply([inline], "x", [], ts)).toBeNull();
+  });
+
   test("字段顺序不同也认（历史接口按 agent 的参数顺序给，ask 里存的是 bridge 收到时的顺序）", () => {
     const shuffled = [rows[0], { options: (rows[1] as { options: unknown[] }).options, id: "f", type: "multiselect" }] as WebComponentRow[];
     expect(askForReply([ask({})], "x", shuffled, ts)?.id).toBe("ask_1");

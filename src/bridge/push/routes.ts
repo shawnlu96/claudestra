@@ -59,7 +59,7 @@ export function createPushRoutes(d: PushRouteDeps): ExtensionHandler {
     if (p === `${PREFIX}/push/apns` && m === "POST") {
       const b = await body(req);
       if (typeof b.token !== "string" || !APNS_TOKEN_RE.test(b.token)) return apiJson(400, { ok: false, error: "token invalid" });
-      saveApnsDevice(d.db, b.token, typeof b.device === "string" ? b.device : "");
+      saveApnsDevice(d.db, b.token, typeof b.device === "string" ? b.device : "", new Date(), who);
       return apiJson(200, { ok: true, configured: d.sender.config().apns });
     }
     const apns = APNS_RE.exec(p);

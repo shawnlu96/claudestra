@@ -101,18 +101,23 @@ function canon(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 
+const buttonIds = (row: WebComponentRow | undefined) => (row?.type === "buttons" ? row.buttons.map((b) => b.id).join(",") : "");
+
 /**
- * 这个聊天气泡是哪条 ask 建出来的：同一个 agent、ask 的选项以气泡的 components 开头（行内按钮排在后面）；
+ * 这个聊天气泡是哪条 ask 建出来的：同一个 agent、ask 的选项以气泡的 components 开头，行内按钮合成的那一行排在后面（按 id 对）；
  * agent 复用同一组按钮时取建立时间离气泡最近的一条（两分钟内），对不上就当没有。
  */
-export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string): WebAsk | null {
-  if (!rows?.length || !agent) return null;
-  const want = canon(rows);
+export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow[] | undefined, replyTs?: string, inlineIds: string[] = []): WebAsk | null {
+  const block = rows ?? [];
+  if ((!block.length && !inlineIds.length) || !agent) return null;
+  const want = canon(block);
+  const wantInline = inlineIds.join(",");
   const at = replyTs ? Date.parse(replyTs) : NaN;
   let best: WebAsk | null = null;
   for (const a of asks) {
     if (a.source !== "reply" || !a.fromAgent || !sameAgent(a.fromAgent, agent)) continue;
-    if (canon(a.options.slice(0, rows.length)) !== want) continue;
+    if (canon(a.options.slice(0, block.length)) !== want) continue;
+    if (wantInline && buttonIds(a.options[block.length] as WebComponentRow | undefined) !== wantInline) continue;
     if (Number.isFinite(at) && Math.abs(a.createdAt - at) > 120_000) continue;
     if (!best || (Number.isFinite(at) && Math.abs(a.createdAt - at) < Math.abs(best.createdAt - at))) best = a;
     else if (!Number.isFinite(at) && a.createdAt > best.createdAt) best = a;

@@ -106,7 +106,7 @@ describe("推送订阅", () => {
     const tok = "AB".repeat(32);
     expect(await json(await call(handler, "POST", "/api/v1/push/apns", { token: tok, device: "iPhone" }))).toEqual({ status: 200, body: { ok: true, configured: false } });
     expect(await json(await call(handler, "POST", "/api/v1/push/apns", { token: "zz" }))).toMatchObject({ status: 400 });
-    expect(listApnsDevices(db)).toEqual([tok.toLowerCase()]);
+    expect(listApnsDevices(db)).toEqual([{ token: tok.toLowerCase(), principal: "owner:self", credential: null }]); // 登记时的身份：「待你处理」按它过 ask-access
     expect(await json(await call(handler, "DELETE", `/api/v1/push/apns/${tok}`))).toEqual({ status: 200, body: { ok: true, removed: true } });
     expect(listApnsDevices(db)).toEqual([]);
   });

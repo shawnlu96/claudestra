@@ -55,6 +55,10 @@ function migrate(db: Database): void {
     agent TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, last_reply_ts INTEGER NOT NULL DEFAULT 0)`);
   db.exec(`CREATE TABLE IF NOT EXISTS apns_devices (
     token TEXT PRIMARY KEY, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_seen TEXT NOT NULL)`);
+  // APNs 登记时的凭据（T11b）：「待你处理」按它过 ask-access，凭据撤了就不再推。老行 NULL = owner:self（App 每次启动重新登记时补上）
+  const apnsCols = (db.prepare("PRAGMA table_info(apns_devices)").all() as { name: string }[]).map((c) => c.name);
+  if (!apnsCols.includes("principal")) db.exec("ALTER TABLE apns_devices ADD COLUMN principal TEXT");
+  if (!apnsCols.includes("credential")) db.exec("ALTER TABLE apns_devices ADD COLUMN credential TEXT");
   // 协作视图「上次以来」（lib/last-seen.ts）：按 principal × 视图记上次看的时刻。不在 WEB_STATE_TABLES 里——旧 BFF 没有这张表，迁移不搬
   db.exec(`CREATE TABLE IF NOT EXISTS last_seen (principal TEXT NOT NULL, scope TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (principal, scope))`);
   // 旧 web 的登录会话（只存 sha256）：升级后浏览器带着旧 cstra_session 来，一次性换成设备凭据（lib/legacy-web.ts）

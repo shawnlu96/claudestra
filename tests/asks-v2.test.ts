@@ -88,6 +88,18 @@ describe("显式 ask", () => {
     expect(s.asks.some((e) => (e.data as { askId: string; state: string }).askId === old.id && (e.data as { state: string }).state === "superseded")).toBe(true);
   });
 
+  test("授权类不带 askId 不猜（adv1 P1-1）：旧消息的行内「批准」批不了参数变了的新一条，回 409 说清楚；被取代的提示是「已被新版本取代」", async () => {
+    const old = (await reply("发 v2.0.1 吗？[[{#go}批准]] [[{#no}算了]]", { kind: "authorize", bind: RELEASE }, [])).ask!;
+    const neu = (await reply("发 v2.0.2 吗？[[{#go}批准]] [[{#no}算了]]", { kind: "authorize", bind: { ...RELEASE, params: { tag: "v2.0.2" } } }, [])).ask!;
+    const r = (await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() }))!;
+    expect([r.status, ((await r.json()) as { code: string }).code, getAsk(openLedger(s.path), neu.id)?.state]).toEqual([409, "ask_id_required", "open"]);
+    const stale = (await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: old.id }))!;
+    expect(((await stale.json()) as { error: string }).error).toContain("已被新版本取代");
+    // 不带绑定的照旧按「最新一条对得上的」认
+    await reply("换个名字？", undefined, BUTTONS);
+    expect((await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() }))!.status).toBe(202);
+  });
+
   test("知会类：不建 ask，这条回复记成免推送（推送派发器按 threadId 查）", async () => {
     const r = await reply("v2.32.0 已上线", { kind: "inform" }, []);
     expect(r.ask).toBeNull();

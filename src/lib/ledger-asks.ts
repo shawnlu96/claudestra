@@ -203,7 +203,7 @@ const askActor = (a: Ask): string => a.fromAgent ?? a.createdBy ?? "system";
 
 /** 已结案 → conflict，current 带上库里的状态与答案（调用方据此回「已处理」） */
 function closedError(a: Ask): LedgerError {
-  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : "撤销";
+  const word = a.state === "answered" ? "处理" : a.state === "expired" ? "过期" : a.state === "superseded" ? "被新版本取代" : "撤销";
   return new LedgerError("conflict", `ask ${a.id} 已${word}`, { state: a.state, answer: a.answer });
 }
 

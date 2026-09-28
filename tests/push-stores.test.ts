@@ -50,7 +50,7 @@ describe("push-store", () => {
     const db = fresh();
     saveApnsDevice(db, "AB".repeat(32), "iPhone", new Date("2026-01-01T00:00:00Z"));
     saveApnsDevice(db, "ab".repeat(32), "iPhone 2", new Date("2026-01-02T00:00:00Z"));
-    expect(listApnsDevices(db)).toEqual(["ab".repeat(32)]);
+    expect(listApnsDevices(db)).toEqual([{ token: "ab".repeat(32), principal: null, credential: null }]);
     expect(db.prepare("SELECT device, created_at, last_seen FROM apns_devices").get()).toEqual({ device: "iPhone 2", created_at: "2026-01-01T00:00:00.000Z", last_seen: "2026-01-02T00:00:00.000Z" });
     expect(deleteApnsDevice(db, "AB".repeat(32))).toBe(true);
     expect(listApnsDevices(db)).toEqual([]);
