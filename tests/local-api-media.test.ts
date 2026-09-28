@@ -3,7 +3,7 @@
  * 会话文件 / agent 清单 / 附件目录都指到临时目录（setMediaForTest / setAttachmentDirsForTest）。安全类场景来自 T22 第 1 轮审查的复现。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.js";
@@ -77,7 +77,12 @@ beforeAll(async () => {
   writeFileSync(jl["agent-b"], "");
   // 手写标记指向旧上传目录里一个在、一个不在的文件（审查 r3：拿锚点请求的 200 / 404 探测文件在不在）
   const probe = (n: string) => `[attachment: ${uploads}/2026-09-20/./${n}]`;
-  writeFileSync(jl["agent-probe"], `${inLine(NOW - 300, "probe", [], `${probe("ab12cd34-plan.pdf")} ${probe("deadbeef-plan.pdf")}`, "friend")}\n`);
+  writeFileSync(join(inbox, "api_1700000000900_gone.pdf"), "GONE"); // 可信绑定，用例里删掉 = 「可信但文件不在」
+  writeFileSync(jl["agent-probe"], [
+    inLine(NOW - 300, "probe", [], `${probe("ab12cd34-plan.pdf")} ${probe("deadbeef-plan.pdf")}`, "friend"),
+    inLine(NOW - 200, "gone", [join(inbox, "api_1700000000900_gone.pdf")]),
+    "",
+  ].join("\n"));
 });
 afterAll(() => {
   setMediaForTest(undefined);
@@ -145,6 +150,25 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     const anchor = async (name: string, p: Principal) => (await get(`/media?agent=probe&name=${encodeURIComponent(name)}`, p)).status;
     expect([await anchor("2026-09-20/ab12cd34-plan.pdf", guest), await anchor("2026-09-20/deadbeef-plan.pdf", guest)]).toEqual([404, 404]);
     expect(await anchor("2026-09-20/ab12cd34-plan.pdf", OWNER)).toBe(200);
+  });
+  test("「可信但文件不在」「找到但不可信」「没找到且不可信」对 guest 逐字节一致：列表字段与 raw / thumb 的 404", async () => {
+    const guest: Principal = { ...GUEST, id: "guest:3", agents: ["probe"], credential: "dev_g3" };
+    await list("agent=probe", guest); // 先按文件还在时建好索引，再删
+    unlinkSync(join(inbox, "api_1700000000900_gone.pdf"));
+    const items = (await list("agent=probe", guest)).items;
+    expect(items.map((i: any) => i.name).sort()).toEqual(["ab12cd34-plan.pdf", "deadbeef-plan.pdf", "gone.pdf"]);
+    const shape = (i: any) => JSON.stringify({ keys: Object.keys(i), size: i.size, mime: i.mime, available: i.available, restricted: i.restricted });
+    expect(new Set(items.map(shape)).size).toBe(1);
+    expect(items[0]).toMatchObject({ available: false, size: null, mime: null });
+    const bodies = new Set<string>();
+    for (const it of items) {
+      for (const v of ["raw", "thumb"]) {
+        const res = await get(`/media/${it.id}/${v}`, guest);
+        bodies.add(`${res.status} ${res.headers.get("content-type")} ${await res.text()}`);
+      }
+    }
+    expect([...bodies]).toHaveLength(1);
+    expect([...bodies][0]).toStartWith("404 ");
   });
   test("可信行对 guest 照常可取；不再给 immutable 长缓存", async () => {
     const p0 = (await list("agent=worker&q=pic0", GUEST)).items[0];

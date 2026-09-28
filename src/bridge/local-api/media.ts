@@ -80,13 +80,15 @@ async function listMedia(url: URL, principal: Principal): Promise<Response> {
 
 async function serveFile(id: string, variant: "raw" | "thumb", display: boolean, principal: Principal): Promise<Response> {
   const row = mediaRow(mediaDb(), id);
-  // 不在 scope、不存在、绑定不可信（非 manage）一律 404：不让人按 id 探测文件在不在；可信但歧义 / 共享的回 403（列表里也标了 restricted）
-  if (!row || !agentInScope(principal, row.agent)) return apiJson(404, { ok: false, error: "media not found" });
+  // 不在 scope、不存在、绑定不可信（非 manage）、文件不在一律回同一个 404（逐字节相同）：不让人按 id 探测文件在不在；
+  // 可信但歧义 / 共享的回 403（列表里也标了 restricted）
+  const notFound = () => apiJson(404, { ok: false, error: "media not found" });
+  if (!row || !agentInScope(principal, row.agent)) return notFound();
   const manage = canManage(principal);
-  if (!manage && row.trusted !== 1) return apiJson(404, { ok: false, error: "media not found" });
+  if (!manage && row.trusted !== 1) return notFound();
   if (isRestricted(row, manage)) return apiJson(403, { ok: false, error: "media restricted (ambiguous source)" });
   const file = row.loc ? openLoc(row.loc, attachmentDirs()) : null;
-  if (!file || !row.loc) return apiJson(404, { ok: false, error: "media file missing" });
+  if (!file || !row.loc) return notFound();
   if (variant === "thumb" || display) {
     const out = await convertedImage(mediaPaths.thumbs, id, row.loc, variant === "thumb" ? "thumb" : "display", file.abs, file.name);
     if (out === "busy") return new Response(JSON.stringify({ ok: false, error: "thumbnailer busy" }), { status: 503, headers: { "Retry-After": "2", "Content-Type": "application/json" } });

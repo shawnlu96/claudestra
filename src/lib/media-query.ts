@@ -60,12 +60,13 @@ type LocExists = (loc: string) => boolean;
 /** 一行 → 返回体里的一项（字段契约见 web/lib/api/media.ts 的 MediaItem）。available = 找到了副本、对调用方不受限、文件还在 */
 function toItem(r: Row, manage: boolean, exists: LocExists) {
   const blocked = r.loc != null && isRestricted(r, manage);
-  // 可信但有歧义 / 被共享的行给 restricted 占位；不可信的行对非 manage 就当文件不在
+  // 可信但有歧义 / 被共享的行给 restricted 占位；不可信的行对非 manage 就当文件不在。
+  // 不可用时 size / mime 一律为空：「可信但文件不在」「找到但不可信」「没找到且不可信」三种对外必须逐字节一致
   const restricted = blocked && r.trusted === 1;
   const available = r.loc != null && !blocked && exists(r.loc);
   return {
     id: r.id, agent: r.agent, sessionId: r.session_id, seq: r.seq, ts: r.ts, dir: r.dir, sender: r.sender, senderId: r.sender_id, name: r.name,
-    size: blocked ? null : r.size, mime: blocked ? null : r.mime, kind: r.kind, cat: r.cat, available, ...(restricted ? { restricted } : {}),
+    size: available ? r.size : null, mime: available ? r.mime : null, kind: r.kind, cat: r.cat, available, ...(restricted ? { restricted } : {}),
   };
 }
 
