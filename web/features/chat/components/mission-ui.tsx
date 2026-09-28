@@ -5,7 +5,7 @@ import { startMission } from "@/lib/api/agents";
 import type { MissionInfo } from "@/lib/chat/agents";
 import type { AgentSession } from "../type";
 import { fmtDueParts } from "../fmt-ts-parts";
-import { nextRefreshMs, resolveUntil, tipShift } from "../mission-time";
+import { isStale, nextRefreshMs, resolveUntil, tipShift } from "../mission-time";
 import { CenteredModal } from "./centered-modal";
 
 /**
@@ -42,18 +42,26 @@ export function MissionStopIcon({ size = 15 }: { size?: number }) {
   );
 }
 
-/** 「现在」：到下一个本地零点（今天 / 明天会变）或 resumeAt（「等到」换回「截止」）时自动刷新；
- *  页面从后台回到前台也刷新——iOS 会冻结后台页面的计时器，醒来时零点可能早就过了。 */
+/** 「现在」：到下一个本地零点（今天 / 明天会变）或 resumeAt（「等到」换回「截止」）时自动刷新。
+ *  延迟按真实时间算，不按 state 里的 now：bridge 退避中改 resumeAt 只重渲染、不重挂载，那个 now 可能是几小时前的；
+ *  resumeAt 一变就立刻重取 now。计时器靠不住的两种情况另外兜底：iOS 冻结后台页面（回到前台时 visibilitychange），
+ *  以及 macOS 合盖睡眠时 setTimeout 的时钟停走、标签页却一直可见（每分钟对一次，mission-time.ts isStale）。 */
 function useNow(resumeAt?: string): number {
   const [now, setNow] = useState(() => Date.now());
+  const seen = useRef(resumeAt);
   useEffect(() => {
-    const id = setTimeout(() => setNow(Date.now()), nextRefreshMs(now, resumeAt));
+    const tick = () => setNow(Date.now());
+    const changed = seen.current !== resumeAt;
+    seen.current = resumeAt;
+    const id = setTimeout(tick, changed ? 0 : nextRefreshMs(Date.now(), resumeAt));
+    const iv = setInterval(() => isStale(now, Date.now(), resumeAt) && tick(), 60_000);
     const onVis = () => {
-      if (document.visibilityState === "visible") setNow(Date.now());
+      if (document.visibilityState === "visible") tick();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       clearTimeout(id);
+      clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [now, resumeAt]);
@@ -76,12 +84,24 @@ export function MissionBadge({ mission, compact = false, slot }: { mission: Miss
   const [mode, setMode] = useState<TipMode>(null);
   const boxRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
+  const waiting = !!mission.resumeAt && Date.parse(mission.resumeAt) > now;
+  const until = due(t, mission.until, now);
+  const resume = waiting ? due(t, mission.resumeAt!, now) : null;
+  const text = resume ? `${t("等到")} ${resume.short}` : `${t("截止")} ${until.short}`;
+  const title =
+    `${t("值守中")} · ${t("截止")} ${until.full} · ${t("已提醒")} ${mission.nudges}` + (resume ? `\n${t("等到")} ${resume.full}` : "") + `\n${mission.goal}`;
+  // 浮层内容（多一行「等到」、目标变了）或视口（转屏、改窗口大小）变了都要重新夹一次
   useLayoutEffect(() => {
     const box = boxRef.current;
     const tip = tipRef.current;
     if (!mode || !box || !tip) return;
-    tip.style.left = `${tipShift(box.getBoundingClientRect().left, tip.offsetWidth, window.innerWidth)}px`;
-  }, [mode]);
+    const place = () => {
+      tip.style.left = `${tipShift(box.getBoundingClientRect().left, tip.offsetWidth, window.innerWidth)}px`;
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [mode, title]);
   useEffect(() => {
     if (mode !== "pin") return;
     const onDown = (e: PointerEvent) => {
@@ -90,12 +110,6 @@ export function MissionBadge({ mission, compact = false, slot }: { mission: Miss
     document.addEventListener("pointerdown", onDown, true);
     return () => document.removeEventListener("pointerdown", onDown, true);
   }, [mode]);
-  const waiting = !!mission.resumeAt && Date.parse(mission.resumeAt) > now;
-  const until = due(t, mission.until, now);
-  const resume = waiting ? due(t, mission.resumeAt!, now) : null;
-  const text = resume ? `${t("等到")} ${resume.short}` : `${t("截止")} ${until.short}`;
-  const title =
-    `${t("值守中")} · ${t("截止")} ${until.full} · ${t("已提醒")} ${mission.nudges}` + (resume ? `\n${t("等到")} ${resume.full}` : "") + `\n${mission.goal}`;
   const tone = waiting ? "text-warning" : "text-info";
   if (compact) {
     return (

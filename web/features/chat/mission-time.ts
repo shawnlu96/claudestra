@@ -31,6 +31,16 @@ export function nextRefreshMs(now: number, resumeAt?: string): number {
 }
 
 /**
+ * 兜底检查：上次取的「现在」（shown）到真实现在（real）之间，本地日期变了或跨过了 resumeAt，就该重算。
+ * 正常情况下计时器会准时刷新，这里只接住计时器被系统睡眠拖晚的情况。
+ */
+export function isStale(shown: number, real: number, resumeAt?: string): boolean {
+  if (new Date(shown).toDateString() !== new Date(real).toDateString()) return true;
+  const r = resumeAt ? Date.parse(resumeAt) : NaN;
+  return r > shown && r <= real;
+}
+
+/**
  * 浮层相对徽章左边缘的水平位移（px）：优先和徽章左对齐，右边放不下就往左挪，挪到屏幕左边距为止。
  * 按浮层实测宽度算（不是最大宽度），窄屏上短浮层也不会被误判成放不下。
  */

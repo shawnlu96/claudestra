@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { nextRefreshMs, resolveUntil, tipShift } from "../web/features/chat/mission-time";
+import { isStale, nextRefreshMs, resolveUntil, tipShift } from "../web/features/chat/mission-time";
 
 // TZ 跨测试文件共享（同一进程）。delete process.env.TZ 不会让 Bun 回到原时区，只能显式赋回原值
 const saved = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -49,6 +49,44 @@ describe("nextRefreshMs", () => {
     expect(nextRefreshMs(now, "2026-09-29T14:15:00Z")).toBe(15 * 60_000 + 1000);
     expect(nextRefreshMs(now, "2026-09-29T13:00:00Z")).toBe(2 * 3_600_000 + 1000);
     expect(nextRefreshMs(now, "2026-09-30T03:00:00Z")).toBe(2 * 3_600_000 + 1000);
+  });
+});
+
+describe("refresh after resumeAt changes mid-backoff (badge mounted hours earlier)", () => {
+  // 复验复现的场景（上海）：09:00 挂载，14:00 bridge 改 resumeAt。延迟必须从真实的 14:00 算，不能从 state 里的 09:00 算
+  const mounted = Date.parse("2026-09-29T01:00:00Z"); // 上海 09:00
+  const real = Date.parse("2026-09-29T06:00:00Z"); // 上海 14:00
+  test("resumeAt set to 14:05 → fires at 14:05, not 19:05", () => {
+    process.env.TZ = "Asia/Shanghai";
+    expect(nextRefreshMs(real, "2026-09-29T06:05:00Z")).toBe(5 * 60_000 + 1000);
+    expect(nextRefreshMs(mounted, "2026-09-29T06:05:00Z")).toBe(5 * 3_600_000 + 5 * 60_000 + 1000); // 旧写法的 5 小时
+  });
+  test("resumeAt cleared at 14:00 → next wake is tonight's midnight, not tomorrow 05:00", () => {
+    process.env.TZ = "Asia/Shanghai";
+    expect(real + nextRefreshMs(real)).toBe(Date.parse("2026-09-29T16:00:00Z") + 1000);
+  });
+});
+
+describe("isStale (timers delayed by system sleep)", () => {
+  test("local day changed → stale", () => {
+    process.env.TZ = "Asia/Shanghai";
+    expect(isStale(Date.parse("2026-09-29T15:30:00Z"), Date.parse("2026-09-29T16:10:00Z"))).toBe(true); // 23:30 → 00:10
+  });
+  test("crossed resumeAt → stale; not yet, or resumeAt already past before shown → not stale", () => {
+    process.env.TZ = "Asia/Shanghai";
+    const shown = Date.parse("2026-09-29T06:00:00Z");
+    expect(isStale(shown, Date.parse("2026-09-29T06:10:00Z"), "2026-09-29T06:05:00Z")).toBe(true);
+    expect(isStale(shown, Date.parse("2026-09-29T06:03:00Z"), "2026-09-29T06:05:00Z")).toBe(false);
+    expect(isStale(shown, Date.parse("2026-09-29T06:10:00Z"), "2026-09-29T05:00:00Z")).toBe(false);
+    expect(isStale(shown, Date.parse("2026-09-29T06:10:00Z"))).toBe(false);
+  });
+  test("day boundary follows the device zone", () => {
+    const shown = Date.parse("2026-09-29T15:30:00Z");
+    const real = Date.parse("2026-09-29T16:10:00Z");
+    process.env.TZ = "Asia/Tokyo"; // 00:30 → 01:10，同一天
+    expect(isStale(shown, real)).toBe(false);
+    process.env.TZ = "Asia/Shanghai"; // 23:30 → 00:10，跨天
+    expect(isStale(shown, real)).toBe(true);
   });
 });
 
