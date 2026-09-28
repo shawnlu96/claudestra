@@ -238,7 +238,7 @@
     "size:tests/modal-parser.test.ts": 1116,
     "size:tests/session-history.test.ts": 781,
     "size:web/features/chat/chat-store.ts": 2439,
-    "size:web/features/chat/components/chat.tsx": 721,
+    "size:web/features/chat/components/chat.tsx": 676,
     "size:web/features/chat/components/composer.tsx": 799,
     "size:web/features/chat/components/message-list.tsx": 837,
     "size:web/features/chat/components/peers-modal.tsx": 450,
