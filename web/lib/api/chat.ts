@@ -4,7 +4,8 @@
  */
 import { apiAgentName, uiAgentName } from "@/lib/chat/agents";
 import { takeAskHint } from "./asks";
-import { api } from "./client";
+import { api, ApiError } from "./client";
+import { t } from "@/lib/i18n";
 import { invalidateHidden } from "./history";
 
 const enc = (agent: string) => encodeURIComponent(apiAgentName(agent));
@@ -91,4 +92,14 @@ export async function searchHistory(q: string, agent?: string): Promise<SearchHi
 export async function setHidden(agent: string, sessionId: string, fromSeq: number, toSeq: number, hide: boolean): Promise<void> {
   await api(`/agents/${enc(agent)}/hidden`, { method: "POST", json: { sessionId, fromSeq, toSeq, hide }, timeoutMs: 10_000 });
   invalidateHidden(agent);
+}
+
+/** bridge 带了已知 code 的发送失败，按当前界面语言说（字典在 lib/i18n-dict.ts）；其余用 bridge 的原始 error */
+const SEND_ERROR_TEXT: Record<string, string> = {
+  slash_owner_only: "斜杠命令只有 owner 能用，请直接发文字", // bridge/api-slash.ts：guest / scoped token 发了会直通的斜杠命令
+};
+
+export function sendErrorText(e: unknown): string {
+  const zh = e instanceof ApiError && e.code ? SEND_ERROR_TEXT[e.code] : undefined;
+  return zh ? t(zh) : (e as Error).message;
 }

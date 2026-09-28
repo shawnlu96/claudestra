@@ -101,3 +101,19 @@ export function channelBodyText(attrs: string, body: string): string {
 function ownerWordsOfAnswer(attrs: string, text: string): string {
   return /(?:^|\s)trigger="ask_answer"/.test(attrs) ? text.split("\n").slice(1).join("\n").trim() : text;
 }
+
+const COMMAND_LINE_MAX = 200;
+
+/** 斜杠命令记录的原文（<command-name>/x</command-name> ± <command-args>…）→「/x 参数」；不是命令记录 → null */
+export function commandRecordLine(raw: string): string | null {
+  const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(raw);
+  return cmd ? commandLine(cmd[1], /<command-args>([\s\S]*?)<\/command-args>/.exec(raw)?.[1]) : null;
+}
+
+/** 斜杠命令记录（session-history 还原 <command-name> / <command-args>）→ 历史里的一行：带上参数（Web 直通 / TUI 直敲的参数原本只剩「/x」，owner 看不到敲进去了什么），压成一行、限长 */
+export function commandLine(name: string, args?: string): string {
+  const a = (args ?? "").replace(/\s+/g, " ").trim();
+  const line = a ? `${name} ${a}` : name;
+  const chars = Array.from(line);
+  return chars.length > COMMAND_LINE_MAX ? `${chars.slice(0, COMMAND_LINE_MAX).join("")}…` : line;
+}

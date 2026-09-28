@@ -24,6 +24,7 @@ export const DICT: Record<string, string> = {
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
+  "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
   "正在回复…": "Replying…",
   "仍在工作…": "Still working…",
   "正在压缩上下文…": "Compacting context…",

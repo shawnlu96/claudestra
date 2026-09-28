@@ -72,7 +72,8 @@ import { paneLooksWorking } from "../lib/turn-state.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
-import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
+import { commandsForAgent } from "./slash-registry.js";
+import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
@@ -200,6 +201,18 @@ let deps: ApiDeps | null = null;
 export function initApiRoutes(d: ApiDeps): void {
   deps = d;
 }
+
+/** 斜杠直通的运行时依赖（api-slash.ts 不 import hub，依赖从这里注入） */
+const slashDeps = (d: ApiDeps): SlashDeps => ({
+  sendLine: tmuxSendLine,
+  mirror: d.mirrorApiExchange,
+  scheduleClearRotation: d.scheduleClearRotation,
+  markThinking: (a) => {
+    const ev = agentNameForChannel(a.channelId) || (a.channelId === CONTROL_CHANNEL_ID ? "master" : a.name);
+    emitEvent({ agent: ev, chatId: a.channelId, type: "agent_status", data: { status: "thinking" } });
+  },
+  record: (cmd, a) => recordMetric("api_slash", { channelId: a.channelId, agent: a.name, meta: { cmd } }),
+});
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
 
@@ -1253,64 +1266,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     waitSec = Math.min(Math.max(waitSec, 0), 300);
     if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
-    // Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
-    // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的
-    // "/xxx" 落回普通消息——用户可能真想发以 / 开头的文本。TUI 类命令没有回合，
-    // 响应带 slash:true 让前端不进「正在回复」态。
-    // v2.11: peer token 不给 slash 直通——那是 TUI 控制权(/clear 可跨机清上下文),
-    // messaging scope 不该静默升级(review 2026-07-19 #5)。peer 文本一律按普通消息投。
-    const slashM = attachments.length === 0 && !principal.peer ? text.trim().match(/^\/([\w:-]+)(?:\s+([\s\S]+))?$/) : null;
-    if (slashM) {
-      const regName = agent.name === "master" ? null : agent.name;
-      // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
-      // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；Pi 照旧回落到 CC 注册表
-      const rt = String((agent as any).runtime || "");
-      const nativeHit = runtimeCommandsFor(rt, agent.name)?.find((c) => c.name === slashM[1]);
-      const resolved = nativeHit
-        ? { ok: true as const, ccText: `/${nativeHit.invokeName}${(slashM[2] || "").trim() ? ` ${slashM[2].trim()}` : ""}`, scope: nativeHit.scope }
-        : rt === "codex" ? { ok: false as const, reason: "not a Codex command" } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
-      if (resolved.ok) {
-        const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
-        try {
-          await tmuxSendLine(win, resolved.ccText);
-          // v2.16.2 输入框打 /model 也登记切换意图(peer 报告根因 1:slash 直通
-          // 无任何代按逻辑,弹窗迟到 1.5s 无人按,agent 卡死)——watcher 兜底代按
-          if (slashM[1] === "model" && (slashM[2] || "").trim()) {
-            const { noteModelSwitchIntent } = await import("./permission-watcher.js");
-            noteModelSwitchIntent(agent.name, resolveModelAlias((slashM[2] || "").trim()));
-          }
-        } catch (e) {
-          return apiJson(500, { ok: false, error: `tmux 注入失败: ${(e as Error).message}` });
-        }
-        const tn = principal.name || tokenId;
-        deps.mirrorApiExchange({ kind: "api", tokenId, name: tn }, agent.channelId, `[🌐 API←${tn}] ${text}`).catch(() => {});
-        recordMetric("api_slash", { channelId: agent.channelId, agent: agent.name, meta: { cmd: slashM[1] } });
-        // skill 类命令(非 builtin)注入后跑的是真实 LLM 回合,Stop hook 会正常
-        // 收尾——发 thinking 让 web 思考徽章/侧栏 busy 亮起(2026-07-24 owner:
-        // 「命令运行时没有思考中提示,agent 状态也不是工作状态」)。builtin TUI
-        // 命令(/cost /compact /context…)无回合无 Stop hook,发了会永久卡
-        // thinking,维持不发。
-        if (resolved.scope !== "builtin") {
-          const evAgentSlash =
-            agentNameForChannel(agent.channelId) ||
-            (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
-          emitEvent({ agent: evAgentSlash, chatId: agent.channelId, type: "agent_status", data: { status: "thinking" } });
-        }
-        // 直通的 /clear 与 clear 端点一样会轮转 session——必须同样挂轮转收尾，
-        // 否则 registry/watcher/history 盯死文件（2026-07-15 用户在 Web 输入框
-        // 打 /clear，temp 的历史冻结整整 7 天才被发现）。
-        if (slashM[1] === "clear" && agent.name !== "master" && agent.cwd) {
-          deps.scheduleClearRotation(agent.name, agent.channelId, agent.cwd, agent.sessionId);
-        }
-        console.log(`⚡ [api] slash 注入 ${agent.name}: ${resolved.ccText}`);
-        return apiJson(202, { ok: true, accepted: true, slash: true, ccText: resolved.ccText, agent: agent.name });
-      }
-      const other = isProjectSkillForOtherAgent(slashM[1], regName);
-      if (other) {
-        return apiJson(409, { ok: false, error: `/${slashM[1]} 是 ${other.replace(/^agent-/, "")} 的项目技能，当前 agent 不可用` });
-      }
-      // 不是已知命令 → 继续按普通消息投递
-    }
+    // Web 斜杠直通只给 owner（bridge/api-slash.ts）：能直通就注入 TUI 并在这里返回（非 owner → 403）；不是命令 → 按普通消息往下投
+    const slashRes = await handleSlashPassthrough({ principal, tokenId, agent, text, hasAttachments: attachments.length > 0 }, slashDeps(deps));
+    if (slashRes) return slashRes;
 
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
@@ -1397,6 +1355,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     // Pi / Codex 的命令来自它们自己（lib/runtime-commands.ts）；这里也决定了「能注入什么」：面板里没有的命令，直通分支会拒绝 —— 两边同源。
     const runtime = String((agent as any).runtime || "") || "claude-code";
+    // 斜杠直通只给 owner（api-slash.ts）：别人拿到命令表也用不了，给空表，网页就不显示候选 / 技能按钮
+    if (!isOwnerPrincipal(principal)) return apiJson(200, { ok: true, agent: agent.name, runtime, commands: [], slash: false });
     const commands = runtimeCommandsFor(runtime, agent.name) ?? commandsForAgent(agent.name === "master" ? null : agent.name);
     return apiJson(200, { ok: true, agent: agent.name, runtime, commands });
   }

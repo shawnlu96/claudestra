@@ -18,7 +18,8 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT } from "./session-archive.js";
-import { channelBodyText } from "./inbound-body.js";
+import { channelBodyText, commandRecordLine } from "./inbound-body.js";
+import { sanitizeComponents } from "./history-components.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -177,54 +178,6 @@ function isReplyTool(name: string): boolean {
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-}
-
-/** jsonl 里的 components 不可信——只放行结构完整的按钮行/选单行，其余丢弃。 */
-function sanitizeComponents(raw: unknown): ReplyComponentRow[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ReplyComponentRow[] = [];
-  for (const row of raw) {
-    if (!row || typeof row !== "object") continue;
-    const r = row as Record<string, unknown>;
-    if (r.type === "buttons" && Array.isArray(r.buttons)) {
-      const buttons = r.buttons
-        .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
-        .filter((b) => typeof b.id === "string" && typeof b.label === "string")
-        .map((b) => ({
-          id: b.id as string,
-          label: b.label as string,
-          ...(typeof b.style === "string" ? { style: b.style } : {}),
-          ...(typeof b.emoji === "string" ? { emoji: b.emoji } : {}),
-        }));
-      if (buttons.length) out.push({ type: "buttons", buttons });
-    } else if ((r.type === "select" || r.type === "multiselect") && typeof r.id === "string" && Array.isArray(r.options)) {
-      const options = r.options
-        .filter((o): o is Record<string, unknown> => !!o && typeof o === "object")
-        .filter((o) => typeof o.label === "string" && typeof o.value === "string")
-        .map((o) => ({
-          label: o.label as string,
-          value: o.value as string,
-          ...(typeof o.description === "string" ? { description: o.description } : {}),
-        }));
-      if (options.length) {
-        // v2.14+ multiselect 与 select 同构，只多 min/max/submitLabel 三个可选字段。
-        // ⚠ 这里漏认一种类型的后果不是「样式不对」而是**整组交互从历史里消失**——
-        // 刷新页面后按钮就没了（owner 2026-07-25 实报「哪有多选按钮」）。
-        out.push({
-          type: r.type as "select" | "multiselect",
-          id: r.id,
-          ...(typeof r.placeholder === "string" ? { placeholder: r.placeholder } : {}),
-          ...(r.type === "multiselect" && typeof r.min === "number" ? { min: r.min } : {}),
-          ...(r.type === "multiselect" && typeof r.max === "number" ? { max: r.max } : {}),
-          ...(r.type === "multiselect" && typeof r.submitLabel === "string"
-            ? { submitLabel: r.submitLabel }
-            : {}),
-          options,
-        });
-      }
-    }
-  }
-  return out;
 }
 
 export interface HistoryPage {
@@ -502,6 +455,38 @@ export async function readSessionHistory(
   }
 }
 
+/** system 类记录（parseHistoryLines 用）：压缩分界线、斜杠命令、回合耗时回填。处理了返回 true，其它 system 记录不进历史 */
+function applySystemRecord(rec: any, seq: number, ts: string | null, all: HistoryMessage[]): boolean {
+  if (rec.type !== "system") return false;
+  if (rec.subtype === "compact_boundary") {
+    // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
+    all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
+    return true;
+  }
+
+  // 新版 CC 把斜杠命令记成 system/local_command（内容同样是 <command-name>…<command-args>…），不认就整条从历史里消失
+  if (rec.subtype === "local_command") {
+    const cmd = typeof rec.content === "string" ? commandRecordLine(rec.content) : null;
+    if (cmd) all.push({ seq, ts, role: "system", text: cmd });
+    return true;
+  }
+
+  // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
+  // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
+  // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
+  if (rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
+    for (let j = all.length - 1; j >= 0; j--) {
+      if (all[j].role === "assistant") {
+        all[j].turnMs = rec.durationMs;
+        break;
+      }
+      if (all[j].role === "user") break; // 中间隔了用户消息就不回填
+    }
+    return true;
+  }
+  return false;
+}
+
 /**
  * 解析一段 jsonl 行为历史消息。seq = lineOffset + 行内下标,维持「全文件行号」
  * 坐标系(全读时 lineOffset=0;尾读时为窗口前缀的换行数)——与 searchSessionHistory
@@ -533,11 +518,7 @@ function parseHistoryLines(
     if (!rec) continue;
     const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
 
-    if (rec.type === "system" && rec.subtype === "compact_boundary") {
-      // 纯文本不带装饰——system 条目的分隔线样式由各前端自己渲染
-      all.push({ seq, ts, role: "system", text: "上下文已压缩（compact）" });
-      continue;
-    }
+    if (applySystemRecord(rec, seq, ts, all)) continue; // 压缩分界 / 斜杠命令 / 回合耗时
 
     if (rec.type === "attachment") {
       // v2.21.4 被队列吸收的入站消息:agent 忙时 channel 送达的消息先进 CC 队列,随后
@@ -557,20 +538,6 @@ function parseHistoryLines(
             all.push(msg);
           }
         }
-      }
-      continue;
-    }
-
-    // turn_duration → 回填到刚结束的那轮 assistant 的 turnMs。
-    // 只有正常收尾的回合才有这条(被打断的没有),前端据此给历史尾轮
-    // 渲染「✓ 完成 · 12.3s」——切后台错过 done 事件后刷新也能看到完成态。
-    if (rec.type === "system" && rec.subtype === "turn_duration" && typeof rec.durationMs === "number") {
-      for (let j = all.length - 1; j >= 0; j--) {
-        if (all[j].role === "assistant") {
-          all[j].turnMs = rec.durationMs;
-          break;
-        }
-        if (all[j].role === "user") break; // 中间隔了用户消息就不回填
       }
       continue;
     }
@@ -607,7 +574,7 @@ function parseHistoryLines(
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
       // TUI 斜杠命令记录（不带 isMeta 的裸 user 条目）不是用户打的字：
-      //   <command-name>/x</command-name> ± <command-message>…（顺序不定）→ system 轻条目「/x」
+      //   <command-name>/x</command-name> ± <command-message>… ± <command-args>…（顺序不定）→ system 轻条目「/x 参数」
       //   <local-command-stdout>输出</local-command-stdout> → system 轻条目（去 ANSI、截断）
       //   Pi 技能调用 <skill name="x" …>整份 SKILL.md</skill>[参数] → system 轻条目「/x 参数」
       // 不处理会把原始标签 / 整篇技能说明裸渲染成用户气泡。
@@ -620,8 +587,8 @@ function parseHistoryLines(
         continue;
       }
       if (/^<command-(name|message)>/.test(trimmed)) {
-        const cmd = /<command-name>(\/[\w:-]+)<\/command-name>/.exec(trimmed);
-        if (cmd) all.push({ seq, ts, role: "system", text: cmd[1] });
+        const cmd = commandRecordLine(trimmed);
+        if (cmd) all.push({ seq, ts, role: "system", text: cmd });
         continue; // 无 command-name 的畸形命令记录直接丢
       }
       const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(trimmed);

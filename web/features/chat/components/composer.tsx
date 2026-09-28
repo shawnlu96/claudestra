@@ -697,7 +697,7 @@ export function Composer() {
               title={t("Skills（斜杠命令面板）")}
               aria-label={t("打开 Skills 面板")}
               disabled={disabled}
-              className="flex size-8 items-center justify-center rounded-[9px] font-mono text-[15px] font-semibold text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent"
+              className={`${skills.length ? "flex" : "hidden"} size-8 items-center justify-center rounded-[9px] font-mono text-[15px] font-semibold text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-30 disabled:hover:bg-transparent`}
             >
               /
             </button>
