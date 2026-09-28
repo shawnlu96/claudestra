@@ -28,4 +28,15 @@ describe("paneMainTurnBusy", () => {
   test("真空闲", () => {
     expect(paneMainTurnBusy("✻ Worked for 46s · done 9:51 PM\n" + footer)).toBe(false);
   });
+
+  test("spinner 锚定行首：空闲画面里工具输出带「…(12s)」不算忙（N7 复核 P1：否则 Discord 抢占会对空闲 CC 连发 C-c）", () => {
+    const idle = ["⏺ Bash(bun run build)", "  ⎿  Compiling… (12s)", "     done", "", "✻ Worked for 20s · done 6:01 PM", footer].join("\n");
+    expect(paneMainTurnBusy(idle)).toBe(false);
+    expect(paneMainTurnBusy("  正在下载… (3s 左右)\n" + footer)).toBe(false);
+  });
+
+  test("跑过一小时的回合：spinner 计时带 h 也认", () => {
+    expect(paneMainTurnBusy("✽ Pondering… (1h 2m 3s · ↓ 9.9k tokens)\n" + footer)).toBe(true);
+    expect(paneMainTurnBusy("· Cooking… (1h 5s)\n" + footer)).toBe(true);
+  });
 });

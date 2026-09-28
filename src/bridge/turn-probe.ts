@@ -4,7 +4,7 @@
  * 免得「忙不忙」又散回四套判据。
  */
 import { readRegistryAgents } from "../lib/registry.js";
-import { MASTER_SESSION, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
+import { MASTER_SESSION, tmuxRawStrict, windowTarget } from "../lib/tmux-helper.js";
 import { turnState, type TurnState } from "../lib/turn-state.js";
 import { hasActiveBgActivities } from "./bg-activity-watcher.js";
 import { getAgentStatus } from "./event-bus.js";
@@ -21,7 +21,7 @@ export async function probeTurnAt(win: string | null, runtime: string | undefine
   let pane: string | null = null;
   if (win) {
     try {
-      pane = await tmuxRaw(["capture-pane", "-t", win, "-p"]);
+      pane = await tmuxRawStrict(["capture-pane", "-t", win, "-p"]); // Strict：出错要走 catch 记成未知，别拿空串去判
     } catch {
       pane = null; // 抓屏失败 = 画面未知，turnState 按 unknown 处理（押后闸放行、抢占不打断）
     }

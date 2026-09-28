@@ -7,7 +7,7 @@ import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { paneLooksWorking } from "../src/lib/tmux-helper.js";
-import { agentMsgMustWait, turnState, type TurnInput } from "../src/lib/turn-state.js";
+import { agentMsgMustWait, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
 
 const RULE = "─".repeat(80);
 const footer = (agentsBar: string[]) =>
@@ -58,6 +58,18 @@ describe("turnState：main 只看主回合", () => {
 
   test("CC 空闲 → idle", () => {
     expect(turnState(at({ status: "done" })).main).toBe("idle");
+  });
+
+  test("空画面（tmuxRaw 出错返回空串）→ unknown，不是 idle", () => {
+    expect(turnState(at({ pane: "" })).main).toBe("unknown");
+    expect(turnState(at({ pane: "\n\n  \n" })).main).toBe("unknown");
+  });
+
+  test("画面在压缩（手动 /compact，watcher 还没置 compacting）→ compacting，排在 busy 前面（人类消息不 C-c 掉压缩）", () => {
+    const compacting = ["✻ Compacting conversation… (12s)", "  ▰▰▰▱▱▱▱ 37%", footer([])].join("\n");
+    const s = turnState(at({ pane: compacting, status: "done" }));
+    expect(s.main).toBe("compacting");
+    expect(agentMsgMustWait(s)).toBe(true);
   });
 
   test("抓不到画面 → unknown（押后闸放行）；CC 横幅和忙碌标记都不在 → unknown", () => {
@@ -118,5 +130,17 @@ describe("押后队列：只剩后台在跑时 flush 能投出 agent 消息", ()
     }, "c-pm", "sweep");
     expect(delivered).toEqual(["交付"]);
     expect(held.get("c-pm") ?? []).toEqual([]);
+  });
+});
+
+describe("thinking 反向对账（permission-watcher）的单帧判据", () => {
+  test("只剩后台在跑、事件态卡 thinking → 判卡住（会收敛成带 bgPending 的 done）", () => {
+    expect(thinkingLooksStuck(ONLY_BG, "thinking", false)).toBe(true);
+    expect(thinkingLooksStuck(WAITING_BG, "thinking", false)).toBe(true);
+  });
+  test("主回合在跑 / 长 MCP 调用 / 本来就不是 thinking → 不收敛", () => {
+    expect(thinkingLooksStuck(MAIN_BUSY_WITH_BG, "thinking", false)).toBe(false);
+    expect(thinkingLooksStuck(ONLY_BG, "thinking", true)).toBe(false);
+    expect(thinkingLooksStuck(ONLY_BG, "done", false)).toBe(false);
   });
 });

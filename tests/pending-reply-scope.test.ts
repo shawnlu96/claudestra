@@ -7,7 +7,7 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { dropPendingsForChannel, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
 import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
@@ -167,5 +167,16 @@ describe("N7：kill 之后的欠账 + 拦截只追非 agent 来源", () => {
     expect(stopPick(replies, PM, true)?.key).toBe("thr-owner");
     expect(nudgesForOrigin("local")).toBe(false);
     for (const k of ["user", "api", "bridge", undefined]) expect(nudgesForOrigin(k)).toBe(true);
+  });
+});
+
+describe("hangsInterAgentWatchdog（N7 复核 P2-5）", () => {
+  test("被 kill 的 A 押在 B 队列里的消息，A 死后才投出：内容照投，但不给 B 挂看门狗", () => {
+    expect(hangsInterAgentWatchdog(false, undefined, false)).toBe(false);
+  });
+  test("发送方在线的普通请求照挂；发给自己、oneShot 不挂", () => {
+    expect(hangsInterAgentWatchdog(false, undefined, true)).toBe(true);
+    expect(hangsInterAgentWatchdog(true, undefined, true)).toBe(false);
+    expect(hangsInterAgentWatchdog(false, true, true)).toBe(false);
   });
 });

@@ -84,20 +84,28 @@ export async function interruptWindow(target: string, runtime: string | undefine
  * 不拦的话每条 Discord 消息都会误发一次打断键（空闲 Codex 收到 Esc 会挂上 backtrack）。
  * 判据是 turnState 的 main（只看主回合：只剩后台 subagent 时 C-c 会把它们全停掉）；unknown（CC 文案可能变了）时宁可不打断。
  * bridge 注入带事件态的 verdictOf（bridge/turn-probe.ts），默认值只看屏幕。
+ * cooldown 与 deliverToLocal 的抢占共用一份：Discord 入站先打断一次，紧接着 deliverToLocal 再判一次——
+ * 若判据误把空闲当忙，空闲 CC 在短窗内收到两次 C-c 就退出了。
  */
 export async function preemptIfBusy(
   target: string,
   runtime: string | undefined | null,
-  verdictOf: (target: string) => Promise<string> = async (t) => turnState({ pane: await tmuxRaw(["capture-pane", "-t", t, "-p"]), runtime }).main,
+  verdictOf: (target: string) => Promise<string> = async (t) => {
+    const pane = await tmuxRawStrict(["capture-pane", "-t", t, "-p"]).catch(() => null); // 抓不到 = unknown，下面按判据失效跳过
+    return turnState({ pane, runtime }).main;
+  },
   interrupt: (target: string, runtime: string | undefined | null) => Promise<readonly string[]> = interruptWindow,
+  cooldown?: { ready: () => boolean; mark: () => void },
 ): Promise<boolean> {
   const control = controlFor(runtime);
   if (!control.preemptOnHumanMessage || !control.paneHeuristics) return false;
+  if (cooldown && !cooldown.ready()) return false;
   const verdict = await verdictOf(target);
   if (verdict === "unknown") console.warn(`⚠️ ${target} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
   if (verdict !== "busy") return false;
   console.log(`⚡ 新消息到达但 ${target} 还在忙，打断`);
   const keys = await interrupt(target, runtime).catch(() => []); // 发键失败 = 没打断成，照常投递，消息不丢
+  if (keys.length > 0) cooldown?.mark();
   return keys.length > 0;
 }
 

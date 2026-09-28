@@ -1358,9 +1358,9 @@ export function paneLooksWorking(pane: string): boolean {
   return paneMainTurnBusy(tail) || /Waiting for \d+ background/i.test(tail) || /\b(\d+m\s*)?\d+s\s*·\s*[↓↑]\s*[\d.]+k?\s*tokens/i.test(tail);
 }
 
-/** 只认主回合在跑。③④ 在主回合已结束、只剩后台 subagent 时照样显示,这时 C-c 会把后台 agent 全部停掉
- *  (CC 记 agents_killed、标 stoppedByUser)——人类消息抢占只能看这个。见 tests/modal-parser.test.ts。 */
+/** 只认主回合在跑(③④ 只剩后台时照样显示,那时的 C-c 会把后台 agent 全停掉)。spinner 用 CC_BUSY_RE 锚定行首的那支:
+ *  不锚定会把空闲画面里的「⎿ Compiling… (12s)」判忙,Discord 抢占就会对空闲 CC 连发 C-c。见 tests/pane-main-turn.test.ts。 */
 export function paneMainTurnBusy(pane: string): boolean {
   const tail = pane.split("\n").slice(-14).join("\n");
-  return /esc to interrupt/i.test(tail) || /…\s*\((\d+m\s*)?\d+s\b/.test(tail) || /Press up to edit queued messages/i.test(tail);
+  return CC_BUSY_RE.test(tail) || /Press up to edit queued messages/i.test(tail);
 }

@@ -168,13 +168,14 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dropPendingsForChannel, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
+import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { interruptWindow, preemptIfBusy, stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
+import { PreemptCooldown } from "./lib/preempt-cooldown.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
@@ -748,9 +749,8 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
 }
 
 /** 投递到本地 Claude Code session —— 通过 ws 注入一条 "message" 事件 */
-/** 人类连发抢占的每频道冷却：C-c 后短窗内不再重复打断（防打断叠加 + 双 C-c 风险）。 */
-const lastPreemptAt = new Map<string, number>();
-const PREEMPT_COOLDOWN_MS = 4_000;
+/** 人类连发抢占的每频道冷却(与 Discord 入站那道共用)：C-c 后短窗内不再重复打断（防打断叠加 + 双 C-c 退出）。 */
+const preemptCooldown = new PreemptCooldown(4_000);
 
 // ── 大总管的 jsonl watcher（v2.14+）──────────────────────────────────────
 // master 不在 registry（它是 tmux window 0，没有 create/resume 那套注册流程），
@@ -830,7 +830,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     // C-c 掐断本机正跑的回合等于让外机打断本机用户的活(review 2026-07-19 #1)
     (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) &&
     env.intent === "request" &&
-    Date.now() - (lastPreemptAt.get(to.channelId) ?? 0) > PREEMPT_COOLDOWN_MS
+    preemptCooldown.ready(to.channelId)
   ) {
     try {
       const { win, runtime: targetRuntime } = await resolveTurnWindow(to.channelId, CONTROL_CHANNEL_ID);
@@ -838,7 +838,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
       // v2.23+ 能把消息 steer / 排进回合的运行时(Pi)**人类消息一律不打断**:打断反而把
       // 干到一半的回合掐了(2026-09-14 实测)。由 control.preemptOnHumanMessage 声明。
       if (win && (await probeTurnAt(win, targetRuntime, evAgent)).main === "busy" && controlFor(targetRuntime).preemptOnHumanMessage) {
-        lastPreemptAt.set(to.channelId, Date.now());
+        preemptCooldown.mark(to.channelId);
         await interruptWindow(win, targetRuntime);
         recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
         // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
@@ -916,11 +916,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     // reply→别agent forward 都经这里），记看门狗 pending。
     // v2.4.16+: meta.skipInterAgentWatchdog=true 时不挂 watchdog（oneShot 的 fire
     // -and-forget 场景，caller 不期待回应，watchdog 没必要打扰 target）。
-    if (
-      env.from.kind === "local" &&
-      env.from.ws !== to.ws &&
-      !env.meta.skipInterAgentWatchdog
-    ) {
+    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, clients.has(env.from.channelId))) {
       pendingInterAgentMsg.set(to.channelId, {
         fromLabel: env.from.agentName || "另一个 agent",
         fromChannelId: env.from.channelId,
@@ -1474,7 +1470,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
       const targetWindow = agent ? `master:${agent.name}` : `master:0`;
       // 只看主回合（契约可疑时宁可不打断）；只对 preemptOnHumanMessage + paneHeuristics 的运行时（CC），Pi / Codex 跳过
       const verdict = (w: string) => probeTurnAt(w, agent?.runtime, agent?.name ?? "master").then((s) => s.main);
-      if (await preemptIfBusy(targetWindow, agent?.runtime, verdict)) await Bun.sleep(400);
+      // 打断后等 CC 收尾一拍（与 deliverToLocal 同为 1.2s）：共用冷却让那边不再打断、也就不再等，立刻投会混进垂死回合的尾流
+      if (await preemptIfBusy(targetWindow, agent?.runtime, verdict, undefined, preemptCooldown.for(channelId))) await Bun.sleep(1200);
     } catch { /* non-critical */ }
 
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着

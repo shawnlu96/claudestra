@@ -19,7 +19,7 @@ import {
   detectDevChannelsModal,
   paneShowsCompacting,
   paneCompactProgress,
-  paneLooksWorking,
+  paneMainTurnBusy,
   detectSwitchConfirmPrompt,
   effortDialogLevel,
   modelFamilies,
@@ -42,6 +42,7 @@ import { emitEvent } from "./event-bus.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { controlFor } from "../lib/runtimes/index.js";
+import { thinkingLooksStuck } from "../lib/turn-state.js";
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -545,32 +546,21 @@ async function checkAgent(
       compactPctSeen.delete(channelId);
     }
     if (!noPaneHeuristics && !compacting && st === "compacting") {
-      const working = paneLooksWorking(pane);
+      const working = paneMainTurnBusy(pane); // 只剩后台在跑 = 主回合已结束,收敛成 done(否则卡 thinking,押后闸永远判忙)
       console.log(`📦 ${agentName} 压缩已不在 pane 上(兜底收敛 → ${working ? "thinking" : "done"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: working ? "thinking" : "done", trigger: "compact_end_pane" } });
     }
   } catch { /* 检测失败不影响其余 */ }
 
-  // thinking 反向对账:pane 空闲(❯ 在场且无 esc to interrupt)而事件态仍
-  // thinking,连续 2 分钟 → 强制发 done 收敛。真回合的间隙(工具间/流转)
-  // 不会持续 2 分钟空闲提示符,不误伤。
+  // thinking 反向对账:pane 主回合空闲(❯ 在场、无 spinner / esc to interrupt)而事件态仍
+  // thinking,连续 2 分钟 → 强制发 done 收敛。真回合的间隙(工具间/流转)不会持续 2 分钟空闲提示符。
   try {
     const { getAgentStatus, emitEvent, isChannelExternallyBusy } = await import("./event-bus.js");
     const { hasActiveBgActivities } = await import("./bg-activity-watcher.js");
-    // v2.21.2+ 判据集中到 paneLooksWorking(五信号;此前只认 esc to interrupt,
-    // 一天误收敛 444 次——owner 截图 gc-car 工具还在刷、下面已画绿勾)
-    const paneIdleNow = /❯/.test(pane) && !paneLooksWorking(pane);
-    // v2.21.1+ 「pane idle 但 agent 逻辑在忙」豁免(owner 2026-09-02:「每次起
-    // background task 都触发[提前完成],不只 codex」)。对账本意是抓「状态卡
-    // thinking 但真闲」的死状态,但 agent 大量异步等待时 pane idle 是常态,不是
-    // 卡死。两类可靠的「真在忙」信号并集豁免:
-    //   ① externallyBusy:bridge 经手的长 MCP 调用(ask_codex,实测 303s)
-    //   ② hasActiveBgActivities:bg-activity-watcher 追踪的后台 shell task(3min 不增长判结束) /
-    //      subagent(交了答复或被中断才结束,在跑工具静默最多挂 30min,见 lib/subagent-progress.ts)
-    // 命中任一 → 不收敛 done + 重置计时器,真闲下来后重新累计 120s 才判。
-    // 残留边界:静默 bg shell(3min 不写输出)会被判结束,之后若仍 idle 可能误判——少见,且此刻无可观测活动。
-    const logicallyBusy = isChannelExternallyBusy(channelId) || hasActiveBgActivities(agentName);
-    if (getAgentStatus(agentName) === "thinking" && paneIdleNow && !logicallyBusy) {
+    // 单帧判据见 lib/turn-state.ts thinkingLooksStuck:只看主回合,只剩后台在跑不豁免(收敛成带 bgPending 的 done,
+    // 前端显示「后台继续中」);bridge 经手的长 MCP 调用(ask_codex,实测 303s)仍豁免。不满足就重置计时器,重新累计 120s。
+    const bgPending = hasActiveBgActivities(agentName);
+    if (thinkingLooksStuck(pane, getAgentStatus(agentName), isChannelExternallyBusy(channelId))) {
       const first = idleWhileThinking.get(channelId);
       if (first === undefined) {
         idleWhileThinking.set(channelId, Date.now());
@@ -584,7 +574,7 @@ async function checkAgent(
         } else {
           idleWhileThinking.delete(channelId);
           console.log(`🧭 thinking 对账: ${agentName} 事件态 thinking 但 pane 已空闲 ${Math.round((Date.now() - first) / 1000)}s、jsonl 无新写入,强制收敛为 done`);
-          emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "reconcile" } });
+          emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "reconcile", ...(bgPending ? { bgPending: true } : {}) } });
         }
       }
     } else {

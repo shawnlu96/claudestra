@@ -111,3 +111,12 @@ export function dropPendingsForChannel(
   }
   return n;
 }
+
+/**
+ * agent→agent 消息送达时要不要给接收方挂 inter-agent 看门狗（Stop 时没回应就催一次）。
+ * 发送方已不在线（被 kill；押在队列里的消息在它死后才投出）就不挂——内容照投，但催接收方回一个已销毁的 agent 没有意义。
+ * 发给自己（同一个 ws）和 oneShot（skipInterAgentWatchdog）也不挂。
+ */
+export function hangsInterAgentWatchdog(sameWs: boolean, skipWatchdog: boolean | undefined, senderOnline: boolean): boolean {
+  return !sameWs && !skipWatchdog && senderOnline;
+}
