@@ -66,11 +66,12 @@ describe("interruptVia：interruptOnlyWhenBusy", () => {
     expect(f.sent).toEqual([]);
   });
 
-  test("CC / Pi / 缺省：不看屏幕，照旧无条件发 C-c", async () => {
-    for (const rt of ["claude-code", "pi", undefined]) {
+  test("CC / 缺省发 Esc、Pi 发 C-c：都不看屏幕，无条件发", async () => {
+    // CC 用 Esc：主回合空闲、只剩后台子 agent 时 C-c 会停掉全部后台 agent，Esc 不会（2026-09-28 沙箱实测）
+    for (const [rt, key] of [["claude-code", "Escape"], [undefined, "Escape"], ["pi", "C-c"]] as const) {
       const f = fakeIO(CODEX_IDLE);
-      expect(await interruptVia(f.io, rt)).toEqual(["C-c"]);
-      expect(f.sent).toEqual(["C-c"]);
+      expect(await interruptVia(f.io, rt)).toEqual([key]);
+      expect(f.sent).toEqual([key]);
       expect(f.captures()).toBe(0);
     }
   });
