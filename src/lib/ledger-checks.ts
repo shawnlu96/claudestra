@@ -20,6 +20,7 @@ import {
   type TaskKind,
 } from "./ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "./ledger-store.js";
+import { FP_RE } from "./relay-protocol.js";
 
 /** specRev 不在里面：它只由阶段机（回退到 spec）维护 */
 export const ITEM_FIELDS = ["title", "ownerWords", "priority", "status", "oneLine", "next", "extra"] as const;
@@ -120,13 +121,27 @@ export function checkNewTask(db: Database, actor: string, input: NewTask): boole
 }
 
 type Assignment = Pick<LedgerTask, "agent" | "assigneeKind" | "assignee">;
-const ASSIGNEE_MAX = 64;
+/** 本机 agent 名：与 manager 建 agent 时的黑名单同一口径（core.ts NAME_BLOCKLIST_RE），另外不许 @（旧的 agent@peer 写法） */
+const AGENT_NAME_RE = /^[^\s"'`$;&|<>()*?{}\\/:~@\p{Cc}]{1,64}$/u;
+/** 本机的人：owner 或 guest principal（lib/devices.ts 的 id 形状）；token principal 可能是 peer，不算人 */
+const HUMAN_RE = /^local:(owner:self|guest:[0-9a-f]{1,64})$/;
+
+/**
+ * assignee 的三种格式（docs 28-human-collab 附录 B-2）：agent = 本机 agent 名；human = local:<principalId>；
+ * peer_agent = <fp>/<agent>，fp 是对方实例的指纹——peer 的名字能改、会重名，不能当键。返回错误原因，合格为 null。
+ */
+export function assigneeFormatError(kind: AssigneeKind, who: string): string | null {
+  if (kind === "agent") return AGENT_NAME_RE.test(who) && who !== "owner" ? null : "本机 agent 名（不含空白、引号、/ : @ 等）";
+  if (kind === "human") return HUMAN_RE.test(who) ? null : "local:<principalId>，如 local:owner:self、local:guest:1a2b3c4d";
+  const slash = who.indexOf("/");
+  const ok = slash > 0 && FP_RE.test(who.slice(0, slash)) && AGENT_NAME_RE.test(who.slice(slash + 1));
+  return ok ? null : "<fp>/<agent>，fp 是对方指纹（xxxx-xxxx-xxxx-xxxx 小写十六进制）";
+}
 
 function checkAssignee(kind: unknown, who: string): void {
   if (!ASSIGNEE_KINDS.includes(kind as AssigneeKind)) throw new LedgerError("invalid", `assigneeKind 只能是 ${ASSIGNEE_KINDS.join(" / ")}，收到 ${String(kind)}`);
-  // 控制字符与空白会让 name@peer 路由、principal 比对都对不上，名字太长多半是把整句话塞进来了
-  if ([...who].length > ASSIGNEE_MAX || /[\s\p{Cc}]/u.test(who)) throw new LedgerError("invalid", `assignee 不能含空白 / 控制字符，且不超过 ${ASSIGNEE_MAX} 字：${who}`);
-  if (kind === "peer_agent" && !/^[^@]+@[^@]+$/.test(who)) throw new LedgerError("invalid", `peer_agent 的 assignee 要写成 agent@peer：${who}`);
+  const err = assigneeFormatError(kind as AssigneeKind, who);
+  if (err) throw new LedgerError("invalid", `${String(kind)} 的 assignee 格式不对（要 ${err}）：${who}`);
 }
 
 /**
@@ -140,7 +155,10 @@ export function resolveAssignee(cur: Assignment, patch: Record<string, unknown>)
   if (byAgent && byAssignee) throw new LedgerError("invalid", "agent 与 assigneeKind / assignee 不能同时改：本机 agent 用其一即可");
   if (byAgent) {
     const agent = (patch.agent as string | null) || null;
-    if (agent) return { agent, assigneeKind: "agent", assignee: agent };
+    if (agent) {
+      checkAssignee("agent", agent);
+      return { agent, assigneeKind: "agent", assignee: agent };
+    }
     return cur.assigneeKind === "agent" || cur.assigneeKind === null ? { agent: null, assigneeKind: null, assignee: null } : { agent: null };
   }
   if (!byAssignee) return {};

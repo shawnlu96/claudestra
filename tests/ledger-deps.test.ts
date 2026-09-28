@@ -3,7 +3,8 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { addDep, removeDep, setDep } from "../src/lib/ledger-deps-write.js";
 import { blockedBy, depViews, derivedState, findPath, isSatisfied, reviewBranches, runnableTasks, type LedgerDep } from "../src/lib/ledger-deps.js";
-import type { LedgerTask, Stage, TaskKind } from "../src/lib/ledger-stages.js";
+import type { AssigneeKind, LedgerTask, Stage, TaskKind } from "../src/lib/ledger-stages.js";
+import { assigneeFormatError } from "../src/lib/ledger-checks.js";
 import { closeLedger, getDep, getTask, LedgerError, listDeps, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, renameAgentRefs, setMeta, setTask } from "../src/lib/ledger-write.js";
 
@@ -11,6 +12,8 @@ const P = "claude-orchestrator";
 const PM = { actor: "agent-claudestra", now: 10 };
 const EXE = { actor: "agent-task-t8h", now: 10 };
 const OWNER = { actor: "owner", now: 10 };
+/** 对方实例指纹（relay-protocol FP_RE 形状） */
+const FP = "1a2b-3c4d-5e6f-7a8b";
 
 function errOf(fn: () => unknown): LedgerError {
   try {
@@ -167,19 +170,21 @@ describe("负责人类型", () => {
 
   test("建任务带 agent → assigneeKind=agent；带 human / peer_agent → agent 为空（本机没有执行者身份）", () => {
     expect(who("A")).toEqual(["agent-task-t8h", "agent", "agent-task-t8h"]);
-    createTask(db, PM, { project: P, id: "R", title: "发版", kind: "ops", assigneeKind: "human", assignee: "owner" });
-    expect(who("R")).toEqual([null, "human", "owner"]);
-    createTask(db, PM, { project: P, id: "S", title: "对面", kind: "code", assigneeKind: "peer_agent", assignee: "future_data@ahh" });
-    expect(who("S")).toEqual([null, "peer_agent", "future_data@ahh"]);
+    createTask(db, PM, { project: P, id: "R", title: "发版", kind: "ops", assigneeKind: "human", assignee: "local:owner:self" });
+    expect(who("R")).toEqual([null, "human", "local:owner:self"]);
+    createTask(db, PM, { project: P, id: "S", title: "对面", kind: "code", assigneeKind: "peer_agent", assignee: `${FP}/future_data` });
+    expect(who("S")).toEqual([null, "peer_agent", `${FP}/future_data`]);
+    expect(errOf(() => createTask(db, PM, { project: P, id: "V", title: "坏", kind: "code", assigneeKind: "human", assignee: "owner" })).code).toBe("invalid");
+    expect(errOf(() => createTask(db, PM, { project: P, id: "W", title: "坏", kind: "code", agent: "has space" })).code).toBe("invalid");
     createTask(db, PM, { project: P, id: "U", title: "未派", kind: "code" });
     expect(who("U")).toEqual([null, null, null]);
   });
 
   test("改负责人：只有 PM 能改；换到 agent 同步 agent 列；清空三列都空；与 agent 同时改报 invalid；格式校验", () => {
     const rev = () => (getTask(db, "A") as LedgerTask).rev;
-    expect(errOf(() => setTask(db, EXE, { id: "A", rev: rev(), patch: { assigneeKind: "human", assignee: "owner" } })).code).toBe("forbidden");
-    setTask(db, PM, { id: "A", rev: rev(), patch: { assigneeKind: "human", assignee: "owner" } });
-    expect(who("A")).toEqual([null, "human", "owner"]);
+    expect(errOf(() => setTask(db, EXE, { id: "A", rev: rev(), patch: { assigneeKind: "human", assignee: "local:owner:self" } })).code).toBe("forbidden");
+    setTask(db, PM, { id: "A", rev: rev(), patch: { assigneeKind: "human", assignee: "local:guest:1a2b3c4d" } });
+    expect(who("A")).toEqual([null, "human", "local:guest:1a2b3c4d"]);
     setTask(db, PM, { id: "A", rev: rev(), patch: { assigneeKind: "agent", assignee: "agent-x" } });
     expect(who("A")).toEqual(["agent-x", "agent", "agent-x"]);
     setTask(db, PM, { id: "A", rev: rev(), patch: { agent: null } });
@@ -187,11 +192,29 @@ describe("负责人类型", () => {
     const bad: Record<string, unknown>[] = [
       { agent: "agent-y", assignee: "agent-y" },
       { assigneeKind: "robot", assignee: "r" },
-      { assigneeKind: "peer_agent", assignee: "no-at-sign" },
-      { assigneeKind: "human", assignee: "has space" },
+      { assigneeKind: "peer_agent", assignee: "future_data@ahh" },
+      { assigneeKind: "human", assignee: "owner" },
       { assigneeKind: "human" },
     ];
     for (const patch of bad) expect([patch, errOf(() => setTask(db, PM, { id: "A", rev: rev(), patch: patch as never })).code]).toEqual([patch, "invalid"]);
+  });
+
+  test("格式（附录 B-2）：agent = 本机 agent 名；human = local:<principalId>；peer_agent = <fp>/<agent>；各带非法样例", () => {
+    const ok: [AssigneeKind, string][] = [
+      ["agent", "agent-task-t8h"], ["agent", "master"], ["agent", "agent-数据"],
+      ["human", "local:owner:self"], ["human", "local:guest:1a2b3c4d"],
+      ["peer_agent", `${FP}/future_data`], ["peer_agent", `${FP}/agent-x`],
+    ];
+    const bad: [AssigneeKind, string][] = [
+      ["agent", ""], ["agent", "owner"], ["agent", "a b"], ["agent", "x@peer"], ["agent", "a/b"], ["agent", "a:b"], ["agent", "a;rm"], ["agent", "a\u0007"],
+      ["agent", "x".repeat(65)],
+      ["human", "owner"], ["human", "local:"], ["human", "local:owner:other"], ["human", "local:guest:XYZ"], ["human", "local:token:tok_1a2b"],
+      ["human", "guest:1a2b3c4d"], ["human", "local:guest:1a2b3c4d "],
+      ["peer_agent", "future_data@ahh"], ["peer_agent", "future_data"], ["peer_agent", `${FP}/`], ["peer_agent", `/future_data`],
+      ["peer_agent", `${FP.toUpperCase()}/x`], ["peer_agent", "abcd-ef01/x"], ["peer_agent", `${FP}/a/b`], ["peer_agent", `${FP}/a b`],
+    ];
+    for (const [k, v] of ok) expect([k, v, assigneeFormatError(k, v)]).toEqual([k, v, null]);
+    for (const [k, v] of bad) expect([k, v, typeof assigneeFormatError(k, v)]).toEqual([k, v, "string"]);
   });
 
   test("改名钩子：kind=agent 的 assignee 跟着 agent 一起改", () => {

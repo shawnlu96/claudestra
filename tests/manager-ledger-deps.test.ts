@@ -73,20 +73,24 @@ describe("dep-add / dep-set / dep-rm / deps", () => {
 });
 
 describe("负责人旗标", () => {
-  test("task-new --assignee-kind human：agent 为空、不碰 registry", async () => {
-    const r = await run(PM, "task-new", "R1", "--title", "发版", "--kind", "ops", "--assignee-kind", "human", "--assignee", "owner");
-    expect(r.task).toMatchObject({ agent: null, assigneeKind: "human", assignee: "owner" });
+  test("task-new --assignee-kind human：agent 为空、不碰 registry；不合格式直接拒绝、任务不建", async () => {
+    const r = await run(PM, "task-new", "R1", "--title", "发版", "--kind", "ops", "--assignee-kind", "human", "--assignee", "local:owner:self");
+    expect(r.task).toMatchObject({ agent: null, assigneeKind: "human", assignee: "local:owner:self" });
     expect(r.registryLinked).toBeUndefined();
+    expect(await run(PM, "task-new", "R2", "--title", "x", "--kind", "ops", "--assignee-kind", "human", "--assignee", "owner")).toMatchObject({ ok: false, code: "invalid" });
+    expect(await run(PM, "task-new", "R3", "--title", "x", "--kind", "code", "--assignee-kind", "peer_agent", "--assignee", "future_data@ahh")).toMatchObject({ ok: false, code: "invalid" });
+    expect(getTask(db, "R2") ?? getTask(db, "R3")).toBeNull();
   });
 
   test("task-set --assignee-kind agent 归一成 registry 键并联动 registry；执行者改负责人 forbidden；与 --agent 同用报 invalid", async () => {
     const rev = () => String(getTask(db, "T1")!.rev);
-    expect(await run(EXE, "task-set", "T1", "--rev", rev(), "--assignee-kind", "human", "--assignee", "owner")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run(EXE, "task-set", "T1", "--rev", rev(), "--assignee-kind", "human", "--assignee", "local:owner:self")).toMatchObject({ ok: false, code: "forbidden" });
     const r = await run(PM, "task-set", "T1", "--rev", rev(), "--assignee-kind", "agent", "--assignee", "Task-X");
     expect(r).toMatchObject({ ok: true, task: { agent: "agent-task-x", assigneeKind: "agent", assignee: "agent-task-x" }, registryLinked: true });
     expect(reg.agents["agent-task-x"]).toMatchObject({ parent: PM, task: "T1" });
-    expect(await run(PM, "task-set", "T1", "--rev", rev(), "--assignee-kind", "peer_agent", "--assignee", "future_data@ahh")).toMatchObject({
-      ok: true, task: { agent: null, assigneeKind: "peer_agent", assignee: "future_data@ahh" },
+    // 指纹大小写不敏感：CLI 转小写后入库
+    expect(await run(PM, "task-set", "T1", "--rev", rev(), "--assignee-kind", "peer_agent", "--assignee", "1A2B-3C4D-5E6F-7A8B/future_data")).toMatchObject({
+      ok: true, task: { agent: null, assigneeKind: "peer_agent", assignee: "1a2b-3c4d-5e6f-7a8b/future_data" },
     });
     expect(await run(PM, "task-set", "T1", "--rev", rev(), "--agent", "task-x", "--assignee", "y")).toMatchObject({ ok: false, code: "invalid" });
     expect(await run(PM, "task-set", "T1", "--rev", rev(), "--assignee", "")).toMatchObject({ ok: true, task: { agent: null, assigneeKind: null, assignee: null } });

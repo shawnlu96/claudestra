@@ -27,15 +27,22 @@ const TASK_FLAGS: Record<string, string> = {
 const ITEM_VALUED = [...Object.keys(ITEM_FLAGS), "extra", "project", "dedup"];
 const TASK_VALUED = [...Object.keys(TASK_FLAGS), "extra", "dedup"];
 
-/** 旗标 → 字段 patch；agent / pm（以及类型为 agent 的 assignee）归一成 registry 键，空串 = 清空 */
+/** assignee 按类型归一：本机 agent → registry 键；peer_agent 的指纹部分转小写（指纹按小写比）；human 原样，格式由库校验 */
+function normalizeAssignee(v: string, kind: string | null): string | null {
+  if (!v) return null;
+  if (kind === "agent") return agentKey(v);
+  const slash = v.indexOf("/");
+  return kind === "peer_agent" && slash > 0 ? `${v.slice(0, slash).toLowerCase()}${v.slice(slash)}` : v;
+}
+
+/** 旗标 → 字段 patch；agent / pm 归一成 registry 键，空串 = 清空 */
 function fieldsFrom(c: LedgerCli, map: Record<string, string>, curKind: string | null = null): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const localAssignee = (c.p.flags["assignee-kind"] ?? curKind) === "agent";
   for (const [flag, field] of Object.entries(map)) {
     const v = c.p.flags[flag];
     if (v === undefined) continue;
-    const isAgent = field === "agent" || field === "pm" || (field === "assignee" && localAssignee);
-    out[field] = isAgent ? (v ? agentKey(v) : null) : field === "assigneeKind" || field === "assignee" ? v || null : v;
+    if (field === "assignee") out[field] = normalizeAssignee(v, c.p.flags["assignee-kind"] ?? curKind);
+    else out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : field === "assigneeKind" ? v || null : v;
   }
   const extra = jsonObjectFlag(c.p, "extra");
   if (extra) out.extra = extra;
@@ -224,7 +231,9 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   "item-set": { valued: [...ITEM_VALUED, "rev"], usage: "item-set <id> --rev <n> [--title --status --priority --owner-words --one-line --next --extra]", run: itemSet },
   "task-new": {
     valued: [...TASK_VALUED, "kind", "project"],
-    usage: "task-new <id> --title <t> --kind code|investigate|ops [--item --agent | --assignee-kind agent|human|peer_agent --assignee <名>] [--pm --branch --pr --head --spec --model --extra]",
+    usage:
+      "task-new <id> --title <t> --kind code|investigate|ops [--item --agent | --assignee-kind agent|human|peer_agent " +
+      "--assignee <agent 名 | local:<principalId> | <fp>/<agent>>] [--pm --branch --pr --head --spec --model --extra]",
     run: taskNew,
   },
   "task-set": {
