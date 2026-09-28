@@ -8,5 +8,6 @@ export const BOUNDARY_DICT: Record<string, string> = {
     "This clears drafts, UI preferences and caches on this device (paired machines are kept), then reloads. Continue?",
   "这部分出错了": "This section hit an error",
   "关闭协作视图": "Close collaboration view",
+  "返回会话列表": "Back to sessions",
   "这条消息显示不了": "This message can't be displayed",
 };

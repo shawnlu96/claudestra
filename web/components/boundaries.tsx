@@ -70,7 +70,7 @@ export function RootBoundary({ children }: { children: ReactNode }) {
   );
 }
 
-function PaneFallback({ error, reset, onClose }: { error: Error; reset: () => void; onClose?: () => void }) {
+function PaneFallback({ error, reset, onClose, onBack }: { error: Error; reset: () => void; onClose?: () => void; onBack?: () => void }) {
   return (
     <div role="alert" className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-2 bg-base-100 px-6 text-center">
       <AlertIcon className="size-6 text-warning" />
@@ -85,15 +85,21 @@ function PaneFallback({ error, reset, onClose }: { error: Error; reset: () => vo
             {t("关闭协作视图")}
           </button>
         )}
+        {/* 窄屏上顶栏（带返回）也在兜底范围里，得另给一条回列表的路；桌面侧栏一直在，不用 */}
+        {onBack && (
+          <button type="button" className="btn btn-ghost btn-sm sm:hidden" onClick={onBack}>
+            {t("返回会话列表")}
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
-/** 聊天主区（顶栏 + 消息 + 输入框）：resetKey 传当前会话，切走再切回自动重试 */
-export function ChatPaneBoundary({ resetKey, children }: { resetKey: unknown; children: ReactNode }) {
+/** 聊天主区（顶栏 + 消息 + 输入框）：resetKey 传当前会话，切走再切回自动重试；onBack = 窄屏回会话列表 */
+export function ChatPaneBoundary({ resetKey, onBack, children }: { resetKey: unknown; onBack: () => void; children: ReactNode }) {
   return (
-    <ErrorBoundary onError={CHAT_ERR} resetKey={resetKey} fallback={(e, reset) => <PaneFallback error={e} reset={reset} />}>
+    <ErrorBoundary onError={CHAT_ERR} resetKey={resetKey} fallback={(e, reset) => <PaneFallback error={e} reset={reset} onBack={onBack} />}>
       {children}
     </ErrorBoundary>
   );
@@ -111,7 +117,15 @@ export function CollabPaneBoundary({ onClose, children }: { onClose: () => void;
 /** 侧栏：会话列表崩了不拖垮聊天区（桌面双栏时右边照常能用） */
 export function SidebarBoundary({ children }: { children: ReactNode }) {
   return (
-    <ErrorBoundary onError={SIDEBAR_ERR} fallback={(e, reset) => <PaneFallback error={e} reset={reset} />}>
+    <ErrorBoundary
+      onError={SIDEBAR_ERR}
+      fallback={(e, reset) => (
+        // 与 sidebar.tsx 的 <aside> 同宽：兜底画面是 flex-1，不套这层会在桌面上把侧栏撑成半屏
+        <div className="flex w-full shrink-0 flex-col border-r border-base-300 sm:w-[var(--sb-w,16rem)]">
+          <PaneFallback error={e} reset={reset} />
+        </div>
+      )}
+    >
       {children}
     </ErrorBoundary>
   );

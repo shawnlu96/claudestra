@@ -266,8 +266,9 @@ function TopBar() {
 /** 聊天主区（顶栏 + 对齐横幅 + 消息 + 输入框）套一层错误兜底：切会话即重试（components/boundaries.tsx） */
 function ChatMain() {
   const active = useChatStore((s) => s.state.activeAgent);
+  const { toList } = useChatNav();
   return (
-    <ChatPaneBoundary resetKey={active}>
+    <ChatPaneBoundary resetKey={active} onBack={toList}>
       <TopBar />
       {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
       <div className="relative">
