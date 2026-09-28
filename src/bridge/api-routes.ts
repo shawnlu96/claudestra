@@ -519,7 +519,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           compacting: getAgentStatus("master") === "compacting",
           runtime: "claude-code",
           contextTokens: mInfo?.ctxTokens ?? null,
-          ...mShown, ...extras("master"), // 附加字段（值守等，agent-info-routes.ts）；master 不在 registry，external / 显示名恒为空
+          ...mShown, ...extras("master"), // 附加字段（Autopilot 等，agent-info-routes.ts）；master 不在 registry，external / 显示名恒为空
         } as any);
       }
       return apiJson(200, { ok: true, agents });

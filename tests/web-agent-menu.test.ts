@@ -9,7 +9,7 @@ const pj = (id: string, name = id, emoji?: string): ProjectMeta => ({ id, name, 
 const ids = (xs: { id: string }[]) => xs.map((x) => x.id);
 
 describe("buildAgentMenu（侧栏右键 / 长按菜单内容）", () => {
-  test("运行中：详情 / 值守 / 重启 / 停止 / 清空 / 移动到 / 归档，停止标红，移动到带二级", () => {
+  test("运行中：详情 / Autopilot / 重启 / 停止 / 清空 / 移动到 / 归档，停止标红，移动到带二级", () => {
     const items = buildAgentMenu(ag("w"))!;
     expect(ids(items)).toEqual(["info", "mission", "restart", "kill", "clear", "move", "archive"]);
     expect(items.find((i) => i.id === "kill")?.danger).toBe(true);
@@ -18,12 +18,12 @@ describe("buildAgentMenu（侧栏右键 / 长按菜单内容）", () => {
   test("已停止：启动 / 移动到 / 归档——没有停止和清空", () => {
     expect(ids(buildAgentMenu(ag("w", { status: "stopped" }))!)).toEqual(["info", "start", "move", "archive"]);
   });
-  test("值守项随状态切换：没在值守 =「开始值守…」，值守中 =「结束值守」", () => {
-    expect(buildAgentMenu(ag("w"))!.find((i) => i.id === "mission")?.label).toBe("开始值守…");
+  test("Autopilot 项随状态切换：没开 Autopilot =「开启 Autopilot…」，Autopilot 中 =「关闭 Autopilot」", () => {
+    expect(buildAgentMenu(ag("w"))!.find((i) => i.id === "mission")?.label).toBe("开启 Autopilot…");
     const on = ag("w", { mission: { goal: "g", until: "2026-09-28T02:00:00Z", nudges: 3 } });
-    expect(buildAgentMenu(on)!.find((i) => i.id === "mission")?.label).toBe("结束值守");
+    expect(buildAgentMenu(on)!.find((i) => i.id === "mission")?.label).toBe("关闭 Autopilot");
   });
-  test("大总管运行中只有值守（外加本机打开类）；停了没有菜单；mock 没有菜单", () => {
+  test("大总管运行中只有 Autopilot（外加本机打开类）；停了没有菜单；mock 没有菜单", () => {
     expect(ids(buildAgentMenu(ag("m", { pinnedMaster: true }))!)).toEqual(["mission"]);
     expect(buildAgentMenu(ag("m", { pinnedMaster: true, status: "stopped" }))).toBeNull();
     expect(buildAgentMenu(ag("k", { mock: true }))).toBeNull();

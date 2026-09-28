@@ -96,7 +96,7 @@ export function errorText(e: unknown, fallback: string): string {
   return (e as Error)?.message || fallback;
 }
 
-// ── 值守（bridge/local-api/mission.ts）：until 同命令行 HH:MM / +3h / ISO ──
+// ── Autopilot（bridge/local-api/mission.ts）：until 同命令行 HH:MM / +3h / ISO ──
 export function startMission(agent: string, body: { goal: string; until: string; ledger?: string }): Promise<{ ok?: boolean; error?: string }> {
   return api(`/agents/${enc(agent)}/mission`, { method: "POST", json: body, timeoutMs: 10_000 });
 }
