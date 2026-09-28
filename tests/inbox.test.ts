@@ -144,6 +144,20 @@ describe("takeInbox", () => {
     expect(again.result.text.length).toBeLessThan(16_000);
   });
 
+  test("两条长消息 message_id 撞了：按 message_id 读不猜、列出 thread_id；按 thread_id 读，翻页提示也带 thread_id", async () => {
+    const dup = (t: string) => {
+      const i = item("q".repeat(30_000));
+      i.env.meta.messageId = "m-dup";
+      i.env.meta.threadId = t;
+      return i;
+    };
+    setup([dup("thr-a"), dup("thr-b")]);
+    const amb = await takeInbox(me, 1000, { read: "m-dup" });
+    expect("result" in amb && amb.result.text).toContain("thr-a、thr-b");
+    const p1 = await takeInbox(me, 1000, { read: "thr-b" });
+    expect("result" in p1 && p1.result.text).toContain('read: "thr-b", page: 2');
+  });
+
   test("空的 / 正在被 Stop 投递（频道锁被占）/ 认不出调用方", async () => {
     const { held } = setup([]);
     const empty = await takeInbox(me);

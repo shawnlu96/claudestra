@@ -68,6 +68,23 @@ describe("AgentCallBook", () => {
     expect(book.slot("c-codex", "c-me")).toBeUndefined();
   });
 
+  test("#116 时期的老槽（messageIds 有两条、没有 requests）：每条都算请求，答了已送到的 q1 不会删掉押着的 q2", () => {
+    const p = join(dir, "legacy116.json");
+    writeFileSync(p, JSON.stringify({ ["c-codex\u001fc-me"]: { ...call(1), targetChannelId: "c-codex", messageIds: ["q1", "q2"], expecting: "合并过的" } }));
+    const book = new AgentCallBook(p);
+    const v = book.exact("c-codex", "c-me", (r) => r.messageId === "q2")!;
+    expect(v.requests!.map((r) => r.messageId)).toEqual(["q1"]);
+    book.consume("c-codex", "c-me", v);
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.messageId)).toEqual(["q2"]);
+  });
+
+  test("回复频道只取已送到那几条自己的：q1 没有、q2 押着且有 B → 视图里是空（走默认），不借 q2 的", () => {
+    const book = new AgentCallBook(null);
+    book.add("c-codex", { ...call(1), originalReplyChannel: undefined }, "q1");
+    book.add("c-codex", { ...call(2), originalReplyChannel: "B" }, "q2");
+    expect(book.exact("c-codex", "c-me", (r) => r.messageId === "q2")!.originalReplyChannel).toBeUndefined();
+  });
+
   test("answerable：恰好一个已送达的 caller 在等才算；请求还押着的不算；两个在等谁都不算", () => {
     const book = new AgentCallBook(null);
     book.add("c-codex", call(1, "c-me"));

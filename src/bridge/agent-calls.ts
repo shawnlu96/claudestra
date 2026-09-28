@@ -55,9 +55,16 @@ const isCall = (v: unknown): boolean => {
 };
 
 const SEP = "\u001f";
-/** 老数据（没有 requests）整槽当一条请求 */
-const requestsOf = (c?: PendingAgentCall): CallRequest[] =>
-  !c ? [] : c.requests ?? [{ expecting: c.expecting, originalReplyChannel: c.originalReplyChannel, ts: c.ts, messageId: c.messageIds?.[0] }];
+/**
+ * 老数据（没有 requests）：每个记过的 message_id 各算一条请求，一条都不丢（codex 复核：只取第一个会让押着的第二条回程被整槽删掉）。
+ * 老槽的 expecting / 回复频道是合并过的、拆不回逐条，保守地每条都带上；连 id 都没有就整槽当一条。
+ */
+const requestsOf = (c?: PendingAgentCall): CallRequest[] => {
+  if (!c) return [];
+  if (c.requests) return c.requests;
+  const base = { expecting: c.expecting, originalReplyChannel: c.originalReplyChannel, ts: c.ts };
+  return c.messageIds?.length ? c.messageIds.map((messageId) => ({ ...base, messageId })) : [base];
+};
 const keyOf = (target: string, caller: string) => `${target}${SEP}${caller}`;
 const targetOf = (key: string, c: PendingAgentCall) => c.targetChannelId ?? key.split(SEP)[0];
 
@@ -108,7 +115,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     const last = reqs[reqs.length - 1];
     this.set(keyOf(target, base.callerChannelId), {
       ...base, targetChannelId: target, requests: reqs, messageIds: reqs.map((r) => r.messageId).filter((x): x is string => !!x),
-      expecting: last?.expecting, originalReplyChannel: last?.originalReplyChannel ?? base.originalReplyChannel,
+      expecting: last?.expecting, originalReplyChannel: last?.originalReplyChannel,
     });
   }
 
@@ -117,7 +124,8 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     const seen = requestsOf(c).filter((r) => !stillHeld({ messageId: r.messageId, callerChannelId: c.callerChannelId }));
     if (!seen.length) return undefined;
     const expecting = seen.map((r) => r.expecting).filter(Boolean).join("；另一个问题：") || undefined;
-    return { ...c, requests: seen, expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel ?? c.originalReplyChannel };
+    // 回复频道只取已送到的那几条自己的；没有就留空走默认，不借槽里还押着的请求的（codex 复核：会串到别的会话）
+    return { ...c, requests: seen, expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel };
   }
 
   /** target 明确答给 caller（回发 send_to_agent / reply 到 caller 的频道） */
