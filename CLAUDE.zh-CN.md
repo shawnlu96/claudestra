@@ -105,6 +105,7 @@ bun src/manager.ts create   <name> <dir> [purpose]
 bun src/manager.ts resume   <name> <sessionId> [dir] [--fork]  # --fork: 分支副本收编野生/被占用会话
 bun src/manager.ts adopt    <name> <sessionId>   # 把 bg 分身收编为正式会话并重启
 bun src/manager.ts archive  <name>               # 立即快照该 agent 当前 session 的对话 jsonl 到归档
+bun src/manager.ts codex-sub-archive status|on|off   # 缺省关；开了以后 7 天没写的 Codex 子线程收进 archive/archived/，90 天后（归档保留期）删除
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
 bun src/manager.ts restart  --include-master   # v2.24+ 全体重启（含大总管）

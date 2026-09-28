@@ -128,8 +128,8 @@
     "deps:watcher-no-watcher: src/bridge/model-drift.ts -> src/bridge/permission-watcher.ts": 1,
     "deps:watcher-no-watcher: src/bridge/permission-watcher.ts -> src/bridge/bg-activity-watcher.ts": 1,
     "deps:web-src-split: web/scripts/tls-proxy.ts -> src/lib/tailscale.ts": 1,
-    "doc:CLAUDE.md": 24540,
-    "doc:CLAUDE.zh-CN.md": 22241,
+    "doc:CLAUDE.md": 24712,
+    "doc:CLAUDE.zh-CN.md": 22415,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1076,
@@ -294,6 +294,18 @@
       "from": 0,
       "to": 0,
       "why": "新增 TESTS_WEB_DOM 例外：tests/web-dom-*.test.ts 要在 happy-dom 里真挂载 React 组件（错误兜底），允许引用带 react 的 web 模块；登记在明处，替代之前用类型查询 + 插值动态 import 绕开 tests-web-pure 的写法（T20 审查 P2-2）"
+    },
+    {
+      "key": "doc:CLAUDE.md",
+      "from": 24540,
+      "to": 24712,
+      "why": "PR #186 审查 P2：Codex 子线程自动归档开关 codex-sub-archive 要在命令清单里写明一行（缺省关；开了 7 天没写的子线程归档、90 天后删除），owner 指定写进 CLAUDE.md，细节在 docs/architecture/features.md"
+    },
+    {
+      "key": "doc:CLAUDE.zh-CN.md",
+      "from": 22241,
+      "to": 22415,
+      "why": "同上（PR #186 审查 P2）：中文版命令清单同步加 codex-sub-archive 一行，细节在 docs/architecture/features.zh-CN.md"
     }
   ]
 }

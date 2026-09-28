@@ -94,7 +94,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
-import { archiveUnmanagedFile } from "../lib/unmanaged-archive.js";
+import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -770,20 +770,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(400, { ok: false, error: "这条归档没有记录原始位置（老条目），只能手动恢复" });
     }
     try {
-      await fsp.mkdir(original.split("/").slice(0, -1).join("/"), { recursive: true });
-      const files = (await fsp.readdir(dir)).filter((f) => f !== ".meta.json");
-      for (const f of files) {
-        // 单个会话文件 → 直接搬回原始路径；其余（子会话目录等）→ 放在原文件同级的同名目录下
-        const direct = files.length === 1 ? original : "";
-        if (direct) {
-          await fsp.rename(`${dir}/${f}`, direct);
-        } else {
-          const target = `${original.replace(/\.jsonl$/, "")}/${f}`;
-          await fsp.mkdir(target.split("/").slice(0, -1).join("/"), { recursive: true });
-          await fsp.rename(`${dir}/${f}`, target);
-        }
-      }
-      await fsp.rm(dir, { recursive: true, force: true });
+      // 搬回原路径、mtime 改成现在、记进「用户恢复过」——否则下一轮 Codex 子线程自动归档又把它收走
+      await restoreUnmanagedArchive(dir, { originalPath: original, sessionId: String(meta?.sessionId || rid) });
       return apiJson(200, { ok: true, kind: "unmanaged", restoredTo: original });
     } catch (e) {
       return apiJson(500, { ok: false, error: (e as Error).message });
