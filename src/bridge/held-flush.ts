@@ -14,7 +14,8 @@ export interface FlushDeps {
   isHumanRequest: (env: Envelope) => boolean;
   /** 这个频道当前的连接；不在线 = undefined */
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
-  deliver: (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;
+  /** stillWanted：投递途中最后一刻再核对这条还在队里（被 kill 清理 / 放弃摘掉的就不发、不押回） */
+  deliver: (env: Envelope, to: LocalEndpoint, stillWanted?: () => boolean) => Promise<Delivery>;
   /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
   touch: (channelId: string, env: Envelope) => void;
 }
@@ -37,7 +38,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
       if (!d.held.get(channelId)?.includes(item)) continue;
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
-      const r = await d.deliver(item.env, to);
+      const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item));
       if (r.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
       // 目标又忙了:deliverToLocal 押回时 hold 认出原条目还在(同一封)就不另加——原条目留着,首次入队 / 已提醒时间不重置,
       // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份。等下一次触发

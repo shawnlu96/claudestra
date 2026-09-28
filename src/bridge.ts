@@ -794,7 +794,7 @@ function syncMasterWatcher(discord: Client): void {
   });
 }
 
-async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Promise<RouterDelivery> {
+async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
   const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
@@ -882,13 +882,12 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint): Pro
       console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
     }
   }
-  // ── v2.21.1+ agent→agent 忙时押后(见 heldLocalMsgs 注释):目标回合中就不发,
-  // 押进队列等 Stop——CC 的回合中通知处置有丢弃窗口,回合外投递才是可靠的。
-  // 人类/API 消息不押:上面已抢占 C-c,投递时目标已被腾空;response 回执、
-  // send_to_agent、pushback、reply 转发(from.kind=local 全集)都押。
-  // v2.21.2+ 压缩上下文中一律押(人类消息也押:上面已跳过 C-c;压缩结束事件会放行)
+  // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   const compactingNow = getAgentStatus(evAgent) === "compacting";
-  if (compactingNow || (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent)))) {
+  const busy = compactingNow || (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent)));
+  // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
+  if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+  if (busy) {
     const n = heldLocalMsgs.hold(to.channelId, { env, to, heldAt: Date.now() });
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方

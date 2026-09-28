@@ -79,6 +79,21 @@ describe("flushHeld", () => {
     expect(h.contents()).toEqual([]);
   });
 
+  test("投递途中（deliver 自己的 await 里）这条被摘掉：守卫返回 false，deliverToLocal 据此既不发也不押回", async () => {
+    const h = harness([item("a")]);
+    let guardSaw: boolean | undefined;
+    h.deps.deliver = async (env, _to, stillWanted) => {
+      expect(stillWanted?.()).toBe(true); // 进来时还在
+      h.held.remove("c-me", h.held.get("c-me")![0]); // 模拟 await 期间 kill 清理
+      guardSaw = stillWanted?.();
+      return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+    };
+    await flushHeld(h.deps, "c-me", "stop");
+    expect(guardSaw).toBe(false);
+    expect(h.touched).toEqual([]);
+    expect(h.contents()).toEqual([]);
+  });
+
   test("check_inbox 租约内的不投，过期的照投", async () => {
     const now = Date.now();
     const leased = { ...item("leased"), lease: { batchId: "inbox_x", at: now } };
