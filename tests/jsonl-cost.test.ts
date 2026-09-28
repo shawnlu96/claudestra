@@ -16,6 +16,23 @@ function mkJsonl(lines: object[]): string {
 }
 
 describe("rollupJsonl", () => {
+  test("同一响应的多行（message.id + requestId 相同）只计一次", async () => {
+    const rec = {
+      type: "assistant",
+      timestamp: "2026-09-28T00:00:00.000Z",
+      requestId: "req_1",
+      message: { id: "msg_1", model: "claude-opus-5-5", usage: { input_tokens: 100, output_tokens: 10 } },
+    };
+    const path = mkJsonl([rec, rec, rec, { ...rec, requestId: "req_2", message: { ...rec.message, id: "msg_2" } }]);
+    try {
+      const [u] = await rollupJsonl(path);
+      expect(u.input).toBe(200);
+      expect(u.requests).toBe(2);
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
   test("按 model 汇总 usage", async () => {
     const path = mkJsonl([
       {

@@ -35,7 +35,9 @@ import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "
 import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
-import { computeAgentStats, formatTokens, type AgentStat, type AgentLike } from "../lib/agent-stats.js";
+import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
+import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
+import { fmtAge, machineFooter, machineUsage, type MachineUsage } from "./machine-usage.js";
 import { withCodexQuota, type CodexQuotaObservation } from "../lib/codex-usage.js";
 
 const DASHBOARD_CHANNEL_NAME = "📊-claudestra-stats";
@@ -63,6 +65,9 @@ export interface StatsSnapshot {
   updatedAt: number;
   /** Claude 之外的额度卡（目前只有「最近一次 Codex 会话看到的额度」）；没有就是空数组 */
   quotas?: CodexQuotaObservation[];
+  /** 今日 / 本周的边界（本周 = 周额度周期，拿不到退回滚动 7 天）与全机合计（所有会话、按响应去重；首次扫描前为 null） */
+  window?: UsageWindowBounds;
+  machine?: MachineUsage | null;
 }
 
 // ── 账号级 /status 抓取 ────────────────────────────────────────────────
@@ -441,7 +446,7 @@ async function getAccountUsage(block = true): Promise<AccountUsage | null> {
       new Promise<null>((r) => setTimeout(() => r(null), 25000)),
     ])
       .then((u) => {
-        if (u) accountCache = u;
+        if (u) noteWeekResetText((accountCache = u).weekResets); // 没配 statusline 时周期起点的次来源
         return accountCache;
       })
       .catch(() => accountCache)
@@ -459,17 +464,15 @@ async function getAccountUsage(block = true): Promise<AccountUsage | null> {
 
 // ── 快照组装 ───────────────────────────────────────────────────────────
 
-async function listAgents(): Promise<AgentLike[]> {
-  return readRegistryAgents(); // RegistryAgent 是 AgentLike 超集（cwd 已归一含 dir 兼容）
-}
-
 export async function buildSnapshot(blockGauge = true): Promise<StatsSnapshot> {
-  const [agents, global] = await Promise.all([
-    listAgents().then((list) => computeAgentStats(list)),
+  const window = currentUsageWindow();
+  const [agents, global, machine] = await Promise.all([
+    readRegistryAgents().then((list) => computeAgentStats(list, window)), // RegistryAgent 是 AgentLike 超集
     getAccountUsage(blockGauge),
+    machineUsage(window),
   ]);
   agents.sort((a, b) => b.contextTokens - a.contextTokens);
-  return withCodexQuota({ global, agents, updatedAt: Date.now() });
+  return withCodexQuota({ global, agents, updatedAt: Date.now(), window, machine });
 }
 
 // ── Discord 渲染 ───────────────────────────────────────────────────────
@@ -495,14 +498,6 @@ export function sessionResetSuspect(s: string, scrapedAt: number): boolean {
   );
   if (d.getTime() <= scrapedAt) d.setDate(d.getDate() + 1);
   return d.getTime() - scrapedAt > 5 * 3_600_000;
-}
-
-/** 抓取时间 → "刚刚 / N 分钟前 / N 小时前"（用户要能看出 gauge 数据多旧） */
-function fmtAge(scrapedAt: number): string {
-  const ms = Date.now() - scrapedAt;
-  if (ms < 90_000) return "刚刚";
-  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)} 分钟前`;
-  return `${(ms / 3_600_000).toFixed(1)} 小时前`;
 }
 
 function bar(pct: number | null, w = 10): string {
@@ -556,7 +551,7 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
     .setTitle("📊 Claudestra 用量看板")
     .setColor(limitColor(worstLimit))
     .setDescription(desc.join("\n"))
-    .setFooter({ text: "本地 JSONL + /status · 每次对话完成自动更新" })
+    .setFooter({ text: machineFooter(snap.machine, snap.window) })
     .setTimestamp(new Date(snap.updatedAt));
 
   for (const a of snap.agents.slice(0, 24)) {
@@ -567,7 +562,7 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
       : `📖 ${formatTokens(a.contextTokens)} ${a.contextPct}%`;
     emb.addFields({
       name: `${ctxDot(a.contextPct)} ${name} · ${ctx}`,
-      value: `${a.model.replace(/^claude-/, "")} · 今 ${formatTokens(a.today.tokens)} · 周 ${formatTokens(a.week.tokens)}`,
+      value: `${a.model.replace(/^claude-/, "")} · 当前会话 今 ${formatTokens(a.today.tokens)} · 周 ${formatTokens(a.week.tokens)}`,
       inline: false,
     });
   }

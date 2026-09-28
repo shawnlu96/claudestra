@@ -35,6 +35,17 @@ function addUsage(acc: Usage, u: any): void {
 }
 
 /**
+ * 一次 API 响应的去重键。Claude Code 把一个响应的每个内容块（thinking / text / tool_use）各写一行，
+ * 每行都带同一份 usage；fork / resume 又会把历史行抄进新文件。逐行累加会多算约一倍（2026-09-28 实测
+ * 2495 行只有 1209 个响应）。没有 message.id 的记录（Pi 等）不去重，逐条计。
+ */
+export function usageDedupKey(rec: any): string | null {
+  const id = rec?.message?.id;
+  if (typeof id !== "string" || !id) return null;
+  return `${id}:${typeof rec.requestId === "string" ? rec.requestId : ""}`;
+}
+
+/**
  * 解析一个 JSONL 文件，按 model 分桶返回用量。
  * 可选 sinceTs（ms）只统计晚于该时间戳的记录。
  */
@@ -42,6 +53,7 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
   if (!existsSync(path)) return [];
   const text = await Bun.file(path).text();
   const buckets = new Map<string, Usage>();
+  const seen = new Set<string>();
   for (const line of text.split("\n")) {
     if (!line) continue;
     let rec: any;
@@ -57,6 +69,11 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
     const model = rec?.message?.model || "unknown";
     const usage = rec?.message?.usage;
     if (!usage) continue;
+    const dk = usageDedupKey(rec);
+    if (dk !== null) {
+      if (seen.has(dk)) continue;
+      seen.add(dk);
+    }
     const acc = buckets.get(model) || emptyUsage();
     addUsage(acc, usage);
     buckets.set(model, acc);

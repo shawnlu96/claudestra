@@ -8,7 +8,7 @@ import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./runtime-badge";
 import { stats } from "@/lib/api/system";
 import { Bar, ClaudeQuotaCard, CodexQuotaCard, UsageTable, type GlobalStats } from "./quota-cards";
-import { codexQuotas, type QuotaView, type StatAgent } from "../usage-view";
+import { codexQuotas, usageTableData, type QuotaView, type StatAgent, type UsageTableData } from "../usage-view";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
@@ -24,7 +24,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const store = useChatStoreApi();
   const agents = useChatStore((s) => s.state.agents);
   const [g, setG] = useState<GlobalStats | null>(null);
-  const [statAgents, setStatAgents] = useState<StatAgent[]>([]);
+  const [usage, setUsage] = useState<UsageTableData>({ agents: [], machine: null, window: null });
   // 老 bridge 没有 quotas 字段 → 空数组，不画 Codex 卡
   const [quotas, setQuotas] = useState<QuotaView[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -41,10 +41,10 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
     // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
     // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
     store.refreshAgents();
-    stats<{ global?: GlobalStats; agents?: StatAgent[]; quotas?: unknown }>(force)
+    stats<{ global?: GlobalStats; agents?: StatAgent[]; quotas?: unknown; machine?: unknown; window?: unknown }>(force)
       .then((j) => {
         setG(j.global ?? null);
-        setStatAgents(Array.isArray(j.agents) ? j.agents : []);
+        setUsage(usageTableData(j));
         setQuotas(codexQuotas(j.quotas));
         // bridge 刚重启时账号 gauge 缓存为空——本次请求已在服务端触发后台抓取,
         // ~6.5s 后静默重拉补上,不用用户手点刷新
@@ -126,7 +126,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
             <CodexQuotaCard key={`${q.source}:${q.sessionId ?? ""}`} q={q} />
           ))}
           {/* token 与花费按 runtime 分行（Claude Code / Codex / Pi 口径各不相同，混着看互相淹没） */}
-          {statAgents.length > 0 && <UsageTable agents={statAgents} />}
+          {(usage.agents.length > 0 || usage.machine) && <UsageTable {...usage} />}
 
           {/* 各 agent 上下文占用(1M 参考刻度) */}
           <div className="mb-2 text-xs font-medium uppercase tracking-wide text-base-content/40">

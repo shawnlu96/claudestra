@@ -13,7 +13,7 @@
  */
 
 import { existsSync, statSync } from "fs";
-import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
+import { projectJsonlPath, findJsonlBySessionId, usageDedupKey } from "./jsonl-cost.js";
 import {
   findSessionJsonlBySessionId,
   runtimeForSessionPath,
@@ -22,6 +22,7 @@ import {
   translateSessionLine,
 } from "./session-source.js";
 import { readSessionCtx } from "./usage-cache.js";
+import { currentUsageWindow, windowFloor, windowsFor, type UsageWindowBounds } from "./usage-window.js";
 
 export interface UsageWindow {
   tokens: number;
@@ -114,22 +115,6 @@ export const CONTEXT_CEILING = 1_000_000;
  */
 export const POST_COMPACT_BASE_TOKENS = 45_000;
 
-/** 今天本地 00:00 的 ms 时间戳 */
-export function dayStartTs(now = new Date()): number {
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-/** 本周一本地 00:00 的 ms 时间戳（ISO 周，周一为一周开始） */
-export function weekStartTs(now = new Date()): number {
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  const day = (d.getDay() + 6) % 7; // 周一 = 0
-  d.setDate(d.getDate() - day);
-  return d.getTime();
-}
-
 export interface FileStats {
   contextTokens: number;
   contextEstimated: boolean;
@@ -171,6 +156,7 @@ const STATS_TAIL_MAX_BYTES = 128 * 1024 * 1024;
  *
  * 返回的 `oldestTs` 是本段里最早的一条时间戳，调用方据此判断窗口是否已经回溯过周界。
  * 取 Infinity 表示整段没有一条可解析的时间戳。
+ * `seen` 是跨调用共享的去重集合（全机扫描跨文件共用一份）；不传 = 本段内去重。
  */
 export function scanStatsWindow(
   lines: string[],
@@ -178,6 +164,7 @@ export function scanStatsWindow(
   weekTs: number,
   /** v2.23+ 会话 runtime；由 readFileStats 按路径判定**一次**传入，别在每行里重算 */
   runtime?: string,
+  seen: Set<string> = new Set(),
 ): { stats: FileStats; oldestTs: number } {
   const today = emptyUsageWindow();
   const week = emptyUsageWindow();
@@ -230,7 +217,13 @@ export function scanStatsWindow(
       ctxFound = true;
     }
     const ts = new Date(rec.timestamp).getTime();
-    if (!Number.isFinite(ts) || ts < weekTs) continue;
+    if (!Number.isFinite(ts) || ts < windowFloor(dayTs, weekTs)) continue;
+    // 从尾往前扫，同一响应先遇到的是最后写的那行（usage 最完整）
+    const dk = usageDedupKey(rec);
+    if (dk !== null) {
+      if (seen.has(dk)) continue;
+      seen.add(dk);
+    }
     const tok =
       Number(u.input_tokens || 0) +
       Number(u.cache_creation_input_tokens || 0) +
@@ -240,7 +233,7 @@ export function scanStatsWindow(
     // 运行时自己报了费用（Pi）就记那一笔，不再按牌价估一遍（两种钱不重叠）
     const reported = typeof u.runtime_reported_cost_usd === "number" ? u.runtime_reported_cost_usd : null;
     const cost = reported === null ? costOfUsage(String(rec?.message?.model || ""), u) : 0;
-    for (const w of ts >= dayTs ? [week, today] : [week]) {
+    for (const w of windowsFor(ts, dayTs, weekTs, today, week)) {
       w.tokens += tok;
       w.requests += 1;
       w.costUsd += cost;
@@ -254,12 +247,11 @@ export function scanStatsWindow(
 export async function readFileStats(
   path: string,
   /** 尾读起始窗口；单测可调小来在小 fixture 上验扩窗路径（与 readSessionHistory 的 maxFullReadBytes 同约定） */
-  opts: { tailStartBytes?: number } = {},
+  opts: { tailStartBytes?: number; window?: UsageWindowBounds } = {},
 ): Promise<FileStats> {
   const empty = emptyFileStats();
   if (!existsSync(path)) return empty;
-  const dayTs = dayStartTs();
-  const weekTs = weekStartTs();
+  const { dayStart: dayTs, weekStart: weekTs } = opts.window ?? currentUsageWindow();
   let size = 0;
   try { size = statSync(path).size; } catch { return empty; }
   // 缓存键刻意**不含** mtime：session jsonl 每次工具调用都在追加，mtime 一直在变，
@@ -293,7 +285,7 @@ export async function readFileStats(
     // 不需要额外对齐到行首。
     const lines = (await Bun.file(path).slice(cut).text()).split("\n");
     const { stats, oldestTs } = scan(lines, dayTs, weekTs, cut === 0);
-    if (oldestTs < weekTs || cut === 0 || win >= STATS_TAIL_MAX_BYTES) {
+    if (oldestTs < windowFloor(dayTs, weekTs) || cut === 0 || win >= STATS_TAIL_MAX_BYTES) {
       fileCache.set(path, { key, stats });
       return stats;
     }
@@ -312,13 +304,13 @@ function resolveJsonl(agent: AgentLike): string | null {
   return null;
 }
 
-/** 对一批 agent（通常来自 registry.json）算 per-agent 统计。跳过非 active 的。 */
-export async function computeAgentStats(agents: AgentLike[]): Promise<AgentStat[]> {
+/** 对一批 agent（通常来自 registry.json）算 per-agent 统计（各自**当前会话**文件）。跳过非 active 的。 */
+export async function computeAgentStats(agents: AgentLike[], window = currentUsageWindow()): Promise<AgentStat[]> {
   const out: AgentStat[] = [];
   for (const a of agents) {
     if (a.status && a.status !== "active") continue;
     const jsonl = resolveJsonl(a);
-    const fs = jsonl ? await readFileStats(jsonl) : emptyFileStats();
+    const fs = jsonl ? await readFileStats(jsonl, { window }) : emptyFileStats();
     out.push({
       name: a.name,
       channelId: a.channelId || "",

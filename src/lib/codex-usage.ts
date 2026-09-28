@@ -19,6 +19,7 @@ import {
   readCodexMeta,
 } from "./codex-session.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
+import { windowsFor } from "./usage-window.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -55,8 +56,8 @@ export const scanCodexStatsWindow: StatsWindowScanner = (lines, dayTs, weekTs, f
   let oldestTs = Infinity;
   let recorded = false; // 上一条是 token_usage_record：紧跟着的 token_count 是同一次请求，只推进计数器、不再计
   const add = (ts: number, n: number) => {
-    if (!n || !Number.isFinite(ts) || ts < weekTs) return;
-    for (const w of ts >= dayTs ? [week, today] : [week]) {
+    if (!n || !Number.isFinite(ts)) return;
+    for (const w of windowsFor(ts, dayTs, weekTs, today, week)) {
       w.tokens += n;
       w.requests += 1;
     }
