@@ -1,6 +1,9 @@
-/** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案；以及 stream-shape 的作答回显只留原文 */
+/** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案、乐观作答；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
-import { agentLabel, answeredGroups, answerSummary, askCounts, askForReply, clicksFromAnswer, groupAsks, rowGroup, spanText, type WebAsk } from "@/features/asks/asks-model";
+import {
+  agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, groupAsks,
+  PENDING_MAX_MS, rowGroup, spanText, wireLabels, type PendingAnswer, type WebAsk,
+} from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
 import { fillParams } from "@/lib/i18n-fill";
@@ -92,4 +95,31 @@ test("时间文案", () => {
 test("作答回显：去掉给 agent 看的第一行，只留 owner 发的原文（才对得上乐观气泡）", () => {
   const evt = { seq: 1, ts: "", agent: "agent-x", chatId: "c", type: "chat_message", data: { direction: "in", srcKind: "api", text: "[✅ owner 回复了你 …]\n[button:go]", askId: "ask_1" } };
   expect(translate(evt as never, "zh", new Set())).toMatchObject({ t: "user-in", text: "[button:go]" });
+});
+
+describe("乐观作答（T11b 第 8 条）", () => {
+  const shown: PendingAnswer["answer"] = { choices: [], labels: ["发"], text: "", via: "web_card", at: 5_000 };
+  const pend = (at = 5_000) => new Map([["ask_1", { at, answer: shown }]]);
+
+  test("提交那一刻：服务端还说开着，本地先显示已答——移出「等你处理」、计数减 1，卡上已答是提交的人话", () => {
+    const server = [ask({ id: "ask_1" }), ask({ id: "ask_2" })];
+    const v = applyPending(server, pend(), 5_100);
+    expect(v.settled).toEqual([]);
+    expect(askCounts(v.asks).waiting).toBe(1);
+    expect(groupAsks(v.asks).recent.map((a) => a.id)).toEqual(["ask_1"]);
+    expect(answerSummary(v.asks[0])).toBe("发");
+  });
+
+  test("服务端确认（已不是 open）、列表里没了、或盖了太久：settled，此后以服务端为准（盖太久的回到「等你处理」）", () => {
+    const answered = ask({ id: "ask_1", state: "answered", answer: { choices: ["[button:go]"], labels: ["发"], text: "好", via: "web_card", at: 5_050 } });
+    expect(applyPending([answered], pend(), 5_100)).toMatchObject({ settled: ["ask_1"], asks: [{ answer: { text: "好" } }] });
+    expect(applyPending([], pend(), 5_100).settled).toEqual(["ask_1"]);
+    const stale = applyPending([ask({ id: "ask_1" })], pend(), 5_000 + PENDING_MAX_MS + 1);
+    expect(stale.settled).toEqual(["ask_1"]);
+    expect(askCounts(stale.asks).waiting).toBe(1);
+  });
+
+  test("wire → 人话：按钮取文字，选单取选中项文字（多选用「、」），对不上的原样", () => {
+    expect(wireLabels(rows, ["[button:go]", "[select:f:a,b]", "[button:zz]"])).toEqual(["发", "甲、乙", "[button:zz]"]);
+  });
 });
