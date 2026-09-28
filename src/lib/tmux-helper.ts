@@ -176,17 +176,14 @@ export async function ensurePaneInteractive(target: string): Promise<boolean> {
   return false;
 }
 
-export async function tmuxSendLine(
-  target: string,
-  text: string,
-  delayMs = 100
-): Promise<void> {
+/** strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
+export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false): Promise<void> {
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益
   if (await ensurePaneInteractive(target)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
-  await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
+  await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }

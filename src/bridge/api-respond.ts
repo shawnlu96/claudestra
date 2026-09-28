@@ -7,7 +7,7 @@
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { canManage } from "../lib/devices.js";
 import { readLiveCcSessionEntries, type CcSessionEntry } from "../lib/cc-sessions.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 
 export function apiJson(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -38,7 +38,7 @@ export function notInScope(agent: string): Response {
  * 再加前缀成 "agent-agent-master" 就不算 master 了，"*" 放行，路由按名字解析又落到 master（tests/api-master-scope.test.ts）。
  */
 export function inScopeEitherName(principal: Principal, name: string): boolean {
-  if (name === "__master__" || name.replace(/^(agent-)+/, "") === "master") return agentInScope(principal, "master");
+  if (isMasterName(name)) return agentInScope(principal, "master");
   return agentInScope(principal, name) || agentInScope(principal, `agent-${name}`);
 }
 
