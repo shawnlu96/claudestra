@@ -169,6 +169,10 @@ describe("四处同一口径", () => {
   });
 });
 
+test("被禁用的 principal 什么都看不见、答不了（纵深防御，adv1 P2-7）", () => {
+  for (const p of [{ ...WHO.owner, disabled: true }, { ...G1, disabled: true }]) expect(kinds.some((k) => canSeeAsk(p, asks[k]) || canAnswerAsk(p, asks[k]))).toBe(false);
+});
+
 test("矩阵表自己不自相矛盾：答得了的一定看得见", () => {
   for (const want of Object.values(MATRIX)) for (let i = 0; i < kinds.length; i++) if (want.answer[i] === "y") expect(want.see[i]).toBe("y");
 });

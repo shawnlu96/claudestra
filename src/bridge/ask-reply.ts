@@ -5,9 +5,9 @@
  *   authorize 带绑定（参数哈希回给 agent，执行前 ledger ask-check）；同一个 agent 同一个 key 再问，旧的 superseded。
  * `ask` 字段不合格整条 reply 退回给 agent（Delivery dropped + 原因），不猜、不静默丢。建 ask 出错不挡回复本身。
  */
-import { missingApprove, paramsHash, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
+import { bindHash, missingApprove, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
 import { draftFromReply, type AskRow, type ReplyAskDraft } from "../lib/ask-options.js";
-import { closeAsk, openAskFull, patchAsk, type Ask, type NewAsk } from "../lib/ledger-asks.js";
+import { closeAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type NewAsk } from "../lib/ledger-asks.js";
 import { markdownToPlain } from "../lib/plain-text.js";
 import { askDb, parentExtra, publishAsk, taskOf, toOwner, whoIs } from "./asks.js";
 import type { Delivery, Envelope } from "./router.js";
@@ -39,12 +39,12 @@ function draftOf(text: string, components: unknown, explicit: boolean): ReplyAsk
 const optionIds = (rows: AskRow[]) => new Set(rows.flatMap((r) => (r.type === "buttons" ? r.buttons.map((b) => b.id) : [r.id])));
 
 /** 显式字段 → openAsk 的那几列；授权类的 approve 按钮不在选项里 → 错误句 */
-function explicitColumns(x: ReplyAsk, draft: ReplyAskDraft, now: number): Partial<NewAsk> | string {
+function explicitColumns(x: ReplyAsk, draft: ReplyAskDraft, fromAgent: string, now: number): Partial<NewAsk> | string {
   const cols: Partial<NewAsk> = { kind: x.kind === "inform" ? "decide" : x.kind };
   if (x.bind) {
     const missing = missingApprove(x.bind, optionIds(draft.options));
     if (missing.length) return `ask.bind.approve lists button id(s) not in this reply: ${missing.join(", ")}`;
-    cols.bind = { ...x.bind, paramsHash: paramsHash(x.bind.params) };
+    cols.bind = { ...x.bind, paramsHash: bindHash(x.bind, fromAgent) };
   }
   const key = x.key ?? (x.kind === "authorize" ? x.bind?.action : undefined);
   if (key) cols.askKey = key;
@@ -73,21 +73,20 @@ async function openAskForReply(env: Envelope, chatId: string, fromChannelId: str
   const who = await whoIs(fromChannelId);
   if (!who) return { ask: null };
   const now = Date.now();
-  const cols = explicit ? explicitColumns(explicit, draft, now) : {};
+  const cols = explicit ? explicitColumns(explicit, draft, who.name, now) : {};
   if (typeof cols === "string") return { ask: null, error: cols };
   const r = openAskFull(askDb(), {
     project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
     title: draft.title, context: draft.context, body: env.content, options: draft.options, kindHint: draft.kindHint, chatId, threadId: env.meta.threadId,
     ...parentExtra(who), ...cols,
-  }, now);
-  for (const old of r.superseded) publishAsk(old);
+  }, now, { deferSupersede: true });
   publishAsk(r.ask);
   return { ask: r.ask };
 }
 
 /**
  * 带选项（或显式 ask）、发给 owner 的先建 ask，askId / 参数哈希进 env.meta（出站事件带给网页，reply 结果回给 agent）；
- * 投递成功补记 Discord 消息 id，失败把 ask 撤掉。
+ * 投递成功补记 Discord 消息 id、作废同 key 的旧 ask；失败把新的撤掉（旧的不动）。
  */
 export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromChannelId: string, send: (e: Envelope) => Promise<Delivery>, rawAsk?: unknown): Promise<Delivery> {
   let a: Ask | null = null;
@@ -105,8 +104,10 @@ export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromCha
   const d = await send(env);
   if (!a) return d;
   try {
-    if (d.outcome.kind === "sent") patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [] });
-    else {
+    if (d.outcome.kind === "sent") {
+      patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [] });
+      for (const old of supersedeOlder(askDb(), a)) publishAsk(old); // 发出去了才作废同 key 的旧的：发失败时旧的仍有效
+    } else {
       const c = closeAsk(askDb(), a.id, "cancelled", "reply 没发出去");
       if (c) publishAsk(c);
     }

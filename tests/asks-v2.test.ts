@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
 import { deliverReplyWithAsk, isQuietReply } from "../src/bridge/ask-reply.js";
-import { createAsk, setAsksForTest, setOnAssignedAnswer, type AsksDeps } from "../src/bridge/asks.js";
+import { createAsk, ownerPresence, setAsksForTest, setOnAssignedAnswer, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
 import type { Delivery, Envelope } from "../src/bridge/router.js";
-import { paramsHash } from "../src/lib/ask-bind.js";
+import { bindHash } from "../src/lib/ask-bind.js";
 import { getAsk, type Ask, type AskAnswer } from "../src/lib/ledger-asks.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createItem, createTask } from "../src/lib/ledger-write.js";
@@ -73,8 +73,8 @@ const api = (path: string, who: Principal, body?: unknown) =>
 describe("显式 ask", () => {
   test("授权类：记绑定与参数哈希（env.meta.askHash 回给 agent）、默认卡活、key 默认 bind.action", async () => {
     const r = await reply("发 v2.32.0 吗", { kind: "authorize", bind: RELEASE, why: "要打 tag" });
-    expect(r.ask).toMatchObject({ kind: "authorize", blocking: true, askKey: "release", context: "要打 tag", bind: { action: "release", paramsHash: paramsHash(RELEASE.params) } });
-    expect(r.env.meta.askHash).toBe(paramsHash(RELEASE.params));
+    expect(r.ask).toMatchObject({ kind: "authorize", blocking: true, askKey: "release", context: "要打 tag", bind: { action: "release", paramsHash: bindHash(RELEASE, "agent-x") } });
+    expect(r.env.meta.askHash).toBe(bindHash(RELEASE, "agent-x"));
   });
 
   test("参数变了旧按钮失效：同一个 key 再问，旧的 superseded；点旧卡片 / 旧气泡都是 409「已处理」，新的照常答", async () => {
@@ -86,6 +86,17 @@ describe("显式 ask", () => {
     expect((await answerFromCard("p", neu.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
     // 被取代的也发了 SSE：网页卡片跟着收掉
     expect(s.asks.some((e) => (e.data as { askId: string; state: string }).askId === old.id && (e.data as { state: string }).state === "superseded")).toBe(true);
+  });
+
+  test("同 key 重问、新回复没发出去：新的撤掉，旧的仍然有效（发出去了才作废旧的，adv1 P2-8）", async () => {
+    const old = (await reply("发 v2.32.0 吗", { kind: "authorize", bind: RELEASE })).ask!;
+    const env: Envelope = {
+      from: { kind: "local", channelId: "111", ws }, to: { kind: "user", userId: "", channelId: "api:owner:self" }, intent: "response", content: "改发 v2.32.1 吗",
+      meta: { messageId: "reply_fail", triggerKind: "agent_tool", ts: at, threadId: "thr_fail", components: BUTTONS },
+    };
+    const ask = { kind: "authorize", bind: { ...RELEASE, params: { tag: "v2.32.1" } } };
+    await deliverReplyWithAsk(env, "api:owner:self", "111", async (e) => ({ envelope: e, outcome: { kind: "dropped", reason: "offline" } }), ask);
+    expect([getAsk(openLedger(s.path), old.id)?.state, getAsk(openLedger(s.path), env.meta.askId!)?.state]).toEqual(["open", "cancelled"]);
   });
 
   test("授权类不带 askId 不猜（adv1 P1-1）：旧消息的行内「批准」批不了参数变了的新一条，回 409 说清楚；被取代的提示是「已被新版本取代」", async () => {
@@ -149,7 +160,7 @@ describe("人 / 系统发起的 ask", () => {
 
   test("POST /ledger/:project/asks：只有 owner 能开；assignee 格式、kind 校验；开出来的作答只记账", async () => {
     expect((await api("/ledger/p/asks", G1, { title: "审一下" }))!.status).toBe(403);
-    expect((await api("/ledger/p/asks", owner(), { title: "审一下", assignee: "not a person" }))!.status).toBe(400);
+    for (const assignee of ["not a person", "local:token:tok_s", "local:guest:ZZ"]) expect((await api("/ledger/p/asks", owner(), { title: "审一下", assignee }))!.status).toBe(400);
     expect((await api("/ledger/p/asks", owner(), { title: "审一下", kind: "assigned" }))!.status).toBe(400);
     const res = (await api("/ledger/p/asks", owner(), { title: "审一下这份设计稿", assignee: "local:guest:aa11", options: BUTTONS, dedupKey: "chat:r1" }))!;
     expect(res.status).toBe(201);
@@ -157,6 +168,26 @@ describe("人 / 系统发起的 ask", () => {
     expect(a).toMatchObject({ source: "human", createdBy: "owner:self", fromAgent: null, kind: "decide", assignee: "local:guest:aa11" });
     expect((await answerFromCard("p", a.id, { choices: ["[button:go]"] }, G1)).status).toBe(202);
     expect([s.sent, s.held]).toEqual([[], []]);
+  });
+
+  test("建 ask 要全权 owner 凭据；dedupKey 撞上看不见的只回 409、不带标题背景，看得见的给回那条（adv1 P2-1）", async () => {
+    const partial = owner({ agents: ["agent-x"], terminal: false, manage: true });
+    const noManage = owner({ agents: ["*"], terminal: false, manage: false });
+    for (const who of [partial, noManage]) expect((await api("/ledger/p/asks", who, { title: "审一下" }))!.status).toBe(403);
+    createAsk({ project: "q", source: "system", createdBy: "system", kind: "decide", title: "别的项目的机密", context: "背景", dedupKey: "assign:T9:1:1" });
+    const hit = (await api("/ledger/p/asks", owner(), { title: "撞一下", dedupKey: "assign:T9:1:1" }))!;
+    expect([hit.status, JSON.stringify(await hit.json()).includes("机密")]).toEqual([409, false]);
+    const mine = ((await (await api("/ledger/p/asks", owner(), { title: "我的", dedupKey: "chat:r9" }))!.json()) as { ask: Ask }).ask;
+    const again = (await api("/ledger/p/asks", owner(), { title: "我的", dedupKey: "chat:r9" }))!;
+    expect([again.status, ((await again.json()) as { ask: Ask }).ask.id]).toEqual([200, mine.id]);
+  });
+
+  test("guest 作答不算 owner 在场（r1 P2-1）：owner 卡活的 ask 照样推送", async () => {
+    ownerPresence.setVisible("dev_owner", false);
+    await Bun.sleep(2);
+    const a = assignG1();
+    expect((await answerFromCard("p", a.id, { choices: ["[button:assign_done]"] }, G1)).status).toBe(202);
+    expect(ownerPresence.state()).toBe("away");
   });
 });
 
@@ -179,6 +210,10 @@ describe("指派事项过期", () => {
     expect(s.sent[0].content).toBe(`[⌛ T9 指派给 local:guest:aa11 的事项已过期（${a.id}）]`);
     expect(await sweepExpired()).toBe(0);
     expect(s.sent).toHaveLength(1);
+    // 别的项目里手填了同一个任务号：不发给这边的 PM（adv1 P2-9）
+    createAsk({ project: "q", source: "human", createdBy: "owner:self", kind: "assigned", title: "t", assignee: "local:guest:aa11", taskId: "T9" });
+    expireAll();
+    expect([await sweepExpired(), s.sent.length]).toEqual([1, 1]);
   });
 
   test("PM 不在线：不投、不进押后队列、不改投大总管；人发起的非指派 ask 过期只发 SSE", async () => {

@@ -1,8 +1,8 @@
 /**
  * 「待你处理」到期（每分钟扫一次，asks.ts initAsks 起的计时器）。一律先记 expired、发 SSE（推送订阅者据此给 assignee / owner 推）；之后按来源：
  * - agent 发的 reply 类：通知发起方「没人批，按未批准处理」（没人点 ≠ 同意），发起方不在按 answerTarget 改投；
- * - 指派事项（assigned）：给该任务的 PM 一条固定模板「<任务号> 指派给 <assignee> 的事项已过期」（T28 §2.5 第 7 行）——不抢占、每条只发一次
- *   （expired 只会结一次），PM 不在线就不投，也不进押后队列、不改投大总管；PM 据此 ask-reopen 或改派；
+ * - 指派事项（assigned）：给该任务（同一项目里的）的 PM 一条固定模板「<任务号> 指派给 <assignee> 的事项已过期」（T28 §2.5 第 7 行）——不抢占、
+ *   每条只发一次（expired 只会结一次）；PM 不在线就不投、不改投大总管，在线但这一下没投进去的照 sendCalm 进押后队列等它空下来；PM 据此 ask-reopen 或改派；
  * - 其余人 / 系统发起的：只有 SSE。
  */
 import { t } from "../lib/i18n.js";
@@ -32,7 +32,8 @@ async function noticeAssignedExpired(a: Ask): Promise<void> {
   const d = asksDeps();
   const db = askDbIfExists();
   if (!d || !db || !a.taskId) return;
-  const pm = getTask(db, a.taskId)?.pm;
+  const task = getTask(db, a.taskId);
+  const pm = task?.project === a.project ? task.pm : null; // 手填了别的项目的任务号：不发给那边的 PM
   if (!pm) return;
   const reg = (await registry()).find((r) => (r.name === pm || r.name === `agent-${pm}`) && r.status === "active" && r.channelId);
   if (!reg?.channelId || !d.clients.has(reg.channelId)) return console.log(`指派事项 ${a.id} 过期：PM ${pm} 不在线，不投`);

@@ -5,7 +5,7 @@
 import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { checkAsk, paramsHash } from "../lib/ask-bind.js";
+import { bindHash, checkAsk, hasDuplicateKeys, paramsProblem } from "../lib/ask-bind.js";
 import { getAsk, hasAsksTable } from "../lib/ledger-asks.js";
 import { taskMetrics } from "../lib/ledger-metrics.js";
 import { getItem, getMeta, getTask, LedgerError, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
@@ -108,22 +108,28 @@ function meta(c: LedgerCli): Result {
 }
 
 /**
- * `ledger ask-check <askId> --hash <h> | --params '<json>'`（docs 13 §4.7）：授权类 ask 批下来的是不是这组参数。agent 执行前跑，
- * 退出码非 0 = 别执行、重新问（reason 说为什么）。--params 由这里现算哈希（和 reply 结果里回的 askHash 同一个算法，lib/ask-bind.ts）
+ * `ledger ask-check <askId> --hash <h> | --params '<json>'`（docs 13 §4.7）：授权类 ask 批下来的是不是这组参数。发起它的 agent 执行前跑，
+ * 退出码非 0 = 别执行、重新问（reason 说为什么）。--params 由这里现算哈希（action / version 取 ask 里的、agent 是调用者自己，
+ * 和 reply 结果里回的 askHash 同一个算法，lib/ask-bind.ts）；参数里有重复键、超过 2^53 的整数直接拒（会撞哈希）
  */
 function askCheck(c: LedgerCli): Result {
   const id = c.p.pos[1];
   const { hash, params } = c.p.flags;
   if (!id || (hash === undefined) === (params === undefined)) throw new LedgerError("invalid", "ask-check <askId> 要带 --hash <h> 或 --params '<json>' 其中一个");
+  const a = hasAsksTable(c.db) ? getAsk(c.db, id) : null;
   let h = hash ?? "";
   if (params !== undefined) {
+    let v: unknown;
     try {
-      h = paramsHash(JSON.parse(params));
+      v = JSON.parse(params);
     } catch (e) {
       throw new LedgerError("invalid", `--params 不是 JSON：${(e as Error).message}`);
     }
+    const bad = hasDuplicateKeys(params) ? "duplicate keys" : paramsProblem(v);
+    if (bad) throw new LedgerError("invalid", `--params 不合格（会撞哈希）：${bad}`);
+    h = a?.bind ? bindHash({ ...a.bind, params: v }, c.deps.actor) : "";
   }
-  const r = checkAsk(hasAsksTable(c.db) ? getAsk(c.db, id) : null, h, c.deps.now());
+  const r = checkAsk(a, h, c.deps.actor, c.deps.now());
   return r.ok ? { ok: true, askId: id, approved: true } : { ok: false, code: "conflict", askId: id, approved: false, error: r.reason };
 }
 

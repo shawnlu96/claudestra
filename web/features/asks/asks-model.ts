@@ -34,9 +34,15 @@ export interface WebAsk {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  /** 授权类：批的是哪个动作、哪组参数（卡片原样摆出来，owner 看清自己批准的是什么） */
+  bind?: { action: string; params: unknown; version?: string } | null;
   /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
   canAnswer?: boolean;
 }
+
+/** 协作视图的「等你」：开着、非验收、没指给别人的（指给 guest 的指派事项是在等那个 guest，不是等 owner） */
+export const waitsOnOwner = (a: Pick<WebAsk, "state" | "kind" | "assignee">): boolean =>
+  a.state === "open" && a.kind !== "accept" && (!a.assignee || a.assignee === "local:owner:self");
 
 export interface AskGroups {
   /** 等你拍板 / 授权 / 亲自处理的（按等待时长，久的在前） */
@@ -189,10 +195,13 @@ export const ASK_EVENT_REFRESH_MS = 300;
 
 /** 乐观作答（T11b 第 8 条）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
 export interface PendingAnswer {
+  /** 提交返回的时刻（还在飞时是点下去的时刻）：盖多久从这里算 */
   at: number;
   answer: NonNullable<WebAsk["answer"]>;
+  /** 请求还没回来：不管多久都不撤（作答接口超时 60 秒，机器忙时拖过 20 秒也正常） */
+  inFlight?: boolean;
 }
-/** 盖这么久服务端还说开着：以服务端为准（提交其实没成、或 SSE / 拉取一直没回来），卡片回到「等你处理」 */
+/** 提交返回后盖这么久服务端还说开着：以服务端为准（提交其实没成、或 SSE / 拉取一直没回来），卡片回到「等你处理」 */
 export const PENDING_MAX_MS = 20_000;
 
 /**
@@ -204,11 +213,14 @@ export function applyPending(server: WebAsk[], pending: ReadonlyMap<string, Pend
   const asks = server.map((a) => {
     const p = pending.get(a.id);
     if (!p) return a;
-    if (a.state !== "open" || now - p.at > PENDING_MAX_MS) {
+    if (a.state !== "open" || (!p.inFlight && now - p.at > PENDING_MAX_MS)) {
       settled.add(a.id);
       return a;
     }
-    return { ...a, state: "answered" as const, answer: p.answer, updatedAt: p.at };
+    // 多行 reply 已答的那几行留着（聊天气泡的已答高亮从 answer.choices 推导）
+    const had = a.answer;
+    const answer = had ? { ...p.answer, choices: [...had.choices, ...p.answer.choices], labels: [...(had.labels ?? []), ...(p.answer.labels ?? [])] } : p.answer;
+    return { ...a, state: "answered" as const, answer, updatedAt: p.at };
   });
   for (const id of pending.keys()) if (!server.some((a) => a.id === id)) settled.add(id);
   return { asks, settled: [...settled] };

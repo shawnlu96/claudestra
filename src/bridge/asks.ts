@@ -227,7 +227,7 @@ export interface AnswerInput {
   text: string;
   /** owner 在聊天里发的那条原文（答复正文原样带上）；卡片 / Discord 没有 */
   original?: string;
-  /** 已验证的 owner：网页的 owner 设备凭据，或 Discord 的 ALLOWED_USER_IDS 用户 */
+  /** 作答的人：网页的设备凭据（owner 的带 owner 标记；指给自己的 guest 没有），或 Discord 的 ALLOWED_USER_IDS 用户 */
   from: Endpoint;
   principal: string;
   device?: string;
@@ -257,7 +257,8 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   const labels = i.picks.map((p) => p.label);
   const answer = { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final };
   const a = answerAsk(askDb(), i.ask.id, i.atts?.length ? { ...answer, atts: i.atts } : answer);
-  ownerPresence.touch();
+  // 只有 owner 本人作答才算「在」（Discord 只有 ALLOWED_USER_IDS；网页看 owner 标记）：guest 答指给自己的不算，否则 owner 卡活的 ask 5 分钟内只弹横幅
+  if (i.from.kind !== "api" || i.from.owner) ownerPresence.touch();
   publishAsk(a);
   if (!answersGoToAgent(a)) {
     if (a.kind === "assigned" && a.state === "answered" && a.answer) await runAssignedHook(a, a.answer);
@@ -291,9 +292,14 @@ export type CreateAskInput = Omit<NewAsk, "source" | "fromAgent" | "fromChannelI
  * 带 dedupKey 撞上已有的就返回那条、不重复发 SSE / 推送
  */
 export function createAsk(input: CreateAskInput): Ask {
+  return createAskFull(input).ask;
+}
+
+/** 同上，另告诉调用方是不是撞上了已有的（POST 接口要据此决定能不能把那条给出去） */
+export function createAskFull(input: CreateAskInput): { ask: Ask; existed: boolean } {
   const r = openAskFull(askDb(), input);
   if (!r.existed) publishAsk(r.ask);
-  return r.ask;
+  return r;
 }
 
 export function initAsks(d: AsksDeps): void {

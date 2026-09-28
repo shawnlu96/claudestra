@@ -38,16 +38,67 @@ export function canonicalJson(v: unknown): string {
   return JSON.stringify(v ?? null);
 }
 
-export const paramsHash = (params: unknown): string => createHash("sha256").update(canonicalJson(params)).digest("hex");
+/**
+ * 授权绑定的哈希：action、version、发起 agent、params 一起算——换了动作 / 版本、换个 agent 拿去核对，哈希都对不上。
+ * 存在 bind.paramsHash（列名沿用），reply 结果里的 askHash 就是它
+ */
+export const bindHash = (b: Pick<AskBind, "action" | "params" | "version">, fromAgent: string): string =>
+  createHash("sha256").update(canonicalJson({ action: b.action, agent: fromAgent, params: b.params, version: b.version ?? null })).digest("hex");
+
+/** 超过 2^53 的整数（把 Discord snowflake 写成了数字）进了 JS 就不精确了，不同的值会算出同一个哈希：要求写成字符串 */
+function unsafeNumber(v: unknown): boolean {
+  if (typeof v === "number") return !Number.isFinite(v) || (Number.isInteger(v) && !Number.isSafeInteger(v));
+  if (Array.isArray(v)) return v.some(unsafeNumber);
+  return !!v && typeof v === "object" && Object.values(v).some(unsafeNumber);
+}
+
+/** 键按解析后的值比（"a" 与 "\u0061" 是同一个键） */
+function keyText(quoted: string): string {
+  try {
+    return JSON.parse(quoted) as string;
+  } catch {
+    return quoted; // 坏的转义：外面的 JSON.parse 会报错，这里怎么比都行
+  }
+}
+
+/** 原始 JSON 里同一个对象有没有重复的键（JSON.parse 会静默留后一个，两种写法算出同一个哈希）。只在 ask-check --params 用：reply 的参数到这里时已经解析过了 */
+export function hasDuplicateKeys(raw: string): boolean {
+  const stack: (Set<string> | null)[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === "{") stack.push(new Set());
+    else if (c === "[") stack.push(null);
+    else if (c === "}" || c === "]") stack.pop();
+    else if (c === '"') {
+      let j = i + 1;
+      while (j < raw.length && raw[j] !== '"') j += raw[j] === "\\" ? 2 : 1;
+      const keys = stack.at(-1);
+      if (keys && /^\s*:/.test(raw.slice(j + 1, j + 20))) {
+        const k = keyText(raw.slice(i, j + 1));
+        if (keys.has(k)) return true;
+        keys.add(k);
+      }
+      i = j;
+    }
+  }
+  return false;
+}
 
 const str = (v: unknown, max: number): string | undefined => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined);
+
+/** 参数本身合不合格（大小、超大整数）；ask-check --params 另查重复键 */
+export function paramsProblem(params: unknown): string | null {
+  if (canonicalJson(params).length > PARAMS_MAX) return `ask.bind.params too large (> ${PARAMS_MAX} chars)`;
+  return unsafeNumber(params) ? "ask.bind.params has an integer beyond 2^53 (or a non-finite number) — pass it as a string" : null;
+}
 
 function parseBind(raw: unknown): Omit<AskBind, "paramsHash"> | string {
   const b = raw as Record<string, unknown> | null;
   if (!b || typeof b !== "object") return "ask.bind is required for authorize";
   if (typeof b.action !== "string" || !ID_RE.test(b.action)) return "ask.bind.action must match ^[\\w:.-]{1,64}$";
   if (b.params === undefined) return "ask.bind.params is required (the exact parameters being authorized)";
-  if (canonicalJson(b.params).length > PARAMS_MAX) return `ask.bind.params too large (> ${PARAMS_MAX} chars)`;
+  const bad = paramsProblem(b.params);
+  if (bad) return bad;
   const approve = Array.isArray(b.approve) ? b.approve.filter((x): x is string => typeof x === "string" && ID_RE.test(x)) : [];
   if (!approve.length) return "ask.bind.approve must list the button id(s) that mean \"approved\"";
   const version = str(b.version, 80);
@@ -91,17 +142,18 @@ export type AskCheckResult = { ok: true } | { ok: false; reason: string };
 
 /**
  * `ledger ask-check <askId> --hash <h>`：授权类、已作答、选的是 approve 里的按钮、参数哈希一致、没过期（有效期从开出算，答了也不延长）、
- * 没被取代，才算批准。其余一律拒绝，reason 是给 agent 看的一句话。
+ * 没被取代、核对的就是发起它的 agent，才算批准。其余一律拒绝，reason 是给 agent 看的一句话。
  */
-export function checkAsk(a: Ask | null, hash: string, now = Date.now()): AskCheckResult {
+export function checkAsk(a: Ask | null, hash: string, caller: string, now = Date.now()): AskCheckResult {
   if (!a) return { ok: false, reason: "ask not found" };
   if (!a.bind) return { ok: false, reason: `${a.id} has no authorization binding (not an authorize ask)` };
+  if (a.fromAgent !== caller) return { ok: false, reason: `${a.id} was asked by ${a.fromAgent ?? "a person"}, not ${caller} — ask for your own approval` };
   if (a.state === "superseded") return { ok: false, reason: `${a.id} was superseded by a newer ask — use the new one` };
   if (a.state === "open") return { ok: false, reason: `${a.id} is not answered yet` };
   if (a.state !== "answered") return { ok: false, reason: `${a.id} is ${a.state} — treat as not approved` };
   if (a.expiresAt <= now) return { ok: false, reason: `${a.id} approval window ended at ${new Date(a.expiresAt).toISOString()} — ask again` };
   const picked = new Set((a.answer?.choices ?? []).map((w) => /^\[button:(.+)\]$/.exec(w)?.[1]).filter(Boolean));
   if (!a.bind.approve.some((id) => picked.has(id))) return { ok: false, reason: `${a.id} was answered without approving (${(a.answer?.labels ?? []).join(", ") || "no choice"})` };
-  if (hash.toLowerCase() !== a.bind.paramsHash) return { ok: false, reason: `${a.id} parameter hash mismatch — the parameters changed since approval; ask again` };
+  if (hash.toLowerCase() !== a.bind.paramsHash) return { ok: false, reason: `${a.id} hash mismatch — the action, version or parameters changed since approval; ask again` };
   return { ok: true };
 }

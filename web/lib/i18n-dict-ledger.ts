@@ -34,6 +34,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "已被新版本取代": "Superseded by a newer version",
   "指派": "Assigned",
   "已记下": "Recorded",
+  "批准的是：{action}": "Approving: {action}",
   "审核": "Review",
   "待你处理 · 已答 {n} 项": "Needs you · {n} answered",
   "已提交": "Submitted",

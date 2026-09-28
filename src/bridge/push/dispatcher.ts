@@ -90,12 +90,15 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
   const now = d.now ?? Date.now;
   const log = d.log ?? ((m: string) => console.log(`🔔 ${m}`));
 
-  /** 登记时的凭据还有效（撤了 / 禁用 / 过期的设备什么都不推）；老行没记 principal 的按 owner:self 算 */
+  /**
+   * APNs 设备登记时的凭据还有效（撤了 / 禁用 / 过期的设备什么都不推）；老行没记 principal 的按 owner:self 算。
+   * 只管 APNs：壳每次启动都重新登记、凭据跟着换新；网页的订阅只在手动开启时登记，按它判会让重新配对过的浏览器连聊天推送一起静默停掉
+   */
   const live = (r: Registrant): boolean => !r.principal || !d.resolvePrincipal || !!d.resolvePrincipal(r.principal, r.credential);
 
   /** 发给 owner 的订阅（guest 的订阅只收指给自己的 ask，走 sendRows） */
   async function webPushAll(payload: Record<string, unknown>, filter?: (s: PushSubscriptionRow) => boolean): Promise<NoticeOutcome> {
-    return sendRows(listPushSubscriptions(d.db).filter((s) => s.audience === "owner" && live(s) && (!filter || filter(s))), payload);
+    return sendRows(listPushSubscriptions(d.db).filter((s) => s.audience === "owner" && (!filter || filter(s))), payload);
   }
 
   async function sendRows(subs: PushSubscriptionRow[], payload: Record<string, unknown>): Promise<NoticeOutcome> {

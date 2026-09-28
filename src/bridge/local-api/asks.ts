@@ -15,7 +15,7 @@ import type { Ask } from "../../lib/ledger-asks.js";
 import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { answerFromCard } from "../ask-entry.js";
-import { createAsk, listForWeb, ownerPresence } from "../asks.js";
+import { createAskFull, listForWeb, ownerPresence } from "../asks.js";
 
 const decode = (s: string): string | null => {
   try {
@@ -72,28 +72,36 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
 }
 
 const TITLE_MAX = 40;
-/** T8h 的 assignee 格式（cd914851）：人 local:<principalId>、队友的 agent <fp>/<agent>、本机 agent 名 */
-const ASSIGNEE_RE = /^(local:[\w:.-]{1,80}|[0-9a-f]{4}(-[0-9a-f]{4}){3}\/[\w.-]{1,64}|[\w.-]{1,64})$/i;
+/**
+ * T8h 的 assignee 格式（cd914851）：人只能是 owner 或 guest（local:owner:self / local:guest:<hex>，token principal 不行——它订不了推送、
+ * 列表和作答也不给）、队友的 agent <fp>/<agent>、本机 agent 名。rebase 到 T8h 后换成 ledger-checks 的 assigneeFormatError
+ */
+const ASSIGNEE_RE = /^(local:(owner:self|guest:[0-9a-f]{1,64})|[0-9a-f]{4}(-[0-9a-f]{4}){3}\/[\w.-]{1,64}|[\w-]{1,64})$/;
 
-/** owner 开一条人发起的 ask（T28 chat 的审核、给 guest 指派）：作答只记账，不回投任何 agent（bridge/asks.ts createAsk） */
+/**
+ * owner 开一条人发起的 ask（T28 chat 的审核、给 guest 指派）：作答只记账，不回投任何 agent（bridge/asks.ts createAsk）。
+ * 要全权的 owner 凭据（读得了整本台账）：部分 scope / 没有管理权的设备不能开。dedupKey 撞上已有的：同项目、看得见就把那条给回去，否则只回 409——
+ * 否则拿 T28a 形状的键去撞就能读出别的项目里的标题和背景。
+ */
 async function createHumanAsk(req: Request, project: string, p: Principal): Promise<Response> {
-  if (!isOwnerPrincipal(p)) return forbidden("only the owner can open an ask");
+  if (!isOwnerPrincipal(p) || !canReadLedger(p)) return forbidden("only the owner (full-access device) can open an ask");
   const b = await jsonBody(req);
   const title = typeof b?.title === "string" ? Array.from(b.title.trim()).slice(0, TITLE_MAX).join("") : "";
   if (!b || !title) return apiJson(400, { ok: false, error: "body {title, assignee?, kind?: decide|assigned, taskId?, context?, options?, allowText?, expiresIn?, dedupKey?}" });
   const assignee = typeof b.assignee === "string" ? b.assignee : undefined;
-  if (assignee !== undefined && !ASSIGNEE_RE.test(assignee)) return apiJson(400, { ok: false, error: "assignee must be local:<principalId>, <fp>/<agent> or an agent name" });
+  if (assignee !== undefined && !ASSIGNEE_RE.test(assignee)) return apiJson(400, { ok: false, error: "assignee must be local:owner:self, local:guest:<hex>, <fp>/<agent> or an agent name" });
   const kind = b.kind === "assigned" ? "assigned" : b.kind === undefined || b.kind === "decide" ? "decide" : null;
   if (!kind || (kind === "assigned" && !assignee)) return apiJson(400, { ok: false, error: "kind must be decide | assigned (assigned needs an assignee)" });
   const exp = typeof b.expiresIn === "number" && b.expiresIn >= 60 && b.expiresIn <= 30 * 24 * 3600 ? Date.now() + b.expiresIn * 1000 : undefined;
   const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined);
   try {
-    const a = createAsk({
+    const { ask: a, existed } = createAskFull({
       project, source: "human", createdBy: p.id, kind, title, assignee, taskId: str(b.taskId, 40), context: str(b.context, 300) ?? "",
       options: draftFromReply(title, b.options)?.options ?? [], allowText: b.allowText !== false, expiresAt: exp, dedupKey: str(b.dedupKey, 200),
       blocking: kind === "assigned" ? true : null,
     });
-    return apiJson(201, { ok: true, ask: a });
+    if (existed && (a.project !== project || !canSeeAsk(p, a))) return apiJson(409, { ok: false, code: "dedup_conflict", error: "dedupKey already used" });
+    return apiJson(existed ? 200 : 201, { ok: true, existed, ask: a });
   } catch (e) {
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }

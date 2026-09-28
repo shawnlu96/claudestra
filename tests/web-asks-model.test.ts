@@ -1,6 +1,6 @@
 /** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案、乐观作答；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
-import { agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, closedText, groupAsks, PENDING_MAX_MS, rowGroup, spanText, wireLabels, type PendingAnswer, type WebAsk } from "@/features/asks/asks-model";
+import { agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, closedText, groupAsks, PENDING_MAX_MS, rowGroup, spanText, waitsOnOwner, wireLabels, type PendingAnswer, type WebAsk } from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
 import { fillParams } from "@/lib/i18n-fill";
@@ -123,12 +123,23 @@ describe("乐观作答（T11b 第 8 条）", () => {
     expect(askCounts(stale.asks).waiting).toBe(1);
   });
 
+  test("请求还在飞的不按时间撤；多行 reply 已答的几行和这次的合在一起显示（PR0 r1 P2-2、P2-5）", () => {
+    const inFlight = new Map([["ask_1", { ...pend().get("ask_1")!, inFlight: true }]]);
+    expect(applyPending([ask({ id: "ask_1" })], inFlight, 5_000 + PENDING_MAX_MS * 3).settled).toEqual([]);
+    const part = ask({ id: "ask_1", answer: { choices: ["[select:f:a]"], labels: ["甲"], text: "", via: "web_chat", at: 4_000 } });
+    expect(applyPending([part], pend(), 5_100).asks[0].answer).toMatchObject({ choices: ["[select:f:a]"], labels: ["甲", "发"] });
+  });
+
   test("wire → 人话：按钮取文字，选单取选中项文字（多选用「、」），对不上的原样", () => {
     expect(wireLabels(rows, ["[button:go]", "[select:f:a,b]", "[button:zz]"])).toEqual(["发", "甲、乙", "[button:zz]"]);
   });
 });
 
 describe("第二版（T11b PR A）", () => {
+  test("协作视图的「等你」不算指给 guest 的指派事项（r1 P2-2）", () => {
+    expect([ask({}), ask({ assignee: "local:owner:self" }), ask({ assignee: "local:guest:aa11", kind: "assigned" }), ask({ kind: "accept" })].map(waitsOnOwner)).toEqual([true, true, false, false]);
+  });
+
   test("人 / 系统发起的没有 agent：卡片按类型写「指派」「审核」；聊天气泡永远对不上它；被取代的写「已被新版本取代」", () => {
     expect(agentLabel(null, (x) => x, "assigned")).toBe("指派");
     expect(agentLabel(null, (x) => x, "decide")).toBe("审核");
