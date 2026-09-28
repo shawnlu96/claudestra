@@ -18,7 +18,7 @@
 
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
-import { isMasterAgent } from "./registry.js";
+import { bareCanonicalName, isLiteralMaster, isMasterAgent } from "./registry.js";
 import { OWNER_PRINCIPAL_ID } from "./devices.js";
 import { timingSafeEqual } from "crypto";
 import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
@@ -76,7 +76,26 @@ const isPrincipalsFile = (d: unknown): boolean =>
  * 确认磁盘上的文件不是坏的。
  */
 export async function readPrincipals(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
-  return readJsonLenient<PrincipalsFile>(path, { principals: [] }, { validate: isPrincipalsFile, who: "principals" });
+  const file = await readJsonLenient<PrincipalsFile>(path, { principals: [] }, { validate: isPrincipalsFile, who: "principals" });
+  warnMasterVariants(file);
+  return file;
+}
+
+/** 已报过的「principal + 写法」：每个进程只报一次，别让每次鉴权都刷一行 */
+const warnedVariants = new Set<string>();
+
+/**
+ * 名单（principal 的 agents 与各凭据的 grant）里的大总管变体：老版本签码时把 MASTER、全角等当普通名字落了盘，现在不给任何权限。
+ * 只告警、不改盘（principals.json 由 owner 处置），写明是哪个 principal（T42-r2）。
+ */
+export function warnMasterVariants(file: PrincipalsFile, warn: (msg: string) => void = console.warn): void {
+  for (const p of file.principals) {
+    for (const a of new Set([...(p.agents ?? []), ...(p.credentials ?? []).flatMap((c) => c.grant?.agents ?? [])])) {
+      if (!isMasterAgent(a) || isLiteralMaster(a) || warnedVariants.has(`${p.id}\0${a}`)) continue;
+      warnedVariants.add(`${p.id}\0${a}`);
+      warn(`⚠️ [principals] ${p.id}（${p.name}）的名单里有大总管的变体写法 ${JSON.stringify(a)}：不给任何权限，按无效条目处理；要开放大总管请写逐字的 master`);
+    }
+  }
 }
 
 /** 写者用：损坏时抛 StateCorruptError，而不是返回空。 */
@@ -213,12 +232,15 @@ export function agentInScope(p: Principal, agentName: string): boolean {
   // 分享出去」）。历史 token 显式列了 master（老版本 --force 能签出）也在
   // 这里截断——签发侧和消费侧双闸。
   if (p.peer && isMaster) return false;
+  const want = bareCanonicalName(agentName);
   for (const a of p.agents) {
     if (a === "*") {
       if (!isMaster) return true;
       continue;
     }
-    if (a === agentName || `agent-${a}` === agentName || a === `agent-${agentName}`) return true;
+    // 普通 agent 按规范名比（CC / 全角 / 零宽变体 = 同一个）；大总管只认逐字列出的 master / agent-master，老条目里的 MASTER 之类
+    // 变体不给任何权限（等于无效条目，readPrincipals 告警）——请求里的名字是哪种写法都一样，isMasterAgent 已认作大总管
+    if (isMaster ? isLiteralMaster(a) : bareCanonicalName(a) === want) return true;
   }
   return false;
 }
