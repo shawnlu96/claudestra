@@ -55,6 +55,8 @@ export interface QuotaSchedulerDeps {
   hashCreditId(accountKey: string, rawId: string): string;
   store: QuotaStore;
   isEnabled(): boolean;
+  /** 没人看时也查 Claude（要读 Keychain，需 owner 另批；缺省关）：打开后与 Codex 明细同一 6 小时后台节奏 */
+  claudeBackground?(): boolean;
 }
 
 interface EndpointView<E extends QuotaEndpoint = QuotaEndpoint> {
@@ -246,7 +248,7 @@ export class QuotaScheduler {
     const p = QUOTA_ENDPOINTS[endpoint].provider;
     const live = () => gen === this.gen && this.deps.isEnabled();
     if (!live()) return { status: "disabled" };
-    if (p === "claude" && reason === "background") return { status: "skipped_policy" };
+    if (p === "claude" && reason === "background" && !this.deps.claudeBackground?.()) return { status: "skipped_policy" };
     const st = await this.load();
     const now = this.deps.now();
     const ch = st.credHealth[p];
@@ -319,7 +321,7 @@ export class QuotaScheduler {
     if (best) await this.run(best.e, reason);
   }
 
-  /** 定时器每次调一次（T2b-2 起定时器）。有人看 → 两家额度 + 明细；没人看 → 只查 Codex 重置明细。自己兜底，不向定时器抛 */
+  /** 定时器每次调一次。有人看 → 两家额度 + 明细；没人看 → Codex 重置明细（Claude 只在 claudeBackground 开时也查）。自己兜底，不向定时器抛 */
   async tick(opts: { viewing: boolean }): Promise<void> {
     const now = this.deps.now();
     const wake = this.lastTickAt !== null && now - this.lastTickAt > QUOTA_TIMING.wakeGapMs;
@@ -332,6 +334,9 @@ export class QuotaScheduler {
         if (wake || (await this.overdue("claude_usage", T.viewIntervalMs, now)) >= 0) await this.refresh("claude", reason);
         await this.tickCodex([["codex_usage", T.viewIntervalMs], ["codex_reset_credits", T.detailViewIntervalMs]], reason, wake, now);
       } else {
+        // Claude 后台一律用 background 原因（wake 也不例外），开关关着时 attempt 里的策略闸挡住它
+        const claudeDue = this.deps.claudeBackground?.() && (wake || (await this.overdue("claude_usage", T.detailBackgroundIntervalMs, now)) >= 0);
+        if (claudeDue) await this.refresh("claude", "background");
         await this.tickCodex([["codex_reset_credits", T.detailBackgroundIntervalMs]], wake ? "wake" : "background", wake, now);
       }
     } catch (e) {

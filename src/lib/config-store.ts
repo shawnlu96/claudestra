@@ -40,6 +40,9 @@ export interface AppConfig {
   groqApiKey?: string;
   /** 订阅额度：从订阅接口读取实时额度（缺省开；关了只用本机缓存，bridge 不读 Keychain / auth.json）。bridge/quota-service.ts */
   quotaLive?: boolean;
+  /** 没人看看板时也在后台读 Claude 的 Keychain、查 Claude 额度与重置卡（6 小时一次），让 Claude 的快过期提醒也能后台触发。
+   *  缺省关：要 owner 另批（设计稿 T2b §3 / §5 原定 Claude 只在看板打开时读）。每个 tick 现读，改完不用重启 */
+  quotaClaudeBackground?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -85,6 +88,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
+    ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
   };
 }
 

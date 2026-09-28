@@ -31,6 +31,7 @@ type Route = (url: string, signal: AbortSignal) => Response | Promise<Response>;
 interface Harness {
   now: number;
   enabled: boolean;
+  claudeBg: boolean;
   cd: ReturnType<typeof fakeCredDeps>;
   fetch: ReturnType<typeof fakeFetch>;
   route: Route;
@@ -44,6 +45,7 @@ function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore()
   const h: Harness = {
     now: T0,
     enabled: true,
+    claudeBg: false,
     cd: fakeCredDeps(),
     fetch: fakeFetch((u, s) => h.route(u, s)),
     route,
@@ -63,6 +65,7 @@ function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore()
         hashCreditId: (acct, id) => hmacHex(SECRET, acct, id),
         store: h.store,
         isEnabled: () => h.enabled,
+        claudeBackground: () => h.claudeBg,
       });
       return h.scheduler;
     },
@@ -114,6 +117,34 @@ describe("合并与限频", () => {
     expect((await h.scheduler.refresh("claude", "background")).status).toBe("skipped_policy");
     expect(h.cd.keychainCalls).toHaveLength(0);
     expect(h.fetch.calls).toHaveLength(0);
+  });
+});
+
+describe("Claude 后台读取开关（owner 另批才开）", () => {
+  test("开：没人看时 Claude 也按 6 小时查；关回去立刻停，策略闸照旧", async () => {
+    const h = harness();
+    const claudeCalls = () => h.fetch.calls.filter((c) => c.url.includes("/oauth/usage")).length;
+    await h.scheduler.tick({ viewing: false });
+    expect(claudeCalls()).toBe(0);
+    h.claudeBg = true;
+    h.advance(5 * MIN);
+    await h.scheduler.tick({ viewing: false });
+    expect(claudeCalls()).toBe(1);
+    h.advance(5 * MIN);
+    await h.scheduler.tick({ viewing: false });
+    expect(claudeCalls()).toBe(1);
+    for (let i = 0; i < 72; i++) {
+      h.advance(5 * MIN);
+      await h.scheduler.tick({ viewing: false });
+    }
+    expect(claudeCalls()).toBe(2); // 6 小时后第二次
+    h.claudeBg = false;
+    for (let i = 0; i < 80; i++) {
+      h.advance(5 * MIN);
+      await h.scheduler.tick({ viewing: false });
+    }
+    expect(claudeCalls()).toBe(2);
+    expect((await h.scheduler.refresh("claude", "background")).status).toBe("skipped_policy");
   });
 });
 
