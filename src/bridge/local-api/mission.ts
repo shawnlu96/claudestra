@@ -1,9 +1,9 @@
 /**
- * 网页上开 / 关值守（lib/missions.ts；推进在 bridge/mission.ts）：
+ * 网页上开 / 关 Autopilot（lib/missions.ts；推进在 bridge/mission.ts）：
  *   POST   /api/v1/agents/:name/mission {goal, until, ledger?}   until 同命令行：HH:MM / +3h / ISO
  *   DELETE /api/v1/agents/:name/mission                          收回
- * 进行中的值守随 GET /agents 的 mission 字段下发（agent-info-routes.ts），这里不另设列表接口。
- * 要 manage 权限：值守会让 agent 在没人看着的时候一直干活，等同替 owner 下长期指令。
+ * 进行中的 Autopilot 随 GET /agents 的 mission 字段下发（agent-info-routes.ts），这里不另设列表接口。
+ * 要 manage 权限：Autopilot 会让 agent 在没人看着的时候一直干活，等同替 owner 下长期指令。
  */
 import { canManage } from "../../lib/devices.js";
 import { MISSIONS_PATH, missionKey, newMission, parseUntil, updateMissions } from "../../lib/missions.js";
