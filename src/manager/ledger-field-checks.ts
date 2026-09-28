@@ -6,16 +6,17 @@
  */
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
-import { owesAdversarial } from "../lib/ledger-handler.js";
-import { specPolicyOf } from "../lib/task-spec.js";
+import { owesAdversarial, type PendingReview } from "../lib/ledger-handler.js";
+import { specPathFor, specPolicyOf } from "../lib/task-spec.js";
 import type { LedgerCli } from "./ledger-context.js";
 
-const PR_RE = /^(#?\d{1,7}|https:\/\/github\.com\/[\w.-]{1,100}\/[\w.-]{1,100}\/pull\/\d{1,7})$/;
+/** 数字、#N，或 github.com/<owner>/<repo>/pull/N（不限定哪个仓库，兄弟仓库也用；归属由 verify 判）。owner / repo 按 GitHub 的命名规则 */
+const PR_RE = /^(#?\d{1,7}|https:\/\/github\.com\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.\.?\/)[\w.-]{1,100}\/pull\/\d{1,7})$/;
 const HEAD_RE = /^[0-9a-f]{7,40}$/i;
 
-/** git 自己的分支名规则；以 - 开头会被当成选项、@{ 是 reflog 语法，先挡掉 */
+/** git 自己的分支名规则；以 - 开头会被当成选项、@{ 是 reflog 语法、单个 @ 是 HEAD 的别名（check-ref-format --branch 会放行），先挡掉 */
 function branchOk(v: string): boolean {
-  if (v.startsWith("-") || v.includes("@{")) return false;
+  if (v === "@" || v.startsWith("-") || v.includes("@{")) return false;
   return Bun.spawnSync(["git", "check-ref-format", "--branch", v], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 }
 
@@ -28,18 +29,21 @@ export function checkTaskRefs(flags: Record<string, string | undefined>): void {
 }
 
 /**
- * `review --to merge`：开了班子的项目，规格卡要对抗式、台账里还没有对抗式轮的 pass（这一条也不是）就拒绝。
- * 对抗式要经 `ledger dispatch` 派（它记下派审种类）；确实审过但没走 dispatch 时由 PM 用 `ledger stage --from review --to merge` 手动推。
- * 没开班子的项目照旧（人工流程不走 dispatch，这里判不出对抗式）；读不到规格卡也不拦（说不清欠不欠）。
+ * `review --to merge`：开了班子的项目，还欠对抗式（owesAdversarial：当前 head 上没有对抗式 pass、PM 豁免，这一条也不是）就拒绝；
+ * 规格卡在、但提到对抗式却读不出「审查：」（unknown）同样拒绝——按规格卡核对。读不到规格卡不拦（说不清欠不欠）；没开班子照旧。
+ * 文案按角色给出口：PM 可以 --waive adversarial；别人只能去派对抗式，或升级给 PM。
  */
-export function checkMergeGate(c: LedgerCli, task: LedgerTask, verdict: string): void {
+export function checkMergeGate(c: LedgerCli, task: LedgerTask, pending: PendingReview): void {
   const meta = getMeta(c.db, task.project);
   if (!meta.team) return;
   const events = listEvents(c.db, { project: task.project, target: task.id });
-  if (owesAdversarial(specPolicyOf(task, meta.docsDir), events, { verdict }) !== true) return;
-  throw new LedgerError(
-    "conflict",
-    `${task.id} 的规格卡要求对抗式，台账里还没有对抗式轮的通过：先 ledger dispatch ${task.id}（会自动选对抗式）派审，通过后再 --to merge；` +
-      "确实审过对抗式但没走 dispatch，请 PM 用 ledger stage --from review --to merge",
-  );
+  const owes = owesAdversarial(specPolicyOf(task, meta.docsDir), events, pending);
+  if (owes === false || (owes === "unknown" && !specPathFor(task, meta.docsDir))) return;
+  const why = owes === true
+    ? `${task.id} 的规格卡要求对抗式，当前 head 上还没有对抗式轮的通过`
+    : `${task.id} 的规格卡提到对抗式，但读不出「审查：」那一行，说不清还欠不欠`;
+  const out = c.isRealPm(task.project)
+    ? "PM 核对后确实不需要再审，可以带 --waive adversarial --text <理由>"
+    : `把这件事升级给 PM（ledger escalate ${task.id} --reason …）`;
+  throw new LedgerError("conflict", `${why}：先 ledger dispatch ${task.id}（会按规格卡选对抗式）派审，通过后再 --to merge；${out}`);
 }

@@ -139,11 +139,16 @@ describe("review --to merge：规格卡还欠对抗式就拒绝（开了班子�
     expect((await run("agent-disp", ...pass("merge"))).task.stage).toBe("merge");
   });
 
-  test("没有派审记录（手写 prompt 派的审）也拒绝，提示 PM 用 stage 手动推", async () => {
+  test("没有派审记录（手写 prompt 派的审）也拒绝：PM 看到 --waive 出口，调度助理只看到派审 / 升级；stage 手动推只给 PM", async () => {
     withTeam();
     toReview();
     const r = await run("agent-pm", ...pass("merge"));
-    expect(r.error).toContain("ledger stage --from review --to merge");
+    expect(r.error).toContain("--waive adversarial");
+    const d = await run("agent-disp", ...pass("merge"));
+    expect(d.error).toContain("升级给 PM");
+    expect(d.error).not.toContain("stage");
+    expect(d.error).not.toContain("--waive");
+    expect((await run("agent-disp", "stage", "T1", "--from", "review", "--to", "merge")).code).toBe("forbidden");
     expect((await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge")).task.stage).toBe("merge");
   });
 

@@ -139,8 +139,9 @@ describe("任务与 registry 联动", () => {
   test("--branch / --pr / --head 写入前就校验：git 分支名、数字 / #N / GitHub PR 链接、7–40 位十六进制", async () => {
     await taskT8b();
     const bad: [string, string][] = [
-      ["branch", "x\n## 重点"], ["branch", "-x"], ["branch", "a..b"], ["branch", "@{-1}"], ["branch", "a b"],
-      ["pr", "abc"], ["pr", "#1\n## 重点"], ["pr", "https://evil.example/pull/1"], ["head", "abc"], ["head", "xyz1234"], ["head", "a".repeat(41)],
+      ["branch", "x\n## 重点"], ["branch", "-x"], ["branch", "a..b"], ["branch", "@{-1}"], ["branch", "a b"], ["branch", "@"],
+      ["pr", "abc"], ["pr", "#1\n## 重点"], ["pr", "https://evil.example/pull/1"], ["pr", "https://github.com/../b/pull/1"], ["pr", "https://github.com/a/../pull/1"],
+      ["pr", "https://github.com/-a/b/pull/1"], ["pr", "https://github.com/a/b/issues/1"], ["pr", "https://github.com/a/b/pull/1?x=1"], ["head", "abc"], ["head", "xyz1234"], ["head", "a".repeat(41)],
     ];
     for (const [flag, v] of bad) {
       expect(await run(EXE, "task-set", "T8b", "--rev", "1", `--${flag}`, v)).toMatchObject({ ok: false, code: "invalid" });
@@ -149,6 +150,8 @@ describe("任务与 registry 联动", () => {
     const ok = await run(EXE, "task-set", "T8b", "--rev", "1", "--branch", "task/t8b-x", "--pr", "https://github.com/a/b/pull/12", "--head", "ABCDEF1");
     expect(ok.task).toMatchObject({ branch: "task/t8b-x", pr: "https://github.com/a/b/pull/12", headSHA: "ABCDEF1" });
     expect((await run(EXE, "task-set", "T8b", "--rev", "2", "--pr", "12")).task.pr).toBe("12");
+    // 仓库不限定：兄弟仓库的 PR 也收（归属由 verify 判）
+    expect((await run(EXE, "task-set", "T8b", "--rev", "3", "--pr", "https://github.com/other-org/claudestra-relay/pull/7")).ok).toBe(true);
     expect(await run(EXE, "deliver", "T8b", "--head", "abc")).toMatchObject({ ok: false, code: "invalid" });
   });
   test("task-set：执行者改自己任务的分支可以，改执行者不行；PM 改执行者时 registry 跟着挂", async () => {

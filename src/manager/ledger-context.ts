@@ -67,6 +67,16 @@ export class LedgerCli {
     if (r === null || r === "executor") throw new LedgerError("forbidden", `${what}要项目 ${project} 的 PM / master / owner（你是 ${this.deps.actor}）`);
   }
 
+  /** 真正的 PM：名单里除了班子调度助理以外的人，或 master / owner（调度助理也在 PM 名单里，PM 专属的出口不能交给它） */
+  isRealPm(project: string): boolean {
+    const r = this.role(project);
+    return r === "master" || r === "owner" || (r === "pm" && getMeta(this.db, project).team?.dispatcher !== this.deps.actor);
+  }
+
+  requireRealPm(project: string, what: string): void {
+    if (!this.isRealPm(project)) throw new LedgerError("forbidden", `${what}只有项目 ${project} 的 PM（调度助理除外）/ master / owner 能做（你是 ${this.deps.actor}）`);
+  }
+
   /** 任务的执行者本人，或 PM / master / owner */
   requireOwnOrManager(task: LedgerTask, what: string): void {
     if (this.role(task.project, task) === null) throw new LedgerError("forbidden", `${what}只能是任务 ${task.id} 的执行者或 PM / master / owner（你是 ${this.deps.actor}）`);

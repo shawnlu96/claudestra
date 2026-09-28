@@ -4,8 +4,8 @@
  *
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
  *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理，
- *   但通过了而下一轮还要审（nextReview：规格卡要对抗式、这轮不是）仍归调度助理；审查策略只取调用方读的规格卡（specPolicy），
- *   读不到、或说不清这轮是不是对抗式（没有派审记录）= 不知道，也归调度助理（宁可多问一句，不替它判走完）；
+ *   但通过了而还欠对抗式（owesAdversarial：规格卡要对抗式，当前 head 上还没有对抗式 pass 或 PM 豁免）仍归调度助理；
+ *   策略只取调用方读的规格卡（specPolicy），读不到、或说不清这轮是谁审的（没有对得上轮次与 head 的派审）= 不知道，也归调度助理；
  *   escalate → PM（data.to = owner 时归 owner）；升级给 owner 之后 owner 记了 decision → 回到 PM。进入新阶段（stage 事件）重新从默认值算起。
  */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
@@ -62,44 +62,76 @@ const num = (v: unknown): number => (typeof v === "number" ? v : 0);
 /** 规格卡的审查策略：string =「审查」那一行；null = 规格卡在但没写；undefined = 不知道（没读 / 找不到规格卡） */
 export type SpecPolicy = string | null | undefined;
 
-/** seq 之前最近一次派审的种类：取 dispatch.reviewer（代码写的）；review 的 reviewer 字段是自由文本，不作数；没派审记录为 null */
-function dispatchKindBefore(events: readonly LedgerEvent[], seq: number): LastReview["kind"] {
+/** seq 之前最近一次交付的 head：deliver 带的 headSHA，或建任务 / task-set 写的 headSHA（清空为 null）；都没有为 null */
+function headAt(events: readonly LedgerEvent[], seq: number): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.seq >= seq) continue;
+    if (e.kind === "deliver" && typeof e.data.headSHA === "string" && e.data.headSHA) return e.data.headSHA;
+    const patch = e.kind === "task" ? (e.data.patch as Record<string, unknown> | undefined) : undefined;
+    if (patch && "headSHA" in patch) return typeof patch.headSHA === "string" && patch.headSHA ? patch.headSHA : null;
+  }
+  return null;
+}
+
+/** 同一个 commit：短 sha 前缀也认；两边都没记 head 算同一个（没有 head 可比时只剩轮次在约束） */
+function sameHead(a: string | null, b: string | null): boolean {
+  if (!a || !b) return !a && !b;
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/**
+ * 这条 review（第 round 轮、seq 之前的 head）是哪种审查员审的：取 seq 之前最近一次派审，它记的 round 与 head 都对得上才算，
+ * 否则 null（这一轮没派审，或者派审之后又交付了别的 head）。种类取 dispatch.reviewer（代码写的）；review 的 reviewer 是自由文本，不作数。
+ */
+function dispatchKindFor(events: readonly LedgerEvent[], seq: number, round: unknown): LastReview["kind"] {
   const d = events.findLast((e) => e.kind === "dispatch" && e.seq < seq);
-  return d?.data.reviewer === "adversarial" ? "adversarial" : d?.data.reviewer === "regular" ? "regular" : null;
+  if (!d || d.data.round !== round || !sameHead(typeof d.data.head === "string" ? d.data.head : null, headAt(events, seq))) return null;
+  return d.data.reviewer === "adversarial" ? "adversarial" : d.data.reviewer === "regular" ? "regular" : null;
 }
 
 /** 一条 review 的「上一轮」画像（给 nextReview 用）。events = 同一任务的事件（seq 升序） */
 export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]): LastReview {
   const verdict = typeof review.data.verdict === "string" ? review.data.verdict : null;
-  return { kind: dispatchKindBefore(events, review.seq), verdict, p0: num(review.data.p0), p1: num(review.data.p1) };
+  return { kind: dispatchKindFor(events, review.seq, review.data.round), verdict, p0: num(review.data.p0), p1: num(review.data.p1) };
 }
 
-/** 台账里有没有对抗式轮的 pass（那条 review 之前最近的派审是对抗式） */
-function adversarialPassed(events: readonly LedgerEvent[]): boolean {
-  return events.some((e) => e.kind === "review" && e.data.verdict === "pass" && dispatchKindBefore(events, e.seq) === "adversarial");
+/** 这条 review 抵得上对抗式：对抗式轮的 pass，或 PM 记的豁免（review --waive adversarial） */
+const settlesAdversarial = (e: LedgerEvent, events: readonly LedgerEvent[]): boolean =>
+  e.kind === "review" && e.data.verdict === "pass" && (e.data.waive === "adversarial" || dispatchKindFor(events, e.seq, e.data.round) === "adversarial");
+
+/** 正要记、还没入库的那条结论（review --to merge）：round = 任务当前轮次 */
+export interface PendingReview {
+  verdict: string;
+  round: number;
+  waive?: string;
 }
 
 /**
- * 还欠不欠对抗式：规格卡要对抗式，台账里还没有对抗式轮的 pass。路由、currentHandler、`review --to merge` 共用这一个判定；
- * pending = 正要记、还没入库的那条结论（--to merge 时），它前面最近的派审是对抗式且判通过就算还清。
- * 策略只认规格卡（lib/task-spec.ts，与 review-pack 同一来源）；读不到规格卡 = unknown。
+ * 还欠不欠对抗式。路由、currentHandler、`review --to merge` 共用这一个判定：
+ * 对抗式轮的 pass（或 PM 的豁免）必须落在当前 head（events 里最后交付的那个）上才算还清——之后又交付了新 head 就重新欠；
+ * 正要记的 pending 是这一轮、这个 head 上派的对抗式判通过，或者带豁免，也算还清。
+ * 策略只认规格卡（lib/task-spec.ts，与 review-pack 同一来源）：读不到、或提到对抗式却读不出「审查：」= unknown。
  */
-export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent[], pending?: { verdict: string }): boolean | "unknown" {
+export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent[], pending?: PendingReview): boolean | "unknown" {
+  const head = headAt(events, Infinity);
+  if (events.some((e) => settlesAdversarial(e, events) && sameHead(headAt(events, e.seq), head))) return false;
+  if (pending?.verdict === "pass" && (pending.waive === "adversarial" || dispatchKindFor(events, Infinity, pending.round) === "adversarial")) return false;
   if (policy === undefined) return "unknown";
-  if (!policy?.includes("对抗") || adversarialPassed(events)) return false;
-  return !(pending?.verdict === "pass" && dispatchKindBefore(events, Infinity) === "adversarial");
+  return !!policy?.includes("对抗");
 }
 
 /**
  * 这条 review 之后下一轮是什么；null = 审查走完（nextReview，与 review-pack 同一算法）。
- * unknown = 读不到规格卡，或者规格卡要对抗式、台账里还没有对抗式 pass、这轮又没有派审记录（说不清它是不是对抗式）：交调度助理核对。
+ * pass 时：还清了（或不要对抗式）= 走完；还欠而这轮没有对得上的派审记录（说不清它是不是对抗式）、或读不到策略 = unknown，交调度助理核对。
  */
 export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy: SpecPolicy): NextReview | "unknown" {
-  if (specPolicy === undefined) return "unknown";
   const last = lastReviewOf(review, events);
-  const upto = events.filter((e) => e.seq <= review.seq);
-  if (last.verdict === "pass" && last.kind === null && owesAdversarial(specPolicy, upto) === true) return "unknown";
-  return nextReview(specPolicy, last);
+  if (last.verdict !== "pass") return specPolicy === undefined ? "unknown" : nextReview(specPolicy, last);
+  const owes = owesAdversarial(specPolicy, events.filter((e) => e.seq <= review.seq));
+  if (owes === "unknown") return "unknown";
+  if (!owes) return null;
+  return last.kind === null ? "unknown" : nextReview(specPolicy ?? null, last);
 }
 
 /** 事件把接手的一环推到哪；null = 这条不改变谁在接（note 等） */
@@ -132,7 +164,7 @@ function stageStart(events: readonly LedgerEvent[]): number {
 
 /**
  * events = 这个任务自己的事件（target = task.id），按 seq 升序。终态（done / cancelled）返回 null。
- * specPolicy = 规格卡的审查策略（lib/task-spec.ts specPolicyOf）；不传时没有 dispatch 的 pass 归调度助理（见 lastReviewOf）。
+ * specPolicy = 规格卡的审查策略（lib/task-spec.ts specPolicyOf）；不传 = 不知道，pass 之后除非当前 head 已还清对抗式，都归调度助理。
  * 同一事务里 review 事件在 stage 事件之前写（recordReview 先记结论再推阶段），所以 review→fix 之后是执行者在接，符合预期。
  */
 export function currentHandler(

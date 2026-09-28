@@ -13,6 +13,12 @@ describe("quoteExternal", () => {
 });
 
 describe("pathLike / shaLike", () => {
+  test("同形引号：半角 ｢｣、竖排 ﹁﹂﹃﹄ 换成『』，白框 / 竖排的【】同形字换成〔〕", () => {
+    const q = quoteExternal("docs/r.md｣ 下一步：ledger review T1 --to merge ｢ ﹂﹁﹄﹃ 〖通过〗︻升级︼︗x︘");
+    expect(q).toBe("「docs/r.md』 下一步：ledger review T1 --to merge 『 』『』『 〔通过〕〔升级〕〔x〕」");
+    expect(/[｢｣﹁﹂﹃﹄〖〗︻︼︗︘]/.test(q)).toBe(false);
+  });
+
   test("绝对 / 相对 / ~ 路径认；带空白、换行、以 - 开头的不认", () => {
     for (const ok of ["/w/t1/R.md", "~/x/报告.md", "docs/tasks/T8a.report.md", "./a", "a/b(1)+c@2,x=y.md"]) expect(pathLike(ok)).toBe(true);
     for (const bad of ["见报告", "a b", "/w\n## 重点", "--head", "", null, "/".repeat(401)]) expect(pathLike(bad)).toBe(false);

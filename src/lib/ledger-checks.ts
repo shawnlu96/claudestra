@@ -163,6 +163,8 @@ export interface ReviewInput {
   text?: string;
   /** 同一事务推阶段（review → fix / merge / done / spec） */
   move?: StageMove;
+  /** PM 豁免对抗式（review --waive adversarial，权限在 CLI 层判），只对当时的 head 有效（ledger-handler.ts owesAdversarial） */
+  waive?: "adversarial";
 }
 
 export function checkReview(input: ReviewInput, task: LedgerTask): void {
