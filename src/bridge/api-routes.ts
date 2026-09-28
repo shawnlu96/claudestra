@@ -1479,6 +1479,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (claudeSetMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(claudeSetMatch[1]);
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isFullScope(principal)) return forbidden("claude-settings requires a full-scope token"); // 与 pi/codex-settings 同一门（bridge/runtime-settings-routes.ts）
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
@@ -1760,8 +1761,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // 两种 runtime 都支持（Pi 走 resume --runtime pi，会话 id 是 open-or-create）。
   // 耗时（起 tmux 窗口 + 等就绪）→ 202 后台执行，结果进事件流。
   if (path === "/agents/resume" && req.method === "POST") {
-    // 能 takeover（SIGTERM owner 正在跑的 CC 进程）和 fork：scope 为 "*" 的 guest / peer 不算全权
-    if (!isFullScope(principal)) return forbidden("resume requires a full-scope token");
+    if (!isFullScope(principal)) return forbidden("resume requires a full-scope token"); // takeover 会 SIGTERM owner 正在跑的 CC；scope 为 * 的 guest / peer 不算全权
     let body: any;
     try {
       body = await req.json();

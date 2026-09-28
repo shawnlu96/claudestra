@@ -67,6 +67,8 @@ const ENDPOINTS: Record<string, Endpoint> = {
   resume: { method: "POST", path: "/api/v1/agents/resume", body: "{}", ok: [400] },
   // 过了门以后假 tmux 抓不到屏：409 / 502 都说明走到了门后面
   clear: { method: "POST", path: "/api/v1/agents/cc/clear", body: "{}", ok: [409, 502] },
+  // 切模型 / effort 会注入 TUI：过了门以后假 tmux 抓屏为空 → 判成忙，409「正在回合中」
+  "claude-settings": { method: "POST", path: "/api/v1/agents/cc/claude-settings", body: JSON.stringify({ effort: "high" }), ok: [409] },
   // 过了门就会真去探本机网络（fetch 3847、tailscale status、lsof）：放行的格子不发请求，只断言门的判定（见纯函数用例）
   "remote-access": { method: "GET", path: "/api/v1/remote-access", ok: [], probes: true },
   // 替 agent 批准权限弹框：过了门以后假 tmux 抓不到弹框 → 409「permission dialog no longer active」
@@ -88,6 +90,8 @@ const TRAVERSALS = (home: string) => {
     "agent-x/../master": "agent-x/../master",
     反斜杠: "agent-x\\..\\master",
     "..": "..",
+    // 编码两次：解码一次后是字面的「%2F」，不是分隔符——当成一个不存在的目录名，读不到任何东西
+    编码两次: `agent-x%2F${"..%2F".repeat(40)}${encodeURIComponent(wild.slice(1))}`,
   };
 };
 const TRAV_CREDS = ["guest *", "peer *", "owner 设备"];
@@ -147,8 +151,9 @@ describe("历史接口的路径穿越（agent 名 %2F 解码后会拼进归档�
       for (const cred of TRAV_CREDS) {
         for (const op of ["list", "read"]) {
           const r = byName(`trav ${cred} ${k} ${op}`);
-          // 单独的「..」（连 %2E%2E 也是）会被 URL 解析当成上一级目录规范化掉，请求到不了这个路由 → 404
-          const want = k === ".." ? 404 : 403;
+          // 单独的「..」（连 %2E%2E 也是）会被 URL 解析当成上一级目录规范化掉，请求到不了这个路由 → 404；
+          // 编码两次的名字里没有分隔符，过得了门，但只是一个不存在的 agent → 404
+          const want = k === ".." || k === "编码两次" ? 404 : 403;
           expect(`${k} ${cred} ${op} ${r.status} ${String(r.body).includes(SECRET)}`).toBe(`${k} ${cred} ${op} ${want} false`);
         }
       }
