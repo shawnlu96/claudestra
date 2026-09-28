@@ -69,6 +69,18 @@ export const INCOMPLETE_TEXT: Record<IncompleteReason, string> = {
   ownership: "判断不了任务所属项目是不是本仓库（git 读不到本仓库、项目没登记目录，或 PR 链接和项目对不上），不知道该核什么",
 };
 
+/**
+ * extra.repo：PM 声明「这个任务的 PR 在本项目登记的另一个仓库」（owner/repo，返回小写）；不写 → null，写错抛错。
+ * 只有 PM / master / owner 能写 extra（执行者改不了），verify 靠它区分「另一个仓库的活」和「PR 链接填错」。
+ */
+export function parseExtraRepo(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(raw.trim())) {
+    throw new Error(`task extra.repo 要是 owner/repo（如 shawnlu96/claudestra-relay），收到 ${JSON.stringify(raw)}`);
+  }
+  return raw.trim().toLowerCase();
+}
+
 /** extra.checks：不写 → null；写了必须是已知组名的非空数组，否则抛错（打错一个字就少核一项；空数组没有意义） */
 export function parseExtraChecks(raw: unknown): string[] | null {
   if (raw === undefined || raw === null) return null;

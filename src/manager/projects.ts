@@ -6,7 +6,7 @@
  * 从 manager.ts 搬出；能改目录归属的 add / edit --dirs / merge 另有目录校验（lib/project-dirs.ts）和角色校验（project-guard.ts）。
  */
 import { readProjects, writeProjects, PROJECT_ID_RE, type ProjectDef } from "../lib/projects.js";
-import { dirKey, validateProjectDirs } from "../lib/project-dirs.js";
+import { validateProjectDirs } from "../lib/project-dirs.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { loadRegistry, saveRegistry, normalizeName, output } from "./core.js";
 import { requireProjectWriter } from "./project-guard.js";
@@ -204,7 +204,7 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
 }
 
 /**
- * 把 src 并进 dst（台账 i08 1.1）：目录并进去（去重）、成员 projectId 改成 dst 并把 Discord 频道挪到 dst 的 category、删 src。
+ * 把 src 并进 dst（台账 i08 1.1）：目录并进去（按真实路径去重，照 add 校验绝对路径）、成员 projectId 改成 dst 并把 Discord 频道挪到 dst 的 category、删 src。
  * 旧 category 空了留在 Discord（bridge 没有删分类的通道），输出里报出来。合不合、合哪几个是 owner 拍板的事，这里只提供工具。
  */
 async function cmdProjectMerge(srcId: string, dstId: string) {
@@ -215,7 +215,10 @@ async function cmdProjectMerge(srcId: string, dstId: string) {
     output({ ok: false, error: !src ? `project "${srcId}" 不存在` : !dst ? `project "${dstId}" 不存在` : "src 和 dst 是同一个" });
     return;
   }
-  for (const d of src.dirs) if (!dst.dirs.some((x) => dirKey(x) === dirKey(d))) dst.dirs.push(d);
+  // 合并后的目录照 add / edit 一样校验（绝对路径、不和第三个项目撞）；src 要删掉，不算撞
+  const checked = validateProjectDirs([...dst.dirs, ...src.dirs], data.projects.filter((p) => p.id !== srcId), dstId);
+  if (!checked.ok) return output(checked);
+  dst.dirs = checked.dirs;
   const reg = await loadRegistry();
   const moved = Object.entries(reg.agents).filter(([, a]) => a.projectId === srcId);
   for (const [, a] of moved) a.projectId = dstId;

@@ -1,5 +1,5 @@
 /**
- * project 目录写入前的校验（project-add / project-edit --dirs）：只收绝对路径，一个目录只归一个项目；project-merge 用 dirKey 去重。
+ * project 目录写入前的校验（project-add / project-edit --dirs / project-merge）：只收绝对路径，一个目录只归一个项目。
  * 为什么要严：台账 verify 按「本仓库主树命中哪个项目」判任务归属（manager/ledger-verify.ts），相对路径随调用方 cwd 变、
  * `$HOME` 字面不展开、两个项目登记同一目录时谁排前面归谁，都会让归属判错（T8G r4 P2-1 / P2-2）。
  * 已存在的目录按真实路径比（大小写、symlink 都规范掉）：Node 的 JS 版 realpath 不规范大小写，Bun 下两者一致，用 .native 保险。

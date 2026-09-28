@@ -10,6 +10,7 @@ import {
   checklistVerdict,
   judgeProbe,
   parseExtraChecks,
+  parseExtraRepo,
   planChecklist,
   PROBE_IDS,
   type ChecklistPlan,
@@ -77,8 +78,24 @@ async function siblingRepoDir(c: LedgerCli, fd: FactsDeps, task: LedgerTask, pr:
 }
 
 /**
- * 任务所属项目是不是本仓库：PR 链接的 owner/repo 等于本仓库 origin → 拥有；等于项目里另一个目录的 origin → 该项目的另一个仓库，
- * 只核证据；没有可比的链接就按项目目录判。链接指向别处时，粘错、打错一个字也长这样，所以只有目录也明确不含本仓库才判不拥有，
+ * PR 指向项目里另一个仓库：PM 在 extra.repo 声明过同一个仓库 → 只核证据；没声明 / 声明的不一样 → unknown 并给出 PM 怎么声明
+ * （项目目录明确不含本仓库时 ownership 照旧按目录判不属于）。执行者能改 PR 链接、改不了 extra，本仓库的活挂错另一个仓库的 PR 就停在这里。
+ */
+function siblingOwnership(task: LedgerTask, pr: string, dir: string): Ownership {
+  const declared = asInvalid(() => parseExtraRepo(task.extra.repo));
+  const params = { project: task.project, prRepo: pr, dir, task: task.id, declared: declared ?? "" };
+  if (declared === pr) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params } };
+  if (declared) return { owns: "unknown", note: { tpl: "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑", params } };
+  const cmd = `ledger task-set ${task.id} --rev <rev> --extra '${JSON.stringify({ ...task.extra, repo: pr })}'`;
+  return {
+    owns: "unknown",
+    note: { tpl: "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），PM 还没声明这个任务属于它：确实是那边的活就由 PM 跑 {cmd}，否则把 PR 改回本仓库的", params: { ...params, cmd } },
+  };
+}
+
+/**
+ * 任务所属项目是不是本仓库：PR 链接的 owner/repo 等于本仓库 origin → 拥有；等于项目里另一个目录的 origin → 看 PM 的声明
+ * （siblingOwnership）；没有可比的链接就按项目目录判。链接指向别处时，粘错、打错一个字也长这样，所以只有目录也明确不含本仓库才判不拥有，
  * 否则判断不了（不放行）。
  */
 async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise<Ownership> {
@@ -88,8 +105,10 @@ async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise
   if (pr && origin === pr) return { owns: "yes" };
   const project = task.project;
   const sib = pr ? await siblingRepoDir(c, fd, task, pr) : null;
-  if (pr && sib) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params: { project, prRepo: pr, dir: sib } } };
+  const sibling = pr && sib ? siblingOwnership(task, pr, sib) : null;
+  if (sibling?.owns === "no") return sibling;
   const dirs = await dirOwnership(c, fd, task);
+  if (sibling && dirs !== "no") return sibling; // 目录没排除本仓库：可能是本仓库的活挂了那边的 PR，要 PM 声明
   if (!pr || !origin) {
     return dirs === "no" ? { owns: "no", note: { tpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", params: { project } } } : { owns: dirs };
   }

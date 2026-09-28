@@ -63,5 +63,15 @@ describe("manager project-* 接线（临时 CLAUDESTRA_STATE_DIR）", () => {
     expect(run(["project-edit", "aa", "--name", "A"], "222")).toMatchObject({ ok: true, project: { name: "A" } });
     expect(run(["project-edit", "aa", "--dirs", "/no/such/b"])).toMatchObject({ ok: false, error: expect.stringContaining("已登记在项目 bb 下") });
     expect(JSON.parse(readFileSync(join(state, "projects.json"), "utf8")).projects.map((p: ProjectDef) => p.dirs)).toEqual([["/no/such/a"], ["/no/such/b"]]);
+    // merge 也照 add 校验：合出来的目录和第三个项目撞 → 拒绝；不撞 → 按真实路径去重合并
+    expect(run(["project-add", "cc", "--dirs", "/no/such/c"])).toMatchObject({ ok: true });
+    const file = join(state, "projects.json");
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    data.projects[1].dirs.push("/no/such/c"); // 旧数据里已经撞了的（写入校验之前留下的）
+    writeFileSync(file, JSON.stringify(data));
+    expect(run(["project-merge", "bb", "aa"])).toMatchObject({ ok: false, error: expect.stringContaining("已登记在项目 cc 下") });
+    data.projects[1].dirs = ["/no/such/b", "/no/such/a/"];
+    writeFileSync(file, JSON.stringify(data));
+    expect(run(["project-merge", "bb", "aa"])).toMatchObject({ ok: true, dirs: ["/no/such/a", "/no/such/b"] });
   });
 });

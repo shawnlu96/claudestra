@@ -318,18 +318,56 @@ describe("没 PR 与别的项目", () => {
     sc.projects = [proj(P, ["/w"]), proj("other", ["/w/claudestra"])];
     expect(await pm("verify", "T19", "--dry-run")).toMatchObject({ checklistSource: "evidence" });
   });
-  test("一个项目登记了多个仓库：claudestra-relay 的 PR → 属于该项目的另一个仓库，只核证据；本仓库的 PR 照旧按全套核", async () => {
+  const RELAY_PR = "https://github.com/shawnlu96/claudestra-relay/pull/3";
+  const relayProject = () => {
     sc.projects = [proj(P, ["/repo", "/relay"])];
     sc.origins["/relay"] = "git@github.com:shawnlu96/claudestra-relay.git";
-    liveTask("T30", { pr: "https://github.com/shawnlu96/claudestra-relay/pull/3" });
+  };
+  test("一个项目登记了多个仓库：PM 在 extra.repo 声明了 relay → relay 的 PR 只核证据；本仓库的 PR 照旧按全套核", async () => {
+    relayProject();
+    liveTask("T30", { pr: RELAY_PR, extra: { repo: "ShawnLu96/claudestra-relay" } });
     const dry = await pm("verify", "T30", "--dry-run");
     expect(dry).toMatchObject({ checklistSource: "evidence", noteTpl: expect.stringContaining("另一个仓库"), noteParams: { prRepo: "shawnlu96/claudestra-relay", dir: "/relay" } });
     sc.sizes["docs/T30.report.md"] = 500;
     expect(await pm("verify", "T30", "--evidence", "docs/T30.report.md")).toMatchObject({ ok: true, moved: true });
     expect((await pm("verify", "T9", "--dry-run")).checks.map((c: any) => c.id)).toEqual(["pr-merged", "web-local", "web-relay", "daemon-bridge"]);
     sc.missing = ["/relay"]; // 那个目录不在了：认不出是它的仓库 → 回到「对不上」
-    liveTask("T31", { pr: "https://github.com/shawnlu96/claudestra-relay/pull/3" });
+    liveTask("T31", { pr: RELAY_PR, extra: { repo: "shawnlu96/claudestra-relay" } });
     expect(await pm("verify", "T31", "--dry-run")).toMatchObject({ result: "unknown", noteTpl: expect.stringContaining("对不上") });
+  });
+  test("没声明 / 声明的是别的仓库 → unknown，提示 PM 怎么声明（命令里带上原有的 extra 键）", async () => {
+    relayProject();
+    sc.sizes["docs/r.md"] = 500;
+    liveTask("T34", { pr: RELAY_PR, extra: { checks: ["cron"] } });
+    const r = await pm("verify", "T34", "--evidence", "docs/r.md");
+    expect(r).toMatchObject({ ok: false, result: "unknown", task: { stage: "live" } });
+    expect(r.noteParams.cmd).toBe(`ledger task-set T34 --rev <rev> --extra '{"checks":["cron"],"repo":"shawnlu96/claudestra-relay"}'`);
+    expect(r.error).toContain("PM 还没声明");
+    liveTask("T35", { pr: RELAY_PR, extra: { repo: "shawnlu96/other" } });
+    expect(await pm("verify", "T35", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", noteTpl: expect.stringContaining("PM 声明的仓库是 {declared}") });
+  });
+  test("M3：本仓库的活，执行者在 build 阶段把 PR 改成 relay 的 → 进不了 verified；执行者也写不了 extra.repo", async () => {
+    relayProject();
+    createTask(db, { actor: "owner" }, { project: P, id: "T36", title: "t", kind: "code", agent: EXE, pm: PM, pr: "https://github.com/x/y/pull/150", branch: "task/t9", stage: "build", round: 1 });
+    const rev = () => String(getTask(db, "T36")!.rev);
+    expect(await run(EXE, ["task-set", "T36", "--rev", rev(), "--pr", RELAY_PR])).toMatchObject({ ok: true });
+    expect(await run(EXE, ["task-set", "T36", "--rev", rev(), "--extra", '{"repo":"shawnlu96/claudestra-relay"}'])).toMatchObject({ ok: false, code: "forbidden" });
+    moveStage(db, { actor: PM }, { taskId: "T36", from: "build", to: "review" });
+    moveStage(db, { actor: PM }, { taskId: "T36", from: "review", to: "merge" });
+    moveStage(db, { actor: PM }, { taskId: "T36", from: "merge", to: "live" });
+    sc.sizes["docs/T36.md"] = 500;
+    expect(await pm("verify", "T36", "--evidence", "docs/T36.md")).toMatchObject({ ok: false, result: "unknown", task: { stage: "live" } });
+  });
+  test("项目只登记了 relay（目录明确不含本仓库）：没声明也照旧按目录判不属于、只核证据", async () => {
+    relayProject();
+    sc.projects = [proj(P, ["/relay"])];
+    liveTask("T37", { pr: RELAY_PR });
+    expect(await pm("verify", "T37", "--dry-run")).toMatchObject({ checklistSource: "evidence", noteParams: { prRepo: "shawnlu96/claudestra-relay" } });
+  });
+  test("extra.repo 写入时校验格式", async () => {
+    const rev = String(getTask(db, "T9")!.rev);
+    expect(await pm("task-set", "T9", "--rev", rev, "--extra", '{"repo":"not a repo"}')).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("owner/repo") });
+    expect(await pm("task-set", "T9", "--rev", rev, "--extra", '{"repo":"a/b"}')).toMatchObject({ ok: true });
   });
   test("登记的目录不存在 / 是相对路径 / 就是本仓库却被别的项目占了 → 判断不了，不判「不属于」", async () => {
     liveTask("T32", { pr: "https://github.com/someone/other/pull/9" });
