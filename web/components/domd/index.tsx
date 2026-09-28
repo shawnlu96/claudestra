@@ -18,6 +18,8 @@ import "@do-md/core-react/style.css";
 import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
 import { padTableBlocks } from "./normalize-md";
 import { InlineButton, CopyChip, AgentChip, BadgeChip } from "./inline-button";
+import { SAFE_NODES } from "./safe-nodes";
+import { mdTooHeavy } from "@/lib/chat/md-guard";
 import "./prism-themes.css";
 
 /**
@@ -68,12 +70,16 @@ export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
   // 真正有新语法注册时 +1,一个会话最多几次,remount 成本可忽略。
   const [grammarV, setGrammarV] = useState(0);
   useEffect(() => subscribeGrammarLoad(() => setGrammarV(getGrammarVersion())), []);
+  // 段内定界符过多 / 缩进过深的 md 交给 do-md 会卡死或栈溢出（lib/chat/md-guard.ts 有实测数字）：按纯文本显示
+  const heavy = useMemo(() => typeof initMd === "string" && mdTooHeavy(initMd), [initMd]);
+  if (heavy) return <div className={bodyClassName}><div className="whitespace-pre-wrap break-words">{initMd}</div></div>;
   return (
     <DOMDProvider
       key={grammarV}
       editable={false}
       codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
       inlineRules={INLINE_RULES}
+      renderComponent={SAFE_NODES}
       {...provider}
       initMd={initMd}
     >

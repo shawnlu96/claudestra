@@ -6,6 +6,7 @@ import { isApiUrl } from "@/lib/chat/attachments";
 import { AuthImg, fetchAuthBlob, resolvedAuthUrl, saveBlob } from "./auth-img";
 import { AttachmentPreview, openAttachment, type PreviewState } from "./attachment-preview";
 import { shareFile } from "../attachment-share";
+import { isNativeShell } from "@/lib/native";
 import { PaperclipIcon } from "./line-icons";
 
 /* 用户气泡里的附件回显：图片缩略图 + PhotoSwipe 全屏预览 / 文件 chip（文本预览、手机分享、桌面下载）/ iOS 分享保存。
@@ -66,14 +67,20 @@ function AttachedImage({ a, onPreview, imgRef }: { a: ChatAttachmentView; onPrev
   );
 }
 
-/** 把当前图片分享/保存：iOS 上走系统分享面板(可存相册),不支持时下载原图。 */
-async function shareImage(url: string, name: string): Promise<void> {
+/**
+ * 把当前图片分享/保存：iOS 上走系统分享面板(可存相册),浏览器里不支持时下载原图。
+ * 壳里不支持分享时返回 false、不下载：壳不处理 WKDownload，下载就是点了没反应，由调用方把按钮换成说明。
+ */
+async function shareImage(url: string, name: string): Promise<boolean> {
   try {
     const blob = await fetchAuthBlob(url);
-    if ((await shareFile(blob, name || "image.png")) === "unsupported") saveBlob(blob, name || "image.png");
+    if ((await shareFile(blob, name || "image.png")) !== "unsupported") return true;
+    if (isNativeShell()) return false;
+    saveBlob(blob, name || "image.png");
   } catch {
     /* 取不到图就什么都不做：图正显示在 lightbox 里，多半是缓存被清，关掉重开即可 */
   }
+  return true;
 }
 
 export function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
@@ -110,9 +117,14 @@ export function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
         isButton: true,
         tagName: "button",
         html: t("保存"),
-        onClick: () => {
+        onClick: (_e, el) => {
           const slide = pswp.currSlide?.data as { pid?: string; alt?: string } | undefined;
-          if (slide?.pid) void shareImage(slide.pid, String(slide.alt || "image.png"));
+          if (!slide?.pid) return;
+          void shareImage(slide.pid, String(slide.alt || "image.png")).then((ok) => {
+            if (ok) return;
+            el.textContent = t("这台设备不能保存图片，可以截屏");
+            setTimeout(() => (el.textContent = t("保存")), 4000);
+          });
         },
       });
     });
