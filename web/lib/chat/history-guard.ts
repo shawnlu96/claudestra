@@ -32,9 +32,15 @@ export function mergeGuardRecords(messages: ChatMessage[], records: GuardItem[],
       else out.splice(at, 0, msg);
     } else if (r.status === "released") {
       const acted = Date.parse(r.actedAt ?? "") || t;
-      const idx = out.findIndex(
-        (m) => m.role === "user" && !taken.has(m.id) && m.content === r.text && Math.abs(Date.parse(m.ts ?? "") - acted) <= RELEASE_WINDOW_MS && (isSelf ? !m.from : true),
-      );
+      // 同文候选可能不止一条（反复测试同一句、Jev 超时 fail-open 直通的那几条），也别碰合成的 dropped 气泡（它带 guard）——
+      // 取离放行时刻最近的那条：放行即重投，那条历史消息的 ts 只比 actedAt 晚几毫秒。
+      let idx = -1;
+      let best = RELEASE_WINDOW_MS + 1;
+      out.forEach((m, i) => {
+        if (m.role !== "user" || m.guard || taken.has(m.id) || m.content !== r.text || (isSelf && m.from)) return;
+        const d = Math.abs(Date.parse(m.ts ?? "") - acted);
+        if (d <= RELEASE_WINDOW_MS && d < best) { best = d; idx = i; }
+      });
       if (idx >= 0) {
         taken.add(out[idx].id);
         out[idx] = { ...out[idx], guard: "released", ...(r.actedBy ? { guardBy: r.actedBy } : {}) };

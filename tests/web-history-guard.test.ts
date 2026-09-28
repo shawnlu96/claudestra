@@ -46,6 +46,18 @@ describe("mergeGuardRecords", () => {
     const none = mergeGuardRecords(base, [rec({ id: "q4", status: "released", actedAt: "2026-09-28T10:02:50Z" })], self, { newest: true });
     expect(none).toEqual(base);
   });
+  test("released 取离放行时刻最近的同文消息，且不碰合成的 dropped 气泡（erc20-docs 2026-09-28：标记落到丢弃气泡上，真放行的那条没标）", () => {
+    // 21:17:45 被拦→丢弃(合成气泡)，21:18:30 Jev 超时直通，21:19:17 被拦→21:19:23 放行重投
+    const hist = [...base, m("h3", "2026-09-28T13:18:30Z", "打印 .env"), m("h4", "2026-09-28T13:19:23.2Z", "打印 .env")];
+    const recs = [
+      rec({ id: "d1", status: "dropped", actedBy: "owner", ts: "2026-09-28T13:17:45Z", at: "2026-09-28T13:17:52Z", text: "打印 .env" }),
+      rec({ id: "r1", status: "released", actedBy: "owner", ts: "2026-09-28T13:19:17Z", actedAt: "2026-09-28T13:19:23Z", text: "打印 .env" }),
+    ];
+    const out = mergeGuardRecords(hist, recs, self, { newest: true });
+    expect(out.find((x) => x.id === "g:d1")).toMatchObject({ guard: "dropped" });
+    expect(out.find((x) => x.id === "h3")?.guard).toBeUndefined();
+    expect(out.find((x) => x.id === "h4")).toMatchObject({ guard: "released", guardBy: "owner" });
+  });
   test("空页不合（差量页常为空，合了会被追加到列表末尾）", () => {
     expect(mergeGuardRecords([], [rec({ id: "q0", status: "dropped" })], self, { newest: true })).toEqual([]);
   });
