@@ -130,6 +130,39 @@ describe("接线：authApi / 路径模式 / 中继 peer 帧", () => {
   test("没有任何期望指纹的老 peer：截止日前不签名也放行（告警），之后拒", async () => {
     expect(await status(apiReq(TOK.old))).toBe(beforeDeadline ? 200 : 401);
   });
+  test("防重放：同一个签名的 POST 300 秒内再来一次 → 401；GET 不去重", async () => {
+    const t = Date.now() - 1000;
+    const body = '{"text":"replay-direct"}';
+    expect(await status(apiReq(TOK.a, { key: keyA, method: "POST", body, now: t }))).toBe(200);
+    expect(await status(apiReq(TOK.a, { key: keyA, method: "POST", body, now: t }))).toBe(401);
+    expect(await status(apiReq(TOK.a, { key: keyA, method: "POST", body: '{"text":"other"}', now: t }))).toBe(200);
+    expect(await status(apiReq(TOK.a, { key: keyA, now: t }))).toBe(200);
+    expect(await status(apiReq(TOK.a, { key: keyA, now: t }))).toBe(200);
+  });
+  test("防重放：经中继转进来的请求只算一次；截获后在中继上重放、或改走直连重放都被拒", async () => {
+    const statuses: number[] = [];
+    const ingress = (async (url: string, init: RequestInit) => {
+      const r = new Request(`http://ingress.local${new URL(url).pathname}`, init);
+      setRequestContext(r, { source: "lan", clientIp: null, https: false });
+      const p = await authenticateApi(r, new URL(r.url), { rateLimit: false });
+      statuses.push(p instanceof Response ? p.status : 200);
+      return p instanceof Response ? p : new Response("{}");
+    }) as unknown as typeof fetch;
+    const h = makeInboundHandler({
+      webBase: "http://127.0.0.1:2", ingressBase: () => "http://127.0.0.1:1", fetchImpl: ingress,
+      refusePeer: async (from, req) => relayPeerRefusal(from, req, await loadRelayPeerView()),
+    });
+    const body = '{"text":"replay-relay"}';
+    const headers = { authorization: `Bearer ${TOK.a}`, ...signedHeaders("POST", PATH, body, keyA) };
+    const frame = () => ({ method: "POST", path: PATH, headers, body: new ReadableStream<Uint8Array>({ start: (c) => { c.enqueue(new TextEncoder().encode(body)); c.close(); } }) });
+    const ctx = { from: fpA, signal: new AbortController().signal };
+    expect((await h(frame(), ctx)).status).toBe(200);
+    expect(statuses).toEqual([200]);
+    await expect(h(frame(), ctx)).rejects.toMatchObject({ code: "replay" });
+    const direct = new Request(`http://ingress.local${PATH}`, { method: "POST", headers, body });
+    setRequestContext(direct, { source: "lan", clientIp: null, https: false });
+    expect(await status(direct)).toBe(401);
+  });
   test("路径模式里兑换邀请直接 403，不进 API", async () => {
     let called = false;
     const res = await dispatchMachineRequest(

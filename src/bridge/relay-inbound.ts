@@ -11,13 +11,15 @@ import { randomBytes } from "node:crypto";
 import { SIG_HEADERS, isPublicKey, keyFingerprint, verifySigned } from "../lib/instance-key.js";
 import { RELAY_FROM, RELAY_FROM_HEADER, apiPathOk, isRedeemRequest, type Headers } from "../lib/relay-protocol.js";
 import { RELAY_MODE_API, RELAY_MODE_HEADER } from "../lib/relay-machine-path.js";
+import { ReplayCache } from "../lib/peer-trust.js";
 import { collectBody, dropForPeer, forwardHeaders, headersToObject, rewriteLocation } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundHandler, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { dispatchMachineRequest, type ApiHandler } from "./relay-dispatch.js";
 
+export { ReplayCache };
+
 /** peer 请求正文上限：验签要整读，别让对方灌满内存（peer 路径的正文都是小 JSON） */
 const MAX_PEER_BODY = 2 * 1024 * 1024;
-const REPLAY_TTL_MS = 10 * 60_000;
 
 /**
  * 只有经中继进来的 peer 请求才带的标记头。peer 入口靠它决定要不要相信 x-claudestra-relay-from：
@@ -52,20 +54,6 @@ export interface InboundDeps {
   handleApi?: ApiHandler;
   /** 验签之后的发件人核对（联系人、token 归属，lib/peer-trust.ts relayPeerRefusal）：返回拒绝原因或 null */
   refusePeer: (from: string, req: { method: string; path: string; headers: Headers }) => Promise<string | null>;
-}
-
-/** 非幂等方法的签名 10 分钟内只认一次（签名含时间戳与正文哈希，同一 sig = 同一请求） */
-export class ReplayCache {
-  private readonly seenAt = new Map<string, number>();
-  constructor(private readonly ttlMs = REPLAY_TTL_MS) {}
-
-  /** true = 见过（重放） */
-  seen(sig: string, now: number): boolean {
-    for (const [k, t] of this.seenAt) if (now - t > this.ttlMs) this.seenAt.delete(k);
-    if (this.seenAt.has(sig)) return true;
-    this.seenAt.set(sig, now);
-    return false;
-  }
 }
 
 /** §4.1：签名头公钥的指纹必须等于中继盖的 from，签名必须对得上，非 GET/HEAD 不许重放 */

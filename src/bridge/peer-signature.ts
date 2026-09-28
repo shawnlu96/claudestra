@@ -11,7 +11,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
 import { judgeSignature, type PinnedPeerKey } from "../lib/peer-keys.js";
 import { readPeers } from "../lib/peers.js";
-import { peerSigVerdict, recordPeerFp, type PeerSigVerdict } from "../lib/peer-trust.js";
+import { peerSigVerdict, recordPeerFp, ReplayCache, type PeerSigVerdict } from "../lib/peer-trust.js";
 
 const PEER_KEYS_PATH = join(STATE_DIR, "peer-keys.json");
 let keys: Map<string, PinnedPeerKey> | null = null;
@@ -33,6 +33,8 @@ export function peerSignatureState(peer: string): PinnedPeerKey | null {
 
 const LEGACY_WARN_EVERY_MS = 60 * 60_000;
 const legacyWarnedAt = new Map<string, number>();
+/** 所有入口（直连、peer 入口、经中继）的 peer 请求共用：验签通过的非 GET/HEAD 签名窗口内只认一次 */
+const replays = new ReplayCache();
 
 export async function checkPeerSignature(req: Request, url: URL, peer: string): Promise<PeerSigVerdict> {
   if (!peer || peer.startsWith("invite:")) return { allow: true, legacy: false }; // 未兑换的邀请 token：还没有对方记录可比
@@ -49,8 +51,10 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
   const prev = loaded().get(peer);
   const next = judgeSignature(prev, hdr, (pk) => verifySigned(pk, { method: req.method, path, ts: hdr.ts!, sig: hdr.sig!, body }), new Date().toISOString(), recordFp);
   const result = next.lastCheck!.result;
-  const verdict = peerSigVerdict(result, !!(recordFp || prev?.publicKey), Date.now());
-  if (!verdict.allow) console.warn(`🚫 [peer-sig] ${peer}: ${result}，拒绝`);
+  let verdict = peerSigVerdict(result, !!(recordFp || prev?.publicKey), Date.now());
+  const idempotent = req.method === "GET" || req.method === "HEAD";
+  if (verdict.allow && result === "ok" && !idempotent && replays.seen(hdr.sig!, Date.now())) verdict = { allow: false, reason: "replay" };
+  if (!verdict.allow) console.warn(`🚫 [peer-sig] ${peer}: ${verdict.reason}，拒绝`);
   else if (verdict.legacy && Date.now() - (legacyWarnedAt.get(peer) ?? 0) > LEGACY_WARN_EVERY_MS) {
     legacyWarnedAt.set(peer, Date.now());
     console.warn(`⚠️ [peer-sig] ${peer}: ${result}，没有记录过对方指纹，截止日前放行（lib/peer-trust.ts LEGACY_PEER_DEADLINE）`);

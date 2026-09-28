@@ -9,6 +9,27 @@ import { readPeers, relayPeerFingerprint } from "./peers.js";
 import { findByBearer, readPrincipals } from "./principals.js";
 import { isRedeemRequest } from "./relay-protocol.js";
 
+/** 签名时间戳允许 ±300 秒（lib/instance-key.ts），一个签名最多在 600 秒里有效：去重窗口不能短于它 */
+const REPLAY_TTL_MS = 10 * 60_000;
+
+/**
+ * 非幂等方法的签名在窗口内只认一次（签名含时间戳与正文哈希，同一 sig = 同一请求），过期条目随调用清掉。
+ * 中继 peer 帧（bridge/relay-inbound.ts）与 authApi 的 peer 验签（bridge/peer-signature.ts）各持一份：
+ * 经中继来的请求两份各见一次不算重放，截获后换一条路重放则会撞上 authApi 那份。
+ */
+export class ReplayCache {
+  private readonly seenAt = new Map<string, number>();
+  constructor(private readonly ttlMs = REPLAY_TTL_MS) {}
+
+  /** true = 见过（重放） */
+  seen(sig: string, now: number): boolean {
+    for (const [k, t] of this.seenAt) if (now - t > this.ttlMs) this.seenAt.delete(k);
+    if (this.seenAt.has(sig)) return true;
+    this.seenAt.set(sig, now);
+    return false;
+  }
+}
+
 /** 没有任何期望指纹的老 peer（签名功能之前建立、又从没签过名）放行到这一刻；doctor 会报还剩几个 */
 export const LEGACY_PEER_DEADLINE = "2026-11-01T00:00:00Z";
 

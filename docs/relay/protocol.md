@@ -182,7 +182,7 @@ claudestra-relay-auth-v2
 3. 防重放：非 GET / HEAD 的 `x-claudestra-sig` 10 分钟内见过 → `error replay`。
 4. 核发件人（`lib/peer-trust.ts` `relayPeerRefusal`）：兑换邀请之外，`from` MUST 是本机联系人（peers.json 里未禁用、记有指纹的对方）；带了 peer token（Bearer 或 events 的 `?token=`）的，token 所属 peer 的期望指纹 MUST 等于 `from`。否则 `error sender_forbidden`。签名只证明请求出自 `from`，这一步才证明 token 是 `from` 的。
 
-验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>`。bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹），不签、签错、过期、换了钥匙都 401；直连（不经中继）的 peer 请求同样如此。三样都没有的老 peer 在 `LEGACY_PEER_DEADLINE` 前放行并告警（doctor 会列出来）。中继路径模式（§6）不收 peer token，也不接兑换邀请，一律 403。
+验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>`。bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹），不签、签错、过期、换了钥匙都 401；直连（不经中继）的 peer 请求同样如此。验签通过的非 GET / HEAD 签名在 10 分钟内只认一次（与第 3 步同一个 `ReplayCache` 实现，bridge 另持一份，所有入口共用），重放 → 401。三样都没有的老 peer 在 `LEGACY_PEER_DEADLINE` 前放行并告警（doctor 会列出来）。中继路径模式（§6）不收 peer token，也不接兑换邀请，一律 403。
 
 ### 4.2 隧道请求（`from: "relay"`）
 
