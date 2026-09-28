@@ -7,6 +7,7 @@
 import { matchClickedRow } from "./reply-clicks";
 import { FormLookup } from "./form-restore";
 import { parseInlineButtons, plainLabel } from "./inline-buttons";
+import { stripMentionDirective } from "./mention-directive";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "./events";
 import { attachmentFromPath, extractAttachments } from "./attachments";
@@ -120,12 +121,14 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
-  const click = resolveUserClick(text, anchor, forms);
-  let raw = click?.text ?? text;
-  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
-  if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
+  const own = from ? text : stripMentionDirective(text); // @ 委托指令行只给 agent 看；只剥本人的（外源的末行照原样给 owner 看）
+  const click = resolveUserClick(own, anchor, forms);
+  let raw = click?.text ?? own;
+  // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明。
+  // 纯附件消息正文以 [attachment: …] 开头，那不是来源头：剥了图就没了
+  if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
-  const pending = click && !click.resolved ? { clickRaw: text } : {};
+  const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending };
 }
 

@@ -9,8 +9,9 @@ import { isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../li
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
-import { TMUX_SOCK as SOCK, MASTER_SESSION, AGENT_PREFIX, tmuxRaw } from "../lib/tmux-helper.js";
+import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
+import { type PendingOp } from "../lib/pending-ops.js";
 import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
 
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
@@ -22,8 +23,11 @@ export interface AgentInfo {
   project: string;
   purpose: string;
   created: string;
-  status: "active" | "stopped";
+  /** creating = create 的占位（pending.op=create），成功后被正式条目整条覆盖 */
+  status: "active" | "stopped" | "creating";
   channelId: string;
+  /** 做到一半的 create / kill / rename 标记（lib/pending-ops.ts）；做完即删 */
+  pending?: PendingOp;
   notes: string;
   sessionId?: string;
   cwd: string;
@@ -116,11 +120,25 @@ export async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entri
   for (const newName of Object.keys(raw.agents)) {
     const oldTmux = newName.replace(/^agent-/, "worker-");
     if (oldTmux !== newName) {
-      await tmuxRaw(["rename-window", "-t", `${MASTER_SESSION}:${oldTmux}`, newName]).catch(() => {});
+      await tmuxRaw(["rename-window", "-t", windowTarget(oldTmux), newName]).catch(() => {});
     }
   }
 
   return { migrated: true, entries: Object.keys(raw.agents).length };
+}
+
+/**
+ * 只改一个条目：重读最新 registry、改、写。长命令（restart --all 动辄几分钟，写锁 20 秒后会降级放行）若拿开头的快照
+ * 整份写回，会冲掉期间别人的写入（例如 create 刚落盘的正式条目被改回 creating，repair 随后把活 agent 当残留清掉）。
+ * 条目已不在就不写，返回 false。
+ */
+export async function patchRegistryAgent(name: string, mutate: (a: AgentInfo) => void): Promise<boolean> {
+  const reg = await loadRegistry();
+  const a = reg.agents[name];
+  if (!a) return false;
+  mutate(a);
+  await saveRegistry(reg);
+  return true;
 }
 
 export async function saveRegistry(reg: Registry) {
@@ -146,7 +164,8 @@ export async function saveRegistry(reg: Registry) {
 // `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
 // 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
 // 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
-const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f]/;
+// `.` 也挡：tmux 在目标串里按 `.` 切 pane，带点的窗口按名字永远找不到（create 按 @id 能建成，之后按名字的操作全静默失效）
+const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f]/;
 /** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
 const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 
@@ -180,7 +199,7 @@ export function assertValidNewName(raw: string): void {
   }
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
     throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
+      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
     );
   }
   if (NAME_TRAVERSAL_RE.test(cleaned)) {

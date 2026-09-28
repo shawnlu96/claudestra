@@ -201,7 +201,7 @@ function TopBar() {
             </span>
           )}
         </div>
-        {/* 窄顶栏的值守徽章（宽时那份在 AgentTitle 里）；ctx 徽章点开是「什么时候压」建议卡 + 一键存记忆+Compact（ctx-badge.tsx） */}
+        {/* 窄顶栏的 Autopilot 徽章（宽时那份在 AgentTitle 里）；ctx 徽章点开是「什么时候压」建议卡 + 一键存记忆+Compact（ctx-badge.tsx） */}
         {info?.mission && <MissionBadge key={info.name} mission={info.mission} slot="bar" />}
         {info && <CtxBadge agent={info} />}
         {info && <ClaudeSwitcher agent={info} />}

@@ -541,7 +541,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, inboundBodyForLocal, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
@@ -1085,14 +1085,14 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
         `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
         `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
         ``,
-        env.content,
+        inboundBodyForLocal(env),
       ].join("\n");
     }
     return [
       `[🌐 来自 Web 端用户「${from.name}」（HTTP API 接入，非 Discord）。`,
       `用 reply() 回答到本 chat_id。对方界面完整渲染 Markdown（表格可用），且能看到本频道完整聊天记录——不要复述上下文；也不要引用与本请求无关的内容。]`,
       ``,
-      env.content,
+      inboundBodyForLocal(env),
     ].join("\n");
   }
 
@@ -1110,7 +1110,7 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
       `判断一下：是问你/要你动手 → 用 reply()/send_to_agent 处理；是纯状态同步/答完没下文 → end_turn 静默 OK，**别为了走形式编"收到"**。`,
       `规则：有干货才说话；没干货别说话。]`,
       ``,
-      env.content,
+      inboundBodyForLocal(env),
     ].join("\n");
   }
 
@@ -2669,7 +2669,7 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 
 
 /** 每分钟扫一次：回程簿里送达后 2 小时还没被消化的条目清掉（target 的 Stop / reply / 回发 send_to_agent 都会消化它，
- * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = 值守一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
+ * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = Autopilot 一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
  * 押在 heldLocalMsgs 里（target 还没看到）时不清，失效钟从真正送达起算（flushHeldLocalMsgs 投递时 touch）。 */
 const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
@@ -3547,7 +3547,7 @@ initInbox({
     direction: "in", from: env.from.kind === "local" ? env.from.agentName ?? "agent" : "?", fromId: "agent", srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId,
   } }),
 });
-void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
+void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

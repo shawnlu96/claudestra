@@ -10,6 +10,7 @@
 import type { ChatMessage } from "./type";
 import { FormLookup } from "@/lib/chat/form-restore";
 import { hasClickTargets, resolveUserClick } from "@/lib/chat/history-shape";
+import { stripMentionDirective } from "@/lib/chat/mention-directive";
 
 type OnUser = (m: ChatMessage, anchor: ChatMessage | null, forms: FormLookup) => void;
 /** 按顺序走一遍消息，维护「最近的可作答锚点」与表单索引；遇到用户消息交给 onUser（此刻只看得见它前面的表单）。返回走完时的状态 */
@@ -53,8 +54,12 @@ export function resolveLiveClick(text: string, messages: ChatMessage[]): string 
   return resolveUserClick(text, anchor, forms)?.text ?? null;
 }
 
-/** 他端用户消息的 content（+ 还原过时原文留在 wire：addRemoteUserMessage 的回声对账按 wire ?? content 比） */
-export function liveUserText(text: string, messages: ChatMessage[]): { content: string; wire?: string } {
-  const content = resolveLiveClick(text, messages) ?? text;
+/**
+ * 他端用户消息的 content：本人的先剥 @ 委托指令行（只给 agent 看，外源的末行照原样给 owner 看），再按回投还原。
+ * 和原文不同时原文留在 wire：addRemoteUserMessage 与回声判定（isUserEcho）按 wire ?? content 认重放。
+ */
+export function liveUserText(text: string, messages: ChatMessage[], from?: string): { content: string; wire?: string } {
+  const own = from ? text : stripMentionDirective(text);
+  const content = resolveLiveClick(own, messages) ?? own;
   return content === text ? { content } : { content, wire: text };
 }

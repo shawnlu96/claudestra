@@ -21,7 +21,7 @@ import {
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
-import { composeView, droppedBlobUrls, revokeBlobUrls, stripInboundHeader } from "./view-compose";
+import { composeView, droppedBlobUrls, echoKeyOf, isUserEcho, revokeBlobUrls, sendCursor } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
@@ -1498,24 +1498,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
   public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string) {
-    const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
-    const t = norm(text);
-    if (!t && !attachments?.length) return;
-    const tail = this.state.messages.slice(-15);
-    // 对账去重:文本相同即回声(附件消息 BFF 已剥注入块,与乐观消息的干净文本
-    // 对得上);纯附件无文本时按附件数量兜底匹配
-    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒
-    // 回声被画成第二个气泡（owner 2026-09-14 实报「发一条多出现一个」）
-    const bare = (m: ChatMessage) => norm(stripInboundHeader(m.wire ?? m.content ?? ""));
-    if (
-      tail.some(
-        (m) =>
-          m.role === "user" &&
-          (norm(m.wire ?? m.content) === t || (t !== "" && bare(m) === t)) &&
-          (t !== "" || (m.attachments?.length ?? 0) === (attachments?.length ?? 0))
-      )
-    )
+    if (!text.trim() && !attachments?.length) return;
+    // 对账去重：尾部 15 条里已有这条（本端乐观消息的回声 / 历史已有）就不再画——比对规则见 view-compose 的 isUserEcho
+    const echo = this.state.messages.slice(-15).find((m) => isUserEcho(m, text, attachments, from));
+    if (echo) {
+      // 回声认领本端乐观气泡：记下这条的指纹，同一气泡不再吞下一条同名附件
+      if (echo.local && echo.echoKey === undefined) this.produce((s) => void s.messages.filter((x) => x.id === echo.id).forEach((x) => (x.echoKey = echoKeyOf(text, attachments))));
       return;
+    }
     this.produce((s) => {
       // 与 send 一致:插话给流式中的助手气泡定稿,后续输出另起气泡
       if (s.streaming) {
@@ -1525,7 +1515,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        ...liveUserText(text, s.messages), // 他端发的按钮 / 表单回投：显示可读文案 + 标已答，原文留 wire 给回声对账
+        ...liveUserText(text, s.messages, from), // 他端发的按钮 / 表单回投：可读文案 + 标已答；本人的 @ 委托指令行剥掉；原文留 wire 给回声对账
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
@@ -1595,6 +1585,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         content: display,
         ts: new Date().toISOString(),
         attachments,
+        ...sendCursor(s.messages), // 纯附件没有正文可比，对账靠发送时的历史游标
         local: true, // 历史确认前保留(见 loadMessages 的乐观消息保全)
         // 按钮点击:展示 label、实发 wire——对账按 wire 匹配,否则气泡永挂 30min
         ...(wire !== display ? { wire } : {}),

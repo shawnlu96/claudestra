@@ -38,6 +38,8 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { SubSessionInfo } from "./runtimes/types.js";
+import { codexSubOf, isCodexSubThread } from "./codex-subthread.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -107,7 +109,7 @@ const foundPaths = new Map<string, string>();
  * cwd 取不到 ⇒ 整个会话被悄悄跳过（第一版就是这么扫出 0 条的）。
  * 这里按需倍增到找到换行为止，封顶 4MB 防着坏文件。
  */
-export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string } | null> {
+export async function readCodexMeta(path: string): Promise<{ sessionId: string; cwd: string; sub?: SubSessionInfo } | null> {
   const MAX = 4 * 1024 * 1024;
   for (let want = 64 * 1024; ; want = Math.min(want * 4, MAX)) {
     let chunk: string;
@@ -120,13 +122,22 @@ export async function readCodexMeta(path: string): Promise<{ sessionId: string; 
     try {
       const obj = JSON.parse(chunk.slice(0, nl));
       if (obj?.type !== "session_meta") return null;
-      const cwd = typeof obj?.payload?.cwd === "string" ? obj.payload.cwd : "";
-      const sessionId = String(obj?.payload?.session_id ?? obj?.payload?.id ?? "");
-      return cwd && sessionId ? { sessionId, cwd } : null;
+      const p = obj?.payload ?? {};
+      const cwd = typeof p.cwd === "string" ? p.cwd : "";
+      // id 是本线程自己的；session_id 是根会话的——子线程两者不同（主会话相同）
+      const sessionId = String(p.id ?? p.session_id ?? "");
+      if (!cwd || !sessionId) return null;
+      return isCodexSubThread(p) ? { sessionId, cwd, sub: codexSubOf(p) } : { sessionId, cwd };
     } catch {
       return null;
     }
   }
+}
+
+/** 按 sessionId 找 Codex 线程的归属（收编前判「是不是子会话」用）；找不到文件 / 不是子线程 = null */
+export async function codexSubSessionOf(sessionId: string, root?: string): Promise<SubSessionInfo | null> {
+  const path = findCodexSessionPath(sessionId, root);
+  return (path ? (await readCodexMeta(path))?.sub : null) ?? null;
 }
 
 /** content 数组（`[{type:"input_text"|"output_text", text}]`）→ 纯文本 */

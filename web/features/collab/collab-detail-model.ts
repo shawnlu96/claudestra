@@ -35,7 +35,7 @@ export interface Segment {
   state: "past" | "current" | "future";
 }
 
-export function stageSegments(d: Pick<TaskDetail, "task" | "timeline">): Segment[] {
+export function stageSegments(d: { task: Pick<LedgerTaskView, "stage" | "stageBefore">; timeline: readonly StageEntryView[] }): Segment[] {
   const cur = d.task.stage === "blocked" ? d.task.stageBefore ?? "build" : d.task.stage;
   const curIdx = SEGMENTS.findIndex((g) => g.includes(cur));
   return SEGMENTS.map((g, i) => {
@@ -105,7 +105,7 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
 const pad = (n: number) => String(n).padStart(2, "0");
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 
-/** 事件时刻的短写，写法同值守卡片（mission-ui.tsx）：今天 HH:mm / 昨天 HH:mm / MM-DD HH:mm；按设备本地时区 */
+/** 事件时刻的短写，写法同 Autopilot 卡片（mission-ui.tsx）：今天 HH:mm / 昨天 HH:mm / MM-DD HH:mm；按设备本地时区 */
 export function fmtEventTime(ts: number, now: number, tr: Tr = zh): string {
   const d = new Date(ts);
   const n = new Date(now);

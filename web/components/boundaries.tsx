@@ -70,9 +70,10 @@ export function RootBoundary({ children }: { children: ReactNode }) {
   );
 }
 
-function PaneFallback({ error, reset, onClose, onBack }: { error: Error; reset: () => void; onClose?: () => void; onBack?: () => void }) {
+type PaneProps = { error: Error; reset: () => void; onClose?: () => void; onBack?: () => void; bg?: string };
+function PaneFallback({ error, reset, onClose, onBack, bg = "bg-base-100" }: PaneProps) {
   return (
-    <div role="alert" className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-2 bg-base-100 px-6 text-center">
+    <div role="alert" className={`flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-2 px-6 text-center ${bg}`}>
       <AlertIcon className="size-6 text-warning" />
       <div className="text-sm font-medium text-base-content">{t("这部分出错了")}</div>
       <p className="line-clamp-3 max-w-sm break-all font-mono text-xs text-base-content/50">{error.message}</p>
@@ -122,7 +123,7 @@ export function SidebarBoundary({ children }: { children: ReactNode }) {
       fallback={(e, reset) => (
         // 与 sidebar.tsx 的 <aside> 同宽：兜底画面是 flex-1，不套这层会在桌面上把侧栏撑成半屏
         <div className="flex w-full shrink-0 flex-col border-r border-base-300 sm:w-[var(--sb-w,16rem)]">
-          <PaneFallback error={e} reset={reset} />
+          <PaneFallback error={e} reset={reset} bg="bg-base-200" />
         </div>
       )}
     >
@@ -131,7 +132,7 @@ export function SidebarBoundary({ children }: { children: ReactNode }) {
   );
 }
 
-/** 单条消息：一条坏消息只把自己换成一行灰字，列表照常。resetKey 传消息对象本身，内容一更新就再试 */
+/** 单条消息：一条坏消息只把自己换成一行灰字，列表照常。id 带上会话（历史气泡 id 是 h<seq>，跨会话会撞）；resetKey 传消息对象，内容一更新就再试 */
 export function BubbleBoundary({ id, resetKey, children }: { id: string; resetKey: unknown; children: ReactNode }) {
   return (
     <ErrorBoundary

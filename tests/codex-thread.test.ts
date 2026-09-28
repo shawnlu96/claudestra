@@ -74,7 +74,8 @@ describe("wrapChannelContent", () => {
     expect(w).toBe('<channel source="claudestra" user="a&quot;&lt;b&gt;">\nx\n</channel>');
   });
   test("reply_via（developer_instructions 不随 resume 生效的兜底）不影响解包出原文", () => {
-    const w = wrapChannelContent("[🌐 来自 Web]\n\n正文 <b>&", { chat_id: "api:t", user: "web" }, "claudestra", codexReplyHint("claudestra"));
+    // meta 与生产同形：bridge 给 Web 用户的 meta 带 api="true"（bridge.ts deliver 组 meta 处），历史只对带注入属性的剥头
+    const w = wrapChannelContent("[🌐 来自 Web]\n\n正文 <b>&", { chat_id: "api:t", user: "web", api: "true" }, "claudestra", codexReplyHint("claudestra"));
     expect(w).toContain(' reply_via="mcp__claudestra__reply(chat_id)；纯文本输出不会送达">');
     expect(unwrapChannelMessage(w)).toEqual({ text: "正文 <b>&", from: "web" });
   });

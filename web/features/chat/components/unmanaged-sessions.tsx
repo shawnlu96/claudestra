@@ -2,9 +2,10 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { fmtAgo } from "../fmt-time";
 import { getLang, useT } from "@/lib/i18n";
-import { resumeSession } from "@/lib/api/agents";
 import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
+import { AdoptPanel } from "./adopt-panel";
+import { nestSubSessions, SessionName, sessionRowKey, type SubSessionInfo } from "./session-name";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -30,6 +31,7 @@ interface SessionRow {
   lastMessage: string;
   agentName: string | null;
   manageable?: boolean; // v2.24+ bridge 按运行时适配器给出（老 bridge 不带）
+  sub?: SubSessionInfo; // 子会话归属（lib/session-nesting.ts）
 }
 
 interface HistoryTool {
@@ -191,7 +193,7 @@ export function UnmanagedSessions() {
 
   const count = sessions.filter((s) => s.agentName === null && !isTempSession(s.cwd)).length;
 
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null); // 行键（sessionRowKey），不是 sessionId
 
   /** 列表里左滑直接处置（不必点进抽屉）；成功后重拉列表 */
   const manageFromList = async (s: SessionRow, action: "archive" | "delete") => {
@@ -287,8 +289,8 @@ export function UnmanagedSessions() {
             </div>
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
-            {unmanaged.map((s) => (
-              <li key={s.sessionId}>
+            {nestSubSessions(unmanaged).map(({ row: s, depth }) => (
+              <li key={sessionRowKey(s)} style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
                 <SwipeActions
                   actions={[
                     {
@@ -297,12 +299,12 @@ export function UnmanagedSessions() {
                       onClick: () => void manageFromList(s, "archive"),
                     },
                     {
-                      label: confirming === s.sessionId ? t("确认删除") : t("删除"),
+                      label: confirming === sessionRowKey(s) ? t("确认删除") : t("删除"),
                       className: "bg-error/80 text-error-content",
                       onClick: () =>
-                        confirming === s.sessionId
+                        confirming === sessionRowKey(s)
                           ? void manageFromList(s, "delete")
-                          : setConfirming(s.sessionId),
+                          : setConfirming(sessionRowKey(s)),
                     },
                   ]}
                 >
@@ -320,9 +322,7 @@ export function UnmanagedSessions() {
                         {t("活跃")}
                       </span>
                     ) : null}
-                    <span className="truncate text-base-content/80">
-                      {s.name || s.sessionId.slice(0, 8)}
-                    </span>
+                    <SessionName s={s} />
                     <span className="ml-auto shrink-0 text-[11px] text-base-content/40">
                       {s.age || fmtAgo(Date.parse(s.modifiedAt))}
                     </span>
@@ -346,6 +346,7 @@ export function UnmanagedSessions() {
       {viewing ? (
         <SessionViewer
           session={viewing}
+          parentName={viewing.sub ? sessions.find((x) => x.sessionId === viewing.sub?.parentId)?.name : undefined}
           onClose={() => setViewing(null)}
           onAdopted={() => {
             setViewing(null);
@@ -360,10 +361,12 @@ export function UnmanagedSessions() {
 /** 只读会话视图：看历史 + 收编成 agent（收编后才可对话） */
 function SessionViewer({
   session,
+  parentName,
   onClose,
   onAdopted,
 }: {
   session: SessionRow;
+  parentName?: string;
   onClose: () => void;
   onAdopted: () => void;
 }) {
@@ -372,7 +375,6 @@ function SessionViewer({
   const [error, setError] = useState("");
   const [adopting, setAdopting] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
-  const [name, setName] = useState(session.slug || session.sessionId.slice(0, 8));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
@@ -414,25 +416,6 @@ function SessionViewer({
     }
   };
 
-  const adopt = async () => {
-    const n = name.trim();
-    if (!n) return;
-    setBusy(true);
-    try {
-      const json = (await resumeSession({ agent: n, sessionId: session.sessionId, runtime: session.runtime, cwd: session.cwd })) as { hint?: string };
-      setNotice(
-        json.hint ||
-          t("已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。")
-      );
-      setTimeout(onAdopted, 1500);
-    } catch (e) {
-      setNotice("");
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
@@ -440,9 +423,8 @@ function SessionViewer({
         <header className="flex items-center gap-2 border-b border-base-300 px-4 py-3">
           <RuntimeBadge runtime={session.runtime} />
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium">
-              {session.name || session.sessionId.slice(0, 8)}
-            </div>
+            {/* 子会话在标题上也挂「↳ 昵称 / 自动审查」徽章：点进来之后同样看得出不是主会话 */}
+            <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium"><SessionName s={session} /></div>
             <div className="truncate font-mono text-[11px] text-base-content/50">
               {session.cwd}
             </div>
@@ -494,30 +476,19 @@ function SessionViewer({
             <div className="mb-2 text-xs text-success break-words">{notice}</div>
           ) : null}
           {adopting ? (
-            <div className="flex items-center gap-2">
-              <input
-                className="input input-bordered input-sm flex-1"
-                placeholder={t("agent 名字")}
-                value={name}
-                disabled={busy}
-                autoFocus
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void adopt();
-                }}
-              />
-              <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void adopt()}>
-                {busy ? <span className="loading loading-spinner loading-xs" /> : null}
-                {t("收编")}
-              </button>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onClick={() => setAdopting(false)}
-              >
-                {t("取消")}
-              </button>
-            </div>
+            <AdoptPanel
+              session={session}
+              parentName={parentName}
+              onCancel={() => setAdopting(false)}
+              onAccepted={(hint) => {
+                setNotice(hint);
+                setTimeout(onAdopted, 1500);
+              }}
+              onError={(msg) => {
+                setNotice("");
+                setError(msg);
+              }}
+            />
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               {/* 手机上没有返回按钮可点：抽屉右上那个 ✕ 会被刘海/状态栏压住（owner

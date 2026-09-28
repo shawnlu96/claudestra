@@ -1,6 +1,6 @@
 import { api } from "@/lib/api/client";
 
-/** 值守（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
+/** Autopilot（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
 export interface MissionInfo {
   goal: string;
   until: string;
@@ -52,7 +52,8 @@ export interface AgentSession {
   displayName: string;
   purpose: string;
   cwd: string;
-  status: "active" | "stopped";
+  /** creating = create 进行中 / 砍在半路的占位 */
+  status: "active" | "stopped" | "creating";
   /** 大总管置顶入口——不可 kill/restart，列表第一位。 */
   pinnedMaster?: boolean;
   /** 遗留字段（mock 模式已随 /api/v1 迁移移除，恒为 undefined）。 */
@@ -83,7 +84,7 @@ export interface AgentSession {
   sharedPeers?: number;
   sharedWith?: string[];
   updateHint?: UpdateHint | null;
-  /** 进行中的值守（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开始 / 结束值守」 */
+  /** 进行中的 Autopilot（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开启 / 关闭 Autopilot」 */
   mission?: MissionInfo | null;
   /** 别的 agent 发来、它还在回合里没收到的消息数（等回合结束或它调 check_inbox）→ 侧栏小标 */
   queued?: number;
@@ -128,6 +129,11 @@ interface ApiAgent {
   ledgerTask?: unknown;
 }
 
+/** bridge 的状态串 → 网页三态；dead 等未知值按 active（旧行为），creating 单列（不能发消息） */
+function agentStatus(s: string | undefined): AgentSession["status"] {
+  return s === "stopped" ? "stopped" : s === "creating" ? "creating" : "active";
+}
+
 function mapAgent(a: ApiAgent): AgentSession {
   if (a.name === "master") {
     return {
@@ -138,7 +144,7 @@ function mapAgent(a: ApiAgent): AgentSession {
       displayName: "大总管",
       purpose: a.purpose || "调度员：管理/派发多个 agent",
       cwd: "",
-      status: a.status === "stopped" ? "stopped" : "active",
+      status: agentStatus(a.status),
       pinnedMaster: true,
       lastActivityTs: a.lastActivityTs ?? null,
       busy: a.busy === true,
@@ -157,12 +163,12 @@ function mapAgent(a: ApiAgent): AgentSession {
     displayName: bare,
     purpose: a.purpose || "",
     cwd: a.cwd || "",
-    status: a.status === "stopped" ? "stopped" : "active",
+    status: agentStatus(a.status),
     // 刚建出来的 agent 还没说过话 → lastActivityTs 为 null 会沉底；用创建时间兜底，刚建的自然在最上面
     lastActivityTs: a.lastActivityTs ?? (a.created ? Date.parse(a.created) || null : null),
     // bridge 的 busy（hook 驱动）优先；老 bridge 无此字段时退回 idle 探测
-    busy: a.status !== "stopped" && (a.busy ?? a.idle === false),
-    compacting: a.status !== "stopped" && a.compacting === true,
+    busy: agentStatus(a.status) === "active" && (a.busy ?? a.idle === false),
+    compacting: agentStatus(a.status) === "active" && a.compacting === true,
     contextTokens: a.contextTokens ?? null,
     model: a.model ?? null,
     runtime: a.runtime ?? null,
@@ -199,7 +205,7 @@ const ledgerSig = (lt?: LedgerTaskRef | null) => (lt ? `|${lt.id}:${lt.stage}:${
 
 /**
  * agentsSignature（features/chat/chat-store.ts）里不断新增的字段拼在这里：chat-store 只许缩，新字段加一处就好。
- * 漏掉的字段 = 列表轮询判「没变」、界面不更新（external / 显示名、值守标记都踩过）。
+ * 漏掉的字段 = 列表轮询判「没变」、界面不更新（external / 显示名、Autopilot 标记都踩过）。
  */
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";

@@ -1,0 +1,16 @@
+{
+  "name": "claudestra-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Claudestra menu-bar app (experimental, macOS only)",
+  "scripts": {
+    "build:ui": "bun build ui/main.ts --outdir dist --target browser --minify && cp ui/index.html ui/style.css dist/",
+    "dev": "bun run build:ui && tauri dev",
+    "build": "bun run build:ui && tauri build --bundles app",
+    "icons": "tauri icon ../native/assets/icon-only.png",
+    "typecheck": "../node_modules/.bin/tsc -p ."
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

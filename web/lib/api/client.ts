@@ -64,6 +64,8 @@ export interface ApiInit {
   signal?: AbortSignal;
   /** 缺省 GET 15s / 其它 60s；0 = 不限（SSE） */
   timeoutMs?: number;
+  /** 页面隐藏 / 卸载时也要发出去的小请求（如协作视图的「看过了」） */
+  keepalive?: boolean;
 }
 
 interface Target {
@@ -133,7 +135,7 @@ async function send(path: string, init: ApiInit, machine: MachineRef | undefined
   ctrl.signal.addEventListener("abort", untrack, { once: true });
   let res: Response;
   try {
-    res = await fetch(`${target.base}${API_PREFIX}${path}`, { method, headers, body, credentials: "include", cache: "no-store", signal: ctrl.signal });
+    res = await fetch(`${target.base}${API_PREFIX}${path}`, { method, headers, body, credentials: "include", cache: "no-store", signal: ctrl.signal, keepalive: init.keepalive });
   } finally {
     // SSE（不限时）留在表里直到调用方 abort 或切机器把它中止——上面的 abort 监听负责出表
     if (timeoutMs > 0) untrack();

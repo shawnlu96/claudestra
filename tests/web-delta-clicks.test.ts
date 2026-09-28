@@ -7,6 +7,7 @@ import { toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
 import { liveUserText, resolveDeltaClicks, resolveLiveClick, resolvePendingClicks } from "@/features/chat/delta-clicks";
 import { composeView } from "@/features/chat/view-compose";
 import type { ChatMessage } from "@/features/chat/type";
+import { withMentionDirective } from "@/lib/chat/mention-directive";
 import type { WebComponentRow } from "@/lib/chat/events";
 
 const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "user", text, ...extra });
@@ -149,5 +150,37 @@ describe("resolveLiveClick（实时流推来的他端回投）", () => {
 
   test("表单不在当前列表里：按钮给兜底「🔘 id」（与刷新后同形），不是原样的 [button:id]", () => {
     expect(resolveLiveClick("[button:ghost]", toChatMessages([u(1, "hi")]))).toBe("🔘 ghost");
+  });
+});
+
+describe("和 T19 的 @ 委托指令行合在一起（本人消息剥指令行，外源不剥）", () => {
+  const writer = { kind: "local" as const, agent: "writer" };
+  const wire = withMentionDirective("[select:picks:t,s]\n顺便问下 @writer", writer, "zh");
+
+  test("实时路径：本人的多选回投 + 指令行 → 可读行、不露指令行，原文留 wire；外源的原样不剥", () => {
+    const msgs = toChatMessages(structuredClone(prior), { sid: "s1" });
+    const full = toChatMessages(structuredClone([...prior, u(3, wire)]), { sid: "s1" });
+    const live = liveUserText(wire, msgs);
+    expect(live.content).toBe(full[2].content);
+    expect(live.content).toContain("【");
+    expect(live.content).not.toContain("📨");
+    expect(live.wire).toBe(wire);
+    expect(msgs[1].replyClicks).toEqual(full[1].replyClicks!);
+    const guest = liveUserText(wire, toChatMessages(structuredClone(prior), { sid: "s1" }), "guest");
+    expect(guest.content).toContain("[📨 委托转达]");
+  });
+
+  test("clickRaw 翻页补解析：表单在更早一页时，补上的结果和整段刷新一致，不露指令行", () => {
+    const later = toChatMessages([u(10, "hi"), a(11, { text: "没有表单" })], { sid: "s1" });
+    const delta = toChatMessages([u(12, wire)], { sid: "s1" });
+    resolveDeltaClicks(later, delta);
+    expect(delta[0].content).not.toContain("📨"); // 还没找到表单时的兜底也不露
+    expect(delta[0].clickRaw).toBeDefined();
+    const older = toChatMessages(structuredClone(prior), { sid: "s1", tail: false });
+    const list = resolvePendingClicks([...older, ...later, ...delta]);
+    const full = toChatMessages(structuredClone([...prior, u(10, "hi"), a(11, { text: "没有表单" }), u(12, wire)]), { sid: "s1" });
+    expect(list.at(-1)!.content).toBe(full.at(-1)!.content);
+    expect(list.at(-1)!.content).not.toContain("📨");
+    expect(older[1].replyClicks).toEqual(full[1].replyClicks!);
   });
 });
