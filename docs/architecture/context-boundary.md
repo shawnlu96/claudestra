@@ -68,17 +68,19 @@ Step 5 also covers "low-priority allowance exhausted" (`exhausted`). A failed se
 
 "Idle" = the last real conversation record is at least `idleMinutes` old **and** the pane shows no spinner / background work (CC touches session files on its own, so mtime alone is unreliable, and a long tool call leaves it untouched). The global path (personal agents) additionally keeps the old condition — session-file mtime at least `idleHours` old — so personal agents are compacted no more often than before; named policies use only the new definition.
 
-### Transition until `lp-state` lands
+### Pane gate (`lp-state`)
 
-Until T35's `lp-state` is merged, the live pane reader is a placeholder that reports "menu + draft" (never type). It gates **only named policies**. The global path and the Discord "save + compact" button skip the pane checks, like the old stats-dashboard code (450K / idle hours / 93% emergency line); both read the same switch (`CtxBoundaryDeps.gateGlobal`, exposed as `gatesGlobal()`), so the `lp-state` increment flips one line. An unreadable pane (window gone — capture uses `tmuxRawStrict`, an empty capture counts as unreadable) is never typed into, gated or not: tmux `send-keys` to a missing window does not fail, so it would only report a fake "sent".
+Pane facts come from T35's `readLpPane` on **one** `capture-pane -p -e` (the plain text is its `stripAnsi`; two separate captures disagreed 15 times in 200 while the screen was changing). `paneStateFromLp` maps it for the gate: `walled`, `lowPriority` (`exhausted` counts as the quota wall), `menu` **or** `modal` (permission prompt, AUQ, Rewind), `compacting`, and `draft = input !== "empty"` — an `unknown` input box (drafts of 14+ lines, bash mode, a full-width rule inside the draft, anything covering the box) blocks like a draft. Named policies, the global path and the Discord "save + compact" button all go through it (`CtxBoundaryDeps.gateGlobal` stays as a switch for tests and rollback). An unreadable pane (window gone — capture uses `tmuxRawStrict`, an empty capture counts as unreadable) is never typed into: tmux `send-keys` to a missing window does not fail, so it would only report a fake "sent". Samples: `tests/fixtures/ctx-boundary/` (real CC 2.1.283 screens from a private tmux).
 
-Where the global path is still not identical to the old code:
+Why `-e`: in a plain capture an empty input box still shows CC's grey suggestion (`❯ Try "write a test for <filepath>"`); only the `ESC[2m` in the escaped capture tells it apart from a real draft (`❯ owner half typed msg`). A multi-line draft continues on indented lines inside the box.
+
+### Global path vs. the old code
+
+Where the global path is not identical to the old stats-dashboard code:
 
 - **Scope**: the old code ran only in Discord mode and only for agents with a `channelId`. The runner covers every active Claude Code agent, including agents without a channel and web-only installs, which get automatic compaction for the first time (defaults 400K / 3 h unless configured).
 - **Executor rule**: a personal agent whose working directory is a linked worktree or a git submodule (both have a `.git` file) is treated as an executor and gets `/compact` with the keep list instead of `/save-compact`.
 - **Idle**: both the new and the old condition must hold, so it fires no more often than before (review r2 compared 3024 cases: every difference was "old fires, new waits").
-
-Pane facts (`wall`, `lp`, `exhausted`, `menu`, `compacting`, `draft`) come from `paneQuotaState(plain, escaped)` in `src/lib/lp-state.ts` (T35). The pane is captured twice, plain and with `-e`: in the plain capture an empty input box still shows CC's grey suggestion (`❯ Try "write a test for <filepath>"`), which only the `ESC[2m` in the escaped capture tells apart from a real draft (`❯ owner half typed msg`). A multi-line draft continues on indented lines inside the box. Samples: ledger `reviews/T36-samples/`.
 
 ## Runner
 

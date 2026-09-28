@@ -14,8 +14,9 @@ import { tmuxRawStrict, tmuxSendLine, windowKey, windowTarget } from "../lib/tmu
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
 import { compactCommand, effectiveAction, isExecutor, matchPolicy, resolvePolicies, type CompactAction, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
+import { readLpPane, stripAnsi } from "../lib/lp-state.js";
 import {
-  boundaryDecision, boundaryView, globalBoundary, policyBoundary, SKIP_REASON_TEXT,
+  boundaryDecision, boundaryView, globalBoundary, paneStateFromLp, policyBoundary, SKIP_REASON_TEXT,
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type PaneQuotaState, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 
@@ -51,7 +52,8 @@ export interface BoundaryAgent extends InjectTarget {
   realWindow: number | null;
 }
 
-/** 画面两份：纯文本给忙闲 / 排队判定；带转义的给草稿判定（输入框里灰色的提示建议只有 ESC[2m 才分得出来） */
+/** 一次 `capture-pane -p -e`：esc 给画面判定（输入框的灰色提示只有 ESC[2m 分得出来），plain 是它去色后的样子（忙闲 / 排队）。
+ *  只抓一次：抓两次在画面快速变化时两份会对不上（r2 实测 200 次里 15 次） */
 export interface PaneCapture {
   plain: string;
   esc: string;
@@ -61,11 +63,11 @@ export interface CtxBoundaryDeps {
   now(): number;
   agents(): Promise<BoundaryAgent[]>;
   capture(target: string): Promise<PaneCapture | null>;
-  paneState(plain: string, esc: string): PaneQuotaState;
+  paneState(esc: string): PaneQuotaState;
   send(target: string, line: string): Promise<void>;
   autoCompact(): (GlobalAutoCompact & { policies?: unknown }) | undefined;
   log(line: string): void;
-  /** 全局路径（没命中具名策略的个人 agent）要不要过画面判定。lp-state 到位前 false：旧口径不看画面，救命线照常 */
+  /** 全局路径（没命中具名策略的个人 agent）和 Discord 手动按钮要不要过画面判定（线上 true；留着开关给测试和回退） */
   gateGlobal: boolean;
 }
 
@@ -154,7 +156,7 @@ export async function injectCompact(
 ): Promise<InjectResult> {
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
   // 读不到画面（多半是窗口不在）不管 gate 都不发：tmux 往不存在的窗口 send-keys 不报错，发了也只会假报「已开始」
-  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.plain, pane.esc));
+  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.esc));
   if (reason || !pane) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
   const line = compactCommand(effectiveAction(t.executor, opts.action), opts.keep ?? null);
   try {
@@ -183,7 +185,7 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     window: b.window,
     hardCap: b.hardCap,
     idle: idleEnough(a, b, pane, now),
-    pane: !gate ? UNGATED : pane === null ? null : deps.paneState(pane.plain, pane.esc),
+    pane: !gate ? UNGATED : pane === null ? null : deps.paneState(pane.esc),
     queued: pane !== null && QUEUED_RE.test(pane.plain),
     injectedRecently: compactInjectedRecently(a.target, now),
     lastTrig: lastTrig.get(a.name) ?? 0,
@@ -309,7 +311,8 @@ async function tailOf(r: RegistryAgent) {
 /** 用 strict：tmuxRaw 会吞掉非零退出，窗口不在时拿到空串，后面就会对着不存在的窗口报「已发送」 */
 async function capturePane(t: string): Promise<PaneCapture | null> {
   try {
-    const [plain, esc] = await Promise.all([tmuxRawStrict(["capture-pane", "-t", t, "-p"]), tmuxRawStrict(["capture-pane", "-t", t, "-p", "-e"])]);
+    const esc = await tmuxRawStrict(["capture-pane", "-t", t, "-p", "-e"]);
+    const plain = stripAnsi(esc);
     return plain.trim() ? { plain, esc } : null;
   } catch {
     return null; // 窗口不在 / tmux 出错：按「读不到画面」跳过，不盲敲
@@ -320,12 +323,11 @@ const liveDeps: CtxBoundaryDeps = {
   now: () => Date.now(),
   agents: liveAgents,
   capture: capturePane,
-  // 临时：T35 的 lib/lp-state.ts paneQuotaState 合进来之前一律当「有菜单」处理（不敲键）
-  paneState: () => ({ wall: false, lp: "unknown", menu: true, compacting: false, draft: true }),
+  paneState: (esc) => paneStateFromLp(readLpPane(esc)),
   send: (t, line) => tmuxSendLine(t, line),
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),
-  gateGlobal: false, // 过渡期：个人 agent 照旧口径走，lp-state 合进来的增量再改 true（PM 09-29 定的 P1-1 方案 A）
+  gateGlobal: true,
 };
 
 let timer: ReturnType<typeof setInterval> | null = null;
