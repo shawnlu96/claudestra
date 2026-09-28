@@ -27,7 +27,7 @@ async function put(over: Partial<Mission>): Promise<void> {
 
 let paneBusy = false;
 beforeAll(() => {
-  setMissionTestHooks({ path, graceMs: 50, paneBusy: async () => paneBusy });
+  setMissionTestHooks({ path, graceMs: 50, turnBusy: async () => paneBusy });
   initMission({
     clients: new Map([["ctl", { ws: {} as never, channelId: "ctl", cwd: "/tmp" }]]),
     deliver: async (env) => void sent.push(env),

@@ -1,5 +1,5 @@
 /**
- * `pendingReplies` 的两个作用域判据。纯逻辑，单测在 tests/pending-reply-scope.test.ts。
+ * `pendingReplies` / `pendingThreads` 的作用域判据。纯逻辑，单测在 tests/pending-reply-scope.test.ts。
  *
  * `pendingReplies` 以**回信地址**（replyBackChannel）为 key，值里的 `targetWs` 是
  * 「欠这条回复的那个 agent」。它同时支撑两件事：Stop hook 的补 reply 拦截
@@ -72,4 +72,52 @@ export function pendingKeysOwedBy<T extends OwedEntry>(
     if (p.targetWs === debtorWs && p.intendedReplyChannel === replyChannel) keys.push(key);
   }
   return keys;
+}
+
+/**
+ * Stop 的「补 reply」拦截追不追这条欠账：agent 来源（from.kind=local，含 master）不追——它们的答复走
+ * send_to_agent / 回程簿推回，看门狗兜底；逼它 reply 到对方频道只会多出一次 forward（第三条路）。
+ * 人类、peer（没有回程簿）、bridge 来源照旧拦。挂载本身不变：💭→✅ 的状态收尾还要用。
+ */
+export function nudgesForOrigin(fromKind: string | undefined): boolean {
+  return fromKind !== "local";
+}
+
+/** pendingThreads 里判断「和某频道有关」只需要请求的两端 */
+export interface ThreadEnds {
+  request: { from: { kind: string; channelId?: string }; to: { kind: string; channelId?: string } };
+}
+
+/**
+ * agent 被永久 kill（/agent/cleanup）后，和它的频道有关的欠账全部销掉，返回销掉的条数：
+ * - pendingReplies：回信地址是它的频道——它发出的请求，别人还欠着答复；不销的话欠账人的 Stop 会被逼着 reply 到已删的频道；
+ * - pendingThreads：发给它的，和由它发起的；
+ * - inter-agent 看门狗：它发给别人、对方还没回应的（看门狗以接收方频道为 key，不销的话对方下次 Stop 会被催着回一个已销毁的 agent）。
+ * 发给它、它自己欠着的 pendingReplies 不在这里：它的 ws 已经没了，Stop 不会再来。
+ */
+export function dropPendingsForChannel(
+  replies: Map<string, { intendedReplyChannel: string }>,
+  threads: Map<string, ThreadEnds>,
+  watchdogs: Map<string, { fromChannelId?: string }>,
+  channelId: string,
+): number {
+  let n = 0;
+  for (const [key, p] of replies) if (p.intendedReplyChannel === channelId && replies.delete(key)) n++;
+  for (const [key, w] of watchdogs) if (w.fromChannelId === channelId && watchdogs.delete(key)) n++;
+  for (const [tid, t] of threads) {
+    const { from, to } = t.request;
+    const touches = (from.kind === "local" && from.channelId === channelId) || (to.kind === "local" && to.channelId === channelId);
+    if (touches && threads.delete(tid)) n++;
+  }
+  return n;
+}
+
+/**
+ * agent→agent 消息送达时要不要给接收方挂 inter-agent 看门狗（Stop 时没回应就催一次）。
+ * 发送方已不在册（被 kill；押在队列里的消息在它死后才投出）就不挂——内容照投，但催接收方回一个已销毁的 agent 没有意义。
+ * 「在册」看 registry 而不是看 ws 在不在：bridge 刚重启、发送方还在重连退避时 ws 不在，但它没死。
+ * 发给自己（同一个 ws）和 oneShot（skipInterAgentWatchdog）也不挂。
+ */
+export function hangsInterAgentWatchdog(sameWs: boolean, skipWatchdog: boolean | undefined, senderRegistered: boolean): boolean {
+  return !sameWs && !skipWatchdog && senderRegistered;
 }
