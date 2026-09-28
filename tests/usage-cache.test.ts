@@ -37,13 +37,11 @@ describe("parseUsageCache", () => {
     expect(parseUsageCache(JSON.stringify({ scrapedAt: at, sessionPct: 42.5, weekPct: 0.4 }), at)).toMatchObject({ sessionPct: 43, weekPct: 0 });
   });
 
-  test("脏 pct(越界/非数)拒收单字段,另一字段仍可用", () => {
-    const r = parseUsageCache(
-      JSON.stringify({ sessionPct: 150, weekPct: 77, scrapedAt: NOW }),
-      NOW
-    );
+  test("脏 pct(负数/非数)拒收单字段,另一字段仍可用;超过 100 截成 100(CC 状态栏会报 101%)", () => {
+    const r = parseUsageCache(JSON.stringify({ sessionPct: -3, weekPct: 77, scrapedAt: NOW }), NOW);
     expect(r!.sessionPct).toBeNull();
     expect(r!.weekPct).toBe(77);
+    expect(parseUsageCache(JSON.stringify({ sessionPct: 101, weekPct: "x", scrapedAt: NOW }), NOW)).toMatchObject({ sessionPct: 100, weekPct: null });
   });
 });
 

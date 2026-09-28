@@ -90,6 +90,8 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
 
   /** 带着扣下的话（stop-settle 的 withheld）的槽被 reply / send_to_agent 直接答掉时调，bridge 接成推给 caller */
   onWithheld?: (pac: PendingAgentCall) => void;
+  /** 以 API 错误结束、等续跑的槽没等到就被删了（过期 / target 被关掉）：bridge 接成 expiredNotice 推给 caller，不静默丢 */
+  onExpired?: (pac: PendingAgentCall, why: string) => void;
 
   /** 记一条请求（同一 caller 还没答完的请求留着，新的追加在后面） */
   add(target: string, call: PendingAgentCall, messageId?: string): void {
@@ -115,10 +117,13 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     return true;
   }
 
-  /** send_to_agent 投递失败：只撤这一条请求 */
+  /** send_to_agent 投递失败：只撤这一条请求。不是答复，不走 consume——槽上的等续跑标记和扣下的话都是前面几条请求的，原样留着 */
   dropRequest(target: string, caller: string, messageId: string): void {
     const cur = this.slot(target, caller);
-    if (cur) this.consume(target, caller, { ...cur, requests: [{ messageId, ts: 0 }] });
+    if (!cur) return;
+    const left = requestsOf(cur).filter((r) => r.messageId !== messageId);
+    if (left.length) this.store(target, cur, left);
+    else this.delete(keyOf(target, caller));
   }
 
   private store(target: string, base: PendingAgentCall, reqs: CallRequest[]): void {
@@ -182,14 +187,23 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     return w;
   }
 
-  /** target 这一轮以 API 错误结束：在等它的槽都记上等续跑（第一次的时刻），withheld 有字就追加；落盘 */
-  markApiError(target: string, stillHeld: StillHeld, withheld: string | null, now = Date.now()): void {
+  /**
+   * target 这一轮以 API 错误结束：在等它的槽都记上等续跑（第一次的时刻）；withheld 只挂在归属确定的那一槽：caller 给了就是它
+   * （null = 确定不了），没给就要恰好一个在等、或恰好一槽已经扣着话。多个 caller 不猜、不广播（A 的话推给 B 是串话）。
+   * 返回扣到了哪一槽（没扣 = undefined）；落盘
+   */
+  markApiError(target: string, stillHeld: StillHeld, withheld: string | null, caller?: string | null, now = Date.now()): string | undefined {
     const w = this.waiting(target, stillHeld);
+    const held = w.filter((c) => c.withheld?.length);
+    const owner = caller !== undefined ? caller : w.length === 1 ? w[0]!.callerChannelId : held.length === 1 ? held[0]!.callerChannelId : null;
+    const to = withheld && owner && w.some((c) => c.callerChannelId === owner) ? owner : undefined;
     for (const c of w) {
       const raw = this.slot(target, c.callerChannelId);
-      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorAt: raw.apiErrorAt ?? now, withheld: [...(raw.withheld ?? []), ...(withheld ? [withheld] : [])] });
+      const add = c.callerChannelId === to ? { withheld: [...(raw?.withheld ?? []), withheld!] } : {};
+      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, apiErrorAt: raw.apiErrorAt ?? now, ...add });
     }
     if (w.length) this.persist();
+    return to;
   }
 
   /** 扣下的话已经推给 caller 了：只清那一槽的 withheld */
@@ -215,15 +229,16 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   }
 
   /**
-   * 每分钟扫：送达后 staleMs 还没被消化的槽删掉，返回删掉的（以 API 错误结束、等续跑的由 bridge 用 expiredNotice 告诉 caller）。
+   * 每分钟扫：送达后 staleMs 还没被消化的槽删掉，返回删掉的（以 API 错误结束、等续跑的经 onExpired 告诉 caller）。
    * 押在 target 队里（它还没看到）的不删，失效钟从真正送达起算。
    */
-  sweepStale(now: number, staleMs: number, heldFrom: (target: string) => HeldFromLike[] | undefined): PendingAgentCall[] {
+  sweepStale(now: number, staleMs: number, heldFrom: (target: string) => HeldFromLike[] | undefined, paused?: (target: string) => boolean): PendingAgentCall[] {
     const out: PendingAgentCall[] = [];
     for (const [k, c] of [...this.entries()]) {
-      if (!shouldSweepPac(c, heldFrom(targetOf(k, c)), now, staleMs)) continue;
+      if (paused?.(targetOf(k, c)) || !shouldSweepPac(c, heldFrom(targetOf(k, c)), now, staleMs)) continue;
       this.deleteQuiet(k);
       out.push(c);
+      if (c.apiErrorAt) this.onExpired?.({ ...c, targetChannelId: targetOf(k, c) }, "之后 2 小时没有接着做完");
     }
     if (out.length) this.persist();
     return out;
@@ -236,6 +251,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       if (targetOf(k, c) !== channelId && c.callerChannelId !== channelId) continue;
       this.deleteQuiet(k);
       n++;
+      if (c.apiErrorAt && targetOf(k, c) === channelId) this.onExpired?.({ ...c, targetChannelId: channelId }, "之后它被关掉了");
     }
     if (n) this.persist();
     return n;
@@ -261,9 +277,9 @@ export function withheldNotice(pac: PendingAgentCall): string {
   return `[ℹ️ ${pac.targetName} 撞墙前扣下的答复（那一轮以 API 错误结束，下面是出错前它已经说了的话）：]\n\n${(pac.withheld ?? []).join("\n\n")}`;
 }
 
-/** 以 API 错误结束、等续跑的回程过期（2 小时没接着做完）：不静默删，固定模板告诉 caller，扣下的话附后 */
-export function expiredNotice(pac: PendingAgentCall): string {
+/** 以 API 错误结束、等续跑的回程没了（2 小时没接着做完 / target 被关掉）：不静默删，固定模板告诉 caller，扣下的话附后 */
+export function expiredNotice(pac: PendingAgentCall, why = "之后 2 小时没有接着做完"): string {
   const at = new Date(pac.apiErrorAt ?? pac.ts).toTimeString().slice(0, 5);
-  const head = `[ℹ️ ${pac.targetName} 没有给出答复（原因：它 ${at} 那一轮以 API 错误结束，之后 2 小时没有接着做完），扣下的话附后，请重发或换人]`;
+  const head = `[ℹ️ ${pac.targetName} 没有给出答复（原因：它 ${at} 那一轮以 API 错误结束，${why}），扣下的话附后，请重发或换人]`;
   return pac.withheld?.length ? `${head}\n\n${pac.withheld.join("\n\n")}` : head;
 }

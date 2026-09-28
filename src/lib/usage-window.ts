@@ -72,26 +72,29 @@ function wallToUtc(y: number, mo: number, d: number, h: number, mi: number, tz: 
 
 /**
  * /status 面板和撞墙提示的重置文字 → 绝对毫秒。认的形态："Sep 30, 6am (Asia/Tokyo)"、"Sep 30 at 6:30pm"、"Fri 9am (Asia/Tokyo)"、"6am (UTC)"。
- * 带日期不带年份：取离现在最近、且落在 [now − 7d, now + 8d] 内的那一年（周重置不可能更远）。
+ * 带日期不带年份：取离现在最近、且落在 [now − 7d, now + 8d] 内的那一年（周重置不可能更远）；跨年时 CC 会带上年份
+ * （"Jan 2, 2027 at 6am"），有年份就用它。
  * 只有星期 / 只有时刻：重置总在将来，取不早于 now − 5 分钟的最早那个（离得最近的可能是已经过去的昨天同一时刻）。认不出返回 null。
  */
 export function parseResetText(text: string, nowMs: number): number | null {
-  const m = text.trim().match(/^(?:([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(?:at\s+)?|([A-Za-z]{3,9})\.?,?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b\s*(?:\(([^)]+)\))?/i);
+  const re = /^(?:([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(?:(\d{4}),?\s+)?(?:at\s+)?|([A-Za-z]{3,9})\.?,?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b\s*(?:\(([^)]+)\))?/i;
+  const m = text.trim().match(re);
   if (!m) return null;
-  let hour = Number(m[4]) % 12;
-  if (m[6].toLowerCase() === "pm") hour += 12;
-  const minute = m[5] ? Number(m[5]) : 0;
-  const tz = m[7]?.trim() || null;
+  let hour = Number(m[5]) % 12;
+  if (m[7].toLowerCase() === "pm") hour += 12;
+  const minute = m[6] ? Number(m[6]) : 0;
+  const tz = m[8]?.trim() || null;
   const candidates: number[] = [];
   if (m[1]) {
     const mo = MONTHS.indexOf(m[1].slice(0, 3).toLowerCase());
     if (mo < 0) return null;
     const y0 = new Date(nowMs).getFullYear();
+    if (m[3]) return wallToUtc(Number(m[3]), mo, Number(m[2]), hour, minute, tz);
     for (const y of [y0 - 1, y0, y0 + 1]) candidates.push(wallToUtc(y, mo, Number(m[2]), hour, minute, tz));
     const ok = candidates.filter((c) => Number.isFinite(c) && c >= nowMs - WEEK_MS && c <= nowMs + WEEK_MS + 24 * 3600_000);
     return ok.length ? ok.sort((a, b) => Math.abs(a - nowMs) - Math.abs(b - nowMs))[0] : null;
   }
-  const wd = m[3] ? WEEKDAYS.indexOf(m[3].slice(0, 3).toLowerCase()) : null;
+  const wd = m[4] ? WEEKDAYS.indexOf(m[4].slice(0, 3).toLowerCase()) : null;
   if (wd === -1) return null;
   // 原文时区里「今天」前后几天的那个点（本机和原文时区差十几个小时时，按本机日期推会整天错开）；带星期的只留那一天
   const tzOff = tz ? tzOffsetMs(nowMs, tz) : null;

@@ -1,4 +1,5 @@
 import type { ChatMessage } from "./type";
+import { sameNotice } from "@/lib/chat/notice-repeat";
 
 /**
  * v2.23.2+ 直播气泡 ↔ 历史气泡的合流规则（纯函数，tests/web-live-merge.test.ts 覆盖）。
@@ -156,6 +157,8 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
   if (!base.length || !delta.length) return [...base, ...delta];
   const last = base[base.length - 1];
   const first = delta[0];
+  // 同一串 ⛔ 错误行：服务端重算的「×N」那行已经把尾条算进去了，替换而不是再追加一行（直播 / 差量 / 刷新三条路径一样）
+  if (last.role === "system" && first.role === "system" && sameNotice(last.content, first.content)) return [...base.slice(0, -1), ...delta];
   const fs = firstSeq(first);
   const joinable =
     last.role === "assistant" &&

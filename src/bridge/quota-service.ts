@@ -158,7 +158,8 @@ export function createQuotaService(d: QuotaServiceDeps) {
 export type QuotaService = ReturnType<typeof createQuotaService>;
 
 /**
- * 额度闸（bridge/quota-wall.ts）用：Claude 两个窗口里较高的百分比（只认实时层）+ 此刻能用的重置卡张数。
+ * 额度闸（bridge/quota-wall.ts）用：Claude 两个窗口里较高的百分比（只认实时层）+ 持有的重置次数（held：默认的卡要撞到限额才算
+ * usableNow，撞墙前的快照里 applicableNow 几乎总是 0，拿它判「有没有卡」进闸通知那一行就永远不出现）。
  * refresh = 先按后台节奏查一次（沿用调度器的间隔、退避与 quotaClaudeBackground 开关；只读接口，不碰 consume / reset）。
  */
 async function claudeWallView(
@@ -171,7 +172,7 @@ async function claudeWallView(
   if (!p) return null;
   const pcts = p.meters.filter((m) => m.unit === "pct" && (m.kind === "session" || m.kind === "weekly") && m.used !== null).map((m) => m.used as number);
   const live = p.source.layer === "live" && pcts.length > 0;
-  return { pct: live ? Math.max(...pcts) : null, observedAt: p.source.observedAt ?? 0, credits: p.resetCredits?.applicableNow ?? null };
+  return { pct: live ? Math.max(...pcts) : null, observedAt: p.source.observedAt ?? 0, credits: p.resetCredits?.held ?? null };
 }
 
 /**

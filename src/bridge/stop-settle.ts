@@ -40,25 +40,35 @@ export interface StopTurn {
  * 开启这一轮的那条说了算：回合进行中送到的（bridge 消息、peer 请求照投不押）不覆盖它（T24 r2 P2-1，PM 09-29）；
  * 开头几秒里一起送到的一批（押后队列补投）取最严的：stranger > owner > insider。这一轮 Stop 时清掉。
  * 被打断的回合（抢占 C-c、停止按钮、终端里 Esc）CC 不发 Stop：送到时目标闲着、离上一条又过了一批的时间，就是新一轮，重记。
- * 没有记录：这一轮不是 bridge 送的消息开的（CC 到点自己续跑、owner 在终端里打字）= insider；但重启后还没见过这个频道的
- * Stop 时，正跑的那一轮是重启前开的、来源不知道 = stranger（不结算，PM 09-29）。
+ * 没有记录：这一轮不是 bridge 送的消息开的——CC 到点自己接着跑撞墙那一轮（owner 在终端里打字也是这样），继承上一轮的来源
+ * 和回程；重启后还没见过这个频道的 Stop，上一轮不知道 = stranger（不结算，PM 09-29）。
  */
 export type TurnTrigger = "insider" | "owner" | "stranger";
 const RANK: Record<TurnTrigger, number> = { insider: 0, owner: 1, stranger: 2 };
 /** 同一批：第一条送到后这么久内到的算一起开启这一轮 */
 const TRIGGER_BATCH_MS = 3_000;
-const turnTrigger = new Map<string, { who: TurnTrigger; at: number }>();
-/** 本进程见过 Stop 的频道：之后没有记录的回合是它自己开的 */
-const stopSeen = new Set<string>();
-export function noteDelivered(cid: string, from: { kind: string; owner?: boolean; peer?: string }, now = Date.now(), idle = false): void {
+/** callers = 这一轮是哪几个 agent 的 send_to_agent 开的（扣下的话只挂在唯一的那一个上，markApiError） */
+interface TriggerRec { who: TurnTrigger; at: number; callers: string[] }
+const turnTrigger = new Map<string, TriggerRec>();
+/** 上一轮（本进程见过它的 Stop）按什么来源结的：没有投递记录的下一轮继承它 */
+const prevTrigger = new Map<string, TriggerRec>();
+type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string };
+export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false): void {
   const who: TurnTrigger = from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
+  const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
   const cur = turnTrigger.get(cid);
   const batch = !!cur && now - cur.at <= TRIGGER_BATCH_MS;
-  if (!cur || (idle && !batch)) turnTrigger.set(cid, { who, at: now });
-  else if (batch && RANK[who] > RANK[cur.who]) turnTrigger.set(cid, { who, at: cur.at });
+  if (!cur || (idle && !batch)) turnTrigger.set(cid, { who, at: now, callers: caller });
+  else if (batch) turnTrigger.set(cid, { who: RANK[who] > RANK[cur.who] ? who : cur.who, at: cur.at, callers: [...new Set([...cur.callers, ...caller])] });
 }
-const strangerTurn = (t: StopTurn): boolean =>
-  (t.trigger ?? turnTrigger.get(t.cid)?.who ?? (stopSeen.has(t.cid) ? "insider" : "stranger")) === "stranger";
+const recOf = (t: StopTurn): TriggerRec | undefined => turnTrigger.get(t.cid) ?? prevTrigger.get(t.cid);
+const triggerOf = (t: StopTurn): TurnTrigger => t.trigger ?? recOf(t)?.who ?? "stranger";
+const strangerTurn = (t: StopTurn): boolean => triggerOf(t) === "stranger";
+/** 这一轮答的是哪个 caller：恰好一个 agent 开的就是它；好几个 = null（不猜）；不是 agent 开的 = undefined（回程簿按在等的唯一一槽） */
+const callerOf = (t: StopTurn): string | null | undefined => {
+  const c = recOf(t)?.callers ?? [];
+  return c.length === 1 ? c[0] : c.length > 1 ? null : undefined;
+};
 
 const ranIntoApiError = (t: StopTurn): boolean =>
   !!t.drain.apiError || (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME);
@@ -78,7 +88,7 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
   try {
     return await settleOwn(d, t, mine);
   } finally {
-    if (mine) { turnTrigger.delete(t.cid); stopSeen.add(t.cid); } // 这一轮结束：下一轮的来源从它的第一条消息重新记
+    if (mine) { prevTrigger.set(t.cid, { at: 0, callers: [], ...recOf(t), who: triggerOf(t) }); turnTrigger.delete(t.cid); } // 下一轮的来源从它的第一条消息重新记
   }
 }
 
@@ -93,10 +103,10 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
     d.rearmResume(t.cid); // 答的是外人：回程留着；它的 60 秒续跑要是被这一轮取消了，重新排上，不然没人再叫它接着做
     return own;
   }
-  // 扣下的话按槽逐个推（好几个 caller 在等时也推，不等它逐个 send_to_agent）；推失败这一轮的正文也扣上，不丢
+  // 扣下的话按槽逐个推（每槽只有归属确定的那份，markApiError）；推失败这一轮的正文扣回它该归的那一槽，不丢
   for (const c of waiting.filter((x) => x.withheld?.length)) {
     if (await pushWithheld(d, t.cid, c)) continue;
-    if (t.drain.text) d.markApiError(t.cid, t.drain.text);
+    markWithheld(d, t, t.drain.text);
     return own;
   }
   await settleCallers(d, t.cid, t.drain.text);
@@ -106,7 +116,9 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
 /** 撞墙前扣下的话单独推一条、带抬头：和这一轮（可能是不相干的一轮）的正文拼在一起，caller 分不清哪句是答它的 */
 async function pushWithheld(d: CallerSettleDeps, cid: string, pac: PendingAgentCall): Promise<boolean> {
   try {
-    await d.pushBack(pac, cid, withheldNotice(pac));
+    const r = await d.pushBack(pac, cid, withheldNotice(pac));
+    // pushBackToCaller 不抛错，失败是返回 error / dropped：当成送到了就会清掉扣下的话、消化回程
+    if (r && (r.kind === "error" || r.kind === "dropped")) throw new Error(`投递结果 ${r.kind}`);
     d.clearWithheld(cid, pac);
     return true;
   } catch (e) {
@@ -115,12 +127,18 @@ async function pushWithheld(d: CallerSettleDeps, cid: string, pac: PendingAgentC
   }
 }
 
+/** 记上等续跑并把 text 扣到归属确定的那一槽；归属不明（几个 caller 在等）不猜，只告诉 owner 有这么段话没转给任何人 */
+function markWithheld(d: CallerSettleDeps, t: StopTurn, text: string | null): void {
+  const to = d.markApiError(t.cid, text, callerOf(t));
+  if (text && !to && d.waiting(t.cid).length) d.unattributed?.(t.cid, text);
+}
+
 /**
  * 自己频道这一轮以 API 错误结束：在等它的回程都记上「等续跑」（落在回程簿上，重启后还在、几个 caller 都记），
  * 错误前它已经说了的话扣在回程上、接着做完时一起推（外人触发的那一轮说的是给外人的，不扣）；不是撞墙的给 caller 推一条说明
  */
 async function onApiErrorTurn(d: CallerSettleDeps, t: StopTurn): Promise<void> {
-  d.markApiError(t.cid, strangerTurn(t) ? null : t.drain.text);
+  markWithheld(d, t, strangerTurn(t) ? null : t.drain.text);
   const err = t.drain.error;
   // 撞墙的留给额度闸（整台机器押住、出闸续跑，caller 不用知道）；没读到错误条目（Stop 比 jsonl 先到）不猜
   if (!err || ((t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME && wallHitOf(err.error, err.text, Date.now()))) return;
@@ -165,12 +183,14 @@ export interface CallerSettleDeps {
   /** 外人那一轮结束、回程还等着：它的 60 秒续跑 / 出闸续跑要是被这一轮当成「它又动了」取消了，重新排上（quota-wall-wiring） */
   rearmResume(cid: string): void;
   consume(cid: string, pac: PendingAgentCall): void;
-  /** 推回 caller（bridge 的 pushBackToCaller） */
-  pushBack(pac: PendingAgentCall, cid: string, body: string): Promise<unknown>;
+  /** 推回 caller（bridge 的 pushBackToCaller，返回投递结果；error / dropped = 没送到） */
+  pushBack(pac: PendingAgentCall, cid: string, body: string): Promise<{ kind: string } | void>;
   /** 好几个 caller 在等、它又没指明答给谁：提醒它分别回 */
   nudgeAmbiguous(cid: string): void;
-  /** 在等 cid 的槽都记上「以 API 错误结束、等续跑」，withheld 有字就追加进去（回程簿 markApiError，落盘） */
-  markApiError(cid: string, withheld: string | null): void;
+  /** 在等 cid 的槽都记上「以 API 错误结束、等续跑」，withheld 只扣到归属确定的那一槽（回程簿 markApiError，落盘），返回扣到哪一槽 */
+  markApiError(cid: string, withheld: string | null, caller?: string | null): string | undefined;
+  /** 以 API 错误结束的一轮说了话、却对不上是答哪个 caller 的：只告诉 owner，不推给任何 caller */
+  unattributed?(cid: string, text: string): void;
   /** 扣下的话已经推给 caller：清掉这一槽的 withheld（等续跑标记随答复一起消化） */
   clearWithheld(cid: string, pac: PendingAgentCall): void;
   /** 在等 cid 的、还没为 API 错误说明过的槽，取出即记下（落盘，回程簿 takeApiErrorNotice） */

@@ -68,6 +68,8 @@ import {
   listWindows,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
+import { wallWaitRefusal, windowWallWait } from "../lib/wall-screen.js";
+import { canSeeQuota } from "../lib/devices.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
@@ -1265,12 +1267,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     waitSec = Math.min(Math.max(waitSec, 0), 300);
     if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
-    // Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
-    // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的
-    // "/xxx" 落回普通消息——用户可能真想发以 / 开头的文本。TUI 类命令没有回合，
-    // 响应带 slash:true 让前端不进「正在回复」态。
-    // v2.11: peer token 不给 slash 直通——那是 TUI 控制权(/clear 可跨机清上下文),
-    // messaging scope 不该静默升级(review 2026-07-19 #5)。peer 文本一律按普通消息投。
+    // Web slash 直通：「/cmd [args]」命中注册表 → tmux 字面注入（CC 原生解释，同 Discord slash）；没命中的 "/xxx" 落回普通消息（可能真想发
+    // 以 / 开头的文本）。TUI 类命令没有回合，响应带 slash:true 让前端不进「正在回复」。peer 不给直通：那是 TUI 控制权（/clear 可跨机清
+    // 上下文），messaging scope 不该静默升级，peer 文本一律按普通消息投。窗口停在额度菜单 / 撞墙倒计时上不注入（lib/wall-screen.ts）。
     const slashM = attachments.length === 0 && !principal.peer ? text.trim().match(/^\/([\w:-]+)(?:\s+([\s\S]+))?$/) : null;
     if (slashM) {
       const regName = agent.name === "master" ? null : agent.name;
@@ -1283,6 +1282,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         : rt === "codex" ? { ok: false as const, reason: "not a Codex command" } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
       if (resolved.ok) {
         const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
+        const wall = await windowWallWait(win);
+        if (wall) return apiJson(409, { ok: false, error: `${agent.name} ${wallWaitRefusal(wall)}，这条命令没有注入` });
         try {
           await tmuxSendLine(win, resolved.ccText);
           // v2.16.2 输入框打 /model 也登记切换意图(peer 报告根因 1:slash 直通
@@ -1297,11 +1298,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const tn = principal.name || tokenId;
         deps.mirrorApiExchange({ kind: "api", tokenId, name: tn }, agent.channelId, `[🌐 API←${tn}] ${text}`).catch(() => {});
         recordMetric("api_slash", { channelId: agent.channelId, agent: agent.name, meta: { cmd: slashM[1] } });
-        // skill 类命令(非 builtin)注入后跑的是真实 LLM 回合,Stop hook 会正常
-        // 收尾——发 thinking 让 web 思考徽章/侧栏 busy 亮起(2026-07-24 owner:
-        // 「命令运行时没有思考中提示,agent 状态也不是工作状态」)。builtin TUI
-        // 命令(/cost /compact /context…)无回合无 Stop hook,发了会永久卡
-        // thinking,维持不发。
+        // skill 类命令(非 builtin)注入后跑的是真实 LLM 回合、Stop hook 会收尾:发 thinking 让 web 思考徽章 / 侧栏 busy 亮起。
+        // builtin TUI 命令(/cost /compact /context…)无回合无 Stop hook,发了会永久卡 thinking,不发。
         if (resolved.scope !== "builtin") {
           const evAgentSlash =
             agentNameForChannel(agent.channelId) ||
@@ -1367,12 +1365,14 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
-    deps.startTypingWithSafety(agent.channelId);
+    if (!delivery.outcome.heldBy) deps.startTypingWithSafety(agent.channelId); // 押住了就没有回合，别亮「正在输入」
     // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
     deps.lastMessageSource.set(agent.channelId, "agent");
 
-    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy：押住了（额度闸 / 目标停在额度菜单，没发键），不干等答复
-      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, heldBy: delivery.outcome.heldBy, hint: `poll GET /api/v1/threads/${threadId}` });
+    // heldBy：押住了（额度闸 / 目标停在额度菜单，没发键），不干等答复。原因只给全权 owner（canSeeQuota，额度是 owner 的事），别人只看到 queued
+    if (waitSec === 0 || delivery.outcome.heldBy) {
+      const held = delivery.outcome.heldBy ? { queued: true, heldBy: canSeeQuota(principal) ? delivery.outcome.heldBy : undefined } : {};
+      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId}` });
     }
 
     const result = await new Promise<ApiReplyResult | null>((resolve) => {

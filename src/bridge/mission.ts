@@ -15,7 +15,7 @@ import { readSessionCtx } from "../lib/usage-cache.js";
 import { windowTarget } from "../lib/tmux-helper.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { probeTurnAt } from "./turn-probe.js";
-import { missionKey, MISSIONS_PATH, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind } from "../lib/missions.js";
+import { missionKey, missionOnClaudeCode, MISSIONS_PATH, nudgeKind, nudgeText, readMissions, updateMissions, type Mission, type NudgeKind } from "../lib/missions.js";
 import { AUTOPILOT_TIMING, YIELD_TEXT, yieldReason } from "../lib/autopilot-run.js";
 import {
   claimWake, decideFire, enqueueWake, markDelivered, newRunId, noteLongYield, releaseRateLimitHold, unclaimRun, type TurnSeen,
@@ -324,12 +324,12 @@ export function initMission(d: MissionDeps): void {
   onQuotaWallExit(() => void releaseWallHolds().catch((e) => console.error("⏱ Autopilot 出闸放行失败:", (e as Error).message)));
 }
 
-/** 额度闸出闸：等额度的唤醒全部马上放行、立刻排一次 */
+/** 额度闸出闸：CC 上等额度的唤醒全部马上放行、立刻排一次（Codex / Pi 等的是自己的额度，照原时刻） */
 async function releaseWallHolds(): Promise<void> {
   const now = Date.now();
   const released = await updateMissions((all) => {
     const out: Mission[] = [];
-    for (const m of Object.values(all)) if (m.status === "active" && releaseRateLimitHold(m, now)) out.push({ ...m });
+    for (const m of Object.values(all)) if (m.status === "active" && missionOnClaudeCode(m.agent) && releaseRateLimitHold(m, now)) out.push({ ...m });
     return out;
   }, path);
   for (const m of released ?? []) schedule(m.agent, 0, m);

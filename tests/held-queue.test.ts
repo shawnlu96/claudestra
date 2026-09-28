@@ -6,6 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { sweepHeldAges } from "../src/bridge/held-age.js";
 import { ageHeld, HELD_GIVE_UP_MS, HELD_NOTIFY_MS, heldAgentCounts, heldNoticeText, HeldQueue, type HeldItem } from "../src/bridge/held-queue.js";
 
 const dir = mkdtempSync(join(tmpdir(), "held-queue-"));
@@ -131,5 +132,27 @@ describe("heldAgentCounts（侧栏「排队 N 条」读落盘文件）", () => {
     expect(heldAgentCounts(join(dir, "nope.json"))).toEqual({});
     writeFileSync(join(dir, "bad2.json"), "{oops");
     expect(heldAgentCounts(join(dir, "bad2.json"))).toEqual({});
+  });
+});
+
+describe("押后老化按发送方分（T24 wf gate-state-5 / delivery-hold-6）", () => {
+  test("闸只停 Claude Code 发送方的提醒；人发的 24 小时放弃时发到目标频道、附原文", () => {
+    const q = new HeldQueue(null);
+    const human = item("你先停一下", 1000);
+    human.env = { ...human.env, from: { kind: "user", userId: "u1", channelId: "c-me" } } as HeldItem["env"];
+    const codex = item("codex 的请求", 1000);
+    q.set("c-me", [item("cc 的请求", 1000), codex, human]);
+    const sent: string[] = [];
+    const humans: string[] = [];
+    sweepHeldAges({
+      held: q, paused: (it) => it.env.content === "cc 的请求", wsOf: () => ({ send: (s: string) => void sent.push(JSON.parse(s).content) }),
+      notifyHuman: (cid, text) => void humans.push(`${cid}:${text}`),
+    }, 1000 + HELD_GIVE_UP_MS + 1);
+    expect(q.get("c-me")!.map((i) => i.env.content)).toEqual(["cc 的请求"]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("codex 的请求");
+    expect(humans).toHaveLength(1);
+    expect(humans[0]).toStartWith("c-me:⚠️");
+    expect(humans[0]).toContain("原文：\n你先停一下");
   });
 });

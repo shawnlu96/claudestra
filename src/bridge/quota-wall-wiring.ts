@@ -5,7 +5,9 @@
  */
 import { existsSync, unlinkSync } from "fs";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
-import { isModelLimitHit, paneShowsWallWait } from "../lib/quota-wall-text.js";
+import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
+import { windowWallWait } from "../lib/wall-screen.js";
+import { noticeOncePerState } from "../lib/quota-wall-notice.js";
 import { recordMetric } from "../lib/metrics.js";
 import { countsAsWallActivity, emptyWallState, isHumanSender, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
 import { readRegistryAgents } from "../lib/registry.js";
@@ -75,13 +77,17 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
     load: loadState,
     save: (s) => writeJsonAtomicSync(QUOTA_WALL_PATH, s),
     isClaudeCode: async (cid) => ((await resolveTurnWindow(cid, b.controlChannelId)).runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME,
+    lowPriority: async (cid) => {
+      const { win } = await resolveTurnWindow(cid, b.controlChannelId);
+      return !!win && paneShowsLowPriority(await tmuxCapture(win, 30).catch(() => "")); // 抓不到当没开：照旧押（保守）
+    },
     windows: () => claudeWindows(b.controlChannelId),
-    capture: (win) => tmuxCapture(win, 30),
+    capture: (win, history = 30) => tmuxCapture(win, history),
     prepare: (win) => ensurePaneInteractive(win),
     sendEsc: (win) => tmuxSendEscape(win),
     mainTurnBusy: async (cid, agent) => {
       const { win } = await resolveTurnWindow(cid, b.controlChannelId);
-      if (win && paneShowsWallWait(await tmuxCapture(win, 30))) return false; // 停在撞墙菜单 / 自动续跑倒计时：带「esc to cancel」，判忙会漏续跑
+      if (win && (await windowWallWait(win))) return false; // 停在撞墙菜单 / 自动续跑倒计时：带「esc to cancel」，判忙会漏续跑
       return agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId));
     },
     held: {
@@ -95,14 +101,14 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
       const c = b.clients.get(cid);
       if (!c) return (console.log(`⚠️ 额度恢复续跑 ${agent}：不在线，跳过`), false);
       b.markAgentSource(cid);
-      await b.deliver({
+      const d = await b.deliver({
         from: { kind: "bridge", label: "quota-wall" },
         to: { kind: "local", channelId: cid, agentName: agent, ws: c.ws, cwd: c.cwd },
         intent: "notification",
         content: text,
         meta: { messageId: newMessageId("wall_resume"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() },
       });
-      return true;
+      return d.outcome.kind !== "sent" ? false : d.outcome.heldBy ? "held" : true;
     },
     notifyOwner: async (text) => {
       const q = await import("./quota-service.js");
@@ -121,28 +127,29 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
   });
 }
 
-const MENU_NOTICE_EVERY_MS = 10 * 60_000;
-const menuNoticeAt = new Map<string, number>();
+const firstNoticeFor = noticeOncePerState();
 
 /**
  * 目标窗口停在额度菜单 / 撞墙等待画面（paneShowsWallWait）：这条消息一个键都不发——不抢占、不 C-c（菜单里有「Switch to usage
  * credits」，按错一下就花钱，PM 09-29）——押住：闸开着按额度闸押（出闸关菜单后补投），没闸按普通押后（菜单关了就投）。
- * 人发的在 Discord 频道里说一声（10 分钟一次），agent / API 调用方从 heldBy 知道。不是这种画面返回 null，照常投。
+ * 人发的在 Discord 频道里说一声（同一条消息、同一个画面状态只说一次：每分钟的补投会反复走到这里），agent / API 调用方从 heldBy
+ * 知道。不是这种画面返回 null，照常投。
  * 停止按钮、「停」字两条发键路径不走这里（T41 / T13e 收口）。deliverToLocal 在抢占之前调。
  */
-export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: string): Promise<Delivery | null> {
+export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: string, stillWanted?: () => boolean): Promise<Delivery | null> {
   const b = bridge;
   if (!b) return null;
   const { win, runtime } = await resolveTurnWindow(to.channelId, b.controlChannelId);
   if (!win || (runtime ?? DEFAULT_RUNTIME) !== DEFAULT_RUNTIME) return null;
-  if (!paneShowsWallWait(await tmuxCapture(win, 30).catch(() => ""))) return null; // 抓不到画面：认不出，照常投（不因此卡住消息）
+  const kind = await windowWallWait(win); // 抓不到画面：认不出，照常投（不因此卡住消息）
+  if (!kind) return null;
+  if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } }; // 别把撤下的押回来（会复活）
   const walled = !!wall?.active();
   console.log(`⏸ 消息押后(${agent} 停在额度菜单 / 撞墙等待，没发任何键): 队列 ${b.held.holdEnv(env, walled ? "quota_wall" : undefined)} 条`);
-  const now = Date.now();
-  if (isHumanSender(env.from) && /^\d+$/.test(to.channelId) && now - (menuNoticeAt.get(to.channelId) ?? 0) > MENU_NOTICE_EVERY_MS) {
-    menuNoticeAt.set(to.channelId, now);
-    const when = walled ? "出闸后" : "菜单关掉后";
-    await b.escalate(to.channelId, `⏸ ${agent} 停在额度菜单（撞墙等待），bridge 没有发任何键；你的消息先押着，${when}送达。要马上处理请在它的窗口里自己操作。`)
+  if (isHumanSender(env.from) && /^\d+$/.test(to.channelId) && firstNoticeFor(to.channelId, `${kind}:${walled}`, env.meta.messageId)) {
+    const what = kind === "menu" ? "停在额度菜单" : "停在自动续跑倒计时";
+    const when = walled ? "出闸后" : kind === "menu" ? "菜单关掉后" : "它接着跑之后";
+    await b.escalate(to.channelId, `⏸ ${agent} ${what}（撞墙等待），bridge 没有发任何键；你的消息先押着，${when}送达。要马上处理请在它的窗口里自己操作。`)
       .catch((e) => console.error("额度菜单押后提示发送失败（消息照样押着）:", (e as Error).message));
   }
   return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: "wall_menu" } };

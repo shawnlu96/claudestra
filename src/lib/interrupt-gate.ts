@@ -13,6 +13,11 @@ export interface InterruptGateDeps {
   /** 频道 → 窗口和运行时；查不到窗口 = null */
   resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string }>;
   probe: (win: string, runtime: string | undefined, agent: string) => Promise<TurnState>;
+  /**
+   * 窗口停在额度菜单 / 撞墙等待（lib/quota-wall-text.ts paneShowsWallWait）：自动抢占一个键都不发（菜单里有花钱的选项，
+   * 倒计时上的键会取消 CC 排好的自动续跑）。两个抢占入口都经这里，以后新加的入口也跑不掉。
+   */
+  wallWait?: (win: string) => Promise<boolean>;
   /** 按运行时声明发打断键（CC 是 C-c），返回实际发出的键 */
   interrupt: (win: string, runtime: string | undefined) => Promise<readonly string[]>;
   /** 抢占成功后的收尾（指标 + done/interrupt 事件 + 日志） */
@@ -23,6 +28,8 @@ export interface InterruptGateDeps {
 
 /** 打断之后等 CC 收尾一拍再投递：立刻投会混进垂死回合的尾流 */
 const SETTLE_MS = 1_200;
+/** 判完要发键之后隔这么久再看一眼画面：判忙那一刻和发键之间菜单刚弹出来的，不发 */
+const RECHECK_MS = 300;
 /** 任意两次发键的最小间隔：挡住 CC 的「连按两次 C-c 退出」和 Codex 的双 Esc 回溯遮罩 */
 const MANUAL_GAP_MS = 1_500;
 
@@ -44,9 +51,14 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
         if (sinceKey(channelId) <= cooldownMs) return false;
         const { win, runtime } = await deps.resolve(channelId);
         if (!win || !controlFor(runtime).preemptOnHumanMessage) return false;
+        if (await deps.wallWait?.(win)) return false;
         const { main } = await deps.probe(win, runtime, agent);
         if (main === "unknown") console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
         if (main !== "busy") return false;
+        if (deps.wallWait) {
+          await deps.sleep(RECHECK_MS);
+          if (await deps.wallWait(win)) return false;
+        }
         lastKeyAt.set(channelId, now());
         await deps.interrupt(win, runtime);
         deps.onPreempted(agent, channelId);

@@ -39,7 +39,7 @@ export function QuotaWallBanner() {
           if (e instanceof ApiError && [403, 404].includes(e.status)) {
             stop = true; // 不是 owner / bridge 太老：这个页面里不再拉
             if (timer) clearInterval(timer);
-          }
+          } else console.debug("额度闸横幅拉取失败（保持上次的横幅，下一次轮询再试）:", e);
         });
     };
     load();

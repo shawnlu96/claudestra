@@ -58,11 +58,12 @@ export function wallNotice(w: Wall, c: WallNoticeCtx): string {
       `${c.queued} agent message(s) queued; delivered automatically after recovery — no need to nudge`)}`,
   ];
   if (c.credits !== null && c.credits > 0) {
-    lines.push(`- ${t(`有 ${c.credits} 张重置卡可用：在任一撞墙窗口里 /limit-reset（bridge 不会自动用卡）`,
-      `${c.credits} reset card(s) available: run /limit-reset in any walled window (the bridge never uses one on its own)`)}`);
+    lines.push(`- ${t(`有 ${c.credits} 次重置可用：在任一撞墙窗口里 /limit-reset（bridge 不会自动用卡）`,
+      `${c.credits} reset(s) available: run /limit-reset in any walled window (the bridge never uses one on its own)`)}`);
   }
-  lines.push(`- ${t("你直接发的消息照常送达。恢复后 bridge 自动关菜单、补投、续跑",
-    "Your own messages still go through. On recovery the bridge closes the menus, delivers the queue and resumes the agents")}`);
+  lines.push(`- ${t("你直接发的消息照常送达，但停在额度菜单 / 自动续跑倒计时上的窗口除外：先押着、不发键。恢复后 bridge 自动关菜单、补投、续跑",
+    "Your own messages still go through, except to windows on the limit menu / auto-continue countdown (held, no key sent). "
+      + "On recovery the bridge closes the menus, delivers the queue and resumes the agents")}`);
   return lines.join("\n");
 }
 
@@ -90,6 +91,10 @@ export function recoveredNotice(w: Wall): string {
     lines.push(`- ${t(`这几个窗口发了 Esc 菜单还开着（只发一次，不重试），需要手动关：${r.escFailed.join("、")}`,
       `These windows still show the menu after one Esc (not retried) — please close them: ${r.escFailed.join(", ")}`)}`);
   }
+  if (r.held?.length) {
+    lines.push(`- ${t(`这几个窗口还停在 CC 的自动续跑倒计时 / 菜单上，续跑消息押着没发键；要马上接着做请在窗口里自己处理：${r.held.join("、")}`,
+      `These windows still sit on Claude Code's auto-continue countdown / menu; the resume message is held and no key was sent — handle them in the window to continue now: ${r.held.join(", ")}`)}`);
+  }
   if (r.manual.length) {
     lines.push(`- ${t(`这几个窗口的画面对不上已知菜单，没发键，需要手动看一眼：${r.manual.join("、")}`,
       `These windows didn't show a recognised menu, so no key was sent — please check them: ${r.manual.join(", ")}`)}`);
@@ -105,4 +110,19 @@ export function wallResumeText(hitAt: number, error: string): string {
     `[额度恢复] 你 ${hhmm(hitAt)} 那一回合${why}中断了，现在额度已恢复。请从上一步接着做，不必复述已做的；如果确实没有未完的事，直接 end_turn。`,
     `[Usage restored] Your turn at ${hhmm(hitAt)} was cut off (${why}); capacity is back. Continue from where you stopped without recapping; if nothing is left, just end_turn.`,
   );
+}
+
+/**
+ * 押在额度菜单上的人类消息给频道的提示：同一条消息、同一个画面状态（菜单 / 倒计时 × 闸开没开）只提示一次，状态变了才再提示。
+ * 每分钟的押后补投会让同一条反复走到提示那一步（周墙一押一两天），按时间限频照样刷屏。
+ */
+export function noticeOncePerState(): (channelId: string, state: string, messageId: string) => boolean {
+  const seen = new Map<string, { state: string; ids: Set<string> }>();
+  return (cid, state, messageId) => {
+    const cur = seen.get(cid);
+    const ids = cur?.state === state ? cur.ids : new Set<string>();
+    if (ids.has(messageId)) return false;
+    seen.set(cid, { state, ids: ids.add(messageId) });
+    return true;
+  };
 }

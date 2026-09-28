@@ -3,6 +3,7 @@
  * notice 画成一行系统提示、和上一条相同就并成 ×N；额度闸横幅的显示模型。
  */
 import { describe, expect, test } from "bun:test";
+import { mergeContiguousAssistant } from "@/features/chat/live-merge";
 import { pushNotice } from "@/features/chat/notice-merge";
 import type { ChatMessage } from "@/features/chat/type";
 import { wallBanner } from "@/features/quota-wall/wall-banner-model";
@@ -50,5 +51,15 @@ describe("额度闸横幅", () => {
     expect(wallBanner({ active: false, wall: { kind: "weekly", enteredAt: 1, recovering: false } }, now)).toBeNull();
     expect(wallBanner({ active: false, wall: null }, now)).toBeNull();
     expect(wallBanner(null, now)).toBeNull();
+  });
+});
+
+describe("差量拼接遇到同一串 ⛔ 错误行（T24 wf notify-web-rules-4）", () => {
+  test("服务端重算的 ×2 那行替换尾条，不追加成「⛔ X」+「⛔ ×2 X」两行", () => {
+    const base: ChatMessage[] = [{ id: "h1", role: "system", content: `⛔ ${LIMIT}`, ts: "" }];
+    const delta: ChatMessage[] = [{ id: "h3", role: "system", content: `⛔ ×2 ${LIMIT}`, ts: "" }];
+    expect(mergeContiguousAssistant(base, delta).map((m) => m.content)).toEqual([`⛔ ×2 ${LIMIT}`]);
+    const other: ChatMessage[] = [{ id: "h4", role: "system", content: "⛔ API Error: 529", ts: "" }];
+    expect(mergeContiguousAssistant(base, other)).toHaveLength(2);
   });
 });

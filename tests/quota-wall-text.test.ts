@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isLimitHitText, isModelLimitHit, matchLimitMenu, paneShowsWallWait, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
+import { isLimitHitText, isModelLimitHit, matchLimitMenu, paneShowsLowPriority, paneShowsWallWait, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
 import { paneMainTurnBusy } from "../src/lib/turn-state.js";
 
 const at = (iso: string) => Date.parse(iso);
@@ -178,6 +178,22 @@ describe("真实画面样本（T35 2026-09-29 录的 CC 画面，去掉 ANSI：t
     expect(paneShowsWallWait(["✻ Pondering… (2m 3s · ↓ 1.2k tokens)", ...foot.slice(1)].join("\n"))).toBe(false); // 顶格 spinner = 真在跑
     const garbled = ["   What do you want to do?", "   ❯ 1. Stop and wait for limit to reset", "Some prose at column 0", "   Enter to confirm · Esc to cancel"];
     expect(paneShowsWallWait(garbled.join("\n"))).toBe(false); // 选项之间夹着顶格的别的内容：不是菜单
+  });
+  test("CC 2.1.283 的另外三种倒计时：周额度 80 列截断、重置时间未知、到点后 continuing shortly（T24 wf keys-screens-2；按 CC 源码文案从 walled.txt 推出）", () => {
+    for (const f of ["walled-weekly-80col", "walled-when-resets", "walled-shortly"]) expect([f, paneShowsWallWait(pane(f))]).toEqual([f, true]);
+  });
+  test("手机宽度（48 列）的 3 项菜单折成好几行、菜单带促销说明行：都认得（T24 wf delivery-hold-7 / keys-screens-5）", () => {
+    const narrow = [
+      "✻ Worked for 0s", "▔".repeat(48), "   What do you want to do?", "", "   ❯ 1. Stop and wait for limit to",
+      "        reset", "     2. Wait here, then continue", "        automatically at Sep 30 at 6am", "     3. Switch to usage", "        credits", "", "   Enter to confirm · Esc to cancel",
+    ];
+    expect(paneShowsWallWait(narrow.join("\n"))).toBe(true);
+    const promo = ["   What do you want to do?", "   Claim a $250 credit to keep going in the cloud.", "", "   ❯ 1. Stop and wait for limit to reset", "   Enter to confirm · Esc to cancel"];
+    expect(paneShowsWallWait(promo.join("\n"))).toBe(true);
+  });
+  test("开了 low-priority 在跑（状态栏 Lower priority until …）认得；撞墙等待、没开 LP 的不算（T24 wf gate-state-2）", () => {
+    for (const f of ["lp-on-allowance", "lp-on-autocontinue"]) expect([f, paneShowsLowPriority(pane(f))]).toEqual([f, true]);
+    for (const f of ["walled", "lp-off-offer", "menu-5-items", "draft"]) expect([f, paneShowsLowPriority(pane(f))]).toEqual([f, false]);
   });
   test("回合中弹出的别的对话框（底部也是「Enter to confirm · Esc to cancel」）不算额度菜单（T24 r2 P2-6）", () => {
     const other = ["   Do you want to proceed?", "", "   ❯ 1. Yes", "     2. No", "", "   Enter to confirm · Esc to cancel"].join("\n");

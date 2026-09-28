@@ -148,15 +148,15 @@ export type HeldNotice = { kind: "still-queued" | "gave-up"; item: HeldItem; cha
  * 每分钟扫描时调：押满 30 分钟、还没通知过的 → still-queued（只发一次）；押满 24 小时 → 出队并 gave-up。
  * 返回要发给发送方的通知，发不发、怎么发由 bridge 决定（它手里有 clients）。
  */
-export function ageHeld(q: HeldQueue, now: number, walled = false): HeldNotice[] {
+export function ageHeld(q: HeldQueue, now: number, paused: boolean | ((item: HeldItem) => boolean) = false): HeldNotice[] {
   const out: HeldNotice[] = [];
-  // 闸开着就整体停摆：提醒是直接 ws.send 给发送方的，发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
-  if (walled) return out;
+  // 额度闸开着时发送方是 Claude Code 的停摆（paused）：提醒是直接 ws.send 给发送方的，它也撞着墙，提醒只会唤醒一个注定失败的回合
+  if (paused === true) return out;
   for (const [channelId, items] of [...q.entries()]) {
     const keep: HeldItem[] = [];
     let changed = false;
     for (const item of items) {
-      if (item.reason === "quota_wall") {
+      if (item.reason === "quota_wall" || (paused && paused(item))) {
         keep.push(item); // 额度闸押的不提醒、不放弃：发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
         continue;
       }
@@ -178,8 +178,12 @@ export function ageHeld(q: HeldQueue, now: number, walled = false): HeldNotice[]
 }
 
 /** 通知发送方的话（bridge.ts 包成 system notification 发到发送方的 ws） */
-export function heldNoticeText(n: HeldNotice): string {
+export function heldNoticeText(n: HeldNotice, human = false): string {
   const who = n.item.to.agentName || n.channelId;
+  if (human) {
+    return `⚠️ 你发给 ${who} 的消息排了 24 小时仍没送到（它一直不空闲、停在额度菜单 / 自动续跑倒计时上，或不在线），已放弃，没有发任何键。`
+      + `如仍需要请重发。原文：\n${String(n.item.env.content).slice(0, 1500)}`;
+  }
   const head = String(n.item.env.content).slice(0, 150);
   return n.kind === "still-queued"
     ? `[⏳ bridge] 你发给 ${who} 的消息已排队 30 分钟：对方一直在一个长回合里，这一轮结束就会送到，不用重发。原文开头: ${head}`

@@ -6,6 +6,8 @@
 export interface WallResponse {
   active?: boolean;
   queued?: number;
+  /** 持有的重置次数（owner 自己在撞墙窗口里 /limit-reset 用；bridge 不自动用） */
+  credits?: number | null;
   wall?: {
     kind?: string;
     resetsAt?: number | null;
@@ -56,5 +58,6 @@ export function wallBanner(r: WallResponse | null, now: number): WallBanner | nu
     detail.push({ text: "重置时间未知", vars: {} });
   }
   detail.push({ text: "排队 {n} 条 agent 消息，恢复后自动送达", vars: { n: r.queued ?? 0 } });
+  if (r.credits) detail.push({ text: "有 {n} 次重置可用：在撞墙窗口里 /limit-reset", vars: { n: r.credits } });
   return { key: `${id}:active`, tone: "warning", title, detail, canClear: true };
 }

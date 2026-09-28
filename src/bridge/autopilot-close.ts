@@ -6,7 +6,7 @@
 import { classifyRun, type RunEvidence } from "../lib/autopilot-run.js";
 import { finishRun, type ActiveRun } from "../lib/autopilot-wake.js";
 import { appendRunLog, runLogLine } from "../lib/autopilot-log.js";
-import { updateMissions, type Mission } from "../lib/missions.js";
+import { missionOnClaudeCode, updateMissions, type Mission } from "../lib/missions.js";
 import { lastEvidenceAt, takeEvidence, takeOrphan } from "./autopilot-evidence.js";
 import { quotaWall } from "./quota-wall-wiring.js";
 
@@ -50,7 +50,7 @@ export async function closeRun(
   try {
     if (opts.afterDone !== undefined) await settle(agent, opts.afterDone);
     const ev = opts.ev ?? takeEvidence(agent, runId);
-    const wallUntil = quotaWall()?.until(); // 整机撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）
+    const wallUntil = missionOnClaudeCode(agent) ? quotaWall()?.until() : undefined; // CC 撞墙：下次唤醒按闸的重置时刻排（出闸时 mission.ts 另行放行）
     if (wallUntil) ev.wallUntil = wallUntil;
     const now = Date.now();
     const cls = classifyRun(ev);

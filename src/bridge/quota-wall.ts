@@ -10,7 +10,7 @@ import {
   type UsageSignal, type Wall, type WallExitVia, type WallRecovery, type WallState,
 } from "../lib/quota-wall.js";
 import { recoveredNotice, wallNotice, wallResumeText } from "../lib/quota-wall-notice.js";
-import { countLimitsResetEcho, matchLimitMenu, wallHitOf } from "../lib/quota-wall-text.js";
+import { limitsResetEchoes, matchLimitMenu, wallHitOf } from "../lib/quota-wall-text.js";
 import type { Envelope } from "./router.js";
 
 /** 一个 Claude Code 窗口（含 master） */
@@ -27,9 +27,12 @@ export interface QuotaWallDeps {
   save(s: WallState): void;
   /** 这个频道的 agent 是不是 Claude Code（Codex / Pi 不进闸）；查不到按是（master 不在 registry 里） */
   isClaudeCode(channelId: string): Promise<boolean>;
+  /** 这个窗口开着 low-priority、照常在跑（状态栏「Lower priority until …」）：闸对它放行 */
+  lowPriority?(channelId: string): Promise<boolean>;
   /** 此刻在册的 Claude Code 窗口（扫回显、关菜单用） */
   windows(): Promise<WallWindow[]>;
-  capture(win: string): Promise<string>;
+  /** 抓窗口画面（可见区 + 往上 historyLines 行历史，默认 30） */
+  capture(win: string, historyLines?: number): Promise<string>;
   /** 关菜单前让窗口回到可交互（退出 copy-mode），tmux-helper 的 ensurePaneInteractive */
   prepare(win: string): Promise<unknown>;
   sendEsc(win: string): Promise<void>;
@@ -45,12 +48,12 @@ export interface QuotaWallDeps {
     release(now: number): number;
   };
   flush(channelId: string): Promise<void>;
-  /** 投出去了返回 true；不在线等没投成返回 false（不算续跑过） */
-  resume(channelId: string, agent: string, text: string): Promise<boolean>;
+  /** 投出去了返回 true；不在线 / dropped 返回 false（不算续跑过）；被押住（窗口停在倒计时 / 菜单上）返回 "held" */
+  resume(channelId: string, agent: string, text: string): Promise<boolean | "held">;
   notifyOwner(text: string): Promise<boolean>;
   /** T2b-2 只读用量接口；null = 这次没探成（关着 / 退避中 / 出错） */
   probe(): Promise<{ pct: number | null; observedAt: number } | null>;
-  /** 此刻能用的重置卡张数（只读，不触发查询）；拿不到 = null */
+  /** 持有的重置次数（只读，不触发查询）；拿不到 = null */
   credits(): Promise<number | null>;
   readCache(): UsageSignal | null;
   /** quota-wall clear 留下的请求：取走即删 */
@@ -69,7 +72,8 @@ interface Ctx {
   d: QuotaWallDeps;
   state: WallState;
   /** 每个窗口进闸后第一次看到的回显条数：之后变多才算 owner 用了卡（画面上旧的回显不算）。进程内，重启后重新取基线 */
-  echoBase: Map<string, number>;
+  /** 窗口 → 进闸时画面上已有的「Limits reset」回显内容（limitsResetEchoes） */
+  echoBase: Map<string, Set<string>>;
   exitListeners: ((via: WallExitVia) => void)[];
 }
 
@@ -90,22 +94,25 @@ function exitWall(c: Ctx, via: WallExitVia): void {
   }
 }
 
+/** 基线往上多抓这么多行历史：之后窗口变高、每拍的抓屏范围变大时露出来的旧回显，基线里已经有了 */
+const ECHO_BASE_HISTORY = 2_000;
+
 /** 进闸那一刻就给每个窗口记回显基线：等到第一拍（最多 15 秒后）才记，这期间用卡的回显会被当成旧的 */
 async function baselineEchoes(c: Ctx): Promise<void> {
   c.echoBase.clear();
   for (const w of await c.d.windows()) {
-    const n = countLimitsResetEcho(await c.d.capture(w.win).catch(() => "")); // 抓不到当 0：之后真有回显只会更早出闸
-    if (!c.echoBase.has(w.win)) c.echoBase.set(w.win, n);
+    const seen = limitsResetEchoes(await c.d.capture(w.win, ECHO_BASE_HISTORY).catch(() => "")); // 抓不到当没有：之后真有回显只会更早出闸
+    if (!c.echoBase.has(w.win)) c.echoBase.set(w.win, new Set(seen));
   }
 }
 
 async function sawLimitsReset(c: Ctx): Promise<boolean> {
   let seen = false;
   for (const w of await c.d.windows()) {
-    const n = countLimitsResetEcho(await c.d.capture(w.win).catch(() => "")); // 抓屏失败当画面空：这一拍看不到回显，下一拍再看
+    const now = limitsResetEchoes(await c.d.capture(w.win).catch(() => "")); // 抓屏失败当画面空：这一拍看不到回显，下一拍再看
     const base = c.echoBase.get(w.win);
-    if (base === undefined) c.echoBase.set(w.win, n);
-    else if (n > base) {
+    if (base === undefined) c.echoBase.set(w.win, new Set(now));
+    else if (now.some((e) => !base.has(e))) {
       c.d.log(`🎟 ${w.agent} 窗口出现「Limits reset」回显（用了重置卡）`);
       seen = true;
     }
@@ -143,6 +150,12 @@ function patchRecovery(c: Ctx, id: string, p: Partial<WallRecovery>): boolean {
   return true;
 }
 
+const ESC_RECHECK_MS = 300;
+
+async function gatedNow(c: Ctx, channelId: string): Promise<boolean> {
+  return wallActive(c.state) && (await c.d.isClaudeCode(channelId)) && !(await c.d.lowPriority?.(channelId));
+}
+
 async function closeMenus(c: Ctx, id: string): Promise<void> {
   const r = structuredClone(c.state.wall!.recovery!);
   const sent: WallWindow[] = [];
@@ -152,6 +165,12 @@ async function closeMenus(c: Ctx, id: string): Promise<void> {
     if (matchLimitMenu(pane)) {
       // copy-mode 里 Esc 只会让 tmux 退出 copy-mode：只对要发键的窗口先退出来，别把正在翻屏的别的窗口踢出去（T24 r2 P2-7）
       await c.d.prepare(win.win).catch((e) => c.d.log(`额度闸：${win.agent} 退出 copy-mode 失败（照发 Esc，之后复查）: ${(e as Error).message}`));
+      await c.d.sleep(ESC_RECHECK_MS); // 发键前再看一眼：这段时间里 owner 自己关了 / 选了别的，就不发
+      const again = await c.d.capture(win.win).catch(() => ""); // 抓不到就不发：宁可留给人关，也不盲按
+      if (!matchLimitMenu(again)) {
+        c.d.log(`额度闸：${win.agent} 的菜单在发 Esc 前已经变了，不发键`);
+        continue;
+      }
       await c.d.sendEsc(win.win);
       r.escSent.push(win.channelId);
       sent.push(win);
@@ -195,8 +214,10 @@ async function resumeAgents(c: Ctx, id: string): Promise<void> {
     const busy = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话
     if (!stillRecovering(c, id)) return;
     const r = structuredClone(c.state.wall!.recovery!);
+    const got = busy ? null : await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error));
     if (busy) r.running.push(h.agent);
-    else if (await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error))) r.resumed.push(h.agent);
+    else if (got === "held") r.held = [...(r.held ?? []), h.agent];
+    else if (got) r.resumed.push(h.agent);
     if (!patchRecovery(c, id, r)) return;
   }
   patchRecovery(c, id, { step: "done" });
@@ -271,13 +292,12 @@ export function createQuotaWall(d: QuotaWallDeps) {
     },
     snapshot: (): { active: boolean; wall: Wall | null; queued: number } => ({ active: wallActive(c.state), wall: c.state.wall, queued: d.held.wallCount() }),
 
-    /** 这个频道此刻在闸里：闸开着、是 Claude Code agent（Autopilot 据此让位） */
-    gates: async (channelId: string): Promise<boolean> => wallActive(c.state) && d.isClaudeCode(channelId),
+    /** 这个频道此刻在闸里：闸开着、是 Claude Code agent、没开 low-priority（开了的照常在跑）。Autopilot 据此让位、flush 据此只投人的 */
+    gates: (channelId: string): Promise<boolean> => gatedNow(c, channelId),
 
-    /** 这条消息此刻要不要押住：闸开着、收件方是 Claude Code、不是人发的 */
+    /** 这条消息此刻要不要押住：闸开着、收件方在闸里（gates）、不是人发的 */
     async holds(env: Envelope, channelId: string): Promise<boolean> {
-      if (!wallActive(c.state) || isHumanSender(env.from)) return false;
-      return d.isClaudeCode(channelId);
+      return !isHumanSender(env.from) && (await gatedNow(c, channelId));
     },
 
     noteApiError: (e: { channelId: string; agent: string; at: number; error: string; text: string }): Promise<boolean> => noteApiErrorIn(c, e),

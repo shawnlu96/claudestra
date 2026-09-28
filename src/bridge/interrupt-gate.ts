@@ -7,6 +7,7 @@ import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
 import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
+import { windowWallWait } from "../lib/wall-screen.js";
 import { emitEvent } from "./event-bus.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
 
@@ -15,6 +16,7 @@ const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
+  wallWait: async (win) => !!(await windowWallWait(win)), // 抓不到屏：交给 probe 按老规矩判（它也抓不到就是 unknown，不发键）
   interrupt: interruptWindow,
   onPreempted: (agent, channelId) => {
     recordMetric("agent_interrupt", { channelId, agent, meta: { trigger: "preempt" } });

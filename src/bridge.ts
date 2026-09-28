@@ -470,14 +470,16 @@ async function pushBackToCaller(
   return { kind: "sent" as const, note: "queued" };
 }
 
-// 带着撞错前扣下的话的槽被它直接答掉：扣下的话单独推给 caller（bridge/stop-settle.ts），不跟着槽悄悄清掉
-pendingAgentCalls.onWithheld = (p) => void pushBackToCaller(p, undefined, p.targetChannelId ?? "", withheldNotice(p), "agent_withheld").catch((e) => console.error("扣下的答复推送失败:", e));
+// 带着撞错前扣下的话的槽被它直接答掉 / 等续跑的槽没等到就删了：单独推给 caller（bridge/stop-settle.ts），不跟着槽悄悄清掉
+pendingAgentCalls.onWithheld = (p) => void pushBackToCaller(p, undefined, p.originalReplyChannel || p.targetChannelId || "", withheldNotice(p), "agent_withheld");
+pendingAgentCalls.onExpired = (p, why) => void pushBackToCaller(p, undefined, p.originalReplyChannel || p.targetChannelId || "", expiredNotice(p, why), "agent_expired", "notification");
 const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   answerable: answerablePac, consume: (cid, pac) => void pendingAgentCalls.consume(cid, pac.callerChannelId, pac), nudgeAmbiguous: nudgeAmbiguousCallers,
   pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
-  markApiError: (cid, text) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac.callerChannelId),
+  markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac.callerChannelId),
+  unattributed: (cid) => void notifyMaster(`ℹ️ ${agentLabelForChannel(cid)} 那一轮以 API 错误结束，好几个 caller 在等、出错前说的话对不上是答谁的：没有转给任何人（在它自己的频道里看得到）`),
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
 
@@ -546,7 +548,8 @@ import type {
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, inboundBodyForLocal, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
-import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
+import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
+import { sweepHeldAges } from "./bridge/held-age.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
@@ -847,7 +850,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 只对人类 request 生效(Discord user / 非 peer 的 API user);agent↔agent、peer(外机的 agent 请求,不能打断本机的活)、系统消息、回执不抢占。
   // 判忙、冷却、串行都在 interruptGate(lib/interrupt-gate.ts):只看主回合、压缩中和 Pi / Codex 不打断,打断后等 CC 收尾一拍。
   // 停在额度菜单 / 撞墙等待:先押住、一个键都不发(菜单里有花钱的选项,bridge/quota-wall-wiring.ts)
-  const atWallMenu = await holdAtWallWait(env, to, evAgent); if (atWallMenu) return atWallMenu;
+  const atWallMenu = await holdAtWallWait(env, to, evAgent, stillWanted); if (atWallMenu) return atWallMenu;
   if ((env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request") {
     try {
       await interruptGate.preempt(to.channelId, evAgent);
@@ -1519,6 +1522,8 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     const delivery = await deliver(env);
     if (delivery.outcome.kind === "sent") {
       recordMetric("message_in", { channelId, meta: { len: content.length, attachments: attachmentPaths.length } });
+      // 押住了（额度闸 / 停在额度菜单，没发键）：没有回合，收掉「思考中」和输入指示，说明另有一条（quota-wall-wiring holdAtWallWait）
+      if (delivery.outcome.heldBy) { stopTyping(channelId); clearSafetyTimer(channelId); await finishStatusMessage(discord, channelId, t("⏸ 押着", "⏸ Held")); }
     } else if (delivery.outcome.kind === "dropped") {
       console.log(`📪 deliver dropped ${envelopeLabel(env)}: ${delivery.outcome.reason}`);
       recordMetric("message_dropped", { channelId, meta: { reason: delivery.outcome.reason } });
@@ -2642,22 +2647,14 @@ const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
   const IA_WATCHDOG_STALE_MS = 10 * 60_000;
-  for (const p of quotaWall()?.active() ? [] : pendingAgentCalls.sweepStale(now, PAC_STALE_MS, heldFromOf)) { // 闸内不扫，出闸重新起算
+  const wallPaused = (ch?: string) => !!quotaWall()?.active() && agentRuntime(clients.get(ch ?? "")) === "claude-code"; // 闸只停 CC 的，出闸重新起算
+  for (const p of pendingAgentCalls.sweepStale(now, PAC_STALE_MS, heldFromOf, wallPaused)) {
     console.log(`🧹 pendingAgentCalls stale: 清掉 target=${p.targetName} (caller=${p.callerName})`);
-    if (p.apiErrorAt) void pushBackToCaller(p, undefined, p.targetChannelId ?? "", expiredNotice(p), "agent_expired", "notification").catch((e) => console.error("回程过期说明推送失败:", e));
   }
-  // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押久了告诉 caller(held-queue.ts ageHeld)
-  for (const n of ageHeld(heldLocalMsgs, now, !!quotaWall()?.active())) {
-    console.log(`${n.kind === "gave-up" ? "🧹 押后消息放弃" : "⏳ 押后消息仍在排队"}: → ${n.item.to.agentName || n.channelId}`);
-    const from = n.item.env.from;
-    const caller = from.kind === "local" ? clients.get(from.channelId) : undefined;
-    try {
-      caller?.ws.send(JSON.stringify({ type: "message", content: heldNoticeText(n), meta: {
-        chat_id: (from as RouterLocalEndpoint).channelId, message_id: newMessageId(`held_${n.kind}`), ts: new Date().toISOString(), trigger: "system",
-        intent: "notification", thread_id: newThreadId(), user: "bridge", user_id: "bridge", is_bridge: "true",
-      } }));
-    } catch { /* caller 也没了就算了:消息本身按上面的规则留着 / 已放弃 */ }
-  }
+  // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押久了告诉发送方(bridge/held-age.ts)
+  sweepHeldAges({ held: heldLocalMsgs, paused: (it) => it.env.from.kind === "local" && wallPaused(it.env.from.channelId), wsOf: (c) => clients.get(c)?.ws,
+    notifyHuman: (cid, text) => void deliver({ from: { kind: "bridge", label: "held" }, to: { kind: "user", userId: "", channelId: cid }, intent: "notification", content: text,
+      meta: { messageId: newMessageId("held_human"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() } }) }, now);
   for (const channelId of heldLocalMsgs.keys()) {
     if (heldLocalMsgs.get(channelId)?.length) void flushHeldLocalMsgs(channelId, "sweep");
   }

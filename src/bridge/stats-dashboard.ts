@@ -35,7 +35,7 @@ import { readConfig, readConfigSync, setStatsDashboard, isConfigCorrupt } from "
 import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage, readSessionCtx } from "../lib/usage-cache.js";
 import { discordCreateChannel } from "./discord-api.js";
-import { quotaWall } from "./quota-wall-wiring.js";
+import { windowWallWait } from "../lib/wall-screen.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
@@ -813,9 +813,11 @@ export function noteSaveCompactInjected(target: string): void {
   recentSaveCompact.set(windowKey(target), Date.now());
 }
 
+const winOf = (a: AgentStat): string => (a.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(a.name));
+
 async function triggerAutoSaveCompact(a: AgentStat, effThreshold: number): Promise<void> {
   try {
-    const target = a.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(a.name);
+    const target = winOf(a);
     noteSaveCompactInjected(target);
     await tmuxSendLine(target, "/save-compact");
     console.log(`🧹 auto save-compact triggered: ${a.name} @ ${formatTokens(a.contextTokens)} (threshold=${formatTokens(effThreshold)})`);
@@ -844,11 +846,8 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
     // 下来那轮再动手(owner 2026-08-26:别干着干着就 compact)。
     // ⚠ 必须放在 tier===0 闸**之前**(peer 2026-08-30):小窗口 agent 的有效
     // 阈值低于最小绝对档 250K,放闸后面就永远轮不到触发。
-    // v2.21.1+ 救命线(owner 2026-09-02 上下文被 CC 裸压全丢):闲置门槛对忙碌
-    // agent 是永久阻塞——Robinhood 一直在干活,涨到 717K 被 CC 压掉,我们一次
-    // 都没触发过。踩到 EMERGENCY(窗口 93%,离 CC 的 ~967K 只剩几万 token)时
-    // **无视闲置**,因为再等下去就是被裸压(记忆全丢),打断一次远比那个轻。
-    // v2.21.3+ 救命线不再挂在 eff>0 后面:常规线关(window=0)时它照样兜底。
+    // 救命线:闲置门槛对一直在干活的 agent 是永久阻塞,踩到 EMERGENCY(窗口 93%,离 CC 的 ~967K 裸压只剩几万 token)时
+    // **无视闲置**——再等就被裸压(记忆全丢),打断一次远比那个轻。它不挂在 eff>0 后面:常规线关(window=0)时照样兜底。
     if (!first) {
       const eff = effectiveAutoCompactThreshold(threshold, a);
       const emergency = emergencyOn ? emergencyThresholdOf(a) : null;
@@ -862,8 +861,9 @@ async function checkContextTiers(discord: Client, agents: AgentStat[]): Promise<
         now: Date.now(),
         retryMs: AUTO_COMPACT_RETRY_MS,
       });
-      // 额度闸开着：直接敲进窗口的 /save-compact 不经过 deliver，会起一个注定撞墙的回合（出闸后下一轮扫描再触发）
-      if (d.fire && !quotaWall()?.active()) {
+      // 直接敲进窗口的 /save-compact 不经过 deliver：停在额度菜单 / 撞墙倒计时上的窗口不敲（打字会取消自动续跑、菜单上会选项），
+      // 下一轮扫描再看；闸开着但开了 low-priority 在跑的照常触发（救命线也是：再等就被 CC 裸压）
+      if (d.fire && !(await windowWallWait(winOf(a)))) {
         autoCompactTriggered.set(a.channelId, Date.now());
         if (d.emergency) console.log(`🚨 救命线触发(${formatTokens(a.contextTokens)} ≥ ${formatTokens(emergency!)},CC 随时裸压):${a.name} 无视闲置门槛`);
         await triggerAutoSaveCompact(a, d.emergency ? emergency! : eff);

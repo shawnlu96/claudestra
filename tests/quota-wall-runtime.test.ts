@@ -25,7 +25,7 @@ function env(from: Envelope["from"], to: string, id: string): Envelope {
 }
 const agentFrom = (cid: string): Envelope["from"] => ({ kind: "local", agentName: `agent-${cid}`, channelId: cid, ws: {} as never });
 
-function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: string[]; codex?: string[]; stuck?: string[] } = {}) {
+function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: string[]; codex?: string[]; stuck?: string[]; heldResume?: string[]; lp?: string[] } = {}) {
   let now = T0;
   let disk: WallState = opts.disk ?? emptyWallState();
   const held = new HeldQueue(null);
@@ -46,6 +46,7 @@ function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: st
     load: () => structuredClone(disk),
     save: (s) => void (disk = structuredClone(s)),
     isClaudeCode: async (cid) => !(opts.codex ?? []).includes(cid),
+    lowPriority: async (cid) => (opts.lp ?? []).includes(cid),
     windows: async () => windows,
     capture: async (win) => panes[win] ?? "",
     prepare: async (win) => void prepared.push(win),
@@ -64,7 +65,7 @@ function rig(opts: { disk?: WallState; panes?: Record<string, string>; busy?: st
       flushed.push(cid);
       held.delete(cid);
     },
-    resume: async (cid, _agent, text) => (resumed.push({ cid, text }), true),
+    resume: async (cid, _agent, text) => ((opts.heldResume ?? []).includes(cid) ? "held" : (resumed.push({ cid, text }), true)),
     notifyOwner: async (text) => (notices.push(text), true),
     probe: async () => (probe.calls++, probe.v),
     credits: async () => 1,
@@ -124,6 +125,14 @@ describe("进闸 / 押后", () => {
     expect(Object.keys(r.wall.snapshot().wall!.hits)).toEqual(["a", "c"]);
   });
 
+  test("开了 low-priority 照常在跑的窗口：闸对它放行，agent 消息照投、不算在闸里（T24 wf gate-state-2）", async () => {
+    const r = rig({ lp: ["lp"] });
+    await hitWall(r, "a");
+    expect(await r.wall.holds(env(agentFrom("b"), "lp", "m1"), "lp")).toBe(false);
+    expect(await r.wall.gates("lp")).toBe(false);
+    expect(await r.wall.gates("a")).toBe(true);
+  });
+
   test("bridge 重启后闸状态不丢", async () => {
     const r = rig();
     await hitWall(r, "a");
@@ -135,13 +144,17 @@ describe("进闸 / 押后", () => {
 });
 
 describe("出闸三个来源", () => {
-  test("「Limits reset」回显：进闸时画面上已有的旧回显不算，新出现的才算", async () => {
-    const old = "  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n";
+  test("「Limits reset」回显：进闸时画面上已有的旧回显不算（窗口变高露出来的同一条也不算），新出现的才算", async () => {
+    const old = "❯ /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 2 resets left\n";
     const r = rig({ panes: { "master:agent-b": old } });
     await hitWall(r, "a");
     await r.wall.tick(); // 取基线
     expect(r.wall.active()).toBe(true);
-    r.panes["master:agent-b"] = old + "\n> /limit-reset\n" + old;
+    r.panes["master:agent-b"] = `${old}\n${old}`; // 抓屏范围变大，同一条旧回显多露出一次
+    r.advance(15_000);
+    await r.wall.tick();
+    expect(r.wall.active()).toBe(true);
+    r.panes["master:agent-b"] = `${old}\n❯ /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n`;
     r.advance(15_000);
     await r.wall.tick();
     expect(r.wall.active()).toBe(false);
@@ -217,6 +230,17 @@ describe("恢复", () => {
     await r.wall.tick();
     expect(r.resumed).toHaveLength(1);
     expect(r.esc).toHaveLength(2);
+  });
+
+  test("续跑消息被押住（窗口还停在 CC 的自动续跑倒计时上）：不算续跑过，出闸通知单列、请人去窗口里处理（T24 wf delivery-hold-6 / -10）", async () => {
+    const r = rig({ heldResume: ["b"] });
+    for (const c of ["a", "b"]) await hitWall(r, c);
+    r.wall.clear();
+    await r.wall.tick();
+    expect(r.resumed.map((x) => x.cid)).toEqual(["a"]);
+    expect(r.disk().wall!.recovery).toMatchObject({ resumed: ["agent-a"], held: ["agent-b"] });
+    expect(r.notices.at(-1)).toContain("续跑 1 个 agent");
+    expect(r.notices.at(-1)).toContain("自动续跑倒计时");
   });
 
   test("恢复途中重启：从记下的那一步接着做，已发过 Esc 的不再发", async () => {
@@ -330,7 +354,7 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     r.cache.v = full;
     r.advance(20_000);
     await r.wall.tick();
-    r.panes["master:agent-b"] = "  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n";
+    r.panes["master:agent-b"] = "❯ /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n";
     await r.wall.tick();
     expect(r.disk().wall!.exit!.via).toBe("limits_reset");
     const entered = r.notices.filter((n) => n.startsWith("⛔")).length;

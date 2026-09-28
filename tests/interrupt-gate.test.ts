@@ -5,10 +5,15 @@
 import { describe, expect, test } from "bun:test";
 import { createInterruptGate, type InterruptGateDeps } from "../src/lib/interrupt-gate.js";
 import type { TurnState } from "../src/lib/turn-state.js";
+import { paneShowsWallWait } from "../src/lib/quota-wall-text.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const fixture = (f: string) => readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
 
 type Main = TurnState["main"];
 
-function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number } = {}) {
+function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; screens?: string[] } = {}) {
   let clock = 1_790_000_000_000;
   const keys: string[] = [];
   const preempted: string[] = [];
@@ -27,6 +32,7 @@ function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number } 
       return [k];
     },
     onPreempted: (agent) => void preempted.push(agent),
+    ...(opts.screens ? { wallWait: async () => paneShowsWallWait(opts.screens!.length > 1 ? opts.screens!.shift()! : opts.screens![0]!) } : {}),
     sleep: async () => undefined,
     now: () => clock,
   };
@@ -158,3 +164,25 @@ function stubDeps(): InterruptGateDeps {
     onPreempted: () => undefined, sleep: async () => undefined,
   };
 }
+
+describe("preempt：停在额度菜单 / 撞墙倒计时一个键都不发（T24 PM 口径：Discord 入站和 deliverToLocal 共用这一道）", () => {
+  test("真实菜单、倒计时、带假输入框、窄窗口折行的画面：判忙也不发键", async () => {
+    for (const f of ["menu-5-items", "menu-on-credits", "menu-no-lp", "walled", "walled-channel", "menu-fakebox", "walled-fakebox", "menu-narrow60"]) {
+      const h = harness({ main: "busy", screens: [fixture(f)] });
+      expect([f, await h.gate.preempt("ch", "agent-a")]).toEqual([f, false]);
+      expect([f, h.keys]).toEqual([f, []]);
+    }
+  });
+
+  test("判忙那一刻还没有菜单、300ms 后复核时弹出来了：不发键", async () => {
+    const h = harness({ main: "busy", screens: [fixture("busy-queued"), fixture("menu-5-items")] });
+    expect(await h.gate.preempt("ch", "agent-a")).toBe(false);
+    expect(h.keys).toEqual([]);
+  });
+
+  test("真在跑的画面照常抢占", async () => {
+    const h = harness({ main: "busy", screens: [fixture("busy-queued")] });
+    expect(await h.gate.preempt("ch", "agent-a")).toBe(true);
+    expect(h.keys).toEqual(["C-c"]);
+  });
+});

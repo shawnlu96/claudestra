@@ -145,6 +145,8 @@ export interface ChatMessage {
   echoKey?: string;
   /** v2.15+ 发送失败（超时/网络/服务端拒绝）——气泡标「未送达」,别装作已发出 */
   failed?: boolean;
+  /** bridge 押住了（额度闸 / 目标停在额度菜单，features/quota-wall/held-send.ts）：一押可能一两天，保全不按 30 分钟丢 */
+  held?: boolean;
 }
 
 export interface AgentSession {

@@ -29,21 +29,25 @@ function harness(runtime?: string, opts: { pushFails?: boolean } = {}) {
   const book = new AgentCallBook(null);
   book.add(cid, { ...call }, "m1");
   const pushed: string[] = [];
+  const to: string[] = [];
   const notes: string[] = [];
   const rearmed: string[] = [];
+  const unattributed: string[] = [];
   let nudged = 0;
   const deps: CallerSettleDeps = {
     answerable: (cid) => book.answerable(cid, () => false),
     waiting: (cid) => book.waiting(cid, () => false),
     rearmResume: (cid) => void rearmed.push(cid),
     consume: (cid, pac) => void book.consume(cid, pac.callerChannelId, pac),
-    pushBack: async (_pac, _cid, body) => {
+    pushBack: async (pac, _cid, body) => {
       if (opts.pushFails) throw new Error("caller 的 ws 断了");
       pushed.push(body);
+      to.push(pac.callerChannelId);
     },
+    unattributed: (_cid, text) => void unattributed.push(text),
     nudgeAmbiguous: () => void nudged++,
     takeApiErrorNotice: (cid) => book.takeApiErrorNotice(cid, () => false),
-    markApiError: (cid, text) => book.markApiError(cid, () => false, text),
+    markApiError: (cid, text, caller) => book.markApiError(cid, () => false, text, caller),
     clearWithheld: (cid, pac) => book.clearWithheld(cid, pac.callerChannelId),
     notify: async (_pac, _cid, body) => void notes.push(body),
     metric: () => {},
@@ -53,9 +57,9 @@ function harness(runtime?: string, opts: { pushFails?: boolean } = {}) {
     ({ cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event, runtime, drain, trigger });
   const stop = (event: string, drain: StopTurn["drain"], trigger: TurnTrigger = "insider") => settleStopTurn(deps, turn(event, drain, trigger));
   /** bridge 的真实路径：不给 humanTurn，按 deliverToLocal 送达时 noteDelivered 记下的来源判 */
-  const delivered = (from: { kind: string; owner?: boolean; peer?: string }, at?: number, idle = false) => noteDelivered(cid, from, at, idle);
+  const delivered = (from: { kind: string; owner?: boolean; peer?: string; channelId?: string }, at?: number, idle = false) => noteDelivered(cid, from, at, idle);
   const stopReal = (event: string, drain: StopTurn["drain"]) => settleStopTurn(deps, { ...turn(event, drain), trigger: undefined });
-  return { cid, book, pushed, notes, rearmed, nudged: () => nudged, stop, stopReal, delivered, turn, slot: () => book.slot(cid, "c-pm") };
+  return { cid, book, deps, pushed, to, notes, rearmed, unattributed, nudged: () => nudged, stop, stopReal, delivered, turn, slot: () => book.slot(cid, "c-pm") };
 }
 
 describe("Claude Code：以 API 错误结束的一轮不结算", () => {
@@ -210,7 +214,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     expect(b.pushed).toEqual([]);
   });
 
-  test("CC 到点自己续跑的那一轮（没有 bridge 投递）按 insider 结算；重启后还没见过 Stop 的频道仍按外人（T24 adv1 P1-4）", async () => {
+  test("CC 到点自己续跑的那一轮（没有 bridge 投递）继承撞墙那一轮的来源：PM 的照样结算、guest 的不结算；重启后没见过 Stop 的仍按外人（T24 adv1 P1-4）", async () => {
     const h = harness();
     h.delivered({ kind: "local" });
     await h.stopReal("StopFailure", { text: "查到根因在 X", apiError: true, error: wallErr });
@@ -218,6 +222,11 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     expect(h.pushed).toHaveLength(2);
     expect(h.pushed[1]).toContain("X 修好了");
     expect(h.rearmed).toEqual([]);
+    const g = harness(); // 撞墙的那一轮是 guest 开的：CC 自己接着跑的还是在答 guest，不结算 PM
+    g.delivered({ kind: "api" });
+    await g.stopReal("StopFailure", { text: "（给 guest 的）半句", apiError: true, error: wallErr });
+    await g.stopReal("Stop", { text: "（给 guest 的）结论" });
+    expect(g.pushed).toEqual([]);
     const r = harness(); // 重启后：这一轮是重启前开的，来源不知道
     r.book.markApiError(r.cid, () => false, "旧的半句");
     await r.stopReal("Stop", { text: "不知道在答谁" });
@@ -270,15 +279,56 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     expect(h.slot()).toMatchObject({ withheld: ["半句", "做完了"] });
   });
 
-  test("好几个 caller 在等时撞错：扣下的话按槽逐个推（不等它逐个 send_to_agent），然后照旧提醒它分别回（T24 r2 P2-4）", async () => {
+  test("好几个 caller 在等时撞错：扣下的话只挂在开启这一轮的那个 caller 上，别的 caller 收不到（T24 wf delivery-hold-3）", async () => {
     const h = harness();
     h.book.add(h.cid, { ...call, callerChannelId: "c-other", callerName: "agent-other" }, "m9");
-    await h.stop("StopFailure", { text: "查到一半", apiError: true, error: wallErr });
-    await h.stop("Stop", { text: "做完了" });
-    expect(h.pushed).toHaveLength(2);
-    expect(h.pushed.every((p) => p.includes("撞墙前扣下的答复") && p.includes("查到一半"))).toBe(true);
-    expect(h.nudged()).toBe(1);
+    h.delivered({ kind: "local", channelId: "c-pm" }, 1_000, true); // PM 的请求开了这一轮
+    await h.stopReal("StopFailure", { text: "（给 PM 的）查到一半", apiError: true, error: wallErr });
+    expect(h.book.slot(h.cid, "c-other")?.withheld).toBeUndefined();
+    await h.stopReal("Stop", { text: "做完了" }); // CC 自己接着跑：继承来源
+    expect(h.to).toEqual(["c-pm"]);
+    expect(h.pushed[0]).toContain("（给 PM 的）查到一半");
+    expect(h.nudged()).toBe(1); // 正文照旧不猜：提醒它分别回
+  });
+
+  test("顺序路径：B 的回合先撞错、A 的回合再撞错——各自的话只回各自的 caller；对不上是谁的就不扣，只告诉 owner（T24 wf delivery-hold-3）", async () => {
+    const h = harness(); // c-pm = B，已经在等
+    h.delivered({ kind: "local", channelId: "c-pm" }, 1_000, true);
+    await h.stopReal("StopFailure", { text: "（给 B 的）半句", apiError: true, error: { error: "overloaded", text: "API Error: 529" } });
+    h.book.add(h.cid, { ...call, callerChannelId: "c-a", callerName: "agent-a" }, "m9");
+    h.delivered({ kind: "local", channelId: "c-a" }, 60_000, true);
+    await h.stopReal("StopFailure", { text: "（给 A 的）半句", apiError: true, error: wallErr });
+    expect(h.book.slot(h.cid, "c-pm")?.withheld).toEqual(["（给 B 的）半句"]);
+    expect(h.book.slot(h.cid, "c-a")?.withheld).toEqual(["（给 A 的）半句"]);
+    h.delivered({ kind: "bridge" }, 200_000, true); // 出闸续跑：bridge 开的，两个都在等
+    await h.stopReal("StopFailure", { text: "续跑又撞了，说了一句", apiError: true, error: wallErr });
+    expect(h.unattributed).toEqual(["续跑又撞了，说了一句"]);
+    expect(h.book.forTarget(h.cid).flatMap((c) => c.withheld ?? [])).not.toContain("续跑又撞了，说了一句");
+    h.delivered({ kind: "bridge" }, 400_000, true);
+    await h.stopReal("Stop", { text: "都做完了" });
+    expect(h.to).toEqual(["c-pm", "c-a"]);
+    expect(h.pushed[0]).toContain("给 B 的");
+    expect(h.pushed[0]).not.toContain("给 A 的");
+    expect(h.pushed[1]).toContain("给 A 的");
+  });
+
+  test("补投同批里 A、B 两个 caller 的请求一起开了这一轮：谁的话都不扣（不猜）", async () => {
+    const h = harness();
+    h.book.add(h.cid, { ...call, callerChannelId: "c-a", callerName: "agent-a" }, "m9");
+    h.delivered({ kind: "local", channelId: "c-pm" }, 1_000, true);
+    h.delivered({ kind: "local", channelId: "c-a" }, 1_500, true);
+    await h.stopReal("StopFailure", { text: "混着答的半句", apiError: true, error: wallErr });
     expect(h.book.forTarget(h.cid).every((c) => !c.withheld)).toBe(true);
+    expect(h.unattributed).toHaveLength(1);
+  });
+
+  test("推回 caller 返回 error / dropped（pushBackToCaller 不抛错）：当没送到，扣下的话留着、回程不消化（T24 adv1 P2-2）", async () => {
+    const h = harness();
+    const deps = { ...h.deps, pushBack: async () => ({ kind: "error" }) };
+    h.delivered({ kind: "local", channelId: "c-pm" }, 1_000, true);
+    await settleStopTurn(deps, { ...h.turn("StopFailure", { text: "半句", apiError: true, error: wallErr }), trigger: undefined });
+    await settleStopTurn(deps, { ...h.turn("Stop", { text: "做完了" }), trigger: undefined });
+    expect(h.slot()?.withheld).toEqual(["半句", "做完了"]);
   });
 
   test("它直接 reply / send_to_agent 答掉带着扣下的话的槽：consume 不悄悄清掉，交给 onWithheld 推", async () => {

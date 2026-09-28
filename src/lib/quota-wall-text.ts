@@ -9,6 +9,7 @@
  * agent 自己的正文不问；这里再只认句首、limit 后面紧跟标点或行尾，「You've hit your API limit on GitHub」这类话也不算。
  */
 import { parseResetAt } from "./autopilot-run.js";
+import { limitMenuAtBottom } from "./limit-menu.js";
 import { paneMainTurnBusy } from "./turn-state.js";
 
 /** 「hit」是额度窗口，「reached your Fable limit」「Fable 5 limit」是单个模型的额度（本机实录 99 条） */
@@ -93,31 +94,6 @@ export function matchLimitMenu(pane: string): boolean {
  * 窄窗口会把「· esc to cancel」折到下一行，所以不要求它在同一行。
  */
 const WALL_WAIT_LINE = /Usage limit reached\b|continuing automatically at\b|\/low-priority to continue now\b/i;
-const MENU_HINT_LINE = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$/i;
-/** 额度菜单里才有的项：新旧版本的文案都算（判「停在额度菜单」要宽，判「能不能发 Esc」用上面严格的 matchLimitMenu） */
-const LIMIT_OPTION_RE = /limit to reset|usage credits|lower priority|continue automatically|Upgrade your plan|Add funds to continue/i;
-
-const OPTION_LINE = /^(\s*)(?:❯\s*)?\d+\.\s+\S/;
-const indentOf = (l: string) => /^\s*/.exec(l)![0].length;
-
-/**
- * 画面底部是额度菜单（标题 + 编号项 + 提示行，有一项是额度菜单才有的）；不要求每一项都认得。
- * 窄窗口（约 74 列以下）选项会折行：缩进比上一个编号项更深的行算它的续行，拼回去再认。
- */
-function limitMenuAtBottom(lines: string[]): boolean {
-  const tail = lines.filter((l) => l.trim()).slice(-20);
-  if (!tail.length || !MENU_HINT_LINE.test(tail[tail.length - 1]!)) return false;
-  const head = tail.findLastIndex((l) => /^\s*What do you want to do\?\s*$/.test(l));
-  if (head < 0) return false;
-  const opts: string[] = [];
-  let indent = -1;
-  for (const l of tail.slice(head + 1, -1)) {
-    if (OPTION_LINE.test(l)) { opts.push(l.trim()); indent = indentOf(l); } else if (opts.length && indentOf(l) > indent) opts[opts.length - 1] += ` ${l.trim()}`;
-    else return false;
-  }
-  return opts.some((l) => LIMIT_OPTION_RE.test(l));
-}
-
 /** 输入框下沿以下（状态栏）：最后一对顶格横线边框、上框下一行是顶格 ❯；没有输入框（被菜单占着）= 空 */
 function footerLines(lines: string[]): string[] {
   for (let i = lines.length - 1; i > 1; i--) {
@@ -135,13 +111,28 @@ function footerLines(lines: string[]): string[] {
  * 判「还在跑」只看顶格的行：真 spinner、真输入框的横线和 ❯ 都在第 0 列，对话 / 工具输出里贴进来的忙画面都有缩进，
  * 不能让它遮住真的菜单（同 T35 lp-state 的做法）。拿掉之后画面上还有 spinner 的，照旧算在跑。
  */
-export function paneShowsWallWait(pane: string): boolean {
+export function wallWaitKind(pane: string): "menu" | "countdown" | null {
   const lines = pane.replace(/\s+$/, "").split("\n");
-  if (!limitMenuAtBottom(lines) && !footerLines(lines).some((l) => WALL_WAIT_LINE.test(l))) return false;
-  return !paneMainTurnBusy(lines.filter((l) => !/^\s/.test(l) && !WALL_WAIT_LINE.test(l)).join("\n"));
+  const kind = limitMenuAtBottom(lines) ? "menu" : footerLines(lines).some((l) => WALL_WAIT_LINE.test(l)) ? "countdown" : null;
+  return kind && !paneMainTurnBusy(lines.filter((l) => !/^\s/.test(l) && !WALL_WAIT_LINE.test(l)).join("\n")) ? kind : null;
 }
+export const paneShowsWallWait = (pane: string): boolean => wallWaitKind(pane) !== null;
 
-/** owner 用了重置卡（/limit-reset 成功）时 CC 回显的「Limits reset · your weekly reset day stays … · … left」，不落 jsonl，只能看画面 */
-export function countLimitsResetEcho(pane: string): number {
-  return (pane.match(/^\s*(?:⎿\s*)?Limits reset\s*·/gm) ?? []).length;
+/** 状态栏写着「Lower priority until 3:20am · … /low-priority to stop」：撞了 session 墙但开了 low-priority，照常在跑（T35 实录样本 lp-on-*） */
+export const paneShowsLowPriority = (pane: string): boolean => footerLines(pane.replace(/\s+$/, "").split("\n")).some((l) => /Lower priority until\b/i.test(l));
+
+/**
+ * owner 用了重置卡（/limit-reset 成功）时 CC 回显的「⎿ Limits reset · your weekly reset day stays … · N resets left」，不落 jsonl，
+ * 只能看画面。只认紧跟在顶格的 `❯ /limit-reset` 输入行下面的那一行：对话 / 工具输出里引用的都有缩进、前面也不是输入行。返回回显内容
+ * （调用方按内容记基线，不按行数：窗口变高、抓屏范围变大露出来的旧回显，行数会变、内容不变）。
+ */
+export function limitsResetEchoes(pane: string): string[] {
+  const lines = pane.split("\n");
+  const out: string[] = [];
+  lines.forEach((l, i) => {
+    if (!/^[❯>]\s*\/limit-reset\s*$/.test(l)) return;
+    const next = lines.slice(i + 1).find((x) => x.trim());
+    if (next && /^\s*⎿\s*Limits reset\s*·/.test(next)) out.push(next.trim());
+  });
+  return out;
 }

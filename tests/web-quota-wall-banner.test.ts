@@ -25,6 +25,11 @@ describe("wallBanner", () => {
     ]);
   });
 
+  test("有重置次数：多一行提示在撞墙窗口里 /limit-reset；没有就不显示（T24 wf notify-web-rules-3）", () => {
+    expect(wallBanner({ active: true, queued: 0, credits: 2, wall }, NOW)!.detail.at(-1)).toEqual({ text: "有 {n} 次重置可用：在撞墙窗口里 /limit-reset", vars: { n: 2 } });
+    expect(wallBanner({ active: true, queued: 0, credits: 0, wall }, NOW)!.detail).toHaveLength(3);
+  });
+
   test("session 墙、重置时间未知、不到一小时", () => {
     expect(wallBanner({ active: true, wall: { ...wall, kind: "session" } }, NOW)!.title).toBe("Claude Code 5 小时额度已用完");
     expect(wallBanner({ active: true, wall: { ...wall, resetsAt: null } }, NOW)!.detail[0]).toEqual({ text: "重置时间未知", vars: {} });

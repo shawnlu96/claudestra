@@ -23,6 +23,7 @@ import {
   type RecordSrc,
 } from "./live-merge";
 import { composeView, droppedBlobUrls, echoKeyOf, isUserEcho, revokeBlobUrls, sendCursor } from "./view-compose";
+import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
@@ -1638,10 +1639,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // multipart 直接打 bridge 的 messages 端点（每次重试重建 FormData——消费过的不能复用）。
       const sendTimeout = () => AbortSignal.timeout(hasFiles ? 60_000 : 20_000);
       let result: SendResult | undefined;
-      // 503 / retryable = agent 活着、只是 channel-server 链路在重连（几秒内自愈）。
-      // 静默退避重试，别弹「已断开」——owner 2026-07-25:「我进 console 看，你那边
-      // 还正在进行着上一轮的对话呢」。发送失败（agent 离线 / 超限等）则解锁 + 附错误提示，
-      // 别让「停止」按钮 + 思考态一直卡死。
+      // 503 / retryable = agent 活着、只是 channel-server 链路在重连（几秒内自愈）：静默退避重试，别弹「已断开」。
+      // 发送失败（agent 离线 / 超限等）则解锁 + 附错误提示，别让「停止」按钮 + 思考态一直卡死。
       for (let attempt = 0; ; attempt++) {
         try {
           result = await sendMessage(agent, wire, files, sendTimeout());
@@ -1652,6 +1651,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         }
       }
       this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
+      if (result?.heldBy) this.produce((s) => markHeldSend(s, optimisticId, result!.heldBy!, this.nextId(), getLang() === "zh")); // 押住了：没有回合
       // slash 直通（/compact、/context 这类 CC 原生命令走 tmux 注入）：没有常规
       // 回合,不会有 done 事件——立即解除「正在回复」,并插一条系统线告知已注入。
       // 普通消息：输出经已打开的持久流回来。

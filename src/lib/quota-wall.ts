@@ -37,6 +37,8 @@ export interface WallRecovery {
   resumed: string[];
   /** 出闸时已经在跑、不续跑的 agent 名 */
   running: string[];
+  /** 续跑消息被押住了（窗口还停在 CC 的自动续跑倒计时 / 菜单上，没发键）：要人去窗口里处理的 agent 名 */
+  held?: string[];
 }
 
 export interface Wall {
@@ -59,9 +61,12 @@ export interface Wall {
 }
 
 interface WallCacheSeen {
-  full: boolean;
-  /** 某个窗口的重置时刻前进过（严格晚于之前见过的最晚那个）：窗口滚过去了 */
-  rolled: boolean;
+  /** 闸里见过这个窗口 ≥100 */
+  fullWeek: boolean;
+  fullSession: boolean;
+  /** 这个窗口的重置时刻前进过（严格晚于之前见过的最晚那个）：窗口滚过去了。按窗口分：周墙里 5h 滚动不算 */
+  rolledWeek: boolean;
+  rolledSession: boolean;
   /** 见过的最晚重置时刻：写入脚本会把空闲会话里上一周期的旧值写回来，只认前进、不认「不相等」 */
   maxWeek: number | null;
   maxSession: number | null;
@@ -178,7 +183,7 @@ export interface UsageSignal {
 
 const notPassed = (at: number | null, now: number) => at === null || at > now;
 
-const isFull = (u: UsageSignal): boolean => [u.sessionPct, u.weekPct].some((p) => p !== null && p >= 100);
+const full = (p: number | null): boolean => p !== null && p >= 100;
 
 /**
  * 闸里每一拍记下缓存的样子。缓存的 scrapedAt 每次渲染都刷新、同一窗口的百分比只升不降，「比进闸新」不代表数据新：
@@ -187,10 +192,11 @@ const isFull = (u: UsageSignal): boolean => [u.sessionPct, u.weekPct].some((p) =
 export function observeCache(s: WallState, u: UsageSignal | null): WallState | null {
   const w = s.wall;
   if (!u || !w || w.exit || u.scrapedAt <= w.enteredAt) return null;
-  const p = w.cache;
+  const p = w.cache && "fullWeek" in w.cache ? w.cache : undefined; // 老形状（不分窗口）：丢掉重新看，只会出闸更晚
   const next: WallCacheSeen = {
-    full: !!p?.full || isFull(u),
-    rolled: !!p && (p.rolled || advanced(p.maxWeek, u.weekResetsAtMs) || advanced(p.maxSession, u.sessionResetsAtMs)),
+    fullWeek: !!p?.fullWeek || full(u.weekPct), fullSession: !!p?.fullSession || full(u.sessionPct),
+    rolledWeek: !!p && (p.rolledWeek || advanced(p.maxWeek, u.weekResetsAtMs)),
+    rolledSession: !!p && (p.rolledSession || advanced(p.maxSession, u.sessionResetsAtMs)),
     maxWeek: later(p?.maxWeek ?? null, u.weekResetsAtMs), maxSession: later(p?.maxSession ?? null, u.sessionResetsAtMs),
   };
   if (p && JSON.stringify(p) === JSON.stringify(next)) return null;
@@ -210,9 +216,11 @@ export function enterFromUsage(s: WallState, u: UsageSignal, now: number, newId:
   if (!week && !session) return no;
   const resetsAt = week ? u.weekResetsAtMs : u.sessionResetsAtMs;
   const prev = s.wall;
-  if (prev?.exit && prev.exit.via !== "resets_at" && !advanced(week ? prev.cache?.maxWeek ?? null : prev.cache?.maxSession ?? null, resetsAt)) return no;
+  // 上一道闸没观察过缓存（api_error 进的）就拿原文的重置时刻比；两样都没有才不从缓存进
+  const seen = prev && (week ? prev.cache?.maxWeek : prev.cache?.maxSession) || (prev?.kind === (week ? "weekly" : "session") ? prev.resetsAt : null);
+  if (prev?.exit && prev.exit.via !== "resets_at" && !advanced(seen ?? null, resetsAt)) return no;
   const w = freshWall(s.wall, newId(), now, "usage_cache", week ? "weekly" : "session", resetsAt, null);
-  w.cache = { full: true, rolled: false, maxWeek: u.weekResetsAtMs, maxSession: u.sessionResetsAtMs };
+  w.cache = { fullWeek: full(u.weekPct), fullSession: full(u.sessionPct), rolledWeek: false, rolledSession: false, maxWeek: u.weekResetsAtMs, maxSession: u.sessionResetsAtMs };
   return { state: { v: 1, wall: w }, entered: true };
 }
 
@@ -244,14 +252,23 @@ export function exitVia(w: Wall, sig: ExitSignals): WallExitVia | null {
   if (sig.limitsReset) return "limits_reset";
   if (sig.now >= wallUntil(w) + WALL_TIMING.exitSlackMs) return "resets_at";
   if (sig.probe && sig.probe.observedAt > w.enteredAt && sig.probe.pct !== null && sig.probe.pct < 100) return "probe";
-  const c = sig.cache;
   const k = w.cache; // observeCache 先记过这一拍
-  if (c && k && c.scrapedAt > w.enteredAt) {
-    const pcts = [c.sessionPct, c.weekPct].filter((p): p is number => p !== null);
-    const below = pcts.length > 0 && pcts.every((p) => p < 100);
-    if (below && (k.full || k.rolled)) return "usage_cache";
-  }
+  const c = sig.cache;
+  const probeFull = !!sig.probe && sig.probe.pct !== null && sig.probe.pct >= 100 && !!c && sig.probe.observedAt >= c.scrapedAt; // 比缓存新的探测说还满：不让缓存盖掉
+  if (c && k && "fullWeek" in k && c.scrapedAt > w.enteredAt && !probeFull && cacheSaysBelow(w.kind, c, k)) return "usage_cache";
   return null;
+}
+
+/**
+ * 缓存说撞墙的那个窗口下来了。按窗口看：周墙只看 7d、session 墙只看 5h，另一个窗口滚动不算；那个窗口读不到（null）= 不知道。
+ * 周墙只认周重置时刻前进：写入脚本允许带 five_hour 的写者把 7d 往下写，「见过满后来降了」对周不可信。unknown 墙看闸里见过满的窗口。
+ */
+function cacheSaysBelow(kind: WallKind, c: UsageSignal, k: WallCacheSeen): boolean {
+  const week = kind === "weekly" || k.fullWeek;
+  const session = kind === "session" || k.fullSession;
+  if (!week && !session) return false;
+  if (week && !(c.weekPct !== null && c.weekPct < 100 && k.rolledWeek)) return false;
+  return !session || (c.sessionPct !== null && c.sessionPct < 100 && (k.fullSession || k.rolledSession));
 }
 
 export function markExit(s: WallState, via: WallExitVia, now: number): WallState {

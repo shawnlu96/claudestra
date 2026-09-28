@@ -36,9 +36,9 @@ import {
   detectArrowNavModal,
   detectPermissionMode,
   btabStepsTo,
-  MASTER_SESSION,
-  type ArrowNavKind,
+  MASTER_SESSION, type ArrowNavKind,
 } from "../lib/tmux-helper.js";
+import { wallWaitRefusal, windowWallWait } from "../lib/wall-screen.js";
 import { resolveInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { newMessageId, newThreadId } from "./router.js";
 import { clearSafetyTimer, trackStatusMessage, statusMessageIdFor, finishStatusMessage, agentActionButtons } from "./discord-adapter.js";
@@ -552,7 +552,6 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const targetWindow = agentName ? windowTarget(agentName) : `master:0`;
         const targetLabel = agentName || "master";
 
-        // 收集 option 值
         const vals: Record<string, string> = {};
         for (const opt of interaction.options.data) {
           if (typeof opt.value === "string") vals[opt.name] = opt.value;
@@ -568,8 +567,9 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         }
 
         const resolved = resolveInvocation(cmd, agentName, vals);
-        if (!resolved.ok) {
-          await interaction.editReply({ content: `⚠️ ${resolved.reason}` }).catch(() => {});
+        const wall = resolved.ok ? await windowWallWait(targetWindow) : null; // 停在额度菜单 / 撞墙倒计时上不注入（lib/wall-screen.ts）
+        if (!resolved.ok || wall) {
+          await interaction.editReply({ content: resolved.ok ? `⏸ ${targetLabel} ${wallWaitRefusal(wall!)}，这条命令没有注入` : `⚠️ ${resolved.reason}` }).catch(() => {});
           return;
         }
 

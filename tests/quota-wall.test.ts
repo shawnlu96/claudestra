@@ -7,8 +7,8 @@ import {
   countsAsWallActivity, emptyWallState, enterFromUsage, exitVia, isHumanSender, observeCache, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue,
   resumeTargets, wallActive, WALL_TIMING, type WallState,
 } from "../src/lib/quota-wall.js";
-import { recoveredNotice, wallNotice, wallResumeText } from "../src/lib/quota-wall-notice.js";
-import { countLimitsResetEcho, matchLimitMenu, parseWallText } from "../src/lib/quota-wall-text.js";
+import { noticeOncePerState, recoveredNotice, wallNotice, wallResumeText } from "../src/lib/quota-wall-notice.js";
+import { limitsResetEchoes, matchLimitMenu, parseWallText } from "../src/lib/quota-wall-text.js";
 
 const T0 = Date.parse("2026-09-28T13:19:40Z");
 const WEEKLY = "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)";
@@ -69,7 +69,7 @@ describe("进闸与并入", () => {
     expect(enterFromUsage(exited, stale, T0 + 610_000, newId).entered).toBe(false);
     // 用卡出闸：周重置日不变，还没发请求的窗口一渲染就写回 100%——同一窗口重置时刻没变就不进（T24 r1 P2-1）
     expect(enterFromUsage(exited, { ...stale, scrapedAt: T0 + 605_000 }, T0 + 610_000, newId).entered).toBe(false);
-    const seen = { ...exited, wall: { ...exited.wall!, cache: { full: true, rolled: false, maxWeek: T0 + 9e7, maxSession: T0 + 9e6 } } };
+    const seen = { ...exited, wall: { ...exited.wall!, cache: { fullWeek: true, fullSession: true, rolledWeek: false, rolledSession: false, maxWeek: T0 + 9e7, maxSession: T0 + 9e6 } } };
     expect(enterFromUsage(seen, { ...stale, scrapedAt: T0 + 605_000 }, T0 + 610_000, newId).entered).toBe(false);
     expect(enterFromUsage(seen, { ...stale, weekResetsAtMs: T0 + 8e7, scrapedAt: T0 + 605_000 }, T0 + 610_000, newId).entered).toBe(false); // 更早：写回的旧值
     expect(enterFromUsage(seen, { ...stale, weekResetsAtMs: T0 + 6e8, scrapedAt: T0 + 605_000 }, T0 + 610_000, newId).entered).toBe(true);
@@ -102,34 +102,47 @@ describe("出闸（任一来源）", () => {
     expect(exitVia(w(), { now: T0 + 400_000, probe: { pct: 100, observedAt: T0 + 300_000 } })).toBeNull();
     expect(exitVia(w(), { now: T0 + 400_000, probe: { pct: 3, observedAt: T0 + 300_000 } })).toBe("probe");
   });
-  test("状态栏缓存：闸里见过满、后来 <100 才出闸；撞墙时停在 99% 的旧值不算（T24 r1 P2-1）", () => {
-    const c = { sessionPct: 0, weekPct: 2, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
-    const obs = (x: typeof c) => observeCache({ v: 1, wall: w() }, x)!.wall!;
-    expect(exitVia(obs(c), { now: T0 + 10, cache: c })).toBeNull(); // 从没见过满
-    const full = obs({ ...c, weekPct: 100 });
-    expect(exitVia(full, { now: T0 + 10, cache: { ...c, weekPct: 100 } })).toBeNull();
+  const obsAll = (wall: NonNullable<WallState["wall"]>, ...cs: Parameters<typeof observeCache>[1][]) =>
+    cs.reduce((x, c) => observeCache({ v: 1, wall: x }, c)?.wall ?? x, wall);
+  test("周墙：只认周重置时刻前进 + 7d <100；见过满后降下来、5h 窗口滚动都不出（T24 wf gate-state-1）", () => {
+    const c = { sessionPct: 30, weekPct: 100, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
+    const full = obsAll(w(), c);
+    const down = { ...c, weekPct: 97, scrapedAt: T0 + 9 }; // 带 five_hour 的陈旧写者把 7d 往下写
+    expect(exitVia(obsAll(full, down), { now: T0 + 10, cache: down })).toBeNull();
+    const fiveRolled = { ...c, sessionPct: 0, sessionResetsAtMs: 5e12 + 18e6, weekPct: 99, scrapedAt: T0 + 9 }; // 闸里 5h 滚了一次
+    expect(exitVia(obsAll(full, fiveRolled), { now: T0 + 10, cache: fiveRolled })).toBeNull();
+    const noWeek = { ...c, weekPct: null, weekResetsAtMs: 7e12, scrapedAt: T0 + 9 }; // 7d 读不到 = 不知道
+    expect(exitVia(obsAll(full, noWeek), { now: T0 + 10, cache: noWeek })).toBeNull();
+    const rolled = { ...c, weekPct: 2, weekResetsAtMs: 7e12, scrapedAt: T0 + 9 };
+    expect(exitVia(obsAll(full, rolled), { now: T0 + 10, cache: rolled })).toBe("usage_cache");
+    expect(exitVia(obsAll(full, rolled), { now: T0 + 10, cache: { ...rolled, scrapedAt: T0 - 5 } })).toBeNull();
+    expect(exitVia(obsAll(full, rolled), { now: T0 + 10, cache: rolled, probe: { pct: 100, observedAt: T0 + 9 } })).toBeNull(); // 同一拍探测说还满
     expect(observeCache({ v: 1, wall: full }, { ...c, scrapedAt: T0 + 9 })).toBeNull(); // 记下的样子没变：不落盘
-    const after = full;
-    expect(exitVia(after, { now: T0 + 10, cache: { ...c, scrapedAt: T0 + 9 } })).toBe("usage_cache");
-    expect(exitVia(after, { now: T0 + 10, cache: { ...c, scrapedAt: T0 - 5 } })).toBeNull();
-    // 重置时刻前进了（窗口滚过去了）：没见过满也出
-    const w99 = obs({ ...c, weekPct: 99 });
-    const rolled = { ...c, weekResetsAtMs: 7e12, scrapedAt: T0 + 9 };
-    expect(exitVia(observeCache({ v: 1, wall: w99 }, rolled)!.wall!, { now: T0 + 10, cache: rolled })).toBe("usage_cache");
+  });
+  test("session 墙：5h 见过满后 <100 或 5h 重置前进就出；周重置前进不算（T24 wf gate-state-1 反方向）", () => {
+    const sw = hit(emptyWallState(), "a", T0, SESSION).state.wall!;
+    const c = { sessionPct: 101, weekPct: 40, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
+    const weekRolled = { ...c, weekPct: 0, weekResetsAtMs: 7e12, scrapedAt: T0 + 9 };
+    expect(exitVia(obsAll(sw, c, weekRolled), { now: T0 + 10, cache: weekRolled })).toBeNull();
+    const down = { ...c, sessionPct: 3, scrapedAt: T0 + 9 };
+    expect(exitVia(obsAll(sw, c, down), { now: T0 + 10, cache: down })).toBe("usage_cache");
+    const at99 = { ...c, sessionPct: 99 }; // 撞墙时停在 99% 的旧值：没见过满、也没滚
+    expect(exitVia(obsAll(sw, at99), { now: T0 + 10, cache: at99 })).toBeNull();
+    const rolled = { ...at99, sessionPct: 0, sessionResetsAtMs: 5e12 + 18e6, scrapedAt: T0 + 9 };
+    expect(exitVia(obsAll(sw, at99, rolled), { now: T0 + 10, cache: rolled })).toBe("usage_cache");
   });
   test("重置时刻只认前进：空闲会话写回上一周期的旧 reset（不相等但更早）不算窗口滚过去（T24 r2 P2-3）", () => {
     const c = { sessionPct: 0, weekPct: 99, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
-    const first = observeCache({ v: 1, wall: w() }, c)!.wall!;
     const old = { ...c, weekResetsAtMs: 6e12 - 7 * 86_400_000, weekPct: 40, scrapedAt: T0 + 9 };
-    const after = observeCache({ v: 1, wall: first }, old)?.wall ?? first;
-    expect(after.cache).toMatchObject({ rolled: false, maxWeek: 6e12 });
+    const after = obsAll(w(), c, old);
+    expect(after.cache).toMatchObject({ rolledWeek: false, maxWeek: 6e12 });
     expect(exitVia(after, { now: T0 + 10, cache: old })).toBeNull();
   });
-  test("带 five_hour 的写者把 7d 从 100 往下写成 99：按「闸里见过满、之后 <100」出闸（PM 定的规则；真撞墙会再从 api_error_turn 进闸）", () => {
-    const c = { sessionPct: 20, weekPct: 100, sessionResetsAtMs: 5e12, weekResetsAtMs: 6e12, scrapedAt: T0 + 5 };
-    const full = observeCache({ v: 1, wall: w() }, c)!.wall!;
-    const down = { ...c, weekPct: 99, scrapedAt: T0 + 9 };
-    expect(exitVia(observeCache({ v: 1, wall: full }, down)?.wall ?? full, { now: T0 + 10, cache: down })).toBe("usage_cache");
+  test("用卡出闸后上一道闸没看过缓存：拿原文的重置时刻比，新周期的 100% 照样能进闸（T24 adv1 P2-10）", () => {
+    const exited = markExit(hit(emptyWallState(), "a", T0).state, "limits_reset", T0 + 600_000);
+    const same = { sessionPct: 10, weekPct: 100, sessionResetsAtMs: T0 + 9e6, weekResetsAtMs: exited.wall!.resetsAt!, scrapedAt: T0 + 605_000 };
+    expect(enterFromUsage(exited, same, T0 + 610_000, newId).entered).toBe(false);
+    expect(enterFromUsage(exited, { ...same, weekResetsAtMs: exited.wall!.resetsAt! + 7 * 86_400_000 }, T0 + 610_000, newId).entered).toBe(true);
   });
   test("CLI clear；已出闸的不再出", () => {
     expect(exitVia(w(), { now: T0, cli: true })).toBe("cli");
@@ -201,10 +214,13 @@ describe("菜单匹配：完整认得才发 Esc", () => {
 });
 
 describe("「Limits reset」回显计数", () => {
-  test("只数行首的回显（CC 回显带 ⎿），别处引用不算", () => {
-    const pane = "> /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 2 resets left\n说明：Limits reset · 是回显";
-    expect(countLimitsResetEcho(pane)).toBe(1);
-    expect(countLimitsResetEcho("")).toBe(0);
+  test("只认紧跟在顶格 /limit-reset 输入行下面的 ⎿ 回显；对话 / 工具输出里引用的不算（T24 wf gate-state-4）", () => {
+    const echo = "  ⎿  Limits reset · your weekly reset day stays Wed · 2 resets left";
+    expect(limitsResetEchoes(`❯ /limit-reset\n${echo}\n说明：Limits reset · 是回显`)).toEqual([echo.trim()]);
+    expect(limitsResetEchoes(`> /limit-reset\n\n${echo}`)).toEqual([echo.trim()]);
+    expect(limitsResetEchoes(`⏺ 样本：\n  ❯ /limit-reset\n${echo}`)).toEqual([]); // 引用的输入行有缩进
+    expect(limitsResetEchoes(`⏺ Bash(cat x)\n${echo}`)).toEqual([]);
+    expect(limitsResetEchoes("")).toEqual([]);
   });
 });
 
@@ -241,5 +257,19 @@ describe("countsAsWallActivity：撞墙后它是不是真的又跑起来了", ()
     expect(countsAsWallActivity("chat_message", { direction: "in" })).toBe(false);
     expect(countsAsWallActivity("assistant_text", { text: "You've hit your weekly limit", rateLimited: true })).toBe(false);
     expect(countsAsWallActivity("assistant_text", { text: "API Error: 529", apiError: true })).toBe(false);
+  });
+});
+
+describe("押在额度菜单上的提示（T24 wf delivery-hold-5 / notify-web-rules-2）", () => {
+  test("同一条消息每分钟补投 24 小时：同一状态只提示一次；菜单变倒计时、出闸后再各一次；新消息另算", () => {
+    const due = noticeOncePerState();
+    let n = 0;
+    for (let i = 0; i < 24 * 60; i++) if (due("c1", "menu:true", "m1")) n++;
+    expect(n).toBe(1);
+    expect(due("c1", "countdown:true", "m1")).toBe(true);
+    expect(due("c1", "countdown:false", "m1")).toBe(true);
+    expect(due("c1", "countdown:false", "m1")).toBe(false);
+    expect(due("c1", "countdown:false", "m2")).toBe(true);
+    expect(due("c2", "countdown:false", "m1")).toBe(true);
   });
 });
