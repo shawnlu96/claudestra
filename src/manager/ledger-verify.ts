@@ -19,7 +19,8 @@ import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { collectPrStage, collectVerifyFacts, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
 import { recordVerify } from "../lib/ledger-write.js";
-import { resolveProjectForRealDir } from "../lib/projects.js";
+import { dirKey } from "../lib/project-dirs.js";
+import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -49,9 +50,12 @@ type Note = { tpl: string; params: Record<string, string> };
 type Ownership = { owns: "yes" } | { owns: "no"; note: Note } | { owns: "unknown"; note?: Note };
 type Owns = Ownership["owns"];
 
+const projectDirs = (c: LedgerCli, task: LedgerTask) => (c.deps.projects?.().find((p) => p.id === task.project)?.dirs ?? []).map(normalizeDir);
+
 /**
  * 按 projects.json 的目录：本仓库主树按最具体的目录命中的项目（伞形根只精确匹配，lib/projects.ts）就是任务所属项目 → yes；
- * 所属项目登记了目录却没命中 → no；没登记目录、git 读不到主树 → unknown。不给项目清单（测试）按拥有算。
+ * 所属项目登记了目录却没命中 → no。以下判断不了（unknown）：没登记目录、git 读不到主树、登记的目录有不存在的或不是绝对路径
+ * （配置漂移，不能据此说「不含本仓库」）、登记的目录就是本仓库却被别的项目占了（两个项目登记同一目录）。不给项目清单（测试）按拥有算。
  */
 async function dirOwnership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise<Owns> {
   const projects = c.deps.projects?.();
@@ -59,21 +63,33 @@ async function dirOwnership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Prom
   const repo = await mainRepoRoot(fd);
   if (!repo) return "unknown";
   if (resolveProjectForRealDir(projects, repo)?.id === task.project) return "yes";
-  return projects.find((p) => p.id === task.project)?.dirs.length ? "no" : "unknown";
+  const dirs = projectDirs(c, task);
+  if (!dirs.length || dirs.some((d) => !d.startsWith("/") || !fd.isDir(d) || dirKey(d) === dirKey(repo))) return "unknown";
+  return "no";
+}
+
+/** 一个项目登记了多个仓库：PR 的仓库是任务所属项目里哪个目录的 origin（本仓库探针核不了那边，只核证据） */
+async function siblingRepoDir(c: LedgerCli, fd: FactsDeps, task: LedgerTask, pr: string): Promise<string | null> {
+  for (const d of projectDirs(c, task)) {
+    if (d.startsWith("/") && fd.isDir(d) && (await originRepo(fd, d)) === pr) return d;
+  }
+  return null;
 }
 
 /**
- * 任务所属项目是不是本仓库：PR 链接的 owner/repo 等于本仓库 origin → 拥有；没有可比的链接就按项目目录判。
- * 链接指向别的仓库时，粘错、打错一个字也长这样，所以只有目录也明确不含本仓库才判不拥有，否则判断不了（不放行）。
- * 只有明确判定不拥有，才降成只核证据文件。
+ * 任务所属项目是不是本仓库：PR 链接的 owner/repo 等于本仓库 origin → 拥有；等于项目里另一个目录的 origin → 该项目的另一个仓库，
+ * 只核证据；没有可比的链接就按项目目录判。链接指向别处时，粘错、打错一个字也长这样，所以只有目录也明确不含本仓库才判不拥有，
+ * 否则判断不了（不放行）。
  */
 async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise<Ownership> {
   const pr = task.pr ? prRepo(task.pr) : null;
   const origin = pr ? await originRepo(fd) : null;
   if (pr && !origin) return { owns: "unknown" };
   if (pr && origin === pr) return { owns: "yes" };
-  const dirs = await dirOwnership(c, fd, task);
   const project = task.project;
+  const sib = pr ? await siblingRepoDir(c, fd, task, pr) : null;
+  if (pr && sib) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params: { project, prRepo: pr, dir: sib } } };
+  const dirs = await dirOwnership(c, fd, task);
   if (!pr || !origin) {
     return dirs === "no" ? { owns: "no", note: { tpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", params: { project } } } : { owns: dirs };
   }

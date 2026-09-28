@@ -16,7 +16,11 @@ bun src/manager.ts ledger verify <task> [--evidence <path>] [--waive <probe,...>
 - **`task.extra.checks`** (`web` / `bridge` / `cron` / `launcher`, non-empty) can only **add** groups on top of the inferred ones. It replaces them only when the file list is unavailable. To drop an inferred probe, waive it.
 - **No file list and no `extra.checks`** → the checklist is *incomplete*: the verdict is `unknown`, and waivers can't change that.
 - **`code` tasks must have a PR.** A task without a PR (ops) only gets `manual-evidence`: `--evidence` must point at a file that isn't empty.
-- **Other projects.** If the task's project doesn't own this repository (none of its `projects.json` dirs is this repo's main worktree), only `manual-evidence` runs, and a note in the output says so.
+- **Ownership (three states).** The probes only know this repository, so verify first decides whether the task belongs to it:
+  - *yes* — the PR link's `owner/repo` equals this repo's `origin`, or (no comparable link) this repo's main worktree resolves (most specific dir, umbrella dirs `/` / `$HOME` / `/tmp` exact-match only, real paths) to the task's project. Full checklist.
+  - *no* — the PR link equals the `origin` of another dir of the task's project (a project with several repos, e.g. claudestra-relay), or the project's dirs all exist and none of them holds this repo. Only `manual-evidence` runs, with a translatable note; a `code` task in this state doesn't need a PR.
+  - *unknown* — anything else: git can't read this repo or its origin, the project has no dirs / isn't in `projects.json`, a registered dir is missing or not absolute, this repo's dir is registered under two projects, or the PR link points elsewhere while the dirs don't rule this repo out ("PR link and project disagree"). The checklist is incomplete (`incompleteReason: "ownership"`) and can't pass.
+- **Project dirs are guarded at write time** (`lib/project-dirs.ts`, `manager/project-guard.ts`): `project-add` / `project-edit --dirs` / `project-merge` accept absolute paths only (`~`, `$HOME`, relative paths are refused with the expanded form), refuse a dir already registered under another project (compared with `realpathSync.native`, so case and symlinks don't split one dir in two), and only run for owner / master / a PM — an executor could otherwise edit its project's dirs to make its task "not ours".
 - **Where it came from.** Every run records `checklistSource` (`files` / `files+extra` / `extra` / `evidence`); the CLI output and the web UI both show it.
 
 ## Probes

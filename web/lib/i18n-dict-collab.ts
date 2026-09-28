@@ -116,6 +116,8 @@ export const COLLAB_DICT: Record<string, string> = {
   "判断不了任务所属项目是不是本仓库，不知道该核什么": "Can’t tell whether the task’s project is this repository, so there’s nothing to check against",
   "PR 属于 {prRepo}，不是本仓库 {origin}，只核证据文件（--evidence）": "The PR belongs to {prRepo}, not this repository {origin}; only the evidence file is checked (--evidence)",
   "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）": "Project {project} doesn’t include this repository; only the evidence file is checked (--evidence)",
+  "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）":
+    "The PR belongs to {prRepo} ({dir}), another repository of project {project}; this repository’s probes can’t check it, so only the evidence file is checked (--evidence)",
   "PR 链接和项目对不上：链接指向 {prRepo}，本仓库是 {origin}，项目 {project} 的目录却没排除本仓库——改对链接或登记好项目目录后重跑":
     "PR link and project disagree: the link points to {prRepo}, this repository is {origin}, and project {project}’s dirs don’t exclude it — fix the link or register the dirs, then rerun",
   "{daemon} 没装（launchd 里没有它）——这台机器不用它就 --waive 带理由": "{daemon} isn’t installed (not in launchd) — if this machine doesn’t use it, --waive with a reason",

@@ -3,11 +3,13 @@
  * project-migrate 与 resolveOrCreateProject / buildProjectContext 仍在 manager.ts：
  * 它们挂在 create/resume 的启动路径上（生命周期区，另一条线在改），等那边落地再一起搬。
  *
- * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
+ * 从 manager.ts 搬出；能改目录归属的 add / edit --dirs / merge 另有目录校验（lib/project-dirs.ts）和角色校验（project-guard.ts）。
  */
-import { readProjects, writeProjects, normalizeDir, PROJECT_ID_RE, type ProjectDef } from "../lib/projects.js";
+import { readProjects, writeProjects, PROJECT_ID_RE, type ProjectDef } from "../lib/projects.js";
+import { dirKey, validateProjectDirs } from "../lib/project-dirs.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { loadRegistry, saveRegistry, normalizeName, output } from "./core.js";
+import { requireProjectWriter } from "./project-guard.js";
 
 async function cmdProjectAdd(
   id: string,
@@ -22,7 +24,9 @@ async function cmdProjectAdd(
     output({ ok: false, error: `project "${id}" 已存在` });
     return;
   }
-  const dirs = (opts.dirs || []).map(normalizeDir).filter(Boolean);
+  const checked = validateProjectDirs(opts.dirs || [], data.projects, id);
+  if (!checked.ok) return output({ ok: false, error: checked.error });
+  const dirs = checked.dirs;
   if (dirs.length === 0) {
     output({ ok: false, error: "至少要一个工作目录: --dirs <a,b>" });
     return;
@@ -73,7 +77,9 @@ async function cmdProjectEdit(
     else delete p.emoji;
   }
   if (opts.dirs !== undefined) {
-    const dirs = opts.dirs.map(normalizeDir).filter(Boolean);
+    const checked = validateProjectDirs(opts.dirs, data.projects, id);
+    if (!checked.ok) return output({ ok: false, error: checked.error });
+    const dirs = checked.dirs;
     if (dirs.length === 0) {
       output({ ok: false, error: "目录列表不能为空(project 至少要有一个工作目录)" });
       return;
@@ -185,6 +191,11 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
     output({ ok: false, error: USAGE[cmd] ?? `unknown ${cmd}` });
     return;
   }
+  // 能改目录归属的三个命令只许 owner / master / PM（project-guard.ts）
+  if (cmd === "project-add" || cmd === "project-merge" || (cmd === "project-edit" && opts.dirs !== undefined)) {
+    const denied = await requireProjectWriter((await readProjects()).projects);
+    if (denied) return output({ ok: false, code: "forbidden", error: denied });
+  }
   if (cmd === "project-add") return cmdProjectAdd(a, opts);
   if (cmd === "project-edit") return cmdProjectEdit(a, opts);
   if (cmd === "project-remove") return cmdProjectRemove(a);
@@ -204,7 +215,7 @@ async function cmdProjectMerge(srcId: string, dstId: string) {
     output({ ok: false, error: !src ? `project "${srcId}" 不存在` : !dst ? `project "${dstId}" 不存在` : "src 和 dst 是同一个" });
     return;
   }
-  for (const d of src.dirs.map(normalizeDir)) if (!dst.dirs.map(normalizeDir).includes(d)) dst.dirs.push(d);
+  for (const d of src.dirs) if (!dst.dirs.some((x) => dirKey(x) === dirKey(d))) dst.dirs.push(d);
   const reg = await loadRegistry();
   const moved = Object.entries(reg.agents).filter(([, a]) => a.projectId === srcId);
   for (const [, a] of moved) a.projectId = dstId;

@@ -28,6 +28,8 @@ export interface FactsDeps {
   relayWebCommit(base: string): Promise<string | null>;
   bridgePort(): number | null;
   fileSize(path: string): number | null;
+  /** 目录在不在（归属判定：项目登记的目录不存在就不能据此说「不含本仓库」） */
+  isDir(path: string): boolean;
   /** 仓库相对路径读源码（算 daemon 的 import 闭包） */
   readRepoFile(rel: string): string | null;
 }
@@ -51,6 +53,13 @@ export function realFactsDeps(repoRoot: string): FactsDeps {
         return statSync(resolve(p)).size;
       } catch {
         return null; // 不存在 / 读不了：探针按「证据文件不存在」判 fail，原因写在 detail 里
+      }
+    },
+    isDir: (p) => {
+      try {
+        return statSync(p).isDirectory();
+      } catch {
+        return false; // 不存在 / 读不了：归属判定按「判断不了」处理
       }
     },
     readRepoFile: (rel) => {
@@ -259,9 +268,9 @@ export async function mainRepoRoot(d: FactsDeps): Promise<string | null> {
   return r.code === 0 && dir ? dirname(dir) : null;
 }
 
-/** origin 的 GitHub owner/repo（小写）；不是 GitHub 远端或读不到为 null */
-export async function originRepo(d: FactsDeps): Promise<string | null> {
-  const r = await git(d, d.repoRoot, "remote", "get-url", "origin");
+/** dir（默认本仓库）的 origin 的 GitHub owner/repo（小写）；不是 GitHub 远端或读不到为 null */
+export async function originRepo(d: FactsDeps, dir: string = d.repoRoot): Promise<string | null> {
+  const r = await git(d, dir, "remote", "get-url", "origin");
   const m = firstLine(r.stdout).match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
   return r.code === 0 && m ? m[1].toLowerCase() : null;
 }

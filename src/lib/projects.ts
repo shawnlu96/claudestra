@@ -159,9 +159,10 @@ export function resolveProjectForRealDir(projects: ProjectDef[], dir: string): P
   return hit ? projects.find((p) => p.id === hit.id) ?? null : null;
 }
 
+/** .native：macOS 默认大小写不敏感，JS 版 realpath 不规范大小写（/Users/x/Repos 与 /Users/x/repos 会比不上） */
 function realOr(p: string): string {
   try {
-    return realpathSync(p);
+    return realpathSync.native(p);
   } catch {
     return p; // 目录已不在：按原样比
   }
