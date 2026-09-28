@@ -1017,7 +1017,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
       // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
-      if (!client) return;
+      if (!client || (await (await import("./ask-entry.js")).answerDiscordInteraction(interaction, channelId, `[button:${id}]`))) return; // 「待你处理」：不抢占
 
       // v2.4.15+ UX：点击后清掉原按钮 + 标注"已点击"，**并在底下保留一个"打断"
       // 按钮**，让用户在 agent 处理过程中能随时中断（之前点完按钮就没打断按钮、
@@ -1127,7 +1127,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       // v2.14+ 多选：Discord 的 max_values>1 会一次交回多个值，全部带上（逗号分隔）。
       // 单选保持原样 `[select:id:value]`，agent 侧的老分支不受影响。
       const client = clients.get(channelId);
-      if (!client) return;
+      if (!client || (await (await import("./ask-entry.js")).answerDiscordInteraction(interaction, channelId, `[select:${id}:${interaction.values.join(",")}]`))) return;
       startTypingWithSafety(channelId);
       const picked = interaction.values.length > 1
         ? interaction.values.join(",")

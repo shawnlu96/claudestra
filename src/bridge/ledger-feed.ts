@@ -35,13 +35,13 @@ function ensureLedgerFeed(): void {
 }
 
 /**
- * /api/v1/events 的逐条过滤：ledger 事件只给 canReadLedger，其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
+ * /api/v1/events 的逐条过滤：ledger / ask 事件只给 canReadLedger，其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
  * 能读台账的连接顺带把轮询起起来。
  */
 export function sseEventAllow(principal: Principal): (evt: BridgeEvent) => boolean {
   const ledger = canReadLedger(principal);
   if (ledger) ensureLedgerFeed();
-  return (evt) => (evt.type === "ledger" ? ledger : agentInScope(principal, evt.agent));
+  return (evt) => (evt.type === "ledger" || evt.type === "ask" ? ledger : agentInScope(principal, evt.agent));
 }
 
 /** 单测：换库路径（和 emit，不给 = 真发到 event-bus），返回手动 tick；传 undefined 还原并停掉轮询 */

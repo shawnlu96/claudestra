@@ -104,7 +104,6 @@ function isPathSafeName(x: string): boolean {
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 
-
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
 /**
@@ -1265,6 +1264,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(400, { ok: false, error: "text is required" });
     }
     waitSec = Math.min(Math.max(waitSec, 0), 300);
+    if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
     // Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
     // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的

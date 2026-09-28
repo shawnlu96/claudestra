@@ -370,7 +370,6 @@ const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 // 「#control 频道的 agent」。将来引入非 Discord 的 master 标识时只改这几个 helper。
 // ============================================================
 
-
 /** 该 ws 是否 master 的连接 */
 function isMasterWs(ws: ServerWebSocket<unknown>): boolean {
   return !!CONTROL_CHANNEL_ID && clients.get(CONTROL_CHANNEL_ID)?.ws === ws;
@@ -529,7 +528,6 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
   }
   return n;
 }
-
 
 // ============================================================
 // v2.0.0+ 路由抽象
@@ -723,7 +721,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agent: agentName,
     chatId: `api:${to.tokenId}`,
     type: "chat_message",
-    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
+    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components, askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
   });
 
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
@@ -847,11 +845,11 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
       console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
     }
   }
-  // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
+  // agent→agent 与 waitForIdle(owner 作答等)目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类 request 上面已抢占不押;压缩中一律押
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
-  const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
+  const busy = compactingNow || ((env.from.kind === "local" || env.meta.waitForIdle) && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
@@ -1117,7 +1115,6 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
   // 其他情况（user 在 agent 自己的频道）原样投递
   return env.content;
 }
-
 
 /** 开始 typing + 30min 安全超时（实现在 discord-adapter，这里注入 owner mention） */
 function startTypingWithSafety(channelId: string) {
@@ -1891,7 +1888,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             files: msg.files,
           },
         };
-        const delivery = await deliver(env);
+        const delivery = await (await import("./bridge/asks.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver); // 带选项发给 owner → 建「待你处理」
         if (delivery.outcome.kind !== "sent") {
           const errMsg = delivery.outcome.kind === "dropped"
             ? `reply dropped: ${delivery.outcome.reason}`
@@ -1907,7 +1904,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
-          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}) } });
+          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components, askId: env.meta.askId } : {}) } });
         }
 
         // v1.9.21+ send_to_agent 推回机制：
@@ -2666,7 +2663,6 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
     console.error("cleanupStaleThinkingMessages 异常:", e);
   }
 }
-
 
 /** 每分钟扫一次：回程簿里送达后 2 小时还没被消化的条目清掉（target 的 Stop / reply / 回发 send_to_agent 都会消化它，
  * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = 值守一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
@@ -3548,6 +3544,9 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
+void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占，忙就押后
+  clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
+}));
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。
