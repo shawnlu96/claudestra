@@ -156,11 +156,23 @@ describe("台账读侧不被 ask 事件盖掉", () => {
 });
 
 describe("迁移", () => {
+  test("版本号说到了、asks 表却不在（某一步静默失败 / 撞过号）→ 打开时报错，不带着残缺的库往下跑", () => {
+    path = tempLedgerPath("ledger-asks-broken-");
+    const raw = new Database(path);
+    const v1 = LEDGER_MIGRATIONS[0];
+    if (typeof v1 !== "string") throw new Error("v1 迁移应是一段 SQL");
+    raw.exec(`${v1}; PRAGMA user_version = ${LEDGER_MIGRATIONS.length}`);
+    raw.close();
+    expect(() => openLedger(path)).toThrow(/缺 asks/);
+  });
+
   test("v1 的库（CLI 旧版建的）打开后补上 asks 表，已有数据不动", () => {
     path = tempLedgerPath("ledger-asks-v1-");
     const raw = new Database(path);
     // 用真的 v1 建库语句造旧库：后面的迁移步（别的分支追加的 ALTER TABLE tasks 之类）要有完整的 v1 表才跑得通
-    raw.exec(`${LEDGER_MIGRATIONS[0]}; PRAGMA user_version = 1`);
+    const v1 = LEDGER_MIGRATIONS[0];
+    if (typeof v1 !== "string") throw new Error("v1 迁移应是一段 SQL");
+    raw.exec(`${v1}; PRAGMA user_version = 1`);
     raw.exec("INSERT INTO items (project, id, title, status, createdAt, updatedAt) VALUES ('p', 'i1', 'x', 'todo', 0, 0)");
     expect(hasAsksTable(raw)).toBe(false);
     raw.close();

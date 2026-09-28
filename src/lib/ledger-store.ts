@@ -69,11 +69,12 @@ CREATE TABLE meta (
 
 /**
  * 「待你处理」（docs 13 §4.2）：唯一由 bridge 写的表（ledger-asks.ts）；阶段机与 items / tasks 仍只有 CLI 写。
- * 建表 / 建索引都带 IF NOT EXISTS：分支上提前打开过的库再按合并后的顺序迁移时，不会撞「already exists」。
+ * 每条语句单独 prepare().run()：bun 的 db.exec 一次跑多条语句时，运行期错误（CHECK、触发器）会被吞掉，版本号照样往前推。
+ * 建表 / 建索引都带 IF NOT EXISTS，可重跑：分支上提前打开过的库再按合并后的顺序迁移时不会撞「already exists」。
  * project = "master" 表示大总管发的（它不属于任何项目）；blocking NULL = 自动建的、不知道卡不卡活。
  */
-const SCHEMA_ASKS = `
-CREATE TABLE IF NOT EXISTS asks (
+const ASKS_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS asks (
   id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, taskId TEXT,
   fromAgent TEXT NOT NULL, fromChannelId TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('reply','auq','permission','codex')),
@@ -85,16 +86,23 @@ CREATE TABLE IF NOT EXISTS asks (
   expiresAt INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('open','answered','expired','cancelled')),
   answer TEXT, outboxMessageId TEXT, extra TEXT NOT NULL DEFAULT '{}',
-  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS asks_state_project ON asks(state, project);
-CREATE INDEX IF NOT EXISTS asks_from_state ON asks(fromAgent, state);
-`;
+  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)`,
+  "CREATE INDEX IF NOT EXISTS asks_state_project ON asks(state, project)",
+  "CREATE INDEX IF NOT EXISTS asks_from_state ON asks(fromAgent, state)",
+];
+
+function migrateAsks(db: Database): void {
+  for (const sql of ASKS_STATEMENTS) db.prepare(sql).run();
+}
+
+/** 一步迁移：一段 SQL，或要逐条执行 / 先查现状的函数（与 T8h 的依赖边迁移同一形状） */
+type Migration = string | ((db: Database) => void);
 
 /**
  * 下标 i 把库从版本 i 升到 i+1。只许在末尾追加，不写死版本号：几条分支各自加一步时，谁后合并谁排在后面，
  * 版本号跟着 length 走就不会撞。单测用 LEDGER_MIGRATIONS[0] 造旧库，后面追加的步骤（ALTER TABLE 之类）才有完整的 v1 表可改。
  */
-export const LEDGER_MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_ASKS];
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks];
 /** PRAGMA user_version 的最新值 = 迁移步数 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 
@@ -163,13 +171,31 @@ export function schemaVersion(db: Database): number {
 
 /** IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做 */
 function migrate(db: Database): void {
-  if (schemaVersion(db) >= LEDGER_MIGRATIONS.length) return;
-  db.transaction(() => {
-    for (let v = schemaVersion(db); v < LEDGER_MIGRATIONS.length; v++) {
-      db.exec(LEDGER_MIGRATIONS[v]);
-      db.exec(`PRAGMA user_version = ${v + 1}`);
-    }
-  }).immediate();
+  if (schemaVersion(db) < LEDGER_MIGRATIONS.length) {
+    db.transaction(() => {
+      for (let v = schemaVersion(db); v < LEDGER_MIGRATIONS.length; v++) {
+        const step = LEDGER_MIGRATIONS[v];
+        if (typeof step === "string") db.exec(step);
+        else step(db);
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      }
+    }).immediate();
+  }
+  checkSchema(db);
+}
+
+/** 迁移后必须在的表与列（缺一个就说明某一步静默失败了）：新加的迁移把自己的关键表 / 列补进来 */
+const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
+  asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+};
+
+/** 版本号说到了、表或列却不在（多语句 exec 吞了错、分支上撞过号）：报错，别让写入层带着残缺的库往下跑 */
+function checkSchema(db: Database): void {
+  for (const [table, cols] of Object.entries(REQUIRED_COLUMNS)) {
+    const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    const missing = cols.filter((c) => !have.has(c));
+    if (missing.length) throw new Error(`台账库缺 ${table}(${missing.join(", ")})：版本 ${schemaVersion(db)} 的迁移没跑全`);
+  }
 }
 
 // ── 行映射 ──
