@@ -20,7 +20,10 @@ describe("AgentCallBook", () => {
   test("add 落盘，新实例（= bridge 重启）原样恢复", () => {
     const p = join(dir, "a.json");
     new AgentCallBook(p).add("c-codex", call(1000), "m1");
-    expect(new AgentCallBook(p).slot("c-codex", "c-me")).toEqual({ ...call(1000), targetChannelId: "c-codex", rev: 1, messageIds: ["m1"] });
+    expect(new AgentCallBook(p).slot("c-codex", "c-me")).toMatchObject({
+      ...call(1000), targetChannelId: "c-codex", messageIds: ["m1"],
+      requests: [{ messageId: "m1", expecting: "按意见改设计稿", originalReplyChannel: "api:owner:self", ts: 1000 }],
+    });
   });
 
   test("两个 caller 问同一个 target 各占一槽，互不覆盖；consume 只消化指定那槽", () => {
@@ -35,23 +38,33 @@ describe("AgentCallBook", () => {
     expect(book.slot("c-codex", "c-pi")?.ts).toBe(3);
   });
 
-  test("同一 caller 连着问：并进同一槽（expecting 合并、记下两条请求 id、rev 加一），不覆盖前一个问题", () => {
+  test("同一 caller 连着问：q1 已送到、q2 还押着 → 答复只算 q1（只带 q1 的 expecting），消化只删 q1，q2 留着等它自己的答复", () => {
     const book = new AgentCallBook(null);
-    expect(book.add("c-codex", { ...call(1), expecting: "改设计稿" }, "m1")).toEqual({ rev: 1, merged: false });
-    expect(book.add("c-codex", { ...call(2), expecting: "再跑测试" }, "m2")).toEqual({ rev: 2, merged: true });
-    const s = book.slot("c-codex", "c-me")!;
-    expect(s.expecting).toBe("改设计稿；接着又问了一件：再跑测试");
-    expect(s.messageIds).toEqual(["m1", "m2"]);
-    expect(book.forTarget("c-codex")).toHaveLength(1);
+    book.add("c-codex", { ...call(1), expecting: "改设计稿" }, "q1");
+    book.add("c-codex", { ...call(2), expecting: "再跑测试" }, "q2");
+    const q2Held = (r: { messageId?: string }) => r.messageId === "q2";
+    const v = book.exact("c-codex", "c-me", q2Held)!;
+    expect(v.expecting).toBe("改设计稿");
+    expect(v.requests!.map((r) => r.messageId)).toEqual(["q1"]);
+    expect(book.consume("c-codex", "c-me", v)).toBe(true);
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.messageId)).toEqual(["q2"]);
+    expect(book.exact("c-codex", "c-me", q2Held)).toBeUndefined(); // q2 还押着：它的答复不会被别的收尾吃掉
+    const v2 = book.exact("c-codex", "c-me", () => false)!; // q2 送到了
+    expect(v2.expecting).toBe("再跑测试");
+    book.consume("c-codex", "c-me", v2);
+    expect(book.slot("c-codex", "c-me")).toBeUndefined();
   });
 
-  test("consume 带 rev：旧快照（rev 1）删不掉后来并进来的新请求（rev 2）", () => {
+  test("两条都送到了：一次答复算两条（expecting 合并），消化后整槽删；dropRequest 只撤指定那条", () => {
     const book = new AgentCallBook(null);
-    book.add("c-codex", call(1), "m1");
-    book.add("c-codex", call(2), "m2");
-    expect(book.consume("c-codex", "c-me", 1)).toBe(false);
-    expect(book.slot("c-codex", "c-me")).toBeDefined();
-    expect(book.consume("c-codex", "c-me", 2)).toBe(true);
+    book.add("c-codex", { ...call(1), expecting: "改设计稿" }, "q1");
+    book.add("c-codex", { ...call(2), expecting: "再跑测试" }, "q2");
+    book.dropRequest("c-codex", "c-me", "q2");
+    expect(book.slot("c-codex", "c-me")!.requests!.map((r) => r.messageId)).toEqual(["q1"]);
+    book.add("c-codex", { ...call(3), expecting: "再跑测试" }, "q3");
+    const v = book.answerable("c-codex", () => false)!;
+    expect(v.expecting).toBe("改设计稿；另一个问题：再跑测试");
+    book.consume("c-codex", "c-me", v);
     expect(book.slot("c-codex", "c-me")).toBeUndefined();
   });
 

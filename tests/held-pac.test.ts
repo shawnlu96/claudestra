@@ -2,7 +2,7 @@
  * v2.23.1+ pendingAgentCalls 失效判定：押后期间不清（2026-09-17 master→claudestra 回程丢失）。
  */
 import { describe, test, expect } from "bun:test";
-import { callStillHeld, pacStillHeld, shouldSweepPac } from "../src/lib/held-pac.ts";
+import { callStillHeld, pacStillHeld, requestStillHeld, shouldSweepPac } from "../src/lib/held-pac.ts";
 
 const STALE = 10 * 60_000;
 const now = 1_000_000_000;
@@ -48,5 +48,14 @@ describe("callStillHeld：槽里记了请求 id 就按 id 判", () => {
   test("老槽没记 id：退回按发送方判", () => {
     expect(callStillHeld({ callerChannelId: "c-me" }, held)).toBe(true);
     expect(callStillHeld({ callerChannelId: "c-other" }, held)).toBe(false);
+  });
+});
+
+describe("requestStillHeld：单条请求按 message_id 判", () => {
+  const held = [{ fromKind: "local", fromChannelId: "c-me", messageId: "q2" }];
+  test("这条押着 / 同一 caller 的另一条押着但这条送到了 / 老数据按发送方", () => {
+    expect(requestStillHeld({ messageId: "q2", callerChannelId: "c-me" }, held)).toBe(true);
+    expect(requestStillHeld({ messageId: "q1", callerChannelId: "c-me" }, held)).toBe(false);
+    expect(requestStillHeld({ callerChannelId: "c-me" }, held)).toBe(true);
   });
 });
