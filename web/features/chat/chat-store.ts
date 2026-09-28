@@ -12,7 +12,7 @@ import type {
   ProjectMeta,
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
-import { pushNotice } from "./notice-merge";
+import { pushNotice } from "./notice-merge"; import { guardSettles } from "./guard-settle";
 import { hydrateHistoryMessages } from "./history-hydrate";
 import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import { canSendClearBoot, classifySendFailure, RetiredAcpStreams, settleClearSend, isClearSend, sendTimeoutMs } from "./clear-send";
@@ -1299,15 +1299,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 回合其实还在继续——立即置 streaming=false 会让「思考中/停止按钮」
         // 凭空消失(2026-07-14 真机)。5s 后仍是当前代际(重连成功会自增代际,
         // 由连流后的 /pending 校准真实 thinking 态)才解锁,防 done 丢失锁死。
-        setTimeout(() => {
-          if (gen !== this.streamGen) return; // 已重连,新流说了算
-          if (this.state.streaming || this.state.awaitingChunk) {
-            this.produce((s) => {
-              s.streaming = false;
-              s.awaitingChunk = false;
-            });
-          }
-        }, 5_000);
+        setTimeout(() => { if (gen === this.streamGen) this.unlockTurn(); }, 5_000); // 已重连的话新流说了算
       }
       // 断流自动重连：bridge 重启 / 网络抖动会掐 SSE。此前只有「回前台」
       // 触发 maybeReconnect，页面一直在前台就永远断着——断流期间 agent 的过程
@@ -1384,11 +1376,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.streamAgent = null;
     if (abort) abort.abort(); // iOS 上 cancel 不关底层连接,必须 abort(连接泄漏修复)
     if (reader) reader.cancel().catch(() => {});
-    if (this.state.streaming || this.state.awaitingChunk)
-      this.produce((s) => {
-        s.streaming = false;
-        s.awaitingChunk = false;
-      });
+    this.unlockTurn();
+  }
+
+  /** 本端仍锁在「思考中 / 停止」而回合其实不会来（断流、切会话、守门拦下）→ 解锁 composer。已解锁时无操作。 */
+  private unlockTurn() {
+    if (this.state.streaming || this.state.awaitingChunk) this.produce((s) => { s.streaming = false; s.awaitingChunk = false; });
+  }
+
+  /** Chat Guard 拦下 / 丢弃了本端刚发的那条（见 guard-settle.ts）：agent 没收到，别再等它回。 */
+  public guardSettled(text?: string) {
+    if (guardSettles(this.state, text)) this.unlockTurn();
   }
 
   /**
