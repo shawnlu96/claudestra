@@ -9,7 +9,7 @@
  * 日志：~/.claude-orchestrator/cron-history.json（最近 100 条执行记录）
  */
 
-import { STATE_DIR, statePath, CRON_HISTORY_PATH } from "./lib/paths.js";
+import { STATE_DIR, statePath, CRON_HISTORY_PATH, refuseInSandbox } from "./lib/paths.js";
 import { readFile, mkdir } from "fs/promises";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { runtimeForSessionPath, translateSessionLine } from "./lib/session-source.js";
@@ -634,10 +634,10 @@ async function main() {
 // 这里才 enableTimestampLogs() —— manager.ts 会从本文件 import loadJobs 等工具，
 // 不该让它的 console 被 wrap（会污染 JSON 输出）。
 if (import.meta.main) {
+  refuseInSandbox("跑 cron 调度器"); // 沙箱：lib/paths 按入口名拦不住 `bun -e 'import(...)'`，这里再拦一道
   enableTimestampLogs();
   initLang();
-  // v2.19.0 认主守卫（见 lib/owner-guard.ts）。放在 import.meta.main 里——
-  // manager.ts 会 import 本文件的工具函数，那条路径不该被守卫拦。
+  // v2.19.0 认主守卫（见 lib/owner-guard.ts）。放在 import.meta.main 里——manager.ts 会 import 本文件的工具函数，那条路径不该被守卫拦。
   await (await import("./lib/owner-guard.js")).assertPrimaryOrExit("cron");
   main().catch((err) => {
     console.error("Cron Scheduler 崩溃:", err);

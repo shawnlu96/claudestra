@@ -99,7 +99,10 @@ import {
   rosterLine,
   type ProjectDef,
 } from "./lib/projects.js";
-import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
+import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
+import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
+import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -215,6 +218,7 @@ async function waitPidGone(pid: number, timeoutMs: number): Promise<boolean> {
  * 「同一个会话换了个地方继续」。判据与安全阀见 lib/takeover.ts。
  */
 async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boolean; name?: string } = {}) {
+  refuseInSandbox("接管会话（沙箱里列出的是生产会话）");
   // 只认「活着且确实是登记里那个进程」的条目：pid 复用的过期登记会让 SIGTERM 打错人
   const [alive, panes, reg] = await Promise.all([
     readLiveCcSessionEntries(),
@@ -229,7 +233,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
     const n = Number(r.stdout.toString().trim());
     return r.exitCode === 0 && Number.isFinite(n) ? n : null;
   });
-  const cands = takeoverCandidates(alive.filter((e) => !ancestors.has(e.pid)), panes, managed);
+  const cands = takeoverCandidates(alive.filter((e) => !ancestors.has(e.pid) && !sandboxRootOf(e.cwd)), panes, managed); // 沙箱的会话不接管
 
   if (!target && !opts.all) {
     output({ ok: true, candidates: cands.map((c) => ({
@@ -485,7 +489,7 @@ async function cmdCreate(
   runtimeFlag?: string,
   piBaseFlag?: string,
 ) {
-  assertValidNewName(name);
+  dir = assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
   // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
   // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
   let adapter: ManagedRuntimeAdapter;
@@ -756,6 +760,7 @@ async function cmdResume(
   if (!adapter.isValidSessionId(sessionId)) {
     throw new Error(`非法 sessionId: "${sessionId}"（不是合法的 ${adapter.label} 会话 id；其它运行时的会话请加 --runtime <id>）`);
   }
+  assertResumable(sessionId, dir); // 沙箱里不许；生产里不接管沙箱的会话（lib/sandbox-sessions.ts）
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
@@ -806,7 +811,6 @@ async function cmdResume(
       return;
     }
   }
-
   // v2.21+ resume 也满足「必属一个 project」:同名旧条目沿用,否则按目录归属
   const regPeek = await loadRegistry();
   let resumeProjectId = regPeek.agents[tmuxName]?.projectId;
@@ -1240,6 +1244,7 @@ async function selfWindowName(): Promise<string | null> {
 
 async function enforceSessionModel(name: string, model?: string): Promise<boolean> {
   if (!model?.trim()) return true;
+  if (isSandbox()) return false; // 沙箱：/model 会改写全局 settings.json，下面的「写回快照」也会，整段跳过（--model 启动参数照样生效）
   const target = windowTarget(name);
   const resolved = resolveModelAlias(model.trim());
   // 自守：绝不给发起者自己的窗口发键（见 selfWindowName 注释）。registry 已写，
@@ -1299,6 +1304,7 @@ async function cmdAdopt(name: string, sessionId: string) {
     output({ ok: false, error: `非法 sessionId: "${sessionId}"（应为 UUID 格式）` });
     return;
   }
+  assertResumable(sessionId); // 沙箱里不许；生产里不收编沙箱的会话
   const tmuxName = normalizeName(name);
   const reg = await loadRegistry();
   const info = reg.agents[tmuxName];
@@ -2654,6 +2660,9 @@ async function cmdTmuxWaitIdle(name: string, timeoutMs: number) {
 // ============================================================
 
 const [cmd, ...args] = process.argv.slice(2);
+// 沙箱：白名单由 manager 自己把（lib/sandbox-env.ts），带着沙箱环境直接跑 manager 也绕不过；scripts/sandbox.ts 是第二道
+const sandboxRefusal = isSandbox() ? sandboxManagerRefusal([cmd ?? "", ...args]) : null;
+if (sandboxRefusal) { output({ ok: false, error: sandboxRefusal }); process.exit(1); }
 
 /**
  * v2.19.0 写操作认主（见 lib/owner-guard.ts）。
@@ -3001,6 +3010,7 @@ switch (cmd) {
       output({ ok: false, error: `sessionId 形状非法: ${newSid}` });
       break;
     }
+    assertSandboxSession(newSid); // 沙箱：新会话必须属于沙箱根（否则 set-session + restart 就续到了生产会话）
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
     const info = reg.agents[tmuxName];
@@ -3226,6 +3236,7 @@ switch (cmd) {
     break;
 
   case "update":
+    refuseInSandbox("升级（git pull + reload launchd）");
     await cmdUpdate();
     break;
 

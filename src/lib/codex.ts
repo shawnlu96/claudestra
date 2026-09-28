@@ -23,6 +23,7 @@ import { statePath } from "./paths.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 import { tmpdir } from "os";
 import { join } from "path";
+import { sandboxDisabled } from "./sandbox.js";
 
 /** 沙箱白名单:read-only 缺省(纯问答/审阅);workspace-write 让它真改 cwd 里的
  *  文件。danger-full-access 故意不暴露——agent 自己已经是无沙箱 shell,没必要
@@ -142,6 +143,9 @@ export interface CodexResult {
  * 兜底取 stdout JSONL 的尾部文本。超时 SIGKILL。
  */
 export async function runCodex(opts: CodexRunOpts): Promise<CodexResult> {
+  // 沙箱：codex 会加载 ~/.codex 的全局 MCP（mem0 之类会写真实数据），与拒绝 Codex agent 同一理由
+  const off = sandboxDisabled("ask_codex");
+  if (off) return { ok: false, message: off, sessionId: null, elapsedMs: 0 };
   const t0 = Date.now();
   const bin = findCodexBin();
   if (!bin) {

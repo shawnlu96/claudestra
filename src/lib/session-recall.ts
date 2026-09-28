@@ -17,6 +17,7 @@ import { writeJsonAtomic } from "./state-file.js";
 import { existsSync } from "fs";
 import { chmod, readFile, rename, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
+import { refuseInSandbox } from "./sandbox.js";
 
 /** SessionStart 的 matcher:compact 后也重新注入——压缩摘要最容易把约束丢掉。 */
 export const RECALL_MATCHER = "startup|resume|clear|compact";
@@ -134,6 +135,7 @@ export async function readClaudeSettings(path: string): Promise<ClaudeSettings> 
  * 权限跟原文件走(Codex 复核 2026-09-06:新建临时文件默认 0644,原文件 0600 会被放宽)。
  */
 export async function writeClaudeSettings(path: string, settings: ClaudeSettings): Promise<void> {
+  refuseInSandbox("写 ~/.claude/settings.json（全局 Claude Code 配置）"); // install-hooks / setup / manager 的模型写回都经这里
   // lib/state-file：tmp + rename、preserveMode（writeFile 的 mode 受 umask 裁剪,内部再 chmod），
   // 并且写到软链的最终目标——dotfiles 管理的 settings.json 常是软链,rename 到软链本身会把它断开
   await writeJsonAtomic(path, settings, { preserveMode: true, trailingNewline: true });

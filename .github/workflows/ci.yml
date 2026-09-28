@@ -53,6 +53,10 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: bun run typecheck
 
+      # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）
+      - name: Install tmux
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+
       - name: Unit tests
         run: bun test
 

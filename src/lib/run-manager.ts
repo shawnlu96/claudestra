@@ -9,6 +9,8 @@
  * （2026-07-27「brew 更新失败:」后面什么都没有）。
  */
 
+import { isSandbox } from "./sandbox.js";
+
 export interface RawRun {
   cmd: string;
   out: string;
@@ -53,7 +55,9 @@ export interface RunManagerOpts {
 }
 
 export async function runManagerProcess(args: string[], opts: RunManagerOpts): Promise<any> {
-  const proc = Bun.spawn([opts.bunPath, "run", opts.managerPath, ...args], {
+  // 沙箱 bridge 拉起的 manager 同样不读任何 .env（cwd 虽是沙箱根，防的是有人在别处起沙箱 bridge）
+  const noEnv = isSandbox(opts.env ?? process.env) ? ["--no-env-file"] : [];
+  const proc = Bun.spawn([opts.bunPath, ...noEnv, "run", opts.managerPath, ...args], {
     stdout: "pipe",
     stderr: "pipe",
     env: opts.env ?? process.env,

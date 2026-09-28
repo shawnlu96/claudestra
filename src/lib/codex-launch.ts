@@ -24,6 +24,7 @@
  */
 import { existsSync } from "node:fs";
 import { shellEscape } from "./claude-launch.js";
+import { assertSandboxRuntime } from "./sandbox.js";
 import { resolveLoginBinary, type LoginBinary, type Runner } from "./login-binary.js";
 import { CONTEXT_PREAMBLE_MARKER, encodePreambleEnv } from "./codex-thread.js";
 
@@ -182,6 +183,7 @@ export const CODEX_MCP_ENV_VARS = [
 ] as const;
 
 export function buildCodexCommand(spec: CodexLaunchSpec, channelRules: string): string {
+  assertSandboxRuntime("codex"); // 沙箱里拒绝：上面的 MCP 环境白名单不带沙箱变量，还会加载用户全局 MCP
   const mcpName = spec.mcpName || "claudestra";
   if (!/^[A-Za-z0-9_-]+$/.test(mcpName)) throw new Error(`非法 MCP 名: ${mcpName}`);
   if (!spec.sessionId) throw new Error("Codex 启动需要 sessionId（new 先跑 exec 引导）");

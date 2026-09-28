@@ -22,10 +22,11 @@ beforeEach(() => {
   cachePath = join(home, ".claude-orchestrator", "usage-cache.json");
 });
 
-async function run(payload: unknown): Promise<void> {
+async function run(payload: unknown, stateDir = ""): Promise<void> {
   const p = Bun.spawn(["bash", SCRIPT], {
     stdin: new TextEncoder().encode(typeof payload === "string" ? payload : JSON.stringify(payload)),
-    env: { ...process.env, HOME: home },
+    // 默认清掉 CLAUDESTRA_STATE_DIR（测试 preload 给本进程设了临时目录）：这里测的是 HOME 下的默认落点
+    env: { ...process.env, HOME: home, CLAUDESTRA_STATE_DIR: stateDir },
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -44,6 +45,15 @@ const input = (five: number | null, week: number | null, fiveReset: number | nul
 });
 
 const cache = () => JSON.parse(readFileSync(cachePath, "utf8"));
+
+describe("usage-cache-write.sh 落点", () => {
+  test("CLAUDESTRA_STATE_DIR 优先（沙箱 agent 的状态栏写沙箱，不写生产 home）", async () => {
+    const state = mkdtempSync(join(tmpdir(), "ucw-state-"));
+    await run(input(8, 94, 1787846400, 1788296400), state);
+    expect(JSON.parse(readFileSync(join(state, "usage-cache.json"), "utf8")).sessionPct).toBe(8);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+});
 
 describe("usage-cache-write.sh 多写者合并", () => {
   test("首写全量落盘", async () => {
