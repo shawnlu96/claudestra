@@ -27,6 +27,30 @@ export interface QuotaWindowDto {
 
 export interface ClaudeUsageDto {
   windows: QuotaWindowDto[];
+  /** 重置卡（响应里的 cedar_ember 块）；旧账号 / 接口没给 = null，不算错误 */
+  resets: ClaudeResetsDto | null;
+}
+
+/** Claude 的一张重置卡（grant）：一张可以含多次重置，到 ends_at 作废 */
+interface ClaudeResetGrantDto {
+  /** HMAC(本机密钥, 账户键 + grant.id)；原始 id 不出解析函数 */
+  key: string;
+  resetsLeft: number;
+  resetsTotal: number | null;
+  /** 没有截止日 = null（CC 的 schema 允许）：照样持有，只是不参与快过期提醒 */
+  endsAtMs: number | null;
+  paused: boolean;
+  usableNow: boolean;
+  /** 要撞到限额才能用（缺省 true，照 CC 界面） */
+  requiresLimit: boolean;
+}
+
+export interface ClaudeResetsDto {
+  eligible: boolean;
+  /** eligible=false 的原因（如 "surface"：请求没带 Claude Code 的客户端身份）；界面照写，不当成 0 张 */
+  ineligibleReason: string | null;
+  atLimit: boolean;
+  grants: ClaudeResetGrantDto[];
 }
 
 export interface CodexUsageDto {
@@ -87,7 +111,7 @@ const kindOk = (v: unknown): v is string => typeof v === "string" && KIND_RE.tes
 const SEVERITIES = new Set(["normal", "warning", "critical"]);
 const severityOf = (v: unknown): QuotaWindowDto["severity"] => (typeof v === "string" && SEVERITIES.has(v) ? (v as QuotaWindowDto["severity"]) : null);
 
-// ── Claude：GET api.anthropic.com/api/oauth/usage ───────────────────────────
+// ── Claude：GET api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1 ──────────
 
 function claudeLimit(l: AnyRecord): QuotaWindowDto | null {
   const usedPct = pctOf(l.percent);
@@ -115,13 +139,43 @@ function claudeLegacy(j: AnyRecord): QuotaWindowDto[] {
   return out;
 }
 
-export function parseClaudeUsage(json: unknown): ClaudeUsageDto | null {
+function claudeGrant(g: AnyRecord, hashId: (rawId: string) => string): ClaudeResetGrantDto | null {
+  const endsAtMs = g.ends_at == null ? null : timeOf(g.ends_at);
+  const left = countOf(g.resets_left);
+  // 给了 ends_at 却认不出（坏串 / 超出可信区间）整条丢；没给才算「无截止日」
+  if (typeof g.id !== "string" || !g.id || g.id.length > 256 || (g.ends_at != null && endsAtMs === null) || left === null) return null;
+  return {
+    key: hashId(g.id),
+    resetsLeft: left,
+    resetsTotal: countOf(g.resets_total),
+    endsAtMs,
+    paused: g.paused === true,
+    usableNow: g.usable_now === true,
+    requiresLimit: g.use_requires_limit !== false,
+  };
+}
+
+/** cedar_ember 块（?cedar_ember=1 才返回）：只留资格、是否撞限与每张卡的次数 / 截止；label、clears、next_grant_id 等一律不收 */
+function claudeResets(v: unknown, hashId: (rawId: string) => string): ClaudeResetsDto | null {
+  const c = obj(v);
+  if (!c) return null;
+  const grants = Array.isArray(c.grants) ? c.grants.slice(0, 50).map(obj).filter((g): g is AnyRecord => g !== null) : [];
+  const why = c.ineligible_reason;
+  return {
+    eligible: c.eligible === true,
+    ineligibleReason: typeof why === "string" && KIND_RE.test(why) ? why : null,
+    atLimit: c.at_limit === true,
+    grants: grants.map((g) => claudeGrant(g, hashId)).filter((g): g is ClaudeResetGrantDto => g !== null),
+  };
+}
+
+export function parseClaudeUsage(json: unknown, hashId: (rawId: string) => string): ClaudeUsageDto | null {
   const j = obj(json);
   if (!j) return null;
   const limits = Array.isArray(j.limits) ? j.limits.slice(0, 32).map(obj).filter((l): l is AnyRecord => l !== null) : [];
   const fromLimits = limits.map(claudeLimit).filter((w): w is QuotaWindowDto => w !== null);
   const windows = fromLimits.length ? fromLimits : claudeLegacy(j);
-  return windows.length ? { windows } : null;
+  return windows.length ? { windows, resets: claudeResets(j.cedar_ember, hashId) } : null;
 }
 
 // ── Codex：GET chatgpt.com/backend-api/wham/usage ──────────────────────────

@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readClaudeCredential, readCodexCredential, type QuotaCredential } from "../src/lib/quota-credentials.js";
-import { getQuota, parseRetryAfter, QUOTA_BODY_CAP, QUOTA_ENDPOINTS, readCappedBody, type QuotaEndpoint } from "../src/lib/quota-providers.js";
+import { claudeClientHeaders, getQuota, parseRetryAfter, QUOTA_BODY_CAP, QUOTA_ENDPOINTS, readCappedBody, type QuotaEndpoint } from "../src/lib/quota-providers.js";
 import { T0, claudeUsageBody, expectNoSentinel, fakeCredDeps, fakeFetch, jsonResponse, okRoutes } from "./quota-fixtures.js";
 
 async function creds(): Promise<{ claude: QuotaCredential; codex: QuotaCredential }> {
@@ -27,12 +27,31 @@ describe("请求形状", () => {
     const plan: [QuotaEndpoint, QuotaCredential][] = [["claude_usage", c.claude], ["codex_usage", c.codex], ["codex_reset_credits", c.codex]];
     for (const [e, cred] of plan) expect((await getQuota(e, cred, deps(f))).ok).toBe(true);
     expect(f.calls.map((x) => [x.url, x.method, x.redirect])).toEqual([
-      ["https://api.anthropic.com/api/oauth/usage", "GET", "manual"],
+      ["https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1", "GET", "manual"],
       ["https://chatgpt.com/backend-api/wham/usage", "GET", "manual"],
       ["https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", "GET", "manual"],
     ]);
     expect(f.calls[0].headers["anthropic-beta"]).toBe("oauth-2025-04-20");
     expect(f.calls[1].headers["ChatGPT-Account-Id"]).toBeDefined();
+  });
+
+  test("Claude 客户端身份头：带本机版本的 User-Agent；探不到版本不带；只给 Claude、只放行两个头名、盖不掉鉴权头", async () => {
+    const c = await creds();
+    const f = fakeFetch(okRoutes);
+    await getQuota("claude_usage", c.claude, { ...deps(f), clientHeaders: claudeClientHeaders("2.1.283") });
+    expect(f.calls[0].headers["User-Agent"]).toBe("claude-cli/2.1.283 (external, cli)");
+    expect(f.calls[0].headers["anthropic-beta"]).toBe("oauth-2025-04-20");
+    expect(claudeClientHeaders(null)).toEqual({});
+    expect(claudeClientHeaders("latest; rm -rf")).toEqual({});
+    await getQuota("claude_usage", c.claude, { ...deps(f), clientHeaders: claudeClientHeaders(null) });
+    expect(f.calls[1].headers["User-Agent"]).toBeUndefined();
+    const sneaky = { "User-Agent": "x", Authorization: "Bearer EVIL", Cookie: "a=b", "anthropic-beta": "bad\nvalue" };
+    await getQuota("claude_usage", c.claude, { ...deps(f), clientHeaders: sneaky });
+    expect(f.calls[2].headers.Authorization).not.toBe("Bearer EVIL");
+    expect(f.calls[2].headers.Cookie).toBeUndefined();
+    expect(f.calls[2].headers["User-Agent"]).toBe("x");
+    await getQuota("codex_usage", c.codex, { ...deps(f), clientHeaders: claudeClientHeaders("2.1.283") });
+    expect(f.calls[3].headers["User-Agent"]).toBeUndefined();
   });
 
   test("凭据与端点不同家 → 直接抛（编程错误），不发请求", async () => {
@@ -46,7 +65,7 @@ describe("请求形状", () => {
     expect(() => {
       (QUOTA_ENDPOINTS.claude_usage as { url: string }).url = "https://evil.example/";
     }).toThrow(TypeError);
-    expect(QUOTA_ENDPOINTS.claude_usage.url).toBe("https://api.anthropic.com/api/oauth/usage");
+    expect(QUOTA_ENDPOINTS.claude_usage.url).toBe("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1");
   });
 
   test("源码里没有兑换 / 购买接口，也没有非 GET 的 method", () => {

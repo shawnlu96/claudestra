@@ -193,6 +193,9 @@ export function canReadLedger(p: Principal): boolean {
   return canManage(p) && p.agents.includes("*") && !p.peer;
 }
 
+/** 订阅额度（账户用量、重置次数、读凭据的开关）只给本机 owner，与台账同一道门（设计稿 T2b §5） */
+export const canSeeQuota = canReadLedger;
+
 /**
  * 在网页里发配对码 / 批准配对的门：要 manage，而且得是设备凭据——老的全 scope Bearer token 过渡期还能过 canManage，
  * 但不该拿它签出带终端和管理的新设备（codex 复核 #67）。本机终端走回环控制路由，不经这里。

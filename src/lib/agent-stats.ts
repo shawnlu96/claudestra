@@ -165,6 +165,8 @@ export function scanStatsWindow(
   /** v2.23+ 会话 runtime；由 readFileStats 按路径判定**一次**传入，别在每行里重算 */
   runtime?: string,
   seen: Set<string> = new Set(),
+  /** 额外的分组累加器（全机扫描按 Pi 接入商拆）：返回 null = 这条只进总账 */
+  bucket?: (rec: any) => { today: UsageWindow; week: UsageWindow } | null,
 ): { stats: FileStats; oldestTs: number } {
   const today = emptyUsageWindow();
   const week = emptyUsageWindow();
@@ -228,7 +230,10 @@ export function scanStatsWindow(
     // 运行时自己报了费用（Pi）就记那一笔，不再按牌价估一遍（两种钱不重叠）
     const reported = typeof u.runtime_reported_cost_usd === "number" ? u.runtime_reported_cost_usd : null;
     const cost = reported === null ? costOfUsage(String(rec?.message?.model || ""), u) : 0;
-    for (const w of windowsFor(ts, dayTs, weekTs, today, week)) {
+    const extra = bucket?.(rec);
+    const targets = windowsFor(ts, dayTs, weekTs, today, week);
+    if (extra) targets.push(...windowsFor(ts, dayTs, weekTs, extra.today, extra.week));
+    for (const w of targets) {
       w.tokens += tok;
       w.requests += 1;
       w.costUsd += cost;

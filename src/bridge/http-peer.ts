@@ -48,7 +48,7 @@ export function initHttpPeer(d: HttpPeerDeps) {
   startPeerPresence(); // 在线 peer 列表（peer-presence.ts）
   if (d.fetchImpl) return; // 单测注入 fake fetch：不连中继、不起推送（两者都要真实的磁盘状态）
   void startRelayLink({ handleApi: d.handleApi }); // 中继链路（relay-link.ts）
-  initPush(); // 推送派发器 + /api/v1/push 路由（push/init.ts）；出口按中继在不在线选网关 / 直发
+  initPush(d.deliver); // 推送派发器 + /api/v1/push 路由 + 订阅额度提醒（push/init.ts）；出口按中继在不在线选网关 / 直发
 }
 
 /** 出站 wait 秒数。长挂 POST 跨 tailnet 常被中间设备掐，拿到 202 之前就断 → 连 threadId 都没有、回复必丢；

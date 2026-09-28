@@ -143,3 +143,67 @@ describe("createMachineUsageCache", () => {
     expect(Date.now() - t0).toBeLessThan(1000);
   });
 });
+
+describe("Pi 按接入商拆（piProviders）", () => {
+  const piLine = (id: string, ts: number, provider: unknown, input: number, cost: number) => ({
+    type: "message", id, parentId: null, timestamp: new Date(ts).toISOString(),
+    message: { role: "assistant", provider, model: "m-1", usage: { input, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: cost } }, content: [] },
+  });
+
+  test("按会话行的 provider 分桶；名字不合规归 unknown；总账与分桶一致", async () => {
+    const root = mkdtempSync(join(tmpdir(), "machine-usage-pi-"));
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = join(root, "pi");
+    try {
+      const dir = join(root, "pi", "sessions", "--Users-x-repo--");
+      writeJsonl(dir, "2026-09-28T00-00-00-000Z_s1.jsonl", [
+        piLine("p1", NOW - H, "acme-go", 100, 0.5),
+        piLine("p2", NOW - 30 * H, "acme-go", 1000, 1),
+        piLine("p3", NOW - H, "other.cloud", 7, 0.01),
+        piLine("p4", NOW - H, "bad name/../x", 3, 0),
+        piLine("p5", NOW - H, undefined, 2, 0),
+      ]);
+      // fork 抄了 p1：不重复计
+      writeJsonl(dir, "2026-09-28T01-00-00-000Z_s2.jsonl", [piLine("p1", NOW - H, "acme-go", 100, 0.5)]);
+      const m = await scanMachineUsage(W, [join(root, "pi", "sessions")]);
+      expect(Object.keys(m.piProviders).sort()).toEqual(["acme-go", "other.cloud", "unknown"]);
+      expect(m.piProviders["acme-go"].week.tokens).toBe(1100);
+      expect(m.piProviders["acme-go"].today.tokens).toBe(100);
+      expect(m.piProviders["acme-go"].week.reportedCostUsd).toBeCloseTo(1.5);
+      expect(m.piProviders.unknown.week.tokens).toBe(5);
+      const sum = Object.values(m.piProviders).reduce((a, p) => a + p.week.tokens, 0);
+      expect(sum).toBe(m.byRuntime.pi.week.tokens);
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+    }
+  });
+
+  test("接入商名是 __proto__ / constructor / toString：照常分桶，全机统计不抛", async () => {
+    const root = mkdtempSync(join(tmpdir(), "machine-usage-pi-proto-"));
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = join(root, "pi");
+    try {
+      const dir = join(root, "pi", "sessions", "--Users-x-repo--");
+      writeJsonl(dir, "2026-09-28T00-00-00-000Z_s1.jsonl", [
+        piLine("q1", NOW - H, "__proto__", 10, 0),
+        piLine("q2", NOW - H, "constructor", 20, 0),
+        piLine("q3", NOW - H, "toString", 30, 0),
+      ]);
+      const m = await scanMachineUsage(W, [join(root, "pi", "sessions")]);
+      expect(Object.keys(m.piProviders).sort()).toEqual(["__proto__", "constructor", "toString"]);
+      expect(new Map(Object.entries(m.piProviders)).get("constructor")?.week.tokens).toBe(20);
+      expect(m.week.tokens).toBe(60);
+      const back = JSON.parse(JSON.stringify(m)) as typeof m; // 子进程 → bridge 走 JSON
+      expect(Object.keys(back.piProviders).sort()).toEqual(["__proto__", "constructor", "toString"]);
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+    }
+  });
+
+  test("Claude Code 会话不进 piProviders", async () => {
+    const m = await scanMachineUsage(W, [fixture()]);
+    expect(m.piProviders).toEqual({});
+  });
+});
