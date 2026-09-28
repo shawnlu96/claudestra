@@ -16,6 +16,7 @@ import { LEGACY_WEB_DAEMON, legacyWebPlistPath } from "./web-static.js";
 import { migrateWebState, sessionIdHash } from "./web-state-migrate.js";
 import { publishWebOut } from "./web-build.js";
 import { migrateStaticDirToReleases } from "./web-releases.js";
+import { refuseInSandbox } from "./sandbox.js";
 
 /** 旧 web 的会话 cookie 名（web/lib/services/auth.service.ts，已删） */
 export const LEGACY_SESSION_COOKIE = "cstra_session";
@@ -41,6 +42,7 @@ export function redeemLegacySession(db: Database, sessionId: string, now: Date =
 
 /** 卸旧 daemon + 把 plist 挪进 backups/（retire-web 与自动迁移共用）；bootout 非 0 多半是「没 load」，目标状态一致照常挪 */
 export function retireLegacyWebDaemon(backupDir: string = join(STATE_DIR, "backups"), now: Date = new Date()): { bootedOut: boolean; plist: string | null } {
+  refuseInSandbox("卸旧 web daemon（launchctl bootout）");
   const uid = process.getuid?.() ?? 501;
   const bootedOut = spawnSync("launchctl", ["bootout", `gui/${uid}/${LEGACY_WEB_DAEMON}`], { encoding: "utf8" }).status === 0;
   if (!existsSync(legacyWebPlistPath())) return { bootedOut, plist: null };

@@ -29,7 +29,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { TMUX_SOCK, MASTER_SESSION } from "../lib/tmux-helper.js";
+import { TMUX_SOCK, MASTER_SESSION, sandboxTmuxArgv } from "../lib/tmux-helper.js";
 import type { Principal } from "../lib/principals.js";
 import { terminalAllowedFor, terminalIoDenied, terminalOwnerKey } from "./terminal-auth.js";
 import { authenticateApi } from "./api-auth.js";
@@ -38,7 +38,7 @@ import { revocable } from "./credential-revocation.js";
 // ---------- tmux 小工具（独立于 tmux-helper 的 tmuxRaw：这里需要 exitCode） ----------
 
 function tmuxArgs(args: string[]): string[] {
-  return ["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args];
+  return sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]); // 沙箱：socket 是软链 / 指向生产就抛错
 }
 
 async function tmuxRun(args: string[]): Promise<{ code: number; out: string; err: string }> {

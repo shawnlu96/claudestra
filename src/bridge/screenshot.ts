@@ -3,6 +3,7 @@
  */
 
 import { TMUX_SOCK, BUN_PATH, ENV_WITH_BUN, TMP_DIR } from "./config.js";
+import { sandboxTmuxArgv } from "../lib/tmux-helper.js";
 
 export async function tmuxScreenshot(
   windowName: string
@@ -17,11 +18,11 @@ export async function tmuxScreenshot(
 
     // capture with ANSI colors → pipe to ansi2html
     const capture = Bun.spawn(
-      [
+      sandboxTmuxArgv([
         "tmux", "-S", TMUX_SOCK,
         "capture-pane", "-t", target,
         "-p", "-e", "-S", "-50",
-      ],
+      ]),
       { stdout: "pipe", stderr: "pipe" }
     );
     const ansi2html = Bun.spawn(

@@ -11,6 +11,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
 import { TMUX_SOCK as SOCK, MASTER_SESSION, AGENT_PREFIX, tmuxRaw } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
+import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
 
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 // ============================================================
@@ -78,6 +79,9 @@ export interface AgentInfo {
    * 技能、禁工具、指定 MCP 配置。缺失 = 继承全局（引入档案之前的行为）。改完要 restart。
    */
   piEnv?: PiEnvProfile;
+  /** 派发者的 registry 键（`agent-xxx` / `master`）与任务短名——manager/team.ts 写入，侧栏据此挂树 */
+  parent?: string;
+  task?: string;
 }
 
 export interface Registry {
@@ -154,6 +158,21 @@ export function normalizeName(raw: string): string {
  * 校验：只用于新建/resume。拒绝空白和 shell 元字符，防止命令注入。
  * 允许 CJK 等 Unicode 字符（Discord 频道名支持，tmux 也支持）。
  */
+/**
+ * create 的入口校验：名字合法；沙箱里 agent 只许建在沙箱根目录下的已有目录、只许 Claude Code runtime；
+ * 生产里目录不许在沙箱根下（lib/sandbox.ts）。返回调用方后面该用的目录——沙箱里是规范化后的那个
+ * （检查的与 tmux -c 实际收到的必须是同一个串），生产里原样返回。
+ */
+export function assertCreatable(name: string, dir: string, runtime: string | undefined): string {
+  assertValidNewName(name);
+  const d = normalizeSandboxAgentDir(dir);
+  const dirProblem = sandboxAgentDirProblem(d);
+  if (dirProblem) throw new Error(dirProblem);
+  refuseSandboxDirInProduction(d, "建 agent");
+  assertSandboxRuntime(runtime || "claude-code");
+  return d;
+}
+
 export function assertValidNewName(raw: string): void {
   const cleaned = raw.replace(AGENT_PREFIX, "");
   if (cleaned.length === 0 || cleaned.length > 48) {
