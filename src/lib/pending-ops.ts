@@ -112,7 +112,7 @@ export function describeResidue(r: Residue): string {
     case "stale-kill": return `${r.agent}：kill 做到一半`;
     case "stale-rename": return `${r.agent}：rename（从 ${r.from}）做到一半，频道 / 台账可能还是旧名`;
     case "busy": return `${r.agent}：${r.op} 正在进行（pid ${r.pid}）`;
-    case "orphan-window": return r.registered ? `${r.agent}：registry 是 stopped，窗口却还在` : `${r.agent}：窗口没登记在 registry`;
+    case "orphan-window": return r.registered ? `${r.agent}：registry 是 stopped，窗口却还在（只剩 shell 才会被 repair 关掉）` : `${r.agent}：窗口没登记在 registry`;
     case "orphan-channel": return `${r.agent}：已 stopped，频道 ${r.channelId} 还在`;
   }
 }

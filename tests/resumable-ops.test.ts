@@ -211,6 +211,14 @@ describe("对抗：再跑 / repair 不许误删", () => {
     expect(r.skipped).toEqual([expect.objectContaining({ agent: "agent-hand", kind: "orphan-window", auto: false })]);
   });
 
+  test("stopped 条目的窗口里还有进程（registry 漏写 active）→ 不关，只有裸 shell 才关", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": OLD, "agent-y": { ...OLD, channelId: "chY" } } }, windows: ["agent-x", "agent-y"], busyWindows: ["agent-x"] });
+    const r = await runRepair(true, await scanOf(w), w.deps);
+    expect(w.st.windows).toEqual(["agent-x"]);
+    expect(r.ok).toBe(false);
+    expect((r.applied as Array<{ agent: string; detail: string }>).find((x) => x.agent === "agent-x")!.detail).toContain("restart");
+  });
+
   test("计划列出后条目变了（被 resume 成 active）→ apply 跳过", async () => {
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": OLD } }, channels: new Set(["chOld"]) });
     const scan = await scanOf(w);

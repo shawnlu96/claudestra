@@ -40,11 +40,13 @@ async function fixOne(r: Residue, deps: OpsDeps): Promise<{ ok: boolean; detail:
     }
     case "stale-rename": {
       const n = await runRename(r.from, r.agent, deps);
-      return { ok: n.ok === true && !n.incomplete, detail: n.ok ? "频道 / 台账已补改" : String(n.error) };
+      return { ok: n.ok === true && !n.incomplete, detail: n.ok ? "窗口 / 台账 / 频道已补改" : String(n.error) };
     }
     case "orphan-window":
+      // registry 说 stopped 而窗口里还有进程 = 多半是 registry 漏写了 active、agent 正在用：只报，别关
+      if (!(await deps.windowIsBareShell(r.agent))) return { ok: false, detail: `窗口里还有进程在跑，不关——在用就 restart ${r.agent} 把 registry 改回 active，确认不用再手动关` };
       await deps.killWindow(r.agent);
-      return { ok: true, detail: "窗口已关" };
+      return { ok: true, detail: "窗口只剩 shell，已关" };
     case "orphan-channel": {
       const d = await deps.deleteChannel(r.channelId);
       if (typeof d === "object") return { ok: false, detail: `删频道失败：${d.error}` };

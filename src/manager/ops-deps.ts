@@ -2,7 +2,7 @@
  * create / kill / rename / repair 共用的副作用接口。步骤函数只经它碰 tmux / bridge / registry，
  * 单测换成内存假件后能在任一步之后「砍掉」再重跑（tests/resumable-ops.test.ts）。
  */
-import { listAgentWindows, listWindowIdsByName, tmuxRaw } from "../lib/tmux-helper.js";
+import { listAgentWindows, listWindowIdsByName, tmuxRaw, windowHasChildProcess, windowTarget } from "../lib/tmux-helper.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { archiveSession } from "../lib/session-archive.js";
 import { isLocalChannel, isUnknownChannelError, pidAlive } from "../lib/pending-ops.js";
@@ -16,6 +16,8 @@ export interface OpsDeps {
   listWindows(): Promise<string[]>;
   killWindow(name: string): Promise<void>;
   renameWindow(from: string, to: string): Promise<void>;
+  /** 窗口只剩裸 shell（确无子进程）；探测失败按「有进程」算，宁可不关 */
+  windowIsBareShell(name: string): Promise<boolean>;
   deleteChannel(channelId: string): Promise<ChannelResult>;
   renameChannel(channelId: string, name: string): Promise<ChannelResult>;
   /** bridge 上还存在的频道 id；null = bridge 不在 */
@@ -80,6 +82,7 @@ export const realOpsDeps: OpsDeps = {
     const [id] = await listWindowIdsByName(from);
     if (id) await tmuxRaw(["rename-window", "-t", id, to]);
   },
+  windowIsBareShell: async (name) => (await windowHasChildProcess(windowTarget(name)).catch(() => null)) === false,
   deleteChannel: (channelId) => channelOp({ type: "delete_channel", channelId }),
   renameChannel: (channelId, name) => channelOp({ type: "rename_channel", channelId, name }),
   async listChannels() {

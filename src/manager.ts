@@ -660,6 +660,7 @@ async function cmdCreate(
     ready,
     project: proj.id,
     ...(projRes.created ? { projectCreated: true } : {}),
+    ...(begun.recovered ? { recoveredResidue: begun.recovered.steps } : {}), // 上次砍在半路的残留，这次先清掉了
     preset: perms.preset || DEFAULT_PRESET,
     effort: effort || "(inherits ~/.claude/settings.json)",
     permissionMode: mode,

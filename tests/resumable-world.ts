@@ -16,6 +16,8 @@ export interface WorldState {
   archived: string[];
   ledgerRenames: string[];
   channelNames: Map<string, string>;
+  /** 里面还有进程在跑的窗口（repair 不许关） */
+  busyWindows: string[];
 }
 
 export function makeWorld(init: Partial<WorldState> = {}) {
@@ -28,6 +30,7 @@ export function makeWorld(init: Partial<WorldState> = {}) {
     archived: [],
     ledgerRenames: [],
     channelNames: new Map(),
+    busyWindows: [],
     ...structuredClone(init),
   };
   /** 进程被砍之后，它后面的任何副作用都不会发生：所有假件一律抛 Crash（被调用方 catch 吞掉也无妨） */
@@ -55,6 +58,7 @@ export function makeWorld(init: Partial<WorldState> = {}) {
     saveRegistry: async (r) => { live(); st.reg = structuredClone(r); hit("save"); },
     listWindows: async () => { live(); return [...st.windows]; },
     killWindow: async (n) => { live(); st.windows = st.windows.filter((w) => w !== n); hit("killWindow"); },
+    windowIsBareShell: async (n) => { live(); return !st.busyWindows.includes(n); },
     renameWindow: async (a, b) => { live(); st.windows = st.windows.map((w) => (w === a ? b : w)); hit("renameWindow"); },
     deleteChannel: async (id) => {
       live();
