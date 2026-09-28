@@ -99,7 +99,10 @@ import {
   rosterLine,
   type ProjectDef,
 } from "./lib/projects.js";
-import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
+import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
+import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
+import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -215,6 +218,7 @@ async function waitPidGone(pid: number, timeoutMs: number): Promise<boolean> {
  * 「同一个会话换了个地方继续」。判据与安全阀见 lib/takeover.ts。
  */
 async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boolean; name?: string } = {}) {
+  refuseInSandbox("接管会话（沙箱里列出的是生产会话）");
   // 只认「活着且确实是登记里那个进程」的条目：pid 复用的过期登记会让 SIGTERM 打错人
   const [alive, panes, reg] = await Promise.all([
     readLiveCcSessionEntries(),
@@ -229,7 +233,7 @@ async function cmdTakeover(target?: string, opts: { all?: boolean; force?: boole
     const n = Number(r.stdout.toString().trim());
     return r.exitCode === 0 && Number.isFinite(n) ? n : null;
   });
-  const cands = takeoverCandidates(alive.filter((e) => !ancestors.has(e.pid)), panes, managed);
+  const cands = takeoverCandidates(alive.filter((e) => !ancestors.has(e.pid) && !sandboxRootOf(e.cwd)), panes, managed); // 沙箱的会话不接管
 
   if (!target && !opts.all) {
     output({ ok: true, candidates: cands.map((c) => ({
@@ -430,6 +434,7 @@ async function buildProjectContext(proj: ProjectDef, selfTmuxName: string): Prom
       ? `同项目 agent: ${mates.join("、")}——跨仓/跨职责协作用 send_to_agent 找它们,也可用 project_info 工具随时查项目成员与目录。`
       : `目前项目里只有你一个 agent(project_info 工具可随时查最新成员)。`,
   );
+  parts.push(`派活给新建的执行者时用 claudestra create <名> <目录> --task "<任务名>",它会自动挂到你名下(侧栏显示在你下面)。`);
   return parts.join(" ");
 }
 
@@ -484,8 +489,9 @@ async function cmdCreate(
   projectFlag?: string,
   runtimeFlag?: string,
   piBaseFlag?: string,
+  teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
-  assertValidNewName(name);
+  dir = assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
   // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
   // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
   let adapter: ManagedRuntimeAdapter;
@@ -509,6 +515,8 @@ async function cmdCreate(
   const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
+  const team = await (await import("./manager/team.js")).teamFieldsForCreate(tmuxName, teamFlags); // 派发者校验在建频道 / 拉起之前
+  if (!team) return;
 
   // v2.21+ 每个 agent 必属一个 project:显式 --project > 按 dir 匹配 > 自动建组
   const projRes = await resolveOrCreateProject(dir, projectFlag);
@@ -635,6 +643,7 @@ async function cmdCreate(
 
   // 6. 更新 registry（只有启动成功才落盘）
   const reg = await loadRegistry();
+  if (reg.agents[tmuxName]) (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // kill 后同名重建：旧子 agent 不认新 agent 作父
   reg.agents[tmuxName] = {
     project: dir,
     projectId: proj.id,
@@ -651,6 +660,7 @@ async function cmdCreate(
     permissionMode: mode,
     ...(model ? { model } : {}),
     ...(external ? { external: true } : {}),
+    ...team,
     // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
     ...adapter.registryFields(spec),
   };
@@ -756,6 +766,7 @@ async function cmdResume(
   if (!adapter.isValidSessionId(sessionId)) {
     throw new Error(`非法 sessionId: "${sessionId}"（不是合法的 ${adapter.label} 会话 id；其它运行时的会话请加 --runtime <id>）`);
   }
+  assertResumable(sessionId, dir); // 沙箱里不许；生产里不接管沙箱的会话（lib/sandbox-sessions.ts）
   assertValidNewName(name);
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
@@ -806,7 +817,6 @@ async function cmdResume(
       return;
     }
   }
-
   // v2.21+ resume 也满足「必属一个 project」:同名旧条目沿用,否则按目录归属
   const regPeek = await loadRegistry();
   let resumeProjectId = regPeek.agents[tmuxName]?.projectId;
@@ -932,6 +942,7 @@ async function cmdResume(
     ...(model ? { model } : {}),
     // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
+    ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
   await saveRegistry(reg);
 
@@ -1079,6 +1090,7 @@ async function cmdRemove(name: string) {
   for (const key of Object.keys(reg.agents)) {
     if (key.toLowerCase() === tmuxName && key !== tmuxName) delete reg.agents[key];
   }
+  (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // 清掉子 agent 指向它的 parent，免得同名重建被旧孤儿认作父
   await saveRegistry(reg);
   await triggerSkillsRescan("remove", tmuxName);
   if (info?.channelId) {
@@ -1141,6 +1153,7 @@ async function cmdRename(oldName: string, newName: string) {
   // 2. registry 迁移
   reg.agents[newTmux] = { ...info, displayName: newChannelName };
   delete reg.agents[oldTmux];
+  (await import("./manager/team.js")).repointParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
   await saveRegistry(reg);
   steps.push({ step: "registry", ok: true });
 
@@ -1240,6 +1253,7 @@ async function selfWindowName(): Promise<string | null> {
 
 async function enforceSessionModel(name: string, model?: string): Promise<boolean> {
   if (!model?.trim()) return true;
+  if (isSandbox()) return false; // 沙箱：/model 会改写全局 settings.json，下面的「写回快照」也会，整段跳过（--model 启动参数照样生效）
   const target = windowTarget(name);
   const resolved = resolveModelAlias(model.trim());
   // 自守：绝不给发起者自己的窗口发键（见 selfWindowName 注释）。registry 已写，
@@ -1299,6 +1313,7 @@ async function cmdAdopt(name: string, sessionId: string) {
     output({ ok: false, error: `非法 sessionId: "${sessionId}"（应为 UUID 格式）` });
     return;
   }
+  assertResumable(sessionId); // 沙箱里不许；生产里不收编沙箱的会话
   const tmuxName = normalizeName(name);
   const reg = await loadRegistry();
   const info = reg.agents[tmuxName];
@@ -2654,6 +2669,9 @@ async function cmdTmuxWaitIdle(name: string, timeoutMs: number) {
 // ============================================================
 
 const [cmd, ...args] = process.argv.slice(2);
+// 沙箱：白名单由 manager 自己把（lib/sandbox-env.ts），带着沙箱环境直接跑 manager 也绕不过；scripts/sandbox.ts 是第二道
+const sandboxRefusal = isSandbox() ? sandboxManagerRefusal([cmd ?? "", ...args]) : null;
+if (sandboxRefusal) { output({ ok: false, error: sandboxRefusal }); process.exit(1); }
 
 /**
  * v2.19.0 写操作认主（见 lib/owner-guard.ts）。
@@ -2858,37 +2876,9 @@ switch (cmd) {
   }
 
   case "create": {
-    // v2.21+ --project <id>(也接受 --project=id):显式指定归属 project
-    let projectFlag: string | undefined;
-    const afterProject: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      const a = args[i];
-      if (a === "--project") projectFlag = args[++i] || undefined;
-      else if (a.startsWith("--project=")) projectFlag = a.slice("--project=".length) || undefined;
-      else afterProject.push(a);
-    }
-    const { rest: afterExternal, value: external } = extractBoolFlag(afterProject, "--external");
-    const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
-    const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterRuntime, "--pi-base");
-    const { rest: afterModel, model } = extractModelFlag(afterPiBase);
-    const { rest: afterMode, mode } = extractModeFlag(afterModel);
-    const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
-    const { rest: afterPurpose, purpose: purposeFlag } = extractPurposeFlag(afterEffort);
-    const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterPurpose);
-    const [name, dir, ...purposeParts] = posArgs;
-    const flagLike = rejectFlagLikePositional(name, dir);
-    if (flagLike) {
-      output({ ok: false, error: flagLike });
-      break;
-    }
-    if (!name || !dir) {
-      output({
-        ok: false,
-        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
-      });
-      break;
-    }
-    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag);
+    const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
+    if ("error" in c) output({ ok: false, error: c.error });
+    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.piBaseFlag, c.teamFlags);
     break;
   }
 
@@ -3001,6 +2991,7 @@ switch (cmd) {
       output({ ok: false, error: `sessionId 形状非法: ${newSid}` });
       break;
     }
+    assertSandboxSession(newSid); // 沙箱：新会话必须属于沙箱根（否则 set-session + restart 就续到了生产会话）
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
     const info = reg.agents[tmuxName];
@@ -3079,6 +3070,7 @@ switch (cmd) {
 
   case "list": await cmdList(); break;
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
+  case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
   case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 
@@ -3226,6 +3218,7 @@ switch (cmd) {
     break;
 
   case "update":
+    refuseInSandbox("升级（git pull + reload launchd）");
     await cmdUpdate();
     break;
 
@@ -3505,6 +3498,7 @@ switch (cmd) {
         "resume <name> <sessionId> [dir] — resume a past session",
         "kill <name>                     — destroy an agent",
         "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel)",
+        'team-link <name> [--parent <agent|master|none>] [--task "<text>"] — attach an agent under its dispatcher (sidebar tree)',
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
         "sessions [search]               — browse past Claude Code sessions",

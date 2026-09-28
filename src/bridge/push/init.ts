@@ -9,6 +9,7 @@ import { ApnsClient, apnsConfigFromEnv } from "../../lib/apns.js";
 import { repoEnvVar } from "../../lib/env-file.js";
 import { instanceKeySync, keyFingerprint } from "../../lib/instance-key.js";
 import { STATE_DIR } from "../../lib/paths.js";
+import { sandboxDisabled } from "../../lib/sandbox.js";
 import { readPrincipals } from "../../lib/principals.js";
 import { readRegistryAgents } from "../../lib/registry.js";
 import { loadOrCreateVapidKeys, readVapidKeys, webPushSender, type VapidIdentity } from "../../lib/web-push.js";
@@ -43,7 +44,7 @@ function directBackends(): DirectBackends {
 }
 
 export function initPush(): void {
-  if (started) return;
+  if (started || sandboxDisabled("推送")) return; // 沙箱不发 APNs / Web Push；/api/v1/push 路由也就不挂（lib/sandbox.ts）
   started = true;
   const db = openWebState();
   let direct: DirectBackends | null = null;

@@ -205,6 +205,8 @@ export const DICT: Record<string, string> = {
   "截止": "until",
   "已提醒": "nudges",
   "等到": "waiting until",
+  "今天": "today",
+  "明天": "tomorrow",
   "开始值守": "Start mission",
   "目标": "Goal",
   "截止时间": "Deadline",
@@ -288,6 +290,11 @@ export const DICT: Record<string, string> = {
   "没有匹配「": 'No sessions matching "',
   "」的会话": '"',
   " · 归档保留": " · archives kept", // key/值均带前导空格
+  // 派发关系（team-group.tsx）
+  "派出 {n} 个": "{n} agent dispatched|{n} agents dispatched",
+  "派出 {n}": "{n} sent",
+  "展开派出的 agent": "Show dispatched agents",
+  "收起派出的 agent": "Hide dispatched agents",
 
   // ── 输入区（composer）────────────────────────────────
   "按住说话，松开结束": "Hold to talk, release to finish",

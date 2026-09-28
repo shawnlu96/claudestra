@@ -21,6 +21,7 @@ import { bridgePortOf } from "./bridge-port.js";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { shellEscape } from "./claude-launch.js";
+import { assertSandboxRuntime } from "./sandbox.js";
 import { piBinName, piEnvFlags, type PiEnvProfile } from "./pi-env.js";
 
 /** Claudestra 注入的 Pi 扩展：绝对路径（扩展必须能被 Pi 直接 -e 加载） */
@@ -60,6 +61,7 @@ export interface PiLaunchOptions {
 
 /** 构造 pi 启动命令行字符串（含前导环境变量导出），供 tmux send-keys 使用。 */
 export function buildPiCommand(opts: PiLaunchOptions): string {
+  assertSandboxRuntime("pi"); // 沙箱里拒绝：Pi 扩展内联了路径规则，不经 lib/sandbox.ts 的闸门
   // ⚠ 与 claude-launch 同一条：兜底从 BRIDGE_PORT 推，写死 3847 会让改过端口的
   //   机器上所有 Pi agent 静默连不上 bridge（见 lib/bridge-url.ts）。
   const bridgeUrl = opts.bridgeUrl || resolveBridgeUrl();

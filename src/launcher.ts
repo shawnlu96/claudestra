@@ -5,13 +5,14 @@
  * 如果 session 死了自动重启。
  */
 
-import { statePath } from "./lib/paths.js";
+import { refuseInSandbox, statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "./lib/restart-result.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
+refuseInSandbox("跑 launcher（它管大总管与自动更新，会走到 install-cli）"); // 模块顶层、任何副作用之前；lib/paths 按入口名拦不住 `bun -e 'import(...)'`
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -86,7 +87,6 @@ import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
 import { healSelfDirty } from "./lib/self-dirty.js";
 await assertPrimaryOrExit("launcher");
-
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
 const MASTER_DIR = process.env.MASTER_DIR || `${import.meta.dir}/../master`;

@@ -16,6 +16,7 @@ import { ensurePeerIngressPort } from "../lib/peer-ingress-config.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { bridgeHttpBase, bridgePortOf } from "../lib/bridge-port.js";
 import { repoEnvVar } from "../lib/env-file.js";
+import { sandboxDisabled } from "../lib/sandbox.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { webPortFromStartScript } from "../lib/cli-install.js";
 import { readPeers } from "../lib/peers.js";
@@ -83,7 +84,7 @@ function resolveWebPort(): number {
 /** bridge 启动时调一次。没配 RELAY_URL 立刻返回；连接失败由客户端库自己退避重连，这里不抛 */
 export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Promise<void> {
   const relayUrl = repoEnvVar("RELAY_URL").trim();
-  if (!relayUrl || client) return;
+  if (!relayUrl || client || sandboxDisabled("中继")) return; // 沙箱不用生产实例身份连中继（lib/sandbox.ts）
   const key = instanceKeySync();
   if (!key) {
     console.error("⚠️ 中继：本机没有实例密钥（instance-key.pem 读写失败），不连中继");

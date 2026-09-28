@@ -2,6 +2,9 @@
  * 共享配置常量
  */
 
+// 沙箱 bridge（CLAUDESTRA_SANDBOX=1）带着 Discord token / 中继 / 生产端口等就拒绝启动；非沙箱空操作
+enforceSandboxBridgeEnv(DEFAULT_BRIDGE_PORT);
+
 export const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN!;
 
 // Web-only: 无 DISCORD_BOT_TOKEN 时以 Web-only 模式运行：不连 Discord、
@@ -27,6 +30,7 @@ export const INBOX_DIR = STATE_INBOX_DIR;
 // 从 tmux-helper 引入避免两处常量漂移
 export { TMUX_SOCK } from "../lib/tmux-helper.js";
 import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
+import { enforceSandboxBridgeEnv } from "../lib/sandbox.js";
 import { RUNTIME_DIR, INBOX_DIR as STATE_INBOX_DIR } from "../lib/paths.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;

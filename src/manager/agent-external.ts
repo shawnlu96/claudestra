@@ -1,3 +1,4 @@
+import { hasUnsafeDisplayChars } from "../lib/display-text.js";
 import { loadRegistry, saveRegistry, output, type Registry } from "./core.js";
 
 /** 按裸名 / 带前缀名找 registry 条目；找不到就 output 错误并返回 null（两个命令共用） */
@@ -21,7 +22,7 @@ export async function cmdAgentLabel(name: string, text: string) {
     return;
   }
   // 控制字符 / 方向控制符（RLO 之类）会让侧栏里的名字看起来像别的会话
-  if (/[\u0000-\u001f\u007f‎‏‪-‮⁦-⁩]/.test(label)) {
+  if (hasUnsafeDisplayChars(label)) {
     output({ ok: false, error: "显示名不能含控制字符或方向控制符" });
     return;
   }
