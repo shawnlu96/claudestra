@@ -4,9 +4,10 @@
  */
 import type { LedgerEventView, LedgerOverview } from "@/features/collab/collab-model";
 import type { TaskDetail } from "@/features/collab/collab-detail-model";
-import { drainFrames, type BridgeEvent } from "@/lib/chat/stream-shape";
+import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { apiAgentName } from "@/lib/chat/agents";
-import { api, apiStream } from "./client";
+import { api } from "./client";
+import { followBridgeEvents } from "./follow-events";
 
 const enc = encodeURIComponent;
 
@@ -55,25 +56,7 @@ export function agentPending(agent: string): Promise<{ thinking?: boolean; compa
 /** 协作视图只关心这几类：台账变了、各 agent 的此刻动作、PM 的审查员子 agent 起止 */
 const WANTED = new Set(["ledger", "tool_start", "tool_done", "agent_status", "bg_task_started", "bg_task_completed"]);
 
-/**
- * 订阅 bridge /events，逐条回调关心的事件；onOpen 在连上时调一次（调用方据此全量重拉，T8c 约定）。
- * 流正常结束或出错都 resolve / reject 给调用方决定重连；signal 中止即关连接。
- */
-export async function followCollabEvents(opts: { signal: AbortSignal; onOpen: () => void; onEvent: (e: BridgeEvent) => void }): Promise<void> {
-  const res = await apiStream("/events", { signal: opts.signal });
-  opts.onOpen();
-  const reader = res.body!.getReader();
-  const dec = new TextDecoder();
-  let buffer = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      const { events, rest } = drainFrames(buffer + dec.decode(value, { stream: true }));
-      buffer = rest;
-      for (const evt of events) if (WANTED.has(evt.type)) opts.onEvent(evt);
-    }
-  } finally {
-    reader.cancel().catch(() => undefined); // 已断开的流再 cancel 会抛，这里只是善后
-  }
+/** 订阅 bridge /events 里协作视图关心的那几类（通用读流在 follow-events.ts） */
+export function followCollabEvents(opts: { signal: AbortSignal; onOpen: () => void; onEvent: (e: BridgeEvent) => void }): Promise<void> {
+  return followBridgeEvents({ ...opts, types: WANTED });
 }

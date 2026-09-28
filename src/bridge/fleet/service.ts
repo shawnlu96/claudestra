@@ -134,7 +134,7 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   const ctx: RunCtx = { io, keep: compactKeep(), deliverText: textSender(req.actor, req.via, targets.length) };
   const results = await pool(targets, CONCURRENCY, async (t): Promise<FleetResult> => {
     const na = notApplicable(req.action, t);
-    if (na) return { agent: t.name, outcome: na === "不在线" ? "failed" : "skipped", detail: na };
+    if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
     return runOne(req.action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
   });
   void refreshLp(targets.filter((t) => t.runtime === "claude-code").map((t) => ({ name: t.name, channelId: t.channelId })));

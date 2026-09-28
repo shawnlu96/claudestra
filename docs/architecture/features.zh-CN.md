@@ -13,6 +13,7 @@
 - **只读历史 API（v2.9+）** — 归档的 web UI 侧出口：`GET /api/v1/agents/:name/history` 列 agent 的全部 session（live + 归档合并，live 更大时优先），`GET /api/v1/agents/:name/history/:sessionId` 返回中性分页消息（`?limit=100&before=<seq>` 像聊天视图一样往前翻页；`?subagent=agent-xxx` 读 subagent 对话）。解析在 `lib/session-history.ts`（纯函数，有单测）：user/assistant/compact 边界条目 → `{seq, ts, role, text, tools[], compactSummary?}`，meta 条目和 tool_result 载荷被过滤，工具调用经 jsonl-watcher 的 `formatTool` 渲染。token scope 规则与 messages 端点一致；agent 被 kill 后归档仍可读（这正是归档的意义）。sessionId/subagent 参数拼路径前做白名单校验。
 - **Agent 间通信** — `send_to_agent(target, text)` MCP 工具通过 Bridge 直接向另一个 agent 的上下文注入消息。目标在忙时消息落盘排队，`check_inbox` 可在回合中领取（租约 + 确认），答复按 (target, caller) 的每条请求推回——详见 [agent-messaging.md](./agent-messaging.md)。
 - **定时任务** — cron 表达式拉起临时 agent、执行 prompt、汇报、清理。
+- **批量管理（T35）** — 只给 owner：看每个会话是否在 low-priority 下运行（读 pane 状态栏，statusLine JSON 里没有这个字段）、「设成开 / 设成关」不盲切，以及 fan-out 动作（LP 开关、带保留清单的 `/compact`、`/save-compact`、开 LP 再压缩、自定义文本），每个 agent 各自回报结果；网页面板、`manager fleet`、`/api/v1/fleet/*`，详见 [fleet-ops.md](./fleet-ops.md)。
 - **Discord UI** — 按钮、下拉菜单、slash 命令（`/status`、`/screenshot`、`/interrupt`、`/cron`）。
 - **`reply()` 的交互组件** — 按钮行、单选下拉，以及 v2.14+ 的 `multiselect`：勾若干项一次提交。Discord 用原生 `max_values`（选完即交），web 端渲染成 checkbox + 提交按钮。两端回投同一种格式 `[select:<id>:<v1>,<v2>]`（值逗号分隔），agent 侧一套解析吃两端。选项之间不互斥时优先用多选，一个来回胜过好几轮。
 - **链路掉线告警（v2.14+）** — `wedge-watcher` 的 link sentinel（tmux 窗口活着但 channel-server 掉线 >5min）除了发 Discord 频道，也推 `session_anomaly(kind=link_down)` 事件，web 端渲染成醒目提示。此前这条只发 Discord，而 web 用户在 MCP 断开时得不到任何信号。

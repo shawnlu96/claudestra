@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useChatStore } from "@/features/chat/chat-store";
+import { PanelHeader } from "@/features/chat/components/panel-header";
 import { ResponsiveShell } from "@/features/chat/components/responsive-shell";
 import type { ProjectMeta } from "@/features/chat/type";
 import {
@@ -107,21 +108,15 @@ export function FleetPanel({ open, onClose }: { open: boolean; onClose: () => vo
 
   return (
     <ResponsiveShell z="z-[90]" panelClass="sm:max-w-2xl" onClose={onClose}>
-      <header className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3" style={{ paddingTop: "env(safe-area-inset-top)" }}>
-        <button className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden" aria-label={t("返回")} onClick={onClose}>
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </button>
-        <span className="truncate font-semibold">{t("批量管理")}</span>
+      <PanelHeader title="批量管理" onClose={onClose}>
         <button className="btn btn-ghost btn-sm ml-auto" disabled={loading} onClick={() => void load()}>
           {loading ? <span className="loading loading-spinner loading-xs" /> : t("刷新状态")}
         </button>
-        <button className="btn btn-ghost btn-sm max-sm:hidden" aria-label={t("关闭")} onClick={onClose}>
-          ✕
-        </button>
-      </header>
-      <div className="min-h-0 flex-1 touch-pan-y space-y-4 overflow-y-auto overscroll-contain px-3 pt-3" style={{ WebkitOverflowScrolling: "touch", paddingBottom: "max(env(safe-area-inset-bottom), 1rem)" }}>
+      </PanelHeader>
+      <div
+        className="min-h-0 flex-1 touch-pan-y space-y-4 overflow-y-auto overscroll-contain px-3 pt-3"
+        style={{ WebkitOverflowScrolling: "touch", paddingBottom: "max(env(safe-area-inset-bottom), 1rem)" }}
+      >
         {err && <div className="rounded-lg bg-error/10 px-3 py-2 text-xs text-error">{t(err)}</div>}
         <Picker agents={agents} projects={projects} picked={picked} setPicked={setPicked} />
         <ActionPicker action={action} setAction={setAction} keep={keep ?? keepDefault} setKeep={setKeep} text={text} setText={setText} />

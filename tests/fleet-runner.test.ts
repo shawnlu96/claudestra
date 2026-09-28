@@ -112,6 +112,16 @@ describe("压缩", () => {
     expect(r).toMatchObject({ outcome: "done", detail: "已开始压缩" });
   });
 
+  test("LP 下压缩先排队等算力（spinner 是 Working at lower priority，不是 Compacting）→ 也算已开始", async () => {
+    const waiting = fx("lp-on-interrupted").replace(
+      /\n[^\n]*─{20,}[^\n]*\n[^\n]*❯[^\n]*\n/,
+      (m) => `\n❯ /compact 保留测试\n✻ Working at lower priority … · next try in 15s · attempt 2 · esc to interrupt${m}`,
+    );
+    expect(waiting).toContain("next try in 15s");
+    const r = await run({ kind: "compact" }, [fx("lp-on-interrupted"), waiting]);
+    expect(r).toMatchObject({ outcome: "done", detail: "已开始压缩" });
+  });
+
   test("对话太短 → 已跳过", async () => {
     const r = await run({ kind: "compact" }, [fx("lp-on-interrupted"), fx("compact-too-short")]);
     expect(r).toMatchObject({ outcome: "skipped", detail: "对话太短，不用压缩" });
@@ -146,6 +156,11 @@ describe("开 LP 再压缩", () => {
     const r = await run({ kind: "lp-compact" }, [fx("walled"), fx("lp-on-allowance"), fx("compacting")]);
     expect(r.outcome).toBe("done");
     expect(r.keys).toEqual(["line:/low-priority", "line:/compact"]);
+  });
+
+  test("开了 LP、但对话太短没压缩 → 仍算已执行（LP 确实开了）", async () => {
+    const r = await run({ kind: "lp-compact" }, [fx("walled"), fx("lp-on-allowance"), fx("compact-too-short")]);
+    expect(r).toMatchObject({ outcome: "done", detail: "LP 已开，对话太短，不用压缩" });
   });
 
   test("LP 已经开着 → 直接压缩", async () => {

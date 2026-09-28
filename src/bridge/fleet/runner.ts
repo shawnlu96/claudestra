@@ -123,7 +123,11 @@ async function slash(io: PaneIO, win: string, cmd: string, started: (x: { raw: s
   return end.ok ? done(what) : failed(`发了 ${name}，10 秒内没看到开始，需要人工看`);
 }
 
-const compactStarted = (x: { raw: string; r: LpRead }) => x.r.compacting || /Compacting conversation|Compacted/.test(afterCommand(x.raw, "/compact"));
+/**
+ * 压缩开始的样子不止一种：「Compacting conversation…」，或 low-priority 下先排队等算力（「Working at lower priority … next try in 15s」，
+ * 十几秒后才换成 Compacting）。发之前验过是空闲的，所以发完出现回合 spinner 就是 /compact 在跑。
+ */
+const compactStarted = (x: { raw: string; r: LpRead }) => x.r.compacting || x.r.busy || /Compacting conversation|Compacted/.test(afterCommand(x.raw, "/compact"));
 
 function compact(io: PaneIO, win: string, keep: string): Promise<Step> {
   return slash(io, win, compactCommand(keep), compactStarted, "已开始压缩");
@@ -153,6 +157,8 @@ async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Ste
     if ((await read(io, win)).r.lowPriority !== "on") return failed("打断后 LP 不在了，没压缩");
   }
   const c = await compact(io, win, keep);
+  // 这次确实把 LP 打开了、只是压缩那步跳过（对话太短 / 正在压缩）：整体算执行过，不能报「已跳过」让人以为什么都没做
+  if (before.lowPriority !== "on" && c.outcome === "skipped") return done(`LP 已开，${c.detail}`);
   return { ...c, detail: `LP 开着，${c.detail}` };
 }
 

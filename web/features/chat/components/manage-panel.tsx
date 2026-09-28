@@ -4,6 +4,7 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { NewAgentModal } from "./new-agent-modal";
 import { useT } from "@/lib/i18n";
 import { ResponsiveShell } from "./responsive-shell";
+import { PanelHeader } from "./panel-header";
 import { FleetPanel } from "@/features/fleet/fleet-panel";
 import { SnailIcon } from "@/features/fleet/lp-badge";
 
@@ -48,17 +49,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
 
   return (
     <ResponsiveShell z="z-[80]" panelClass="sm:max-w-xl" onClose={onClose}>
-      {/* 顶栏与会话页 TopBar 同构:安全区自垫、返回箭头走 onClose(窄屏= history.back) */}
-      <header
-        className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3"
-        style={{ paddingTop: "env(safe-area-inset-top)" }}
-      >
-        <button className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden" aria-label={t("返回")} onClick={onClose}>
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </button>
-        <span className="truncate font-semibold">{t("Agent 管理")}</span>
+      <PanelHeader title="Agent 管理" onClose={onClose}>
         <button className="btn btn-ghost btn-sm ml-auto gap-1" onClick={() => setShowFleet(true)}>
           <SnailIcon className="size-4" />
           {t("批量管理")}
@@ -66,10 +57,7 @@ export function ManagePanel({ open, onClose }: { open: boolean; onClose: () => v
         <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
           {t("＋ 新建")}
         </button>
-        <button className="btn btn-ghost btn-sm max-sm:hidden" aria-label={t("关闭")} onClick={onClose}>
-          ✕
-        </button>
-      </header>
+      </PanelHeader>
       {msg && <div className="px-4 pt-2 text-xs text-base-content/60">{t(msg)}</div>}
 
       <div
