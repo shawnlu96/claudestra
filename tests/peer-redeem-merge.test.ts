@@ -1,6 +1,6 @@
 /**
  * 兑换邀请时按实例 id 合并（manager/peers.ts cmdPeerInviteRedeem → lib/peers.ts isSameRedeemer）：
- * 实例 id 是自报的，只有签名指纹等于原记录的期望指纹才合并；否则另建一条，原记录与它的 token 不动。
+ * 实例 id 是自报的，只有签名指纹等于原记录的期望指纹才合并；实例 id 撞上别人的记录而指纹对不上 → 拒绝兑换，原记录与 token 不动。
  * 场景：C（本机）已有联系人 V（记录有 fp）；M 手里有 C 的一张有效邀请、知道 V 的实例 id。
  * 状态文件写在 preload 的临时 STATE_DIR，peer 名各用各的。
  */
@@ -60,28 +60,33 @@ async function call(secret: string, key: typeof keyV): Promise<number | string> 
 const rec = async (name: string) => (await readPeers()).httpPeers?.find((p) => p.name === name);
 const tokenDisabled = async (id: string) => !!(await readPrincipals()).principals.find((p) => p.id === `token:${id}`)?.disabled;
 
-describe("按实例 id 合并：签名指纹对不上就不合并", () => {
+const pending = async (id: string) => !!(await readPeers()).pendingInvites?.some((i) => i.id === id);
+
+describe("按实例 id 合并：签名指纹对不上就拒绝兑换", () => {
   test("接管前：V 调 C 正常", async () => {
     expect(await call(SECRET.v, keyV)).toBe("rm-victim");
   });
-  test("M 用自己的钥匙签名兑换、带 V 的实例 id、不带 url → 另建一条，V 的记录和 token 不动", async () => {
+  test("M 用自己的钥匙签名兑换、带 V 的实例 id、不带 url → 拒绝；V 的记录和 token 不动，邀请没被用掉", async () => {
     const out = await redeem("join-secret-rm-1", "rm-victim", IID_V, fpM);
-    expect(out).toMatchObject({ ok: true, peer: "rm-victim-2" });
-    expect(out.revokedTokens).toBeUndefined();
+    expect(out).toMatchObject({ ok: false, code: "iid_taken" });
+    expect(String(out.error)).toContain("删掉旧联系人再重新邀请");
+    expect((await readPeers()).httpPeers?.map((p) => p.name)).toEqual(["rm-victim"]);
     expect((await rec("rm-victim"))?.fp).toBe(fpV);
-    expect((await rec("rm-victim-2"))?.fp).toBe(fpM);
     expect(await tokenDisabled("tok_rm_v")).toBe(false);
+    expect(await pending("inv_rm1")).toBe(true);
   });
-  test("之后 M 只能以自己的新身份调用，冒充不了 V；V 自己照常", async () => {
-    expect(await call(SECRET.i1, keyM)).toBe("rm-victim-2");
+  test("之后 M 冒充不了 V；V 自己照常", async () => {
     expect(await call(SECRET.v, keyM)).toBe(401);
     expect(await call(SECRET.v, keyV)).toBe("rm-victim");
   });
-  test("不签名兑换（没有指纹）带 V 的实例 id → 同样另建一条", async () => {
-    const out = await redeem("join-secret-rm-2", "rm-victim", IID_V, "");
-    expect(out.peer).not.toBe("rm-victim");
-    expect(out.revokedTokens).toBeUndefined();
+  test("不签名兑换（没有指纹）带 V 的实例 id → 同样拒绝", async () => {
+    expect(await redeem("join-secret-rm-2", "rm-victim", IID_V, "")).toMatchObject({ ok: false, code: "iid_taken" });
     expect(await tokenDisabled("tok_rm_v")).toBe(false);
+  });
+  test("M 不冒用实例 id 兑换 → 以自己的新名字加入，不碰 V", async () => {
+    expect(await redeem("join-secret-rm-1", "rm-victim", "", fpM)).toMatchObject({ ok: true, peer: "rm-victim-2" });
+    expect(await call(SECRET.i1, keyM)).toBe("rm-victim-2");
+    expect((await rec("rm-victim"))?.fp).toBe(fpV);
   });
   test("V 本人重新加入（签名指纹对得上）→ 合进原记录，吊销被取代的旧 token", async () => {
     const out = await redeem("join-secret-rm-3", "anything", IID_V, fpV);

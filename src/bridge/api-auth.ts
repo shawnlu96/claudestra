@@ -35,7 +35,8 @@ function bearerSecret(req: Request, url: URL): string | null {
   return (sseTokenOk && url.searchParams.get("token")) || null;
 }
 
-export async function authenticateApi(req: Request, url: URL, opts: { rateLimit: boolean }): Promise<Principal | Response> {
+/** peers: false = 这条路由不收 peer token（远程终端这类不限速的路由；peer 本来就不该碰终端） */
+export async function authenticateApi(req: Request, url: URL, opts: { rateLimit: boolean; peers?: false }): Promise<Principal | Response> {
   const file = await readPrincipals(principalsPath);
   const secret = bearerSecret(req, url);
   let p: Principal | null;
@@ -51,6 +52,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
   }
+  if (p.peer && opts.peers === false) return apiJson(403, { ok: false, error: "peer tokens are not accepted on this route", code: "peer_route_forbidden" });
   // peer 先验签再扣限速：拿到 token 却签不了名的人耗不掉正牌 peer 的额度（失败另有一个桶）
   const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
   if (sig instanceof Response) return sig;
@@ -61,7 +63,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
     if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)` });
   }
-  const replay = sig?.once ? isPeerReplay(sig.once) : false;
+  const replay = sig?.once ? isPeerReplay(sig.once, p.peer!) : false;
   if (replay) return peerSigRejected(replay);
   if (p.peer) {
     const peer = p.peer;
@@ -81,7 +83,10 @@ async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean
   if (v.allow) return v;
   let failures = sigFailures.get(peer);
   if (!failures) sigFailures.set(peer, (failures = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN)));
-  if (rateLimit && !failures.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded for failed peer signatures (${API_RATE_LIMIT_PER_MIN} req/min)` });
+  if (rateLimit && !failures.tryAcquire()) {
+    const error = `too many failed peer signatures (${API_RATE_LIMIT_PER_MIN}/min), last failure: ${v.reason}`;
+    return apiJson(429, { ok: false, error, code: "peer_signature", reason: "sig_rate_limited", cause: v.reason });
+  }
   return peerSigRejected(v.reason);
 }
 

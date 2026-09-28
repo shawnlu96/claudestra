@@ -99,8 +99,9 @@ export function verifyPeerRequest(
   const r = verifySigned(key, { method: req.method, path: req.path, ts, sig, body: req.body }, now);
   if (r !== "ok") return new RelayError("bad_signature", "peer", r === "stale" ? "timestamp outside ±300 s" : "signature mismatch");
   const idempotent = req.method === "GET" || req.method === "HEAD";
-  const seen = idempotent ? false : cache.seen(sig, ts, now);
+  const seen = idempotent ? false : cache.seen(sig, ts, now, from);
   if (seen === "full") return new RelayError("replay_full", "peer", "replay cache full, retry later");
+  if (seen === "before_start") return new RelayError("bad_signature", "peer", "signed before the receiver started: your clock is behind, sync it and resend");
   if (seen) return new RelayError("replay", "peer", "signature already used");
   return null;
 }

@@ -67,6 +67,15 @@ export function isSameRedeemer(p: HttpPeer, r: { inTokenId: string; iid?: string
 }
 
 /**
+ * 兑换方自报的实例 id 已经属于别的记录、指纹却对不上（没有一条 isSameRedeemer 成立）：拒绝兑换，
+ * 不建第二条同实例 id 的记录——之后按实例 id 办事的功能就不必各自防冒名。换了钥匙的本人要删掉旧联系人再重新邀请。
+ */
+export function redeemIidTaken(all: HttpPeer[], r: { inTokenId: string; iid?: string; url?: string; fp?: string }, anchorOf: (p: HttpPeer) => string | null): boolean {
+  if (!r.iid || all.some((p) => isSameRedeemer(p, r, anchorOf(p)))) return false;
+  return all.some((p) => !p.disabled && p.instanceId === r.iid);
+}
+
+/**
  * v2.15+ 一键邀请的待兑换记录。生成邀请时就把入站 token 预签好（邀请串里
  * 直接携带），对方粘贴邀请 → 他的 bridge 拿 joinSecret 回调我方 /peers/redeem
  * → 自动登记成 HttpPeer，免掉旧三步握手的「回执 + accept」。

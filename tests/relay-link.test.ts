@@ -186,25 +186,39 @@ describe("入站分流（relay-inbound.ts）", () => {
     for (const v of variants) {
       expect(Buffer.from(v, "base64url").equals(Buffer.from(sig, "base64url"))).toBe(true); // 确实解出同样的字节
       expect(verifyPeerRequest(myFp, req(v), cache, NOW)?.code).toBe("bad_signature");
-      expect(cache.seen(v, h["x-claudestra-ts"], NOW)).toBe("replay");
+      expect(cache.seen(v, h["x-claudestra-ts"], NOW, myFp)).toBe("replay");
     }
   });
   test("ReplayCache：早于进程启动 → before_start；条目留到签名过期；满了拒新请求（full）而不挤掉旧条目", () => {
-    const start = Math.floor(NOW / 1000);
+    const start = Math.floor(NOW / 1000), t0 = start * 1000;
     const c = new ReplayCache(2, start, 1000);
     const sigOf = (n: number) => Buffer.alloc(64, n).toString("base64url");
     const at = (d: number) => String(start + d);
-    expect(c.seen(sigOf(1), at(-1), NOW)).toBe("before_start");
-    expect(c.seen(sigOf(1), at(0), NOW)).toBe(false);
-    expect(c.seen(sigOf(2), at(1), NOW)).toBe(false);
-    expect(c.seen(sigOf(3), at(1), NOW)).toBe("full"); // 满了：拒这条，1、2 都还在
-    expect(c.seen(sigOf(1), at(0), NOW)).toBe("replay");
-    expect(c.seen(sigOf(2), at(1), NOW)).toBe("replay");
-    // 1 的签名在 start*1000 + 1000 过期、2 的在 +2000：过了 1 的有效期，腾出一格
-    const later = start * 1000 + 1500;
-    expect(c.seen(sigOf(3), at(1), later)).toBe(false);
-    expect(c.seen(sigOf(2), at(1), later)).toBe("replay");
-    expect(c.seen(sigOf(4), at(1), later)).toBe("full");
+    expect(c.seen(sigOf(1), at(-1), t0, "p")).toBe("before_start");
+    expect(c.seen(sigOf(1), at(0), t0, "p")).toBe(false);
+    expect(c.seen(sigOf(2), at(1), t0, "q")).toBe(false);
+    expect(c.seen(sigOf(3), at(1), t0, "r")).toBe("full"); // 整体满了：拒这条，1、2 都还在
+    expect(c.seen(sigOf(1), at(0), t0, "p")).toBe("replay");
+    expect(c.seen(sigOf(2), at(1), t0, "q")).toBe("replay");
+    // 1 的签名在 t0 + 1000 过期、2 的在 +2000：过了 1 的有效期（且距上次清扫满一秒），腾出一格
+    expect(c.seen(sigOf(3), at(1), t0 + 1500, "r")).toBe(false);
+    expect(c.seen(sigOf(2), at(1), t0 + 1500, "q")).toBe("replay");
+    expect(c.seen(sigOf(4), at(1), t0 + 1500, "r")).toBe("full");
+  });
+  test("ReplayCache：按 peer 分桶——一个 peer 灌满只拒它自己", () => {
+    const start = Math.floor(NOW / 1000), t0 = start * 1000;
+    const c = new ReplayCache(100, start, 60_000, 3);
+    const sigOf = (n: number) => Buffer.alloc(64, n).toString("base64url");
+    for (let i = 1; i <= 3; i++) expect(c.seen(sigOf(i), String(start), t0, "flood")).toBe(false);
+    expect(c.seen(sigOf(4), String(start), t0, "flood")).toBe("full");
+    expect(c.seen(sigOf(5), String(start), t0, "honest")).toBe(false);
+    expect(c.seen(sigOf(5), String(start), t0, "honest")).toBe("replay");
+  });
+  test("verifyPeerRequest：签名时间早于本进程启动 → 报时钟问题，不报 replay", () => {
+    const cache = new ReplayCache(10, Math.floor(NOW / 1000) + 3600);
+    const r = verifyPeerRequest(myFp, { method: "POST", path: "/api/v1/x", headers: signed("POST", "/api/v1/x", "b"), body: enc("b") }, cache, NOW);
+    expect(r?.code).toBe("bad_signature");
+    expect(r?.message).toMatch(/clock/);
   });
 });
 

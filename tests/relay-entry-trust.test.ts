@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { authenticateApi, redeemRefusal, redeemSenderFp, relaySenderFp } from "../src/bridge/api-auth.js";
+import { peerAuthHint } from "../src/lib/peer-trust.js";
 import { makeInboundHandler, setSocketRequestContext } from "../src/bridge/relay-inbound.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
 import { requestContextOf, setRequestContext } from "../src/bridge/request-context.js";
@@ -121,7 +122,16 @@ describe("先验签再扣限速；改钉", () => {
   test("验签失败单独限流（每分钟 120 次，超了 429），且不消耗正牌 peer 的额度", async () => {
     for (let i = 0; i < 120; i++) expect(await status(direct(TOK.p), true)).toBe(401);
     for (let i = 0; i < 10; i++) expect(await status(direct(TOK.p, keyQ), true)).toBe(429);
+    const limited = await authenticateApi(direct(TOK.p, keyQ), new URL(`http://127.0.0.1:1${PATH}`), { rateLimit: true });
+    expect(await (limited as Response).json()).toMatchObject({ code: "peer_signature", reason: "sig_rate_limited", cause: "key_changed" });
+    expect(peerAuthHint({ code: "peer_signature", reason: "sig_rate_limited", cause: "stale" })).toMatch(/限流.*stale/);
     expect(await status(direct(TOK.p, keyP), true)).toBe(200);
+  });
+  test("不限速的路由（远程终端）不收 peer token：签名对也 403，不碰防重放缓存", async () => {
+    const r = direct(TOK.p, keyP, "POST", '{"data":"x"}');
+    const p = await authenticateApi(r, new URL(r.url), { rateLimit: false, peers: false });
+    expect(p instanceof Response && p.status).toBe(403);
+    expect(await (p as Response).json()).toMatchObject({ code: "peer_route_forbidden" });
   });
   test("只钉住过的 peer：对方重装后按签名兑换重新加入（记录有了 fp）→ 改钉新钥匙；删掉后同名重加 → 旧钉住作废", async () => {
     expect(await status(direct(TOK.q, keyQ))).toBe(200); // 钉住 Q

@@ -15,7 +15,8 @@ import { currentPin, peerSigVerdict, recordPeerFp, ReplayCache, type PeerSigVerd
 
 const PEER_KEYS_PATH = join(STATE_DIR, "peer-keys.json");
 let keys: Map<string, PinnedPeerKey> | null = null;
-let lastWrite = 0;
+/** 启动时算作刚写过：进程起来后的第一次失败也要等一分钟才补写 */
+let lastWrite = Date.now();
 
 function loaded(): Map<string, PinnedPeerKey> {
   if (keys) return keys;
@@ -37,8 +38,8 @@ const legacyWarnedAt = new Map<string, number>();
 const replays = new ReplayCache();
 
 /** 验签通过的非 GET/HEAD 请求：非 false = 这个签名已经用过（或早于本进程启动），值是拒绝原因 */
-export function isPeerReplay(once: { sig: string; ts: string }): ReplayVerdict {
-  return replays.seen(once.sig, once.ts, Date.now());
+export function isPeerReplay(once: { sig: string; ts: string }, peer: string): ReplayVerdict {
+  return replays.seen(once.sig, once.ts, Date.now(), peer);
 }
 
 export async function checkPeerSignature(req: Request, url: URL, peer: string): Promise<PeerSigVerdict> {
@@ -75,7 +76,7 @@ async function persist(peer: string, prev: PinnedPeerKey | undefined, next: Pinn
   loaded().set(peer, next);
   const pinChanged = prev?.publicKey !== next.publicKey && next.lastCheck?.result === "ok";
   if (!pinChanged) {
-    flushTimer ??= setTimeout(() => void flush(peer), 60_000 - (Date.now() - lastWrite));
+    flushTimer ??= setTimeout(() => void flush(peer), Math.min(60_000, Math.max(0, 60_000 - (Date.now() - lastWrite))));
     flushTimer.unref?.();
     return;
   }
