@@ -94,7 +94,7 @@ describe("moveStage", () => {
     ];
     for (const [from, to, actor] of path) {
       // 进 verified 只经完成检查单（recordVerify）；它推阶段时同样记一条 stage 事件
-      if (to === "verified") recordVerify(db, { actor }, { taskId: "T8a", result: "pass", data: {} });
+      if (to === "verified") recordVerify(db, { actor }, { taskId: "T8a", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] } });
       else moveStage(db, { actor }, { taskId: "T8a", from: from as never, to: to as never });
     }
     expect(getTask(db, "T8a")).toMatchObject({ stage: "done", round: 4, specRev: 2 });
