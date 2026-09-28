@@ -1112,7 +1112,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const histListMatch = path.match(/^\/agents\/([^/]+)\/history$/);
   if (histListMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(histListMatch[1]);
-    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isPathSafeName(agentParam) || !inScopeEitherName(principal, agentParam)) return notInScope(agentParam); // 名字会拼进归档路径（%2F → /）
     const agent = await findHistoryAgent(agentParam);
     const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
     const sessions = await listAgentSessions(canonical, {
@@ -1135,7 +1135,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const histSessMatch = path.match(/^\/agents\/([^/]+)\/history\/([^/]+)$/);
   if (histSessMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(histSessMatch[1]);
-    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isPathSafeName(agentParam) || !inScopeEitherName(principal, agentParam)) return notInScope(agentParam); // 名字会拼进归档路径（%2F → /）
     const sid = decodeURIComponent(histSessMatch[2]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
     const agent = await findHistoryAgent(agentParam);

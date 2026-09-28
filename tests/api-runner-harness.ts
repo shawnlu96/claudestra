@@ -10,6 +10,8 @@ import { join } from "path";
 export type RunnerResult = { name: string; status?: number; body?: string; threw?: string; message?: string };
 
 export interface RunnerHome {
+  /** 临时 HOME：测试可以往里放会话文件、归档 */
+  home: string;
   run(specs: unknown[], env?: Record<string, string>): RunnerResult[];
   cleanup(): void;
 }
@@ -29,6 +31,7 @@ export function runnerHome(prefix: string, registry: { agents: Record<string, un
   mkdirSync(join(home, ".claude-orchestrator"), { recursive: true });
   writeFileSync(join(home, ".claude-orchestrator", "registry.json"), JSON.stringify(registry));
   return {
+    home,
     run(specs, env = {}) {
       const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
         env: {
