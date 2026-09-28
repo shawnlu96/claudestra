@@ -56,7 +56,7 @@ interface PackPlan {
   adversarial: boolean;
   worktree: string | null;
   deliverEvent: LedgerEvent | undefined;
-  /** 规格卡「审查」那一行，记进 dispatch 事件：路由 / currentHandler 据此用 nextReview 算下一轮 */
+  /** 规格卡「审查」那一行，记进 dispatch 事件备查（路由 / currentHandler 自己读规格卡，不依赖它） */
   policy: string | null;
   pack: ReviewPack & { subagentType: string };
 }
@@ -76,7 +76,7 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
   const specPath = specPathOf(c, task);
   const specText = readTextSoft(specPath);
   const policy = reviewPolicy(specText);
-  const next = lastEvent ? nextReview(policy, lastReviewOf(lastEvent, events).last) : nextReview(policy, null);
+  const next = nextReview(policy, lastEvent ? lastReviewOf(lastEvent, events) : null);
   const adversarial = c.p.bools.has("adversarial") || next === "adversarial";
   const worktree = await worktreeOf(c, task);
   const deliverEvent = events.findLast((e) => e.kind === "deliver");
@@ -120,7 +120,7 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   const reviewer = p.adversarial ? "adversarial" : "regular";
   // 去重键带 head：同一轮重新交付了新 head 再派，是新的一次派审，不能拿回带旧 head 的那条
   const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}:${p.task.headSHA ?? "-"}` };
-  // policy：规格卡的审查策略，路由 / currentHandler 据此用 nextReview 判断这轮通过后是不是还要审
+  // policy：派审当时规格卡的审查策略，备查；路由 / currentHandler 判断还要不要审时读的是规格卡本身
   const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath, policy: p.policy };
   const r = appendEvent(c.db, ctx, { project: p.task.project, target: p.task.id, kind: "dispatch", text: p.pack.description, data });
   return { ok: true, event: r.event, duplicate: r.duplicate, ...(headNote ? { headNote } : {}), ...p.pack };

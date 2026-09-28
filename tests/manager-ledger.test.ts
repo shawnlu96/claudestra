@@ -133,8 +133,23 @@ describe("任务与 registry 联动", () => {
     for (const [flag, v] of [["title", "x"], ["item", "i10"], ["spec", "s.md"], ["extra", "{}"]]) {
       expect(await run(EXE, "task-set", "T8b", "--rev", "1", `--${flag}`, v)).toMatchObject({ ok: false, code: "forbidden" });
     }
-    expect((await run(EXE, "task-set", "T8b", "--rev", "1", "--pr", "#136", "--head", "abc", "--model", "opus")).task).toMatchObject({ pr: "#136", headSHA: "abc" });
+    expect((await run(EXE, "task-set", "T8b", "--rev", "1", "--pr", "#136", "--head", "abc1234", "--model", "opus")).task).toMatchObject({ pr: "#136", headSHA: "abc1234" });
     expect((await run(PM, "task-set", "T8b", "--rev", "2", "--title", "改名")).task.title).toBe("改名");
+  });
+  test("--branch / --pr / --head 写入前就校验：git 分支名、数字 / #N / GitHub PR 链接、7–40 位十六进制", async () => {
+    await taskT8b();
+    const bad: [string, string][] = [
+      ["branch", "x\n## 重点"], ["branch", "-x"], ["branch", "a..b"], ["branch", "@{-1}"], ["branch", "a b"],
+      ["pr", "abc"], ["pr", "#1\n## 重点"], ["pr", "https://evil.example/pull/1"], ["head", "abc"], ["head", "xyz1234"], ["head", "a".repeat(41)],
+    ];
+    for (const [flag, v] of bad) {
+      expect(await run(EXE, "task-set", "T8b", "--rev", "1", `--${flag}`, v)).toMatchObject({ ok: false, code: "invalid" });
+    }
+    expect(await run(PM, "task-new", "T9x", "--title", "x", "--kind", "code", "--branch", "x\ny")).toMatchObject({ ok: false, code: "invalid" });
+    const ok = await run(EXE, "task-set", "T8b", "--rev", "1", "--branch", "task/t8b-x", "--pr", "https://github.com/a/b/pull/12", "--head", "ABCDEF1");
+    expect(ok.task).toMatchObject({ branch: "task/t8b-x", pr: "https://github.com/a/b/pull/12", headSHA: "ABCDEF1" });
+    expect((await run(EXE, "task-set", "T8b", "--rev", "2", "--pr", "12")).task.pr).toBe("12");
+    expect(await run(EXE, "deliver", "T8b", "--head", "abc")).toMatchObject({ ok: false, code: "invalid" });
   });
   test("task-set：执行者改自己任务的分支可以，改执行者不行；PM 改执行者时 registry 跟着挂", async () => {
     await taskT8b();
@@ -166,9 +181,9 @@ describe("阶段、进展、交付、审查", () => {
   test("deliver：执行者交付并推到 review；别人不行", async () => {
     await run(EXE, "stage", "T8b", "--from", "spec", "--to", "restate");
     await run(PM, "stage", "T8b", "--from", "restate", "--to", "build");
-    expect(await run("agent-task-t4", "deliver", "T8b", "--head", "abc")).toMatchObject({ ok: false, code: "forbidden" });
-    const r = await run(EXE, "deliver", "T8b", "--head", "abc", "--evidence", "docs/tasks/T8b.report.md", "--from", "build");
-    expect(r).toMatchObject({ ok: true, task: { stage: "review", round: 1, headSHA: "abc" }, event: { kind: "deliver", data: { round: 1 } } });
+    expect(await run("agent-task-t4", "deliver", "T8b", "--head", "abc1234")).toMatchObject({ ok: false, code: "forbidden" });
+    const r = await run(EXE, "deliver", "T8b", "--head", "abc1234", "--evidence", "docs/tasks/T8b.report.md", "--from", "build");
+    expect(r).toMatchObject({ ok: true, task: { stage: "review", round: 1, headSHA: "abc1234" }, event: { kind: "deliver", data: { round: 1 } } });
   });
   test("review：只有 PM；缺 P 计数 invalid；--to 同事务推阶段", async () => {
     await run(EXE, "stage", "T8b", "--from", "spec", "--to", "restate");

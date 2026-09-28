@@ -120,6 +120,45 @@ describe("ledger review-pack / dispatch", () => {
   });
 });
 
+describe("review --to merge：规格卡还欠对抗式就拒绝（开了班子的项目）", () => {
+  const pass = (to?: string) => ["review", "T1", "--reviewer", "r", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0", ...(to ? ["--to", to] : [])];
+  const withTeam = () => setMeta(db, { actor: "owner", now: 1 }, { project: P, key: "team", value: { dispatcher: "agent-disp", audit: true } });
+
+  test("常规轮 pass 直接 --to merge 被拒；派对抗式、对抗式判通过时 --to merge 放行", async () => {
+    withTeam();
+    toReview();
+    await run("agent-disp", "dispatch", "T1");
+    const bad = await run("agent-disp", ...pass("merge"));
+    expect(bad).toMatchObject({ ok: false, code: "conflict" });
+    expect(bad.error).toContain("规格卡要求对抗式");
+    expect(getMeta(db, P).team).not.toBeNull();
+    expect(listEvents(db, { target: "T1" }).filter((e) => e.kind === "review")).toHaveLength(0); // 拒绝时什么都没写
+    expect((await run("agent-disp", ...pass())).ok).toBe(true);
+    const adv = await run("agent-disp", "dispatch", "T1");
+    expect(adv.event.data.reviewer).toBe("adversarial");
+    expect((await run("agent-disp", ...pass("merge"))).task.stage).toBe("merge");
+  });
+
+  test("没有派审记录（手写 prompt 派的审）也拒绝，提示 PM 用 stage 手动推", async () => {
+    withTeam();
+    toReview();
+    const r = await run("agent-pm", ...pass("merge"));
+    expect(r.error).toContain("ledger stage --from review --to merge");
+    expect((await run("agent-pm", "stage", "T1", "--from", "review", "--to", "merge")).task.stage).toBe("merge");
+  });
+
+  test("没开班子、读不到规格卡：照旧放行", async () => {
+    toReview();
+    expect((await run("agent-pm", ...pass("merge"))).task.stage).toBe("merge");
+    createTask(db, { actor: "owner", now: 1 }, { project: P, id: "T2", title: "无卡", kind: "code", agent: "agent-exec" });
+    withTeam();
+    for (const [from, to] of [["spec", "restate"], ["restate", "build"]]) moveStage(db, { actor: "owner", now: 1 }, { taskId: "T2", from: from as never, to: to as never });
+    deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T2", moveFrom: "build" });
+    const noSpec = ["review", "T2", "--reviewer", "r", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0", "--to", "merge"];
+    expect((await run("agent-pm", ...noSpec)).task.stage).toBe("merge");
+  });
+});
+
 describe("ledger escalate", () => {
   test("执行者能就自己的任务升级给 PM，不能升级给 owner；调度助理可以", async () => {
     expect((await run("agent-exec", "escalate", "T1", "--reason", "要改规格")).event).toMatchObject({ kind: "escalate", data: { to: "pm" } });

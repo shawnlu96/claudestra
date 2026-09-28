@@ -20,6 +20,9 @@ export interface FlushDeps {
   touch: (channelId: string, env: Envelope) => void;
 }
 
+/** 押后日志里的来源：agent 名、bridge:<label>（班子通知是 bridge:ledger），其余照 kind */
+const fromLabel = (env: Envelope): string => (env.from.kind === "local" ? (env.from.agentName ?? "?") : env.from.kind === "bridge" ? `bridge:${env.from.label ?? "?"}` : env.from.kind);
+
 type DeliveredHook = (channelId: string, env: Envelope) => void;
 const deliveredHooks: DeliveredHook[] = [];
 
@@ -57,7 +60,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
         for (const fn of deliveredHooks) fn(channelId, item.env);
       }
       d.held.remove(channelId, item);
-      if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
+      if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${fromLabel(item.env)} → ${to.agentName || channelId}（${item.env.meta.messageId}）`);
     }
   } finally {
     d.held.release(channelId);

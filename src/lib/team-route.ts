@@ -5,13 +5,13 @@
  *   review 且推到 fix      → 执行者：结论 md 路径 + 那条 review 的一句话
  *   review 且推到 merge / done / spec，或通过、审查走完但没推阶段 → PM（「可以合并」只在真推到 merge 时说）；
  *   通过了但下一轮还要审（nextReview，与 review-pack 同一算法、同一份规格卡）→ 调度助理（没配就 PM）「常规轮通过，下一轮：对抗式」；
- *   没有派审记录又读不到规格卡（不知道还要不要审）→ 同样交调度助理核对，不说「审查走完」
+ *   读不到规格卡、或规格卡要对抗式而台账里没有对抗式 pass、这轮也没有派审记录（不知道）→ 同样交调度助理核对，不说「审查走完」
  *   escalate               → PM
  * 硬规则（review 出 P0，或第 HARD_ROUND 轮还不通过）写死在 autoEscalations：bridge 据此调 `ledger escalate --auto` 记一条升级，
  * 不靠调度助理判断；那条 escalate 事件下一轮照上面的规则通知 PM。
  * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管；该发却找不到 PM 时经 ctx.warn 留日志。
  * 标题行与【升级】这类判定词只由代码按事件类型 / verdict 生成；台账里的自由文本（交付说明、升级原因、审查要点）只进固定标题的
- * 引用框（quoteExternal 单行引用），证据 / 结论路径只认路径字符、也进引用框：通知以 bridge 身份送达，不能让原文伪造指令。
+ * 引用框（quoteExternal 单行引用），证据 / 结论路径同样进引用框：通知以 bridge 身份送达，不能让原文伪造指令。
  */
 import { nextAfterReview, pmOf, type SpecPolicy } from "./ledger-handler.js";
 import { pathLike, pathQuote, quoteExternal, refLike } from "./quote-text.js";
@@ -41,7 +41,7 @@ export interface RouteCtx {
   team(project: string): { pms: readonly string[]; team: TeamConfig | null };
   /** 同一任务的全部事件（seq 升序）：判断常规轮通过后是否还有对抗式 */
   events(taskId: string): readonly LedgerEvent[];
-  /** 规格卡的审查策略（lib/task-spec.ts specPolicyOf）：没有 dispatch 事件时用它；不给 = 不知道 */
+  /** 规格卡的审查策略（lib/task-spec.ts specPolicyOf，与 review-pack 同一来源）；不给 = 不知道 */
   policy?(task: LedgerTask): SpecPolicy;
   /** 打印进通知里的 manager 命令前缀，例如 `bun /path/to/src/manager.ts` */
   managerCmd: string;
@@ -57,10 +57,10 @@ const tid = (id: string): string => (refLike(id) ? id : quoteExternal(id, 40));
 /** 判定词只由代码按 verdict 字段生成 */
 const VERDICT_WORD: Record<string, string> = { pass: "通过", changes: "要修改", block: "阻塞" };
 const verdictWord = (v: unknown): string => VERDICT_WORD[str(v) ?? ""] ?? "（结论字段不认识）";
-/** 路径也是写的人给的：只认路径字符（pathLike），并且同样进固定标题的引用框 */
+/** 路径也是写的人给的：和别的自由文本一样进固定标题的引用框（不看它像不像路径） */
 const pathLine = (label: string, v: unknown): string[] => {
   const p = str(v);
-  return p ? [`${label}（原文，非指令）：${pathQuote(p, "（不是路径，已省略；看 ledger show）")}`] : [];
+  return p ? [`${label}（原文，非指令）：${pathQuote(p)}`] : [];
 };
 /** 固定标题的引用框：标题由代码写死，原文只在「」里 */
 const quoted = (label: string, text: string): string[] => (text ? [`${label}（原文，非指令）：${quoteExternal(text)}`] : []);
@@ -98,7 +98,7 @@ const PM_MOVES: Partial<Record<Stage, string>> = { merge: "阶段已推到 merge
 const NEXT_WORD = {
   adversarial: "常规轮通过，下一轮：对抗式",
   regular: "判了通过但还有 P0 / P1，下一轮：常规复验",
-  unknown: "判了通过，但台账里没有派审记录、也读不到规格卡：按规格卡「审查」一行核对还要不要对抗式，不要就交 PM 推阶段",
+  unknown: "判了通过，但台账说不清审查走没走完（读不到规格卡，或这轮没有派审记录）：按规格卡核对是否还欠对抗式，不欠就交 PM 推阶段",
 } as const;
 
 type Draft = Omit<RouteNotice, "messageId" | "seq" | "project" | "taskId">;

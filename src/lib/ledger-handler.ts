@@ -4,8 +4,8 @@
  *
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
  *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理，
- *   但通过了而下一轮还要审（nextReview：规格卡要对抗式、这轮不是）仍归调度助理；审查策略取派审时 dispatch 记下的，
- *   没有 dispatch 就用调用方读的规格卡（specPolicy），两样都没有 = 不知道还要不要审，也归调度助理（宁可多问一句，不替它判走完）；
+ *   但通过了而下一轮还要审（nextReview：规格卡要对抗式、这轮不是）仍归调度助理；审查策略只取调用方读的规格卡（specPolicy），
+ *   读不到、或说不清这轮是不是对抗式（没有派审记录）= 不知道，也归调度助理（宁可多问一句，不替它判走完）；
  *   escalate → PM（data.to = owner 时归 owner；硬规则的自动升级 data.auto 不改处理人）；升级给 owner 之后 owner 记了 decision → 回到 PM。
  *   进入新阶段（stage 事件）重新从默认值算起。
  */
@@ -63,23 +63,44 @@ const num = (v: unknown): number => (typeof v === "number" ? v : 0);
 /** 规格卡的审查策略：string =「审查」那一行；null = 规格卡在但没写；undefined = 不知道（没读 / 找不到规格卡） */
 export type SpecPolicy = string | null | undefined;
 
-/**
- * 一条 review 的「上一轮」画像：审查员种类与审查策略取这条 review 之前最近的 dispatch（代码写的），
- * 没有 dispatch（PM 手写 prompt 派审、绕开了 dispatch）时策略取 specPolicy（lib/task-spec.ts，与 review-pack 同一来源）。
- * review 自己的 reviewer 字段是自由文本，不作数。events = 同一任务的事件（seq 升序）。
- */
-export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy?: SpecPolicy): { policy: SpecPolicy; last: LastReview } {
-  const d = events.findLast((e) => e.kind === "dispatch" && e.seq < review.seq);
-  const kind = d?.data.reviewer === "adversarial" ? "adversarial" : d?.data.reviewer === "regular" ? "regular" : null;
-  const policy = !d ? specPolicy : typeof d.data.policy === "string" ? d.data.policy : null;
-  const verdict = typeof review.data.verdict === "string" ? review.data.verdict : null;
-  return { policy, last: { kind, verdict, p0: num(review.data.p0), p1: num(review.data.p1) } };
+/** seq 之前最近一次派审的种类：取 dispatch.reviewer（代码写的）；review 的 reviewer 字段是自由文本，不作数；没派审记录为 null */
+function dispatchKindBefore(events: readonly LedgerEvent[], seq: number): LastReview["kind"] {
+  const d = events.findLast((e) => e.kind === "dispatch" && e.seq < seq);
+  return d?.data.reviewer === "adversarial" ? "adversarial" : d?.data.reviewer === "regular" ? "regular" : null;
 }
 
-/** 这条 review 之后下一轮是什么；null = 审查走完（lib/review-pack.ts 的 nextReview，路由与 review-pack 同一算法）；unknown = 审查策略不知道 */
-export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy?: SpecPolicy): NextReview | "unknown" {
-  const { policy, last } = lastReviewOf(review, events, specPolicy);
-  return policy === undefined ? "unknown" : nextReview(policy, last);
+/** 一条 review 的「上一轮」画像（给 nextReview 用）。events = 同一任务的事件（seq 升序） */
+export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]): LastReview {
+  const verdict = typeof review.data.verdict === "string" ? review.data.verdict : null;
+  return { kind: dispatchKindBefore(events, review.seq), verdict, p0: num(review.data.p0), p1: num(review.data.p1) };
+}
+
+/** 台账里有没有对抗式轮的 pass（那条 review 之前最近的派审是对抗式） */
+function adversarialPassed(events: readonly LedgerEvent[]): boolean {
+  return events.some((e) => e.kind === "review" && e.data.verdict === "pass" && dispatchKindBefore(events, e.seq) === "adversarial");
+}
+
+/**
+ * 还欠不欠对抗式：规格卡要对抗式，台账里还没有对抗式轮的 pass。路由、currentHandler、`review --to merge` 共用这一个判定；
+ * pending = 正要记、还没入库的那条结论（--to merge 时），它前面最近的派审是对抗式且判通过就算还清。
+ * 策略只认规格卡（lib/task-spec.ts，与 review-pack 同一来源）；读不到规格卡 = unknown。
+ */
+export function owesAdversarial(policy: SpecPolicy, events: readonly LedgerEvent[], pending?: { verdict: string }): boolean | "unknown" {
+  if (policy === undefined) return "unknown";
+  if (!policy?.includes("对抗") || adversarialPassed(events)) return false;
+  return !(pending?.verdict === "pass" && dispatchKindBefore(events, Infinity) === "adversarial");
+}
+
+/**
+ * 这条 review 之后下一轮是什么；null = 审查走完（nextReview，与 review-pack 同一算法）。
+ * unknown = 读不到规格卡，或者规格卡要对抗式、台账里还没有对抗式 pass、这轮又没有派审记录（说不清它是不是对抗式）：交调度助理核对。
+ */
+export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy: SpecPolicy): NextReview | "unknown" {
+  if (specPolicy === undefined) return "unknown";
+  const last = lastReviewOf(review, events);
+  const upto = events.filter((e) => e.seq <= review.seq);
+  if (last.verdict === "pass" && last.kind === null && owesAdversarial(specPolicy, upto) === true) return "unknown";
+  return nextReview(specPolicy, last);
 }
 
 /** 事件把接手的一环推到哪；null = 这条不改变谁在接（note 等） */
