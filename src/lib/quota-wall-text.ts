@@ -9,7 +9,8 @@
  */
 import { parseResetText } from "./usage-window.js";
 
-const LIMIT_HIT_RE = /^(?:You['’]?ve hit your (?:[\w-]+ )?limit|Hit your (?:rate |usage )?limit)/i;
+/** 「hit」是额度窗口，「reached your Fable limit」是单个模型的额度（本机 48 条实录）；都只认句首 */
+const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w-]+ ){0,2}limit|Hit your (?:rate |usage )?limit)/i;
 
 export const isLimitHitText = (text: string): boolean => LIMIT_HIT_RE.test(text.trim());
 
@@ -27,7 +28,7 @@ export interface WallHit {
 export function parseWallText(text: string, now: number): WallHit | null {
   const t = text.trim();
   if (!isLimitHitText(t)) return null;
-  const k = /hit your ([\w-]+) limit/i.exec(t)?.[1]?.toLowerCase();
+  const k = /(?:hit|reached) your ([\w-]+) limit/i.exec(t)?.[1]?.toLowerCase();
   const kind: WallKind = k === "weekly" ? "weekly" : k === "session" ? "session" : "unknown";
   const rm = /\bresets\s+(.+?)\s*$/i.exec(t.split("\n")[0]);
   const resetsText = rm ? rm[1].trim() : null;
