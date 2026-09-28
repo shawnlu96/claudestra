@@ -99,3 +99,8 @@ export function useContacts(): ContactsSnap {
 export function useFullScope(): boolean | null {
   return useSyncExternalStore(subscribe, () => snap.fullScope, () => null);
 }
+
+/** 非 React 处（chat-store 的后台请求，见 scoped-requests.ts）读当前判定；没有订阅者时不会自己去问，只读已有结果 */
+export function fullScopeNow(): boolean | null {
+  return snap.fullScope;
+}

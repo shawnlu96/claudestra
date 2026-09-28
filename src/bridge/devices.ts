@@ -174,6 +174,10 @@ export async function handleDevicesManaged(req: Request, url: URL, principal: Pr
   const p = url.pathname;
   if (!p.startsWith("/api/v1/devices")) return null;
   if (p === "/api/v1/devices" && req.method === "GET") return canManage(principal) ? listDevices(principal) : forbidden(MANAGE_MSG);
+  // 退出登录 = 撤自己这条：不用先拉列表拿 id（guest 没有列表权限）；Bearer / peer token 没有「这条设备凭据」，404
+  if (p === "/api/v1/devices/current" && req.method === "DELETE") {
+    return principal.credential?.startsWith("dev_") ? revokeDevice(req, principal, principal.credential) : apiJson(404, { ok: false, error: "not a device credential" });
+  }
   const del = p.match(/^\/api\/v1\/devices\/(dev_[0-9a-f]+)$/);
   if (del && req.method === "DELETE") return revokeDevice(req, principal, del[1]);
   if (p === "/api/v1/devices/approvals" && req.method === "GET") {

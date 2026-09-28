@@ -14,7 +14,6 @@ import { useKbFixToggle } from "./settings/interface-sections";
 import { SettingsNav, settingsPagesFor, type SettingsPageId } from "./settings/nav";
 import { useFullScope } from "../contacts-data";
 import { isNativeShell } from "@/lib/native";
-import { useMachines } from "../../machines/use-machines";
 import { SettingsPage } from "./settings/pages";
 
 /**
@@ -48,7 +47,6 @@ export function SettingsModal({
   // iOS 键盘修正实验开关(use-keyboard-viewport):挂载时读 localStorage
   const kbFix = useKbFixToggle();
   const full = useFullScope() === true;
-  const { multi } = useMachines();
   // 以下每个 hook 在 open 变真时重置 + 拉取（顺序同拆分前）；这些分区只给全权设备，别的设备不拉
   const load = open && full;
   const profile = useProfileDraft(load, shared);
@@ -61,7 +59,7 @@ export function SettingsModal({
   const [showCron, setShowCron] = useState(false);
   // null = 还没在弹窗里切过页 → 显示入口指定的 initialPage；关闭清掉，下次打开重新听入口的
   const [picked, setPicked] = useState<SettingsPageId | null>(null);
-  const pages = settingsPagesFor(full, { native: isNativeShell(), multi });
+  const pages = settingsPagesFor(full, { native: isNativeShell() });
   const page = pages.includes(picked ?? initialPage) ? (picked ?? initialPage) : "general";
   const close = () => {
     onClose();

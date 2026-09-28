@@ -5,7 +5,7 @@ import { RemoteAccessSection } from "../remote-access-section";
 import { AccessPathsSection } from "../access-paths";
 import { PeersPanel } from "../peers-modal";
 import { Section, GroupLabel } from "./section";
-import { DevicesSection, MachinesSection } from "./devices-section";
+import { DevicesSection, MachinesSection, SelfDeviceSection } from "./devices-section";
 import { ShellServerSection } from "./shell-server-section";
 import { ArchiveRetentionSection } from "./archive-retention-section";
 import { QuotaLiveSection } from "./quota-live-section";
@@ -100,11 +100,11 @@ function ConnectPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 设备：这台机器上已配对的设备（撤销 / 退出登录，要全权）+ 本浏览器配对过的机器 */
+/** 设备：这台机器上已配对的设备（撤销 / 退出登录，要全权；别的设备只有本设备的退出登录）+ 本浏览器配对过的机器 */
 function DevicesPage({ s }: { s: SettingsState }) {
   return (
     <>
-      {s.full && <DevicesSection />}
+      {s.full ? <DevicesSection /> : <SelfDeviceSection />}
       <MachinesSection />
     </>
   );

@@ -140,12 +140,12 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
 ];
 
 /**
- * 这台设备能看的页。非全权设备（guest / 部分 scope）只留纯本地的页：会话与自动化、Peer、技能库、Claude 整页的接口都要全权；
- * 连接与集成只在原生壳里还剩 App 服务器地址；设备页只在这个浏览器配过多台机器时还剩机器清单。
+ * 这台设备能看的页。非全权设备（guest / 部分 scope）只留纯本地的页和设备页（本设备的退出登录）：会话与自动化、Peer、技能库、
+ * Claude 整页的接口都要全权；连接与集成只在原生壳里还剩 App 服务器地址。
  */
-export function settingsPagesFor(full: boolean, env: { native: boolean; multi: boolean }): SettingsPageId[] {
-  if (full) return SETTINGS_PAGES.map((p) => p.id);
-  return SETTINGS_PAGES.map((p) => p.id).filter((id) => id === "general" || id === "appearance" || id === "labs" || (id === "connect" && env.native) || (id === "security" && env.multi));
+export function settingsPagesFor(full: boolean, env: { native: boolean }): SettingsPageId[] {
+  const local: SettingsPageId[] = ["general", "appearance", "security", "labs", ...(env.native ? ["connect" as const] : [])];
+  return SETTINGS_PAGES.map((p) => p.id).filter((id) => full || local.includes(id));
 }
 
 /** 左栏(sm+)/顶部横条(手机)二合一：同一组按钮，靠响应式类切方向。pages = settingsPagesFor 的结果 */

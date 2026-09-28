@@ -162,6 +162,7 @@ export const DICT: Record<string, string> = {
   "最近": "Last seen",
   "确定？": "Sure?",
   "退出登录": "Sign out",
+  "这台设备只能用分享给它的会话，看不到、也管不了别的设备": "This device can only use the sessions shared with it; it can't see or manage other devices",
   "这个浏览器里的机器": "Machines in this browser",
   "添加另一台机器": "Add another machine",
   "切换机器": "Switch machine",

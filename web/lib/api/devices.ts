@@ -112,6 +112,11 @@ export function revokeDevice(id: string): Promise<void> {
   return api(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
 }
 
+/** 退出登录：撤这次请求用的那条设备凭据，不用 manage、不用先拉列表（guest 拿不到列表）；bridge 同样回删 cookie */
+export function revokeCurrentDevice(): Promise<void> {
+  return api("/devices/current", { method: "DELETE" }).then(() => undefined);
+}
+
 // ── 在网页里发配对码、批准别的设备（要 manage；bridge/local-api/control.ts 与 devices.ts 的管理端点）──
 
 /** 手输短码等着这台机器点头的设备 */
