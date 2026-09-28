@@ -14,6 +14,8 @@ import { mergeEnvContent, readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR } from "./paths.js";
 import { LEGACY_WEB_DAEMON, legacyWebPlistPath } from "./web-static.js";
 import { migrateWebState, sessionIdHash } from "./web-state-migrate.js";
+import { publishWebOut } from "./web-build.js";
+import { migrateStaticDirToReleases } from "./web-releases.js";
 
 /** 旧 web 的会话 cookie 名（web/lib/services/auth.service.ts，已删） */
 export const LEGACY_SESSION_COOKIE = "cstra_session";
@@ -61,7 +63,12 @@ function addMissingEnv(envFile: string, updates: Record<string, string>): string
  * install-cli 在 reload daemon 之前调：机器上还有旧 web 的 plist 且新前端已构建 → 迁移并卸旧 daemon（它起不来了），
  * 随后 bridge reload 时带上新 env、接管旧端口。返回给 install-cli 的 warnings（说明做了什么、怎么回滚）。
  */
-export async function autoMigrateLegacyWeb(repoRoot: string): Promise<string[]> {
+/** install-cli 的网页托管迁移一步做完：旧 web 服务 → bridge 托管 web/out → 按版本发布（lib/web-releases.ts，不抛错） */
+export async function migrateWebHosting(repoRoot: string): Promise<string[]> {
+  return [...(await autoMigrateLegacyWeb(repoRoot)), ...(await migrateStaticDirToReleases(repoRoot, () => publishWebOut(repoRoot)))];
+}
+
+async function autoMigrateLegacyWeb(repoRoot: string): Promise<string[]> {
   const plistPath = legacyWebPlistPath();
   if (!existsSync(plistPath)) return [];
   const out = join(repoRoot, "web", "out");

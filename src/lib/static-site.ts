@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, normalize, resolve } from "node:path";
+import { join, normalize, relative, resolve } from "node:path";
 
 export interface StaticHit {
   /** 磁盘绝对路径 */
@@ -133,7 +133,8 @@ export function resolveExportedPath(rootDir: string, pathname: string, fileExist
   const { root, rel } = safe;
   const hit = (p: string, status: 200 | 404 = 200): StaticHit | null => {
     const abs = normalize(join(root, p)); // rel 已钉在根内，追加 .html / index.html / 404.html 不会再出去
-    return fileExists(abs) ? { path: abs, status, cacheControl: cachePolicy(p) } : null;
+    // 缓存策略按规范化后的落地路径定：`/_next/static/%2e%2e/index.html` 落到的是 HTML，不能拿到永久缓存
+    return fileExists(abs) ? { path: abs, status, cacheControl: cachePolicy(`/${relative(root, abs)}`) } : null;
   };
   if (rel.endsWith("/")) return hit(`${rel}index.html`) ?? notFound(hit);
   const last = rel.split("/").pop() ?? "";

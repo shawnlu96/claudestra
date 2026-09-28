@@ -50,7 +50,7 @@ import { readActiveAgents } from "./registry.js";
 import { rebuildWebIfStale, type WebBuildResult } from "./web-build.js";
 import { legacyWebPlistPath, staticIndexExists, webStaticState, webStaticWarnings } from "./web-static.js";
 import { cliPathNotes } from "./cli-path.js";
-import { autoMigrateLegacyWeb } from "./legacy-web.js";
+import { migrateWebHosting } from "./legacy-web.js";
 
 
 interface DaemonSpec {
@@ -826,8 +826,8 @@ export async function installClaudestraCli(
       }
     } catch (e) { warnings.push(`web 构建: ${(e as Error).message}`); }
   }
-  // 1c) 从旧 web 服务升上来的机器：自动迁移 + 卸掉起不来的旧 daemon；下面 reload bridge 时带着新 env 接管旧端口（lib/legacy-web.ts）
-  try { warnings.push(...(await autoMigrateLegacyWeb(repoRoot))); }
+  // 1c) 网页托管迁移：旧 web 服务 → bridge 托管 → 按版本发布；下面 reload bridge 时带着新 env 生效（lib/legacy-web.ts）
+  try { warnings.push(...(await migrateWebHosting(repoRoot))); }
   catch (e) { warnings.push(`旧 web 自动迁移失败（${(e as Error).message}）：手动 claudestra migrate-web-state → retire-web`); }
   result.web = webStaticState(repoRoot);
   warnings.push(...webStaticWarnings(result.web, { staticIndex: staticIndexExists(result.web.staticDir), legacyPlist: existsSync(legacyWebPlistPath()) }));
