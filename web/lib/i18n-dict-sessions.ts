@@ -8,6 +8,10 @@ export const SESSIONS_DICT: Record<string, string> = {
   "活跃": "Active",
   "子会话": "Sub-session",
   "自动审查": "Auto review",
+  "已纳管": "Managed",
+  "{n} 个子会话": "{n} sub-session|{n} sub-sessions",
+  "展开子会话": "Show sub-sessions",
+  "收起子会话": "Hide sub-sessions",
   "已归档并从列表移除（内容留在归档目录，可找回）": "Archived and removed from the list (the content stays in the archive and can be restored)",
   "已受理，正在后台收编（约 10-40 秒），完成后会出现在 agent 列表里。":
     "Accepted — adopting in the background (about 10–40 s). It will show up in the agent list when done.",

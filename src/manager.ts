@@ -61,6 +61,7 @@ import {
 } from "./lib/claude-launch.js";
 import { piAgentDir, piSessionIdFromFilename } from "./lib/pi-session.js";
 import { translateSessionLine } from "./lib/session-source.js";
+import { limitByMainSessions } from "./lib/session-limit.js";
 import { resolveSessionIdForWindow, readLiveCcSessionEntries } from "./lib/cc-sessions.js";
 import { readBypassConsent } from "./lib/bypass-consent.js";
 import { writeMasterResume } from "./lib/master-session.js";
@@ -102,7 +103,7 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, outputSync, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -1622,14 +1623,10 @@ async function cmdSessions(search?: string) {
   // 从 registry 建立 sessionId → displayName 映射
   const reg = await loadRegistry();
   const nameMap = new Map<string, string>();
-  for (const info of Object.values(reg.agents)) {
-    if (info.sessionId && info.displayName) {
-      nameMap.set(info.sessionId, info.displayName);
-    }
-  }
+  for (const info of Object.values(reg.agents)) if (info.sessionId && info.displayName) nameMap.set(info.sessionId, info.displayName);
 
-  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 —— Discord 面板自己 slice(15)，CLI 是人读的。
-  const display = sessions.slice(0, 100).map((s, i) => ({
+  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 个主会话（子线程跟着主会话走），Discord 面板自己再截
+  const display = limitByMainSessions(sessions, 100).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
     name: nameMap.get(s.sessionId) || s.slug || s.sessionId.slice(0, 8),
@@ -1643,7 +1640,7 @@ async function cmdSessions(search?: string) {
     ...(s.sub ? { sub: s.sub } : {}),
   }));
 
-  output({
+  outputSync({
     ok: true,
     total: sessions.length,
     showing: display.length,
