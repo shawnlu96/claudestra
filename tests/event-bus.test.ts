@@ -79,7 +79,7 @@ describe("subscribeEvents", () => {
 
   test("allow 逐条判定（/api/v1/events 用 agentInScope）：\"*\" token 收不到 master 的事件，实时与补发都一样", () => {
     const star: Principal = { id: "token:tok_star", role: "external", agents: ["*"], createdAt: "2026-09-27T00:00:00Z" };
-    const allow = (a: string) => agentInScope(star, a);
+    const allow = (e: BridgeEvent) => agentInScope(star, e.agent);
     const got: string[] = [];
     subscribeEvents({ allow }, (e) => got.push(e.agent));
     mk("agent-worker");
@@ -87,6 +87,22 @@ describe("subscribeEvents", () => {
     mk("agent-master");
     expect(got).toEqual(["agent-worker"]);
     expect(replayEventsSince(0, { allow }).map((e) => e.agent)).toEqual(["agent-worker"]);
+  });
+
+  test("allow 拿到整条事件：可按类型判（ledger 事件不属于任何 agent）；transient 的 ledger 事件不进补发", () => {
+    const seen: BridgeEvent[] = [];
+    const allow = (e: BridgeEvent) => { seen.push(e); return e.type === "ledger" ? false : e.agent === "agent-worker"; };
+    const got: string[] = [];
+    subscribeEvents({ allow }, (e) => got.push(`${e.type}:${e.agent}`));
+    const all: string[] = [];
+    subscribeEvents({}, (e) => all.push(e.type));
+    mk("agent-worker");
+    emitEvent({ agent: "", chatId: "", type: "ledger", data: { project: "p" } }, { transient: true });
+    expect(got).toEqual(["assistant_text:agent-worker"]);
+    expect(all).toEqual(["assistant_text", "ledger"]);
+    expect(seen.map((e) => e.type)).toEqual(["assistant_text", "ledger"]);
+    expect(seen[1].data).toEqual({ project: "p" });
+    expect(replayEventsSince(0).map((e) => e.type)).toEqual(["assistant_text"]);
   });
 
   test("订阅者回调抛异常不影响后续订阅者与主流程", () => {

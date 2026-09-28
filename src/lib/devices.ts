@@ -185,6 +185,15 @@ export function canManage(p: Principal): boolean {
 }
 
 /**
+ * 内置台账（docs 10-ledger §4）的唯一读门，API / SSE ledger 事件 / GET /agents 的 ledgerTask 三处共用。
+ * 台账横跨整个项目的任务、执行者与 owner 原话，所以比 canManage 多要「全 scope、非 peer」：
+ * 部分 scope 的 owner 设备、guest、peer（含历史上签过 "*" 的）一律不给；老的全 scope Bearer 随 canManage 过渡期放行。
+ */
+export function canReadLedger(p: Principal): boolean {
+  return canManage(p) && p.agents.includes("*") && !p.peer;
+}
+
+/**
  * 在网页里发配对码 / 批准配对的门：要 manage，而且得是设备凭据——老的全 scope Bearer token 过渡期还能过 canManage，
  * 但不该拿它签出带终端和管理的新设备（codex 复核 #67）。本机终端走回环控制路由，不经这里。
  */

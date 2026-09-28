@@ -79,6 +79,7 @@ import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-h
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { sseEventAllow } from "./ledger-feed.js";
 import { firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
@@ -940,9 +941,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
   if (path === "/events" && req.method === "GET") {
-    // 逐条按 agentInScope 过滤（"*" 不含 master、peer 永不含 master、前缀双认）——原先 "*" 直接不过滤，master 的事件全漏给 "*" token
-    const allow = (agent: string) => agentInScope(principal, agent);
-    return revocable(deps.handleEventsRequest(req, { allow }), principal); // 设备凭据一撤，这条 SSE 立刻断（credential-revocation.ts）
+    // 逐条过滤：agent 事件按 agentInScope（"*" 不含 master、peer 永不含 master、前缀双认），ledger 事件只给 canReadLedger（bridge/ledger-feed.ts）
+    return revocable(deps.handleEventsRequest(req, { allow: sseEventAllow(principal) }), principal); // 设备凭据一撤，这条 SSE 立刻断（credential-revocation.ts）
   }
 
   // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送只推自己的对话）；ownerIds = 本人的 Discord 账号（ALLOWED_USER_IDS 第一个 = 装机时填的自己），web 据此把本人从 Discord 发的也放右边；不告诉 peer

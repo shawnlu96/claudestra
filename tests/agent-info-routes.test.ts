@@ -200,4 +200,24 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     expect(x.parent).toBeUndefined();
     expect(x.task).toBeUndefined();
   });
+  test("ledgerTask（台账执行中的任务）只给 canReadLedger，与 T4 的 parent / task 并存；别人连库都不查", async () => {
+    let calls = 0;
+    const withLedger = { ...io, ledgerTasks: () => (calls++, new Map([["t8c", { id: "T8c", stage: "review" as const, round: 2 }]])) };
+    const own = await agentListExtras(owner, withLedger);
+    expect(own("agent-t8c", { parent: "agent-open", task: "T8c 读接口" })).toMatchObject({ parent: "open", task: "T8c 读接口", ledgerTask: { id: "T8c", stage: "review", round: 2 } });
+    expect(own("t8c", {}).ledgerTask).toEqual({ id: "T8c", stage: "review", round: 2 }); // 裸名也对得上
+    expect("ledgerTask" in own("agent-open", {})).toBe(false);
+    expect(calls).toBe(1); // 一次列表只查一次库
+    const partialOwner: Principal = { ...owner, agents: ["t8c"], manage: true, credential: "dev_p" };
+    for (const p of [scoped, peerStar, partialOwner]) {
+      expect((await agentListExtras(p, withLedger))("agent-t8c", {}).ledgerTask).toBeUndefined();
+    }
+    expect(calls).toBe(1);
+  });
+  test("读台账出错：列表照常出，只是不带 ledgerTask", async () => {
+    const broken = { ...io, ledgerTasks: () => { throw new Error("database is locked"); } };
+    const x = (await agentListExtras(owner, broken))("agent-t8c", { task: "T" });
+    expect(x.task).toBe("T");
+    expect(x.ledgerTask).toBeUndefined();
+  });
 });
