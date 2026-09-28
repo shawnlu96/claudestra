@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
-import { resolveDeltaClicks } from "@/features/chat/delta-clicks";
+import { resolveDeltaClicks, resolveLiveClick } from "@/features/chat/delta-clicks";
 import type { WebComponentRow } from "@/lib/chat/events";
 
 const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "user", text, ...extra });
@@ -95,5 +95,21 @@ describe("resolveDeltaClicks（差量里的回投往前找所属表单）", () =
     const guest = split(prior, [u(3, "[button:go]", { from: "guest-mom", fromId: "api:guest:mom" })]);
     expect(guest.shaped[0].content).toBe("✅ 发版");
     expect(guest.shaped[0].from).toBe("guest-mom");
+  });
+});
+
+describe("resolveLiveClick（实时流推来的他端回投）", () => {
+  test("按钮 / 单选 / 多选都还原成与刷新后一样的文案，并给表单标已答；普通文字返回 null", () => {
+    for (const [wire, idx] of [["[button:go]", 2], ["[select:env:stg]", 2], ["[select:picks:r]", 2]] as const) {
+      const msgs = toChatMessages(structuredClone(prior), { sid: "s1" });
+      const full = toChatMessages(structuredClone([...prior, u(3, wire)]), { sid: "s1" });
+      expect(resolveLiveClick(wire, msgs)).toBe(full[idx].content);
+      expect(msgs[1].replyClicks).toEqual(full[1].replyClicks!);
+    }
+    expect(resolveLiveClick("随便说点", toChatMessages(structuredClone(prior)))).toBeNull();
+  });
+
+  test("表单不在当前列表里：按钮给兜底「🔘 id」（与刷新后同形），不是原样的 [button:id]", () => {
+    expect(resolveLiveClick("[button:ghost]", toChatMessages([u(1, "hi")]))).toBe("🔘 ghost");
   });
 });

@@ -28,8 +28,7 @@ import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
-import { restoreFormReply } from "@/lib/chat/form-restore";
-import { resolveDeltaClicks } from "./delta-clicks";
+import { resolveDeltaClicks, resolveLiveClick } from "./delta-clicks";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
 import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
@@ -1518,10 +1517,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const t = norm(text);
     if (!t && !attachments?.length) return;
     const tail = this.state.messages.slice(-15);
-    // 对账去重:文本相同即回声(附件消息 BFF 已剥注入块,与乐观消息的干净文本
-    // 对得上);纯附件无文本时按附件数量兜底匹配
-    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒
-    // 回声被画成第二个气泡（owner 2026-09-14 实报「发一条多出现一个」）
+    // 对账去重:原文(wire 优先)相同即回声;纯附件无文本时按附件数量兜底匹配。
+    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒ 回声被画成第二个气泡
     const bare = (m: ChatMessage) => norm(stripInboundHeader(m.wire ?? m.content ?? ""));
     if (
       tail.some(
@@ -1538,10 +1535,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         const last = s.messages[s.messages.length - 1];
         if (last?.role === "assistant" && last.streamed) last.streamed = false;
       }
+      const content = resolveLiveClick(text, s.messages) ?? text; // 他端发的按钮 / 表单回投：显示可读文案 + 标已答，原文留 wire 给回声对账
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content: restoreFormReply(text, s.messages) ?? text, // 他端发的表单回投：显示可读行 + 标已答
+        content,
+        ...(content !== text ? { wire: text } : {}),
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
