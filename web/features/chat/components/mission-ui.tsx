@@ -9,9 +9,9 @@ import { isStale, nextRefreshMs, resolveUntil, tipShift } from "../mission-time"
 import { CenteredModal } from "./centered-modal";
 
 /**
- * 值守的界面（bridge/local-api/mission.ts；推进在 bridge/mission.ts）：
+ * Autopilot 的界面（bridge/local-api/mission.ts；推进在 bridge/mission.ts）：
  *   MissionBadge  侧栏行的图标 / 顶栏的「截止 今天 11:00」标记；额度用尽退避中显示「等到 明天 09:15」，悬停看全称与目标
- *   MissionModal  「开始值守…」弹框：目标 + 截止时间（快捷：+2 / +4 / +8 小时，或手填 HH:MM）
+ *   MissionModal  「开启 Autopilot…」弹框：目标 + 截止时间（快捷：+2 / +4 / +8 小时，或手填 HH:MM）
  * 弹框单实例挂在 AgentMenu 的 portal 里，侧栏菜单与顶栏菜单都经 openMissionModal 打开。
  */
 type T = ReturnType<typeof useT>;
@@ -23,7 +23,7 @@ function due(t: T, iso: string, now: number): { short: string; full: string } {
   return { short: `${day} ${p.hm}`, full: p.full };
 }
 
-/** lucide navigation：值守的统一标识（侧栏、顶栏徽章、菜单、弹框共用），线条风格与顶栏其他图标一致 */
+/** lucide navigation：Autopilot 的统一标识（侧栏、顶栏徽章、菜单、弹框共用），线条风格与顶栏其他图标一致 */
 export function MissionIcon({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -32,7 +32,7 @@ export function MissionIcon({ size = 13 }: { size?: number }) {
   );
 }
 
-/** lucide circle-stop：结束值守 */
+/** lucide circle-stop：关闭 Autopilot */
 export function MissionStopIcon({ size = 15 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -89,7 +89,7 @@ export function MissionBadge({ mission, compact = false, slot }: { mission: Miss
   const resume = waiting ? due(t, mission.resumeAt!, now) : null;
   const text = resume ? `${t("等到")} ${resume.short}` : `${t("截止")} ${until.short}`;
   const title =
-    `${t("值守中")} · ${t("截止")} ${until.full} · ${t("已提醒")} ${mission.nudges}` + (resume ? `\n${t("等到")} ${resume.full}` : "") + `\n${mission.goal}`;
+    `${t("Autopilot 中")} · ${t("截止")} ${until.full} · ${t("已提醒")} ${mission.nudges}` + (resume ? `\n${t("等到")} ${resume.full}` : "") + `\n${mission.goal}`;
   // 浮层内容（多一行「等到」、目标变了）或视口（转屏、改窗口大小）变了都要重新夹一次
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -152,7 +152,7 @@ export function MissionBadge({ mission, compact = false, slot }: { mission: Miss
         }
       >
         <span className="block text-[10px] text-base-content/50">
-          {t("值守中")} · {t("已提醒")} {mission.nudges}
+          {t("Autopilot 中")} · {t("已提醒")} {mission.nudges}
         </span>
         <span className="block font-mono tabular-nums">
           {t("截止")} {until.full}
@@ -200,7 +200,7 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
   if (!agent || typeof document === "undefined") return null;
   const close = () => setAgent(null);
   const submit = async () => {
-    if (!goal.trim()) return setErr(t("写一句值守要推进的目标"));
+    if (!goal.trim()) return setErr(t("写一句 Autopilot 要推进的目标"));
     setBusy(true);
     setErr("");
     try {
@@ -222,7 +222,7 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
             <MissionIcon size={16} />
           </span>
           <span className="min-w-0 truncate">
-            {t("开始值守")} · {agent.label || t(agent.displayName)}
+            {t("开启 Autopilot（自动推进）")} · {agent.label || t(agent.displayName)}
           </span>
         </h3>
         <p className="mt-1 text-xs leading-relaxed text-base-content/60">
@@ -263,7 +263,7 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
             {t("取消")}
           </button>
           <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void submit()}>
-            {busy ? <span className="loading loading-spinner loading-xs" /> : t("开始值守")}
+            {busy ? <span className="loading loading-spinner loading-xs" /> : t("开启 Autopilot")}
           </button>
         </div>
       </div>

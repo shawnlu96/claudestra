@@ -131,8 +131,8 @@ export function AgentMenu() {
     if (id === "info") openAgentInfo(name);
     else if (id === "mission" && s.agent.mission) {
       void stopMission(name)
-        .then((r) => fail("结束值守失败:", r))
-        .catch((e: Error) => fail("结束值守失败:", { ok: false, error: e.message }))
+        .then((r) => fail("关闭 Autopilot 失败:", r))
+        .catch((e: Error) => fail("关闭 Autopilot 失败:", { ok: false, error: e.message }))
         .finally(() => void store.refreshAgents());
     }
     else if (id === "mission") openMissionModal(s.agent);
