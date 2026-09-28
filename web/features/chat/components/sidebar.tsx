@@ -27,6 +27,7 @@ import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { WorkspaceSwitch } from "@/features/talk/workspace-switch";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -220,12 +221,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）。
           刷新按钮已移除（列表由 15s 轮询 + 回前台重连自动感知 roster 变化）；
           新建会话统一走大总管对话，Web 侧不再单独提供入口。 */}
-      <div
-        className="px-4 pb-2"
-        style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}
-      >
+      <div className="px-4 pb-2" style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}>
         <div className="flex items-center pb-2.5">
-          <span className="font-semibold">{t("会话")}</span>
+          <WorkspaceSwitch active="workbench" />
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
           <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
           {/* v2.21+ 项目管理入口 */}

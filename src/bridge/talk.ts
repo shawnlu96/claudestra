@@ -108,13 +108,14 @@ export interface PersonView {
 }
 
 /**
- * 可以 @、可以开 dm 的人。owner 看得到本机所有 guest；guest 只看得到 owner 和跟自己同在一个房间的人（不能枚举别的 guest）。
+ * 可以 @、可以开 dm 的人。owner 看得到本机所有 guest 设备；guest 只看得到 owner 和跟自己同在一个房间的人（不能枚举别的 guest）。
  */
 export function directoryFor(me: Me, principals: PrincipalsFile, rooms: readonly Room[]): PersonView[] {
   const db = talkDb();
   const ids = new Set<string>([OWNER_PERSON]);
   if (me.isOwner) {
-    for (const p of principals.principals) if (isGuestPrincipal(p.id) && !p.disabled) ids.add(personAliases(db, personIdOf(p.id))[0]);
+    // owner 看到每台 guest 设备本身（并走的带 mergedInto），界面上才能拆开；guest 只看到规范 id
+    for (const p of principals.principals) if (isGuestPrincipal(p.id) && !p.disabled) ids.add(personIdOf(p.id));
   } else {
     for (const r of rooms) for (const k of r.members) ids.add(personAliases(db, personOfKey(k, me.fp))[0]);
   }

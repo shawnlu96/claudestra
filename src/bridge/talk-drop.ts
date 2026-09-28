@@ -80,7 +80,7 @@ async function buildDrop(me: Me, principal: Principal, b: Record<string, unknown
   const principals = await talkPrincipals();
   const by = nameOf(me.personId, principals);
   const from: ApiUserEndpoint = { kind: "api", tokenId: tokenIdOf(principal), name: by, ...(isOwnerPrincipal(principal) ? { owner: true as const } : {}) };
-  const body = renderDropBody({ by, roomTitle: String(roomView(room, me, principals).title), lines: msgs.map((m) => lineOf(m, me, principals)) });
+  const body = renderDropBody({ by, room: { kind: room.kind, title: String(roomView(room, me, principals).title) }, lines: msgs.map((m) => lineOf(m, me, principals)) });
   const content = renderApiInbound({ from, content: body });
   return { room, msgs, agent, from, body, content, sha: contentSha(content) };
 }

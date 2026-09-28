@@ -76,7 +76,7 @@ export async function postRoomMessage(me: Me, p: Principal, key: string, body: R
   publishTalk(room, "message", { msg: `${m.origin}/${m.id}` });
   if (m.mentions.includes(OWNER_PERSON) && me.personId !== OWNER_PERSON) {
     const title = String(roomView(room, me, principals).title);
-    pushOwnerNotice(`${nameOf(me.personId, principals)} @ 了你（Chat · ${title}）`, m.text.slice(0, 120) || "[图片]");
+    pushOwnerNotice(`${nameOf(me.personId, principals)} @ 了你（Chat · ${title}）`, m.text.slice(0, 120) || "[图片]", `/talk?room=${encodeURIComponent(key)}`);
   }
   return apiJson(201, { ok: true, message: messageView(saved, me, p, principals) });
 }

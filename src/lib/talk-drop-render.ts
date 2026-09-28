@@ -20,7 +20,8 @@ export interface DropLine {
 
 export interface DropInput {
   by: string;
-  roomTitle: string;
+  /** dm：对方的名字；thread：小组名 */
+  room: { kind: "dm" | "thread"; title: string };
   lines: DropLine[];
 }
 
@@ -48,7 +49,8 @@ function lineBody(l: DropLine): string {
 }
 
 export function renderDropBody(d: DropInput): string {
-  const head = `[📥 从 Chat 丢进工作台] ${oneLine(d.by)} 从「${oneLine(d.roomTitle)}」选了 ${d.lines.length} 条消息交给你（只有这几条，没有其余聊天记录）。`;
+  const where = d.room.kind === "dm" ? `和 ${oneLine(d.room.title)} 的私聊` : `小组「${oneLine(d.room.title)}」`;
+  const head = `[📥 从 Chat 丢进工作台] ${oneLine(d.by)} 从${where}里选了 ${d.lines.length} 条消息交给你（只有这几条，没有其余聊天记录）。`;
   const blocks = d.lines.map((l) => `— ${oneLine(l.author)} · ${dropTime(l.at)}\n${lineBody(l)}`);
   return [head, ...blocks].join("\n\n");
 }

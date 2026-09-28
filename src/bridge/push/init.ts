@@ -24,9 +24,9 @@ import { createPushSender, type DirectBackends } from "./sender.js";
 const PRINCIPALS_REFRESH_MS = 60_000;
 let dispatcherRef: Dispatcher | null = null;
 
-/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身） */
-export function pushOwnerNotice(title: string, body: string): void {
-  dispatcherRef?.notice({ title, body }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
+/** 系统提醒推给 owner 的所有设备（推送没起来就什么也不做——提醒丢了不影响功能本身）；url = 点通知打开哪里，缺省 /chat */
+export function pushOwnerNotice(title: string, body: string, url?: string): void {
+  dispatcherRef?.notice({ title, body, url }).catch((e) => console.error(`⚠️ 推送：系统提醒没推出去: ${(e as Error).message}`));
 }
 /**
  * 要知道送没送到的系统提醒（订阅额度快过期：失败的渠道要单独重试）。推送子系统没起来（沙箱 / 启动前）→ null。
