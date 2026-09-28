@@ -28,7 +28,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...READ_CMDS,
-  import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]", run: importCmd },
+  import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
 export function ledgerUsage(): string {
