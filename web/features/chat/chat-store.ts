@@ -1558,7 +1558,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 处理（Discord 侧本就如此）。这是 claude-os stdin steer 在 claudestra 架构下的等价：
    * 不写进程 stdin，靠 CC 原生排队，语义即「插入正在跑的会话」。
    */
-  public async send(text: string, files?: File[], wireText?: string) {
+  public async send(text: string, files?: File[], wireText?: string, keepQuote = false) {
     let display = text.trim();
     const hasFiles = !!files && files.length > 0;
     if ((!display && !hasFiles) || !this.state.activeAgent) return;
@@ -1567,11 +1567,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const agent = this.state.activeAgent;
     // 引用回复(owner 2026-07-16 左滑引用):composer 文本发送时把引用草稿以
     // Markdown 引用块前置——web/Discord 都原生渲染,agent 也看得懂针对哪段。
-    // 按钮点击(wireText 场景)不消费引用。
-    if (!wireText && this.state.quoteDraft && display) {
+    // 按钮点击(wireText 场景)不消费引用;keepQuote = 输入框里带了表单同步行,wire 同样前置。
+    if ((!wireText || keepQuote) && this.state.quoteDraft && display) {
       // 块级引用可能多行(列表 / 代码块):每行都要 "> " 才是一个完整引用块
       const quoted = this.state.quoteDraft.split("\n").map((l) => `> ${l}`).join("\n");
       display = `${quoted}\n\n${display}`;
+      if (wireText) wireText = `${quoted}\n\n${wireText}`;
       this.clearQuote();
     }
     // wireText：发给 agent 的真实 payload（默认=展示文本）。按钮点击时展示 label、
@@ -2008,25 +2009,22 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /**
-   * 点击 reply 附带的按钮 / 选单：回投 [button:<id>] / [select:<id>:<value>] 给 agent
-   * （与 Discord 侧语义完全一致），同时禁用该条 reply 的整组组件、高亮所选。
-   * 展示气泡用人类可读的 label（而非裸的 [button:id]），wire 才是 agent 分支用的 payload。
+   * 点击 reply 附带的按钮 / 选单：回投 [button:<id>] / [select:<id>:<value>] 给 agent（与 Discord 同语义），
+   * 本行标已答、高亮所选。气泡显示人类可读的 label，wire 才是 agent 分支用的 payload。
    */
-  public async clickReplyComponent(
-    messageId: string,
-    rowKey: string,
-    choiceValue: string,
-    label: string,
-    wire: string
-  ) {
-    // bug ①:已作答是**按行**的,不是整条消息。防重复点只挡本行。
+  public async clickReplyComponent(messageId: string, rowKey: string, choiceValue: string, label: string, wire: string) {
+    if (this.markReplyAnswered(messageId, rowKey, choiceValue)) await this.send(label, undefined, wire);
+  }
+
+  /** 标某一行已作答（bug ①：按行不按整条；输入框带表单同步行发出也走这里）；已答 / 消息不在返回 false。 */
+  public markReplyAnswered(messageId: string, rowKey: string, choiceValue: string): boolean {
     const target = this.state.messages.find((m) => m.id === messageId);
-    if (!target || target.replyClicks?.[rowKey]) return;
+    if (!target || target.replyClicks?.[rowKey]) return false;
     this.produce((s) => {
       const m = s.messages.find((x) => x.id === messageId);
       if (m) (m.replyClicks ??= {})[rowKey] = choiceValue;
     });
-    await this.send(label, undefined, wire);
+    return true;
   }
 
   /** v2.15+ 思考遥测:3s 一条,只在回合中有意义(streaming=false 时状态条不渲染,

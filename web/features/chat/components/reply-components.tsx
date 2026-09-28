@@ -4,6 +4,9 @@ import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
+import { editComposer, useComposerText, useFormTitles, useSyncsWithComposer } from "../form-sync";
+import { pickedFromText, setFormValues, toggleFormValue } from "@/lib/chat/form-compose";
+import { useT } from "@/lib/i18n";
 
 /**
  * reply() 附带的交互组件（按钮 / 选单）Web 渲染。点击 → 回投
@@ -85,7 +88,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         if (row.type === "multiselect") {
           return (
             <MultiSelectRow
-              key={ri}
+              key={ri} messageId={m.id}
               row={row}
               disabled={rowAnswered}
               busy={busy !== ""}
@@ -141,15 +144,19 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
 
 /**
  * 多选行：勾选若干项，再点提交一次性回投。
+ * 未作答时勾选状态**就是输入框里该表单那一行**（lib/chat/form-compose.ts）：每勾 / 取消一项
+ * 改写那一行，owner 手改那一行勾选也跟着变——只有一份状态，发出去的和看到的不会打架。
  * 已作答的那一组保持勾选状态展示（跟单选一样，让人回头能看清自己选了什么）。
  */
 function MultiSelectRow({
+  messageId,
   row,
   disabled,
   busy,
   answeredValue,
   onSubmit,
 }: {
+  messageId: string;
   row: Extract<WebComponentRow, { type: "multiselect" }>;
   disabled: boolean;
   busy: boolean;
@@ -157,19 +164,22 @@ function MultiSelectRow({
   answeredValue?: string;
   onSubmit: (values: string[], labels: string[]) => void;
 }) {
-  // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则空集起步
+  const t = useT();
+  const composerText = useComposerText();
+  // 输入框同步行的标题（placeholder，同一视图重名带 id）
+  const title = useFormTitles().get(row.id) ?? row.id;
+  const synced = useSyncsWithComposer(messageId, row.id) && !disabled;
+  // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则读输入框里的同步行
   const answered = answeredValue?.startsWith(`${row.id}:`)
     ? answeredValue.slice(row.id.length + 1).split(",").filter(Boolean)
     : null;
-  const [picked, setPicked] = useState<string[]>(answered ?? []);
+  const picked = answered ?? (synced ? pickedFromText(composerText, row, title) : []);
   const locked = disabled || busy;
   const min = Math.max(1, Number(row.min) || 1);
   const max = Number(row.max) || row.options.length;
   const toggle = (v: string) => {
-    if (locked) return;
-    setPicked((prev) =>
-      prev.includes(v) ? prev.filter((x) => x !== v) : prev.length >= max ? prev : [...prev, v],
-    );
+    if (locked || !synced) return;
+    editComposer((prev) => toggleFormValue(prev, row, title, v));
   };
   const canSubmit = !locked && picked.length >= min && picked.length <= max;
 
@@ -210,13 +220,18 @@ function MultiSelectRow({
           disabled={!canSubmit}
           onClick={() => {
             const labels = row.options.filter((o) => picked.includes(o.value)).map((o) => o.label);
+            // 快速提交 = 这组已答，输入框里它的同步行一并撤掉（补充文字留着）
+            editComposer((prev) => setFormValues(prev, row, title, []));
             onSubmit(picked, labels);
           }}
           className="btn btn-primary btn-sm mt-1 self-start"
         >
-          {row.submitLabel || "提交"}
+          {row.submitLabel || t("提交")}
           {picked.length > 0 && ` (${picked.length})`}
         </button>
+      )}
+      {!disabled && picked.length > 0 && (
+        <span className="text-[11px] opacity-50">{t("已同步到输入框，可补一句再发送")}</span>
       )}
     </div>
   );

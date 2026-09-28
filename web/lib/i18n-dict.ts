@@ -112,6 +112,7 @@ export const DICT: Record<string, string> = {
   "停止失败:": "Stop failed: ",
   "移除": "Remove",
   "提交": "Submit",
+  "已同步到输入框，可补一句再发送": "Added to the message box — add a note and send",
   "搜索": "Search",
   "回到最新": "Back to latest",
   "正在看历史": "Viewing history",
