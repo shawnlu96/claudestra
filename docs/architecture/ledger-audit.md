@@ -57,3 +57,8 @@ One notification per recipient per run, from `bridge:ledger-audit`, intent `noti
 - Otherwise it is delivered directly, and the recipient's `lastMessageSource` is set to `agent` so the Stop after handling it does not @ the owner.
 
 If the dispatcher can't be reached for 2 runs in a row, rules 1–3 go to the PM (`fallback` in the CLI output) until it is back online; the switch is logged once. Changes in `skipped` are logged once per change, so a source that stays unreadable is visible in the bridge log without repeating every run. After T11a merges, the busy check + hold should be replaced by its `meta.waitForIdle`.
+
+## Follow-ups
+
+- **After T30 merges:** take the dispatcher from `meta.team.dispatcher` (null = no dispatcher, everything goes to the PM) instead of guessing by name; route by `currentHandler`; let rules 1 and 3 read `dispatch` events (`data.round`) before falling back to subagent descriptions; honour the `meta.team.audit` switch. Automatic escalations (`data.auto: true`) must be told apart if the audit ever counts escalations.
+- **After T8h merges:** rule 5 should skip tasks blocked by a dependency.
