@@ -3,6 +3,7 @@
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
 import { normalizePeerAgent } from "../lib/ledger-checks.js";
+import { parseExtraChecks } from "../lib/ledger-probes.js";
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
@@ -46,6 +47,14 @@ function fieldsFrom(c: LedgerCli, map: Record<string, string>, curKind: string |
     else out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : field === "assigneeKind" ? v || null : v;
   }
   const extra = jsonObjectFlag(c.p, "extra");
+  if (extra && "checks" in extra) {
+    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单配好了
+    try {
+      parseExtraChecks(extra.checks);
+    } catch (e) {
+      throw new LedgerError("invalid", (e as Error).message);
+    }
+  }
   if (extra) out.extra = extra;
   return out;
 }
@@ -128,6 +137,9 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   return { ok: true, task: r.row, duplicate: r.duplicate, ...link };
 }
 
+/** 合并之后 PR / 分支 / head 就是完成检查单的依据，执行者不能再改（PM 纠错仍可） */
+const SHIPPED: readonly string[] = ["merge", "live", "verified", "done"];
+
 /** 执行者只能改自己任务的这几项；标题、事项、规格、extra、执行者、PM 要 PM / master / owner */
 const EXECUTOR_TASK_FLAGS = new Set(["rev", "dedup", "branch", "pr", "head", "model"]);
 
@@ -137,6 +149,9 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   const extraFlags = Object.keys(c.p.flags).filter((f) => !EXECUTOR_TASK_FLAGS.has(f));
   if (extraFlags.length && c.role(cur.project, cur) === "executor") {
     throw new LedgerError("forbidden", `执行者只能改 --branch / --pr / --head / --model，${extraFlags.map((f) => `--${f}`).join(" ")} 要 PM 改`);
+  }
+  if (c.role(cur.project, cur) === "executor" && SHIPPED.includes(cur.stage) && ["pr", "branch", "head"].some((f) => c.p.flags[f] !== undefined)) {
+    throw new LedgerError("forbidden", `任务 ${cur.id} 已在 ${cur.stage}，执行者不能再改 --pr / --branch / --head（完成检查单按它们核对上线）`);
   }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
@@ -181,7 +196,7 @@ function review(c: LedgerCli): Result {
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }
 
-/** decision / deploy / verify / rollback：PM / master / owner；data 由各自的旗标组成 */
+/** decision / deploy / rollback：PM / master / owner；data 由各自的旗标组成（verify 在 ledger-verify.ts，由系统核对） */
 function managerEvent(kind: AppendableKind, build: (c: LedgerCli) => { target: string; text?: string; data: Record<string, unknown> }) {
   return (c: LedgerCli): Result => {
     const b = build(c);
@@ -203,11 +218,6 @@ const deploy = managerEvent("deploy", (c) => ({
   text: c.p.flags.text,
   data: { version: c.need("version"), rollbackPoint: c.p.flags["rollback-point"] ?? null },
 }));
-const verify = managerEvent("verify", (c) => {
-  const result = c.need("result");
-  if (result !== "pass" && result !== "fail") throw new LedgerError("invalid", "--result 只能是 pass / fail");
-  return { target: c.task(c.p.pos[1]).id, text: c.p.flags.text, data: { result, evidence: c.p.flags.evidence ?? null } };
-});
 const rollback = managerEvent("rollback", (c) => ({ target: c.task(c.p.pos[1]).id, text: c.p.flags.text, data: { to: c.p.flags.to ?? null } }));
 
 function freeze(frozen: boolean) {
@@ -242,7 +252,7 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
     usage: "task-set <id> --rev <n> [--title --item --agent | --assignee-kind --assignee] [--pm --branch --pr --head --spec --model --extra]",
     run: taskSet,
   },
-  stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]", run: stage },
+  stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]（进 verified 用 ledger verify）", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
   review: {
@@ -252,7 +262,6 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   },
   decision: { valued: ["project", "dedup"], bools: ["transcribed"], usage: "decision <task|item|-> <原话> [--transcribed]", run: decision },
   deploy: { valued: ["version", "rollback-point", "text", "dedup"], usage: "deploy <task> --version <v> [--rollback-point <x>] [--text]", run: deploy },
-  verify: { valued: ["result", "evidence", "text", "dedup"], usage: "verify <task> --result pass|fail [--evidence <path>] [--text]", run: verify },
   rollback: { valued: ["to", "text", "dedup"], usage: "rollback <task> [--to <version>] [--text]", run: rollback },
   freeze: { valued: ["reason", "project", "dedup"], usage: "freeze --reason <原因>", run: freeze(true) },
   unfreeze: { valued: ["text", "project", "dedup"], usage: "unfreeze [--text]", run: freeze(false) },

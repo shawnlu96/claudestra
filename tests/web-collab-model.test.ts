@@ -102,11 +102,15 @@ describe("首页排序与一句话状态", () => {
     const ov = overview([
       task("V", "live", { lastEvent: ev("verify", { result: "fail" }) }),
       task("R", "live", { lastEvent: ev("rollback", {}) }),
+      task("U", "live", { lastEvent: ev("verify", { result: "unknown" }) }),
+      task("P", "live", { lastEvent: ev("verify", { result: "pass" }) }),
       task("B", "blocked", { stageBefore: "review", lastEvent: { ...ev("stage", { to: "blocked" }), text: "等上游修复" } }),
     ]);
     const lines = new Map(homeView(ov, NOW).lines.map((l) => [l.id, l]));
     expect(lines.get("V")!).toMatchObject({ attention: "problem", stageLabel: "线上验证失败" });
     expect(lines.get("R")!.attention).toBe("problem");
+    expect(lines.get("U")!).toMatchObject({ attention: "problem", stageLabel: "线上验证查不到结果" }); // 检查单有项查不到：卡在 live，要人看
+    expect(lines.get("P")!.stageLabel).toBe("已上线 · 等验证");
     expect(lines.get("B")!).toMatchObject({ attention: "problem", column: 3, reason: "等上游修复" });
   });
 

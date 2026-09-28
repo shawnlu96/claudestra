@@ -7,19 +7,14 @@
  *   2. POST /api/v1/agents/:name/claude-settings 对非 CC agent 回 400（照 pi-settings），
  *      而不是被 CC 的空闲判据判成忙、恒回 409「回合进行中」。
  *
- * 复用 api-route-parity.runner.ts 的沙箱：临时 HOME / 状态目录 / tmux socket 目录，
- * PATH 里的 bun 与 tmux 都是假的——假 bun 充当 `manager list`（回一份固定列表），
- * 假 tmux 一律 exit 1。不碰真实 registry，也不碰 master.sock。
+ * 复用 api-route-parity.runner.ts 的沙箱（tests/api-runner-harness.ts）：不碰真实 registry，也不碰 master.sock。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { runnerHome, type RunnerHome, type RunnerResult } from "./api-runner-harness";
 import { nonClaudeRuntimeError } from "../src/lib/claude-settings-runtime";
 import type { RegistryAgent } from "../src/lib/registry";
 
 type Spec = { name: string; method: string; path: string; token?: "full"; body?: string };
-type Result = { name: string; status?: number; body?: string; threw?: string; message?: string };
 
 const REGISTRY = {
   agents: {
@@ -29,33 +24,9 @@ const REGISTRY = {
     "agent-old": { channelId: "api:old", status: "stopped", cwd: "/tmp/x" }, // 历史数据：无 runtime 字段
   },
 };
-// 假 `manager list` 的输出（status=stopped：列表端点不去 tmux 探忙）
-const MANAGER_LIST = {
-  ok: true,
-  agents: Object.keys(REGISTRY.agents).map((name) => ({ name, channelId: `api:${name}`, status: "stopped", purpose: "" })),
-};
 
-let home = "";
-let results: Result[] = [];
-
-function run(specs: Spec[]): Result[] {
-  const fakeBin = join(home, "fakebin");
-  const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
-    env: {
-      PATH: `${fakeBin}:/usr/bin:/bin`,
-      HOME: home,
-      TMPDIR: home,
-      CLAUDESTRA_RUNTIME_DIR: join(home, "rt"),
-      CONTROL_CHANNEL_ID: "",
-      LANG: "C",
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const lines = r.stdout.toString().trim().split("\n");
-  if (r.exitCode !== 0 || !lines.length) throw new Error(`runner failed: ${r.stderr.toString().slice(-2000)}`);
-  return JSON.parse(lines[lines.length - 1]);
-}
+let sandbox: RunnerHome | null = null;
+let results: RunnerResult[] = [];
 
 const settings = (agent: string): Spec => ({
   name: `settings ${agent}`,
@@ -67,27 +38,18 @@ const settings = (agent: string): Spec => ({
 const byName = (n: string) => results.find((x) => x.name === n)!;
 
 beforeAll(() => {
-  home = mkdtempSync(join(tmpdir(), "claude-settings-rt-"));
-  const fakeBin = join(home, "fakebin");
-  mkdirSync(fakeBin);
-  mkdirSync(join(home, "rt"));
-  writeFileSync(join(fakeBin, "bun"), `#!/bin/sh\necho '${JSON.stringify(MANAGER_LIST)}'\n`, { mode: 0o755 });
-  writeFileSync(join(fakeBin, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-  mkdirSync(join(home, ".claude-orchestrator"), { recursive: true });
-  writeFileSync(join(home, ".claude-orchestrator", "registry.json"), JSON.stringify(REGISTRY));
-  results = run([
+  sandbox = runnerHome("claude-settings-rt-", REGISTRY);
+  results = sandbox.run([
     { name: "list", method: "GET", path: "/api/v1/agents", token: "full" },
     settings("cx"),
     settings("agent-cx"),
     settings("pp"),
     settings("cc"),
     settings("old"),
-  ]);
+  ] satisfies Spec[]);
 }, 60_000);
 
-afterAll(() => {
-  if (home) rmSync(home, { recursive: true, force: true });
-});
+afterAll(() => sandbox?.cleanup());
 
 describe("nonClaudeRuntimeError（claude-settings 的 runtime 闸，纯函数）", () => {
   const regs: RegistryAgent[] = [
