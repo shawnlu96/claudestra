@@ -9,6 +9,7 @@ import { taskMetrics } from "../lib/ledger-metrics.js";
 import { getItem, getMeta, getTask, LedgerError, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
 import { setMeta } from "../lib/ledger-write.js";
 import { isUmbrellaDir, normalizeDir } from "../lib/projects.js";
+import { planRoles, teamBaseOf } from "../lib/team-proposal.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey, intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -108,9 +109,14 @@ async function meta(c: LedgerCli): Promise<Result> {
   c.requireManager(project, "提议改 PM 名单");
   const list = [...new Set(pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey))];
   const cur = getMeta(c.db, project);
-  const draft = { kind: "pms" as const, project, proposer: c.deps.actor, pm: null, pms: list, dispatcher: null, audit: cur.team?.audit ?? true };
+  // 调度助理得在名单里（它跑 dispatch / review 靠 PM 身份）：要换调度助理用 team up，要撤班子用 team down
+  const disp = cur.team?.dispatcher;
+  if (disp && !list.includes(disp)) throw new LedgerError("invalid", `${disp} 是在任的调度助理，不能移出 PM 名单：换调度助理用 team up --dispatcher-agent，撤班子用 team down`);
   const agents = (await c.deps.loadRegistry()).agents as Agents;
-  return { ...(await propose(draft, agents, c.deps.proposals)), project, meta: cur };
+  const base = teamBaseOf(cur);
+  const roles = planRoles({ pms: list, dispatcher: disp ?? null, on: !!cur.team }, base, agents);
+  const draft = { kind: "pms" as const, project, proposer: c.deps.actor, pm: null, pms: list, dispatcher: null, audit: cur.team?.audit ?? true, base, roles };
+  return { ...(await propose(draft, c.deps.proposals)), project, meta: cur };
 }
 
 export const READ_CMDS: Record<string, CommandSpec> = {

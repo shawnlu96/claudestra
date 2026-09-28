@@ -138,6 +138,20 @@ describe("routeEvents", () => {
     expect(n[0].text).toContain("（硬规则，自动升级）");
   });
 
+  test("结论是 PM 自己记的（没配调度助理）不给自己升级；调度助理记的照常升级", () => {
+    team(null);
+    toBuild();
+    deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T1", moveFrom: "build" });
+    const cut = listEvents(db).at(-1)?.seq ?? 0;
+    recordReview(db, { actor: "agent-pm", now: 3 }, { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 1, p1: 0, p2: 0, move: { from: "review", to: "fix" } });
+    expect(escalations(cut)).toEqual([]);
+    team("agent-disp");
+    deliver(db, { actor: "agent-exec", now: 4 }, { taskId: "T1", moveFrom: "fix" });
+    const cut2 = listEvents(db).at(-1)?.seq ?? 0;
+    recordReview(db, { actor: "agent-disp", now: 5 }, { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 1, p1: 0, p2: 0, move: { from: "review", to: "fix" } });
+    expect(escalations(cut2)).toHaveLength(1);
+  });
+
   test("没开班子、开班子之前的 review 不自动升级", () => {
     toBuild();
     deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T1", moveFrom: "build" });
@@ -400,9 +414,9 @@ describe("teamRouterTicker：游标与重启", () => {
     deliver(db, { actor: "agent-exec", now: 2 }, { taskId: "T1", moveFrom: "build" });
     const dseq = listEvents(db).at(-1)?.seq;
     appendEvent(db, { actor: "agent-exec", now: 3 }, { project: "p", target: "T1", kind: "escalate", text: "要改规格", data: { to: "pm" } });
-    recordReview(db, { actor: "agent-pm", now: 4 }, { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 1, p1: 0, p2: 0 });
+    recordReview(db, owner(4), { taskId: "T1", reviewer: "regular", verdict: "changes", p0: 1, p1: 0, p2: 0 });
     await tick();
-    expect(got).toEqual(["agent-pm:escalate"]);
+    expect(got).toEqual(["agent-pm:escalate"]); // 结论由 owner 记（不是 PM 本人），硬规则照常升级
     expect(logs).toContainEqual(expect.stringContaining(`T1 deliver → agent-disp（seq ${dseq}）投递出错`));
     expect(logs).toContainEqual(expect.stringContaining("T1 的硬规则升级没记上（manager 超时）"));
   });

@@ -31,24 +31,26 @@ bun src/manager.ts team up --project <id> --dispatcher     # also create a dispa
 bun src/manager.ts team up --project <id> --dispatcher-agent <existing agent>   # use an existing agent as dispatcher
 ```
 
-`team up` **changes nothing by itself**. It creates a proposal and posts Confirm / Reject buttons in the PM's channel. Changing the PM list requires the owner, so the owner has to click Confirm themselves:
+Only the project's PMs, the master and the owner may propose `team up` / `team down`; executors may not. `team up --no-dispatcher` drops the current dispatcher; without any dispatcher flag the current one is kept. `team up` **changes nothing by itself**. It creates a proposal, and the bridge renders a card from that proposal with Confirm / Reject buttons in the proposer's channel (the control channel when proposed from a terminal). Changing the PM list requires the owner, so the owner has to click Confirm themselves:
 
 - **Discord**: the click only counts if the user is in `ALLOWED_USER_IDS`.
 - **Web**: the click only counts from the owner's own device credential. Bearer tokens from `token-add`, guest devices and peers are all refused.
-- The buttons expire after 30 minutes and can only take effect once. They carry a hash of the proposal, so a proposal edited after it was posted is void.
+- The button id carries a check code computed with a key that exists only in the bridge's memory, bound to the proposal content and the channel it was posted in. Agents cannot compute it, and they cannot post such buttons at all: every id the bridge handles itself (team confirmations, admin panels, permission prompts and so on) is on a reserved list (`src/lib/reserved-buttons.ts`), and a message from an agent, a local script or a peer that carries a reserved id is refused as a whole. On Discord the click must also land on the message the bridge posted. After a bridge restart old cards are void; propose again.
+- The buttons expire after 30 minutes and can only take effect once. A proposal edited after it was posted is void.
 - The CLI has no "confirm" subcommand.
 
 When the owner clicks Confirm, the bridge first marks the proposal as confirmed, then runs these steps in order. It stops at the first failure and `team status` shows where it stopped:
 
-1. Create the dispatcher, if a new one was requested, with role `dispatcher`.
-2. Set the PM's role to `pm`. **This takes effect on the PM's next restart; the PM is never restarted automatically.**
-3. Run `ledger team-apply <proposal id>` to write the ledger. The command checks three things itself: the bridge marked the proposal confirmed, the parameter hash still matches, and the confirmation came before expiry (and no more than 10 minutes ago). Only then does it write the PM list and the team config (`meta.team`; event routing starts from this point) and record an owner decision. The bridge itself stays read-only on the ledger.
+1. `ledger team-apply <proposal id> --check`: checks without writing, so a stale proposal stops before anything is created.
+2. Create the dispatcher, if a new one was requested, with role `dispatcher`.
+3. Run `ledger team-apply <proposal id>` to write the ledger. The command checks: the bridge marked the proposal confirmed, the content hash still matches, the confirmation came before expiry (and no more than 10 minutes ago), and **the PM list and team config are still what they were when the proposal was made** (if another proposal took effect first or the team was taken down, the old proposal is void instead of overwriting the list with stale data). Only then does it write the PM list and the team config (`meta.team`; event routing starts from this point) and record an owner decision, all in one transaction. The bridge itself stays read-only on the ledger.
+4. Set or clear registry roles as listed on the card: the dispatcher gets dispatcher, everyone else on the list gets pm, and anyone removed from the list (or everyone, when the team is taken down) loses the role. Roles take effect on the next restart; nothing restarts automatically.
 
-**Changing the PM list works the same way**: `ledger meta --pms a,b` writes nothing directly. It creates a proposal and posts the buttons (a PM, the master or the owner may propose; executors may not). The same applies when the owner runs it from a terminal: click Confirm once in the UI. There is no CLI switch for the team config; use `team up` / `team down`.
+**Changing the PM list works the same way**: `ledger meta --pms a,b` writes nothing directly. It creates a proposal and posts the buttons (a PM, the master or the owner may propose; executors may not). The active dispatcher cannot be dropped from the list this way; use `team up` to replace it or `team down` to end the team. The same applies when the owner runs it from a terminal: click Confirm once in the UI. There is no CLI switch for the team config; use `team up` / `team down`.
 
 To take the team down: `team down --project <id>`, also confirmed by the owner. Routing stops, and the dispatcher leaves the PM list and loses its role. The agent itself is not deleted; `kill` it yourself if you want it gone.
 
-**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself (the loopback `/api/v1/devices/local` hands out an owner device credential directly; T34 tightens it to calls carrying `BRIDGE_CONTROL_TOKEN` or a human confirmation). The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the buttons do guarantee: an agent using the normal tools cannot make itself PM, and every PM-list change in the ledger traces back to the proposal the owner clicked.
+**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself (the loopback `/api/v1/devices/local` hands out an owner device credential directly; planned in T34, not implemented yet: accept only calls carrying `BRIDGE_CONTROL_TOKEN` or a human confirmation). The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the cards and buttons do guarantee: an agent that only uses the normal tools (reply, send_to_agent, ledger commands) cannot propose a team change if it is an executor and cannot forge a confirm button, so what the owner clicks is always a card the bridge rendered from the proposal itself. Apart from `ledger import` (the owner's one-time migration, which only writes an empty list), every PM-list change in the ledger traces back to the proposal the owner clicked.
 
 ## How a task flows
 
@@ -93,9 +95,9 @@ It lists the PM list, the dispatcher, and for each open task **who is holding it
 
 **Taking over**:
 
-- **New PM**: `team up --pm <new PM>`. Once the owner confirms, the new PM gets the role on its next restart. Make sure the old PM has stopped first, so two PMs never write the ledger at once. The old PM stays on the PM list; to remove it, propose a new list with `ledger meta --pms` and have the owner confirm it in the UI.
+- **New PM**: `team up --pm <new PM>` (the active dispatcher is kept by default). Once the owner confirms, the new PM gets the role on its next restart. Make sure the old PM has stopped first, so two PMs never write the ledger at once. The old PM stays on the PM list; to remove it, propose a new list with `ledger meta --pms` and have the owner confirm it in the UI.
 - **Dispatcher died**: `manager restart <dispatcher>`. The role comes back from the registry, and deliveries that arrived in the meantime are waiting in the held queue.
-- **No dispatcher any more**: `team down`, or run `team up` again without `--dispatcher`. Deliveries then go to the PM.
+- **No dispatcher any more**: `team down`, or `team up --no-dispatcher`. Deliveries then go to the PM.
 
 ## Related
 

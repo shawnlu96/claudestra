@@ -29,26 +29,29 @@
 bun src/manager.ts team up --project <项目 id>                 # 只配 PM 和巡检
 bun src/manager.ts team up --project <项目 id> --dispatcher    # 另建一个调度助理 <项目 id>-dispatch
 bun src/manager.ts team up --project <项目 id> --dispatcher-agent <已有 agent>   # 让已有的 agent 当调度助理
+bun src/manager.ts team up --project <项目 id> --no-dispatcher # 撤掉现有的调度助理（不带这三个参数时保留现有的）
 ```
 
-`team up` **不会直接改任何东西**，只生成一份提案，并在 PM 的频道里贴出「确认 / 拒绝」按钮。改 PM 名单需要 owner 身份，所以要由 owner 本人在界面上点确认：
+只有项目的 PM、大总管、owner 能提议 `team up` / `team down`，执行者不行。`team up` **不会直接改任何东西**，只生成一份提案，由 bridge 按提案内容在提议者的频道里贴出卡片和「确认 / 拒绝」按钮（终端里提议的贴控制频道）。改 PM 名单需要 owner 身份，所以要由 owner 本人在界面上点确认：
 
-- **Discord**：只有 `ALLOWED_USER_IDS` 里的用户点了才算。
+- **Discord**：只有 `ALLOWED_USER_IDS` 里的用户点了才算，而且要点在 bridge 贴出的那条消息上。
 - **网页**：只有 owner 本人设备的凭据点了才算。用 `token-add` 签出的 Bearer token、guest 设备、peer 都不行。
-- 按钮 30 分钟内有效，只能生效一次。按钮里带着提案内容的哈希：提案在点击前被改过，就会作废。
+- 按钮 id 带一段校验码，是 bridge 用只在自己内存里的密钥算的，绑定提案内容和贴出的频道。agent 算不出来，也贴不出这类按钮：bridge 处理的管理按钮（班子确认、管理面板、权限弹窗等）id 都在一张保留表里（`src/lib/reserved-buttons.ts`），agent、本机脚本、peer 发的消息里只要带了保留 id，整条拒发。bridge 重启后旧卡片作废，重新提议即可。
+- 按钮 30 分钟内有效，只能生效一次；提案在点击前被改过就作废。
 - 命令行没有「确认」子命令。
 
 owner 点确认后，bridge 先把提案标成「已确认」，再依次做下面几步（任何一步失败就停下，并在 `team status` 里写明停在哪一步）：
 
-1. 建调度助理（如果要新建），角色设为 dispatcher；
-2. 把 PM 的角色设为 pm。**要等 PM 下次重启才生效，不会自动重启 PM**；
-3. 调 `ledger team-apply <提案 id>` 写台账。这条命令自己再核对三件事：提案已被 bridge 标为确认、参数哈希一致、确认发生在过期之前（并且确认后 10 分钟内）。三项都满足，才写 PM 名单、班子配置（`meta.team`，从这一刻起开始事件路由），再记一条 owner 的决定。bridge 自己对台账仍然只读。
+1. `ledger team-apply <提案 id> --check`：只核对不写，过时的提案在建任何东西之前就停下；
+2. 建调度助理（如果要新建），角色设为 dispatcher；
+3. `ledger team-apply <提案 id>` 写台账。这条命令自己再核对：提案已被 bridge 标为确认、内容哈希一致、确认发生在过期之前（并且确认后 10 分钟内）、**提议时的 PM 名单和班子配置到现在没变**（先点了别的提案、或者 down 过，旧提案就作废，不会按过时的名单整表覆盖）。都满足，才在一个事务里写 PM 名单、班子配置（`meta.team`，从这一刻起开始事件路由），再记一条 owner 的决定。bridge 自己对台账仍然只读；
+4. 按提案里列的角色变动设 / 撤 registry 角色：调度助理设 dispatcher，名单里其余的人设 pm，被移出名单的、班子撤下后的都撤掉。**角色要等下次重启才生效，不会自动重启**。卡片上逐条写着这些变动。
 
-**改 PM 名单也走同一条路**：`ledger meta --pms a,b` 不直接写，只生成一份提案、贴出按钮（PM、大总管、owner 可以提议，执行者不行）。owner 在终端里跑也一样，去界面上点一次确认即可。班子配置没有单独的命令行开关，一律用 `team up` / `team down`。
+**改 PM 名单也走同一条路**：`ledger meta --pms a,b` 不直接写，只生成一份提案、贴出卡片（PM、大总管、owner 可以提议，执行者不行）。在任的调度助理不能被移出名单（换调度助理用 `team up`，撤班子用 `team down`）。owner 在终端里跑也一样，去界面上点一次确认即可。班子配置没有单独的命令行开关，一律用 `team up` / `team down`。
 
-撤下班子：`team down --project <id>`，同样要 owner 确认。撤下后事件路由停止，调度助理移出 PM 名单、撤掉角色；这个 agent 本身不会被删，需要的话手动 `kill`。
+撤下班子：`team down --project <id>`，同样要 owner 确认。撤下后事件路由停止，调度助理移出 PM 名单，班子角色一并撤掉；这个 agent 本身不会被删，需要的话手动 `kill`。
 
-**关于「不能冒充 owner」**：这是产品约束，不是安全边界。所有 agent 都以你的用户身份运行，默认不做权限确认，一个铁了心的 agent 可以直接改状态文件和台账库，也可以自己去配对一台设备（本机的 `/api/v1/devices/local` 能直接签出 owner 设备凭据；T34 之后收紧为只接受带 `BRIDGE_CONTROL_TOKEN` 的调用或真人确认）。「已确认」这个标记记在状态目录的提案文件里，同一个用户的进程也能伪造它。按钮保证的是：走正常工具路径的 agent 给不了自己 PM 身份，任何一次 PM 名单的变更都能在台账里查到是 owner 点的哪份提案。
+**关于「不能冒充 owner」**：这是产品约束，不是安全边界。所有 agent 都以你的用户身份运行，默认不做权限确认，一个铁了心的 agent 可以直接改状态文件和台账库，也可以自己去配对一台设备（本机的 `/api/v1/devices/local` 能直接签出 owner 设备凭据；计划中（T34，尚未实现）收紧为只接受带 `BRIDGE_CONTROL_TOKEN` 的调用或真人确认）。「已确认」这个标记记在状态目录的提案文件里，同一个用户的进程也能伪造它。卡片和按钮保证的是：只用正常工具（reply、send_to_agent、ledger 命令）的 agent 提不了班子提案（执行者），也伪造不了确认按钮，owner 点到的一定是 bridge 按提案原样渲染的那张卡片。除了 owner 一次性迁移用的 `ledger import`（只在名单为空时写），PM 名单的每次变更都能在台账里查到是 owner 点的哪份提案。
 
 ## 一件任务怎么流转
 
@@ -93,9 +96,9 @@ bun src/manager.ts team status --project <id>
 
 **换人接手**：
 
-- **换 PM**：`team up --pm <新 PM>`，owner 确认后，新 PM 下次重启时带上角色。先确认旧 PM 已经停下，避免两个 PM 同时写台账。旧 PM 仍留在 PM 名单里；要移除，用 `ledger meta --pms` 提议新名单，owner 在界面上确认。
+- **换 PM**：`team up --pm <新 PM>`（在任的调度助理默认保留），owner 确认后，新 PM 下次重启时带上角色。先确认旧 PM 已经停下，避免两个 PM 同时写台账。旧 PM 仍留在 PM 名单里；要移除，用 `ledger meta --pms` 提议新名单，owner 在界面上确认。
 - **调度助理挂了**：`manager restart <调度助理>`，角色会随 registry 恢复。重启期间积下的交付通知在押后队列里，它连上后会收到。
-- **不要调度助理了**：`team down`；或者重新 `team up` 且不带 `--dispatcher`，交付就改为通知 PM。
+- **不要调度助理了**：`team down`；或者 `team up --no-dispatcher`，交付就改为通知 PM。
 
 ## 相关
 

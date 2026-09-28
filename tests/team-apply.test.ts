@@ -1,6 +1,6 @@
 /**
- * PM 名单 / 班子配置只能经 owner 确认的提案写进台账：`ledger meta --pms` 只生成提案，`ledger team-apply` 核对三件事
- * （bridge 标过 confirmed、参数哈希一致、确认时未过期）才写（src/manager/ledger-team-cmds.ts）；
+ * PM 名单 / 班子配置只能经 owner 确认的提案写进台账：`ledger meta --pms` 只生成提案，`ledger team-apply` 核对
+ * （bridge 标过 confirmed、内容哈希一致、确认时未过期、提议时的名单与班子没变）才在一个事务里写（src/manager/ledger-team-cmds.ts）；
  * 硬规则的 `ledger escalate --auto` 只给 bridge 用，记在 bridge-rule 名下。
  */
 import type { Database } from "bun:sqlite";
@@ -34,7 +34,7 @@ function run(actor: string, now: number, ...args: string[]) {
   return runLedger(args, {
     db, actor, actorProject: P, projectIds: [P], now: () => now,
     loadRegistry: async () => structuredClone(reg), saveRegistry: async () => {},
-    proposals: { path, post: async (p) => (posted.push(p), postError) },
+    proposals: { path, post: async (p: TeamProposal) => (posted.push(p), postError) },
   }) as Promise<Record<string, any>>;
 }
 
@@ -42,7 +42,8 @@ async function put(p: TeamProposal): Promise<void> {
   await updateProposals((all) => void (all[p.id] = p), NOW, path);
 }
 
-const draft = (pms: string[]) => ({ kind: "pms" as const, project: P, proposer: "agent-pm", pm: null, pms, dispatcher: null, audit: true });
+const BASE = { pms: ["agent-pm"], team: null };
+const draft = (pms: string[]) => ({ kind: "pms" as const, project: P, proposer: "agent-pm", pm: null, pms, dispatcher: null, audit: true, base: BASE, roles: [] });
 const confirmed = (p: TeamProposal, at = NOW + 1): TeamProposal => ({ ...p, status: "confirmed", confirmedAt: at });
 
 beforeEach(() => {
@@ -77,6 +78,17 @@ describe("ledger meta --pms：只生成提案", () => {
     }
     expect(getMeta(db, P).team).toBeNull();
   });
+
+  test("在任的调度助理不能被移出名单；提案记下提议时的名单与要变的角色", async () => {
+    setMeta(db, { actor: "owner", now: 3 }, { project: P, key: "pms", value: ["agent-pm", "agent-d"] });
+    setMeta(db, { actor: "owner", now: 4 }, { project: P, key: "team", value: { dispatcher: "agent-d", audit: true } });
+    expect(await run("agent-pm", NOW, "meta", "--pms", "pm")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("在任的调度助理") });
+    const r = await run("agent-pm", NOW, "meta", "--pms", "pm,d,exec");
+    expect(r.ok).toBe(true);
+    // registry 里 pm 还没有角色、exec 新进名单：都设成 pm；agent-d 不在 registry，跳过
+    const roles = [{ agent: "agent-pm", role: "pm" }, { agent: "agent-exec", role: "pm" }];
+    expect(posted.at(-1)).toMatchObject({ base: { pms: ["agent-pm", "agent-d"], team: { dispatcher: "agent-d", audit: true } }, roles });
+  });
 });
 
 describe("ledger team-apply", () => {
@@ -97,7 +109,8 @@ describe("ledger team-apply", () => {
     await put(confirmed(up));
     await run("owner", NOW + 2, "team-apply", up.id);
     expect(getMeta(db, P).team).toMatchObject({ dispatcher: "agent-d", audit: true });
-    const down = newProposal({ ...draft(["agent-pm"]), kind: "down", dispatcher: { agent: "agent-d", create: false }, audit: false }, NOW, "22222222");
+    const upBase = { pms: ["agent-pm", "agent-d"], team: { dispatcher: "agent-d", audit: true } };
+    const down = newProposal({ ...draft(["agent-pm"]), kind: "down", dispatcher: { agent: "agent-d", create: false }, audit: false, base: upBase }, NOW, "22222222");
     await put(confirmed(down));
     await run("owner", NOW + 2, "team-apply", down.id);
     expect(getMeta(db, P)).toMatchObject({ pms: ["agent-pm"], team: null });
@@ -120,6 +133,40 @@ describe("ledger team-apply", () => {
     expect((await run("owner", NOW + 11 * 60_000, "team-apply", p.id)).error).toContain("超过 10 分钟");
     expect(await run("owner", NOW, "team-apply", "ffffffff")).toMatchObject({ ok: false, error: "提案不存在" });
     expect(getMeta(db, P).pms).toEqual(["agent-pm"]);
+  });
+});
+
+describe("ledger team-apply：过时的提案、--check、事务", () => {
+  test("提议后名单变过（另一份先生效）就作废，不按过时的名单整表覆盖；down 之后旧的 up 提案也作废", async () => {
+    const a = newProposal(draft(["agent-pm", "agent-a"]), NOW, "aaaa0001");
+    const b = newProposal(draft(["agent-pm", "agent-b"]), NOW, "aaaa0002");
+    await put(confirmed(a));
+    await put(confirmed(b));
+    expect((await run("owner", NOW + 2, "team-apply", a.id)).ok).toBe(true);
+    expect(await run("owner", NOW + 2, "team-apply", b.id)).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("已经变了") });
+    expect(getMeta(db, P).pms).toEqual(["agent-pm", "agent-a"]);
+  });
+
+  test("--check 只核对不写：通过时台账和提案状态都不动；过时时同样拒绝", async () => {
+    const p = newProposal(draft(["agent-pm", "agent-exec"]), NOW, "cccc0001");
+    await put(confirmed(p));
+    const count = listEvents(db).length;
+    expect(await run("owner", NOW + 2, "team-apply", p.id, "--check")).toMatchObject({ ok: true, checked: true });
+    expect(listEvents(db)).toHaveLength(count);
+    expect((await readProposals(path))[p.id]?.status).toBe("confirmed");
+    setMeta(db, { actor: "owner", now: 3 }, { project: P, key: "pms", value: ["agent-pm", "agent-z"] });
+    expect((await run("owner", NOW + 2, "team-apply", p.id, "--check")).error).toContain("已经变了");
+  });
+
+  test("三处写入同一个事务：中途失败什么都不留，提案标 failed", async () => {
+    // 班子配置里的调度助理不在名单格式里会被库拒：让第二处写入失败
+    const bad = newProposal({ ...draft(["agent-pm", "agent-d"]), kind: "up", pm: "agent-pm", dispatcher: { agent: "agent-d", create: false }, audit: "x" as never }, NOW, "dddd0001");
+    await put(confirmed(bad));
+    const count = listEvents(db).length;
+    expect((await run("owner", NOW + 2, "team-apply", bad.id)).ok).toBe(false);
+    expect(getMeta(db, P).pms).toEqual(["agent-pm"]);
+    expect(listEvents(db)).toHaveLength(count);
+    expect((await readProposals(path))[bad.id]?.status).toBe("failed");
   });
 });
 

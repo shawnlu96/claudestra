@@ -213,7 +213,7 @@ async function findBgSession(bgId: string): Promise<NeutralSessionInfo | null> {
 
 /** 编排班子提案的 owner 确认先截下（bridge/team-confirm.ts；Discord 交互已按 ALLOWED_USER_IDS 拦过），其余按钮照旧 */
 export async function handleMgmtOrTeamButton(id: string, chatId: string, messageId?: string, discord?: Client): Promise<{ text: string; components?: any[] } | null> {
-  const team = await handleTeamButton(id, "Discord", confirmDeps());
+  const team = await handleTeamButton(id, "Discord", { chatId, messageId: messageId ?? "" }, confirmDeps());
   return team ? { text: team } : handleMgmtButton(id, chatId, messageId, discord);
 }
 

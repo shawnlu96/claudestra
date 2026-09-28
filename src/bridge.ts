@@ -51,12 +51,9 @@ import {
   discordDeleteChannel,
   moveChannelRequest,
 } from "./bridge/discord-api.js";
-import {
-  runManager,
-  buildStatusPanel,
-  handleMgmtOrTeamButton,
-  handleMgmtSelect,
-} from "./bridge/management.js";
+import { runManager, buildStatusPanel, handleMgmtOrTeamButton, handleMgmtSelect } from "./bridge/management.js";
+import { postProposalCard } from "./bridge/team-confirm.js";
+import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
@@ -579,12 +576,12 @@ import {
 } from "./bridge/discord-adapter.js";
 
 /**
- * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 /
- * reply / send_to_agent / pushback）都走这一个函数。
- * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），
- * 状态追踪 + @ mention / header 渲染全在一处管。
+ * v2.0.0+ 统一消息投递入口。所有 bridge 的出入站消息（messageCreate 路由 / reply / send_to_agent / pushback）都走这一个函数。
+ * 内部按 to.kind 派发（local ws inject / user discord send / api resolve），状态追踪 + @ mention / header 渲染全在一处管。
  */
 async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
+  const refused = reservedButtonRefusal(env.from, env.content, env.meta.components); // 保留按钮只许 bridge 自己发（lib/reserved-buttons.ts）
+  if (refused) return { envelope: env, outcome: { kind: "dropped", reason: refused } };
   // 0. intent-aware 预处理：response 消息先清对应 pending
   if (env.intent === "response" && env.meta.inReplyTo) {
     for (const [key, p] of pendingReplies.entries()) {
@@ -1703,8 +1700,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
   switch (msg.type) {
     case "ping": {
-      // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong
-      // 让 channel-server 那侧的 idle 也重置。无需其它处理。
+      // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong 让 channel-server 那侧的 idle 也重置，无需其它处理。
       try { ws.send(JSON.stringify({ type: "pong" })); } catch { /* non-critical */ }
       return;
     }
@@ -2214,6 +2210,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "move_channel": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await moveChannelRequest(discord, WEB_ONLY, msg)) })); break;
+    case "team_proposal_post": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await postProposalCard(String(msg.id ?? ""), deliver)) })); break;
     case "check_inbox": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await takeInbox(ws, Date.now(), inboxOpts(msg))) })); break;
 
     case "project_info": {

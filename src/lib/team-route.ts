@@ -175,11 +175,17 @@ export interface AutoEscalation {
   dedup: string;
 }
 
-/** 硬规则：review 出 P0，或第 HARD_ROUND 轮起还不通过 → 自动升级给 PM */
+/**
+ * 硬规则：review 出 P0，或第 HARD_ROUND 轮起还不通过 → 自动升级给 PM。
+ * 结论就是 PM 自己记的（没配调度助理时常见）不升级：升级事件记在 bridge-rule 名下，绕过「写事件的人不收通知」，会给 PM 发一条自己的事。
+ */
 export function autoEscalations(batch: readonly LedgerEvent[], ctx: RouteCtx): AutoEscalation[] {
   const out: AutoEscalation[] = [];
   for (const e of batch) {
-    if (e.kind !== "review" || !e.target || !teamOf(e, ctx)) continue;
+    const t = e.kind === "review" && e.target ? teamOf(e, ctx) : null;
+    if (!t?.team) continue;
+    const task = ctx.task(e.target);
+    if (task && e.actor === pmOf(task, { pms: t.pms, dispatcher: t.team.dispatcher })) continue;
     const round = num(e.data.round);
     const why = num(e.data.p0) > 0 ? `第 ${round} 轮审出 P0（${num(e.data.p0)} 个）` : round >= HARD_ROUND && e.data.verdict !== "pass" ? `第 ${round} 轮还不通过` : null;
     const path = str(e.data.path);
