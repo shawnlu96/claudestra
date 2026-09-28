@@ -79,7 +79,8 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
     return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], projectEvents: [], ...(since === null ? {} : { sinceEvents: [] }), now });
   }
   // schema 报库里实际的版本：CLI 先升级、bridge 还没重启时它会比代码常量新（LedgerReader 打开时已记一次日志）
-  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), ...(since === null ? {} : { sinceEvents: sinceEvents(db, project, since) }), now });
+  const sinceView = since === null ? {} : { sinceEvents: sinceEvents(db, project, since) };
+  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), ...sinceView, now });
 }
 
 /**

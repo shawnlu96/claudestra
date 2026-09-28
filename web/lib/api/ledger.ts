@@ -10,8 +10,27 @@ import { api, apiStream } from "./client";
 
 const enc = encodeURIComponent;
 
-export function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
-  return api(`/ledger/${enc(project)}`, { timeoutMs: 10_000, signal });
+/** since：带上就多要一份 sinceEvents（「上次以来」的原料）；老 bridge 不认这个参数，照常回总览 */
+export function fetchLedger(project: string, signal?: AbortSignal, since?: number | null): Promise<LedgerOverview & { ok: boolean }> {
+  return api(`/ledger/${enc(project)}${typeof since === "number" ? `?since=${since}` : ""}`, { timeoutMs: 10_000, signal });
+}
+
+/** 「上次以来」的基准（bridge local-api/last-seen.ts，按 principal × 项目）；null = 没记过 */
+export function fetchLastSeen(project: string, signal?: AbortSignal): Promise<{ lastSeen: number | null; now: number }> {
+  return api(`/me/last-seen/${enc(project)}`, { timeoutMs: 8000, signal });
+}
+
+/** 记一次「看过」：时刻用服务端的；keepalive 让页面隐藏 / 卸载途中也发得出去 */
+export function markLastSeen(project: string): Promise<{ lastSeen: number; now: number }> {
+  return api(`/me/last-seen/${enc(project)}`, { method: "PUT", timeoutMs: 8000, keepalive: true });
+}
+
+/** 某 agent 当前在跑的 bg 活动快照（审查员信号重连时整表重建用）；查不到回空 */
+export function fetchBgTasks(agent: string, signal?: AbortSignal): Promise<{ id: string; kind: string; title: string; startedAt: number }[]> {
+  return api<{ tasks?: { id: string; kind: string; title: string; startedAt: number }[] }>(`/agents/${enc(apiAgentName(agent))}/bg-tasks`, { timeoutMs: 5000, signal }).then(
+    (r) => r.tasks ?? [],
+    () => [], // 查不到（老 bridge / 这台设备看不到 PM）：没有审查员信号，线照常显示
+  );
 }
 
 export function fetchLedgerTask(project: string, id: string, signal?: AbortSignal): Promise<TaskDetail & { ok: boolean }> {
@@ -25,8 +44,8 @@ export function agentPending(agent: string): Promise<{ thinking?: boolean; compa
   );
 }
 
-/** 协作视图只关心这几类：台账变了、各 agent 的此刻动作 */
-const WANTED = new Set(["ledger", "tool_start", "tool_done", "agent_status"]);
+/** 协作视图只关心这几类：台账变了、各 agent 的此刻动作、PM 的审查员子 agent 起止 */
+const WANTED = new Set(["ledger", "tool_start", "tool_done", "agent_status", "bg_task_started", "bg_task_completed"]);
 
 /**
  * 订阅 bridge /events，逐条回调关心的事件；onOpen 在连上时调一次（调用方据此全量重拉，T8c 约定）。
