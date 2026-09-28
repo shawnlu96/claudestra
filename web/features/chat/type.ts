@@ -1,6 +1,6 @@
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
-import type { MissionInfo } from "@/lib/chat/agents";
+import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
 
 export interface ToolCallView {
   /** tool_use id——直播里 tool-state（失败标红）按它找回这张卡。 */
@@ -191,6 +191,8 @@ export interface AgentSession {
   parent?: string | null;
   /** 任务短名（≤40 字）→ 侧栏名字后的压淡小标 */
   task?: string | null;
+  /** 台账里它正在执行的任务 → 侧栏行尾阶段小标（ledger-stage.ts）；没挂任务 / 凭据读不了台账时 bridge 不下发 */
+  ledgerTask?: LedgerTaskRef | null;
 }
 
 /** v2.21+ project 元数据（GET /api/projects）→ 侧栏组头 + 项目管理弹窗。 */

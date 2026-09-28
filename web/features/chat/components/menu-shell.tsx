@@ -1,5 +1,5 @@
 "use client";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 
 /**
  * 侧栏右键 / 长按菜单的共用外壳（会话菜单 agent-menu.tsx 与 project 菜单 project-menu.tsx）：
@@ -38,6 +38,7 @@ export function MenuShell({ x, y, rows, title, onClose, children }: {
   onClose: () => void;
   children: ReactNode;
 }) {
+  const titleId = useId();
   const h = rows * ROW_H + 30;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -49,10 +50,11 @@ export function MenuShell({ x, y, rows, title, onClose, children }: {
       <div className="fixed inset-0 z-[997]" style={{ touchAction: "none" }} onPointerDown={onClose} />
       <div
         role="menu"
+        aria-labelledby={titleId}
         className="cstra-menu-in fixed z-[998] overflow-hidden rounded-2xl border border-base-300 bg-base-100/97 py-1.5 shadow-xl backdrop-blur"
         style={{ left, top, width: MENU_W }}
       >
-        <div className="truncate px-3.5 pb-1 pt-0.5 text-[11px] text-base-content/40">{title}</div>
+        <div id={titleId} className="truncate px-3.5 pb-1 pt-0.5 text-[11px] text-base-content/40">{title}</div>
         {children}
       </div>
     </>

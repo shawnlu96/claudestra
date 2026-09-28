@@ -22,7 +22,7 @@ import {
 } from "../lib/autopilot-wake.js";
 import { appendRunLog, runLogLine, skippedLogLine } from "../lib/autopilot-log.js";
 import { initAutopilotEvidence, isTracking, lastHumanMessageAt, takeEvidence, trackRun, untrackRun } from "./autopilot-evidence.js";
-import { newThreadId, type Envelope } from "./router.js";
+import { newMessageId, newThreadId, type Envelope } from "./router.js";
 
 /** 回合结束后等多久再递：让人有机会先开口，也躲开 Stop 之后的收尾（排队消息、typing 清理） */
 let GRACE_MS = 45_000;
@@ -98,7 +98,7 @@ async function sendNudge(agent: string, m: Mission, kind: NudgeKind, now: number
     to: { kind: "local", channelId: c.channelId, ws: c.client.ws, cwd: c.client.cwd },
     intent: "notification",
     content: nudgeText(m, kind, now, DONE_CMD(agent)),
-    meta: { messageId: `mission_${now}`, triggerKind: "bridge_synth", ts: iso(now), threadId: newThreadId() },
+    meta: { messageId: newMessageId("mission"), triggerKind: "bridge_synth", ts: iso(now), threadId: newThreadId() },
   });
   console.log(`⏱ Autopilot ${agent}: 递出 ${kind}（第 ${m.nudges + 1} 次）`);
   return true;

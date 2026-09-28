@@ -308,3 +308,8 @@ export function newThreadId(): string {
   return `thr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** bridge 合成消息的 message_id：前缀_毫秒_随机。只用毫秒会撞，check_inbox 按它读、回程簿按它对请求 */
+export function newMessageId(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
