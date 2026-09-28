@@ -3,7 +3,7 @@
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
 import { normalizePeerAgent } from "../lib/ledger-checks.js";
-import { parseExtraChecks } from "../lib/ledger-probes.js";
+import { parseExtraChecks, parseExtraRepo } from "../lib/ledger-probes.js";
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
@@ -47,10 +47,11 @@ function fieldsFrom(c: LedgerCli, map: Record<string, string>, curKind: string |
     else out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : field === "assigneeKind" ? v || null : v;
   }
   const extra = jsonObjectFlag(c.p, "extra");
-  if (extra && "checks" in extra) {
-    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单配好了
+  if (extra) {
+    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单 / 仓库声明配好了
     try {
       parseExtraChecks(extra.checks);
+      parseExtraRepo(extra.repo);
     } catch (e) {
       throw new LedgerError("invalid", (e as Error).message);
     }
