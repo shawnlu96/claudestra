@@ -9,6 +9,7 @@ import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredent
 import { apiJson } from "./api-respond.js";
 import { checkPeerSignature } from "./peer-signature.js";
 import { requestContextOf } from "./request-context.js";
+import { FP_RE } from "../lib/relay-protocol.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
 // 手机 + 电脑 + 侧栏轮询共用一个身份
@@ -63,6 +64,12 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
   }
   return p;
+}
+
+/** 经中继来的请求的发件人指纹：只认 peer 入口核过进程内标记后放进请求上下文的（peer-ingress.ts），原始头一律不信；没有返回 "" */
+export function relaySenderFp(req: Request): string {
+  const fp = requestContextOf(req).relayFrom ?? "";
+  return FP_RE.test(fp) ? fp : "";
 }
 
 /** 凭据的 lastSeenAt / 到期滑动：内存里先节流，10 分钟内不碰 principals.json；写失败只记日志（鉴权已经通过） */

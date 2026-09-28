@@ -33,12 +33,15 @@ export function relayMark(): string {
   return (mark ??= randomBytes(32).toString("base64url"));
 }
 
-/** peer 入口用：标记对不上就删掉来源指纹头（可能是直连 peer 伪造的）；标记头本身永远不往 API 传。返回是否可信 */
-export function sanitizeRelayFrom(h: globalThis.Headers, expectedMark: string): boolean {
-  const trusted = h.get(RELAY_MARK_HEADER) === expectedMark;
+/**
+ * peer 入口用：标记对得上才返回来源指纹，否则 null（可能是直连 peer 伪造的）。两个头都从 h 里删掉——
+ * 指纹只经请求上下文（request-context.ts relayFrom）往下传，任何入口的原始头都不会被当成来源。
+ */
+export function takeRelayFrom(h: globalThis.Headers, expectedMark: string): string | null {
+  const from = h.get(RELAY_MARK_HEADER) === expectedMark ? h.get(RELAY_FROM_HEADER) : null;
   h.delete(RELAY_MARK_HEADER);
-  if (!trusted) h.delete(RELAY_FROM_HEADER);
-  return trusted;
+  h.delete(RELAY_FROM_HEADER);
+  return from || null;
 }
 
 export interface InboundDeps {

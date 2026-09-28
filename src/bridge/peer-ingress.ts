@@ -14,7 +14,8 @@
 import { findByBearer, readPrincipals } from "../lib/principals.js";
 import { configuredPeerIngressPort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
-import { relayMark, sanitizeRelayFrom } from "./relay-inbound.js";
+import { relayMark, takeRelayFrom } from "./relay-inbound.js";
+import { setRequestContext } from "./request-context.js";
 
 export { configuredPeerIngressPort };
 
@@ -103,24 +104,25 @@ export async function peerIngressSyncRoute(req: Request): Promise<Response> {
   return json(200, { ok: true, ...(await syncPeerIngress(body.hold === true)) });
 }
 
+/** 入口收到的一个请求（单测直接调，不开端口） */
+export async function ingressRequest(req: Request, handleApi: ApiHandler): Promise<Response> {
+  if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
+  const raw = new URL(req.url);
+  const url = new URL(ingressApiPath(raw.pathname) + raw.search, raw.origin);
+  const secret = ingressSecret(req, url);
+  const principal = secret ? findByBearer(await readPrincipals(), secret) : null;
+  if (ingressVerdict(secret, principal) === "not-peer") {
+    return json(403, { ok: false, error: "this entrance only serves peer tokens" });
+  }
+  const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
+  // 来源指纹只认经中继进来的（relay-inbound.ts 盖了进程内标记），放进请求上下文；原始头一律剥掉
+  const headers = new Headers(req.headers);
+  const relayFrom = takeRelayFrom(headers, relayMark());
+  const apiReq = new Request(url.toString(), { method: req.method, headers, body });
+  setRequestContext(apiReq, { source: "lan", clientIp: null, https: false, ...(relayFrom ? { relayFrom } : {}) });
+  return handleApi(apiReq, url);
+}
+
 function serve(opts: { port: number; host: Host; handleApi: ApiHandler }) {
-  return Bun.serve({
-    port: opts.port,
-    hostname: opts.host,
-    async fetch(req) {
-      if (req.headers.get("upgrade")) return json(400, { ok: false, error: "no websocket on the peer entrance" });
-      const raw = new URL(req.url);
-      const url = new URL(ingressApiPath(raw.pathname) + raw.search, raw.origin);
-      const secret = ingressSecret(req, url);
-      const principal = secret ? findByBearer(await readPrincipals(), secret) : null;
-      if (ingressVerdict(secret, principal) === "not-peer") {
-        return json(403, { ok: false, error: "this entrance only serves peer tokens" });
-      }
-      const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
-      // 来源指纹头只认经中继进来的（relay-inbound.ts 盖了进程内标记）；直连 peer 自带的一律剥掉
-      const headers = new Headers(req.headers);
-      sanitizeRelayFrom(headers, relayMark());
-      return opts.handleApi(new Request(url.toString(), { method: req.method, headers, body }), url);
-    },
-  });
+  return Bun.serve({ port: opts.port, hostname: opts.host, fetch: (req) => ingressRequest(req, opts.handleApi) });
 }
