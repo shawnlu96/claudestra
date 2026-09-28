@@ -1,7 +1,7 @@
 /** 推送订阅（src/lib/push-store.ts）与未读 / 已读（src/lib/unread-store.ts）两个存取模块，:memory: 库 */
 import { afterEach, describe, expect, test } from "bun:test";
 import { closeWebState, openWebState } from "../src/lib/web-state.js";
-import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, saveApnsDevice, savePushSubscription } from "../src/lib/push-store.js";
+import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, saveApnsDevice, savePushSubscription, setPushSubscriptionKey } from "../src/lib/push-store.js";
 import { bumpUnread, countsUnread, markAgentRead, onAgentRead, pruneUnread, readMarks, totalUnread, unreadCounts, unreadOrphans, type ReadEvent } from "../src/lib/unread-store.js";
 
 const fresh = () => {
@@ -14,22 +14,35 @@ const sub = (n: string) => ({ endpoint: `https://push.example/${n}`, keys: { p25
 describe("push-store", () => {
   test("订阅 upsert（同 endpoint 换密钥 / UA）、列出、删除；坏 keys 行跳过", () => {
     const db = fresh();
-    savePushSubscription(db, sub("a"), "Mozilla iPhone", new Date("2026-01-01T00:00:00Z"));
+    savePushSubscription(db, sub("a"), "Mozilla iPhone", null, new Date("2026-01-01T00:00:00Z"));
     savePushSubscription(db, sub("b"), "Mozilla Mac");
     savePushSubscription(db, { ...sub("a"), keys: { p256dh: "new", auth: "new" } }, "Mozilla Mac");
     db.prepare("INSERT INTO push_subscriptions (endpoint, keys, ua, created_at) VALUES (?, ?, ?, ?)").run("https://x/bad", "{not json", "", "");
     const rows = listPushSubscriptions(db);
     expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({ endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac" });
+    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({ endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null });
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(true);
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(false);
     expect(listPushSubscriptions(db)).toHaveLength(1);
   });
+  test("订阅记着 VAPID 公钥：登记时写、重订覆盖、投成功后改正", () => {
+    const db = fresh();
+    savePushSubscription(db, sub("a"), "ua", "RELAY");
+    expect(listPushSubscriptions(db)[0].vapidKey).toBe("RELAY");
+    savePushSubscription(db, sub("a"), "ua", "OWN");
+    expect(listPushSubscriptions(db)[0].vapidKey).toBe("OWN");
+    setPushSubscriptionKey(db, sub("a"), "RELAY");
+    expect(listPushSubscriptions(db)[0].vapidKey).toBe("RELAY");
+    // 发送途中被重新订阅（密钥变了）：旧投递结果不覆盖新登记
+    savePushSubscription(db, { ...sub("a"), keys: { p256dh: "re", auth: "re" } }, "ua", "OWN");
+    setPushSubscriptionKey(db, sub("a"), "RELAY");
+    expect(listPushSubscriptions(db)[0].vapidKey).toBe("OWN");
+  });
   test("dismissSafe：UA 为空或 iOS 的不发 dismiss", () => {
-    expect(dismissSafe({ ...sub("x"), ua: "" })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)" })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPad; CPU OS 17_0)" })).toBe(false);
-    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (Macintosh)" })).toBe(true);
+    expect(dismissSafe({ ...sub("x"), ua: "", vapidKey: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)", vapidKey: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (iPad; CPU OS 17_0)", vapidKey: null })).toBe(false);
+    expect(dismissSafe({ ...sub("x"), ua: "Mozilla/5.0 (Macintosh)", vapidKey: null })).toBe(true);
   });
   test("APNs 设备：token 小写存、upsert 刷 last_seen、删除", () => {
     const db = fresh();

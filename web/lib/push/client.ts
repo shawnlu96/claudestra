@@ -48,7 +48,7 @@ export async function enablePush(): Promise<{ ok: boolean; msg: string }> {
     const stale = await reg.pushManager.getSubscription();
     if (stale) await stale.unsubscribe().catch(() => {}); // 退不掉也照样重订，subscribe 会报错再说
     const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(key) });
-    await pushSubscribe(sub.toJSON(), navigator.userAgent);
+    await pushSubscribe(sub.toJSON(), navigator.userAgent, key);
     // 本地测试通知（不走推送服务）：立刻能看到 = 展示层正常，之后收不到就是投递层
     try {
       await reg.showNotification(t("推送已开启 ✅"), { body: t("这条是本地测试——能看到它,说明通知展示没问题"), tag: "cstra-local-test", icon: "/icons/icon-192.png" });

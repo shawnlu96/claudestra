@@ -15,6 +15,7 @@ const sent: Sent[] = [];
 let outcomes: Record<string, SendOutcome> = {};
 let apnsOn = true;
 const sender: PushSender = {
+  webPushKeys: () => ["K"],
   config: () => ({ mode: "direct", webPush: { vapidPublicKey: "K" }, apns: apnsOn }),
   async sendWebPush(sub, payload) {
     sent.push({ kind: "web", to: sub.endpoint, payload: JSON.parse(payload) });
@@ -104,6 +105,14 @@ describe("出站回复 → 未读 + 推送", () => {
     await dispatcher.onEvent(evt({}));
     expect(listPushSubscriptions(db).map((s) => s.endpoint).sort()).toEqual([IOS, OLD].sort());
     expect(listApnsDevices(db)).toEqual([]);
+  });
+  test("投成功时发送器报了另一把公钥 → 记回订阅；报的和记着的一样就不写", async () => {
+    outcomes = { [MAC]: { ok: true, gone: false, status: 201, vapidKey: "OWN" }, [OLD]: { ok: false, gone: false, status: 403, vapidKey: "OWN" } };
+    await dispatcher.onEvent(evt({}));
+    const key = (e: string) => listPushSubscriptions(db).find((s) => s.endpoint === e)?.vapidKey;
+    expect(key(MAC)).toBe("OWN");
+    expect(key(OLD)).toBeNull(); // 失败的不记
+    expect(key(IOS)).toBeNull(); // 假发送器没报钥匙
   });
   test("APNs 未配置就不查设备表也不发", async () => {
     apnsOn = false;

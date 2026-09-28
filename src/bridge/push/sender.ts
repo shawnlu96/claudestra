@@ -1,11 +1,13 @@
 /**
- * 推送的出口（docs/design-hosted-frontend.md §7）：中继连着且中继有对应凭据 → 发 push 帧让中继投递（网关模式，浏览器用的是
- * 中继的 VAPID 公钥）；否则直发（bridge 自己的 VAPID 密钥 / 自己的 APNs p8）。Web Push 与 APNs 各自选路：中继只做了
- * Web Push 没做 APNs 时，APNs 仍可走本机 p8。老中继（welcome 不带 push）一律直发。
+ * 推送的出口（docs/design-hosted-frontend.md §7）。Web Push 按订阅的 VAPID 公钥选路：订阅只认订它时用的那把钥匙，
+ * 用中继公钥订的走中继（push 帧），用本机公钥订的（托管前端之前的老浏览器）由 bridge 直发——两把钥匙签错一律 403。
+ * 不知道钥匙的老订阅两条路依次试，推送服务 401/403 才换下一条（没投出去，不会重复）。托管 origin 的订阅必是中继公钥，
+ * 直发签不进去，所以 sw.js「中继模式的推送一定经中继、fp 已钉死」仍成立。APNs 另行选路：中继有 p8 走中继，否则本机 p8。
  * 两个后端都是注入的：relay 是 bridge/relay-link.ts 的 relayClient()，direct 由 init.ts 从磁盘 / env 懒加载。
  */
 import { apnsTokenDead, type ApnsClient, type ApnsMessage } from "../../lib/apns.js";
 import { RelayError, type PushAck, type RelayClient } from "../../lib/relay-client.js";
+import { pushEndpointProblem } from "../../lib/push-endpoint.js";
 import type { WebPushSubscription } from "../../lib/relay-protocol.js";
 import { webPushOutcome, type WebPushSend } from "../../lib/web-push.js";
 
@@ -15,6 +17,8 @@ export interface SendOutcome {
   gone: boolean;
   status?: number;
   error?: string;
+  /** Web Push 投成功时用的那把 VAPID 公钥：调用方记回订阅，下次直接走这条路 */
+  vapidKey?: string;
 }
 
 /** GET /api/v1/push/config 的形状（契约 §13.3） */
@@ -32,7 +36,9 @@ export interface DirectBackends {
 
 export interface PushSender {
   config(): PushConfig;
-  sendWebPush(sub: WebPushSubscription, payload: string, ttl?: number): Promise<SendOutcome>;
+  /** 现在签得了的 VAPID 公钥（中继的在前）：登记订阅时浏览器报的钥匙只认这里面的 */
+  webPushKeys(): string[];
+  sendWebPush(sub: WebPushSubscription & { vapidKey?: string | null }, payload: string, ttl?: number): Promise<SendOutcome>;
   sendApns(token: string, msg: ApnsMessage): Promise<SendOutcome>;
 }
 
@@ -43,6 +49,16 @@ export interface SenderDeps {
 
 const fromAck = (a: PushAck): SendOutcome => ({ ok: a.ok, gone: a.gone === true, ...(a.status !== undefined ? { status: a.status } : {}), ...(a.error ? { error: a.error } : {}) });
 const relayFailed = (e: unknown): SendOutcome => ({ ok: false, gone: false, error: e instanceof RelayError ? `relay_${e.code}` : (e as Error).message });
+/**
+ * 推送服务拒了签名：多半是订阅用的不是这把钥匙（FCM 403、Mozilla 401），换另一把还有救。
+ * 中继回包只认 upstream_error（推送服务的原状态），中继自己将来若加 403 类拒绝不能被当成换钥匙的信号
+ */
+const keyRejected = (o: SendOutcome): boolean => (o.status === 401 || o.status === 403) && (o.error === undefined || o.error === "upstream_error");
+
+interface WebPushRoute {
+  key: string;
+  send: (sub: WebPushSubscription, payload: string, ttl: number) => Promise<SendOutcome>;
+}
 
 export function createPushSender(d: SenderDeps): PushSender {
   const online = () => {
@@ -57,7 +73,33 @@ export function createPushSender(d: SenderDeps): PushSender {
     const c = online();
     return c && c.info().push?.apns ? c : null;
   };
+  /** 现在可用的 Web Push 出口，中继在前（没记钥匙的订阅先试中继：托管前端之后订的都是中继公钥） */
+  const webPushRoutes = (): WebPushRoute[] => {
+    const out: WebPushRoute[] = [];
+    const r = relayWebPush();
+    if (r) {
+      out.push({
+        key: r.info().push!.vapidPublicKey!,
+        send: (sub, payload, ttl) => r.push({ kind: "webpush", subscription: sub, payload, ttl }).then(fromAck, relayFailed),
+      });
+    }
+    const b = d.direct();
+    const send = b.webPush;
+    if (send && b.vapidPublicKey && !out.some((o) => o.key === b.vapidPublicKey)) {
+      out.push({
+        key: b.vapidPublicKey,
+        // 中继那边投前会再验 endpoint；直发只能自己验——存量订阅（迁移按列复制）没经过登记时的检查
+        send: (sub, payload, ttl) => pushEndpointProblem(sub.endpoint) ? Promise.resolve({ ok: false, gone: false, error: "endpoint_forbidden" }) :
+          send(sub, payload, { ttl }).then(
+            (status): SendOutcome => ({ ...webPushOutcome(status), status }),
+            (e: unknown): SendOutcome => ({ ok: false, gone: false, error: (e as Error).message }),
+          ),
+      });
+    }
+    return out;
+  };
   return {
+    webPushKeys: () => webPushRoutes().map((r) => r.key),
     config() {
       const mode = online() ? "relay" : "direct";
       const rw = relayWebPush();
@@ -65,22 +107,17 @@ export function createPushSender(d: SenderDeps): PushSender {
       return { mode, webPush: key ? { vapidPublicKey: key } : null, apns: relayApns() !== null || d.direct().apns !== null };
     },
     async sendWebPush(sub, payload, ttl = 3600) {
-      const r = relayWebPush();
-      if (r) {
-        try {
-          return fromAck(await r.push({ kind: "webpush", subscription: sub, payload, ttl }));
-        } catch (e) {
-          return relayFailed(e);
-        }
+      const routes = webPushRoutes();
+      if (!routes.length) return { ok: false, gone: false, error: "webpush_unavailable" };
+      const own = sub.vapidKey ? routes.filter((r) => r.key === sub.vapidKey) : [];
+      const target = { endpoint: sub.endpoint, keys: sub.keys }; // 只把订阅本身交出去，别把本地字段带进 push 帧
+      let last: SendOutcome = { ok: false, gone: false, error: "webpush_unavailable" };
+      for (const r of [...own, ...routes.filter((x) => !own.includes(x))]) {
+        last = await r.send(target, payload, ttl);
+        if (last.ok) return { ...last, vapidKey: r.key };
+        if (!keyRejected(last)) return last;
       }
-      const b = d.direct();
-      if (!b.webPush) return { ok: false, gone: false, error: "webpush_unavailable" };
-      try {
-        const status = await b.webPush(sub, payload, { ttl });
-        return { ...webPushOutcome(status), status };
-      } catch (e) {
-        return { ok: false, gone: false, error: (e as Error).message };
-      }
+      return last;
     },
     async sendApns(token, msg) {
       const r = relayApns();

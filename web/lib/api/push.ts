@@ -21,8 +21,9 @@ export async function vapidPublicKey(): Promise<string | null> {
   return c.webPush?.vapidPublicKey ?? null;
 }
 
-export function pushSubscribe(subscription: PushSubscriptionJSON, userAgent: string): Promise<void> {
-  return api("/push/subscriptions", { method: "POST", json: { subscription, userAgent }, timeoutMs: 10_000 }).then(() => undefined);
+/** vapidKey = 订阅时用的公钥：机器按它选投递路径（中继的走中继，本机的直发） */
+export function pushSubscribe(subscription: PushSubscriptionJSON, userAgent: string, vapidKey: string): Promise<void> {
+  return api("/push/subscriptions", { method: "POST", json: { subscription, userAgent, vapidKey }, timeoutMs: 10_000 }).then(() => undefined);
 }
 export function pushUnsubscribe(endpoint: string): Promise<void> {
   return api("/push/subscriptions", { method: "DELETE", json: { endpoint }, timeoutMs: 10_000 }).then(() => undefined);

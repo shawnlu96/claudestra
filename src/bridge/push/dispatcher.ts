@@ -11,7 +11,7 @@ import type { Database } from "bun:sqlite";
 import type { ApnsMessage } from "../../lib/apns.js";
 import { OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
 import type { PrincipalsFile } from "../../lib/principals.js";
-import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow } from "../../lib/push-store.js";
+import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey } from "../../lib/push-store.js";
 import { bareAgent, bumpUnread, countsUnread, markAgentRead, onAgentRead, totalUnread, type ReadEvent } from "../../lib/unread-store.js";
 import type { PushSender } from "./sender.js";
 
@@ -70,6 +70,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     const json = JSON.stringify(d.fp ? { fp: d.fp, ...payload } : payload);
     await Promise.all(subs.map(async (s) => {
       const r = await d.sender.sendWebPush(s, json);
+      if (r.ok && r.vapidKey && r.vapidKey !== s.vapidKey) setPushSubscriptionKey(d.db, s, r.vapidKey);
       if (r.gone) {
         deletePushSubscription(d.db, s.endpoint);
         log(`订阅已失效，已清理（${r.status ?? r.error}）`);
