@@ -7,6 +7,7 @@
 import { DEFAULT_RUNTIME, sourceFor } from "./runtimes/index.js";
 import { isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "./claude-launch.js";
 import type { RegistryAgent } from "./registry.js";
+import { hasControlChar } from "./flag-like.js";
 
 /**
  * 非 Claude Code agent → 给人看的拒绝原因；CC（含缺失/未知 runtime）或不在 registry
@@ -26,7 +27,7 @@ export function nonClaudeRuntimeError(agentParam: string, regs: readonly Registr
  * 将来有人放宽字符集，换行也漏不进去，漏进去就是替 owner 多敲一行。
  */
 export function isSafeModelArg(m: string): boolean {
-  return !/\p{Cc}/u.test(m) && /^[A-Za-z0-9][A-Za-z0-9._\/@:-]{0,127}$/.test(m);
+  return !hasControlChar(m) && /^[A-Za-z0-9][A-Za-z0-9._\/@:-]{0,127}$/.test(m);
 }
 
 /** claude-settings 入参 → 给人看的 400 原因，合法 → null。effort 接受 runtime-only 档（ultracode 就是「this session only」语义） */

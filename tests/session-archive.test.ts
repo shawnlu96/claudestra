@@ -78,6 +78,7 @@ describe("读归档先按真实路径核对根目录：符号链接绕不出去�
     writeFileSync(join(outside, "secret.jsonl"), '{"type":"user","message":{"content":"secret"}}\n');
     writeFileSync(join(root, "agent-ok", `${SID}.jsonl`), '{"type":"user"}\n');
     symlinkSync(outside, join(root, "agent-evil")); // 整个 agent 目录指到外面
+    symlinkSync(join(root, "agent-ok"), join(root, "agent-sib")); // 指到根下别的 agent 的目录
     symlinkSync(join(outside, "secret.jsonl"), join(root, "agent-ok", `${SID2}.jsonl`)); // 单个会话文件指到外面
     symlinkSync(root, join(base, "root-link")); // 根自己是链接（把状态目录挪到别的盘）不该误伤
     return { base, root };
@@ -87,6 +88,7 @@ describe("读归档先按真实路径核对根目录：符号链接绕不出去�
     const { base, root } = tree();
     try {
       expect(agentArchiveDir("agent-evil", root)).toBeNull();
+      expect(agentArchiveDir("agent-sib", root)).toBeNull(); // 在根下，但不是它自己的目录
       expect(agentArchiveDir("agent-ok", root)).toBe(join(root, "agent-ok"));
       expect(agentArchiveDir("agent-ok", join(base, "root-link"))).toBe(join(base, "root-link", "agent-ok"));
       expect(agentArchiveDir("agent-new", root)).toBe(join(root, "agent-new")); // 还不存在：只做字面校验

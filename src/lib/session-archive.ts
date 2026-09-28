@@ -26,13 +26,18 @@ export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 /**
  * 某个 agent 的归档目录。名字拼出来不是归档根下的单层目录（带 /、..、绝对路径——URL 里的 %2F 解码后就是 /）→ null。
  * 历史端点的 agent 名直接来自请求，这是最后一道根目录校验：放过去就能读到任意目录下的会话正文（tests/session-gates.test.ts）。
- * 目录已存在时再按真实路径核一遍：符号链接指到根外面同样 → null。
+ * 目录已存在时再按真实路径核一遍：它得真的是根下的「这个名字」——链接指到根外面、或指到别的 agent 的归档目录 → null。
  */
 export function agentArchiveDir(agentName: string, root: string = ARCHIVE_ROOT): string | null {
   const base = resolve(root);
   const dir = resolve(base, agentName);
   if (dirname(dir) !== base || basename(dir) !== agentName) return null;
-  return !existsSync(dir) || realpathWithin(dir, base) ? dir : null;
+  if (!existsSync(dir)) return dir;
+  try {
+    return realpathSync(dir) === join(realpathSync(base), agentName) ? dir : null;
+  } catch {
+    return null; // 读不了真实路径（没权限）就不读：同 realpathWithin
+  }
 }
 
 /** p 的真实路径（解开所有符号链接）在 root 的真实路径之下。读不了（悬空链接、没权限）→ false，调用方当它不在根下跳过 */

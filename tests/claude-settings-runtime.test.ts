@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { runnerHome, type RunnerHome, type RunnerResult } from "./api-runner-harness";
 import { nonClaudeRuntimeError } from "../src/lib/claude-settings-runtime";
+import { controlCharError } from "../src/lib/flag-like";
 import type { RegistryAgent } from "../src/lib/registry";
 import { guestGrant, hashDeviceToken, type DeviceCredential, type Grant } from "../src/lib/devices";
 
@@ -145,9 +146,10 @@ describe("POST claude-settings：只接 Claude Code agent", () => {
 describe("POST claude-settings：只给全权凭据（与 pi/codex-settings 同一门），model 只许 id 字符（T32）", () => {
   test("owner 设备：合法名越过校验走到空闲判据（409）；带换行 / 空格 / \\r 的回 400，一个字都不注入", () => {
     expect(byName("owner legal").status).toBe(409);
-    for (const k of ["newline", "space", "cr"]) {
+    // 换行、\r 先过控制字符闸（同 cron / create，先看原文）；空格是字符集不对
+    for (const [k, want] of [["newline", controlCharError("model")], ["space", "model 含非法字符"], ["cr", controlCharError("model")]]) {
       const r = byName(`owner ${k}`);
-      expect([k, r.status, JSON.parse(r.body!).error]).toEqual([k, 400, "model 含非法字符"]);
+      expect([k, r.status, JSON.parse(r.body!).error]).toEqual([k, 400, want]);
     }
   });
 

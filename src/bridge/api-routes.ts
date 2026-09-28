@@ -84,7 +84,7 @@ import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
-import { controlCharBody, firstControlCharField, firstFlagLikeField } from "../lib/flag-like.js";
+import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { handleCronRoutes } from "./cron-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
@@ -1177,8 +1177,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (subagent) {
       if (!isValidSubagentId(subagent)) return apiJson(400, { ok: false, error: "invalid subagent id" });
       file = `${found.path.replace(/\.jsonl$/, "")}/subagents/${subagent}.jsonl`;
-      // 归档里的子 agent 目录是符号链接、指到归档根外面 → 当它不存在（lib/session-archive.ts realpathWithin）
-      const escapes = found.source === "archive" && !realpathWithin(file, ARCHIVE_ROOT);
+      // 归档里的子 agent 目录是符号链接、指到本 agent 归档目录外面（别的 agent 的也算）→ 当它不存在（lib/session-archive.ts realpathWithin）
+      const escapes = found.source === "archive" && !realpathWithin(file, found.path.replace(/\/[^/]+$/, ""));
       if (escapes || !existsSync(file)) return apiJson(404, { ok: false, error: `subagent "${subagent}" not found in session` });
     }
     const limitRaw = Number(url.searchParams.get("limit") || 100);
@@ -1444,6 +1444,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("claude-settings requires a full-scope token"); // 与 pi/codex-settings 同一门（bridge/runtime-settings-routes.ts）
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
+    const textBad = textFieldsProblem(body, ["model", "effort"]); // 先看原文再 trim，口径同 cron / create
+    if (textBad) return apiJson(400, textBad);
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
     const effort = typeof body?.effort === "string" && body.effort.trim() ? body.effort.trim() : undefined;
     if (!model && !effort) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
@@ -1682,11 +1684,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("create requires a full-scope token");
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
+    const textBad = textFieldsProblem(body, ["name", "dir", "purpose", "model", "effort", "project", "runtime", "piBase"]); // 先看原文再 trim，口径同 cron（lib/flag-like.ts）
+    if (textBad) return apiJson(400, textBad);
     const name = String(body?.name || "").trim();
     const dir = String(body?.dir || "").trim();
     const purpose = String(body?.purpose || "").trim();
-    // v2.10+ 可选钉模型/effort(owner 2026-07-16:「新建 agent 加选模型和 Effort」)。
-    // 透传给 manager create --model/--effort,校验(别名/合法档位)由 manager 做。
+    // 可选钉模型 / effort：透传给 manager create --model/--effort，别名与合法档位由 manager 校验
     const model = String(body?.model || "").trim();
     const effort = String(body?.effort || "").trim();
     // v2.21+ 可选归属 project(缺省由 manager 按 dir 自动归属/建组)
@@ -1703,9 +1706,6 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // 自由文本不会被当成 flag（manager/create-args.ts 注释：曾可用 purpose 替换整个命令黑名单）。
     const flagLike = firstFlagLikeField({ name, dir, project, model, effort });
     if (flagLike) return apiJson(400, { ok: false, error: `${flagLike} 不能以 "-" 开头` });
-    // purpose / model 拼进启动命令后经 send-keys 敲进 shell：控制字符能丢掉整行再执行后半段（lib/flag-like.ts）
-    const ctrl = firstControlCharField({ name, dir, purpose, model, effort, project });
-    if (ctrl) return apiJson(400, controlCharBody(ctrl));
     if (model && !isSafeModelArg(model)) return apiJson(400, { ok: false, error: "model 含非法字符" });
     const createArgs = ["create", name, dir];
     if (purpose) createArgs.push("--purpose", purpose);

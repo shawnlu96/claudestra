@@ -4,14 +4,14 @@ import { promptProblem } from "@/lib/cron-prompt";
 import { DICT } from "@/lib/i18n-dict";
 
 describe("promptProblem", () => {
-  test("一行普通文字（中文、emoji、空格）没问题", () => {
-    expect(promptProblem("每周一 10 点汇总 PR 状态 📊")).toBe("");
+  test("一行普通文字（中文、emoji、ZWJ 组合 emoji、空格）没问题", () => {
+    expect(promptProblem("每周一 10 点汇总 PR 状态 📊 👨\u200d👩\u200d👧")).toBe("");
   });
-  test("粘贴进来的换行（\\n、\\r\\n、\\r）→「只能一行」", () => {
-    for (const p of ["a\nb", "a\r\nb", "a\rb"]) expect([p, promptProblem(p)]).toEqual([p, "定时任务的 prompt 只能一行"]);
+  test("粘贴进来的换行（\\n、\\r\\n、\\r、U+2028、U+2029、U+0085）→「只能一行」", () => {
+    for (const p of ["a\nb", "a\r\nb", "a\rb", "LS-A\u2028/clear", "a\u2029b", "a\u0085b"]) expect([p, promptProblem(p)]).toEqual([p, "定时任务的 prompt 只能一行"]);
   });
   test("其它控制字符（Tab、Esc、\\x03）→ 单独说明", () => {
-    for (const p of ["a\tb", "a\u001b[Z", "a\u0003"]) expect([p, promptProblem(p)]).toEqual([p, "任务指令里有看不见的控制字符（比如 Tab），请删掉"]);
+    for (const p of ["a\tb", "a\u001b[Z", "a\u0003", "a\u200bb", "a\u202eb"]) expect([p, promptProblem(p)]).toEqual([p, "任务指令里有看不见的控制字符（比如 Tab），请删掉"]);
   });
   test("提示文案都有英文", () => {
     for (const k of ["定时任务的 prompt 只能一行", "任务指令里有看不见的控制字符（比如 Tab），请删掉"]) expect(DICT[k]).toBeTruthy();

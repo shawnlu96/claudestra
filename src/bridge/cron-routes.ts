@@ -1,12 +1,12 @@
 /**
- * /api/v1/cron*（从 api-routes 拆出：那个文件只许变小）。列表 / 开关 / 删除：全权凭据（isFullScope）。
- * 新建 / 编辑的 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头），和斜杠直通同一类，所以要求：
+ * /api/v1/cron*（从 api-routes 拆出：那个文件只许变小）。列表 / 删除：全权凭据（isFullScope）。
+ * 新建 / 编辑 / 开关（重新启用）会让 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头），和斜杠直通同一类，所以要求：
  * 全权（isFullScope，要求 scope 含 "*"）之外还要 owner 本人（isOwnerPrincipal）；有 targetAgent 时它还得在 scope 里——
  * "*" 不含 master，要显式列出（agentInScope）。测试见 tests/cron-create-gates.test.ts。
  * runManager / loadJobs 由调用方注入：一个在 management.ts（hub），一个在 src/cron.ts（入口），bridge 模块都不能 import。
  */
 import { agentInScope, isOwnerPrincipal, type Principal } from "../lib/principals.js";
-import { controlCharBody, firstControlCharField } from "../lib/flag-like.js";
+import { textFieldsProblem } from "../lib/flag-like.js";
 import type { CronJob } from "../lib/cron-job.js";
 import { apiJson, forbidden, invalidJsonBody, INVALID_JSON, isFullScope, notInScope, readJsonBody } from "./api-respond.js";
 
@@ -15,9 +15,10 @@ export interface CronRouteDeps {
   loadJobs: () => Promise<CronJob[]>;
 }
 
-const CRON_OWNER_ONLY = "creating or editing cron jobs requires the owner's own credential";
+const CRON_OWNER_ONLY = "creating, editing or toggling cron jobs requires the owner's own credential";
+const cronResult = (r: any): Response => apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
 
-/** 新建 / 编辑的身份门（读 body 之前；scope 含 "*" 已由外层 isFullScope 保证）：不放行 → 403 响应，放行 → null */
+/** 新建 / 编辑 / 开关的身份门（读 body 之前；scope 含 "*" 已由外层 isFullScope 保证）：不放行 → 403 响应，放行 → null */
 const cronWriterDenied = (principal: Principal): Response | null => (isOwnerPrincipal(principal) ? null : forbidden(CRON_OWNER_ONLY));
 
 /** prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master。按 src/cron.ts 的解析补成 agent-<名> 再判，与调度器落到的是同一个 agent */
@@ -52,10 +53,10 @@ export async function handleCronRoutes(req: Request, path: string, principal: Pr
     if (writer) return writer;
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
-    const target = targetDenied(principal, body?.targetAgent ? String(body.targetAgent) : null);
+    const textBad = textFieldsProblem(body);
+    if (textBad) return apiJson(400, textBad);
+    const target = targetDenied(principal, body?.targetAgent);
     if (target) return target;
-    const ctrl = firstControlCharField(body);
-    if (ctrl) return apiJson(400, controlCharBody(ctrl));
     const name = String(body?.name ?? "").trim();
     const schedule = String(body?.schedule ?? "").trim();
     const prompt = String(body?.prompt ?? "").trim();
@@ -66,27 +67,26 @@ export async function handleCronRoutes(req: Request, path: string, principal: Pr
     const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
     if (body?.effort) extra.push("--effort", String(body.effort));
     if (body?.project) extra.push("--project", String(body.project));
-    const r = await deps.runManager("cron-add", name, schedule, dir, ...extra, prompt);
-    return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+    return cronResult(await deps.runManager("cron-add", name, schedule, dir, ...extra, prompt));
   }
   const cronAction = path.match(/^\/cron\/([^/]+)\/(toggle|remove|edit)$/);
   if (cronAction && req.method === "POST") {
     const id = decodeURIComponent(cronAction[1]);
     const action = cronAction[2];
     let r: any;
-    if (action === "toggle") r = await deps.runManager("cron-toggle", id);
-    else if (action === "remove") r = await deps.runManager("cron-remove", id);
+    if (action === "remove") r = await deps.runManager("cron-remove", id);
     else {
       const writer = cronWriterDenied(principal);
       if (writer) return writer;
-      // 编辑改不了 targetAgent：比的是原任务的（找不到任务就交给 manager 回「找不到」）
+      // 开关（重新启用）和编辑都会让 prompt 再敲进目标 agent。编辑改不了 targetAgent：比的是原任务的（找不到任务就交给 manager 回「找不到」）
       const job = (await deps.loadJobs()).find((j) => j.name === id || j.id === id);
       const target = targetDenied(principal, job?.targetAgent);
       if (target) return target;
+      if (action === "toggle") return cronResult(await deps.runManager("cron-toggle", id));
       const body: any = await readJsonBody(req);
       if (body === INVALID_JSON) return invalidJsonBody();
-      const ctrl = firstControlCharField(body);
-      if (ctrl) return apiJson(400, controlCharBody(ctrl));
+      const textBad = textFieldsProblem(body);
+      if (textBad) return apiJson(400, textBad);
       const flags: string[] = [];
       if (body?.schedule) flags.push("--schedule", String(body.schedule));
       if (body?.prompt) flags.push("--prompt", String(body.prompt));
@@ -98,7 +98,7 @@ export async function handleCronRoutes(req: Request, path: string, principal: Pr
       if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
       r = await deps.runManager("cron-edit", id, ...flags);
     }
-    return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+    return cronResult(r);
   }
   return apiJson(405, { ok: false, error: "method not allowed" });
 }

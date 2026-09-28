@@ -1,6 +1,6 @@
 /** lib/flag-like.ts：POST /api/v1/agents 透传给 manager 的字段不能长得像 flag（model / effort 也算） */
 import { describe, expect, test } from "bun:test";
-import { controlCharError, firstControlCharField, firstFlagLikeField } from "../src/lib/flag-like";
+import { controlCharError, firstControlCharField, firstFlagLikeField, firstNonStringField, hasControlChar, textFieldsProblem } from "../src/lib/flag-like";
 import { parseCreateArgs } from "../src/manager/create-args";
 
 describe("firstFlagLikeField", () => {
@@ -17,20 +17,34 @@ describe("firstFlagLikeField", () => {
 });
 
 describe("firstControlCharField", () => {
-  test("换行、\\r、\\x03、\\x1b、NUL、\\x7f 都算；报第一个出问题的字段名", () => {
-    for (const bad of ["a\nb", "a\rb", "a\u0003b", "a\u001b[Z", "a\u0000", "a\u007f", "a\u0085"]) {
+  test("换行、\\r、\\x03、\\x1b、NUL、\\x7f、U+2028/2029、零宽、方向控制符都算；报第一个出问题的字段名", () => {
+    const cf = ["a\u2028b", "a\u2029b", "a\u200bb", "a\u200cb", "a\u2060b", "a\ufeffb", "a\u202eb", "a\u2066b", "a\u00adb"];
+    for (const bad of ["a\nb", "a\rb", "a\u0003b", "a\u001b[Z", "a\u0000", "a\u007f", "a\u0085", ...cf]) {
       expect([bad, firstControlCharField({ name: "ok", prompt: bad })]).toEqual([bad, "prompt"]);
     }
     expect(firstControlCharField({ name: "a\tb", prompt: "x\ny" })).toBe("name");
   });
-  test("中文、emoji、全角符号、空格放行；非字符串值按 String() 看，null / undefined 跳过", () => {
-    expect(firstControlCharField({ purpose: "看日志 📨［x］", model: "claude-opus-5-5", n: 3, x: null, y: undefined })).toBeNull();
-    expect(firstControlCharField({ targetAgent: ["cc\r"] })).toBe("targetAgent");
+  test("中文、emoji（含 ZWJ 连起来的组合 emoji）、全角符号、空格放行；只看字符串，别的类型交给 firstNonStringField", () => {
+    expect(firstControlCharField({ purpose: "看日志 📨［x］👨\u200d👩\u200d👧", model: "claude-opus-5-5", n: 3, x: null, y: undefined })).toBeNull();
+    expect(firstControlCharField({ targetAgent: ["cc\r"] })).toBeNull();
+    expect(hasControlChar("a\u200db")).toBe(false);
     expect(firstControlCharField(null)).toBeNull();
     expect(firstControlCharField("a\nb")).toBeNull(); // 不是对象：没有字段可报，调用方的 JSON 形状校验会拦
   });
   test("报错文案说清哪个字段、为什么不行，中英各一段", () => {
     const e = controlCharError("prompt");
     for (const part of ["「prompt」", "换行会让它提前提交", "只能写成一行", '"prompt"', "submits early", "single line"]) expect(e).toContain(part);
+  });
+});
+
+describe("textFieldsProblem：入口闸，先于 trim", () => {
+  test("对象、数组、数字 → not_string（写明字段）；toString 被改过的对象也不会抛", () => {
+    expect(firstNonStringField({ a: "x", b: null, c: undefined })).toBeNull();
+    for (const v of [{ toString: "x" }, ["cc"], 3, true]) expect(textFieldsProblem({ ok: "x", prompt: v })).toMatchObject({ ok: false, code: "not_string", field: "prompt" });
+  });
+  test("首尾的 \\r \\n 也算（以前 create / claude-settings 先 trim 掉了）；给 keys 只看那几个字段", () => {
+    expect(textFieldsProblem({ model: "claude-fake-3\r" })).toEqual({ ok: false, code: "control_chars", field: "model", error: controlCharError("model") });
+    expect(textFieldsProblem({ model: "opus", extra: { a: 1 } }, ["model"])).toBeNull();
+    expect(textFieldsProblem(null, ["model"])).toBeNull();
   });
 });

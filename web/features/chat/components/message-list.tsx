@@ -56,7 +56,7 @@ const SystemDivider = memo(function SystemDivider({ m }: { m: ChatMessage }) {
     <div className={`${anim} relative mb-[22px] flex select-none items-center gap-3`}>
       <GutterTime ts={m.ts} side="left" lead="system" />
       <span className="h-px flex-1 bg-base-content/10" />
-      <span className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
+      <span title={tVerbatim(m.content)} className="max-w-[70%] shrink-0 truncate text-[11px] font-medium tracking-wide text-base-content/35">
         {tVerbatim(m.content)}
       </span>
       <HeaderTime ts={m.ts} />
