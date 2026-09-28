@@ -99,6 +99,10 @@ describe("lib/attachment-lookup 纯函数", () => {
     expect(attachmentMime("X.JPG")).toBe("image/jpeg");
     expect(attachmentMime("notes.log")).toBe("text/plain; charset=utf-8");
     expect(attachmentMime("blob")).toBe("application/octet-stream");
+    expect(attachmentMime("设计稿.MD")).toBe("text/markdown; charset=utf-8");
+    expect(attachmentMime("a.csv")).toBe("text/csv; charset=utf-8");
+    expect(attachmentMime("a.json")).toBe("application/json; charset=utf-8");
+    expect(attachmentMime("page.html")).toBe("application/octet-stream");
   });
   test("findAttachment：目录不存在时安静地空手而归", () => {
     expect(findAttachment("x.png", null, { uploadDir: join(dir, "nope"), inboxDirs: [join(dir, "nope2")] })).toBeNull();
