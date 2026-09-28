@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { isBuilderComm, needsNpmInstall, parseBakedWebCommit, parseBuildMarker, sameCommit, WEB_PATHSPEC } from "../src/lib/web-build";
+import { isBuilderComm } from "../src/lib/web-build-lock";
+import { needsNpmInstall, parseBakedWebCommit, parseBuildMarker, sameCommit, WEB_PATHSPEC } from "../src/lib/web-build";
 import { readFileSync } from "fs";
 
 describe("web-build 纯逻辑", () => {
