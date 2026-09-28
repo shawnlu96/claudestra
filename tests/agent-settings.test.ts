@@ -1,6 +1,6 @@
 /** lib/agent-settings.ts：按 agent 的设置文件（skillOverrides）读写与启动参数；状态目录由 tests/preload.ts 隔离到临时目录 */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 // runtimes/index 要先于 runtimes/claude-code 加载（main 上原有的循环依赖；单独跑本文件时顺序反了会 TDZ）
@@ -9,9 +9,11 @@ import {
   agentSettingsPath,
   allSkillOverrides,
   applySkillOverride,
+  dropLaunchSettings,
   isSettingsAgentName,
   isSkillName,
   launchSettingsFor,
+  launchSnapshotPath,
   MAX_LAUNCH_SETTINGS_BYTES,
   outsideSkillOverrides,
   removeAgentSettings,
@@ -21,10 +23,19 @@ import {
   skillOverridesOf,
 } from "../src/lib/agent-settings.js";
 import { buildClaudeCommand } from "../src/lib/claude-launch.js";
+import { logPath } from "../src/lib/log-paths.js";
 import { claudeLaunchOptions } from "../src/lib/runtimes/claude-code.js";
 import { sandboxLaunchArgs } from "../src/lib/sandbox-env.js";
 
 const readJson = (p: string) => JSON.parse(readFileSync(p, "utf8"));
+/** 序列化后正好 bytes 字节的 { skillOverrides: {...} }（最后一个键名补齐长度） */
+function bigOverrides(bytes: number): { skillOverrides: Record<string, string> } {
+  const o: Record<string, string> = {};
+  for (let i = 0; JSON.stringify({ skillOverrides: o }).length < bytes - 40; i++) o[`skill-${String(i).padStart(4, "0")}`] = "off";
+  const pad = bytes - JSON.stringify({ skillOverrides: { ...o, z: "off" } }).length;
+  o[`z${"x".repeat(pad)}`] = "off";
+  return { skillOverrides: o };
+}
 
 describe("applySkillOverride / skillOverridesOf（纯函数）", () => {
   test("on = 删键（显式写 on 会让 /skills 菜单那一项被锁）；表空了连 skillOverrides 一起删；其它键原样保留", () => {
@@ -119,20 +130,49 @@ describe("启动参数", () => {
     expect(launchSettingsFor("agent-t7")).toEqual({ skillOverrides: { pdf: "off" } });
     expect(buildClaudeCommand({ channelId: "1", bridgeUrl: "ws://localhost:3847", sessionId: "s", settingsAgent: "agent-t7" })).not.toContain("sk-secret");
   });
-  test("写入前卡长度：超过上限拒写（tmux 单条命令约 16KB 就发不出去），文件原样不动", async () => {
-    const big: Record<string, string> = {};
-    for (let i = 0; big && JSON.stringify(big).length < MAX_LAUNCH_SETTINGS_BYTES - 40; i++) big[`skill-${String(i).padStart(4, "0")}`] = "off";
-    const p = agentSettingsPath("agent-t8");
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify({ skillOverrides: big }));
-    const before = readFileSync(p, "utf8");
-    await expect(setSkillOverride("agent-t8", "one-more-skill-with-a-long-name", "off")).rejects.toThrow(/上限/);
-    expect(readFileSync(p, "utf8")).toBe(before);
-    await setSkillOverride("agent-t8", "skill-0000", "on"); // 往回调总是允许
+  test("settingsLaunchArgs：非空才带；不超上限内联 JSON、不落快照（正好等于上限也内联）", () => {
+    expect(settingsLaunchArgs({}, "agent-t9")).toEqual([]);
+    expect(settingsLaunchArgs({ skillOverrides: { a: "off" } }, "agent-t9")).toEqual(["--settings", '{"skillOverrides":{"a":"off"}}']);
+    const edge = bigOverrides(MAX_LAUNCH_SETTINGS_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(edge))).toBe(MAX_LAUNCH_SETTINGS_BYTES);
+    expect(settingsLaunchArgs(edge, "agent-t9")).toEqual(["--settings", JSON.stringify(edge)]);
+    expect(existsSync(launchSnapshotPath("agent-t9"))).toBe(false);
   });
-  test("settingsLaunchArgs：非空才带，内联 JSON", () => {
-    expect(settingsLaunchArgs({})).toEqual([]);
-    expect(settingsLaunchArgs({ skillOverrides: { a: "off" } })).toEqual(["--settings", '{"skillOverrides":{"a":"off"}}']);
+  test("超长：写快照（0600、内容就是那份 JSON）传路径，bridge 日志里记警告；就绪后 dropLaunchSettings 删掉", () => {
+    const big = bigOverrides(MAX_LAUNCH_SETTINGS_BYTES + 1);
+    const args = settingsLaunchArgs(big, "agent-t8");
+    const snap = launchSnapshotPath("agent-t8");
+    expect(args).toEqual(["--settings", snap]);
+    expect(readJson(snap)).toEqual(big);
+    expect(statSync(snap).mode & 0o777).toBe(0o600);
+    expect(readFileSync(logPath("bridge", "err"), "utf8")).toMatch(/\[agent-settings\] ⚠ agent-t8 的启动设置 8193 字节，超过内联上限 8192/);
+    expect(allSkillOverrides()["launch"]).toBeUndefined(); // 快照目录不算一个 agent
+    dropLaunchSettings("agent-t8");
+    expect(existsSync(snap)).toBe(false);
+    dropLaunchSettings("agent-t8"); // 不在也不抛
+    dropLaunchSettings("../evil"); // 非法名直接不碰
+  });
+  test("超长写入不再拒：设置文件照写，buildClaudeCommand 带快照路径不带内容；remove 连快照一起删", async () => {
+    const p = agentSettingsPath("agent-t10");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ skillOverrides: bigOverrides(MAX_LAUNCH_SETTINGS_BYTES).skillOverrides }));
+    await setSkillOverride("agent-t10", "one-more-skill-with-a-long-name", "off");
+    expect(readJson(p).skillOverrides["one-more-skill-with-a-long-name"]).toBe("off");
+    const cmd = buildClaudeCommand({ channelId: "1", bridgeUrl: "ws://localhost:3847", sessionId: "s", settingsAgent: "agent-t10" });
+    expect(cmd).toContain(`--settings ${launchSnapshotPath("agent-t10")}`);
+    expect(cmd).not.toContain("one-more-skill-with-a-long-name");
+    expect(Buffer.byteLength(cmd)).toBeLessThan(MAX_LAUNCH_SETTINGS_BYTES);
+    expect(readJson(launchSnapshotPath("agent-t10")).skillOverrides["one-more-skill-with-a-long-name"]).toBe("off");
+    removeAgentSettings("agent-t10");
+    expect(existsSync(p)).toBe(false);
+    expect(existsSync(launchSnapshotPath("agent-t10"))).toBe(false);
+  });
+  test("沙箱超长：合成后的一份（含 statusLine）落快照，仍只有一个 --settings", () => {
+    const args = sandboxLaunchArgs("claudestra", "/bin/bun", "/repo/src", bigOverrides(MAX_LAUNCH_SETTINGS_BYTES), "agent-t11");
+    expect(args.filter((a) => a === "--settings")).toHaveLength(1);
+    expect(args[args.indexOf("--settings") + 1]).toBe(launchSnapshotPath("agent-t11"));
+    expect(readJson(launchSnapshotPath("agent-t11")).statusLine).toEqual({ type: "command", command: "/repo/scripts/statusline-usage.sh" });
+    dropLaunchSettings("agent-t11");
   });
   test("buildClaudeCommand：没文件不带 --settings；有文件内联传内容（不传路径：CC 读之前文件被删也起得来）；坏文件不带", async () => {
     const base = { channelId: "1", bridgeUrl: "ws://localhost:3847", sessionId: "s" };

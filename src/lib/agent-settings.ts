@@ -4,13 +4,14 @@
  * 写者只有 manager（skill-toggle）；bridge 只读。不碰全局 ~/.claude/settings.json：CC Switch 切供应商会整份重写它。
  *
  * 实测（CC 2.1.283，docs 02-03 附录 C2）：
- * - `--settings <路径>` 指向的文件不存在时 CC 直接报错退出 → 不传路径传内容：生成命令到 CC 读文件之间文件被删 / 挪也起得来；
+ * - `--settings <路径>` 指向的文件不存在时 CC 直接报错退出 → 平时传内容不传路径；超长才落临时快照传路径，就绪后删（CC 只在启动时读，删了照常跑）；
  * - 会话运行中改文件不生效（/reload-skills 也不行），重启（含 --resume）后生效 → 界面只提示「重启后生效」；
  * - 显式写 "on" 会让 /skills 菜单里那一项变成「locked by flag」→ on 一律删键，不写 "on"。
  */
-import { existsSync, readdirSync, renameSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { logPath } from "./log-paths.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, reportCorrupt, writeJsonStateGuarded } from "./state-file.js";
 
@@ -20,7 +21,7 @@ export type AgentSettings = Record<string, unknown>;
 
 /** 进启动命令行的键（白名单）：设置文件里手写了别的（比如 env 里的密钥）也不会出现在 ps 里 */
 const LAUNCH_KEYS = ["skillOverrides"] as const;
-/** 内联 JSON 的上限：tmux 单条命令约 16KB 就发不出去（启动命令里还有 purpose、project 上下文等），留一半余量 */
+/** 内联 JSON 的上限：tmux 单条命令约 16KB 就发不出去（启动命令里还有 purpose、project 上下文等），留一半余量；超过改走临时快照文件 */
 export const MAX_LAUNCH_SETTINGS_BYTES = 8192;
 const launchPart = (s: AgentSettings): AgentSettings => Object.fromEntries(LAUNCH_KEYS.filter((k) => k in s).map((k) => [k, s[k]]));
 
@@ -78,8 +79,6 @@ export async function setSkillOverride(agent: string, skill: string, state: Skil
   const cur = readJsonStateSync(path, isPlainObject);
   const base = cur.status === "ok" ? (cur.data as AgentSettings) : {};
   const next = applySkillOverride(aliases.reduce((acc, a) => applySkillOverride(acc, a, "on"), base), skill, state);
-  const bytes = Buffer.byteLength(JSON.stringify(launchPart(next)));
-  if (bytes > MAX_LAUNCH_SETTINGS_BYTES) throw new Error(`技能覆盖太多了（${bytes} 字节，上限 ${MAX_LAUNCH_SETTINGS_BYTES}）：启动命令会超过 tmux 的长度上限，先把用不着的调回「开」`);
   if (Object.keys(next).length === 0 && cur.status !== "corrupt") {
     if (existsSync(path)) unlinkSync(path);
     return next;
@@ -99,6 +98,7 @@ export function removeAgentSettings(agent: string): void {
   } catch (e) {
     console.error(`⚠ 删除 agent 设置文件失败（${agent}）：${(e as Error).message}`);
   }
+  dropLaunchSettings(agent);
 }
 /**
  * 首次 rename：源文件不在时也要删掉目标位置的旧文件（改名到一个删过的名字，不能继承那个旧 agent 的开关）。
@@ -116,9 +116,48 @@ export function renameAgentSettings(from: string, to: string, resume?: { oldTake
   }
 }
 
-/** 生产的启动参数：非空就以内联 JSON 传（沙箱另走 sandboxLaunchArgs，和沙箱覆盖合成一份）。只收 launchSettingsFor 过滤过的。纯函数 */
-export function settingsLaunchArgs(settings: AgentSettings): string[] {
-  return Object.keys(settings).length ? ["--settings", JSON.stringify(settings)] : [];
+/** 超长设置的启动快照（和设置文件分目录，allSkillOverrides 扫不到它） */
+export const launchSnapshotPath = (agent: string): string => statePath("agent-settings", "launch", `${agent}.json`);
+
+/** 警告同时写 stderr 和 bridge 日志：manager 被 bridge 调时 stderr 只在失败时才有人看 */
+function warnToBridgeLog(msg: string): void {
+  console.error(msg);
+  try {
+    mkdirSync(dirname(logPath("bridge", "err")), { recursive: true });
+    appendFileSync(logPath("bridge", "err"), `[${new Date().toISOString()}] [agent-settings] ${msg}\n`);
+  } catch (e) {
+    console.error(`⚠ 写 bridge 日志失败：${(e as Error).message}`); // 上面那行 stderr 已经留了警告
+  }
+}
+
+/**
+ * 启动参数（沙箱经 sandboxLaunchArgs 合成一份后也走这里）：非空就以内联 JSON 传；超过 MAX_LAUNCH_SETTINGS_BYTES 时写进
+ * launchSnapshotPath 传路径并记警告（内联会超过 tmux 单条命令上限、启动命令发不出去）。快照由启动方在就绪后 dropLaunchSettings。
+ * 只收 launchSettingsFor 过滤过的：快照里也只有白名单键。写快照失败就抛——宁可这次起不来报错，也不能悄悄丢掉用户关的技能。
+ */
+export function settingsLaunchArgs(settings: AgentSettings, agent?: string): string[] {
+  if (!Object.keys(settings).length) return [];
+  const json = JSON.stringify(settings);
+  const bytes = Buffer.byteLength(json);
+  if (bytes <= MAX_LAUNCH_SETTINGS_BYTES || !agent || !isSettingsAgentName(agent)) return ["--settings", json];
+  const path = launchSnapshotPath(agent);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, json, { mode: 0o600 });
+  warnToBridgeLog(`⚠ ${agent} 的启动设置 ${bytes} 字节，超过内联上限 ${MAX_LAUNCH_SETTINGS_BYTES}：改用临时文件 ${path} 启动（就绪后删）`);
+  return ["--settings", path];
+}
+
+/**
+ * 就绪后删启动快照（manager launchInWindow / launcher 大总管）：CC 只在启动时读，实测删了照常跑。没就绪的不删——CC 可能还没读到，
+ * 删了它会因文件不存在直接退出；留着的下次启动覆盖，remove 时一并删。
+ */
+export function dropLaunchSettings(agent: string): void {
+  if (!isSettingsAgentName(agent)) return;
+  try {
+    rmSync(launchSnapshotPath(agent), { force: true });
+  } catch (e) {
+    console.error(`⚠ 删除启动快照失败（${agent}）：${(e as Error).message}`);
+  }
 }
 
 /** 给启动器：这个 agent 设置里白名单内的键（损坏 / 不存在 → {}，不带 flag；宁可不带也不能让 CC 启动失败） */

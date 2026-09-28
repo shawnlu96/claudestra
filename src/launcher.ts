@@ -162,7 +162,7 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
 
     if (await isIdle()) {
       console.log(`✅ 大总管已就绪${MASTER_EFFORT && MASTER_EFFORT !== "default" ? `（effort=${MASTER_EFFORT}）` : ""}`);
-      return true;
+      (await import("./lib/agent-settings.js")).dropLaunchSettings("master"); return true; // 超长设置落的启动快照：就绪 = CC 已读过
     }
 
     if (masterShouldAutoConfirm(pane)) {

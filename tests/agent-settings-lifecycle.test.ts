@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { makeWorld } from "./resumable-world";
-import { agentSettingsPath, setSkillOverride } from "../src/lib/agent-settings";
+import { agentSettingsPath, removeAgentSettings, setSkillOverride } from "../src/lib/agent-settings";
 import { abandonCreate, beginCreate, commitCreate, newCreateRun, recordCreate } from "../src/manager/create-guard";
 import { runKill, runRemove } from "../src/manager/agent-kill";
 import { runRename } from "../src/manager/agent-rename";
@@ -15,11 +15,11 @@ const LIVE: AgentInfo = { project: "/p", purpose: "live", created: "t0", status:
 const pending = { op: "rename" as const, pid: 1, startedAt: "2026-09-28T10:00:00Z", from: "agent-a" };
 const has = (name: string) => existsSync(agentSettingsPath(name));
 const overridesOf = (name: string) => JSON.parse(readFileSync(agentSettingsPath(name), "utf8")).skillOverrides;
-const clear = async (...names: string[]) => { for (const n of names) if (has(n)) await setSkillOverride(n, "pdf", "on"); };
+const clear = (...names: string[]) => { for (const n of names) removeAgentSettings(n); };
 
 describe("rename", () => {
   test("首次：挪过去；目标位置有删过的 agent 留下的旧文件也会被替换", async () => {
-    await clear("agent-a", "agent-b");
+    clear("agent-a", "agent-b");
     await setSkillOverride("agent-a", "pdf", "off");
     await setSkillOverride("agent-b", "save", "off"); // 同名旧 agent 删了但文件还在
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-a": LIVE } }, windows: ["agent-a"], channels: new Set(["ch1"]) });
@@ -28,14 +28,14 @@ describe("rename", () => {
     expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
   });
   test("首次、源没有文件：清掉目标位置的旧文件（不继承删过的 agent 的开关）", async () => {
-    await clear("agent-a", "agent-b");
+    clear("agent-a", "agent-b");
     await setSkillOverride("agent-b", "save", "off");
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-a": LIVE } }, windows: ["agent-a"], channels: new Set(["ch1"]) });
     await runRename("a", "b", w.deps);
     expect(has("agent-b")).toBe(false);
   });
   test("补跑、上次 registry 已迁、文件还没挪：这次挪过去", async () => {
-    await clear("agent-a", "agent-b");
+    clear("agent-a", "agent-b");
     await setSkillOverride("agent-a", "pdf", "off");
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending } } }, channels: new Set(["ch1"]) });
     expect(await runRename("a", "b", w.deps)).toMatchObject({ ok: true, resumed: true });
@@ -43,20 +43,57 @@ describe("rename", () => {
     expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
   });
   test("补跑、上次文件已经挪过去：目标原样保留，不删", async () => {
-    await clear("agent-a", "agent-b");
+    clear("agent-a", "agent-b");
     await setSkillOverride("agent-b", "pdf", "off");
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending } } }, channels: new Set(["ch1"]) });
     await runRename("a", "b", w.deps);
     expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
   });
   test("补跑、旧名已被新 agent 占用：两边的文件都不动", async () => {
-    await clear("agent-a", "agent-b");
+    clear("agent-a", "agent-b");
     await setSkillOverride("agent-a", "save", "off"); // 新 agent 自己的
     await setSkillOverride("agent-b", "pdf", "off");
     const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending }, "agent-a": { ...LIVE, channelId: "chA" } } }, channels: new Set(["ch1"]) });
     await runRename("a", "b", w.deps);
     expect(overridesOf("agent-a")).toEqual({ save: "off" });
     expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
+  });
+});
+
+describe("rename 做到一半被砍、新进程补跑（resumable-world 的 crashAfter）", () => {
+  const start = () => makeWorld({ reg: { socket: "s", agents: { "agent-a": LIVE } }, windows: ["agent-a"], channels: new Set(["ch1"]) });
+  // save#1 = registry 已迁、文件还没挪；其余都在挪完之后
+  for (const cut of ["save#1", "renameWindow#1", "renameLedger#1", "renameChannel#1", "save#2"]) {
+    test(`砍在 ${cut}：补跑后文件在新名下、旧名下没有；再跑一次也不删`, async () => {
+      clear("agent-a", "agent-b");
+      await setSkillOverride("agent-a", "pdf", "off");
+      const w = start();
+      w.crashAfter(cut);
+      await expect(runRename("a", "b", w.deps)).rejects.toThrow();
+      expect(has(cut === "save#1" ? "agent-a" : "agent-b")).toBe(true); // 砍的时候文件在哪
+      w.restart();
+      const r = await runRename("a", "b", w.deps);
+      expect(r.ok).toBe(cut !== "save#2"); // 砍在最后一次落盘之后 = 其实已做完，补跑找不到 agent-a
+      expect(has("agent-a")).toBe(false);
+      expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
+      await runRename("a", "b", w.deps); // 已经做完：找不到 agent-a，什么都不碰
+      expect(overridesOf("agent-b")).toEqual({ pdf: "off" });
+    });
+  }
+  test("砍在 registry 之后、同名新 agent 已建好并调过技能：补跑不碰新 agent 的文件，也不拿它当源", async () => {
+    clear("agent-a", "agent-b");
+    await setSkillOverride("agent-a", "pdf", "off");
+    const w = start();
+    w.crashAfter("save#1");
+    await expect(runRename("a", "b", w.deps)).rejects.toThrow();
+    w.restart();
+    w.st.reg.agents["agent-a"] = { ...LIVE, channelId: "chA", purpose: "新来的" }; // 新 agent 建成时旧文件已被 commitCreate 删，这份是它自己调的
+    await setSkillOverride("agent-a", "pdf", "on");
+    await setSkillOverride("agent-a", "save", "off");
+    const r = await runRename("a", "b", w.deps);
+    expect(r).toMatchObject({ ok: true, resumed: true });
+    expect(overridesOf("agent-a")).toEqual({ save: "off" });
+    expect(has("agent-b")).toBe(false);
   });
 });
 

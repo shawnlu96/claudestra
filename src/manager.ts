@@ -740,6 +740,7 @@ async function launchInWindow(
   const unsent = await win.sendLine(adapter.buildLaunchCommand({ ...spec, ...(fresh ? {} : { settingsName: tmuxName }) })).then(() => null, (e: Error) => e.message);
   if (unsent) return { result: { ready: false, reason: "exited", detail: `启动命令没发出去：${unsent}`, recoveredFullSession: false } };
   const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
+  if (result.ready) (await import("./lib/agent-settings.js")).dropLaunchSettings(tmuxName); // 超长设置落的启动快照：就绪 = CC 已读过
   return { result, baseline };
 }
 
