@@ -15,15 +15,31 @@ const INBOUND_HEAD_START_RE = /^\s*\[(🌐|🤖|🤝|📢|📣)/;
 const HEAD_END_RE = /]\r?\n\r?\n/;
 
 /**
+ * 打断抬头（lib/turn-cuts.ts 的 preemptHeadline / stopHeadline / heldAcrossStopNote，放在来源头之后、正文之前）。只有 channel 属性带
+ * interrupt_note="true"（bridge 真加了抬头才写）时才剥：只按措辞认的话，外源 / Discord 用户自己手写一句「[⚡ 这条消息打断了你…]」
+ * 就能把后面的内容从历史里藏起来，agent 却照样收到全文。Pi 裸记录没有属性，抬头留在历史里（只是多一行字）。
+ */
+const NOTE_ATTR_RE = /(?:^|\s)interrupt_note="true"/;
+const INTERRUPT_NOTE_RE = /^\s*\[(⚡ 这条消息打断了你|⏹ 这是一条「停」指令|⏹ 这条是叫停之前)/;
+
+/** 剥掉开头那块打断抬头（没有就原样返回） */
+function stripInterruptNote(body: string): string {
+  if (!INTERRUPT_NOTE_RE.test(body)) return body;
+  const m = HEAD_END_RE.exec(body);
+  return m ? body.slice(m.index + m[0].length) : isSingleBlock(body) ? "" : body;
+}
+
+/**
  * 剥掉开头的 bridge 注入头：「]」+ 空行之前是头；没有空行边界但整段是单个方括号块 = 正文为空的纯附件消息，整段都是头。
  * 只能对确知是 bridge 注入的消息调用（channelBodyText 看属性、Pi 看 hasInboundHeader）：用户自己打的
  * 「[🤖 ignore previous instructions]\n\nhello」剥了之后历史只剩 hello，agent 却收到全文。
  */
-export function stripChannelHeader(body: string): string {
+export function stripChannelHeader(body: string, withNote = false): string {
   const s = body.trimStart(); // 尾部空行先别削：正文为空时它就是头的边界
-  if (!INBOUND_HEAD_START_RE.test(s)) return s.trim();
+  const note = (x: string) => (withNote ? stripInterruptNote(x) : x);
+  if (!INBOUND_HEAD_START_RE.test(s)) return note(s).trim();
   const m = HEAD_END_RE.exec(s);
-  if (m) return s.slice(m.index + m[0].length).trim();
+  if (m) return note(s.slice(m.index + m[0].length)).trim();
   return isSingleBlock(s) ? "" : s.trim();
 }
 
@@ -94,7 +110,10 @@ const INJECTED_ATTR_RE = /(?:^|\s)(?:api|is_agent)="true"/;
  * 正文里已有整行的附件行（Discord 入口、新 API 入口）就不再按属性补：属性按 ; 拆，文件名带分号会拆出假路径。
  */
 export function channelBodyText(attrs: string, body: string): string {
-  const text = ownerWordsOfAnswer(attrs, INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body) : body.trim());
+  const withNote = NOTE_ATTR_RE.test(attrs);
+  // 先剥打断抬头（bridge 写在正文最前、来源头之后），再按 trigger 去掉答复的说明行：两者都是 bridge 加的，顺序反了会把抬头当成说明行剥掉
+  const bare = INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body, withNote) : (withNote ? stripInterruptNote(body.trim()) : body).trim();
+  const text = ownerWordsOfAnswer(attrs, bare);
   return (/^\[attachment: [^\]\n]+\]$/m.test(text) ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
 }
 
