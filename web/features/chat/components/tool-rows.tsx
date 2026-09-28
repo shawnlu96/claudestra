@@ -5,6 +5,9 @@ import { highlightCode, langForPath } from "../highlight";
 import { fmtTs } from "../fmt-time";
 import { cleanSummary, toolIcon } from "../message-text";
 import { QuoteSwipe } from "./quote-swipe";
+import { ChevronRightIcon, TriangleAlertIcon } from "./line-icons";
+import { useIsExport } from "../export-context";
+import { toolGroupLayout } from "../tool-group";
 import { useT } from "@/lib/i18n";
 
 /* 消息列表里的工具卡（从 message-list.tsx 原样搬出，D8-9）：流式态 ActiveToolRow /
@@ -201,30 +204,46 @@ function ToolDetailView({ name, detail }: { name: string; detail: string }) {
 
 /**
  * 一组连续的工具调用（中间没夹文字）收进一个框：默认只露最新一步，点组头展开全部，再点单张卡看详情。
- * 只有 1～2 步的不收（多点一下反而更麻烦）；有失败的在组头标出来，收起也看得见。
+ * 只有 1～2 步的不收（多点一下反而更麻烦）；有失败的在组头标出来，收起也看得见。导出稿全展开、组头不可点（../tool-group.ts）。
  * open 是本组本地状态：流式期间新工具不断进来，组件按段下标复用，展开态不会被冲掉。
  */
 export function ToolGroup({ tools, streaming, activeLast }: { tools: ToolCallView[]; streaming: boolean; activeLast: boolean }) {
   const t = useT();
+  const exporting = useIsExport();
   const [open, setOpen] = useState(false);
   const row = (tool: ToolCallView, j: number) =>
     streaming ? <ActiveToolRow key={j} tool={tool} active={activeLast && j === tools.length - 1} /> : <HistoryToolRow key={j} tool={tool} />;
-  if (tools.length <= 2) return <div className="my-2 space-y-1">{tools.map(row)}</div>;
+  const layout = toolGroupLayout(tools.length, open, exporting);
+  if (!layout.framed) return <div className="my-2 space-y-1">{tools.map(row)}</div>;
   const failed = tools.filter((x) => x.state === "error").length;
+  const title = (
+    <>
+      <span>{t("{n} 步工具调用", { n: tools.length })}</span>
+      {failed > 0 && (
+        <span className="flex items-center gap-1 text-error">
+          <TriangleAlertIcon size={12} className="shrink-0" />
+          {t("{n} 步失败", { n: failed })}
+        </span>
+      )}
+    </>
+  );
   return (
     <div className="my-2 rounded-xl border border-base-content/10 bg-base-content/[0.02] p-1">
-      <button
-        type="button"
-        className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[11px] text-base-content/50 transition-colors hover:bg-base-content/5 hover:text-base-content/80"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className="w-3 shrink-0">{open ? "▾" : "▸"}</span>
-        <span>{t("{n} 步工具调用", { n: tools.length })}</span>
-        {failed > 0 && <span className="text-error">⚠️ {t("{n} 步失败", { n: failed })}</span>}
-        <span className="ml-auto shrink-0">{open ? t("收起列表") : t("展开全部")}</span>
-      </button>
-      <div className="space-y-1">{open ? tools.map(row) : row(tools[tools.length - 1], tools.length - 1)}</div>
+      {layout.toggle ? (
+        <button
+          type="button"
+          className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[11px] text-base-content/50 transition-colors hover:bg-base-content/5 hover:text-base-content/80"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <ChevronRightIcon size={12} className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+          {title}
+          <span className="ml-auto shrink-0">{open ? t("收起列表") : t("展开全部")}</span>
+        </button>
+      ) : (
+        <div className="flex items-center gap-1.5 px-1.5 py-1 text-[11px] text-base-content/50">{title}</div>
+      )}
+      <div className="space-y-1">{layout.showAll ? tools.map(row) : row(tools[tools.length - 1], tools.length - 1)}</div>
     </div>
   );
 }
