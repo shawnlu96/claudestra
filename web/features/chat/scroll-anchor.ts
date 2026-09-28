@@ -7,8 +7,10 @@ import type { ChatMessage } from "./type";
 import { isNearBottom } from "./scroll-follow";
 
 export interface ViewAnchor {
-  /** 重拉前是否贴底——贴底的恢复就是继续贴底，不看锚点 */
+  /** 重拉前是否贴底（吸底跟随中 || 几何上离底 < 90px）——贴底的恢复就是继续贴底，不看锚点 */
   atBottom: boolean;
+  /** 重拉前是否正在吸底跟随（差量对齐只认这个：刚开始上滑、离底还不到 90px 的不算） */
+  following: boolean;
   /** 视口顶部第一条（部分）可见气泡的 id */
   id: string | null;
   /** 该气泡的 jsonl seq（h<seq>；跨 session 翻页的 h<seq>~ns 与直播气泡为 null） */
@@ -40,14 +42,15 @@ export function captureAnchor(
   view: { scrollTop: number; scrollHeight: number; clientHeight: number; following?: boolean },
 ): ViewAnchor {
   // 吸底跟随中也算贴底：手指按住时流式长高会让几何上离底，但抬手后本该继续吸底
-  const atBottom = !!view.following || isNearBottom(view.scrollHeight, view.scrollTop, view.clientHeight);
+  const following = !!view.following;
+  const atBottom = following || isNearBottom(view.scrollHeight, view.scrollTop, view.clientHeight);
   const at = rows.findIndex((r) => r.bottom > 0);
-  if (at < 0) return { atBottom, id: null, seq: null, offset: 0 };
+  if (at < 0) return { atBottom, following, id: null, seq: null, offset: 0 };
   const hasSeq = (r: RowBox) => seqOfId(r.id) !== null;
   let hit = hasSeq(rows[at]) ? rows[at] : undefined;
   for (let i = at - 1; !hit && i >= 0; i--) if (hasSeq(rows[i])) hit = rows[i];
   hit ??= rows.slice(at + 1).find(hasSeq) ?? rows[at];
-  return { atBottom, id: hit.id, seq: seqOfId(hit.id), offset: hit.top };
+  return { atBottom, following, id: hit.id, seq: seqOfId(hit.id), offset: hit.top };
 }
 
 export type AnchorMatch = { id: string; how: "same" | "seq" } | { id: null; how: "none" };
@@ -97,6 +100,24 @@ export function followAfterScroll(prev: { top: number; max: number }, top: numbe
 }
 
 /**
+ * 一次 scroll 事件的判定。settle = 当前校正期类型。scrollTop 与上次自己记下的不同、且 max 没变小（不是被夹）
+ * = 用户在滚（拖动 / 惯性 / 键盘）→ 结束校正、吸底照常判；否则锚点校正期内保持不吸底。不结束的话，
+ * 校正期里 RO 会把视口拽回锚点、打断惯性，滑到底也不会恢复吸底。
+ */
+export function scrollDecision(i: {
+  settle: "anchor" | "bottom" | null;
+  prev: { top: number; max: number };
+  top: number;
+  scrollHeight: number;
+  clientHeight: number;
+}): { endSettle: boolean; follow: boolean } {
+  const user = Math.abs(i.top - i.prev.top) >= 1 && i.scrollHeight - i.clientHeight >= i.prev.max;
+  const endSettle = i.settle !== null && user;
+  const hold = i.settle === "anchor" && !endSettle;
+  return { endSettle, follow: !hold && followAfterScroll(i.prev, i.top, i.scrollHeight, i.clientHeight) };
+}
+
+/**
  * 全量重拉在用户往上翻时保留已翻出的更早前缀：新窗口只含最近一页，锚点若在更早的页里
  * 重拉后就没了。前缀 = 当前视图里排在新窗口第一个 h 气泡之前、seq 更小的部分；
  * 跨 session 命名空间气泡与换纸分隔条都在前缀里原样保留。新窗口里没有 h 气泡、或当前视图
@@ -123,4 +144,45 @@ export function keepOlderPrefix(current: readonly ChatMessage[], next: ChatMessa
 /** loadOlder 拼进来的跨 session 气泡（h<seq>~ns）与换纸分隔条——只会出现在头部 */
 function isOlderPage(id: string): boolean {
   return /^h\d+~/.test(id) || id.startsWith("sessdiv_");
+}
+
+export interface WindowPlanInput {
+  following: boolean;
+  /** 上次记下的窗口顶那条（已按会话 / 基础窗口过滤；没有 = null） */
+  top: string | null;
+  ids: readonly string[];
+  windowSize: number;
+  /** 待放回的锚点 id（没有 = null） */
+  placeId: string | null;
+}
+
+export interface WindowPlan {
+  /** 要把窗口改成多少条（null = 不改）；reset = 归零自动扩缩 */
+  resize: number | null;
+  reset: boolean;
+  /** 记为新的窗口顶那条 */
+  recordTop: string | null;
+  /** 锚点已在窗口内可以放 / 放不了了（清掉待放） */
+  place: "now" | "wait" | "drop";
+}
+
+/**
+ * 每次提交后的窗口决策（use-scroll-follow 的 layout effect 照此执行）。锚点待放时不按旧顶部定位，
+ * 为锚点扩窗时同步记下新的窗口顶——否则「旧顶部定位缩回 30 ↔ 为锚点扩窗」每次提交来回切，React 抛
+ * Maximum update depth（重拉后旧顶部那条被正主替换、锚点又在新窗口顶之上时，tests 里有模拟）。
+ */
+export function planWindow(i: WindowPlanInput): WindowPlan {
+  const n = i.ids.length;
+  const topOf = (size: number) => (n ? i.ids[Math.max(0, n - size)] : null);
+  if (!i.following && !i.placeId) {
+    const need = windowForTop(i.top, i.ids, i.windowSize);
+    if (need !== null) return { resize: need, reset: false, recordTop: i.top, place: "drop" };
+  }
+  const recordTop = topOf(i.windowSize);
+  if (!i.placeId) return { resize: null, reset: i.following, recordTop, place: "drop" };
+  const idx = i.ids.indexOf(i.placeId);
+  if (idx < 0) return { resize: null, reset: i.following, recordTop, place: "drop" };
+  if (idx >= n - i.windowSize) return { resize: null, reset: i.following, recordTop, place: "now" };
+  const need = n - idx + 5;
+  return { resize: need, reset: false, recordTop: topOf(need), place: "wait" };
 }

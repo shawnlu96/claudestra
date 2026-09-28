@@ -10,6 +10,8 @@ import {
   keepOlderPrefix,
   resolveAnchor,
   seqOfId,
+  planWindow,
+  scrollDecision,
   windowForTop,
 } from "@/features/chat/scroll-anchor";
 import { ReloadScroll, reloadKindFor } from "@/features/chat/reload-scroll";
@@ -38,7 +40,7 @@ describe("captureAnchor", () => {
       ],
       view,
     );
-    expect(a).toEqual({ atBottom: false, id: "h12", seq: 12, offset: -120 });
+    expect(a).toEqual({ atBottom: false, following: false, id: "h12", seq: 12, offset: -120 });
   });
 
   test("吸底跟随中（手指按住时流式长高、几何上已离底）也记 atBottom", () => {
@@ -47,7 +49,7 @@ describe("captureAnchor", () => {
 
   test("贴底（离底 < 90px）记 atBottom", () => {
     expect(captureAnchor([], { scrollTop: 4350, scrollHeight: 5000, clientHeight: 600 }).atBottom).toBe(true);
-    expect(captureAnchor([], view)).toEqual({ atBottom: false, id: null, seq: null, offset: 0 });
+    expect(captureAnchor([], view)).toEqual({ atBottom: false, following: false, id: null, seq: null, offset: 0 });
   });
 
   test("顶部是直播气泡（重拉后 id 会变）→ 改用它前面最近的历史气泡，偏移按那条自己的", () => {
@@ -57,7 +59,7 @@ describe("captureAnchor", () => {
       { id: "cm1", top: -3200, bottom: 400 },
       { id: "h30", top: 400, bottom: 900 },
     ];
-    expect(captureAnchor(rows, view)).toEqual({ atBottom: false, id: "h20", seq: 20, offset: -3500 });
+    expect(captureAnchor(rows, view)).toEqual({ atBottom: false, following: false, id: "h20", seq: 20, offset: -3500 });
   });
 
   test("前面没有历史气泡 → 用后面的；都没有 → 仍记直播气泡（同 id 还在就能找回）", () => {
@@ -151,7 +153,10 @@ describe("keepOlderPrefix（往上翻时全量重拉保留已翻出的更早前�
 });
 
 describe("ReloadScroll（store ↔ 列表交接）", () => {
-  const view = (atBottom: boolean) => ({ capture: () => ({ atBottom, id: "h8", seq: 8, offset: -40 }) });
+  const view = (atBottom: boolean, following = atBottom) => ({
+    capture: () => ({ atBottom, following, id: "h8", seq: 8, offset: -40 }),
+    bottom: () => {},
+  });
   const current = ["h5", "h8", "h10"].map(msg);
   const next = ["h8", "h10", "h11"].map(msg);
   const base = { sameSession: true, current, next };
@@ -202,6 +207,24 @@ describe("ReloadScroll（store ↔ 列表交接）", () => {
     expect(r.take("a")).toMatchObject({ why: "anchor", prefix: 0, delta: true });
   });
 
+  test("差量对齐只认「正在吸底」：刚开始上滑、几何上还离底不到 90px 的不落底，走锚点；全量对齐几何贴底也算", () => {
+    const r = new ReloadScroll();
+    r.attach(view(true, false));
+    r.merge("a", { ...base, reload: "align", delta: true });
+    expect(r.take("a")?.why).toBe("anchor");
+    r.merge("a", { ...base, reload: "align" });
+    expect(r.take("a")?.why).toBe("bottom");
+  });
+
+  test("requestBottom 交给列表立刻落底；没挂载时无事", () => {
+    const r = new ReloadScroll();
+    let n = 0;
+    r.requestBottom();
+    r.attach({ capture: () => null, bottom: () => void n++ });
+    r.requestBottom();
+    expect(n).toBe(1);
+  });
+
   test("快照不交给别的会话；列表没挂载时 align 不交接", () => {
     const r = new ReloadScroll();
     r.attach(view(false));
@@ -248,5 +271,71 @@ describe("reloadKindFor（reconnect(full) 的落点）", () => {
   test("非 force（后台恢复 / 断线重连 / 回到页面）→ align", () => {
     expect(reloadKindFor()).toBe("align");
     expect(reloadKindFor({ force: false })).toBe("align");
+  });
+});
+
+describe("planWindow（每次提交后的窗口决策）", () => {
+  /** 模拟连续提交：按决策改窗口大小 / 记顶部 / 放锚点，直到稳定；返回提交次数（不收敛 = -1） */
+  function simulate(ids: string[], start: { windowSize: number; top: string | null; placeId: string | null }) {
+    let { windowSize, top, placeId } = start;
+    for (let commit = 1; commit <= 60; commit++) {
+      const p = planWindow({ following: false, top, ids, windowSize, placeId });
+      top = p.recordTop;
+      if (p.place !== "wait") placeId = null;
+      if (p.resize === null || p.resize === windowSize) return { commits: commit, windowSize, placeId };
+      windowSize = p.resize;
+    }
+    return { commits: -1, windowSize, placeId };
+  }
+
+  test("重拉后旧窗口顶那条消失（ru_ 被正主替换）+ 锚点在新窗口顶之上 → 扩窗放锚点后收敛，不来回抖", () => {
+    const ids = Array.from({ length: 100 }, (_, k) => `h${k + 1}`);
+    const r = simulate(ids, { windowSize: 30, top: "ru_x", placeId: "h50" });
+    expect(r.commits).toBeGreaterThan(0);
+    expect(r.placeId).toBeNull();
+    expect(r.windowSize).toBeGreaterThanOrEqual(100 - 49);
+  });
+
+  test("吸底时不按顶部定位、归零自动扩缩", () => {
+    const p = planWindow({ following: true, top: "h1", ids: ["h1", "h2", "h3"], windowSize: 2, placeId: null });
+    expect(p).toMatchObject({ resize: null, reset: true, recordTop: "h2" });
+  });
+
+  test("往上翻着、尾部来了新消息 → 扩窗保住原顶部", () => {
+    const p = planWindow({ following: false, top: "h2", ids: ["h1", "h2", "h3", "h4"], windowSize: 2, placeId: null });
+    expect(p).toMatchObject({ resize: 3, recordTop: "h2" });
+  });
+});
+
+describe("scrollDecision（校正期内分清自己写的 / 被夹 / 用户在滚）", () => {
+  const prev = { top: 2000, max: 4400 };
+  const at = (settle: "anchor" | "bottom" | null, top: number, sh = 5000, ch = 600) => scrollDecision({ settle, prev, top, scrollHeight: sh, clientHeight: ch });
+
+  test("自己写的（与上次记下的相同）→ 不结束校正，锚点校正期内不吸底", () => {
+    expect(at("anchor", 2000)).toEqual({ endSettle: false, follow: false });
+  });
+
+  test("被夹（max 变小）→ 不结束校正，也不当成回到吸底", () => {
+    expect(at("anchor", 1800, 2400, 600)).toEqual({ endSettle: false, follow: false });
+  });
+
+  test("跨过提交时刻的拖动 / 惯性往上 → 结束校正（惯性不再被 RO 拽回），不吸底", () => {
+    expect(at("anchor", 1900)).toEqual({ endSettle: true, follow: false });
+  });
+
+  test("校正期内拖动 / 键盘滚到最底 → 结束校正并恢复吸底（此前要等下一个 scroll 事件才恢复）", () => {
+    expect(scrollDecision({ settle: "anchor", prev: { top: 4300, max: 4400 }, top: 4400, scrollHeight: 5000, clientHeight: 600 })).toEqual({
+      endSettle: true,
+      follow: true,
+    });
+  });
+
+  test("落底校正期里用户滚动 → 也结束（记日志），吸底照常判", () => {
+    expect(at("bottom", 1900)).toEqual({ endSettle: true, follow: false });
+  });
+
+  test("没有校正期 → 就是 followAfterScroll", () => {
+    expect(at(null, 1900)).toEqual({ endSettle: false, follow: false });
+    expect(scrollDecision({ settle: null, prev: { top: 4300, max: 4400 }, top: 4390, scrollHeight: 5000, clientHeight: 600 }).follow).toBe(true);
   });
 });

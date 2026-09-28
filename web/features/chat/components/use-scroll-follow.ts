@@ -2,13 +2,13 @@
 /**
  * 消息列表的吸底跟随、渲染窗口定位与对齐重拉后的位置恢复（判据是纯函数：../scroll-anchor.ts）。
  * store 整体替换 messages 前经 reloadScroll 要锚点快照，提交后这里取回：该落底就落底，否则把锚点气泡
- * 放回原偏移，并在 SETTLE_MS 内随富文本异步长高持续校正（用户一碰屏幕即停），结束时记实际偏差。
+ * 放回原偏移，并在 SETTLE_MS 内随富文本异步长高持续校正（用户一滚 / 一碰即停），结束时记实际偏差。
  */
 import { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from "react";
 import type { ChatStore } from "../chat-store";
 import type { ChatMessage } from "../type";
 import { isNearBottom } from "../scroll-follow";
-import { anchorScrollDelta, captureAnchor, followAfterScroll, resolveAnchor, windowForTop, type RowBox } from "../scroll-anchor";
+import { anchorScrollDelta, captureAnchor, planWindow, resolveAnchor, scrollDecision, type RowBox } from "../scroll-anchor";
 import { isSelectMode } from "../select-mode";
 import { installTapRescue } from "@/lib/tap-rescue";
 
@@ -26,6 +26,8 @@ interface SettleState {
   timer: ReturnType<typeof setTimeout>;
 }
 type SettleRef = MutableRefObject<SettleState | null>;
+/** 上一次 scroll 事件 / 自己写 scrollTop 后的位置：scrollDecision 据此分「自己写的 / 被夹 / 用户在滚」 */
+type LastRef = MutableRefObject<{ top: number; max: number }>;
 
 export interface ScrollFollowOpts {
   store: ChatStore;
@@ -40,6 +42,12 @@ export interface ScrollFollowOpts {
   onNearBottom: (near: boolean) => void;
 }
 
+interface Shared {
+  settleRef: SettleRef;
+  lastRef: LastRef;
+  resetWindow: () => void;
+}
+
 function nodeTop(el: HTMLElement, id: string): number | null {
   const node = el.querySelector(`[data-mid="${CSS.escape(id)}"]`);
   return node ? node.getBoundingClientRect().top - el.getBoundingClientRect().top : null;
@@ -52,6 +60,30 @@ function placeAnchor(el: HTMLElement, p: Place): boolean {
   return true;
 }
 
+/**
+ * 记下自己写完的位置（下一个 scroll 事件据此认出不是用户在滚）。吸底时关掉浏览器原生滚动锚定：
+ * Chrome 会因上方内容变化自调 scrollTop（变小），被当成上滑、吸底误关；不吸底时保留——桌面屏外气泡
+ * content-visibility 占位（globals.css）靠它不顿。iOS 本就没有。
+ */
+function mark(el: HTMLElement, o: ScrollFollowOpts, lastRef: LastRef) {
+  lastRef.current = { top: el.scrollTop, max: el.scrollHeight - el.clientHeight };
+  el.style.overflowAnchor = o.followRef.current ? "none" : "";
+}
+
+/** 手指在屏幕上 / 正在选字：不写 scrollTop（抬手后 releaseTouchHold / RO 补吸底；选区不被滚掉） */
+function held(o: ScrollFollowOpts): boolean {
+  return Date.now() < o.touchHoldRef.current || isSelectMode();
+}
+
+/** 落底：吸底打开、自动窗口归零；手指按着 / 选字时只开吸底不写 scrollTop */
+function toBottom(el: HTMLElement, o: ScrollFollowOpts, sh: Shared) {
+  o.followRef.current = true;
+  sh.resetWindow();
+  o.onNearBottom(true);
+  if (!held(o)) el.scrollTop = el.scrollHeight;
+  mark(el, o, sh.lastRef);
+}
+
 function captureView(el: HTMLElement, following: boolean) {
   const base = el.getBoundingClientRect().top;
   const rows: RowBox[] = [];
@@ -62,8 +94,8 @@ function captureView(el: HTMLElement, following: boolean) {
   return captureAnchor(rows, { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, following });
 }
 
-/** 校正期结束（到期 / 被触碰 / 被新一轮重拉接管）：记实际结果，真机验收靠这一行对 client.log */
-function endSettle(o: ScrollFollowOpts, ref: SettleRef, end: "timeout" | "touch" | "superseded") {
+/** 校正期结束（到期 / 用户滚动 / 触碰 / 被新一轮重拉接管）：记实际结果，真机验收靠这一行对 client.log */
+function endSettle(o: ScrollFollowOpts, ref: SettleRef, end: "timeout" | "scroll" | "touch" | "superseded") {
   const cur = ref.current;
   const el = o.scrollerRef.current;
   if (!cur) return;
@@ -73,11 +105,13 @@ function endSettle(o: ScrollFollowOpts, ref: SettleRef, end: "timeout" | "touch"
   const fb = Math.round(el.scrollHeight - el.scrollTop - el.clientHeight);
   const top = cur.s.kind === "anchor" ? nodeTop(el, cur.s.id) : null;
   const drift = cur.s.kind === "anchor" ? (top === null ? "gone" : `${Math.round(top - cur.s.offset)}px`) : "-";
-  if (!cur.s.quiet) o.store.clientLog(`reload-scroll: settled agent=${o.active} kind=${cur.s.kind} drift=${drift} fb=${fb}px end=${end}`);
+  // agent 取 store 当前值：attach 的 bottom 回调闭包里的 o 是首次渲染那份
+  if (!cur.s.quiet) o.store.clientLog(`reload-scroll: settled agent=${o.store.state.activeAgent} kind=${cur.s.kind} drift=${drift} fb=${fb}px end=${end}`);
 }
 
 export function useScrollFollow(o: ScrollFollowOpts) {
   const settleRef: SettleRef = useRef(null);
+  const lastRef: LastRef = useRef({ top: 0, max: 0 });
   /** 自动扩 / 缩出来的窗口条数（相对 baseWindow，可为负）；回到吸底即归零，DOM 不无限长 */
   const [auto, setAuto] = useState(0);
   const autoRef = useRef(0);
@@ -91,38 +125,39 @@ export function useScrollFollow(o: ScrollFollowOpts) {
     setAuto(autoRef.current);
   };
   const windowSize = Math.max(1, o.baseWindow + auto);
-  useFollowObserver(o, settleRef, resetWindow);
-  useReloadAnchor(o, settleRef, { windowSize, setWindow, resetWindow });
+  const sh: Shared = { settleRef, lastRef, resetWindow };
+  useFollowObserver(o, sh);
+  useReloadAnchor(o, sh, { windowSize, setWindow });
   return { windowSize, resetWindow };
 }
 
-/** scroll 判离底 + ResizeObserver 吸底；校正期内 RO 改为按锚点放回 */
-function useFollowObserver(o: ScrollFollowOpts, settleRef: SettleRef, resetWindow: () => void) {
-  const { store, active, scrollerRef, followRef, touchHoldRef, snapRef } = o;
+/** scroll 判离底 + ResizeObserver 吸底；校正期内 RO 改为按锚点放回，用户一滚即结束校正 */
+function useFollowObserver(o: ScrollFollowOpts, sh: Shared) {
+  const { store, active, scrollerRef, followRef, snapRef } = o;
+  const { settleRef, lastRef } = sh;
   useEffect(() => {
-    resetWindow(); // 换会话：自动窗口归零（基础窗口由 message-list 的 [active] effect 归零）
+    sh.resetWindow(); // 换会话：自动窗口归零（基础窗口由 message-list 的 [active] effect 归零）
     const el = scrollerRef.current;
     const inner = el?.firstElementChild;
     if (!el || !inner) return;
     // 触摸丢 click 兜底(lib/tap-rescue.ts):回弹 / 减速尾巴 / 吸底期间点工具行也能展开
     const offRescue = installTapRescue(el, { name: "msgs", log: (m) => store.clientLog(m) });
-    let last = { top: el.scrollTop, max: el.scrollHeight - el.clientHeight };
-    // 吸底时关掉浏览器原生滚动锚定：Chrome 会因视口里某条上方内容变化自调 scrollTop（变小），被当成上滑、
-    // 吸底误关。不吸底时保留——桌面屏外气泡 content-visibility 占位（globals.css）靠它不顿。iOS 本就没有。
-    const mark = () => {
-      last = { top: el.scrollTop, max: el.scrollHeight - el.clientHeight };
-      el.style.overflowAnchor = followRef.current ? "none" : "";
-    };
-    mark();
+    mark(el, o, lastRef);
     const onScroll = () => {
       // 向上滑立即退出吸底（不等离底 >90px）——流式内容持续长高时，90px 缓冲区内的每次 resize 吸底
-      // 都会把刚起步的上滑手势拽回去。被夹回 / 回弹落位不算上滑（见 followAfterScroll）。
+      // 都会把刚起步的上滑手势拽回去。被夹回 / 回弹落位 / 自己写的不算（见 scrollDecision）。
       const was = followRef.current;
-      // 锚点校正期内被夹到最底不算回到吸底：内容马上长回来，要放回的是锚点
-      const settling = settleRef.current?.s.kind === "anchor";
-      followRef.current = !settling && followAfterScroll(last, el.scrollTop, el.scrollHeight, el.clientHeight);
-      mark();
-      if (!was && followRef.current) resetWindow();
+      const d = scrollDecision({
+        settle: settleRef.current?.s.kind ?? null,
+        prev: lastRef.current,
+        top: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      if (d.endSettle) endSettle(o, settleRef, "scroll");
+      followRef.current = d.follow;
+      mark(el, o, lastRef);
+      if (!was && followRef.current) sh.resetWindow();
       // 按钮可见性按「离底」判，与 follow 解耦：真的离开底部 90px 才弹，贴着底微调不闪
       o.onNearBottom(isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
     };
@@ -131,16 +166,15 @@ function useFollowObserver(o: ScrollFollowOpts, settleRef: SettleRef, resetWindo
     for (const ev of ["touchstart", "wheel", "pointerdown"] as const) el.addEventListener(ev, onTouch, { passive: true });
     const snap = () => {
       el.scrollTop = el.scrollHeight;
-      mark(); // 吸底自身的位移不算「用户上滑」
+      mark(el, o, lastRef); // 吸底自身的位移不算「用户上滑」
     };
     snapRef.current = snap;
     const ro = new ResizeObserver(() => {
-      if (isSelectMode()) return; // 选字期间新内容长高也不吸底：滚一下选区就没了
-      if (Date.now() < touchHoldRef.current) return; // 手指在屏幕上:见 message-list 的 touchHoldRef 注释
+      if (held(o)) return; // 选字期间不滚（选区会丢）；手指在屏幕上:见 message-list 的 touchHoldRef 注释
       const s = settleRef.current?.s;
       if (s?.kind === "anchor") {
         placeAnchor(el, s);
-        mark();
+        mark(el, o, lastRef);
         return;
       }
       if (followRef.current) snap();
@@ -162,19 +196,28 @@ function useFollowObserver(o: ScrollFollowOpts, settleRef: SettleRef, resetWindo
 interface WindowCtl {
   windowSize: number;
   setWindow: (n: number) => void;
-  resetWindow: () => void;
 }
 
-/** 对齐重拉的锚点快照登记 / 提交后恢复，以及往上翻着时窗口按顶部那条定位 */
-function useReloadAnchor(o: ScrollFollowOpts, settleRef: SettleRef, w: WindowCtl) {
+/** 对齐重拉的锚点快照登记 / 提交后恢复，以及往上翻着时窗口按顶部那条定位（planWindow） */
+function useReloadAnchor(o: ScrollFollowOpts, sh: Shared, w: WindowCtl) {
   const { store, active, scrollerRef, followRef } = o;
+  const { settleRef, lastRef } = sh;
   /** 锚点不在渲染窗口里：等窗口扩开的那次提交再放 */
   const placeRef = useRef<Place | null>(null);
   /** 渲染窗口顶部那条（按会话 + 基础窗口）：用户自己展开窗口时重新记，不跟他抢 */
   const topRef = useRef<{ agent: string; base: number; id: string } | null>(null);
 
   useEffect(
-    () => store.reloadScroll.attach({ capture: () => (scrollerRef.current ? captureView(scrollerRef.current, followRef.current) : null) }),
+    () =>
+      store.reloadScroll.attach({
+        capture: () => (scrollerRef.current ? captureView(scrollerRef.current, followRef.current) : null),
+        bottom: () => {
+          endSettle(o, settleRef, "superseded");
+          placeRef.current = null;
+          if (scrollerRef.current) toBottom(scrollerRef.current, o, sh);
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [store, scrollerRef, followRef],
   );
 
@@ -187,40 +230,35 @@ function useReloadAnchor(o: ScrollFollowOpts, settleRef: SettleRef, w: WindowCtl
       const hit = armed.why === "anchor" && armed.anchor ? resolveAnchor(armed.anchor, ids) : null;
       const result = hit?.id ? `anchor:${hit.how}` : armed.why === "anchor" ? "missing→bottom" : `${armed.why}→bottom`;
       const quiet = armed.delta && !hit?.id; // 差量对齐（含 7s 对账心跳）只在真的按锚点放回时记
-      if (!quiet) store.clientLog(
-        `reload-scroll: agent=${active}${armed.delta ? " delta" : ""} atBottom=${armed.anchor?.atBottom ?? "-"} anchorSeq=${armed.anchor?.seq ?? "-"} prefix=${armed.prefix} result=${result}`,
-      );
+      if (!quiet) {
+        store.clientLog(
+          `reload-scroll: agent=${active}${armed.delta ? " delta" : ""} atBottom=${armed.anchor?.atBottom ?? "-"} anchorSeq=${armed.anchor?.seq ?? "-"} prefix=${armed.prefix} result=${result}`,
+        );
+      }
       endSettle(o, settleRef, "superseded");
       placeRef.current = null;
       const s: Settle = hit?.id && armed.anchor ? { kind: "anchor", id: hit.id, offset: armed.anchor.offset } : { kind: "bottom", quiet };
       settleRef.current = { s, timer: setTimeout(() => endSettle(o, settleRef, "timeout"), SETTLE_MS) };
-      if (s.kind === "bottom") {
-        followRef.current = true;
-        w.resetWindow();
-        el.scrollTop = el.scrollHeight;
-        return;
-      }
+      if (s.kind === "bottom") return toBottom(el, o, sh);
       followRef.current = false;
       placeRef.current = { id: s.id, offset: s.offset };
     }
-    if (followRef.current) {
-      w.resetWindow();
-    } else {
-      const top = topRef.current?.agent === active && topRef.current.base === o.baseWindow ? topRef.current.id : null;
-      const need = windowForTop(top, ids, w.windowSize);
-      if (need !== null) return w.setWindow(need); // 定位好的那次提交再继续（placeRef 保留）
+    const cur = topRef.current;
+    const plan = planWindow({
+      following: followRef.current,
+      top: cur?.agent === active && cur.base === o.baseWindow ? cur.id : null,
+      ids,
+      windowSize: w.windowSize,
+      placeId: placeRef.current?.id ?? null,
+    });
+    if (plan.reset) sh.resetWindow();
+    if (plan.recordTop) topRef.current = { agent: active, base: o.baseWindow, id: plan.recordTop };
+    if (plan.place === "now" && placeRef.current) {
+      placeAnchor(el, placeRef.current);
+      mark(el, o, lastRef);
     }
-    if (ids.length) topRef.current = { agent: active, base: o.baseWindow, id: ids[Math.max(0, ids.length - w.windowSize)] };
-    const want = placeRef.current;
-    if (!want || placeAnchor(el, want)) {
-      placeRef.current = null;
-      return;
-    }
-    // 锚点在渲染窗口之外（窗口按尾部条数截，重拉后条数变了）：扩窗口，下一次提交再放
-    const idx = ids.indexOf(want.id);
-    const need = ids.length - idx + 5;
-    if (idx >= 0 && need > w.windowSize) w.setWindow(need);
-    else placeRef.current = null;
+    if (plan.place !== "wait") placeRef.current = null;
+    if (plan.resize !== null) w.setWindow(plan.resize); // 定位好的那次提交再继续（placeRef 保留）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [o.messages, w.windowSize, o.baseWindow]);
 }

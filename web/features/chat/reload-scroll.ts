@@ -19,6 +19,8 @@ export function reloadKindFor(opts?: { force?: boolean; keepPlace?: boolean }): 
 
 export interface ReloadScrollView {
   capture(): ViewAnchor | null;
+  /** 立刻落到最底（点推送 / 深链 / 重点当前会话）——不依赖重连走哪条路（可能被地板 / 在飞让路吞掉） */
+  bottom(): void;
 }
 
 export interface ArmedReload {
@@ -57,10 +59,15 @@ export class ReloadScroll {
     const anchor = p.reload === "align" ? (this.view?.capture() ?? null) : null;
     if (p.reload === "align" && !anchor) return p.next; // 列表没挂载：没有位置可恢复
     const why: ArmedReload["why"] =
-      p.reload === "latest" ? "latest" : !p.sameSession ? "rotated" : anchor?.atBottom ? "bottom" : "anchor";
+      p.reload === "latest" ? "latest" : !p.sameSession ? "rotated" : atBottom(anchor, !!p.delta) ? "bottom" : "anchor";
     const messages = why === "anchor" ? keepOlderPrefix(p.current, p.next) : p.next;
     this.armed = { agent, why, anchor, prefix: messages.length - p.next.length, delta: !!p.delta };
     return messages;
+  }
+
+  /** 要看最新：列表立刻落底 */
+  requestBottom(): void {
+    this.view?.bottom();
   }
 
   /** 列表在替换提交后取走（只取一次；换了会话的快照作废） */
@@ -69,4 +76,9 @@ export class ReloadScroll {
     this.armed = null;
     return x && x.agent === agent ? x : null;
   }
+}
+
+/** 差量对齐（7s 对账心跳也走）只在真的吸底跟随时落底；全量对齐几何贴底也算 */
+function atBottom(anchor: ViewAnchor | null, delta: boolean): boolean {
+  return !!anchor && (delta ? anchor.following : anchor.atBottom);
 }

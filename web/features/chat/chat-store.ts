@@ -556,6 +556,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 窄屏返回列表再点回来只是回到页面:走常规选路(流健康=判活探针,否则 fast/delta),
       // 不无条件全量——全量重拉会把长对话里的阅读位置挪走。
       this.clientLog(`openAgent(same): ${intent === "reenter" ? "回到页面,常规对齐" : "强制对齐"}`);
+      if (intent !== "reenter") this.reloadScroll.requestBottom(); // 落底不依赖 force 重连有没有被地板 / 让路吞掉
       this.maybeReconnect(intent === "reenter" ? undefined : { force: true });
       return;
     }
