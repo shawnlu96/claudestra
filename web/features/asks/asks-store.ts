@@ -222,6 +222,12 @@ export const asksStore = {
   },
 };
 
+const none = (): AsksSnap => EMPTY;
 export function useAsks(): AsksSnap {
-  return useSyncExternalStore(asksStore.subscribe, asksStore.get, () => EMPTY);
+  return useSyncExternalStore(asksStore.subscribe, asksStore.get, none);
+}
+
+/** 只在 on 时读内容；off 时快照恒为 EMPTY，store 变了也不重渲染（每条助手消息都挂着 useReplyAsk，没有按钮的不该跟着 ask 事件重算） */
+export function useAsksIf(on: boolean): AsksSnap {
+  return useSyncExternalStore(asksStore.subscribe, on ? asksStore.get : none, none);
 }

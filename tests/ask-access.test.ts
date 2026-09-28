@@ -86,6 +86,11 @@ describe("lib/ask-access.ts 的矩阵", () => {
   }
 });
 
+test("大总管的两种写法（master / agent-master）都要 scope 含 master 才看得见（adv2 附带）", () => {
+  const viaKey = { fromAgent: "agent-master", assignee: null };
+  expect([canSeeAsk(WHO.owner, viaKey), canSeeAsk(WHO.webUi, viaKey), canSeeAsk(WHO.ownerMaster, viaKey)]).toEqual([false, false, true]);
+});
+
 describe("四处同一口径", () => {
   test("列表：GET /asks 给的正好是看得见的，每行 canAnswer 和答的判定一致；读不了台账又不是设备凭据的整个 403", async () => {
     for (const [name, p] of Object.entries(WHO)) {

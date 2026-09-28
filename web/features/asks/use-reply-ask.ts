@@ -8,7 +8,7 @@ import { parseInlineButtons } from "@/lib/chat/inline-buttons";
 import { deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useT } from "@/lib/i18n";
 import { answeredGroups, askForReply, clicksFromAnswer, closedText, rowGroup } from "./asks-model";
-import { useAsks } from "./asks-store";
+import { useAsksIf } from "./asks-store";
 
 /**
  * 聊天气泡里的按钮 / 选单 / 行内按钮跟着它建出的「待你处理」走（reply-components.tsx、use-inline-actions.ts 各一行调用）：
@@ -22,8 +22,8 @@ export function useReplyAsk(m: ChatMessage) {
   const t = useT();
   const rows = m.replyComponents;
   const agent = useChatStore((s) => s.state.activeAgent);
-  const { asks } = useAsks();
   const inlineIds = useMemo(() => parseInlineButtons(m.replyText ?? "").map((b) => b.id), [m.replyText]);
+  const { asks } = useAsksIf(!!rows?.length || inlineIds.length > 0);
   const ask = useMemo(() => askForReply(asks, agent, rows, m.replyTs ?? m.ts, inlineIds), [asks, agent, rows, m.replyTs, m.ts, inlineIds]);
   const closed = ask && ask.state !== "open" ? ask : null;
   const done = useMemo(() => (ask?.answer && rows ? answeredGroups(rows, ask.answer.choices) : new Set<string>()), [ask, rows]);

@@ -104,6 +104,12 @@ describe("显式 ask", () => {
     const neu = (await reply("发 v2.0.2 吗？[[{#go}批准]] [[{#no}算了]]", { kind: "authorize", bind: { ...RELEASE, params: { tag: "v2.0.2" } } }, [])).ask!;
     const r = (await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() }))!;
     expect([r.status, ((await r.json()) as { code: string }).code, getAsk(openLedger(s.path), neu.id)?.state]).toEqual([409, "ask_id_required", "open"]);
+    // 带了 id 但对不上命中的那条（库里没有、别的 agent 的）也不猜（adv2 P2-1）
+    const other = createAsk({ project: "p", source: "human", createdBy: "owner:self", kind: "decide", title: "别处的", assignee: null });
+    for (const askId of ["ask_doesnotexist000", other.id]) {
+      expect((await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId }))!.status).toBe(409);
+    }
+    expect(getAsk(openLedger(s.path), neu.id)?.state).toBe("open");
     const stale = (await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner(), askId: old.id }))!;
     expect(((await stale.json()) as { error: string }).error).toContain("已被新版本取代");
     // 不带绑定的照旧按「最新一条对得上的」认
