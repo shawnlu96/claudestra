@@ -1,6 +1,8 @@
 /** 批量管理面板与 low-priority 徽章（web/features/fleet）的字典条目，规则同 lib/i18n-dict.ts */
 export const FLEET_DICT: Record<string, string> = {
   "批量管理": "Batch ops",
+  "请求中…": "Requesting…",
+  "没压成": "Didn't compact",
   "刷新状态": "Refresh",
   "选谁": "Who",
   "撞墙中": "At limit",

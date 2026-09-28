@@ -4,6 +4,8 @@
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 tmuxSendLine，Esc 走 tmuxSendEscape 的双击护栏。
  */
 import type { ServerWebSocket } from "bun";
+import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
 import {
@@ -44,13 +46,13 @@ function compactKeep(): string {
   return typeof k === "string" && k.trim() ? k : DEFAULT_COMPACT_KEEP;
 }
 
-type Cand = FleetCandidate & { channelId?: string };
+type Cand = FleetCandidate & { channelId?: string; cwd?: string };
 
 async function candidates(): Promise<Cand[]> {
   const regs = await readRegistryAgents();
   const online = (cid?: string) => !!cid && !!deps?.clients.has(cid);
   const list: Cand[] = regs.map((r) => ({
-    name: r.name, channelId: r.channelId, project: r.projectId, runtime: agentRuntime(r), master: false, online: online(r.channelId),
+    name: r.name, channelId: r.channelId, cwd: r.cwd, project: r.projectId, runtime: agentRuntime(r), master: false, online: online(r.channelId),
   }));
   const cc = deps?.controlChannelId;
   list.push({ name: "master", channelId: cc, runtime: "claude-code", master: true, online: online(cc) });
@@ -89,6 +91,27 @@ export interface FleetRunReport {
 }
 
 const CONCURRENCY = 4;
+
+/**
+ * 执行者（与 T36 的 isExecutor 同口径）：agent-task-*，或 cwd 在 git linked worktree 里（.git 是文件）。
+ * 它的 /save-compact 解析到主仓的 memory 目录，会盖掉 PM 的 HANDOFF，所以 save-compact 对它一律改成 compact
+ */
+export function isExecutor(c: Pick<Cand, "name" | "cwd">): boolean {
+  if (c.name.startsWith("agent-task-")) return true;
+  for (let d = c.cwd; d && d !== dirname(d); d = dirname(d)) {
+    const git = statSync(join(d, ".git"), { throwIfNoEntry: false });
+    if (git) return git.isFile();
+  }
+  return false;
+}
+
+async function runTarget(req: FleetRunRequest, t: Cand, ctx: RunCtx): Promise<FleetResult> {
+  const na = notApplicable(req.action, t);
+  if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
+  const swap = req.action.kind === "save-compact" && isExecutor(t);
+  const r = await runOne(swap ? { kind: "compact" } : req.action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
+  return swap ? { ...r, detail: `执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：${r.detail}` } : r;
+}
 
 async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -132,11 +155,7 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
     return { runId, dryRun: true, action: req.action, targets: names, results: [], excluded, summary: `预演：会对 ${names.length} 个 agent 执行（${names.map(bareName).join("、") || "无"}）` };
   }
   const ctx: RunCtx = { io, keep: compactKeep(), deliverText: textSender(req.actor, req.via, targets.length) };
-  const results = await pool(targets, CONCURRENCY, async (t): Promise<FleetResult> => {
-    const na = notApplicable(req.action, t);
-    if (na) return { agent: t.name, outcome: "skipped", detail: na }; // 离线 / 运行时不支持：没发键，算跳过（「全部」里常有停掉的旧条目）
-    return runOne(req.action, t.name, t.runtime === "claude-code" ? lpWindowOf(t.name) : null, ctx);
-  });
+  const results = await pool(targets, CONCURRENCY, (t) => runTarget(req, t, ctx));
   void refreshLp(targets.filter((t) => t.runtime === "claude-code").map((t) => ({ name: t.name, channelId: t.channelId })));
   const projectOf = new Map(targets.filter((t) => t.project).map((t) => [bareName(t.name), t.project!]));
   auditFleet({ runId, action: req.action, actor: req.actor, via: req.via, at: Date.now(), results, projectOf });

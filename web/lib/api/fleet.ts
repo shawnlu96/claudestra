@@ -2,7 +2,7 @@
  * 批量管理（bridge/local-api/fleet.ts、bridge/fleet/）：GET /fleet/state、POST /fleet/run，以及 SSE 的 low_priority 事件。
  * 只有 owner 本人的全 scope manage 凭据能用，其余 403（面板直接显示错误）。
  */
-import { api } from "./client";
+import { api, ApiError } from "./client";
 import { followEventStream } from "./ledger";
 
 export type LpMode = "on" | "off" | "exhausted" | "unknown";
@@ -43,6 +43,22 @@ export function fetchFleetState(signal?: AbortSignal): Promise<{ agents: FleetAg
 export async function runFleet(body: { action: FleetAction; select: FleetSelect; dryRun?: boolean }): Promise<FleetReport> {
   const r = await api<{ report: FleetReport }>("/fleet/run", { method: "POST", json: body, timeoutMs: 10 * 60_000 });
   return r.report;
+}
+
+/**
+ * 顶栏上下文徽章、输入框警示条的「存记忆 + Compact」：只对这一个 agent 发 save-compact，执行者由 bridge 改成 compact
+ * （它的 save-compact 会盖掉 PM 的 HANDOFF）。返回按钮上显示的一句话；ok=false 时按钮可以再点。
+ */
+export async function requestCompact(agent: string): Promise<{ ok: boolean; text: string }> {
+  try {
+    const r = await runFleet({ action: { kind: "save-compact" }, select: { agents: [agent] } });
+    const x = r.results[0];
+    if (!x) return { ok: false, text: r.excluded[0]?.reason ?? r.summary };
+    return { ok: x.outcome === "done" || x.outcome === "queued", text: x.detail };
+  } catch (e) {
+    const denied = e instanceof ApiError && e.status === 403;
+    return { ok: false, text: denied ? "只有 owner 本机的管理设备能直接压缩" : (e as Error).message };
+  }
 }
 
 /** 订阅 low_priority 事件（面板开着时实时刷新徽章）；signal 中止即关连接 */

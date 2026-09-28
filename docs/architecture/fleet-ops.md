@@ -29,10 +29,15 @@ Facts found live that shape the runner:
 - The existing busy regex (`CC_BUSY_RE`) contains `esc to cancel`, which the walled footer also contains, so an idle walled session reads as busy there. Fleet judges busy only from the spinner lines above the input box.
 - At low priority `/compact` may first show `Working at lower priority … next try in 15s` before `Compacting conversation`; any spinner after the command counts as started. A short conversation answers `Not enough messages to compact.` → skipped.
 - Dim text in the input box (`ESC[2m`) is CC's suggestion and gets replaced by typing; normal-colour text is someone's draft and blocks every key-sending action.
+- Modals (`modal`): no input box at the bottom (rate-limit menu, permission prompt, AskUserQuestion, Rewind — which draws `▔` instead of `─`), or a box that is really a dialog (a numbered option on the `❯` line, or capitalised `Esc to cancel` / `Enter to select|confirm|continue` / `Tab to amend` inside or under it; the walled footer's lowercase `esc to cancel` does not count). Only the rate-limit menu may receive keys; every other dialog is refused without pressing anything — Esc on the bypass first-run prompt exits CC. Real samples: `modal-*.ansi`.
+
+## Shared with T36
+
+`paneQuotaState(plain, escaped) → { wall, lp, exhausted, menu, compacting, draft }` in `lib/lp-state.ts` is the pane gate of T36's context-boundary injector. It reads only `escaped` (plain is the fallback when that capture is empty); `draft` is also true when the input box cannot be read, so an unprovable-empty box never gets typed into. Either side changing this file tells the other.
 
 ## Actions and outcomes
 
-`lp-on`, `lp-off` (set-to-state: already there → skipped; busy → failed "busy, not sent", since a queued toggle runs after the turn and may flip the wrong way), `compact` (with a keep list; busy → queued), `save-compact`, `lp-compact` (on → interrupt → clear → compact), `text` (delivered through `deliver()` as a bridge-origin message with a `[📣 批量指令 · 来自 …]` header, all runtimes). Each agent reports `done` / `queued` / `skipped` / `failed` with a reason. CC-only actions skip Pi and Codex agents; offline agents are skipped.
+`lp-on`, `lp-off` (set-to-state: already there → skipped; busy → failed "busy, not sent", since a queued toggle runs after the turn and may flip the wrong way), `compact` (with a keep list; busy → queued), `save-compact` (an executor — `agent-task-*` or a cwd inside a linked git worktree — gets `compact` instead: its save-compact resolves to the main repo's memory directory and overwrites the PM's HANDOFF), `lp-compact` (on → interrupt → clear → compact), `text` (delivered through `deliver()` as a bridge-origin message with a `[📣 批量指令 · 来自 …]` header, all runtimes). Each agent reports `done` / `queued` / `skipped` / `failed` with a reason. CC-only actions skip Pi and Codex agents; offline agents are skipped. `compact` / `save-compact` refuse while walled with LP off or exhausted (same rule as T36's gate: the command would just sit there).
 
 Default keep list: `DEFAULT_COMPACT_KEEP` in `lib/fleet-plan.ts`, overridable via `config.json` `fleet.compactKeep`, editable per run in the panel. Newlines are collapsed — a newline in the TUI input submits.
 
@@ -43,6 +48,7 @@ Selection: explicit agents, `all`, `project`, plus AND-filters `walled` and `ctx
 - `GET /api/v1/fleet/state`, `POST /api/v1/fleet/run {action, select, dryRun?}` — `canRunFleet`: the owner principal (`isOwnerPrincipal`) with a full-scope manage credential. Guests, partial-scope devices, non-owner tokens and peers get 403.
 - `manager fleet state` / `manager fleet <action> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--include-master] [--keep …] [--text …] [--dry-run]` — sends ws `fleet_run` to the bridge; the bridge only accepts it on a connection whose upgrade was direct loopback without `X-Forwarded-For` (same trust as `route_to_agent`).
 - `GET /api/v1/agents` rows carry `lowPriority` (not for peers); SSE `low_priority` (transient) fires when a polled state changes (every 30 s, and right after a fleet run).
+- Web: the context badge's "存记忆 + Compact" and the composer's over-limit banner call `requestCompact(agent)` → `POST /fleet/run` for that one agent (owner only, same gate); the result text stays on the button / banner, a failure can be retried.
 - Web: badge next to the sidebar name (lucide snail / hourglass / ban), panel from Agent 管理 → 批量管理. Discord stats dashboard: plain-text tag (`LP→3:20am`, `撞墙中`, `LP 本周额度已用完`), display only.
 - Every run logs one line per agent to the bridge log (`🛰 [fleet] <runId> …`) and writes one project-level ledger note per affected project (who, when, action, per-agent results).
 
