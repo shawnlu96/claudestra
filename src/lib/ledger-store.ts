@@ -101,8 +101,6 @@ export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateDeps];
 const MIGRATIONS = LEDGER_MIGRATIONS;
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
-/** 从这个版本起库里有 task_deps 与 assignee 列：bridge 读到还没被 CLI 迁移的旧库时据此跳过 */
-export const DEPS_SCHEMA_VERSION = MIGRATIONS.indexOf(migrateDeps) + 1;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -169,11 +167,16 @@ export function schemaVersion(db: Database): number {
 
 /** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = { tasks: ["assigneeKind", "assignee"] };
+/** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
+const REQUIRED_INDEXES: Record<string, readonly string[]> = { task_deps: ["task_deps_to", "task_deps_project"] };
 
-/** 按 LEDGER_TABLES 与 REQUIRED_COLUMNS 找缺的表 / 列；空数组 = 完整 */
+/** 按 LEDGER_TABLES、REQUIRED_COLUMNS、REQUIRED_INDEXES 找缺的表 / 列 / 索引；空数组 = 完整 */
 function missingSchema(db: Database): string[] {
-  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name));
+  const rows = db.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE type IN ('table', 'index')").all() as { type: string; name: string; tbl_name: string }[];
+  const tables = new Set(rows.filter((r) => r.type === "table").map((r) => r.name));
+  const indexes = new Set(rows.filter((r) => r.type === "index").map((r) => `${r.tbl_name}.${r.name}`));
   const missing: string[] = LEDGER_TABLES.filter((t) => !tables.has(t));
+  for (const [table, names] of Object.entries(REQUIRED_INDEXES)) missing.push(...names.filter((n) => !indexes.has(`${table}.${n}`)).map((n) => `index ${table}.${n}`));
   for (const [table, cols] of Object.entries(REQUIRED_COLUMNS)) {
     if (!tables.has(table)) continue;
     const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
@@ -195,16 +198,23 @@ function runStep(db: Database, step: Migration): void {
 function migrate(db: Database): void {
   const behind = schemaVersion(db) < MIGRATIONS.length;
   if (!behind && missingSchema(db).length === 0) return;
-  db.transaction(() => {
-    const from = schemaVersion(db);
-    for (let v = from; v < MIGRATIONS.length; v++) {
-      runStep(db, MIGRATIONS[v]);
-      db.exec(`PRAGMA user_version = ${v + 1}`);
-    }
-    if (from > 0 && missingSchema(db).length) for (const step of MIGRATIONS.slice(1)) runStep(db, step);
-    const still = missingSchema(db);
-    if (still.length) throw new Error(`台账库迁移后仍缺：${still.join(", ")}（user_version ${schemaVersion(db)}）`);
-  }).immediate();
+  // 报错里的版本号要是回滚后的：事务里的 user_version 已被推过，库文件里还是进事务时读到的那个
+  let from = schemaVersion(db);
+  try {
+    db.transaction(() => {
+      from = schemaVersion(db);
+      for (let v = from; v < MIGRATIONS.length; v++) {
+        runStep(db, MIGRATIONS[v]);
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      }
+      if (from > 0 && missingSchema(db).length) for (const step of MIGRATIONS.slice(1)) runStep(db, step);
+      const still = missingSchema(db);
+      if (still.length) throw new Error(`迁移后仍缺：${still.join(", ")}`);
+    }).immediate();
+  } catch (e) {
+    if (isBusy(e)) throw e;
+    throw new Error(`台账库迁移失败（${(e as Error).message}），已回滚，库仍是 v${from}`, { cause: e });
+  }
 }
 
 // ── 行映射 ──
@@ -263,9 +273,12 @@ export function getDep(db: Database, from: string, to: string): LedgerDep | null
   return r ? toDep(r) : null;
 }
 
-/** 项目的全部依赖边；库还是迁移前的版本（bridge 先于 CLI 升级）时为空 */
+/**
+ * 项目的全部依赖边；库里还没有 task_deps（bridge 先于 CLI 升级，或别的分支的代码先占了版本号）时为空。
+ * 看表在不在而不是版本号：只读连接没法补齐，版本号到了表却不在时按版本判会直接 no such table。
+ */
 export function listDeps(db: Database, project: string): LedgerDep[] {
-  if (schemaVersion(db) < DEPS_SCHEMA_VERSION) return [];
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_deps'").get()) return [];
   return (db.prepare("SELECT * FROM task_deps WHERE project = ? ORDER BY fromTask, toTask").all(project) as Row[]).map(toDep);
 }
 

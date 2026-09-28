@@ -138,7 +138,7 @@ function isAgentName(name: string): boolean {
  * peer 的 agent 部分要求已归一（NFKC + 小写，CLI 负责归一），否则 fp/Agent-X 与 fp/agent-x 会被当成两个人。返回错误原因，合格为 null。
  */
 export function assigneeFormatError(kind: AssigneeKind, who: string): string | null {
-  if (kind === "agent") return isAgentName(who) ? null : "本机 agent 名（不含空白、引号、/ : 等，不能是 owner）";
+  if (kind === "agent") return isAgentName(who) ? null : "本机 agent 名（不含空白、点号 .、引号、/ \\ : ~ 等，不能是 owner）";
   if (kind === "human") return HUMAN_RE.test(who) ? null : "local:<principalId>，如 local:owner:self、local:guest:1a2b3c4d";
   const slash = who.indexOf("/");
   const agent = who.slice(slash + 1);

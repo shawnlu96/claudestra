@@ -278,6 +278,7 @@ describe("负责人类型", () => {
     ];
     for (const [k, v] of ok) expect([k, v, assigneeFormatError(k, v)]).toEqual([k, v, null]);
     for (const [k, v] of bad) expect([k, v, typeof assigneeFormatError(k, v)]).toEqual([k, v, "string"]);
+    expect(assigneeFormatError("agent", "agent-a.b")).toContain("点号");
   });
 
   test("只改类型不带 assignee：同类型等于没改，不拿旧 assignee 反推 agent（新旧代码混写过的行两列可能不一致）", () => {

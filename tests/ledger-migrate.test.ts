@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { LedgerReader, projectView } from "../src/lib/ledger-read.js";
-import { closeLedger, DEPS_SCHEMA_VERSION, getTask, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, listDeps, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
+import { closeLedger, getTask, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, listDeps, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 
 function tmp(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "ledger-mig-"));
@@ -47,10 +47,8 @@ function openerScript(path: string, startAt: number, i: number): string {
 }
 
 describe("v1 → 依赖边版本", () => {
-  test("迁移常量由下标算：最新版本 = 迁移步数，依赖边从 DEPS_SCHEMA_VERSION 起", () => {
+  test("迁移常量由下标算：最新版本 = 迁移步数", () => {
     expect(LEDGER_SCHEMA_VERSION).toBe(LEDGER_MIGRATIONS.length);
-    expect(DEPS_SCHEMA_VERSION).toBeGreaterThan(1);
-    expect(DEPS_SCHEMA_VERSION).toBeLessThanOrEqual(LEDGER_SCHEMA_VERSION);
   });
 
   test("写成 SQL 数组的迁移一个元素只有一条语句：多语句交给 prepare 只跑第一条（其余静默丢掉）、交给 exec 会吞运行期错误", () => {
@@ -68,6 +66,13 @@ describe("v1 → 依赖边版本", () => {
     expect(schema(one).length).toBeGreaterThan(0);
     one.close();
     all.close();
+  });
+
+  test("字面检查：数组迁移的元素去掉触发器的 BEGIN … END 后不许再有 `;` 接语句（藏一条 UPDATE 时两边 schema 一样，上一条测不出）", () => {
+    for (const step of LEDGER_MIGRATIONS) {
+      if (typeof step === "function") continue;
+      for (const sql of step) expect([sql, /;\s*\S/.test(sql.replace(/\bBEGIN\b[\s\S]*?\bEND\b/gi, ""))]).toEqual([sql, false]);
+    }
   });
 
   test("旧任务有 agent 的回填成 assigneeKind=agent，没派人（含空串）的留空；task_deps 建好", () => {
@@ -133,11 +138,24 @@ describe("v1 → 依赖边版本", () => {
       const raw = new Database(path);
       raw.exec("CREATE TRIGGER no_upd BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'frozen'); END");
       raw.close();
-      expect(() => openLedger(path)).toThrow("frozen");
+      expect(() => openLedger(path)).toThrow(/frozen.*已回滚，库仍是 v1/);
       const after = new Database(path);
       expect(schemaVersion(after)).toBe(1);
       expect((after.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).some((c) => c.name === "assigneeKind")).toBe(false);
       after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("补齐核对看索引所属的表：同名索引先建在别的表上（IF NOT EXISTS 会跳过）→ 报错、回滚", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const raw = new Database(path);
+      raw.exec("CREATE INDEX task_deps_to ON tasks(kind)");
+      raw.close();
+      expect(() => openLedger(path)).toThrow(/index task_deps\.task_deps_to.*已回滚，库仍是 v1/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -175,6 +193,21 @@ describe("v1 → 依赖边版本", () => {
       const view = projectView(db!, "p", 0);
       expect(view.deps).toEqual([]);
       expect(view.tasks.map((t) => [t.id, t.assigneeKind, t.runnable])).toEqual([["T1", null, true], ["T2", null, true], ["T3", null, true]]);
+      reader.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("只读连接遇上「版本号已是最新、task_deps 却不在」（别的分支的代码先占了号，写者还没补齐）：deps 为空，不报 no such table", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const raw = new Database(path);
+      raw.exec(`PRAGMA user_version = ${LEDGER_SCHEMA_VERSION}`);
+      raw.close();
+      const reader = new LedgerReader(path);
+      expect(projectView(reader.get()!, "p", 0).deps).toEqual([]);
       reader.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
