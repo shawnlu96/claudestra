@@ -35,20 +35,21 @@ export function setAbortCapable(channelId: string, on: boolean): void {
 const ABORT_ACK_MS = 1_500;
 type AbortResult = "aborted" | "idle" | "no_ack";
 const abortWaiters = new Map<string, { channelId: string; done: (r: AbortResult) => void }>();
-const lastAbort = new Map<string, AbortResult>();
+const lastAbort = new Map<string, { result: AbortResult; inEditor: number }>();
 
-export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unknown }): void {
+export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unknown; inEditor?: unknown }): void {
   const w = abortWaiters.get(String(msg.id));
   if (!w) return;
   abortWaiters.delete(String(msg.id));
   const ids = Array.isArray(msg.voided) ? msg.voided.filter((x): x is string => typeof x === "string") : [];
   // 先回显再放行：放行之后停字那条会 record() 一条 cut、清掉「这一回合送到了哪些」，就查不到发送方了
   if (ids.length) echoVoided(w.channelId, ids);
+  lastAbort.set(w.channelId, { result: msg.result === "aborted" ? "aborted" : "idle", inEditor: Number(msg.inEditor) || 0 });
   w.done(msg.result === "aborted" ? "aborted" : "idle");
 }
 
-/** 这个频道最近一次请 Pi 扩展中止的结果（停字抬头照实写：真停了 / 已请求没回执） */
-export const lastAbortResult = (channelId: string): AbortResult | undefined => lastAbort.get(channelId);
+/** 这个频道最近一次请 Pi 扩展中止的结果（停字抬头照实写：真停了 / 已请求没回执；inEditor = 作废的消息里几条被 Pi 退回了输入框） */
+export const lastAbortResult = (channelId: string): { result: AbortResult; inEditor: number } | undefined => lastAbort.get(channelId);
 
 /** 请 Pi 扩展中止当前回合：真中止了 / 没回执 = ["abort"]，本来就空闲 = []；没连着、扩展太旧不会中止 = 抛错（调用方如实回报，不说「已打断」） */
 export async function extensionAbort(channelId: string): Promise<readonly string[]> {
@@ -61,7 +62,7 @@ export async function extensionAbort(channelId: string): Promise<readonly string
     setTimeout(() => abortWaiters.delete(id) && resolve("no_ack"), ABORT_ACK_MS);
     ws.send(JSON.stringify({ type: "abort", id }));
   });
-  lastAbort.set(channelId, r);
+  if (r === "no_ack") lastAbort.set(channelId, { result: r, inEditor: 0 });
   return r === "idle" ? [] : ["abort"];
 }
 

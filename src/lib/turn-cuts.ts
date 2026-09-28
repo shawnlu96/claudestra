@@ -4,6 +4,7 @@
  * 接线（落盘、订阅事件、记送达和回复）在 bridge/turn-cuts.ts；单测 tests/turn-cuts.test.ts。
  */
 import { bashCommandOf, classifyTool, heavier, sideEffectLabel, type SideEffect, type SideEffectVerdict } from "./side-effects.js";
+import { matchStopWord } from "./stop-words.js";
 
 /** terminal：人在 CC 终端里自己按了打断（会话记录出现 [Request interrupted by user，而 bridge 没发过键） */
 export type CutCause = "preempt" | "manual" | "stopword" | "codex_interrupt" | "terminal";
@@ -64,6 +65,33 @@ export interface CutEvent {
 }
 
 export const CUT_TTL_MS = 30 * 60_000;
+
+/** 会话记录（CC jsonl）里的一条 user 记录 */
+export interface TranscriptUserEntry {
+  isMeta?: boolean;
+  isCompactSummary?: boolean;
+  origin?: { kind?: string } | string;
+  message?: { content?: unknown };
+}
+
+/**
+ * 会话记录里的 user 记录对打断记录有没有意义：打断标记（[Request interrupted by user，终端里按的或 bridge 发的键），
+ * 或人在终端里敲的新输入（「停」之后又开口了，Autopilot 可以接着推进；敲的是停字就不算）。
+ * 真实输入 = 不是 meta / compact 续写、来源不是 channel 注入 / 后台通知 / 自动续跑、没有工具结果、不是斜杠命令或 <标签> 包着的系统文本。
+ * 只认 Claude Code：Pi / Codex 的会话记录里 bridge 投进去的消息就是普通 user 文本（带不带来源头都有），分不出是不是终端里敲的——
+ * 当成「开口了」会让外源消息解开 owner 的「停」。单测 tests/turn-cuts.test.ts。
+ */
+export function transcriptUserEvent(e: TranscriptUserEntry, runtime?: string): { type: "turn_interrupted" | "terminal_input"; data: { stop?: boolean }; transient?: true } | null {
+  const content = e.message?.content;
+  const blocks = Array.isArray(content) ? (content as { type?: string; text?: string }[]) : null;
+  const text = typeof content === "string" ? content : blocks ? blocks.map((b) => (b?.type === "text" ? (b.text ?? "") : "")).join("") : "";
+  if (text.startsWith("[Request interrupted by user")) return { type: "turn_interrupted", data: {} };
+  const origin = typeof e.origin === "object" ? e.origin?.kind : e.origin;
+  if (e.isMeta || e.isCompactSummary || (origin && origin !== "human") || blocks?.some((b) => b?.type === "tool_result")) return null;
+  const t = text.trim();
+  if ((runtime && runtime !== "claude-code") || !t || /^[</]/.test(t)) return null;
+  return { type: "terminal_input", data: { stop: matchStopWord(t).stop }, transient: true }; // 不进事件环：只给打断记录用
+}
 const CHAIN_MAX = 5;
 
 const str = (x: unknown) => (typeof x === "string" ? x : "");
@@ -244,8 +272,9 @@ export type StopOutcome = "fired" | "requested" | "not_busy" | "failed";
  * queuedBefore：停之前已经排进 Codex 队列、会在这条之后才送到的消息摘录——它们送到时别照做。
  * 被打断的这一轮里、停之前还送来过的消息（cut.alsoPending：Pi steer 进去的、冷却期里的补充）也列出来：它们已经在上下文里，别照做。
  * not_busy 时多半是在回答你刚问的问题（「要停止 X 吗」「停止」），提醒按回答处理。
+ * inEditor：Pi 停下时把几条停之前 steer 进去、还没执行的消息退回了它的输入框（已作废，发送方收到了通知）。
  */
-export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBefore: readonly string[] = []): string {
+export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBefore: readonly string[] = [], inEditor = 0): string {
   const what = outcome === "fired" && c ? `已替你打断（${doingText(c)}）`
     : outcome === "requested" ? "已请运行时中止当前回合（没有回执：如果还在跑，你自己马上停下）"
     : outcome === "not_busy" ? "你刚才没有在跑的回合（如果这是在回答你刚问的问题，就按回答处理，不是叫停）"
@@ -256,7 +285,8 @@ export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBef
   const also = c?.alsoPending?.length
     ? `\n这一轮里停之前还送来过 ${c.alsoPending.map((t) => `「${clip(norm(t.excerpt), 30)}」`).join("、")}：也是停之前发的，先别照做，问用户还要不要。`
     : "";
-  return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}${also}]`;
+  const editor = inEditor ? `\nPi 输入框里退回了 ${inEditor} 条停之前送到的消息，未执行（已作废，发送方已收到通知）：别照做，也别替用户提交。` : "";
+  return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}${also}${editor}]`;
 }
 
 /**

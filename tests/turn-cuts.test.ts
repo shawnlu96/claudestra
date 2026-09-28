@@ -7,6 +7,7 @@ import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { isHumanRequest, type Envelope } from "../src/bridge/router.js";
 import {
   completedOnlyFrom, settleBy, CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
+  transcriptUserEvent,
   type Cut, type CutEvent, type NewCutInput,
 } from "../src/lib/turn-cuts.js";
 
@@ -264,5 +265,40 @@ describe("waitForIdle 的固定语义（T11a 的答复复用）", () => {
     expect(isHumanRequest(mk({}, { kind: "api", name: "p", tokenId: "t", peer: "ahh" } as Envelope["from"]))).toBe(false);
     expect(isHumanRequest({ ...mk({}), intent: "response" } as Envelope)).toBe(false);
     expect(isHumanRequest(mk({}, { kind: "local", channelId: "c" } as Envelope["from"]))).toBe(false);
+  });
+});
+
+describe("transcriptUserEvent：会话记录里的 user 记录（打断标记 / 终端里敲的新输入）", () => {
+  const txt = (text: string, extra: Record<string, unknown> = {}) => ({ message: { content: [{ type: "text", text }] }, ...extra });
+  test("打断标记", () => {
+    expect(transcriptUserEvent(txt("[Request interrupted by user for tool use]"))).toEqual({ type: "turn_interrupted", data: {} });
+    expect(transcriptUserEvent({ message: { content: "[Request interrupted by user]" } })).toEqual({ type: "turn_interrupted", data: {} });
+  });
+  test("终端里敲的真实输入 → terminal_input；敲的是停字 → stop", () => {
+    expect(transcriptUserEvent(txt("把 X 也改了", { origin: { kind: "human" }, promptSource: "typed" }))).toEqual({ type: "terminal_input", data: { stop: false }, transient: true });
+    expect(transcriptUserEvent({ message: { content: "2" } })).toEqual({ type: "terminal_input", data: { stop: false }, transient: true }); // 老版本没有 origin
+    expect(transcriptUserEvent(txt("停", { origin: { kind: "human" } }))).toEqual({ type: "terminal_input", data: { stop: true }, transient: true });
+  });
+  test("排除：channel 注入、后台通知、自动续跑、compact 续写、meta、斜杠命令、<标签> 系统文本、工具结果", () => {
+    const no = [
+      txt('<channel source="claudestra" chat_id="1">hi</channel>', { isMeta: true, origin: { kind: "channel" } }),
+      txt("<task-notification> <task-id>x</task-id>", { origin: { kind: "task-notification" } }),
+      txt("You can continue now.", { isMeta: true, origin: { kind: "auto-continuation" } }),
+      txt("Another Claude session sent a message", { isMeta: true, origin: { kind: "peer" } }),
+      txt("This session is being continued from a previous conversation", { isCompactSummary: true }),
+      txt("Base directory for this skill: /x", { isMeta: true }),
+      txt("/compact 摘要必须保留…"),
+      txt("<command-message>save-compact</command-message> <command-name>/save-compact</command-name>", { origin: { kind: "human" } }),
+      txt("<local-command-stdout>Set model</local-command-stdout>"),
+      { message: { content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } },
+      txt("   "),
+    ];
+    for (const e of no) expect(transcriptUserEvent(e)).toBeNull();
+  });
+  test("只认 Claude Code：Pi / Codex 的会话记录里 bridge 投进去的消息分不出是不是终端里敲的", () => {
+    expect(transcriptUserEvent(txt("[🌐 guest] 部署 Y"), "pi")).toBeNull();
+    expect(transcriptUserEvent(txt("hi"), "codex")).toBeNull();
+    expect(transcriptUserEvent(txt("hi"), "claude-code")).toEqual({ type: "terminal_input", data: { stop: false }, transient: true });
+    expect(transcriptUserEvent(txt("[Request interrupted by user]"), "pi")).toEqual({ type: "turn_interrupted", data: {} });
   });
 });

@@ -224,6 +224,7 @@ export class TurnCuts {
   /** event-bus 订阅回调：续做检测、迟到的 inflight、会话记录里的打断标记 */
   onEvent(e: CutEvent & { chatId: string; agent: string }): void {
     if (e.type === "turn_interrupted") return void this.onTranscriptInterrupt(e);
+    if (e.type === "terminal_input") return this.noteHuman(e.chatId, e.data.stop === true); // 终端前的就是 owner
     if (e.type === "tool_start") {
       const id = typeof e.data.toolId === "string" ? e.data.toolId : "";
       if (id) this.starts.set(id, e);

@@ -287,6 +287,15 @@ describe("对抗式第 3 轮（@57b5354）", () => {
     expect(book({ path }).b.interruptHold("ch")).toBeNull();
   });
 
+  test("终端里敲了新输入（terminal_input）也算 owner 又开口了：解除挂起；敲的是停字就还停着", () => {
+    const { b } = book();
+    stopCut(b);
+    b.onEvent({ type: "terminal_input", ts: iso(T0), data: { stop: true }, chatId: "ch", agent: "a" });
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.onEvent({ type: "terminal_input", ts: iso(T0), data: { stop: false }, chatId: "ch", agent: "a" });
+    expect(b.interruptHold("ch")).toBeNull();
+  });
+
   test("P2-5：Codex 空闲时经 queue 投、马上开跑的那条不算「排在队列里」", () => {
     const { b } = book();
     b.setCodexTypeIn("ch", true);

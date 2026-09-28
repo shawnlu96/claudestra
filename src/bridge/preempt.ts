@@ -54,10 +54,10 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   });
   if (!stop) return void (env.meta.interruptNote = preemptHeadline(cut));
   // Pi 的中止靠扩展里的 abort()：有回执 = 真停了，等不到回执如实写「已请求」；扩展回「本来就空闲」= 没有在跑的回合
-  const pi = runtime === "pi";
-  const outcome = r.fired ? (pi && lastAbortResult(channelId) !== "aborted" ? "requested" : "fired")
-    : r.why === "not_busy" || (pi && r.why === "no_keys") ? "not_busy" : "failed";
-  env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore);
+  const pi = runtime === "pi" ? lastAbortResult(channelId) : undefined;
+  const outcome = r.fired ? (runtime === "pi" && pi?.result !== "aborted" ? "requested" : "fired")
+    : r.why === "not_busy" || (runtime === "pi" && r.why === "no_keys") ? "not_busy" : "failed";
+  env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore, r.fired ? (pi?.inEditor ?? 0) : 0);
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
 }
 

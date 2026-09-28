@@ -45,6 +45,8 @@ export type BridgeEventType =
   | "api_error_turn"
   // 会话记录里出现打断标记 [Request interrupted by user（data.ts = 那一行的时间）：打断记录据此认出人在终端里叫停
   | "turn_interrupted"
+  // 人在终端里敲了新输入（data.stop = 敲的是停字）：「停」之后又开口了，Autopilot 可以接着推进。transient：不进环
+  | "terminal_input"
   // 内置台账有写入（lib/ledger-read.ts 的 data_version 轮询）：data 只有 {project}，agent / chatId 为空；
   // transient 发、不补发——网页每次 SSE 连上 / 重连都全量重拉台账。只推给 canReadLedger 的连接（bridge/ledger-feed.ts）
   | "ledger";

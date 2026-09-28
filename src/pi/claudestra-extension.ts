@@ -47,7 +47,6 @@ interface PiUi {
   notify?(message: string, level?: "info" | "warning" | "error"): void;
   setStatus?(key: string, text: string | undefined): void;
   getEditorText?(): string;
-  setEditorText?(text: string): void;
 }
 
 interface PiModelLike {
@@ -307,9 +306,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           void inject(String(msg.content ?? ""));
           return;
         case "abort": { // 回执照实写，并列出作废的消息（停之前 steer 进去、还没执行的），bridge 逐条告诉发送方
-          let r: ReturnType<typeof aborts.abort> = { result: "idle", voided: [] };
+          let r: ReturnType<typeof aborts.abort> = { result: "idle", voided: [], inEditor: 0 };
           try { r = aborts.abort(); } catch (e) { console.error(`claudestra: abort 失败: ${(e as Error).message}`); }
-          return void ws.send(JSON.stringify({ type: "abort_ack", id: msg.id, result: r.result, voided: r.voided.map((v) => v.messageId).filter(Boolean) }));
+          return void ws.send(JSON.stringify({ type: "abort_ack", id: msg.id, ...r }));
         }
         case "replaced":
           // 同一个频道被另一条连接顶替。Claude Code 侧的判据是「MCP stdio 还在 ⇒ 绝不死」；

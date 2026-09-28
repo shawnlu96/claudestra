@@ -1,11 +1,13 @@
 /**
  * src/pi/abort-control.ts（Pi 扩展里 bridge 叫停的那一段）与 bridge/pi-abort.ts 的回显文案。对抗式第 3 轮 P1-B + PM 的修法：
- * 停之后，已经 steer 进去、还没执行的消息一律作废（TUI 输入框里退回来的那几条清掉），回执列出来，bridge 回显给发送方。
+ * 停之后，已经 steer 进去、还没执行的消息一律作废，回执列出来，bridge 回显给发送方；TUI 下 Pi 退回输入框的不清（终端里的人可能在打字），
+ * 回执报几条，⏹ 抬头里写明。
  * 行为在真 Pi 0.85.1 + 假模型上对照过（TUI 与 --mode rpc），见 docs/architecture/interrupts.md「Pi」。
  */
 import { describe, expect, test } from "bun:test";
 import { createAbortControl, type AbortableCtx } from "../src/pi/abort-control.js";
 import { voidedNotice } from "../src/bridge/pi-abort.js";
+import { stopHeadline } from "../src/lib/turn-cuts.js";
 
 /** 模拟 Pi：queue = 排队的 steer 消息；tui = 有中止处理（把排队的退回输入框），否则队列留着、中止后会拿它们续跑 */
 function fakePi(opts: { tui: boolean; editor?: string }) {
@@ -20,14 +22,14 @@ function fakePi(opts: { tui: boolean; editor?: string }) {
         s.queue = [];
       }
     },
-    ...(opts.tui ? { ui: { getEditorText: () => s.editor, setEditorText: (t: string) => void (s.editor = t) } } : {}),
+    ...(opts.tui ? { ui: { getEditorText: () => s.editor } } : {}),
   };
   return { s, ctx };
 }
 const msg = (text: string) => ({ role: "user", content: [{ type: "text", text }] });
 
 describe("Pi：停之前 steer 进去、还没执行的消息作废", () => {
-  test("TUI：回执列出作废的那条；Pi 退回输入框的这条被清掉，人在终端里打了一半的字留着", () => {
+  test("TUI：回执列出作废的那条、报它被退回了输入框；输入框不动（人在终端里打了一半的字也在）", () => {
     let t = 0;
     const c = createAbortControl(() => t);
     const pi = fakePi({ tui: true, editor: "我在终端里打了一半" });
@@ -38,8 +40,9 @@ describe("Pi：停之前 steer 进去、还没执行的消息作废", () => {
     pi.s.queue.push("部署 Y");
     const r = c.abort();
     expect(r.result).toBe("aborted");
-    expect(r.voided.map((v) => v.messageId)).toEqual(["m2"]);
-    expect(pi.s.editor).toBe("我在终端里打了一半");
+    expect(r.voided).toEqual(["m2"]);
+    expect(r.inEditor).toBe(1);
+    expect(pi.s.editor).toBe("部署 Y\n\n我在终端里打了一半");
     t += 100;
     c.onRunStart(pi.ctx); // TUI 下队列已空：不会有续跑，就算有新一轮也不拦
     expect(pi.s.aborts).toBe(1);
@@ -52,7 +55,9 @@ describe("Pi：停之前 steer 进去、还没执行的消息作废", () => {
     c.onRunStart(pi.ctx);
     c.onBridgeMessage({ text: "部署 Y BASH", messageId: "m2" }, true);
     pi.s.queue.push("部署 Y BASH");
-    expect(c.abort().voided.map((v) => v.messageId)).toEqual(["m2"]);
+    const r = c.abort();
+    expect(r.voided).toEqual(["m2"]);
+    expect(r.inEditor).toBe(0); // RPC 没有输入框：在续跑的那一轮里被拦下
     t += 5;
     c.onRunStart(pi.ctx); // 续跑的那一轮
     expect(pi.s.aborts).toBe(2);
@@ -69,19 +74,26 @@ describe("Pi：停之前 steer 进去、还没执行的消息作废", () => {
     c.onMessageStart({ role: "user", content: "看下日志" });
     c.onBridgeMessage({ text: "部署 Y", messageId: "m2" }, true);
     pi.s.queue.push("部署 Y");
-    expect(c.abort().voided.map((v) => v.messageId)).toEqual(["m2"]);
+    expect(c.abort().voided).toEqual(["m2"]);
   });
 
   test("没在跑 → idle，不中止、不作废；回合正常结束后清账", () => {
     const c = createAbortControl();
     const pi = fakePi({ tui: true });
-    expect(c.abort()).toEqual({ result: "idle", voided: [] }); // 还没开过回合
+    expect(c.abort()).toEqual({ result: "idle", voided: [], inEditor: 0 }); // 还没开过回合
     c.onRunStart(pi.ctx);
     c.onBridgeMessage({ text: "x", messageId: "m1" }, true);
     c.onSettled();
     pi.s.idle = true;
-    expect(c.abort()).toEqual({ result: "idle", voided: [] });
+    expect(c.abort()).toEqual({ result: "idle", voided: [], inEditor: 0 });
     expect(pi.s.aborts).toBe(0);
+  });
+});
+
+describe("⏹ 抬头：Pi 输入框里退回的条数", () => {
+  test("有退回就写明「Pi 输入框里退回了 N 条，未执行」；没有就不写", () => {
+    expect(stopHeadline(undefined, "fired", [], 2)).toContain("Pi 输入框里退回了 2 条停之前送到的消息，未执行");
+    expect(stopHeadline(undefined, "fired")).not.toContain("输入框");
   });
 });
 

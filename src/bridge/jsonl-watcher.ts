@@ -19,6 +19,7 @@ import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
 import { splitChunkLines } from "../lib/jsonl-lines.js";
+import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isForwardTool } from "../lib/forward.js";
@@ -592,9 +593,9 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
         if (entry.type === "user") {
           const content = entry.message?.content;
-          // 打断标记（终端里按的或 bridge 发的键）：CC 写这一行、不发 Stop，打断记录据此认出「人在终端里叫停」（bridge/turn-cuts.ts）
-          const first = typeof content === "string" ? content : Array.isArray(content) ? String(content[0]?.text ?? "") : "";
-          if (first.startsWith("[Request interrupted by user")) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "turn_interrupted", data: { ts: entry.timestamp } });
+          // 打断标记 / 人在终端里敲的新输入：打断记录据此认出「人在终端里叫停」和「叫停之后又开口了」（lib/turn-cuts.ts transcriptUserEvent）
+          const ue = transcriptUserEvent(entry, state.runtime);
+          if (ue) emitEvent({ agent: state.agentName, chatId: state.channelId, type: ue.type, data: { ts: entry.timestamp, ...ue.data } }, ue);
           if (!Array.isArray(content)) continue;
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
