@@ -14,8 +14,6 @@ import { applyPending, ASK_EVENT_REFRESH_MS, type PendingAnswer, type WebAsk } f
 export interface AsksSnap {
   asks: WebAsk[];
   loaded: boolean;
-  /** 这个凭据能不能作答（bridge 的 canAnswerAsk）：不能的只看不答 */
-  canAnswer: boolean;
   /** 抽屉开着吗；focus = 要滚到的那张卡 */
   open: boolean;
   focus: string | null;
@@ -30,7 +28,7 @@ export interface AskNote {
   text: string;
 }
 
-const EMPTY: AsksSnap = { asks: [], loaded: false, canAnswer: true, open: false, focus: null, banner: null, notes: {} };
+const EMPTY: AsksSnap = { asks: [], loaded: false, open: false, focus: null, banner: null, notes: {} };
 let snap: AsksSnap = EMPTY;
 /** 服务端最近一次给的列表；显示的是它盖上待确认的作答（applyPending） */
 let server: WebAsk[] = [];
@@ -90,7 +88,7 @@ async function refresh(): Promise<void> {
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
     for (const a of r.asks) seen.add(a.id);
     server = r.asks;
-    show({ loaded: true, canAnswer: r.canAnswer !== false, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    show({ loaded: true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) {
       denied = true;

@@ -6,19 +6,24 @@ import { uiAgentName } from "@/lib/chat/agents";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { replyRowKey } from "@/lib/chat/reply-clicks";
 
-export type AskState = "open" | "answered" | "expired" | "cancelled";
+/** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
+export type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
 /** 字段按卡片上的阅读顺序排（谁、问什么、怎么答、什么状态） */
 export interface WebAsk {
   id: string;
-  fromAgent: string;
+  /** 人 / 系统发起的（指派事项、chat 审核）没有发起 agent */
+  fromAgent: string | null;
+  /** 指给谁（local:<principalId>）；指给自己的 guest 也看得到、答得了 */
+  assignee?: string | null;
+  createdBy?: string | null;
   project: string;
   taskId: string | null;
   title: string;
   context: string;
   body: string;
-  kind: "decide" | "authorize" | "owner_action" | "accept";
+  kind: "decide" | "authorize" | "owner_action" | "accept" | "assigned";
   kindHint: string | null;
-  source: "reply" | "auq" | "permission" | "codex";
+  source: "reply" | "auq" | "permission" | "codex" | "human" | "system";
   options: unknown[];
   allowText: boolean;
   blocking: boolean | null;
@@ -29,6 +34,8 @@ export interface WebAsk {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
+  canAnswer?: boolean;
 }
 
 export interface AskGroups {
@@ -58,8 +65,9 @@ export function askCounts(asks: WebAsk[]): { waiting: number; accept: number } {
   return { waiting: g.waiting.length, accept: g.accept.length };
 }
 
-/** 卡片 / 横幅上给人看的名字：大总管不显示内部名 */
-export function agentLabel(name: string, t: (s: string) => string): string {
+/** 卡片 / 横幅上给人看的名字：大总管不显示内部名；人 / 系统发起的没有 agent，按类型写「指派」「审核」 */
+export function agentLabel(name: string | null, t: (s: string) => string, kind?: WebAsk["kind"]): string {
+  if (!name) return kind === "assigned" ? t("指派") : t("审核");
   return name === "master" ? t("大总管") : uiAgentName(name);
 }
 
@@ -103,7 +111,7 @@ export function askForReply(asks: WebAsk[], agent: string, rows: WebComponentRow
   const at = replyTs ? Date.parse(replyTs) : NaN;
   let best: WebAsk | null = null;
   for (const a of asks) {
-    if (a.source !== "reply" || !sameAgent(a.fromAgent, agent)) continue;
+    if (a.source !== "reply" || !a.fromAgent || !sameAgent(a.fromAgent, agent)) continue;
     if (canon(a.options.slice(0, rows.length)) !== want) continue;
     if (Number.isFinite(at) && Math.abs(a.createdAt - at) > 120_000) continue;
     if (!best || (Number.isFinite(at) && Math.abs(a.createdAt - at) < Math.abs(best.createdAt - at))) best = a;
@@ -157,6 +165,7 @@ export function spanText(ms: number, t: (s: string, p?: Record<string, string | 
 export function closedText(a: WebAsk, t: (s: string, p?: Record<string, string | number>) => string): string {
   if (a.state === "answered") return t("已处理");
   if (a.state === "expired") return t("已过期，按未批准处理");
+  if (a.state === "superseded") return t("已被新版本取代");
   return t("已撤销");
 }
 

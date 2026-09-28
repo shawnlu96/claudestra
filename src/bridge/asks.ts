@@ -1,6 +1,6 @@
 /**
  * 「待你处理」在 bridge 里的接线（docs 13 §4.3 §4.6）：owner 作答后生成答复消息投回发起方；人 / 系统发起的 ask（createAsk）作答只记账。
- * reply 建 ask 在 ask-reply.ts，过期在 ask-expire.ts，运行时卡住的镜像 ask（AUQ / 权限 / Codex 弹框）在 ask-runtime.ts；
+ * reply 建 ask 在 ask-reply.ts，过期在 ask-expire.ts（每分钟扫一次由 ask-entry.ts initAskWiring 起），运行时卡住的镜像 ask（AUQ / 权限 / Codex 弹框）在 ask-runtime.ts；
  * 各作答入口在 ask-entry.ts、local-api/asks.ts，谁能看 / 答在 lib/ask-access.ts。
  * 答复与过期通知一律不抢占（intent=response / notification），并打 meta.waitForIdle 标记：「目标主回合在忙就押后、Stop 后再投」
  * 由 T13a 接进 deliverToLocal；在那之前 response 照常直投（本来就不抢占）。库的读写在 lib/ledger-asks.ts。
@@ -11,9 +11,9 @@ import type { ServerWebSocket } from "bun";
 import { groupsLeft, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { answerAsk, getAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAskFull, patchAsk, type Ask, type AskAnswer, type AskAtt, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
+import { answerAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAskFull, patchAsk, type Ask, type AskAnswer, type AskAtt, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { activeTasksByAgent } from "../lib/ledger-read.js";
-import { LEDGER_PATH, LedgerError, openLedger } from "../lib/ledger-store.js";
+import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
@@ -249,21 +249,14 @@ export function setOnAssignedAnswer(fn: typeof onAssigned): void {
 
 /**
  * 作答（事务里写 answer + decision 事件）→ 投答复。多行 reply 逐行点时每行都投一次，ask 到所有组答完才结案。
- * 已结案 / 这组答过 / 过期抛 LedgerError("conflict")，调用方回「已处理」；刚在这里被判过期的，顺带给发起方补发「按未批准处理」。
+ * 已结案 / 这组答过 / 过期抛 LedgerError("conflict")，调用方回「已处理」；刚在这里被判过期的（current.expiredNow），
+ * 由调用方（ask-entry.ts commitNoticing）补发过期通知——过期那套在 ask-expire.ts，这里不反向依赖它。
  */
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   if (!deps) throw new Error("asks 未初始化");
-  let a: Ask;
-  try {
-    const labels = i.picks.map((p) => p.label);
-    const answer = { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final };
-    a = answerAsk(askDb(), i.ask.id, i.atts?.length ? { ...answer, atts: i.atts } : answer);
-  } catch (e) {
-    const cur = e instanceof LedgerError ? e.current : undefined;
-    const expired = cur?.expiredNow ? getAsk(askDb(), i.ask.id) : null;
-    if (expired) await (await import("./ask-expire.js")).noticeExpired(expired);
-    throw e;
-  }
+  const labels = i.picks.map((p) => p.label);
+  const answer = { choices: i.picks.map((p) => p.wire), labels, text: i.text, principal: i.principal, device: i.device, via: i.via, at: Date.now(), final: i.final };
+  const a = answerAsk(askDb(), i.ask.id, i.atts?.length ? { ...answer, atts: i.atts } : answer);
   ownerPresence.touch();
   publishAsk(a);
   if (!answersGoToAgent(a)) {
@@ -305,8 +298,6 @@ export function createAsk(input: CreateAskInput): Ask {
 
 export function initAsks(d: AsksDeps): void {
   deps = d;
-  const tick = () => void import("./ask-expire.js").then((m) => m.sweepExpired()).catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));
-  setInterval(tick, 60_000).unref?.();
 }
 
 /** 网页列表：开着的全给，已结案的只给最近 3 天；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */

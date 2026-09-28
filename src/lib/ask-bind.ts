@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import type { Ask, AskBind, AskKind } from "./ledger-asks.js";
 
 /** reply 里能声明的类型；inform = 知会，不建 ask、这条回复也不推送；assigned 只能由 createAsk 开 */
-export type ReplyAskKind = Exclude<AskKind, "assigned"> | "inform";
+type ReplyAskKind = Exclude<AskKind, "assigned"> | "inform";
 const REPLY_KINDS: readonly ReplyAskKind[] = ["decide", "authorize", "owner_action", "accept", "inform"];
 
 export interface ReplyAsk {

@@ -76,7 +76,8 @@ describe("ask-check 的判定", () => {
   test("CLI：ask-check <id> --hash / --params 都行，拒绝时 ok:false（退出码非 0）带理由；参数缺了、JSON 坏了报 invalid", async () => {
     const db = openLedger(":memory:");
     const a = pick(openAsk(db, draft(), Date.now()), "go", Date.now());
-    const run = (...args: string[]) => runLedger(args, { db, actor: "agent-x", projectIds: ["p"], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => Date.now() });
+    const deps = { db, actor: "agent-x", projectIds: ["p"], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => Date.now() };
+    const run = (...args: string[]) => runLedger(args, deps);
     expect(await run("ask-check", a.id, "--hash", h)).toMatchObject({ ok: true, approved: true });
     expect(await run("ask-check", a.id, "--params", JSON.stringify({ sha: "818a473", tag: "v2.32.0" }))).toMatchObject({ ok: true });
     expect(await run("ask-check", a.id, "--params", JSON.stringify({ tag: "v2.32.1", sha: "818a473" }))).toMatchObject({ ok: false, approved: false, error: expect.stringMatching(/hash mismatch/) });

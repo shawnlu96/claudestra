@@ -1,7 +1,9 @@
 /** 「待你处理」库的生命周期（lib/ledger-asks.ts）：建 → 答 → 再答被拒；到期；撤销；事件只追加；v1 库升级 */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, openAskFull, patchAsk, type AskAnswer, type NewAsk } from "../src/lib/ledger-asks.js";
+import {
+  answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, openAskFull, patchAsk, type AskAnswer, type NewAsk,
+} from "../src/lib/ledger-asks.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
@@ -205,7 +207,7 @@ describe("第二版：人 / 系统发起、指派、按 key 取代、去重", ()
     expect(listEvents(d, { project: "p" }).filter((e) => e.kind === "ask")).toHaveLength(1);
   });
 
-  test("按 key 取代：同一个 agent 同一个 key 再开，旧的开着的记 superseded（ask_cancel 带 supersededBy），新的 supersedes 指旧的；别的 key、别的 agent 不动；取代后旧按钮答不了", () => {
+  test("按 key 取代：同 agent 同 key 再开，旧的记 superseded（ask_cancel 带 supersededBy），新的 supersedes 指旧的；别的 key / agent 不动；旧按钮答不了", () => {
     const d = db();
     const old = openAsk(d, { ...base, askKey: "release" }, 1000);
     const other = openAsk(d, { ...base, askKey: "deploy" }, 1100);

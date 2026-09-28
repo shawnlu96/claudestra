@@ -6,8 +6,8 @@ import type { WebAsk } from "@/features/asks/asks-model";
 import { api } from "./client";
 import { followEventStream } from "./ledger";
 
-/** canAnswer：这个凭据能不能作答（owner 本人）；看得见、答不了的卡片上不出选项。老 bridge 不给就当能答 */
-export function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; canAnswer?: boolean; presence?: string; now: number }> {
+/** 每行带 canAnswer（这个凭据能不能答这一条）；guest 只拿得到指给自己的 */
+export function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; presence?: string; now: number }> {
   return api("/asks", { signal, timeoutMs: 10_000 });
 }
 

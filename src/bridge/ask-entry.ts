@@ -14,7 +14,8 @@ import { canAnswerAsk, canSeeAsk } from "../lib/ask-access.js";
 import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../lib/principals.js";
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
-import { answersGoToAgent, answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AsksDeps } from "./asks.js";
+import { noticeExpired, sweepExpired } from "./ask-expire.js";
+import { answersGoToAgent, answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
 export function picksFor(a: Ask, wires: string[]): WireMatch[] | null {
@@ -55,6 +56,17 @@ export function closedWords(a: Pick<Ask, "state" | "answer">): string {
 /** 409 的体：code 给程序判，error 是网页提示里直接显示的那句 */
 const closedBody = (a: Pick<Ask, "id" | "state" | "answer">) => ({ ok: false, code: "ask_closed", error: closedWords(a), askId: a.id, state: a.state, answer: a.answer });
 
+/** 作答；作答时才发现到点的（current.expiredNow：这一笔已记成 expired），先补发过期通知再照抛 */
+async function commitNoticing(i: AnswerInput): Promise<Ask> {
+  try {
+    return await commitAnswer(i);
+  } catch (e) {
+    const expired = e instanceof LedgerError && e.current?.expiredNow ? getAsk(askDb(), i.ask.id) : null;
+    if (expired) await noticeExpired(expired);
+    throw e;
+  }
+}
+
 /** 冲突（刚被别处答了 / 这一项答过了 / 到点过期）→ 409，其余错误照抛 */
 async function commitOr409(run: () => Promise<Ask>, fallback: Ask): Promise<Response> {
   try {
@@ -92,7 +104,7 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
   const blocked = await redirectForbidden(p, hit.ask);
   if (blocked) return blocked;
-  return commitOr409(() => commitAnswer({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
+  return commitOr409(() => commitNoticing({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
 }
 
 /**
@@ -115,7 +127,7 @@ export async function answerFromCard(project: string, id: string, body: { choice
   if (atts === null) return apiJson(400, { ok: false, error: "atts must be [{kind, ref, name?, mime?}] (≤ 20)" });
   const blocked = await redirectForbidden(p, a);
   if (blocked) return blocked;
-  return commitOr409(() => commitAnswer({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts }), a);
+  return commitOr409(() => commitNoticing({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true, atts }), a);
 }
 
 /** 运行时弹框镜像出来的（AUQ / 权限 / Codex）：按键走它们原有的端点，卡片端点不收 */
@@ -165,7 +177,7 @@ export async function answerFromDiscord(c: DiscordClick, wire: string): Promise<
   }
   try {
     const from = { kind: "user" as const, userId: c.user.id, channelId: c.channelId, username: c.user.username };
-    const out = await commitAnswer({ ask: a, picks, text: "", from, principal: `discord:${c.user.id}`, via: "discord" });
+    const out = await commitNoticing({ ask: a, picks, text: "", from, principal: `discord:${c.user.id}`, via: "discord" });
     c.typing?.();
     if (out.state === "open") await c.whisper(t(`已收到：${picks[0].label}（这条还有别的项没答）`, `Got it: ${picks[0].label} (other parts still open)`));
     else await c.edit(`${c.origContent}\n\n✅ ${t("已点击", "Clicked")}：**${(out.answer?.labels ?? [picks[0].label]).join("、")}**`);
@@ -217,9 +229,11 @@ export function discordAskEditor(discord: DiscordLike): (a: Ask, label: string) 
   };
 }
 
-/** bridge.ts 启动时的一行：接上投递 / 押后队列，Discord 模式下带上「改原消息为已处理」；撤掉上次留下的运行时 ask 并订阅 AUQ 事件 */
+/** bridge.ts 启动时的一行：接上投递 / 押后队列，Discord 模式下带上「改原消息为已处理」；撤掉上次留下的运行时 ask 并订阅 AUQ 事件；每分钟扫过期 */
 export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: DiscordLike | null }): void {
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
+  const sweep = () => void sweepExpired().catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));
+  setInterval(sweep, 60_000).unref?.();
 }

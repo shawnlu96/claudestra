@@ -20,7 +20,9 @@ describe("push-store", () => {
     db.prepare("INSERT INTO push_subscriptions (endpoint, keys, ua, created_at) VALUES (?, ?, ?, ?)").run("https://x/bad", "{not json", "", "");
     const rows = listPushSubscriptions(db);
     expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({ endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null, audience: "owner", principal: null, credential: null });
+    expect(rows.find((r) => r.endpoint.endsWith("/a"))).toEqual({
+      endpoint: "https://push.example/a", keys: { p256dh: "new", auth: "new" }, ua: "Mozilla Mac", vapidKey: null, audience: "owner", principal: null, credential: null,
+    });
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(true);
     expect(deletePushSubscription(db, "https://push.example/a")).toBe(false);
     expect(listPushSubscriptions(db)).toHaveLength(1);

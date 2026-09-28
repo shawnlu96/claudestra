@@ -137,21 +137,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     ]);
   }
 
-  /** 这个 guest 订阅是不是这条 ask 的指派对象（订阅时的凭据撤了就不算） */
-  function assigneeRow(s: PushSubscriptionRow, a: Pick<Ask, "assignee">): boolean {
-    const p = s.audience === "guest" && s.principal ? d.resolvePrincipal?.(s.principal, s.credential) : null;
-    return !!p && isAskAssignee(p, a);
-  }
-
-  /** owner 那一路也要看得见这条（部分 scope 的 owner 设备、不含 master 的设备）：老订阅没记 principal 的按 owner 全权算 */
-  function ownerRowSees(s: PushSubscriptionRow, a: Pick<Ask, "fromAgent" | "assignee">): boolean {
-    if (!s.principal) return true;
-    const p = d.resolvePrincipal?.(s.principal, s.credential);
-    return !!p && canSeeAsk(p, a);
-  }
-
-  /** 推过的 ask（进程内，键 = id:状态）：开出、过期各只发一次事件，bridge 重启后开着的也不会再发，所以不用落盘 */
-  const askPushed = new Set<string>();
+  const onAsk = askPusher(d, { webPushAll, sendRows, apnsAll, log, now });
   const unsubscribe = onAgentRead((e) => void onRead(e).catch((err) => log(`已读同步失败: ${(err as Error).message}`)));
 
   return {
@@ -185,24 +171,50 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
       const msg = { title: notificationBody(n.title), body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
       return sumOutcomes(await Promise.all([apnsAll(msg), webPushAll(msg)]));
     },
-    async onAsk(a, presence) {
-      const decision = askPushDecision(a, presence);
-      const assignee = askPushToAssignee(a);
-      const key = `${a.id}:${a.state}`;
-      if ((decision !== "push" && !assignee) || askPushed.has(key)) return decision;
-      askPushed.add(key);
-      // 指给 owner 自己的（local:owner:self）走 owner 那一路
-      const toOwner = decision === "push" || (assignee && a.assignee === humanAssignee(OWNER_PRINCIPAL_ID));
-      const guests = assignee ? listPushSubscriptions(d.db).filter((s) => assigneeRow(s, a)) : [];
-      if (!toOwner && !guests.length) return decision;
-      const m = askPushMessage(a);
-      const msg = { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, agent: bareAgent(a.fromAgent ?? ""), ts: now(), tag: m.tag };
-      // Web Push 多带 ask：已有窗口时 SW 直接叫页面打开抽屉定位这张卡（web/public/sw.js）；APNs（owner 的 App）靠 url 冷启动
-      const ownerWeb = toOwner ? webPushAll({ ...msg, ask: a.id }, (s) => ownerRowSees(s, a)) : NO_SEND;
-      await Promise.all([toOwner ? apnsAll(msg) : NO_SEND, ownerWeb, sendRows(guests, { ...msg, ask: a.id })]);
-      log(`待你处理已推送 ${a.id}（${a.fromAgent ?? a.assignee}，owner=${toOwner} guest=${guests.length}）`);
-      return decision;
-    },
+    onAsk,
     stop: unsubscribe,
+  };
+}
+
+interface PushIo {
+  webPushAll: (payload: Record<string, unknown>, filter?: (s: PushSubscriptionRow) => boolean) => Promise<NoticeOutcome>;
+  sendRows: (subs: PushSubscriptionRow[], payload: Record<string, unknown>) => Promise<NoticeOutcome>;
+  apnsAll: (msg: ApnsMessage) => Promise<NoticeOutcome>;
+  log: (msg: string) => void;
+  now: () => number;
+}
+
+/** 「待你处理」那一路（Dispatcher.onAsk）：owner 的订阅按 askPushDecision、指派对象的 guest 订阅按 askPushToAssignee；收件人都得看得见这条 */
+function askPusher(d: DispatcherDeps, io: PushIo): Dispatcher["onAsk"] {
+  /** 推过的 ask（进程内，键 = id:状态）：开出、过期各只发一次事件，bridge 重启后开着的也不会再发，所以不用落盘 */
+  const pushed = new Set<string>();
+  /** 这个 guest 订阅是不是这条 ask 的指派对象（订阅时的凭据撤了就不算） */
+  const assigneeRow = (s: PushSubscriptionRow, a: Pick<Ask, "assignee">): boolean => {
+    const p = s.audience === "guest" && s.principal ? d.resolvePrincipal?.(s.principal, s.credential) : null;
+    return !!p && isAskAssignee(p, a);
+  };
+  /** owner 那一路也要看得见这条（部分 scope 的 owner 设备、不含 master 的设备）：老订阅没记 principal 的按 owner 全权算 */
+  const ownerRowSees = (s: PushSubscriptionRow, a: Pick<Ask, "fromAgent" | "assignee">): boolean => {
+    if (!s.principal) return true;
+    const p = d.resolvePrincipal?.(s.principal, s.credential);
+    return !!p && canSeeAsk(p, a);
+  };
+  return async (a, presence) => {
+    const decision = askPushDecision(a, presence);
+    const assignee = askPushToAssignee(a);
+    const key = `${a.id}:${a.state}`;
+    if ((decision !== "push" && !assignee) || pushed.has(key)) return decision;
+    pushed.add(key);
+    // 指给 owner 自己的（local:owner:self）走 owner 那一路
+    const toOwner = decision === "push" || (assignee && a.assignee === humanAssignee(OWNER_PRINCIPAL_ID));
+    const guests = assignee ? listPushSubscriptions(d.db).filter((s) => assigneeRow(s, a)) : [];
+    if (!toOwner && !guests.length) return decision;
+    const m = askPushMessage(a);
+    const msg = { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, agent: bareAgent(a.fromAgent ?? ""), ts: io.now(), tag: m.tag };
+    // Web Push 多带 ask：已有窗口时 SW 直接叫页面打开抽屉定位这张卡（web/public/sw.js）；APNs（owner 的 App）靠 url 冷启动
+    const ownerWeb = toOwner ? io.webPushAll({ ...msg, ask: a.id }, (s) => ownerRowSees(s, a)) : NO_SEND;
+    await Promise.all([toOwner ? io.apnsAll(msg) : NO_SEND, ownerWeb, io.sendRows(guests, { ...msg, ask: a.id })]);
+    io.log(`待你处理已推送 ${a.id}（${a.fromAgent ?? a.assignee}，owner=${toOwner} guest=${guests.length}）`);
+    return decision;
   };
 }

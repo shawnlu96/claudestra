@@ -4,6 +4,9 @@
  * 凭据：owner 设备（不含 / 含 master）、assignee 本人的 guest、别的 guest、部分 scope 的 owner 设备、web-ui token、老的「*」Bearer、peer。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { answerFromCard } from "../src/bridge/ask-entry.js";
 import { publishAsk, setAsksForTest } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
@@ -16,7 +19,7 @@ import { openAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { Principal } from "../src/lib/principals.js";
 import { savePushSubscription, type PushSubscriber } from "../src/lib/push-store.js";
-import { openWebState } from "../src/lib/web-state.js";
+import { closeWebState, openWebState } from "../src/lib/web-state.js";
 import { at, guest, LEGACY_STAR_TOKEN, owner, ownerWithMaster, PEER } from "./asks-test-kit.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -109,7 +112,9 @@ describe("四处同一口径", () => {
   });
 
   test("推送：每条 ask 推到的订阅，订阅者都看得见它（owner 那一路按订阅时的凭据收窄；guest 只收指给自己的）", async () => {
-    const db = openWebState(":memory:");
+    // 自己的临时文件：":memory:" 是进程内共享的缓存连接，别的测试文件也在用
+    const wsPath = join(mkdtempSync(join(tmpdir(), "ask-access-push-")), "web-state.sqlite");
+    const db = openWebState(wsPath);
     const sent: { endpoint: string }[] = [];
     const sender = {
       config: () => ({ webPush: { vapidPublicKey: "K" }, apns: false, mode: "direct" }),
@@ -139,7 +144,7 @@ describe("四处同一口径", () => {
       if (k === "agent") expect(names.sort()).toEqual(["owner"]);
     }
     d.stop();
-    db.close();
+    closeWebState(wsPath);
   });
 
   test("卡片作答：答得了的才 202，看不见的 404、看得见答不了的 403", async () => {

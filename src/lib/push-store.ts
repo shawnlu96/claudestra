@@ -18,7 +18,7 @@ export interface PushSubscriptionRow extends WebPushSubscription {
   credential: string | null;
 }
 
-export type PushAudience = "owner" | "guest";
+type PushAudience = "owner" | "guest";
 export interface PushSubscriber {
   audience: PushAudience;
   principal: string;
