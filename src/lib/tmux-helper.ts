@@ -214,10 +214,10 @@ export function tmuxInterrupt(target: string): void {
  */
 export const ESC_DOUBLE_TAP_MS = 1200;
 const lastEscapeAt = new Map<string, number>();
-export async function tmuxSendEscape(target: string): Promise<void> {
+export async function tmuxSendEscape(target: string, opts: { strict?: boolean } = {}): Promise<void> {
   const wait = ESC_DOUBLE_TAP_MS - (Date.now() - (lastEscapeAt.get(target) ?? 0));
   if (wait > 0) await Bun.sleep(wait);
-  await tmuxRaw(["send-keys", "-t", target, "Escape"]);
+  await (opts.strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "Escape"]); // strict：打断键发不出去要报给按按钮的人
   lastEscapeAt.set(target, Date.now());
 }
 

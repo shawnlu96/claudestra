@@ -34,10 +34,26 @@ Side-effect classes (`lib/side-effects.ts`, rule table in the test): `none` (rea
 
 | | Claude Code | Codex | Pi |
 |---|---|---|---|
-| Human message while busy | C-c, then deliver | Esc, then deliver (typed into the TUI, below) | steered into the running turn, no interrupt |
-| Stop word / button | C-c | Esc (only when busy) | C-c |
+| Human message while busy | Esc, then deliver (not C-c, below) | Esc, then deliver (typed into the TUI, below) | steered into the running turn, no interrupt |
+| Stop word / button | Esc | Esc (only when busy) | C-c |
 | Interrupt signal | none (bridge marks done itself) | `Interrupt` hook ~0.5 s after Esc | extension reports `agent_settled` → treated as `Stop` |
+| Background subagents | survive (Esc; C-c on an idle main turn would kill them) | — | — |
 | Transcript | cut tool_use gets an `is_error` result "The user doesn't want to proceed … STOP …", then `[Request interrupted by user for tool use]` | `<turn_aborted>` developer message; the aborted command **may keep running** (a `ping` finished in the background after Esc, 2026-09-28) | not verified (below) |
+
+### Claude Code: Esc, never C-c (background subagents)
+
+Verified on Claude Code 2.1.283 in the sandbox (2026-09-28), a background subagent running `ping` while the main turn ran a foreground `ping`:
+
+| Key | Main turn busy | Main turn idle, only background agents running |
+|---|---|---|
+| C-c | main turn interrupted, background agent keeps running | **"All background agents stopped"** — every background agent is killed |
+| Esc | main turn interrupted, background agent keeps running | nothing happens, background agent keeps running |
+
+The source agrees: the interrupt handler returns early while a query is running; only when nothing is running does C-c fall through to "stop all background agents", while Esc is bound with `suppressBackgroundAgentKill: true`. Both leave the same transcript markers (the cut tool_use gets the "STOP … wait for the user" error result, then `[Request interrupted by user for tool use]`).
+
+The busy check can say "busy" while the main turn is idle (the event status stays `thinking` when a turn ends without a Stop hook, e.g. interrupted from the terminal; production on 2026-09-28 22:16:44 preempted an idle PM and killed its background reviewer). With C-c that misjudgment killed background work; with Esc it is a no-op. So Claude Code's `interruptKeys` is `["Escape"]` for preemption, stop words and the stop buttons alike. Every interrupt Esc goes through `tmuxSendEscape` (≥1200 ms between Escs per window, shared with the watchers), and the gate spaces any two keys ≥1.5 s, so a double-Esc Rewind can't be triggered. Graceful exit (`restart` / `kill`) still uses C-c: stopping everything is what exiting means.
+
+Limit: a stop button or stop word no longer stops an agent's background subagents; only its main turn. Stopping those needs Claude Code's own kill-agents chord in the terminal.
 
 ### Codex: the queue stalls after an interrupt
 
@@ -57,4 +73,4 @@ Inferred from source: Stop words and the stop button send C-c (`PI_CONTROL.inter
 
 ## Sandbox results (2026-09-28, Claude Code)
 
-Long foreground command cut by an interjection → headline delivered → agent answered, inspected the half-written file and reran it on its own (cut `resumed`, no hint). Interjection that asked for an answer only → `Stop` → resume hint 2 s later listing the cut command and the unreplied request → agent checked and reran. `停。` → C-c → `⏹` headline → agent confirmed stop, no hint. API stop → `manual` cut, stopped.
+Long foreground command cut by an interjection → headline delivered → agent answered, inspected the half-written file and reran it on its own (cut `resumed`, no hint). Interjection that asked for an answer only → `Stop` → resume hint 2 s later listing the cut command and the unreplied request → agent checked and reran. `停。` → interrupt (then C-c; Esc since the switch) → `⏹` headline → agent confirmed stop, no hint. API stop → `manual` cut, stopped.

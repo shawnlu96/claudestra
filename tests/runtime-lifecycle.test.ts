@@ -283,9 +283,9 @@ describe("manageable 适配器契约", () => {
 });
 
 describe("control 声明", () => {
-  test("CC：C-c 打断、人类消息抢占、看 pane、会话内补 /model", () => {
+  test("CC：Esc 打断（C-c 在主回合空闲时会停掉后台 agent）、人类消息抢占、看 pane、会话内补 /model", () => {
     expect(controlFor("claude-code")).toEqual({
-      interruptKeys: ["C-c"],
+      interruptKeys: ["Escape"],
       preemptOnHumanMessage: true,
       idleSource: "pane",
       modelEnforcement: "in-session",
@@ -314,7 +314,8 @@ describe("control 声明", () => {
   });
 
   test("打断回执里的按键名给人看", () => {
-    expect(describeKeys(controlFor(undefined).interruptKeys)).toBe("Ctrl+C");
+    expect(describeKeys(controlFor(undefined).interruptKeys)).toBe("Esc");
+    expect(describeKeys(controlFor("pi").interruptKeys)).toBe("Ctrl+C");
     expect(describeKeys(controlFor("codex").interruptKeys)).toBe("Esc");
   });
 });

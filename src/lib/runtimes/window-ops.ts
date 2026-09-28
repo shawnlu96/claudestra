@@ -67,9 +67,8 @@ export async function interruptWindow(target: string, runtime: string | undefine
   return interruptVia(
     {
       capture: (lines) => tmuxCapture(target, lines),
-      sendKey: async (key) => {
-        await tmuxRawStrict(["send-keys", "-t", target, key]);
-      },
+      // Esc 也走双击护栏：和 watcher / 面板清场的 Esc 挨得太近会打开 CC 的 Rewind
+      sendKey: (key) => (key === "Escape" ? tmuxSendEscape(target, { strict: true }) : tmuxRawStrict(["send-keys", "-t", target, key]).then(() => undefined)),
     },
     runtime,
   );

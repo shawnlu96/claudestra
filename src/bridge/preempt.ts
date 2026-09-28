@@ -76,7 +76,7 @@ export async function manualInterrupt(
 /** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
 export async function interruptAgentByName(name: string, channelId: string): Promise<{ keys: readonly string[]; deduped?: true }> {
   const isMaster = name === "master" || name === "0";
-  const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就当 CC 发 C-c：人要停，宁可发
+  const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就按 CC 的打断键发：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;
   return manualInterrupt(channelId, isMaster ? `${MASTER_SESSION}:0` : windowTarget(name), runtime, isMaster ? "master" : name, "api");
 }
