@@ -274,6 +274,11 @@ describe("第 1 轮审查补的：match 替换语义 / 宽模式抢执行者 / �
     expect(e.projects).toEqual(["orch"]);
     expect(e.names).toEqual([]);
   });
+  test("match 写成字符串 → 报警告、按没写处理（沿用内置的匹配条件）", () => {
+    const r = resolvePolicies([{ id: "executor", match: "agent-task-*" }]);
+    expect(r.warnings.some((w) => w.policy === "executor" && w.text.includes("match 必须是对象"))).toBe(true);
+    expect(r.policies.find((p) => p.id === "executor")!.names).toEqual(["agent-task-*"]);
+  });
   test("写成空 match（names: []）→ 报警告并说明内置策略也随之失效", () => {
     const r = resolvePolicies([{ id: "executor", match: { names: [] } }]);
     expect(r.policies.some((p) => p.id === "executor")).toBe(false);

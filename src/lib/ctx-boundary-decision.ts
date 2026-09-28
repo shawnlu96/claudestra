@@ -104,7 +104,7 @@ export type BoundaryVerdict = { fire: true; kind: "idle" | "hard-cap" } | { fire
 export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   under: "没过线",
   compacting: "正在压缩",
-  "retry-wait": "30 分钟内注入过，还没见效",
+  "retry-wait": "冷却中（注入过还没见效，30 分钟；或刚发送失败，5 分钟）",
   "pane-unknown": "读不到画面",
   "quota-wall": "撞了额度墙又没开 low-priority",
   menu: "画面上有选择菜单",

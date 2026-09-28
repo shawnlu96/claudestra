@@ -70,7 +70,13 @@ Step 5 also covers "low-priority allowance exhausted" (`exhausted`). A failed se
 
 ### Transition until `lp-state` lands
 
-Until T35's `paneQuotaState` is merged, the live pane reader is a placeholder that reports "menu + draft" (never type). It gates **only named policies**. The global path and the Discord "save + compact" button run ungated, exactly as the old stats-dashboard code did (450K / idle hours / 93% emergency line). `CtxBoundaryDeps.gateGlobal` and `injectCompact({gate})` switch the global path and the button onto the pane checks in the increment that brings `lp-state`.
+Until T35's `lp-state` is merged, the live pane reader is a placeholder that reports "menu + draft" (never type). It gates **only named policies**. The global path and the Discord "save + compact" button skip the pane checks, like the old stats-dashboard code (450K / idle hours / 93% emergency line); both read the same switch (`CtxBoundaryDeps.gateGlobal`, exposed as `gatesGlobal()`), so the `lp-state` increment flips one line. An unreadable pane (window gone — capture uses `tmuxRawStrict`, an empty capture counts as unreadable) is never typed into, gated or not: tmux `send-keys` to a missing window does not fail, so it would only report a fake "sent".
+
+Where the global path is still not identical to the old code:
+
+- **Scope**: the old code ran only in Discord mode and only for agents with a `channelId`. The runner covers every active Claude Code agent, including agents without a channel and web-only installs, which get automatic compaction for the first time (defaults 400K / 3 h unless configured).
+- **Executor rule**: a personal agent whose working directory is a linked worktree or a git submodule (both have a `.git` file) is treated as an executor and gets `/compact` with the keep list instead of `/save-compact`.
+- **Idle**: both the new and the old condition must hold, so it fires no more often than before (review r2 compared 3024 cases: every difference was "old fires, new waits").
 
 Pane facts (`wall`, `lp`, `exhausted`, `menu`, `compacting`, `draft`) come from `paneQuotaState(plain, escaped)` in `src/lib/lp-state.ts` (T35). The pane is captured twice, plain and with `-e`: in the plain capture an empty input box still shows CC's grey suggestion (`❯ Try "write a test for <filepath>"`), which only the `ESC[2m` in the escaped capture tells apart from a real draft (`❯ owner half typed msg`). A multi-line draft continues on indented lines inside the box. Samples: ledger `reviews/T36-samples/`.
 

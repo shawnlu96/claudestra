@@ -252,4 +252,10 @@ describe("injectCompact（T35 批量动作的入口）", () => {
     expect(await injectCompact(tgt("car"), { action: "save-compact", gate: false }, h.deps)).toEqual({ status: "executed", line: "/save-compact" });
     expect(await injectCompact(tgt("agent-task-t1", true), { action: "save-compact", gate: false }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
   });
+
+  test("读不到画面（窗口不在）：gate:false 也不发，不假报「已开始」", async () => {
+    const h = harness([], { panes: { "master:gone": null } });
+    expect(await injectCompact(tgt("gone"), { action: "save-compact", gate: false }, h.deps)).toMatchObject({ status: "skipped", reason: "pane-unknown" });
+    expect(h.sent.length).toBe(0);
+  });
 });

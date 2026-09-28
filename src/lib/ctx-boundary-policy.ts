@@ -55,6 +55,7 @@ const strList = (v: unknown): string[] | null =>
 /** 按 id 合并出一条策略；返回 null = 这条不生效（原因已写进 warnings） */
 function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null, warn: (t: string) => void): CtxPolicy | null {
   // 写了 match 就整个替换内置的匹配条件（不和继承来的 names / projects 取「且」）；没写才沿用
+  if (e.match !== undefined && !isObj(e.match)) warn(`match 必须是对象（{"names": [...]} / {"projects": [...]}），收到 ${JSON.stringify(e.match)}，按没写处理`);
   const m = isObj(e.match) ? e.match : null;
   const projects = m ? strList(m.projects) ?? [] : base?.projects ?? [];
   const names = m ? strList(m.names) ?? [] : base?.names ?? [];

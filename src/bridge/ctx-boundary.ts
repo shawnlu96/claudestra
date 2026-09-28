@@ -10,7 +10,7 @@ import { agentRuntime, readRegistryAgents, type RegistryAgent } from "../lib/reg
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "../lib/session-source.js";
 import { sessionTailInfo } from "../lib/session-tail.js";
 import { readSessionCtx } from "../lib/usage-cache.js";
-import { tmuxRaw, tmuxSendLine, windowKey, windowTarget } from "../lib/tmux-helper.js";
+import { tmuxRawStrict, tmuxSendLine, windowKey, windowTarget } from "../lib/tmux-helper.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
 import { compactCommand, effectiveAction, isExecutor, matchPolicy, resolvePolicies, type CompactAction, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
@@ -153,10 +153,9 @@ export async function injectCompact(
   deps: Pick<CtxBoundaryDeps, "capture" | "paneState" | "send" | "now"> = liveDeps,
 ): Promise<InjectResult> {
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
-  if (opts.gate !== false) {
-    const reason: InjectSkip | null = pane ? paneGate(deps.paneState(pane.plain, pane.esc)) : "pane-unknown";
-    if (reason) return { status: "skipped", reason, text: SKIP_REASON_TEXT[reason] };
-  }
+  // 读不到画面（多半是窗口不在）不管 gate 都不发：tmux 往不存在的窗口 send-keys 不报错，发了也只会假报「已开始」
+  const reason: InjectSkip | null = !pane ? "pane-unknown" : opts.gate === false ? null : paneGate(deps.paneState(pane.plain, pane.esc));
+  if (reason || !pane) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
   const line = compactCommand(effectiveAction(t.executor, opts.action), opts.keep ?? null);
   try {
     await deps.send(t.target, line);
@@ -164,7 +163,7 @@ export async function injectCompact(
     return { status: "failed", error: (e as Error).message };
   }
   noteCompactInjected(t.target, deps.now());
-  return { status: pane && paneLooksWorking(pane.plain) ? "queued" : "executed", line };
+  return { status: paneLooksWorking(pane.plain) ? "queued" : "executed", line };
 }
 
 /** 新口径：最后一条对话满 idleMs 且画面不忙。全局路径另加旧口径（mtime 满 idleMs），两者都满足才算闲 */
@@ -236,6 +235,11 @@ export function ctxBoundaryViewFor(
   return boundaryView(boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow, executor }, p), ctx, p.warnings);
 }
 
+/** 全局路径和 Discord 手动按钮现在过不过画面判定（lp-state 增量只改 liveDeps.gateGlobal 一处） */
+export function gatesGlobal(): boolean {
+  return liveDeps.gateGlobal;
+}
+
 /** 当前配置的问题（越界的 ccWindow、写错的字段…），面板顶上列出来 */
 export function ctxBoundaryWarnings(): PolicyWarning[] {
   return currentPolicies(liveDeps).warnings;
@@ -302,12 +306,13 @@ async function tailOf(r: RegistryAgent) {
   return { info: await sessionTailInfo(path), mtime };
 }
 
+/** 用 strict：tmuxRaw 会吞掉非零退出，窗口不在时拿到空串，后面就会对着不存在的窗口报「已发送」 */
 async function capturePane(t: string): Promise<PaneCapture | null> {
   try {
-    const [plain, esc] = await Promise.all([tmuxRaw(["capture-pane", "-t", t, "-p"]), tmuxRaw(["capture-pane", "-t", t, "-p", "-e"])]);
-    return { plain, esc };
+    const [plain, esc] = await Promise.all([tmuxRawStrict(["capture-pane", "-t", t, "-p"]), tmuxRawStrict(["capture-pane", "-t", t, "-p", "-e"])]);
+    return plain.trim() ? { plain, esc } : null;
   } catch {
-    return null; // 窗口不在 / tmux 出错：决策表按「读不到画面」跳过，不盲敲
+    return null; // 窗口不在 / tmux 出错：按「读不到画面」跳过，不盲敲
   }
 }
 
