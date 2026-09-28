@@ -2,15 +2,14 @@
  * 多选表单 ↔ 输入框的接线（T10）。纯变换在 lib/chat/form-compose.ts；这里只管：
  * - 输入框文字的广播：composer 是非受控 textarea（见 composer.tsx 开头 #185 的说明），
  *   表单要读它、改它，就经这个小总线，不把 composer 的 state 往上提。
- * - 从 store 的消息里收集仍可作答的表单、算标题、发送前转换并标已答。
+ * - 把 store 里仍可作答的表单（lib/chat/form-open.ts 收集）接给组件、发送前转换并标已答。
  */
 import { useEffect, useMemo, useSyncExternalStore, type RefObject } from "react";
-import type { ChatMessage } from "./type";
 import type { ChatStore } from "./chat-store";
 import { useChatStore, useChatStoreApi } from "./chat-store";
 import { createEditQueue, type EditQueue } from "./ime-queue";
-import { deriveClicksFromLegacy, replyRowKey } from "@/lib/chat/reply-clicks";
-import { composeFormSend, formTitles, type MultiRow, type SyncForm } from "@/lib/chat/form-compose";
+import { composeFormSend, type SyncForm } from "@/lib/chat/form-compose";
+import { openForms, openFormsSig } from "@/lib/chat/form-open";
 import { restoreFormReply } from "@/lib/chat/form-restore";
 import { postClientLog } from "@/lib/client-log";
 
@@ -81,34 +80,11 @@ export function logLocalTick(rowId: string, reason: string): void {
   postClientLog(`[form] 本地勾选 id=${id} reason=${reason}`);
 }
 
-// ── 表单收集 ──
-function multiRows(m: ChatMessage): { row: MultiRow; ri: number }[] {
-  return (m.replyComponents ?? []).flatMap((row, ri) => (row.type === "multiselect" ? [{ row, ri }] : []));
-}
-
-/** 仍可作答的多选表单（带标题），新消息在前；标题按视图里全部多选表单算（placeholder 重名带 id） */
-export function openForms(messages: ChatMessage[]): SyncForm[] {
-  const titles = formTitles(messages.flatMap((m) => multiRows(m).map(({ row }) => row)));
-  const out: SyncForm[] = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    const clicks = m.replyClicks ?? deriveClicksFromLegacy(m.replyClickedId, m.replyComponents);
-    for (const { row, ri } of multiRows(m)) {
-      const rowKey = replyRowKey(row, ri);
-      if (clicks[rowKey] == null) out.push({ row, title: titles.get(row.id) ?? row.id, messageId: m.id, rowKey });
-    }
-  }
-  return out;
-}
-
+// ── 表单收集（纯逻辑在 lib/chat/form-open.ts） ──
 /** 组件用：选择器只返回签名字符串（表单集合与已答没变就不重算、不重渲） */
 export function useOpenForms(): SyncForm[] {
   const store = useChatStoreApi();
-  const sig = useChatStore((s) =>
-    s.state.messages
-      .flatMap((m) => multiRows(m).map(({ row, ri }) => `${m.id}\u0001${row.id}\u0001${m.replyClicks?.[replyRowKey(row, ri)] ?? ""}`))
-      .join("\u0000"),
-  );
+  const sig = useChatStore((s) => openFormsSig(s.state.messages));
   // eslint-disable-next-line react-hooks/exhaustive-deps -- sig 就是 messages 里表单相关部分的摘要
   return useMemo(() => openForms(store.state.messages), [sig, store]);
 }

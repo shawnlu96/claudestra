@@ -5,6 +5,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { composeFormSend, lineScan, syncBlock, syncable, toggleFormValue, type MultiRow, type SyncForm } from "@/lib/chat/form-compose";
+import { openForms, openFormsSig } from "@/lib/chat/form-open";
+import type { ChatMessage } from "@/features/chat/type";
 
 const live: MultiRow = {
   type: "multiselect",
@@ -59,5 +61,19 @@ describe("线上同形状表单走完同步链路", () => {
     let text = "";
     for (const o of live.options) text = toggleFormValue(text, F, [F], o.value);
     expect(lineScan(text, [F]).owners.get(live.id)?.over).toBe(false);
+  });
+});
+
+describe("openFormsSig：已答（含旧格式 replyClickedId）变了签名就变", () => {
+  const msg = (extra: Partial<ChatMessage> = {}): ChatMessage => ({ id: "h115266", role: "assistant", content: "", replyComponents: [live], ...extra });
+  test("旧格式消息被答：签名变、openForms 不再列它", () => {
+    const before = [msg()];
+    const after = [msg({ replyClickedId: "d_pm_2010_form:recall_fix" })];
+    expect(openForms(before)).toHaveLength(1);
+    expect(openForms(after)).toHaveLength(0);
+    expect(openFormsSig(after)).not.toBe(openFormsSig(before));
+  });
+  test("新格式照旧：replyClicks 变了签名变", () => {
+    expect(openFormsSig([msg({ replyClicks: { "m:d_pm_2010_form": "d_pm_2010_form:recall_fix" } })])).not.toBe(openFormsSig([msg()]));
   });
 });
