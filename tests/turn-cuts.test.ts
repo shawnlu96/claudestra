@@ -239,6 +239,12 @@ describe("打断抬头不进历史正文（lib/turn-cuts.ts withInterruptNote）
   test("Discord 用户没有来源头：只有 ⏹ 抬头也剥掉", () => {
     expect(unwrapChannelMessage(ch("[⏹ 这是一条「停」指令：已替你打断。]\n\n停"))?.text).toBe("停");
   });
+  test("Discord 用户的消息（channel 属性里没有 api / is_agent）：⏹ 抬头照样剥，普通以 [ 开头的正文不动", () => {
+    const discord = (body: string) => `<channel source="claudestra" chat_id="123" message_id="m2" user="owner" user_id="u1">\n${body}\n</channel>`;
+    expect(unwrapChannelMessage(discord("[⏹ 这是一条「停」指令：已替你打断。]\n\n停"))?.text).toBe("停");
+    expect(unwrapChannelMessage(discord("[⚡ 这条消息打断了你：当时在跑 x。]\n\n先别部署"))?.text).toBe("先别部署");
+    expect(unwrapChannelMessage(discord("[TODO] 看一下\n\n正文"))?.text).toBe("[TODO] 看一下\n\n正文");
+  });
 });
 
 describe("waitForIdle 的固定语义（T11a 的答复复用）", () => {

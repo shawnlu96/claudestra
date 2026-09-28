@@ -27,7 +27,7 @@ export interface EscGuardDeps {
 export function createEscGuard(deps: EscGuardDeps) {
   const lastDone = new Map<string, number>();
   return async function sendEscape(target: string, opts: { strict?: boolean } = {}): Promise<void> {
-    const key = (await deps.windowId(target).catch(() => null)) ?? windowKey(target);
+    const key = (await deps.windowId(target).catch(() => null)) ?? windowKey(target); // 解析不出窗口 id（窗口不在、tmux 出错）就退回按写法归一的 windowKey
     const lock = await deps.lock(key);
     try {
       const wait = Math.max(lastDone.get(key) ?? 0, deps.readShared(key)) + ESC_DOUBLE_TAP_MS - deps.now();

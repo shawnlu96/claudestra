@@ -19,6 +19,7 @@
  */
 
 import type { ServerWebSocket } from "bun";
+import { isOwnerSource, neutralizeDelegateMarker } from "../lib/delegate-marker.js";
 
 // ============================================================
 // Endpoint：消息发送方 / 接收方的统一地址
@@ -75,6 +76,8 @@ export interface ApiUserEndpoint {
   name: string;
   /** v2.11+ HTTP peer 标记(principal.peer 透传):入站注入头渲染成 peer 请求 */
   peer?: string;
+  /** 发信凭据是 owner 本人（lib/principals.ts isOwnerPrincipal，入口处按 principal 算好）：@ 委托标记只认它 */
+  owner?: true;
 }
 
 export type Endpoint = LocalEndpoint | UserEndpoint | BridgeEndpoint | ApiUserEndpoint;
@@ -328,4 +331,9 @@ export function newMessageId(prefix: string): string {
 export function isHumanRequest(env: Envelope): boolean {
   if (env.meta.waitForIdle) return false;
   return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
+}
+
+/** 注入本地 agent 的正文：非 owner 来源里的 `[📨` 中和掉——@ 委托标记只有 owner 本人能发（lib/delegate-marker.ts） */
+export function inboundBodyForLocal(env: Pick<Envelope, "from" | "content">): string {
+  return isOwnerSource(env.from) ? env.content : neutralizeDelegateMarker(env.content);
 }

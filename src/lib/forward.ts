@@ -4,6 +4,8 @@
  * 与 send_to_agent 不同：那是「请同事帮忙」，同事的回答推回给我、我再转述；转交后回答直接到用户。
  * 这里是纯规则（tests/forward.test.ts），投递在 bridge/forward.ts。
  */
+import { neutralizeDelegateMarker } from "./delegate-marker.js";
+
 const FORWARD_TOOL = "forward_to_agent";
 
 /** Claude Code 侧是 MCP 名 mcp__<MCP_NAME>__forward_to_agent，Pi 侧是裸名 */
@@ -16,9 +18,22 @@ export function forwardNotice(target: string): string {
   return `↪ 已转给 [[{.agent}${target.replace(/^agent-/, "")}]]`;
 }
 
+const REASON_MAX = 120;
+
+/**
+ * 转交理由由 agent 写，却放在原发送者（可能是 owner）的信封里投给接手方：中和委托标记、压成一行、限长，
+ * 免得它借 owner 的身份带进换行和 [📨（lib/delegate-marker.ts；T19 审查 r2 P2-C）
+ */
+function safeReason(reason: string): string {
+  const one = neutralizeDelegateMarker(reason).replace(/\s+/g, " ").trim();
+  const chars = Array.from(one);
+  return chars.length > REASON_MAX ? `${chars.slice(0, REASON_MAX).join("")}…` : one;
+}
+
 /** 投给接手方时加在原话前面的说明 */
 export function forwardHeader(fromAgent: string, reason: string): string {
-  const why = reason.trim() ? `（${reason.trim()}）` : "";
+  const r = safeReason(reason);
+  const why = r ? `（${r}）` : "";
   return `[↪ 由 ${fromAgent} 转来：用户原本发给了 ${fromAgent}，它判断该由你处理${why}。` +
     `直接 reply 回答用户即可，不用回 ${fromAgent}；这条已经转过一次，不能再转。]`;
 }
