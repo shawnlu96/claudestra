@@ -317,7 +317,7 @@ export function AgentRow({
             <span className="badge badge-outline badge-warning badge-xs shrink-0 align-middle">{t("草稿")}</span>
           )}
           {a.updateHint && !hintDismissed && (
-            <span className="shrink-0 pl-1 text-[11px] text-info/80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
+            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80" title={t(a.updateHint.kind === "pi-update" ? "Pi 可更新" : "重启后生效新版本")}>⬆</span>
           )}
           {/* busy 时不显示过期时间(owner 2026-07-16:「明明在工作却显示 48 分钟前」
               ——lastActivityTs 读 jsonl 最后一条对话,CC 回合内攒内存不落盘,长回合
@@ -330,9 +330,9 @@ export function AgentRow({
             </span>
           )}
           {compacting ? (
-            <span className="shrink-0 pl-1 text-[11px] text-info/80">{t("压缩中")}</span>
+            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("压缩中")}</span>
           ) : (a.busy || busyLive) ? (
-            <span className="shrink-0 pl-1 text-[11px] text-warning/80">{t("工作中")}</span>
+            <span className="shrink-0 pl-1 text-[11px] text-warning-soft-80">{t("工作中")}</span>
           ) : (
             lastAt && (
               <span className="shrink-0 pl-1 font-mono text-[11px] tabular-nums text-base-content/35">
@@ -370,7 +370,7 @@ function RepoTag({ a }: { a: AgentSession }) {
     <>
       {showRepo && <span className="min-w-0 max-w-[40%] shrink-[4] truncate font-mono text-[11px] text-base-content/40" title={repo}>{repo}</span>}
       {!!a.queued && (
-        <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-info/80" title={t("{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）", { n: a.queued })}>
+        <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-info-soft-80" title={t("{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）", { n: a.queued })}>
           <InboxIcon />
           {a.queued}
         </span>

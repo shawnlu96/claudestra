@@ -27,6 +27,8 @@
     --color-info: "#3abff8";
     --color-success: "#00A96D";
     --color-warning: "#fbbd23";
+    /* text-*-soft-N 的透明度下限：深色 0% = 照写的 N% 透明度（与 text-warning/N 一致） */
+    --status-soft-floor: 0%;
     --radius-field: 0.5rem;
     --depth: 0;
 }
@@ -52,8 +54,25 @@
     --color-warning-content: "#FFFFFF";
     --color-error: "#B91C1C";
     --color-error-content: "#FFFFFF";
+    /* 浅色 100%：次要状态字一律满色，叠透明度在浅底上会跌破 4.5:1 */
+    --status-soft-floor: 100%;
     --radius-field: 0.5rem;
     --depth: 0;
+}
+
+/* 次要状态字：text-warning-soft-80 在深色下等同 text-warning-soft-80，浅色下取满色（--status-soft-floor，见上面两个主题块）。
+   状态文字（出错信息、「工作中」、删除按钮…）想压淡一档时用它，不要直接写 text-warning-soft-80——浅色下对比度不够。 */
+@utility text-info-soft-* {
+    color: color-mix(in oklab, var(--color-info) max(var(--status-soft-floor), calc(--value(integer) * 1%)), transparent);
+}
+@utility text-success-soft-* {
+    color: color-mix(in oklab, var(--color-success) max(var(--status-soft-floor), calc(--value(integer) * 1%)), transparent);
+}
+@utility text-warning-soft-* {
+    color: color-mix(in oklab, var(--color-warning) max(var(--status-soft-floor), calc(--value(integer) * 1%)), transparent);
+}
+@utility text-error-soft-* {
+    color: color-mix(in oklab, var(--color-error) max(var(--status-soft-floor), calc(--value(integer) * 1%)), transparent);
 }
 
 /* 安全区 padding 工具类（类名对齐 claude-os 的 pt-safe-top/pb-safe-bottom；

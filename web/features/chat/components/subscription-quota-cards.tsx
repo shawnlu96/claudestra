@@ -24,7 +24,7 @@ function SourceRow({ e, onRetry, retrying }: { e: EntryView; onRetry: (p: "claud
   return (
     <div className="flex items-start gap-2 text-[10.5px] text-base-content/40">
       <span className="min-w-0 flex-1">
-        <span className={warn ? "text-warning/80" : undefined}>
+        <span className={warn ? "text-warning-soft-80" : undefined}>
           {warn && <WarnIcon />} {t("数据")}：{t(layerLabel(e))}
         </span>
         {typeof observedAt === "number" && ` · ${fmtAge(observedAt)}`}
@@ -68,7 +68,7 @@ function ResetCredits({ c, claude }: { c: NonNullable<EntryView["resetCredits"]>
           {c.expiries.map((x, i) => (
             <div key={i}>{expiryParts(x).map((p) => t(p.key, p.params)).join(" · ")}</div>
           ))}
-          {c.stale && <div className="text-warning/80">{t("明细偏旧")}</div>}
+          {c.stale && <div className="text-warning-soft-80">{t("明细偏旧")}</div>}
         </div>
       )}
       {/* CC 界面原意：重置卡是补满额度，不挪动周重置日 */}
