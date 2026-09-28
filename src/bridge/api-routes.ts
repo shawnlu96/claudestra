@@ -46,7 +46,7 @@ import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0Mcp
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
-import { collectSessions } from "./sessions-inventory.js";
+import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -532,29 +532,19 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。
-  // scope 规则：全权 token（"*"）看全部（含野生会话）；受限 token 只看 scope
-  // 内 agent 的正式会话及其分身。
+  // scope 规则见 sessions-inventory.ts visibleSessions：只有全权凭据看得到野生会话。
   if (path === "/sessions" && req.method === "GET") {
     const list = await collectSessions();
     if (list === null) return apiJson(503, { ok: false, error: "claude agents --json unavailable" });
-    const full = principal.agents.includes("*");
-    const visible = full
-      ? list
-      : list.filter((s) => {
-          const owner = s.registeredAgent ?? s.doppelgangerOf;
-          return owner ? agentInScope(principal, owner) : false;
-        });
-    return apiJson(200, { ok: true, sessions: visible });
+    return apiJson(200, { ok: true, sessions: visibleSessions(list, principal) });
   }
 
   // GET /api/v1/remote-access —— 网页「手机访问」面板：Tailscale 状态、每个入口（可达 / 证书剩余天数）、
   // 建议。只读：绝不在这里配 serve 或改任何机器配置（那只在 setup 的交互终端里、经用户同意做）。
-  // 全权 token：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。peer token 即便是 `*`
-  // 也拒：那是另一台 Claudestra，本机的网络盘点不该给它。
+  // 全权凭据：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。guest、peer 即便 scope 是 `*`
+  // 也拒（isFullScope 不认它们）：本机的网络盘点不该给别人。
   if (path === "/remote-access" && req.method === "GET") {
-    if (!principal.agents.includes("*") || principal.peer) {
-      return apiJson(403, { ok: false, error: "remote-access requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("remote-access requires a full-scope token");
     const { remoteAccessSnapshot } = await import("../lib/tailscale.js");
     const { readFrontendPort } = await import("../lib/doctor-remote.js");
     try {
@@ -582,9 +572,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // NeutralSessionInfo）；这个是 manager 扫盘得到的**会话历史清单**（含未纳管的
   // pi-web / 终端手敲的 Pi 会话），供 web 端「会话列表」用。仅全权 token。
   if (path === "/session-list" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "session-list requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("session-list requires a full-scope token");
     const r = await runManager("sessions");
     if (!r?.ok) return apiJson(500, { ok: false, error: r?.error || "manager sessions failed" });
     // 标出哪些已经纳管（有 registry 条目）—— Web 端据此决定「收编」还是「打开对话」
@@ -603,7 +591,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // v2.24+ GET /api/v1/runtimes —— 可建 agent 的运行时 + 本机能不能用（见 lib/runtimes/catalog.ts）
   if (path === "/runtimes" && req.method === "GET") {
-    if (!principal.agents.includes("*")) return apiJson(403, { ok: false, error: "runtimes requires a full-scope token" });
+    if (!isFullScope(principal)) return forbidden("runtimes requires a full-scope token");
     return apiJson(200, { ok: true, runtimes: await runtimeCatalog() });
   }
 
@@ -1448,6 +1436,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (clearMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(clearMatch[1]);
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isFullScope(principal)) return forbidden("clear requires a full-scope token"); // 清掉的是 owner 的上下文
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const isMasterClear = agent.name === "master";
@@ -1771,9 +1760,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // 两种 runtime 都支持（Pi 走 resume --runtime pi，会话 id 是 open-or-create）。
   // 耗时（起 tmux 窗口 + 等就绪）→ 202 后台执行，结果进事件流。
   if (path === "/agents/resume" && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "resume requires a full-scope token" });
-    }
+    // 能 takeover（SIGTERM owner 正在跑的 CC 进程）和 fork：scope 为 "*" 的 guest / peer 不算全权
+    if (!isFullScope(principal)) return forbidden("resume requires a full-scope token");
     let body: any;
     try {
       body = await req.json();
