@@ -56,6 +56,16 @@ describe("publishWebRelease", () => {
     expect(readFileSync(join(currentLink(dir), "index.html"), "utf8")).toBe(html("v2"));
     expect(listReleases(dir)).toEqual([b.id!, a.id!]);
   });
+  test("同一毫秒连发两次：第二个版本顺延 1ms，不撞名、不失败", async () => {
+    build("v1");
+    const a = await publishWebRelease(out, { dir, now: at(0) });
+    build("v2");
+    const b = await publishWebRelease(out, { dir, now: at(0) });
+    expect(b.ok).toBe(true);
+    expect(b.id).not.toBe(a.id);
+    expect(listReleases(dir)).toEqual([b.id!, a.id!]);
+    expect(readFileSync(join(currentLink(dir), "index.html"), "utf8")).toBe(html("v2"));
+  });
   test("没有 index.html 不发布，current 原样不动", async () => {
     build("v1");
     const a = await publishWebRelease(out, { dir, now: at(0) });
