@@ -12,6 +12,13 @@ import { createKeyedSerial } from "./keyed-serial.js";
 import { windowKey } from "./tmux-target.js";
 
 export const ESC_DOUBLE_TAP_MS = 1200;
+/** 等窗口锁的上限：比锁的过期时间（5 秒）长，持锁进程崩了也等得到回收 */
+export const ESC_LOCK_WAIT_MS = 12_000;
+/**
+ * bridge 各 HTTP 入口的连接空闲上限（秒）。打断请求最坏要等打断间隔（≤2.75 秒）+ 窗口锁 ESC_LOCK_WAIT_MS + 锁内 1.2 秒才有结果；
+ * Bun 默认 10 秒会先把连接切断，客户端只拿到空响应，看不到「Esc 没发」。网页打断的超时（web/lib/api/chat.ts）要在两者之间。
+ */
+export const HTTP_IDLE_TIMEOUT_S = 30;
 
 export interface EscGuardDeps {
   /** 目标 → tmux 的 #{window_id}（如 "@3"）；窗口不在 / 出错 = null */

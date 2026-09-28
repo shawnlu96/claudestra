@@ -75,8 +75,8 @@ export async function manualInterrupt(
   if (r.deduped) return r; // 刚按过一次停：那一次已经记过、收过尾
   // 空闲也记：owner 按了停，续做提醒和 Autopilot 都该停下
   if (by.owner) turnCuts.record({ channelId, agent, runtime, cause: "manual", byName: by.name, tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
-  else console.log(`⏹ ${by.name ?? "非 owner"} 按停止打断了 ${agent}：不记成 owner 的「停」`);
-  if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger } });
+  else console.log(`⏹ ${by.name ?? "非 owner"} 按停止${r.keys.length ? "打断了" : "（空闲，没发键）"} ${agent}：只打断这一回合，不记成 owner 的「停」、不挂起 Autopilot`);
+  if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger, owner: String(by.owner), ...(by.name ? { by: by.name } : {}) } }); // 记下实际按的人
   stopTyping(channelId);
   clearSafetyTimer(channelId);
   // 空闲时也发 done：前端误判忙时借此解锁

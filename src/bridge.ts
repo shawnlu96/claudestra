@@ -176,7 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
-import { noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort } from "./bridge/interrupt-gate.js";
+import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -3479,14 +3479,14 @@ const server = Bun.serve({
   // 反代 → 回环上的 peer 专用入口（bridge/peer-ingress.ts），不必对外开放这里。
   hostname: process.env.BRIDGE_BIND || "127.0.0.1",
   fetch: bridgeFetch,
+  idleTimeout: HTTP_IDLE_TIMEOUT_S, // Bun 默认 10 秒：打断请求要等 Esc 窗口锁（最长 12 秒 + 间隔），会先被切断、客户端拿到空响应
   // D5-11 兜底：fetch 里逃逸的异常（/api/v1 以外的路由、终端 API 等）回 JSON，
   // 不再是 Bun 未设 NODE_ENV 时的 67KB HTML 调试页。/api/v1 自己已在 handleApiRequest 里接住。
   error(e) {
     return apiErrorResponse(e);
   },
   websocket: {
-    // v2.2.0+: 抬高 idleTimeout（Bun 默认 120s）。配合 channel-server 每 25s 的
-    // keepalive ping，空闲 agent 的连接不会被关 → 不再 flap。255 是 Bun 上限。
+    // ws 的 idleTimeout 抬到 Bun 上限 255（默认 120s），配合 channel-server 每 25s 的 keepalive ping，空闲 agent 的连接不会被关、不再 flap
     idleTimeout: 255,
     open(ws) {
       console.log("🔌 新的 channel-server 连接");

@@ -9,6 +9,7 @@ import { interruptWindow } from "../lib/runtimes/window-ops.js";
 import { emitEvent } from "./event-bus.js";
 import { extensionAbort, setAbortCapable } from "./pi-abort.js";
 export { onAbortAck, setExtensionSocket, stopAfterAbort } from "./pi-abort.js"; // bridge.ts 只从这里接打断相关的线
+export { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
 import { turnCuts } from "./turn-cuts.js";
 

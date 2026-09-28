@@ -4,6 +4,8 @@
  * 对外 / 不可逆的名单宁可列宽——把不可逆的判成「可以重跑」，代价是重复下单、重复发版。
  */
 
+import { classifyCloud, classifyPublish } from "./side-effects-cli.js";
+
 export type SideEffect = "none" | "idempotent" | "check_first" | "external";
 
 export interface SideEffectVerdict {
@@ -36,7 +38,9 @@ const LOCAL_BOOKKEEPING = new Set(["TaskCreate", "TaskUpdate", "TodoWrite"]);
 const FILE_WRITES = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 /** MCP 工具名（最后一段按 _ 切词）：有写动词就不是只读；没有写动词、有读动词才算只读 */
 const MCP_WRITE_WORD =
-  /^(write|create|update|delete|remove|send|post|put|set|add|click|type|fill|upload|drop|drag|edit|run|exec|execute|merge|publish|press|select|navigate|close|batch|apply|submit|approve|cancel)$/i;
+  new RegExp("^(write|create|update|delete|remove|send|post|put|set|add|click|type|fill|upload|drop|drag|edit|run|exec|execute|merge|publish|press|select|navigate"
+    + "|close|batch|apply|submit|approve|cancel|insert|upsert|invoke|trigger|deploy|start|stop|kill|terminate|restart|reset|revoke|grant|move|rename|archive"
+    + "|restore|install|enable|disable|purge|flush|truncate|in)$", "i"); // in：check_in、log_in
 const MCP_READ_WORD = /^(read|get|list|search|query|fetch|find|check|view|describe|snapshot|screenshot|status|info|messages)$/i;
 function mcpReadOnly(short: string): boolean {
   const words = short.split(/[_-]/);
@@ -48,6 +52,8 @@ const MCP_EXTERNAL_SERVER = /slack|github|gitlab|gmail|mail|linear|jira|notion|d
 const MCP_MONEY_WORD = /^(place|order|buy|sell|trade|refund|charge|pay|payment|transfer|withdraw)$/i;
 /** 数据库类服务：query / execute 可能是写语句，不能按「query = 读」放行 */
 const MCP_DB_SERVER = /db|sql|postgres|mysql|sqlite|mongo|redis|supabase|database|bigquery|snowflake|clickhouse|neon|prisma/i;
+/** 服务名不在上表也认（Cloudflare 的 d1_database_query、turso / redshift 的 query）：工具名本身像在跑语句 */
+const MCP_DB_TOOL = /sql|query|cypher|statement|database|(^|[_-])d1([_-]|$)/i;
 
 /**
  * 分类一次工具调用。command：Bash 的命令原文（jsonl-watcher 的 detail 里「描述 ─── 命令」取后半，见 bashCommandOf）；
@@ -66,7 +72,7 @@ export function classifyTool(name: string, opts: { command?: string; target?: st
   if (short === "reply") return v("check_first", "先看回复发出去没有，别重复发");
   const server = name.startsWith("mcp__") ? name.split("__")[1] ?? "" : "";
   if (short.split(/[_-]/).some((w) => MCP_MONEY_WORD.test(w))) return v("external", "交易 / 支付可能已经生效，先去对方那边查订单状态，别重复下");
-  if (MCP_DB_SERVER.test(server) && /query|exec|sql|migrat/i.test(short)) return v("check_first", "语句可能已经执行（写语句收不回），先查数据现状");
+  if (MCP_DB_SERVER.test(server) && /query|exec|sql|migrat/i.test(short) || MCP_DB_TOOL.test(short)) return v("check_first", "语句可能已经执行（写语句收不回），先查数据现状");
   if (mcpReadOnly(short)) return v("none");
   if (MCP_EXTERNAL_SERVER.test(server)) return v("external", "对外操作可能已经生效（消息已发、PR 已开），先去对方那边核对，别重复做");
   return v("check_first");
@@ -92,9 +98,10 @@ export function classifyBash(command: string, extraExternal: readonly string[] =
   const inner = substitutions(cmd);
   if (inner === null || (inner.length && depth >= 3)) out = v("check_first", "命令里套了子命令，先核对它做到了哪一步");
   else for (const c of inner) out = heavier(out, classifyBash(c, extraExternal, depth + 1));
-  // 单个 & 是后台接着跑下一条（2>&1、&> 里的 & 不算分隔）
-  for (const seg of cmd.split(/\s*(?:&&|\|\||;|\||\n|&(?![>\d]))\s*/)) {
-    if (seg.trim()) out = heavier(out, classifySegment(seg));
+  // 单个 & 是后台接着跑下一条（2>&1、&> 里的 & 不算分隔）；分隔符留在奇数位，管道右侧的段要知道自己读 stdin
+  const parts = cmd.split(/\s*(&&|\|\||;|\||\n|&(?![>\d]))\s*/);
+  for (let k = 0; k < parts.length; k += 2) {
+    if (parts[k].trim()) out = heavier(out, classifySegment(parts[k], parts[k - 1] === "|"));
   }
   return out;
 }
@@ -121,16 +128,42 @@ function substitutions(cmd: string): string[] | null {
   return out;
 }
 
-/** 去掉前导的 VAR=x、sudo / time / nohup / env / timeout N 这类外壳，返回真正的命令词 */
+/** 命令外壳，值是它哪些选项带值（sudo -u deploy、nice -n 10）：连外壳带选项一起去掉 */
+const WRAPPERS: Record<string, RegExp> = {
+  sudo: /^-[ugCDhpUrtT]$/, nice: /^-n$/, stdbuf: /^-[ioe]$/, caffeinate: /^-[tw]$/, env: /^-u$/, time: /^$/, nohup: /^$/, command: /^$/, exec: /^-a$/,
+};
+/** shell 结构的前缀（for … do X、if … then X、{ X; }、( X )、! X）：真正的命令在后面 */
+const SHELL_KEYWORDS = new Set(["do", "then", "else", "elif", "!", "{", "("]);
+
+/** 去掉前导的 VAR=x、sudo / time / nohup / env / nice / timeout N 这类外壳和 shell 结构词，返回真正的命令词 */
 function tokensOf(seg: string): string[] {
   const toks = seg.trim().split(/\s+/).map((t) => t.replace(/['"]/g, "")); // -X"POST" 与 -XPOST 一样
+  if (/^[({]./.test(toks[0] ?? "")) toks[0] = toks[0].replace(/^[({]+/, ""); // (cd x、{curl
   while (toks.length) {
     const t = toks[0];
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || ["sudo", "time", "nohup", "env", "command", "exec"].includes(t)) toks.shift();
-    else if (t === "timeout" || t === "gtimeout") toks.splice(0, 2);
+    const valued = Object.hasOwn(WRAPPERS, t) ? WRAPPERS[t] : undefined;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || SHELL_KEYWORDS.has(t)) toks.shift();
+    else if (valued) {
+      toks.shift();
+      while (toks[0]?.startsWith("-")) toks.splice(0, valued.test(toks[0]) ? 2 : 1);
+    } else if (t === "timeout" || t === "gtimeout") toks.splice(0, 2);
     else break;
   }
   return toks;
+}
+
+/** 把别的命令当参数跑的（bash -c '…'、xargs …、watch …）：取出里面那条命令，没有就 undefined */
+function innerCommand(t: string[]): string | undefined {
+  const [c0 = ""] = t;
+  if (/^(bash|sh|zsh|dash)$/.test(c0)) {
+    const k = t.findIndex((x, i) => i > 0 && /^-[a-z]*c$/.test(x));
+    return k > 0 ? t.slice(k + 1).join(" ") : undefined;
+  }
+  if (c0 !== "xargs" && c0 !== "watch") return undefined;
+  const valued = c0 === "xargs" ? /^-[InPLdEsa]$/ : /^-n$/;
+  let k = 1;
+  while (k < t.length && t[k].startsWith("-")) k += valued.test(t[k]) ? 2 : 1;
+  return t.slice(k).join(" ");
 }
 
 const READ_CMDS = new Set([
@@ -141,28 +174,25 @@ const READ_CMDS = new Set([
 const GIT_READ = new Set(["status", "log", "diff", "show", "rev-parse", "blame", "ls-files", "ls-remote", "grep", "describe", "shortlog", "merge-base", "cat-file"]);
 const MANAGER_READ = /^(list|sessions|doctor|version|cost|status|help|--help|.*-list|.*-test)$/;
 
-function classifySegment(seg: string): SideEffectVerdict {
+function classifySegment(seg: string, piped = false): SideEffectVerdict {
   const t = tokensOf(seg);
-  const [c0 = "", c1 = "", c2 = ""] = t;
   const has = (re: RegExp) => t.slice(1).some((x) => re.test(x));
-  if (!c0) return v("none");
-  const base = classifyCommand(t, has, seg);
+  if (!t[0]) return v("none");
+  const inner = innerCommand(t);
+  const base = inner !== undefined ? classifyBash(inner) : classifyCommand(t, has, seg, piped);
   // 重定向写文件（> / >>，不含 2>&1、>/dev/null）：至少先看文件现状
   return /(^|[^0-9&>])>>?\s*(?!&|\/dev\/null)\S/.test(seg) ? heavier(base, v("check_first", "命令会写文件，先看文件现状")) : base;
 }
 
-function classifyCommand(t: string[], has: (re: RegExp) => boolean, seg: string): SideEffectVerdict {
+function classifyCommand(t: string[], has: (re: RegExp) => boolean, seg: string, piped: boolean): SideEffectVerdict {
   const [c0 = "", c1 = "", c2 = ""] = t;
   if (c0 === "git") return classifyGit(t);
   if (c0 === "gh") return classifyGh(t);
   if (["curl", "wget", "http", "https", "xh"].includes(c0)) {
-    return httpMutates(t, seg) ? v("external", "请求可能已经发出，先查对方状态，别重复提交") : v("none");
+    return httpMutates(t, seg, piped) ? v("external", "请求可能已经发出，先查对方状态，别重复提交") : v("none");
   }
-  const cloud = classifyCloud(t);
+  const cloud = classifyCloud(t) ?? classifyPublish(t);
   if (cloud) return cloud;
-  if (["npm", "bun", "yarn", "pnpm", "cargo", "docker"].includes(c0) && ["publish", "push"].includes(c1)) {
-    return v("external", "可能已经发布了，先查线上版本");
-  }
   if (c0 === "ssh" || c0 === "scp" || c0 === "rsync") return v("check_first", "远端可能已经改了一部分，先上去看现状");
   if ((c0 === "bun" || c0 === "node") && /manager\.ts$/.test(c1)) return classifyManager(c2, t.slice(3));
   if (c0 === "claudestra") return classifyManager(c1, t.slice(2));
@@ -185,8 +215,8 @@ function classifyCommand(t: string[], has: (re: RegExp) => boolean, seg: string)
 
 const WRITE_METHOD = /^(POST|PUT|PATCH|DELETE)$/i;
 
-/** curl / wget / httpie（http、https、xh）会不会改对方的东西：显式写方法，或带请求体（httpie 从 stdin 读到请求体就默认 POST） */
-function httpMutates(t: string[], seg: string): boolean {
+/** curl / wget / httpie（http、https、xh）会不会改对方的东西：显式写方法，或带请求体（httpie 从 stdin 读到请求体就默认 POST，管道右侧也算） */
+function httpMutates(t: string[], seg: string, piped: boolean): boolean {
   const args = t.slice(1);
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
@@ -197,44 +227,22 @@ function httpMutates(t: string[], seg: string): boolean {
     if (/^-[a-zA-Z]*[dFT]/.test(a) && !a.startsWith("--")) return true;
     if (/^(--data.*|--form.*|--json|--upload-file|--post-data|--post-file|--body-data|--body-file)(=.*)?$/.test(a)) return true;
   }
-  // httpie：方法是第一个非选项参数，或带 key=value / key:=json 数据项
+  // httpie：任何一个位置参数是写方法（带值选项 -a user:pass、--timeout 5 会占掉第一个位置），或带 key=value / key:=json 数据项、--raw 请求体
   if (["http", "https", "xh"].includes(t[0] ?? "")) {
-    if (/(^|[^<0-9])<(?!\()|<<</.test(seg)) return true;
+    if (piped && !args.includes("--ignore-stdin") || /(^|[^<0-9])<(?!\()|<<</.test(seg)) return true;
+    if (args.some((a) => /^(--raw|--multipart)(=|$)/.test(a))) return true;
     const pos = args.filter((a) => !a.startsWith("-") && !a.startsWith("<"));
-    return WRITE_METHOD.test(pos[0] ?? "") || pos.slice(1).some((a) => /^[\w.-]+:?=/.test(a));
+    return pos.some((a) => WRITE_METHOD.test(a)) || pos.slice(1).some((a) => /^[\w.-]+(:=|=(?!=))/.test(a)); // q==x 是查询参数
   }
   return false;
 }
 
-/** 云 / 集群 / 基础设施命令：只放行查看类（白名单），其余一律对外（生产资源，收不回；动词列不全，漏一个就是把删库判成只读） */
-function classifyCloud(t: string[]): SideEffectVerdict | null {
-  const [c0 = "", c1 = "", c2 = ""] = t;
-  const verbs = t.slice(1).filter((a) => !a.startsWith("-"));
-  const ext = (hint: string) => v("external", hint);
-  if (c0 === "kubectl") {
-    if (/^(get|describe|logs|top|explain|version|config|api-resources|auth)$/.test(c1)) return v("none");
-    return ext("集群资源可能已经改了，先 kubectl get 核对现状");
-  }
-  if (c0 === "helm") return /^(list|ls|status|get|show|history|search|template|lint)$/.test(c1) ? v("none") : ext("release 可能已经变了，先 helm status 核对");
-  if (c0 === "terraform" || c0 === "tofu") {
-    if (/^(plan|show|output|validate|version|providers|graph|console)$/.test(c1) || /^(state|workspace)$/.test(c1) && /^(list|show)$/.test(c2)) return v("none");
-    if (c1 === "init" || c1 === "fmt") return c1 === "fmt" && !t.includes("-check") ? v("check_first", "fmt 会改文件，先看文件现状") : v("idempotent");
-    return ext("基础设施可能已经改了一半，先 plan 看现状，别直接重跑");
-  }
-  if (c0 === "aws" || c0 === "gcloud" || c0 === "az") {
-    const read = /^(describe|list|get|ls|show|help|version|wait)(-|$)/;
-    // aws 的操作名固定在第二个词（aws <服务> <操作>）；gcloud / az 的命令组长短不一，有读动词、又没有明显的写动词才算只读
-    const ok = c0 === "aws" ? read.test(verbs[1] ?? "") || verbs[0] === "sts" && /^get-/.test(verbs[1] ?? "")
-      : verbs.some((w) => read.test(w)) && !verbs.some((w) => /^(delete|remove|create|update|set|deploy|resize|start|stop|restart|reset|deallocate|scale|apply|import|add)(-|$)/.test(w));
-    return ok ? v("none") : ext("云资源可能已经改了，先 describe / list 核对，别直接重跑");
-  }
-  return null;
-}
-
 function classifyGit(all: string[]): SideEffectVerdict {
-  // git -C <dir> / -c k=v 这类全局参数不影响分类
+  // git -C <dir> / -c k=v / --git-dir=… / --no-pager 这类全局参数不影响分类
   const t = [...all];
-  while (t.length > 1 && /^-[Cc]$/.test(t[1])) t.splice(1, 2);
+  while (t.length > 1 && /^(-[Cc]|--git-dir|--work-tree|--namespace|-[CcP]\S+|--[\w-]+=.*|--no-pager|--paginate|--bare|--no-replace-objects)$/.test(t[1])) {
+    t.splice(1, /^(-[Cc]|--git-dir|--work-tree|--namespace)$/.test(t[1]) ? 2 : 1);
+  }
   const sub = t[1] ?? "";
   const rest = t.slice(2);
   if (GIT_READ.has(sub)) return v("none");
@@ -267,7 +275,9 @@ function classifyGit(all: string[]): SideEffectVerdict {
   return v("check_first", `先 git status 看 ${sub || "git"} 做到了哪一步`);
 }
 
-function classifyGh(t: string[]): SideEffectVerdict {
+function classifyGh(all: string[]): SideEffectVerdict {
+  const t = [...all]; // gh -R o/r pr create：全局的 -R / --repo 先跳过
+  while (t.length > 1 && /^(-R|--repo)(=.*)?$/.test(t[1])) t.splice(1, t[1].includes("=") ? 1 : 2);
   const [, noun = "", verb = ""] = t;
   if (/^(view|list|diff|checks|status|watch)$/.test(verb) || noun === "search" || noun === "auth" && verb === "status") return v("none");
   if (noun === "api") {
@@ -277,6 +287,8 @@ function classifyGh(t: string[]): SideEffectVerdict {
   }
   if (noun === "workflow" && verb === "run" || noun === "repo" && /^(create|delete|rename|archive|edit|fork)$/.test(verb)) return v("external", "对外操作可能已经生效，先去 GitHub 上核对");
   if (noun === "release") return v("external", "先 gh release view <tag> 核对，要不要重发由 owner 定");
+  if (/^(secret|variable)$/.test(noun) && /^(set|delete|remove)$/.test(verb) || noun === "gist" && /^(create|edit|delete)$/.test(verb)
+    || noun === "run" && /^(cancel|rerun|delete)$/.test(verb)) return v("external", "对外操作可能已经生效，先去 GitHub 上核对");
   if (noun === "pr" && verb === "merge") return v("check_first", "先 gh pr view 看是否已经合并");
   if (noun === "pr" && verb === "checkout") return v("idempotent");
   if ((noun === "pr" || noun === "issue") && /^(create|comment|review|close|reopen|edit)$/.test(verb)) return v("external", "别人可能已经看到了，先 gh pr/issue view 核对，别重复发");
