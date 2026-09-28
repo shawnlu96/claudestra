@@ -4,12 +4,12 @@
  * 非 macOS / SVG → 返回 null，调用方退回原图。同时最多跑 MAX_JOBS 个 sips、最多排 MAX_QUEUE 个，
  * 排满返回 "busy"（调用方回 503），免得有人批量请求把 CPU 和内存打满。
  * 转不了的（像素超过 MAX_PIXELS、整次转换超时、sips 报错）返回 "failed"（调用方回占位）并记住，同一个文件不再重复触发：
- * 一张几百 KB 的 2 万 × 2 万 PNG 解码峰值就要 400MB（T22 对抗审查 adv1 P2-1）。PDF 一律不转：sips -g 读 PDF 尺寸就要完整解析，
+ * 一张几百 KB 的 2 万 × 2 万 PNG 解码峰值就要 400MB（T22 对抗审查 adv1 P2-1）。PDF（按文件头认，不看扩展名）一律不转：sips -g 读 PDF 尺寸就要完整解析，
  * 复杂页面单这一步就好几秒，一次转换能占住转换槽 20 秒（adv2 P2-d）。
  * 缓存文件名 = 媒体 id + 定位串哈希：同一个 id 以后解析到别的文件（索引重建）不会拿到旧图；总大小超过上限按最久未访问清理。
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync, utimesSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, renameSync, statSync, unlinkSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 
 export type Variant = "thumb" | "display";
@@ -28,8 +28,21 @@ const MAX_CACHE_BYTES = 512 * 1024 * 1024;
 const PRUNE_EVERY = 40;
 /** sips 认不了 / 转了没意义的：SVG 原样出（带 CSP），GIF 动图缩略图会丢动画但网格里可以接受 */
 const SKIP_EXT = new Set(["svg"]);
-/** 不做缩略图、直接回占位的 */
-const NO_THUMB_EXT = new Set(["pdf"]);
+/** PDF 按文件头认（阅读器在前 1KB 里找 %PDF 就认，改名成 .png 照样被 sips 当 PDF 解析）：不做缩略图、直接回占位 */
+const PDF_SNIFF_BYTES = 1024;
+
+function looksLikePdf(src: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(src, "r");
+    const buf = Buffer.alloc(PDF_SNIFF_BYTES);
+    return buf.subarray(0, readSync(fd, buf, 0, PDF_SNIFF_BYTES, 0)).includes("%PDF");
+  } catch {
+    return false; // 读不了：交给后面的 sips，它同样读不了 → failed
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 let running = 0;
 const waiters: (() => void)[] = [];
@@ -130,7 +143,7 @@ export function clearThumbs(dir: string): void {
   pruneThumbs(dir, 0);
 }
 
-/** id 的缩略图 / 显示版路径（没有就现转）；不适用（非 macOS / SVG）返回 null，PDF 和转换失败过的返回 "failed"，排队满了返回 "busy" */
+/** id 的缩略图 / 显示版路径（没有就现转）；不适用（非 macOS / SVG）返回 null，PDF（按文件头）和转换失败过的返回 "failed"，排队满了返回 "busy" */
 export async function convertedImage(
   cacheDir: string,
   id: string,
@@ -140,7 +153,7 @@ export async function convertedImage(
   name: string,
 ): Promise<string | null | "busy" | "failed"> {
   if (!/^[0-9a-f]{24}$/.test(id)) return null;
-  if (NO_THUMB_EXT.has(extOf(name))) return "failed";
+  if (looksLikePdf(src)) return "failed"; // 放在平台判断前：非 macOS 也回占位，不把 PDF 原样当缩略图
   if (!canConvert(name)) return null;
   const out = join(cacheDir, `${id}-${createHash("sha256").update(loc).digest("hex").slice(0, 12)}.${variant}.jpg`);
   if (existsSync(out)) {

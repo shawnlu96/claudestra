@@ -50,9 +50,19 @@ describe("缩略图缓存", () => {
     clearThumbs(d);
     expect(readdirSync(d)).toEqual(["keep.txt"]);
   });
-  test("PDF 不做缩略图：直接回占位（failed），不跑 sips（adv2 P2-d）", async () => {
-    expect(await convertedImage(join(root, "thumbs"), "0".repeat(24), "i:x.pdf", "thumb", "/nonexistent/x.pdf", "x.pdf")).toBe("failed");
-    expect(await convertedImage(join(root, "thumbs"), "0".repeat(24), "i:x.PDF", "display", "/nonexistent/x.PDF", "x.PDF")).toBe("failed");
+  test("PDF 按文件头认、不做缩略图：改名成 .png 的也直接回占位（failed），不跑 sips（adv2 P2-d / adv3 P2-①）", async () => {
+    // 能被 sips 正常转换的最小 PDF：不拦的话改名成 .png 会真的交给 sips 并转出图来
+    const MINI_PDF = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n" +
+      "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 50 50]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+    const d = join(root, "pdfs");
+    mkdirSync(d);
+    const cases: [string, string][] = [["x.pdf", "%PDF-1.7\n"], ["disguised.png", MINI_PDF], ["junk-first.jpg", `${"x".repeat(500)}%PDF-1.5`]];
+    for (const [name, body] of cases) {
+      writeFileSync(join(d, name), body);
+      for (const v of ["thumb", "display"] as const) {
+        expect(await convertedImage(join(root, "thumbs"), "0".repeat(24), `i:${name}`, v, join(d, name), name)).toBe("failed");
+      }
+    }
   });
 });
 
