@@ -47,3 +47,18 @@ export function createOpenSettle(onSettled: (bytes: number, ms: number) => void,
     },
   };
 }
+
+export type TermStatus = "connecting" | "connected" | "exited" | "error";
+
+/**
+ * 揭开只把「连接中」改成「已连接」。计时期间 PTY 退出（exit 帧）/ 流出错已经把状态改走，
+ * 这时再写 connected 会让遮罩、「重新连接」按钮和自愈重连（依赖 status 是 exited/error）一起消失，终端变成死画面。
+ */
+export const revealStatus = (s: TermStatus): TermStatus => (s === "connecting" ? "connected" : s);
+
+/** 流正常收尾：已连接，或 open 帧已到、还在等揭开，都算结束——否则停在「连接中」转圈，既无重连按钮也不触发自愈 */
+export const streamEndStatus = (opened: boolean) => (s: TermStatus): TermStatus =>
+  s === "connected" || (opened && s === "connecting") ? "exited" : s;
+
+/** 流读取出错（断网 / 看门狗 abort）：连接中或已连接 → error；已是 exited 的保持 */
+export const streamErrorStatus = (s: TermStatus): TermStatus => (s === "connected" || s === "connecting" ? "error" : s);

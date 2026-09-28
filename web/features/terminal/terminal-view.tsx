@@ -7,7 +7,7 @@ import { ControlBar } from "./control-bar";
 import { useT } from "@/lib/i18n";
 import { terminalInput, terminalResize, terminalStream } from "@/lib/api/terminal";
 import { postClientLog } from "@/lib/client-log";
-import { createOpenSettle } from "./open-settle";
+import { createOpenSettle, revealStatus, streamEndStatus, streamErrorStatus, type TermStatus } from "./open-settle";
 
 /**
  * 复制:剪贴板 API 优先;局域网明文 http(非安全上下文)下它不存在,回退
@@ -71,8 +71,6 @@ function visibleScreenText(term: Terminal): string {
  * 渲染主题对齐 ansi2html 的 catppuccin mocha（#1e1e2e/#cdd6f4）。
  * WebGL addon 尽力加载（失败静默降级 DOM renderer——xterm v6 已无 canvas）。
  */
-
-type TermStatus = "connecting" | "connected" | "exited" | "error";
 
 /** UTF-8 字符串 → base64（xterm onData 给 JS 字符串，先编 UTF-8 字节再 b64） */
 function b64encode(s: string): string {
@@ -300,9 +298,11 @@ export function TerminalView({
     const settle = createOpenSettle((bytes, ms) => { // 画面稳定再揭开（open-settle.ts）；记首轮输出量，核对「尺寸一变 CC 整段重画」
       if (disposed) return;
       term.scrollToBottom();
-      setStatus("connected");
+      setStatus(revealStatus); // 只揭开「连接中」：计时里已退出 / 出错的不能改回 connected
       postClientLog(`[term] open settled agent=${agent} bytes=${bytes} ms=${ms} ${term.cols}x${term.rows}`);
     });
+    // 进终态（exit 帧 / 流收尾 / 流出错）先停揭开计时：揭开前 PTY 就退出（window 被 kill / agent 重启）时别再揭开
+    const finish = (next: TermStatus | ((s: TermStatus) => TermStatus)) => { settle.cancel(); if (!disposed) setStatus(next); };
     // 僵尸连接看门狗：iOS 回前台的挂起 socket 常常既不报错也不关闭——终端永远
     // 冻结且无重连入口。bridge 每 5s 发 ping,>15s 无任何字节 = 连接已死,主动
     // abort 走 error 分支,配合上面的自愈逻辑自动重连。
@@ -390,17 +390,15 @@ export function TerminalView({
                 }
               }
             } else if (evt.t === "exit") {
-              if (!disposed) setStatus("exited");
+              finish("exited");
             }
           }
         }
-        // 流正常收尾（Bridge 关闭）——不是用户主动关就标记结束
-        if (!disposed) setStatus((s) => (s === "connected" ? "exited" : s));
+        // 流正常收尾（Bridge 关闭）——不是用户主动关就标记结束；open 后还在等揭开的也算结束
+        finish(streamEndStatus(termIdRef.current !== null));
       } catch {
-        if (!disposed) {
-          setStatus((s) => (s === "connected" || s === "connecting" ? "error" : s));
-          setErrMsg("连接中断");
-        }
+        finish(streamErrorStatus);
+        if (!disposed) setErrMsg("连接中断");
       }
     }
 
