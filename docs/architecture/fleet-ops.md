@@ -54,7 +54,7 @@ Selection: explicit agents, `all`, `project`, plus AND-filters `walled` and `ctx
 
 ## MCP tool (`fleet`)
 
-Agents that schedule other agents (the master and PMs) call the batch actions themselves through the channel-server tool `fleet` (`src/lib/fleet-tool.ts`, registered in `channel-server.ts`). It is a thin client over the same ws `fleet_state` / `fleet_run`; nothing about execution differs from the panel and the CLI.
+Agents that schedule other agents (the master and PMs) call the batch actions themselves through the channel-server tool `fleet` (`src/lib/fleet-tool.ts`, registered in `channel-server.ts`). It is a thin client over the same ws `fleet_state` / `fleet_run`; nothing about execution differs from the panel and the CLI. Claude Code loads MCP tools lazily, so callers find it as `mcp__claudestra__fleet` via ToolSearch (the master template says so; a sandbox Haiku agent that wasn't told went for `manager fleet` in Bash instead).
 
 - `fleet({op:"state"})` — one line per agent the caller may act on: online / busy / walled (reset time, LP offered) / LP on (until when, allowance left) / context tokens (from the session usage, not the pane's ctx%).
 - `fleet({op:"run", action, select, dryRun?, text?})` — `action` is `lp_on` / `lp_off` / `lp_compact` / `compact` / `save_compact` / `text`; `select` takes `agents` / `all` / `project` plus the `walled` / `ctxOver` filters. **`dryRun` defaults to true** (only a literal `false` executes) and returns who would be acted on and who is skipped with why. `keep` is not accepted — compaction always uses `fleet.compactKeep`. `text` is at most 2000 characters, delivered through `deliver()` as a notification (no keys, no preemption) with the caller's name in the header.

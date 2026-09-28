@@ -9,7 +9,7 @@ import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
-import { scopeForCaller, visibleToCaller, type FleetCaller } from "../../lib/fleet-caller.js";
+import { FleetScopeError, scopeForCaller, visibleToCaller, type FleetCaller } from "../../lib/fleet-caller.js";
 import {
   ACTION_LABEL, bareName, DEFAULT_COMPACT_KEEP, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
@@ -179,7 +179,7 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   // 先按调用方收窄再抓屏：PM 不去读别的项目的窗口
   const all = await candidates();
   const scoped = req.caller ? scopeForCaller(req.caller, req.action.kind, req.select, all) : { ok: true as const, cands: all, select: req.select, excluded: [] };
-  if (!scoped.ok) throw new Error(scoped.error);
+  if (!scoped.ok) throw new FleetScopeError(scoped.error);
   const lp = await refreshLp(scoped.cands.filter((c) => c.runtime === "claude-code" && c.online));
   let list = scoped.cands.map((c) => withLp(c, lp));
   if (req.select.ctxOver !== undefined) list = await withContext(list);

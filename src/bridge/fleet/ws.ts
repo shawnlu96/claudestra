@@ -6,7 +6,7 @@
  * 两类都先要求升级时是直连回环（ws 升级那一层已拒非回环，这里按连接地址再判一次兜底）。
  */
 import { readConfigSync } from "../../lib/config-store.js";
-import { identifyFleetCaller, MCP_TEXT_MAX, type CallerDecision } from "../../lib/fleet-caller.js";
+import { FleetScopeError, identifyFleetCaller, MCP_TEXT_MAX, type CallerDecision } from "../../lib/fleet-caller.js";
 import { parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
 import { openLedger, pmsByProject } from "../../lib/ledger-store.js";
 import { readRegistryAgents } from "../../lib/registry.js";
@@ -58,6 +58,6 @@ export async function handleFleetWs(msg: Record<string, unknown>, ws: unknown): 
     }
     return { result: await runFleet({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "owner", via: "cli" }) };
   } catch (e) {
-    return { error: `批量管理出错：${(e as Error).message}` };
+    return { error: e instanceof FleetScopeError ? e.message : `批量管理出错：${(e as Error).message}` };
   }
 }

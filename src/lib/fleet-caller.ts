@@ -56,6 +56,9 @@ export function identifyFleetCaller(x: CallerInput): CallerDecision {
 /** 会打断调用方正在跑的这一轮的动作：对自己点名做这些，整个请求报错 */
 const INTERRUPTS_SELF: readonly FleetActionKind[] = ["compact", "lp-compact", "save-compact"];
 
+/** 调用方越界（不是它的项目、点名自己压缩、includeMaster）：是拒绝不是故障，入口原样报给调用方 */
+export class FleetScopeError extends Error {}
+
 export type ScopeResult<T> = { ok: true; cands: T[]; select: FleetSelect; excluded: Excluded[] } | { ok: false; error: string };
 
 /**

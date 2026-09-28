@@ -93,8 +93,8 @@ describe("能动谁", () => {
     expect(r.excluded).toEqual([{ name: "pm1", reason: expect.stringContaining("调用方自己") }]);
   });
   test("PM 点名自己压缩 / 指定别的项目 / 带 keep / 超长 text：整个报错", async () => {
-    expect((await mcp("pm", run({ action: { kind: "compact" }, select: { agents: ["pm1"] } }))).error).toContain("不能对自己压缩");
-    expect((await mcp("pm", run({ action: { kind: "lp-off" }, select: { project: "t43-q" } }))).error).toContain("不是项目 t43-q 的 PM");
+    expect((await mcp("pm", run({ action: { kind: "compact" }, select: { agents: ["pm1"] } }))).error).toStartWith("不能对自己压缩"); // 是拒绝不是故障：不带「出错」前缀
+    expect((await mcp("pm", run({ action: { kind: "lp-off" }, select: { project: "t43-q" } }))).error).toStartWith("你不是项目 t43-q 的 PM");
     expect((await mcp("pm", run({ action: { kind: "compact", keep: "x" }, select: { all: true } }))).error).toContain("keep");
     expect((await mcp("pm", run({ action: { kind: "text", text: "x".repeat(2001) }, select: { all: true } }))).error).toContain("2000");
   });
