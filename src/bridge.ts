@@ -835,6 +835,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
   // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占
   if (isHumanRequest(env)) await preemptForHuman(env, to.channelId, evAgent);
+  if (env.meta.interruptNote) meta.interrupt_note = "true"; // 历史只剥真由 bridge 加的抬头(lib/inbound-body.ts),用户手写的同样开头不剥
   const content = await renderContentForLocal(env); // 抢占之后渲染:抬头(env.meta.interruptNote)是抢占时写的
   // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去

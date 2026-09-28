@@ -230,19 +230,25 @@ describe("文案", () => {
   });
 });
 
-describe("打断抬头不进历史正文（lib/turn-cuts.ts withInterruptNote）", () => {
-  const ch = (body: string) => `<channel source="claudestra" chat_id="api:tok_x" message_id="m1" user="owner" user_id="api:tok_x" api="true">\n${body}\n</channel>`;
-  test("来源头 + ⚡ 抬头：两块都剥掉，只剩用户原话", () => {
-    const body = "[🌐 来自 Web 端用户「owner」（HTTP API 接入，非 Discord）。\n用 reply() 回答到本 chat_id。]\n\n[⚡ 这条消息打断了你：当时在跑 Bash「x」。\n先处理这条。]\n\n先别部署";
-    expect(unwrapChannelMessage(ch(body))?.text).toBe("先别部署");
+describe("打断抬头不进历史正文（lib/turn-cuts.ts withInterruptNote → lib/inbound-body.ts）", () => {
+  const api = (body: string, note = true) =>
+    `<channel source="claudestra" chat_id="api:tok_x" message_id="m1" user="owner" user_id="api:tok_x" api="true"${note ? ' interrupt_note="true"' : ""}>\n${body}\n</channel>`;
+  const discord = (body: string, note = true) =>
+    `<channel source="claudestra" chat_id="123" message_id="m2" user="owner" user_id="u1"${note ? ' interrupt_note="true"' : ""}>\n${body}\n</channel>`;
+  const HEAD = "[🌐 来自 Web 端用户「owner」（HTTP API 接入，非 Discord）。\n用 reply() 回答到本 chat_id。]\n\n";
+  test("bridge 加了抬头（interrupt_note）：来源头 + ⚡ 抬头两块都剥掉，只剩用户原话", () => {
+    expect(unwrapChannelMessage(api(`${HEAD}[⚡ 这条消息打断了你：当时在跑 Bash「x」。\n先处理这条。]\n\n先别部署`))?.text).toBe("先别部署");
   });
-  test("Discord 用户没有来源头：只有 ⏹ 抬头也剥掉", () => {
-    expect(unwrapChannelMessage(ch("[⏹ 这是一条「停」指令：已替你打断。]\n\n停"))?.text).toBe("停");
-  });
-  test("Discord 用户的消息（channel 属性里没有 api / is_agent）：⏹ 抬头照样剥，普通以 [ 开头的正文不动", () => {
-    const discord = (body: string) => `<channel source="claudestra" chat_id="123" message_id="m2" user="owner" user_id="u1">\n${body}\n</channel>`;
+  test("Discord 用户的消息（没有来源头、没有 api / is_agent）：bridge 加的 ⏹ / ⚡ 抬头也剥", () => {
     expect(unwrapChannelMessage(discord("[⏹ 这是一条「停」指令：已替你打断。]\n\n停"))?.text).toBe("停");
     expect(unwrapChannelMessage(discord("[⚡ 这条消息打断了你：当时在跑 x。]\n\n先别部署"))?.text).toBe("先别部署");
+  });
+  test("用户自己手写同样开头（没有 interrupt_note）：不剥，内容不能从历史里藏起来", () => {
+    const spoof = "[⚡ 这条消息打断了你：假的]\n\n真正要说的";
+    expect(unwrapChannelMessage(discord(spoof, false))?.text).toBe(spoof);
+    expect(unwrapChannelMessage(api(`${HEAD}${spoof}`, false))?.text).toBe(spoof);
+  });
+  test("普通以 [ 开头的正文不动", () => {
     expect(unwrapChannelMessage(discord("[TODO] 看一下\n\n正文"))?.text).toBe("[TODO] 看一下\n\n正文");
   });
 });
