@@ -42,11 +42,10 @@ describe("fmtDueParts", () => {
 });
 
 describe("device time zone", () => {
-  const saved = process.env.TZ;
-  // TZ 跨测试文件共享（同一进程），不还原会让后面按本地时区断言的用例漂移
+  // TZ 跨测试文件共享（同一进程）。delete process.env.TZ 不会让 Bun 回到原时区，只能显式赋回原值
+  const saved = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   afterAll(() => {
-    if (saved === undefined) delete process.env.TZ;
-    else process.env.TZ = saved;
+    process.env.TZ = saved;
   });
   // 2026-09-29T20:45:00Z = owner 的例子：东京 09-30 05:45，上海 09-30 04:45
   const iso = "2026-09-29T20:45:00.000Z";

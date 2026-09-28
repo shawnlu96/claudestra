@@ -1,10 +1,11 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { startMission } from "@/lib/api/agents";
 import type { MissionInfo } from "@/lib/chat/agents";
 import type { AgentSession } from "../type";
 import { fmtDueParts } from "../fmt-ts-parts";
+import { nextRefreshMs, resolveUntil, tipShift } from "../mission-time";
 import { CenteredModal } from "./centered-modal";
 
 /**
@@ -41,22 +42,54 @@ export function MissionStopIcon({ size = 15 }: { size?: number }) {
   );
 }
 
+/** 「现在」：到下一个本地零点（今天 / 明天会变）或 resumeAt（「等到」换回「截止」）时自动刷新；
+ *  页面从后台回到前台也刷新——iOS 会冻结后台页面的计时器，醒来时零点可能早就过了。 */
+function useNow(resumeAt?: string): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setTimeout(() => setNow(Date.now()), nextRefreshMs(now, resumeAt));
+    const onVis = () => {
+      if (document.visibilityState === "visible") setNow(Date.now());
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [now, resumeAt]);
+  return now;
+}
+
+/** hover = 鼠标悬停（移开就收）；pin = 点按 / Enter / Space（点别处、失焦或 Esc 收）；focus = 键盘聚焦 */
+type TipMode = "hover" | "pin" | "focus" | null;
+
 /**
  * compact（侧栏行）：只一个图标，放在名字容器外面由行的 flex 居中——放进名字的文字流里会和字的基线错开。
  * 顶栏：与 ExternalBadge 同款的浅底小块，图标 +「截止 今天 11:00」；退避中图标转警示色、文字换成「等到 明天 09:15」。
- * 全称（日期 + UTC 偏移）与目标放在同款浮层里：桌面悬停，手机点一下（没有 hover），4 秒后自动收起。
- * 浮层默认左对齐徽章，徽章靠右、放不下时改右对齐，免得在手机上伸出屏幕。
+ * slot：顶栏宽时和名字同一行（title，在「思考中」之前，回合进出不挪位），窄时放第二行徽章组（bar）——
+ * 带日期的文字放第一行会把名字挤没。两处各渲染一份，用容器查询只显示一份。
+ * 全称（日期 + UTC 偏移）与目标放在同款浮层里；浮层按实测宽度夹在屏幕内（mission-time.ts tipShift）。
  */
-export function MissionBadge({ mission, compact = false }: { mission: MissionInfo; compact?: boolean }) {
+export function MissionBadge({ mission, compact = false, slot }: { mission: MissionInfo; compact?: boolean; slot?: "title" | "bar" }) {
   const t = useT();
-  // 挂载时刻就够：resumeAt 变化会让列表签名变、整行重渲染（lib/chat/agents.ts agentExtraSig）
-  const [now] = useState(() => Date.now());
-  const [tip, setTip] = useState<{ open: boolean; right: boolean }>({ open: false, right: false });
+  const now = useNow(mission.resumeAt);
+  const [mode, setMode] = useState<TipMode>(null);
+  const boxRef = useRef<HTMLSpanElement>(null);
+  const tipRef = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    const tip = tipRef.current;
+    if (!mode || !box || !tip) return;
+    tip.style.left = `${tipShift(box.getBoundingClientRect().left, tip.offsetWidth, window.innerWidth)}px`;
+  }, [mode]);
   useEffect(() => {
-    if (!tip.open) return;
-    const id = setTimeout(() => setTip((s) => ({ ...s, open: false })), 4000);
-    return () => clearTimeout(id);
-  }, [tip.open]);
+    if (mode !== "pin") return;
+    const onDown = (e: PointerEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setMode(null);
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [mode]);
   const waiting = !!mission.resumeAt && Date.parse(mission.resumeAt) > now;
   const until = due(t, mission.until, now);
   const resume = waiting ? due(t, mission.resumeAt!, now) : null;
@@ -71,25 +104,37 @@ export function MissionBadge({ mission, compact = false }: { mission: MissionInf
       </span>
     );
   }
-  const place = (el: HTMLElement, open: boolean) => setTip({ open, right: el.getBoundingClientRect().left + 288 > window.innerWidth - 16 });
+  const display = slot === "title" ? "hidden @xl:inline-flex" : slot === "bar" ? "inline-flex @xl:hidden" : "inline-flex";
   return (
     <span
+      ref={boxRef}
       aria-label={title}
+      aria-expanded={!!mode}
       role="button"
       tabIndex={0}
-      onMouseEnter={(e) => place(e.currentTarget, false)}
-      onClick={(e) => place(e.currentTarget, !tip.open)}
-      className="group/mis relative inline-flex shrink-0 cursor-default items-center gap-1 rounded-md bg-base-content/[0.08] px-1.5 py-1 text-[11px] leading-none text-base-content/60"
+      onPointerEnter={(e) => e.pointerType === "mouse" && setMode((m) => m ?? "hover")}
+      onPointerLeave={(e) => e.pointerType === "mouse" && setMode((m) => (m === "hover" ? null : m))}
+      onClick={() => setMode((m) => (m === "pin" ? null : "pin"))}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") setMode(null);
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        setMode((m) => (m === "pin" ? null : "pin"));
+      }}
+      onFocus={(e) => e.currentTarget.matches(":focus-visible") && setMode((m) => m ?? "focus")}
+      onBlur={() => setMode((m) => (m === "hover" ? m : null))}
+      className={`relative ${display} shrink-0 cursor-default items-center gap-1 rounded-md bg-base-content/[0.08] px-1.5 py-1 text-[11px] leading-none text-base-content/60`}
     >
       <span className={tone}>
         <MissionIcon />
       </span>
       <span className="font-mono tabular-nums">{text}</span>
       <span
+        ref={tipRef}
         role="tooltip"
         className={
-          `pointer-events-none absolute ${tip.right ? "right-0" : "left-0"} top-full z-50 mt-1.5 w-max max-w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-base-300 ` +
-          `bg-base-100 px-2.5 py-1.5 text-left text-[11px] font-normal leading-normal text-base-content shadow-lg ${tip.open ? "block" : "hidden"} lg:group-hover/mis:block`
+          "pointer-events-none absolute left-0 top-full z-50 mt-1.5 w-max max-w-[min(18rem,calc(100vw-16px))] rounded-lg border border-base-300 bg-base-100 " +
+          `px-2.5 py-1.5 text-left text-[11px] font-normal leading-normal text-base-content shadow-lg ${mode ? "block" : "hidden"}`
         }
       >
         <span className="block text-[10px] text-base-content/50">
@@ -145,7 +190,7 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
     setBusy(true);
     setErr("");
     try {
-      const r = await startMission(agent.name, { goal: goal.trim(), until: until.trim() });
+      const r = await startMission(agent.name, { goal: goal.trim(), until: resolveUntil(until) });
       if (r.ok === false) throw new Error(r.error || "");
       onStarted();
       close();
