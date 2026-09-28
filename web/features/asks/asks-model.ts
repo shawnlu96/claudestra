@@ -127,6 +127,23 @@ export function clicksFromAnswer(rows: WebComponentRow[], choices: string[]): Re
   return out;
 }
 
+/** wire → 人话（按钮文字 / 选中项文字，多选用「、」连）：乐观作答时卡片上「已答：…」先显示它，服务端的 labels 回来后以服务端为准 */
+export function wireLabels(rows: WebComponentRow[], wires: string[]): string[] {
+  return wires.map((w) => {
+    const id = /^\[button:([\w:-]+)\]$/.exec(w)?.[1];
+    for (const r of rows) {
+      if (r.type === "buttons") {
+        const b = id ? r.buttons.find((x) => x.id === id) : undefined;
+        if (b) return b.label;
+      } else if (w.startsWith(`[select:${r.id}:`) && w.endsWith("]")) {
+        const vals = w.slice(`[select:${r.id}:`.length, -1).split(",");
+        return vals.map((v) => r.options.find((o) => o.value === v)?.label ?? v).join("、");
+      }
+    }
+    return w;
+  });
+}
+
 /** 「12 分钟」「3 小时」「2 天」：等了多久 / 还剩多久都用它 */
 export function spanText(ms: number, t: (s: string, p?: Record<string, string | number>) => string): string {
   const m = Math.max(0, Math.round(ms / 60_000));
@@ -148,4 +165,37 @@ export function answerSummary(a: WebAsk): string {
   if (!a.answer) return "";
   const picked = a.answer.labels?.length ? a.answer.labels : a.answer.choices;
   return [...picked, a.answer.text ? `「${a.answer.text}」` : ""].filter(Boolean).join("；");
+}
+
+/**
+ * 另一台设备：收到 SSE ask 事件后等这么久再重拉（一次作答会连着来几条事件，合成一次）。
+ * 验收要求「另一台设备 2 秒内消失」：经中继的事件延迟 + 这个等待 + 一次拉取要在 2 秒里（tests/asks-relay-stream.test.ts）
+ */
+export const ASK_EVENT_REFRESH_MS = 300;
+
+/** 乐观作答（T11b 第 8 条）：提交时本地先记一笔，服务端确认前盖在拉到的数据上 */
+export interface PendingAnswer {
+  at: number;
+  answer: NonNullable<WebAsk["answer"]>;
+}
+/** 盖这么久服务端还说开着：以服务端为准（提交其实没成、或 SSE / 拉取一直没回来），卡片回到「等你处理」 */
+export const PENDING_MAX_MS = 20_000;
+
+/**
+ * 把乐观作答盖到服务端列表上：盖上的那条显示成已答（移出「等你处理」、计数减 1）。服务端已不是 open（确认了，或别处先答 / 过期）、
+ * 列表里没有了、或盖太久了 → 放进 settled，调用方从待确认表里删掉，此后只看服务端
+ */
+export function applyPending(server: WebAsk[], pending: ReadonlyMap<string, PendingAnswer>, now: number): { asks: WebAsk[]; settled: string[] } {
+  const settled = new Set<string>();
+  const asks = server.map((a) => {
+    const p = pending.get(a.id);
+    if (!p) return a;
+    if (a.state !== "open" || now - p.at > PENDING_MAX_MS) {
+      settled.add(a.id);
+      return a;
+    }
+    return { ...a, state: "answered" as const, answer: p.answer, updatedAt: p.at };
+  });
+  for (const id of pending.keys()) if (!server.some((a) => a.id === id)) settled.add(id);
+  return { asks, settled: [...settled] };
 }
