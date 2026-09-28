@@ -117,5 +117,12 @@ export function parseResponseHead(raw: unknown): { status: number; headers: Reco
   return { status: o.status as number, headers: pickHeaders(h as Record<string, string>, INNER_RES_HEADERS) };
 }
 
+/**
+ * 内层验签被当成重放时，收方 authApi 在（加密、认证过的）内层响应里给的 reason：401 {code:"peer_signature", reason}。
+ * 两种要分开报：签名早于对方这次启动 = 对方重启过、请求没被处理，可以重发；签名已见过 = 已经处理过（回复在路上丢了，
+ * 多半是中继伪造了 401），不能重发，否则就是处理两次。
+ */
+export const INNER_REPLAY_REASONS = { restarted: "replay_before_restart", duplicate: "replay" } as const;
+
 /** 收方的明文错误体：只有 code，不带任何细节（中继看得到它，也能伪造它） */
 export const e2eError = (status: number, code: string): Response => Response.json({ ok: false, code }, { status });

@@ -31,19 +31,29 @@ async function machine(v = 1): Promise<Machine> {
 
 const asPeer = (x: Machine, name: string): E2ePeer => ({ name, fp: x.fp, idk: x.id.publicKey, ek: x.blob });
 
-/** B 的内层路由替身：记下处理过的请求；非 GET 按内层签名去重（代替 T25 的 ReplayCache） */
+/**
+ * B 的内层路由替身：记下处理过的请求；非 GET 按 T25 authApi 的样子查内层签名——签名时间早于本次启动 → replay_before_restart，
+ * 见过 → replay（401 {code:"peer_signature", reason}）。restart() = 进程重启：去重表清空、启动时刻前移。
+ */
 function router() {
   const handled: { method: string; path: string; headers: Record<string, string>; body: string }[] = [];
-  const seenSig = new Set<string>();
+  let seenSig = new Set<string>();
+  let startedAt = 0;
+  const reject = (reason: string) => Response.json({ ok: false, code: "peer_signature", reason }, { status: 401 });
   const dispatch = async (req: Request) => {
     const sig = req.headers.get(SIG_HEADERS.sig) ?? "";
-    if (req.method !== "GET" && seenSig.has(sig)) return Response.json({ ok: false, error: "replay" }, { status: 409 });
+    if (req.method !== "GET" && Number(req.headers.get(SIG_HEADERS.ts)) < startedAt) return reject("replay_before_restart");
+    if (req.method !== "GET" && seenSig.has(sig)) return reject("replay");
     seenSig.add(sig);
     const body = req.method === "GET" ? "" : await req.text();
     handled.push({ method: req.method, path: new URL(req.url).pathname, headers: Object.fromEntries(req.headers), body });
     return Response.json({ ok: true, echo: body, n: handled.length }, { status: req.method === "POST" ? 201 : 200 });
   };
-  return { handled, dispatch };
+  const restart = (clock: number) => {
+    seenSig = new Set();
+    startedAt = clock + 1;
+  };
+  return { handled, dispatch, restart };
 }
 
 type Relay = (req: Request, forward: (r: Request) => Promise<Response>) => Promise<Response>;
@@ -87,11 +97,19 @@ async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeo
     },
     ...(opts.now ? { now: opts.now } : {}),
   });
-  /** 模拟调用方：内层带 Bearer 和一个每次唯一的内层签名 */
+  /** 模拟调用方：内层带 Bearer、一个每次唯一的内层签名和签名时刻（单调时钟） */
+  let clock = 0;
   const call = (method: string, path: string, body?: string) =>
-    client.fetch(method, path, { authorization: "Bearer tok", [SIG_HEADERS.sig]: randomUUID(), host: "evil", "x-forwarded-for": "127.0.0.1" }, body === undefined ? undefined : utf8(body));
+    client.fetch(method, path, {
+      authorization: "Bearer tok", [SIG_HEADERS.sig]: randomUUID(), [SIG_HEADERS.ts]: String(++clock), host: "evil", "x-forwarded-for": "127.0.0.1",
+    }, body === undefined ? undefined : utf8(body));
+  /** B 进程重启：会话全丢，内层去重表清空，之前签的非 GET 都算「重启前」 */
+  const restartB = () => {
+    bDeps.sessions = new SessionTable(opts.limits, opts.now);
+    r.restart(clock);
+  };
   return {
-    a, b, r, bDeps, client, call, posted, pinnedByA,
+    a, b, r, bDeps, client, call, posted, pinnedByA, restartB,
     setBKnowsA: (p: E2ePeer | null) => (bKnowsA = p),
     setAKnowsB: (p: E2ePeer) => (aKnowsB = p),
   };
@@ -166,18 +184,31 @@ describe("peer E2E：重放与重复投递", () => {
       }
       return res;
     } });
-    const res = await w.call("POST", "/api/v1/agents/x/messages", "pay once");
-    expect(res.status).toBe(409); // 内层重放缓存拒掉的那一次，原样带回给调用方
+    const err = await w.call("POST", "/api/v1/agents/x/messages", "pay once").catch((e: E2eError) => e);
+    expect(err).toMatchObject({ code: "e2e_duplicate" }); // 已处理过：明确告诉调用方别重发
     expect(w.r.handled).toHaveLength(1);
     expect(w.posted.filter((p) => p.endsWith("/hello"))).toHaveLength(2);
   });
 
-  test("会话真丢了（收方重启）：重握手后重发成功，只处理一次", async () => {
+  test("会话只是被淘汰（对方没重启）：重握手后原样重发成功，只处理一次", async () => {
     const w = await world();
     await w.call("GET", "/api/v1/agents");
     w.bDeps.sessions = new SessionTable();
-    expect((await w.call("POST", "/api/v1/x", "after restart")).status).toBe(201);
+    expect((await w.call("POST", "/api/v1/x", "evicted")).status).toBe(201);
     expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(1);
+  });
+
+  test("对方真的重启过：重启前签的非 GET 被拒，调用方拿到明确可重试的「对方重启过，请重发」；新签的照常", async () => {
+    const w = await world();
+    await w.call("GET", "/api/v1/agents");
+    // 调用方先签好，发出前对方重启：模拟「会话在、签名在，进程换了」
+    const signed = w.call("POST", "/api/v1/x", "before restart");
+    w.restartB();
+    const err = await signed.catch((e: E2eError) => e);
+    expect(err).toMatchObject({ code: "e2e_peer_restarted" });
+    expect((err as Error).message).toContain("对方重启过，请重发");
+    expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(0);
+    expect((await w.call("POST", "/api/v1/x", "resent")).status).toBe(201);
   });
 });
 

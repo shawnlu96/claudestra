@@ -13,7 +13,7 @@ import { DIR_REQ, DIR_RES, openAll, sealMessage } from "./e2e/records.js";
 import { compareE2eKey, verifyE2eKey, type MachineE2eKey, type SignedE2eKey } from "./e2e-machine-key.js";
 import type { E2ePeer } from "./peer-e2e-serve.js";
 import {
-  E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, encodeHello, encodeInnerHead, parseHelloReply, parseResponseHead,
+  E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, encodeHello, encodeInnerHead, INNER_REPLAY_REASONS, parseHelloReply, parseResponseHead,
   PEER_E2E_LABEL, recordPath,
 } from "./peer-e2e-wire.js";
 
@@ -53,6 +53,19 @@ const RETRY = Symbol("retry");
 async function codeOf(res: Response): Promise<string> {
   const j = (await res.json().catch(() => null)) as { code?: unknown } | null; // 错误体不是 JSON（中继或老版本的错误页）：按状态码报
   return typeof j?.code === "string" ? j.code : `e2e_http_${res.status}`;
+}
+
+/** 内层响应已认证，reason 可信：对方重启过（没处理，可重发）与已处理过（不能重发）分开报，调用方把这句话原样回给发消息的一方 */
+function throwIfInnerReplay(payload: Uint8Array): void {
+  let j: { code?: unknown; reason?: unknown } | null = null;
+  try {
+    j = JSON.parse(new TextDecoder().decode(payload));
+  } catch {
+    return; // 不是 JSON 的 401：不是验签拒绝，原样交给调用方
+  }
+  if (j?.code !== "peer_signature") return;
+  if (j.reason === INNER_REPLAY_REASONS.restarted) throw new E2eError("e2e_peer_restarted", "对方重启过，请重发");
+  if (j.reason === INNER_REPLAY_REASONS.duplicate) throw new E2eError("e2e_duplicate", "对方已经处理过这条（回复在路上丢了），不要重发");
 }
 
 export class PeerE2eClient {
@@ -101,6 +114,7 @@ export class PeerE2eClient {
     }
     if (!rh) throw new E2eError("e2e_record", "malformed response head");
     const payload = NO_BODY_STATUS.has(rh.status) ? null : concat(...parts.slice(1));
+    if (rh.status === 401 && payload) throwIfInnerReplay(payload);
     return new Response(payload, { status: rh.status, headers: rh.headers });
   }
 
