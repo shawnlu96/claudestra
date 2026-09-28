@@ -165,17 +165,19 @@ function Body({ d, line, action, tr }: { d: TaskDetail; line: LineView; action: 
       <RecentSec d={d} tr={tr} />
       <ReviewSec d={d} tr={tr} />
       <PeopleSec d={d} exec={exec} action={action} tr={tr} />
-      {line.agent && d.task.stage !== "done" && d.task.stage !== "cancelled" && (
-        <Sec title={`${tr("对它说")} · ${line.agent}`}>
-          <CollabSay agent={line.agent} busy={exec?.busy === true} tr={tr} />
-        </Sec>
-      )}
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">
             <Icon name="gitPullRequest" size={13} />
             PR #{pr.match(/(\d+)\/?$/)?.[1] ?? ""}
           </a>
+        </div>
+      )}
+      {line.agent && d.task.stage !== "done" && d.task.stage !== "cancelled" && (
+        <div className={s.sayDock}>
+          <Sec title={`${tr("对它说")} · ${line.agent}`}>
+            <CollabSay agent={line.agent} busy={exec?.busy === true} tr={tr} />
+          </Sec>
         </div>
       )}
     </div>

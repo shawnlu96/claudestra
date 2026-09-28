@@ -128,7 +128,7 @@
 
 /* ── 详情面板：桌面贴右侧，首页不被替换；手机全屏（portal 到 body，见 collab-detail.tsx）── */
 .panel { width: var(--panel-w); flex: none; border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; overscroll-behavior: contain; color: var(--text-2); }
-.panel.full { position: fixed; inset: 0; z-index: 60; width: auto; border: 0; padding-bottom: env(safe-area-inset-bottom); }
+.panel.full { position: fixed; inset: 0; z-index: 60; width: auto; border: 0; }
 .ph { position: sticky; top: 0; background: var(--panel); z-index: 2; display: flex; align-items: flex-start; gap: 10px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
 .full .ph { padding-top: max(env(safe-area-inset-top), 14px); }
 .ph .tt { flex: 1; min-width: 0; }
@@ -177,6 +177,8 @@
 .rcpt { display: flex; align-items: center; gap: 7px; font-size: var(--fs-2); color: var(--muted); margin-top: 8px; }
 .rcpt.ok { color: var(--ok); } .rcpt.err { color: var(--err); }
 .links { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 手机全屏详情：「对它说」钉在底部（ux.md §4），内容在它上面滚 */
+.full .sayDock { position: sticky; bottom: 0; margin: 0 -18px -28px; padding: 12px 18px max(env(safe-area-inset-bottom), 12px); background: var(--panel); border-top: 1px solid var(--line); }
 .approx { color: var(--faint); }
 
 @media (prefers-reduced-motion: reduce) {
