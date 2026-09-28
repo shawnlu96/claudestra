@@ -146,7 +146,7 @@ describe("GET /ledger/:project", () => {
     setLedgerFeedForTest({ path: join(root, "none", "ledger.sqlite"), emit: () => {} });
     try {
       const body = (await (await get("/ledger/empty")).json()) as any;
-      expect(body).toMatchObject({ ok: true, exists: false, items: [], tasks: [], projectEvents: [], meta: { docsDir: null } });
+      expect(body).toMatchObject({ ok: true, exists: false, items: [], tasks: [], deps: [], projectEvents: [], audit: [], meta: { docsDir: null } });
       expect((await get("/ledger/empty/tasks/T1")).status).toBe(404);
       expect((await get("/ledger/empty/docs/T8c.md")).status).toBe(404);
     } finally {

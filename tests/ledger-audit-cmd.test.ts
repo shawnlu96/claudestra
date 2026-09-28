@@ -238,7 +238,11 @@ describe("ledger audit 的权限与只读", () => {
     const state = mkdtempSync(join(tmpdir(), "ledger-audit-ro-"));
     const raw = new Database(join(state, "ledger.sqlite"));
     raw.exec("PRAGMA journal_mode = WAL");
-    raw.exec(LEDGER_MIGRATIONS[0] as string);
+    // 用真实迁移建到「巡检之前」那一版（表齐、版本号对得上），只读侧才不会先撞上「版本号到了表却缺」
+    for (const step of LEDGER_MIGRATIONS.slice(0, AUDIT_SCHEMA_VERSION - 1)) {
+      if (typeof step === "function") step(raw);
+      else for (const sql of step) raw.prepare(sql).run();
+    }
     raw.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
     raw.close();
     const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };

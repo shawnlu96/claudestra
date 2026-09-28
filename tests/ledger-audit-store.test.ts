@@ -139,7 +139,8 @@ describe("读侧", () => {
     const path = tempLedgerPath("ledger-audit-v1-");
     seedLedger(path);
     const raw = new Database(path);
-    raw.exec(`DROP TABLE audit_findings; PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
+    raw.exec("DROP TABLE audit_findings");
+    raw.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
     raw.close();
     const reader = new LedgerReader(path);
     const db = reader.get();

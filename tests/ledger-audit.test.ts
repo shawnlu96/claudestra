@@ -19,7 +19,8 @@ function ev(target: string, ts: number, kind: EventKind, data: Record<string, un
 function task(id: string, stage: Stage, over: Partial<LedgerTask> = {}): LedgerTask {
   return {
     id, project: "p", itemId: null, title: id, kind: "code", stage, stageBefore: null, round: 1, agent: EXE, pm: PM, branch: null,
-    pr: null, headSHA: null, spec: null, specRev: 1, model: null, rev: 1, extra: {}, createdAt: 0, updatedAt: 0, ...over,
+    pr: null, headSHA: null, spec: null, specRev: 1, model: null, rev: 1, extra: {}, createdAt: 0, updatedAt: 0,
+    assigneeKind: "agent", assignee: over.agent ?? EXE, ...over,
   };
 }
 /** 任务 id 在 stageAt 时刻进入 stage（建任务事件在 0 时刻） */

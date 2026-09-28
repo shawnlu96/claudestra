@@ -8,6 +8,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DepKind, DepState, LedgerDep } from "./ledger-deps.js";
 import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
+import { SCHEMA_AUDIT } from "./ledger-audit-schema.js";
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
@@ -121,21 +122,6 @@ function migrateDeps(db: Database): void {
   run("CREATE INDEX IF NOT EXISTS task_deps_to ON task_deps(toTask)");
   run("CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project)");
 }
-
-/**
- * 巡检结果（T29，lib/ledger-audit-store.ts）。放单独一张表而不是事件族：findings 要改 lastSeen / resolvedAt，
- * events 只能追加；而且当事件写会挤进 taskView.lastEvent 与 projectEvents（T11a 审查 P1-5 的坑）。
- * changedAt 只在开 / 关 / 重开时更新（读侧变更推送的游标）；queuedAs = 通知押在押后队列里的 messageId，投出去才算推过。
- */
-const SCHEMA_AUDIT: readonly string[] = [
-  `CREATE TABLE IF NOT EXISTS audit_findings (
-  key TEXT PRIMARY KEY, project TEXT NOT NULL, taskId TEXT, rule TEXT NOT NULL,
-  firstSeen INTEGER NOT NULL, lastSeen INTEGER NOT NULL, resolvedAt INTEGER,
-  since INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '', suggestion TEXT NOT NULL DEFAULT '',
-  notify TEXT, notifiedAt INTEGER, queuedAs TEXT, changedAt INTEGER NOT NULL)`,
-  "CREATE INDEX IF NOT EXISTS audit_findings_open ON audit_findings(project, resolvedAt)",
-  "CREATE INDEX IF NOT EXISTS audit_findings_changed ON audit_findings(changedAt)",
-];
 
 /** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
 type Migration = readonly string[] | ((db: Database) => void);
