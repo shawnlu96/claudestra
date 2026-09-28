@@ -5,7 +5,7 @@ import { getLang, useT } from "@/lib/i18n";
 import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
 import { AdoptPanel } from "./adopt-panel";
-import { nestSubSessions, SessionName, type SubSessionInfo } from "./session-name";
+import { nestSubSessions, SessionName, sessionRowKey, type SubSessionInfo } from "./session-name";
 
 /**
  * 侧栏「未纳管会话」分区（v2.23+）。
@@ -193,7 +193,7 @@ export function UnmanagedSessions() {
 
   const count = sessions.filter((s) => s.agentName === null && !isTempSession(s.cwd)).length;
 
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null); // 行键（sessionRowKey），不是 sessionId
 
   /** 列表里左滑直接处置（不必点进抽屉）；成功后重拉列表 */
   const manageFromList = async (s: SessionRow, action: "archive" | "delete") => {
@@ -290,7 +290,7 @@ export function UnmanagedSessions() {
           ) : null}
           <ul className="max-h-64 overflow-y-auto">
             {nestSubSessions(unmanaged).map(({ row: s, depth }) => (
-              <li key={s.sessionId} style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
+              <li key={sessionRowKey(s)} style={{ paddingLeft: Math.min(depth, 3) * 14 }}>
                 <SwipeActions
                   actions={[
                     {
@@ -299,12 +299,12 @@ export function UnmanagedSessions() {
                       onClick: () => void manageFromList(s, "archive"),
                     },
                     {
-                      label: confirming === s.sessionId ? t("确认删除") : t("删除"),
+                      label: confirming === sessionRowKey(s) ? t("确认删除") : t("删除"),
                       className: "bg-error/80 text-error-content",
                       onClick: () =>
-                        confirming === s.sessionId
+                        confirming === sessionRowKey(s)
                           ? void manageFromList(s, "delete")
-                          : setConfirming(s.sessionId),
+                          : setConfirming(sessionRowKey(s)),
                     },
                   ]}
                 >

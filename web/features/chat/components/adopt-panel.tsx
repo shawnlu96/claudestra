@@ -42,12 +42,16 @@ export function AdoptPanel({ session, parentName, onCancel, onAccepted, onError 
   };
 
   if (pendingSub && !confirmed) {
-    const parent = parentName || pendingSub.parentId.slice(0, 8) || t("另一个会话");
-    const what = pendingSub.kind === "guardian_review" ? t("自动审查线程") : t("子会话");
+    // Codex 父子两行名字都是 cwd 末段，只写名字分不出是哪个会话：后面带上父会话 id 前 8 位
+    const id8 = pendingSub.parentId.slice(0, 8);
+    const parent = parentName && id8 ? `${parentName} · ${id8}` : parentName || id8 || t("另一个会话");
+    const review = pendingSub.kind === "guardian_review";
     return (
       <div className="flex flex-col gap-2" role="alertdialog" aria-label={t("确认收编子会话")}>
         <div className="rounded-lg bg-warning/15 px-3 py-2 text-xs text-base-content/80">
-          {t("这是「{parent}」的{what}，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？", { parent, what })}
+          {review
+            ? t("这是「{parent}」的自动审查线程，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？", { parent })
+            : t("这是「{parent}」的子会话，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？", { parent })}
         </div>
         <div className="flex items-center justify-end gap-2">
           <button className="btn btn-ghost btn-sm" onClick={onCancel}>

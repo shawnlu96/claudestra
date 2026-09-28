@@ -2,8 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexSubSessionOf, isCodexSubThread, readCodexMeta } from "../src/lib/codex-session";
-import { nestSubSessions } from "../web/lib/session-nesting";
+import { codexSubSessionOf, readCodexMeta } from "../src/lib/codex-session";
+import { isCodexSubThread } from "../src/lib/codex-subthread";
+import { nestSubSessions, sessionRowKey } from "../web/lib/session-nesting";
 
 // Codex 的子线程（subagent / 自动审查）与主会话同 cwd，列表里分不出主从；session_meta 里 id≠session_id 就是子线程
 const dir = mkdtempSync(join(tmpdir(), "codex-sub-"));
@@ -38,11 +39,23 @@ describe("子线程判定：id≠session_id / 有 parent_thread_id / 来源是 s
     expect(m?.sub).toEqual({ parentId: "", kind: "guardian_review" });
   });
   test("fork：id = session_id、没有 parent_thread_id、来源不是子线程 → 独立会话，不能误判", async () => {
-    for (const extra of [{}, { thread_source: "user" }, { thread_source: "cli", parent_thread_id: "" }]) {
-      expect(isCodexSubThread({ id: "F", session_id: "F", ...extra })).toBe(false);
-    }
+    // 实测形状（审查员扫本机 43 个 rollout + codex 0.153.4）：fork 只带 forked_from_id；exec / vscode 会话 thread_source=user
+    const primaries = [{}, { thread_source: "user" }, { thread_source: "user", forked_from_id: "A" }, { source: "exec", thread_source: "user" },
+      { source: "vscode" }, { source: "cli", parent_thread_id: "" }];
+    for (const extra of primaries) expect(isCodexSubThread({ id: "F", session_id: "F", ...extra })).toBe(false);
     expect(await readCodexMeta(meta("fork.jsonl", { id: "F", session_id: "F", thread_source: "user" }))).toEqual({ sessionId: "F", cwd: "/w" });
   });
+  test("codex 新来源：thread_source 不是 user 就算（memory_consolidation / review / compact / thread_spawn），source 是 {subagent} 对象也算", async () => {
+    for (const ts of ["memory_consolidation", "review", "compact", "thread_spawn"]) {
+      expect(isCodexSubThread({ id: "G", session_id: "G", thread_source: ts })).toBe(true);
+    }
+    const m = await readCodexMeta(meta("mc.jsonl", { id: "G", session_id: "G", thread_source: "memory_consolidation" }));
+    expect(m?.sub).toEqual({ parentId: "", kind: "memory_consolidation" });
+    const viaSource = await readCodexMeta(meta("src.jsonl", { id: "H", session_id: "H", thread_source: "user", source: { subagent: "review" } }));
+    expect(viaSource?.sub).toEqual({ parentId: "", kind: "review" });
+    expect(isCodexSubThread({ id: "H", session_id: "H", source: { subagent: { thread_spawn: {} } } })).toBe(true);
+  });
+
   test("按 sessionId 查归属：找得到子线程文件 → sub；主会话 / 找不到 → null", async () => {
     const root = mkdtempSync(join(tmpdir(), "codex-sub-root-"));
     const day = join(root, "2026", "09", "28");
@@ -56,6 +69,17 @@ describe("子线程判定：id≠session_id / 有 parent_thread_id / 来源是 s
     expect(await codexSubSessionOf(id(1), root)).toBeNull();
     expect(await codexSubSessionOf(id(9), root)).toBeNull();
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("sessionRowKey", () => {
+  test("同一个 sessionId 两行（不同 cwd）：键不重复；删除确认按键找，只命中一行", () => {
+    const rows = [{ sessionId: "D", runtime: "claude-code", cwd: "/a" }, { sessionId: "E", runtime: "claude-code", cwd: "/a" }, { sessionId: "D", runtime: "claude-code", cwd: "/b" }];
+    const keys = rows.map(sessionRowKey);
+    expect(new Set(keys).size).toBe(3);
+    const confirming = sessionRowKey(rows[0]);
+    expect(rows.filter((r) => sessionRowKey(r) === confirming)).toEqual([rows[0]]);
+    expect(sessionRowKey({ sessionId: "D", runtime: "codex", cwd: "/a" })).not.toBe(keys[0]);
   });
 });
 
