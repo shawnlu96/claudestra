@@ -5,6 +5,9 @@
  * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
  */
 
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { acquireLock } from "./file-lock.js";
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
@@ -197,20 +200,25 @@ export function tmuxInterrupt(target: string): void {
 
 /**
  * 双 Esc 护栏：CC 把间隔 ≤600ms 的两次 Esc 当 Rewind 手势，弹出检查点对话框挡住窗口（≥700ms 不开，git log -S ESC_DOUBLE_TAP_MS）。
- * 所以所有 Esc 都走这里：同一窗口两次之间 ≥1200ms。占位是同步的（先算好这一发的时刻、记下、再等），进程内并发的调用方依次排开；
- * 跨进程（manager 子进程发的 Esc）另把预定时刻写进窗口选项 ESC_AT_OPTION，发之前两边都看——读写之间仍有毫秒级的跨进程竞态。
+ * 所以所有 Esc 都走这里：发键全程持有跨进程锁（bridge、manager 子进程共用 runtime 目录），离上一次发完不足 1200ms 就先等，发完才记时——
+ * 只按「预定时刻」排不够：负载高时 tmux 调用能慢几百毫秒，两次按键会挤到一起（沙箱实测开出了 Rewind）。拿不到锁（5 秒）只按本进程记时排。
  */
 export const ESC_DOUBLE_TAP_MS = 1200;
-const ESC_AT_OPTION = "@claudestra_esc_at";
 const lastEscapeAt = new Map<string, number>();
 export async function tmuxSendEscape(target: string, opts: { strict?: boolean } = {}): Promise<void> {
-  const shared = Number(await windowOption(target, ESC_AT_OPTION)) || 0;
-  const now = Date.now();
-  const at = Math.max(now, (lastEscapeAt.get(target) ?? 0) + ESC_DOUBLE_TAP_MS, shared + ESC_DOUBLE_TAP_MS);
-  lastEscapeAt.set(target, at); // 同步占位：await 之前记下
-  await setWindowOption(target, ESC_AT_OPTION, String(at));
-  if (at > Date.now()) await Bun.sleep(at - Date.now());
-  await (opts.strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "Escape"]); // strict：打断键发不出去要报给按按钮的人
+  const key = target.replace(":=", ":").replace(/[^\w.-]/g, "_");
+  const file = join(RUNTIME_DIR, `esc-${key}.at`);
+  const lock = await acquireLock(join(RUNTIME_DIR, `esc-${key}.lock`), 5_000, 10_000);
+  try {
+    const shared = (() => { try { return Number(readFileSync(file, "utf8")) || 0; } catch { return 0; /* 还没有人发过 Esc：文件不存在 */ } })();
+    const wait = Math.max(lastEscapeAt.get(key) ?? 0, shared) + ESC_DOUBLE_TAP_MS - Date.now();
+    if (wait > 0) await Bun.sleep(wait);
+    await (opts.strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "Escape"]); // strict：打断键发不出去要报给按按钮的人
+  } finally {
+    lastEscapeAt.set(key, Date.now()); // 发完才记：键一定已经落地
+    try { writeFileSync(file, String(Date.now())); } catch { /* 写不了只丢跨进程共享：本进程的记时照样挡双击 */ }
+    lock?.release();
+  }
 }
 
 /**
