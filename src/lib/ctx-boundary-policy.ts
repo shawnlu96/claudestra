@@ -38,7 +38,8 @@ const CC_COMPACT_BUFFER = 33_000;
 
 export const DEFAULT_KEEP_LIST =
   "摘要务必保留：任务卡号、分支、worktree、当前 head 与 PR 号；未完成的步骤和被打断时正在做的那一步；PM 最近的指令；" +
-  "owner 和 PM 的原话约束与硬规矩（例如只在沙箱发键、不 git add -A）；待回报事项；审查结论和还没修的问题";
+  "owner 和 PM 的原话约束与硬规矩（例如只在沙箱发键、不 git add -A）；待回报事项；在等谁的回复（send_to_agent 发出去还没回的）；" +
+  "值守 / Autopilot 的目标；审查结论和还没修的问题";
 
 /** 内置策略不写本机 agent 名；要把某个会话加进来，在 config.json 里写同 id 的条目覆盖 match（按 id 合并）。 */
 export const BUILTIN_POLICIES: readonly CtxPolicy[] = [
@@ -53,11 +54,12 @@ const strList = (v: unknown): string[] | null =>
 
 /** 按 id 合并出一条策略；返回 null = 这条不生效（原因已写进 warnings） */
 function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null, warn: (t: string) => void): CtxPolicy | null {
-  const m = isObj(e.match) ? e.match : {};
-  const projects = strList(m.projects) ?? base?.projects ?? [];
-  const names = strList(m.names) ?? base?.names ?? [];
+  // 写了 match 就整个替换内置的匹配条件（不和继承来的 names / projects 取「且」）；没写才沿用
+  const m = isObj(e.match) ? e.match : null;
+  const projects = m ? strList(m.projects) ?? [] : base?.projects ?? [];
+  const names = m ? strList(m.names) ?? [] : base?.names ?? [];
   if (!projects.length && !names.length) {
-    warn("没有匹配条件（match.projects / match.names），已忽略");
+    warn(`没有匹配条件（match.projects / match.names），已忽略${base ? "——同 id 的内置策略也随之失效；要关请写 enabled:false" : ""}`);
     return null;
   }
   const num = (k: "window" | "hardCap"): number | null => {
@@ -105,8 +107,14 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
  * （09-29 01:49 实测）。所以不管策略怎么配，执行者一律按 compact（带保留清单）执行；没匹配到策略的个人 agent 各在自己的仓里，照旧。
  */
 const EXECUTOR_PREFIX = "agent-task-";
-export function effectiveAction(agentName: string, action: CompactAction): CompactAction {
-  return action === "save-compact" && agentName.startsWith(EXECUTOR_PREFIX) ? "compact" : action;
+export function effectiveAction(executor: boolean, action: CompactAction): CompactAction {
+  return action === "save-compact" && executor ? "compact" : action;
+}
+
+/** 按执行者对待：名字是 agent-task-*，或者工作目录是 git 的 linked worktree（根因就在这：memory 目录解析到主仓）。
+ *  不看 registry 的 parent / task：PM 的调度助理也带这两个字段，但它在台账目录里，有自己的 memory，需要 save-compact 留 HANDOFF */
+export function isExecutor(a: { name: string; worktree?: boolean }): boolean {
+  return a.name.startsWith(EXECUTOR_PREFIX) || a.worktree === true;
 }
 
 /** 名字模式有没有可能命中执行者：通配符前的字面部分与 agent-task- 互为前缀就算（宁可多报） */
@@ -115,14 +123,30 @@ function mayMatchExecutor(pattern: string): boolean {
   return lit.startsWith(EXECUTOR_PREFIX) || EXECUTOR_PREFIX.startsWith(lit);
 }
 
+/** 这条策略有没有可能命中执行者：名字模式可能命中 agent-task-*，或者只写了项目（项目里的执行者也会吃到） */
+function mayHitExecutors(p: CtxPolicy): boolean {
+  return p.names.length ? p.names.some(mayMatchExecutor) : p.projects.length > 0;
+}
+
 /** 搭配问题：不拦，只报（配置照样生效；执行者的 action 在 effectiveAction 里兜住） */
 function crossCheck(p: CtxPolicy, warn: (t: string) => void): void {
   if (p.ccWindow !== null && p.hardCap >= p.ccWindow - CC_COMPACT_BUFFER) {
     warn(`hardCap ${p.hardCap} 不低于 CC 的实际压缩点（约 ${p.ccWindow - CC_COMPACT_BUFFER}）：CC 会先压，带保留清单的那一步等不到`);
   }
-  if (p.action === "save-compact" && (p.names.some(mayMatchExecutor) || (p.projects.length > 0 && p.names.length === 0))) {
+  if (p.action === "save-compact" && mayHitExecutors(p)) {
     warn("action 是 save-compact，但会命中执行者（agent-task-*）：执行者一律改按 compact 执行——worktree 里的 save-compact 会写主仓 memory，覆盖 PM 的 HANDOFF");
   }
+}
+
+/** 宽模式（agent-*、*、只写项目）排在内置 executor 前面或优先级更高时，会把执行者抢走：执行者拿到的是这条的线 */
+function preemptionCheck(out: CtxPolicy[], warnings: PolicyWarning[]): void {
+  const ei = out.findIndex((p) => p.id === "executor");
+  if (ei < 0) return;
+  out.forEach((p, i) => {
+    if (p.id === "executor" || !mayHitExecutors(p)) return;
+    const outranks = p.projects.length > 0; // 写了项目的优先级高于只写名字的内置 executor，不管顺序
+    if (outranks || i < ei) warnings.push({ policy: p.id, text: "会抢在内置 executor 之前命中执行者（agent-task-*），它们拿到的是这条的线，不是执行类默认值" });
+  });
 }
 
 /**
@@ -159,6 +183,7 @@ export function resolvePolicies(raw: unknown): { policies: CtxPolicy[]; warnings
     out.push(p);
   });
   for (const b of BUILTIN_POLICIES) if (!seen.has(b.id)) out.push(b);
+  preemptionCheck(out, warnings);
   return { policies: out, warnings };
 }
 
@@ -174,7 +199,7 @@ function nameMatches(patterns: string[], name: string): boolean {
   return patterns.some((p) => globMatch(p, name));
 }
 
-type PolicyVia = "project+name" | "project" | "name";
+export type PolicyVia = "project+name" | "project" | "name";
 export interface PolicyMatch {
   policy: CtxPolicy;
   via: PolicyVia;
@@ -208,166 +233,4 @@ export function compactCommand(action: CompactAction, keep: string | null): stri
 /** 第 1 层：启动这个会话时要合进 `--settings` 的键。没策略 / 策略没写 ccWindow → 空对象（不带，CC 用默认）。 */
 export function ccLaunchSettings(m: PolicyMatch | null): { autoCompactWindow?: number } {
   return m?.policy.ccWindow ? { autoCompactWindow: m.policy.ccWindow } : {};
-}
-
-// ── 这一轮用哪条线 ─────────────────────────────────────────────────────
-
-/** 一个 agent 这一轮生效的边界：命中的策略，或退回全局 */
-export interface Boundary {
-  policy: string;
-  via: PolicyVia | "global";
-  /** 0 = 软边界关（全局 window=0） */
-  window: number;
-  /** null = 没有硬上限（全局且拿不到真实窗口） */
-  hardCap: number | null;
-  idleMs: number;
-  action: CompactAction;
-  keep: string | null;
-  ccWindow: number | null;
-}
-
-export interface GlobalAutoCompact {
-  window?: number;
-  idleHours?: number;
-  emergency?: boolean;
-}
-
-// 全局口径（从 stats-dashboard 原样搬来）：缺省 40 万 + 闲置 3 小时；拿得到真实窗口时软线收到 85%、救命线 93%。
-// 救命线离 CC 默认的 ~967K 只剩几万，踩到就不管闲置（打断一次 ≪ 被 CC 裸压丢记忆）。来龙去脉：git log -S EMERGENCY_WINDOW_RATIO
-const DEFAULT_GLOBAL_WINDOW = 400_000;
-const DEFAULT_GLOBAL_IDLE_HOURS = 3;
-const REAL_WINDOW_TRIGGER_RATIO = 0.85;
-const EMERGENCY_WINDOW_RATIO = 0.93;
-
-export function globalBoundary(cfg: GlobalAutoCompact | undefined, realWindow: number | null): Boundary {
-  const w = cfg?.window;
-  const base = w === 0 ? 0 : typeof w === "number" && Number.isFinite(w) && w > 0 ? w : DEFAULT_GLOBAL_WINDOW;
-  const h = cfg?.idleHours;
-  const idleHours = h === 0 ? 0 : typeof h === "number" && Number.isFinite(h) && h > 0 ? h : DEFAULT_GLOBAL_IDLE_HOURS;
-  return {
-    policy: "global",
-    via: "global",
-    window: base > 0 && realWindow ? Math.min(base, Math.floor(realWindow * REAL_WINDOW_TRIGGER_RATIO)) : base,
-    // 救命线独立于软线：window=0 关了软线它照样兜底
-    hardCap: cfg?.emergency !== false && realWindow ? Math.floor(realWindow * EMERGENCY_WINDOW_RATIO) : null,
-    idleMs: idleHours * 3600_000,
-    action: "save-compact",
-    keep: null,
-    ccWindow: null,
-  };
-}
-
-/** 策略的线同样不越过真实窗口的 85% / 93%（小窗口模型上 CC 会先压） */
-export function policyBoundary(m: PolicyMatch, realWindow: number | null): Boundary {
-  const p = m.policy;
-  const cap = (v: number, ratio: number) => (realWindow ? Math.min(v, Math.floor(realWindow * ratio)) : v);
-  return {
-    policy: p.id,
-    via: m.via,
-    window: cap(p.window, REAL_WINDOW_TRIGGER_RATIO),
-    hardCap: cap(p.hardCap, EMERGENCY_WINDOW_RATIO),
-    idleMs: p.idleMinutes * 60_000,
-    action: p.action,
-    keep: p.keep,
-    ccWindow: p.ccWindow,
-  };
-}
-
-// ── 决策表 ─────────────────────────────────────────────────────────────
-
-/** pane 上读出的额度墙 / low-priority / 选择菜单 / 压缩中（来源 lib/lp-state.ts 的 paneQuotaState） */
-export interface PaneQuotaState {
-  wall: boolean;
-  lp: "on" | "off" | "unknown";
-  menu: boolean;
-  compacting: boolean;
-}
-
-export interface BoundaryInput {
-  ctx: number;
-  window: number;
-  hardCap: number | null;
-  /** 最后一条真实对话距今满 idleMs，且画面不在忙 */
-  idle: boolean;
-  /** null = 读不到画面 */
-  pane: PaneQuotaState | null;
-  /** 画面上已有排队消息（「Press up to edit queued messages」） */
-  queued: boolean;
-  /** bridge 刚注入过压缩（守卫期内） */
-  injectedRecently: boolean;
-  lastTrig: number;
-  now: number;
-  retryMs: number;
-}
-
-export type SkipReason = "under" | "compacting" | "retry-wait" | "pane-unknown" | "quota-wall" | "menu" | "queued" | "busy";
-export type BoundaryVerdict = { fire: true; kind: "idle" | "hard-cap" } | { fire: false; reason: SkipReason };
-
-export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
-  under: "没过线",
-  compacting: "正在压缩",
-  "retry-wait": "30 分钟内注入过，还没见效",
-  "pane-unknown": "读不到画面",
-  "quota-wall": "撞了额度墙又没开 low-priority",
-  menu: "画面上有选择菜单",
-  queued: "已经有排队的消息",
-  busy: "还在忙",
-};
-
-/**
- * 按顺序判，先命中先返回：
- *   没过线 → 正在压缩 → 30 分钟重试冷却 → 读不到画面 → 撞墙且没开 LP → 画面上有选择菜单 → 已有排队消息
- *   → 过硬上限（忙也注入，排队到回合结束） → 过软线且闲置 → 其余（忙）不动。
- * 撞墙那条排在冷却之后、且不开火，所以不占重试计时；菜单那条挡的是「往菜单里敲字」——额度墙菜单第 3 项是花钱的 usage credits。
- */
-export function boundaryDecision(i: BoundaryInput): BoundaryVerdict {
-  const overSoft = i.window > 0 && i.ctx >= i.window;
-  const overHard = i.hardCap !== null && i.ctx >= i.hardCap;
-  if (!overSoft && !overHard) return { fire: false, reason: "under" };
-  if (i.injectedRecently || i.pane?.compacting) return { fire: false, reason: "compacting" };
-  if (i.lastTrig > 0 && i.now - i.lastTrig <= i.retryMs) return { fire: false, reason: "retry-wait" };
-  if (!i.pane) return { fire: false, reason: "pane-unknown" };
-  if (i.pane.wall && i.pane.lp !== "on") return { fire: false, reason: "quota-wall" };
-  if (i.pane.menu) return { fire: false, reason: "menu" };
-  if (i.queued) return { fire: false, reason: "queued" };
-  if (overHard) return { fire: true, kind: "hard-cap" };
-  if (i.idle) return { fire: true, kind: "idle" };
-  return { fire: false, reason: "busy" };
-}
-
-// ── 显示 ───────────────────────────────────────────────────────────────
-
-type BoundaryLevel = "ok" | "over" | "cap";
-
-/** 面板 / 网页列表显示用：命中哪条、离软线还剩多少（负数 = 已超出）、过线等级 */
-export interface CtxBoundaryView {
-  policy: string;
-  via: PolicyVia | "global";
-  window: number;
-  hardCap: number | null;
-  remaining: number | null;
-  level: BoundaryLevel;
-  action: CompactAction;
-  ccWindow: number | null;
-  warnings: string[];
-}
-
-const LABEL: Record<string, string> = { executor: "执行类", coordinator: "协调类", global: "全局" };
-/** 面板上显示的策略名：内置的给中文名，自定义的显示 id */
-export const boundaryLabel = (policy: string): string => LABEL[policy] ?? policy;
-
-export function boundaryView(b: Boundary, ctx: number | null, warnings: PolicyWarning[] = []): CtxBoundaryView {
-  const c = ctx ?? 0;
-  const level: BoundaryLevel = b.hardCap !== null && c >= b.hardCap ? "cap" : b.window > 0 && c >= b.window ? "over" : "ok";
-  return {
-    policy: b.policy,
-    via: b.via,
-    window: b.window,
-    hardCap: b.hardCap,
-    remaining: b.window > 0 && ctx !== null ? b.window - ctx : null,
-    level,
-    action: b.action,
-    ccWindow: b.ccWindow,
-    warnings: warnings.filter((w) => w.policy === b.policy).map((w) => w.text),
-  };
 }

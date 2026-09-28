@@ -33,7 +33,7 @@ import { readConfig, setStatsDashboard, isConfigCorrupt } from "../lib/config-st
 import { readRegistryAgents } from "../lib/registry.js";
 import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/usage-cache.js";
 import { compactInjectedRecently, ctxBoundaryViewFor, ctxBoundaryWarnings } from "./ctx-boundary.js";
-import { boundaryLabel, type CtxBoundaryView } from "../lib/ctx-boundary-policy.js";
+import { boundaryLabel, type CtxBoundaryView } from "../lib/ctx-boundary-decision.js";
 import { discordCreateChannel } from "./discord-api.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";

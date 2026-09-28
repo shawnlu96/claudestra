@@ -84,9 +84,9 @@ master/                大总管指令模板（由 setup.ts 渲染）
 - **Claude Code agents 模式适配** — 会话清单 + 分身检测、重启时 fork 自愈、adopt/cleanup（`lib/bg-jobs.ts`）。
 - **后台活动子区 + 会话归档** — subagent / 后台 shell 各开子区；退役会话快照到 `~/.claude-orchestrator/archive/`（另有每日补扫）。
 - **只读历史 API + 手动归档区** — `GET /api/v1/agents/:name/history`、归档/恢复端点，保留期只清手动归档区。
-- **Pi agent 会话** — `runtime: "pi"` 经 Pi 扩展接入，能力档案（`pi-env`），会话记录转成 CC 形状。
+- **Pi agent 会话** — `runtime: "pi"` 经 Pi 扩展接入，能力档案（`pi-env`），会话记录翻译成 Claude Code 形状（`lib/session-source.ts`）。
 - **HTTP peers** — 跨实例协作走 `/api/v1`，scope token + 一键邀请；大总管永不可分享。
-- **上下文边界** — 按项目 / 名字配压缩线：[docs/architecture/context-boundary.md](./docs/architecture/context-boundary.md)。
+- **上下文边界** — 按项目 / 名字模式的压缩线：[context-boundary.md](./docs/architecture/context-boundary.md)。
 
 ## 安全姿态
 
@@ -108,11 +108,11 @@ bun src/manager.ts adopt    <name> <sessionId>   # 把 bg 分身收编为正式�
 bun src/manager.ts archive  <name>               # 立即快照该 agent 当前 session 的对话 jsonl 到归档
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
-bun src/manager.ts restart  --include-master   # 全体重启（含大总管）
+bun src/manager.ts restart  --include-master   # v2.24+ 全体重启（含大总管）
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
 
-# Project 归组（每个 agent 必属一个 project,create 缺省按目录自动归属）
+# Project 归组（v2.21+;每个 agent 必属一个 project,create 缺省按目录自动归属）
 bun src/manager.ts project-add    <id> --dirs <a,b> [--name <显示名>] [--emoji <e>] [--desc <说明>]
 bun src/manager.ts project-list
 bun src/manager.ts project-edit   <id> [--name ..] [--emoji ..] [--dirs a,b] [--desc ..]
@@ -121,14 +121,14 @@ bun src/manager.ts project-assign <agent> <projectId>   # 转移归属,Discord �
 bun src/manager.ts project-migrate                # 存量 agent 补 projectId（bridge 启动时自动跑）
 
 # 定时任务
-bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # 临时 agent 的档位,缺省 medium
+bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # 临时 agent 的档位,缺省 medium(v2.21.3+)
 bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# 跨 Claudestra HTTP peers（docs/design-http-peers.md）。一键邀请：A 生成（中继链接或邀请串），B 点开或粘贴，
-# B 的 bridge 回调 A 兑换；一次性、24h 过期，撤销即吊销 token；单向授权，对称 = B 也发一张。
+# 跨 Claudestra HTTP peers（docs/design-http-peers.md）。v2.15+ 一键邀请：A 生成（连着中继是链接，否则邀请串）、
+# B 点开或粘贴，B 的 bridge 自动回调 A 兑换；一次性、24h 过期，撤销连带吊销内嵌 token；默认单向授权，对称 = B 也发一张。
 # scope 只收已开 external 的 agent，"*"/大总管一律拒（lib/peer-scope-gate.ts）
 bun src/manager.ts peer-invite-new --agents <a,b> [--url <我方bridge地址>]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口/peer 端口）
 bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--url <我方地址>]  # B: 粘贴即完成（--agents = 反向开放）
@@ -158,7 +158,7 @@ bun src/manager.ts auto-update status
 bun src/manager.ts auto-update claudestra on|off   # Claudestra 自更新（30 分钟轮询）
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI（每周轮询）
 
-# 多前端 API token（scope = 按 agent 的白名单，"*" = 除 master 外全部）
+# 多前端 API token（v2.6.0+；scope = 按 agent 的白名单，"*" = 除 master 外全部）
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予
 bun src/manager.ts token-list
 bun src/manager.ts token-revoke <tokenId|name>
@@ -185,8 +185,8 @@ bun test
 | `BRIDGE_URL` | channel-server 的 WebSocket 目标地址（可选覆盖） |
 | `MASTER_DIR` | 大总管 tmux session 的工作目录（可选覆盖） |
 | `BRIDGE_BIND` | HTTP/ws 绑定地址（默认 `127.0.0.1`；`0.0.0.0` 对外开放，反代/TLS 自理） |
-| `BRIDGE_CONTROL_TOKEN` | 控制面 token：**非回环**访问裸路由（`/hook` `/stats` `/skills/rescan` `/agent/cleanup` `/events`）与 ws 升级（`route_to_agent` = 主机 RCE）时要求命中。回环永远豁免；`/api/v1/*` 走自己的 Bearer（peer 不受影响）。不设 = **fail-closed**：非回环控制访问一律拒（当前合法流量 100% 回环，默认零影响）。仅当确需远程直连这些路由时才设。 |
-| `BRIDGE_CORS_ORIGIN` | CORS 白名单：逗号分隔 origin 或 `*`（默认不设 = 不发 CORS 头） |
+| `BRIDGE_CONTROL_TOKEN` | v2.21.1+ 控制面 token：**非回环**访问裸路由（`/hook` `/stats` `/skills/rescan` `/agent/cleanup` `/events`）与 ws 升级（`route_to_agent` = 主机 RCE）时要求命中。回环永远豁免；`/api/v1/*` 走自己的 Bearer（peer 不受影响）。不设 = **fail-closed**：非回环控制访问一律拒（当前合法流量 100% 回环，默认零影响）。仅当确需远程直连这些路由时才设。 |
+| `BRIDGE_CORS_ORIGIN` | v2.10+ CORS 白名单：逗号分隔 origin 或 `*`（默认不设 = 不发 CORS 头） |
 | `BRIDGE_STATIC_DIR` | bridge 托管的网页静态包（`web/out`，Next 导出布局；setup 写入；不设 = 只有 API） |
 
 ## tmux 拓扑
@@ -214,7 +214,7 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
 - MCP server 名（`MCP_NAME`）必须在三处保持一致：`claude mcp add`、channel-server 注册、jsonl-watcher 的 tool 过滤前缀。它集中在 `src/bridge/config.ts` 和 `src/lib/claude-launch.ts`。
 - Agent 名字在 create/resume 时走 shell 元字符黑名单校验，在 kill/restart 时宽松归一，以兼容历史 CJK 命名的 worker。
 - Tool call 展示通过 `WATCHER_CONFIG.debounceMs`（默认 1500ms）去抖，避免在 tool 爆发时触发 Discord 限流。
-- **`channel-server` 生命周期**：一切都由一条约束推导——**channel-server 没有守护者**，Claude Code 既不会 respawn 死掉的 stdio MCP server，也不会自动重连，所以它一旦退出就是该 agent 永久失联。两条规则：（1）**握手之后才注册**。`mcp.oninitialized` 是连 bridge 的闸门，野进程光把 `channel-server.ts` 跑起来抢不到频道——这很要紧，因为 `DISCORD_CHANNEL_ID` 由 Claude Code 注入并被**所有 Bash 子进程继承**，在 agent 自己的仓库里手滑跑一次就会顶掉正在服务的连接。留了 30s 兜底，SDK 不回调也照常注册。（2）**被顶替不等于该死**。收到 `replaced` / `close(4001)` 时看 stdio 还在不在：Claude Code 仍在用本进程就退避重连、把频道拿回来（3s→60s，且计数要稳定持有 30s 才归零，两个活实例只会退化成慢速轮换，不会 3 秒一轮互抢）；只有 `mcp.onclose` 才是正当退出。判定逻辑独立在 `lib/link-policy.ts` 并有单测。`code 1000`（bridge 重启）仍按瞬断处理 → 指数退避重连。
+- **`channel-server` 生命周期（v2.14+）**：一切都由一条约束推导——**channel-server 没有守护者**，Claude Code 既不会 respawn 死掉的 stdio MCP server，也不会自动重连，所以它一旦退出就是该 agent 永久失联。两条规则：（1）**握手之后才注册**。`mcp.oninitialized` 是连 bridge 的闸门，野进程光把 `channel-server.ts` 跑起来抢不到频道——这很要紧，因为 `DISCORD_CHANNEL_ID` 由 Claude Code 注入并被**所有 Bash 子进程继承**，在 agent 自己的仓库里手滑跑一次就会顶掉正在服务的连接。留了 30s 兜底，SDK 不回调也照常注册。（2）**被顶替不等于该死**。收到 `replaced` / `close(4001)` 时看 stdio 还在不在：Claude Code 仍在用本进程就退避重连、把频道拿回来（3s→60s，且计数要稳定持有 30s 才归零，两个活实例只会退化成慢速轮换，不会 3 秒一轮互抢）；只有 `mcp.onclose` 才是正当退出。判定逻辑独立在 `lib/link-policy.ts` 并有单测。`code 1000`（bridge 重启）仍按瞬断处理 → 指数退避重连。
 
 ## 贡献提示
 
@@ -225,7 +225,6 @@ tmux -S /tmp/claude-orchestrator/master.sock -CC attach
   - **Minor**（`x.Y.0`）— 真正新的、值得一句「现在你可以……」标题的用户可见能力。例：v1.3.0 Claude Code 自动更新、v1.5.0 Discord slash 补全。旧 minor 作为历史保留。
   - **Major**（`X.0.0`）— 破坏性变更或系统级重构。由 owner 手动 bump；不要自己主动升 major。
   - 判断法：写 release notes 时如果开头是「修了……」「加了个……」「补了测试」「重构了……」——那就是 **patch**。只有配得上标题的新能力才是 minor。
-- `tmux-helper.ts` 和 `claude-launch.ts` 是 tmux 命令和 Claude Code 启动参数的**唯一权威位置**。新文件里不要再内联这些。
 - 需要绕过 LLM 的管理按钮放到 `bridge/management.ts`。把 `id` 同时加到 `handleMgmtButton` 和对应的面板构造器。
 - 提交前跑 `bun run check`（= `tsc --noEmit` + `bun test` + `scripts/guard`）。**`bun build` 不做类型检查** —— 它对 `const x: number = "str"` 直接放行，此前"用它快速抓类型错误"的说法是错的。每个入口仍要 `bun build src/<entry>.ts --target=bun` 跑一遍（`bridge`、`channel-server`、`manager`、`launcher`、`cron`、`setup`），它能抓到类型检查覆盖不到的模块解析错误。CI 在每次 push / PR 上跑这三件事。
 - Cron 测试测解析与触发时间；实机走沙箱（`bun run sandbox`，[docs/architecture/sandbox.md](./docs/architecture/sandbox.md)）。

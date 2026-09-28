@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
-  BUILTIN_POLICIES, boundaryDecision, boundaryView, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globalBoundary, globMatch,
-  matchPolicy, policyBoundary, resolvePolicies, type BoundaryInput, type CtxPolicy, type PaneQuotaState,
+  BUILTIN_POLICIES, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globMatch, isExecutor, matchPolicy, resolvePolicies,
+  type CtxPolicy,
 } from "../src/lib/ctx-boundary-policy.js";
+import {
+  boundaryDecision, boundaryView, globalBoundary, policyBoundary, type BoundaryInput, type PaneQuotaState,
+} from "../src/lib/ctx-boundary-decision.js";
 
 const byId = (ps: CtxPolicy[], id: string) => ps.find((p) => p.id === id);
 
@@ -147,7 +150,7 @@ describe("policyBoundary", () => {
 });
 
 describe("boundaryDecision：决策表", () => {
-  const clear: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false };
+  const clear: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, draft: false };
   const base: BoundaryInput = {
     ctx: 210_000, window: 200_000, hardCap: 250_000, idle: true, pane: clear, queued: false, injectedRecently: false,
     lastTrig: 0, now: 1_000_000_000, retryMs: 30 * 60_000,
@@ -238,11 +241,16 @@ describe("boundaryView / compactCommand / ccLaunchSettings", () => {
 });
 
 describe("执行者不跑 save-compact（worktree 里写主仓 memory，会覆盖 PM 的 HANDOFF）", () => {
-  test("effectiveAction：agent-task-* 的 save-compact 改成 compact；其余不动", () => {
-    expect(effectiveAction("agent-task-t36", "save-compact")).toBe("compact");
-    expect(effectiveAction("agent-task-t36", "compact")).toBe("compact");
-    expect(effectiveAction("agent-pm-a", "save-compact")).toBe("save-compact");
-    expect(effectiveAction("agent-car-talk", "save-compact")).toBe("save-compact");
+  test("effectiveAction：执行者的 save-compact 改成 compact；其余不动", () => {
+    expect(effectiveAction(true, "save-compact")).toBe("compact");
+    expect(effectiveAction(true, "compact")).toBe("compact");
+    expect(effectiveAction(false, "save-compact")).toBe("save-compact");
+  });
+  test("isExecutor：名字是 agent-task-*，或者目录是 linked worktree（换了名字的 worktree agent 也算）", () => {
+    expect(isExecutor({ name: "agent-task-t36" })).toBe(true);
+    expect(isExecutor({ name: "agent-foo", worktree: true })).toBe(true);
+    expect(isExecutor({ name: "agent-pm-dispatch", worktree: false })).toBe(false);
+    expect(isExecutor({ name: "agent-car-talk" })).toBe(false);
   });
   test("配了 save-compact、又可能命中执行者的策略 → 警告；只命中协调者的不报", () => {
     const hit = (m: object) =>
@@ -257,5 +265,36 @@ describe("执行者不跑 save-compact（worktree 里写主仓 memory，会覆�
     expect(hit({ projects: ["orch"], names: ["agent-pm-*"] })).toBe(false);
     expect(resolvePolicies([{ id: "executor", action: "save-compact" }]).warnings.some((w) => w.text.includes("HANDOFF"))).toBe(true);
     expect(resolvePolicies(undefined).warnings).toEqual([]); // 内置的 coordinator 只匹配 agent-pm-*，不报
+  });
+});
+
+describe("第 1 轮审查补的：match 替换语义 / 宽模式抢执行者 / 草稿 / 余量用完 / 保留清单", () => {
+  test("同 id 写了 match 就整个替换（只写 projects 不再和继承来的 names 取「且」）", () => {
+    const e = resolvePolicies([{ id: "executor", match: { projects: ["orch"] } }]).policies.find((p) => p.id === "executor")!;
+    expect(e.projects).toEqual(["orch"]);
+    expect(e.names).toEqual([]);
+  });
+  test("写成空 match（names: []）→ 报警告并说明内置策略也随之失效", () => {
+    const r = resolvePolicies([{ id: "executor", match: { names: [] } }]);
+    expect(r.policies.some((p) => p.id === "executor")).toBe(false);
+    expect(r.warnings.some((w) => w.policy === "executor" && w.text.includes("enabled:false"))).toBe(true);
+  });
+  test("宽模式排在内置 executor 前面 / 只写项目 → 报「会抢在 executor 之前」；只命中协调者的不报", () => {
+    const pre = (e: object) => resolvePolicies([{ id: "x", window: 900_000, ...e }]).warnings.some((w) => w.policy === "x" && w.text.includes("抢在内置 executor"));
+    expect(pre({ match: { names: ["agent-*"] } })).toBe(true);
+    expect(pre({ match: { projects: ["orch"] } })).toBe(true);
+    expect(pre({ match: { names: ["agent-pm-*"] } })).toBe(false);
+    // executor 被关掉就没有「抢」这回事
+    expect(resolvePolicies([{ id: "executor", enabled: false }, { id: "x", window: 1, match: { names: ["agent-*"] } }]).warnings).toEqual([]);
+  });
+  test("决策表：输入框有草稿 → 不注入，硬上限也不例外；LP 余量用完 → 按撞墙处理", () => {
+    const pane: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, draft: true };
+    const base: BoundaryInput = { ctx: 900_000, window: 200_000, hardCap: 250_000, idle: false, pane, queued: false, injectedRecently: false, lastTrig: 0, now: 1, retryMs: 1 };
+    expect(boundaryDecision(base)).toEqual({ fire: false, reason: "draft" });
+    expect(boundaryDecision({ ...base, pane: { ...pane, draft: false, wall: true, lp: "on", exhausted: true } })).toEqual({ fire: false, reason: "quota-wall" });
+  });
+  test("默认保留清单带上「在等谁的回复」和「值守 / Autopilot 的目标」", () => {
+    expect(DEFAULT_KEEP_LIST).toContain("在等谁的回复");
+    expect(DEFAULT_KEEP_LIST).toContain("Autopilot");
   });
 });

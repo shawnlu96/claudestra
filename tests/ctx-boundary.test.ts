@@ -3,7 +3,8 @@ import {
   compactInjectedRecently, ctxBoundaryTick, injectCompact, noteCompactInjected, resetCtxBoundaryState,
   type BoundaryAgent, type CtxBoundaryDeps,
 } from "../src/bridge/ctx-boundary.js";
-import { DEFAULT_KEEP_LIST, type PaneQuotaState } from "../src/lib/ctx-boundary-policy.js";
+import { DEFAULT_KEEP_LIST } from "../src/lib/ctx-boundary-policy.js";
+import type { PaneQuotaState } from "../src/lib/ctx-boundary-decision.js";
 
 const MIN = 60_000;
 const IDLE_PANE = "some output\n❯ \n";
@@ -13,11 +14,14 @@ function harness(agents: BoundaryAgent[], opts: { panes?: Record<string, string 
   let now = 1_000_000_000;
   const sent: { target: string; line: string }[] = [];
   const logs: string[] = [];
-  const state: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, ...opts.state };
+  const state: PaneQuotaState = { wall: false, lp: "off", menu: false, compacting: false, draft: false, ...opts.state };
   const deps: CtxBoundaryDeps = {
     now: () => now,
     agents: async () => agents,
-    capture: async (t) => (opts.panes && t in opts.panes ? opts.panes[t] : IDLE_PANE),
+    capture: async (t) => {
+      const p = opts.panes && t in opts.panes ? opts.panes[t] : IDLE_PANE;
+      return p === null ? null : { plain: p, esc: p };
+    },
     paneState: () => state,
     send: async (target, line) => void sent.push({ target, line }),
     autoCompact: () => opts.autoCompact,
@@ -26,9 +30,11 @@ function harness(agents: BoundaryAgent[], opts: { panes?: Record<string, string 
   return { deps, sent, logs, state, advance: (ms: number) => (now += ms), get now() { return now; } };
 }
 
-const agent = (o: Partial<BoundaryAgent>): BoundaryAgent => ({
-  name: "agent-task-t1", projectId: "orch", target: "master:agent-task-t1", ctx: 0, convTs: 0, realWindow: null, ...o,
-});
+const agent = (o: Partial<BoundaryAgent>): BoundaryAgent => {
+  const name = o.name ?? "agent-task-t1";
+  return { name, projectId: "orch", target: `master:${name}`, executor: name.startsWith("agent-task-"), ctx: 0, convTs: 0, realWindow: null, ...o };
+};
+const tgt = (name: string, executor = false) => ({ name, target: `master:${name}`, executor });
 
 beforeEach(() => resetCtxBoundaryState());
 
@@ -138,6 +144,35 @@ describe("ctxBoundaryTick", () => {
       expect(h.sent).toEqual([{ target: "master:agent-task-t1", line: `/compact ${DEFAULT_KEEP_LIST}` }]);
     }
   });
+  test("输入框有草稿（owner 打了一半）→ 硬上限也不注入，免得把草稿连着 /compact 一起提交", async () => {
+    const h = harness([], { state: { draft: true } });
+    h.deps.agents = async () => [agent({ ctx: 400_000, convTs: h.now })];
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "draft" });
+    expect(h.sent.length).toBe(0);
+    h.state.draft = false; // 发出去了 / 清掉了：下一轮照常
+    h.advance(MIN);
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: true, kind: "hard-cap" });
+  });
+
+  test("发送失败：日志带错误原文，不记注入守卫，5 分钟后重试（不进 30 分钟沉默期）", async () => {
+    const h = harness([]);
+    h.deps.agents = async () => [agent({ ctx: 300_000, convTs: h.now })];
+    let fail = true;
+    h.deps.send = async (target, line) => {
+      if (fail) throw new Error("can't find window");
+      h.sent.push({ target, line });
+    };
+    const r = await ctxBoundaryTick(h.deps);
+    expect(r[0].inject).toEqual({ status: "failed", error: "can't find window" });
+    expect(h.logs.some((l) => l.includes("failed（can't find window）"))).toBe(true);
+    expect(compactInjectedRecently("master:agent-task-t1", h.now)).toBe(false);
+    h.advance(4 * MIN);
+    expect((await ctxBoundaryTick(h.deps))[0].verdict).toEqual({ fire: false, reason: "retry-wait" });
+    fail = false;
+    h.advance(2 * MIN);
+    expect((await ctxBoundaryTick(h.deps))[0].inject?.status).toBe("executed");
+    expect(h.sent.length).toBe(1);
+  });
 });
 
 describe("injectCompact（T35 批量动作的入口）", () => {
@@ -146,28 +181,30 @@ describe("injectCompact（T35 批量动作的入口）", () => {
       [{ compacting: true }, "compacting"],
       [{ wall: true, lp: "unknown" }, "quota-wall"],
       [{ menu: true }, "menu"],
+      [{ draft: true }, "draft"],
+      [{ exhausted: true, wall: true, lp: "on" }, "quota-wall"],
     ] as const) {
       const h = harness([], { state: s as Partial<PaneQuotaState> });
-      const r = await injectCompact("master:x", { action: "compact" }, h.deps);
+      const r = await injectCompact(tgt("x"), { action: "compact" }, h.deps);
       expect(r).toMatchObject({ status: "skipped", reason });
       expect((r as { text: string }).text.length).toBeGreaterThan(0);
       expect(h.sent.length).toBe(0);
     }
     const h = harness([], { panes: { "master:x": null } });
-    expect(await injectCompact("master:x", { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "pane-unknown" });
+    expect(await injectCompact(tgt("x"), { action: "compact" }, h.deps)).toMatchObject({ status: "skipped", reason: "pane-unknown" });
   });
 
   test("闲着 = executed，忙 = queued，发送抛错 = failed；成功注入都记守卫", async () => {
     const h = harness([], { panes: { "master:busy": BUSY_PANE } });
-    expect(await injectCompact("master:idle", { action: "compact", keep: "只留卡号" }, h.deps)).toEqual({ status: "executed", line: "/compact 只留卡号" });
-    expect(await injectCompact("master:busy", { action: "save-compact" }, h.deps)).toEqual({ status: "queued", line: "/save-compact" });
-    // 带了 agentName 的执行者：save-compact 改成 compact（手动按钮 / 批量动作都走这条）
-    expect(await injectCompact("master:t", { action: "save-compact", agentName: "agent-task-t9" }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
+    expect(await injectCompact(tgt("idle"), { action: "compact", keep: "只留卡号" }, h.deps)).toEqual({ status: "executed", line: "/compact 只留卡号" });
+    expect(await injectCompact(tgt("busy"), { action: "save-compact" }, h.deps)).toEqual({ status: "queued", line: "/save-compact" });
+    // 执行者（名字或 worktree 判定）：save-compact 改成 compact（手动按钮 / 批量动作都走这条）
+    expect(await injectCompact(tgt("agent-foo", true), { action: "save-compact" }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
     expect(compactInjectedRecently("master:idle", h.now)).toBe(true);
     expect(compactInjectedRecently("master:idle", h.now + 16 * MIN)).toBe(false);
     h.deps.send = async () => {
       throw new Error("no window");
     };
-    expect(await injectCompact("master:gone", { action: "compact" }, h.deps)).toEqual({ status: "failed", error: "no window" });
+    expect(await injectCompact(tgt("gone"), { action: "compact" }, h.deps)).toEqual({ status: "failed", error: "no window" });
   });
 });

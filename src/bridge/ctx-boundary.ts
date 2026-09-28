@@ -1,8 +1,10 @@
 /**
- * 上下文边界的执行：每分钟看一遍在跑的 Claude Code 会话，按 lib/ctx-boundary-policy.ts 的决策表往 tmux 注入
+ * 上下文边界的执行：每分钟看一遍在跑的 Claude Code 会话，按 lib/ctx-boundary-decision.ts 的决策表往 tmux 注入
  * `/compact <保留清单>` 或 `/save-compact`。不挂在 Discord 看板上（web-only / 沙箱也要跑），bridge 启动时 startCtxBoundary()。
  * 设计 docs/architecture/context-boundary.md；单测 tests/ctx-boundary.test.ts（全部依赖可注入）。
  */
+import { existsSync, statSync } from "fs";
+import { dirname, join } from "path";
 import { readConfigSync } from "../lib/config-store.js";
 import { agentRuntime, readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "../lib/session-source.js";
@@ -11,23 +13,32 @@ import { readSessionCtx } from "../lib/usage-cache.js";
 import { tmuxRaw, tmuxSendLine, windowKey, windowTarget } from "../lib/tmux-helper.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
+import { compactCommand, effectiveAction, isExecutor, matchPolicy, resolvePolicies, type CompactAction, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
 import {
-  boundaryDecision, boundaryView, compactCommand, effectiveAction, globalBoundary, matchPolicy, policyBoundary, resolvePolicies, SKIP_REASON_TEXT,
-  type Boundary, type BoundaryVerdict, type CompactAction, type CtxBoundaryView, type GlobalAutoCompact, type PaneQuotaState,
-  type PolicyWarning,
-} from "../lib/ctx-boundary-policy.js";
+  boundaryDecision, boundaryView, globalBoundary, policyBoundary, SKIP_REASON_TEXT,
+  type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type PaneQuotaState, type SkipReason,
+} from "../lib/ctx-boundary-decision.js";
 
 const TICK_MS = 60_000;
 /** 注入后 30 分钟没回落到线下才重试：注入可能被 TUI 吞掉，布尔标记会卡成永久沉默（git log -S AUTO_COMPACT_RETRY_MS） */
 const RETRY_MS = 30 * 60_000;
+/** 发送失败（窗口没了、tmux 出错）：5 分钟后再试，不进 30 分钟的沉默期 */
+const FAIL_RETRY_MS = 5 * 60_000;
 /** 刚注入过压缩的窗口：15 分钟内不再注入、也不给看板当 /status 抓取源（压缩中 pane 像闲着，抓取会硬中断它） */
 const INJECT_GUARD_MS = 15 * 60_000;
+/** 面板 / agent 列表一次请求里每个 agent 都要看策略：线上依赖读配置、解析一次管 2 秒 */
+const POLICY_CACHE_MS = 2_000;
 const QUEUED_RE = /Press up to edit queued messages/i;
 
-export interface BoundaryAgent {
+/** 往哪个窗口注入、按不按执行者对待（执行者不跑 save-compact，见 lib effectiveAction） */
+export interface InjectTarget {
   name: string;
-  projectId: string | null;
   target: string;
+  executor: boolean;
+}
+
+export interface BoundaryAgent extends InjectTarget {
+  projectId: string | null;
   /** null = 读不到会话文件 */
   ctx: number | null;
   /** 最后一条真实对话的时间（不用 mtime：CC 会周期性 touch 会话文件） */
@@ -36,19 +47,26 @@ export interface BoundaryAgent {
   realWindow: number | null;
 }
 
+/** 画面两份：纯文本给忙闲 / 排队判定；带转义的给草稿判定（输入框里灰色的提示建议只有 ESC[2m 才分得出来） */
+export interface PaneCapture {
+  plain: string;
+  esc: string;
+}
+
 export interface CtxBoundaryDeps {
   now(): number;
   agents(): Promise<BoundaryAgent[]>;
-  capture(target: string): Promise<string | null>;
-  paneState(pane: string): PaneQuotaState;
+  capture(target: string): Promise<PaneCapture | null>;
+  paneState(plain: string, esc: string): PaneQuotaState;
   send(target: string, line: string): Promise<void>;
   autoCompact(): (GlobalAutoCompact & { policies?: unknown }) | undefined;
   log(line: string): void;
 }
 
+type InjectSkip = Extract<SkipReason, "pane-unknown" | "quota-wall" | "menu" | "draft" | "compacting">;
 export type InjectResult =
   | { status: "executed" | "queued"; line: string }
-  | { status: "skipped"; reason: "pane-unknown" | "quota-wall" | "menu" | "compacting"; text: string }
+  | { status: "skipped"; reason: InjectSkip; text: string }
   | { status: "failed"; error: string };
 
 export interface TickOutcome {
@@ -62,11 +80,13 @@ const lastTrig = new Map<string, number>();
 const injectedAt = new Map<string, number>();
 const lastSkip = new Map<string, string>();
 const warned = new Set<string>();
+let policyCache: { at: number; value: ReturnType<typeof resolveNow> } | null = null;
 
 /** 测试用：清掉进程内状态 */
 export function resetCtxBoundaryState(): void {
   for (const m of [lastTrig, injectedAt, lastSkip]) m.clear();
   warned.clear();
+  policyCache = null;
 }
 
 /** 所有往会话里注入压缩的路径（本模块、看板的手动按钮）都记这一笔，共用一份守卫。 */
@@ -79,7 +99,7 @@ export function compactInjectedRecently(target: string, now = Date.now()): boole
   return ts !== undefined && now - ts < INJECT_GUARD_MS;
 }
 
-function currentPolicies(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log">) {
+function resolveNow(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log">) {
   const ac = deps.autoCompact();
   const r = resolvePolicies(ac?.policies);
   for (const w of r.warnings) {
@@ -91,40 +111,57 @@ function currentPolicies(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log">) {
   return { ac, ...r };
 }
 
-function boundaryFor(a: Pick<BoundaryAgent, "name" | "projectId" | "realWindow">, p: ReturnType<typeof currentPolicies>): Boundary {
+function currentPolicies(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log" | "now">) {
+  if (deps !== liveDeps) return resolveNow(deps);
+  const now = deps.now();
+  if (!policyCache || now - policyCache.at > POLICY_CACHE_MS) policyCache = { at: now, value: resolveNow(deps) };
+  return policyCache.value;
+}
+
+function boundaryFor(
+  a: Pick<BoundaryAgent, "name" | "projectId" | "realWindow" | "executor">,
+  p: ReturnType<typeof resolveNow>,
+): Boundary {
   const m = matchPolicy(p.policies, a);
   const b = m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
-  return { ...b, action: effectiveAction(a.name, b.action) };
+  return { ...b, action: effectiveAction(a.executor, b.action) };
+}
+
+function paneGate(ps: PaneQuotaState): InjectSkip | null {
+  if (ps.compacting) return "compacting";
+  if ((ps.wall && ps.lp !== "on") || ps.exhausted) return "quota-wall";
+  if (ps.menu) return "menu";
+  if (ps.draft) return "draft";
+  return null;
 }
 
 /**
- * 注入一次压缩（T35 的批量动作也走这里）：先读画面，读不到 / 撞墙没开 LP / 有选择菜单 / 正在压缩 → 不敲键。
- * 传了 agentName 时执行者的 save-compact 改成 compact（见 effectiveAction）。
- * 忙的时候敲进去会排队到回合结束（queued），闲着就是立刻执行（executed）。
+ * 注入一次压缩（Discord 手动按钮、T35 的批量动作也走这里；拿不准目标时用 injectTargetFor(name)）。
+ * 先读画面：读不到 / 撞墙没开 LP / 有选择菜单 / 输入框有草稿 / 正在压缩 → 不敲键。执行者的 save-compact 改成 compact。
+ * 忙的时候敲进去会排队到回合结束（queued），闲着就是立刻执行（executed）。只有真发出去了才记注入守卫。
  */
 export async function injectCompact(
-  target: string,
-  opts: { action: CompactAction; keep?: string | null; pane?: string | null; agentName?: string },
+  t: InjectTarget,
+  opts: { action: CompactAction; keep?: string | null; pane?: PaneCapture | null },
   deps: Pick<CtxBoundaryDeps, "capture" | "paneState" | "send" | "now"> = liveDeps,
 ): Promise<InjectResult> {
-  const pane = opts.pane !== undefined ? opts.pane : await deps.capture(target);
-  const ps = pane === null ? null : deps.paneState(pane);
-  const reason = !ps ? "pane-unknown" : ps.compacting ? "compacting" : ps.wall && ps.lp !== "on" ? "quota-wall" : ps.menu ? "menu" : null;
-  if (reason || pane === null) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
-  const line = compactCommand(opts.agentName ? effectiveAction(opts.agentName, opts.action) : opts.action, opts.keep ?? null);
+  const pane = opts.pane !== undefined ? opts.pane : await deps.capture(t.target);
+  const reason: InjectSkip | null = pane ? paneGate(deps.paneState(pane.plain, pane.esc)) : "pane-unknown";
+  if (reason || !pane) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
+  const line = compactCommand(effectiveAction(t.executor, opts.action), opts.keep ?? null);
   try {
-    noteCompactInjected(target, deps.now());
-    await deps.send(target, line);
+    await deps.send(t.target, line);
   } catch (e) {
     return { status: "failed", error: (e as Error).message };
   }
-  return { status: paneLooksWorking(pane) ? "queued" : "executed", line };
+  noteCompactInjected(t.target, deps.now());
+  return { status: paneLooksWorking(pane.plain) ? "queued" : "executed", line };
 }
 
-function idleEnough(a: BoundaryAgent, idleMs: number, pane: string | null, now: number): boolean {
+function idleEnough(a: BoundaryAgent, idleMs: number, pane: PaneCapture | null, now: number): boolean {
   if (idleMs <= 0) return true;
   if (a.convTs === null || pane === null) return false;
-  return now - a.convTs >= idleMs && !paneLooksWorking(pane);
+  return now - a.convTs >= idleMs && !paneLooksWorking(pane.plain);
 }
 
 async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: CtxBoundaryDeps): Promise<TickOutcome> {
@@ -135,8 +172,8 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     window: b.window,
     hardCap: b.hardCap,
     idle: idleEnough(a, b.idleMs, pane, now),
-    pane: pane === null ? null : deps.paneState(pane),
-    queued: pane !== null && QUEUED_RE.test(pane),
+    pane: pane === null ? null : deps.paneState(pane.plain, pane.esc),
+    queued: pane !== null && QUEUED_RE.test(pane.plain),
     injectedRecently: compactInjectedRecently(a.target, now),
     lastTrig: lastTrig.get(a.name) ?? 0,
     now,
@@ -149,10 +186,12 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     lastSkip.set(a.name, verdict.reason);
     return { agent: a.name, boundary: b, verdict };
   }
-  lastTrig.set(a.name, now);
   lastSkip.delete(a.name);
-  const inject = await injectCompact(a.target, { action: b.action, keep: b.keep, pane, agentName: a.name }, deps);
-  deps.log(`🧹 上下文边界 ${verdict.kind === "hard-cap" ? "硬上限" : "闲置"}触发 ${tag}：${b.action} → ${inject.status}`);
+  const inject = await injectCompact(a, { action: b.action, keep: b.keep, pane }, deps);
+  if (inject.status === "executed" || inject.status === "queued") lastTrig.set(a.name, now);
+  else if (inject.status === "failed") lastTrig.set(a.name, now - RETRY_MS + FAIL_RETRY_MS);
+  const why = inject.status === "failed" ? `（${inject.error}）` : inject.status === "skipped" ? `（${inject.text}）` : "";
+  deps.log(`🧹 上下文边界 ${verdict.kind === "hard-cap" ? "硬上限" : "闲置"}触发 ${tag}：${b.action} → ${inject.status}${why}`);
   return { agent: a.name, boundary: b, verdict, inject };
 }
 
@@ -175,19 +214,48 @@ export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise
 
 /** 面板 / 网页列表显示用：这个 agent 命中哪条线、还剩多少 */
 export function ctxBoundaryViewFor(
-  a: { name: string; projectId?: string | null; runtime?: string; sessionId?: string },
+  a: { name: string; projectId?: string | null; runtime?: string; sessionId?: string; cwd?: string },
   ctx: number | null,
 ): CtxBoundaryView | null {
   if (agentRuntime(a) !== "claude-code") return null;
   const p = currentPolicies(liveDeps);
   const realWindow = a.sessionId ? readSessionCtx(a.sessionId)?.window ?? null : null;
-  const b = boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow }, p);
-  return boundaryView(b, ctx, p.warnings);
+  const executor = isExecutor({ name: a.name, worktree: isLinkedWorktree(a.cwd) });
+  return boundaryView(boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow, executor }, p), ctx, p.warnings);
 }
 
 /** 当前配置的问题（越界的 ccWindow、写错的字段…），面板顶上列出来 */
 export function ctxBoundaryWarnings(): PolicyWarning[] {
   return currentPolicies(liveDeps).warnings;
+}
+
+const worktreeCache = new Map<string, boolean>();
+/** 工作目录是不是 git 的 linked worktree：往上找第一个 .git，是文件（「gitdir: …」）就是。按目录缓存（agent 的 cwd 不会变） */
+function isLinkedWorktree(dir: string | undefined): boolean {
+  if (!dir) return false;
+  const hit = worktreeCache.get(dir);
+  if (hit !== undefined) return hit;
+  let v = false;
+  for (let d = dir; ; d = dirname(d)) {
+    const g = join(d, ".git");
+    if (existsSync(g)) {
+      try {
+        v = statSync(g).isFile();
+      } catch {
+        v = false; // 刚好被删：当普通仓库，下次 cwd 变了才会重算（cwd 不变，这里只是防抛）
+      }
+      break;
+    }
+    if (dirname(d) === d) break;
+  }
+  worktreeCache.set(dir, v);
+  return v;
+}
+
+/** 按 registry 名字拼注入对象（Discord 手动按钮、T35 的批量动作用） */
+export async function injectTargetFor(name: string): Promise<InjectTarget> {
+  const r = (await readRegistryAgents()).find((x) => x.name === name);
+  return { name, target: windowTarget(name), executor: isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
 }
 
 async function liveAgents(): Promise<BoundaryAgent[]> {
@@ -200,6 +268,7 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
       name: r.name,
       projectId: r.projectId ?? null,
       target: windowTarget(r.name),
+      executor: isExecutor({ name: r.name, worktree: isLinkedWorktree(r.cwd) }),
       ctx: info?.ctxTokens ?? null,
       convTs: info?.convTs ?? null,
       realWindow: readSessionCtx(r.sessionId)?.window ?? null,
@@ -213,12 +282,21 @@ async function tailOf(r: RegistryAgent) {
   return path ? sessionTailInfo(path) : null;
 }
 
+async function capturePane(t: string): Promise<PaneCapture | null> {
+  try {
+    const [plain, esc] = await Promise.all([tmuxRaw(["capture-pane", "-t", t, "-p"]), tmuxRaw(["capture-pane", "-t", t, "-p", "-e"])]);
+    return { plain, esc };
+  } catch {
+    return null; // 窗口不在 / tmux 出错：决策表按「读不到画面」跳过，不盲敲
+  }
+}
+
 const liveDeps: CtxBoundaryDeps = {
   now: () => Date.now(),
   agents: liveAgents,
-  capture: (t) => tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => null), // 窗口不在 / tmux 出错：决策表按「读不到画面」跳过，不盲敲
+  capture: capturePane,
   // 临时：T35 的 lib/lp-state.ts paneQuotaState 合进来之前一律当「有菜单」处理（不敲键）
-  paneState: () => ({ wall: false, lp: "unknown", menu: true, compacting: false }),
+  paneState: () => ({ wall: false, lp: "unknown", menu: true, compacting: false, draft: true }),
   send: (t, line) => tmuxSendLine(t, line),
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),

@@ -20,7 +20,7 @@ import { emitEvent } from "./event-bus.js";
 import { permissionMessages, clearPermissionMessage } from "./permission-watcher.js";
 import { clearWedgeState } from "./wedge-watcher.js";
 import { forceRefreshStatsDashboard } from "./stats-dashboard.js";
-import { injectCompact } from "./ctx-boundary.js";
+import { injectCompact, injectTargetFor } from "./ctx-boundary.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { describeKeys } from "../lib/runtimes/window-ops.js";
@@ -386,7 +386,7 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
-    const r = await injectCompact(windowTarget(agent.name), { action: "save-compact", agentName: agent.name }); // 同自动压缩一个入口：有菜单 / 撞墙没开 LP / 压缩中不敲键
+    const r = await injectCompact(await injectTargetFor(agent.name), { action: "save-compact" }); // 同自动压缩一个入口：有菜单 / 草稿 / 撞墙没开 LP / 压缩中不敲键
     if (r.status === "skipped" || r.status === "failed") throw new Error(r.status === "skipped" ? `现在不能注入：${r.text}` : r.error);
     console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId}, ${r.status})`);
     const what = r.line === "/save-compact" ? "存记忆 + compact" : "带保留清单 compact（执行者不跑 save-compact，免得覆盖 PM 的 HANDOFF）";
