@@ -79,7 +79,8 @@ export function classifyBash(command: string, extraExternal: readonly string[] =
     if (kw && cmd.includes(kw)) return v("external", `项目登记的对外操作（${kw}）：先查状态，不要直接重跑`);
   }
   let out: SideEffectVerdict = v("none");
-  for (const seg of cmd.split(/\s*(?:&&|\|\||;|\||\n)\s*/)) {
+  // 单个 & 是后台接着跑下一条（2>&1、&> 里的 & 不算分隔）
+  for (const seg of cmd.split(/\s*(?:&&|\|\||;|\||\n|&(?![>\d]))\s*/)) {
     if (seg.trim()) out = heavier(out, classifySegment(seg));
   }
   return out;
@@ -138,6 +139,7 @@ function classifyCommand(t: string[], has: (re: RegExp) => boolean): SideEffectV
   if (c0 === "tmux") return /^(capture-pane|list-|display|has-session|show)/.test(c1) ? v("none") : v("check_first");
   if (["bun", "npm", "yarn", "pnpm", "npx", "bunx"].includes(c0)) return classifyPkg(c0, c1, c2, t);
   if (c0 === "find") return has(/^-(delete|exec|execdir|ok)$/) ? v("check_first") : v("none");
+  if (c0 === "fd") return has(/^(-x|-X|--exec|--exec-batch)$/) ? v("check_first", "fd 对每个结果执行了命令，先核对做到了哪一个") : v("none");
   if (c0 === "sed") return has(/^-i/) ? v("check_first", "先看文件现状") : v("none");
   if (c0 === "mkdir" && has(/^-p$/)) return v("idempotent");
   if (READ_CMDS.has(c0)) return v("none");
@@ -151,9 +153,12 @@ function httpMutates(t: string[]): boolean {
   const args = t.slice(1);
   for (let k = 0; k < args.length; k++) {
     const a = args[k];
-    const method = /^-X(.+)$/.exec(a)?.[1] ?? /^--(?:request|method)=(.+)$/.exec(a)?.[1] ?? (/^(-X|--request|--method)$/.test(a) ? args[k + 1] : undefined);
+    // 短选项可以连写：-sX POST / -sXPOST / -sd@order.json
+    const shortX = /^-[a-zA-Z]*X(.*)$/.exec(a);
+    const method = (shortX ? shortX[1] || args[k + 1] : undefined) ?? /^--(?:request|method)=(.+)$/.exec(a)?.[1] ?? (/^(--request|--method)$/.test(a) ? args[k + 1] : undefined);
     if (method && WRITE_METHOD.test(method)) return true;
-    if (/^(-d|--data.*|-F|--form.*|--json|--upload-file|-T|--post-data|--post-file|--body-data|--body-file)(=.*)?$/.test(a)) return true;
+    if (/^-[a-zA-Z]*[dFT]/.test(a) && !a.startsWith("--")) return true;
+    if (/^(--data.*|--form.*|--json|--upload-file|--post-data|--post-file|--body-data|--body-file)(=.*)?$/.test(a)) return true;
   }
   // httpie：方法是第一个非选项参数，或带 key=value / key:=json 数据项
   if (["http", "https", "xh"].includes(t[0] ?? "")) {
@@ -199,10 +204,11 @@ function classifyGit(all: string[]): SideEffectVerdict {
       : v("external", "tag 可能已经推上去了，先 git ls-remote --tags 核对，要不要重打由 owner 定");
   }
   if (sub === "push") {
-    if (rest.some((x) => /^(-f|--force|--force-with-lease.*|--delete|-d|--mirror|--prune)$/.test(x) || /^:/.test(x) || /^\+/.test(x))) {
+    // 短选项连写（-fu、-df）也算强推 / 删除
+    if (rest.some((x) => /^-[a-zA-Z]*[fd]/.test(x) && !x.startsWith("--") || /^(--force|--force-with-lease.*|--delete|--mirror|--prune)$/.test(x) || /^[:+]/.test(x))) {
       return v("external", "强推 / 删远端分支可能已经生效，先 git ls-remote 核对远端，不要直接重跑");
     }
-    if (rest.includes("--tags") || rest.some((x) => /^refs\/tags\/|^v\d/.test(x))) return v("external", "tag 可能已经推上去了，先 git ls-remote --tags 核对");
+    if (rest.some((x) => x === "--tags" || x === "--follow-tags" || /^refs\/tags\/|^v\d/.test(x))) return v("external", "tag 可能已经推上去了，先 git ls-remote --tags 核对");
     return v("idempotent", "非强推可以重跑；先 git status 看是否已经推上去");
   }
   if (sub === "fetch" || sub === "pull") return v("idempotent");

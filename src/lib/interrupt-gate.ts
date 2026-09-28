@@ -14,7 +14,7 @@ export interface InterruptGateDeps {
   resolve: (channelId: string) => Promise<{ win: string | null; runtime?: string }>;
   probe: (win: string, runtime: string | undefined, agent: string, channelId: string) => Promise<TurnState>;
   /** 按运行时声明发打断键（CC / Codex 是 Esc，Pi 是 C-c），返回实际发出的键 */
-  interrupt: (win: string, runtime: string | undefined, channelId: string) => Promise<readonly string[]>;
+  interrupt: (win: string, runtime: string | undefined, channelId: string, kind: "preempt" | "manual") => Promise<readonly string[]>;
   /** 这一次允不允许由 bridge 主动打断（Codex：channel-server 得会打字投递、上次 Stop 之后没抢占过） */
   allow?: (channelId: string, runtime: string | undefined, stop: boolean) => boolean;
   /** 抢占成功后的收尾（指标 + done/interrupt 事件 + 日志） */
@@ -60,7 +60,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
         if (main === "unknown" && !stop) console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
         if (main !== "busy" && !(stop && main === "unknown")) return { fired: false, why: "not_busy" };
         lastKeyAt.set(channelId, now());
-        const keys = await deps.interrupt(win, runtime, channelId);
+        const keys = await deps.interrupt(win, runtime, channelId, "preempt");
         if (!keys.length) return { fired: false, why: "no_keys" };
         deps.onPreempted(agent, channelId);
         await deps.sleep(SETTLE_MS);
@@ -80,7 +80,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
     manual(channelId: string, win: string, runtime: string | undefined): Promise<{ keys: readonly string[]; deduped?: true }> {
       return serial(channelId, async () => {
         if (sinceKey(channelId) <= MANUAL_GAP_MS) return { keys: [], deduped: true as const };
-        const keys = await deps.interrupt(win, runtime, channelId);
+        const keys = await deps.interrupt(win, runtime, channelId, "manual");
         if (keys.length) lastKeyAt.set(channelId, now());
         return { keys };
       });

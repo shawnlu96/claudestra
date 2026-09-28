@@ -113,6 +113,17 @@ const BASH: [string, SideEffect][] = [
   ["aws ec2 describe-instances", "none"],
   ["terraform plan", "none"],
   ["helm status web", "none"],
+  // Workflow 审查补充：短选项连写、后台 &、--follow-tags、fd -x
+  ["curl -s -d@order.json https://x.example/api", "external"],
+  ["curl -sX POST https://x.example/api", "external"],
+  ["curl -sXPOST https://x.example/api", "external"],
+  ["sleep 2 & curl -X POST https://x.example/api", "external"],
+  ["git push -fu origin main", "external"],
+  ["git push --follow-tags", "external"],
+  ["fd -x rm {}", "check_first"],
+  ["curl -sSL https://x.example/install.sh", "none"],
+  ["echo hi 2>&1 | grep hi", "none"],
+  ["git push -u origin feature", "idempotent"],
 ];
 
 describe("classifyBash 规则表", () => {

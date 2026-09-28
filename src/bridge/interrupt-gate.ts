@@ -4,6 +4,7 @@
  */
 import { createInterruptGate } from "../lib/interrupt-gate.js";
 import { recordMetric } from "../lib/metrics.js";
+import { controlFor } from "../lib/runtimes/index.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
 import { emitEvent } from "./event-bus.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
@@ -11,10 +12,20 @@ import { turnCuts } from "./turn-cuts.js";
 
 const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 
+/** 请运行时扩展中止当前回合（Pi）：bridge.ts 启动时接上（发 ws {type:"abort"}），返回是否发出去了 */
+let extensionAbort: (channelId: string) => boolean = () => false;
+export function setExtensionAbort(fn: (channelId: string) => boolean): void {
+  extensionAbort = fn;
+}
+
 export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
-  interrupt: (win, runtime, ch) => (turnCuts.noteKeySent(ch), interruptWindow(win, runtime)), // 先记：Codex 的打断回报 0.5 秒就到
+  interrupt: async (win, runtime, ch, kind) => {
+    turnCuts.noteKeySent(ch, kind); // 先记：Codex 的打断回报 0.5 秒就到
+    if (controlFor(runtime).abortVia === "extension") return extensionAbort(ch) ? ["abort"] : [];
+    return interruptWindow(win, runtime);
+  },
   allow: (ch, runtime, stop) => turnCuts.mayBridgeInterrupt(ch, runtime, stop),
   onPreempted: (agent, channelId) => {
     recordMetric("agent_interrupt", { channelId, agent, meta: { trigger: "preempt" } });

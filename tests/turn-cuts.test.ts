@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { isHumanRequest, type Envelope } from "../src/bridge/router.js";
 import {
-  CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
+  completedOnlyFrom, settleBy, CUT_TTL_MS, inflightFrom, resumeBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
   type Cut, type CutEvent, type NewCutInput,
 } from "../src/lib/turn-cuts.js";
 
@@ -108,6 +108,36 @@ describe("续做检测（逐段）", () => {
   });
   test("砍在思考 / 出字的段认不出续没续：一直算没续", () => {
     expect(resumeBy(cutFrom([]), start("t9", "Bash", DEPLOY))).toBeNull();
+  });
+});
+
+describe("Codex 与刚跑完的工具（Workflow 审查）", () => {
+  test("Codex 的会话记录只在命令跑完才有 tool_use：不当成在跑，只取最后一条当「做到了」", () => {
+    const evs = [start("c1", "Bash", "rg foo"), start("c2", "Bash", "git push origin x")];
+    expect(inflightFrom(evs).inflight.length).toBe(2); // 旧判据：全当成被砍
+    const r = completedOnlyFrom(evs);
+    expect(r.inflight).toEqual([]);
+    expect(r.lastDone?.summary).toBe("git push origin x");
+    const c = cutFrom(evs, { runtime: "codex", tools: r });
+    expect(preemptHeadline(c)).toContain("bridge 看不到（Codex 命令跑完才记录）");
+    expect(resumeNotice(c, () => "replied")).toContain("看不到是哪条命令");
+  });
+  test("打断后到的成功 tool_done：从 inflight 摘掉；出错的 / 很久以后的不摘", () => {
+    const c = cutFrom([start("t1", "Bash", "curl -X POST https://x/order")]);
+    expect(settleBy(c, done("t1", false, T0 + 2000))?.inflight).toEqual([]);
+    expect(settleBy(c, done("t1", true, T0 + 2000))).toBeNull();
+    expect(settleBy(c, done("t1", false, T0 + 60_000))).toBeNull();
+  });
+  test("停字抬头：Pi 如实写「已请求」；Codex 列出停之前排在队列里的消息", () => {
+    const c = cutFrom([]);
+    expect(stopHeadline(c, "requested")).toContain("没有回执");
+    const h = stopHeadline(c, "fired", ["顺便把 Y 发布"]);
+    expect(h).toContain("停之前还有 1 条消息排在队列里");
+    expect(h).toContain("顺便把 Y 发布");
+  });
+  test("可以重跑的也把核对建议带进抬头（kickstart：先看 pid）", () => {
+    const c = cutFrom([start("t1", "Bash", "launchctl kickstart -k gui/501/x")]);
+    expect(preemptHeadline(c)).toContain("先看服务的 pid");
   });
 });
 

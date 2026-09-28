@@ -7,7 +7,7 @@
  */
 import { statePath } from "../lib/paths.js";
 import {
-  CUT_TTL_MS, lateInflight, makeCut, onStop, resumeBy, resumeNotice,
+  CUT_TTL_MS, lateInflight, makeCut, onStop, resumeBy, resumeNotice, settleBy,
   type Cut, type CutCause, type CutEvent, type CutTool, type ReplyState, type TurnTrigger,
 } from "../lib/turn-cuts.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
@@ -19,6 +19,7 @@ const isCut = (v: unknown) => !!v && typeof v === "object" && typeof (v as Cut).
 const CUT_NOTICE_LABEL = "turn-cuts";
 const REPLY_KEEP = 20;
 const START_KEEP = 50;
+const INBOUND_KEEP = 8;
 /** 会话记录里的打断标记离 bridge 发键这么近 = 是我们发的键（CC 在键到之后几百毫秒内写这一行） */
 const OWN_KEY_WINDOW_MS = 5_000;
 
@@ -34,14 +35,17 @@ export interface RecordCutInput {
 
 export class TurnCuts {
   private readonly cuts: PersistedMap<Cut>;
-  private readonly lastInbound = new Map<string, TurnTrigger>();
+  /** 频道 → 这一回合（上次 Stop / 打断之后）送到的消息，按先后；被打断时它们就是「在处理的」 */
+  private readonly inbound = new Map<string, TurnTrigger[]>();
+  /** Codex 频道：上次 Stop 之后经 codex queue（不是打进 TUI）投的消息摘录——Esc 之后它们会排在停字后面才跑 */
+  private readonly codexQueued = new Map<string, string[]>();
   /** 频道 → 最后一次 ws.send 投递的时刻（终端打断之后有没有新消息进来） */
   private readonly deliveredAt = new Map<string, number>();
   /** `${channelId}\n${chatId}` → agent 往这个地址 reply 的时刻（最近几次） */
   private readonly replies = new Map<string, number[]>();
   /** 最近的 tool_start（lateInflight 要拿 tool_done 对回它的 start） */
   private readonly starts = new Map<string, CutEvent>();
-  private readonly keySentAt = new Map<string, number>();
+  private readonly keySentAt = new Map<string, { at: number; kind: "preempt" | "manual" }>();
   /** 频道 → 人最后一次说的不是「停」的时刻（和 cut 里的「停」比先后） */
   private readonly lastGoAt = new Map<string, number>();
   /** 提醒已生成、还押在队列里没投出去的频道（这期间 agent 续上了 / 又被打断，提醒就作废） */
@@ -62,8 +66,8 @@ export class TurnCuts {
     return this.cuts.get(channelId);
   }
 
-  /** 消息真正 ws.send 出去之后调：记「这个频道最后在处理什么」；打断它的那条送达了，插话回合从此开始 */
-  noteDelivered(env: Envelope, channelId: string): void {
+  /** 消息真正 ws.send 出去之后调：记「这一回合在处理什么」；打断它的那条送达了，插话回合从此开始。typed = Codex 打进 TUI 的那条 */
+  noteDelivered(env: Envelope, channelId: string, typed = false): void {
     const at = this.now();
     this.deliveredAt.set(channelId, at);
     const cut = this.cuts.get(channelId);
@@ -72,7 +76,16 @@ export class TurnCuts {
     const f = env.from;
     const fromName = f.kind === "user" ? (f.username ?? "用户") : f.kind === "api" ? f.name : f.kind === "local" ? (f.agentName ?? "agent") : `bridge${f.label ? `:${f.label}` : ""}`;
     const replyTo = f.kind === "user" || f.kind === "local" ? f.channelId : f.kind === "api" ? `api:${f.tokenId}` : "";
-    this.lastInbound.set(channelId, { messageId: env.meta.messageId, fromKind: f.kind, fromName, excerpt: env.content.slice(0, 120), replyTo, at });
+    const t = { messageId: env.meta.messageId, fromKind: f.kind, fromName, excerpt: env.content.slice(0, 120), replyTo, at };
+    this.inbound.set(channelId, [...(this.inbound.get(channelId) ?? []), t].slice(-INBOUND_KEEP));
+    if (this.codexTypeIn.has(channelId) && !typed && (f.kind === "user" || f.kind === "api")) {
+      this.codexQueued.set(channelId, [...(this.codexQueued.get(channelId) ?? []), t.excerpt].slice(-INBOUND_KEEP));
+    }
+  }
+
+  /** Codex 停字用：上次 Stop 之后排进 codex queue、还没轮到的人类消息（停之后会先跑它们） */
+  codexQueuedBefore(channelId: string): string[] {
+    return this.codexQueued.get(channelId) ?? [];
   }
 
   /** agent 调 reply(chat_id) 时调 */
@@ -86,16 +99,20 @@ export class TurnCuts {
     if (!isStop) this.lastGoAt.set(channelId, this.now());
   }
 
-  /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到） */
-  noteKeySent(channelId: string): void {
-    this.keySentAt.set(channelId, this.now());
+  /** bridge 要发打断键了（发之前记：Codex 的打断回报 0.5 秒就到）。preempt = 后面紧跟着要投一条新消息 */
+  noteKeySent(channelId: string, kind: "preempt" | "manual"): void {
+    this.keySentAt.set(channelId, { at: this.now(), kind });
   }
 
   /** 记一次打断。被打断的回合在处理的是打断之前最后送达的那条（打断它的这条此刻还没送达） */
   record(i: RecordCutInput): Cut {
     const at = this.now();
     this.prune(at);
-    const trig = this.lastInbound.get(i.channelId);
+    // 被打断的回合在处理的：打断它的这条之前送到的那些；人和 agent 的优先（bridge 自己的通知只在没有别的时才算）
+    const all = (this.inbound.get(i.channelId) ?? []).filter((t) => t.messageId !== i.byMessageId);
+    const real = all.filter((t) => t.fromKind !== "bridge");
+    const [trig, ...alsoPending] = real.length ? real : all.slice(-1);
+    this.inbound.set(i.channelId, []); // 插话回合从头记
     const prev = this.cuts.get(i.channelId);
     // 提醒生成了还没投出去就又被打断：那一段还没收尾，挂进新的链里（旧提醒随之作废，见 noticeWanted）
     const chainable = prev && prev.state === "hinted" && this.noticePending.has(i.channelId) ? { ...prev, state: "open" as const } : prev;
@@ -104,7 +121,7 @@ export class TurnCuts {
         id: `cut_${at.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
         agent: i.agent, channelId: i.channelId, runtime: i.runtime, at, cause: i.cause,
         byMessageId: i.byMessageId, byName: i.byName, tools: i.tools,
-        turnTrigger: trig && trig.messageId !== i.byMessageId ? trig : undefined,
+        turnTrigger: trig, alsoPending,
       },
       chainable,
     );
@@ -135,10 +152,13 @@ export class TurnCuts {
     return this.codexTypeIn.has(channelId) && (stop || !this.codexCutSinceStop.has(channelId));
   }
 
-  /** 这次打断回报是不是 bridge 自己发的键引起的（Codex Interrupt hook / CC 会话记录的打断标记） */
-  keySentWithin(channelId: string, at: number, ms = OWN_KEY_WINDOW_MS): boolean {
+  /**
+   * 这次打断回报是不是 bridge 自己发的键引起的（Codex Interrupt hook / CC 会话记录的打断标记）。
+   * kind 给了就只认那一种：抢占的回声不是回合结束（新消息马上开回合），停止按钮的回声就是回合结束，要照常收尾。
+   */
+  keySentWithin(channelId: string, at: number, kind?: "preempt" | "manual", ms = OWN_KEY_WINDOW_MS): boolean {
     const k = this.keySentAt.get(channelId);
-    return k !== undefined && at >= k - 500 && at - k <= ms;
+    return k !== undefined && (!kind || k.kind === kind) && at >= k.at - 500 && at - k.at <= ms;
   }
 
   /** Autopilot 要不要先别推进：人叫停了（之后没再说别的），或者还有一条打断收尾提醒没投 */
@@ -150,7 +170,11 @@ export class TurnCuts {
 
   /** 回合结束：该提醒就返回提醒的信封（押后队列投，只提醒一次），否则 null */
   onStop(channelId: string, event: string, agent: string): Envelope | null {
-    if (event === "Stop") this.codexPaused.delete(channelId), this.codexCutSinceStop.delete(channelId); // 打断回报是 StopFailure，不算
+    if (event === "Stop") {
+      // 回合正常结束：Codex 的队列恢复了、排着的也会依次跑完（打断回报是 StopFailure，不算）；下一回合的消息从头记
+      for (const m of [this.codexPaused, this.codexCutSinceStop]) m.delete(channelId);
+      this.codexQueued.delete(channelId), this.inbound.delete(channelId);
+    }
     const cut = this.cuts.get(channelId);
     if (!cut) return null;
     const d = onStop(cut, event, this.now());
@@ -158,7 +182,7 @@ export class TurnCuts {
     if (d !== "hint") return null;
     this.cuts.set(channelId, { ...cut, state: "hinted" });
     this.noticePending.add(channelId);
-    return resumeNoticeEnv(channelId, agent, resumeNotice(cut, (seg) => this.replyState(seg)));
+    return resumeNoticeEnv(channelId, agent, resumeNotice(cut, (seg, t) => this.replyState(seg, t)));
   }
 
   /** 押着的收尾提醒投出去之前再问一次：生成之后又被打断 / 叫停过、那件事已续上、过了 30 分钟，都不投了 */
@@ -173,9 +197,8 @@ export class TurnCuts {
   }
 
   /** 被打断时在处理的人类消息回过没有：送达到被打断之间回过 = 答了；只在打断之后回过 = 可能答的是插话，让 agent 核对 */
-  private replyState(seg: Cut): ReplyState {
-    const t = seg.turnTrigger;
-    if (!t || (t.fromKind !== "user" && t.fromKind !== "api") || !t.replyTo) return "replied";
+  private replyState(seg: Cut, t: TurnTrigger): ReplyState {
+    if ((t.fromKind !== "user" && t.fromKind !== "api") || !t.replyTo) return "replied";
     const times = (this.replies.get(`${seg.channelId}\n${t.replyTo}`) ?? []).filter((ts) => ts >= t.at);
     return times.some((ts) => ts <= seg.at) ? "replied" : times.length ? "after_cut" : "never";
   }
@@ -193,7 +216,7 @@ export class TurnCuts {
     const resumed = resumeBy(cut, e);
     if (resumed) return void this.cuts.set(e.chatId, resumed);
     if (e.type === "tool_done" && cut.state === "open") {
-      const upd = lateInflight(cut, this.starts.get(String(e.data.toolId ?? "")), e);
+      const upd = settleBy(cut, e) ?? lateInflight(cut, this.starts.get(String(e.data.toolId ?? "")), e);
       if (upd) this.cuts.set(e.chatId, upd);
     }
   }

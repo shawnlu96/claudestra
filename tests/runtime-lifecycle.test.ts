@@ -293,13 +293,14 @@ describe("control 声明", () => {
     });
   });
 
-  test("Pi：维持 C-c，不抢占、忙闲只信 hook、模型以启动参数为准（restart 不再补发 /model）", () => {
+  test("Pi：不抢占、停经扩展 abort（C-c 只清空输入框）、忙闲只信 hook、模型以启动参数为准（restart 不再补发 /model）", () => {
     expect(controlFor("pi")).toEqual({
       interruptKeys: ["C-c"],
       preemptOnHumanMessage: false,
       idleSource: "hook",
       modelEnforcement: "launch-flag",
       paneHeuristics: false,
+      abortVia: "extension",
     });
   });
 

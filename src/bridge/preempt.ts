@@ -24,6 +24,12 @@ function senderName(env: Envelope): string {
 }
 
 /**
+ * 打断那一刻「砍在哪」的快照（发键之前取：打断后 CC 会给被砍的工具写一条出错结果，快照就看不出了）。
+ * Codex 的会话记录只在命令跑完才有一条，跑着的看不到：只取最后跑完的一条（lib/turn-cuts.ts completedOnlyFrom）。
+ */
+const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(agent, runtime === "codex");
+
+/**
  * 人类 request 到达、投递之前调：目标主回合在跑就打断（CC / Codex；Pi steer 不打断），停字三种运行时都打断。
  * 真打断了（键发出、画面确认停下）才记 cut、加「这条消息打断了你」的抬头；「停」不管打没打断都记一条「停」类 cut
  * （压掉续做提醒、Autopilot 不推进），抬头照实写打断没打断。发键失败只记日志，消息照常投递。
@@ -31,7 +37,9 @@ function senderName(env: Envelope): string {
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<void> {
   const stop = matchStopWord(env.content).stop;
   turnCuts.noteHuman(channelId, stop);
-  const tools = inflightTools(agent); // 发键之前取：打断后 CC 会给被砍的工具写一条出错结果，快照就看不出砍在哪了
+  const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
+  const tools = toolsAt(agent, runtime);
+  const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
   let r: PreemptResult = { fired: false, why: "not_allowed" };
   try {
     r = await interruptGate.preempt(channelId, agent, { stop });
@@ -39,13 +47,14 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
     console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
   }
   if (!r.fired && !stop) return;
-  const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
     byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] },
   });
   if (!stop) return void (env.meta.interruptNote = preemptHeadline(cut));
-  env.meta.interruptNote = stopHeadline(cut, r.fired ? "fired" : r.why === "not_busy" ? "not_busy" : "failed");
+  // Pi 的中止靠扩展里的 abort()，发出去没有回执：如实写「已请求」
+  const outcome = r.fired ? (runtime === "pi" ? "requested" : "fired") : r.why === "not_busy" ? "not_busy" : "failed";
+  env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore);
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
 }
 
@@ -57,11 +66,11 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
 export async function manualInterrupt(
   channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api",
 ): Promise<{ keys: readonly string[]; deduped?: true }> {
-  const tools = inflightTools(agent);
+  const tools = toolsAt(agent, runtime);
   const r = await interruptGate.manual(channelId, win, runtime);
-  if (r.deduped) return r; // 1.5 秒内刚发过键（多半是抢占，新消息正在投）：别把正在开始的回合收成 done
-  // 空闲时也记：人按了停，续做提醒和 Autopilot 都该停下
+  // 空闲 / 1.5 秒内刚发过键（多半是抢占）也记：人按了停，续做提醒和 Autopilot 都该停下
   turnCuts.record({ channelId, agent, runtime, cause: "manual", tools: r.keys.length ? tools : { inflight: [] } });
+  if (r.deduped) return r; // 刚发过键、新消息正在投：别把正在开始的回合收成 done
   if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger } });
   stopTyping(channelId);
   clearSafetyTimer(channelId);
@@ -84,5 +93,5 @@ export async function interruptAgentByName(name: string, channelId: string): Pro
  */
 export function onCodexInterrupt(channelId: string, agent: string): void {
   if (turnCuts.keySentWithin(channelId, Date.now())) return;
-  turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: inflightTools(agent) });
+  turnCuts.record({ channelId, agent, runtime: "codex", cause: "codex_interrupt", tools: toolsAt(agent, "codex") });
 }

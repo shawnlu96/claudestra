@@ -138,14 +138,14 @@ describe("终端里自己按的打断（P1-1 第二条）", () => {
   });
   test("bridge 刚发过键 → 是自己的回声，不记", () => {
     const { b, at, tick } = book();
-    b.noteKeySent("ch");
+    b.noteKeySent("ch", "preempt");
     tick(400);
     b.onEvent(interrupted(at()));
     expect(b.get("ch")).toBeUndefined();
   });
   test("回声判定用那一行写进会话记录的时间，不用 watcher 读到的时间", () => {
     const { b, at, tick } = book();
-    b.noteKeySent("ch");
+    b.noteKeySent("ch", "preempt");
     tick(4_000);
     expect(b.keySentWithin("ch", at() - 3_600)).toBe(true);
     expect(b.keySentWithin("ch", at() + 60_000)).toBe(false);
@@ -185,5 +185,60 @@ describe("Codex：打字投递状态（P1-3 / P2-4 / P2-14）", () => {
     b.record({ channelId: "ch", agent: "a", runtime: "pi", cause: "stopword", tools: { inflight: [] } });
     preempt(b, "m");
     expect(b.takeAfterInterrupt("ch")).toBe(false);
+  });
+});
+
+describe("Workflow 审查补充（#148 @a24b688）", () => {
+  test("Codex 打断回报：抢占的回声不当回合结束；停止按钮的回声照常收尾", () => {
+    const { b, at } = book();
+    b.noteKeySent("ch", "preempt");
+    expect(b.keySentWithin("ch", at() + 500, "preempt")).toBe(true);
+    const m = book();
+    m.b.noteKeySent("ch", "manual");
+    expect(m.b.keySentWithin("ch", m.at() + 500, "preempt")).toBe(false);
+    expect(m.b.keySentWithin("ch", m.at() + 500)).toBe(true); // 仍是 bridge 自己的键：不记成终端里按的
+  });
+
+  test("语音连发：抢占冷却期内送到的补充也算在处理、也列进「还没回复」；bridge 自己的通知不顶掉人的消息", () => {
+    const { b, tick } = book();
+    b.noteDelivered(env("m1", "先部署 X"), "ch");
+    tick(1_000);
+    b.noteDelivered(env("m2", "再把 Y 也改了"), "ch");
+    b.noteDelivered(env("n1", "[agent-calls] …", { kind: "bridge", label: "agent-calls" } as Envelope["from"]), "ch");
+    tick(1_000);
+    const cut = preempt(b, "m3");
+    expect(cut.turnTrigger?.messageId).toBe("m1");
+    expect(cut.alsoPending?.map((t) => t.messageId)).toEqual(["m2"]);
+    b.noteDelivered(env("m3", "x"), "ch");
+    tick(1_000);
+    const n = b.onStop("ch", "Stop", "a")!.content;
+    expect(n).toContain("先部署 X");
+    expect(n).toContain("再把 Y 也改了");
+  });
+
+  test("Codex：上次 Stop 之后经 queue 投的人类消息记下来，停字抬头列出它们；打进 TUI 的不算；Stop 后清零", () => {
+    const { b } = book();
+    b.setCodexTypeIn("ch", true);
+    b.noteDelivered(env("m1", "部署 X"), "ch", true);
+    b.noteDelivered(env("m2", "顺便把 Y 发布"), "ch", false);
+    expect(b.codexQueuedBefore("ch")).toEqual(["顺便把 Y 发布"]);
+    b.onStop("ch", "Stop", "cx");
+    expect(b.codexQueuedBefore("ch")).toEqual([]);
+  });
+
+  test("打断前一两秒刚跑完的工具：之后到的成功 tool_done 把它从「被砍断」里摘掉", () => {
+    const { b, at } = book();
+    preempt(b, "m2");
+    b.onEvent({ type: "tool_done", ts: iso(at() + 1_500), data: { toolId: "t1", error: false }, chatId: "ch", agent: "a" });
+    const c = b.get("ch")!;
+    expect(c.inflight).toEqual([]);
+    expect(c.lastDone?.summary).toBe(DEPLOY);
+  });
+
+  test("停止按钮在抢占后 1.5 秒内按下（被去重、没发键）也记成停", () => {
+    const { b } = book();
+    preempt(b, "m2");
+    b.record({ channelId: "ch", agent: "a", cause: "manual", tools: { inflight: [] } });
+    expect(b.get("ch")?.state).toBe("stopped");
   });
 });

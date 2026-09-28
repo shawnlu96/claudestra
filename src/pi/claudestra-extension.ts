@@ -50,11 +50,8 @@ const RECONNECT_MAX_MS = 60_000;
 /** 就绪标记写在 tmux window 上，manager 创建 agent 时轮询它判断「起来了」 */
 const READY_OPTION = "@claudestra_ready";
 
-// ────────────────────────────────────────────────────────────
-// Pi 扩展 API 的最小结构化类型（本仓库不依赖 pi 包，避免为一个 type import
-// 拖进整套依赖；字段与 @earendil-works/pi-coding-agent 0.85.x 的
-// dist/core/extensions/types.d.ts 对齐，运行时由 Pi 自己提供实现）
-// ────────────────────────────────────────────────────────────
+// ── Pi 扩展 API 的最小结构化类型（不依赖 pi 包，免得为一个 type import 拖进整套依赖；
+//    字段与 @earendil-works/pi-coding-agent 0.85.x 的 dist/core/extensions/types.d.ts 对齐，运行时由 Pi 提供实现） ──
 
 interface PiToolResult {
   content: Array<{ type: "text"; text: string }>;
@@ -84,10 +81,10 @@ interface PiContext {
   modelRegistry?: PiModelRegistryLike;
   /** 当前模型（可能为空）。取 name/id 写进能力快照 */
   model?: { id?: string; name?: string } | undefined;
-  sessionManager?: {
-    getSessionId?(): string | undefined;
-    getSessionFile?(): string | undefined;
-  };
+  sessionManager?: { getSessionId?(): string | undefined; getSessionFile?(): string | undefined };
+  /** 中止当前回合（Pi 的 C-c 只清空输入框，真正的中止是这个；bridge 的停字 / 停止按钮经 ws 的 abort 走到这里） */
+  abort?(): void;
+  isIdle?(): boolean;
 }
 
 interface PiToolDefinition {
@@ -125,9 +122,7 @@ interface PiExtensionApi {
   getModel?(): { id?: string; name?: string } | undefined;
 }
 
-// ────────────────────────────────────────────────────────────
-// 扩展主体
-// ────────────────────────────────────────────────────────────
+// ── 扩展主体 ──
 
 export default function claudestraChannel(pi: PiExtensionApi): void {
   // 不是 Claudestra 起的会话 ⇒ 一行工具都不注册，彻底不影响用户自己的 pi。
@@ -147,6 +142,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   /** Pi 是否在一轮当中——决定注入用不用 deliverAs（流式中必须给） */
   let streaming = false;
+  let runCtx: PiContext | undefined; // 最近一次 agent_start 的上下文：bridge 的 abort 要用
   /** 最近一次入站消息的 chat_id：reply 不传 chat_id 时的默认去处 */
   let lastChatId = "";
   const pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -328,6 +324,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           if (msg.meta?.chat_id) lastChatId = String(msg.meta.chat_id);
           void inject(String(msg.content ?? ""));
           return;
+        case "abort": // bridge 的停字 / 停止按钮：没在跑就什么都不做（空闲时 abort 无意义）
+          try { if (runCtx && !runCtx.isIdle?.()) runCtx.abort?.(); } catch (e) { console.error(`claudestra: abort 失败: ${(e as Error).message}`); }
+          return;
         case "replaced":
           // 同一个频道被另一条连接顶替。Claude Code 侧的判据是「MCP stdio 还在 ⇒ 绝不死」；
           // 这里等价：会话还活着 ⇒ 不当致命错误，退避后把频道抢回来。
@@ -449,7 +448,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   // 模型换了就重写快照（档案里钉的模型/用户手动切换都走这里）
   pi.on("model_select", (_event, ctx) => writeEnvSnapshot(ctx));
 
-  pi.on("agent_start", () => { streaming = true; });
+  pi.on("agent_start", (_event, ctx) => { streaming = true; runCtx = ctx; });
   pi.on("agent_settled", () => {
     streaming = false;
     reportSettled();

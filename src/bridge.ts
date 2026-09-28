@@ -176,6 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
+import { setExtensionAbort } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -416,6 +417,7 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
+setExtensionAbort((ch) => !!clients.get(ch) && (clients.get(ch)!.ws.send(JSON.stringify({ type: "abort" })), true)); // Pi 的停：扩展里 abort()
 
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
@@ -851,7 +853,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   try {
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    turnCuts.noteDelivered(env, to.channelId);
+    turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true");
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
     const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId };
@@ -2734,6 +2736,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
     }
+    // Codex 被 bridge 自己的 Esc 打断后的 Interrupt 回报（约 0.5 秒到，报成 StopFailure）：不是回合结束——抢占已收尾，新消息正要开回合，
+    // 走下面的 Stop 收尾会把等待中的 API / agent 请求按被砍的回合结算、还给 owner 发假的完成 @
+    if (body.interrupt && turnCuts.keySentWithin(channelId, Date.now(), "preempt")) return new Response("ok");
 
     // v2.22.x 补 reply 拦截(owner 2026-09-07「agent 总是忘了调 reply」):这回合有
     // 投递给它却没回的请求 → 让 Claude Code 别结束,带 reason 续跑一次。必须在

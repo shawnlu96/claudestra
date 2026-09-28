@@ -86,5 +86,5 @@ export function stopNeedsPaneRecheck(runtime: string | undefined | null): boolea
 
 /** 给人看的按键名（"C-c" → "Ctrl+C"），打断回执里用 */
 export function describeKeys(keys: readonly string[]): string {
-  return keys.map((k) => (k === "C-c" ? "Ctrl+C" : k === "Escape" ? "Esc" : k)).join(" ");
+  return keys.map((k) => (k === "C-c" ? "Ctrl+C" : k === "Escape" ? "Esc" : k === "abort" ? "中止请求" : k)).join(" ");
 }

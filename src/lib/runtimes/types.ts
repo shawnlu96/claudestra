@@ -193,6 +193,11 @@ export interface RuntimeControl {
    * window-ops 的 interruptWindow 读它：空闲时一个键都不发，调用方回报「当前空闲，无需打断」。
    */
   interruptOnlyWhenBusy?: boolean;
+  /**
+   * 打断不靠按键、靠运行时里的扩展：Pi 的 C-c 只清空输入框（从不中止回合），真正的中止是扩展上下文的 abort()，
+   * bridge 经 ws 发 {type:"abort"} 给 Claudestra 扩展（src/pi/claudestra-extension.ts）。发出去就算「已请求」，没有回执。
+   */
+  abortVia?: "extension";
 }
 
 /** fork 后探测真实会话 id 的上下文 */
