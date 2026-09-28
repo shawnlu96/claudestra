@@ -44,12 +44,14 @@ export interface AccountState {
   health: Partial<Record<QuotaEndpoint, EndpointHealth>>;
 }
 
-interface CredHealth {
+export interface CredHealth {
   /** internal = 调度自身出错（spawn 抛错、写盘失败等），也挂冷却 */
   code: CredErrorCode | "internal";
   at: number;
-  /** null = 只认用户主动重试（Keychain 被拒 / 超时：不能每开一次看板就弹一次框） */
+  /** null = 看板上只认用户主动重试（Keychain 被拒 / 超时：不能每开一次看板就弹一次框）；后台仍按 6 小时节奏试 */
   until: number | null;
+  /** 同一个码连续出现的次数（Keychain 连续被拒 2 次后台也停，等用户重试） */
+  count?: number;
 }
 
 export interface QuotaState {
@@ -59,6 +61,8 @@ export interface QuotaState {
   accounts: Record<string, AccountState>;
   credHealth: Partial<Record<QuotaProvider, CredHealth>>;
   reminders: ReminderLedger;
+  /** 后台查询的上次尝试时刻（成功失败都算）：Claude 后台读 Keychain 只按它的 6 小时节奏走，凭据坏着也不会每个 tick 都读 */
+  bgAttemptAt?: Partial<Record<QuotaProvider, number>>;
 }
 
 export function emptyQuotaState(): QuotaState {
@@ -115,10 +119,25 @@ function normalizeAccount(a: unknown): AccountState | null {
   };
 }
 
+/**
+ * 账本里的一条通知：provider 只认 claude / codex（缺省 = 老账本的 codex），expiry 要有形状对的 credits、exhausted 要有 exhausted 块。
+ * 认不出的整条丢（未来版本回滚、手改）——留着的话复核时按它查视图会抛错，把整个提醒流程卡死。
+ */
 function validNotice(n: unknown): boolean {
   if (!isObj(n) || typeof n.id !== "string" || !num(n.createdAt) || typeof n.accountKey !== "string" || !isObj(n.channels)) return false;
+  if (n.provider !== undefined && n.provider !== "claude" && n.provider !== "codex") return false;
+  const credit = (c: unknown) => isObj(c) && typeof c.key === "string" && num(c.expiresAtMs) && num(c.thresholdH);
+  const e = n.exhausted;
+  const body = n.kind === "expiry" ? Array.isArray(n.credits) && n.credits.every(credit)
+    : n.kind === "exhausted" && isObj(e) && num(e.applicable) && typeof e.windowId === "string" && numOrNull(e.resetsAtMs);
   const ch = n.channels;
-  return ["push", "discord"].every((c) => isObj(ch[c]) && typeof ch[c].status === "string" && num(ch[c].attempts));
+  return body && ["push", "discord"].every((c) => isObj(ch[c]) && typeof ch[c].status === "string" && num(ch[c].attempts));
+}
+
+function validOutbox(raw: unknown[]): ReminderLedger["outbox"] {
+  const ok = raw.filter(validNotice) as ReminderLedger["outbox"];
+  if (ok.length < raw.length) console.warn(`[quota] 提醒账本里 ${raw.length - ok.length} 条通知形状认不出，已丢弃`);
+  return ok;
 }
 
 /** 从磁盘读回的状态逐层过一遍：形状不对的那一块丢掉，其余照用（外层不对就整份按空） */
@@ -134,11 +153,12 @@ export function normalizeQuotaState(v: unknown): QuotaState {
     v: 1,
     current: keep(v.current, (p, k) => PROVIDERS.has(p) && (k === null || safeKey(k))),
     accounts,
-    credHealth: keep(v.credHealth, (p, c) => PROVIDERS.has(p) && isObj(c) && typeof c.code === "string" && num(c.at) && numOrNull(c.until)),
+    credHealth: keep(v.credHealth, (p, c) => PROVIDERS.has(p) && isObj(c) && typeof c.code === "string" && num(c.at) && numOrNull(c.until) && (c.count === undefined || num(c.count))),
+    ...(isObj(v.bgAttemptAt) ? { bgAttemptAt: keep(v.bgAttemptAt, (p, at) => PROVIDERS.has(p) && num(at)) } : {}),
     reminders: {
       credits: keep(r.credits, (_k, c) => isObj(c) && num(c.expiresAtMs) && Array.isArray(c.coveredH) && c.coveredH.every(num)),
       exhausted: keep(r.exhausted, (_k, at) => num(at)),
-      outbox: (r.outbox as unknown[]).filter(validNotice) as ReminderLedger["outbox"],
+      outbox: validOutbox(r.outbox as unknown[]),
     },
   };
 }

@@ -24,6 +24,7 @@ import { openAgentInfo } from "../agent-info";
 import { stopMission } from "@/lib/api/agents";
 import { MissionIcon, MissionModal, MissionStopIcon, openMissionModal } from "./mission-ui";
 import { FolderIcon, menuItemIcon } from "./line-icons";
+import { LedgerStageLine } from "./ledger-stage-chip";
 
 type MenuState = { agent: AgentSession; x: number; y: number } | null;
 type Page = "main" | "move" | "open-terminal" | "open-ide";
@@ -67,8 +68,10 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
   const arch = useArmedConfirm(4000);
   const items = buildAgentMenu(s.agent, openers, platform) ?? [];
   const sub = page === "open-terminal" ? openers.filter((o) => o.kind === "terminal") : page === "open-ide" ? openers.filter((o) => o.kind === "ide") : [];
-  const rows = page === "main" ? items.length : 1 + Math.max(1, page === "move" ? targets.length : sub.length);
-  const title = page === "move" ? t("移动到") : page === "open-terminal" ? t("在终端打开") : page === "open-ide" ? t("用 IDE 打开") : s.agent.displayName;
+  // 主页标题下多一行台账阶段（LedgerStageLine），按半行算进高度，免得贴底弹出时被切掉
+  const rows = page === "main" ? items.length + (s.agent.ledgerTask ? 0.5 : 0) : 1 + Math.max(1, page === "move" ? targets.length : sub.length);
+  const mainTitle = <>{s.agent.displayName}{s.agent.ledgerTask && <LedgerStageLine task={s.agent.ledgerTask} />}</>;
+  const title = page === "move" ? t("移动到") : page === "open-terminal" ? t("在终端打开") : page === "open-ide" ? t("用 IDE 打开") : mainTitle;
   return (
     <MenuShell x={s.x} y={s.y} rows={rows} title={title} onClose={closeAgentMenu}>
       {page === "main" &&

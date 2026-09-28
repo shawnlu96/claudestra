@@ -54,7 +54,7 @@ export function Bar({ pct, tone }: { pct: number; tone: string }) {
   );
 }
 
-function WarnIcon() {
+export function WarnIcon() {
   return (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="inline-block align-[-1px]">
@@ -65,7 +65,7 @@ function WarnIcon() {
   );
 }
 
-function CardTitle({ runtime, title, tag }: { runtime: string; title: string; tag?: string | null }) {
+export function CardTitle({ runtime, title, tag }: { runtime: string; title: string; tag?: string | null }) {
   return (
     <div className="flex items-center gap-1.5 text-xs font-medium">
       <RuntimeBadge runtime={runtime} />
@@ -76,7 +76,7 @@ function CardTitle({ runtime, title, tag }: { runtime: string; title: string; ta
 }
 
 /** 一条额度窗口：百分比 + 重置时间；过了重置时刻只说「待刷新」，不把旧百分比当现值 */
-function GaugeRow({ label, pct, resets, passed }: { label: string; pct?: number | null; resets?: string; passed?: boolean }) {
+export function GaugeRow({ label, pct, resets, passed }: { label: string; pct?: number | null; resets?: string; passed?: boolean }) {
   const t = useT();
   return (
     <div>

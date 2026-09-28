@@ -246,3 +246,12 @@ describe("piSessionIdFromFilename（会话文件名 → sessionId）", () => {
     expect(piSessionIdFromFilename("nounderscore.jsonl")).toBeNull();
   });
 });
+
+describe("piLineToClaudeShape · provider", () => {
+  test("assistant 行保留接入商名（全机用量按它拆）；不是字符串就不带", async () => {
+    const { piLineToClaudeShape } = await import("../src/lib/pi-session.js");
+    const line = (provider: unknown) => JSON.stringify({ type: "message", id: "e1", timestamp: "2026-09-28T00:00:00Z", message: { role: "assistant", provider, model: "glm", content: [] } });
+    expect(piLineToClaudeShape(line("acme-go"))?.message.provider).toBe("acme-go");
+    expect(piLineToClaudeShape(line(42))?.message.provider).toBeUndefined();
+  });
+});

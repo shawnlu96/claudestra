@@ -38,6 +38,11 @@ export interface AppConfig {
   /** 语音转写用的 Groq API key（bridge/local-api：PUT /api/v1/settings 写、GET 只回尾四位提示；env GROQ_API_KEY 兜底）。
    *  以前在 web BFF 的 ~/.claude-orchestrator/web/config.json，manager migrate-web-state 搬过来。 */
   groqApiKey?: string;
+  /** 订阅额度：从订阅接口读取实时额度（缺省开；关了只用本机缓存，bridge 不读 Keychain / auth.json）。bridge/quota-service.ts */
+  quotaLive?: boolean;
+  /** 没人看看板时也在后台读 Claude 的 Keychain、查 Claude 额度与重置卡（6 小时一次），让 Claude 的快过期提醒也能后台触发。
+   *  缺省开（owner 09-28 批准；设计稿 T2b §3 / §5 原定只在看板打开时读）；false 单独关掉。每个 tick 现读，改完不用重启 */
+  quotaClaudeBackground?: boolean;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -82,6 +87,8 @@ function merge(base: AppConfig, raw: any): AppConfig {
     // 以前漏在这里：任何 set*（读→改→写）都会把磁盘上的 archiveRetentionDays 抹掉
     ...(typeof raw.archiveRetentionDays === "number" ? { archiveRetentionDays: raw.archiveRetentionDays } : {}),
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
+    ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
+    ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
   };
 }
 
@@ -95,7 +102,8 @@ function defaults(): AppConfig {
  * （2026-09 审查 D7-4）。其余字段仍取默认值。
  */
 export function safeConfigOnCorrupt(): AppConfig {
-  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false } };
+  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）
+  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false };
 }
 
 // 常驻进程（bridge / launcher）运行中文件被写坏时，继续用上次成功读到的内容
@@ -190,6 +198,13 @@ export async function setAutoCompact(patch: { window?: number; idleHours?: numbe
     ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
     ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
   };
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.quotaLive = enabled;
   await writeConfig(cfg);
   return cfg;
 }
