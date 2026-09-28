@@ -197,8 +197,9 @@ describe("依赖边视图", () => {
 
   test("总览带边（推导值 / 最终状态）；每个任务带 blockedBy 与 runnable；dep 事件不算 lastEvent（不盖掉进展）", () => {
     const v = projectView(db, "p", 3000);
-    expect(v.deps.map((d) => [d.from, d.to, d.derived, d.effective])).toEqual([["T1", "T4", "done", "done"], ["T4", "T5", "waiting", "waiting"]]);
-    expect(v.tasks.map((t) => [t.id, t.runnable, t.blockedBy])).toEqual([["T1", true, []], ["T2", false, []], ["T4", true, []], ["T5", false, ["T4"]]]);
+    // T1 停在 merge：过审排队不算满足（code 要到 live），T4 仍被挡
+    expect(v.deps.map((d) => [d.from, d.to, d.derived, d.effective])).toEqual([["T1", "T4", "active", "active"], ["T4", "T5", "waiting", "waiting"]]);
+    expect(v.tasks.map((t) => [t.id, t.runnable, t.blockedBy])).toEqual([["T1", true, []], ["T2", false, []], ["T4", false, ["T1"]], ["T5", false, ["T4"]]]);
     expect(v.tasks.find((t) => t.id === "T5")!.lastEvent).toMatchObject({ kind: "task", data: { op: "new" } });
   });
 

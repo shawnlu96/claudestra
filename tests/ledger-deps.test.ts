@@ -31,21 +31,35 @@ const dep = (from: string, to: string, over: Partial<LedgerDep> = {}): LedgerDep
 });
 
 describe("推导（纯函数）", () => {
-  test("满足：code / ops 从 merge 起，investigate 只认 done；cancelled 不算", () => {
-    const code: [Stage, boolean][] = [["review", false], ["merge", true], ["live", true], ["verified", true], ["done", true], ["cancelled", false], ["blocked", false]];
+  test("满足（PM 09-29）：code 从 live 起；ops / investigate 只认 done；cancelled 不算", () => {
+    const code: [Stage, boolean][] = [
+      ["review", false], ["merge", false], ["live", true], ["verified", true], ["done", true], ["fix", false], ["cancelled", false], ["blocked", false],
+    ];
     for (const [s, ok] of code) expect([s, isSatisfied(t("a", s))]).toEqual([s, ok]);
-    expect(isSatisfied(t("a", "merge", "ops"))).toBe(true);
+    for (const s of ["merge", "live", "verified"] as Stage[]) expect([s, isSatisfied(t("a", s, "ops"))]).toEqual([s, false]);
+    expect(isSatisfied(t("a", "done", "ops"))).toBe(true);
     expect(isSatisfied(t("a", "review", "investigate"))).toBe(false);
     expect(isSatisfied(t("a", "done", "investigate"))).toBe(true);
   });
 
-  test("blocks：满足 → done，前置在 review → active，其余 waiting；branch：满足 → active，否则 waiting；前置不存在 → waiting", () => {
-    expect(derivedState("blocks", t("a", "merge"))).toBe("done");
+  test("blocks：满足 → done，已交付未满足（review / merge / 未 done 的 ops live）→ active，其余 waiting；branch：满足 → active；前置不存在 → waiting", () => {
+    expect(derivedState("blocks", t("a", "live"))).toBe("done");
+    expect(derivedState("blocks", t("a", "merge"))).toBe("active");
     expect(derivedState("blocks", t("a", "review"))).toBe("active");
+    expect(derivedState("blocks", t("a", "live", "ops"))).toBe("active");
     expect(derivedState("blocks", t("a", "build"))).toBe("waiting");
+    expect(derivedState("blocks", t("a", "fix"))).toBe("waiting");
     expect(derivedState("branch", t("a", "live"))).toBe("active");
-    expect(derivedState("branch", t("a", "review"))).toBe("waiting");
+    expect(derivedState("branch", t("a", "merge"))).toBe("waiting");
     expect(derivedState("blocks", undefined)).toBe("waiting");
+  });
+
+  test("上游在 merge：下游不可执行；上游到 live：下游可执行；上游回滚到 fix：下游重新被挡", () => {
+    const down = t("D", "spec");
+    const at = (stage: Stage) => runnableTasks([t("U", stage), down], depViews([dep("U", "D")], [t("U", stage), down])).map((x) => x.id);
+    expect(at("merge")).toEqual(["U"]);
+    expect(at("live")).toEqual(["U", "D"]);
+    expect(at("fix")).toEqual(["U"]);
   });
 
   test("手动值优先于推导；前置取消时标 fromCancelled", () => {
@@ -196,7 +210,11 @@ describe("写入：加 / 改 / 删", () => {
     moveStage(db, EXE, { taskId: "A", from: "build", to: "review" });
     expect(derived()).toBe("active");
     moveStage(db, PM, { taskId: "A", from: "review", to: "merge" });
+    expect(derived()).toBe("active");
+    moveStage(db, PM, { taskId: "A", from: "merge", to: "live" });
     expect(derived()).toBe("done");
+    moveStage(db, PM, { taskId: "A", from: "live", to: "fix" });
+    expect(derived()).toBe("waiting");
   });
 });
 

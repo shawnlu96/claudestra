@@ -46,26 +46,31 @@ function workStage(t: StageOf): Stage {
   return t.stage === "blocked" && t.stageBefore ? t.stageBefore : t.stage;
 }
 
-/** code / ops 进了 merge 就算满足（依赖要的是进 main，不是上线）；investigate 不经合并，只认 done */
+/**
+ * 满足（PM 09-29 定）：code 上线才算——merge 只是过审排队，队列能冻结、能退回 review / fix，下游在它之上开工会踩空；
+ * ops 与 investigate 只认 done。上游回退（live → fix 等）时推导自然翻回不满足。
+ */
 const SATISFIED: Record<TaskKind, readonly Stage[]> = {
-  code: ["merge", "live", "verified", "done"],
-  ops: ["merge", "live", "verified", "done"],
+  code: ["live", "verified", "done"],
+  ops: ["done"],
   investigate: ["done"],
 };
+/** 已交付、在审查 / 合并 / 上线路上但还没满足：blocks 边算「正在判定」 */
+const IN_FLIGHT: readonly Stage[] = ["review", "merge", "live", "verified"];
 
 export function isSatisfied(task: StageOf): boolean {
   return SATISFIED[task.kind]?.includes(workStage(task)) ?? false;
 }
 
 /**
- * blocks：前置满足 → done；前置在 review（条件正在判定）→ active；其余 → waiting。
+ * blocks：前置满足 → done；已交付还没满足（review / merge / live / verified 里没满足的）→ active；其余 → waiting。
  * branch：前置满足 → active（到了分叉口，等人判定走哪条）；否则 waiting。branch 的 done 只能由 PM 手动选中。
  */
 export function derivedState(kind: DepKind, from: StageOf | undefined): DepState {
   if (!from) return "waiting";
   if (kind === "branch") return isSatisfied(from) ? "active" : "waiting";
   if (isSatisfied(from)) return "done";
-  return workStage(from) === "review" ? "active" : "waiting";
+  return IN_FLIGHT.includes(workStage(from)) ? "active" : "waiting";
 }
 
 export function depViews(deps: readonly LedgerDep[], tasks: readonly DepTask[]): DepView[] {
