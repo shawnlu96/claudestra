@@ -119,6 +119,9 @@ export const COLLAB_DICT: Record<string, string> = {
   "任务没记分支，核对不了本仓库 {origin} 上有没有它的 PR：PM 先 ledger task-set {task} --branch <分支> 再重跑":
     "The task has no branch recorded, so we can’t check whether {origin} has a PR for it: a PM runs ledger task-set {task} --branch <branch>, then rerun",
   "查不了本仓库 {origin} 上有没有分支 {branch} 的 PR（{error}），按判断不了处理": "Couldn’t check whether {origin} has a PR from branch {branch} ({error}); treated as inconclusive",
+  "查不了 PR {link} 的分支（{error}），按判断不了处理": "Couldn’t read the branch of PR {link} ({error}); treated as inconclusive",
+  "PR {link} 的分支是 {head}，任务记的分支是 {branch}：对不上就核不了是不是这个任务的，改对 PR 链接或分支后重跑":
+    "PR {link} is from branch {head}, but the task records branch {branch}; without a match we can’t confirm it belongs to this task — fix the PR link or the branch, then rerun",
   "本仓库 {origin} 上有分支 {branch} 的 PR {pr}：这是本仓库的活，PR 链接应该指向它": "{origin} has PR {pr} from branch {branch}: this is this repository’s work, so the PR link should point there",
   "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑":
     "The PR points to {prRepo} ({dir}), another repository of project {project}, but the PM declared {declared} — fix the PR link or extra.repo, then rerun",

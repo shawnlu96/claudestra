@@ -75,8 +75,9 @@ export const INCOMPLETE_TEXT: Record<IncompleteReason, string> = {
  */
 export function parseExtraRepo(raw: unknown): string | null {
   if (raw === undefined || raw === null) return null;
-  if (typeof raw !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(raw.trim())) {
-    throw new Error(`task extra.repo 要是 owner/repo（如 shawnlu96/claudestra-relay），收到 ${JSON.stringify(raw)}`);
+  // 不收 .git 结尾：PR 链接里的仓库名不带它，带了就永远对不上
+  if (typeof raw !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(raw.trim()) || /\.git$/i.test(raw.trim())) {
+    throw new Error(`task extra.repo 要是 owner/repo（如 shawnlu96/claudestra-relay，不带 .git），收到 ${JSON.stringify(raw)}`);
   }
   return raw.trim().toLowerCase();
 }
