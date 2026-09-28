@@ -56,14 +56,14 @@ describe("currentHandler", () => {
     expect(h()).toMatchObject({ role: "owner", since: 70 });
   });
 
-  test("常规轮通过但派审时记着还要对抗式 → 仍归调度助理；升级给 owner 后 owner 记了 decision → 回到 PM", () => {
+  test("常规轮通过、规格卡还要对抗式（dispatch 记着审查策略）→ 仍归调度助理；升级给 owner 后 owner 记了 decision → 回到 PM", () => {
     moveStage(db, owner(20), { taskId: "T1", from: "spec", to: "restate" });
     moveStage(db, owner(30), { taskId: "T1", from: "restate", to: "build" });
     deliver(db, { actor: "agent-exec", now: 40 }, { taskId: "T1", moveFrom: "build" });
-    appendEvent(db, { actor: "agent-disp", now: 50 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "regular", round: 1, adversarialNext: true } });
+    appendEvent(db, { actor: "agent-disp", now: 50 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "regular", round: 1, policy: "Claude 一轮；最后一轮对抗式" } });
     recordReview(db, owner(60), { taskId: "T1", reviewer: "regular", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     expect(h()).toMatchObject({ role: "dispatcher", since: 60 });
-    appendEvent(db, { actor: "agent-disp", now: 70 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "adversarial", round: 1, adversarialNext: false } });
+    appendEvent(db, { actor: "agent-disp", now: 70 }, { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "adversarial", round: 1, policy: "Claude 一轮；最后一轮对抗式" } });
     recordReview(db, owner(80), { taskId: "T1", reviewer: "adversarial", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     expect(h()).toMatchObject({ role: "pm", since: 80 });
     appendEvent(db, { actor: "agent-pm", now: 90 }, { project: "p", target: "T1", kind: "escalate", text: "要拍板", data: { to: "owner" } });

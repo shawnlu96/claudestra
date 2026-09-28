@@ -13,7 +13,8 @@ import type { LedgerEvent, LedgerTask } from "../lib/ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import { STATE_DIR, statePath, TMUX_SOCK } from "../lib/paths.js";
-import { buildReviewPack, reviewPolicy, wantsAdversarial, type PrevReview, type ReviewPack } from "../lib/review-pack.js";
+import { lastReviewOf } from "../lib/ledger-handler.js";
+import { buildReviewPack, nextReview, reviewPolicy, type PrevReview, type ReviewPack } from "../lib/review-pack.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -70,8 +71,8 @@ interface PackPlan {
   adversarial: boolean;
   worktree: string | null;
   deliverEvent: LedgerEvent | undefined;
-  /** 规格卡要求对抗式（「审查」一行提到对抗）：常规轮通过后还要再派一轮 */
-  wantsAdversarialRound: boolean;
+  /** 规格卡「审查」那一行，记进 dispatch 事件：路由 / currentHandler 据此用 nextReview 算下一轮 */
+  policy: string | null;
   pack: ReviewPack;
 }
 
@@ -85,11 +86,13 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
   const reviews = events.filter((e) => e.kind === "review");
   const round = intFlag(c.p, "round") ?? Math.max(task.round, 1);
   if (round < 1) throw new LedgerError("invalid", "--round 从 1 起");
-  const prev = toPrev(reviews.at(-1));
+  const lastEvent = reviews.at(-1);
+  const prev = toPrev(lastEvent);
   const specPath = specPathOf(c, task);
   const specText = readText(specPath);
   const policy = reviewPolicy(specText);
-  const adversarial = c.p.bools.has("adversarial") || wantsAdversarial(policy, prev);
+  const next = lastEvent ? nextReview(policy, lastReviewOf(lastEvent, events).last) : nextReview(policy, null);
+  const adversarial = c.p.bools.has("adversarial") || next === "adversarial";
   const worktree = await worktreeOf(c, task);
   const deliverEvent = events.findLast((e) => e.kind === "deliver");
   const dd = deliverEvent?.data ?? {};
@@ -102,7 +105,7 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
     workDir: join(REVIEWS_DIR, `${tag}-work`),
     prod: { stateDir: STATE_DIR, tmuxSocket: TMUX_SOCK, bridgePort: resolveBridgePort({ BRIDGE_PORT: repoEnvVar("BRIDGE_PORT") }) },
   });
-  return { task, round, adversarial, worktree, deliverEvent, wantsAdversarialRound: !!policy?.includes("对抗"), pack };
+  return { task, round, adversarial, worktree, deliverEvent, policy, pack };
 }
 
 async function reviewPack(c: LedgerCli): Promise<Result> {
@@ -130,8 +133,8 @@ async function dispatch(c: LedgerCli): Promise<Result> {
   const reviewer = p.adversarial ? "adversarial" : "regular";
   // 去重键带 head：同一轮重新交付了新 head 再派，是新的一次派审，不能拿回带旧 head 的那条
   const ctx = { ...c.ctx(), dedupKey: c.p.flags.dedup ?? `dispatch:${p.task.id}:r${p.round}:${reviewer}:${p.task.headSHA ?? "-"}` };
-  // adversarialNext：这轮是常规、规格卡还要对抗式 → 这轮通过也不归 PM（路由与 currentHandler 据此判断）
-  const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath, adversarialNext: !p.adversarial && p.wantsAdversarialRound };
+  // policy：规格卡的审查策略，路由 / currentHandler 据此用 nextReview 判断这轮通过后是不是还要审
+  const data = { reviewer, round: p.round, head: p.task.headSHA, path: p.pack.reviewPath, policy: p.policy };
   const r = appendEvent(c.db, ctx, { project: p.task.project, target: p.task.id, kind: "dispatch", text: p.pack.description, data });
   return { ok: true, event: r.event, duplicate: r.duplicate, ...(headNote ? { headNote } : {}), ...p.pack };
 }

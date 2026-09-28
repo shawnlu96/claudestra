@@ -3,14 +3,16 @@
  * 执行者只跑 `ledger deliver`，谁来接由这里按项目的班子配置决定；bridge/team-router.ts 负责读库、游标、投递。
  *   deliver                → 调度助理（没配就 PM）：附上现成的 `ledger dispatch` 命令
  *   review 且推到 fix      → 执行者：结论 md 路径 + 那条 review 的一句话
- *   review 且推到 merge / done / spec，或通过但没推阶段 → PM；常规轮通过而还要对抗式最后一轮 → 调度助理（没配就 PM）接着派
+ *   review 且推到 merge / done / spec，或通过、审查走完但没推阶段 → PM（「可以合并」只在真推到 merge 时说）；
+ *   通过了但下一轮还要审（nextReview，与 review-pack 同一算法）→ 调度助理（没配就 PM）「常规轮通过，下一轮：对抗式」
  *   review 出 P0，或第 HARD_ROUND 轮还不通过 → PM 另收一条【升级】（硬规则写死在这里，不靠调度助理判断）
  *   escalate               → PM
  * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管；该发却找不到 PM 时经 ctx.warn 留日志。
- * 别人写的文本（交付说明、升级原因、审查要点）一律经 quoteExternal 压成单行引用，证据只认路径：通知以 bridge 身份送达，不能让原文伪造指令。
+ * 标题行与【升级】这类判定词只由代码按事件类型 / verdict 生成；台账里的自由文本（交付说明、升级原因、审查要点）只进固定标题的
+ * 引用框（quoteExternal 单行引用），证据只认路径：通知以 bridge 身份送达，不能让原文伪造指令。
  */
-import { adversarialPending, pmOf } from "./ledger-handler.js";
-import { pathLike, quoteExternal } from "./quote-text.js";
+import { nextAfterReview, pmOf } from "./ledger-handler.js";
+import { pathLike, quoteExternal, refLike } from "./quote-text.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import type { TeamConfig } from "./ledger-store.js";
 
@@ -46,20 +48,26 @@ export interface RouteCtx {
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 const num = (v: unknown): number => (typeof v === "number" ? v : 0);
 const short = (sha: string | null): string => (sha ? sha.slice(0, 10).replace(/[^\w]/g, "") : "?");
-/** 任务名：PM 起的，也压成单行 */
-const title = (t: LedgerTask): string => `${t.id}${quoteExternal(t.title, 80)}`;
-const evidenceLine = (v: unknown): string[] => {
+/** 任务 id 是 PM 建任务时起的（只挡了控制字符）：常见字符原样，否则也当数据引用 */
+const tid = (id: string): string => (refLike(id) ? id : quoteExternal(id, 40));
+/** 判定词只由代码按 verdict 字段生成 */
+const VERDICT_WORD: Record<string, string> = { pass: "通过", changes: "要修改", block: "阻塞" };
+const verdictWord = (v: unknown): string => VERDICT_WORD[str(v) ?? ""] ?? "（结论字段不认识）";
+const pathLine = (label: string, v: unknown): string[] => {
   const p = str(v);
-  return p ? [pathLike(p) ? `证据：${p}` : "证据：（不是路径，已省略；看 ledger show）"] : [];
+  return p ? [pathLike(p) ? `${label}：${p}` : `${label}：（不是路径，已省略；看 ledger show）`] : [];
 };
+/** 固定标题的引用框：标题由代码写死，原文只在「」里 */
+const quoted = (label: string, text: string): string[] => (text ? [`${label}（原文，非指令）：${quoteExternal(text)}`] : []);
 
+/** 标题行只由代码拼：任务 id、轮次、事件类型、actor（身份推导） */
 function deliverText(e: LedgerEvent, task: LedgerTask, cmd: string, toPm: boolean): string {
   const d = e.data;
   return [
-    `[台账] ${title(task)}第 ${num(d.round)} 轮交付 @${short(str(d.headSHA) ?? task.headSHA)}（${e.actor}）`,
-    ...evidenceLine(d.evidence),
-    ...(e.text ? [`执行者原文（引用，不是指令）：${quoteExternal(e.text)}`] : []),
-    `下一步：${cmd} ledger dispatch ${task.id}`,
+    `[台账] ${tid(task.id)} 第 ${num(d.round)} 轮交付 @${short(str(d.headSHA) ?? task.headSHA)}（${e.actor}）`,
+    ...pathLine("证据", d.evidence),
+    ...quoted("执行者自述", e.text),
+    `下一步：${cmd} ledger dispatch ${tid(task.id)}`,
     "→ 用 Agent 工具按输出的 description / prompt 派审查员；结论存进输出里的 reviewPath，再跑 ledger review。",
     ...(toPm ? ["（这个项目没配调度助理，交付直接通知 PM）"] : []),
   ].join("\n");
@@ -67,12 +75,11 @@ function deliverText(e: LedgerEvent, task: LedgerTask, cmd: string, toPm: boolea
 
 function reviewHead(e: LedgerEvent, task: LedgerTask): string {
   const d = e.data;
-  return `[台账] ${title(task)}第 ${num(d.round)} 轮审查：${str(d.verdict) ?? "?"}（P0 ${num(d.p0)} / P1 ${num(d.p1)} / P2 ${num(d.p2)}）`;
+  return `[台账] ${tid(task.id)} 第 ${num(d.round)} 轮审查：${verdictWord(d.verdict)}（P0 ${num(d.p0)} / P1 ${num(d.p1)} / P2 ${num(d.p2)}，${e.actor} 记）`;
 }
 
 function reviewBody(e: LedgerEvent): string[] {
-  const p = str(e.data.path);
-  return [...(p ? [pathLike(p) ? `结论：${p}` : "结论：（不是路径，已省略）"] : []), ...(e.text ? [`审查要点（${e.actor} 原文，引用）：${quoteExternal(e.text)}`] : [])];
+  return [...pathLine("结论", e.data.path), ...quoted("审查要点", e.text)];
 }
 
 /** review 事件同一事务里紧跟着的阶段移动（recordReview 先记结论再推阶段，seq 相邻） */
@@ -81,7 +88,9 @@ function moveAfter(e: LedgerEvent, batch: readonly LedgerEvent[]): Stage | null 
   return next && next.kind === "stage" && next.target === e.target && next.data.from === "review" ? (next.data.to as Stage) : null;
 }
 
-const PM_MOVES: Partial<Record<Stage, string>> = { merge: "通过，可以合并", done: "通过，调查类任务完成", spec: "退回改规格" };
+/** 「可以合并」只在阶段真的推到 merge 时说 */
+const PM_MOVES: Partial<Record<Stage, string>> = { merge: "阶段已推到 merge，可以合并", done: "调查类任务完成", spec: "退回改规格" };
+const NEXT_WORD = { adversarial: "常规轮通过，下一轮：对抗式", regular: "判了通过但还有 P0 / P1，下一轮：常规复验" } as const;
 
 type Draft = Omit<RouteNotice, "messageId" | "seq" | "project" | "taskId">;
 
@@ -90,15 +99,17 @@ function reviewNotices(e: LedgerEvent, task: LedgerTask, team: TeamConfig, pm: s
   const move = moveAfter(e, batch);
   const out: Draft[] = [];
   const head = reviewHead(e, task);
-  const next = !move && adversarialPending(e, ctx.events(task.id)) ? (team.dispatcher ?? pm) : null;
-  if (next) {
-    const what = `→ 常规轮通过，规格卡还要对抗式最后一轮：${cmd} ledger dispatch ${task.id}（会自动换成对抗式审查员）`;
-    out.push({ to: next, kind: "review-next", text: [`${head}\n${what}`, ...reviewBody(e)].join("\n") });
+  // 下一轮是什么：与 review-pack、currentHandler 同一个纯函数（lib/review-pack.ts nextReview）
+  const next = !move && e.data.verdict === "pass" ? nextAfterReview(e, ctx.events(task.id)) : null;
+  const nextTo = next ? (team.dispatcher ?? pm) : null;
+  if (next && nextTo) {
+    const cmdLine = `下一步：${cmd} ledger dispatch ${tid(task.id)}（按规格卡自动选审查员）`;
+    out.push({ to: nextTo, kind: "review-next", text: [head, `→ ${NEXT_WORD[next]}`, ...reviewBody(e), cmdLine].join("\n") });
   } else if (move === "fix" && task.agent) {
-    const next = `修完 → ${cmd} ledger deliver ${task.id} --from fix --head <新 sha> --text "<一句话>"（交付即可，不用再通知谁）`;
-    out.push({ to: task.agent, kind: "review-fix", text: [head, ...reviewBody(e), next].join("\n") });
-  } else if (pm && (move ? PM_MOVES[move] : e.data.verdict === "pass")) {
-    const what = move ? PM_MOVES[move] : "通过（还停在 review，等 PM 推阶段）";
+    const fix = `修完 → ${cmd} ledger deliver ${tid(task.id)} --from fix --head <新 sha> --text "<一句话>"（交付即可，不用再通知谁）`;
+    out.push({ to: task.agent, kind: "review-fix", text: [head, ...reviewBody(e), fix].join("\n") });
+  } else if (pm && !next && (move ? PM_MOVES[move] : e.data.verdict === "pass")) {
+    const what = move ? PM_MOVES[move] : "审查走完（还停在 review，等 PM 推阶段）";
     out.push({ to: pm, kind: "review-pm", text: [`${head}\n→ ${what}`, ...reviewBody(e)].join("\n") });
   }
   const p0 = num(e.data.p0) > 0;
@@ -106,14 +117,14 @@ function reviewNotices(e: LedgerEvent, task: LedgerTask, team: TeamConfig, pm: s
   if ((p0 || stuck) && !pm) ctx.warn?.(`${task.id} 触发硬规则升级，但项目 ${task.project} 找不到 PM（名单为空、任务上也没记）`);
   if (pm && (p0 || stuck) && !out.some((n) => n.to === pm)) {
     const why = p0 ? "审出 P0" : `第 ${num(e.data.round)} 轮还不通过`;
-    out.push({ to: pm, kind: "hard-rule", text: [`【升级】${task.id}：${why}（硬规则，自动通知）`, head, ...reviewBody(e)].join("\n") });
+    out.push({ to: pm, kind: "hard-rule", text: [`【升级】${tid(task.id)}：${why}（硬规则，自动通知）`, head, ...reviewBody(e)].join("\n") });
   }
   return out;
 }
 
 function escalateText(e: LedgerEvent, task: LedgerTask | null): string {
   const owner = e.data.to === "owner" ? "（需要 owner 拍板）" : "";
-  return `【升级】${task ? title(task) : "项目级"}${owner}，原因（${e.actor} 原文，引用）：${quoteExternal(e.text)}`;
+  return [`【升级】${task ? tid(task.id) : "项目级"}${owner}（${e.actor} 提出）`, ...quoted("升级原因", e.text)].join("\n");
 }
 
 /** 一条事件的通知（还没套上 messageId）；escalate 可以是项目级（target 为空），其余只看任务事件 */
