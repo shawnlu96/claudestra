@@ -78,7 +78,7 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
  * 发键出错原样抛给调用方回报；keys 为空 = 空闲 / 刚按过一次停，调用方各自回执。刚自动抢占过就等够最小间隔再发，不丢这次停。
  */
 export async function manualInterrupt(
-  channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string } = { owner: true },
+  channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api", by: { owner: boolean; name?: string; peer?: string } = { owner: true },
 ): Promise<{ keys: readonly string[]; deduped?: true }> {
   const tools = toolsAt(agent, runtime);
   if (by.owner) clearAgentPendings(channelId); // 同停字：发键之前清，Pi 停下报的 Stop 不再被看门狗拿去催
@@ -91,12 +91,12 @@ export async function manualInterrupt(
   stopTyping(channelId);
   clearSafetyTimer(channelId);
   // 空闲时也发 done：前端误判忙时借此解锁
-  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
+  emitEvent({ agent, chatId: channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(by.peer ? { peer: by.peer } : {}) } });
   return r;
 }
 
 /** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
-export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string }): Promise<{ keys: readonly string[]; deduped?: true }> {
+export async function interruptAgentByName(name: string, channelId: string, by?: { owner: boolean; name?: string; peer?: string }): Promise<{ keys: readonly string[]; deduped?: true }> {
   const isMaster = name === "master" || name === "0";
   const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就按 CC 的打断键发：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;

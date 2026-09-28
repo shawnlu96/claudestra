@@ -143,6 +143,12 @@ describe("parseResetAt", () => {
   test("新版 CC 的 session / weekly limit 文案照样解析", () => {
     expect(parseResetAt("You've hit your session limit · resets 4:30pm (Asia/Tokyo)", Date.parse("2026-09-28T03:00:00Z"))).toBe(Date.parse("2026-09-28T07:30:00Z"));
   });
+  test("带星期：resets Fri 9am → 下一个周五；今天就是那天且已过 → 下周", () => {
+    const mon = Date.parse("2026-09-28T03:00:00Z"); // 周一，东京 12:00
+    expect(parseResetAt("You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)", mon)).toBe(Date.parse("2026-10-02T00:00:00Z"));
+    expect(parseResetAt("resets Mon 1pm (Asia/Tokyo)", mon)).toBe(Date.parse("2026-09-28T04:00:00Z"));
+    expect(parseResetAt("resets Mon 11am (Asia/Tokyo)", mon)).toBe(Date.parse("2026-10-05T02:00:00Z"));
+  });
   test("认不出 / 太远 → null", () => {
     expect(parseResetAt("You've hit your usage limit", NOW)).toBeNull();
     expect(parseResetAt("try again in a moment", NOW)).toBeNull();

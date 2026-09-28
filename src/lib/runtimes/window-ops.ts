@@ -27,7 +27,7 @@ export function tmuxWindowOps(name: string, target: string = windowTarget(name))
     name,
     target,
     capture: (lines = 40) => tmuxCapture(target, lines),
-    sendLine: (text) => tmuxSendLine(target, text),
+    sendLine: (text) => tmuxSendLine(target, text, 100, true), // 启动命令：没发出去就抛（lib/tmux-helper.ts）
     sendLiteral: async (text) => {
       await noteProgramInput(target, text);
       await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);

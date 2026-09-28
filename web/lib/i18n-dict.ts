@@ -9,18 +9,21 @@
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
+import { ATTACH_DICT } from "./i18n-dict-attach";
 import { BOUNDARY_DICT } from "./i18n-dict-boundary";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 import { CONTACTS_DICT } from "./i18n-dict-contacts";
 import { SESSIONS_DICT } from "./i18n-dict-sessions";
+import { SKILLS_DICT } from "./i18n-dict-skills";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...CONTACTS_DICT, // 侧栏联系人与输入框 @（lib/i18n-dict-contacts.ts）
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
+  ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "正在回复…": "Replying…",
@@ -171,24 +174,6 @@ export const DICT: Record<string, string> = {
   "手机怎么连到这台电脑": "How your phone reaches this computer",
   "{n} 条别的 agent 发来的消息在排队（它这一轮结束或调 check_inbox 时收到）":
     "{n} message from other agents queued (arrives when its turn ends or it calls check_inbox)|{n} messages from other agents queued (arrive when its turn ends or it calls check_inbox)",
-  // ── 设置 · 技能 ──
-  "技能库": "Skills",
-  "这台电脑上的技能": "Skills on this computer",
-  "各 runtime 能用哪些技能、从哪来、同名时谁生效。现在只能看，启用 / 停用和安装后面做。":
-    "Which skills each runtime can use, where they come from, and which one wins on a name clash. Read-only for now; enabling, disabling and installing come later.",
-  "全部": "All",
-  "搜索技能": "Search skills",
-  "没有匹配的技能": "No matching skills",
-  "个人": "personal",
-  "claude.ai 同步": "synced from claude.ai",
-  "自带": "built-in",
-  "共享目录": "shared folder",
-  "被{scope}的同名技能盖过": "overridden by a {scope} skill of the same name",
-  "同名还有 {n} 处": "{n} more with this name",
-  "不在 / 菜单": "hidden from / menu",
-  "只能手动调用": "manual only",
-  "找了哪些目录（{n} 个，{m} 个存在）": "Folders searched ({n}, {m} exist)",
-  "不存在": "missing",
   "这几条路可以同时开着，想用哪个用哪个。每个地址第一次打开都要配对一次：设置 · 设备 → 添加设备。": "These paths can all be on at once; use whichever you like. Each address needs pairing the first time: Settings · Devices → Add device.",
   "局域网": "LAN",
   "自己的域名": "Your own domain",
@@ -477,7 +462,18 @@ export const DICT: Record<string, string> = {
   "新建 project": "New project",
   "id(小写)": "id (lowercase)",
   "显示名(可中文)": "Display name (any language)",
-  "工作目录,一行一个,如 ~/repos/qingniao/miniapp": "Working directories, one per line, e.g. ~/repos/acme/app",
+  "工作目录(绝对路径),一行一个,如 /Users/you/repos/qingniao/miniapp": "Working directories (absolute paths), one per line, e.g. /Users/you/repos/acme/app",
+  // 项目目录校验与改目录的角色校验（模板与 src/lib/project-dirs.ts、src/manager/project-guard.ts 同一份字面量，tests/project-dirs.test.ts 对账）
+  "项目目录要写绝对路径：「{dir}」里的 ~ 不会被展开，请写成「{fix}」": "Project directories must be absolute: “~” in “{dir}” isn’t expanded — write “{fix}”",
+  "项目目录要写绝对路径：「{dir}」里的 $HOME 不会被展开，请写成「{fix}」": "Project directories must be absolute: “$HOME” in “{dir}” isn’t expanded — write “{fix}”",
+  "项目目录要写绝对路径：「{dir}」里的 ~用户名 或环境变量不会被展开，请写成展开后的绝对路径":
+    "Project directories must be absolute: “~user” or environment variables in “{dir}” aren’t expanded — write the expanded absolute path",
+  "项目目录要写绝对路径：「{dir}」是相对路径，请写成绝对路径，例如「{fix}」": "Project directories must be absolute: “{dir}” is relative — write an absolute path, e.g. “{fix}”",
+  "目录「{dir}」已登记在项目 {project} 下：一个目录只能属于一个项目（要合并两个项目用 project-merge <src> <dst>）":
+    "“{dir}” is already registered under project {project}: a directory can belong to one project only (to combine two projects use project-merge <src> <dst>)",
+  "认不出调用方的身份：改项目目录要找 PM 或 owner（网页 / master）": "Caller identity not recognized: ask a PM or the owner (web / master) to change project directories",
+  "{actor} 不是项目 {projects} 的 PM，不能改项目目录：改项目目录要找 PM 或 owner（网页 / master）":
+    "{actor} isn’t a PM of project {projects} and can’t change its directories: ask a PM or the owner (web / master)",
   "工作目录(一行一个,可多仓)": "Working directories (one per line, several repos OK)",
   "项目说明(可选,会注入新建 agent 的上下文)": "Project description (optional, added to new agents' context)",
   "至少要一个工作目录": "At least one working directory is required",

@@ -7,7 +7,10 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { dropPendingsForChannel, dropVoidedPendings, takeApiPending, apiQueueToSettle, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import {
+  apiQueueToSettle, dropPendingsForChannel, dropVoidedPendings, takeApiPending, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply,
+  pendingKeysOwedBy, type ThreadEnds,
+} from "../src/lib/pending-reply-scope.js";
 import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {

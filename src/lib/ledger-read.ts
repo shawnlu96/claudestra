@@ -7,9 +7,10 @@
  */
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
+import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
 import { stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
 import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
-import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
+import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
 const READ_BUSY_TIMEOUT_MS = 200;
@@ -90,7 +91,7 @@ interface ReviewSummary {
   text: string;
   ts: number;
 }
-export interface TaskView extends LedgerTask {
+interface TaskView extends LedgerTask {
   lastEvent: LedgerEvent | null;
   /** 进入当前阶段的时刻（时间线最后一段的 from）；没有建任务事件的残缺数据为 null */
   stageSince: number | null;
@@ -98,11 +99,17 @@ export interface TaskView extends LedgerTask {
   stageSinceApprox: boolean;
   lastReview: ReviewSummary | null;
   metrics: TaskMetrics;
+  /** 挡着它的前置任务 id（ledger-deps.ts blockedBy）；空 = 依赖上不挡 */
+  blockedBy: string[];
+  /** 不是终态且依赖上不挡（runnableTasks 的口径） */
+  runnable: boolean;
 }
 export interface ProjectView {
   meta: LedgerMeta;
   items: LedgerItem[];
   tasks: TaskView[];
+  /** 项目的依赖边，带推导值与最终状态 */
+  deps: DepView[];
   /** 最近 PROJECT_EVENTS_LIMIT 条 target 为空的项目级事件，seq 升序 */
   projectEvents: LedgerEvent[];
 }
@@ -130,14 +137,18 @@ function currentStageMark(own: readonly LedgerEvent[]): LedgerEvent | undefined 
   return own.findLast((e) => e.kind === "stage" || (e.kind === "task" && e.data.op === "new"));
 }
 
-function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number): TaskView {
+function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number, deps: readonly DepView[]): TaskView {
+  const blockers = blockedBy(task.id, deps).map((d) => d.from);
   return {
     ...task,
-    lastEvent: own.findLast((e) => !isAskEvent(e)) ?? null,
+    // dep 事件是关系变更不是进展、ask 族有自己的卡片：算进来会把回滚 / 验证失败这类「出问题」信号和最近一条进展盖掉（web collab-model 看 lastEvent）
+    lastEvent: own.findLast((e) => !isAskEvent(e) && e.kind !== "dep") ?? null,
     stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
     stageSinceApprox: currentStageMark(own)?.data.approxTime === true,
     lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
     metrics: taskMetrics(task, own, now),
+    blockedBy: blockers,
+    runnable: !TERMINAL_STAGES.includes(task.stage) && blockers.length === 0,
   };
 }
 
@@ -154,20 +165,48 @@ export function projectView(db: Database, project: string, now: number): Project
     .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel', 'ask_reopen')
       AND NOT (kind = 'decision' AND json_extract(data, '$.askId') IS NOT NULL) ORDER BY seq DESC LIMIT ?`)
     .all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
+  const tasks = listTasks(db, project);
+  const deps = depViews(listDeps(db, project), tasks);
   return {
     meta: getMeta(db, project),
     items: listItems(db, project),
-    tasks: listTasks(db, project).map((t) => taskView(t, byTarget.get(t.id) ?? [], now)),
+    tasks: tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps)),
+    deps,
     projectEvents: recent.reverse().map(toEvent),
   };
 }
 
+/** 进入当前工作阶段（blocked 时是进 blocked 前那个）的那条 stage 事件的来处 */
+function enteredFrom(task: LedgerTask, events: readonly LedgerEvent[]): Stage | null {
+  const at = task.stage === "blocked" ? task.stageBefore : task.stage;
+  const e = events.findLast((x) => x.kind === "stage" && x.data.to === at);
+  return typeof e?.data.from === "string" ? (e.data.from as Stage) : null;
+}
+
+export interface TaskDetail {
+  task: TaskView;
+  events: LedgerEvent[];
+  timeline: StageEntry[];
+  /** 进边（它等谁）与出边（谁等它） */
+  deps: { in: DepView[]; out: DepView[] };
+  /** 审查分叉：现算，不存边 */
+  reviewBranches: ReviewBranches;
+}
+
 /** GET /ledger/:project/tasks/:id：任务不在这个项目下 → null（任务 id 全局唯一，但不许借别的项目名读到） */
-export function taskDetail(db: Database, project: string, id: string, now: number): { task: TaskView; events: LedgerEvent[]; timeline: StageEntry[] } | null {
+export function taskDetail(db: Database, project: string, id: string, now: number): TaskDetail | null {
   const task = getTask(db, id);
   if (!task || task.project !== project) return null;
   const events = listEvents(db, { project, target: id });
-  return { task: taskView(task, events, now), events, timeline: stageTimeline(events, now) };
+  const deps = depViews(listDeps(db, project), listTasks(db, project));
+  const view = taskView(task, events, now, deps);
+  return {
+    task: view,
+    events,
+    timeline: stageTimeline(events, now),
+    deps: { in: deps.filter((d) => d.to === id), out: deps.filter((d) => d.from === id) },
+    reviewBranches: reviewBranches(task, view.lastReview, enteredFrom(task, events)),
+  };
 }
 
 export interface LedgerTaskRef {

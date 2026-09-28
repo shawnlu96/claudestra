@@ -68,6 +68,7 @@ export function claudeLaunchOptions(spec: LaunchSpec): LaunchOptions {
     model: spec.model,
     purpose: spec.purpose,
     agentName: spec.agentName,
+    settingsAgent: spec.settingsName,
     projectContext: spec.projectContext,
   };
 }

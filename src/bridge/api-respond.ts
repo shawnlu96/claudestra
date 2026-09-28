@@ -32,8 +32,13 @@ export function notInScope(agent: string): Response {
   return apiJson(403, { ok: false, error: `agent "${agent}" not in token scope` });
 }
 
-/** scope 双向兼容前缀：裸名或 agent- 前缀的任一个在 scope 内即放行（短路顺序同原写法）。 */
+/**
+ * scope 双向兼容前缀：裸名或 agent- 前缀的任一个在 scope 内即放行（短路顺序同原写法）。
+ * master 的各种写法（去掉任意层 agent- 前缀后是 master，或网页的会话名 __master__）只按 master 判：以前 "agent-master"
+ * 再加前缀成 "agent-agent-master" 就不算 master 了，"*" 放行，路由按名字解析又落到 master（tests/api-master-scope.test.ts）。
+ */
 export function inScopeEitherName(principal: Principal, name: string): boolean {
+  if (name === "__master__" || name.replace(/^(agent-)+/, "") === "master") return agentInScope(principal, "master");
   return agentInScope(principal, name) || agentInScope(principal, `agent-${name}`);
 }
 

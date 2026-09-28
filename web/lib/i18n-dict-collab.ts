@@ -116,6 +116,18 @@ export const COLLAB_DICT: Record<string, string> = {
   "判断不了任务所属项目是不是本仓库，不知道该核什么": "Can’t tell whether the task’s project is this repository, so there’s nothing to check against",
   "PR 属于 {prRepo}，不是本仓库 {origin}，只核证据文件（--evidence）": "The PR belongs to {prRepo}, not this repository {origin}; only the evidence file is checked (--evidence)",
   "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）": "Project {project} doesn’t include this repository; only the evidence file is checked (--evidence)",
+  "任务没记分支，核对不了本仓库 {origin} 上有没有它的 PR：PM 先 ledger task-set {task} --branch <分支> 再重跑":
+    "The task has no branch recorded, so we can’t check whether {origin} has a PR for it: a PM runs ledger task-set {task} --branch <branch>, then rerun",
+  "查不了本仓库 {origin} 上有没有分支 {branch} 的 PR（{error}），按判断不了处理": "Couldn’t check whether {origin} has a PR from branch {branch} ({error}); treated as inconclusive",
+  "查不了 PR {link} 的分支（{error}），按判断不了处理": "Couldn’t read the branch of PR {link} ({error}); treated as inconclusive",
+  "PR {link} 的分支是 {head}，任务记的分支是 {branch}：对不上就核不了是不是这个任务的，改对 PR 链接或分支后重跑":
+    "PR {link} is from branch {head}, but the task records branch {branch}; without a match we can’t confirm it belongs to this task — fix the PR link or the branch, then rerun",
+  "本仓库 {origin} 上有分支 {branch} 的 PR {pr}：这是本仓库的活，PR 链接应该指向它": "{origin} has PR {pr} from branch {branch}: this is this repository’s work, so the PR link should point there",
+  "PR 指向 {prRepo}，但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑": "The PR points to {prRepo}, but the PM declared {declared} — fix the PR link or extra.repo, then rerun",
+  "PR 指向项目 {project} 的另一个仓库 {prRepo}（{dir}），PM 还没声明这个任务属于它：确实是那边的活就由 PM 跑 {cmd}，否则把 PR 改回本仓库的":
+    "The PR points to {prRepo} ({dir}), another repository of project {project}, and no PM has declared the task belongs there: if it does, a PM runs {cmd}; otherwise point the PR back",
+  "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）":
+    "The PR belongs to {prRepo} ({dir}), another repository of project {project}; this repository’s probes can’t check it, so only the evidence file is checked (--evidence)",
   "PR 链接和项目对不上：链接指向 {prRepo}，本仓库是 {origin}，项目 {project} 的目录却没排除本仓库——改对链接或登记好项目目录后重跑":
     "PR link and project disagree: the link points to {prRepo}, this repository is {origin}, and project {project}’s dirs don’t exclude it — fix the link or register the dirs, then rerun",
   "{daemon} 没装（launchd 里没有它）——这台机器不用它就 --waive 带理由": "{daemon} isn’t installed (not in launchd) — if this machine doesn’t use it, --waive with a reason",
