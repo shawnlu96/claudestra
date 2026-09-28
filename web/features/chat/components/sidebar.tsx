@@ -25,6 +25,7 @@ import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
 import { Chevron, ProjectGroup } from "./project-group";
 import type { AgentSession } from "../type";
+import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
 
@@ -432,10 +433,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
                 ? "border-primary/40 bg-primary/10"
                 : "border-base-300 bg-base-100 hover:bg-base-300/40"
             }`}
-            onClick={() => {
-              store.openAgent(master.name);
-              onSelect();
-            }}
+            onClick={() => { void store.openAgent(master.name, rowOpenIntent()); onSelect(); }}
           >
             <span
               className={`grid size-9 shrink-0 place-items-center rounded-lg ${
