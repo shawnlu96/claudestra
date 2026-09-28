@@ -3,7 +3,7 @@
  * 只有 owner 本人的全 scope manage 凭据能用，其余 403（面板直接显示错误）。
  */
 import { api } from "./client";
-import { followBridgeEvents } from "./follow-events";
+import { followEventStream } from "./ledger";
 
 export type LpMode = "on" | "off" | "exhausted" | "unknown";
 /** bridge/fleet/lp-monitor.ts 的 LpSnapshot 在网页这边的形状（web 与 src 互不 import）：walled = 撞墙等待，offer = 现在能开 */
@@ -47,9 +47,11 @@ export async function runFleet(body: { action: FleetAction; select: FleetSelect;
 
 /** 订阅 low_priority 事件（面板开着时实时刷新徽章）；signal 中止即关连接 */
 export function followLpEvents(opts: { signal: AbortSignal; onEvent: (agent: string, lp: LpState) => void }): Promise<void> {
-  return followBridgeEvents({ signal: opts.signal, types: LP_EVENTS, onEvent: (e) => opts.onEvent(e.agent, e.data as unknown as LpState) });
+  return followEventStream("/events?types=low_priority", {
+    signal: opts.signal,
+    onEvent: (e) => e.type === "low_priority" && opts.onEvent(e.agent, e.data as unknown as LpState),
+  });
 }
-const LP_EVENTS: ReadonlySet<string> = new Set(["low_priority"]);
 
 /** 徽章文案：开 → 「LP→3:20am」；用完 → 「LP 已用完」；撞墙 → 「撞墙中」；其余不显示 */
 export function lpBadgeText(lp: LpState | null | undefined): string | null {

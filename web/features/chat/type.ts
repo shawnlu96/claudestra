@@ -133,6 +133,8 @@ export interface ChatMessage {
   attachments?: ChatAttachmentView[];
   /** 入站消息来源标签（Discord 用户名 / 来源 agent；自己发的不带）。 */
   from?: string;
+  /** 按钮 / 表单回投的原始 payload：所属表单不在同一段历史里、没能还原成可读文案时留着，合进已加载的消息时再往前找（features/chat/delta-clicks.ts） */
+  clickRaw?: string;
   /** v2.20.2+ 回合结束但后台任务还在跑——「后台继续中」标记(代替绿勾)。 */
   turnBgPending?: boolean;
   /** 本端乐观发送、尚未在历史(jsonl)中确认——历史重拉时保留不吞

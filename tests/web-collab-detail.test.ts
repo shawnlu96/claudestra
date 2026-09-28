@@ -2,7 +2,11 @@
  * 协作视图详情面板纯逻辑（web/features/collab/collab-detail-model.ts）：阶段用时条、最近 3 件事、审查摘要、参与者。
  */
 import { describe, expect, test } from "bun:test";
-import { actorName, eventLine, fmtEventTime, participants, recentThree, reviewRows, stageSegments } from "../web/features/collab/collab-detail-model";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { actorName, eventLine, fmtEventTime, latestChecklist, participants, recentThree, reviewRows, SOURCE_TEXT, stageSegments } from "../web/features/collab/collab-detail-model";
+import { COLLAB_DICT } from "../web/lib/i18n-dict-collab";
+import { INCOMPLETE_TEXT } from "../src/lib/ledger-probes";
 import type { LedgerEventView, LedgerTaskView } from "../web/features/collab/collab-model";
 import { fillParams } from "../web/lib/i18n-fill";
 
@@ -98,5 +102,55 @@ describe("事件时刻", () => {
     const jan1 = new Date(2027, 0, 1, 8, 0).getTime();
     expect(fmtEventTime(new Date(2026, 11, 31, 22, 0).getTime(), jan1)).toBe("昨天 22:00");
     expect(fmtEventTime(new Date(2026, 11, 30, 22, 0).getTime(), jan1)).toBe("12-30 22:00");
+  });
+});
+
+describe("完成检查单", () => {
+  test("取最近一次系统核对的 verify；老的手填 verify（没有 checks）不算；豁免、模板、未知 id、坏状态都兜住", () => {
+    expect(latestChecklist([ev("verify", { result: "pass", evidence: null })])).toBeNull();
+    const checks = [
+      { id: "pr-merged", status: "pass", detail: "已合并", tpl: "PR {pr} 状态是 {state}，还没合并", params: { pr: "#1", state: "OPEN", bad: { x: 1 } } },
+      { id: "web-relay", status: "unknown", detail: "拿不到", waived: "中继维护" },
+      { id: "daemon-bridge", status: "fail", detail: "还没重启" },
+      { id: "new-probe", status: "weird" },
+    ];
+    const old = ev("verify", { result: "fail", checks: [{ id: "pr-merged", status: "fail" }] });
+    const c = latestChecklist([old, ev("verify", { result: "fail", checks, checklistSource: "files+extra", incomplete: false }, "", "owner"), ev("note", {}, "别的")]);
+    expect(c).toMatchObject({ result: "fail", actor: "owner", waived: 1, source: "files+extra", incomplete: false, note: null });
+    expect(c!.rows).toEqual([
+      { id: "pr-merged", label: "PR 已合并", status: "pass", detail: "已合并", tpl: "PR {pr} 状态是 {state}，还没合并", params: { pr: "#1", state: "OPEN" }, waived: null },
+      { id: "web-relay", label: "中继网页已部署", status: "unknown", detail: "拿不到", tpl: null, params: {}, waived: "中继维护" },
+      { id: "daemon-bridge", label: "bridge 已重启", status: "fail", detail: "还没重启", tpl: null, params: {}, waived: null },
+      { id: "new-probe", label: "new-probe", status: "unknown", detail: "", tpl: null, params: {}, waived: null },
+    ]);
+    expect(latestChecklist([ev("verify", { result: "unknown", checks: [], checklistSource: "bogus", incomplete: true, note: "只核证据" })])).toMatchObject({
+      source: null, incomplete: true, incompleteText: "拿不到 PR 的文件列表，推断不出检查单", note: { text: "只核证据", tpl: null, params: {} },
+    });
+    const owned = latestChecklist([ev("verify", {
+      result: "unknown", checks: [], incomplete: true, incompleteReason: "ownership",
+      note: "项目 p 的目录里没有本仓库", noteTpl: "项目 {project} 的目录里没有本仓库，只核证据文件（--evidence）", noteParams: { project: "p" },
+    })]);
+    expect(owned).toMatchObject({ incompleteText: expect.stringContaining("判断不了"), note: { tpl: expect.stringContaining("{project}"), params: { project: "p" } } });
+  });
+  test("verify 事件一句话：pass / fail / unknown 三种", () => {
+    expect(eventLine(ev("verify", { result: "pass" }))).toBe("线上验证通过");
+    expect(eventLine(ev("verify", { result: "unknown" }))).toBe("线上验证查不到结果");
+  });
+  test("探针说明与 note 模板（ledger-probes.ts / ledger-verify.ts 的中文字面量）在英文词表里都有译文，占位符一致", () => {
+    const strip = (f: string) => readFileSync(join(import.meta.dir, f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const probes = strip("../src/lib/ledger-probes.ts");
+    const verifyTpls = [...strip("../src/manager/ledger-verify.ts").matchAll(/tpl: "([^"\n]+)"/g)].map((m) => m[1]);
+    const lits = [...new Set([...probes.matchAll(/"([^"\n]*[\u4e00-\u9fff][^"\n]*)"/g)].map((m) => m[1]))];
+    // 「没采集」是参数值；INCOMPLETE_TEXT 只进 CLI 报错（网页用自己的短句，见 collab-detail-model 的 INCOMPLETE_TEXT）
+    const tpls = [...lits.filter((l) => l !== "没采集" && !Object.values(INCOMPLETE_TEXT).includes(l)), ...verifyTpls];
+    expect(verifyTpls.length).toBe(3);
+    expect(tpls.length).toBeGreaterThan(30);
+    const holes = (t: string) => [...t.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
+    for (const t of tpls) {
+      expect(COLLAB_DICT[t], t).toBeString();
+      expect(holes(COLLAB_DICT[t]), t).toEqual(holes(t));
+    }
+    for (const k of Object.values(SOURCE_TEXT)) expect(COLLAB_DICT[k], k).toBeString();
+    for (const k of ["拿不到 PR 的文件列表，推断不出检查单", "判断不了任务所属项目是不是本仓库，不知道该核什么"]) expect(COLLAB_DICT[k], k).toBeString();
   });
 });
