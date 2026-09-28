@@ -26,8 +26,8 @@
 
 import { existsSync } from "fs";
 import { lstat, readdir, stat } from "fs/promises";
-import { basename, dirname, join } from "path";
-import { projectsSlug, projectJsonlPath } from "../lib/jsonl-cost.js";
+import { basename, join } from "path";
+import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
 import { readActiveAgents } from "../lib/registry.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
 import { parseChatId } from "./router.js";
@@ -93,11 +93,6 @@ let ticking = false; // tick 重入保护：首轮 baseline 超过 POLL_MS 时 i
 let tickCount = 0;
 
 // ── 目录定位 ───────────────────────────────────────────────────────────
-
-function subagentsDirFor(cwd: string, sessionId: string): string {
-  // 跟着会话文件走：进了 worktree 的会话整个搬进新的项目目录（见 projectJsonlPath）
-  return join(dirname(projectJsonlPath(cwd, sessionId)), sessionId, "subagents");
-}
 
 function shellTasksDirFor(cwd: string, sessionId: string): string {
   // Claude Code 的 session scratchpad 根：/tmp/claude-<uid>/<slug>/<sessionId>/
@@ -366,7 +361,7 @@ async function tickInner(): Promise<void> {
   for (const agent of agents) {
     // 该 agent-session 首次被扫到 → 本轮只记存量(baseline),不开流
     const first = baseline.first(agent.name, agent.sessionId);
-    const subFiles = await listFiles(subagentsDirFor(agent.cwd, agent.sessionId), ".jsonl");
+    const subFiles = await listFiles(subagentsDir(agent.cwd, agent.sessionId), ".jsonl");
     const shellFiles = await listFiles(shellTasksDirFor(agent.cwd, agent.sessionId), ".output");
     // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
     const fresh = [...subFiles, ...shellFiles].filter((f) => !seen.has(f));
