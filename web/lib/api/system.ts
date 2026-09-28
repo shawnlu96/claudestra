@@ -177,3 +177,17 @@ export function postClientLogLine(base: string, msg: string): void {
 
 /** 直接取原始响应（附件之外别处不用）——留给终端流之类要看状态码的调用方 */
 export { apiRaw };
+
+// ── 订阅额度（bridge/local-api/quota.ts；只给本机 owner，403 / 404 / 503 时看板退回旧的额度卡）──
+export function quota<T>(): Promise<T> {
+  return api<T>("/quota", { timeoutMs: 12_000 });
+}
+export function quotaRetry<T>(provider: "claude" | "codex"): Promise<T> {
+  return api<T>("/quota/retry", { method: "POST", json: { provider }, timeoutMs: 15_000 });
+}
+export function quotaSettings(): Promise<{ enabled: boolean }> {
+  return api<{ enabled: boolean }>("/quota/settings", { timeoutMs: 8000 });
+}
+export function putQuotaSettings(enabled: boolean): Promise<{ enabled: boolean }> {
+  return api<{ enabled: boolean }>("/quota/settings", { method: "PUT", json: { enabled }, timeoutMs: 8000 });
+}

@@ -7,12 +7,16 @@ import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./runtime-badge";
 import { stats } from "@/lib/api/system";
-import { Bar, ClaudeQuotaCard, CodexQuotaCard, UsageTable, type GlobalStats } from "./quota-cards";
+import { Bar, UsageTable, type GlobalStats } from "./quota-cards";
+import { QuotaArea } from "./subscription-quota-cards";
 import { codexQuotas, usageTableData, type QuotaView, type StatAgent, type UsageTableData } from "../usage-view";
+import { useSubscriptionQuota } from "../use-subscription-quota";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
- * 顶部 = 额度卡（Claude 订阅 + 最近一次 Codex 会话看到的）与按 runtime 分行的 token / 花费
+ * 顶部 = 订阅额度卡片组（/api/v1/quota，打开期间每 60 秒拉一次——这也是 bridge 判「有人在看」的心跳）；
+ * 拿不到（非 owner 403 / 老 bridge 404 / 服务没起 503）退回旧的额度卡（Claude 订阅 + 最近一次 Codex 会话看到的）。
+ * 其下是按 runtime 分行的 token / 花费
  * (Bridge /stats);列表 = 各 agent 上下文占用条 + 忙碌态 + 最后对话时间。侧栏 📊 进入,portal 到 body。
  */
 
@@ -28,6 +32,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   // 老 bridge 没有 quotas 字段 → 空数组，不画 Codex 卡
   const [quotas, setQuotas] = useState<QuotaView[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const quotaState = useSubscriptionQuota(open);
   // 冷启动自动补拉只试一次/每次打开(openRef 防面板已关还在拉)
   const retriedRef = useRef(false);
   const openRef = useRef(open);
@@ -37,6 +42,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   });
 
   const load = (force: boolean) => {
+    if (force) void quotaState.reload();
     if (force) setRefreshing(true);
     // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
     // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
@@ -114,17 +120,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5">
-          {/* 账号 gauge 还没到手(bridge 冷启动首抓中)——给占位而不是整块消失 */}
-          {!g && (
-            <div className="mb-3 rounded-xl bg-base-200 p-3.5 text-xs text-base-content/50">
-              {t("账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓")}
-            </div>
-          )}
-          {/* 额度卡：Claude 订阅 + 最近一次 Codex 会话看到的（没有 Codex rollout 的机器没有这张） */}
-          {g && <ClaudeQuotaCard g={g} />}
-          {quotas.map((q) => (
-            <CodexQuotaCard key={`${q.source}:${q.sessionId ?? ""}`} q={q} />
-          ))}
+          <QuotaArea quota={quotaState} g={g} quotas={quotas} />
           {/* token 与花费按 runtime 分行（Claude Code / Codex / Pi 口径各不相同，混着看互相淹没） */}
           {(usage.agents.length > 0 || usage.machine) && <UsageTable {...usage} />}
 

@@ -23,6 +23,7 @@ import { AgentInfoModal } from "./agent-info-modal";
 import { openAgentInfo } from "../agent-info";
 import { stopMission } from "@/lib/api/agents";
 import { MissionIcon, MissionModal, MissionStopIcon, openMissionModal } from "./mission-ui";
+import { FolderIcon, menuItemIcon } from "./line-icons";
 import { LedgerStageLine } from "./ledger-stage-chip";
 
 type MenuState = { agent: AgentSession; x: number; y: number } | null;
@@ -78,20 +79,20 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
           it.id === "archive" ? (
             <MenuItem
               key={it.id}
-              icon={it.icon}
+              icon={menuItemIcon(it)}
               label={arch.armed ? t("确认归档?") : t(it.label)}
               danger={arch.armed}
               onClick={() => (arch.armed ? onAction("archive") : arch.arm())}
             />
           ) : (
-            <MenuItem key={it.id} icon={it.id !== "mission" ? it.icon : s.agent.mission ? <MissionStopIcon size={14} /> : <MissionIcon size={14} />} label={menuLabel(t, it.label, it.arg)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
+            <MenuItem key={it.id} icon={it.id !== "mission" ? menuItemIcon(it) : s.agent.mission ? <MissionStopIcon size={14} /> : <MissionIcon size={14} />} label={menuLabel(t, it.label, it.arg)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
           ),
         )}
       {page !== "main" && <MenuItem icon="‹" label={t("返回")} onClick={onBack} />}
       {page === "move" && targets.length === 0 && (
         <div className="px-3.5 py-2 text-[12.5px] text-base-content/40">{t("没有别的 project")}</div>
       )}
-      {page === "move" && targets.map((p) => <MenuItem key={p.id} icon={p.emoji || "📁"} label={p.name || p.id} onClick={() => onMove(p)} />)}
+      {page === "move" && targets.map((p) => <MenuItem key={p.id} icon={p.emoji || <FolderIcon size={14} />} label={p.name || p.id} onClick={() => onMove(p)} />)}
       {(page === "open-terminal" || page === "open-ide") && <OpenerList openers={sub} onPick={(id) => onAction(`open:${id}`)} />}
     </MenuShell>
   );

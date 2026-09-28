@@ -14,8 +14,9 @@ export const CODEX_TOKEN = "eyJ-SENTINEL-CODEX-TOKEN";
 export const CODEX_ACCOUNT = "raw-codex-account-id-0001";
 const EMAIL = "leak@example.com";
 export const CREDIT_IDS = ["rlrc_RAWCREDITID_A", "rlrc_RAWCREDITID_B"];
+export const GRANT_IDS = ["grant_RAWGRANTID_A", "grant_RAWGRANTID_B"];
 /** 这些串出现在任何 DTO / 状态文件 / 结果里都算泄漏 */
-const SENTINELS = [CLAUDE_TOKEN, CLAUDE_ACCOUNT, CODEX_TOKEN, CODEX_ACCOUNT, EMAIL, ...CREDIT_IDS, "user-RAW-0001", "UNKNOWN_FUTURE"];
+const SENTINELS = [CLAUDE_TOKEN, CLAUDE_ACCOUNT, CODEX_TOKEN, CODEX_ACCOUNT, EMAIL, ...CREDIT_IDS, ...GRANT_IDS, "user-RAW-0001", "UNKNOWN_FUTURE", "LABEL-SENTINEL"];
 
 export const T0 = Date.parse("2026-09-28T09:00:00.000Z");
 
@@ -37,6 +38,38 @@ export function claudeUsageBody(): Record<string, unknown> {
     seven_day_breakdown: { rows: [{ key: "claude_code", percent: 100 }] },
     account_email: EMAIL,
     UNKNOWN_FUTURE: { nested: EMAIL },
+  };
+}
+
+/**
+ * Claude 的重置卡块（/api/oauth/usage?cedar_ember=1，形状取自 CC 2.1.283 二进制里的字段名）。grant 原始 id、label、
+ * clears、next_grant_id 都是哨兵：解析结果里一个都不能有。
+ */
+export function cedarEmberBlock(grants: { endsAt: string; left?: number; usableNow?: boolean; requiresLimit?: boolean; paused?: boolean }[] = [
+  { endsAt: "2026-10-01T09:00:00Z" },
+  { endsAt: "2026-10-20T09:00:00Z", left: 2, usableNow: true, requiresLimit: false },
+]): Record<string, unknown> {
+  return {
+    eligible: true,
+    at_limit: false,
+    weekly_resets_at: "2026-09-30T06:00:00Z",
+    cooldown_until: null,
+    next_grant_id: GRANT_IDS[1],
+    grants: grants.map((g, i) => ({
+      id: GRANT_IDS[i % 2] + (i > 1 ? i : ""),
+      label: "LABEL-SENTINEL",
+      resets_total: 3,
+      resets_left: g.left ?? 1,
+      starts_at: "2026-09-01T00:00:00Z",
+      ends_at: g.endsAt,
+      clears: ["weekly", EMAIL],
+      paused: g.paused ?? false,
+      usable_now: g.usableNow ?? false,
+      ...(g.requiresLimit === undefined ? {} : { use_requires_limit: g.requiresLimit }),
+      percent_used: 0,
+      blocking: false,
+    })),
+    UNKNOWN_FUTURE: EMAIL,
   };
 }
 
@@ -148,7 +181,7 @@ export function fakeFetch(handler: (url: string, signal: AbortSignal) => Respons
 
 /** 默认的「一切正常」路由 */
 export function okRoutes(url: string): Response {
-  if (url.endsWith("/api/oauth/usage")) return jsonResponse(200, claudeUsageBody());
+  if (url.includes("/api/oauth/usage")) return jsonResponse(200, claudeUsageBody());
   if (url.endsWith("/wham/usage")) return jsonResponse(200, codexUsageBody());
   if (url.endsWith("/wham/rate-limit-reset-credits")) return jsonResponse(200, resetCreditsBody());
   return jsonResponse(404, {});
