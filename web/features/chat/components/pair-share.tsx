@@ -9,7 +9,8 @@
 import { useEffect, useRef, useState } from "react";
 import { renderSVG } from "uqr";
 import { getLang, useT } from "@/lib/i18n";
-import { decideApproval, grantsAllAgents, GUEST_ALL_WARNING, listApprovals, listDevices, type PendingApproval, type ShareCode } from "@/lib/api/devices";
+import { decideApproval, listApprovals, listDevices, type PendingApproval, type ShareCode } from "@/lib/api/devices";
+import { grantsAllAgents, GUEST_ALL_WARNING } from "@/lib/guest-share";
 import { fmtRemaining, remainingSeconds } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 

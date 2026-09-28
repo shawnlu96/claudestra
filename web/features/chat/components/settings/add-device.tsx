@@ -1,7 +1,8 @@
 "use client";
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
-import { GUEST_ALL_WARNING, newShareCode, shareCodeErrorText, type ShareCode } from "@/lib/api/devices";
+import { newShareCode, type ShareCode } from "@/lib/api/devices";
+import { GUEST_ALL_WARNING, guestShareOpts, shareCodeErrorText } from "@/lib/guest-share";
 import { useChatStore } from "../../chat-store";
 import { PairCodeCard } from "../pair-share";
 
@@ -71,18 +72,17 @@ export function AddDevicePanel({ onClose, onPaired }: { onClose: () => void; onP
   /** 选了「全部会话」、点过一次生成：按钮变成「确定开放全部」，再点才签 */
   const [allArmed, setAllArmed] = useState(false);
   const choices = agents.filter((a) => !a.pinnedMaster && !a.mock).map((a) => ({ name: a.name, label: a.label || a.displayName }));
-  const all = picked.includes(ALL);
   const blocked = who === "guest" && picked.length === 0;
 
   /** confirmed：「全部会话」已经确认过（第二次点、或「再来一个」沿用这次的选择） */
   const issue = async (confirmed = false) => {
-    if (who === "guest" && !guest.trim()) return setErr(t("写一下是给谁的，比如「Alex 的手机」"));
-    if (blocked) return setErr(t("至少选一个会话"));
-    if (who === "guest" && all && !confirmed) return setAllArmed(true);
+    const req = who === "guest" ? guestShareOpts(guest, picked, confirmed) : { opts: {} };
+    if ("error" in req) return setErr(t(req.error));
+    if ("confirm" in req) return setAllArmed(true);
     setBusy(true);
     setErr("");
     try {
-      setPair(await newShareCode(who === "guest" ? { guest: guest.trim(), agents: all ? [ALL] : picked, ...(all ? { confirmAllAgents: true } : {}) } : {}));
+      setPair(await newShareCode(req.opts));
     } catch (e) {
       setErr(t(shareCodeErrorText(e)));
     } finally {

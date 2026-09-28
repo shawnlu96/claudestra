@@ -28,9 +28,11 @@ import type { SettingsPageId } from "./nav";
  * 设置弹窗的八个页面(菜单在 ./nav.tsx)。带状态的分区其状态仍由 SettingsModal 的 useXxx(open)
  * 持有并经 `state` 传进来——页面切换只是分区组件的挂载/卸载，不碰数据；自管状态的分区
  * (设备 / 归档保留 / 后端版本 / 全体重启 / 服务器地址 / 手机访问 / Peer 协作)本来就随挂载拉取。
+ * full=false（guest / 部分 scope）：要全权的分区不渲染——整页都要全权的页在 nav.settingsPagesFor 里就滤掉了。
  */
 export interface SettingsState {
   busy: boolean;
+  full: boolean;
   profile: ReturnType<typeof useProfileDraft>;
   groq: ReturnType<typeof useGroqKey>;
   defaults: ReturnType<typeof useClaudeDefaults>;
@@ -46,10 +48,10 @@ export interface SettingsState {
 function GeneralPage({ s }: { s: SettingsState }) {
   return (
     <>
-      <ProfileSection draft={s.profile} busy={s.busy} />
+      {s.full && <ProfileSection draft={s.profile} busy={s.busy} />}
       <LanguageSection />
-      <PushSection push={s.push} />
-      <BackendUpdateSection />
+      {s.full && <PushSection push={s.push} />}
+      {s.full && <BackendUpdateSection />}
     </>
   );
 }
@@ -84,21 +86,25 @@ function ConnectPage({ s }: { s: SettingsState }) {
   return (
     <>
       <GroupLabel>{t("访问")}</GroupLabel>
-      <AccessPathsSection />
-      <RemoteAccessSection />
+      {s.full && <AccessPathsSection />}
+      {s.full && <RemoteAccessSection />}
       {isNativeShell() && <ShellServerSection />}
-      <GroupLabel>{t("集成")}</GroupLabel>
-      <GroqKeySection groq={s.groq} busy={s.busy} />
-      <QuotaLiveSection />
+      {s.full && (
+        <>
+          <GroupLabel>{t("集成")}</GroupLabel>
+          <GroqKeySection groq={s.groq} busy={s.busy} />
+          <QuotaLiveSection />
+        </>
+      )}
     </>
   );
 }
 
-/** 设备：这台机器上已配对的设备（撤销 / 退出登录）+ 本浏览器配对过的机器 */
-function DevicesPage() {
+/** 设备：这台机器上已配对的设备（撤销 / 退出登录，要全权）+ 本浏览器配对过的机器 */
+function DevicesPage({ s }: { s: SettingsState }) {
   return (
     <>
-      <DevicesSection />
+      {s.full && <DevicesSection />}
       <MachinesSection />
     </>
   );
@@ -124,7 +130,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
     case "peers":
       return <PeersPanel />;
     case "security":
-      return <DevicesPage />;
+      return <DevicesPage s={s} />;
     case "skills":
       return <SkillsSection />;
     case "labs":

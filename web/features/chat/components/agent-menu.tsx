@@ -69,6 +69,7 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
   const arch = useArmedConfirm(4000);
   const full = useFullScope() === true;
   const items = buildAgentMenu(s.agent, openers, platform, full) ?? [];
+  if (page === "main" && !items.length) return null; // 非全权设备又没得本机打开：长按不弹空壳
   const sub = page === "open-terminal" ? openers.filter((o) => o.kind === "terminal") : page === "open-ide" ? openers.filter((o) => o.kind === "ide") : [];
   // 主页标题下多一行台账阶段（LedgerStageLine），按半行算进高度，免得贴底弹出时被切掉
   const rows = page === "main" ? items.length + (s.agent.ledgerTask ? 0.5 : 0) : 1 + Math.max(1, page === "move" ? targets.length : sub.length);

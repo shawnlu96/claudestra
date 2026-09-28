@@ -815,6 +815,7 @@ export const DICT: Record<string, string> = {
 
   // ── 会话级模型/effort 切换器 ─────────────────────────
   "当前模型与 effort，点击切换": "Current model & effort — tap to switch",
+  "当前模型与 effort": "Current model & effort",
   // ── Pi 会话的模型/思考档位切换器（v2.23+） ─────────────
   "Pi 会话：当前模型与思考档位，点击切换": "Pi session: current model & thinking level — tap to switch",
   "Codex 会话：当前模型与推理档位，点击切换": "Codex session: current model & reasoning level — tap to switch",

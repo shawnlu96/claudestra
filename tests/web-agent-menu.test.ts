@@ -28,10 +28,10 @@ describe("buildAgentMenu（侧栏右键 / 长按菜单内容）", () => {
     expect(buildAgentMenu(ag("m", { pinnedMaster: true, status: "stopped" }))).toBeNull();
     expect(buildAgentMenu(ag("k", { mock: true }))).toBeNull();
   });
-  test("非全权设备（guest / 部分 scope）：只剩详情和本机打开类，要全权的项一个不给", () => {
+  test("非全权设备（guest / 部分 scope）：只剩本机打开类，详情等要全权的项一个不给；没得打开就没有菜单", () => {
     const openers = [{ id: "finder", label: "Finder", kind: "files" as const }];
-    expect(ids(buildAgentMenu(ag("w"), [], "darwin", false)!)).toEqual(["info"]);
-    expect(ids(buildAgentMenu(ag("w", { status: "stopped" }), openers, "darwin", false)!)).toEqual(["info", "open:finder"]);
+    expect(buildAgentMenu(ag("w"), [], "darwin", false)).toBeNull();
+    expect(ids(buildAgentMenu(ag("w", { status: "stopped" }), openers, "darwin", false)!)).toEqual(["open:finder"]);
     expect(buildAgentMenu(ag("m", { pinnedMaster: true }), [], "darwin", false)).toBeNull();
   });
 });

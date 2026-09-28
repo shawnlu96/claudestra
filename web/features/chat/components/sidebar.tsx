@@ -17,7 +17,6 @@ import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
-import { PeersButton } from "./peers-button";
 import { SidebarAdminButtons } from "./sidebar-admin-buttons";
 import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
@@ -229,22 +228,14 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           <span className="font-semibold">{t("会话")}</span>
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
           <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
-          {/* 项目管理 / 多选删除：只给全权设备（sidebar-admin-buttons.tsx） */}
-          <SidebarAdminButtons manage={manage} onProjects={() => setShowProjects(true)} onToggleManage={() => (manage ? exitManage() : setManage(true))} />
-          <PeersButton onClick={() => setSettingsPage("peers")} />
-          <button
-            className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("用量看板")}
-            aria-label={t("用量看板")}
-            onClick={() => setShowStats(true)}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 3v16a2 2 0 0 0 2 2h16" />
-              <path d="M7 13v4" />
-              <path d="M12 9v8" />
-              <path d="M17 5v12" />
-            </svg>
-          </button>
+          {/* 项目管理 / 多选删除 / Peer / 用量看板：只给全权设备（sidebar-admin-buttons.tsx） */}
+          <SidebarAdminButtons
+            manage={manage}
+            onProjects={() => setShowProjects(true)}
+            onToggleManage={() => (manage ? exitManage() : setManage(true))}
+            onPeers={() => setSettingsPage("peers")}
+            onStats={() => setShowStats(true)}
+          />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
             title={t("设置")}
