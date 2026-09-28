@@ -5,9 +5,9 @@
  * 归属规则（codex 2026-09-28 复核）：target 回发 send_to_agent 给 X、或 reply 到 X 的频道 → 精确消化 X 那槽；target 在自己频道
  * reply / 回合结束兜底 → 只有恰好一个已投递的 caller 在等才推给它；多个在等就不推给任何人、不广播，提醒 target 用 send_to_agent 分别回。
  *
- * 同一 caller 连着问同一个 target：并进同一槽（expecting 合并、记下每条请求的 message_id、rev 加一），不覆盖前一个问题；
- * 「请求还押着」按这些 message_id 判（后一条押着不挡前一条的回程）；consume 带 rev，旧快照不会删掉后来并进来的新请求。
- * 仍然没有显式回复 ID：同一 caller 的两个问题共用一次答复（codex 复核：最终要 callId，过渡期每对一个未完成请求）。
+ * 同一 caller 连着问同一个 target：槽里逐条记请求（message_id / expecting / 回复频道），不合并覆盖。target 答复时只算
+ * 「已送到它手上」的那几条（视图），消化也只删这几条——还押着的问题留在槽里，等它送到后再答（codex 2026-09-28 复核：
+ * 并槽后回答旧问题会把押着的新问题一起删掉）。仍然没有显式回复 ID：同时送到的几条共用一次答复。
  *
  * 落盘（~/.claude-orchestrator/pending-agent-calls.json）：bridge 重启后对方照常回复也知道推给谁。不存 caller 的 ws：推回时按
  * callerChannelId 取当前连接。老文件（key = target）启动时迁成新 key。
@@ -32,13 +32,21 @@ export interface PendingAgentCall {
   ts: number;
   /** 已经提醒过 target「好几个人在等你，分别回」的时刻（同一批只提醒一次） */
   ambiguityNotifiedAt?: number;
-  /** 这一槽的版本：同一 caller 又问一次就加一（consume 带它，旧快照不删新请求） */
-  rev?: number;
-  /** 并进这一槽的请求 message_id（判「请求还押着」用） */
+  /** 这一槽的各条请求（老数据没有：整槽当一条） */
+  requests?: CallRequest[];
+  /** requests 的 message_id（stale 扫描判「全都还押着」用，lib/held-pac.ts） */
   messageIds?: string[];
 }
 
-type StillHeld = (call: PendingAgentCall) => boolean;
+export interface CallRequest {
+  messageId?: string;
+  expecting?: string;
+  originalReplyChannel?: string;
+  ts: number;
+}
+
+/** 这条请求还押在 target 队里（它没看到） */
+type StillHeld = (req: { messageId?: string; callerChannelId: string }) => boolean;
 
 const isCall = (v: unknown): boolean => {
   const c = v as Partial<PendingAgentCall> | null;
@@ -47,6 +55,9 @@ const isCall = (v: unknown): boolean => {
 };
 
 const SEP = "\u001f";
+/** 老数据（没有 requests）整槽当一条请求 */
+const requestsOf = (c?: PendingAgentCall): CallRequest[] =>
+  !c ? [] : c.requests ?? [{ expecting: c.expecting, originalReplyChannel: c.originalReplyChannel, ts: c.ts, messageId: c.messageIds?.[0] }];
 const keyOf = (target: string, caller: string) => `${target}${SEP}${caller}`;
 const targetOf = (key: string, c: PendingAgentCall) => c.targetChannelId ?? key.split(SEP)[0];
 
@@ -64,32 +75,55 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (this.size) console.log(`♻️ 恢复待回程的 send_to_agent ${this.size} 条（对方的答复仍会推回发起方）`);
   }
 
-  /** 记一槽；同一 caller 这一槽还没答完就并进去（不覆盖前一个问题）。返回这一槽现在的 rev 和是否并入 */
-  add(target: string, call: PendingAgentCall, messageId?: string): { rev: number; merged: boolean } {
+  /** 记一条请求（同一 caller 还没答完的请求留着，新的追加在后面） */
+  add(target: string, call: PendingAgentCall, messageId?: string): void {
     const prev = this.slot(target, call.callerChannelId);
-    const ids = messageId ? [messageId] : [];
-    if (!prev) {
-      this.set(keyOf(target, call.callerChannelId), { ...call, targetChannelId: target, rev: 1, messageIds: ids });
-      return { rev: 1, merged: false };
-    }
-    const rev = (prev.rev ?? 1) + 1;
-    const expecting = [prev.expecting, call.expecting].filter(Boolean).join("；接着又问了一件：") || undefined;
-    this.set(keyOf(target, call.callerChannelId), {
-      ...prev, ...call, targetChannelId: target, rev, expecting, ambiguityNotifiedAt: undefined,
-      originalReplyChannel: call.originalReplyChannel ?? prev.originalReplyChannel, messageIds: [...(prev.messageIds ?? []), ...ids],
-    });
-    return { rev, merged: true };
+    const req: CallRequest = { messageId, expecting: call.expecting, originalReplyChannel: call.originalReplyChannel, ts: call.ts };
+    this.store(target, { ...(prev ?? call), ...call, ambiguityNotifiedAt: undefined }, [...requestsOf(prev), req]);
   }
 
   slot(target: string, caller: string): PendingAgentCall | undefined {
     return this.get(keyOf(target, caller));
   }
 
-  /** 消化一槽；给了 rev 且槽已被后来的请求并入（rev 变了）就不删 */
-  consume(target: string, caller: string, rev?: number): boolean {
+  /** 消化一次答复：只删视图里（已送到 target 的）那几条请求，删空了才删整槽；不给视图 = 整槽删 */
+  consume(target: string, caller: string, answered?: PendingAgentCall): boolean {
     const cur = this.slot(target, caller);
-    if (!cur || (rev !== undefined && cur.rev !== undefined && cur.rev !== rev)) return false;
-    return this.delete(keyOf(target, caller));
+    if (!cur) return false;
+    if (!answered?.requests) return this.delete(keyOf(target, caller));
+    const done = new Set(answered.requests.map((r) => r.messageId));
+    const left = requestsOf(cur).filter((r) => !done.has(r.messageId));
+    if (!left.length) return this.delete(keyOf(target, caller));
+    this.store(target, cur, left);
+    return true;
+  }
+
+  /** send_to_agent 投递失败：只撤这一条请求 */
+  dropRequest(target: string, caller: string, messageId: string): void {
+    const cur = this.slot(target, caller);
+    if (cur) this.consume(target, caller, { ...cur, requests: [{ messageId, ts: 0 }] });
+  }
+
+  private store(target: string, base: PendingAgentCall, reqs: CallRequest[]): void {
+    const last = reqs[reqs.length - 1];
+    this.set(keyOf(target, base.callerChannelId), {
+      ...base, targetChannelId: target, requests: reqs, messageIds: reqs.map((r) => r.messageId).filter((x): x is string => !!x),
+      expecting: last?.expecting, originalReplyChannel: last?.originalReplyChannel ?? base.originalReplyChannel,
+    });
+  }
+
+  /** 视图：只含已送到 target 手上的请求（expecting 合并、回复频道取最后一条）；一条都没送到 = undefined */
+  private view(c: PendingAgentCall, stillHeld: StillHeld): PendingAgentCall | undefined {
+    const seen = requestsOf(c).filter((r) => !stillHeld({ messageId: r.messageId, callerChannelId: c.callerChannelId }));
+    if (!seen.length) return undefined;
+    const expecting = seen.map((r) => r.expecting).filter(Boolean).join("；另一个问题：") || undefined;
+    return { ...c, requests: seen, expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel ?? c.originalReplyChannel };
+  }
+
+  /** target 明确答给 caller（回发 send_to_agent / reply 到 caller 的频道） */
+  exact(target: string, caller: string, stillHeld: StillHeld): PendingAgentCall | undefined {
+    const c = this.slot(target, caller);
+    return c && this.view(c, stillHeld);
   }
 
   forTarget(target: string): PendingAgentCall[] {
@@ -98,7 +132,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
 
   /** 在等 target 答复、且请求已经送到 target 手上的（还押在 target 队里的它根本没看到，不算） */
   waiting(target: string, stillHeld: StillHeld): PendingAgentCall[] {
-    return this.forTarget(target).filter((c) => !stillHeld(c));
+    return this.forTarget(target).map((c) => this.view(c, stillHeld)).filter((v): v is PendingAgentCall => !!v);
   }
 
   /** target 没指明答给谁时的归属：恰好一个在等才算；0 个或多个 → undefined（多个不猜、不广播） */
@@ -111,7 +145,10 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   takeAmbiguity(target: string, stillHeld: StillHeld, now = Date.now()): PendingAgentCall[] {
     const w = this.waiting(target, stillHeld);
     if (w.length < 2 || w.every((c) => c.ambiguityNotifiedAt)) return [];
-    for (const c of w) this.setQuiet(keyOf(target, c.callerChannelId), { ...c, ambiguityNotifiedAt: now });
+    for (const c of w) {
+      const raw = this.slot(target, c.callerChannelId);
+      if (raw) this.setQuiet(keyOf(target, c.callerChannelId), { ...raw, ambiguityNotifiedAt: now });
+    }
     this.persist();
     return w;
   }

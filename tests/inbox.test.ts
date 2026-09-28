@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { HeldQueue, INBOX_LEASE_MS, leaseActive, unseenFrom, type HeldItem } from "../src/bridge/held-queue.js";
-import { callStillHeld } from "../src/lib/held-pac.js";
+import { requestStillHeld } from "../src/lib/held-pac.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 
 const me = { tag: "claudestra-ws" } as never;
@@ -41,9 +41,9 @@ describe("takeInbox", () => {
     const r = await takeInbox(me, 5 * 60_000);
     if ("error" in r) throw new Error(r.error);
     expect(r.result.n).toBe(2);
-    expect(r.result.text).toMatch(/收件箱 inbox_\w+：2 条/);
+    expect(r.result.text).toMatch(/收件箱 inbox_[\w-]+：2 条/);
     expect(r.result.text).toContain("1/2 · 来自 agent-codex · message_id=m-复核意见 1 · 排队 5 分钟");
-    expect(r.result.text).toMatch(/ack: "inbox_\w+"/);
+    expect(r.result.text).toMatch(/ack: "inbox_[\w-]+"/);
     const q = held.get("c-me")!;
     expect(q.map((i) => i.env.content)).toEqual(["复核意见 1", "人类补充", "复核意见 2"]); // 还在队里
     expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(2);
@@ -55,7 +55,7 @@ describe("takeInbox", () => {
     const { held } = setup([item("a"), item("b")]);
     const first = await takeInbox(me, 1000);
     if ("error" in first) throw new Error(first.error);
-    const batch = /inbox_\w+/.exec(first.result.text)![0];
+    const batch = /inbox_[\w-]+/.exec(first.result.text)![0];
     held.set("c-me", [...held.get("c-me")!, item("c")]);
     const again = await takeInbox(me, 2000);
     if ("error" in again) throw new Error(again.error);
@@ -68,7 +68,7 @@ describe("takeInbox", () => {
 
   test("领取后没 ack 就回复：回程判定算它看到了（#112 × #114 的组合）", async () => {
     const { held, calls } = setup([item("请复核")]);
-    const seen = () => calls.answerable("c-me", (c) => callStillHeld(c, unseenFrom(held, "c-me")));
+    const seen = () => calls.answerable("c-me", (r) => requestStillHeld(r, unseenFrom(held, "c-me")));
     expect(seen()).toBeUndefined(); // 还押着、没领：不算
     await takeInbox(me, 1000);
     expect(seen()?.callerChannelId).toBe("c-codex"); // 领了（租约中、未 ack）：算送到了
@@ -78,7 +78,7 @@ describe("takeInbox", () => {
     const { held } = setup(Array.from({ length: 12 }, (_, i) => item(`m${i}`)));
     const r1 = await takeInbox(me, 1000);
     if ("error" in r1) throw new Error(r1.error);
-    const batch = /inbox_\w+/.exec(r1.result.text)![0];
+    const batch = /inbox_[\w-]+/.exec(r1.result.text)![0];
     expect(r1.result.text).toContain("还有 2 条");
     const r2 = await takeInbox(me, 2000, { ack: batch });
     if ("error" in r2) throw new Error(r2.error);
@@ -106,9 +106,10 @@ describe("takeInbox", () => {
   test("超长的一条：预览里给 read 入口；分页读（第一次读就打租约），读完 ack 出队", async () => {
     const big = item("z".repeat(30_000));
     big.env.meta.messageId = "m-big";
+    big.env.meta.threadId = "thr-big";
     const { held } = setup([big]);
     const r = await takeInbox(me, 1000);
-    expect("result" in r && r.result.text).toContain('check_inbox({ read: "m-big" })');
+    expect("result" in r && r.result.text).toContain('check_inbox({ read: "thr-big" })'); // read 用 thread_id（message_id 会撞）
     const p1 = await takeInbox(me, 1000, { read: "m-big" });
     if ("error" in p1) throw new Error(p1.error);
     expect(p1.result.text).toContain("第 1/3 页");
@@ -119,8 +120,28 @@ describe("takeInbox", () => {
     expect(held.get("c-me")![0].lease!.at).toBe(1000); // 读后面的页不续租
     await takeInbox(me, 3000, { ack: batch });
     expect(held.get("c-me") ?? []).toHaveLength(0);
-    const gone = await takeInbox(me, 4000, { read: "m-big" });
-    expect("result" in gone && gone.result.text).toContain("没有 message_id=m-big");
+    const gone = await takeInbox(me, 4000, { read: "thr-big" });
+    expect("result" in gone && gone.result.text).toContain("没有 thr-big");
+  });
+
+  test("一队超长消息：预览最多 3 条、计入预算；分页读打了租约后再无参调用也不展开全文", async () => {
+    const long = (k: number) => {
+      const i = item(`${k}`.repeat(30_000));
+      i.env.meta.messageId = `m-long-${k}`;
+      i.env.meta.threadId = `thr-long-${k}`;
+      return i;
+    };
+    setup([1, 2, 3, 4, 5].map(long));
+    const r = await takeInbox(me, 1000);
+    if ("error" in r) throw new Error(r.error);
+    expect(r.result.text.split("这条共").length - 1).toBeLessThanOrEqual(3);
+    expect(r.result.text.length).toBeLessThan(16_000);
+    await takeInbox(me, 1000, { read: "thr-long-1" });
+    const again = await takeInbox(me, 2000);
+    if ("error" in again) throw new Error(again.error);
+    expect(again.result.text).toContain("原样重给");
+    expect(again.result.text).toContain("只给开头");
+    expect(again.result.text.length).toBeLessThan(16_000);
   });
 
   test("空的 / 正在被 Stop 投递（频道锁被占）/ 认不出调用方", async () => {

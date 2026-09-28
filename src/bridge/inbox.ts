@@ -42,6 +42,17 @@ function ackBatch(d: InboxDeps, channelId: string, batchId: string): number {
 }
 
 const PREVIEW_CHARS = 2_000;
+/** 正文预算：给抬头 / 分隔留 1000 字，整个工具结果不超过 MAX_CHARS；超过预算的单条只给开头 */
+const BUDGET = MAX_CHARS - 1_000;
+const MAX_PREVIEWS = 3;
+
+/** 放进工具结果的一条：放得下给全文，放不下给开头 + 分页读入口（read 用 thread_id——message_id 只是「前缀_毫秒」会撞） */
+async function fitEntry(d: InboxDeps, it: HeldItem, now: number): Promise<{ text: string; long: boolean }> {
+  const text = await entryText(d, it, now);
+  if (text.length <= BUDGET) return { text, long: false };
+  const hint = `要现在看全文用 check_inbox({ read: "${it.env.meta.threadId}" }) 分页读，否则这一轮结束时送达`;
+  return { text: `${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；${hint}）`, long: true };
+}
 
 async function entryText(d: InboxDeps, it: HeldItem, now: number): Promise<string> {
   const from = it.env.from.kind === "local" ? it.env.from.agentName || it.env.from.channelId : "?";
@@ -58,12 +69,14 @@ function batchText(batchId: string, texts: string[], note: string, left: number)
 const PAGE_CHARS = 12_000;
 
 /** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
-async function readPaged(d: InboxDeps, channelId: string, messageId: string, page: number, now: number): Promise<Result> {
-  const it = (d.held.get(channelId) ?? []).find((i) => isAgentMsg(i) && i.env.meta.messageId === messageId);
-  if (!it) return { result: { n: 0, text: `收件箱里没有 message_id=${messageId}（已确认过，或已按普通消息送达）。` } };
+async function readPaged(d: InboxDeps, channelId: string, readId: string, page: number, now: number): Promise<Result> {
+  const q = (d.held.get(channelId) ?? []).filter(isAgentMsg);
+  const it = q.find((i) => i.env.meta.threadId === readId) ?? q.find((i) => i.env.meta.messageId === readId);
+  if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
+  const messageId = it.env.meta.messageId;
   if (!leaseActive(it, now)) {
     d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined);
-    it.lease = { batchId: `inbox_${randomUUID().slice(0, 8)}`, at: now };
+    it.lease = { batchId: `inbox_${randomUUID()}`, at: now };
     d.held.persist();
   }
   const text = await entryText(d, it, now);
@@ -106,7 +119,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     if (open.length) {
       const batchId = open[0].lease!.batchId;
       const mine = open.filter((i) => i.lease!.batchId === batchId);
-      const texts = await Promise.all(mine.map((it) => entryText(d, it, now)));
+      const texts = (await Promise.all(mine.map((it) => fitEntry(d, it, now)))).map((e) => e.text); // 超长的仍只给开头，不绕过预算
       return { result: { n: mine.length, text: batchText(batchId, texts, "这是你领过还没确认的一批，原样重给。", 0) } };
     }
     const free = q.filter((i) => isAgentMsg(i) && !leaseActive(i, now));
@@ -115,19 +128,21 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     let chars = 0;
     for (const it of free) {
       if (picked.length >= MAX_TAKE) break;
-      const text = await entryText(d, it, now);
-      if (text.length > MAX_CHARS) {
-        // 太长的不进批（租约只管整条）：先给开头，全文回合结束时按普通消息送达
-        const readHint = `要现在看全文用 check_inbox({ read: "${it.env.meta.messageId}" }) 分页读，否则这一轮结束时送达`;
-        previews.push(`${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；${readHint}）`);
+      const { text, long } = await fitEntry(d, it, now);
+      if (chars + text.length > BUDGET) continue; // 这批放不下的等下一批（后面短的还能放进来）
+      if (long) {
+        // 太长的不进批（租约只管整条）：只给开头，计入预算、最多几条；全文分页读或回合结束时送达
+        if (previews.length < MAX_PREVIEWS) {
+          previews.push(text);
+          chars += text.length;
+        }
         continue;
       }
-      if (chars + text.length > MAX_CHARS) continue; // 这批放不下的等下一批（后面短的还能放进来）
       picked.push({ it, text });
       chars += text.length;
     }
     if (!picked.length) return { result: { n: 0, text: [`${ackNote}收件箱里没有可领取的消息。`, ...previews].join("\n\n") } };
-    const batchId = `inbox_${randomUUID().slice(0, 8)}`; // 毫秒会撞：同一毫秒两次领取会被绑成一批
+    const batchId = `inbox_${randomUUID()}`; // 毫秒会撞：同一毫秒两次领取会被绑成一批
     // 先 touch 再落租约（和押后投递同序）：落盘后、touch 前崩溃，重启时回程簿会带着旧钟被当成过期扫掉
     for (const { it } of picked) d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined); // 这些请求这会儿才真正到它手上
     for (const { it } of picked) {

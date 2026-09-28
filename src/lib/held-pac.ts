@@ -33,6 +33,12 @@ export function callStillHeld(call: { callerChannelId: string; messageIds?: stri
   return call.messageIds.every((id) => unseen.has(id));
 }
 
+/** 单条请求还押在 target 队里（它没看到）：有 message_id 按 id 查，老数据没有就按发送方查 */
+export function requestStillHeld(req: { messageId?: string; callerChannelId: string }, held: HeldFromLike[] | undefined): boolean {
+  if (!req.messageId) return pacStillHeld(req.callerChannelId, held);
+  return !!held?.some((h) => h.messageId === req.messageId);
+}
+
 /** 该 pac 是否该被 stale 扫描清掉 */
 export function shouldSweepPac(
   pac: { ts: number; callerChannelId: string; messageIds?: string[] },
