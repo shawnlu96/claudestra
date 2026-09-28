@@ -18,7 +18,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
-import { channelBodyText } from "./inbound-body.js";
+import { channelAskId, channelBodyText, senderOf } from "./inbound-body.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -129,16 +129,15 @@ export interface HistoryMessage {
   turnMs?: number;
   /** compact 产生的摘要条目（不是真实用户输入） */
   compactSummary?: boolean;
-  /**
-   * v2.21.3+ 进度句(💭):Fable 5.1 的 progress-update thinking 块——「接下来我会…」
-   * 这类给用户看的短注,不是推理正文。与 text 分开:渲染更弱、不进 content 对账。
-   */
+  /** 进度句(💭):progress-update thinking 块「接下来我会…」,给用户看的短注,与 text 分开(渲染更弱、不进 content 对账) */
   progress?: string;
   model?: string;
   /** 入站消息的发送者标签（<channel> 的 user 属性：API token 名 / Discord 用户名 / 来源 agent） */
   from?: string;
   /** 发送者 id（user_id 属性：api:<tokenId> / Discord 用户 id）——web 据此认出「本人的所有来源」 */
   fromId?: string;
+  /** owner 对「待你处理」的作答：答的是哪条 ask（web 画「答复：<标题>」引用条，lib/inbound-body.ts answerEcho） */
+  askId?: string;
 }
 
 /**
@@ -311,14 +310,14 @@ function collectChannelMessageIds(lines: string[]): Set<string> {
  * 解包一条 <channel> 入站消息：返回 { text, from }；不是 channel 包装
  * （caveat / local-command 等真 meta）返回 null。
  */
-export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string } | null {
+export function unwrapChannelMessage(raw: string): { text: string; from?: string; fromId?: string; askId?: string } | null {
   const m = raw.match(CHANNEL_WRAP_RE);
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const text = channelBodyText(m[1], m[2]); // 剥注入头 + 补附件行（lib/inbound-body.ts）
   if (!text) return null;
-  return { text, from, fromId };
+  return { text, from, fromId, askId: channelAskId(m[1], m[2]) };
 }
 
 function summarize(sessionId: string, source: "live" | "archive", path: string): SessionSummary | null {
@@ -553,7 +552,7 @@ function parseHistoryLines(
           const mid = channelMessageId(queued);
           if (!mid || !seenChannelIds.has(mid)) {
             const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-            if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
+            Object.assign(msg, senderOf(un));
             all.push(msg);
           }
         }
@@ -601,7 +600,7 @@ function parseHistoryLines(
         // bridge 内部注入(看门狗 nudge 等,user="bridge:*")是发给 agent 的指令,不是对话,不进历史(直播侧 srcKind 同款排除)
         if (un.from && /^bridge(:|$)/.test(un.from)) continue;
         const msg: HistoryMessage = { seq, ts, role: "user", text: un.text };
-        if (un.from) Object.assign(msg, { from: un.from, fromId: un.fromId });
+        Object.assign(msg, senderOf(un));
         all.push(msg);
         continue;
       }

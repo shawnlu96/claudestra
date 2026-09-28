@@ -14,6 +14,7 @@ import { t } from "../lib/i18n.js";
 import { answerAsk, hasAsksTable, listAsks, MASTER_PROJECT, openAskFull, patchAsk, type Ask, type AskAnswer, type AskAtt, type AskVia, type NewAsk } from "../lib/ledger-asks.js";
 import { activeTasksByAgent } from "../lib/ledger-read.js";
 import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
+import { answerEcho } from "../lib/inbound-body.js";
 import { OwnerPresence } from "../lib/owner-presence.js";
 import { readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
@@ -211,7 +212,8 @@ export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["int
     to: { kind: "local", agentName: to.agentName, channelId: to.channelId, ws: live?.ws as ServerWebSocket<unknown>, cwd: live?.cwd },
     intent,
     content,
-    meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true },
+    meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true,
+      ...(trigger === "ask_answer" ? { askEcho: { askId, echo: answerEcho(content).text } } : {}) },
   };
   if (live) {
     const r = await d.deliver(env);

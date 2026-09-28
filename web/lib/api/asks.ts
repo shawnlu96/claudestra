@@ -1,6 +1,6 @@
 /**
- * 「待你处理」（bridge local-api/asks.ts）：列表、卡片作答、网页可见性心跳；以及聊天里点按钮时带上 askId 的小抄。
- * 门是 canReadLedger：部分 scope 的设备 / guest 拿 403，调用方按「没有待办」处理。
+ * 「待你处理」（bridge local-api/asks.ts）：列表、单条、原消息定位、卡片作答、网页可见性心跳；以及聊天里点按钮时带上 askId 的小抄。
+ * 谁能看见在 bridge lib/ask-access.ts：guest 只拿得到指给自己的；peer / 老 token 403，调用方按「没有待办」处理。
  */
 import type { WebAsk } from "@/features/asks/asks-model";
 import { api } from "./client";
@@ -17,6 +17,16 @@ export function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: We
  */
 export function answerAskCard(project: string, id: string, body: { choices?: string[]; text?: string }): Promise<{ ok: boolean }> {
   return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/answer`, { method: "POST", json: body, timeoutMs: 15_000 });
+}
+
+/** 一条 ask（聊天里「答复：<标题>」引用条按 askId 取标题）；看不见的 404 */
+export function fetchAsk(id: string): Promise<{ ok: boolean; ask: WebAsk }> {
+  return api(`/asks/${encodeURIComponent(id)}`, { timeoutMs: 10_000 });
+}
+
+/** 原消息在发起 agent 会话里的位置（「回到对话」、引用条点了跳过去）；人 / 系统发起的、找不到的 404 */
+export function locateAsk(id: string): Promise<{ ok: boolean; agent: string; sessionId: string; seq: number }> {
+  return api(`/asks/${encodeURIComponent(id)}/locate`, { timeoutMs: 20_000 });
 }
 
 export function postPresence(visible: boolean): Promise<unknown> {

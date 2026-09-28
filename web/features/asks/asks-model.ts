@@ -4,6 +4,7 @@
  */
 import { uiAgentName } from "@/lib/chat/agents";
 import type { WebComponentRow } from "@/lib/chat/events";
+import { attachmentUrl, isImageName } from "@/lib/chat/attachments";
 import { replyRowKey } from "@/lib/chat/reply-clicks";
 
 /** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
@@ -36,6 +37,13 @@ export interface WebAsk {
   expiresAt: number;
   /** 这个凭据能不能答这一条（bridge lib/ask-access.ts canAnswerAsk，列表逐行给）；老 bridge 不给 = 能答 */
   canAnswer?: boolean;
+  /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有） */
+  extra?: { files?: { name: string; attachment: string }[] };
+}
+
+/** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */
+export function askAttachments(a: Pick<WebAsk, "extra">): { name: string; kind: "image" | "file"; url: string }[] {
+  return (a.extra?.files ?? []).map((f) => ({ name: f.name, kind: isImageName(f.attachment) ? "image" : "file", url: attachmentUrl(f.attachment) }));
 }
 
 export interface AskGroups {

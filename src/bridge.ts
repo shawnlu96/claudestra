@@ -684,7 +684,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   // files 常在临时目录（scratchpad/截图），拷进 inbox（web 附件取回白名单）——
   // SSE 事件带 inbox 文件名，web 前端走 /api/chat/attachment/<name> 内联显示，
   // 时间戳前缀防碰撞 + 与 Discord 下载附件同一套展示名清洗（去 ^\d+_）。
-  const eventFiles: { name: string; attachment: string }[] = [];
+  const eventFiles: { name: string; attachment: string }[] = (env.meta.sentFiles = []);
   for (const p of env.meta.files || []) {
     try {
       const base = sanitizeAttachmentBase(p); // 保 Unicode;与 web attachment 路由同一套(peer 2026-08-25)
@@ -862,7 +862,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
-    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, askId: env.meta.askId };
+    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, ...env.meta.askEcho };
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inData });
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
     // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按

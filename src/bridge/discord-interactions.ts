@@ -912,7 +912,9 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           await proc.exited;
           if (proc.exitCode !== 0) console.error(`🔔 tmux send-keys 失败: ${await new Response(proc.stderr).text()}`);
           // 发键成功当场把「待你处理」里的权限 ask 记成 answered（ask-runtime.ts）；等改完 Discord 消息再记，watcher 可能先看到弹框没了记成撤销。发键失败不记
-          else if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
+          else if (isPermBtn) {
+            void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
+          }
 
           // 编辑原消息显示已处理（保留指纹让下次 poll 自然清理，避免竞争条件）
           const msgId = permissionMessages.get(targetChannelId);
@@ -971,7 +973,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             }).catch(() => {});
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
-            // 同步收掉 web 端的交互卡
+            // 「待你处理」记下选了什么、谁选的（ask-runtime.ts，要在广播之前）；再同步收掉 web 端的交互卡
+            (await import("./ask-runtime.js")).settleAuq(auqChannel, "discord", state, { principal: `discord:${interaction.user.id}` });
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
           } else if (action === "cancel") {
             await tmuxSendEscape(state.tmuxTarget);

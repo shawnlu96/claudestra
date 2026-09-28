@@ -49,13 +49,14 @@ function chatMessage(d: Record<string, unknown>, selfIds: ReadonlySet<string>): 
     const src = String(d.srcKind ?? "");
     if ((src === "api" || src === "user") && typeof d.text === "string" && d.text.trim()) {
       // 剥附件注入块 → 干净正文 + 附件数组；不剥的话另一端渲染出整块路径文字，本端回声与乐观消息也对不上（双份）
-      // owner 对「待你处理」的作答（bridge/asks.ts）：第一行是给 agent 看的说明，之后才是 owner 发的原文——回显只要原文，才对得上乐观气泡
-      const said = typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
+      // owner 对「待你处理」的作答：bridge 给了 echo（选项人话 + 原话，和历史同一个算法，lib/inbound-body.ts answerEcho）；老 bridge 只剥第一行说明
+      const said = typeof d.echo === "string" ? d.echo : typeof d.askId === "string" ? d.text.split("\n").slice(1).join("\n") : d.text;
       const { content, attachments } = extractAttachments(said);
       if (!content && !attachments?.length) return null;
       const from = typeof d.from === "string" && d.from !== "?" ? d.from : undefined;
       const fromLabel = isSelfSource(from, typeof d.fromId === "string" ? d.fromId : undefined, selfIds) ? undefined : from;
-      return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}) };
+      const ask = typeof d.askId === "string" ? { askId: d.askId } : {};
+      return { t: "user-in", text: content, ...(fromLabel ? { from: fromLabel } : {}), ...(attachments?.length ? { attachments } : {}), ...ask };
     }
     return null;
   }

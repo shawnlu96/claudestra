@@ -132,6 +132,8 @@ export interface ChatMessage {
   attachments?: ChatAttachmentView[];
   /** 入站消息来源标签（Discord 用户名 / 来源 agent；自己发的不带）。 */
   from?: string;
+  /** owner 在「待你处理」卡片上的作答：答的是哪条 ask（气泡上方画「答复：<标题>」引用条，点了跳回原消息） */
+  askId?: string;
   /** 按钮 / 表单回投的原始 payload：所属表单不在同一段历史里、没能还原成可读文案时留着，合进已加载的消息时再往前找（features/chat/delta-clicks.ts） */
   clickRaw?: string;
   /** v2.20.2+ 回合结束但后台任务还在跑——「后台继续中」标记(代替绿勾)。 */

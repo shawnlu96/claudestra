@@ -94,10 +94,40 @@ export function channelBodyText(attrs: string, body: string): string {
   return (/^\[attachment: [^\]\n]+\]$/m.test(text) ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
 }
 
+const ASK_ANSWER_RE = /(?:^|\s)trigger="ask_answer"/;
+const WIRE_LINE_RE = /^\[(?:button|select):[^\]\n]+\]$/;
+const ASK_ID_RE = /[（(](ask_[0-9a-z]+)[）)]/;
+/** 第一行里「选择：a；b。」/「Chose: a; b. 」（bridge/asks.ts answerContent 的两种语言） */
+const CHOSE_RE = /选择：(.+?)。|Chose: (.+?)\. /;
+
 /**
- * owner 对「待你处理」的作答（trigger="ask_answer"，bridge/asks.ts answerContent）：第一行是 bridge 给 agent 写的说明，
- * 历史里只留 owner 发的原文——和网页的乐观气泡、直播回显（web stream-shape）对得上。attrs = <channel …> 的属性串
+ * owner 对「待你处理」的作答（bridge/asks.ts answerContent：第一行是给 agent 写的说明，之后是 owner 的原文）→ 给人看的样子：
+ * askId 取第一行里的 ask_…（网页据此画「答复：<标题>」引用条、点了跳回原消息）；正文把 wire 行（[button:…] / [select:…]）换成
+ * 第一行里的选项人话，再接 owner 写的话。历史（channelBodyText）和直播（bridge 入站事件的 echo）都用它，多端显示一致。
  */
+export function answerEcho(content: string): { askId?: string; text: string } {
+  const [head = "", ...rest] = content.split("\n");
+  const said = rest.filter((l) => !WIRE_LINE_RE.test(l.trim())).join("\n").trim();
+  const chose = CHOSE_RE.exec(head);
+  const labels = (chose?.[1] ?? chose?.[2] ?? "").trim();
+  const askId = ASK_ID_RE.exec(head)?.[1];
+  return { ...(askId ? { askId } : {}), text: [labels, said].filter(Boolean).join("\n") };
+}
+
+/** channel 包装的属性串 + 内文 → 这条是哪条 ask 的作答（不是作答 → undefined） */
+export function channelAskId(attrs: string, body: string): string | undefined {
+  return ASK_ANSWER_RE.test(attrs) ? answerEcho(stripChannelHeader(body)).askId : undefined;
+}
+
 function ownerWordsOfAnswer(attrs: string, text: string): string {
-  return /(?:^|\s)trigger="ask_answer"/.test(attrs) ? text.split("\n").slice(1).join("\n").trim() : text;
+  return ASK_ANSWER_RE.test(attrs) ? answerEcho(text).text : text;
+}
+
+/** 历史里一条入站消息的发送者与所答的 ask（lib/session-history.ts）：没有的字段不带，历史 JSON 里不出现空键；没有 from 就不带 fromId */
+export function senderOf(un: { from?: string; fromId?: string; askId?: string }): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (un.from) out.from = un.from;
+  if (un.from && un.fromId) out.fromId = un.fromId;
+  if (un.askId) out.askId = un.askId;
+  return out;
 }

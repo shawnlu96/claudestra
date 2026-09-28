@@ -1497,7 +1497,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  电脑端要等对齐才出现)。同一 token 两端共用,本端自己发的消息也会收到回声
    *  ——按归一化文本对尾部消息对账,匹配到(乐观消息/历史已有)则跳过,否则画成
    *  用户气泡。历史重拉时 ru_ 气泡会被 jsonl 里的正主整体替换,无双份。 */
-  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string) {
+  public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string, askId?: string) {
     if (!text.trim() && !attachments?.length) return;
     // 对账去重：尾部 15 条里已有这条（本端乐观消息的回声 / 历史已有）就不再画——比对规则见 view-compose 的 isUserEcho
     const echo = this.state.messages.slice(-15).find((m) => isUserEcho(m, text, attachments, from));
@@ -1517,7 +1517,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         role: "user",
         ...liveUserText(text, s.messages, from), // 他端发的按钮 / 表单回投：可读文案 + 标已答；本人的 @ 委托指令行剥掉；原文留 wire 给回声对账
         ts: new Date().toISOString(),
-        ...(from ? { from } : {}),
+        ...(from ? { from } : {}), ...(askId ? { askId } : {}), // askId：「待你处理」作答的引用条（features/asks/components/ask-quote.tsx）
         ...(attachments?.length ? { attachments } : {}),
       });
     });

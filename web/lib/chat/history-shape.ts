@@ -33,6 +33,8 @@ export interface NeutralMessage {
   from?: string;
   /** 发送者 id（user_id）：认本人的所有来源 */
   fromId?: string;
+  /** owner 对「待你处理」的作答：答的是哪条 ask（bridge 从答复第一行解析，lib/inbound-body.ts answerEcho） */
+  askId?: string;
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -129,7 +131,8 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   if (from) raw = raw.replace(/^\[(?!attachment: )[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
-  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending };
+  const ask = m.askId ? { askId: m.askId } : {};
+  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };
 }
 
 /** assistant 记录并进当前回合气泡（首条建组）；segments 保留叙述 / 工具 / 回复的真实交错序 */

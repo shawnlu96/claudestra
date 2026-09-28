@@ -1,6 +1,9 @@
 /** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案、乐观作答；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
-import { agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, closedText, groupAsks, PENDING_MAX_MS, rowGroup, spanText, wireLabels, type PendingAnswer, type WebAsk } from "@/features/asks/asks-model";
+import {
+  agentLabel, answeredGroups, answerSummary, applyPending, askAttachments, askCounts, askForReply, clicksFromAnswer, closedText,
+  groupAsks, PENDING_MAX_MS, rowGroup, spanText, wireLabels, type PendingAnswer, type WebAsk,
+} from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
 import { fillParams } from "@/lib/i18n-fill";
@@ -89,9 +92,18 @@ test("时间文案", () => {
   expect(spanText(3 * 86400_000, zh)).toBe("3 天");
 });
 
-test("作答回显：去掉给 agent 看的第一行，只留 owner 发的原文（才对得上乐观气泡）", () => {
-  const evt = { seq: 1, ts: "", agent: "agent-x", chatId: "c", type: "chat_message", data: { direction: "in", srcKind: "api", text: "[✅ owner 回复了你 …]\n[button:go]", askId: "ask_1" } };
-  expect(translate(evt as never, "zh", new Set())).toMatchObject({ t: "user-in", text: "[button:go]" });
+test("作答回显：bridge 给了 echo 就显示它（选项人话 + 原话），带上 askId 给引用条；老 bridge 没 echo 的只去掉第一行", () => {
+  const data = { direction: "in", srcKind: "api", text: "[✅ owner 回复了你 …]\n[button:go]", askId: "ask_1" };
+  const evt = (d: Record<string, unknown>) => ({ seq: 1, ts: "", agent: "agent-x", chatId: "c", type: "chat_message", data: d }) as never;
+  expect(translate(evt({ ...data, echo: "发\n只发 Codex" }), "zh", new Set())).toMatchObject({ t: "user-in", text: "发\n只发 Codex", askId: "ask_1" });
+  expect(translate(evt(data), "zh", new Set())).toMatchObject({ t: "user-in", text: "[button:go]", askId: "ask_1" });
+});
+
+test("原消息带的附件 → 卡片上的附件条（图片 / 文件、inbox 的地址）", () => {
+  const files = [{ name: "a.png", attachment: "1_a.png" }, { name: "稿子.md", attachment: "2_稿子.md" }];
+  const got = askAttachments({ extra: { files } }).map((x) => [x.name, x.kind, x.url.endsWith("1_a.png") || x.url.includes(encodeURIComponent("2_稿子.md"))]);
+  expect(got).toEqual([["a.png", "image", true], ["稿子.md", "file", true]]);
+  expect(askAttachments({})).toEqual([]);
 });
 
 describe("乐观作答（T11b 第 8 条）", () => {

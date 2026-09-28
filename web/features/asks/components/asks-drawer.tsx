@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
-import { groupAsks } from "../asks-model";
+import { groupAsks, type WebAsk } from "../asks-model";
 import { asksStore, useAsks } from "../asks-store";
 import { AskCard } from "./ask-card";
 import { CloseIcon } from "./ask-icons";
@@ -14,7 +14,7 @@ const RECENT_PREVIEW = 5;
  * 「待你处理」抽屉：手机全屏、桌面右侧 440px；portal 到 body（移动端会话页在 transform 横滑容器里，fixed 会被困住）。
  * 三组：等你处理 / 待验收 / 最近处理过。打开时定位到 focus 那张（推送深链、横幅点进来）。
  */
-export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void }) {
+export function AsksDrawer({ onOpenChat }: { onOpenChat: (ask: WebAsk) => void }) {
   const t = useT();
   const { asks, focus } = useAsks();
   const [now, setNow] = useState(() => Date.now());

@@ -3,6 +3,7 @@
  * 其余看 = canReadLedger（大总管的另要 scope 含 master），答 = owner 本人。台账读不了、又不是设备凭据的（peer、老 token）整个 403：
  *   GET  /api/v1/asks                              跨项目（侧栏计数、抽屉；大总管的 ask 只在这里，project = "master"）；每行 canAnswer
  *   POST /api/v1/ledger/:project/asks              owner 开一条人发起的 ask（指派 / 审核），{title, assignee?, kind?, taskId?, options?, …}
+ *   GET  /api/v1/asks/:id[/locate]                 一条 / 它的原消息在哪（聊天引用条、「回到对话」跳原消息）
  *   GET  /api/v1/ledger/:project/asks              单个项目
  *   POST /api/v1/ledger/:project/asks/:id/answer   卡片作答 {choices: wire[], text?}；已结案 409 ask_closed；运行时弹框 400
  *   POST /api/v1/presence                          网页可见性 {visible}：可见时每分钟一次、切后台时一次（推送规则判 owner 在不在）
@@ -11,11 +12,12 @@
 import { canAnswerAsk, canSeeAsk, humanAssignee } from "../../lib/ask-access.js";
 import { draftFromReply } from "../../lib/ask-options.js";
 import { canReadLedger } from "../../lib/devices.js";
-import type { Ask } from "../../lib/ledger-asks.js";
-import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
+import { getAsk, type Ask } from "../../lib/ledger-asks.js";
+import { agentInScope, isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { answerFromCard } from "../ask-entry.js";
-import { createAsk, listForWeb, ownerPresence } from "../asks.js";
+import { locateAsk } from "../ask-locate.js";
+import { askReadDb, createAsk, listForWeb, ownerPresence } from "../asks.js";
 
 const decode = (s: string): string | null => {
   try {
@@ -38,9 +40,11 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
 
 export async function handleAsksApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
   const m = path === "/asks" ? ["", undefined, undefined, undefined] : path.match(/^\/ledger\/([^/]+)\/asks(?:\/([^/]+)\/(answer))?$/);
-  if (!m && path !== "/presence") return null;
+  const one = path.match(/^\/asks\/([^/]+?)(\/locate)?$/);
+  if (!m && !one && path !== "/presence") return null;
   const ledger = canReadLedger(principal);
   if (!ledger && !(principal.credential && !principal.peer)) return forbidden("asks require a full-scope owner credential or a device credential");
+  if (one) return oneAsk(req, decode(one[1]), !!one[2], principal);
   if (path === "/presence") {
     if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
     // 只认 owner 本人（和作答同一道门）：集成 token 一直报「在」会把卡活推送全压掉
@@ -97,4 +101,19 @@ async function createHumanAsk(req: Request, project: string, p: Principal): Prom
   } catch (e) {
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }
+}
+
+/**
+ * GET /asks/:id：一条（聊天里「答复：<标题>」引用条按 askId 取标题）；GET /asks/:id/locate：原消息在发起 agent 会话里的位置
+ * {agent, sessionId, seq}（网页据此跳过去）。看不见的一律 404；定位另要发起 agent 在凭据 scope 里（和读聊天历史同一道门）
+ */
+async function oneAsk(req: Request, id: string | null, locate: boolean, p: Principal): Promise<Response> {
+  if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
+  const db = askReadDb();
+  const a = id && db ? getAsk(db, id) : null;
+  if (!a || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found` });
+  if (!locate) return apiJson(200, { ok: true, ask: { ...a, canAnswer: canAnswerAsk(p, a) } });
+  if (!a.fromAgent || !agentInScope(p, a.fromAgent)) return apiJson(404, { ok: false, error: "no source message for this ask" });
+  const loc = await locateAsk(a.id);
+  return loc ? apiJson(200, { ok: true, ...loc }) : apiJson(404, { ok: false, error: "source message not found in the agent's sessions" });
 }

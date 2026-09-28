@@ -105,7 +105,8 @@ export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromCha
   const d = await send(env);
   if (!a) return d;
   try {
-    if (d.outcome.kind === "sent") patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [] });
+    const files = env.meta.sentFiles?.length ? { extra: { files: env.meta.sentFiles } } : {};
+    if (d.outcome.kind === "sent") patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [], ...files });
     else {
       const c = closeAsk(askDb(), a.id, "cancelled", "reply 没发出去");
       if (c) publishAsk(c);

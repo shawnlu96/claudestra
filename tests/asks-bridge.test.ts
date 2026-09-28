@@ -134,10 +134,12 @@ describe("作答 → 答复不抢占", () => {
     expect(delivered[0].content.split("\n").slice(1).join("\n")).toBe("[select:f:a,b]\n顺便先别发 release");
   });
 
-  test("历史里 trigger=ask_answer 的入站只留 owner 原文；别的入站不动", () => {
+  test("历史里 trigger=ask_answer 的入站：去掉说明行、wire 换成选项人话再接原话，带上 askId（引用条用）；别的入站不动", () => {
     const wrap = (trigger: string, body: string) => `<channel source="claudestra" chat_id="api:owner:self" trigger="${trigger}" user="owner">\n${body}\n</channel>`;
-    expect(unwrapChannelMessage(wrap("ask_answer", "[✅ owner 回复了你 …]\n[button:go]"))?.text).toBe("[button:go]");
-    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))?.text).toBe("第一行\n第二行");
+    const head = "[✅ owner 回复了你 12:00 的「待你处理」（ask_abc1）：发吗？选择：✅ 发。下面是 owner 发的原文]";
+    expect(unwrapChannelMessage(wrap("ask_answer", `${head}\n[button:go]`))).toMatchObject({ text: "✅ 发", askId: "ask_abc1" });
+    expect(unwrapChannelMessage(wrap("ask_answer", `${head}\n[button:go]\n只发 Codex`))?.text).toBe("✅ 发\n只发 Codex");
+    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))).toEqual({ text: "第一行\n第二行", from: "owner", fromId: undefined, askId: undefined });
   });
 
   test("不接管：没 wire 的普通消息、对不上任何 ask 的 wire、非 owner 凭据（peer / 部分 scope）", async () => {

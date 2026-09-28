@@ -32,6 +32,7 @@ import { GutterTime, HeaderTime } from "./msg-time";
 import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
+import { AskQuote } from "@/features/asks/components/ask-quote";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -262,8 +263,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
   }));
   const t = useT();
   const store = useChatStoreApi();
-  // 个人资料：自己的消息(无 from——from 是入站来源标签,别人的消息才带)
-  // 旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
+  // 个人资料：自己的消息(无 from——入站来源标签,别人的才带)旁显示自定义头像+昵称(owner 2026-07-14)。低频变更,全气泡重渲染可接受。
   const profile = useChatStore((s) => s.state.profile);
   if (m.role === "system") return <SystemDivider m={m} />;
   if (m.role === "user") {
@@ -314,7 +314,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
               {...press.handlers}
             >
               <GutterTime ts={m.ts} side={isSelf ? "right" : "left"} lead="user" />
-              {userQuoted && (
+              {m.askId ? <AskQuote id={m.askId} /> : userQuoted && (
                 <div className="mb-2 border-l-2 border-base-content/25 pl-2 text-[12px] leading-snug text-base-content/50">
                   {userQuoted}
                 </div>

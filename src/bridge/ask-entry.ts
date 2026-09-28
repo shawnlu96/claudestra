@@ -15,6 +15,7 @@ import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../li
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
 import { noticeExpired, sweepExpired } from "./ask-expire.js";
+import { initAskPin } from "./ask-pin.js";
 import { answersGoToAgent, answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
@@ -229,11 +230,15 @@ export function discordAskEditor(discord: DiscordLike): (a: Ask, label: string) 
   };
 }
 
-/** bridge.ts 启动时的一行：接上投递 / 押后队列，Discord 模式下带上「改原消息为已处理」；撤掉上次留下的运行时 ask 并订阅 AUQ 事件；每分钟扫过期 */
+/**
+ * bridge.ts 启动时的一行：接上投递 / 押后队列，Discord 模式下带上「改原消息为已处理」和 #control 的授权摘要置顶（ask-pin.ts）；
+ * 撤掉上次留下的运行时 ask 并订阅 AUQ 事件；每分钟扫过期
+ */
 export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: DiscordLike | null }): void {
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
+  if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);
   const sweep = () => void sweepExpired().catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));
   setInterval(sweep, 60_000).unref?.();
 }

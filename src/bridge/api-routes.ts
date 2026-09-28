@@ -1621,9 +1621,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
       const action = String(body?.action || "submit");
       if (action === "cancel") {
-        try {
-          await tmuxSendEscape(state.tmuxTarget);
-        } catch { /* non-critical：状态照清 */ }
+        try { await tmuxSendEscape(state.tmuxTarget); } catch { /* Esc 没发出去也照样清状态：弹框还在的话下次检测会重建卡片 */ }
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
         emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
@@ -1662,7 +1660,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       clearAuqState(agent.channelId);
       recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
       // 「待你处理」的 AUQ ask 在广播之前记成是谁答的（ask-runtime.ts）：凭据 id 不进 question_cleared，那是发给所有订阅者的
-      (await import("./ask-runtime.js")).settleRuntimeAsk("auq", agent.channelId, "interact", undefined, { principal: principal.id, device: principal.credential });
+      (await import("./ask-runtime.js")).settleAuq(agent.channelId, "interact", state, { principal: principal.id, device: principal.credential });
       emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
       return apiJson(200, { ok: true, keys: keys.length });
     }
