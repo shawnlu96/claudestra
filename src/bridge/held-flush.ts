@@ -15,8 +15,8 @@ export interface FlushDeps {
   /** 这个频道当前的连接；不在线 = undefined */
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
   deliver: (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;
-  /** 回程簿失效钟从真正送达起算 */
-  touch: (channelId: string) => void;
+  /** 回程簿失效钟从真正送达起算（只动这封消息发送方那一槽） */
+  touch: (channelId: string, env: Envelope) => void;
 }
 
 export async function flushHeld(d: FlushDeps, channelId: string, reason: string): Promise<void> {
@@ -43,7 +43,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份。等下一次触发
       if (r.outcome.kind === "sent" && r.outcome.note === "queued") break;
       // 先 touch 再出队落盘:中间崩溃也只是重投一次,不会拿旧钟把回程扫掉
-      if (r.outcome.kind === "sent") d.touch(channelId);
+      if (r.outcome.kind === "sent") d.touch(channelId, item.env);
       d.held.remove(channelId, item);
       if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${item.env.from.kind === "local" ? item.env.from.agentName : "?"} → ${to.agentName || channelId}`);
     }
