@@ -121,7 +121,7 @@ const CATEGORY_NAME = "agents";
 
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { realOpsDeps, triggerSkillsRescan } from "./manager/ops-deps.js";
-import { pendingHoldsOffHeal, pendingRefusal, pidAlive } from "./lib/pending-ops.js";
+import { isPendingLive, pendingHoldsOffHeal, pendingRefusal, pidAlive } from "./lib/pending-ops.js";
 import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, newCreateRun, recordCreate } from "./manager/create-guard.js"; // create 的 creating 占位
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
@@ -617,7 +617,7 @@ async function cmdCreate(
     ready = started.ready;
     if (!started.ready) {
       // 按 reason 出文案（对话框原文 / 秒退 / 占用）；CC 状态栏契约提示只对「超时」有意义
-      const hint = started.reason === "timeout" ? readyTimeoutHint(await captureLast(name, 40).catch(() => "")) : "";
+      const hint = started.reason === "timeout" ? readyTimeoutHint(await tmuxCapture(windowId, 40).catch(() => "")) : ""; // 按 @id 读，别读到同名的别的窗口
       await cleanup(`${adapter.label} ${readyFailureText(started)}${hint}`);
       return;
     }
@@ -1283,6 +1283,14 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     }
 
     try {
+    // 拿到锁后按最新 registry 再核一次：排队期间可能被 kill / 做成半截（开头的快照看不到）；多目标重启不拉起已停止的
+    const fresh = (await loadRegistry()).agents[tmuxName];
+    const late = pendingRefusal(fresh?.pending, "restart", fresh?.pending ? await listAgentWindowsShared() : [], Date.now(), pidAlive)
+      ?? (!name && fresh?.status !== "active" ? "排队期间已被 kill / 移除，跳过" : null);
+    if (late) {
+      results.push({ name: tmuxName, ok: false, error: late });
+      continue;
+    }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
     const adapter = managedFor(info.runtime);
     if (!adapter) {
@@ -1420,7 +1428,10 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     if (started.ready && reg.agents[tmuxName] && reg.agents[tmuxName].status !== "active") {
       reg.agents[tmuxName].status = "active";
       // 重新拉起 = 残留 kill 作废（免得 repair 再杀一次）；只改这一条，不在最后整份写回开头的快照
-      await patchRegistryAgent(tmuxName, (a) => { a.status = "active"; if (a.pending?.op === "kill") delete a.pending; });
+      await patchRegistryAgent(tmuxName, (a) => {
+        a.status = "active";
+        if (a.pending?.op === "kill" && !isPendingLive(a.pending, Date.now(), pidAlive)) delete a.pending; // 在途的 kill 不替它作废
+      });
     }
 
     // 按 reason 出文案并附 detail（以前一律「启动超时」）；超时再附大会话体积提示
@@ -1526,7 +1537,7 @@ async function cmdList() {
       // 不确定，必须当「不判 dead」——写 !hasChild 会把 null 当 false 反而更易误杀。
       const stillShell = isAtShell(await captureLast(name, 5));
       // stillShell 为真才去 spawn ps(省一次进程);否则 hasChild 留 null,判据 false
-      const hasChild = stillShell ? await windowHasChildProcess(name) : null;
+      const hasChild = stillShell ? await windowHasChildProcess(windowTarget(name)) : null;
       if (deadShellVerdict(stillShell, hasChild)) {
         console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell 且无子进程（claude 未启动/已退出），判为 dead 交给自愈`);
         agents.push({
@@ -2524,7 +2535,7 @@ switch (cmd) {
   }
 
   case "kill": {
-    const [name] = args;
+    const [name] = args.filter((a) => !a.startsWith("--")); // `kill --force x` 也认得出名字
     if (!name) {
       output({ ok: false, error: "usage: kill <name>" });
       break;
@@ -2534,7 +2545,7 @@ switch (cmd) {
   }
 
   case "remove": {
-    const [name] = args;
+    const [name] = args.filter((a) => !a.startsWith("--"));
     if (!name) {
       output({ ok: false, error: "usage: remove <name>（kill + 从列表永久移除,归档保留）" });
       break;

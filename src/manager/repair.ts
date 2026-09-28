@@ -32,7 +32,7 @@ async function stillApplies(r: Residue, deps: OpsDeps): Promise<boolean> {
 async function fixOne(r: Residue, deps: OpsDeps, force: boolean): Promise<{ ok: boolean; detail: string }> {
   switch (r.kind) {
     case "stale-create": {
-      const c = await clearCreateResidue(r.agent, deps, { force });
+      const c = await clearCreateResidue(r.agent, deps, { force, expect: r.marker }); // 只清计划里看到的那个标记
       return { ok: c.ok, detail: c.ok ? c.steps.join("；") : c.error! };
     }
     case "stale-kill": {

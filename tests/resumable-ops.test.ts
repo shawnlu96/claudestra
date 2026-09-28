@@ -8,7 +8,8 @@ import { abandonCreate, abortCreate, beginCreate, clearCreateResidue, commitCrea
 import { runKill, runRemove } from "../src/manager/agent-kill";
 import { runRename } from "../src/manager/agent-rename";
 import { runRepair } from "../src/manager/repair";
-import type { AgentInfo } from "../src/manager/core";
+import { assertValidNewName, type AgentInfo } from "../src/manager/core";
+import { windowKey } from "../src/lib/tmux-target";
 import { isForbiddenChannelError, isUnknownChannelError, pendingHoldsOffHeal, pendingRefusal, scanResidues } from "../src/lib/pending-ops";
 
 type World = ReturnType<typeof makeWorld>;
@@ -26,6 +27,11 @@ async function simulateCreate(w: World, name: string, run: CreateRun = newCreate
   await recordCreate(name, { windowId }, w.deps, run);
   const entry = { project: "/p", purpose: "new", created: "t1", status: "active", channelId: ch, notes: "", cwd: "/p", sessionId: "s-new" } as AgentInfo;
   return commitCreate(name, entry, w.deps, run);
+}
+
+/** 调用方判定时看到的那个 create 标记 */
+function markerOf(w: World): { pid: number; startedAt: string } {
+  return w.st.reg.agents["agent-x"]!.pending!;
 }
 
 async function scanOf(w: World) {
@@ -186,7 +192,7 @@ describe("对抗：再跑 / repair 不许误删", () => {
     w.crashAfter("createChannel#1");
     await expect(simulateCreate(w, "agent-x")).rejects.toBeInstanceOf(Crash);
     w.restart();
-    const r = await clearCreateResidue("agent-x", w.deps);
+    const r = await clearCreateResidue("agent-x", w.deps, { expect: markerOf(w) });
     expect(r.steps.join()).toContain("没记到频道 id");
     expect(w.st.channels.has("owner-made")).toBe(true);
     expect(w.st.channels.size).toBe(2);
@@ -198,7 +204,7 @@ describe("对抗：再跑 / repair 不许误删", () => {
     await expect(simulateCreate(w, "agent-x")).rejects.toBeInstanceOf(Crash);
     w.restart();
     w.st.bridgeUp = false;
-    expect((await clearCreateResidue("agent-x", w.deps)).ok).toBe(false);
+    expect((await clearCreateResidue("agent-x", w.deps, { expect: markerOf(w) })).ok).toBe(false);
     expect(w.st.reg.agents["agent-x"]!.status).toBe("creating");
     expect(await simulateCreate(w, "agent-x")).toContain("残留清不掉");
   });
@@ -269,7 +275,7 @@ describe("审查发现的误删路径（回归用例）", () => {
     w.restart();
     w.openWindow("agent-x"); // 别的路径（如 resume）建的同名窗口，里面在跑
     w.st.busyWindows = ["agent-x"];
-    const r = await clearCreateResidue("agent-x", w.deps);
+    const r = await clearCreateResidue("agent-x", w.deps, { expect: markerOf(w) });
     expect(r.steps.join()).toContain("没关");
     expect(w.st.windows).toEqual(["agent-x"]);
   });
@@ -318,7 +324,7 @@ describe("审查发现的误删路径（回归用例）", () => {
     await simulateCreate(w, "agent-x").catch((e) => { if (!(e instanceof Crash)) throw e; });
     w.restart();
     w.breakTmux();
-    await expect(clearCreateResidue("agent-x", w.deps)).rejects.toThrow("列不出");
+    await expect(clearCreateResidue("agent-x", w.deps, { expect: markerOf(w) })).rejects.toThrow("列不出");
     const r = await runRepair(true, { ...(await scanOf(w)), windows: null }, w.deps);
     expect((r.applied as Array<{ kind: string }>).map((x) => x.kind)).toEqual(["stale-create"]);
     expect(w.st.channels.has("c1")).toBe(true);
@@ -513,3 +519,44 @@ describe("PM 最后一轮审查（回归用例）", () => {
   });
 });
 
+describe("第 3 轮复验（回归用例）", () => {
+  test("P2-3：两次读之间占位换了主人 → clearCreateResidue 停手，不清到新占位头上", async () => {
+    const w = makeWorld();
+    w.crashAfter("openWindow#1");
+    await simulateCreate(w, "agent-x").catch((e) => { if (!(e instanceof Crash)) throw e; });
+    w.restart();
+    const seen = markerOf(w);
+    // B 接手：新的占位、自己的窗口和频道
+    const cur = w.st.reg.agents["agent-x"]!.pending!;
+    w.st.reg.agents["agent-x"]!.pending = { ...cur, startedAt: "2026-09-28T13:00:00Z" };
+    const bWin = w.openWindow("agent-x");
+    const r = await clearCreateResidue("agent-x", w.deps, { expect: seen });
+    expect(r.ok).toBe(false);
+    expect(w.st.winIds).toContain(bWin);
+    expect(w.st.reg.agents["agent-x"]!.status).toBe("creating");
+  });
+
+  test("P2-3：repair 只清计划里那个标记", async () => {
+    const w = makeWorld();
+    w.crashAfter("openWindow#1");
+    await simulateCreate(w, "agent-x").catch((e) => { if (!(e instanceof Crash)) throw e; });
+    w.restart();
+    const scan = await scanOf(w);
+    const newer = { op: "create" as const, pid: 7, startedAt: "2026-09-28T11:00:00Z", channelName: "x" }; // 也是残留，但不是计划里那个
+    w.st.reg.agents["agent-x"]!.pending = newer;
+    await runRepair(true, scan, w.deps);
+    expect(w.st.reg.agents["agent-x"]!.pending).toEqual(newer);
+  });
+
+  test("P2-1：Esc 节流 / save-compact 守卫按窗口身份记账", () => {
+    expect(windowKey("master:=agent-x")).toBe("agent-x");
+    expect(windowKey("master:agent-x")).toBe("agent-x");
+    expect(windowKey("agent-x")).toBe("agent-x");
+    expect(windowKey("master:0")).toBe("0");
+  });
+
+  test("P2-8：建名拒绝点号（tmux 目标里 . 是 pane 分隔符）", () => {
+    expect(() => assertValidNewName("bad.name")).toThrow("点号");
+    expect(() => assertValidNewName("fine-name")).not.toThrow();
+  });
+});

@@ -9,7 +9,7 @@ import { isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../li
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
-import { TMUX_SOCK as SOCK, MASTER_SESSION, AGENT_PREFIX, tmuxRaw } from "../lib/tmux-helper.js";
+import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
 import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
@@ -120,7 +120,7 @@ export async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entri
   for (const newName of Object.keys(raw.agents)) {
     const oldTmux = newName.replace(/^agent-/, "worker-");
     if (oldTmux !== newName) {
-      await tmuxRaw(["rename-window", "-t", `${MASTER_SESSION}:${oldTmux}`, newName]).catch(() => {});
+      await tmuxRaw(["rename-window", "-t", windowTarget(oldTmux), newName]).catch(() => {});
     }
   }
 
@@ -164,7 +164,8 @@ export async function saveRegistry(reg: Registry) {
 // `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
 // 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
 // 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
-const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~\x00-\x1f\x7f]/;
+// `.` 也挡：tmux 在目标串里按 `.` 切 pane，带点的窗口按名字永远找不到（create 按 @id 能建成，之后按名字的操作全静默失效）
+const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f]/;
 /** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
 const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 
@@ -198,7 +199,7 @@ export function assertValidNewName(raw: string): void {
   }
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
     throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
+      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
     );
   }
   if (NAME_TRAVERSAL_RE.test(cleaned)) {

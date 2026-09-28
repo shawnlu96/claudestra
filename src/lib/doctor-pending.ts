@@ -56,7 +56,7 @@ async function checkUpdateMarker(repoRoot: string): Promise<Check[]> {
   const g = "config";
   const gone = readUpdateMarker(UPDATE_ABANDONED);
   const abandoned: Check[] = gone ? [{ group: g, name: "放弃补完的 update", status: "warn",
-    detail: `update → ${gone.targetLabel} 停在 ${gone.step} 时仓库被改到别处，依赖 / daemon 可能不是新代码`,
+    detail: `update → ${gone.targetLabel} 停在 ${gone.step} 后放弃补完（${gone.abandonReason ?? "原因没记下"}），依赖 / daemon 可能不是新代码`,
     fix: `bun src/manager.ts install-cli 重装并 reload daemon（成功的 update 也会顺手清掉），核对后可删 ${UPDATE_ABANDONED}` }] : [];
   const m = readUpdateMarker();
   if (!m) return abandoned;

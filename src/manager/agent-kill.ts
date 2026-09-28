@@ -54,7 +54,7 @@ export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {
   // 窗口暂时不在可能是 restart 在重建：这时按「没窗口也往下」删频道、置 stopped，会和 restart 打架
   if (deps.restartInProgress(name)) return { ok: false, error: `${name} 正在 restart（窗口在重建），等它结束再 kill` };
   if (info?.pending?.op === "create") {
-    const r = await clearCreateResidue(name, deps, { force: opts.force, restoreStopped: true }); // 放回的旧条目别是 active，否则 launcher 会拉活
+    const r = await clearCreateResidue(name, deps, { force: opts.force, restoreStopped: true, expect: info.pending }); // 放回的旧条目别是 active，否则 launcher 会拉活
     return r.ok
       ? { ok: true, agent: name, message: `${name} 是做到一半的 create，已清理：${r.steps.join("；")}` }
       : { ok: false, agent: name, error: r.error };

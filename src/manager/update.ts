@@ -195,7 +195,7 @@ async function resumeUpdate(d: UpdateDeps): Promise<boolean> {
   if (v.action === "report") {
     // 仓库被改到别处：补不了，也不该永远挡住更新；标记挪去 abandoned 让 doctor 继续报，照常走 update
     console.error(`[update] ⚠️ 上次 update（→ ${m.targetLabel}，停在 ${m.step}）没做完，且${v.why}；标记移到 ${UPDATE_ABANDONED}，照常更新`);
-    abandonUpdateMarker();
+    await abandonUpdateMarker(v.why);
     return false;
   }
   if (v.action === "finish-tail" && (await d.git("status", "--porcelain")).out) {

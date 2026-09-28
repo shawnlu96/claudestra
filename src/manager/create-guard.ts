@@ -17,7 +17,7 @@ function createPendingOf(a: AgentInfo | undefined): CreatePending | null {
 }
 
 /** 同一个标记（同一次 create 写的），而不只是「都是 create」——并发时别把别人刚写的占位当成自己要清的 */
-function sameMarker(a: CreatePending | null, b: CreatePending): boolean {
+function sameMarker(a: { pid: number; startedAt: string } | null, b: { pid: number; startedAt: string }): boolean {
   return !!a && a.pid === b.pid && a.startedAt === b.startedAt;
 }
 
@@ -28,6 +28,8 @@ export interface ClearOptions {
   force?: boolean;
   /** 放回的旧条目若是 active 就改成 stopped：kill 一个做到一半的 create 时，别让 launcher 把旧会话拉活 */
   restoreStopped?: boolean;
+  /** 只清这一个标记（调用方判定时看到的那个）：两次读之间别的 create 接手了，就停手，别清到它头上 */
+  expect: { pid: number; startedAt: string };
 }
 
 /** 关掉这次 create 建的窗口：记了 id 只关那一个；没记到 id（砍在建窗口与写回之间）时同名窗口只有裸 shell 才关 */
@@ -51,9 +53,10 @@ async function closeCreateWindow(name: string, p: CreatePending, deps: OpsDeps, 
 }
 
 /** 清掉一个 create 残留（不看持有者死活——调用方先判）。可重复调用：每一步都先看还在不在 */
-export async function clearCreateResidue(name: string, deps: OpsDeps, opts: ClearOptions = {}): Promise<ClearResult> {
+export async function clearCreateResidue(name: string, deps: OpsDeps, opts: ClearOptions): Promise<ClearResult> {
   const p = createPendingOf((await deps.loadRegistry()).agents[name]);
   if (!p) return { ok: true, steps: [] };
+  if (!sameMarker(p, opts.expect)) return { ok: false, steps: [], error: `${name} 的占位已换成另一次 create（pid ${p.pid}），没动` };
   const steps: string[] = [];
   await closeCreateWindow(name, p, deps, steps);
   if (p.channelId) {
@@ -90,7 +93,7 @@ export async function beginCreate(name: string, channelName: string, base: Parti
     if (cur.pending.op !== "create") {
       return { ok: false, error: `${name} 有做到一半的 ${cur.pending.op}，先跑 manager repair --apply（或再跑一次那条命令）收尾` };
     }
-    recovered = await clearCreateResidue(name, deps);
+    recovered = await clearCreateResidue(name, deps, { expect: cur.pending });
     if (!recovered.ok) return { ok: false, error: `上次 create 的残留清不掉：${recovered.error}` };
   }
   if ((await deps.listWindows()).includes(name)) return { ok: false, error: `${name} 已存在` };
@@ -150,8 +153,12 @@ export function gateOps<T extends object>(ops: T, run: CreateRun): T {
 
 /** 建频道 / 建窗口后立刻调：之后任何一刻被杀，残留清理都知道删哪个频道、关哪个窗口 */
 export async function recordCreate(name: string, patch: { channelId?: string; windowId?: string }, deps: OpsDeps, run: CreateRun): Promise<void> {
-  // 信号清理已接手：把主流程冻在这里等它 process.exit，别再往下建窗口（清理按接手时的占位删，后建的它看不见）
-  if (run.aborting) await new Promise<never>(() => {});
+  // 信号清理已接手：把主流程冻在这里等它 process.exit，别再往下建窗口（清理按接手时的占位删，后建的它看不见）。
+  // 刚建好还没来得及记下的窗口，清理看不到它的 id：这里按 id 自己关掉
+  if (run.aborting) {
+    if (patch.windowId) await deps.killWindowId(patch.windowId).catch((e) => console.error(`[create] 关中止时刚建的窗口失败: ${(e as Error).message}`));
+    await new Promise<never>(() => {});
+  }
   const reg = await deps.loadRegistry();
   const a = reg.agents[name];
   if (!ownsPlaceholder(reg, name, run) || !a) return;
@@ -185,7 +192,7 @@ export async function commitCreate(name: string, entry: AgentInfo, deps: OpsDeps
  * 只按本次自己记下的 id 关窗口（还得同名）、删频道——id 唯一，不会误伤接手方。
  */
 export async function abandonCreate(name: string, own: { channelId?: string; windowId?: string }, deps: OpsDeps, run: CreateRun): Promise<ClearResult> {
-  if (ownsPlaceholder(await deps.loadRegistry(), name, run)) return clearCreateResidue(name, deps);
+  if (ownsPlaceholder(await deps.loadRegistry(), name, run)) return clearCreateResidue(name, deps, { expect: run.marker! });
   const steps = ["占位已被别的进程接手，registry 没动，只按本次的 id 收拾"];
   if (own.windowId && (await deps.windowIds(name)).includes(own.windowId)) {
     await deps.killWindowId(own.windowId);
@@ -210,7 +217,7 @@ export async function abortCreate(sig: NodeJS.Signals, name: string, deps: OpsDe
   const code = sig === "SIGINT" ? 130 : 143;
   setTimeout(() => exit(code), 10_000).unref();
   try {
-    const r = await clearCreateResidue(name, deps);
+    const r = await clearCreateResidue(name, deps, { expect: run.marker! });
     report(r.ok ? `create 被 ${sig} 打断，已清理：${r.steps.join("；")}` : `create 被 ${sig} 打断，${r.error}`);
   } catch (e) {
     report(`create 被 ${sig} 打断，清理出错：${(e as Error).message}——跑 manager repair 补`);

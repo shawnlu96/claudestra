@@ -82,7 +82,7 @@ export function isForbiddenChannelError(msg: string): boolean {
 }
 
 export type Residue =
-  | { kind: "stale-create"; agent: string; channelId?: string; channelName: string }
+  | { kind: "stale-create"; agent: string; channelId?: string; channelName: string; marker: { pid: number; startedAt: string } }
   | { kind: "stale-kill"; agent: string }
   | { kind: "stale-rename"; agent: string; from: string }
   | { kind: "busy"; agent: string; op: PendingOp["op"]; pid: number }
@@ -117,7 +117,9 @@ export function scanResidues(inp: ScanInput): Residue[] {
     if (isPendingLive(p, inp.now, inp.alive)) {
       out.push({ kind: "busy", agent: name, op: p.op, pid: p.pid });
       if (p.op === "create" && p.channelId) liveChannelOwners.add(p.channelId);
-    } else if (p.op === "create") out.push({ kind: "stale-create", agent: name, channelId: p.channelId, channelName: p.channelName });
+    } else if (p.op === "create") {
+      out.push({ kind: "stale-create", agent: name, channelId: p.channelId, channelName: p.channelName, marker: { pid: p.pid, startedAt: p.startedAt } });
+    }
     else if (p.op === "kill") out.push({ kind: "stale-kill", agent: name });
     else out.push({ kind: "stale-rename", agent: name, from: p.from });
   }

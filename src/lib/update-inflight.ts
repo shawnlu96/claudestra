@@ -7,7 +7,7 @@
  * daemon 的启动时间判断补哪一截；launcher 自杀那种正常情况 bridge / cron 已 reload，只清标记。
  */
 import { spawnSync } from "child_process";
-import { existsSync, readFileSync, renameSync, rmSync } from "fs";
+import { existsSync, readFileSync, rmSync } from "fs";
 import { statePath } from "./paths.js";
 import { writeJsonAtomic } from "./state-file.js";
 
@@ -31,6 +31,8 @@ export interface UpdateMarker {
   reloadAt?: string;
   /** 已经补过一次 reload：再判出「要补 reload」就放弃（移去 abandoned），别让一个起不来的 daemon 永远挡住新版本 */
   reloadRetried?: boolean;
+  /** 移去 abandoned 时写下的原因（HEAD 被改到别处 / 补过 reload 仍有 daemon 没起来，含是哪几个） */
+  abandonReason?: string;
 }
 
 /** daemon 现状：数字 = 在跑，自该时刻起；null = 已 load 但没在跑（崩溃循环 / 退出了，reload 修不好）；unloaded = 没 load（reload 能修） */
@@ -57,9 +59,11 @@ export function clearUpdateMarker(path = UPDATE_INFLIGHT): void {
   rmSync(path, { force: true });
 }
 
-/** 放弃补完：标记挪到 UPDATE_ABANDONED 留给 doctor（现场不能静默消失），不再挡住之后的 update */
-export function abandonUpdateMarker(from = UPDATE_INFLIGHT, to = UPDATE_ABANDONED): void {
-  renameSync(from, to);
+/** 放弃补完：标记连同原因挪到 UPDATE_ABANDONED 留给 doctor（现场不能静默消失），不再挡住之后的 update */
+export async function abandonUpdateMarker(reason: string, from = UPDATE_INFLIGHT, to = UPDATE_ABANDONED): Promise<void> {
+  const m = readUpdateMarker(from);
+  if (m) await writeJsonAtomic(to, { ...m, abandonReason: reason });
+  rmSync(from, { force: true });
 }
 
 export type UpdateVerdict =
