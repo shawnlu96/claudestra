@@ -173,7 +173,7 @@ export async function resolveSessionIdForWindow(
   for (;;) {
     const childPids = await windowChildPids(target).catch(() => [] as number[]);
     const paneId =
-      (await tmuxRaw(["display-message", "-p", "-t", target, "#{pane_id}"]).catch(() => "")).trim() || null;
+      (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_id}"]).catch(() => "")).trim().split("\n")[0] || null; // list-panes：窗口不在就空，不像 display-message 退回当前窗口
     const entries = (await readCcSessionEntries())
       .filter((e) => pidAlive(e.pid))
       .map((e) => ({ ...e, cwd: safeRealpath(e.cwd) }));

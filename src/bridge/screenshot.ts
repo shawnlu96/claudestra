@@ -3,6 +3,7 @@
  */
 
 import { TMUX_SOCK, BUN_PATH, ENV_WITH_BUN, TMP_DIR } from "./config.js";
+import { windowTarget } from "../lib/tmux-helper.js";
 import { sandboxTmuxArgv } from "../lib/tmux-helper.js";
 
 export async function tmuxScreenshot(
@@ -10,7 +11,7 @@ export async function tmuxScreenshot(
 ): Promise<string | null> {
   const pngPath = `${TMP_DIR}/peek_${windowName}_${Date.now()}.png`;
   const target =
-    windowName === "master" ? "master:0" : `master:${windowName}`;
+    windowName === "master" ? "master:0" : windowTarget(windowName);
 
   try {
     const htmlPath = `${TMP_DIR}/peek_${Date.now()}.html`;

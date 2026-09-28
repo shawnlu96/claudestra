@@ -7,10 +7,12 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createEscGuard } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
+import { windowKey } from "./tmux-target.js"; export { windowKey };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -153,9 +155,9 @@ export async function setWindowOption(target: string, option: string, value: str
   }
 }
 
-/** tmux window target: `master:agent-xxx` */
+/** `master:=agent-xxx`：`=` 精确匹配，否则窗口不在时 tmux 按前缀落到 agent-xxxbar。⚠ display-message 例外：窗口不在时不报错、退回当前窗口，要核存在用 list-panes */
 export function windowTarget(name: string): string {
-  return `${MASTER_SESSION}:${name}`;
+  return `${MASTER_SESSION}:=${name}`;
 }
 
 /** 发送文本到窗口（literal 模式 + 单独的 Enter） */
@@ -168,7 +170,7 @@ export function windowTarget(name: string): string {
  */
 export async function ensurePaneInteractive(target: string): Promise<boolean> {
   try {
-    const inMode = (await tmuxRaw(["display-message", "-p", "-t", target, "#{pane_in_mode}"])).trim();
+    const inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空（display-message 会退回当前窗口）
     if (inMode !== "" && inMode !== "0") {
       await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
       await Bun.sleep(120);
@@ -198,28 +200,21 @@ export function tmuxInterrupt(target: string): void {
   tmuxFire(["send-keys", "-t", target, "C-c"]);
 }
 
-/**
- * 双 Esc 护栏：CC 把间隔 ≤600ms 的两次 Esc 当 Rewind 手势，弹出检查点对话框挡住窗口（≥700ms 不开，git log -S ESC_DOUBLE_TAP_MS）。
- * 所以所有 Esc 都走这里：发键全程持有跨进程锁（bridge、manager 子进程共用 runtime 目录），离上一次发完不足 1200ms 就先等，发完才记时——
- * 只按「预定时刻」排不够：负载高时 tmux 调用能慢几百毫秒，两次按键会挤到一起（沙箱实测开出了 Rewind）。拿不到锁（5 秒）只按本进程记时排。
- */
-export const ESC_DOUBLE_TAP_MS = 1200;
-const lastEscapeAt = new Map<string, number>();
-export async function tmuxSendEscape(target: string, opts: { strict?: boolean } = {}): Promise<void> {
-  const key = target.replace(":=", ":").replace(/[^\w.-]/g, "_");
-  const file = join(RUNTIME_DIR, `esc-${key}.at`);
-  const lock = await acquireLock(join(RUNTIME_DIR, `esc-${key}.lock`), 5_000, 10_000);
-  try {
-    const shared = (() => { try { return Number(readFileSync(file, "utf8")) || 0; } catch { return 0; /* 还没有人发过 Esc：文件不存在 */ } })();
-    const wait = Math.max(lastEscapeAt.get(key) ?? 0, shared) + ESC_DOUBLE_TAP_MS - Date.now();
-    if (wait > 0) await Bun.sleep(wait);
-    await (opts.strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "Escape"]); // strict：打断键发不出去要报给按按钮的人
-  } finally {
-    lastEscapeAt.set(key, Date.now()); // 发完才记：键一定已经落地
-    try { writeFileSync(file, String(Date.now())); } catch { /* 写不了只丢跨进程共享：本进程的记时照样挡双击 */ }
-    lock?.release();
-  }
-}
+/** 双 Esc 护栏（CC 连按两次 Esc = Rewind）：所有 Esc 都必须走这里。规则、窗口身份、跨进程锁见 lib/esc-guard.ts */
+const escFile = (key: string, ext: string) => join(RUNTIME_DIR, `esc-${key.replace(/[^\w.-]/g, "_")}.${ext}`);
+export const tmuxSendEscape = createEscGuard({
+  windowId: async (t) => (await tmuxRaw(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null,
+  lock: (key) => acquireLock(escFile(key, "lock"), 5_000, 10_000),
+  readShared: (key) => {
+    try { return Number(readFileSync(escFile(key, "at"), "utf8")) || 0; } catch { return 0; /* 还没有人给这个窗口发过 Esc */ }
+  },
+  writeShared: (key, at) => {
+    try { writeFileSync(escFile(key, "at"), String(at)); } catch { /* 写不了只丢跨进程共享，本进程的记时照样挡双击 */ }
+  },
+  send: async (t, strict) => void (await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", t, "Escape"])), // strict：打断键发不出去要报给按按钮的人
+  sleep: (ms) => Bun.sleep(ms),
+  now: () => Date.now(),
+});
 
 /**
  * CC 2.1.x 的 Rewind 检查点对话框——**不是我们的面板，永远不要盲发 Esc**。
@@ -407,7 +402,6 @@ export async function isIdle(target: string): Promise<boolean> {
  * 由调用点决定往哪边倒。
  */
 export type IdleVerdict = "idle" | "busy" | "unknown";
-
 
 /**
  * v2.23+ Pi 窗口的忙闲判据。
