@@ -176,6 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { interruptGate } from "./bridge/interrupt-gate.js";
+import { createKeyedSerial } from "./lib/keyed-serial.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
@@ -428,7 +429,7 @@ async function localAgentWorking(channelId: string, evAgent: string): Promise<bo
 function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest,
-    client: (c) => clients.get(c), deliver: deliverToLocal, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
+    client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
   }, channelId, reason);
 }
 
@@ -597,7 +598,7 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
   try {
     switch (env.to.kind) {
       case "local":
-        return await deliverToLocal(env, env.to);
+        return await deliverLocalInOrder(env, env.to);
       case "user":
         return await deliverToUser(env, env.to);
       case "api":
@@ -782,6 +783,16 @@ function syncMasterWatcher(discord: Client): void {
   });
 }
 
+/**
+ * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先
+ * ws.send——owner 语音连发的顺序就乱了(tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。
+ */
+const localSendOrder = createKeyedSerial();
+function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
+  return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
+}
+
+/** 只经 deliverLocalInOrder 调用 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
   const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送

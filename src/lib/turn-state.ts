@@ -51,6 +51,14 @@ export function paneShowsCompacting(pane: string): boolean {
   return /^\s*[·✢✳✶✻✽*]\s+Compacting\b/im.test(turnZone(pane).above);
 }
 
+/**
+ * spinner 位置换成了 API 重试 / 限流横幅（「✻ Repeated 529 … · Retrying in 38s」「✻ Waiting for API response · will retry in 5s」）。
+ * 压缩中碰上重试时「Compacting conversation…」会被它替换掉：这时不能据此判定压缩结束（permission-watcher 的兜底收敛）。
+ */
+export function paneShowsApiRetry(pane: string): boolean {
+  return /^\s*[·✢✳✶✻✽*]\s+[^\n]*\b(?:retrying|will retry)\b/im.test(turnZone(pane).above);
+}
+
 /** 只认主回合在跑：spinner（CC_BUSY_RE，锚定行首）、老 TUI 的 esc to interrupt、排队消息提示。见 tests/pane-main-turn.test.ts。 */
 export function paneMainTurnBusy(pane: string): boolean {
   const z = turnZone(pane);

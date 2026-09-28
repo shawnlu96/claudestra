@@ -5,6 +5,7 @@
  * 一律发键——认不出的忙碌帧（API 重试行、新文案）判成空闲时不发键，用户就停不下来。依赖全注入，单测 tests/interrupt-gate.test.ts；
  * 接线在 bridge/interrupt-gate.ts。
  */
+import { createKeyedSerial } from "./keyed-serial.js";
 import { controlFor } from "./runtimes/index.js";
 import type { TurnState } from "./turn-state.js";
 
@@ -29,20 +30,8 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
   const now = deps.now ?? Date.now;
   /** 频道 → 上一次真发出键的时刻（抢占和手动共用） */
   const lastKeyAt = new Map<string, number>();
-  const chains = new Map<string, Promise<unknown>>();
+  const serial = createKeyedSerial();
   const sinceKey = (ch: string) => now() - (lastKeyAt.get(ch) ?? -Infinity);
-
-  /** 同一频道的打断逻辑排队执行；前一个出错不影响后一个 */
-  function serial<T>(ch: string, fn: () => Promise<T>): Promise<T> {
-    const run = (chains.get(ch) ?? Promise.resolve()).then(fn);
-    const tail = run.then(
-      () => undefined,
-      () => undefined, // 错误由 run 的调用方拿到；链尾只负责排队，不能因为前一个失败卡住后面的
-    );
-    chains.set(ch, tail);
-    void tail.then(() => chains.get(ch) === tail && chains.delete(ch));
-    return run;
-  }
 
   return {
     /**

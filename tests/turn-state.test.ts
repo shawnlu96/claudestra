@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
-import { agentMsgMustWait, paneLooksWorking, paneShowsCompacting, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
+import { agentMsgMustWait, paneLooksWorking, paneShowsApiRetry, paneShowsCompacting, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
 
 const RULE = "─".repeat(80);
 const footer = (agentsBar: string[]) =>
@@ -176,6 +176,19 @@ describe("压缩画面（N7 对抗复验 P2-B / F）", () => {
     const pane = ["  我们下一步要处理 Compacting 期间的消息押后。", "", "✻ Worked for 12s · done 6:31 PM", "", footer([])].join("\n");
     expect(paneShowsCompacting(pane)).toBe(false);
     expect(turnState(at({ pane, status: "done" })).main).toBe("idle");
+  });
+});
+
+describe("压缩中碰上 API 重试（N7 定向复验 P3）", () => {
+  const pane = ["⏺ x", "", "✻ Repeated 529 Overloaded errors · Retrying in 38s · attempt 5/10", "", footer([])].join("\n");
+  test("重试横幅替换了 Compacting 行：认得出是重试，事件态 compacting 时仍判 compacting（人类消息不 C-c 掉压缩）", () => {
+    expect(paneShowsApiRetry(pane)).toBe(true);
+    expect(paneShowsCompacting(pane)).toBe(false);
+    expect(turnState(at({ pane, status: "compacting" })).main).toBe("compacting");
+  });
+  test("普通忙碌 / 空闲画面不算重试", () => {
+    expect(paneShowsApiRetry(["✽ Pondering… (3s)", "", footer([])].join("\n"))).toBe(false);
+    expect(paneShowsApiRetry(CC_IDLE)).toBe(false);
   });
 });
 

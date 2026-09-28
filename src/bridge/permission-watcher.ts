@@ -40,7 +40,7 @@ import { emitEvent } from "./event-bus.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { controlFor } from "../lib/runtimes/index.js";
-import { paneMainTurnBusy, paneShowsCompacting, thinkingLooksStuck } from "../lib/turn-state.js";
+import { paneMainTurnBusy, paneShowsApiRetry, paneShowsCompacting, thinkingLooksStuck } from "../lib/turn-state.js";
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -543,7 +543,7 @@ async function checkAgent(
     } else {
       compactPctSeen.delete(channelId);
     }
-    if (!noPaneHeuristics && !compacting && st === "compacting") {
+    if (!noPaneHeuristics && !compacting && st === "compacting" && !paneShowsApiRetry(pane)) { // 压缩中碰上 API 重试：保持 compacting
       const working = paneMainTurnBusy(pane); // 只剩后台在跑 = 主回合已结束,收敛成 done(否则卡 thinking,押后闸永远判忙)
       console.log(`📦 ${agentName} 压缩已不在 pane 上(兜底收敛 → ${working ? "thinking" : "done"})`);
       emitEvent({ agent: agentName, chatId: channelId, type: "agent_status", data: { status: working ? "thinking" : "done", trigger: "compact_end_pane" } });
