@@ -131,7 +131,8 @@ beforeEach(() => {
   calls = [];
   sc = { files: ["web/a.tsx", "src/bridge/x.ts"], state: "MERGED", branch: "task/t9", ghFails: false, mergeInMain: true, localWeb: "w1",
     relay: { enabled: true, base: "relay.example" }, relayWeb: "w2", bridgeStart: PULLED + 60_000, codeHasMerge: true,
-    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo", origins: {}, missing: [], branchPrs: [], projects: [proj(P, ["/repo"])], sizes: {} };
+    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo",
+    origins: {}, missing: [], branchPrs: [], projects: [proj(P, ["/repo"])], sizes: {} };
   db = openLedger(":memory:");
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   liveTask();
