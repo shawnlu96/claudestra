@@ -51,7 +51,8 @@ function recordOwner(db: Database | null, dest: string, agent: string, src: stri
 /**
  * API 入站上传落盘：open(wx) 原子占名，撞名（同一毫秒同名、同一请求里两个同名文件）就换带随机数字后缀的名字重试，
  * 仍是 `api_<数字>_<名>`（展示名剥前缀的规则不变）。以前按毫秒拼名直接覆盖写：一方的 guest 能读到另一方的文件（T22 adv1 P1-1）。
- * 返回落盘的绝对路径；db 拿不到也照样写，只是没账。
+ * 占到名字先记账再写内容：文件出现时账已经在。写失败连账一起撤。返回落盘的绝对路径；
+ * db 拿不到也照样写，只是没账——没账的 api_ 文件建索引时按不可信算（media-index resolveRef），owner 照常能看。
  */
 export async function saveUpload(dir: string, name: string, data: Uint8Array, agent: string, db: Database | null): Promise<string> {
   await mkdir(dir, { recursive: true });
@@ -68,14 +69,15 @@ export async function saveUpload(dir: string, name: string, data: Uint8Array, ag
       throw e;
     }
     try {
+      recordOwner(db, file, agent, UPLOAD_SRC, ms);
       await fh.writeFile(data);
     } catch (e) {
+      db?.prepare("DELETE FROM out_copies WHERE dest = ?").run(file);
       await unlink(dest).catch((u) => console.error(`上传写入失败后清理 ${dest} 失败:`, (u as Error).message));
       throw e;
     } finally {
       await fh.close();
     }
-    recordOwner(db, file, agent, UPLOAD_SRC, ms);
     return dest;
   }
   throw new Error(`no free upload name for ${base}`);
@@ -112,8 +114,13 @@ export function ledgerCopy(db: Database, agent: string, src: string, tsMs: numbe
   return row?.dest ?? null;
 }
 
-/** 这个 inbox 文件在账上属于别的 agent（老数据按名字猜时要排除掉；入站行指向它就不可信） */
+/** 这个 inbox 文件在账上属于哪个 agent（没账 = null） */
+export function inboxOwner(db: Database, dest: string): string | null {
+  return (db.prepare("SELECT agent FROM out_copies WHERE dest = ?").get(dest) as { agent: string } | null)?.agent ?? null;
+}
+
+/** 这个 inbox 文件在账上属于别的 agent（老数据按名字猜出站副本时要排除掉） */
 export function ownedByOther(db: Database, agent: string, dest: string): boolean {
-  const row = db.prepare("SELECT agent FROM out_copies WHERE dest = ?").get(dest) as { agent: string } | null;
-  return !!row && row.agent !== agent;
+  const owner = inboxOwner(db, dest);
+  return owner !== null && owner !== agent;
 }

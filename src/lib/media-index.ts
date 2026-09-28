@@ -14,7 +14,7 @@ import { basename, dirname } from "node:path";
 import type { AttachmentDirs } from "./attachment-lookup.js";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 import { MEDIA_MARKERS, mediaRefsOf, type MediaRef } from "./media-extract.js";
-import { ensureOutboundTable, ledgerCopy, OUT_WINDOW_AFTER_MS, ownedByOther } from "./media-outbound.js";
+import { ensureOutboundTable, inboxOwner, ledgerCopy, OUT_WINDOW_AFTER_MS, ownedByOther } from "./media-outbound.js";
 import { buildInboxCatalog, displayName, resolveInbound, resolveOutbound, type InboxCatalog, type OutboundLedger, type Resolved } from "./media-store.js";
 import { createLineTranslator, runtimeForSessionPath } from "./session-source.js";
 
@@ -137,12 +137,18 @@ function ledgerFor(ctx: Ctx, agent: string): OutboundLedger {
   };
 }
 
+/** bridge 按毫秒拼名写进 inbox 的文件：API 上传 api_<数字>_、出站副本 <13 位毫秒>_ */
+const MS_NAMED = /^(?:api_\d+|\d{13})_/;
+
 function resolveRef(ctx: Ctx, agent: string, r: { dir: string; path: string; ts: string | null; trusted: boolean }): Promise<Resolved | null> | Resolved | null {
   if (r.dir !== "in") return resolveOutbound(r.path, r.ts, ctx.dirs, ctx.cat(), ledgerFor(ctx, agent));
   const hit = resolveInbound(r.path, ctx.dirs, r.trusted);
-  // inbox 文件在账上属于别的 agent（它的上传 / 出站副本）：这条入站行就不可信。文件名原子占名、一次写入只属于一方，
-  // 不必等另一方的记录进索引才判成共享（T22 adv1 P1-1 复现 2）
-  return hit?.trusted && hit.loc.startsWith("i") && ownedByOther(ctx.db, agent, hit.name) ? { ...hit, trusted: false } : hit;
+  if (!hit?.trusted || !hit.loc.startsWith("i")) return hit;
+  // inbox 文件的归属以账为准（原子占名、先记账后落盘，一次写入只属于一方）：账上属于别的 agent → 不可信，不必等另一方的记录
+  // 进索引才判成共享。按毫秒拼名的（api_ 上传、13 位毫秒前缀的出站副本）没账 = 修复前的老文件（当时同名同毫秒会被覆盖）
+  // 或记账失败，同样不可信；Discord 下载是 <附件雪花 id>_<名>，一个附件一个名字，不靠账。owner 照常能看（T22 adv1 P1-1）
+  const owner = inboxOwner(ctx.db, hit.name);
+  return (owner !== null ? owner !== agent : MS_NAMED.test(hit.name)) ? { ...hit, trusted: false } : hit;
 }
 
 /**

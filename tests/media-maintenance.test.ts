@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeMediaIndex, openMediaIndex } from "../src/lib/media-index.js";
-import { canonicalAgent, copyOutboundFiles, ledgerCopy, ownedByOther, saveUpload } from "../src/lib/media-outbound.js";
+import { canonicalAgent, copyOutboundFiles, inboxOwner, ledgerCopy, ownedByOther, saveUpload } from "../src/lib/media-outbound.js";
 import { clearThumbs, pruneThumbs } from "../src/lib/media-thumb.js";
 
 let root: string;
@@ -114,6 +114,21 @@ describe("出站副本账本", () => {
         expect(ownedByOther(db, agent, name)).toBe(false);
       }
     }
+    closeMediaIndex(p);
+  });
+  test("归属账落在库文件里：关库重开（bridge 重启）还在；写内容失败时账和文件一起撤", async () => {
+    const p = join(root, "persist.sqlite");
+    const inbox = join(root, "persist-inbox");
+    let db = openMediaIndex(p);
+    const dest = await saveUpload(inbox, "a.png", new TextEncoder().encode("A"), "worker", db);
+    const name = dest.slice(inbox.length + 1);
+    closeMediaIndex(p);
+    db = openMediaIndex(p);
+    expect(inboxOwner(db, name)).toBe("agent-worker");
+    const bad = { byteLength: 1 } as unknown as Uint8Array; // writeFile 会拒掉的数据
+    await expect(saveUpload(inbox, "b.png", bad, "worker", db)).rejects.toThrow();
+    expect(readdirSync(inbox).filter((f) => f.endsWith("_b.png"))).toEqual([]);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM out_copies WHERE dest LIKE '%_b.png'").get() as { n: number }).n).toBe(0);
     closeMediaIndex(p);
   });
   test("agent 名规范成 registry 形状", () => {

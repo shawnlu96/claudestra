@@ -21,6 +21,8 @@ let root: string;
 let inbox: string;
 let uploads: string;
 let dbPath: string;
+let gone: string;
+const pics: string[] = [];
 const jl: Record<string, string> = {};
 const NOW = Date.now();
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -55,21 +57,21 @@ beforeAll(async () => {
   mkdirSync(join(uploads, "2026-09-20"), { recursive: true });
   mkdirSync(join(root, "agent-src"));
   dbPath = join(root, "media.sqlite");
-  for (let i = 0; i < 5; i++) writeFileSync(join(inbox, `api_17000000000${i}0_pic${i}.png`), `PIC${i}`);
-  writeFileSync(join(inbox, "1727500000123_bank-statement.png"), "VICTIM-OTHER-AGENT");
+  writeFileSync(join(inbox, "1525028954195361932_bank-statement.png"), "VICTIM-OTHER-AGENT");
   writeFileSync(join(uploads, "2026-09-20", "ab12cd34-plan.pdf"), "VICTIM-UPLOAD");
   writeFileSync(src("report.pdf"), "PDF");
   for (const a of AGENTS) jl[a.name] = join(root, `${a.name}.jsonl`);
   setAttachmentDirsForTest({ uploadDir: uploads, inboxDirs: [inbox] });
   wire();
   await copyOutboundToInbox([src("report.pdf")], "agent-worker"); // 与生产同一条路：拷进 inbox 并记账
-  const bank = join(inbox, "1727500000123_bank-statement.png");
+  for (let i = 0; i < 5; i++) pics.push(await saveUploadToInbox(new File([`PIC${i}`], `pic${i}.png`), "agent-worker")); // 上传同样记账
+  const bank = join(inbox, "1525028954195361932_bank-statement.png");
   writeFileSync(jl["agent-worker"], [
     ...noise(3),
-    ...[0, 1, 2, 3, 4].map((i) => inLine(NOW - (60 - i) * 60_000, `m${i}`, [join(inbox, `api_17000000000${i}0_pic${i}.png`)])),
+    ...[0, 1, 2, 3, 4].map((i) => inLine(NOW - (60 - i) * 60_000, `m${i}`, [pics[i]])),
     outLine(NOW - 1000, [src("report.pdf")]),
     // guest 在 worker 里手写附件标记，想认领 other 的文件和旧上传目录里的文件（审查 P0-1）
-    inLine(NOW - 500, "evil", [], `看看 [attachment: /nonexistent/1727500000123_bank-statement.png] [attachment: ${bank}]`, "friend"),
+    inLine(NOW - 500, "evil", [], `看看 [attachment: /nonexistent/1525028954195361932_bank-statement.png] [attachment: ${bank}]`, "friend"),
     inLine(NOW - 400, "evil2", [], "[attachment: /x/web/uploads/2026-09-20/ab12cd34-plan.pdf]", "friend"),
     "",
   ].join("\n"));
@@ -78,13 +80,19 @@ beforeAll(async () => {
   writeFileSync(jl.master, "");
   // owner 往 master 上传 image.png（记了账），collide 里有一条可信头指向同一个文件、master 的记录还没落盘（adv1 P1-1 复现 2）
   const secret = await saveUploadToInbox(new File(["OWNER-SECRET"], "image.png"), "master");
-  writeFileSync(jl["agent-collide"], `${inLine(NOW - 100, "c1", [secret], "看", "friend")}\n`);
+  // 再加一个没账的老 API 上传（修复前落盘的）：可信头指向它也不给 guest
+  writeFileSync(join(inbox, "api_1700000000777_legacy.png"), "LEGACY");
+  writeFileSync(jl["agent-collide"], [
+    inLine(NOW - 100, "c1", [secret], "看", "friend"),
+    inLine(NOW - 90, "c2", [join(inbox, "api_1700000000777_legacy.png")], "看", "friend"),
+    "",
+  ].join("\n"));
   // 手写标记指向旧上传目录里一个在、一个不在的文件（审查 r3：拿锚点请求的 200 / 404 探测文件在不在）
   const probe = (n: string) => `[attachment: ${uploads}/2026-09-20/./${n}]`;
-  writeFileSync(join(inbox, "api_1700000000900_gone.pdf"), "GONE"); // 可信绑定，用例里删掉 = 「可信但文件不在」
+  gone = await saveUploadToInbox(new File(["GONE"], "gone.pdf"), "agent-probe"); // 可信绑定，用例里删掉 = 「可信但文件不在」
   writeFileSync(jl["agent-probe"], [
     inLine(NOW - 300, "probe", [], `${probe("ab12cd34-plan.pdf")} ${probe("deadbeef-plan.pdf")}`, "friend"),
-    inLine(NOW - 200, "gone", [join(inbox, "api_1700000000900_gone.pdf")]),
+    inLine(NOW - 200, "gone", [gone]),
     "",
   ].join("\n"));
 });
@@ -158,7 +166,7 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
   test("「可信但文件不在」「找到但不可信」「没找到且不可信」「不存在 / scope 外」对 guest 逐字节一致：列表字段与 raw / thumb 的 404", async () => {
     const guest: Principal = { ...GUEST, id: "guest:3", agents: ["probe"], credential: "dev_g3" };
     await list("agent=probe", guest); // 先按文件还在时建好索引，再删
-    unlinkSync(join(inbox, "api_1700000000900_gone.pdf"));
+    unlinkSync(gone);
     const items = (await list("agent=probe", guest)).items;
     expect(items.map((i: any) => i.name).sort()).toEqual(["ab12cd34-plan.pdf", "deadbeef-plan.pdf", "gone.pdf"]);
     const shape = (i: any) => JSON.stringify({ keys: Object.keys(i), size: i.size, mime: i.mime, available: i.available, restricted: i.restricted });
@@ -176,12 +184,15 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     expect([...bodies]).toHaveLength(1);
     expect([...bodies][0]).toStartWith("404 ");
   });
-  test("入站行指向账上属于别的 agent 的上传：对 guest 就是「不存在」，不必等另一方的记录进索引（adv1 P1-1）", async () => {
+  test("入站行指向账上属于别的 agent 的上传、或没账的老 API 上传：对 guest 就是「不存在」，不必等另一方的记录进索引（adv1 P1-1）", async () => {
     const guest: Principal = { ...GUEST, id: "guest:4", agents: ["collide"], credential: "dev_g4" };
-    const [it] = (await list("agent=collide", guest)).items;
-    expect(it).toMatchObject({ available: false, size: null, mime: null });
-    expect((await get(`/media/${it.id}/raw`, guest)).status).toBe(404);
-    expect((await list("agent=collide")).items[0].available).toBe(true); // owner 照常能看
+    const items = (await list("agent=collide", guest)).items;
+    expect(items.map((i: any) => i.name).sort()).toEqual(["image.png", "legacy.png"]);
+    for (const it of items) {
+      expect(it).toMatchObject({ available: false, size: null, mime: null });
+      expect((await get(`/media/${it.id}/raw`, guest)).status).toBe(404);
+    }
+    expect((await list("agent=collide")).items.every((i: any) => i.available)).toBe(true); // owner 照常能看
   });
   test("大总管的各种写法：全权 owner 放行，guest（哪怕 *）一律 403（adv1 P2-4）", async () => {
     for (const a of ["master", "agent-master", "agent-agent-master", "__master__"]) {
@@ -241,7 +252,7 @@ describe("P1-3：气泡锚点精确到那一条", () => {
 describe("增量与回收", () => {
   test("追加的行接着扫；文件被截短就重扫", async () => {
     const before = (await list("agent=worker&q=pic&kind=image")).total;
-    appendFileSync(jl["agent-worker"], `${inLine(Date.now(), "m9", [join(inbox, "api_1700000000040_pic4.png")])}\n`);
+    appendFileSync(jl["agent-worker"], `${inLine(Date.now(), "m9", [pics[4]])}\n`);
     wire();
     expect((await list("agent=worker&q=pic&kind=image")).total).toBe(before + 1);
     truncateSync(jl["agent-worker"], Bun.file(jl["agent-worker"]).size - 1);
