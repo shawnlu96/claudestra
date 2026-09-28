@@ -7,7 +7,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { pmNotice, resultOfChoices, type AskPlan, type HumanResult } from "../lib/human-node.js";
-import { checkHumanCant, humanDeliver, pendingAssignments, projectHasTeam, type HumanDeliverInput } from "../lib/ledger-human.js";
+import { checkHumanCant, HUMAN_ATTS_MAX, humanDeliver, pendingAssignments, projectHasTeam, type HumanDeliverInput } from "../lib/ledger-human.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { attsUsableBy, refAttsFromAsk } from "../lib/talk-atts.js";
@@ -97,12 +97,15 @@ async function answererFromTalk(principal: string): Promise<Answerer | null> {
   return me ? { actor: me.personId, persons: personAliases(talkDb(), me.personId), isOwner: me.isOwner, keys: me.keys } : null;
 }
 
-/** 作答附的图：只收 talk 附件库里作答人自己能用的（上传者本人 / 所在房间），挂到这条 ask 上，看得见 ask 的人才看得见图 */
+/**
+ * 作答附的图：只收 talk 附件库里作答人自己能用的（上传者本人 / 所在房间），挂到这条 ask 上，看得见 ask 的人才看得见图。
+ * 答案那时已经记下了，超过交付上限的截掉而不是让整笔交付失败（失败 = ask 结了、任务还卡在 build）
+ */
 function linkAtts(ask: AssignedAsk, who: Answerer, atts: AssignedAnswer["atts"]): string[] {
   const shas = [...new Set((atts ?? []).filter((a) => a.kind === "talk").map((a) => a.ref))];
   const db = talkDb();
-  const ok = shas.filter((sha) => attsUsableBy(db, [sha], who.keys, () => false));
-  if (ok.length < shas.length) console.log(`指派事项 ${ask.id} 的作答带了 ${shas.length - ok.length} 张作答人用不了的图，已略过`);
+  const ok = shas.filter((sha) => attsUsableBy(db, [sha], who.keys, () => false)).slice(0, HUMAN_ATTS_MAX);
+  if (ok.length < shas.length) console.log(`指派事项 ${ask.id} 的作答带了 ${shas.length - ok.length} 张用不了或超出 ${HUMAN_ATTS_MAX} 张的图，已略过`);
   refAttsFromAsk(db, ok, ask.id);
   return ok;
 }

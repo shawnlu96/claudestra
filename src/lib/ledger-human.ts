@@ -13,7 +13,8 @@ import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { applyMove } from "./ledger-write.js";
 
 const NOTE_MAX = 4000;
-const ATTS_MAX = 9;
+/** 一次交付最多挂几张图；「待你处理」的作答收得更多（20），多出的由 bridge 截掉，不让整笔交付失败 */
+export const HUMAN_ATTS_MAX = 9;
 const SHA_RE = /^[0-9a-f]{64}$/;
 
 /** 同一条 ask 只记一次交付：重复作答、bridge 重放都落到这个 key 上 */
@@ -56,7 +57,7 @@ export function humanDeliver(db: Database, actor: string, input: HumanDeliverInp
   const note = (input.note ?? "").trim();
   const atts = [...new Set(input.atts ?? [])];
   if (note.length > NOTE_MAX) throw new LedgerError("invalid", `说明最多 ${NOTE_MAX} 字`);
-  if (atts.length > ATTS_MAX || !atts.every((a) => SHA_RE.test(a))) throw new LedgerError("invalid", `附件最多 ${ATTS_MAX} 张，且要是 sha256`);
+  if (atts.length > HUMAN_ATTS_MAX || !atts.every((a) => SHA_RE.test(a))) throw new LedgerError("invalid", `附件最多 ${HUMAN_ATTS_MAX} 张，且要是 sha256`);
   const ctx: WriteCtx = { actor, now, dedupKey: humanDeliverKey(input.askId) };
   return tx(db, () => {
     const task = mustTask(db, input.taskId);

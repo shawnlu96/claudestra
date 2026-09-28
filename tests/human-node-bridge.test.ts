@@ -123,9 +123,26 @@ describe("作答", () => {
     expect(getTask(db, "T1")!.stage).toBe("build");
     expect(notices).toEqual([]);
   });
-  test("开了班子：完成由班子路由通知，这里不发；做不了照样发", async () => {
-    db.prepare("INSERT INTO meta (project, key, value) VALUES (?, 'team', ?)").run(P, JSON.stringify({ dispatcher: null, audit: true, sinceSeq: 1 }));
+  test("图超过交付上限：截到 9 张照样交付，不让已记下的作答卡在 build", async () => {
+    const shas = [..."3456789abcde"].map((c) => c.repeat(64));
+    for (const sha of shas) {
+      talkDb().prepare("INSERT INTO atts (sha256, mime, bytes, createdAt) VALUES (?, 'image/png', 10, 0)").run(sha);
+      talkDb().prepare("INSERT INTO att_uploads (sha256, uploader, createdAt) VALUES (?, ?, 0)").run(sha, `${FP}/guest:aa`);
+    }
+    expect(await handleAssignedAnswer(deps(), ask("a1"), answer("assign_done", "guest:aa", { atts: shas.map((ref) => ({ kind: "talk", ref })) }))).toMatchObject({ ok: true });
+    expect(listEvents(db, { target: "T1" }).find((e) => e.kind === "deliver")!.data.atts).toEqual(shas.slice(0, 9));
+  });
+  const teamOn = () => db.prepare("INSERT INTO meta (project, key, value) VALUES (?, 'team', ?)").run(P, JSON.stringify({ dispatcher: null, audit: true, sinceSeq: 1 }));
+  test("开了班子：完成只留一条交付事件给班子路由，这里一次都不发，钩子重放也不发", async () => {
+    teamOn();
     expect(await handleAssignedAnswer(deps(), ask("a1"), answer("assign_done", "guest:aa"))).toEqual({ ok: true, result: "done", notified: false });
+    expect(await handleAssignedAnswer(deps(), ask("a1"), answer("assign_done", "guest:a2"))).toEqual({ ok: true, result: "done", notified: false });
+    expect(listEvents(db, { target: "T1" }).filter((e) => e.kind === "deliver")).toHaveLength(1);
+    expect(notices).toEqual([]);
+  });
+  test("开了班子：做不了不写交付、班子路由收不到，这里照样发", async () => {
+    teamOn();
+    await handleAssignedAnswer(deps(), ask("a1"), answer("assign_done", "guest:aa"));
     moveStage(db, PM, { taskId: "T1", from: "review", to: "fix" });
     expect(await handleAssignedAnswer(deps(), ask("a5", "assign:T1:1:1"), answer("assign_cant", "owner:self"))).toMatchObject({ ok: true, notified: true });
     expect(notices.map((n) => n.askId)).toEqual(["a5"]);
