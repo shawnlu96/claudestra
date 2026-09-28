@@ -32,4 +32,5 @@ export const MEDIA_DICT: Record<string, string> = {
   "昨天": "Yesterday",
   "预览或下载": "Preview or download",
   "定位到消息": "Jump to message",
+  "别人发的": "Sent by someone else",
 };

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AttachmentDirs } from "../src/lib/attachment-lookup.js";
-import { buildInboxCatalog, displayName, openLoc, resolveInbound, resolveOutbound, safeName } from "../src/lib/media-store.js";
+import { buildInboxCatalog, displayName, openLoc, resolveInbound, resolveOutbound, safeName, type OutboundLedger } from "../src/lib/media-store.js";
 
 let root: string;
 let dirs: AttachmentDirs;
@@ -51,42 +51,55 @@ describe("openLoc（取文件时的保守解析）", () => {
   });
 });
 
-describe("resolveInbound", () => {
-  test("上传目录按日期；inbox 按名；找不到 null", () => {
-    expect(resolveInbound("/whatever/web/uploads/2026-09-01/aaaa1111-x.png", dirs)?.loc).toBe("u:2026-09-01/aaaa1111-x.png");
-    expect(resolveInbound("/Users/x/.claude-orchestrator/inbox/1525028954195361932_IMG.png", dirs)?.loc).toBe("i0:1525028954195361932_IMG.png");
-    expect(resolveInbound("/tmp/claude-orchestrator/inbox/legacy.txt", dirs)?.loc).toBe("i1:legacy.txt");
-    expect(resolveInbound("/x/inbox/nope.png", dirs)).toBeNull();
+describe("resolveInbound（父目录必须正好是白名单目录，不按名字兜底）", () => {
+  test("上传目录按日期、inbox、旧 inbox；可信度原样带出", () => {
+    expect(resolveInbound(join(dirs.uploadDir, "2026-09-01", "aaaa1111-x.png"), dirs, true)).toMatchObject({ loc: "u:2026-09-01/aaaa1111-x.png", trusted: true });
+    expect(resolveInbound(join(dirs.inboxDirs[0], "1525028954195361932_IMG.png"), dirs, false)).toMatchObject({ loc: "i0:1525028954195361932_IMG.png", trusted: false });
+    expect(resolveInbound(join(dirs.inboxDirs[1], "legacy.txt"), dirs, true)?.loc).toBe("i1:legacy.txt");
+    expect(resolveInbound(join(dirs.inboxDirs[0], "nope.png"), dirs, true)).toBeNull();
   });
-  test("记录里的路径带穿越 / 指向链接也拼不出目录外", () => {
-    expect(resolveInbound("/x/inbox/../../secret.txt", dirs)).toBeNull();
-    expect(resolveInbound("/x/inbox/1700000000000_link.png", dirs)).toBeNull();
+  test("目录不是白名单目录（哪怕名字在白名单里有同名文件）→ null：手写标记没法按名字认领别的文件（审查 P0）", () => {
+    expect(resolveInbound("/nonexistent/1525028954195361932_IMG.png", dirs, false)).toBeNull();
+    expect(resolveInbound("/x/web/uploads/2026-09-01/aaaa1111-x.png", dirs, true)).toBeNull();
+    expect(resolveInbound(join(root, "1525028954195361932_IMG.png"), dirs, true)).toBeNull();
+  });
+  test("穿越 / 链接拼不出目录外", () => {
+    expect(resolveInbound(join(dirs.inboxDirs[0], "..", "secret.txt"), dirs, true)).toBeNull();
+    expect(resolveInbound(join(dirs.inboxDirs[0], "1700000000000_link.png"), dirs, true)).toBeNull();
   });
 });
 
 describe("resolveOutbound", () => {
   const cat = () => buildInboxCatalog(dirs);
   const at = (ms: number) => new Date(ms).toISOString();
-  test("时间窗里唯一的副本；一小时后的同名副本不认（修「旧消息显示成新图」）", async () => {
-    const r = await resolveOutbound("/tmp/scratch/shot.png", at(T0), dirs, cat());
-    expect(r).toMatchObject({ loc: `i0:${T0 + 800}_shot.png`, ambiguous: false });
-    const later = await resolveOutbound("/tmp/scratch/shot.png", at(T0 + 3_600_000 - 2000), dirs, cat());
-    expect(later?.loc).toBe(`i0:${T0 + 3_600_000}_shot.png`);
+  const noLedger: OutboundLedger = { copyFor: () => null, ownedByOther: () => false, othersSentSameName: () => false };
+  test("有账：直接认账上的副本，可信", async () => {
+    const ledger: OutboundLedger = { ...noLedger, copyFor: (src) => (src === "/tmp/w/amb.png" ? `${T0 + 5000}_amb.png` : null) };
+    expect(await resolveOutbound("/tmp/w/amb.png", at(T0), dirs, cat(), ledger)).toMatchObject({ loc: `i0:${T0 + 5000}_amb.png`, trusted: true, ambiguous: false });
   });
-  test("窗里两份字节相同 = 同一次投递拷了两份，不算歧义；内容不同 = ambiguous", async () => {
-    expect((await resolveOutbound("/a/dup.png", at(T0), dirs, cat()))?.ambiguous).toBe(false);
-    expect((await resolveOutbound("/a/amb.png", at(T0), dirs, cat()))?.ambiguous).toBe(true);
+  test("没账按时间窗猜：只要消息之后拷进来的；猜出来的不可信；一小时后的同名副本不认", async () => {
+    const r = await resolveOutbound("/tmp/scratch/shot.png", at(T0), dirs, cat(), noLedger);
+    expect(r).toMatchObject({ loc: `i0:${T0 + 800}_shot.png`, trusted: false, ambiguous: false });
+    expect(await resolveOutbound("/tmp/scratch/shot.png", at(T0 + 60_000), dirs, cat(), noLedger)).toBeNull(); // 消息之前的旧副本不认
+  });
+  test("窗里两份字节相同不算歧义；内容不同、或别的 agent 同窗发过同名 = ambiguous；别人账上的副本排除", async () => {
+    expect((await resolveOutbound("/a/dup.png", at(T0), dirs, cat(), noLedger))?.ambiguous).toBe(false);
+    expect((await resolveOutbound("/a/amb.png", at(T0), dirs, cat(), noLedger))?.ambiguous).toBe(true);
+    expect((await resolveOutbound("/a/dup.png", at(T0), dirs, cat(), { ...noLedger, othersSentSameName: () => true }))?.ambiguous).toBe(true);
+    const owned = { ...noLedger, ownedByOther: (d: string) => d.endsWith("_shot.png") };
+    expect(await resolveOutbound("/tmp/scratch/shot.png", at(T0), dirs, cat(), owned)).toBeNull();
   });
   test("中文名走同一套清洗；Discord 雪花前缀、窗外、符号链接都不认", async () => {
-    expect((await resolveOutbound("/a/朱耷-新.png", at(T0), dirs, cat()))?.loc).toBe(`i0:${T0 + 100}_朱耷-新.png`);
-    expect(await resolveOutbound("/a/IMG.png", at(T0), dirs, cat())).toBeNull();
-    expect(await resolveOutbound("/a/shot.png", at(T0 - 3_600_000), dirs, cat())).toBeNull();
-    expect(await resolveOutbound("/a/link.png", at(1700000000000), dirs, cat())).toBeNull();
+    expect((await resolveOutbound("/a/朱耷-新.png", at(T0), dirs, cat(), noLedger))?.loc).toBe(`i0:${T0 + 100}_朱耷-新.png`);
+    expect(await resolveOutbound("/a/IMG.png", at(T0), dirs, cat(), noLedger)).toBeNull();
+    expect(await resolveOutbound("/a/shot.png", at(T0 - 3_600_000), dirs, cat(), noLedger)).toBeNull();
+    expect(await resolveOutbound("/a/link.png", at(1700000000000), dirs, cat(), noLedger)).toBeNull();
   });
 });
 
-test("displayName 去掉落盘前缀", () => {
-  expect(displayName("1790588791502_v3.png")).toBe("v3.png");
-  expect(displayName("api_1790588791502_r.pdf")).toBe("r.pdf");
-  expect(displayName("64890de5-IMG_8870.jpeg")).toBe("IMG_8870.jpeg");
+test("displayName 只剥一层前缀；uuid 规则只用于旧上传目录", () => {
+  expect(displayName("1790588791502_v3.png", false)).toBe("v3.png");
+  expect(displayName("api_1790588791502_20240928_x.png", false)).toBe("20240928_x.png");
+  expect(displayName("64890de5-IMG_8870.jpeg", true)).toBe("IMG_8870.jpeg");
+  expect(displayName("20240928-report.pdf", false)).toBe("20240928-report.pdf");
 });

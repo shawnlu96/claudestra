@@ -73,8 +73,10 @@ export function AttachmentStrip({ items, msg }: { items: ChatAttachmentView[]; m
   const openViewer = async (index: number) => {
     const a = images[index];
     const agent = store.state.activeAgent;
-    const seq = msg ? (msg.seqEnd ?? Number(/^h(\d+)/.exec(msg.id)?.[1])) : NaN;
-    const anchor = { name: fileNameOf(a.url!), ...(msg?.sid && Number.isFinite(seq) ? { session: msg.sid, seq } : {}) };
+    // 历史气泡（id = h<首 seq>，seqEnd = 尾 seq）按区间精确找；区间里没有就 404、退回只翻这几张，不会打开同名旧图
+    const seqFrom = msg ? Number(/^h(\d+)/.exec(msg.id)?.[1]) : NaN;
+    const seq = msg?.seqEnd ?? seqFrom;
+    const anchor = { name: fileNameOf(a.url!), ...(msg?.sid && Number.isFinite(seqFrom) && Number.isFinite(seq) ? { session: msg.sid, seqFrom, seq } : {}) };
     const text = { t, onLocate: (it: MediaItem) => void store.jumpToContext(it.sessionId, it.seq) };
     if (agent && anchor.name && (await openMediaViewer({ agent }, anchor, text))) return;
     const slides = images.map((x) => ({ key: x.url!, url: x.url!, saveUrl: x.url!, name: x.name }));

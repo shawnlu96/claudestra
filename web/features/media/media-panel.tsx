@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { selfIds } from "@/lib/api/history";
 import { mediaRawUrl, type MediaItem, type MediaQuery } from "@/lib/api/media";
 import { uiAgentName } from "@/lib/chat/agents";
 import { useT } from "@/lib/i18n";
@@ -11,7 +12,7 @@ import { fmtTs } from "../chat/fmt-time";
 import { MediaFilters, type MediaFilterState } from "./media-filters";
 import { BackIcon, CloseIcon } from "./media-icons";
 import { FileList, ImageGrid } from "./media-items";
-import { previewable, sinceOf } from "./media-logic";
+import { previewable, sinceOf, whoLabel } from "./media-logic";
 import { openMediaViewer } from "./media-viewer";
 import { useMediaList } from "./use-media-list";
 
@@ -64,16 +65,19 @@ export function MediaPanel({ agent, onClose }: { agent?: string; onClose: () => 
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const [self, setSelf] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    void selfIds().then(setSelf);
+  }, []);
   const locate = (it: MediaItem) => {
     void store.openAgent(uiAgentName(it.agent)).then(() => store.jumpToContext(it.sessionId, it.seq));
     nav.toContent(); // 手机端从侧栏入口来时还在会话列表页：压栈横滑到会话页（已在会话页 / 桌面端空转）
     onClose();
   };
-  const caption = (it: MediaItem) => {
-    const who = it.dir === "in" ? t("我发的") : uiAgentName(it.agent);
-    return [who, !agent && it.dir === "in" ? uiAgentName(it.agent) : "", fmtTs(it.ts ?? undefined)].filter(Boolean).join(" · ");
-  };
-  const openImage = (it: MediaItem) => void openMediaViewer(query, { around: it.id }, { t, caption, onLocate: locate });
+  // 会话已经不在（agent 删了、只剩归档）就不给定位：点了也没有会话可去
+  const canLocate = (it: MediaItem) => agents.some((a) => a.name === uiAgentName(it.agent));
+  const caption = (it: MediaItem) => [whoLabel(it, self, t), !agent && it.dir === "in" ? uiAgentName(it.agent) : "", fmtTs(it.ts ?? undefined)].filter(Boolean).join(" · ");
+  const openImage = (it: MediaItem) => void openMediaViewer(query, { around: it.id }, { t, caption, onLocate: (x) => (canLocate(x) ? locate(x) : undefined) });
 
   return (
     <ResponsiveShell z="z-50" panelClass="sm:max-w-3xl sm:h-[82dvh]" onClose={onClose}>
@@ -107,7 +111,7 @@ export function MediaPanel({ agent, onClose }: { agent?: string; onClose: () => 
           <div className="px-3 py-10 text-center text-sm text-base-content/40">{f.tab === "image" ? t("没有符合条件的图片") : t("没有符合条件的文件")}</div>
         )}
         {items && f.tab === "image" && <ImageGrid items={items} onOpen={openImage} />}
-        {items && f.tab === "file" && <FileList items={items} showAgent={!agent} onOpen={(it) => void openFile(it)} onLocate={locate} />}
+        {items && f.tab === "file" && <FileList items={items} showAgent={!agent} self={self} onOpen={(it) => void openFile(it)} onLocate={(it) => (canLocate(it) ? () => locate(it) : undefined)} />}
         <div ref={endMarker} className="h-8" />
         {loading && (
           <div className="flex justify-center py-3">

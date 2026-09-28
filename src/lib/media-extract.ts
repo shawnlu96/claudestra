@@ -1,13 +1,13 @@
 /**
  * 媒体索引的逐行抽取（纯函数）：一条已翻译成 Claude Code 形状的会话记录 → 里面人与 agent 之间传的附件引用。
- * 认的形态与历史面板一致（session-history.parseHistoryLines / web lib/chat/attachments.extractAttachments）：
- *  - 我发的：<channel> 头里的 attachments="a;b"（bridge 投递时写；网页上传只有这一份），正文里的 `[attachment: /path]`，
- *    旧 BFF 的 `[用户上传了 N 个文件…:\n- /path]`；
+ *  - 我发的：<channel> 头里的 attachments="a;b" 是 bridge 落盘后写的，**唯一可信**的「消息 → 文件」绑定（trusted）；
+ *    正文里的 `[attachment: /path]`、旧 BFF 的 `[用户上传了 N 个文件…]`、裸 user 文本都是发送者能随手写的，
+ *    只作不可信引用（非 manage 调用方只拿到占位，见 media-query.isRestricted；伪造标记读别的 agent 的文件 = T22 审查 P0）；
  *    回合中途被队列吸收的入站消息落成 attachment/queued_command 记录，同一 message_id 另有 user 记录时以后者为准（prio 高）；
- *  - agent 发的：reply 工具调用的 input.files（绝对路径，bridge 投递时另拷一份进 inbox）。
+ *  - agent 发的：reply 工具调用的 input.files（agent 本地路径；副本由 bridge 拷进 inbox 并记账，见 media-outbound.ts）。
  * agent↔agent 消息（is_agent="true"）与 bridge 注入（user="bridge:*"）不收：媒体视图只看人和 agent 之间的往来。
  */
-import { channelMessageId, isReplyTool, queuedPromptOf, unwrapChannelMessage } from "./session-history.js";
+import { isReplyTool, queuedPromptOf } from "./session-history.js";
 
 export interface MediaRef {
   seq: number;
@@ -23,6 +23,10 @@ export interface MediaRef {
   mid?: string;
   /** 同 mid 两份记录时谁说了算：user 记录 1，queued 记录 0 */
   prio: number;
+  /** 入站：路径来自 bridge 写的头属性（可信）；正文标记为 false。出站恒 false，可信与否由副本账本决定 */
+  trusted: boolean;
+  /** 入站发送者 id（<channel user_id=…>）：前端据此认「我发的」 */
+  senderId?: string;
 }
 
 const ATTACH_TAG_RE = /\[attachment:\s*([^\]\n]+)\]/g;
@@ -48,26 +52,29 @@ function textOf(content: unknown): string {
   return content.filter((b: any) => b?.type === "text").map((b: any) => b.text || "").join("\n");
 }
 
-/** 行首 <channel …> 头里的属性（is_agent 不在 unwrapChannelMessage 的返回里） */
-function channelHeader(raw: string): string {
-  return /^\s*<channel\s+([^>]*)>/.exec(raw)?.[1] ?? "";
+const CHANNEL_HEAD_RE = /^\s*<channel\s+([^>]*)>/;
+const XML_ENTITY: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&apos;": "'" };
+
+function attr(attrs: string, name: string): string | undefined {
+  const v = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1];
+  return v?.replace(/&(?:amp|quot|lt|gt|apos);/g, (e) => XML_ENTITY[e] ?? e);
 }
 
-function inboundRefs(raw: string, seq: number, ts: string | null, prio: number, wrapped: boolean): MediaRef[] {
-  let paths = attachmentPathsInText(raw);
-  let sender: string | undefined;
-  let mid: string | undefined;
-  if (wrapped) {
-    const un = unwrapChannelMessage(raw);
-    if (!un) return [];
-    if (un.from && /^bridge(:|$)/.test(un.from)) return [];
-    if (/(?:^|\s)is_agent="true"/.test(channelHeader(raw))) return [];
-    // 头属性（网页上传只有这一份）+ 正文标记（Discord 附件两处都有），按路径去重
-    paths = [...new Set([...(un.attachments ?? []), ...attachmentPathsInText(un.text)])];
-    sender = un.from;
-    mid = channelMessageId(raw) ?? undefined;
-  }
-  return paths.map((path, idx) => ({ seq, ts, idx, dir: "in" as const, sender, path, mid, prio }));
+/** canTrust：记录本身是 bridge 投递的（isMeta 的 channel 消息 / queued_command）；裸 user 文本里自称的 <channel> 头不算 */
+function inboundRefs(raw: string, seq: number, ts: string | null, prio: number, canTrust: boolean): MediaRef[] {
+  const head = canTrust ? CHANNEL_HEAD_RE.exec(raw) : null;
+  const base = { seq, ts, dir: "in" as const, prio };
+  // isMeta 却没有 channel 头 = caveat / 命令输出，不是消息；裸 user 文本只给不可信引用
+  if (!head) return canTrust ? [] : attachmentPathsInText(raw).map((path, idx) => ({ ...base, idx, path, trusted: false }));
+  const attrs = head[1];
+  const sender = attr(attrs, "user");
+  if ((sender && /^bridge(:|$)/.test(sender)) || attr(attrs, "is_agent") === "true") return [];
+  const who = { sender, senderId: attr(attrs, "user_id"), mid: attr(attrs, "message_id") };
+  // 头属性（可信）在前；正文里的标记只补头属性里没有的（不可信）
+  const trusted = (attr(attrs, "attachments") ?? "").split(";").map((p) => p.trim()).filter(Boolean);
+  const body = attachmentPathsInText(raw.slice(head[0].length)).filter((p) => !trusted.includes(p));
+  return [...trusted.map((path) => ({ path, trusted: true })), ...[...new Set(body)].map((path) => ({ path, trusted: false }))]
+    .map((r, idx) => ({ ...base, ...who, ...r, idx }));
 }
 
 /** 一条记录 → 附件引用（没有返回空数组）。rec 是 translateSessionLine 的结果。 */
@@ -81,10 +88,9 @@ export function mediaRefsOf(rec: any, seq: number): MediaRef[] {
   if (rec.type === "user") {
     const text = textOf(rec.message?.content);
     if (!text) return [];
-    // isMeta + <channel> = 入站消息；非 meta 的裸 user 文本里带标记的是更早的直敲 / 旧格式，照样认
-    if (rec.isMeta === true) return inboundRefs(text, seq, ts, 1, true);
     if (rec.isCompactSummary === true) return []; // 压缩摘要里复述的路径不是一次新的发送
-    return inboundRefs(text, seq, ts, 1, false);
+    // 非 meta 的裸 user 文本（更早的直敲 / 旧格式）没有 channel 头：inboundRefs 只给不可信引用
+    return inboundRefs(text, seq, ts, 1, rec.isMeta === true);
   }
   if (rec.type === "assistant" && Array.isArray(rec.message?.content)) {
     const out: MediaRef[] = [];
@@ -92,7 +98,7 @@ export function mediaRefsOf(rec: any, seq: number): MediaRef[] {
       if (b?.type !== "tool_use" || typeof b.name !== "string" || !isReplyTool(b.name)) continue;
       if (!Array.isArray(b.input?.files)) continue;
       for (const f of b.input.files) {
-        if (typeof f === "string" && f.trim()) out.push({ seq, ts, idx: out.length, dir: "out", path: f.trim(), prio: 1 });
+        if (typeof f === "string" && f.trim()) out.push({ seq, ts, idx: out.length, dir: "out", path: f.trim(), prio: 1, trusted: false });
       }
     }
     return out;

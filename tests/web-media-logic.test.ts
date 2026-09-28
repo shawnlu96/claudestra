@@ -1,10 +1,10 @@
 /** web/features/media/media-logic：按天分组、分页合并、查看器正序下标、时间筛选、展示格式；lib/api/media 的查询串 */
 import { describe, expect, test } from "bun:test";
-import { appendOlder, chronoIndex, dayKey, dayLabel, extBadge, fmtSize, groupByDay, placePage, previewable, sinceOf, wantsDisplayVariant } from "@/features/media/media-logic";
+import { appendOlder, chronoIndex, dayKey, dayLabel, extBadge, fmtSize, groupByDay, placePage, previewable, sinceOf, wantsDisplayVariant, whoLabel } from "@/features/media/media-logic";
 import { mediaQueryString, type MediaItem } from "@/lib/api/media";
 
 const item = (id: string, ts: string | null): MediaItem => ({
-  id, agent: "agent-x", sessionId: "s", seq: 1, ts, dir: "in", sender: null, name: `${id}.png`, size: 1, mime: "image/png", kind: "image", cat: "image", available: true,
+  id, agent: "agent-x", sessionId: "s", seq: 1, ts, dir: "in", sender: null, senderId: null, name: `${id}.png`, size: 1, mime: "image/png", kind: "image", cat: "image", available: true,
 });
 const local = (y: number, mo: number, d: number, h = 12) => new Date(y, mo - 1, d, h).toISOString();
 
@@ -60,6 +60,16 @@ describe("筛选与展示", () => {
   });
   test("查询串：master 会话名映射回 bridge 名，空值不带", () => {
     expect(mediaQueryString({ agent: "worker", kind: "image", q: "  " }, { before: "1_a", limit: 40 })).toBe("agent=worker&kind=image&before=1_a&limit=40");
-    expect(mediaQueryString({}, { name: "a b.png", session: "s1", seq: 3 })).toBe("name=a+b.png&session=s1&seq=3");
+    expect(mediaQueryString({}, { name: "a b.png", session: "s1", seqFrom: 1, seq: 3 })).toBe("name=a+b.png&session=s1&seq_from=1&seq=3");
   });
+});
+
+test("whoLabel：agent 发的写 agent 名；入站按发送者 id 认本人，别人写对方名字", () => {
+  const t = (x: string) => x;
+  const self = new Set(["api:owner:self"]);
+  const base = item("a", null);
+  expect(whoLabel({ ...base, dir: "out", agent: "agent-design" }, self, t)).toBe("design");
+  expect(whoLabel({ ...base, sender: "iPhone", senderId: "api:owner:self" }, self, t)).toBe("我发的");
+  expect(whoLabel({ ...base, sender: "friend", senderId: "api:guest:1" }, self, t)).toBe("friend");
+  expect(whoLabel({ ...base, sender: null, senderId: null }, self, t)).toBe("我发的"); // 没有发送者 = 本端
 });

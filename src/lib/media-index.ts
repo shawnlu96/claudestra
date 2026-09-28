@@ -8,15 +8,17 @@
  */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import type { AttachmentDirs } from "./attachment-lookup.js";
+import { sanitizeAttachmentBase } from "./attachment-name.js";
 import { MEDIA_MARKERS, mediaRefsOf, type MediaRef } from "./media-extract.js";
-import { buildInboxCatalog, displayName, resolveInbound, resolveOutbound, type InboxCatalog, type Resolved } from "./media-store.js";
+import { ensureOutboundTable, ledgerCopy, OUT_WINDOW_AFTER_MS, ownedByOther } from "./media-outbound.js";
+import { buildInboxCatalog, displayName, resolveInbound, resolveOutbound, type InboxCatalog, type OutboundLedger, type Resolved } from "./media-store.js";
 import { createLineTranslator, runtimeForSessionPath } from "./session-source.js";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const CHUNK_BYTES = 1024 * 1024;
 /** 出站副本可能比 jsonl 记录晚几秒落盘：这么久以内没找到文件的行，下次刷新再解析一次 */
 const RETRY_MISSING_MS = 15 * 60_000;
@@ -29,29 +31,59 @@ export interface MediaSource {
 
 const dbs = new Map<string, Database>();
 
-export function openMediaIndex(path: string): Database {
-  const hit = dbs.get(path);
-  if (hit) return hit;
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-  const db = new Database(path);
+function migrate(db: Database, onReset?: () => void): void {
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000"); // 同进程多条请求并发刷新 / 读，别一撞锁就 500
   const ver = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   if (ver !== SCHEMA_VERSION) {
     db.exec("DROP TABLE IF EXISTS media; DROP TABLE IF EXISTS sources;");
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    onReset?.(); // 行 id 对应的内容可能变了：缩略图缓存要跟着清
   }
   db.exec(`CREATE TABLE IF NOT EXISTS sources (
     path TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL,
     offset INTEGER NOT NULL, next_seq INTEGER NOT NULL)`);
   db.exec(`CREATE TABLE IF NOT EXISTS media (
     id TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT, ts_ms INTEGER NOT NULL, sk TEXT NOT NULL,
-    dir TEXT NOT NULL, sender TEXT, name TEXT NOT NULL, ref_path TEXT NOT NULL, loc TEXT, size INTEGER, mime TEXT,
-    kind TEXT NOT NULL, cat TEXT NOT NULL, ambiguous INTEGER NOT NULL DEFAULT 0, prio INTEGER NOT NULL)`);
+    dir TEXT NOT NULL, sender TEXT, sender_id TEXT, name TEXT NOT NULL, ref_path TEXT NOT NULL, ref_base TEXT NOT NULL, loc TEXT, size INTEGER,
+    mime TEXT, kind TEXT NOT NULL, cat TEXT NOT NULL, trusted INTEGER NOT NULL, ambiguous INTEGER NOT NULL DEFAULT 0, prio INTEGER NOT NULL)`);
   db.exec("CREATE INDEX IF NOT EXISTS media_sk ON media(sk)");
   db.exec("CREATE INDEX IF NOT EXISTS media_agent ON media(agent, ts_ms)");
   db.exec("CREATE INDEX IF NOT EXISTS media_loc ON media(loc)");
+  db.exec("CREATE INDEX IF NOT EXISTS media_out ON media(dir, ref_base, ts_ms)");
+  ensureOutboundTable(db);
+}
+
+/** 删掉库文件（含 WAL / SHM）：库坏了就重建，索引都能从 jsonl 重扫出来 */
+function dropFiles(path: string): void {
+  for (const f of [path, `${path}-wal`, `${path}-shm`]) {
+    if (existsSync(f)) unlinkSync(f);
+  }
+}
+
+/** 打开（缓存）索引库；打不开或迁移失败 = 库坏了，删掉重建一次 */
+export function openMediaIndex(path: string, onReset?: () => void): Database {
+  const hit = dbs.get(path);
+  if (hit) return hit;
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  let db = new Database(path);
+  try {
+    migrate(db, onReset);
+  } catch (e) {
+    console.error(`[media] 索引库打不开，重建: ${(e as Error).message}`);
+    db.close();
+    dropFiles(path);
+    db = new Database(path);
+    migrate(db, onReset);
+  }
   dbs.set(path, db);
   return db;
+}
+
+/** 运行中查询报库损坏时调用：关掉、删文件，下次 openMediaIndex 重建（出站副本账本也随之丢失，老副本退回按名字猜） */
+export function resetMediaIndex(path: string): void {
+  closeMediaIndex(path);
+  if (path !== ":memory:") dropFiles(path);
 }
 
 export function closeMediaIndex(path: string): void {
@@ -89,27 +121,50 @@ function mediaId(agent: string, sessionId: string, r: MediaRef): string {
   return createHash("sha256").update(key).digest("hex").slice(0, 24);
 }
 
-async function resolveRef(r: { dir: string; path: string; ts: string | null }, dirs: AttachmentDirs, cat: () => InboxCatalog): Promise<Resolved | null> {
-  return r.dir === "in" ? resolveInbound(r.path, dirs) : resolveOutbound(r.path, r.ts, dirs, cat());
+/** 一次刷新共用的上下文：库、目录、inbox 快照（要用到才建） */
+interface Ctx {
+  db: Database;
+  dirs: AttachmentDirs;
+  cat: () => InboxCatalog;
 }
 
-async function upsertRefs(db: Database, src: MediaSource, refs: MediaRef[], dirs: AttachmentDirs, cat: () => InboxCatalog): Promise<void> {
+function ledgerFor(ctx: Ctx, agent: string): OutboundLedger {
+  const others = ctx.db.prepare("SELECT 1 FROM media WHERE dir = 'out' AND ref_base = ? AND agent != ? AND ts_ms BETWEEN ? AND ? LIMIT 1");
+  return {
+    copyFor: (src, t) => ledgerCopy(ctx.db, agent, src, t),
+    ownedByOther: (dest) => ownedByOther(ctx.db, agent, dest),
+    othersSentSameName: (base, t) => !!others.get(base, agent, t - OUT_WINDOW_AFTER_MS, t + OUT_WINDOW_AFTER_MS),
+  };
+}
+
+function resolveRef(ctx: Ctx, agent: string, r: { dir: string; path: string; ts: string | null; trusted: boolean }): Promise<Resolved | null> | Resolved | null {
+  return r.dir === "in" ? resolveInbound(r.path, ctx.dirs, r.trusted) : resolveOutbound(r.path, r.ts, ctx.dirs, ctx.cat(), ledgerFor(ctx, agent));
+}
+
+/** 找到的文件 → 行里的展示字段；没找到就用记录里的 basename */
+function shown(hit: Resolved | null, refPath: string): { name: string; kind: string; cat: string } {
+  const name = hit ? displayName(hit.name, hit.loc.startsWith("u:")) : displayName(basename(refPath), refPath.includes("/web/uploads/"));
+  return { name, ...classify(name) };
+}
+
+async function upsertRefs(ctx: Ctx, src: MediaSource, refs: MediaRef[]): Promise<void> {
   const rows: (string | number | null)[][] = [];
   for (const r of refs) {
-    const hit = await resolveRef(r, dirs, cat);
-    const name = hit ? displayName(hit.name) : basename(r.path);
-    const { kind, cat: c } = classify(name);
+    const hit = await resolveRef(ctx, src.agent, r);
+    const { name, kind, cat } = shown(hit, r.path);
     const tsMs = r.ts ? Date.parse(r.ts) || 0 : 0;
     const id = mediaId(src.agent, src.sessionId, r);
     rows.push([id, src.agent, src.sessionId, r.seq, r.ts, tsMs, sortKey(tsMs, r.seq, r.idx, id), r.dir, r.sender ?? (r.dir === "out" ? src.agent : null),
-      name, r.path, hit?.loc ?? null, hit?.size ?? null, hit?.mime ?? null, kind, c, hit?.ambiguous ? 1 : 0, r.prio]);
+      r.senderId ?? null, name, r.path, sanitizeAttachmentBase(r.path), hit?.loc ?? null, hit?.size ?? null, hit?.mime ?? null, kind, cat,
+      // 没找到文件时记引用本身的可信度（入站头属性 = 可信），retryMissing 找到文件后照它重算
+      (hit ? hit.trusted : r.trusted) ? 1 : 0, hit?.ambiguous ? 1 : 0, r.prio]);
   }
-  const stmt = db.prepare(`INSERT INTO media (id, agent, session_id, seq, ts, ts_ms, sk, dir, sender, name, ref_path, loc, size, mime, kind, cat, ambiguous, prio)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const stmt = ctx.db.prepare(`INSERT INTO media (id, agent, session_id, seq, ts, ts_ms, sk, dir, sender, sender_id, name, ref_path, ref_base, loc, size,
+    mime, kind, cat, trusted, ambiguous, prio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET seq = excluded.seq, ts = excluded.ts, ts_ms = excluded.ts_ms, sk = excluded.sk, prio = excluded.prio
     WHERE excluded.prio > media.prio`);
   // 一块一个事务：逐行自动提交在 WAL 下每行一次落盘，一块几十行就能把事件循环卡住几百毫秒
-  db.transaction(() => {
+  ctx.db.transaction(() => {
     for (const row of rows) stmt.run(...row);
   })();
 }
@@ -188,7 +243,8 @@ async function scanFrom(src: MediaSource, size: number, offset: number, seq: num
 type SourceRow = { size: number; mtime: number; offset: number; next_seq: number };
 
 /** 扫一个来源文件（增量）。返回是否有新内容被扫过。 */
-async function scanSource(db: Database, src: MediaSource, dirs: AttachmentDirs, cat: () => InboxCatalog): Promise<boolean> {
+async function scanSource(ctx: Ctx, src: MediaSource): Promise<boolean> {
+  const { db } = ctx;
   let st;
   try {
     st = statSync(src.path);
@@ -199,31 +255,48 @@ async function scanSource(db: Database, src: MediaSource, dirs: AttachmentDirs, 
   if (row && row.size === st.size && row.mtime === st.mtimeMs) return false;
   const grown = row && st.size >= row.offset;
   const start = grown ? { offset: row.offset, seq: row.next_seq } : { offset: 0, seq: 0 };
-  const end = await scanFrom(src, st.size, start.offset, start.seq, (refs) => upsertRefs(db, src, refs, dirs, cat));
+  const end = await scanFrom(src, st.size, start.offset, start.seq, (refs) => upsertRefs(ctx, src, refs));
   db.prepare(`INSERT INTO sources (path, agent, session_id, size, mtime, offset, next_seq) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, offset = excluded.offset, next_seq = excluded.next_seq`)
     .run(src.path, src.agent, src.sessionId, st.size, st.mtimeMs, end.offset, end.nextSeq);
   return true;
 }
 
-/** 最近的、还没找到文件的行再解析一次（出站副本晚于 jsonl 记录落盘） */
-async function retryMissing(db: Database, dirs: AttachmentDirs, cat: () => InboxCatalog, now: number): Promise<void> {
-  const rows = db.prepare("SELECT id, dir, ref_path, ts FROM media WHERE loc IS NULL AND ts_ms > ?").all(now - RETRY_MISSING_MS) as
-    { id: string; dir: string; ref_path: string; ts: string | null }[];
-  const upd = db.prepare("UPDATE media SET loc = ?, size = ?, mime = ?, name = ?, kind = ?, cat = ?, ambiguous = ? WHERE id = ?");
+/** 最近的、还没找到文件的行再解析一次（出站副本晚于 jsonl 记录落盘；窗口外的副本 resolveOutbound 本身就不认） */
+async function retryMissing(ctx: Ctx, now: number): Promise<void> {
+  const rows = ctx.db.prepare("SELECT id, agent, dir, ref_path, ts, trusted FROM media WHERE loc IS NULL AND ts_ms > ?").all(now - RETRY_MISSING_MS) as
+    { id: string; agent: string; dir: string; ref_path: string; ts: string | null; trusted: number }[];
+  const upd = ctx.db.prepare("UPDATE media SET loc = ?, size = ?, mime = ?, name = ?, kind = ?, cat = ?, trusted = ?, ambiguous = ? WHERE id = ?");
   for (const r of rows) {
-    const hit = await resolveRef({ dir: r.dir, path: r.ref_path, ts: r.ts }, dirs, cat);
+    // 入站：行里记的是引用的可信度（头属性来的才是 1）；出站由账本重新决定
+    const hit = await resolveRef(ctx, r.agent, { dir: r.dir, path: r.ref_path, ts: r.ts, trusted: r.dir === "in" && r.trusted === 1 });
     if (!hit) continue;
-    const name = displayName(hit.name);
-    const { kind, cat: c } = classify(name);
-    upd.run(hit.loc, hit.size, hit.mime, name, kind, c, hit.ambiguous ? 1 : 0, r.id);
+    const { name, kind, cat } = shown(hit, r.ref_path);
+    upd.run(hit.loc, hit.size, hit.mime, name, kind, cat, hit.trusted ? 1 : 0, hit.ambiguous ? 1 : 0, r.id);
   }
 }
 
-/** 刷新一批来源：逐个增量扫，inbox 快照整批只建一次（要用到才建） */
-export async function refreshMediaIndex(db: Database, sources: MediaSource[], dirs: AttachmentDirs, now = Date.now()): Promise<void> {
+/** 回收：清单里已经没有的会话文件（被删 / 换了路径）连同它们的行一起删掉 */
+function collect(db: Database, sources: MediaSource[]): void {
+  const keep = new Set(sources.map((s) => s.path));
+  const sessions = new Set(sources.map((s) => `${s.agent}|${s.sessionId}`));
+  const gone = (db.prepare("SELECT path FROM sources").all() as { path: string }[]).filter((r) => !keep.has(r.path));
+  const stale = (db.prepare("SELECT DISTINCT agent, session_id FROM media").all() as { agent: string; session_id: string }[])
+    .filter((r) => !sessions.has(`${r.agent}|${r.session_id}`));
+  db.transaction(() => {
+    for (const g of gone) db.prepare("DELETE FROM sources WHERE path = ?").run(g.path);
+    for (const r of stale) db.prepare("DELETE FROM media WHERE agent = ? AND session_id = ?").run(r.agent, r.session_id);
+  })();
+}
+
+/**
+ * 刷新一批来源：逐个增量扫。complete = 这是全部 agent 的完整清单，可以顺带回收消失的会话
+ * （只刷一部分时回收会把别的 agent 的行当成消失删掉）。
+ */
+export async function refreshMediaIndex(db: Database, sources: MediaSource[], dirs: AttachmentDirs, opts: { now?: number; complete?: boolean } = {}): Promise<void> {
   let catalog: InboxCatalog | null = null;
-  const cat = () => (catalog ??= buildInboxCatalog(dirs));
-  for (const s of sources) await scanSource(db, s, dirs, cat);
-  await retryMissing(db, dirs, cat, now);
+  const ctx: Ctx = { db, dirs, cat: () => (catalog ??= buildInboxCatalog(dirs)) };
+  for (const s of sources) await scanSource(ctx, s);
+  await retryMissing(ctx, opts.now ?? Date.now());
+  if (opts.complete) collect(db, sources);
 }

@@ -14,6 +14,8 @@ export interface MediaItem {
   ts: string | null;
   dir: "in" | "out";
   sender: string | null;
+  /** 入站发送者 id（<channel user_id>）：前端拿本人 id 集合认「我发的」 */
+  senderId: string | null;
   name: string;
   size: number | null;
   mime: string | null;
@@ -49,6 +51,8 @@ export interface MediaCursor {
   around?: string;
   name?: string;
   session?: string;
+  /** 气泡覆盖的记录区间 [seqFrom, seq]：服务端只在这个区间里找锚点，找不到回 404 */
+  seqFrom?: number;
   seq?: number;
   limit?: number;
 }
@@ -70,6 +74,7 @@ export function mediaQueryString(q: MediaQuery, c: MediaCursor = {}): string {
   set("around", c.around);
   set("name", c.name);
   set("session", c.session);
+  set("seq_from", c.seqFrom);
   set("seq", c.seq);
   set("limit", c.limit);
   return p.toString();

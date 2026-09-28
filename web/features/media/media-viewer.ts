@@ -4,17 +4,21 @@
  * 显示版走服务端 ?display=1（HEIC 可看、走中继省流量），保存 / 分享取原图。PhotoSwipe 保留（owner 2026-07-14 选定），
  * 手势：捏合 / 双击缩放、下拉关闭、单击关闭，桌面方向键左右翻。
  * 两种来源：媒体索引（openMediaViewer）与气泡里现成的几张图（openStaticViewer，旧 bridge 没有 /media 时的退路）。
+ * 图片自己取成 object URL、只留最近 MAX_DECODED 张，其余回收，关掉查看器全回收（不走 AuthImg 那份永不回收的全局缓存）。
  */
 import type PhotoSwipe from "photoswipe";
 import type { SlideData } from "photoswipe";
+import { selfIds } from "@/lib/api/history";
 import { listMedia, mediaRawUrl, type MediaCursor, type MediaItem, type MediaPage, type MediaQuery } from "@/lib/api/media";
-import { uiAgentName } from "@/lib/chat/agents";
-import { fetchAuthBlob, resolveAuthUrl, saveBlob } from "../chat/components/auth-img";
+import { fetchAuthBlob, saveBlob } from "../chat/components/auth-img";
 import { fmtTs } from "../chat/fmt-time";
-import { placePage, wantsDisplayVariant } from "./media-logic";
+import { placePage, wantsDisplayVariant, whoLabel } from "./media-logic";
 
 const PAGE = 40;
 const EDGE = 4;
+const MAX_DECODED = 12;
+/** 索引首建时等它建完再开（否则总数会在翻看中途变），最多等这么多轮、每轮 1 秒 */
+const BUILD_POLLS = 8;
 
 export interface ViewerSlide {
   key: string;
@@ -31,6 +35,8 @@ export interface ViewerText {
   t: (s: string) => string;
   /** 媒体项 → 顶部说明；不给就是「谁发的 · 时间」 */
   caption?: (item: MediaItem) => string;
+  /** 本人的发送者 id（认「我发的」）；不给就现取 */
+  self?: ReadonlySet<string>;
   onLocate?: (item: MediaItem) => void;
 }
 
@@ -62,24 +68,58 @@ export async function shareOrSave(url: string, name: string): Promise<void> {
   }
 }
 
-/** 已解码的尺寸（PhotoSwipe 要宽高才能排版）：object URL → naturalWidth/Height */
-const dims = new Map<string, { src: string; w: number; h: number }>();
-function decode(url: string): Promise<{ src: string; w: number; h: number }> {
-  const hit = dims.get(url);
-  if (hit) return Promise.resolve(hit);
-  return resolveAuthUrl(url).then(
-    (src) =>
-      new Promise((ok, fail) => {
-        const img = new Image();
-        img.onload = () => {
-          const d = { src, w: img.naturalWidth || 1600, h: img.naturalHeight || 1200 };
-          dims.set(url, d);
-          ok(d);
-        };
-        img.onerror = () => fail(new Error("decode"));
-        img.src = src;
-      }),
-  );
+/** 一个查看器实例的图片缓存：地址 → object URL + 原图宽高（PhotoSwipe 要宽高才能排版）；超出 MAX_DECODED 按最久未用回收 */
+class Decoder {
+  private done = new Map<string, { src: string; w: number; h: number }>();
+  private pending = new Map<string, Promise<void>>();
+
+  get(url: string): { src: string; w: number; h: number } | undefined {
+    const hit = this.done.get(url);
+    if (hit) {
+      this.done.delete(url); // 挪到最新
+      this.done.set(url, hit);
+    }
+    return hit;
+  }
+
+  load(url: string): Promise<void> {
+    let p = this.pending.get(url);
+    if (!p) {
+      p = fetchAuthBlob(url)
+        .then((b) => {
+          const src = URL.createObjectURL(b);
+          return new Promise<void>((ok, fail) => {
+            const img = new Image();
+            img.onload = () => {
+              this.done.set(url, { src, w: img.naturalWidth || 1600, h: img.naturalHeight || 1200 });
+              this.evict();
+              ok();
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(src);
+              fail(new Error("decode"));
+            };
+            img.src = src;
+          });
+        })
+        .finally(() => this.pending.delete(url));
+      this.pending.set(url, p);
+    }
+    return p;
+  }
+
+  private evict(): void {
+    while (this.done.size > MAX_DECODED) {
+      const [url, d] = this.done.entries().next().value!;
+      URL.revokeObjectURL(d.src);
+      this.done.delete(url);
+    }
+  }
+
+  clear(): void {
+    for (const d of this.done.values()) URL.revokeObjectURL(d.src);
+    this.done.clear();
+  }
 }
 
 function slideOf(item: MediaItem, text: ViewerText): ViewerSlide {
@@ -88,7 +128,7 @@ function slideOf(item: MediaItem, text: ViewerText): ViewerSlide {
     url: mediaRawUrl(item.id, wantsDisplayVariant(item.name)),
     saveUrl: mediaRawUrl(item.id),
     name: item.name,
-    caption: text.caption?.(item) ?? [item.dir === "in" ? text.t("我发的") : uiAgentName(item.agent), fmtTs(item.ts ?? undefined)].join(" · "),
+    caption: text.caption?.(item) ?? [whoLabel(item, text.self ?? new Set(), text.t), fmtTs(item.ts ?? undefined)].join(" · "),
     item,
   };
 }
@@ -117,16 +157,22 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
     arrowPrev: src.total > 1,
     arrowNext: src.total > 1,
   });
-  const refresh = (indexes: number[]) => indexes.forEach((i) => pswp.refreshSlideContent(i));
+  const dec = new Decoder();
+  pswp.on("destroy", () => dec.clear());
+  // 总数变了（翻看中有新图进来）：刷新计数与箭头；下标从最早一张数起，新图加在最新一端，已加载的下标不动
+  const refresh = (indexes: number[]) => {
+    indexes.forEach((i) => pswp.refreshSlideContent(i));
+    pswp.dispatch("change");
+  };
   pswp.addFilter("numItems", () => src.total);
   pswp.addFilter("itemData", (_d: SlideData, i: number): SlideData => {
     const s = src.get(i);
     if (s === "loading") return { html: SPINNER };
     if (s === "gone") return { html: note(text.t("文件已不在本机")) };
     if (s.item && !s.item.available) return { html: note(text.t(s.item.restricted ? "这张图来源不唯一，只有管理设备能查看" : "文件已不在本机")) };
-    const d = dims.get(s.url);
+    const d = dec.get(s.url);
     if (d) return { src: d.src, width: d.w, height: d.h, alt: s.name };
-    decode(s.url).then(() => refresh([i]), () => undefined); // 解码失败：这一格留着转圈，旁边的照常翻
+    dec.load(s.url).then(() => pswp.refreshSlideContent(i), () => undefined); // 解码失败：这一格留着转圈，旁边的照常翻
     return { html: SPINNER };
   });
   const current = (): ViewerSlide | null => {
@@ -180,55 +226,68 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
   src.near(src.start, refresh);
 }
 
-/** 媒体索引来源：从锚点（媒体 id，或气泡里的文件名 + 会话 + seq）取一窗，翻到边界往两头补页。锚点找不到返回 false */
+/** 第一页：索引还在首建就每秒再拉一次，建完（或等够了）再开，免得总数在翻看中途变；锚点找不到（404 等）返回 null */
+async function firstPage(q: MediaQuery, anchor: MediaCursor): Promise<MediaPage | null> {
+  let page: MediaPage | null = null;
+  for (let i = 0; i < BUILD_POLLS; i++) {
+    try {
+      page = await listMedia(q, { ...anchor, limit: PAGE });
+    } catch {
+      return page; // 404（气泡区间里没有这张 / 没进索引 / 旧 bridge 没这个端点）→ 调用方退回气泡里的几张图
+    }
+    if (!page.building) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return page;
+}
+
+/** 媒体索引来源：从锚点（媒体 id，或气泡里的文件名 + 会话 + seq 区间）取一窗，翻到边界往两头补页。锚点找不到返回 false */
 export async function openMediaViewer(query: MediaQuery, anchor: MediaCursor, text: ViewerText): Promise<boolean> {
   const q: MediaQuery = { ...query, kind: "image" };
-  let first: MediaPage;
-  try {
-    first = await listMedia(q, { ...anchor, limit: PAGE });
-  } catch {
-    return false; // 404（没进索引 / 旧 bridge 没这个端点）→ 调用方退回气泡里的几张图
-  }
-  const total = first.total;
+  const [first, self] = await Promise.all([firstPage(q, anchor), text.self ?? selfIds().catch(() => new Set<string>())]);
+  if (!first || !first.anchor) return false;
+  const src: Source = { total: first.total, start: 0, get: () => "loading", near: () => undefined };
   let slots = placePage(new Map(), first);
-  const at = [...slots].find(([, it]) => it.id === first.anchor)?.[0] ?? total - 1;
+  src.start = [...slots].find(([, it]) => it.id === first.anchor)?.[0] ?? first.total - 1;
   let older = first.older;
   let newer = first.newer;
   const busy = { older: false, newer: false };
   const lo = () => Math.min(...slots.keys());
   const hi = () => Math.max(...slots.keys());
+  const place = (page: MediaPage, refresh: (idx: number[]) => void) => {
+    const before = new Set(slots.keys());
+    slots = placePage(slots, page); // 各页用自己的 total / newerCount 定位：新图进来两者同增，已有下标不变
+    src.total = Math.max(src.total, page.total);
+    refresh([...slots.keys()].filter((k) => !before.has(k)));
+  };
   const load = async (side: "older" | "newer", refresh: (idx: number[]) => void) => {
     const cursor = side === "older" ? older : newer;
-    if (!cursor || busy[side]) return;
+    if (busy[side] || (!cursor && side === "older")) return;
+    // 最新一端没有游标：总数长了（有新图）才值得再问一次，围绕已加载的最新一张取窗拿到新游标
+    const newest = slots.get(hi());
+    if (!cursor && (hi() >= src.total - 1 || !newest)) return;
     busy[side] = true;
     try {
-      const page = await listMedia(q, side === "older" ? { before: cursor, limit: PAGE } : { after: cursor, limit: PAGE });
-      const before = new Set(slots.keys());
-      slots = placePage(slots, { ...page, total });
+      const c = cursor ? (side === "older" ? { before: cursor } : { after: cursor }) : { around: newest!.id };
+      const page = await listMedia(q, { ...c, limit: PAGE });
       if (side === "older") older = page.older;
       else newer = page.newer;
-      refresh([...slots.keys()].filter((k) => !before.has(k)));
+      place(page, refresh);
     } catch {
       /* 网络抖一下：这一侧保持转圈，下次翻页再试 */
     } finally {
       busy[side] = false;
     }
   };
-  return launch(
-    {
-      total,
-      start: at,
-      get: (i) => {
-        const it = slots.get(i);
-        return it ? slideOf(it, text) : "loading";
-      },
-      near: (i, refresh) => {
-        if (i - lo() < EDGE) void load("older", refresh);
-        if (hi() - i < EDGE) void load("newer", refresh);
-      },
-    },
-    text,
-  ).then(() => true);
+  src.get = (i) => {
+    const it = slots.get(i);
+    return it ? slideOf(it, { ...text, self }) : "loading";
+  };
+  src.near = (i, refresh) => {
+    if (i - lo() < EDGE) void load("older", refresh);
+    if (hi() - i < EDGE) void load("newer", refresh);
+  };
+  return launch(src, text).then(() => true);
 }
 
 /** 静态来源：气泡里现成的几张图（没有媒体索引时的退路，不能往前翻、没有定位） */

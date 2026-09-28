@@ -4,6 +4,8 @@
  * 服务端列表恒为时间倒序（最新在前）；查看器按时间正序（左 = 更早，和微信一样往右翻是更新的）。
  */
 import type { MediaItem, MediaPage } from "@/lib/api/media";
+import { uiAgentName } from "@/lib/chat/agents";
+import { isSelfSource } from "@/lib/chat/history-shape";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -100,4 +102,10 @@ export function wantsDisplayVariant(name: string): boolean {
 /** 浏览器能直接预览的文件（新标签打开），其余直接下载 */
 export function previewable(name: string): boolean {
   return /\.(pdf|txt|log|json|md|csv|png|jpe?g|gif|webp|svg)$/i.test(name);
+}
+
+/** 谁发的：agent 发的写 agent 名；入站按发送者 id 认本人（别人的设备 / guest / Discord 用户写对方的名字） */
+export function whoLabel(item: Pick<MediaItem, "dir" | "agent" | "sender" | "senderId">, self: ReadonlySet<string>, t: (s: string) => string): string {
+  if (item.dir === "out") return uiAgentName(item.agent);
+  return isSelfSource(item.sender ?? undefined, item.senderId ?? undefined, self) ? t("我发的") : item.sender || t("别人发的");
 }

@@ -7,7 +7,7 @@
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
-import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
+import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
@@ -682,23 +682,6 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     apiFiles.set(id, { path: p, tokenId: to.tokenId, name });
     return { name, url: `/api/v1/files/${id}` };
   });
-  // 出站附件持久化（owner 2026-07-14:「你也可以给我发图片」）：agent reply 的
-  // files 常在临时目录（scratchpad/截图），拷进 inbox（web 附件取回白名单）——
-  // SSE 事件带 inbox 文件名，web 前端走 /api/chat/attachment/<name> 内联显示，
-  // 时间戳前缀防碰撞 + 与 Discord 下载附件同一套展示名清洗（去 ^\d+_）。
-  const eventFiles: { name: string; attachment: string }[] = [];
-  for (const p of env.meta.files || []) {
-    try {
-      const base = sanitizeAttachmentBase(p); // 保 Unicode;与 web attachment 路由同一套(peer 2026-08-25)
-      const dest = `${Date.now()}_${base}`;
-      await fs.mkdir(INBOX_DIR, { recursive: true });
-      await fs.copyFile(p, `${INBOX_DIR}/${dest}`);
-      eventFiles.push({ name: base, attachment: dest });
-    } catch (e) {
-      console.error(`API 出站附件拷贝失败 ${p}:`, (e as Error).message);
-    }
-  }
-
   const threadId = pending?.threadId || env.meta.threadId;
   const agentName = pending?.agentName ||
     (env.from.kind === "local" ? env.from.agentName : undefined) ||
@@ -709,6 +692,8 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // "?" 的幽灵会话，用户在正确的会话里什么也看不到（owner 两次实报「问号频道」，
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
+  // reply 的附件（常在临时目录）拷进 inbox 供网页内联显示，并记账「谁、哪个原路径 → 哪个副本」（媒体索引按账认领，见 lib/media-outbound.ts）
+  const eventFiles = await copyOutboundToInbox(env.meta.files || [], agentName);
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,

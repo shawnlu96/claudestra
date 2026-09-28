@@ -3,26 +3,26 @@ import { useEffect, useRef, useState } from "react";
 import { mediaThumbUrl, type MediaItem } from "@/lib/api/media";
 import { uiAgentName } from "@/lib/chat/agents";
 import { useT } from "@/lib/i18n";
-import { AuthImg } from "../chat/components/auth-img";
 import { fmtTs } from "../chat/fmt-time";
-import { dayLabel, extBadge, fmtSize, groupByDay } from "./media-logic";
+import { dayLabel, extBadge, fmtSize, groupByDay, whoLabel } from "./media-logic";
 import { DownloadIcon, ImageOffIcon, LocateIcon } from "./media-icons";
+import { useBlobUrl } from "./use-blob-url";
 
-/* 图片网格（按天分组、缩略图懒加载）与文件列表。缩略图是服务端生成的 360px JPEG；格子进入视口前不发请求。 */
+/* 图片网格（按天分组）与文件列表。缩略图是服务端生成的 360px JPEG；格子离视口近了才取，远了就卸掉、回收 object URL（翻几百张也不涨内存）。 */
 
-/** 进入视口（提前 400px）才挂 AuthImg；不可用的项直接给占位 */
+/** 离视口 1200px 以内才挂图；不可用的项直接给占位 */
 function Thumb({ item, onOpen }: { item: MediaItem; onOpen: () => void }) {
   const t = useT();
   const ref = useRef<HTMLButtonElement>(null);
-  const [seen, setSeen] = useState(false);
-  const [err, setErr] = useState(false);
+  const [near, setNear] = useState(false);
   useEffect(() => {
     const el = ref.current;
-    if (!el || seen) return;
-    const io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && setSeen(true), { rootMargin: "400px 0px" });
+    if (!el) return;
+    const io = new IntersectionObserver((es) => setNear(es.some((e) => e.isIntersecting)), { rootMargin: "1200px 0px" });
     io.observe(el);
     return () => io.disconnect();
-  }, [seen]);
+  }, []);
+  const { src, error: err } = useBlobUrl(near && item.available ? mediaThumbUrl(item.id) : null);
   const tip = item.restricted ? t("这张图来源不唯一，只有管理设备能查看") : !item.available || err ? t("文件已不在本机") : item.name;
   return (
     <button
@@ -32,8 +32,9 @@ function Thumb({ item, onOpen }: { item: MediaItem; onOpen: () => void }) {
       onClick={onOpen}
       className="relative aspect-square overflow-hidden rounded-md bg-base-300/70 outline-none focus-visible:ring-2 focus-visible:ring-primary"
     >
-      {item.available && !err && seen ? (
-        <AuthImg src={mediaThumbUrl(item.id)} alt={item.name} loading="lazy" onError={() => setErr(true)} className="h-full w-full object-cover" />
+      {item.available && !err && src ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={src} alt={item.name} className="h-full w-full object-cover" />
       ) : (
         <span className="absolute inset-0 grid place-items-center text-base-content/30">{(!item.available || err) && <ImageOffIcon size={22} />}</span>
       )}
@@ -65,10 +66,10 @@ export function ImageGrid({ items, onOpen }: { items: MediaItem[]; onOpen: (item
   );
 }
 
-/** 文件一行：类型徽标 · 名字 · 大小 / 时间 / 会话 / 谁发的；右侧 预览或下载、定位到消息 */
-function FileRow({ item, showAgent, onOpen, onLocate }: { item: MediaItem; showAgent: boolean; onOpen: () => void; onLocate: () => void }) {
+/** 文件一行：类型徽标 · 名字 · 大小 / 时间 / 会话 / 谁发的；右侧 预览或下载、定位到消息（会话已不在时不给定位） */
+function FileRow({ item, showAgent, self, onOpen, onLocate }: { item: MediaItem; showAgent: boolean; self: ReadonlySet<string>; onOpen: () => void; onLocate?: () => void }) {
   const t = useT();
-  const who = item.dir === "in" ? t("我发的") : t("{agent} 发的", { agent: uiAgentName(item.agent) });
+  const who = item.dir === "in" ? whoLabel(item, self, t) : t("{agent} 发的", { agent: uiAgentName(item.agent) });
   const meta = [fmtSize(item.size), fmtTs(item.ts ?? undefined), showAgent && item.dir === "in" ? uiAgentName(item.agent) : "", who].filter(Boolean).join(" · ");
   return (
     <div className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-base-200/70">
@@ -82,21 +83,24 @@ function FileRow({ item, showAgent, onOpen, onLocate }: { item: MediaItem; showA
           <DownloadIcon />
         </button>
       )}
-      <button type="button" className="btn btn-ghost btn-sm btn-square text-base-content/60" title={t("定位到消息")} aria-label={t("定位到消息")} onClick={onLocate}>
-        <LocateIcon />
-      </button>
+      {onLocate && (
+        <button type="button" className="btn btn-ghost btn-sm btn-square text-base-content/60" title={t("定位到消息")} aria-label={t("定位到消息")} onClick={onLocate}>
+          <LocateIcon />
+        </button>
+      )}
     </div>
   );
 }
 
-export function FileList({ items, showAgent, onOpen, onLocate }: { items: MediaItem[]; showAgent: boolean; onOpen: (it: MediaItem) => void; onLocate: (it: MediaItem) => void }) {
+export function FileList(props: { items: MediaItem[]; showAgent: boolean; self: ReadonlySet<string>; onOpen: (it: MediaItem) => void; onLocate: (it: MediaItem) => (() => void) | undefined }) {
+  const { items, showAgent, self, onOpen, onLocate } = props;
   return (
     <div className="flex flex-col">
       {groupByDay(items).map((g) => (
         <section key={g.day || "none"}>
           <DayTitle day={g.day} />
           {g.items.map((it) => (
-            <FileRow key={it.id} item={it} showAgent={showAgent} onOpen={() => onOpen(it)} onLocate={() => onLocate(it)} />
+            <FileRow key={it.id} item={it} showAgent={showAgent} self={self} onOpen={() => onOpen(it)} onLocate={onLocate(it)} />
           ))}
         </section>
       ))}
