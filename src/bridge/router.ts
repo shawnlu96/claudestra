@@ -19,6 +19,7 @@
  */
 
 import type { ServerWebSocket } from "bun";
+import { isOwnerSource, neutralizeDelegateMarker } from "../lib/delegate-marker.js";
 
 // ============================================================
 // Endpoint：消息发送方 / 接收方的统一地址
@@ -313,3 +314,8 @@ export function newMessageId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+
+/** 注入本地 agent 的正文：非 owner 来源里的 `[📨` 中和掉——@ 委托标记只有 owner 本人能发（lib/delegate-marker.ts） */
+export function inboundBodyForLocal(env: Pick<Envelope, "from" | "content">): string {
+  return isOwnerSource(env.from) ? env.content : neutralizeDelegateMarker(env.content);
+}

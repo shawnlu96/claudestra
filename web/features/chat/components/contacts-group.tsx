@@ -20,6 +20,12 @@ export function presenceTone(online: boolean | null, busy?: boolean): string {
   return online === false ? "bg-base-content/25" : "bg-base-content/15";
 }
 
+/** 列表为空的原因：凭据被拒 / 单向看不到 / 对方确实没开放，三种说法不同，别让人以为是对方收回了授权 */
+function emptyReason(c: PeerContact, t: ReturnType<typeof useT>): string {
+  if (c.rejected) return t("对方拒绝了我们的凭据（可能已被移除），需要重新加入");
+  return c.online === null ? t("单向连接：看不到对方开放了哪些 agent") : t("对方没有开放 agent 给你");
+}
+
 const rank = (c: PeerContact) => (c.online === true ? 0 : c.online === false ? 1 : 2);
 
 function PeerStatus({ c }: { c: PeerContact }) {
@@ -34,10 +40,10 @@ function PeerStatus({ c }: { c: PeerContact }) {
 
 function AgentLine({ a, online }: { a: ContactAgent; online: boolean | null }) {
   const t = useT();
-  const busyText = a.busy === true ? t("忙") : a.busy === false ? t("空闲") : "—";
+  const busyText = a.stopped ? t("已停止") : a.busy === true ? t("忙") : a.busy === false ? t("空闲") : "—";
   return (
     <li className="flex items-center gap-2 py-1 pl-7 pr-1.5 text-[12.5px]">
-      <span className={`size-1.5 shrink-0 rounded-full ${presenceTone(online, a.busy)}`} />
+      <span className={`size-1.5 shrink-0 rounded-full ${presenceTone(a.stopped ? false : online, a.busy)}`} />
       <span className="min-w-0 flex-1 truncate">{a.name.replace(/^agent-/, "")}</span>
       <span className="shrink-0 text-[11px] text-base-content/45">{busyText}</span>
     </li>
@@ -59,7 +65,7 @@ function PeerBlock({ c, collapsed, onToggle }: { c: PeerContact; collapsed: bool
           {c.agents.map((a) => <AgentLine key={a.name} a={a} online={c.online} />)}
           {!c.agents.length && (
             <li className="py-1 pl-[42px] pr-1.5 text-[11.5px] text-base-content/40">
-              {c.online === null ? t("单向连接：看不到对方开放了哪些 agent") : t("对方没有开放 agent 给你")}
+              {emptyReason(c, t)}
             </li>
           )}
         </ul>

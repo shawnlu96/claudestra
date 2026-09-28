@@ -13,6 +13,10 @@ export interface PeerPresence {
   latencyMs?: number;
   /** 对方开放给我的 agent（探测成功时刷新；网络失败保留上次看到的；401 / 403 清空） */
   remoteAgents?: RemoteAgent[];
+  /** remoteAgents 最近一次刷新（只在探测成功时写）。checkedAt 失败也刷新、中继 peer 的 online 又被中继覆盖，判忙闲新鲜度只能看它 */
+  agentsAt?: string;
+  /** 最近一次探测被对方拒绝（401 / 403）：凭据失效，与「对方没开放 agent」是两回事。中继覆盖 online / error 时它不动 */
+  authRejected?: boolean;
   /** 离线原因：timeout（多半对方机器离线 / 没共享给我）、refused（端口没对外）、http 401 等 */
   error?: string;
   /** 对方最近一次调我的 API（入站） */
@@ -33,10 +37,12 @@ const isAuthRejected = (error: string) => error === "http 401" || error === "htt
 export function mergeProbe(prev: PeerPresence | undefined, r: ProbeResult | null, now: string): PeerPresence {
   const base: PeerPresence = { ...(prev ?? { online: null }), checkedAt: now };
   if (!r) return { ...base, online: null, error: undefined, latencyMs: undefined };
-  if (r.ok) return { ...base, online: true, lastOnlineAt: now, latencyMs: r.latencyMs, remoteAgents: r.agents, error: undefined };
+  if (r.ok) return { ...base, online: true, lastOnlineAt: now, latencyMs: r.latencyMs, remoteAgents: r.agents, agentsAt: now, authRejected: false, error: undefined };
   const off: PeerPresence = { ...base, online: false, error: r.error, latencyMs: undefined };
-  if (isAuthRejected(r.error)) delete off.remoteAgents;
-  return off;
+  if (!isAuthRejected(r.error)) return off;
+  delete off.remoteAgents;
+  delete off.agentsAt;
+  return { ...off, authRejected: true };
 }
 
 /** fetch 抛出的错误 → 一个短词（给人看，也给 agent 判断「要不要等一会儿再发」） */

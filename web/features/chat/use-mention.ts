@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState, type RefObject } from "react";
 import { useT } from "@/lib/i18n";
 import { mentionLabel, type MentionTarget } from "@/lib/chat/mention-directive";
 import { useContacts } from "./contacts-data";
-import { applyMention, localCandidates, matchMentions, mentionPresent, mentionQuery, peerCandidates, recheckMention, type MentionCandidate, type MentionQuery } from "./mention";
+import { applyMention, isSlashText, localCandidates, matchMentions, mentionPresent, mentionQuery, peerCandidates, recheckMention, type MentionCandidate, type MentionQuery } from "./mention";
 import { clampSel, handlePickerKey } from "./picker-keys";
 import type { AgentSession } from "./type";
 
@@ -43,7 +43,9 @@ export function useMention({ text, setText, taRef, active, agents }: Opts): Ment
   const [dismissed, setDismissed] = useState(false);
   // 记下是在哪个会话选的：切会话后自动失效（不用 effect 清，免得多渲染一轮）
   const [picked, setPicked] = useState<{ agent: string; target: MentionTarget } | null>(null);
-  const target = picked?.agent === active ? picked.target : null;
+  // 斜杠命令里 @ 不生效（isSlashText）：提示条随之消失，发出去就是普通命令
+  const slash = isSlashText(text);
+  const target = !slash && picked?.agent === active ? picked.target : null;
   const [error, setError] = useState("");
   useEffect(() => {
     const ta = taRef.current;
@@ -60,7 +62,7 @@ export function useMention({ text, setText, taRef, active, agents }: Opts): Ment
     [agents, active, contacts, allowed],
   );
   // 第一期只允许一个目标：已有生效的 @ 就不再弹
-  const items = target || !q ? [] : matchMentions(cands, q.q);
+  const items = target || slash || !q ? [] : matchMentions(cands, q.q);
   const open = !dismissed && items.length > 0;
 
   const pick = (c: MentionCandidate) => {
@@ -89,7 +91,7 @@ export function useMention({ text, setText, taRef, active, agents }: Opts): Ment
     });
 
   const prepare = (cur: string): MentionTarget | null | false => {
-    if (!target || !mentionPresent(cur, mentionLabel(target))) return null;
+    if (!target || isSlashText(cur) || !mentionPresent(cur, mentionLabel(target))) return null;
     const r = recheckMention(target, contacts, agents);
     if (r.ok) return r.target;
     const name = mentionLabel(target);

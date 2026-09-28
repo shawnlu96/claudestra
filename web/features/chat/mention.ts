@@ -3,7 +3,8 @@
  * 指令文案在 lib/chat/mention-directive.ts；这里只管候选从哪来、怎么排、怎么插、发送前怎么复核。
  * 第一期只允许一个目标：已经有生效的 @ 时不再弹候选（删掉那个标记才能换人）。
  */
-import { isSafeMentionName, mentionLabel, type MentionTarget } from "@/lib/chat/mention-directive";
+import { mentionLabel, type MentionTarget } from "@/lib/chat/mention-directive";
+import { isSafeMentionName } from "@/lib/chat/mention-name";
 import type { PeerContact } from "./contact-types";
 
 export interface MentionCandidate {
@@ -21,6 +22,11 @@ export interface MentionQuery {
   /** 查询词结束下标（= 光标） */
   end: number;
   q: string;
+}
+
+/** 斜杠命令（bridge 按 /^\/[\w:-]+/ 当 CLI 命令直通）：不弹 @、不加指令——指令会连同换行拼进命令参数 */
+export function isSlashText(text: string): boolean {
+  return /^\/[\w:-]+/.test(text.trim());
 }
 
 /** 光标前最近的 @ 词：@ 必须在开头或空白后（邮箱 a@b 不弹），@ 到光标之间没有空白 */
@@ -57,7 +63,7 @@ export function peerCandidates(contacts: PeerContact[]): MentionCandidate[] {
   for (const c of contacts) {
     if (!isSafeMentionName(c.name)) continue;
     for (const a of c.agents) {
-      if (!isSafeMentionName(a.name)) continue;
+      if (a.stopped || !isSafeMentionName(a.name)) continue;
       const target: MentionTarget = { kind: "peer", agent: a.name, peer: c.name, ...(c.fp ? { fp: c.fp } : {}) };
       out.push({ target, label: mentionLabel(target), online: c.online, ...(typeof a.busy === "boolean" ? { busy: a.busy } : {}) });
     }
@@ -107,6 +113,9 @@ export function recheckMention(t: MentionTarget, contacts: PeerContact[], agents
     return a.status === "active" ? { ok: true, target: t } : { ok: false, reason: "stopped" };
   }
   const c = t.fp ? contacts.find((x) => x.fp === t.fp) : contacts.find((x) => x.name === t.peer && !x.fp);
-  if (!c || !isSafeMentionName(c.name) || !c.agents.some((a) => a.name === t.agent)) return { ok: false, reason: "gone" };
-  return { ok: true, target: { ...t, peer: c.name } };
+  const a = c && isSafeMentionName(c.name) ? c.agents.find((x) => x.name === t.agent) : undefined;
+  if (!c || !a) return { ok: false, reason: "gone" };
+  // 指令里只写得下 peer 名（send_to_agent 没有指纹参数）：这里到 agent 真正发出之间 peer 被删、又加了同名的另一台，
+  // 会投给后者。窗口只有几秒，撤销的情况对方会实时鉴权拒掉，所以只在这里说明，不另做（T19 审查 P2-6）
+  return a.stopped ? { ok: false, reason: "stopped" } : { ok: true, target: { ...t, peer: c.name } };
 }

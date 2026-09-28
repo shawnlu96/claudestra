@@ -17,7 +17,6 @@
     "dead:src/bridge/bg-activity-watcher.ts#activeBgActivities": 1,
     "dead:src/bridge/components.ts#ensureTyping": 1,
     "dead:src/bridge/config.ts#MCP_NAME": 1,
-    "dead:src/bridge/event-bus.ts#BridgeEventType": 1,
     "dead:src/bridge/http-peer.ts#inflightHttpPeerCalls": 1,
     "dead:src/bridge/management.ts#buildSessionsPanel": 1,
     "dead:src/bridge/router.ts#BridgeEndpoint": 1,
@@ -137,8 +136,8 @@
     "doc:CLAUDE.zh-CN.md": 22241,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
-    "dup:total": 1140,
-    "fn:overflow": 9542,
+    "dup:total": 1128,
+    "fn:overflow": 9540,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:ArchivedSessions": 1,
@@ -282,6 +281,12 @@
       "from": 0,
       "to": 0,
       "why": "删 web/app/api 路由鉴权检查（route:<file>）：目录已不存在，检查永远命中 0 个文件；其余 pattern / catch 规则不变"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 登记 mention-name（src/lib ⇄ web/lib/chat）：@ 委托的名字准入规则 bridge 过滤联系人、网页拼指令行两边都要用，web 与 src 不能互相 import（T19 审查 P2-1）"
     }
   ]
 }

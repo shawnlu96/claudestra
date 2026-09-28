@@ -33,6 +33,7 @@ function emit(next: ContactsSnap): void {
 async function load(): Promise<void> {
   const fp = machines.currentFp();
   if (inflightFp === fp || document.visibilityState === "hidden") return;
+  if (snap.fp === fp && snap.allowed === false) return; // 这台机器已答过 403 / 404：换机器前不再问（权限不会自己变）
   inflightFp = fp;
   try {
     const j = await peerContacts<{ contacts?: PeerContact[] }>();

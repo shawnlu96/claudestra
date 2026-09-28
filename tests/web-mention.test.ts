@@ -1,8 +1,9 @@
 /** 输入框 @ 委托：候选、插入、发送前复核（web/features/chat/mention.ts）与指令行拼接 / 剥离（web/lib/chat/mention-directive.ts） */
 import { describe, expect, test } from "bun:test";
-import { applyMention, localCandidates, matchMentions, mentionPresent, mentionQuery, peerCandidates, recheckMention } from "@/features/chat/mention";
+import { applyMention, isSlashText, localCandidates, matchMentions, mentionPresent, mentionQuery, peerCandidates, recheckMention } from "@/features/chat/mention";
 import type { PeerContact } from "@/features/chat/contact-types";
-import { isSafeMentionName, mentionAddress, mentionDirective, mentionLabel, stripMentionDirective, withMentionDirective } from "@/lib/chat/mention-directive";
+import { mentionAddress, mentionDirective, mentionLabel, stripMentionDirective, withMentionDirective } from "@/lib/chat/mention-directive";
+import { isSafeMentionName } from "@/lib/chat/mention-name";
 import { clampSel, handlePickerKey } from "@/features/chat/picker-keys";
 
 const agents = [
@@ -77,6 +78,20 @@ describe("发送前复核", () => {
     expect(recheckMention({ kind: "local", agent: "writer" }, [], agents).ok).toBe(true);
     expect(recheckMention({ kind: "local", agent: "old" }, [], agents)).toEqual({ ok: false, reason: "stopped" });
     expect(recheckMention({ kind: "local", agent: "nobody" }, [], agents)).toEqual({ ok: false, reason: "gone" });
+  });
+});
+
+describe("斜杠命令里不做 @", () => {
+  test("以 /命令 开头的文本（bridge 当 CLI 命令直通）认得出来；引用块、普通文字不算", () => {
+    expect(isSlashText("/review @writer")).toBe(true);
+    expect(isSlashText("  /model opus")).toBe(true);
+    expect(isSlashText("> /quoted\n\n@writer")).toBe(false);
+    expect(isSlashText("路径 /tmp @writer")).toBe(false);
+  });
+  test("对方已停止的目标：复核按「已停止」拦下", () => {
+    const t = { kind: "peer" as const, agent: "relay-ops", peer: "alex", fp: "fp-alex" };
+    const c = { ...alex, agents: [{ name: "relay-ops", stopped: true }] };
+    expect(recheckMention(t, [c], agents)).toEqual({ ok: false, reason: "stopped" });
   });
 });
 

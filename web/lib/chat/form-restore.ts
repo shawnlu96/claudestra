@@ -62,7 +62,11 @@ export function restoreFormReply(text: string, messages: ChatMessage[], commit =
   return lookup.restore(text, commit);
 }
 
-/** 他端实时推来的用户消息：表单回投还原成可读行，否则剥掉 @ 委托指令行（与本端气泡、历史还原同一显示） */
-export function restoreUserText(text: string, messages: ChatMessage[]): string {
-  return restoreFormReply(text, messages) ?? stripMentionDirective(text);
+/**
+ * 他端实时推来的用户消息，与本端气泡、历史还原同一显示：本人的先剥 @ 委托指令行（外源不剥，见 mention-directive.ts），
+ * 再把表单回投还原成可读行
+ */
+export function restoreUserText(text: string, messages: ChatMessage[], from?: string): string {
+  const own = from ? text : stripMentionDirective(text);
+  return restoreFormReply(own, messages) ?? own;
 }

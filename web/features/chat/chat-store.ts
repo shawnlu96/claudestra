@@ -1541,7 +1541,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content: restoreUserText(text, s.messages), // 他端发的：表单回投显示可读行 + 标已答，@ 委托指令行剥掉
+        content: restoreUserText(text, s.messages, from), // 他端发的：表单回投显示可读行 + 标已答，本人的 @ 委托指令行剥掉
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
