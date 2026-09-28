@@ -1,7 +1,5 @@
 /**
- * Claude Code 启动命令构造
- *
- * 统一 manager/launcher/cron 三处的 Claude Code 启动参数：
+ * Claude Code 启动命令构造。统一 manager/launcher/cron 三处的 Claude Code 启动参数：
  * - MCP server 名（由 env MCP_NAME 控制，默认 claudestra）
  * - disallowedTools 黑名单（支持命名预设和自定义）
  * - dev channel 加载 + skip-permissions
@@ -12,6 +10,7 @@ import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 import { isSandbox } from "./sandbox.js";
 import { sandboxLaunchArgs } from "./sandbox-env.js";
+import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
 
@@ -276,6 +275,8 @@ export interface LaunchOptions {
   purpose?: string;
   /** purpose 注入时的自称名（registry 名，如 agent-foo）。 */
   agentName?: string;
+  /** 按哪个名字找 agent-settings/<名>.json（registry 名 / master）；不传 = 不带 --settings */
+  settingsAgent?: string;
   /**
    * v2.21+ project 上下文注入:一行「你属于 project X,目录有…,同伴有…」,与
    * purpose 合并成同一条 --append-system-prompt。让 review/测试类 agent 天然
@@ -329,7 +330,9 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   if (mode === "auto") mode = "bypassPermissions";
 
   const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
-  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR).map(shellEscape));
+  const own = launchSettingsFor(opts.settingsAgent); // agent 设置文件（lib/agent-settings.ts）；沙箱与沙箱覆盖合成一份，只传一次 --settings
+  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own.settings ?? {}).map(shellEscape));
+  else parts.push(...settingsLaunchArgs(own).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它
   // 还顺带跳过 workspace trust dialog）；其余模式走 --permission-mode <mode>。

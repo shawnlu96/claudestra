@@ -141,6 +141,8 @@ export interface LaunchSpec {
   sessionId: string;
   /** 注入给会话的自称（registry 名）。不传 = 不注入 */
   agentName?: string;
+  /** 按哪个名字找 agent 设置文件（lib/agent-settings.ts）；launchInWindow 统一填 tmux 名，resume 也带（与 agentName 不同） */
+  settingsName?: string;
   /**
    * 会话的工作目录（tmux 窗口的 -c）。CC / Pi 不读它（窗口 cwd 即会话 cwd）；Codex 要拿它
    * 跑 exec 引导（-C）并写目录信任。不传时 Codex 从 rollout 首行的 session_meta 取。

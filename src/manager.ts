@@ -741,7 +741,7 @@ async function launchInWindow(
   const baseline =
     spec.mode === "fork" && opts.cwd && adapter.forkBaseline ? await adapter.forkBaseline(opts.cwd) : undefined;
   await adapter.beforeLaunch?.(win);
-  await win.sendLine(adapter.buildLaunchCommand(spec));
+  await win.sendLine(adapter.buildLaunchCommand({ ...spec, settingsName: tmuxName }));
   const result = await adapter.waitReady(win, { rounds: CLAUDE_READY_ROUNDS, pollMs: 500 });
   return { result, baseline };
 }
@@ -1035,6 +1035,7 @@ async function cmdKill(name: string) {
     }
   }
   await saveRegistry(reg);
+  (await import("./lib/agent-settings.js")).removeAgentSettings(tmuxName); // 同名重建的 agent 不该继承旧的技能开关
 
   await triggerSkillsRescan("remove", tmuxName);
 
@@ -1156,6 +1157,7 @@ async function cmdRename(oldName: string, newName: string) {
   (await import("./manager/team.js")).repointParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
   await saveRegistry(reg);
   await (await import("./manager/ledger.js")).renameLedgerAgent(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名
+  (await import("./lib/agent-settings.js")).renameAgentSettings(oldTmux, newTmux); // 按 agent 的技能开关跟着改名
   steps.push({ step: "registry", ok: true });
 
   // 3. Discord 频道 rename
@@ -3059,15 +3061,8 @@ switch (cmd) {
     break;
   }
 
-  case "rename": {
-    const [oldName, newName] = args;
-    if (!oldName || !newName) {
-      output({ ok: false, error: "usage: rename <old-name> <new-name>" });
-      break;
-    }
-    await cmdRename(oldName, newName);
-    break;
-  }
+  case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;
+  case "skill-toggle": await (await import("./manager/skills.js")).cmdSkillToggle(args); break; // 按 agent 启停技能（lib/agent-settings.ts）
 
   case "list": await cmdList(); break;
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;

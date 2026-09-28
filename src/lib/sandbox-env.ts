@@ -115,10 +115,11 @@ export function sandboxEnv(
  *   不加载用户其它 MCP（mem0 之类会写真实数据）。
  * - statusLine：全局 settings.json 指向主树的 statusline 脚本，主树没更新到认 CLAUDESTRA_STATE_DIR 的版本时，
  *   沙箱 agent 每刷新一次状态栏就写一次生产的 usage-cache.json。`--settings` 的优先级高于用户设置，覆盖掉它。
+ *   agent 自己的设置（lib/agent-settings.ts）并进同一份：两个 --settings 怎么合并 CC 没背书。
  */
-export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string): string[] {
+export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string, agentSettings: Record<string, unknown> = {}): string[] {
   const cfg = { mcpServers: { [mcpName]: { command: bunPath, args: ["--no-env-file", join(srcDir, "channel-server.ts")] } } };
-  const settings = { statusLine: { type: "command", command: join(srcDir, "..", "scripts", "statusline-usage.sh") } };
+  const settings = { ...agentSettings, statusLine: { type: "command", command: join(srcDir, "..", "scripts", "statusline-usage.sh") } };
   return ["--mcp-config", JSON.stringify(cfg), "--strict-mcp-config", "--settings", JSON.stringify(settings)];
 }
 
@@ -133,6 +134,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "project-add", "project-list", "project-assign", "project-edit", "project-remove", "cron-list", "tmux-capture",
   "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
+  "skill-toggle", // 只写沙箱状态目录下的 agent-settings（lib/agent-settings.ts），技能目录只读
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */

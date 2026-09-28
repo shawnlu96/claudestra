@@ -149,7 +149,7 @@ async function bringUpClaudeInMasterWindow(): Promise<boolean> {
     channelId: CONTROL_CHANNEL_ID,
     bridgeUrl: BRIDGE_URL,
     effort: MASTER_EFFORT,
-    resumeId: resume?.sessionId,
+    resumeId: resume?.sessionId, settingsAgent: "master", // 大总管也能按 agent 关技能（manager skill-toggle master …）
   });
   // shell init 阶段的 Y/n（oh-my-zsh / homebrew）会吞掉首字符，先清掉。
   await clearShellInitPrompts(MASTER_WINDOW);

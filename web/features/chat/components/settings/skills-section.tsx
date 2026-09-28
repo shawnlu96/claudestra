@@ -2,6 +2,9 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { skillLibrary } from "@/lib/api/system";
+import { uiAgentName } from "@/lib/chat/agents";
+import { offAgentsBySkill } from "../../agent-skills-logic";
+import { AgentSkillsSection } from "../agent-skills-section";
 import {
   homeOf,
   RUNTIME_LABEL,
@@ -36,12 +39,13 @@ export function SkillsSection() {
   }, []);
   const home = lib ? homeOf(lib.roots) : null;
   const list = lib ? visibleSkills(lib.skills, rt, q) : [];
+  const offBy = offAgentsBySkill(lib?.overrides);
   return (
     <>
       <section className="rounded-xl bg-base-200/60 p-4">
         <div className="text-[13.5px] font-semibold">{t("这台电脑上的技能")}</div>
         <p className="mt-0.5 text-xs leading-relaxed text-base-content/50">
-          {t("各 runtime 能用哪些技能、从哪来、同名时谁生效。现在只能看，启用 / 停用和安装后面做。")}
+          {t("各 runtime 能用哪些技能、从哪来、同名时谁生效。按会话开关在会话详情里；安装后面做。")}
         </p>
         {err && <div className="mt-2 text-xs text-error">{t("读取失败")}: {err}</div>}
         {!lib && !err && <span className="loading loading-spinner loading-xs mt-3" />}
@@ -66,19 +70,25 @@ export function SkillsSection() {
             </div>
             <ul className="mt-2 flex list-none flex-col gap-1.5 p-0">
               {list.map((s) => (
-                <SkillRow key={`${s.runtime}|${s.dir}`} s={s} home={home} showRuntime={rt === "all"} />
+                <SkillRow key={`${s.runtime}|${s.dir}`} s={s} home={home} showRuntime={rt === "all"} offIn={s.runtime === "claude-code" ? offBy[s.name] : undefined} />
               ))}
             </ul>
             {list.length === 0 && <p className="mt-2 text-xs text-base-content/50">{t("没有匹配的技能")}</p>}
           </>
         )}
       </section>
+      {lib && (
+        <details className="rounded-xl bg-base-200/60 p-4">
+          <summary className="cursor-pointer text-[13px] font-medium">{t("大总管的技能")}</summary>
+          <AgentSkillsSection name="master" master />
+        </details>
+      )}
       {lib && <RootsSection roots={lib.roots} home={home} />}
     </>
   );
 }
 
-function SkillRow({ s, home, showRuntime }: { s: LibrarySkill; home: string | null; showRuntime: boolean }) {
+function SkillRow({ s, home, showRuntime, offIn }: { s: LibrarySkill; home: string | null; showRuntime: boolean; offIn?: string[] }) {
   const t = useT();
   const tag = "badge badge-xs shrink-0";
   return (
@@ -94,6 +104,9 @@ function SkillRow({ s, home, showRuntime }: { s: LibrarySkill; home: string | nu
         )}
         {!s.userInvocable && <span className={`${tag} badge-ghost`}>{t("不在 / 菜单")}</span>}
         {!s.modelInvocable && <span className={`${tag} badge-ghost`}>{t("只能手动调用")}</span>}
+        {offIn?.length ? (
+          <span className={`${tag} badge-warning badge-outline`} title={offIn.map((a) => (a === "master" ? t("大总管") : uiAgentName(a))).join(", ")}>{t("在 {n} 个会话里没开", { n: offIn.length })}</span>
+        ) : null}
       </div>
       {s.description && <p className="mt-0.5 line-clamp-2 text-[11.5px] leading-relaxed text-base-content/60">{s.description}</p>}
       <div className="mt-0.5 truncate font-mono text-[10.5px] text-base-content/40" title={s.linkTarget ?? s.dir}>
