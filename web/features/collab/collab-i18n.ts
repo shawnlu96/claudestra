@@ -11,6 +11,10 @@ import { fillParams } from "@/lib/i18n-fill";
 import type { Tr } from "./collab-model";
 
 const COLLAB_WORDS: Record<string, string> = {
+  // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
+  "：": ": ",
+  "、": ", ",
+  "今天": "today",
   "协作视图": "Team view",
   "开发中": "Building",
   "你": "You",
@@ -35,7 +39,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "执行者": "Executor",
   "拦下": "blocked",
   "排队": "queued",
-  "昨天": "Yesterday",
+  "昨天": "yesterday",
   "未派人": "unassigned",
   "现在": "Now",
   "空闲": "Idle",

@@ -86,16 +86,21 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
   const onAction = useCallback((e: BridgeEvent) => {
     if (membersRef.current.has(e.agent.replace(/^agent-/, ""))) setActions((m) => reduceAction(m, e, Date.now()));
   }, []);
-  const connected = useCollabStream(project, refetch, onAction);
+  // 连上 / 重连：全量重拉；断开期间丢掉的事件不补发，旧的此刻动作全部作废，等新事件或 /agents 的 busy 兜底
+  const onOpen = useCallback(() => {
+    setActions(new Map());
+    void refetch();
+  }, [refetch]);
+  const connected = useCollabStream(project, onOpen, refetch, onAction);
 
   return { load, now: clock + offset, actions, connected, rev, advance, refetch };
 }
 
 /**
- * 协作视图自己的一条 /events：连上（含重连）→ 全量重拉；本项目的 ledger 事件去抖后重拉；其余交给 onAction。
+ * 协作视图自己的一条 /events：连上（含重连）→ onOpen（清旧动作 + 全量重拉）；本项目的 ledger 事件去抖后 onLedger；其余交给 onAction。
  * 卸载、页面隐藏都断开，回前台再连；断线按 2s → 30s 退避重连。返回此刻连没连着。
  */
-function useCollabStream(project: string, refetch: () => Promise<void>, onAction: (e: BridgeEvent) => void): boolean {
+function useCollabStream(project: string, onOpen: () => void, onLedger: () => Promise<void>, onAction: (e: BridgeEvent) => void): boolean {
   const [connected, setConnected] = useState(false);
   useEffect(() => {
     let alive = true;
@@ -125,13 +130,13 @@ function useCollabStream(project: string, refetch: () => Promise<void>, onAction
         onOpen: () => {
           setConnected(true);
           backoff = RETRY_MIN_MS;
-          void refetch();
+          onOpen();
         },
         onEvent: (e) => {
           if (e.type !== "ledger") return onAction(e);
           if (e.data?.project !== project) return;
           clearTimeout(debounce);
-          debounce = setTimeout(() => void refetch(), REFETCH_DEBOUNCE_MS);
+          debounce = setTimeout(() => void onLedger(), REFETCH_DEBOUNCE_MS);
         },
       }).then(lost, lost);
     };
@@ -144,7 +149,7 @@ function useCollabStream(project: string, refetch: () => Promise<void>, onAction
       disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [project, refetch, onAction]);
+  }, [project, onOpen, onLedger, onAction]);
   return connected;
 }
 

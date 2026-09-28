@@ -5,6 +5,7 @@
 import type { LedgerOverview } from "@/features/collab/collab-model";
 import type { TaskDetail } from "@/features/collab/collab-detail-model";
 import { drainFrames, type BridgeEvent } from "@/lib/chat/stream-shape";
+import { apiAgentName } from "@/lib/chat/agents";
 import { api, apiStream } from "./client";
 
 const enc = encodeURIComponent;
@@ -15,6 +16,13 @@ export function fetchLedger(project: string, signal?: AbortSignal): Promise<Ledg
 
 export function fetchLedgerTask(project: string, id: string, signal?: AbortSignal): Promise<TaskDetail & { ok: boolean }> {
   return api(`/ledger/${enc(project)}/tasks/${enc(id)}`, { timeoutMs: 10_000, signal });
+}
+
+/** 发「对它说」之前实时查一次它在不在回合里（同聊天页连流时补拉的 /pending）；查不到返回 null，由调用方按忙处理 */
+export function agentPending(agent: string): Promise<{ thinking?: boolean; compacting?: boolean } | null> {
+  return api<{ thinking?: boolean; compacting?: boolean }>(`/agents/${enc(apiAgentName(agent))}/pending`, { timeoutMs: 4000 }).catch(
+    () => null, // 查不到（断网 / 老 bridge）：返回 null，liveIdle 会按忙处理，宁可不发
+  );
 }
 
 /** 协作视图只关心这几类：台账变了、各 agent 的此刻动作 */

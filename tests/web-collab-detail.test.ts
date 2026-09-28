@@ -4,6 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { actorName, eventLine, fmtEventTime, participants, recentThree, reviewRows, stageSegments } from "../web/features/collab/collab-detail-model";
 import type { LedgerEventView, LedgerTaskView } from "../web/features/collab/collab-model";
+import { fillParams } from "../web/lib/i18n-fill";
 
 const MIN = 60_000;
 let seq = 0;
@@ -77,6 +78,14 @@ describe("审查与参与者", () => {
       { name: "claude-reviewer", role: "reviewer", rounds: [1, 2] },
       { name: "codex", role: "reviewer", rounds: [2] },
     ]);
+  });
+});
+
+describe("英文界面的标点", () => {
+  test("拼句用的冒号走 tr：中文全角，英文半角", () => {
+    const en = (x: string, p?: Record<string, string | number>) => fillParams(({ "：": ": ", "{who} 回滚": "{who} rolled back" } as Record<string, string>)[x] ?? x, p);
+    expect(eventLine(ev("rollback", {}, "白屏", "agent-pm"), en)).toBe("pm rolled back: 白屏");
+    expect(eventLine(ev("rollback", {}, "白屏", "agent-pm"))).toBe("pm 回滚：白屏");
   });
 });
 

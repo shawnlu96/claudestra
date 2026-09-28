@@ -11,12 +11,15 @@ export interface CollabNav {
 }
 
 let state: CollabNav = { project: null, task: null };
+/** 协作视图盖着期间被拦下的已读回执（关掉时由 collab-switch 判断要不要补发） */
+const released: string[] = [];
+export const takeReleasedReads = (): string[] => released.splice(0);
 const subs = new Set<() => void>();
 
 function set(next: CollabNav) {
   if (next.project === state.project && next.task === state.task) return;
   state = next;
-  holdReads(next.project !== null);
+  released.push(...holdReads(next.project !== null));
   for (const cb of subs) cb();
 }
 

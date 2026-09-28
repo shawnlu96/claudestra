@@ -198,7 +198,7 @@ export function CollabView({ project }: { project: string }) {
       </div>
       {openTask && ov && (
         <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={ov} line={view?.lines.find((l) => l.id === openTask) ?? null}
-          action={(l) => lineAction(l)} onClose={closeTask} />
+          action={(l) => lineAction(l)} actions={actions} onClose={closeTask} />
       )}
     </div>
   );

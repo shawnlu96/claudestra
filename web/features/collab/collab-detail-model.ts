@@ -71,30 +71,32 @@ export function eventLine(e: LedgerEventView, tr: Tr = zh): string | null {
 }
 
 function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): string | null {
+  // 冒号按界面语言：中文全角「：」，英文「: 」（经 collab-i18n 的本地词表）
+  const colon = tr("：");
   const d = e.data;
   switch (e.kind) {
     case "stage": {
       const to = STAGE_NAME[d.to as Stage] ?? String(d.to);
       const head = d.from === "review" && d.to === "fix" ? tr("{who} 退回返工", { who }) : tr("{who} 推到「{to}」", { who, to: tr(to) });
-      return tail ? `${head}：${tail}` : head;
+      return tail ? `${head}${colon}${tail}` : head;
     }
     case "deliver":
-      return tr("{who} 交付", { who }) + (typeof d.headSHA === "string" ? ` · ${d.headSHA.slice(0, 7)}` : "") + (tail ? `：${tail}` : "");
+      return tr("{who} 交付", { who }) + (typeof d.headSHA === "string" ? ` · ${d.headSHA.slice(0, 7)}` : "") + (tail ? `${colon}${tail}` : "");
     case "review": {
       const verdict = tr(VERDICT[String(d.verdict)] ?? String(d.verdict));
-      return tr("审查 · 第 {n} 轮：{v}", { n: typeof d.round === "number" ? d.round : "?", v: verdict }) + ` · ${pCounts(d)}` + (tail ? `：${tail}` : "");
+      return tr("审查 · 第 {n} 轮：{v}", { n: typeof d.round === "number" ? d.round : "?", v: verdict }) + ` · ${pCounts(d)}` + (tail ? `${colon}${tail}` : "");
     }
     case "decision":
       // 拍板一律是 owner 的原话（PM 代记也一样），不写记录人
       return tr("拍板：{t}", { t: tail });
     case "deploy":
-      return tr("上线 {v}", { v: typeof d.version === "string" ? d.version : "" }).trim() + (tail ? `：${tail}` : "");
+      return tr("上线 {v}", { v: typeof d.version === "string" ? d.version : "" }).trim() + (tail ? `${colon}${tail}` : "");
     case "verify":
-      return tr(d.result === "fail" ? "线上验证失败" : "线上验证通过") + (tail ? `：${tail}` : "");
+      return tr(d.result === "fail" ? "线上验证失败" : "线上验证通过") + (tail ? `${colon}${tail}` : "");
     case "rollback":
-      return tr("{who} 回滚", { who }) + (tail ? `：${tail}` : "");
+      return tr("{who} 回滚", { who }) + (tail ? `${colon}${tail}` : "");
     case "note":
-      return tail ? (who ? `${who}：${tail}` : tail) : null;
+      return tail ? (who ? `${who}${colon}${tail}` : tail) : null;
     default:
       return null;
   }

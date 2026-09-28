@@ -30,9 +30,17 @@ export function pushUnsubscribe(endpoint: string): Promise<void> {
 }
 
 let readsHeld = false;
-/** 协作视图盖在会话上面时暂停已读回执：底下的会话没人在看，不能替用户清掉未读和别处的通知（features/collab/collab-nav.ts） */
-export function holdReads(on: boolean): void {
+const heldReads = new Set<string>();
+/**
+ * 协作视图盖在会话上面时暂停已读回执：底下的会话没人在看，不能替用户清掉未读和别处的通知（features/collab/collab-nav.ts）。
+ * 暂停期间被拦下的会话记着；恢复时交还给调用方，由它判断用户回到的是不是那个会话、要不要补发。
+ */
+export function holdReads(on: boolean): string[] {
   readsHeld = on;
+  if (on) return [];
+  const out = [...heldReads];
+  heldReads.clear();
+  return out;
 }
 
 /**
@@ -40,7 +48,10 @@ export function holdReads(on: boolean): void {
  * （bridge 的 read 端点不做这件事）——失败无所谓，消息可能早被人工清理或根本没有 Discord 通知。
  */
 export async function markRead(agent: string): Promise<void> {
-  if (readsHeld) return;
+  if (readsHeld) {
+    heldReads.add(agent);
+    return;
+  }
   const name = encodeURIComponent(apiAgentName(agent));
   await api(`/agents/${name}/read`, { method: "POST", json: {}, timeoutMs: 8000 });
   void api(`/agents/${name}/notify-read`, { method: "POST", json: {}, timeoutMs: 8000 }).catch(() => {});

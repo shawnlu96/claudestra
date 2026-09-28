@@ -2,7 +2,6 @@
  * 协作视图首页纯逻辑（web/features/collab/collab-model.ts、collab-action.ts）：排序、停留时长、卡住判定、一句话状态、此刻动作。
  */
 import { describe, expect, test } from "bun:test";
-import { actionLine, reduceAction, sayGate, shortDetail, type ActionMap } from "../web/features/collab/collab-action";
 import { dwellMs, dwellText, fmtDuration, homeView, isStuck, STUCK_MS, type LedgerOverview, type LedgerTaskView, type Stage } from "../web/features/collab/collab-model";
 
 const MIN = 60_000;
@@ -113,69 +112,5 @@ describe("首页排序与一句话状态", () => {
 
   test("空台账：没有线、计数全 0", () => {
     expect(homeView(overview([], { exists: false }), NOW)).toMatchObject({ lines: [], todayDone: [], headline: { advancing: 0, problem: 0, stuck: 0 } });
-  });
-});
-
-describe("此刻动作", () => {
-  test("tool_start 记工具与短 detail；tool_done 回思考中；回合结束为空闲；无关事件返回同一张表", () => {
-    let m: ActionMap = new Map();
-    m = reduceAction(m, { agent: "agent-task-t5", type: "tool_start", data: { name: "Edit", detail: "/Users/x/repo/web/features/chat/scroll-anchor.ts" } }, 1);
-    expect(m.get("task-t5")).toEqual({ kind: "tool", tool: "Edit", detail: "scroll-anchor.ts", ts: 1 });
-    m = reduceAction(m, { agent: "task-t5", type: "tool_done", data: {} }, 2);
-    expect(m.get("task-t5")!.kind).toBe("thinking");
-    m = reduceAction(m, { agent: "task-t5", type: "agent_status", data: { status: "done" } }, 3);
-    expect(m.get("task-t5")!.kind).toBe("idle");
-    expect(reduceAction(m, { agent: "task-t5", type: "assistant_text", data: {} }, 4)).toBe(m);
-  });
-
-  // detail 是 jsonl-watcher.formatToolDetail 的输出：Bash = description\n───\ncommand（没有 description 只有 command）
-  const SECRETS = ["sk-ant", "ghp_", "Bearer", "/Users", "~/", ".env", "My Docs", "TOKEN=", "abc"];
-  const clean = (out: string) => SECRETS.filter((x) => out.includes(x));
-
-  test("shortDetail 不泄露 token、环境变量、绝对路径、带空格的路径（审查 #144 P1-2）", () => {
-    const cases: [string, string, string][] = [
-      ["Bash", 'curl -H "Authorization: Bearer sk-ant-api03-AAAABBBB" https://x', "curl"],
-      ["Bash", "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 gh pr list", "gh"],
-      ["Bash", "cat /Users/shawn/.config/mem0/.env", "cat"],
-      ["Bash", "cd /Users/shawn/repos/claude-orchestrator && bun test", "bun"],
-      ["Bash", "/opt/homebrew/bin/git status", "git"],
-      ["Bash", "Run tests\n───\nTOKEN=abc bun test", "Run tests"],
-      ["Bash", "Read /Users/shawn/.ssh/config\n───\ncat ~/.ssh/config", "Read config"],
-      ["Bash", "Call API with sk-ant-api03-XXXXXXXX\n───\ncurl x", "Call API with •••"],
-      ["Read", "/Users/shawn/My Docs/secret plan.md\noffset=10", "secret plan.md"],
-      ["Edit", "/Users/shawn/repos/x/web/a.ts\n─── old ───\nTOKEN=abc\n─── new ───\nb", "a.ts"],
-      ["Grep", '{"pattern":"foo","path":"/Users/shawn/repos"}', ""],
-      ["mcp__mem0__memory_search", '{"query":"x"}', ""],
-      ["bash", "ls /Users/shawn", ""],
-    ];
-    for (const [tool, detail, want] of cases) {
-      const out = shortDetail(tool, detail);
-      expect(out).toBe(want);
-      expect(clean(out)).toEqual([]);
-    }
-  });
-
-  test("shortDetail：description 过长按码点截 40 字，不截半个 emoji", () => {
-    expect(shortDetail("Bash", `${"跑".repeat(45)}\n───\nls`)).toBe(`${"跑".repeat(40)}…`);
-    expect([...shortDetail("Bash", `${"🚀".repeat(41)}\n───\nls`)].length).toBe(41);
-  });
-
-  test("MCP 工具名只留最后一段；不在白名单的工具不带 detail", () => {
-    const m = reduceAction(new Map(), { agent: "a", type: "tool_start", data: { name: "mcp__mem0__memory_search", detail: '{"query":"secret"}' } }, 1);
-    expect(m.get("a")).toEqual({ kind: "tool", tool: "memory_search", ts: 1 });
-  });
-
-  test("sayGate：它在干活时不许发（web 消息会先 C-c 打断它），空闲且有字才能发（审查 #144 P0）", () => {
-    expect(sayGate(true, "先别动", false)).toEqual({ canSend: false, blockedByWork: true });
-    expect(sayGate(false, "先别动", false)).toEqual({ canSend: true, blockedByWork: false });
-    expect(sayGate(false, "   ", false).canSend).toBe(false);
-    expect(sayGate(false, "先别动", true).canSend).toBe(false);
-  });
-
-  test("actionLine：工具 > 思考 > busy 兜底 > 等人 > 空闲", () => {
-    expect(actionLine({ kind: "tool", tool: "Bash", detail: "ls", ts: 0 }, false, "等 PM 放行")).toEqual({ kind: "tool", text: "Bash · ls" });
-    expect(actionLine(undefined, true, "等 PM 放行").kind).toBe("thinking");
-    expect(actionLine({ kind: "idle", ts: 0 }, true, "等 PM 放行")).toEqual({ kind: "waiting", text: "等 PM 放行" });
-    expect(actionLine(undefined, false, null)).toEqual({ kind: "idle", text: "" });
   });
 });

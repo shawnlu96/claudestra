@@ -528,15 +528,15 @@ function ChatInner() {
     const qa = new URLSearchParams(window.location.search).get("agent");
     if (qa) {
       window.history.replaceState(null, "", window.location.pathname);
+      closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
       void store.openAgent(qa);
-      closingCollab(toContent)(); // 通知直达：哪怕正是底下这个会话，也得把协作视图收起来
     }
     // v2.22+ 原生壳:绑定 APNs 插件事件(token 登记 / 点通知直达),已授权则静默刷新 token
     if (isNativeShell()) {
       void import("@/lib/push/native").then((m) => {
         m.bindNativePushListeners((agent) => {
+          closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
           void store.openAgent(agent);
-          closingCollab(toContent)(); // 通知直达：哪怕正是底下这个会话，也得把协作视图收起来
         });
         void m.refreshNativeRegistration();
       });
@@ -545,8 +545,8 @@ function ChatInner() {
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; agent?: string; fp?: string };
       if (d?.type !== "cstra-open-agent" || !d.agent) return;
+      closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
       void hopThenOpen(d.fp, () => store.resetForMachine(), () => store.openAgent(String(d.agent))); // 别的机器发的通知：先切机器再开会话
-      closingCollab(toContent)(); // 通知直达：哪怕正是底下这个会话，也得把协作视图收起来
     };
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);

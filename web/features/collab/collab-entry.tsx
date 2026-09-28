@@ -14,28 +14,36 @@ import { Icon } from "./collab-icons";
 import { openCollab, useCollabNav } from "./collab-nav";
 
 const probing = new Set<string>();
-const retryMs = new Map<string, number>();
+/** 每个项目最多一条重探链：折叠 / 展开会反复挂载入口，不能每次叠一条定时器 */
+const retries = new Map<string, { timer: ReturnType<typeof setTimeout>; wait: number }>();
 const RETRY_MIN_MS = 10_000;
 const RETRY_MAX_MS = 60_000;
+const lastWait = new Map<string, number>();
 
 /** 读一次总览定入口去留；网络 / bridge 重启这类临时失败按 10s → 60s 退避重探，只在第一次失败时打一行日志 */
 function probe(project: string) {
-  if (probing.has(project)) return;
+  if (probing.has(project) || retries.has(project)) return;
   probing.add(project);
   fetchLedger(project)
     .then((ov) => {
-      retryMs.delete(project);
+      lastWait.delete(project);
       cacheOverview(project, ov, ov.now - Date.now());
     })
     .catch((e) => {
       if (e instanceof ApiError && (e.status === 403 || e.status === 404)) return setLedgerAccess(project, "no");
-      const wait = retryMs.get(project);
-      if (wait === undefined) console.warn(`[collab] 探测台账 ${project} 失败，入口先不显示、稍后重试：${(e as Error).message}`);
-      const next = Math.min((wait ?? RETRY_MIN_MS / 2) * 2, RETRY_MAX_MS);
-      retryMs.set(project, next);
-      setTimeout(() => probe(project), next);
+      const last = lastWait.get(project);
+      if (last === undefined) console.warn(`[collab] 探测台账 ${project} 失败，入口先不显示、稍后重试：${(e as Error).message}`);
+      const wait = Math.min((last ?? RETRY_MIN_MS / 2) * 2, RETRY_MAX_MS);
+      lastWait.set(project, wait);
+      retries.set(project, { wait, timer: setTimeout(() => (retries.delete(project), probe(project)), wait) });
     })
     .finally(() => probing.delete(project));
+}
+/** 入口卸载（项目组折叠 / 侧栏换机器）：取消这个项目挂着的重探，下次挂载再从头探 */
+function cancelRetry(project: string) {
+  const r = retries.get(project);
+  if (r) clearTimeout(r.timer);
+  retries.delete(project);
 }
 
 export function CollabEntry({ projectId }: { projectId: string }) {
@@ -44,7 +52,9 @@ export function CollabEntry({ projectId }: { projectId: string }) {
   const cur = useCollabNav();
   const access = useLedgerAccess(projectId);
   useEffect(() => {
-    if (access === "unknown") probe(projectId);
+    if (access !== "unknown") return; // 已经定了（能读 / 不能读）就不再探
+    probe(projectId);
+    return () => cancelRetry(projectId);
   }, [access, projectId]);
   if (access !== "yes") return null;
   const on = cur.project === projectId;

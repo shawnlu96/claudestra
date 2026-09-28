@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
+import { isWorking, type ActionMap, type AgentAction } from "./collab-action";
 import { useChatStore } from "../chat/chat-store";
 import type { AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-line";
@@ -160,7 +161,7 @@ function PeopleSec({ d, exec, action, tr }: { d: TaskDetail; exec: AgentSession 
                 <span>
                   {tr(ROLE[p.role].label)}
                   {p.role === "executor" && exec?.model ? ` · ${exec.model}${exec.effort ? ` · ${exec.effort}` : ""}` : ""}
-                  {p.rounds?.length ? ` · ${tr("第 {r} 轮", { r: p.rounds.join("、") })}` : ""}
+                  {p.rounds?.length ? ` · ${tr("第 {r} 轮", { r: p.rounds.join(tr("、")) })}` : ""}
                 </span>
               </div>
               <div className={s.d}>{tr(ROLE[p.role].duty)}</div>
@@ -173,11 +174,10 @@ function PeopleSec({ d, exec, action, tr }: { d: TaskDetail; exec: AgentSession 
   );
 }
 
-function Body({ d, line, action, tr }: { d: TaskDetail; line: LineView; action: LineAction; tr: Tr }) {
+function Body({ d, line, action, stream, tr }: { d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; tr: Tr }) {
   const agents = useChatStore((st) => st.state.agents);
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
-  // 和工位卡同一个判定：事件流说在思考 / 跑工具 / 压缩，或流里没有但 /agents 说 busy
-  const working = action.kind === "thinking" || action.kind === "tool" || action.kind === "compacting";
+  const working = isWorking(stream, exec?.busy);
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
   return (
     <div className={s.pb}>
@@ -213,6 +213,7 @@ export function CollabDetail(props: {
   ov: LedgerOverview;
   line: LineView | null;
   action: (l: LineView) => LineAction;
+  actions: ActionMap;
   onClose: () => void;
 }) {
   const { project, id, rev, now, ov, onClose } = props;
@@ -244,7 +245,7 @@ export function CollabDetail(props: {
         </button>
       </div>
       {load.status === "ok" && line ? (
-        <Body d={load.d} line={line} action={props.action(line)} tr={tr} />
+        <Body d={load.d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined} tr={tr} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
       )}
