@@ -7,6 +7,7 @@
 
 import { RUNTIME_DIR, TMUX_SOCK } from "./paths.js"; export { TMUX_SOCK };
 import { sandboxDisabled } from "./sandbox.js";
+import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -42,15 +43,13 @@ async function runTmux(
   args: string[],
   opts?: { timeoutMs?: number }
 ): Promise<TmuxRunResult> {
-  const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args], {
+  const proc = Bun.spawn(sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]), { // 沙箱：socket / new-window 目录先过闸
     stdout: "pipe",
     stderr: "pipe",
   });
-  // 超时强杀。tmuxRaw 全是查询/发键这类瞬时命令（正常 <100ms），但它坐在多条热
-  // 轮询路径上（permission-watcher 每 8s、wedge-watcher、jsonl-watcher…），一旦
-  // tmux server 卡住而这里没有超时，每一轮都会永久挂起一个 await + 一个子进程。
-  // 同样的坑在 sessions-inventory.ts 上真实发生过：2026-07-24 cask 升级后连
-  // `claude --version` 都永久 hang，堆了 30+ 僵尸进程。15s 对瞬时命令极宽松。
+  // 超时强杀。tmuxRaw 全是查询/发键这类瞬时命令（正常 <100ms），但它坐在多条热轮询路径上（permission-watcher、
+  // wedge-watcher、jsonl-watcher…），tmux server 卡住而这里没有超时，每一轮都会永久挂起一个 await + 一个子进程
+  // （sessions-inventory 同款坑：git log -S "15s 对瞬时命令"）。15s 对瞬时命令极宽松。
   const killer = setTimeout(() => {
     try { proc.kill(9); } catch { /* 已退出 */ }
   }, opts?.timeoutMs ?? 15_000);
@@ -99,6 +98,7 @@ export async function tmuxRawStrict(
 ): Promise<string> {
   const r = await runTmux(args, opts);
   if (r.code !== 0) throw new Error(formatTmuxFailure(args, r.code, r.err));
+  await sandboxVerifyNewWindow(args, (a) => tmuxRawStrict(a)); // 沙箱：窗口实际目录不在沙箱根下就关掉并抛错
   return r.out;
 }
 
@@ -119,7 +119,7 @@ export function sessionTarget(session: string = MASTER_SESSION): string {
 
 /** 非阻塞 fire-and-forget 发送（用于 C-c 等不需要等待的操作） */
 export function tmuxFire(args: string[]): void {
-  Bun.spawn(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]);
+  Bun.spawn(sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]));
 }
 
 /**

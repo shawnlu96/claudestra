@@ -3,13 +3,18 @@
  * 起真实沙箱 bridge 的无副作用验证在 tests/sandbox-isolation.test.ts。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, outboundAllowed, sandboxAgentDirProblem,
-  sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem,
+  sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem, sandboxRootOf, SANDBOX_MARKER,
 } from "../src/lib/sandbox.js";
+import { assertResumable } from "../src/lib/sandbox-sessions.js";
+import { runCodex } from "../src/lib/codex.js";
+import { writeClaudeSettings } from "../src/lib/session-recall.js";
+import { installRepoSkills } from "../src/lib/skills-install.js";
+import { runManagerProcess } from "../src/lib/run-manager.js";
 import { productionDeny, sandboxEnv, sandboxLaunchArgs, sandboxLayout, sandboxManagerRefusal } from "../src/lib/sandbox-env.js";
 import { pickCcSessionForWindow, type CcSessionEntry } from "../src/lib/cc-sessions.js";
 import { assertCreatable } from "../src/manager/core.js";
@@ -148,15 +153,37 @@ describe("生产改过的端口 / 目录", () => {
 });
 
 describe("沙箱 agent 的目录与 runtime", () => {
-  const env = { ...ON, CLAUDESTRA_SANDBOX_ROOT: "/tmp/sbx", HOME: "/Users/x" };
-  test("只许建在沙箱根目录下", () => {
-    expect(sandboxAgentDirProblem("/tmp/sbx/work", env)).toBeNull();
-    expect(sandboxAgentDirProblem("/tmp/sbx", env)).not.toBeNull();
-    expect(sandboxAgentDirProblem("/Users/x/repos/wt", env)).toContain("/tmp/sbx");
-    expect(sandboxAgentDirProblem("~/repos", env)).not.toBeNull();
-    expect(sandboxAgentDirProblem("/tmp/sbx/../elsewhere", env)).not.toBeNull();
+  const root = mkdtempSync(join(tmpdir(), "sbx-root-"));
+  mkdirSync(join(root, "work"));
+  writeFileSync(join(root, "work", "file"), "");
+  const env = { ...ON, CLAUDESTRA_SANDBOX_ROOT: root, HOME: root };
+  test("只许建在沙箱根目录下、且目录已存在（不存在时 tmux 会回落到 $HOME）", () => {
+    expect(sandboxAgentDirProblem(join(root, "work"), env)).toBeNull();
+    expect(sandboxAgentDirProblem(root, env)).not.toBeNull();
+    expect(sandboxAgentDirProblem("/Users/x/repos/wt", env)).toContain(root);
+    expect(sandboxAgentDirProblem(join(root, "work", "typo"), env)).toContain("不存在");
+    expect(sandboxAgentDirProblem(join(root, "work", "file"), env)).toContain("不是目录");
+    expect(sandboxAgentDirProblem(`${root}/../elsewhere`, env)).not.toBeNull();
+    expect(sandboxAgentDirProblem("work", env)).toContain("绝对路径");
+    expect(sandboxAgentDirProblem("~/work", env)).toBeNull(); // HOME 指向沙箱根时 ~ 照常展开
+    expect(sandboxAgentDirProblem("~foo", env)).toContain("~user");
     expect(sandboxAgentDirProblem("/tmp/x", { ...ON })).toContain("CLAUDESTRA_SANDBOX_ROOT");
     expect(sandboxAgentDirProblem("/anywhere", {})).toBeNull();
+  });
+  test("sandboxRootOf：往上找沙箱标记；生产侧据此拒绝接管沙箱的会话", () => {
+    writeFileSync(join(root, SANDBOX_MARKER), "{}");
+    expect(sandboxRootOf(join(root, "work", "deeper"))).toBe(canonicalPath(root));
+    expect(sandboxRootOf(tmpdir())).toBeNull();
+  });
+  test("assertResumable：沙箱里一律拒绝；生产里目录属于沙箱就拒绝", () => {
+    expect(() => assertResumable("00000000-0000-4000-8000-000000000000", join(root, "work"))).toThrow("属于沙箱");
+    expect(() => assertResumable("00000000-0000-4000-8000-000000000000", tmpdir())).not.toThrow();
+    process.env.CLAUDESTRA_SANDBOX = "1";
+    try {
+      expect(() => assertResumable("00000000-0000-4000-8000-000000000000", tmpdir())).toThrow("沙箱里不许");
+    } finally {
+      delete process.env.CLAUDESTRA_SANDBOX;
+    }
   });
   test("只许 Claude Code runtime", () => {
     expect(() => assertSandboxRuntime("codex", env)).toThrow("Claude Code");
@@ -218,11 +245,14 @@ describe("沙箱关掉的 API 与动作", () => {
   test("manager create 的入口校验：沙箱里查目录与 runtime，非沙箱只查名字", () => {
     delete process.env.CLAUDESTRA_SANDBOX;
     expect(() => assertCreatable("a", "/anywhere", "codex")).not.toThrow();
-    Object.assign(process.env, { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/tmp/sbx" });
+    const root = mkdtempSync(join(tmpdir(), "sbx-create-"));
+    mkdirSync(join(root, "work"));
+    Object.assign(process.env, { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: root });
     try {
       expect(() => assertCreatable("a", "/elsewhere", undefined)).toThrow("沙箱 agent 必须建在");
-      expect(() => assertCreatable("a", "/tmp/sbx/work", "codex")).toThrow("Claude Code");
-      expect(() => assertCreatable("a", "/tmp/sbx/work", undefined)).not.toThrow();
+      expect(() => assertCreatable("a", join(root, "work"), "codex")).toThrow("Claude Code");
+      expect(() => assertCreatable("a", join(root, "work"), undefined)).not.toThrow();
+      expect(() => assertCreatable("a", join(root, "work", "typo"), undefined)).toThrow("不存在");
     } finally {
       delete process.env.CLAUDESTRA_SANDBOX_ROOT;
     }
@@ -243,6 +273,23 @@ describe("沙箱关掉的 API 与动作", () => {
     // 合法的 pane 命中：cwd 一致照常认
     const own = { ...sbx, sessionId: "own", cwd: "/Users/x/repos/app" };
     expect(pickCcSessionForWindow([sbx, own], { childPids: [], paneId: "%3", cwd: "/Users/x/repos/app" })?.sessionId).toBe("own");
+  });
+  test("ask_codex、写 settings.json、装 skill：沙箱里拒绝", async () => {
+    process.env.CLAUDESTRA_SANDBOX = "1";
+    const r = await runCodex({ prompt: "hi" } as Parameters<typeof runCodex>[0]);
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain("沙箱");
+    await expect(writeClaudeSettings("/nonexistent/settings.json", {})).rejects.toThrow("沙箱里不许");
+    expect(() => installRepoSkills("/nonexistent", { apply: true })).toThrow("沙箱里不许");
+  });
+  test("bridge 拉起的 manager：沙箱里带 --no-env-file，非沙箱命令行不变", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sbx-rm-"));
+    const fake = join(dir, "fake-bun");
+    writeFileSync(fake, '#!/bin/sh\nprintf \'{"ok":true,"argv":"%s"}\\n\' "$*"\n');
+    chmodSync(fake, 0o755);
+    const run = (env: Record<string, string>) => runManagerProcess(["list"], { bunPath: fake, managerPath: "/m.ts", env, timeoutMs: 5000 });
+    expect((await run({ PATH: process.env.PATH ?? "" })).argv).toBe("run /m.ts list");
+    expect((await run({ PATH: process.env.PATH ?? "", CLAUDESTRA_SANDBOX: "1" })).argv).toBe("--no-env-file run /m.ts list");
   });
   test("bg job 清理 / roster 根治、/model /effort 切换：沙箱里直接拒绝，不碰进程与文件", async () => {
     process.env.CLAUDESTRA_SANDBOX = "1";

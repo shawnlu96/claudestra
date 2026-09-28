@@ -183,7 +183,7 @@ async function agentSide(): Promise<void> {
   const flog = () => (existsSync(join(tmp, "fake-claude.log")) ? readFileSync(join(tmp, "fake-claude.log"), "utf8") : "");
   const blog = () => readFileSync(join(root, "bridge.log"), "utf8");
   const created = sandbox("manager", "create", "sbxt", join(root, "work"), "隔离测试");
-  const info = JSON.parse(created.out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as { ok?: boolean; channelId?: string };
+  const info = JSON.parse(created.out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as { ok?: boolean; channelId?: string; sessionId?: string };
   expect(info.ok, `${created.out}\n${flog()}`).toBe(true);
   await until("channel-server 注册到沙箱 bridge", () => blog().includes(`注册频道: ${info.channelId}`));
   await until("bridge 发现会话 jsonl", () => blog().includes("开始监听: agent-sbxt"));
@@ -199,10 +199,46 @@ async function agentSide(): Promise<void> {
   // statusLine 的用量缓存落在沙箱状态目录，生产的没出现
   expect(existsSync(join(root, "state", "usage-cache.json"))).toBe(true);
   expect(existsSync(join(home, ".claude-orchestrator", "usage-cache.json"))).toBe(false);
-  // 沙箱根目录外建 agent、非 Claude Code runtime：拒绝
+  // 沙箱根目录外、目录不存在（tmux 会回落到 $HOME）、非 Claude Code runtime：拒绝；API 建 agent 同样经 manager create
   expect(sandbox("manager", "create", "bad", tmp).out).toContain("沙箱 agent 必须建在");
+  expect(sandbox("manager", "create", "typo", join(root, "work", "typo")).out).toContain("不存在");
   expect(sandbox("manager", "create", "bad2", join(root, "work"), "--runtime", "codex").code).not.toBe(0);
+  const api = await fetch(`http://127.0.0.1:${port}/api/v1/agents`, {
+    method: "POST", headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "typo2", dir: join(root, "work", "typo2") }),
+  });
+  expect(JSON.stringify(await api.json())).toContain("不存在");
+  // 生产侧（不带沙箱开关的 manager）：takeover 不列沙箱会话、resume 不接管它
+  const listed = productionManager("takeover");
+  expect((JSON.parse(listed.out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as { candidates?: unknown[] }).candidates, listed.out).toEqual([]);
+  expect(productionManager("resume", "prodx", info.sessionId ?? "").out).toContain("属于沙箱");
   expect(sandbox("manager", "kill", "sbxt").code).toBe(0);
+}
+
+/**
+ * 以「生产」身份跑 manager（不带沙箱开关）：状态 / 运行目录是另一套一次性目录（不碰假 home 的状态目录，
+ * 也绝不碰真实的 /tmp/claude-orchestrator），bridge 地址指向中继替身——万一闸门失效，替身会记到请求
+ */
+function productionManager(...args: string[]): { code: number; out: string } {
+  const r = Bun.spawnSync([BUN, "--no-env-file", join(REPO, "src", "manager.ts"), ...args], {
+    cwd: tmp, stdout: "pipe", stderr: "pipe", timeout: 30_000,
+    env: {
+      PATH: `${join(tmp, "shim")}:${process.env.PATH}`, HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+      CLAUDESTRA_STATE_DIR: join(tmp, "prodmgr", "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "prodmgr", "run"),
+      BRIDGE_URL: `ws://127.0.0.1:${decoy!.port}`, BRIDGE_PORT: String(decoy!.port),
+    },
+  });
+  return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
+}
+
+/** 沙箱环境（与 scripts/sandbox.ts 给沙箱进程的完全相同），用来模拟 `eval "$(bun run sandbox env)"` 与沙箱 agent 的 Bash */
+function sandboxEnvOf(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of sandbox("env").out.split("\n")) {
+    const m = /^export ([A-Z_]+)='(.*)'$/.exec(line);
+    if (m) out[m[1]!] = m[2]!.replace(/'\\''/g, "'");
+  }
+  return { ...out, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" };
 }
 
 beforeAll(async () => {
@@ -248,14 +284,17 @@ describe("沙箱 bridge 无副作用", () => {
     await exercise();
     expect(sandbox("down").code).toBe(0);
 
-    // 唯一允许的改动：假 Claude Code 自己写的会话 jsonl（~/.claude/projects 下，Claude Code 自身的写入）
-    const projects = join(home, ".claude", "projects");
-    expect(diff(before, snapshot(home)).filter((c) => !c.startsWith(`新 ${projects}/`) && c !== `改 ${projects}/`)).toEqual([]);
+    // 唯一允许的改动：假 Claude Code 自己写的会话 jsonl 与进程登记（~/.claude/projects、~/.claude/sessions，Claude Code 自身的写入）
+    const cc = [join(home, ".claude", "projects"), join(home, ".claude", "sessions")];
+    const ccOwn = (c: string) => cc.some((d) => c.startsWith(`新 ${d}/`) || c === `改 ${d}/` || c === `新 ${d}/` || c.startsWith(`删 ${d}/`));
+    expect(diff(before, snapshot(home)).filter((c) => !ccOwn(c) && c !== `改 ${join(home, ".claude")}/`)).toEqual([]);
 
     const calls = readFileSync(shimLog, "utf8").split("\n").filter(Boolean);
     expect(calls.filter((c) => c.startsWith("launchctl"))).toEqual([]);
     const sock = join(root, "run", "master.sock");
-    expect(calls.filter((c) => c.startsWith("tmux") && !c.includes(`-S ${sock}`))).toEqual([]);
+    // 例外只有测试自己以「生产」身份跑的 manager（productionManager，一次性的假生产运行目录）
+    const prodSock = join(tmp, "prodmgr", "run", "master.sock");
+    expect(calls.filter((c) => c.startsWith("tmux") && !c.includes(`-S ${sock}`) && !c.includes(`-S ${prodSock}`))).toEqual([]);
     expect(calls.filter((c) => /^(npm|pi|curl|codex) /.test(c))).toEqual([]);
 
     expect(hits).toEqual({ proxy: [], decoy: [] });
@@ -293,6 +332,60 @@ describe("沙箱 bridge 无副作用", () => {
     expect(existsSync(stateDir)).toBe(false);
     expect(hits).toEqual({ proxy: [], decoy: [] });
   }, 90_000);
+
+  test("绕过脚本：带着沙箱环境直接跑 manager 的危险子命令、launcher / cron / setup，全部拒绝，零写入零出站", async () => {
+    const before = snapshot(home);
+    const launchctlBefore = readFileSync(shimLog, "utf8").split("\n").filter((c) => c.startsWith("launchctl")).length;
+    const env = sandboxEnvOf();
+    expect(env.CLAUDESTRA_SANDBOX).toBe("1");
+    const run = (argv: string[]) => {
+      const r = Bun.spawnSync([BUN, "--no-env-file", ...argv], { cwd: root, env, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
+      return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
+    };
+    const mgr = join(REPO, "src", "manager.ts");
+    const cmds = [
+      ["install-cli"], ["install-hooks"], ["install-skills"], ["takeover"], ["takeover", "--all"], ["update"], ["retire-web"],
+      ["resume", "x", "00000000-0000-4000-8000-000000000000", join(root, "work")], ["adopt", "x", "00000000-0000-4000-8000-000000000000"],
+      ["peer-http-list"], ["doctor"],
+    ];
+    for (const c of cmds) {
+      const r = run([mgr, ...c]);
+      expect(r.code, `${c.join(" ")}\n${r.out}`).not.toBe(0);
+      expect(r.out, c.join(" ")).toContain("沙箱");
+    }
+    for (const entry of ["launcher.ts", "cron.ts", "setup.ts"]) {
+      const r = run([join(REPO, "src", entry)]);
+      expect(r.code, `${entry}\n${r.out}`).not.toBe(0);
+      expect(r.out, entry).toContain("不能在沙箱里跑");
+    }
+    expect(diff(before, snapshot(home))).toEqual([]);
+    expect(readFileSync(shimLog, "utf8").split("\n").filter((c) => c.startsWith("launchctl")).length).toBe(launchctlBefore);
+    expect(hits).toEqual({ proxy: [], decoy: [] });
+  }, 120_000);
+
+  test("tmux socket：沙箱进程起来之后把 socket 或整个运行目录换成软链，tmux 调用直接拒绝", async () => {
+    const base = join(tmp, "socktest");
+    const fakeProd = join(tmp, "fakeprod-run");
+    mkdirSync(join(base, "run"), { recursive: true });
+    mkdirSync(fakeProd, { recursive: true });
+    const env = {
+      PATH: process.env.PATH ?? "", HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1",
+      CLAUDESTRA_STATE_DIR: join(base, "state"), CLAUDESTRA_RUNTIME_DIR: join(base, "run"), BRIDGE_PORT: "23998", BRIDGE_URL: "ws://localhost:23998",
+      CLAUDESTRA_SANDBOX_DENY_DIRS: fakeProd,
+    };
+    const attempt = (swap: string) => Bun.spawnSync([BUN, "--no-env-file", "-e", `
+      const { tmuxRaw } = await import(${JSON.stringify(join(REPO, "src", "lib", "tmux-helper.ts"))});
+      const fs = await import("fs");
+      ${swap}
+      try { await tmuxRaw(["kill-server"]); console.log("through"); } catch (e) { console.log("blocked: " + e.message); }`],
+    { cwd: tmp, env, stdout: "pipe", stderr: "pipe" }).stdout.toString();
+    const sock = join(base, "run", "master.sock");
+    expect(attempt(`fs.symlinkSync(${JSON.stringify(join(fakeProd, "master.sock"))}, ${JSON.stringify(sock)});`)).toContain("软链");
+    rmSync(sock, { force: true });
+    const swapDir = `fs.renameSync(${JSON.stringify(join(base, "run"))}, ${JSON.stringify(join(base, "run.old"))});
+      fs.symlinkSync(${JSON.stringify(fakeProd)}, ${JSON.stringify(join(base, "run"))});`;
+    expect(attempt(swapDir)).toContain("生产目录");
+  }, 60_000);
 
   test("出站闸门：沙箱进程里 fetch 与 WebSocket 连非自己端口（含回环上的其它端口）都被拦，替身零请求", async () => {
     const before = hits.decoy.length;

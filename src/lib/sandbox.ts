@@ -6,7 +6,7 @@
  * 本文件只依赖 node: 模块：lib/paths.ts、lib/bridge-url.ts 都 import 它，反向 import 会成环。
  * 启动侧（环境构建、目录布局、manager 白名单）在 lib/sandbox-env.ts。
  */
-import { existsSync, realpathSync } from "fs";
+import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
 
 export const SANDBOX_FLAG = "CLAUDESTRA_SANDBOX";
@@ -15,6 +15,8 @@ export const SANDBOX_ROOT_ENV = "CLAUDESTRA_SANDBOX_ROOT";
 /** 生产改过的端口 / 目录（scripts/sandbox.ts 从生产 .env 与 launchd plist 里读出来）；与默认值一起拒绝 */
 export const SANDBOX_DENY_PORTS_ENV = "CLAUDESTRA_SANDBOX_DENY_PORTS";
 export const SANDBOX_DENY_DIRS_ENV = "CLAUDESTRA_SANDBOX_DENY_DIRS";
+/** 沙箱根目录里的标记文件（scripts/sandbox.ts 建）：生产侧靠它认出「这是沙箱的目录」 */
+export const SANDBOX_MARKER = ".claudestra-sandbox";
 
 type Env = Record<string, string | undefined>;
 
@@ -47,7 +49,13 @@ export function canonicalPath(p: string): string {
   try {
     head = realpathSync(head);
   } catch {
-    /* 祖先刚被删 / 无权限：按字面路径比，最多少认一次软链，不会放过相同的字面路径 */
+    // Bun 的 realpath 对 unix socket 报 EOPNOTSUPP（tmux 的 master.sock 就是）：解析父目录再接上文件名。
+    // 父目录也解析不了（刚被删 / 无权限）就按字面路径比，最多少认一次软链，不会放过相同的字面路径
+    try {
+      head = join(realpathSync(dirname(head)), basename(head));
+    } catch {
+      /* 见上 */
+    }
   }
   return join(head, ...tail);
 }
@@ -66,7 +74,7 @@ function denyPorts(env: Env): number[] {
   return (env[SANDBOX_DENY_PORTS_ENV] || "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
 }
 
-function denyDirs(env: Env): string[] {
+export function denyDirs(env: Env): string[] {
   return (env[SANDBOX_DENY_DIRS_ENV] || "").split(":").map((s) => s.trim()).filter(Boolean);
 }
 
@@ -117,14 +125,20 @@ function portOf(u: URL): number {
   return u.protocol === "https:" || u.protocol === "wss:" ? 443 : 80;
 }
 
+/** 管 launchd / 自动更新 / 定时起 agent 的入口：沙箱进程里一律不许跑（它们都会碰生产的机器级设施） */
+const SANDBOX_FORBIDDEN_ENTRIES = ["launcher.ts", "cron.ts", "setup.ts"];
+
 /**
  * 沙箱进程的总闸（lib/paths.ts 模块加载时调一次，所有 Claudestra 进程都经过它）：目录不安全就抛错；
  * BRIDGE_PORT 与 BRIDGE_URL 指向不同端口也抛错（出站白名单按 agent 实际连的 BRIDGE_URL 放行，
- * 两者不一致说明环境拼错了）；都安全才装出站闸门。bridgeUrl 是惰性的：非沙箱进程不求值。
+ * 两者不一致说明环境拼错了）；入口是 launcher / cron / setup 也抛错；都安全才装出站闸门。
+ * bridgeUrl 是惰性的：非沙箱进程不求值。
  */
-export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string }): void {
+export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; entry?: string }): void {
   if (!isSandbox(c.env)) return;
   const problems = sandboxDirProblems(c);
+  const entry = basename(c.entry ?? "");
+  if (SANDBOX_FORBIDDEN_ENTRIES.includes(entry)) problems.push(`${entry} 不能在沙箱里跑（它管 launchd / 自动更新 / 定时任务）`);
   const port = portOf(new URL(c.bridgeUrl()));
   const envPort = (c.env.BRIDGE_PORT || "").trim();
   if (envPort && Number(envPort) !== port) problems.push(`BRIDGE_PORT=${envPort} 与 BRIDGE_URL 的端口 ${port} 不一致`);
@@ -185,15 +199,41 @@ export function sandboxDisabled(feature: string, env: Env = process.env): string
 }
 
 /**
- * 沙箱 agent 只许建在沙箱根目录下。生产 agent 不会在那里，于是 bridge 按 cwd 认会话的几条路径
- * （clear 轮转、Stop 自愈、会话发现）不会把生产会话当成沙箱的，反之亦然。
+ * 沙箱 agent 只许建在沙箱根目录下、且目录已存在。生产 agent 不会在那里，于是 bridge 按 cwd 认会话的几条路径
+ * （clear 轮转、Stop 自愈、会话发现）不会把生产会话当成沙箱的，反之亦然。目录必须已存在：
+ * `tmux new-window -c <不存在的目录>` 会静默回落到 $HOME，会话就写进了 ~/.claude/projects/-Users-<你>/。
+ * `~user` 写法直接拒绝（manager 把 `~` 当前缀替换，`~foo` 会变成 /Users/<你>foo，与这里的判断对不上）。
  */
 export function sandboxAgentDirProblem(dir: string, env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
   const root = (env[SANDBOX_ROOT_ENV] || "").trim();
   if (!root) return `沙箱没设 ${SANDBOX_ROOT_ENV}，不知道 agent 该建在哪（用 scripts/sandbox.ts 起沙箱）`;
-  const inside = relative(canonicalPath(root), canonicalPath(dir.replace(/^~(?=$|\/)/, env.HOME || "~")));
-  return inside === "" || inside.startsWith("..") || isAbsolute(inside) ? `沙箱 agent 必须建在 ${root}/ 下面（收到 ${dir}）` : null;
+  let d = dir.trim();
+  if (d === "~" || d.startsWith("~/")) d = (env.HOME || "") + d.slice(1);
+  else if (d.startsWith("~")) return `沙箱不认 ${dir} 这种 ~user 写法，写绝对路径`;
+  if (!isAbsolute(d)) return `沙箱 agent 的目录要写绝对路径（收到 ${dir}）`;
+  const inside = relative(canonicalPath(root), canonicalPath(d));
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) return `沙箱 agent 必须建在 ${root}/ 下面（收到 ${dir}）`;
+  let isDir = false;
+  try {
+    isDir = statSync(d).isDirectory();
+  } catch {
+    /* 不存在：下面按「不是目录」报 */
+  }
+  return isDir ? null : `沙箱 agent 的目录 ${dir} 不存在或不是目录（tmux 会回落到 $HOME）`;
+}
+
+/** dir 所在的沙箱根（往上找 SANDBOX_MARKER）；不在任何沙箱里返回 null。生产侧用它拒绝接管沙箱的会话 */
+export function sandboxRootOf(dir: string): string | null {
+  for (let d = canonicalPath(dir); ; d = dirname(d)) {
+    if (existsSync(join(d, SANDBOX_MARKER))) return d;
+    if (dirname(d) === d) return null;
+  }
+}
+
+/** 沙箱进程里不许做的动作：直接抛错（纵深防御——manager 的白名单之外，危险函数自己再拦一道） */
+export function refuseInSandbox(what: string, env: Env = process.env): void {
+  if (isSandbox(env)) throw new SandboxViolation([`沙箱里不许${what}`]);
 }
 
 /** Pi / Codex 的启动链不经本模块的闸门（Codex 给 MCP 的环境是白名单、还会加载用户全局 MCP）：沙箱里直接拒绝 */

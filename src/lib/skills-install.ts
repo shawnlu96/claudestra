@@ -16,6 +16,7 @@
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, mkdirSync, symlinkSync, unlinkSync, realpathSync } from "fs";
 import { join, resolve } from "path";
+import { refuseInSandbox } from "./sandbox.js";
 
 export type SkillInstallAction = "linked" | "relinked" | "ok" | "warn";
 
@@ -102,5 +103,6 @@ export function installRepoSkills(
   repoRoot: string,
   opts: { home?: string; apply?: boolean } = {},
 ): SkillInstallResult[] {
+  if (opts.apply) refuseInSandbox("装 skill 到 ~/.claude/skills"); // 只读体检（doctor）照常
   return listRepoSkills(repoRoot).map((n) => installRepoSkill(repoRoot, n, opts));
 }

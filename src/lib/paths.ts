@@ -47,7 +47,7 @@ export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_D
 // 沙箱进程（CLAUDESTRA_SANDBOX=1）在任何路径被用到之前过闸；非沙箱是空操作
 enforceSandboxProcess({
   env: process.env, stateDir: STATE_DIR, runtimeDir: RUNTIME_DIR,
-  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgeUrl: () => resolveBridgeUrl(),
+  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgeUrl: () => resolveBridgeUrl(), entry: process.argv[1],
 });
 
 /** 状态目录下的文件 */

@@ -51,6 +51,7 @@ import { rebuildWebIfStale, type WebBuildResult } from "./web-build.js";
 import { legacyWebPlistPath, staticIndexExists, webStaticState, webStaticWarnings } from "./web-static.js";
 import { cliPathNotes } from "./cli-path.js";
 import { migrateWebHosting } from "./legacy-web.js";
+import { refuseInSandbox } from "./sandbox.js";
 
 
 interface DaemonSpec {
@@ -774,6 +775,7 @@ export async function installClaudestraCli(
   /** skipWebBuild：调用方（manager update）本轮已经试过构建——失败时不再把同一个失败的构建跑第二遍 */
   opts: { skipWebBuild?: boolean } = {},
 ): Promise<InstallCliResult> {
+  refuseInSandbox("install-cli（写 ~/Library/LaunchAgents、launchctl reload、全局 CLI 与 skills）");
   repoRoot = resolve(repoRoot);
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -788,12 +790,9 @@ export async function installClaudestraCli(
     warnings,
   };
 
-  // 平台守卫。这个函数整体是 launchd 专有的：写 ~/Library/LaunchAgents/*.plist、
-  // 调 launchctl bootout/bootstrap。以前没有这道判断，Linux 上会照样往
-  // ~/Library/LaunchAgents 里 mkdir -p 出一个假目录、launchctl 报 command not found，
-  // 而调用方（setup.ts）只 warn 不 fail —— 用户看到"✨ 安装完成"，实际没有任何
-  // 进程守护、开机不自启，且文档里的排查命令（launchctl list）全都用不了。
-  // 与其假装成功，不如明确失败并给出可操作的替代方案。
+  // 平台守卫：这个函数整体是 launchd 专有的（写 ~/Library/LaunchAgents/*.plist、launchctl bootout/bootstrap）。
+  // 非 macOS 上照做只会建出假目录、launchctl 报错，调用方（setup.ts）又只 warn——用户看到「安装完成」却没有
+  // 任何进程守护。与其假装成功，不如明确失败并给出 systemd 的替代方案。
   if (process.platform !== "darwin") {
     errors.push(
       `进程守护当前只实现了 macOS launchd，检测到 ${process.platform}。\n` +

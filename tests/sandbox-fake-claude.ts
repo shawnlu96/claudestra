@@ -1,14 +1,15 @@
 /**
  * tests/sandbox-isolation.test.ts 用的「假 Claude Code」：放在 PATH 最前面冒充 `claude`，但照真的那样
  * 用收到的环境跑 settings.json（叠上 --settings，后者优先）里的 hooks 与 statusLine、按 --mcp-config 拉起 channel-server 并握手、
- * 往 ~/.claude/projects 写会话 jsonl、收到频道消息就调 reply 回一句 pong、然后跑 Stop hook。
+ * 往 ~/.claude/projects 写会话 jsonl、往 ~/.claude/sessions 写进程登记（takeover / 会话认领读它）、
+ * 收到频道消息就调 reply 回一句 pong、然后跑 Stop hook。
  * 这样 agent 这一侧（channel-server / hooks / statusLine / 会话发现）的写入与出站都在受控测试里走一遍。
  */
 
 /** 生成可执行脚本的源码（shebang 指向当前 bun）。log 记下每一步，失败时给断言看 */
 export function fakeClaudeSource(bunPath: string, logPath: string): string {
   return `#!${bunPath}
-import { appendFileSync, mkdirSync, openSync, readFileSync } from "fs";
+import { appendFileSync, mkdirSync, openSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 const LOG = ${JSON.stringify(logPath)};
 const log = (s) => appendFileSync(LOG, "fake-claude " + s + "\\n");
@@ -31,6 +32,9 @@ async function sh(cmd, input) {
   const [code, err] = await Promise.all([p.exited, new Response(p.stderr).text()]);
   log("ran " + cmd.split("/").pop() + " code=" + code + (err.trim() ? " err=" + err.trim().slice(0, 300).replace(/\\n/g, " | ") : ""));
 }
+mkdirSync(join(home, ".claude", "sessions"), { recursive: true });
+writeFileSync(join(home, ".claude", "sessions", process.pid + ".json"), JSON.stringify({ pid: process.pid, sessionId: sid, cwd,
+  startedAt: Date.now(), kind: "interactive", tmux: "master:@1." + (process.env.TMUX_PANE ?? "%0") }));
 const proj = join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
 mkdirSync(proj, { recursive: true });
 appendFileSync(join(proj, sid + ".jsonl"), JSON.stringify({ type: "user", sessionId: sid, cwd, timestamp: new Date().toISOString(),

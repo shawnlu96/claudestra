@@ -122,13 +122,20 @@ export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: stri
   return ["--mcp-config", JSON.stringify(cfg), "--strict-mcp-config", "--settings", JSON.stringify(settings)];
 }
 
-/** 沙箱里允许经 `scripts/sandbox.ts manager` 调的子命令（其余会碰 launchd / 生产会话 / 外部网络） */
+/**
+ * 沙箱里 manager 允许跑的子命令。manager.ts 分发前自己查（isSandbox 时），scripts/sandbox.ts 再查一遍：
+ * 带着沙箱环境直接 `bun src/manager.ts …`（`eval "$(bun run sandbox env)"`、沙箱 agent 自己的 Bash）也过不去。
+ * 名单外的会碰 launchd（install-cli / update）、全局 ~/.claude（install-hooks / install-skills）、生产会话
+ * （takeover / resume / adopt）或外部网络（peer-*）。后半截是沙箱 bridge 自己经 runManager 调的。
+ */
 const SANDBOX_MANAGER_COMMANDS = new Set([
   "create", "kill", "remove", "list", "restart", "archive", "token-add", "token-list", "token-revoke",
-  "project-add", "project-list", "project-assign", "project-edit", "cron-list", "tmux-capture",
+  "project-add", "project-list", "project-assign", "project-edit", "project-remove", "cron-list", "tmux-capture",
+  "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
+  "tmux-send-keys",
 ]);
 
-/** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 自己按 lib/sandbox.ts 再查一遍 */
+/** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */
 export function sandboxManagerRefusal(args: string[]): string | null {
   const cmd = args[0] ?? "";
   if (!SANDBOX_MANAGER_COMMANDS.has(cmd)) {

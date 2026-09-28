@@ -14,7 +14,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { homedir } from "os";
-import { canonicalPath, pathsOverlap, sandboxDirProblems, sandboxStaticDirProblem, SANDBOX_FLAG } from "../src/lib/sandbox.js";
+import { canonicalPath, pathsOverlap, sandboxDirProblems, sandboxStaticDirProblem, SANDBOX_FLAG, SANDBOX_MARKER as MARKER } from "../src/lib/sandbox.js";
 import {
   productionDeny, sandboxEnv, sandboxLayout, sandboxManagerRefusal, zdotdirFiles, type ProductionDeny, type SandboxLayout,
 } from "../src/lib/sandbox-env.js";
@@ -24,7 +24,6 @@ import { DEFAULT_RUNTIME_DIR, stateDirIn } from "../src/lib/paths.js";
 import { SRC_DIR } from "../src/lib/repo-root.js";
 
 const DEFAULT_PORT = 23900;
-const MARKER = ".claudestra-sandbox";
 const INNER = "__inner";
 const BRIDGE_PLIST = join(homedir(), "Library", "LaunchAgents", "com.claudestra.bridge.plist");
 
