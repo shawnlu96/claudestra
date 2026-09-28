@@ -34,9 +34,15 @@ export async function handleGuard(req: Request, path: string, principal: Princip
   }
   if (path === "/guard/quarantine" && req.method === "GET") {
     const agent = url.searchParams.get("agent") || undefined;
-    const items = listQuarantine(agent).map((i) => ({
-      id: i.id, agent: i.agent, from: i.subject.sender.name, trust: i.subject.sender.trust, text: i.subject.text, at: i.at, hits: i.decision.hits, sourceKind: i.env.from.kind,
-    }));
+    const all = url.searchParams.get("status") === "all";
+    const items = listQuarantine(agent, all).map((i) => {
+      const f = i.env.from as { kind: string; tokenId?: string; userId?: string; agentName?: string };
+      return {
+        id: i.id, agent: i.agent, from: i.subject.sender.name, trust: i.subject.sender.trust, text: i.subject.text, at: i.at, hits: i.decision.hits, sourceKind: f.kind,
+        // 历史视图对齐左右 / 打标用：发送方的 principal id（web 的 selfIds 认它）、消息原时间、处理结果
+        fromId: f.kind === "api" ? `api:${f.tokenId ?? ""}` : f.userId ?? f.agentName ?? "", ts: i.env.meta.ts, status: i.status, actedBy: i.actedBy ?? null, actedAt: i.actedAt ?? null,
+      };
+    });
     return apiJson(200, { ok: true, items });
   }
   const m = path.match(/^\/guard\/quarantine\/([^/]+)\/(release|drop)$/);

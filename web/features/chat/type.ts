@@ -165,6 +165,9 @@ export interface ChatMessage {
   held?: boolean;
   /** bridge 押在对方这一轮之后（回合中 / 压缩中 / 不在线，chat_held，features/chat/held-echo.ts）：送达或作罢即摘；一轮可以跑几小时，同样不按 30 分钟丢 */
   queued?: boolean;
+  /** Chat Guard 的持久记录（lib/chat/history-guard.ts 合进历史）：dropped = 合成的「已丢弃」气泡；released = 触发过守门、人工放行 */
+  guard?: "dropped" | "released";
+  guardBy?: string;
 }
 
 export interface AgentSession {

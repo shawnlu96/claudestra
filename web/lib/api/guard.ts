@@ -1,4 +1,4 @@
-/** Chat Guard 管理面（bridge/local-api/guard.ts）：待放行清单、放行 / 丢弃、开关与阈值 */
+/** Chat Guard 管理面（bridge/local-api/guard.ts）：待放行清单 / 守门记录、放行 / 丢弃、阈值 */
 import { api } from "./client";
 
 export interface GuardItem {
@@ -7,14 +7,22 @@ export interface GuardItem {
   from: string;
   trust: string;
   text: string;
+  /** 进隔离区的时间 */
   at: string;
   hits: { id: string; verdict: string; score: number | null }[];
   sourceKind: string;
+  /** 发送方 principal id（api:owner:self 等），历史视图据此判「是不是我发的」 */
+  fromId?: string;
+  /** 消息原时间（env.meta.ts） */
+  ts?: string;
+  status?: "pending" | "released" | "dropped";
+  actedBy?: string | null;
+  actedAt?: string | null;
 }
-export function listGuard(agent?: string): Promise<GuardItem[]> {
-  return api<{ items?: GuardItem[] }>(`/guard/quarantine${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`, { timeoutMs: 8000 }).then(
-    (j) => j.items ?? [],
-  );
+/** all=false 只回 pending（待放行卡）；all=true 连 released / dropped 也回（历史视图里的守门记录） */
+export function listGuard(agent?: string, all = false): Promise<GuardItem[]> {
+  const qs = [agent ? `agent=${encodeURIComponent(agent)}` : "", all ? "status=all" : ""].filter(Boolean).join("&");
+  return api<{ items?: GuardItem[] }>(`/guard/quarantine${qs ? `?${qs}` : ""}`, { timeoutMs: 8000 }).then((j) => j.items ?? []);
 }
 export function releaseGuard(id: string): Promise<void> {
   return api(`/guard/quarantine/${encodeURIComponent(id)}/release`, { method: "POST", json: {}, timeoutMs: 20_000 }).then(() => undefined);

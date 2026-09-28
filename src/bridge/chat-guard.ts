@@ -149,9 +149,12 @@ export async function guardInbound(env: Envelope, to: LocalEndpoint): Promise<De
   return { envelope: env, outcome: { kind: "sent", note: "guarded" } };
 }
 
-export function listQuarantine(agent?: string): QuarantineItem[] {
+/** all=false 只回 pending（待放行卡）；all=true 连 released / dropped 也回（历史视图里的守门记录，owner 2026-09-28「被丢弃的信息刷新就没了，能否保存」） */
+export function listQuarantine(agent?: string, all = false): QuarantineItem[] {
   sweepQuarantine();
-  return [...deps.store.values()].filter((i) => i.status === "pending" && (!agent || bare(i.agent) === bare(agent))).sort((a, b) => a.at.localeCompare(b.at));
+  return [...deps.store.values()]
+    .filter((i) => (all || i.status === "pending") && (!agent || bare(i.agent) === bare(agent)))
+    .sort((a, b) => a.at.localeCompare(b.at));
 }
 
 /** 超过 24 h 没人处理的自动丢弃（发送方早已不等了；留着只会误放） */
