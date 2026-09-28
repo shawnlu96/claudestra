@@ -39,6 +39,8 @@ export const PI_CONTROL: RuntimeControl = {
   modelEnforcement: "launch-flag",
   // paneShowsCompacting 等 CC 文案在 Pi 窗口上会误命中
   paneHeuristics: false,
+  // interruptKeys 的 C-c 在 Pi 里只清空输入框；停字 / 停止按钮走扩展的 abort()
+  abortVia: "extension",
 };
 
 /** LaunchSpec → buildPiCommand 的选项。Pi 的 --session-id 是 open-or-create，三种 mode 同一条命令 */
