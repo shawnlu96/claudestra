@@ -5,6 +5,7 @@
  * 这里让历史对齐实时：连续 assistant 记录累积进一个气泡，遇到 user / system / compact 边界断开。
  */
 import { matchClickedRow } from "./reply-clicks";
+import { FormLookup } from "./form-restore";
 import { parseInlineButtons, plainLabel } from "./inline-buttons";
 import type { ChatMessage, ToolCallView, AssistantSegment, ChatAttachmentView } from "@/features/chat/type";
 import type { WebComponentRow } from "./events";
@@ -68,10 +69,12 @@ function systemDivider(m: NeutralMessage, content: string, sid?: string): ChatMe
 }
 
 /** 按钮 / 选单点击的机器 payload → 组件里的人类可读 label（与 live 乐观气泡同形），并回填该气泡的 replyClicks */
-function resolveClick(text: string, anchor: ChatMessage | null): string | null {
+function resolveClick(text: string, anchor: ChatMessage | null, forms: FormLookup): string | null {
   const btnMatch = text.match(/^\[button:([\w-]+)\]$/);
   const selMatch = text.match(/^\[select:([\w-]+):(.+)\]$/);
   if (!btnMatch && !selMatch) return null;
+  // 选单按 id 往前找最近一条含它的消息（owner 可能回头答更早的表单），按钮仍认最近锚点
+  if (selMatch) anchor = forms.find(selMatch[1]) ?? anchor;
   if (anchor) {
     const clicked = matchClickedRow(anchor.replyComponents, btnMatch?.[1] ?? null, selMatch?.[1] ?? null, selMatch?.[2] ?? null);
     if (clicked) {
@@ -90,14 +93,15 @@ function resolveClick(text: string, anchor: ChatMessage | null): string | null {
   return `🔘 ${btnMatch ? btnMatch[1] : selMatch![2]}`; // 组件气泡不在本页时兜底 id
 }
 
-function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts): ChatMessage {
+function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
   const text = m.text || "";
   // CC 写入的中断标记 / TUI 斜杠命令记录不是用户打的字 → 轻分隔线
   if (/^\[Request interrupted/.test(text)) return systemDivider(m, "已被用户中断", opts.sid);
   const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
-  let raw = resolveClick(text, anchor) ?? text;
+  // 多选表单的回投（点「提交」或输入框同步行发出）统一还原成「【标题】✓ …」，与发送时的气泡一致
+  let raw = forms.restore(text) ?? resolveClick(text, anchor, forms) ?? text;
   // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
   if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
@@ -144,6 +148,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
   let group: ChatMessage | null = null; // 当前正在累积的 assistant 回合气泡
   // 最近一条带组件（块级或行内按钮）的 assistant 气泡：后续 user 的按钮点击 payload 命中它 → 「已答」态跨刷新持久
   let anchor: ChatMessage | null = null;
+  const forms = new FormLookup();
 
   for (const m of items) {
     // 「删除」的隐藏区间：不输出；但 user/system 仍是 assistant 分组的断点——否则隐藏一条用户消息会把两侧回合合成一泡
@@ -167,7 +172,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
 
     if (m.role === "user") {
       group = null;
-      out.push(userMessage(m, anchor, opts));
+      out.push(userMessage(m, anchor, opts, forms));
       continue;
     }
     const g = accumulate(group, m, toolCalls, opts.sid);
@@ -175,6 +180,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
     group = g;
     // 行内按钮也算「可作答锚点」；必须真解析出按钮才算，纯 [[wiki]] 文本不能把带组件的老锚点顶掉
     if (g.replyComponents?.length || parseInlineButtons(`${m.replyText ?? ""}\n${m.text ?? ""}`).length > 0) anchor = g;
+    forms.add(g);
   }
   // 完成标记只给「历史尾轮」：最后一条是 assistant 且回合正常收尾（turnMs 来自 turn_duration，进行中 / 被打断的没有）
   if (opts.tail !== false) {

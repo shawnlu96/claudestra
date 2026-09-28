@@ -4,6 +4,9 @@ import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
+import { editComposer, useComposerSnap, useOpenForms } from "../form-sync";
+import { lineScan, renderFormLine, setFormValues, syncable, toggleFormValue } from "@/lib/chat/form-compose";
+import { useT } from "@/lib/i18n";
 
 /**
  * reply() 附带的交互组件（按钮 / 选单）Web 渲染。点击 → 回投
@@ -85,16 +88,16 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         if (row.type === "multiselect") {
           return (
             <MultiSelectRow
-              key={ri}
+              key={ri} messageId={m.id}
               row={row}
               disabled={rowAnswered}
               busy={busy !== ""}
               answeredValue={clicks[key]}
-              onSubmit={(values, labels) =>
+              onSubmit={(values, display) =>
                 choose(
                   key,
                   `${row.id}:${values.join(",")}`,
-                  labels.join("、"),
+                  display,
                   `[select:${row.id}:${values.join(",")}]`,
                 )
               }
@@ -141,35 +144,49 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
 
 /**
  * 多选行：勾选若干项，再点提交一次性回投。
- * 已作答的那一组保持勾选状态展示（跟单选一样，让人回头能看清自己选了什么）。
+ * 未作答时勾选状态**就是输入框里该表单那一行**（lib/chat/form-compose.ts）：每勾 / 取消一项
+ * 改写那一行，owner 手改那一行勾选也跟着变。同一 id 复用时的旧表单、选项不合格的表单、没有
+ * 输入框（分享模式）时退回本地勾选，照样能「提交」。已作答的那一组保持勾选状态展示。
  */
 function MultiSelectRow({
+  messageId,
   row,
   disabled,
   busy,
   answeredValue,
   onSubmit,
 }: {
+  messageId: string;
   row: Extract<WebComponentRow, { type: "multiselect" }>;
   disabled: boolean;
   busy: boolean;
   /** 已答值 `<rowId>:<v1>,<v2>`（本行），用于回显勾选。 */
   answeredValue?: string;
-  onSubmit: (values: string[], labels: string[]) => void;
+  /** display = 气泡里显示的可读行（与输入框同步行、历史还原同形） */
+  onSubmit: (values: string[], display: string) => void;
 }) {
-  // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则空集起步
+  const t = useT();
+  const composer = useComposerSnap();
+  const forms = useOpenForms();
+  const form = forms.find((f) => f.messageId === messageId && f.row.id === row.id);
+  const eligible = !!form && composer.present && syncable(row) && forms.find((f) => f.row.id === row.id) === form;
+  const scan = eligible ? lineScan(composer.text, forms) : null;
+  // 输入框里有歧义行（别的表单也能认领）时也退回本地勾选：往输入框写只会每点一次多一行
+  const synced = !!scan && !scan.ambiguous.has(row.id);
+  const [local, setLocal] = useState<string[]>([]);
+  const owner = scan?.owners.get(row.id) ?? null;
+  // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则读输入框里的同步行 / 本地勾选
   const answered = answeredValue?.startsWith(`${row.id}:`)
     ? answeredValue.slice(row.id.length + 1).split(",").filter(Boolean)
     : null;
-  const [picked, setPicked] = useState<string[]>(answered ?? []);
+  const picked = answered ?? (synced ? (owner?.parsed.values ?? []) : local);
   const locked = disabled || busy;
   const min = Math.max(1, Number(row.min) || 1);
   const max = Number(row.max) || row.options.length;
   const toggle = (v: string) => {
     if (locked) return;
-    setPicked((prev) =>
-      prev.includes(v) ? prev.filter((x) => x !== v) : prev.length >= max ? prev : [...prev, v],
-    );
+    if (synced) editComposer((prev) => toggleFormValue(prev, form!, forms, v));
+    else setLocal((p) => (p.includes(v) ? p.filter((x) => x !== v) : p.length >= max ? p : [...p, v]));
   };
   const canSubmit = !locked && picked.length >= min && picked.length <= max;
 
@@ -209,14 +226,20 @@ function MultiSelectRow({
           type="button"
           disabled={!canSubmit}
           onClick={() => {
-            const labels = row.options.filter((o) => picked.includes(o.value)).map((o) => o.label);
-            onSubmit(picked, labels);
+            // 快速提交 = 这组已答，输入框里它的同步行一并撤掉（补充文字留着）
+            if (synced) editComposer((prev) => setFormValues(prev, form!, forms, []));
+            onSubmit(picked, renderFormLine(row, form?.title ?? row.id, picked));
           }}
           className="btn btn-primary btn-sm mt-1 self-start"
         >
-          {row.submitLabel || "提交"}
+          {row.submitLabel || t("提交")}
           {picked.length > 0 && ` (${picked.length})`}
         </button>
+      )}
+      {!disabled && owner && (
+        <span className={`text-[11px] ${owner.over ? "text-warning" : "opacity-50"}`}>
+          {owner.over ? t("最多选 {n} 项：超出时这一行按普通文字发送", { n: max }) : t("已同步到输入框，可补一句再发送")}
+        </span>
       )}
     </div>
   );

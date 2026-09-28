@@ -11,104 +11,14 @@ import { clearDraft, loadDraft, saveDraft } from "../drafts";
 import { agentSkills } from "@/lib/api/chat";
 import { skillUsed } from "@/lib/api/settings";
 import { transcribe } from "@/lib/api/system";
-
+import { PendingFiles } from "./pending-files";
+import { sendComposed, useComposerBus } from "../form-sync";
 
 const MAX_FILES = 5;
 
 /* 复刻 Claude OS features/chat/composer 的卡片式输入：圆角卡 + 内嵌「正在回复」条
    + 附件缩略图 + 无边框 textarea + 图标控件。功能保留 claudestra 侧：流式中可插话、
    粘贴上传、停止与发送并列。 */
-
-/**
- * 缩略图的 blob URL：同一个 File 只建一次，移出待发列表就 revoke（D8-3）。
- * 以前在渲染体里直接 createObjectURL——打字、遥测、列表轮询每触发一次重渲染就新建一个
- * URL、缩略图重新解码（iOS 上随打字闪），而且从不 revoke，附过的图整页生命周期都释放不掉。
- * 放模块级而不是 ref：渲染期要读它，ref 在渲染期不能碰；Composer 同时只有一个。
- */
-const pendingUrls = new Map<File, string>();
-function pendingUrl(f: File): string {
-  let u = pendingUrls.get(f);
-  if (!u) {
-    u = URL.createObjectURL(f);
-    pendingUrls.set(f, u);
-  }
-  return u;
-}
-function releasePendingUrls(keep: File[]) {
-  const live = new Set(keep);
-  for (const [f, u] of pendingUrls) {
-    if (!live.has(f)) {
-      URL.revokeObjectURL(u);
-      pendingUrls.delete(f);
-    }
-  }
-}
-
-/** 待发送文件的缩略图 / 文件卡片，点 ✕ 移除。 */
-function PendingFiles({
-  files,
-  onRemove,
-}: {
-  files: File[];
-  onRemove: (i: number) => void;
-}) {
-  const t = useT();
-  // 不做卸载时全清：StrictMode 的假卸载会把还在显示的缩略图 revoke 掉；
-  // 残留的会在下一次列表变化（发送清空也算）时一并释放
-  useEffect(() => releasePendingUrls(files), [files]);
-  if (files.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-2 px-3 pb-1 pt-3">
-      {files.map((f, i) => {
-        const isImg = f.type.startsWith("image/");
-        return isImg ? (
-          <div
-            key={i}
-            className="group relative size-16 overflow-hidden rounded-lg border border-base-content/10 bg-base-300"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={pendingUrl(f)}
-              alt={f.name}
-              className="size-full object-cover"
-            />
-            <RemoveBtn onClick={() => onRemove(i)} />
-          </div>
-        ) : (
-          <div
-            key={i}
-            title={f.name}
-            className="group relative flex h-16 w-44 items-center gap-2.5 overflow-hidden rounded-lg border border-base-content/10 bg-base-300 px-3"
-          >
-            <span className="text-lg">📎</span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[12px] font-medium text-base-content/85">
-                {f.name}
-              </div>
-              <div className="text-[10.5px] text-base-content/40">{t("文件")}</div>
-            </div>
-            <RemoveBtn onClick={() => onRemove(i)} />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function RemoveBtn({ onClick }: { onClick: () => void }) {
-  const t = useT();
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={t("移除")}
-      aria-label={t("移除")}
-      className="absolute right-0.5 top-0.5 flex size-[18px] items-center justify-center rounded-full bg-black/60 text-[11px] text-white opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100"
-    >
-      ✕
-    </button>
-  );
-}
 
 const SCOPE_LABEL: Record<string, string> = {
   builtin: "内建",
@@ -160,9 +70,8 @@ export function Composer() {
       });
     }
   };
-  useEffect(() => () => {
-    if (textRafRef.current != null) cancelAnimationFrame(textRafRef.current);
-  }, []);
+  useEffect(() => () => void (textRafRef.current != null && cancelAnimationFrame(textRafRef.current)), []);
+  const formEdits = useComposerBus(text, setText, composingRef, taRef); // 多选表单勾选 = 输入框里的同步行（form-sync）
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   // v2.15+ 思考遥测:耗时 + ↓token 跳动(token 在涨 = 模型活着,消除「卡住」错觉)
@@ -482,14 +391,14 @@ export function Composer() {
 
   const submit = () => {
     // 读「此刻」的值:状态镜像最多落后一帧,Enter 紧跟最后一个字时不能丢字
-    const cur = textRef.current;
+    const cur = formEdits.drain(textRef.current); // 组合期还在排队的表单勾选也算进这条
     if (disabled || (!cur.trim() && files.length === 0)) return;
     // Skill 使用计数埋点(面板排序的频次数据源)——手打 / 和面板选择都覆盖
     const m = /^\/([\w:-]+)/.exec(cur.trim());
     if (m) {
       void skillUsed(m[1]).catch(() => {}); // 计数埋点丢了只影响面板排序
     }
-    store.send(cur, files.length ? files : undefined);
+    sendComposed(store, cur, files.length ? files : undefined); // 带表单同步行 → wire 换成 [select:…]
     setText("");
     setFiles([]);
     if (active) clearDraft(active);
@@ -726,11 +635,10 @@ export function Composer() {
           )}
           <textarea
             ref={taRef}
-            onCompositionStart={() => {
-              composingRef.current = true;
-            }}
+            onCompositionStart={() => void (composingRef.current = true)}
             onCompositionEnd={() => {
               composingRef.current = false;
+              requestAnimationFrame(formEdits.flush); // 组合期勾的表单：等收尾的 input 把 DOM 值落进 textRef 再补做
             }}
             onFocus={() => setTaFocused(true)}
             onBlur={() => setTaFocused(false)}
