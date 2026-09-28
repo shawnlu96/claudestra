@@ -150,9 +150,8 @@ export function initRuntimeAsks(): void {
       const context = qs.map((q) => q.question ?? "").join("\n").slice(0, 300);
       void openRuntimeAsk({ source: "auq", channelId: evt.chatId, agentName: evt.agent, kind: "decide", title: auqTitle(qs), context, options: qs });
     } else if (evt.type === "question_cleared") {
-      // 谁答的：网页 API 带 by（凭据）/ credential，Discord 带 uid；都没有记 unknown
-      const by = typeof data.by === "string" ? data.by : typeof data.uid === "string" ? `discord:${data.uid}` : undefined;
-      const who = { principal: by, device: typeof data.credential === "string" ? data.credential : undefined };
+      // 网页 API 的提交端点在广播前已带凭据记过账（这里再结是空操作）；Discord 带 uid；都没有记 unknown
+      const who = { principal: typeof data.uid === "string" ? `discord:${data.uid}` : undefined };
       settleRuntimeAsk("auq", evt.chatId, data.reason === "submit" ? (data.via === "discord" ? "discord" : "interact") : undefined, undefined, who);
     }
   });
