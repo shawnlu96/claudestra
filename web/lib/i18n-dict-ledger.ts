@@ -14,6 +14,7 @@ export const LEDGER_DICT: Record<string, string> = {
   "更多": "More",
   "已发给 {agent}，它忙完手上这一步就会看到": "Sent to {agent} — it will see it once the current step is done",
   "这件已经处理过了（或已过期）": "Already handled (or expired)",
+  "没发出去（连不上），再点一次": "Couldn't send (no connection) — tap again",
   "急": "Urgent",
   "可能是授权": "Possibly an authorization",
   "等了 {span}": "waiting {span}",
