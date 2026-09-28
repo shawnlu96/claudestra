@@ -54,9 +54,9 @@ describe("flushHeld", () => {
   test("投完第一条目标又忙：第二条原条目留着、heldAt 不变、不 touch、不重复入队", async () => {
     const h = harness([item("a"), item("b", "local", 1234)]);
     let n = 0;
-    h.deps.deliver = async (env, to) => {
+    h.deps.deliver = async (env) => {
       if (n++ === 0) return sent(env);
-      h.held.hold("c-me", { env, to, heldAt: 9999 }); // 模拟 deliverToLocal 见目标在忙，把同一封再押一次
+      h.held.holdEnv(env); // 和 deliverToLocal 见目标在忙时一样，把同一封再押一次
       return sent(env, "queued");
     };
     await flushHeld(h.deps, "c-me", "stop");

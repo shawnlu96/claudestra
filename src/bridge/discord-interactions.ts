@@ -40,7 +40,7 @@ import {
   type ArrowNavKind,
 } from "../lib/tmux-helper.js";
 import { resolveInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
-import { newThreadId } from "./router.js";
+import { newMessageId, newThreadId } from "./router.js";
 import { clearSafetyTimer, trackStatusMessage, statusMessageIdFor, finishStatusMessage, agentActionButtons } from "./discord-adapter.js";
 import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
@@ -1004,7 +1004,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             intent: "notification",
             content: mgmtResult.text,
             meta: {
-              messageId: `mgmt_${Date.now()}`,
+              messageId: newMessageId("mgmt"),
               triggerKind: "bridge_synth",
               ts: new Date().toISOString(),
               threadId: newThreadId(),
@@ -1049,7 +1049,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         intent: "request",
         content: `[button:${id}]`,
         meta: {
-          messageId: interaction.message?.id || `btn_${Date.now()}`,
+          messageId: interaction.message?.id || newMessageId("btn"),
           triggerKind: "user_discord",
           ts: new Date().toISOString(),
           threadId: newThreadId(),
@@ -1112,7 +1112,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             intent: "notification",
             content: mgmtResult.text,
             meta: {
-              messageId: `mgmt_${Date.now()}`,
+              messageId: newMessageId("mgmt"),
               triggerKind: "bridge_synth",
               ts: new Date().toISOString(),
               threadId: newThreadId(),
