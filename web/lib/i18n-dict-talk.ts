@@ -51,4 +51,10 @@ export const TALK_DICT: Record<string, string> = {
   "{a} 正在忙或不在线，已进押后队列，空闲后送达，不会丢。": "{a} is busy or offline. Queued — it will be delivered once it’s idle, nothing is lost.",
   "没送到：{e}": "Not delivered: {e}",
   "重发": "Resend",
+  "新建任务": "New task",
+  "用 {n} 条消息新建任务": "New task from {n} message|New task from {n} messages",
+  "已建任务 {id}，勾选的原文记在任务上。": "Created task {id}; the selected messages are noted on it.",
+  "选择项目": "Choose a project",
+  "任务号，如 T123": "Task id, e.g. T123",
+  "任务标题": "Task title",
 };

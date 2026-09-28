@@ -14,6 +14,7 @@ import { sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
 import { renderApiInbound, type ApiUserEndpoint, type Delivery, type Envelope } from "../src/bridge/router.js";
 import { setTalkForTest } from "../src/bridge/talk.js";
+import { setTalkTaskRunnerForTest } from "../src/bridge/talk-task.js";
 import { effectivePrincipal, type Grant } from "../src/lib/devices.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
@@ -203,3 +204,34 @@ describe("丢进工作台", () => {
     expect((await again(d2)).state).toBe("failed");
   });
 });
+
+describe("从 Chat 新建任务（一期只有 owner）", () => {
+  const calls: string[][] = [];
+  beforeAll(() => setTalkTaskRunnerForTest(async (args) => (calls.push(args), { ok: true, task: { id: args[2] } })));
+  afterAll(() => setTalkTaskRunnerForTest(undefined));
+  const body = (extra: Record<string, unknown> = {}) => ({ room: dm, msgs: [firstMsg], project: "p", id: "T901", title: "登录页\n改文案", kind: "code", req: `tt_${randomUUID()}`, ...extra });
+
+  test("guest、集成 token、peer 都建不了（API 层）", async () => {
+    expect((await api(guest("aa"), "POST", "/talk/tasks", body())).status).toBe(403);
+    expect((await api(INTEGRATION, "POST", "/talk/tasks", body())).status).toBe(403);
+    expect((await api(PEER, "POST", "/talk/tasks", body())).status).toBe(403);
+    expect(calls).toEqual([]);
+  });
+  test("owner：经 CLI 建任务（flag 用 --k=v 形式、标题单行化、带 dedup），再把勾选的原文记成 note", async () => {
+    const b = body();
+    const r = await api(owner, "POST", "/talk/tasks", b);
+    expect(r.status).toBe(201);
+    expect(calls[0].slice(0, 6)).toEqual(["ledger", "task-new", "T901", "--project=p", "--title=登录页 改文案", "--kind=code"]);
+    expect(calls[0]).toContain(`--dedup=talk-task:${b.req}`);
+    expect(calls[1].slice(0, 4)).toEqual(["ledger", "note", "T901", `--dedup=talk-note:${b.req}`]);
+    expect(calls[1][4]).toBe("--");
+    expect(calls[1][5]).toContain("你看下这个设计");
+  });
+  test("参数形状不对 400；不是成员的房间 404", async () => {
+    expect((await api(owner, "POST", "/talk/tasks", body({ id: "-rf" }))).status).toBe(400);
+    expect((await api(owner, "POST", "/talk/tasks", body({ project: "--x" }))).status).toBe(400);
+    expect((await api(owner, "POST", "/talk/tasks", body({ kind: "hack" }))).status).toBe(400);
+    expect((await api(owner, "POST", "/talk/tasks", body({ room: "f".repeat(64) }))).status).toBe(404);
+  });
+});
+

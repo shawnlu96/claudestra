@@ -112,3 +112,8 @@ export async function dropTargets(): Promise<{ name: string; label: string }[]> 
 export function followTalkEvents(opts: { signal: AbortSignal; onOpen: () => void; onTalk: (room: string) => void }): Promise<void> {
   return followEventStream("/events?types=talk", { signal: opts.signal, onOpen: opts.onOpen, onEvent: (e) => e.type === "talk" && opts.onTalk(String(e.data.room ?? "")) });
 }
+
+/** 只有 owner：勾选的消息建成台账任务（bridge 经 CLI 写，原文记成任务上的 note）；req 是幂等键，重试不会建两条 */
+export function createTask(b: { room: string; msgs: string[]; project: string; id: string; title: string; kind: string; req: string }): Promise<{ ok: boolean; task: { id: string }; noted?: boolean }> {
+  return api("/talk/tasks", { method: "POST", json: b, timeoutMs: 90_000 });
+}

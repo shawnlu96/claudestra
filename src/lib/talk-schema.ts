@@ -17,6 +17,8 @@ export const THREAD_ID_RE = /^tr_[0-9a-f-]{36}$/;
 export const DM_ID_RE = /^[0-9a-f]{64}$/;
 /** 丢进工作台的幂等键，由前端生成：`td_` + uuid */
 export const DROP_ID_RE = /^td_[0-9a-f-]{36}$/;
+/** 从 Chat 建任务的幂等键（台账 dedup 用），由前端生成：`tt_` + uuid */
+export const TASK_REQ_RE = /^tt_[0-9a-f-]{36}$/;
 
 /** SQLite 没有正则：CHECK 用 GLOB 拼出同一个形状（前缀 + 36 位 [0-9a-f-]），和上面的正则一起守 */
 const uuidCheck = (col: string, prefix: string): string => `length(${col}) = 39 AND substr(${col}, 1, 3) = '${prefix}' AND substr(${col}, 4) NOT GLOB '*[^0-9a-f-]*'`;

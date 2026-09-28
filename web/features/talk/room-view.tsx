@@ -8,6 +8,7 @@ import { useT } from "@/lib/i18n";
 import { AuthImg } from "@/features/chat/components/auth-img";
 import { attUrl, deleteMessage, type TalkMessage, type TalkRoom } from "@/lib/api/talk";
 import { DropModal } from "./drop-modal";
+import { TaskModal } from "./task-modal";
 import { BackIcon, DropIcon, SelectIcon, TrashIcon } from "./talk-icons";
 import type { TalkMe } from "./use-talk";
 
@@ -78,6 +79,7 @@ export function RoomView({ room, me, messages, loading, onBack, onChanged, compo
   const [selecting, setSelecting] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
   const [dropping, setDropping] = useState(false);
+  const [tasking, setTasking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastKey = messages[messages.length - 1]?.key;
 
@@ -119,6 +121,7 @@ export function RoomView({ room, me, messages, loading, onBack, onChanged, compo
       {selecting ? (
         <div className="flex shrink-0 items-center gap-2 border-t border-base-300 bg-base-100 px-3 pt-2" style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}>
           <span className="flex-1 text-sm text-base-content/70">{t("已选 {n} 条", { n: picked.length })}</span>
+          {me.isOwner && <button className="btn btn-ghost btn-sm" disabled={!picked.length} onClick={() => setTasking(true)}>{t("新建任务")}</button>}
           <button className="btn btn-primary btn-sm" disabled={!picked.length} onClick={() => setDropping(true)}>
             <DropIcon size={16} />
             {t("丢进工作台")}
@@ -126,6 +129,19 @@ export function RoomView({ room, me, messages, loading, onBack, onChanged, compo
         </div>
       ) : (
         composer
+      )}
+      {tasking && (
+        <TaskModal
+          room={room}
+          msgs={messages.filter((m) => picked.includes(m.key)).map((m) => m.key)}
+          onClose={(done) => {
+            setTasking(false);
+            if (done) {
+              setSelecting(false);
+              setPicked([]);
+            }
+          }}
+        />
       )}
       {dropping && (
         <DropModal

@@ -12,6 +12,7 @@
  *   POST   /api/v1/talk/atts                                正文 = 图片字节 → {sha256, mime, bytes}
  *   GET    /api/v1/talk/atts/:sha256                        取图（上传者 / 引用它的房间成员）
  *   POST   /api/v1/talk/drops/preview | /drops              丢进工作台：预览（agent 收到的原文 + sha）/ 确认 {dropId, sha, ...}
+ *   POST   /api/v1/talk/tasks                               只有 owner：勾选的消息建成台账任务 {room, msgs, project, id, title, kind, req}
  * 实时：SSE talk 事件（只推给房间成员），收到就重拉。
  */
 import type { Principal } from "../../lib/principals.js";
@@ -19,6 +20,7 @@ import { ensureLocalPerson, isGuestPrincipal, localPrincipalOf, mergePeople, OWN
 import { createThread, ensureDm, roomsFor, memberKey } from "../../lib/talk-rooms.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
 import { commitDrop, previewDrop } from "../talk-drop.js";
+import { createTaskFromTalk } from "../talk-task.js";
 import { directoryFor, meOf, publishTalk, reconcileDropsOnce, rememberMe, roomView, selfFp, talkDb, talkPrincipals, type Me } from "../talk.js";
 import { deleteRoomMessage, listRoomMessages, postRoomMessage, readAtt, uploadAtt } from "./talk-msgs.js";
 
@@ -147,6 +149,14 @@ async function dropsRoute(req: Request, me: Me, p: Principal, rest: string[]): P
   return apiJson(200, { ok: true, ...(rest[0] === "preview" ? r : { drop: r }) });
 }
 
+async function taskRoute(req: Request, me: Me, p: Principal): Promise<Response> {
+  if (!me.isOwner) return forbidden("only the owner can create tasks from chat");
+  const b = await body(req);
+  if (b instanceof Response) return b;
+  const r = await createTaskFromTalk(me, p, b);
+  return "status" in r && "error" in r ? apiJson(r.status as number, { ok: false, error: r.error }) : apiJson(201, r);
+}
+
 export async function handleTalkApi(req: Request, path: string, principal: Principal, url: URL): Promise<Response | null> {
   if (path !== "/talk" && !path.startsWith("/talk/")) return null;
   const me = meOf(principal);
@@ -157,6 +167,7 @@ export async function handleTalkApi(req: Request, path: string, principal: Princ
     if (section === "people") return await peopleRoute(req, me, rest);
     if (section === "rooms") return await roomsRoute(req, me, principal, rest, url);
     if (section === "drops") return await dropsRoute(req, me, principal, rest);
+    if (section === "tasks" && !rest.length && req.method === "POST") return await taskRoute(req, me, principal);
     if (section === "atts" && !rest.length && req.method === "POST") return await uploadAtt(me, req);
     if (section === "atts" && rest.length === 1 && req.method === "GET") return readAtt(me, principal, rest[0]);
   } catch (e) {

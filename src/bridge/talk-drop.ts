@@ -7,7 +7,7 @@
  */
 import { tokenIdOf, agentInScope, isOwnerPrincipal, type Principal, type PrincipalsFile } from "../lib/principals.js";
 import { attPath, getAtt } from "../lib/talk-atts.js";
-import { contentSha, renderDropBody, type DropLine } from "../lib/talk-drop-render.js";
+import { contentSha, renderDropBody, type DropInput, type DropLine } from "../lib/talk-drop-render.js";
 import { claimDrop, getDrop, type DropRow } from "../lib/talk-drops.js";
 import { getMessage, type TalkMessage } from "../lib/talk-messages.js";
 import { getRoom, isMember, parseRoomKey, type Room } from "../lib/talk-rooms.js";
@@ -68,21 +68,29 @@ function lineOf(m: TalkMessage, me: Me, principals: PrincipalsFile): DropLine {
 }
 
 /** 预览与确认共用：校验房间 / 消息 / agent，拼出 agent 会收到的完整正文 */
-async function buildDrop(me: Me, principal: Principal, b: Record<string, unknown>): Promise<Built | DropError> {
+/** 房间、勾选的消息与它们渲染前的样子（丢进工作台与「新建任务」共用）：不是成员 404，消息不在这个房间 / 已删 400 / 409 */
+export async function buildLines(me: Me, _p: Principal, b: Record<string, unknown>): Promise<{ room: Room; picked: TalkMessage[]; msgs: string[]; excerpt: DropInput } | DropError> {
   const ref = typeof b.room === "string" ? parseRoomKey(b.room) : null;
   const db = talkDb();
   const room = ref ? getRoom(db, ref) : null;
   if (!room || !isMember(db, room, me.keys)) return { status: 404, error: "room not found" };
-  const msgs = pickMessages(me, room, b.msgs);
-  if (!Array.isArray(msgs)) return msgs;
-  const agent = await resolveAgent(principal, b.agent);
-  if ("status" in agent) return agent;
+  const picked = pickMessages(me, room, b.msgs);
+  if (!Array.isArray(picked)) return picked;
   const principals = await talkPrincipals();
   const by = nameOf(me.personId, principals);
-  const from: ApiUserEndpoint = { kind: "api", tokenId: tokenIdOf(principal), name: by, ...(isOwnerPrincipal(principal) ? { owner: true as const } : {}) };
-  const body = renderDropBody({ by, room: { kind: room.kind, title: String(roomView(room, me, principals).title) }, lines: msgs.map((m) => lineOf(m, me, principals)) });
+  const excerpt = { by, room: { kind: room.kind, title: String(roomView(room, me, principals).title) }, lines: picked.map((m) => lineOf(m, me, principals)) };
+  return { room, picked, msgs: picked.map((m) => `${m.origin}/${m.id}`), excerpt };
+}
+
+async function buildDrop(me: Me, principal: Principal, b: Record<string, unknown>): Promise<Built | DropError> {
+  const lines = await buildLines(me, principal, b);
+  if ("status" in lines) return lines;
+  const agent = await resolveAgent(principal, b.agent);
+  if ("status" in agent) return agent;
+  const from: ApiUserEndpoint = { kind: "api", tokenId: tokenIdOf(principal), name: lines.excerpt.by, ...(isOwnerPrincipal(principal) ? { owner: true as const } : {}) };
+  const body = renderDropBody(lines.excerpt);
   const content = renderApiInbound({ from, content: body });
-  return { room, msgs, agent, from, body, content, sha: contentSha(content) };
+  return { room: lines.room, msgs: lines.picked, agent, from, body, content, sha: contentSha(content) };
 }
 
 async function sendOrHold(env: Envelope, agent: { name: string; channelId: string }): Promise<"sent" | "held"> {

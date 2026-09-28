@@ -55,4 +55,11 @@ export function renderDropBody(d: DropInput): string {
   return [head, ...blocks].join("\n\n");
 }
 
+/** 「新建任务」记在任务上的原文（ledger note）：同样只带勾选的，别的实例的人写的同样包外部文本 */
+export function renderTalkExcerpt(d: DropInput): string {
+  const where = d.room.kind === "dm" ? `和 ${oneLine(d.room.title)} 的私聊` : `小组「${oneLine(d.room.title)}」`;
+  const blocks = d.lines.map((l) => `— ${oneLine(l.author)} · ${dropTime(l.at)}\n${lineBody(l)}`);
+  return [`Chat 原文（${oneLine(d.by)} 从${where}里选了 ${d.lines.length} 条建成这个任务）：`, ...blocks].join("\n\n");
+}
+
 export const contentSha = (content: string): string => createHash("sha256").update(content, "utf8").digest("hex");
