@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { TurnCuts } from "../src/bridge/turn-cuts.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
-import type { Envelope } from "../src/bridge/router.js";
+import { isHumanRequest, type Envelope } from "../src/bridge/router.js";
 import {
   CUT_TTL_MS, inflightFrom, isResumedBy, lateInflight, makeCut, onStop, preemptHeadline, resumeNotice, stopHeadline, withInterruptNote,
   type Cut, type CutEvent, type NewCutInput,
@@ -296,5 +296,19 @@ describe("打断抬头不进历史正文（lib/turn-cuts.ts withInterruptNote）
   });
   test("Discord 用户没有来源头：只有 ⏹ 抬头也剥掉", () => {
     expect(unwrapChannelMessage(ch("[⏹ 这是一条「停」指令：已替你打断。]\n\n停"))?.text).toBe("停");
+  });
+});
+
+describe("waitForIdle 的固定语义（T11a 的答复复用）", () => {
+  const mk = (over: Partial<Envelope["meta"]>, from: Envelope["from"] = { kind: "api", name: "owner", tokenId: "t" } as Envelope["from"]) =>
+    ({ from, to: { kind: "local", channelId: "ch" }, intent: "request", content: "x", meta: { messageId: "m", triggerKind: "api_user", ts: "", threadId: "t", ...over } }) as unknown as Envelope;
+  test("人类 request 会抢占；带 waitForIdle 的永远不算（不打断、flush 时不插队）", () => {
+    expect(isHumanRequest(mk({}))).toBe(true);
+    expect(isHumanRequest(mk({ waitForIdle: true }))).toBe(false);
+  });
+  test("peer 的 api 入站、response、agent 消息本来就不算", () => {
+    expect(isHumanRequest(mk({}, { kind: "api", name: "p", tokenId: "t", peer: "ahh" } as Envelope["from"]))).toBe(false);
+    expect(isHumanRequest({ ...mk({}), intent: "response" } as Envelope)).toBe(false);
+    expect(isHumanRequest(mk({}, { kind: "local", channelId: "c" } as Envelope["from"]))).toBe(false);
   });
 });

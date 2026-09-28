@@ -140,7 +140,11 @@ export interface Envelope {
     forwarded?: boolean;
     /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */
     interruptNote?: string;
-    /** 目标主回合在跑就押到空闲再投（与 agent→agent 同规则）：打断收尾提醒用，回合中裸发会落进丢弃窗口 */
+    /**
+     * 只在目标主回合空闲时投（与 agent→agent 同规则），语义固定、别的任务直接复用（打断收尾提醒、T11a 的答复）：
+     * - 主回合忙或正在压缩 → 进押后队列，Stop / 压缩结束 / 每分钟扫描时 flush 再投；
+     * - 永远不触发抢占：即使 from 是人类、intent 是 request，也不算 isHumanRequest（不打断、flush 时也不插队）。
+     */
     waitForIdle?: boolean;
   };
 }
@@ -317,3 +321,11 @@ export function newMessageId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * 人类 request（Discord 用户 / 非 peer 的 API 用户）——抢占与押后规则的分野：它会打断在忙的目标，押后队列里也不等空闲。
+ * 带 waitForIdle 的不算（永远不抢占），见 Envelope.meta.waitForIdle。单测 tests/turn-cuts.test.ts。
+ */
+export function isHumanRequest(env: Envelope): boolean {
+  if (env.meta.waitForIdle) return false;
+  return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
+}

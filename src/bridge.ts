@@ -417,10 +417,6 @@ const pendingAgentCalls = new AgentCallBook();
  */
 const heldLocalMsgs = new HeldQueue();
 
-/** 人类 request(Discord 用户 / 非 peer 的 API 用户)——抢占与押后规则的分野。 */
-function isHumanRequest(env: RouterEnvelope): boolean {
-  return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
-}
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
@@ -543,7 +539,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, isHumanRequest, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
