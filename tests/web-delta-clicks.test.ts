@@ -4,7 +4,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
-import { resolveDeltaClicks, resolveLiveClick } from "@/features/chat/delta-clicks";
+import { liveUserText, resolveDeltaClicks, resolveLiveClick, resolvePendingClicks } from "@/features/chat/delta-clicks";
+import { composeView } from "@/features/chat/view-compose";
+import type { ChatMessage } from "@/features/chat/type";
 import type { WebComponentRow } from "@/lib/chat/events";
 
 const u = (seq: number, text: string, extra: Partial<NeutralMessage> = {}): NeutralMessage => ({ seq, role: "user", text, ...extra });
@@ -73,10 +75,41 @@ describe("resolveDeltaClicks（差量里的回投往前找所属表单）", () =
     expect(r.base[0].replyClicks).toBeUndefined();
   });
 
-  test("前一段里也找不到（表单比已加载的还早）：维持兜底文案，clickRaw 用过即删", () => {
-    const r = split([u(1, "hi"), a(2, { text: "没有表单" })], [u(3, "[button:ghost]")]);
-    expect(r.shaped[0].content).toBe("🔘 ghost");
-    expect(r.shaped[0].clickRaw).toBeUndefined();
+  test("前一段里也找不到（表单比已加载的还早）：维持兜底文案、留着 clickRaw；往上翻页加载出表单后补上", () => {
+    const r = split([u(10, "hi"), a(11, { text: "没有表单" })], [u(12, "[button:go]")]);
+    expect(r.shaped[0].content).toBe("🔘 go");
+    expect(r.shaped[0].clickRaw).toBe("[button:go]");
+    // loadOlder：更早的一页（带表单）拼到前面
+    const older = toChatMessages(structuredClone(prior), { sid: "s1", tail: false });
+    const list = resolvePendingClicks([...older, ...r.base, ...r.shaped]);
+    expect(list.at(-1)!.content).toBe("✅ 发版");
+    expect(list.at(-1)!.clickRaw).toBeUndefined();
+    expect(older[1].replyClicks).toEqual({ b0: "go" });
+  });
+
+  test("P1-1：带 emoji 字段的按钮，本端乐观气泡 +「差量回投」对账后只剩一份（显示文案与按钮上的一致）", () => {
+    const form: WebComponentRow[] = [{ type: "buttons", buttons: [{ id: "go", label: "发版", emoji: "✅" }] }];
+    const base = toChatMessages([u(1, "发版吗"), a(2, { replyText: "发吗", replyComponents: form })], { sid: "s1" });
+    const local: ChatMessage = { id: "local1", role: "user", content: "✅ 发版", wire: "[button:go]", local: true, ts: new Date().toISOString() };
+    const delta = toChatMessages([u(3, "[button:go]")], { sid: "s1" });
+    const history = [...base, ...resolveDeltaClicks(base, delta)];
+    const v = composeView({ current: [...base, local], history, incoming: delta, streaming: false, cursor: null });
+    expect(v.messages.filter((m) => m.role === "user").map((m) => m.content)).toEqual(["发版吗", "✅ 发版"]);
+    // 整段刷新也是同一个文案
+    const full = toChatMessages([u(1, "发版吗"), a(2, { replyText: "发吗", replyComponents: form }), u(3, "[button:go]")]);
+    expect(full[2].content).toBe("✅ 发版");
+  });
+
+  test("同 id 表单复用：实时通道已给后一张标了同一个答案，差量再解析同一条回投时不挪到更早那张", () => {
+    const two = [...prior, u(3, "再来一张"), a(4, { replyText: "同一个表单再发一次", replyComponents: FORM })];
+    const base = toChatMessages(structuredClone(two), { sid: "s1" });
+    expect(resolveLiveClick("[select:picks:t,s]", base)).toContain("【");
+    expect(base[3].replyClicks).toEqual({ "m:picks": "picks:t,s" });
+    const delta = toChatMessages([u(5, "[select:picks:t,s]")], { sid: "s1" });
+    resolveDeltaClicks(base, delta);
+    expect(delta[0].content).toContain("【");
+    expect(base[1].replyClicks).toBeUndefined(); // 更早那张没被误标
+    expect(base[3].replyClicks).toEqual({ "m:picks": "picks:t,s" });
   });
 
   test("按钮认最近的锚点：两段都有表单时，回投落在更近的那一段（与整段整形同一规则）", () => {
@@ -107,6 +140,11 @@ describe("resolveLiveClick（实时流推来的他端回投）", () => {
       expect(msgs[1].replyClicks).toEqual(full[1].replyClicks!);
     }
     expect(resolveLiveClick("随便说点", toChatMessages(structuredClone(prior)))).toBeNull();
+  });
+
+  test("liveUserText：还原过的保留原文在 wire（回声对账用），普通文字不带 wire", () => {
+    expect(liveUserText("[button:go]", toChatMessages(structuredClone(prior)))).toEqual({ content: "✅ 发版", wire: "[button:go]" });
+    expect(liveUserText("随便说点", toChatMessages(structuredClone(prior)))).toEqual({ content: "随便说点" });
   });
 
   test("表单不在当前列表里：按钮给兜底「🔘 id」（与刷新后同形），不是原样的 [button:id]", () => {

@@ -1,17 +1,20 @@
 /**
- * web/lib/error-boundary.ts：抛错的组件被兜住，只换掉它自己；resetKey / reset 能恢复。另测「清除本地缓存」只清该清的。
+ * web/lib/error-boundary.ts：抛错的组件被兜住，只换掉它自己；resetKey / reset 能恢复；换 key 的同一次更新里刚抛的错只报一次。
+ * 另测「清除本地缓存」只清该清的、气泡层上报按 id 只放行第一次。
  * 真挂载到 happy-dom 里跑 React 19 客户端渲染（服务端渲染不走错误兜底）。happy-dom 只在本文件注册、afterAll 注销，
  * bun test 所有文件共用一个进程，全局 window / document 不能漏到别的测试里。
- * React 在 web/node_modules：根目录解析不到，按真实路径动态加载（类型取 web 的 @types），再把它的 Component 交给 createErrorBoundary。
+ * guard 登记的 TESTS_WEB_DOM 例外（scripts/guard/config.ts）：可以引用带 react 的 web 模块。React 在 web/node_modules，
+ * 根目录解析不到，用 createRequire 从 web/ 加载——与 error-boundary.ts 自己 import 的是同一份。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { createErrorBoundary } from "@/lib/error-boundary";
+import { ErrorBoundary, onlyOnce } from "@/lib/error-boundary";
 import { clearLocalCaches, KEEP_ON_RESET, type ResettableStorage } from "@/lib/crash-reset";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
+const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
 interface El {
   textContent: string | null;
   appendChild(c: El): void;
@@ -22,20 +25,15 @@ interface Doc {
   body: El;
 }
 
-const WEB_NM = realpathSync(new URL("../web/node_modules", import.meta.url).pathname);
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
-let ErrorBoundary: ReturnType<typeof createErrorBoundary>;
 
 beforeAll(async () => {
   GlobalRegistrator.register();
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  const reactPath = `${WEB_NM}/react/index.js`;
-  const clientPath = `${WEB_NM}/react-dom/client.js`;
-  React = (await import(reactPath)) as ReactNS;
-  ({ createRoot } = (await import(clientPath)) as ReactDomClient);
-  ErrorBoundary = createErrorBoundary(React.Component);
+  React = webRequire("react") as ReactNS;
+  ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
   doc = (globalThis as unknown as { document: Doc }).document;
 });
 
@@ -114,6 +112,28 @@ describe("ErrorBoundary", () => {
     await m.rerender(view(2, false));
     expect(m.text()).toBe("[v2]");
     await m.unmount();
+  });
+
+  test("换 key 的同一次更新里刚抛的错只报一次（不会立刻重置、重渲、再报）", async () => {
+    const h = React.createElement;
+    let reports = 0;
+    const view = (key: number, broken: boolean) =>
+      h(ErrorBoundary, { resetKey: key, onError: () => void reports++, fallback: () => h("i", null, "坏"), children: h(Thrower, { label: `k${key}`, broken }) });
+    const m = await mount(view(1, false));
+    await m.rerender(view(2, true));
+    expect(m.text()).toBe("坏");
+    expect(reports).toBe(1);
+    // 之后每换一次 key 重试一次、最多再报一次（气泡层另按消息 id 去重，见 onlyOnce）
+    await m.rerender(view(3, true));
+    expect(reports).toBe(2);
+    await m.unmount();
+  });
+
+  test("onlyOnce：同一个 key 只放行第一次；超过上限整体清空后重新计", () => {
+    const once = onlyOnce(2);
+    expect([once("a"), once("a"), once("b"), once("b")]).toEqual([true, false, true, false]);
+    expect(once("c")).toBe(true); // 满 2 个 → 清空后记下 c
+    expect(once("a")).toBe(true);
   });
 
   test("非 Error 的抛出物也包成 Error 交给 fallback", async () => {

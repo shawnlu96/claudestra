@@ -74,7 +74,8 @@ function resolveClick(text: string, anchor: ChatMessage | null, forms: FormLooku
   const selMatch = text.match(/^\[select:([\w-]+):(.+)\]$/);
   if (!btnMatch && !selMatch) return null;
   // 选单按 id 往前找最近一条含它的消息（owner 可能回头答更早的表单），按钮仍认最近锚点
-  if (selMatch) anchor = forms.find(selMatch[1]) ?? anchor;
+  const answer = selMatch && `${selMatch[1]}:${selMatch[2].split(",").map((v) => v.trim()).filter(Boolean).join(",")}`; // 与 matchClickedRow 存的已答值同形
+  if (selMatch) anchor = forms.find(selMatch[1], answer!) ?? anchor;
   if (anchor) {
     const clicked = matchClickedRow(anchor.replyComponents, btnMatch?.[1] ?? null, selMatch?.[1] ?? null, selMatch?.[2] ?? null);
     if (clicked) {

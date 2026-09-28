@@ -1,20 +1,25 @@
 "use client";
 /**
- * 三层错误兜底的外壳（核心在 lib/error-boundary.ts）：根 = 整页，Pane = 聊天 / 协作视图，Bubble = 单条消息。
+ * 错误兜底的外壳（核心在 lib/error-boundary.ts）：根 = 整页，Pane = 聊天主区 / 协作视图 / 侧栏，Bubble = 单条消息。
  * 兜底画面用纯函数 t() 不用 useT()：出错的可能正是某个 hook，兜底里不能再依赖订阅；语言在崩之前就定好了。
  */
-import { Component, type ReactNode } from "react";
-import { createErrorBoundary } from "@/lib/error-boundary";
+import type { ReactNode } from "react";
+import { ErrorBoundary, onlyOnce } from "@/lib/error-boundary";
 import { reportBoundaryError } from "@/lib/runtime-error";
 import { clearLocalCaches } from "@/lib/crash-reset";
 import { t } from "@/lib/i18n";
 
-const ErrorBoundary = createErrorBoundary(Component);
 const onError = (scope: string) => (err: Error, stack: string) => reportBoundaryError(scope, err, stack);
 const ROOT_ERR = onError("root");
 const CHAT_ERR = onError("chat");
 const COLLAB_ERR = onError("collab");
-const BUBBLE_ERR = onError("bubble");
+const SIDEBAR_ERR = onError("sidebar");
+
+/** 气泡层每条消息只报第一次：resetKey 是消息对象，流式气泡每来一段就重试一次，不去重会几秒用光 5 分钟 8 条的额度 */
+const firstBubbleReport = onlyOnce();
+function reportBubble(id: string, err: Error, stack: string) {
+  if (firstBubbleReport(id)) reportBoundaryError("bubble", err, stack, id);
+}
 
 function AlertIcon({ className }: { className: string }) {
   return (
@@ -85,7 +90,7 @@ function PaneFallback({ error, reset, onClose }: { error: Error; reset: () => vo
   );
 }
 
-/** 聊天消息区：resetKey 传当前会话，切走再切回自动重试 */
+/** 聊天主区（顶栏 + 消息 + 输入框）：resetKey 传当前会话，切走再切回自动重试 */
 export function ChatPaneBoundary({ resetKey, children }: { resetKey: unknown; children: ReactNode }) {
   return (
     <ErrorBoundary onError={CHAT_ERR} resetKey={resetKey} fallback={(e, reset) => <PaneFallback error={e} reset={reset} />}>
@@ -103,11 +108,20 @@ export function CollabPaneBoundary({ onClose, children }: { onClose: () => void;
   );
 }
 
+/** 侧栏：会话列表崩了不拖垮聊天区（桌面双栏时右边照常能用） */
+export function SidebarBoundary({ children }: { children: ReactNode }) {
+  return (
+    <ErrorBoundary onError={SIDEBAR_ERR} fallback={(e, reset) => <PaneFallback error={e} reset={reset} />}>
+      {children}
+    </ErrorBoundary>
+  );
+}
+
 /** 单条消息：一条坏消息只把自己换成一行灰字，列表照常。resetKey 传消息对象本身，内容一更新就再试 */
-export function BubbleBoundary({ resetKey, children }: { resetKey: unknown; children: ReactNode }) {
+export function BubbleBoundary({ id, resetKey, children }: { id: string; resetKey: unknown; children: ReactNode }) {
   return (
     <ErrorBoundary
-      onError={BUBBLE_ERR}
+      onError={(err, stack) => reportBubble(id, err, stack)}
       resetKey={resetKey}
       fallback={(e) => (
         <div role="alert" title={e.message} className="my-1 flex items-center gap-1.5 px-1 text-xs text-base-content/50">

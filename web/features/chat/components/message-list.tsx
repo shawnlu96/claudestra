@@ -748,7 +748,7 @@ export function MessageList() {
             )}
             {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
-              <BubbleBoundary resetKey={m}>
+              <BubbleBoundary id={m.id} resetKey={m}>
                 <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} />
               </BubbleBoundary>
             )}

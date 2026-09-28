@@ -6,7 +6,7 @@ import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store"
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
-import { ChatPaneBoundary } from "@/components/boundaries";
+import { ChatPaneBoundary, SidebarBoundary } from "@/components/boundaries";
 import { UpdateToast } from "./update-toast";
 import { ComposerOrDock } from "./share-dock";
 import { Splash } from "./splash";
@@ -16,6 +16,7 @@ import { ClaudeSwitcher } from "./claude-switcher";
 import { CtxBadge } from "./ctx-badge";
 import { MissionBadge } from "./mission-ui";
 import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
+import { useMinVisible } from "../use-min-visible";
 import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
 import { hopThenOpen } from "@/features/machines/notification-hop";
@@ -135,27 +136,6 @@ const MANAGE_HASH = "#manage";
 const isManageHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === MANAGE_HASH;
-
-/** 最短亮灯:active 变 truthy 立即亮,变 null 后至少亮满 minMs 才熄——
- *  秒级完成的同步不再「一闪而过等于没亮」(owner 2026-08-08)。 */
-function useMinVisible<T>(active: T | null, minMs = 1200): T | null {
-  const [shown, setShown] = useState<T | null>(active);
-  const litAtRef = useRef(0);
-  useEffect(() => {
-    if (active !== null) {
-      if (litAtRef.current === 0) litAtRef.current = Date.now();
-      setShown(active);
-      return;
-    }
-    const lit = litAtRef.current;
-    if (lit === 0) { setShown(null); return; }
-    const remain = minMs - (Date.now() - lit);
-    if (remain <= 0) { litAtRef.current = 0; setShown(null); return; }
-    const t = setTimeout(() => { litAtRef.current = 0; setShown(null); }, remain);
-    return () => clearTimeout(t);
-  }, [active, minMs]);
-  return shown;
-}
 
 /** v2.17.2 对齐/连接横幅(owner 2026-08-08:「小徽章太隐蔽,要让用户知道系统
  *  在努力」)。消息区顶部居中的实色浮动 chip,零布局位移;严重度取一:
@@ -280,6 +260,23 @@ function TopBar() {
       {info && <TopBarActions agent={info} busy={busy} onManage={openManage} />}
       <ManagePanel open={showManage} onClose={closeManage} />
     </header>
+  );
+}
+
+/** 聊天主区（顶栏 + 对齐横幅 + 消息 + 输入框）套一层错误兜底：切会话即重试（components/boundaries.tsx） */
+function ChatMain() {
+  const active = useChatStore((s) => s.state.activeAgent);
+  return (
+    <ChatPaneBoundary resetKey={active}>
+      <TopBar />
+      {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
+      <div className="relative">
+        <SyncBanner />
+        <UpdateToast />
+      </div>
+      <MessageList />
+      <ComposerOrDock />
+    </ChatPaneBoundary>
   );
 }
 
@@ -698,18 +695,11 @@ function ChatInner() {
               : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
-          <Sidebar onSelect={closingCollab(toContent)} />
+          <SidebarBoundary><Sidebar onSelect={closingCollab(toContent)} /></SidebarBoundary>
 
           <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
             <CollabSwitch />
-            <TopBar />
-            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
-            <div className="relative">
-              <SyncBanner />
-              <UpdateToast />
-            </div>
-            <ChatPaneBoundary resetKey={activeAgent}><MessageList /></ChatPaneBoundary>
-            <ComposerOrDock />
+            <ChatMain />
           </main>
         </div>
         </div>

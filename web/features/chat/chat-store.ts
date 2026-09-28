@@ -28,9 +28,10 @@ import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
-import { resolveDeltaClicks, resolveLiveClick } from "./delta-clicks";
+import { liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
+import { agentsSignature } from "./agents-signature";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
-import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
+import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
 import { fetchHistory } from "@/lib/api/history";
 import { openAgentEventStream } from "@/lib/api/stream";
@@ -39,28 +40,12 @@ import { getProfile, putProfile } from "@/lib/api/settings";
 import { projectsList } from "@/lib/api/system";
 import { markRead } from "@/lib/api/push";
 
-/**
- * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
- * + busy/contextTokens/lastActivityTs）。轮询用它判断列表是否真的变了，只有变了
- * 才更新 state。⚠ 后三个易变字段必须入指纹——contextTokens 不入的话，compact 后
- * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
- */
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
 let lastSidebarTouchAt = 0;
 const SIDEBAR_FREEZE_MS = 2_000;
 export function noteSidebarInteraction() {
   lastSidebarTouchAt = Date.now();
-}
-
-function agentsSignature(list: AgentSession[]): string {
-  return list
-    .map(
-      (a) =>
-        `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
-        `${a.busy ? 1 : 0}${a.projectId ?? ""}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}${a.unread ?? 0}${a.label ?? ""}${a.external ? 1 : 0}${a.sharedPeers ?? 0}${(a.sharedWith ?? []).join(",")}${agentExtraSig(a)}`
-    )
-    .join("");
 }
 
 // 视图合流（入站头剥离 / 乐观消息保全 / 按 ts 插回 / 直播保全）在 view-compose.ts
@@ -678,7 +663,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
               ts: msgs[msgs.length - 1]?.ts ?? new Date().toISOString(),
             } as ChatMessage]
           : [];
-        s.messages = [...msgs, ...divider, ...s.messages];
+        s.messages = resolvePendingClicks([...msgs, ...divider, ...s.messages]); // 更早的一页可能正是之前找不到的表单
         s.historyHasMore = !!json.hasMore;
         s.loadingOlder = false;
       });
@@ -1517,8 +1502,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const t = norm(text);
     if (!t && !attachments?.length) return;
     const tail = this.state.messages.slice(-15);
-    // 对账去重:原文(wire 优先)相同即回声;纯附件无文本时按附件数量兜底匹配。
-    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒ 回声被画成第二个气泡
+    // 对账去重:文本相同即回声(附件消息 BFF 已剥注入块,与乐观消息的干净文本
+    // 对得上);纯附件无文本时按附件数量兜底匹配
+    // 注入头无关比对：Pi 的历史里这条消息自带 `[🌐 来自 …]` 头，比原文会失配 ⇒
+    // 回声被画成第二个气泡（owner 2026-09-14 实报「发一条多出现一个」）
     const bare = (m: ChatMessage) => norm(stripInboundHeader(m.wire ?? m.content ?? ""));
     if (
       tail.some(
@@ -1535,12 +1522,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         const last = s.messages[s.messages.length - 1];
         if (last?.role === "assistant" && last.streamed) last.streamed = false;
       }
-      const content = resolveLiveClick(text, s.messages) ?? text; // 他端发的按钮 / 表单回投：显示可读文案 + 标已答，原文留 wire 给回声对账
       s.messages.push({
         id: `ru_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         role: "user",
-        content,
-        ...(content !== text ? { wire: text } : {}),
+        ...liveUserText(text, s.messages), // 他端发的按钮 / 表单回投：显示可读文案 + 标已答，原文留 wire 给回声对账
         ts: new Date().toISOString(),
         ...(from ? { from } : {}),
         ...(attachments?.length ? { attachments } : {}),
