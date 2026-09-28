@@ -3,6 +3,7 @@ import { useState, useSyncExternalStore } from "react";
 import { useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
 import type { AgentSession } from "../type";
+import { useFullScope } from "../contacts-data";
 import {
   dismissUpdateHint, getDismissedHints, getDismissedHintsServer, subscribeDismissedHints, updateHintKey,
 } from "../update-hint-dismiss";
@@ -25,8 +26,9 @@ export function UpdateHintBanner({ agent }: { agent?: AgentSession }) {
   // 按 agent 记：横幅组件跨会话复用，不记名的话 A 在重启中、切到 B 也会显示「重启中…」
   const [run, setRun] = useState<{ agent: string; state: "running" | "failed"; error?: string } | null>(null);
   const dismissed = useUpdateHintDismissed(agent);
+  const full = useFullScope() === true; // 两种按钮最后都是重启，要全权凭据；别的设备看到了也点不动
   const hint = agent?.status === "active" ? agent.updateHint : null;
-  if (!agent || !hint || dismissed) return null;
+  if (!agent || !hint || dismissed || !full) return null;
   const mine = run?.agent === agent.name ? run : null;
   const piUpdate = hint.kind === "pi-update";
 

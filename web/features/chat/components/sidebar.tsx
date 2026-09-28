@@ -18,6 +18,7 @@ import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
 import { PeersButton } from "./peers-button";
+import { SidebarAdminButtons } from "./sidebar-admin-buttons";
 import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
@@ -228,39 +229,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           <span className="font-semibold">{t("会话")}</span>
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
           <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
-          {/* v2.21+ 项目管理入口 */}
-          <button
-            className="flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("项目管理")}
-            aria-label={t("项目管理")}
-            onClick={() => setShowProjects(true)}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-            </svg>
-          </button>
-          <button
-            className={`flex h-7 items-center justify-center rounded-lg px-1.5 transition-colors ${
-              manage
-                ? "text-primary"
-                : "text-base-content/50 hover:bg-base-300 hover:text-base-content"
-            }`}
-            title={manage ? t("退出多选") : t("多选管理（批量删除）")}
-            aria-label={manage ? t("退出多选") : t("多选管理")}
-            onClick={() => (manage ? exitManage() : setManage(true))}
-          >
-            {manage ? (
-              <span className="text-xs font-medium">{t("完成")}</span>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m3 17 2 2 4-4" />
-                <path d="m3 7 2 2 4-4" />
-                <path d="M13 6h8" />
-                <path d="M13 12h8" />
-                <path d="M13 18h8" />
-              </svg>
-            )}
-          </button>
+          {/* 项目管理 / 多选删除：只给全权设备（sidebar-admin-buttons.tsx） */}
+          <SidebarAdminButtons manage={manage} onProjects={() => setShowProjects(true)} onToggleManage={() => (manage ? exitManage() : setManage(true))} />
           <PeersButton onClick={() => setSettingsPage("peers")} />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"

@@ -134,7 +134,7 @@
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1082,
-    "fn:overflow": 9430,
+    "fn:overflow": 9399,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:ArchivedSessions": 1,
@@ -237,7 +237,7 @@
     "size:web/features/chat/components/composer.tsx": 787,
     "size:web/features/chat/components/message-list.tsx": 837,
     "size:web/features/chat/components/peers-modal.tsx": 450,
-    "size:web/features/chat/components/sidebar.tsx": 572,
+    "size:web/features/chat/components/sidebar.tsx": 542,
     "size:web/features/chat/components/unmanaged-sessions.tsx": 541,
     "size:web/features/terminal/terminal-view.tsx": 674
   },
