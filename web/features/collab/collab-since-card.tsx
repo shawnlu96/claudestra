@@ -12,8 +12,8 @@ import s from "./collab-v2.module.css";
 
 const TONE = { red: base.red, amber: base.amber, neutral: base.neutral, green: base.green } as const;
 
-export function SinceCard(props: { digest: SinceDigest; since: number; now: number; tr: Tr; onOpen: (id: string) => void; onDismiss: () => void }) {
-  const { digest, since, now, tr, onOpen, onDismiss } = props;
+export function SinceCard(props: { digest: SinceDigest; since: number; truncated: boolean; now: number; tr: Tr; onOpen: (id: string) => void; onDismiss: () => void }) {
+  const { digest, since, truncated, now, tr, onOpen, onDismiss } = props;
   if (!digest.items.length) return null;
   return (
     <section className={s.since} aria-label={tr("上次来之后")}>
@@ -32,7 +32,8 @@ export function SinceCard(props: { digest: SinceDigest; since: number; now: numb
           <span className={s.tt}>{i.title}</span>
         </button>
       ))}
-      {digest.more > 0 && <div className={s.more}>{tr("另 {n} 件", { n: digest.more })}</div>}
+      {/* truncated：服务端只给了最新的一段（src/lib/ledger-since.ts），更早的变化没列进来 */}
+      {(digest.more > 0 || truncated) && <div className={s.more}>{tr(truncated ? "另 {n}+ 件" : "另 {n} 件", { n: digest.more })}</div>}
     </section>
   );
 }

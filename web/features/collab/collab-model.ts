@@ -66,8 +66,6 @@ export interface LedgerOverview {
   meta: { pms: string[]; docsDir: string | null; queueFrozen: { frozen: boolean; reason: string; since: number | null } };
   items: { id: string; title: string; oneLine: string }[];
   tasks: LedgerTaskView[];
-  /** 带 ?since= 拉时才有：那一刻之后的任务事件（src/lib/ledger-since.ts） */
-  sinceEvents?: LedgerEventView[];
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */

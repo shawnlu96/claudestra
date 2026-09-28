@@ -1,7 +1,6 @@
 /**
  * 内置台账的读接口（docs 10-ledger §4）；写只走 CLI（bun src/manager.ts ledger …），这里一律 GET：
  *   GET /api/v1/ledger/:project              事项 + 任务（每个带最近一条事件与服务端算好的指标）+ 最近的项目级事件 + meta
- *                                            ?since=<ms> 另带 sinceEvents（协作视图「上次以来」，lib/ledger-since.ts）
  *   GET /api/v1/ledger/:project/tasks/:id    任务 + 全部事件 + 阶段时间线 + 指标
  *   GET /api/v1/ledger/:project/docs/<path>  meta.docsDir 下的 .md / .png / .jpg / .jpeg 原文件（规格卡、报告、截图）
  * 门是 canReadLedger（全 scope、非 peer 的 manage 凭据）；project 必须在 projects.json。库还不存在时总览回空台账（exists:false）。
@@ -11,7 +10,6 @@ import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, resolve, sep } from "node:path";
 import { canReadLedger } from "../../lib/devices.js";
 import { PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../../lib/ledger-read.js";
-import { sinceEvents } from "../../lib/ledger-since.js";
 import { LEDGER_SCHEMA_VERSION, getMeta, schemaVersion } from "../../lib/ledger-store.js";
 import type { Principal } from "../../lib/principals.js";
 import { isUmbrellaDir, normalizeDir, PROJECTS_PATH, readProjects } from "../../lib/projects.js";
@@ -35,13 +33,6 @@ export async function ledgerProjectExists(project: string): Promise<boolean> {
   return (await readProjects(projectsPath)).projects.some((p) => p.id === project);
 }
 
-/** ?since= 只认非负的有限毫秒数；缺省或写坏 = 不要 sinceEvents */
-function sinceParam(url: URL | undefined): number | null {
-  const raw = url?.searchParams.get("since");
-  const n = raw ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
-
 function decode(s: string): string | null {
   try {
     const d = decodeURIComponent(s);
@@ -52,7 +43,7 @@ function decode(s: string): string | null {
   }
 }
 
-export async function handleLedgerApi(req: Request, path: string, principal: Principal, url?: URL): Promise<Response | null> {
+export async function handleLedgerApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
   const m = path.match(/^\/ledger\/([^/]+)(?:\/tasks\/([^/]+)|\/docs\/(.+))?$/);
   if (!m) return null;
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
@@ -68,7 +59,6 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }
   const now = Date.now();
-  const since = sinceParam(url);
   if (m[3] !== undefined) return db ? serveDoc(getMeta(db, project).docsDir, m[3]) : notFound("ledger has no docsDir");
   if (taskId !== undefined) {
     const detail = db ? taskDetail(db, project, taskId, now) : null;
@@ -76,11 +66,10 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
   }
   if (!db) {
     const meta = { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } };
-    return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], projectEvents: [], ...(since === null ? {} : { sinceEvents: [] }), now });
+    return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], projectEvents: [], now });
   }
   // schema 报库里实际的版本：CLI 先升级、bridge 还没重启时它会比代码常量新（LedgerReader 打开时已记一次日志）
-  const sinceView = since === null ? {} : { sinceEvents: sinceEvents(db, project, since) };
-  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), ...sinceView, now });
+  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), now });
 }
 
 /**

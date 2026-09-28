@@ -52,9 +52,9 @@ function migrate(db: Database): void {
     agent TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, last_reply_ts INTEGER NOT NULL DEFAULT 0)`);
   db.exec(`CREATE TABLE IF NOT EXISTS apns_devices (
     token TEXT PRIMARY KEY, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_seen TEXT NOT NULL)`);
-  // 旧 web 的登录会话（只存 sha256）：升级后浏览器带着旧 cstra_session 来，一次性换成设备凭据（lib/legacy-web.ts）
   // 协作视图「上次以来」（lib/last-seen.ts）：按 principal × 视图记上次看的时刻。不在 WEB_STATE_TABLES 里——旧 BFF 没有这张表，迁移不搬
   db.exec(`CREATE TABLE IF NOT EXISTS last_seen (principal TEXT NOT NULL, scope TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (principal, scope))`);
+  // 旧 web 的登录会话（只存 sha256）：升级后浏览器带着旧 cstra_session 来，一次性换成设备凭据（lib/legacy-web.ts）
   db.exec(`CREATE TABLE IF NOT EXISTS legacy_sessions (
     id_hash TEXT PRIMARY KEY, username TEXT NOT NULL DEFAULT '', expires_at TEXT NOT NULL, used_at TEXT)`);
 }

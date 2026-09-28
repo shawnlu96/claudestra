@@ -17,26 +17,27 @@ const EVENT_ICON: Record<string, IconName> = {
   deploy: "zap", verify: "shieldCheck", rollback: "rotateCcw", note: "history",
 };
 
+/** 收起时不算帧（几千条事件要几百毫秒，审查 T12C r1 P2-7）；事件不到 2 条就没什么可回放 */
 export function CollabReplay({ d, tr }: { d: TaskDetail; tr: Tr }) {
   const [open, setOpen] = useState(false);
-  const frames = useMemo(() => replayFrames(d.events, tr), [d.events, tr]);
-  if (frames.length < 2) return null;
+  if (d.events.length < 2) return null;
   if (!open)
     return (
       <button type="button" className={`${base.btn} ${s.rpOpen}`} onClick={() => setOpen(true)}>
         <Icon name="play" size={12} />
-        {tr("回放这条任务 · {n} 件事", { n: frames.length })}
+        {tr("回放这条任务")}
       </button>
     );
   return (
     <div className={base.sec}>
       <h5>{tr("回放")}</h5>
-      <Player d={d} frames={frames} tr={tr} onClose={() => setOpen(false)} />
+      <Player d={d} tr={tr} onClose={() => setOpen(false)} />
     </div>
   );
 }
 
-function Player({ d, frames, tr, onClose }: { d: TaskDetail; frames: ReturnType<typeof replayFrames>; tr: Tr; onClose: () => void }) {
+function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void }) {
+  const frames = useMemo(() => replayFrames(d.events, tr), [d.events, tr]);
   const [i, setI] = useState(0);
   const [playing, setPlaying] = useState(false);
   const cur = frames[Math.min(i, frames.length - 1)];

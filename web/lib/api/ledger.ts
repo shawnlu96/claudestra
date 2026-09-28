@@ -2,7 +2,7 @@
  * 台账读接口（bridge T8c：GET /api/v1/ledger/:project[/tasks/:id]）与协作视图的事件订阅。
  * 权限是 canReadLedger（全 scope 的 owner 设备）；403 由调用方收起入口，不当成故障。
  */
-import type { LedgerOverview } from "@/features/collab/collab-model";
+import type { LedgerEventView, LedgerOverview } from "@/features/collab/collab-model";
 import type { TaskDetail } from "@/features/collab/collab-detail-model";
 import { drainFrames, type BridgeEvent } from "@/lib/chat/stream-shape";
 import { apiAgentName } from "@/lib/chat/agents";
@@ -10,14 +10,22 @@ import { api, apiStream } from "./client";
 
 const enc = encodeURIComponent;
 
-/** since：带上就多要一份 sinceEvents（「上次以来」的原料）；老 bridge 不认这个参数，照常回总览 */
-export function fetchLedger(project: string, signal?: AbortSignal, since?: number | null): Promise<LedgerOverview & { ok: boolean }> {
-  return api(`/ledger/${enc(project)}${typeof since === "number" ? `?since=${since}` : ""}`, { timeoutMs: 10_000, signal });
+export function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
+  return api(`/ledger/${enc(project)}`, { timeoutMs: 10_000, signal });
 }
 
-/** 「上次以来」的基准（bridge local-api/last-seen.ts，按 principal × 项目）；null = 没记过 */
-export function fetchLastSeen(project: string, signal?: AbortSignal): Promise<{ lastSeen: number | null; now: number }> {
-  return api(`/me/last-seen/${enc(project)}`, { timeoutMs: 8000, signal });
+export interface LastSeenView {
+  /** 服务端记的上次看过的时刻（按 principal × 项目）；null = 没记过 */
+  lastSeen: number | null;
+  now: number;
+  /** 基准（since，缺省 lastSeen）之后、now 之前的任务事件；老 bridge 没有 */
+  events?: LedgerEventView[];
+  truncated?: boolean;
+}
+
+/** 「上次以来」一个请求拿齐：基准 + 之后的事件（bridge local-api/last-seen.ts）；since 覆盖基准（同一标签页刷新前那份） */
+export function fetchLastSeen(project: string, signal?: AbortSignal, since?: number | null): Promise<LastSeenView> {
+  return api(`/me/last-seen/${enc(project)}?events=1${typeof since === "number" ? `&since=${since}` : ""}`, { timeoutMs: 8000, signal });
 }
 
 /** 记一次「看过」：时刻用服务端的；keepalive 让页面隐藏 / 卸载途中也发得出去 */

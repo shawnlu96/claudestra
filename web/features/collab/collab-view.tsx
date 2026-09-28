@@ -187,7 +187,7 @@ export function CollabView({ project }: { project: string }) {
       <>
         <Headline v={view!} tr={tr} connected={connected} now={now} projectName={projectName} />
         {lastSeen.state.since !== null && (
-          <SinceCard digest={digest} since={lastSeen.state.since} now={now} tr={tr} onOpen={(id) => openCollabTask(id)} onDismiss={lastSeen.dismiss} />
+          <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={(id) => openCollabTask(id)} onDismiss={lastSeen.dismiss} />
         )}
         <PmStrip v={view!} action={pmAction} tr={tr} />
         <div className={s.lines}>

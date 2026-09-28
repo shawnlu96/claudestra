@@ -80,7 +80,10 @@ export const COLLAB_DICT: Record<string, string> = {
   "上次来之后有变化": "Changed since your last visit",
   "{t} 起": "since {t}",
   "另 {n} 件": "{n} more",
-  "回放这条任务 · {n} 件事": "Replay this task · {n} events",
+  "另 {n}+ 件": "{n}+ more",
+  "{id} 审查拦下": "{id} blocked in review",
+  "{id} 解除受阻": "{id} unblocked",
+  "回放这条任务": "Replay this task",
   "{pm} 派出": "sent by {pm}",
   "已跑 {d}": "running {d}",
 };

@@ -1,7 +1,7 @@
 /**
  * 详情里的「回放」（T12c，ux.md 第三层的只读简化版）：把一条任务的台账事件排成帧，播放头走到哪一帧，
  * 阶段条就画成那一刻的样子。只用 GET /ledger/:project/tasks/:id 已有的 events + timeline，不新增接口；
- * agent 间消息、工具历史没有持久化（data-gaps 第 8、9 项），不在回放里。单测 tests/web-collab-replay.test.ts。
+ * agent 间消息、工具历史没有持久化（data-gaps 第 8、9 项），不在回放里。单测在 tests/web-collab-since.test.ts 的「回放」一节。
  */
 import { eventLine, stageSegments, type Segment, type StageEntryView } from "./collab-detail-model";
 import type { LedgerEventView, Stage, Tr } from "./collab-model";

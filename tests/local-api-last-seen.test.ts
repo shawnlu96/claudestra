@@ -109,37 +109,62 @@ describe("GET/PUT /me/last-seen/:project", () => {
   });
 });
 
-describe("GET /ledger/:project?since=", () => {
-  test("不带 since 不下发 sinceEvents；带了只给之后的任务事件（导入回填、项目级、非建任务的 task 事件都不算）", async () => {
-    expect(((await (await call("/ledger/p")).json()) as Record<string, unknown>).sinceEvents).toBeUndefined();
-    expect(((await (await call("/ledger/p?since=abc")).json()) as Record<string, unknown>).sinceEvents).toBeUndefined();
-    const body = (await (await call("/ledger/p?since=500")).json()) as { sinceEvents: { ts: number; target: string; kind: string; text: string; data: Record<string, unknown> }[] };
-    expect(body.sinceEvents.map((e) => [e.ts, e.target, e.kind])).toEqual([
+type EventsBody = { lastSeen: number | null; now: number; events: { ts: number; target: string; kind: string; text: string; data: Record<string, unknown> }[]; truncated: boolean };
+
+describe("GET /me/last-seen/:project?events=1 与 lib/ledger-since", () => {
+  test("不带 events=1 不下发事件；台账总览也不再带 sinceEvents；基准缺省用 lastSeen，没记过 → 空", async () => {
+    expect(((await (await call("/me/last-seen/p", oldToken)).json()) as Record<string, unknown>).events).toBeUndefined();
+    expect(((await (await call("/ledger/p?since=500")).json()) as Record<string, unknown>).sinceEvents).toBeUndefined();
+    const none = (await (await call("/me/last-seen/p?events=1", oldToken)).json()) as EventsBody;
+    expect(none).toMatchObject({ lastSeen: null, events: [], truncated: false });
+  });
+
+  test("since 覆盖基准：只给之后、now 之前的任务事件（导入回填、项目级、非建任务的 task 事件都不算）；写坏的 since 按缺省", async () => {
+    const body = (await (await call("/me/last-seen/p?events=1&since=500", oldToken)).json()) as EventsBody;
+    expect(body.events.map((e) => [e.ts, e.target, e.kind])).toEqual([
       [520, "T1", "review"],
       [520, "T1", "stage"],
       [600, "T2", "task"],
       [1100, "T1", "verify"],
       [1300, "T9", "task"],
     ]);
+    expect(body.truncated).toBe(false);
+    expect(((await (await call("/me/last-seen/p?events=1&since=abc", oldToken)).json()) as EventsBody).events).toEqual([]);
+  });
+
+  test("基准用服务端记的 lastSeen：PUT 之后再读，之前的事件都不算了", async () => {
+    await call("/me/last-seen/q", oldToken, "PUT");
+    const body = (await (await call("/me/last-seen/q?events=1", oldToken)).json()) as EventsBody;
+    expect(body.lastSeen).not.toBeNull();
+    expect(body.events).toEqual([]);
   });
 
   test("text 只留首个非空行，data 只留摘要要的键", async () => {
-    const body = (await (await call("/ledger/p?since=1050")).json()) as { sinceEvents: { kind: string; text: string; data: Record<string, unknown> }[] };
-    const verify = body.sinceEvents.find((e) => e.kind === "verify")!;
+    const body = (await (await call("/me/last-seen/p?events=1&since=1050", oldToken)).json()) as EventsBody;
+    const verify = body.events.find((e) => e.kind === "verify")!;
     expect(verify.text).toBe("线上验证失败：首屏白屏");
     expect(verify.data).toEqual({ result: "fail" });
   });
 
-  test("上限 SINCE_EVENTS_LIMIT 条，保留最新的，seq 升序", () => {
+  test("过滤在 LIMIT 之前：大量导入回填不会挤掉真实事件；超过上限留最新的并标 truncated；until 之后的不算", () => {
     const path = tempLedgerPath();
     const db = openLedger(path);
     try {
       createTask(db, { actor: "owner", now: 1 }, { project: "p", id: "T1", title: "t", kind: "code", agent: "a" });
-      for (let i = 0; i < SINCE_EVENTS_LIMIT + 30; i++) appendEvent(db, { actor: "a", now: 10 + i }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
+      appendEvent(db, { actor: "a", now: 5 }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
+      for (let i = 0; i < SINCE_EVENTS_LIMIT * 3; i++) {
+        appendEvent(db, { actor: "import", now: 6 + i, approxTime: true }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
+      }
+      const few = sinceEvents(db, "p", 0);
+      expect(few.events.map((e) => e.ts)).toEqual([1, 5]);
+      expect(few.truncated).toBe(false);
+      for (let i = 0; i < SINCE_EVENTS_LIMIT + 30; i++) appendEvent(db, { actor: "a", now: 10_000 + i }, { project: "p", target: "T1", kind: "verify", data: { result: "pass" } });
       const got = sinceEvents(db, "p", 0);
-      expect(got.length).toBe(SINCE_EVENTS_LIMIT);
-      expect(got.at(-1)!.ts).toBe(10 + SINCE_EVENTS_LIMIT + 29);
-      expect(got[0].seq).toBeLessThan(got[1].seq);
+      expect(got.events.length).toBe(SINCE_EVENTS_LIMIT);
+      expect(got.truncated).toBe(true);
+      expect(got.events.at(-1)!.ts).toBe(10_000 + SINCE_EVENTS_LIMIT + 29);
+      expect(got.events[0].seq).toBeLessThan(got.events[1].seq);
+      expect(sinceEvents(db, "p", 0, 5).events.map((e) => e.ts)).toEqual([1, 5]);
     } finally {
       closeLedger(path);
     }

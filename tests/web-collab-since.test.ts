@@ -42,10 +42,51 @@ describe("sinceDigest", () => {
       ev("T9", "stage", { from: "build", to: "blocked" }),
       ev("T11", "review", { verdict: "block" }),
     ], TASKS);
-    expect(d.items.map((i) => i.text)).toEqual(["T11 被退回返工", "T9 受阻", "T8 线上验证失败", "T7 回滚", "新派 T6"]);
+    expect(d.items.map((i) => i.text)).toEqual(["T11 审查拦下", "T9 受阻", "T8 线上验证失败", "T7 回滚", "新派 T6"]);
     expect(d.more).toBe(1);
     expect(d.items.length).toBe(SINCE_MAX);
     expect(d.changed.size).toBe(6);
+  });
+
+  test("问题解决了就不再标红：退回后又通过 / 上线，回滚后又上线，验证失败后又通过，受阻后解除（审查 T12C r1 P2-4）", () => {
+    const d = sinceDigest([
+      ev("T5", "review", { round: 1, verdict: "changes" }),
+      ev("T5", "stage", { from: "fix", to: "review", round: 2 }),
+      ev("T5", "review", { round: 2, verdict: "pass" }),
+      ev("T6", "rollback"),
+      ev("T6", "deploy", { version: "v2" }),
+      ev("T7", "verify", { result: "fail" }),
+      ev("T7", "verify", { result: "pass" }),
+      ev("T8", "stage", { from: "build", to: "blocked" }),
+      ev("T8", "stage", { from: "blocked", to: "build" }),
+    ], TASKS);
+    expect(d.items.map((i) => [i.taskId, i.text, i.tone])).toEqual([
+      ["T7", "T7 验证通过", "green"],
+      ["T6", "T6 上线", "green"],
+      ["T5", "T5 审查通过", "green"],
+      ["T8", "T8 解除受阻", "neutral"],
+    ]);
+  });
+
+  test("没解决的问题照样红：返工后只是交付审查还没过；解除受阻不算解决别的问题；问题之后又出新问题说最新的", () => {
+    const d = sinceDigest([
+      ev("T5", "review", { round: 1, verdict: "changes" }),
+      ev("T5", "stage", { from: "fix", to: "review", round: 2 }),
+      ev("T6", "rollback"),
+      ev("T6", "stage", { from: "blocked", to: "build" }),
+      ev("T7", "review", { round: 1, verdict: "pass" }),
+      ev("T7", "verify", { result: "fail" }),
+    ], TASKS);
+    expect(d.items.map((i) => [i.taskId, i.text, i.tone])).toEqual([
+      ["T7", "T7 线上验证失败", "red"],
+      ["T6", "T6 回滚", "red"],
+      ["T5", "T5 被退回返工 · 第 1 轮", "red"],
+    ]);
+  });
+
+  test("审查结论：block 写「审查拦下」；没写结论的审查不成条，交给同一刻的 stage 事件", () => {
+    const d = sinceDigest([ev("T5", "review", { verdict: "block" }), ev("T6", "review", { round: 2 }), ev("T6", "stage", { from: "review", to: "merge" })], TASKS);
+    expect(d.items.map((i) => [i.text, i.tone])).toEqual([["T5 审查拦下", "red"], ["T6 进入合并", "neutral"]]);
   });
 
   test("不值得说的事件（交付、改字段）不成条，但任务照样算变过；空台账事件 → 空摘要", () => {
