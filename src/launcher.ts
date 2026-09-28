@@ -84,6 +84,7 @@ initDaemonLogs("launcher");
 // 过来的 registry 把别人的 agent 全拉起来（2026-08-15 实测一口气 14 个）。
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
+import { healSelfDirty } from "./lib/self-dirty.js";
 await assertPrimaryOrExit("launcher");
 
 
@@ -347,10 +348,9 @@ async function checkBetaUpdates(autoOn: boolean) {
   if (remote === lastBetaAttemptSha && Date.now() - lastBetaAttemptAt < 10 * 60_000) return;
   lastBetaAttemptSha = remote;
   lastBetaAttemptAt = Date.now();
-  // v2.20.2+ 脏树先检并**如实上报**(peer 实报:用户微调软链进仓库的 skill →
-  // git pull 永远失败,而这里旧文案「自动前进」读起来像成功——版本停在旧的
-  // 三周没人发现)。阻塞是用户须知的状态,不是日志尾巴。
-  const dirty = await g("status", "--porcelain");
+  // 脏树先检并如实上报(软链进仓库的 skill 被微调 → git pull 永远失败,版本停三周没人发现);阻塞是用户须知的状态。
+  // 例外:只是我们自己的安装改写的锁文件,先还原再走(He 的机器因此停在中间版本、App 白屏,git log -S healSelfDirty)
+  const dirty = healSelfDirty(REPO_ROOT, await g("status", "--porcelain"));
   if (dirty) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)})但仓库工作区脏——自动更新阻塞`);
     if (remote !== lastDirtyNotifiedSha) {
@@ -446,7 +446,7 @@ async function checkForUpdates() {
 
   // 脏树 = update 必然 bail：如实上报一次（按版本去重），别静默
   const st = Bun.spawnSync(["git", "-C", REPO_ROOT, "status", "--porcelain"]);
-  if (st.exitCode === 0 && st.stdout.toString().trim()) {
+  if (st.exitCode === 0 && healSelfDirty(REPO_ROOT, st.stdout.toString()).trim()) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本但仓库工作区脏——自动更新阻塞`);
     if (lastReleaseDirtyNotified !== release.version) {
       lastReleaseDirtyNotified = release.version;
