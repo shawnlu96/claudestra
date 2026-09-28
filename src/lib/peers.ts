@@ -11,6 +11,8 @@ import { readJsonLenient, writeJsonStateGuarded } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 import { instanceIdSync, isInstanceId } from "./instance-id.js";
 import { FP_RE } from "./relay-protocol.js";
+import { isPublicKey, keyFingerprint } from "./instance-key.js";
+import type { SignedE2eKey } from "./e2e-machine-key.js";
 import { existsSync } from "fs";
 import { mkdir } from "fs/promises";
 
@@ -37,6 +39,11 @@ export interface HttpPeer {
   instanceId?: string;
   /** 对方实例指纹（lib/instance-key.ts keyFingerprint）：中继的联系人门控与在线状态按它认人；老记录没有 */
   fp?: string;
+  /**
+   * 用密钥建立的 peer（docs/relay/e2e-design.md §5.1）：带外交换时钉住的身份公钥与签名 E2E 公钥块。
+   * 有它就是 required：出站只走 E2E，明文入站一律 403 e2e_required。老记录与 --allow-legacy 建的没有
+   */
+  e2e?: { idk: string; ek: SignedE2eKey };
 }
 
 /**
@@ -236,6 +243,27 @@ export interface PeerInviteV2 {
   iid?: string;
   /** 邀请方实例指纹：被邀方记进 peer 记录，之后中继按它放行对方的帧、推在线状态 */
   fp?: string;
+  /** 邀请方 Ed25519 身份公钥：兑换方拿它验 ek 并钉住。与 ek 同进同出，--allow-legacy 的邀请两样都没有 */
+  idk?: string;
+  /** 邀请方的签名 E2E 公钥块：有它才走 HPKE 兑换、建 required peer */
+  ek?: SignedE2eKey;
+}
+
+const isKeyBlobShape = (v: unknown): v is SignedE2eKey => {
+  const o = v as Record<string, unknown> | null;
+  return !!o && typeof o === "object" && Number.isSafeInteger(o.v) && (o.v as number) >= 1 && Number.isSafeInteger(o.ts) && (o.ts as number) >= 0 &&
+    typeof o.pub === "string" && typeof o.sig === "string";
+};
+
+/**
+ * 邀请里的密钥字段：都没有 → {}（老邀请 / --allow-legacy）；带了任何一样就两样都得合格，身份公钥还得对上 fp，
+ * 否则 null、整张邀请作废——带了却坏掉的密钥不能被悄悄当成老邀请接受，那就是一次降级。签名在兑换时再验（要 WebCrypto）。
+ */
+function inviteKeys(raw: Record<string, unknown>, fp: string | undefined): { idk?: string; ek?: SignedE2eKey } | null {
+  if (raw.idk === undefined && raw.ek === undefined) return {};
+  if (!isPublicKey(raw.idk) || !fp || keyFingerprint(raw.idk) !== fp || !isKeyBlobShape(raw.ek)) return null;
+  const { v, ts, pub, sig } = raw.ek;
+  return { idk: raw.idk, ek: { v, ts, pub, sig } };
 }
 
 /** 没给 iid 就带上本机的（本机 id 读写失败时不带，握手照常） */
@@ -254,7 +282,9 @@ export function parsePeerInviteV2(s: string): PeerInviteV2 | null {
     if (typeof raw.join !== "string" || raw.join.length < 16) return null;
     const iid = isInstanceId(raw.iid) ? { iid: raw.iid } : {}; // 形状不对就当没带（只影响合并，不拒整张邀请）
     const fp = typeof raw.fp === "string" && FP_RE.test(raw.fp.toLowerCase()) ? { fp: raw.fp.toLowerCase() } : {};
-    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join, ...iid, ...fp };
+    const keys = inviteKeys(raw, fp.fp);
+    if (!keys) return null;
+    return { v: 2, name: raw.name, url: raw.url.replace(/\/+$/, ""), token: raw.token, join: raw.join, ...iid, ...fp, ...keys };
   } catch {
     return null;
   }

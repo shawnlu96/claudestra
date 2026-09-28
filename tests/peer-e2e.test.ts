@@ -1,0 +1,322 @@
+/**
+ * peer 整体加密的进程内端到端（lib/peer-e2e-{client,serve,sessions,wire}.ts）：A 发起、B 响应，中间夹一个「中继」，
+ * 它能录下、重放、并发重复投递、篡改、伪造错误、冒充 B 应答。按 docs/relay/e2e-design.md §4.1.4 与 §5.1 的降级 / 重放规则逐条钉住：
+ * 任何一处都不回退明文，同一个内层请求最多被处理一次。
+ */
+import { describe, expect, test } from "bun:test";
+import { createPublicKey, generateKeyPairSync, randomUUID } from "node:crypto";
+import { respond } from "../src/lib/e2e/handshake.ts";
+import { generateEcdh } from "../src/lib/e2e/primitives.ts";
+import { signE2eKey, type MachineE2eKey, type SignedE2eKey } from "../src/lib/e2e-machine-key.ts";
+import { keyFingerprint, SIG_HEADERS, signedHeaders, verifySigned, type InstanceKey } from "../src/lib/instance-key.ts";
+import { E2eError, PeerE2eClient } from "../src/lib/peer-e2e-client.ts";
+import { serveE2e, type E2ePeer, type ServeDeps } from "../src/lib/peer-e2e-serve.ts";
+import { SessionTable } from "../src/lib/peer-e2e-sessions.ts";
+import { encodeHelloReply, PEER_E2E_LABEL } from "../src/lib/peer-e2e-wire.ts";
+import { toB64url, utf8 } from "../src/lib/e2e/encoding.ts";
+
+interface Machine {
+  id: InstanceKey;
+  fp: string;
+  m: MachineE2eKey;
+  blob: SignedE2eKey;
+}
+
+async function machine(v = 1): Promise<Machine> {
+  const privateKey = generateKeyPairSync("ed25519").privateKey;
+  const id = { privateKey, publicKey: String(createPublicKey(privateKey).export({ format: "jwk" }).x) };
+  const pair = await generateEcdh();
+  return { id, fp: keyFingerprint(id.publicKey), m: { pair, ts: 1790000000 }, blob: signE2eKey(id, pair.pub, v, 1790000000) };
+}
+
+const asPeer = (x: Machine, name: string): E2ePeer => ({ name, fp: x.fp, idk: x.id.publicKey, ek: x.blob });
+
+/** B 的内层路由替身：记下处理过的请求；非 GET 按内层签名去重（代替 T25 的 ReplayCache） */
+function router() {
+  const handled: { method: string; path: string; headers: Record<string, string>; body: string }[] = [];
+  const seenSig = new Set<string>();
+  const dispatch = async (req: Request) => {
+    const sig = req.headers.get(SIG_HEADERS.sig) ?? "";
+    if (req.method !== "GET" && seenSig.has(sig)) return Response.json({ ok: false, error: "replay" }, { status: 409 });
+    seenSig.add(sig);
+    const body = req.method === "GET" ? "" : await req.text();
+    handled.push({ method: req.method, path: new URL(req.url).pathname, headers: Object.fromEntries(req.headers), body });
+    return Response.json({ ok: true, echo: body, n: handled.length }, { status: req.method === "POST" ? 201 : 200 });
+  };
+  return { handled, dispatch };
+}
+
+type Relay = (req: Request, forward: (r: Request) => Promise<Response>) => Promise<Response>;
+
+async function world(opts: { relay?: Relay; limits?: ConstructorParameters<typeof SessionTable>[0]; now?: () => number } = {}) {
+  const a = await machine(), b = await machine();
+  const r = router();
+  let bKnowsA: E2ePeer | null = asPeer(a, "a");
+  let aKnowsB = asPeer(b, "b");
+  const seenOuter = new Set<string>();
+  const pinnedByA: SignedE2eKey[] = [];
+  const bDeps: ServeDeps = {
+    myFp: b.fp,
+    machine: async () => b.m,
+    mySignedKey: async () => b.blob,
+    sessions: new SessionTable(opts.limits, opts.now),
+    peerByFp: (fp) => (bKnowsA && fp === bKnowsA.fp ? bKnowsA : null),
+    pinNewer: async () => {},
+    outerSigned: (req, body, idk) => {
+      const h = (k: string) => req.headers.get(k) ?? "";
+      if (h(SIG_HEADERS.key) !== idk || seenOuter.has(h(SIG_HEADERS.sig))) return false;
+      seenOuter.add(h(SIG_HEADERS.sig));
+      return verifySigned(idk, { method: req.method, path: new URL(req.url).pathname, ts: h(SIG_HEADERS.ts), sig: h(SIG_HEADERS.sig), body }) === "ok";
+    },
+    dispatch: (inner) => r.dispatch(inner),
+  };
+  const toB = async (req: Request) => (await serveE2e(req, new URL(req.url).pathname, bDeps, { relayFrom: a.fp })) ?? new Response("not found", { status: 404 });
+  const posted: string[] = [];
+  const client = new PeerE2eClient({
+    myFp: a.fp,
+    peer: () => aKnowsB,
+    machine: async () => a.m,
+    mySignedKey: async () => a.blob,
+    pinNewer: async (_p, k) => {
+      pinnedByA.push(k);
+    },
+    post: async (path, body, contentType) => {
+      posted.push(path);
+      const req = new Request(`http://b.local${path}`, { method: "POST", body, headers: { "content-type": contentType, ...signedHeaders("POST", path, body, a.id) } });
+      return opts.relay ? opts.relay(req, toB) : toB(req);
+    },
+    ...(opts.now ? { now: opts.now } : {}),
+  });
+  /** 模拟调用方：内层带 Bearer 和一个每次唯一的内层签名 */
+  const call = (method: string, path: string, body?: string) =>
+    client.fetch(method, path, { authorization: "Bearer tok", [SIG_HEADERS.sig]: randomUUID(), host: "evil", "x-forwarded-for": "127.0.0.1" }, body === undefined ? undefined : utf8(body));
+  return {
+    a, b, r, bDeps, client, call, posted, pinnedByA,
+    setBKnowsA: (p: E2ePeer | null) => (bKnowsA = p),
+    setAKnowsB: (p: E2ePeer) => (aKnowsB = p),
+  };
+}
+
+const copy = async (req: Request) => new Request(req.url, { method: req.method, headers: req.headers, body: await req.clone().arrayBuffer() });
+
+describe("peer E2E：正常往返", () => {
+  test("POST / GET 都能往返；内层头走白名单，host、x-forwarded-for 这类到不了路由", async () => {
+    const w = await world();
+    const res = await w.call("POST", "/api/v1/agents/x/messages", "hi");
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ ok: true, echo: "hi", n: 1 });
+    expect((await w.call("GET", "/api/v1/agents")).status).toBe(200);
+    expect(w.r.handled.map((h) => [h.method, h.path])).toEqual([["POST", "/api/v1/agents/x/messages"], ["GET", "/api/v1/agents"]]);
+    expect(w.r.handled[0].headers.authorization).toBe("Bearer tok");
+    expect(w.r.handled[0].headers["x-forwarded-for"]).toBeUndefined();
+    expect(w.r.handled[0].headers.host).not.toBe("evil");
+    expect(w.posted.filter((p) => p.endsWith("/hello"))).toHaveLength(1); // 一个会话复用
+    expect(w.posted.every((p) => p.startsWith("/api/v1/e2e/"))).toBe(true);
+  });
+
+  test("中继看到的字节里没有内层路径、token、正文", async () => {
+    const seen: string[] = [];
+    const w = await world({ relay: async (req, fwd) => {
+      seen.push(Buffer.from(await req.clone().arrayBuffer()).toString("latin1"));
+      const res = await fwd(req);
+      seen.push(Buffer.from(await res.clone().arrayBuffer()).toString("latin1"));
+      return res;
+    } });
+    await w.call("POST", "/api/v1/agents/secretproj/messages", "机密内容");
+    const all = seen.join("\n");
+    for (const needle of ["secretproj", "Bearer", "tok", "机密", "echo"]) expect(all.includes(needle)).toBe(false);
+  });
+});
+
+describe("peer E2E：重放与重复投递", () => {
+  test("中继事后重放录下的记录 → 409，路由没再处理", async () => {
+    let captured: Request | null = null;
+    const w = await world({ relay: async (req, fwd) => {
+      if (new URL(req.url).pathname !== "/api/v1/e2e/hello" && !captured) captured = await copy(req);
+      return fwd(req);
+    } });
+    await w.call("POST", "/api/v1/agents/x/messages", "once");
+    const again = (await serveE2e(captured!, new URL(captured!.url).pathname, w.bDeps, { relayFrom: w.a.fp }))!;
+    expect(again.status).toBe(409);
+    expect(((await again.json()) as { code: string }).code).toBe("e2e_replay");
+    expect(w.r.handled).toHaveLength(1);
+  });
+
+  test("同一条记录并发投两份：只有一份通过（查并记同步），另一份 409", async () => {
+    const statuses: number[] = [];
+    const w = await world({ relay: async (req, fwd) => {
+      if (new URL(req.url).pathname === "/api/v1/e2e/hello") return fwd(req);
+      const dup = await copy(req);
+      const [r1, r2] = await Promise.all([fwd(req), fwd(dup)]);
+      statuses.push(r1.status, r2.status);
+      return r1.status === 200 ? r1 : r2;
+    } });
+    expect((await w.call("POST", "/api/v1/x", "dup")).status).toBe(201);
+    expect(statuses.sort()).toEqual([200, 409]);
+    expect(w.r.handled).toHaveLength(1);
+  });
+
+  test("原请求已被处理、中继伪造 401 e2e_session：发起方重握手重发同一份内层，收方认出重放，不处理第二次", async () => {
+    let forged = false;
+    const w = await world({ relay: async (req, fwd) => {
+      const res = await fwd(req);
+      if (!forged && new URL(req.url).pathname !== "/api/v1/e2e/hello") {
+        forged = true;
+        return Response.json({ ok: false, code: "e2e_session" }, { status: 401 });
+      }
+      return res;
+    } });
+    const res = await w.call("POST", "/api/v1/agents/x/messages", "pay once");
+    expect(res.status).toBe(409); // 内层重放缓存拒掉的那一次，原样带回给调用方
+    expect(w.r.handled).toHaveLength(1);
+    expect(w.posted.filter((p) => p.endsWith("/hello"))).toHaveLength(2);
+  });
+
+  test("会话真丢了（收方重启）：重握手后重发成功，只处理一次", async () => {
+    const w = await world();
+    await w.call("GET", "/api/v1/agents");
+    w.bDeps.sessions = new SessionTable();
+    expect((await w.call("POST", "/api/v1/x", "after restart")).status).toBe(201);
+    expect(w.r.handled.filter((h) => h.method === "POST")).toHaveLength(1);
+  });
+});
+
+describe("peer E2E：篡改与降级", () => {
+  test("改请求记录 → 400，窗口不动：原样再发同一个 rid 仍能通过", async () => {
+    let saved: Request | null = null;
+    const w = await world({ relay: async (req, fwd) => {
+      if (new URL(req.url).pathname === "/api/v1/e2e/hello" || saved) return fwd(req);
+      saved = await copy(req);
+      const b = new Uint8Array(await req.arrayBuffer());
+      b[b.length - 1] ^= 1;
+      const bad = await fwd(new Request(req.url, { method: "POST", headers: req.headers, body: b }));
+      expect(bad.status).toBe(400);
+      return fwd(saved);
+    } });
+    expect((await w.call("POST", "/api/v1/x", "intact")).status).toBe(201);
+    expect(w.r.handled).toHaveLength(1);
+  });
+
+  test("改响应、互换两个请求的响应 → 发起方抛 e2e_record", async () => {
+    const w = await world({ relay: async (req, fwd) => {
+      const res = await fwd(req);
+      if (new URL(req.url).pathname === "/api/v1/e2e/hello") return res;
+      const b = new Uint8Array(await res.arrayBuffer());
+      b[10] ^= 1;
+      return new Response(b, { status: 200, headers: res.headers });
+    } });
+    await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_record" });
+
+    let first: Uint8Array | null = null;
+    const w2 = await world({ relay: async (req, fwd) => {
+      const res = await fwd(req);
+      if (new URL(req.url).pathname === "/api/v1/e2e/hello") return res;
+      const body = new Uint8Array(await res.arrayBuffer());
+      first ??= body; // 第二个请求拿到第一个的响应
+      return new Response(first, { status: 200, headers: res.headers });
+    } });
+    await w2.call("GET", "/api/v1/agents");
+    await expect(w2.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_record" });
+  });
+
+  test("中继冒充 B 应答 hello（没有 B 的 M）→ confirm 对不上，一个内层请求都没发出", async () => {
+    const evil = await generateEcdh();
+    const w = await world({ relay: async (req, fwd) => {
+      if (new URL(req.url).pathname !== "/api/v1/e2e/hello") return fwd(req);
+      const h = (await req.json()) as { ce: string };
+      const ce = Uint8Array.from(Buffer.from(h.ce, "base64url"));
+      const r = await respond({ fp: w.b.fp, devId: utf8(w.a.fp), label: PEER_E2E_LABEL }, { local: evil, remoteStatic: w.a.m.pair.pub, ce });
+      return new Response(encodeHelloReply({ be: r.be, sid: r.sid, ttl: 86400, confirm: r.confirm, key: w.b.blob }));
+    } });
+    await expect(w.call("POST", "/api/v1/x", "secret")).rejects.toMatchObject({ code: "e2e_confirm" });
+    expect(w.posted).toEqual(["/api/v1/e2e/hello"]);
+  });
+
+  test("对方不支持（404）、中继报错（502）、任何非记录流的 200 → 抛错，绝不换明文重试", async () => {
+    const fakes: [string, number, Record<string, string>][] = [["nope", 404, {}], ["bad gateway", 502, {}], ['{"ok":true}', 200, { "content-type": "application/json" }]];
+    for (const [body, status, headers] of fakes) {
+      const w = await world({ relay: async (req, fwd) => (new URL(req.url).pathname === "/api/v1/e2e/hello" ? fwd(req) : new Response(body, { status, headers })) });
+      await expect(w.call("POST", "/api/v1/x", "p")).rejects.toBeInstanceOf(E2eError);
+      expect(w.posted.every((p) => p.startsWith("/api/v1/e2e/"))).toBe(true);
+      expect(w.r.handled).toHaveLength(0);
+    }
+  });
+});
+
+describe("peer E2E：hello 的准入", () => {
+  test("未知 peer 403、发给别人 400、套件不认识 400、外层没签名 401、中继盖的发送方对不上 403", async () => {
+    const w = await world();
+    const hello = async (body: Record<string, unknown>, signed = true, relayFrom = w.a.fp) => {
+      const raw = utf8(JSON.stringify(body));
+      const req = new Request("http://b.local/api/v1/e2e/hello", { method: "POST", body: raw, headers: signed ? signedHeaders("POST", "/api/v1/e2e/hello", raw, w.a.id) : {} });
+      const res = (await serveE2e(req, "/api/v1/e2e/hello", w.bDeps, { relayFrom }))!;
+      return [res.status, ((await res.json()) as { code: string }).code];
+    };
+    const base = { v: 1, suite: { kem: 16, kdf: 1, aead: 2 }, from: w.a.fp, to: w.b.fp, ce: toB64url((await generateEcdh()).pub), key: w.a.blob };
+    expect(await hello({ ...base, suite: { kem: 16, kdf: 1, aead: 1 } })).toEqual([400, "e2e_suite"]);
+    expect(await hello({ ...base, to: "0000-0000-0000-0000" })).toEqual([400, "e2e_wrong_target"]);
+    expect(await hello(base, false)).toEqual([401, "e2e_signature"]);
+    expect(await hello(base, true, "1111-1111-1111-1111")).toEqual([403, "e2e_peer_mismatch"]);
+    w.setBKnowsA(null);
+    expect(await hello(base)).toEqual([403, "e2e_unknown_peer"]);
+  });
+
+  test("对方拿出比钉住的更旧的块 → e2e_key_stale；更新的块在 confirm 之后才钉", async () => {
+    const w = await world();
+    w.setAKnowsB({ ...asPeer(w.b, "b"), ek: { ...w.b.blob, v: 2 } });
+    await expect(w.call("GET", "/api/v1/agents")).rejects.toMatchObject({ code: "e2e_key_stale" });
+
+    const w2 = await world();
+    const rotated = await generateEcdh();
+    w2.b.m = { pair: rotated, ts: 1790000100 };
+    w2.b.blob = signE2eKey(w2.b.id, rotated.pub, 2, 1790000100);
+    expect((await w2.call("GET", "/api/v1/agents")).status).toBe(200);
+    expect(w2.pinnedByA.map((k) => k.v)).toEqual([2]);
+  });
+});
+
+describe("peer E2E：会话生命期", () => {
+  test("peer 在会话期间被删：下一条 401，重握手被拒 → e2e_unknown_peer，路由没处理", async () => {
+    const w = await world();
+    await w.call("GET", "/api/v1/agents");
+    w.setBKnowsA(null);
+    await expect(w.call("POST", "/api/v1/x", "late")).rejects.toMatchObject({ code: "e2e_unknown_peer" });
+    expect(w.r.handled).toHaveLength(1);
+  });
+
+  test("解密的 await 期间 peer 被删（第 3 步再查）→ 401，不分发", async () => {
+    let kill: (() => void) | null = null;
+    const w = await world({ relay: async (req, fwd) => {
+      const p = fwd(req); // 收方同步跑到第一个 await 就让出，这时删 peer = 删在解密期间
+      if (new URL(req.url).pathname !== "/api/v1/e2e/hello") kill?.();
+      return p;
+    } });
+    await w.call("GET", "/api/v1/agents");
+    kill = () => w.setBKnowsA(null);
+    await expect(w.call("POST", "/api/v1/x", "race")).rejects.toMatchObject({ code: "e2e_unknown_peer" });
+    expect(w.r.handled).toHaveLength(1);
+  });
+
+  test("用量耗尽、TTL 到期 → 换新会话；每个发起方最多留 16 个", async () => {
+    let now = 1_800_000_000_000;
+    const w = await world({ limits: { maxRequests: 2 }, now: () => now });
+    for (let k = 0; k < 3; k++) await w.call("GET", "/api/v1/agents");
+    expect(w.posted.filter((p) => p.endsWith("/hello"))).toHaveLength(2);
+    now += 25 * 3600_000;
+    await w.call("GET", "/api/v1/agents");
+    expect(w.posted.filter((p) => p.endsWith("/hello"))).toHaveLength(3);
+
+    const t = new SessionTable({ perPeer: 16 });
+    const keys = { c2b: {} as CryptoKey, b2c: {} as CryptoKey, th: new Uint8Array(32) };
+    for (let n = 0; n < 20; n++) t.add("aaaa-aaaa-aaaa-aaaa", crypto.getRandomValues(new Uint8Array(16)), keys);
+    t.add("bbbb-bbbb-bbbb-bbbb", crypto.getRandomValues(new Uint8Array(16)), keys);
+    expect(t.size).toBe(17);
+  });
+
+  test("内层路径不合规（套娃 /api/v1/e2e/、不在 /api/v1/ 下）→ 加密的 400，路由不处理", async () => {
+    const w = await world();
+    expect((await w.client.fetch("GET", "/api/v1/e2e/hello", {})).status).toBe(400);
+    expect((await w.client.fetch("GET", "/admin", {})).status).toBe(400);
+    expect(w.r.handled).toHaveLength(0);
+  });
+});
