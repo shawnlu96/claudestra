@@ -42,7 +42,9 @@ let now = 1_790_000_000_000;
 const received: Uint8Array[] = [];
 const frames: PushRequest[] = [];
 const dir = mkdtempSync(join(tmpdir(), "push-no-content-"));
-const db = openWebState(":memory:");
+// 独立的库文件：openWebState 按路径缓存句柄，":memory:" 会和别的测试文件共用一份（未读数串过来，角标就对不上）
+const dbPath = join(dir, "web-state.sqlite");
+const db = openWebState(dbPath);
 let browser: ReturnType<typeof webPushTestBrowser>;
 
 beforeAll(async () => {
@@ -77,7 +79,7 @@ afterAll(() => {
   client?.close();
   relay?.stop();
   pushSrv?.stop(true);
-  closeWebState(":memory:");
+  closeWebState(dbPath);
 });
 
 /** 触发一次，等推送服务收到，返回 [中继看到的帧 payload, 浏览器解开的正文] */
