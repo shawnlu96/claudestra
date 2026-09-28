@@ -42,6 +42,10 @@ describe("动作白名单", () => {
     expect(compactCommand("")).toBe("/compact");
   });
 
+  test("控制字符（ESC / Ctrl+C / Tab）不许原样敲进输入框", () => {
+    expect(compactCommand("保留\x1b[A\x03清单\t尾")).toBe("/compact 保留 [A 清单 尾");
+  });
+
   test("keep 只对 compact / lp-compact 生效", () => {
     const a = parseFleetAction({ kind: "lp-on", keep: "x" });
     expect(a.ok && a.action.keep).toBeUndefined();

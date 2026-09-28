@@ -31,9 +31,12 @@ export const DEFAULT_COMPACT_KEEP =
 const MAX_KEEP = 2000;
 const MAX_TEXT = 4000;
 
-/** 输入框里一个换行就等于回车：保留清单压成一行，否则半截清单会被当成一条命令提交 */
+/**
+ * 保留清单是用 send-keys -l 原样敲进输入框的：换行等于回车（半截清单会被当成命令提交），ESC 等控制字符会被 TUI 当成按键。
+ * 所以控制字符一律换成空格、压成一行。
+ */
 function oneLine(s: string): string {
-  return s.replace(/[\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim();
+  return s.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }
 
 export function compactCommand(keep: string): string {

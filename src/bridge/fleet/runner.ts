@@ -162,11 +162,23 @@ async function lpThenCompact(io: PaneIO, win: string, keep: string): Promise<Ste
   return { ...c, detail: `LP 开着，${c.detail}` };
 }
 
+/** 正在被批量动作处理的 agent：网页和 CLI 同时对同一个窗口发，两串按键会交错（半截命令、Esc 打到别人的回合上） */
+const inFlight = new Set<string>();
+
 /** 单个 agent 跑一个动作；win 为 null（窗口不在）只允许 text */
 export async function runOne(action: FleetAction, agent: string, win: string | null, ctx: RunCtx): Promise<FleetResult> {
   const out = (s: Step): FleetResult => ({ agent, ...s });
   if (ccOnly(action.kind) && !win) return out(failed("找不到它的 tmux 窗口"));
-  const w = win ?? "";
+  if (inFlight.has(agent)) return out({ outcome: "skipped", detail: "另一个批量动作正在处理它" });
+  inFlight.add(agent);
+  try {
+    return await runAction(action, agent, win ?? "", ctx, out);
+  } finally {
+    inFlight.delete(agent);
+  }
+}
+
+async function runAction(action: FleetAction, agent: string, w: string, ctx: RunCtx, out: (s: Step) => FleetResult): Promise<FleetResult> {
   try {
     switch (action.kind) {
       case "lp-on": return out(await setLp(ctx.io, w, "on"));

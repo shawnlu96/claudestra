@@ -176,6 +176,25 @@ describe("开 LP 再压缩", () => {
   });
 });
 
+describe("同一个 agent 同时只跑一个批量动作", () => {
+  test("第一个还没跑完，第二个直接跳过、不发键", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const first = fakeIO([fx("walled"), fx("lp-on-autocontinue")]);
+    const slow: PaneIO = { ...first.io, capture: async (w) => (await gate, first.io.capture(w)) };
+    const a = runOne({ kind: "lp-on" }, "agent-x", "master:=agent-x", ctxOf(slow));
+    const second = fakeIO([fx("walled")]);
+    const b = await runOne({ kind: "compact" }, "agent-x", "master:=agent-x", ctxOf(second.io));
+    expect(b).toMatchObject({ outcome: "skipped", detail: "另一个批量动作正在处理它" });
+    expect(second.keys).toEqual([]);
+    release();
+    expect((await a).outcome).toBe("done");
+    const again = await runOne({ kind: "lp-on" }, "agent-x", "master:=agent-x", ctxOf(fakeIO([fx("lp-on-allowance")]).io));
+    expect(again.outcome).toBe("skipped"); // 占用在第一个结束后释放：这次是「已经是开」
+    expect(again.detail).toBe("已经是开");
+  });
+});
+
 describe("自定义文本走 deliver", () => {
   test("送达 / 排队 / 失败", async () => {
     expect((await run({ kind: "text", text: "hi" }, [""])).outcome).toBe("done");
