@@ -8,7 +8,7 @@
  * 用法：bun scripts/ledger-import-deps.ts <deps.json> --project <id> [--keep-state] [--dry-run]
  * 沙箱：CLAUDESTRA_STATE_DIR=<临时目录> 让读库与 CLI 写入都指向那里的 ledger.sqlite。
  */
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { resolveBunPath } from "../src/lib/bun-path.js";
@@ -116,9 +116,10 @@ function report(plan: ImportPlan): void {
 /**
  * 只读取规划要的数据，不在库旁边留下文件：没有 -wal 时用 immutable 打开（纯 readonly 在缺 -wal / -shm 时打不开，
  * 而读写打开会建出这两个文件）；已有 -wal 时说明有进程开着库，普通 readonly 就能读到 WAL 里的最新提交。
+ * URI 要显式带 SQLITE_OPEN_URI：Linux 上 bun 自带的 SQLite 默认不解析 URI，`{ readonly: true }` 会把整串当文件名、打不开。
  */
 function readForPlan(path: string, project: string): { tasks: PlanTask[]; deps: { from: string; to: string }[]; usedKeys: Set<string> } {
-  const db = existsSync(`${path}-wal`) ? new Database(path, { readonly: true }) : new Database(`file:${path}?immutable=1`, { readonly: true });
+  const db = existsSync(`${path}-wal`) ? new Database(path, { readonly: true }) : new Database(`file:${path}?immutable=1`, constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI);
   try {
     const tasks = (db.query("SELECT * FROM tasks").all() as Record<string, unknown>[]).map(toTask);
     // 用过的导入 key：边不在了而 key 在 = PM 删过，dry-run 也要报出来而不是算进「要导」

@@ -4,7 +4,7 @@
  */
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { depAddArgs, planDepImport } from "../scripts/ledger-import-deps.js";
 
@@ -78,10 +78,18 @@ describe("planDepImport", () => {
 describe("在临时状态目录里真跑", () => {
   const SCRIPT = resolve(import.meta.dir, "../scripts/ledger-import-deps.ts");
 
+  /**
+   * 子进程只带白名单变量：前面的测试可能改过 process.env（沙箱开关、频道号等），整份展开会让身份 / 状态目录随测试顺序漂移。
+   * 没有 DISCORD_CHANNEL_ID → 终端身份 = owner。
+   */
+  function childEnv(dir: string): Record<string, string> {
+    const env: Record<string, string> = { CLAUDESTRA_STATE_DIR: dir };
+    for (const k of ["PATH", "HOME", "TMPDIR"]) if (process.env[k] !== undefined) env[k] = process.env[k] as string;
+    return env;
+  }
+
   function run(dir: string, ...args: string[]): { code: number; out: string } {
-    const env: Record<string, string> = { ...(process.env as Record<string, string>), CLAUDESTRA_STATE_DIR: dir };
-    delete env.DISCORD_CHANNEL_ID; // 终端身份 = owner；别让跑测试的 agent 的频道号把身份带成它自己
-    const p = Bun.spawnSync([process.execPath, SCRIPT, ...args], { env, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawnSync([process.execPath, SCRIPT, ...args], { env: childEnv(dir), stdout: "pipe", stderr: "pipe" });
     return { code: p.exitCode ?? -1, out: p.stdout.toString() + p.stderr.toString() };
   }
 
@@ -96,7 +104,7 @@ describe("在临时状态目录里真跑", () => {
       body,
       "closeLedger(path);",
     ].join("\n");
-    const p = Bun.spawnSync([process.execPath, "-e", code], { stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawnSync([process.execPath, "-e", code], { env: childEnv(dirname(path)), stdout: "pipe", stderr: "pipe" });
     if (p.exitCode !== 0) throw new Error(p.stderr.toString());
     return p.stdout.toString().trim();
   }
@@ -115,19 +123,21 @@ describe("在临时状态目录里真跑", () => {
       const json = join(dir, "deps.json");
       writeFileSync(json, JSON.stringify(JSON_FIXTURE));
 
+      // 断言带上整段输出：CI 上挂了能直接看到脚本说了什么
       const dry = run(dir, "--project", P, json, "--dry-run");
-      expect([dry.code, dry.out.includes("要导 3 条")]).toEqual([0, true]);
+      expect({ ...dry, has: dry.out.includes("要导 3 条") }).toMatchObject({ code: 0, has: true });
       expect([existsSync(`${path}-wal`), existsSync(`${path}-shm`)]).toEqual([false, false]);
 
-      expect(run(dir, json, "--project", P).code).toBe(0);
+      const first = run(dir, json, "--project", P);
+      expect(first).toMatchObject({ code: 0 });
       const again = run(dir, json, "--project", P);
-      expect([again.code, again.out.includes("要导 0 条")]).toEqual([0, true]);
+      expect({ ...again, has: again.out.includes("要导 0 条") }).toMatchObject({ code: 0, has: true });
 
       expect(sub(path, `console.log(listDeps(db, P).length); removeDep(db, { actor: "owner" }, { from: "T7", to: "T13a" });`)).toBe("3");
       const dry2 = run(dir, json, "--project", P, "--dry-run");
-      expect([dry2.out.includes("要导 0 条"), dry2.out.includes("曾导入、后来被删，不补回")]).toEqual([true, true]);
+      expect({ ...dry2, has: [dry2.out.includes("要导 0 条"), dry2.out.includes("曾导入、后来被删，不补回")] }).toMatchObject({ has: [true, true] });
       const third = run(dir, json, "--project", P);
-      expect([third.code, third.out.includes("曾导入、后来被删，不补回")]).toEqual([0, true]);
+      expect({ ...third, has: third.out.includes("曾导入、后来被删，不补回") }).toMatchObject({ code: 0, has: true });
       expect(sub(path, `console.log(getDep(db, "T7", "T13a") === null);`)).toBe("true");
     } finally {
       rmSync(dir, { recursive: true, force: true });
