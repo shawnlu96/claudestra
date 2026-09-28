@@ -116,6 +116,7 @@ export function recheckMention(t: MentionTarget, contacts: PeerContact[], agents
   const a = c && isSafeMentionName(c.name) ? c.agents.find((x) => x.name === t.agent) : undefined;
   if (!c || !a) return { ok: false, reason: "gone" };
   // 指令里只写得下 peer 名（send_to_agent 没有指纹参数）：这里到 agent 真正发出之间 peer 被删、又加了同名的另一台，
-  // 会投给后者。窗口只有几秒，撤销的情况对方会实时鉴权拒掉，所以只在这里说明，不另做（T19 审查 P2-6）
+  // 会投给后者（peers.json 保证同一时刻 peer 名唯一）。窗口是 agent 处理这条消息的那段时间；撤销的情况对方会实时鉴权拒掉，
+  // 所以只在这里说明，不另做（T19 审查 P2-6）
   return a.stopped ? { ok: false, reason: "stopped" } : { ok: true, target: { ...t, peer: c.name } };
 }

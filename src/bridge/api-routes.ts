@@ -33,7 +33,7 @@ import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./c
 import {
   readPrincipals,
   agentInScope,
-  tokenIdOf,
+  tokenIdOf, isOwnerPrincipal,
   SlidingWindowLimiter,
   type Principal,
 } from "../lib/principals.js";
@@ -1328,7 +1328,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
     const env: Envelope = {
-      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}) },
+      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}), ...(isOwnerPrincipal(principal) ? { owner: true } : {}) },
       to: { kind: "local", agentName: agent.name, channelId: agent.channelId, ws: client.ws as any, cwd: client.cwd },
       intent: "request",
       content: text,

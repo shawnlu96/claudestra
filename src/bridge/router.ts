@@ -76,6 +76,8 @@ export interface ApiUserEndpoint {
   name: string;
   /** v2.11+ HTTP peer 标记(principal.peer 透传):入站注入头渲染成 peer 请求 */
   peer?: string;
+  /** 发信凭据是 owner 本人（lib/principals.ts isOwnerPrincipal，入口处按 principal 算好）：@ 委托标记只认它 */
+  owner?: true;
 }
 
 export type Endpoint = LocalEndpoint | UserEndpoint | BridgeEndpoint | ApiUserEndpoint;

@@ -1,7 +1,7 @@
 /**
  * 网页侧栏「联系人」与输入框 @ 候选的数据（GET /api/v1/peers/contacts；tests/peer-contacts.test.ts）。
  * 只重排现有 peer presence（bridge 每分钟探测 + 中继实时推），不新增任何探测。
- * 对方开放的 agent 列表本来就是对方按我们的 token scope 过滤过的，这里再挡一道 master 与不合规的名字（lib/mention-name.ts：
+ * 对方开放的 agent 列表本来就是对方按我们的 token scope 过滤过的，这里再挡一道 master 与不合规的 agent 名（lib/mention-name.ts：
  * 名字会进 agent 看到的指令行），并且只给名字 + 忙闲 / 已停止：延迟、错误原文、对方地址都不带出去。
  */
 import type { HttpPeer } from "./peers.js";
