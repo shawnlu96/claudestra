@@ -910,10 +910,9 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             { stdout: "pipe", stderr: "pipe" }
           );
           await proc.exited;
-          if (proc.exitCode !== 0) {
-            const stderr = await new Response(proc.stderr).text();
-            console.error(`🔔 tmux send-keys 失败: ${stderr}`);
-          }
+          if (proc.exitCode !== 0) console.error(`🔔 tmux send-keys 失败: ${await new Response(proc.stderr).text()}`);
+          // 发键成功当场把「待你处理」里的权限 ask 记成 answered（ask-runtime.ts）；等改完 Discord 消息再记，watcher 可能先看到弹框没了记成撤销。发键失败不记
+          else if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
 
           // 编辑原消息显示已处理（保留指纹让下次 poll 自然清理，避免竞争条件）
           const msgId = permissionMessages.get(targetChannelId);
@@ -925,8 +924,6 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             } catch { /* non-critical */ }
             permissionMessages.delete(targetChannelId);
           }
-          // 「待你处理」里对应的权限 ask 记成 answered（ask-runtime.ts），不然弹框消失时会被当成撤销
-          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
         }
