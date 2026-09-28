@@ -11,7 +11,7 @@ import type { AssigneeKind, EventKind, LedgerEvent, LedgerItem, LedgerTask } fro
 import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
-export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "task_deps"] as const;
+export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps"] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -70,6 +70,34 @@ const SCHEMA_V1: readonly string[] = [
 ];
 
 /**
+ * 「待你处理」（docs 13 §4.2）：唯一由 bridge 写的表（ledger-asks.ts）；阶段机与 items / tasks 仍只有 CLI 写。
+ * 每条语句单独 prepare().run()：bun 的 db.exec 一次跑多条语句时，运行期错误（CHECK、触发器）会被吞掉，版本号照样往前推。
+ * 建表 / 建索引都带 IF NOT EXISTS，可重跑：分支上提前打开过的库再按合并后的顺序迁移时不会撞「already exists」。
+ * project = "master" 表示大总管发的（它不属于任何项目）；blocking NULL = 自动建的、不知道卡不卡活。
+ */
+const ASKS_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS asks (
+  id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, taskId TEXT,
+  fromAgent TEXT NOT NULL, fromChannelId TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('reply','auq','permission','codex')),
+  kind TEXT NOT NULL CHECK (kind IN ('decide','authorize','owner_action','accept')),
+  blocking INTEGER, urgency TEXT NOT NULL DEFAULT 'normal' CHECK (urgency IN ('normal','urgent')),
+  title TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+  options TEXT NOT NULL DEFAULT '[]', allowText INTEGER NOT NULL DEFAULT 1, kindHint TEXT,
+  chatId TEXT NOT NULL DEFAULT '', threadId TEXT, discordMessageIds TEXT NOT NULL DEFAULT '[]',
+  expiresAt INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open','answered','expired','cancelled')),
+  answer TEXT, outboxMessageId TEXT, extra TEXT NOT NULL DEFAULT '{}',
+  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)`,
+  "CREATE INDEX IF NOT EXISTS asks_state_project ON asks(state, project)",
+  "CREATE INDEX IF NOT EXISTS asks_from_state ON asks(fromAgent, state)",
+];
+
+function migrateAsks(db: Database): void {
+  for (const sql of ASKS_STATEMENTS) db.prepare(sql).run();
+}
+
+/**
  * 依赖边 + 负责人类型（T8h）。when / from / to 是 SQL 关键字，列名用 cond / fromTask / toTask，行映射成 when / from / to。
  * 旧任务有 agent 的回填成 assigneeKind=agent；两端都要是已有任务、不许自环，环与同项目在写入层判（ledger-deps-write.ts）。
  * 每一步都可重跑（PM 定的迁移规矩）：版本号撞过、表或列已在时照样走通。SQLite 的 ADD COLUMN 没有 IF NOT EXISTS，先查列再加。
@@ -97,7 +125,7 @@ function migrateDeps(db: Database): void {
 /** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
 type Migration = readonly string[] | ((db: Database) => void);
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
-export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateDeps];
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateDeps];
 const MIGRATIONS = LEDGER_MIGRATIONS;
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = MIGRATIONS.length;
@@ -166,9 +194,15 @@ export function schemaVersion(db: Database): number {
 }
 
 /** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
-const REQUIRED_COLUMNS: Record<string, readonly string[]> = { tasks: ["assigneeKind", "assignee"] };
+const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
+  tasks: ["assigneeKind", "assignee"],
+  asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+};
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
-const REQUIRED_INDEXES: Record<string, readonly string[]> = { task_deps: ["task_deps_to", "task_deps_project"] };
+const REQUIRED_INDEXES: Record<string, readonly string[]> = {
+  asks: ["asks_state_project", "asks_from_state"],
+  task_deps: ["task_deps_to", "task_deps_project"],
+};
 
 /** 按 LEDGER_TABLES、REQUIRED_COLUMNS、REQUIRED_INDEXES 找缺的表 / 列 / 索引；空数组 = 完整 */
 function missingSchema(db: Database): string[] {

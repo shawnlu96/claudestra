@@ -135,7 +135,7 @@
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1084,
-    "fn:overflow": 9464,
+    "fn:overflow": 9454,
     "fnLong:AgentActions": 1,
     "fnLong:AgentRow": 1,
     "fnLong:ArchivedSessions": 1,
@@ -233,10 +233,10 @@
     "size:src/setup.ts": 2042,
     "size:tests/modal-parser.test.ts": 1116,
     "size:tests/session-history.test.ts": 781,
-    "size:web/features/chat/chat-store.ts": 2446,
-    "size:web/features/chat/components/chat.tsx": 760,
+    "size:web/features/chat/chat-store.ts": 2430,
+    "size:web/features/chat/components/chat.tsx": 676,
     "size:web/features/chat/components/composer.tsx": 787,
-    "size:web/features/chat/components/message-list.tsx": 839,
+    "size:web/features/chat/components/message-list.tsx": 837,
     "size:web/features/chat/components/peers-modal.tsx": 450,
     "size:web/features/chat/components/sidebar.tsx": 572,
     "size:web/features/chat/components/unmanaged-sessions.tsx": 541,
@@ -284,6 +284,18 @@
       "from": 0,
       "to": 0,
       "why": "TWINS 登记 mention-name（src/lib ⇄ web/lib/chat）：@ 委托的名字准入规则 bridge 过滤联系人、网页拼指令行两边都要用，web 与 src 不能互相 import（T19 审查 P2-1）"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "新增 TESTS_WEB_DOM 例外：tests/web-dom-*.test.ts 要在 happy-dom 里真挂载 React 组件（错误兜底），允许引用带 react 的 web 模块；登记在明处，替代之前用类型查询 + 插值动态 import 绕开 tests-web-pure 的写法（T20 审查 P2-2）"
+    },
+    {
+      "key": "guard:scripts/guard/rules/deps.ts",
+      "from": 0,
+      "to": 0,
+      "why": "新增 TESTS_WEB_DOM 例外：tests/web-dom-*.test.ts 要在 happy-dom 里真挂载 React 组件（错误兜底），允许引用带 react 的 web 模块；登记在明处，替代之前用类型查询 + 插值动态 import 绕开 tests-web-pure 的写法（T20 审查 P2-2）"
     }
   ]
 }

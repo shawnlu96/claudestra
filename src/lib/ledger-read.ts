@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
 import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
 import { stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
-import { TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -141,8 +141,8 @@ function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number, de
   const blockers = blockedBy(task.id, deps).map((d) => d.from);
   return {
     ...task,
-    // dep 事件是关系变更不是进展：算进来会把回滚 / 验证失败这类「出问题」信号和最近一条进展盖掉（web collab-model 看 lastEvent）
-    lastEvent: own.findLast((e) => e.kind !== "dep") ?? null,
+    // dep 事件是关系变更不是进展、ask 族有自己的卡片：算进来会把回滚 / 验证失败这类「出问题」信号和最近一条进展盖掉（web collab-model 看 lastEvent）
+    lastEvent: own.findLast((e) => !isAskEvent(e) && e.kind !== "dep") ?? null,
     stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
     stageSinceApprox: currentStageMark(own)?.data.approxTime === true,
     lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
@@ -160,7 +160,11 @@ export function projectView(db: Database, project: string, now: number): Project
     if (list) list.push(e);
     else byTarget.set(e.target, [e]);
   }
-  const recent = db.query("SELECT * FROM events WHERE project = ? AND target = '' ORDER BY seq DESC LIMIT ?").all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
+  // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
+  const recent = db
+    .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel')
+      AND NOT (kind = 'decision' AND json_extract(data, '$.askId') IS NOT NULL) ORDER BY seq DESC LIMIT ?`)
+    .all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
   return {

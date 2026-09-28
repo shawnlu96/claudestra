@@ -6,6 +6,8 @@ import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store"
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
+import { SyncBanner } from "./sync-banner";
+import { ChatPaneBoundary, SidebarBoundary } from "@/components/boundaries";
 import { UpdateToast } from "./update-toast";
 import { ComposerOrDock } from "./share-dock";
 import { Splash } from "./splash";
@@ -20,6 +22,7 @@ import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync
 import { hopThenOpen } from "@/features/machines/notification-hop";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
+import { reportRuntimeError } from "@/lib/runtime-error";
 import { DevToolsMount } from "../../devtools/dev-mount";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
@@ -69,37 +72,6 @@ function endSlideProbe(how: string) {
   const msgs = document.querySelectorAll("[data-mid]").length;
   const streaming = document.documentElement.getAttribute("data-streaming") || "?";
   shellLog(`[slide] ${sp.dir} total=${Math.round(total)}ms anim=${Math.round(anim)}ms firstFrame=${Math.round(sp.firstFrame)}ms maxGap=${Math.round(sp.maxGap)}ms frames=${sp.frames} end=${how} msgs=${msgs} streaming=${streaming}`);
-}
-/**
- * v2.21.3+ 运行时错误上报(壳 + PWA 都记,此前只有壳且只记文件名+行号——生产 chunk
- * 全在第 1 行,等于没记)。带完整 JS 栈(含列号):配合 next.config 的
- * productionBrowserSourceMaps,用 `node scripts/resolve-stack.mjs` 还原到源码位置。
- * 背景:壳里两天抓到 18 次 React #185(渲染死循环),光凭 @chunk:1 定位不了。
- * 5 分钟最多 8 条,防死循环类错误刷爆日志。
- */
-const errLogWindow: number[] = [];
-function reportRuntimeError(kind: string, err: unknown, fallback: string) {
-  const now = Date.now();
-  while (errLogWindow.length && now - errLogWindow[0] > 5 * 60_000) errLogWindow.shift();
-  if (errLogWindow.length >= 8) return;
-  errLogWindow.push(now);
-  const e = err instanceof Error ? err : null;
-  // 20 帧:React 自己的 8 帧(throwIfInfiniteUpdateLoopDetected → dispatchSetState)之后
-  // 才轮到我们的调用方——2026-09-03 抓到 24 条 #185 全卡在第 8 帧 dispatchSetState 上
-  const stack = (e?.stack || "").split("\n").slice(0, 20).join("\n");
-  // 浏览器扩展注入的脚本报错不是我们的(2026-09-09 一条 Windows 上的
-  // chrome-extension://…/inpage.js "func sseError not found")——它照样占 8 条/5 分钟
-  // 的上报额度、还会惊动监视器。整条(含栈)只要指向扩展协议就丢弃。
-  const text = `${stack} ${e?.message || fallback}`;
-  // ResizeObserver loop completed with undelivered notifications:浏览器的良性警告
-  // (RO 回调里改了布局,同帧后续通知被丢弃),不是错误,历史上 7 天两条,不占额度
-  if (/\b(chrome|moz|safari-web)-extension:\/\//.test(text) || /ResizeObserver loop (completed|limit)/.test(text)) {
-    errLogWindow.pop();
-    return;
-  }
-  const msg = `${kind} ${e?.message || fallback}${stack ? `\nstack: ${stack}` : ""}`;
-  const tag = isNativeShell() ? "[shell]" : "[pwa]";
-  postClientLog(`${tag} ${msg}`);
 }
 /**
  * v2.21.4 React 提交突发上报(追 #185)。layout.tsx 里的内联钩子在同一个宏任务里
@@ -164,73 +136,6 @@ const MANAGE_HASH = "#manage";
 const isManageHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === MANAGE_HASH;
-
-/** 最短亮灯:active 变 truthy 立即亮,变 null 后至少亮满 minMs 才熄——
- *  秒级完成的同步不再「一闪而过等于没亮」(owner 2026-08-08)。 */
-function useMinVisible<T>(active: T | null, minMs = 1200): T | null {
-  const [shown, setShown] = useState<T | null>(active);
-  const litAtRef = useRef(0);
-  useEffect(() => {
-    if (active !== null) {
-      if (litAtRef.current === 0) litAtRef.current = Date.now();
-      setShown(active);
-      return;
-    }
-    const lit = litAtRef.current;
-    if (lit === 0) { setShown(null); return; }
-    const remain = minMs - (Date.now() - lit);
-    if (remain <= 0) { litAtRef.current = 0; setShown(null); return; }
-    const t = setTimeout(() => { litAtRef.current = 0; setShown(null); }, remain);
-    return () => clearTimeout(t);
-  }, [active, minMs]);
-  return shown;
-}
-
-/** v2.17.2 对齐/连接横幅(owner 2026-08-08:「小徽章太隐蔽,要让用户知道系统
- *  在努力」)。消息区顶部居中的实色浮动 chip,零布局位移;严重度取一:
- *  同步失败(可点重试) > 同步中 > 重连中;最短亮 1.2s,消失 = 已是最新。
- *  空视图(骨架屏/全屏错误态)与历史现场不亮。 */
-function SyncBanner() {
-  const t = useT();
-  const syncState = useChatStore((s) => s.state.syncState);
-  const streamDown = useChatStore((s) => s.state.streamDown);
-  const loadingHistory = useChatStore((s) => s.state.loadingHistory);
-  const historyError = useChatStore((s) => s.state.historyError);
-  const browsing = useChatStore((s) => s.state.browsing);
-  const active = useChatStore((s) => s.state.activeAgent);
-  const store = useChatStoreApi();
-  const raw =
-    !active || loadingHistory || historyError || browsing
-      ? null
-      : syncState === "error"
-        ? "error"
-        : syncState === "syncing"
-          ? "syncing"
-          : streamDown
-            ? "streamDown"
-            : null;
-  // error 不吃最短亮灯(它本来就常驻到重试);syncing/streamDown 保底 1.2s
-  const held = useMinVisible(raw === "error" ? null : raw);
-  const kind = raw === "error" ? "error" : held;
-  if (!kind) return null;
-  return (
-    <div className="pointer-events-none absolute inset-x-0 top-2 z-30 flex justify-center">
-      {kind === "error" ? (
-        <button
-          className="pointer-events-auto flex items-center gap-2 rounded-full bg-warning px-4 py-1.5 text-[12.5px] font-semibold text-warning-content shadow-lg"
-          onClick={() => store.retrySync()}
-        >
-          ⚠️ {t("同步失败 · 点按重试")}
-        </button>
-      ) : (
-        <span className="pointer-events-auto flex items-center gap-2 rounded-full border border-base-300/70 bg-base-100/85 px-4 py-1.5 text-[12.5px] font-medium text-base-content/80 shadow-lg backdrop-blur-md">
-          <span className="loading loading-spinner w-3.5 text-primary" />
-          {kind === "syncing" ? t("正在同步最新消息…") : t("连接断开 · 重连中…")}
-        </span>
-      )}
-    </div>
-  );
-}
 
 function TopBar() {
   const t = useT();
@@ -309,6 +214,24 @@ function TopBar() {
       {info && <TopBarActions agent={info} busy={busy} onManage={openManage} />}
       <ManagePanel open={showManage} onClose={closeManage} />
     </header>
+  );
+}
+
+/** 聊天主区（顶栏 + 对齐横幅 + 消息 + 输入框）套一层错误兜底：切会话即重试（components/boundaries.tsx） */
+function ChatMain() {
+  const active = useChatStore((s) => s.state.activeAgent);
+  const { toList } = useChatNav();
+  return (
+    <ChatPaneBoundary resetKey={active} onBack={toList}>
+      <TopBar />
+      {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
+      <div className="relative">
+        <SyncBanner />
+        <UpdateToast />
+      </div>
+      <MessageList />
+      <ComposerOrDock />
+    </ChatPaneBoundary>
   );
 }
 
@@ -727,18 +650,11 @@ function ChatInner() {
               : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
-          <Sidebar onSelect={closingCollab(toContent)} />
+          <SidebarBoundary><Sidebar onSelect={closingCollab(toContent)} /></SidebarBoundary>
 
           <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
             <CollabSwitch />
-            <TopBar />
-            {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
-            <div className="relative">
-              <SyncBanner />
-              <UpdateToast />
-            </div>
-            <MessageList />
-            <ComposerOrDock />
+            <ChatMain />
           </main>
         </div>
         </div>
