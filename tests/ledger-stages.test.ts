@@ -133,6 +133,7 @@ describe("roleOf / 起止阶段", () => {
     expect(isStageOfKind("code", "blocked")).toBe(false);
     expect(isStageOfKind("investigate", "merge")).toBe(false);
     expect(isStageOfKind("ops", "restate")).toBe(false);
+    expect(isStageOfKind("code", "toString" as never)).toBe(false);
   });
   test("终点：investigate 看 done，code / ops 先看 verified", () => {
     expect(endStages("investigate")[0]).toBe("done");

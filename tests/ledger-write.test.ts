@@ -2,8 +2,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getItem, getMeta, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { createItem, createTask, deliver, moveStage, recordReview, setItem, setTask } from "../src/lib/ledger-write.js";
-import { appendEvent, setFrozen, setMeta } from "../src/lib/ledger-write-project.js";
+import { appendEvent, createItem, createTask, deliver, moveStage, recordReview, setFrozen, setItem, setMeta, setTask } from "../src/lib/ledger-write.js";
 
 const P = "claude-orchestrator";
 const PM = { actor: "agent-claudestra" };
@@ -229,6 +228,10 @@ describe("审查第 1 轮", () => {
     expect([d.event.data.round, r.event.data.round]).toEqual([1, 1]);
     const d2 = deliver(db, EXE, { taskId: "T8a", headSHA: "def", moveFrom: "fix" });
     expect(d2.event.data.round).toBe(2);
+  });
+  test("复验 P2：specRev 不能经 setTask 改（只由阶段机回退到 spec 时加 1）", () => {
+    expect(errOf(() => setTask(db, OWNER, { id: "T8a", rev: 1, patch: { specRev: -5 } as never })).code).toBe("invalid");
+    expect(getTask(db, "T8a")?.specRev).toBe(1);
   });
   test("P2 事项 id 与任务 id 不能撞", () => {
     expect(errOf(() => createItem(db, PM, { project: P, id: "T8a", title: "x" })).code).toBe("conflict");

@@ -44,9 +44,10 @@ describe("openLedger", () => {
 });
 
 describe("事件只追加", () => {
-  test("两个模块都没有改 / 删事件的导出函数", () => {
+  test("两个模块都没有改 / 删事件的导出函数；直接写事件的 insertEvent / replay / tx 也不导出（否则能绕过阶段机）", () => {
     const names = [...Object.keys(store), ...Object.keys(write)];
     expect(names.filter((n) => /event/i.test(n) && /(update|delete|remove|edit|set)/i.test(n))).toEqual([]);
+    expect(names.filter((n) => ["insertEvent", "replay", "tx"].includes(n))).toEqual([]);
   });
   test("直接 UPDATE / DELETE events 被 trigger 拦下", () => {
     const db = openLedger(":memory:");
@@ -164,4 +165,31 @@ describe("多进程同时首次打开新库（审查第 1 轮 P2-6）", () => {
     expect(() => busyAsLedgerError("写入", () => { throw busy; })).toThrow(expect.objectContaining({ name: "LedgerError", code: "busy" }));
     expect(() => busyAsLedgerError("写入", () => { throw new Error("boom"); })).toThrow("boom");
   });
+});
+
+describe("切 WAL 等锁的总时长（复验 P2）", () => {
+  test("别的连接一直占着新库：约 5s 报 LedgerError(busy)，不会先卡满一次 busy_timeout 再重试到约 10s", () => {
+    const { dir, path } = tmp();
+    const holder = new Database(path);
+    try {
+      holder.exec("CREATE TABLE x (a)");
+      holder.exec("BEGIN EXCLUSIVE");
+      const t0 = Date.now();
+      let err: unknown;
+      try {
+        openLedger(path);
+      } catch (e) {
+        err = e;
+      }
+      const elapsed = Date.now() - t0;
+      expect(err).toMatchObject({ name: "LedgerError", code: "busy" });
+      expect(String((err as Error).message)).toContain("5s");
+      expect(elapsed).toBeGreaterThanOrEqual(4500);
+      expect(elapsed).toBeLessThan(6500);
+    } finally {
+      holder.exec("ROLLBACK");
+      holder.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

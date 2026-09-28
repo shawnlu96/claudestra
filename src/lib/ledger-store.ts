@@ -15,6 +15,8 @@ export const LEDGER_TABLES = ["items", "tasks", "events", "meta"] as const;
 export const LEDGER_SCHEMA_VERSION = 1;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
+/** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
+const WAL_TRY_TIMEOUT_MS = 100;
 
 const cache = new Map<string, Database>();
 
@@ -85,8 +87,9 @@ export function busyAsLedgerError<T>(what: string, fn: () => T): T {
 }
 
 /**
- * 切 WAL 不走 busy_timeout：多个进程同时首次打开新库时会直接 SQLITE_BUSY（审查实测 8 路并发约 1/10）。
- * 所以先读当前模式，已是 WAL 就不再切；切的时候遇到 BUSY 就退避重试，到期限还不行再抛。
+ * 多个进程同时首次打开新库时，切 WAL 会直接 SQLITE_BUSY（审查实测 8 路并发约 1/10）。
+ * 所以先读当前模式，已是 WAL 就不再切；遇到 BUSY 就退避重试，到期限还不行再抛。
+ * 调用方要先把 busy_timeout 调成 WAL_TRY_TIMEOUT_MS，否则第一次尝试就会先卡满 5s，总等待变成约 10s，和报错文案对不上。
  */
 function ensureWal(db: Database): void {
   const deadline = Date.now() + BUSY_TIMEOUT_MS;
@@ -109,8 +112,9 @@ export function openLedger(path: string = LEDGER_PATH): Database {
   const db = new Database(path);
   try {
     busyAsLedgerError("打开时", () => {
-      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      db.exec(`PRAGMA busy_timeout = ${WAL_TRY_TIMEOUT_MS}`);
       ensureWal(db);
+      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec("PRAGMA foreign_keys = ON");
       migrate(db);
     });

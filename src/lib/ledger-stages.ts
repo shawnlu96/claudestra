@@ -107,7 +107,8 @@ const EXECUTOR_MOVES: readonly (readonly [Stage, Stage])[] = [
 
 /** 这种 kind 的任务会不会停在这个阶段（跳转表里有出边的阶段 + 终态）；blocked 不算，它缺 stageBefore 就回不去 */
 export function isStageOfKind(kind: TaskKind, stage: Stage): boolean {
-  return stage in (TRANSITIONS[kind] ?? {}) || TERMINAL_STAGES.includes(stage);
+  // 用 hasOwn 不用 in：in 会把 toString 这类原型键也当成阶段
+  return Object.hasOwn(TRANSITIONS[kind] ?? {}, stage) || TERMINAL_STAGES.includes(stage);
 }
 
 export type TransitionTask = Pick<LedgerTask, "kind" | "stage" | "stageBefore">;
