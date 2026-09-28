@@ -30,9 +30,10 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
       await fn();
       setNote({ ok: true, text: runtime ? t("已提交给弹框") : t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) });
     } catch (e) {
-      // 409 分两种：整条已结案（别处答了 / 过期），或多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它）
-      const code = e instanceof ApiError && e.status === 409 ? e.code : undefined;
-      const why = code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : code ? t("这件已经处理过了（或已过期）") : (e as Error).message;
+      // 409 分两种：多行里这一项刚在聊天 / Discord 里答过（其余行还能答，重拉后卡片会收掉它），其余都当整条已结案——
+      // 弹框端点的 409（弹框已经没了）不带 code，也归这一类，别把英文原文露给 owner
+      const conflict = e instanceof ApiError && e.status === 409;
+      const why = !conflict ? (e as Error).message : e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
       setNote({ ok: false, text: why });
     }
     setBusy(false);
