@@ -139,3 +139,23 @@ describe("registry 读者：损坏 ≠ 空", () => {
     expect(readRegistryAgentsSync(p)).toEqual([]);
   });
 });
+
+describe("派发关系字段（parent / task）", () => {
+  test("字符串照读；缺失或非字符串 = 普通 agent", async () => {
+    const p = writeRegistry({
+      agents: {
+        "agent-t1": { status: "active", parent: "agent-claudestra", task: "T1 沙箱隔离" },
+        "agent-t2": { status: "active", parent: "master" },
+        "agent-x": { status: "active", parent: 42, task: ["脏"] },
+        "agent-y": { status: "active" },
+      },
+    });
+    const all = await readRegistryAgents(p);
+    const by = (n: string) => all.find((a) => a.name === n)!;
+    expect(by("agent-t1")).toMatchObject({ parent: "agent-claudestra", task: "T1 沙箱隔离" });
+    expect(by("agent-t2").parent).toBe("master");
+    expect(by("agent-x").parent).toBeUndefined();
+    expect(by("agent-x").task).toBeUndefined();
+    expect(by("agent-y").parent).toBeUndefined();
+  });
+});

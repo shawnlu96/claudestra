@@ -79,6 +79,7 @@ import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-h
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
@@ -1759,12 +1760,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(400, { ok: false, error: 'piBase must be "minimal" or "inherit"' });
     }
     if (!name || !dir) return apiJson(400, { ok: false, error: 'body must be {"name", "dir", "purpose"?, "model"?, "effort"?, "project"?, "runtime"?, "piBase"?}' });
-    // name / dir 走位置参数，必须先挡掉长得像 flag 的值；purpose 改走具名
-    // --purpose，避免自由文本被 manager 的 flag 提取抢先解析（详见
-    // manager.ts 的 extractPurposeFlag 注释：曾可用 purpose 替换整个命令黑名单）。
-    if (name.startsWith("-") || dir.startsWith("-") || project.startsWith("-")) {
-      return apiJson(400, { ok: false, error: 'name/dir/project 不能以 "-" 开头' });
-    }
+    // 透传给 manager 的值必须先挡掉长得像 flag 的（lib/flag-like.ts）；purpose 走具名 --purpose 且最先抽，
+    // 自由文本不会被当成 flag（manager/create-args.ts 注释：曾可用 purpose 替换整个命令黑名单）。
+    const flagLike = firstFlagLikeField({ name, dir, project, model, effort });
+    if (flagLike) return apiJson(400, { ok: false, error: `${flagLike} 不能以 "-" 开头` });
     const createArgs = ["create", name, dir];
     if (purpose) createArgs.push("--purpose", purpose);
     if (model) createArgs.push("--model", model);

@@ -12,7 +12,8 @@
 
 ```bash
 # 生命周期
-manager create <名称> <目录> [用途] [--preset <p>] [--effort <e>] [--mode <m>] [--model <m>] [--external]
+manager create <名称> <目录> [用途] [--preset <p>] [--effort <e>] [--mode <m>] [--model <m>] [--external] [--parent <agent|master|none>] [--task "<任务名>"]
+manager team-link <名称> [--parent <agent|master|none>] [--task "<任务名>"]   # 补挂 / 改挂派发者、改任务名（--task "" 清除）
 manager resume <名称> <sessionId> [目录] [--fork]   # --fork: 收编被 bg 占用的 session
 manager adopt <名称> <sessionId>       # 把 bg 分身提为正式 session 并重启
 manager kill <名称>
@@ -63,6 +64,7 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 - **create 的 [用途] 认真写**——它会作为系统提示注入 agent 本体（v2.16+），agent 靠它知道自己的职责。
 - **project 归组（v2.21+）**：create 可带 `--project <id>`，不带则按目录自动归属已有 project、匹配不到就自动建组。同 project 的 agent 启动时互相知道对方（花名册注入），运行中可用 `project_info` 工具查成员与目录。「给 qingniao 加个 review agent」→ `manager create qingniao-review <项目任一目录> "负责 review ..." --project qingniao`。
 - 新建交互 agent 不用带 `--mode`（默认即可）；**cron / 无人值守**场景用 `--mode bypassPermissions`（默认模式遇危险操作要等人批，没人在场会卡死）。
+- **派发关系（侧栏把执行者挂在派发者下面）**：给某件任务派执行者时带 `--task "<任务名>"`；在别的 agent 自己的会话里跑的 create 带了 `--task` 会自动挂到那个 agent 下。你（大总管）建常驻 agent 照常不带，它们留在各自项目组里；要让执行者挂在你下面，显式写 `--parent master`。
 - `--external` 标记 agent 可暴露给 API token / peer（R1 保护：未标记的要 `--force` 才能授权出去）。
 - **master 永远不能暴露给 peer**，这是硬规则，`--force` 也不行。
 

@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import type { Principal, PrincipalsFile } from "../lib/principals.js";
-import { readPrincipals } from "../lib/principals.js";
+import { agentInScope, readPrincipals } from "../lib/principals.js";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
@@ -31,7 +31,7 @@ const defaultIo: AgentInfoIo = {
 };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
-export type AgentListExtras = (name: string, r?: { external?: boolean; label?: string; channelId?: string }) => Record<string, unknown>;
+export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task">) => Record<string, unknown>;
 
 /**
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
@@ -54,8 +54,19 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       ...missionField(missions, name),
       // 别的 agent 发来、它还在回合里没收到的消息（等回合结束或它调 check_inbox 才到）
       ...(r?.channelId && held[r.channelId] ? { queued: held[r.channelId] } : {}),
+      ...teamField(principal, r),
     };
   };
+}
+
+/**
+ * 派发关系（manager/team.ts）：侧栏把执行者挂在派发者下面。parent 只在调用方 scope 里看得到派发者时给（裸名，大总管 = master），
+ * 否则名字本身就泄露了 scope 外的 agent；peer 两项都不给（和值守一样是本机的事）。展示用，不参与授权。
+ */
+function teamField(principal: Principal, r?: Pick<RegistryAgent, "parent" | "task">): { parent?: string; task?: string } {
+  if (principal.peer || !r) return {};
+  const parent = r.parent && agentInScope(principal, r.parent) ? r.parent.replace(/^agent-/, "") : undefined;
+  return { ...(parent ? { parent } : {}), ...(r.task ? { task: r.task } : {}) };
 }
 
 /** 进行中的值守（侧栏 / 顶栏「⏱ 值守 → 11:00」、菜单切换「开始 / 结束值守」）；peer 看不到 */
