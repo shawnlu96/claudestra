@@ -93,7 +93,7 @@ export function signedFor(method: string, url: string, body: string | Uint8Array
 }
 
 /** 时间戳允许的偏差：两台机器时钟差 + 网络，超过就当重放 */
-const MAX_SKEW_S = 300;
+export const MAX_SKEW_S = 300;
 
 export type SigCheck = "ok" | "bad" | "stale";
 

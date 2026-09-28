@@ -156,7 +156,7 @@ describe("入站分流（relay-inbound.ts）", () => {
     await expect(noIngress.handler(probe, ctx(myFp))).rejects.toMatchObject({ code: "local_unreachable" });
   });
   test("verifyPeerRequest：缺头 / 指纹不符 / 签名不对 / 过期 / 重放", () => {
-    const cache = new ReplayCache(1000);
+    const cache = new ReplayCache();
     const req = (h: Record<string, string>, body = "b") => ({ method: "POST", path: "/api/v1/x", headers: h, body: enc(body) });
     expect(verifyPeerRequest(myFp, req({}), cache, NOW)?.message).toMatch(/missing/);
     expect(verifyPeerRequest("0000-0000-0000-0000", req(signed("POST", "/api/v1/x", "b")), cache, NOW)?.message).toMatch(/does not match/);
@@ -165,13 +165,13 @@ describe("入站分流（relay-inbound.ts）", () => {
     const good = signed("POST", "/api/v1/x", "b");
     expect(verifyPeerRequest(myFp, req(good), cache, NOW)).toBeNull();
     expect(verifyPeerRequest(myFp, req(good), cache, NOW + 10)?.code).toBe("replay");
-    expect(verifyPeerRequest(myFp, req(good), cache, NOW + 2000)).toBeNull(); // 缓存过期后同一签名又能用（时间戳仍在 ±300 s 内）
+    expect(verifyPeerRequest(myFp, req(good), cache, NOW + 299_000)?.code).toBe("replay"); // 签名还没过期，条目就一直在
     const get = { method: "GET", path: "/api/v1/agents", headers: signed("GET", "/api/v1/agents"), body: enc("") };
     expect(verifyPeerRequest(myFp, get, cache, NOW)).toBeNull();
     expect(verifyPeerRequest(myFp, get, cache, NOW)).toBeNull();
   });
   test("签名的另一种 base64url 写法（补 =、改末字符低位、夹 . 或 !）：验签就不认，缓存按解码字节也认得出是同一个", () => {
-    const cache = new ReplayCache(60_000);
+    const cache = new ReplayCache();
     const h = signed("POST", "/api/v1/x", "v");
     const sig = h["x-claudestra-sig"];
     const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -189,20 +189,22 @@ describe("入站分流（relay-inbound.ts）", () => {
       expect(cache.seen(v, h["x-claudestra-ts"], NOW)).toBe("replay");
     }
   });
-  test("ReplayCache：早于进程启动 → before_start；满了挤掉最老的、它的签名时间成为下限；按插入顺序过期", () => {
+  test("ReplayCache：早于进程启动 → before_start；条目留到签名过期；满了拒新请求（full）而不挤掉旧条目", () => {
     const start = Math.floor(NOW / 1000);
-    const c = new ReplayCache(1000, 2, start);
+    const c = new ReplayCache(2, start, 1000);
     const sigOf = (n: number) => Buffer.alloc(64, n).toString("base64url");
     const at = (d: number) => String(start + d);
     expect(c.seen(sigOf(1), at(-1), NOW)).toBe("before_start");
     expect(c.seen(sigOf(1), at(0), NOW)).toBe(false);
     expect(c.seen(sigOf(2), at(1), NOW)).toBe(false);
-    expect(c.seen(sigOf(3), at(2), NOW)).toBe(false); // 挤掉 1，下限 = start
+    expect(c.seen(sigOf(3), at(1), NOW)).toBe("full"); // 满了：拒这条，1、2 都还在
+    expect(c.seen(sigOf(1), at(0), NOW)).toBe("replay");
     expect(c.seen(sigOf(2), at(1), NOW)).toBe("replay");
-    expect(c.seen(sigOf(1), at(0), NOW)).toBe("replay"); // 1 已没有记录，但签名时间不晚于下限：不放过
-    expect(c.seen(sigOf(4), at(0), NOW)).toBe("replay"); // 被灌满时，下限那一秒的新签名也误拒
-    expect(c.seen(sigOf(5), at(1), NOW)).toBe(false); // 晚于下限照常；挤掉 2，下限 = start + 1
-    expect(c.seen(sigOf(3), at(2), NOW + 1001)).toBe(false); // 过期后清掉；过期不抬下限
+    // 1 的签名在 start*1000 + 1000 过期、2 的在 +2000：过了 1 的有效期，腾出一格
+    const later = start * 1000 + 1500;
+    expect(c.seen(sigOf(3), at(1), later)).toBe(false);
+    expect(c.seen(sigOf(2), at(1), later)).toBe("replay");
+    expect(c.seen(sigOf(4), at(1), later)).toBe("full");
   });
 });
 

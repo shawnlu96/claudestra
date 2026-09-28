@@ -118,8 +118,9 @@ describe("兑换邀请：来源与发件人指纹", () => {
 });
 
 describe("先验签再扣限速；改钉", () => {
-  test("拿着 token 却签不了名的请求不消耗正牌 peer 的额度", async () => {
-    for (let i = 0; i < 130; i++) expect(await status(direct(TOK.p), true)).toBe(401);
+  test("验签失败单独限流（每分钟 120 次，超了 429），且不消耗正牌 peer 的额度", async () => {
+    for (let i = 0; i < 120; i++) expect(await status(direct(TOK.p), true)).toBe(401);
+    for (let i = 0; i < 10; i++) expect(await status(direct(TOK.p, keyQ), true)).toBe(429);
     expect(await status(direct(TOK.p, keyP), true)).toBe(200);
   });
   test("只钉住过的 peer：对方重装后按签名兑换重新加入（记录有了 fp）→ 改钉新钥匙；删掉后同名重加 → 旧钉住作废", async () => {

@@ -18,6 +18,7 @@ import { FP_RE } from "../lib/relay-protocol.js";
 const API_RATE_LIMIT_PER_MIN = 120;
 const OWNER_RATE_LIMIT_PER_MIN = 600;
 const limiters = new Map<string, SlidingWindowLimiter>();
+const sigFailures = new Map<string, SlidingWindowLimiter>();
 const lastTouchWrite = new Map<string, number>();
 const TOUCH_WRITE_EVERY_MS = 10 * 60_000;
 /** 单测把 principals.json 指到临时目录；生产不调 */
@@ -50,8 +51,8 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
   }
-  // peer 先验签再扣限速：拿到 token 却签不了名的人耗不掉正牌 peer 的额度
-  const sig = p.peer ? await peerGate(req, url, p.peer) : null;
+  // peer 先验签再扣限速：拿到 token 却签不了名的人耗不掉正牌 peer 的额度（失败另有一个桶）
+  const sig = p.peer ? await peerGate(req, url, p.peer, opts.rateLimit) : null;
   if (sig instanceof Response) return sig;
   if (opts.rateLimit) {
     const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
@@ -69,11 +70,19 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   return p;
 }
 
-/** peer token 的来源与签名：经中继来的（路径模式、隧道，source=relay）一律 403；签名钥匙必须是这个 peer 的（lib/peer-trust.ts） */
-async function peerGate(req: Request, url: URL, peer: string): Promise<Extract<PeerSigVerdict, { allow: true }> | Response> {
+/**
+ * peer token 的来源与签名：经中继来的（路径模式、隧道，source=relay）一律 403；签名钥匙必须是这个 peer 的（lib/peer-trust.ts）。
+ * 验签失败也限流（每个 peer 每分钟 120 次，超了回 429），但用单独的桶：和成功请求共用一个桶的话，
+ * 拿着 token 却签不了名的人就能把正牌 peer 挡在外面。
+ */
+async function peerGate(req: Request, url: URL, peer: string, rateLimit: boolean): Promise<Extract<PeerSigVerdict, { allow: true }> | Response> {
   if (requestContextOf(req).source === "relay") return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
   const v = await checkPeerSignature(req, url, peer);
-  return v.allow ? v : peerSigRejected(v.reason);
+  if (v.allow) return v;
+  let failures = sigFailures.get(peer);
+  if (!failures) sigFailures.set(peer, (failures = new SlidingWindowLimiter(API_RATE_LIMIT_PER_MIN)));
+  if (rateLimit && !failures.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded for failed peer signatures (${API_RATE_LIMIT_PER_MIN} req/min)` });
+  return peerSigRejected(v.reason);
 }
 
 /** reason 单独给出：调用方据此提示「对时 / 重新邀请 / 别原样重发」，而不是笼统的「token 失效」 */

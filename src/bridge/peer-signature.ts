@@ -68,12 +68,13 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
 }
 
 /**
- * 钉住的钥匙变了立刻写；只是验签结果变了一分钟最多写一次（拿着 token 交替发坏签名也只是一分钟一次），
- * 没写的由定时器在一分钟后补上。写失败不影响这次判定。
+ * 钉住的钥匙变了立刻写。验签失败从不触发写盘，只改内存；它和「结果没变的 ok」都等定时器一分钟最多补写一次
+ * （doctor 读的是文件，持续失败要能落到盘上），拿着 token 连发坏签名也只是一分钟一次。写失败不影响这次判定。
  */
 async function persist(peer: string, prev: PinnedPeerKey | undefined, next: PinnedPeerKey): Promise<void> {
   loaded().set(peer, next);
-  if (prev?.publicKey === next.publicKey && Date.now() - lastWrite < 60_000) {
+  const pinChanged = prev?.publicKey !== next.publicKey && next.lastCheck?.result === "ok";
+  if (!pinChanged) {
     flushTimer ??= setTimeout(() => void flush(peer), 60_000 - (Date.now() - lastWrite));
     flushTimer.unref?.();
     return;
