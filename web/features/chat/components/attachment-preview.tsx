@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { defaultInlineRules } from "@do-md/core-react";
-import { Domd, domdTooHeavy } from "@/components/domd";
+import { breakLongRuns, Domd, PLAIN_NOTICE, type PlainReason } from "@/components/domd";
 import { useT } from "@/lib/i18n";
 import { clipPreview, openMode, textFlavor, type TextFlavor } from "@/lib/chat/attachment-open";
 import { isNativeShell } from "@/lib/native";
@@ -115,18 +115,19 @@ function Notice({ children }: { children: ReactNode }) {
 function TextBody({ flavor, text }: { flavor: TextFlavor; text: string }) {
   const t = useT();
   const { shown, truncated } = useMemo(() => clipPreview(text), [text]);
-  // 交给 do-md 会卡死或栈溢出的 md（阈值与实测见 lib/chat/md-guard.ts）按纯文本显示；Domd 自己也会兜，这里多给一行提示
-  const heavy = useMemo(() => flavor === "markdown" && domdTooHeavy(shown), [flavor, shown]);
+  // Domd 判定会卡死 / 栈溢出的 md 自己退回纯文本（lib/chat/md-guard.ts、components/domd/probe.ts），这里把原因显示成提示条
+  const [plain, setPlain] = useState<{ md: string; reason: PlainReason } | null>(null);
+  const onPlain = useCallback((reason: PlainReason) => setPlain({ md: shown, reason }), [shown]);
   return (
     <>
       {truncated && <Notice>{t("内容过长，仅显示开头")}</Notice>}
-      {heavy && <Notice>{t("内容较大，按纯文本显示")}</Notice>}
+      {plain?.md === shown && <Notice>{t(PLAIN_NOTICE[plain.reason])}</Notice>}
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
-        {flavor === "markdown" && !heavy ? (
+        {flavor === "markdown" ? (
           // 只留默认行内规则：附件是外来内容，`[[{#id}…]]` 不能变成会替用户回投给 agent 的按钮
-          <Domd initMd={shown} inlineRules={defaultInlineRules} bodyClassName="chat-domd px-4 py-3" />
+          <Domd initMd={shown} inlineRules={defaultInlineRules} bodyClassName="chat-domd px-4 py-3" onPlain={onPlain} />
         ) : (
-          <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12.5px] leading-relaxed text-base-content">{shown}</pre>
+          <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12.5px] leading-relaxed text-base-content">{breakLongRuns(shown)}</pre>
         )}
       </div>
     </>

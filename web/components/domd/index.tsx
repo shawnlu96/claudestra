@@ -18,8 +18,11 @@ import "@do-md/core-react/style.css";
 import { tokenize, subscribeGrammarLoad, getGrammarVersion } from "./prism";
 import { padTableBlocks } from "./normalize-md";
 import { InlineButton, CopyChip, AgentChip, BadgeChip } from "./inline-button";
-import { SAFE_NODES } from "./safe-nodes";
-import { mdTooHeavy } from "@/lib/chat/md-guard";
+import { ImgAltContext, SAFE_NODES } from "./safe-nodes";
+import { domdSafe } from "./probe";
+import { breakLongRuns } from "./long-runs";
+import { imageAlts, mdTooHeavy } from "@/lib/chat/md-guard";
+import { useT } from "@/lib/i18n";
 import { ErrorBoundary } from "@/lib/error-boundary";
 import { reportBoundaryError } from "@/lib/runtime-error";
 import "./prism-themes.css";
@@ -48,11 +51,6 @@ const INLINE_RULES: InlineRule[] = [
 
 const DOMD_ERR = (err: Error, stack: string) => reportBoundaryError("domd", err, stack);
 
-/** 这段 md 交给 Domd 会不会被降级成纯文本（和 Domd 自己判定用同一份输入；附件预览据此显示提示条） */
-export function domdTooHeavy(md: string): boolean {
-  return mdTooHeavy(padTableBlocks(md));
-}
-
 type ProviderProps = ComponentProps<typeof DOMDProvider>;
 
 export type DomdProps = Omit<ProviderProps, "children"> & {
@@ -60,14 +58,35 @@ export type DomdProps = Omit<ProviderProps, "children"> & {
   bodyClassName?: string;
   /** 渲染在 Provider 内的附加桥接组件（流式喂字等）。Chat 只读暂不用。 */
   children?: ReactNode;
+  /** 退回纯文本时通知调用方（附件预览在顶部显示提示条）；不传就在正文上方显示一行提示 */
+  onPlain?: (reason: PlainReason) => void;
 };
+
+/** heavy = 护栏按大小 / 定界符 / 嵌套判定；complex = 试解析出错、树太深或渲染出错 */
+export type PlainReason = "heavy" | "complex";
+
+export const PLAIN_NOTICE: Record<PlainReason, string> = {
+  heavy: "内容较大，按纯文本显示",
+  complex: "内容结构太复杂，按纯文本显示",
+};
+
+function PlainBody({ className, text, reason, onPlain }: { className?: string; text: ReactNode; reason: PlainReason; onPlain?: (r: PlainReason) => void }) {
+  const t = useT();
+  useEffect(() => onPlain?.(reason), [onPlain, reason]);
+  return (
+    <div className={className}>
+      {!onPlain && <div className="mb-1 text-xs text-base-content/50">{t(PLAIN_NOTICE[reason])}</div>}
+      <div className="whitespace-pre-wrap break-words">{typeof text === "string" ? breakLongRuns(text) : text}</div>
+    </div>
+  );
+}
 
 /**
  * 一站式只读 DOMD（Provider + 主体）。默认挂 Prism 高亮。
  * initMd 是初始 markdown（挂载时读一次）——所以调用方对「流式进行中」的消息
  * 先用纯文本渲染，定稿后再挂 Domd（一次性拿全量 content），见 message-list。
  */
-export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
+export function Domd({ bodyClassName, children, onPlain, ...provider }: DomdProps) {
   // 表格紧贴上一行时 do-md 认不出来（它要求表格自成块）——渲染前补上那个空行。
   // 见 ./normalize-md：0.2.10 与最新 0.11.2 行为一致，升级救不了，只能归一化。
   const initMd = useMemo(
@@ -79,33 +98,41 @@ export function Domd({ bodyClassName, children, ...provider }: DomdProps) {
   // 真正有新语法注册时 +1,一个会话最多几次,remount 成本可忽略。
   const [grammarV, setGrammarV] = useState(0);
   useEffect(() => subscribeGrammarLoad(() => setGrammarV(getGrammarVersion())), []);
-  // 段内定界符过多 / 缩进过深的 md 交给 do-md 会卡死或栈溢出（lib/chat/md-guard.ts 有实测数字）：按纯文本显示
-  const heavy = useMemo(() => typeof initMd === "string" && mdTooHeavy(initMd), [initMd]);
-  const plain = <div className={bodyClassName}><div className="whitespace-pre-wrap break-words">{initMd}</div></div>;
-  if (heavy) return plain;
-  // 护栏没拦住的（渲染里栈溢出等）也退回纯文本，并上报一次好补阈值
+  const opts = {
+    editable: false,
+    codeTokenizer: tokenize as ProviderProps["codeTokenizer"],
+    inlineRules: INLINE_RULES,
+    renderComponent: SAFE_NODES,
+    ...provider,
+    initMd,
+  };
+  // 段内定界符过多 / 嵌套过深的 md 交给 do-md 会卡死或栈溢出（lib/chat/md-guard.ts 有实测数字）；护栏认不出的再试解析一遍（./probe）
+  const reason = useMemo((): PlainReason | null => {
+    if (typeof initMd !== "string") return null;
+    if (mdTooHeavy(initMd)) return "heavy";
+    return domdSafe(opts) ? null : "complex";
+  }, [initMd]); // eslint-disable-line react-hooks/exhaustive-deps -- 解析结果只随 initMd 变（其余参数挂载后不变，DOMD 本身也只读一次）
+  const alts = useMemo(() => (typeof initMd === "string" && !reason ? imageAlts(initMd) : new Map<string, string>()), [initMd, reason]);
+  const plain = (r: PlainReason) => <PlainBody className={bodyClassName} text={initMd} reason={r} onPlain={onPlain} />;
+  if (reason) return plain(reason);
+  // 渲染里抛的错（栈溢出等）也退回纯文本，并上报一次好补阈值
   return (
-    <ErrorBoundary fallback={() => plain} onError={DOMD_ERR} resetKey={initMd}>
-      <DOMDProvider
-        key={grammarV}
-        editable={false}
-        codeTokenizer={tokenize as ProviderProps["codeTokenizer"]}
-        inlineRules={INLINE_RULES}
-        renderComponent={SAFE_NODES}
-        {...provider}
-        initMd={initMd}
-      >
-        {bodyClassName ? (
-          <div className={bodyClassName}>
+    <ErrorBoundary fallback={() => plain("complex")} onError={DOMD_ERR} resetKey={initMd}>
+      <ImgAltContext.Provider value={alts}>
+        <DOMDProvider key={grammarV} {...opts}>
+          {bodyClassName ? (
+            <div className={bodyClassName}>
+              <DOMD />
+            </div>
+          ) : (
             <DOMD />
-          </div>
-        ) : (
-          <DOMD />
-        )}
-        {children}
-      </DOMDProvider>
+          )}
+          {children}
+        </DOMDProvider>
+      </ImgAltContext.Provider>
     </ErrorBoundary>
   );
 }
 
 export { DOMDProvider as DomdProvider };
+export { breakLongRuns };
