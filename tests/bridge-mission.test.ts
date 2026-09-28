@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { initMission, reconcileMissions, setMissionTestHooks } from "../src/bridge/mission.js";
 import { emitEvent, type BridgeEventType } from "../src/bridge/event-bus.js";
 import { resetAutopilotEvidence } from "../src/bridge/autopilot-evidence.js";
+import { setEvidenceWaitForTest } from "../src/bridge/autopilot-close.js";
 import type { Envelope } from "../src/bridge/router.js";
 import { readRunLog } from "../src/lib/autopilot-log.js";
 import { newMission, readMissions, updateMissions, type Mission } from "../src/lib/missions.js";
@@ -46,17 +47,28 @@ async function startAndNudge(): Promise<Mission> {
 }
 
 let paneBusy = false;
+let paneUnknown = false;
+/** 真 bridge 投递给本地时会发 thinking（deliverToLocal）；run 只认那之后的 done */
+const realDeliver = async (env: Envelope) => {
+  sent.push(env);
+  thinking();
+  return { envelope: env, outcome: { kind: "sent" } };
+};
+let deliverImpl: (env: Envelope) => Promise<unknown> = realDeliver;
 beforeAll(() => {
-  setMissionTestHooks({ path, graceMs: 50, reconcileDelayMs: 20, turnBusy: async () => paneBusy });
+  setEvidenceWaitForTest({ minMs: 30, quietMs: 20, maxMs: 300 });
+  setMissionTestHooks({ path, graceMs: 50, reconcileDelayMs: 20, turnSeen: async () => (paneBusy ? "busy" : paneUnknown ? "unknown" : "idle") });
   initMission({
     clients: new Map([["ctl", { ws: {} as never, channelId: "ctl", cwd: "/tmp" }]]),
-    deliver: async (env) => void sent.push(env),
+    deliver: (env) => deliverImpl(env),
     lastMessageSource: { set: () => undefined },
     controlChannelId: "ctl",
   });
 });
 beforeEach(async () => {
   paneBusy = false;
+  paneUnknown = false;
+  deliverImpl = realDeliver;
   // 先删掉上一条的 mission 再等它残留的定时器 / 回合结束处理跑完，否则它们会把提醒记到这一条头上
   await updateMissions((all) => void delete all.master, path);
   done(); // 清掉上一条测试可能留下的「thinking」
@@ -218,5 +230,112 @@ describe("bridge 重启后（只有落盘的状态）", () => {
     await settle();
     expect((await cur()).lastRun?.runId).toBe("run_busy");
     expect(sent.length).toBe(1);
+  });
+});
+
+describe("对抗式审查补的用例", () => {
+  test("回合结束之后才到的最后几条事件（撞额度）也算进这一轮", async () => {
+    await startAndNudge();
+    done();
+    ev("api_error_turn", { error: "rate_limit" }); // watcher 在 Stop 之后才把最后几行读完
+    ev("assistant_text", { text: "You've hit your session limit · resets 4:30pm (Asia/Tokyo)" });
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("rate_limited");
+  });
+  test("deliver 报 error（没送到）→ 不标已投递、nudges 不加，唤醒放回队列", async () => {
+    deliverImpl = async (env) => {
+      sent.push(env);
+      return { envelope: env, outcome: { kind: "error", error: new Error("ws closed") } };
+    };
+    await put();
+    done();
+    await until(() => sent.length === 1);
+    await settle();
+    const m = await cur();
+    expect(m.nudges).toBe(0);
+    expect(m.run).toBeUndefined();
+    expect(m.wake?.source).toBe("retry");
+  });
+  test("领取后、投递前到的 done（上一回合迟到的 Stop）不算这个 run 的结束", async () => {
+    deliverImpl = async (env) => {
+      done(); // 上一个（人工）回合的 Stop 恰好此刻到，还没发 thinking
+      await sleep(30);
+      return realDeliver(env);
+    };
+    await put();
+    done();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    await settle();
+    const m = await cur();
+    expect(m.lastRun).toBeUndefined();
+    expect(m.run?.deliveredAt).toBeTruthy();
+  });
+  test("stop 后立刻 start：旧 run 的回合结束给旧一代补一行日志，不写进新一代", async () => {
+    const a = await startAndNudge();
+    await updateMissions((all) => void Object.assign(all.master, { status: "stopped" }), path);
+    const b = await put(); // 新一代
+    ev("tool_start", { name: "Edit" });
+    done(); // 旧 run 的回合结束
+    await until(() => readRunLog(a.id!).length === 1);
+    expect(readRunLog(a.id!)[0]).toMatchObject({ outcome: "action_taken" });
+    expect(readRunLog(a.id!)[0].reason).toContain("换了一代");
+    const now = await cur();
+    expect(now.id).toBe(b.id);
+    expect(now.lastRun).toBeUndefined();
+  });
+  test("agent 在 run 里自己 mission done → 收尾写日志、不再排下一次", async () => {
+    const m = await startAndNudge();
+    await updateMissions((all) => void Object.assign(all.master, { status: "done" }), path);
+    done();
+    await until(async () => !!(await cur()).lastRun);
+    await settle();
+    expect((await cur()).wake).toBeUndefined();
+    expect(sent.length).toBe(1);
+    expect(readRunLog(m.id!)[0].nextWakeAt).toBeUndefined();
+  });
+  test("旧一代欠着的到点收尾：新一代开始就作废，不吞新一代的 done、不把「已关闭」发给新一代", async () => {
+    await put({ until: new Date(Date.now() - 1000).toISOString() });
+    paneBusy = true;
+    done();
+    await until(async () => (await cur()).status === "expired");
+    await settle();
+    expect(sent.length).toBe(0);
+    paneBusy = false;
+    await put(); // 新一代
+    await reconcileMissions();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    ev("tool_start", { name: "Edit" });
+    done();
+    await until(async () => !!(await cur()).lastRun);
+    expect(sent.every((e) => !String(e.content).includes("已关闭"))).toBe(true);
+    expect((await cur()).lastRun?.outcome).toBe("action_taken");
+  });
+  test("点了「打断」→ 这一轮收尾，下一次按人类让位规则等，不是 45 秒后又推", async () => {
+    await startAndNudge();
+    ev("agent_status", { status: "done", trigger: "interrupt" });
+    await until(async () => !!(await cur()).lastRun);
+    await settle();
+    expect(sent.length).toBe(1);
+    expect((await cur()).wake).toBeTruthy();
+  });
+  test("事件的 agent 字段是频道 id（bridge 补发类事件）也按频道认到 master", async () => {
+    await put();
+    emitEvent({ agent: "ctl", chatId: "ctl", type: "agent_status", data: { status: "done" } });
+    await until(() => sent.length === 1);
+  });
+  test("重启时补发的 done 用频道 id 当 agent 字段：同样不放行等人拍板", async () => {
+    await put({ wakeSeq: 1, wake: { seq: 1, source: "turn_end", dueAt: new Date(Date.now() + 3_600_000).toISOString(), firstAt: new Date().toISOString(), merged: 0, hold: "blocked" } });
+    emitEvent({ agent: "ctl", chatId: "ctl", type: "agent_status", data: { status: "done", reason: "bridge_restarted" } });
+    await settle();
+    expect((await cur()).wake).toMatchObject({ seq: 1, hold: "blocked" });
+  });
+  test("重启后忙闲未知（Codex / Pi）→ 已投递的 run 不收尾不重递", async () => {
+    const t = new Date(Date.now() - 60_000).toISOString();
+    await put({ wakeSeq: 1, run: { runId: "run_x", seq: 1, source: "turn_end", merged: 0, firstAt: t, claimedAt: t, deliveredAt: t } });
+    paneUnknown = true;
+    await reconcileMissions();
+    await settle();
+    expect((await cur()).run?.runId).toBe("run_x");
+    expect(sent.length).toBe(0);
   });
 });

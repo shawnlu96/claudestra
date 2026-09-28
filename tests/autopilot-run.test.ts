@@ -1,8 +1,7 @@
 /** lib/autopilot-run.ts：五类结果归类、下次醒来、让位、额度重置时间（CC / Codex 两种写法） */
 import { describe, expect, test } from "bun:test";
 import {
-  AUTOPILOT_TIMING as T, classifyRun, emptyEvidence, isMutatingTool, countsAsTool, nextStreaks, nextWake, parseResetAt, yieldReason,
-  type RunEvidence,
+  AUTOPILOT_TIMING as T, classifyRun, emptyEvidence, nextStreaks, nextWake, parseResetAt, yieldReason, type RunEvidence,
 } from "../src/lib/autopilot-run.js";
 
 const ev = (over: Partial<RunEvidence> = {}): RunEvidence => ({ ...emptyEvidence(), ...over });
@@ -34,30 +33,28 @@ describe("classifyRun：五类各一条", () => {
   });
 });
 
-describe("工具分类", () => {
-  test("通信工具不算调工具；只读不算改东西；Bash 分不清算改", () => {
-    expect(countsAsTool("mcp__claudestra__reply")).toBe(false);
-    expect(countsAsTool("Read")).toBe(true);
-    expect(isMutatingTool("Read")).toBe(false);
-    expect(isMutatingTool("Grep")).toBe(false);
-    expect(isMutatingTool("Edit")).toBe(true);
-    expect(isMutatingTool("Bash")).toBe(true);
-    expect(isMutatingTool("mcp__claudestra__reply")).toBe(false);
-  });
-});
-
 describe("nextWake：结果决定下次什么时候醒", () => {
   const s0 = { idle: 0, fail: 0 };
-  test("很短的正常一轮不被当成空转：只要调过工具，连续多少轮都是宽限期后接着推", () => {
+  test("很短的正常一轮不被当成空转：干了活的短轮次永不退避；没进展的一两轮也照常接着推", () => {
     let s = s0;
-    for (let i = 0; i < 6; i++) s = nextStreaks(s, "normal", ev({ tools: 1 }));
-    expect(s.idle).toBe(0);
+    for (let i = 0; i < 6; i++) s = nextStreaks(s, "action_taken", ev({ tools: 1, mutating: 1 }));
+    expect(nextWake("action_taken", s, ev({ mutating: 1 }), NOW, GRACE).delayMs).toBe(GRACE);
+    s = nextStreaks(s, "normal", ev({ tools: 1 }));
+    s = nextStreaks(s, "normal", ev({ tools: 1 }));
     expect(nextWake("normal", s, ev({ tools: 1 }), NOW, GRACE)).toEqual({ delayMs: GRACE, why: "正常一轮，接着推" });
+  });
+  test("每轮都只读查看（等 CI / 等 peer）：连续 3 轮就待命，不会每 45 秒推一次推到截止", () => {
+    let s = s0;
+    for (let i = 0; i < 3; i++) s = nextStreaks(s, "normal", ev({ tools: 2 }));
+    expect(nextWake("normal", s, ev({ tools: 2 }), NOW, GRACE)).toMatchObject({ delayMs: T.standbyStepsMs[0], hold: "standby" });
+  });
+  test("证据丢了的一轮不计入待命 / 失败计数", () => {
+    expect(nextStreaks({ idle: 2, fail: 1 }, "normal", ev({ evidenceLost: true }))).toEqual({ idle: 2, fail: 1 });
   });
   test("action_taken 接着推", () => {
     expect(nextWake("action_taken", s0, ev({ mutating: 1 }), NOW, GRACE).delayMs).toBe(GRACE);
   });
-  test("连续 3 轮 normal 且没调工具才待命：5 → 15 → 30 → 60 封顶；干一次活就清零", () => {
+  test("连续 3 轮 normal 才待命：5 → 15 → 30 → 60 封顶；干一次活就清零", () => {
     let s = s0;
     const got: number[] = [];
     for (let i = 0; i < 7; i++) {
@@ -124,6 +121,21 @@ describe("parseResetAt", () => {
   test("Codex：try again in N hours M minutes", () => {
     expect(parseResetAt("try again in 2 hours 13 minutes.", NOW)).toBe(NOW + (2 * 60 + 13) * 60_000);
     expect(parseResetAt("try again in 1 day and 3 hours", NOW)).toBe(NOW + 27 * 3_600_000);
+  });
+  test("收尾晚了几分钟：按看到那句话的时刻解析（rateLimitAt），不会滚到明天", () => {
+    const seen = Date.parse("2026-09-27T17:59:00Z"); // 上海 01:59 看到「resets 2am」
+    const closeAt = Date.parse("2026-09-27T18:05:00Z"); // 02:05 才收尾
+    const w = nextWake("rate_limited", { idle: 0, fail: 0 }, ev({ rateLimitText: "resets 2am (Asia/Shanghai)", rateLimitAt: seen }), closeAt, GRACE);
+    expect(w.delayMs).toBe(T.rateLimitSlackMs);
+  });
+  test("12am / 12pm、跨年的周额度", () => {
+    const now = Date.parse("2026-09-28T12:00:00Z"); // 上海 20:00
+    expect(parseResetAt("resets 12am (Asia/Shanghai)", now)).toBe(Date.parse("2026-09-28T16:00:00Z"));
+    expect(parseResetAt("resets 12pm (Asia/Shanghai)", now)).toBe(Date.parse("2026-09-29T04:00:00Z"));
+    expect(parseResetAt("resets Jan 2, 9am (Asia/Shanghai)", Date.parse("2026-12-31T02:00:00Z"))).toBe(Date.parse("2027-01-02T01:00:00Z"));
+  });
+  test("新版 CC 的 session / weekly limit 文案照样解析", () => {
+    expect(parseResetAt("You've hit your session limit · resets 4:30pm (Asia/Tokyo)", Date.parse("2026-09-28T03:00:00Z"))).toBe(Date.parse("2026-09-28T07:30:00Z"));
   });
   test("认不出 / 太远 → null", () => {
     expect(parseResetAt("You've hit your usage limit", NOW)).toBeNull();

@@ -10,10 +10,12 @@ export type RunOutcome = "normal" | "action_taken" | "blocked_approval" | "rate_
 export interface RunEvidence {
   /** 本轮调用的工具数（不含 reply 这类通信工具） */
   tools: number;
-  /** 其中可能改了东西的（只读工具以外的都算，Bash 分不清就算） */
+  /** 其中可能改了东西的（lib/autopilot-tools.ts：只读工具、只读 shell 以外的都算） */
   mutating: number;
   /** 撞额度那句原文（带重置时间）；没撞 = 不填 */
   rateLimitText?: string;
+  /** 看到那句话的时刻（重置时间按它解析） */
+  rateLimitAt?: number;
   /** API 报错原文，或 bridge 判定的失败原因（超时、agent 掉线） */
   failure?: string;
   /** 本轮发出的带按钮消息数：只认 run 开始之后 agent 自己发的，owner 早先没答的按钮不算 */
@@ -28,21 +30,6 @@ export interface RunEvidence {
 
 export const emptyEvidence = (): RunEvidence => ({ tools: 0, mutating: 0, buttonsSent: 0, questionOpen: false, humanInterleaved: false });
 
-/** 不改东西的工具：只读查询和 Claudestra 的查询类工具。名字按 Claude Code 的形状（Codex / Pi 的记录都先翻成这个形状） */
-const READ_ONLY_TOOLS = new Set([
-  "Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "ToolSearch", "TodoWrite", "TaskList", "TaskGet", "NotebookRead",
-  "ListMcpResourcesTool", "ReadMcpResourceTool",
-]);
-const COMMS_TOOLS = /^mcp__[^_]+__(reply|react|edit_message|fetch_messages|download_attachment|check_inbox|project_info|list_shared_channels)$/;
-
-/** 通信工具不算「调了工具」：没事可做时 agent 也会 reply 一句「没有要推进的」 */
-export function countsAsTool(name: string): boolean {
-  return !COMMS_TOOLS.test(name);
-}
-export function isMutatingTool(name: string): boolean {
-  return countsAsTool(name) && !READ_ONLY_TOOLS.has(name);
-}
-
 /**
  * 归类，优先级从上到下：额度 > 失败 > 在等人 > 干了活 > 正常。
  * 发了按钮但同时也干了别的活，算 action_taken（提醒里要求「拍板的事记下来先跳过」，它照做了就不该停等）；
@@ -54,14 +41,14 @@ export function classifyRun(ev: RunEvidence): { outcome: RunOutcome; reason: str
   if (ev.questionOpen) return { outcome: "blocked_approval", reason: "回合停在一个没回答的提问上" };
   if (ev.buttonsSent > 0 && ev.mutating === 0) return { outcome: "blocked_approval", reason: `发了 ${ev.buttonsSent} 条带按钮的消息，等人拍板` };
   if (ev.mutating > 0) return { outcome: "action_taken", reason: `调了 ${ev.tools} 个工具，其中 ${ev.mutating} 个可能改了东西` };
-  return { outcome: "normal", reason: ev.tools ? `只做了查看（${ev.tools} 个只读工具）` : "没调工具" };
+  return { outcome: "normal", reason: ev.tools ? `只做了查看（${ev.tools} 个只读调用）` : "没调工具" };
 }
 
 // ── 下一次什么时候醒 ──
 
 /** 调参集中在这里（PM 09-28：先按执行者定的来，集中成常量方便以后调） */
 export const AUTOPILOT_TIMING = {
-  /** 连续几轮「normal 且一个工具都没调」进待命退避：没事做了就 standby */
+  /** 连续几轮 normal（没有写操作；只读查看、回一句话都算没进展）进待命退避：没事做了就 standby */
   idleRunsBeforeStandby: 3,
   standbyStepsMs: [5, 15, 30, 60].map((m) => m * MINUTE_MS),
   /** 额度：解析不出重置时间时等多久；解析出来的再多等一会儿，别卡在重置那一秒 */
@@ -90,14 +77,16 @@ export const AUTOPILOT_TIMING = {
 export type WakeHold = "rate_limit" | "failed" | "blocked" | "standby";
 
 export interface RunStreaks {
-  /** 连续「normal 且没调工具」的轮数 */
+  /** 连续 normal（没有写操作）的轮数 */
   idle: number;
   /** 连续失败的轮数 */
   fail: number;
 }
 
+/** 证据丢了的一轮（bridge 重启过）说明不了有没有进展：两个计数都原样保留 */
 export function nextStreaks(prev: RunStreaks, outcome: RunOutcome, ev: RunEvidence): RunStreaks {
-  return { idle: outcome === "normal" && ev.tools === 0 ? prev.idle + 1 : 0, fail: outcome === "failed" ? prev.fail + 1 : 0 };
+  if (ev.evidenceLost) return { ...prev };
+  return { idle: outcome === "normal" ? prev.idle + 1 : 0, fail: outcome === "failed" ? prev.fail + 1 : 0 };
 }
 
 export interface NextWake {
@@ -109,7 +98,7 @@ export interface NextWake {
 export function nextWake(outcome: RunOutcome, streaks: RunStreaks, ev: RunEvidence, now: number, graceMs: number): NextWake {
   const T = AUTOPILOT_TIMING;
   if (outcome === "rate_limited") {
-    const at = ev.rateLimitText ? parseResetAt(ev.rateLimitText, now) : null;
+    const at = ev.rateLimitText ? parseResetAt(ev.rateLimitText, ev.rateLimitAt ?? now) : null;
     if (at === null) return { delayMs: T.rateLimitFallbackMs, hold: "rate_limit", why: "撞额度，没解析出重置时间" };
     return { delayMs: Math.max(at - now, 0) + T.rateLimitSlackMs, hold: "rate_limit", why: `撞额度，${new Date(at).toISOString()} 重置` };
   }
@@ -197,6 +186,7 @@ const to24 = (h: number, ap: string): number => (h % 12) + (ap.toLowerCase() ===
 
 /**
  * 只有时刻没有日期：取该时区今天的这个时刻，已过就算明天。有月日没有年：今年的这天已过就算明年。
+ * now 要传「看到那句话的时刻」，不是收尾时刻：收尾晚了几分钟，按收尾时刻算会把刚过去的重置滚到明天。
  * 结果不在 (now-1 分钟, now+8 天) 之内 → null，调用方退回固定等待。
  */
 function resolveWall(now: number, h: number, mi: number, tz: string | undefined, md?: { mo: number; d: number; y?: number }): number | null {

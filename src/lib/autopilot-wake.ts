@@ -18,7 +18,7 @@ export interface Wake {
   source: WakeSource;
   /** 不早于这个时刻领取（ISO） */
   dueAt: string;
-  /** 最早那次触发的时刻：让位太久记「未推进」从这里算 */
+  /** 最早到期的时刻（合并进来的触发里最早该推进的那次）：让位太久记「未推进」从这里算，挡在额度 / 待命里的时间不算 */
   firstAt: string;
   /** 合并掉了几次触发 */
   merged: number;
@@ -67,13 +67,15 @@ export function enqueueWake(m: AutopilotFields, t: { source: WakeSource; dueAt: 
   m.wakeSeq = seq;
   const old = m.wake;
   if (!old) {
-    m.wake = { seq, source: t.source, dueAt: iso(t.dueAt), firstAt: iso(now), merged: 0, ...(t.hold ? { hold: t.hold } : {}) };
+    m.wake = { seq, source: t.source, dueAt: iso(t.dueAt), firstAt: iso(t.dueAt), merged: 0, ...(t.hold ? { hold: t.hold } : {}) };
     return m.wake;
   }
   const keepOld = !t.hold && old.hold && !releases(old.hold);
   const w: Wake = { ...old, seq, source: t.source, merged: old.merged + 1 };
   if (!keepOld) {
     w.dueAt = iso(t.dueAt);
+    // 带 hold 的是新的调度决定，从它重新算；放行 / 普通合并取更早的那个（一直有人聊把 dueAt 往后推，firstAt 不跟着推）
+    w.firstAt = t.hold || Date.parse(old.firstAt) > t.dueAt ? iso(t.dueAt) : old.firstAt;
     if (t.hold) w.hold = t.hold;
     else delete w.hold;
   }
@@ -141,32 +143,42 @@ export function noteLongYield(m: AutopilotFields, now: number): boolean {
 
 /**
  * 定时器到点时该做什么（让位另判：要抓屏、查在线，放在 bridge）。until 以外的时刻都从落盘的字段算，所以 bridge 重启后照样能接上：
- * - run 领了没投递、超过 claimStaleMs → 放回（进程在领取和投递之间挂了）
- * - run 已投递：还在忙就等；本进程没在给它记账（重启过）且已空闲 → 按证据不全收尾；超过 runStaleMs 仍空闲 → 判失败收尾
- * - 没有 wake 也没有 run（刚开启、或旧数据）→ 入队一次 start
+ * - run 领了没标投递：本进程知道已经递出去了（标记时写锁超时）→ 补标；否则超过 claimStaleMs 放回（进程在领取和投递之间挂了）
+ * - run 已投递：还在忙就等；空闲且本进程没在记账（重启过）→ 按证据不全收尾；忙闲未知（重启后 Codex / Pi 没有事件态）等到 runStaleMs 再收；
+ *   本进程在记账、超过 runStaleMs 仍空闲 → 判失败收尾
+ * - 没有 wake 也没有 run（刚开启、或旧数据）→ 入队一次 start；旧数据里还在退避的 resumeAt 照旧生效
  */
+export type TurnSeen = "busy" | "idle" | "unknown";
 export type FireStep =
   | { kind: "wait"; ms: number }
   | { kind: "unclaim" }
+  | { kind: "mark_delivered" }
   | { kind: "close"; lost: boolean; failure?: string }
-  | { kind: "enqueue_start" }
+  | { kind: "enqueue_start"; dueAt: number }
   | { kind: "try" };
 
-export function decideFire(m: AutopilotFields, now: number, s: { busy: boolean; tracked: boolean }): FireStep {
+export function decideFire(
+  m: AutopilotFields & { resumeAt?: string }, now: number, s: { turn: TurnSeen; tracked: boolean; deliveredHere?: boolean },
+): FireStep {
   const T = AUTOPILOT_TIMING;
   const r = m.run;
   if (r && !r.deliveredAt) {
+    if (s.deliveredHere) return { kind: "mark_delivered" };
     const age = now - Date.parse(r.claimedAt);
     return age >= T.claimStaleMs ? { kind: "unclaim" } : { kind: "wait", ms: T.claimStaleMs - age };
   }
   if (r?.deliveredAt) {
     const age = now - Date.parse(r.deliveredAt);
-    if (s.busy) return { kind: "wait", ms: T.yieldRecheckMs * 5 };
+    if (s.turn === "busy") return { kind: "wait", ms: T.yieldRecheckMs * 5 };
+    if (!s.tracked && s.turn === "idle") return { kind: "close", lost: true };
+    if (age < T.runStaleMs) return { kind: "wait", ms: T.runStaleMs - age };
     if (!s.tracked) return { kind: "close", lost: true };
-    if (age >= T.runStaleMs) return { kind: "close", lost: false, failure: `投递后 ${Math.round(age / 60_000)} 分钟没等到回合结束，agent 已空闲` };
-    return { kind: "wait", ms: T.runStaleMs - age };
+    return { kind: "close", lost: false, failure: `投递后 ${Math.round(age / 60_000)} 分钟没等到回合结束，agent 已空闲` };
   }
-  if (!m.wake) return { kind: "enqueue_start" };
+  if (!m.wake) {
+    const legacy = m.resumeAt ? Date.parse(m.resumeAt) : NaN;
+    return { kind: "enqueue_start", dueAt: Number.isFinite(legacy) && legacy > now ? legacy : now };
+  }
   const due = Date.parse(m.wake.dueAt) - now;
   return due > 0 ? { kind: "wait", ms: due } : { kind: "try" };
 }

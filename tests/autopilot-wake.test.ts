@@ -92,6 +92,12 @@ describe("finishRun", () => {
 });
 
 describe("noteLongYield：让位太久记一次「未推进」", () => {
+  test("从到期时刻算，挡在待命 / 额度里的时间不算：待命 60 分钟到点恰好让位，不会立刻记「排队 60 分钟」", () => {
+    const m: AutopilotFields = {};
+    enqueueWake(m, { source: "turn_end", dueAt: NOW + 3_600_000, hold: "standby" }, NOW);
+    expect(noteLongYield(m, NOW + 3_600_000)).toBe(false);
+    expect(noteLongYield(m, NOW + 3_600_000 + T.maxYieldDelayMs)).toBe(true);
+  });
   test("不到上限不记；到了记一次；同一条唤醒不再记；新触发合并进来也不重复记", () => {
     const m: AutopilotFields = {};
     enqueueWake(m, { source: "turn_end", dueAt: NOW }, NOW);
@@ -132,29 +138,42 @@ describe("落盘 → 重新加载（模拟 bridge 重启）", () => {
 });
 
 describe("decideFire：到点该做什么（都从落盘字段算，重启后照样接上）", () => {
-  const idle = { busy: false, tracked: true };
+  const idle = { turn: "idle" as const, tracked: true };
   test("刚开启没有 wake → 入队 start；wake 没到 → 等；到了 → 试着推进", () => {
     const m: AutopilotFields = {};
-    expect(decideFire(m, NOW, idle)).toEqual({ kind: "enqueue_start" });
+    expect(decideFire(m, NOW, idle)).toEqual({ kind: "enqueue_start", dueAt: NOW });
     enqueueWake(m, { source: "start", dueAt: NOW + 5000 }, NOW);
     expect(decideFire(m, NOW, idle)).toEqual({ kind: "wait", ms: 5000 });
     expect(decideFire(m, NOW + 5000, idle)).toEqual({ kind: "try" });
   });
-  test("领了没投递：短时间内等（投递可能在路上），超时放回", () => {
+  test("旧数据还在退避（resumeAt 在将来）→ 入队时照旧等到那时", () => {
+    expect(decideFire({ resumeAt: new Date(NOW + 600_000).toISOString() } as AutopilotFields, NOW, idle)).toEqual({ kind: "enqueue_start", dueAt: NOW + 600_000 });
+    expect(decideFire({ resumeAt: new Date(NOW - 1).toISOString() } as AutopilotFields, NOW, idle)).toEqual({ kind: "enqueue_start", dueAt: NOW });
+  });
+  test("领了没投递：短时间内等（投递可能在路上），超时放回；本进程知道递出去了 → 补标，绝不放回", () => {
     const m: AutopilotFields = {};
     enqueueWake(m, { source: "start", dueAt: NOW }, NOW);
     claimWake(m, NOW, "r1");
     expect(decideFire(m, NOW + 1000, idle).kind).toBe("wait");
     expect(decideFire(m, NOW + T.claimStaleMs, idle)).toEqual({ kind: "unclaim" });
+    expect(decideFire(m, NOW + T.claimStaleMs, { ...idle, deliveredHere: true })).toEqual({ kind: "mark_delivered" });
   });
   test("已投递：忙就等；重启过（没在记账）且空闲 → 证据不全收尾；太久没等到结束 → 失败收尾", () => {
     const m: AutopilotFields = {};
     enqueueWake(m, { source: "start", dueAt: NOW }, NOW);
     claimWake(m, NOW, "r1");
     markDelivered(m, "r1", NOW);
-    expect(decideFire(m, NOW + 60_000, { busy: true, tracked: false }).kind).toBe("wait");
-    expect(decideFire(m, NOW + 60_000, { busy: false, tracked: false })).toEqual({ kind: "close", lost: true });
+    expect(decideFire(m, NOW + 60_000, { turn: "busy", tracked: false }).kind).toBe("wait");
+    expect(decideFire(m, NOW + 60_000, { turn: "idle", tracked: false })).toEqual({ kind: "close", lost: true });
     expect(decideFire(m, NOW + 60_000, idle)).toEqual({ kind: "wait", ms: T.runStaleMs - 60_000 });
     expect(decideFire(m, NOW + T.runStaleMs, idle)).toMatchObject({ kind: "close", lost: false, failure: expect.stringContaining("没等到回合结束") });
+  });
+  test("重启后忙闲未知（Codex / Pi 没有事件态）→ 不直接收尾，等到 runStaleMs 再按证据不全收", () => {
+    const m: AutopilotFields = {};
+    enqueueWake(m, { source: "start", dueAt: NOW }, NOW);
+    claimWake(m, NOW, "r1");
+    markDelivered(m, "r1", NOW);
+    expect(decideFire(m, NOW + 60_000, { turn: "unknown", tracked: false })).toEqual({ kind: "wait", ms: T.runStaleMs - 60_000 });
+    expect(decideFire(m, NOW + T.runStaleMs, { turn: "unknown", tracked: false })).toEqual({ kind: "close", lost: true });
   });
 });
