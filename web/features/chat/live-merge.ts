@@ -187,7 +187,7 @@ export function mergeContiguousAssistant(base: ChatMessage[], delta: ChatMessage
 }
 
 /**
- * 两段都带组件时按先后拼起来（与服务端同一次响应里 accumulate 的拼法一致）——只取一段，另一段的按钮 / 表单
+ * 两段都带组件时按先后拼起来（与整段拉历史时 lib/chat/history-shape.ts 的 accumulate 拼法一致）——只取一段，另一段的按钮 / 表单
  * 就从气泡里消失了。按钮行的已答键是下标（replyRowKey 的 `b<ri>`），后一段的要平移前一段的行数；
  * 选单（m:/s:<id>）与行内按钮（i:<id>）的键不含下标，原样合并。
  */

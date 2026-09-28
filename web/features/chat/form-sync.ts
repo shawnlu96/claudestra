@@ -8,7 +8,7 @@ import { useEffect, useMemo, useSyncExternalStore, type RefObject } from "react"
 import type { ChatStore } from "./chat-store";
 import { useChatStore, useChatStoreApi } from "./chat-store";
 import { createEditQueue, type EditQueue } from "./ime-queue";
-import { composeFormSend, type SyncForm } from "@/lib/chat/form-compose";
+import { composeFormSend, lineScan, syncBlock, type LineOwner, type MultiRow, type SyncBlock, type SyncForm } from "@/lib/chat/form-compose";
 import { openForms, openFormsSig } from "@/lib/chat/form-open";
 import { restoreFormReply } from "@/lib/chat/form-restore";
 import { postClientLog } from "@/lib/client-log";
@@ -100,4 +100,24 @@ export function sendComposed(store: ChatStore, cur: string, files?: File[]): voi
   const display = restoreFormReply(wire, store.state.messages, false) ?? cur;
   answered.forEach((a) => store.markReplyAnswered(a.messageId, a.rowKey, a.choiceValue));
   void store.send(display, files, wire, true);
+}
+
+/**
+ * MultiSelectRow 用：这一行表单是否走输入框同步（block = null），不走就给原因码；以及输入框里认给它的那一行。
+ * 按「消息 id + 行下标」定位——同一回合前后两段复用 id 时两行 rowKey 相同，只按 id 找会拿到别的那行。
+ */
+export function useFormRowSync(messageId: string, rowIndex: number, row: MultiRow): {
+  form: SyncForm | undefined;
+  forms: SyncForm[];
+  block: SyncBlock | "ambiguous" | null;
+  owner: LineOwner | null;
+} {
+  const composer = useComposerSnap();
+  const forms = useOpenForms();
+  const form = forms.find((f) => f.messageId === messageId && f.rowIndex === rowIndex);
+  const pre = syncBlock(row, form, forms, composer.present);
+  const scan = pre ? null : lineScan(composer.text, forms);
+  // 输入框里有歧义行（别的表单也能认领）时也退回本地勾选：往输入框写只会每点一次多一行
+  const block = pre ?? (scan?.ambiguous.has(row.id) ? "ambiguous" : null);
+  return { form, forms, block, owner: scan?.owners.get(row.id) ?? null };
 }

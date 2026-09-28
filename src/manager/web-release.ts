@@ -36,8 +36,14 @@ export async function maybeBuildWeb(): Promise<{ built: boolean; published?: boo
 
 /** 中继托管的是另一份前端：本机发完它还旧就在输出里说一句（手机经中继打开，拿不到本机这份） */
 async function relayNote(): Promise<{ relayWeb?: string }> {
-  const note = await relayWebReminder(REPO_ROOT, currentLink(), (d) => readBuildInfo(d)?.webCommit ?? null);
-  return note ? { relayWeb: note } : {};
+  try {
+    const note = await relayWebReminder(REPO_ROOT, currentLink(), (d) => readBuildInfo(d)?.webCommit ?? null);
+    return note ? { relayWeb: note } : {};
+  } catch (e) {
+    // 只是发完后的提醒：git 不可用 / 读不到 build-info 都不能把已经成功的部署变成失败退出
+    console.error(`[web-release] 中继网页版本比对失败（不影响本次部署）：${(e as Error).message}`);
+    return {};
+  }
 }
 
 export async function cmdWebRelease(args: string[]): Promise<void> {

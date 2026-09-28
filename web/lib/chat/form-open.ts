@@ -13,16 +13,17 @@ function multiRows(m: ChatMessage): { row: MultiRow; ri: number }[] {
 
 const clicksOf = (m: ChatMessage): Record<string, string> => m.replyClicks ?? deriveClicksFromLegacy(m.replyClickedId, m.replyComponents);
 
-/** 仍可作答的多选表单（带标题），新消息在前；标题按视图里全部多选表单算（placeholder 重名带 id） */
+/** 仍可作答的多选表单（带标题），新消息、同消息里靠后的行在前；标题按视图里全部多选表单算（placeholder 重名带 id） */
 export function openForms(messages: ChatMessage[]): SyncForm[] {
   const titles = formTitles(messages.flatMap((m) => multiRows(m).map(({ row }) => row)));
   const out: SyncForm[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     const clicks = clicksOf(m);
-    for (const { row, ri } of multiRows(m)) {
+    // 同一条消息里也是后面的行在前：同一回合前后两段复用 id 时，最新那段先被按 id 找到（它才同步，旧的退回本地）
+    for (const { row, ri } of multiRows(m).reverse()) {
       const rowKey = replyRowKey(row, ri);
-      if (clicks[rowKey] == null) out.push({ row, title: titles.get(row.id) ?? row.id, messageId: m.id, rowKey });
+      if (clicks[rowKey] == null) out.push({ row, title: titles.get(row.id) ?? row.id, messageId: m.id, rowKey, rowIndex: ri });
     }
   }
   return out;

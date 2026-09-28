@@ -15,6 +15,8 @@ export interface SyncForm {
   title: string;
   messageId?: string;
   rowKey?: string;
+  /** 行在消息 replyComponents 里的下标：同一回合前后两段复用 id 时，两行 rowKey 相同，靠它区分 */
+  rowIndex?: number;
 }
 
 /** 去掉零宽 / 双向控制字符，换行、控制字符、连续空白压成一个空格再 trim——agent 给的文字进输入框前一律过这里 */

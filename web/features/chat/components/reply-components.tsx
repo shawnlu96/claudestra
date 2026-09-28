@@ -4,8 +4,8 @@ import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
-import { editComposer, logLocalTick, useComposerSnap, useOpenForms } from "../form-sync";
-import { lineScan, renderFormLine, setFormValues, syncBlock, toggleFormValue } from "@/lib/chat/form-compose";
+import { editComposer, logLocalTick, useFormRowSync } from "../form-sync";
+import { renderFormLine, setFormValues, toggleFormValue } from "@/lib/chat/form-compose";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -88,7 +88,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         if (row.type === "multiselect") {
           return (
             <MultiSelectRow
-              key={ri} messageId={m.id}
+              key={ri} messageId={m.id} rowIndex={ri}
               row={row}
               disabled={rowAnswered}
               busy={busy !== ""}
@@ -150,6 +150,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
  */
 function MultiSelectRow({
   messageId,
+  rowIndex,
   row,
   disabled,
   busy,
@@ -157,6 +158,7 @@ function MultiSelectRow({
   onSubmit,
 }: {
   messageId: string;
+  rowIndex: number;
   row: Extract<WebComponentRow, { type: "multiselect" }>;
   disabled: boolean;
   busy: boolean;
@@ -166,16 +168,9 @@ function MultiSelectRow({
   onSubmit: (values: string[], display: string) => void;
 }) {
   const t = useT();
-  const composer = useComposerSnap();
-  const forms = useOpenForms();
-  const form = forms.find((f) => f.messageId === messageId && f.row.id === row.id);
-  const pre = syncBlock(row, form, forms, composer.present);
-  const scan = pre ? null : lineScan(composer.text, forms);
-  // 输入框里有歧义行（别的表单也能认领）时也退回本地勾选：往输入框写只会每点一次多一行
-  const block = pre ?? (scan?.ambiguous.has(row.id) ? "ambiguous" : null);
+  const { form, forms, block, owner } = useFormRowSync(messageId, rowIndex, row);
   const synced = !block;
   const [local, setLocal] = useState<string[]>([]);
-  const owner = scan?.owners.get(row.id) ?? null;
   // 已作答时从本行已答值还原选中项（格式 `<rowId>:<v1>,<v2>`），否则读输入框里的同步行 / 本地勾选
   const answered = answeredValue?.startsWith(`${row.id}:`)
     ? answeredValue.slice(row.id.length + 1).split(",").filter(Boolean)
