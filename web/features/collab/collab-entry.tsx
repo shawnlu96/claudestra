@@ -19,6 +19,8 @@ const retries = new Map<string, { timer: ReturnType<typeof setTimeout>; wait: nu
 const RETRY_MIN_MS = 10_000;
 const RETRY_MAX_MS = 60_000;
 const lastWait = new Map<string, number>();
+/** 每个项目此刻挂着几个入口：全卸载后，在途探测的失败分支不再挂新的重试（审查 #144 第 3 轮 P2-6） */
+const mounted = new Map<string, number>();
 
 /** 读一次总览定入口去留；网络 / bridge 重启这类临时失败按 10s → 60s 退避重探，只在第一次失败时打一行日志 */
 function probe(project: string) {
@@ -31,6 +33,7 @@ function probe(project: string) {
     })
     .catch((e) => {
       if (e instanceof ApiError && (e.status === 403 || e.status === 404)) return setLedgerAccess(project, "no");
+      if (!mounted.get(project)) return; // 入口已经不在了：不重试，下次挂载再从头探
       const last = lastWait.get(project);
       if (last === undefined) console.warn(`[collab] 探测台账 ${project} 失败，入口先不显示、稍后重试：${(e as Error).message}`);
       const wait = Math.min((last ?? RETRY_MIN_MS / 2) * 2, RETRY_MAX_MS);
@@ -53,8 +56,12 @@ export function CollabEntry({ projectId }: { projectId: string }) {
   const access = useLedgerAccess(projectId);
   useEffect(() => {
     if (access !== "unknown") return; // 已经定了（能读 / 不能读）就不再探
+    mounted.set(projectId, (mounted.get(projectId) ?? 0) + 1);
     probe(projectId);
-    return () => cancelRetry(projectId);
+    return () => {
+      mounted.set(projectId, (mounted.get(projectId) ?? 1) - 1);
+      cancelRetry(projectId);
+    };
   }, [access, projectId]);
   if (access !== "yes") return null;
   const on = cur.project === projectId;
