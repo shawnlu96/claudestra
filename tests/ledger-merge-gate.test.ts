@@ -212,3 +212,31 @@ describe("交付不带 head：旧轮次的对抗式 pass 不能顶（r4）", () 
     expect(owesAdversarial(policy(), events(), round())).toBe(true);
   });
 });
+
+describe("续派不被幂等键吞掉（判定只认最近一条 dispatch）", () => {
+  const dispatches = () => events().filter((e) => e.kind === "dispatch").map((e) => e.data.reviewer);
+
+  test("常规 pass → 对抗式 changes 不推 fix → 再派常规：新写一条，常规 pass 不能算对抗式", async () => {
+    ship("aaaa1111", "build");
+    await run("agent-disp", "dispatch", "T1");
+    await run("agent-disp", ...verdict("pass"));
+    expect((await run("agent-disp", "dispatch", "T1")).event.data.reviewer).toBe("adversarial");
+    await run("agent-disp", ...verdict("changes"));
+    const d = await run("agent-disp", "dispatch", "T1");
+    expect(d.duplicate).toBe(false);
+    expect(dispatches()).toEqual(["regular", "adversarial", d.event.data.reviewer]);
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+  });
+
+  test("中间派过别的种类：命中的旧派审已不是最近一条，新写一条；什么都没变时重跑仍是同一条", async () => {
+    ship("aaaa1111", "build");
+    await run("agent-disp", "dispatch", "T1");
+    await run("agent-disp", "dispatch", "T1", "--adversarial");
+    const again = await run("agent-disp", "dispatch", "T1");
+    expect(again.duplicate).toBe(false);
+    expect(dispatches()).toEqual(["regular", "adversarial", "regular"]);
+    const rerun = await run("agent-disp", "dispatch", "T1");
+    expect(rerun).toMatchObject({ duplicate: true, event: { seq: again.event.seq } });
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+  });
+});
