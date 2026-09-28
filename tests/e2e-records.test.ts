@@ -100,6 +100,20 @@ describe("记录流", () => {
     await expect(openAll(s, new Uint8Array([0, 2, 0, 0x20]))).rejects.toThrow("bad record length");
   });
 
+  test("流式：final 之后另一次 push 再来记录也拒；流关闭时没见到 final 报截断", async () => {
+    const s = await scope();
+    const recs = split(await sealMessage(s, enc("h"), enc("body")));
+    const o = new RecordOpener(s);
+    expect((await o.push(join(recs))).map(dec)).toEqual(["h", "body"]);
+    expect(o.done).toBe(true);
+    await expect(o.push(recs[1])).rejects.toThrow("data after final");
+    const cut = new RecordOpener(s);
+    await cut.push(recs[0]);
+    await cut.push(recs[1].subarray(0, 5)); // 最后一条只到了一半
+    expect(cut.done).toBe(false);
+    expect(() => cut.end()).toThrow("truncated");
+  });
+
   test("响应绑定请求：换 rid、换方向、换 sid 都解不开", async () => {
     const s = await scope(DIR_RES, 7n);
     const stream = await sealMessage(s, enc("{\"status\":200}"));
