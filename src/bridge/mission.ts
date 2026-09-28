@@ -21,7 +21,9 @@ import {
   claimWake, decideFire, enqueueWake, markDelivered, newRunId, noteLongYield, unclaimRun, type TurnSeen,
 } from "../lib/autopilot-wake.js";
 import { appendRunLog, skippedLogLine } from "../lib/autopilot-log.js";
-import { initAutopilotEvidence, isTracking, lastHumanMessageAt, takeEvidence, trackedTurn, trackRun, untrackRun } from "./autopilot-evidence.js";
+import {
+  initAutopilotEvidence, isTracking, lastHumanMessageAt, takeEvidence, takeTurnActivity, trackedTurn, trackRun, untrackRun,
+} from "./autopilot-evidence.js";
 import { closeRun, logOrphanRun, pendingCloseOf } from "./autopilot-close.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
 
@@ -279,7 +281,7 @@ async function fire(agent: string): Promise<void> {
  * 本进程在记账的 run 只认投递之后的 done（事件到达那一刻已见过 thinking，snap 是那一刻拍下的）——领取前后迟到的
  * 上一回合 Stop 不算。重启过（没在记账）就照收。
  */
-async function onTurnDone(agent: string, snap: ReturnType<typeof trackedTurn>): Promise<void> {
+async function onTurnDone(agent: string, snap: ReturnType<typeof trackedTurn>, active: boolean): Promise<void> {
   const now = Date.now();
   const pre = (await readMissions(path))[agent];
   const owed = wrapups.get(agent);
@@ -296,6 +298,9 @@ async function onTurnDone(agent: string, snap: ReturnType<typeof trackedTurn>): 
     return;
   }
   if (pre.status !== "active") return;
+  // 只有真实的新回合（上一个 done 之后有活动）或人类信号才放行待命 / 等人拍板；重复的 Stop、reconcile 补发的 done 不算
+  const humanSince = (lastHumanMessageAt(agent) ?? 0) > Date.parse(pre.lastRun?.endedAt ?? "1970-01-01T00:00:00Z");
+  if (!active && !humanSince) return;
   const m = await upd((all) => {
     const cur = all[agent];
     if (cur?.status !== "active" || cur.id !== pre.id || cur.run) return null;
@@ -329,7 +334,7 @@ export function initMission(d: MissionDeps): void {
     // bridge 重启时给每个频道补发的 done 不是回合结束：当成回合结束会把「等人拍板 / 待命」提前放行；在跑的 run 由 decideFire 按画面收尾
     if (evt.type !== "agent_status" || d?.status !== "done" || d.reason === "bridge_restarted") return;
     const agent = agentOfEvent(evt);
-    onTurnDone(agent, trackedTurn(agent)).catch((e) => console.error("⏱ Autopilot 回合结束处理失败:", (e as Error).message));
+    onTurnDone(agent, trackedTurn(agent), takeTurnActivity(agent, evt.chatId)).catch((e) => console.error("⏱ Autopilot 回合结束处理失败:", (e as Error).message));
   });
   const rerun = (why: string) => () => void reconcileMissions().catch((e) => console.error(`⏱ Autopilot ${why}失败:`, (e as Error).message));
   watchFile(path, { interval: 5_000 }, rerun("重排"));

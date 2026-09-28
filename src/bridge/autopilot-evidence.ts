@@ -33,6 +33,9 @@ const tracking = new Map<string, Tracking>();
 /** 频道 → 在记账的 agent：事件的 agent 字段认不出（"?"、频道 id）时按频道找 */
 const byChannel = new Map<string, string>();
 const lastHumanAt = new Map<string, number>();
+/** 上一个 done 之后有没有真实的回合活动（thinking / 工具 / assistant 文字 / agent 发消息）：重复的 Stop、reconcile 补发的 done 之前没有 */
+const turnActivity = new Set<string>();
+const ACTIVITY = new Set(["tool_start", "assistant_text", "reply_pending"]);
 const RL_NO_TEXT = "rate_limit（没有原文）";
 /** 撞额度那句话：本轮早先无关的、带 limit 字样的话不能拿来当额度原文 */
 const LIMIT_TEXT = /hit your (?:\w+ )?limit/i;
@@ -97,6 +100,15 @@ export function takeOrphan(agent: string, currentRunId: string | undefined): { r
   if (!t || t.runId === currentRunId) return null;
   drop(key(agent));
   return { run: t.run, missionId: t.missionId, ev: t.ev };
+}
+
+/**
+ * 取走「上一个 done 之后有没有真实回合活动」：回合结束的订阅者在 done 事件到达时同步调用，每个 done 只消费一次——
+ * 所以同一回合的第二个 Stop、没有活动的 reconcile 补发 done 拿到的都是 false，不能放行待命 / 等人拍板（P2-9）。
+ */
+export function takeTurnActivity(agent: string, chatId: string): boolean {
+  const byName = turnActivity.delete(key(agent));
+  return turnActivity.delete(`#${chatId}`) || byName; // 两边都删：agent 字段填的是频道 id 的事件也对得上
 }
 
 /** 最近一次人类信号（Discord 用户 / 网页消息、点「打断」）的时刻；bridge 启动以来没有 → undefined */
@@ -171,6 +183,11 @@ export function onAutopilotEvent(evt: BridgeEvent, now = Date.now()): void {
   const t = tracking.get(k);
   const d = evt.data ?? {};
   if (t && !t.frozen) t.lastEventAt = now;
+  const d0 = d as { status?: unknown; direction?: unknown };
+  if (ACTIVITY.has(evt.type) || d0.status === "thinking" || (evt.type === "chat_message" && d0.direction === "out")) {
+    turnActivity.add(k);
+    turnActivity.add(`#${evt.chatId}`);
+  }
   if (evt.type === "chat_message") return onChatMessage(k, d, t, now);
   if (evt.type === "agent_status") return onStatus(k, t, d, now);
   if (t && !t.frozen) onRunEvent(t, evt.type, d, now);
@@ -188,5 +205,6 @@ export function resetAutopilotEvidence(peers: string[] = []): void {
   tracking.clear();
   byChannel.clear();
   lastHumanAt.clear();
+  turnActivity.clear();
   peerTokens = new Set(peers);
 }

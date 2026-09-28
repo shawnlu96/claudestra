@@ -1,8 +1,8 @@
 /** bridge/autopilot-evidence.ts：只给进行中的 run 记账、只认本轮发出的按钮（含行内按钮）、撞额度两种形状、人类信号（让位）、重启后证据不全 */
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
-  isTracking, lastHumanMessageAt, onAutopilotEvent, peekTracked, resetAutopilotEvidence, runStarted, takeEvidence, takeOrphan, trackedTurn, trackRun,
-  untrackRun,
+  isTracking, lastHumanMessageAt, onAutopilotEvent, peekTracked, resetAutopilotEvidence, runStarted, takeEvidence, takeOrphan, takeTurnActivity,
+  trackedTurn, trackRun, untrackRun,
 } from "../src/bridge/autopilot-evidence.js";
 import { classifyRun } from "../src/lib/autopilot-run.js";
 import type { ActiveRun } from "../src/lib/autopilot-wake.js";
@@ -176,6 +176,18 @@ describe("第 3 轮复验补的", () => {
     expect(peekTracked("w", "r1")?.missionId).toBe("m1");
     expect(peekTracked("w", "r2")).toBeNull();
     expect(isTracking("w", "r1")).toBe(true);
+  });
+});
+
+describe("P2-9：回合活动", () => {
+  test("每个 done 只消费一次：有活动 → true，紧跟的重复 Stop → false；按 agent 名或频道都能取到", () => {
+    onAutopilotEvent(evt("agent-w", "tool_start", { name: "Read" }, "chw"));
+    expect(takeTurnActivity("w", "chw")).toBe(true);
+    expect(takeTurnActivity("w", "chw")).toBe(false);
+    onAutopilotEvent(evt("chw", "agent_status", { status: "thinking" }, "chw")); // agent 字段是频道 id
+    expect(takeTurnActivity("w", "chw")).toBe(true);
+    onAutopilotEvent(evt("w", "chat_message", { direction: "in", srcKind: "user" }, "chw")); // 人类入站本身不算回合活动
+    expect(takeTurnActivity("w", "chw")).toBe(false);
   });
 });
 
