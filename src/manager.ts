@@ -1855,8 +1855,7 @@ async function cmdSessions(search?: string) {
     }
   }
 
-  // v2.23+ 给 web 端也留原始字段：ISO 时间（排序/相对时间自己算）、cwd（点开要看历史）。
-  // 上限从 25 放到 100 —— Discord 面板自己 slice(15)，CLI 是人读的，两者都不受影响。
+  // 给 web 端留原始字段（ISO 时间、cwd、子会话归属）；上限 100 —— Discord 面板自己 slice(15)，CLI 是人读的。
   const display = sessions.slice(0, 100).map((s, i) => ({
     index: i + 1,
     sessionId: s.sessionId,
@@ -1868,6 +1867,7 @@ async function cmdSessions(search?: string) {
     age: formatAge(s.modifiedAt),
     modifiedAt: s.modifiedAt.toISOString(),
     lastMessage: s.lastUserMessage || "",
+    ...(s.sub ? { sub: s.sub } : {}),
   }));
 
   output({
