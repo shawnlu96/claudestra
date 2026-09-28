@@ -31,7 +31,7 @@ export function relayWebCheck(f: RelayWebFacts, base: string, group: string): Ch
 }
 
 /** 中继首页同源的 /build-info.json（web/scripts/gen-build-info.mjs 生成，随静态导出上线） */
-async function fetchRelayWebCommit(base: string): Promise<string | null> {
+export async function fetchRelayWebCommit(base: string): Promise<string | null> {
   try {
     const r = await fetch(`https://${base}/build-info.json`, { signal: AbortSignal.timeout(4000) });
     if (!r.ok) return null;

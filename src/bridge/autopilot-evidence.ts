@@ -235,7 +235,8 @@ export function onAutopilotEvent(evt: BridgeEvent, now = Date.now()): void {
 }
 
 export function initAutopilotEvidence(): () => void {
-  const refresh = () => void refreshPeerTokens().catch((e) => console.warn("⏱ Autopilot 读 peer token 失败（peer 请求暂按人类算）:", (e as Error).message));
+  const refresh = () => void refreshPeerTokens().catch((e) =>
+    console.warn("⏱ Autopilot 读 peer token 失败（沿用上次的名单；从没读到过则 API 消息逐条重读，读不到不算人类信号）:", (e as Error).message));
   refresh();
   setInterval(refresh, 60_000).unref?.();
   return subscribeEvents({}, (evt) => onAutopilotEvent(evt));

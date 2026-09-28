@@ -16,7 +16,7 @@ const COMMS_TOOLS = new RegExp(`^(?:mcp__.+__)?(?:${COMMS})$`);
 const READ_ONLY_MCP = /^mcp__.+__(ask_codex|memory_search|memory_list|memory_read)$/;
 const SHELL_TOOLS = new Set(["Bash", "bash", "exec_command", "shell"]);
 /** 只读的子 agent 类型：只有探索 / 规划（PM 09-28 拍板）；其余子 agent（含带 Bash 的 claude-code-guide）当作在干活 */
-const READ_ONLY_AGENTS = /"subagent_type"\s*:\s*"(Explore|Plan)"/;
+const READ_ONLY_AGENTS = new Set(["Explore", "Plan"]);
 /** jsonl-watcher 截断过长 detail 时加的尾巴：看不全的命令按写算（heredoc / 长命令的后半段可能正是写操作） */
 const TRUNCATED = /\n… \(已截断，完整 \d+ 字符\)$/;
 
@@ -45,11 +45,22 @@ export function bashCommandOf(detail: unknown): string {
   return i >= 0 ? s.slice(i + 5) : s;
 }
 
+/** Agent / Task 的 detail 是入参 JSON（formatToolDetail）：只看最外层的 subagent_type，prompt 里嵌的同名字段不算 */
+function subagentTypeOf(detail: unknown): string {
+  try {
+    const j: unknown = JSON.parse(typeof detail === "string" ? detail : "");
+    const t = j && typeof j === "object" ? (j as { subagent_type?: unknown }).subagent_type : undefined;
+    return typeof t === "string" ? t : "";
+  } catch {
+    return ""; // 不是完整 JSON：认不出类型，按在干活算
+  }
+}
+
 /** 可能改了东西的工具调用：只读工具、通信工具、只读 MCP 查询、只读 shell、探索类子 agent 以外都算 */
 export function isMutatingTool(name: string, detail?: unknown): boolean {
   if (!countsAsTool(name) || READ_ONLY_TOOLS.has(name) || READ_ONLY_MCP.test(name)) return false;
   if (typeof detail === "string" && TRUNCATED.test(detail)) return true;
   if (SHELL_TOOLS.has(name)) return !isReadOnlyBash(bashCommandOf(detail));
-  if (name === "Agent" || name === "Task") return !READ_ONLY_AGENTS.test(typeof detail === "string" ? detail : "");
+  if (name === "Agent" || name === "Task") return !READ_ONLY_AGENTS.has(subagentTypeOf(detail));
   return true;
 }

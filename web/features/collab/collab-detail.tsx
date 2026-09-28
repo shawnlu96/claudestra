@@ -1,6 +1,6 @@
 "use client";
 /**
- * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 最近 3 件事 + 回放（T12c）→ 审查 → 参与者（含在跑的审查员）→ 对它说 → PR。
+ * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 完成检查单 → 最近 3 件事 + 回放（T12c）→ 审查 → 参与者（含在跑的审查员）→ 对它说 → PR。
  * 桌面是首页右侧的面板；手机是全屏页，必须 portal 到 body（会话页在 transform 横滑容器里，web/CLAUDE.md PWA 第 4 条）。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
@@ -13,6 +13,7 @@ import type { LineAction } from "./collab-line";
 import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
 import { Icon, type IconName } from "./collab-icons";
 import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
+import { ChecklistSec } from "./collab-checklist";
 import { CollabReplay } from "./collab-replay-player";
 import type { RunningReviewer } from "./collab-reviewers";
 import { CollabSay } from "./collab-say";
@@ -211,6 +212,7 @@ function Body(props: { d: TaskDetail; line: LineView; action: LineAction; stream
     <div className={s.pb}>
       <NowSec line={line} total={d.task.metrics.totalMs} tr={tr} />
       <StagesSec d={d} line={line} tr={tr} />
+      <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} />
       <CollabReplay d={d} tr={tr} />
       <ReviewSec d={d} tr={tr} />

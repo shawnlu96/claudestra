@@ -1,4 +1,5 @@
 /** 台账读侧测试共用：临时目录里的真实文件库 + 一条走过审查一轮的任务（ledger-read / local-api-ledger 两个测试用） */
+import type { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,21 @@ export function seedLedger(path: string, opts: { docsDir?: string } = {}): void 
   setFrozen(db, owner(800), { project: "p", frozen: true, reason: "等 T1 上线" });
   if (opts.docsDir) setMeta(db, owner(900), { project: "p", key: "docsDir", value: opts.docsDir });
   closeLedger(path);
+}
+
+/**
+ * 读侧测试造 verify 事件：appendEvent 不收 verify（进 verified 只能走 recordVerify 的系统核对），这里直接写表，
+ * data 的 imported / approxTime 标记与 ledger-write.ts 的 eventData 一致。
+ */
+export function verifyEvent(
+  db: Database,
+  ctx: { actor: string; now: number; approxTime?: boolean },
+  e: { project: string; target: string; text?: string; data: Record<string, unknown> },
+): void {
+  const data = ctx.actor === "import" ? { ...e.data, imported: true, ...(ctx.approxTime ? { approxTime: true } : {}) } : e.data;
+  db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, ?, ?, ?, 'verify', ?, ?)").run(
+    ctx.now, ctx.actor, e.project, e.target, e.text ?? "", JSON.stringify(data),
+  );
 }
 
 const STORE = join(import.meta.dir, "../src/lib/ledger-store.ts");

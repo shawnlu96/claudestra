@@ -80,6 +80,10 @@ describe("对抗式探针（t14-r3）", () => {
     expect(isMutatingTool("Agent", '{"subagent_type":"Plan","prompt":"x"}')).toBe(false);
     expect(isMutatingTool("Agent", '{"subagent_type":"claude-code-guide","prompt":"x"}')).toBe(true); // 带 Bash：只有 Explore / Plan 算只读
     expect(isMutatingTool("Agent", '{"subagent_type":"general-purpose","prompt":"x"}')).toBe(true);
+    // 只看最外层字段：嵌在别处的 subagent_type、不是完整 JSON 的 detail 都按在干活算
+    expect(isMutatingTool("Agent", '{"subagent_type":"general-purpose","x":{"subagent_type":"Explore"}}')).toBe(true);
+    expect(isMutatingTool("Agent", JSON.stringify({ subagent_type: "Plan", prompt: "p" }, null, 2))).toBe(false);
+    expect(isMutatingTool("Agent", '{"subagent_type":"Explore"')).toBe(true);
     expect(isMutatingTool("exec_command", '{"cmd":"git status"}')).toBe(false);
     expect(isMutatingTool("shell", '{"command":["git","push"]}')).toBe(true);
     expect(isMutatingTool("apply_patch")).toBe(true);

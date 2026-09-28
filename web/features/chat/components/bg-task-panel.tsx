@@ -96,7 +96,7 @@ function BgStatus({ t }: { t: BgTaskView }) {
   }
   const quietMs = p?.lastTs ? now - p.lastTs : 0;
   return (
-    <span className="ml-1 flex shrink-0 items-center gap-1.5 font-mono tabular-nums text-warning/80">
+    <span className="ml-1 flex shrink-0 items-center gap-1.5 font-mono tabular-nums text-warning-soft-80">
       <span className="loading loading-spinner loading-xs text-warning" />
       {!!p?.startedTs && <span>{fmtClock(now - p.startedTs)}</span>}
       {!!p?.ctxTokens && <span className="opacity-60">{Math.round(p.ctxTokens / 1000)}k</span>}
@@ -120,7 +120,7 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
       <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-1.5 text-xs">
         <KindIcon kind={t.kind} />
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-medium text-warning/90">
+          <span className="truncate font-medium text-warning-soft-90">
             {/* bridge 给的 title 带 🐚/🧵/🤖 emoji 前缀(Discord 线程名用)——web 已有线性 kind 图标,剥掉免重复 */}
             {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵🤖]\s*/u, "")}
           </span>
@@ -141,7 +141,7 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
             preventDefault 防触发 details 开合 */}
         {running && (
           <button
-            className="grid size-5 shrink-0 place-items-center rounded text-error/70 hover:bg-error/10"
+            className="grid size-5 shrink-0 place-items-center rounded text-error-soft-70 hover:bg-error/10"
             title={tr("请求 agent 停止此任务")}
             aria-label={tr("停止任务")}
             onClick={(e) => {
@@ -243,7 +243,7 @@ export function BgTaskPanel() {
             onClick={() => setShowDone(true)}
             title={tr("展开已完成的后台任务")}
           >
-            <span className="text-success/70">✓</span>
+            <span className="text-success-soft-70">✓</span>
             <span>
               {tr("{n} 个已完成", { n: done.length })}
             </span>

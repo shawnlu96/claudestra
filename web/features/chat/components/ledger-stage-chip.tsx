@@ -1,5 +1,5 @@
 "use client";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { LedgerTaskRef } from "@/lib/chat/agents";
 import { useLang, useT } from "@/lib/i18n";
 import { stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind, type StageTone } from "../ledger-stage";
@@ -10,28 +10,20 @@ import { stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind,
  * 手机长按走 agent 菜单，菜单标题下面那行就是 LedgerStageLine。
  */
 
-/**
- * 字色：浅色主题没定义 warning / success / error，daisyUI 默认的亮色在浅底上只有 1.5～2.4:1，所以浅色用 token 混黑压深一档（选中行底色上约 5.3:1，WCAG 要 ≥4.5），
- * 深色主题用 token 原色。只作用于小标和菜单那一行，不动 globals.css 的全局色（看板等别处也在用）。
- * 深色判定与 daisyUI 同口径：data-theme=dark，或没钉浅色且系统是深色。Tailwind 只认字面量类名，色值走 CSS 变量。
- */
-const FG = "text-(--lsc-fg) [[data-theme=dark]_&]:text-(--lsc-fg-d) dark:[:root:not([data-theme=light])_&]:text-(--lsc-fg-d)";
-const dim = (token: string, pct: number) => `color-mix(in oklab, var(${token}) ${pct}%, black)`;
-const TONE: Record<StageTone, { bg: string; dot: string; fg: string; fgDark: string }> = {
-  error: { bg: "bg-error/12", dot: "bg-error", fg: dim("--color-error", 68), fgDark: "var(--color-error)" },
-  warning: { bg: "bg-warning/15", dot: "bg-warning", fg: dim("--color-warning", 58), fgDark: "var(--color-warning)" },
-  primary: { bg: "bg-primary/12", dot: "bg-primary", fg: "var(--color-primary)", fgDark: "var(--color-primary)" },
-  success: { bg: "bg-success/12", dot: "bg-success", fg: dim("--color-success", 60), fgDark: "var(--color-success)" },
+/** 字色直接用状态 token：浅色主题在 globals.css 里已压深到 ≥4.5:1，深色用原色；中性色深浅各一档透明度 */
+const TONE: Record<StageTone, { bg: string; dot: string; fg: string }> = {
+  error: { bg: "bg-error/12", dot: "bg-error", fg: "text-error" },
+  warning: { bg: "bg-warning/15", dot: "bg-warning", fg: "text-warning" },
+  primary: { bg: "bg-primary/12", dot: "bg-primary", fg: "text-primary" },
+  success: { bg: "bg-success/12", dot: "bg-success", fg: "text-success" },
   neutral: {
     bg: "bg-base-content/[0.07]",
     dot: "bg-base-content/40",
-    fg: "color-mix(in oklab, var(--color-base-content) 78%, transparent)",
-    fgDark: "color-mix(in oklab, var(--color-base-content) 55%, transparent)",
+    fg: "text-base-content/[0.78] [[data-theme=dark]_&]:text-base-content/55 dark:[:root:not([data-theme=light])_&]:text-base-content/55",
   },
 };
 /** 中间档（色点 + 阶段）的起点：英文短名（Review / Verified）比两个汉字宽一倍，默认 16rem 侧栏里的执行者行会把名字挤成省略号，起点放宽到 13rem */
 const MID_TIER = { zh: "hidden @[11rem]:inline", en: "hidden @[13rem]:inline" } as const;
-const toneStyle = (tone: StageTone) => ({ "--lsc-fg": TONE[tone].fg, "--lsc-fg-d": TONE[tone].fgDark }) as CSSProperties;
 
 export function LedgerStageChip({ task, names }: { task: LedgerTaskRef; names: (string | null | undefined)[] }) {
   const t = useT();
@@ -42,8 +34,7 @@ export function LedgerStageChip({ task, names }: { task: LedgerTaskRef; names: (
   const sentence = stageSentence(v, t);
   return (
     <span
-      className={`flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10.5px] font-medium leading-4 ${tone.bg} ${FG}`}
-      style={toneStyle(v.tone)}
+      className={`flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10.5px] font-medium leading-4 ${tone.bg} ${tone.fg}`}
       title={sentence}
       data-ledger-stage={task.stage}
     >
@@ -62,7 +53,7 @@ export function LedgerStageLine({ task }: { task: LedgerTaskRef }) {
   const t = useT();
   const v = stageChipView(task, useLang());
   return (
-    <span className={`mt-0.5 flex items-center gap-1 ${FG}`} style={toneStyle(v.tone)}>
+    <span className={`mt-0.5 flex items-center gap-1 ${TONE[v.tone].fg}`}>
       <StageIcon kind={v.icon} className="size-3 shrink-0" />
       <span className="truncate">{stageSentence(v, t)}</span>
     </span>
