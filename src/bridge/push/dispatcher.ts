@@ -12,6 +12,7 @@ import type { ApnsMessage } from "../../lib/apns.js";
 import { OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
 import type { PrincipalsFile } from "../../lib/principals.js";
 import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey } from "../../lib/push-store.js";
+import { markdownToPlain } from "../../lib/plain-text.js";
 import { bareAgent, bumpUnread, countsUnread, markAgentRead, onAgentRead, totalUnread, type ReadEvent } from "../../lib/unread-store.js";
 import type { PushSender } from "./sender.js";
 
@@ -54,9 +55,9 @@ export function ownerChatIds(file: PrincipalsFile): Set<string> {
   return ids;
 }
 
-/** 通知正文：一行、最多 180 字 */
+/** 通知正文：先去掉 Markdown 与行内按钮等样式（lib/plain-text.ts），再压成一行、最多 180 字 */
 export function notificationBody(text: string): string {
-  const t = text.replace(/\s+/g, " ").trim();
+  const t = markdownToPlain(text).replace(/\s+/g, " ").trim();
   return t.length > BODY_MAX ? `${t.slice(0, BODY_MAX)}…` : t;
 }
 
@@ -131,7 +132,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     },
     async notice(n) {
       const ts = now();
-      const msg = { title: n.title, body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
+      const msg = { title: notificationBody(n.title), body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
       await Promise.all([apnsAll(msg), webPushAll(msg)]);
     },
     stop: unsubscribe,
