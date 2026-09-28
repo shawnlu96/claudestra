@@ -13,7 +13,7 @@
 import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
-import { withAttachmentLines } from "../lib/inbound-body.js";
+import { apiMirrorBody, withAttachmentLines } from "../lib/inbound-body.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
 import {
@@ -1367,7 +1367,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像
-    deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${text.trim() || `📎 ${attachments.length} 个附件`}`).catch(() => {});
+    deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
     deps.startTypingWithSafety(agent.channelId);
     // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
     deps.lastMessageSource.set(agent.channelId, "agent");

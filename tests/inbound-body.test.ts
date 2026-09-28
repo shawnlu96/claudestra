@@ -5,11 +5,13 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  apiMirrorBody,
   channelAttachmentPaths,
   channelBodyText,
   hasInboundHeader,
   stripChannelHeader,
   withAttachmentLines,
+  withoutAttachmentLines,
 } from "../src/lib/inbound-body.js";
 import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { wrapPiInboundAsChannel } from "../src/lib/pi-session.js";
@@ -121,5 +123,24 @@ describe("web 还原（extractAttachments）", () => {
         { name: "report.pdf", kind: "file", url: "/api/v1/attachments/api_1790601404200_report.pdf" },
       ],
     });
+  });
+});
+
+describe("出本机的文本不带路径（Discord 镜像 / 转交原话）", () => {
+  test("API 镜像：纯附件给个数，附件+文字只留文字；都不含本机路径", () => {
+    const pure = withAttachmentLines("", [IMG, PDF]);
+    expect(apiMirrorBody(pure, 2)).toBe("📎 2 个附件");
+    expect(apiMirrorBody("", 1)).toBe("📎 1 个附件");
+    expect(apiMirrorBody(withAttachmentLines("看图", [IMG]), 1)).toBe("看图");
+    for (const t of [apiMirrorBody(pure, 2), apiMirrorBody(withAttachmentLines("看图", [IMG]), 1)]) {
+      expect(t).not.toContain("/Users/");
+      expect(t).not.toContain("[attachment:");
+    }
+  });
+
+  test("转交原话：剥掉附件行，其它 [ 开头的文字不动", () => {
+    expect(withoutAttachmentLines(`这里红了\n\n[attachment: ${IMG}]\n[attachment: ${PDF}]`)).toBe("这里红了");
+    expect(withoutAttachmentLines(`[attachment: ${IMG}]`)).toBe("");
+    expect(withoutAttachmentLines("[TODO] 普通文本")).toBe("[TODO] 普通文本");
   });
 });

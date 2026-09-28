@@ -37,6 +37,17 @@ export function withAttachmentLines(text: string, paths: readonly string[] | und
   return text.trim() ? `${text}\n\n${lines}` : lines;
 }
 
+/** 贴到 Discord 的文本去掉 `[attachment: 本机路径]` 行：文件另外作为 Discord 附件上传，路径不出本机 */
+export function withoutAttachmentLines(text: string): string {
+  return text.replace(/\n?[ \t]*\[attachment: [^\]\n]+\]/g, "").trim();
+}
+
+/** API 入站镜像到 Discord 的正文：用原始文字，纯附件时给个数（不带路径） */
+export function apiMirrorBody(text: string, attachmentCount: number): string {
+  const t = withoutAttachmentLines(text);
+  return t || (attachmentCount > 0 ? `📎 ${attachmentCount} 个附件` : "");
+}
+
 const XML_ENTITY: Record<string, string> = { "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&apos;": "'" };
 
 /** <channel …> 属性串里的 attachments="a;b"（bridge 用 ; 连接，见 bridge.ts 组 meta 处） */
