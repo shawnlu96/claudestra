@@ -20,20 +20,12 @@ export interface TurnInput {
   runtime?: string | null;
   /** bg-activity 里还有没结束的 subagent / bg shell */
   bgActive?: boolean;
-  /** 最近一个后台 subagent 结束的时刻（ms），没有 = undefined */
-  bgEndedAt?: number;
-  now: number;
 }
 
 export interface TurnState {
   main: MainTurn;
   bg: boolean;
-  /** 后台 subagent 刚结束：CC 马上要排 task-notification 开回合，这时到的通知可能落进回合开头的丢弃窗口 */
-  bgJustEnded: boolean;
 }
-
-/** 防撞窗口。只罩得住 subagent（结束信号及时）；bg shell 靠 3 分钟无输出才判结束，罩不住 */
-export const BG_SETTLE_MS = 10_000;
 
 function mainTurn(i: TurnInput): MainTurn {
   if (i.status === "compacting") return "compacting";
@@ -51,14 +43,15 @@ export function turnState(input: TurnInput): TurnState {
   const i = { ...input, pane: input.pane === null ? null : input.pane.replace(/\s+$/, "") };
   const main = mainTurn(i);
   const paneBg = controlFor(i.runtime).paneHeuristics && i.pane !== null && main !== "busy" && paneLooksWorking(i.pane);
-  const sinceEnd = i.bgEndedAt === undefined ? Infinity : i.now - i.bgEndedAt;
-  return { main, bg: paneBg || !!i.bgActive, bgJustEnded: sinceEnd >= 0 && sinceEnd < BG_SETTLE_MS };
+  return { main, bg: paneBg || !!i.bgActive };
 }
 
 /**
- * agent→agent 消息（和值守提醒）现在要不要先押着：主回合在跑 / 压缩中 / 后台刚结束。
- * unknown 放行——认不出画面就押，消息可能永远投不出去；误投的代价只是撞上一次丢弃窗口。
+ * agent→agent 消息（和值守提醒）现在要不要先押着：主回合在跑 / 压缩中。只剩后台在跑不押。
+ * 后台 subagent 结束时 CC 会立刻自动开 task-notification 回合，撞上它靠屏幕判忙（spinner 一出来 main 就是 busy）；
+ * 别按 bg-activity 的「结束」事件加时间窗：它 10 秒扫一轮，检测到时通知回合往往已经跑完（N7 报告有实测时序）。
+ * unknown 放行——认不出画面就押，消息可能永远投不出去。
  */
 export function agentMsgMustWait(s: TurnState): boolean {
-  return s.main === "busy" || s.main === "compacting" || s.bgJustEnded;
+  return s.main === "busy" || s.main === "compacting";
 }

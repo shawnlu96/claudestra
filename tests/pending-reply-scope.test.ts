@@ -134,7 +134,9 @@ describe("N7：kill 之后的欠账 + 拦截只追非 agent 来源", () => {
       ["thr-to-t3", { request: { from: local("c-pm"), to: local("c-t3") } }],
       ["thr-owner", { request: { from: { kind: "api" }, to: local("c-pm") } }],
     ]);
-    return { replies, threads };
+    // 看门狗以接收方频道为 key：T3 发给 PM 的还没回应；PM 发给 T5 的还没回应；旧条目没有 fromChannelId
+    const watchdogs = new Map<string, { fromChannelId?: string }>([["c-pm", { fromChannelId: "c-t3" }], ["c-t5", { fromChannelId: "c-pm" }], ["c-x", {}]]);
+    return { replies, threads, watchdogs };
   }
   const stopPick = (replies: Map<string, Entry>, ws: unknown, originFilter: boolean) =>
     pickUnrepliedForNudge(
@@ -142,19 +144,21 @@ describe("N7：kill 之后的欠账 + 拦截只追非 agent 来源", () => {
       { event: "Stop", stopHookActive: false, now: 10_000 },
     );
 
-  test("cleanup 销掉回信地址是它的欠账、发给它和由它发起的 thread；别人的不动", () => {
-    const { replies, threads } = state();
-    expect(dropPendingsForChannel(replies, threads, "c-t3")).toBe(3);
+  test("cleanup 销掉回信地址是它的欠账、发给它和由它发起的 thread、它发出去的看门狗；别人的不动", () => {
+    const { replies, threads, watchdogs } = state();
+    expect(dropPendingsForChannel(replies, threads, watchdogs, "c-t3")).toBe(4);
     expect([...replies.keys()]).toEqual(["thr-owner", "thr-pm"]);
     expect([...threads.keys()]).toEqual(["thr-owner"]);
+    expect([...watchdogs.keys()]).toEqual(["c-t5", "c-x"]);
   });
 
   test("cleanup 之后 PM 的 Stop 不再被逼着 reply 到已删的频道（不加来源过滤也成立）", () => {
-    const { replies, threads } = state();
+    const { replies, threads, watchdogs } = state();
     replies.delete("thr-owner");
     expect(stopPick(replies, PM, false)?.key).toBe("thr-t3");
-    dropPendingsForChannel(replies, threads, "c-t3");
+    dropPendingsForChannel(replies, threads, watchdogs, "c-t3");
     expect(stopPick(replies, PM, false)).toBeNull();
+    expect(watchdogs.has("c-pm")).toBe(false); // 看门狗也不会再催 PM 回一个已销毁的 agent
   });
 
   test("拦截对 agent 来源不触发（T5 被逼着 reply 到 PM 频道）；人类 / peer / bridge 照拦", () => {

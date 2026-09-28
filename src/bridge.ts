@@ -411,7 +411,7 @@ function isHumanRequest(env: RouterEnvelope): boolean {
   return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
 }
 
-/** agent→agent 消息现在要不要押着:只看主回合(+后台刚结束的防撞窗口),只剩后台在跑不算,见 lib/turn-state.ts */
+/** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
   return agentMsgMustWait(await probeTurn(channelId, evAgent, CONTROL_CHANNEL_ID));
 }
@@ -496,6 +496,8 @@ subscribeEvents({}, (evt) => {
  */
 interface PendingInterAgentMsg {
   fromLabel: string;
+  /** 发送方频道:它被 kill 时连这条一起销(dropPendingsForChannel) */
+  fromChannelId?: string;
   retries: number;
   ts: number;
 }
@@ -921,6 +923,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     ) {
       pendingInterAgentMsg.set(to.channelId, {
         fromLabel: env.from.agentName || "另一个 agent",
+        fromChannelId: env.from.channelId,
         retries: 0,
         ts: Date.now(),
       });
@@ -3398,7 +3401,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
             headers: { "Content-Type": "application/json" },
           });
         }
-        const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, body.channelId);
+        const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
         // 押给它的消息(含推回给它的答复)不再有人收:丢掉并留日志,别等 24 小时,也别投给日后复用这个频道的新 agent
         const dropped = heldLocalMsgs.get(body.channelId)?.length ?? 0;
         if (heldLocalMsgs.delete(body.channelId)) console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped} 条消息 (channel=${body.channelId})`);

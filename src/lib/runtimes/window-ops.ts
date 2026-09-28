@@ -88,7 +88,7 @@ export async function interruptWindow(target: string, runtime: string | undefine
 export async function preemptIfBusy(
   target: string,
   runtime: string | undefined | null,
-  verdictOf: (target: string) => Promise<string> = async (t) => turnState({ pane: await tmuxRaw(["capture-pane", "-t", t, "-p"]), runtime, now: Date.now() }).main,
+  verdictOf: (target: string) => Promise<string> = async (t) => turnState({ pane: await tmuxRaw(["capture-pane", "-t", t, "-p"]), runtime }).main,
   interrupt: (target: string, runtime: string | undefined | null) => Promise<readonly string[]> = interruptWindow,
 ): Promise<boolean> {
   const control = controlFor(runtime);

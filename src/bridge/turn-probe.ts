@@ -7,20 +7,9 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { MASTER_SESSION, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { turnState, type TurnState } from "../lib/turn-state.js";
 import { hasActiveBgActivities } from "./bg-activity-watcher.js";
-import { getAgentStatus, subscribeEvents } from "./event-bus.js";
+import { getAgentStatus } from "./event-bus.js";
 
 const norm = (agent: string) => agent.replace(/^agent-/, "");
-
-/**
- * agent（去掉 agent- 前缀）→ 最近一个后台 subagent 结束的时刻。按 subagent 最后一次写 jsonl 算，不按检测到的时刻：
- * 扫描 10 秒一轮，沙箱实测检测到时 task-notification 那一回合已经跑完了。bg shell 不记：它靠 3 分钟无输出判结束。
- */
-const subagentEndedAt = new Map<string, number>();
-subscribeEvents({}, (evt) => {
-  if (evt.type !== "bg_task_completed" || evt.data.kind !== "subagent") return;
-  const lastTs = typeof evt.data.lastTs === "number" ? evt.data.lastTs : Date.now();
-  subagentEndedAt.set(norm(evt.agent), Math.min(lastTs, Date.now()));
-});
 
 /** 事件态：名字两侧都可能带 agent- 前缀（master 另说），两种都查 */
 function statusOf(agent: string) {
@@ -37,9 +26,7 @@ export async function probeTurnAt(win: string | null, runtime: string | undefine
       pane = null; // 抓屏失败 = 画面未知，turnState 按 unknown 处理（押后闸放行、抢占不打断）
     }
   }
-  return turnState({
-    pane, status: statusOf(agent), runtime, bgActive: hasActiveBgActivities(agent), bgEndedAt: subagentEndedAt.get(norm(agent)), now: Date.now(),
-  });
+  return turnState({ pane, status: statusOf(agent), runtime, bgActive: hasActiveBgActivities(agent) });
 }
 
 /** 频道 → 窗口和运行时：master 固定是 master:0，其余从 registry 找；查不到窗口 = null */

@@ -91,16 +91,19 @@ export interface ThreadEnds {
 /**
  * agent 被永久 kill（/agent/cleanup）后，和它的频道有关的欠账全部销掉，返回销掉的条数：
  * - pendingReplies：回信地址是它的频道——它发出的请求，别人还欠着答复；不销的话欠账人的 Stop 会被逼着 reply 到已删的频道；
- * - pendingThreads：发给它的，和由它发起的。
+ * - pendingThreads：发给它的，和由它发起的；
+ * - inter-agent 看门狗：它发给别人、对方还没回应的（看门狗以接收方频道为 key，不销的话对方下次 Stop 会被催着回一个已销毁的 agent）。
  * 发给它、它自己欠着的 pendingReplies 不在这里：它的 ws 已经没了，Stop 不会再来。
  */
 export function dropPendingsForChannel(
   replies: Map<string, { intendedReplyChannel: string }>,
   threads: Map<string, ThreadEnds>,
+  watchdogs: Map<string, { fromChannelId?: string }>,
   channelId: string,
 ): number {
   let n = 0;
   for (const [key, p] of replies) if (p.intendedReplyChannel === channelId && replies.delete(key)) n++;
+  for (const [key, w] of watchdogs) if (w.fromChannelId === channelId && watchdogs.delete(key)) n++;
   for (const [tid, t] of threads) {
     const { from, to } = t.request;
     const touches = (from.kind === "local" && from.channelId === channelId) || (to.kind === "local" && to.channelId === channelId);

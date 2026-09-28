@@ -7,7 +7,7 @@ import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { paneLooksWorking } from "../src/lib/tmux-helper.js";
-import { agentMsgMustWait, BG_SETTLE_MS, turnState, type TurnInput } from "../src/lib/turn-state.js";
+import { agentMsgMustWait, turnState, type TurnInput } from "../src/lib/turn-state.js";
 
 const RULE = "─".repeat(80);
 const footer = (agentsBar: string[]) =>
@@ -26,14 +26,14 @@ const CC_IDLE = ["✻ Worked for 46s · done 9:51 PM", "", footer([])].join("\n"
 const piPane = (body: string) =>
   [body, "─".repeat(52), "─".repeat(52), "~/projects/x (develop) • agent-pi_x", "↑17M ↓2.8M R1032M (auto)", "🔗 agent-pi_x 💬 pi--10", ""].join("\n");
 
-const at = (over: Partial<TurnInput>): TurnInput => ({ pane: CC_IDLE, now: 1_000_000, ...over });
+const at = (over: Partial<TurnInput>): TurnInput => ({ pane: CC_IDLE, ...over });
 
 describe("turnState：main 只看主回合", () => {
   test("只剩后台 agent → main=idle、bg=true，agent 消息不押（旧判据 paneLooksWorking 判忙）", () => {
     for (const pane of [ONLY_BG, WAITING_BG]) {
       expect(paneLooksWorking(pane)).toBe(true);
       const s = turnState(at({ pane, status: "done" }));
-      expect(s).toEqual({ main: "idle", bg: true, bgJustEnded: false });
+      expect(s).toEqual({ main: "idle", bg: true });
       expect(agentMsgMustWait(s)).toBe(false);
     }
   });
@@ -75,7 +75,7 @@ describe("turnState：Codex / Pi 只看事件态", () => {
     expect(paneLooksWorking(PI_LOOKS_CC_BUSY)).toBe(true);
     for (const runtime of ["pi", "codex"]) {
       const s = turnState(at({ pane: PI_LOOKS_CC_BUSY, runtime, status: "done" }));
-      expect(s).toEqual({ main: "idle", bg: false, bgJustEnded: false });
+      expect(s).toEqual({ main: "idle", bg: false });
     }
   });
   test("thinking → busy；没画面也照判", () => {
@@ -87,17 +87,16 @@ describe("turnState：Codex / Pi 只看事件态", () => {
   });
 });
 
-describe("防撞窗口：后台 subagent 刚结束", () => {
-  const now = 1_000_000;
-  test(`${BG_SETTLE_MS / 1000} 秒内 agent 消息仍押（task-notification 要开回合），main 不受影响`, () => {
-    const s = turnState(at({ pane: ONLY_BG, bgEndedAt: now - BG_SETTLE_MS + 1000, now }));
-    expect(s.main).toBe("idle");
-    expect(s.bgJustEnded).toBe(true);
+describe("后台 subagent 结束 → CC 自动开 task-notification 回合", () => {
+  // 沙箱实抓：subagent 结束 26ms 后通知回合就开了，spinner 一出来就判忙——撞车靠这个挡，不靠时间窗
+  const NOTIFY_TURN = [
+    "⏺ Agent \"Run 4 sequential sleeps\" finished · 8s", "", "⏺ Calling claudestra…", "",
+    "✳ Booping… (7s · ↓ 354 tokens)", "  ⎿  Tip: Run /install-slack-app to use Claude in Slack", footer([]),
+  ].join("\n");
+  test("通知回合在跑 → busy，agent 消息押", () => {
+    const s = turnState(at({ pane: NOTIFY_TURN, status: "done" }));
+    expect(s.main).toBe("busy");
     expect(agentMsgMustWait(s)).toBe(true);
-  });
-  test("过了窗口就放行；时钟倒退（bgEndedAt 在未来）不算", () => {
-    expect(agentMsgMustWait(turnState(at({ pane: ONLY_BG, bgEndedAt: now - BG_SETTLE_MS - 1000, now })))).toBe(false);
-    expect(agentMsgMustWait(turnState(at({ pane: ONLY_BG, bgEndedAt: now + 5000, now })))).toBe(false);
   });
 });
 
@@ -114,7 +113,7 @@ describe("押后队列：只剩后台在跑时 flush 能投出 agent 消息", ()
     const delivered: string[] = [];
     await flushHeld({
       held, compacting: () => false, isHumanRequest: () => false, client: () => ({ ws }), touch: () => undefined,
-      working: async () => agentMsgMustWait(turnState({ pane: ONLY_BG, status: "done", now: Date.now() })),
+      working: async () => agentMsgMustWait(turnState({ pane: ONLY_BG, status: "done" })),
       deliver: async (e) => (delivered.push(String(e.content)), { envelope: e, outcome: { kind: "sent" } }),
     }, "c-pm", "sweep");
     expect(delivered).toEqual(["交付"]);

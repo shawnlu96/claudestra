@@ -24,7 +24,7 @@ let GRACE_MS = 45_000;
 let path = MISSIONS_PATH;
 /**
  * 事件总线只在 bridge 投递时才知道「在忙」：bridge 刚重启、或 agent 自己续着干，状态表是空的。递提醒前再按 turnState 判一次：
- * 主回合在跑 / 压缩中 / 后台 subagent 刚结束（task-notification 马上开回合，撞上会落进丢弃窗口）才让位；只剩后台在跑不算忙。
+ * 主回合在跑 / 压缩中才让位；只剩后台在跑不算忙。
  * unknown 放行——认不出画面就挡，值守会永远递不出去。
  */
 let turnBusy = async (agent: string): Promise<boolean> => {
