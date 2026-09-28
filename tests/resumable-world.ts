@@ -9,7 +9,9 @@ export class Crash extends Error {}
 
 export interface WorldState {
   reg: Registry;
+  /** 窗口名；winIds 与它一一对应（tmux 的 `@N`） */
   windows: string[];
+  winIds: string[];
   channels: Set<string>;
   bridgeUp: boolean;
   cleanups: string[];
@@ -31,8 +33,14 @@ export function makeWorld(init: Partial<WorldState> = {}) {
     ledgerRenames: [],
     channelNames: new Map(),
     busyWindows: [],
+    winIds: [],
     ...structuredClone(init),
   };
+  let nextWin = 100;
+  if (st.winIds.length !== st.windows.length) st.winIds = st.windows.map(() => `@${nextWin++}`);
+  /** tmux 列不出窗口（模拟 tmux 出错）：列窗口类调用一律抛 */
+  let tmuxBroken = false;
+  const dropWin = (i: number) => { st.windows.splice(i, 1); st.winIds.splice(i, 1); };
   /** 进程被砍之后，它后面的任何副作用都不会发生：所有假件一律抛 Crash（被调用方 catch 吞掉也无妨） */
   let dead = false;
   /** 「新进程」接手时时钟跳过 PENDING_STALE_MS：旧标记变残留，新写的标记是新鲜的（同一个测试进程 pid 不变） */
@@ -56,9 +64,11 @@ export function makeWorld(init: Partial<WorldState> = {}) {
   const deps: OpsDeps = {
     loadRegistry: async () => { live(); return structuredClone(st.reg); },
     saveRegistry: async (r) => { live(); st.reg = structuredClone(r); hit("save"); },
-    listWindows: async () => { live(); return [...st.windows]; },
-    killWindow: async (n) => { live(); st.windows = st.windows.filter((w) => w !== n); hit("killWindow"); },
-    windowIsBareShell: async (n) => { live(); return !st.busyWindows.includes(n); },
+    listWindows: async () => { live(); if (tmuxBroken) throw new Error("列不出 tmux 窗口"); return [...st.windows]; },
+    windowIds: async (n) => { live(); if (tmuxBroken) throw new Error("列不出 tmux 窗口"); return st.winIds.filter((_, i) => st.windows[i] === n); },
+    killWindow: async (n) => { live(); for (let i = st.windows.length - 1; i >= 0; i--) if (st.windows[i] === n) dropWin(i); hit("killWindow"); },
+    killWindowId: async (id) => { live(); const i = st.winIds.indexOf(id); if (i >= 0) dropWin(i); hit("killWindow"); },
+    windowIsBareShell: async (t) => { live(); const name = t.startsWith("@") ? st.windows[st.winIds.indexOf(t)] : t; return !!name && !st.busyWindows.includes(t) && !st.busyWindows.includes(name); },
     renameWindow: async (a, b) => { live(); st.windows = st.windows.map((w) => (w === a ? b : w)); hit("renameWindow"); },
     deleteChannel: async (id) => {
       live();
@@ -100,7 +110,8 @@ export function makeWorld(init: Partial<WorldState> = {}) {
       hit("createChannel");
       return id;
     },
-    openWindow(name: string) { live(); st.windows.push(name); hit("openWindow"); },
+    openWindow(name: string): string { live(); const id = `@${nextWin++}`; st.windows.push(name); st.winIds.push(id); hit("openWindow"); return id; },
+    breakTmux(on = true) { tmuxBroken = on; },
   };
 }
 

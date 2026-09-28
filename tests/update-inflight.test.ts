@@ -30,9 +30,13 @@ describe("updateVerdict", () => {
       expect(updateVerdict(m({ step }), "T".repeat(40), NOW, dead, fresh).action).toBe("finish-tail");
     }
   });
-  test("还在升级前 → 清标记照常走；HEAD 被人动过 → 只报", () => {
+  test("还在升级前 → 清标记照常走；HEAD 被人动过且没做完 → report（不补）", () => {
     expect(updateVerdict(m({ step: "checkout" }), "F".repeat(40), NOW, dead, fresh).action).toBe("clear");
-    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, fresh).action).toBe("report");
+    expect(updateVerdict(m({ step: "migrated" }), "X".repeat(40), NOW, dead, fresh).action).toBe("report");
+    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: null }).action).toBe("report");
+  });
+  test("reload 已完成（launcher 连坐回收的常态）之后 HEAD 被人动过 → 仍只清标记，不挡以后的更新", () => {
+    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, fresh).action).toBe("clear");
   });
   test("持有者活着但超过 30 分钟 = 残留（pid 复用）", () => {
     expect(updateVerdict(m({ startedAt: new Date(NOW - 31 * 60_000).toISOString() }), "T".repeat(40), NOW, () => true, fresh).action).toBe("clear");

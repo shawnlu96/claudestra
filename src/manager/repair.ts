@@ -23,7 +23,8 @@ async function stillApplies(r: Residue, deps: OpsDeps): Promise<boolean> {
       return a?.pending?.op === op && !isPendingLive(a.pending, deps.now(), deps.alive);
     }
     case "orphan-window": return a?.status === "stopped" && !a.pending && (await deps.listWindows()).includes(r.agent);
-    case "orphan-channel": return a?.status === "stopped" && !a.pending && a.channelId === r.channelId;
+    case "orphan-channel": // 窗口又出现了 = 可能被拉起来在用，频道不能删
+      return a?.status === "stopped" && !a.pending && a.channelId === r.channelId && !(await deps.listWindows()).includes(r.agent);
     default: return false;
   }
 }
@@ -35,6 +36,14 @@ async function fixOne(r: Residue, deps: OpsDeps): Promise<{ ok: boolean; detail:
       return { ok: c.ok, detail: c.ok ? c.steps.join("；") : c.error! };
     }
     case "stale-kill": {
+      const reg = await deps.loadRegistry();
+      const a = reg.agents[r.agent]!;
+      if (a.status !== "stopped") {
+        // kill 标记挂在 active 条目上 = 之后被 restart / resume 拉起来了：kill 的意图已作废，只清标记，绝不再杀
+        delete a.pending;
+        await deps.saveRegistry(reg);
+        return { ok: true, detail: `条目是 ${a.status}（已被重新拉起），只清掉旧的 kill 标记` };
+      }
       const k = await runKill(r.agent, deps);
       return { ok: k.ok === true && !k.incomplete, detail: String(k.message ?? k.error) };
     }

@@ -7,7 +7,8 @@ import { spawnSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import type { Check } from "./doctor.js";
 import { REGISTRY_PATH } from "./registry.js";
-import { listAgentWindows, TMUX_SOCK, MASTER_SESSION } from "./tmux-helper.js";
+import { TMUX_SOCK, MASTER_SESSION } from "./tmux-helper.js";
+import { agentWindowsOrNull } from "./agent-windows.js";
 import { bridgeRequest } from "./bridge-client.js";
 import { describeResidue, pidAlive, scanResidues, type Residue, type ScanInput } from "./pending-ops.js";
 import { launchdStartedAt, readUpdateMarker, updateVerdict, UPDATE_INFLIGHT } from "./update-inflight.js";
@@ -15,7 +16,7 @@ import { launchdStartedAt, readUpdateMarker, updateVerdict, UPDATE_INFLIGHT } fr
 const REPAIR = "bun src/manager.ts repair（先看计划）→ bun src/manager.ts repair --apply";
 
 /** 残留 → doctor 行（纯函数，tests/pending-ops.test.ts） */
-export function residueChecks(residues: Residue[], channelsKnown: boolean): Check[] {
+export function residueChecks(residues: Residue[], channelsKnown: boolean, windowsKnown = true): Check[] {
   const g = "agent";
   const pick = (...kinds: Residue["kind"][]) => residues.filter((r) => kinds.includes(r.kind));
   const out: Check[] = [];
@@ -33,6 +34,7 @@ export function residueChecks(residues: Residue[], channelsKnown: boolean): Chec
   }
   if (chans.length) out.push({ group: g, name: "孤儿频道", status: "warn", detail: chans.map(describeResidue).join("；"), fix: REPAIR });
   if (!channelsKnown) out.push({ group: g, name: "孤儿频道", status: "warn", detail: "bridge 连不上，没查频道", fix: "bridge 起来后再跑 doctor" });
+  if (!windowsKnown) out.push({ group: g, name: "孤儿窗口", status: "warn", detail: "tmux 列不出窗口，窗口 / 频道类没查", fix: "tmux 正常后再跑 doctor" });
   if (!out.some((c) => c.status !== "ok")) out.push({ group: g, name: "半截操作", status: "ok", detail: "没有残留（占位 / 半截 kill、rename / 孤儿窗口、频道）" });
   return out;
 }
@@ -41,7 +43,7 @@ export function residueChecks(residues: Residue[], channelsKnown: boolean): Chec
 export async function gatherScanInput(): Promise<ScanInput> {
   let agents: ScanInput["agents"] = {};
   if (existsSync(REGISTRY_PATH)) agents = JSON.parse(readFileSync(REGISTRY_PATH, "utf8")).agents ?? {};
-  const windows = await listAgentWindows().catch(() => [] as string[]); // tmux 不在 = 没有窗口可言
+  const windows = (await agentWindowsOrNull())?.map((w) => w.name) ?? null; // null = tmux 出错，窗口 / 频道类检查跳过
   let channels: Set<string> | null = null;
   try {
     const r = await bridgeRequest({ type: "list_channels" });
@@ -61,7 +63,7 @@ async function checkUpdateMarker(repoRoot: string): Promise<Check[]> {
   switch (v.action) {
     case "live": return [{ group: g, name: "update 进行中", status: "ok", detail: `${what}，pid ${m.pid} 还在跑` }];
     case "clear": return [{ group: g, name: "update 标记", status: "ok", detail: `${what}：${v.why}，下次 update 自动清掉` }];
-    case "report": return [{ group: g, name: "卡住的 update", status: "warn", detail: `${what}：${v.why}`, fix: `核对仓库后删掉 ${UPDATE_INFLIGHT} 再跑 bun src/manager.ts update` }];
+    case "report": return [{ group: g, name: "卡住的 update", status: "warn", detail: `${what}：${v.why}`, fix: `bun src/manager.ts update（会丢弃这个过期标记后照常更新；标记文件 ${UPDATE_INFLIGHT}）` }];
     default: return [{ group: g, name: "卡住的 update", status: "warn",
       detail: `${what}：${v.action === "finish-reload" ? `这些 daemon 没在 reload 之后重启：${v.stale.join(", ")}` : "切到新版本后没做完（依赖 / 构建 / reload）"}`,
       fix: "bun src/manager.ts update（会从停下的那一步补完）" }];
@@ -75,5 +77,5 @@ export async function checkPendingOps(repoRoot: string): Promise<Check[]> {
   } catch (e) {
     return [{ group: "agent", name: "半截操作", status: "warn", detail: `查不了：${(e as Error).message}` }];
   }
-  return [...residueChecks(scanResidues(input), input.channels !== null), ...(await checkUpdateMarker(repoRoot))];
+  return [...residueChecks(scanResidues(input), input.channels !== null, input.windows !== null), ...(await checkUpdateMarker(repoRoot))];
 }

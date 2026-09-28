@@ -186,11 +186,21 @@ async function resumeUpdate(d: UpdateDeps): Promise<boolean> {
     return false;
   }
   if (v.action === "live") return done({ ok: false, error: `另一次 update 正在进行（pid ${m.pid}，步骤 ${m.step}）——稍后再试` });
-  if (v.action === "report") return done({ ok: false, error: `上次 update（→ ${m.targetLabel}）没做完，且${v.why}。核对后删掉 ${UPDATE_INFLIGHT} 再跑 update` });
+  if (v.action === "report") {
+    // 仓库已被人改过：旧标记描述的现场不在了，补不了也不该永远挡住更新——留一句话，照常走 update
+    console.error(`[update] ⚠️ 上次 update（→ ${m.targetLabel}，停在 ${m.step}）没做完，且${v.why}；丢弃标记后照常更新`);
+    clearUpdateMarker();
+    return false;
+  }
+  if (v.action === "finish-tail" && (await d.git("status", "--porcelain")).out) {
+    return done({ ok: false, error: `上次 update（→ ${m.targetLabel}）停在「${m.step}」要补完，但工作区有未提交的改动——commit/stash 后再跑 update（标记在 ${UPDATE_INFLIGHT}）` });
+  }
   const lock = await takeUpdateLock();
   if (!lock.ok) return done({ ok: false, error: lock.error });
   const resumed = { resumed: `上次 update 停在「${m.step}」，已从这里补完` };
-  m.pid = process.pid;
+  // 换成本进程接手：pid 与起始时间一起刷新并立刻落盘，别的 update 才会判它在途而不是又一个残留
+  Object.assign(m, { pid: process.pid, startedAt: new Date().toISOString() });
+  await writeUpdateMarker(m);
   if (v.action === "finish-reload") {
     const r = await reloadDaemons(m);
     const daemons = r.cliInstall.daemons.map((x) => ({ label: x.label, loaded: x.loaded, warning: x.warning }));

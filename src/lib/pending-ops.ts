@@ -11,6 +11,8 @@ export type PendingOp =
       op: "create"; pid: number; startedAt: string; channelName: string;
       /** 建频道后立刻写回；没有 = 砍在「建频道」与「写回」之间，频道只报不删（不按名字猜） */
       channelId?: string;
+      /** 建窗口后立刻写回 tmux 窗口 id：残留清理只按 id 关，不按名字杀到别人的同名窗口 */
+      windowId?: string;
       /** 同名旧条目（kill 过的 agent）：create 失败时原样恢复，不抹掉它的历史 */
       prev?: Record<string, unknown>;
     }
@@ -36,6 +38,16 @@ export function isPendingLive(p: { pid: number; startedAt: string }, now: number
   return alive(p.pid);
 }
 
+/**
+ * restart / resume 能不能碰这个条目：在途的一律不碰；残留的 kill 可以（重新拉起 = kill 的意图作废，调用方清标记）；
+ * 残留的 create / rename 不行——窗口 / 频道还挂在标记上，拉起来会多出第二个会话或丢掉线索。
+ */
+export function pendingRefusal(p: PendingOp | undefined, verb: string, now: number, alive: (pid: number) => boolean): string | null {
+  if (!p) return null;
+  if (isPendingLive(p, now, alive)) return `${verb} 不了：正在 ${p.op}（pid ${p.pid}），等它结束再试`;
+  return p.op === "kill" ? null : `有做到一半的 ${p.op}，先跑 manager repair --apply 收尾再 ${verb}`;
+}
+
 export function newPending<T extends PendingOp["op"]>(op: T, extra: Omit<Extract<PendingOp, { op: T }>, "op" | "pid" | "startedAt">, now = Date.now()): Extract<PendingOp, { op: T }> {
   return { op, pid: process.pid, startedAt: new Date(now).toISOString(), ...extra } as Extract<PendingOp, { op: T }>;
 }
@@ -59,8 +71,8 @@ export type Residue =
 
 export interface ScanInput {
   agents: Record<string, { status?: string; channelId?: string; pending?: PendingOp }>;
-  /** master session 里的 agent-* 窗口 */
-  windows: string[];
+  /** master session 里的 agent-* 窗口；null = 列不出来（窗口类、频道类检查都跳过，宁可漏报不误删） */
+  windows: string[] | null;
   /** 平台上还存在的频道 id；null = 查不到（bridge 不在），跳过孤儿频道 */
   channels: Set<string> | null;
   now: number;
@@ -88,15 +100,16 @@ export function scanResidues(inp: ScanInput): Residue[] {
     else if (p.op === "kill") out.push({ kind: "stale-kill", agent: name });
     else out.push({ kind: "stale-rename", agent: name, from: p.from });
   }
-  for (const w of inp.windows) {
+  for (const w of inp.windows ?? []) {
     if (handled.has(w)) continue;
     const a = inp.agents[w];
     if (!a) out.push({ kind: "orphan-window", agent: w, registered: false });
     else if (a.status === "stopped") out.push({ kind: "orphan-window", agent: w, registered: true });
   }
-  if (inp.channels) {
+  if (inp.channels && inp.windows) {
     for (const [name, a] of Object.entries(inp.agents)) {
-      if (handled.has(name) || a.status !== "stopped" || isLocalChannel(a.channelId)) continue;
+      // 窗口还在 = agent 可能正在用（registry 漏写 active），它的频道不算孤儿
+      if (handled.has(name) || a.status !== "stopped" || isLocalChannel(a.channelId) || inp.windows.includes(name)) continue;
       if (inp.channels.has(a.channelId!) && !liveChannelOwners.has(a.channelId!)) {
         out.push({ kind: "orphan-channel", agent: name, channelId: a.channelId! });
       }

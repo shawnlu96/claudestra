@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { Crash, makeWorld, normalize, type WorldState } from "./resumable-world";
-import { beginCreate, clearCreateResidue, commitCreate, recordCreateChannel } from "../src/manager/create-guard";
+import { beginCreate, clearCreateResidue, commitCreate, recordCreate } from "../src/manager/create-guard";
 import { runKill, runRemove } from "../src/manager/agent-kill";
 import { runRename } from "../src/manager/agent-rename";
 import { runRepair } from "../src/manager/repair";
@@ -20,14 +20,15 @@ async function simulateCreate(w: World, name: string): Promise<string> {
   const begun = await beginCreate(name, name.replace("agent-", ""), { project: "/p", purpose: "new", cwd: "/p" }, w.deps);
   if (!begun.ok) return begun.error;
   const ch = w.createChannel(name);
-  await recordCreateChannel(name, ch, w.deps);
-  w.openWindow(name);
+  await recordCreate(name, { channelId: ch }, w.deps);
+  const windowId = w.openWindow(name);
+  await recordCreate(name, { windowId }, w.deps);
   const entry = { project: "/p", purpose: "new", created: "t1", status: "active", channelId: ch, notes: "", cwd: "/p", sessionId: "s-new" } as AgentInfo;
-  return (await commitCreate(name, entry, w.deps)) ? "ok" : "lost";
+  return commitCreate(name, entry, w.deps);
 }
 
 async function scanOf(w: World) {
-  return { agents: structuredClone(w.st.reg.agents), windows: [...w.st.windows], channels: new Set(w.st.channels), now: w.deps.now(), alive: w.deps.alive };
+  return { agents: structuredClone(w.st.reg.agents), windows: [...w.st.windows] as string[] | null, channels: new Set(w.st.channels), now: w.deps.now(), alive: w.deps.alive };
 }
 
 /** 先完整跑一遍拿到所有砍点，再逐个砍、逐个用 finish 收尾，断言终态 */
@@ -168,7 +169,7 @@ describe("对抗：再跑 / repair 不许误删", () => {
     const w = makeWorld();
     await beginCreate("agent-x", "x", {}, w.deps);
     const ch = w.createChannel("agent-x");
-    await recordCreateChannel("agent-x", ch, w.deps);
+    await recordCreate("agent-x", { channelId: ch }, w.deps);
     const snap = normalize(w.st);
     expect(await simulateCreate(w, "agent-x")).toContain("正在 create");
     expect(await runKill("agent-x", w.deps)).toMatchObject({ ok: false });
@@ -233,7 +234,101 @@ describe("对抗：再跑 / repair 不许误删", () => {
     const snap = normalize(w.st);
     const r = await runRepair(false, await scanOf(w), w.deps);
     expect(r).toMatchObject({ dryRun: true });
-    expect((r.plan as unknown[]).length).toBe(2);
+    // 窗口还在，频道就不算孤儿（可能是 registry 漏写 active、正在用）：只报窗口这一项
+    expect(r.plan).toEqual([expect.objectContaining({ kind: "orphan-window" })]);
     expect(normalize(w.st)).toEqual(snap);
   });
 });
+
+describe("审查发现的误删路径（回归用例）", () => {
+  const KILL_LEFT = { op: "kill" as const, pid: 0, startedAt: "2026-09-28T11:00:00Z", left: ["channel"] };
+
+  test("F1：kill 欠删频道之后被 restart 拉起（active）→ repair 只清标记，绝不再杀", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": { ...LIVE, pending: KILL_LEFT } } }, windows: ["agent-x"], channels: new Set(["ch9"]), busyWindows: ["agent-x"] });
+    const r = await runRepair(true, await scanOf(w), w.deps);
+    expect(r.ok).toBe(true);
+    expect(w.st.windows).toEqual(["agent-x"]);
+    expect(w.st.channels.has("ch9")).toBe(true);
+    expect(w.st.reg.agents["agent-x"]).toMatchObject({ status: "active" });
+    expect(w.st.reg.agents["agent-x"]!.pending).toBeUndefined();
+  });
+
+  test("F2：stopped 但窗口里有进程 → 窗口不关，频道也不删", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": { ...OLD, channelId: "ch9" } } }, windows: ["agent-x"], channels: new Set(["ch9"]), busyWindows: ["agent-x"] });
+    await runRepair(true, await scanOf(w), w.deps);
+    expect(w.st.windows).toEqual(["agent-x"]);
+    expect(w.st.channels.has("ch9")).toBe(true);
+  });
+
+  test("F4：create 残留只关自己记下 id 的窗口；同名的别的窗口（有进程）不关", async () => {
+    const w = makeWorld();
+    w.crashAfter("createChannel#1");
+    await simulateCreate(w, "agent-x").catch((e) => { if (!(e instanceof Crash)) throw e; });
+    w.restart();
+    w.openWindow("agent-x"); // 别的路径（如 resume）建的同名窗口，里面在跑
+    w.st.busyWindows = ["agent-x"];
+    const r = await clearCreateResidue("agent-x", w.deps);
+    expect(r.steps.join()).toContain("没关");
+    expect(w.st.windows).toEqual(["agent-x"]);
+  });
+
+  test("F5 / F6：同名条目带残留 kill / rename 时 create 拒绝（不把线索塞进 prev 覆盖掉）", async () => {
+    for (const pending of [KILL_LEFT, { op: "rename" as const, pid: 1, startedAt: "2026-09-28T10:00:00Z", from: "agent-old" }]) {
+      const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": { ...OLD, pending } } }, channels: new Set(["chOld"]) });
+      expect(await simulateCreate(w, "agent-x")).toContain(`做到一半的 ${pending.op}`);
+      expect(w.st.reg.agents["agent-x"]!.pending).toEqual(pending);
+    }
+  });
+
+  test("F7：kill 一个 rename 做到一半的 agent，旧名窗口也关", async () => {
+    const pending = { op: "rename" as const, pid: 1, startedAt: "2026-09-28T10:00:00Z", from: "agent-a" };
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending } } }, windows: ["agent-a"], channels: new Set(["ch9"]) });
+    expect(await runKill("agent-b", w.deps)).toMatchObject({ ok: true });
+    expect(w.st.windows).toEqual([]);
+  });
+
+  test("kill 一开始就置 stopped（砍在中间 launcher 不会当 dead 拉回）", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": LIVE } }, windows: ["agent-x"], channels: new Set(["ch9"]) });
+    w.crashAfter("save#1");
+    await runKill("agent-x", w.deps).catch((e) => { if (!(e instanceof Crash)) throw e; });
+    expect(w.st.reg.agents["agent-x"]).toMatchObject({ status: "stopped", pending: { op: "kill" } });
+  });
+
+  test("大总管不能 kill / remove", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-master": LIVE } } });
+    expect(await runKill("agent-master", w.deps)).toMatchObject({ ok: false });
+    expect(await runRemove("agent-master", w.deps)).toMatchObject({ ok: false });
+    expect(w.st.reg.agents["agent-master"]).toEqual(LIVE);
+  });
+
+  test("remove 时 bridge 不在：条目留成 stopped + 欠删频道，repair 之后补删", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": LIVE } }, windows: ["agent-x"], channels: new Set(["ch9"]), bridgeUp: false });
+    expect(await runRemove("agent-x", w.deps)).toMatchObject({ ok: false });
+    expect(w.st.reg.agents["agent-x"]).toMatchObject({ status: "stopped", pending: { op: "kill", left: ["channel"] } });
+    w.st.bridgeUp = true;
+    await runRepair(true, await scanOf(w), w.deps);
+    expect(w.st.channels.size).toBe(0);
+  });
+
+  test("tmux 列不出窗口：残留清理不删频道、repair 不报窗口 / 频道类", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-s": { ...OLD, channelId: "c1" } } }, channels: new Set(["c1"]) });
+    w.crashAfter("openWindow#1");
+    await simulateCreate(w, "agent-x").catch((e) => { if (!(e instanceof Crash)) throw e; });
+    w.restart();
+    w.breakTmux();
+    await expect(clearCreateResidue("agent-x", w.deps)).rejects.toThrow("列不出");
+    const r = await runRepair(true, { ...(await scanOf(w)), windows: null }, w.deps);
+    expect((r.applied as Array<{ kind: string }>).map((x) => x.kind)).toEqual(["stale-create"]);
+    expect(w.st.channels.has("c1")).toBe(true);
+    expect(w.st.channels.size).toBe(2);
+  });
+
+  test("占位被别的进程接手后 commit 返回 lost，不覆盖", async () => {
+    const w = makeWorld();
+    await beginCreate("agent-x", "x", {}, w.deps);
+    w.st.reg.agents["agent-x"]!.pending = { op: "create", pid: 999999, startedAt: "2026-09-28T12:00:00Z", channelName: "x" };
+    expect(await commitCreate("agent-x", LIVE, w.deps)).toBe("lost");
+    expect(w.st.reg.agents["agent-x"]!.status).toBe("creating");
+  });
+});
+

@@ -2,7 +2,8 @@
  * create / kill / rename / repair 共用的副作用接口。步骤函数只经它碰 tmux / bridge / registry，
  * 单测换成内存假件后能在任一步之后「砍掉」再重跑（tests/resumable-ops.test.ts）。
  */
-import { listAgentWindows, listWindowIdsByName, tmuxRaw, windowHasChildProcess, windowTarget } from "../lib/tmux-helper.js";
+import { listWindowIdsByName, tmuxRaw, windowHasChildProcess, windowTarget } from "../lib/tmux-helper.js";
+import { agentWindowsOrNull } from "../lib/agent-windows.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { archiveSession } from "../lib/session-archive.js";
 import { isLocalChannel, isUnknownChannelError, pidAlive } from "../lib/pending-ops.js";
@@ -13,11 +14,15 @@ type ChannelResult = "ok" | "gone" | { error: string };
 export interface OpsDeps {
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
+  /** 列不出来时抛错：调用方据此中止，不能把「不知道」当成「窗口不在」去删频道 */
   listWindows(): Promise<string[]>;
+  /** 同名窗口的 tmux id（`@N`），同样列不出来就抛 */
+  windowIds(name: string): Promise<string[]>;
   killWindow(name: string): Promise<void>;
+  killWindowId(id: string): Promise<void>;
   renameWindow(from: string, to: string): Promise<void>;
-  /** 窗口只剩裸 shell（确无子进程）；探测失败按「有进程」算，宁可不关 */
-  windowIsBareShell(name: string): Promise<boolean>;
+  /** 窗口（名字或 `@id`）只剩裸 shell（确无子进程）；探测失败按「有进程」算，宁可不关 */
+  windowIsBareShell(target: string): Promise<boolean>;
   deleteChannel(channelId: string): Promise<ChannelResult>;
   renameChannel(channelId: string, name: string): Promise<ChannelResult>;
   /** bridge 上还存在的频道 id；null = bridge 不在 */
@@ -70,19 +75,29 @@ async function notifyAgentCleanup(channelId: string, agent: string): Promise<boo
   }
 }
 
+async function knownWindows() {
+  const w = await agentWindowsOrNull();
+  if (!w) throw new Error("列不出 tmux 窗口（tmux 出错），为免误删先停手；tmux 正常后再跑");
+  return w;
+}
+
 export const realOpsDeps: OpsDeps = {
   loadRegistry,
   saveRegistry,
-  listWindows: () => listAgentWindows(),
+  listWindows: async () => (await knownWindows()).map((w) => w.name),
+  windowIds: async (name) => (await knownWindows()).filter((w) => w.name === name).map((w) => w.id),
   async killWindow(name) {
     // by id：同名多份时 `master:name` 会 ambiguous，错误被吞就杀错 / 漏杀
     for (const id of await listWindowIdsByName(name)) await tmuxRaw(["kill-window", "-t", id]);
+  },
+  async killWindowId(id) {
+    await tmuxRaw(["kill-window", "-t", id]);
   },
   async renameWindow(from, to) {
     const [id] = await listWindowIdsByName(from);
     if (id) await tmuxRaw(["rename-window", "-t", id, to]);
   },
-  windowIsBareShell: async (name) => (await windowHasChildProcess(windowTarget(name)).catch(() => null)) === false,
+  windowIsBareShell: async (target) => (await windowHasChildProcess(target.startsWith("@") ? target : windowTarget(target)).catch(() => null)) === false,
   deleteChannel: (channelId) => channelOp({ type: "delete_channel", channelId }),
   renameChannel: (channelId, name) => channelOp({ type: "rename_channel", channelId, name }),
   async listChannels() {

@@ -59,7 +59,8 @@ export type UpdateVerdict =
 
 /**
  * 标记 + 现状 → 该做什么。daemonStart 给出每个 daemon 当前进程的启动时刻（没在跑 = null）。
- * 只在 HEAD 恰好等于目标时补做；HEAD 既不是目标也不是升级前 = 有人动过仓库，只报不碰。
+ * 已到 reloading 且三个 daemon 都在 reloadAt 之后起来过 = 做完了（launcher 连坐回收的常态），不管 HEAD 后来被谁动过。
+ * 其余只在 HEAD 恰好等于目标时补做；HEAD 既不是目标也不是升级前 = 有人动过仓库，不补（report）。
  */
 export function updateVerdict(
   m: UpdateMarker,
@@ -69,16 +70,16 @@ export function updateVerdict(
   daemonStart: Record<string, number | null>,
 ): UpdateVerdict {
   if (alive(m.pid) && now - Date.parse(m.startedAt) < UPDATE_LIVE_MS) return { action: "live" };
+  const since = Date.parse(m.reloadAt ?? m.startedAt);
+  // ps 的 lstart 只到秒：留 1 秒余量，免得 reload 同一秒内起来的 daemon 被判成没重启
+  const stale = Object.entries(daemonStart).filter(([, t]) => t === null || t < since - 1000).map(([label]) => label);
+  if (m.step === "reloading" && !stale.length) return { action: "clear", why: "三个 daemon 都已在 reload 之后重启过" };
   if (head !== m.target) {
     return head === m.fromHead
       ? { action: "clear", why: "上次没走到切换版本，仓库还在升级前" }
       : { action: "report", why: `HEAD ${head.slice(0, 7)} 既不是目标 ${m.targetLabel} 也不是升级前 ${m.fromHead.slice(0, 7)}（有人动过仓库）` };
   }
-  if (m.step !== "reloading") return { action: "finish-tail" };
-  const since = Date.parse(m.reloadAt ?? m.startedAt);
-  // ps 的 lstart 只到秒：留 1 秒余量，免得 reload 同一秒内起来的 daemon 被判成没重启
-  const stale = Object.entries(daemonStart).filter(([, t]) => t === null || t < since - 1000).map(([label]) => label);
-  return stale.length ? { action: "finish-reload", stale } : { action: "clear", why: "三个 daemon 都已在 reload 之后重启过" };
+  return m.step === "reloading" ? { action: "finish-reload", stale } : { action: "finish-tail" };
 }
 
 /** launchd 托管进程的启动时刻（ms）；没 load / 没在跑 / 读不到 = null */
