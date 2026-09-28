@@ -13,7 +13,7 @@ import { InboxIcon } from "./ask-icons";
 /**
  * 侧栏里的「待你处理」入口（owner 18:31 拍板放侧栏）：有事才出现，数字只数等你处理的，验收单独小字。
  * 同时挂抽屉和「新来一件卡活的」顶部横幅（owner 正在用时不推送，就靠它）。machineKey 变了整份重来。
- * TODO(T12b 合并后)：把同一份数据接进协作视图首页的「等你」槽位。
+ * 协作视图首页的「等你」读的也是这一份（collab-view.tsx → homeView 的 waits）。
  */
 export function AsksEntry({ machineKey }: { machineKey: string }) {
   const t = useT();

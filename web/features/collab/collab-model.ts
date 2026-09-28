@@ -82,7 +82,7 @@ export function skippedColumns(kind: string): number[] {
 const WAIT_STAGES: ReadonlySet<Stage> = new Set(["restate", "review", "merge", "live", "blocked"]);
 export const STUCK_MS = 30 * 60_000;
 
-/** 关注度：数字小的排前面。owner（等你）要 T11 的数据，第一版恒不出现，槽位保留 */
+/** 关注度：数字小的排前面。owner（等你）= 这条线上有开着的「待你处理」（features/asks，homeView 的 waits） */
 export type Attention = "problem" | "owner" | "stuck" | "waiting" | "progress";
 const RANK: Record<Attention, number> = { problem: 0, owner: 1, stuck: 2, waiting: 3, progress: 4 };
 
@@ -117,7 +117,23 @@ export interface Headline {
   advancing: number;
   problem: number;
   stuck: number;
+  /** 这个项目里开着、等 owner 处理的 ask 数（验收类不算） */
   owner: number;
+}
+
+/** 一条开着的「待你处理」（features/asks 的 WebAsk 里协作视图用到的几个字段） */
+export interface OwnerWait {
+  id: string;
+  taskId: string | null;
+  /** bridge 名（agent-xxx / master） */
+  fromAgent: string;
+  title: string;
+}
+
+/** 这条线在等 owner 的哪件事：挂在这个任务上的优先，其次是这条线的执行者发的、没挂任务的 */
+export function waitFor(t: Pick<LedgerTaskView, "id" | "agent">, waits: readonly OwnerWait[]): OwnerWait | null {
+  const agent = bareAgent(t.agent);
+  return waits.find((w) => w.taskId === t.id) ?? waits.find((w) => !w.taskId && agent !== null && bareAgent(w.fromAgent) === agent) ?? null;
 }
 
 export interface PmStrip {
@@ -251,9 +267,11 @@ export function goalOf(t: LedgerTaskView, items: ReadonlyMap<string, { oneLine: 
   return (t.itemId && items.get(t.itemId)?.oneLine) || "";
 }
 
-export function lineOf(t: LedgerTaskView, ov: Pick<LedgerOverview, "tasks" | "meta">, items: ReadonlyMap<string, { oneLine: string }>, now: number, tr: Tr = zh): LineView {
+export function lineOf(t: LedgerTaskView, ov: Pick<LedgerOverview, "tasks" | "meta">, items: ReadonlyMap<string, { oneLine: string }>, now: number, tr: Tr = zh, wait: OwnerWait | null = null): LineView {
   const frozen = frozenReason(ov.meta, tr);
-  const att = attentionOf(t, now);
+  const base = attentionOf(t, now);
+  // 出问题仍排最前；其余只要在等 owner，就归「等你」
+  const att: Attention = wait && base !== "problem" ? "owner" : base;
   const dwell = dwellMs(t, now);
   return {
     id: t.id,
@@ -268,7 +286,7 @@ export function lineOf(t: LedgerTaskView, ov: Pick<LedgerOverview, "tasks" | "me
     dwellMs: dwell,
     dwellApprox: t.stageSinceApprox === true,
     stuck: att === "stuck",
-    reason: reasonOf(t, att, dwell, frozen, tr),
+    reason: att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr),
     agent: bareAgent(t.agent),
     pm: bareAgent(t.pm),
     round: t.round,
@@ -287,11 +305,12 @@ function localMidnight(now: number): number {
   return d.getTime();
 }
 
-export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh): HomeView {
+/** waits：这个项目里开着、等 owner 的 ask（调用方已按项目、非验收过滤）；不给 = 没有「等你」 */
+export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: readonly OwnerWait[] = []): HomeView {
   const items = new Map(ov.items.map((i) => [i.id, i]));
   // 没派人的 spec 是 PM 手里的排队，不画成线（PM 调度条里计数）
   const open = ov.tasks.filter((t) => !isClosed(t.stage) && !(t.stage === "spec" && !t.agent));
-  const lines = sortLines(open.map((t) => lineOf(t, ov, items, now, tr)));
+  const lines = sortLines(open.map((t) => lineOf(t, ov, items, now, tr, waitFor(t, waits))));
   const midnight = localMidnight(now);
   const pm = ov.meta.pms[0] ?? open.find((t) => t.pm)?.pm ?? null;
   return {
@@ -300,7 +319,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh): HomeView
       advancing: lines.length,
       problem: lines.filter((l) => l.attention === "problem").length,
       stuck: lines.filter((l) => l.attention === "stuck").length,
-      owner: 0,
+      owner: waits.length,
     },
     todayDone: ov.tasks
       .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics.endTs ?? t.updatedAt) >= midnight)
