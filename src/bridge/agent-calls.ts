@@ -191,3 +191,10 @@ export function ambiguityNotice(waiting: PendingAgentCall[]): string {
   return `[ℹ️ 现在有 ${waiting.length} 个 agent 同时在等你的答复：${who}。你没用 send_to_agent 指明答给谁的回复，bridge 分不清归谁，`
     + `所以没有转给任何一方（免得把 A 的内容给了 B）。请用 send_to_agent 分别回复每个发起方（target 填它的名字）。]`;
 }
+
+/** caller 当时填的 expecting 放在答复最前面，caller 不靠自己记得也能接着干 */
+export function withExpecting(pac: PendingAgentCall, reply: string): string {
+  return pac.expecting
+    ? `[💡 你之前 send_to_agent 给 ${pac.targetName} 时填的期望：${pac.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${reply}`
+    : reply;
+}

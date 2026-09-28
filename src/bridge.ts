@@ -9,7 +9,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
-import { isTargetsOwnReply, isOwnStopChannel } from "./lib/pushback-scope.js";
+import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
 
@@ -450,13 +450,6 @@ function nudgeAmbiguousCallers(cid: string): void {
     content: ambiguityNotice(amb), meta: { messageId: newMessageId("amb"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() } });
 }
 
-/** caller 当时填的 expecting 放在答复最前面,caller 不靠自己记得也能接着干 */
-function withExpecting(pac: PendingAgentCall, reply: string): string {
-  return pac.expecting
-    ? `[💡 你之前 send_to_agent 给 ${pac.targetName} 时填的期望：${pac.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${reply}`
-    : reply;
-}
-
 /** target 的答复推回 caller。caller 的 ws 按 channelId 现取(回程簿落盘不存 ws,caller 重连 / bridge 重启后旧连接已失效);
  *  caller 此刻不在线就进押后队列,它连上后的每分钟扫描会投。fromChannel = 推回的 meta.chat_id(见 originalReplyChannel)。 */
 async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string) {
@@ -475,6 +468,12 @@ async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<u
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
 }
+
+const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
+  answerable: answerablePac, consume: (cid, pac) => void pendingAgentCalls.consume(cid, pac.callerChannelId, pac), nudgeAmbiguous: nudgeAmbiguousCallers,
+  pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
+  metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
+};
 
 // v2.21.2+ 压缩上下文结束(jsonl compact_boundary 主路 / pane 兜底)→ 放行压缩期间
 // 押后的消息。人类消息押的理由只是「别掐压缩」,结束就该到;1.5s 让 CC 收尾。
@@ -546,7 +545,8 @@ import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-qu
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
-import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
+import { AgentCallBook, ambiguityNotice, withExpecting, type PendingAgentCall } from "./bridge/agent-calls.js";
+import { settleCallers, settlesOwnTurn } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -2897,51 +2897,12 @@ async function handleHookRequest(req: Request): Promise<Response> {
           try {
             const drainResult = await drainChannelWatcher(cid, discord);
             const drainedText = drainResult.text;
-
-            // v2.0.13+ 兜底 1: 本地 send_to_agent caller 在等 push。如果 target 这轮
-            // 走了 watcher drain（assistant 文字直接 post 到自己 channel）而**不是**
-            // reply()，老 pushback 路径根本不触发 → caller 永远等不到。这里在 Stop
-            // drain 之后强制 pushback 一次：
-            //   - drain 出了文字 → push 该文字
-            //   - drain 没文字（连 assistant text 都没有）→ push 一句 "对方结束了
-            //     turn 但没回复"，至少让 caller 不会无限静默等
-            // ⚠ 同上的归属问题，而且这条更宽：channelsToClear 里除了本 agent 自己的
-            //   频道，还塞了 pendingReplies 里**别人的** intendedReplyChannel（为了把
-            //   「💭 思考中」改成「✅ 完成」）。drain 本身对它们是需要的（把 💬 冲干净
-            //   再标 ✅），但下面三个消费点都在回答「谁欠谁一个回应」，拿别人的收尾
-            //   去结算就是张冠李戴。
-            const ownTurn = isOwnStopChannel(cid, channelId, thisClientForStatus?.ws, clients.get(cid)?.ws);
-            const pendingAgent = ownTurn ? answerablePac(cid) : undefined;
-            if (pendingAgent) {
-              if (!drainedText) {
-                // v2.4.16+ no-text 静默清掉 pending，**不 push** 回 caller。
-                // 历史上这里 push 一条"[⚠️ 对方没产出，你需要主动追问或换路线]"，
-                // 等于积极激励 caller 再发一轮 send_to_agent → target 又没产出
-                // → 又一轮 push → 死循环（agent 之间永无止境聊天的根因）。
-                // 现在静默：caller 的 send_to_agent promise 不 resolve，caller 早
-                // 就 end_turn 了，最多等 staleCleanup 10min 扫掉。caller 没收到推
-                // 不会发起新轮 → 链条天然中断，对应"对方没回话就别盯着"的人类直觉。
-                pendingAgentCalls.consume(cid, pendingAgent.callerChannelId, pendingAgent);
-                console.log(
-                  `🤫 drain兜底 no-text 静默清 pending: ${pendingAgent.targetName} → ${pendingAgent.callerName}`
-                );
-                recordMetric("agent_pushback_drain_silent", {
-                  channelId: pendingAgent.callerChannelId,
-                  meta: { target: pendingAgent.targetName },
-                });
-              } else {
-                try {
-                  const pushBody = withExpecting(pendingAgent, `[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`);
-                  await pushBackToCaller(pendingAgent, clients.get(cid)?.ws, pendingAgent.originalReplyChannel || cid, pushBody, "agent_drain");
-                  pendingAgentCalls.consume(cid, pendingAgent.callerChannelId, pendingAgent);
-                  console.log(`📨 AGENT PUSH-BACK (drain兜底): ${pendingAgent.targetName} → ${pendingAgent.callerName}（drain 文字）`);
-                  recordMetric("agent_pushback_drain", { channelId: pendingAgent.callerChannelId, meta: { hadText: "yes" } });
-                } catch (e) {
-                  console.error("AGENT PUSH-BACK (drain兜底) 失败:", e);
-                }
-              }
-            }
-            if (ownTurn && !pendingAgent) nudgeAmbiguousCallers(cid); // 好几个 caller 在等、它又没指明答给谁
+            // 下面三个消费点（回程簿、API 请求、看门狗）都在回答「cid 欠谁一个回应」：只有 cid 自己正常结束的一轮才结算，
+            // 别人的频道、以 API 错误结束的一轮（那句错误不是答复，回程留着等真实答复）都不动（bridge/stop-settle.ts）
+            const ownTurn = settlesOwnTurn({
+              cid, stopChannelId: channelId, stopWs: thisClientForStatus?.ws, candidateWs: clients.get(cid)?.ws, event, apiError: drainResult.apiError,
+            });
+            if (ownTurn) await settleCallers(stopSettleDeps, cid, drainedText);
 
             // v2.6.0+ R3: API waiter 兜底 —— agent end_turn 没 reply() 时，用
             // drain 出的 assistant 文本 resolve 挂着的 API 请求，wait 调用方不必
@@ -2974,8 +2935,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // v2.4.16+: 最多 nudge **1** 次（之前是 2 次，跟 drain兜底 no-text push
             // 叠加导致 agent 反复 wake-up 抓 LLM turn，是"聊不停"的另一个根因）。
             // 1 次未响应直接放弃，少打扰对面 + 少烧 token。
-            // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错
-            const iaPending = ownTurn && event !== "StopFailure" ? pendingInterAgentMsg.get(cid) : undefined;
+            // 以 API 错误结束的一轮（ownTurn 已排除）不是「收到了没理」:催它只会再撞一次同样的错
+            const iaPending = ownTurn ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);

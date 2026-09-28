@@ -22,6 +22,7 @@ import { splitChunkLines } from "../lib/jsonl-lines.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isForwardTool } from "../lib/forward.js";
+import { isLimitHitText } from "../lib/quota-wall-text.js";
 
 interface ToolEntry {
   id: string;
@@ -50,13 +51,10 @@ interface WatcherState {
   processing: boolean;
   /** 2s poll 兜底的 interval handle */
   pollInterval: ReturnType<typeof setInterval> | null;
-  /**
-   * 本轮是否命中 rate-limit（Claude Code 在 assistant text 里打"You've hit
-   * your limit · resets ..."）。下一条 turn_duration 就不 push 了 —— rate-limit
-   * 的 turn_duration 是"卡住被拒"的时长，对用户没意义，跟 limit 消息一起显
-   * 反而刷屏。读到任何非 limit 的 assistant text 时 reset flag。
-   */
+  /** 本轮命中额度墙（"You've hit your … limit"）：下一条 turn_duration 是被拒的等待时长，不显示；读到它时复位 */
   rateLimited: boolean;
+  /** 最后一条 assistant 条目是 API 错误（额度 / 网络…）：Stop 时 drain 兜底据此不把错误文字当答复（bridge.ts） */
+  apiErrorTurn?: boolean;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -457,13 +455,11 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
         }
 
         if (entry.type === "assistant") {
-          // v2.24+ 回合被 API 错误终止（CC 把它写成 assistant 条目 + isApiErrorMessage:true，
-          // 紧跟 system/turn_duration）。发事件让 bridge 60s 后自动续跑一次。
-          if (entry.isApiErrorMessage === true) {
-            emitEvent({
-              agent: state.agentName, chatId: state.channelId, type: "api_error_turn",
-              data: { error: String(entry.error ?? ""), ts: entry.timestamp ?? null },
-            });
+          // 回合被 API 错误终止（assistant 条目 + isApiErrorMessage，紧跟 turn_duration）→ bridge 续跑 / 额度闸（text 给闸认撞墙原文）
+          state.apiErrorTurn = entry.isApiErrorMessage === true;
+          if (state.apiErrorTurn) {
+            const text = String(entry.message?.content?.[0]?.text ?? "").slice(0, 300);
+            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "api_error_turn", data: { error: String(entry.error ?? ""), ts: entry.timestamp ?? null, text } });
           }
           const content = entry.message?.content;
           if (!Array.isArray(content)) continue;
@@ -568,7 +564,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               // 像 "You've hit your limit · resets 2am (Asia/Shanghai)"。不应该按
               // 常规 💬 发（会让 agent 看着像正常输出），换成 ⛔ 标记 + 置 flag
               // 让后面的 turn_duration 也跳过。
-              if (/You['']?ve hit your (usage )?limit|Hit your (rate |usage )?limit/i.test(t)) {
+              if (isLimitHitText(t)) { // weekly / session / usage 各种写法（lib/quota-wall-text.ts）
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, seq, sid: state.sessionId } });
@@ -638,7 +634,7 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 export async function drainChannelWatcher(
   channelId: string,
   discord: Client,
-): Promise<{ drained: boolean; text: string | null }> {
+): Promise<{ drained: boolean; text: string | null; apiError?: boolean }> {
   for (const state of watchers.values()) {
     if (state.channelId !== channelId) continue;
     try {
@@ -661,7 +657,7 @@ export async function drainChannelWatcher(
       captured = assistantOnly || null;
       try { await flushText(state, discord); } catch { /* non-critical */ }
     }
-    return { drained: true, text: captured };
+    return { drained: true, text: captured, apiError: !!state.apiErrorTurn };
   }
   return { drained: false, text: null };
 }
