@@ -5,14 +5,14 @@
  *   escalate <T|->   升级给 PM / owner；bridge 的事件路由据此通知 PM
  * 规格卡与上一轮 md 只读、找不到就在 prompt 里注明，不因此失败；head 对不上才拒绝派审（审错版本比不审更糟）。
  */
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { resolveBridgePort } from "../lib/bridge-url.js";
 import { repoEnvVar } from "../lib/env-file.js";
 import type { LedgerEvent, LedgerTask } from "../lib/ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "../lib/ledger-store.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import { STATE_DIR, statePath, TMUX_SOCK } from "../lib/paths.js";
+import { readTextSoft, specPathFor } from "../lib/task-spec.js";
 import { lastReviewOf } from "../lib/ledger-handler.js";
 import { buildReviewPack, nextReview, reviewPolicy, type PrevReview, type ReviewPack } from "../lib/review-pack.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
@@ -22,24 +22,8 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 /** 审查结论统一落在这里：<T>-r<N>.md（对抗式 <T>-r<N>-adv.md），临时文件 <T>-r<N>[-adv]-work/ */
 const REVIEWS_DIR = statePath("ledger", "reviews");
 
-const readText = (path: string | null): string | null => {
-  if (!path || !existsSync(path)) return null;
-  try {
-    return readFileSync(path, "utf-8");
-  } catch (e) {
-    // 读不到只让 prompt 少几行重点（审查员照样能自己打开规格卡），不值得让派审失败
-    console.error(`⚠️ 读不到 ${path}：${(e as Error).message}`);
-    return null;
-  }
-};
-
-/** 规格卡：任务上记的是存在的绝对路径就用它，否则 <docsDir>/tasks/<T>.md */
-function specPathOf(c: LedgerCli, task: LedgerTask): string | null {
-  if (task.spec && isAbsolute(task.spec) && existsSync(task.spec)) return task.spec;
-  const docs = getMeta(c.db, task.project).docsDir;
-  const p = docs ? join(docs, "tasks", `${task.id}.md`) : null;
-  return p && existsSync(p) ? p : null;
-}
+/** 规格卡：与 bridge 班子路由同一个定位（lib/task-spec.ts） */
+const specPathOf = (c: LedgerCli, task: LedgerTask): string | null => specPathFor(task, getMeta(c.db, task.project).docsDir);
 
 /** 执行者的 worktree = registry 里它的工作目录 */
 async function worktreeOf(c: LedgerCli, task: LedgerTask): Promise<string | null> {
@@ -61,7 +45,7 @@ function toPrev(e: LedgerEvent | undefined): PrevReview | null {
   const path = typeof d.path === "string" && d.path ? d.path : null;
   return {
     round: typeof d.round === "number" ? d.round : null, verdict: typeof d.verdict === "string" ? d.verdict : null,
-    p0: n(d.p0), p1: n(d.p1), p2: n(d.p2), path, text: e.text, md: readText(path),
+    p0: n(d.p0), p1: n(d.p1), p2: n(d.p2), path, text: e.text, md: readTextSoft(path),
   };
 }
 
@@ -89,7 +73,7 @@ async function plan(c: LedgerCli): Promise<PackPlan> {
   const lastEvent = reviews.at(-1);
   const prev = toPrev(lastEvent);
   const specPath = specPathOf(c, task);
-  const specText = readText(specPath);
+  const specText = readTextSoft(specPath);
   const policy = reviewPolicy(specText);
   const next = lastEvent ? nextReview(policy, lastReviewOf(lastEvent, events).last) : nextReview(policy, null);
   const adversarial = c.p.bools.has("adversarial") || next === "adversarial";

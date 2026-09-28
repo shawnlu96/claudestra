@@ -148,12 +148,14 @@ function note(c: LedgerCli): Result {
   return { ok: true, event: r.event, duplicate: r.duplicate };
 }
 
+const PATH_ONLY = (flag: string) => `${flag} 只收文件路径：字母数字和 ASCII 路径标点，不含空白、全角标点、控制或不可见字符`;
+
 function deliverCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
   c.requireOwnOrManager(task, "交付");
   const moveFrom = c.p.flags.from === undefined ? undefined : stageFlag(c, "from");
-  // 证据只收路径：它会原样进 bridge 通知和审查员 prompt（lib/quote-text.ts）
-  if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", "--evidence 只收文件路径（不含空白和换行）");
+  // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
+  if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }
@@ -163,6 +165,7 @@ function review(c: LedgerCli): Result {
   c.requireManager(task.project, "记审查结论");
   const counts = { p0: intFlag(c.p, "p0"), p1: intFlag(c.p, "p1"), p2: intFlag(c.p, "p2") };
   if (Object.values(counts).some((v) => v === undefined)) throw new LedgerError("invalid", "要带 --p0 --p1 --p2（没有就写 0）");
+  if (c.p.flags.path !== undefined && !pathLike(c.p.flags.path)) throw new LedgerError("invalid", PATH_ONLY("--path"));
   const move = c.p.flags.to === undefined ? undefined : { from: "review" as const, to: stageFlag(c, "to") };
   const r = recordReview(c.db, c.ctx(), {
     taskId: task.id, reviewer: c.need("reviewer"), verdict: c.need("verdict") as never, ...(counts as { p0: number; p1: number; p2: number }),

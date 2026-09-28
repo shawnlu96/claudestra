@@ -4,7 +4,8 @@
  *
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
  *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理，
- *   但通过了而下一轮还要审（nextReview：规格卡要对抗式、这轮不是，派审时 dispatch 记下了规格卡的审查策略）仍归调度助理；
+ *   但通过了而下一轮还要审（nextReview：规格卡要对抗式、这轮不是）仍归调度助理；审查策略取派审时 dispatch 记下的，
+ *   没有 dispatch 就用调用方读的规格卡（specPolicy），两样都没有 = 不知道还要不要审，也归调度助理（宁可多问一句，不替它判走完）；
  *   escalate → PM（data.to = owner 时归 owner）；升级给 owner 之后 owner 记了 decision → 回到 PM。进入新阶段（stage 事件）重新从默认值算起。
  */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
@@ -58,33 +59,37 @@ function resolve(role: HandlerRole, task: Pick<LedgerTask, "agent" | "pm">, team
 
 const num = (v: unknown): number => (typeof v === "number" ? v : 0);
 
+/** 规格卡的审查策略：string =「审查」那一行；null = 规格卡在但没写；undefined = 不知道（没读 / 找不到规格卡） */
+export type SpecPolicy = string | null | undefined;
+
 /**
- * 一条 review 的「上一轮」画像：审查员种类与规格卡审查策略取这条 review 之前最近的 dispatch（代码写的），
+ * 一条 review 的「上一轮」画像：审查员种类与审查策略取这条 review 之前最近的 dispatch（代码写的），
+ * 没有 dispatch（PM 手写 prompt 派审、绕开了 dispatch）时策略取 specPolicy（lib/task-spec.ts，与 review-pack 同一来源）。
  * review 自己的 reviewer 字段是自由文本，不作数。events = 同一任务的事件（seq 升序）。
  */
-export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]): { policy: string | null; last: LastReview } {
+export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy?: SpecPolicy): { policy: SpecPolicy; last: LastReview } {
   const d = events.findLast((e) => e.kind === "dispatch" && e.seq < review.seq);
   const kind = d?.data.reviewer === "adversarial" ? "adversarial" : d?.data.reviewer === "regular" ? "regular" : null;
-  const policy = typeof d?.data.policy === "string" ? d.data.policy : null;
+  const policy = !d ? specPolicy : typeof d.data.policy === "string" ? d.data.policy : null;
   const verdict = typeof review.data.verdict === "string" ? review.data.verdict : null;
   return { policy, last: { kind, verdict, p0: num(review.data.p0), p1: num(review.data.p1) } };
 }
 
-/** 这条 review 之后下一轮是什么；null = 审查走完（lib/review-pack.ts 的 nextReview，路由与 review-pack 同一算法） */
-export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[]): NextReview {
-  const { policy, last } = lastReviewOf(review, events);
-  return nextReview(policy, last);
+/** 这条 review 之后下一轮是什么；null = 审查走完（lib/review-pack.ts 的 nextReview，路由与 review-pack 同一算法）；unknown = 审查策略不知道 */
+export function nextAfterReview(review: LedgerEvent, events: readonly LedgerEvent[], specPolicy?: SpecPolicy): NextReview | "unknown" {
+  const { policy, last } = lastReviewOf(review, events, specPolicy);
+  return policy === undefined ? "unknown" : nextReview(policy, last);
 }
 
 /** 事件把接手的一环推到哪；null = 这条不改变谁在接（note 等） */
-function roleAfter(e: LedgerEvent, cur: HandlerRole, events: readonly LedgerEvent[]): HandlerRole | null {
+function roleAfter(e: LedgerEvent, cur: HandlerRole, events: readonly LedgerEvent[], specPolicy: SpecPolicy): HandlerRole | null {
   switch (e.kind) {
     case "deliver":
       return "dispatcher";
     case "dispatch":
       return "reviewer";
     case "review":
-      return e.data.verdict === "pass" && nextAfterReview(e, events) === null ? "pm" : "dispatcher";
+      return e.data.verdict === "pass" && nextAfterReview(e, events, specPolicy) === null ? "pm" : "dispatcher";
     case "escalate":
       return e.data.to === "owner" ? "owner" : "pm";
     case "decision":
@@ -106,9 +111,15 @@ function stageStart(events: readonly LedgerEvent[]): number {
 
 /**
  * events = 这个任务自己的事件（target = task.id），按 seq 升序。终态（done / cancelled）返回 null。
+ * specPolicy = 规格卡的审查策略（lib/task-spec.ts specPolicyOf）；不传时没有 dispatch 的 pass 归调度助理（见 lastReviewOf）。
  * 同一事务里 review 事件在 stage 事件之前写（recordReview 先记结论再推阶段），所以 review→fix 之后是执行者在接，符合预期。
  */
-export function currentHandler(task: Pick<LedgerTask, "stage" | "agent" | "pm" | "createdAt">, events: readonly LedgerEvent[], team: HandlerTeam): Handler | null {
+export function currentHandler(
+  task: Pick<LedgerTask, "stage" | "agent" | "pm" | "createdAt">,
+  events: readonly LedgerEvent[],
+  team: HandlerTeam,
+  specPolicy?: SpecPolicy,
+): Handler | null {
   const base = STAGE_ROLE[task.stage];
   if (!base) return null;
   const start = stageStart(events);
@@ -117,7 +128,7 @@ export function currentHandler(task: Pick<LedgerTask, "stage" | "agent" | "pm" |
   let since = startEvent?.ts ?? task.createdAt;
   let seq = startEvent?.seq ?? 0;
   for (const e of events.slice(start + 1)) {
-    const next = roleAfter(e, role, events);
+    const next = roleAfter(e, role, events, specPolicy);
     if (!next) continue;
     role = next;
     since = e.ts;

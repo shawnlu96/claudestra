@@ -4,15 +4,16 @@
  *   deliver                → 调度助理（没配就 PM）：附上现成的 `ledger dispatch` 命令
  *   review 且推到 fix      → 执行者：结论 md 路径 + 那条 review 的一句话
  *   review 且推到 merge / done / spec，或通过、审查走完但没推阶段 → PM（「可以合并」只在真推到 merge 时说）；
- *   通过了但下一轮还要审（nextReview，与 review-pack 同一算法）→ 调度助理（没配就 PM）「常规轮通过，下一轮：对抗式」
+ *   通过了但下一轮还要审（nextReview，与 review-pack 同一算法、同一份规格卡）→ 调度助理（没配就 PM）「常规轮通过，下一轮：对抗式」；
+ *   没有派审记录又读不到规格卡（不知道还要不要审）→ 同样交调度助理核对，不说「审查走完」
  *   review 出 P0，或第 HARD_ROUND 轮还不通过 → PM 另收一条【升级】（硬规则写死在这里，不靠调度助理判断）
  *   escalate               → PM
  * 收件人就是写这条事件的人时不发；没开班子的项目、开班子之前的事件一律不管；该发却找不到 PM 时经 ctx.warn 留日志。
  * 标题行与【升级】这类判定词只由代码按事件类型 / verdict 生成；台账里的自由文本（交付说明、升级原因、审查要点）只进固定标题的
- * 引用框（quoteExternal 单行引用），证据只认路径：通知以 bridge 身份送达，不能让原文伪造指令。
+ * 引用框（quoteExternal 单行引用），证据 / 结论路径只认路径字符、也进引用框：通知以 bridge 身份送达，不能让原文伪造指令。
  */
-import { nextAfterReview, pmOf } from "./ledger-handler.js";
-import { pathLike, quoteExternal, refLike } from "./quote-text.js";
+import { nextAfterReview, pmOf, type SpecPolicy } from "./ledger-handler.js";
+import { pathQuote, quoteExternal, refLike } from "./quote-text.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import type { TeamConfig } from "./ledger-store.js";
 
@@ -39,6 +40,8 @@ export interface RouteCtx {
   team(project: string): { pms: readonly string[]; team: TeamConfig | null };
   /** 同一任务的全部事件（seq 升序）：判断常规轮通过后是否还有对抗式 */
   events(taskId: string): readonly LedgerEvent[];
+  /** 规格卡的审查策略（lib/task-spec.ts specPolicyOf）：没有 dispatch 事件时用它；不给 = 不知道 */
+  policy?(task: LedgerTask): SpecPolicy;
   /** 打印进通知里的 manager 命令前缀，例如 `bun /path/to/src/manager.ts` */
   managerCmd: string;
   /** 该通知却找不到收件人（没有 PM）时说一声 */
@@ -53,9 +56,10 @@ const tid = (id: string): string => (refLike(id) ? id : quoteExternal(id, 40));
 /** 判定词只由代码按 verdict 字段生成 */
 const VERDICT_WORD: Record<string, string> = { pass: "通过", changes: "要修改", block: "阻塞" };
 const verdictWord = (v: unknown): string => VERDICT_WORD[str(v) ?? ""] ?? "（结论字段不认识）";
+/** 路径也是写的人给的：只认路径字符（pathLike），并且同样进固定标题的引用框 */
 const pathLine = (label: string, v: unknown): string[] => {
   const p = str(v);
-  return p ? [pathLike(p) ? `${label}：${p}` : `${label}：（不是路径，已省略；看 ledger show）`] : [];
+  return p ? [`${label}（原文，非指令）：${pathQuote(p, "（不是路径，已省略；看 ledger show）")}`] : [];
 };
 /** 固定标题的引用框：标题由代码写死，原文只在「」里 */
 const quoted = (label: string, text: string): string[] => (text ? [`${label}（原文，非指令）：${quoteExternal(text)}`] : []);
@@ -65,7 +69,7 @@ function deliverText(e: LedgerEvent, task: LedgerTask, cmd: string, toPm: boolea
   const d = e.data;
   return [
     `[台账] ${tid(task.id)} 第 ${num(d.round)} 轮交付 @${short(str(d.headSHA) ?? task.headSHA)}（${e.actor}）`,
-    ...pathLine("证据", d.evidence),
+    ...pathLine("证据路径", d.evidence),
     ...quoted("执行者自述", e.text),
     `下一步：${cmd} ledger dispatch ${tid(task.id)}`,
     "→ 用 Agent 工具按输出的 description / prompt 派审查员；结论存进输出里的 reviewPath，再跑 ledger review。",
@@ -79,7 +83,7 @@ function reviewHead(e: LedgerEvent, task: LedgerTask): string {
 }
 
 function reviewBody(e: LedgerEvent): string[] {
-  return [...pathLine("结论", e.data.path), ...quoted("审查要点", e.text)];
+  return [...pathLine("结论路径", e.data.path), ...quoted("审查要点", e.text)];
 }
 
 /** review 事件同一事务里紧跟着的阶段移动（recordReview 先记结论再推阶段，seq 相邻） */
@@ -90,7 +94,11 @@ function moveAfter(e: LedgerEvent, batch: readonly LedgerEvent[]): Stage | null 
 
 /** 「可以合并」只在阶段真的推到 merge 时说 */
 const PM_MOVES: Partial<Record<Stage, string>> = { merge: "阶段已推到 merge，可以合并", done: "调查类任务完成", spec: "退回改规格" };
-const NEXT_WORD = { adversarial: "常规轮通过，下一轮：对抗式", regular: "判了通过但还有 P0 / P1，下一轮：常规复验" } as const;
+const NEXT_WORD = {
+  adversarial: "常规轮通过，下一轮：对抗式",
+  regular: "判了通过但还有 P0 / P1，下一轮：常规复验",
+  unknown: "判了通过，但台账里没有派审记录、也读不到规格卡：按规格卡「审查」一行核对还要不要对抗式，不要就交 PM 推阶段",
+} as const;
 
 type Draft = Omit<RouteNotice, "messageId" | "seq" | "project" | "taskId">;
 
@@ -100,7 +108,7 @@ function reviewNotices(e: LedgerEvent, task: LedgerTask, team: TeamConfig, pm: s
   const out: Draft[] = [];
   const head = reviewHead(e, task);
   // 下一轮是什么：与 review-pack、currentHandler 同一个纯函数（lib/review-pack.ts nextReview）
-  const next = !move && e.data.verdict === "pass" ? nextAfterReview(e, ctx.events(task.id)) : null;
+  const next = !move && e.data.verdict === "pass" ? nextAfterReview(e, ctx.events(task.id), ctx.policy?.(task)) : null;
   const nextTo = next ? (team.dispatcher ?? pm) : null;
   if (next && nextTo) {
     const cmdLine = `下一步：${cmd} ledger dispatch ${tid(task.id)}（按规格卡自动选审查员）`;

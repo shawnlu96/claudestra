@@ -13,6 +13,7 @@ import type { ServerWebSocket } from "bun";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getMeta, getTask, listEvents } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
+import { specPolicyOf } from "../lib/task-spec.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import { routeEvents, type RouteNotice } from "../lib/team-route.js";
@@ -132,6 +133,7 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
           return { pms: m.pms, team: m.team };
         },
         events: (id) => listEvents(db, { target: id }),
+        policy: (t) => specPolicyOf(t, getMeta(db, t.project).docsDir),
         managerCmd: `bun ${MANAGER_PATH}`,
         warn: (m) => d.log(`⚠️ 班子路由：${m}`),
       });
