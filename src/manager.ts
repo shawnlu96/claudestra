@@ -484,6 +484,7 @@ async function cmdCreate(
   projectFlag?: string,
   runtimeFlag?: string,
   piBaseFlag?: string,
+  teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
   assertValidNewName(name);
   // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
@@ -509,6 +510,8 @@ async function cmdCreate(
   const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
+  const team = await (await import("./manager/team.js")).teamFieldsForCreate(tmuxName, teamFlags); // 派发者校验在建频道 / 拉起之前
+  if (!team) return;
 
   // v2.21+ 每个 agent 必属一个 project:显式 --project > 按 dir 匹配 > 自动建组
   const projRes = await resolveOrCreateProject(dir, projectFlag);
@@ -651,6 +654,7 @@ async function cmdCreate(
     permissionMode: mode,
     ...(model ? { model } : {}),
     ...(external ? { external: true } : {}),
+    ...team,
     // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
     ...adapter.registryFields(spec),
   };
@@ -932,6 +936,7 @@ async function cmdResume(
     ...(model ? { model } : {}),
     // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
+    ...(await import("./manager/team.js")).keepOnResume(prior), // 派发关系 / 显示名 / external 不随重写丢失
   };
   await saveRegistry(reg);
 
@@ -1141,6 +1146,7 @@ async function cmdRename(oldName: string, newName: string) {
   // 2. registry 迁移
   reg.agents[newTmux] = { ...info, displayName: newChannelName };
   delete reg.agents[oldTmux];
+  (await import("./manager/team.js")).renameParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
   await saveRegistry(reg);
   steps.push({ step: "registry", ok: true });
 
@@ -2867,7 +2873,8 @@ switch (cmd) {
       else if (a.startsWith("--project=")) projectFlag = a.slice("--project=".length) || undefined;
       else afterProject.push(a);
     }
-    const { rest: afterExternal, value: external } = extractBoolFlag(afterProject, "--external");
+    const { rest: afterTeam, flags: teamFlags } = (await import("./manager/team.js")).extractTeamFlags(afterProject); // --parent / --task（manager/team.ts）
+    const { rest: afterExternal, value: external } = extractBoolFlag(afterTeam, "--external");
     const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
     const { rest: afterPiBase, value: piBaseFlag } = extractStringFlag(afterRuntime, "--pi-base");
     const { rest: afterModel, model } = extractModelFlag(afterPiBase);
@@ -2884,11 +2891,11 @@ switch (cmd) {
     if (!name || !dir) {
       output({
         ok: false,
-        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external]',
+        error: 'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external] [--parent <agent|master|none>] [--task "<text>"]',
       });
       break;
     }
-    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag);
+    await cmdCreate(name, dir, purposeFlag ?? purposeParts.join(" "), { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, piBaseFlag, teamFlags);
     break;
   }
 
@@ -3079,6 +3086,7 @@ switch (cmd) {
 
   case "list": await cmdList(); break;
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
+  case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
   case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 

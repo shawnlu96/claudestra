@@ -1,0 +1,101 @@
+"use client";
+import type { ReactNode } from "react";
+import { useT } from "@/lib/i18n";
+import type { AgentSession } from "../type";
+import type { TeamNode } from "../sidebar-entries";
+import { Chevron } from "./project-group";
+
+/**
+ * 派发者 + 下挂执行者（树由 sidebar-entries.ts buildTeams 构好，这里只渲染）。执行者缩进一层、带导线，
+ * 和 project 组内的缩进同款；派发者那行行首多一个开合箭头（在行按钮外面，点它不进会话）、行尾「派出 N 个」。
+ * 折叠状态由调用方按设备记住（use-persisted-set.ts）。
+ */
+
+/** AgentRow 的两个插槽：lead = 行按钮前的独立控件，tail = 名字容器后的小标（下一期的任务阶段小标也放这里） */
+export interface RowSlots {
+  lead?: ReactNode;
+  tail?: ReactNode;
+}
+type RenderRow = (a: AgentSession, slots?: RowSlots) => ReactNode;
+
+function TeamToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      className="-ml-1 -mr-1.5 grid size-5 shrink-0 place-items-center rounded text-base-content/40 hover:bg-base-300 hover:text-base-content/80 sm:-mr-1"
+      aria-expanded={open}
+      aria-label={t(open ? "收起派出的 agent" : "展开派出的 agent")}
+      title={t(open ? "收起派出的 agent" : "展开派出的 agent")}
+      onClick={onToggle}
+    >
+      <Chevron open={open} />
+    </button>
+  );
+}
+
+/** 「派出 N 个」；收起时有执行者在忙就补一个黄点（组头同款），不用展开也知道底下在干活 */
+function DispatchCount({ n, busy }: { n: number; busy: boolean }) {
+  const t = useT();
+  return (
+    <span className="flex shrink-0 items-center gap-1 text-[11px] text-base-content/40">
+      {t("派出 {n} 个", { n })}
+      {busy && <span className="size-1.5 rounded-full bg-warning" />}
+    </span>
+  );
+}
+
+function Kids({ kids, row }: { kids: AgentSession[]; row: RenderRow }) {
+  return (
+    <li>
+      <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">{kids.map((c) => row(c))}</ul>
+    </li>
+  );
+}
+
+export function TeamGroup({ node, collapsed, busy, onToggle, row }: {
+  node: TeamNode;
+  collapsed: boolean;
+  /** 有执行者在忙（收起时的黄点） */
+  busy: boolean;
+  onToggle: () => void;
+  row: RenderRow;
+}) {
+  if (!node.children.length) return <>{row(node.a)}</>;
+  return (
+    <>
+      {row(node.a, {
+        lead: <TeamToggle open={!collapsed} onToggle={onToggle} />,
+        tail: <DispatchCount n={node.children.length} busy={collapsed && busy} />,
+      })}
+      {!collapsed && <Kids kids={node.children} row={row} />}
+    </>
+  );
+}
+
+/** 大总管派出的：挂在顶部大总管卡片下面（卡片本身是个按钮，开合放在卡片下方的一行里） */
+export function MasterTeam({ kids, collapsed, busy, onToggle, row }: {
+  kids: AgentSession[];
+  collapsed: boolean;
+  busy: boolean;
+  onToggle: () => void;
+  row: RenderRow;
+}) {
+  const t = useT();
+  if (!kids.length) return null;
+  return (
+    <div className="-mt-1 mb-2">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-base-content/40 transition-colors hover:text-base-content/80"
+        aria-expanded={!collapsed}
+        aria-label={t(collapsed ? "展开派出的 agent" : "收起派出的 agent")}
+        onClick={onToggle}
+      >
+        <Chevron open={!collapsed} />
+        <DispatchCount n={kids.length} busy={collapsed && busy} />
+      </button>
+      {!collapsed && <ul className="flex w-full list-none flex-col gap-0.5 p-0"><Kids kids={kids} row={row} /></ul>}
+    </div>
+  );
+}

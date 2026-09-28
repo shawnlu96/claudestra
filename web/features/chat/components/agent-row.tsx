@@ -15,6 +15,7 @@ import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
+import type { RowSlots } from "./team-group"; // lead = 行按钮前的开合控件，tail = 名字后的小标（派出 N 个 / 下一期的阶段）
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
    tapIntent 是模块级单例——所有行实例共享；swipeReg 在 agent-row-swipe.ts（AgentRow 与 Sidebar 共用同一实例）。 */
@@ -54,6 +55,8 @@ export function AgentRow({
   checked = false,
   onToggleCheck,
   projEmoji,
+  lead,
+  tail,
 }: {
   a: AgentSession;
   active: boolean;
@@ -71,7 +74,7 @@ export function AgentRow({
   onToggleCheck?: () => void;
   /** v2.21+ 单人 project 的合并行:project 自定义 emoji 前缀(未自定义不显,防噪) */
   projEmoji?: string;
-}) {
+} & RowSlots) {
   const store = useChatStoreApi();
   const t = useT(); // 也订阅语言切换,保证 fmtAgo 标签随切换重渲
   const hintDismissed = useUpdateHintDismissed(a); // 横幅上关掉的提示,侧栏 ⬆ 一起收起
@@ -252,6 +255,7 @@ export function AgentRow({
             }`}
           />
         )}
+        {lead}
         <button
           className="relative flex min-w-0 flex-1 select-none items-center gap-2.5 text-left sm:gap-2"
           {...menu.handlers}
@@ -302,6 +306,7 @@ export function AgentRow({
             <NameTags a={a} projEmoji={projEmoji} />
           </span>
           <RepoTag a={a} />
+          {tail}
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
               放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}
@@ -344,6 +349,7 @@ function NameTags({ a, projEmoji }: { a: AgentSession; projEmoji?: string }) {
   const t = useT();
   return (
     <>
+      {a.task && <span className="ml-1.5 text-[12px] font-normal text-base-content/45">{a.task}</span>}
       {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
       {a.pinnedMaster && <span className="badge badge-primary badge-xs ml-1 align-middle">{t("总控")}</span>}
       {a.mock && <span className="badge badge-ghost badge-xs ml-1 align-middle">mock</span>}

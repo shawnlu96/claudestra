@@ -78,6 +78,9 @@ export interface AgentInfo {
    * 技能、禁工具、指定 MCP 配置。缺失 = 继承全局（引入档案之前的行为）。改完要 restart。
    */
   piEnv?: PiEnvProfile;
+  /** 派发者的 registry 键（`agent-xxx` / `master`）与任务短名——manager/team.ts 写入，侧栏据此挂树 */
+  parent?: string;
+  task?: string;
 }
 
 export interface Registry {

@@ -187,6 +187,10 @@ export interface AgentSession {
   runtime?: string | null;
   /** 该重启 / 该 pi update（null = 已是新版或判不了）→ composer 横幅 + 侧栏小标 */
   updateHint?: UpdateHint | null;
+  /** 派发者（前端会话名，大总管 = __master__）：侧栏把它挂在派发者下面（sidebar-entries.ts 构树）；调用方看不到派发者时 bridge 不下发 */
+  parent?: string | null;
+  /** 任务短名（≤40 字）→ 侧栏名字后的压淡小标 */
+  task?: string | null;
 }
 
 /** v2.21+ project 元数据（GET /api/projects）→ 侧栏组头 + 项目管理弹窗。 */
