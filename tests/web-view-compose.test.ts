@@ -6,6 +6,7 @@ import {
   stripInboundHeader,
   survivingPending,
   PENDING_KEEP_MS,
+  echoKeyOf,
   isUserEcho,
   sendCursor,
 } from "@/features/chat/view-compose";
@@ -172,6 +173,20 @@ describe("isUserEcho（他端发言回声去重）", () => {
     const first = { ...histUser(1, ""), attachments: [img("/api/v1/attachments/api_1_image.png")] };
     expect(isUserEcho(first, "", [img("/api/v1/attachments/api_2_image.png")])).toBe(false);
     expect(isUserEcho(first, "", [img("/api/v1/attachments/api_1_image.png")])).toBe(true);
+  });
+
+  test("r2 P2-3：外源发言不和本端乐观气泡比；乐观气泡认领过一次回声后，同名的另一张不再被吞", () => {
+    const mine = local("", { attachments: [img("blob:a")] });
+    expect(isUserEcho(mine, "", [img("/api/v1/attachments/api_1_image.png")], "tao")).toBe(false);
+    const claimed = { ...mine, echoKey: echoKeyOf("", [img("/api/v1/attachments/api_1_image.png")]) };
+    expect(isUserEcho(claimed, "", [img("/api/v1/attachments/api_1_image.png")])).toBe(true); // 同一条回声重放
+    expect(isUserEcho(claimed, "", [img("/api/v1/attachments/api_2_image.png")])).toBe(false); // 自己另一台设备发的同名图
+  });
+
+  test("r2 P2-5：纯附件对账不配外源用户的纯图", () => {
+    const cur = [local("", { attachments: [img("blob:a")], sentAfter: { seq: 10, sid: "s1" } })];
+    const theirs = { ...histUser(11, ""), seqEnd: 11, sid: "s1", from: "tao", attachments: [img("/api/v1/attachments/api_1_image.png")] };
+    expect(survivingPending(cur, [theirs], NOW).length).toBe(1);
   });
 
   test("有正文按正文比（含注入头无关比对）；纯图不会和有字的气泡配", () => {

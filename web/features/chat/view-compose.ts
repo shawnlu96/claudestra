@@ -86,9 +86,9 @@ export function sendCursor(messages: readonly ChatMessage[]): Pick<ChatMessage, 
   return {};
 }
 
-/** 纯附件的乐观消息与历史条目配对：正文都空、附件数相同、在发送时的游标之后（换了会话就不比行号） */
+/** 纯附件的乐观消息与历史条目配对：本人发的、正文都空、同一批附件、在发送时的游标之后（换了会话就不比行号） */
 function sameAttachmentOnly(m: ChatMessage, h: ChatMessage): boolean {
-  if (h.content.trim() || (m.attachments?.length ?? 0) !== (h.attachments?.length ?? 0)) return false;
+  if (h.from || h.content.trim() || !sameAttachments(m.attachments, h.attachments)) return false;
   const c = m.sentAfter;
   if (!c || typeof h.seqEnd !== "number" || (c.sid && h.sid && c.sid !== h.sid)) return true;
   return h.seqEnd > c.seq;
@@ -108,12 +108,19 @@ function sameAttachments(a: ChatMessage["attachments"], b: ChatMessage["attachme
   });
 }
 
+/** 一条他端发言的指纹（正文 + 附件地址）：本端乐观气泡认领第一个回声时记下，之后只认同一条（重放）的回声 */
+export function echoKeyOf(text: string, attachments?: ChatMessage["attachments"]): string {
+  return [text.replace(/\r\n?/g, "\n").trim(), ...(attachments ?? []).map((a) => a.url ?? a.name)].join("\n");
+}
+
 /**
  * 他端用户发言（stream user-in）是不是视图里已有的某条（本端乐观消息的回声 / 历史已有）：有正文比正文（含注入头无关比对）；
  * 纯附件比附件本身——只比「附件数相同」会把别的设备连发的第二张纯图当成回声吞掉（审查 P2-3）。
+ * 外源（from）发言不可能是本端乐观消息的回声；乐观气泡已认领过回声（echoKey）就只认那一条，同名的第二张 image.png 不再被吞。
  */
-export function isUserEcho(m: ChatMessage, text: string, attachments?: ChatMessage["attachments"]): boolean {
-  if (m.role !== "user") return false;
+export function isUserEcho(m: ChatMessage, text: string, attachments?: ChatMessage["attachments"], from?: string): boolean {
+  if (m.role !== "user" || (from && m.local)) return false;
+  if (m.local && m.echoKey !== undefined) return m.echoKey === echoKeyOf(text, attachments);
   const norm = (x: string) => x.replace(/\r\n?/g, "\n").trim();
   const t = norm(text);
   const raw = m.wire ?? m.content ?? "";

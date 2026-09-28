@@ -61,7 +61,7 @@ describe("unwrapChannelMessage", () => {
 
   test("agent↔agent：剥 [🤖 …] header（header 内含 ] 不截断正文）", () => {
     const raw = wrap(
-      'source="claudestra" chat_id="local-x" user="cstra-dev"',
+      'source="claudestra" chat_id="local-x" user="cstra-dev" is_agent="true"',
       "[🤖 来自 master 的 inbound 消息（非 FYI）。\n判断一下：[DIRECT] 标记的要处理。]\n\n请检查 [这个] 模块"
     );
     expect(unwrapChannelMessage(raw)).toEqual({ text: "请检查 [这个] 模块", from: "cstra-dev" });
@@ -85,7 +85,7 @@ describe("unwrapChannelMessage", () => {
         type: "user",
         isMeta: true,
         timestamp: "2026-07-01T00:01:00Z",
-        message: { content: '<channel source="claudestra" chat_id="api:tok_x" user="web-ui">\n[🌐 来自 API 用户「web-ui」（外部 token 接入，非 Discord）。\n直接 reply() 即可。]\n\n你好呀\n</channel>' },
+        message: { content: '<channel source="claudestra" chat_id="api:tok_x" user="web-ui" api="true">\n[🌐 来自 API 用户「web-ui」（外部 token 接入，非 Discord）。\n直接 reply() 即可。]\n\n你好呀\n</channel>' },
       },
       { type: "assistant", timestamp: "2026-07-01T00:02:00Z", message: { content: [{ type: "text", text: "你好" }] } },
     ]);

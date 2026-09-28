@@ -21,7 +21,7 @@ import {
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
-import { composeView, droppedBlobUrls, isUserEcho, revokeBlobUrls, sendCursor } from "./view-compose";
+import { composeView, droppedBlobUrls, echoKeyOf, isUserEcho, revokeBlobUrls, sendCursor } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
@@ -1516,7 +1516,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public addRemoteUserMessage(text: string, attachments?: ChatAttachmentView[], from?: string) {
     if (!text.trim() && !attachments?.length) return;
     // 对账去重：尾部 15 条里已有这条（本端乐观消息的回声 / 历史已有）就不再画——比对规则见 view-compose 的 isUserEcho
-    if (this.state.messages.slice(-15).some((m) => isUserEcho(m, text, attachments))) return;
+    const echo = this.state.messages.slice(-15).find((m) => isUserEcho(m, text, attachments, from));
+    if (echo) {
+      // 回声认领本端乐观气泡：记下这条的指纹，同一气泡不再吞下一条同名附件
+      if (echo.local && echo.echoKey === undefined) this.produce((s) => void s.messages.filter((x) => x.id === echo.id).forEach((x) => (x.echoKey = echoKeyOf(text, attachments))));
+      return;
+    }
     this.produce((s) => {
       // 与 send 一致:插话给流式中的助手气泡定稿,后续输出另起气泡
       if (s.streaming) {

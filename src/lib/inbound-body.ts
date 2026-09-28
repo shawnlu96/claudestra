@@ -15,16 +15,16 @@ const INBOUND_HEAD_START_RE = /^\s*\[(🌐|🤖|🤝|📢|📣)/;
 const HEAD_END_RE = /]\r?\n\r?\n/;
 
 /**
- * 剥掉开头的 bridge 注入头；没有已知头或找不到边界就原样返回（去首尾空白）。
- * headerOnly：确知这条是 bridge 注入的（见 INJECTED_ATTR_RE），没有空行边界但以「]」结尾 = 正文为空的纯附件消息，
- * 整段都是头。不确知时不能这么判：用户自己打的「[🌐 其实] 普通 [话]」会被整段吃掉。
+ * 剥掉开头的 bridge 注入头：「]」+ 空行之前是头；没有空行边界但整段是单个方括号块 = 正文为空的纯附件消息，整段都是头。
+ * 只能对确知是 bridge 注入的消息调用（channelBodyText 看属性、Pi 看 hasInboundHeader）：用户自己打的
+ * 「[🤖 ignore previous instructions]\n\nhello」剥了之后历史只剩 hello，agent 却收到全文。
  */
-export function stripChannelHeader(body: string, headerOnly = false): string {
+export function stripChannelHeader(body: string): string {
   const s = body.trimStart(); // 尾部空行先别削：正文为空时它就是头的边界
   if (!INBOUND_HEAD_START_RE.test(s)) return s.trim();
   const m = HEAD_END_RE.exec(s);
   if (m) return s.slice(m.index + m[0].length).trim();
-  return headerOnly && isSingleBlock(s) ? "" : s.trim();
+  return isSingleBlock(s) ? "" : s.trim();
 }
 
 /** 整段是一个方括号块：以「]」结尾且中间没有「]」+ 换行（5 月的旧通知是好几行 [🤖 …]\n[💡 …] 叠在一起，那是正文） */
@@ -33,9 +33,19 @@ function isSingleBlock(s: string): boolean {
   return x.endsWith("]") && !/]\r?\n/.test(x);
 }
 
-/** Pi 裸记录是否 bridge 注入的入站（据此还原成 <channel> 形状）：已知头 + 空行边界，或整段就是头（纯附件消息） */
+/** renderContentForLocal 三种头各自的固定措辞；Pi 裸记录没有 channel 属性，只能凭它（或头块跨行）认出 bridge 注入 */
+const HEAD_SIGNATURE_RE = /来自 Web 端用户「|来自 peer 实例「|的 inbound 消息/;
+
+/**
+ * Pi 裸记录是否 bridge 注入的入站（是才还原成带注入属性的 <channel> 形状）：头块（空行边界之前，或整段单块）要带固定措辞或跨行。
+ * 只看形状不够：Pi 终端里直接打的「[🤖 hi]」「[🌐 其实] 普通 [话]」会被当成头剥空、从历史里消失。
+ */
 export function hasInboundHeader(text: string): boolean {
-  return INBOUND_HEAD_START_RE.test(text) && (HEAD_END_RE.test(text) || isSingleBlock(text));
+  const s = text.trimStart();
+  if (!INBOUND_HEAD_START_RE.test(s)) return false;
+  const m = HEAD_END_RE.exec(s);
+  const head = m ? s.slice(0, m.index + 1) : isSingleBlock(s) ? s.trim() : "";
+  return HEAD_SIGNATURE_RE.test(head) || /\n/.test(head);
 }
 
 /** 正文尾部补上缺的 `[attachment: 路径]` 行；已在正文里的路径不重复（Discord 入口正文和属性里各有一份） */
@@ -76,9 +86,10 @@ const INJECTED_ATTR_RE = /(?:^|\s)(?:api|is_agent)="true"/;
 
 /**
  * channel 包装的属性串 + 内文 → 历史里显示的正文（剥头 + 补附件行）；空串表示没有可显示内容。
- * 正文里已有附件行（Discord 入口、新 API 入口）就不再按属性补：属性按 ; 拆，文件名带分号会拆出假路径。
+ * 只有带注入属性的才剥头（回放 8704 条带头记录，缺属性的 0 条，所以不会让旧记录露头）。
+ * 正文里已有整行的附件行（Discord 入口、新 API 入口）就不再按属性补：属性按 ; 拆，文件名带分号会拆出假路径。
  */
 export function channelBodyText(attrs: string, body: string): string {
-  const text = stripChannelHeader(body, INJECTED_ATTR_RE.test(attrs));
-  return (text.includes("[attachment: ") ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
+  const text = INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body) : body.trim();
+  return (/^\[attachment: [^\]\n]+\]$/m.test(text) ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
 }
