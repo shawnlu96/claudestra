@@ -45,6 +45,18 @@ export interface JevTestResult {
 export function jevTest(): Promise<JevTestResult> {
   return api<JevTestResult>("/jev/test", { method: "POST", json: {}, timeoutMs: 25_000 });
 }
+/** Jev 调用记录（bridge guard-log.jsonl，新的在前）：每条守门判定一行，error = Jev 失败、守门降级照投 */
+export type JevVerdict = "pass" | "flag" | "block" | "error";
+export interface JevLogEntry {
+  id: string; ts: string; agent: string; verdict: JevVerdict;
+  sender: { name: string; trust: string; kind: string };
+  top?: { id: string; score: number | null }; ms?: number; tokens?: number; error?: string; preview?: string;
+  action?: "released" | "dropped"; by?: string; actedAt?: string;
+}
+export interface JevLog { items: JevLogEntry[]; stats: Record<JevVerdict | "total", number> & { avgMs: number | null } }
+export function jevLog(limit = 200): Promise<JevLog> {
+  return api<JevLog>(`/jev/log?limit=${limit}`, { timeoutMs: 8000 });
+}
 
 // ── per-agent 设置（clear 后自动发送的开机指令）──
 export function getAgentSettings(agent: string): Promise<{ initMessage: string }> {

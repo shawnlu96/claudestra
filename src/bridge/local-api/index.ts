@@ -36,6 +36,7 @@ import { handleBorrowApi } from "./lend-peers-view.js";
 import { handleLendWorkersApi } from "./lend-workers.js";
 import { handleMedia } from "./media.js";
 import { handleJev } from "./jev.js";
+import { handleJevLog } from "./jev-log.js";
 import { handleGuard } from "./guard.js";
 import { handleMissionApi } from "./mission.js";
 import { handlePeerLedgerApi } from "./peer-ledger.js";
@@ -55,7 +56,7 @@ const FAMILIES: Family[] = [
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
   handleLendGrantApi, handleBorrowApi, handleLendClaudeTokenApi, handleWorkBoardApi, handleProductBoardApi,
-  handleLendQuotaLinesApi, handleJev, handleGuard,
+  handleLendQuotaLinesApi, handleJev, handleJevLog, handleGuard,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {

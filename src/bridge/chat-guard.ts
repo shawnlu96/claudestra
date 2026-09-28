@@ -33,7 +33,8 @@ export interface QuarantineItem {
 }
 const isItem = (v: unknown): boolean => !!v && typeof v === "object" && typeof (v as QuarantineItem).id === "string" && !!(v as QuarantineItem).env;
 const QUARANTINE_PATH = statePath("guard-quarantine.json");
-const LOG_PATH = statePath("guard-log.jsonl");
+/** 每次 Jev 判定一行（含失败降级）+ 放行 / 丢弃一行；设置页「调用记录」读它（local-api/jev-log.ts） */
+export const GUARD_LOG_PATH = statePath("guard-log.jsonl");
 const QUARANTINE_TTL_MS = 24 * 3_600_000;
 
 interface Deps {
@@ -51,7 +52,7 @@ let deps: Deps = {
   deliverLocal: async (env) => ({ envelope: env, outcome: { kind: "error", error: new Error("chat guard not wired") } }),
   ask: jevAsk,
   store: new PersistedMap<QuarantineItem>(QUARANTINE_PATH, "守门隔离区", isItem, ["ws", "discordMsg"]),
-  logPath: LOG_PATH,
+  logPath: GUARD_LOG_PATH,
   now: () => Date.now(),
   guardEnabled: async (agent) => {
     const bareName = agent.replace(/^agent-/, "");
@@ -125,11 +126,11 @@ export async function guardInbound(env: Envelope, to: LocalEndpoint): Promise<De
       return null;
     }
     console.error(`⚠️ 守门：Jev 判定失败，照常投递: ${(e as Error).message}`);
-    log({ id: env.meta.messageId, agent, sender: subject.sender, verdict: "error", error: (e as Error).message });
+    log({ id: env.meta.messageId, agent, sender: subject.sender, verdict: "error", error: (e as Error).message, preview: previewText(env.content, 80) });
     return null;
   }
   recent.set(key, [...(recent.get(key) ?? []), env.content].slice(-2));
-  log({ id: env.meta.messageId, agent, sender: subject.sender, verdict: decision.verdict, hits: decision.hits, ms, tokens });
+  log({ id: env.meta.messageId, agent, sender: subject.sender, verdict: decision.verdict, hits: decision.hits, ms, tokens, preview: previewText(env.content, 80) });
   if (decision.verdict !== "block") return null;
   const item: QuarantineItem = { id: env.meta.messageId, agent, env, to, subject, decision, at: new Date(deps.now()).toISOString(), status: "pending" };
   deps.store.set(item.id, item);

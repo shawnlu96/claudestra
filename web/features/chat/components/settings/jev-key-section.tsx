@@ -4,6 +4,7 @@ import { useT } from "@/lib/i18n";
 import type { SharedBusy } from "./profile-section";
 import { Section } from "./section";
 import { getSettings, jevTest, putSettings, type JevTestResult } from "@/lib/api/settings";
+import { JevLogModal } from "./jev-log-modal";
 
 /**
  * Jev（TypeSafe System One）的 API Key（owner 2026-09-28）。与 Groq 同款：完整 key 永不回显，已配置时展示尾四位；
@@ -77,6 +78,8 @@ function TestResult({ r }: { r: JevTestResult | { error: string } }) {
 export function JevKeySection({ jev, busy }: { jev: ReturnType<typeof useJevKey>; busy: boolean }) {
   const t = useT();
   const { keyInput, setKeyInput, hint, msg, save, testing, test, runTest } = jev;
+  // 调用记录不依赖当前是否配了 key：清掉 key 之后也要能回看之前的判定 / 降级
+  const [showLog, setShowLog] = useState(false);
   return (
     <Section
       title={t("Jev · TypeSafe API Key")}
@@ -96,6 +99,9 @@ export function JevKeySection({ jev, busy }: { jev: ReturnType<typeof useJevKey>
       />
       <div className="mt-3 flex flex-wrap items-center justify-end gap-2.5">
         {msg && <span className="text-xs text-base-content/60">{t(msg)}</span>}
+        <button className="btn btn-ghost btn-sm" onClick={() => setShowLog(true)}>
+          {t("调用记录")}
+        </button>
         <button className="btn btn-ghost btn-sm" disabled={busy || testing || !hint} title={hint ? "" : t("未配置 key，先保存再测试")} onClick={() => void runTest()}>
           {testing ? t("测试中…") : t("测试连接")}
         </button>
@@ -109,6 +115,7 @@ export function JevKeySection({ jev, busy }: { jev: ReturnType<typeof useJevKey>
         </button>
       </div>
       {test && <TestResult r={test} />}
+      <JevLogModal open={showLog} onClose={() => setShowLog(false)} />
     </Section>
   );
 }

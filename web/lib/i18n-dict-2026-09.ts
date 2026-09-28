@@ -62,4 +62,19 @@ export const DICT_2026_09: Record<string, string> = {
   "已被守门丢弃，未送达 agent": "Discarded by Chat Guard; never reached the agent",
   "已被守门拦下，等待放行": "Held by Chat Guard, awaiting release",
   "触发过守门，已人工放行": "Triggered Chat Guard; released manually",
+  // ── Jev 调用记录（2026-09-28）──────────────
+  "调用记录": "Call log",
+  "Jev 调用记录": "Jev call log",
+  "每条 = 一次 Chat Guard 判定。「降级」= Jev 调用失败，消息未经判定照常送达。":
+    "Each row is one Chat Guard judgment. \"Degraded\" means the Jev call failed and the message was delivered unjudged.",
+  "通过": "Passed",
+  "可疑": "Flagged",
+  "拦下": "Blocked",
+  "降级": "Degraded",
+  "已放行": "Released",
+  "已丢弃": "Discarded",
+  "待放行": "Awaiting release",
+  "近期判定": "Recent",
+  "平均": "avg",
+  "暂无记录": "No records yet",
 };
