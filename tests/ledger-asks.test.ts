@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, patchAsk, type AskAnswer, type NewAsk } from "../src/lib/ledger-asks.js";
 import { projectView } from "../src/lib/ledger-read.js";
-import { closeLedger, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
+import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -156,11 +156,14 @@ describe("迁移", () => {
   test("v1 的库（CLI 旧版建的）打开后补上 asks 表，已有数据不动", () => {
     path = tempLedgerPath("ledger-asks-v1-");
     const raw = new Database(path);
-    raw.exec("CREATE TABLE items (project TEXT, id TEXT); INSERT INTO items VALUES ('p', 'i1'); PRAGMA user_version = 1");
+    // 用真的 v1 建库语句造旧库：后面的迁移步（别的分支追加的 ALTER TABLE tasks 之类）要有完整的 v1 表才跑得通
+    raw.exec(`${LEDGER_MIGRATIONS[0]}; PRAGMA user_version = 1`);
+    raw.exec("INSERT INTO items (project, id, title, status, createdAt, updatedAt) VALUES ('p', 'i1', 'x', 'todo', 0, 0)");
     expect(hasAsksTable(raw)).toBe(false);
     raw.close();
     const d = openLedger(path);
     expect(schemaVersion(d)).toBe(LEDGER_SCHEMA_VERSION);
+    expect(LEDGER_SCHEMA_VERSION).toBe(LEDGER_MIGRATIONS.length);
     expect(hasAsksTable(d)).toBe(true);
     expect(d.query("SELECT count(*) AS n FROM items").get()).toEqual({ n: 1 });
   });

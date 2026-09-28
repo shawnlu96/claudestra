@@ -267,7 +267,14 @@ export function goalOf(t: LedgerTaskView, items: ReadonlyMap<string, { oneLine: 
   return (t.itemId && items.get(t.itemId)?.oneLine) || "";
 }
 
-export function lineOf(t: LedgerTaskView, ov: Pick<LedgerOverview, "tasks" | "meta">, items: ReadonlyMap<string, { oneLine: string }>, now: number, tr: Tr = zh, wait: OwnerWait | null = null): LineView {
+export function lineOf(
+  t: LedgerTaskView,
+  ov: Pick<LedgerOverview, "tasks" | "meta">,
+  items: ReadonlyMap<string, { oneLine: string }>,
+  now: number,
+  tr: Tr = zh,
+  wait: OwnerWait | null = null,
+): LineView {
   const frozen = frozenReason(ov.meta, tr);
   const base = attentionOf(t, now);
   // 出问题仍排最前；其余只要在等 owner，就归「等你」

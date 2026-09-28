@@ -11,8 +11,6 @@ import { statePath } from "./paths.js";
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
 export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks"] as const;
-/** PRAGMA user_version；升级时在 MIGRATIONS 末尾追加一步，旧库按顺序补齐 */
-export const LEDGER_SCHEMA_VERSION = 2;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -91,8 +89,13 @@ CREATE INDEX asks_state_project ON asks(state, project);
 CREATE INDEX asks_from_state ON asks(fromAgent, state);
 `;
 
-/** 下标 i 把库从版本 i 升到 i+1 */
-const MIGRATIONS: string[] = [SCHEMA_V1, SCHEMA_V2];
+/**
+ * 下标 i 把库从版本 i 升到 i+1。只许在末尾追加，不写死版本号：几条分支各自加一步时，谁后合并谁排在后面，
+ * 版本号跟着 length 走就不会撞。单测用 LEDGER_MIGRATIONS[0] 造旧库，后面追加的步骤（ALTER TABLE 之类）才有完整的 v1 表可改。
+ */
+export const LEDGER_MIGRATIONS: readonly string[] = [SCHEMA_V1, SCHEMA_V2];
+/** PRAGMA user_version 的最新值 = 迁移步数 */
+export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 
 function isBusy(e: unknown): boolean {
   return String((e as { code?: unknown })?.code ?? "").startsWith("SQLITE_BUSY");
@@ -159,10 +162,10 @@ export function schemaVersion(db: Database): number {
 
 /** IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做 */
 function migrate(db: Database): void {
-  if (schemaVersion(db) >= MIGRATIONS.length) return;
+  if (schemaVersion(db) >= LEDGER_MIGRATIONS.length) return;
   db.transaction(() => {
-    for (let v = schemaVersion(db); v < MIGRATIONS.length; v++) {
-      db.exec(MIGRATIONS[v]);
+    for (let v = schemaVersion(db); v < LEDGER_MIGRATIONS.length; v++) {
+      db.exec(LEDGER_MIGRATIONS[v]);
       db.exec(`PRAGMA user_version = ${v + 1}`);
     }
   }).immediate();
