@@ -55,6 +55,35 @@ describe("shortDetail 不泄露（审查 #144 P1-2、第 2 轮 P2-1 / P2-2）", 
     });
   }
 
+  // 审查 #144 第 3 轮 P2-1：密钥前后贴着别的字符（反引号、括号、JSON、中文）时按词切不出来，靠不锚定的前缀兜底
+  const GHP = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+  const glued: [string, string][] = [
+    [`Auth with \`${GHP}\``, "Auth with `•••`"],
+    [`Auth with <${GHP}>`, "Auth with <•••>"],
+    [`Auth with [${GHP}]`, "Auth with [•••]"],
+    [`Use token:${GHP}`, "Use token:•••"],
+    [`Post {"token":"${GHP}"}`, 'Post {"token":"•••"}'],
+    [`设置GH_TOKEN=${GHP}后重试`, "设置GH_TOKEN=•••后重试"],
+    [`令牌=${GHP}`, "令牌=•••"],
+    [`token是${GHP}`, "token是•••"],
+    [`密钥：${GHP}`, "密钥：•••"],
+    [`用新密钥（${GHP}）登录`, "用新密钥（•••）登录"],
+  ];
+  for (const [desc, want] of glued) {
+    test(`贴着别的字符的密钥：${desc.slice(0, 16)}`, () => {
+      const out = line("Bash", { description: desc, command: "x" });
+      expect(out).toBe(want);
+      expect(out).not.toContain("ghp_");
+    });
+  }
+
+  test("引号不配平、转义引号 / 空格、$'…'：programOf 宁可不显示（第 3 轮 P2-2）", () => {
+    for (const command of ['echo \\"x\\" ; curl', 'FOO="unbalanced curl', "a\\ b", "X=$'sec' ls", "API='x' \"half"]) {
+      expect(line("Bash", { command })).toBe("");
+    }
+    expect(line("Bash", { command: "ls -la" })).toBe("ls");
+  });
+
   test("Pi 的真实路径：小写 bash / read 先经 mapPiToolCall 变成 Bash / Read", () => {
     const pi = (n: string, args: unknown) => {
       const m = mapPiToolCall(n, args);

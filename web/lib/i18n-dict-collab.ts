@@ -55,6 +55,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "读台账失败": "Couldn’t read the ledger",
   "排队 · 等派发": "Queued · awaiting dispatch",
   "它刚开始干活，没发。等它这步做完再说": "It just started working — not sent. Wait for this step to finish.",
+  "没查到它的状态，没发": "Couldn’t check its status — not sent.",
   // T12c：上次以来 / 审查员信号 / 回放
   "审查中 · 第 {n} 轮 · 审查员在跑": "In review · round {n} · reviewer running",
   "审查员在跑 · 第 {n} 轮": "Reviewer running · round {n}",
