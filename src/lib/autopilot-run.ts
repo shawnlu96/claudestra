@@ -68,6 +68,8 @@ export const AUTOPILOT_TIMING = {
   runStaleMs: 30 * MINUTE_MS,
   /** 领到了却一直没标「已投递」：进程在领取和投递之间挂了，过这么久放回队列（不能太短：投递本身可能要等抢占收尾） */
   claimStaleMs: 2 * MINUTE_MS,
+  /** 标「已投递」/ 收尾时写锁超时，多久后重试 */
+  lockRetryMs: 5_000,
 } as const;
 
 /**
@@ -136,8 +138,10 @@ export function yieldReason(s: { turnBusy: boolean; online: boolean; lastHumanAt
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const MONTH_RE = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
-/** Claude Code：「resets 2am (Asia/Shanghai)」「resets 4:40pm (Asia/Tokyo)」「resets Oct 3, 2am (Asia/Tokyo)」 */
-const CC_RESET = new RegExp(`resets\\s+(?:${MONTH_RE}\\s+(\\d{1,2}),?\\s+(?:at\\s+)?)?(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\s*(?:\\(([^)]+)\\))?`, "i");
+/** Claude Code：「resets 2am (Asia/Shanghai)」「resets 4:40pm (Asia/Tokyo)」「resets Oct 3, 2am (Asia/Tokyo)」「resets Fri 9am (…)」 */
+const DOW = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const CC_DAY = `(?:(sun|mon|tue|wed|thu|fri|sat)[a-z]*\\.?,?\\s+)?(?:${MONTH_RE}\\s+(\\d{1,2}),?\\s+(?:at\\s+)?)?`;
+const CC_RESET = new RegExp(`resets\\s+${CC_DAY}(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\s*(?:\\(([^)]+)\\))?`, "i");
 /** Codex：「try again at 8:41 AM」「try again at Sep 29th, 2026 8:41 AM」（本机时区） */
 const CODEX_AT = new RegExp(`try again at\\s+(?:${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\s+)?(\\d{1,2}):(\\d{2})\\s*(am|pm)`, "i");
 /** Codex 旧写法：「try again in 2 hours 13 minutes」「try again in 3 days 1 hour」 */
@@ -203,12 +207,22 @@ function resolveWall(now: number, h: number, mi: number, tz: string | undefined,
   return t > now - MINUTE_MS && t - now <= RESET_HORIZON_MS ? t : null;
 }
 
+/** 「resets Fri 9am」：该时区里下一个周五的这个时刻（今天就是周五且已过 → 下周） */
+function resolveWeekday(now: number, dow: number, h: number, mi: number, tz: string | undefined): number | null {
+  const td = todayIn(now, tz);
+  const ahead = (dow - new Date(Date.UTC(td.y, td.mo, td.d)).getUTCDay() + 7) % 7;
+  let t = wallToEpoch(td.y, td.mo, td.d + ahead, h, mi, tz);
+  if (t < now - MINUTE_MS) t = wallToEpoch(td.y, td.mo, td.d + ahead + 7, h, mi, tz);
+  return t - now <= RESET_HORIZON_MS ? t : null;
+}
+
 /** 撞额度那句话里的重置时刻（时间戳）；CC 和 Codex 的几种写法都认，全都认不出 → null */
 export function parseResetAt(text: string, now: number): number | null {
   const cc = CC_RESET.exec(text);
   if (cc) {
-    const [, mon, day, hh, mm, ap, tz] = cc;
+    const [, dow, mon, day, hh, mm, ap, tz] = cc;
     const md = mon ? { mo: MONTHS.indexOf(mon.toLowerCase().slice(0, 3)), d: Number(day) } : undefined;
+    if (dow && !md) return resolveWeekday(now, DOW.indexOf(dow.toLowerCase()), to24(Number(hh), ap), Number(mm ?? 0), tz?.trim());
     return resolveWall(now, to24(Number(hh), ap), Number(mm ?? 0), tz?.trim(), md);
   }
   const at = CODEX_AT.exec(text);

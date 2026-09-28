@@ -2,7 +2,8 @@
  * `ledger` 的写子命令（docs 10-ledger §3 动作表）：参数 → lib/ledger-write.ts。角色：阶段与 meta 由库判，其余在这里（LedgerCli.require*）。
  * task-new / task-set 改执行者时经 T4 的派发规则联动 registry 的 parent / task（manager/team.ts），台账先写、registry 后写。
  */
-import { parseExtraChecks } from "../lib/ledger-probes.js";
+import { normalizePeerAgent } from "../lib/ledger-checks.js";
+import { parseExtraChecks, parseExtraRepo } from "../lib/ledger-probes.js";
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
@@ -22,22 +23,35 @@ import { agentKey, intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import { MASTER_PARENT, TASK_MAX, validateParent, validateTask } from "./team.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
-const TASK_FLAGS: Record<string, string> = { title: "title", item: "itemId", agent: "agent", pm: "pm", branch: "branch", pr: "pr", head: "headSHA", spec: "spec", model: "model" };
+const TASK_FLAGS: Record<string, string> = {
+  title: "title", item: "itemId", agent: "agent", "assignee-kind": "assigneeKind", assignee: "assignee", pm: "pm", branch: "branch", pr: "pr", head: "headSHA", spec: "spec", model: "model",
+};
 const ITEM_VALUED = [...Object.keys(ITEM_FLAGS), "extra", "project", "dedup"];
 const TASK_VALUED = [...Object.keys(TASK_FLAGS), "extra", "dedup"];
 
-/** 旗标 → 字段 patch；agent / pm 归一成 registry 键 */
-function fieldsFrom(c: LedgerCli, map: Record<string, string>): Record<string, unknown> {
+/** assignee 按类型归一：本机 agent → registry 键；peer_agent 的指纹转小写、agent 部分 NFKC + 小写；human 原样。格式由库校验 */
+function normalizeAssignee(v: string, kind: string | null): string | null {
+  if (!v) return null;
+  if (kind === "agent") return agentKey(v);
+  const slash = v.indexOf("/");
+  return kind === "peer_agent" && slash > 0 ? `${v.slice(0, slash).toLowerCase()}/${normalizePeerAgent(v.slice(slash + 1))}` : v;
+}
+
+/** 旗标 → 字段 patch；agent / pm 归一成 registry 键，空串 = 清空 */
+function fieldsFrom(c: LedgerCli, map: Record<string, string>, curKind: string | null = null): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [flag, field] of Object.entries(map)) {
     const v = c.p.flags[flag];
-    if (v !== undefined) out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : v;
+    if (v === undefined) continue;
+    if (field === "assignee") out[field] = normalizeAssignee(v, c.p.flags["assignee-kind"] ?? curKind);
+    else out[field] = field === "agent" || field === "pm" ? (v ? agentKey(v) : null) : field === "assigneeKind" ? v || null : v;
   }
   const extra = jsonObjectFlag(c.p, "extra");
-  if (extra && "checks" in extra) {
-    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单配好了
+  if (extra) {
+    // 写进去的时候就拦：等到 verify 才报错，PM 早就以为检查单 / 仓库声明配好了
     try {
       parseExtraChecks(extra.checks);
+      parseExtraRepo(extra.repo);
     } catch (e) {
       throw new LedgerError("invalid", (e as Error).message);
     }
@@ -142,9 +156,9 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
-  const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS) as never });
-  // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent 就再挂一次（幂等）
-  const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined : r.row.agent !== cur.agent);
+  const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS, cur.assigneeKind) as never });
+  // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent / --assignee 就再挂一次（幂等）
+  const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined || c.p.flags.assignee !== undefined : r.row.agent !== cur.agent);
   return { ok: true, task: r.row, duplicate: r.duplicate, ...(relink ? await linkRegistry(c, r.row.agent as string, r.row.title) : {}) };
 }
 
@@ -229,10 +243,16 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   "item-set": { valued: [...ITEM_VALUED, "rev"], usage: "item-set <id> --rev <n> [--title --status --priority --owner-words --one-line --next --extra]", run: itemSet },
   "task-new": {
     valued: [...TASK_VALUED, "kind", "project"],
-    usage: "task-new <id> --title <t> --kind code|investigate|ops [--item --agent --pm --branch --pr --head --spec --model --extra]",
+    usage:
+      "task-new <id> --title <t> --kind code|investigate|ops [--item --agent | --assignee-kind agent|human|peer_agent " +
+      "--assignee <agent 名 | local:<principalId> | <fp>/<agent>>] [--pm --branch --pr --head --spec --model --extra]",
     run: taskNew,
   },
-  "task-set": { valued: [...TASK_VALUED, "rev"], usage: "task-set <id> --rev <n> [--title --item --agent --pm --branch --pr --head --spec --model --extra]", run: taskSet },
+  "task-set": {
+    valued: [...TASK_VALUED, "rev"],
+    usage: "task-set <id> --rev <n> [--title --item --agent | --assignee-kind --assignee] [--pm --branch --pr --head --spec --model --extra]",
+    run: taskSet,
+  },
   stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]（进 verified 用 ledger verify）", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
