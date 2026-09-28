@@ -14,6 +14,8 @@ import {
   checkNewTask,
   checkReview,
   checkStatus,
+  IMPORT_ACTOR,
+  isOwnerLike,
   checkTarget,
   isManager,
   ITEM_FIELDS,
@@ -43,10 +45,15 @@ function tx<T>(db: Database, fn: () => T): T {
   return busyAsLedgerError("写入", () => db.transaction(fn).immediate());
 }
 
+/** 导入身份写的事件一律带 imported，调用方漏了也补上 */
+function eventData(ctx: WriteCtx, e: EventDraft): Record<string, unknown> {
+  return ctx.actor === IMPORT_ACTOR ? { ...e.data, imported: true } : (e.data ?? {});
+}
+
 function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
   const r = db
     .prepare("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
-    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(e.data ?? {}), primary ? ctx.dedupKey || null : null);
+    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null);
   return toEvent(r as Record<string, unknown>);
 }
 
@@ -115,7 +122,7 @@ export function setItem(db: Database, ctx: WriteCtx, input: { project: string; i
 const TASK_INSERT_COLS = ["id", "project", "itemId", "title", "kind", "stage", "round", "agent", "pm", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra"] as const;
 
 /** 插任务行并记建任务事件；eventStage = 事件里记的起始阶段（导入时行落在最终阶段、时间线从 eventStage 开始） */
-function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boolean, eventStage?: Stage): LedgerEvent {
+function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boolean, eventStage?: Stage, approx = false): LedgerEvent {
   const row: Record<string, unknown> = { specRev: 1, round: 0, extra: {}, ...input, stage: input.stage ?? "spec" };
   const now = ctx.now ?? Date.now();
   db.prepare(
@@ -123,7 +130,7 @@ function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boole
   ).run(...(TASK_INSERT_COLS.map((c) => toColumn(c, row[c])) as string[]), now, now);
   const { project, id, ...patch } = row;
   if (eventStage) patch.stage = eventStage;
-  const data = { op: "new", patch, rev: 1, ...(imported ? { imported: true } : {}) };
+  const data = { op: "new", patch, rev: 1, ...(imported ? { imported: true } : {}), ...(approx ? { approxTime: true } : {}) };
   return insertEvent(db, ctx, { project: String(project), target: String(id), kind: "task", data }, true);
 }
 
@@ -145,11 +152,11 @@ export function importTask(db: Database, ctx: WriteCtx, input: ImportTaskInput):
   return tx(db, () => {
     const dup = replay(db, ctx, { project: input.task.project, target: input.task.id, kind: "task" }, () => mustTask(db, input.task.id));
     if (dup) return dup;
-    if (ctx.actor !== "owner") throw new LedgerError("forbidden", "只有 owner 能导入任务");
+    if (!isOwnerLike(ctx.actor)) throw new LedgerError("forbidden", "只有 owner 能导入任务");
     checkNewTask(db, ctx.actor, input.task);
     const initial = input.initialStage ?? input.task.stage ?? "spec";
     checkImportChain(initial, input.task.stage ?? "spec", input.events);
-    const event = insertTask(db, { ...ctx, now: input.createdTs }, input.task, true, initial);
+    const event = insertTask(db, { ...ctx, now: input.createdTs }, input.task, true, initial, input.createdApprox);
     for (const e of input.events) {
       const draft = { project: input.task.project, target: input.task.id, kind: e.kind, text: e.text, data: { ...e.data, imported: true } };
       insertEvent(db, { ...ctx, now: e.ts }, draft, false);
@@ -302,7 +309,7 @@ export function setMeta(
     const key = { project: input.project, target: "", kind: "meta" as const };
     const dup = replay(db, ctx, key, () => getMeta(db, input.project));
     if (dup) return dup;
-    if (ctx.actor !== "owner") throw new LedgerError("forbidden", `只有 owner 能设项目的 ${input.key}`);
+    if (!isOwnerLike(ctx.actor)) throw new LedgerError("forbidden", `只有 owner 能设项目的 ${input.key}`);
     const ok = input.key === "pms" ? Array.isArray(input.value) && input.value.every((p) => typeof p === "string" && p) : typeof input.value === "string";
     if (!ok) throw new LedgerError("invalid", input.key === "pms" ? "pms 要是非空字符串数组" : "docsDir 要是字符串");
     putMeta(db, input.project, input.key, input.value);

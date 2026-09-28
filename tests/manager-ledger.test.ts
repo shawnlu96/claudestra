@@ -9,6 +9,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import type { Registry } from "../src/manager/core.js";
 import { renameLedgerAgent, runLedger, UNKNOWN_ACTOR } from "../src/manager/ledger.js";
 import { expandDocsDir } from "../src/manager/ledger-read-cmds.js";
+import { truncateTask } from "../src/manager/ledger-write-cmds.js";
 
 const P = "claude-orchestrator";
 const PM = "agent-claudestra";
@@ -21,14 +22,23 @@ function agent(projectId = P) {
   return { status: "active", projectId } as Registry["agents"][string];
 }
 
+/** 注入 registry 写失败（模拟 registry 损坏 / 锁超时） */
+let failSave = false;
+
 async function run(actor: string, ...args: string[]) {
   return runLedger(args, {
     db, actor, actorProject: reg.agents[actor]?.projectId, projectIds: [P, "other"],
-    loadRegistry: async () => reg, saveRegistry: async (r) => void (reg = r), now: () => 1_000,
+    loadRegistry: async () => structuredClone(reg), // 真的 loadRegistry 每次读出新对象：写失败时内存里的改动不能漏进 reg
+    saveRegistry: async (r) => {
+      if (failSave) throw new Error("registry 写不进去");
+      reg = r;
+    },
+    now: () => 1_000,
   }) as Promise<Record<string, any>>;
 }
 
 beforeEach(async () => {
+  failSave = false;
   db = openLedger(":memory:");
   dir = mkdtempSync(join(tmpdir(), "ledger-cli-"));
   reg = { socket: "", agents: { [PM]: agent(), [EXE]: agent(), "agent-task-t4": agent() } };
@@ -101,6 +111,30 @@ describe("任务与 registry 联动", () => {
     expect((reg.agents[EXE].task ?? "").length).toBe(40);
     expect(await run(EXE, "task-new", "T2", "--title", "x", "--kind", "code")).toMatchObject({ ok: false, code: "forbidden" });
     expect(await run(PM, "task-new", "T2", "--title", "x", "--kind", "bug")).toMatchObject({ ok: false, code: "invalid" });
+  });
+  test("registry 写失败：台账照样成功（ok:true + registryError）；带同一个 --dedup 重试会补挂上", async () => {
+    failSave = true;
+    const args = ["task-new", "T7", "--title", "t", "--kind", "code", "--agent", "task-t8b", "--dedup", "k-t7"];
+    expect(await run(PM, ...args)).toMatchObject({ ok: true, duplicate: false, registryLinked: false, registryError: "registry 写不进去" });
+    expect(reg.agents[EXE].task).toBeUndefined();
+    failSave = false;
+    expect(await run(PM, ...args)).toMatchObject({ ok: true, duplicate: true, registryLinked: true });
+    expect(reg.agents[EXE]).toMatchObject({ parent: PM, task: "t" });
+  });
+  test("任务名按码点截断：emoji 不会被截成半个", async () => {
+    const title = `${"字".repeat(39)}😀尾巴`;
+    const r = await run(PM, "task-new", "T6", "--title", title, "--kind", "code", "--agent", "task-t8b");
+    expect(r.taskTruncated).toBe(true);
+    expect(reg.agents[EXE].task).toBe("字".repeat(39));
+    expect(truncateTask(`${"字".repeat(38)}😀`)).toEqual({ task: `${"字".repeat(38)}😀`, truncated: false });
+  });
+  test("task-set：执行者只能改 branch / pr / head / model，标题 / 事项 / 规格 / extra 要 PM", async () => {
+    await taskT8b();
+    for (const [flag, v] of [["title", "x"], ["item", "i10"], ["spec", "s.md"], ["extra", "{}"]]) {
+      expect(await run(EXE, "task-set", "T8b", "--rev", "1", `--${flag}`, v)).toMatchObject({ ok: false, code: "forbidden" });
+    }
+    expect((await run(EXE, "task-set", "T8b", "--rev", "1", "--pr", "#136", "--head", "abc", "--model", "opus")).task).toMatchObject({ pr: "#136", headSHA: "abc" });
+    expect((await run(PM, "task-set", "T8b", "--rev", "2", "--title", "改名")).task.title).toBe("改名");
   });
   test("task-set：执行者改自己任务的分支可以，改执行者不行；PM 改执行者时 registry 跟着挂", async () => {
     await taskT8b();
@@ -212,6 +246,7 @@ describe("meta / show / export", () => {
     const copy = openLedger(sq);
     expect(getTask(copy, "T8b")?.title).toBe("写入 CLI");
     closeLedger(sq);
+    expect(await run(PM, "export", "--sqlite", sq)).toMatchObject({ ok: false, code: "conflict" });
   });
   test("import：非 owner 拒绝", async () => {
     expect(await run(PM, "import", "x.json", "--map", "m.json")).toMatchObject({ ok: false, code: "forbidden" });
@@ -223,8 +258,16 @@ describe("rename 钩子", () => {
     const path = join(dir, "ledger.sqlite");
     const fdb = openLedger(path);
     createTask(fdb, { actor: "owner" }, { project: P, id: "T8b", title: "t", kind: "code", agent: "agent-task-t8a" });
-    await renameLedgerAgent("agent-task-t8a", "agent-task-t8b", path);
+    const saved = process.env.DISCORD_CHANNEL_ID;
+    process.env.DISCORD_CHANNEL_ID = "no-such-channel";
+    try {
+      await renameLedgerAgent("agent-task-t8a", "agent-task-t8b", path);
+    } finally {
+      if (saved === undefined) delete process.env.DISCORD_CHANNEL_ID;
+      else process.env.DISCORD_CHANNEL_ID = saved;
+    }
     expect(getTask(fdb, "T8b")?.agent).toBe("agent-task-t8b");
+    expect(listEvents(fdb, { target: "T8b" }).at(-1)?.actor).toBe("system");
     closeLedger(path);
     const none = join(dir, "none", "ledger.sqlite");
     await renameLedgerAgent("a", "b", none);

@@ -82,10 +82,10 @@ export async function cmdLedger(args: string[]): Promise<void> {
 export async function renameLedgerAgent(from: string, to: string, path = LEDGER_PATH): Promise<void> {
   if (!existsSync(path)) return;
   try {
-    // 只读 registry（loadRegistry 在文件不存在时会顺手建一个空的）；认不出身份就记成 owner——这是 manager 自己跟着 rename 做的同步
+    // 只读 registry（loadRegistry 在文件不存在时会顺手建一个空的）；认不出身份记成 "system"——这是 manager 跟着 rename 做的同步，不冒充 owner
     const agents = Object.fromEntries((await readRegistryAgents()).map((a) => [a.name, { channelId: a.channelId }]));
     const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, agents);
-    const r = renameAgentRefs(openLedger(path), { actor: who.ok ? who.actor : "owner" }, from, to);
+    const r = renameAgentRefs(openLedger(path), { actor: who.ok ? who.actor : "system" }, from, to);
     if (r.tasks.length || r.projects.length) console.error(`台账已同步改名 ${from} → ${to}：任务 ${r.tasks.join(", ") || "无"}；PM 名单 ${r.projects.join(", ") || "无"}`);
   } catch (e) {
     console.error(`⚠️ 台账同步改名失败（${from} → ${to}）：${(e as Error).message}——手动用 ledger task-set --agent / meta --pms 补`);

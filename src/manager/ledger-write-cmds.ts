@@ -43,11 +43,30 @@ function stageFlag(c: LedgerCli, name: string): Stage {
   return v as Stage;
 }
 
+/** 按码点截到 TASK_MAX 个 UTF-16 单位以内（registry 的 task 按 .length 限长），不把 emoji 截成半个 */
+export function truncateTask(title: string): { task: string; truncated: boolean } {
+  let out = "";
+  for (const ch of title) {
+    if (out.length + ch.length > TASK_MAX) return { task: out, truncated: true };
+    out += ch;
+  }
+  return { task: out, truncated: false };
+}
+
 /**
  * 执行者挂到派活的人下面、任务名写进 registry（与 T4 team-link 同一套校验）。registry 里没有这个 agent（还没派人）就只写台账。
- * parent 不合法（自己派给自己、成环）或任务名含控制字符就跳过那一项并在输出里说明，不让整条命令失败——台账已经写了。
+ * 台账已经写成功了，所以这里任何失败都不让命令变 ok:false：parent 不合法 / 任务名不合法跳过那一项，读写 registry 出错返回 registryError。
+ * 重复执行是安全的（同样的值再写一遍），dedup 重试时也会再跑一次，把上次没挂上的补上。
  */
 async function linkRegistry(c: LedgerCli, agent: string, title: string): Promise<Result> {
+  try {
+    return await writeLink(c, agent, title);
+  } catch (e) {
+    return { registryLinked: false, registryError: (e as Error).message };
+  }
+}
+
+async function writeLink(c: LedgerCli, agent: string, title: string): Promise<Result> {
   const reg = await c.deps.loadRegistry();
   const info = reg.agents[agent];
   if (!info) return { registryLinked: false, registryNote: `registry 里没有 ${agent}，只记了台账` };
@@ -59,11 +78,8 @@ async function linkRegistry(c: LedgerCli, agent: string, title: string): Promise
     if (err) out.parentSkipped = err;
     else info.parent = parent;
   }
-  let task = title.trim();
-  if (task.length > TASK_MAX) {
-    task = task.slice(0, TASK_MAX);
-    out.taskTruncated = true;
-  }
+  const { task, truncated } = truncateTask(title.trim());
+  if (truncated) out.taskTruncated = true;
   const taskErr = validateTask(task);
   if (taskErr) out.taskSkipped = taskErr;
   else info.task = task;
@@ -95,17 +111,25 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   if (!TASK_KINDS.includes(kind)) throw new LedgerError("invalid", `--kind 只能是 ${TASK_KINDS.join(" / ")}`);
   const fields = fieldsFrom(c, TASK_FLAGS);
   const r = createTask(c.db, c.ctx(), { ...fields, project, id: c.p.pos[1] ?? "", title: c.need("title"), kind } as never);
-  const link = r.row.agent && !r.duplicate ? await linkRegistry(c, r.row.agent, r.row.title) : {};
+  const link = r.row.agent ? await linkRegistry(c, r.row.agent, r.row.title) : {};
   return { ok: true, task: r.row, duplicate: r.duplicate, ...link };
 }
+
+/** 执行者只能改自己任务的这几项；标题、事项、规格、extra、执行者、PM 要 PM / master / owner */
+const EXECUTOR_TASK_FLAGS = new Set(["rev", "dedup", "branch", "pr", "head", "model"]);
 
 async function taskSet(c: LedgerCli): Promise<Result> {
   const cur = c.task(c.p.pos[1]);
   c.requireOwnOrManager(cur, "改任务字段");
+  const extraFlags = Object.keys(c.p.flags).filter((f) => !EXECUTOR_TASK_FLAGS.has(f));
+  if (extraFlags.length && c.role(cur.project, cur) === "executor") {
+    throw new LedgerError("forbidden", `执行者只能改 --branch / --pr / --head / --model，${extraFlags.map((f) => `--${f}`).join(" ")} 要 PM 改`);
+  }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
   const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS) as never });
-  const relink = !r.duplicate && r.row.agent && r.row.agent !== cur.agent;
+  // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent 就再挂一次（幂等）
+  const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined : r.row.agent !== cur.agent);
   return { ok: true, task: r.row, duplicate: r.duplicate, ...(relink ? await linkRegistry(c, r.row.agent as string, r.row.title) : {}) };
 }
 

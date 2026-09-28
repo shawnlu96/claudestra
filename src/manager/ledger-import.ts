@@ -8,7 +8,8 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Stage, TaskKind } from "../lib/ledger-stages.js";
-import { LedgerError } from "../lib/ledger-store.js";
+import { IMPORT_ACTOR } from "../lib/ledger-checks.js";
+import { busyAsLedgerError, LedgerError } from "../lib/ledger-store.js";
 import { appendEvent, createItem, importTask, setMeta, type ImportTaskInput, type NewItem } from "../lib/ledger-write.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey } from "./ledger-identity.js";
@@ -24,6 +25,10 @@ interface TaskMapping {
   /** 不建任务，整条原样挂进这个事项的 extra.skippedTasks */
   skip?: boolean;
   intoItemExtra?: string;
+  /** 覆盖源数据的时间点（源里缺、PM 从 log / PR / registry 查到的），同源字段格式 */
+  dispatchedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 export interface ImportMap {
@@ -91,35 +96,61 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v ? v : null;
 }
 
-/** 一条老任务 → importTask 输入：行落在映射给的阶段，时间线 spec →（startedAt）开工阶段 →（finishedAt / 导入时刻）最终阶段 */
-function planTask(src: Obj, m: TaskMapping, project: string, now: number, defaultPm: string | undefined): ImportTaskInput {
+/** 进过 review 的阶段：导入时 round 至少 1（源里没记 reviews 也一样） */
+const REVIEWED: readonly Stage[] = ["review", "fix", "merge", "live", "verified", "done"];
+
+type Stamp = { ts: number; approx: boolean };
+
+/**
+ * 三个时间点：映射覆盖 > 源字段 > 推断。推断取「最近一个已知时间」：派发缺 → 开工 / 完成时间；开工缺 → 派发时间；
+ * 完成缺 → 源文件的 updatedAt（老台账最后一次落笔）。推断的都标 approx，事件上记 approxTime，别当成真实时刻去算用时。
+ */
+export function taskTimes(src: Obj, m: TaskMapping, fallback: number): { created: Stamp; started: Stamp; ended: Stamp } {
+  const dispatched = parseTs(m.dispatchedAt) ?? parseTs(src.dispatchedAt);
+  const started = parseTs(m.startedAt) ?? parseTs(src.startedAt);
+  const finished = parseTs(m.finishedAt) ?? parseTs(src.finishedAt);
+  const created = dispatched ?? started ?? finished ?? fallback;
+  const s = Math.max(started ?? created, created);
+  return {
+    created: { ts: created, approx: dispatched === null },
+    started: { ts: s, approx: started === null },
+    ended: { ts: Math.max(finished ?? fallback, s), approx: finished === null },
+  };
+}
+
+const approxData = (st: Stamp): Obj => (st.approx ? { approxTime: true } : {});
+
+/** 一条老任务 → importTask 输入：行落在映射给的阶段，时间线 spec →（开工）开工阶段 →（完成）最终阶段 */
+function planTask(src: Obj, m: TaskMapping, project: string, fallback: number, defaultPm: string | undefined): ImportTaskInput {
   const id = String(src.id);
   const owner = parseOwnerField(src.owner);
   const reviews = Array.isArray(src.reviews) ? src.reviews.map(String) : [];
-  const created = parseTs(src.dispatchedAt) ?? parseTs(src.startedAt) ?? parseTs(src.finishedAt) ?? now;
-  const started = Math.max(parseTs(src.startedAt) ?? created, created);
-  const ended = Math.max(parseTs(src.finishedAt) ?? now, started);
+  const { created, started, ended } = taskTimes(src, m, fallback);
   const extra = Object.fromEntries(Object.entries(src).filter(([k]) => !TASK_COLUMNS.includes(k)));
   const specRev = Number.isInteger(src.specRev) && (src.specRev as number) >= 0 ? (src.specRev as number) : 1;
   const agent = m.agent !== undefined ? m.agent : owner.agent;
   const pm = m.pm ?? owner.pm ?? defaultPm ?? null;
   const task = {
-    project, id, title: String(src.title), kind: m.kind, stage: m.stage, round: reviews.length, itemId: m.item ?? null,
+    project, id, title: String(src.title), kind: m.kind, stage: m.stage, round: Math.max(reviews.length, REVIEWED.includes(m.stage) ? 1 : 0), itemId: m.item ?? null,
     agent: agent ? agentKey(agent) : null, pm: pm ? agentKey(pm) : null, branch: str(src.branch), pr: str(src.pr), headSHA: str(src.headSHA),
     spec: str(src.spec), specRev, model: str(src.model), extra,
   };
   const events: ImportTaskInput["events"] = [];
   const words = str(src.owner_words);
-  if (words) events.push({ kind: "decision", ts: created, text: words, data: { transcribed: true } });
+  if (words) events.push({ kind: "decision", ts: created.ts, text: words, data: { transcribed: true, ...approxData(created) } });
   const first: Stage = m.kind === "ops" ? "build" : "restate";
-  if (m.stage !== "spec") events.push({ kind: "stage", ts: started, data: { from: "spec", to: first } });
-  reviews.forEach((text, i) => events.push({ kind: "review", ts: ended, text, data: { round: i + 1, reviewer: null, verdict: null, ...parseReviewCounts(text) } }));
-  if (src.merge || src.rollbackPoint) events.push({ kind: "deploy", ts: ended, data: { version: str(src.merge), rollbackPoint: str(src.rollbackPoint) } });
-  if (m.stage !== "spec" && m.stage !== first) events.push({ kind: "stage", ts: ended, data: { from: first, to: m.stage } });
-  return { task, initialStage: "spec", createdTs: created, events };
+  if (m.stage !== "spec") events.push({ kind: "stage", ts: started.ts, data: { from: "spec", to: first, ...approxData(started) } });
+  reviews.forEach((text, i) => {
+    events.push({ kind: "review", ts: ended.ts, text, data: { round: i + 1, reviewer: null, verdict: null, ...parseReviewCounts(text), ...approxData(ended) } });
+  });
+  if (src.merge || src.rollbackPoint) {
+    events.push({ kind: "deploy", ts: ended.ts, data: { version: str(src.merge), rollbackPoint: str(src.rollbackPoint), ...approxData(ended) } });
+  }
+  if (m.stage !== "spec" && m.stage !== first) events.push({ kind: "stage", ts: ended.ts, data: { from: first, to: m.stage, ...approxData(ended) } });
+  return { task, initialStage: "spec", createdTs: created.ts, createdApprox: created.approx, events };
 }
 
-function planItems(src: Obj, map: ImportMap, project: string, now: number, skipped: Map<string, Obj>): ImportPlan["items"] {
+function planItems(src: Obj, map: ImportMap, project: string, now: number, fallback: number, skipped: Map<string, Obj>): ImportPlan["items"] {
   const items: ImportPlan["items"] = [];
   for (const it of (src.items as Obj[] | undefined) ?? []) {
     const { id, title, status, priority, oneLine, next, ask, trial, ...rest } = it;
@@ -131,21 +162,23 @@ function planItems(src: Obj, map: ImportMap, project: string, now: number, skipp
       project, id: String(id), title: String(title), status, priority: String(priority ?? ""),
       oneLine: String(oneLine ?? ""), next: String(next ?? ""), ownerWords: String(ask ?? ""), extra,
     };
-    items.push({ input: input as NewItem, ts: parseTs(it.updatedAt) ?? now });
+    items.push({ input: input as NewItem, ts: parseTs(it.updatedAt) ?? fallback });
   }
   for (const n of map.newItems ?? []) items.push({ input: { ...n, project }, ts: now });
   return items;
 }
 
-/** 老 log / morning / ownerInbox → note / decision 事件（按时间稳定排序，ts 相同的保持原顺序） */
+/** 老 log / morning / ownerInbox → note / decision 事件（按时间稳定排序，ts 相同的保持原顺序）；缺时间的取源文件 updatedAt 并标 approxTime */
 function planEvents(src: Obj, project: string, now: number, itemIds: Set<string>, taskIds: Set<string>): PlannedEvent[] {
+  const approx = (v: unknown): Obj => (parseTs(v) === null ? { approxTime: true } : {});
   const out: PlannedEvent[] = [];
   const log = ((src.log as Obj[] | undefined) ?? []).map((e, i) => ({ e, i, ts: parseTs(e.ts) ?? now }));
   log.sort((a, b) => a.ts - b.ts || a.i - b.i);
   for (const { e, ts } of log) {
     const item = str(e.item);
     const target = item && itemIds.has(item) ? item : "";
-    out.push({ project, target, kind: "note", text: String(e.text ?? ""), data: { imported: true, ...(item && !target ? { item } : {}) }, ts, dedupKey: hashKey("import:log", e.ts, e.item, e.text) });
+    const data = { imported: true, ...(item && !target ? { item } : {}), ...approx(e.ts) };
+    out.push({ project, target, kind: "note", text: String(e.text ?? ""), data, ts, dedupKey: hashKey("import:log", e.ts, e.item, e.text) });
   }
   const morning = src.morning as { title?: string; points?: unknown[] } | undefined;
   if (morning) {
@@ -154,13 +187,14 @@ function planEvents(src: Obj, project: string, now: number, itemIds: Set<string>
   }
   for (const m of (src.ownerInbox as Obj[] | undefined) ?? []) {
     const refs = [...String(m.to ?? "").matchAll(/\bT\d+[a-z0-9-]*\b/gi)].map((x) => x[0]).filter((t) => taskIds.has(t));
-    const data = { imported: true, transcribed: true, source: "ownerInbox", status: m.status ?? null, to: m.to ?? null };
+    const data = { imported: true, transcribed: true, source: "ownerInbox", status: m.status ?? null, to: m.to ?? null, ...approx(m.ts) };
     out.push({ project, target: refs.length === 1 ? refs[0] : "", kind: "decision", text: String(m.text ?? ""), data, ts: parseTs(m.ts) ?? now, dedupKey: hashKey("import:inbox", m.ts, m.text) });
   }
   return out;
 }
 
 export function planImport(src: Obj, map: ImportMap, project: string, now: number): ImportPlan {
+  const fallback = parseTs(src.updatedAt) ?? now;
   const srcTasks = ((src.items as Obj[] | undefined) ?? []).flatMap((it) => ((it.trial as Obj | undefined)?.tasks as Obj[] | undefined) ?? []);
   const unmapped = srcTasks.map((t) => String(t.id)).filter((id) => !map.tasks[id]);
   const skipped = new Map<string, Obj>();
@@ -169,36 +203,91 @@ export function planImport(src: Obj, map: ImportMap, project: string, now: numbe
     const m = map.tasks[String(t.id)];
     if (!m) continue;
     if (m.skip) skipped.set(String(t.id), { ...t, __into: m.intoItemExtra });
-    else tasks.push(planTask(t, m, project, now, map.defaultPm));
+    else tasks.push(planTask(t, m, project, fallback, map.defaultPm));
   }
   for (const x of map.extraTasks ?? []) {
     const { item: _i, kind: _k, stage: _s, agent: _a, pm: _p, skip: _x, intoItemExtra: _e, ...rest } = x;
-    tasks.push(planTask(rest, x, project, now, map.defaultPm));
+    tasks.push(planTask(rest, x, project, fallback, map.defaultPm));
   }
-  const items = planItems(src, map, project, now, skipped);
+  const items = planItems(src, map, project, now, fallback, skipped);
   const itemIds = new Set(items.map((i) => i.input.id));
   for (const t of tasks) {
     if (t.task.itemId && !itemIds.has(t.task.itemId)) throw new LedgerError("invalid", `任务 ${t.task.id} 映射到的事项 ${t.task.itemId} 不存在（源文件和 newItems 里都没有）`);
   }
-  const events = planEvents(src, project, now, itemIds, new Set(tasks.map((t) => t.task.id)));
+  const events = planEvents(src, project, fallback, itemIds, new Set(tasks.map((t) => t.task.id)));
   return { project, ...(map.pms ? { pms: map.pms.map(agentKey) } : {}), items, tasks, events, unmapped };
 }
 
 type Tally = { created: number; duplicate: number };
 
-/** 顺序：PM 名单 → 事项 → 任务（依赖事项）→ 事件（目标要先存在）；全用 owner 身份，dedupKey 让重跑只返回 duplicate */
-export function applyImport(db: Database, plan: ImportPlan): Record<string, Tally> {
+const ITEM_DRIFT = ["title", "status", "priority", "oneLine", "next", "ownerWords", "extra"];
+const TASK_DRIFT = ["itemId", "kind", "stage", "round", "agent", "pm", "title", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra"];
+
+/** dedup 命中但值变了（改了映射后重跑）：列出字段，不能静默沿用库里的旧值 */
+function driftOf(what: string, planned: Obj, row: Obj, fields: string[]): string | null {
+  const diff = fields.filter((f) => JSON.stringify(planned[f] ?? null) !== JSON.stringify(row[f] ?? null));
+  return diff.length ? `${what}（${diff.join(", ")}）` : null;
+}
+
+/** 出错时带上是哪一条，映射写错了能直接定位 */
+function step<T>(what: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof LedgerError) throw new LedgerError(e.code, `${what}：${e.message}`, e.current);
+    throw e;
+  }
+}
+
+/** 顺序：PM 名单 → 事项 → 任务（依赖事项）→ 事件（目标要先存在）；身份一律 IMPORT_ACTOR（事件自动带 imported） */
+function applyAll(db: Database, plan: ImportPlan): Record<string, Tally> {
   const tally = (): Tally => ({ created: 0, duplicate: 0 });
   const out = { items: tally(), tasks: tally(), events: tally() };
   const bump = (t: Tally, dup: boolean) => void (dup ? t.duplicate++ : t.created++);
-  if (plan.pms) setMeta(db, { actor: "owner", dedupKey: hashKey("import:pms", plan.project, plan.pms.join(",")) }, { project: plan.project, key: "pms", value: plan.pms });
-  for (const { input, ts } of plan.items) bump(out.items, createItem(db, { actor: "owner", now: ts, dedupKey: `import:item:${plan.project}:${input.id}` }, input).duplicate);
-  for (const t of plan.tasks) bump(out.tasks, importTask(db, { actor: "owner", dedupKey: `import:task:${t.task.id}` }, t).duplicate);
+  const drift: string[] = [];
+  const actor = IMPORT_ACTOR;
+  if (plan.pms) setMeta(db, { actor, dedupKey: hashKey("import:pms", plan.project, plan.pms.join(",")) }, { project: plan.project, key: "pms", value: plan.pms });
+  for (const { input, ts } of plan.items) {
+    const r = step(`事项 ${input.id}`, () => createItem(db, { actor, now: ts, dedupKey: `import:item:${plan.project}:${input.id}` }, input));
+    bump(out.items, r.duplicate);
+    const d = r.duplicate && driftOf(`事项 ${input.id}`, { status: "todo", priority: "", oneLine: "", next: "", ownerWords: "", extra: {}, ...input }, r.row as never, ITEM_DRIFT);
+    if (d) drift.push(d);
+  }
+  for (const t of plan.tasks) {
+    const r = step(`任务 ${t.task.id}`, () => importTask(db, { actor, dedupKey: `import:task:${t.task.id}` }, t));
+    bump(out.tasks, r.duplicate);
+    const d = r.duplicate && driftOf(`任务 ${t.task.id}`, t.task as never, r.row as never, TASK_DRIFT);
+    if (d) drift.push(d);
+  }
   for (const e of plan.events) {
-    const r = appendEvent(db, { actor: "owner", now: e.ts, dedupKey: e.dedupKey }, { project: e.project, target: e.target, kind: e.kind, text: e.text, data: e.data });
+    const r = step(`事件 ${e.dedupKey}`, () => appendEvent(db, { actor, now: e.ts, dedupKey: e.dedupKey }, { project: e.project, target: e.target, kind: e.kind, text: e.text, data: e.data }));
     bump(out.events, r.duplicate);
   }
+  if (drift.length) throw new LedgerError("conflict", `这些已导入过、但这次的值不同（改了映射？）：${drift.join("；")}。整批已回滚；要改请用 item-set / task-set / stage，或换新库重导`);
   return out;
+}
+
+class DryRunRollback {
+  constructor(readonly result: Record<string, Tally>) {}
+}
+
+/**
+ * 整批一个事务（lib 各写函数的事务嵌套成 savepoint）：半路任何一条失败都整体回滚，不留半截数据。
+ * dry-run 跑完全一样的写入与校验再回滚——只跑 planImport 查不出库里才有的校验（kind 与阶段不配等）。
+ */
+export function applyImport(db: Database, plan: ImportPlan, dryRun = false): Record<string, Tally> {
+  try {
+    return busyAsLedgerError("导入", () =>
+      db.transaction(() => {
+        const r = applyAll(db, plan);
+        if (dryRun) throw new DryRunRollback(r);
+        return r;
+      }).immediate(),
+    );
+  } catch (e) {
+    if (e instanceof DryRunRollback) return e.result; // 故意抛出来回滚的，结果照常返回
+    throw e;
+  }
 }
 
 function readJson(path: string, what: string): Obj {
@@ -220,6 +309,6 @@ export function importCmd(c: LedgerCli): Result {
   const plan = planImport(src, map, project, c.deps.now());
   if (plan.unmapped.length) throw new LedgerError("invalid", `映射文件没覆盖这些任务：${plan.unmapped.join(", ")}（每个都要给 item / kind / stage，或 skip）`);
   const counts = { items: plan.items.length, tasks: plan.tasks.length, events: plan.events.length + plan.tasks.reduce((s, t) => s + t.events.length + 1, 0) };
-  if (c.p.bools.has("dry-run")) return { ok: true, dryRun: true, project, planned: counts };
-  return { ok: true, project, planned: counts, result: applyImport(c.db, plan) };
+  const dryRun = c.p.bools.has("dry-run");
+  return { ok: true, project, ...(dryRun ? { dryRun: true } : {}), planned: counts, result: applyImport(c.db, plan, dryRun) };
 }

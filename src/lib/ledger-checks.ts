@@ -108,7 +108,7 @@ export function checkNewTask(db: Database, actor: string, input: NewTask): boole
     if (input[k] !== undefined && !isCount(input[k])) throw new LedgerError("invalid", `${k} 要是非负整数`);
   }
   const imported = stage !== "spec" || (input.round ?? 0) !== 0;
-  if (imported && actor !== "owner") throw new LedgerError("forbidden", "只有 owner 能直接建在非 spec 阶段或带 round 的任务（导入用）");
+  if (imported && !isOwnerLike(actor)) throw new LedgerError("forbidden", "只有 owner 能直接建在非 spec 阶段或带 round 的任务（导入用）");
   if (getTask(db, input.id)) throw new LedgerError("conflict", `任务 ${input.id} 已存在（任务 id 全局唯一）`);
   checkIdFree(db, input.id, "task");
   checkItemRef(db, input.project, input.itemId);
@@ -116,7 +116,7 @@ export function checkNewTask(db: Database, actor: string, input: NewTask): boole
 }
 
 export interface WriteCtx {
-  /** 写入者：agent 名 / "master" / "owner"（身份推导在 CLI） */
+  /** 写入者：agent 名 / "master" / "owner" / "import"（身份推导在 CLI） */
   actor: string;
   /** 事件时间（epoch ms），默认 Date.now()；测试注入 */
   now?: number;
@@ -175,6 +175,16 @@ export function checkReview(input: ReviewInput, task: LedgerTask): void {
 export const APPENDABLE_KINDS = ["note", "decision", "deploy", "verify", "rollback"] as const;
 export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
+/**
+ * 导入专用身份：只有 CLI 的 import（已确认是 owner 在跑）会用它。它写的事件一律强制 imported:true（insertEvent），
+ * 网页上能和 owner 的真实操作区分开；owner 专属项（导入口、PM 名单）对它放行。registry 键都带 agent- 前缀，撞不上。
+ */
+export const IMPORT_ACTOR = "import";
+
+export function isOwnerLike(actor: string): boolean {
+  return actor === "owner" || actor === IMPORT_ACTOR;
+}
+
 /** 导入口能合成的事件种类；建任务事件由 importTask 自己写，item / meta / freeze 不经导入口 */
 const IMPORT_EVENT_KINDS = ["stage", "review", "deploy", "note", "decision", "verify", "rollback"] as const;
 
@@ -185,6 +195,8 @@ export interface ImportTaskInput {
   initialStage?: Stage;
   /** 建任务事件的时间 */
   createdTs: number;
+  /** 建任务时间是推断的（源数据没有派发时间），建任务事件标 approxTime */
+  createdApprox?: boolean;
   events: { kind: (typeof IMPORT_EVENT_KINDS)[number]; ts: number; text?: string; data?: Record<string, unknown> }[];
 }
 

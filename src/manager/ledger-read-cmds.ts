@@ -47,17 +47,27 @@ function exportCmd(c: LedgerCli): Result {
   const sqlite = c.p.flags.sqlite;
   if (!out === !sqlite) throw new LedgerError("invalid", "export 要带 --out <file.json>（单个项目）或 --sqlite <file>（整库）其中一个");
   const dest = (out ?? sqlite) as string;
-  if (existsSync(dest)) throw new LedgerError("conflict", `${dest} 已存在，不覆盖`);
   if (sqlite) {
-    c.db.prepare("VACUUM INTO ?").run(dest);
+    // VACUUM INTO 自己拒绝写到已存在的非空文件，不覆盖的判断交给 sqlite（先查再写有竞态）
+    try {
+      c.db.prepare("VACUUM INTO ?").run(dest);
+    } catch (e) {
+      throw new LedgerError(existsSync(dest) ? "conflict" : "invalid", `导出到 ${dest} 失败：${(e as Error).message}`);
+    }
     return { ok: true, sqlite: dest };
   }
   const project = c.project();
-  const data = {
+  // 一个读事务里取完：别的进程在中途写入时，items / tasks / events 仍是同一刻的快照
+  const data = c.db.transaction(() => ({
     project, exportedAt: new Date(c.deps.now()).toISOString(), meta: getMeta(c.db, project),
     items: listItems(c.db, project), tasks: listTasks(c.db, project), events: listEvents(c.db, { project }),
-  };
-  writeFileSync(dest, `${JSON.stringify(data, null, 2)}\n`);
+  }))();
+  try {
+    writeFileSync(dest, `${JSON.stringify(data, null, 2)}\n`, { flag: "wx" });
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    throw new LedgerError(code === "EEXIST" ? "conflict" : "invalid", code === "EEXIST" ? `${dest} 已存在，不覆盖` : `写 ${dest} 失败：${(e as Error).message}`);
+  }
   return { ok: true, out: dest, items: data.items.length, tasks: data.tasks.length, events: data.events.length };
 }
 

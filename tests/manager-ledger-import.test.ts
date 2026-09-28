@@ -9,11 +9,13 @@ import { describe, expect, test } from "bun:test";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 import { closeLedger, getItem, getMeta, getTask, listEvents, listTasks, openLedger } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
-import { applyImport, parseOwnerField, parseReviewCounts, parseTs, planImport, type ImportMap } from "../src/manager/ledger-import.js";
+import { applyImport, parseOwnerField, parseReviewCounts, parseTs, planImport, taskTimes, type ImportMap } from "../src/manager/ledger-import.js";
 
 const SRC = JSON.parse(readFileSync(resolve(import.meta.dir, "fixtures/ledger-legacy.json"), "utf8")) as Record<string, unknown>;
 const P = "claude-orchestrator";
 const NOW = Date.parse("2026-09-28T20:00:00+09:00");
+/** 源文件的 updatedAt：缺完成时间的任务退到它（最近一个已知时间），不退到导入时刻 */
+const FILE_TS = parseTs("2026-09-28T18:21:16+0900") as number;
 const MAP: ImportMap = {
   project: P,
   defaultPm: "agent-claudestra",
@@ -68,7 +70,7 @@ describe("planImport 字段对照", () => {
     expect(task("T3")?.task).toMatchObject({ agent: "agent-task-t3", pm: "agent-claudestra", spec: "docs/tasks/T3.md", specRev: 1, model: "claude-opus-5-5 medium" });
     expect(task("T8a")?.task).toMatchObject({ agent: "agent-task-t8b", stage: "build", itemId: "i10" });
   });
-  test("合成事件：原话 → decision；spec → 开工阶段（startedAt）→ 最终阶段（finishedAt / 导入时刻）；reviews → review（round、计数）；merge → deploy", () => {
+  test("合成事件：原话 → decision；spec → 开工阶段（startedAt）→ 最终阶段（finishedAt，缺了退到源文件 updatedAt 并标 approxTime）；reviews → review；merge → deploy", () => {
     const t0 = task("T0")!;
     const fin = parseTs("2026-09-28T15:40:25+09:00");
     expect(t0.createdTs).toBe(fin as number);
@@ -79,7 +81,10 @@ describe("planImport 字段对照", () => {
     expect(t0.events[3].data).toEqual({ version: "PR #1 → main abc1234", rollbackPoint: "main 0000000" });
     const t3 = task("T3")!;
     const at = (s: string) => parseTs(s) as number;
-    expect(t3.events.map((e): [string, number] => [e.kind, e.ts])).toEqual([["decision", at("2026-09-28T15:40:45+09:00")], ["stage", at("2026-09-28T16:01:55+09:00")], ["stage", NOW]]);
+    expect(t3.events.map((e): [string, number] => [e.kind, e.ts])).toEqual([["decision", at("2026-09-28T15:40:45+09:00")], ["stage", at("2026-09-28T16:01:55+09:00")], ["stage", FILE_TS]]);
+    expect(t3.events.map((e) => e.data?.approxTime ?? false)).toEqual([false, false, true]);
+    expect(t0.createdApprox).toBe(true);
+    expect(t0.events[0].data).toMatchObject({ approxTime: true });
   });
   test("log 按时间稳定排序；没导入的事项 → 项目级并保留原 item；ownerInbox 只指一个已导入任务的挂任务，其余项目级", () => {
     const notes = plan.events.filter((e) => e.kind === "note" && e.data.source !== "morning");
@@ -97,6 +102,29 @@ describe("planImport 字段对照", () => {
   });
 });
 
+describe("时间与轮次（审查第 1 轮 P1-3 / P2-6）", () => {
+  test("taskTimes：映射覆盖 > 源字段 > 最近已知时间；推断的标 approx", () => {
+    const src = { dispatchedAt: "2026-09-28T15:00:00+09:00" };
+    const m = { kind: "code" as const, stage: "done" as const, finishedAt: "2026-09-28T17:00:00+09:00" };
+    const t = taskTimes(src, m, FILE_TS);
+    const at = (v: string) => parseTs(v) as number;
+    expect(t.created).toEqual({ ts: at("2026-09-28T15:00:00+09:00"), approx: false });
+    expect(t.started).toEqual({ ts: at("2026-09-28T15:00:00+09:00"), approx: true });
+    expect(t.ended).toEqual({ ts: at("2026-09-28T17:00:00+09:00"), approx: false });
+    expect(taskTimes({}, { kind: "code", stage: "spec" }, FILE_TS)).toEqual({
+      created: { ts: FILE_TS, approx: true }, started: { ts: FILE_TS, approx: true }, ended: { ts: FILE_TS, approx: true },
+    });
+    const override = taskTimes({ dispatchedAt: "2026-09-28T15:00:00+09:00" }, { ...m, dispatchedAt: "2026-09-28T14:00:00+09:00" }, FILE_TS);
+    expect(override.created.ts).toBe(parseTs("2026-09-28T14:00:00+09:00") as number);
+  });
+  test("到过 review 的任务 round 至少 1（源里没有 reviews 也一样）", () => {
+    const plan = planImport(SRC, MAP, P, NOW);
+    expect(plan.tasks.find((t) => t.task.id === "T3")?.task.round).toBe(1);
+    expect(plan.tasks.find((t) => t.task.id === "T0")?.task.round).toBe(2);
+    expect(plan.tasks.find((t) => t.task.id === "T8a")?.task.round).toBe(0);
+  });
+});
+
 describe("applyImport", () => {
   test("写库计数、重跑全部 duplicate；完全相同的两条 log 只记一条；导入的任务指标能算", () => {
     const db = openLedger(":memory:");
@@ -110,8 +138,35 @@ describe("applyImport", () => {
       expect(listTasks(db, P).map((t) => [t.id, t.stage])).toEqual([["T0", "done"], ["T3", "done"], ["T8a", "build"]]);
       const t3 = getTask(db, "T3")!;
       const m = taskMetrics(t3, listEvents(db, { target: "T3" }), NOW);
-      expect(m).toMatchObject({ startTs: parseTs("2026-09-28T16:01:55+09:00"), endTs: NOW });
-      expect(listEvents(db, { target: "T0" }).every((e) => e.data.imported === true)).toBe(true);
+      expect(m).toMatchObject({ startTs: parseTs("2026-09-28T16:01:55+09:00"), endTs: FILE_TS });
+      const all = listEvents(db, { project: P });
+      expect(all.every((e) => e.actor === "import" && e.data.imported === true)).toBe(true);
+    } finally {
+      closeLedger(":memory:");
+    }
+  });
+  test("整批一个事务：半路失败全部回滚；dry-run 跑同样的库内校验、跑完也回滚", () => {
+    const db = openLedger(":memory:");
+    try {
+      const bad = planImport(SRC, { ...MAP, tasks: { ...MAP.tasks, T3: { item: "i17", kind: "investigate", stage: "live" } } }, P, NOW);
+      expect(() => applyImport(db, bad, true)).toThrow("任务 T3");
+      expect(() => applyImport(db, bad)).toThrow("任务 T3");
+      expect([listTasks(db, P).length, listEvents(db).length]).toEqual([0, 0]);
+      const good = planImport(SRC, MAP, P, NOW);
+      expect(applyImport(db, good, true).tasks).toEqual({ created: 3, duplicate: 0 });
+      expect(listEvents(db)).toHaveLength(0);
+    } finally {
+      closeLedger(":memory:");
+    }
+  });
+  test("改了映射后重跑：dedup 命中但值不同就报 conflict 并回滚，不静默沿用旧值", () => {
+    const db = openLedger(":memory:");
+    try {
+      applyImport(db, planImport(SRC, MAP, P, NOW));
+      const before = listEvents(db).length;
+      const changed = planImport(SRC, { ...MAP, tasks: { ...MAP.tasks, T3: { item: "i17", kind: "code", stage: "live" } } }, P, NOW);
+      expect(() => applyImport(db, changed)).toThrow(/任务 T3（stage/);
+      expect([getTask(db, "T3")?.stage, listEvents(db).length]).toEqual(["done", before]);
     } finally {
       closeLedger(":memory:");
     }
@@ -125,7 +180,7 @@ describe("applyImport", () => {
       const map = join(dir, "map.json");
       writeFileSync(map, JSON.stringify(MAP));
       const deps = { db, actor: "owner", projectIds: [P], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => NOW };
-      expect(await runLedger(["import", src, "--map", map, "--dry-run"], deps)).toMatchObject({ ok: true, dryRun: true, planned: { items: 4, tasks: 3 } });
+      expect(await runLedger(["import", src, "--map", map, "--dry-run"], deps)).toMatchObject({ ok: true, dryRun: true, planned: { items: 4, tasks: 3 }, result: { tasks: { created: 3 } } });
       expect(listTasks(db, P)).toHaveLength(0);
       writeFileSync(map, JSON.stringify({ ...MAP, tasks: { T0: MAP.tasks.T0 } }));
       expect(await runLedger(["import", src, "--map", map], deps)).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("T3, T8") });

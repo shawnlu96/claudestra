@@ -4,7 +4,7 @@ import { reservedAgentNameChecks } from "../src/lib/doctor-state.js";
 import { isReservedAgentName } from "../src/lib/registry.js";
 import { assertValidNewName } from "../src/manager/core.js";
 import { agentKey, intFlag, jsonObjectFlag, parseLedgerArgs, resolveActor, type ParsedArgs } from "../src/manager/ledger-identity.js";
-import { isWriteInvocation } from "../src/manager/write-commands.js";
+import { isWriteInvocation, needsWriteLock } from "../src/manager/write-commands.js";
 
 const agents = { "agent-claudestra": { channelId: "111" }, "agent-task-t8b": { channelId: "222" }, "agent-master": { channelId: "999" } };
 
@@ -81,5 +81,15 @@ describe("写命令判定（认主守卫 + 命令级写锁）", () => {
     expect(isWriteInvocation("ledger", ["meta", "--project", "p"])).toBe(false);
     expect(isWriteInvocation("ledger", ["meta", "--pms", "a"])).toBe(true);
     expect(isWriteInvocation("ledger", ["meta", "--project=p", "--docs-dir=~/d"])).toBe(true);
+  });
+});
+
+describe("命令级写锁（只给会写 registry 的 ledger 子命令）", () => {
+  test("task-new / task-set / import 拿锁；其余 ledger 写只过认主守卫不拿锁；别的命令照旧", () => {
+    for (const sub of ["task-new", "task-set", "import"]) expect(needsWriteLock("ledger", [sub])).toBe(true);
+    for (const sub of ["stage", "note", "deliver", "review", "meta", "show"]) expect(needsWriteLock("ledger", [sub])).toBe(false);
+    expect(isWriteInvocation("ledger", ["stage"])).toBe(true);
+    expect(needsWriteLock("create", [])).toBe(true);
+    expect(needsWriteLock("list", [])).toBe(false);
   });
 });

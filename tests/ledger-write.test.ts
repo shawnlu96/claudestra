@@ -289,3 +289,14 @@ describe("renameAgentRefs（manager rename 钩子）", () => {
     expect(events_("T9").at(-1)?.data).toMatchObject({ op: "set", patch: { agent: "agent-pm", pm: "agent-pm" }, rename: { from: "agent-claudestra", to: "agent-pm" } });
   });
 });
+
+describe("导入身份 import", () => {
+  test("它写的事件一律带 imported；PM 名单、导入口对它放行；roleOf 不给它任何阶段角色", () => {
+    const IMP = { actor: "import" };
+    expect(setMeta(db, IMP, { project: P, key: "pms", value: ["agent-claudestra"] }).event.data.imported).toBe(true);
+    expect(createItem(db, IMP, { project: P, id: "i30", title: "x" }).event.data).toMatchObject({ op: "new", imported: true });
+    const r = importTask(db, IMP, { task: { project: P, id: "H2", title: "t", kind: "code", stage: "spec" }, createdTs: 5, createdApprox: true, events: [] });
+    expect(r.event).toMatchObject({ actor: "import", data: { imported: true, approxTime: true } });
+    expect(errOf(() => moveStage(db, IMP, { taskId: "H2", from: "spec", to: "restate" })).code).toBe("forbidden");
+  });
+});
