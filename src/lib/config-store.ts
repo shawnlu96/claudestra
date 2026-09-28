@@ -74,6 +74,8 @@ export interface AppConfig {
   deviceCookieRenew?: "on" | "observe" | "off";
   /** Jev（TypeSafe System One）API key：PUT /api/v1/settings 写、GET 只回尾四位；env TYPESAFE_API_KEY 兜底（lib/jev.ts） */
   jevApiKey?: string;
+  /** Chat Guard（bridge/chat-guard.ts）：mode 缺省 on（没配 Jev key 时自然不生效）；blockAt 缺省 0.85 */
+  chatGuard?: { mode?: "off" | "on"; blockAt?: number };
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -120,6 +122,14 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
+    ...(raw.chatGuard && typeof raw.chatGuard === "object"
+      ? {
+          chatGuard: {
+            ...(raw.chatGuard.mode === "off" || raw.chatGuard.mode === "on" ? { mode: raw.chatGuard.mode } : {}),
+            ...(typeof raw.chatGuard.blockAt === "number" ? { blockAt: raw.chatGuard.blockAt } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -309,6 +319,14 @@ export async function setJevApiKey(key: string): Promise<AppConfig> {
   const cfg = await readConfig();
   if (key) cfg.jevApiKey = key;
   else delete cfg.jevApiKey;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/** Chat Guard 开关 / 阈值（设置 → 安全） */
+export async function setChatGuard(patch: { mode?: "off" | "on"; blockAt?: number }): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.chatGuard = { ...cfg.chatGuard, ...patch };
   await writeConfig(cfg);
   return cfg;
 }

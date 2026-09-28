@@ -1,6 +1,7 @@
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { PendingPermission, PendingAsk } from "./type";
 import type { RecordSrc } from "./live-merge";
+import { applyGuardEvent } from "./guard-store";
 
 /**
  * 消费流式事件的最小接口。ChatStore 实现它。
@@ -58,6 +59,9 @@ export interface StreamSink {
 /** 处理一条已解析的 Web 流事件。初次发送与断线重连共用。 */
 export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
   switch (evt.t) {
+    case "guard":
+      applyGuardEvent(evt); // 待放行卡有自己的小 store，不进 chat-store
+      break;
     case "tool":
       sink.addToolCall(evt.name, evt.summary, evt.state, evt.detail, evt.id, { seq: evt.seq, sid: evt.sid });
       break;

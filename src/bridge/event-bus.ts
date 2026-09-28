@@ -16,6 +16,8 @@ export type BridgeEventType =
   | "chat_message"
   // 人发的消息进了押后队列 / 押后作罢（bridge/held-web.ts）：data = 入站镜像字段 + state；网页在气泡下标「排队中」
   | "chat_held"
+  // Chat Guard（bridge/chat-guard.ts）：quarantined / released / dropped，web 画待放行卡
+  | "chat_guard"
   // 上下文压缩完成（CC 在 jsonl 落 system/compact_boundary 时发出）。web 端据此
   // 插分隔线、让 ctx 徽章即时回落。jsonl-watcher 一直在发，但漏了在这里声明 ——
   // 加类型检查后才暴露出来。

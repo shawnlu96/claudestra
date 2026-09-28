@@ -7,7 +7,7 @@ import { SkillsSheet } from "./skills-sheet";
 import { matchSlashCommands, slashQuery, type SlashCmd } from "../slash-match";
 import { MicIcon, PaperclipIcon, SendIcon } from "./composer-icons";
 import { PasteExternalButton } from "./paste-external";
-import { UpdateHintBanner } from "./update-hint-banner";
+import { UpdateHintBanner } from "./update-hint-banner"; import { GuardCard } from "./guard-card";
 import { clearDraft, loadDraft, saveDraft } from "../drafts";
 import { agentSkills } from "@/lib/api/chat";
 import { skillUsed } from "@/lib/api/settings";
@@ -460,7 +460,7 @@ export function Composer() {
       style={{ paddingBottom: "max(var(--cstra-kb-safe, env(safe-area-inset-bottom)), 0.75rem)" }}
     >
       <div className="mx-auto w-full max-w-3xl lg:max-w-[min(92%,1600px)]">{/* 限宽与 message-list 同步,输入框与消息列对齐 */}
-        <UpdateHintBanner agent={agentInfo} />
+        <UpdateHintBanner agent={agentInfo} /><GuardCard agent={agentInfo?.name} />
         <CtxWarnBanner agent={agentInfo} />
 
         <MentionLayer m={mention} active={active} />

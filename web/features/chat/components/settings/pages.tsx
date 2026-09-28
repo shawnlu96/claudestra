@@ -26,6 +26,7 @@ import { TalkToggleSection } from "./talk-toggle-section";
 import { FontSection } from "./font-section";
 import { ChatPrefsSection } from "./chat-prefs-section";
 import { SkillsSection } from "./skills-section";
+import { GuardSection } from "./guard-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -142,7 +143,12 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         </>
       );
     case "security":
-      return <DevicesPage s={s} />;
+      return (
+        <>
+          <DevicesPage s={s} />
+          {s.full && <GuardSection />}
+        </>
+      );
     case "skills":
       return <SkillsSection />;
     case "labs":

@@ -427,7 +427,7 @@ const pendingAgentCalls = new AgentCallBook();
  * 管不了 → bridge 侧根治:目标在回合中就不 ws.send,压进本队列,Stop hook 后
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
-const heldLocalMsgs = new HeldQueue();
+const heldLocalMsgs = new HeldQueue(); configureChatGuard({ client: (id) => clients.get(id), deliverLocal: (env, to) => deliverLocalInOrder(env, to) }); // 守门放行走原路
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
 setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, hold: (env) => void heldLocalMsgs.holdEnv(env),
   books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
@@ -564,7 +564,7 @@ import {
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
-import { probeTurn } from "./bridge/turn-probe.js";
+import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound } from "./bridge/chat-guard.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
@@ -808,6 +808,7 @@ function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, still
 
 /** 只经 deliverLocalInOrder 调用 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
+  const guarded = await guardInbound(env, to); if (guarded) return guarded; // 守门先于一切投递副作用（来源记录 / 押后 / 抢占 / 渲染）
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
   // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer 回复」——Stop 不该
@@ -2386,7 +2387,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             targetChannelId: target.channelId,
             targetName,
             pushBack: !oneShot,
-            queued: delivery.outcome.note === "queued", heldBy: delivery.outcome.heldBy, // 对方在回合中（或额度闸 / 停在额度菜单）:已排队落盘
+            queued: delivery.outcome.note === "queued", heldBy: delivery.outcome.heldBy, guarded: delivery.outcome.note === "guarded", // 排队 / 押后 / 被守门隔离
           },
         }));
       } catch (err) {

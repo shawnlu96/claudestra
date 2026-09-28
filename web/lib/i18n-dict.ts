@@ -984,7 +984,7 @@ export const DICT: Record<string, string> = {
   "最近活动": "Last activity",
   "运行中": "Running",
   "对外共享（external）": "Shared externally (external)",
-  "开启后可共享给 peer；对方能看到该会话的全部上下文。关闭时会从所有 peer 的共享范围里移除。": "When on, this session can be shared with peers, who then see its whole context. Turning it off removes it from every peer's scope.",
+  "开启后可共享给 peer；对方能看到该会话的全部上下文。关闭时会从所有 peer 的共享范围里移除。": "When on, peers can be given this session and see its whole context. Turning it off removes it from every peer's scope.",
   "已共享给": "Shared with",
   "未共享": "Not shared",
   "已从以下 peer 的共享范围移除：": "Removed from these peers' scope: ",
@@ -1007,4 +1007,14 @@ export const DICT: Record<string, string> = {
   "Jev 连通，结果通顺": "Jev reachable, answers look right",
   "Jev 连通，但结果可疑（请检查 key 与模型）": "Jev reachable, but the answers look off (check key and model)",
   "耗时": "Latency",
+  // ── Chat Guard（2026-09-28）──────────────
+  "守门拦下一条消息": "Chat Guard held a message",
+  "来自": "from",
+  "放行": "Release",
+  "丢弃": "Discard",
+  "入站守门（Chat Guard）": "Inbound guard (Chat Guard)",
+  "消息进入 agent 前先用 Jev 判定是否在套取敏感信息或要求破坏性操作；命中即隔离，需你放行。未配 Jev 时不生效。":
+    "Jev screens messages for secret extraction or destructive requests before they reach an agent; hits wait for your release. Needs a Jev key.",
+  "未配置 Jev key（连接与集成 → 集成）": "No Jev key configured (Connections → Integrations)",
+  "拦截阈值": "Block threshold",
 };

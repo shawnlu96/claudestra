@@ -160,6 +160,15 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
       const e = chatMessage({ ...d, direction: "in" }, selfIds);
       return e?.t === "user-in" && !e.from && (d.state === "queued" || d.state === "dropped") ? { ...e, held: d.state } : null;
     }
+    case "chat_guard": {
+      const action = d.action === "released" || d.action === "dropped" ? d.action : "quarantined";
+      const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+      return {
+        t: "guard", action, id: String(d.id ?? ""), agent: String(d.agent ?? evt.agent).replace(/^agent-/, ""),
+        from: str(d.from), trust: str(d.trust), text: str(d.text), probe: str(d.probe),
+        score: typeof d.score === "number" ? d.score : undefined, at: str(d.at) ?? evt.ts,
+      };
+    }
     case "question":
       return { t: "ask", id: `auq-${evt.seq}`, questions: mapAuqQuestions(d.questions) };
     case "question_cleared":

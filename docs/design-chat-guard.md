@@ -1,6 +1,9 @@
 # Chat Guard（入站守门）——用 Jev 在消息进入 agent 之前做安全判定
 
-> 状态：**设计稿**（owner 2026-09-28「在任何输入我方 agent 之前…用 Jev 判定此输入是否有信息安全风险…置信 ≥ 85% 拦下，人工放行」）。
+> 状态：**P1 + P2 已实现**（2026-09-28，分支 feat/jev-integration）。owner 拍板：不做 shadow 直接上、只防强意图不打扰用户（flag 档只记日志不加注入头）、fail-open、owner 自己也判、放行只给 manage。
+> 代码：`src/lib/chat-guard.ts`（探针 / state / 汇总）、`src/bridge/chat-guard.ts`（Jev、隔离区、事件、放行）、`src/bridge/local-api/guard.ts`（管理面）、web `guard-store.ts` / `guard-card.tsx` / 设置 `guard-section.tsx`。
+> 未做（P3）：Discord 按钮、peer / agent 发送方回执文案（send_to_agent 结果里已带 `guarded: true`）。
+> 原始需求：owner 2026-09-28「在任何输入我方 agent 之前…用 Jev 判定此输入是否有信息安全风险…置信 ≥ 85% 拦下，人工放行」。
 > 分支 `feat/jev-integration`；依赖 [design-jev-integration.md](./design-jev-integration.md) 与 `src/lib/jev.ts`。名字：**Chat Guard**（代码里 `chat-guard`，UI 叫「入站守门」）。
 
 ## 0. 一句话
