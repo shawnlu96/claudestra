@@ -174,7 +174,7 @@ export function checkReview(input: ReviewInput, task: LedgerTask): void {
 }
 
 /** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生 */
-export const APPENDABLE_KINDS = ["note", "decision", "deploy", "verify", "rollback"] as const;
+export const APPENDABLE_KINDS = ["note", "decision", "deploy", "verify", "rollback", "dispatch", "escalate"] as const;
 export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
 /**

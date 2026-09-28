@@ -171,6 +171,8 @@ import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
+import { extractControlToken } from "./bridge/api-auth.js";
+import { initTeamRouter } from "./bridge/team-router.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
@@ -3175,15 +3177,6 @@ const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
 // 路由 + ws 升级要此 token,/api/v1 走自己的 Bearer。未设 = 非回环控制访问
 // 全拒(fail-closed,当前合法流量 100% 回环,零影响)。
 const CONTROL_TOKEN = process.env.BRIDGE_CONTROL_TOKEN || "";
-/** 从请求取 control token:Authorization: Bearer / x-bridge-token / ?control_token= */
-function extractControlToken(req: Request, url: URL): string | null {
-  const auth = req.headers.get("authorization");
-  if (auth?.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
-  const h = req.headers.get("x-bridge-token");
-  if (h) return h.trim();
-  const q = url.searchParams.get("control_token");
-  return q ? q.trim() : null;
-}
 
 /**
  * clear 后的会话轮转收尾（后台异步）。
@@ -3548,6 +3541,7 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
+initTeamRouter({ clients, deliver, hold: (env) => heldLocalMsgs.holdEnv(env), working: localAgentWorking, markBridgeSource: (c) => lastMessageSource.set(c, "agent") }); // 台账事件路由
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

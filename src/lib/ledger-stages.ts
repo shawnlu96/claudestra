@@ -16,9 +16,12 @@ export type Role = (typeof ROLES)[number];
 export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "dropped"] as const;
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
-/** stage / item / task / meta 由写入函数自动产生；其余由调用方显式追加 */
+/**
+ * stage / item / task / meta 由写入函数自动产生；其余由调用方显式追加。
+ * dispatch = 派出审查员（reviewer / round / head）、escalate = 升级给 PM（或 owner），编排班子的「现在谁在接」靠它们推导（ledger-handler.ts）。
+ */
 const EVENT_KINDS = [
-  "stage", "item", "task", "meta", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
+  "stage", "item", "task", "meta", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze", "dispatch", "escalate",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

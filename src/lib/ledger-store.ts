@@ -222,12 +222,29 @@ export interface QueueFrozen {
   since: number | null;
 }
 
+/** 编排班子（docs/team）：开了才有事件路由；dispatcher 为 null = 交付直接通知 PM。只有 owner 能设 */
+export interface TeamConfig {
+  dispatcher: string | null;
+  /** 巡检开关，T29 读 */
+  audit: boolean;
+  /** 开班子那条 meta 事件的 seq：路由只管它之后的事件，开班子前的历史不补发 */
+  sinceSeq: number;
+}
+
 export interface LedgerMeta {
   /** 项目 PM 名单；只有 owner 能设 */
   pms: string[];
   /** 规格卡 / 报告所在目录；只有 owner 能设 */
   docsDir: string | null;
   queueFrozen: QueueFrozen;
+  team: TeamConfig | null;
+}
+
+function toTeam(v: unknown): TeamConfig | null {
+  if (!v || typeof v !== "object") return null;
+  const t = v as Record<string, unknown>;
+  if (typeof t.sinceSeq !== "number") return null;
+  return { dispatcher: typeof t.dispatcher === "string" && t.dispatcher ? t.dispatcher : null, audit: t.audit !== false, sinceSeq: t.sinceSeq };
 }
 
 export function getMeta(db: Database, project: string): LedgerMeta {
@@ -240,5 +257,6 @@ export function getMeta(db: Database, project: string): LedgerMeta {
     pms: Array.isArray(pms) ? pms.filter((p): p is string => typeof p === "string") : [],
     docsDir: typeof docsDir === "string" ? docsDir : null,
     queueFrozen: frozen ?? { frozen: false, reason: "", since: null },
+    team: toTeam(kv.get("team")),
   };
 }

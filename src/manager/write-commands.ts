@@ -51,8 +51,8 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   model: new Set(["set", "reset", "all"]),
 };
 
-/** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms / --docs-dir 才写 */
-const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export"]);
+/** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms / --docs-dir / --team / --dispatcher 才写 */
+const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack"]);
 /**
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
  * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
@@ -89,6 +89,6 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
-  if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
+  if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir|team|dispatcher)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
 }
