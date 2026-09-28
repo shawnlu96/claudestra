@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { statePath } from "./paths.js";
 
 /**
  * mem0 记忆卫生(v2.20+):把「定期审查记忆库」收编成产品特性。
@@ -60,7 +61,9 @@ export function hygienePrompt(): string {
     // 返回 has_more)之前它永远只回 20 条,首次完整运行是绕过 MCP 直查 pgvector 才做成的。
     // v2.21.5+ 四步:①进度 TTL ②近重复处置(owner 09-06 放权)③全库审查(只建议;
     // 例外:superseded 打标)④检索评测。①边删边翻页会漏(Codex review):先收集完再删。
-    "对 mem0 记忆库做定期卫生检查,分四步,最后用 reply 工具发一份 Markdown 报告。①②是仅有的两处授权执行 memory_delete 的步骤。" +
+    // 报告先落文件再发:频道 / 临时会话没了,存档还在(owner 线上 cron 的做法,台账 i09 吸收进产品默认)
+    `对 mem0 记忆库做定期卫生检查,分四步。报告有两个去处,缺一不可:(a) 写入文件 \`${statePath("reports")}/mem0-hygiene-<今天 YYYY-MM-DD>.md\`` +
+    "(完整 Markdown,长度不限,不依赖频道存活的存档);(b) 用 reply 工具把同一份报告发出来,超长就分条发。①②是仅有的两处授权执行 memory_delete 的步骤。" +
     "①过期进度清理:先用 mcp__mem0__memory_list(type=\"progress\", before=\"<今天减 14 天的 ISO 日期>\", brief=true, limit=500, offset=N) " +
     "分页把**全部**候选的 id 与摘要收集完(直到返回的 has_more 为 false),再逐条 mcp__mem0__memory_delete——边删边翻页会跳过后面的记录;" +
     "**只删 type=progress 的,其他类型一律不碰**;删掉的 id 与摘要列进报告。" +
