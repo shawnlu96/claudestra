@@ -155,24 +155,29 @@ describe("台账读侧不被 ask 事件盖掉", () => {
   });
 });
 
+/** 按 v1 的建表语句逐条建（迁移一律单条语句，见 tests/ledger-migrate.test.ts） */
+function makeV1(raw: Database): void {
+  for (const sql of LEDGER_MIGRATIONS[0] as readonly string[]) raw.prepare(sql).run();
+}
+
 describe("迁移", () => {
-  test("版本号说到了、asks 表却不在（某一步静默失败 / 撞过号）→ 打开时报错，不带着残缺的库往下跑", () => {
+  test("版本号说到了、asks 表却不在（别的分支的代码先占了号）→ 打开时按表 / 列核对补齐", () => {
     path = tempLedgerPath("ledger-asks-broken-");
     const raw = new Database(path);
-    const v1 = LEDGER_MIGRATIONS[0];
-    if (typeof v1 !== "string") throw new Error("v1 迁移应是一段 SQL");
-    raw.exec(`${v1}; PRAGMA user_version = ${LEDGER_MIGRATIONS.length}`);
+    makeV1(raw);
+    raw.exec(`PRAGMA user_version = ${LEDGER_MIGRATIONS.length}`);
     raw.close();
-    expect(() => openLedger(path)).toThrow(/缺 asks/);
+    const d = openLedger(path);
+    expect(hasAsksTable(d)).toBe(true);
+    expect(schemaVersion(d)).toBe(LEDGER_MIGRATIONS.length);
   });
 
   test("v1 的库（CLI 旧版建的）打开后补上 asks 表，已有数据不动", () => {
     path = tempLedgerPath("ledger-asks-v1-");
     const raw = new Database(path);
     // 用真的 v1 建库语句造旧库：后面的迁移步（别的分支追加的 ALTER TABLE tasks 之类）要有完整的 v1 表才跑得通
-    const v1 = LEDGER_MIGRATIONS[0];
-    if (typeof v1 !== "string") throw new Error("v1 迁移应是一段 SQL");
-    raw.exec(`${v1}; PRAGMA user_version = 1`);
+    makeV1(raw);
+    raw.exec("PRAGMA user_version = 1");
     raw.exec("INSERT INTO items (project, id, title, status, createdAt, updatedAt) VALUES ('p', 'i1', 'x', 'todo', 0, 0)");
     expect(hasAsksTable(raw)).toBe(false);
     raw.close();

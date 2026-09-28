@@ -5,7 +5,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, invisibleNameError, isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
@@ -159,13 +159,8 @@ export async function saveRegistry(reg: Registry) {
 // 拒绝空白、shell 元字符、控制字符。CJK 和其他 Unicode 字母允许。
 // 长度上限 48 — Discord 频道名上限 100，tmux window 名没硬限制，48 足够宽。
 //
-// v2.13.1+ 补上 `/`、`\`、`:`、`~` 和 `..`：agent 名会直接拼进文件路径 ——
-// session-archive.ts 的 join(ARCHIVE_ROOT, agentName)、screenshot.ts 的
-// `${TMP_DIR}/peek_${windowName}_...`。名字里带 `/` 或 `..` 就能把归档目录和
-// 截图文件写到预期之外的位置（攻击者控制得了目录、控制不了完整文件名，所以是
-// 目录创建 + 文件覆盖，不是 RCE，但没有任何理由允许）。
-// `.` 也挡：tmux 在目标串里按 `.` 切 pane，带点的窗口按名字永远找不到（create 按 @id 能建成，之后按名字的操作全静默失效）
-const NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f]/;
+// 字符黑名单在 lib/registry.ts（AGENT_NAME_BLOCKLIST_RE，含 `.`、路径分隔符与不可见字符的理由），台账校验负责人时用同一份。
+const NAME_BLOCKLIST_RE = AGENT_NAME_BLOCKLIST_RE;
 /** 单独挡 `..`（上面的字符类挡不住不含分隔符的纯 ".."） */
 const NAME_TRAVERSAL_RE = /(^|[^\w])\.\.($|[^\w])|^\.+$/;
 
@@ -197,9 +192,11 @@ export function assertValidNewName(raw: string): void {
   if (cleaned.length === 0 || cleaned.length > 48) {
     throw new Error(`agent 名称长度必须在 1~48 之间: "${raw}"`);
   }
+  const invisible = invisibleNameError(cleaned);
+  if (invisible) throw new Error(`${invisible}: ${JSON.stringify(raw)}`);
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
     throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~ 或 shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
+      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~、shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
     );
   }
   if (NAME_TRAVERSAL_RE.test(cleaned)) {
