@@ -87,6 +87,13 @@ describe("设成开 / 设成关", () => {
     expect(r.keys).toEqual([]);
   });
 
+  test("发完刚好开始忙、开关排队了 → 已排队，并提醒回合结束前有人手动切过会切反（adv3）", async () => {
+    const r = await run({ kind: "lp-off" }, [fx("lp-on-allowance"), fx("busy-queued")]);
+    expect(r).toMatchObject({ outcome: "queued", keys: ["line:/low-priority"] });
+    expect(r.detail).toContain("回合结束才生效");
+    expect(r.detail).toContain("会切反");
+  });
+
   test("发了但 CC 回 isn't available → 失败并带回显原文", async () => {
     const r = await run({ kind: "lp-on" }, [fx("lp-off-resumable"), fx("fresh-unavailable")]);
     expect(r.outcome).toBe("failed");
@@ -279,6 +286,19 @@ describe("开 LP 再压缩：Esc 放回输入框的字只清我们自己敲的 /
       expect([text, r.outcome, r.keys]).toEqual([text, "failed", ["line:/low-priority", "escape"]]);
       expect(r.detail).toStartWith(OTHER);
     }
+  });
+
+  test("行首多一个空格也不算（逐字比，不去空格）→ 不按退格（adv3 P2-1）", async () => {
+    const r = await run({ kind: "lp-compact" }, [...head, typed(" /low-priority")]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape"] });
+    expect(r.detail).toStartWith(OTHER);
+  });
+
+  test("闸门第一帧是空、第二帧才冒出 /low-priority → 不是两帧都看到，不按退格（adv3 P2-2）", async () => {
+    const empty = fx("lp-on-interrupted");
+    const r = await run({ kind: "lp-compact" }, [...head, [empty, empty, restoredDraft]]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape"] });
+    expect(r.detail).toBe(`${OTHER}（两次抓屏之间输入框变了）`);
   });
 
   test("闸门第一帧是 /low-priority、第二帧有人接着打了字 → 不按退格", async () => {

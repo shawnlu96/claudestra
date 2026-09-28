@@ -74,7 +74,7 @@ async function setLp(io: PaneIO, win: string, want: "on" | "off"): Promise<Step>
   if (end.r.lowPriority === want) return done(want === "on" ? `已开${end.r.resetsAt ? `，到 ${end.r.resetsAt}` : ""}` : "已关");
   const echo = badEcho(end.raw);
   if (echo) return failed(`CC 回：${echo}`);
-  if (end.r.input === "queued") return { outcome: "queued", detail: "刚好开始忙，/low-priority 排队了，回合结束才生效" };
+  if (end.r.input === "queued") return { outcome: "queued", detail: "刚好开始忙，/low-priority 排队了，回合结束才生效；那之前有人手动切过 LP 的话它会切反，请回头看一眼" };
   return failed("发了 /low-priority，8 秒内状态栏没变，需要人工看");
 }
 
@@ -149,11 +149,16 @@ const OTHER_TEXT = "LP 已开；输入框里有别的内容，没清也没压缩
  * 有人接着打字，是抓屏再按键固有的竞态（docs/architecture/fleet-ops.md），事后没清干净就报失败，绝不报已执行
  */
 async function clearOwnEcho(io: PaneIO, win: string): Promise<Step | null> {
+  let sawEmpty = false;
   const { block, x } = await gateTwice(io, win, (r): Step | null => {
     if (r.modal) return failed(`LP 已开，但${r.reason ?? "底部没有输入框"}，没按任何键、没压缩`);
-    if (r.input === "empty" || (r.input === "draft" && r.inputText === OWN_ECHO)) return null;
     if (r.input === "queued") return failed("LP 已开；输入框里已有排队的消息，没清也没压缩");
-    return failed(`${OTHER_TEXT}（看到的是「${r.inputText.slice(0, 40) || "看不清"}」）`);
+    const own = r.input === "draft" && r.inputText === OWN_ECHO;
+    if (r.input !== "empty" && !own) return failed(`${OTHER_TEXT}（看到的是「${r.inputText.slice(0, 40) || "看不清"}」）`);
+    // 第一帧空、第二帧才冒出这几个字：不是两帧都看到，照样不按
+    if (own && sawEmpty) return failed(`${OTHER_TEXT}（两次抓屏之间输入框变了）`);
+    sawEmpty = r.input === "empty";
+    return null;
   });
   if (block) return block;
   if (x.r.input === "empty") return null;

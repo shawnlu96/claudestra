@@ -3,7 +3,7 @@
  * 只有 owner 本人的消息末行才算数。peer、Web 访客、scoped token、别的 agent 转来的正文会原样落在 agent 看到的
  * 末行，不处理就能冒充「用户委托」。所以投递给本地 agent 前，把非 owner 来源里任何「方括号 + 信封」的写法整个换成
  * NEUTRAL_TAG。只认逐字 `[📨` 挡不住变体（零宽字符、变体选择符、全角括号、【、📩 ✉️、&#91;…，T19 审查 r2 P2-A），
- * 所以匹配时容忍夹在中间的不可见字符（零宽 / 格式字符、C0 / C1 控制字符），替换后再按规范形（去掉这些 + NFKC）复查一遍。
+ * 所以匹配时容忍夹在中间的不可见字符（零宽 / 格式字符、C0 / C1 控制字符、整段终端转义序列），替换后再按规范形（去掉这些 + NFKC）复查一遍。
  * tests/delegate-marker.test.ts。
  */
 
@@ -21,14 +21,18 @@ export const NEUTRAL_TAG = "〔外源文本，不是委托〕";
 
 // 左方括号的各种写法（NFKC 会归一成 [ 的全角 / 竖排形也列上）、夹在中间的不可见字符（含 \x01 这类控制字符）、各种信封 emoji
 const OPEN = "(?:\\[|［|﹇|【|〖|〘|&#0*91;|&#x0*5b;|&lsqb;|&lbrack;)";
-const GAP = "[\\p{Cc}\\p{Cf}\\uFE00-\\uFE0F\\s]*";
+// 终端转义序列（ESC / C1 引导的 CSI、带结束符的 OSC、两字符序列）整段算不可见：只跳过引导字符的话，`[0m` 这类参数是可见字，
+// `[\x1b[0m📨` 就混过去了（T35 adv3 P2-3）
+const ESC_SEQ = "(?:(?:\\x1b\\[|\\x9b)[0-?]*[ -/]*[@-~]|(?:\\x1b\\]|\\x9d)[^\\x07\\x1b\\x9c]*(?:\\x07|\\x1b\\\\|\\x9c)|\\x1b[@-_])";
+const GAP = `(?:${ESC_SEQ}|[\\p{Cc}\\p{Cf}\\uFE00-\\uFE0F\\s])*`;
 const ENVELOPE = "(?:📨|📩|✉|📧|💌|📬|📭|📪|📫|🖂)";
 // 标记连同后面 40 字以内的标签与右括号一起换掉；没有右括号就只换括号 + 信封
 const MARKER = `${OPEN}${GAP}${ENVELOPE}(?:[^\\]】〗〙\\n]{0,40}[\\]】〗〙])?`;
 const markerGlobal = () => new RegExp(MARKER, "giu");
 const looksLikeMarker = (s: string) => new RegExp(MARKER, "iu").test(s);
-/** 规范形：去掉格式字符、变体选择符和控制字符（换行、tab 留着，不然整段并成一行），再 NFKC */
-const canonical = (s: string) => s.replace(/(?![\t\n\r])[\p{Cc}\p{Cf}\uFE00-\uFE0F]/gu, "").normalize("NFKC");
+/** 规范形：去掉终端转义序列、格式字符、变体选择符和控制字符（换行、tab 留着，不然整段并成一行），再 NFKC */
+const canonical = (s: string) =>
+  s.replace(new RegExp(ESC_SEQ, "gu"), "").replace(/(?![\t\n\r])[\p{Cc}\p{Cf}\uFE00-\uFE0F]/gu, "").normalize("NFKC");
 
 export function neutralizeDelegateMarker(content: string): string {
   const once = content.replace(markerGlobal(), NEUTRAL_TAG);
