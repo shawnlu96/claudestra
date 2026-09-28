@@ -167,7 +167,7 @@ export function progressNoteOf(block: any): string | null {
  *
  * jsonl-watcher 的 HIDDEN_TOOLS 与 reply_pending 早就认裸名了，这里是漏网的两处。
  */
-function isReplyTool(name: string): boolean {
+export function isReplyTool(name: string): boolean {
   if (name === "reply") return true; // Pi 侧裸名
   return name.startsWith("mcp__") && name.endsWith("__reply");
 }

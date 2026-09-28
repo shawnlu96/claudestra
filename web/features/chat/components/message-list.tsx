@@ -299,7 +299,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
             </span>
           </div>
         )}
-        {atts.length > 0 && <AttachmentStrip items={atts} />}
+        {atts.length > 0 && <AttachmentStrip items={atts} msg={m} />}
         {m.content && (
           <QuoteSwipe quote={userBody} className="max-w-[85%]">
             <div
@@ -375,7 +375,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
       {/* agent 出站附件(reply files):图片内联、文件 chip,与 user 气泡同一渲染 */}
       {!!m.attachments?.length && (
         <div className="mt-2">
-          <AttachmentStrip items={m.attachments} />
+          <AttachmentStrip items={m.attachments} msg={m} />
         </div>
       )}
       {!!m.replyComponents?.length && <ReplyComponents m={m} />}

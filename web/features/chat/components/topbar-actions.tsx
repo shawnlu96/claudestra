@@ -8,6 +8,8 @@ import { TerminalButton, TerminalIcon, useTerminalEntry } from "../../terminal/t
 import { AgentActions, MoreMenu, closeDropdown, hasActionMenu } from "./agent-actions";
 import { OpenButton } from "./open-button";
 import { InfoButton } from "./info-button";
+import { ImagesIcon } from "../../media/media-icons";
+import { MediaPanel } from "../../media/media-panel";
 
 /** 管理：四宫格（lucide layout-grid），只在折叠菜单里用——平铺时仍是文字按钮 */
 function ManageIcon() {
@@ -24,12 +26,13 @@ function ManageIcon() {
 /**
  * 会话顶栏右侧操作组。顶栏够宽（自身内容宽 ≥36rem，按 @container 判而不是视口断点——
  * 桌面侧栏可拖宽，视口宽不代表顶栏宽）时平铺；窄了就把分享 / 管理 / 搜索 / 终端收进
- * ⋮ 菜单：普通 active agent 并进 AgentActions 已有的下拉，大总管 / 非 active 另起一个。
+ * ⋮ 菜单（图片与文件同理）：普通 active agent 并进 AgentActions 已有的下拉，大总管 / 非 active 另起一个。
  * 平铺按钮和菜单项只是两个入口，搜索覆盖层、终端页/模态各自只挂一份。
  */
 export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; busy: boolean; onManage: () => void }) {
   const t = useT();
   const [searchOpen, setSearchOpen] = useState(false);
+  const [mediaOpen, setMediaOpen] = useState(false);
   const term = useTerminalEntry(agent);
   const master = !!agent.pinnedMaster;
   const merged = hasActionMenu(agent);
@@ -53,6 +56,12 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
         <button onClick={pick(() => setSearchOpen(true))}>
           <SearchIcon />
           {t("搜索")}
+        </button>
+      </li>
+      <li className="@xl:hidden">
+        <button onClick={pick(() => setMediaOpen(true))}>
+          <ImagesIcon size={15} />
+          {t("图片与文件")}
         </button>
       </li>
       {term.available && (
@@ -85,6 +94,9 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
           </button>
         )}
         <SessionSearchButton onClick={() => setSearchOpen(true)} />
+        <button className="btn btn-ghost btn-sm px-2 text-base-content/60 hover:text-base-content" title={t("图片与文件")} aria-label={t("图片与文件")} onClick={() => setMediaOpen(true)}>
+          <ImagesIcon size={15} />
+        </button>
         {term.available && <TerminalButton onClick={term.open} />}
       </span>
       {!merged && (
@@ -104,6 +116,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
         }
       />
       {searchOpen && <SearchOverlay agentName={agent.name} onClose={() => setSearchOpen(false)} />}
+      {mediaOpen && <MediaPanel agent={agent.name} onClose={() => setMediaOpen(false)} />}
       {term.view}
     </span>
   );
