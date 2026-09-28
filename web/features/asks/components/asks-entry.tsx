@@ -27,9 +27,9 @@ export function AsksEntry({ machineKey }: { machineKey: string }) {
     return () => clearTimeout(id);
   }, [banner]);
   const c = askCounts(asks);
-  // 「回到对话」：打开发起 agent 的对话并跳到原消息（ask-jump.ts；定位不到就只打开对话）
+  // 「回到对话」：只收起抽屉、不出栈（asks-store.leaveForChat），打开发起 agent 的对话并跳到原消息（ask-jump.ts；定位不到就只打开对话）
   const openChat = (ask: WebAsk) => {
-    asksStore.closeDrawer();
+    asksStore.leaveForChat();
     nav.toContent();
     void jumpToAsk(store, ask);
   };

@@ -8,6 +8,7 @@ import { existsSync, renameSync } from "node:fs";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 import { activeTasksByAgent, LedgerReader, ledgerFeedTicker, PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../src/lib/ledger-read.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { addDep } from "../src/lib/ledger-deps-write.js";
 import { appendEvent, createItem, createTask, importTask, moveStage, recordReview } from "../src/lib/ledger-write.js";
 import { ledgerScript, runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -179,6 +180,34 @@ describe("视图", () => {
       moveStage(w, { actor: "agent-x", now: 3 }, { taskId: "A", from: "spec", to: "restate" });
     });
     expect(activeTasksByAgent(new LedgerReader(p2).get()!).get("x")).toEqual({ id: "A", stage: "restate", round: 0 });
+  });
+});
+
+describe("依赖边视图", () => {
+  const path = tempLedgerPath();
+  seedLedger(path);
+  const w = openLedger(path);
+  const owner = { actor: "owner", now: 2000 };
+  createTask(w, owner, { project: "p", id: "T4", title: "等 T1", kind: "code" });
+  createTask(w, owner, { project: "p", id: "T5", title: "等 T4", kind: "code" });
+  addDep(w, owner, { from: "T1", to: "T4", when: "T1 合并后" });
+  addDep(w, owner, { from: "T4", to: "T5", when: "T4 合并后" });
+  closeLedger(path);
+  const db = new LedgerReader(path).get()!;
+
+  test("总览带边（推导值 / 最终状态）；每个任务带 blockedBy 与 runnable；dep 事件不算 lastEvent（不盖掉进展）", () => {
+    const v = projectView(db, "p", 3000);
+    // T1 停在 merge：过审排队不算满足（code 要到 live），T4 仍被挡
+    expect(v.deps.map((d) => [d.from, d.to, d.derived, d.effective])).toEqual([["T1", "T4", "active", "active"], ["T4", "T5", "waiting", "waiting"]]);
+    expect(v.tasks.map((t) => [t.id, t.runnable, t.blockedBy])).toEqual([["T1", true, []], ["T2", false, []], ["T4", false, ["T1"]], ["T5", false, ["T4"]]]);
+    expect(v.tasks.find((t) => t.id === "T5")!.lastEvent).toMatchObject({ kind: "task", data: { op: "new" } });
+  });
+
+  test("任务详情：进边 / 出边分开给；审查分叉现算", () => {
+    const d = taskDetail(db, "p", "T4", 3000)!;
+    expect([d.deps.in.map((x) => x.from), d.deps.out.map((x) => x.to)]).toEqual([["T1"], ["T5"]]);
+    expect(d.reviewBranches).toEqual({ pass: "merge", changes: "fix", taken: null });
+    expect(taskDetail(db, "p", "T5", 3000)!.events.map((e) => e.kind)).toEqual(["task", "dep"]);
   });
 });
 

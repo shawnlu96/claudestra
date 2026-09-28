@@ -17,7 +17,7 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
-import { ARCHIVE_ROOT } from "./session-archive.js";
+import { agentArchiveDir, ARCHIVE_ROOT } from "./session-archive.js";
 import { channelAskId, channelBodyText, senderOf } from "./inbound-body.js";
 import { settleToolCard } from "./auq-echo.js";
 
@@ -365,8 +365,8 @@ export async function listAgentSessions(
       sessionJsonlPath(opts.runtime, cwd, sessionId) ?? projectJsonlPath(cwd, sessionId));
   const byId = new Map<string, SessionSummary>();
 
-  const archiveDir = join(opts.archiveRoot ?? ARCHIVE_ROOT, agentName);
-  if (existsSync(archiveDir)) {
+  const archiveDir = agentArchiveDir(agentName, opts.archiveRoot ?? ARCHIVE_ROOT);
+  if (archiveDir && existsSync(archiveDir)) {
     try {
       for (const f of readdirSync(archiveDir)) {
         if (!f.endsWith(".jsonl")) continue;

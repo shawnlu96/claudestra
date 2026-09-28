@@ -46,6 +46,11 @@ let sc: {
   mainRepoOk: boolean;
   mergeParents: number;
   mainRepo: string;
+  /** 项目里别的目录的 origin（一个项目登记多个仓库）；missing = 不存在的目录 */
+  origins: Record<string, string>;
+  missing: string[];
+  /** 本仓库上 task.branch 的 PR（gh pr list）；"fail" = gh 失败，{ raw } = gh 原样输出 */
+  branchPrs: number[] | "fail" | { raw: string };
   projects: ProjectDef[];
   sizes: Record<string, number>;
 };
@@ -63,6 +68,10 @@ function fakeRun(argv: string[]) {
     if (sc.ghFails) return out(1, "", "gh: not logged in\n");
     return out(0, JSON.stringify({ state: sc.state, mergeCommit: { oid: "m1" }, mergedAt: new Date(MERGED).toISOString(), headRefOid: "h1", headRefName: sc.branch }));
   }
+  if (cmd.startsWith("gh pr list --repo x/y --head ")) {
+    if (sc.branchPrs === "fail") return out(1, "", "HTTP 502");
+    return out(0, "raw" in sc.branchPrs ? sc.branchPrs.raw : JSON.stringify(sc.branchPrs.map((number) => ({ number }))));
+  }
   if (cmd.startsWith("gh api --paginate repos/x/y/pulls/150/files")) return sc.files ? out(0, sc.files.join("\n") + "\n") : out(1, "", "HTTP 502");
   if (at("/repo", "fetch --quiet origin main")) return out(0);
   if (at("/repo", "merge-base --is-ancestor m1 origin/main")) return out(sc.mergeInMain ? 0 : 1);
@@ -71,6 +80,8 @@ function fakeRun(argv: string[]) {
   if (cmd.startsWith("git -C /repo merge-base --is-ancestor w1 ")) return out(["w1", "w2"].includes(argv.at(-1)!) ? 0 : 1);
   if (at("/repo", "rev-parse --path-format=absolute --git-common-dir")) return sc.mainRepoOk ? out(0, `${sc.mainRepo}/.git\n`) : out(128, "", "fatal");
   if (at("/repo", "remote get-url origin")) return sc.origin ? out(0, `${sc.origin}\n`) : out(2, "", "no such remote");
+  const other = cmd.match(/^git -C (\S+) remote get-url origin$/)?.[1];
+  if (other) return sc.origins[other] ? out(0, `${sc.origins[other]}\n`) : out(2, "", "no such remote");
   if (at("/repo", "rev-list --parents -n 1 m1")) return out(0, ["m1", "p0", "p9"].slice(0, sc.mergeParents + 1).join(" ") + "\n");
   if (at("/repo", "diff --name-only m1^1 m1")) return out(0, "src/bridge/x.ts\nweb/a.tsx\n");
   if (at(DAEMON_CWD, "rev-parse --git-dir")) return sc.cwdIsRepo ? out(0, ".git\n") : out(128, "", "fatal: not a git repository");
@@ -96,6 +107,7 @@ const fakeDeps = (over: Partial<FactsDeps> = {}): FactsDeps => ({
   relayWebCommit: async () => sc.relayWeb,
   bridgePort: () => 3847,
   fileSize: (p) => sc.sizes[p] ?? null,
+  isDir: (p) => !sc.missing.includes(p),
   readRepoFile: (rel) => REPO_FILES[rel] ?? null,
   ...over,
 });
@@ -119,7 +131,8 @@ beforeEach(() => {
   calls = [];
   sc = { files: ["web/a.tsx", "src/bridge/x.ts"], state: "MERGED", branch: "task/t9", ghFails: false, mergeInMain: true, localWeb: "w1",
     relay: { enabled: true, base: "relay.example" }, relayWeb: "w2", bridgeStart: PULLED + 60_000, codeHasMerge: true,
-    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo", projects: [proj(P, ["/repo"])], sizes: {} };
+    cwdIsRepo: true, worktreeClean: true, origin: "git@github.com:x/y.git", mainRepoOk: true, mergeParents: 2, mainRepo: "/repo",
+    origins: {}, missing: [], branchPrs: [], projects: [proj(P, ["/repo"])], sizes: {} };
   db = openLedger(":memory:");
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   liveTask();
@@ -311,6 +324,128 @@ describe("没 PR 与别的项目", () => {
     expect(await pm("verify", "T19", "--dry-run")).toMatchObject({ checklistSource: "evidence", note: expect.stringContaining("目录里没有本仓库") });
     sc.projects = [proj(P, ["/w"]), proj("other", ["/w/claudestra"])];
     expect(await pm("verify", "T19", "--dry-run")).toMatchObject({ checklistSource: "evidence" });
+  });
+  const RELAY_PR = "https://github.com/shawnlu96/claudestra-relay/pull/3";
+  const relayProject = () => {
+    sc.projects = [proj(P, ["/repo", "/relay"])];
+    sc.origins["/relay"] = "git@github.com:shawnlu96/claudestra-relay.git";
+  };
+  test("一个项目登记了多个仓库：PM 在 extra.repo 声明了 relay → relay 的 PR 只核证据；本仓库的 PR 照旧按全套核", async () => {
+    relayProject();
+    liveTask("T30", { pr: RELAY_PR, extra: { repo: "ShawnLu96/claudestra-relay" } });
+    const dry = await pm("verify", "T30", "--dry-run");
+    expect(dry).toMatchObject({ checklistSource: "evidence", noteTpl: expect.stringContaining("另一个仓库"), noteParams: { prRepo: "shawnlu96/claudestra-relay", dir: "/relay" } });
+    sc.sizes["docs/T30.report.md"] = 500;
+    expect(await pm("verify", "T30", "--evidence", "docs/T30.report.md")).toMatchObject({ ok: true, moved: true });
+    expect((await pm("verify", "T9", "--dry-run")).checks.map((c: any) => c.id)).toEqual(["pr-merged", "web-local", "web-relay", "daemon-bridge"]);
+    sc.missing = ["/relay"]; // 那个目录不在了：认不出是它的仓库 → 回到「对不上」
+    liveTask("T31", { pr: RELAY_PR, extra: { repo: "shawnlu96/claudestra-relay" } });
+    expect(await pm("verify", "T31", "--dry-run")).toMatchObject({ result: "unknown", noteTpl: expect.stringContaining("对不上") });
+  });
+  test("声明了也要反证：本仓库上有这个分支的 PR / gh 查不了 / 任务没记分支 → unknown（fail-closed）", async () => {
+    relayProject();
+    sc.sizes["docs/r.md"] = 500;
+    liveTask("T38", { pr: RELAY_PR, extra: { repo: "shawnlu96/claudestra-relay" } });
+    sc.branchPrs = [151];
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("有分支 task/t9 的 PR #151") });
+    expect(calls).toContain("gh pr list --repo x/y --head task/t9 --state all --json number --limit 5");
+    sc.branchPrs = "fail";
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("HTTP 502") });
+    liveTask("T39", { pr: RELAY_PR, branch: null, extra: { repo: "shawnlu96/claudestra-relay" } });
+    expect(await pm("verify", "T39", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("任务没记分支") });
+    for (const raw of ["{}", '"x"', "null", "[{}]"]) {
+      sc.branchPrs = { raw }; // gh 输出是 JSON 但不是数组：按查不了处理，不当成「没有 PR」
+      const r = await pm("verify", "T38", "--evidence", "docs/r.md");
+      expect(r.error).not.toContain("undefined"); // 先断言：bun 的 toMatchObject 会把 received 里匹配上的字段换成匹配器
+      expect(r).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("查不了本仓库") });
+    }
+    sc.branchPrs = [];
+    sc.branch = "task/other"; // relay 那边 PR 的分支和任务记的不一样：核不了是不是这个任务的
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("分支是 task/other") });
+    sc.branch = "task/t9";
+    sc.ghFails = true;
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("查不了 PR") });
+    sc.ghFails = false;
+    calls.splice(0);
+    expect(await pm("verify", "T38", "--evidence", "docs/r.md")).toMatchObject({ ok: true, moved: true });
+    expect(calls.filter((c) => c.startsWith("gh pr ")).sort()).toEqual([ // 声明过的也只查一次
+      "gh pr list --repo x/y --head task/t9 --state all --json number --limit 5",
+      `gh pr view ${RELAY_PR} --json headRefName`,
+    ]);
+  });
+  test("没声明 / 声明的是别的仓库 → unknown，提示 PM 怎么声明（命令里带上原有的 extra 键）", async () => {
+    relayProject();
+    sc.sizes["docs/r.md"] = 500;
+    liveTask("T34", { pr: RELAY_PR, extra: { checks: ["cron"] } });
+    const r = await pm("verify", "T34", "--evidence", "docs/r.md");
+    expect(r).toMatchObject({ ok: false, result: "unknown", task: { stage: "live" } });
+    expect(r.noteParams.cmd).toBe(`ledger task-set T34 --rev <rev> --extra '{"checks":["cron"],"repo":"shawnlu96/claudestra-relay"}'`);
+    expect(r.error).toContain("PM 还没声明");
+    liveTask("T35", { pr: RELAY_PR, extra: { repo: "shawnlu96/other" } });
+    expect(await pm("verify", "T35", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", noteTpl: expect.stringContaining("PM 声明的仓库是 {declared}") });
+    // 声明对不上哪条路都不能静默忽略：M16（目录明确不含本仓库）、PR 就在本仓库，都判断不了
+    sc.projects = [proj(P, ["/relay"])];
+    expect(await pm("verify", "T35", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", noteParams: { declared: "shawnlu96/other" } });
+    liveTask("T40", { extra: { repo: "shawnlu96/claudestra-relay" } });
+    expect(await pm("verify", "T40", "--dry-run")).toMatchObject({ result: "unknown", noteParams: { prRepo: "x/y", declared: "shawnlu96/claudestra-relay" } });
+  });
+  test("PR 链接前后夹带参数（-R evil/x …）认不出，不会原样交给 gh", async () => {
+    relayProject();
+    sc.sizes["docs/r.md"] = 500;
+    for (const [id, pr] of [["T41", `-R evil/x ${RELAY_PR}`], ["T42", "-R evil/x https://github.com/x/y/pull/150"], ["T43", `${RELAY_PR} --repo evil/x`]] as const) {
+      liveTask(id, { pr, extra: { repo: "shawnlu96/claudestra-relay" } });
+      expect((await pm("verify", id, "--evidence", "docs/r.md")).ok).toBe(false);
+    }
+    expect(calls.filter((c) => c.startsWith("gh ") && /evil|-R /.test(c))).toEqual([]);
+    liveTask("T44", { pr: ` ${RELAY_PR} `, extra: { repo: "shawnlu96/claudestra-relay" } }); // 首尾空白照认，拼出规范 URL
+    expect(await pm("verify", "T44", "--evidence", "docs/r.md")).toMatchObject({ ok: true, moved: true });
+    expect(calls).toContain(`gh pr view ${RELAY_PR} --json headRefName`);
+  });
+  test("M3：本仓库的活，执行者在 build 阶段把 PR 改成 relay 的 → 进不了 verified；执行者也写不了 extra.repo", async () => {
+    relayProject();
+    createTask(db, { actor: "owner" }, { project: P, id: "T36", title: "t", kind: "code", agent: EXE, pm: PM, pr: "https://github.com/x/y/pull/150", branch: "task/t9", stage: "build", round: 1 });
+    const rev = () => String(getTask(db, "T36")!.rev);
+    expect(await run(EXE, ["task-set", "T36", "--rev", rev(), "--pr", RELAY_PR])).toMatchObject({ ok: true });
+    expect(await run(EXE, ["task-set", "T36", "--rev", rev(), "--extra", '{"repo":"shawnlu96/claudestra-relay"}'])).toMatchObject({ ok: false, code: "forbidden" });
+    moveStage(db, { actor: PM }, { taskId: "T36", from: "build", to: "review" });
+    moveStage(db, { actor: PM }, { taskId: "T36", from: "review", to: "merge" });
+    moveStage(db, { actor: PM }, { taskId: "T36", from: "merge", to: "live" });
+    sc.sizes["docs/T36.md"] = 500;
+    expect(await pm("verify", "T36", "--evidence", "docs/T36.md")).toMatchObject({ ok: false, result: "unknown", task: { stage: "live" } });
+  });
+  test("项目只登记了 relay（目录明确不含本仓库）：没声明也照旧只核证据，但本仓库上有这个分支的 PR 或查不了仍判断不了", async () => {
+    relayProject();
+    sc.projects = [proj(P, ["/relay"])];
+    liveTask("T37", { pr: RELAY_PR });
+    expect(await pm("verify", "T37", "--dry-run")).toMatchObject({ checklistSource: "evidence", noteParams: { prRepo: "shawnlu96/claudestra-relay" } });
+    sc.branchPrs = [151]; // 反证照样生效：本仓库上也有这个分支的 PR → 判断不了
+    expect(await pm("verify", "T37", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("有分支 task/t9 的 PR #151") });
+    sc.branchPrs = "fail";
+    expect(await pm("verify", "T37", "--evidence", "docs/r.md")).toMatchObject({ ok: false, result: "unknown", note: expect.stringContaining("HTTP 502") });
+  });
+  test("extra.repo 写入时校验格式", async () => {
+    const rev = String(getTask(db, "T9")!.rev);
+    expect(await pm("task-set", "T9", "--rev", rev, "--extra", '{"repo":"not a repo"}')).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("owner/repo") });
+    expect(await pm("task-set", "T9", "--rev", rev, "--extra", '{"repo":"a/b.git"}')).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("不带 .git") });
+    expect(await pm("task-set", "T9", "--rev", rev, "--extra", '{"repo":"a/b"}')).toMatchObject({ ok: true });
+  });
+  test("登记的目录不存在 / 是相对路径 / 就是本仓库却被别的项目占了 → 判断不了，不判「不属于」", async () => {
+    liveTask("T32", { pr: "https://github.com/someone/other/pull/9" });
+    liveTask("T33", { pr: null, kind: "ops" });
+    const cases: [ProjectDef[], string[]][] = [
+      [[proj(P, ["/gone"])], ["/gone"]],
+      [[proj(P, ["rel/dir"])], []],
+      [[proj("other", ["/repo"]), proj(P, ["/repo"])], []],
+    ];
+    for (const [projects, missing] of cases) {
+      sc.projects = projects;
+      sc.missing = missing;
+      expect(await pm("verify", "T32", "--dry-run")).toMatchObject({ result: "unknown" });
+      expect(await pm("verify", "T33", "--dry-run")).toMatchObject({ result: "unknown" });
+    }
+    sc.missing = [];
+    sc.projects = [proj(P, ["/gone"])]; // 目录在、只是不含本仓库：照旧判不属于
+    expect(await pm("verify", "T33", "--dry-run")).toMatchObject({ checklistSource: "evidence" });
   });
   test("没配中继 → web-relay 不适用算过；本机网页是后代版本也算过", async () => {
     sc.relay = { enabled: false };

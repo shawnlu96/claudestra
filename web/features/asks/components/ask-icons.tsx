@@ -19,6 +19,15 @@ export function CloseIcon({ size = 18 }: { size?: number }) {
   );
 }
 
+/** lucide chevron-left：手机上抽屉左上角的返回（和会话页顶栏同一个） */
+export function BackIcon({ size = 22 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...P} strokeWidth={2} aria-hidden>
+      <path d="M15 18l-6-6 6-6" />
+    </svg>
+  );
+}
+
 export function ChatIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...P} aria-hidden>

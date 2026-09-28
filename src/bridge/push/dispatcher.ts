@@ -18,7 +18,9 @@ import type { Ask } from "../../lib/ledger-asks.js";
 import type { Presence } from "../../lib/owner-presence.js";
 import { OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
 import { isOwnerPrincipal, tokenIdOf, type Principal, type PrincipalsFile } from "../../lib/principals.js";
-import { type ApnsDeviceRow, deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey } from "../../lib/push-store.js";
+import {
+  type ApnsDeviceRow, deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey,
+} from "../../lib/push-store.js";
 import { t as tr } from "../../lib/i18n.js";
 import { markdownToPlain } from "../../lib/plain-text.js";
 import { bareAgent, bumpUnread, countsUnread, markAgentRead, onAgentRead, totalUnread, type ReadEvent } from "../../lib/unread-store.js";

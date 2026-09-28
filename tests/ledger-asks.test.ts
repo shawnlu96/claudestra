@@ -158,24 +158,29 @@ describe("台账读侧不被 ask 事件盖掉", () => {
   });
 });
 
+/** 按 v1 的建表语句逐条建（迁移一律单条语句，见 tests/ledger-migrate.test.ts） */
+function makeV1(raw: Database): void {
+  for (const sql of LEDGER_MIGRATIONS[0] as readonly string[]) raw.prepare(sql).run();
+}
+
 describe("迁移", () => {
-  test("版本号说到了、asks 表却不在（某一步静默失败 / 撞过号）→ 打开时报错，不带着残缺的库往下跑", () => {
+  test("版本号说到了、asks 表却不在（别的分支的代码先占了号）→ 打开时按表 / 列核对补齐", () => {
     path = tempLedgerPath("ledger-asks-broken-");
     const raw = new Database(path);
-    const v1 = LEDGER_MIGRATIONS[0];
-    if (typeof v1 !== "string") throw new Error("v1 迁移应是一段 SQL");
-    raw.exec(`${v1}; PRAGMA user_version = ${LEDGER_MIGRATIONS.length}`);
+    makeV1(raw);
+    raw.exec(`PRAGMA user_version = ${LEDGER_MIGRATIONS.length}`);
     raw.close();
-    expect(() => openLedger(path)).toThrow(/缺 asks/);
+    const d = openLedger(path);
+    expect(hasAsksTable(d)).toBe(true);
+    expect(schemaVersion(d)).toBe(LEDGER_MIGRATIONS.length);
   });
 
   test("v1 的库（CLI 旧版建的）打开后补上 asks 表，已有数据不动", () => {
     path = tempLedgerPath("ledger-asks-v1-");
     const raw = new Database(path);
     // 用真的 v1 建库语句造旧库：后面的迁移步（别的分支追加的 ALTER TABLE tasks 之类）要有完整的 v1 表才跑得通
-    const v1 = LEDGER_MIGRATIONS[0];
-    if (typeof v1 !== "string") throw new Error("v1 迁移应是一段 SQL");
-    raw.exec(`${v1}; PRAGMA user_version = 1`);
+    makeV1(raw);
+    raw.exec("PRAGMA user_version = 1");
     raw.exec("INSERT INTO items (project, id, title, status, createdAt, updatedAt) VALUES ('p', 'i1', 'x', 'todo', 0, 0)");
     expect(hasAsksTable(raw)).toBe(false);
     raw.close();
@@ -223,18 +228,40 @@ describe("第二版：人 / 系统发起、指派、按 key 取代、去重", ()
   });
 });
 
+/** 按合并后的顺序造一个第 n 版的库（SQL 数组逐条 prepare().run()，函数直接调）；steps 可换成别的组合（模拟分支上的库） */
+function rawAt(steps: readonly (typeof LEDGER_MIGRATIONS)[number][], version: number): Database {
+  path = tempLedgerPath("ledger-asks-v2-");
+  const raw = new Database(path);
+  for (const step of steps) typeof step === "function" ? step(raw) : step.forEach((sql) => raw.prepare(sql).run());
+  raw.exec(`PRAGMA user_version = ${version}`);
+  raw.exec(`INSERT INTO asks (id, project, fromAgent, fromChannelId, source, kind, title, expiresAt, state, createdAt, updatedAt)
+    VALUES ('ask_old', 'p', 'agent-x', '111', 'reply', 'decide', '老的', 9e12, 'open', 1, 1)`);
+  return raw;
+}
+const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+
 describe("迁移到第二版", () => {
+  test("顺序：v1 → asks → T8h 的依赖边 → asks 第二版（v4）", () => {
+    expect(LEDGER_MIGRATIONS.length).toBe(4);
+    expect(LEDGER_MIGRATIONS[3]).toBe(migrateAsksV2);
+  });
+
+  test("T8h 的 v3（线上那版 + 依赖边）升到 v4：asks 重建、task_deps 和任务负责人列都在", () => {
+    rawAt(LEDGER_MIGRATIONS.slice(0, 3), 3).close();
+    const d = openLedger(path);
+    expect([schemaVersion(d), tableExists(d, "task_deps"), getAsk(d, "ask_old")?.assignee]).toEqual([4, true, null]);
+    closeLedger(path);
+  });
+
+  test("分支上提前开过的 v3（asks 第二版、没有 task_deps）：合并后的代码打开会自愈出 task_deps，asks 不再重建、数据都在", () => {
+    rawAt([...LEDGER_MIGRATIONS.slice(0, 2), migrateAsksV2], 3).close();
+    const d = openLedger(path);
+    expect([schemaVersion(d), tableExists(d, "task_deps"), getAsk(d, "ask_old")?.title]).toEqual([4, true, "老的"]);
+    closeLedger(path);
+  });
+
   test("v2 的库（T11a 线上那版）：重建后旧数据、索引都在，fromAgent 可空、新的 kind / state / source 写得进；重跑不再重建", () => {
-    path = tempLedgerPath("ledger-asks-v2-");
-    const raw = new Database(path);
-    const [v1, v2] = LEDGER_MIGRATIONS;
-    if (typeof v1 !== "string" || typeof v2 !== "function") throw new Error("前两步应是 v1 SQL + asks 建表函数");
-    raw.exec(`${v1}`);
-    v2(raw);
-    raw.exec("PRAGMA user_version = 2");
-    raw.exec(`INSERT INTO asks (id, project, fromAgent, fromChannelId, source, kind, title, expiresAt, state, createdAt, updatedAt)
-      VALUES ('ask_old', 'p', 'agent-x', '111', 'reply', 'decide', '老的', 9e12, 'open', 1, 1)`);
-    raw.close();
+    rawAt(LEDGER_MIGRATIONS.slice(0, 2), 2).close();
     const d = openLedger(path);
     expect(schemaVersion(d)).toBe(LEDGER_MIGRATIONS.length);
     expect(getAsk(d, "ask_old")).toMatchObject({ title: "老的", fromAgent: "agent-x", assignee: null, bind: null, dedupKey: null });

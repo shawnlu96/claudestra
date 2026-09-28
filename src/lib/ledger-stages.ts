@@ -16,9 +16,9 @@ export type Role = (typeof ROLES)[number];
 export const ITEM_STATUSES = ["todo", "decide", "design", "doing", "done", "dropped"] as const;
 export type ItemStatus = (typeof ITEM_STATUSES)[number];
 
-/** stage / item / task / meta 由写入函数自动产生；ask / ask_expire / ask_cancel（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；其余由调用方显式追加 */
+/** stage / item / task / meta / dep 由写入函数自动产生；ask / ask_expire / ask_cancel（与作答的 decision）只由 bridge 的 ledger-asks.ts 写；其余由调用方显式追加 */
 const EVENT_KINDS = [
-  "stage", "item", "task", "meta", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
+  "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
   "ask", "ask_expire", "ask_cancel",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
@@ -32,6 +32,13 @@ export function isAskEvent(e: { kind: string; data: Record<string, unknown> }): 
 }
 
 export type ReviewVerdict = "pass" | "changes" | "block";
+
+/**
+ * 负责人类型：本机 agent（agent 列同值，执行者角色照旧按 agent 认）/ 人（local:<principalId>）/ 别的实例上的 agent（<fp>/<agent>）。
+ * 路由必须按 kind 分支，不能只解析 assignee 字符串：本机 agent 名允许 @，`agent-x@peer` 是本机名，不是跨实例地址。
+ */
+export const ASSIGNEE_KINDS = ["agent", "human", "peer_agent"] as const;
+export type AssigneeKind = (typeof ASSIGNEE_KINDS)[number];
 
 export interface LedgerItem {
   project: string;
@@ -58,6 +65,8 @@ export interface LedgerTask {
   stageBefore: Stage | null;
   round: number;
   agent: string | null;
+  assigneeKind: AssigneeKind | null;
+  assignee: string | null;
   pm: string | null;
   branch: string | null;
   pr: string | null;
