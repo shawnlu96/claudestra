@@ -1,12 +1,14 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
-import { buttonText, replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
+import { buttonText, replyRowKey } from "@/lib/chat/reply-clicks";
 import { useChatStoreApi } from "../chat-store";
+import { useReplyAsk } from "@/features/asks/use-reply-ask";
 import { editComposer, logLocalTick, useFormRowSync } from "../form-sync";
 import { renderFormLine, setFormValues, toggleFormValue } from "@/lib/chat/form-compose";
 import { useT } from "@/lib/i18n";
+import { CheckMark } from "./check-mark";
 
 /**
  * reply() 附带的交互组件（按钮 / 选单）Web 渲染。点击 → 回投
@@ -16,6 +18,8 @@ import { useT } from "@/lib/i18n";
  * bug ①（2026-08-24）：作答是**按行独立**的——一条 reply 里的多个 select row /
  * 按钮行各答各的，答完一行不再锁死其余行。状态在 m.replyClicks（rowKey→值），
  * 老快照的单值 replyClickedId 退化推导（deriveClicksFromLegacy）。
+ *
+ * 这条 reply 建过「待你处理」：已答值、整条锁住、状态小字、点击前带 askId 都在 features/asks/use-reply-ask.ts。
  */
 
 const BTN_STYLE: Record<string, string> = {
@@ -31,16 +35,13 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
   const rows = m.replyComponents;
   // busy = 正在回投的那一行的 rowKey（只锁该行，不锁全条）。
   const [busy, setBusy] = useState("");
-  // 每行的已答值：优先 replyClicks（新），回退老快照的单值。
-  const clicks = useMemo(
-    () => m.replyClicks ?? deriveClicksFromLegacy(m.replyClickedId, rows),
-    [m.replyClicks, m.replyClickedId, rows],
-  );
+  // 每行的已答值：优先 replyClicks（新），回退老快照的单值；对应的「待你处理」已结案就整条锁住
+  const { clicks, rowLocked, status, beforeSend } = useReplyAsk(m);
   if (!rows || rows.length === 0) return null;
 
   // 某一行的一次作答。rowKey 定位到行；choiceValue 存进 replyClicks 供高亮。
   const choose = async (rowKey: string, choiceValue: string, label: string, wire: string) => {
-    if (clicks[rowKey] != null || busy) return;
+    if (clicks[rowKey] != null || busy || !beforeSend(wire)) return;
     setBusy(rowKey);
     await store.clickReplyComponent(m.id, rowKey, choiceValue, label, wire);
     setBusy("");
@@ -52,7 +53,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         const key = replyRowKey(row, ri);
         // Discord 同款语义：没答过的行一直可点（用户习惯隔几条消息再回来点）。
         // bug ① 前这里是 !!m.replyClickedId（整条消息级）——多行时答一行锁全部。
-        const rowAnswered = clicks[key] != null;
+        const rowAnswered = clicks[key] != null || rowLocked(row, ri);
         const rowBusy = busy === key;
         if (row.type === "buttons") {
           return (
@@ -138,6 +139,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
           </div>
         );
       })}
+      {status && <span className="text-[11px] opacity-50">{status}</span>}
     </div>
   );
 }
@@ -206,13 +208,7 @@ function MultiSelectRow({
                 : "border-base-content/10 bg-base-100/40 hover:bg-base-content/[0.04]"
             } ${locked && !on ? "opacity-40" : ""}`}
           >
-            <span
-              className={`mt-[3px] grid size-3.5 shrink-0 place-items-center rounded border text-[10px] leading-none ${
-                on ? "border-primary bg-primary text-primary-content" : "border-base-content/30"
-              }`}
-            >
-              {on ? "✓" : ""}
-            </span>
+            <CheckMark on={on} />
             <span className="min-w-0">
               <span className="font-medium opacity-90">{o.label}</span>
               {o.description && <span className="ml-1 opacity-50">{o.description}</span>}

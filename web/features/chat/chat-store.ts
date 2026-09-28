@@ -1614,18 +1614,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (!entry) return;
     const { agent, wire, files } = entry;
     const hasFiles = !!files && files.length > 0;
-    const fail = (why: string) => {
+    const fail = (why: string, handled = false) => {
       const errId = this.nextId();
       entry.errId = errId;
       this.produce((s) => {
         s.streaming = false;
         s.awaitingChunk = false;
         const opt = s.messages.find((m) => m.id === optimisticId);
-        if (opt) opt.failed = true; // 气泡标「未送达」+ 重发/删除按钮,别装作已发出
+        if (opt) opt.failed = !handled; // 标「未送达」+ 重发/删除;「待你处理」已在别处答了(409 ask_closed)不算失败,只提示一句
         s.messages.push({
           id: errId,
           role: "assistant",
-          content: `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
+          content: handled ? why : `${getLang() === "zh" ? "⚠️ 发送失败：" : "⚠️ Send failed: "}${why}`,
           ts: new Date().toISOString(),
         });
       });
@@ -1677,7 +1677,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
     } catch (e) {
       const timedOut = (e as Error).name === "TimeoutError";
-      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message);
+      fail(timedOut ? (getLang() === "zh" ? "上传超时（网络不稳）" : "upload timed out") : (e as Error).message, e instanceof ApiError && e.code === "ask_closed");
     }
   }
 

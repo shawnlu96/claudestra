@@ -67,6 +67,9 @@
 .info { padding: 16px 16px 14px 24px; min-width: 0; position: relative; }
 .info::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 2px; border-radius: 2px; background: transparent; transition: background .6s; }
 .row.hot .info::before { background: var(--accent); }
+/* 等你：左侧琥珀竖条 + 细边框，比普通「等待」醒目（它在等的是看这个页面的人） */
+.row.owner .info::before { background: var(--warn); }
+.row.owner { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 45%, transparent); }
 .t1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .tid { font-family: var(--mono); font-size: var(--fs-3); color: var(--muted); flex: none; }
 .ttl { color: var(--text); font-weight: 600; font-size: var(--fs-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
