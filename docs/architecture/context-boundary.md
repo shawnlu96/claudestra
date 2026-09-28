@@ -30,12 +30,20 @@ Layer 2 is meant to act first; layer 1 is the backstop for a single turn that ru
 }
 ```
 
-- Built-ins (no machine-specific names): `executor` = `agent-task-*`, window 200K / idle 3 min / hardCap 250K / ccWindow 300K / `compact`; `coordinator` = `agent-pm-*`, window 300K / idle 5 min / hardCap 400K / `save-compact` (coordinators need to leave a HANDOFF).
+- Built-ins (no machine-specific names): `executor` = `agent-task-*`, window 200K / idle 3 min / hardCap 250K / ccWindow 300K / `compact`; `coordinator` = `agent-pm-*`, window 300K / idle 5 min / hardCap 400K / `save-compact` (coordinators need to leave a HANDOFF; executors must not — see below).
 - Entries merge onto the built-in with the same `id` (write only what changes); `"enabled": false` turns one off; a new `id` is a new policy. Order: configured entries first (as written), untouched built-ins after.
 - Fields: `match.projects` (project ids) / `match.names` (glob, `*` and `?`), `window`, `idleMinutes`, `hardCap` (≥ window), `action` (`compact` | `save-compact`), `ccWindow` (100K–1M or omitted), `keep` (one line; replaces the default keep list).
 - Matching priority: a policy with both projects **and** names (both must hit) > projects only > names only; ties go to the first in the list. The master session is only matched by the literal name `master`, never by a wildcard.
 - `config-store` keeps `policies` verbatim; validation happens in the resolver so a hand-written mistake is reported, not erased by the next settings save.
 - Agents that match no policy use the global `window` / `idleHours` / `emergency` exactly as before (85% / 93% of the real window when statusline reports it).
+
+## Executors never get `/save-compact`
+
+An executor runs in a git worktree, but Claude Code resolves its auto-memory directory to the **main** checkout (`~/.claude/projects/-Users-…-claude-orchestrator/memory/`), the same one the PM uses. `/save-compact` writes `HANDOFF.md` there, so an executor's save-compact overwrites the PM's hand-off (observed 2026-09-29 01:49). Therefore:
+
+- `effectiveAction(name, action)`: for `agent-task-*` a `save-compact` becomes `compact` with the keep list — whatever the policy says, and on the global fallback too. Every injection path applies it (the runner, the Discord "save + compact" button, `injectCompact` callers that pass `agentName`).
+- The resolver warns when a `save-compact` policy could reach executors: a name pattern whose literal prefix overlaps `agent-task-` (`agent-*`, `*`, `agent-task-t36`), or a project-only policy.
+- Unmatched personal agents keep `save-compact`: each lives in its own repository, so their memory directories don't collide.
 
 ## Decision table (`boundaryDecision`)
 

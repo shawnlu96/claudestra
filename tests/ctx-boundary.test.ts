@@ -128,6 +128,16 @@ describe("ctxBoundaryTick", () => {
     expect(h.sent).toEqual([{ target: "master:agent-pm-a", line: "/save-compact" }]);
     expect(h.logs.filter((l) => l.includes("ccWindow")).length).toBe(1);
   });
+  test("执行者：策略配成 save-compact、或者退回全局，都改发带清单的 /compact", async () => {
+    for (const autoCompact of [{ policies: [{ id: "executor", action: "save-compact" }] }, { window: 100_000, idleHours: 0, policies: [{ id: "executor", enabled: false }] }]) {
+      resetCtxBoundaryState();
+      const h = harness([], { autoCompact });
+      h.deps.agents = async () => [agent({ ctx: 260_000, convTs: h.now })];
+      const r = await ctxBoundaryTick(h.deps);
+      expect(r[0].boundary.action).toBe("compact");
+      expect(h.sent).toEqual([{ target: "master:agent-task-t1", line: `/compact ${DEFAULT_KEEP_LIST}` }]);
+    }
+  });
 });
 
 describe("injectCompact（T35 批量动作的入口）", () => {
@@ -151,6 +161,8 @@ describe("injectCompact（T35 批量动作的入口）", () => {
     const h = harness([], { panes: { "master:busy": BUSY_PANE } });
     expect(await injectCompact("master:idle", { action: "compact", keep: "只留卡号" }, h.deps)).toEqual({ status: "executed", line: "/compact 只留卡号" });
     expect(await injectCompact("master:busy", { action: "save-compact" }, h.deps)).toEqual({ status: "queued", line: "/save-compact" });
+    // 带了 agentName 的执行者：save-compact 改成 compact（手动按钮 / 批量动作都走这条）
+    expect(await injectCompact("master:t", { action: "save-compact", agentName: "agent-task-t9" }, h.deps)).toMatchObject({ line: `/compact ${DEFAULT_KEEP_LIST}` });
     expect(compactInjectedRecently("master:idle", h.now)).toBe(true);
     expect(compactInjectedRecently("master:idle", h.now + 16 * MIN)).toBe(false);
     h.deps.send = async () => {

@@ -12,7 +12,7 @@ import { tmuxRaw, tmuxSendLine, windowKey, windowTarget } from "../lib/tmux-help
 import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
 import {
-  boundaryDecision, boundaryView, compactCommand, globalBoundary, matchPolicy, policyBoundary, resolvePolicies, SKIP_REASON_TEXT,
+  boundaryDecision, boundaryView, compactCommand, effectiveAction, globalBoundary, matchPolicy, policyBoundary, resolvePolicies, SKIP_REASON_TEXT,
   type Boundary, type BoundaryVerdict, type CompactAction, type CtxBoundaryView, type GlobalAutoCompact, type PaneQuotaState,
   type PolicyWarning,
 } from "../lib/ctx-boundary-policy.js";
@@ -93,23 +93,25 @@ function currentPolicies(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log">) {
 
 function boundaryFor(a: Pick<BoundaryAgent, "name" | "projectId" | "realWindow">, p: ReturnType<typeof currentPolicies>): Boundary {
   const m = matchPolicy(p.policies, a);
-  return m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
+  const b = m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
+  return { ...b, action: effectiveAction(a.name, b.action) };
 }
 
 /**
  * 注入一次压缩（T35 的批量动作也走这里）：先读画面，读不到 / 撞墙没开 LP / 有选择菜单 / 正在压缩 → 不敲键。
+ * 传了 agentName 时执行者的 save-compact 改成 compact（见 effectiveAction）。
  * 忙的时候敲进去会排队到回合结束（queued），闲着就是立刻执行（executed）。
  */
 export async function injectCompact(
   target: string,
-  opts: { action: CompactAction; keep?: string | null; pane?: string | null },
+  opts: { action: CompactAction; keep?: string | null; pane?: string | null; agentName?: string },
   deps: Pick<CtxBoundaryDeps, "capture" | "paneState" | "send" | "now"> = liveDeps,
 ): Promise<InjectResult> {
   const pane = opts.pane !== undefined ? opts.pane : await deps.capture(target);
   const ps = pane === null ? null : deps.paneState(pane);
   const reason = !ps ? "pane-unknown" : ps.compacting ? "compacting" : ps.wall && ps.lp !== "on" ? "quota-wall" : ps.menu ? "menu" : null;
   if (reason || pane === null) return { status: "skipped", reason: reason ?? "pane-unknown", text: SKIP_REASON_TEXT[reason ?? "pane-unknown"] };
-  const line = compactCommand(opts.action, opts.keep ?? null);
+  const line = compactCommand(opts.agentName ? effectiveAction(opts.agentName, opts.action) : opts.action, opts.keep ?? null);
   try {
     noteCompactInjected(target, deps.now());
     await deps.send(target, line);
@@ -149,7 +151,7 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
   }
   lastTrig.set(a.name, now);
   lastSkip.delete(a.name);
-  const inject = await injectCompact(a.target, { action: b.action, keep: b.keep, pane }, deps);
+  const inject = await injectCompact(a.target, { action: b.action, keep: b.keep, pane, agentName: a.name }, deps);
   deps.log(`🧹 上下文边界 ${verdict.kind === "hard-cap" ? "硬上限" : "闲置"}触发 ${tag}：${b.action} → ${inject.status}`);
   return { agent: a.name, boundary: b, verdict, inject };
 }

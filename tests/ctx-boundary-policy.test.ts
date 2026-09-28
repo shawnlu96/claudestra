@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  BUILTIN_POLICIES, boundaryDecision, boundaryView, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, globalBoundary, globMatch,
+  BUILTIN_POLICIES, boundaryDecision, boundaryView, ccLaunchSettings, compactCommand, DEFAULT_KEEP_LIST, effectiveAction, globalBoundary, globMatch,
   matchPolicy, policyBoundary, resolvePolicies, type BoundaryInput, type CtxPolicy, type PaneQuotaState,
 } from "../src/lib/ctx-boundary-policy.js";
 
@@ -234,5 +234,28 @@ describe("boundaryView / compactCommand / ccLaunchSettings", () => {
     expect(ccLaunchSettings({ policy: BUILTIN_POLICIES[0], via: "name" })).toEqual({ autoCompactWindow: 300_000 });
     expect(ccLaunchSettings({ policy: BUILTIN_POLICIES[1], via: "name" })).toEqual({});
     expect(ccLaunchSettings(null)).toEqual({});
+  });
+});
+
+describe("执行者不跑 save-compact（worktree 里写主仓 memory，会覆盖 PM 的 HANDOFF）", () => {
+  test("effectiveAction：agent-task-* 的 save-compact 改成 compact；其余不动", () => {
+    expect(effectiveAction("agent-task-t36", "save-compact")).toBe("compact");
+    expect(effectiveAction("agent-task-t36", "compact")).toBe("compact");
+    expect(effectiveAction("agent-pm-a", "save-compact")).toBe("save-compact");
+    expect(effectiveAction("agent-car-talk", "save-compact")).toBe("save-compact");
+  });
+  test("配了 save-compact、又可能命中执行者的策略 → 警告；只命中协调者的不报", () => {
+    const hit = (m: object) =>
+      resolvePolicies([{ id: "p", match: m, window: 100_000, action: "save-compact" }]).warnings.some((w) => w.text.includes("HANDOFF"));
+    expect(hit({ names: ["agent-task-*"] })).toBe(true);
+    expect(hit({ names: ["agent-*"] })).toBe(true);
+    expect(hit({ names: ["*"] })).toBe(true);
+    expect(hit({ names: ["agent-task-t36"] })).toBe(true);
+    expect(hit({ projects: ["orch"] })).toBe(true); // 只写项目：这个项目里的执行者也会命中
+    expect(hit({ names: ["agent-pm-*"] })).toBe(false);
+    expect(hit({ names: ["agent-car-*"] })).toBe(false);
+    expect(hit({ projects: ["orch"], names: ["agent-pm-*"] })).toBe(false);
+    expect(resolvePolicies([{ id: "executor", action: "save-compact" }]).warnings.some((w) => w.text.includes("HANDOFF"))).toBe(true);
+    expect(resolvePolicies(undefined).warnings).toEqual([]); // 内置的 coordinator 只匹配 agent-pm-*，不报
   });
 });

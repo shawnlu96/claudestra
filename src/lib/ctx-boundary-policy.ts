@@ -100,10 +100,28 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
   return { id, projects, names, window, idleMinutes, hardCap, action, ccWindow, keep };
 }
 
-/** 数字之间的搭配问题：不拦，只报（配置照样生效） */
+/**
+ * 执行者（worktree 里的 agent-task-*）不跑 /save-compact：它写的是主仓的 memory 目录，和 PM 共用，HANDOFF.md 会被覆盖
+ * （09-29 01:49 实测）。所以不管策略怎么配，执行者一律按 compact（带保留清单）执行；没匹配到策略的个人 agent 各在自己的仓里，照旧。
+ */
+const EXECUTOR_PREFIX = "agent-task-";
+export function effectiveAction(agentName: string, action: CompactAction): CompactAction {
+  return action === "save-compact" && agentName.startsWith(EXECUTOR_PREFIX) ? "compact" : action;
+}
+
+/** 名字模式有没有可能命中执行者：通配符前的字面部分与 agent-task- 互为前缀就算（宁可多报） */
+function mayMatchExecutor(pattern: string): boolean {
+  const lit = pattern.split(/[*?]/)[0];
+  return lit.startsWith(EXECUTOR_PREFIX) || EXECUTOR_PREFIX.startsWith(lit);
+}
+
+/** 搭配问题：不拦，只报（配置照样生效；执行者的 action 在 effectiveAction 里兜住） */
 function crossCheck(p: CtxPolicy, warn: (t: string) => void): void {
   if (p.ccWindow !== null && p.hardCap >= p.ccWindow - CC_COMPACT_BUFFER) {
     warn(`hardCap ${p.hardCap} 不低于 CC 的实际压缩点（约 ${p.ccWindow - CC_COMPACT_BUFFER}）：CC 会先压，带保留清单的那一步等不到`);
+  }
+  if (p.action === "save-compact" && (p.names.some(mayMatchExecutor) || (p.projects.length > 0 && p.names.length === 0))) {
+    warn("action 是 save-compact，但会命中执行者（agent-task-*）：执行者一律改按 compact 执行——worktree 里的 save-compact 会写主仓 memory，覆盖 PM 的 HANDOFF");
   }
 }
 

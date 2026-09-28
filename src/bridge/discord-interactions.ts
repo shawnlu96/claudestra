@@ -386,11 +386,11 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
-    // 与自动压缩同一个入口：画面上有选择菜单 / 撞墙没开 low-priority / 正在压缩时不敲键，并共用注入守卫
-    const r = await injectCompact(windowTarget(agent.name), { action: "save-compact" });
+    const r = await injectCompact(windowTarget(agent.name), { action: "save-compact", agentName: agent.name }); // 同自动压缩一个入口：有菜单 / 撞墙没开 LP / 压缩中不敲键
     if (r.status === "skipped" || r.status === "failed") throw new Error(r.status === "skipped" ? `现在不能注入：${r.text}` : r.error);
     console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId}, ${r.status})`);
-    const content = `🧹 已让 **${String(agent.name).replace(/^agent-/, "")}** 存记忆 + compact（${r.status === "queued" ? "它正忙，已排队" : "已开始"}，做完它会在自己频道汇报）`;
+    const what = r.line === "/save-compact" ? "存记忆 + compact" : "带保留清单 compact（执行者不跑 save-compact，免得覆盖 PM 的 HANDOFF）";
+    const content = `🧹 已让 **${String(agent.name).replace(/^agent-/, "")}** ${what}（${r.status === "queued" ? "它正忙，已排队" : "已开始"}）`;
     await interaction.followUp({ content, ephemeral: true }).catch(() => {});
   } catch (e) {
     console.error("🧹 save-compact 触发失败:", e);
