@@ -5,6 +5,7 @@ import { uiAgentName } from "@/lib/chat/agents";
 import { useT } from "@/lib/i18n";
 import { useChatStore, useChatStoreApi } from "../chat/chat-store";
 import { fetchAuthBlob, saveBlob } from "../chat/components/auth-img";
+import { useChatNav } from "../chat/components/nav-context";
 import { ResponsiveShell } from "../chat/components/responsive-shell";
 import { fmtTs } from "../chat/fmt-time";
 import { MediaFilters, type MediaFilterState } from "./media-filters";
@@ -49,6 +50,7 @@ function toQuery(f: MediaFilterState, q: string): MediaQuery {
 export function MediaPanel({ agent, onClose }: { agent?: string; onClose: () => void }) {
   const t = useT();
   const store = useChatStoreApi();
+  const nav = useChatNav();
   const agents = useChatStore((s) => s.state.agents);
   const [f, setF] = useState<MediaFilterState>({ tab: "image", q: "", pick: agent ?? "", dir: "", cat: "", range: "all" });
   const dq = useDebounced(f.q.trim(), 300);
@@ -64,6 +66,7 @@ export function MediaPanel({ agent, onClose }: { agent?: string; onClose: () => 
 
   const locate = (it: MediaItem) => {
     void store.openAgent(uiAgentName(it.agent)).then(() => store.jumpToContext(it.sessionId, it.seq));
+    nav.toContent(); // 手机端从侧栏入口来时还在会话列表页：压栈横滑到会话页（已在会话页 / 桌面端空转）
     onClose();
   };
   const caption = (it: MediaItem) => {

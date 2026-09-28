@@ -41,7 +41,9 @@ const ICON = {
     '<line x1="12" x2="12" y1="19" y2="22"/><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (paths: string) =>
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin:auto">${paths}</svg>`;
+  // 与 PhotoSwipe 自带按钮同位（按钮 50×60，图标居中）；颜色取它的 --pswp-icon-color，否则会继承页面的深色文字色
+  `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ` +
+  `style="position:absolute;top:18px;left:13px;color:var(--pswp-icon-color,#fff)">${paths}</svg>`;
 const note = (text: string) => `<div class="flex h-full w-full items-center justify-center px-8 text-center text-sm text-white/60">${text}</div>`;
 const SPINNER = '<div class="flex h-full w-full items-center justify-center"><span class="loading loading-spinner loading-md text-white/60"></span></div>';
 

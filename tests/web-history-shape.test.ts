@@ -62,9 +62,9 @@ describe("toChatMessages（历史记录 → 气泡）", () => {
       u(3, "", { attachments: ["/s/inbox/api_3_d.jpg"] }),
     ]);
     expect(out.map((m) => [m.content, m.attachments?.map((x) => `${x.kind}:${x.name}`)])).toEqual([
-      ["看这两张", ["image:api_1_a.png", "file:api_2_b.pdf"]],
+      ["看这两张", ["image:a.png", "file:b.pdf"]],
       ["", ["image:c.png"]],
-      ["", ["image:api_3_d.jpg"]],
+      ["", ["image:d.jpg"]],
     ]);
   });
   test("按钮点击的机器 payload 还原成组件 label，并回填锚点气泡的 replyClicks（已答态跨刷新持久）", () => {
