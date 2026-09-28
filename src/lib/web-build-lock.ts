@@ -7,9 +7,10 @@
  * - 创建：先把 pid 写进临时文件，再 link 到锁路径——link 是原子的且目标存在就失败，锁文件从诞生起就带完整 pid。
  *   旧写法 open("wx") 与写 pid 之间有空档，别人看到空文件当孤儿删掉，两边都以为自己拿到了锁。
  * - 内容读不出 pid（空、乱码、读失败）→ 不删、直接失败，留给人处理：身份不确定时宁可这轮不建。
- * - 持有者已死才接管，且接管者之间互斥：先用同样的 link 手法拿「接管锁」，拿到后重读持有者、确认已死才 unlink。
- *   接管锁在手时锁路径只可能被持有者本人删，死者删不了，所以读和删之间锁不会变。旧写法拿过期读数去 rename
- *   别人刚建的活锁再放回，放回前锁路径是空的，第三方趁机建锁，4 进程抢接管时约三成轮次双持有（见 tests/web-build-lock.test.ts）。
+ * - 持有者已死才接管，且接管者之间互斥：先用同样的 link 手法拿「接管锁」，拿到后读持有者、确认已死，再重读仍是它才 unlink。
+ *   只有持有者本人和接管者会删锁：确认死后锁仍是死者的，死者不会释放、别的接管者被挡住，到 unlink 前锁不会变。
+ *   （判死要跑 ps，只读一次的话活持有者可能在这期间释放、别人建了新锁，会被误删。）旧写法拿过期读数 rename 别人的活锁
+ *   再放回，放回前路径为空、第三方建锁，4 进程抢接管时约三成轮次双持有（见 tests/web-build-lock.test.ts）。
  *   接管锁残留（接管者在很短的临界区里崩溃）→ 按 problem 报错、留给人删，不猜。
  * - 失败原因要报出去（lockStatus）：只有「锁已存在且持有者活着」才算忙；锁内容异常、非 EEXIST 的文件系统错误
  *   都是错误——当成「忙」会让自动更新从此静默地不再部署网页。
@@ -78,25 +79,27 @@ function tryCreate(path: string): boolean {
 }
 
 /**
- * 锁持有者看着已死：拿接管锁后重读确认再删。别人正在接管 → 等一下让主循环再抢；
- * 接管锁的主人已死或内容异常 → 抛错，由 takeLock 报成 problem。
+ * 锁持有者看着已死：拿接管锁后确认已死、再重读锁仍是它才删（判死要跑 ps，这期间活持有者可能已释放、别人已建新锁）。
+ * 别人正在接管 → 等一下，返回那人的 pid 让主循环再抢；接管锁重读仍是同一个死 pid 才算残留，抛错由 takeLock 报成 problem。
  */
-function reapDead(path: string): void {
+function reapDead(path: string): number | undefined {
   const guard = `${path}.reap`;
   if (!tryCreate(guard)) {
     const g = readHolder(guard);
-    if (g === "gone" || (g !== null && holderBusy(g))) {
-      Bun.sleepSync(1); // 接管临界区很短（最多一次 ps），等它做完；主循环 20 轮足够等到
-      return;
+    if (g === "gone" || (g !== null && (holderBusy(g) || readHolder(guard) !== g))) {
+      Bun.sleepSync(10); // 接管临界区只有一两次 ps，等它做完
+      return typeof g === "number" ? g : undefined;
     }
     throw new Error(`接管锁残留（${guard}）：确认没有 web 构建在跑之后手动删掉它`);
   }
   try {
     const holder = readHolder(path);
-    if (typeof holder === "number" && !holderBusy(holder)) unlinkSync(path);
+    // 死者不会再释放、建锁要等路径为空：确认死后重读仍是它，到 unlink 之前锁就不会变
+    if (typeof holder === "number" && !holderBusy(holder) && readHolder(path) === holder) unlinkSync(path);
   } finally {
     unlinkSync(guard);
   }
+  return undefined;
 }
 
 /** 拿锁；永不抛。失败时看 lockStatus()：有 problem 是错误，只有 holder 是别人在构建 */
@@ -105,6 +108,7 @@ export function takeLock(): boolean {
   const path = lockPath();
   try {
     mkdirSync(STATE_DIR, { recursive: true });
+    let reaper: number | undefined;
     for (let i = 0; i < 20; i++) {
       if (tryCreate(path)) return true;
       const holder = readHolder(path);
@@ -117,8 +121,10 @@ export function takeLock(): boolean {
         last = { holder };
         return false;
       }
-      reapDead(path);
+      reaper = reapDead(path);
     }
+    // 一直等不到接管锁：多半是它的 pid 被别的 bun 进程复用了，报出来，不当成「别人在构建」静默跳过
+    if (reaper !== undefined) last = { problem: `web 构建锁接管一直被 pid ${reaper} 占着（${path}.reap）：确认没有 web 构建在跑之后手动删掉它` };
     return false;
   } catch (e) {
     last = { problem: `web 构建锁出错（${path}）：${(e as Error).message}` };

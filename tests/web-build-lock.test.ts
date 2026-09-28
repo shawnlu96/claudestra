@@ -73,13 +73,13 @@ describe("takeLock / releaseLock", () => {
       rmSync(`${LOCK}.reap`, { force: true });
     }
   });
-  test("别人正在接管（接管锁主人活着）：不动锁，这轮拿不到", () => {
+  test("接管锁一直被活 bun 占着（等价于 pid 被复用）：不动锁，等满后按 problem 报出占用者", () => {
     const dead = String(deadPid());
     writeFileSync(LOCK, dead);
     writeFileSync(`${LOCK}.reap`, String(process.pid));
     try {
       expect(takeLock()).toBe(false);
-      expect(lockStatus().problem).toBeUndefined();
+      expect(lockStatus().problem).toContain(`pid ${process.pid}`);
       expect(readFileSync(LOCK, "utf8")).toBe(dead);
     } finally {
       rmSync(`${LOCK}.reap`, { force: true });
