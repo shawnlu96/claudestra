@@ -3,7 +3,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { LedgerEventView } from "../web/features/collab/collab-model";
-import { nextIndex, replayFrames, segmentsAt, timelineAt } from "../web/features/collab/collab-replay";
+import { hasReplay, nextIndex, replayFrames, segmentsAt, timelineAt } from "../web/features/collab/collab-replay";
 import { SINCE_MAX, sinceDigest } from "../web/features/collab/collab-since";
 
 const MIN = 60_000;
@@ -84,6 +84,11 @@ describe("sinceDigest", () => {
     ]);
   });
 
+  test("受阻之后被取消：说「取消」、不再标红（审查 T12C r2 P2-5）", () => {
+    const d = sinceDigest([ev("T5", "stage", { from: "build", to: "blocked" }), ev("T5", "stage", { from: "blocked", to: "cancelled" })], TASKS);
+    expect(d.items.map((i) => [i.text, i.tone])).toEqual([["T5 取消", "neutral"]]);
+  });
+
   test("审查结论：block 写「审查拦下」；没写结论的审查不成条，交给同一刻的 stage 事件", () => {
     const d = sinceDigest([ev("T5", "review", { verdict: "block" }), ev("T6", "review", { round: 2 }), ev("T6", "stage", { from: "review", to: "merge" })], TASKS);
     expect(d.items.map((i) => [i.text, i.tone])).toEqual([["T5 审查拦下", "red"], ["T6 进入合并", "neutral"]]);
@@ -142,6 +147,17 @@ describe("回放", () => {
     expect(blocked[2].ms).toBe(MIN);
     const last = segmentsAt(frames[6], [...timeline]);
     expect(last[3]).toMatchObject({ state: "current", ms: 0 });
+  });
+
+  test("hasReplay 只数能成帧的事件，和 replayFrames 的取舍一致（审查 T12C r2 P2-4）", () => {
+    const onlyNew = [ev("T5", "task", { op: "new" }), ev("T5", "task", { op: "set" }), ev("T5", "task", { op: "set" }), ev("T5", "note", {}, "  ")];
+    expect(replayFrames(onlyNew).length).toBe(1);
+    expect(hasReplay(onlyNew)).toBe(false);
+    const noNew = [ev("T5", "task", { op: "set" }), ev("T5", "item")];
+    expect(replayFrames(noNew)).toEqual([]);
+    expect(hasReplay(noNew)).toBe(false);
+    const samples = [...events, ev("T5", "note", {}, "有正文"), ev("T5", "meta"), ev("T5", "decision", {}, "先这样"), ev("T5", "freeze")];
+    for (let n = 0; n <= samples.length; n++) expect(hasReplay(samples.slice(0, n))).toBe(replayFrames(samples.slice(0, n)).length >= 2);
   });
 
   test("播放头走到末帧就停", () => {

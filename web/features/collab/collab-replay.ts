@@ -26,6 +26,17 @@ function newTaskStage(e: LedgerEventView): Stage {
   return typeof patch?.stage === "string" ? (patch.stage as Stage) : "spec";
 }
 
+/** 会成帧的事件种类（与 eventLine 说话的那几类一致；note 还要有正文）；tests 里有一条用例核对两边不走样 */
+const FRAME_KINDS = new Set(["stage", "deliver", "review", "decision", "deploy", "verify", "rollback"]);
+const framable = (e: LedgerEventView) => (e.kind === "task" && e.data.op === "new") || FRAME_KINDS.has(e.kind) || (e.kind === "note" && e.text.trim() !== "");
+
+/** 能不能回放（至少 2 帧）：只数、不拼文案，详情收起时用它决定出不出按钮 */
+export function hasReplay(events: readonly LedgerEventView[]): boolean {
+  let n = 0;
+  for (const e of events) if (framable(e) && ++n >= 2) return true;
+  return false;
+}
+
 /** 事件 → 帧：建任务算第一帧；「最近 3 件事」不说的事件（改字段、事项）不成帧，但阶段照样跟着走 */
 export function replayFrames(events: readonly LedgerEventView[], tr: Tr = zh): ReplayFrame[] {
   const out: ReplayFrame[] = [];

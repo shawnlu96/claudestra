@@ -65,6 +65,67 @@ describe("parseReviewer：关键词在开头、对象紧跟其后（审查 T12C 
   for (const [title, want] of cases) test(title, () => expect(P(title)).toEqual(want === null ? null : { adversarial: false, ...want }));
 });
 
+describe("parseReviewer：本周实际用过的写法（审查 T12C r2 P2-2，34 条 + PM 点名的）", () => {
+  const R2: ReviewTarget[] = [
+    { id: "T12C", pr: "https://github.com/shawnlu96/claude-orchestrator/pull/160" },
+    { id: "T12d", pr: null }, { id: "T13a", pr: null }, { id: "T26", pr: "#150" }, { id: "T5", pr: null },
+    { id: "T1-2", pr: null }, { id: "T6a", pr: null }, { id: "R2", pr: null }, { id: "T12", pr: null },
+    { id: "T8g" }, { id: "T24a" }, { id: "T27" },
+  ];
+  const cases: [string, string | null, number | null][] = [
+    ["Review T8G r2", "T8g", 2],
+    ["Adversarial review T24a r1", "T24a", 1],
+    ["Re-review T12c r2", "T12C", 2],
+    ["Adversarial final T13a", "T13a", null],
+    ["Adversarial final review T13a r3", "T13a", 3],
+    ["Review PR #150 (T26)", "T26", null],
+    ["Review PR #155 (T27)", "T27", null],
+    ["Review PR #160", "T12C", null],
+    ["Review PR ＃150", "T26", null],
+    ["Review #150", "T26", null],
+    ["Review T12c-r2", "T12C", 2],
+    ["review t12c R2", "T12C", 2],
+    ["REVIEW T12C ROUND 2", "T12C", 2],
+    ["审查 T12c 第二轮", "T12C", 2],
+    ["T12c 第二轮审查", "T12C", 2],
+    ["对 T12c 做对抗式审查", "T12C", null],
+    ["复核T5的修复", "T5", null],
+    ["Review T12c and T12d", "T12C", null],
+    ["Review T12d/T12c spec", "T12d", null],
+    ["Review the T5 fix", "T5", null],
+    ["Review task T5", "T5", null],
+    ["Code review: T6a", "T6a", null],
+    ["Review T12", "T12", null],
+    ["Reviewing T5's PR", "T5", null],
+    ["Final review of T1-2 r1", "T1-2", 1],
+    ["Review: T12c（第2轮）", "T12C", 2],
+    ["Review T１２c", "T12C", null],
+    ["Review\tT12c", "T12C", null],
+    ["🤖 Review T12c r2", "T12C", 2],
+    // 不能误挂
+    ["T5 review findings fix", null, null],
+    ["T12c review-fix verification", null, null],
+    ["Recheck T5 CI status", null, null],
+    ["Audit T5 logs for crash", null, null],
+    ["Review R2", null, null],
+    ["Review T12x", null, null],
+    ["Merge T12b after review", null, null],
+    ["Summarize review of T12c", null, null],
+    ["Review PR #150 (T99)", null, null],
+  ];
+  for (const [title, id, round] of cases) {
+    test(title, () => {
+      const got = parseReviewer(title, R2);
+      expect(got && { taskId: got.taskId, round: got.round }).toEqual(id === null ? null : { taskId: id, round });
+    });
+  }
+  test("对抗式只看关键词那一段", () => {
+    expect(parseReviewer("对 T12c 做对抗式审查", R2)?.adversarial).toBe(true);
+    expect(parseReviewer("Adversarial final T13a", R2)?.adversarial).toBe(true);
+    expect(parseReviewer("Review T12c adversarial notes", R2)?.adversarial).toBe(false);
+  });
+});
+
 describe("parseReviewer：约定写法与边界", () => {
   test("约定 `Review <任务号> r<N>` / `Adversarial review <任务号> r<N>`；R2、第 2 轮、中文关键词也认", () => {
     expect(P("Review T12c r2")).toEqual({ taskId: "T12C", round: 2, adversarial: false });

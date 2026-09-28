@@ -81,6 +81,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "{t} 起": "since {t}",
   "另 {n} 件": "{n} more",
   "另 {n}+ 件": "{n}+ more",
+  "更早的变化没列全": "Earlier changes not all listed",
   "{id} 审查拦下": "{id} blocked in review",
   "{id} 解除受阻": "{id} unblocked",
   "回放这条任务": "Replay this task",

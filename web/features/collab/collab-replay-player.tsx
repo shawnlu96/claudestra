@@ -7,7 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fmtDuration, type Tr } from "./collab-model";
 import { fmtEventTime, type TaskDetail } from "./collab-detail-model";
 import { Icon, type IconName } from "./collab-icons";
-import { nextIndex, replayFrames, segmentsAt } from "./collab-replay";
+import { hasReplay, nextIndex, replayFrames, segmentsAt } from "./collab-replay";
 import base from "./collab.module.css";
 import s from "./collab-v2.module.css";
 
@@ -17,10 +17,10 @@ const EVENT_ICON: Record<string, IconName> = {
   deploy: "zap", verify: "shieldCheck", rollback: "rotateCcw", note: "history",
 };
 
-/** 收起时不算帧（几千条事件要几百毫秒，审查 T12C r1 P2-7）；事件不到 2 条就没什么可回放 */
+/** 收起时不拼文案、不算帧（几千条事件要几百毫秒，审查 T12C r1 P2-7），只数能成帧的事件：不到 2 帧没什么可回放 */
 export function CollabReplay({ d, tr }: { d: TaskDetail; tr: Tr }) {
   const [open, setOpen] = useState(false);
-  if (d.events.length < 2) return null;
+  if (!hasReplay(d.events)) return null;
   if (!open)
     return (
       <button type="button" className={`${base.btn} ${s.rpOpen}`} onClick={() => setOpen(true)}>
@@ -57,6 +57,8 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
     listRef.current?.querySelector<HTMLElement>(`[data-i="${i}"]`)?.scrollIntoView({ block: "nearest" });
   }, [i]);
 
+  // 按钮只在能成两帧以上时出现（hasReplay）；这里再兜一次：数据异常到一帧都没有时不画
+  if (!cur) return null;
   const tone = cur.stage === "fix" || cur.stage === "blocked" || cur.kind === "rollback" ? base.red : base.neutral;
   const toggle = () => {
     // 停在末帧时再点播放 = 从头再放一遍

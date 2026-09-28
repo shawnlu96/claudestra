@@ -1,8 +1,8 @@
 /**
  * 「上次以来」（T12c，ux.md 场景 1 / 6）：上次看协作视图之后，台账上发生的事 → 首页顶部最多 5 条摘要 + 变过的任务集合（线上打小圆点）。
- * 输入是总览 ?since= 下发的 sinceEvents（src/lib/ledger-since.ts：已滤掉导入回填与项目级事件）。
+ * 输入是 GET /me/last-seen/:project?events=1 下发的 events（src/lib/ledger-since.ts：已滤掉导入回填与项目级事件）。
  * 每条任务只说最要紧的一件：出问题 → 上线 / 完成 → 审查通过 → 新派发 → 其余推进；同档取最近的。
- * 问题之后又通过 / 上线 / 验证通过（受阻的还有解除受阻）就算解决了，改说解决之后最要紧的那件，不再标红（审查 T12C r1 P2-4）。
+ * 问题之后又通过 / 上线 / 验证通过 / 取消（受阻的还有解除受阻）就算解决了，改说解决之后最要紧的那件，不再标红（审查 T12C r1 P2-4）。
  * 单测 tests/web-collab-since.test.ts。
  */
 import type { LedgerEventView, LedgerTaskView, Tone, Tr } from "./collab-model";
@@ -40,6 +40,8 @@ interface Classified {
   /** 这条是「受阻」/「解除受阻」：解除只解决受阻这一类问题 */
   blocked?: boolean;
   unblock?: boolean;
+  /** 取消了：之前的问题都不用再管 */
+  cancel?: boolean;
 }
 
 /** 一条事件在摘要里的档位与说法；null = 不值得说（交付、改字段这类） */
@@ -80,7 +82,7 @@ function stageText(id: string, to: string, round: number | null, tr: Tr): Classi
     case "verified":
       return { rank: 1, text: tr("{id} 完成", { id }) };
     case "cancelled":
-      return { rank: 4, text: tr("{id} 取消", { id }) };
+      return { rank: 4, text: tr("{id} 取消", { id }), cancel: true };
     case "restate":
       return { rank: 4, text: tr("{id} 开始复述", { id }) };
     case "build":
@@ -102,7 +104,7 @@ function headOf(list: readonly (Classified & { ts: number })[]): Classified & { 
   const last = list.findLastIndex((c) => c.rank === 0);
   if (last < 0) return pick(list);
   const after = list.slice(last + 1);
-  const resolved = after.some((c) => c.rank === 1 || c.rank === 2 || (list[last].blocked && c.unblock));
+  const resolved = after.some((c) => c.rank === 1 || c.rank === 2 || c.cancel || (list[last].blocked && c.unblock));
   return resolved ? pick(after) : list[last];
 }
 

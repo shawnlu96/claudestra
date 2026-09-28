@@ -1,6 +1,6 @@
 /**
  * 协作视图「上次以来」（T12c）：lib/last-seen.ts 的只往前走、bridge/local-api/last-seen.ts 的门与项目校验、
- * 以及台账总览 ?since= 下发的 sinceEvents（lib/ledger-since.ts）。
+ * 以及 GET /me/last-seen/:project?events=1 下发的事件（lib/ledger-since.ts）。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";

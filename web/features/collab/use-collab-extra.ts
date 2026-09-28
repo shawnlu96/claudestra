@@ -23,12 +23,45 @@ export interface SinceState {
 }
 
 const EMPTY: SinceState = { since: null, events: [], truncated: false };
-const CARRY_KEY = (project: string) => `cstra.collab.since.${project}`;
-/** 刷新前后两次读取之间通常不到一秒；放宽到 10s 容慢机器，再久就当是另一次「来」 */
+const CARRY_PREFIX = "cstra.collab.since.";
+/** pagehide 写入到新页面开始加载之间通常不到一秒；放宽到 10s 容慢机器，再久就当是另一次「来」 */
 const CARRY_MAX_AGE_MS = 10_000;
-/** 这次页面加载是不是刷新；每个项目只沿用一次（之后在 App 里关了再开，就是新的一次「来」） */
+/** 这次页面加载是不是刷新 */
 const RELOADED = typeof performance !== "undefined" && (performance.getEntriesByType?.("navigation")[0] as PerformanceNavigationTiming | undefined)?.type === "reload";
-const carried = new Set<string>();
+
+/**
+ * 页面加载时一次把所有 carry 读出来并删掉，不管是哪种导航；只有刷新才采用。否则整页离开时写下的 carry
+ * 会留到以后某次刷新再被捡起来，已看过的摘要借机复活（审查 T12C r2 P2-1）。每个项目只沿用一次。
+ */
+const inherited: Map<string, number> = (() => {
+  const out = new Map<string, number>();
+  if (typeof window === "undefined") return out;
+  const loadedAt = performance.timeOrigin || Date.now();
+  let keys: string[] = [];
+  try {
+    keys = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.key(i) ?? "").filter((k) => k.startsWith(CARRY_PREFIX));
+  } catch {
+    // 隐私模式 / 存储被禁：没有 carry 可读，刷新后摘要从服务端的新基准算，只是少几条
+    return out;
+  }
+  for (const k of keys) {
+    try {
+      const c = JSON.parse(sessionStorage.getItem(k) ?? "null") as { since?: unknown; at?: unknown } | null;
+      sessionStorage.removeItem(k);
+      const fresh = c && typeof c.since === "number" && c.since > 0 && typeof c.at === "number" && Math.abs(loadedAt - c.at) <= CARRY_MAX_AGE_MS;
+      if (RELOADED && fresh) out.set(k.slice(CARRY_PREFIX.length), c.since as number);
+    } catch {
+      // 内容写坏：这一条当没有
+    }
+  }
+  return out;
+})();
+
+function carryTake(project: string): number | null {
+  const v = inherited.get(project) ?? null;
+  inherited.delete(project);
+  return v;
+}
 /** 此刻挂着、正在显示摘要的项目 → 它的基准；pagehide 时写进 sessionStorage */
 const showing = new Map<string, number>();
 /**
@@ -50,21 +83,6 @@ function flushLeaveMarks(): void {
   leaveMarks.clear();
 }
 
-function carryRead(project: string): number | null {
-  if (!RELOADED || carried.has(project)) return null;
-  carried.add(project);
-  try {
-    const raw = sessionStorage.getItem(CARRY_KEY(project));
-    sessionStorage.removeItem(CARRY_KEY(project));
-    const c = raw ? (JSON.parse(raw) as { since?: unknown; at?: unknown }) : null;
-    const fresh = c && typeof c.since === "number" && c.since > 0 && typeof c.at === "number" && Math.abs(Date.now() - c.at) <= CARRY_MAX_AGE_MS;
-    return fresh ? (c.since as number) : null;
-  } catch {
-    // 隐私模式 / 存储被禁 / 内容写坏：刷新后摘要从服务端的新基准算，只是少几条
-    return null;
-  }
-}
-
 let pageHooked = false;
 /** 模块级只挂一次：pagehide 把挂着的离开标记发出去、把正在显示的摘要基准留给刷新；隐藏时也先把离开标记发掉 */
 function hookPage(): void {
@@ -74,7 +92,7 @@ function hookPage(): void {
     flushLeaveMarks();
     for (const [project, since] of showing) {
       try {
-        sessionStorage.setItem(CARRY_KEY(project), JSON.stringify({ since, at: Date.now() }));
+        sessionStorage.setItem(CARRY_PREFIX + project, JSON.stringify({ since, at: Date.now() }));
       } catch {
         // 同上：只影响刷新后能不能接着显示这份摘要
       }
@@ -103,7 +121,7 @@ export function useLastSeen(project: string): { state: SinceState; dismiss: () =
       const mine = ++gen.current;
       const current = () => !ctrl.signal.aborted && mine === gen.current;
       try {
-        const carry = carryRead(project);
+        const carry = carryTake(project);
         const got = await fetchLastSeen(project, ctrl.signal, carry);
         if (!current()) return;
         const since = carry ?? got.lastSeen;
@@ -127,6 +145,7 @@ export function useLastSeen(project: string): { state: SinceState; dismiss: () =
     return () => {
       ctrl.abort();
       showing.delete(project);
+      inherited.delete(project);
       document.removeEventListener("visibilitychange", onVisibility);
       if (visible)
         leaveMarks.set(project, setTimeout(() => {
@@ -140,6 +159,7 @@ export function useLastSeen(project: string): { state: SinceState; dismiss: () =
     gen.current++;
     setState(EMPTY);
     showing.delete(project);
+    inherited.delete(project);
     sendMark(project);
   }, [project]);
   return { state, dismiss };

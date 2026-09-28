@@ -33,7 +33,8 @@ export function SinceCard(props: { digest: SinceDigest; since: number; truncated
         </button>
       ))}
       {/* truncated：服务端只给了最新的一段（src/lib/ledger-since.ts），更早的变化没列进来 */}
-      {(digest.more > 0 || truncated) && <div className={s.more}>{tr(truncated ? "另 {n}+ 件" : "另 {n} 件", { n: digest.more })}</div>}
+      {digest.more > 0 && <div className={s.more}>{tr(truncated ? "另 {n}+ 件" : "另 {n} 件", { n: digest.more })}</div>}
+      {digest.more === 0 && truncated && <div className={s.more}>{tr("更早的变化没列全")}</div>}
     </section>
   );
 }
