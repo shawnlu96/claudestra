@@ -118,9 +118,16 @@ describe("压缩", () => {
     expect(r).toMatchObject({ outcome: "skipped", detail: "对话太短，不用压缩" });
   });
 
-  test("忙 → 照发，报已排队", async () => {
+  test("回合在跑、输入框是空的 → 照发，报已排队", async () => {
+    const r = await run({ kind: "compact" }, [fx("lp-on-autocontinue"), fx("busy-queued")]);
+    expect(r).toMatchObject({ outcome: "queued", detail: "忙，已排队，回合结束后执行", keys: ["line:/compact"] });
+  });
+
+  test("输入框里已有排队的消息 → 不发，原因写「排队的消息」，和草稿分开（PM 09-29 口径）", async () => {
     const r = await run({ kind: "compact" }, [fx("busy-queued"), fx("busy-queued")]);
-    expect(r.outcome).toBe("queued");
+    expect(r).toMatchObject({ outcome: "failed", keys: [] });
+    expect(r.detail).toContain("排队的消息");
+    expect(r.detail).not.toContain("草稿");
   });
 
   test("正在压缩 → 跳过", async () => {
