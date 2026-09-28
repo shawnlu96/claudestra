@@ -1,6 +1,6 @@
 /**
  * bridge 侧按运行时声明（RuntimeControl）分流的四个闸口，Codex 接进来后复审抓到它们还在套 CC 判据：
- * - Discord 入站「忙就先打断」只对 preemptOnHumanMessage + paneHeuristics 的运行时（preemptIfBusy）
+ * - 人类消息抢占 / 手动打断的闸见 tests/interrupt-gate.test.ts
  * - Stop 后的屏幕复核只对 idleSource=pane 的运行时（stopNeedsPaneRecheck）
  * - wedge 卡死判定只对 paneHeuristics 的运行时（wedgeJudgedByPane）
  * - interruptOnlyWhenBusy：空闲的 Codex 不发 Esc，返回空数组让调用方回报「无需打断」（interruptVia）
@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { wedgeJudgedByPane } from "../src/bridge/wedge-watcher.js";
 import { paneIdleVerdict, paneLooksIdle } from "../src/lib/tmux-helper.js";
-import { interruptVia, preemptIfBusy, stopNeedsPaneRecheck, type InterruptIO } from "../src/lib/runtimes/window-ops.js";
+import { interruptVia, stopNeedsPaneRecheck, type InterruptIO } from "../src/lib/runtimes/window-ops.js";
 
 const CODEX_IDLE = [
   "› 上一轮的回答……",
@@ -83,51 +83,6 @@ describe("interruptVia：interruptOnlyWhenBusy", () => {
       },
     };
     await expect(interruptVia(io, "codex")).rejects.toThrow("send-keys failed");
-  });
-});
-
-describe("preemptIfBusy：Discord 入站的抢占打断", () => {
-  function spy(verdict: string, keys: readonly string[] = ["C-c"]) {
-    const calls = { verdict: 0, interrupt: [] as (string | null | undefined)[] };
-    const verdictOf = async () => {
-      calls.verdict++;
-      return verdict;
-    };
-    const interrupt = async (_t: string, rt: string | null | undefined) => {
-      calls.interrupt.push(rt);
-      return keys;
-    };
-    return { calls, verdictOf, interrupt };
-  }
-
-  test("CC 在忙：打断", async () => {
-    const s = spy("busy");
-    expect(await preemptIfBusy("w", undefined, s.verdictOf, s.interrupt)).toBe(true);
-    expect(s.calls.interrupt).toEqual([undefined]);
-  });
-
-  test("CC 空闲 / 判据可疑：不打断", async () => {
-    for (const v of ["idle", "unknown"]) {
-      const s = spy(v);
-      expect(await preemptIfBusy("w", "claude-code", s.verdictOf, s.interrupt)).toBe(false);
-      expect(s.calls.interrupt).toEqual([]);
-    }
-  });
-
-  test("Codex / Pi：连屏幕都不看，绝不打断（CC 判据对它们恒判 busy）", async () => {
-    for (const rt of ["codex", "pi"]) {
-      const s = spy("busy", ["Escape"]);
-      expect(await preemptIfBusy("w", rt, s.verdictOf, s.interrupt)).toBe(false);
-      expect(s.calls.verdict).toBe(0);
-      expect(s.calls.interrupt).toEqual([]);
-    }
-  });
-
-  test("发键失败：返回 false，不抛（照常投递）", async () => {
-    const r = await preemptIfBusy("w", undefined, async () => "busy", async () => {
-      throw new Error("tmux gone");
-    });
-    expect(r).toBe(false);
   });
 });
 

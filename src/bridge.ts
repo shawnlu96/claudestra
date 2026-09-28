@@ -66,7 +66,7 @@ import * as fs from "fs/promises";
 // master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, isBusyStatus, markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus, markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -168,13 +168,15 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { hangsPendingReply, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
+import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
-import { interruptWindow, preemptIfBusy, stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
+import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
+import { interruptGate } from "./bridge/interrupt-gate.js";
+import { createKeyedSerial } from "./lib/keyed-serial.js";
 import { notifyTargetVerdict } from "./lib/notify.js";
 import { readProjects } from "./lib/projects.js";
 import {
@@ -187,8 +189,6 @@ import {
   isIdle,
   probeTuiContract,
   MASTER_SESSION,
-  paneLooksWorking,
-  paneMainTurnBusy,
 } from "./lib/tmux-helper.js";
 import {
   scanGlobal as scanGlobalSkills,
@@ -340,6 +340,8 @@ interface PendingReply {
   threadId?: string;
   /** v2.22.x Stop hook 已为这条请求拦过一次「补 reply」——不再拦(lib/reply-nudge.ts) */
   nudgedAt?: number;
+  /** 请求方的 from.kind:agent 来源不拦(nudgesForOrigin) */
+  fromKind?: string;
 }
 const pendingReplies = new Map<string, PendingReply>();
 
@@ -392,6 +394,13 @@ async function agentLabelForChannelAsync(channelId: string): Promise<string> {
   return "?";
 }
 
+/** 频道的 agent 还在册(master / registry 里 active)。kill 会把它标 stopped 或删掉;bridge 刚重启、它还在重连退避时仍算在册 */
+async function channelStillRegistered(channelId: string): Promise<boolean> {
+  if (channelId === CONTROL_CHANNEL_ID) return true;
+  const regs = await readRegistryAgents().catch(() => null); // 读不到就当还在册:多挂一个看门狗只是多催一次,比漏判安全
+  return !regs || regs.some((a) => a.channelId === channelId && a.status === "active");
+}
+
 /** send_to_agent 回程路由簿：target 答复时推回 caller。落盘、caller 的 ws 推回时现取，见 bridge/agent-calls.ts */
 const pendingAgentCalls = new AgentCallBook();
 
@@ -411,29 +420,16 @@ function isHumanRequest(env: RouterEnvelope): boolean {
   return (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request";
 }
 
-/** 目标 agent 是否正在回合中(pane 双信号 + event-bus 状态,与人类抢占同判据)。 */
+/** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
 async function localAgentWorking(channelId: string, evAgent: string): Promise<boolean> {
-  try {
-    let win: string | null = null;
-    if (channelId === CONTROL_CHANNEL_ID) win = `${MASTER_SESSION}:0`;
-    else {
-      const reg = (await readRegistryAgents()).find((a) => a.channelId === channelId);
-      if (reg) win = windowTarget(reg.name);
-    }
-    const tail10 = win
-      ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
-      : "";
-    return paneLooksWorking(tail10) || isBusyStatus(getAgentStatus(evAgent)); // v2.21.2+ 五信号 + 压缩中也算忙
-  } catch {
-    return false;
-  }
+  return agentMsgMustWait(await probeTurn(channelId, evAgent, CONTROL_CHANNEL_ID));
 }
 
 /** 押后队列投递:Stop hook / 压缩结束 / 周期扫描调用(规则与交错场景见 bridge/held-flush.ts 及其测试) */
 function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
   return flushHeld({
     held: heldLocalMsgs, compacting: (a) => getAgentStatus(a) === "compacting", working: localAgentWorking, isHumanRequest,
-    client: (c) => clients.get(c), deliver: deliverToLocal, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
+    client: (c) => clients.get(c), deliver: deliverLocalInOrder, touch: (c, env) => pendingAgentCalls.touch(c, env.from.kind === "local" ? env.from.channelId : undefined),
   }, channelId, reason);
 }
 
@@ -451,7 +447,7 @@ function nudgeAmbiguousCallers(cid: string): void {
   const amb = pendingAgentCalls.takeAmbiguity(cid, stillHeldFor(cid));
   const to = amb.length ? clients.get(cid) : undefined;
   if (to) void deliver({ from: { kind: "bridge", label: "agent-calls" }, to: { kind: "local", channelId: cid, ws: to.ws, cwd: to.cwd }, intent: "notification",
-    content: ambiguityNotice(amb), meta: { messageId: `amb_${Date.now()}`, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() } });
+    content: ambiguityNotice(amb), meta: { messageId: newMessageId("amb"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId() } });
 }
 
 /** caller 当时填的 expecting 放在答复最前面,caller 不靠自己记得也能接着干 */
@@ -472,10 +468,10 @@ async function pushBackToCaller(pac: PendingAgentCall, fromWs: ServerWebSocket<u
     to: { kind: "local", agentName: pac.callerName, channelId: pac.callerChannelId, ws: callerWs, cwd: live?.cwd },
     intent: "response",
     content,
-    meta: { messageId: `${idPrefix}_${Date.now()}`, triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
+    meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
   if (live) return (await deliver(env)).outcome;
-  heldLocalMsgs.hold(pac.callerChannelId, { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() });
+  heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
 }
@@ -509,6 +505,8 @@ subscribeEvents({}, (evt) => {
  */
 interface PendingInterAgentMsg {
   fromLabel: string;
+  /** 发送方频道:它被 kill 时连这条一起销(dropPendingsForChannel) */
+  fromChannelId?: string;
   retries: number;
   ts: number;
 }
@@ -543,9 +541,11 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
+import { probeTurn } from "./bridge/turn-probe.js";
+import { agentMsgMustWait } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
@@ -598,7 +598,7 @@ async function deliver(env: RouterEnvelope): Promise<RouterDelivery> {
   try {
     switch (env.to.kind) {
       case "local":
-        return await deliverToLocal(env, env.to);
+        return await deliverLocalInOrder(env, env.to);
       case "user":
         return await deliverToUser(env, env.to);
       case "api":
@@ -745,7 +745,7 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
       intent: "notification",
       content: text,
       meta: {
-        messageId: `api_mirror_${Date.now()}`,
+        messageId: newMessageId("api_mirror"),
         triggerKind: "system",
         ts: new Date().toISOString(),
         threadId: newThreadId(),
@@ -757,9 +757,6 @@ async function mirrorApiExchange(to: RouterApiUserEndpoint, agentChannelId: stri
 }
 
 /** 投递到本地 Claude Code session —— 通过 ws 注入一条 "message" 事件 */
-/** 人类连发抢占的每频道冷却：C-c 后短窗内不再重复打断（防打断叠加 + 双 C-c 风险）。 */
-const lastPreemptAt = new Map<string, number>();
-const PREEMPT_COOLDOWN_MS = 4_000;
 
 // ── 大总管的 jsonl watcher（v2.14+）──────────────────────────────────────
 // master 不在 registry（它是 tmux window 0，没有 create/resume 那套注册流程），
@@ -786,6 +783,16 @@ function syncMasterWatcher(discord: Client): void {
   });
 }
 
+/**
+ * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先
+ * ws.send——owner 语音连发的顺序就乱了(tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。
+ */
+const localSendOrder = createKeyedSerial();
+function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
+  return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
+}
+
+/** 只经 deliverLocalInOrder 调用 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
   const content = await renderContentForLocal(env);
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
@@ -831,56 +838,24 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 上下文都在,agent 带着前一条的进度优先响应补充,而不是把补充压到回复之后。
   // 只对人类的 request 生效(Discord user / API user);agent↔agent、peer、bridge
   // 系统消息、response 回执不抢占目标的工作。
-  // 「主回合在跑」= pane 主回合信号(paneMainTurnBusy)或 event-bus 最近状态 thinking。
-  // 不能用 paneLooksWorking:主回合结束、只剩后台 subagent 时它照样判忙,而那时的 C-c 会把
-  // 后台 agent 全停掉;消息本来就能直接投递,不需要腾空。paneLooksIdle 不用——工作中的空 ❯ 会假阳性。
-  // 误判空闲时单发一次 C-c 只清输入行不退出 CC(退出要短窗内连按两次);同频道 4s 冷却,连发不叠加打断。
-  if (
-    // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,
-    // C-c 掐断本机正跑的回合等于让外机打断本机用户的活(review 2026-07-19 #1)
-    (env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) &&
-    env.intent === "request" &&
-    Date.now() - (lastPreemptAt.get(to.channelId) ?? 0) > PREEMPT_COOLDOWN_MS
-  ) {
+  // 判忙、冷却、串行都在 interruptGate(lib/interrupt-gate.ts):只看主回合、压缩中和 Pi / Codex 不打断,打断后等 CC 收尾一拍。
+  // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,C-c 掐断本机正跑的回合等于让外机打断本机用户的活
+  if ((env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request") {
     try {
-      let win: string | null = null;
-      let targetRuntime: string | undefined;
-      if (to.channelId === CONTROL_CHANNEL_ID) win = `${MASTER_SESSION}:0`;
-      else {
-        const reg = (await readRegistryAgents()).find((a) => a.channelId === to.channelId);
-        if (reg) {
-          win = windowTarget(reg.name);
-          targetRuntime = reg.runtime;
-        }
-      }
-      const tail10 = win
-        ? (await tmuxRaw(["capture-pane", "-t", win, "-p"])).split("\n").slice(-10).join("\n")
-        : "";
-      const working = paneMainTurnBusy(tail10) || getAgentStatus(evAgent) === "thinking";
-      // v2.21.2+ 正在压缩上下文:不 C-c(会把跑了几分钟的压缩掐掉),下面押后到压缩结束
-      // v2.23+ 能把消息 steer / 排进回合的运行时(Pi)**人类消息一律不打断**:打断反而把
-      // 干到一半的回合掐了(2026-09-14 实测)。由 control.preemptOnHumanMessage 声明。
-      if (win && working && controlFor(targetRuntime).preemptOnHumanMessage && getAgentStatus(evAgent) !== "compacting") {
-        lastPreemptAt.set(to.channelId, Date.now());
-        await interruptWindow(win, targetRuntime);
-        recordMetric("agent_interrupt", { channelId: to.channelId, agent: evAgent, meta: { trigger: "preempt" } });
-        // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
-        emitEvent({ agent: evAgent, chatId: to.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
-        console.log(`⚡ 抢占打断 ${evAgent}（人类补充消息优先处理）`);
-        // CC 中断收尾需要一拍;立刻投递会混进垂死回合的尾流
-        await new Promise((r) => setTimeout(r, 1200));
-      }
+      await interruptGate.preempt(to.channelId, evAgent);
     } catch (e) {
       console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
     }
   }
   // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
-  const compactingNow = getAgentStatus(evAgent) === "compacting";
-  const busy = compactingNow || (env.from.kind === "local" && (await localAgentWorking(to.channelId, evAgent)));
+  // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
+  const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
+  const compactingNow = turn.main === "compacting";
+  const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
-    const n = heldLocalMsgs.hold(to.channelId, { env, to, heldAt: Date.now() });
+    const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
@@ -927,6 +902,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
         intendedReplyChannel: replyBackChannel,
         targetWs: to.ws,
         threadId: env.meta.threadId,
+        fromKind: env.from.kind,
       });
       pendingThreads.set(env.meta.threadId, {
         request: env,
@@ -938,13 +914,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     // reply→别agent forward 都经这里），记看门狗 pending。
     // v2.4.16+: meta.skipInterAgentWatchdog=true 时不挂 watchdog（oneShot 的 fire
     // -and-forget 场景，caller 不期待回应，watchdog 没必要打扰 target）。
-    if (
-      env.from.kind === "local" &&
-      env.from.ws !== to.ws &&
-      !env.meta.skipInterAgentWatchdog
-    ) {
+    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, await channelStillRegistered(env.from.channelId))) {
       pendingInterAgentMsg.set(to.channelId, {
         fromLabel: env.from.agentName || "另一个 agent",
+        fromChannelId: env.from.channelId,
         retries: 0,
         ts: Date.now(),
       });
@@ -1068,7 +1041,7 @@ async function forwardReplyToAgentClaude(
     intent: answering ? "response" : "notification",
     content: answering ? withExpecting(answering, text) : text,
     meta: {
-      messageId: `reply_fwd_${Date.now()}`,
+      messageId: newMessageId("reply_fwd"),
       triggerKind: "agent_tool",
       ts: new Date().toISOString(),
       threadId: newThreadId(),
@@ -1250,7 +1223,7 @@ discord.once("ready", async () => {
         to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
         intent: "notification",
         content: resumeText(st.error, st.errorAt),
-        meta: { messageId: `api_resume_${now}`, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
+        meta: { messageId: newMessageId("api_resume"), triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
       }).then(() => {
         console.log(`🔁 api-error-resume → ${cid}`);
         recordMetric("api_error_resume", { channelId: cid, meta: { error: st.error } });
@@ -1490,13 +1463,11 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
   // 新用户消息到达 → 如果 agent 还在忙（不 idle），先发 Ctrl+C 打断，让新消息覆盖旧任务
   {
     try {
-      const listResult = await runManager("list");
-      const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
-      const targetWindow = agent ? `master:${agent.name}` : `master:0`;
-      // 三态判断（契约可疑时宁可不打断）；只对 preemptOnHumanMessage + paneHeuristics 的运行时（CC），
-      // Pi / Codex 跳过——它们套 CC 判据恒判 busy，每条消息都会被误发打断键
-      if (await preemptIfBusy(targetWindow, agent?.runtime)) await Bun.sleep(400);
-    } catch { /* non-critical */ }
+      // 与 deliverToLocal 那道是同一个闸（interruptGate）：这里打断了，那边在冷却期内不会再发第二次 C-c
+      await interruptGate.preempt(channelId, await agentLabelForChannelAsync(channelId));
+    } catch (e) {
+      console.log(`⚠️ Discord 入站抢占失败,按常规投递: ${(e as Error).message}`);
+    }
 
     // v2.4.16+ 用户发消息 = 显式接管这个 channel 的对话方向。把该 channel 上挂着
     // 的所有 inter-agent pending 一并清掉，否则它们会在下一轮 Stop hook 触发
@@ -1521,7 +1492,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     intent: "notification",
     content: t("💭 大聪明思考中...", "💭 Thinking..."),
     meta: {
-      messageId: `status_${channelId}_${Date.now()}`,
+      messageId: newMessageId(`status_${channelId}`),
       triggerKind: "bridge_synth",
       ts: new Date().toISOString(),
       threadId: newThreadId(),
@@ -1650,7 +1621,7 @@ async function notifyMaster(content: string): Promise<void> {
       intent: "notification",
       content,
       meta: {
-        messageId: `notify_${Date.now()}`,
+        messageId: newMessageId("notify"),
         triggerKind: "bridge_synth",
         ts: new Date().toISOString(),
         threadId: newThreadId(),
@@ -1911,7 +1882,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           intent: "response",
           content: text,
           meta: {
-            messageId: `reply_${Date.now()}`,
+            messageId: newMessageId("reply"),
             triggerKind: "agent_tool",
             ts: new Date().toISOString(),
             threadId: newThreadId(),
@@ -2012,7 +1983,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           intent: "notification",
           content: text,
           meta: {
-            messageId: `notify_${Date.now()}`,
+            messageId: newMessageId("notify"),
             triggerKind: "bridge_synth",
             ts: new Date().toISOString(),
             threadId: newThreadId(),
@@ -2405,7 +2376,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           intent: "request",
           content: msg.text || "",
           meta: {
-            messageId: `agent_${Date.now()}`,
+            messageId: newMessageId("agent"),
             triggerKind: "agent_tool",
             ts: new Date().toISOString(),
             threadId: newThreadId(),
@@ -2703,7 +2674,7 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
-  const STALE_MS = 10 * 60_000;
+  const IA_WATCHDOG_STALE_MS = 10 * 60_000;
   for (const [key, pending] of pendingAgentCalls.entries()) {
     if (!shouldSweepPac(pending, heldFromOf(pending.targetChannelId ?? ""), now, PAC_STALE_MS)) continue;
     pendingAgentCalls.delete(key);
@@ -2716,7 +2687,7 @@ setInterval(() => {
     const caller = from.kind === "local" ? clients.get(from.channelId) : undefined;
     try {
       caller?.ws.send(JSON.stringify({ type: "message", content: heldNoticeText(n), meta: {
-        chat_id: (from as RouterLocalEndpoint).channelId, message_id: `held_${n.kind}_${now}`, ts: new Date().toISOString(), trigger: "system",
+        chat_id: (from as RouterLocalEndpoint).channelId, message_id: newMessageId(`held_${n.kind}`), ts: new Date().toISOString(), trigger: "system",
         intent: "notification", thread_id: newThreadId(), user: "bridge", user_id: "bridge", is_bridge: "true",
       } }));
     } catch { /* caller 也没了就算了:消息本身按上面的规则留着 / 已放弃 */ }
@@ -2739,7 +2710,7 @@ setInterval(() => {
     }
   }
   for (const [channelId, pending] of pendingInterAgentMsg.entries()) {
-    if (now - pending.ts > STALE_MS) {
+    if (now - pending.ts > IA_WATCHDOG_STALE_MS) {
       pendingInterAgentMsg.delete(channelId);
       console.log(`🧹 pendingInterAgentMsg stale: 清掉 ${channelId}（来自 ${pending.fromLabel}）`);
     }
@@ -2784,7 +2755,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
         const cands = [...pendingReplies.entries()]
-          .filter(([, p]) => p.targetWs === ws)
+          .filter(([, p]) => p.targetWs === ws && nudgesForOrigin(p.fromKind))
           .map(([key, p]) => ({ key, ts: p.ts, nudgedAt: p.nudgedAt }));
         const pick = pickUnrepliedForNudge(cands, { event, stopHookActive: !!body.stopHookActive, now: Date.now() });
         if (pick) {
@@ -2960,10 +2931,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                 });
               } else {
                 try {
-                  const callerCtxLine = pendingAgent.expecting
-                    ? `[💡 你之前 send_to_agent 给 ${pendingAgent.targetName} 时填的期望：${pendingAgent.expecting}]\n`
-                    : "";
-                  const pushBody = `${callerCtxLine}[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`;
+                  const pushBody = withExpecting(pendingAgent, `[ℹ️ 对方 (${pendingAgent.targetName}) 这轮没用 reply() 工具，下面是 bridge 从 assistant 文字兜底转发的：]\n\n${drainedText}`);
                   await pushBackToCaller(pendingAgent, clients.get(cid)?.ws, pendingAgent.originalReplyChannel || cid, pushBody, "agent_drain");
                   pendingAgentCalls.consume(cid, pendingAgent.callerChannelId, pendingAgent);
                   console.log(`📨 AGENT PUSH-BACK (drain兜底): ${pendingAgent.targetName} → ${pendingAgent.callerName}（drain 文字）`);
@@ -3031,7 +2999,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
                       intent: "notification",
                       content: nudgeText,
                       meta: {
-                        messageId: `ia_nudge_${Date.now()}`,
+                        messageId: newMessageId("ia_nudge"),
                         triggerKind: "bridge_synth",
                         ts: new Date().toISOString(),
                         threadId: newThreadId(),
@@ -3197,7 +3165,7 @@ initApiRoutes({
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
   deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
-  hold: (env) => void heldLocalMsgs.hold((env.to as RouterLocalEndpoint).channelId, { env, to: env.to as RouterLocalEndpoint, heldAt: Date.now() }),
+  hold: (env) => void heldLocalMsgs.holdEnv(env),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });
 
@@ -3422,7 +3390,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
             headers: { "Content-Type": "application/json" },
           });
         }
-        const n = clearInterAgentPendingsForChannel(body.channelId);
+        const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
         // 押给它的消息(含推回给它的答复)不再有人收:丢掉并留日志,别等 24 小时,也别投给日后复用这个频道的新 agent
         const dropped = heldLocalMsgs.get(body.channelId)?.length ?? 0;
         if (heldLocalMsgs.delete(body.channelId)) console.log(`🧹 agent 已 kill,丢掉押给它的 ${dropped} 条消息 (channel=${body.channelId})`);
@@ -3431,11 +3399,6 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
         // 建了又删的 agent 会一路堆积。
         const goneAgent = (body as { agent?: string }).agent;
         if (goneAgent) forgetAgent(goneAgent);
-        for (const [tid, t] of pendingThreads.entries()) {
-          if (t.request.to.kind === "local" && t.request.to.channelId === body.channelId) {
-            pendingThreads.delete(tid);
-          }
-        }
         console.log(`🧹 /agent/cleanup channel=${body.channelId} 清掉 ${n} 条 pending`);
         return new Response(JSON.stringify({ ok: true, cleared: n }), {
           headers: { "Content-Type": "application/json" },

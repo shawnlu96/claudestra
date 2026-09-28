@@ -61,6 +61,30 @@ describe("takeLock / releaseLock", () => {
       chmodSync(STATE_DIR, 0o700);
     }
   });
+  test("接管锁残留（主人已死）：不接管、按 problem 报出去，两把锁都不动", () => {
+    const dead = String(deadPid());
+    writeFileSync(LOCK, dead);
+    writeFileSync(`${LOCK}.reap`, dead);
+    try {
+      expect(takeLock()).toBe(false);
+      expect(lockStatus().problem).toContain(`${LOCK}.reap`);
+      expect(readFileSync(LOCK, "utf8")).toBe(dead);
+    } finally {
+      rmSync(`${LOCK}.reap`, { force: true });
+    }
+  });
+  test("接管锁一直被活 bun 占着（等价于 pid 被复用）：不动锁，等满后按 problem 报出占用者", () => {
+    const dead = String(deadPid());
+    writeFileSync(LOCK, dead);
+    writeFileSync(`${LOCK}.reap`, String(process.pid));
+    try {
+      expect(takeLock()).toBe(false);
+      expect(lockStatus().problem).toContain(`pid ${process.pid}`);
+      expect(readFileSync(LOCK, "utf8")).toBe(dead);
+    } finally {
+      rmSync(`${LOCK}.reap`, { force: true });
+    }
+  });
   test("release 只删自己的锁", () => {
     writeFileSync(LOCK, "999999");
     releaseLock();
@@ -83,10 +107,11 @@ ${body}`);
 }
 
 describe("多进程抢锁", () => {
+  // 旧写法（rename 活锁再放回）在这里约三成轮次出现 2~3 个持有者，8 轮几乎必挂
   test("预置一个死持有者的锁，4 个进程同时起跑抢接管：只有一个拿到", async () => {
     const dir = mkdtempSync(join(tmpdir(), "web-build-lock-dead-"));
     try {
-      for (let round = 0; round < 3; round++) {
+      for (let round = 0; round < 8; round++) {
         mkdirSync(join(dir, "state"), { recursive: true });
         writeFileSync(join(dir, "state", "web-build.lock"), String(deadPid()));
         const outs = await race<{ got: boolean }>(dir, `const got = takeLock(); await Bun.sleep(200); if (got) releaseLock(); console.log(JSON.stringify({ got }));`, 4);
@@ -95,7 +120,7 @@ describe("多进程抢锁", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 60_000);
 
   test("4 个进程同时起跑、各抢 30 次：临界区里从没出现过两个持有者，且确实都拿到过锁", async () => {
     const dir = mkdtempSync(join(tmpdir(), "web-build-lock-"));

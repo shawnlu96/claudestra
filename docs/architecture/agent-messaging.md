@@ -9,7 +9,7 @@ Claude Code silently drops a channel notification that arrives while a turn is s
 ## Held queue (`held-queue.ts`)
 
 - Persisted to `~/.claude-orchestrator/held-messages.json` (ws stripped; the current connection is looked up by channel id at delivery), so a bridge restart loses nothing.
-- `hold()` is idempotent per envelope (messageId **and** threadId — messageIds are `prefix_<ms>` and collide): re-holding the item being delivered keeps the original, with its first-held time.
+- `hold()` is idempotent per envelope object: re-holding the item being delivered (flush hands `deliverToLocal` the queued env itself) keeps the original, with its first-held time. Not keyed by `message_id` — button clicks on one Discord message share it.
 - Nothing is dropped on a timer: after 30 min the sender is told it is still queued; after 24 h it gives up and says so.
 
 ## Flush (`held-flush.ts`)
@@ -30,7 +30,7 @@ Lets an agent in a long turn pull what is queued for it, as a tool result.
 
 - **Lease, not dequeue**: a batch (`inbox_<uuid>`) is leased; `check_inbox({ ack })` confirms it (dequeues) and takes the next batch. An unconfirmed batch is not delivered by flush during the 15 min lease, then is delivered normally (same `message_id`).
 - Calling without `ack` while a batch is unconfirmed returns that batch again (no new lease) — covers a lost tool result or a cancelled turn.
-- Budget: ≤ 10 messages, ≤ 15 000 chars of bodies. A longer message is not batched; it gets a 2 000-char preview (max 3 per result) and can be read in 12 000-char pages with `check_inbox({ read: <thread_id>, page })`, which leases it on first read. `read` by `message_id` is accepted only when unambiguous.
+- Budget: ≤ 10 messages, ≤ 15 000 chars of bodies. A longer message is not batched; it gets a 2 000-char preview (max 3 per result) and can be read in 12 000-char pages with `check_inbox({ read: <message_id>, page })`, which leases it on first read. Bridge-generated ids are `prefix_<ms>_<rand>` (`newMessageId`); a `thread_id` is still accepted, and paging hints echo whichever id was passed.
 - A leased request counts as **seen** by the target for return routing (`unseenFrom` only lists unleased items).
 
 ## Return routing (`agent-calls.ts`)

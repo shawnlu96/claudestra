@@ -168,7 +168,8 @@ describe("ownerChatIds", () => {
 
 describe("系统提醒（新设备配对）", () => {
   test("推给所有 Web Push 订阅和 APNs；不计未读、不带会话", async () => {
-    await dispatcher.notice({ title: "新设备已配对", body: "「iPhone」刚配对了这台电脑。" });
+    const out = await dispatcher.notice({ title: "新设备已配对", body: "「iPhone」刚配对了这台电脑。" });
+    expect(out).toEqual({ sent: 4, failed: 0 });
     expect(unreadCounts(db)).toEqual({});
     const web = sent.filter((s) => s.kind === "web");
     expect(web.map((s) => s.to).sort()).toEqual([IOS, MAC, OLD].sort());

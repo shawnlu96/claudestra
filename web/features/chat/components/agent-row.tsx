@@ -16,6 +16,7 @@ import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
+import { LedgerStageChip } from "./ledger-stage-chip";
 import type { RowSlots } from "./team-group"; // lead = 行按钮前的开合控件，tail = 名字后的小标（派出 N 个 / 下一期的阶段）
 
 /* 侧栏的会话行（从 sidebar.tsx 原样搬出，D8-9）：AgentRow + 左滑动作 + 点击串台守卫。
@@ -259,7 +260,7 @@ export function AgentRow({
         )}
         {lead}
         <button
-          className="relative flex min-w-0 flex-1 select-none items-center gap-2.5 text-left sm:gap-2"
+          className="@container relative flex min-w-0 flex-1 select-none items-center gap-2.5 text-left sm:gap-2"
           {...menu.handlers}
           onPointerDown={(e) => {
             tapIntent = { name: a.name, ts: Date.now(), x: e.clientX, y: e.clientY };
@@ -308,7 +309,7 @@ export function AgentRow({
             <NameTags a={a} projEmoji={projEmoji} />
           </span>
           <RepoTag a={a} />
-          {tail}
+          {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} names={[a.label, a.displayName]} />}
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
               放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}

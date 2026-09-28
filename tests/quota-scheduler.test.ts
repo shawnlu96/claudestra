@@ -24,54 +24,9 @@ import {
   resetCreditsBody,
 } from "./quota-fixtures.js";
 
-const MIN = 60_000;
-const HOUR = 60 * MIN;
+import { HOUR, MIN, harness, type Harness } from "./quota-scheduler-harness.js";
 
-type Route = (url: string, signal: AbortSignal) => Response | Promise<Response>;
-interface Harness {
-  now: number;
-  enabled: boolean;
-  cd: ReturnType<typeof fakeCredDeps>;
-  fetch: ReturnType<typeof fakeFetch>;
-  route: Route;
-  store: QuotaStore;
-  scheduler: QuotaScheduler;
-  advance(ms: number): void;
-  fresh(): QuotaScheduler;
-}
-
-function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore()): Harness {
-  const h: Harness = {
-    now: T0,
-    enabled: true,
-    cd: fakeCredDeps(),
-    fetch: fakeFetch((u, s) => h.route(u, s)),
-    route,
-    store,
-    scheduler: null as unknown as QuotaScheduler,
-    advance(ms: number) {
-      h.now += ms;
-    },
-    fresh() {
-      h.scheduler = new QuotaScheduler({
-        now: () => h.now,
-        random: () => 0.5,
-        fetch: h.fetch,
-        readCredential: (p) => (p === "claude" ? readClaudeCredential(h.cd) : readCodexCredential(h.cd)),
-        confirmCredential: (c) => confirmCredential(c, h.cd),
-        peekAccountKey: (p) => peekAccountKey(p, h.cd),
-        hashCreditId: (acct, id) => hmacHex(SECRET, acct, id),
-        store: h.store,
-        isEnabled: () => h.enabled,
-      });
-      return h.scheduler;
-    },
-  };
-  h.fresh();
-  return h;
-}
-
-const urlsOf = (h: Harness) => h.fetch.calls.map((c) => c.url.split("/").pop());
+const urlsOf = (h: Harness) => h.fetch.calls.map((c) => c.url.split("?")[0].split("/").pop());
 
 describe("合并与限频", () => {
   test("网页 / Discord / 后台同时刷新同一家 → 只发一个请求", async () => {
@@ -140,7 +95,7 @@ describe("失败分类与冷却", () => {
       h.advance(MIN);
     }
     expect(h.cd.keychainCalls.length).toBeLessThanOrEqual(6);
-    expect(h.fetch.calls.filter((c) => c.url.endsWith("/oauth/usage"))).toHaveLength(1);
+    expect(h.fetch.calls.filter((c) => c.url.includes("/oauth/usage"))).toHaveLength(1);
   });
 
   test("401 后 CC 续期了 token：下一次核对就恢复，不用等满 30 分钟", async () => {

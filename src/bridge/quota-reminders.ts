@@ -1,0 +1,189 @@
+/**
+ * 重置次数的提醒投递（设计稿 T2b §4 / §6.1；规则与账本在 lib/quota-reminder-rules.ts）：Codex 的 credit 与 Claude 的重置卡
+ * 走同一套 72 / 24 小时规则和去重。两家都在后台每 6 小时查一次（Claude 要读 Keychain，owner 09-28 已批，config quotaClaudeBackground 可单独关）。
+ *
+ *   - 每个额度 tick 之后跑一次：按当前视图规划「快过期」（72 / 24 小时）与「用满了还有可用重置」，再投递账本里没送到的。
+ *   - 两个渠道各记各的：推送（owner 的所有设备）、Discord #control。失败的渠道按规则退避重试，已成功的不重发。
+ *     推送一台设备也没登记 = 算送到（没有可重试的对象）；推送子系统没起来 / 全部设备失败 = 失败。
+ *   - 夜间 23:00–08:00（本机时区）不打扰：暂存，08:00 后同一渠道的积压合并成一条发。例外：有 credit 在 08:00 前就过期，
+ *     等下去就是不可逆的损失，立即发。
+ *   - 文案只有到期时刻、次数、窗口名：credit 的内部键、账户键都不进消息。
+ * 单测 tests/quota-reminders.test.ts。
+ */
+
+import { t } from "../lib/i18n.js";
+import {
+  claudeGrantCredits, isEligibleCredit, pendingDeliveries, planExhaustedReminder, planExpiryReminder, recordDelivery,
+  type ReminderChannel, type ReminderLedger, type ReminderNotice,
+} from "../lib/quota-reminder-rules.js";
+import type { RemoteView } from "../lib/quota-scheduler.js";
+
+const QUIET_START_H = 23;
+const QUIET_END_H = 8;
+
+/** 本机时区的夜间（23:00–08:00） */
+export function inQuietHours(now: number): boolean {
+  const h = new Date(now).getHours();
+  return h >= QUIET_START_H || h < QUIET_END_H;
+}
+
+/** 这段夜间结束的时刻（本机时区的下一个 08:00）；不在夜间 = now */
+export function quietEndsAt(now: number): number {
+  if (!inQuietHours(now)) return now;
+  const d = new Date(now);
+  if (d.getHours() >= QUIET_START_H) d.setDate(d.getDate() + 1);
+  d.setHours(QUIET_END_H, 0, 0, 0);
+  return d.getTime();
+}
+
+/** 夜间也要立刻发：有 credit 等不到天亮就过期（已经过期的不算——那条提醒本身就该丢了） */
+export function urgentAtNight(n: ReminderNotice, now: number): boolean {
+  const end = quietEndsAt(now);
+  return n.kind === "expiry" && (n.credits ?? []).some((c) => c.expiresAtMs > now && c.expiresAtMs <= end);
+}
+
+const pad = (n: number) => String(n).padStart(2, "0");
+/** MM-DD HH:mm（本机时区） */
+export function fmtLocal(ms: number): string {
+  const d = new Date(ms);
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+const REDEEM_HINT = () => t("需要时在 codex 里 /status → Redeem usage limit reset。", "When needed: /status in codex → Redeem usage limit reset.");
+const CLAUDE_HINT = () => t("需要时在 Claude Code 里使用：用了补满额度，周重置日不变。", "Use it in Claude Code when needed: it refills your usage; the weekly reset date stays the same.");
+
+function windowName(id: string): string {
+  if (id === "5h") return t("5 小时窗口", "5-hour window");
+  if (id === "7d") return t("本周窗口", "weekly window");
+  return t(`${id} 窗口`, `${id} window`);
+}
+
+/** 一条通知的正文（不含标题） */
+export function noticeBody(n: ReminderNotice): string {
+  if (n.kind === "expiry") {
+    const cs = n.credits ?? [];
+    const when = cs.map((c) => fmtLocal(c.expiresAtMs)).join(t("、", ", "));
+    if (n.provider === "claude") {
+      return t(
+        `Claude 有 ${cs.length} 张重置卡 ${when} 到期，还没用完。${CLAUDE_HINT()}`,
+        `Claude has ${cs.length} reset card${cs.length > 1 ? "s" : ""} expiring ${when} with resets left. ${CLAUDE_HINT()}`,
+      );
+    }
+    return t(
+      `Codex 有 ${cs.length} 次免费额度重置 ${when} 到期，还没用。${REDEEM_HINT()}`,
+      `Codex has ${cs.length} unused free usage reset${cs.length > 1 ? "s" : ""} expiring ${when}. ${REDEEM_HINT()}`,
+    );
+  }
+  const e = n.exhausted;
+  const k = e?.applicable ?? 0;
+  const win = e ? windowName(e.windowId) : "";
+  return t(`Codex 额度用满了（${win}），你有 ${k} 次重置此刻可用。${REDEEM_HINT()}`, `Codex usage is maxed out (${win}); ${k} reset${k > 1 ? "s" : ""} can be redeemed now. ${REDEEM_HINT()}`);
+}
+
+const noticeTitle = (ns: ReminderNotice[]) => {
+  const names = [...new Set(ns.map((n) => (n.provider === "claude" ? "Claude" : "Codex")))].join(" / ");
+  return t(`${names} 额度重置`, `${names} usage resets`);
+};
+
+/** 规划：两家各看当前账户；陈旧 / 账户不确定由规则自己拒 */
+function planReminders(ledger: ReminderLedger, view: RemoteView, now: number): ReminderLedger {
+  let next = ledger;
+  const cl = view.claude;
+  const cu = cl.endpoints.claude_usage;
+  if (cl.account && cu?.snapshot?.data.resets) {
+    const ctx = { provider: "claude" as const, accountKey: cl.account.key, now, uncertain: cl.account.uncertain, stale: cu.stale };
+    next = planExpiryReminder(next, claudeGrantCredits(cu.snapshot.data.resets), ctx).ledger;
+  }
+  const c = view.codex;
+  if (!c.account) return next;
+  const base = { provider: "codex" as const, accountKey: c.account.key, now, uncertain: c.account.uncertain };
+  const detail = c.endpoints.codex_reset_credits;
+  if (detail?.snapshot) next = planExpiryReminder(next, detail.snapshot.data.credits, { ...base, stale: detail.stale }).ledger;
+  const usage = c.endpoints.codex_usage;
+  if (usage?.snapshot) next = planExhaustedReminder(next, usage.snapshot.data, { ...base, stale: usage.stale }).ledger;
+  return next;
+}
+
+/** 当前快照里这家「未用、有资格、没过期」的重置 key；没有快照 = null（只能按到期时刻判） */
+function eligibleKeys(view: RemoteView, p: "claude" | "codex", now: number): Set<string> | null {
+  const credits = p === "claude"
+    ? (view.claude.endpoints.claude_usage?.snapshot?.data.resets ? claudeGrantCredits(view.claude.endpoints.claude_usage.snapshot.data.resets) : null)
+    : (view.codex.endpoints.codex_reset_credits?.snapshot?.data.credits ?? null);
+  return credits ? new Set(credits.filter((c) => isEligibleCredit(c, now)).map((c) => c.key)) : null;
+}
+
+/** 用满提醒此刻还成立：同一个窗口（id + 重置时刻）还满着、还没到重置时刻、此刻仍有可兑换的次数 */
+function stillExhausted(n: ReminderNotice, view: RemoteView, now: number): boolean {
+  const e = n.exhausted;
+  const usage = view.codex.endpoints.codex_usage?.snapshot?.data;
+  if (!e || !usage || (usage.resetCredits?.applicableAvailableCount ?? 0) <= 0) return false;
+  if (e.resetsAtMs !== null && e.resetsAtMs <= now) return false;
+  const w = usage.windows.find((x) => x.id === e.windowId);
+  return !!w && w.resetsAtMs === e.resetsAtMs && (w.usedPct >= 100 || usage.limitReached);
+}
+
+/**
+ * 发出前复核（夜里暂存到 08:00、失败渠道最多重试 3 天，这期间窗口可能早重置了、卡可能已用掉或过期）：
+ * 当前账户存在且不是通知里的那个 / 用满已不成立 → 整条丢；当前账户未知 → 只按时刻判，不丢；快过期只留仍然有效的重置，一条不剩也丢。丢弃记一行日志（不含任何键）。
+ */
+function revalidateOutbox(ledger: ReminderLedger, view: RemoteView, now: number): ReminderLedger {
+  const outbox: ReminderNotice[] = [];
+  for (const n of ledger.outbox) {
+    const p = n.provider ?? "codex";
+    let keep: ReminderNotice | null = null;
+    const acct = p === "claude" || p === "codex" ? view[p].account : undefined;
+    if (acct === null) {
+      // 此刻账户未知（凭据一时读不到、~/.claude.json 正被重写）：没法复核，只按时刻判，不因一次读取失败丢掉暂存的提醒
+      const credits = (n.credits ?? []).filter((c) => c.expiresAtMs > now);
+      const e = n.exhausted;
+      keep = n.kind === "exhausted" ? (e && (e.resetsAtMs === null || e.resetsAtMs > now) ? n : null) : credits.length ? { ...n, credits } : null;
+    } else if (acct?.key === n.accountKey) {
+      if (n.kind === "exhausted") keep = stillExhausted(n, view, now) ? n : null;
+      else {
+        const keys = eligibleKeys(view, p, now);
+        const credits = (n.credits ?? []).filter((c) => c.expiresAtMs > now && (keys === null || keys.has(c.key)));
+        keep = credits.length ? { ...n, credits } : null;
+      }
+    }
+    if (keep) outbox.push(keep);
+    else console.log(`[quota] ${p} ${n.kind === "expiry" ? "快过期" : "用满"}提醒发出前复核已不成立，丢弃`);
+  }
+  return { ...ledger, outbox };
+}
+
+export interface ReminderSenders {
+  /** 推送子系统没起来 = null */
+  push(title: string, body: string): Promise<{ sent: number; failed: number } | null>;
+  discord(text: string): Promise<boolean>;
+}
+
+export interface ReminderLedgerApi {
+  withReminders(fn: (ledger: ReminderLedger, view: RemoteView) => ReminderLedger): Promise<ReminderLedger>;
+}
+
+async function send(channel: ReminderChannel, notices: ReminderNotice[], s: ReminderSenders): Promise<boolean> {
+  const body = notices.map(noticeBody).join("\n");
+  try {
+    if (channel === "discord") return await s.discord(`**${noticeTitle(notices)}**\n${body}`);
+    const r = await s.push(noticeTitle(notices), body);
+    return r !== null && (r.sent > 0 || r.failed === 0);
+  } catch (e) {
+    console.error(`[quota] 提醒投递失败（${channel}）：${(e as Error)?.name ?? "unknown"}`);
+    return false;
+  }
+}
+
+/** 一轮：规划 → 发出前复核 → 按渠道把到期该投的合并成一条发出 → 逐条记投递结果（账本落盘，重启后去重仍在） */
+export async function runReminders(api: ReminderLedgerApi, senders: ReminderSenders, now: number): Promise<void> {
+  const ledger = await api.withReminders((l, view) => revalidateOutbox(planReminders(l, view, now), view, now));
+  const quiet = inQuietHours(now);
+  const byChannel = new Map<ReminderChannel, ReminderNotice[]>();
+  for (const { notice, channel } of pendingDeliveries(ledger, now)) {
+    if (quiet && !urgentAtNight(notice, now)) continue;
+    byChannel.set(channel, [...(byChannel.get(channel) ?? []), notice]);
+  }
+  for (const [channel, notices] of byChannel) {
+    const ok = await send(channel, notices, senders);
+    await api.withReminders((l) => notices.reduce((acc, n) => recordDelivery(acc, n.id, channel, ok, now), l));
+  }
+}

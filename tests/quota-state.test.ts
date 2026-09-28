@@ -53,20 +53,28 @@ describe("normalizeQuotaState", () => {
   });
 
   test("提醒账本：坏条目丢掉", () => {
-    const good = { id: "n", kind: "expiry", accountKey: "k", createdAt: 1, channels: { push: { status: "sent", attempts: 1, lastAt: 1 }, discord: { status: "pending", attempts: 0, lastAt: null } } };
+    const channels = { push: { status: "sent", attempts: 1, lastAt: 1 }, discord: { status: "pending", attempts: 0, lastAt: null } };
+    const good = { id: "n", kind: "expiry", accountKey: "k", createdAt: 1, credits: [{ key: "c", expiresAtMs: 9, thresholdH: 72 }], channels };
+    const goodClaude = { ...good, id: "c1", provider: "claude" };
+    const goodExhausted = { id: "x1", kind: "exhausted", provider: "codex", accountKey: "k", createdAt: 1, exhausted: { applicable: 1, windowId: "5h", resetsAtMs: null }, channels };
+    // 未来版本 / 手改：provider 不认识、credits 形状不对、exhausted 缺块、expiry 没有 credits
+    const unknownProvider = { ...good, id: "g", provider: "gemini" };
+    const badCredits = { ...good, id: "b", credits: [{ key: 1 }] };
+    const noBlock = { ...goodExhausted, id: "x2", exhausted: undefined };
+    const noCredits = { ...good, id: "e", credits: undefined };
     const s = {
       ...emptyQuotaState(),
       credHealth: { claude: { code: "keychain_denied", at: 1, until: null }, codex: { code: 1 } },
       reminders: {
         credits: { a: { expiresAtMs: 1, coveredH: [72] }, b: { expiresAtMs: "x", coveredH: [] } },
         exhausted: { w: 1, v: "x" },
-        outbox: [good, { id: "bad" }, null],
+        outbox: [good, { id: "bad" }, null, goodClaude, goodExhausted, unknownProvider, badCredits, noBlock, noCredits],
       },
     };
     const n = normalizeQuotaState(s);
     expect(Object.keys(n.credHealth)).toEqual(["claude"]);
     expect(Object.keys(n.reminders.credits)).toEqual(["a"]);
     expect(n.reminders.exhausted).toEqual({ w: 1 });
-    expect(n.reminders.outbox).toEqual([good] as never);
+    expect(n.reminders.outbox).toEqual([good, goodClaude, goodExhausted] as never);
   });
 });
