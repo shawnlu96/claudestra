@@ -47,7 +47,10 @@ export type BridgeEventType =
   | "ledger"
   // 「待你处理」开出 / 作答 / 过期 / 撤销（bridge/asks.ts）：data {project, askId, state}；transient，网页收到就重拉 /api/v1/asks；
   // 和 ledger 同一道门，只推给 canReadLedger 的连接
-  | "ask";
+  | "ask"
+  // Chat（talk）的房间有新消息 / 删除 / 新房间 / 丢进工作台的状态变了：data {room, members, what}；transient，网页收到就重拉；
+  // 只推给房间成员（bridge/talk.ts talkEventAllowed）
+  | "talk";
 
 export interface BridgeEvent {
   /** 进程内单调递增，SSE 的 id / Last-Event-ID 补发锚点 */

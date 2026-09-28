@@ -331,3 +331,26 @@ export function newMessageId(prefix: string): string {
 export function inboundBodyForLocal(env: Pick<Envelope, "from" | "content">): string {
   return isOwnerSource(env.from) ? env.content : neutralizeDelegateMarker(env.content);
 }
+
+/**
+ * HTTP API 用户 / HTTP peer 发给本地 agent 的完整正文（抬头 + 正文），bridge.ts renderContentForLocal 与「丢进工作台」的预览共用。
+ * 抬头明示对话方经 Web/API 接入、是外部 principal（agent 可据此对无关的敏感上下文保持沉默），reply 回 meta.chat_id（api:<tokenId>）。
+ * peer 标记的是另一个 Claudestra 实例的跨机请求，不是本机 Web 用户。Web 有完整聊天记录，所以提示别复述上下文。
+ */
+export function renderApiInbound(env: { from: ApiUserEndpoint; content: string }): string {
+  const { from } = env;
+  if (from.peer) {
+    return [
+      `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
+      `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
+      ``,
+      inboundBodyForLocal(env),
+    ].join("\n");
+  }
+  return [
+    `[🌐 来自 Web 端用户「${from.name}」（HTTP API 接入，非 Discord）。`,
+    `用 reply() 回答到本 chat_id。对方界面完整渲染 Markdown（表格可用），且能看到本频道完整聊天记录——不要复述上下文；也不要引用与本请求无关的内容。]`,
+    ``,
+    inboundBodyForLocal(env),
+  ].join("\n");
+}

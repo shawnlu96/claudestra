@@ -8,6 +8,7 @@ import { canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { emitEvent, type BridgeEvent } from "./event-bus.js";
+import { talkEventAllowed } from "./talk.js";
 
 const TICK_MS = 1000;
 
@@ -35,7 +36,7 @@ function ensureLedgerFeed(): void {
 }
 
 /**
- * /api/v1/events 的逐条过滤：ledger / ask 事件只给 canReadLedger，其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
+ * /api/v1/events 的逐条过滤：ledger / ask 事件只给 canReadLedger，talk 事件只给房间成员，其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
  * 能读台账的连接顺带把轮询起起来。types（?types=ask,ledger）：只要这几类——侧栏「待你处理」开一条只收 ask 的轻量流，不背全量工具事件。
  */
 export function sseEventAllow(principal: Principal, types?: string[]): (evt: BridgeEvent) => boolean {
@@ -45,6 +46,7 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
   return (evt) => {
     if (onlyTypes && !onlyTypes.has(evt.type)) return false;
     if (evt.type === "ledger") return ledger;
+    if (evt.type === "talk") return talkEventAllowed(principal, evt.data);
     // ask 事件：台账的门，外加发起方在 scope 里（大总管的 ask 只给含 master 的凭据，和 ask-entry.ts 的 canSeeAsk 同口径）
     return evt.type === "ask" ? ledger && agentInScope(principal, evt.agent) : agentInScope(principal, evt.agent);
   };
