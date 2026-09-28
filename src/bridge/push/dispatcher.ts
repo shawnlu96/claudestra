@@ -12,6 +12,7 @@ import type { ApnsMessage } from "../../lib/apns.js";
 import { OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
 import type { PrincipalsFile } from "../../lib/principals.js";
 import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey } from "../../lib/push-store.js";
+import { t as tr } from "../../lib/i18n.js";
 import { markdownToPlain } from "../../lib/plain-text.js";
 import { bareAgent, bumpUnread, countsUnread, markAgentRead, onAgentRead, totalUnread, type ReadEvent } from "../../lib/unread-store.js";
 import type { PushSender } from "./sender.js";
@@ -55,10 +56,15 @@ export function ownerChatIds(file: PrincipalsFile): Set<string> {
   return ids;
 }
 
-/** 通知正文：先去掉 Markdown 与行内按钮等样式（lib/plain-text.ts），再压成一行、最多 180 字 */
+/**
+ * 通知正文：先去掉 Markdown 与行内按钮等样式（lib/plain-text.ts），再压成一行、最多 180 个字符（按字符截，不切断 emoji）。
+ * 原文有内容、去样式后空了（例如只有一张图）→ 给个占位，否则这条回复既不推送也不计未读
+ */
 export function notificationBody(text: string): string {
-  const t = markdownToPlain(text).replace(/\s+/g, " ").trim();
-  return t.length > BODY_MAX ? `${t.slice(0, BODY_MAX)}…` : t;
+  const plain = markdownToPlain(text).replace(/\s+/g, " ").trim();
+  const t = plain || (!text.trim() ? "" : /!\[[^\]]*\]\(/.test(text) ? tr("[图片]", "[image]") : tr("[新消息]", "[new message]"));
+  const chars = Array.from(t);
+  return chars.length > BODY_MAX ? `${chars.slice(0, BODY_MAX).join("")}…` : t;
 }
 
 export function createDispatcher(d: DispatcherDeps): Dispatcher {
