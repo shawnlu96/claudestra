@@ -30,7 +30,8 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
     if (e.status !== 409) return e.message;
     return e.code === "ask_part_answered" ? t("这一项刚在别处答过了，已刷新，剩下的还能答") : t("这件已经处理过了（或已过期）");
   };
-  const ok = runtime ? t("已提交给弹框") : t("已发给 {agent}，它忙完手上这一步就会看到", { agent });
+  // 人 / 系统发起的（指派、审核）没有 agent 可投：只记账
+  const ok = runtime ? t("已提交给弹框") : ask.fromAgent ? t("已发给 {agent}，它忙完手上这一步就会看到", { agent }) : t("已记下");
   // 乐观作答（T11b 第 8 条）：点下去卡片就移到「最近处理过」、计数减 1；失败回到「等你处理」并显示原因（asks-store.answer）
   const run = async (fn: () => Promise<unknown>, labels: string[], text = "") => {
     setBusy(true);
