@@ -55,9 +55,13 @@ function migrate(db: Database): void {
     agent TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, last_reply_ts INTEGER NOT NULL DEFAULT 0)`);
   db.exec(`CREATE TABLE IF NOT EXISTS apns_devices (
     token TEXT PRIMARY KEY, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, last_seen TEXT NOT NULL)`);
-  // APNs 登记时的凭据（T11b）：「待你处理」按它过 ask-access，凭据撤了就不再推。老行 NULL = owner:self（App 每次启动重新登记时补上）
+  // APNs 登记时的凭据（T11b）：「待你处理」按它过 ask-access，凭据撤了就不再推。加列时清掉老行：不知道是谁登记的，留着就按全权推、
+  // 撤了凭据也照推（撤掉的设备登记不回来）；壳每次启动、已授权时都会重新登记，手机打开一次 App 就恢复推送（tests/web-state.test.ts）
   const apnsCols = (db.prepare("PRAGMA table_info(apns_devices)").all() as { name: string }[]).map((c) => c.name);
-  if (!apnsCols.includes("principal")) db.exec("ALTER TABLE apns_devices ADD COLUMN principal TEXT");
+  if (!apnsCols.includes("principal")) {
+    db.exec("ALTER TABLE apns_devices ADD COLUMN principal TEXT");
+    db.exec("DELETE FROM apns_devices");
+  }
   if (!apnsCols.includes("credential")) db.exec("ALTER TABLE apns_devices ADD COLUMN credential TEXT");
   // 协作视图「上次以来」（lib/last-seen.ts）：按 principal × 视图记上次看的时刻。不在 WEB_STATE_TABLES 里——旧 BFF 没有这张表，迁移不搬
   db.exec(`CREATE TABLE IF NOT EXISTS last_seen (principal TEXT NOT NULL, scope TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (principal, scope))`);
