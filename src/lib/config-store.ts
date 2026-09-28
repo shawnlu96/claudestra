@@ -91,6 +91,8 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.groqApiKey === "string" && raw.groqApiKey ? { groqApiKey: raw.groqApiKey } : {}),
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
+    // 批量管理的保留清单（bridge/fleet 的 compactKeep()）：白名单只带 compactKeep；漏在这里读不到，任何 set* 还会把它抹掉
+    ...(typeof raw.fleet?.compactKeep === "string" && raw.fleet.compactKeep.trim() ? { fleet: { compactKeep: raw.fleet.compactKeep } } : {}),
   };
 }
 

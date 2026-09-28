@@ -119,3 +119,22 @@ describe("config-store 坏文件", () => {
     expect(readdirSync(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
+
+describe("config-store 的 fleet 段（批量管理的保留清单）", () => {
+  test("compactKeep 能读到；不是字符串或空白的丢掉", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-read-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保留进度与决定", callers: ["x"] } }));
+    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: "保留进度与决定" });
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: 3 } }));
+    expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
+  });
+
+  test("写别的配置（set*：读 → 改 → 写）不会抹掉磁盘上的 fleet 段", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-keep-"));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ lang: "zh", fleet: { compactKeep: "保留进度与决定" } }));
+    const r = run(dir, `await c.setLang("en"); await c.setArchiveRetention(30);`);
+    expect(r.status).toBe(0);
+    const disk = JSON.parse(readFileSync(join(dir, "config.json"), "utf-8"));
+    expect(disk).toMatchObject({ lang: "en", archiveRetentionDays: 30, fleet: { compactKeep: "保留进度与决定" } });
+  });
+});
