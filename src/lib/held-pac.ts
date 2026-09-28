@@ -14,6 +14,8 @@ export interface HeldFromLike {
   fromKind: string;
   /** from.kind === "local" 时的发送端频道 id */
   fromChannelId?: string;
+  /** 押后消息的 message_id（回程槽记了请求 id 时按它精确查） */
+  messageId?: string;
 }
 
 export function pacStillHeld(callerChannelId: string, held: HeldFromLike[] | undefined): boolean {
@@ -21,13 +23,23 @@ export function pacStillHeld(callerChannelId: string, held: HeldFromLike[] | und
   return held.some((h) => h.fromKind === "local" && h.fromChannelId === callerChannelId);
 }
 
+/**
+ * 这一槽的请求 target 一条都还没看到：槽里记了请求 message_id 就按 id 查——同一 caller 后来的另一条还押着，
+ * 不该挡住前一条（已送到）的回程（codex 2026-09-28 复核）；老槽没记 id 就按发送方查。
+ */
+export function callStillHeld(call: { callerChannelId: string; messageIds?: string[] }, held: HeldFromLike[] | undefined): boolean {
+  if (!call.messageIds?.length) return pacStillHeld(call.callerChannelId, held);
+  const unseen = new Set((held ?? []).map((h) => h.messageId));
+  return call.messageIds.every((id) => unseen.has(id));
+}
+
 /** 该 pac 是否该被 stale 扫描清掉 */
 export function shouldSweepPac(
-  pac: { ts: number; callerChannelId: string },
+  pac: { ts: number; callerChannelId: string; messageIds?: string[] },
   held: HeldFromLike[] | undefined,
   now: number,
   staleMs: number,
 ): boolean {
-  if (pacStillHeld(pac.callerChannelId, held)) return false;
+  if (callStillHeld(pac, held)) return false;
   return now - pac.ts > staleMs;
 }
