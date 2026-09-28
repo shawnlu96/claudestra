@@ -9,6 +9,7 @@ export const QUOTA_DICT: Record<string, string> = {
   "实时": "live",
   "实时过期": "live (stale)",
   "本机缓存": "local cache",
+  "本机记录": "local records",
   "无": "none",
   "5 小时": "5-hour",
   "本周 tokens": "Tokens this week",

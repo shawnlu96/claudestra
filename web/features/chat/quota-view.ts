@@ -107,6 +107,11 @@ export const LAYER_LABEL: Record<LayerSource, string> = {
   none: "无",
 };
 
+/** 数据层标签：按量接入商（Pi）的数据是本机会话记录，不是缓存，照实叫「本机记录」 */
+export function layerLabel(e: EntryView): string {
+  return e.kind === "api" && e.source.layer === "local_cache" ? "本机记录" : LAYER_LABEL[e.source.layer];
+}
+
 /** 固定错误码 → 人话（zh 原文，面板里再过 t()）；认不出的码原样显示 */
 const REASONS: Record<string, string> = {
   timeout: "接口超时",

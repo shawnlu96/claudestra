@@ -3,7 +3,7 @@
  * 数据层与原因码的人话、「重试」只在用户重试才解除的状态出、本机缓存标账户归属未知。
  */
 import { describe, expect, test } from "bun:test";
-import { canRetry, entryRuntime, expiryParts, fmtAt, identityNote, meterLabel, quotaPanelData, reasonText } from "../web/features/chat/quota-view";
+import { canRetry, entryRuntime, expiryParts, fmtAt, identityNote, layerLabel, meterLabel, quotaPanelData, reasonText } from "../web/features/chat/quota-view";
 
 const T = new Date(2026, 8, 28, 10, 0).getTime();
 const body = {
@@ -89,5 +89,12 @@ describe("重置卡截止说明", () => {
     expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
     expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
     expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
+  });
+});
+
+describe("数据层标签", () => {
+  test("Pi（按量接入商）的本机数据叫「本机记录」；订阅的本机兜底仍叫「本机缓存」", () => {
+    const d = quotaPanelData(body)!;
+    expect(d.entries.map(layerLabel).slice(0, 4)).toEqual(["实时", "实时过期", "本机缓存", "本机记录"]);
   });
 });

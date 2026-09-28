@@ -3,7 +3,7 @@ import { useT } from "@/lib/i18n";
 import { fmtTok, type QuotaView } from "../usage-view";
 import type { useSubscriptionQuota } from "../use-subscription-quota";
 import {
-  canRetry, entryRuntime, expiryParts, fmtAt, identityNote, LAYER_LABEL, meterLabel, reasonText,
+  canRetry, entryRuntime, expiryParts, fmtAt, identityNote, layerLabel, meterLabel, reasonText,
   type EntryView, type MeterView, type QuotaPanelData,
 } from "../quota-view";
 import { CardTitle, ClaudeQuotaCard, CodexQuotaCard, fmtAge, GaugeRow, WarnIcon, type GlobalStats } from "./quota-cards";
@@ -25,7 +25,7 @@ function SourceRow({ e, onRetry, retrying }: { e: EntryView; onRetry: (p: "claud
     <div className="flex items-start gap-2 text-[10.5px] text-base-content/40">
       <span className="min-w-0 flex-1">
         <span className={warn ? "text-warning/80" : undefined}>
-          {warn && <WarnIcon />} {t("数据")}：{t(LAYER_LABEL[layer])}
+          {warn && <WarnIcon />} {t("数据")}：{t(layerLabel(e))}
         </span>
         {typeof observedAt === "number" && ` · ${fmtAge(observedAt)}`}
         {why && ` · ${t(why)}`}
