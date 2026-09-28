@@ -8,7 +8,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   canonicalPath, isSandbox, outboundAllowed, sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems,
-  sandboxEnv, sandboxLayout, sandboxManagerRefusal, sandboxMcpArgs, enforceSandboxBridgeEnv,
+  sandboxEnv, sandboxLayout, sandboxManagerRefusal, sandboxMcpArgs, sandboxStaticDirProblem, enforceSandboxBridgeEnv,
 } from "../src/lib/sandbox.js";
 import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "../src/lib/bridge-url.js";
 import { repoEnvVar } from "../src/lib/env-file.js";
@@ -111,6 +111,15 @@ describe("sandboxEnv", () => {
       MASTER_DIR: "/tmp/sbx/master", BRIDGE_PORT: "23900", BRIDGE_URL: "ws://localhost:23900", BRIDGE_BIND: "127.0.0.1",
       HISTFILE: "/tmp/sbx/shell_history", ZDOTDIR: "/tmp/sbx/zdotdir", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "/tmp/sbx/bun-cache",
     });
+  });
+});
+
+describe("sandboxStaticDirProblem", () => {
+  test("生产状态目录（含 web-releases）拒绝，worktree 的 web/out 放行", () => {
+    const prod = "/Users/x/.claude-orchestrator";
+    expect(sandboxStaticDirProblem(`${prod}/web-releases/current`, prod)).toContain("web-releases");
+    expect(sandboxStaticDirProblem(prod, prod)).not.toBeNull();
+    expect(sandboxStaticDirProblem("/tmp/wt/web/out", prod)).toBeNull();
   });
 });
 

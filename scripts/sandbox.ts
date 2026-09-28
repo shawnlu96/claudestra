@@ -14,7 +14,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { join, resolve } from "path";
 import { homedir } from "os";
 import {
-  canonicalPath, sandboxEnv, sandboxLayout, sandboxManagerRefusal, SANDBOX_FLAG, zdotdirFiles, type SandboxLayout,
+  canonicalPath, sandboxEnv, sandboxLayout, sandboxManagerRefusal, sandboxStaticDirProblem, SANDBOX_FLAG, zdotdirFiles, type SandboxLayout,
 } from "../src/lib/sandbox.js";
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { SRC_DIR } from "../src/lib/repo-root.js";
@@ -44,6 +44,8 @@ function parseOpts(argv: string[]): Opts {
   }
   if (!Number.isInteger(port) || port <= 0 || port >= 65536) fail(`--port 不合法：${port}`);
   if (port === DEFAULT_BRIDGE_PORT) fail(`${port} 是生产 bridge 的默认端口，沙箱不能用`);
+  const staticProblem = staticDir ? sandboxStaticDirProblem(staticDir, join(homedir(), ".claude-orchestrator")) : null;
+  if (staticProblem) fail(staticProblem);
   return { port, root: root || `/tmp/claudestra-sandbox-${port}`, staticDir, rest };
 }
 

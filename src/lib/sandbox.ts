@@ -50,6 +50,16 @@ function overlaps(a: string, b: string): boolean {
   return inside(a, b) || inside(b, a);
 }
 
+/**
+ * `--static` 挂载的前端目录不能在生产状态目录里：线上 web 按版本发布在 ~/.claude-orchestrator/web-releases/，
+ * 沙箱挂它虽然只读，但它会随生产发布 / 回滚原地切换，沙箱测到的就不是自己这份代码。挂 worktree 的 web/out。
+ */
+export function sandboxStaticDirProblem(staticDir: string, prodStateDir: string): string | null {
+  return overlaps(canonicalPath(staticDir), canonicalPath(prodStateDir))
+    ? `--static ${staticDir} 在生产状态目录 ${prodStateDir} 里（线上 web-releases）；改挂本 worktree 的 web/out 或临时目录`
+    : null;
+}
+
 export interface DirCheck {
   env: Env;
   stateDir: string;

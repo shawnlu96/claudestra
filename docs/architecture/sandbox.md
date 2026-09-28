@@ -13,7 +13,7 @@ bun run sandbox down                                 # stop the bridge and the s
 bun run sandbox clean                                # down + delete the sandbox root
 ```
 
-Options (any command): `--port N` (never the production default), `--root DIR` (keep it short: tmux socket paths are capped at 104 bytes), `--static DIR` (serve an already-built `web/out` read-only; the sandbox never builds web).
+Options (any command): `--port N` (never the production default), `--root DIR` (keep it short: tmux socket paths are capped at 104 bytes), `--static DIR` (serve an already-built `web/out` read-only — this checkout's, or a scratch copy; the sandbox never builds web and refuses anything inside the production state dir, i.e. the live `web-releases/`, which flips on every production deploy / rollback).
 
 Watch an agent: `tmux -S /tmp/claudestra-sandbox-23900/run/master.sock attach`, or `bun run sandbox manager tmux-capture <name>`. Bridge log: `<root>/bridge.log`. `bun run sandbox env` prints the sandbox environment as `export` lines for one-off manual commands.
 
