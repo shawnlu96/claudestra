@@ -1,12 +1,10 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { ChatMessage } from "../type";
 import type { WebComponentRow } from "@/lib/chat/events";
-import { replyRowKey, deriveClicksFromLegacy } from "@/lib/chat/reply-clicks";
-import { useChatStore, useChatStoreApi } from "../chat-store";
-import { askForReply, clicksFromAnswer, closedText } from "@/features/asks/asks-model";
-import { useAsks } from "@/features/asks/asks-store";
-import { hintAskForWire } from "@/lib/api/asks";
+import { replyRowKey } from "@/lib/chat/reply-clicks";
+import { useChatStoreApi } from "../chat-store";
+import { useReplyAsk } from "@/features/asks/use-reply-ask";
 import { editComposer, logLocalTick, useFormRowSync } from "../form-sync";
 import { renderFormLine, setFormValues, toggleFormValue } from "@/lib/chat/form-compose";
 import { useT } from "@/lib/i18n";
@@ -21,8 +19,7 @@ import { CheckMark } from "./check-mark";
  * 按钮行各答各的，答完一行不再锁死其余行。状态在 m.replyClicks（rowKey→值），
  * 老快照的单值 replyClickedId 退化推导（deriveClicksFromLegacy）。
  *
- * 这条 reply 建过「待你处理」（features/asks）：已在别处答了 / 过期 / 撤销 → 整条锁住并标状态，答案回填高亮；
- * 还开着 → 点的时候把 askId 交给 sendMessage（lib/api/asks.ts 的小抄），bridge 按它结案，不再按「最新一条」猜。
+ * 这条 reply 建过「待你处理」：已答值、整条锁住、状态小字、点击前带 askId 都在 features/asks/use-reply-ask.ts。
  */
 
 const BTN_STYLE: Record<string, string> = {
@@ -35,25 +32,16 @@ const btnClass = (style?: string) => BTN_STYLE[style ?? "secondary"] ?? BTN_STYL
 
 export function ReplyComponents({ m }: { m: ChatMessage }) {
   const store = useChatStoreApi();
-  const t = useT();
   const rows = m.replyComponents;
-  const agent = useChatStore((s) => s.state.activeAgent);
-  const { asks } = useAsks();
-  const ask = useMemo(() => askForReply(asks, agent, rows, m.replyTs ?? m.ts), [asks, agent, rows, m.replyTs, m.ts]);
-  const closed = ask && ask.state !== "open" ? ask : null;
   // busy = 正在回投的那一行的 rowKey（只锁该行，不锁全条）。
   const [busy, setBusy] = useState("");
-  // 每行的已答值：优先 replyClicks（新），回退老快照的单值；ask 已在别处答了就用它的答案补上
-  const clicks = useMemo(() => {
-    const own = m.replyClicks ?? deriveClicksFromLegacy(m.replyClickedId, rows);
-    return closed?.answer && rows ? { ...clicksFromAnswer(rows, closed.answer.choices), ...own } : own;
-  }, [m.replyClicks, m.replyClickedId, rows, closed]);
+  // 每行的已答值：优先 replyClicks（新），回退老快照的单值；对应的「待你处理」已结案就整条锁住
+  const { clicks, locked, status, beforeSend } = useReplyAsk(m);
   if (!rows || rows.length === 0) return null;
 
   // 某一行的一次作答。rowKey 定位到行；choiceValue 存进 replyClicks 供高亮。
   const choose = async (rowKey: string, choiceValue: string, label: string, wire: string) => {
-    if (clicks[rowKey] != null || busy || closed) return;
-    if (ask) hintAskForWire(agent, wire, ask.id);
+    if (clicks[rowKey] != null || busy || !beforeSend(wire)) return;
     setBusy(rowKey);
     await store.clickReplyComponent(m.id, rowKey, choiceValue, label, wire);
     setBusy("");
@@ -65,7 +53,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
         const key = replyRowKey(row, ri);
         // Discord 同款语义：没答过的行一直可点（用户习惯隔几条消息再回来点）。
         // bug ① 前这里是 !!m.replyClickedId（整条消息级）——多行时答一行锁全部。
-        const rowAnswered = clicks[key] != null || !!closed;
+        const rowAnswered = clicks[key] != null || locked;
         const rowBusy = busy === key;
         if (row.type === "buttons") {
           return (
@@ -151,7 +139,7 @@ export function ReplyComponents({ m }: { m: ChatMessage }) {
           </div>
         );
       })}
-      {ask && <span className="text-[11px] opacity-50">{closed ? closedText(closed, t) : t("待你处理")}</span>}
+      {status && <span className="text-[11px] opacity-50">{status}</span>}
     </div>
   );
 }

@@ -60,6 +60,7 @@ export function setAsksForTest(t: { path: string; deps?: AsksDeps; registry?: Re
   readRegistry = t?.registry ? async () => t.registry! : () => readRegistryAgents();
   ownerChats = t?.ownerChats ? async () => new Set(t.ownerChats) : async () => ownerChatIds(await readPrincipals());
   runtimeOpen.clear();
+  permSeen.clear();
 }
 
 /** ask 状态变了：发 SSE（网页重拉），再通知推送等订阅者 */
@@ -321,18 +322,26 @@ export function settleRuntimeAsk(source: Exclude<AskSource, "reply">, channelId:
   }
 }
 
-/** permission-watcher 每次弹框变了调一次：是权限弹框就开（换了一个就先结旧的），是别的弹框（session-idle）就把旧的结掉 */
-export function notePermissionAsk(channelId: string, agentName: string, desc: string | null): void {
-  if (!desc) return settleRuntimeAsk("permission", channelId);
-  const title = t(`${agentName} 需要授权`, `${agentName} needs permission`);
-  void openRuntimeAsk({ source: "permission", channelId, agentName, kind: "authorize", title, context: desc, options: PERMISSION_ASK_OPTIONS, replace: true });
-}
+/** 上一轮看到的权限弹框描述（按频道）：同一个弹框每 8 秒扫到一次，只有变了才开 / 结 */
+const permSeen = new Map<string, string>();
 
-/** permission-watcher 每轮每个 agent 调一次：Codex 运行中的弹框（lib/runtime-dialogs.ts 的规则表）在就开，没了就结 */
-export function noteCodexDialog(channelId: string, agentName: string, pane: string): void {
+/**
+ * permission-watcher 每轮每个 agent 调一次（一行）：
+ * - Codex 运行中的弹框（lib/runtime-dialogs.ts 的规则表）在就开、没了就结；
+ * - 权限弹框：desc 变了就开新的（先结旧的），没了（null，含换成 session-idle 那种）就结。
+ */
+export function noteRuntimeDialogs(channelId: string, agentName: string, pane: string, permissionDesc: string | null): void {
   const d = detectCodexRuntimeDialog(pane);
   if (d) void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", ...d, options: [] });
   else settleRuntimeAsk("codex", channelId);
+  if (permSeen.get(channelId) === (permissionDesc ?? undefined)) return;
+  if (!permissionDesc) {
+    permSeen.delete(channelId);
+    return settleRuntimeAsk("permission", channelId);
+  }
+  permSeen.set(channelId, permissionDesc);
+  const title = t(`${agentName} 需要授权`, `${agentName} needs permission`);
+  void openRuntimeAsk({ source: "permission", channelId, agentName, kind: "authorize", title, context: permissionDesc, options: PERMISSION_ASK_OPTIONS, replace: true });
 }
 
 function auqTitle(qs: { question?: string; header?: string }[]): string {

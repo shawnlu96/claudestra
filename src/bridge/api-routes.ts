@@ -1260,9 +1260,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch {
       return apiJson(400, { ok: false, error: "invalid body (JSON {text, wait?} or multipart with text/files)" });
     }
-    if (!text.trim() && attachments.length === 0) {
-      return apiJson(400, { ok: false, error: "text is required" });
-    }
+    if (!text.trim() && attachments.length === 0) return apiJson(400, { ok: false, error: "text is required" });
     waitSec = Math.min(Math.max(waitSec, 0), 300);
     if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 

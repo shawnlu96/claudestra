@@ -1,7 +1,32 @@
 /**
- * 台账相关的 i18n 词条（features/chat/ledger-stage.ts 等），由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
+ * 台账相关的 i18n 词条（features/chat/ledger-stage.ts、「待你处理」features/asks/* 等），由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
  * 阶段短名（「开发」「验证」…）不在这里：短词做全局 key 容易撞键，放在 ledger-stage.ts 的 STAGE_DEFS 里按语言取。
  */
 export const LEDGER_DICT: Record<string, string> = {
   "{id} · {state} · 第 {n} 轮": "{id} · {state} · round {n}",
+  // ── 待你处理（features/asks/*、聊天气泡上的状态）──
+  "待你处理": "Needs you",
+  "待验收 {n}": "{n} to review",
+  "没有等你处理的事": "Nothing needs you right now",
+  "等你处理": "Waiting on you",
+  "待验收": "To review",
+  "最近处理过": "Recently handled",
+  "更多": "More",
+  "已发给 {agent}，它忙完手上这一步就会看到": "Sent to {agent} — it will see it once the current step is done",
+  "这件已经处理过了（或已过期）": "Already handled (or expired)",
+  "急": "Urgent",
+  "可能是授权": "Possibly an authorization",
+  "等了 {span}": "waiting {span}",
+  "收起原文": "Hide original",
+  "看原文": "Show original",
+  "这个弹框要到终端里处理": "This dialog has to be handled in the terminal",
+  "回到对话": "Back to chat",
+  "还剩 {span} 过期": "expires in {span}",
+  "想补充什么，写在这里（可选）": "Anything to add? (optional)",
+  "不到 1 分钟": "under a minute",
+  "{n} 分钟": "{n} min",
+  "{n} 小时": "{n} hour|{n} hours",
+  "已处理": "Handled",
+  "已过期，按未批准处理": "Expired — treated as not approved",
+  "已撤销": "Withdrawn",
 };

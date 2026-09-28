@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
-import { deliverReplyWithAsk, openRuntimeAsk, ownerPresence, sweepExpired, setAsksForTest, settleRuntimeAsk, type AsksDeps } from "../src/bridge/asks.js";
+import { deliverReplyWithAsk, noteRuntimeDialogs, openRuntimeAsk, ownerPresence, sweepExpired, setAsksForTest, settleRuntimeAsk, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
@@ -266,5 +266,19 @@ describe("改投、过期、运行时弹框", () => {
     expect(listAsks(db, { source: "permission" }).map((a) => [a.title, a.state])).toEqual([["b", "open"], ["a", "cancelled"]]);
     settleRuntimeAsk("permission", "111");
     expect(listAsks(db, { source: "permission", states: ["open"] })).toEqual([]);
+  });
+
+  test("permission-watcher 的一行调用：同一个权限弹框每 8 秒扫到只开一条；换了弹框先结旧的；消失就结案；Codex 规则表是空的，不开", async () => {
+    const tick = (desc: string | null) => noteRuntimeDialogs("111", "agent-x", "pane text", desc);
+    tick("执行命令: rm x");
+    tick("执行命令: rm x");
+    await Bun.sleep(20);
+    tick("Edit 文件: a.ts");
+    await Bun.sleep(20);
+    tick(null);
+    await Bun.sleep(20);
+    const db = openLedger(path);
+    expect(listAsks(db, { source: "permission" }).map((a) => [a.context, a.state])).toEqual([["Edit 文件: a.ts", "cancelled"], ["执行命令: rm x", "cancelled"]]);
+    expect(listAsks(db, { source: "codex" })).toEqual([]);
   });
 });

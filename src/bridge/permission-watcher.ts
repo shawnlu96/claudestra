@@ -37,7 +37,7 @@ import {
   type AuqQuestion,
 } from "./ask-user-question.js";
 import { emitEvent } from "./event-bus.js";
-import { noteCodexDialog, notePermissionAsk, settleRuntimeAsk } from "./asks.js";
+import { noteRuntimeDialogs } from "./asks.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { controlFor } from "../lib/runtimes/index.js";
@@ -624,8 +624,6 @@ async function checkAgent(
   // v2.17.2+ AskUserQuestion pane 侧检测(CC 2.1.x jsonl 迟落盘,唯一及时通路)
   if (await maybeHandleAuq(agentName, channelId, pane, allowedUserIds, discord)) return;
 
-  noteCodexDialog(channelId, agentName, pane); // Codex 运行中卡住回合的弹框 →「待你处理」；没了就结案
-
   // 两种弹窗共用一个 channel 级别的 slot，同时只会有一种出现
   const sessionIdleDesc = detectSessionIdlePrompt(pane);
   const permissionDesc = sessionIdleDesc ? null : detectRuntimePermissionPrompt(pane);
@@ -645,14 +643,13 @@ async function checkAgent(
   }
 
   const key = computeModalKey(sessionIdleDesc, permissionDesc);
+  noteRuntimeDialogs(channelId, agentName, pane, key ? permissionDesc : null); // Codex / 权限弹框 →「待你处理」，没了就结案
   if (!key) {
     lastNotified.delete(channelId);
-    settleRuntimeAsk("permission", channelId); // 弹框没了：对应的「待你处理」结案
     return;
   }
   if (lastNotified.get(channelId) === key) return;
   lastNotified.set(channelId, key);
-  notePermissionAsk(channelId, agentName, permissionDesc); // 权限弹框 →「待你处理」（session-idle 那种不算，顺带结掉旧的）
 
   const pngPath = await tmuxScreenshot(agentName);
   const mention = allowedUserIds.map((id) => `<@${id}>`).join(" ");
@@ -665,11 +662,7 @@ async function checkAgent(
     let logLabel: string;
 
     if (sessionIdleDesc) {
-      text = [
-        `💤 **${agentName}** session 已闲置，Claude Code 询问如何继续`,
-        sessionIdleDesc,
-        mention,
-      ].filter(Boolean).join("\n");
+      text = [`💤 **${agentName}** session 已闲置，Claude Code 询问如何继续`, sessionIdleDesc, mention].filter(Boolean).join("\n");
       components = buildComponents([
         {
           type: "buttons",
@@ -682,11 +675,7 @@ async function checkAgent(
       ]);
       logLabel = `session-idle desc="${sessionIdleDesc}"`;
     } else {
-      text = [
-        `🔔 **${agentName}** 需要授权`,
-        permissionDesc,
-        mention,
-      ].filter(Boolean).join("\n");
+      text = [`🔔 **${agentName}** 需要授权`, permissionDesc, mention].filter(Boolean).join("\n");
       components = buildComponents([
         {
           type: "buttons",
