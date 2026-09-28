@@ -16,6 +16,7 @@ import { readdir, readFile } from "fs/promises";
 import { realpathSync } from "fs";
 import { join } from "path";
 import { tmuxRaw, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
+import { isSandbox } from "./sandbox.js";
 
 export interface CcSessionEntry {
   pid: number;
@@ -134,8 +135,12 @@ export function pickCcSessionForWindow(
   opts: { childPids: number[]; paneId?: string | null; cwd?: string; exclude?: string },
 ): CcSessionEntry | null {
   const byPid = entries.filter((e) => opts.childPids.includes(e.pid));
-  const byPane = opts.paneId
-    ? entries.filter((e) => !byPid.includes(e) && e.tmux?.endsWith(`.${opts.paneId}`))
+  // pane 编号是弱证据：登记里的 tmux 字段（master:@x.%N）不带 socket，本机另一个 tmux server（沙箱，session 也叫
+  // master）的 %N 会撞号。所以只凭 pane 命中的候选，给了 cwd 就必须 cwd 也一致——沙箱 agent 只建在沙箱根目录下，
+  // 生产 agent 不在那里，两边互相认不到；合法命中的 cwd 本来就一致（登记记的是启动目录，与 registry 同源）。
+  // 沙箱里干脆只认 pid（tests/sandbox.test.ts 的撞号用例）
+  const byPane = opts.paneId && !isSandbox()
+    ? entries.filter((e) => !byPid.includes(e) && e.tmux?.endsWith(`.${opts.paneId}`) && (!opts.cwd || e.cwd === opts.cwd))
     : [];
   const cands = [...byPid, ...byPane].filter((e) => e.sessionId !== opts.exclude);
   if (!cands.length) return null;

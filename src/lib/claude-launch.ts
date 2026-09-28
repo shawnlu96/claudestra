@@ -10,6 +10,10 @@
 import { pathOverrideAssignments } from "./paths.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
+import { isSandbox } from "./sandbox.js";
+import { sandboxLaunchArgs } from "./sandbox-env.js";
+import { resolveBunPath } from "./bun-path.js";
+import { SRC_DIR } from "./repo-root.js";
 
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 
@@ -324,11 +328,8 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
     (opts.permissionMode && opts.permissionMode.trim()) || DEFAULT_PERMISSION_MODE;
   if (mode === "auto") mode = "bypassPermissions";
 
-  const parts: string[] = [
-    "claude",
-    "--dangerously-load-development-channels",
-    `server:${MCP_NAME}`,
-  ];
+  const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
+  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它
   // 还顺带跳过 workspace trust dialog）；其余模式走 --permission-mode <mode>。

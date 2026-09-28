@@ -6,6 +6,7 @@
   "scripts": {
     "bridge": "bun run src/bridge.ts",
     "manager": "bun run src/manager.ts",
+    "sandbox": "bun scripts/sandbox.ts",
     "setup": "bun run src/setup.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
