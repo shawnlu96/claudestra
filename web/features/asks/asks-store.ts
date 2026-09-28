@@ -9,6 +9,8 @@
 import { useSyncExternalStore } from "react";
 import { ApiError } from "@/lib/api/client";
 import { fetchAsks, followAskEvents, postPresence } from "@/lib/api/asks";
+import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
+import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
 import { applyPending, ASK_EVENT_REFRESH_MS, type PendingAnswer, type WebAsk } from "./asks-model";
 
 export interface AsksSnap {
@@ -101,6 +103,26 @@ async function refresh(): Promise<void> {
   }
 }
 
+/**
+ * 手机上抽屉是一页 #asks（lib/hash-nav.ts，与会话页 #chat 同一套）：打开压一条打过标的历史项，左滑 / 返回键 /
+ * 左上角返回都是出栈，popstate 按 hash 开关。桌面是侧边抽屉，不压栈。
+ */
+const ASKS_HASH = "#asks";
+const onAsksPage = () => hashBase(window.location.hash) === ASKS_HASH;
+
+function enter(focus: string | null): void {
+  if (shouldPush(window.location.hash, ASKS_HASH, isNarrow())) window.history.pushState({ cstra: "asks" }, "", ASKS_HASH);
+  set({ open: true, focus, banner: null });
+}
+
+function leave(): void {
+  const plan = leavePlan(window.location.hash, ASKS_HASH, window.history.state, "asks", backGuard.busy());
+  if (plan === "wait") return;
+  if (plan === "back") return backGuard.back(); // popstate 收起
+  if (plan === "strip") stripHash();
+  set({ open: false, focus: null });
+}
+
 function presence(v: boolean): void {
   if (!denied) void postPresence(v).catch(() => undefined); // 心跳丢一次无妨，一分钟后还有下一次
 }
@@ -113,8 +135,10 @@ export const asksStore = {
   },
   refresh,
   answer,
-  openDrawer: (focus: string | null = null) => set({ open: true, focus, banner: null }),
-  closeDrawer: () => set({ open: false, focus: null }),
+  openDrawer: (focus: string | null = null) => enter(focus),
+  closeDrawer: leave,
+  /** 「回到对话」：只收起、不出栈——会话页的 #chat 压在 #asks 上面，从会话左滑回来抽屉重新打开 */
+  leaveForChat: () => set({ open: false, focus: null }),
   dismissBanner: () => set({ banner: null }),
   /** 侧栏入口挂载时调；返回卸载。key = 当前机器 */
   start(key: string): () => void {
@@ -149,26 +173,33 @@ export const asksStore = {
     // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
     const onSw = (e: MessageEvent) => {
       const d = e.data as { type?: string; ask?: string };
-      if (d?.type === "cstra-open-ask" && d.ask) set({ open: true, focus: d.ask, banner: null });
+      if (d?.type === "cstra-open-ask" && d.ask) enter(d.ask);
+    };
+    // 左滑 / 返回键落到 #asks 就开（含从「回到对话」的会话页退回来），离开就关
+    const onPop = () => {
+      const on = onAsksPage();
+      if (on !== snap.open) set({ open: on, focus: null });
     };
     navigator.serviceWorker?.addEventListener("message", onSw);
+    window.addEventListener("popstate", onPop);
     document.addEventListener("visibilitychange", onVis);
     void refresh();
     presence(visible());
-    // 推送深链：/chat?ask=<id> → 打开抽屉并定位到那张卡
-    const qs = new URLSearchParams(window.location.search);
-    const deep = qs.get("ask");
+    // 推送深链 /chat?ask=<id>：摘掉参数再压 #asks，返回落在会话列表而不是退出应用；带 #asks 刷新（iOS 冷恢复）= 原样重开
+    const deep = askFromLink(window.location.href);
     if (deep) {
+      const qs = new URLSearchParams(window.location.search);
       qs.delete("ask");
       window.history.replaceState(null, "", `${window.location.pathname}${qs.size ? `?${qs}` : ""}${window.location.hash}`);
-      set({ open: true, focus: deep });
-    }
+      enter(deep);
+    } else if (onAsksPage()) set({ open: true });
     return () => {
       if (timer) clearTimeout(timer);
       clearInterval(poll);
       clearInterval(beat);
       ctrl.abort();
       navigator.serviceWorker?.removeEventListener("message", onSw);
+      window.removeEventListener("popstate", onPop);
       document.removeEventListener("visibilitychange", onVis);
     };
   },
