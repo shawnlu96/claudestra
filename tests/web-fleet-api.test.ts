@@ -32,3 +32,14 @@ describe("requestCompact", () => {
     expect(await requestCompact("agent-a", broken)).toEqual({ ok: false, text: "网络断了" });
   });
 });
+
+test("fleetAccess：问不到（断网、老 bridge 没这个端点）按不能处理，按钮不显示（PM 09-29：结果未知一律隐藏）", async () => {
+  const { machines } = await import("@/lib/machines");
+  const real = machines.current.bind(machines);
+  machines.current = () => ({ fp: "unreachable-fp" }) as ReturnType<typeof real>;
+  try {
+    expect(await fleetAccess()).toBe(false);
+  } finally {
+    machines.current = real;
+  }
+});

@@ -50,7 +50,10 @@ export async function runFleet(body: { action: FleetAction; select: FleetSelect;
 const access = new Map<string, boolean>();
 const machineKey = () => machines.current()?.fp ?? "local";
 
-/** 问不到（断网、老 bridge 没这个端点）当能、不记：按钮照常显示，点了 403 再收 */
+/**
+ * 问不到（断网、老 bridge 没这个端点）当不能、不记：guest 点得到的按钮点了不能回 403，所以结果未知一律隐藏（PM 09-29），下次再问。
+ * T42 的 useFullScope 进了 main 就换成它（同一个 canRunFleet 来源）
+ */
 export async function fleetAccess(): Promise<boolean> {
   const key = machineKey();
   const hit = access.get(key);
@@ -60,8 +63,7 @@ export async function fleetAccess(): Promise<boolean> {
     access.set(key, true);
     return true;
   } catch (e) {
-    if (!(e instanceof ApiError && e.status === 403)) return true;
-    access.set(key, false);
+    if (e instanceof ApiError && e.status === 403) access.set(key, false);
     return false;
   }
 }

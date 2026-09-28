@@ -6,7 +6,7 @@ import type { AgentSession } from "../type";
 
 type Req = { at: number; ok?: boolean; text?: string };
 
-/** 这台设备能不能直接压缩（GET /fleet/access）：guest、部分 scope 的设备没有这个权限，按钮不显示；问到之前先不显示 */
+/** 这台设备能不能直接压缩（GET /fleet/access）：guest、部分 scope 的设备没有这个权限，按钮不显示；问到之前、问不到都不显示 */
 export function useFleetAccess(): boolean {
   const [ok, setOk] = useState(false);
   useEffect(() => {
