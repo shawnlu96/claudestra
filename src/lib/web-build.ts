@@ -24,6 +24,7 @@ import { STATE_DIR } from "./paths.js";
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
 import { spawnSync } from "child_process";
 import { resolveNpm } from "./npm-path.js";
+import { healSelfDirty } from "./self-dirty.js";
 
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
 export const WEB_PATHSPEC = ["--", "web", ":(exclude)web/*.md"];
@@ -290,7 +291,7 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
   // 主树就是线上：脏树构建会把未提交代码烤进 bundle，且烤入的 commit 与代码对不上
   const dirty = git(repoRoot, ["status", "--porcelain", ...WEB_PATHSPEC]);
   if (!dirty.ok) return { attempted: false, skipped: "git status 失败,不构建" };
-  if (dirty.out) return { attempted: false, skipped: `${verdict.detail};但 web/ 有未提交改动,不自动构建` };
+  if (healSelfDirty(repoRoot, dirty.out)) return { attempted: false, skipped: `${verdict.detail};但 web/ 有未提交改动,不自动构建` };
 
   const npmBin = resolveNpm();
   if (!npmBin) return { attempted: false, error: `${verdict.detail};找不到 npm(PATH/nvm/homebrew 都没有),无法重建` };
@@ -311,7 +312,10 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
       lock: mtimeOrNull(`${webDir}/package-lock.json`),
       installed: mtimeOrNull(`${webDir}/node_modules/.package-lock.json`),
     })) {
-      const ip = await run([npmBin.npm, "install"], webDir, env);
+      // 有锁文件就 npm ci：严格按锁安装、不改写它——npm install 会改写受 git 管理的 package-lock.json，
+      // 之后自动更新全因「工作区脏」被拦（lib/self-dirty.ts）；装完万一还是改了就还原
+      const ip = await run([npmBin.npm, existsSync(`${webDir}/package-lock.json`) ? "ci" : "install"], webDir, env);
+      healSelfDirty(repoRoot, git(repoRoot, ["status", "--porcelain", "--", "web/package-lock.json"]).out);
       if (!ip.ok) {
         result.ok = false;
         result.error = "npm install 失败";
