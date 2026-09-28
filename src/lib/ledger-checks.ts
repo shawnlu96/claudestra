@@ -121,6 +121,8 @@ export interface WriteCtx {
   /** 事件时间（epoch ms），默认 Date.now()；测试注入 */
   now?: number;
   dedupKey?: string;
+  /** 只对导入身份生效：这次的事件时间是推断的，事件标 approxTime（事项的创建时间老台账里没有） */
+  approxTime?: boolean;
 }
 
 export interface WriteResult<T> {
@@ -197,6 +199,8 @@ export interface ImportTaskInput {
   createdTs: number;
   /** 建任务时间是推断的（源数据没有派发时间），建任务事件标 approxTime */
   createdApprox?: boolean;
+  /** 时间线指纹（建任务时间 + 合成事件），记在建任务事件上：映射改了时间重跑时，调用方拿它判断「值变了」 */
+  fingerprint?: string;
   events: { kind: (typeof IMPORT_EVENT_KINDS)[number]; ts: number; text?: string; data?: Record<string, unknown> }[];
 }
 

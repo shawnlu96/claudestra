@@ -45,9 +45,10 @@ function tx<T>(db: Database, fn: () => T): T {
   return busyAsLedgerError("写入", () => db.transaction(fn).immediate());
 }
 
-/** 导入身份写的事件一律带 imported，调用方漏了也补上 */
+/** 导入身份写的事件一律带 imported，调用方漏了也补上；approxTime 也只认导入身份 */
 function eventData(ctx: WriteCtx, e: EventDraft): Record<string, unknown> {
-  return ctx.actor === IMPORT_ACTOR ? { ...e.data, imported: true } : (e.data ?? {});
+  if (ctx.actor !== IMPORT_ACTOR) return e.data ?? {};
+  return { ...e.data, imported: true, ...(ctx.approxTime ? { approxTime: true } : {}) };
 }
 
 function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
@@ -122,7 +123,7 @@ export function setItem(db: Database, ctx: WriteCtx, input: { project: string; i
 const TASK_INSERT_COLS = ["id", "project", "itemId", "title", "kind", "stage", "round", "agent", "pm", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra"] as const;
 
 /** 插任务行并记建任务事件；eventStage = 事件里记的起始阶段（导入时行落在最终阶段、时间线从 eventStage 开始） */
-function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boolean, eventStage?: Stage, approx = false): LedgerEvent {
+function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boolean, eventStage?: Stage, approx = false, fingerprint?: string): LedgerEvent {
   const row: Record<string, unknown> = { specRev: 1, round: 0, extra: {}, ...input, stage: input.stage ?? "spec" };
   const now = ctx.now ?? Date.now();
   db.prepare(
@@ -130,7 +131,7 @@ function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boole
   ).run(...(TASK_INSERT_COLS.map((c) => toColumn(c, row[c])) as string[]), now, now);
   const { project, id, ...patch } = row;
   if (eventStage) patch.stage = eventStage;
-  const data = { op: "new", patch, rev: 1, ...(imported ? { imported: true } : {}), ...(approx ? { approxTime: true } : {}) };
+  const data = { op: "new", patch, rev: 1, ...(imported ? { imported: true } : {}), ...(approx ? { approxTime: true } : {}), ...(fingerprint ? { fingerprint } : {}) };
   return insertEvent(db, ctx, { project: String(project), target: String(id), kind: "task", data }, true);
 }
 
@@ -156,7 +157,7 @@ export function importTask(db: Database, ctx: WriteCtx, input: ImportTaskInput):
     checkNewTask(db, ctx.actor, input.task);
     const initial = input.initialStage ?? input.task.stage ?? "spec";
     checkImportChain(initial, input.task.stage ?? "spec", input.events);
-    const event = insertTask(db, { ...ctx, now: input.createdTs }, input.task, true, initial, input.createdApprox);
+    const event = insertTask(db, { ...ctx, now: input.createdTs }, input.task, true, initial, input.createdApprox, input.fingerprint);
     for (const e of input.events) {
       const draft = { project: input.task.project, target: input.task.id, kind: e.kind, text: e.text, data: { ...e.data, imported: true } };
       insertEvent(db, { ...ctx, now: e.ts }, draft, false);

@@ -125,6 +125,61 @@ describe("时间与轮次（审查第 1 轮 P1-3 / P2-6）", () => {
   });
 });
 
+/** 时间线无倒序：每个目标的第一条事件就是它的建立事件；任务不早于它挂的事项；任务的阶段事件时间不回退 */
+function timelineProblems(db: ReturnType<typeof openLedger>): string[] {
+  const out: string[] = [];
+  const firstTs = new Map<string, number>();
+  for (const e of listEvents(db)) {
+    if (!e.target) continue;
+    const created = e.kind === "item" || (e.kind === "task" && e.data.op === "new");
+    if (created && !firstTs.has(e.target)) firstTs.set(e.target, e.ts);
+    else if (!firstTs.has(e.target)) out.push(`${e.target} 的 ${e.kind} 早于它的建立事件`);
+    else if (e.ts < (firstTs.get(e.target) as number)) out.push(`${e.target} 的 ${e.kind} 时间早于建立`);
+  }
+  for (const t of listTasks(db, P)) {
+    if (t.itemId && (firstTs.get(t.id) ?? 0) < (firstTs.get(t.itemId) ?? 0)) out.push(`${t.id} 早于事项 ${t.itemId}`);
+    const stages = listEvents(db, { target: t.id }).filter((e) => e.kind === "stage").map((e) => e.ts);
+    if (stages.some((ts, i) => i > 0 && ts < stages[i - 1])) out.push(`${t.id} 阶段时间回退`);
+  }
+  return out;
+}
+
+describe("时间线顺序（审查复验 P2）", () => {
+  test("事项创建时间取 updatedAt / 最早 log / 最早挂上的任务里最早的，一律标 approxTime；没有任何线索的取源文件 updatedAt", () => {
+    const plan = planImport(SRC, MAP, P, NOW);
+    const ts = (id: string) => plan.items.find((i) => i.input.id === id)?.ts;
+    expect(ts("i10")).toBe(parseTs("2026-09-28T03:30:00+09:00") as number);
+    expect(ts("i07")).toBe(plan.tasks.find((t) => t.task.id === "T0")?.createdTs as number);
+    expect(ts("i21")).toBe(FILE_TS);
+  });
+  test("挂到任务上的决定早于派发：建任务提前到决定那一刻并标 approxTime", () => {
+    const late = { ...MAP, tasks: { ...MAP.tasks, T3: { ...MAP.tasks.T3, dispatchedAt: "2026-09-28T17:30:00+09:00", startedAt: "2026-09-28T17:40:00+09:00" } } };
+    const t3 = planImport(SRC, late, P, NOW).tasks.find((t) => t.task.id === "T3")!;
+    expect(t3.createdTs).toBe(parseTs("2026-09-28T17:23:38+0900") as number);
+    expect(t3.createdApprox).toBe(true);
+  });
+  test("导入后整条时间线没有倒序，事项事件都标 approxTime", () => {
+    const db = openLedger(":memory:");
+    try {
+      applyImport(db, planImport(SRC, MAP, P, NOW));
+      expect(timelineProblems(db)).toEqual([]);
+      expect(listEvents(db).filter((e) => e.kind === "item").every((e) => e.data.approxTime === true)).toBe(true);
+    } finally {
+      closeLedger(":memory:");
+    }
+  });
+  test("映射里只改了时间：重跑报 conflict（任务时间线指纹、事项创建时间都算变化）", () => {
+    const db = openLedger(":memory:");
+    try {
+      applyImport(db, planImport(SRC, MAP, P, NOW));
+      const moved = { ...MAP, tasks: { ...MAP.tasks, T3: { ...MAP.tasks.T3, finishedAt: "2026-09-28T17:00:00+09:00" } } };
+      expect(() => applyImport(db, planImport(SRC, moved, P, NOW))).toThrow(/任务 T3（fingerprint）/);
+    } finally {
+      closeLedger(":memory:");
+    }
+  });
+});
+
 describe("applyImport", () => {
   test("写库计数、重跑全部 duplicate；完全相同的两条 log 只记一条；导入的任务指标能算", () => {
     const db = openLedger(":memory:");

@@ -53,7 +53,10 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms / --docs-dir 才写 */
 const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export"]);
-/** ledger 里会写 registry 的子命令：只有它们拿命令级写锁；其余只写 sqlite，库自己有 BEGIN IMMEDIATE，不必排在 restart 这类长写后面 */
+/**
+ * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
+ * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
+ */
 const LEDGER_REGISTRY_SUBS: ReadonlySet<string> = new Set(["task-new", "task-set", "import"]);
 
 /** auto-update 的读子命令（缺省即 status）；其余（channel / claudestra on|off / claude on|off）都写 config.json */

@@ -150,7 +150,13 @@ function planTask(src: Obj, m: TaskMapping, project: string, fallback: number, d
   return { task, initialStage: "spec", createdTs: created.ts, createdApprox: created.approx, events };
 }
 
-function planItems(src: Obj, map: ImportMap, project: string, now: number, fallback: number, skipped: Map<string, Obj>): ImportPlan["items"] {
+/**
+ * 老台账没有事项的创建时间：取「updatedAt、最早一条挂它的 log、最早挂上它的任务的派发时间」里最早的（都没有就取源文件 updatedAt），
+ * 一律标 approxTime。取最早是为了时间线不倒序——事项的 log 与任务都不能早于事项本身。
+ */
+function planItems(src: Obj, map: ImportMap, project: string, fallback: number, skipped: Map<string, Obj>, firstSeen: Map<string, number>): ImportPlan["items"] {
+  const created = (id: string, updatedAt: unknown) => Math.min(parseTs(updatedAt) ?? Infinity, firstSeen.get(id) ?? Infinity);
+  const tsOf = (id: string, updatedAt: unknown) => (Number.isFinite(created(id, updatedAt)) ? created(id, updatedAt) : fallback);
   const items: ImportPlan["items"] = [];
   for (const it of (src.items as Obj[] | undefined) ?? []) {
     const { id, title, status, priority, oneLine, next, ask, trial, ...rest } = it;
@@ -162,9 +168,9 @@ function planItems(src: Obj, map: ImportMap, project: string, now: number, fallb
       project, id: String(id), title: String(title), status, priority: String(priority ?? ""),
       oneLine: String(oneLine ?? ""), next: String(next ?? ""), ownerWords: String(ask ?? ""), extra,
     };
-    items.push({ input: input as NewItem, ts: parseTs(it.updatedAt) ?? fallback });
+    items.push({ input: input as NewItem, ts: tsOf(String(id), it.updatedAt) });
   }
-  for (const n of map.newItems ?? []) items.push({ input: { ...n, project }, ts: now });
+  for (const n of map.newItems ?? []) items.push({ input: { ...n, project }, ts: tsOf(n.id, undefined) });
   return items;
 }
 
@@ -209,19 +215,40 @@ export function planImport(src: Obj, map: ImportMap, project: string, now: numbe
     const { item: _i, kind: _k, stage: _s, agent: _a, pm: _p, skip: _x, intoItemExtra: _e, ...rest } = x;
     tasks.push(planTask(rest, x, project, fallback, map.defaultPm));
   }
-  const items = planItems(src, map, project, now, fallback, skipped);
-  const itemIds = new Set(items.map((i) => i.input.id));
+  const itemIds = new Set([...((src.items as Obj[] | undefined) ?? []).map((i) => String(i.id)), ...(map.newItems ?? []).map((n) => n.id)]);
   for (const t of tasks) {
     if (t.task.itemId && !itemIds.has(t.task.itemId)) throw new LedgerError("invalid", `任务 ${t.task.id} 映射到的事项 ${t.task.itemId} 不存在（源文件和 newItems 里都没有）`);
   }
   const events = planEvents(src, project, fallback, itemIds, new Set(tasks.map((t) => t.task.id)));
+  settleTimeline(tasks, events);
+  const firstSeen = new Map<string, number>();
+  const seen = (id: string | null | undefined, ts: number) => void (id && firstSeen.set(id, Math.min(firstSeen.get(id) ?? Infinity, ts)));
+  for (const e of events) seen(e.target, e.ts);
+  for (const t of tasks) seen(t.task.itemId, t.createdTs);
+  const items = planItems(src, map, project, fallback, skipped, firstSeen);
   return { project, ...(map.pms ? { pms: map.pms.map(agentKey) } : {}), items, tasks, events, unmapped };
+}
+
+/**
+ * 建任务要排在挂到它身上的决定之前（ownerInbox 的要求常早于派发）：任务的创建时间取 min(派发, 最早的决定)，被提前的标 approxTime。
+ * 定完时间再算指纹，重跑时拿它判断时间线有没有变。
+ */
+function settleTimeline(tasks: ImportTaskInput[], events: PlannedEvent[]): void {
+  for (const t of tasks) {
+    const earliest = Math.min(...events.filter((e) => e.target === t.task.id).map((e) => e.ts));
+    if (earliest < t.createdTs) {
+      t.createdTs = earliest;
+      t.createdApprox = true;
+    }
+    t.fingerprint = hashKey("timeline", JSON.stringify({ c: t.createdTs, a: !!t.createdApprox, e: t.events }));
+  }
 }
 
 type Tally = { created: number; duplicate: number };
 
-const ITEM_DRIFT = ["title", "status", "priority", "oneLine", "next", "ownerWords", "extra"];
-const TASK_DRIFT = ["itemId", "kind", "stage", "round", "agent", "pm", "title", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra"];
+/** 变化检测的字段；createdTs / fingerprint 覆盖时间点与合成事件（映射里改了时间，重跑也要报出来） */
+const ITEM_DRIFT = ["title", "status", "priority", "oneLine", "next", "ownerWords", "extra", "createdTs"];
+const TASK_DRIFT = ["itemId", "kind", "stage", "round", "agent", "pm", "title", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra", "fingerprint"];
 
 /** dedup 命中但值变了（改了映射后重跑）：列出字段，不能静默沿用库里的旧值 */
 function driftOf(what: string, planned: Obj, row: Obj, fields: string[]): string | null {
@@ -248,15 +275,17 @@ function applyAll(db: Database, plan: ImportPlan): Record<string, Tally> {
   const actor = IMPORT_ACTOR;
   if (plan.pms) setMeta(db, { actor, dedupKey: hashKey("import:pms", plan.project, plan.pms.join(",")) }, { project: plan.project, key: "pms", value: plan.pms });
   for (const { input, ts } of plan.items) {
-    const r = step(`事项 ${input.id}`, () => createItem(db, { actor, now: ts, dedupKey: `import:item:${plan.project}:${input.id}` }, input));
+    const r = step(`事项 ${input.id}`, () => createItem(db, { actor, now: ts, approxTime: true, dedupKey: `import:item:${plan.project}:${input.id}` }, input));
     bump(out.items, r.duplicate);
-    const d = r.duplicate && driftOf(`事项 ${input.id}`, { status: "todo", priority: "", oneLine: "", next: "", ownerWords: "", extra: {}, ...input }, r.row as never, ITEM_DRIFT);
+    const planned = { status: "todo", priority: "", oneLine: "", next: "", ownerWords: "", extra: {}, ...input, createdTs: ts };
+    const d = r.duplicate && driftOf(`事项 ${input.id}`, planned, { ...r.row, createdTs: r.event.ts } as never, ITEM_DRIFT);
     if (d) drift.push(d);
   }
   for (const t of plan.tasks) {
     const r = step(`任务 ${t.task.id}`, () => importTask(db, { actor, dedupKey: `import:task:${t.task.id}` }, t));
     bump(out.tasks, r.duplicate);
-    const d = r.duplicate && driftOf(`任务 ${t.task.id}`, t.task as never, r.row as never, TASK_DRIFT);
+    const planned = { ...t.task, fingerprint: t.fingerprint };
+    const d = r.duplicate && driftOf(`任务 ${t.task.id}`, planned as never, { ...r.row, fingerprint: r.event.data.fingerprint } as never, TASK_DRIFT);
     if (d) drift.push(d);
   }
   for (const e of plan.events) {
