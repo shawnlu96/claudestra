@@ -67,7 +67,7 @@ function firstLine(s: string): string {
 // 各分区
 // ────────────────────────────────────────────
 
-async function checkRuntime(): Promise<Check[]> {
+export async function checkRuntime(): Promise<Check[]> {
   const out: Check[] = [];
   const g = "运行时";
 
