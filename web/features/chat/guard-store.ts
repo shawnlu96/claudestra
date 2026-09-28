@@ -9,6 +9,15 @@ import type { WebStreamEvent } from "@/lib/chat/events";
  */
 type GuardEvt = Extract<WebStreamEvent, { t: "guard" }>;
 const byAgent = new Map<string, GuardItem[]>();
+/** 发送方乐观气泡的标记：agent → 原文 → 状态（held = 等放行，dropped = 已丢弃）；放行后删掉（消息会正常进历史） */
+const marks = new Map<string, Map<string, "held" | "dropped">>();
+const setMark = (agent: string, text: string | undefined, status: "held" | "dropped" | null) => {
+  if (!text) return;
+  const m = marks.get(agent) ?? new Map<string, "held" | "dropped">();
+  if (status) m.set(text, status);
+  else m.delete(text);
+  marks.set(agent, m);
+};
 const loaded = new Set<string>();
 const subs = new Set<() => void>();
 const emit = () => subs.forEach((f) => f());
@@ -16,6 +25,7 @@ const EMPTY: GuardItem[] = [];
 
 export function applyGuardEvent(e: GuardEvt): void {
   const list = byAgent.get(e.agent) ?? [];
+  setMark(e.agent, e.fullText, e.action === "quarantined" ? "held" : e.action === "dropped" ? "dropped" : null);
   if (e.action === "quarantined") {
     if (list.some((i) => i.id === e.id)) return;
     const hit = e.probe ? [{ id: e.probe, verdict: "block", score: e.score ?? null }] : [];
@@ -43,12 +53,26 @@ export function applyGuardEvent(e: GuardEvt): void {
 
 export async function loadGuard(agent: string): Promise<void> {
   try {
-    byAgent.set(agent, await listGuard(agent));
+    const items = await listGuard(agent);
+    byAgent.set(agent, items);
+    for (const i of items) setMark(agent, i.text, "held");
     loaded.add(agent);
     emit();
   } catch {
     /* 没权限（guest）或 bridge 旧版没有这个端点：卡片不显示即可，聊天不受影响 */
   }
+}
+
+/** 某条用户气泡（按原文逐字对）当前的守门状态；没有标记 = null */
+export function useGuardMark(agent: string | undefined, text: string): "held" | "dropped" | null {
+  return useSyncExternalStore(
+    (cb) => {
+      subs.add(cb);
+      return () => subs.delete(cb);
+    },
+    () => (agent ? (marks.get(agent)?.get(text) ?? null) : null),
+    () => null,
+  );
 }
 
 export function removeGuardLocal(agent: string, id: string): void {

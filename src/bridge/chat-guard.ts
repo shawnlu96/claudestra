@@ -139,7 +139,11 @@ export async function guardInbound(env: Envelope, to: LocalEndpoint): Promise<De
   console.log(`🛡 守门拦下一条给 ${agent} 的消息（${top?.id} ${top?.score?.toFixed(2)}）：来自 ${subject.sender.name}`);
   emitEvent({
     agent: evAgent, chatId: to.channelId, type: "chat_guard",
-    data: { action: "quarantined", id: item.id, agent, from: subject.sender.name, trust: subject.sender.trust, text: preview, probe: top?.id, score: top?.score, at: item.at },
+    // fullText：web 用它把发送方的乐观气泡逐字对上并打标（preview 截断了对不上）
+    data: {
+      action: "quarantined", id: item.id, agent, from: subject.sender.name, trust: subject.sender.trust,
+      text: preview, fullText: env.content.slice(0, 8000), probe: top?.id, score: top?.score, at: item.at,
+    },
   });
   pushOwnerNotice(`⛔ 守门拦下一条给 ${agent} 的消息`, `来自 ${subject.sender.name}（${top?.id} ${top?.score?.toFixed(2)}）：${preview}`);
   return { envelope: env, outcome: { kind: "sent", note: "guarded" } };
@@ -161,7 +165,10 @@ function sweepQuarantine(): void {
 function finish(item: QuarantineItem, status: "released" | "dropped", by: string): void {
   deps.store.set(item.id, { ...item, status, actedAt: new Date(deps.now()).toISOString(), actedBy: by });
   log({ id: item.id, agent: item.agent, action: status, by });
-  emitEvent({ agent: item.to.agentName || item.to.channelId, chatId: item.to.channelId, type: "chat_guard", data: { action: status, id: item.id, agent: bare(item.agent), by } });
+  emitEvent({
+    agent: item.to.agentName || item.to.channelId, chatId: item.to.channelId, type: "chat_guard",
+    data: { action: status, id: item.id, agent: bare(item.agent), by, fullText: item.env.content.slice(0, 8000) },
+  });
 }
 
 export async function releaseQuarantined(id: string, by: string): Promise<{ ok: boolean; error?: string }> {

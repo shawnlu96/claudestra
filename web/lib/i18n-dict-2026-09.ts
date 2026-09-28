@@ -59,4 +59,6 @@ export const DICT_2026_09: Record<string, string> = {
   "Chat Guard 已开启：点击关闭": "Chat Guard is on: click to disable",
   "Chat Guard 未开启：点击开启": "Chat Guard is off: click to enable",
   "按会话开启：会话详情里的 Chat Guard 开关，或顶栏的盾牌图标。": "Enabled per session: the Chat Guard switch in session details, or the shield icon in the header.",
+  "已被守门丢弃，未送达 agent": "Discarded by Chat Guard; never reached the agent",
+  "已被守门拦下，等待放行": "Held by Chat Guard, awaiting release",
 };
