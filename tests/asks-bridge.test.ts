@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
-import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
+import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, permissionLabel, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
 import { deliverReplyWithAsk, ownerPresence, sweepExpired, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
@@ -190,7 +190,7 @@ describe("Discord 与卡片", () => {
     expect(await answerDiscordInteraction(click("other").i, "555", "[button:go]")).toBe(false);
   });
 
-  test("卡片：选项对不上 400、项目不对 404、既不选也不写 400、正常 202；运行时弹框类只补记（按键已由原端点发过）", async () => {
+  test("卡片：选项对不上 400、项目不对 404、既不选也不写 400、正常 202；运行时弹框类 400（由原按键端点记账，记人话标签）", async () => {
     const a = (await reply())!;
     expect((await answerFromCard("p", a.id, { choices: ["[button:zzz]"] }, owner())).status).toBe(400);
     expect((await answerFromCard("q", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(404);
@@ -199,10 +199,9 @@ describe("Discord 与卡片", () => {
     expect(getAsk(openLedger(path), a.id)?.answer).toMatchObject({ via: "web_card", text: "好" });
     await openRuntimeAsk({ source: "permission", channelId: "111", agentName: "agent-x", kind: "authorize", title: "t", context: "c", options: [] });
     const rt = listAsks(openLedger(path), { source: "permission" })[0];
-    delivered = [];
-    expect((await answerFromCard("p", rt.id, { label: "允许" }, owner())).status).toBe(202);
-    expect(getAsk(openLedger(path), rt.id)).toMatchObject({ state: "answered", answer: { via: "web_card", labels: ["允许"] } });
-    expect(delivered).toEqual([]);
+    expect((await answerFromCard("p", rt.id, { choices: [] }, owner())).status).toBe(400);
+    settleRuntimeAsk("permission", "111", "interact", permissionLabel("allow"), { principal: "owner:self" }); // api-routes 按键端点那一行
+    expect(getAsk(openLedger(path), rt.id)).toMatchObject({ state: "answered", answer: { via: "interact", labels: ["允许"] } });
     settleRuntimeAsk("permission", "111"); // 弹框随后消失：已答的不会被改成撤销
     expect(getAsk(openLedger(path), rt.id)?.state).toBe("answered");
   });

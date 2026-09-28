@@ -42,9 +42,8 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
   const all = ask.options as WebComponentRow[];
   const done = answeredGroups(all, ask.answer?.choices ?? []);
   const rows = all.filter((r, ri) => !done.has(rowGroup(r, ri)));
-  // 权限弹框：先按键（原有端点），再补记是谁、选了什么——不然弹框消失时这条会被当成撤销
-  const pickPermission = (action: string, label: string) =>
-    run(() => answerPermission(ask.fromAgent, action).then(() => answerAskCard(ask.project, ask.id, { label }).catch(() => undefined /* 补记失败不影响按键已生效，最多记成撤销 */)));
+  // 权限弹框：按原有端点发键，是谁、选了什么由那个端点当场记进这条 ask
+  const pickPermission = (action: string) => run(() => answerPermission(ask.fromAgent, action));
 
   return (
     <article

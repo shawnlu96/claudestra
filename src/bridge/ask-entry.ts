@@ -8,12 +8,12 @@
 import { matchWire, splitWire, type AskRow, type WireMatch } from "../lib/ask-options.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
-import { answerAsk, findAskByDiscordMessage, getAsk, listAsks, type Ask } from "../lib/ledger-asks.js";
+import { findAskByDiscordMessage, getAsk, listAsks, type Ask } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { agentInScope, tokenIdOf, type Principal } from "../lib/principals.js";
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
-import { answerTarget, askDb, askReadDb, commitAnswer, initAsks, ownerPresence, publishAsk, type AsksDeps } from "./asks.js";
+import { answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AsksDeps } from "./asks.js";
 
 /** 看得见这条 ask：台账的门；大总管的 ask 另要 scope 含 master（「*」不含 master，和 SSE / agent 列表同一口径） */
 export function canSeeAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
@@ -110,15 +110,15 @@ export async function answerFromChat(req: { agent: string; text: string; princip
 
 /**
  * 网页卡片：POST /ledger/:project/asks/:id/answer，body {choices: wire[], text?}。卡片是一次提交：不管多行 reply 还有没有没答的组都结案。
- * 运行时弹框（AUQ / 权限）：卡片先按原有端点发了键，再调这里补记是谁、选了什么（只记账，不再投给 agent）。
+ * 运行时弹框（AUQ / 权限）不走这里：卡片按原有端点（POST /agents/:name/answer）发键，由那个端点当场记是谁、选了什么。
  */
-export async function answerFromCard(project: string, id: string, body: { choices?: unknown; text?: unknown; label?: unknown }, p: Principal): Promise<Response> {
+export async function answerFromCard(project: string, id: string, body: { choices?: unknown; text?: unknown }, p: Principal): Promise<Response> {
   const db = askReadDb();
   const a = db ? getAsk(db, id) : null;
   if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
   if (!canAnswerAsk(p, a)) return forbidden("answering requires the owner's own device credential");
   if (a.state !== "open") return apiJson(409, closedBody(a));
-  if (a.source !== "reply") return recordRuntimeAnswer(a, typeof body.label === "string" ? body.label.slice(0, 80) : "", p);
+  if (a.source !== "reply") return apiJson(400, { ok: false, error: "runtime dialogs are answered via POST /agents/:name/answer" });
   const wires = Array.isArray(body.choices) ? body.choices.filter((c): c is string => typeof c === "string") : [];
   const text = typeof body.text === "string" ? body.text.trim().slice(0, 4000) : "";
   const picks = picksFor(a, wires);
@@ -127,15 +127,6 @@ export async function answerFromCard(project: string, id: string, body: { choice
   const blocked = await redirectForbidden(p, a);
   if (blocked) return blocked;
   return commitOr409(() => commitAnswer({ ask: a, picks, text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_card", final: true }), a);
-}
-
-function recordRuntimeAnswer(a: Ask, label: string, p: Principal): Promise<Response> {
-  return commitOr409(async () => {
-    const out = answerAsk(askDb(), a.id, { choices: [], labels: label ? [label] : [], text: "", principal: p.id, device: p.credential, via: "web_card", at: Date.now() });
-    ownerPresence.touch();
-    publishAsk(out);
-    return out;
-  }, a);
 }
 
 /** Discord 交互里要用到的那一小撮（不 import discord.js 的类型，单测好造） */

@@ -12,9 +12,9 @@ export function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: We
 
 /**
  * 卡片作答：choices = 回投 wire（[button:id] / [select:id:v1,v2]），text = 文本框里的话；卡片是一次提交，bridge 按全部答完结案。
- * 运行时弹框（权限）：按键已由 answerPermission 发过，这里只带 label 补记选了什么。409 = 已被别处处理 / 已过期
+ * 只给 reply 类用（运行时弹框走 answerAuq / answerPermission）。409 = 已被别处处理 / 已过期
  */
-export function answerAskCard(project: string, id: string, body: { choices?: string[]; text?: string; label?: string }): Promise<{ ok: boolean }> {
+export function answerAskCard(project: string, id: string, body: { choices?: string[]; text?: string }): Promise<{ ok: boolean }> {
   return api(`/ledger/${encodeURIComponent(project)}/asks/${encodeURIComponent(id)}/answer`, { method: "POST", json: body, timeoutMs: 15_000 });
 }
 

@@ -1682,7 +1682,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
       }
       // 「待你处理」里对应的权限 ask 记成是谁答的（ask-runtime.ts），不然弹框消失时会被当成撤销——网页里所有权限卡都走这里
-      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", action, { principal: tokenId, device: principal.credential }));
+      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", m.permissionLabel(action), { principal: tokenId, device: principal.credential }));
       return apiJson(200, { ok: true });
     }
 

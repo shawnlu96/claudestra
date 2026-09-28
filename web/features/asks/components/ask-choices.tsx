@@ -125,12 +125,12 @@ export function AuqChoices({ questions, busy, onSubmit, onCancel }: { questions:
 }
 
 /** 权限弹框：选项行就是 bridge 给的三个按钮（id = 按键端点的 action） */
-export function PermissionChoices({ rows, busy, onPick }: { rows: WebComponentRow[]; busy: boolean; onPick: (action: string, label: string) => void }) {
+export function PermissionChoices({ rows, busy, onPick }: { rows: WebComponentRow[]; busy: boolean; onPick: (action: string) => void }) {
   const buttons = rows.flatMap((r) => (r.type === "buttons" ? r.buttons : []));
   return (
     <div className="flex flex-wrap gap-2">
       {buttons.map((b) => (
-        <button key={b.id} type="button" disabled={busy} className={`btn btn-sm ${btn(b.style)}`} onClick={() => onPick(b.id, b.label)}>
+        <button key={b.id} type="button" disabled={busy} className={`btn btn-sm ${btn(b.style)}`} onClick={() => onPick(b.id)}>
           {b.label}
         </button>
       ))}

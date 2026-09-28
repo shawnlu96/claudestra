@@ -3,7 +3,7 @@
  * 作答走它们原有的按键端点（POST /agents/:name/answer、Discord 按钮），这里只跟着开 / 结案：
  * - AUQ：订阅 question / question_cleared 事件；从网页 / Discord 提交的记 answered，其余记 cancelled；
  * - 权限 / Codex：permission-watcher 每轮一行 noteRuntimeDialogs；Discord 按钮答了记 answered（discord-interactions 一行），
- *   网页卡片按完键再调卡片端点补记（ask-entry.ts）；其余（终端里答了、回合结束）弹框消失时记 cancelled。
+ *   网页按键端点发完键当场记（api-routes.ts 一行）；其余（终端里答了、回合结束）弹框消失时记 cancelled。
  * 「每个频道每种来源一条开着的」只记在内存：bridge 启动时先把上次留下还开着的全部撤掉，弹框还在就由 watcher 重建。
  */
 import { t } from "../lib/i18n.js";
@@ -32,6 +32,9 @@ const PERMISSION_ASK_OPTIONS = [{ type: "buttons", buttons: [
   { id: "allow_session", label: t("允许 + 本会话不再问", "Allow for this session"), style: "primary" },
   { id: "deny", label: t("拒绝", "Deny"), style: "danger" },
 ] }];
+
+/** 网页按键端点只知道 action：记账时换成卡片上的那句人话（和 Discord 按钮记的一样是标签，不是英文 id） */
+export const permissionLabel = (action: string): string => PERMISSION_ASK_OPTIONS[0].buttons.find((b) => b.id === action)?.label ?? action;
 
 interface RuntimeAskInput {
   source: RuntimeSource;
