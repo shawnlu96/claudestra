@@ -2,12 +2,13 @@
  * `ledger` 的读子命令与项目设置：whoami / show / export / meta。
  * export 不直接拷 WAL 库文件（正在写的库拷出来可能缺最近的提交）：JSON 走一致读，整库走 VACUUM INTO。
  */
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { taskMetrics } from "../lib/ledger-metrics.js";
 import { getItem, getMeta, getTask, LedgerError, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
 import { setMeta } from "../lib/ledger-write.js";
+import { isUmbrellaDir, normalizeDir } from "../lib/projects.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey, intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -60,11 +61,24 @@ function exportCmd(c: LedgerCli): Result {
   return { ok: true, out: dest, items: data.items.length, tasks: data.tasks.length, events: data.events.length };
 }
 
-/** 把 ~ 展开成家目录；只收绝对路径（docs 端点按它 realpath，相对路径会随调用时的 cwd 变） */
+/**
+ * docsDir 存 realpath 后的绝对路径：~ 展开、相对路径拒绝（会随调用时的 cwd 变）、目录必须已存在。
+ * 大伞目录（/、家目录、临时目录，以及家目录的上级如 /Users）一律拒绝——docs 端点只按「根 + 分隔符」比前缀，
+ * 根设得太大就等于把整台机器的 .md / 图片开放给读台账的设备（T8c 审查的纵深防御）。
+ */
 export function expandDocsDir(raw: string, home = homedir()): string {
   const p = raw === "~" ? home : raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
   if (!isAbsolute(p)) throw new LedgerError("invalid", `--docs-dir 要是绝对路径（或 ~/ 开头）：${raw}`);
-  return p;
+  let real: string;
+  try {
+    real = realpathSync(p);
+  } catch (e) {
+    throw new LedgerError("invalid", `--docs-dir 读不到（要先建好目录）：${p}（${(e as Error).message}）`);
+  }
+  const homeReal = realpathSync(home);
+  const umbrella = [real, normalizeDir(p)].some(isUmbrellaDir) || real === homeReal || homeReal.startsWith(`${real}/`) || real === "/";
+  if (umbrella) throw new LedgerError("invalid", `--docs-dir 不能是 /、家目录、临时目录或家目录的上级这类大目录：${real}`);
+  return real;
 }
 
 /** 不带参数 = 查看；--pms / --docs-dir 只有 owner 能设（库里判） */

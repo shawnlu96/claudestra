@@ -1,8 +1,8 @@
 /** ledger 命令族（src/manager/ledger*.ts）：每个子命令正反例、CLI 层角色矩阵、task-new 联动 registry、rename 钩子、沙箱状态目录隔离 */
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -172,13 +172,22 @@ describe("决定、部署、验证、回滚、冻结", () => {
 });
 
 describe("meta / show / export", () => {
-  test("meta：不带参数查看；只有 owner 能设；--pms 归一成 registry 键；--docs-dir 展开 ~、拒相对路径", async () => {
+  test("meta：不带参数查看；只有 owner 能设；--pms 归一成 registry 键；--docs-dir 存 realpath、拒相对路径", async () => {
     expect((await run(PM, "meta")).meta.pms).toEqual([PM]);
     expect(await run(PM, "meta", "--pms", "x")).toMatchObject({ ok: false, code: "forbidden" });
-    const r = await run("owner", "meta", "--project", P, "--pms", "claudestra, Task-T4", "--docs-dir", "~/ledger/docs");
-    expect(r.meta).toMatchObject({ pms: [PM, "agent-task-t4"], docsDir: expandDocsDir("~/ledger/docs") });
-    expect(r.meta.docsDir.startsWith("/")).toBe(true);
+    const docs = join(dir, "docs");
+    mkdirSync(docs);
+    const r = await run("owner", "meta", "--project", P, "--pms", "claudestra, Task-T4", "--docs-dir", docs);
+    expect(r.meta).toMatchObject({ pms: [PM, "agent-task-t4"], docsDir: realpathSync(docs) });
     expect(await run("owner", "meta", "--project", P, "--docs-dir", "docs")).toMatchObject({ ok: false, code: "invalid" });
+  });
+  test("expandDocsDir：~ 按传入的家目录展开；不存在的目录、/、家目录、家目录的上级、临时目录都拒绝", () => {
+    const home = join(dir, "home");
+    mkdirSync(join(home, "ledger", "docs"), { recursive: true });
+    expect(expandDocsDir("~/ledger/docs", home)).toBe(realpathSync(join(home, "ledger", "docs")));
+    for (const bad of ["~/nope", "/", "~", dir, "/tmp", "/private/tmp", homedir(), dirname(homedir())]) {
+      expect(() => expandDocsDir(bad, bad === homedir() || bad === dirname(homedir()) ? homedir() : home)).toThrow(/读不到|大目录/);
+    }
   });
   test("show：项目总览带任务指标；任务详情带指标与最近事件；事项带挂着的任务；未知报 not_found", async () => {
     await taskT8b();
