@@ -48,7 +48,7 @@ When the owner clicks Confirm, the bridge first marks the proposal as confirmed,
 
 To take the team down: `team down --project <id>`, also confirmed by the owner. Routing stops, and the dispatcher leaves the PM list and loses its role. The agent itself is not deleted; `kill` it yourself if you want it gone.
 
-**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself. The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the buttons do guarantee: an agent using the normal tools cannot make itself PM, and every PM-list change in the ledger traces back to the proposal the owner clicked.
+**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself (the loopback `/api/v1/devices/local` hands out an owner device credential directly; T34 tightens it to calls carrying `BRIDGE_CONTROL_TOKEN` or a human confirmation). The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the buttons do guarantee: an agent using the normal tools cannot make itself PM, and every PM-list change in the ledger traces back to the proposal the owner clicked.
 
 ## How a task flows
 
