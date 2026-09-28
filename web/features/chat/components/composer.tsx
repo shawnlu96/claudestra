@@ -144,7 +144,7 @@ export function Composer() {
   // Skills 面板(owner 2026-07-15:「斜杠太隐蔽,对话框下加按钮呼出」)
   const [skillsOpen, setSkillsOpen] = useState(false);
 
-  const disabled = !active;
+  const disabled = !active || agentInfo?.status === "creating"; // 创建中的会话还没接上，发了也收不到
   const hasContent = !!text.trim() || files.length > 0;
   // 流式中也可发（插入会话）——不再要求 !streaming。
   const canSend = !disabled && hasContent;
@@ -646,7 +646,7 @@ export function Composer() {
             rows={1}
             placeholder={
               disabled
-                ? t("先选择一个会话…")
+                ? t(active ? "会话创建中，稍后再发…" : "先选择一个会话…")
                 : streaming
                   ? coarse
                     ? t("继续输入，随时插话…")
