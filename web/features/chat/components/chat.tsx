@@ -6,6 +6,7 @@ import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store"
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
 import { MessageList } from "./message-list";
+import { ChatPaneBoundary } from "@/components/boundaries";
 import { UpdateToast } from "./update-toast";
 import { ComposerOrDock } from "./share-dock";
 import { Splash } from "./splash";
@@ -20,6 +21,7 @@ import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync
 import { hopThenOpen } from "@/features/machines/notification-hop";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
+import { reportRuntimeError } from "@/lib/runtime-error";
 import { DevToolsMount } from "../../devtools/dev-mount";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
@@ -69,37 +71,6 @@ function endSlideProbe(how: string) {
   const msgs = document.querySelectorAll("[data-mid]").length;
   const streaming = document.documentElement.getAttribute("data-streaming") || "?";
   shellLog(`[slide] ${sp.dir} total=${Math.round(total)}ms anim=${Math.round(anim)}ms firstFrame=${Math.round(sp.firstFrame)}ms maxGap=${Math.round(sp.maxGap)}ms frames=${sp.frames} end=${how} msgs=${msgs} streaming=${streaming}`);
-}
-/**
- * v2.21.3+ 运行时错误上报(壳 + PWA 都记,此前只有壳且只记文件名+行号——生产 chunk
- * 全在第 1 行,等于没记)。带完整 JS 栈(含列号):配合 next.config 的
- * productionBrowserSourceMaps,用 `node scripts/resolve-stack.mjs` 还原到源码位置。
- * 背景:壳里两天抓到 18 次 React #185(渲染死循环),光凭 @chunk:1 定位不了。
- * 5 分钟最多 8 条,防死循环类错误刷爆日志。
- */
-const errLogWindow: number[] = [];
-function reportRuntimeError(kind: string, err: unknown, fallback: string) {
-  const now = Date.now();
-  while (errLogWindow.length && now - errLogWindow[0] > 5 * 60_000) errLogWindow.shift();
-  if (errLogWindow.length >= 8) return;
-  errLogWindow.push(now);
-  const e = err instanceof Error ? err : null;
-  // 20 帧:React 自己的 8 帧(throwIfInfiniteUpdateLoopDetected → dispatchSetState)之后
-  // 才轮到我们的调用方——2026-09-03 抓到 24 条 #185 全卡在第 8 帧 dispatchSetState 上
-  const stack = (e?.stack || "").split("\n").slice(0, 20).join("\n");
-  // 浏览器扩展注入的脚本报错不是我们的(2026-09-09 一条 Windows 上的
-  // chrome-extension://…/inpage.js "func sseError not found")——它照样占 8 条/5 分钟
-  // 的上报额度、还会惊动监视器。整条(含栈)只要指向扩展协议就丢弃。
-  const text = `${stack} ${e?.message || fallback}`;
-  // ResizeObserver loop completed with undelivered notifications:浏览器的良性警告
-  // (RO 回调里改了布局,同帧后续通知被丢弃),不是错误,历史上 7 天两条,不占额度
-  if (/\b(chrome|moz|safari-web)-extension:\/\//.test(text) || /ResizeObserver loop (completed|limit)/.test(text)) {
-    errLogWindow.pop();
-    return;
-  }
-  const msg = `${kind} ${e?.message || fallback}${stack ? `\nstack: ${stack}` : ""}`;
-  const tag = isNativeShell() ? "[shell]" : "[pwa]";
-  postClientLog(`${tag} ${msg}`);
 }
 /**
  * v2.21.4 React 提交突发上报(追 #185)。layout.tsx 里的内联钩子在同一个宏任务里
@@ -737,7 +708,7 @@ function ChatInner() {
               <SyncBanner />
               <UpdateToast />
             </div>
-            <MessageList />
+            <ChatPaneBoundary resetKey={activeAgent}><MessageList /></ChatPaneBoundary>
             <ComposerOrDock />
           </main>
         </div>

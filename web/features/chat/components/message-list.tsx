@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import type { ChatMessage, AssistantSegment } from "../type";
 import { Domd } from "@/components/domd";
+import { BubbleBoundary } from "@/components/boundaries";
 import { PermissionCard } from "./permission-card";
 import { AskQuestionCard } from "./ask-question-card";
 import { ReplyComponents } from "./reply-components";
@@ -747,12 +748,9 @@ export function MessageList() {
             )}
             {share.on && <ShareMask id={m.id} order={order} />}
             {echoIds.has(m.id) ? null : (
-              <Message
-                m={m}
-                streaming={streaming}
-                isLast={i === visible.length - 1}
-                awaiting={awaiting}
-              />
+              <BubbleBoundary resetKey={m}>
+                <Message m={m} streaming={streaming} isLast={i === visible.length - 1} awaiting={awaiting} />
+              </BubbleBoundary>
             )}
           </div>
         ))}

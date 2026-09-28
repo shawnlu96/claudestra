@@ -69,7 +69,7 @@ function systemDivider(m: NeutralMessage, content: string, sid?: string): ChatMe
 }
 
 /** 按钮 / 选单点击的机器 payload → 组件里的人类可读 label（与 live 乐观气泡同形），并回填该气泡的 replyClicks */
-function resolveClick(text: string, anchor: ChatMessage | null, forms: FormLookup): string | null {
+function resolveClick(text: string, anchor: ChatMessage | null, forms: FormLookup): ResolvedClick | null {
   const btnMatch = text.match(/^\[button:([\w-]+)\]$/);
   const selMatch = text.match(/^\[select:([\w-]+):(.+)\]$/);
   if (!btnMatch && !selMatch) return null;
@@ -79,18 +79,37 @@ function resolveClick(text: string, anchor: ChatMessage | null, forms: FormLooku
     const clicked = matchClickedRow(anchor.replyComponents, btnMatch?.[1] ?? null, selMatch?.[1] ?? null, selMatch?.[2] ?? null);
     if (clicked) {
       (anchor.replyClicks ??= {})[clicked.rowKey] = clicked.choiceValue;
-      return clicked.label;
+      return { text: clicked.label, resolved: true };
     }
     if (btnMatch) {
       // 块级组件没命中 → 试行内按钮（正文里的 [[{#id}label]]）：rowKey 前缀 `i:`，与 InlineButton 的已答态判定同键
       const inline = parseInlineButtons(`${anchor.replyText ?? ""}\n${anchor.content ?? ""}`).find((b) => b.id === btnMatch[1]);
       if (inline) {
         (anchor.replyClicks ??= {})[`i:${inline.id}`] = inline.id;
-        return plainLabel(inline.label);
+        return { text: plainLabel(inline.label), resolved: true };
       }
     }
   }
-  return `🔘 ${btnMatch ? btnMatch[1] : selMatch![2]}`; // 组件气泡不在本页时兜底 id
+  return { text: `🔘 ${btnMatch ? btnMatch[1] : selMatch![2]}`, resolved: false }; // 组件气泡不在本页时兜底 id
+}
+
+interface ResolvedClick {
+  text: string;
+  /** false = 所属表单不在这段消息里，文案是兜底（或还留着 [select:…] 行），合进更早的消息后可以再解析一次 */
+  resolved: boolean;
+}
+const LEFT_SELECT = /^\s*\[select:[\w-]+:.+\]\s*$/m;
+
+/** 用户消息若是按钮 / 表单回投 → 可读文案并回填所属表单的已答；不是回投 → null。多选表单的整段回投还原成「【标题】✓ …」 */
+export function resolveUserClick(text: string, anchor: ChatMessage | null, forms: FormLookup): ResolvedClick | null {
+  const restored = forms.restore(text);
+  if (restored !== null) return { text: restored, resolved: !LEFT_SELECT.test(restored) };
+  return resolveClick(text, anchor, forms) ?? (LEFT_SELECT.test(text) ? { text, resolved: false } : null);
+}
+
+/** 可作答锚点：带块级组件，或正文里真解析出了行内按钮（纯 [[wiki]] 文本不能把带组件的老锚点顶掉） */
+export function hasClickTargets(replyText: string | undefined, text: string | undefined, components?: WebComponentRow[]): boolean {
+  return !!components?.length || parseInlineButtons(`${replyText ?? ""}\n${text ?? ""}`).length > 0;
 }
 
 function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeOpts, forms: FormLookup): ChatMessage {
@@ -100,12 +119,13 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   const cmd = text.match(/^<command-name>(\/[\w-]+)<\/command-name>/);
   if (cmd) return systemDivider(m, cmd[1], opts.sid);
   const from = isSelfSource(m.from, m.fromId, opts.selfIds ?? new Set()) ? undefined : m.from; // 本人的所有来源都不标
-  // 多选表单的回投（点「提交」或输入框同步行发出）统一还原成「【标题】✓ …」，与发送时的气泡一致
-  let raw = forms.restore(text) ?? resolveClick(text, anchor, forms) ?? text;
+  const click = resolveUserClick(text, anchor, forms);
+  let raw = click?.text ?? text;
   // 外源入站剥掉 bridge 注入的来源头（[🤝 来自 peer…] 多行方括号块）——UI 用来源 chip 展示，留着就是双份说明
   if (from) raw = raw.replace(/^\[[^\]]{0,800}\]\s*\n*/, "");
   const { content, attachments } = extractAttachments(raw);
-  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}) };
+  const pending = click && !click.resolved ? { clickRaw: text } : {};
+  return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending };
 }
 
 /** assistant 记录并进当前回合气泡（首条建组）；segments 保留叙述 / 工具 / 回复的真实交错序 */
@@ -178,8 +198,7 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
     const g = accumulate(group, m, toolCalls, opts.sid);
     if (!group) out.push(g);
     group = g;
-    // 行内按钮也算「可作答锚点」；必须真解析出按钮才算，纯 [[wiki]] 文本不能把带组件的老锚点顶掉
-    if (g.replyComponents?.length || parseInlineButtons(`${m.replyText ?? ""}\n${m.text ?? ""}`).length > 0) anchor = g;
+    if (hasClickTargets(m.replyText, m.text, g.replyComponents)) anchor = g;
     forms.add(g);
   }
   // 完成标记只给「历史尾轮」：最后一条是 assistant 且回合正常收尾（turnMs 来自 turn_duration，进行中 / 被打断的没有）

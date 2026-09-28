@@ -29,6 +29,7 @@ import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus }
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 import { restoreFormReply } from "@/lib/chat/form-restore";
+import { resolveDeltaClicks } from "./delta-clicks";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
 import { agentExtraSig, loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
@@ -43,8 +44,7 @@ import { markRead } from "@/lib/api/push";
  * roster 变化指纹：捕获会影响渲染的字段（成员 + 状态 + 展示名 + 置顶/mock 标记
  * + busy/contextTokens/lastActivityTs）。轮询用它判断列表是否真的变了，只有变了
  * 才更新 state。⚠ 后三个易变字段必须入指纹——contextTokens 不入的话，compact 后
- * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值
- *（2026-07-16 真机实锤）；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
+ * 轮询拉回的新值会被「列表没变」挡掉，ctx 徽章/用量面板永远停在压缩前的旧值；busy/lastActivityTs 同理（黄点与时间标签靠轮询回落）。
  */
 /** v2.17.2 侧栏最近触碰时刻(pointerdown/滚动)——roster 重排的交互期冻结依据。
  *  sidebar 的容器事件调 noteSidebarInteraction 更新;见 refreshAgents 内注释。 */
@@ -765,7 +765,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (gen !== this.openGen) return;
       const msgs = hydrateHistoryMessages(json.data ?? []);
       this.produce((s) => {
-        if (msgs.length) s.messages = [...s.messages, ...msgs];
+        if (msgs.length) s.messages = [...s.messages, ...resolveDeltaClicks(s.messages, msgs)];
         s.historyNewerHasMore = msgs.length > 0 && !!json.hasMore;
         s.loadingNewer = false;
       });
@@ -858,7 +858,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         // 用现有视图代替重拉
         const base = s.messages.filter((m) => m.id.startsWith("h"));
         // 同一回合被 7s 差量切成的多段历史气泡拼回一泡(见 live-merge.ts)
-        const history = mergeContiguousAssistant(base, dropCoveredDelta(base, delta));
+        const history = mergeContiguousAssistant(base, resolveDeltaClicks(base, dropCoveredDelta(base, delta)));
         const v = composeView({
           current: s.messages,
           history,

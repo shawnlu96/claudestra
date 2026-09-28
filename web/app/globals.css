@@ -41,6 +41,17 @@
     --color-base-100: "#FFFFFF";
     --color-base-200: "#F7F7F7";
     --color-base-300: "#EDEDED";
+    /* 状态色压深一档:daisyUI 默认亮色在白底上只有 1.7～3:1,状态字看不清。这组对白底 ≥5.9、
+       对 base-300 与自身 15% 浅底 ≥4.7(WCAG 4.5);实心按钮 / 徽章上的字随之改白。
+       协作视图(collab.module.css)与阶段小标直接引用这组,不再各自混黑。深色主题不动。 */
+    --color-info: "#0369A1";
+    --color-info-content: "#FFFFFF";
+    --color-success: "#0A7146";
+    --color-success-content: "#FFFFFF";
+    --color-warning: "#8A5A00";
+    --color-warning-content: "#FFFFFF";
+    --color-error: "#B91C1C";
+    --color-error-content: "#FFFFFF";
     --radius-field: 0.5rem;
     --depth: 0;
 }
