@@ -90,7 +90,7 @@ export function JevKeySection({ jev, busy }: { jev: ReturnType<typeof useJevKey>
         type="password"
         value={keyInput}
         onChange={(e) => setKeyInput(e.target.value)}
-        placeholder="ts_…"
+        placeholder="apikey_…"
         autoComplete="off"
         className="input input-bordered input-sm w-full text-sm"
       />
