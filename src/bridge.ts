@@ -3388,7 +3388,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
-        dropHeldOnKill(heldLocalMsgs, body.channelId); // 押给它的消息不再有人收:丢掉并留日志;owner 的 ask 答复放回「待你处理」(bridge/held-flush.ts)
+        dropHeldOnKill(heldLocalMsgs, body.channelId), turnCuts.forget(body.channelId); // 押给它的消息丢掉(ask 答复放回「待你处理」),打断 / 叫停记录也删
         // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
         // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
         // 建了又删的 agent 会一路堆积。

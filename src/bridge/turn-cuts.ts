@@ -121,8 +121,19 @@ export class TurnCuts {
 
   /** owner 的消息到达（抢占判断之前）：不是「停」就解除「已叫停」。外源（非 owner 的 API 用户）不调：他们不能替 owner 叫停或解除 */
   noteHuman(channelId: string, isStop: boolean): void {
+    this.prune(this.now()); // 不只在记新 cut 时清：很少被打断的实例，解除过的叫停记录也要按时清掉
     const s = this.stops.get(channelId);
     if (!isStop && s && s.goAt === undefined) this.stops.set(channelId, { ...s, goAt: this.now() });
+  }
+
+  /**
+   * agent 被永久 kill（/agent/cleanup）：这个频道的打断 / 叫停记录和内存里的回合状态全删。
+   * 不删的话叫停记录一直留在盘上，日后复用这个频道的新 agent 还会被当成「owner 叫停了」，Autopilot 不推进。
+   */
+  forget(channelId: string): void {
+    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
+    for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
+    for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
   }
 
   /** owner 最近一次叫停这个频道的时刻（解除了也还在）：押在它之前、之后才投出去的消息要加抬头（bridge/held-flush.ts） */

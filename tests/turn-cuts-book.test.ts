@@ -377,6 +377,33 @@ describe("Workflow 复核 wf2（@2968ec7f）", () => {
     expect(b.interruptHold("ch2")).toBe("stopped");
   });
 
+  test("adv5：owner 开口也会清理解除超过 24 小时的叫停记录（不必等下一次打断）", () => {
+    const { b, tick } = book();
+    ownerStop(b);
+    tick(1_000);
+    b.noteHuman("ch", false);
+    tick(25 * 3_600_000);
+    b.noteHuman("ch2", false);
+    expect(b.stoppedAt("ch")).toBeUndefined();
+  });
+
+  test("adv5：agent 被 kill（forget）：打断 / 叫停记录都删，落盘也删；别的频道不受影响", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "turn-cuts-")), "turn-cuts.json");
+    const { b } = book({ path });
+    b.noteDelivered(env("m1", "合并 T3 并上线"), "ch");
+    ownerStop(b);
+    b.record({ channelId: "ch2", agent: "a2", cause: "stopword", tools: { inflight: [] } });
+    b.forget("ch");
+    expect(b.get("ch")).toBeUndefined();
+    expect(b.stoppedAt("ch")).toBeUndefined();
+    expect(b.interruptHold("ch")).toBeNull();
+    expect(b.deliveredMessage("ch", "m1")).toBeUndefined();
+    const reloaded = book({ path }).b;
+    expect(reloaded.get("ch")).toBeUndefined();
+    expect(reloaded.stoppedAt("ch")).toBeUndefined();
+    expect(reloaded.interruptHold("ch2")).toBe("stopped");
+  });
+
   test("esc-keys-2：manager 清场 / tmux-send-keys 发的 C-c 引起的打断标记不记成叫停", async () => {
     let inputs: ProgramInput[] = [];
     const { b, at, tick } = book({ inputs: () => inputs });
