@@ -3,16 +3,22 @@
  * 共用这一份。Codex 不把 MCP instructions 放进模型上下文（实测），所以这段文字必须能被
  * 单独注入；抽成常量避免两边各改各的。
  *
- * ⚠ Claude Code 侧逐字不变是契约（tests/codex-cc-invariants.test.ts 钉了摘要）。
+ * ⚠ Claude Code 侧逐字不变是契约（tests/codex-cc-invariants.test.ts 钉了中文版摘要）。
+ * 回复语言跟机器语言（config.json 的 lang，台账 i06）：英文机器只换「Reply in」那一行，其余不动；中文原文逐字不变。
  */
-export function channelInstructions(claudestraHome: string): string {
+import { readConfigSync, type AppLang } from "./config-store.js";
+
+export function channelInstructions(claudestraHome: string, lang: AppLang = readConfigSync().lang): string {
   const CLAUDESTRA_HOME = claudestraHome;
+  const replyIn = lang === "en"
+    ? "Reply in concise English — lead with the result, then the details. If the user writes in another language, reply in that language."
+    : "Reply in 精简中文——直奔结论，先说结果再说细节。";
   return `Claudestra channel bridge——用户通过 Discord 或 Web 客户端远程与你对话（多在手机上）。
 
 Reply rules（通用，不分来源）:
 - Use the "reply" tool with chat_id from the <channel> tag.
 - If reply tool unavailable, use: bun ${CLAUDESTRA_HOME}/src/discord-reply.ts "<chat_id>" "<text>"
-- Reply in 精简中文——直奔结论，先说结果再说细节。
+- ${replyIn}
 - 有干货才说话；纯状态同步没人问就别刷屏。
 
 **格式按消息来源分流（看 <channel> tag 的 chat_id）：**

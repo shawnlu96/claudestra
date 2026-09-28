@@ -14,7 +14,7 @@ const sha = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex"
 
 test("channelInstructions 与抽取前的内联文本逐字一致", () => {
   // 摘要取自抽取前 HEAD(cf18087) 的 channel-server.ts，CLAUDESTRA_HOME="/HOME/X"
-  const t = channelInstructions("/HOME/X");
+  const t = channelInstructions("/HOME/X", "zh");
   expect(t.length).toBe(2481);
   expect(sha(t)).toBe("3b01aa691e81250dc0ee508d658e38445e5a8bf906c8c47b7ccbceb921052fd1");
   expect(t).toContain('bun /HOME/X/src/discord-reply.ts "<chat_id>" "<text>"');
@@ -71,4 +71,13 @@ describe("typing-hook：Codex 的 Interrupt 按 StopFailure 报给 bridge", () =
     expect(got.map((b) => b?.event)).toEqual(["StopFailure", "Stop"]);
     expect(got[0].channelId).toBe("999000333");
   });
+});
+
+test("英文机器：只把「Reply in」那一行换成英文，其余规则逐字不变", () => {
+  const zh = channelInstructions("/HOME/X", "zh");
+  const en = channelInstructions("/HOME/X", "en");
+  expect(en).toContain("- Reply in concise English");
+  expect(en).not.toContain("精简中文");
+  const strip = (s: string) => s.split("\n").filter((l) => !l.startsWith("- Reply in")).join("\n");
+  expect(strip(en)).toBe(strip(zh));
 });
