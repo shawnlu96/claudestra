@@ -143,3 +143,14 @@ export function droppedBlobUrls(before: ChatMessage[], after: ChatMessage[]): st
   }
   return out;
 }
+
+/** 乐观气泡的本地预览 URL 用完即还（见上面的 droppedBlobUrls） */
+export function revokeBlobUrls(urls: string[]) {
+  for (const u of urls) {
+    try {
+      URL.revokeObjectURL(u);
+    } catch {
+      /* 已失效的 URL revoke 不会抛，这里只是防御 */
+    }
+  }
+}

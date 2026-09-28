@@ -20,8 +20,8 @@ import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, Wor
 import { QuoteSwipe } from "./quote-swipe";
 import { AttachmentStrip } from "./attachments";
 import { exitSelectMode, isSelectMode } from "../select-mode";
-import { isNearBottom, tailAppendedCount } from "../scroll-follow";
-import { installTapRescue } from "@/lib/tap-rescue";
+import { tailAppendedCount } from "../scroll-follow";
+import { useScrollFollow } from "./use-scroll-follow";
 import { devCount } from "../../devtools/dev-mode";
 import { ProgressNote } from "./progress-note";
 import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
@@ -34,6 +34,8 @@ import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
+/** 打开会话只挂最近这么多个气泡，「显示更早」按需展开（见 extraVisible） */
+const WINDOW_BASE = 30;
 const NO_ORDER: string[] = [];
 
 /* 复刻 Claude OS features/chat 的对话观感：assistant 全宽 + ✦ Claude 头，
@@ -600,44 +602,11 @@ export function MessageList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, browsing]);
 
-  useEffect(() => {
-    const el = scrollerRef.current;
-    const inner = el?.firstElementChild;
-    if (!el || !inner) return;
-    // 触摸丢 click 兜底(lib/tap-rescue.ts):回弹 / 减速尾巴 / 吸底期间点工具行也能展开
-    const offRescue = installTapRescue(el, { name: "msgs", log: (m) => store.clientLog(m) });
-    let lastTop = el.scrollTop;
-    const onScroll = () => {
-      // 向上滑立即退出吸底（不等离底 >90px）——流式内容持续长高时，90px 缓冲区
-      // 内的每次 resize 吸底都会把刚起步的上滑手势拽回去，手感就是「滑不动」
-      const up = el.scrollTop < lastTop;
-      lastTop = el.scrollTop;
-      const nearBottom = isNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
-      followRef.current = !up && nearBottom;
-      // 按钮的可见性按「离底」判，与 follow 解耦：向上滑一下就退出吸底，但只有
-      // 真的离开底部 90px 才值得弹按钮，否则贴着底微调也会闪一下。
-      setAtBottomBoth(nearBottom);
-      if (nearBottom) clearUnread();
-    };
-    el.addEventListener("scroll", onScroll);
-    const snap = () => {
-      el.scrollTop = el.scrollHeight;
-      lastTop = el.scrollTop; // 吸底自身的位移不算「用户上滑」
-    };
-    snapRef.current = snap;
-    const ro = new ResizeObserver(() => {
-      if (isSelectMode()) return; // 同上：选字期间新内容长高也不吸底
-      if (Date.now() < touchHoldRef.current) return; // 手指在屏幕上:见 touchHoldRef 注释
-      if (followRef.current) snap();
-    });
-    ro.observe(inner);
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-      ro.disconnect();
-      snapRef.current = null;
-      offRescue();
-    };
-  }, [active]);
+  useScrollFollow({
+    store, active, messages, windowSize: WINDOW_BASE + extraVisible, scrollerRef, followRef, touchHoldRef, snapRef,
+    ensureWindow: (n) => setExtraVisible((e) => Math.max(e, n - WINDOW_BASE)),
+    onNearBottom: (near) => { setAtBottomBoth(near); if (near) clearUnread(); },
+  });
   // 分享模式（hooks 必须在下面的早退之前）：范围规则见 share-mode.ts
   const share = useShare();
   // 只在分享模式开着时算 id 列表——关着时长对话流式每拍白算一遍（peer review #43）
@@ -661,7 +630,7 @@ export function MessageList() {
 
   // 渲染窗口 = 尾部 30+extra 条（visible 是 messages 的后缀 → 全列表最后一条
   // 就是 visible 最后一条，isLast 语义不变）
-  const windowSize = 30 + extraVisible;
+  const windowSize = WINDOW_BASE + extraVisible;
   const visible = messages.length > windowSize ? messages.slice(-windowSize) : messages;
   const offset = messages.length - visible.length;
   const hiddenCount = offset;

@@ -21,19 +21,9 @@ import {
   historyHasReply,
   type RecordSrc,
 } from "./live-merge";
-import { composeView, droppedBlobUrls, stripInboundHeader } from "./view-compose";
+import { composeView, droppedBlobUrls, revokeBlobUrls, stripInboundHeader } from "./view-compose";
 import { decideReconnect } from "./reconnect-policy";
-
-/** 乐观气泡的本地预览 URL 用完即还（见 view-compose.ts 的 droppedBlobUrls） */
-function revokeBlobUrls(urls: string[]) {
-  for (const u of urls) {
-    try {
-      URL.revokeObjectURL(u);
-    } catch {
-      /* 已失效的 URL revoke 不会抛，这里只是防御 */
-    }
-  }
-}
+import { ReloadScroll } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
@@ -186,6 +176,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * jsonl seq，追加只影响尾部），缓存降级为防白屏的过渡帧。
    */
   private messageCache = new Map<string, ChatMessage[]>();
+  /** 全量对齐重拉的滚动交接（锚点快照 / 保留更早前缀），见 reload-scroll.ts */
+  public readonly reloadScroll = new ReloadScroll();
   /** 最近一次 reply 内容落地的时刻——用于丢弃 watcher 迟到的 reply_pending */
   private lastReplyTextAt = 0;
 
@@ -551,19 +543,20 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
   // ─── 打开会话 + 持久流 ─────────────────────────────────────
 
-  public async openAgent(name: string) {
+  /** intent：latest = 要看最新（推送 / 深链 / 桌面重点当前行）；reenter = 窄屏从列表回到同一会话（open-intent.ts） */
+  public async openAgent(name: string, intent: "latest" | "reenter" = "latest") {
     if (name === this.state.activeAgent) {
       // 历史现场里重点当前会话 = 要回到现在,走完整退出路径
       if (this.state.browsing) {
         void this.returnToLatest();
         return;
       }
-      // 重复打开当前会话(点推送通知/重点侧栏项)= 用户明确要看最新——不能静默
-      // 返回:冻结页面点通知进来正是这条路(2026-07-24 wechat-bot 事故,推送到了
-      // 点进去还是死页面)。force:跳过判活守卫,流健康也全量对齐(bridge 重启
-      // 纪元切换的静默缺口只有重拉历史能补)。
-      this.clientLog("openAgent(same): 强制对齐");
-      this.maybeReconnect({ force: true });
+      // 重复打开当前会话(点推送/深链/桌面重点)= 要看最新,force 全量对齐:冻结页面点通知进来正是
+      // 这条路(2026-07-24 wechat-bot 事故),bridge 重启纪元切换的静默缺口只有重拉历史能补。
+      // 窄屏返回列表再点回来只是回到页面:走常规选路(流健康=判活探针,否则 fast/delta),
+      // 不无条件全量——长对话全量重拉会把人从原位置挪走(owner 2026-09-28)。
+      this.clientLog(`openAgent(same): ${intent === "reenter" ? "回到页面,常规对齐" : "强制对齐"}`);
+      this.maybeReconnect(intent === "reenter" ? undefined : { force: true });
       return;
     }
     // 记住最后打开的会话——iOS 把后台页整个回收重载后（store 全新、hash 还在
@@ -1014,8 +1007,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         });
         return;
       }
+      const prev = { sid: this.historySessionId, older: this.olderCursor, more: this.state.historyHasMore };
       this.historySessionId = json.sessionId ?? null;
-      this.olderCursor = null; // 全量重载 = 视图重置,翻页游标重新起算
+      this.olderCursor = null; // 全量重载 = 视图重置,翻页游标重新起算(保留了更早前缀时下面沿用旧游标)
       // v2.16 cursor 同步:全量加载即重锚游标(sid + 最后一条原始记录 seq)。
       // 唤醒差量按它拉「之后的」——这是 owner 2026-07-25 立的 cursor 模型扳机的落地
       this.historyCursor =
@@ -1035,8 +1029,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           cursor: this.historyCursor,
           nowMs: Date.now(),
         });
-        revokeBlobUrls(droppedBlobUrls(s.messages, v.messages));
-        s.messages = v.messages;
+        const msgs = this.reloadScroll.merge(name, { sameSession: prev.sid === json.sessionId, current: s.messages, next: v.messages });
+        if (msgs.length > v.messages.length) [this.olderCursor, s.historyHasMore] = [prev.older, prev.more];
+        revokeBlobUrls(droppedBlobUrls(s.messages, msgs));
+        s.messages = msgs;
         if (v.restoreAwaiting) s.awaitingChunk = true;
         s.loadingHistory = false;
         s.syncState = null; // pill 消失 = 对齐完成(没新内容也一样,「已是最新」)
@@ -1504,6 +1500,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       return;
     }
     this.clientLog(`reconnect(full): agent=${name} 重拉历史+重连流`);
+    this.reloadScroll.expect(name);
     void this.loadMessages(name, gen).then(() => {
       if (gen !== this.openGen) return;
       void this.openStream(name);
