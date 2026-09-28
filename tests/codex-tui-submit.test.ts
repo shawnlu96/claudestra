@@ -71,6 +71,14 @@ describe("typeIntoCodex", () => {
     expect(calls).toEqual([`paste:${MSG}`, "enter"]);
   });
 
+  test("内容以 / 或 ! 开头（TUI 的斜杠命令 / 本机 shell）→ 不打", async () => {
+    for (const t of ["/quit", " !rm -rf x"]) {
+      const { io, calls } = fakeIO([EMPTY]);
+      expect((await typeIntoCodex(io, t)).ok).toBe(false);
+      expect(calls).toEqual([]);
+    }
+  });
+
   test("输入框不空 / 在忙 / 有弹框 / 认不出：一个键都不发，交给 queue", async () => {
     for (const f of [TYPED, BUSY, TRUST, HISTORY]) {
       const { io, calls } = fakeIO([f]);

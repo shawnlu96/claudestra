@@ -55,6 +55,8 @@ const SUBMIT_POLLS = 10;
  * 回车后等到「回合开始（busy）」或「输入框变空」才算提交成功；第一下回车被当成换行时再补一下。
  */
 export async function typeIntoCodex(io: TypeInIO, text: string): Promise<TypeInResult> {
+  // TUI 里 / 开头是斜杠命令、! 开头是本机 shell：投递内容正常以 <channel 或 [ 开头，万一不是就别打
+  if (/^\s*[/!]/.test(text)) return { ok: false, why: "内容以 / 或 ! 开头，TUI 会当成命令" };
   const before = composerState(await io.capture());
   if (before !== "empty") return { ok: false, why: `输入框状态 ${before}` };
   await io.paste(text);
