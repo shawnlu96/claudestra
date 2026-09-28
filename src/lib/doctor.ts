@@ -562,7 +562,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkRuntime(),
     checkConfig(repoRoot),
     checkDaemons(),
-    checkUndeliveredAlerts(), checkStateFiles(),
+    checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(),

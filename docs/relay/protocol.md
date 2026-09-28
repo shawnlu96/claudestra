@@ -180,8 +180,9 @@ claudestra-relay-auth-v2
 1. `x-claudestra-key` 形状合法，且 `keyFingerprint(key) === from`；否则 `error bad_signature`。`from` 由中继按握手结果盖章，别的实例顶不了 A 的钥匙，中继虽能盖任意 `from` 却签不出 A 的签名。
 2. 按 `instance-key.ts` 的 canonical 验：`claudestra-req-v1\n<METHOD>\n<path>\n<ts>\n<sha256(body) hex>`，body 是完整请求正文的原始字节（流式正文先收齐再验——peer 路径的正文都是小 JSON）；偏差 ±300 秒。不过 → `bad_signature`。
 3. 防重放：非 GET / HEAD 的 `x-claudestra-sig` 10 分钟内见过 → `error replay`。
+4. 核发件人（`lib/peer-trust.ts` `relayPeerRefusal`）：兑换邀请之外，`from` MUST 是本机联系人（peers.json 里未禁用、记有指纹的对方）；带了 peer token（Bearer 或 events 的 `?token=`）的，token 所属 peer 的期望指纹 MUST 等于 `from`。否则 `error sender_forbidden`。签名只证明请求出自 `from`，这一步才证明 token 是 `from` 的。
 
-验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>`。bridge 照旧按 peer token 与 scope 放行。
+验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>`。bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹），不签、签错、过期、换了钥匙都 401；直连（不经中继）的 peer 请求同样如此。三样都没有的老 peer 在 `LEGACY_PEER_DEADLINE` 前放行并告警（doctor 会列出来）。中继路径模式（§6）不收 peer token，也不接兑换邀请，一律 403。
 
 ### 4.2 隧道请求（`from: "relay"`）
 
@@ -287,7 +288,7 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 | `stream_idle` / `stream_max` | relay | 流态空闲超时 / 总时长超限 | 不重试 |
 | `peer_disconnected` | relay | 等待期间对方断线 | 不重试 POST |
 | `unknown_request` | relay | `res` / `data` / `end` / `cancel` 对不上 pending（已超时、发起方已断、或 `to` 填错） | 记日志 |
-| `bad_signature` / `replay` / `path_forbidden` | peer | §4.1 | 不重试 |
+| `bad_signature` / `replay` / `path_forbidden` / `sender_forbidden` | peer | §4.1 | 不重试 |
 | `payload_too_large` | peer | peer 请求正文超过接收方上限（bridge 侧 2 MiB；正文要收齐验签，不能无限收） | 不重试 |
 | `local_unreachable` / `local_timeout` | peer | 接收方连不上 / 等不到本机入口 | 不重试 |
 
@@ -308,7 +309,7 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 
 中继**能**：看见帧内明文（含 token 与正文）；知道谁在线、谁调了谁、多大、多久、从哪个 IP 来；拒绝转发；替换 front 送出的任何内容（它就是 HTTPS 终点）。
 
-中继**不能**：冒充实例发 peer 请求（没有私钥，接收方验签）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
+中继**不能**：冒充实例发 peer 请求（没有私钥；接收方验签，核对 token 属于签名者，bridge 对 peer token 强制验签，路径模式不收 peer token）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
 
 明说的残余风险，留给下一版端到端加密：隧道里的 Web 流量（含会话 cookie）对中继可见；中继若能直连某台实例的 Web 端口（同机部署）就能绕过一切。缓解：不在跑 bridge 的机器上跑中继；Web 与 peer 入口默认只听本机。中继日志 MUST 只记信封：时间、from、to、id、方法、路径前缀、大小、状态、耗时；不记头与正文，不记 `/c/<code>` 的短码值。
 

@@ -3,7 +3,7 @@
  *
  * 用途：跨实例请求带签名，对方能确认「这个请求真是那台机器发的」，而不只是「拿着那个 token」——
  * token 被抄走、或者以后经中转服务器转发时，签名仍然只有私钥持有者做得出来。
- * 现阶段只记录验签结果、不拦截（见 bridge/peer-signature.ts）；密钥与 instance-id 分开：
+ * 接收方对 peer token 强制验签（bridge/peer-signature.ts、lib/peer-trust.ts）；密钥与 instance-id 分开：
  * instance-id 是对方自报的合并标识，这个才是凭据。纯逻辑部分单测在 tests/instance-key.test.ts。
  */
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, type KeyObject } from "node:crypto";

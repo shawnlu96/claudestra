@@ -3,7 +3,8 @@
  *   - from = "relay" 且带模式头 api：路径模式 https://<base>/m/<fp>/api/v1/…，在进程内直接调 API（relay-dispatch.ts），
  *     身份由设备凭据 / Bearer 决定；
  *   - from = "relay" 没有模式头：旧子域名隧道，原样重放到本机 Web（Next.js），身份由 Web 自己的会话 cookie 决定；
- *   - from = 对方指纹：peer 调 /api/v1，先验签（指纹 ↔ 签名头公钥 ↔ 签名）再打 peer 专用回环入口。
+ *   - from = 对方指纹：peer 调 /api/v1，先验签（指纹 ↔ 签名头公钥 ↔ 签名），再核发件人（联系人、token 归属），
+ *     最后打 peer 专用回环入口。
  * 纯逻辑（验签、重放缓存）单独导出给 tests/relay-link.test.ts；fetch 可注入。
  */
 import { randomBytes } from "node:crypto";
@@ -49,6 +50,8 @@ export interface InboundDeps {
   onRedeemed?: () => void;
   /** 路径模式请求的进程内 API 处理器（bridge.ts 注入：终端端点 + serveApiRequest）；没注入就只有旧隧道 */
   handleApi?: ApiHandler;
+  /** 验签之后的发件人核对（联系人、token 归属，lib/peer-trust.ts relayPeerRefusal）：返回拒绝原因或 null */
+  refusePeer: (from: string, req: { method: string; path: string; headers: Headers }) => Promise<string | null>;
 }
 
 /** 非幂等方法的签名 10 分钟内只认一次（签名含时间戳与正文哈希，同一 sig = 同一请求） */
@@ -147,6 +150,8 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
   }
   const bad = verifyPeerRequest(from, { method: req.method, path: req.path, headers: req.headers, body }, cache, (d.now ?? Date.now)());
   if (bad) throw bad;
+  const refused = await d.refusePeer(from, req);
+  if (refused) throw new RelayError("sender_forbidden", "peer", refused);
   const base = d.ingressBase();
   if (!base) throw new RelayError("local_unreachable", "peer", "peer ingress port not configured on this instance");
   const headers = forwardHeaders(req.headers, dropForPeer);

@@ -7,7 +7,7 @@
 import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
 import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { apiJson } from "./api-respond.js";
-import { notePeerSignature } from "./peer-signature.js";
+import { checkPeerSignature } from "./peer-signature.js";
 import { requestContextOf } from "./request-context.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
@@ -54,8 +54,14 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
     if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)` });
   }
-  if (p.peer) void import("./peer-presence.js").then((m) => m.notePeerInbound(p!.peer!)); // 在线 peer 列表的「最近来访」
-  if (p.peer) void notePeerSignature(req, url, p.peer); // 验签：只记录不拦（bridge/peer-signature.ts）
+  if (p.peer) {
+    // peer 只经 peer 入口或中继的 peer 帧进来；路径模式（source=relay）是给浏览器的，token 在那里只是中继看得见的明文
+    if (requestContextOf(req).source === "relay") return apiJson(403, { ok: false, error: "peer tokens are not accepted on the relay path", code: "peer_via_relay_path" });
+    const v = await checkPeerSignature(req, url, p.peer); // 签名钥匙必须是这个 peer 的（lib/peer-trust.ts）
+    if (!v.allow) return apiJson(401, { ok: false, error: `peer request signature rejected: ${v.reason}`, code: "peer_signature" });
+    const peer = p.peer;
+    void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
+  }
   return p;
 }
 

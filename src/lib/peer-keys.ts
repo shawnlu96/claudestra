@@ -3,7 +3,8 @@
  *
  * 首次见到对方带签名、且签名对得上 → 钉住这把公钥（TOFU，和 SSH 第一次连主机一样）；
  * 之后换了公钥 → key_changed（不替换，等人确认——这正是签名要防的情况）。
- * 现阶段只记录结果、不拦请求：老版本的 peer 还不会签名（unsigned），协作照常。
+ * peers.json 记了对方指纹（recordFp，邀请 / 兑换得来）时以它为准：指纹不符 = key_changed，
+ * 指纹相符而钉住的是别的钥匙（对方重装后重新邀请）就改钉。放不放行由 lib/peer-trust.ts 按结果定。
  */
 import { isPublicKey, keyFingerprint, type SigCheck } from "./instance-key.js";
 
@@ -21,6 +22,7 @@ export function judgeSignature(
   hdr: { key: string | null; ts: string | null; sig: string | null },
   check: (publicKey: string) => SigCheck,
   now: string,
+  recordFp: string | null = null,
 ): PinnedPeerKey {
   const done = (result: SigResult, pin?: Pick<PinnedPeerKey, "publicKey" | "fingerprint" | "pinnedAt">): PinnedPeerKey => ({
     ...prev,
@@ -29,8 +31,8 @@ export function judgeSignature(
   });
   if (!hdr.key || !hdr.ts || !hdr.sig) return done("unsigned");
   if (!isPublicKey(hdr.key)) return done("bad");
-  if (prev?.publicKey && prev.publicKey !== hdr.key) return done("key_changed");
-  const r = check(prev?.publicKey ?? hdr.key);
+  if (recordFp ? keyFingerprint(hdr.key) !== recordFp.toLowerCase() : prev?.publicKey && prev.publicKey !== hdr.key) return done("key_changed");
+  const r = check(hdr.key);
   if (r !== "ok") return done(r);
-  return prev?.publicKey ? done("ok") : done("ok", { publicKey: hdr.key, fingerprint: keyFingerprint(hdr.key), pinnedAt: now });
+  return prev?.publicKey === hdr.key ? done("ok") : done("ok", { publicKey: hdr.key, fingerprint: keyFingerprint(hdr.key), pinnedAt: now });
 }

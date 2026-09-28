@@ -16,6 +16,7 @@ import { requestContextOf } from "../src/bridge/request-context.js";
 import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER } from "../src/lib/relay-machine-path.js";
 import { isDirectLoopback } from "../src/bridge/web-gateway.js";
 import { isSameHostRequest } from "../src/lib/same-host.js";
+const ALLOW_ALL = async () => null;
 
 const FP = "16f9-b5d1-30fb-8923";
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -85,7 +86,7 @@ describe("入站分流（relay-inbound.ts）", () => {
     const calls: Call[] = [];
     let redeemed = 0;
     const fetchImpl = (async (url: string, init: RequestInit) => { calls.push({ url, init }); return answer({ url, init }); }) as unknown as typeof fetch;
-    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => ingress, fetchImpl, now: () => NOW, onRedeemed: () => redeemed++ });
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer: ALLOW_ALL, ingressBase: () => ingress, fetchImpl, now: () => NOW, onRedeemed: () => redeemed++ });
     return { handler, calls, redeemed: () => redeemed };
   }
   const ctx = (from: string, signal = new AbortController().signal) => ({ from, signal });
@@ -176,7 +177,7 @@ describe("路径模式：进程内 dispatch（relay-dispatch.ts）", () => {
     const fetchCalls: string[] = [];
     const fetchImpl = (async (url: string) => { fetchCalls.push(url); return new Response("web"); }) as unknown as typeof fetch;
     const handler = makeInboundHandler({
-      webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl,
+      webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl, refusePeer: ALLOW_ALL,
       handleApi: async (r) => {
         seen = r;
         return new Response(JSON.stringify({ ok: true, body: await r.text() }), { status: 201, headers: { "content-type": "application/json", "set-cookie": "cstra_dev=x; Path=/" } });
@@ -204,7 +205,7 @@ describe("路径模式：进程内 dispatch（relay-dispatch.ts）", () => {
 
   test("中继的同网提示 → 上下文 sameNetwork:true，头本身不进 API", async () => {
     let seen: Request | null = null;
-    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, handleApi: async (r) => ((seen = r), new Response("ok")) });
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer: ALLOW_ALL, ingressBase: () => null, handleApi: async (r) => ((seen = r), new Response("ok")) });
     const headers = { [RELAY_MODE_HEADER]: "api", [RELAY_PREFIX_HEADER]: `/m/${FP}`, "x-claudestra-relay-same-net": "1", "x-forwarded-for": "203.0.113.5" };
     await handler({ method: "GET", path: "/api/v1/host", headers, body: bodyStream("") }, ctx("relay"));
     const r = seen as unknown as Request;
@@ -214,9 +215,9 @@ describe("路径模式：进程内 dispatch（relay-dispatch.ts）", () => {
 
   test("带模式头但路径不在 /api/v1 下 → path_forbidden；没注入 handleApi 时退回旧隧道", async () => {
     const web = (async () => new Response("web")) as unknown as typeof fetch;
-    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl: web, handleApi: async () => new Response("api") });
+    const handler = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer: ALLOW_ALL, ingressBase: () => null, fetchImpl: web, handleApi: async () => new Response("api") });
     await expect(handler({ method: "GET", path: "/hook", headers: { [RELAY_MODE_HEADER]: "api" }, body: bodyStream("") }, ctx("relay"))).rejects.toMatchObject({ code: "path_forbidden" });
-    const legacy = makeInboundHandler({ webBase: "http://127.0.0.1:2", ingressBase: () => null, fetchImpl: web });
+    const legacy = makeInboundHandler({ webBase: "http://127.0.0.1:2", refusePeer: ALLOW_ALL, ingressBase: () => null, fetchImpl: web });
     const res = await legacy({ method: "GET", path: "/api/v1/agents", headers: { [RELAY_MODE_HEADER]: "api" }, body: bodyStream("") }, ctx("relay"));
     expect(dec(await collectBody(res.body, 1 << 16))).toBe("web");
   });

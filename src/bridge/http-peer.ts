@@ -173,7 +173,7 @@ async function runCall(
       headers: {
         Authorization: `Bearer ${peer.outToken || ""}`,
         "Content-Type": "application/json",
-        ...signedFor("POST", url, body), // 实例签名（lib/instance-key.ts），对方只记录不拦
+        ...signedFor("POST", url, body), // 实例签名（lib/instance-key.ts），对方凭它认定是我本人（lib/peer-trust.ts）
       },
       body,
       signal: AbortSignal.timeout(postTimeoutMs),
