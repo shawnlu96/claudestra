@@ -206,7 +206,7 @@ async function handleModalInteraction(
     };
     const tmuxKey = keyMap[key] ?? key; // 数字键保持原样
     // Esc 走带双击护栏的 tmuxSendEscape：两次 Esc 挨得太近会打开 CC 的 Rewind 回溯菜单
-    await (tmuxKey === "Escape" ? tmuxSendEscape(targetWindow) : tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey]));
+    await (tmuxKey === "Escape" ? tmuxSendEscape(targetWindow, { strict: true }) : tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey])); // Esc 没发出去要报失败
     await Bun.sleep(1500);
     const pane = await tmuxCapture(targetWindow, 40);
     const options = parseModalOptions(pane);
@@ -671,7 +671,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       if (id.startsWith("wedge_esc:")) {
         const agentName = id.slice("wedge_esc:".length);
         try {
-          await tmuxSendEscape(windowTarget(agentName));
+          await tmuxSendEscape(windowTarget(agentName), { strict: true });
           clearWedgeState(agentName);
           await interaction.followUp({ content: `✅ 已发 Esc 到 ${agentName}`, ephemeral: true }).catch(() => {});
         } catch (e) {
@@ -966,7 +966,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             // 同步收掉 web 端的交互卡
             emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord" } });
           } else if (action === "cancel") {
-            await tmuxSendEscape(state.tmuxTarget);
+            const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
+            if (failed) return void (await interaction.editReply({ content: `❌ 取消没生效：${failed.message}` }).catch(() => {})); // 状态留着可以再按
             await interaction.editReply({
               content: `❌ 已取消 AskUserQuestion（发了 Esc 给 agent）`,
               components: [],

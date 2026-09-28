@@ -1612,9 +1612,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
       const action = String(body?.action || "submit");
       if (action === "cancel") {
-        try {
-          await tmuxSendEscape(state.tmuxTarget);
-        } catch { /* non-critical：状态照清 */ }
+        const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
+        if (failed) return apiJson(409, { ok: false, error: `取消没生效：${failed.message}` }); // Esc 没发出去：问题还在，状态留着可以再取消
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
         emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });

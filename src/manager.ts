@@ -2126,7 +2126,7 @@ async function cmdTmuxSendKeys(name: string, keys: string[]) {
   for (const k of keys) {
     const special = /^(Enter|Escape|Esc|Left|Right|Up|Down|Tab|BTab|BSpace|C-[a-z]|M-[a-z]|Space)$/i.test(k);
     const args = special ? ["send-keys", "-t", windowTarget(tmuxName), k] : ["send-keys", "-t", windowTarget(tmuxName), "-l", "--", k];
-    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName)) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算）
+    await (/^(Escape|Esc)$/i.test(k) ? tmuxSendEscape(windowTarget(tmuxName), { strict: true }) : tmuxRaw(args)); // Esc 走双击护栏（跨进程也算），没发出去就报错
     await Bun.sleep(50);
   }
   output({ ok: true, agent: tmuxName, keys });

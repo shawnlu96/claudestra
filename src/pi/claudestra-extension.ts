@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createAbortControl } from "./abort-control.js";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
@@ -45,6 +46,8 @@ interface PiToolResult {
 interface PiUi {
   notify?(message: string, level?: "info" | "warning" | "error"): void;
   setStatus?(key: string, text: string | undefined): void;
+  getEditorText?(): string;
+  setEditorText?(text: string): void;
 }
 
 interface PiModelLike {
@@ -100,29 +103,6 @@ interface PiExtensionApi {
   getCommands?(): Array<{ name?: string }>;
   getThinkingLevel?(): string;
   getModel?(): { id?: string; name?: string } | undefined;
-}
-
-/**
- * bridge 的停字 / 停止按钮（ws {type:"abort"}）：中止当前回合，回执照实写。TUI 模式下 Pi 的中止会把排队的 steer 消息退回输入框（同它的 Esc）；
- * 没有这个处理（--mode rpc）时 Pi 马上拿排队消息开下一轮（agent-session _handlePostAgentRun）：那一轮也中止，否则「部署 Y」+「等等」
- * 里的部署会在「等等」送到前跑起来。bridge 的下一条消息（就是那条「停」）到了、或过了 3 秒就不再拦。
- */
-function createAbortControl() {
-  let runCtx: PiContext | undefined; // 最近一次 agent_start 的上下文
-  let abortNextRunUntil = 0;
-  return {
-    onRunStart(ctx: PiContext): void {
-      runCtx = ctx;
-      if (Date.now() < abortNextRunUntil) { abortNextRunUntil = 0; ctx.abort?.(); }
-    },
-    onBridgeMessage: () => void (abortNextRunUntil = 0),
-    abort(): "aborted" | "idle" {
-      if (!runCtx || runCtx.isIdle?.()) return "idle"; // 空闲时 abort 无意义
-      runCtx.abort?.();
-      if (runCtx.hasPendingMessages?.()) abortNextRunUntil = Date.now() + 3_000;
-      return "aborted";
-    },
-  };
 }
 
 // ── 扩展主体 ──
@@ -323,13 +303,13 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
         case "message":
           // bridge 已经把 header（[🤖 来自 X] 等）渲染好，原样注入即可
           if (msg.meta?.chat_id) lastChatId = String(msg.meta.chat_id);
-          aborts.onBridgeMessage();
+          aborts.onBridgeMessage({ text: String(msg.content ?? ""), messageId: msg.meta?.message_id }, streaming);
           void inject(String(msg.content ?? ""));
           return;
-        case "abort": {
-          let result = "idle";
-          try { result = aborts.abort(); } catch (e) { console.error(`claudestra: abort 失败: ${(e as Error).message}`); }
-          return void ws.send(JSON.stringify({ type: "abort_ack", id: msg.id, result }));
+        case "abort": { // 回执照实写，并列出作废的消息（停之前 steer 进去、还没执行的），bridge 逐条告诉发送方
+          let r: ReturnType<typeof aborts.abort> = { result: "idle", voided: [] };
+          try { r = aborts.abort(); } catch (e) { console.error(`claudestra: abort 失败: ${(e as Error).message}`); }
+          return void ws.send(JSON.stringify({ type: "abort_ack", id: msg.id, result: r.result, voided: r.voided.map((v) => v.messageId).filter(Boolean) }));
         }
         case "replaced":
           // 同一个频道被另一条连接顶替。Claude Code 侧的判据是「MCP stdio 还在 ⇒ 绝不死」；
@@ -451,8 +431,10 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     streaming = true;
     aborts.onRunStart(ctx);
   });
+  pi.on("message_start", (event) => aborts.onMessageStart(event?.message));
   pi.on("agent_settled", () => {
     streaming = false;
+    aborts.onSettled();
     reportSettled();
   });
 

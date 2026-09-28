@@ -3,7 +3,7 @@
  * 大总管的 `master:0`（打断、抓取）和 `master:=master`（取消 AUQ）是同一个窗口；跨进程靠锁 + 共享时刻。
  * 回归：T13a 对抗式 P2-3、T13b 第 4 轮新 P2-1。
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createEscGuard, ESC_DOUBLE_TAP_MS, type EscGuardDeps } from "../src/lib/esc-guard.js";
 import { windowKey } from "../src/lib/tmux-target.js";
 
@@ -113,11 +113,18 @@ describe("拿不到锁（对抗式第 3 轮 P2-1：负载 107 时 7 路并发，
     expect(w.sent.length).toBe(7);
     for (const g of gaps(w.sent)) expect(g).toBeGreaterThanOrEqual(ESC_DOUBLE_TAP_MS);
   });
-  test("等不到锁就不发（fail-closed）：strict（打断键）抛错如实回报，其余只告警", async () => {
+  test("等不到锁就不发（fail-closed）：有告警；strict（打断键、取消 AUQ、wedge、按键面板）抛错如实回报，其余只告警", async () => {
     const w = world({ ids: { t: "@1" }, noLock: true });
     const esc = createEscGuard(w.deps);
-    await expect(esc("t", { strict: true })).rejects.toThrow("等不到窗口锁");
-    await esc("t");
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(esc("t", { strict: true })).rejects.toThrow("等不到窗口锁");
+      await esc("t");
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(String(warn.mock.calls[0][0])).toContain("Esc 没发");
+    } finally {
+      warn.mockRestore();
+    }
     expect(w.sent).toEqual([]);
     expect(w.shared.get("@1")).toBeUndefined(); // 没发就不记时
   });

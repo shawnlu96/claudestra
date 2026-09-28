@@ -40,6 +40,7 @@ export class TurnCuts {
   private readonly cuts: PersistedMap<Cut>;
   /** 频道 → 这一回合（上次 Stop / 打断之后）送到的消息，按先后；被打断时它们就是「在处理的」 */
   private readonly inbound = new Map<string, TurnTrigger[]>();
+  private readonly agentOf = new Map<string, string>();
   /** Codex 频道：上次 Stop 之后经 codex queue（不是打进 TUI）投的消息摘录——Esc 之后它们会排在停字后面才跑 */
   private readonly codexQueued = new Map<string, string[]>();
   /** 频道 → 最后一次 ws.send 投递的时刻（终端打断之后有没有新消息进来） */
@@ -85,10 +86,17 @@ export class TurnCuts {
     const fromName = f.kind === "user" ? (f.username ?? "用户") : f.kind === "api" ? f.name : f.kind === "local" ? (f.agentName ?? "agent") : `bridge${f.label ? `:${f.label}` : ""}`;
     const replyTo = f.kind === "user" || f.kind === "local" ? f.channelId : f.kind === "api" ? `api:${f.tokenId}` : "";
     const t = { messageId: env.meta.messageId, fromKind: f.kind, fromName, excerpt: env.content.slice(0, 120), replyTo, at };
+    if (env.to.kind === "local" && env.to.agentName) this.agentOf.set(channelId, env.to.agentName);
     this.inbound.set(channelId, [...(this.inbound.get(channelId) ?? []), t].slice(-INBOUND_KEEP));
     if (this.codexTypeIn.has(channelId) && !typed && busy && (f.kind === "user" || f.kind === "api")) {
       this.codexQueued.set(channelId, [...(this.codexQueued.get(channelId) ?? []), t.excerpt].slice(-INBOUND_KEEP));
     }
+  }
+
+  /** 这一回合送到过的某条消息（Pi 停下后作废回显要找发送方），以及它是发给哪个 agent 的 */
+  deliveredMessage(channelId: string, messageId: string): (TurnTrigger & { agent?: string }) | undefined {
+    const t = (this.inbound.get(channelId) ?? []).find((x) => x.messageId === messageId);
+    return t && { ...t, agent: this.agentOf.get(channelId) };
   }
 
   /** Codex 停字用：上次 Stop 之后排进 codex queue、还没轮到的人类消息（停之后会先跑它们） */
