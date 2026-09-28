@@ -1256,7 +1256,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     targets = [tmuxName];
   } else {
     const deadButInReg = Object.keys(reg.agents).filter(
-      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n)
+      (n) => reg.agents[n].status === "active" && !liveWindows.includes(n) && !isMasterAgent(n)
     );
     targets = [...liveWindows, ...deadButInReg];
   }
@@ -2593,13 +2593,13 @@ switch (cmd) {
     break;
 
   case "restart": {
-    // --include-master：连大总管一起重启（Claude Code 重新登录后让所有会话认新凭证）。
-    // 只在「全体重启」时有意义——指名道姓重启某个 agent 时带它是自相矛盾的。
-    const rest = args.filter((a) => a !== "--include-master");
-    const includeMaster = args.length !== rest.length;
-    const [name] = rest;
-    if (name && includeMaster) {
-      output({ ok: false, error: "--include-master 只能用于全体重启（不要同时指定 agent 名）" });
+    // --include-master：连大总管一起重启（CC 重新登录后让所有会话认新凭证），只在「全体重启」时有意义。只认 `--` 之前的：
+    // bridge 按名字重启传 `restart -- <名>`，名字长得像开关也只是名字。大总管由 launcher 守护，不许按名字重启（历史条目 agent-master 会被拉成分身）
+    const dd = args.indexOf("--");
+    const includeMaster = (dd < 0 ? args : args.slice(0, dd)).includes("--include-master");
+    const [name] = dd < 0 ? args.filter((a) => a !== "--include-master") : args.slice(dd + 1);
+    if (name && (includeMaster || isMasterAgent(name))) {
+      output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
       break;
     }
     await cmdRestart(name || undefined, { includeMaster });

@@ -25,7 +25,18 @@ export type AgentRuntime = "claude-code" | "pi" | "codex";
  * `agent-master` 绕过 master 排除），`manager.ts list` 这次踩的是另一头。
  */
 export function isMasterAgent(name: string | undefined | null): boolean {
-  return name === "master" || name === "agent-master";
+  return isMasterName(name);
+}
+
+/**
+ * master 的唯一判定：NFKC → 小写 → 去掉所有层 agent- 前缀 → master，网页的会话名 __master__ 也算。
+ * 请求里的名字会落到不区分大小写的文件系统（APFS：Master 的归档目录就是 master 的）、会被 manager 转小写，
+ * 全角写法经 NFKC 也会变回来——判定只要有一处比路由解析「窄」，"*" 就能从那个缺口碰到 master（tests/api-master-scope.test.ts）。
+ */
+export function isMasterName(name: string | undefined | null): boolean {
+  if (!name) return false;
+  const n = name.normalize("NFKC").toLowerCase().replace(/^(agent-)+/, "");
+  return n === "master" || n === "__master__";
 }
 
 /**
