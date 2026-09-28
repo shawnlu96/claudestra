@@ -3,13 +3,15 @@
  * 刷新时机：挂载、自己那条只收 ask 的 SSE（/events?types=ask，没开会话时也实时）、回到前台、可见时每 30 秒兜底。
  * 顺带报网页可见性（POST /presence，推送规则据此判 owner 在不在）：切前台 / 后台各一次，可见时每分钟一次。
  * 凭据读不了台账（403）就当没有待办，也不再轮询。切机器由调用方换 key 重挂（start 见到新 key 先清空）。
+ * 作答是乐观的（T11b 第 8 条）：answer() 提交前就把卡标成已答（移出「等你处理」、计数减 1），服务端确认 / SSE 回来再校正，失败回滚并在卡上留原因。
+ * 线上 owner 反映答完卡片迟迟不走：作答接口要等投递给 agent（抓屏判忙、读 registry）才回 202，机器一忙就拖好几秒。
  */
 import { useSyncExternalStore } from "react";
 import { ApiError } from "@/lib/api/client";
 import { fetchAsks, followAskEvents, postPresence } from "@/lib/api/asks";
 import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
-import type { WebAsk } from "./asks-model";
+import { applyPending, ASK_EVENT_REFRESH_MS, type PendingAnswer, type WebAsk } from "./asks-model";
 
 export interface AsksSnap {
   asks: WebAsk[];
@@ -21,10 +23,20 @@ export interface AsksSnap {
   focus: string | null;
   /** owner 正在用时新来的卡活 ask：顶部横幅（不推送） */
   banner: WebAsk | null;
+  /** 作答后卡片上那一句（按 askId）：成功「已发给 X」/ 失败的原因。卡片换了分组会重挂、组件里的 state 会丢，所以记在这里 */
+  notes: Record<string, AskNote>;
 }
 
-const EMPTY: AsksSnap = { asks: [], loaded: false, canAnswer: true, open: false, focus: null, banner: null };
+export interface AskNote {
+  ok: boolean;
+  text: string;
+}
+
+const EMPTY: AsksSnap = { asks: [], loaded: false, canAnswer: true, open: false, focus: null, banner: null, notes: {} };
 let snap: AsksSnap = EMPTY;
+/** 服务端最近一次给的列表；显示的是它盖上待确认的作答（applyPending） */
+let server: WebAsk[] = [];
+const pending = new Map<string, PendingAnswer>();
 let machineKey: string | null = null;
 let denied = false;
 const seen = new Set<string>();
@@ -37,6 +49,40 @@ function set(p: Partial<AsksSnap>): void {
 
 const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
 
+/** 服务端列表 + 待确认的作答 → 显示用的列表；已确认 / 盖太久的从待确认表里删掉 */
+function show(extra: Partial<AsksSnap> = {}): void {
+  const v = applyPending(server, pending, Date.now());
+  for (const id of v.settled) pending.delete(id);
+  set({ asks: v.asks, ...extra });
+}
+
+const note = (id: string, n: AskNote | null) => {
+  const notes = { ...snap.notes };
+  if (n) notes[id] = n;
+  else delete notes[id];
+  return notes;
+};
+
+/**
+ * 乐观作答：先盖上「已答」再提交；成功等服务端确认（SSE / 下一次拉取），失败撤掉那一笔、留下原因，再重拉一次以服务端为准。
+ * 出错不再往外抛：原因记在 notes 里由卡片显示；返回成没成
+ */
+async function answer(id: string, shown: PendingAnswer["answer"], submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean> {
+  pending.set(id, { at: Date.now(), answer: shown });
+  show({ notes: note(id, null) });
+  try {
+    await submit();
+    set({ notes: note(id, { ok: true, text: words.ok }) });
+    return true;
+  } catch (e) {
+    pending.delete(id);
+    show({ notes: note(id, { ok: false, text: words.fail(e) }) });
+    return false;
+  } finally {
+    void refresh();
+  }
+}
+
 async function refresh(): Promise<void> {
   if (denied) return;
   try {
@@ -45,11 +91,13 @@ async function refresh(): Promise<void> {
     // 第一次拉到的不算「新来的」；之后新来的卡活 ask 在前台就弹横幅
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
     for (const a of r.asks) seen.add(a.id);
-    set({ asks: r.asks, loaded: true, canAnswer: r.canAnswer !== false, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    server = r.asks;
+    show({ loaded: true, canAnswer: r.canAnswer !== false, ...(bannerAsk ? { banner: bannerAsk } : {}) });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) {
       denied = true;
-      set({ asks: [], loaded: true });
+      server = [];
+      show({ loaded: true });
     }
     // 其余（断网、切机器中止）：保留上一份，下次刷新再来
   }
@@ -86,6 +134,7 @@ export const asksStore = {
     return () => void subs.delete(f);
   },
   refresh,
+  answer,
   openDrawer: (focus: string | null = null) => enter(focus),
   closeDrawer: leave,
   /** 「回到对话」：只收起、不出栈——会话页的 #chat 压在 #asks 上面，从会话左滑回来抽屉重新打开 */
@@ -97,12 +146,14 @@ export const asksStore = {
       machineKey = key;
       denied = false;
       seen.clear();
+      pending.clear();
+      server = [];
       snap = EMPTY;
     }
     let timer: ReturnType<typeof setTimeout> | null = null;
     const soon = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => void refresh(), 300); // 一次作答会连着来几条事件，合成一次
+      timer = setTimeout(() => void refresh(), ASK_EVENT_REFRESH_MS);
     };
     const onVis = () => {
       presence(visible());
