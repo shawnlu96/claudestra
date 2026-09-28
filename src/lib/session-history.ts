@@ -14,6 +14,7 @@
 
 import { findSessionJsonlBySessionId, runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./session-source.js";
 import { existsSync, readdirSync, statSync } from "fs";
+import { pushApiErrorRow } from "./api-error-rows.js";
 import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
@@ -658,6 +659,7 @@ function parseHistoryLines(
     }
 
     if (rec.type === "assistant") {
+      if (pushApiErrorRow(all, rec, seq, ts)) continue; // API 错误 → 一行系统提示，连续相同的并成 ×N（lib/api-error-rows.ts）
       const content = rec.message?.content;
       if (!Array.isArray(content)) continue;
       const texts: string[] = [];
@@ -704,8 +706,7 @@ function parseHistoryLines(
       if (progress.length) msg.progress = progress.join("\n");
       if (replyTexts.length) msg.replyText = replyTexts.join("\n");
       if (replyComponents.length) msg.replyComponents = replyComponents;
-      if (replyFiles.length) msg.replyFiles = replyFiles;
-      if (tools.length) msg.tools = tools;
+      Object.assign(msg, replyFiles.length ? { replyFiles } : {}, tools.length ? { tools } : {});
       if (typeof rec.message?.model === "string") msg.model = rec.message.model;
       all.push(msg);
     }
@@ -714,8 +715,7 @@ function parseHistoryLines(
   return all;
 }
 
-/** 从解析好的(全量或尾窗)消息里按 before/after/默认切页。after 与 before 互斥,
- *  after 优先。moreBefore=尾读且未读到文件头时为真(窗口之前还有更早消息)。 */
+/** 从解析好的(全量或尾窗)消息里按 before/after/默认切页:after 与 before 互斥、after 优先;moreBefore=尾读且未读到文件头时为真(窗口之前还有更早消息)。 */
 function sliceHistoryPage(
   all: HistoryMessage[],
   limit: number,

@@ -169,7 +169,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
-import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
+import { quotaWall, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
@@ -787,6 +787,11 @@ function syncMasterWatcher(discord: Client): void {
  * 同一频道的投递按到达顺序整段串行:中间有渲染、抢占(等 1.2s 收尾)、判忙抓屏几处 await,不串行的话后到的消息会先
  * ws.send——owner 语音连发的顺序就乱了(tests/keyed-serial.test.ts)。deliver() 到这里之间没有 await,入队顺序即到达顺序。
  */
+/** 额度闸押后：对调用方同样是「已受理、排队中」，出闸时按序补投（bridge/quota-wall.ts） */
+function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | undefined): RouterDelivery {
+  console.log(`⏸ 消息押后(${agent} 额度闸): 来自 ${from ?? "?"},队列 ${heldLocalMsgs.holdEnv(env, "quota_wall")} 条`);
+  return { envelope: env, outcome: { kind: "sent", note: "queued" } };
+}
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
   return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
@@ -854,6 +859,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
+  if (!busy && (await quotaWall()?.holds(env, to.channelId))) return holdForQuotaWall(env, evAgent, meta.user); // 额度闸：agent / bridge 消息押到出闸
   if (busy) {
     const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
@@ -1189,47 +1195,12 @@ discord.once("ready", async () => {
   startCodexTurnFailureWatch(async (channelId) => {
     await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
   });
-  // v2.24+ 回合以 API 错误结束 ⇒ 60s 无活动自动续跑一次（owner 2026-09-18；规则见 lib/api-error-resume.ts）
-  const apiErrorStates = new Map<string, ApiErrorState>();
-  subscribeEvents({}, (evt) => {
-    const ts = Date.parse(evt.ts) || Date.now();
-    if (evt.type === "api_error_turn") {
-      const err = String((evt.data as { error?: unknown }).error ?? "");
-      const r = noteApiError(apiErrorStates, evt.chatId, err, ts);
-      console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${r === "track" ? "60s 后自动续跑" : "续跑后再撞，升级到频道"}`);
-      recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: r } });
-      if (r === "escalate" && /^\d+$/.test(evt.chatId)) {
-        void (async () => {
-          try {
-            const ch = (await discord.channels.fetch(evt.chatId)) as TextChannel;
-            await ch.send(`⛔ ${evt.agent} 连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`);
-          } catch (e) { console.error("api-error 升级通知失败:", (e as Error).message); }
-        })();
-      }
-      return;
-    }
-    if (countsAsActivity(evt.type, evt.data)) noteActivity(apiErrorStates, evt.chatId, ts);
+  // 回合以 API 错误结束 ⇒ 60s 后续跑一次；撞额度 ⇒ 全机额度闸（agent 消息押后、出闸统一恢复）。规则与接线见 bridge/quota-wall-wiring.ts
+  startQuotaWall({
+    held: heldLocalMsgs, calls: pendingAgentCalls, clients, deliver, flush: flushHeldLocalMsgs, controlChannelId: CONTROL_CHANNEL_ID,
+    markAgentSource: (cid) => void lastMessageSource.set(cid, "agent"),
+    escalate: async (cid, text) => void (await ((await discord.channels.fetch(cid)) as TextChannel).send(text)),
   });
-  setInterval(() => {
-    const now = Date.now();
-    for (const cid of dueForResume(apiErrorStates, now)) {
-      const st = apiErrorStates.get(cid);
-      const target = clients.get(cid);
-      if (!st || !target) { apiErrorStates.delete(cid); continue; }
-      markResumed(apiErrorStates, cid, now);
-      lastMessageSource.set(cid, "agent");
-      void deliver({
-        from: { kind: "bridge", label: "api-error-resume" },
-        to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
-        intent: "notification",
-        content: resumeText(st.error, st.errorAt),
-        meta: { messageId: newMessageId("api_resume"), triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
-      }).then(() => {
-        console.log(`🔁 api-error-resume → ${cid}`);
-        recordMetric("api_error_resume", { channelId: cid, meta: { error: st.error } });
-      }).catch((e) => console.error("api-error-resume 投递失败:", (e as Error).message));
-    }
-  }, 15_000);
 
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
@@ -2676,7 +2647,7 @@ setInterval(() => {
   const now = Date.now();
   const IA_WATCHDOG_STALE_MS = 10 * 60_000;
   for (const [key, pending] of pendingAgentCalls.entries()) {
-    if (!shouldSweepPac(pending, heldFromOf(pending.targetChannelId ?? ""), now, PAC_STALE_MS)) continue;
+    if (quotaWall()?.active() || !shouldSweepPac(pending, heldFromOf(pending.targetChannelId ?? ""), now, PAC_STALE_MS)) continue; // 闸内不扫，出闸重新起算
     pendingAgentCalls.delete(key);
     console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
   }

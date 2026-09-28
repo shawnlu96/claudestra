@@ -52,4 +52,16 @@ export const QUOTA_DICT: Record<string, string> = {
   "账户不确定，暂不出提醒": "account uncertain; reminders paused",
   "本机密钥不可用": "local key unavailable",
   "内部出错，稍后自动重试": "internal error, will retry automatically",
+  // 额度闸横幅（features/quota-wall/）
+  "Claude Code 周额度已用完": "Claude Code weekly limit reached",
+  "Claude Code 5 小时额度已用完": "Claude Code session limit reached",
+  "Claude Code 额度已用完": "Claude Code usage limit reached",
+  "额度已恢复，正在关菜单、补投消息、续跑": "Usage restored — closing menus, delivering queued messages, resuming agents",
+  "{when} 重置": "resets {when}",
+  "约 {m} 分钟后": "in about {m} min",
+  "约 {h} 小时后": "in about {h} h",
+  "重置时间未知": "reset time unknown",
+  "排队 {n} 条 agent 消息，恢复后自动送达": "{n} agent message(s) queued, delivered automatically on recovery",
+  "已恢复": "It's back",
+  "确认已恢复？": "Confirm restored?",
 };

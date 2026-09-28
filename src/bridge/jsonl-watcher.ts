@@ -567,10 +567,10 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               if (isLimitHitText(t)) { // weekly / session / usage 各种写法（lib/quota-wall-text.ts）
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, seq, sid: state.sessionId } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn, seq, sid: state.sessionId } });
               } else {
-                state.textQueue.push(`💬 ${t}`);
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId } });
+                state.textQueue.push(`💬 ${t}`); // apiError：网页画成一行系统提示、连续相同的合并（web/features/chat/notice-merge.ts）
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId, ...(state.apiErrorTurn ? { apiError: true } : {}) } });
               }
             }
             // v2.21.3+ Fable 5.1 的进度句:Anthropic 文档所说的 progress-update thinking

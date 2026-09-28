@@ -46,6 +46,8 @@ describe("api-error-resume", () => {
   test("错误条目自己那句 API Error 文本不算活动；工具调用 / thinking / 用户消息算", () => {
     expect(countsAsActivity("assistant_text", { text: "API Error: Unable to connect to API (X)" })).toBe(false);
     expect(countsAsActivity("assistant_text", { text: "继续做 §24.1" })).toBe(true);
+    // 撞额度那句（watcher 标 rateLimited）也是错误条目自己带出来的，不算它又动了
+    expect(countsAsActivity("assistant_text", { text: "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)", rateLimited: true })).toBe(false);
     expect(countsAsActivity("tool_start", {})).toBe(true);
     expect(countsAsActivity("chat_message", {})).toBe(true);
     expect(countsAsActivity("agent_status", { status: "thinking" })).toBe(true);

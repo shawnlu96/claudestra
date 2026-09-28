@@ -46,11 +46,11 @@ export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: num
   if (s.resumedAt === undefined && ts > s.errorAt + ACTIVITY_GRACE_MS) m.delete(cid);
 }
 
-/** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" 文本不算 */
+/** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" / 撞额度原文（rateLimited）不算 */
 export function countsAsActivity(type: string, data: Record<string, unknown>): boolean {
   if (type === "tool_start" || type === "chat_message") return true;
   if (type === "agent_status") return (data as { status?: unknown }).status === "thinking";
-  if (type === "assistant_text") return !String((data as { text?: unknown }).text ?? "").startsWith("API Error");
+  if (type === "assistant_text") return data.rateLimited !== true && !String((data as { text?: unknown }).text ?? "").startsWith("API Error");
   return false;
 }
 

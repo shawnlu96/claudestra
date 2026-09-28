@@ -12,6 +12,7 @@ import type {
   ProjectMeta,
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
+import { pushNotice } from "./notice-merge";
 import { hydrateHistoryMessages } from "./history-hydrate";
 import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import {
@@ -1854,6 +1855,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     });
   }
 
+  public systemNotice(text: string, src?: RecordSrc) {
+    if (this.dropIfCovered("notice", src)) return;
+    this.flushPendingText();
+    this.produce((s) => pushNotice(s.messages, text, this.nextId(), new Date().toISOString()));
+  }
+
   public appendAssistantText(text: string, progress?: boolean, src?: RecordSrc) {
     if (this.dropIfCovered(progress ? "progress" : "text", src)) return;
     if (progress) {
@@ -2129,12 +2136,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         ) {
           idx--;
         }
-        s.messages.splice(idx, 0, {
-          id: this.nextId(),
-          role: "system",
-          content: "已被用户中断",
-          ts: new Date().toISOString(),
-        });
+        s.messages.splice(idx, 0, { id: this.nextId(), role: "system", content: "已被用户中断", ts: new Date().toISOString() });
       }
       s.streaming = false;
       s.awaitingChunk = false;
@@ -2315,16 +2317,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.flushPendingText();
     const fmtK = (n: number) => `${Math.round(n / 1000)}k`;
     this.produce((s) => {
-      s.messages.push({
-        id: this.nextId(),
-        role: "system",
-        content: pre
-          ? getLang() === "zh"
-            ? `📦 上下文已压缩：${fmtK(pre)} → ${fmtK(post)}`
-            : `📦 Context compacted: ${fmtK(pre)} → ${fmtK(post)}`
-          : "📦 上下文已压缩",
-        ts: new Date().toISOString(),
-      });
+      const zh = getLang() === "zh";
+      const content = pre ? (zh ? `📦 上下文已压缩：${fmtK(pre)} → ${fmtK(post)}` : `📦 Context compacted: ${fmtK(pre)} → ${fmtK(post)}`) : "📦 上下文已压缩";
+      s.messages.push({ id: this.nextId(), role: "system", content, ts: new Date().toISOString() });
       s.compacting = false; // 压缩已结束(随后的 done/running 状态事件各自收场)
       s.compactPct = null;
       const a = s.agents.find((x) => x.name === s.activeAgent);

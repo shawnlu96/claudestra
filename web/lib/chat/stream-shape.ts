@@ -122,6 +122,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
     case "tool_done":
       return typeof d.toolId === "string" && d.toolId ? { t: "tool-state", id: d.toolId, state: d.error ? "error" : "done" } : null;
     case "assistant_text":
+      if (d.apiError || d.rateLimited) return { t: "notice", text: String(d.text ?? ""), ...recordSrc(d) };
       return { t: "text", text: String(d.text ?? ""), ...(d.progress ? { progress: true } : {}), ...recordSrc(d) };
     case "reply_pending":
       return { t: "replying" };

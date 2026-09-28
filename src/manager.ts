@@ -3230,10 +3230,8 @@ switch (cmd) {
     break;
   }
 
-  case "cost": {
-    await cmdCost(args);
-    break;
-  }
+  case "cost": await cmdCost(args); break;
+  case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
 
   case "invite-link": {
     await cmdInviteLink(args);
@@ -3533,6 +3531,7 @@ switch (cmd) {
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
+        "quota-wall status|clear  — usage-limit wall: show state / confirm usage is back (bridge then closes menus, delivers the queue, resumes)",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",
         "pair [--json]                   — print a QR code / link / 8-char code so a phone or browser can pair with this machine through the relay (RELAY_URL in .env)",
         "relay-status                    — show the relay connection (address, fingerprint, contacts online)",

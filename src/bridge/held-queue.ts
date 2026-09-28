@@ -19,6 +19,8 @@ export interface HeldItem {
   notifiedAt?: number;
   /** 被 check_inbox 领走、还没确认（bridge/inbox.ts）：租约内 Stop 不再投，过期后照常投 */
   lease?: { batchId: string; at: number };
+  /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
+  reason?: "quota_wall";
 }
 
 /** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
@@ -64,16 +66,51 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
    */
   hold(channelId: string, item: HeldItem): number {
     const cur = this.get(channelId) ?? [];
-    if (cur.some((i) => i.env === item.env)) return cur.length;
+    const same = cur.find((i) => i.env === item.env);
+    if (same) {
+      // 闸前因「回合中」押着的，闸内再被押回来就改记成额度闸：不再老化、出闸时一起补投
+      if (item.reason && !same.reason) {
+        same.reason = item.reason;
+        this.set(channelId, [...cur]);
+      }
+      return cur.length;
+    }
     const q = [...cur, item];
     this.set(channelId, q);
     return q.length;
   }
 
   /** 按信封的收件方押后，入队时间取现在 */
-  holdEnv(env: Envelope): number {
+  holdEnv(env: Envelope, reason?: HeldItem["reason"]): number {
     const to = env.to as LocalEndpoint;
-    return this.hold(to.channelId, { env, to, heldAt: Date.now() });
+    return this.hold(to.channelId, { env, to, heldAt: Date.now(), ...(reason ? { reason } : {}) });
+  }
+
+  /** 额度闸押着的条数 */
+  wallCount(): number {
+    return [...this.values()].reduce((n, q) => n + q.filter((i) => i.reason === "quota_wall").length, 0);
+  }
+
+  /** 有额度闸消息的频道，按各自最早一条的入队时间排（出闸补投的顺序） */
+  wallChannels(): string[] {
+    const first = (q: HeldItem[]) => Math.min(...q.filter((i) => i.reason === "quota_wall").map((i) => i.heldAt));
+    return [...this.entries()].filter(([, q]) => q.some((i) => i.reason === "quota_wall")).sort((a, b) => first(a[1]) - first(b[1])).map(([c]) => c);
+  }
+
+  /** 出闸：额度闸消息转回普通押后，入队时间重置为 now（否则押了一天的立刻被 24 小时放弃），返回条数 */
+  releaseWall(now: number): number {
+    let n = 0;
+    for (const [ch, q] of [...this.entries()]) {
+      if (!q.some((i) => i.reason === "quota_wall")) continue;
+      for (const i of q) {
+        if (i.reason !== "quota_wall") continue;
+        delete i.reason;
+        i.heldAt = now;
+        n++;
+      }
+      this.set(ch, [...q]);
+    }
+    return n;
   }
 
   /** 投出去之后才摘掉并落盘：投递中途崩溃 / 别处 set 触发整表落盘时，盘上都还有它（至少投一次，收件方看 message_id 去重） */
@@ -105,6 +142,10 @@ export function ageHeld(q: HeldQueue, now: number): HeldNotice[] {
     const keep: HeldItem[] = [];
     let changed = false;
     for (const item of items) {
+      if (item.reason === "quota_wall") {
+        keep.push(item); // 额度闸押的不提醒、不放弃：发送方多半也撞着墙，提醒只会唤醒一个注定失败的回合
+        continue;
+      }
       if (now - item.heldAt > HELD_GIVE_UP_MS) {
         out.push({ kind: "gave-up", item, channelId });
         changed = true;
