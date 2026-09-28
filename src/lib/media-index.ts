@@ -141,9 +141,12 @@ function resolveRef(ctx: Ctx, agent: string, r: { dir: string; path: string; ts:
   return r.dir === "in" ? resolveInbound(r.path, ctx.dirs, r.trusted) : resolveOutbound(r.path, r.ts, ctx.dirs, ctx.cat(), ledgerFor(ctx, agent));
 }
 
-/** 找到的文件 → 行里的展示字段；没找到就用记录里的 basename */
+/**
+ * 展示名：可信且找到的按实际文件名，其余一律按记录里的 basename——不可信的引用若按「找没找到」换算法，
+ * 名字本身就泄露了文件在不在（审查 r2 P2-1）。
+ */
 function shown(hit: Resolved | null, refPath: string): { name: string; kind: string; cat: string } {
-  const name = hit ? displayName(hit.name, hit.loc.startsWith("u:")) : displayName(basename(refPath), refPath.includes("/web/uploads/"));
+  const name = hit?.trusted ? displayName(hit.name, hit.loc.startsWith("u:")) : displayName(basename(refPath), refPath.includes("/web/uploads/"));
   return { name, ...classify(name) };
 }
 

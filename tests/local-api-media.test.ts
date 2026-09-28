@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.js";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
-import { copyOutboundToInbox, setMediaForTest, type AgentInfo } from "../src/bridge/local-api/media-refresh.js";
+import { copyOutboundToInbox, refreshMedia, setMediaForTest, type AgentInfo } from "../src/bridge/local-api/media-refresh.js";
 import { closeMediaIndex } from "../src/lib/media-index.js";
 import type { Principal } from "../src/lib/principals.js";
 
@@ -201,6 +201,21 @@ describe("增量与回收", () => {
     expect((await list("agent=other")).items).toEqual([]);
     wire();
     expect((await list("agent=other")).items.length).toBeGreaterThan(0);
+  });
+  test("连发强制重扫：排着的那一轮合并，链上最多一跑一等（审查 r2 P2-4）", async () => {
+    let runs = 0;
+    setMediaForTest({
+      db: dbPath,
+      thumbs: join(root, "thumbs"),
+      agents: async () => AGENTS,
+      sources: async (agents) => {
+        runs++;
+        return agents.map((a) => ({ agent: a.name, sessionId: `sid-${a.name}`, path: jl[a.name] }));
+      },
+    });
+    await Promise.all(Array.from({ length: 20 }, () => refreshMedia(["agent-worker"])));
+    expect(runs).toBeLessThanOrEqual(2);
+    wire();
   });
 });
 

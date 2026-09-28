@@ -5,7 +5,8 @@
  * 表与媒体索引同库，但不随索引版本清空：账是事实，丢了就再也认不回来。
  */
 import type { Database } from "bun:sqlite";
-import { copyFile, mkdir, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { sanitizeAttachmentBase } from "./attachment-name.js";
 
@@ -24,13 +25,18 @@ export function canonicalAgent(name: string): string {
   return name === "master" || name === "?" || name.startsWith("agent-") ? name : `agent-${name}`;
 }
 
-async function freeName(dir: string, base: string): Promise<string> {
+/**
+ * 原子占名拷贝：COPYFILE_EXCL 让「名字已被占」由内核判定，撞名（同一毫秒同名、另一个并发拷贝抢先）就换下一毫秒重试。
+ * 先 stat 再覆盖写不是原子的：两个 agent 同一毫秒发同名文件会拿到同一个名字，后写的覆盖先写的，账和内容对不上（T22 审查 r2 P1-A）。
+ */
+async function copyToFreeName(src: string, dir: string, base: string): Promise<string> {
   for (let ms = Date.now(); ; ms++) {
     const name = `${ms}_${base}`;
     try {
-      await stat(join(dir, name));
-    } catch {
-      return name; // 不存在 = 可用（同一毫秒两个同名副本以前会互相覆盖）
+      await copyFile(src, join(dir, name), constants.COPYFILE_EXCL);
+      return name;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
   }
 }
@@ -45,8 +51,7 @@ export async function copyOutboundFiles(paths: string[], agent: string, inboxDir
     try {
       const base = sanitizeAttachmentBase(p);
       await mkdir(inboxDir, { recursive: true });
-      const dest = await freeName(inboxDir, base);
-      await copyFile(p, join(inboxDir, dest));
+      const dest = await copyToFreeName(p, inboxDir, base);
       out.push({ name: base, attachment: dest });
       db?.prepare("INSERT OR REPLACE INTO out_copies (dest, agent, src, ms) VALUES (?, ?, ?, ?)").run(dest, canonicalAgent(agent), p.trim(), Number(dest.split("_")[0]));
     } catch (e) {

@@ -74,6 +74,26 @@ describe("出站副本账本", () => {
     expect(ownedByOther(db, "agent-worker", dest!)).toBe(false);
     closeMediaIndex(p);
   });
+  test("两个 agent 并发拷同名文件：副本名各不相同，账上的归属与文件内容一致（审查 r2 P1-A）", async () => {
+    const p = join(root, "race.sqlite");
+    const db = openMediaIndex(p);
+    const inbox = join(root, "race-inbox");
+    for (const who of ["a", "b"]) {
+      mkdirSync(join(root, `race-${who}`));
+      writeFileSync(join(root, `race-${who}`, "shot.png"), `${who.toUpperCase()}-PRIVATE`);
+    }
+    const pa = join(root, "race-a", "shot.png"), pb = join(root, "race-b", "shot.png");
+    for (let i = 0; i < 50; i++) {
+      const [x, y] = await Promise.all([copyOutboundFiles([pa], "agent-a", inbox, db), copyOutboundFiles([pb], "agent-b", inbox, db)]);
+      expect(x[0].attachment).not.toBe(y[0].attachment);
+      for (const [c, who] of [[x[0], "a"], [y[0], "b"]] as const) {
+        const row = db.prepare("SELECT agent FROM out_copies WHERE dest = ?").get(c.attachment) as { agent: string };
+        expect(row.agent).toBe(`agent-${who}`);
+        expect(readFileSync(join(inbox, c.attachment), "utf8")).toBe(`${who.toUpperCase()}-PRIVATE`);
+      }
+    }
+    closeMediaIndex(p);
+  });
   test("agent 名规范成 registry 形状", () => {
     expect([canonicalAgent("worker"), canonicalAgent("agent-x"), canonicalAgent("master"), canonicalAgent("?")]).toEqual(["agent-worker", "agent-x", "master", "?"]);
   });

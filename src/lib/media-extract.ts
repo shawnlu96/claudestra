@@ -7,7 +7,7 @@
  *  - agent 发的：reply 工具调用的 input.files（agent 本地路径；副本由 bridge 拷进 inbox 并记账，见 media-outbound.ts）。
  * agent↔agent 消息（is_agent="true"）与 bridge 注入（user="bridge:*"）不收：媒体视图只看人和 agent 之间的往来。
  */
-import { channelAttachmentPaths } from "./inbound-body.js";
+import { channelAttachmentPaths, decodeXmlAttr } from "./inbound-body.js";
 import { isReplyTool, queuedPromptOf } from "./session-history.js";
 
 export interface MediaRef {
@@ -55,9 +55,10 @@ function textOf(content: unknown): string {
 
 const CHANNEL_HEAD_RE = /^\s*<channel\s+([^>]*)>/;
 
-/** 头里的普通属性（发送者、message_id 等；附件路径走 inbound-body.channelAttachmentPaths，它会解码 XML 实体） */
+/** 头里的普通属性（发送者、message_id 等；附件路径走 inbound-body.channelAttachmentPaths） */
 function attr(attrs: string, name: string): string | undefined {
-  return new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1];
+  const v = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1];
+  return v === undefined ? undefined : decodeXmlAttr(v);
 }
 
 /** canTrust：记录本身是 bridge 投递的（isMeta 的 channel 消息 / queued_command）；裸 user 文本里自称的 <channel> 头不算 */

@@ -32,6 +32,8 @@ let agentsProvider: () => Promise<AgentInfo[]> = defaultAgents;
 let sourcesProvider: (agents: AgentInfo[]) => Promise<MediaSource[]> = sourcesOf;
 const lastRefresh = new Map<string, number>();
 let inflight: Promise<void> | null = null;
+/** 排在 inflight 后面、还没开跑的那一轮：新请求并进它（加上自己要强制的 agent），链上最多一跑一等——连发锚点请求不会把重扫越排越长 */
+let queued: { force: Set<string>; job: Promise<void> } | null = null;
 /** 至少完整刷完过一轮：之前的请求值得多等一会儿（首建），之后只短等 */
 let builtOnce = false;
 
@@ -45,6 +47,7 @@ export function setMediaForTest(
   sourcesProvider = o?.sources ?? sourcesOf;
   lastRefresh.clear();
   inflight = null;
+  queued = null;
   builtOnce = false;
 }
 
@@ -91,10 +94,16 @@ export function recoverIfCorrupt(e: unknown): boolean {
 
 /** 刷新到期的 agent（force 里的不管节流）；返回这一轮的 promise，调用方自己决定等多久 */
 export function refreshMedia(force: string[] = []): Promise<void> {
+  if (queued) {
+    for (const n of force) queued.force.add(n);
+    return queued.job;
+  }
+  const q = { force: new Set(force), job: Promise.resolve() };
   const run = async () => {
+    if (queued === q) queued = null;
     const all = await agentsProvider();
     const now = Date.now();
-    const due = all.filter((a) => force.includes(a.name) || now - (lastRefresh.get(a.name) ?? 0) >= REFRESH_EVERY_MS);
+    const due = all.filter((a) => q.force.has(a.name) || now - (lastRefresh.get(a.name) ?? 0) >= REFRESH_EVERY_MS);
     if (!due.length) return;
     for (const a of due) lastRefresh.set(a.name, now);
     const complete = due.length === all.length;
@@ -110,6 +119,8 @@ export function refreshMedia(force: string[] = []): Promise<void> {
       if (inflight === next) inflight = null;
     });
   inflight = next;
+  q.job = next;
+  queued = q;
   return next;
 }
 

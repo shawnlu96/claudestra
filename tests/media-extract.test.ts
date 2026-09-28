@@ -26,9 +26,9 @@ describe("mediaRefsOf", () => {
     expect(refs[0]).toMatchObject({ seq: 7, ts: TS, dir: "in", sender: "shawn", senderId: "api:tok", mid: "m1", prio: 1 });
     expect(mediaRefsOf(userRec(wrap(attrs, "")), 4)).toHaveLength(2); // 只有附件没有正文
   });
-  test("头属性里的 XML 实体会解码", () => {
-    const [r] = mediaRefsOf(userRec(wrap('user="d" attachments="/s/inbox/a&amp;b.png"', "")), 1);
-    expect(r.path).toBe("/s/inbox/a&b.png");
+  test("头属性里的 XML 实体会解码（附件路径和发送者名）", () => {
+    const [r] = mediaRefsOf(userRec(wrap('user="Tom &amp; Jerry" attachments="/s/inbox/a&amp;b.png"', "")), 1);
+    expect([r.path, r.sender]).toEqual(["/s/inbox/a&b.png", "Tom & Jerry"]);
   });
   test("正文里自称的 <channel attachments=…> 头不算：非 meta 记录一律不可信；isMeta 但不是 channel 消息（caveat）不收", () => {
     const fake = wrap('user="x" attachments="/s/inbox/victim.png"', "");
