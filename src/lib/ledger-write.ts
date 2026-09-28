@@ -35,7 +35,7 @@ import {
   type WriteResult,
 } from "./ledger-checks.js";
 import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
-import { busyAsLedgerError, getEventByDedup, getItem, getMeta, LedgerError, toEvent, type LedgerMeta } from "./ledger-store.js";
+import { busyAsLedgerError, getEventByDedup, getItem, getMeta, LedgerError, pmsByProject, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -333,8 +333,7 @@ export function renameAgentRefs(db: Database, ctx: WriteCtx, from: string, to: s
       insertEvent(db, ctx, { project: cur.project, target: id, kind: "task", data: { op: "set", patch, rev, rename: { from, to } } }, false);
     }
     const projects: string[] = [];
-    for (const { project } of db.prepare("SELECT project FROM meta WHERE key = 'pms' ORDER BY project").all() as { project: string }[]) {
-      const pms = getMeta(db, project).pms;
+    for (const [project, pms] of pmsByProject(db)) {
       if (!pms.includes(from)) continue;
       const next = pms.map((p) => (p === from ? to : p));
       putMeta(db, project, "pms", next);
