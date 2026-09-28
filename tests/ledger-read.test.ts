@@ -97,6 +97,14 @@ describe("视图", () => {
     expect(v.tasks[0].metrics).toMatchObject({ reviewRounds: 2, reworkCount: 1, p1: 1, p2: 3, reviewWaits: [150, 20] });
   });
 
+  test("stageSince 是进入当前阶段的时刻；lastReview 是最近一轮审查的摘要，没审过为 null", () => {
+    const [t1, t2] = projectView(db, "p", 1000).tasks;
+    expect(t1.stageSince).toBe(520);
+    expect(t1.lastReview).toEqual({ round: 2, verdict: "pass", p0: 0, p1: 0, p2: 1, text: "", ts: 520 });
+    expect(t2.stageSince).toBe(600);
+    expect(t2.lastReview).toBeNull();
+  });
+
   test("项目级事件只带 target 为空的、最近 PROJECT_EVENTS_LIMIT 条、seq 升序", () => {
     const p2 = tempLedgerPath();
     withWriter(p2, (w) => {

@@ -80,8 +80,21 @@ function changedProjects(db: Database, afterSeq: number): { projects: string[]; 
   return { projects: rows.map((r) => r.project), lastSeq: rows.reduce((m, r) => Math.max(m, r.m), afterSeq) };
 }
 
+/** 最近一轮审查的摘要：首页「返工原因」只要这一条，不必为每条线再拉详情 */
+export interface ReviewSummary {
+  round: number | null;
+  verdict: string | null;
+  p0: number | null;
+  p1: number | null;
+  p2: number | null;
+  text: string;
+  ts: number;
+}
 export interface TaskView extends LedgerTask {
   lastEvent: LedgerEvent | null;
+  /** 进入当前阶段的时刻（时间线最后一段的 from）；没有建任务事件的残缺数据为 null */
+  stageSince: number | null;
+  lastReview: ReviewSummary | null;
   metrics: TaskMetrics;
 }
 export interface ProjectView {
@@ -92,8 +105,22 @@ export interface ProjectView {
   projectEvents: LedgerEvent[];
 }
 
+const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
+  if (!e) return null;
+  const d = e.data;
+  return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text: e.text, ts: e.ts };
+}
+
 function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number): TaskView {
-  return { ...task, lastEvent: own.at(-1) ?? null, metrics: taskMetrics(task, own, now) };
+  return {
+    ...task,
+    lastEvent: own.at(-1) ?? null,
+    stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
+    lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
+    metrics: taskMetrics(task, own, now),
+  };
 }
 
 /** GET /ledger/:project：事项 + 任务（每个带最近一条事件与指标）+ 最近的项目级事件；整个项目的事件只查一次 */
