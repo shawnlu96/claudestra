@@ -69,7 +69,7 @@ export function CollabLine(props: {
     <div
       role="button"
       tabIndex={0}
-      className={`${s.row} ${TONE[l.tone]} ${hot ? s.hot : ""} ${selected ? s.sel : ""}`}
+      className={`${s.row} ${TONE[l.tone]} ${hot ? s.hot : ""} ${selected ? s.sel : ""} ${l.attention === "owner" ? s.owner : ""}`}
       onClick={onOpen}
       onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onOpen())}
     >

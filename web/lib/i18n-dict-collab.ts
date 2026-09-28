@@ -45,6 +45,8 @@ export const COLLAB_DICT: Record<string, string> = {
   "等 PM 放行": "Awaiting PM approval",
   "{n} 条出问题": "{n} with problems",
   "{n} 条卡住": "{n} stuck",
+  "{n} 条等你": "{n} waiting on you",
+  "等你：{t}": "Waiting on you: {t}",
   "{who} 回滚": "{who} rolled back",
   "它在干活。等它这步做完再说；要打断它，请到它的会话里说": "It's working. Wait for this step to finish — to interrupt it, go to its chat.",
   "按关注度排序": "By attention",

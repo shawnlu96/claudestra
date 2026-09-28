@@ -177,3 +177,29 @@ describe("系统提醒（新设备配对）", () => {
     expect(sent.filter((s) => s.kind === "apns")).toHaveLength(1);
   });
 });
+
+describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里只看接线）", () => {
+  const ask = (over: Record<string, unknown> = {}) =>
+    ({ id: "ask_1", fromAgent: "agent-alpha", title: "发 v2.32.0 吗", state: "open", kind: "decide", blocking: true, urgency: "normal", ...over }) as never;
+
+  test("卡活 + owner 不在：推一次（Web Push 带 ask、点开直达卡片；APNs 靠 url），不计未读；同一条再来不重推", async () => {
+    expect(await dispatcher.onAsk(ask(), "away")).toBe("push");
+    const web = sent.filter((s) => s.kind === "web");
+    expect(web).toHaveLength(3);
+    expect(web[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", body: "发 v2.32.0 吗", url: "/chat?ask=ask_1", agent: "alpha", ask: "ask_1", tag: "cstra-ask-ask_1" });
+    expect(sent.filter((s) => s.kind === "apns")[0].payload).toMatchObject({ url: "/chat?ask=ask_1", agent: "alpha" });
+    expect(unreadCounts(db)).toEqual({});
+    sent.length = 0;
+    expect(await dispatcher.onAsk(ask(), "away")).toBe("push");
+    expect(sent).toEqual([]);
+  });
+
+  test("owner 正在用 → 不推（网页横幅）；验收类 / 自动建的（不知道卡不卡活）→ 不推；急的在用也推", async () => {
+    expect(await dispatcher.onAsk(ask({ id: "a2" }), "active")).toBe("banner");
+    expect(await dispatcher.onAsk(ask({ id: "a3", kind: "accept" }), "away")).toBe("none");
+    expect(await dispatcher.onAsk(ask({ id: "a4", blocking: null }), "away")).toBe("none");
+    expect(sent).toEqual([]);
+    expect(await dispatcher.onAsk(ask({ id: "a5", urgency: "urgent" }), "active")).toBe("push");
+    expect(sent.length).toBeGreaterThan(0);
+  });
+});

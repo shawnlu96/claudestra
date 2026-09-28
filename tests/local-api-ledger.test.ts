@@ -13,7 +13,7 @@ import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/inde
 import { handleLedgerApi, setLedgerApiProjectsForTest } from "../src/bridge/local-api/ledger.js";
 import { canReadLedger, effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
-import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import type { Principal } from "../src/lib/principals.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
@@ -100,7 +100,7 @@ describe("GET /ledger/:project", () => {
   test("总览：事项、任务带 lastEvent 与服务端算的指标（与 ledger-metrics 一致）、冻结状态、项目级事件", async () => {
     const res = await get("/ledger/p");
     const body = (await res.json()) as any;
-    expect(body).toMatchObject({ ok: true, project: "p", exists: true, schema: 1 });
+    expect(body).toMatchObject({ ok: true, project: "p", exists: true, schema: LEDGER_SCHEMA_VERSION });
     expect(body.meta).toMatchObject({ docsDir: docs, queueFrozen: { frozen: true, reason: "等 T1 上线" } });
     expect(body.items.map((i: { id: string }) => i.id)).toEqual(["i1"]);
     expect(body.tasks.map((t: { id: string }) => t.id)).toEqual(["T1", "T2"]);
