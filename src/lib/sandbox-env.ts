@@ -110,12 +110,16 @@ export function sandboxEnv(
 }
 
 /**
- * 沙箱 agent 的 MCP 参数：channel-server 用**本仓库**的（全局 `claude mcp add` 注册的是主树那份，
- * 测不到当前分支的改动），`--strict-mcp-config` 顺带不加载用户其它 MCP（mem0 之类会写真实数据）。
+ * 沙箱 agent 的额外启动参数，都指向**本 checkout** 的代码，而不是全局配置里登记的主树那份：
+ * - channel-server：全局 `claude mcp add` 注册的是主树的，测不到当前分支；`--strict-mcp-config` 顺带
+ *   不加载用户其它 MCP（mem0 之类会写真实数据）。
+ * - statusLine：全局 settings.json 指向主树的 statusline 脚本，主树没更新到认 CLAUDESTRA_STATE_DIR 的版本时，
+ *   沙箱 agent 每刷新一次状态栏就写一次生产的 usage-cache.json。`--settings` 的优先级高于用户设置，覆盖掉它。
  */
-export function sandboxMcpArgs(mcpName: string, bunPath: string, channelServerPath: string): string[] {
-  const cfg = { mcpServers: { [mcpName]: { command: bunPath, args: ["--no-env-file", channelServerPath] } } };
-  return ["--mcp-config", JSON.stringify(cfg), "--strict-mcp-config"];
+export function sandboxLaunchArgs(mcpName: string, bunPath: string, srcDir: string): string[] {
+  const cfg = { mcpServers: { [mcpName]: { command: bunPath, args: ["--no-env-file", join(srcDir, "channel-server.ts")] } } };
+  const settings = { statusLine: { type: "command", command: join(srcDir, "..", "scripts", "statusline-usage.sh") } };
+  return ["--mcp-config", JSON.stringify(cfg), "--strict-mcp-config", "--settings", JSON.stringify(settings)];
 }
 
 /** 沙箱里允许经 `scripts/sandbox.ts manager` 调的子命令（其余会碰 launchd / 生产会话 / 外部网络） */

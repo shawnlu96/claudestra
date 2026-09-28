@@ -1,6 +1,6 @@
 /**
  * tests/sandbox-isolation.test.ts 用的「假 Claude Code」：放在 PATH 最前面冒充 `claude`，但照真的那样
- * 用收到的环境跑 settings.json 里的 hooks 与 statusLine、按 --mcp-config 拉起 channel-server 并握手、
+ * 用收到的环境跑 settings.json（叠上 --settings，后者优先）里的 hooks 与 statusLine、按 --mcp-config 拉起 channel-server 并握手、
  * 往 ~/.claude/projects 写会话 jsonl、收到频道消息就调 reply 回一句 pong、然后跑 Stop hook。
  * 这样 agent 这一侧（channel-server / hooks / statusLine / 会话发现）的写入与出站都在受控测试里走一遍。
  */
@@ -19,7 +19,12 @@ const flag = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : u
 const sid = flag("--session-id") ?? "no-session";
 const home = process.env.HOME, cwd = process.cwd();
 log("start sid=" + sid + " strict=" + argv.includes("--strict-mcp-config") + " state=" + process.env.CLAUDESTRA_STATE_DIR);
-const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+const user = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+const cli = flag("--settings") ? JSON.parse(flag("--settings")) : {};
+// 与 Claude Code 一致：--settings 的标量（statusLine）盖过用户设置，hooks 两边都跑
+const hooks = {};
+for (const src of [user.hooks ?? {}, cli.hooks ?? {}]) for (const [ev, gs] of Object.entries(src)) hooks[ev] = [...(hooks[ev] ?? []), ...gs];
+const settings = { ...user, ...cli, hooks };
 const hookCmds = (ev) => (settings.hooks?.[ev] ?? []).flatMap((g) => (g.hooks ?? []).map((h) => h.command));
 async function sh(cmd, input) {
   const p = Bun.spawn(["/bin/sh", "-c", cmd], { stdin: new Blob([JSON.stringify(input)]), stdout: "pipe", stderr: "pipe", env: process.env });

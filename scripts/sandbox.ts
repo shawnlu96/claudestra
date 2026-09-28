@@ -42,8 +42,12 @@ function fail(msg: string): never {
 }
 
 function run(cmd: string[]): string {
-  const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
-  return r.exitCode === 0 ? r.stdout.toString() : "";
+  try {
+    const r = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
+    return r.exitCode === 0 ? r.stdout.toString() : "";
+  } catch {
+    return ""; // 可执行文件不存在（Linux 上没有 plutil / lsof）：当作没查到，调用方各有兜底
+  }
 }
 
 /** 生产配置：launchd plist 的环境与工作目录、生产仓库与本仓库主工作树的 .env（都只读） */

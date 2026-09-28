@@ -10,7 +10,7 @@ import {
   assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, outboundAllowed, sandboxAgentDirProblem,
   sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem,
 } from "../src/lib/sandbox.js";
-import { productionDeny, sandboxEnv, sandboxLayout, sandboxManagerRefusal, sandboxMcpArgs } from "../src/lib/sandbox-env.js";
+import { productionDeny, sandboxEnv, sandboxLaunchArgs, sandboxLayout, sandboxManagerRefusal } from "../src/lib/sandbox-env.js";
 import { pickCcSessionForWindow, type CcSessionEntry } from "../src/lib/cc-sessions.js";
 import { assertCreatable } from "../src/manager/core.js";
 import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "../src/lib/bridge-url.js";
@@ -235,6 +235,15 @@ describe("沙箱关掉的 API 与动作", () => {
     expect(pickCcSessionForWindow([e], { childPids: [], paneId: "%3" })).toBeNull();
     expect(pickCcSessionForWindow([e], { childPids: [99999], paneId: "%3" })?.sessionId).toBe("prod");
   });
+  test("撞号：生产按 pane 找自己的会话时，同编号 %N 的沙箱会话不会被认走（生产登记还没写的那一刻）", () => {
+    delete process.env.CLAUDESTRA_SANDBOX;
+    const sbx = { pid: 424242, sessionId: "sandbox-sid", cwd: "/tmp/claudestra-sandbox-23900/work", tmux: "master:@1.%3" } as CcSessionEntry;
+    // 生产窗口 %3、cwd 在生产目录：只有沙箱那条凭 pane 撞上 → 不认（撤掉 cwd 条件这里会拿到 sandbox-sid）
+    expect(pickCcSessionForWindow([sbx], { childPids: [], paneId: "%3", cwd: "/Users/x/repos/app" })).toBeNull();
+    // 合法的 pane 命中：cwd 一致照常认
+    const own = { ...sbx, sessionId: "own", cwd: "/Users/x/repos/app" };
+    expect(pickCcSessionForWindow([sbx, own], { childPids: [], paneId: "%3", cwd: "/Users/x/repos/app" })?.sessionId).toBe("own");
+  });
   test("bg job 清理 / roster 根治、/model /effort 切换：沙箱里直接拒绝，不碰进程与文件", async () => {
     process.env.CLAUDESTRA_SANDBOX = "1";
     expect((await cleanupBgJob("abc-123", { jobsDir: "/nonexistent" })).ok).toBe(false);
@@ -290,14 +299,15 @@ describe("启动命令", () => {
     const cmd = buildClaudeCommand(opts);
     expect(cmd).toContain("CLAUDESTRA_STATE_DIR=/tmp/s/state CLAUDESTRA_RUNTIME_DIR=/tmp/s/run CLAUDESTRA_SANDBOX=1 claude");
     expect(cmd).toContain("--strict-mcp-config");
-    expect(cmd).toContain(join(import.meta.dir, "..", "src", "channel-server.ts").replace(/\/tests\/\.\./, ""));
+    expect(cmd).toContain(join(import.meta.dir, "..", "src", "channel-server.ts"));
+    expect(cmd).toContain(`--settings '{"statusLine":{"type":"command","command":"${join(import.meta.dir, "..", "scripts", "statusline-usage.sh")}"}}'`);
   });
 
-  test("sandboxMcpArgs：同名 server、--no-env-file", () => {
-    const [flag, json, strict] = sandboxMcpArgs("claudestra", "/bin/bun", "/repo/src/channel-server.ts");
-    expect(flag).toBe("--mcp-config");
-    expect(strict).toBe("--strict-mcp-config");
-    expect(JSON.parse(json!)).toEqual({ mcpServers: { claudestra: { command: "/bin/bun", args: ["--no-env-file", "/repo/src/channel-server.ts"] } } });
+  test("sandboxLaunchArgs：本 checkout 的 channel-server（--no-env-file）与 statusLine，只加载这一个 MCP", () => {
+    const [f1, mcp, strict, f2, settings] = sandboxLaunchArgs("claudestra", "/bin/bun", "/repo/src");
+    expect([f1, strict, f2]).toEqual(["--mcp-config", "--strict-mcp-config", "--settings"]);
+    expect(JSON.parse(mcp!)).toEqual({ mcpServers: { claudestra: { command: "/bin/bun", args: ["--no-env-file", "/repo/src/channel-server.ts"] } } });
+    expect(JSON.parse(settings!)).toEqual({ statusLine: { type: "command", command: "/repo/scripts/statusline-usage.sh" } });
   });
 });
 

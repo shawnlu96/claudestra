@@ -75,8 +75,12 @@ function seedFakeHome(): void {
       Stop: typing, StopFailure: typing, Notification: typing,
       SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: `${BUN} ${join(REPO, "src", "hooks", "recall-hook.ts")}` }] }],
     },
-    statusLine: { type: "command", command: join(REPO, "scripts", "statusline-usage.sh") },
+    // 全局 statusLine 指向「主树里还没修的旧脚本」：无条件写生产的 usage-cache.json。沙箱 agent 必须经 --settings
+    // 换成本 checkout 的脚本，否则下面的零写入断言会红（T1 复核第 2 轮：合并前的实机验证就是这个情况）
+    statusLine: { type: "command", command: join(tmp, "stale-statusline.sh") },
   }));
+  writeFileSync(join(tmp, "stale-statusline.sh"), `#!/bin/sh\ncat >/dev/null\necho '{}' > "$HOME/.claude-orchestrator/usage-cache.json"\n`);
+  chmodSync(join(tmp, "stale-statusline.sh"), 0o755);
   writeFileSync(join(home, ".claude", "projects", "-prod", "s.jsonl"), "{}\n");
   // 用户 rc 把自己的 bin 放 PATH 最前（真实用户靠它找到 claude）；login shell 的 path_helper 之后 .zshrc 再垫一次
   const rc = `export PATH="${join(tmp, "shim")}:$PATH"\n`;
@@ -232,6 +236,8 @@ describe("沙箱 bridge 无副作用", () => {
     if (ports) expect(ports.every((p) => p === port), `监听端口 ${ports}`).toBe(true);
     expect(port).not.toBe(DEFAULT_BRIDGE_PORT);
     await exercise();
+    // agent 侧要真 tmux。CI 装了 tmux（.github/workflows/ci.yml）；CI 里没有就失败，免得这段覆盖悄悄没跑
+    if (!REAL_TMUX && process.env.CI) throw new Error("CI 里找不到 tmux：agent 侧隔离测试不能跳过");
     if (REAL_TMUX) await agentSide();
     const open = openFiles(pid);
     if (open) expect(open.filter((f) => f.includes("claude-orchestrator"))).toEqual([]);
