@@ -12,7 +12,7 @@ import {
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
 import { webDb } from "./local-api/db.js";
-import { readPrincipalsStrict, updatePrincipals, type Principal } from "../lib/principals.js";
+import { readPrincipalsStrict, reservedNameError, updatePrincipals, type Principal } from "../lib/principals.js";
 import { formatCode } from "../lib/relay-protocol.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
@@ -258,6 +258,9 @@ export function issuePairing(
   const fp = i.fp ?? machineFp();
   if (!fp) return { ok: false, error: "本机没有实例密钥（instance-key.pem 读写失败），签不了配对码" };
   const guest = str(body.guest);
+  // guest 的名字会成为它消息的来源名：老记录里「来源 = web-ui」被网页当 owner 本人（web/lib/chat/history-shape.ts）
+  const reserved = guest ? reservedNameError(guest) : null;
+  if (reserved) return { ok: false, error: reserved };
   const asked = normalizeGrant(body as Partial<{ agents: unknown; terminal: unknown; manage: unknown }>, guest ? guestGrant(["*"]) : fullGrant());
   // 网页里发码（issuer = 那台设备）：给出去的不能比它自己的大；本机终端（CLI）不传 issuer，照旧
   const grant = issuer ? capGrant(asked, issuer) : asked;

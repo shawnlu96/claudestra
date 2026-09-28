@@ -45,7 +45,7 @@ import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
+import { claudeSwitchInputError, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
@@ -76,7 +76,7 @@ import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
-import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
+import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
@@ -1433,8 +1433,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     });
   }
 
-  // POST /api/v1/agents/:name/claude-settings —— 会话级切模型/effort：tmux 注入原生 /model、/effort(与 TUI 手打同一生效路径)。
-  // 非 CC runtime 400;回合进行中 409(注入只会排进输入框);非 master 同步写 registry(manager set-claude)——restart 后沿用。
+  // POST /api/v1/agents/:name/claude-settings —— tmux 注入原生 /model、/effort(与 TUI 手打同一路径，所以要全权 token)。
+  // 非 CC runtime 400;回合中 409(注入只会排进输入框);非 master 同步写 registry(manager set-claude)，restart 后沿用。
   const claudeSetMatch = path.match(/^\/agents\/([^/]+)\/claude-settings$/);
   if (claudeSetMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(claudeSetMatch[1]);
@@ -1445,11 +1445,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
     const effort = typeof body?.effort === "string" && body.effort.trim() ? body.effort.trim() : undefined;
     if (!model && !effort) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
-    // v2.21.1+ 会话级切换接受 runtime-only 档(ultracode)——它就是「this session
-    // only」语义,与 /effort 注入这条路完全对齐(peer owner 请求 2026-08-30)
-    if (effort && !isKnownRuntimeEffort(effort)) {
-      return apiJson(400, { ok: false, error: `未知 effort: "${effort}"。可用: ${[...KNOWN_EFFORT_LEVELS, ...RUNTIME_ONLY_EFFORT_LEVELS].join(", ")}` });
-    }
+    const inputErr = claudeSwitchInputError(model, effort);
+    if (inputErr) return apiJson(400, { ok: false, error: inputErr });
     const runtimeErr = nonClaudeRuntimeError(agentParam, await readRegistryAgents());
     if (runtimeErr) return apiJson(400, { ok: false, error: runtimeErr });
     const agent = await findApiAgent(agentParam);

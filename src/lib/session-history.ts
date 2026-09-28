@@ -18,7 +18,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { agentArchiveDir, ARCHIVE_ROOT } from "./session-archive.js";
-import { channelBodyText, commandRecordLine } from "./inbound-body.js";
+import { channelBodyText, commandRecordLine, commandStdoutLine } from "./inbound-body.js";
 import { sanitizeComponents } from "./history-components.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
@@ -172,12 +172,6 @@ export function progressNoteOf(block: any): string | null {
 function isReplyTool(name: string): boolean {
   if (name === "reply") return true; // Pi 侧裸名
   return name.startsWith("mcp__") && name.endsWith("__reply");
-}
-
-/** 去掉 ANSI 转义序列（local-command-stdout 里的 \x1b[1m 等，裸渲染是豆腐块）。 */
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 }
 
 export interface HistoryPage {
@@ -464,10 +458,12 @@ function applySystemRecord(rec: any, seq: number, ts: string | null, all: Histor
     return true;
   }
 
-  // 新版 CC 把斜杠命令记成 system/local_command（内容同样是 <command-name>…<command-args>…），不认就整条从历史里消失
+  // 新版 CC 把斜杠命令和它的输出记成成对的 system/local_command（<command-name>… 一条、<local-command-stdout>… 一条），不认就整条从历史里消失
   if (rec.subtype === "local_command") {
-    const cmd = typeof rec.content === "string" ? commandRecordLine(rec.content) : null;
-    if (cmd) all.push({ seq, ts, role: "system", text: cmd });
+    const raw = typeof rec.content === "string" ? rec.content : "";
+    const out = commandStdoutLine(raw); // 先认输出：命令的输出里可能恰好印着 <command-name>…
+    const text = out === undefined ? commandRecordLine(raw) : out;
+    if (text) all.push({ seq, ts, role: "system", text });
     return true;
   }
 
@@ -591,13 +587,8 @@ function parseHistoryLines(
         if (cmd) all.push({ seq, ts, role: "system", text: cmd });
         continue; // 无 command-name 的畸形命令记录直接丢
       }
-      const stdout = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(trimmed);
-      if (stdout) {
-        const body = stripAnsi(stdout[1]).trim();
-        if (!body || body === "(no content)") continue;
-        all.push({ seq, ts, role: "system", text: body.length > 200 ? body.slice(0, 200) + "…" : body });
-        continue;
-      }
+      const stdout = commandStdoutLine(trimmed);
+      if (stdout !== undefined) { if (stdout) all.push({ seq, ts, role: "system", text: stdout }); continue; }
       const skill = /^<skill name="([^"]+)"[^>]*>[\s\S]*<\/skill>([\s\S]*)$/.exec(trimmed);
       if (skill) { all.push({ seq, ts, role: "system", text: `/${skill[1]} ${skill[2].trim()}`.trim() }); continue; }
       // 队列回放的裸斜杠命令：tmux 注入的 /compact 等经 CC 队列会额外落一条纯文本 user 记录，紧接着还有

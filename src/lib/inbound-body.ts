@@ -117,3 +117,21 @@ export function commandLine(name: string, args?: string): string {
   const chars = Array.from(line);
   return chars.length > COMMAND_LINE_MAX ? `${chars.slice(0, COMMAND_LINE_MAX).join("")}…` : line;
 }
+
+/** 去掉 ANSI 转义序列（local-command-stdout 里的 \x1b[1m 等，裸渲染是豆腐块）。 */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
+/**
+ * 斜杠命令的输出记录 `<local-command-stdout>…</local-command-stdout>` → 历史里的一行（去 ANSI、限 200 字）。
+ * 不是这种记录 → undefined；空输出 → null（记录照样吃掉，别回落成普通文本）。老版 CC 记成 user 记录、新版记成 system/local_command，两处共用。
+ */
+export function commandStdoutLine(raw: string): string | null | undefined {
+  const m = /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(raw.trim());
+  if (!m) return undefined;
+  const body = stripAnsi(m[1]).trim();
+  if (!body || body === "(no content)") return null;
+  return body.length > 200 ? body.slice(0, 200) + "…" : body;
+}

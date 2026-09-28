@@ -222,7 +222,7 @@
     "size:src/launcher.ts": 1175,
     "size:src/lib/cli-install.ts": 1045,
     "size:src/lib/doctor.ts": 570,
-    "size:src/lib/session-history.ts": 971,
+    "size:src/lib/session-history.ts": 962,
     "size:src/lib/tailscale.ts": 623,
     "size:src/lib/tmux-helper.ts": 1338,
     "size:src/manager.ts": 3049,
