@@ -1155,6 +1155,7 @@ async function cmdRename(oldName: string, newName: string) {
   delete reg.agents[oldTmux];
   (await import("./manager/team.js")).repointParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
   await saveRegistry(reg);
+  await (await import("./manager/ledger.js")).renameLedgerAgent(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名
   steps.push({ step: "registry", ok: true });
 
   // 3. Discord 频道 rename
@@ -3072,6 +3073,7 @@ switch (cmd) {
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
   case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
   case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
+  case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 
   // v2.4.19+ 给现存 active agent 补发置顶 focus 公告（新建/恢复的自动发，这个

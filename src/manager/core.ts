@@ -5,7 +5,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
@@ -186,6 +186,7 @@ export function assertValidNewName(raw: string): void {
   if (NAME_TRAVERSAL_RE.test(cleaned)) {
     throw new Error(`agent 名称不能包含 ".."：${JSON.stringify(raw)}`);
   }
+  if (isReservedAgentName(cleaned)) throw new Error(`agent 名称不能是 owner / master（台账里是身份保留名）：${JSON.stringify(raw)}`);
 }
 
 export function formatAge(date: Date): string {

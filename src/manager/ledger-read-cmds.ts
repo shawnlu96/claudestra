@@ -1,0 +1,89 @@
+/**
+ * `ledger` 的读子命令与项目设置：whoami / show / export / meta。
+ * export 不直接拷 WAL 库文件（正在写的库拷出来可能缺最近的提交）：JSON 走一致读，整库走 VACUUM INTO。
+ */
+import { existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { taskMetrics } from "../lib/ledger-metrics.js";
+import { getItem, getMeta, getTask, LedgerError, listEvents, listItems, listTasks } from "../lib/ledger-store.js";
+import { setMeta } from "../lib/ledger-write.js";
+import type { LedgerCli, Result } from "./ledger-context.js";
+import { agentKey, intFlag } from "./ledger-identity.js";
+import type { CommandSpec } from "./ledger-write-cmds.js";
+
+const DEFAULT_EVENTS = 20;
+
+function whoami(c: LedgerCli): Result {
+  const project = c.p.flags.project ?? c.deps.actorProject ?? null;
+  return { ok: true, actor: c.deps.actor, project, role: project ? c.role(project) : null };
+}
+
+/** 不带目标：项目总览（任务附指标）；任务：详情 + 指标 + 最近事件；事项：详情 + 挂着的任务 + 最近事件 */
+function show(c: LedgerCli): Result {
+  const id = c.p.pos[1];
+  const limit = intFlag(c.p, "events") ?? DEFAULT_EVENTS;
+  const now = c.deps.now();
+  const task = id ? getTask(c.db, id) : null;
+  if (task) {
+    const events = listEvents(c.db, { target: task.id });
+    return { ok: true, task, metrics: taskMetrics(task, events, now), events: events.slice(-limit) };
+  }
+  const project = c.project();
+  if (id) {
+    const item = getItem(c.db, project, id);
+    if (!item) throw new LedgerError("not_found", `项目 ${project} 里没有任务或事项 ${id}`);
+    const tasks = listTasks(c.db, project).filter((t) => t.itemId === id);
+    return { ok: true, item, tasks, events: listEvents(c.db, { project, target: id }).slice(-limit) };
+  }
+  const events = listEvents(c.db, { project });
+  const tasks = listTasks(c.db, project).map((t) => ({ ...t, metrics: taskMetrics(t, events, now) }));
+  return { ok: true, project, meta: getMeta(c.db, project), items: listItems(c.db, project), tasks };
+}
+
+function exportCmd(c: LedgerCli): Result {
+  const out = c.p.flags.out;
+  const sqlite = c.p.flags.sqlite;
+  if (!out === !sqlite) throw new LedgerError("invalid", "export 要带 --out <file.json>（单个项目）或 --sqlite <file>（整库）其中一个");
+  const dest = (out ?? sqlite) as string;
+  if (existsSync(dest)) throw new LedgerError("conflict", `${dest} 已存在，不覆盖`);
+  if (sqlite) {
+    c.db.prepare("VACUUM INTO ?").run(dest);
+    return { ok: true, sqlite: dest };
+  }
+  const project = c.project();
+  const data = {
+    project, exportedAt: new Date(c.deps.now()).toISOString(), meta: getMeta(c.db, project),
+    items: listItems(c.db, project), tasks: listTasks(c.db, project), events: listEvents(c.db, { project }),
+  };
+  writeFileSync(dest, `${JSON.stringify(data, null, 2)}\n`);
+  return { ok: true, out: dest, items: data.items.length, tasks: data.tasks.length, events: data.events.length };
+}
+
+/** 把 ~ 展开成家目录；只收绝对路径（docs 端点按它 realpath，相对路径会随调用时的 cwd 变） */
+export function expandDocsDir(raw: string, home = homedir()): string {
+  const p = raw === "~" ? home : raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
+  if (!isAbsolute(p)) throw new LedgerError("invalid", `--docs-dir 要是绝对路径（或 ~/ 开头）：${raw}`);
+  return p;
+}
+
+/** 不带参数 = 查看；--pms / --docs-dir 只有 owner 能设（库里判） */
+function meta(c: LedgerCli): Result {
+  const project = c.project();
+  const { pms, "docs-dir": docsDir } = c.p.flags;
+  if (pms === undefined && docsDir === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
+  const ctx = { actor: c.deps.actor, now: c.deps.now() };
+  if (pms !== undefined) {
+    const list = pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey);
+    setMeta(c.db, ctx, { project, key: "pms", value: list });
+  }
+  if (docsDir !== undefined) setMeta(c.db, ctx, { project, key: "docsDir", value: expandDocsDir(docsDir) });
+  return { ok: true, project, meta: getMeta(c.db, project) };
+}
+
+export const READ_CMDS: Record<string, CommandSpec> = {
+  whoami: { valued: ["project"], usage: "whoami", run: whoami },
+  show: { valued: ["events", "project"], usage: "show [<task|item>] [--events N]", run: show },
+  export: { valued: ["out", "sqlite", "project"], usage: "export --out <file.json> | --sqlite <file>", run: exportCmd },
+  meta: { valued: ["pms", "docs-dir", "project"], usage: "meta [--pms a,b] [--docs-dir <path>]（不带参数 = 查看）", run: meta },
+};

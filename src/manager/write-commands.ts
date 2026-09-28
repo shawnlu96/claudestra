@@ -51,6 +51,9 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   model: new Set(["set", "reset", "all"]),
 };
 
+/** ledger 的读子命令；其余都写台账（备机上也要过认主守卫），task-new / task-set / import 还会写 registry。meta 不带参数是查看，也按写算 */
+const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export"]);
+
 /** auto-update 的读子命令（缺省即 status）；其余（channel / claudestra on|off / claude on|off）都写 config.json */
 const AUTO_UPDATE_READ_SUBS: ReadonlySet<string> = new Set(["", "status", "get"]);
 
@@ -75,5 +78,6 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
+  if (cmd === "ledger") return !LEDGER_READ_SUBS.has(sub);
   return false;
 }

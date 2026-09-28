@@ -15,7 +15,7 @@ import { resolveBridgePort } from "./bridge-url.js";
 import { claudeAccountChecks, parseAuthStatus, parseClaudeVersion } from "./claude-account.js";
 import { parseDotenv, readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR, TMUX_SOCK } from "./paths.js";
-import { checkStateFiles, checkUndeliveredAlerts, staleInstallEnvCheck } from "./doctor-state.js";
+import { checkStateFiles, checkUndeliveredAlerts, reservedAgentNameChecks, staleInstallEnvCheck } from "./doctor-state.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
 import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
@@ -405,7 +405,7 @@ async function checkAgents(): Promise<Check[]> {
       fix: `检查 ${ORCH_DIR}/registry.json 是不是坏了（应是 JSON 对象）` });
     return out;
   }
-  out.push({ group: g, name: "registry.json", status: "ok", detail: `${agents.length} 个 agent` });
+  out.push({ group: g, name: "registry.json", status: "ok", detail: `${agents.length} 个 agent` }, ...reservedAgentNameChecks(agents.map((a) => a.name), g));
 
   const sock = TMUX_SOCK;
   const win = await sh(["tmux", "-S", sock, "list-windows", "-t", "master", "-F", "#{window_name}"]);
