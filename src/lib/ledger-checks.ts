@@ -20,7 +20,7 @@ import {
   type TaskKind,
 } from "./ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "./ledger-store.js";
-import { AGENT_NAME_BLOCKLIST_RE } from "./registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, INVISIBLE_NAME_MSG, INVISIBLE_NAME_RE } from "./registry.js";
 import { FP_RE } from "./relay-protocol.js";
 
 /** specRev 不在里面：它只由阶段机（回退到 spec）维护 */
@@ -153,6 +153,7 @@ export function normalizePeerAgent(name: string): string {
 
 function checkAssignee(kind: unknown, who: string): void {
   if (!ASSIGNEE_KINDS.includes(kind as AssigneeKind)) throw new LedgerError("invalid", `assigneeKind 只能是 ${ASSIGNEE_KINDS.join(" / ")}，收到 ${String(kind)}`);
+  if (kind !== "human" && INVISIBLE_NAME_RE.test(who)) throw new LedgerError("invalid", `${INVISIBLE_NAME_MSG}：${JSON.stringify(who)}`);
   const err = assigneeFormatError(kind as AssigneeKind, who);
   if (err) throw new LedgerError("invalid", `${String(kind)} 的 assignee 格式不对（要 ${err}）：${who}`);
 }

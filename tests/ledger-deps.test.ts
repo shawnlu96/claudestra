@@ -235,6 +235,9 @@ describe("负责人类型", () => {
     expect(who("S")).toEqual([null, "peer_agent", `${FP}/future_data`]);
     expect(errOf(() => createTask(db, PM, { project: P, id: "V", title: "坏", kind: "code", assigneeKind: "human", assignee: "owner" })).code).toBe("invalid");
     expect(errOf(() => createTask(db, PM, { project: P, id: "W", title: "坏", kind: "code", agent: "has space" })).code).toBe("invalid");
+    for (const bad of [{ agent: "a\u200db" }, { assigneeKind: "peer_agent", assignee: `${FP}/a\u200cb` }]) {
+      expect(errOf(() => createTask(db, PM, { project: P, id: "Z", title: "坏", kind: "code", ...bad } as never)).message).toContain("名字不能含不可见字符（零宽连接符等），请换一个名字");
+    }
     createTask(db, PM, { project: P, id: "U", title: "未派", kind: "code" });
     expect(who("U")).toEqual([null, null, null]);
   });

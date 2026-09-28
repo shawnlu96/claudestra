@@ -16,7 +16,7 @@ function tmp(): { dir: string; path: string } {
 function makeV1(path: string): void {
   const raw = new Database(path);
   raw.exec("PRAGMA journal_mode = WAL");
-  raw.exec(LEDGER_MIGRATIONS[0] as string);
+  for (const sql of LEDGER_MIGRATIONS[0] as readonly string[]) raw.prepare(sql).run();
   raw.exec("PRAGMA user_version = 1");
   const ins = raw.prepare("INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt) VALUES (?, 'p', ?, 'code', ?, ?, 0, 0)");
   ins.run("T1", "有人", "build", "agent-exec");
@@ -51,6 +51,23 @@ describe("v1 → 依赖边版本", () => {
     expect(LEDGER_SCHEMA_VERSION).toBe(LEDGER_MIGRATIONS.length);
     expect(DEPS_SCHEMA_VERSION).toBeGreaterThan(1);
     expect(DEPS_SCHEMA_VERSION).toBeLessThanOrEqual(LEDGER_SCHEMA_VERSION);
+  });
+
+  test("写成 SQL 数组的迁移一个元素只有一条语句：多语句交给 prepare 只跑第一条（其余静默丢掉）、交给 exec 会吞运行期错误", () => {
+    // 同一条分别用 prepare().run() 与 exec 跑进两个库：一个元素里藏了第二条语句，两边的 schema 就对不上
+    const [one, all] = [new Database(":memory:"), new Database(":memory:")];
+    const schema = (d: Database) => d.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+    for (const step of LEDGER_MIGRATIONS) {
+      if (typeof step === "function") continue;
+      for (const sql of step) {
+        one.prepare(sql).run();
+        all.exec(sql);
+        expect([sql, schema(one)]).toEqual([sql, schema(all)]);
+      }
+    }
+    expect(schema(one).length).toBeGreaterThan(0);
+    one.close();
+    all.close();
   });
 
   test("旧任务有 agent 的回填成 assigneeKind=agent，没派人（含空串）的留空；task_deps 建好", () => {

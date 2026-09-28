@@ -5,7 +5,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { AGENT_NAME_BLOCKLIST_RE, isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, INVISIBLE_NAME_MSG, INVISIBLE_NAME_RE, isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
@@ -192,9 +192,10 @@ export function assertValidNewName(raw: string): void {
   if (cleaned.length === 0 || cleaned.length > 48) {
     throw new Error(`agent 名称长度必须在 1~48 之间: "${raw}"`);
   }
+  if (INVISIBLE_NAME_RE.test(cleaned)) throw new Error(`${INVISIBLE_NAME_MSG}: ${JSON.stringify(raw)}`);
   if (NAME_BLOCKLIST_RE.test(cleaned)) {
     throw new Error(
-      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~、shell 元字符 " ' \` $ ; & | < > ( ) * ? { }，或零宽等不可见字符）`
+      `agent 名称含非法字符: "${raw}"（不能包含空白、点号 .、路径分隔符 / \\ : ~、shell 元字符 " ' \` $ ; & | < > ( ) * ? { }）`
     );
   }
   if (NAME_TRAVERSAL_RE.test(cleaned)) {

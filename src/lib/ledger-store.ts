@@ -34,39 +34,40 @@ export class LedgerError extends Error {
   }
 }
 
-const SCHEMA_V1 = `
-CREATE TABLE items (
-  project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
-  ownerWords TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL CHECK (status IN ('todo','decide','design','doing','done','dropped')),
-  oneLine TEXT NOT NULL DEFAULT '', next TEXT NOT NULL DEFAULT '',
-  rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
-  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-  PRIMARY KEY (project, id));
-CREATE TABLE tasks (
-  id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, title TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('code','investigate','ops')),
-  stage TEXT NOT NULL CHECK (stage IN ('spec','restate','build','review','fix','merge','live','verified','done','blocked','cancelled')),
-  stageBefore TEXT, round INTEGER NOT NULL DEFAULT 0,
-  agent TEXT, pm TEXT, branch TEXT, pr TEXT, headSHA TEXT, spec TEXT,
-  specRev INTEGER NOT NULL DEFAULT 1, model TEXT,
-  rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
-  createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-  FOREIGN KEY (project, itemId) REFERENCES items(project, id));
-CREATE INDEX tasks_project ON tasks(project);
-CREATE TABLE events (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
-  actor TEXT NOT NULL, project TEXT NOT NULL,
-  target TEXT NOT NULL,
-  kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}',
-  dedupKey TEXT UNIQUE);
-CREATE INDEX events_project_target ON events(project, target, seq);
-CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END;
-CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END;
-CREATE TABLE meta (
-  project TEXT NOT NULL, key TEXT NOT NULL,
-  value TEXT NOT NULL, PRIMARY KEY (project, key));
-`;
+/** 一条语句一个元素（迁移规矩：bun 的多语句 exec 会吞运行期错误）；触发器的 BEGIN … END 整条算一个 */
+const SCHEMA_V1: readonly string[] = [
+  `CREATE TABLE items (
+    project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
+    ownerWords TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('todo','decide','design','doing','done','dropped')),
+    oneLine TEXT NOT NULL DEFAULT '', next TEXT NOT NULL DEFAULT '',
+    rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
+    createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+    PRIMARY KEY (project, id))`,
+  `CREATE TABLE tasks (
+    id TEXT PRIMARY KEY, project TEXT NOT NULL, itemId TEXT, title TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('code','investigate','ops')),
+    stage TEXT NOT NULL CHECK (stage IN ('spec','restate','build','review','fix','merge','live','verified','done','blocked','cancelled')),
+    stageBefore TEXT, round INTEGER NOT NULL DEFAULT 0,
+    agent TEXT, pm TEXT, branch TEXT, pr TEXT, headSHA TEXT, spec TEXT,
+    specRev INTEGER NOT NULL DEFAULT 1, model TEXT,
+    rev INTEGER NOT NULL DEFAULT 1, extra TEXT NOT NULL DEFAULT '{}',
+    createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
+    FOREIGN KEY (project, itemId) REFERENCES items(project, id))`,
+  "CREATE INDEX tasks_project ON tasks(project)",
+  `CREATE TABLE events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+    actor TEXT NOT NULL, project TEXT NOT NULL,
+    target TEXT NOT NULL,
+    kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}',
+    dedupKey TEXT UNIQUE)`,
+  "CREATE INDEX events_project_target ON events(project, target, seq)",
+  "CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END",
+  "CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'ledger events are append-only'); END",
+  `CREATE TABLE meta (
+    project TEXT NOT NULL, key TEXT NOT NULL,
+    value TEXT NOT NULL, PRIMARY KEY (project, key))`,
+];
 
 /**
  * 依赖边 + 负责人类型（T8h）。when / from / to 是 SQL 关键字，列名用 cond / fromTask / toTask，行映射成 when / from / to。
@@ -93,8 +94,8 @@ function migrateDeps(db: Database): void {
   run("CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project)");
 }
 
-/** 一步迁移：一段 SQL，或要先查现状的函数（如加列） */
-type Migration = string | ((db: Database) => void);
+/** 一步迁移：一组单条 SQL（逐条 prepare().run()），或要先查现状的函数（如加列）。别写成一段多语句字符串交给 exec */
+type Migration = readonly string[] | ((db: Database) => void);
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算） */
 export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateDeps];
 const MIGRATIONS = LEDGER_MIGRATIONS;
@@ -182,8 +183,8 @@ function missingSchema(db: Database): string[] {
 }
 
 function runStep(db: Database, step: Migration): void {
-  if (typeof step === "string") db.exec(step);
-  else step(db);
+  if (typeof step === "function") step(db);
+  else for (const sql of step) db.prepare(sql).run();
 }
 
 /**

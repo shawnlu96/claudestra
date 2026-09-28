@@ -35,6 +35,9 @@ export function isMasterAgent(name: string | undefined | null): boolean {
  * \p{Cf}（零宽、方向控制等不可见格式符）让两个看起来一样的名字成了两个人。CJK 等 Unicode 字母允许。
  */
 export const AGENT_NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f\p{Cf}]/u;
+/** 不可见字符单独报（PM 09-29 定的文案）：终端里看不出名字哪儿不对，直接叫人换一个 */
+export const INVISIBLE_NAME_RE = /\p{Cf}/u;
+export const INVISIBLE_NAME_MSG = "名字不能含不可见字符（零宽连接符等），请换一个名字";
 
 /**
  * 保留给身份的名字：台账（lib/ledger-stages.ts roleOf）把 actor "owner" / "master" 直接当角色。
