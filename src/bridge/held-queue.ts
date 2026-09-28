@@ -57,13 +57,14 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   }
 
   /**
-   * 追加一条并落盘，返回这个频道排队的条数。同一封（messageId 相同，router.ts newMessageId 保证唯一）已在队里就不再加：
+   * 追加一条并落盘，返回这个频道排队的条数。同一封（同一个 env 对象）已在队里就不再加：
    * flush 投到一半目标又忙，deliverToLocal 会把正在投的那条再 hold 一次——原条目留着，首次入队 / 提醒时间不被刷新。
+   * 不按 messageId 认：同一条 Discord 消息上的两次按钮点击 messageId 相同，是两封（tests/held-queue.test.ts）。
    * 换新数组不原地 push：flush 遍历的快照不受影响。
    */
   hold(channelId: string, item: HeldItem): number {
     const cur = this.get(channelId) ?? [];
-    if (cur.some((i) => i.env.meta.messageId === item.env.meta.messageId)) return cur.length;
+    if (cur.some((i) => i.env === item.env)) return cur.length;
     const q = [...cur, item];
     this.set(channelId, q);
     return q.length;

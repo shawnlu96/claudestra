@@ -880,7 +880,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
-    const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是同一封,按 messageId 去重不会重复入队
+    const n = heldLocalMsgs.holdEnv(env); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
     return { envelope: env, outcome: { kind: "sent", note: "queued" } };
@@ -1250,7 +1250,7 @@ discord.once("ready", async () => {
         to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
         intent: "notification",
         content: resumeText(st.error, st.errorAt),
-        meta: { messageId: `api_resume_${now}`, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
+        meta: { messageId: newMessageId("api_resume"), triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
       }).then(() => {
         console.log(`🔁 api-error-resume → ${cid}`);
         recordMetric("api_error_resume", { channelId: cid, meta: { error: st.error } });

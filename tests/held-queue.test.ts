@@ -59,13 +59,15 @@ describe("HeldQueue 落盘", () => {
     expect(new HeldQueue(p).get("c-me")!.map((i) => i.env.content)).toEqual(["一", "二"]);
   });
 
-  test("hold：同一封（messageId 相同）再押一次不重复、不刷新入队时间；messageId 不同的照加", () => {
+  test("hold：同一封（同一个 env）再押一次不重复、不刷新入队时间；messageId 相同的另一封照加", () => {
     const q = new HeldQueue(null);
     const first = item("复核", 1000);
     q.hold("c-me", first);
     expect(q.hold("c-me", { ...first, heldAt: 9999 })).toBe(1); // flush 投到一半目标又忙，deliverToLocal 把同一封再押一次
     expect(q.get("c-me")![0].heldAt).toBe(1000);
-    expect(q.hold("c-me", item("追问", 2000))).toBe(2);
+    // 同一条 Discord 消息上先后点了两个按钮（目标压缩中）：messageId 都是那条消息的 id，是两封
+    const clickB = { ...first, env: { ...first.env, content: "[button:b]", meta: { ...first.env.meta, threadId: "thr_2" } } } as HeldItem;
+    expect(q.hold("c-me", clickB)).toBe(2);
   });
 
   test("holdEnv：按信封收件方入队、入队时间取现在，同一封同样去重", () => {
