@@ -16,7 +16,7 @@ import { InlineActionContext } from "@/components/domd/inline-button";
 import { replyEchoMessageIds, isEchoSegment } from "../reply-echo";
 import { useInlineActions } from "./use-inline-actions";
 import { messagePlainText, splitQuoted } from "../message-text";
-import { ActiveToolRow, HistoryToolRow, ToolCallsBlock } from "./tool-rows";
+import { ToolGroup } from "./tool-rows";
 import { ClaudeHeader, CompactingLine, ReplyingLine, ThinkingDots, TurnMark, WorkingLine } from "./turn-indicators";
 import { QuoteSwipe } from "./quote-swipe";
 import { AttachmentStrip } from "./attachments";
@@ -180,11 +180,7 @@ function AssistantBody({
         <TextBlock key={i} msgId={m.id} text={seg.text} ts={seg.ts ?? m.replyTs ?? m.ts} streamed={false} fullText={full} />
       )
     ) : (
-      <div key={i} className="my-2 space-y-1">
-        {seg.tools.map((t, j) =>
-          streamingLast ? <ActiveToolRow key={j} tool={t} active={i === segs!.length - 1 && j === seg.tools.length - 1} /> : <HistoryToolRow key={j} tool={t} />,
-        )}
-      </div>
+      <ToolGroup key={i} tools={seg.tools} streaming={streamingLast} activeLast={i === segs!.length - 1} />
     );
   const narration = hasSegs ? (
     <SegGroups segs={segs!} ts={m.ts} render={renderSeg} />
@@ -341,7 +337,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting }:
       <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
         {!hasSegs && !!m.toolCalls?.length && (
-          <ToolCallsBlock tools={m.toolCalls} streamingLast={streamingLast} />
+          <ToolGroup tools={m.toolCalls} streaming={streamingLast} activeLast />
         )}
         <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} />
       </div>
