@@ -150,9 +150,9 @@ export async function setWindowOption(target: string, option: string, value: str
   }
 }
 
-/** tmux window target: `master:agent-xxx` */
+/** `master:=agent-xxx`：`=` 精确匹配，否则窗口不在时 tmux 按前缀落到 agent-xxxbar（tests/tmux-target.test.ts） */
 export function windowTarget(name: string): string {
-  return `${MASTER_SESSION}:${name}`;
+  return `${MASTER_SESSION}:=${name}`;
 }
 
 /** 发送文本到窗口（literal 模式 + 单独的 Enter） */

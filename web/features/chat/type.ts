@@ -146,7 +146,8 @@ export interface AgentSession {
   displayName: string;
   purpose: string;
   cwd: string;
-  status: "active" | "stopped";
+  /** creating = create 进行中 / 砍在半路的占位：显示「创建中」、不能发消息 */
+  status: "active" | "stopped" | "creating";
   mock?: boolean;
   /** 大总管置顶入口——不显示 kill/restart，列表第一位。 */
   pinnedMaster?: boolean;

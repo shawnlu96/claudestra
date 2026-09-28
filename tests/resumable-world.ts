@@ -20,6 +20,10 @@ export interface WorldState {
   channelNames: Map<string, string>;
   /** 里面还有进程在跑的窗口（repair 不许关） */
   busyWindows: string[];
+  /** 正有 restart 在跑的 agent（restart 锁） */
+  restarting: string[];
+  /** Discord 拒绝删除（50013）的频道 */
+  forbiddenChannels: string[];
 }
 
 export function makeWorld(init: Partial<WorldState> = {}) {
@@ -33,6 +37,8 @@ export function makeWorld(init: Partial<WorldState> = {}) {
     ledgerRenames: [],
     channelNames: new Map(),
     busyWindows: [],
+    restarting: [],
+    forbiddenChannels: [],
     winIds: [],
     ...structuredClone(init),
   };
@@ -68,11 +74,13 @@ export function makeWorld(init: Partial<WorldState> = {}) {
     windowIds: async (n) => { live(); if (tmuxBroken) throw new Error("列不出 tmux 窗口"); return st.winIds.filter((_, i) => st.windows[i] === n); },
     killWindow: async (n) => { live(); for (let i = st.windows.length - 1; i >= 0; i--) if (st.windows[i] === n) dropWin(i); hit("killWindow"); },
     killWindowId: async (id) => { live(); const i = st.winIds.indexOf(id); if (i >= 0) dropWin(i); hit("killWindow"); },
+    restartInProgress: (n) => st.restarting.includes(n),
     windowIsBareShell: async (t) => { live(); const name = t.startsWith("@") ? st.windows[st.winIds.indexOf(t)] : t; return !!name && !st.busyWindows.includes(t) && !st.busyWindows.includes(name); },
     renameWindow: async (a, b) => { live(); st.windows = st.windows.map((w) => (w === a ? b : w)); hit("renameWindow"); },
     deleteChannel: async (id) => {
       live();
       if (!st.bridgeUp) return { error: "Bridge 请求超时 (10s)" };
+      if (st.forbiddenChannels.includes(id)) return { error: "Missing Permissions (50013)", forbidden: true };
       const had = st.channels.delete(id);
       hit("deleteChannel");
       return had ? "ok" : "gone";

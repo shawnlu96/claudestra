@@ -6,6 +6,8 @@
  * 或标记超过 PENDING_STALE_MS（防 pid 复用）；持有者还活着 = 另一次操作正在进行，一律不碰。
  */
 
+import { isMasterAgent } from "./registry.js";
+
 export type PendingOp =
   | {
       op: "create"; pid: number; startedAt: string; channelName: string;
@@ -69,9 +71,14 @@ export function isLocalChannel(id: string | undefined): boolean {
   return !id || id.startsWith("local-");
 }
 
-/** Discord 的「频道已不存在」——删频道时视同已删 */
+/** Discord 的「频道已不存在」（10003）——删频道时视同已删；只认这一种，别的错误都不能当「删掉了」 */
 export function isUnknownChannelError(msg: string): boolean {
-  return /Unknown Channel|10003/i.test(msg);
+  return /Unknown Channel|\b10003\b/i.test(msg);
+}
+
+/** Discord 的 Missing Access（50001）/ Missing Permissions（50013）：bot 看不到或没权限，重试也没用，要人处理 */
+export function isForbiddenChannelError(msg: string): boolean {
+  return /Missing Access|Missing Permissions|\b5000[13]\b/i.test(msg);
 }
 
 export type Residue =
@@ -102,6 +109,7 @@ export function scanResidues(inp: ScanInput): Residue[] {
   const liveChannelOwners = new Set<string>();
   for (const [name, a] of Object.entries(inp.agents)) {
     if (a.status === "active" && a.channelId) liveChannelOwners.add(a.channelId);
+    if (isMasterAgent(name)) continue; // 大总管不归 repair 管（多一层保险：它的窗口名本来就不是 agent-*）
     const p = a.pending;
     if (!p) continue;
     handled.add(name);
@@ -114,7 +122,7 @@ export function scanResidues(inp: ScanInput): Residue[] {
     else out.push({ kind: "stale-rename", agent: name, from: p.from });
   }
   for (const w of inp.windows ?? []) {
-    if (handled.has(w)) continue;
+    if (handled.has(w) || isMasterAgent(w)) continue;
     const a = inp.agents[w];
     if (!a) out.push({ kind: "orphan-window", agent: w, registered: false });
     else if (a.status === "stopped") out.push({ kind: "orphan-window", agent: w, registered: true });
@@ -122,7 +130,7 @@ export function scanResidues(inp: ScanInput): Residue[] {
   if (inp.channels && inp.windows) {
     for (const [name, a] of Object.entries(inp.agents)) {
       // 窗口还在 = agent 可能正在用（registry 漏写 active），它的频道不算孤儿
-      if (handled.has(name) || a.status !== "stopped" || isLocalChannel(a.channelId) || inp.windows.includes(name)) continue;
+      if (handled.has(name) || isMasterAgent(name) || a.status !== "stopped" || isLocalChannel(a.channelId) || inp.windows.includes(name)) continue;
       if (inp.channels.has(a.channelId!) && !liveChannelOwners.has(a.channelId!)) {
         out.push({ kind: "orphan-channel", agent: name, channelId: a.channelId! });
       }

@@ -4,12 +4,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { Crash, makeWorld, normalize, type WorldState } from "./resumable-world";
-import { beginCreate, clearCreateResidue, commitCreate, recordCreate } from "../src/manager/create-guard";
+import { abandonCreate, abortCreate, beginCreate, clearCreateResidue, commitCreate, CreateAborted, gateOps, newCreateRun, recordCreate, type CreateRun } from "../src/manager/create-guard";
 import { runKill, runRemove } from "../src/manager/agent-kill";
 import { runRename } from "../src/manager/agent-rename";
 import { runRepair } from "../src/manager/repair";
 import type { AgentInfo } from "../src/manager/core";
-import { pendingHoldsOffHeal, pendingRefusal } from "../src/lib/pending-ops";
+import { isForbiddenChannelError, isUnknownChannelError, pendingHoldsOffHeal, pendingRefusal, scanResidues } from "../src/lib/pending-ops";
 
 type World = ReturnType<typeof makeWorld>;
 
@@ -17,15 +17,15 @@ const OLD: AgentInfo = { project: "/p", purpose: "old", created: "t0", status: "
 const LIVE: AgentInfo = { project: "/p", purpose: "live", created: "t0", status: "active", channelId: "ch9", notes: "", cwd: "/p", sessionId: "s9" };
 
 /** 按 cmdCreate 的顺序走一遍占位协议（窗口 / 频道由世界假件代劳） */
-async function simulateCreate(w: World, name: string): Promise<string> {
-  const begun = await beginCreate(name, name.replace("agent-", ""), { project: "/p", purpose: "new", cwd: "/p" }, w.deps);
+async function simulateCreate(w: World, name: string, run: CreateRun = newCreateRun()): Promise<string> {
+  const begun = await beginCreate(name, name.replace("agent-", ""), { project: "/p", purpose: "new", cwd: "/p" }, w.deps, run);
   if (!begun.ok) return begun.error;
   const ch = w.createChannel(name);
-  await recordCreate(name, { channelId: ch }, w.deps);
+  await recordCreate(name, { channelId: ch }, w.deps, run);
   const windowId = w.openWindow(name);
-  await recordCreate(name, { windowId }, w.deps);
+  await recordCreate(name, { windowId }, w.deps, run);
   const entry = { project: "/p", purpose: "new", created: "t1", status: "active", channelId: ch, notes: "", cwd: "/p", sessionId: "s-new" } as AgentInfo;
-  return commitCreate(name, entry, w.deps);
+  return commitCreate(name, entry, w.deps, run);
 }
 
 async function scanOf(w: World) {
@@ -168,9 +168,10 @@ describe("rename：每一步之后被砍", () => {
 describe("对抗：再跑 / repair 不许误删", () => {
   test("持有者还活着的占位：create、kill、repair 都不碰", async () => {
     const w = makeWorld();
-    await beginCreate("agent-x", "x", {}, w.deps);
+    const run = newCreateRun();
+    await beginCreate("agent-x", "x", {}, w.deps, run);
     const ch = w.createChannel("agent-x");
-    await recordCreate("agent-x", { channelId: ch }, w.deps);
+    await recordCreate("agent-x", { channelId: ch }, w.deps, run);
     const snap = normalize(w.st);
     expect(await simulateCreate(w, "agent-x")).toContain("正在 create");
     expect(await runKill("agent-x", w.deps)).toMatchObject({ ok: false });
@@ -326,9 +327,10 @@ describe("审查发现的误删路径（回归用例）", () => {
 
   test("占位被别的进程接手后 commit 返回 lost，不覆盖", async () => {
     const w = makeWorld();
-    await beginCreate("agent-x", "x", {}, w.deps);
+    const run = newCreateRun();
+    await beginCreate("agent-x", "x", {}, w.deps, run);
     w.st.reg.agents["agent-x"]!.pending = { op: "create", pid: 999999, startedAt: "2026-09-28T12:00:00Z", channelName: "x" };
-    expect(await commitCreate("agent-x", LIVE, w.deps)).toBe("lost");
+    expect(await commitCreate("agent-x", LIVE, w.deps, run)).toBe("lost");
     expect(w.st.reg.agents["agent-x"]!.status).toBe("creating");
   });
 });
@@ -391,6 +393,123 @@ describe("最后一轮审查（回归用例）", () => {
     const r = await beginCreate("agent-x", "x", {}, w.deps);
     expect(r.ok).toBe(false);
     expect(w.st.reg.agents["agent-x"]!.pending).toEqual(other);
+  });
+});
+
+describe("PM 最后一轮审查（回归用例）", () => {
+  /** 走到「窗口已建、id 已记」为止，返回 run 与世界 */
+  async function halfCreate(init: Partial<WorldState> = {}) {
+    const w = makeWorld(init);
+    const run = newCreateRun();
+    await beginCreate("agent-x", "x", {}, w.deps, run);
+    const ch = w.createChannel("agent-x");
+    await recordCreate("agent-x", { channelId: ch }, w.deps, run);
+    const windowId = w.openWindow("agent-x");
+    await recordCreate("agent-x", { windowId }, w.deps, run);
+    return { w, run, ch, windowId };
+  }
+
+  test("P1-1：信号清理接手后，主流程经 gateOps 的任何窗口操作都抛、recordCreate 冻住、commit 不落盘", async () => {
+    const { w, run } = await halfCreate();
+    const sent: string[] = [];
+    const ops = gateOps({ sendLine: async (t: string) => { sent.push(t); } }, run);
+    const exits: number[] = [];
+    await abortCreate("SIGTERM", "agent-x", w.deps, run, () => {}, (c) => exits.push(c));
+    expect(exits).toEqual([143]);
+    expect(w.st.windows).toEqual([]);
+    expect(() => ops.sendLine("claude --resume …")).toThrow(CreateAborted);
+    expect(sent).toEqual([]);
+    const frozen = await Promise.race([recordCreate("agent-x", { windowId: "@9" }, w.deps, run).then(() => "resolved"), Bun.sleep(50).then(() => "frozen")]);
+    expect(frozen).toBe("frozen");
+    expect(await commitCreate("agent-x", LIVE, w.deps, run)).toBe("aborted");
+    expect(w.st.reg.agents["agent-x"]).toBeUndefined();
+  });
+
+  test("P1-1：已落盘后才收到信号 → 不清理、不退出，交给主流程照常收尾", async () => {
+    const { w, run, ch } = await halfCreate();
+    expect(await commitCreate("agent-x", { ...LIVE, channelId: ch }, w.deps, run)).toBe("ok");
+    const exits: number[] = [];
+    await abortCreate("SIGINT", "agent-x", w.deps, run, () => {}, (c) => exits.push(c));
+    expect(exits).toEqual([]);
+    expect(w.st.windows).toEqual(["agent-x"]);
+    expect(w.st.reg.agents["agent-x"]!.status).toBe("active");
+  });
+
+  test("P2-1 / P2-8：占位被别的进程接手 → 只按本次的 id 收拾，registry 与别人的窗口都不碰", async () => {
+    const { w, run, ch, windowId } = await halfCreate();
+    const other = { op: "create" as const, pid: 4242, startedAt: "2026-09-28T12:00:00Z", channelName: "x", channelId: "chOther" };
+    w.st.reg.agents["agent-x"]!.pending = other;
+    const theirs = w.openWindow("agent-x");
+    const r = await abandonCreate("agent-x", { channelId: ch, windowId }, w.deps, run);
+    expect(r.ok).toBe(true);
+    expect(w.st.winIds).toEqual([theirs]);
+    expect(w.st.channels.has(ch)).toBe(false);
+    expect(w.st.reg.agents["agent-x"]!.pending).toEqual(other);
+    // 记下的 id 已被复用成别的名字的窗口：不关
+    w.st.windows = ["agent-other"]; w.st.winIds = [windowId];
+    await abandonCreate("agent-x", { windowId }, w.deps, run);
+    expect(w.st.winIds).toEqual([windowId]);
+  });
+
+  test("P2-3：restart 进行中 kill / remove 拒绝", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": LIVE } }, restarting: ["agent-x"], channels: new Set(["ch9"]) });
+    expect(await runKill("agent-x", w.deps)).toMatchObject({ ok: false });
+    expect(await runRemove("agent-x", w.deps)).toMatchObject({ ok: false });
+    expect(w.st.reg.agents["agent-x"]).toEqual(LIVE);
+    expect(w.st.channels.has("ch9")).toBe(true);
+  });
+
+  test("P2-4：kill 一个做到一半的 create，prev 是 active → 恢复成 stopped", async () => {
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-x": LIVE } } });
+    w.crashAfter("openWindow#1");
+    await simulateCreate(w, "agent-x").catch((e) => { if (!(e instanceof Crash)) throw e; });
+    w.restart();
+    expect(await runKill("agent-x", w.deps)).toMatchObject({ ok: true });
+    expect(w.st.reg.agents["agent-x"]).toEqual({ ...LIVE, status: "stopped" });
+  });
+
+  test("P2-5：Discord 不让删频道 → kill 给人话并留欠账；--force 放弃这一步、不留欠账", async () => {
+    const init = { reg: { socket: "s", agents: { "agent-x": LIVE } }, channels: new Set(["ch9"]), forbiddenChannels: ["ch9"] };
+    const w = makeWorld(init);
+    const r = await runKill("agent-x", w.deps);
+    expect(r).toMatchObject({ ok: true, incomplete: ["channel"] });
+    expect(String(r.message)).toContain("Discord 拒绝");
+    expect(w.st.reg.agents["agent-x"]!.pending).toMatchObject({ op: "kill", left: ["channel"] });
+    expect(await runKill("agent-x", w.deps, { force: true })).toMatchObject({ ok: true });
+    expect(w.st.reg.agents["agent-x"]!.pending).toBeUndefined();
+    // 同名 create 不再被挡
+    expect(await simulateCreate(w, "agent-x")).toBe("ok");
+  });
+
+  test("P2-5：只有 Unknown Channel / 10003 算已删", () => {
+    expect(isUnknownChannelError("DiscordAPIError[10003]: Unknown Channel")).toBe(true);
+    expect(isUnknownChannelError("DiscordAPIError[50001]: Missing Access")).toBe(false);
+    expect(isForbiddenChannelError("DiscordAPIError[50013]: Missing Permissions")).toBe(true);
+    expect(isForbiddenChannelError("Bridge 请求超时 (10s)")).toBe(false);
+  });
+
+  test("P2-6：kill 盖掉 rename 标记前先把台账归属补过来；旧名被占时报出来", async () => {
+    const pending = { op: "rename" as const, pid: 1, startedAt: "2026-09-28T10:00:00Z", from: "agent-a" };
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending } } } });
+    await runKill("agent-b", w.deps);
+    expect(w.st.ledgerRenames).toEqual(["agent-a>agent-b"]);
+    const w2 = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, pending }, "agent-a": { ...LIVE, channelId: "chA" } } } });
+    const r = await runKill("agent-b", w2.deps);
+    expect(w2.st.ledgerRenames).toEqual([]);
+    expect(JSON.stringify(r.notes)).toContain("人工核对");
+  });
+
+  test("P2-6：rename 补跑时旧名已被占 → 台账不改，但在 steps / warnings 里报出来", async () => {
+    const pending = { op: "rename" as const, pid: 1, startedAt: "2026-09-28T10:00:00Z", from: "agent-a" };
+    const w = makeWorld({ reg: { socket: "s", agents: { "agent-b": { ...LIVE, channelId: "ch1", pending }, "agent-a": { ...LIVE, channelId: "chA" } } }, channels: new Set(["ch1"]) });
+    const r = await runRename("a", "b", w.deps);
+    expect(r.warnings).toBeDefined();
+    expect(JSON.stringify(r.steps)).toContain("台账归属没改");
+  });
+
+  test("P2-10：scanResidues 不碰大总管", () => {
+    const r = scanResidues({ agents: { "agent-master": { status: "stopped", channelId: "c0" } }, windows: ["agent-master"], channels: new Set(["c0"]), now: 0, alive: () => false });
+    expect(r).toEqual([]);
   });
 });
 

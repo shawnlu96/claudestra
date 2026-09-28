@@ -23,7 +23,7 @@ import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
   tmuxCapture,
-  isIdle as tmuxIsIdle,
+  isIdle as tmuxIsIdle, windowTarget,
 } from "./lib/tmux-helper.js";
 
 // ============================================================
@@ -331,7 +331,7 @@ async function executeOnTempAgent(
     const tmpSessionId = createResult.sessionId as string | undefined;
     await Bun.sleep(3000); // 等 agent 就绪
 
-    const tmuxTarget = `master:agent-${agentName}`;
+    const tmuxTarget = windowTarget(`agent-${agentName}`);
     await tmuxSendLine(tmuxTarget, job.prompt);
 
     // 等完成 —— 15s 冷启动 + 10s 轮询 idle

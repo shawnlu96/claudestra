@@ -6,10 +6,19 @@ import { listWindowIdsByName, tmuxRaw, windowHasChildProcess, windowTarget } fro
 import { agentWindowsOrNull } from "../lib/agent-windows.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { archiveSession } from "../lib/session-archive.js";
-import { isLocalChannel, isUnknownChannelError, pidAlive } from "../lib/pending-ops.js";
+import { isForbiddenChannelError, isLocalChannel, isUnknownChannelError, pidAlive } from "../lib/pending-ops.js";
+import { isRestartInProgress } from "./restart-lock.js";
 import { loadRegistry, saveRegistry, type Registry } from "./core.js";
 
-type ChannelResult = "ok" | "gone" | { error: string };
+/** forbidden = Discord 拒绝（没权限 / 看不到），重试没用 */
+type ChannelResult = "ok" | "gone" | { error: string; forbidden?: boolean };
+
+/** 删频道失败的人话：分清「bridge 不在，稍后重试」和「Discord 不让删，要人去处理」，两种都能 --force 放弃这一步 */
+export function channelFailureText(channelId: string, r: { error: string; forbidden?: boolean }): string {
+  return r.forbidden
+    ? `Discord 拒绝删除频道 ${channelId}（bot 没权限或看不到它：${r.error}）——去 Discord 手动删，或加 --force 放弃这一步`
+    : `删频道 ${channelId} 失败（${r.error}）——bridge 恢复后再跑，或加 --force 放弃这一步`;
+}
 
 export interface OpsDeps {
   loadRegistry(): Promise<Registry>;
@@ -21,6 +30,8 @@ export interface OpsDeps {
   killWindow(name: string): Promise<void>;
   killWindowId(id: string): Promise<void>;
   renameWindow(from: string, to: string): Promise<void>;
+  /** 该 agent 正有 restart 在跑（窗口暂时不在是 restart 在重建，不是被 kill 到一半） */
+  restartInProgress(name: string): boolean;
   /** 窗口（名字或 `@id`）只剩裸 shell（确无子进程）；探测失败按「有进程」算，宁可不关 */
   windowIsBareShell(target: string): Promise<boolean>;
   deleteChannel(channelId: string): Promise<ChannelResult>;
@@ -42,7 +53,7 @@ async function channelOp(msg: Record<string, unknown>): Promise<ChannelResult> {
     return "ok";
   } catch (e) {
     const m = (e as Error).message;
-    return isUnknownChannelError(m) ? "gone" : { error: m };
+    return isUnknownChannelError(m) ? "gone" : { error: m, ...(isForbiddenChannelError(m) ? { forbidden: true } : {}) };
   }
 }
 
@@ -97,6 +108,7 @@ export const realOpsDeps: OpsDeps = {
     const [id] = await listWindowIdsByName(from);
     if (id) await tmuxRaw(["rename-window", "-t", id, to]);
   },
+  restartInProgress: isRestartInProgress,
   windowIsBareShell: async (target) => (await windowHasChildProcess(target.startsWith("@") ? target : windowTarget(target)).catch(() => null)) === false,
   deleteChannel: (channelId) => channelOp({ type: "delete_channel", channelId }),
   renameChannel: (channelId, name) => channelOp({ type: "rename_channel", channelId, name }),

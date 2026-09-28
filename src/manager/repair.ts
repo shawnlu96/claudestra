@@ -29,10 +29,10 @@ async function stillApplies(r: Residue, deps: OpsDeps): Promise<boolean> {
   }
 }
 
-async function fixOne(r: Residue, deps: OpsDeps): Promise<{ ok: boolean; detail: string }> {
+async function fixOne(r: Residue, deps: OpsDeps, force: boolean): Promise<{ ok: boolean; detail: string }> {
   switch (r.kind) {
     case "stale-create": {
-      const c = await clearCreateResidue(r.agent, deps);
+      const c = await clearCreateResidue(r.agent, deps, { force });
       return { ok: c.ok, detail: c.ok ? c.steps.join("；") : c.error! };
     }
     case "stale-kill": {
@@ -48,7 +48,7 @@ async function fixOne(r: Residue, deps: OpsDeps): Promise<{ ok: boolean; detail:
       if ((await deps.listWindows()).includes(r.agent) && !(await deps.windowIsBareShell(r.agent))) {
         return { ok: false, detail: `窗口里还有进程在跑：确认要销毁就再跑 kill ${r.agent}，想留着就 restart ${r.agent}（会清掉这个 kill 标记）` };
       }
-      const k = await runKill(r.agent, deps);
+      const k = await runKill(r.agent, deps, { force });
       return { ok: k.ok === true && !k.incomplete, detail: String(k.message ?? k.error) };
     }
     case "stale-rename": {
@@ -71,7 +71,8 @@ async function fixOne(r: Residue, deps: OpsDeps): Promise<{ ok: boolean; detail:
   }
 }
 
-export async function runRepair(apply: boolean, input: ScanInput, deps: OpsDeps): Promise<Record<string, unknown>> {
+/** force：频道删不掉（bridge 不在 / Discord 没权限）的 create / kill 残留，放弃删频道这一步照样收尾 */
+export async function runRepair(apply: boolean, input: ScanInput, deps: OpsDeps, force = false): Promise<Record<string, unknown>> {
   const residues = scanResidues(input).filter((r) => r.kind !== "busy");
   const plan = residues.map((r) => ({ agent: r.agent, kind: r.kind, what: describeResidue(r), auto: isAutoRepairable(r) }));
   const channelsChecked = input.channels !== null;
@@ -87,7 +88,7 @@ export async function runRepair(apply: boolean, input: ScanInput, deps: OpsDeps)
       applied.push({ agent: r.agent, kind: r.kind, ok: true, detail: "状态已变（别的命令接手 / 已恢复），跳过" });
       continue;
     }
-    const res = await fixOne(r, deps).catch((e) => ({ ok: false, detail: (e as Error).message }));
+    const res = await fixOne(r, deps, force).catch((e) => ({ ok: false, detail: (e as Error).message }));
     applied.push({ agent: r.agent, kind: r.kind, ...res });
   }
   const skipped = plan.filter((p) => !p.auto);
@@ -96,5 +97,5 @@ export async function runRepair(apply: boolean, input: ScanInput, deps: OpsDeps)
 
 export async function cmdRepair(args: string[]): Promise<void> {
   const { gatherScanInput } = await import("../lib/doctor-pending.js");
-  output(await runRepair(args.includes("--apply"), await gatherScanInput(), realOpsDeps));
+  output(await runRepair(args.includes("--apply"), await gatherScanInput(), realOpsDeps, args.includes("--force")));
 }

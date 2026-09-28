@@ -29,7 +29,12 @@ export interface UpdateMarker {
   step: UpdateStep;
   startedAt: string;
   reloadAt?: string;
+  /** 已经补过一次 reload：再判出「要补 reload」就放弃（移去 abandoned），别让一个起不来的 daemon 永远挡住新版本 */
+  reloadRetried?: boolean;
 }
+
+/** daemon 现状：数字 = 在跑，自该时刻起；null = 已 load 但没在跑（崩溃循环 / 退出了，reload 修不好）；unloaded = 没 load（reload 能修） */
+export type DaemonState = number | null | "unloaded";
 
 /** 持有者还活着且没超过 update.lock 的陈旧闸（30 分钟）= 另一次 update 在跑 */
 const UPDATE_LIVE_MS = 30 * 60_000;
@@ -65,7 +70,8 @@ export type UpdateVerdict =
   | { action: "report"; why: string };
 
 /**
- * 标记 + 现状 → 该做什么。daemonStart 给出每个 daemon 当前进程的启动时刻（没在跑 = null）。
+ * 标记 + 现状 → 该做什么。daemonStart 见 DaemonState：只有「在跑但早于 reloadAt」和「没 load」算 reload 没做完；
+ * 已 load 却起不来的交给 doctor 的 daemon 检查，不拿来挡更新。
  * 已到 reloading 且三个 daemon 都在 reloadAt 之后起来过 = 做完了（launcher 连坐回收的常态），不管 HEAD 后来被谁动过。
  * 其余在 HEAD 等于目标、或在目标之后（headAhead：有人在目标上又提交了，尾段不依赖具体 HEAD）时补做；
  * HEAD 既不在目标线上也不是升级前 = 仓库被改到别处，不补（report）。
@@ -75,26 +81,30 @@ export function updateVerdict(
   head: string,
   now: number,
   alive: (pid: number) => boolean,
-  daemonStart: Record<string, number | null>,
+  daemonStart: Record<string, DaemonState>,
   headAhead = false,
 ): UpdateVerdict {
   if (alive(m.pid) && now - Date.parse(m.startedAt) < UPDATE_LIVE_MS) return { action: "live" };
   const since = Date.parse(m.reloadAt ?? m.startedAt);
   // ps 的 lstart 只到秒：留 1 秒余量，免得 reload 同一秒内起来的 daemon 被判成没重启
-  const stale = Object.entries(daemonStart).filter(([, t]) => t === null || t < since - 1000).map(([label]) => label);
-  if (m.step === "reloading" && !stale.length) return { action: "clear", why: "三个 daemon 都已在 reload 之后重启过" };
+  const stale = Object.entries(daemonStart).filter(([, t]) => t === "unloaded" || (typeof t === "number" && t < since - 1000)).map(([label]) => label);
+  if (m.step === "reloading" && !stale.length) return { action: "clear", why: "daemon 都已在 reload 之后重启过（起不来的归 doctor 的 daemon 检查）" };
   if (head !== m.target && !headAhead) {
     return head === m.fromHead
       ? { action: "clear", why: "上次没走到切换版本，仓库还在升级前" }
       : { action: "report", why: `HEAD ${head.slice(0, 7)} 既不是目标 ${m.targetLabel} 也不是升级前 ${m.fromHead.slice(0, 7)}（有人动过仓库）` };
   }
-  return m.step === "reloading" ? { action: "finish-reload", stale } : { action: "finish-tail" };
+  if (m.step !== "reloading") return { action: "finish-tail" };
+  return m.reloadRetried
+    ? { action: "report", why: `已经补过一次 reload，${stale.join(", ")} 仍没重启` }
+    : { action: "finish-reload", stale };
 }
 
-/** launchd 托管进程的启动时刻（ms）；没 load / 没在跑 / 读不到 = null */
-export function launchdStartedAt(label: string): number | null {
+/** launchd 托管进程的现状（DaemonState）；读不到启动时间按「没在跑」算 */
+export function launchdStartedAt(label: string): DaemonState {
   const l = spawnSync("launchctl", ["list", label], { encoding: "utf8" });
-  const pid = l.status === 0 ? /"PID"\s*=\s*(\d+)/.exec(l.stdout || "")?.[1] : undefined;
+  if (l.status !== 0) return "unloaded";
+  const pid = /"PID"\s*=\s*(\d+)/.exec(l.stdout || "")?.[1];
   if (!pid) return null;
   const ps = spawnSync("ps", ["-o", "lstart=", "-p", pid], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
   const t = Date.parse((ps.stdout || "").trim());

@@ -1213,13 +1213,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    const client = deps.clients.get(agent.channelId);
+    const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId); // create 还没落盘：当离线，不投递（manager list 的 creating）
     if (!client) {
       // ws 不在 ≠ agent 死了。channel-server 是独立子进程，被顶替/重启时 ws 会短暂
       // 缺席，而 tmux window 里的 Claude Code 照常跑着上一回合（2026-07-25 owner:
       // 「提示已断开，我进 console 看你还在进行上一轮对话」）。window 还在就报可重试的
       // 503，别把「链路重连中」说成「会话不存在」。
-      const alive = (await listWindows().catch((): string[] => [])).includes(agent.name);
+      const alive = agent.status !== "creating" && (await listWindows().catch((): string[] => [])).includes(agent.name);
       if (alive) {
         return apiJson(503, {
           ok: false,

@@ -55,7 +55,9 @@ export async function runRename(oldName: string, newName: string, deps: OpsDeps)
   } else {
     steps.push({ step: "tmux rename-window", ok: false, skipped: windows.includes(newTmux) ? "窗口已是新名" : oldTaken ? "旧名已被新 agent 占用" : "tmux window 不存在" });
   }
-  if (!oldTaken) await deps.renameLedger(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名（重复跑找不到旧名 = 无事）
+  // 台账的执行者 / PM 名单跟着改名（重复跑找不到旧名 = 无事）。旧名已被新 agent 占用时分不清哪些是谁的：不动，报出来
+  if (!oldTaken) await deps.renameLedger(oldTmux, newTmux);
+  else steps.push({ step: "ledger", ok: false, skipped: `旧名 ${oldTmux} 已被新 agent 占用，台账归属没改——人工核对：ledger task-set --agent ${newTmux}` });
 
   let channelDone = true;
   if (entry.channelId) {
@@ -81,6 +83,7 @@ export async function runRename(oldName: string, newName: string, deps: OpsDeps)
     steps,
     ...(resuming ? { resumed: true } : {}),
     ...(channelDone ? {} : { incomplete: ["channel"] }),
+    ...(oldTaken ? { warnings: ["台账归属没自动改（旧名已被新 agent 占用），见 steps"] } : {}),
     hint: channelDone
       ? "Claude Code 内部 session 的显示名会在下次 restart 时更新到新名（现在仍是旧的，不影响功能）。"
       : `频道没改成——bridge 恢复后再跑一次 rename ${oldTmux} ${newTmux}（或 manager repair --apply）即可补上`,

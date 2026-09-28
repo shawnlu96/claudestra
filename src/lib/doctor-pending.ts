@@ -30,7 +30,7 @@ export function residueChecks(residues: Residue[], channelsKnown: boolean, windo
   if (winReg.length) out.push({ group: g, name: "孤儿窗口", status: "warn", detail: winReg.map(describeResidue).join("；"), fix: REPAIR });
   if (winFree.length) {
     out.push({ group: g, name: "未登记窗口", status: "warn", detail: `${winFree.map((r) => r.agent).join(", ")} 不在 registry 里（可能是手开的，repair 不碰）`,
-      fix: `确认没用后逐个关：tmux -S ${TMUX_SOCK} kill-window -t ${MASTER_SESSION}:<name>` });
+      fix: `确认没用后逐个关（= 是精确匹配，别落到同前缀的窗口）：tmux -S ${TMUX_SOCK} kill-window -t ${MASTER_SESSION}:=<name>` });
   }
   if (chans.length) out.push({ group: g, name: "孤儿频道", status: "warn", detail: chans.map(describeResidue).join("；"), fix: REPAIR });
   if (!channelsKnown) out.push({ group: g, name: "孤儿频道", status: "warn", detail: "bridge 连不上，没查频道", fix: "bridge 起来后再跑 doctor" });

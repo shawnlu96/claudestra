@@ -102,12 +102,13 @@ import {
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
 import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
-import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { loadRegistry, migrateWorkerToAgent, patchRegistryAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
 import { cmdRename } from "./manager/agent-rename.js";
+import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
@@ -121,7 +122,7 @@ const CATEGORY_NAME = "agents";
 import { bridgeRequest } from "./lib/bridge-client.js";
 import { realOpsDeps, triggerSkillsRescan } from "./manager/ops-deps.js";
 import { pendingHoldsOffHeal, pendingRefusal, pidAlive } from "./lib/pending-ops.js";
-import { beginCreate, clearCreateResidue, commitCreate, createAborting, guardCreateSignals, recordCreate } from "./manager/create-guard.js"; // create 的 creating 占位
+import { abandonCreate, beginCreate, commitCreate, gateOps, guardCreateSignals, newCreateRun, recordCreate } from "./manager/create-guard.js"; // create 的 creating 占位
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
@@ -552,12 +553,14 @@ async function cmdCreate(
   }
 
   // 窗口查重 + 写 creating 占位（上次砍在半路的残留先清）：之后任一刻被杀，再跑 / repair 都能收拾（manager/create-guard.ts）
-  const begun = await beginCreate(tmuxName, channelName, { project: dir, projectId: proj.id, purpose, cwd: dir }, realOpsDeps);
+  const run = newCreateRun();
+  const begun = await beginCreate(tmuxName, channelName, { project: dir, projectId: proj.id, purpose, cwd: dir }, realOpsDeps, run);
   if (!begun.ok) return output({ ok: false, error: begun.error });
-  const unguard = guardCreateSignals(tmuxName, realOpsDeps, (msg) => output({ ok: false, error: msg }));
+  const unguard = guardCreateSignals(tmuxName, realOpsDeps, run, (msg) => output({ ok: false, error: msg }));
 
   // 1. 创建 Discord 频道
-  let channelId: string;
+  let channelId = "";
+  let windowId = "";
   try {
     const result = await bridgeRequest({
       type: "create_channel",
@@ -570,26 +573,25 @@ async function cmdCreate(
     await cleanup(`创建 Discord 频道失败: ${(err as Error).message}`);
     return;
   }
-  await recordCreate(tmuxName, { channelId }, realOpsDeps);
+  await recordCreate(tmuxName, { channelId }, realOpsDeps, run);
 
   // 频道建好后若后续任何步骤失败，都按占位清理孤儿频道 + tmux window，并放回同名旧条目
   async function cleanup(reason: string) {
-    if (createAborting()) return; // 信号清理已接手并负责输出
-    const r = await clearCreateResidue(tmuxName, realOpsDeps);
+    if (run.aborting) return; // 信号清理已接手并负责输出
+    const r = await abandonCreate(tmuxName, { channelId, windowId }, realOpsDeps, run); // 占位若已被接手，只按本次的 id 收拾
     unguard();
     output({ ok: false, error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
   }
 
   let ready = false;
   let spec: LaunchSpec;
-  let windowId = "";
   const expandedDir = dir.replace(/^~/, process.env.HOME || "~");
 
   try {
     // 2. 创建 tmux window（在 master session 里）
     await ensureSocket();
     windowId = (await tmuxRawStrict(["new-window", "-P", "-F", "#{window_id}", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", expandedDir])).trim();
-    await recordCreate(tmuxName, { windowId }, realOpsDeps); // 残留清理只按这个 id 关窗
+    await recordCreate(tmuxName, { windowId }, realOpsDeps, run); // 残留清理只按这个 id 关窗
     await Bun.sleep(500);
 
     // 3. 启动会话
@@ -610,7 +612,8 @@ async function cmdCreate(
       extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv },
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
-    const started = (await launchInWindow(tmuxName, adapter, spec)).result;
+    // 按窗口 id 操作，并经 gateOps：信号清理接手后不再往 tmux 发任何东西（按名字发可能落到别的窗口）
+    const started = (await launchInWindow(tmuxName, adapter, spec, { target: windowId, gate: (w) => gateOps(w, run) })).result;
     ready = started.ready;
     if (!started.ready) {
       // 按 reason 出文案（对话框原文 / 秒退 / 占用）；CC 状态栏契约提示只对「超时」有意义
@@ -626,6 +629,7 @@ async function cmdCreate(
 
   // v2.5.4: 会话内补发 /model，确保 pin 真正生效（--model 对 resume 场景不可靠）。
   // 启动参数即权威的运行时（Pi）不补发：/model 在那边是另一套语义。
+  if (run.signalled) return; // 信号到了：清理接手，别再发 /model
   if (adapter.control.modelEnforcement === "in-session") await enforceSessionModel(tmuxName, model);
 
   // 6. 正式条目覆盖占位（占位已被信号清理拿走 = 那边已输出结果）
@@ -648,12 +652,11 @@ async function cmdCreate(
     ...team,
     // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
     ...adapter.registryFields(spec),
-  }, realOpsDeps);
+  }, realOpsDeps, run);
   unguard();
-  if (committed === "lost") { // 占位被别的进程当残留接手（本进程被挂起超过 10 分钟？）：按本次自己的 id 收拾，id 唯一不会误伤
-    if (windowId) await realOpsDeps.killWindowId(windowId);
-    await realOpsDeps.deleteChannel(channelId);
-    return output({ ok: false, error: `${tmuxName} 的占位被别的进程接手了，这次 create 作废（本次建的窗口 / 频道已按 id 清掉）` });
+  if (committed === "lost") { // 占位被别的进程当残留接手（本进程被挂起超过 10 分钟？）：只按本次自己的 id 收拾
+    const r = await abandonCreate(tmuxName, { channelId, windowId }, realOpsDeps, run);
+    return output({ ok: false, error: `${tmuxName} 的占位被别的进程接手了，这次 create 作废（${r.ok ? r.steps.join("；") : r.error}）` });
   }
   if (committed === "aborted") return;
 
@@ -723,9 +726,9 @@ async function launchInWindow(
   tmuxName: string,
   adapter: ManagedRuntimeAdapter,
   spec: LaunchSpec,
-  opts: { waitShell?: boolean; cwd?: string } = {},
+  opts: { waitShell?: boolean; cwd?: string; target?: string; gate?: (w: ReturnType<typeof tmuxWindowOps>) => ReturnType<typeof tmuxWindowOps> } = {},
 ): Promise<{ result: ReadyResult; baseline?: unknown }> {
-  const win = tmuxWindowOps(tmuxName);
+  const win = (opts.gate ?? ((w) => w))(tmuxWindowOps(tmuxName, opts.target)); // create 传 @id + 中止闸
   if (opts.waitShell && !(await waitForShell(tmuxName))) {
     return { result: { ready: false, reason: "timeout", detail: "shell 未就绪", recoveredFullSession: false } };
   }
@@ -1149,65 +1152,6 @@ async function cmdAdopt(name: string, sessionId: string) {
   await cmdRestart(tmuxName);
 }
 
-/**
- * per-agent restart 跨进程互斥（v2.17.2，peer 2026-08-09 新证据：并发 restart
- * 期间启动命令被打进无关 agent 的窗口，把没参与竞态的 agent 打成空壳）。
- *
- * 关键：launcher 的 boot / periodic restore 是两个独立的 `bun run manager.ts
- * restart` **子进程**——进程内 Map 锁挡不住。cmdRestart 里 `gracefulExit →
- * kill → sleep(500) → new-window → send 启动命令` 全程无锁，两个子进程交错
- * 就能让 A 往 B 刚建的窗口发命令。P1 租约堵住了 launcher 侧的双跑，但 web /
- * 手动 restart 与 launcher 仍可能并发——文件锁是不依赖上游守规矩的纵深防御。
- */
-const RESTART_LOCK_DIR = statePath("locks");
-const RESTART_LOCK_STALE_MS = 3 * 60_000;
-
-function tryLockRestart(tmuxName: string, depth = 0): boolean {
-  const lock = `${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`;
-  try {
-    mkdirSync(RESTART_LOCK_DIR, { recursive: true });
-    const fd = openSync(lock, "wx"); // O_EXCL：已存在即抛
-    writeSync(fd, `${process.pid}\n${Date.now()}`);
-    closeSync(fd);
-    return true;
-  } catch {
-    if (depth > 0) return false; // 只接管一次，避免抢锁循环
-    try {
-      const [pidS, tsS] = readFileSync(lock, "utf8").split("\n");
-      const pid = parseInt(pidS, 10);
-      const ts = parseInt(tsS, 10) || 0;
-      let alive = false;
-      if (pid > 0) { try { process.kill(pid, 0); alive = true; } catch { /* 死了 */ } }
-      if (!alive || Date.now() - ts > RESTART_LOCK_STALE_MS) {
-        unlinkSync(lock); // 陈旧（持有进程已死 / 超时）→ 接管
-        return tryLockRestart(tmuxName, depth + 1);
-      }
-    } catch { /* 读锁失败按被占处理 */ }
-    return false;
-  }
-}
-
-/** 该 agent 是否正有 restart 在跑（cmdList 的 dead 判定要避开这段窗口期）。
- *  锁陈旧（进程已死 / 超 3min）按「没在跑」处理，与 tryLockRestart 的接管判据一致。 */
-function isRestartInProgress(tmuxName: string): boolean {
-  try {
-    const raw = readFileSync(`${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`, "utf8");
-    const [pidStr, tsStr] = raw.split("\n");
-    const pid = Number(pidStr);
-    const ts = Number(tsStr);
-    if (Number.isFinite(ts) && Date.now() - ts > 3 * 60_000) return false;
-    if (Number.isFinite(pid)) {
-      try { process.kill(pid, 0); } catch { return false; } // 进程没了 = 孤儿锁
-    }
-    return true;
-  } catch {
-    return false; // 没锁
-  }
-}
-
-function unlockRestart(tmuxName: string): void {
-  try { unlinkSync(`${RESTART_LOCK_DIR}/restart-${tmuxName}.lock`); } catch { /* 已删 */ }
-}
 
 /**
  * 仓库根 .env 里的一个变量（manager 可能从任意 cwd 被调起，Bun 只自动加载 cwd 的
@@ -1321,7 +1265,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
 
   const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string }[] = [];
 
-  let regDirty = false;
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
@@ -1448,9 +1391,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
         if (newId) {
           // v2.8+ fork 换代：旧 session 从 registry 退役，先归档快照
           await archiveSession(tmuxName, cwd, info.sessionId).catch(() => {});
-          reg.agents[tmuxName].sessionId = newId;
-          reg.agents[tmuxName].notes = `${adapter.noteTag} session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
-          await saveRegistry(reg);
+          const notes = `${adapter.noteTag} session: ${newId} (forked from ${info.sessionId.slice(0, 8)})`;
+          Object.assign(reg.agents[tmuxName], { sessionId: newId, notes });
+          await patchRegistryAgent(tmuxName, (a) => Object.assign(a, { sessionId: newId, notes })); // 只改这一条，不整份写回开头的快照
           console.error(`[restart] ${tmuxName} fork 出新 session ${newId.slice(0, 8)}（${found.via}），registry 已回写`);
         } else {
           console.error(`[restart] ⚠️ ${tmuxName} fork 成功但未探测到新 session id，registry 未更新`);
@@ -1476,8 +1419,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     // restoreDeadAgents 只认 active 故永不自愈。成功即写回 active。
     if (started.ready && reg.agents[tmuxName] && reg.agents[tmuxName].status !== "active") {
       reg.agents[tmuxName].status = "active";
-      if (reg.agents[tmuxName].pending?.op === "kill") delete reg.agents[tmuxName].pending; // 重新拉起 = 残留 kill 作废，免得 repair 再杀一次
-      regDirty = true;
+      // 重新拉起 = 残留 kill 作废（免得 repair 再杀一次）；只改这一条，不在最后整份写回开头的快照
+      await patchRegistryAgent(tmuxName, (a) => { a.status = "active"; if (a.pending?.op === "kill") delete a.pending; });
     }
 
     // 按 reason 出文案并附 detail（以前一律「启动超时」）；超时再附大会话体积提示
@@ -1512,7 +1455,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     }
   }
 
-  if (regDirty) await saveRegistry(reg); // P2：落回 status=active
 
   // 重启后做一次完整 skill 重扫（每个 agent cwd 可能项目级 skill 有变动）
   await triggerSkillsRescan("full");
@@ -2587,7 +2529,7 @@ switch (cmd) {
       output({ ok: false, error: "usage: kill <name>" });
       break;
     }
-    await cmdKill(name);
+    await cmdKill(name, { force: args.includes("--force") }); // --force：频道删不掉时放弃这一步
     break;
   }
 
@@ -2597,7 +2539,7 @@ switch (cmd) {
       output({ ok: false, error: "usage: remove <name>（kill + 从列表永久移除,归档保留）" });
       break;
     }
-    await cmdRemove(name);
+    await cmdRemove(name, { force: args.includes("--force") });
     break;
   }
 
@@ -3041,7 +2983,7 @@ switch (cmd) {
       usage: [
         "create <name> <dir> [purpose]  — create an agent",
         "resume <name> <sessionId> [dir] — resume a past session",
-        "kill <name>                     — destroy an agent",
+        "kill <name> [--force]           — destroy an agent (rerun finishes a half-done kill; --force gives up a channel that can't be deleted)",
         "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel); rerun finishes a half-done rename",
         "repair [--apply]                — clean up half-done create/kill/rename, orphan windows/channels (dry run unless --apply)",
         'team-link <name> [--parent <agent|master|none>] [--task "<text>"] — attach an agent under its dispatcher (sidebar tree)',

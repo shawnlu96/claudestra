@@ -127,6 +127,20 @@ export async function migrateWorkerToAgent(): Promise<{ migrated: boolean; entri
   return { migrated: true, entries: Object.keys(raw.agents).length };
 }
 
+/**
+ * 只改一个条目：重读最新 registry、改、写。长命令（restart --all 动辄几分钟，写锁 20 秒后会降级放行）若拿开头的快照
+ * 整份写回，会冲掉期间别人的写入（例如 create 刚落盘的正式条目被改回 creating，repair 随后把活 agent 当残留清掉）。
+ * 条目已不在就不写，返回 false。
+ */
+export async function patchRegistryAgent(name: string, mutate: (a: AgentInfo) => void): Promise<boolean> {
+  const reg = await loadRegistry();
+  const a = reg.agents[name];
+  if (!a) return false;
+  mutate(a);
+  await saveRegistry(reg);
+  return true;
+}
+
 export async function saveRegistry(reg: Registry) {
   await mkdir(STATE_DIR, { recursive: true });
   // 原子写：同目录临时文件 + rename（POSIX 下 rename 原子）。防并发 reader 读到

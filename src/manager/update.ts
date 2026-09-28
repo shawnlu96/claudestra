@@ -177,7 +177,7 @@ function done(payload: Record<string, unknown>): true {
   return true;
 }
 
-/** 上次 update 砍在半路时补完。返回 true = 已处理（已 output），调用方直接返回 */
+/** 上次 update 砍在半路时补完。返回 true = 已处理（已 output），调用方直接返回；false = 接着走正常更新 */
 async function resumeUpdate(d: UpdateDeps): Promise<boolean> {
   const m = readUpdateMarker();
   if (!m) return false;
@@ -208,9 +208,12 @@ async function resumeUpdate(d: UpdateDeps): Promise<boolean> {
   Object.assign(m, { pid: process.pid, startedAt: new Date().toISOString() });
   await writeUpdateMarker(m);
   if (v.action === "finish-reload") {
+    // 只补一次：再判出要补就放弃（report → abandoned）。补完不就此返回，接着走正常更新——有新版本照样装
+    m.reloadRetried = true;
     const r = await reloadDaemons(m);
-    const daemons = r.cliInstall.daemons.map((x) => ({ label: x.label, loaded: x.loaded, warning: x.warning }));
-    return done({ ok: r.cliInstall.errors.length === 0, ...resumed, to: m.targetLabel, notReloaded: v.stale, daemons });
+    const bad = r.cliInstall.daemons.filter((x) => !x.loaded).map((x) => x.label);
+    console.error(`[update] ${resumed.resumed}：补 reload（没重启的：${v.stale.join(", ")}）${bad.length ? `，仍没 load 上：${bad.join(", ")}` : ""}；接着检查新版本`);
+    return false;
   }
   const reattach = m.channel === "release" ? await reattachBranch(d, m.targetLabel) : null;
   const t = await runTail(d, m);

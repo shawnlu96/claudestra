@@ -22,8 +22,14 @@ describe("updateVerdict", () => {
   test("lstart 只到秒：同一秒内起来的不误判", () => {
     expect(updateVerdict(m(), "T".repeat(40), NOW, dead, { ...fresh, c: NOW - 60_500 }).action).toBe("clear");
   });
-  test("有 daemon 没重启 / 没在跑 → 补 reload，列出是哪几个", () => {
-    expect(updateVerdict(m(), "T".repeat(40), NOW, dead, { ...fresh, b: NOW - 3_600_000, c: null })).toEqual({ action: "finish-reload", stale: ["b", "c"] });
+  test("有 daemon 还是旧进程 / 没 load → 补 reload，列出是哪几个", () => {
+    expect(updateVerdict(m(), "T".repeat(40), NOW, dead, { ...fresh, b: NOW - 3_600_000, c: "unloaded" })).toEqual({ action: "finish-reload", stale: ["b", "c"] });
+  });
+  test("已 load 却起不来（崩溃循环）不算「reload 没做完」：清标记，别挡住修复版的安装", () => {
+    expect(updateVerdict(m(), "T".repeat(40), NOW, dead, { ...fresh, c: null }).action).toBe("clear");
+  });
+  test("同一个 target 已补过一次 reload 仍不行 → report（放弃补完，移去 abandoned），不再反复 reload", () => {
+    expect(updateVerdict(m({ reloadRetried: true }), "T".repeat(40), NOW, dead, { ...fresh, c: "unloaded" }).action).toBe("report");
   });
   test("切到目标但没走到 reload → 从尾段补", () => {
     for (const step of ["checkout", "installed", "built", "migrated"] as const) {
@@ -33,11 +39,11 @@ describe("updateVerdict", () => {
   test("还在升级前 → 清标记照常走；HEAD 被人动过且没做完 → report（不补）", () => {
     expect(updateVerdict(m({ step: "checkout" }), "F".repeat(40), NOW, dead, fresh).action).toBe("clear");
     expect(updateVerdict(m({ step: "migrated" }), "X".repeat(40), NOW, dead, fresh).action).toBe("report");
-    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: null }).action).toBe("report");
+    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: "unloaded" }).action).toBe("report");
   });
   test("HEAD 在目标之后（又提交过）→ 照样补完", () => {
     expect(updateVerdict(m({ step: "migrated" }), "X".repeat(40), NOW, dead, fresh, true).action).toBe("finish-tail");
-    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: null }, true)).toEqual({ action: "finish-reload", stale: ["a"] });
+    expect(updateVerdict(m(), "X".repeat(40), NOW, dead, { ...fresh, a: "unloaded" }, true)).toEqual({ action: "finish-reload", stale: ["a"] });
   });
   test("reload 已完成（launcher 连坐回收的常态）之后 HEAD 被人动过 → 仍只清标记，不挡以后的更新", () => {
     expect(updateVerdict(m(), "X".repeat(40), NOW, dead, fresh).action).toBe("clear");
