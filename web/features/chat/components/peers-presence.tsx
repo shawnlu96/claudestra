@@ -6,6 +6,7 @@
  */
 import { useT } from "@/lib/i18n";
 import { fmtAgo } from "../fmt-time";
+import { ContactAgentLines, useContact } from "./contacts-lines";
 
 export interface PeerPresenceInfo {
   online: boolean | null;
@@ -46,9 +47,10 @@ export function PresenceSummary({ peers }: { peers: { presence?: PeerPresenceInf
   );
 }
 
-/** 「我 → 他」这一行的状态：在线 / 离线原因 / 上次在线 / 他开放给我的 agent（入站来访见 LastVisit） */
-export function PresenceLine({ presence }: { presence?: PeerPresenceInfo }) {
+/** 「我 → 他」这一行的状态：在线 / 离线原因 / 上次在线 / 他开放给我的 agent 与忙闲（入站来访见 LastVisit） */
+export function PresenceLine({ presence, peer }: { presence?: PeerPresenceInfo; peer: string }) {
   const t = useT();
+  const contact = useContact(peer);
   const p = presence ?? { online: null };
   const dot = p.online === true ? "bg-success" : p.online === false ? "bg-error" : "bg-base-content/25";
   let head: string;
@@ -65,7 +67,8 @@ export function PresenceLine({ presence }: { presence?: PeerPresenceInfo }) {
       {p.online === false && (
         <div className="pl-3 text-base-content/45">{lastOnline ? `${t("上次在线")} ${fmtAgo(lastOnline)}` : t("还没连上过")}</div>
       )}
-      {!!p.remoteAgents?.length && (
+      {/* 联系人数据带忙闲，优先用；拿不到（非全权设备 / 老 bridge）退回探测给的纯名字 */}
+      {contact?.agents.length ? <ContactAgentLines contact={contact} /> : !!p.remoteAgents?.length && (
         <div className="pl-3 text-base-content/45">
           {t("他开放给你的")}: {p.remoteAgents.map((a) => a.name.replace(/^agent-/, "")).join(", ")}
         </div>
