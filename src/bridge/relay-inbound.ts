@@ -94,6 +94,8 @@ function localError(e: unknown, signal: AbortSignal): RelayError {
 const dropForResponse = (k: string): boolean => k === "content-encoding";
 /** 隧道路径让压缩正文原样过：Bun 的 fetch 支持 decompress:false，浏览器自己解——JS 块经此少传六成，慢上行的机器体感差别很大 */
 const TUNNEL_FETCH: Record<string, unknown> = typeof Bun !== "undefined" ? { decompress: false } : {};
+/** 中继没给客户端地址时的 XFF 占位（RFC 7239 的 unknown）：不是 IP，同机判定（lib/same-host.ts）也认不成本机 */
+const TUNNEL_UNKNOWN_CLIENT = "unknown";
 
 /** 本机 Web 按自己的监听地址算出的绝对 Location（http://127.0.0.1:3333/…）也改到公网地址，浏览器才不会跳到它连不上的回环 */
 function rewriteLocalLocation(headers: Headers, webBase: string, publicHost: string): Headers {
@@ -112,6 +114,9 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
   const publicHost = req.headers["x-forwarded-host"] || req.headers.host || "";
   const headers = forwardHeaders(req.headers);
   if (publicHost) headers.host = publicHost;
+  // 隧道打的是回环端口，而且可能正是 bridge 接管的旧 web 端口：bridge 只把「回环 + 无 XFF」认作本机（web-gateway.ts
+  // isDirectLoopback），所以这里无论中继带没带都写一个非空 XFF，隧道请求永远不会被当成本机进程（tests/relay-link.test.ts）
+  headers["x-forwarded-for"] = headers["x-forwarded-for"]?.trim() || TUNNEL_UNKNOWN_CLIENT;
   // Node 的 fetch 没有 decompress 开关会自动解压：那时不能把 accept-encoding 传过去，否则 content-encoding 头对不上正文
   if (!("decompress" in TUNNEL_FETCH)) delete headers["accept-encoding"];
   const init: RequestInit & { duplex?: "half" } = {

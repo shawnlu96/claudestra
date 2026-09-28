@@ -14,6 +14,8 @@ import { encodePeerInviteV2, inviteLink, isPeerBaseUrl, parsePeerInviteV2, relay
 import { collectBody } from "../src/lib/relay-stream.js";
 import { requestContextOf } from "../src/bridge/request-context.js";
 import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER } from "../src/lib/relay-machine-path.js";
+import { isDirectLoopback } from "../src/bridge/web-gateway.js";
+import { isSameHostRequest } from "../src/lib/same-host.js";
 
 const FP = "16f9-b5d1-30fb-8923";
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -95,13 +97,28 @@ describe("入站分流（relay-inbound.ts）", () => {
     const res = await h.handler({ method: "GET", path: "/chat?x=1", headers, body: bodyStream("") }, ctx("relay"));
     expect(h.calls[0].url).toBe("http://127.0.0.1:2/chat?x=1");
     expect(h.calls[0].init.method).toBe("GET");
-    expect(h.calls[0].init.headers).toEqual({ host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip" });
+    expect(h.calls[0].init.headers).toEqual({ host: "mini.relay.test", "x-forwarded-proto": "https", "accept-encoding": "gzip", "x-forwarded-for": "unknown" });
     expect((h.calls[0].init as { decompress?: boolean }).decompress).toBe(false);
     expect(h.calls[0].init.redirect).toBe("manual");
     expect(h.calls[0].init.body).toBeUndefined();
     expect(res.status).toBe(303);
     expect(res.headers).toEqual({ location: "https://mini.relay.test/login", "content-encoding": "gzip", "x-keep": "1" });
     expect(dec(await collectBody(res.body, 100))).toBe("page");
+  });
+  test("隧道请求一律带非空 XFF：到了 bridge 接管的旧 web 端口也不会被认成本机；真本机与带 XFF 的反代判定不变", async () => {
+    const h = harness(() => new Response("ok"));
+    const sent = async (headers: Record<string, string>) => {
+      await h.handler({ method: "POST", path: "/api/v1/devices/local", headers, body: bodyStream("") }, ctx("relay"));
+      return (h.calls.at(-1)!.init.headers as Record<string, string>)["x-forwarded-for"];
+    };
+    for (const xff of [await sent({}), await sent({ "x-forwarded-for": "" }), await sent({ "x-forwarded-for": "  " })]) {
+      expect(xff).toBe("unknown");
+      expect(isDirectLoopback("127.0.0.1", xff)).toBe(false);
+      expect(isSameHostRequest("127.0.0.1", xff, ["127.0.0.1", "192.168.1.5"])).toBe(false);
+    }
+    expect(await sent({ "x-forwarded-for": "203.0.113.9" })).toBe("203.0.113.9");
+    expect(isDirectLoopback("127.0.0.1", null)).toBe(true);
+    expect(isDirectLoopback("127.0.0.1", "203.0.113.9")).toBe(false);
   });
   test("隧道 POST 带正文流；Web 连不上 → local_unreachable；被取消 → local_timeout", async () => {
     const h = harness((c) => new Response(`got:${c.init.body ? "body" : "none"}`));

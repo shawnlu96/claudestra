@@ -185,7 +185,7 @@ claudestra-relay-auth-v2
 
 ### 4.2 隧道请求（`from: "relay"`）
 
-实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里 `host` 设为中继盖的 `x-forwarded-host`（= `<slug>.<base>`，front 已剥掉浏览器自带的 `x-forwarded-*`），保留 `x-forwarded-*`，去掉 hop-by-hop、`content-length` 与 `accept-encoding`（让 Web 回未压缩正文：实例侧 fetch 会解码，再带着 `content-encoding` 浏览器会解两次）。响应去掉 `content-encoding`；`location` 若以 `http://<slug>.<base>` 或 `http://127.0.0.1:<WEB_PORT>` 开头 MUST 改写为 `https://<slug>.<base>`（Web 在明文端口上算出的绝对地址，浏览器连不到）。
+实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里 `host` 设为中继盖的 `x-forwarded-host`（= `<slug>.<base>`，front 已剥掉浏览器自带的 `x-forwarded-*`），保留 `x-forwarded-*`，且 `x-forwarded-for` MUST 非空（中继没给或给了空值就写 `unknown`：本机 Web 端口可能由 bridge 接管，bridge 只把「回环且无 XFF」认作本机进程，隧道请求绝不能落进这一档），去掉 hop-by-hop、`content-length` 与 `accept-encoding`（让 Web 回未压缩正文：实例侧 fetch 会解码，再带着 `content-encoding` 浏览器会解两次）。响应去掉 `content-encoding`；`location` 若以 `http://<slug>.<base>` 或 `http://127.0.0.1:<WEB_PORT>` 开头 MUST 改写为 `https://<slug>.<base>`（Web 在明文端口上算出的绝对地址，浏览器连不到）。
 
 ## 5. 目录、slug、配对短码
 
