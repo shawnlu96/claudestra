@@ -19,7 +19,8 @@ import { resetToolTracking, agentNameForChannel } from "./jsonl-watcher.js";
 import { emitEvent } from "./event-bus.js";
 import { permissionMessages, clearPermissionMessage } from "./permission-watcher.js";
 import { clearWedgeState } from "./wedge-watcher.js";
-import { forceRefreshStatsDashboard, noteSaveCompactInjected } from "./stats-dashboard.js";
+import { forceRefreshStatsDashboard } from "./stats-dashboard.js";
+import { injectCompact } from "./ctx-boundary.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { describeKeys } from "../lib/runtimes/window-ops.js";
@@ -385,15 +386,12 @@ async function triggerSaveCompact(interaction: any, targetChannelId: string, run
       await interaction.followUp({ content: "❌ 找不到对应 agent（可能已被 kill）", ephemeral: true }).catch(() => {});
       return;
     }
-    noteSaveCompactInjected(windowTarget(agent.name));
-    await tmuxSendLine(windowTarget(agent.name), "/save-compact");
-    console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId})`);
-    await interaction
-      .followUp({
-        content: `🧹 已让 **${String(agent.name).replace(/^agent-/, "")}** 存记忆 + compact（正忙的话会排队，做完它会在自己频道汇报）`,
-        ephemeral: true,
-      })
-      .catch(() => {});
+    // 与自动压缩同一个入口：画面上有选择菜单 / 撞墙没开 low-priority / 正在压缩时不敲键，并共用注入守卫
+    const r = await injectCompact(windowTarget(agent.name), { action: "save-compact" });
+    if (r.status === "skipped" || r.status === "failed") throw new Error(r.status === "skipped" ? `现在不能注入：${r.text}` : r.error);
+    console.log(`🧹 save-compact 已发送: ${agent.name} (channel=${targetChannelId}, ${r.status})`);
+    const content = `🧹 已让 **${String(agent.name).replace(/^agent-/, "")}** 存记忆 + compact（${r.status === "queued" ? "它正忙，已排队" : "已开始"}，做完它会在自己频道汇报）`;
+    await interaction.followUp({ content, ephemeral: true }).catch(() => {});
   } catch (e) {
     console.error("🧹 save-compact 触发失败:", e);
     await interaction.followUp({ content: `❌ 触发失败: ${(e as Error).message}`, ephemeral: true }).catch(() => {});

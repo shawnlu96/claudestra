@@ -1,3 +1,4 @@
+import type { CtxBoundaryInfo } from "./ctx-boundary-view";
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
 import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
@@ -167,6 +168,8 @@ export interface AgentSession {
   contextTokens?: number | null;
   /** 会话记录自带的上下文窗口（Codex 有；Claude Code 为 null → 按 1M 绝对刻度），见 ctx-level.ctxView */
   contextWindow?: number | null;
+  /** 命中的上下文边界 + 余量（bridge 算；Codex / Pi 为 null），见 ctx-boundary-view.ts */
+  ctxBoundary?: CtxBoundaryInfo | null;
   /** 当前模型 id（jsonl 实测 → registry → 全局默认;null=未知）→ TopBar 徽章。 */
   model?: string | null;
   /** 当前 effort 档位（同上兜底链）→ TopBar 徽章。 */

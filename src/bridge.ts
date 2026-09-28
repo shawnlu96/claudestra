@@ -75,6 +75,7 @@ import { initPeerIngress, localProbeResponse, relayControlRoutes, setRequestCont
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
+import { startCtxBoundary } from "./bridge/ctx-boundary.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
 import {
@@ -3557,11 +3558,10 @@ sweepStaleTerminalSessions().catch(() => {});
 // 成立)。委托 manager(写锁+原子写),幂等——没缺的直接 migrated:0 返回。
 setTimeout(() => {
   runManager("project-migrate")
-    .then((r: any) => {
-      if (r?.ok && r.migrated > 0) console.log(`📁 project 迁移:${r.migrated} 个 agent 已按目录归组`);
-    })
+    .then((r: any) => void (r?.ok && r.migrated > 0 && console.log(`📁 project 迁移:${r.migrated} 个 agent 已按目录归组`)))
     .catch(() => {});
 }, 3_000);
+startCtxBoundary(); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑（bridge/ctx-boundary.ts）
 
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与
 // 平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。

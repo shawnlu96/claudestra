@@ -10,7 +10,7 @@
  * 其余依赖（manager 调用、principals、session-history……）都是无状态模块，直接 import。
  */
 
-import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
+import { sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
 import { apiMirrorBody, withAttachmentLines } from "../lib/inbound-body.js";
@@ -29,7 +29,7 @@ import {
   liveInteractiveHolder,
 } from "./api-respond.js";
 import { interruptAgentByName } from "./interrupt-gate.js";
-import { existsSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./config.js";
 import {
   readPrincipals,
@@ -74,12 +74,13 @@ import { clearSafetyTimer } from "./discord-adapter.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent, resolveWebInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
-import { scanSessionTail, TAIL_WINDOWS, type SessionTailInfo } from "../lib/session-tail.js";
+import { sessionTailInfo, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, isKnownRuntimeEffort, KNOWN_EFFORT_LEVELS, RUNTIME_ONLY_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { ctxBoundaryViewFor } from "./ctx-boundary.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { firstFlagLikeField } from "../lib/flag-like.js";
@@ -251,45 +252,6 @@ async function findHistoryAgent(
   return hit ? { name: hit.name, cwd: hit.cwd, sessionId: hit.sessionId, runtime: hit.runtime } : null;
 }
 
-/**
- * 会话文件里最后一条真实对话记录（user/assistant，带 timestamp）的时间。
- *
- * 不能用文件 mtime 当「最近对话时间」：CC 会持续原地更新状态类记录
- * （last-prompt / mode / file-history-snapshot 等），且自己的 housekeeping
- * 还会周期性 touch 会话文件（2026-08-10 实测：12 个 agent 的 jsonl 被逐个
- * touch，字节与归档副本 cmp 完全一致）——空闲 agent 的 mtime 一直在刷新，
- * 列表排序就出现「没动静的 agent 莫名顶到最前」
- * （2026-07-13 router；2026-08-10 qingniao-miniapp owner 报「我明明啥也没干」）。
- *
- * 扫描策略（v2.18.1 修正）：tail 逐级放宽 256KB → 2MB → 8MB 逆序找，命中即停；
- * 长期只被 restart 的 agent，尾部窗口可能全是重启残渣（No response requested. +
- * /model 命令记录 + file-history-snapshot），真实对话被挤到更早的位置。
- * 全读完仍找不到 → convTs 为 **null**（旧实现退回 mtime，等于把「CC 摸过文件」
- * 当成活动，正是上面那个 bug 的直接成因；调用方退回 registry.created 更诚实）。
- * 按 (path, mtimeMs) 缓存——mtime 没变不重读，放宽窗口的读放大只在 touch 后发生一次。
- */
-const tailInfoCache = new Map<string, { mtimeMs: number; info: SessionTailInfo }>();
-export async function sessionTailInfo(path: string): Promise<SessionTailInfo | null> {
-  try {
-    const st = statSync(path);
-    const hit = tailInfoCache.get(path);
-    if (hit && hit.mtimeMs === st.mtimeMs) return hit.info;
-    let info: SessionTailInfo = {
-      convTs: null, ctxTokens: null, ctxWindow: null, model: null, modelTs: null, effort: null, effortTs: null,
-    };
-    for (const win of TAIL_WINDOWS) {
-      const start = Math.max(0, st.size - win);
-      info = scanSessionTail(await Bun.file(path).slice(start, st.size).text(), runtimeForSessionPath(path));
-      // 真实对话已命中，或已经读到文件头（再放宽也没有新内容）→ 收工
-      if (info.convTs !== null || start === 0) break;
-    }
-    tailInfoCache.set(path, { mtimeMs: st.mtimeMs, info });
-    return info;
-  } catch {
-    return null;
-  }
-}
-
 // ── v2.15+ 一键邀请兑换（无 Bearer 的公开端点，见 handleApiRequest 顶部）──
 
 const redeemLimiter = new SlidingWindowLimiter(10, 60_000);
@@ -438,6 +400,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           const r = regByName.get(a.name);
           (a as any).lastActivityTs = info?.convTs ?? null;
           (a as any).contextTokens = info?.ctxTokens ?? null;
+          (a as any).ctxBoundary = r ? ctxBoundaryViewFor(r, info?.ctxTokens ?? null) : null; // 命中的上下文边界 + 余量（bridge/ctx-boundary.ts）
           // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
           (a as any).projectId = r?.projectId ?? null;
           Object.assign(a, { ...extras(a.name, r), archived: (a as any).archived }); // archived 以上面 Promise.all 那段为准（生效路径）

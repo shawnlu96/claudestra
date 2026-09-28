@@ -6,6 +6,8 @@ import { ctxLevel, CTX_WINDOW } from "../ctx-level";
 import { fmtAgo } from "../fmt-time";
 import { useT } from "@/lib/i18n";
 import { RuntimeBadge } from "./runtime-badge";
+import { CtxBoundaryChip } from "./ctx-boundary-chip";
+import { BOUNDARY_BAR } from "../ctx-boundary-view";
 import { stats } from "@/lib/api/system";
 import { Bar, UsageTable, type GlobalStats } from "./quota-cards";
 import { QuotaArea } from "./subscription-quota-cards";
@@ -134,12 +136,9 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
               const tok = a.contextTokens!;
               const pct = (tok / CTX_WINDOW) * 100;
               // 色阶(owner 定阈值,1M 窗):≥750k 深红(实色) / ≥500k 红 / ≥200k 黄 / 其余绿
-              const tone = {
-                deep: "bg-error",
-                high: "bg-error/60",
-                mid: "bg-warning",
-                none: "bg-success",
-              }[ctxLevel(tok)];
+              // 有上下文边界的（Claude Code）按边界上色：过压缩线黄、过硬上限红；没有的（Codex / Pi）照旧按 1M 刻度
+              const b = a.ctxBoundary;
+              const tone = b ? BOUNDARY_BAR[b.level] : { deep: "bg-error", high: "bg-error/60", mid: "bg-warning", none: "bg-success" }[ctxLevel(tok)];
               return (
                 <div key={a.name}>
                   <div className="mb-1 flex items-center gap-1.5 text-xs">
@@ -150,6 +149,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
                     <span className="ml-auto font-mono tabular-nums text-base-content/60">
                       {Math.round(tok / 1000)}k
                     </span>
+                    {b && <CtxBoundaryChip b={b} />}
                     <span className="font-mono text-[10px] tabular-nums text-base-content/35">
                       {fmtRel(a.lastActivityTs)}
                     </span>

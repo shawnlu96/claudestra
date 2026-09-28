@@ -88,8 +88,9 @@ One line each; full descriptions in [docs/architecture/features.md](./docs/archi
 - **Claude Code agents-mode integration** — session inventory + doppelganger detection, fork self-heal on restart, adopt/cleanup (`lib/bg-jobs.ts`).
 - **Background-activity threads + session archive** — subagents / bg shells get their own threads; retired sessions are snapshotted to `~/.claude-orchestrator/archive/` (daily sweep too).
 - **Read-only history API + manual archive category** — `GET /api/v1/agents/:name/history`, archive/restore endpoints, retention prunes only the manual category.
-- **Pi agent sessions** — `runtime: "pi"` agents via the Pi extension, capability profiles (`pi-env`), session records translated to Claude Code shape (`lib/session-source.ts`).
+- **Pi agent sessions** — `runtime: "pi"` agents via the Pi extension, capability profiles (`pi-env`), session records translated to Claude Code shape.
 - **HTTP peers** — cross-instance collaboration over `/api/v1` with scoped tokens and one-click invites; master is never shareable.
+- **Context boundaries** — per-project / name-pattern compaction lines: [docs/architecture/context-boundary.md](./docs/architecture/context-boundary.md).
 
 ## Security posture
 
@@ -111,7 +112,7 @@ bun src/manager.ts adopt    <name> <sessionId>   # promote a bg doppelganger to 
 bun src/manager.ts archive  <name>               # snapshot the agent's current session jsonl to ~/.claude-orchestrator/archive/
 bun src/manager.ts kill     <name>
 bun src/manager.ts restart  [name]
-bun src/manager.ts restart  --include-master   # v2.24+ restart every session, master included
+bun src/manager.ts restart  --include-master   # restart every session, master included
 bun src/manager.ts list
 bun src/manager.ts sessions [search]
 
@@ -124,16 +125,15 @@ bun src/manager.ts project-assign <agent> <projectId>   # also moves the Discord
 bun src/manager.ts project-migrate                # backfill projectId for legacy agents (bridge runs it at startup)
 
 # Cron jobs
-bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # temp agent effort, default medium (v2.21.3+)
+bun src/manager.ts cron-add     <name> "<cron>" <dir> <prompt...> [--effort <level>]   # temp agent effort, default medium
 bun src/manager.ts cron-list
 bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# Cross-Claudestra HTTP peers (design: docs/design-http-peers.md). v2.15+ one-click invite: A generates (a link on the
-# relay, else a string), B opens/pastes it, B's bridge redeems at A. Single-use, 24h TTL, revoke kills the embedded token;
-# joining exposes nothing of B (one-way grant) — symmetric = B sends an invite back.
-# Scopes only take agents with `external` on (lib/peer-scope-gate.ts): "*" and master are always refused, --force no longer overrides.
+# Cross-Claudestra HTTP peers (docs/design-http-peers.md). One-click invite: A generates (relay link, else a string), B opens
+# or pastes it, B's bridge redeems at A. Single-use, 24h TTL, revoke kills its token; one-way — symmetric = B invites back.
+# Scopes only take agents with `external` on (lib/peer-scope-gate.ts): "*" and master are always refused.
 bun src/manager.ts peer-invite-new --agents <a,b> [--url <my-bridge-url>]  # A: print one-click invite (URL: relay, else HTTPS entry / peer port)
 bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--url <my-url>]  # B: paste invite, done (--agents = reverse exposure)
 bun src/manager.ts peer-invite-list               # pending invites (sweeps expired + revokes their tokens)
@@ -141,7 +141,7 @@ bun src/manager.ts peer-invite-revoke <inv_id>    # void an unredeemed invite + 
 # Legacy 3-step handshake (other side pre-v2.15): peer-http-invite <name> --agents <a,b> [--url] → peer-http-join <name> '<invite>' --agents <x,y> --url <my-url> → peer-http-accept <name> '<receipt>'
 bun src/manager.ts peer-http-test <name>          # GET peer /agents — verify reachability + scope
 bun src/manager.ts peer-http-list                 # list HTTP peers + handshake state
-bun src/manager.ts peer-http-scope <name> --agents <a,b>  # v2.11.1+: change inbound scope in place (token unchanged)
+bun src/manager.ts peer-http-scope <name> --agents <a,b>  # change inbound scope in place (token unchanged)
 bun src/manager.ts peer-http-remove <name>        # delete peer + revoke the token we issued
 # send_to_agent target: "<agent>@<peer>" | "peer:<peer>.<agent>"
 
