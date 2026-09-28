@@ -136,6 +136,12 @@ describe("imageSrcKind：图片来源", () => {
       expect(imageSrcKind(s)).toBe("blocked");
     }
   });
+  test("只解码一次：两次编码的 `%252e%252e` 是名叫 `%2e%2e` 的普通文件（浏览器和服务端都不会再解一次成 ..）", () => {
+    expect(imageSrcKind("/api/v1/attachments/%252e%252e")).toBe("attachment");
+    expect(imageSrcKind("/api/v1/attachments/%252e%252e%252fagents")).toBe("attachment");
+    expect(new URL("/api/v1/attachments/%252e%252e", "http://h").pathname).toBe("/api/v1/attachments/%252e%252e");
+    expect(imageSrcKind("/api/v1/attachments/a%E0%A4%A.png")).toBe("blocked"); // 非法 % 序列一律拒
+  });
   test("imageHost：占位上显示的域名", () => {
     expect(imageHost("https://tracker.example:8443/p.gif?id=1")).toBe("tracker.example:8443");
     expect(imageHost("https://")).toBe("");
