@@ -28,6 +28,21 @@ export const MoonIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide bot 的路径（外源消息头 source-header.tsx 也用它，放进自己的 svg 里） */
+export const BOT_PATHS = (
+  <>
+    <path d="M12 8V4H8" />
+    <rect width="16" height="12" x="4" y="8" rx="2" />
+    <path d="M2 14h2" />
+    <path d="M20 14h2" />
+    <path d="M15 13v2" />
+    <path d="M9 13v2" />
+  </>
+);
+
+/** lucide bot */
+export const BotIcon = (p: IconProps) => <Svg {...p}>{BOT_PATHS}</Svg>;
+
 /** lucide folder-open */
 export const FolderOpenIcon = (p: IconProps) => (
   <Svg {...p}>
@@ -88,21 +103,6 @@ export const FileIcon = (p: IconProps) => (
     <path d="M14 2v4a2 2 0 0 0 2 2h4" />
   </Svg>
 );
-
-/** lucide bot 的路径（外源消息头 source-header.tsx 也用它，放进自己的 svg 里） */
-export const BOT_PATHS = (
-  <>
-    <path d="M12 8V4H8" />
-    <rect width="16" height="12" x="4" y="8" rx="2" />
-    <path d="M2 14h2" />
-    <path d="M20 14h2" />
-    <path d="M15 13v2" />
-    <path d="M9 13v2" />
-  </>
-);
-
-/** lucide bot */
-export const BotIcon = (p: IconProps) => <Svg {...p}>{BOT_PATHS}</Svg>;
 
 /** 菜单里按名字取的图标（名字由 ../agent-menu.ts 的纯函数给出，它不能依赖 React） */
 const MENU_ICONS: Record<LineIconName, (p: IconProps) => ReactNode> = {
