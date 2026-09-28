@@ -9,6 +9,13 @@ export interface MissionInfo {
   lastNudgeAt?: string;
 }
 
+/** 台账里它正在执行的任务（bridge agent-info-routes.ts ledgerField，只给能读台账的凭据）→ 侧栏行尾阶段小标（features/chat/ledger-stage.ts） */
+export interface LedgerTaskRef {
+  id: string;
+  stage: string;
+  round: number;
+}
+
 /** 大总管的前端保留名 ↔ API 的 "master"。 */
 export const MASTER_AGENT_NAME = "__master__";
 
@@ -76,6 +83,7 @@ export interface AgentSession {
   parent?: string | null;
   /** 任务短名（≤40 字）→ 侧栏名字后的压淡小标 */
   task?: string | null;
+  ledgerTask?: LedgerTaskRef | null;
 }
 
 interface ApiAgent {
@@ -108,6 +116,7 @@ interface ApiAgent {
   /** 派发者的裸名（大总管 = master）与任务短名（bridge agent-info-routes.ts teamField） */
   parent?: string | null;
   task?: string | null;
+  ledgerTask?: LedgerTaskRef | null;
 }
 
 function mapAgent(a: ApiAgent): AgentSession {
@@ -175,6 +184,8 @@ export async function loadAgents(): Promise<AgentSession[]> {
   });
 }
 
+const ledgerSig = (lt?: LedgerTaskRef | null) => (lt ? `|${lt.id}:${lt.stage}:${lt.round}` : "");
+
 /**
  * agentsSignature（features/chat/chat-store.ts）里不断新增的字段拼在这里：chat-store 只许缩，新字段加一处就好。
  * 漏掉的字段 = 列表轮询判「没变」、界面不更新（external / 显示名、值守标记都踩过）。
@@ -182,5 +193,5 @@ export async function loadAgents(): Promise<AgentSession[]> {
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}`;
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask);
 }

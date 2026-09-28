@@ -297,6 +297,11 @@ export const DICT: Record<string, string> = {
   "派出 {n}": "{n} sent",
   "展开派出的 agent": "Show dispatched agents",
   "收起派出的 agent": "Hide dispatched agents",
+  // 台账阶段小标（ledger-stage.ts）：行上短名、悬停 / 长按整句；「{id} · {state}」中英同形，不进字典。字典有 1000 行上限，这里一行放多条
+  "规格": "Spec", "复述": "Restate", "开发": "Build", "审查": "Review", "返工": "Fix", "合并": "Merge", "上线": "Live", "验证": "Verified", "卡住": "Blocked",
+  "已完成": "Done", "已取消": "Cancelled", "写规格中": "writing spec", "等复述确认": "restate awaiting sign-off", "开发中": "building", "审查中": "in review",
+  "返工中": "fixing", "等合并": "awaiting merge", "已上线，待验证": "live, awaiting verification", "已验证": "verified", "卡住了": "blocked",
+  "{id} · {state} · 第 {n} 轮": "{id} · {state} · round {n}",
 
   // ── 输入区（composer）────────────────────────────────
   "按住说话，松开结束": "Hold to talk, release to finish",
