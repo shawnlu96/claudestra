@@ -437,12 +437,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
-function heldFromOf(targetChannelId: string) {
-  return heldLocalMsgs.get(targetChannelId)?.map((i) => ({
-    fromKind: i.env.from.kind,
-    fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined,
-  }));
-}
+const heldFromOf = (target: string) => unseenFrom(heldLocalMsgs, target);
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
@@ -548,7 +543,7 @@ import type {
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
 import { endpointLabel, envelopeLabel, newThreadId, parseChatId } from "./bridge/router.js";
-import { ageHeld, heldNoticeText, HeldQueue } from "./bridge/held-queue.js";
+import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { AgentCallBook, ambiguityNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";

@@ -25,6 +25,14 @@ export interface HeldItem {
 export const INBOX_LEASE_MS = 15 * 60_000;
 export const leaseActive = (i: HeldItem, now = Date.now()): boolean => !!i.lease && now - i.lease.at < INBOX_LEASE_MS;
 
+/**
+ * 押在 target 队里、它还没看到的消息各是谁发的（回程簿判「请求送到它手上没有」用，lib/held-pac.ts）。
+ * check_inbox 领走的算看到了，哪怕还没 ack——否则 agent 读完就答，答复会被当成「请求还押着」而不算数（codex 2026-09-28 复核）。
+ */
+export function unseenFrom(q: HeldQueue, target: string): { fromKind: string; fromChannelId?: string }[] | undefined {
+  return q.get(target)?.filter((i) => !i.lease).map((i) => ({ fromKind: i.env.from.kind, fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined }));
+}
+
 export const HELD_NOTIFY_MS = 30 * 60_000;
 export const HELD_GIVE_UP_MS = 24 * 3_600_000;
 
