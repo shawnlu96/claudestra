@@ -133,6 +133,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "project-add", "project-list", "project-assign", "project-edit", "project-remove", "cron-list", "tmux-capture",
   "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
+  "quota-wall", // 额度闸 status|clear：只读写沙箱状态目录下的 quota-wall.json / 请求文件（manager/quota-wall.ts）
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */

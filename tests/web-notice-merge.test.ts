@@ -23,10 +23,10 @@ describe("直播 notice", () => {
     pushNotice(m, LIMIT, "1", "t1");
     pushNotice(m, LIMIT, "2", "t2");
     pushNotice(m, LIMIT, "3", "t3");
-    expect(m).toEqual([{ id: "1", role: "system", content: `⛔ ${LIMIT} ×3`, ts: "t3" }]);
+    expect(m).toEqual([{ id: "1", role: "system", content: `⛔ ×3 ${LIMIT}`, ts: "t3" }]);
     m.push({ id: "u", role: "user", content: "接着做", ts: "t4" });
     pushNotice(m, LIMIT, "5", "t5");
-    expect(m.map((x) => x.content)).toEqual([`⛔ ${LIMIT} ×3`, "接着做", `⛔ ${LIMIT}`]);
+    expect(m.map((x) => x.content)).toEqual([`⛔ ×3 ${LIMIT}`, "接着做", `⛔ ${LIMIT}`]);
     pushNotice(m, "API Error: 500", "6", "t6");
     expect(m.at(-1)!.content).toBe("⛔ API Error: 500");
   });

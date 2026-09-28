@@ -10,7 +10,8 @@ interface Row {
   text: string;
 }
 
-const REPEAT_RE = /\s×(\d+)$/;
+/** 次数放在最前：手机上系统行一行放不下会截断尾部，放末尾就看不见了 */
+const REPEAT_RE = /^⛔ ×(\d+) /;
 
 /** 错误原文 → 一行提示（取首行，截 200 字）。 */
 export function apiErrorNotice(text: string): string {
@@ -27,9 +28,9 @@ export function pushApiErrorRow(rows: Row[], rec: { isApiErrorMessage?: unknown;
   const blocks = Array.isArray(rec.message?.content) ? (rec.message!.content as { type?: string; text?: string }[]) : [];
   const text = apiErrorNotice(blocks.find((b) => b?.type === "text")?.text ?? "API Error");
   const prev = rows[rows.length - 1];
-  if (prev?.role === "system" && prev.text.replace(REPEAT_RE, "") === text) {
+  if (prev?.role === "system" && prev.text.replace(REPEAT_RE, "⛔ ") === text) {
     const n = Number(REPEAT_RE.exec(prev.text)?.[1] ?? 1) + 1;
-    Object.assign(prev, { seq, ts, text: `${text} ×${n}` });
+    Object.assign(prev, { seq, ts, text: text.replace(/^⛔ /, `⛔ ×${n} `) });
   } else {
     rows.push({ seq, ts, role: "system", text });
   }

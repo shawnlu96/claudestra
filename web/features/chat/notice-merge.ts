@@ -5,14 +5,15 @@
  */
 import type { ChatMessage } from "./type";
 
-const REPEAT_RE = /\s×(\d+)$/;
+/** 次数放在最前：手机上系统行放不下会截断尾部 */
+const REPEAT_RE = /^⛔ ×(\d+) /;
 
 /** 把一条提示放进消息列表：尾条是同文的系统行就改成 ×N，否则追加 */
 export function pushNotice(messages: ChatMessage[], raw: string, id: string, ts: string): void {
   const text = `⛔ ${raw.trim().split("\n")[0].slice(0, 200)}`;
   const last = messages[messages.length - 1];
-  if (last?.role === "system" && last.content.replace(REPEAT_RE, "") === text) {
-    last.content = `${text} ×${Number(REPEAT_RE.exec(last.content)?.[1] ?? 1) + 1}`;
+  if (last?.role === "system" && last.content.replace(REPEAT_RE, "⛔ ") === text) {
+    last.content = text.replace(/^⛔ /, `⛔ ×${Number(REPEAT_RE.exec(last.content)?.[1] ?? 1) + 1} `);
     last.ts = ts;
     return;
   }

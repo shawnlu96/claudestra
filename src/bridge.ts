@@ -1195,13 +1195,6 @@ discord.once("ready", async () => {
   startCodexTurnFailureWatch(async (channelId) => {
     await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
   });
-  // 回合以 API 错误结束 ⇒ 60s 后续跑一次；撞额度 ⇒ 全机额度闸（agent 消息押后、出闸统一恢复）。规则与接线见 bridge/quota-wall-wiring.ts
-  startQuotaWall({
-    held: heldLocalMsgs, calls: pendingAgentCalls, clients, deliver, flush: flushHeldLocalMsgs, controlChannelId: CONTROL_CHANNEL_ID,
-    markAgentSource: (cid) => void lastMessageSource.set(cid, "agent"),
-    escalate: async (cid, text) => void (await ((await discord.channels.fetch(cid)) as TextChannel).send(text)),
-  });
-
   // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
   // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
   {
@@ -3480,6 +3473,12 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // 值守：回合结束自动推进
+// 回合以 API 错误结束 ⇒ 60s 后续跑一次；撞额度 ⇒ 全机额度闸（agent 消息押后、出闸统一恢复）。Discord 与 Web-only 都要，规则见 bridge/quota-wall-wiring.ts
+startQuotaWall({
+  held: heldLocalMsgs, calls: pendingAgentCalls, clients, deliver, flush: flushHeldLocalMsgs, controlChannelId: CONTROL_CHANNEL_ID,
+  markAgentSource: (cid) => void lastMessageSource.set(cid, "agent"),
+  escalate: async (cid, text) => void (await ((await discord.channels.fetch(cid)) as TextChannel).send(text)),
+});
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

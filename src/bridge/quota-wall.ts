@@ -88,6 +88,15 @@ function exitWall(c: Ctx, via: WallExitVia): void {
   }
 }
 
+/** 进闸那一刻就给每个窗口记回显基线：等到第一拍（最多 15 秒后）才记，这期间用卡的回显会被当成旧的 */
+async function baselineEchoes(c: Ctx): Promise<void> {
+  c.echoBase.clear();
+  for (const w of await c.d.windows()) {
+    const n = countLimitsResetEcho(await c.d.capture(w.win).catch(() => "")); // 抓不到当 0：之后真有回显只会更早出闸
+    if (!c.echoBase.has(w.win)) c.echoBase.set(w.win, n);
+  }
+}
+
 async function sawLimitsReset(c: Ctx): Promise<boolean> {
   let seen = false;
   for (const w of await c.d.windows()) {
@@ -108,6 +117,7 @@ async function watchWall(c: Ctx, now: number): Promise<void> {
   if (notifyDue(w, now)) {
     const credits = await c.d.credits().catch(() => null); // 读不到卡数：通知里不写重置卡那行，别的照发
     const text = wallNotice(w, { now, queued: c.d.held.wallCount(), credits });
+    c.d.log(`📣 额度闸通知 owner：${text.split("\n").join(" / ")}`);
     if (await c.d.notifyOwner(text).catch(() => false)) patchWall(c, { notifiedAt: now }); // 没发出去就不记，下一拍重发
   }
   let probe: { pct: number | null; observedAt: number } | null = null;
@@ -181,8 +191,8 @@ async function tickOnce(c: Ctx): Promise<void> {
     const cache = c.d.readCache();
     const r = cache ? enterFromUsage(c.state, cache, now, c.d.newId) : null;
     if (r?.entered) {
-      c.echoBase.clear();
       set(c, r.state);
+      await baselineEchoes(c);
       c.d.log(`⛔ 额度闸进闸（用量缓存 ${cache!.weekPct ?? "?"}% / ${cache!.sessionPct ?? "?"}%）`);
     }
   }
@@ -199,8 +209,8 @@ async function noteApiErrorIn(c: Ctx, e: { channelId: string; agent: string; at:
   const parsed = e.error === "rate_limit" ? parseWallText(e.text, e.at) : null;
   if (parsed) {
     const r = noteWallHit(c.state, { ...e, parsed }, c.d.newId);
-    if (r.entered) c.echoBase.clear();
     set(c, r.state);
+    if (r.entered) await baselineEchoes(c).catch((err) => c.d.log(`额度闸取回显基线出错（第一拍再取）: ${(err as Error).message}`));
     c.d.log(r.entered
       ? `⛔ 额度闸进闸：${e.agent} 撞到 ${parsed.kind} 额度（重置 ${parsed.resetsText ?? "未知"}）——agent 消息押后，人类消息照投`
       : `⛔ 额度闸：${e.agent} 也撞墙了（名单 ${Object.keys(r.state.wall!.hits).length} 个）`);

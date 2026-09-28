@@ -73,7 +73,7 @@ export function QuotaWallBanner() {
 
   const tone = b.tone === "warning" ? "bg-warning text-warning-content" : "bg-info text-info-content";
   return (
-    <div className="pointer-events-none fixed inset-x-0 z-[68] flex justify-center px-4" style={{ top: "calc(env(safe-area-inset-top) + 8px)" }}>
+    <div className="pointer-events-none fixed inset-x-0 z-[68] flex justify-center px-4" style={{ top: "calc(env(safe-area-inset-top) + 56px)" /* 顶栏下方：别压住顶栏按钮 */ }}>
       <div role="status" className={`pointer-events-auto flex max-w-[640px] items-start gap-2 rounded-2xl py-2 pl-3 pr-1.5 text-[12.5px] shadow-lg ${tone}`}>
         <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0" aria-hidden>
           {/* lucide gauge */}

@@ -35,7 +35,7 @@ describe("历史里的 API 错误", () => {
     const shape = messages.map((m) => [m.role, m.text]);
     expect(shape).toEqual([
       ["assistant", "先看下代码"],
-      ["system", `⛔ ${LIMIT} ×3`],
+      ["system", `⛔ ×3 ${LIMIT}`],
       ["user", "接着做"],
       ["system", `⛔ ${LIMIT}`],
     ]);

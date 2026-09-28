@@ -137,6 +137,14 @@ describe("出闸三个来源", () => {
     expect(r.disk().wall!.exit!.via).toBe("limits_reset");
   });
 
+  test("进闸那一刻就取基线：进闸后、第一拍之前出现的回显也算", async () => {
+    const r = rig();
+    await hitWall(r, "a");
+    r.panes["master:agent-b"] = "> /limit-reset\n  ⎿  Limits reset · your weekly reset day stays Wed · 1 resets left\n";
+    await r.wall.tick();
+    expect(r.disk().wall!.exit!.via).toBe("limits_reset");
+  });
+
   test("用量探测：5 分钟一次，看到 <100 出闸", async () => {
     const r = rig();
     await hitWall(r, "a");
