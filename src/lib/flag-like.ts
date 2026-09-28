@@ -14,8 +14,18 @@ export function firstFlagLikeField(fields: Record<string, string>): string | nul
  */
 export function firstControlCharField(fields: unknown): string | null {
   const entries = fields && typeof fields === "object" ? Object.entries(fields) : [];
-  return entries.find(([, v]) => v != null && /\p{Cc}/u.test(String(v)))?.[0] ?? null;
+  return entries.find(([, v]) => v != null && hasControlChar(String(v)))?.[0] ?? null;
 }
+
+export const hasControlChar = (s: string) => /\p{Cc}/u.test(s);
+
+/**
+ * cron 调度器发送前的最后一道（src/cron.ts executeJob）：入口（API、manager cron-add / cron-edit）都拦了，
+ * 这里挡的是拦之前写进 cron.json 的旧任务和手改的文件——真 CC 上 \x1b[Z 会被当成 Shift+Tab 切掉权限模式。
+ */
+export const CRON_PROMPT_REFUSED =
+  "prompt 里有换行或控制字符，已拒发（多半是加校验之前写进去的旧任务）。用 cron-edit 改成一行后会恢复执行" +
+  " / The prompt contains a line break or control character and was not sent (likely a job saved before validation). Fix it with cron-edit.";
 
 /** 给人看的原因：哪个字段、为什么不行。网页按 code + field 自己出文案（features/chat/components/cron-modal.tsx） */
 export const controlCharError = (field: string) =>

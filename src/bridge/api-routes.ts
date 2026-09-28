@@ -86,6 +86,7 @@ import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { controlCharBody, firstControlCharField, firstFlagLikeField } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
+import { handleCronRoutes } from "./cron-routes.js";
 import { trackInboundHandoff } from "./handoff-tracker.js";
 import { authenticateApi } from "./api-auth.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
@@ -107,8 +108,6 @@ function isPathSafeName(x: string): boolean {
 
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
-/** cron 的 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头）：新建 / 编辑同斜杠直通只认 owner 本人（api-slash.ts） */
-const CRON_OWNER_ONLY = "creating or editing cron jobs requires the owner's own credential";
 
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
@@ -1850,75 +1849,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // ── v2.20+ /cron —— 定时任务管理面(owner 2026-08-26「cron 没有 UI」)。
   // 与 /peers 同款:全权 token 门禁,mutation 全走 runManager 复用 CLI 校验,
   // 与 Discord /cron 面板、CLI 手管三方等价互不打架。
-  if (path === "/cron" || path.startsWith("/cron/")) {
-    if (!isFullScope(principal)) return forbidden("cron management requires a full-scope token");
-    if (path === "/cron" && req.method === "GET") {
-      const jobs = await loadJobs();
-      return apiJson(200, {
-        ok: true,
-        jobs: jobs.map((j) => ({
-          id: j.id,
-          name: j.name,
-          schedule: j.schedule,
-          dir: j.dir.replace(process.env.HOME || "", "~"),
-          prompt: j.prompt, // 全文——编辑界面要用,不像 cron-list 截 80
-          enabled: j.enabled,
-          lastRun: j.lastRun ?? null,
-          nextRun: j.nextRun ?? null,
-          targetAgent: j.targetAgent ?? null,
-          effort: j.effort ?? null, // null = 缺省(临时 agent 走 medium)
-          project: j.project ?? null, // null = 按 dir 自动解析
-          createdAt: j.createdAt,
-        })),
-      });
-    }
-    if (path === "/cron" && req.method === "POST") {
-      if (!isOwnerPrincipal(principal)) return forbidden(CRON_OWNER_ONLY);
-      const body: any = await readJsonBody(req);
-      if (body === INVALID_JSON) return invalidJsonBody();
-      const ctrl = firstControlCharField(body);
-      if (ctrl) return apiJson(400, controlCharBody(ctrl));
-      const name = String(body?.name ?? "").trim();
-      const schedule = String(body?.schedule ?? "").trim();
-      const prompt = String(body?.prompt ?? "").trim();
-      const dir = String(body?.dir ?? "~").trim() || "~";
-      if (!name || !schedule || !prompt) {
-        return apiJson(400, { ok: false, error: "name/schedule/prompt required" });
-      }
-      const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
-      if (body?.effort) extra.push("--effort", String(body.effort));
-      if (body?.project) extra.push("--project", String(body.project));
-      const r = await runManager("cron-add", name, schedule, dir, ...extra, prompt);
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-    const cronAction = path.match(/^\/cron\/([^/]+)\/(toggle|remove|edit)$/);
-    if (cronAction && req.method === "POST") {
-      const id = decodeURIComponent(cronAction[1]);
-      const action = cronAction[2];
-      let r: any;
-      if (action === "toggle") r = await runManager("cron-toggle", id);
-      else if (action === "remove") r = await runManager("cron-remove", id);
-      else {
-        if (!isOwnerPrincipal(principal)) return forbidden(CRON_OWNER_ONLY);
-        const body: any = await readJsonBody(req);
-        if (body === INVALID_JSON) return invalidJsonBody();
-        const ctrl = firstControlCharField(body);
-        if (ctrl) return apiJson(400, controlCharBody(ctrl));
-        const flags: string[] = [];
-        if (body?.schedule) flags.push("--schedule", String(body.schedule));
-        if (body?.prompt) flags.push("--prompt", String(body.prompt));
-        if (body?.name) flags.push("--name", String(body.name));
-        if (body?.dir) flags.push("--dir", String(body.dir));
-        if (body?.effort) flags.push("--effort", String(body.effort));
-        // project: 传 "" / null 表示清除(回到按 dir 解析),manager 侧用 "-" 表示
-        if (body?.project !== undefined) flags.push("--project", body.project ? String(body.project) : "-");
-        if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
-        r = await runManager("cron-edit", id, ...flags);
-      }
-      return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
-    }
-    return apiJson(405, { ok: false, error: "method not allowed" });
-  }
+  const cronRes = await handleCronRoutes(req, path, principal, { runManager, loadJobs }); // /cron*（bridge/cron-routes.ts）
+  if (cronRes) return cronRes;
 
   // ── v2.20.2+ /auto-compact —— 自动存记忆+compact 的阈值/闲置门槛(owner:
   // 「设置里看不到」——此前只有配置文件可改)。写入 Claudestra 自己的

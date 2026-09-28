@@ -1,0 +1,111 @@
+/**
+ * /api/v1/cron*（从 api-routes 拆出：那个文件只许变小）。列表 / 开关 / 删除：全权凭据（isFullScope）。
+ * 新建 / 编辑的 prompt 到点原样敲进目标 agent 的 TUI（src/cron.ts，不带来源头），和斜杠直通同一类，所以要求：
+ * owner 本人（isOwnerPrincipal）、scope 含 "*"，有 targetAgent 时它还得在 scope 里——master 要显式列出（agentInScope）。
+ * 光看 isFullScope 不够：开了终端的部分 scope owner 设备 role 仍是 owner，canManage 放行。测试见 tests/cron-create-gates.test.ts。
+ * runManager / loadJobs 由调用方注入：一个在 management.ts（hub），一个在 src/cron.ts（入口），bridge 模块都不能 import。
+ */
+import { agentInScope, isOwnerPrincipal, type Principal } from "../lib/principals.js";
+import { controlCharBody, firstControlCharField } from "../lib/flag-like.js";
+import type { CronJob } from "../lib/cron-job.js";
+import { apiJson, forbidden, invalidJsonBody, INVALID_JSON, isFullScope, notInScope, readJsonBody } from "./api-respond.js";
+
+export interface CronRouteDeps {
+  runManager: (...args: string[]) => Promise<any>;
+  loadJobs: () => Promise<CronJob[]>;
+}
+
+const CRON_OWNER_ONLY = "creating or editing cron jobs requires the owner's own credential";
+const CRON_ALL_AGENTS = "creating or editing cron jobs requires a credential scoped to all agents";
+
+/** 新建 / 编辑的身份门（读 body 之前）：不放行 → 403 响应，放行 → null */
+function cronWriterDenied(principal: Principal): Response | null {
+  if (!isOwnerPrincipal(principal)) return forbidden(CRON_OWNER_ONLY);
+  return principal.agents.includes("*") ? null : forbidden(CRON_ALL_AGENTS);
+}
+
+/**
+ * prompt 会敲进去的那个 agent（空 = 临时 agent）要在 scope 里："*" 不含 master。按 src/cron.ts 的解析补成 agent-<名> 再判——
+ * inScopeEitherName 会再试一次加前缀的写法，"agent-master" 变成 "agent-agent-master" 就不算 master 了
+ */
+const targetDenied = (principal: Principal, target: string | null | undefined): Response | null =>
+  target && !agentInScope(principal, target.startsWith("agent-") ? target : `agent-${target}`) ? notInScope(target) : null;
+
+export async function handleCronRoutes(req: Request, path: string, principal: Principal, deps: CronRouteDeps): Promise<Response | null> {
+  if (path !== "/cron" && !path.startsWith("/cron/")) return null;
+  if (!isFullScope(principal)) return forbidden("cron management requires a full-scope token");
+  if (path === "/cron" && req.method === "GET") {
+    const jobs = await deps.loadJobs();
+    return apiJson(200, {
+      ok: true,
+      jobs: jobs.map((j) => ({
+        id: j.id,
+        name: j.name,
+        schedule: j.schedule,
+        dir: j.dir.replace(process.env.HOME || "", "~"),
+        prompt: j.prompt, // 全文——编辑界面要用,不像 cron-list 截 80
+        enabled: j.enabled,
+        lastRun: j.lastRun ?? null,
+        nextRun: j.nextRun ?? null,
+        targetAgent: j.targetAgent ?? null,
+        effort: j.effort ?? null, // null = 缺省(临时 agent 走 medium)
+        project: j.project ?? null, // null = 按 dir 自动解析
+        createdAt: j.createdAt,
+      })),
+    });
+  }
+  if (path === "/cron" && req.method === "POST") {
+    const writer = cronWriterDenied(principal);
+    if (writer) return writer;
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
+    const target = targetDenied(principal, body?.targetAgent ? String(body.targetAgent) : null);
+    if (target) return target;
+    const ctrl = firstControlCharField(body);
+    if (ctrl) return apiJson(400, controlCharBody(ctrl));
+    const name = String(body?.name ?? "").trim();
+    const schedule = String(body?.schedule ?? "").trim();
+    const prompt = String(body?.prompt ?? "").trim();
+    const dir = String(body?.dir ?? "~").trim() || "~";
+    if (!name || !schedule || !prompt) {
+      return apiJson(400, { ok: false, error: "name/schedule/prompt required" });
+    }
+    const extra: string[] = body?.targetAgent ? ["--target-agent", String(body.targetAgent)] : [];
+    if (body?.effort) extra.push("--effort", String(body.effort));
+    if (body?.project) extra.push("--project", String(body.project));
+    const r = await deps.runManager("cron-add", name, schedule, dir, ...extra, prompt);
+    return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+  }
+  const cronAction = path.match(/^\/cron\/([^/]+)\/(toggle|remove|edit)$/);
+  if (cronAction && req.method === "POST") {
+    const id = decodeURIComponent(cronAction[1]);
+    const action = cronAction[2];
+    let r: any;
+    if (action === "toggle") r = await deps.runManager("cron-toggle", id);
+    else if (action === "remove") r = await deps.runManager("cron-remove", id);
+    else {
+      const writer = cronWriterDenied(principal);
+      if (writer) return writer;
+      // 编辑改不了 targetAgent：比的是原任务的（找不到任务就交给 manager 回「找不到」）
+      const job = (await deps.loadJobs()).find((j) => j.name === id || j.id === id);
+      const target = targetDenied(principal, job?.targetAgent);
+      if (target) return target;
+      const body: any = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
+      const ctrl = firstControlCharField(body);
+      if (ctrl) return apiJson(400, controlCharBody(ctrl));
+      const flags: string[] = [];
+      if (body?.schedule) flags.push("--schedule", String(body.schedule));
+      if (body?.prompt) flags.push("--prompt", String(body.prompt));
+      if (body?.name) flags.push("--name", String(body.name));
+      if (body?.dir) flags.push("--dir", String(body.dir));
+      if (body?.effort) flags.push("--effort", String(body.effort));
+      // project: 传 "" / null 表示清除(回到按 dir 解析),manager 侧用 "-" 表示
+      if (body?.project !== undefined) flags.push("--project", body.project ? String(body.project) : "-");
+      if (!flags.length) return apiJson(400, { ok: false, error: "nothing to edit" });
+      r = await deps.runManager("cron-edit", id, ...flags);
+    }
+    return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+  }
+  return apiJson(405, { ok: false, error: "method not allowed" });
+}
