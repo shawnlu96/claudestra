@@ -13,6 +13,9 @@ import { skillUsed } from "@/lib/api/settings";
 import { transcribe } from "@/lib/api/system";
 import { PendingFiles } from "./pending-files";
 import { sendComposed, useComposerBus } from "../form-sync";
+import { useMention } from "../use-mention";
+import { MentionLayer } from "./mention-layer";
+import { clampSel, handlePickerKey } from "../picker-keys";
 
 const MAX_FILES = 5;
 
@@ -85,6 +88,7 @@ export function Composer() {
   // agent 没执行的兜底:10 分钟后 ctx 仍超标才重新亮出来。按 agent 记。
   const [compactReqAt, setCompactReqAt] = useState<Record<string, number>>({});
   const agentInfo = agents.find((a) => a.name === active);
+  const mention = useMention({ text, setText, taRef, active, agents }); // 输入框 @ 另一个 agent = 委托当前 agent 去找它
   const ctxTokens = typeof agentInfo?.contextTokens === "number" ? agentInfo.contextTokens : 0;
   const reqAt = compactReqAt[active] || 0;
   // 阈值对齐 ctx-level 深红档(1M 窗的 75%)——此前按 200k 窗的 170k,1M 模型
@@ -398,7 +402,9 @@ export function Composer() {
     if (m) {
       void skillUsed(m[1]).catch(() => {}); // 计数埋点丢了只影响面板排序
     }
-    sendComposed(store, cur, files.length ? files : undefined); // 带表单同步行 → wire 换成 [select:…]
+    const target = mention.prepare(cur); // @ 的目标发送前再核一遍（撤销 / 停止 / 改名）；失效就不发，原因显示在输入框上方
+    if (target === false) return;
+    sendComposed(store, cur, files.length ? files : undefined, target ?? undefined); // 表单同步行 → [select:…]；@ → 末尾加委托指令
     setText("");
     setFiles([]);
     if (active) clearDraft(active);
@@ -451,29 +457,10 @@ export function Composer() {
     // 方向键也是在选候选词不是在导航命令面板。keyCode 229 兜浏览器时序坑
     // (compositionend 先于 keydown 派发时 isComposing 已经翻假)。
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    // 命令面板打开时接管导航键（桌面）：↑↓ 移动、Enter/Tab 填入、Esc 关闭
-    if (slashOpen) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSlashSel((v) => Math.min(v + 1, slashItems.length - 1));
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSlashSel((v) => Math.max(v - 1, 0));
-        return;
-      }
-      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
-        e.preventDefault();
-        pickSlash(slashItems[Math.min(slashSel, slashItems.length - 1)]);
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setSlashDismissed(true);
-        return;
-      }
-    }
+    // 命令 / @ 面板打开时接管导航键（桌面）：↑↓ 移动、Enter/Tab 填入、Esc 关闭（picker-keys.ts）
+    if (mention.onKeyDown(e)) return;
+    const slashPick = () => pickSlash(slashItems[Math.min(slashSel, slashItems.length - 1)]);
+    if (slashOpen && handlePickerKey(e, { move: (d) => setSlashSel((v) => clampSel(v, d, slashItems.length)), pick: slashPick, close: () => setSlashDismissed(true) })) return;
     if (e.key === "Enter" && !e.shiftKey && !coarse) {
       e.preventDefault();
       submit();
@@ -516,6 +503,7 @@ export function Composer() {
           </div>
         )}
 
+        <MentionLayer m={mention} active={active} />
         {/* Slash 命令面板:输入 / 即弹,即时模糊过滤。onPointerDown preventDefault
             防抢走 textarea 焦点收键盘(control-bar 同款) */}
         {slashOpen && (
@@ -621,7 +609,7 @@ export function Composer() {
                     <span className="animate-cstra-breathe absolute inline-flex size-3 rounded-full bg-error" />
                     <span className="relative inline-flex size-2 rounded-full bg-error" />
                   </span>
-                  <span className="text-[14px] font-medium text-error/90">
+                  <span className="text-[14px] font-medium text-error-soft-90">
                     {t("正在录音")} {recSecs}s · {t("松开结束")}
                   </span>
                 </>
@@ -742,7 +730,7 @@ export function Composer() {
               )}
             </button>
             {recErr && recState === "idle" && (
-              <span className="truncate text-[11px] text-error/70">{t(recErr)}</span>
+              <span className="truncate text-[11px] text-error-soft-70">{t(recErr)}</span>
             )}
 
             <div className="ml-auto flex items-center gap-1.5">

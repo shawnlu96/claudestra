@@ -372,7 +372,6 @@ const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 // 「#control 频道的 agent」。将来引入非 Discord 的 master 标识时只改这几个 helper。
 // ============================================================
 
-
 /** 该 ws 是否 master 的连接 */
 function isMasterWs(ws: ServerWebSocket<unknown>): boolean {
   return !!CONTROL_CHANNEL_ID && clients.get(CONTROL_CHANNEL_ID)?.ws === ws;
@@ -532,7 +531,6 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
   return n;
 }
 
-
 // ============================================================
 // v2.0.0+ 路由抽象
 // ============================================================
@@ -543,7 +541,7 @@ import type {
   Envelope as RouterEnvelope,
   Delivery as RouterDelivery,
 } from "./bridge/router.js";
-import { endpointLabel, envelopeLabel, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
+import { endpointLabel, envelopeLabel, inboundBodyForLocal, newMessageId, newThreadId, parseChatId } from "./bridge/router.js";
 import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
@@ -725,7 +723,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agent: agentName,
     chatId: `api:${to.tokenId}`,
     type: "chat_message",
-    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
+    data: { direction: "out", from: agentName, text: env.content, threadId, api: true, ...(env.meta.components ? { components: env.meta.components, askId: env.meta.askId } : {}), ...(eventFiles.length ? { files: eventFiles } : {}) },
   });
 
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
@@ -866,7 +864,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
-    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId };
+    const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId, askId: env.meta.askId };
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inData });
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
     // 永久缺位,工具/文本不直播、Stop done 挂 '?' 名下卡「工作中」)。每条入站核对 watcher 在位,缺位按
@@ -1087,14 +1085,14 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
         `[🤝 来自 peer 实例「${from.peer}」的跨机请求（HTTP API，对方是另一个 Claudestra 的 agent/用户）。`,
         `用 reply() 回答——回复会自动转交对方的调用方。回答实质内容,保持精简;超出你职责范围的请求可以礼貌说明并拒绝。]`,
         ``,
-        env.content,
+        inboundBodyForLocal(env),
       ].join("\n");
     }
     return [
       `[🌐 来自 Web 端用户「${from.name}」（HTTP API 接入，非 Discord）。`,
       `用 reply() 回答到本 chat_id。对方界面完整渲染 Markdown（表格可用），且能看到本频道完整聊天记录——不要复述上下文；也不要引用与本请求无关的内容。]`,
       ``,
-      env.content,
+      inboundBodyForLocal(env),
     ].join("\n");
   }
 
@@ -1112,14 +1110,13 @@ async function renderContentForLocal(env: RouterEnvelope): Promise<string> {
       `判断一下：是问你/要你动手 → 用 reply()/send_to_agent 处理；是纯状态同步/答完没下文 → end_turn 静默 OK，**别为了走形式编"收到"**。`,
       `规则：有干货才说话；没干货别说话。]`,
       ``,
-      env.content,
+      inboundBodyForLocal(env),
     ].join("\n");
   }
 
   // 其他情况（user 在 agent 自己的频道）原样投递
   return env.content;
 }
-
 
 /** 开始 typing + 30min 安全超时（实现在 discord-adapter，这里注入 owner mention） */
 function startTypingWithSafety(channelId: string) {
@@ -1893,7 +1890,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             files: msg.files,
           },
         };
-        const delivery = await deliver(env);
+        const delivery = await (await import("./bridge/asks.js")).deliverReplyWithAsk(env, msg.chatId, fromChannelId, deliver); // 带选项发给 owner → 建「待你处理」
         if (delivery.outcome.kind !== "sent") {
           const errMsg = delivery.outcome.kind === "dropped"
             ? `reply dropped: ${delivery.outcome.reason}`
@@ -1909,7 +1906,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         // 这里再发就是同一条回复的重复事件（web 前端会渲染两遍）。
         if (parseChatId(msg.chatId).transport !== "api") {
           const evAgent = agentLabelForChannel(fromChannelId);
-          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}) } });
+          emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components, askId: env.meta.askId } : {}) } });
         }
 
         // v1.9.21+ send_to_agent 推回机制：
@@ -2668,7 +2665,6 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
     console.error("cleanupStaleThinkingMessages 异常:", e);
   }
 }
-
 
 /** 每分钟扫一次：回程簿里送达后 2 小时还没被消化的条目清掉（target 的 Stop / reply / 回发 send_to_agent 都会消化它，
  * 残留只在 Stop 丢失、target 挂了之类的情况）。2 小时 = Autopilot 一轮的长度：以前 10 分钟，target 长回合结束才答时回程已被扫没。
@@ -3542,6 +3538,9 @@ initInbox({
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
 initTeamRouter({ clients, deliver, hold: (env) => heldLocalMsgs.holdEnv(env), working: localAgentWorking, markBridgeSource: (c) => lastMessageSource.set(c, "agent") }); // 台账事件路由
+void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处理：答复 / 过期通知不抢占（押后由 waitForIdle 标记）
+  clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord,
+}));
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

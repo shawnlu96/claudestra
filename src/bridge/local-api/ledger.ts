@@ -1,7 +1,7 @@
 /**
  * 内置台账的读接口（docs 10-ledger §4）；写只走 CLI（bun src/manager.ts ledger …），这里一律 GET：
- *   GET /api/v1/ledger/:project              事项 + 任务（每个带最近一条事件与服务端算好的指标）+ 最近的项目级事件 + meta
- *   GET /api/v1/ledger/:project/tasks/:id    任务 + 全部事件 + 阶段时间线 + 指标
+ *   GET /api/v1/ledger/:project              事项 + 任务（每个带最近一条事件、指标、blockedBy / runnable）+ 依赖边 + 最近的项目级事件 + meta
+ *   GET /api/v1/ledger/:project/tasks/:id    任务 + 全部事件 + 阶段时间线 + 指标 + 进出依赖边 + 审查分叉
  *   GET /api/v1/ledger/:project/docs/<path>  meta.docsDir 下的 .md / .png / .jpg / .jpeg 原文件（规格卡、报告、截图）
  * 门是 canReadLedger（全 scope、非 peer 的 manage 凭据）；project 必须在 projects.json。库还不存在时总览回空台账（exists:false）。
  * 实时靠 SSE ledger 事件（bridge/ledger-feed.ts），网页连上 / 重连都全量重拉这里。
@@ -28,6 +28,11 @@ export function setLedgerApiProjectsForTest(p: string | undefined): void {
 
 const notFound = (error: string) => apiJson(404, { ok: false, error });
 
+/** project 在不在 projects.json（台账与「上次以来」两个端点共用这份校验） */
+export async function ledgerProjectExists(project: string): Promise<boolean> {
+  return (await readProjects(projectsPath)).projects.some((p) => p.id === project);
+}
+
 function decode(s: string): string | null {
   try {
     const d = decodeURIComponent(s);
@@ -46,7 +51,7 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
   const project = decode(m[1]);
   const taskId = m[2] === undefined ? undefined : decode(m[2]);
   if (project === null || taskId === null) return apiJson(400, { ok: false, error: "bad path encoding" });
-  if (!(await readProjects(projectsPath)).projects.some((p) => p.id === project)) return notFound(`project "${project}" not found`);
+  if (!(await ledgerProjectExists(project))) return notFound(`project "${project}" not found`);
   let db: ReturnType<typeof ledgerDb>;
   try {
     db = ledgerDb();
@@ -61,7 +66,7 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
   }
   if (!db) {
     const meta = { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } };
-    return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], projectEvents: [], now });
+    return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], deps: [], projectEvents: [], now });
   }
   // schema 报库里实际的版本：CLI 先升级、bridge 还没重启时它会比代码常量新（LedgerReader 打开时已记一次日志）
   return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), now });

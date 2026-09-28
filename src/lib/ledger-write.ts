@@ -3,7 +3,7 @@
  * CAS：items / tasks 改字段带 rev，推阶段带 from；不符抛 LedgerError("conflict")，current 里是库里的实际值。
  * 幂等：ctx.dedupKey 全局唯一；同 key 再提交且 project / target / kind 一致 → 返回原事件与当前行、duplicate=true，不再校验 CAS。
  * 阶段角色由这里按 actor + 项目 PM 名单现算（roleOf），调用方不能自报角色；其余动作的角色矩阵在 CLI（T8b）。
- * tx / insertEvent / replay 不导出：直接写事件就绕过了阶段机与 owner 校验；纯校验在 ledger-checks.ts。
+ * tx / insertEvent / replay 在 ledger-tx.ts，只给写入模块用：直接写事件就绕过了阶段机与 owner 校验；纯校验在 ledger-checks.ts。
  */
 import type { Database } from "bun:sqlite";
 import {
@@ -14,13 +14,13 @@ import {
   checkNewTask,
   checkReview,
   checkStatus,
-  IMPORT_ACTOR,
   isOwnerLike,
   checkTarget,
   isManager,
   ITEM_FIELDS,
   mustTask,
   pick,
+  resolveAssignee,
   TASK_FIELDS,
   toColumn,
   type AppendableKind,
@@ -35,40 +35,11 @@ import {
   type WriteResult,
 } from "./ledger-checks.js";
 import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
-import { busyAsLedgerError, getEventByDedup, getItem, getMeta, LedgerError, toEvent, type LedgerMeta } from "./ledger-store.js";
+import { checksAllClear } from "./ledger-probes.js";
+import { getItem, getMeta, LedgerError, type LedgerMeta } from "./ledger-store.js";
+import { insertEvent, replay, tx } from "./ledger-tx.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
-
-type EventDraft = { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> };
-
-function tx<T>(db: Database, fn: () => T): T {
-  return busyAsLedgerError("写入", () => db.transaction(fn).immediate());
-}
-
-/** 导入身份写的事件一律带 imported，调用方漏了也补上；approxTime 也只认导入身份 */
-function eventData(ctx: WriteCtx, e: EventDraft): Record<string, unknown> {
-  if (ctx.actor !== IMPORT_ACTOR) return e.data ?? {};
-  return { ...e.data, imported: true, ...(ctx.approxTime ? { approxTime: true } : {}) };
-}
-
-function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
-  const r = db
-    .prepare("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
-    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null);
-  return toEvent(r as Record<string, unknown>);
-}
-
-/** dedupKey 命中：同一动作 → 原样返回；key 被别的动作用过 → dedup_mismatch */
-function replay<T>(db: Database, ctx: WriteCtx, e: Pick<EventDraft, "project" | "target" | "kind">, load: () => T): WriteResult<T> | null {
-  if (ctx.dedupKey === "") throw new LedgerError("invalid", "dedupKey 不能是空字符串（不要幂等就别传）");
-  if (!ctx.dedupKey) return null;
-  const prev = getEventByDedup(db, ctx.dedupKey);
-  if (!prev) return null;
-  if (prev.project !== e.project || prev.target !== e.target || prev.kind !== e.kind) {
-    throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已用于 ${prev.project}/${prev.target || "(项目)"} 的 ${prev.kind} 事件`);
-  }
-  return { row: load(), event: prev, duplicate: true };
-}
 
 // ── 事项 ──
 
@@ -120,11 +91,16 @@ export function setItem(db: Database, ctx: WriteCtx, input: { project: string; i
 
 // ── 任务 ──
 
-const TASK_INSERT_COLS = ["id", "project", "itemId", "title", "kind", "stage", "round", "agent", "pm", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra"] as const;
+const TASK_INSERT_COLS = [
+  "id", "project", "itemId", "title", "kind", "stage", "round", "agent", "assigneeKind", "assignee",
+  "pm", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra",
+] as const;
 
 /** 插任务行并记建任务事件；eventStage = 事件里记的起始阶段（导入时行落在最终阶段、时间线从 eventStage 开始） */
 function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boolean, eventStage?: Stage, approx = false, fingerprint?: string): LedgerEvent {
-  const row: Record<string, unknown> = { specRev: 1, round: 0, extra: {}, ...input, stage: input.stage ?? "spec" };
+  const given = Object.fromEntries(Object.entries(input).filter(([k, v]) => v !== undefined && ["agent", "assigneeKind", "assignee"].includes(k)));
+  const assigned = resolveAssignee({ agent: null, assigneeKind: null, assignee: null }, given);
+  const row: Record<string, unknown> = { specRev: 1, round: 0, extra: {}, ...input, ...assigned, stage: input.stage ?? "spec" };
   const now = ctx.now ?? Date.now();
   db.prepare(
     `INSERT INTO tasks (${TASK_INSERT_COLS.join(", ")}, rev, createdAt, updatedAt) VALUES (${TASK_INSERT_COLS.map(() => "?").join(", ")}, 1, ?, ?)`,
@@ -166,7 +142,7 @@ export function importTask(db: Database, ctx: WriteCtx, input: ImportTaskInput):
   });
 }
 
-/** stage / round / stageBefore 只能经 moveStage 改；kind / project / id 建了就不变；agent / pm 只有 PM / master / owner 能改 */
+/** stage / round / stageBefore 只能经 moveStage 改；kind / project / id 建了就不变；agent / assignee* / pm 只有 PM / master / owner 能改 */
 export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: number; patch: TaskPatch }): WriteResult<LedgerTask> {
   return tx(db, () => {
     const cur = mustTask(db, input.id);
@@ -175,10 +151,12 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     if (dup) return dup;
     const patch = pick(input.patch as Record<string, unknown>, TASK_FIELDS, "任务");
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `任务 ${input.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
-    if (("agent" in patch || "pm" in patch) && !isManager(db, ctx.actor, cur)) throw new LedgerError("forbidden", `只有 PM / master / owner 能改任务 ${cur.id} 的 agent / pm`);
+    const people = ["agent", "assigneeKind", "assignee", "pm"].filter((k) => k in patch);
+    if (people.length && !isManager(db, ctx.actor, cur)) throw new LedgerError("forbidden", `只有 PM / master / owner 能改任务 ${cur.id} 的 ${people.join(" / ")}`);
     if ("itemId" in patch) checkItemRef(db, cur.project, patch.itemId);
-    const rev = updateTask(db, ctx, cur, patch);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch, rev } }, true);
+    const full = { ...patch, ...resolveAssignee(cur, patch) };
+    const rev = updateTask(db, ctx, cur, full);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: full, rev } }, true);
     return { row: mustTask(db, input.id), event, duplicate: false };
   });
 }
@@ -213,11 +191,15 @@ function applyMove(db: Database, ctx: WriteCtx, task: LedgerTask, move: StageMov
   return { task: mustTask(db, task.id), event };
 }
 
+/** 进 verified 只经 recordVerify（系统核对完成检查单）；从 blocked 回到原本就是 verified 的阶段不算「进」 */
+export const VERIFY_HINT = "进 verified 要跑 `ledger verify <task>`：系统核对完成检查单，全过才推（stage 不能直接推 verified）";
+
 export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; text?: string } & StageMove): WriteResult<LedgerTask> {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "stage" }, () => task);
     if (dup) return dup;
+    if (input.to === "verified" && task.stage !== "blocked") throw new LedgerError("forbidden", VERIFY_HINT, { stage: task.stage });
     const { task: row, event } = applyMove(db, ctx, task, input, true, input.text);
     return { row, event, duplicate: false };
   });
@@ -260,9 +242,34 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
   });
 }
 
+/**
+ * 完成检查单的结论（ledger-probes.ts 判好的）：记 verify 事件；pass 时同一事务推 live → verified。
+ * 角色由这里现算（只有 PM / master / owner），任务必须还在 live——采集事实期间被人推走了就 conflict，不记一条过期的结论；
+ * pass 还要在事务里再核一遍 checks（checksAllClear），调用方传错 result 也推不进去。
+ */
+export function recordVerify(
+  db: Database,
+  ctx: WriteCtx,
+  input: { taskId: string; result: "pass" | "fail" | "unknown"; data: Record<string, unknown>; text?: string },
+): WriteResult<LedgerTask> {
+  return tx(db, () => {
+    let task = mustTask(db, input.taskId);
+    const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "verify" }, () => task);
+    if (dup) return dup;
+    if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
+    if (task.stage !== "live") throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 live`, { stage: task.stage, rev: task.rev });
+    if (input.result === "pass" && !checksAllClear(input.data.checks, input.data.incomplete)) {
+      throw new LedgerError("invalid", "结论是 pass 但检查单不全 / 为空，或有没通过也没豁免的项");
+    }
+    const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "verify", text: input.text, data: { ...input.data, result: input.result } }, true);
+    if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false).task;
+    return { row: task, event, duplicate: false };
+  });
+}
+
 // ── 其它事件与项目级 ──
 
-/** note / decision / deploy / verify / rollback；target 为 "" 表示项目级 */
+/** note / decision / deploy / rollback（verify 只经 recordVerify）；target 为 "" 表示项目级 */
 export function appendEvent(
   db: Database,
   ctx: WriteCtx,
@@ -339,7 +346,10 @@ export function renameAgentRefs(db: Database, ctx: WriteCtx, from: string, to: s
     const tasks = (db.prepare("SELECT id FROM tasks WHERE agent = ? OR pm = ? ORDER BY id").all(from, from) as { id: string }[]).map((r) => r.id);
     for (const id of tasks) {
       const cur = mustTask(db, id);
-      const patch = { ...(cur.agent === from ? { agent: to } : {}), ...(cur.pm === from ? { pm: to } : {}) };
+      const patch = {
+        ...(cur.agent === from ? { agent: to, ...resolveAssignee(cur, { agent: to }) } : {}),
+        ...(cur.pm === from ? { pm: to } : {}),
+      };
       const rev = updateTask(db, ctx, cur, patch);
       insertEvent(db, ctx, { project: cur.project, target: id, kind: "task", data: { op: "set", patch, rev, rename: { from, to } } }, false);
     }

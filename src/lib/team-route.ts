@@ -15,7 +15,7 @@
 import { nextAfterReview, pmOf, type SpecPolicy } from "./ledger-handler.js";
 import { pathQuote, quoteExternal, refLike } from "./quote-text.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
-import type { TeamConfig } from "./ledger-store.js";
+import type { TeamConfig } from "./ledger-team-config.js";
 
 /** 同一任务审到第几轮还不通过就自动升级给 PM（07c 第 1 节） */
 const HARD_ROUND = 3;

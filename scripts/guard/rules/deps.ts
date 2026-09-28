@@ -2,7 +2,7 @@
 // 扫静态 import / export-from / 动态 import()（含无插值的模板字面量）/ require()；type-only 边不参与分层与环。
 // 在遮罩了字符串和注释的文本上匹配（字符串里的 import 不算），路径按下标回原文取。
 import { dirname, join, normalize } from "path";
-import { BRIDGE_HUBS, WATCHERS } from "../config.ts";
+import { BRIDGE_HUBS, TESTS_WEB_DOM, WATCHERS } from "../config.ts";
 import type { Counts, Files, RuleResult } from "../types.ts";
 import { maskStrings } from "./lex.ts";
 
@@ -71,7 +71,7 @@ function edgeViolations(e: Edge): string[] {
 
 const UI_PKG = /from\s+["'](react|react-dom|next(\/[^"']*)?)["']/;
 
-/** tests 只能 import web 里的纯模块：传递闭包里不能出现 react / next。 */
+/** tests 只能 import web 里的纯模块：传递闭包里不能出现 react / next（登记过的 TESTS_WEB_DOM 除外）。 */
 function webPure(files: Files, edges: Edge[], f: string, seen: Set<string>): boolean {
   if (seen.has(f)) return true;
   seen.add(f);
@@ -122,7 +122,7 @@ export function measureDeps(files: Files): RuleResult {
   const found = new Set<string>();
   for (const e of edges) for (const v of edgeViolations(e)) found.add(v);
   for (const e of edges) {
-    if (layerOf(e.from) === "tests" && layerOf(e.to) === "web" && !webPure(files, edges, e.to, new Set())) {
+    if (layerOf(e.from) === "tests" && layerOf(e.to) === "web" && !TESTS_WEB_DOM.test(e.from) && !webPure(files, edges, e.to, new Set())) {
       found.add(`tests-web-pure: ${e.from} -> ${e.to}`);
     }
   }

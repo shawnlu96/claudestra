@@ -25,7 +25,40 @@ export type AgentRuntime = "claude-code" | "pi" | "codex";
  * `agent-master` 绕过 master 排除），`manager.ts list` 这次踩的是另一头。
  */
 export function isMasterAgent(name: string | undefined | null): boolean {
-  return name === "master" || name === "agent-master";
+  return isMasterName(name);
+}
+
+/**
+ * master 的唯一判定：NFKC → 小写 → 去掉所有层 agent- 前缀 → master，网页的会话名 __master__ 也算。
+ * 请求里的名字会落到不区分大小写的文件系统（APFS：Master 的归档目录就是 master 的）、会被 manager 转小写，
+ * 全角写法经 NFKC 也会变回来——判定只要有一处比路由解析「窄」，"*" 就能从那个缺口碰到 master（tests/api-master-scope.test.ts）。
+ */
+export function isMasterName(name: string | undefined | null): boolean {
+  if (!name) return false;
+  const n = name.normalize("NFKC").toLowerCase().replace(/^(agent-)+/, "");
+  return n === "master" || n === "__master__";
+}
+
+/**
+ * agent 名里不许出现的字符（manager 新建 / resume / 改名与台账的负责人校验共用这一份）：空白、shell 元字符、控制字符，
+ * 以及 `/` `\` `:` `~`——agent 名会拼进归档目录、截图文件路径，带分隔符就能写到预期之外的位置；
+ * `.`——tmux 在目标串里按 `.` 切 pane，带点的窗口按名字永远找不到（tests/resumable-ops.test.ts）；
+ * 不可见字符（INVISIBLE_NAME_RE）让两个看起来一样的名字成了两个人。CJK 等 Unicode 字母允许。
+ */
+export const AGENT_NAME_BLOCKLIST_RE = /[\s"'`$;&|<>()*?{}\\/:~.\x00-\x1f\x7f\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/u;
+/**
+ * 不可见字符：\p{Cf}（零宽、方向控制）只是一部分，变体选择符 FE0F（Mn）、韩文填充符 U+3164（Lo）、CGJ 等在
+ * Default_Ignorable_Code_Point 里，盲文空格 U+2800 两边都不在、单列。带 FE0F 的 emoji 名字因此被拒（PM 09-29 定，可接受）。
+ * 只管新建 / resume / 改名与台账写入；kill / restart 走宽松归一，老名字照旧能操作。
+ */
+const INVISIBLE_NAME_RE = /[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/u;
+
+/** 名字里第一个不可见字符的报错（写出 U+XXXX，终端里看不出哪儿不对）；没有为 null */
+export function invisibleNameError(name: string): string | null {
+  const ch = INVISIBLE_NAME_RE.exec(name)?.[0];
+  if (ch === undefined) return null;
+  const code = `U+${(ch.codePointAt(0) as number).toString(16).toUpperCase().padStart(4, "0")}`;
+  return `名字不能含不可见字符（零宽连接符等），这里有 ${code}，请换一个名字（emoji 后面常带不可见的变体选择符 U+FE0F，去掉再试）`;
 }
 
 /**

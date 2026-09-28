@@ -208,11 +208,10 @@ describe("决定、部署、验证、回滚、冻结", () => {
     expect((await run(PM, "decision", "i10", "owner", "说", "开工")).event).toMatchObject({ text: "owner 说 开工", data: { transcribed: true } });
     expect(await run(EXE, "decision", "T8b", "x")).toMatchObject({ ok: false, code: "forbidden" });
   });
-  test("deploy / verify / rollback：PM 写，字段进 data；缺必填、取值不对报 invalid", async () => {
+  test("deploy / rollback：PM 写，字段进 data；缺必填报 invalid；verify 不再收手填的 --result", async () => {
     expect((await run(PM, "deploy", "T8b", "--version", "0d2e7a3", "--rollback-point", "12aa2a8")).event.data).toEqual({ version: "0d2e7a3", rollbackPoint: "12aa2a8" });
     expect(await run(PM, "deploy", "T8b")).toMatchObject({ ok: false, code: "invalid" });
-    expect((await run(PM, "verify", "T8b", "--result", "pass")).event.data).toEqual({ result: "pass", evidence: null });
-    expect(await run(PM, "verify", "T8b", "--result", "ok")).toMatchObject({ ok: false, code: "invalid" });
+    expect(await run(PM, "verify", "T8b", "--result", "pass")).toMatchObject({ ok: false, code: "invalid", error: "不认识的参数 --result" });
     expect((await run(PM, "rollback", "T8b", "--to", "12aa2a8")).event.data).toEqual({ to: "12aa2a8" });
     expect(await run(EXE, "rollback", "T8b")).toMatchObject({ ok: false, code: "forbidden" });
   });

@@ -4,11 +4,13 @@
  */
 import type { Database } from "bun:sqlite";
 import {
+  ASSIGNEE_KINDS,
   isStageOfKind,
   ITEM_STATUSES,
   roleOf,
   STAGES,
   TASK_KINDS,
+  type AssigneeKind,
   type ItemStatus,
   type LedgerEvent,
   type LedgerItem,
@@ -18,10 +20,12 @@ import {
   type TaskKind,
 } from "./ledger-stages.js";
 import { getItem, getMeta, getTask, LedgerError } from "./ledger-store.js";
+import { AGENT_NAME_BLOCKLIST_RE, invisibleNameError } from "./registry.js";
+import { FP_RE } from "./relay-protocol.js";
 
 /** specRev 不在里面：它只由阶段机（回退到 spec）维护 */
 export const ITEM_FIELDS = ["title", "ownerWords", "priority", "status", "oneLine", "next", "extra"] as const;
-export const TASK_FIELDS = ["title", "itemId", "agent", "pm", "branch", "pr", "headSHA", "spec", "model", "extra"] as const;
+export const TASK_FIELDS = ["title", "itemId", "agent", "assigneeKind", "assignee", "pm", "branch", "pr", "headSHA", "spec", "model", "extra"] as const;
 
 export type ItemPatch = Partial<Pick<LedgerItem, (typeof ITEM_FIELDS)[number]>>;
 export type TaskPatch = Partial<Pick<LedgerTask, (typeof TASK_FIELDS)[number]>>;
@@ -85,6 +89,8 @@ export interface NewTask {
   kind: TaskKind;
   itemId?: string | null;
   agent?: string | null;
+  assigneeKind?: AssigneeKind | null;
+  assignee?: string | null;
   pm?: string | null;
   branch?: string | null;
   pr?: string | null;
@@ -113,6 +119,77 @@ export function checkNewTask(db: Database, actor: string, input: NewTask): boole
   checkIdFree(db, input.id, "task");
   checkItemRef(db, input.project, input.itemId);
   return imported;
+}
+
+type Assignment = Pick<LedgerTask, "agent" | "assigneeKind" | "assignee">;
+/** registry 键的长度上限：manager 裸名 ≤ 48，加上 agent- 前缀留余量 */
+const AGENT_NAME_MAX = 64;
+/** 本机的人：owner 或 guest principal（lib/devices.ts 的 id 形状）；token principal 可能是 peer，不算人 */
+const HUMAN_RE = /^local:(owner:self|guest:[0-9a-f]{1,64})$/;
+
+/** 本机 agent 名：与 manager 建 agent 同一份黑名单（lib/registry.ts），owner 是身份保留名（master 就是大总管本人，可以） */
+function isAgentName(name: string): boolean {
+  return name.length > 0 && [...name].length <= AGENT_NAME_MAX && !AGENT_NAME_BLOCKLIST_RE.test(name) && name !== "owner";
+}
+
+/**
+ * assignee 的三种格式（docs 28-human-collab 附录 B-2）：agent = 本机 agent 名；human = local:<principalId>；
+ * peer_agent = <fp>/<agent>，fp 是对方实例的指纹——peer 的名字能改、会重名，不能当键。
+ * peer 的 agent 部分要求已归一（NFKC + 小写，CLI 负责归一），否则 fp/Agent-X 与 fp/agent-x 会被当成两个人。返回错误原因，合格为 null。
+ */
+export function assigneeFormatError(kind: AssigneeKind, who: string): string | null {
+  if (kind === "agent") return isAgentName(who) ? null : "本机 agent 名（不含空白、点号 .、引号、/ \\ : ~ 等，不能是 owner）";
+  if (kind === "human") return HUMAN_RE.test(who) ? null : "local:<principalId>，如 local:owner:self、local:guest:1a2b3c4d";
+  const slash = who.indexOf("/");
+  const agent = who.slice(slash + 1);
+  const ok = slash > 0 && FP_RE.test(who.slice(0, slash)) && isAgentName(agent) && agent === normalizePeerAgent(agent);
+  return ok ? null : "<fp>/<agent>，fp 是对方指纹（xxxx-xxxx-xxxx-xxxx 小写十六进制），agent 小写";
+}
+
+/** peer agent 名的归一：NFKC（全角 → 半角等）+ 小写 */
+export function normalizePeerAgent(name: string): string {
+  return name.normalize("NFKC").toLowerCase();
+}
+
+function checkAssignee(kind: unknown, who: string): void {
+  if (!ASSIGNEE_KINDS.includes(kind as AssigneeKind)) throw new LedgerError("invalid", `assigneeKind 只能是 ${ASSIGNEE_KINDS.join(" / ")}，收到 ${String(kind)}`);
+  const invisible = kind === "human" ? null : invisibleNameError(who);
+  if (invisible) throw new LedgerError("invalid", `${invisible}：${JSON.stringify(who)}`);
+  const err = assigneeFormatError(kind as AssigneeKind, who);
+  if (err) throw new LedgerError("invalid", `${String(kind)} 的 assignee 格式不对（要 ${err}）：${who}`);
+}
+
+/**
+ * 负责人三列的联动（改 / 建任务都经这里）：agent 列仍是执行者角色的依据（roleOf），所以 kind=agent 时 agent 与 assignee 同值，
+ * 人 / 别的实例上的 agent 在本机没有执行者身份，agent 置空。patch 里 agent 与 assignee* 不能同时出现（两个来源会打架）。
+ * 返回要写的列；patch 不涉及负责人时为空对象。
+ */
+export function resolveAssignee(cur: Assignment, patch: Record<string, unknown>): Partial<Assignment> {
+  const byAgent = "agent" in patch;
+  const byAssignee = "assignee" in patch || "assigneeKind" in patch;
+  if (byAgent && byAssignee) throw new LedgerError("invalid", "agent 与 assigneeKind / assignee 不能同时改：本机 agent 用其一即可");
+  if (byAgent) {
+    const agent = (patch.agent as string | null) || null;
+    if (agent) {
+      checkAssignee("agent", agent);
+      return { agent, assigneeKind: "agent", assignee: agent };
+    }
+    return cur.assigneeKind === "agent" || cur.assigneeKind === null ? { agent: null, assigneeKind: null, assignee: null } : { agent: null };
+  }
+  if (!byAssignee) return {};
+  const kind = ("assigneeKind" in patch ? patch.assigneeKind : cur.assigneeKind) as AssigneeKind | null;
+  const who = (("assignee" in patch ? patch.assignee : cur.assignee) as string | null) || null;
+  if (!who) {
+    if ("assigneeKind" in patch && patch.assigneeKind) throw new LedgerError("invalid", "给了 assigneeKind 就要同时给 assignee");
+    return { agent: null, assigneeKind: null, assignee: null };
+  }
+  if (!("assignee" in patch)) {
+    // 只给了类型：同类型等于没改（不拿旧 assignee 反推 agent——新旧代码混写过的行两列可能不一致），换类型必须带 assignee
+    if (kind === cur.assigneeKind) return {};
+    throw new LedgerError("invalid", "换负责人类型要同时给 assignee");
+  }
+  checkAssignee(kind, who);
+  return { agent: kind === "agent" ? who : null, assigneeKind: kind, assignee: who };
 }
 
 export interface WriteCtx {
@@ -175,8 +252,11 @@ export function checkReview(input: ReviewInput, task: LedgerTask): void {
   if (task.stage !== "review") throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，不在 review，不能记审查结论`, { stage: task.stage });
 }
 
-/** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生 */
-export const APPENDABLE_KINDS = ["note", "decision", "deploy", "verify", "rollback", "dispatch", "escalate"] as const;
+/**
+ * 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生，verify 只由 recordVerify 写（否则能伪造一条「检查通过」）；
+ * dispatch / escalate 由 `ledger dispatch` / `ledger escalate` 追加（编排班子）
+ */
+export const APPENDABLE_KINDS = ["note", "decision", "deploy", "rollback", "dispatch", "escalate"] as const;
 export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
 /**

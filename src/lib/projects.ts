@@ -149,15 +149,20 @@ export function resolveProjectForDirOrMain(
   if (hit) return hit;
   const main = mainOf(dir);
   if (!main || normalizeDir(main) === normalizeDir(dir)) return null;
-  // git 给的是真实路径（/tmp → /private/tmp、/var → /private/var），project 目录也换成真实路径再比
-  const real = projects.map((p) => ({ ...p, dirs: p.dirs.map((d) => realOr(normalizeDir(d))) }));
-  const hit2 = resolveProjectForDir(real, main);
-  return hit2 ? projects.find((p) => p.id === hit2.id) ?? null : null;
+  return resolveProjectForRealDir(projects, main);
 }
 
+/** 同 resolveProjectForDir，但两边都先换成真实路径（git 给的是真实路径：/tmp → /private/tmp、/var → /private/var） */
+export function resolveProjectForRealDir(projects: ProjectDef[], dir: string): ProjectDef | null {
+  const real = projects.map((p) => ({ ...p, dirs: p.dirs.map((d) => realOr(normalizeDir(d))) }));
+  const hit = resolveProjectForDir(real, realOr(normalizeDir(dir)));
+  return hit ? projects.find((p) => p.id === hit.id) ?? null : null;
+}
+
+/** .native：macOS 默认大小写不敏感，Node 的 JS 版 realpath 不规范大小写（Repos 与 repos 比不上）；Bun 下两者一致，用 .native 保险 */
 function realOr(p: string): string {
   try {
-    return realpathSync(p);
+    return realpathSync.native(p);
   } catch {
     return p; // 目录已不在：按原样比
   }

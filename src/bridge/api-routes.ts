@@ -13,6 +13,7 @@
 import { runtimeForSessionPath, sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
+import { apiMirrorBody, withAttachmentLines } from "../lib/inbound-body.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
 import {
@@ -33,7 +34,7 @@ import { TMP_DIR, MASTER_DIR, INBOX_DIR, REPO_ROOT, ALLOWED_USER_IDS } from "./c
 import {
   readPrincipals,
   agentInScope,
-  tokenIdOf,
+  tokenIdOf, isOwnerPrincipal,
   SlidingWindowLimiter,
   type Principal,
 } from "../lib/principals.js";
@@ -43,9 +44,10 @@ import { readPeers } from "../lib/peers.js";
 import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
 import { readConfig as readAppConfig, setAutoCompact } from "../lib/config-store.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 import { nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
-import { collectSessions } from "./sessions-inventory.js";
+import { collectSessions, visibleSessions } from "./sessions-inventory.js";
+import { archivedOnlyAgent, isMasterSessionFile, locateSessionFile, masterSessionsAllowed } from "./session-file.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -104,7 +106,6 @@ function isPathSafeName(x: string): boolean {
 
 // master 不在 registry，从 env 读其控制频道 id（各端点的 master 特判用）
 const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
-
 
 // ── API 会话状态（v2.6.0+，原 bridge.ts Phase B 区块） ──────────────────
 
@@ -532,29 +533,19 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。
-  // scope 规则：全权 token（"*"）看全部（含野生会话）；受限 token 只看 scope
-  // 内 agent 的正式会话及其分身。
+  // scope 规则见 sessions-inventory.ts visibleSessions：只有全权凭据看得到野生会话。
   if (path === "/sessions" && req.method === "GET") {
     const list = await collectSessions();
     if (list === null) return apiJson(503, { ok: false, error: "claude agents --json unavailable" });
-    const full = principal.agents.includes("*");
-    const visible = full
-      ? list
-      : list.filter((s) => {
-          const owner = s.registeredAgent ?? s.doppelgangerOf;
-          return owner ? agentInScope(principal, owner) : false;
-        });
-    return apiJson(200, { ok: true, sessions: visible });
+    return apiJson(200, { ok: true, sessions: visibleSessions(list, principal, MASTER_DIR) });
   }
 
   // GET /api/v1/remote-access —— 网页「手机访问」面板：Tailscale 状态、每个入口（可达 / 证书剩余天数）、
   // 建议。只读：绝不在这里配 serve 或改任何机器配置（那只在 setup 的交互终端里、经用户同意做）。
-  // 全权 token：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。peer token 即便是 `*`
-  // 也拒：那是另一台 Claudestra，本机的网络盘点不该给它。
+  // 全权凭据：返回里有 tailnet 主机名、CLI 路径、监听地址这些机器信息。guest、peer 即便 scope 是 `*`
+  // 也拒（isFullScope 不认它们）：本机的网络盘点不该给别人。
   if (path === "/remote-access" && req.method === "GET") {
-    if (!principal.agents.includes("*") || principal.peer) {
-      return apiJson(403, { ok: false, error: "remote-access requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("remote-access requires a full-scope token");
     const { remoteAccessSnapshot } = await import("../lib/tailscale.js");
     const { readFrontendPort } = await import("../lib/doctor-remote.js");
     try {
@@ -582,9 +573,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // NeutralSessionInfo）；这个是 manager 扫盘得到的**会话历史清单**（含未纳管的
   // pi-web / 终端手敲的 Pi 会话），供 web 端「会话列表」用。仅全权 token。
   if (path === "/session-list" && req.method === "GET") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "session-list requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("session-list requires a full-scope token");
     const r = await runManager("sessions");
     if (!r?.ok) return apiJson(500, { ok: false, error: r?.error || "manager sessions failed" });
     // 标出哪些已经纳管（有 registry 条目）—— Web 端据此决定「收编」还是「打开对话」
@@ -603,7 +592,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
   // v2.24+ GET /api/v1/runtimes —— 可建 agent 的运行时 + 本机能不能用（见 lib/runtimes/catalog.ts）
   if (path === "/runtimes" && req.method === "GET") {
-    if (!principal.agents.includes("*")) return apiJson(403, { ok: false, error: "runtimes requires a full-scope token" });
+    if (!isFullScope(principal)) return forbidden("runtimes requires a full-scope token");
     return apiJson(200, { ok: true, runtimes: await runtimeCatalog() });
   }
 
@@ -675,7 +664,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!agentInScope(principal, name)) return apiJson(403, { ok: false, error: "agent out of scope" });
     // 大总管不参与归档（它是常驻调度器；把它归档掉 = 侧栏消失，2026-09-14 我的测试脚本
     // 误选它当靶子，正好验证了这个坑必须堵）
-    if (String(name).replace(/^agent-/, "") === "master") {
+    if (isMasterName(name)) {
       return apiJson(400, { ok: false, error: "master 不参与归档" });
     }
     // **归档 = 分类**（owner 2026-09-14「他不是只是一个显示逻辑和分类问题吗」）：
@@ -869,17 +858,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!action) return apiJson(400, { ok: false, error: 'body must be {"action":"archive"|"delete"}' });
     const mRuntime = typeof mbody?.runtime === "string" ? mbody.runtime : undefined;
     const mCwd = typeof mbody?.cwd === "string" ? mbody.cwd : undefined;
-    // 定位口径与 /sessions/:id/history 完全一致（Pi 文件名带时间戳，光有 id 推不出路径）
-    let mfile = mCwd ? sessionJsonlPath(mRuntime, mCwd, sid) : null;
-    if (!mfile || !existsSync(mfile)) {
-      mfile =
-        findSessionJsonlBySessionId(mRuntime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid) ??
-        findSessionJsonlBySessionId("codex", sid);
-    }
-    if (!mfile || !existsSync(mfile)) {
-      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    }
+    const mfile = locateSessionFile(sid, mRuntime, mCwd); // 定位口径与 /sessions/:id/history 同一个函数
+    if (!mfile) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
+    if (isMasterSessionFile(mfile, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master");
     const fsp = await import("node:fs/promises");
     try {
       const st = await fsp.stat(mfile);
@@ -920,17 +901,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const cwd = url.searchParams.get("cwd") || undefined;
     const limit = Math.min(Number(url.searchParams.get("limit") || 100) || 100, 500);
     const before = url.searchParams.get("before");
-    // 定位：先按 cwd+runtime 精确推，再两种 runtime 各自全库兜底扫
-    let file = cwd ? sessionJsonlPath(runtime, cwd, sid) : null;
-    if (!file || !existsSync(file)) {
-      file =
-        findSessionJsonlBySessionId(runtime ?? "pi", sid) ??
-        findSessionJsonlBySessionId("claude-code", sid) ??
-        findSessionJsonlBySessionId("codex", sid);
-    }
-    if (!file || !existsSync(file)) {
-      return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
-    }
+    const file = locateSessionFile(sid, runtime, cwd);
+    if (!file) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
+    if (isMasterSessionFile(file, MASTER_DIR) && !masterSessionsAllowed(principal)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
     const page = await readSessionHistory(file, {
       limit,
       ...(before ? { before: Number(before) } : {}),
@@ -941,7 +914,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // GET /api/v1/events —— token 版 SSE（scope 过滤）
   if (path === "/events" && req.method === "GET") {
     // 逐条过滤：agent 事件按 agentInScope（"*" 不含 master、peer 永不含 master、前缀双认），ledger 事件只给 canReadLedger（bridge/ledger-feed.ts）
-    return revocable(deps.handleEventsRequest(req, { allow: sseEventAllow(principal) }), principal); // 设备凭据一撤，这条 SSE 立刻断（credential-revocation.ts）
+    return revocable(deps.handleEventsRequest(req, { allow: sseEventAllow(principal, url.searchParams.get("types")?.split(",")) }), principal); // 凭据一撤就断
   }
 
   // GET /api/v1/whoami —— 调用方自己的 token 身份（web 推送只推自己的对话）；ownerIds = 本人的 Discord 账号（ALLOWED_USER_IDS 第一个 = 装机时填的自己），web 据此把本人从 Discord 发的也放右边；不告诉 peer
@@ -1124,9 +1097,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const histListMatch = path.match(/^\/agents\/([^/]+)\/history$/);
   if (histListMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(histListMatch[1]);
-    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isPathSafeName(agentParam) || !inScopeEitherName(principal, agentParam)) return notInScope(agentParam); // 名字会拼进归档路径（%2F → /）
     const agent = await findHistoryAgent(agentParam);
-    const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
+    const canonical = agent?.name ?? archivedOnlyAgent(agentParam); // 查不到时只认逐字同名的归档目录（bridge/session-file.ts）
+    if (!canonical) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found (no registry entry, no archives)` });
     const sessions = await listAgentSessions(canonical, {
       cwd: agent?.cwd,
       currentSessionId: agent?.sessionId,
@@ -1147,11 +1121,12 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const histSessMatch = path.match(/^\/agents\/([^/]+)\/history\/([^/]+)$/);
   if (histSessMatch && req.method === "GET") {
     const agentParam = decodeURIComponent(histSessMatch[1]);
-    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isPathSafeName(agentParam) || !inScopeEitherName(principal, agentParam)) return notInScope(agentParam); // 名字会拼进归档路径（%2F → /）
     const sid = decodeURIComponent(histSessMatch[2]);
     if (!isValidSessionId(sid)) return apiJson(400, { ok: false, error: "invalid sessionId" });
     const agent = await findHistoryAgent(agentParam);
-    const canonical = agent?.name ?? (agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`);
+    const canonical = agent?.name ?? archivedOnlyAgent(agentParam); // 查不到时只认逐字同名的归档目录（bridge/session-file.ts）
+    if (!canonical) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found (no registry entry, no archives)` });
     // 热路径快捷:请求的就是当前活 session → 直接推 live 路径,跳过归档目录扫描
     // (listAgentSessions 每次 stat 全部归档快照 + 子 agent 目录;差量同步 100% 走这条)
     let found: { sessionId: string; source: "live" | "archive"; path: string } | undefined;
@@ -1239,8 +1214,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const form = await req.formData();
         text = String(form.get("text") || "");
         waitSec = Number(form.get("wait") || 0);
-        const inboxDir = INBOX_DIR;
-        await Bun.spawn(["mkdir", "-p", inboxDir]).exited;
+        await Bun.spawn(["mkdir", "-p", INBOX_DIR]).exited;
         // 不用 `f is File` 类型谓词：Bun 的全局 File 与 node:buffer 的 File 在类型
         // 上不兼容（缺 webkitRelativePath/slice），谓词写法会被 tsc 拒。运行时判据
         // 仍是 instanceof File，只是把窄化交给 typeof 排除字符串项。
@@ -1250,7 +1224,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
-          const dest = `${inboxDir}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;
+          const dest = `${INBOX_DIR}/api_${Date.now()}_${f.name.replace(/[^\w.\-]/g, "_")}`;
           await Bun.write(dest, f);
           attachments.push(dest);
         }
@@ -1262,10 +1236,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     } catch {
       return apiJson(400, { ok: false, error: "invalid body (JSON {text, wait?} or multipart with text/files)" });
     }
-    if (!text.trim() && attachments.length === 0) {
-      return apiJson(400, { ok: false, error: "text is required" });
-    }
+    if (!text.trim() && attachments.length === 0) return apiJson(400, { ok: false, error: "text is required" });
     waitSec = Math.min(Math.max(waitSec, 0), 300);
+    if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
     // Web slash 直通：文本形如 "/cmd [args]" 且命中注册表 → tmux 字面注入
     // （CC 原生解释，与 Discord slash 同款 tmuxSendLine 路径）。未命中注册表的
@@ -1329,10 +1302,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
     const env: Envelope = {
-      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}) },
+      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}), ...(isOwnerPrincipal(principal) ? { owner: true } : {}) },
       to: { kind: "local", agentName: agent.name, channelId: agent.channelId, ws: client.ws as any, cwd: client.cwd },
       intent: "request",
-      content: text,
+      content: withAttachmentLines(text, attachments), // 附件照 Discord 入口写进正文：Pi 只认正文，历史/直播靠它还原缩略图
       meta: {
         messageId: `api_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         triggerKind: "system",
@@ -1367,8 +1340,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     }
 
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
-    // R2 入站镜像
-    deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${text}`).catch(() => {});
+    // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
+    deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
     deps.startTypingWithSafety(agent.channelId);
     // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
     deps.lastMessageSource.set(agent.channelId, "agent");
@@ -1437,7 +1410,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const evAgentInt =
       agentNameForChannel(agent.channelId) ||
       (agent.channelId === CONTROL_CHANNEL_ID ? "master" : agent.name);
-    emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt" } });
+    emitEvent({ agent: evAgentInt, chatId: agent.channelId, type: "agent_status", data: { status: "done", trigger: "interrupt", ...(principal.peer ? { peer: principal.peer } : {}) } });
     console.log(`⚡ [api] ${sent.length ? "打断键已发送" : "当前空闲，未发打断键"}：${agent.name} (token=${tokenId})`);
     return apiJson(200, { ok: true, agent: agent.name, ...(sent.length ? {} : { idle: true }) }); // done 照发：前端误判忙时借此解锁
   }
@@ -1450,6 +1423,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (clearMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(clearMatch[1]);
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isFullScope(principal)) return forbidden("clear requires a full-scope token"); // 清掉的是 owner 的上下文
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const isMasterClear = agent.name === "master";
@@ -1492,6 +1466,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (claudeSetMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(claudeSetMatch[1]);
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isFullScope(principal)) return forbidden("claude-settings requires a full-scope token"); // 与 pi/codex-settings 同一门（bridge/runtime-settings-routes.ts）
     const body: any = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
     const model = typeof body?.model === "string" && body.model.trim() ? resolveModelAlias(body.model) : undefined;
@@ -1604,13 +1579,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, { ok: true, agent: agent.name, model: model ?? null, effort: effort ?? null, ...(warnings.length ? { warning: warnings.join("；") } : {}) });
   }
 
-  // POST /api/v1/agents/:name/answer —— 交互卡回传。
-  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]}
-  //   或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
+  // POST /api/v1/agents/:name/answer —— 交互卡回传。只给 owner 本人：批准权限弹框、替 agent 回答 = 以 owner 名义拍板（与 ask-entry.ts canAnswerAsk 同一判定）
+  // body {kind:"auq", action:"submit"|"cancel", selections?: number[][]} 或 {kind:"permission", action:"allow"|"allow_session"|"deny"}
   const answerMatch = path.match(/^\/agents\/([^/]+)\/answer$/);
   if (answerMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(answerMatch[1]);
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!isOwnerPrincipal(principal)) return forbidden("answering requires the owner's own credential");
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
     const body: any = await readJsonBody(req);
@@ -1628,7 +1603,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         } catch { /* non-critical：状态照清 */ }
         clearAuqState(agent.channelId);
         recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api", by: tokenId, credential: principal.credential } });
         return apiJson(200, { ok: true, cancelled: true });
       }
       // submit：body.selections 覆盖状态（web 前端一次性提交所有选择）
@@ -1651,7 +1626,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       const auqParse = auqPane ? parseAuqPane(auqPane) : null;
       if (auqPane && !auqParse) {
         clearAuqState(agent.channelId);
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
+        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api", by: tokenId, credential: principal.credential } });
         return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
       }
       const keys = buildAuqKeystrokes(state, auqParse);
@@ -1663,17 +1638,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       }
       clearAuqState(agent.channelId);
       recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
-      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
+      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api", by: tokenId, credential: principal.credential } });
       return apiJson(200, { ok: true, keys: keys.length });
     }
 
     if (kind === "permission") {
       const action = String(body?.action || "");
-      const keySeqMap: Record<string, string[]> = {
-        allow: ["1", "Enter"],
-        allow_session: ["2", "Enter"],
-        deny: ["3", "Enter"],
-      };
+      const keySeqMap: Record<string, string[]> = { allow: ["1", "Enter"], allow_session: ["2", "Enter"], deny: ["3", "Enter"] };
       const keySeq = keySeqMap[action];
       if (!keySeq) return apiJson(400, { ok: false, error: 'action must be "allow" | "allow_session" | "deny"' });
       const targetWindow = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
@@ -1687,6 +1658,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       } catch (e) {
         return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
       }
+      // 「待你处理」里对应的权限 ask 记成是谁答的（ask-runtime.ts），不然弹框消失时会被当成撤销——网页里所有权限卡都走这里
+      void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", agent.channelId, "interact", m.permissionLabel(action), { principal: tokenId, device: principal.credential }));
       return apiJson(200, { ok: true });
     }
 
@@ -1775,9 +1748,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // 两种 runtime 都支持（Pi 走 resume --runtime pi，会话 id 是 open-or-create）。
   // 耗时（起 tmux 窗口 + 等就绪）→ 202 后台执行，结果进事件流。
   if (path === "/agents/resume" && req.method === "POST") {
-    if (!principal.agents.includes("*")) {
-      return apiJson(403, { ok: false, error: "resume requires a full-scope token" });
-    }
+    if (!isFullScope(principal)) return forbidden("resume requires a full-scope token"); // takeover 会 SIGTERM owner 正在跑的 CC；scope 为 * 的 guest / peer 不算全权
     let body: any;
     try {
       body = await req.json();
@@ -1894,8 +1865,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (lifecycleMatch && req.method === "POST") {
     if (!isFullScope(principal)) return forbidden(`${lifecycleMatch[2]} requires a full-scope token`);
     const agentParam = decodeURIComponent(lifecycleMatch[1]);
-    if (agentParam === "master") return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
-    const r = await runManager(lifecycleMatch[2], agentParam);
+    if (isMasterName(agentParam)) return apiJson(400, { ok: false, error: "master lifecycle is managed by the launcher" });
+    if (firstFlagLikeField({ name: agentParam })) return apiJson(400, { ok: false, error: 'agent name must not start with "-"' });
+    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    const r = await runManager(lifecycleMatch[2], "--", agentParam); // `--` 之后只当名字：`--include-master` 当名字传进来也不会变成开关
     return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: `manager ${lifecycleMatch[2]} failed` });
   }
 

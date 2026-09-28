@@ -4,6 +4,7 @@ import { fmtAgo } from "../fmt-time";
 import { getLang, useT } from "@/lib/i18n";
 import { sessionHistory, sessionHistoryError, sessionList, sessionManage } from "@/lib/api/system";
 import { RuntimeBadge } from "./runtime-badge";
+import { SidebarSectionHeader } from "./sidebar-section-header";
 import { AdoptPanel } from "./adopt-panel";
 import { nestSubSessions, SessionName, sessionRowKey, type SubSessionInfo } from "./session-name";
 
@@ -229,53 +230,7 @@ export function UnmanagedSessions() {
 
   return (
     <li className="mx-2 mt-1 rounded-xl bg-base-300/25 p-1 list-none">
-      <div className="flex w-full items-center">
-        <button
-          type="button"
-          className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
-          onClick={toggle}
-          aria-expanded={open}
-        >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={`shrink-0 text-base-content/40 transition-transform ${open ? "" : "-rotate-90"}`}
-          >
-            <path d="m6 9 6 6 6-6" />
-          </svg>
-          <span className="shrink-0 text-[13px] opacity-80">{open ? "🗂" : "🗂"}</span>
-          <span className="truncate">{t("未纳管会话")}</span>
-          {/* 折叠态也给计数：不给条数用户没有点开的动机（视觉审查 P1） */}
-          {count !== null ? (
-            <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{count}</span>
-          ) : loading ? (
-            <span className="ml-auto loading loading-spinner loading-xs" />
-          ) : null}
-        </button>
-        {/* 触摸目标：原先只有 px-1.5 的裸字符（≈14×20px），手机上点不中 ——
-            而且紧挨折叠按钮，手指落点全被邻居吃掉（owner 2026-09-14 实报）。
-            给 36×36 的格子（iOS 建议 44，列表头里 36 是合理折中）+ touch-manipulation */}
-        {open ? (
-          <button
-            type="button"
-            className="grid size-9 shrink-0 touch-manipulation place-items-center rounded-md text-base text-base-content/45 transition-colors hover:text-base-content/80 active:bg-base-200/70"
-            title={t("刷新")}
-            disabled={loading}
-            onClick={(e) => {
-              e.stopPropagation();
-              void load();
-            }}
-          >
-            ⟳
-          </button>
-        ) : null}
-      </div>
+      <SidebarSectionHeader icon="🗂" label={t("未纳管会话")} open={open} onToggle={toggle} count={count} loading={loading} onRefresh={() => void load()} />
       {open ? (
         <div className="pb-1">
           {error ? (
