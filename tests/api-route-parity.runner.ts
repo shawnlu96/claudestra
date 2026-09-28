@@ -19,6 +19,8 @@ interface Spec {
   method: string;
   path: string;
   token?: "full" | "scoped" | "bogus";
+  /** 自带凭据（优先于 token）：Bearer secret，或设备 cookie 里的 dev_ token；对应的 principal 由 RUNNER_PRINCIPALS 追加 */
+  auth?: { bearer?: string; device?: string };
   body?: string;
   /** 在本进程 pid 上伪造一条「活的 interactive Claude Code」登记，sessionId 取这个值 */
   liveSession?: string;
@@ -36,6 +38,7 @@ writeFileSync(
     principals: [
       { id: "token:tok_full", role: "owner", name: "full", agents: ["*"], secret: "s-full", createdAt: "2026-01-01T00:00:00Z" },
       { id: "token:tok_scoped", role: "external", name: "scoped", agents: ["a1"], secret: "s-scoped", createdAt: "2026-01-01T00:00:00Z" },
+      ...JSON.parse(process.env.RUNNER_PRINCIPALS || "[]"),
     ],
   }),
 );
@@ -73,7 +76,9 @@ for (const s of specs) {
     );
   }
   const headers: Record<string, string> = {};
-  if (s.token) headers.Authorization = `Bearer ${s.token === "full" ? "s-full" : s.token === "scoped" ? "s-scoped" : "nope"}`;
+  if (s.auth?.device) Object.assign(headers, { Cookie: `cstra_dev=${s.auth.device}`, "x-cstra-device": "1" });
+  else if (s.auth?.bearer) headers.Authorization = `Bearer ${s.auth.bearer}`;
+  else if (s.token) headers.Authorization = `Bearer ${s.token === "full" ? "s-full" : s.token === "scoped" ? "s-scoped" : "nope"}`;
   if (s.body !== undefined) headers["Content-Type"] = "application/json";
   const url = `http://127.0.0.1:3847${s.path}`;
   const req = new Request(url, { method: s.method, headers, body: s.body });
