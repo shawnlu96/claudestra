@@ -20,6 +20,7 @@ import { piProviderEntries } from "../lib/quota-pi.js";
 import { QuotaScheduler, type RefreshResult } from "../lib/quota-scheduler.js";
 import { fileQuotaStore } from "../lib/quota-state.js";
 import { readUsageCacheStale } from "../lib/usage-cache.js";
+import { makeVersionCache, probeInstalled } from "../lib/update-hints.js";
 import { currentUsageWindow } from "../lib/usage-window.js";
 import { machineUsage } from "./machine-usage.js";
 import { runReminders, type ReminderSenders } from "./quota-reminders.js";
@@ -66,7 +67,16 @@ export function createQuotaService(d: QuotaServiceDeps) {
 
   const viewing = () => lastViewedAt !== null && d.now() - lastViewedAt < QUOTA_CADENCE.viewWindowMs;
 
+  /** 总开关现读（手改 config.json、文件坏了按关）：由开变关时同样让在途结果作废 */
+  function syncEnabled(): void {
+    const v = d.readEnabled();
+    if (v === enabled) return;
+    enabled = v;
+    if (!v) scheduler.onDisabled();
+  }
+
   async function tickOnce(): Promise<void> {
+    syncEnabled();
     try {
       await scheduler.tick({ viewing: viewing() });
       if (enabled) await d.afterTick(scheduler);
@@ -86,6 +96,7 @@ export function createQuotaService(d: QuotaServiceDeps) {
   }
 
   async function snapshot(): Promise<QuotaView> {
+    syncEnabled();
     const wasViewing = viewing();
     lastViewedAt = d.now();
     if (!wasViewing) {
@@ -147,6 +158,17 @@ export function createQuotaService(d: QuotaServiceDeps) {
 
 export type QuotaService = ReturnType<typeof createQuotaService>;
 
+/**
+ * 本机实际装的 Claude Code 版本（按登录 shell 的 PATH 解析，与 agent 跑的是同一个 claude；launcher 体检同口径）：
+ * 拼 Claude 请求的客户端身份头。6 小时重探一次赶上自动升级；探不到返回 null，请求不带身份头。
+ */
+const CC_VERSION = { key: "quota:installed:claude", ttl: 6 * 60 * 60_000, load: () => probeInstalled("claude") };
+const ccVersions = makeVersionCache();
+async function claudeClientVersion(): Promise<string | null> {
+  await ccVersions.refresh([CC_VERSION]);
+  return ccVersions.get(CC_VERSION.key) ?? null;
+}
+
 /** 生产依赖：真凭据、真 fetch、quota-state.json、config.json */
 function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
   const cred = defaultCredDeps();
@@ -166,6 +188,7 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
     store: fileQuotaStore(),
     isEnabled,
     claudeBackground: () => readConfigSync().quotaClaudeBackground !== false,
+    claudeClientVersion,
   });
 }
 
@@ -200,10 +223,11 @@ export function controlChannelSender(deliver: (env: Envelope) => Promise<Deliver
 export function startQuotaService(senders: ReminderSenders): QuotaService {
   if (service) return service;
   const afterTick: QuotaServiceDeps["afterTick"] = (sch) => runReminders(sch, senders, Date.now());
+  void claudeClientVersion(); // 预热：打开看板的第一次查询就能带上身份头（探测失败只是这一轮不带，makeVersionCache 自己记日志）
   service = createQuotaService({
     now: Date.now,
     makeScheduler: productionScheduler,
-    readEnabled: () => readConfigSync().quotaLive !== false,
+    readEnabled: () => readConfigSync().quotaLive !== false, // 缺省开；文件坏了 safeConfigOnCorrupt 给 false
     writeEnabled: async (v) => void (await setQuotaLive(v)),
     local: productionLocal,
     afterTick,

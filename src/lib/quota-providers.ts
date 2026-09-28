@@ -112,10 +112,26 @@ function discardBody(res: Response): void {
   res.body?.cancel().catch(() => {}); // 只是释放连接，失败不影响已经定下的错误码
 }
 
+/**
+ * Claude Code 的客户端身份头：不带时 cedar_ember 回 eligible:false / ineligible_reason:"surface"（看不到重置卡）。
+ * 版本号取本机实际装的 CC（调用方探测后传入）；探不到就一个都不带，不编假版本。
+ */
+export function claudeClientHeaders(version: string | null): Record<string, string> {
+  if (!version || !/^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(version)) return {};
+  return { "User-Agent": `claude-cli/${version} (external, cli)`, "anthropic-beta": "oauth-2025-04-20" };
+}
+
+/** 额外请求头只放行这两个名字、只给 Claude、值只收可打印 ASCII：别的头（尤其 Authorization）加不进来 */
+const CLIENT_HEADER_NAMES = new Set(["user-agent", "anthropic-beta"]);
+function pickClientHeaders(cred: QuotaCredential, extra: Record<string, string> | undefined): Record<string, string> {
+  if (cred.provider !== "claude" || !extra) return {};
+  return Object.fromEntries(Object.entries(extra).filter(([k, v]) => CLIENT_HEADER_NAMES.has(k.toLowerCase()) && /^[\x20-\x7e]{1,100}$/.test(v)));
+}
+
 export async function getQuota<E extends QuotaEndpoint>(
   endpoint: E,
   cred: QuotaCredential,
-  deps: { fetch: QuotaFetch; now: () => number; timeoutMs?: number; hashCreditId: (rawId: string) => string },
+  deps: { fetch: QuotaFetch; now: () => number; timeoutMs?: number; hashCreditId: (rawId: string) => string; clientHeaders?: Record<string, string> },
 ): Promise<FetchOutcome<DtoMap[E]>> {
   const target = QUOTA_ENDPOINTS[endpoint];
   if (!target || target.provider !== cred.provider) throw new Error(`quota endpoint ${endpoint} 与凭据 ${cred.provider} 不匹配`);
@@ -127,7 +143,7 @@ export async function getQuota<E extends QuotaEndpoint>(
     try {
       res = await deps.fetch(target.url, {
         method: "GET",
-        headers: { Accept: "application/json", ...cred.authHeaders() },
+        headers: { Accept: "application/json", ...pickClientHeaders(cred, deps.clientHeaders), ...cred.authHeaders() },
         redirect: "manual",
         signal: ctrl.signal,
       });

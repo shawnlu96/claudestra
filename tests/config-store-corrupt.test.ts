@@ -30,6 +30,15 @@ describe("config-store 坏文件", () => {
     expect(JSON.parse(r.out)).toEqual({ claudestra: true, claudeCode: true });
   });
 
+  test("订阅额度的两个开关：不存在 → 缺省（字段缺席，服务按开）；损坏 → 一律关（不读凭据）", () => {
+    const missing = run(mkdtempSync(join(tmpdir(), "cfg-q-missing-")), `const q = c.readConfigSync(); console.log(JSON.stringify([q.quotaLive ?? null, q.quotaClaudeBackground ?? null]));`);
+    expect(JSON.parse(missing.out)).toEqual([null, null]);
+    const dir = mkdtempSync(join(tmpdir(), "cfg-q-bad-"));
+    writeFileSync(join(dir, "config.json"), "{bad");
+    const bad = run(dir, `const q = c.readConfigSync(); console.log(JSON.stringify([q.quotaLive, q.quotaClaudeBackground]));`);
+    expect(JSON.parse(bad.out)).toEqual([false, false]);
+  });
+
   test("损坏 → 同步/异步读都返回自动更新全关，并在 stderr 留痕", () => {
     const dir = mkdtempSync(join(tmpdir(), "cfg-bad-"));
     writeFileSync(join(dir, "config.json"), "{bad");

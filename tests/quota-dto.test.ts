@@ -68,6 +68,7 @@ describe("Claude 重置卡（cedar_ember）", () => {
     const d = parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: cedarEmberBlock() }, (id) => (seen.push(id), `h${seen.length}`));
     expect(d?.resets).toEqual({
       eligible: true,
+      ineligibleReason: null,
       atLimit: false,
       grants: [
         { key: "h1", resetsLeft: 1, resetsTotal: 3, endsAtMs: Date.parse("2026-10-01T09:00:00Z"), paused: false, usableNow: false, requiresLimit: true },
@@ -76,6 +77,13 @@ describe("Claude 重置卡（cedar_ember）", () => {
     });
     expect(seen).toEqual(GRANT_IDS);
     expectNoSentinel(JSON.stringify(d));
+  });
+
+  test("入口不合格（没带 Claude Code 身份头 → surface）：eligible false + 原因，grants 空；原因过正则", () => {
+    const block = { eligible: false, ineligible_reason: "surface", at_limit: false, grants: [] };
+    expect(parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: block }, hash)?.resets).toEqual({ eligible: false, ineligibleReason: "surface", atLimit: false, grants: [] });
+    const weird = parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: { ...block, ineligible_reason: "<b>x</b>" } }, hash);
+    expect(weird?.resets?.ineligibleReason).toBeNull();
   });
 
   test("ends_at 为空或缺席 = 无截止日，卡照样保留；给了却认不出才丢", () => {

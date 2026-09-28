@@ -98,3 +98,88 @@ describe("写盘", () => {
   });
 });
 
+
+describe("凭据失败的节奏（对抗式审查 P2）", () => {
+  const bg12h = async (setup: (h: Harness) => void, stepMs = 5 * MIN) => {
+    const h = harness();
+    h.claudeBg = true;
+    setup(h);
+    for (let t = 0; t < 12 * HOUR; t += stepMs) {
+      await h.scheduler.tick({ viewing: false });
+      h.advance(stepMs);
+    }
+    return h;
+  };
+
+  test("后台遇到 Keychain 超时 / 出错：不永久停，按 6 小时节奏重试（12 小时 ≤ 2 次）", async () => {
+    for (const status of ["timeout", "error"] as const) {
+      const h = await bg12h((x) => (x.cd.keychain = { status }));
+      expect(h.cd.keychainCalls.length).toBe(2);
+    }
+  });
+
+  test("Keychain 连续被拒 2 次：后台也停，等用户重试；用户重试解除", async () => {
+    const h = harness();
+    h.claudeBg = true;
+    h.cd.keychain = { status: "denied" };
+    for (let t = 0; t < 24 * HOUR; t += 5 * MIN) {
+      await h.scheduler.tick({ viewing: false });
+      h.advance(5 * MIN);
+    }
+    expect(h.cd.keychainCalls.length).toBe(2);
+    h.cd.keychain = { status: "ok", stdout: keychainBlob() + "\n" };
+    expect((await h.scheduler.refresh("claude", "user_retry")).status).toBe("fetched");
+  });
+
+  test("凭据失败时用户重试也守 60 秒；读完 Keychain 才出错的（条目认不出）看板开着至少 5 分钟才再读", async () => {
+    const h = harness();
+    h.cd.keychain = { status: "ok", stdout: "not-json\n" };
+    expect((await h.scheduler.refresh("claude", "user_retry")).status).toBe("failed");
+    h.advance(20_000);
+    expect((await h.scheduler.refresh("claude", "user_retry")).status).toBe("skipped_interval");
+    expect(h.cd.keychainCalls).toHaveLength(1);
+    for (let i = 0; i < 4; i++) {
+      h.advance(MIN);
+      await h.scheduler.tick({ viewing: true });
+    }
+    expect(h.cd.keychainCalls).toHaveLength(1); // 4 分 20 秒内看板一直开着也不再读
+    h.advance(MIN);
+    await h.scheduler.tick({ viewing: true });
+    expect(h.cd.keychainCalls).toHaveLength(2);
+  });
+
+  test("时钟前跳一年又拨回：上次尝试记在未来就按现在重置，48 小时内后台照常读", async () => {
+    const h = harness();
+    h.claudeBg = true;
+    h.advance(365 * 24 * HOUR);
+    await h.scheduler.tick({ viewing: false });
+    const afterJump = h.cd.keychainCalls.length;
+    expect(afterJump).toBe(1);
+    h.advance(-365 * 24 * HOUR);
+    for (let t = 0; t < 48 * HOUR; t += 5 * MIN) {
+      await h.scheduler.tick({ viewing: false });
+      h.advance(5 * MIN);
+    }
+    const back = h.cd.keychainCalls.length - afterJump;
+    expect(back).toBeGreaterThanOrEqual(7);
+    expect(back).toBeLessThanOrEqual(8);
+    // 回拨后 Codex 明细也不停（记录在未来按到期算）
+    expect(h.fetch.calls.filter((c) => c.url.includes("rate-limit-reset-credits")).length).toBeGreaterThan(2);
+  });
+});
+
+describe("Claude 客户端身份头（不带就看不到重置卡）", () => {
+  test("探到本机版本 → Claude 请求带 claude-cli/<版本> 的 UA；探不到 / 探测抛错 → 不带，请求照常；Codex 从不带", async () => {
+    const h = harness();
+    h.ccVersion = "2.1.283";
+    await h.scheduler.refresh("claude", "view");
+    await h.scheduler.refresh("codex", "view");
+    const ua = (i: number) => h.fetch.calls[i].headers["User-Agent"];
+    expect(ua(0)).toBe("claude-cli/2.1.283 (external, cli)");
+    expect(ua(1)).toBeUndefined();
+    h.advance(MIN + 1000);
+    h.ccVersion = "throw";
+    expect((await h.scheduler.refresh("claude", "view")).status).toBe("fetched");
+    expect(ua(2)).toBeUndefined();
+  });
+});

@@ -40,7 +40,11 @@ describe("quotaPanelData", () => {
     expect(d.entries.map((e) => e.id)).toEqual(["claude", "codex", "codex.local", "pi:acme", "x"]);
     expect(JSON.stringify(d)).not.toContain("SHOULD-NOT-SURVIVE");
     expect(JSON.stringify(d)).not.toContain('"secret"');
-    expect(d.entries[1].resetCredits).toEqual({ held: 2, applicableNow: 0, expiries: [{ at: T + 86400_000, left: null, requiresLimit: false }], stale: false });
+    expect(d.entries[1].resetCredits).toEqual({
+      held: 2, applicableNow: 0, expiries: [{ at: T + 86400_000, left: null, requiresLimit: false }], stale: false, ineligibleReason: null,
+    });
+    const surface = quotaPanelData({ snapshot: { providers: [{ id: "claude", name: "Claude", source: { layer: "live" }, resetCredits: { held: 0, credits: [], ineligibleReason: "surface" } }] } })!;
+    expect(surface.entries[0].resetCredits?.ineligibleReason).toBe("surface");
     expect(d.entries[4].source.layer).toBe("none");
     expect(d.entries[4].meters).toEqual([]);
   });

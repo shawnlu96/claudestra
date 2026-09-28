@@ -24,7 +24,8 @@ export interface EntryView {
   identity: "assumed" | "bound" | "unknown";
   meters: MeterView[];
   /** expiries：每张卡 / 每条 credit 的截止；left = 这张卡剩几次（Claude 一张卡可含多次），requiresLimit = 到限额才能用 */
-  resetCredits: { held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean } | null;
+  /** ineligibleReason：接口说这个入口看不到重置卡（如 surface），界面写原因，不显示成 0 张 */
+  resetCredits: { held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean; ineligibleReason: string | null } | null;
   source: { layer: LayerSource; observedAt: number | null; reason: string | null; needsUserRetry: boolean };
 }
 
@@ -64,7 +65,8 @@ function creditsOf(v: unknown): EntryView["resetCredits"] {
     return { at, left: num(o.left), requiresLimit: o.requiresLimit === true };
   };
   const list = Array.isArray(c.credits) ? c.credits.map(expiry).filter((x): x is CreditExpiry => x !== null) : null;
-  return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true };
+  const why = str(c.ineligibleReason);
+  return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true, ineligibleReason: why && /^[a-z_]{1,32}$/.test(why) ? why : null };
 }
 
 function entryOf(v: unknown): EntryView | null {

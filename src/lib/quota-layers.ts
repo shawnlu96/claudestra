@@ -44,6 +44,8 @@ export interface ResetCreditsView {
   credits: { key: string; expiresAtMs: number | null; left?: number; requiresLimit?: boolean }[] | null;
   stale: boolean;
   observedAt: number | null;
+  /** 接口说这个入口看不到重置卡（Claude cedar_ember eligible=false 的原因）：界面写原因，不显示成 0 张 */
+  ineligibleReason?: string | null;
 }
 
 export interface ProviderEntry {
@@ -123,6 +125,9 @@ function claudeResetsOf(r: ProviderRemote, now: number): ResetCreditsView | null
   const ev = r.endpoints.claude_usage;
   const resets = ev?.snapshot?.data.resets ?? null;
   if (!resets) return null;
+  if (!resets.eligible) {
+    return { held: 0, applicableNow: 0, credits: [], stale: ev?.stale ?? true, observedAt: ev?.snapshot?.observedAt ?? null, ineligibleReason: resets.ineligibleReason ?? "unknown" };
+  }
   // 与提醒（claudeGrantCredits）同一口径：有资格、没暂停、还有次数、没过期；只是没有截止日的卡也算持有
   const usable = (g: (typeof resets.grants)[number]) => resets.eligible && !g.paused && g.resetsLeft > 0 && (g.endsAtMs === null || g.endsAtMs > now);
   const grants = resets.grants.filter(usable).sort((a, b) => (a.endsAtMs ?? Infinity) - (b.endsAtMs ?? Infinity));

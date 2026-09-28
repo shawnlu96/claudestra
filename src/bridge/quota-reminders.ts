@@ -124,14 +124,20 @@ function stillExhausted(n: ReminderNotice, view: RemoteView, now: number): boole
 
 /**
  * 发出前复核（夜里暂存到 08:00、失败渠道最多重试 3 天，这期间窗口可能早重置了、卡可能已用掉或过期）：
- * 账户换了 / 用满已不成立 → 整条丢；快过期只留仍然有效的重置，一条不剩也丢。丢弃记一行日志（不含任何键）。
+ * 当前账户存在且不是通知里的那个 / 用满已不成立 → 整条丢；当前账户未知 → 只按时刻判，不丢；快过期只留仍然有效的重置，一条不剩也丢。丢弃记一行日志（不含任何键）。
  */
 function revalidateOutbox(ledger: ReminderLedger, view: RemoteView, now: number): ReminderLedger {
   const outbox: ReminderNotice[] = [];
   for (const n of ledger.outbox) {
     const p = n.provider ?? "codex";
     let keep: ReminderNotice | null = null;
-    if (view[p].account?.key === n.accountKey) {
+    const acct = p === "claude" || p === "codex" ? view[p].account : undefined;
+    if (acct === null) {
+      // 此刻账户未知（凭据一时读不到、~/.claude.json 正被重写）：没法复核，只按时刻判，不因一次读取失败丢掉暂存的提醒
+      const credits = (n.credits ?? []).filter((c) => c.expiresAtMs > now);
+      const e = n.exhausted;
+      keep = n.kind === "exhausted" ? (e && (e.resetsAtMs === null || e.resetsAtMs > now) ? n : null) : credits.length ? { ...n, credits } : null;
+    } else if (acct?.key === n.accountKey) {
       if (n.kind === "exhausted") keep = stillExhausted(n, view, now) ? n : null;
       else {
         const keys = eligibleKeys(view, p, now);

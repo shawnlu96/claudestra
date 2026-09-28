@@ -5,7 +5,7 @@
 
 import type { CredErrorCode } from "./quota-credentials.js";
 import type { FetchErrorCode, QuotaEndpoint } from "./quota-providers.js";
-import type { AccountState, EndpointHealth } from "./quota-state.js";
+import type { AccountState, CredHealth, EndpointHealth } from "./quota-state.js";
 
 export const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -78,8 +78,24 @@ export function applyFailure(
 export function credCooldown(code: CredErrorCode, now: number): number | null {
   if (code === "keychain_denied" || code === "keychain_timeout" || code === "keychain_error") return null;
   if (code === "keychain_missing") return now + QUOTA_TIMING.authCooldownMs;
-  if (code === "token_expired") return now + 5 * MIN;
+  // 读完 Keychain 才发现的错（token 过期、条目内容认不出、读取期间换号）：至少 5 分钟，不然看板开着每分钟读一次
+  if (code === "token_expired" || code === "auth_bad_shape" || code === "identity_changed") return now + 5 * MIN;
   return now + MIN;
+}
+
+/**
+ * 凭据失败后的闸（在读任何凭据之前判）：
+ *  - 用户主动重试也守 60 秒最小间隔；
+ *  - 失败时刻在「现在」之后 = 时钟被拨回过：不按它挡；
+ *  - until = null（Keychain 被拒 / 超时 / 出错）：看板不自己重读，后台按自己的 6 小时节奏照试（每次试都算进 bgAttemptAt），
+ *    只有 Keychain 连续被拒 2 次才连后台也停，等用户重试。
+ */
+export function credBlocked(ch: CredHealth | undefined, reason: RefreshReason, now: number): RefreshResult | null {
+  if (!ch || ch.at > now) return null;
+  if (reason === "user_retry") return now - ch.at < QUOTA_TIMING.minIntervalMs ? { status: "skipped_interval" } : null;
+  if (ch.until !== null) return ch.until > now ? { status: "skipped_cooldown", code: ch.code } : null;
+  if (reason === "background" && !(ch.code === "keychain_denied" && (ch.count ?? 1) >= 2)) return null;
+  return { status: "skipped_cooldown", code: ch.code };
 }
 /** 这些失败说明「现在不知道是哪个账户」：当前账户清空，不再把旧账户的卡片当成它 */
 export const ACCOUNT_UNKNOWN = new Set<CredErrorCode>(["no_secret", "auth_missing", "auth_bad_shape", "account_missing", "keychain_missing"]);
@@ -95,6 +111,8 @@ export function gate(acct: AccountState, endpoint: QuotaEndpoint, now: number, r
   const h = acct.health[endpoint];
   if (h?.paused && reason !== "user_retry" && (h.cooldownUntil ?? Infinity) > now) return { status: "skipped_paused" };
   const lastAny = Math.max(-Infinity, ...Object.values(acct.health).map((x) => x?.lastAttemptAt ?? -Infinity));
+  // 上次尝试在「现在」之后 = 时钟被拨回过：间隔与冷却都是按错的时钟算的，不按它们挡（否则要停到时钟追上）
+  if (lastAny > now) return null;
   if (now - lastAny < QUOTA_TIMING.minIntervalMs) return { status: "skipped_interval" };
   if (!h || h.paused || h.cooldownUntil === null || h.cooldownUntil <= now || !h.lastCode) return null;
   const cooling = { status: "skipped_cooldown", code: h.lastCode } as const;

@@ -12,12 +12,12 @@
  */
 
 import type { CredErrorCode, CredResult, QuotaCredential, QuotaProvider } from "./quota-credentials.js";
-import { getQuota, QUOTA_ENDPOINTS, type FetchErrorCode, type QuotaEndpoint, type QuotaFetch } from "./quota-providers.js";
+import { claudeClientHeaders, getQuota, QUOTA_ENDPOINTS, type FetchErrorCode, type QuotaEndpoint, type QuotaFetch } from "./quota-providers.js";
 import { pruneLedger, type ReminderLedger } from "./quota-reminder-rules.js";
 import { pruneAccounts, type AccountState, type QuotaState, type QuotaStore, type Snapshots } from "./quota-state.js";
 
 import {
-  ACCOUNT_UNKNOWN, applyFailure, credCooldown, freshHealth, gate, MIN, QUOTA_TIMING,
+  ACCOUNT_UNKNOWN, applyFailure, credBlocked, credCooldown, freshHealth, gate, MIN, QUOTA_TIMING,
   type RefreshReason, type RefreshResult,
 } from "./quota-policy.js";
 
@@ -37,6 +37,8 @@ export interface QuotaSchedulerDeps {
   isEnabled(): boolean;
   /** 没人看时也查 Claude（要读 Keychain）：开时与 Codex 明细同一 6 小时后台节奏。不传 = 关（库的缺省保守；bridge 按配置传，缺省开） */
   claudeBackground?(): boolean;
+  /** 本机实际装的 Claude Code 版本（拼客户端身份头，不带就看不到重置卡）；探不到 null，这时一个身份头都不带 */
+  claudeClientVersion?(): Promise<string | null>;
 }
 
 interface EndpointView<E extends QuotaEndpoint = QuotaEndpoint> {
@@ -150,9 +152,12 @@ export class QuotaScheduler {
     return acct;
   }
 
-  private async credFailure(st: QuotaState, p: QuotaProvider, code: CredErrorCode, now: number): Promise<RefreshResult> {
-    st.credHealth[p] = { code, at: now, until: credCooldown(code, now) };
+  private async credFailure(st: QuotaState, p: QuotaProvider, code: CredErrorCode, now: number, endpoint: QuotaEndpoint): Promise<RefreshResult> {
+    const prev = st.credHealth[p];
+    st.credHealth[p] = { code, at: now, until: credCooldown(code, now), count: prev?.code === code ? (prev.count ?? 1) + 1 : 1 };
     const cur = st.current[p];
+    // 凭据失败也算一次尝试：同账户 60 秒最小间隔照样生效
+    if (cur && st.accounts[cur]) (st.accounts[cur].health[endpoint] ??= freshHealth()).lastAttemptAt = now;
     if (ACCOUNT_UNKNOWN.has(code)) st.current[p] = null;
     else if (cur && st.accounts[cur]) st.accounts[cur].uncertain = true;
     await this.save();
@@ -167,8 +172,8 @@ export class QuotaScheduler {
     if (p === "claude" && reason === "background" && !this.deps.claudeBackground?.()) return { status: "skipped_policy" };
     const st = await this.load();
     const now = this.deps.now();
-    const ch = st.credHealth[p];
-    if (ch && reason !== "user_retry" && (ch.until === null || ch.until > now)) return { status: "skipped_cooldown", code: ch.code };
+    const blocked = credBlocked(st.credHealth[p], reason, now);
+    if (blocked) return blocked;
     // 先按账户标识判一遍：限频 / 冷却中就不去读 Keychain（换了号则按新号判，不被旧号的冷却卡住）
     const peek = await this.deps.peekAccountKey(p);
     // 当前账户以本机登录的标识为准：换回了旧号就立刻切过去，哪怕这次被冷却挡住，也不继续展示上一个号的卡片
@@ -177,7 +182,7 @@ export class QuotaScheduler {
     if (pre) return pre;
     const cr = await this.deps.readCredential(p);
     if (!live()) return { status: "discarded" };
-    if (!cr.ok) return this.credFailure(st, p, cr.code, now);
+    if (!cr.ok) return this.credFailure(st, p, cr.code, now, endpoint);
     delete st.credHealth[p];
     const cred = cr.cred;
     const acct = this.account(st, p, cred.accountKey, now);
@@ -191,10 +196,12 @@ export class QuotaScheduler {
       return g;
     }
     h.lastAttemptAt = now;
+    const version = p === "claude" ? ((await this.deps.claudeClientVersion?.().catch(() => null)) ?? null) : null; // 探测失败 = 不带身份头，不挡请求
     const out = await getQuota(endpoint, cred, {
       fetch: this.deps.fetch,
       now: this.deps.now,
       hashCreditId: (raw) => this.deps.hashCreditId(cred.accountKey, raw),
+      clientHeaders: claudeClientHeaders(version),
     });
     const same = await this.deps.confirmCredential(cred);
     if (!live() || !same) return { status: "discarded" };
@@ -221,7 +228,7 @@ export class QuotaScheduler {
     const acct = key ? st.accounts[key] : undefined;
     const h = acct?.health[endpoint];
     const last = Math.max(acct?.snapshots[endpoint]?.observedAt ?? -Infinity, h?.lastAttemptAt ?? -Infinity, h?.credCheckedAt ?? -Infinity);
-    return now - last - interval;
+    return last > now ? Infinity : now - last - interval; // 时钟拨回：记录在未来，按到期算，不停查到时钟追上
   }
 
   /**
@@ -244,7 +251,14 @@ export class QuotaScheduler {
   private async tickClaudeBackground(now: number): Promise<void> {
     if (!this.deps.claudeBackground?.()) return;
     const st = await this.load();
-    if (now - (st.bgAttemptAt?.claude ?? -Infinity) < QUOTA_TIMING.detailBackgroundIntervalMs) return;
+    const last = st.bgAttemptAt?.claude ?? -Infinity;
+    if (last > now) {
+      // 时钟前跳后又拨回：上次尝试记在未来，按「现在」重置，6 小时后照常读（不停读到时钟追上）
+      st.bgAttemptAt = { ...st.bgAttemptAt, claude: now };
+      await this.save();
+      return;
+    }
+    if (now - last < QUOTA_TIMING.detailBackgroundIntervalMs) return;
     st.bgAttemptAt = { ...st.bgAttemptAt, claude: now };
     await this.save();
     await this.refresh("claude", "background");

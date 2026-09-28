@@ -215,6 +215,13 @@ describe("Claude 重置卡（cedar_ember）", () => {
     expect(claudeCard(withBlock({ ...block, eligible: false })).resetCredits!.held).toBe(0);
   });
 
+  test("入口不合格（surface）：重置那一行写原因，不是 0 张；原因缺席按 unknown", () => {
+    const rc = claudeCard(withBlock({ eligible: false, ineligible_reason: "surface", at_limit: false, grants: [] })).resetCredits!;
+    expect(rc).toMatchObject({ held: 0, credits: [], ineligibleReason: "surface" });
+    expect(claudeCard(withBlock({ eligible: false, grants: [] })).resetCredits!.ineligibleReason).toBe("unknown");
+    expect(claudeCard(withBlock(cedarEmberBlock())).resetCredits!.ineligibleReason).toBeUndefined();
+  });
+
   test("没有截止日的卡：计入持有、排在最后、expiresAtMs null", () => {
     const block = cedarEmberBlock([{ endsAt: "2026-10-01T09:00:00Z" }, { endsAt: "2026-10-05T09:00:00Z", left: 2 }]);
     (block.grants as Record<string, unknown>[])[1].ends_at = null;

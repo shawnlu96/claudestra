@@ -47,6 +47,8 @@ interface ClaudeResetGrantDto {
 
 export interface ClaudeResetsDto {
   eligible: boolean;
+  /** eligible=false 的原因（如 "surface"：请求没带 Claude Code 的客户端身份）；界面照写，不当成 0 张 */
+  ineligibleReason: string | null;
   atLimit: boolean;
   grants: ClaudeResetGrantDto[];
 }
@@ -158,8 +160,10 @@ function claudeResets(v: unknown, hashId: (rawId: string) => string): ClaudeRese
   const c = obj(v);
   if (!c) return null;
   const grants = Array.isArray(c.grants) ? c.grants.slice(0, 50).map(obj).filter((g): g is AnyRecord => g !== null) : [];
+  const why = c.ineligible_reason;
   return {
     eligible: c.eligible === true,
+    ineligibleReason: typeof why === "string" && KIND_RE.test(why) ? why : null,
     atLimit: c.at_limit === true,
     grants: grants.map((g) => claudeGrant(g, hashId)).filter((g): g is ClaudeResetGrantDto => g !== null),
   };

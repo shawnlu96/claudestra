@@ -102,7 +102,8 @@ function defaults(): AppConfig {
  * （2026-09 审查 D7-4）。其余字段仍取默认值。
  */
 export function safeConfigOnCorrupt(): AppConfig {
-  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false } };
+  // 订阅额度的两个开关同口径：坏文件时不读凭据（owner 关掉的「读 Keychain」不能因为文件坏了被静默打开）
+  return { ...DEFAULT_CONFIG, autoUpdate: { claudestra: false, claudeCode: false }, quotaLive: false, quotaClaudeBackground: false };
 }
 
 // 常驻进程（bridge / launcher）运行中文件被写坏时，继续用上次成功读到的内容

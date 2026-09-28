@@ -15,6 +15,8 @@ export interface Harness {
   now: number;
   enabled: boolean;
   claudeBg: boolean;
+  /** 本机 Claude Code 版本探测的结果；"throw" = 探测本身抛错 */
+  ccVersion: string | null | "throw";
   cd: ReturnType<typeof fakeCredDeps>;
   fetch: ReturnType<typeof fakeFetch>;
   route: Route;
@@ -29,6 +31,7 @@ export function harness(route: Route = okRoutes, store: QuotaStore = memoryQuota
     now: T0,
     enabled: true,
     claudeBg: false,
+    ccVersion: null,
     cd: fakeCredDeps(),
     fetch: fakeFetch((u, s) => h.route(u, s)),
     route,
@@ -49,6 +52,10 @@ export function harness(route: Route = okRoutes, store: QuotaStore = memoryQuota
         store: h.store,
         isEnabled: () => h.enabled,
         claudeBackground: () => h.claudeBg,
+        claudeClientVersion: async () => {
+          if (h.ccVersion === "throw") throw new Error("probe failed");
+          return h.ccVersion;
+        },
       });
       return h.scheduler;
     },

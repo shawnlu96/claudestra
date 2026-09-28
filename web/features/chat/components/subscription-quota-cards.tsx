@@ -53,6 +53,9 @@ function ValueRow({ m }: { m: MeterView }) {
 
 function ResetCredits({ c, claude }: { c: NonNullable<EntryView["resetCredits"]>; claude: boolean }) {
   const t = useT();
+  if (c.ineligibleReason) {
+    return <div className="text-[10.5px] text-base-content/45">{t("这个入口看不到重置卡（原因：{why}）", { why: c.ineligibleReason })}</div>;
+  }
   if (c.held <= 0 && !c.expiries?.length) return null;
   return (
     <div className="space-y-0.5 text-xs">

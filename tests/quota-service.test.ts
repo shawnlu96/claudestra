@@ -20,6 +20,7 @@ function harness(opts: { enabled?: boolean; route?: (url: string) => Response | 
     ticks: [] as boolean[],
     afterTicks: 0,
     persisted: [] as boolean[],
+    cfgEnabled: opts.enabled ?? true,
     store: memoryQuotaStore(),
     scheduler: null as unknown as QuotaScheduler,
   };
@@ -45,8 +46,11 @@ function harness(opts: { enabled?: boolean; route?: (url: string) => Response | 
       };
       return h.scheduler;
     },
-    readEnabled: () => opts.enabled ?? true,
-    writeEnabled: async (v) => void h.persisted.push(v),
+    readEnabled: () => h.cfgEnabled,
+    writeEnabled: async (v) => {
+      h.persisted.push(v);
+      h.cfgEnabled = v;
+    },
     local: async () => ({ claudeCache: null, codexRollout: null, extra: opts.extra ?? [] }),
     afterTick: async () => void h.afterTicks++,
     setTimer: (fn, ms) => {
@@ -147,6 +151,22 @@ describe("开关", () => {
     expect(v.enabled).toBe(false);
     expect(v.snapshot.providers.filter((p) => p.id === "claude" || p.id === "codex")).toHaveLength(0);
     expect(await t.svc.retry("claude")).toEqual({ status: "disabled" });
+  });
+
+  test("总开关每个 tick 现读：有人手改 config.json 关掉（或文件坏了按关），下一个 tick 起不发请求、不跑提醒", async () => {
+    const t = harness();
+    t.svc.start();
+    await t.fire();
+    expect(t.h.afterTicks).toBe(1);
+    t.h.cfgEnabled = false;
+    const calls = t.fetch.calls.length;
+    for (let i = 0; i < 3; i++) await t.fire();
+    expect(t.svc.isEnabled()).toBe(false);
+    expect(t.fetch.calls.length).toBe(calls);
+    expect(t.h.afterTicks).toBe(1);
+    t.h.cfgEnabled = true;
+    await t.fire();
+    expect(t.svc.isEnabled()).toBe(true);
   });
 
   test("开着时每个 tick 后跑提醒；配置里是关的就从关开始", async () => {

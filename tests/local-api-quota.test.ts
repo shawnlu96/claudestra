@@ -29,6 +29,7 @@ const MATRIX: [string, Principal, boolean][] = [
 const OWNER = MATRIX[0][1];
 
 const persisted: boolean[] = [];
+let cfgEnabled = true; // 假 config.json：写了就读回（服务每个 tick / GET 现读）
 const fetch = fakeFetch((url) => okRoutes(url));
 
 beforeAll(() => {
@@ -44,8 +45,11 @@ beforeAll(() => {
       store: memoryQuotaStore(),
       isEnabled,
     }),
-    readEnabled: () => true,
-    writeEnabled: async (v) => void persisted.push(v),
+    readEnabled: () => cfgEnabled,
+    writeEnabled: async (v) => {
+      persisted.push(v);
+      cfgEnabled = v;
+    },
     local: async () => ({ claudeCache: null, codexRollout: null, extra: [] }),
     afterTick: async () => {},
     setTimer: () => 0,

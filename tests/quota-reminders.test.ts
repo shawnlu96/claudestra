@@ -65,6 +65,7 @@ function harness(opts: { now: number; credits: unknown; usage?: unknown; claude?
   };
   return {
     h,
+    cd,
     fresh,
     /** 拉一遍 Codex 两个端点（同家 60 秒间隔：中间推 61 秒） */
     async fetchCodex() {
@@ -247,6 +248,37 @@ describe("Claude 重置卡（与 Codex 同一套规则与去重）", () => {
     await t.h.scheduler.refresh("claude", "view");
     await t.run();
     expect(t.h.sent).toHaveLength(0);
+  });
+
+  test("23:30 暂存，05:30 那次读取碰上 ~/.claude.json 读不到（account_missing）：不丢，08:00 照样发出", async () => {
+    const start = new Date(2026, 9, 1, 23, 30).getTime();
+    const t = harness({ now: start, credits: creditsExpiring(start + 20 * 24 * HOUR), claude: claudeWith(start + 60 * HOUR) });
+    await t.h.scheduler.refresh("claude", "view");
+    await t.run();
+    expect(t.h.sent).toHaveLength(0);
+    const acct = t.cd.files.get("/home/u/.claude.json")!;
+    t.cd.files.delete("/home/u/.claude.json");
+    t.h.now = start + 6 * HOUR; // 05:30
+    expect((await t.h.scheduler.refresh("claude", "view")).status).toBe("failed");
+    await t.run();
+    expect((await t.h.store.load())!.reminders.outbox).toHaveLength(1);
+    t.cd.files.set("/home/u/.claude.json", acct);
+    t.h.now = start + 8.5 * HOUR + 5 * MIN; // 08:05
+    await t.run();
+    expect(t.h.sent.map((x) => x.channel).sort()).toEqual(["discord", "push"]);
+    expect(t.h.sent[0].body).toContain("Claude 有 1 张重置卡");
+  });
+
+  test("账本里有一条不认识的 provider（未来版本回滚 / 手改）：读回时丢掉，不卡死其余提醒", async () => {
+    const t = harness({ now: local(12), credits: creditsExpiring(local(12) + 48 * HOUR) });
+    const st = await t.h.store.load();
+    const channels = { push: { status: "pending", attempts: 0, lastAt: null }, discord: { status: "pending", attempts: 0, lastAt: null } };
+    st!.reminders.outbox.push({ id: "g", kind: "expiry", provider: "gemini", accountKey: "k", createdAt: local(12), credits: [], channels } as never);
+    await t.h.store.save(st!);
+    t.fresh();
+    await t.fetchCodex();
+    await t.run();
+    expect(t.h.sent.map((x) => x.channel).sort()).toEqual(["discord", "push"]);
   });
 
   test("没有 cedar_ember（旧账号）/ 卡没到 72 小时：不提醒", async () => {
