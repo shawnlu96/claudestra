@@ -190,5 +190,9 @@ export async function migrateStaticDirToReleases(
   } catch (e) {
     return [`网页没改成按版本发布：写 .env 失败（${(e as Error).message}），仍直接托管 web/out`];
   }
-  return [`网页改为按版本发布：BRIDGE_STATIC_DIR 从 web/out 换成 ${currentLink(dir)}，构建期间线上不再缺文件（回滚：改回 ${out} 再重启 bridge）`];
+  return [
+    `网页改为按版本发布：BRIDGE_STATIC_DIR 从 web/out 换成 ${currentLink(dir)}。` +
+    "这一次升级本身仍是原地构建，期间网页可能短暂打不开；从下一次更新起，构建期间线上不再缺文件" +
+    `（回滚：把 BRIDGE_STATIC_DIR 改回 ${out} 再重启 bridge）`,
+  ];
 }
