@@ -1,26 +1,31 @@
 "use client";
 import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { startMission } from "@/lib/api/agents";
 import type { MissionInfo } from "@/lib/chat/agents";
 import type { AgentSession } from "../type";
+import { fmtDueParts } from "../fmt-ts-parts";
+import { CenteredModal } from "./centered-modal";
 
 /**
  * 值守的界面（bridge/local-api/mission.ts；推进在 bridge/mission.ts）：
- *   MissionBadge  侧栏行的图标 / 顶栏的「截止 11:00」标记；额度用尽退避中显示「等到 09:15」，悬停看目标
+ *   MissionBadge  侧栏行的图标 / 顶栏的「截止 今天 11:00」标记；额度用尽退避中显示「等到 明天 09:15」，悬停看全称与目标
  *   MissionModal  「开始值守…」弹框：目标 + 截止时间（快捷：+2 / +4 / +8 小时，或手填 HH:MM）
  * 弹框单实例挂在 AgentMenu 的 portal 里，侧栏菜单与顶栏菜单都经 openMissionModal 打开。
  */
-function hhmm(iso: string): string {
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+type T = ReturnType<typeof useT>;
+/** 常显短写（今天 / 明天 / MM-DD + HH:mm）与悬停全称（带日期与 UTC 偏移），规则在 fmt-ts-parts.ts fmtDueParts */
+function due(t: T, iso: string, now: number): { short: string; full: string } {
+  const p = fmtDueParts(iso, new Date(now));
+  if (!p) return { short: "—", full: "—" };
+  const day = p.day === "today" ? t("今天") : p.day === "tomorrow" ? t("明天") : p.date;
+  return { short: `${day} ${p.hm}`, full: p.full };
 }
 
 /** lucide navigation：值守的统一标识（侧栏、顶栏徽章、菜单、弹框共用），线条风格与顶栏其他图标一致 */
 export function MissionIcon({ size = 13 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <polygon points="3 11 22 2 13 21 11 13 3 11" />
     </svg>
   );
@@ -29,7 +34,7 @@ export function MissionIcon({ size = 13 }: { size?: number }) {
 /** lucide circle-stop：结束值守 */
 export function MissionStopIcon({ size = 15 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <circle cx="12" cy="12" r="10" />
       <rect x="9" y="9" width="6" height="6" rx="1" />
     </svg>
@@ -38,15 +43,26 @@ export function MissionStopIcon({ size = 15 }: { size?: number }) {
 
 /**
  * compact（侧栏行）：只一个图标，放在名字容器外面由行的 flex 居中——放进名字的文字流里会和字的基线错开。
- * 顶栏：与 ExternalBadge 同款的浅底小块，图标 +「截止 11:00」；退避中图标转警示色、文字换成「等到 09:15」。
+ * 顶栏：与 ExternalBadge 同款的浅底小块，图标 +「截止 今天 11:00」；退避中图标转警示色、文字换成「等到 明天 09:15」。
+ * 全称（日期 + UTC 偏移）与目标放在同款浮层里：桌面悬停，手机点一下（没有 hover），4 秒后自动收起。
+ * 浮层默认左对齐徽章，徽章靠右、放不下时改右对齐，免得在手机上伸出屏幕。
  */
 export function MissionBadge({ mission, compact = false }: { mission: MissionInfo; compact?: boolean }) {
   const t = useT();
   // 挂载时刻就够：resumeAt 变化会让列表签名变、整行重渲染（lib/chat/agents.ts agentExtraSig）
   const [now] = useState(() => Date.now());
+  const [tip, setTip] = useState<{ open: boolean; right: boolean }>({ open: false, right: false });
+  useEffect(() => {
+    if (!tip.open) return;
+    const id = setTimeout(() => setTip((s) => ({ ...s, open: false })), 4000);
+    return () => clearTimeout(id);
+  }, [tip.open]);
   const waiting = !!mission.resumeAt && Date.parse(mission.resumeAt) > now;
-  const text = `${waiting ? t("等到") : t("截止")} ${hhmm(waiting ? mission.resumeAt! : mission.until)}`;
-  const title = `${t("值守中")} · ${t("截止")} ${hhmm(mission.until)} · ${t("已提醒")} ${mission.nudges}\n${mission.goal}`;
+  const until = due(t, mission.until, now);
+  const resume = waiting ? due(t, mission.resumeAt!, now) : null;
+  const text = resume ? `${t("等到")} ${resume.short}` : `${t("截止")} ${until.short}`;
+  const title =
+    `${t("值守中")} · ${t("截止")} ${until.full} · ${t("已提醒")} ${mission.nudges}` + (resume ? `\n${t("等到")} ${resume.full}` : "") + `\n${mission.goal}`;
   const tone = waiting ? "text-warning" : "text-info";
   if (compact) {
     return (
@@ -55,16 +71,40 @@ export function MissionBadge({ mission, compact = false }: { mission: MissionInf
       </span>
     );
   }
+  const place = (el: HTMLElement, open: boolean) => setTip({ open, right: el.getBoundingClientRect().left + 288 > window.innerWidth - 16 });
   return (
     <span
-      title={title}
       aria-label={title}
-      className="inline-flex shrink-0 items-center gap-1 rounded-md bg-base-content/[0.08] px-1.5 py-1 text-[11px] leading-none text-base-content/60"
+      role="button"
+      tabIndex={0}
+      onMouseEnter={(e) => place(e.currentTarget, false)}
+      onClick={(e) => place(e.currentTarget, !tip.open)}
+      className="group/mis relative inline-flex shrink-0 cursor-default items-center gap-1 rounded-md bg-base-content/[0.08] px-1.5 py-1 text-[11px] leading-none text-base-content/60"
     >
       <span className={tone}>
         <MissionIcon />
       </span>
       <span className="font-mono tabular-nums">{text}</span>
+      <span
+        role="tooltip"
+        className={
+          `pointer-events-none absolute ${tip.right ? "right-0" : "left-0"} top-full z-50 mt-1.5 w-max max-w-[min(18rem,calc(100vw-2rem))] rounded-lg border border-base-300 ` +
+          `bg-base-100 px-2.5 py-1.5 text-left text-[11px] font-normal leading-normal text-base-content shadow-lg ${tip.open ? "block" : "hidden"} lg:group-hover/mis:block`
+        }
+      >
+        <span className="block text-[10px] text-base-content/50">
+          {t("值守中")} · {t("已提醒")} {mission.nudges}
+        </span>
+        <span className="block font-mono tabular-nums">
+          {t("截止")} {until.full}
+        </span>
+        {resume && (
+          <span className="block font-mono tabular-nums text-warning">
+            {t("等到")} {resume.full}
+          </span>
+        )}
+        <span className="mt-1 line-clamp-4 block whitespace-pre-wrap break-words">{mission.goal}</span>
+      </span>
     </span>
   );
 }
@@ -115,9 +155,9 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
       setBusy(false);
     }
   };
-  return createPortal(
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 px-4" onClick={close}>
-      <div className="w-full max-w-md rounded-2xl bg-base-100 p-5 shadow-xl" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+  return (
+    <CenteredModal onClose={close}>
+      <div className="overflow-y-auto p-5" role="dialog" aria-modal="true">
         <h3 className="flex items-center gap-2 text-base font-semibold">
           <span className="text-info">
             <MissionIcon size={16} />
@@ -168,7 +208,6 @@ export function MissionModal({ onStarted }: { onStarted: () => void }) {
           </button>
         </div>
       </div>
-    </div>,
-    document.body,
+    </CenteredModal>
   );
 }
