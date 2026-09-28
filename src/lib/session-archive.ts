@@ -16,12 +16,22 @@ import { agentRuntime } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
 import { existsSync, readdirSync } from "fs";
 import { mkdir, readdir } from "fs/promises";
-import { join } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { projectJsonlPath, findJsonlBySessionId, projectsSlug } from "./jsonl-cost.js";
 import { copyIfLarger } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
+
+/**
+ * 某个 agent 的归档目录。名字拼出来不是归档根下的单层目录（带 /、..、绝对路径——URL 里的 %2F 解码后就是 /）→ null。
+ * 历史端点的 agent 名直接来自请求，这是最后一道根目录校验：放过去就能读到任意目录下的会话正文（tests/session-gates.test.ts）。
+ */
+export function agentArchiveDir(agentName: string, root: string = ARCHIVE_ROOT): string | null {
+  const base = resolve(root);
+  const dir = resolve(base, agentName);
+  return dirname(dir) === base && basename(dir) === agentName ? dir : null;
+}
 
 /**
  * 「归档」类别区（v2.23+）—— 网页侧栏那份列表的唯一来源。

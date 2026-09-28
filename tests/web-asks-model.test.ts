@@ -1,6 +1,9 @@
 /** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案、乐观作答；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
-import { agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, closedText, groupAsks, PENDING_MAX_MS, rowGroup, spanText, waitsOnOwner, wireLabels, type PendingAnswer, type WebAsk } from "@/features/asks/asks-model";
+import {
+  agentLabel, answeredGroups, answerSummary, applyPending, askCounts, askForReply, clicksFromAnswer, closedText, groupAsks,
+  PENDING_MAX_MS, rowGroup, spanText, waitsOnOwner, wireLabels, type PendingAnswer, type WebAsk,
+} from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
 import { fillParams } from "@/lib/i18n-fill";

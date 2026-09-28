@@ -10,6 +10,7 @@
  */
 import { canAnswerAsk, canSeeAsk, humanAssignee } from "../../lib/ask-access.js";
 import { draftFromReply } from "../../lib/ask-options.js";
+import { assigneeFormatError } from "../../lib/ledger-checks.js";
 import { canReadLedger } from "../../lib/devices.js";
 import type { Ask } from "../../lib/ledger-asks.js";
 import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
@@ -72,11 +73,9 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
 }
 
 const TITLE_MAX = 40;
-/**
- * T8h 的 assignee 格式（cd914851）：人只能是 owner 或 guest（local:owner:self / local:guest:<hex>，token principal 不行——它订不了推送、
- * 列表和作答也不给）、队友的 agent <fp>/<agent>、本机 agent 名。rebase 到 T8h 后换成 ledger-checks 的 assigneeFormatError
- */
-const ASSIGNEE_RE = /^(local:(owner:self|guest:[0-9a-f]{1,64})|[0-9a-f]{4}(-[0-9a-f]{4}){3}\/[\w.-]{1,64}|[\w-]{1,64})$/;
+/** assignee 的三种写法（T8h ledger-checks 同一份校验）：local:<owner:self|guest:hex> 是人、带 / 的是队友的 agent、其余是本机 agent 名 */
+const assigneeError = (who: string): string | null =>
+  assigneeFormatError(who.startsWith("local:") ? "human" : who.includes("/") ? "peer_agent" : "agent", who);
 
 /**
  * owner 开一条人发起的 ask（T28 chat 的审核、给 guest 指派）：作答只记账，不回投任何 agent（bridge/asks.ts createAsk）。
@@ -89,7 +88,8 @@ async function createHumanAsk(req: Request, project: string, p: Principal): Prom
   const title = typeof b?.title === "string" ? Array.from(b.title.trim()).slice(0, TITLE_MAX).join("") : "";
   if (!b || !title) return apiJson(400, { ok: false, error: "body {title, assignee?, kind?: decide|assigned, taskId?, context?, options?, allowText?, expiresIn?, dedupKey?}" });
   const assignee = typeof b.assignee === "string" ? b.assignee : undefined;
-  if (assignee !== undefined && !ASSIGNEE_RE.test(assignee)) return apiJson(400, { ok: false, error: "assignee must be local:owner:self, local:guest:<hex>, <fp>/<agent> or an agent name" });
+  const bad = assignee === undefined ? null : assigneeError(assignee);
+  if (bad) return apiJson(400, { ok: false, error: `assignee must be ${bad}` });
   const kind = b.kind === "assigned" ? "assigned" : b.kind === undefined || b.kind === "decide" ? "decide" : null;
   if (!kind || (kind === "assigned" && !assignee)) return apiJson(400, { ok: false, error: "kind must be decide | assigned (assigned needs an assignee)" });
   const exp = typeof b.expiresIn === "number" && b.expiresIn >= 60 && b.expiresIn <= 30 * 24 * 3600 ? Date.now() + b.expiresIn * 1000 : undefined;

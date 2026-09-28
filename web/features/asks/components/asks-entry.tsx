@@ -28,7 +28,7 @@ export function AsksEntry({ machineKey }: { machineKey: string }) {
   }, [banner]);
   const c = askCounts(asks);
   const openChat = (agent: string) => {
-    asksStore.closeDrawer();
+    asksStore.leaveForChat();
     void store.openAgent(uiAgentName(agent));
     nav.toContent();
   };

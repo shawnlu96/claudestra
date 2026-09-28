@@ -2,10 +2,12 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
+import { isNativeShell } from "@/lib/native";
+import { useBackSwipe } from "@/lib/use-back-swipe";
 import { groupAsks } from "../asks-model";
 import { asksStore, useAsks } from "../asks-store";
 import { AskCard } from "./ask-card";
-import { CloseIcon } from "./ask-icons";
+import { BackIcon, CloseIcon } from "./ask-icons";
 
 /** 最近处理过的默认只露这么多张，点「更多」再展开 */
 const RECENT_PREVIEW = 5;
@@ -13,6 +15,8 @@ const RECENT_PREVIEW = 5;
 /**
  * 「待你处理」抽屉：手机全屏、桌面右侧 440px；portal 到 body（移动端会话页在 transform 横滑容器里，fixed 会被困住）。
  * 三组：等你处理 / 待验收 / 最近处理过。打开时定位到 focus 那张（推送深链、横幅点进来）。
+ * 手机上是一页 #asks（asks-store 的 enter / leave）：左上角「‹」、右滑、系统返回都是出栈。原生壳的右滑交给 WKWebView
+ * 系统手势（JS 再退一次就是双重后退）；触摸事件截住不冒到会话壳，否则在这里左滑会把背后切到会话页。
  */
 export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void }) {
   const t = useT();
@@ -26,6 +30,7 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void
   useEffect(() => {
     if (focus) document.getElementById(`ask-${focus}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [focus, asks.length]);
+  const swipe = useBackSwipe({ back: () => { if (!isNativeShell()) asksStore.closeDrawer(); } }, true);
   const g = groupAsks(asks);
   const recent = moreRecent ? g.recent : g.recent.slice(0, RECENT_PREVIEW);
   const card = (a: (typeof asks)[number]) => <AskCard key={a.id} ask={a} now={now} focused={a.id === focus} onOpenChat={onOpenChat} />;
@@ -40,7 +45,7 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void
     );
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={() => asksStore.closeDrawer()}>
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={() => asksStore.closeDrawer()} onTouchStart={swipe.onTouchStart} onTouchEnd={swipe.onTouchEnd}>
       <div
         role="dialog"
         aria-label={t("待你处理")}
@@ -48,8 +53,11 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (agent: string) => void
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center px-4 pb-2" style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}>
+          <button type="button" aria-label={t("返回")} className="btn btn-ghost btn-sm -ml-2 mr-1 px-1.5 sm:hidden" onClick={() => asksStore.closeDrawer()}>
+            <BackIcon />
+          </button>
           <span className="text-base font-semibold">{t("待你处理")}</span>
-          <button type="button" aria-label={t("关闭")} className="btn btn-ghost btn-sm btn-square ml-auto" onClick={() => asksStore.closeDrawer()}>
+          <button type="button" aria-label={t("关闭")} className="btn btn-ghost btn-sm btn-square ml-auto hidden sm:inline-flex" onClick={() => asksStore.closeDrawer()}>
             <CloseIcon />
           </button>
         </div>
