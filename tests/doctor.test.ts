@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { classifyDaemonExit, formatDoctor, orphanAgentNames, webBuildVerdict, type Check } from "../src/lib/doctor";
+import { formatDoctor, orphanAgentNames, webBuildVerdict, type Check } from "../src/lib/doctor";
+import { classifyDaemonExit } from "../src/lib/launchd-status";
 
 describe("classifyDaemonExit", () => {
   test("正常运行 → ok", () => {
