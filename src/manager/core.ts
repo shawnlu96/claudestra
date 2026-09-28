@@ -11,6 +11,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
 import { TMUX_SOCK as SOCK, MASTER_SESSION, AGENT_PREFIX, tmuxRaw } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
+import { type PendingOp } from "../lib/pending-ops.js";
 import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
 
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
@@ -22,8 +23,11 @@ export interface AgentInfo {
   project: string;
   purpose: string;
   created: string;
-  status: "active" | "stopped";
+  /** creating = create 的占位（pending.op=create），成功后被正式条目整条覆盖 */
+  status: "active" | "stopped" | "creating";
   channelId: string;
+  /** 做到一半的 create / kill / rename 标记（lib/pending-ops.ts）；做完即删 */
+  pending?: PendingOp;
   notes: string;
   sessionId?: string;
   cwd: string;

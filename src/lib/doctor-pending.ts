@@ -1,0 +1,79 @@
+/**
+ * doctor 里「做到一半的操作」类检查（doctor.ts 只留调用）：残留的 creating 占位 / 半截 kill / rename、
+ * 孤儿窗口、孤儿频道、卡住的 update 标记。判定在 lib/pending-ops.ts 与 lib/update-inflight.ts（纯函数，有单测）；
+ * 修复统一指向 `manager repair --apply`（update 指向再跑 update）。都正常时只出一行 ok。
+ */
+import { spawnSync } from "child_process";
+import { existsSync, readFileSync } from "fs";
+import type { Check } from "./doctor.js";
+import { REGISTRY_PATH } from "./registry.js";
+import { listAgentWindows, TMUX_SOCK, MASTER_SESSION } from "./tmux-helper.js";
+import { bridgeRequest } from "./bridge-client.js";
+import { describeResidue, pidAlive, scanResidues, type Residue, type ScanInput } from "./pending-ops.js";
+import { launchdStartedAt, readUpdateMarker, updateVerdict, UPDATE_INFLIGHT } from "./update-inflight.js";
+
+const REPAIR = "bun src/manager.ts repair（先看计划）→ bun src/manager.ts repair --apply";
+
+/** 残留 → doctor 行（纯函数，tests/pending-ops.test.ts） */
+export function residueChecks(residues: Residue[], channelsKnown: boolean): Check[] {
+  const g = "agent";
+  const pick = (...kinds: Residue["kind"][]) => residues.filter((r) => kinds.includes(r.kind));
+  const out: Check[] = [];
+  const half = pick("stale-create", "stale-kill", "stale-rename");
+  const busy = pick("busy");
+  const winReg = residues.filter((r) => r.kind === "orphan-window" && r.registered);
+  const winFree = residues.filter((r) => r.kind === "orphan-window" && !r.registered);
+  const chans = pick("orphan-channel");
+  if (half.length) out.push({ group: g, name: "做到一半的操作", status: "warn", detail: half.map(describeResidue).join("；"), fix: REPAIR });
+  if (busy.length) out.push({ group: g, name: "进行中的操作", status: "ok", detail: busy.map(describeResidue).join("；") });
+  if (winReg.length) out.push({ group: g, name: "孤儿窗口", status: "warn", detail: winReg.map(describeResidue).join("；"), fix: REPAIR });
+  if (winFree.length) {
+    out.push({ group: g, name: "未登记窗口", status: "warn", detail: `${winFree.map((r) => r.agent).join(", ")} 不在 registry 里（可能是手开的，repair 不碰）`,
+      fix: `确认没用后逐个关：tmux -S ${TMUX_SOCK} kill-window -t ${MASTER_SESSION}:<name>` });
+  }
+  if (chans.length) out.push({ group: g, name: "孤儿频道", status: "warn", detail: chans.map(describeResidue).join("；"), fix: REPAIR });
+  if (!channelsKnown) out.push({ group: g, name: "孤儿频道", status: "warn", detail: "bridge 连不上，没查频道", fix: "bridge 起来后再跑 doctor" });
+  if (!out.some((c) => c.status !== "ok")) out.push({ group: g, name: "半截操作", status: "ok", detail: "没有残留（占位 / 半截 kill、rename / 孤儿窗口、频道）" });
+  return out;
+}
+
+/** 读 registry + tmux + bridge，产出 scanResidues 的输入；repair 与 doctor 共用 */
+export async function gatherScanInput(): Promise<ScanInput> {
+  let agents: ScanInput["agents"] = {};
+  if (existsSync(REGISTRY_PATH)) agents = JSON.parse(readFileSync(REGISTRY_PATH, "utf8")).agents ?? {};
+  const windows = await listAgentWindows().catch(() => [] as string[]); // tmux 不在 = 没有窗口可言
+  let channels: Set<string> | null = null;
+  try {
+    const r = await bridgeRequest({ type: "list_channels" });
+    channels = new Set(((r?.channels ?? []) as Array<{ id: string }>).map((c) => c.id));
+  } catch { /* bridge 不在：channels=null，孤儿频道这一项跳过并如实报出 */ }
+  return { agents, windows, channels, now: Date.now(), alive: pidAlive };
+}
+
+async function checkUpdateMarker(repoRoot: string): Promise<Check[]> {
+  const m = readUpdateMarker();
+  if (!m) return [];
+  const g = "config";
+  const head = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout?.trim() ?? "";
+  const { DAEMONS } = await import("./cli-install.js");
+  const v = updateVerdict(m, head, Date.now(), pidAlive, Object.fromEntries(DAEMONS.map((x) => [x.label, launchdStartedAt(x.label)])));
+  const what = `update → ${m.targetLabel}（${m.channel}，停在 ${m.step}，${m.startedAt}）`;
+  switch (v.action) {
+    case "live": return [{ group: g, name: "update 进行中", status: "ok", detail: `${what}，pid ${m.pid} 还在跑` }];
+    case "clear": return [{ group: g, name: "update 标记", status: "ok", detail: `${what}：${v.why}，下次 update 自动清掉` }];
+    case "report": return [{ group: g, name: "卡住的 update", status: "warn", detail: `${what}：${v.why}`, fix: `核对仓库后删掉 ${UPDATE_INFLIGHT} 再跑 bun src/manager.ts update` }];
+    default: return [{ group: g, name: "卡住的 update", status: "warn",
+      detail: `${what}：${v.action === "finish-reload" ? `这些 daemon 没在 reload 之后重启：${v.stale.join(", ")}` : "切到新版本后没做完（依赖 / 构建 / reload）"}`,
+      fix: "bun src/manager.ts update（会从停下的那一步补完）" }];
+  }
+}
+
+export async function checkPendingOps(repoRoot: string): Promise<Check[]> {
+  let input: ScanInput;
+  try {
+    input = await gatherScanInput();
+  } catch (e) {
+    return [{ group: "agent", name: "半截操作", status: "warn", detail: `查不了：${(e as Error).message}` }];
+  }
+  return [...residueChecks(scanResidues(input), input.channels !== null), ...(await checkUpdateMarker(repoRoot))];
+}

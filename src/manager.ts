@@ -16,9 +16,9 @@
 import { writeClaudeSettings } from "./lib/session-recall.js";
 import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
 import { repoEnvVar } from "./lib/env-file.js";
-import { RUNTIME_DIR, runtimePath, statePath, UPDATE_LOCK } from "./lib/paths.js";
+import { RUNTIME_DIR, runtimePath, statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
-import { readFile, writeFile, mkdir, readdir, stat, rename } from "fs/promises";
+import { readFile, mkdir, readdir, stat, rename } from "fs/promises";
 import { existsSync, statSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync, realpathSync } from "fs";
 import { join } from "path";
 
@@ -106,44 +106,31 @@ import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assert
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
+import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
+import { cmdRename } from "./manager/agent-rename.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScope, cmdPeerHttpRemove, cmdPeerInviteNew, cmdPeerInviteList, cmdPeerInviteRevoke, cmdPeerInviteRedeem, cmdPeerJoinAuto } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
-import { cmdWebRelease, maybeBuildWeb } from "./manager/web-release.js";
+import { cmdWebRelease } from "./manager/web-release.js";
 import { isWriteInvocation, needsWriteLock, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
 
 import { bridgeRequest } from "./lib/bridge-client.js";
+import { realOpsDeps, triggerSkillsRescan } from "./manager/ops-deps.js";
+import { beginCreate, clearCreateResidue, commitCreate, guardCreateSignals, recordCreateChannel } from "./manager/create-guard.js"; // create 的 creating 占位
 import { notify } from "./lib/notify.js";
 import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
 import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
-import { installAfterPull, DEP_MANIFESTS } from "./lib/post-pull.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
  * agent 生命周期变化（create/resume/kill/restart）时调用。
  * bridge 没运行也无所谓 —— 失败静默。
  */
-async function triggerSkillsRescan(
-  action: "add" | "remove" | "full",
-  agent?: string,
-  cwd?: string
-): Promise<void> {
-  const { bridgeHttpBase } = await import("./lib/bridge-port.js");
-  try {
-    await fetch(`${bridgeHttpBase()}/skills/rescan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, agent, cwd }),
-      signal: AbortSignal.timeout(3000),
-    });
-  } catch { /* bridge 可能未运行 */ }
-}
-
 /**
  * v2.4.19+ 在 agent 频道发置顶公告（带「🖥 跳到 iTerm tab」focus 按钮）。
  * messageId 记进 registry.focusMsgId，已有就不重发（restart 沿用同一频道）。
@@ -563,11 +550,10 @@ async function cmdCreate(
     return;
   }
 
-  // 检查是否已存在
-  if (await windowExists(tmuxName)) {
-    output({ ok: false, error: `${tmuxName} 已存在` });
-    return;
-  }
+  // 窗口查重 + 写 creating 占位（上次砍在半路的残留先清）：之后任一刻被杀，再跑 / repair 都能收拾（manager/create-guard.ts）
+  const begun = await beginCreate(tmuxName, channelName, { project: dir, projectId: proj.id, purpose, cwd: dir }, realOpsDeps);
+  if (!begun.ok) return output({ ok: false, error: begun.error });
+  const unguard = guardCreateSignals(tmuxName, realOpsDeps, (msg) => output({ ok: false, error: msg }));
 
   // 1. 创建 Discord 频道
   let channelId: string;
@@ -580,19 +566,16 @@ async function cmdCreate(
     });
     channelId = result.channelId;
   } catch (err) {
-    output({ ok: false, error: `创建 Discord 频道失败: ${(err as Error).message}` });
+    await cleanup(`创建 Discord 频道失败: ${(err as Error).message}`);
     return;
   }
+  await recordCreateChannel(tmuxName, channelId, realOpsDeps);
 
-  // 频道建好后若后续任何步骤失败，都必须清理孤儿频道 + tmux window
+  // 频道建好后若后续任何步骤失败，都按占位清理孤儿频道 + tmux window，并放回同名旧条目
   async function cleanup(reason: string) {
-    try {
-      await bridgeRequest({ type: "delete_channel", channelId });
-    } catch { /* non-critical */ }
-    try {
-      await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
-    } catch { /* non-critical */ }
-    output({ ok: false, error: `${reason}（已清理残留频道 #${channelName} 和 tmux window）` });
+    const r = await clearCreateResidue(tmuxName, realOpsDeps);
+    unguard();
+    output({ ok: false, error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
   }
 
   let ready = false;
@@ -641,10 +624,8 @@ async function cmdCreate(
   // 启动参数即权威的运行时（Pi）不补发：/model 在那边是另一套语义。
   if (adapter.control.modelEnforcement === "in-session") await enforceSessionModel(tmuxName, model);
 
-  // 6. 更新 registry（只有启动成功才落盘）
-  const reg = await loadRegistry();
-  if (reg.agents[tmuxName]) (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // kill 后同名重建：旧子 agent 不认新 agent 作父
-  reg.agents[tmuxName] = {
+  // 6. 正式条目覆盖占位（占位已被信号清理拿走 = 那边已输出结果）
+  const committed = await commitCreate(tmuxName, {
     project: dir,
     projectId: proj.id,
     purpose,
@@ -663,8 +644,9 @@ async function cmdCreate(
     ...team,
     // 运行时字段由适配器给：Claude Code 返回 {}，老 agent 的 registry 逐字节不变
     ...adapter.registryFields(spec),
-  };
-  await saveRegistry(reg);
+  }, realOpsDeps);
+  unguard();
+  if (!committed) return;
 
   await triggerSkillsRescan("add", tmuxName, expandedDir);
   await announceFocusButton(tmuxName, channelId);
@@ -1000,185 +982,6 @@ async function cmdResume(
   });
   await triggerSkillsRescan("add", tmuxName, resolvedDir);
   await announceFocusButton(tmuxName, channelId);
-}
-
-async function cmdKill(name: string) {
-  const tmuxName = normalizeName(name);
-
-  if (!(await windowExists(tmuxName))) {
-    output({ ok: false, error: `${tmuxName} 不存在` });
-    return;
-  }
-
-  await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
-
-  // 删除对应的 Discord 频道
-  const reg = await loadRegistry();
-  const info = reg.agents[tmuxName];
-  // v2.8+ 会话退役 → 归档 jsonl 快照（CC 的 cleanupPeriodDays 会清源文件）
-  if (info?.sessionId) {
-    await archiveSession(tmuxName, info.cwd, info.sessionId).catch(() => {});
-  }
-  if (info?.channelId) {
-    try {
-      await bridgeRequest({ type: "delete_channel", channelId: info.channelId });
-    } catch { /* non-critical */ }
-  }
-  if (reg.agents[tmuxName]) {
-    reg.agents[tmuxName].status = "stopped";
-  }
-
-  // 清理 registry 里同名的大小写变体（历史遗留）
-  for (const key of Object.keys(reg.agents)) {
-    if (key.toLowerCase() === tmuxName && key !== tmuxName) {
-      delete reg.agents[key];
-    }
-  }
-  await saveRegistry(reg);
-
-  await triggerSkillsRescan("remove", tmuxName);
-
-  // v2.4.16+ 通知 bridge 清掉所有 inter-agent / cross-peer pending（避免被 kill
-  // 的 agent 在别处被 resume 后吃陈年 pushback / nudge）。restart 走另一条路，
-  // 不调这里。bridge 没启也无所谓 —— 静默失败。
-  if (info?.channelId) {
-    const { bridgeHttpBase } = await import("./lib/bridge-port.js");
-    try {
-      await fetch(`${bridgeHttpBase()}/agent/cleanup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // 带上 agent 名，bridge 据此丢掉它在事件总线里的环形缓冲（见 forgetAgent）
-        body: JSON.stringify({ channelId: info.channelId, agent: tmuxName }),
-        signal: AbortSignal.timeout(3000),
-      });
-    } catch { /* bridge 可能未运行 */ }
-  }
-
-  output({
-    ok: true,
-    agent: tmuxName,
-    message: `${tmuxName} 已销毁。`,
-  });
-}
-
-/**
- * v2.10+ 永久移除（owner 2026-07-14:「临时起的 agent 不想在列表里污染我」）:
- * kill 收尾(归档 session/删频道/清 pending) + registry 条目整个删除——列表不再
- * 显示。归档文件保留(~/.claude-orchestrator/archive/):删列表 ≠ 删档案,
- * 会话历史仍可人工翻查;误删的 agent 用 create + resume --fork 可以重建。
- */
-async function cmdRemove(name: string) {
-  const tmuxName = normalizeName(name);
-  const reg = await loadRegistry();
-  const info = reg.agents[tmuxName];
-  if (!info && !(await windowExists(tmuxName))) {
-    output({ ok: false, error: `${tmuxName} 不存在` });
-    return;
-  }
-  if (await windowExists(tmuxName)) {
-    await tmuxRaw(["kill-window", "-t", windowTarget(tmuxName)]);
-  }
-  if (info?.sessionId) {
-    await archiveSession(tmuxName, info.cwd, info.sessionId).catch(() => {});
-  }
-  if (info?.channelId) {
-    try {
-      await bridgeRequest({ type: "delete_channel", channelId: info.channelId });
-    } catch { /* 已 kill 过的频道早删了,静默 */ }
-  }
-  delete reg.agents[tmuxName];
-  for (const key of Object.keys(reg.agents)) {
-    if (key.toLowerCase() === tmuxName && key !== tmuxName) delete reg.agents[key];
-  }
-  (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // 清掉子 agent 指向它的 parent，免得同名重建被旧孤儿认作父
-  await saveRegistry(reg);
-  await triggerSkillsRescan("remove", tmuxName);
-  if (info?.channelId) {
-    const { bridgeHttpBase } = await import("./lib/bridge-port.js");
-    try {
-      await fetch(`${bridgeHttpBase()}/agent/cleanup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // 带上 agent 名，bridge 据此丢掉它在事件总线里的环形缓冲（见 forgetAgent）
-        body: JSON.stringify({ channelId: info.channelId, agent: tmuxName }),
-        signal: AbortSignal.timeout(3000),
-      });
-    } catch { /* bridge 可能未运行 */ }
-  }
-  output({ ok: true, agent: tmuxName, message: `${tmuxName} 已永久移除（会话归档保留）。` });
-}
-
-/**
- * 重命名一个 agent：tmux window 名 + registry key + Discord 频道名 + displayName 全部同步。
- * 不重启 Claude Code（内部显示名会在下次 restart 时更新到新名）。
- */
-async function cmdRename(oldName: string, newName: string) {
-  // 校验新名字合法 + 规范化
-  try {
-    assertValidNewName(newName);
-  } catch (e) {
-    output({ ok: false, error: (e as Error).message });
-    return;
-  }
-  const oldTmux = normalizeName(oldName);
-  const newTmux = normalizeName(newName);
-
-  if (oldTmux === newTmux) {
-    output({ ok: false, error: "新旧名字相同，没啥可改的" });
-    return;
-  }
-
-  const reg = await loadRegistry();
-  const info = reg.agents[oldTmux];
-  if (!info) {
-    output({ ok: false, error: `registry 里没有 ${oldTmux}` });
-    return;
-  }
-  if (reg.agents[newTmux]) {
-    output({ ok: false, error: `${newTmux} 已存在，换个名字` });
-    return;
-  }
-
-  const newChannelName = newTmux.replace(AGENT_PREFIX, "");
-  const steps: any[] = [];
-
-  // 1. tmux window rename（只有 window 还在的时候才做）
-  if (await windowExists(oldTmux)) {
-    const r = await tmuxRaw(["rename-window", "-t", windowTarget(oldTmux), newTmux]).catch((e) => `error: ${e.message}`);
-    steps.push({ step: "tmux rename-window", ok: !r || !r.toString().startsWith("error"), raw: r || "ok" });
-  } else {
-    steps.push({ step: "tmux rename-window", ok: false, skipped: "tmux window 不存在" });
-  }
-
-  // 2. registry 迁移
-  reg.agents[newTmux] = { ...info, displayName: newChannelName };
-  delete reg.agents[oldTmux];
-  (await import("./manager/team.js")).repointParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
-  await saveRegistry(reg);
-  await (await import("./manager/ledger.js")).renameLedgerAgent(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名
-  steps.push({ step: "registry", ok: true });
-
-  // 3. Discord 频道 rename
-  if (info.channelId) {
-    try {
-      await bridgeRequest({ type: "rename_channel", channelId: info.channelId, name: newChannelName });
-      steps.push({ step: "discord channel rename", ok: true });
-    } catch (e) {
-      steps.push({ step: "discord channel rename", ok: false, reason: (e as Error).message });
-    }
-  }
-
-  // 4. 通知 bridge 刷 skill registry（agent 名字变了，skill 映射的 agentName 要同步）
-  await triggerSkillsRescan("full");
-
-  output({
-    ok: true,
-    from: oldTmux,
-    to: newTmux,
-    channelName: newChannelName,
-    steps,
-    hint: "Claude Code 内部 session 的显示名会在下次 restart 时更新到新名（现在仍是旧的，不影响功能）。",
-  });
 }
 
 // ============================================================
@@ -1791,12 +1594,12 @@ async function cmdList() {
     // P2（peer 2026-08-09）：窗口活着但 registry 说 stopped = 两个数据源分叉。
     // cmdRestart 现在会写回 status，理论上不该再出现；真出现就是还有别的写入
     // 路径漏了——静默分叉会让 web 显示「未启动」、归档跳过、自愈不认，必须留痕。
-    if (info && info.status && info.status !== "active") {
+    if (info && info.status && info.status !== "active" && info.status !== "creating") {
       console.error(`[list] ⚠️ ${name} 窗口存在但 registry status=${info.status}（数据源分叉，restart 一次可修）`);
     }
     agents.push({
       name,
-      status: "active",
+      status: info?.status === "creating" ? "creating" : "active", // creating = create 进行中 / 砍在半路（manager repair）
       idle,
       project: info?.project || "unknown",
       projectId: info?.projectId || null,
@@ -2231,281 +2034,6 @@ async function cmdVersion() {
       : hasUpdate
         ? `v${local} → ${release.tag} 可更新`
         : `已是最新 v${local} @ ${head}`,
-  });
-}
-
-/** update.lock 互斥。锁文件里是持有者 pid——已有锁时先验持有者是否还活着:
- *  v2.17.2(peer 取证):update 子进程常由 launcher 派生,installClaudestraCli
- *  bootout launcher 时 launchd 会把它连坐回收(macOS 责任链不随 detach 断),
- *  来不及 unlock → 孤儿锁把之后 30 分钟的一切更新(含 beta 自动前进)封死。
- *  持有 pid 已死的锁直接清除接管;活着的仍按 30 分钟陈旧闸。 */
-async function takeUpdateLock(): Promise<{ ok: boolean; error?: string }> {
-  const lockPath = UPDATE_LOCK;
-  try {
-    const st = statSync(lockPath);
-    let holderAlive = false;
-    try {
-      const pid = parseInt((await Bun.file(lockPath).text()).trim(), 10);
-      if (pid > 0) {
-        process.kill(pid, 0); // 只探活不发信号
-        holderAlive = true;
-      }
-    } catch { /* 读不到 pid / 进程不存在 → 孤儿 */ }
-    if (holderAlive && Date.now() - st.mtimeMs < 30 * 60_000) {
-      return { ok: false, error: "另一次 update 正在进行(持有进程在世,update.lock 未满 30 分钟)——稍后再试" };
-    }
-    if (!holderAlive) console.error("[update] 清除孤儿 update.lock(持有 pid 已死)");
-  } catch { /* 无锁 */ }
-  await writeFile(lockPath, String(process.pid)).catch(() => {});
-  return { ok: true };
-}
-
-/** v2.17 beta 通道 update:紧跟 origin/main 的每个 commit(ff-only,天然在分支
- *  上不 detach)。release 通道走下面的 cmdUpdate 正式流程。 */
-async function cmdUpdateBeta() {
-  const updateLock = UPDATE_LOCK;
-  const lock = await takeUpdateLock();
-  if (!lock.ok) {
-    output({ ok: false, error: lock.error });
-    return;
-  }
-  const unlock = () => import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
-
-  const status = await git("status", "--porcelain");
-  if (!status.ok || status.out) {
-    await unlock();
-    output({ ok: false, error: status.ok ? "仓库有未提交的改动,先 commit/stash 再更新" : "不是 git 仓库" });
-    return;
-  }
-  await git("fetch", "--quiet", "origin", "main");
-  const preHead = (await git("rev-parse", "HEAD")).out.trim();
-  const remote = (await git("rev-parse", "origin/main")).out.trim();
-  if (!remote) { await unlock(); output({ ok: false, error: "取不到 origin/main" }); return; }
-  if (preHead === remote) {
-    // 已同步;若还挂在 detached 顺手挂回(beta 通道也可能从 release 时代的 detach 迁移来)
-    await git("checkout", "main", "--quiet");
-    await git("merge", "--ff-only", "origin/main", "--quiet");
-    await unlock();
-    output({ ok: true, channel: "beta", head: preHead.slice(0, 7), message: `beta 已是最新 @ ${preHead.slice(0, 7)}` });
-    return;
-  }
-  const anc = await git("merge-base", "--is-ancestor", "HEAD", "origin/main");
-  if (!anc.ok) {
-    await unlock();
-    output({ ok: false, error: `本地 HEAD 与 origin/main 分叉,beta 通道不强推——手动处理后再试(git log HEAD...origin/main)` });
-    return;
-  }
-  const co = await git("checkout", "main", "--quiet");
-  const ff = co.ok ? await git("merge", "--ff-only", "origin/main", "--quiet") : co;
-  if (!ff.ok) { await unlock(); output({ ok: false, error: `ff 前进失败: ${ff.err}` }); return; }
-
-  // 依赖清单变了还装不上 → 回退到 preHead，不 /exit、不 reload（见 lib/post-pull.ts）
-  const install = await installAfterPull({
-    runInstall: () => spawnFailure(Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
-    depsChanged: async () => !(await git("diff", "--quiet", preHead, remote, "--", ...DEP_MANIFESTS)).ok,
-    rollback: async () => { const r = await git("reset", "--keep", preHead); return r.ok ? null : r.err || "git reset 失败"; },
-  });
-  if (!install.ok) {
-    await unlock();
-    output({
-      ok: false, channel: "beta", step: install.step, rolledBack: install.rolledBack,
-      error: `bun install 失败（${install.err}）——${install.rolledBack ? `已回退到 ${preHead.slice(0, 7)}` : `回退也失败了：${install.rollbackError}`}；未 reload daemon`,
-    });
-    return;
-  }
-  if (install.warning) console.error(`[update] ⚠️ ${install.warning}`);
-  const rendered = await renderMasterClaude();
-  const webBuild = await maybeBuildWeb();
-  const migrateProc = Bun.spawn([resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" });
-  const migrateError = await spawnFailure(migrateProc);
-  if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
-  await Bun.sleep(500);
-  await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
-  // ⚠ 先释锁再 reload daemon:bootout launcher 会让本进程被 launchd 连坐回收
-  // (peer 取证),殉锁会把之后 30 分钟的更新全封死。临界区(git/build)已过,
-  // 这里释放安全;进程死在 reload 里属预期,损失的只有收尾输出。
-  await unlock();
-  console.log(`[update] beta 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
-  const { installClaudestraCli } = await import("./lib/cli-install.js");
-  const cliInstall = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 上面 maybeBuildWeb 已判过/建过
-  const { installRepoSkills } = await import("./lib/skills-install.js");
-  const skillsInstalled = installRepoSkills(REPO_ROOT);
-  output({
-    ok: true,
-    channel: "beta",
-    skills: skillsInstalled,
-    from: preHead.slice(0, 7),
-    to: remote.slice(0, 7),
-    message: `beta 已前进 ${preHead.slice(0, 7)} → ${remote.slice(0, 7)} 并 reload daemon`,
-    masterReRendered: rendered,
-    webBuild,
-    cliInstalled: cliInstall.errors.length === 0,
-    ...(migrateError ? { migrateError } : {}),
-    ...(install.warning ? { installWarning: install.warning } : {}),
-  });
-}
-
-async function cmdUpdate() {
-  // v2.17 通道分流:beta 走 commit 级前进,release 走正式版流程
-  {
-    const { readConfig } = await import("./lib/config-store.js");
-    if (((await readConfig()).autoUpdate.channel ?? "release") === "beta") {
-      await cmdUpdateBeta();
-      return;
-    }
-  }
-  const { getLatestRelease, getLocalVersion, isNewer } = await import("./lib/github-release.js");
-
-  // 1. 查询最新 release
-  const release = await getLatestRelease();
-  if (!release) {
-    output({ ok: false, error: "无法查询 GitHub release（网络问题或没有发布过 release）" });
-    return;
-  }
-
-  const local = await getLocalVersion();
-  if (!isNewer(release.version, local)) {
-    output({ ok: true, version: local, message: `已是最新版本 v${local}` });
-    return;
-  }
-
-  // 2. 确认工作目录干净
-  const status = await git("status", "--porcelain");
-  if (!status.ok) {
-    output({ ok: false, error: "不是 git 仓库，无法自动更新" });
-    return;
-  }
-  if (status.out) {
-    output({
-      ok: false,
-      error: "仓库有未提交的改动，请先 commit/stash 后再更新",
-      dirty: status.out,
-    });
-    return;
-  }
-
-  // v2.16.3 并发闸(HedeMacBook-Pro 约束5):自动更新 30 分钟一轮,web 构建
-  // 动辄分钟级,别被下一轮重入。v2.17.2 起孤儿锁(持有 pid 已死)直接接管。
-  const updateLock = UPDATE_LOCK;
-  const relLock = await takeUpdateLock();
-  if (!relLock.ok) {
-    output({ ok: false, error: relLock.error });
-    return;
-  }
-
-  // 3. fetch tags + checkout release tag
-  await git("fetch", "--tags", "--quiet", "origin");
-  // 记下升级前的 HEAD：bun install 失败且依赖清单变了时回退到这里（lib/post-pull.ts）
-  const preUpdateHead = (await git("rev-parse", "HEAD")).out.trim();
-  const checkout = await git("checkout", release.tag, "--quiet");
-  if (!checkout.ok) {
-    await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
-    output({ ok: false, error: `git checkout ${release.tag} 失败: ${checkout.err}` });
-    return;
-  }
-
-  // 3b. v2.16.3 挂回分支(HedeMacBook-Pro 报告:checkout <tag> 必然 detached
-  //     HEAD——工作区内容对,但本地分支永不前进、stash 落在 no branch 上,
-  //     版本冻结类故障的温床)。无分叉才 ff 挂回;分叉(开发机本地有超前
-  //     commit)保持 detached 并在输出里说明,绝不静默。
-  const reattach = await (async (): Promise<{ ok: boolean; detail: string }> => {
-    for (const br of ["main", "master"]) {
-      const has = await git("rev-parse", "--verify", "--quiet", `refs/heads/${br}`);
-      if (!has.ok) continue;
-      const anc = await git("merge-base", "--is-ancestor", br, release.tag);
-      if (!anc.ok) return { ok: false, detail: `本地 ${br} 与 ${release.tag} 分叉,保持 detached(开发机属预期);手工挂回: git checkout ${br} && git merge --ff-only ${release.tag}` };
-      const co = await git("checkout", br, "--quiet");
-      if (!co.ok) return { ok: false, detail: `checkout ${br} 失败: ${co.err}` };
-      const ff = await git("merge", "--ff-only", release.tag, "--quiet");
-      if (!ff.ok) return { ok: false, detail: `ff 合并失败: ${ff.err}` };
-      return { ok: true, detail: `已挂回 ${br} @ ${release.tag}` };
-    }
-    return { ok: false, detail: "未找到 main/master 本地分支,保持 detached" };
-  })();
-  if (!reattach.ok) console.error(`[update] ⚠️ ${reattach.detail}`);
-
-  // 4. bun install（依赖可能变了）
-  //    以前只 await exited：断网/锁文件冲突时照样 reload 三个 daemon，新代码缺依赖起不来。
-  //    依赖清单变了还装不上 → 回退到升级前，不 /exit、不 reload（见 lib/post-pull.ts）
-  const install = await installAfterPull({
-    runInstall: () => spawnFailure(Bun.spawn([resolveBunPath(), "install"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }), 20),
-    depsChanged: async () => !(await git("diff", "--quiet", preUpdateHead, release.tag, "--", ...DEP_MANIFESTS)).ok,
-    rollback: async () => { const r = await git("checkout", preUpdateHead, "--quiet"); return r.ok ? null : r.err || "git checkout 失败"; },
-  });
-  if (!install.ok) {
-    await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
-    output({
-      ok: false, step: install.step, rolledBack: install.rolledBack,
-      error: `bun install 失败（${install.err}）——${install.rolledBack ? `已回退到 ${preUpdateHead.slice(0, 7)}` : `回退也失败了：${install.rollbackError}`}；未 reload daemon`,
-    });
-    return;
-  }
-  if (install.warning) console.error(`[update] ⚠️ ${install.warning}`);
-
-  // 4b. 重新渲染 master/CLAUDE.md（新版本可能更新了 master prompt；不刷新的话 master 还用老 context）
-  const rendered = await renderMasterClaude();
-
-  // 4c. v2.16.3 web 构建纳入 update(此前 bridge 侧生效、web 侧继续跑旧构建的「半生效」
-  //     状态最难排查)。闸门:未装 web 跳过 / 构建未过期跳过 / 脏树不建 / 失败换回旧构建
-  //     并显式冒泡 / 仅 launchd 托管时才自动重启。
-  const webBuild = await maybeBuildWeb();
-
-  // 5. 执行新版 manager 的 migrate 子命令（新版可能带格式迁移逻辑）
-  //    关键：用 subprocess 跑 NEW 版代码，当前进程跑的还是旧版
-  const migrateProc = Bun.spawn(
-    [resolveBunPath(), "run", `${REPO_ROOT}/src/manager.ts`, "migrate"],
-    { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" }
-  );
-  const migrateError = await spawnFailure(migrateProc);
-  if (migrateError) console.error(`[update] ⚠️ migrate 失败（继续）: ${migrateError}`);
-
-  // v2.4.0+: 不再 pm2 restart。install-cli 用 launchctl bootout+bootstrap 来
-  // reload 三个 daemon plist，每次都生效新代码；如果检测到老 pm2 进程也会顺手
-  // stop 掉避免双跑。pm2 从启动链彻底解耦。
-
-  // 6b. 告诉正在跑的 master Claude Code 退出，launcher 会用新 CLAUDE.md 重启它
-  //     （daemon reload 只重启 bridge/launcher/cron 三个后台进程，不会动 tmux 里
-  //      的 master session — 不这么做的话老 master 会继续跑着旧的 CLAUDE.md 上下文）
-  await Bun.sleep(500);
-  await tmuxRaw(["send-keys", "-t", `${MASTER_SESSION}:0`, "/exit", "Enter"]).catch(() => {});
-
-  // 7. install-cli —— 写 CLI wrapper + 3 个 daemon plist + 迁移老 pm2/老 autostart
-  //    plist + stop 老 pm2 daemon + launchctl bootstrap 三个新 plist（这一步等同于
-  //    重启 daemon，自动加载新代码）。Idempotent —— 每次 update 跑一次都安全；老用户
-  //    从 v2.3.x 升级到 v2.4.0 的第一次 update 就把所有迁移做完，全无感。
-  // ⚠ 先释锁再 reload daemon(与 beta 路径同理,peer 取证的连坐回收也可能发生
-  // 在 release 自动更新——launcher 派生的 update 子进程死在 bootout launcher 时)
-  await import("fs/promises").then((m) => m.rm(updateLock, { force: true })).catch(() => {});
-  console.log(`[update] 临界区完成,即将 reload 3 daemons(本进程可能随 launcher bootout 被回收,属预期)`);
-  const { installClaudestraCli } = await import("./lib/cli-install.js");
-  const cliInstall = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 上面 maybeBuildWeb 已判过/建过
-  const { installRepoSkills } = await import("./lib/skills-install.js");
-  const skillsInstalled = installRepoSkills(REPO_ROOT);
-  for (const sk of skillsInstalled) if (sk.action !== "ok") console.log(`[skills] ${sk.name}: ${sk.action} — ${sk.detail}`);
-
-  output({
-    ok: true,
-    from: `v${local}`,
-    to: release.tag,
-    message: `已更新到 ${release.tag} 并 reload 三个 launchd daemon`,
-    masterReRendered: rendered,
-    // web 构建结果显式冒泡(skipped 带原因 / ok / error 带尾部日志)——绝不静默
-    webBuild,
-    // 分支挂回结果(detached HEAD 修复,v2.16.3)——同样绝不静默
-    branch: reattach,
-    migrateError: migrateError || undefined,
-    installWarning: install.warning,
-    cliInstalled: cliInstall.errors.length === 0,
-    cliWrapper: cliInstall.cliWrapper || undefined,
-    daemons: cliInstall.daemons.map((d) => ({ label: d.label, loaded: d.loaded, warning: d.warning })),
-    pm2Stopped: cliInstall.pm2Stopped.length > 0 ? cliInstall.pm2Stopped : undefined,
-    oldAutostartPlist: cliInstall.oldAutostartPlist,
-    oldPm2StartupPlist: cliInstall.oldPm2StartupPlist,
-    migratedHookCommand: cliInstall.migratedHookCommand || undefined,
-    bumpedTmuxDashboardLimit: cliInstall.bumpedTmuxDashboardLimit,
-    allowedMcpTools: cliInstall.allowedMcpTools,
-    cliErrors: cliInstall.errors.length > 0 ? cliInstall.errors : undefined,
-    cliWarnings: cliInstall.warnings.length > 0 ? cliInstall.warnings : undefined,
   });
 }
 
@@ -3070,6 +2598,7 @@ switch (cmd) {
   }
 
   case "list": await cmdList(); break;
+  case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
   case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
   case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
@@ -3221,7 +2750,7 @@ switch (cmd) {
 
   case "update":
     refuseInSandbox("升级（git pull + reload launchd）");
-    await cmdUpdate();
+    await (await import("./manager/update.js")).cmdUpdate({ git, spawnFailure, renderMasterClaude }); // 含半截补完（lib/update-inflight.ts）
     break;
 
   case "auto-update": {
@@ -3499,7 +3028,8 @@ switch (cmd) {
         "create <name> <dir> [purpose]  — create an agent",
         "resume <name> <sessionId> [dir] — resume a past session",
         "kill <name>                     — destroy an agent",
-        "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel)",
+        "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel); rerun finishes a half-done rename",
+        "repair [--apply]                — clean up half-done create/kill/rename, orphan windows/channels (dry run unless --apply)",
         'team-link <name> [--parent <agent|master|none>] [--task "<text>"] — attach an agent under its dispatcher (sidebar tree)',
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
