@@ -9,9 +9,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serveStaticSite } from "../src/bridge/web-gateway.js";
 import { inlineScriptHashes } from "../src/lib/static-site.js";
-import { publishWebOut } from "../src/lib/web-build.js";
+import { publishWebOut, rollbackWebOut } from "../src/lib/web-build.js";
+import { STATE_DIR } from "../src/lib/paths.js";
 import {
-  currentLink, currentRelease, fallbackStaticRoots, hasPendingPublish, listReleases, migrateStaticDirToReleases, pinnedStaticRoot,
+  currentLink, currentRelease, fallbackStaticRoots, hasPendingPublish, listReleases, markPendingPublish, migrateStaticDirToReleases, pinnedStaticRoot,
   publishWebRelease, RELEASES_DIR, releasesManaged, rollbackWebRelease,
 } from "../src/lib/web-releases.js";
 
@@ -79,13 +80,6 @@ describe("publishWebRelease", () => {
       ids.push((await publishWebRelease(out, { dir, now: at(i) })).id!);
     }
     expect(listReleases(dir)).toEqual([ids[4], ids[3], ids[2]]);
-  });
-  test("并发发布串行进行：都成功、current 是其中一个、不留半成品和锁", async () => {
-    build("v1");
-    const rs = await Promise.all([0, 1, 2].map((i) => publishWebRelease(out, { dir, now: at(i) })));
-    expect(rs.every((r) => r.ok)).toBe(true);
-    expect(rs.map((r) => r.id)).toContain(currentRelease(dir)!);
-    expect(readdirSync(dir).filter((n) => n.startsWith(".staging-") || n.startsWith(".current-") || n === ".lock")).toEqual([]);
   });
 });
 
@@ -160,11 +154,41 @@ describe("待发布与迁移", () => {
     expect((await publishWebOut(repo())).ok).toBe(true);
     expect(hasPendingPublish()).toBe(false);
   });
+  test("发布失败 → 回滚 → 下一次补发布不会把失败的候选顶上去（回滚在同一把锁下取消待发布）", async () => {
+    mkdirSync(join(repo(), "web"), { recursive: true });
+    writeFileSync(join(repo(), ".env"), `BRIDGE_STATIC_DIR=${currentLink()}\n`);
+    build("v1");
+    await publishWebOut(repo());
+    build("v2");
+    const good = (await publishWebOut(repo())).id!;
+    build("v3-candidate");
+    markPendingPublish("磁盘满（模拟 v3 构建成功但发布失败）");
+    const r = await rollbackWebOut();
+    expect(r.ok).toBe(true);
+    expect(hasPendingPublish()).toBe(false);
+    const retry = await publishWebOut(repo(), { onlyIfPending: true });
+    expect(retry.skipped).toBeTruthy();
+    expect(currentRelease()).not.toBe(good); // 仍停在回滚到的 v1
+    expect(readFileSync(join(currentLink(), "index.html"), "utf8")).toBe(html("v1"));
+  });
+  test("构建锁被别的构建进程持有时：发布与回滚都直接失败，current 不动", async () => {
+    mkdirSync(join(repo(), "web"), { recursive: true });
+    build("v1");
+    const lock = join(STATE_DIR, "web-build.lock");
+    writeFileSync(lock, String(process.pid)); // 本进程就是 bun：按「持有者还在构建」对待
+    try {
+      expect((await publishWebOut(repo())).ok).toBe(false);
+      expect((await rollbackWebOut()).ok).toBe(false);
+      expect(existsSync(currentLink())).toBe(false);
+    } finally {
+      rmSync(lock, { force: true });
+    }
+  });
   test(".env 直接指着 web/out → 发布第一个版本、改指 current，其它行原样；再跑不动", async () => {
     build("v1");
     const env = join(repo(), ".env");
     writeFileSync(env, `# keep\nFOO=1\nBRIDGE_STATIC_DIR=${out}\n`);
-    const publish = () => publishWebRelease(out, { dir, now: at(0) });
+    const publish = async () => publishWebRelease(out, { dir, now: at(0) });
     expect(await migrateStaticDirToReleases(repo(), publish, { envFile: env, dir })).toHaveLength(1);
     expect(readFileSync(env, "utf8")).toBe(`# keep\nFOO=1\nBRIDGE_STATIC_DIR=${currentLink(dir)}\n`);
     expect(releasesManaged(env, dir)).toBe(true);
@@ -175,7 +199,7 @@ describe("待发布与迁移", () => {
     build("v1");
     const env = join(repo(), ".env");
     writeFileSync(env, "BRIDGE_STATIC_DIR=web/out\n", { mode: 0o600 });
-    const publish = () => publishWebRelease(out, { dir, now: at(0) });
+    const publish = async () => publishWebRelease(out, { dir, now: at(0) });
     expect(await migrateStaticDirToReleases(repo(), publish, { envFile: env, dir })).toHaveLength(1);
     expect(readFileSync(env, "utf8")).toBe(`BRIDGE_STATIC_DIR=${currentLink(dir)}\n`);
     expect(lstatSync(env).mode & 0o777).toBe(0o600);
@@ -183,7 +207,7 @@ describe("待发布与迁移", () => {
   test("没托管 / 指向自定义目录 → 不动；发布失败 → .env 不改", async () => {
     const env = join(repo(), ".env");
     mkdirSync(repo(), { recursive: true });
-    const publish = () => publishWebRelease(out, { dir, now: at(0) });
+    const publish = async () => publishWebRelease(out, { dir, now: at(0) });
     writeFileSync(env, "FOO=1\n");
     expect(await migrateStaticDirToReleases(repo(), publish, { envFile: env, dir })).toEqual([]);
     writeFileSync(env, "BRIDGE_STATIC_DIR=/srv/custom\n");

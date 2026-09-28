@@ -5,12 +5,12 @@
  * CSP 按旧 HTML 算、正文延后读到新 HTML，页面脚本被自己的 CSP 拦掉（codex 复核实测）。
  * 保留 current + KEEP_PREVIOUS 个旧版本：已打开的旧页面要的旧 chunk 去旧版本找（fallbackStaticRoots），也是回滚余地；
  * 一个页面开着期间又连发了 KEEP_PREVIOUS+1 次，它的旧 chunk 就没了（刷新即可），这是有意的保留窗口。
- * 发布 / 回滚 / 清理共用一把严格的发布锁；从 web/out 复制还要先拿构建锁（web-build.ts publishWebOut），免得复制到半套产物。
+ * 这里的函数都不加锁：调用方必须持有 web 构建锁（web-build.ts 的构建流程 / publishWebOut / rollbackWebOut）。那把锁按持有者
+ * pid 判死活、不按年龄接管，发布、回滚、清理、待发布标记和构建本身都在它下面串行——不会复制到半套产物，也不会互相删版本。
  */
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { mergeEnvContent, readDotenvFileSync } from "./env-file.js";
-import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { readBuildInfo } from "./static-site.js";
 
@@ -28,6 +28,8 @@ export interface PublishResult {
   pruned?: string[];
   /** 已经切换成功、只是清理旧版本失败：线上是新版本，单独报 */
   pruneError?: string;
+  /** 没做（例如补发布时待发布标记已被回滚取消） */
+  skipped?: string;
 }
 
 export const currentLink = (dir = RELEASES_DIR): string => join(dir, CURRENT);
@@ -37,18 +39,6 @@ function releaseId(outDir: string, now: Date): string {
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   const commit = readBuildInfo(outDir)?.webCommit;
   return commit && /^[0-9a-f]{7,40}$/i.test(commit) ? `${stamp}_${commit.slice(0, 12)}` : stamp;
-}
-
-/** 严格的发布锁：拿不到就失败（file-lock 本身拿不到会降级放行，这里不能放行） */
-async function withReleaseLock<T>(dir: string, fn: () => T, fail: (msg: string) => T): Promise<T> {
-  mkdirSync(dir, { recursive: true });
-  const lock = await acquireLock(join(dir, ".lock"), 30_000, 120_000);
-  if (!lock) return fail("另一个发布 / 回滚正在进行（30 秒内没拿到发布锁）");
-  try {
-    return fn();
-  } finally {
-    lock.release();
-  }
 }
 
 /** 按时间从新到旧的版本目录名（不含 current 与半成品） */
@@ -82,7 +72,7 @@ function switchCurrent(id: string, dir: string): void {
   renameSync(tmp, link);
 }
 
-/** 保留 current + 最新的 keep 个旧版本，其余删掉；顺带清理中断留下的半成品（只在持有发布锁时调，别人不可能正在写） */
+/** 保留 current + 最新的 keep 个旧版本，其余删掉；顺带清理中断留下的半成品（持有构建锁时调，别人不可能正在写） */
 function pruneReleases(dir: string, keep = KEEP_PREVIOUS): string[] {
   const cur = currentRelease(dir);
   const stale = listReleases(dir).filter((id) => id !== cur).slice(keep);
@@ -91,7 +81,11 @@ function pruneReleases(dir: string, keep = KEEP_PREVIOUS): string[] {
   return stale;
 }
 
-function publishLocked(outDir: string, dir: string, now: Date): PublishResult {
+/** outDir → 新版本目录 → 切换 current → 清理旧版本。失败时 current 原样不动 */
+export function publishWebRelease(outDir: string, opts: { dir?: string; now?: Date } = {}): PublishResult {
+  const dir = opts.dir ?? RELEASES_DIR;
+  const now = opts.now ?? new Date();
+  mkdirSync(dir, { recursive: true });
   if (!existsSync(join(outDir, "index.html"))) return { ok: false, error: `${outDir} 里没有 index.html，不发布` };
   const id = releaseId(outDir, now);
   const staging = join(dir, `.staging-${id}`);
@@ -112,24 +106,16 @@ function publishLocked(outDir: string, dir: string, now: Date): PublishResult {
   }
 }
 
-/** outDir → 新版本目录 → 切换 current → 清理旧版本。失败时 current 原样不动。调用方负责 outDir 不在被构建（web-build.ts） */
-export function publishWebRelease(outDir: string, opts: { dir?: string; now?: Date } = {}): Promise<PublishResult> {
-  const dir = opts.dir ?? RELEASES_DIR;
-  return withReleaseLock(dir, () => publishLocked(outDir, dir, opts.now ?? new Date()), (error) => ({ ok: false, error }));
-}
+export type RollbackResult = { ok: boolean; from?: string | null; to?: string; error?: string };
 
-type RollbackResult = { ok: boolean; from?: string | null; to?: string; error?: string };
-
-/** current 退回上一个（更旧的）版本；没有更旧的就不动。回滚不留「待发布」标记，自动更新不会把它顶回去（直到下一次新构建） */
-export function rollbackWebRelease(dir = RELEASES_DIR): Promise<RollbackResult> {
-  return withReleaseLock<RollbackResult>(dir, () => {
-    const all = listReleases(dir);
-    const from = currentRelease(dir);
-    const older = all.slice(from ? all.indexOf(from) + 1 : 0).find((id) => id !== from);
-    if (!older) return { ok: false, from, error: "没有更旧的版本可退" };
-    switchCurrent(older, dir);
-    return { ok: true, from, to: older };
-  }, (error) => ({ ok: false, error }));
+/** current 退回上一个（更旧的）版本；没有更旧的就不动。调用方（rollbackWebOut）在同一把锁下清掉待发布标记 */
+export function rollbackWebRelease(dir = RELEASES_DIR): RollbackResult {
+  const all = listReleases(dir);
+  const from = currentRelease(dir);
+  const older = all.slice(from ? all.indexOf(from) + 1 : 0).find((id) => id !== from);
+  if (!older) return { ok: false, from, error: "没有更旧的版本可退" };
+  switchCurrent(older, dir);
+  return { ok: true, from, to: older };
 }
 
 /**

@@ -22,11 +22,12 @@
  */
 
 import { STATE_DIR } from "./paths.js";
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { spawnSync } from "child_process";
 import { resolveNpm } from "./npm-path.js";
 import { healSelfDirty } from "./self-dirty.js";
-import { clearPendingPublish, hasPendingPublish, markPendingPublish, publishWebRelease, releasesManaged, type PublishResult } from "./web-releases.js";
+import { releaseLock, takeLock } from "./web-build-lock.js";
+import { clearPendingPublish, hasPendingPublish, markPendingPublish, publishWebRelease, releasesManaged, rollbackWebRelease, type PublishResult, type RollbackResult } from "./web-releases.js";
 
 /** 仓库根下的 web pathspec —— 与 gen-build-info.mjs 在 web/ 下的 `-- . ':(exclude)*.md'` 等价 */
 export const WEB_PATHSPEC = ["--", "web", ":(exclude)web/*.md"];
@@ -184,7 +185,6 @@ export interface WebBuildResult {
 }
 
 const ORCH_DIR = STATE_DIR;
-const LOCK_PATH = `${ORCH_DIR}/web-build.lock`;
 /** 备份放仓库外：web/.gitignore 只忽略 /.next/ 与 /out/，放 web/ 下会让工作区变脏、挡住自动更新 */
 const BACKUP_ROOT = `${ORCH_DIR}/web-build`;
 /** 构建会清空的两个目录，各自的克隆位置 */
@@ -192,49 +192,6 @@ const BACKUPS = [
   { sub: ".next", prev: `${BACKUP_ROOT}/next-prev` },
   { sub: "out", prev: `${BACKUP_ROOT}/out-prev` },
 ];
-
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-/**
- * 锁持有者是否还在构建。只看死活、不按年龄接管：备份目录是共用的，接管一个还活着的构建
- * 会删掉它的备份、让它失败时无从回滚。pid 被复用成别的进程时（不是 bun）按已死处理。
- */
-function holderBusy(pid: number): boolean {
-  if (!(pid > 0) || !pidAlive(pid)) return false;
-  const comm = (spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" }).stdout || "").trim();
-  return !comm || isBuilderComm(comm); // ps 读不到就当还活着：宁可这轮不建，也不删别人的备份
-}
-
-/** 构建都跑在 bun 进程里（manager / install-cli）；ps comm 可能是全路径 */
-export function isBuilderComm(comm: string): boolean {
-  return /(^|\/)bun$/.test(comm.trim());
-}
-
-function takeLock(): boolean {
-  mkdirSync(ORCH_DIR, { recursive: true });
-  for (let i = 0; i < 2; i++) {
-    try {
-      const fd = openSync(LOCK_PATH, "wx");
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return true;
-    } catch {
-      let holder = 0;
-      try { holder = parseInt(readFileSync(LOCK_PATH, "utf-8").trim(), 10); } catch { /* 读不到当孤儿 */ }
-      if (holderBusy(holder)) return false;
-      try { unlinkSync(LOCK_PATH); } catch { /* 被别人抢先清了，再试一次 */ }
-    }
-  }
-  return false;
-}
-
-function releaseLock(): void {
-  try {
-    if (parseInt(readFileSync(LOCK_PATH, "utf-8").trim(), 10) === process.pid) unlinkSync(LOCK_PATH);
-  } catch { /* 已不在 */ }
-}
 
 async function run(cmd: string[], cwd: string, env: Record<string, string>): Promise<{ ok: boolean; tail: string[] }> {
   const p = Bun.spawn(cmd, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -278,34 +235,51 @@ function discardBackups(): void {
 
 const outDirOf = (repoRoot: string) => `${repoRoot}/web/out`;
 
-/** 构建成功后（已持有构建锁）：按版本托管就发布；发布失败 = 这次没上线（线上仍是上一个版本），记待发布并按失败报 */
-async function publishAfterBuild(repoRoot: string, result: WebBuildResult): Promise<void> {
-  if (!releasesManaged(`${repoRoot}/.env`)) return;
-  const p = await publishWebRelease(outDirOf(repoRoot));
-  if (!p.ok) {
-    markPendingPublish(p.error ?? "");
-    Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
-    return;
-  }
-  clearPendingPublish();
-  if (p.pruneError) result.error = `新版本已上线，但清理旧版本失败：${p.pruneError}`;
+/** 持有构建锁时发布：成功清掉待发布标记；已按版本托管时失败记待发布（下次不用重建也会补） */
+function publishHoldingLock(repoRoot: string): PublishResult {
+  const p = publishWebRelease(outDirOf(repoRoot));
+  if (p.ok) clearPendingPublish();
+  else if (releasesManaged(`${repoRoot}/.env`)) markPendingPublish(p.error ?? "");
+  return p;
 }
 
-/** 不用重建时：上次构建成功却没发布成（待发布标记还在）→ 补发布。用户主动回滚不留标记，不会被这里顶回去 */
+/** 构建成功后（已持有构建锁）：按版本托管就发布；发布失败 = 这次没上线（线上仍是上一个版本），按失败报 */
+function publishAfterBuild(repoRoot: string, result: WebBuildResult): void {
+  if (!releasesManaged(`${repoRoot}/.env`)) return;
+  const p = publishHoldingLock(repoRoot);
+  if (!p.ok) Object.assign(result, { ok: false, error: `构建成功但${p.error}` });
+  else if (p.pruneError) result.error = `新版本已上线，但清理旧版本失败：${p.pruneError}`;
+}
+
+/** 不用重建时：上次构建成功却没发布成（待发布标记还在）→ 补发布。标记在锁内复查：期间被回滚取消了就不发 */
 async function retryPendingPublish(repoRoot: string, detail: string): Promise<WebBuildResult> {
   if (!hasPendingPublish() || !releasesManaged(`${repoRoot}/.env`)) return { attempted: false, skipped: detail };
-  const p = await publishWebOut(repoRoot);
+  const p = await publishWebOut(repoRoot, { onlyIfPending: true });
+  if (p.skipped) return { attempted: false, skipped: `${detail}；${p.skipped}` };
   return p.ok ? { attempted: false, skipped: `${detail}；补发布了上次没上线的版本` } : { attempted: false, error: `补发布失败：${p.error}` };
 }
 
-/** 手动发布、迁移、补发布的入口：先拿构建锁（web/out 正在被构建就不去复制半套产物），再拿发布锁发布 */
-export async function publishWebOut(repoRoot: string): Promise<PublishResult> {
-  if (!takeLock()) return { ok: false, error: "web 正在构建，稍后再发布" };
+/**
+ * 手动发布、迁移、补发布的入口：拿构建锁（和构建本身、回滚串行）再发布。构建锁拿不到就失败，不等。
+ * 注意：直接在 web/ 里 `npm run build` 不拿这把锁——受支持的手动部署是 `manager web-release deploy`
+ */
+export async function publishWebOut(repoRoot: string, opts: { onlyIfPending?: boolean } = {}): Promise<PublishResult> {
+  if (!takeLock()) return { ok: false, error: "web 正在构建或发布，稍后再试" };
   try {
-    const p = await publishWebRelease(outDirOf(repoRoot));
-    if (p.ok) clearPendingPublish();
-    else if (releasesManaged(`${repoRoot}/.env`)) markPendingPublish(p.error ?? "");
-    return p;
+    if (opts.onlyIfPending && !hasPendingPublish()) return { ok: true, skipped: "待发布已被回滚或别的发布取消" };
+    return publishHoldingLock(repoRoot);
+  } finally {
+    releaseLock();
+  }
+}
+
+/** 回滚：拿构建锁，current 退一个版本，并在同一把锁下清掉待发布标记——之后的 update 不会把失败的候选再顶上去 */
+export async function rollbackWebOut(): Promise<RollbackResult> {
+  if (!takeLock()) return { ok: false, error: "web 正在构建或发布，稍后再试" };
+  try {
+    const r = rollbackWebRelease();
+    if (r.ok) clearPendingPublish();
+    return r;
   } finally {
     releaseLock();
   }
@@ -373,7 +347,7 @@ export async function rebuildWebIfStale(repoRoot: string): Promise<WebBuildResul
       let baked: string | null = null;
       try { baked = parseBakedWebCommit(readFileSync(`${webDir}/lib/build-info.ts`, "utf-8")); } catch { /* 没有就不写 */ }
       if (baked) writeMarker(nextDir, baked);
-      await publishAfterBuild(repoRoot, result);
+      publishAfterBuild(repoRoot, result);
     } else if (hadBuild) {
       result.restored = restoreBuild(webDir);
       if (result.restored) writeMarker(nextDir, "");

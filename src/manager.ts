@@ -3529,7 +3529,7 @@ switch (cmd) {
         "archive-workflows               — backfill Dynamic Workflow records (run JSON, scripts, journals) into the session archive (idempotent)",
         "migrate-web-state               — copy the old web BFF's settings.db tables + groqApiKey/lang into the bridge (tar backup of the web data dir first; idempotent)",
         "retire-web                      — unload + back up the old com.claudestra.web daemon (the bridge serves web/out now); refuses until BRIDGE_STATIC_DIR is served and migrate-web-state ran",
-        "web-release publish|rollback|list — publish web/out as a new versioned release (atomic switch of web-releases/current), roll back, or list",
+        "web-release deploy|publish|rollback|migrate|list — build + publish the web bundle as a versioned release (atomic switch of web-releases/current); deploy is the supported manual path",
         "version                         — show the current version and whether an update is available",
         "update                          — git pull and reload the three launchd daemons",
         "auto-update status              — show auto-update toggles",
