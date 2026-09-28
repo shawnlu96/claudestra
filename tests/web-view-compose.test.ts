@@ -53,6 +53,22 @@ describe("survivingPending（乐观消息对账）", () => {
     expect(survivingPending([btn], [histUser(1, "🔘 go_ahead")], NOW)).toEqual([]);
   });
 
+  test("纯附件（T23）：历史里同附件数、不早于发送的空正文条目 → 对上", () => {
+    const img = { name: "image.png", kind: "image" as const, url: "blob:x" };
+    const cur = [local("", { attachments: [img] })];
+    const h = { ...histUser(1, "", iso(50_000)), attachments: [{ ...img, url: "/api/v1/attachments/api_1_image.png" }] };
+    expect(survivingPending(cur, [h], NOW)).toEqual([]);
+  });
+
+  test("纯附件：更早的另一条纯图片 / 附件数不同 → 不配，刚发的气泡保全", () => {
+    const img = { name: "image.png", kind: "image" as const };
+    const cur = [local("", { attachments: [img] })];
+    const older = { ...histUser(1, "", iso(5 * 60_000)), attachments: [img] };
+    const twoImgs = { ...histUser(2, "", iso(50_000)), attachments: [img, img] };
+    expect(survivingPending(cur, [older, twoImgs], NOW).length).toBe(1);
+    expect(survivingPending(cur, [histUser(3, "有字的消息", iso(50_000))], NOW).length).toBe(1);
+  });
+
   test("CRLF 与首尾空白归一（07-15）", () => {
     expect(survivingPending([local("a\r\nb ")], [histUser(1, "a\nb")], NOW)).toEqual([]);
   });

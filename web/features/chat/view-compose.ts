@@ -60,7 +60,7 @@ export function survivingPending(
       (h, i) =>
         !used.has(i) &&
         h.role === "user" &&
-        (norm(h.content) === t ||
+        ((t ? norm(h.content) === t : sameAttachmentOnly(m, h)) ||
           // Pi：历史带注入头、本地只有正文 ⇒ 与两侧各自的裸文本比对
           (tBare.length > 0 && norm(stripInboundHeader(h.content)) === tBare) ||
           (!!w && h.content.includes(w)) ||
@@ -72,6 +72,20 @@ export function survivingPending(
     }
     return true;
   });
+}
+
+/** 对账容许的本地/服务端时钟差：再大就可能配上几十秒前另一条同样只有图的消息 */
+const ATTACH_ONLY_SKEW_MS = 30_000;
+
+/**
+ * 纯附件的乐观消息（正文为空）与历史条目配对：正文都空、附件数相同、历史不早于发送时刻。
+ * 只比「正文都为空」会配上更早的另一条纯图片消息，把刚发的气泡提前吞掉。
+ */
+function sameAttachmentOnly(m: ChatMessage, h: ChatMessage): boolean {
+  if (h.content.trim() || (m.attachments?.length ?? 0) !== (h.attachments?.length ?? 0)) return false;
+  const sent = m.ts ? Date.parse(m.ts) : NaN;
+  const seen = h.ts ? Date.parse(h.ts) : NaN;
+  return Number.isNaN(sent) || Number.isNaN(seen) || seen >= sent - ATTACH_ONLY_SKEW_MS;
 }
 
 /**

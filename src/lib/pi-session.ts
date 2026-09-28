@@ -31,6 +31,7 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { hasInboundHeader } from "./inbound-body.js";
 
 /** Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖（与 Pi 自身一致） */
 export function piAgentDir(): string {
@@ -202,14 +203,11 @@ export function mapPiToolCall(name: string, args: unknown): { name: string; inpu
  * 🤝 跨机 peer、📢 广播）。Pi 侧的消息是**裸文本**（没有 Claude Code 的 <channel> 包装），
  * 所以历史面板会把它当成一条普通用户消息 —— 注入头留在正文里、且与网页自己渲染的那条
  * 重复。这里把它**还原成 Claude Code 的 <channel> 形状**，后面的解包 / 剥头 / 作者标签
- * 就全部复用既有逻辑（session-history.unwrapChannelMessage + stripChannelHeader）。
+ * 就全部复用既有逻辑（session-history.unwrapChannelMessage + lib/inbound-body.ts 的剥头）。
  */
-const BRIDGE_INBOUND_RE = /^\s*\[(🌐|🤖|🤝|📢|📣)[^\]]*\]/;
-
 export function wrapPiInboundAsChannel(text: string): string {
-  if (!BRIDGE_INBOUND_RE.test(text)) return text;
-  // header 块与正文之间必有空行（bridge 的拼装方式）；没有就当普通消息
-  if (!/\]\r?\n\r?\n/.test(text)) return text;
+  // header 块后面是空行、或正文为空（纯附件消息）；边界不齐就当普通消息
+  if (!hasInboundHeader(text)) return text;
   const head = text.split(/\]\r?\n\r?\n/)[0];
   const from = /[「"]([^」"]+)[」"]/.exec(head)?.[1] ?? "";
   return `<channel source="claudestra"${from ? ` user="${from}"` : ""}>\n${text}\n</channel>`;
@@ -354,7 +352,7 @@ export function piLineToClaudeShape(line: string): AnyRecord | null {
         : Array.isArray(blocks)
           ? blocks.filter((b: AnyRecord) => b?.type === "text").map((b: AnyRecord) => String(b.text ?? "")).join("\n")
           : "";
-    if (joined && BRIDGE_INBOUND_RE.test(joined)) {
+    if (joined && hasInboundHeader(joined)) {
       // ⚠ isMeta:true 是 Claude Code 侧 channel 记录的标记，session-history 只在
       // isMeta 为真时才走 unwrapChannelMessage（其余 isMeta 是 caveat 之类，过滤）。
       // 不带这个标记 ⇒ <channel> 标签原样留在正文里（实测过）。

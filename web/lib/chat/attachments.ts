@@ -41,8 +41,8 @@ export function attachmentFromPath(p: string): AttachmentView | null {
   if (!file) return null;
   const dateDir = p.match(/\/web\/uploads\/(\d{4}-\d{2}-\d{2})\//);
   return {
-    // 展示名去掉雪花 id（Discord 下载）/ uuid（web 上传）前缀
-    name: file.replace(/^\d+_/, "").replace(/^[0-9a-f]{8}-/, ""),
+    // 展示名去掉雪花 id（Discord 下载）/ api_时间戳（API 上传）/ uuid（旧 web 上传）前缀
+    name: file.replace(/^(?:api_)?\d+_/, "").replace(/^[0-9a-f]{8}-/, ""),
     kind: isImageName(file) ? "image" : "file",
     url: attachmentUrl(file, dateDir?.[1]),
   };
