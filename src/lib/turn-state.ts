@@ -1,7 +1,7 @@
 /**
  * 「agent 忙不忙」的唯一判据：主回合（main）和后台活动（bg）分开报。纯函数，单测 tests/turn-state.test.ts。
  *
- * 押后闸 / flush / 两个抢占入口 / 值守都只看 main：主回合结束、只剩后台 subagent 时 CC 收到通知会正常开新回合，
+ * 押后闸 / flush / 两个抢占入口 / Autopilot 都只看 main：主回合结束、只剩后台 subagent 时 CC 收到通知会正常开新回合，
  * 押着它只会让 agent 消息等到后台全部结束（git log -S agentMsgMustWait）；而那时的 C-c 会把后台 agent 全停掉。
  * bg 只给显示用（侧栏黄点仍是 paneLooksWorking，语义 = main 非 idle 或 bg）。
  */
@@ -99,7 +99,7 @@ export function turnState(input: TurnInput): TurnState {
 }
 
 /**
- * agent→agent 消息（和值守提醒）现在要不要先押着：主回合在跑 / 压缩中。只剩后台在跑不押。
+ * agent→agent 消息（和 Autopilot 提醒）现在要不要先押着：主回合在跑 / 压缩中。只剩后台在跑不押。
  * 后台 subagent 结束时 CC 会立刻自动开 task-notification 回合，撞上它靠屏幕判忙（回合开头不带括号的 spinner 也认）；
  * 从 CC 排队通知到 spinner 第一帧之间仍有几十到几百毫秒看不出来——根治靠送达确认，不在这里。
  * 别按 bg-activity 的「结束」事件加时间窗：它 10 秒扫一轮，检测到时通知回合往往已经跑完（实测时序见 git log -S bgJustEnded）。

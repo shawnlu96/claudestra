@@ -1,17 +1,17 @@
-/** lib/missions.ts：截止时间解析、空转计数与退避、提醒种类与文案、加锁读改写 */
+/** lib/missions.ts：截止时间解析、提醒种类与文案、加锁读改写（退避改由 run 结果决定：tests/autopilot-run.test.ts） */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  backoffMs, COMPACT_HINT_RATIO, FAST_TURN_MS, missionKey, nextFastTurns, nudgeKind, nudgeText, parseUntil, readMissions, updateMissions, type Mission,
+  COMPACT_HINT_RATIO, missionKey, nudgeKind, nudgeText, parseUntil, readMissions, updateMissions, type Mission,
 } from "../src/lib/missions.js";
 
 const NOW = new Date(2026, 8, 28, 3, 40, 0); // 本地 03:40
 const base = (over: Partial<Mission> = {}): Mission => ({
   agent: "claudestra", goal: "按台账推进", until: new Date(2026, 8, 28, 11, 0).toISOString(), createdAt: NOW.toISOString(),
-  status: "active", nudges: 0, fastTurns: 0, ...over,
+  status: "active", nudges: 0, ...over,
 });
 
 describe("parseUntil", () => {
@@ -27,19 +27,6 @@ describe("parseUntil", () => {
     expect(parseUntil("2026-09-01T00:00:00Z", NOW)).toBeNull();
     expect(parseUntil("25:00", NOW)).toBeNull();
     expect(parseUntil("明早", NOW)).toBeNull();
-  });
-});
-
-describe("空转与退避", () => {
-  test("提醒后很快就结束的回合 +1，正常干活的回合清零", () => {
-    const at = NOW.getTime();
-    const m = base({ lastNudgeAt: new Date(at).toISOString(), fastTurns: 1 });
-    expect(nextFastTurns(m, at + 20_000)).toBe(2);
-    expect(nextFastTurns(m, at + FAST_TURN_MS + 1)).toBe(0);
-    expect(nextFastTurns(base(), at)).toBe(0);
-  });
-  test("连续两次空转才开始等：5 → 15 → 30 → 60 分钟封顶", () => {
-    expect([0, 1, 2, 3, 4, 5, 9].map((n) => backoffMs(n) / 60_000)).toEqual([0, 0, 5, 15, 30, 60, 60]);
   });
 });
 
@@ -59,7 +46,7 @@ describe("提醒种类与文案", () => {
     expect(t).toContain("~/ledger.json");
     expect(t).toContain('`bun /r/src/manager.ts mission done claudestra "<一句话总结>"`');
     expect(nudgeText(m, "compact", NOW.getTime(), "x")).toContain("/save-compact");
-    expect(nudgeText(m, "deadline", NOW.getTime(), "x")).toContain("值守已关闭");
+    expect(nudgeText(m, "deadline", NOW.getTime(), "x")).toContain("Autopilot 已关闭");
   });
   test("missionKey 去掉 agent- 前缀", () => {
     expect(missionKey("agent-claudestra")).toBe("claudestra");
@@ -93,7 +80,7 @@ describe("updateMissions 的写入纪律", () => {
     await updateMissions(() => undefined, p);
     expect(statSync(p).mtimeMs).toBe(before);
   });
-  test("每一项都要像一条值守：写坏的文件读成空，不把半截数据当状态", async () => {
+  test("每一项都要像一条 mission：写坏的文件读成空，不把半截数据当状态", async () => {
     const dir = mkdtempSync(join(tmpdir(), "missions-bad-"));
     const p = join(dir, "missions.json");
     writeFileSync(p, JSON.stringify({ claudestra: { agent: "claudestra" } }));

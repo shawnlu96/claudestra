@@ -24,7 +24,7 @@ type RunManager = (...args: string[]) => Promise<any>;
 export interface AgentInfoIo {
   readRegistryAgents: () => Promise<RegistryAgent[]>;
   readPrincipals: () => Promise<PrincipalsFile>;
-  /** 值守状态（lib/missions.ts）；单测不给 = 没有值守 */
+  /** Autopilot 状态（lib/missions.ts）；单测不给 = 没有 Autopilot */
   readMissions?: () => Promise<MissionMap>;
   /** 各频道排队中的 agent 消息数（bridge/held-queue.ts）；单测不给 = 都没排队 */
   heldCounts?: () => Record<string, number>;
@@ -72,7 +72,7 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
 
 /**
  * 派发关系（manager/team.ts）：侧栏把执行者挂在派发者下面。parent 只在调用方 scope 里看得到派发者时给（裸名，大总管 = master），
- * 否则名字本身就泄露了 scope 外的 agent；peer 两项都不给（和值守一样是本机的事）。展示用，不参与授权。
+ * 否则名字本身就泄露了 scope 外的 agent；peer 两项都不给（和 Autopilot 一样是本机的事）。展示用，不参与授权。
  */
 function teamField(principal: Principal, r?: Pick<RegistryAgent, "parent" | "task">): { parent?: string; task?: string } {
   if (principal.peer || !r) return {};
@@ -102,7 +102,7 @@ function ledgerField(ledger: Map<string, LedgerTaskRef> | null, name: string): {
   return t ? { ledgerTask: t } : {};
 }
 
-/** 进行中的值守（侧栏 / 顶栏「⏱ 值守 → 11:00」、菜单切换「开始 / 结束值守」）；peer 看不到 */
+/** 进行中的 Autopilot（侧栏 / 顶栏「Autopilot → 11:00」、菜单切换「开启 / 关闭 Autopilot」）；peer 看不到 */
 function missionField(missions: MissionMap, name: string): { mission?: Record<string, unknown> } {
   const m = missions[missionKey(name)];
   if (!m || m.status !== "active") return {};
