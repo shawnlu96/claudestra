@@ -347,6 +347,13 @@ AAD = "cstra-e2e-v1"（按长度前缀编码）后接定长字段：sid(16 字�
     - `replay` → `e2e_duplicate`「对方已经处理过这条（回复在路上丢了），不要重发」：多半是中继伪造了 401。
     - peer 在线探测是 GET、每分钟一次，通常会先把会话换新，所以这种失败不常见。残余情况：中继伪造 401，并且对方恰好在原请求被处理之后、重发到达之前重启，这时会报成「对方重启过」，用户重发就会重复。前提是中继伪造 401 与对方重启同时发生，而签名本身 300 秒就过期，这个窗口很窄。
   - 收方和发方都有进程内的端到端测试（`tests/peer-e2e.test.ts`），中间的「中继」会录下、重放、并发重复投递、篡改、伪造错误、冒充应答。
+  - **接线**：
+    - 出站只有一个出口：bridge 的 `peerFetch`（`bridge/relay-link.ts`）和 manager 的 `peerCliFetch`（`manager/relay.ts`）都先问 `lib/peer-e2e-outbound.ts`，目标是 required peer 就走会话。所以任何调用方都绕不过去。
+    - 入站：`serveApiRequest` 最先把 `/api/v1/e2e/*` 交给 `bridge/peer-e2e-route.ts`；解开的内层请求带着会话发起方，从头走一遍原路由。
+    - `peerGate` 拒两种请求：required peer 的明文请求（`e2e_required`），以及会话发起方和 token 主人对不上的请求（`e2e_peer_mismatch`）。
+    - 兑换在 `bridge/peer-redeem-route.ts` 和 `manager/peers-join.ts`。
+    - 进程内集成测试是 `tests/peer-e2e-relay.test.ts`：真中继，B 侧全链路，relay:// 与直连 http 各跑一遍。
+  - **分层**：中继路径上外层实例签名盖住了记录流，中继改帧或重放帧，会先被 relay-inbound 的验签和重放缓存拦下，轮不到 E2E 层；直连路径没有外层验签，由 E2E 层回 `400 e2e_record` / `409 e2e_replay`。两条路的结论一样：不处理，也不回退明文。
 - **兑换邀请**：
   - 请求：用 HPKE（RFC 9180 base 模式，DHKEM(P-256, HKDF-SHA256) + HKDF-SHA256 + AES-256-GCM）封装给邀请方的 E2E 公钥，内容是 join 口令，以及兑换方自己的身份公钥和签名 E2E 公钥块。实现 `src/lib/e2e/hpke.ts`，用 CFRG 官方同套件向量钉住。
   - 路径照旧是 `POST /api/v1/peers/redeem`，中继只放行非联系人发这一个路径，所以中继不用改。请求体从明文 `{join, …}` 换成 `{v:1, suite, enc, ct}`，`info = lp("cstra-peer-redeem-v1", 邀请方指纹)`（`src/lib/peer-e2e-redeem.ts`）。
