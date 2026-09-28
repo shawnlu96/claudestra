@@ -5,9 +5,9 @@
  */
 import { existsSync, unlinkSync } from "fs";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
-import { isModelLimitHit } from "../lib/quota-wall-text.js";
+import { isModelLimitHit, paneShowsWallWait } from "../lib/quota-wall-text.js";
 import { recordMetric } from "../lib/metrics.js";
-import { emptyWallState, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
+import { countsAsWallActivity, emptyWallState, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/state-file.js";
@@ -78,7 +78,11 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
     capture: (win) => tmuxCapture(win, 30),
     prepare: (win) => ensurePaneInteractive(win),
     sendEsc: (win) => tmuxSendEscape(win),
-    mainTurnBusy: async (cid, agent) => agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId)),
+    mainTurnBusy: async (cid, agent) => {
+      const { win } = await resolveTurnWindow(cid, b.controlChannelId);
+      if (win && paneShowsWallWait(await tmuxCapture(win, 30))) return false; // 停在撞墙菜单 / 自动续跑倒计时：带「esc to cancel」，判忙会漏续跑
+      return agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId));
+    },
     held: {
       wallCount: () => b.held.wallCount(),
       queuedFor: (cid) => !!b.held.get(cid)?.length,
@@ -153,10 +157,8 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       })();
       return;
     }
-    if (countsAsActivity(evt.type, evt.data)) {
-      noteActivity(states, evt.chatId, ts);
-      w.noteActivity(evt.chatId, ts);
-    }
+    if (countsAsActivity(evt.type, evt.data)) noteActivity(states, evt.chatId, ts);
+    if (countsAsWallActivity(evt.type, evt.data as Record<string, unknown>)) w.noteActivity(evt.chatId, ts);
   });
   setInterval(() => {
     void resumeDue(b, w, states, agentOf);

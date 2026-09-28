@@ -3,7 +3,8 @@
  * 临时 429 和 agent 自己话里引用这句都不算撞墙。
  */
 import { describe, expect, test } from "bun:test";
-import { isLimitHitText, isModelLimitHit, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
+import { isLimitHitText, isModelLimitHit, paneShowsWallWait, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
+import { paneMainTurnBusy } from "../src/lib/turn-state.js";
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -115,5 +116,31 @@ describe("parseWallText", () => {
 
   test("不是撞墙原文 → null", () => {
     expect(parseWallText("API Error: 429 This request would exceed your account's rate limit.", Date.now())).toBeNull();
+  });
+});
+
+describe("paneShowsWallWait（T35 实测：撞墙等待画面带「esc to cancel」，CC_BUSY_RE 判成忙）", () => {
+  const border = "─".repeat(40);
+  const menu = [
+    "⏺ 看下代码", "  ⎿  You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)", "", " What do you want to do?",
+    " ❯ 1. Stop and wait for limit to reset", "   2. Wait here, then continue automatically at Sep 30 at 6am", "   3. Switch to usage credits",
+    " Enter to confirm · Esc to cancel",
+  ].join("\n");
+  const countdownBelow = [
+    "✻ Worked for 3m 2s", "", border, "❯ ", border,
+    "  ⚠ /low-priority to continue now at lower priority · uses your weekly limit", "  continuing automatically at 3:20am · esc to cancel",
+  ].join("\n");
+  const countdownAbove = ["  ⎿  You've hit your session limit", "  continuing automatically at 3:20am · esc to cancel", "", border, "❯ ", border, "  ? for shortcuts"].join("\n");
+
+  test("菜单开着 / 自动续跑倒计时：不算在跑（通用判忙会把前两种判成忙，这里不改它）", () => {
+    expect(paneMainTurnBusy(menu)).toBe(true);
+    expect(paneMainTurnBusy(countdownAbove)).toBe(true);
+    for (const p of [menu, countdownBelow, countdownAbove]) expect(paneShowsWallWait(p)).toBe(true);
+  });
+
+  test("拿掉这些行之后还有 spinner：照旧算在跑；没有撞墙画面：不归它管", () => {
+    const running = ["✻ Pondering… (2m 3s · ↓ 1.2k tokens)", "  continuing automatically at 3:20am · esc to cancel", "", border, "❯ ", border].join("\n");
+    expect(paneShowsWallWait(running)).toBe(false);
+    expect(paneShowsWallWait(["✻ Worked for 3m 2s", "", border, "❯ ", border, "  ? for shortcuts"].join("\n"))).toBe(false);
   });
 });

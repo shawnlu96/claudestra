@@ -9,6 +9,7 @@
  * agent 自己的正文不问；这里再只认句首、limit 后面紧跟标点或行尾，「You've hit your API limit on GitHub」这类话也不算。
  */
 import { parseResetAt } from "./autopilot-run.js";
+import { paneMainTurnBusy } from "./turn-state.js";
 
 /** 「hit」是额度窗口，「reached your Fable limit」「Fable 5 limit」是单个模型的额度（本机实录 99 条） */
 const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w.-]+ ){0,3}limit|Hit your (?:rate |usage )?limit)(?=\s*(?:[·.,;:!\n]|$))/i;
@@ -81,6 +82,20 @@ export function matchLimitMenu(pane: string): boolean {
     const m = /^(?:❯\s*)?(\d+)\.\s+(.+)$/.exec(l);
     return !!m && Number(m[1]) === i + 1 && MENU_OPTIONS.some((re) => re.test(m[2].trim())) && (i > 0 || /^Stop and wait/.test(m[2]));
   });
+}
+
+/** 撞墙等待的画面行：菜单底部提示、选了「Wait here」后状态栏的自动续跑倒计时、low-priority 入口（T35 实测文案） */
+const WALL_WAIT_LINE = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$|continuing automatically\b[^\n]*·\s*esc to cancel|\/low-priority to continue now\b/i;
+
+/**
+ * 撞墙后停在那儿等（菜单开着 / 状态栏写着「continuing automatically at 3:20am · esc to cancel」），主回合其实没在跑。
+ * 这两种画面都带「esc to cancel」，CC_BUSY_RE 会判成忙（T35 实测）：额度闸判「它在不在跑」时先用这个排除，
+ * CC_BUSY_RE 本身不动。把这些行拿掉之后画面上还有 spinner 的，照旧算在跑。
+ */
+export function paneShowsWallWait(pane: string): boolean {
+  const lines = pane.replace(/\s+$/, "").split("\n");
+  if (!matchLimitMenu(pane) && !lines.slice(-20).some((l) => WALL_WAIT_LINE.test(l))) return false;
+  return !paneMainTurnBusy(lines.filter((l) => !WALL_WAIT_LINE.test(l)).join("\n"));
 }
 
 /** owner 用了重置卡（/limit-reset 成功）时 CC 回显的「Limits reset · your weekly reset day stays … · … left」，不落 jsonl，只能看画面 */

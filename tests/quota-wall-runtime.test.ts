@@ -271,6 +271,22 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     expect(r.notices.filter((n) => n.startsWith("✅"))).toEqual([]);
   });
 
+  test("补投了却还押着（它停在撞墙等待画面、被判成忙）：照样续跑，不当成「消息会叫醒它」", async () => {
+    const r = rig();
+    await hitWall(r, "a");
+    await hitWall(r, "b");
+    r.held.holdEnv(env(agentFrom("pm"), "a", "to-a"), "quota_wall");
+    r.held.holdEnv(env(agentFrom("pm"), "b", "to-b"), "quota_wall");
+    r.deps.flush = async (cid) => {
+      r.flushed.push(cid);
+      if (cid === "a") r.held.delete(cid); // a 投出去了；b 被押回来
+    };
+    r.wall.clear();
+    await r.wall.tick();
+    expect(r.flushed.sort()).toEqual(["a", "b"]);
+    expect(r.resumed.map((x) => x.cid)).toEqual(["b"]);
+  });
+
   test("补投记账之后、flush 之前重启：条数不重记成 0", async () => {
     const r = rig();
     await hitWall(r, "a");

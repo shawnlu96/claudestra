@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { Client } from "discord.js";
 import { AgentCallBook, type PendingAgentCall } from "../src/bridge/agent-calls.js";
 import { drainChannelWatcher, startWatching, stopWatching } from "../src/bridge/jsonl-watcher.js";
-import { noteDelivered, settleStopTurn, settlesOwnTurn, takeApiWaiters, type ApiWaiter, type CallerSettleDeps, type StopTurn } from "../src/bridge/stop-settle.js";
+import { noteDelivered, settleStopTurn, type TurnTrigger, settlesOwnTurn, takeApiWaiters, type ApiWaiter, type CallerSettleDeps, type StopTurn } from "../src/bridge/stop-settle.js";
 import { projectsSlug } from "../src/lib/jsonl-cost.js";
 
 const LIMIT = "You've hit your weekly limit · resets Sep 30 at 6am (Asia/Tokyo)";
@@ -41,16 +41,17 @@ function harness(runtime?: string, opts: { pushFails?: boolean } = {}) {
     nudgeAmbiguous: () => void nudged++,
     takeApiErrorNotice: (cid) => book.takeApiErrorNotice(cid, () => false),
     markApiError: (cid, text) => book.markApiError(cid, () => false, text),
+    clearWithheld: (cid, pac) => book.clearWithheld(cid, pac.callerChannelId),
     notify: async (_pac, _cid, body) => void notes.push(body),
     metric: () => {},
   };
   /** 与 bridge.ts 的 Stop 处理同一个入口：event 原样、drain 是 drainChannelWatcher 的返回值 */
-  const turn = (event: string, drain: StopTurn["drain"], humanTurn = false): StopTurn =>
-    ({ cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event, runtime, drain, humanTurn });
-  const stop = (event: string, drain: StopTurn["drain"], humanTurn = false) => settleStopTurn(deps, turn(event, drain, humanTurn));
+  const turn = (event: string, drain: StopTurn["drain"], trigger: TurnTrigger = "insider"): StopTurn =>
+    ({ cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event, runtime, drain, trigger });
+  const stop = (event: string, drain: StopTurn["drain"], trigger: TurnTrigger = "insider") => settleStopTurn(deps, turn(event, drain, trigger));
   /** bridge 的真实路径：不给 humanTurn，按 deliverToLocal 送达时 noteDelivered 记下的来源判 */
-  const delivered = (fromKind: string) => noteDelivered(cid, fromKind);
-  const stopReal = (event: string, drain: StopTurn["drain"]) => settleStopTurn(deps, { ...turn(event, drain), humanTurn: undefined });
+  const delivered = (from: { kind: string; owner?: boolean; peer?: string }) => noteDelivered(cid, from);
+  const stopReal = (event: string, drain: StopTurn["drain"]) => settleStopTurn(deps, { ...turn(event, drain), trigger: undefined });
   return { cid, book, pushed, notes, nudged: () => nudged, stop, stopReal, delivered, turn, slot: () => book.slot(cid, "c-pm") };
 }
 
@@ -67,13 +68,15 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     expect(h.slot()).toBeUndefined();
   });
 
-  test("错误前已经说了的话扣下，接着做完时一起推（常规审查 P2-2）", async () => {
+  test("错误前已经说了的话扣下，结算时单独一条、带抬头先推，再推这一轮的答复（PM 09-29）", async () => {
     const h = harness();
     await h.stop("StopFailure", { text: "查到了：根因在 watcher", apiError: true, error: wallErr });
     await h.stop("Stop", { text: "修好了，PR #151" });
-    expect(h.pushed).toHaveLength(1);
-    expect(h.pushed[0]).toContain("查到了：根因在 watcher");
-    expect(h.pushed[0]).toContain("修好了，PR #151");
+    expect(h.pushed).toHaveLength(2);
+    expect(h.pushed[0]).toBe("[ℹ️ agent-task-t18 撞墙前扣下的答复（那一轮以 API 错误结束，下面是出错前它已经说了的话）：]\n\n查到了：根因在 watcher");
+    expect(h.pushed[1]).toContain("修好了，PR #151");
+    expect(h.pushed[1]).not.toContain("根因在 watcher");
+    expect(h.slot()).toBeUndefined();
   });
 
   test("不是撞墙的错误：给 caller 推一条说明、每槽只推一次，回程留着", async () => {
@@ -105,16 +108,24 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     expect(h.notes).toHaveLength(2);
   });
 
-  test("撞墙后人触发的回合（owner 用完卡顺手问别的事）不结算旧 caller；接着做的那一轮（bridge 续跑）才结算", async () => {
+  test("撞墙后 guest / 外部 token 触发的回合不结算旧 caller；接着做的那一轮（bridge 续跑）才结算", async () => {
     const h = harness();
     await h.stop("StopFailure", { text: null, apiError: true, error: wallErr });
-    expect(await h.stop("Stop", { text: "（回 owner 的）天气是晴", apiError: false }, true)).toBe(true);
+    expect(await h.stop("Stop", { text: "（回 guest 的）天气是晴", apiError: false }, "stranger")).toBe(true);
     expect(h.pushed).toEqual([]);
     expect(h.slot()).toBeDefined();
-    await h.stop("Stop", { text: "T18 接着做完了", apiError: false }, false);
+    await h.stop("Stop", { text: "T18 接着做完了", apiError: false });
     expect(h.pushed).toHaveLength(1);
     expect(h.pushed[0]).toContain("T18 接着做完了");
     expect(h.pushed[0]).not.toContain("天气");
+  });
+
+  test("撞墙后 owner 触发的回合（Discord 上说「继续」、Web 上接着问）照常结算旧 caller：owner 和 PM 在同一侧（PM 09-29）", async () => {
+    const h = harness();
+    await h.stop("StopFailure", { text: null, apiError: true, error: wallErr });
+    expect(await h.stop("Stop", { text: "T18 接着做完了", apiError: false }, "owner")).toBe(true);
+    expect(h.pushed).toHaveLength(1);
+    expect(h.slot()).toBeUndefined();
   });
 
   test("等续跑期间 owner 在 Discord 打字不算接管；那几条请求被它自己 reply 答掉后，扣下的话不串给新 caller", async () => {
@@ -130,19 +141,33 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     expect(h.pushed[0]).not.toContain("旧的半句");
   });
 
-  test("真实来源判定：撞错后 Web / API token 触发的回合（api-routes 会把 lastMessageSource 改成 agent）不结算旧 caller，也不扣它的话（T24 r1 P1-2）", async () => {
+  test("真实来源判定：撞错后 guest / peer token 触发的回合不结算、它说的话不扣也不外推；bridge 续跑那轮结算，扣下的话单独一条（T24 r1 P1-2）", async () => {
     const h = harness();
-    h.delivered("local"); // PM 的 send_to_agent
-    await h.stopReal("StopFailure", { text: "查到根因在 X", apiError: true, error: { error: "overloaded", text: "API Error: 529 Overloaded" } });
-    h.delivered("api"); // 外部 token B 问了件别的事
-    await h.stopReal("StopFailure", { text: "（答 B 的）半句", apiError: true, error: { error: "overloaded", text: "API Error: 529 Overloaded" } });
+    const overloaded = { error: "overloaded", text: "API Error: 529 Overloaded" };
+    h.delivered({ kind: "local" }); // PM 的 send_to_agent
+    await h.stopReal("StopFailure", { text: "查到根因在 X", apiError: true, error: overloaded });
+    h.delivered({ kind: "api" }); // guest token B 问了件别的事（没有 owner 标记）
+    await h.stopReal("StopFailure", { text: "（答 B 的）半句", apiError: true, error: overloaded });
+    h.delivered({ kind: "api", owner: true, peer: "sekai" }); // peer 永远不算 owner
     expect(await h.stopReal("Stop", { text: "（答 B 的）结论" })).toBe(true);
     expect(h.pushed).toEqual([]);
-    h.delivered("bridge"); // 60 秒续跑
+    h.delivered({ kind: "bridge" }); // 60 秒续跑
     await h.stopReal("Stop", { text: "X 修好了" });
+    expect(h.pushed).toHaveLength(2);
+    expect(h.pushed[0]).toContain("撞墙前扣下的答复");
+    expect(h.pushed[0]).toContain("查到根因在 X");
+    expect(h.pushed[1]).toContain("X 修好了");
+    expect(h.pushed.join("\n")).not.toContain("答 B");
+  });
+
+  test("真实来源判定：owner 在 Web 上（owner:self 的 api，带 owner 标记）触发的回合结算旧 caller", async () => {
+    const h = harness();
+    h.delivered({ kind: "local" });
+    await h.stopReal("StopFailure", { text: null, apiError: true, error: wallErr });
+    h.delivered({ kind: "api", owner: true });
+    expect(await h.stopReal("Stop", { text: "接着做完了" })).toBe(true);
     expect(h.pushed).toHaveLength(1);
-    expect(h.pushed[0]).toContain("查到根因在 X\n\nX 修好了");
-    expect(h.pushed[0]).not.toContain("答 B");
+    expect(h.slot()).toBeUndefined();
   });
 
   test("两个 caller 在等时撞错：两槽都记上等续跑", async () => {
@@ -155,7 +180,7 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
 
   test("没撞过墙：人触发的回合照旧按原规则结算", async () => {
     const h = harness();
-    await h.stop("Stop", { text: "答复", apiError: false }, true);
+    await h.stop("Stop", { text: "答复", apiError: false }, "stranger");
     expect(h.pushed).toHaveLength(1);
   });
 
@@ -171,6 +196,13 @@ describe("Claude Code：以 API 错误结束的一轮不结算", () => {
     await h.stop("Stop", { text: null });
     expect(h.pushed).toEqual([]);
     expect(h.slot()).toBeUndefined();
+  });
+
+  test("扣下的话推失败：回程和扣下的话都留着，下一轮再推", async () => {
+    const h = harness(undefined, { pushFails: true });
+    await h.stop("StopFailure", { text: "半句", apiError: true, error: wallErr });
+    await h.stop("Stop", { text: "做完了" });
+    expect(h.slot()).toMatchObject({ withheld: ["半句"] });
   });
 
   test("推回失败：回程簿条目还在（搬家契约）", async () => {
@@ -284,8 +316,10 @@ describe("jsonl-watcher 的 apiError 标记 → settleStopTurn（真实 drain �
     const r2 = await drain();
     expect(r2).toEqual({ drained: true, text: "做完了", apiError: false });
     await h.stop("Stop", r2);
-    expect(h.pushed).toHaveLength(1);
-    expect(h.pushed[0]).toContain("先看下代码\n\n做完了");
+    expect(h.pushed).toHaveLength(2);
+    expect(h.pushed[0]).toContain("撞墙前扣下的答复");
+    expect(h.pushed[0]).toContain("先看下代码");
+    expect(h.pushed[1]).toContain("做完了");
   });
 
   test("同一批里先错误后正常（CC 内部重试成功）：apiError=false，答复里不夹报错原文", async () => {

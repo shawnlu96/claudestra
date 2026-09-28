@@ -188,7 +188,9 @@ async function deliverQueue(c: Ctx, id: string): Promise<void> {
 async function resumeAgents(c: Ctx, id: string): Promise<void> {
   const w = c.state.wall!;
   const got = new Set(w.recovery!.flushedTo ?? []);
-  for (const cid of resumeTargets(w, (x) => got.has(x) || c.d.held.queuedFor(x))) {
+  // 补投真送到了（队空了）的不再续跑：那几条消息自会叫醒它。补投了还押着的（它停在撞墙等待画面、被判成忙）照样续跑，
+  // 续跑是 bridge 消息、不因「回合中」押后，它跑完一轮 Stop 时押着的也就投了
+  for (const cid of resumeTargets(w, (x) => got.has(x) && !c.d.held.queuedFor(x))) {
     const h = w.hits[cid];
     const busy = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话
     if (!stillRecovering(c, id)) return;

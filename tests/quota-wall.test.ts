@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  emptyWallState, enterFromUsage, exitVia, isHumanSender, observeCache, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue,
+  countsAsWallActivity, emptyWallState, enterFromUsage, exitVia, isHumanSender, observeCache, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue,
   resumeTargets, wallActive, WALL_TIMING, type WallState,
 } from "../src/lib/quota-wall.js";
 import { recoveredNotice, wallNotice, wallResumeText } from "../src/lib/quota-wall-notice.js";
@@ -213,5 +213,18 @@ describe("通知", () => {
   });
   test("续跑话术带撞墙时刻", () => {
     expect(wallResumeText(new Date(2026, 8, 28, 22, 19).getTime(), "rate_limit")).toContain("22:19");
+  });
+});
+
+describe("countsAsWallActivity：撞墙后它是不是真的又跑起来了", () => {
+  test("jsonl 里出了新东西 / 它往外发消息才算；投递时的 thinking、送进来的消息、错误原文不算（菜单开着的会话收到消息并不会动）", () => {
+    expect(countsAsWallActivity("tool_start", {})).toBe(true);
+    expect(countsAsWallActivity("assistant_text", { text: "接着改" })).toBe(true);
+    expect(countsAsWallActivity("agent_status", { status: "thinking", trigger: "jsonl_activity" })).toBe(true);
+    expect(countsAsWallActivity("chat_message", { direction: "out" })).toBe(true);
+    expect(countsAsWallActivity("agent_status", { status: "thinking" })).toBe(false);
+    expect(countsAsWallActivity("chat_message", { direction: "in" })).toBe(false);
+    expect(countsAsWallActivity("assistant_text", { text: "You've hit your weekly limit", rateLimited: true })).toBe(false);
+    expect(countsAsWallActivity("assistant_text", { text: "API Error: 529", apiError: true })).toBe(false);
   });
 });

@@ -151,6 +151,18 @@ export function noteWallActivity(s: WallState, channelId: string, ts: number, gr
   return { v: 1, wall: w };
 }
 
+/**
+ * 哪些事件说明它撞墙之后真的又跑起来了（从续跑名单拿掉）：jsonl 里出了新东西（工具调用 / 正文 / 新 assistant 条目）、
+ * 它往外发了消息。投递时的 agent_status thinking、送进来的 chat_message 不算——菜单还开着的会话收到消息并不会动。
+ */
+export function countsAsWallActivity(type: string, data: Record<string, unknown>): boolean {
+  if (type === "tool_start") return true;
+  if (type === "chat_message") return data.direction === "out";
+  if (type === "agent_status") return data.status === "thinking" && data.trigger === "jsonl_activity";
+  if (type === "assistant_text") return data.rateLimited !== true && data.apiError !== true && !String(data.text ?? "").startsWith("API Error");
+  return false;
+}
+
 /** statusline 落盘的用量（lib/usage-cache.ts 的 CachedUsage 的子集） */
 export interface UsageSignal {
   sessionPct: number | null;

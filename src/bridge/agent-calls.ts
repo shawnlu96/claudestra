@@ -187,6 +187,12 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (w.length) this.persist();
   }
 
+  /** 扣下的话已经推给 caller 了：只清那一槽的 withheld */
+  clearWithheld(target: string, caller: string): void {
+    const raw = this.slot(target, caller);
+    if (raw?.withheld) this.set(keyOf(target, caller), { ...raw, withheld: undefined });
+  }
+
   /** 有 caller 在等 target 接着做完（它上一轮以 API 错误结束）：这时 owner 在 Discord 打字不算接管 */
   awaitingResume(target: string, stillHeld: StillHeld): boolean {
     return this.waiting(target, stillHeld).some((c) => c.apiErrorAt);

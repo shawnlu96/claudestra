@@ -9,6 +9,7 @@
  * 它的额度条目不带 isApiErrorMessage），被打断时是 typing-hook 把 Interrupt 映射过来的（那一轮就该结掉）。
  */
 import type { MetricEvent } from "../lib/metrics.js";
+import { isOwnerSource } from "../lib/delegate-marker.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
@@ -26,21 +27,24 @@ export interface StopTurn {
   runtime?: string;
   /** drainChannelWatcher 的结果：text 是兜底要转的答复文字（不含错误原文），apiError / error = 最后一条 assistant 是 API 错误 */
   drain: { text: string | null; apiError?: boolean; error?: { error: string; text: string } };
-  /** 这一轮是外人（人 / API token）触发的；不给 = 按 noteDelivered 记下的来源判 */
-  humanTurn?: boolean;
+  /** 触发这一轮的是谁；不给 = 按 noteDelivered 记下的来源判 */
+  trigger?: TurnTrigger;
 }
 
 /**
- * 最近一条真正送到 cid 手上的消息是谁发的（deliverToLocal 发出去那一刻记）：outsider = Discord 用户 / Web / API token
- * （owner、guest、peer 都算），insider = 别的 agent 和 bridge 自己（续跑、补投、看门狗）。以 API 错误结束后，回程要等
- * insider 触发的「接着做」那一轮才结算——outsider 触发的回合答的是那个人，拿去结算旧 caller 就是把 B 的对话推给 PM。
- * 不看 lastMessageSource：api-routes 投递后会把它改成 "agent"（只为不 @ owner）。进程内：重启后不知道 = 当 outsider（不结算）。
+ * 最近一条真正送到 cid 手上的消息是谁发的（deliverToLocal 发出去那一刻记），按 principal 分（PM 09-29）：
+ * insider = 别的 agent 和 bridge 自己（续跑、补投、看门狗）；owner = Discord 上的 owner、Web 上 owner 的设备 / web-ui、
+ * owner:self 的 API（lib/delegate-marker.ts isOwnerSource，全仓唯一的 owner 判定）；stranger = guest、scoped / 外部 token、peer。
+ * 以 API 错误结束后回程照常由 insider 和 owner 触发的回合结算（owner 和 PM 在同一侧，推过去不跨 principal）；stranger 触发的
+ * 回合答的是那个外人，不结算、它说的话也不扣。不看 lastMessageSource：api-routes 投递后会把它改成 "agent"。
+ * 进程内：重启后不知道 = 当 stranger（不结算）。
  */
-const lastTrigger = new Map<string, "outsider" | "insider">();
-export function noteDelivered(cid: string, fromKind: string): void {
-  lastTrigger.set(cid, fromKind === "user" || fromKind === "api" ? "outsider" : "insider");
+export type TurnTrigger = "insider" | "owner" | "stranger";
+const lastTrigger = new Map<string, TurnTrigger>();
+export function noteDelivered(cid: string, from: { kind: string; owner?: boolean; peer?: string }): void {
+  lastTrigger.set(cid, from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger");
 }
-const outsiderTurn = (t: StopTurn): boolean => t.humanTurn ?? lastTrigger.get(t.cid) !== "insider";
+const strangerTurn = (t: StopTurn): boolean => (t.trigger ?? lastTrigger.get(t.cid) ?? "stranger") === "stranger";
 
 const ranIntoApiError = (t: StopTurn): boolean =>
   !!t.drain.apiError || (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME);
@@ -62,9 +66,23 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
     return false;
   }
   const pac = d.answerable(t.cid);
-  if (pac?.apiErrorAt && outsiderTurn(t)) return own; // 答的是外人：回程留着，看门狗照常按「答完了」走
-  await settleCallers(d, t.cid, [...(pac?.withheld ?? []), t.drain.text].filter(Boolean).join("\n\n") || null);
+  if (pac?.apiErrorAt && strangerTurn(t)) return own; // 答的是外人：回程留着，看门狗照常按「答完了」走
+  if (pac?.withheld?.length && !(await pushWithheld(d, t.cid, pac))) return own; // 没推出去：回程和扣下的话都留着，下一轮再试
+  await settleCallers(d, t.cid, t.drain.text);
   return own;
+}
+
+/** 撞墙前扣下的话单独推一条、带抬头：和这一轮（可能是不相干的一轮）的正文拼在一起，caller 分不清哪句是答它的 */
+async function pushWithheld(d: CallerSettleDeps, cid: string, pac: PendingAgentCall): Promise<boolean> {
+  const body = `[ℹ️ ${pac.targetName} 撞墙前扣下的答复（那一轮以 API 错误结束，下面是出错前它已经说了的话）：]\n\n${pac.withheld!.join("\n\n")}`;
+  try {
+    await d.pushBack(pac, cid, body);
+    d.clearWithheld(cid, pac);
+    return true;
+  } catch (e) {
+    console.error(`撞墙前扣下的答复推给 ${pac.callerName} 失败（回程留着）:`, e);
+    return false;
+  }
 }
 
 /**
@@ -72,7 +90,7 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
  * 错误前它已经说了的话扣在回程上、接着做完时一起推（外人触发的那一轮说的是给外人的，不扣）；不是撞墙的给 caller 推一条说明
  */
 async function onApiErrorTurn(d: CallerSettleDeps, t: StopTurn): Promise<void> {
-  d.markApiError(t.cid, outsiderTurn(t) ? null : t.drain.text);
+  d.markApiError(t.cid, strangerTurn(t) ? null : t.drain.text);
   const err = t.drain.error;
   // 撞墙的留给额度闸（整台机器押住、出闸续跑，caller 不用知道）；没读到错误条目（Stop 比 jsonl 先到）不猜
   if (!err || ((t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME && wallHitOf(err.error, err.text, Date.now()))) return;
@@ -119,6 +137,8 @@ export interface CallerSettleDeps {
   nudgeAmbiguous(cid: string): void;
   /** 在等 cid 的槽都记上「以 API 错误结束、等续跑」，withheld 有字就追加进去（回程簿 markApiError，落盘） */
   markApiError(cid: string, withheld: string | null): void;
+  /** 扣下的话已经推给 caller：清掉这一槽的 withheld（等续跑标记随答复一起消化） */
+  clearWithheld(cid: string, pac: PendingAgentCall): void;
   /** 在等 cid 的、还没为 API 错误说明过的槽，取出即记下（落盘，回程簿 takeApiErrorNotice） */
   takeApiErrorNotice(cid: string): PendingAgentCall[];
   /** 推给 caller 一条 intent=notification（不带 expecting、不当答复） */
