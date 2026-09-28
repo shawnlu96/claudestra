@@ -3,6 +3,7 @@
  *   - notify 投递失败的 undelivered-alerts.log
  *   - tmux 全局环境与 .env 的安装级变量漂移
  *   - 状态文件损坏（写者会拒写）与遗留的 .corrupt-* 备份
+ *   - registry 里占了身份保留名的 agent（agent-owner；agent-master 是大总管自己的条目，不算）
  * 判定都是纯函数，tests/doctor.test.ts。
  */
 
@@ -10,7 +11,7 @@ import { readFile, readdir } from "fs/promises";
 import type { Check } from "./doctor.js";
 import { parseTmuxEnvLine } from "./bridge-port.js";
 import { STATE_DIR, CONFIG_PATH, TMUX_SOCK, UNDELIVERED_ALERTS_LOG, statePath } from "./paths.js";
-import { REGISTRY_PATH } from "./registry.js";
+import { isMasterAgent, isReservedAgentName, REGISTRY_PATH } from "./registry.js";
 import { readJsonStateSync, type StateRead } from "./state-file.js";
 
 /**
@@ -117,4 +118,11 @@ export function staleInstallEnvCheck(tmuxEnvOut: string, dotenv: Record<string, 
     detail: `${stale.join(", ")} 与 .env 不一致 —— 新开的 agent / 大总管调起的 manager 拿到的是旧值`,
     fix: `逐个 tmux -S ${TMUX_SOCK} set-environment -g <KEY> <.env 里的值>（值不打印，里面可能有 token），再 bun src/manager.ts restart 让会话重读`,
   }];
+}
+
+/** 台账把 actor "owner" 当身份：registry 里有 agent-owner 就 warn（新建 / 改名已拒，这里兜老数据） */
+export function reservedAgentNameChecks(names: readonly string[], group = "agent"): Check[] {
+  const bad = names.filter((n) => isReservedAgentName(n) && !isMasterAgent(n));
+  return bad.length === 0 ? [] : [{ group, name: "保留名", status: "warn", detail: `registry 里有占用身份保留名的 agent：${bad.join(", ")}`,
+    fix: "bun src/manager.ts rename <旧名> <新名> 换掉（owner / master 在台账里是身份）" }];
 }

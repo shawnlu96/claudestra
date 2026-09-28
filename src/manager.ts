@@ -111,7 +111,7 @@ import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest,
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
 import { cmdAutoUpdate } from "./manager/auto-update.js";
 import { cmdWebRelease, maybeBuildWeb } from "./manager/web-release.js";
-import { isWriteInvocation, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
+import { isWriteInvocation, needsWriteLock, PRINCIPALS_WRITE_COMMANDS } from "./manager/write-commands.js";
 
 const BRIDGE_URL = resolveBridgeUrl();
 const CATEGORY_NAME = "agents";
@@ -1155,6 +1155,7 @@ async function cmdRename(oldName: string, newName: string) {
   delete reg.agents[oldTmux];
   (await import("./manager/team.js")).repointParentRefs(reg, oldTmux, newTmux); // 子 agent 的 parent 跟着改名
   await saveRegistry(reg);
+  await (await import("./manager/ledger.js")).renameLedgerAgent(oldTmux, newTmux); // 台账的执行者 / PM 名单跟着改名
   steps.push({ step: "registry", ok: true });
 
   // 3. Discord 频道 rename
@@ -2824,7 +2825,7 @@ async function cmdPiEnvSet(
 // 覆盖(saveRegistry 只防撕裂不防丢更新)。命令级锁一把关掉全部窗口;拿不到
 // (20s)降级放行——advisory,宁可退回旧竞态也不卡死命令。进程退出兜底释放。
 let writeLock: { release: () => void } | null = null;
-if (isWriteInvocation(cmd, args)) {
+if (needsWriteLock(cmd, args)) {
   const { acquireLock } = await import("./lib/file-lock.js");
   writeLock = await acquireLock(statePath(".manager-write.lock"));
   if (!writeLock) console.error("⚠ 写锁 20s 未拿到,降级继续(并发写命令可能竞态)");
@@ -3072,6 +3073,7 @@ switch (cmd) {
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
   case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
   case "mission": await (await import("./manager/mission.js")).cmdMission(args); break; // 值守（lib/missions.ts）
+  case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 
   // v2.4.19+ 给现存 active agent 补发置顶 focus 公告（新建/恢复的自动发，这个

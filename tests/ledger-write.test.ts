@@ -2,7 +2,8 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getItem, getMeta, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { appendEvent, createItem, createTask, deliver, moveStage, recordReview, setFrozen, setItem, setMeta, setTask } from "../src/lib/ledger-write.js";
+import { appendEvent, createItem, createTask, deliver, importTask, moveStage, recordReview, renameAgentRefs, setFrozen, setItem, setMeta, setTask } from "../src/lib/ledger-write.js";
+import { taskMetrics } from "../src/lib/ledger-metrics.js";
 
 const P = "claude-orchestrator";
 const PM = { actor: "agent-claudestra" };
@@ -237,5 +238,65 @@ describe("审查第 1 轮", () => {
     expect(errOf(() => createItem(db, PM, { project: P, id: "T8a", title: "x" })).code).toBe("conflict");
     expect(errOf(() => createTask(db, PM, { project: P, id: "i10", title: "x", kind: "code" })).code).toBe("conflict");
     expect(errOf(() => createTask(db, PM, { project: "other", id: "i10", title: "x", kind: "code" })).code).toBe("conflict");
+  });
+});
+
+describe("importTask（T8b 导入口）", () => {
+  const task = { project: P, id: "H1", title: "历史任务", kind: "code" as const, itemId: "i10", agent: "agent-task-t3", stage: "done" as const, round: 1 };
+  const events = [
+    { kind: "stage" as const, ts: 200, data: { from: "spec", to: "restate" } },
+    { kind: "review" as const, ts: 800, text: "无 P0，2 个 P1", data: { round: 1, p0: 0, p1: 2, p2: null } },
+    { kind: "stage" as const, ts: 900, data: { from: "restate", to: "done" } },
+  ];
+  test("只给 owner；行落在最终阶段，建任务事件记起始阶段，合成事件全带 imported、时间取原值，指标能算", () => {
+    expect(errOf(() => importTask(db, PM, { task, initialStage: "spec", createdTs: 100, events })).code).toBe("forbidden");
+    const r = importTask(db, { ...OWNER, dedupKey: "imp:H1" }, { task, initialStage: "spec", createdTs: 100, events });
+    expect(r.row).toMatchObject({ stage: "done", round: 1, agent: "agent-task-t3" });
+    const ev = events_("H1");
+    expect(ev.map((e) => [e.kind, e.ts, e.data.imported])).toEqual([["task", 100, true], ["stage", 200, true], ["review", 800, true], ["stage", 900, true]]);
+    expect(ev[0].data.patch).toMatchObject({ stage: "spec" });
+    expect(taskMetrics(r.row, ev, 1000)).toMatchObject({ startTs: 200, endTs: 900, totalMs: 700, reviewRounds: 1, p1: 2 });
+    expect(importTask(db, { ...OWNER, dedupKey: "imp:H1" }, { task, initialStage: "spec", createdTs: 100, events }).duplicate).toBe(true);
+    expect(events_("H1")).toHaveLength(4);
+  });
+  test("阶段事件接不上、最后没落到行的阶段、种类不在白名单：整笔拒绝不留残行", () => {
+    const bad = [
+      [{ kind: "stage" as const, ts: 1, data: { from: "build", to: "done" } }],
+      [{ kind: "stage" as const, ts: 1, data: { from: "spec", to: "restate" } }],
+      [{ kind: "item" as never, ts: 1 }],
+      [{ kind: "stage" as const, ts: Number.NaN, data: { from: "spec", to: "done" } }],
+    ];
+    for (const evs of bad) expect(errOf(() => importTask(db, OWNER, { task, initialStage: "spec", createdTs: 1, events: evs })).code).toBe("invalid");
+    expect(getTask(db, "H1")).toBeNull();
+  });
+});
+
+function events_(target: string) {
+  return listEvents(db, { project: P, target });
+}
+
+describe("renameAgentRefs（manager rename 钩子）", () => {
+  test("tasks.agent / pm 与 PM 名单里的旧名换成新名，各记一条事件；改名后原执行者仍能推自己的步骤", () => {
+    createTask(db, PM, { project: P, id: "T9", title: "t", kind: "code", agent: "agent-claudestra", pm: "agent-claudestra" });
+    const r = renameAgentRefs(db, { actor: "master" }, "agent-task-t8a", "agent-task-t8b");
+    expect(r).toEqual({ tasks: ["T8a"], projects: [] });
+    expect(getTask(db, "T8a")?.agent).toBe("agent-task-t8b");
+    moveStage(db, { actor: "agent-task-t8b" }, { taskId: "T8a", from: "spec", to: "restate" });
+    const r2 = renameAgentRefs(db, { actor: "master" }, "agent-claudestra", "agent-pm");
+    expect(r2).toEqual({ tasks: ["T8a", "T9"], projects: [P] });
+    expect(getTask(db, "T9")).toMatchObject({ agent: "agent-pm", pm: "agent-pm" });
+    expect(getMeta(db, P).pms).toEqual(["agent-pm"]);
+    expect(events_("T9").at(-1)?.data).toMatchObject({ op: "set", patch: { agent: "agent-pm", pm: "agent-pm" }, rename: { from: "agent-claudestra", to: "agent-pm" } });
+  });
+});
+
+describe("导入身份 import", () => {
+  test("它写的事件一律带 imported；PM 名单、导入口对它放行；roleOf 不给它任何阶段角色", () => {
+    const IMP = { actor: "import" };
+    expect(setMeta(db, IMP, { project: P, key: "pms", value: ["agent-claudestra"] }).event.data.imported).toBe(true);
+    expect(createItem(db, IMP, { project: P, id: "i30", title: "x" }).event.data).toMatchObject({ op: "new", imported: true });
+    const r = importTask(db, IMP, { task: { project: P, id: "H2", title: "t", kind: "code", stage: "spec" }, createdTs: 5, createdApprox: true, events: [] });
+    expect(r.event).toMatchObject({ actor: "import", data: { imported: true, approxTime: true } });
+    expect(errOf(() => moveStage(db, IMP, { taskId: "H2", from: "spec", to: "restate" })).code).toBe("forbidden");
   });
 });

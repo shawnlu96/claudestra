@@ -51,6 +51,14 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   model: new Set(["set", "reset", "all"]),
 };
 
+/** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms / --docs-dir 才写 */
+const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export"]);
+/**
+ * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
+ * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
+ */
+const LEDGER_REGISTRY_SUBS: ReadonlySet<string> = new Set(["task-new", "task-set", "import"]);
+
 /** auto-update 的读子命令（缺省即 status）；其余（channel / claudestra on|off / claude on|off）都写 config.json */
 const AUTO_UPDATE_READ_SUBS: ReadonlySet<string> = new Set(["", "status", "get"]);
 
@@ -66,6 +74,12 @@ function takeoverWrites(args: readonly string[]): boolean {
   return false;
 }
 
+/** 要不要拿命令级写锁：写命令里只有只写台账 sqlite 的 ledger 子命令例外（认主守卫照旧按 isWriteInvocation） */
+export function needsWriteLock(cmd: string | undefined, args: readonly string[]): boolean {
+  if (cmd === "ledger") return LEDGER_REGISTRY_SUBS.has(args[0] ?? "");
+  return isWriteInvocation(cmd, args);
+}
+
 /** 这次调用会不会改状态（→ 认主守卫 + 命令级写锁） */
 export function isWriteInvocation(cmd: string | undefined, args: readonly string[]): boolean {
   if (!cmd) return false;
@@ -75,5 +89,6 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
+  if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
 }

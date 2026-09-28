@@ -1,0 +1,37 @@
+{
+  "updatedAt": "2026-09-28T18:21:16+0900",
+  "items": [
+    {
+      "id": "i07", "n": 7, "priority": "P1", "status": "doing", "title": "多 agent 编排", "oneLine": "编排试跑", "next": "扩大第二批",
+      "ask": "先定编排方式", "summary": "样本摘要", "links": [{ "label": "设计稿", "url": "docs/07b.md" }], "codex": "样本复核", "decisions": [],
+      "updatedAt": "2026-09-28T16:00:00+09:00",
+      "trial": {
+        "approvedAt": "2026-09-28T14:56:35+09:00", "reviewPolicy": "样本策略",
+        "tasks": [
+          { "id": "T0", "title": "原子切换", "owner": "agent-claudestra（PM）", "status": "完成（已上线）", "branch": "task/t0", "pr": "https://example.invalid/pull/1",
+            "reviews": ["bff2bdc：无 P0，3 个 P1（样本）→ 已修", "1eb88bd：无新 P0/P1"], "merge": "PR #1 → main abc1234", "rollbackPoint": "main 0000000",
+            "finishedAt": "2026-09-28T15:40:25+09:00", "metrics": "墙钟约 1 小时" },
+          { "id": "T3", "title": "值守卡片", "owner": "agent-task-t3", "status": "完成", "specRev": 1, "spec": "docs/tasks/T3.md", "model": "claude-opus-5-5 medium",
+            "dispatchedAt": "2026-09-28T15:40:45+09:00", "startedAt": "2026-09-28T16:01:55+0900", "owner_words": "截止时间没写日期", "notes": "样本备注" },
+          { "id": "T8", "title": "台账内置（伞形）", "owner": null, "status": "T8a 已合并" }
+        ]
+      }
+    },
+    { "id": "i10", "n": 10, "priority": "P0", "status": "decide", "title": "留下记录", "oneLine": "台账", "next": "做成内置", "ask": "做成我们的内置功能",
+      "summary": "s", "decision": "09-28 17:01 owner 表单", "updatedAt": "2026-09-28T17:05:00+09:00" },
+    { "id": "i17", "n": 17, "priority": "P2", "status": "todo", "title": "值守卡片", "oneLine": "o", "next": "n", "ask": "你的截止 4:45", "summary": "s", "updatedAt": "bad-ts" }
+  ],
+  "log": [
+    { "ts": "2026-09-28T03:34:00+09:00", "item": "i10", "text": "第二条（与第三条同一时刻）" },
+    { "ts": "2026-09-28T03:30:00+09:00", "item": "i10", "text": "第一条（原文件里排在后面）" },
+    { "ts": "2026-09-28T03:34:00+09:00", "item": "i12", "text": "指向没导入的事项" },
+    { "ts": "2026-09-28T04:00:00+09:00", "item": null, "text": "项目级" },
+    { "ts": "2026-09-28T04:00:00+09:00", "item": null, "text": "项目级" }
+  ],
+  "morning": { "title": "早上先看这里", "points": ["要点一", "要点二"] },
+  "ownerInbox": [
+    { "ts": "2026-09-28T17:23:38+0900", "text": "用量面板有 bug", "status": "done", "to": "T3" },
+    { "ts": "2026-09-28T17:00:32+0900", "text": "台账和进度查看", "status": "done", "to": "T8 / T0 / T3" },
+    { "ts": "2026-09-28T17:30:00+0900", "text": "没指派", "status": "open", "to": null }
+  ]
+}

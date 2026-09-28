@@ -7,38 +7,37 @@
  */
 import type { Database } from "bun:sqlite";
 import {
+  APPENDABLE_KINDS,
   checkIdFree,
+  checkImportChain,
   checkItemRef,
   checkNewTask,
+  checkReview,
   checkStatus,
+  IMPORT_ACTOR,
+  isOwnerLike,
   checkTarget,
-  isCount,
+  isManager,
   ITEM_FIELDS,
   mustTask,
   pick,
   TASK_FIELDS,
+  toColumn,
+  type AppendableKind,
+  type ImportTaskInput,
   type ItemPatch,
   type NewItem,
   type NewTask,
+  type ReviewInput,
+  type StageMove,
   type TaskPatch,
+  type WriteCtx,
+  type WriteResult,
 } from "./ledger-checks.js";
-import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type ReviewVerdict, type Stage } from "./ledger-stages.js";
+import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, getItem, getMeta, LedgerError, toEvent, type LedgerMeta } from "./ledger-store.js";
 
-export interface WriteCtx {
-  /** 写入者：agent 名 / "master" / "owner"（身份推导在 CLI） */
-  actor: string;
-  /** 事件时间（epoch ms），默认 Date.now()；测试注入 */
-  now?: number;
-  dedupKey?: string;
-}
-
-export interface WriteResult<T> {
-  row: T;
-  /** 本次动作的主事件（带 dedupKey 的那条） */
-  event: LedgerEvent;
-  duplicate: boolean;
-}
+export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
 type EventDraft = { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> };
 
@@ -46,10 +45,16 @@ function tx<T>(db: Database, fn: () => T): T {
   return busyAsLedgerError("写入", () => db.transaction(fn).immediate());
 }
 
+/** 导入身份写的事件一律带 imported，调用方漏了也补上；approxTime 也只认导入身份 */
+function eventData(ctx: WriteCtx, e: EventDraft): Record<string, unknown> {
+  if (ctx.actor !== IMPORT_ACTOR) return e.data ?? {};
+  return { ...e.data, imported: true, ...(ctx.approxTime ? { approxTime: true } : {}) };
+}
+
 function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
   const r = db
     .prepare("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
-    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(e.data ?? {}), primary ? ctx.dedupKey || null : null);
+    .get(ctx.now ?? Date.now(), ctx.actor, e.project, e.target, e.kind, e.text ?? "", JSON.stringify(eventData(ctx, e)), primary ? ctx.dedupKey || null : null);
   return toEvent(r as Record<string, unknown>);
 }
 
@@ -63,10 +68,6 @@ function replay<T>(db: Database, ctx: WriteCtx, e: Pick<EventDraft, "project" | 
     throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已用于 ${prev.project}/${prev.target || "(项目)"} 的 ${prev.kind} 事件`);
   }
   return { row: load(), event: prev, duplicate: true };
-}
-
-function toColumn(k: string, v: unknown): unknown {
-  return k === "extra" ? JSON.stringify(v ?? {}) : (v ?? null);
 }
 
 // ── 事项 ──
@@ -121,20 +122,47 @@ export function setItem(db: Database, ctx: WriteCtx, input: { project: string; i
 
 const TASK_INSERT_COLS = ["id", "project", "itemId", "title", "kind", "stage", "round", "agent", "pm", "branch", "pr", "headSHA", "spec", "specRev", "model", "extra"] as const;
 
+/** 插任务行并记建任务事件；eventStage = 事件里记的起始阶段（导入时行落在最终阶段、时间线从 eventStage 开始） */
+function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boolean, eventStage?: Stage, approx = false, fingerprint?: string): LedgerEvent {
+  const row: Record<string, unknown> = { specRev: 1, round: 0, extra: {}, ...input, stage: input.stage ?? "spec" };
+  const now = ctx.now ?? Date.now();
+  db.prepare(
+    `INSERT INTO tasks (${TASK_INSERT_COLS.join(", ")}, rev, createdAt, updatedAt) VALUES (${TASK_INSERT_COLS.map(() => "?").join(", ")}, 1, ?, ?)`,
+  ).run(...(TASK_INSERT_COLS.map((c) => toColumn(c, row[c])) as string[]), now, now);
+  const { project, id, ...patch } = row;
+  if (eventStage) patch.stage = eventStage;
+  const data = { op: "new", patch, rev: 1, ...(imported ? { imported: true } : {}), ...(approx ? { approxTime: true } : {}), ...(fingerprint ? { fingerprint } : {}) };
+  return insertEvent(db, ctx, { project: String(project), target: String(id), kind: "task", data }, true);
+}
+
 export function createTask(db: Database, ctx: WriteCtx, input: NewTask): WriteResult<LedgerTask> {
   return tx(db, () => {
-    const key = { project: input.project, target: input.id, kind: "task" as const };
-    const dup = replay(db, ctx, key, () => mustTask(db, input.id));
+    const dup = replay(db, ctx, { project: input.project, target: input.id, kind: "task" }, () => mustTask(db, input.id));
     if (dup) return dup;
-    const imported = checkNewTask(db, ctx.actor, input);
-    const row: Record<string, unknown> = { specRev: 1, round: 0, extra: {}, ...input, stage: input.stage ?? "spec" };
-    const now = ctx.now ?? Date.now();
-    db.prepare(
-      `INSERT INTO tasks (${TASK_INSERT_COLS.join(", ")}, rev, createdAt, updatedAt) VALUES (${TASK_INSERT_COLS.map(() => "?").join(", ")}, 1, ?, ?)`,
-    ).run(...(TASK_INSERT_COLS.map((c) => toColumn(c, row[c])) as string[]), now, now);
-    const { project: _p, id: _i, ...patch } = row;
-    const event = insertEvent(db, ctx, { ...key, data: { op: "new", patch, rev: 1, ...(imported ? { imported: true } : {}) } }, true);
+    const event = insertTask(db, ctx, input, checkNewTask(db, ctx.actor, input));
     return { row: mustTask(db, input.id), event, duplicate: false };
+  });
+}
+
+/**
+ * 导入历史任务（ledger import）：只给 owner。任务行直接落在最终阶段，建任务事件记起始阶段 initialStage，
+ * 之后按顺序追加合成事件，全部强制 imported:true，时间取各自的 ts；stage 事件须首尾相接、最后落到行的阶段（checkImportChain）。
+ * 整批一个事务，半截失败不留残行；dedupKey 挂在建任务事件上，重跑整条返回 duplicate。
+ */
+export function importTask(db: Database, ctx: WriteCtx, input: ImportTaskInput): WriteResult<LedgerTask> {
+  return tx(db, () => {
+    const dup = replay(db, ctx, { project: input.task.project, target: input.task.id, kind: "task" }, () => mustTask(db, input.task.id));
+    if (dup) return dup;
+    if (!isOwnerLike(ctx.actor)) throw new LedgerError("forbidden", "只有 owner 能导入任务");
+    checkNewTask(db, ctx.actor, input.task);
+    const initial = input.initialStage ?? input.task.stage ?? "spec";
+    checkImportChain(initial, input.task.stage ?? "spec", input.events);
+    const event = insertTask(db, { ...ctx, now: input.createdTs }, input.task, true, initial, input.createdApprox, input.fingerprint);
+    for (const e of input.events) {
+      const draft = { project: input.task.project, target: input.task.id, kind: e.kind, text: e.text, data: { ...e.data, imported: true } };
+      insertEvent(db, { ...ctx, now: e.ts }, draft, false);
+    }
+    return { row: mustTask(db, input.task.id), event, duplicate: false };
   });
 }
 
@@ -147,7 +175,7 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     if (dup) return dup;
     const patch = pick(input.patch as Record<string, unknown>, TASK_FIELDS, "任务");
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `任务 ${input.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
-    if (("agent" in patch || "pm" in patch) && !isManager(db, ctx, cur)) throw new LedgerError("forbidden", `只有 PM / master / owner 能改任务 ${cur.id} 的 agent / pm`);
+    if (("agent" in patch || "pm" in patch) && !isManager(db, ctx.actor, cur)) throw new LedgerError("forbidden", `只有 PM / master / owner 能改任务 ${cur.id} 的 agent / pm`);
     if ("itemId" in patch) checkItemRef(db, cur.project, patch.itemId);
     const rev = updateTask(db, ctx, cur, patch);
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch, rev } }, true);
@@ -168,17 +196,6 @@ function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<
 }
 
 // ── 阶段 ──
-
-function isManager(db: Database, ctx: WriteCtx, task: LedgerTask): boolean {
-  const role = roleOf(ctx.actor, task, getMeta(db, task.project).pms);
-  return role !== null && role !== "executor";
-}
-
-export interface StageMove {
-  /** 调用方以为的当前阶段（CAS） */
-  from: Stage;
-  to: Stage;
-}
 
 /** 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件 */
 function applyMove(db: Database, ctx: WriteCtx, task: LedgerTask, move: StageMove, primary: boolean, text = ""): { task: LedgerTask; event: LedgerEvent } {
@@ -229,33 +246,12 @@ export function deliver(
   });
 }
 
-export const REVIEW_VERDICTS: readonly ReviewVerdict[] = ["pass", "changes", "block"];
-
-export interface ReviewInput {
-  taskId: string;
-  /** 审查者（PM 的子 agent / Claude 审查员 / agent-codex），由 PM 代写 */
-  reviewer: string;
-  verdict: ReviewVerdict;
-  p0: number;
-  p1: number;
-  p2: number;
-  /** 结论全文路径 */
-  path?: string;
-  text?: string;
-  /** 同一事务推阶段（review → fix / merge / done / spec） */
-  move?: StageMove;
-}
-
 export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "review" }, () => task);
     if (dup) return dup;
-    if (!REVIEW_VERDICTS.includes(input.verdict)) throw new LedgerError("invalid", `verdict 只能是 ${REVIEW_VERDICTS.join(" / ")}`);
-    for (const k of ["p0", "p1", "p2"] as const) {
-      if (!isCount(input[k])) throw new LedgerError("invalid", `${k} 要是非负整数`);
-    }
-    if (task.stage !== "review") throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，不在 review，不能记审查结论`, { stage: task.stage });
+    checkReview(input, task);
     const { taskId: _t, text, move: _m, ...rest } = input;
     const data = { round: task.round, ...rest, path: input.path ?? null };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "review", text, data }, true);
@@ -265,10 +261,6 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
 }
 
 // ── 其它事件与项目级 ──
-
-/** 调用方可直接追加的事件；stage / item / task / meta / freeze 由对应写函数产生 */
-const APPENDABLE_KINDS = ["note", "decision", "deploy", "verify", "rollback"] as const;
-export type AppendableKind = (typeof APPENDABLE_KINDS)[number];
 
 /** note / decision / deploy / verify / rollback；target 为 "" 表示项目级 */
 export function appendEvent(
@@ -318,11 +310,37 @@ export function setMeta(
     const key = { project: input.project, target: "", kind: "meta" as const };
     const dup = replay(db, ctx, key, () => getMeta(db, input.project));
     if (dup) return dup;
-    if (ctx.actor !== "owner") throw new LedgerError("forbidden", `只有 owner 能设项目的 ${input.key}`);
+    if (!isOwnerLike(ctx.actor)) throw new LedgerError("forbidden", `只有 owner 能设项目的 ${input.key}`);
     const ok = input.key === "pms" ? Array.isArray(input.value) && input.value.every((p) => typeof p === "string" && p) : typeof input.value === "string";
     if (!ok) throw new LedgerError("invalid", input.key === "pms" ? "pms 要是非空字符串数组" : "docsDir 要是字符串");
     putMeta(db, input.project, input.key, input.value);
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: { [input.key]: input.value } } }, true);
     return { row: getMeta(db, input.project), event, duplicate: false };
+  });
+}
+
+/**
+ * agent 改名（manager rename 的钩子）：tasks.agent / tasks.pm 与各项目 PM 名单里的旧名换成新名，每处一条 task / meta 事件。
+ * 不查角色：registry 改名已经过 manager 的认主守卫与写锁，这里只是跟着同步——不同步的话改名后 roleOf 认不出原执行者和 PM。
+ */
+export function renameAgentRefs(db: Database, ctx: WriteCtx, from: string, to: string): { tasks: string[]; projects: string[] } {
+  return tx(db, () => {
+    const tasks = (db.prepare("SELECT id FROM tasks WHERE agent = ? OR pm = ? ORDER BY id").all(from, from) as { id: string }[]).map((r) => r.id);
+    for (const id of tasks) {
+      const cur = mustTask(db, id);
+      const patch = { ...(cur.agent === from ? { agent: to } : {}), ...(cur.pm === from ? { pm: to } : {}) };
+      const rev = updateTask(db, ctx, cur, patch);
+      insertEvent(db, ctx, { project: cur.project, target: id, kind: "task", data: { op: "set", patch, rev, rename: { from, to } } }, false);
+    }
+    const projects: string[] = [];
+    for (const { project } of db.prepare("SELECT project FROM meta WHERE key = 'pms' ORDER BY project").all() as { project: string }[]) {
+      const pms = getMeta(db, project).pms;
+      if (!pms.includes(from)) continue;
+      const next = pms.map((p) => (p === from ? to : p));
+      putMeta(db, project, "pms", next);
+      insertEvent(db, ctx, { project, target: "", kind: "meta", data: { op: "set", patch: { pms: next }, rename: { from, to } } }, false);
+      projects.push(project);
+    }
+    return { tasks, projects };
   });
 }
