@@ -91,7 +91,8 @@ export type TriggerKind =
   | "peer_http"       // v2.11+ HTTP peer 的回复/错误（bridge/http-peer.ts pushback）
   | "agent_tool"      // 本地 agent 通过 MCP tool 主动发的（reply / send_to_agent）
   | "bridge_synth"    // bridge 自己合成的（rescue、relay、nag 等 —— 都属于"代表某方发声"）
-  | "system";         // 系统提示（clean up 通知、错误提示等）
+  | "system"          // 系统提示（clean up 通知、错误提示等）
+  | "ask_answer";     // owner 对「待你处理」的作答（bridge/asks.ts）：只认这个 trigger 的才是 owner 的答复，agent 转述的不算
 
 /**
  * v2.0.0+ 消息意图。取代老版一堆 heuristic（Stop 猜意思 / randomUmaDone
@@ -149,6 +150,8 @@ export interface Envelope {
      * - 永远不触发抢占：即使 from 是人类、intent 是 request，也不算 isHumanRequest（不打断、flush 时也不插队）。
      */
     waitForIdle?: boolean;
+    /** 这条 reply 建出的 / 这条答复所答的「待你处理」id（bridge/asks.ts）；出站 chat_message 事件带上，网页据此把气泡和 ask 对上 */
+    askId?: string;
   };
 }
 

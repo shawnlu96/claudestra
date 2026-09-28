@@ -49,7 +49,10 @@ export type BridgeEventType =
   | "terminal_input"
   // 内置台账有写入（lib/ledger-read.ts 的 data_version 轮询）：data 只有 {project}，agent / chatId 为空；
   // transient 发、不补发——网页每次 SSE 连上 / 重连都全量重拉台账。只推给 canReadLedger 的连接（bridge/ledger-feed.ts）
-  | "ledger";
+  | "ledger"
+  // 「待你处理」开出 / 作答 / 过期 / 撤销（bridge/asks.ts）：data {project, askId, state}；transient，网页收到就重拉 /api/v1/asks；
+  // 和 ledger 同一道门，只推给 canReadLedger 的连接
+  | "ask";
 
 export interface BridgeEvent {
   /** 进程内单调递增，SSE 的 id / Last-Event-ID 补发锚点 */

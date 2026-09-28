@@ -857,9 +857,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           session_noask: ["Down", "Down", "Enter"],// ↓↓ 到 option 3
         };
         const labelMap: Record<string, string> = {
-          perm_allow: "✅ 已允许",
-          perm_allow_session: "✅ 已允许（本会话不再问）",
-          perm_deny: "❌ 已拒绝",
+          perm_allow: "✅ 已允许", perm_allow_session: "✅ 已允许（本会话不再问）", perm_deny: "❌ 已拒绝",
           session_summary: "✨ 从摘要恢复",
           session_full: "📜 恢复完整会话",
           session_noask: "🔕 不再询问",
@@ -916,6 +914,8 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             } catch { /* non-critical */ }
             permissionMessages.delete(targetChannelId);
           }
+          // 「待你处理」里对应的权限 ask 记成 answered（ask-runtime.ts），不然弹框消失时会被当成撤销
+          if (isPermBtn) void import("./ask-runtime.js").then((m) => m.settleRuntimeAsk("permission", targetChannelId, "discord", labelMap[action], { principal: `discord:${interaction.user.id}` }));
         } catch (e) {
           console.error(`🔔 权限响应流程异常:`, e);
         }
@@ -943,7 +943,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             const auqParse = auqPane ? parseAuqPane(auqPane) : null;
             if (auqPane && !auqParse) {
               clearAuqState(auqChannel);
-              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord" } });
+              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord", uid: interaction.user.id } });
               await interaction.editReply({ content: `⚠️ 弹窗已在终端侧被应答/关闭，本次提交作废。`, components: [] }).catch(() => {});
               return;
             }
@@ -964,7 +964,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
             clearAuqState(auqChannel);
             // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord" } });
+            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
           } else if (action === "cancel") {
             const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
             if (failed) return void (await interaction.editReply({ content: `❌ 取消没生效：${failed.message}` }).catch(() => {})); // 状态留着可以再按
@@ -975,7 +975,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
             recordMetric("auq_cancel", { channelId: auqChannel });
             clearAuqState(auqChannel);
             // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord" } });
+            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord", uid: interaction.user.id } });
           }
         } catch (e) {
           console.error("AUQ button 处理异常:", e);
@@ -1007,7 +1007,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
       // 未知按钮 → 走 deliver 转发给 LLM，agent 看到 content="[button:<id>]"
       const client = clients.get(channelId);
-      if (!client) return;
+      if ((await (await import("./ask-entry.js")).answerDiscordInteraction(interaction, channelId, `[button:${id}]`, () => startTypingWithSafety(channelId))) || !client) return;
 
       // v2.4.15+ UX：点击后清掉原按钮 + 标注"已点击"，**并在底下保留一个"打断"
       // 按钮**，让用户在 agent 处理过程中能随时中断（之前点完按钮就没打断按钮、
@@ -1117,7 +1117,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       // v2.14+ 多选：Discord 的 max_values>1 会一次交回多个值，全部带上（逗号分隔）。
       // 单选保持原样 `[select:id:value]`，agent 侧的老分支不受影响。
       const client = clients.get(channelId);
-      if (!client) return;
+      if ((await (await import("./ask-entry.js")).answerDiscordSelect(interaction, channelId, id, () => startTypingWithSafety(channelId))) || !client) return;
       startTypingWithSafety(channelId);
       const picked = interaction.values.length > 1
         ? interaction.values.join(",")

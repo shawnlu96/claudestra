@@ -8,7 +8,7 @@
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
 import { stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
-import { TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
@@ -112,11 +112,16 @@ const numOrNull = (v: unknown): number | null => (typeof v === "number" && Numbe
 /** 总览只要一句原因：首行、按码点截到 120（全文在详情接口里） */
 const REVIEW_TEXT_MAX = 120;
 
+/** 首个非空行，按码点截到 max（超出补 …）：总览只给一句，全文留给详情接口 */
+export function clipFirstLine(text: string, max: number = REVIEW_TEXT_MAX): string {
+  const first = [...(text.split("\n").find((l) => l.trim()) ?? "").trim()];
+  return first.length > max ? `${first.slice(0, max).join("")}…` : first.join("");
+}
+
 function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
   if (!e) return null;
   const d = e.data;
-  const first = [...(e.text.split("\n").find((l) => l.trim()) ?? "").trim()];
-  const text = first.length > REVIEW_TEXT_MAX ? `${first.slice(0, REVIEW_TEXT_MAX).join("")}…` : first.join("");
+  const text = clipFirstLine(e.text);
   return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text, ts: e.ts };
 }
 
@@ -128,7 +133,7 @@ function currentStageMark(own: readonly LedgerEvent[]): LedgerEvent | undefined 
 function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number): TaskView {
   return {
     ...task,
-    lastEvent: own.at(-1) ?? null,
+    lastEvent: own.findLast((e) => !isAskEvent(e)) ?? null,
     stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
     stageSinceApprox: currentStageMark(own)?.data.approxTime === true,
     lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
@@ -144,7 +149,11 @@ export function projectView(db: Database, project: string, now: number): Project
     if (list) list.push(e);
     else byTarget.set(e.target, [e]);
   }
-  const recent = db.query("SELECT * FROM events WHERE project = ? AND target = '' ORDER BY seq DESC LIMIT ?").all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
+  // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
+  const recent = db
+    .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel')
+      AND NOT (kind = 'decision' AND json_extract(data, '$.askId') IS NOT NULL) ORDER BY seq DESC LIMIT ?`)
+    .all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
   return {
     meta: getMeta(db, project),
     items: listItems(db, project),

@@ -107,6 +107,16 @@ const INJECTED_ATTR_RE = /(?:^|\s)(?:api|is_agent)="true"/;
  */
 export function channelBodyText(attrs: string, body: string): string {
   const withNote = NOTE_ATTR_RE.test(attrs);
-  const text = INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body, withNote) : (withNote ? stripInterruptNote(body.trim()) : body).trim();
+  // 先剥打断抬头（bridge 写在正文最前、来源头之后），再按 trigger 去掉答复的说明行：两者都是 bridge 加的，顺序反了会把抬头当成说明行剥掉
+  const bare = INJECTED_ATTR_RE.test(attrs) ? stripChannelHeader(body, withNote) : (withNote ? stripInterruptNote(body.trim()) : body).trim();
+  const text = ownerWordsOfAnswer(attrs, bare);
   return (/^\[attachment: [^\]\n]+\]$/m.test(text) ? text : withAttachmentLines(text, channelAttachmentPaths(attrs))).trim();
+}
+
+/**
+ * owner 对「待你处理」的作答（trigger="ask_answer"，bridge/asks.ts answerContent）：第一行是 bridge 给 agent 写的说明，
+ * 历史里只留 owner 发的原文——和网页的乐观气泡、直播回显（web stream-shape）对得上。attrs = <channel …> 的属性串
+ */
+function ownerWordsOfAnswer(attrs: string, text: string): string {
+  return /(?:^|\s)trigger="ask_answer"/.test(attrs) ? text.split("\n").slice(1).join("\n").trim() : text;
 }
