@@ -4,7 +4,7 @@
  * 用 master（频道取 controlChannelId，不读真实 registry）+ 临时状态文件 + 缩短的宽限期；日志落在 preload 隔离的状态目录。
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initMission, reconcileMissions, setMissionTestHooks } from "../src/bridge/mission.js";
@@ -338,4 +338,86 @@ describe("对抗式审查补的用例", () => {
     expect((await cur()).run?.runId).toBe("run_x");
     expect(sent.length).toBe(0);
   });
+});
+
+describe("第 3 轮复验补的用例", () => {
+  test("迟到的 Stop 紧贴在 thinking 之前到：事件到达那一刻还没开始 → 不算这个 run 的结束", async () => {
+    deliverImpl = async (env) => {
+      done(); // 同一拍：先 Stop 后 thinking
+      return realDeliver(env);
+    };
+    await put();
+    done();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    await settle();
+    expect((await cur()).lastRun).toBeUndefined();
+    ev("tool_start", { name: "Edit" });
+    done();
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("action_taken");
+  });
+  test("watcher 缺位：thinking 挂在「?」名下也认得出，run 的回合结束照常收尾", async () => {
+    deliverImpl = async (env) => {
+      sent.push(env);
+      emitEvent({ agent: "?", chatId: "ctl", type: "agent_status", data: { status: "thinking" } });
+      return { envelope: env, outcome: { kind: "sent" } };
+    };
+    await put();
+    done();
+    await until(async () => !!(await cur()).run?.deliveredAt);
+    ev("tool_start", { name: "Edit" });
+    done();
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("action_taken");
+  });
+  test("收尾等证据的那几秒里 stop + start：旧一代照样补一行日志", async () => {
+    setEvidenceWaitForTest({ minMs: 400, quietMs: 50, maxMs: 2000 });
+    const a = await startAndNudge();
+    ev("tool_start", { name: "Edit" });
+    done();
+    await sleep(100);
+    await updateMissions((all) => void Object.assign(all.master, { status: "stopped" }), path);
+    await put(); // 新一代
+    await until(() => readRunLog(a.id!).length === 1);
+    expect(readRunLog(a.id!)[0].reason).toContain("换了一代");
+    setEvidenceWaitForTest({ minMs: 30, quietMs: 20, maxMs: 300 });
+  });
+  test("收尾窗口里开的下一个回合（押后消息放出）：它的工具不算进这一轮", async () => {
+    setEvidenceWaitForTest({ minMs: 300, quietMs: 100, maxMs: 2000 });
+    await startAndNudge();
+    ev("tool_start", { name: "Read" });
+    done();
+    await sleep(100);
+    ev("chat_message", { direction: "in", srcKind: "local", text: "peer 的消息" });
+    thinking();
+    ev("tool_start", { name: "Edit" });
+    await until(async () => !!(await cur()).lastRun);
+    expect((await cur()).lastRun?.outcome).toBe("normal");
+    setEvidenceWaitForTest({ minMs: 30, quietMs: 20, maxMs: 300 });
+  });
+  test("「标已投递」和收尾连着两次写锁超时：不重投，锁放开后用留下的证据补收尾", async () => {
+    const lock = `${path}.lock`;
+    setMissionTestHooks({ lockMs: 300 });
+    deliverImpl = async (env) => {
+      const r = await realDeliver(env);
+      mkdirSync(lock); // 别的进程占着锁 1.2 秒
+      setTimeout(() => rmdirSync(lock), 1200);
+      return r;
+    };
+    try {
+      const m = await put();
+      done();
+      await until(() => sent.length === 1);
+      await sleep(100);
+      ev("tool_start", { name: "Edit" });
+      done(); // run 的回合结束：收尾时锁还被占着
+      await until(async () => !!(await cur()).lastRun, 12_000);
+      expect(sent.length).toBe(1);
+      expect((await cur()).lastRun?.outcome).toBe("action_taken");
+      expect((await cur()).nudges).toBe(1);
+      expect(readRunLog(m.id!)).toHaveLength(1);
+    } finally {
+      setMissionTestHooks({ lockMs: 10_000 });
+    }
+  }, 20_000);
 });
