@@ -148,7 +148,14 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
   const sent: string[] = [];
   const delivered: Envelope[] = [];
   const sock = { send: (d: string) => void sent.push(d) };
-  setExtensionSocket((ch) => (ch === "pi" ? sock : undefined), { deliver: async (e) => void delivered.push(e), ownerId: () => "owner" });
+  const books = {
+    pendingReplies: new Map<string, { msgId: string; threadId?: string }>(),
+    pendingThreads: new Map<string, unknown>(),
+    pendingInterAgentMsg: new Map<string, { fromChannelId?: string; ts: number }>(),
+    dropped: [] as string[],
+    pendingAgentCalls: { dropRequest: (t: string, c: string, id: string) => void books.dropped.push(`${t}<-${c}:${id}`) },
+  };
+  setExtensionSocket((ch) => (ch === "pi" ? sock : undefined), { deliver: async (e) => void delivered.push(e), ownerId: () => "owner", books: () => books });
   setAbortCapable("pi", true);
   const lastId = () => JSON.parse(sent.at(-1) ?? "{}").id as string;
   const inbound = (id: string, from: Envelope["from"]) => turnCuts.noteDelivered({
@@ -195,6 +202,31 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     await p;
     expect(delivered.map((e) => e.to)).toEqual([expect.objectContaining({ kind: "api", tokenId: "tok_peer" })]); // agent-x 不在线：没法告诉它
     expect(delivered[0].content).toContain("你发给 agent-pi 的「请求 peer1」");
+    stopAfterAbort("pi");
+  });
+
+  test("adv4：作废的消息从补答账、回程槽和看门狗上销掉（找不到发送方的也按 id 销），叫停之后才挂上的看门狗不动", async () => {
+    books.dropped.length = 0; // 上面 pi-6 那条作废的 agent 消息已经撤过它的回程槽
+    inbound("g1", { kind: "api", tokenId: "tok_guest", name: "guest" } as Envelope["from"]);
+    inbound("ag2", { kind: "local", channelId: "ag-y", agentName: "agent-y" } as Envelope["from"]);
+    books.pendingReplies.set("th-g1", { msgId: "g1", threadId: "th-g1" }).set("th-x", { msgId: "unknown1", threadId: "th-x" }).set("th-k", { msgId: "keep" });
+    books.pendingThreads.set("th-g1", {}).set("th-x", {});
+    books.pendingInterAgentMsg.set("pi", { fromChannelId: "ag-y", ts: Date.now() - 1_000 });
+    const p = extensionAbort("pi");
+    onAbortAck({ id: lastId(), result: "aborted", voided: ["g1", "ag2", "unknown1"] }, sock);
+    await p;
+    expect([...books.pendingReplies.keys()]).toEqual(["th-k"]);
+    expect(books.pendingThreads.size).toBe(0);
+    expect(books.pendingInterAgentMsg.has("pi")).toBe(false);
+    expect(books.dropped).toEqual(["pi<-ag-y:ag2"]);
+    stopAfterAbort("pi");
+
+    books.pendingInterAgentMsg.set("pi", { fromChannelId: "ag-y", ts: Date.now() + 60_000 }); // 叫停之后 agent-y 又发来的新请求
+    inbound("ag3", { kind: "local", channelId: "ag-y", agentName: "agent-y" } as Envelope["from"]);
+    const q = extensionAbort("pi");
+    onAbortAck({ id: lastId(), result: "aborted", voided: ["ag3"] }, sock);
+    await q;
+    expect(books.pendingInterAgentMsg.has("pi")).toBe(true);
     stopAfterAbort("pi");
   });
 

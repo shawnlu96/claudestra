@@ -2,7 +2,7 @@
  * Pi 的「停」：Pi 的 C-c 只清空输入框，真正的中止在 Claudestra 扩展里（src/pi/abort-control.ts）。bridge 经 ws 发 {type:"abort", id}，
  * 扩展回 {type:"abort_ack", id, result, voided}。voided = 停之前 steer 进去、还没执行就作废的消息（message_id）：
  * 这里逐条告诉发送方「没执行、要的话请重发」——各回到它自己的回信地址（Discord 人回他发消息的频道、API / 网页 / peer 回它的 api 地址、
- * agent 回它自己），和 agent 回复它们走同一条路（镜像开关、peer 的等待都照旧）。
+ * agent 回它自己），和 agent 回复它们走同一条路（镜像开关、peer 的等待都照旧）；同时从补答账、回程槽和看门狗上销掉，免得 bridge 回头又催 Pi 处理它。
  * 扩展在注册帧里声明 abort:true 才发（老扩展收到会默默忽略）；gate 接线在 bridge/interrupt-gate.ts。
  */
 import type { ServerWebSocket } from "bun";
@@ -10,12 +10,15 @@ import { emitEvent } from "./event-bus.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
+import { dropVoidedPendings, type VoidableBooks } from "../lib/pending-reply-scope.js";
 
 type Socket = { send(data: string): void };
 interface EchoDeps {
   deliver(env: Envelope): Promise<unknown>;
   /** Discord 通知要带的 owner id（bridge.ts primaryOwnerId） */
   ownerId(): string;
+  /** bridge.ts 的几本欠账（取时才读：接线时它们还没初始化） */
+  books(): VoidableBooks;
 }
 
 let socketOf: (channelId: string) => Socket | undefined = () => undefined;
@@ -38,7 +41,7 @@ const ABORT_ACK_MS = 1_500;
 const LATE_ACK_MS = 60_000;
 type AbortResult = "aborted" | "idle" | "no_ack";
 /** done 在等到回执或超时后清掉：超时之后到的回执只补回显 */
-type Waiter = { channelId: string; done?: (r: AbortResult) => void };
+type Waiter = { channelId: string; at: number; done?: (r: AbortResult) => void };
 const abortWaiters = new Map<string, Waiter>();
 const lastAbort = new Map<string, { result: AbortResult; inEditor: number }>();
 /** 频道 → 发出中止的时刻：之后第一次 Stop 是叫停的回声（见 stopAfterAbort） */
@@ -54,7 +57,7 @@ export function onAbortAck(msg: { id?: unknown; result?: unknown; voided?: unkno
   w.done = undefined;
   const ids = Array.isArray(msg.voided) ? [...new Set(msg.voided.filter((x): x is string => typeof x === "string"))] : [];
   // 先回显再放行：放行之后停字那条会 record() 一条 cut、清掉「这一回合送到了哪些」，就查不到发送方了
-  if (ids.length) echoVoided(w.channelId, ids);
+  if (ids.length) settleVoided(w.channelId, ids, w.at);
   if (!done) return; // 迟到的回执：只补回显
   lastAbort.set(w.channelId, { result: msg.result === "aborted" ? "aborted" : "idle", inEditor: Number(msg.inEditor) || 0 });
   done(msg.result === "aborted" ? "aborted" : "idle");
@@ -78,9 +81,10 @@ export async function extensionAbort(channelId: string): Promise<readonly string
   if (!ws) throw new Error("Pi 会话没连着 bridge，中止请求发不过去");
   if (!abortCapable.has(channelId)) throw new Error("这个 Pi 会话的 Claudestra 扩展太旧、不会中止（重启这个 agent 换上新扩展）");
   const id = `abort_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  abortedAt.set(channelId, Date.now()); // 发之前记：回执和 Stop 几毫秒内先后到
+  const at = Date.now();
+  abortedAt.set(channelId, at); // 发之前记：回执和 Stop 几毫秒内先后到
   const r = await new Promise<AbortResult>((resolve) => {
-    const w: Waiter = { channelId, done: resolve };
+    const w: Waiter = { channelId, at, done: resolve };
     abortWaiters.set(id, w);
     setTimeout(() => {
       if (!w.done) return;
@@ -113,10 +117,18 @@ export function voidedEchoTo(t: TurnTrigger): { kind: "user" | "api" | "local"; 
   return null;
 }
 
-function echoVoided(channelId: string, ids: readonly string[]): void {
+/** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方 */
+function settleVoided(channelId: string, ids: readonly string[], abortAt: number): void {
   const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id)).filter((t): t is NonNullable<typeof t> => !!t);
-  if (!echo || !found.length) return;
-  const d = echo;
+  if (!echo) return;
+  const agentOf = new Map(found.filter((t) => t.fromKind === "local" && t.replyTo).map((t) => [t.messageId, t.replyTo]));
+  const voided = ids.map((messageId) => ({ messageId, agentChannel: agentOf.get(messageId) }));
+  const n = dropVoidedPendings(echo.books(), channelId, voided, abortAt);
+  if (n) console.log(`⏹ 作废的 ${ids.length} 条消息从补答账 / 看门狗销掉 ${n} 条`);
+  if (found.length) echoVoided(echo, channelId, found);
+}
+
+function echoVoided(d: EchoDeps, channelId: string, found: readonly (TurnTrigger & { agent?: string })[]): void {
   const agent = found.find((t) => t.agent)?.agent ?? "这个 agent";
   let sent = 0;
   for (const t of found) {

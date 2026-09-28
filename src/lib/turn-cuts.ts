@@ -6,6 +6,7 @@
 import { bashCommandOf, classifyTool, heavier, sideEffectLabel, type SideEffect, type SideEffectVerdict } from "./side-effects.js";
 import { inputHash } from "./program-input.js";
 import { matchStopWord } from "./stop-words.js";
+import { neutralizeDelegateMarker } from "./delegate-marker.js";
 
 /** terminal：人在 CC 终端里自己按了打断（会话记录出现 [Request interrupted by user，而 bridge 没发过键） */
 export type CutCause = "preempt" | "manual" | "stopword" | "codex_interrupt" | "terminal";
@@ -300,10 +301,12 @@ export function heldAcrossStopNote(heldAt: number, stopAt: number): string {
 /**
  * 把抬头放进 renderContentForLocal 渲染好的正文：有来源头（[🌐 …] / [🤝 …]）就插在它后面，没有就放最前。
  * 抬头自成一块、以「]」+ 空行收尾，历史解析（session-history stripChannelHeader）能逐块剥掉，网页不会把它当成用户原话。
+ * 抬头里摘录了别人（访客、peer、agent）的话，拼进 owner 的消息前先中和委托标记（lib/delegate-marker.ts），不然摘录能冒充「用户委托」。
  */
 export function withInterruptNote(rendered: string, note: string): string {
+  const safe = neutralizeDelegateMarker(note);
   const m = /^\[(🌐|🤖|🤝|📢|📣)[\s\S]*?\]\n\n/.exec(rendered);
-  return m ? `${m[0]}${note}\n\n${rendered.slice(m[0].length)}` : `${note}\n\n${rendered}`;
+  return m ? `${m[0]}${safe}\n\n${rendered.slice(m[0].length)}` : `${safe}\n\n${rendered}`;
 }
 
 /** 被打断时在处理的人类消息回过没有：never = 送达以来一次都没回过这个地址；after_cut = 只在打断之后回过（可能答的是插话） */

@@ -121,3 +121,37 @@ export function dropPendingsForChannel(
 export function hangsInterAgentWatchdog(sameWs: boolean, skipWatchdog: boolean | undefined, senderRegistered: boolean): boolean {
   return !sameWs && !skipWatchdog && senderRegistered;
 }
+
+/** 叫停时作废的一条请求：它的 messageId，发送方是本地 agent 时再带上它的频道 */
+export interface VoidedRequest {
+  messageId: string;
+  agentChannel?: string;
+}
+
+/** dropVoidedPendings 要动的几本账（字段名就是 bridge.ts 里的变量名：补答账、thread 追踪、inter-agent 看门狗、回程簿） */
+export interface VoidableBooks {
+  pendingReplies: Map<string, { msgId: string; threadId?: string }>;
+  pendingThreads: Map<string, unknown>;
+  pendingInterAgentMsg: Map<string, { fromChannelId?: string; ts: number }>;
+  pendingAgentCalls: { dropRequest(target: string, caller: string, messageId: string): void };
+}
+
+/**
+ * Pi 叫停时作废的消息（bridge/pi-abort.ts）从账上销掉，返回销掉几条。发送方已被告知「不会执行」，补 reply 拦截或看门狗再催 Pi 处理它
+ * 就自相矛盾，还会把刚停住的 Pi 拉起来。补答账按 msgId 认（连同它的 thread）；看门狗以接收方频道为 key、只记最后一个发送方，
+ * 只在它就是作废消息的 agent、且挂在叫停之前时销（叫停之后它又发来的是新请求）；回程槽只撤这一条。tests/pending-reply-scope.test.ts。
+ */
+export function dropVoidedPendings(books: VoidableBooks, channelId: string, voided: readonly VoidedRequest[], abortAt: number): number {
+  const ids = new Set(voided.map((v) => v.messageId));
+  let n = 0;
+  for (const [key, p] of books.pendingReplies) {
+    if (!ids.has(p.msgId) || !books.pendingReplies.delete(key)) continue;
+    if (p.threadId) books.pendingThreads.delete(p.threadId);
+    n++;
+  }
+  const w = books.pendingInterAgentMsg.get(channelId);
+  const bySender = voided.some((v) => !!v.agentChannel && v.agentChannel === w?.fromChannelId);
+  if (w && bySender && w.ts <= abortAt && books.pendingInterAgentMsg.delete(channelId)) n++;
+  for (const v of voided) if (v.agentChannel) books.pendingAgentCalls.dropRequest(channelId, v.agentChannel, v.messageId);
+  return n;
+}

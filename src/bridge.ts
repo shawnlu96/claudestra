@@ -416,7 +416,8 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
-setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId }); // Pi 的停：经 ws 请扩展 abort()、等回执，作废的消息回显给发送方（bridge/pi-abort.ts）
+// Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
+setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls }) });
 
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
