@@ -997,4 +997,14 @@ export const DICT: Record<string, string> = {
   "暂不提供：请逐个选择已开闸的会话": "Unavailable for now: pick external-enabled sessions one by one",
   "显示名": "Display name",
   "留空则只显示会话名": "Leave empty to show only the session name",
+  // ── Jev / TypeSafe（2026-09-28）──────────────
+  "Jev · TypeSafe API Key": "Jev · TypeSafe API Key",
+  "未配置。到 console.typesafe.ai/keys 生成 key。Jev 是 TypeSafe 的 System One 判断模型。": "Not configured. Create a key at console.typesafe.ai/keys. Jev is TypeSafe's System One judgment model.",
+  "已保存，Jev 调用即时生效": "Saved; Jev calls take effect immediately",
+  "测试连接": "Test connection",
+  "测试中…": "Testing…",
+  "未配置 key，先保存再测试": "No key configured; save one before testing",
+  "Jev 连通，结果通顺": "Jev reachable, answers look right",
+  "Jev 连通，但结果可疑（请检查 key 与模型）": "Jev reachable, but the answers look off (check key and model)",
+  "耗时": "Latency",
 };

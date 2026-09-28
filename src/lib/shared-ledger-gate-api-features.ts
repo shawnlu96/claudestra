@@ -3,5 +3,5 @@ export const LOCAL_API_FEATURES = [
   "shared-ledger",
   "version", "settings", "profile", "agent-settings", "hidden-messages", "skill-prefs", "transcribe", "client-log", "host-open", "attachments",
   "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "asks", "fleet", "agent-skill-settings", "media", "talk",
-  "peer-ledger", "ai-inventory", "lend", "usage", "ledger-dag", "ledger-product",
+  "peer-ledger", "ai-inventory", "lend", "usage", "ledger-dag", "ledger-product", "jev",
 ];

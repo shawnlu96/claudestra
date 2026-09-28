@@ -72,6 +72,8 @@ export interface AppConfig {
   bridgeWatchdog?: "on" | "observe" | "off";
   /** 设备 cookie 随使用续发（bridge/device-cookie-renew.ts，缺省 observe = 只记「会续发」）；每次续发判断现读 */
   deviceCookieRenew?: "on" | "observe" | "off";
+  /** Jev（TypeSafe System One）API key：PUT /api/v1/settings 写、GET 只回尾四位；env TYPESAFE_API_KEY 兜底（lib/jev.ts） */
+  jevApiKey?: string;
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -117,6 +119,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
+    ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
   };
 }
 
@@ -297,6 +300,15 @@ export async function setGroqApiKey(key: string): Promise<AppConfig> {
   const cfg = await readConfig();
   if (key) cfg.groqApiKey = key;
   else delete cfg.groqApiKey;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/** 空串 = 清除（Jev / TypeSafe） */
+export async function setJevApiKey(key: string): Promise<AppConfig> {
+  const cfg = await readConfig();
+  if (key) cfg.jevApiKey = key;
+  else delete cfg.jevApiKey;
   await writeConfig(cfg);
   return cfg;
 }
