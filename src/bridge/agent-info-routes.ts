@@ -14,6 +14,9 @@ import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
 import { heldAgentCounts } from "./held-queue.js";
+import { canReadLedger } from "../lib/devices.js";
+import { activeTasksByAgent, type LedgerTaskRef } from "../lib/ledger-read.js";
+import { ledgerDb } from "./ledger-feed.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -25,9 +28,15 @@ export interface AgentInfoIo {
   readMissions?: () => Promise<MissionMap>;
   /** 各频道排队中的 agent 消息数（bridge/held-queue.ts）；单测不给 = 都没排队 */
   heldCounts?: () => Record<string, number>;
+  /** 裸名 → 执行中的台账任务（lib/ledger-read.ts）；单测不给 = 台账里没有 */
+  ledgerTasks?: () => Map<string, LedgerTaskRef>;
 }
 const defaultIo: AgentInfoIo = {
   readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals(), readMissions: () => readMissions(), heldCounts: () => heldAgentCounts(),
+  ledgerTasks: () => {
+    const db = ledgerDb();
+    return db ? activeTasksByAgent(db) : new Map();
+  },
 };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
@@ -37,11 +46,12 @@ export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" 
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
  * 不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。sharedPeers 对 peer / 受限 token 不给——谁在共享是 owner 的事。
  */
-export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts"> = defaultIo): Promise<AgentListExtras> {
+export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks"> = defaultIo): Promise<AgentListExtras> {
   const full = isFullScope(principal) && !principal.peer;
   const principals = full ? (await io.readPrincipals()).principals : [];
   const missions = principal.peer ? {} : ((await io.readMissions?.()) ?? {});
   const held = principal.peer ? {} : (io.heldCounts?.() ?? {}); // 排队几条：本机的事，不给 peer
+  const ledger = canReadLedger(principal) ? readLedgerTasks(io) : null; // 台账同一道门：部分 scope / guest / peer 连库都不查
   const archived = (name: string) => existsSync(`${USER_ARCHIVE_ROOT}/${name.replace(/^agent-/, "")}`);
   return (name, r) => {
     const sharedWith = full ? peersSharingAgent(principals, name) : null;
@@ -55,6 +65,7 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       // 别的 agent 发来、它还在回合里没收到的消息（等回合结束或它调 check_inbox 才到）
       ...(r?.channelId && held[r.channelId] ? { queued: held[r.channelId] } : {}),
       ...teamField(principal, r),
+      ...ledgerField(ledger, name),
     };
   };
 }
@@ -67,6 +78,28 @@ function teamField(principal: Principal, r?: Pick<RegistryAgent, "parent" | "tas
   if (principal.peer || !r) return {};
   const parent = r.parent && agentInScope(principal, r.parent) ? r.parent.replace(/^agent-/, "") : undefined;
   return { ...(parent ? { parent } : {}), ...(r.task ? { task: r.task } : {}) };
+}
+
+/** 上一次读台账任务是否失败：日志只在「正常 → 出错」和恢复时各打一次，库坏着时每次刷列表不重复报 */
+let ledgerFailing = false;
+
+/** 执行者行尾的阶段小标（docs 10-ledger §4；与 T4 的 task 字符串不同名）。台账读不了只是少了小标，列表照常出 */
+function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks">): Map<string, LedgerTaskRef> | null {
+  try {
+    const r = io.ledgerTasks?.() ?? null;
+    if (ledgerFailing) console.log("📒 GET /agents 读台账任务恢复");
+    ledgerFailing = false;
+    return r;
+  } catch (e) {
+    if (!ledgerFailing) console.error(`⚠️ GET /agents 读台账任务失败（列表先不带 ledgerTask，恢复前不再重复报）: ${(e as Error).message}`);
+    ledgerFailing = true;
+    return null;
+  }
+}
+
+function ledgerField(ledger: Map<string, LedgerTaskRef> | null, name: string): { ledgerTask?: LedgerTaskRef } {
+  const t = ledger?.get(name.replace(/^agent-/, ""));
+  return t ? { ledgerTask: t } : {};
 }
 
 /** 进行中的值守（侧栏 / 顶栏「⏱ 值守 → 11:00」、菜单切换「开始 / 结束值守」）；peer 看不到 */

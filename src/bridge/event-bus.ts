@@ -41,7 +41,10 @@ export type BridgeEventType =
   // 任务清单不走事件:web 已有文件真源面板(~/.claude/tasks + /agents/:name/tasks)
   | "thinking_telemetry"
   // v2.24+ 回合以 API 错误结束（jsonl assistant 条目 isApiErrorMessage:true）——bridge 据此 60s 后自动续跑一次
-  | "api_error_turn";
+  | "api_error_turn"
+  // 内置台账有写入（lib/ledger-read.ts 的 data_version 轮询）：data 只有 {project}，agent / chatId 为空；
+  // transient 发、不补发——网页每次 SSE 连上 / 重连都全量重拉台账。只推给 canReadLedger 的连接（bridge/ledger-feed.ts）
+  | "ledger";
 
 export interface BridgeEvent {
   /** 进程内单调递增，SSE 的 id / Last-Event-ID 补发锚点 */
@@ -62,8 +65,8 @@ export type EventFilter = {
   agent?: string;
   /** 只要这些 agent 的事件；省略 = 不限 */
   agents?: string[];
-  /** 逐条判定（token scope 过滤用：agentInScope——"*" 不含 master 这类规则列表表达不了） */
-  allow?: (agent: string) => boolean;
+  /** 逐条判定整条事件（token 版 SSE：agent 事件按 agentInScope，ledger 这类不属于 agent 的事件按类型另判） */
+  allow?: (evt: BridgeEvent) => boolean;
 };
 
 type Subscriber = {
@@ -116,7 +119,7 @@ const agentDoneAt = new Map<string, number>();
 function matches(evt: BridgeEvent, filter: EventFilter): boolean {
   if (filter.agent && evt.agent !== filter.agent) return false;
   if (filter.agents && !filter.agents.includes(evt.agent)) return false;
-  if (filter.allow && !filter.allow(evt.agent)) return false;
+  if (filter.allow && !filter.allow(evt)) return false;
   return true;
 }
 
