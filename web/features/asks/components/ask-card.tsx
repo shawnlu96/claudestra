@@ -41,7 +41,7 @@ export function AskCard({ ask, now, focused, onOpenChat }: { ask: WebAsk; now: n
       )}
       {askAttachments(ask).length > 0 && (
         <div className="mt-2">
-          <AttachmentStrip items={askAttachments(ask)} />
+          <AttachmentStrip items={askAttachments(ask)} align="start" />
         </div>
       )}
       {showBody && <pre className="mt-1.5 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-base-200 p-2.5 font-sans text-[12.5px]">{ask.body}</pre>}

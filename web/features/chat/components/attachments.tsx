@@ -76,7 +76,8 @@ async function shareImage(url: string, name: string): Promise<void> {
   }
 }
 
-export function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
+/** align：聊天里的用户气泡靠右（默认）；「待你处理」卡片里靠左 */
+export function AttachmentStrip({ items, align = "end" }: { items: ChatAttachmentView[]; align?: "start" | "end" }) {
   const t = useT();
   const images = items.filter((a) => a.kind === "image" && a.url);
   const imgEls = useRef(new Map<string, HTMLImageElement>());
@@ -120,7 +121,7 @@ export function AttachmentStrip({ items }: { items: ChatAttachmentView[] }) {
   };
 
   return (
-    <div className="flex max-w-[85%] flex-wrap justify-end gap-2">
+    <div className={`flex max-w-[85%] flex-wrap gap-2 ${align === "start" ? "justify-start" : "justify-end"}`}>
       {items.map((a, i) =>
         a.kind === "image" ? (
           <AttachedImage
