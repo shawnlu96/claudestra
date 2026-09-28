@@ -1152,7 +1152,6 @@ async function cmdAdopt(name: string, sessionId: string) {
   await cmdRestart(tmuxName);
 }
 
-
 /**
  * 仓库根 .env 里的一个变量（manager 可能从任意 cwd 被调起，Bun 只自动加载 cwd 的
  * .env——所以 env 里没有就直接翻 REPO_ROOT/.env）。
@@ -1264,7 +1263,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
   }
 
   const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string }[] = [];
-
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
@@ -2570,6 +2568,7 @@ switch (cmd) {
   case "team-link": await (await import("./manager/team.js")).cmdTeamLink(args); break; // 补挂 / 改挂派发者、任务名（manager/team.ts）
   case "mission": case "autopilot": await (await import("./manager/mission.js")).cmdMission(args); break; // Autopilot（原名值守，lib/missions.ts）
   case "ledger": await (await import("./manager/ledger.js")).cmdLedger(args); break; // 内置台账（manager/ledger.ts，lib/ledger-*.ts）
+  case "fleet": await (await import("./manager/fleet.js")).cmdFleet(args); break; // 批量管理：LP 开关 / 压缩 / 群发（经 bridge 的 ws fleet_run，bridge/fleet/）
   case "archive-workflows": await (await import("./manager/archive-workflows.js")).cmdArchiveWorkflows(); break; // workflow 记录回填进归档
 
   // v2.4.19+ 给现存 active agent 补发置顶 focus 公告（新建/恢复的自动发，这个
@@ -3037,6 +3036,7 @@ switch (cmd) {
         "tmux-screenshot <agent>         — screenshot an agent's tmux window (returns a PNG path)",
         "tmux-send-keys <agent> <keys...>  — send keys/text to an agent (Enter/Escape/Left/C-c …)",
         "tmux-capture <agent> [lines]    — read the last N lines of an agent's pane",
+        "fleet state | fleet <lp-on|lp-off|compact|save-compact|lp-compact|text> --agents a,b|--project p|--all [--walled] [--ctx-over N] [--dry-run]  — batch ops via the bridge",
         "tmux-wait-idle <agent> [ms]     — block until the agent is idle again (default 30s)",
       ],
     });

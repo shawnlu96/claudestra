@@ -17,6 +17,7 @@ import { heldAgentCounts } from "./held-queue.js";
 import { canReadLedger } from "../lib/devices.js";
 import { activeTasksByAgent, type LedgerTaskRef } from "../lib/ledger-read.js";
 import { ledgerDb } from "./ledger-feed.js";
+import { lpField } from "./fleet/lp-monitor.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -66,6 +67,7 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       ...(r?.channelId && held[r.channelId] ? { queued: held[r.channelId] } : {}),
       ...teamField(principal, r),
       ...ledgerField(ledger, name),
+      ...(principal.peer ? {} : lpField(name)), // low-priority 状态（bridge/fleet/lp-monitor.ts 的缓存）：本机账号的事，不给 peer
     };
   };
 }

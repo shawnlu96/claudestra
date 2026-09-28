@@ -44,7 +44,9 @@ export type BridgeEventType =
   | "api_error_turn"
   // 内置台账有写入（lib/ledger-read.ts 的 data_version 轮询）：data 只有 {project}，agent / chatId 为空；
   // transient 发、不补发——网页每次 SSE 连上 / 重连都全量重拉台账。只推给 canReadLedger 的连接（bridge/ledger-feed.ts）
-  | "ledger";
+  | "ledger"
+  // 某个 CC 窗口的 low-priority 状态变了（bridge/fleet/lp-monitor.ts 轮询画面判出，data = LpSnapshot）；transient，重连后看 agent 列表的 lowPriority
+  | "low_priority";
 
 export interface BridgeEvent {
   /** 进程内单调递增，SSE 的 id / Last-Event-ID 补发锚点 */

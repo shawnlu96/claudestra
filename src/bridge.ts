@@ -71,7 +71,7 @@ import { emitEvent, forgetAgent, subscribeEvents, replayEventsSince, getAgentSta
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
-import { initPeerIngress, localProbeResponse, relayControlRoutes, setRequestContext } from "./bridge/relay-routes.js";
+import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContextOf, setRequestContext } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
@@ -370,7 +370,6 @@ const CONTROL_CHANNEL_ID = process.env.CONTROL_CHANNEL_ID || "";
 // 「#control 频道的 agent」。将来引入非 Discord 的 master 标识时只改这几个 helper。
 // ============================================================
 
-
 /** 该 ws 是否 master 的连接 */
 function isMasterWs(ws: ServerWebSocket<unknown>): boolean {
   return !!CONTROL_CHANNEL_ID && clients.get(CONTROL_CHANNEL_ID)?.ws === ws;
@@ -529,7 +528,6 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
   }
   return n;
 }
-
 
 // ============================================================
 // v2.0.0+ 路由抽象
@@ -2264,6 +2262,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws.data)) })); break;
     case "route_to_agent": {
       try {
         // 找发送方的 channelId
@@ -3423,7 +3422,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
 }
 
 // 主端口与接管的旧 web 端口（bridge/legacy-web-port.ts）共用这一个处理函数：同一道控制面闸门
-async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request): boolean }) {
+async function bridgeFetch(req: Request, server: { requestIP(r: Request): { address: string } | null; upgrade(r: Request, o?: { data?: unknown }): boolean }) {
     const reqOrigin = req.headers.get("Origin");
     const crossOrigin = isCrossOrigin(reqOrigin, req.url, req.headers);
     const url0 = new URL(req.url);
@@ -3461,7 +3460,7 @@ async function bridgeFetch(req: Request, server: { requestIP(r: Request): { addr
         console.warn(`🚫 拒绝跨源 WebSocket 升级: Origin=${reqOrigin}`); return new Response("cross-origin websocket refused", { status: 403 });
       }
     }
-    if (server.upgrade(req)) return undefined;
+    if (server.upgrade(req, { data: { loopback: requestContextOf(req).source === "loopback" } })) return undefined; // ws.data.loopback：批量管理只收直连回环（bridge/fleet/ws.ts）
     const url = new URL(req.url);
     // v2.10+ CORS（BRIDGE_CORS_ORIGIN 未设 = 不发头，行为同旧版）
     const cors = corsHeadersFor(reqOrigin, CORS_ORIGIN_SETTING);
@@ -3548,6 +3547,7 @@ initInbox({
   } }),
 });
 void import("./bridge/mission.js").then((m) => m.initMission({ clients, deliver, lastMessageSource, controlChannelId: CONTROL_CHANNEL_ID })); // Autopilot：回合结束自动推进
+void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 
 // 清扫上次崩溃/被杀残留的 webterm-* viewer session（grouped session 视图，
 // kill 不伤 master 本体）。Discord 与 Web-only 模式都需要。

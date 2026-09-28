@@ -1,0 +1,30 @@
+/**
+ * 批量管理（bridge/fleet/，docs/architecture/fleet-ops.md）：
+ *   GET  /api/v1/fleet/state                          { ok, agents: [...含 lp], compactKeep }（现抓一遍各 CC 窗口的 LP 状态）
+ *   POST /api/v1/fleet/run {action, select, dryRun?}  { ok, report: { runId, results[], excluded[], summary } }
+ * 只给 owner 本人的全 scope manage 凭据（canRunFleet）：这些动作往一批会话里敲键，guest、部分 scope、peer 一律 403。
+ * 动态 import：service 拖着 tmux 与台账，本地 API 其余端点族的单测不该为它付加载代价（同 quota.ts）。
+ */
+import { parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
+import { canRunFleet, type Principal } from "../../lib/principals.js";
+import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
+
+export async function handleFleetApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
+  if (path !== "/fleet/state" && path !== "/fleet/run") return null;
+  if (!canRunFleet(principal)) return forbidden("fleet operations require the owner's full-scope manage credential");
+  const svc = await import("../fleet/service.js");
+  if (path === "/fleet/state") {
+    if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
+    return apiJson(200, { ok: true, ...(await svc.fleetState()) });
+  }
+  if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
+  const body = await readJsonBody(req);
+  if (body === INVALID_JSON) return invalidJsonBody();
+  const b = (body ?? {}) as { action?: unknown; select?: unknown; dryRun?: unknown };
+  const a = parseFleetAction(b.action);
+  if (!a.ok) return apiJson(400, { ok: false, error: a.error });
+  const s = parseFleetSelect(b.select);
+  if (!s.ok) return apiJson(400, { ok: false, error: s.error });
+  const report = await svc.runFleet({ action: a.action, select: s.select, dryRun: b.dryRun === true, actor: "owner", via: `web:${principal.name || principal.id}` });
+  return apiJson(200, { ok: true, report });
+}

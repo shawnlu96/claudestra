@@ -133,7 +133,7 @@ const SANDBOX_MANAGER_COMMANDS = new Set([
   "project-add", "project-list", "project-assign", "project-edit", "project-remove", "cron-list", "tmux-capture",
   "project-migrate", "sessions", "set-session", "label", "cron-add", "cron-edit", "cron-remove", "cron-toggle", "cron-history",
   "tmux-send-keys", "team-link", // team-link 只改沙箱 registry 的 parent / task（manager/team.ts），同 label
-  "rename", "repair", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts）；doctor 读生产 launchd，仍不开放
+  "rename", "repair", "fleet", // 只动沙箱 registry / tmux / bridge（manager/agent-rename.ts、manager/repair.ts；fleet 只连沙箱 bridge 的 ws）；doctor 读生产 launchd，仍不开放
 ]);
 
 /** 返回拒绝原因；null = 可以跑。agent 目录与 runtime 另由 manager 的 create 入口按 lib/sandbox.ts 再查一遍 */
