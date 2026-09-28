@@ -5,7 +5,7 @@
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
 import { STATE_DIR } from "../lib/paths.js";
-import { AGENT_NAME_BLOCKLIST_RE, canonicalTwinError, invisibleNameError, isReservedAgentName, readRegistryAgentsSync, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
+import { AGENT_NAME_BLOCKLIST_RE, invisibleNameError, isReservedAgentName, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
@@ -178,7 +178,7 @@ export function normalizeName(raw: string): string {
  * （检查的与 tmux -c 实际收到的必须是同一个串），生产里原样返回。
  */
 export function assertCreatable(name: string, dir: string, runtime: string | undefined): string {
-  assertValidNewAgent(name);
+  assertValidNewName(name);
   const d = normalizeSandboxAgentDir(dir);
   const dirProblem = sandboxAgentDirProblem(d);
   if (dirProblem) throw new Error(dirProblem);
@@ -203,13 +203,6 @@ export function assertValidNewName(raw: string): void {
     throw new Error(`agent 名称不能包含 ".."：${JSON.stringify(raw)}`);
   }
   if (isReservedAgentName(cleaned)) throw new Error(`agent 名称不能是 owner / master（台账里是身份保留名）：${JSON.stringify(raw)}`);
-}
-
-/** 新建 / resume / 收编：名字合法，且跟 registry 里已有的 agent 规范化后不撞（canonicalTwinError；改名在 agent-rename.ts 按同一规则查） */
-export function assertValidNewAgent(name: string, existing: string[] = readRegistryAgentsSync(STATE_REGISTRY_PATH).map((a) => a.name)): void {
-  assertValidNewName(name);
-  const twin = canonicalTwinError(normalizeName(name), existing);
-  if (twin) throw new Error(twin);
 }
 
 export function formatAge(date: Date): string {
