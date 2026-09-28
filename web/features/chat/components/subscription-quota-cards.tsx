@@ -3,7 +3,7 @@ import { useT } from "@/lib/i18n";
 import { fmtTok, type QuotaView } from "../usage-view";
 import type { useSubscriptionQuota } from "../use-subscription-quota";
 import {
-  canRetry, entryRuntime, fmtAt, identityNote, LAYER_LABEL, meterLabel, reasonText,
+  canRetry, entryRuntime, expiryParts, fmtAt, identityNote, LAYER_LABEL, meterLabel, reasonText,
   type EntryView, type MeterView, type QuotaPanelData,
 } from "../quota-view";
 import { CardTitle, ClaudeQuotaCard, CodexQuotaCard, fmtAge, GaugeRow, WarnIcon, type GlobalStats } from "./quota-cards";
@@ -51,7 +51,7 @@ function ValueRow({ m }: { m: MeterView }) {
   );
 }
 
-function ResetCredits({ c }: { c: NonNullable<EntryView["resetCredits"]> }) {
+function ResetCredits({ c, claude }: { c: NonNullable<EntryView["resetCredits"]>; claude: boolean }) {
   const t = useT();
   if (c.held <= 0 && !c.expiries?.length) return null;
   return (
@@ -61,11 +61,15 @@ function ResetCredits({ c }: { c: NonNullable<EntryView["resetCredits"]> }) {
         <span className="tabular-nums">{t("持有 {n} 次，此刻可用 {m} 次", { n: c.held, m: c.applicableNow })}</span>
       </div>
       {c.expiries && c.expiries.length > 0 && (
-        <div className="text-[10.5px] text-base-content/45">
-          {c.expiries.map((ms) => t("{at} 到期", { at: fmtAt(ms) })).join(" · ")}
-          {c.stale && <span className="ml-1 text-warning/80">{t("明细偏旧")}</span>}
+        <div className="space-y-0.5 text-[10.5px] text-base-content/45">
+          {c.expiries.map((x, i) => (
+            <div key={i}>{expiryParts(x).map((p) => t(p.key, p.params)).join(" · ")}</div>
+          ))}
+          {c.stale && <div className="text-warning/80">{t("明细偏旧")}</div>}
         </div>
       )}
+      {/* CC 界面原意：重置卡是补满额度，不挪动周重置日 */}
+      {claude && <div className="text-[10.5px] text-base-content/40">{t("用了补满额度，周重置日不变")}</div>}
     </div>
   );
 }
@@ -90,7 +94,7 @@ function EntryCard({ e, onRetry, retrying }: { e: EntryView; onRetry: (p: "claud
         ),
       )}
       {e.meters.length === 0 && e.kind === "subscription" && <div className="text-xs text-base-content/45">{t("暂无数据")}</div>}
-      {e.resetCredits && <ResetCredits c={e.resetCredits} />}
+      {e.resetCredits && <ResetCredits c={e.resetCredits} claude={e.id === "claude"} />}
       <SourceRow e={e} onRetry={onRetry} retrying={retrying} />
     </div>
   );

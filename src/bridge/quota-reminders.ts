@@ -1,5 +1,6 @@
 /**
- * Codex 重置次数的提醒投递（设计稿 T2b §4 / §6.1；规则与账本在 lib/quota-reminder-rules.ts）。
+ * 重置次数的提醒投递（设计稿 T2b §4 / §6.1；规则与账本在 lib/quota-reminder-rules.ts）：Codex 的 credit 与 Claude 的重置卡
+ * 走同一套 72 / 24 小时规则和去重。Claude 的数据只在有人看看板时才查（后台不读 Keychain），所以它的提醒也只在那时出。
  *
  *   - 每个额度 tick 之后跑一次：按当前视图规划「快过期」（72 / 24 小时）与「用满了还有可用重置」，再投递账本里没送到的。
  *   - 两个渠道各记各的：推送（owner 的所有设备）、Discord #control。失败的渠道按规则退避重试，已成功的不重发。
@@ -12,7 +13,7 @@
 
 import { t } from "../lib/i18n.js";
 import {
-  pendingDeliveries, planExhaustedReminder, planExpiryReminder, recordDelivery,
+  claudeGrantCredits, pendingDeliveries, planExhaustedReminder, planExpiryReminder, recordDelivery,
   type ReminderChannel, type ReminderLedger, type ReminderNotice,
 } from "../lib/quota-reminder-rules.js";
 import type { RemoteView } from "../lib/quota-scheduler.js";
@@ -49,6 +50,7 @@ export function fmtLocal(ms: number): string {
 }
 
 const REDEEM_HINT = () => t("需要时在 codex 里 /status → Redeem usage limit reset。", "When needed: /status in codex → Redeem usage limit reset.");
+const CLAUDE_HINT = () => t("需要时在 Claude Code 里使用：用了补满额度，周重置日不变。", "Use it in Claude Code when needed: it refills your usage; the weekly reset date stays the same.");
 
 function windowName(id: string): string {
   if (id === "5h") return t("5 小时窗口", "5-hour window");
@@ -61,6 +63,12 @@ export function noticeBody(n: ReminderNotice): string {
   if (n.kind === "expiry") {
     const cs = n.credits ?? [];
     const when = cs.map((c) => fmtLocal(c.expiresAtMs)).join(t("、", ", "));
+    if (n.provider === "claude") {
+      return t(
+        `Claude 有 ${cs.length} 张重置卡 ${when} 到期，还没用完。${CLAUDE_HINT()}`,
+        `Claude has ${cs.length} reset card${cs.length > 1 ? "s" : ""} expiring ${when} with resets left. ${CLAUDE_HINT()}`,
+      );
+    }
     return t(
       `Codex 有 ${cs.length} 次免费额度重置 ${when} 到期，还没用。${REDEEM_HINT()}`,
       `Codex has ${cs.length} unused free usage reset${cs.length > 1 ? "s" : ""} expiring ${when}. ${REDEEM_HINT()}`,
@@ -72,14 +80,23 @@ export function noticeBody(n: ReminderNotice): string {
   return t(`Codex 额度用满了（${win}），你有 ${k} 次重置此刻可用。${REDEEM_HINT()}`, `Codex usage is maxed out (${win}); ${k} reset${k > 1 ? "s" : ""} can be redeemed now. ${REDEEM_HINT()}`);
 }
 
-const noticeTitle = () => t("Codex 额度重置", "Codex usage resets");
+const noticeTitle = (ns: ReminderNotice[]) => {
+  const names = [...new Set(ns.map((n) => (n.provider === "claude" ? "Claude" : "Codex")))].join(" / ");
+  return t(`${names} 额度重置`, `${names} usage resets`);
+};
 
-/** 规划：只看 Codex 当前账户；陈旧 / 账户不确定由规则自己拒 */
+/** 规划：两家各看当前账户；陈旧 / 账户不确定由规则自己拒 */
 function planReminders(ledger: ReminderLedger, view: RemoteView, now: number): ReminderLedger {
-  const c = view.codex;
-  if (!c.account) return ledger;
-  const base = { accountKey: c.account.key, now, uncertain: c.account.uncertain };
   let next = ledger;
+  const cl = view.claude;
+  const cu = cl.endpoints.claude_usage;
+  if (cl.account && cu?.snapshot?.data.resets) {
+    const ctx = { provider: "claude" as const, accountKey: cl.account.key, now, uncertain: cl.account.uncertain, stale: cu.stale };
+    next = planExpiryReminder(next, claudeGrantCredits(cu.snapshot.data.resets), ctx).ledger;
+  }
+  const c = view.codex;
+  if (!c.account) return next;
+  const base = { provider: "codex" as const, accountKey: c.account.key, now, uncertain: c.account.uncertain };
   const detail = c.endpoints.codex_reset_credits;
   if (detail?.snapshot) next = planExpiryReminder(next, detail.snapshot.data.credits, { ...base, stale: detail.stale }).ledger;
   const usage = c.endpoints.codex_usage;
@@ -100,8 +117,8 @@ export interface ReminderLedgerApi {
 async function send(channel: ReminderChannel, notices: ReminderNotice[], s: ReminderSenders): Promise<boolean> {
   const body = notices.map(noticeBody).join("\n");
   try {
-    if (channel === "discord") return await s.discord(`**${noticeTitle()}**\n${body}`);
-    const r = await s.push(noticeTitle(), body);
+    if (channel === "discord") return await s.discord(`**${noticeTitle(notices)}**\n${body}`);
+    const r = await s.push(noticeTitle(notices), body);
     return r !== null && (r.sent > 0 || r.failed === 0);
   } catch (e) {
     console.error(`[quota] 提醒投递失败（${channel}）：${(e as Error)?.name ?? "unknown"}`);

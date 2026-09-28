@@ -4,13 +4,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { parseClaudeUsage, parseCodexResetCredits, parseCodexUsage } from "../src/lib/quota-dto.js";
-import { CREDIT_IDS, claudeUsageBody, codexUsageBody, expectNoSentinel, resetCreditsBody } from "./quota-fixtures.js";
+import { CREDIT_IDS, cedarEmberBlock, claudeUsageBody, codexUsageBody, expectNoSentinel, GRANT_IDS, resetCreditsBody } from "./quota-fixtures.js";
 
 const hash = (id: string) => `h(${id.length})`;
 
 describe("Claude /api/oauth/usage", () => {
   test("limits[]：session / weekly_all / weekly_scoped（带模型名）", () => {
-    const d = parseClaudeUsage(claudeUsageBody());
+    const d = parseClaudeUsage(claudeUsageBody(), hash);
     expect(d?.windows).toEqual([
       { id: "5h", kind: "session", usedPct: 6, resetsAtMs: Date.parse("2026-09-28T16:10:00Z"), windowMinutes: 300, severity: "normal", scopeModel: null },
       { id: "7d", kind: "weekly", usedPct: 74, resetsAtMs: Date.parse("2026-09-30T06:00:00Z"), windowMinutes: 10080, severity: "normal", scopeModel: null },
@@ -25,7 +25,7 @@ describe("Claude /api/oauth/usage", () => {
   test("没有 limits[] 时退回 five_hour / seven_day", () => {
     const body = claudeUsageBody();
     delete body.limits;
-    expect(parseClaudeUsage(body)?.windows.map((w) => [w.id, w.usedPct])).toEqual([["5h", 6], ["7d", 74]]);
+    expect(parseClaudeUsage(body, hash)?.windows.map((w) => [w.id, w.usedPct])).toEqual([["5h", 6], ["7d", 74]]);
   });
 
   test("可疑字符串被拒：模型名不合规则 → null，未知 kind 名不合规则 → 丢掉整条", () => {
@@ -34,18 +34,18 @@ describe("Claude /api/oauth/usage", () => {
       { kind: "Bad Kind!", percent: 5 },
       { kind: "session", percent: -1 },
     ] };
-    const d = parseClaudeUsage(body);
+    const d = parseClaudeUsage(body, hash);
     expect(d?.windows).toHaveLength(1);
     expect(d?.windows[0]).toMatchObject({ id: "7d:scoped", scopeModel: null });
   });
 
   test("原型链上的 kind 名一律不认", () => {
-    const d = parseClaudeUsage({ limits: ["__proto__", "constructor", "prototype", "session"].map((kind) => ({ kind, percent: 1 })) });
+    const d = parseClaudeUsage({ limits: ["__proto__", "constructor", "prototype", "session"].map((kind) => ({ kind, percent: 1 })) }, hash);
     expect(d?.windows.map((w) => w.id)).toEqual(["5h"]);
   });
 
   test("时间戳限制在 2020–2100：负数、毫秒当秒、离谱的未来都不认", () => {
-    const at = (v: unknown) => parseClaudeUsage({ limits: [{ kind: "session", percent: 1, resets_at: v }] })?.windows[0].resetsAtMs;
+    const at = (v: unknown) => parseClaudeUsage({ limits: [{ kind: "session", percent: 1, resets_at: v }] }, hash)?.windows[0].resetsAtMs;
     expect(at("2026-09-28T16:10:00Z")).toBe(Date.parse("2026-09-28T16:10:00Z"));
     expect(at("1999-01-01T00:00:00Z")).toBeNull();
     expect(at("2200-01-01T00:00:00Z")).toBeNull();
@@ -56,9 +56,40 @@ describe("Claude /api/oauth/usage", () => {
   });
 
   test("形状不对 → null", () => {
-    expect(parseClaudeUsage(null)).toBeNull();
-    expect(parseClaudeUsage([])).toBeNull();
-    expect(parseClaudeUsage({ limits: "x" })).toBeNull();
+    expect(parseClaudeUsage(null, hash)).toBeNull();
+    expect(parseClaudeUsage([], hash)).toBeNull();
+    expect(parseClaudeUsage({ limits: "x" }, hash)).toBeNull();
+  });
+});
+
+describe("Claude 重置卡（cedar_ember）", () => {
+  test("只留资格、撞限、每张卡的剩余次数 / 截止 / 能否现在用 / 是否要到限额；id 只交给 hash，label / clears / next_grant_id 不收", () => {
+    const seen: string[] = [];
+    const d = parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: cedarEmberBlock() }, (id) => (seen.push(id), `h${seen.length}`));
+    expect(d?.resets).toEqual({
+      eligible: true,
+      atLimit: false,
+      grants: [
+        { key: "h1", resetsLeft: 1, resetsTotal: 3, endsAtMs: Date.parse("2026-10-01T09:00:00Z"), paused: false, usableNow: false, requiresLimit: true },
+        { key: "h2", resetsLeft: 2, resetsTotal: 3, endsAtMs: Date.parse("2026-10-20T09:00:00Z"), paused: false, usableNow: true, requiresLimit: false },
+      ],
+    });
+    expect(seen).toEqual(GRANT_IDS);
+    expectNoSentinel(JSON.stringify(d));
+  });
+
+  test("旧账号 / 接口没给这个块 → resets null，额度照常；坏的 grant 丢掉", () => {
+    expect(parseClaudeUsage(claudeUsageBody(), hash)?.resets).toBeNull();
+    const block = cedarEmberBlock();
+    (block.grants as Record<string, unknown>[]).push(
+      { id: "", ends_at: "2026-10-01T00:00:00Z", resets_left: 1 },
+      { id: "x", ends_at: "nope", resets_left: 1 },
+      { id: "y", ends_at: "2026-10-01T00:00:00Z" },
+    );
+    const d = parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: block }, hash);
+    expect(d?.windows).toHaveLength(3);
+    expect(d?.resets?.grants).toHaveLength(2);
+    expect(parseClaudeUsage({ ...claudeUsageBody(), cedar_ember: "weird" }, hash)?.resets).toBeNull();
   });
 });
 

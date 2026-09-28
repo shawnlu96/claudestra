@@ -23,8 +23,15 @@ export interface EntryView {
   plan: string | null;
   identity: "assumed" | "bound" | "unknown";
   meters: MeterView[];
-  resetCredits: { held: number; applicableNow: number; expiries: number[] | null; stale: boolean } | null;
+  /** expiries：每张卡 / 每条 credit 的截止；left = 这张卡剩几次（Claude 一张卡可含多次），requiresLimit = 到限额才能用 */
+  resetCredits: { held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean } | null;
   source: { layer: LayerSource; observedAt: number | null; reason: string | null };
+}
+
+export interface CreditExpiry {
+  at: number;
+  left: number | null;
+  requiresLimit: boolean;
 }
 
 export interface QuotaPanelData {
@@ -48,7 +55,12 @@ function meterOf(v: unknown): MeterView | null {
 function creditsOf(v: unknown): EntryView["resetCredits"] {
   const c = obj(v);
   if (!c) return null;
-  const list = Array.isArray(c.credits) ? c.credits.map((x) => num(obj(x)?.expiresAtMs)).filter((x): x is number => x !== null) : null;
+  const expiry = (x: unknown): CreditExpiry | null => {
+    const o = obj(x);
+    const at = num(o?.expiresAtMs);
+    return at === null ? null : { at, left: num(o?.left), requiresLimit: o?.requiresLimit === true };
+  };
+  const list = Array.isArray(c.credits) ? c.credits.map(expiry).filter((x): x is CreditExpiry => x !== null) : null;
   return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true };
 }
 
@@ -156,4 +168,12 @@ export function identityNote(e: EntryView): string | null {
   if (e.kind === "api") return null;
   if (e.source.layer === "local_cache") return "账户归属未知";
   return e.identity === "assumed" ? "账户按本机登录推定" : null;
+}
+
+/** 一张卡 / 一条 credit 的截止说明（zh 原文 + 参数，面板里过 t()） */
+export function expiryParts(x: CreditExpiry): { key: string; params: Record<string, string | number> }[] {
+  const out: { key: string; params: Record<string, string | number> }[] = [{ key: "{at} 到期", params: { at: fmtAt(x.at) } }];
+  if (x.left !== null && x.left > 1) out.push({ key: "剩 {n} 次", params: { n: x.left } });
+  if (x.requiresLimit) out.push({ key: "到限额才能用", params: {} });
+  return out;
 }

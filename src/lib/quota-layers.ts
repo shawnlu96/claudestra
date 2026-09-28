@@ -12,7 +12,7 @@
 
 import type { CodexQuotaObservation } from "./codex-usage.js";
 import type { QuotaWindowDto } from "./quota-dto.js";
-import { isEligibleCredit } from "./quota-reminder-rules.js";
+import { claudeGrantCredits, isEligibleCredit } from "./quota-reminder-rules.js";
 import type { ProviderRemote, RemoteView } from "./quota-scheduler.js";
 import { resetPassed, type CachedUsage } from "./usage-cache.js";
 
@@ -40,7 +40,7 @@ export interface ResetCreditsView {
   held: number;
   applicableNow: number;
   /** 明细拿不到（从没成功过）= null，只剩汇总数 */
-  credits: { key: string; expiresAtMs: number }[] | null;
+  credits: { key: string; expiresAtMs: number; left?: number; requiresLimit?: boolean }[] | null;
   stale: boolean;
   observedAt: number | null;
 }
@@ -113,6 +113,25 @@ function resetCreditsOf(r: ProviderRemote, now: number): ResetCreditsView | null
   };
 }
 
+/**
+ * Claude 的重置卡（cedar_ember）：一张卡可含多次重置，持有数按剩余次数加总；资格与 Codex 同一口径。
+ * 接口没给这个块（旧账号）= null，卡上不出重置那一行。
+ */
+function claudeResetsOf(r: ProviderRemote, now: number): ResetCreditsView | null {
+  const ev = r.endpoints.claude_usage;
+  const resets = ev?.snapshot?.data.resets ?? null;
+  if (!resets) return null;
+  const ok = new Set(claudeGrantCredits(resets).filter((c) => isEligibleCredit(c, now)).map((c) => c.key));
+  const grants = resets.grants.filter((g) => ok.has(g.key)).sort((a, b) => a.endsAtMs - b.endsAtMs);
+  return {
+    held: grants.reduce((n, g) => n + g.resetsLeft, 0),
+    applicableNow: grants.filter((g) => g.usableNow).reduce((n, g) => n + g.resetsLeft, 0),
+    credits: grants.map((g) => ({ key: g.key, expiresAtMs: g.endsAtMs, left: g.resetsLeft, requiresLimit: g.requiresLimit })),
+    stale: ev?.stale ?? true,
+    observedAt: ev?.snapshot?.observedAt ?? null,
+  };
+}
+
 /** 一家的账户卡；账户未知且原因是「没配这家」时返回 null（不出卡） */
 function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): ProviderEntry | null {
   const ev = p === "claude" ? r.endpoints.claude_usage : r.endpoints.codex_usage;
@@ -132,7 +151,7 @@ function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): Pro
     account: { key: r.account.key, identity: r.account.identity },
     meters: snap ? snap.data.windows.map((w) => windowMeter(w, now)) : [],
     balance: codex?.balance ? { amount: codex.balance, currency: null } : null,
-    resetCredits: p === "codex" ? resetCreditsOf(r, now) : null,
+    resetCredits: p === "codex" ? resetCreditsOf(r, now) : claudeResetsOf(r, now),
     source: { layer, observedAt: snap?.observedAt ?? null, reason: layer === "live" ? null : reason },
   };
 }

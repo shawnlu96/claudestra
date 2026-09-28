@@ -9,10 +9,10 @@ import { parseClaudeUsage, parseCodexResetCredits, parseCodexUsage } from "../sr
 import { selectQuotaLayers, type LayerSource, type ProviderEntry, type QuotaMeter, type ResetCreditsView } from "../src/lib/quota-layers.js";
 import type { ProviderRemote, RemoteView } from "../src/lib/quota-scheduler.js";
 import type { CachedUsage } from "../src/lib/usage-cache.js";
-import { T0, claudeUsageBody, codexUsageBody, resetCreditsBody } from "./quota-fixtures.js";
+import { GRANT_IDS, T0, cedarEmberBlock, claudeUsageBody, codexUsageBody, resetCreditsBody } from "./quota-fixtures.js";
 
 const HOUR = 3600_000;
-const claudeData = parseClaudeUsage(claudeUsageBody())!;
+const claudeData = parseClaudeUsage(claudeUsageBody(), (id) => `g-${id}`)!;
 const codexData = parseCodexUsage(codexUsageBody())!;
 const creditsData = parseCodexResetCredits(resetCreditsBody(), (id) => `key-${id.slice(-1)}`)!;
 
@@ -160,5 +160,47 @@ describe("通用接入商条目", () => {
     const s = selectQuotaLayers({ now: T0, enabled: true, remote: remote(), local: { claudeCache: null, codexRollout: null }, extra: [pi] });
     expect(s.providers.at(-1)).toEqual(pi);
     expect(s.generatedAt).toBe(T0);
+  });
+});
+
+describe("Claude 重置卡（cedar_ember）", () => {
+  const withBlock = (block: Record<string, unknown> | null, stale = false): RemoteView => {
+    const data = parseClaudeUsage({ ...claudeUsageBody(), ...(block ? { cedar_ember: block } : {}) }, (id) => `g-${id}`)!;
+    return remote({ claude: {
+      account: { key: "ck", identity: "assumed", uncertain: false }, credFailure: null,
+      endpoints: { claude_usage: { snapshot: { data, observedAt: T0 - 60_000 }, lastCode: null, paused: false, stale } },
+    } });
+  };
+  const claudeCard = (v: RemoteView) => selectQuotaLayers({ now: T0, enabled: true, remote: v, local: { claudeCache: null, codexRollout: null } }).providers.find((p) => p.id === "claude")!;
+
+  test("剩余次数按卡加总、按截止排序、带「到限额才能用」；此刻可用只算 usable_now 的卡", () => {
+    const rc = claudeCard(withBlock(cedarEmberBlock([
+      { endsAt: "2026-10-20T09:00:00Z", left: 2, usableNow: true, requiresLimit: false },
+      { endsAt: "2026-10-01T09:00:00Z" },
+    ]))).resetCredits!;
+    expect(rc.held).toBe(3);
+    expect(rc.applicableNow).toBe(2);
+    expect(rc.credits).toEqual([
+      { key: `g-${GRANT_IDS[1]}`, expiresAtMs: Date.parse("2026-10-01T09:00:00Z"), left: 1, requiresLimit: true },
+      { key: `g-${GRANT_IDS[0]}`, expiresAtMs: Date.parse("2026-10-20T09:00:00Z"), left: 2, requiresLimit: false },
+    ]);
+    expect(rc.stale).toBe(false);
+  });
+
+  test("暂停的、次数用完的、已过期的不算；没资格（eligible=false）全不算", () => {
+    const block = cedarEmberBlock([
+      { endsAt: "2026-10-01T09:00:00Z", paused: true },
+      { endsAt: "2026-10-02T09:00:00Z", left: 0 },
+      { endsAt: "2026-09-01T09:00:00Z" },
+      { endsAt: "2026-10-03T09:00:00Z" },
+    ]);
+    expect(claudeCard(withBlock(block)).resetCredits!.held).toBe(1);
+    expect(claudeCard(withBlock({ ...block, eligible: false })).resetCredits!.held).toBe(0);
+  });
+
+  test("接口没给这个块（旧账号）→ 卡上没有重置这一行，卡本身照常是 live", () => {
+    const card = claudeCard(withBlock(null));
+    expect(card.resetCredits).toBeNull();
+    expect(card.source.layer).toBe("live");
   });
 });

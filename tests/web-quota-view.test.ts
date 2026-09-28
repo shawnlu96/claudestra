@@ -3,7 +3,7 @@
  * 数据层与原因码的人话、「重试」只在用户重试才解除的状态出、本机缓存标账户归属未知。
  */
 import { describe, expect, test } from "bun:test";
-import { canRetry, entryRuntime, fmtAt, identityNote, meterLabel, quotaPanelData, reasonText } from "../web/features/chat/quota-view";
+import { canRetry, entryRuntime, expiryParts, fmtAt, identityNote, meterLabel, quotaPanelData, reasonText } from "../web/features/chat/quota-view";
 
 const T = new Date(2026, 8, 28, 10, 0).getTime();
 const body = {
@@ -40,7 +40,7 @@ describe("quotaPanelData", () => {
     expect(d.entries.map((e) => e.id)).toEqual(["claude", "codex", "codex.local", "pi:acme", "x"]);
     expect(JSON.stringify(d)).not.toContain("SHOULD-NOT-SURVIVE");
     expect(JSON.stringify(d)).not.toContain('"secret"');
-    expect(d.entries[1].resetCredits).toEqual({ held: 2, applicableNow: 0, expiries: [T + 86400_000], stale: false });
+    expect(d.entries[1].resetCredits).toEqual({ held: 2, applicableNow: 0, expiries: [{ at: T + 86400_000, left: null, requiresLimit: false }], stale: false });
     expect(d.entries[4].source.layer).toBe("none");
     expect(d.entries[4].meters).toEqual([]);
   });
@@ -79,5 +79,15 @@ describe("文案与按钮", () => {
     expect(meterLabel({ id: "7d", kind: "weekly_scoped", label: "Fable", unit: "pct", used: 1, resetsAtMs: null, resetPassed: false })).toBe("本周 · Fable");
     expect(fmtAt(T + 3600_000, T)).toBe("11:00");
     expect(fmtAt(new Date(2026, 9, 4, 22, 28).getTime(), T)).toBe("10-04 22:28");
+  });
+});
+
+describe("重置卡截止说明", () => {
+  test("Claude 的卡：剩几次（>1 才写）、到限额才能用；Codex 的 credit 只有到期", () => {
+    const at = new Date(2026, 9, 4, 22, 28).getTime();
+    const keys = (x: Parameters<typeof expiryParts>[0]) => expiryParts(x).map((p) => p.key);
+    expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
+    expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
+    expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
   });
 });

@@ -9,7 +9,9 @@ import { confirmCredential, hmacHex, peekAccountKey, readClaudeCredential, readC
 import type { ReminderNotice } from "../src/lib/quota-reminder-rules.js";
 import { QuotaScheduler } from "../src/lib/quota-scheduler.js";
 import { memoryQuotaStore, type QuotaStore } from "../src/lib/quota-state.js";
-import { CREDIT_IDS, SECRET, codexUsageBody, expectNoSentinel, fakeCredDeps, fakeFetch, jsonResponse, okRoutes, resetCreditsBody } from "./quota-fixtures.js";
+import {
+  CREDIT_IDS, SECRET, cedarEmberBlock, claudeUsageBody, codexUsageBody, expectNoSentinel, fakeCredDeps, fakeFetch, jsonResponse, okRoutes, resetCreditsBody,
+} from "./quota-fixtures.js";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -22,7 +24,7 @@ function creditsExpiring(...expires: number[]) {
   return { ...body, available_count: expires.length };
 }
 
-function harness(opts: { now: number; credits: unknown; usage?: unknown; store?: QuotaStore }) {
+function harness(opts: { now: number; credits: unknown; usage?: unknown; claude?: unknown; store?: QuotaStore }) {
   const h = {
     now: opts.now,
     credits: opts.credits,
@@ -37,6 +39,7 @@ function harness(opts: { now: number; credits: unknown; usage?: unknown; store?:
   const fetch = fakeFetch((url) => {
     if (url.endsWith("/wham/rate-limit-reset-credits")) return jsonResponse(200, h.credits);
     if (url.endsWith("/wham/usage")) return jsonResponse(200, h.usage);
+    if (url.includes("/api/oauth/usage") && opts.claude) return jsonResponse(200, opts.claude);
     return okRoutes(url);
   });
   const fresh = () =>
@@ -210,5 +213,40 @@ describe("用满提醒", () => {
   test("文案带窗口名", () => {
     const n = { kind: "exhausted", exhausted: { applicable: 2, windowId: "5h", resetsAtMs: null } } as unknown as ReminderNotice;
     expect(noticeBody(n)).toMatch(/5/);
+  });
+});
+
+describe("Claude 重置卡（与 Codex 同一套规则与去重）", () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const claudeWith = (endsAt: number) => ({ ...claudeUsageBody(), cedar_ember: cedarEmberBlock([{ endsAt: iso(endsAt) }]) });
+
+  test("72 小时档：两家同时命中 → 每个渠道合并成一条，标题两家都写；重启后不重发", async () => {
+    const t = harness({ now: local(12), credits: creditsExpiring(local(12) + 48 * HOUR), claude: claudeWith(local(12) + 50 * HOUR) });
+    await t.h.scheduler.refresh("claude", "view");
+    await t.fetchCodex();
+    await t.run();
+    expect(t.h.sent).toHaveLength(2);
+    const push = t.h.sent.find((x) => x.channel === "push")!;
+    expect(push.title).toContain("Claude");
+    expect(push.title).toContain("Codex");
+    expect(push.body).toContain("Claude 有 1 张重置卡");
+    expect(push.body).toContain("周重置日不变");
+    expect(push.body).toContain("Codex 有 1 次");
+    expectNoSentinel(JSON.stringify(t.h.sent));
+    t.fresh();
+    t.h.now += 2 * MIN;
+    await t.h.scheduler.refresh("claude", "view");
+    await t.run();
+    expect(t.h.sent).toHaveLength(2);
+  });
+
+  test("没有 cedar_ember（旧账号）/ 卡没到 72 小时：不提醒", async () => {
+    const none = harness({ now: local(12), credits: creditsExpiring(local(12) + 20 * 24 * HOUR), claude: claudeUsageBody() });
+    await none.h.scheduler.refresh("claude", "view");
+    await none.run();
+    const far = harness({ now: local(12), credits: creditsExpiring(local(12) + 20 * 24 * HOUR), claude: claudeWith(local(12) + 10 * 24 * HOUR) });
+    await far.h.scheduler.refresh("claude", "view");
+    await far.run();
+    expect([...none.h.sent, ...far.h.sent]).toHaveLength(0);
   });
 });

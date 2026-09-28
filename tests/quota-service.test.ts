@@ -99,7 +99,7 @@ describe("定时器节奏", () => {
     const t = harness();
     t.svc.start();
     const v = await t.svc.snapshot();
-    expect(t.fetch.calls.map((c) => c.url.split("/").pop()).sort()).toEqual(["usage", "usage"]);
+    expect(t.fetch.calls.map((c) => c.url.split("?")[0].split("/").pop()).sort()).toEqual(["usage", "usage"]);
     expect(v.snapshot.providers.map((p) => `${p.id}:${p.source.layer}`)).toEqual(["claude:live", "codex:live"]);
     t.h.now += 30_000;
     await t.svc.snapshot();
@@ -170,7 +170,7 @@ describe("开关", () => {
     detailDown = false;
     t.h.now += MIN + 1000;
     expect((await t.svc.retry("codex")).status).toBe("fetched");
-    expect(t.fetch.calls.map((c) => c.url.split("/").pop())).toEqual(["usage", "rate-limit-reset-credits", "rate-limit-reset-credits"]);
+    expect(t.fetch.calls.map((c) => c.url.split("?")[0].split("/").pop())).toEqual(["usage", "rate-limit-reset-credits", "rate-limit-reset-credits"]);
     expect((await t.svc.snapshot()).health.codex_reset_credits?.paused).toBe(false);
   });
 });

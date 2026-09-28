@@ -27,7 +27,7 @@ describe("请求形状", () => {
     const plan: [QuotaEndpoint, QuotaCredential][] = [["claude_usage", c.claude], ["codex_usage", c.codex], ["codex_reset_credits", c.codex]];
     for (const [e, cred] of plan) expect((await getQuota(e, cred, deps(f))).ok).toBe(true);
     expect(f.calls.map((x) => [x.url, x.method, x.redirect])).toEqual([
-      ["https://api.anthropic.com/api/oauth/usage", "GET", "manual"],
+      ["https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1", "GET", "manual"],
       ["https://chatgpt.com/backend-api/wham/usage", "GET", "manual"],
       ["https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", "GET", "manual"],
     ]);
@@ -46,7 +46,7 @@ describe("请求形状", () => {
     expect(() => {
       (QUOTA_ENDPOINTS.claude_usage as { url: string }).url = "https://evil.example/";
     }).toThrow(TypeError);
-    expect(QUOTA_ENDPOINTS.claude_usage.url).toBe("https://api.anthropic.com/api/oauth/usage");
+    expect(QUOTA_ENDPOINTS.claude_usage.url).toBe("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1");
   });
 
   test("源码里没有兑换 / 购买接口，也没有非 GET 的 method", () => {

@@ -27,7 +27,8 @@ const endpoint = (provider: QuotaProvider, url: string) => Object.freeze({ provi
 
 /** 逐条冻结：表本身和每一项都改不了（运行时有人改地址会直接抛 TypeError） */
 export const QUOTA_ENDPOINTS: Readonly<Record<QuotaEndpoint, Readonly<{ provider: QuotaProvider; url: string }>>> = Object.freeze({
-  claude_usage: endpoint("claude", "https://api.anthropic.com/api/oauth/usage"),
+  // cedar_ember=1：带回重置卡（Claude Code 2.1.283 同款查询）；skip_spend=1：不要按量花费明细（用不上，少拿一块数据）
+  claude_usage: endpoint("claude", "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"),
   codex_usage: endpoint("codex", "https://chatgpt.com/backend-api/wham/usage"),
   codex_reset_credits: endpoint("codex", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"),
 });
@@ -101,7 +102,7 @@ function statusCode(status: number): FetchErrorCode {
 }
 
 function parseFor<E extends QuotaEndpoint>(endpoint: E, json: unknown, hashCreditId: (rawId: string) => string): DtoMap[E] | null {
-  if (endpoint === "claude_usage") return parseClaudeUsage(json) as DtoMap[E] | null;
+  if (endpoint === "claude_usage") return parseClaudeUsage(json, hashCreditId) as DtoMap[E] | null;
   if (endpoint === "codex_usage") return parseCodexUsage(json) as DtoMap[E] | null;
   return parseCodexResetCredits(json, hashCreditId) as DtoMap[E] | null;
 }

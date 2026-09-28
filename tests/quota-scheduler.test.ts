@@ -71,7 +71,7 @@ function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore()
   return h;
 }
 
-const urlsOf = (h: Harness) => h.fetch.calls.map((c) => c.url.split("/").pop());
+const urlsOf = (h: Harness) => h.fetch.calls.map((c) => c.url.split("?")[0].split("/").pop());
 
 describe("合并与限频", () => {
   test("网页 / Discord / 后台同时刷新同一家 → 只发一个请求", async () => {
@@ -140,7 +140,7 @@ describe("失败分类与冷却", () => {
       h.advance(MIN);
     }
     expect(h.cd.keychainCalls.length).toBeLessThanOrEqual(6);
-    expect(h.fetch.calls.filter((c) => c.url.endsWith("/oauth/usage"))).toHaveLength(1);
+    expect(h.fetch.calls.filter((c) => c.url.includes("/oauth/usage"))).toHaveLength(1);
   });
 
   test("401 后 CC 续期了 token：下一次核对就恢复，不用等满 30 分钟", async () => {

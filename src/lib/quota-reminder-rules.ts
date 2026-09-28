@@ -10,7 +10,7 @@
  * 账本存在 quota-state.json（经 quota-scheduler 的 store），重启后去重仍有效。单测 tests/quota-reminder-rules.test.ts。
  */
 
-import { TS_MAX_MS, type CodexUsageDto, type ResetCreditDto } from "./quota-dto.js";
+import { TS_MAX_MS, type ClaudeResetsDto, type CodexUsageDto, type ResetCreditDto } from "./quota-dto.js";
 
 export type ReminderChannel = "push" | "discord";
 const REMINDER_CHANNELS: readonly ReminderChannel[] = ["push", "discord"];
@@ -33,6 +33,8 @@ interface ChannelDelivery {
 export interface ReminderNotice {
   id: string;
   kind: "expiry" | "exhausted";
+  /** 哪一家的重置（老账本里没有这个字段 = codex） */
+  provider?: "claude" | "codex";
   accountKey: string;
   createdAt: number;
   /** expiry：本次涉及的重置（到期时刻 + 命中的阈值小时数） */
@@ -55,6 +57,8 @@ export function emptyLedger(): ReminderLedger {
 }
 
 export interface PlanContext {
+  /** 缺省 codex */
+  provider?: "claude" | "codex";
   accountKey: string;
   now: number;
   /** 数据陈旧（最近一次查询失败、或太久没查） */
@@ -69,11 +73,29 @@ export function isEligibleCredit(c: ResetCreditDto, now: number): boolean {
   return c.status === "available" && c.supportedByPlan && !c.redeemed && !c.redeemStarted && expiryOk;
 }
 
+/**
+ * Claude 的重置卡 → 与 Codex credit 同一种形状，走同一套资格判定、阈值与去重（key 已是 HMAC(账户 + grant.id)）。
+ * 暂停的、次数用完的不算「可用」；账户没资格（eligible=false）按套餐不支持处理。
+ */
+export function claudeGrantCredits(r: ClaudeResetsDto | null): ResetCreditDto[] {
+  if (!r) return [];
+  return r.grants.map((g) => ({
+    key: g.key,
+    status: g.paused || g.resetsLeft <= 0 ? "other" : "available",
+    supportedByPlan: r.eligible,
+    redeemStarted: false,
+    redeemed: false,
+    grantedAtMs: null,
+    expiresAtMs: g.endsAtMs,
+  }));
+}
+
 function newNotice(kind: ReminderNotice["kind"], ctx: PlanContext, tag: string): ReminderNotice {
   const channels = Object.fromEntries(REMINDER_CHANNELS.map((c) => [c, { status: "pending", attempts: 0, lastAt: null }]));
   return {
     id: `${kind}-${ctx.now.toString(36)}-${tag.slice(0, 8)}`,
     kind,
+    provider: ctx.provider ?? "codex",
     accountKey: ctx.accountKey,
     createdAt: ctx.now,
     channels: channels as ReminderNotice["channels"],
