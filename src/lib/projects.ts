@@ -149,10 +149,14 @@ export function resolveProjectForDirOrMain(
   if (hit) return hit;
   const main = mainOf(dir);
   if (!main || normalizeDir(main) === normalizeDir(dir)) return null;
-  // git 给的是真实路径（/tmp → /private/tmp、/var → /private/var），project 目录也换成真实路径再比
+  return resolveProjectForRealDir(projects, main);
+}
+
+/** 同 resolveProjectForDir，但两边都先换成真实路径（git 给的是真实路径：/tmp → /private/tmp、/var → /private/var） */
+export function resolveProjectForRealDir(projects: ProjectDef[], dir: string): ProjectDef | null {
   const real = projects.map((p) => ({ ...p, dirs: p.dirs.map((d) => realOr(normalizeDir(d))) }));
-  const hit2 = resolveProjectForDir(real, main);
-  return hit2 ? projects.find((p) => p.id === hit2.id) ?? null : null;
+  const hit = resolveProjectForDir(real, realOr(normalizeDir(dir)));
+  return hit ? projects.find((p) => p.id === hit.id) ?? null : null;
 }
 
 function realOr(p: string): string {

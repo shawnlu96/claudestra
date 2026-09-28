@@ -56,12 +56,12 @@ export function agentPending(agent: string): Promise<{ thinking?: boolean; compa
 const WANTED = new Set(["ledger", "tool_start", "tool_done", "agent_status", "bg_task_started", "bg_task_completed"]);
 
 /**
- * 订阅 bridge /events，逐条回调关心的事件；onOpen 在连上时调一次（调用方据此全量重拉，T8c 约定）。
- * 流正常结束或出错都 resolve / reject 给调用方决定重连；signal 中止即关连接。
+ * 订阅 bridge /events（path 可带 ?types= 让 bridge 先滤一道），逐条回调；onOpen 在连上时调一次（调用方据此全量重拉，T8c 约定）。
+ * 流正常结束或出错都 resolve / reject 给调用方决定重连；signal 中止即关连接。协作视图与侧栏「待你处理」共用。
  */
-export async function followCollabEvents(opts: { signal: AbortSignal; onOpen: () => void; onEvent: (e: BridgeEvent) => void }): Promise<void> {
-  const res = await apiStream("/events", { signal: opts.signal });
-  opts.onOpen();
+export async function followEventStream(path: string, opts: { signal: AbortSignal; onOpen?: () => void; onEvent: (e: BridgeEvent) => void }): Promise<void> {
+  const res = await apiStream(path, { signal: opts.signal });
+  opts.onOpen?.();
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let buffer = "";
@@ -71,9 +71,14 @@ export async function followCollabEvents(opts: { signal: AbortSignal; onOpen: ()
       if (done) return;
       const { events, rest } = drainFrames(buffer + dec.decode(value, { stream: true }));
       buffer = rest;
-      for (const evt of events) if (WANTED.has(evt.type)) opts.onEvent(evt);
+      for (const evt of events) opts.onEvent(evt);
     }
   } finally {
     reader.cancel().catch(() => undefined); // 已断开的流再 cancel 会抛，这里只是善后
   }
+}
+
+/** 协作视图：只关心 WANTED 这几类 */
+export function followCollabEvents(opts: { signal: AbortSignal; onOpen: () => void; onEvent: (e: BridgeEvent) => void }): Promise<void> {
+  return followEventStream("/events", { ...opts, onEvent: (evt) => WANTED.has(evt.type) && opts.onEvent(evt) });
 }

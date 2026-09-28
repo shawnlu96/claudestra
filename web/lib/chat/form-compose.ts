@@ -225,7 +225,7 @@ export interface ResolvedForm {
  * 对得上选项才还原并回填已答——讨论里随手写的 `[select:x:bogus]`、代码块里的行原样保留。
  * 没有任何行被还原 → null。
  */
-export function wireToDisplay(text: string, resolve: (id: string) => ResolvedForm | null): string | null {
+export function wireToDisplay(text: string, resolve: (id: string, values: string[]) => ResolvedForm | null): string | null {
   let hit = false;
   let fenced = false;
   const lines = text.split("\n").map((line) => {
@@ -233,7 +233,7 @@ export function wireToDisplay(text: string, resolve: (id: string) => ResolvedFor
     const m = fenced ? null : SELECT_LINE.exec(line.trim());
     if (!m) return line;
     const values = m[2].split(",").map((v) => v.trim()).filter(Boolean);
-    const r = resolve(m[1]);
+    const r = resolve(m[1], values);
     if (!r || !values.length || !values.every((v) => r.row.options.some((o) => o.value === v))) return line;
     r.commit(values);
     hit = true;

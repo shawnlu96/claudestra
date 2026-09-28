@@ -73,6 +73,10 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));
   console.log("🔔 推送派发器已启动（进程内订阅 event-bus）");
+  // 「待你处理」：动态 import 同额度服务——asks 拖着台账库，推送的单测不该为它付加载代价
+  void import("../asks.js")
+    .then((m) => m.onAsk((a) => void dispatcher.onAsk(a, m.ownerPresence.state()).catch((e) => console.error(`⚠️ 待你处理没推出去: ${(e as Error).message}`))))
+    .catch((e) => console.error(`⚠️ 待你处理的推送没接上: ${(e as Error).message}`));
   if (!deliver) return;
   // 动态 import：额度服务拖着全机用量子进程与 bridge/config，推送的单测不该为它付加载代价
   void import("../quota-service.js")

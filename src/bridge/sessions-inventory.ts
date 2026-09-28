@@ -22,6 +22,8 @@ import { homedir } from "os";
 import { join } from "path";
 import { readRegistryAgents, REGISTRY_PATH } from "../lib/registry.js";
 import { resolveClaudeBinary, type Runner } from "../lib/claude-binary.js";
+import { agentInScope, type Principal } from "../lib/principals.js";
+import { canManage } from "../lib/devices.js";
 
 // ============================================================
 // 类型
@@ -291,4 +293,16 @@ export async function collectSessions(opts?: {
     readRegistryLite(opts?.registryPath),
   ]);
   return reconcileSessions(raw, jobStates, registry);
+}
+
+/**
+ * GET /sessions 的可见范围：全权凭据（canManage，即 api-respond 的 isFullScope）看全部，含野生会话；其余（包括 scope 为 "*" 的 guest / peer）
+ * 只看 scope 内 agent 的正式会话及其分身。会话 id 是 /agents/resume 收编、takeover 的钥匙（tests/session-gates.test.ts）。
+ */
+export function visibleSessions(list: NeutralSessionInfo[], principal: Principal): NeutralSessionInfo[] {
+  if (canManage(principal)) return list;
+  return list.filter((s) => {
+    const owner = s.registeredAgent ?? s.doppelgangerOf;
+    return owner ? agentInScope(principal, owner) : false;
+  });
 }

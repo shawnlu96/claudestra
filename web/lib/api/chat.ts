@@ -3,6 +3,7 @@
  * 权限 / AUQ 应答、skills / tasks、全局搜索、消息隐藏。形状与 chat-store / 组件既有约定一致。
  */
 import { apiAgentName, uiAgentName } from "@/lib/chat/agents";
+import { takeAskHint } from "./asks";
 import { api } from "./client";
 import { invalidateHidden } from "./history";
 
@@ -23,7 +24,8 @@ export function sendMessage(agent: string, text: string, files: File[] | undefin
     for (const f of files) fd.append("files", f);
     return api<SendResult>(`/agents/${enc(agent)}/messages`, { method: "POST", body: fd, signal, timeoutMs: 0 });
   }
-  return api<SendResult>(`/agents/${enc(agent)}/messages`, { method: "POST", json: { text, wait: 0 }, signal, timeoutMs: 0 });
+  const ask = takeAskHint(agent, text); // 气泡里点的按钮：告诉 bridge 答的是哪条「待你处理」
+  return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0 }, signal, timeoutMs: 0 });
 }
 
 /** 一键中断：tmux C-c（master → master:0） */

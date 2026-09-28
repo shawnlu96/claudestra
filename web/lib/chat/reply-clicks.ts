@@ -10,7 +10,7 @@
  * rowKey 必须在「点击时(前端有 row+ri)」和「历史还原时(BFF 有 components 数组)」
  * 两侧都能算出同一个值,所以刻意做成 (row, ri) 的纯函数。
  */
-import type { WebComponentRow } from "./events";
+import type { WebButton, WebComponentRow } from "./events";
 
 /**
  * 行的稳定 key:buttons 行按下标(同一 components 数组里位置稳定、两侧同序遍历),
@@ -27,6 +27,11 @@ export interface ClickedRow {
   rowKey: string;
   choiceValue: string;
   label: string;
+}
+
+/** 按钮在气泡里的显示文案（emoji 字段 + label）：按钮渲染、本端乐观气泡、回投还原都用这一个，三处对账才对得上 */
+export function buttonText(b: WebButton): string {
+  return `${b.emoji ? `${b.emoji} ` : ""}${b.label}`;
 }
 
 /**
@@ -46,7 +51,7 @@ export function matchClickedRow(
     const row = rows[ri];
     if (row.type === "buttons" && btnId) {
       const btn = row.buttons.find((b) => b.id === btnId);
-      if (btn) return { rowKey: replyRowKey(row, ri), choiceValue: btnId, label: btn.label };
+      if (btn) return { rowKey: replyRowKey(row, ri), choiceValue: btnId, label: buttonText(btn) };
     }
     if (row.type === "select" && selId && row.id === selId && selValue) {
       const opt = row.options.find((o) => o.value === selValue);

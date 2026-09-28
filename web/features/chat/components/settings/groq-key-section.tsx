@@ -66,7 +66,7 @@ export function GroqKeySection({ groq, busy }: { groq: ReturnType<typeof useGroq
           <div className="mt-3 flex items-center justify-end gap-2.5">
             {msg && <span className="text-xs text-base-content/60">{t(msg)}</span>}
             {hint && (
-              <button className="btn btn-ghost btn-sm text-error/80" disabled={busy} onClick={() => save("")}>
+              <button className="btn btn-ghost btn-sm text-error-soft-80" disabled={busy} onClick={() => save("")}>
                 {t("清除")}
               </button>
             )}
