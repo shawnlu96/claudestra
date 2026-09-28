@@ -15,11 +15,13 @@ describe("draftFromReply", () => {
     expect(draftFromReply("x", [{ type: "buttons", buttons: [] }, { type: "weird" }, "s"])).toBeNull();
   });
 
-  test("标题 = 去 Markdown 后的第一行（≤40 字），背景 = 前 300 字；按钮 id 前缀只给「可能是授权」的提示", () => {
+  test("标题 = 去 Markdown 后的第一行（≤40 字），背景 = 第二行起的前 300 字（不重复标题）；按钮 id 前缀只给「可能是授权」的提示", () => {
     const long = "**v2.31.0** 已经 commit，要发吗？\n\n" + "细节".repeat(200);
     const d = draftFromReply(long, rows)!;
     expect(d.title).toBe("v2.31.0 已经 commit，要发吗？");
     expect(Array.from(d.context).length).toBe(300);
+    expect(d.context.startsWith("细节")).toBe(true);
+    expect(draftFromReply("x".repeat(50) + "\n下一行", rows)!.context.startsWith("xxx")).toBe(true);
     expect(d.kindHint).toBe("authorize");
     expect(draftFromReply("选一个", [rows[1]])!.kindHint).toBeNull();
   });

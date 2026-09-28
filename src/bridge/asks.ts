@@ -157,11 +157,18 @@ export async function deliverReplyWithAsk(env: Envelope, chatId: string, fromCha
 
 const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5);
 
-/** 答复正文：第一行说明这是哪条 ask 的答复，接着是原样的 wire 行（agent 按 [button:id] 分支的老习惯不变），最后是 owner 的补充 */
-export function answerContent(a: Ask, picks: WireMatch[], text: string): string {
-  const head = t(`[✅ owner 回复了你 ${hhmm(a.createdAt)} 的「待你处理」（${a.id}）：${a.title}`, `[✅ owner answered your ${hhmm(a.createdAt)} ask (${a.id}): ${a.title}`);
-  const chose = picks.length ? t(`。选择：${picks.map((p) => p.label).join("；")}]`, `. Chose: ${picks.map((p) => p.label).join("; ")}]`) : "]";
-  return [head + chose, ...picks.map((p) => p.wire), ...(text ? [t(`补充：「${text}」`, `Note: "${text}"`)] : [])].join("\n");
+/**
+ * 答复正文：第一行说明这是哪条 ask 的答复（给 agent 看），之后是 owner 原样发的内容——聊天里是那条消息本身（wire 行 + 补充），
+ * 卡片 / Discord 是 wire 行 + 文本框里的话。agent 按 [button:id] 分支的老习惯不变；网页回显和历史只去掉第一行，和乐观气泡对得上。
+ */
+export function answerContent(a: Ask, picks: WireMatch[], text: string, original?: string): string {
+  const title = /[。？！?!.]$/.test(a.title) ? a.title : `${a.title}。`;
+  const chose = picks.length ? t(`选择：${picks.map((p) => p.label).join("；")}。`, `Chose: ${picks.map((p) => p.label).join("; ")}. `) : "";
+  const head = t(
+    `[✅ owner 回复了你 ${hhmm(a.createdAt)} 的「待你处理」（${a.id}）：${title}${chose}下面是 owner 发的原文]`,
+    `[✅ owner answered your ${hhmm(a.createdAt)} ask (${a.id}): ${title} ${chose}Owner's words below]`,
+  );
+  return [head, original ?? [...picks.map((p) => p.wire), text].filter(Boolean).join("\n")].join("\n");
 }
 
 /** 发起方还在就投它；被 kill 了改投它的派发者（registry parent），派发者也不在就投大总管 */
@@ -199,6 +206,8 @@ export interface AnswerInput {
   ask: Ask;
   picks: WireMatch[];
   text: string;
+  /** owner 在聊天里发的那条原文（答复正文原样带上）；卡片 / Discord 没有 */
+  original?: string;
   /** 已验证的 owner：网页的 api 身份，或 Discord 的 ALLOWED_USER_IDS 用户 */
   from: Endpoint;
   principal: string;
@@ -214,7 +223,7 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   ownerPresence.touch();
   publishAsk(a);
   const to = await answerTarget(a);
-  const outbox = await sendCalm(i.from, to, "response", answerContent(a, i.picks, i.text), a.id);
+  const outbox = await sendCalm(i.from, to, "response", answerContent(a, i.picks, i.text, i.original), a.id);
   patchAsk(askDb(), a.id, { outboxMessageId: outbox, ...(to.redirected ? { extra: { redirectedTo: to.redirected } } : {}) });
   if (to.redirected) console.log(`↪ ask ${a.id} 的发起方 ${a.fromAgent} 不在了，答复改投 ${to.redirected}`);
   if (i.via !== "discord" && a.discordMessageIds.length && deps.editDiscord) {

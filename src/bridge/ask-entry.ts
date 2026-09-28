@@ -67,7 +67,7 @@ export async function answerFromChat(req: { agent: string; text: string; princip
   if (!hit) return null;
   if (hit.ask.state !== "open") return apiJson(409, closedBody(hit.ask));
   const p = req.principal;
-  return commitOr409(() => commitAnswer({ ask: hit.ask, picks: hit.picks, text: rest, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
+  return commitOr409(() => commitAnswer({ ask: hit.ask, picks: hit.picks, text: rest, original: req.text, from: apiFrom(p), principal: p.id, device: p.credential, via: "web_chat" }), hit.ask);
 }
 
 /** 网页卡片：POST /ledger/:project/asks/:id/answer，body {choices: wire[], text?} */

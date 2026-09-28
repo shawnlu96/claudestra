@@ -55,12 +55,14 @@ export interface ReplyAskDraft {
 export function draftFromReply(text: string, components: unknown): ReplyAskDraft | null {
   const options = askRows(text, components);
   if (!options.length) return null;
-  const plain = markdownToPlain(text).replace(/[ \t]+/g, " ").trim();
-  const first = plain.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  const lines = markdownToPlain(text).replace(/[ \t]+/g, " ").split("\n").map((l) => l.trim()).filter(Boolean);
   const ids = componentIds(options);
+  // 卡片上标题下面紧跟背景：背景从第二行起取，不重复标题（标题被截短时整段照给，免得丢掉被截的那半句）
+  const first = lines[0] ?? "";
+  const title = chars(first || firstLabel(options) || "待你处理", TITLE_MAX);
   return {
-    title: chars(first || firstLabel(options) || "待你处理", TITLE_MAX),
-    context: chars(plain.replace(/\n{2,}/g, "\n"), CONTEXT_MAX),
+    title,
+    context: chars((title === first ? lines.slice(1) : lines).join("\n"), CONTEXT_MAX),
     options,
     kindHint: ids.some((id) => AUTHORIZE_HINT.test(id)) ? "authorize" : null,
   };

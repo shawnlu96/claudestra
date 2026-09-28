@@ -18,6 +18,7 @@ import { open as fsOpen } from "fs/promises";
 import { join } from "path";
 import { projectJsonlPath, findJsonlBySessionId } from "./jsonl-cost.js";
 import { ARCHIVE_ROOT } from "./session-archive.js";
+import { ownerWordsOfAnswer, stripChannelHeader } from "./channel-body.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -278,22 +279,6 @@ export function listSubagentFiles(mainJsonlPath: string): string[] {
 // 回合结构也随之丢失（连续 assistant 记录跨回合粘连成巨型气泡）。
 const CHANNEL_WRAP_RE = /^\s*<channel\s+([^>]*)>\r?\n?([\s\S]*?)\r?\n?<\/channel>\s*$/;
 
-/**
- * 剥掉 bridge renderContentForLocal 注入的 framing header：正文开头的
- * [🌐 …] / [🤖 …] 方括号块是给 agent 的路由/行为指示，不是用户输入。header 内可能
- * 出现 "]"（如 [DIRECT] 标记），所以用 "]\n\n" 或行尾 "]" + 空行做块边界，而不是
- * 第一个 "]"。没匹配到已知 emoji 开头就原样保留（不误伤以 [ 开头的真实输入）。
- */
-function stripChannelHeader(body: string): string {
-  if (!/^\[(🌐|🤖|🤝|📢|📣)/.test(body)) return body;
-  // header 块与正文用空行分隔——兼容 LF 与 CRLF（L7：CRLF jsonl 下 "]\n\n" 匹配不到
-  // 会把 framing 头留在正文）。仍要求"]"+空行做边界，不用单个换行（正文里可能出现
-  // "]\n"，会误切）。
-  const m = body.match(/]\r?\n\r?\n/);
-  if (!m || m.index === undefined) return body;
-  return body.slice(m.index + m[0].length).trim();
-}
-
 /** attachment 记录是否为「被队列吸收的用户消息」,是则返回原始 prompt(含 channel 包装)。 */
 export function queuedPromptOf(rec: any): string | null {
   const a = rec?.attachment;
@@ -331,7 +316,7 @@ export function unwrapChannelMessage(raw: string): { text: string; from?: string
   if (!m) return null;
   const from = /(?:^|\s)user="([^"]*)"/.exec(m[1])?.[1] || undefined;
   const fromId = /(?:^|\s)user_id="([^"]*)"/.exec(m[1])?.[1] || undefined;
-  const text = stripChannelHeader(m[2].trim()).trim();
+  const text = ownerWordsOfAnswer(m[1], stripChannelHeader(m[2].trim()).trim());
   if (!text) return null;
   return { text, from, fromId };
 }

@@ -15,6 +15,7 @@ import { getAsk, listAsks, type Ask } from "../src/lib/ledger-asks.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
+import { unwrapChannelMessage } from "../src/lib/session-history.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const at = "2026-09-28T00:00:00Z";
@@ -45,6 +46,8 @@ const mkDeps = (): AsksDeps => ({
 });
 
 function setup(registry = REGISTRY) {
+  unsub(); // 同一用例里再 setup 一次：先退掉上一个订阅、关掉上一个库
+  if (path) closeLedger(path);
   path = tempLedgerPath("asks-bridge-");
   openLedger(path);
   delivered = [];
@@ -59,6 +62,8 @@ afterEach(() => {
   unsub();
   setAsksForTest(undefined);
   closeLedger(path);
+  path = "";
+  unsub = () => {};
   deliverResult = (env) => ({ envelope: env, outcome: { kind: "sent", discordMessageIds: ["d1", "d2"] } });
 });
 
@@ -125,8 +130,14 @@ describe("作答 → 答复不抢占", () => {
     await reply("api:owner:self", [{ type: "multiselect", id: "f", options: [{ label: "甲", value: "a" }, { label: "乙", value: "b" }] }]);
     const res = (await answerFromChat({ agent: "agent-x", text: "[select:f:a,b]\n顺便先别发 release", principal: owner() }))!;
     expect(res.status).toBe(202);
-    expect(delivered[0].content).toContain("[select:f:a,b]");
-    expect(delivered[0].content).toContain("顺便先别发 release");
+    // 第一行给 agent 的说明，之后是 owner 发的原文（网页回显 / 历史只去掉第一行，和乐观气泡对得上）
+    expect(delivered[0].content.split("\n").slice(1).join("\n")).toBe("[select:f:a,b]\n顺便先别发 release");
+  });
+
+  test("历史里 trigger=ask_answer 的入站只留 owner 原文；别的入站不动", () => {
+    const wrap = (trigger: string, body: string) => `<channel source="claudestra" chat_id="api:owner:self" trigger="${trigger}" user="owner">\n${body}\n</channel>`;
+    expect(unwrapChannelMessage(wrap("ask_answer", "[✅ owner 回复了你 …]\n[button:go]"))?.text).toBe("[button:go]");
+    expect(unwrapChannelMessage(wrap("system", "第一行\n第二行"))?.text).toBe("第一行\n第二行");
   });
 
   test("不接管：没 wire 的普通消息、对不上任何 ask 的 wire、非 owner 凭据（peer / 部分 scope）", async () => {
