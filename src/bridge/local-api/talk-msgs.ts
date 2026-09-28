@@ -8,6 +8,7 @@ import { attPath, attsUsableBy, canReadAtt, getAtt, removeUnreferenced, saveAtt,
 import { deleteMessage, getMessage, insertMessage, listMessages, parseDraft, type TalkMessage, type TalkRef } from "../../lib/talk-messages.js";
 import { OWNER_PERSON, personAliases } from "../../lib/talk-people.js";
 import { getRoom, isMember, parseRoomKey, type Room } from "../../lib/talk-rooms.js";
+import { collectBody } from "../../lib/relay-stream.js";
 import { apiJson } from "../api-respond.js";
 import { pushOwnerNotice } from "../push/init.js";
 import { nameOf, personOfKey, publishTalk, rememberMe, roomView, talkAttDir, talkDb, talkPrincipals, type Me } from "../talk.js";
@@ -98,9 +99,16 @@ export function deleteRoomMessage(me: Me, key: string, origin: string, id: strin
 
 /** 上传一张图：正文就是图片字节。类型只按文件头认，剥元数据后按内容寻址存盘 */
 export async function uploadAtt(me: Me, req: Request): Promise<Response> {
-  const declared = Number(req.headers.get("content-length") || 0);
-  if (declared > ATT_MAX_BYTES) return apiJson(413, { ok: false, error: `image must be at most ${ATT_MAX_BYTES} bytes` });
-  const bytes = new Uint8Array(await req.arrayBuffer());
+  const tooLarge = () => apiJson(413, { ok: false, error: `image must be at most ${ATT_MAX_BYTES} bytes` });
+  if (Number(req.headers.get("content-length") || 0) > ATT_MAX_BYTES) return tooLarge();
+  let bytes: Uint8Array;
+  try {
+    // 没有 Content-Length（分块上传）也按上限边读边数，超了立刻停，不整块读进内存
+    bytes = await collectBody(req.body, ATT_MAX_BYTES);
+  } catch (e) {
+    console.warn(`⚠️ talk 图片上传超限或读取中断: ${(e as Error).message}`);
+    return tooLarge();
+  }
   rememberMe(me);
   const r = saveAtt(talkDb(), talkAttDir(), bytes, me.authorKey);
   if (!r.ok) {

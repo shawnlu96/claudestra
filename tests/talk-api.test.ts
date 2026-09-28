@@ -110,6 +110,19 @@ describe("权限矩阵", () => {
     expect((await api(guest("aa"), "PATCH", "/talk/people/local%3Aguest%3Abb", { displayName: "x" })).status).toBe(403);
     expect((await api(guest("aa"), "POST", "/talk/people/local%3Aguest%3Aa2/merge", { into: "local:guest:aa" })).status).toBe(403);
   });
+  test("上传：只收 png / jpeg / webp；超过上限 413（没有 Content-Length 的分块上传也边读边数）", async () => {
+    const svg = await api(guest("aa"), "POST", "/talk/atts", new TextEncoder().encode("<svg onload=alert(1)>"));
+    expect(svg.status).toBe(415);
+    const big = new ReadableStream<Uint8Array>({
+      start(c) {
+        for (let i = 0; i < 9; i++) c.enqueue(new Uint8Array(1024 * 1024));
+        c.close();
+      },
+    });
+    const url = new URL("http://x/api/v1/talk/atts");
+    const r = await handleLocalApi(new Request(url.toString(), { method: "POST", body: big, duplex: "half" } as RequestInit), url, guest("aa"));
+    expect(r?.status).toBe(413);
+  });
   test("删除只有作者或 owner", async () => {
     const m = (await post(owner, dm, "owner 写的")).json.message;
     expect((await api(guest("aa"), "DELETE", `/talk/rooms/${dm}/messages/${m.origin}/${m.id}`)).status).toBe(403);
