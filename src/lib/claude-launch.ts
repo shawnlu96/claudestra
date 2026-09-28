@@ -10,7 +10,8 @@
 import { pathOverrideAssignments } from "./paths.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
-import { isSandbox, sandboxMcpArgs } from "./sandbox.js";
+import { isSandbox } from "./sandbox.js";
+import { sandboxMcpArgs } from "./sandbox-env.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
 

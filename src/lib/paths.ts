@@ -22,8 +22,8 @@
 
 import { homedir } from "os";
 import { join } from "path";
-import { resolveBridgePort } from "./bridge-url.js";
-import { enforceSandboxProcess } from "./sandbox.js";
+import { resolveBridgeUrl } from "./bridge-url.js";
+import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 
 /** 某个 home 下的默认状态目录（不看 override）。给带 `home` 参数的纯函数用。 */
 export function stateDirIn(home: string): string {
@@ -38,7 +38,8 @@ function envDir(name: string): string | undefined {
 /** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR） */
 export const STATE_DIR = envDir("CLAUDESTRA_STATE_DIR") ?? stateDirIn(homedir());
 
-const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";
+/** 生产默认运行目录（不看 override）。沙箱脚本拿它当拒绝清单的一项 */
+export const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";
 
 /** /tmp/claude-orchestrator（或 CLAUDESTRA_RUNTIME_DIR） */
 export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_DIR;
@@ -46,7 +47,7 @@ export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_D
 // 沙箱进程（CLAUDESTRA_SANDBOX=1）在任何路径被用到之前过闸；非沙箱是空操作
 enforceSandboxProcess({
   env: process.env, stateDir: STATE_DIR, runtimeDir: RUNTIME_DIR,
-  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgePort: resolveBridgePort(),
+  defaultStateDir: stateDirIn(homedir()), defaultRuntimeDir: DEFAULT_RUNTIME_DIR, bridgeUrl: () => resolveBridgeUrl(),
 });
 
 /** 状态目录下的文件 */
@@ -84,7 +85,8 @@ export function pathOverrideAssignments(escape: (v: string) => string, env: Reco
 
 export function pathOverrideEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", "CLAUDESTRA_SANDBOX"]) {
+  // 沙箱的开关、根目录与生产拒绝清单也要跟着传给 agent，它的 hook / channel-server 才会按同一套规则拒绝生产
+  for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", SANDBOX_FLAG, SANDBOX_ROOT_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_DENY_DIRS_ENV]) {
     const v = (env[k] || "").trim();
     if (v) out[k] = v;
   }

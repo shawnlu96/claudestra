@@ -16,6 +16,7 @@ import { readdir, readFile } from "fs/promises";
 import { realpathSync } from "fs";
 import { join } from "path";
 import { tmuxRaw, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
+import { isSandbox } from "./sandbox.js";
 
 export interface CcSessionEntry {
   pid: number;
@@ -134,7 +135,8 @@ export function pickCcSessionForWindow(
   opts: { childPids: number[]; paneId?: string | null; cwd?: string; exclude?: string },
 ): CcSessionEntry | null {
   const byPid = entries.filter((e) => opts.childPids.includes(e.pid));
-  const byPane = opts.paneId
+  // 沙箱：登记里的 tmux 字段不带 socket，沙箱与生产两个 tmux server 的 pane 编号会撞，只认 pid
+  const byPane = opts.paneId && !isSandbox()
     ? entries.filter((e) => !byPid.includes(e) && e.tmux?.endsWith(`.${opts.paneId}`))
     : [];
   const cands = [...byPid, ...byPane].filter((e) => e.sessionId !== opts.exclude);

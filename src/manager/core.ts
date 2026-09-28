@@ -11,6 +11,7 @@ import { writeJsonAtomic } from "../lib/state-file.js";
 import { existsSync } from "fs";
 import { TMUX_SOCK as SOCK, MASTER_SESSION, AGENT_PREFIX, tmuxRaw } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
+import { assertSandboxRuntime, sandboxAgentDirProblem } from "../lib/sandbox.js";
 
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
 // ============================================================
@@ -154,6 +155,17 @@ export function normalizeName(raw: string): string {
  * 校验：只用于新建/resume。拒绝空白和 shell 元字符，防止命令注入。
  * 允许 CJK 等 Unicode 字符（Discord 频道名支持，tmux 也支持）。
  */
+/**
+ * create 的入口校验：名字合法；沙箱里 agent 只许建在沙箱根目录下、只许 Claude Code runtime（lib/sandbox.ts）。
+ * 非沙箱时与 assertValidNewName 完全一样。
+ */
+export function assertCreatable(name: string, dir: string, runtime: string | undefined): void {
+  assertValidNewName(name);
+  const dirProblem = sandboxAgentDirProblem(dir);
+  if (dirProblem) throw new Error(dirProblem);
+  assertSandboxRuntime(runtime || "claude-code");
+}
+
 export function assertValidNewName(raw: string): void {
   const cleaned = raw.replace(AGENT_PREFIX, "");
   if (cleaned.length === 0 || cleaned.length > 48) {

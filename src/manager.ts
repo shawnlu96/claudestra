@@ -99,7 +99,8 @@ import {
   rosterLine,
   type ProjectDef,
 } from "./lib/projects.js";
-import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
+import { isSandbox } from "./lib/sandbox.js";
+import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
 import { cmdPermissions } from "./manager/permissions.js";
@@ -485,7 +486,7 @@ async function cmdCreate(
   runtimeFlag?: string,
   piBaseFlag?: string,
 ) {
-  assertValidNewName(name);
+  assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱里另查目录与 runtime（manager/core.ts）
   // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
   // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
   let adapter: ManagedRuntimeAdapter;
@@ -1240,6 +1241,7 @@ async function selfWindowName(): Promise<string | null> {
 
 async function enforceSessionModel(name: string, model?: string): Promise<boolean> {
   if (!model?.trim()) return true;
+  if (isSandbox()) return false; // 沙箱：/model 会改写全局 settings.json，下面的「写回快照」也会，整段跳过（--model 启动参数照样生效）
   const target = windowTarget(name);
   const resolved = resolveModelAlias(model.trim());
   // 自守：绝不给发起者自己的窗口发键（见 selfWindowName 注释）。registry 已写，

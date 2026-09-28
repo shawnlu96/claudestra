@@ -1,6 +1,7 @@
 #!/bin/bash
 # 用量缓存落盘器(v2.20.2+,peer 建议 2026-08-27):读 stdin 的 Claude Code
-# statusline JSON,原子落盘 ~/.claude-orchestrator/usage-cache.json,**零输出**。
+# statusline JSON,原子落盘到状态目录的 usage-cache.json(默认 ~/.claude-orchestrator,
+# CLAUDESTRA_STATE_DIR 覆盖),**零输出**。
 #
 # 这是字段契约的**唯一实现**——自带 statusline 的用户不要手抄落盘段(peer 手抄
 # 漏掉 weekResets,看板静默缺半边,排查方向直接跑偏),在自己脚本末尾加一行即可,
@@ -43,7 +44,9 @@ has_ctx = bool(sid) and isinstance(cw, dict) and isinstance(cw.get("context_wind
 if five is None and week is None and not has_ctx:
     sys.exit(0)
 
-cache_dir = os.path.expanduser("~/.claude-orchestrator")
+# 状态目录跟 lib/paths.ts 同一口径:CLAUDESTRA_STATE_DIR 优先(沙箱 agent 的启动前缀带着它,
+# statusline 子进程继承;不认它 = 沙箱里每刷新一次状态栏就写一次生产的用量缓存)
+cache_dir = os.environ.get("CLAUDESTRA_STATE_DIR", "").strip() or os.path.expanduser("~/.claude-orchestrator")
 if not os.path.isdir(cache_dir):
     sys.exit(0)
 cache_path = os.path.join(cache_dir, "usage-cache.json")

@@ -7,9 +7,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
-  canonicalPath, isSandbox, outboundAllowed, sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems,
-  sandboxEnv, sandboxLayout, sandboxManagerRefusal, sandboxMcpArgs, sandboxStaticDirProblem, enforceSandboxBridgeEnv,
+  assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, outboundAllowed, sandboxAgentDirProblem,
+  sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem,
 } from "../src/lib/sandbox.js";
+import { productionDeny, sandboxEnv, sandboxLayout, sandboxManagerRefusal, sandboxMcpArgs } from "../src/lib/sandbox-env.js";
+import { pickCcSessionForWindow, type CcSessionEntry } from "../src/lib/cc-sessions.js";
+import { assertCreatable } from "../src/manager/core.js";
 import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "../src/lib/bridge-url.js";
 import { repoEnvVar } from "../src/lib/env-file.js";
 import { pathOverrideEnv } from "../src/lib/paths.js";
@@ -22,10 +25,12 @@ const ON = { CLAUDESTRA_SANDBOX: "1" };
 const P = DEFAULT_BRIDGE_PORT;
 
 describe("isSandbox", () => {
-  test("只认字面量 1", () => {
+  test("1 = 开，空 / 0 = 关，其余写法直接报错（不悄悄当成关）", () => {
     expect(isSandbox({})).toBe(false);
-    expect(isSandbox({ CLAUDESTRA_SANDBOX: "true" })).toBe(false);
+    expect(isSandbox({ CLAUDESTRA_SANDBOX: "0" })).toBe(false);
     expect(isSandbox({ CLAUDESTRA_SANDBOX: " 1 " })).toBe(true);
+    expect(() => isSandbox({ CLAUDESTRA_SANDBOX: "true" })).toThrow("不认识");
+    expect(() => isSandbox({ CLAUDESTRA_SANDBOX: "yes" })).toThrow("不认识");
   });
 });
 
@@ -61,7 +66,7 @@ describe("sandboxDirProblems", () => {
 
 describe("bridge 地址与 bridge 环境", () => {
   test("沙箱里的 bridge 地址必须是回环 + 非生产端口", () => {
-    expect(sandboxBridgeUrlProblem(`ws://localhost:${P}`, P)).toContain("生产默认端口");
+    expect(sandboxBridgeUrlProblem(`ws://localhost:${P}`, P)).toContain("生产端口");
     expect(sandboxBridgeUrlProblem("ws://10.0.0.2:23900", P)).toContain("回环");
     expect(sandboxBridgeUrlProblem("ws://127.0.0.1:23900", P)).toBeNull();
   });
@@ -104,13 +109,60 @@ describe("sandboxEnv", () => {
       PATH: "/bin", HOME: "/Users/x", BRIDGE_URL: `ws://localhost:${P}`, BRIDGE_PORT: String(P), DISCORD_CHANNEL_ID: "1",
       MCP_NAME: "claudestra", DISCORD_BOT_TOKEN: "t", RELAY_URL: "wss://r", CLAUDESTRA_STATE_DIR: "/prod", HTTPS_PROXY: "http://127.0.0.1:9",
     };
-    const env = sandboxEnv(base, { layout: sandboxLayout("/tmp/sbx"), port: 23900 });
+    const env = sandboxEnv(base, { layout: sandboxLayout("/tmp/sbx"), port: 23900, deny: { ports: [P, 3848], dirs: ["/p/state", "/p/run"] } });
     expect(env).toEqual({
       PATH: "/bin", HOME: "/Users/x", HTTPS_PROXY: "http://127.0.0.1:9",
-      CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_STATE_DIR: "/tmp/sbx/state", CLAUDESTRA_RUNTIME_DIR: "/tmp/sbx/run",
+      CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/tmp/sbx", CLAUDESTRA_SANDBOX_DENY_PORTS: `${P},3848`,
+      CLAUDESTRA_SANDBOX_DENY_DIRS: "/p/state:/p/run", CLAUDESTRA_STATE_DIR: "/tmp/sbx/state", CLAUDESTRA_RUNTIME_DIR: "/tmp/sbx/run",
       MASTER_DIR: "/tmp/sbx/master", BRIDGE_PORT: "23900", BRIDGE_URL: "ws://localhost:23900", BRIDGE_BIND: "127.0.0.1",
       HISTFILE: "/tmp/sbx/shell_history", ZDOTDIR: "/tmp/sbx/zdotdir", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "/tmp/sbx/bun-cache",
+      PYTHONDONTWRITEBYTECODE: "1",
     });
+  });
+});
+
+describe("生产改过的端口 / 目录", () => {
+  test("productionDeny：默认值 + plist / .env 里改过的端口与目录", () => {
+    const d = productionDeny(
+      [{ BRIDGE_PORT: "13847", PEER_INGRESS_PORT: "3848", WEB_PORT: "x" }, { CLAUDESTRA_STATE_DIR: "/srv/cs", MASTER_DIR: "rel/ignored" }],
+      { port: P, dirs: ["/home/x/.cs"] },
+    );
+    expect(d.ports.sort()).toEqual([13847, 3848, P].sort());
+    expect(d.dirs).toEqual(["/home/x/.cs", "/srv/cs"]);
+  });
+  test("拒绝清单里的端口与目录，和默认值一样被拒", () => {
+    const env = { ...ON, CLAUDESTRA_SANDBOX_DENY_PORTS: "13847", CLAUDESTRA_SANDBOX_DENY_DIRS: "/srv/cs", CLAUDESTRA_STATE_DIR: "x", CLAUDESTRA_RUNTIME_DIR: "y" };
+    expect(sandboxBridgeEnvProblems(P, { ...env, BRIDGE_PORT: "13847" }).join()).toContain("生产端口");
+    expect(() => resolveBridgeUrl({ ...env, BRIDGE_URL: "ws://localhost:13847" })).toThrow("生产端口");
+    const dirs = { env, stateDir: "/srv/cs/sbx", runtimeDir: "/tmp/sbx/run", defaultStateDir: "/Users/x/.cs", defaultRuntimeDir: "/tmp/co" };
+    expect(sandboxDirProblems(dirs).join()).toContain("/srv/cs");
+  });
+  test("BRIDGE_PORT 与 BRIDGE_URL 不一致 → 拒绝（出站白名单按 URL 放行）", () => {
+    const c = {
+      env: { ...ON, CLAUDESTRA_STATE_DIR: "x", CLAUDESTRA_RUNTIME_DIR: "y", BRIDGE_PORT: "23901" },
+      stateDir: "/tmp/sbx/state", runtimeDir: "/tmp/sbx/run", defaultStateDir: "/Users/x/.cs", defaultRuntimeDir: "/tmp/co",
+      bridgeUrl: () => "ws://localhost:23902",
+    };
+    expect(() => enforceSandboxProcess(c)).toThrow("不一致");
+  });
+});
+
+describe("沙箱 agent 的目录与 runtime", () => {
+  const env = { ...ON, CLAUDESTRA_SANDBOX_ROOT: "/tmp/sbx", HOME: "/Users/x" };
+  test("只许建在沙箱根目录下", () => {
+    expect(sandboxAgentDirProblem("/tmp/sbx/work", env)).toBeNull();
+    expect(sandboxAgentDirProblem("/tmp/sbx", env)).not.toBeNull();
+    expect(sandboxAgentDirProblem("/Users/x/repos/wt", env)).toContain("/tmp/sbx");
+    expect(sandboxAgentDirProblem("~/repos", env)).not.toBeNull();
+    expect(sandboxAgentDirProblem("/tmp/sbx/../elsewhere", env)).not.toBeNull();
+    expect(sandboxAgentDirProblem("/tmp/x", { ...ON })).toContain("CLAUDESTRA_SANDBOX_ROOT");
+    expect(sandboxAgentDirProblem("/anywhere", {})).toBeNull();
+  });
+  test("只许 Claude Code runtime", () => {
+    expect(() => assertSandboxRuntime("codex", env)).toThrow("Claude Code");
+    expect(() => assertSandboxRuntime("pi", env)).toThrow();
+    expect(() => assertSandboxRuntime("claude-code", env)).not.toThrow();
+    expect(() => assertSandboxRuntime("codex", {})).not.toThrow();
   });
 });
 
@@ -162,6 +214,26 @@ describe("沙箱关掉的 API 与动作", () => {
     const r = sandboxRouteGate(req, new URL(req.url));
     expect(r?.status).toBe(403);
     expect(((await r!.json()) as { sandbox: boolean }).sandbox).toBe(true);
+  });
+  test("manager create 的入口校验：沙箱里查目录与 runtime，非沙箱只查名字", () => {
+    delete process.env.CLAUDESTRA_SANDBOX;
+    expect(() => assertCreatable("a", "/anywhere", "codex")).not.toThrow();
+    Object.assign(process.env, { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/tmp/sbx" });
+    try {
+      expect(() => assertCreatable("a", "/elsewhere", undefined)).toThrow("沙箱 agent 必须建在");
+      expect(() => assertCreatable("a", "/tmp/sbx/work", "codex")).toThrow("Claude Code");
+      expect(() => assertCreatable("a", "/tmp/sbx/work", undefined)).not.toThrow();
+    } finally {
+      delete process.env.CLAUDESTRA_SANDBOX_ROOT;
+    }
+  });
+  test("会话认领：沙箱里只按 pid 认，不按 pane 编号（两个 tmux server 的 %N 会撞）", () => {
+    const e: CcSessionEntry = { pid: 99999, sessionId: "prod", cwd: "/w", tmux: "master:@1.%3" };
+    delete process.env.CLAUDESTRA_SANDBOX;
+    expect(pickCcSessionForWindow([e], { childPids: [], paneId: "%3" })?.sessionId).toBe("prod");
+    process.env.CLAUDESTRA_SANDBOX = "1";
+    expect(pickCcSessionForWindow([e], { childPids: [], paneId: "%3" })).toBeNull();
+    expect(pickCcSessionForWindow([e], { childPids: [99999], paneId: "%3" })?.sessionId).toBe("prod");
   });
   test("bg job 清理 / roster 根治、/model /effort 切换：沙箱里直接拒绝，不碰进程与文件", async () => {
     process.env.CLAUDESTRA_SANDBOX = "1";

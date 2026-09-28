@@ -8,6 +8,9 @@
  *   2. launchctl 一次都没被调；tmux 每次调用都走沙箱 socket；
  *   3. 出站请求 0 次：代理替身、中继替身都没收到请求，bridge 日志里也没有出站闸门拦截记录；
  *   4. bridge 只监听沙箱端口（有 lsof 时）；沙箱状态目录确实收到了写入（证明写入被重定向，而不是没发生）。
+ * agent 这一侧（有 tmux 时）：经沙箱 manager 真建一个 agent，`claude` 换成假 Claude Code（tests/sandbox-fake-claude.ts），
+ * 它照真的那样跑 settings.json 里的 hooks / statusLine、拉起 channel-server、写会话 jsonl、收消息回 pong。
+ * 假 home 里只许出现它自己写进 ~/.claude/projects 的会话文件（Claude Code 自身的写入，已知边界）。
  * 另测：绕过脚本、直接带着 Discord token / 中继地址起沙箱 bridge → 拒绝启动，同样零写入零出站。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -16,6 +19,7 @@ import { createHash } from "crypto";
 import { join, resolve } from "path";
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox.js";
+import { fakeClaudeSource } from "./sandbox-fake-claude.js";
 
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
@@ -63,8 +67,20 @@ function seedFakeHome(): void {
   writeFileSync(join(st, "peers.json"), JSON.stringify({ httpPeers: [{ name: "prod-peer", url: "https://peer.example.com", token: "t" }] }));
   writeFileSync(join(st, "config.json"), "{}");
   mkdirSync(join(home, ".claude", "projects", "-prod"), { recursive: true });
-  writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ model: "opus", hooks: {} }));
+  // 与真实安装相同的全局配置：hooks 与 statusLine 指向本仓库（合并后就是生产跑的那份）
+  const typing = [{ matcher: "", hooks: [{ type: "command", command: `${BUN} ${join(REPO, "src", "hooks", "typing-hook.ts")}` }] }];
+  writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({
+    model: "opus",
+    hooks: {
+      Stop: typing, StopFailure: typing, Notification: typing,
+      SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: `${BUN} ${join(REPO, "src", "hooks", "recall-hook.ts")}` }] }],
+    },
+    statusLine: { type: "command", command: join(REPO, "scripts", "statusline-usage.sh") },
+  }));
   writeFileSync(join(home, ".claude", "projects", "-prod", "s.jsonl"), "{}\n");
+  // 用户 rc 把自己的 bin 放 PATH 最前（真实用户靠它找到 claude）；login shell 的 path_helper 之后 .zshrc 再垫一次
+  const rc = `export PATH="${join(tmp, "shim")}:$PATH"\n`;
+  for (const f of [".zshenv", ".zshrc", ".bashrc", ".profile"]) writeFileSync(join(home, f), rc);
 }
 
 /** 记账 shim：记下 argv；tmux 透传真 tmux（沙箱 socket 上的真实行为），其余一律失败退出 */
@@ -76,7 +92,9 @@ function writeShims(dir: string): void {
     chmodSync(p, 0o755);
   };
   shim("tmux", REAL_TMUX ? `exec '${REAL_TMUX}' "$@"` : "exit 1");
-  for (const n of ["launchctl", "claude", "codex", "pi", "npm", "curl", "open", "osascript", "tailscale"]) shim(n, "exit 1");
+  for (const n of ["launchctl", "codex", "pi", "npm", "curl", "open", "osascript", "tailscale"]) shim(n, "exit 1");
+  writeFileSync(join(dir, "claude"), fakeClaudeSource(BUN, join(tmp, "fake-claude.log")));
+  chmodSync(join(dir, "claude"), 0o755);
 }
 
 function callerEnv(): Record<string, string> {
@@ -119,6 +137,13 @@ async function freePort(): Promise<number> {
   throw new Error("找不到空闲端口");
 }
 
+/** 进程当前打开的文件路径（有 lsof 时）：用来断言沙箱 bridge 没开着任何生产目录里的文件 */
+function openFiles(pid: number): string[] | null {
+  if (!Bun.which("lsof")) return null;
+  const r = Bun.spawnSync(["lsof", "-p", String(pid), "-Fn"], { stdout: "pipe" });
+  return r.stdout.toString().split("\n").filter((l) => l.startsWith("n/")).map((l) => l.slice(1));
+}
+
 function listeningPorts(pid: number): number[] | null {
   if (!Bun.which("lsof")) return null;
   const r = Bun.spawnSync(["lsof", "-a", "-p", String(pid), "-iTCP", "-sTCP:LISTEN", "-nP", "-Fn"], { stdout: "pipe" });
@@ -137,10 +162,43 @@ async function exercise(): Promise<void> {
   ws.close();
   const list = sandbox("manager", "list");
   expect(list.code).toBe(0);
+  expect(list.out).not.toContain(OUTBOUND_BLOCKED_MARK); // manager 子进程也没试图出站
   // 被拒绝的动作：manager 白名单外、API 拒绝表（无 token 时 401 也算没做成）
   expect(sandbox("manager", "install-cli").code).not.toBe(0);
   expect((await fetch(`${base}/api/v1/update`, { method: "POST" })).ok).toBe(false);
   await Bun.sleep(4000); // 等 bridge 启动后 3s 的 project-migrate 等延迟任务跑完
+}
+
+async function until(what: string, check: () => boolean, ms = 30_000): Promise<void> {
+  for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(300)) if (check()) return;
+  throw new Error(`等不到：${what}`);
+}
+
+/** agent 侧：真建一个沙箱 agent（claude = 假 Claude Code），经 API 收发一条消息，hooks / statusLine / 会话发现都走一遍 */
+async function agentSide(): Promise<void> {
+  const flog = () => (existsSync(join(tmp, "fake-claude.log")) ? readFileSync(join(tmp, "fake-claude.log"), "utf8") : "");
+  const blog = () => readFileSync(join(root, "bridge.log"), "utf8");
+  const created = sandbox("manager", "create", "sbxt", join(root, "work"), "隔离测试");
+  const info = JSON.parse(created.out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as { ok?: boolean; channelId?: string };
+  expect(info.ok, `${created.out}\n${flog()}`).toBe(true);
+  await until("channel-server 注册到沙箱 bridge", () => blog().includes(`注册频道: ${info.channelId}`));
+  await until("bridge 发现会话 jsonl", () => blog().includes("开始监听: agent-sbxt"));
+  const tok = sandbox("manager", "token-add", "dev", "--agents", "*", "--force");
+  const secret = (JSON.parse(tok.out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as { secret?: string }).secret;
+  const r = await fetch(`http://127.0.0.1:${port}/api/v1/agents/agent-sbxt/messages`, {
+    method: "POST", headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" }, body: JSON.stringify({ text: "ping", wait: 20 }),
+  });
+  expect(((await r.json()) as { reply?: string }).reply, flog()).toBe("pong");
+  await until("Stop hook 打到沙箱 bridge", () => blog().includes(`Hook 收到 Stop: channel=${info.channelId}`));
+  expect(flog()).toContain("strict=true");
+  expect(flog()).not.toMatch(/code=[1-9]/); // SessionStart / statusLine / Stop 都正常退出
+  // statusLine 的用量缓存落在沙箱状态目录，生产的没出现
+  expect(existsSync(join(root, "state", "usage-cache.json"))).toBe(true);
+  expect(existsSync(join(home, ".claude-orchestrator", "usage-cache.json"))).toBe(false);
+  // 沙箱根目录外建 agent、非 Claude Code runtime：拒绝
+  expect(sandbox("manager", "create", "bad", tmp).out).toContain("沙箱 agent 必须建在");
+  expect(sandbox("manager", "create", "bad2", join(root, "work"), "--runtime", "codex").code).not.toBe(0);
+  expect(sandbox("manager", "kill", "sbxt").code).toBe(0);
 }
 
 beforeAll(async () => {
@@ -174,6 +232,9 @@ describe("沙箱 bridge 无副作用", () => {
     if (ports) expect(ports.every((p) => p === port), `监听端口 ${ports}`).toBe(true);
     expect(port).not.toBe(DEFAULT_BRIDGE_PORT);
     await exercise();
+    if (REAL_TMUX) await agentSide();
+    const open = openFiles(pid);
+    if (open) expect(open.filter((f) => f.includes("claude-orchestrator"))).toEqual([]);
 
     expect(sandbox("down").code).toBe(0);
     const again = sandbox("up");
@@ -181,7 +242,9 @@ describe("沙箱 bridge 无副作用", () => {
     await exercise();
     expect(sandbox("down").code).toBe(0);
 
-    expect(diff(before, snapshot(home))).toEqual([]);
+    // 唯一允许的改动：假 Claude Code 自己写的会话 jsonl（~/.claude/projects 下，Claude Code 自身的写入）
+    const projects = join(home, ".claude", "projects");
+    expect(diff(before, snapshot(home)).filter((c) => !c.startsWith(`新 ${projects}/`) && c !== `改 ${projects}/`)).toEqual([]);
 
     const calls = readFileSync(shimLog, "utf8").split("\n").filter(Boolean);
     expect(calls.filter((c) => c.startsWith("launchctl"))).toEqual([]);
@@ -209,7 +272,7 @@ describe("沙箱 bridge 无副作用", () => {
       ["DISCORD_BOT_TOKEN", { DISCORD_BOT_TOKEN: "decoy-token" }],
       ["RELAY_URL", { RELAY_URL: `ws://127.0.0.1:${decoy!.port}` }],
       ["CLAUDESTRA_STATE_DIR", { CLAUDESTRA_STATE_DIR: "" }],
-      ["BRIDGE_PORT", { BRIDGE_PORT: String(DEFAULT_BRIDGE_PORT) }],
+      ["生产端口", { BRIDGE_PORT: String(DEFAULT_BRIDGE_PORT) }],
     ];
     for (const [want, extra] of cases) {
       const r = Bun.spawnSync([BUN, "--no-env-file", join(REPO, "src", "bridge.ts")], {
@@ -224,6 +287,27 @@ describe("沙箱 bridge 无副作用", () => {
     expect(existsSync(stateDir)).toBe(false);
     expect(hits).toEqual({ proxy: [], decoy: [] });
   }, 90_000);
+
+  test("出站闸门：沙箱进程里 fetch 与 WebSocket 连非自己端口（含回环上的其它端口）都被拦，替身零请求", async () => {
+    const before = hits.decoy.length;
+    const code = `
+      await import(${JSON.stringify(join(REPO, "src", "lib", "paths.ts"))});
+      const out = [];
+      try { await fetch("http://127.0.0.1:${decoy!.port}/x"); out.push("fetch-through"); } catch { out.push("fetch-blocked"); }
+      try { new WebSocket("ws://127.0.0.1:${decoy!.port}/"); out.push("ws-through"); } catch { out.push("ws-blocked"); }
+      console.log(out.join(","));`;
+    const p = Bun.spawn([BUN, "--no-env-file", "-e", code], {
+      cwd: tmp, stdout: "pipe", stderr: "pipe",
+      env: { PATH: process.env.PATH ?? "", HOME: home, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", CLAUDESTRA_SANDBOX: "1", BRIDGE_PORT: "23999",
+        BRIDGE_URL: "ws://localhost:23999", CLAUDESTRA_STATE_DIR: join(tmp, "g", "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "g", "run") },
+    });
+    const [out, err] = [await new Response(p.stdout).text(), await new Response(p.stderr).text()];
+    await p.exited;
+    expect(out.trim(), err).toBe("fetch-blocked,ws-blocked");
+    expect(err).toContain(OUTBOUND_BLOCKED_MARK);
+    await Bun.sleep(200);
+    expect(hits.decoy.length).toBe(before);
+  }, 30_000);
 
   test("全局注册的 Stop hook：沙箱 agent 按 BRIDGE_URL 打到沙箱端口；拿到生产地址就报错退出、不发请求", async () => {
     const got: string[] = [];
