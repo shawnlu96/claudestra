@@ -13,6 +13,7 @@ import { findAnchor, isRestricted, mediaRow, queryAround, queryMedia, type Media
 import { openLoc } from "../../lib/media-store.js";
 import { convertedImage } from "../../lib/media-thumb.js";
 import { agentInScope, type Principal } from "../../lib/principals.js";
+import { isMasterName } from "../../lib/registry.js";
 import { apiJson } from "../api-respond.js";
 import { attachmentDirs } from "./attachments.js";
 import { awaitRefresh, listAgents, mediaDb, mediaPaths, recoverIfCorrupt, refreshMedia, type AgentInfo } from "./media-refresh.js";
@@ -23,12 +24,12 @@ const CACHE = "private, max-age=3600";
 
 /**
  * 调用方 scope 内的 agent；指定了 agent 就只要它（不在 scope → null = 403）。
- * master 的写法与 api-respond.inScopeEitherName 一致：去掉任意层 agent- 前缀后是 master、或网页会话名 __master__ 都算 master。
+ * master 的写法按 registry.isMasterName（大小写、全角、多层 agent- 前缀、网页会话名 __master__），与其他 /api/v1 路由同一口径。
  */
 async function scopedAgents(principal: Principal, want: string | null): Promise<AgentInfo[] | null> {
   const all = (await listAgents()).filter((a) => agentInScope(principal, a.name));
   if (!want) return all;
-  const name = want === "__master__" || want.replace(/^(agent-)+/, "") === "master" ? "master" : want;
+  const name = isMasterName(want) ? "master" : want;
   const hit = all.find((a) => a.name === name || a.name === `agent-${name}`);
   return hit ? [hit] : null;
 }

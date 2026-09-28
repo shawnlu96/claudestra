@@ -200,7 +200,7 @@ describe("P0：只有 bridge 写的头属性是可信绑定", () => {
     expect((await list("agent=collide")).items.every((i: any) => i.available)).toBe(true); // owner 照常能看
   });
   test("大总管的各种写法：全权 owner 放行，guest（哪怕 *）一律 403（adv1 P2-4）", async () => {
-    for (const a of ["master", "agent-master", "agent-agent-master", "__master__"]) {
+    for (const a of ["master", "agent-master", "agent-agent-master", "__master__", "Master", "AGENT-Master", "ｍａｓｔｅｒ"]) {
       expect((await get(`/media?agent=${a}`)).status).toBe(200);
       expect((await get(`/media?agent=${a}`, { ...GUEST, agents: ["*"] })).status).toBe(403);
     }
