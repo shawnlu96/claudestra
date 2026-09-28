@@ -130,6 +130,11 @@ describe("keepOnResume / repointParentRefs", () => {
     expect(reg.agents["agent-c1"].parent).toBe("agent-new");
     expect(reg.agents["agent-c2"].parent).toBe("agent-other");
   });
+  test("kill 后同名重建（create 覆盖已停止的条目）：旧子 agent 不认新 agent 作父", () => {
+    const reg: Registry = { socket: "", agents: { "agent-x": info({ status: "stopped" }), "agent-oldkid": info({ parent: "agent-x", task: "旧任务" }) } };
+    repointParentRefs(reg, "agent-x"); // cmdCreate 写新条目前的同一调用
+    expect("parent" in reg.agents["agent-oldkid"]).toBe(false);
+  });
   test("remove：清掉指向被删 agent 的 parent（键本身删掉），别的不动", () => {
     const reg: Registry = { socket: "", agents: { "agent-c1": info({ parent: "agent-gone", task: "T" }), "agent-c2": info({ parent: "agent-other" }) } };
     repointParentRefs(reg, "agent-gone");

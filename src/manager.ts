@@ -434,6 +434,7 @@ async function buildProjectContext(proj: ProjectDef, selfTmuxName: string): Prom
       ? `同项目 agent: ${mates.join("、")}——跨仓/跨职责协作用 send_to_agent 找它们,也可用 project_info 工具随时查项目成员与目录。`
       : `目前项目里只有你一个 agent(project_info 工具可随时查最新成员)。`,
   );
+  parts.push(`派活给新建的执行者时用 claudestra create <名> <目录> --task "<任务名>",它会自动挂到你名下(侧栏显示在你下面)。`);
   return parts.join(" ");
 }
 
@@ -642,6 +643,7 @@ async function cmdCreate(
 
   // 6. 更新 registry（只有启动成功才落盘）
   const reg = await loadRegistry();
+  if (reg.agents[tmuxName]) (await import("./manager/team.js")).repointParentRefs(reg, tmuxName); // kill 后同名重建：旧子 agent 不认新 agent 作父
   reg.agents[tmuxName] = {
     project: dir,
     projectId: proj.id,
@@ -3496,6 +3498,7 @@ switch (cmd) {
         "resume <name> <sessionId> [dir] — resume a past session",
         "kill <name>                     — destroy an agent",
         "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel)",
+        'team-link <name> [--parent <agent|master|none>] [--task "<text>"] — attach an agent under its dispatcher (sidebar tree)',
         "restart [name]                  — restart an agent (all agents if omitted)",
         "list                            — list all agents",
         "sessions [search]               — browse past Claude Code sessions",
