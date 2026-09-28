@@ -5,7 +5,7 @@
  *   - 子进程只拿最小环境（HOME / USER / LOGNAME / PATH）：bridge 的环境里有 DISCORD_BOT_TOKEN 等，
  *     不该继承给任何外部程序。security 在这份最小环境下能否找到登录钥匙串**未在真机确认**（T2b-2 接线时测）。
  *   - 超时 5 秒或输出超过上限 → SIGKILL 并 await exited：不能只让 Promise 超时、留下进程和授权框。
- *   - spawn 同步抛错（ENOENT / EMFILE）→ 当作 error，不冒泡。
+ *   - spawn 同步抛错（ENOENT / EMFILE）或读管道出错 → 当作 error，不冒泡；后者同样杀掉并回收进程。
  * 单测 tests/quota-keychain.test.ts（只跑 sleep / printf / yes / env，不碰 security）。
  */
 
@@ -90,7 +90,16 @@ export async function runWithTimeout(argv: string[], timeoutMs: number, spawn: S
       overflow = true;
       kill();
     };
-    const [stdout, stderr] = await Promise.all([readStreamCapped(proc.stdout, OUTPUT_CAP, onOverflow), readStreamCapped(proc.stderr, OUTPUT_CAP, onOverflow)]);
+    let stdout: string | null;
+    let stderr: string | null;
+    try {
+      [stdout, stderr] = await Promise.all([readStreamCapped(proc.stdout, OUTPUT_CAP, onOverflow), readStreamCapped(proc.stderr, OUTPUT_CAP, onOverflow)]);
+    } catch {
+      // 读管道出错：进程照样杀掉并回收，不留下进程和授权框；原文不外传
+      kill();
+      await proc.exited.catch(() => null); // 只为等它退出，退出码已经不重要
+      return { code: null, stdout: "", stderr: "", timedOut };
+    }
     const code = await proc.exited;
     if (timedOut || overflow || stdout === null || stderr === null) return { code: null, stdout: "", stderr: "", timedOut };
     return { code, stdout, stderr: stderr.slice(0, 512), timedOut };

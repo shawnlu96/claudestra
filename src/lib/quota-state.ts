@@ -62,7 +62,7 @@ export interface QuotaState {
 }
 
 export function emptyQuotaState(): QuotaState {
-  return { v: 1, current: {}, accounts: {}, credHealth: {}, reminders: emptyLedger() };
+  return { v: 1, current: {}, accounts: Object.create(null), credHealth: {}, reminders: emptyLedger() };
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -78,8 +78,11 @@ const numOrNull = (v: unknown) => v === null || num(v);
 const strOrNull = (v: unknown) => v === null || typeof v === "string";
 const PROVIDERS = new Set(["claude", "codex"]);
 const ENDPOINTS = new Set(["claude_usage", "codex_usage", "codex_reset_credits"]);
+/** 原型链上的名字当键会让 st.accounts[key] 取到 Object.prototype，读回时一律丢掉 */
+const RESERVED = new Set(["__proto__", "constructor", "prototype"]);
+const safeKey = (k: unknown): k is string => typeof k === "string" && k.length > 0 && k.length <= 128 && !RESERVED.has(k);
 const keep = <T>(o: unknown, ok: (k: string, v: unknown) => boolean): Record<string, T> =>
-  isObj(o) ? (Object.fromEntries(Object.entries(o).filter(([k, v]) => ok(k, v))) as Record<string, T>) : {};
+  isObj(o) ? (Object.fromEntries(Object.entries(o).filter(([k, v]) => safeKey(k) && ok(k, v))) as Record<string, T>) : {};
 
 function validHealth(h: unknown): boolean {
   if (!isObj(h)) return false;
@@ -121,15 +124,15 @@ function validNotice(n: unknown): boolean {
 /** 从磁盘读回的状态逐层过一遍：形状不对的那一块丢掉，其余照用（外层不对就整份按空） */
 export function normalizeQuotaState(v: unknown): QuotaState {
   if (!isQuotaState(v)) return emptyQuotaState();
-  const accounts: Record<string, AccountState> = {};
+  const accounts: Record<string, AccountState> = Object.create(null);
   for (const [k, a] of Object.entries(v.accounts)) {
-    const n = normalizeAccount(a);
+    const n = safeKey(k) ? normalizeAccount(a) : null;
     if (n) accounts[k] = n;
   }
   const r = v.reminders as unknown as Record<string, unknown>;
   return {
     v: 1,
-    current: keep(v.current, (p, k) => PROVIDERS.has(p) && strOrNull(k)),
+    current: keep(v.current, (p, k) => PROVIDERS.has(p) && (k === null || safeKey(k))),
     accounts,
     credHealth: keep(v.credHealth, (p, c) => PROVIDERS.has(p) && isObj(c) && typeof c.code === "string" && num(c.at) && numOrNull(c.until)),
     reminders: {
@@ -150,7 +153,8 @@ const ACCOUNT_TTL_MS = 30 * 24 * 3600_000;
 
 export function pruneAccounts(s: QuotaState, now: number): QuotaState {
   const current = new Set(Object.values(s.current).filter((k): k is string => !!k));
-  const accounts = Object.fromEntries(Object.entries(s.accounts).filter(([k, a]) => current.has(k) || now - a.lastSeenAt < ACCOUNT_TTL_MS));
+  const accounts: Record<string, AccountState> = Object.create(null);
+  for (const [k, a] of Object.entries(s.accounts)) if (current.has(k) || now - a.lastSeenAt < ACCOUNT_TTL_MS) accounts[k] = a;
   return { ...s, accounts };
 }
 

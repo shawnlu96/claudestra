@@ -296,27 +296,47 @@ export class QuotaScheduler {
     this.inflight.clear();
   }
 
-  private async due(endpoint: QuotaEndpoint, interval: number, now: number): Promise<boolean> {
+  /** 超期多久（ms）：负数 = 还没到期；从没查过 = Infinity */
+  private async overdue(endpoint: QuotaEndpoint, interval: number, now: number): Promise<number> {
     const st = await this.load();
     const key = st.current[QUOTA_ENDPOINTS[endpoint].provider];
     const acct = key ? st.accounts[key] : undefined;
     const h = acct?.health[endpoint];
     const last = Math.max(acct?.snapshots[endpoint]?.observedAt ?? -Infinity, h?.lastAttemptAt ?? -Infinity, h?.credCheckedAt ?? -Infinity);
-    return now - last >= interval;
+    return now - last - interval;
   }
 
-  /** 定时器每次调一次（T2b-2 起定时器）。有人看 → 两家额度 + 明细；没人看 → 只查 Codex 重置明细 */
+  /**
+   * Codex 的两个端点共用同家 60 秒间隔：一个 tick 只跑超期最久的那个，另一个下个 tick 再轮到。
+   * 固定先查额度的话，定时器间隔 ≥ 5 分钟时明细每次都紧跟着撞上间隔，永远拉不到。
+   */
+  private async tickCodex(plan: [QuotaEndpoint, number][], reason: RefreshReason, wake: boolean, now: number): Promise<void> {
+    let best: { e: QuotaEndpoint; by: number } | null = null;
+    for (const [e, interval] of plan) {
+      const by = await this.overdue(e, interval, now);
+      if ((wake || by >= 0) && (!best || by > best.by)) best = { e, by };
+    }
+    if (best) await this.run(best.e, reason);
+  }
+
+  /** 定时器每次调一次（T2b-2 起定时器）。有人看 → 两家额度 + 明细；没人看 → 只查 Codex 重置明细。自己兜底，不向定时器抛 */
   async tick(opts: { viewing: boolean }): Promise<void> {
     const now = this.deps.now();
     const wake = this.lastTickAt !== null && now - this.lastTickAt > QUOTA_TIMING.wakeGapMs;
     this.lastTickAt = now;
     if (!this.deps.isEnabled()) return;
     const T = QUOTA_TIMING;
-    if (opts.viewing) {
-      for (const p of PROVIDERS) if (wake || (await this.due(usageEndpoint(p), T.viewIntervalMs, now))) await this.refresh(p, wake ? "wake" : "view");
-      if (wake || (await this.due("codex_reset_credits", T.detailViewIntervalMs, now))) await this.refreshResetCredits(wake ? "wake" : "view");
-    } else if (wake || (await this.due("codex_reset_credits", T.detailBackgroundIntervalMs, now))) {
-      await this.refreshResetCredits(wake ? "wake" : "background");
+    try {
+      if (opts.viewing) {
+        const reason = wake ? "wake" : "view";
+        if (wake || (await this.overdue("claude_usage", T.viewIntervalMs, now)) >= 0) await this.refresh("claude", reason);
+        await this.tickCodex([["codex_usage", T.viewIntervalMs], ["codex_reset_credits", T.detailViewIntervalMs]], reason, wake, now);
+      } else {
+        await this.tickCodex([["codex_reset_credits", T.detailBackgroundIntervalMs]], wake ? "wake" : "background", wake, now);
+      }
+    } catch (e) {
+      const errno = (e as NodeJS.ErrnoException | null)?.code;
+      console.error(`[quota] tick 出错（${typeof errno === "string" ? errno : "unknown"}），等下一个 tick`);
     }
   }
 

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { confirmCredential, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential } from "../src/lib/quota-credentials.js";
 import { planExpiryReminder } from "../src/lib/quota-reminder-rules.js";
 import { applyFailure, backoffMs, QUOTA_TIMING, QuotaScheduler } from "../src/lib/quota-scheduler.js";
-import { emptyQuotaState, fileQuotaStore, memoryQuotaStore, pruneAccounts, type QuotaStore } from "../src/lib/quota-state.js";
+import { emptyQuotaState, fileQuotaStore, memoryQuotaStore, normalizeQuotaState, pruneAccounts, type QuotaStore } from "../src/lib/quota-state.js";
 import {
   SECRET,
   T0,
@@ -414,6 +414,24 @@ describe("tick 节奏", () => {
     expect(h.cd.keychainCalls).toHaveLength(0);
   });
 
+  test.each([5, 10, 16])("有人看、定时器每 %i 分钟一次：12 小时里重置明细不被额度查询饿死", async (every) => {
+    const h = harness();
+    for (let t = 0; t < 12 * 60; t += every) {
+      await h.scheduler.tick({ viewing: true });
+      h.advance(every * MIN);
+    }
+    const urls = urlsOf(h);
+    expect(urls.filter((u) => u === "rate-limit-reset-credits").length).toBeGreaterThanOrEqual(10);
+    expect(urls.filter((u) => u === "usage").length).toBeGreaterThanOrEqual(12 * 60 / Math.max(every, 5) / 2);
+  });
+
+  test("tick 自己兜底：内部出错不向定时器抛", async () => {
+    const store: QuotaStore = { load: async () => { throw new Error("EIO"); }, save: async () => {} };
+    const h = harness(okRoutes, store);
+    await h.scheduler.tick({ viewing: true });
+    await h.scheduler.tick({ viewing: false });
+  });
+
   test("睡眠唤醒（两次 tick 间隔远超节奏）→ 立刻重查", async () => {
     const h = harness();
     await h.scheduler.tick({ viewing: false });
@@ -476,5 +494,29 @@ describe("出错不冒泡、写盘串行、重试不白按", () => {
     const [plain, retry] = await Promise.all([h.scheduler.refresh("codex", "view"), h.scheduler.refresh("codex", "user_retry")]);
     expect(plain.status).toBe("skipped_paused");
     expect(retry.status).toBe("fetched");
+  });
+});
+
+describe("状态文件里的原型链键", () => {
+  test("current / 账户键是 __proto__、constructor：读回时丢掉，view() 与 tick() 不抛", async () => {
+    const raw = JSON.parse(
+      '{"v":1,"current":{"codex":"__proto__","claude":"constructor"},"credHealth":{},' +
+        '"accounts":{"__proto__":{"provider":"codex","identity":"bound","uncertain":false,"rateLimitedUntil":null,"lastSeenAt":1,"snapshots":{},"health":{}},' +
+        '"constructor":{"provider":"claude","identity":"assumed","uncertain":false,"rateLimitedUntil":null,"lastSeenAt":1,"snapshots":{},"health":{}}},' +
+        '"reminders":{"credits":{},"exhausted":{},"outbox":[]}}',
+    );
+    const h = harness(okRoutes, { load: async () => structuredClone(raw), save: async () => {} } as QuotaStore);
+    const s = new QuotaScheduler({
+      now: () => h.now, random: () => 0.5, fetch: h.fetch,
+      readCredential: (p) => (p === "claude" ? readClaudeCredential(h.cd) : readCodexCredential(h.cd)),
+      peekAccountKey: (p) => peekAccountKey(p, h.cd), confirmCredential: (c) => confirmCredential(c, h.cd),
+      hashCreditId: (a, id) => hmacHex(SECRET, a, id), isEnabled: () => true,
+      store: { load: async () => normalizeQuotaState(structuredClone(raw)), save: async () => {} },
+    });
+    const v = await s.view();
+    expect(v.codex.account).toBeNull();
+    expect(v.claude.account).toBeNull();
+    await s.tick({ viewing: true });
+    expect((await s.view()).codex.account).not.toBeNull();
   });
 });

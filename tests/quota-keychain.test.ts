@@ -45,6 +45,24 @@ describe("子进程回收", () => {
     expect(await spawnKeychainReader({ spawn: boom })("svc")).toEqual({ status: "error" });
   });
 
+  test("读管道出错：照样 SIGKILL，并等进程退出后才返回", async () => {
+    const events: string[] = [];
+    let exit!: (n: number) => void;
+    const exited = new Promise<number>((r) => (exit = r));
+    const broken: SpawnFn = () => ({
+      stdout: new ReadableStream({ pull: (c) => c.error(new Error("EPIPE secret")) }),
+      stderr: new ReadableStream({ start: () => {} }),
+      exited: exited.then((n) => (events.push("exited"), n)),
+      kill: (sig) => {
+        events.push(`kill:${sig}`);
+        setTimeout(() => exit(137), 10);
+      },
+    });
+    const r = await runWithTimeout(["x"], 5000, broken);
+    expect(r).toEqual({ code: null, stdout: "", stderr: "", timedOut: false });
+    expect(events).toEqual(["kill:SIGKILL", "exited"]);
+  });
+
   test("正常收 stdout 与退出码", async () => {
     expect(await runWithTimeout(["printf", "hello"], 5000)).toEqual({ code: 0, stdout: "hello", stderr: "", timedOut: false });
   });
