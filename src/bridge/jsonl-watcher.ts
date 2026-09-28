@@ -560,10 +560,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
               // "收到" 这种合法短回复也吞掉。现在 rescue 删了 → watcher 是唯一
               // 文字出口，任何 trim 后非空的 text 都要推出来。
               const t = block.text.trim();
-              // Claude Code 把 rate-limit 命中的提示当 assistant text 写进 jsonl，
-              // 像 "You've hit your limit · resets 2am (Asia/Shanghai)"（新版是 session / weekly limit）。不应该按
-              // 常规 💬 发（会让 agent 看着像正常输出），换成 ⛔ 标记 + 置 flag
-              // 让后面的 turn_duration 也跳过。
+              // 撞额度的提示（"You've hit your limit · resets 2am (Asia/Shanghai)"）按 ⛔ 发、不按 💬（会像 agent 的正常输出），
+              // 置 flag 让后面那条 turn_duration 也跳过。
               if (isLimitHitText(t)) { // weekly / session / usage 各种写法（lib/quota-wall-text.ts）
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
@@ -590,6 +588,8 @@ async function processNewData(state: WatcherState, discord: Client): Promise<voi
 
         if (entry.type === "user") {
           const content = entry.message?.content;
+          // 新一轮的用户提示（不是 tool_result）：上一轮的 API 错误标记作废，否则正常结束的这一轮会被当成出错不结算
+          if (!Array.isArray(content) || !content.some((b) => b?.type === "tool_result")) state.apiErrorTurn = false;
           if (!Array.isArray(content)) continue;
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {

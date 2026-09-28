@@ -13,10 +13,14 @@ describe("isLimitHitText", () => {
     expect(isLimitHitText("You've hit your session limit · resets 10:40pm (Asia/Tokyo)")).toBe(true);
     expect(isLimitHitText("You've hit your limit · resets 2am (Asia/Shanghai)")).toBe(true);
     expect(isLimitHitText("You’ve hit your usage limit. Upgrade to Pro or try again at 8:41 AM.")).toBe(true);
+    // 单个模型的额度（本机 48 条实录，error 也是 rate_limit）
+    expect(isLimitHitText("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.")).toBe(true);
+    expect(isLimitHitText("You've reached your Fable 5 limit. Run /usage-credits to continue or switch models with /model.")).toBe(true);
   });
 
   test("临时 429 限流、别处引用这句、普通文字都不算", () => {
     expect(isLimitHitText("API Error: 429 This request would exceed your account's rate limit. Please try again later.")).toBe(false);
+    expect(isLimitHitText("API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited")).toBe(false);
     expect(isLimitHitText("现场：CC 回的是 You've hit your weekly limit · resets Sep 30")).toBe(false);
     expect(isLimitHitText("收到，接着做")).toBe(false);
   });
@@ -52,6 +56,13 @@ describe("parseWallText", () => {
   test("没写重置时间 / 认不出：resetsAt = null，种类照认", () => {
     expect(parseWallText("You've hit your weekly limit", Date.now())).toEqual({ kind: "weekly", resetsAt: null, resetsText: null });
     expect(parseWallText("You've hit your session limit · resets soon", Date.now())!.resetsAt).toBeNull();
+  });
+
+  test("单个模型的额度（Fable / Opus）不算整机撞墙 → null；显示照样按 ⛔", () => {
+    expect(parseWallText("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.", Date.now())).toBeNull();
+    expect(parseWallText("You've reached your Fable 5 limit. Run /usage-credits to continue.", Date.now())).toBeNull();
+    expect(parseWallText("You've hit your Opus limit · resets 3pm", Date.now())).toBeNull();
+    expect(parseWallText("You've hit your usage limit.", Date.now())!.kind).toBe("unknown");
   });
 
   test("不是撞墙原文 → null", () => {

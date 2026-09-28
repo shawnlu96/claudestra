@@ -2,12 +2,16 @@
  * Stop hook 里 send_to_agent 回程的兜底结算（从 bridge.ts 搬出、依赖注入，单测 tests/stop-settle.test.ts）：
  * target 这一轮没调 reply() 就结束了，拿 drain 出来的 assistant 文字推回 caller（没文字就静默消化）。
  *
- * 以 API 错误结束的一轮（StopFailure，或最后一条 assistant 是 isApiErrorMessage——额度墙也是）不结算：那句错误不是答复。
+ * 以 API 错误结束的一轮（Claude Code 的 StopFailure，或最后一条 assistant 是 isApiErrorMessage——额度墙也是）不结算：那句错误不是答复。
+ * Codex 的 StopFailure 不是这个意思，照常结算：撞额度时是 codex-turn-failure 替它补的（⛔ 那句要推给 caller，
+ * 它的额度条目不带 isApiErrorMessage），被打断时是 typing-hook 把 Interrupt 映射过来的（那一轮就该结掉，
+ * 否则打断后 owner 另问的答复会推给旧 caller）。tests/stop-settle.test.ts。
  * 2026-09-28 撞额度时这里把「You've hit your weekly limit」当 t18/t13a 的答复推给了 PM，还消化了回程簿，
  * 它们之后的真实答复就没了路由。现在回程簿原样留着，等它的真实答复（reply / 下一个正常结束的 Stop）。
  */
 import type { MetricEvent } from "../lib/metrics.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
+import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { withExpecting, type PendingAgentCall } from "./agent-calls.js";
 
 export interface StopTurn {
@@ -18,18 +22,43 @@ export interface StopTurn {
   stopWs: unknown;
   candidateWs: unknown;
   event: string;
-  /** drainChannelWatcher 报的「最后一条 assistant 是 API 错误」 */
-  apiError?: boolean;
+  /** cid 这个 agent 的 runtime（ClientInfo.runtime；master / 老连接没有 = Claude Code） */
+  runtime?: string;
+  /** drainChannelWatcher 的结果：text 是兜底要转的文字，apiError = 最后一条 assistant 是 API 错误 */
+  drain: { text: string | null; apiError?: boolean };
+  /** 这一轮是人发的消息触发的（lastMessageSource 是 user / api） */
+  humanTurn?: boolean;
 }
+
+/**
+ * 以 API 错误结束、手上还有没答完的回程的频道：它欠 caller 的答复要等「接着做」的那一轮（出闸续跑 / 补投 / 60 秒续跑）。
+ * 这期间人触发的回合（owner 用完卡顺手问了件别的事）答的是人，不拿去结算旧 caller（T24a 对抗审查 P2-2）。
+ * 进程内：bridge 重启丢了只是退回「下一个正常回合结算」的老行为。
+ */
+const awaitingResume = new Set<string>();
 
 /**
  * 这一轮算不算 cid 自己「答完了」——只有算的才去结算回程簿、API 请求、看门狗。
  * 别人的频道不算（channelsToClear 里还有 pendingReplies 里别人的 intendedReplyChannel，拿别人的收尾结算就是张冠李戴）；
- * 以 API 错误结束的也不算。
+ * 以 API 错误结束的也不算（Codex 的 StopFailure 除外，见文件头）。
  */
 export function settlesOwnTurn(t: StopTurn): boolean {
-  if (t.event === "StopFailure" || t.apiError) return false;
+  if (t.drain.apiError) return false;
+  if (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME) return false;
   return isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
+}
+
+/** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，API 请求与看门狗照它走 */
+export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
+  const own = settlesOwnTurn(t);
+  if (!own) {
+    if (isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs) && d.answerable(t.cid)) awaitingResume.add(t.cid);
+    return false;
+  }
+  if (awaitingResume.has(t.cid) && t.humanTurn) return own; // 答的是人：回程留着，API 请求 / 看门狗照常按「答完了」走
+  awaitingResume.delete(t.cid);
+  await settleCallers(d, t.cid, t.drain.text);
+  return own;
 }
 
 export interface CallerSettleDeps {
@@ -42,8 +71,8 @@ export interface CallerSettleDeps {
   metric(name: MetricEvent, callerChannelId: string, meta: Record<string, string>): void;
 }
 
-/** 只在 settlesOwnTurn 为真时调 */
-export async function settleCallers(d: CallerSettleDeps, cid: string, drainedText: string | null): Promise<void> {
+/** 只在 settlesOwnTurn 为真时调（settleStopTurn） */
+async function settleCallers(d: CallerSettleDeps, cid: string, drainedText: string | null): Promise<void> {
   const pac = d.answerable(cid);
   if (!pac) {
     d.nudgeAmbiguous(cid);

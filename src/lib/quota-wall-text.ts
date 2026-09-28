@@ -9,7 +9,8 @@
  */
 import { parseResetText } from "./usage-window.js";
 
-const LIMIT_HIT_RE = /^(?:You['’]?ve hit your (?:[\w-]+ )?limit|Hit your (?:rate |usage )?limit)/i;
+/** 「hit」是额度窗口，「reached your Fable limit」是单个模型的额度（本机 48 条实录）；都只认句首 */
+const LIMIT_HIT_RE = /^(?:You['’]?ve (?:hit|reached) your (?:[\w-]+ ){0,2}limit|Hit your (?:rate |usage )?limit)/i;
 
 export const isLimitHitText = (text: string): boolean => LIMIT_HIT_RE.test(text.trim());
 
@@ -23,11 +24,15 @@ export interface WallHit {
   resetsText: string | null;
 }
 
-/** 撞墙原文 → 种类 + 重置时刻；不是撞墙原文返回 null */
+/** 整个账号的额度窗口；别的词是单个模型的额度（「reached your Fable limit」「hit your Opus limit」），换模型就能接着用 */
+const ACCOUNT_WINDOWS = new Set(["weekly", "session", "usage"]);
+
+/** 撞墙原文 → 种类 + 重置时刻；不是撞墙原文、或只是单个模型的额度（不闸整台机器）返回 null */
 export function parseWallText(text: string, now: number): WallHit | null {
   const t = text.trim();
   if (!isLimitHitText(t)) return null;
-  const k = /hit your ([\w-]+) limit/i.exec(t)?.[1]?.toLowerCase();
+  const k = /(?:hit|reached) your ((?:[\w-]+ ){0,1}[\w-]+) limit/i.exec(t)?.[1]?.toLowerCase();
+  if (k && !ACCOUNT_WINDOWS.has(k)) return null;
   const kind: WallKind = k === "weekly" ? "weekly" : k === "session" ? "session" : "unknown";
   const rm = /\bresets\s+(.+?)\s*$/i.exec(t.split("\n")[0]);
   const resetsText = rm ? rm[1].trim() : null;

@@ -96,6 +96,11 @@ describe("进闸 / 押后", () => {
     const r = rig({ codex: ["cx"] });
     expect(await r.wall.noteApiError({ channelId: "a", agent: "agent-a", at: T0, error: "rate_limit", text: "API Error: 429 This request would exceed your account's rate limit." })).toBe(false);
     expect(await r.wall.noteApiError({ channelId: "cx", agent: "agent-cx", at: T0, error: "rate_limit", text: WEEKLY })).toBe(false);
+    // 服务端临时限流（本机 36 条实录，error 同样是 rate_limit）、单个模型的额度：都不闸整台机器
+    const limiting = "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
+    expect(await r.wall.noteApiError({ channelId: "a", agent: "agent-a", at: T0, error: "rate_limit", text: limiting })).toBe(false);
+    const fable = "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.";
+    expect(await r.wall.noteApiError({ channelId: "a", agent: "agent-a", at: T0, error: "rate_limit", text: fable })).toBe(false);
     expect(r.wall.active()).toBe(false);
   });
 
