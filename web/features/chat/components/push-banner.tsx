@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { pushSupported, getPushSubscription, enablePush } from "@/lib/push/client";
 import { nativePushAvailable, nativePushPermission, enableNativePush } from "@/lib/push/native";
 import { useT } from "@/lib/i18n";
+import { BellIcon } from "./line-icons";
 
 /**
  * 「开启推送」引导横幅(owner 2026-07-16:「pwa 不能引导用户允许推送权限么」)。
@@ -47,7 +48,7 @@ export function PushBanner() {
 
   return (
     <div className="mx-4 mb-2 flex items-start gap-2 rounded-xl border border-primary/20 bg-primary/[0.07] px-3 py-2.5 text-xs">
-      <span className="text-base leading-none">🔔</span>
+      <BellIcon className="shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
         <div className="font-medium">{t("开启推送通知")}</div>
         <div className="mt-0.5 leading-relaxed text-base-content/60">

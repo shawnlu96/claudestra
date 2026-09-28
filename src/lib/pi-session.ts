@@ -251,6 +251,14 @@ export function piBlocksToClaude(content: unknown): any {
   return out;
 }
 
+/** 模型与接入商名（models.json 的 provider 键）：全机用量按接入商拆 Pi 的各家（lib/machine-usage.ts） */
+function modelFields(msg: AnyRecord): { model?: string; provider?: string } {
+  return {
+    model: typeof msg.model === "string" ? msg.model : undefined,
+    provider: typeof msg.provider === "string" ? msg.provider : undefined,
+  };
+}
+
 /**
  * 把一行 Pi 会话记录翻译成 Claude Code 的形状；不是对话行（model_change 等）返回 null。
  * 纯函数：不读文件、不看时间，方便单测。
@@ -303,7 +311,7 @@ export function piLineToClaudeShape(line: string): AnyRecord | null {
         role: "assistant",
         // 用量去重键（jsonl-cost firstSeen / keepLatest）：Pi 一条 assistant 一行，fork 会把旧行连 id 一起抄进新文件
         id: typeof entry.id === "string" && entry.id ? `pi:${entry.id}` : undefined,
-        model: typeof msg.model === "string" ? msg.model : undefined,
+        ...modelFields(msg),
         usage: piUsageToClaude(msg.usage),
         content: piBlocksToClaude(msg.content),
       },

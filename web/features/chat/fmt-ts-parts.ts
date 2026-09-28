@@ -38,7 +38,7 @@ export function fmtUtcOffset(d: Date): string {
 }
 
 /**
- * 将来的时刻（值守截止、额度退避「等到」）：day = 按自然日是今天 / 明天 / 其它（其它带 `MM-DD`，同样不带年），
+ * 将来的时刻（Autopilot 截止、额度退避「等到」）：day = 按自然日是今天 / 明天 / 其它（其它带 `MM-DD`，同样不带年），
  * full = 悬停用的全称 `YYYY-MM-DD HH:mm UTC+8`。「今天 / 明天」的文字由调用方翻译。
  */
 export interface DueParts {

@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { PendingPermission } from "../type";
 import { useChatStoreApi } from "../chat-store";
 import { useT } from "@/lib/i18n";
+import { BellIcon, MoonIcon } from "./line-icons";
 
 /** action.style → daisyUI 按钮 class */
 const STYLE_BTN: Record<string, string> = {
@@ -36,7 +37,7 @@ export function PermissionCard({ p }: { p: PendingPermission }) {
     <div className="chat chat-start">
       <div className="chat-bubble max-w-[85%] overflow-hidden rounded-xl border border-warning/40 bg-warning/10 p-0 text-base-content">
         <div className="flex items-start gap-2 px-3 py-2">
-          <span className="mt-0.5 text-lg">{isIdle ? "💤" : "🔔"}</span>
+          {isIdle ? <MoonIcon className="mt-0.5 shrink-0 text-warning" /> : <BellIcon className="mt-0.5 shrink-0 text-warning" />}
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold text-warning">
               {isIdle ? t("会话已闲置，Claude Code 询问如何继续") : t("需要授权")}

@@ -2,8 +2,8 @@ import type { AgentSession, ProjectMeta } from "./type";
 
 /**
  * 侧栏会话右键 / 长按菜单的**内容**（纯函数，无 React；渲染在 components/agent-menu.tsx）。
- * 菜单项随会话状态切换：运行中 = 详情 / 值守 / 重启 / 停止 / 清空 / 移动到 / 归档；已停止 = 详情 / 启动 / 移动到 / 归档。
- * 值守项：没在值守 =「开始值守…」（弹框填目标与截止时间），值守中 =「结束值守」。大总管也能值守。
+ * 菜单项随会话状态切换：运行中 = 详情 / Autopilot / 重启 / 停止 / 清空 / 移动到 / 归档；已停止 = 详情 / 启动 / 移动到 / 归档。
+ * Autopilot 项：没开 Autopilot =「开启 Autopilot…」（弹框填目标与截止时间），Autopilot 中 =「关闭 Autopilot」。大总管也能开 Autopilot。
  * 本机打开时（/api/host 报 local 且探测到程序）末尾再接「在 Finder 中显示 / 在终端打开 / 用 IDE 打开」，
  * project 菜单复用同一段 openItems。单测见 tests/web-agent-menu.test.ts。
  */
@@ -18,12 +18,16 @@ export interface MenuOpener {
 export type OpenAction = `open:${string}` | "open-terminal" | "open-ide";
 export type AgentMenuAction = "info" | "mission" | "restart" | "kill" | "clear" | "start" | "move" | "archive" | OpenAction;
 
+/** 组件画的 lucide 线条图标名（components/line-icons.tsx）；本文件不碰 React */
+export type LineIconName = "folder-open" | "folder-input" | "archive" | "terminal" | "code";
+
 export interface AgentMenuItem {
   id: AgentMenuAction;
   /** 中文 key，渲染时过 t()；含 {app} 时用 arg 替换 */
   label: string;
-  /** 文字符号；空串 = 组件自己画线条图标（值守项，components/mission-ui.tsx） */
+  /** 文字符号；空串 = 组件自己画线条图标（lineIcon，或 Autopilot 项 components/mission-ui.tsx） */
   icon: string;
+  lineIcon?: LineIconName;
   danger?: boolean;
   /** 有二级菜单（移动到 ▸ / 多个终端 ▸ / 多个 IDE ▸） */
   submenu?: boolean;
@@ -34,14 +38,14 @@ export interface AgentMenuItem {
 export function openItems(openers: MenuOpener[], platform: string): AgentMenuItem[] {
   const out: AgentMenuItem[] = [];
   const files = openers.find((o) => o.kind === "files");
-  if (files) out.push({ id: `open:${files.id}`, label: platform === "darwin" ? "在 Finder 中显示" : "打开目录", icon: "🗂" });
-  const group = (kind: "terminal" | "ide", one: string, many: string, page: OpenAction, icon: string) => {
+  if (files) out.push({ id: `open:${files.id}`, label: platform === "darwin" ? "在 Finder 中显示" : "打开目录", icon: "", lineIcon: "folder-open" });
+  const group = (kind: "terminal" | "ide", one: string, many: string, page: OpenAction, lineIcon: LineIconName) => {
     const list = openers.filter((o) => o.kind === kind);
-    if (list.length === 1) out.push({ id: `open:${list[0].id}`, label: one, icon, arg: list[0].label });
-    else if (list.length > 1) out.push({ id: page, label: many, icon, submenu: true });
+    if (list.length === 1) out.push({ id: `open:${list[0].id}`, label: one, icon: "", lineIcon, arg: list[0].label });
+    else if (list.length > 1) out.push({ id: page, label: many, icon: "", lineIcon, submenu: true });
   };
-  group("terminal", "在 {app} 中打开", "在终端打开", "open-terminal", "⌨");
-  group("ide", "用 {app} 打开", "用 IDE 打开", "open-ide", "🧩");
+  group("terminal", "在 {app} 中打开", "在终端打开", "open-terminal", "terminal");
+  group("ide", "用 {app} 打开", "用 IDE 打开", "open-ide", "code");
   return out;
 }
 
@@ -49,11 +53,11 @@ export function openItems(openers: MenuOpener[], platform: string): AgentMenuIte
 export function buildAgentMenu(a: AgentSession, openers: MenuOpener[] = [], platform = "darwin"): AgentMenuItem[] | null {
   if (a.mock) return null;
   const open = openItems(openers, platform);
-  const mission: AgentMenuItem = a.mission ? { id: "mission", label: "结束值守", icon: "" } : { id: "mission", label: "开始值守…", icon: "" };
+  const mission: AgentMenuItem = a.mission ? { id: "mission", label: "关闭 Autopilot", icon: "" } : { id: "mission", label: "开启 Autopilot…", icon: "" };
   if (a.pinnedMaster) return a.status === "active" ? [mission, ...open] : open.length ? open : null;
   const info: AgentMenuItem = { id: "info", label: "详情", icon: "ⓘ" };
-  const move: AgentMenuItem = { id: "move", label: "移动到", icon: "📁", submenu: true };
-  const archive: AgentMenuItem = { id: "archive", label: "归档", icon: "🗄" };
+  const move: AgentMenuItem = { id: "move", label: "移动到", icon: "", lineIcon: "folder-input", submenu: true };
+  const archive: AgentMenuItem = { id: "archive", label: "归档", icon: "", lineIcon: "archive" };
   if (a.status !== "active") {
     return [info, { id: "start", label: "启动", icon: "▶" }, move, archive, ...open];
   }

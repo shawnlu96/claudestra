@@ -93,6 +93,7 @@ async function scanCodexSessions(search?: string): Promise<DiscoveredSession[]> 
       modifiedAt: fileStat.mtime,
       lastUserMessage: await lastUserTextOf(filePath, fileStat.size, codexLineToClaudeShape),
       runtime: "codex",
+      ...(meta.sub ? { sub: meta.sub } : {}),
     });
   }
   return out;
