@@ -24,6 +24,8 @@ export interface LedgerDeps {
   now(): number;
   /** 完成检查单的事实采集（gh / git / 进程）；不给就用真实的（lib/ledger-verify-facts.ts），测试注入假的 */
   factsDeps?(): FactsDeps;
+  /** projects.json 里项目的目录（verify 判断项目是否拥有本仓库）；不给按拥有算 */
+  projectDirs?(project: string): string[] | null;
 }
 
 export type Result = Record<string, unknown>;

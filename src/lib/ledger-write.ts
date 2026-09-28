@@ -35,6 +35,7 @@ import {
   type WriteResult,
 } from "./ledger-checks.js";
 import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { checksAllClear } from "./ledger-probes.js";
 import { busyAsLedgerError, getEventByDedup, getItem, getMeta, LedgerError, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
@@ -266,7 +267,8 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
 
 /**
  * 完成检查单的结论（ledger-probes.ts 判好的）：记 verify 事件；pass 时同一事务推 live → verified。
- * 角色由这里现算（只有 PM / master / owner），任务必须还在 live——采集事实期间被人推走了就 conflict，不记一条过期的结论。
+ * 角色由这里现算（只有 PM / master / owner），任务必须还在 live——采集事实期间被人推走了就 conflict，不记一条过期的结论；
+ * pass 还要在事务里再核一遍 checks（checksAllClear），调用方传错 result 也推不进去。
  */
 export function recordVerify(
   db: Database,
@@ -279,6 +281,7 @@ export function recordVerify(
     if (dup) return dup;
     if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
     if (task.stage !== "live") throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 live`, { stage: task.stage, rev: task.rev });
+    if (input.result === "pass" && !checksAllClear(input.data.checks)) throw new LedgerError("invalid", "结论是 pass 但检查单为空，或有没通过也没豁免的项");
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "verify", text: input.text, data: { ...input.data, result: input.result } }, true);
     if (input.result === "pass") task = applyMove(db, ctx, task, { from: "live", to: "verified" }, false).task;
     return { row: task, event, duplicate: false };

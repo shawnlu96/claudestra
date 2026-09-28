@@ -115,6 +115,9 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   return { ok: true, task: r.row, duplicate: r.duplicate, ...link };
 }
 
+/** 合并之后 PR / 分支 / head 就是完成检查单的依据，执行者不能再改（PM 纠错仍可） */
+const SHIPPED: readonly string[] = ["merge", "live", "verified", "done"];
+
 /** 执行者只能改自己任务的这几项；标题、事项、规格、extra、执行者、PM 要 PM / master / owner */
 const EXECUTOR_TASK_FLAGS = new Set(["rev", "dedup", "branch", "pr", "head", "model"]);
 
@@ -124,6 +127,9 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   const extraFlags = Object.keys(c.p.flags).filter((f) => !EXECUTOR_TASK_FLAGS.has(f));
   if (extraFlags.length && c.role(cur.project, cur) === "executor") {
     throw new LedgerError("forbidden", `执行者只能改 --branch / --pr / --head / --model，${extraFlags.map((f) => `--${f}`).join(" ")} 要 PM 改`);
+  }
+  if (c.role(cur.project, cur) === "executor" && SHIPPED.includes(cur.stage) && ["pr", "branch", "head"].some((f) => c.p.flags[f] !== undefined)) {
+    throw new LedgerError("forbidden", `任务 ${cur.id} 已在 ${cur.stage}，执行者不能再改 --pr / --branch / --head（完成检查单按它们核对上线）`);
   }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");

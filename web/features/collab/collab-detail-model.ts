@@ -197,17 +197,37 @@ export interface CheckRow {
   id: string;
   label: string;
   status: CheckStatus;
+  /** 中文全文；有 tpl 时界面按 tpl + params 翻译（模板与 src/lib/ledger-probes.ts 同一份字面量） */
   detail: string;
+  tpl: string | null;
+  params: Record<string, string | number>;
   /** PM / owner 豁免的理由；有它就不挡 verified */
   waived: string | null;
 }
+
+export type ChecklistSource = "files" | "files+extra" | "extra" | "evidence";
 
 export interface ChecklistView {
   result: CheckStatus;
   ts: number;
   actor: string;
   rows: CheckRow[];
+  /** 通过的结论里有几项是豁免放行的 */
+  waived: number;
+  source: ChecklistSource | null;
+  /** 拿不到 PR 文件列表、推断不出检查单 */
+  incomplete: boolean;
+  /** 非本仓库项目只核证据等说明 */
+  note: string | null;
 }
+
+/** 检查单来源的一句话 */
+export const SOURCE_TEXT: Record<ChecklistSource, string> = {
+  files: "按 PR 改动的文件推断",
+  "files+extra": "按 PR 文件推断，另有手工追加项",
+  extra: "拿不到文件列表，手工指定",
+  evidence: "只核证据文件",
+};
 
 /** 探针 id → 检查项名（与 src/lib/ledger-probes.ts 的 PROBE_IDS 对应；不认识的 id 原样显示） */
 const PROBE_LABEL: Record<string, string> = {
@@ -221,6 +241,10 @@ const PROBE_LABEL: Record<string, string> = {
 };
 
 const asStatus = (v: unknown): CheckStatus => (v === "pass" || v === "fail" ? v : "unknown");
+const asParams = (v: unknown): Record<string, string | number> =>
+  v && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v).filter(([, x]) => typeof x === "string" || typeof x === "number") as [string, string | number][])
+    : {};
 
 /** 最近一次系统核对的完成检查单；老的手填 verify 事件没有 checks，不算 */
 export function latestChecklist(events: readonly LedgerEventView[]): ChecklistView | null {
@@ -232,9 +256,18 @@ export function latestChecklist(events: readonly LedgerEventView[]): ChecklistVi
       label: PROBE_LABEL[String(c.id)] ?? String(c.id ?? ""),
       status: asStatus(c.status),
       detail: typeof c.detail === "string" ? c.detail : "",
+      tpl: typeof c.tpl === "string" && c.tpl ? c.tpl : null,
+      params: asParams(c.params),
       waived: typeof c.waived === "string" && c.waived ? c.waived : null,
     }));
-    return { result: asStatus(e.data.result), ts: e.ts, actor: e.actor, rows };
+    const src = e.data.checklistSource;
+    return {
+      result: asStatus(e.data.result), ts: e.ts, actor: e.actor, rows,
+      waived: rows.filter((r) => r.waived && r.status !== "pass").length,
+      source: typeof src === "string" && src in SOURCE_TEXT ? (src as ChecklistSource) : null,
+      incomplete: e.data.incomplete === true,
+      note: typeof e.data.note === "string" && e.data.note ? e.data.note : null,
+    };
   }
   return null;
 }

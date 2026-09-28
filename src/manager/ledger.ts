@@ -63,6 +63,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     actor,
     actorProject: reg.agents[actor]?.projectId,
     projectIds: projects.projects.map((x) => x.id),
+    projectDirs: (id) => projects.projects.find((x) => x.id === id)?.dirs ?? null,
     loadRegistry,
     saveRegistry,
     now: () => Date.now(),
