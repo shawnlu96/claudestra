@@ -61,7 +61,7 @@ export function planDepImport(
   project: string,
   tasks: readonly PlanTask[],
   existing: readonly { from: string; to: string }[] = [],
-  opts: { keepState?: boolean } = {},
+  opts: { keepState?: boolean; usedKeys?: ReadonlySet<string> } = {},
 ): ImportPlan {
   const obj = (json ?? {}) as { edges?: unknown };
   if (!Array.isArray(obj.edges)) throw new Error("deps.json 里没有 edges 数组");
@@ -76,22 +76,25 @@ export function planDepImport(
     const kind = (raw.kind ?? "blocks") as DepKind;
     const jsonState = typeof raw.state === "string" ? raw.state : null;
     const pair = `${from}>${to}`;
+    const dedup = `deps-json:${pair}`;
     const reason =
       skipReason(project, byId.get(from), byId.get(to), [from, to]) ??
       (inJson.has(pair) ? "json 里重复出现，只导第一条"
       : seen.has(pair) ? "台账里已有这条边（要改用 dep-set）"
+      : opts.usedKeys?.has(dedup) ? "曾导入、后来被删，不补回（要补就手动 dep-add）"
       : !when ? "没有条件"
       : [...when].length > DEP_WHEN_MAX ? `条件超过 ${DEP_WHEN_MAX} 字`
       : !DEP_KINDS.includes(kind) ? `kind 不认识：${String(raw.kind)}`
       : opts.keepState && jsonState !== null && !DEP_STATES.includes(jsonState as DepState) ? `state 不认识：${jsonState}`
       : null);
-    inJson.add(pair);
+    // 只有被采纳的那条才算「出现过」：第一条因没条件被跳过时，后面写对的同一对照样能导
+    if (!reason) inJson.add(pair);
     if (reason) {
       plan.skipped.push({ from, to, reason });
       continue;
     }
     const state = opts.keepState && jsonState !== null ? (jsonState as DepState) : null;
-    plan.add.push({ from, to, when, kind, state, jsonState, derived: derivedState(kind, byId.get(from)), dedup: `deps-json:${from}>${to}` });
+    plan.add.push({ from, to, when, kind, state, jsonState, derived: derivedState(kind, byId.get(from)), dedup });
   }
   return plan;
 }
@@ -114,11 +117,13 @@ function report(plan: ImportPlan): void {
  * 只读取规划要的数据，不在库旁边留下文件：没有 -wal 时用 immutable 打开（纯 readonly 在缺 -wal / -shm 时打不开，
  * 而读写打开会建出这两个文件）；已有 -wal 时说明有进程开着库，普通 readonly 就能读到 WAL 里的最新提交。
  */
-function readForPlan(path: string, project: string): { tasks: PlanTask[]; deps: { from: string; to: string }[] } {
+function readForPlan(path: string, project: string): { tasks: PlanTask[]; deps: { from: string; to: string }[]; usedKeys: Set<string> } {
   const db = existsSync(`${path}-wal`) ? new Database(path, { readonly: true }) : new Database(`file:${path}?immutable=1`, { readonly: true });
   try {
     const tasks = (db.query("SELECT * FROM tasks").all() as Record<string, unknown>[]).map(toTask);
-    return { tasks, deps: listDeps(db, project) };
+    // 用过的导入 key：边不在了而 key 在 = PM 删过，dry-run 也要报出来而不是算进「要导」
+    const keys = db.query("SELECT dedupKey FROM events WHERE dedupKey LIKE 'deps-json:%'").all() as { dedupKey: string }[];
+    return { tasks, deps: listDeps(db, project), usedKeys: new Set(keys.map((k) => k.dedupKey)) };
   } finally {
     db.close();
   }
@@ -143,8 +148,8 @@ async function main(argv: string[]): Promise<number> {
     console.error(`台账库不存在：${LEDGER_PATH}`);
     return 1;
   }
-  const { tasks, deps } = readForPlan(LEDGER_PATH, project);
-  const plan = planDepImport(JSON.parse(readFileSync(file, "utf8")), project, tasks, deps, { keepState: parsed.values["keep-state"] });
+  const { tasks, deps, usedKeys } = readForPlan(LEDGER_PATH, project);
+  const plan = planDepImport(JSON.parse(readFileSync(file, "utf8")), project, tasks, deps, { keepState: parsed.values["keep-state"], usedKeys });
   report(plan);
   if (parsed.values["dry-run"]) return 0;
   let failed = 0;

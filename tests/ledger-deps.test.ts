@@ -120,6 +120,9 @@ describe("推导（纯函数）", () => {
     expect(rb("live", 3, null)).toBe("pass");
     expect(rb("done", 1, null, "investigate")).toBe("pass");
     expect(rb("blocked", 2, null, "code", "fix")).toBe("changes");
+    // 上线后回滚进 fix：那一轮审查走的是「通过」，回滚不算返工
+    expect(reviewBranches({ kind: "code", stage: "fix", round: 2 }, { round: 2, verdict: "pass" }, "live").taken).toBe("pass");
+    expect(reviewBranches({ kind: "code", stage: "fix", round: 2 }, null, "merge").taken).toBe("changes");
     expect(rb("spec", 2, { round: 2, verdict: "changes" })).toBeNull();
     expect(rb("build", 0, null)).toBeNull();
   });

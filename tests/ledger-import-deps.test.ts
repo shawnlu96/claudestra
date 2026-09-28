@@ -46,6 +46,13 @@ describe("planDepImport", () => {
     expect(plan.ignored).toEqual(["branches_example"]);
   });
 
+  test("同一对边第一条被跳过（没条件）时，第二条写对的照样导；用过的导入 key 而边已不在 = PM 删过，不补回", () => {
+    const json = { edges: [{ from: "T7", to: "T13a", when: " " }, { from: "T7", to: "T13a", when: "写对了" }, { from: "T11a", to: "T11b", when: "x" }] };
+    const plan = planDepImport(json, P, TASKS, [], { usedKeys: new Set(["deps-json:T11a>T11b"]) });
+    expect(plan.add.map((d) => [d.from, d.to, d.when])).toEqual([["T7", "T13a", "写对了"]]);
+    expect(plan.skipped.map((x) => x.reason)).toEqual(["没有条件", "曾导入、后来被删，不补回（要补就手动 dep-add）"]);
+  });
+
   test("台账里已有的边跳过；blocked 的前置按 stageBefore 推", () => {
     const tasks = [...TASKS, { ...task("T9", "blocked"), stageBefore: "live" as never }, task("T10", "spec")];
     const json = { edges: [JSON_FIXTURE.edges[0], { from: "T9", to: "T10", when: "T9 上线" }] };
@@ -117,6 +124,8 @@ describe("在临时状态目录里真跑", () => {
       expect([again.code, again.out.includes("要导 0 条")]).toEqual([0, true]);
 
       expect(sub(path, `console.log(listDeps(db, P).length); removeDep(db, { actor: "owner" }, { from: "T7", to: "T13a" });`)).toBe("3");
+      const dry2 = run(dir, json, "--project", P, "--dry-run");
+      expect([dry2.out.includes("要导 0 条"), dry2.out.includes("曾导入、后来被删，不补回")]).toEqual([true, true]);
       const third = run(dir, json, "--project", P);
       expect([third.code, third.out.includes("曾导入、后来被删，不补回")]).toEqual([0, true]);
       expect(sub(path, `console.log(getDep(db, "T7", "T13a") === null);`)).toBe("true");

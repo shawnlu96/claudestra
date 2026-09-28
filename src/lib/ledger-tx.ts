@@ -42,7 +42,9 @@ export function replay<T>(
   const prev = getEventByDedup(db, ctx.dedupKey);
   if (!prev) return null;
   if (prev.project !== e.project || prev.target !== e.target || prev.kind !== e.kind || !same(prev)) {
-    throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已用于 ${prev.project}/${prev.target || "(项目)"} 的 ${prev.kind} 事件`);
+    // 别的项目用过这个 key：只说被占用，不带出那个项目的任务名（key 格式可猜，否则能拿来探测别的项目）
+    const where = prev.project === e.project ? `：已用于 ${prev.target || "(项目)"} 的 ${prev.kind} 事件` : "";
+    throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已被别的动作用过${where}`);
   }
   return { row: load(), event: prev, duplicate: true };
 }

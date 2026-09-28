@@ -75,11 +75,12 @@ CREATE TABLE meta (
  */
 function migrateDeps(db: Database): void {
   const cols = new Set((db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name));
-  if (!cols.has("assigneeKind")) db.exec("ALTER TABLE tasks ADD COLUMN assigneeKind TEXT CHECK (assigneeKind IN ('agent','human','peer_agent'))");
-  if (!cols.has("assignee")) db.exec("ALTER TABLE tasks ADD COLUMN assignee TEXT");
-  db.exec(`
-UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE assigneeKind IS NULL AND agent IS NOT NULL AND agent != '';
-CREATE TABLE IF NOT EXISTS task_deps (
+  // 一条语句一次 prepare().run()：bun 的多语句 exec 会吞掉运行期错误（CHECK、触发器 ABORT），版本号却照样往前推
+  const run = (sql: string) => db.prepare(sql).run();
+  if (!cols.has("assigneeKind")) run("ALTER TABLE tasks ADD COLUMN assigneeKind TEXT CHECK (assigneeKind IN ('agent','human','peer_agent'))");
+  if (!cols.has("assignee")) run("ALTER TABLE tasks ADD COLUMN assignee TEXT");
+  run("UPDATE tasks SET assigneeKind = 'agent', assignee = agent WHERE assigneeKind IS NULL AND agent IS NOT NULL AND agent != ''");
+  run(`CREATE TABLE IF NOT EXISTS task_deps (
   project TEXT NOT NULL,
   fromTask TEXT NOT NULL REFERENCES tasks(id), toTask TEXT NOT NULL REFERENCES tasks(id),
   kind TEXT NOT NULL CHECK (kind IN ('blocks','branch')),
@@ -87,10 +88,9 @@ CREATE TABLE IF NOT EXISTS task_deps (
   state TEXT CHECK (state IN ('waiting','active','done')),
   rev INTEGER NOT NULL DEFAULT 1, createdBy TEXT NOT NULL,
   createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL,
-  PRIMARY KEY (fromTask, toTask), CHECK (fromTask <> toTask));
-CREATE INDEX IF NOT EXISTS task_deps_to ON task_deps(toTask);
-CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project);
-`);
+  PRIMARY KEY (fromTask, toTask), CHECK (fromTask <> toTask))`);
+  run("CREATE INDEX IF NOT EXISTS task_deps_to ON task_deps(toTask)");
+  run("CREATE INDEX IF NOT EXISTS task_deps_project ON task_deps(project)");
 }
 
 /** 一步迁移：一段 SQL，或要先查现状的函数（如加列） */
@@ -166,16 +166,43 @@ export function schemaVersion(db: Database): number {
   return (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
 }
 
-/** IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做 */
+/** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
+const REQUIRED_COLUMNS: Record<string, readonly string[]> = { tasks: ["assigneeKind", "assignee"] };
+
+/** 按 LEDGER_TABLES 与 REQUIRED_COLUMNS 找缺的表 / 列；空数组 = 完整 */
+function missingSchema(db: Database): string[] {
+  const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name));
+  const missing: string[] = LEDGER_TABLES.filter((t) => !tables.has(t));
+  for (const [table, cols] of Object.entries(REQUIRED_COLUMNS)) {
+    if (!tables.has(table)) continue;
+    const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    missing.push(...cols.filter((c) => !have.has(c)).map((c) => `${table}.${c}`));
+  }
+  return missing;
+}
+
+function runStep(db: Database, step: Migration): void {
+  if (typeof step === "string") db.exec(step);
+  else step(db);
+}
+
+/**
+ * IMMEDIATE 事务里先重读版本：两个进程同时首次打开时，后到的看到已迁移就什么都不做。
+ * 版本号到了但表 / 列缺（并行分支的代码先打开过库、按下标迁移跳过了别的分支的步骤）：从第 2 步起全部重跑一遍补齐——
+ * 所以第 1 步之后的每一步都必须可重跑（IF NOT EXISTS、加列先查列）。补完仍缺就报错，不带着残缺的库往下写。
+ */
 function migrate(db: Database): void {
-  if (schemaVersion(db) >= MIGRATIONS.length) return;
+  const behind = schemaVersion(db) < MIGRATIONS.length;
+  if (!behind && missingSchema(db).length === 0) return;
   db.transaction(() => {
-    for (let v = schemaVersion(db); v < MIGRATIONS.length; v++) {
-      const step = MIGRATIONS[v];
-      if (typeof step === "string") db.exec(step);
-      else step(db);
+    const from = schemaVersion(db);
+    for (let v = from; v < MIGRATIONS.length; v++) {
+      runStep(db, MIGRATIONS[v]);
       db.exec(`PRAGMA user_version = ${v + 1}`);
     }
+    if (from > 0 && missingSchema(db).length) for (const step of MIGRATIONS.slice(1)) runStep(db, step);
+    const still = missingSchema(db);
+    if (still.length) throw new Error(`台账库迁移后仍缺：${still.join(", ")}（user_version ${schemaVersion(db)}）`);
   }).immediate();
 }
 

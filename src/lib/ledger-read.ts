@@ -172,6 +172,13 @@ export function projectView(db: Database, project: string, now: number): Project
   };
 }
 
+/** 进入当前工作阶段（blocked 时是进 blocked 前那个）的那条 stage 事件的来处 */
+function enteredFrom(task: LedgerTask, events: readonly LedgerEvent[]): Stage | null {
+  const at = task.stage === "blocked" ? task.stageBefore : task.stage;
+  const e = events.findLast((x) => x.kind === "stage" && x.data.to === at);
+  return typeof e?.data.from === "string" ? (e.data.from as Stage) : null;
+}
+
 export interface TaskDetail {
   task: TaskView;
   events: LedgerEvent[];
@@ -194,7 +201,7 @@ export function taskDetail(db: Database, project: string, id: string, now: numbe
     events,
     timeline: stageTimeline(events, now),
     deps: { in: deps.filter((d) => d.to === id), out: deps.filter((d) => d.from === id) },
-    reviewBranches: reviewBranches(task, view.lastReview),
+    reviewBranches: reviewBranches(task, view.lastReview, enteredFrom(task, events)),
   };
 }
 

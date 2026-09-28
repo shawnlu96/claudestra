@@ -24,7 +24,10 @@ export type EventKind = (typeof EVENT_KINDS)[number];
 
 export type ReviewVerdict = "pass" | "changes" | "block";
 
-/** 负责人类型：本机 agent（agent 列同值，执行者角色照旧按 agent 认）/ 人（principal 名）/ 别的实例上的 agent（name@peer） */
+/**
+ * 负责人类型：本机 agent（agent 列同值，执行者角色照旧按 agent 认）/ 人（local:<principalId>）/ 别的实例上的 agent（<fp>/<agent>）。
+ * 路由必须按 kind 分支，不能只解析 assignee 字符串：本机 agent 名允许 @，`agent-x@peer` 是本机名，不是跨实例地址。
+ */
 export const ASSIGNEE_KINDS = ["agent", "human", "peer_agent"] as const;
 export type AssigneeKind = (typeof ASSIGNEE_KINDS)[number];
 

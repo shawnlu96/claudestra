@@ -88,6 +88,44 @@ describe("v1 → 依赖边版本", () => {
     }
   });
 
+  test("撞号真实场景：别的分支的 v2 先占了号（有 task_deps、没有 assignee 列），版本已是最新——打开时按表 / 列核对，缺的补齐", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const raw = new Database(path);
+      raw.exec("CREATE TABLE task_deps (project TEXT, fromTask TEXT, toTask TEXT, kind TEXT, cond TEXT, state TEXT, rev INTEGER, createdBy TEXT, createdAt INTEGER, updatedAt INTEGER)");
+      raw.exec(`PRAGMA user_version = ${LEDGER_SCHEMA_VERSION}`);
+      raw.close();
+      const db = openLedger(path);
+      expect([getTask(db, "T1")?.assigneeKind, getTask(db, "T1")?.assignee]).toEqual(["agent", "agent-exec"]);
+      closeLedger(path);
+      const raw2 = new Database(path);
+      raw2.exec("DROP TABLE task_deps");
+      raw2.close();
+      expect(listDeps(openLedger(path), "p")).toEqual([]);
+      closeLedger(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("回填撞上运行期错误（触发器 ABORT）：打开报错、整笔回滚，版本号不往前推", () => {
+    const { dir, path } = tmp();
+    try {
+      makeV1(path);
+      const raw = new Database(path);
+      raw.exec("CREATE TRIGGER no_upd BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'frozen'); END");
+      raw.close();
+      expect(() => openLedger(path)).toThrow("frozen");
+      const after = new Database(path);
+      expect(schemaVersion(after)).toBe(1);
+      expect((after.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).some((c) => c.name === "assigneeKind")).toBe(false);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("8 个进程同时打开同一个旧库并写边，连跑 3 轮：全部成功、只迁移一次、边 8 条", async () => {
     for (let round = 0; round < 3; round++) {
       const { dir, path } = tmp();

@@ -140,19 +140,24 @@ export interface ReviewBranches {
   taken: "pass" | "changes" | null;
 }
 
+/** 上线后的回滚把任务打回 fix：那是上线出问题，不是审查退回返工 */
+const ROLLBACK_FROM: readonly Stage[] = ["live", "verified"];
+
 /**
- * 审查分叉：以实际阶段为准，不存成边（存了会和真实阶段对不上）。在 fix → 走了「返工」；已过审进了合并及以后 → 走了「通过」；
- * 还在 review 时，本轮已记结论就按结论（记了还没推阶段），没记为 null。没进过审查、回到 spec / 取消的为 null。blocked 看进 blocked 前的阶段。
+ * 审查分叉：以实际阶段为准，不存成边（存了会和真实阶段对不上）。在 fix → 走了「返工」（从 live / verified 回滚进的 fix 除外，那一轮审查走的是「通过」）；
+ * 已过审进了合并及以后 → 走了「通过」；还在 review 时，本轮已记结论就按结论（记了还没推阶段），没记为 null。
+ * 没进过审查、回到 spec / 取消的为 null。blocked 看进 blocked 前的阶段。enteredFrom = 进入当前（工作）阶段时的来处。
  */
 export function reviewBranches(
   task: StageOf & Pick<LedgerTask, "round">,
   lastReview: { round: number | null; verdict: ReviewVerdict | string | null } | null,
+  enteredFrom: Stage | null = null,
 ): ReviewBranches {
   const pass: Stage = task.kind === "investigate" ? "done" : "merge";
   const stage = workStage(task);
   const passed: readonly Stage[] = task.kind === "investigate" ? ["done"] : ["merge", "live", "verified", "done"];
   let taken: ReviewBranches["taken"] = null;
-  if (task.round > 0 && stage === "fix") taken = "changes";
+  if (task.round > 0 && stage === "fix") taken = enteredFrom && ROLLBACK_FROM.includes(enteredFrom) ? "pass" : "changes";
   else if (task.round > 0 && passed.includes(stage)) taken = "pass";
   else if (stage === "review" && lastReview && lastReview.round === task.round) {
     const v = lastReview.verdict;
