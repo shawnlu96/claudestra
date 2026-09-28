@@ -34,13 +34,16 @@ function TeamToggle({ open, onToggle }: { open: boolean; onToggle: () => void })
   );
 }
 
-/** 「派出 N 个」；收起时有执行者在忙就补一个黄点（组头同款），不用展开也知道底下在干活 */
+/**
+ * 「派出 N」；收起时有执行者在忙就补一个黄点（组头同款），不用展开也知道底下在干活。
+ * 窄侧栏里它先于名字缩（shrink-[4]，所在仓小标同款）——两层缩进后名字被挤成「claud…」比小标被截更糟。
+ */
 function DispatchCount({ n, busy }: { n: number; busy: boolean }) {
   const t = useT();
   return (
-    <span className="flex shrink-0 items-center gap-1 text-[11px] text-base-content/40">
-      {t("派出 {n} 个", { n })}
-      {busy && <span className="size-1.5 rounded-full bg-warning" />}
+    <span className="flex min-w-0 shrink-[4] items-center gap-1 text-[11px] text-base-content/40" title={t("派出 {n} 个", { n })}>
+      <span className="truncate">{t("派出 {n}", { n })}</span>
+      {busy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
     </span>
   );
 }

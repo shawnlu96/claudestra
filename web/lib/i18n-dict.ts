@@ -291,7 +291,8 @@ export const DICT: Record<string, string> = {
   "」的会话": '"',
   " · 归档保留": " · archives kept", // key/值均带前导空格
   // 派发关系（team-group.tsx）
-  "派出 {n} 个": "{n} dispatched",
+  "派出 {n} 个": "{n} agent dispatched|{n} agents dispatched",
+  "派出 {n}": "{n} sent",
   "展开派出的 agent": "Show dispatched agents",
   "收起派出的 agent": "Hide dispatched agents",
 
