@@ -163,7 +163,7 @@ export async function cmdPeerHttpTest(peerName: string) {
     });
     const body: any = await res.json().catch(() => null);
     if (!res.ok) {
-      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: res.status === 401 ? "token 无效/已 revoke——重新握手" : undefined });
+      output({ ok: false, error: `对方返回 ${res.status}: ${body?.error || "未知"}`, hint: res.status === 401 ? (await import("../lib/peer-trust.js")).peerAuthHint(body) : undefined });
       return;
     }
     const agents = (body?.agents || []).map((a: any) => ({ name: a.name, status: a.status }));

@@ -409,3 +409,34 @@ describe("inviteExpired", () => {
     expect(inviteExpired({ expiresAt: "" })).toBe(true);
   });
 });
+
+describe("http-peer 出站：签名去重相关", () => {
+  test("同一秒发两条一样的消息，正文带不同 nonce（对方按签名去重，不能误伤）", async () => {
+    const bodies: string[] = [];
+    initHttpPeer({
+      deliver: async (env) => ({ envelope: env, outcome: { kind: "sent" } }),
+      fetchImpl: (async (_url: string, init: RequestInit) => {
+        bodies.push(String(init.body));
+        return json(200, { ok: true, reply: "ok", threadId: "t", agent: "x" });
+      }) as unknown as typeof fetch,
+      pollIntervalMs: 10,
+      pollGiveUpMs: 300,
+      findPeer: async () => PEER,
+    });
+    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "同样的话");
+    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "同样的话");
+    await sleep(50);
+    expect(bodies.length).toBe(2);
+    const [a, b] = bodies.map((s) => JSON.parse(s));
+    expect(a.text).toBe(b.text);
+    expect(typeof a.nonce).toBe("string");
+    expect(a.nonce).not.toBe(b.nonce);
+  });
+  test("对方回 peer_signature / replay：提示别原样重发，而不是叫人重新握手", async () => {
+    const h = makeHarness([() => json(401, { ok: false, error: "peer request signature rejected: replay", code: "peer_signature", reason: "replay" })]);
+    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");
+    await sleep(50);
+    expect(h.pushed[0]).toContain("不要原样重发");
+    expect(h.pushed[0]).not.toContain("重新握手");
+  });
+});

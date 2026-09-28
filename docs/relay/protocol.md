@@ -175,17 +175,18 @@ claudestra-relay-auth-v2
 
 ### 4.1 接收方验签（peer 路径，实例 MUST 做）
 
-中继看得见明文（本版没有端到端加密），所以「拿着 token 的中继或别的实例不能冒充发起方」靠这一步。**T25 修复前不成立**：路径模式会把 `Authorization` 原样转给 bridge，而 bridge 不看来源就收 Bearer；这一步也不核 token 是否签发给 `from`（见 [e2e-design.md](./e2e-design.md) §1）：
+中继看得见 peer 请求的明文（用密钥建立的 peer 例外：请求整体加密，见 [e2e-design.md](./e2e-design.md) §5.1，下面的验签照旧作用在外层，内层另验一次），所以「拿着 token 的中继或别的实例不能冒充发起方」靠这一步：
 
 1. `x-claudestra-key` 形状合法，且 `keyFingerprint(key) === from`；否则 `error bad_signature`。`from` 由中继按握手结果盖章，别的实例顶不了 A 的钥匙，中继虽能盖任意 `from` 却签不出 A 的签名。
-2. 按 `instance-key.ts` 的 canonical 验：`claudestra-req-v1\n<METHOD>\n<path>\n<ts>\n<sha256(body) hex>`，body 是完整请求正文的原始字节（流式正文先收齐再验——peer 路径的正文都是小 JSON）；偏差 ±300 秒。不过 → `bad_signature`。
-3. 防重放：非 GET / HEAD 的 `x-claudestra-sig` 10 分钟内见过 → `error replay`。
+2. 按 `instance-key.ts` 的 canonical 验：`claudestra-req-v1\n<METHOD>\n<path>\n<ts>\n<sha256(body) hex>`，body 是完整请求正文的原始字节（流式正文先收齐再验——peer 路径的正文都是小 JSON）；偏差 ±300 秒。`x-claudestra-sig` MUST 是规范的无填充 base64url（86 个字符，解码再编码与原串一致），否则同一个签名能写成多种串。不过 → `bad_signature`。
+3. 防重放：非 GET / HEAD 的签名（按解码后的字节比较）10 分钟内见过，或时间戳早于本进程启动（缓存不落盘）→ `error replay`。
+4. 核发件人（`lib/peer-trust.ts` `relayPeerRefusal`）：兑换邀请之外，`from` MUST 是本机联系人（peers.json 里未禁用、记有指纹的对方）；带了 peer token（Bearer 或 events 的 `?token=`）的，token 所属 peer 的期望指纹 MUST 等于 `from`。否则 `error sender_forbidden`。签名只证明请求出自 `from`，这一步才证明 token 是 `from` 的。
 
-验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>`。bridge 照旧按 peer token 与 scope 放行。
+验过后打到本机 **peer 专用回环入口**（`src/bridge/peer-ingress.ts`，端口 `.env` 的 `PEER_INGRESS_PORT`），头里去掉 hop-by-hop、`host`、`content-length`、`x-forwarded-*` 与发起方自带的 `x-claudestra-relay-*`，加 `x-claudestra-relay-from: <from>` 与只有本进程知道的标记头；peer 入口核对标记后把 `from` 放进请求上下文、两个头一律剥掉，bridge 只从上下文读来源指纹（主端口、旧 web 端口带来的同名头不起作用）。bridge 再按 peer token 与 scope 放行，并对 peer token 强制验签：签名钥匙的指纹 MUST 等于这个 peer 的期望指纹（peers.json 的 `fp` → `relay://<fp>` 基址 → 首次签名时钉住的指纹），不签、签错、过期、换了钥匙都 401；直连（不经中继）的 peer 请求同样如此。验签通过的非 GET / HEAD 签名在 10 分钟内只认一次（与第 3 步同一个 `ReplayCache` 实现，bridge 另持一份，所有入口共用，在限速之后才写），重放 → 401。peer 先验签再扣限速。三样都没有的老 peer 在截止日（默认 2026-11-01，`PEER_LEGACY_DEADLINE` 可覆盖）前放行并告警（doctor 会列出来）。经中继来的请求（路径模式 §6 与 §4.2 的隧道，bridge 里来源都是 relay）不收 peer token，也不接兑换邀请，一律 403。直连兑换时，bridge 用兑换请求自带签名的钥匙指纹作为这个 peer 的 `fp`（经中继兑换用 `from`），之后按它验签。
 
 ### 4.2 隧道请求（`from: "relay"`）
 
-实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里 `host` 设为中继盖的 `x-forwarded-host`（= `<slug>.<base>`，front 已剥掉浏览器自带的 `x-forwarded-*`），保留 `x-forwarded-*`，去掉 hop-by-hop、`content-length` 与 `accept-encoding`（让 Web 回未压缩正文：实例侧 fetch 会解码，再带着 `content-encoding` 浏览器会解两次）。响应去掉 `content-encoding`；`location` 若以 `http://<slug>.<base>` 或 `http://127.0.0.1:<WEB_PORT>` 开头 MUST 改写为 `https://<slug>.<base>`（Web 在明文端口上算出的绝对地址，浏览器连不到）。
+实例把它原样重放到本机 Web（`http://127.0.0.1:<WEB_PORT>`，默认 3333），路径不限、不验签（浏览器没有实例密钥；身份由 Web 自己的会话 cookie 决定，与今天 Tailscale 直连一样）。头里 `host` 设为中继盖的 `x-forwarded-host`（= `<slug>.<base>`，front 已剥掉浏览器自带的 `x-forwarded-*`），保留 `x-forwarded-*`，且 `x-forwarded-for` MUST 非空（中继没给或给了空值就写 `unknown`：本机 Web 端口可能由 bridge 接管，bridge 只把「回环且无 XFF」认作本机进程，隧道请求绝不能落进这一档），去掉帧里除 `x-claudestra-relay-base` 之外的 `x-claudestra-*` 头，再加上只有本进程知道的隧道标记头（bridge 主端口 / 接管的旧 web 端口认出它就把来源定成 relay，与路径模式同等对待：peer token 403、不算本机、不算同机），去掉 hop-by-hop、`content-length` 与 `accept-encoding`（让 Web 回未压缩正文：实例侧 fetch 会解码，再带着 `content-encoding` 浏览器会解两次）。响应去掉 `content-encoding`；`location` 若以 `http://<slug>.<base>` 或 `http://127.0.0.1:<WEB_PORT>` 开头 MUST 改写为 `https://<slug>.<base>`（Web 在明文端口上算出的绝对地址，浏览器连不到）。
 
 ## 5. 目录、slug、配对短码
 
@@ -287,7 +288,7 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 | `stream_idle` / `stream_max` | relay | 流态空闲超时 / 总时长超限 | 不重试 |
 | `peer_disconnected` | relay | 等待期间对方断线 | 不重试 POST |
 | `unknown_request` | relay | `res` / `data` / `end` / `cancel` 对不上 pending（已超时、发起方已断、或 `to` 填错） | 记日志 |
-| `bad_signature` / `replay` / `path_forbidden` | peer | §4.1 | 不重试 |
+| `bad_signature` / `replay` / `path_forbidden` / `sender_forbidden` | peer | §4.1 | 不重试 |
 | `payload_too_large` | peer | peer 请求正文超过接收方上限（bridge 侧 2 MiB；正文要收齐验签，不能无限收） | 不重试 |
 | `local_unreachable` / `local_timeout` | peer | 接收方连不上 / 等不到本机入口 | 不重试 |
 
@@ -308,7 +309,7 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 
 中继**能**：看见帧内明文（含 token 与正文）；知道谁在线、谁调了谁、多大、多久、从哪个 IP 来；拒绝转发；替换 front 送出的任何内容（它就是 HTTPS 终点）。
 
-中继**不能**：冒充实例发 peer 请求（没有私钥，接收方验签。**T25 修复前不成立**，原因见 §4.1 的注）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
+中继**不能**：冒充实例发 peer 请求（没有私钥；接收方验签，核对 token 属于签名者，bridge 对 peer token 强制验签，路径模式不收 peer token）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
 
 明说的残余风险（端到端加密的设计与分期见 [e2e-design.md](./e2e-design.md)）：隧道里的 Web 流量（含会话 cookie）对中继可见；中继若能直连某台实例的 Web 端口（同机部署）就能绕过一切。缓解：不在跑 bridge 的机器上跑中继；Web 与 peer 入口默认只听本机。中继日志 MUST 只记信封：时间、from、to、id、方法、路径前缀、大小、状态、耗时；不记头与正文，不记 `/c/<code>` 的短码值。
 

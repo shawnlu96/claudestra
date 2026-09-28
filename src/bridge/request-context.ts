@@ -20,6 +20,8 @@ export interface RequestContext {
   https: boolean;
   /** 经中继时：中继看到的浏览器出口 IP 与这台机器连中继的出口 IP 相同（同一网络，不代表同一台电脑） */
   sameNetwork?: boolean;
+  /** 经中继 peer 帧来、且 peer 入口核过进程内标记的发件人指纹（peer-ingress.ts）；别的入口永远没有，别读原始头 */
+  relayFrom?: string;
 }
 
 const contexts = new WeakMap<Request, RequestContext>();

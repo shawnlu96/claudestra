@@ -63,4 +63,13 @@ describe("judgeSignature（TOFU）", () => {
     expect(judgeSignature(pinned, hdr, () => "bad", T).lastCheck?.result).toBe("bad");
     expect(judgeSignature(undefined, hdr, () => "bad", T)).toEqual({ lastCheck: { at: T, result: "bad" } });
   });
+  test("记录里有对方指纹：以它为准——指纹不符 = key_changed（没钉过也一样），相符而钉的是旧钥匙就改钉", () => {
+    const fp = keyFingerprint(key.publicKey);
+    const other = instanceKeySync(mkdtempSync(join(tmpdir(), "ikey4-")))!.publicKey;
+    expect(judgeSignature(undefined, { ...hdr, key: other }, () => "ok", T, fp).lastCheck?.result).toBe("key_changed");
+    const stale = judgeSignature(undefined, { ...hdr, key: other }, () => "ok", T); // 先钉了旧钥匙（对方重装前）
+    const repinned = judgeSignature(stale, hdr, () => "ok", T, fp.toUpperCase());
+    expect(repinned).toMatchObject({ publicKey: key.publicKey, fingerprint: fp, lastCheck: { result: "ok" } });
+    expect(judgeSignature(repinned, hdr, () => "stale", T, fp).lastCheck?.result).toBe("stale");
+  });
 });

@@ -20,6 +20,7 @@ import { sandboxDisabled } from "../lib/sandbox.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { webPortFromStartScript } from "../lib/cli-install.js";
 import { readPeers } from "../lib/peers.js";
+import { loadRelayPeerView, relayPeerRefusal } from "../lib/peer-trust.js";
 import { FP_RE, slugify, type PeerRecord } from "../lib/relay-protocol.js";
 import { NULL_BODY_STATUS, recordToHeaders } from "../lib/relay-stream.js";
 import { syncPeerIngress } from "./peer-ingress.js";
@@ -110,6 +111,7 @@ export async function startRelayLink(deps: { handleApi?: ApiHandler } = {}): Pro
       ingressBase: () => (ingressPort ? `http://127.0.0.1:${ingressPort}` : null),
       onRedeemed: () => void refreshRelayContacts(),
       handleApi: deps.handleApi,
+      refusePeer: async (from, req) => relayPeerRefusal(from, req, await loadRelayPeerView()),
     }),
     onWelcome: (i) => {
       log("info", `这台机器的网页地址：https://${i.slug}.${i.base}（手机 / 浏览器不装任何东西就能打开）`);
