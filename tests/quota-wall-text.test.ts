@@ -3,7 +3,9 @@
  * 临时 429 和 agent 自己话里引用这句都不算撞墙。
  */
 import { describe, expect, test } from "bun:test";
-import { isLimitHitText, isModelLimitHit, paneShowsWallWait, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { isLimitHitText, isModelLimitHit, matchLimitMenu, paneShowsWallWait, parseWallText, wallHitOf } from "../src/lib/quota-wall-text.js";
 import { paneMainTurnBusy } from "../src/lib/turn-state.js";
 
 const at = (iso: string) => Date.parse(iso);
@@ -132,15 +134,40 @@ describe("paneShowsWallWait（T35 实测：撞墙等待画面带「esc to cancel
   ].join("\n");
   const countdownAbove = ["  ⎿  You've hit your session limit", "  continuing automatically at 3:20am · esc to cancel", "", border, "❯ ", border, "  ? for shortcuts"].join("\n");
 
-  test("菜单开着 / 自动续跑倒计时：不算在跑（通用判忙会把前两种判成忙，这里不改它）", () => {
+  test("菜单开着 / 状态栏自动续跑倒计时：不算在跑（通用判忙会把菜单判成忙，这里不改它）", () => {
     expect(paneMainTurnBusy(menu)).toBe(true);
-    expect(paneMainTurnBusy(countdownAbove)).toBe(true);
-    for (const p of [menu, countdownBelow, countdownAbove]) expect(paneShowsWallWait(p)).toBe(true);
+    for (const p of [menu, countdownBelow]) expect(paneShowsWallWait(p)).toBe(true);
+  });
+
+  test("只看状态栏 / 底部菜单：对话里留着的那句（续跑之后还在屏幕上）不算，不然空闲的会话会一直被当成撞墙押消息", () => {
+    expect(paneShowsWallWait(countdownAbove)).toBe(false);
   });
 
   test("拿掉这些行之后还有 spinner：照旧算在跑；没有撞墙画面：不归它管", () => {
     const running = ["✻ Pondering… (2m 3s · ↓ 1.2k tokens)", "  continuing automatically at 3:20am · esc to cancel", "", border, "❯ ", border].join("\n");
     expect(paneShowsWallWait(running)).toBe(false);
     expect(paneShowsWallWait(["✻ Worked for 3m 2s", "", border, "❯ ", border, "  ? for shortcuts"].join("\n"))).toBe(false);
+  });
+});
+
+describe("真实画面样本（T35 2026-09-29 录的 CC 画面，去掉 ANSI：tests/fixtures/quota-wall/）", () => {
+  const pane = (f: string) => readFileSync(join(import.meta.dir, "fixtures/quota-wall", `${f}.txt`), "utf8");
+  test("停在额度菜单（新版 5 项、有 LP、光标停在 usage credits 上）/ 状态栏倒计时：都算撞墙等待，不发键", () => {
+    for (const f of ["menu-5-items", "menu-no-lp", "menu-on-credits", "menu-on-lp", "walled", "walled-channel", "walled-typing", "lp-off-offer"]) {
+      expect([f, paneShowsWallWait(pane(f))]).toEqual([f, true]);
+    }
+  });
+  test("在跑 / 压缩中 / 开了 low-priority 在跑 / 普通空闲：不算", () => {
+    for (const f of ["busy-queued", "compacting", "lp-on-allowance", "lp-on-autocontinue", "draft", "fresh-placeholder"]) {
+      expect([f, paneShowsWallWait(pane(f))]).toEqual([f, false]);
+    }
+  });
+  test("新版菜单的几项（Don’t continue automatically / Continue now at lower priority / claim a $250 credit）认得，出闸能发 Esc 关掉", () => {
+    for (const f of ["menu-5-items", "menu-no-lp", "menu-on-credits", "menu-on-lp"]) expect([f, matchLimitMenu(pane(f))]).toEqual([f, true]);
+    expect(matchLimitMenu(pane("walled"))).toBe(false); // 状态栏倒计时不是菜单：没东西要关
+  });
+  test("回合中弹出的别的对话框（底部也是「Enter to confirm · Esc to cancel」）不算额度菜单（T24 r2 P2-6）", () => {
+    const other = ["   Do you want to proceed?", "", "   ❯ 1. Yes", "     2. No", "", "   Enter to confirm · Esc to cancel"].join("\n");
+    expect(paneShowsWallWait(other)).toBe(false);
   });
 });

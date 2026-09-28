@@ -239,7 +239,7 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     await hitWall(r, "a");
     r.wall.clear();
     await r.wall.tick();
-    expect(r.prepared).toEqual(["master:agent-a", "master:agent-b", "master:agent-c", "master:agent-pm"]);
+    expect(r.prepared).toEqual(["master:agent-a", "master:agent-b"]); // 只对要发 Esc 的窗口退出 copy-mode（r2 P2-7）
     expect(r.esc).toEqual(["master:agent-a", "master:agent-b"]); // 只发一次，不重试
     expect(r.disk().wall!.recovery).toMatchObject({ escSent: ["a", "b"], escFailed: ["agent-b"] });
     expect(r.notices.at(-1)).toContain("关菜单 1 个窗口");
@@ -285,6 +285,14 @@ describe("恢复的边角（T24 r1 P2-1/2/3/7/9）", () => {
     await r.wall.tick();
     expect(r.flushed.sort()).toEqual(["a", "b"]);
     expect(r.resumed.map((x) => x.cid)).toEqual(["b"]);
+  });
+
+  test("noteActivity 交出从续跑名单拿掉的那条（外人那一轮不算数时 rearmResume 放回去）", async () => {
+    const r = rig();
+    await hitWall(r, "a");
+    expect(r.wall.noteActivity("a", T0 + 1)).toBeNull(); // 错误条目自己带出的活动（宽限内）不算
+    expect(r.wall.noteActivity("a", T0 + 10_000)).toMatchObject({ agent: "agent-a", error: "rate_limit" });
+    expect(r.wall.noteActivity("a", T0 + 20_000)).toBeNull();
   });
 
   test("补投记账之后、flush 之前重启：条数不重记成 0", async () => {

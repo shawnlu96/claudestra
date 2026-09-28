@@ -159,7 +159,8 @@ export interface Envelope {
 // ============================================================
 
 export type DeliveryOutcome =
-  | { kind: "sent"; discordMessageIds?: string[]; note?: string }   // 成功投递
+  // heldBy：押后的原因（note=queued 时）——额度闸 / 目标停在额度菜单（没发键，调用方要如实告诉发送方，bridge/quota-wall-wiring.ts）
+  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" }   // 成功投递
   | { kind: "dropped"; reason: string }                               // 主动丢弃（信任检查 / 目标离线等）
   | { kind: "error"; error: Error };                                  // 失败
 

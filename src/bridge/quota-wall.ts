@@ -148,10 +148,10 @@ async function closeMenus(c: Ctx, id: string): Promise<void> {
   const sent: WallWindow[] = [];
   for (const win of await c.d.windows()) {
     if (r.escSent.includes(win.channelId)) continue;
-    // copy-mode 里画面是翻上去的旧内容、Esc 只会让 tmux 退出 copy-mode：先退出来再看、再发
-    await c.d.prepare(win.win).catch((e) => c.d.log(`额度闸：${win.agent} 退出 copy-mode 失败（照常抓屏，对不上就不发键）: ${(e as Error).message}`));
-    const pane = await c.d.capture(win.win).catch(() => ""); // 抓不到画面就不发键：宁可留给人关，也不盲按
+    const pane = await c.d.capture(win.win).catch(() => ""); // 抓不到画面就不发键：宁可留给人关，也不盲按（copy-mode 下抓到的也是实时画面）
     if (matchLimitMenu(pane)) {
+      // copy-mode 里 Esc 只会让 tmux 退出 copy-mode：只对要发键的窗口先退出来，别把正在翻屏的别的窗口踢出去（T24 r2 P2-7）
+      await c.d.prepare(win.win).catch((e) => c.d.log(`额度闸：${win.agent} 退出 copy-mode 失败（照发 Esc，之后复查）: ${(e as Error).message}`));
       await c.d.sendEsc(win.win);
       r.escSent.push(win.channelId);
       sent.push(win);
@@ -282,10 +282,13 @@ export function createQuotaWall(d: QuotaWallDeps) {
 
     noteApiError: (e: { channelId: string; agent: string; at: number; error: string; text: string }): Promise<boolean> => noteApiErrorIn(c, e),
 
-    /** 它又真的动了：从续跑名单里拿掉 */
-    noteActivity(channelId: string, ts: number): void {
+    /** 它又真的动了：从续跑名单里拿掉，返回拿掉的那条（外人触发的那一轮不算数时要放回去：quota-wall-wiring rearmResume） */
+    noteActivity(channelId: string, ts: number): { agent: string; error: string } | null {
+      const hit = c.state.wall?.hits[channelId];
       const s = noteWallActivity(c.state, channelId, ts, ACTIVITY_GRACE_MS);
-      if (s) set(c, s);
+      if (!s || !hit) return null;
+      set(c, s);
+      return hit;
     },
 
     /** CLI clear 之外的人工出闸（网页按钮）；没闸返回 false */

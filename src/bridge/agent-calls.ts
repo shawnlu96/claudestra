@@ -12,6 +12,7 @@
  * 落盘（~/.claude-orchestrator/pending-agent-calls.json）：bridge 重启后对方照常回复也知道推给谁。不存 caller 的 ws：推回时按
  * callerChannelId 取当前连接。老文件（key = target）启动时迁成新 key。
  */
+import { shouldSweepPac, type HeldFromLike } from "../lib/held-pac.js";
 import { statePath } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 
@@ -87,6 +88,9 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (this.size) console.log(`♻️ 恢复待回程的 send_to_agent ${this.size} 条（对方的答复仍会推回发起方）`);
   }
 
+  /** 带着扣下的话（stop-settle 的 withheld）的槽被 reply / send_to_agent 直接答掉时调，bridge 接成推给 caller */
+  onWithheld?: (pac: PendingAgentCall) => void;
+
   /** 记一条请求（同一 caller 还没答完的请求留着，新的追加在后面） */
   add(target: string, call: PendingAgentCall, messageId?: string): void {
     const prev = this.slot(target, call.callerChannelId);
@@ -102,6 +106,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
   consume(target: string, caller: string, answered?: PendingAgentCall): boolean {
     const cur = this.slot(target, caller);
     if (!cur) return false;
+    if (cur.withheld?.length) this.onWithheld?.(cur); // 它直接答了：扣下的话推给 caller，不跟着槽悄悄清掉
     if (!answered?.requests) return this.delete(keyOf(target, caller));
     const done = new Set(answered.requests.map((r) => r.messageId));
     const left = requestsOf(cur).filter((r) => !done.has(r.messageId));
@@ -209,6 +214,21 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     if (changed) this.persist();
   }
 
+  /**
+   * 每分钟扫：送达后 staleMs 还没被消化的槽删掉，返回删掉的（以 API 错误结束、等续跑的由 bridge 用 expiredNotice 告诉 caller）。
+   * 押在 target 队里（它还没看到）的不删，失效钟从真正送达起算。
+   */
+  sweepStale(now: number, staleMs: number, heldFrom: (target: string) => HeldFromLike[] | undefined): PendingAgentCall[] {
+    const out: PendingAgentCall[] = [];
+    for (const [k, c] of [...this.entries()]) {
+      if (!shouldSweepPac(c, heldFrom(targetOf(k, c)), now, staleMs)) continue;
+      this.deleteQuiet(k);
+      out.push(c);
+    }
+    if (out.length) this.persist();
+    return out;
+  }
+
   /** 这个频道作为 target 或 caller 的槽全清掉（用户接管 / agent 被 kill），返回清掉几条 */
   dropChannel(channelId: string): number {
     let n = 0;
@@ -234,4 +254,16 @@ export function withExpecting(pac: PendingAgentCall, reply: string): string {
   return pac.expecting
     ? `[💡 你之前 send_to_agent 给 ${pac.targetName} 时填的期望：${pac.expecting}\n对方答复如下，请按计划继续，不要只 relay 给用户。]\n\n${reply}`
     : reply;
+}
+
+/** 撞错后扣下的话（stop-settle 的 withheld）单独推给 caller 时的抬头：别和不相干那一轮的正文拼在一起 */
+export function withheldNotice(pac: PendingAgentCall): string {
+  return `[ℹ️ ${pac.targetName} 撞墙前扣下的答复（那一轮以 API 错误结束，下面是出错前它已经说了的话）：]\n\n${(pac.withheld ?? []).join("\n\n")}`;
+}
+
+/** 以 API 错误结束、等续跑的回程过期（2 小时没接着做完）：不静默删，固定模板告诉 caller，扣下的话附后 */
+export function expiredNotice(pac: PendingAgentCall): string {
+  const at = new Date(pac.apiErrorAt ?? pac.ts).toTimeString().slice(0, 5);
+  const head = `[ℹ️ ${pac.targetName} 没有给出答复（原因：它 ${at} 那一轮以 API 错误结束，之后 2 小时没有接着做完），扣下的话附后，请重发或换人]`;
+  return pac.withheld?.length ? `${head}\n\n${pac.withheld.join("\n\n")}` : head;
 }

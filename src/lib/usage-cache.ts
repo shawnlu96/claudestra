@@ -51,8 +51,9 @@ export function formatResetTs(v: unknown): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// 四舍五入但不凑满：99.5% 显示成 100 会被额度闸当成撞墙（还剩 0.5% 就把全机的 agent 消息押住），只有真到 100 才是 100
 const pct = (v: unknown): number | null =>
-  typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? Math.round(v) : null;
+  typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100 ? (v < 100 ? Math.min(99, Math.round(v)) : 100) : null;
 
 /** 解析 + 新鲜度校验(纯函数,单测)。不新鲜/形态不对返回 null。 */
 export function parseUsageCache(

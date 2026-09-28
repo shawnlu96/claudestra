@@ -6,7 +6,7 @@
  */
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
-import { requestStillHeld, shouldSweepPac } from "./lib/held-pac.js";
+import { requestStillHeld } from "./lib/held-pac.js";
 import { sanitizeAttachmentBase } from "./lib/attachment-name.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
@@ -169,7 +169,7 @@ import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
-import { quotaWall, startQuotaWall } from "./bridge/quota-wall-wiring.js";
+import { holdAtWallWait, quotaWall, rearmResume, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
@@ -470,11 +470,13 @@ async function pushBackToCaller(
   return { kind: "sent" as const, note: "queued" };
 }
 
+// 带着撞错前扣下的话的槽被它直接答掉：扣下的话单独推给 caller（bridge/stop-settle.ts），不跟着槽悄悄清掉
+pendingAgentCalls.onWithheld = (p) => void pushBackToCaller(p, undefined, p.targetChannelId ?? "", withheldNotice(p), "agent_withheld").catch((e) => console.error("扣下的答复推送失败:", e));
 const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   answerable: answerablePac, consume: (cid, pac) => void pendingAgentCalls.consume(cid, pac.callerChannelId, pac), nudgeAmbiguous: nudgeAmbiguousCallers,
   pushBack: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_drain"),
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
-  takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)),
+  takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
   markApiError: (cid, text) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac.callerChannelId),
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
@@ -548,7 +550,7 @@ import { ageHeld, heldNoticeText, HeldQueue, unseenFrom } from "./bridge/held-qu
 import { flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait } from "./lib/turn-state.js";
-import { AgentCallBook, ambiguityNotice, withExpecting, type PendingAgentCall } from "./bridge/agent-calls.js";
+import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { noteDelivered, settleStopTurn, takeApiWaiters } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
@@ -793,7 +795,7 @@ function syncMasterWatcher(discord: Client): void {
 /** 额度闸押后：对调用方同样是「已受理、排队中」，出闸时按序补投（bridge/quota-wall.ts） */
 function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | undefined): RouterDelivery {
   console.log(`⏸ 消息押后(${agent} 额度闸): 来自 ${from ?? "?"},队列 ${heldLocalMsgs.holdEnv(env, "quota_wall")} 条`);
-  return { envelope: env, outcome: { kind: "sent", note: "queued" } };
+  return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: "quota_wall" } };
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
@@ -841,13 +843,11 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     meta.attachments = env.meta.attachments.join(";");
   }
   const evAgent = to.agentName || agentLabelForChannel(to.channelId);
-  // ── 人类连发抢占（owner 2026-07-14:「后一条消息应该直接打断前一条,优先处理
-  // 后面的,这样用户可以随时补充」）──目标正在回合中时,先 C-c 掐掉当前回合再投递:
-  // 上下文都在,agent 带着前一条的进度优先响应补充,而不是把补充压到回复之后。
-  // 只对人类的 request 生效(Discord user / API user);agent↔agent、peer、bridge
-  // 系统消息、response 回执不抢占目标的工作。
+  // ── 人类连发抢占:目标正在回合中时先 C-c 掐掉当前回合再投递,agent 带着进度优先响应补充,而不是把补充压到回复之后。
+  // 只对人类 request 生效(Discord user / 非 peer 的 API user);agent↔agent、peer(外机的 agent 请求,不能打断本机的活)、系统消息、回执不抢占。
   // 判忙、冷却、串行都在 interruptGate(lib/interrupt-gate.ts):只看主回合、压缩中和 Pi / Codex 不打断,打断后等 CC 收尾一拍。
-  // v2.11: peer 标记的 api 入站不算「人类抢占」——那是对方实例的 agent 请求,C-c 掐断本机正跑的回合等于让外机打断本机用户的活
+  // 停在额度菜单 / 撞墙等待:先押住、一个键都不发(菜单里有花钱的选项,bridge/quota-wall-wiring.ts)
+  const atWallMenu = await holdAtWallWait(env, to, evAgent); if (atWallMenu) return atWallMenu;
   if ((env.from.kind === "user" || (env.from.kind === "api" && !env.from.peer)) && env.intent === "request") {
     try {
       await interruptGate.preempt(to.channelId, evAgent);
@@ -868,7 +868,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     const n = heldLocalMsgs.holdEnv(env, wallHold ? "quota_wall" : undefined); // 从 flush 来的是队里那个 env 本身,不会重复入队
     console.log(`⏸ 消息押后(${evAgent} ${compactingNow ? "压缩上下文中" : "回合中"}): 来自 ${meta.user},队列 ${n} 条`);
     // 对调用方是「已受理、排队中」(note=queued):真正 ws.send 在 Stop/扫描时发生,send_to_agent 据此告诉发送方
-    return { envelope: env, outcome: { kind: "sent", note: "queued" } };
+    return { envelope: env, outcome: { kind: "sent", note: "queued", ...(wallHold ? { heldBy: "quota_wall" as const } : {}) } };
   }
   try {
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
@@ -2416,7 +2416,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             targetChannelId: target.channelId,
             targetName,
             pushBack: !oneShot,
-            queued: delivery.outcome.note === "queued", // 对方在回合中:已排队落盘,它这一轮结束才收到
+            queued: delivery.outcome.note === "queued", heldBy: delivery.outcome.heldBy, // 对方在回合中（或额度闸 / 停在额度菜单）:已排队落盘
           },
         }));
       } catch (err) {
@@ -2642,10 +2642,9 @@ const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
   const IA_WATCHDOG_STALE_MS = 10 * 60_000;
-  for (const [key, pending] of pendingAgentCalls.entries()) {
-    if (quotaWall()?.active() || !shouldSweepPac(pending, heldFromOf(pending.targetChannelId ?? ""), now, PAC_STALE_MS)) continue; // 闸内不扫，出闸重新起算
-    pendingAgentCalls.delete(key);
-    console.log(`🧹 pendingAgentCalls stale: 清掉 target=${pending.targetName} (caller=${pending.callerName})`);
+  for (const p of quotaWall()?.active() ? [] : pendingAgentCalls.sweepStale(now, PAC_STALE_MS, heldFromOf)) { // 闸内不扫，出闸重新起算
+    console.log(`🧹 pendingAgentCalls stale: 清掉 target=${p.targetName} (caller=${p.callerName})`);
+    if (p.apiErrorAt) void pushBackToCaller(p, undefined, p.targetChannelId ?? "", expiredNotice(p), "agent_expired", "notification").catch((e) => console.error("回程过期说明推送失败:", e));
   }
   // v2.21.1+ 押后队列兜底:Stop 丢失/目标持续忙时,分钟级重试投递;押久了告诉 caller(held-queue.ts ageHeld)
   for (const n of ageHeld(heldLocalMsgs, now, !!quotaWall()?.active())) {

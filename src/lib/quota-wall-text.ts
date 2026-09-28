@@ -62,6 +62,10 @@ export function parseWallText(text: string, now: number): WallHit | null {
 const MENU_OPTIONS = [
   /^Stop and wait for limit to reset$/,
   /^Wait here, then continue automatically (?:shortly|when the limit resets|at .+)$/,
+  // CC 2.1.28x 之后的新项（T35 2026-09-29 实录 tests/fixtures/quota-wall/menu-*.txt）：Esc 不选任何一项，认得就能关
+  /^Don['’]t continue automatically$/,
+  /^Continue now at lower priority$/,
+  /^While you wait, start a new cloud session by claiming a \$\d+ credit$/,
   /^Switch to usage credits$/,
   /^Upgrade your plan$/,
   /^Ask your admin for more usage$/,
@@ -84,18 +88,42 @@ export function matchLimitMenu(pane: string): boolean {
   });
 }
 
-/** 撞墙等待的画面行：菜单底部提示、选了「Wait here」后状态栏的自动续跑倒计时、low-priority 入口（T35 实测文案） */
-const WALL_WAIT_LINE = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$|continuing automatically\b[^\n]*·\s*esc to cancel|\/low-priority to continue now\b/i;
+/** 撞墙等待的状态行（输入框下沿以下）：自动续跑倒计时、low-priority 入口（T35 实测文案，样本 tests/fixtures/quota-wall/walled*.txt） */
+const WALL_WAIT_LINE = /continuing automatically\b[^\n]*·\s*esc (?:to cancel|or type)|\/low-priority to continue now\b/i;
+const MENU_HINT_LINE = /^\s*Enter to confirm\s*·\s*Esc to cancel\s*$/i;
+/** 额度菜单里才有的项：新旧版本的文案都算（判「停在额度菜单」要宽，判「能不能发 Esc」用上面严格的 matchLimitMenu） */
+const LIMIT_OPTION_RE = /limit to reset|usage credits|lower priority|continue automatically|Upgrade your plan|Add funds to continue/i;
+
+/** 画面底部是额度菜单（标题 + 编号项 + 提示行，有一项是额度菜单才有的）；不要求每一项都认得 */
+function limitMenuAtBottom(lines: string[]): boolean {
+  const tail = lines.filter((l) => l.trim()).slice(-12);
+  if (!tail.length || !MENU_HINT_LINE.test(tail[tail.length - 1]!)) return false;
+  const opts = tail.slice(0, -1).reverse();
+  const n = opts.findIndex((l) => !/^\s*(?:❯\s*)?\d+\.\s+\S/.test(l));
+  return n > 0 && /What do you want to do\?/.test(opts[n]!) && opts.slice(0, n).some((l) => LIMIT_OPTION_RE.test(l));
+}
+
+/** 输入框下沿以下（状态栏）：最后一对横线边框、上框下一行是 ❯；没有输入框（被菜单占着）= 空 */
+function footerLines(lines: string[]): string[] {
+  for (let i = lines.length - 1; i > 1; i--) {
+    if (!/^\s*─{8,}/.test(lines[i]!)) continue;
+    for (let j = i - 1; j >= Math.max(0, i - 12); j--) if (/^\s*─{8,}/.test(lines[j]!)) return /^\s*❯/.test(lines[j + 1] ?? "") ? lines.slice(i + 1) : [];
+    return [];
+  }
+  return [];
+}
 
 /**
- * 撞墙后停在那儿等（菜单开着 / 状态栏写着「continuing automatically at 3:20am · esc to cancel」），主回合其实没在跑。
- * 这两种画面都带「esc to cancel」，CC_BUSY_RE 会判成忙（T35 实测）：额度闸判「它在不在跑」时先用这个排除，
- * CC_BUSY_RE 本身不动。把这些行拿掉之后画面上还有 spinner 的，照旧算在跑。
+ * 撞墙后停在那儿等：底部是额度菜单，或状态栏写着「Usage limit reached · continuing automatically at 3:20am · esc to cancel」
+ * （/low-priority 入口同理）。主回合其实没在跑，但菜单的「Esc to cancel」会让 CC_BUSY_RE 判成忙（T35 实测）：额度闸判
+ * 「它在不在跑」、投递前判「能不能发键」都先用这个，CC_BUSY_RE 本身不动。对话里的同样字样不算（只看状态栏 / 底部菜单）；
+ * 拿掉这些行之后画面上还有 spinner 的，照旧算在跑。
  */
 export function paneShowsWallWait(pane: string): boolean {
   const lines = pane.replace(/\s+$/, "").split("\n");
-  if (!matchLimitMenu(pane) && !lines.slice(-20).some((l) => WALL_WAIT_LINE.test(l))) return false;
-  return !paneMainTurnBusy(lines.filter((l) => !WALL_WAIT_LINE.test(l)).join("\n"));
+  const menu = limitMenuAtBottom(lines);
+  if (!menu && !footerLines(lines).some((l) => WALL_WAIT_LINE.test(l))) return false;
+  return !paneMainTurnBusy(lines.filter((l) => !WALL_WAIT_LINE.test(l) && !(menu && MENU_HINT_LINE.test(l))).join("\n"));
 }
 
 /** owner 用了重置卡（/limit-reset 成功）时 CC 回显的「Limits reset · your weekly reset day stays … · … left」，不落 jsonl，只能看画面 */

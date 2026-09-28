@@ -60,11 +60,15 @@ export interface Wall {
 
 interface WallCacheSeen {
   full: boolean;
-  firstWeek: number | null;
-  firstSession: number | null;
-  lastWeek: number | null;
-  lastSession: number | null;
+  /** 某个窗口的重置时刻前进过（严格晚于之前见过的最晚那个）：窗口滚过去了 */
+  rolled: boolean;
+  /** 见过的最晚重置时刻：写入脚本会把空闲会话里上一周期的旧值写回来，只认前进、不认「不相等」 */
+  maxWeek: number | null;
+  maxSession: number | null;
 }
+
+const later = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.max(a, b));
+const advanced = (seen: number | null, now: number | null): boolean => seen !== null && now !== null && now > seen;
 
 export interface WallState {
   v: 1;
@@ -185,8 +189,9 @@ export function observeCache(s: WallState, u: UsageSignal | null): WallState | n
   if (!u || !w || w.exit || u.scrapedAt <= w.enteredAt) return null;
   const p = w.cache;
   const next: WallCacheSeen = {
-    full: !!p?.full || isFull(u), firstWeek: p ? p.firstWeek : u.weekResetsAtMs, firstSession: p ? p.firstSession : u.sessionResetsAtMs,
-    lastWeek: u.weekResetsAtMs, lastSession: u.sessionResetsAtMs,
+    full: !!p?.full || isFull(u),
+    rolled: !!p && (p.rolled || advanced(p.maxWeek, u.weekResetsAtMs) || advanced(p.maxSession, u.sessionResetsAtMs)),
+    maxWeek: later(p?.maxWeek ?? null, u.weekResetsAtMs), maxSession: later(p?.maxSession ?? null, u.sessionResetsAtMs),
   };
   if (p && JSON.stringify(p) === JSON.stringify(next)) return null;
   return { v: 1, wall: { ...structuredClone(w), cache: next } };
@@ -205,9 +210,9 @@ export function enterFromUsage(s: WallState, u: UsageSignal, now: number, newId:
   if (!week && !session) return no;
   const resetsAt = week ? u.weekResetsAtMs : u.sessionResetsAtMs;
   const prev = s.wall;
-  if (prev?.exit && prev.exit.via !== "resets_at" && (!prev.cache || resetsAt === (week ? prev.cache.lastWeek : prev.cache.lastSession))) return no;
+  if (prev?.exit && prev.exit.via !== "resets_at" && !advanced(week ? prev.cache?.maxWeek ?? null : prev.cache?.maxSession ?? null, resetsAt)) return no;
   const w = freshWall(s.wall, newId(), now, "usage_cache", week ? "weekly" : "session", resetsAt, null);
-  w.cache = { full: true, firstWeek: u.weekResetsAtMs, firstSession: u.sessionResetsAtMs, lastWeek: u.weekResetsAtMs, lastSession: u.sessionResetsAtMs };
+  w.cache = { full: true, rolled: false, maxWeek: u.weekResetsAtMs, maxSession: u.sessionResetsAtMs };
   return { state: { v: 1, wall: w }, entered: true };
 }
 
@@ -228,7 +233,7 @@ const FALLBACK_SPAN_MS = { weekly: 7 * 86_400_000, session: 5 * 3_600_000, unkno
 export function wallUntil(w: Wall): number {
   if (w.resetsAt !== null) return w.resetsAt;
   const k = w.cache;
-  const fromCache = w.kind === "weekly" ? k?.lastWeek : w.kind === "session" ? k?.lastSession : Math.max(k?.lastWeek ?? 0, k?.lastSession ?? 0) || null;
+  const fromCache = w.kind === "weekly" ? k?.maxWeek : w.kind === "session" ? k?.maxSession : later(k?.maxWeek ?? null, k?.maxSession ?? null);
   return fromCache && fromCache > w.enteredAt ? fromCache : w.enteredAt + FALLBACK_SPAN_MS[w.kind];
 }
 
@@ -243,9 +248,8 @@ export function exitVia(w: Wall, sig: ExitSignals): WallExitVia | null {
   const k = w.cache; // observeCache 先记过这一拍
   if (c && k && c.scrapedAt > w.enteredAt) {
     const pcts = [c.sessionPct, c.weekPct].filter((p): p is number => p !== null);
-    const rolled = (a: number | null, b: number | null) => a !== null && b !== null && a !== b;
     const below = pcts.length > 0 && pcts.every((p) => p < 100);
-    if (below && (k.full || rolled(k.firstWeek, c.weekResetsAtMs) || rolled(k.firstSession, c.sessionResetsAtMs))) return "usage_cache";
+    if (below && (k.full || k.rolled)) return "usage_cache";
   }
   return null;
 }

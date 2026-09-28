@@ -39,11 +39,12 @@ export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: 
  */
 export const ACTIVITY_GRACE_MS = 3_000;
 
-/** 该 agent 有了错误之后的新活动 ⇒ 不用续（还没续过才删；续过的留到窗口过期以便判「又撞」） */
-export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: number): void {
+/** 该 agent 有了错误之后的新活动 ⇒ 不用续（还没续过才删；续过的留到窗口过期以便判「又撞」）。返回被取消的那条（没取消 = undefined） */
+export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: number): ApiErrorState | undefined {
   const s = m.get(cid);
-  if (!s) return;
-  if (s.resumedAt === undefined && ts > s.errorAt + ACTIVITY_GRACE_MS) m.delete(cid);
+  if (!s || s.resumedAt !== undefined || ts <= s.errorAt + ACTIVITY_GRACE_MS) return undefined;
+  m.delete(cid);
+  return s;
 }
 
 /** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" / 撞额度原文（rateLimited）不算 */

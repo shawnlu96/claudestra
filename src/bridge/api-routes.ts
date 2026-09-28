@@ -1371,8 +1371,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
     deps.lastMessageSource.set(agent.channelId, "agent");
 
-    if (waitSec === 0) {
-      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
+    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy：押住了（额度闸 / 目标停在额度菜单，没发键），不干等答复
+      return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, heldBy: delivery.outcome.heldBy, hint: `poll GET /api/v1/threads/${threadId}` });
     }
 
     const result = await new Promise<ApiReplyResult | null>((resolve) => {

@@ -13,7 +13,7 @@ import { isOwnerSource } from "../lib/delegate-marker.js";
 import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
-import { withExpecting, type PendingAgentCall } from "./agent-calls.js";
+import { withExpecting, withheldNotice, type PendingAgentCall } from "./agent-calls.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -37,14 +37,22 @@ export interface StopTurn {
  * owner:self 的 API（lib/delegate-marker.ts isOwnerSource，全仓唯一的 owner 判定）；stranger = guest、scoped / 外部 token、peer。
  * 以 API 错误结束后回程照常由 insider 和 owner 触发的回合结算（owner 和 PM 在同一侧，推过去不跨 principal）；stranger 触发的
  * 回合答的是那个外人，不结算、它说的话也不扣。不看 lastMessageSource：api-routes 投递后会把它改成 "agent"。
+ * 开启这一轮的那条说了算：回合进行中送到的（bridge 消息、peer 请求照投不押）不覆盖它（T24 r2 P2-1，PM 09-29）；
+ * 开头几秒里一起送到的一批（押后队列补投）取最严的：stranger > owner > insider。这一轮 Stop 时清掉。
  * 进程内：重启后不知道 = 当 stranger（不结算）。
  */
 export type TurnTrigger = "insider" | "owner" | "stranger";
-const lastTrigger = new Map<string, TurnTrigger>();
-export function noteDelivered(cid: string, from: { kind: string; owner?: boolean; peer?: string }): void {
-  lastTrigger.set(cid, from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger");
+const RANK: Record<TurnTrigger, number> = { insider: 0, owner: 1, stranger: 2 };
+/** 同一批：第一条送到后这么久内到的算一起开启这一轮 */
+const TRIGGER_BATCH_MS = 3_000;
+const turnTrigger = new Map<string, { who: TurnTrigger; at: number }>();
+export function noteDelivered(cid: string, from: { kind: string; owner?: boolean; peer?: string }, now = Date.now()): void {
+  const who: TurnTrigger = from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
+  const cur = turnTrigger.get(cid);
+  if (!cur) turnTrigger.set(cid, { who, at: now });
+  else if (now - cur.at <= TRIGGER_BATCH_MS && RANK[who] > RANK[cur.who]) turnTrigger.set(cid, { who, at: cur.at });
 }
-const strangerTurn = (t: StopTurn): boolean => (t.trigger ?? lastTrigger.get(t.cid) ?? "stranger") === "stranger";
+const strangerTurn = (t: StopTurn): boolean => (t.trigger ?? turnTrigger.get(t.cid)?.who ?? "stranger") === "stranger";
 
 const ranIntoApiError = (t: StopTurn): boolean =>
   !!t.drain.apiError || (t.event === "StopFailure" && (t.runtime ?? DEFAULT_RUNTIME) === DEFAULT_RUNTIME);
@@ -60,23 +68,39 @@ export function settlesOwnTurn(t: StopTurn): boolean {
 
 /** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，看门狗照它走 */
 export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
+  const mine = isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
+  try {
+    return await settleOwn(d, t, mine);
+  } finally {
+    if (mine) turnTrigger.delete(t.cid); // 这一轮结束：下一轮的来源从它的第一条消息重新记
+  }
+}
+
+async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promise<boolean> {
   const own = settlesOwnTurn(t);
   if (!own) {
-    if (isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs)) await onApiErrorTurn(d, t);
+    if (mine) await onApiErrorTurn(d, t);
     return false;
   }
-  const pac = d.answerable(t.cid);
-  if (pac?.apiErrorAt && strangerTurn(t)) return own; // 答的是外人：回程留着，看门狗照常按「答完了」走
-  if (pac?.withheld?.length && !(await pushWithheld(d, t.cid, pac))) return own; // 没推出去：回程和扣下的话都留着，下一轮再试
+  const waiting = d.waiting(t.cid);
+  if (waiting.some((c) => c.apiErrorAt) && strangerTurn(t)) {
+    d.rearmResume(t.cid); // 答的是外人：回程留着；它的 60 秒续跑要是被这一轮取消了，重新排上，不然没人再叫它接着做
+    return own;
+  }
+  // 扣下的话按槽逐个推（好几个 caller 在等时也推，不等它逐个 send_to_agent）；推失败这一轮的正文也扣上，不丢
+  for (const c of waiting.filter((x) => x.withheld?.length)) {
+    if (await pushWithheld(d, t.cid, c)) continue;
+    if (t.drain.text) d.markApiError(t.cid, t.drain.text);
+    return own;
+  }
   await settleCallers(d, t.cid, t.drain.text);
   return own;
 }
 
 /** 撞墙前扣下的话单独推一条、带抬头：和这一轮（可能是不相干的一轮）的正文拼在一起，caller 分不清哪句是答它的 */
 async function pushWithheld(d: CallerSettleDeps, cid: string, pac: PendingAgentCall): Promise<boolean> {
-  const body = `[ℹ️ ${pac.targetName} 撞墙前扣下的答复（那一轮以 API 错误结束，下面是出错前它已经说了的话）：]\n\n${pac.withheld!.join("\n\n")}`;
   try {
-    await d.pushBack(pac, cid, body);
+    await d.pushBack(pac, cid, withheldNotice(pac));
     d.clearWithheld(cid, pac);
     return true;
   } catch (e) {
@@ -130,6 +154,10 @@ export function takeApiWaiters<W extends ApiWaiter>(queues: Map<string, W[]>, t:
 
 export interface CallerSettleDeps {
   answerable(cid: string): PendingAgentCall | undefined;
+  /** 在等 cid 的所有槽（请求已送到它手上的） */
+  waiting(cid: string): PendingAgentCall[];
+  /** 外人那一轮结束、回程还等着：它的 60 秒续跑 / 出闸续跑要是被这一轮当成「它又动了」取消了，重新排上（quota-wall-wiring） */
+  rearmResume(cid: string): void;
   consume(cid: string, pac: PendingAgentCall): void;
   /** 推回 caller（bridge 的 pushBackToCaller） */
   pushBack(pac: PendingAgentCall, cid: string, body: string): Promise<unknown>;

@@ -23,7 +23,7 @@ describe("api-error-resume", () => {
     expect(m.has("c1")).toBe(true);
     noteActivity(m, "c1", T0 + 1); // 错误条目自己连带的 assistant_text / thinking，几毫秒后
     expect(m.has("c1")).toBe(true);
-    noteActivity(m, "c1", T0 + ACTIVITY_GRACE_MS + 1);
+    expect(noteActivity(m, "c1", T0 + ACTIVITY_GRACE_MS + 1)).toEqual({ errorAt: T0, error: "e" }); // 交出被取消的那条：外人那一轮结束后可重排
     expect(m.has("c1")).toBe(false);
     expect(dueForResume(m, T0 + RESUME_DELAY_MS)).toEqual([]);
   });

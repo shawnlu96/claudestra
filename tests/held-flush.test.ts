@@ -128,6 +128,13 @@ describe("flushHeld", () => {
     expect(h.held.get("c-me")![0]).toMatchObject({ heldAt: 5000 });
   });
 
+  test("目标一直在压缩：也先改记成额度闸再返回，闸开超过 24 小时也不会出闸后立刻被放弃（T24 r2 P2-8）", async () => {
+    const h = harness([item("agent-msg", "local", 1000)], { walled: async () => true, compacting: () => true });
+    await flushHeld(h.deps, "c-me", "sweep");
+    expect(h.held.wallCount()).toBe(1);
+    expect(h.delivered).toEqual([]);
+  });
+
   test("闸开着时整体不老化：30 分钟提醒是直接 ws.send 给发送方的，会唤醒一个注定撞墙的回合", () => {
     const h = harness([item("to-codex", "local", 1000)]);
     expect(ageHeld(h.held, 1000 + HELD_NOTIFY_MS + 1, true)).toEqual([]);
