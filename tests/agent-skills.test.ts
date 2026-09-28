@@ -57,8 +57,8 @@ describe("同步技能的裸名别名、外部设置", () => {
       cwd: null, overrides: {}, piEnv: {},
       outside: [{ source: "user", overrides: { docx: "off" } }, { source: "local", overrides: { pdf: "name-only" } }],
     });
-    expect(v.rows.find((r) => r.name === "anthropic-skills:docx")?.outside).toEqual([{ source: "user", state: "off" }]);
-    expect(v.rows.find((r) => r.name === "pdf")?.outside).toEqual([{ source: "local", state: "name-only" }]);
+    expect(v.rows.find((r) => r.name === "anthropic-skills:docx")?.outside).toEqual([{ source: "user", key: "docx", state: "off" }]);
+    expect(v.rows.find((r) => r.name === "pdf")?.outside).toEqual([{ source: "local", key: "pdf", state: "name-only" }]);
     expect(v.rows.find((r) => r.name === "anthropic-skills:pdf")?.outside).toBeUndefined();
   });
 });

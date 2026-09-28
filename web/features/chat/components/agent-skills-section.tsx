@@ -130,12 +130,12 @@ function SkillToggleRow({ r, full, readOnly, busy, onChange }: { r: AgentSkillRo
   return (
     <li className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-base-200/50 px-2.5 py-1.5">
       <div className="min-w-0 flex-1 basis-40">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className={`min-w-0 truncate font-mono text-[12.5px] ${r.state === "off" ? "text-base-content/45 line-through" : ""}`} title={r.name}>{displaySkillName(r)}</span>
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className={`min-w-0 max-w-full truncate font-mono text-[12.5px] ${r.state === "off" ? "text-base-content/45 line-through" : ""}`} title={r.name}>{displaySkillName(r)}</span>
           <span className="badge badge-ghost badge-xs shrink-0">{r.scope === "missing" ? t("已不存在") : t(SCOPE_LABEL[r.scope])}</span>
           {!full && r.state !== "on" && r.state !== "off" && <span className="badge badge-info badge-outline badge-xs shrink-0">{t(STATE_LABEL[r.state])}</span>}
           {r.outside?.map((o) => (
-            <span key={o.source} className="badge badge-warning badge-outline badge-xs shrink-0" title={t("在 CC 自己的设置文件里设的，这里改不了")}>
+            <span key={`${o.source}|${o.key}`} className="badge badge-warning badge-outline badge-xs shrink-0" title={`${o.key} · ${t("在 CC 自己的设置文件里设的，这里改不了")}`}>
               {t(OUTSIDE_LABEL[o.source])}: {t(STATE_LABEL[o.state as SkillState] ?? o.state)}
             </span>
           ))}

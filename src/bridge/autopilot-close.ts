@@ -1,0 +1,90 @@
+/**
+ * Autopilot run 的收尾（调度在 bridge/mission.ts）：等证据到齐 → 归类 → 落盘 lastRun 并排下一次 → 写一行日志。
+ * 证据要等：Stop 先发 done，watcher 在那之后才把最后几行 jsonl 读完（撞额度、API 报错常在最后），立刻取证会漏。
+ * tests/bridge-mission.test.ts。
+ */
+import { classifyRun, type RunEvidence } from "../lib/autopilot-run.js";
+import { finishRun, type ActiveRun } from "../lib/autopilot-wake.js";
+import { appendRunLog, runLogLine } from "../lib/autopilot-log.js";
+import { updateMissions, type Mission } from "../lib/missions.js";
+import { lastEvidenceAt, takeEvidence, takeOrphan } from "./autopilot-evidence.js";
+
+/** done 之后至少等这么久、且最后一条事件之后安静这么久才取证；最多等 EVIDENCE_MAX_MS（watcher 另有 2s 轮询兜底） */
+let EVIDENCE = { minMs: 2_000, quietMs: 1_000, maxMs: 10_000 };
+/** 单测缩短等待；生产不调 */
+export function setEvidenceWaitForTest(w: typeof EVIDENCE): void {
+  EVIDENCE = w;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const iso = (ms: number) => new Date(ms).toISOString();
+
+/** 正在收尾的 run：同一个 run 的第二个 done（打断之后又来 Stop）不重复收 */
+const closing = new Set<string>();
+
+async function settle(agent: string, doneAt: number): Promise<void> {
+  const end = doneAt + EVIDENCE.maxMs;
+  for (;;) {
+    const now = Date.now();
+    const quietFor = now - (lastEvidenceAt(agent) ?? 0);
+    if (now >= end || (now - doneAt >= EVIDENCE.minMs && quietFor >= EVIDENCE.quietMs)) return;
+    await sleep(100);
+  }
+}
+
+export interface CloseCtx {
+  path: string;
+  graceMs: number;
+}
+
+/**
+ * 收一个 run：只认 runId 对得上的那一个（重复 done、旧一代都不收）；mission 已不在进行中就不再排下一次。
+ * ev 为空 = 从证据模块取（afterDone 为真时先等证据到齐）；bridge 判的失败 / 证据丢失由调用方传进来。
+ */
+export async function closeRun(
+  agent: string, runId: string, ctx: CloseCtx, opts: { afterDone?: number; ev?: RunEvidence } = {},
+): Promise<Mission | null> {
+  if (closing.has(runId)) return null;
+  closing.add(runId);
+  try {
+    if (opts.afterDone !== undefined) await settle(agent, opts.afterDone);
+    const ev = opts.ev ?? takeEvidence(agent, runId);
+    const now = Date.now();
+    const cls = classifyRun(ev);
+    const out = await updateMissions((all) => {
+      const cur = all[agent];
+      if (!cur || cur.run?.runId !== runId) return null;
+      const run: ActiveRun = cur.run;
+      const f = finishRun(cur, runId, cls.outcome, ev, now, ctx.graceMs)!;
+      if (cur.status !== "active") delete cur.wake;
+      if (f.next.hold && cur.status === "active") cur.resumeAt = iso(f.nextAt); // 网页「等到 …」
+      else delete cur.resumeAt;
+      return { m: { ...cur }, run, f };
+    }, ctx.path);
+    if (!out) return null;
+    const active = out.m.status === "active";
+    appendRunLog(runLogLine({
+      missionId: out.m.id ?? "unknown", agent, run: out.run, outcome: cls.outcome, reason: cls.reason, evidence: ev, now,
+      ...(active ? { next: { at: out.f.nextAt, why: out.f.next.why } } : {}),
+    }));
+    console.log(`⏱ Autopilot ${agent}: run ${runId} → ${cls.outcome}（${cls.reason}）${active ? `，下次 ${out.f.next.why}` : ""}`);
+    return out.m;
+  } finally {
+    closing.delete(runId);
+  }
+}
+
+/**
+ * 本进程还在给旧 run 记账，但 missions.json 里已经换了一代（stop 后立刻 start）或整条删了：给旧一代补一行日志，不排下一次。
+ * 新一代领 run 之前、以及回合结束时都查一次，免得旧 run 的记账被新 run 覆盖、悄悄丢掉。
+ */
+export function logOrphanRun(agent: string, currentRunId: string | undefined): void {
+  const o = takeOrphan(agent, currentRunId);
+  if (!o) return;
+  const cls = classifyRun(o.ev);
+  const now = Date.now();
+  appendRunLog(runLogLine({
+    missionId: o.missionId, agent, run: o.run, outcome: cls.outcome, reason: `${cls.reason}（mission 已停止或换了一代）`, evidence: o.ev, now,
+  }));
+  console.log(`⏱ Autopilot ${agent}: 旧一代的 run ${o.run.runId} 补记 ${cls.outcome}`);
+}

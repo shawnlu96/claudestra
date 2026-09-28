@@ -36,6 +36,7 @@ src/
   cron.ts                Cron scheduler daemon (launchd-managed)
   launcher.ts            Master tmux session guardian (launchd-managed)
   setup.ts               Interactive installation wizard
+  desktop-cli.ts         JSON entry for the menu-bar app (status / deps / doctor / restart); logic in lib/desktop-status.ts
   hooks/
     typing-hook.ts       Claude Code Stop/Notification hook → Bridge HTTP endpoint; v2.22.x Stop 时 bridge 可回 {block, reason}(未回复的频道请求)→ hook 输出 decision=block 让 agent 补 reply
     recall-hook.ts       v2.21.5+ SessionStart hook: injects the project's HANDOFF.md + `~/mem0-mcp/recall.py` output (mem0 top-layer recall) into the opening context; always exits 0, 10s cap
@@ -81,6 +82,7 @@ src/
   ansi2html.ts           ANSI escape codes → coloured HTML
   html2png.ts            HTML → PNG via Playwright headless Chromium
   discord-reply.ts       Bash fallback: send a message through the Bridge directly
+desktop/                   Experimental macOS menu-bar app (Tauri 2): thin Rust shell + desktop/ui; not scanned by guard (desktop/README.md)
 master/
   CLAUDE.md.template     Master agent instruction template (rendered by setup.ts)
   CLAUDE.md              Rendered local copy (git-ignored)

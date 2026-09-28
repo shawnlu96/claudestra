@@ -19,13 +19,13 @@ import { codexBusy } from "./codex-exit.js";
 import { controlFor } from "./index.js";
 import type { WindowOps } from "./types.js";
 
-export function tmuxWindowOps(name: string): WindowOps {
-  const target = windowTarget(name);
+/** target 缺省按名字精确匹配；create 传刚建窗口的 `@id`，窗口一旦被关，后续按键不会落到任何别的窗口 */
+export function tmuxWindowOps(name: string, target: string = windowTarget(name)): WindowOps {
   return {
     name,
     target,
     capture: (lines = 40) => tmuxCapture(target, lines),
-    sendLine: (text) => tmuxSendLine(target, text),
+    sendLine: (text) => tmuxSendLine(target, text, 100, true), // 启动命令：没发出去就抛（lib/tmux-helper.ts）
     sendLiteral: async (text) => {
       await tmuxRaw(["send-keys", "-t", target, "-l", "--", text]);
     },

@@ -20,7 +20,7 @@ interface AgentSkillRow {
   userInvocable: boolean;
   modelInvocable: boolean;
   /** 项目 / 全局 settings 里对它的 skillOverrides（这里管不到；CC 里 --settings 删键开不回来） */
-  outside?: Array<{ source: OutsideSource; state: string }>;
+  outside?: Array<{ source: OutsideSource; key: string; state: string }>;
   /** Pi：跟着 piEnv.skills 里整个父目录一起加载的，单独关不掉（值是那一项） */
   lockedBy?: string;
 }
@@ -62,7 +62,7 @@ export function syncedAliases(skill: string, skills: LibrarySkill[], cwd: string
 }
 
 const outsideOf = (keys: string[], outside: OutsideOverrides) =>
-  outside.flatMap((o) => keys.filter((k) => k in o.overrides).map((k) => ({ source: o.source, state: o.overrides[k] })));
+  outside.flatMap((o) => keys.filter((k) => k in o.overrides).map((k) => ({ source: o.source, key: k, state: o.overrides[k] })));
 
 /** Claude Code：被同名盖过的不列（CC 只认赢家）；overrides 里技能库找不到、也不是别名的补一行 missing */
 function claudeSkillRows(skills: LibrarySkill[], cwd: string | null, overrides: Record<string, SkillState>, outside: OutsideOverrides): AgentSkillRow[] {

@@ -205,3 +205,8 @@ export async function localSkillLibrary(include?: { cwd: string; runtime: AgentR
   if (include) agents.push(include); // skillRoots 按 runtime|目录去重，重复没关系
   return buildSkillLibrary({ home, agents, plugins: readInstalledPlugins(home), piSkillPaths: readPiGlobalEnv().skillPaths }, `${REPO_ROOT}/skills`);
 }
+
+/** 只留这些工作目录下的项目技能 / 项目搜索根（个人、插件、同步等不是项目的原样保留）：按凭据 scope 裁剪用 */
+export function onlyProjects<T extends { scope: string; project?: string }>(items: T[], cwds: Set<string>): T[] {
+  return items.filter((x) => x.scope !== "project" || (!!x.project && cwds.has(x.project)));
+}

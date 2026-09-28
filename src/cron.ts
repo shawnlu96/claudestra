@@ -23,7 +23,7 @@ import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
 import {
   tmuxSendLine,
   tmuxCapture,
-  isIdle as tmuxIsIdle,
+  isIdle as tmuxIsIdle, windowTarget, tmuxRawStrict,
 } from "./lib/tmux-helper.js";
 
 // ============================================================
@@ -331,7 +331,7 @@ async function executeOnTempAgent(
     const tmpSessionId = createResult.sessionId as string | undefined;
     await Bun.sleep(3000); // 等 agent 就绪
 
-    const tmuxTarget = `master:agent-${agentName}`;
+    const tmuxTarget = windowTarget(`agent-${agentName}`);
     await tmuxSendLine(tmuxTarget, job.prompt);
 
     // 等完成 —— 15s 冷启动 + 10s 轮询 idle
@@ -409,14 +409,14 @@ async function executeOnExistingAgent(
 ): Promise<void> {
   const agentShort = job.targetAgent!;
   const tmuxName = agentShort.startsWith("agent-") ? agentShort : `agent-${agentShort}`;
-  const tmuxTarget = `master:${tmuxName}`;
+  const tmuxTarget = windowTarget(tmuxName); // 精确匹配：目标不在时别把提示词打进前缀同名的别的 agent
 
   console.log(`🚀 执行 cron 任务（打到现存 agent）: "${job.name}" → ${tmuxName}`);
 
   // 存在性校验：window 不存在（agent 被 kill / registry 名不对）就报 error，
   // 这种情况用户需要知道。但"agent 忙"不算错，照发。
   try {
-    await tmuxIsIdle(tmuxTarget); // 只测能不能访问 window，不管返回值
+    await tmuxRawStrict(["list-panes", "-t", tmuxTarget, "-F", "#{pane_id}"]); // 窗口不在会抛（isIdle 走 tmuxRaw 从不抛，display-message 会退回当前窗口）
   } catch {
     throw new Error(`目标 agent 不存在或未运行: ${tmuxName}`);
   }

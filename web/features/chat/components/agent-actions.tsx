@@ -209,7 +209,7 @@ export function AgentActions({ agent, menuLead }: { agent: AgentSession; menuLea
             }}
           >
             {agent.mission ? <MissionStopIcon /> : <MissionIcon size={15} />}
-            {agent.mission ? t("结束值守") : t("开始值守…")}
+            {agent.mission ? t("关闭 Autopilot") : t("开启 Autopilot…")}
           </button>
         </li>
         <li>

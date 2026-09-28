@@ -18,6 +18,12 @@ export const SKILL_STATES = ["on", "off", "name-only", "user-invocable-only"] as
 export type SkillState = (typeof SKILL_STATES)[number];
 export type AgentSettings = Record<string, unknown>;
 
+/** 进启动命令行的键（白名单）：设置文件里手写了别的（比如 env 里的密钥）也不会出现在 ps 里 */
+const LAUNCH_KEYS = ["skillOverrides"] as const;
+/** 内联 JSON 的上限：tmux 单条命令约 16KB 就发不出去（启动命令里还有 purpose、project 上下文等），留一半余量 */
+export const MAX_LAUNCH_SETTINGS_BYTES = 8192;
+const launchPart = (s: AgentSettings): AgentSettings => Object.fromEntries(LAUNCH_KEYS.filter((k) => k in s).map((k) => [k, s[k]]));
+
 export const isSkillState = (v: unknown): v is SkillState => typeof v === "string" && (SKILL_STATES as readonly string[]).includes(v);
 
 /** 技能调用名：个人技能 `name`，插件 / 同步 `前缀:name`。挡掉路径分隔、空白和引号（会进 JSON 键和日志）；首字符要字母数字，顺带挡掉 __proto__ */
@@ -72,6 +78,8 @@ export async function setSkillOverride(agent: string, skill: string, state: Skil
   const cur = readJsonStateSync(path, isPlainObject);
   const base = cur.status === "ok" ? (cur.data as AgentSettings) : {};
   const next = applySkillOverride(aliases.reduce((acc, a) => applySkillOverride(acc, a, "on"), base), skill, state);
+  const bytes = Buffer.byteLength(JSON.stringify(launchPart(next)));
+  if (bytes > MAX_LAUNCH_SETTINGS_BYTES) throw new Error(`技能覆盖太多了（${bytes} 字节，上限 ${MAX_LAUNCH_SETTINGS_BYTES}）：启动命令会超过 tmux 的长度上限，先把用不着的调回「开」`);
   if (Object.keys(next).length === 0 && cur.status !== "corrupt") {
     if (existsSync(path)) unlinkSync(path);
     return next;
@@ -81,7 +89,7 @@ export async function setSkillOverride(agent: string, skill: string, state: Skil
 }
 
 /**
- * remove（永久删除）时删；全新 agent（create、resume / takeover 起新名字）启动前删同名旧文件；rename 时跟着挪。
+ * remove（永久删除）时删；全新 agent（create、resume / takeover 起新名字）等 registry 落盘后删同名旧文件（启动时本来就不带）；rename 时跟着挪。
  * 都在 registry 已经落盘之后调：失败只报警、不抛，别让一个残留文件把命令的后半截（频道清理、rescan）断掉。
  */
 export function removeAgentSettings(agent: string): void {
@@ -92,29 +100,30 @@ export function removeAgentSettings(agent: string): void {
     console.error(`⚠ 删除 agent 设置文件失败（${agent}）：${(e as Error).message}`);
   }
 }
-/** 启动前：全新 agent（mode=new，或 registry 里还没有它——create / resume 都是启动后才写 registry）不继承同名旧文件 */
-export function resetSettingsForFreshLaunch(agent: string, mode: string, registered: boolean): void {
-  if (mode === "new" || !registered) removeAgentSettings(agent);
-}
-/** 源文件不在时也要删掉目标位置的旧文件：改名到一个删过的名字，不能继承那个旧 agent 的开关 */
-export function renameAgentSettings(from: string, to: string): void {
+/**
+ * 首次 rename：源文件不在时也要删掉目标位置的旧文件（改名到一个删过的名字，不能继承那个旧 agent 的开关）。
+ * 补跑（resume）：只在源文件还在、且旧名没被新 agent 占用时挪，永远不删目标——上次可能已经挪过去了，旧名的文件也可能是新 agent 的。
+ */
+export function renameAgentSettings(from: string, to: string, resume?: { oldTaken: boolean }): void {
   try {
     const src = agentSettingsPath(from);
-    if (existsSync(src)) renameSync(src, agentSettingsPath(to));
+    if (resume) {
+      if (!resume.oldTaken && existsSync(src)) renameSync(src, agentSettingsPath(to));
+    } else if (existsSync(src)) renameSync(src, agentSettingsPath(to));
     else removeAgentSettings(to);
   } catch (e) {
     console.error(`⚠ 迁移 agent 设置文件失败（${from} → ${to}）：${(e as Error).message}`);
   }
 }
 
-/** 生产的启动参数：非空就以内联 JSON 传（沙箱另走 sandboxLaunchArgs，和沙箱覆盖合成一份）。纯函数 */
+/** 生产的启动参数：非空就以内联 JSON 传（沙箱另走 sandboxLaunchArgs，和沙箱覆盖合成一份）。只收 launchSettingsFor 过滤过的。纯函数 */
 export function settingsLaunchArgs(settings: AgentSettings): string[] {
   return Object.keys(settings).length ? ["--settings", JSON.stringify(settings)] : [];
 }
 
-/** 给启动器：这个 agent 的设置（损坏 / 不存在 → {}，不带 flag；宁可不带也不能让 CC 启动失败） */
+/** 给启动器：这个 agent 设置里白名单内的键（损坏 / 不存在 → {}，不带 flag；宁可不带也不能让 CC 启动失败） */
 export function launchSettingsFor(agent: string | undefined): AgentSettings {
-  return agent && isSettingsAgentName(agent) ? readAgentSettings(agent) : {};
+  return agent && isSettingsAgentName(agent) ? launchPart(readAgentSettings(agent)) : {};
 }
 
 /** 所有 agent 的 skillOverrides（技能库页「在哪些 agent 里关着」）：{ agent: { skill: 档位 } }，没有覆盖的 agent 不出现 */
@@ -139,7 +148,9 @@ export function allSkillOverrides(): Record<string, Record<string, Exclude<Skill
  */
 export function outsideSkillOverrides(cwd: string | null, home = homedir()): Array<{ source: "user" | "project" | "local"; overrides: Record<string, string> }> {
   const files: Array<["user" | "project" | "local", string]> = [["user", join(home, ".claude", "settings.json")]];
-  if (cwd && resolve(cwd) !== resolve(home)) files.push(["project", join(cwd, ".claude", "settings.json")], ["local", join(cwd, ".claude", "settings.local.json")]);
+  // cwd 就是家目录时，项目设置和全局设置是同一个文件，只补读 settings.local.json
+  if (cwd && resolve(cwd) !== resolve(home)) files.push(["project", join(cwd, ".claude", "settings.json")]);
+  if (cwd) files.push(["local", join(cwd, ".claude", "settings.local.json")]);
   const out: Array<{ source: "user" | "project" | "local"; overrides: Record<string, string> }> = [];
   for (const [source, path] of files) {
     const r = readJsonStateSync(path, isPlainObject);

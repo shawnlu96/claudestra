@@ -33,7 +33,8 @@ export async function cmdSkillToggle(args: string[]): Promise<void> {
 async function toggleClaude(agent: string, cwd: string | null, skill: string, state: SkillState): Promise<void> {
   // 同步技能顺手清掉裸名别名键：CC 两种都认，留着的话界面上的档位和实际对不上（lib/agent-skills.ts syncedAliases）
   const aliases = skill.startsWith("anthropic-skills:") ? syncedAliases(skill, (await localSkillLibrary(cwd ? { cwd, runtime: "claude-code" } : undefined)).skills, cwd) : [];
-  const next = await setSkillOverride(agent, skill, state, aliases);
+  const next = await setSkillOverride(agent, skill, state, aliases).catch((e: Error) => e);
+  if (next instanceof Error) return output({ ok: false, error: next.message });
   output({
     ok: true,
     agent,

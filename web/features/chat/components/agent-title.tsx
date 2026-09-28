@@ -5,8 +5,8 @@ import { ExternalBadge } from "./external-badge";
 import { MissionBadge } from "./mission-ui";
 
 /**
- * 会话顶栏的标题（从 chat.tsx 搬出，owner 2026-09-27）：external 徽章跟在名字后面（共享给几个 peer 就挂几），值守徽章在它后面；
- * 值守徽章只在顶栏宽时显示在这里，窄时由 chat.tsx 放到第二行徽章组（带日期的文字会把名字挤没）。
+ * 会话顶栏的标题（从 chat.tsx 搬出，owner 2026-09-27）：external 徽章跟在名字后面（共享给几个 peer 就挂几），Autopilot 徽章在它后面；
+ * Autopilot 徽章只在顶栏宽时显示在这里，窄时由 chat.tsx 放到第二行徽章组（带日期的文字会把名字挤没）。
  * 名字优先显示「显示名」（registry label），有显示名时会话名压淡跟在后面，与侧栏行「显示名 | name」一致。
  */
 export function AgentTitle({ info, fallback }: { info?: AgentSession; fallback: string }) {

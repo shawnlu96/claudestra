@@ -11,9 +11,10 @@ import {
   applySkillOverride,
   isSettingsAgentName,
   isSkillName,
+  launchSettingsFor,
+  MAX_LAUNCH_SETTINGS_BYTES,
   outsideSkillOverrides,
   removeAgentSettings,
-  resetSettingsForFreshLaunch,
   renameAgentSettings,
   setSkillOverride,
   settingsLaunchArgs,
@@ -82,13 +83,6 @@ describe("setSkillOverride（写者）", () => {
     mkdirSync(agentSettingsPath("agent-dir"), { recursive: true }); // 同名的是个目录：unlink 抛 EISDIR / EPERM
     expect(() => removeAgentSettings("agent-dir")).not.toThrow();
   });
-  test("全新启动清旧文件：mode=new 或 registry 里还没有；restart / 从停止再起（已登记）保留", async () => {
-    for (const [mode, registered, kept] of [["new", true, false], ["resume", false, false], ["fork", false, false], ["resume", true, true], ["fork", true, true]] as const) {
-      await setSkillOverride("agent-t6", "pdf", "off");
-      resetSettingsForFreshLaunch("agent-t6", mode, registered);
-      expect(existsSync(agentSettingsPath("agent-t6"))).toBe(kept);
-    }
-  });
   test("outsideSkillOverrides：全局 / 项目 / 项目本地三处；cwd 就是家目录时不重复算", () => {
     const home = mkdtempSync(join(tmpdir(), "outside-home-"));
     const cwd = join(home, "proj");
@@ -102,6 +96,8 @@ describe("setSkillOverride（写者）", () => {
       { source: "local", overrides: { save: "name-only" } },
     ]);
     expect(outsideSkillOverrides(home, home)).toEqual([{ source: "user", overrides: { pdf: "off" } }]);
+    writeFileSync(join(home, ".claude", "settings.local.json"), JSON.stringify({ skillOverrides: { docx: "off" } }));
+    expect(outsideSkillOverrides(home, home)).toEqual([{ source: "user", overrides: { pdf: "off" } }, { source: "local", overrides: { docx: "off" } }]);
   });
   test("allSkillOverrides / rename / remove", async () => {
     await setSkillOverride("agent-t3", "pdf", "off");
@@ -116,6 +112,24 @@ describe("setSkillOverride（写者）", () => {
 });
 
 describe("启动参数", () => {
+  test("只内联白名单里的键：手写进文件的 env（密钥）不进命令行", async () => {
+    const p = agentSettingsPath("agent-t7");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "sk-secret" }, skillOverrides: { pdf: "off" } }));
+    expect(launchSettingsFor("agent-t7")).toEqual({ skillOverrides: { pdf: "off" } });
+    expect(buildClaudeCommand({ channelId: "1", bridgeUrl: "ws://localhost:3847", sessionId: "s", settingsAgent: "agent-t7" })).not.toContain("sk-secret");
+  });
+  test("写入前卡长度：超过上限拒写（tmux 单条命令约 16KB 就发不出去），文件原样不动", async () => {
+    const big: Record<string, string> = {};
+    for (let i = 0; big && JSON.stringify(big).length < MAX_LAUNCH_SETTINGS_BYTES - 40; i++) big[`skill-${String(i).padStart(4, "0")}`] = "off";
+    const p = agentSettingsPath("agent-t8");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ skillOverrides: big }));
+    const before = readFileSync(p, "utf8");
+    await expect(setSkillOverride("agent-t8", "one-more-skill-with-a-long-name", "off")).rejects.toThrow(/上限/);
+    expect(readFileSync(p, "utf8")).toBe(before);
+    await setSkillOverride("agent-t8", "skill-0000", "on"); // 往回调总是允许
+  });
   test("settingsLaunchArgs：非空才带，内联 JSON", () => {
     expect(settingsLaunchArgs({})).toEqual([]);
     expect(settingsLaunchArgs({ skillOverrides: { a: "off" } })).toEqual(["--settings", '{"skillOverrides":{"a":"off"}}']);
