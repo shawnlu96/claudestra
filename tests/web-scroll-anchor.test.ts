@@ -309,7 +309,8 @@ describe("planWindow（每次提交后的窗口决策）", () => {
 
 describe("scrollDecision（校正期内分清自己写的 / 被夹 / 用户在滚）", () => {
   const prev = { top: 2000, max: 4400 };
-  const at = (settle: "anchor" | "bottom" | null, top: number, sh = 5000, ch = 600) => scrollDecision({ settle, prev, top, scrollHeight: sh, clientHeight: ch });
+  const at = (settle: "anchor" | "bottom" | null, top: number, sh = 5000, ch = 600) =>
+    scrollDecision({ settle, prev, self: prev, top, scrollHeight: sh, clientHeight: ch });
 
   test("自己写的（与上次记下的相同）→ 不结束校正，锚点校正期内不吸底", () => {
     expect(at("anchor", 2000)).toEqual({ endSettle: false, follow: false });
@@ -324,10 +325,20 @@ describe("scrollDecision（校正期内分清自己写的 / 被夹 / 用户在�
   });
 
   test("校正期内拖动 / 键盘滚到最底 → 结束校正并恢复吸底（此前要等下一个 scroll 事件才恢复）", () => {
-    expect(scrollDecision({ settle: "anchor", prev: { top: 4300, max: 4400 }, top: 4400, scrollHeight: 5000, clientHeight: 600 })).toEqual({
+    const p4300 = { top: 4300, max: 4400 };
+    expect(scrollDecision({ settle: "anchor", prev: p4300, self: p4300, top: 4400, scrollHeight: 5000, clientHeight: 600 })).toEqual({
       endSettle: true,
       follow: true,
     });
+  });
+
+  test("iOS 惯性尾段每帧不到 1px：按自上次自己写以来的累计位移判，累计过 1px 就算用户在滚", () => {
+    const self = { top: 2000, max: 4400 };
+    const frame = (from: number, to: number) =>
+      scrollDecision({ settle: "anchor", prev: { top: from, max: 4400 }, self, top: to, scrollHeight: 5000, clientHeight: 600 });
+    expect(frame(2000, 1999.6).endSettle).toBe(false); // 第一帧 0.4px
+    expect(frame(1999.6, 1999.2).endSettle).toBe(false); // 累计 0.8px
+    expect(frame(1999.2, 1998.8).endSettle).toBe(true); // 累计 1.2px（单帧仍只有 0.4px）
   });
 
   test("落底校正期里用户滚动 → 也结束（记日志），吸底照常判", () => {
@@ -336,6 +347,7 @@ describe("scrollDecision（校正期内分清自己写的 / 被夹 / 用户在�
 
   test("没有校正期 → 就是 followAfterScroll", () => {
     expect(at(null, 1900)).toEqual({ endSettle: false, follow: false });
-    expect(scrollDecision({ settle: null, prev: { top: 4300, max: 4400 }, top: 4390, scrollHeight: 5000, clientHeight: 600 }).follow).toBe(true);
+    const p4300 = { top: 4300, max: 4400 };
+    expect(scrollDecision({ settle: null, prev: p4300, self: p4300, top: 4390, scrollHeight: 5000, clientHeight: 600 }).follow).toBe(true);
   });
 });

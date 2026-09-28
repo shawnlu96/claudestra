@@ -473,7 +473,7 @@ export function MessageList() {
   });
   const goBottom = () => {
     followRef.current = true;
-    sf.resetWindow();
+    sf.leaveAnchor(); // 与点推送的落底同一条路：结束校正期、清待放锚点（输入框在滚动容器外，pointerdown 结束不了）
     clearUnread();
     setAtBottomBoth(true);
     const el = scrollerRef.current;

@@ -100,18 +100,19 @@ export function followAfterScroll(prev: { top: number; max: number }, top: numbe
 }
 
 /**
- * 一次 scroll 事件的判定。settle = 当前校正期类型。scrollTop 与上次自己记下的不同、且 max 没变小（不是被夹）
- * = 用户在滚（拖动 / 惯性 / 键盘）→ 结束校正、吸底照常判；否则锚点校正期内保持不吸底。不结束的话，
- * 校正期里 RO 会把视口拽回锚点、打断惯性，滑到底也不会恢复吸底。
+ * 一次 scroll 事件的判定。settle = 当前校正期类型；prev = 上一个 scroll 事件的位置（判吸底）；self = 上次自己
+ * 写 scrollTop 后的位置。自 self 以来累计位移 ≥1px 且 max 没变小（不是被夹）= 用户在滚（拖动 / 惯性 / 键盘）
+ * → 结束校正、吸底照常判。按累计不按单帧：iOS 惯性尾段每帧不到 1px。不结束的话 RO 会把视口拽回锚点、打断惯性。
  */
 export function scrollDecision(i: {
   settle: "anchor" | "bottom" | null;
   prev: { top: number; max: number };
+  self: { top: number; max: number };
   top: number;
   scrollHeight: number;
   clientHeight: number;
 }): { endSettle: boolean; follow: boolean } {
-  const user = Math.abs(i.top - i.prev.top) >= 1 && i.scrollHeight - i.clientHeight >= i.prev.max;
+  const user = Math.abs(i.top - i.self.top) >= 1 && i.scrollHeight - i.clientHeight >= i.self.max;
   const endSettle = i.settle !== null && user;
   const hold = i.settle === "anchor" && !endSettle;
   return { endSettle, follow: !hold && followAfterScroll(i.prev, i.top, i.scrollHeight, i.clientHeight) };
