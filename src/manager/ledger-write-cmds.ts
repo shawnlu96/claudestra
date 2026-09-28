@@ -4,6 +4,7 @@
  */
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
+import { pathLike } from "../lib/quote-text.js";
 import {
   appendEvent,
   createItem,
@@ -151,6 +152,8 @@ function deliverCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
   c.requireOwnOrManager(task, "交付");
   const moveFrom = c.p.flags.from === undefined ? undefined : stageFlag(c, "from");
+  // 证据只收路径：它会原样进 bridge 通知和审查员 prompt（lib/quote-text.ts）
+  if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", "--evidence 只收文件路径（不含空白和换行）");
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
 }

@@ -1,10 +1,11 @@
 /**
- * 「现在谁在接这个任务」——编排班子（docs/team/orchestration-team.md）从台账推导，不另存状态：
+ * 「现在谁在接这个任务」——编排班子（docs 10-ledger「附：编排班子」）从台账推导，不另存状态：
  * 协作视图靠它显示当前一环，T29 巡检靠它判断「交到某一环之后没人接」。纯函数，tests/ledger-handler.test.ts。
  *
  * 规则：先按当前阶段定默认的一环，再按进入当前阶段之后的事件往后推：
- *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理；
- *   escalate → PM（data.to = owner 时归 owner）。进入新阶段（stage 事件）重新从默认值算起。
+ *   deliver → 调度助理（没配就是 PM）；dispatch → 审查员；review 没带阶段移动 → 通过归 PM、否则回调度助理，
+ *   但常规轮通过而规格卡还要对抗式（派审时记在 dispatch 的 adversarialNext）仍归调度助理；
+ *   escalate → PM（data.to = owner 时归 owner）；升级给 owner 之后 owner 记了 decision → 回到 PM。进入新阶段（stage 事件）重新从默认值算起。
  */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 
@@ -54,17 +55,30 @@ function resolve(role: HandlerRole, task: Pick<LedgerTask, "agent" | "pm">, team
   return { role, agent: null };
 }
 
-/** 事件把接手的一环推到哪；null = 这条不改变谁在接（note、decision 等） */
-function roleAfter(e: LedgerEvent): HandlerRole | null {
+/**
+ * 这条 review 通过了，但派审时记着「还有对抗式最后一轮」（ledger dispatch 的 adversarialNext）：还没到 PM 合并那一步。
+ * events = 同一任务的事件（seq 升序），取这条 review 之前最近的一条 dispatch。
+ */
+export function adversarialPending(review: LedgerEvent, events: readonly LedgerEvent[]): boolean {
+  if (review.data.verdict !== "pass" || review.data.reviewer === "adversarial") return false;
+  const d = events.findLast((e) => e.kind === "dispatch" && e.seq < review.seq);
+  return d?.data.adversarialNext === true;
+}
+
+/** 事件把接手的一环推到哪；null = 这条不改变谁在接（note 等） */
+function roleAfter(e: LedgerEvent, cur: HandlerRole, events: readonly LedgerEvent[]): HandlerRole | null {
   switch (e.kind) {
     case "deliver":
       return "dispatcher";
     case "dispatch":
       return "reviewer";
     case "review":
-      return e.data.verdict === "pass" ? "pm" : "dispatcher";
+      return e.data.verdict === "pass" && !adversarialPending(e, events) ? "pm" : "dispatcher";
     case "escalate":
       return e.data.to === "owner" ? "owner" : "pm";
+    case "decision":
+      // 等 owner 拍板时，owner（或 PM 转录的 owner 原话）一记 decision 就回到 PM 去执行
+      return cur === "owner" ? "pm" : null;
     default:
       return null;
   }
@@ -92,7 +106,7 @@ export function currentHandler(task: Pick<LedgerTask, "stage" | "agent" | "pm" |
   let since = startEvent?.ts ?? task.createdAt;
   let seq = startEvent?.seq ?? 0;
   for (const e of events.slice(start + 1)) {
-    const next = roleAfter(e);
+    const next = roleAfter(e, role, events);
     if (!next) continue;
     role = next;
     since = e.ts;

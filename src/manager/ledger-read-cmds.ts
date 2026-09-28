@@ -104,17 +104,23 @@ function teamValue(c: LedgerCli): TeamInput | undefined {
   return { dispatcher: d && d !== "-" ? agentKey(d) : null, audit: true };
 }
 
+/** 调度助理必须在（这次设完之后的）PM 名单里、是 registry 里 active 的 agent：否则它跑 dispatch / review 会被拒，通知也投不到 */
+async function checkDispatcher(c: LedgerCli, d: string, pms: readonly string[]): Promise<void> {
+  if (!pms.includes(d)) throw new LedgerError("invalid", `调度助理 ${d} 不在项目的 PM 名单里（${pms.join("、") || "空"}）：先把它加进 --pms`);
+  const a = (await c.deps.loadRegistry()).agents[d];
+  if (!a || a.status !== "active") throw new LedgerError("invalid", `调度助理 ${d} ${a ? `状态是 ${a.status}` : "不在 registry 里"}，要 active 的 agent`);
+}
+
 /** 不带参数 = 查看；--pms / --docs-dir / --team 只有 owner 能设（库里判） */
-function meta(c: LedgerCli): Result {
+async function meta(c: LedgerCli): Promise<Result> {
   const project = c.project();
   const { pms, "docs-dir": docsDir } = c.p.flags;
   const team = teamValue(c);
   if (pms === undefined && docsDir === undefined && team === undefined) return { ok: true, project, meta: getMeta(c.db, project) };
   const ctx = { actor: c.deps.actor, now: c.deps.now() };
-  if (pms !== undefined) {
-    const list = pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey);
-    setMeta(c.db, ctx, { project, key: "pms", value: list });
-  }
+  const list = pms === undefined ? getMeta(c.db, project).pms : pms.split(",").map((s) => s.trim()).filter(Boolean).map(agentKey);
+  if (team?.dispatcher) await checkDispatcher(c, team.dispatcher, list);
+  if (pms !== undefined) setMeta(c.db, ctx, { project, key: "pms", value: list });
   if (docsDir !== undefined) setMeta(c.db, ctx, { project, key: "docsDir", value: expandDocsDir(docsDir) });
   if (team !== undefined) setMeta(c.db, ctx, { project, key: "team", value: team });
   return { ok: true, project, meta: getMeta(c.db, project) };

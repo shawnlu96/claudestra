@@ -222,7 +222,7 @@ export interface QueueFrozen {
   since: number | null;
 }
 
-/** 编排班子（docs/team）：开了才有事件路由；dispatcher 为 null = 交付直接通知 PM。只有 owner 能设 */
+/** 编排班子（docs 10-ledger「附：编排班子」）：开了才有事件路由；dispatcher 为 null = 交付直接通知 PM。只有 owner 能设 */
 export interface TeamConfig {
   dispatcher: string | null;
   /** 巡检开关，T29 读 */

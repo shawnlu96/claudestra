@@ -172,7 +172,7 @@ import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nud
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { extractControlToken } from "./bridge/api-auth.js";
-import { initTeamRouter } from "./bridge/team-router.js";
+import { initTeamRouter, isLedgerNotice } from "./bridge/team-router.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
 import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
@@ -849,11 +849,11 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
       console.log(`⚠️ 抢占打断失败,按常规投递: ${(e as Error).message}`);
     }
   }
-  // agent→agent 目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
+  // agent→agent 与班子通知:目标回合中就不发、押到 Stop(回合中通知有丢弃窗口);人类/API 消息上面已抢占 C-c 不押;压缩中一律押(压缩结束放行)
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
-  const busy = compactingNow || (env.from.kind === "local" && agentMsgMustWait(turn));
+  const busy = compactingNow || ((env.from.kind === "local" || isLedgerNotice(env)) && agentMsgMustWait(turn));
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   if (stillWanted && !stillWanted()) return { envelope: env, outcome: { kind: "dropped", reason: "已从押后队列撤下" } };
   if (busy) {
