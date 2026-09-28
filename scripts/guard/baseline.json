@@ -106,7 +106,6 @@
     "dead:src/lib/tailscale.ts#TAILSCALE_CLI_FALLBACKS": 1,
     "dead:src/lib/takeover.ts#adoptableDir": 1,
     "dead:src/lib/takeover.ts#isTempDir": 1,
-    "dead:src/lib/tmux-helper.ts#ensurePaneInteractive": 1,
     "dead:src/lib/tmux-helper.ts#PI_BUSY_LINE_RE": 1,
     "dead:src/lib/tmux-helper.ts#PI_STATUS_RE": 1,
     "dead:src/lib/tmux-helper.ts#SWITCH_REJECT_RE": 1,

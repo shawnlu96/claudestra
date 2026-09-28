@@ -125,8 +125,13 @@ describe("config-store 的 fleet 段（批量管理的保留清单）", () => {
     const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-read-"));
     writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保留进度与决定", callers: ["x"] } }));
     expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out)).toEqual({ compactKeep: "保留进度与决定" });
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: 3 } }));
-    expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
+    // 不是字符串、空白、超过 1500 字、带控制字符（换行 / ESC 敲进输入框就是按键）→ 当没配（adv2 P2-4、r2 P2-6）
+    for (const bad of [3, "   ", "保".repeat(1501), "第一行\n第二行", "带\x1b[2J 控制符", "C1\x9b 控制符"]) {
+      writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: bad } }));
+      expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).toBe("null");
+    }
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ fleet: { compactKeep: "保".repeat(1500) } }));
+    expect(JSON.parse(run(dir, `console.log(JSON.stringify(c.readConfigSync().fleet ?? null));`).out).compactKeep).toHaveLength(1500);
   });
 
   test("写别的配置（set*：读 → 改 → 写）不会抹掉磁盘上的 fleet 段", () => {

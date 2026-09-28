@@ -2,6 +2,7 @@
  * 批量管理（bridge/local-api/fleet.ts、bridge/fleet/）：GET /fleet/state、POST /fleet/run，以及 SSE 的 low_priority 事件。
  * 只有 owner 本人的全 scope manage 凭据能用，其余 403（面板直接显示错误）。
  */
+import { machines } from "@/lib/machines";
 import { api, ApiError } from "./client";
 import { followEventStream } from "./ledger";
 
@@ -45,19 +46,43 @@ export async function runFleet(body: { action: FleetAction; select: FleetSelect;
   return r.report;
 }
 
+// ── 这台设备能不能用批量管理（GET /fleet/access = bridge 的 canRunFleet）：按机器记住，不能就把「直接压缩」按钮收起来 ──
+const access = new Map<string, boolean>();
+const machineKey = () => machines.current()?.fp ?? "local";
+
+/** 问不到（断网、老 bridge 没这个端点）当能、不记：按钮照常显示，点了 403 再收 */
+export async function fleetAccess(): Promise<boolean> {
+  const key = machineKey();
+  const hit = access.get(key);
+  if (hit !== undefined) return hit;
+  try {
+    await api("/fleet/access", { timeoutMs: 5000 });
+    access.set(key, true);
+    return true;
+  } catch (e) {
+    if (!(e instanceof ApiError && e.status === 403)) return true;
+    access.set(key, false);
+    return false;
+  }
+}
+
+/** 403 时按钮下面显示的话；是字典里的键，组件用 t() 渲染（结果里其余的 detail 是 bridge 的原文，t() 原样返回） */
+export const COMPACT_DENIED = "只有 owner 本机的全权管理设备能直接压缩";
+
 /**
  * 顶栏上下文徽章、输入框警示条的「存记忆 + Compact」：只对这一个 agent 发 save-compact，执行者由 bridge 改成 compact
- * （它的 save-compact 会盖掉 PM 的 HANDOFF）。返回按钮上显示的一句话；ok=false 时按钮可以再点。
+ * （它的 save-compact 会盖掉 PM 的 HANDOFF）。返回按钮上显示的一句话；ok=false 时按钮可以再点。run 只给单测换
  */
-export async function requestCompact(agent: string): Promise<{ ok: boolean; text: string }> {
+export async function requestCompact(agent: string, run = runFleet): Promise<{ ok: boolean; text: string }> {
   try {
-    const r = await runFleet({ action: { kind: "save-compact" }, select: { agents: [agent] } });
+    const r = await run({ action: { kind: "save-compact" }, select: { agents: [agent] } });
     const x = r.results[0];
     if (!x) return { ok: false, text: r.excluded[0]?.reason ?? r.summary };
     return { ok: x.outcome === "done" || x.outcome === "queued", text: x.detail };
   } catch (e) {
-    const denied = e instanceof ApiError && e.status === 403;
-    return { ok: false, text: denied ? "只有 owner 本机的管理设备能直接压缩" : (e as Error).message };
+    if (!(e instanceof ApiError && e.status === 403)) return { ok: false, text: (e as Error).message };
+    access.set(machineKey(), false);
+    return { ok: false, text: COMPACT_DENIED };
   }
 }
 

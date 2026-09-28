@@ -92,8 +92,17 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
     // 批量管理的保留清单（bridge/fleet 的 compactKeep()）：白名单只带 compactKeep；漏在这里读不到，任何 set* 还会把它抹掉
-    ...(typeof raw.fleet?.compactKeep === "string" && raw.fleet.compactKeep.trim() ? { fleet: { compactKeep: raw.fleet.compactKeep } } : {}),
+    ...(okCompactKeep(raw.fleet?.compactKeep) ? { fleet: { compactKeep: raw.fleet.compactKeep } } : {}),
   };
+}
+
+/**
+ * 保留清单会原样敲进 CC 输入框：只收 1500 字以内、不带控制字符的非空串，否则当没配、用默认清单。
+ * 超长时 tmux send-keys 整条失败；换行、ESC 等会被 TUI 当成按键（config.json 是手改的，这里是唯一的闸）
+ */
+const MAX_COMPACT_KEEP = 1500;
+function okCompactKeep(v: unknown): v is string {
+  return typeof v === "string" && !!v.trim() && v.length <= MAX_COMPACT_KEEP && !/[\x00-\x1f\x7f-\x9f]/.test(v);
 }
 
 function defaults(): AppConfig {

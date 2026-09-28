@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ledgerNotes } from "../src/bridge/fleet/audit.js";
 import { NEUTRAL_TAG } from "../src/lib/delegate-marker.js";
-import { isExecutor } from "../src/bridge/fleet/service.js";
+import { actionFor, isExecutor } from "../src/bridge/fleet/service.js";
 import {
   compactCommand, DEFAULT_COMPACT_KEEP, notApplicable, parseFleetAction, parseFleetSelect, selectTargets, summarizeFleet, type FleetCandidate,
 } from "../src/lib/fleet-plan.js";
@@ -163,5 +163,14 @@ describe("执行者认定（save-compact 对它改成 compact，不许盖掉 PM 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("执行者收到 save-compact 改发 compact，结果前面注明；别的动作、非执行者原样（r2 P2-6）", () => {
+    expect(actionFor({ kind: "save-compact" }, { name: "agent-task-t35" })).toEqual({
+      action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：",
+    });
+    expect(actionFor({ kind: "save-compact" }, { name: "agent-pm" })).toEqual({ action: { kind: "save-compact" }, note: "" });
+    expect(actionFor({ kind: "compact", keep: "k" }, { name: "agent-task-t35" })).toEqual({ action: { kind: "compact", keep: "k" }, note: "" });
+    expect(actionFor({ kind: "lp-compact" }, { name: "agent-task-t35" }).note).toBe("");
   });
 });

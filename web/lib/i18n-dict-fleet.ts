@@ -3,6 +3,7 @@ export const FLEET_DICT: Record<string, string> = {
   "批量管理": "Batch ops",
   "请求中…": "Requesting…",
   "没压成": "Didn't compact",
+  "只有 owner 本机的全权管理设备能直接压缩": "Only the owner's own full-access device can compact directly",
   "刷新状态": "Refresh",
   "选谁": "Who",
   "撞墙中": "At limit",

@@ -1,6 +1,7 @@
 /**
- * bridge/fleet/runner.ts：用真实画面（tests/fixtures/lp/）回放，每次发键后切到下一帧，钉死发键顺序与安全边界：
- * 菜单只在高亮项精确等于「Continue now at lower priority」时回车；草稿、忙、状态不明一律不发键；Esc 只在确认有回合时按。
+ * bridge/fleet/runner.ts：用真实画面（tests/fixtures/lp/）回放，每次发键后切到下一段画面，钉死发键顺序与安全边界：
+ * 任何菜单 / 对话框一个键都不按（含 Esc）；草稿、排队、忙、状态不明一律不发键；Esc 只在两帧都确认有回合时按；
+ * Esc 放回来的字只在两帧都正好是 /low-priority 时按同样多的退格。
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -10,18 +11,28 @@ import type { FleetAction } from "../src/lib/fleet-plan.js";
 
 const fx = (name: string) => readFileSync(join(import.meta.dir, "fixtures", "lp", `${name}.ansi`), "utf8");
 
-/** frames[0] 是初始画面；每次 sendLine / press / escape 之后换成下一帧（没有下一帧就停在最后一帧） */
-function fakeIO(frames: string[]) {
+/**
+ * frames[0] 是初始画面；每次 sendLine / erase / escape 之后换成下一段（没有下一段就停在最后一段）。
+ * 一段可以是一组帧：段内每抓一次屏往后走一帧、停在最后一帧——用来模拟两次抓屏之间画面变了
+ */
+function fakeIO(frames: (string | string[])[]) {
   const keys: string[] = [];
   let i = 0;
+  let j = 0;
   const step = (k: string) => {
     keys.push(k);
     i = Math.min(i + 1, frames.length - 1);
+    j = 0;
+  };
+  const capture = async () => {
+    const seg = frames[i]!;
+    if (typeof seg === "string") return seg;
+    return seg[Math.min(j++, seg.length - 1)]!;
   };
   const io: PaneIO = {
-    capture: async () => frames[i]!,
+    capture,
     sendLine: async (_w, t) => step(`line:${t.split(" ")[0]}`),
-    press: async (_w, k) => step(`press:${k}`),
+    erase: async (_w, n) => step(`erase:${n}`),
     escape: async () => step("escape"),
     sleep: async () => {},
   };
@@ -31,14 +42,18 @@ function fakeIO(frames: string[]) {
 function ctxOf(io: PaneIO, text: RunCtx["deliverText"] = async () => ({ ok: true, queued: false })): RunCtx {
   return { io, keep: "保留测试", deliverText: text };
 }
-const run = (a: FleetAction, frames: string[], text?: RunCtx["deliverText"]) => {
+const run = (a: FleetAction, frames: (string | string[])[], text?: RunCtx["deliverText"]) => {
   const f = fakeIO(frames);
   return runOne(a, "agent-x", "master:=agent-x", ctxOf(f.io, text)).then((r) => ({ ...r, keys: f.keys }));
 };
 
-/** 真实画面拼一个「LP 开着、输入框里有 Esc 放回来的字」的帧 */
-const restoredDraft = fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, "\x1b[39m❯ /low-priority\n");
-if (restoredDraft === fx("lp-on-interrupted")) throw new Error("fixture 的输入框行变了，restoredDraft 没拼出来");
+/** 真实画面拼一个「LP 开着、空闲、输入框里是 text」的帧 */
+function typed(text: string): string {
+  const raw = fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, `\x1b[39m❯ ${text}\n`);
+  if (!raw.includes(text)) throw new Error("fixture 的输入框行变了，拼不出输入框里的字");
+  return raw;
+}
+const restoredDraft = typed("/low-priority");
 
 describe("设成开 / 设成关", () => {
   test("撞墙中 → 敲 /low-priority → 状态栏变成开", async () => {
@@ -140,14 +155,14 @@ describe("压缩", () => {
 describe("开 LP 再压缩", () => {
   test("开 → 自动续跑开始 → Esc 打断 → /compact", async () => {
     const r = await run({ kind: "lp-compact" }, [fx("walled"), fx("lp-on-autocontinue"), fx("lp-on-interrupted"), fx("compacting")]);
-    expect(r).toMatchObject({ outcome: "done", detail: "LP 开着，已开始压缩" });
+    expect(r).toMatchObject({ outcome: "done", detail: "LP 已开，已开始压缩" });
     expect(r.keys).toEqual(["line:/low-priority", "escape", "line:/compact"]);
   });
 
-  test("Esc 放回输入框的字要先 C-u 清掉，清干净才压缩", async () => {
+  test("Esc 放回输入框的 /low-priority：按 13 次退格（不用 C-u 清整行），清干净才压缩", async () => {
     const r = await run({ kind: "lp-compact" }, [fx("walled"), fx("lp-on-autocontinue"), restoredDraft, fx("lp-on-interrupted"), fx("compacting")]);
     expect(r.outcome).toBe("done");
-    expect(r.keys).toEqual(["line:/low-priority", "escape", "press:C-u", "line:/compact"]);
+    expect(r.keys).toEqual(["line:/low-priority", "escape", "erase:13", "line:/compact"]);
   });
 
   test("续跑已经自己结束了（没看到忙）→ 不按 Esc", async () => {
@@ -248,14 +263,73 @@ describe("可见区里有一段像输入框的文字（adv1 P0-1）：底部的�
   }
 });
 
-describe("开 LP 再压缩：Esc 放回输入框的字只清我们自己敲的 /low-priority", () => {
-  test("放回来的是别的字（可能是有人在打）→ 不按 C-u、不压缩，报已跳过", async () => {
-    const other = fx("lp-on-interrupted").replace(/\x1b\[39m❯[^\S\n]*\n/, "\x1b[39m❯ owner half typed\n");
-    expect(other).toContain("owner half typed");
-    const r = await run({ kind: "lp-compact" }, [fx("walled"), fx("lp-on-autocontinue"), other]);
-    expect(r.outcome).toBe("skipped");
-    expect(r.detail).toContain("没清也没压缩");
-    expect(r.keys).toEqual(["line:/low-priority", "escape"]);
+describe("开 LP 再压缩：Esc 放回输入框的字只清我们自己敲的 /low-priority（adv2 P2-1）", () => {
+  const head = [fx("walled"), fx("lp-on-autocontinue")];
+  const OTHER = "LP 已开；输入框里有别的内容，没清也没压缩";
+
+  test("放回来的是别的字（可能是有人在打）→ 不按退格、不压缩，报失败（LP 那步成了，活没干完）", async () => {
+    const r = await run({ kind: "lp-compact" }, [...head, typed("owner half typed")]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape"] });
+    expect(r.detail).toStartWith(OTHER);
+  });
+
+  test("多一个字、少一个字都不算：/low-priority 等一下、/low-priorit", async () => {
+    for (const text of ["/low-priority 等一下", "/low-priorit"]) {
+      const r = await run({ kind: "lp-compact" }, [...head, typed(text)]);
+      expect([text, r.outcome, r.keys]).toEqual([text, "failed", ["line:/low-priority", "escape"]]);
+      expect(r.detail).toStartWith(OTHER);
+    }
+  });
+
+  test("闸门第一帧是 /low-priority、第二帧有人接着打了字 → 不按退格", async () => {
+    // Esc 之后这一段：等空闲读一帧，闸门再读两帧
+    const r = await run({ kind: "lp-compact" }, [...head, [restoredDraft, restoredDraft, typed("/low-priority 我先补一句别清")]]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape"] });
+    expect(r.detail).toStartWith(OTHER);
+  });
+
+  test("按了退格没清干净（有人在同一瞬间打字）→ 报失败并带上剩下的字，不压缩、不报已执行", async () => {
+    const r = await run({ kind: "lp-compact" }, [...head, restoredDraft, typed("/l")]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape", "erase:13"] });
+    expect(r.detail).toContain("还剩「/l」");
+  });
+
+  test("Esc 之后弹了权限框 → 一个键都不按", async () => {
+    const r = await run({ kind: "lp-compact" }, [...head, fx("modal-permission")]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape"] });
+  });
+
+  test("排队的消息 → 不清、不压缩，原因写「排队的消息」", async () => {
+    const r = await run({ kind: "lp-compact" }, [...head, [fx("lp-on-interrupted"), fx("busy-queued")]]);
+    expect(r).toMatchObject({ outcome: "failed", keys: ["line:/low-priority", "escape"] });
+    expect(r.detail).toContain("排队的消息");
+  });
+});
+
+describe("发键前两次抓屏：第二帧变了就不发（r2 P2-6）", () => {
+  test("压缩：第一帧空闲、输入框空，第二帧有人打了字 → 不发", async () => {
+    const r = await run({ kind: "compact" }, [[fx("lp-on-interrupted"), typed("owner half typed")]]);
+    expect(r).toMatchObject({ outcome: "failed", keys: [] });
+    expect(r.detail).toContain("草稿");
+  });
+
+  test("关 LP：第一帧空闲，第二帧回合开始了 → 不发", async () => {
+    const r = await run({ kind: "lp-off" }, [[fx("lp-on-allowance"), fx("lp-on-autocontinue")]]);
+    expect(r).toMatchObject({ outcome: "failed", keys: [] });
+    expect(r.detail).toContain("忙，未发");
+  });
+
+  test("开 LP 后只有一帧像在忙、复核两帧都空闲 → 不按 Esc", async () => {
+    const r = await run({ kind: "lp-compact" }, [fx("walled"), [fx("lp-on-autocontinue"), fx("lp-on-autocontinue"), fx("lp-on-allowance")], fx("compacting")]);
+    expect(r.keys).toEqual(["line:/low-priority", "line:/compact"]);
+  });
+
+  test("空闲窗口正文里有「esc to interrupt」：开 LP 再压缩不按 Esc（adv2 P2-3）", async () => {
+    const noisy = fx("lp-on-allowance").replace(/\n[^\n]*─{20,}[^\n]*\n[^\n]*❯[^\n]*\n/, (m) => `\n⏺ 判忙正则里有 esc to interrupt${m}`);
+    expect(noisy).toContain("判忙正则");
+    const r = await run({ kind: "lp-compact" }, [fx("walled"), noisy, fx("compacting")]);
+    expect(r.keys).toEqual(["line:/low-priority", "line:/compact"]);
+    expect(r.outcome).toBe("done");
   });
 });
 

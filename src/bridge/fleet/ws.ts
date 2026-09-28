@@ -7,9 +7,11 @@
 import { bareName, parseFleetAction, parseFleetSelect } from "../../lib/fleet-plan.js";
 import { fleetState, runFleet } from "./service.js";
 
-/** 返回 bridgeRequest 认的形状：{ result } 或 { error } */
-/** wsData = 升级时 bridge.ts 塞进 ws.data 的 { loopback }（直连回环且不带 X-Forwarded-For 才是 true） */
-export async function handleFleetWs(msg: Record<string, unknown>, wsData: unknown): Promise<{ result?: unknown; error?: string }> {
+/**
+ * 返回 bridgeRequest 认的形状：{ result } 或 { error }。wsData = 升级时 bridge.ts 塞进 ws.data 的 { loopback }
+ * （直连回环且不带 X-Forwarded-For 才是 true）；run 只给单测换成假的，看落款
+ */
+export async function handleFleetWs(msg: Record<string, unknown>, wsData: unknown, run = runFleet): Promise<{ result?: unknown; error?: string }> {
   if ((wsData as { loopback?: unknown } | undefined)?.loopback !== true) return { error: "批量管理只收本机直连回环的连接" };
   try {
     if (msg.type === "fleet_state") return { result: await fleetState() };
@@ -21,7 +23,7 @@ export async function handleFleetWs(msg: Record<string, unknown>, wsData: unknow
     if (a.action.kind === "text" || keep !== undefined || s.select.includeMaster || s.select.agents?.some((n) => bareName(n) === "master")) {
       return { error: "命令行不能群发文字、自定义保留清单或带上大总管：这些只在网页上用 owner 设备操作" };
     }
-    return { result: await runFleet({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "local-cli", via: "ws" }) };
+    return { result: await run({ action: a.action, select: s.select, dryRun: msg.dryRun === true, actor: "local-cli", via: "ws" }) };
   } catch (e) {
     return { error: `批量管理出错：${(e as Error).message}` };
   }
