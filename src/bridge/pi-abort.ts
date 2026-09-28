@@ -10,7 +10,7 @@ import { emitEvent } from "./event-bus.js";
 import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./router.js";
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
-import { dropVoidedPendings, takeApiWaitById, type VoidableBooks } from "../lib/pending-reply-scope.js";
+import { dropVoidedPendings, type VoidableBooks } from "../lib/pending-reply-scope.js";
 
 type Socket = { send(data: string): void };
 interface EchoDeps {
@@ -75,22 +75,35 @@ export function stopAfterAbort(channelId: string, now = Date.now()): boolean {
   return abortedAt.delete(channelId) && at !== undefined && now - at < ABORT_STOP_MS;
 }
 
+/** 停字那一轮迟迟不来（比如 Pi 中止后一直 idle）时，停字自己的同步等待最多等这么久就回「已叫停」 */
+const STOP_WAIT_MS = 30_000;
+/** 频道 → 在同步等待的 Pi 停字（messageId）：叫停引起的那次 Stop 的兜底收尾跳过它们（bridge.ts 用 stopWaitIds） */
+const stopWaits = new Map<string, Set<string>>();
+export const stopWaitIds = (channelId: string): ReadonlySet<string> => stopWaits.get(channelId) ?? new Set();
+
 /**
- * Pi 的停字自己的 API 同步等待：叫停引起的那次 Stop 会把挂着的 API 请求按空答复结掉，连这条「停」也算进去（adv5 P2-1），
- * 所以发中止之前先从账上摘下，停完调返回的函数结成一句固定的「已叫停」（lib/turn-cuts.ts stopWaitReply）。
- * 没有同步等待（网页 wait:0）就不摘：它照常看 agent 自己的回复。
+ * Pi 的停字自己的 API 同步等待（adv5 P2-1）：叫停引起的那次 Stop 会把挂着的 API 请求按空答复结掉，连这条「停」也算进去——
+ * 发中止之前登记，那次 Stop 跳过它，留给停字那一轮去答。停完调返回的函数：过 waitMs 还没人答，就结成一句「已叫停」（附中止回执），不回 null。
+ * 没有同步等待（网页 wait:0）不登记。
  */
-export function holdStopWait(env: Envelope, channelId: string, agent: string): ((text: string) => void) | undefined {
+export function holdStopWait(env: Envelope, channelId: string, agent: string, waitMs = STOP_WAIT_MS): ((text: string) => void) | undefined {
   const queues = echo?.books().pendingApiRequests;
-  if (!echo || !queues || env.from.kind !== "api") return undefined;
-  const got = takeApiWaitById(queues, env.meta.messageId);
-  if (!got) return undefined;
-  const d = echo, { tokenId, name } = env.from, to: Endpoint = { kind: "api", tokenId, name };
+  const id = env.meta.messageId;
+  const waiting = () => [...(queues?.values() ?? [])].some((q) => q.some((p) => p.messageId === id && !!p.resolve));
+  if (!echo || env.from.kind !== "api" || !waiting()) return undefined;
+  const ids = stopWaits.get(channelId) ?? new Set<string>();
+  stopWaits.set(channelId, ids.add(id));
+  const d = echo, { tokenId, name } = env.from;
   return (text) => {
-    queues.set(got.key, [...(queues.get(got.key) ?? []), got.p]); // 放回去再投：deliverToApi 按 inReplyTo 认领它
-    const from: Endpoint = { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> };
-    const meta = { messageId: newMessageId("stopped"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: env.meta.messageId };
-    void d.deliver({ from, to, intent: "response", content: text, meta }).catch((e: Error) => console.error(`⚠️ 「已叫停」答复发给 ${name} 失败: ${e.message}`));
+    setTimeout(() => {
+      ids.delete(id);
+      if (!ids.size && stopWaits.get(channelId) === ids) stopWaits.delete(channelId);
+      if (!waiting()) return; // 停字那一轮已经答了
+      const from: Endpoint = { kind: "local", channelId, agentName: agent, ws: socketOf(channelId) as ServerWebSocket<unknown> };
+      const meta = { messageId: newMessageId("stopped"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId(), inReplyTo: id };
+      void d.deliver({ from, to: { kind: "api", tokenId, name }, intent: "response", content: text, meta })
+        .catch((e: Error) => console.error(`⚠️ 「已叫停」答复发给 ${name} 失败: ${e.message}`));
+    }, waitMs).unref?.();
   };
 }
 

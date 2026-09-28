@@ -168,7 +168,7 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
+import { apiQueueToSettle, dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "./lib/api-error-resume.js";
 import { initHttpPeer, cancelHttpPeerCallsForChannel } from "./bridge/http-peer.js";
 import { readRegistryAgents, readRegistryAgentsSync, agentRuntime, type AgentRuntime } from "./lib/registry.js";
@@ -176,7 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman, setStopHooks } from "./bridge/preempt.js";
-import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort } from "./bridge/interrupt-gate.js";
+import { HTTP_IDLE_TIMEOUT_S, noteRuntimeCaps, onAbortAck, setExtensionSocket, stopAfterAbort, stopWaitIds } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -2946,8 +2946,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // 干等到超时。连文本都没有 → resolve reply:null（"结束但没回复"）。
             for (const [pKey, pQueue] of ownTurn ? pendingApiRequests.entries() : []) {
               if (!pQueue.length || pQueue[0].agentChannelId !== cid) continue;
-              pendingApiRequests.delete(pKey);
-              for (const p of pQueue) {
+              for (const p of apiQueueToSettle(pendingApiRequests, pKey, afterAbort ? stopWaitIds(cid) : new Set())) { // Pi 停字自己的等待留给停字那一轮
                 const result: ApiReplyResult = {
                   reply: drainedText || null,
                   threadId: p.threadId,

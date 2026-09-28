@@ -7,7 +7,7 @@
  * ② 销账不验欠账人，会把别的 agent 的欠账顺手销掉。
  */
 import { describe, test, expect } from "bun:test";
-import { dropPendingsForChannel, dropVoidedPendings, takeApiPending, takeApiWaitById, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
+import { dropPendingsForChannel, dropVoidedPendings, takeApiPending, apiQueueToSettle, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply, pendingKeysOwedBy, type ThreadEnds } from "../src/lib/pending-reply-scope.js";
 import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
@@ -221,14 +221,12 @@ describe("takeApiPending（adv5：作废回显不能认领同一 token 的别的
   });
 });
 
-describe("takeApiWaitById（adv5 P2-1：Pi 停字自己的同步等待先摘下，停完再结）", () => {
-  test("只摘在同步等待的那一条（有 resolve），队列空了就删 key；没有同步等待（wait:0）不摘", () => {
-    const qs = new Map<string, { messageId: string; resolve?: number }[]>([["tok|pi", [{ messageId: "other", resolve: 1 }, { messageId: "stop", resolve: 1 }]], ["tok|x", [{ messageId: "web" }]]]);
-    expect(takeApiWaitById(qs, "stop")).toEqual({ key: "tok|pi", p: { messageId: "stop", resolve: 1 } });
-    expect(qs.get("tok|pi")?.map((p) => p.messageId)).toEqual(["other"]);
-    expect(takeApiWaitById(qs, "web")).toBeUndefined();
-    expect(qs.get("tok|x")).toHaveLength(1);
-    expect(takeApiWaitById(qs, "other")?.key).toBe("tok|pi");
+describe("apiQueueToSettle（adv5 P2-1：Pi 叫停引起的那次 Stop 不结停字自己的同步等待）", () => {
+  test("skip 里的留在队里，其余拿走去结；都拿走了就删 key", () => {
+    const qs = new Map<string, { messageId?: string }[]>([["tok|pi", [{ messageId: "other" }, { messageId: "stop" }, {}]]]);
+    expect(apiQueueToSettle(qs, "tok|pi", new Set(["stop"])).map((p) => p.messageId)).toEqual(["other", undefined]);
+    expect(qs.get("tok|pi")).toEqual([{ messageId: "stop" }]);
+    expect(apiQueueToSettle(qs, "tok|pi", new Set())).toEqual([{ messageId: "stop" }]);
     expect(qs.has("tok|pi")).toBe(false);
   });
 });

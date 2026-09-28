@@ -134,7 +134,7 @@ export interface VoidableBooks {
   pendingThreads: Map<string, unknown>;
   pendingInterAgentMsg: Map<string, { fromChannelId?: string; ts: number }>;
   pendingAgentCalls: { dropRequest(target: string, caller: string, messageId: string): void };
-  /** API 请求队列（bridge/pi-abort.ts holdStopWait 摘停字自己的同步等待） */
+  /** API 请求队列（bridge/pi-abort.ts holdStopWait 看停字自己有没有在同步等待） */
   pendingApiRequests?: Map<string, ApiWait[]>;
 }
 
@@ -170,14 +170,14 @@ export function takeApiPending<T extends { messageId?: string }>(queue: T[], inR
 
 type ApiWait = { messageId?: string; resolve?: unknown };
 
-/** 按 messageId 从各 API 队列里摘下一条在同步等待的请求（有 resolve 的），返回它和它所在队列的 key（结它之前要放回去，deliverToApi 才认领得到） */
-export function takeApiWaitById<T extends ApiWait>(queues: Map<string, T[]>, messageId: string): { key: string; p: T } | undefined {
-  for (const [key, q] of queues) {
-    const k = q.findIndex((p) => p.messageId === messageId && !!p.resolve);
-    if (k < 0) continue;
-    const [p] = q.splice(k, 1);
-    if (!q.length) queues.delete(key);
-    return { key, p };
-  }
-  return undefined;
+/**
+ * Stop 兜底收尾要结掉的 API 请求（从账上拿走），skip 里的留在队里：Pi 叫停引起的那次 Stop 不结停字自己的同步等待，
+ * 留给停字那一轮去答（adv5 P2-1，bridge/pi-abort.ts stopWaitIds）。
+ */
+export function apiQueueToSettle<T extends ApiWait>(queues: Map<string, T[]>, key: string, skip: ReadonlySet<string>): T[] {
+  const q = queues.get(key) ?? [];
+  const keep = q.filter((p) => !!p.messageId && skip.has(p.messageId));
+  if (keep.length) queues.set(key, keep);
+  else queues.delete(key);
+  return q.filter((p) => !keep.includes(p));
 }
