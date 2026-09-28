@@ -329,7 +329,7 @@ async function finalize(act: Activity, status: "done" | "stopped" | "idle" = "id
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_completed",
-    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status },
+    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, lastTs: act.progress.lastTs },
   });
   if (act.threadId && act.adapter) {
     try {

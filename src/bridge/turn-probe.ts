@@ -11,10 +11,15 @@ import { getAgentStatus, subscribeEvents } from "./event-bus.js";
 
 const norm = (agent: string) => agent.replace(/^agent-/, "");
 
-/** agent（去掉 agent- 前缀）→ 最近一个后台 subagent 结束的时刻。bg shell 不记：它的结束靠 3 分钟无输出判定，早就过了防撞窗口 */
+/**
+ * agent（去掉 agent- 前缀）→ 最近一个后台 subagent 结束的时刻。按 subagent 最后一次写 jsonl 算，不按检测到的时刻：
+ * 扫描 10 秒一轮，沙箱实测检测到时 task-notification 那一回合已经跑完了。bg shell 不记：它靠 3 分钟无输出判结束。
+ */
 const subagentEndedAt = new Map<string, number>();
 subscribeEvents({}, (evt) => {
-  if (evt.type === "bg_task_completed" && evt.data.kind === "subagent") subagentEndedAt.set(norm(evt.agent), Date.now());
+  if (evt.type !== "bg_task_completed" || evt.data.kind !== "subagent") return;
+  const lastTs = typeof evt.data.lastTs === "number" ? evt.data.lastTs : Date.now();
+  subagentEndedAt.set(norm(evt.agent), Math.min(lastTs, Date.now()));
 });
 
 /** 事件态：名字两侧都可能带 agent- 前缀（master 另说），两种都查 */
