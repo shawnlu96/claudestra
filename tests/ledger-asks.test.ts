@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   answerAsk, ASK_TTL_MS, closeAsk, dueAsks, findAskByDiscordMessage, getAsk, hasAsksTable, listAsks, openAsk, openAskFull, patchAsk, type AskAnswer, type NewAsk,
 } from "../src/lib/ledger-asks.js";
+import { migrateAsksV2 } from "../src/lib/ledger-asks-schema.js";
 import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, LedgerError, listEvents, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
 import { appendEvent, createItem, createTask } from "../src/lib/ledger-write.js";
@@ -246,6 +247,11 @@ describe("迁移到第二版", () => {
     expect(listAsks(d, { states: ["superseded"] })).toHaveLength(1);
     closeLedger(path);
     const again = openLedger(path);
+    expect(getAsk(again, "ask_old")?.title).toBe("老的");
+    // 单独少了一个索引：再跑一次只补索引、不重建（r1 P2-3）
+    again.prepare("DROP INDEX asks_assignee_state").run();
+    migrateAsksV2(again);
+    expect(again.query("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'asks_assignee_state'").get()).toBeTruthy();
     expect(getAsk(again, "ask_old")?.title).toBe("老的");
   });
 });
