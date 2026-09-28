@@ -6,7 +6,7 @@
  *   在沙箱根里，`sandbox clean` 会把它连目录删掉。
  */
 import { openSync, readSync, closeSync } from "fs";
-import { refuseInSandbox, sandboxRootOf } from "./sandbox.js";
+import { isSandbox, refuseInSandbox, sandboxAgentDirProblem, sandboxRootOf } from "./sandbox.js";
 import { findSessionJsonlBySessionId } from "./session-source.js";
 
 /** Claude Code 会话的工作目录：读会话 jsonl 开头 64KB 里第一个带 cwd 的记录；找不到返回 null */
@@ -41,4 +41,15 @@ export function assertResumable(sessionId: string, dir?: string): void {
     const root = d ? sandboxRootOf(d) : null;
     if (root) throw new Error(`会话 ${sessionId.slice(0, 8)} 属于沙箱 ${root}：生产不接管沙箱的会话（sandbox clean 会删掉它的目录）`);
   }
+}
+
+/**
+ * set-session 之前调（沙箱里）：新会话 jsonl 记的 cwd 必须是沙箱根下的目录。否则 `set-session <agent> <生产会话 id>`
+ * 再 restart，沙箱 agent 就 --resume 到了生产那段对话。非沙箱空操作（生产的 set-session 由 bridge 按自己的 registry 调）。
+ */
+export function assertSandboxSession(sessionId: string): void {
+  if (!isSandbox()) return;
+  const cwd = sessionCwd(sessionId);
+  const problem = cwd ? sandboxAgentDirProblem(cwd) : `找不到会话 ${sessionId.slice(0, 8)} 的工作目录`;
+  if (problem) refuseInSandbox(`把 agent 指到会话 ${sessionId.slice(0, 8)}：${problem}`);
 }

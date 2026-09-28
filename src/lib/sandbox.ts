@@ -208,9 +208,9 @@ export function sandboxAgentDirProblem(dir: string, env: Env = process.env): str
   if (!isSandbox(env)) return null;
   const root = (env[SANDBOX_ROOT_ENV] || "").trim();
   if (!root) return `沙箱没设 ${SANDBOX_ROOT_ENV}，不知道 agent 该建在哪（用 scripts/sandbox.ts 起沙箱）`;
-  let d = dir.trim();
-  if (d === "~" || d.startsWith("~/")) d = (env.HOME || "") + d.slice(1);
-  else if (d.startsWith("~")) return `沙箱不认 ${dir} 这种 ~user 写法，写绝对路径`;
+  // 按原样判断，不做 trim：判断的必须就是 tmux -c 收到的那个字符串（规范化见 normalizeSandboxAgentDir）
+  if (dir.startsWith("~") && dir !== "~" && !dir.startsWith("~/")) return `沙箱不认 ${dir} 这种 ~user 写法，写绝对路径`;
+  const d = expandHome(dir, env);
   if (!isAbsolute(d)) return `沙箱 agent 的目录要写绝对路径（收到 ${dir}）`;
   const inside = relative(canonicalPath(root), canonicalPath(d));
   if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) return `沙箱 agent 必须建在 ${root}/ 下面（收到 ${dir}）`;
@@ -221,6 +221,22 @@ export function sandboxAgentDirProblem(dir: string, env: Env = process.env): str
     /* 不存在：下面按「不是目录」报 */
   }
   return isDir ? null : `沙箱 agent 的目录 ${dir} 不存在或不是目录（tmux 会回落到 $HOME）`;
+}
+
+function expandHome(dir: string, env: Env): string {
+  return dir === "~" || dir.startsWith("~/") ? (env.HOME || "") + dir.slice(1) : dir;
+}
+
+/** create 收到的目录在沙箱里先规范化（去首尾空白、展开 ~/），调用方后面一律用这个值，检查与实际使用的是同一个串 */
+export function normalizeSandboxAgentDir(dir: string, env: Env = process.env): string {
+  return isSandbox(env) ? expandHome(dir.trim(), env) : dir;
+}
+
+/** 生产侧：目录在某个沙箱根下就拒绝（sandbox clean 会连目录删掉）；沙箱里不管（沙箱 agent 本来就在那） */
+export function refuseSandboxDirInProduction(dir: string, what: string, env: Env = process.env): void {
+  if (isSandbox(env) || !dir || dir === "-") return;
+  const root = sandboxRootOf(expandHome(dir, env));
+  if (root) throw new Error(`${what}：${dir} 在沙箱 ${root} 里（sandbox clean 会删掉它），生产不在那里建`);
 }
 
 /** dir 所在的沙箱根（往上找 SANDBOX_MARKER）；不在任何沙箱里返回 null。生产侧用它拒绝接管沙箱的会话 */

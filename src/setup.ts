@@ -19,8 +19,10 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { assessInstall, skippableSteps, type InstallProgress } from "./lib/install-progress.js";
 import { gateSetupAdoption } from "./lib/setup-adoption.js";
 import { mergeEnvContent, parseEnvRaw } from "./lib/env-file.js";
+import { refuseInSandbox } from "./lib/sandbox.js";
 import { bindsAllInterfaces, type RemoteAccessChoice } from "./lib/setup-remote-access.js";
 import { frontendChoiceLines, printAccessSummary, printBypassExtras, printMachineChanges } from "./lib/setup-disclosure.js";
+refuseInSandbox("跑 setup（它写 .env、launchd 与 ~/.claude）"); // 模块顶层、打开终端输入之前；lib/paths 按入口名拦不住 `bun -e 'import(...)'`
 
 /**
  * 向导契约版本。install.sh 检出 release 后 grep 这一行：< 2 说明那个版本的向导早于
@@ -1974,14 +1976,12 @@ async function main() {
   // 放在最前（任何有副作用的步骤之前）：不同意时不留下装了一半的 web / token
   await stepBypassConsent();
 
-  // Discord 未选时留空 → bridge 按 WEB_ONLY 模式启动(config.ts:
-  // WEB_ONLY = !DISCORD_BOT_TOKEN);控制频道用 web-only 约定的本地常量。
+  // Discord 未选时留空 → bridge 按 WEB_ONLY 模式启动(config.ts: WEB_ONLY = !DISCORD_BOT_TOKEN);控制频道用 web-only 约定的本地常量。
   let token = "";
   let guildId = "";
   let userId = "";
   let controlChannelId = "local-master-control";
-  // 续装：Discord 四项齐全就整段沿用——token 只在 Reset 时显示一次，重输等于逼人
-  // 去重置 token，而那会让正在跑的 bridge 立刻失效
+  // 续装：Discord 四项齐全就整段沿用——token 只在 Reset 时显示一次，重输等于逼人去重置 token，而那会让正在跑的 bridge 立刻失效
   const reuseDiscord = fronts.discord && hasDiscordConfig(existing) && await confirm(t(
     `沿用现有 Discord 配置（bot token …${existing.DISCORD_BOT_TOKEN!.slice(-4)}，服务器 ${existing.DISCORD_GUILD_ID}）？`,
     `Keep the existing Discord config (bot token …${existing.DISCORD_BOT_TOKEN!.slice(-4)}, server ${existing.DISCORD_GUILD_ID})?`,

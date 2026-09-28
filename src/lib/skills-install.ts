@@ -103,6 +103,6 @@ export function installRepoSkills(
   repoRoot: string,
   opts: { home?: string; apply?: boolean } = {},
 ): SkillInstallResult[] {
-  if (opts.apply) refuseInSandbox("装 skill 到 ~/.claude/skills"); // 只读体检（doctor）照常
+  if (opts.apply ?? true) refuseInSandbox("装 skill 到 ~/.claude/skills"); // 默认就是装；只读体检（doctor 传 apply:false）照常
   return listRepoSkills(repoRoot).map((n) => installRepoSkill(repoRoot, n, opts));
 }

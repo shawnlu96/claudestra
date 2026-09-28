@@ -24,6 +24,8 @@ import { homedir } from "os";
 import { join } from "path";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
+/** 入口文件（launcher / cron）经这里拿：它们本来就 import paths，省一行 import（三个文件都在体积上限） */
+export { refuseInSandbox } from "./sandbox.js";
 
 /** 某个 home 下的默认状态目录（不看 override）。给带 `home` 参数的纯函数用。 */
 export function stateDirIn(home: string): string {

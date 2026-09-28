@@ -25,6 +25,7 @@ const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
 const BUN = process.execPath;
 const REAL_TMUX = Bun.which("tmux");
+const PROD_SID = "11111111-2222-4333-8444-555555555555";
 
 let tmp = "";
 let home = "";
@@ -82,6 +83,8 @@ function seedFakeHome(): void {
   writeFileSync(join(tmp, "stale-statusline.sh"), `#!/bin/sh\ncat >/dev/null\necho '{}' > "$HOME/.claude-orchestrator/usage-cache.json"\n`);
   chmodSync(join(tmp, "stale-statusline.sh"), 0o755);
   writeFileSync(join(home, ".claude", "projects", "-prod", "s.jsonl"), "{}\n");
+  // 一段生产会话：沙箱里 set-session 到它、再 restart，就会续到生产那段对话——必须被拒
+  writeFileSync(join(home, ".claude", "projects", "-prod", `${PROD_SID}.jsonl`), JSON.stringify({ type: "user", sessionId: PROD_SID, cwd: join(home, "prodrepo") }) + "\n");
   // 用户 rc 把自己的 bin 放 PATH 最前（真实用户靠它找到 claude）；login shell 的 path_helper 之后 .zshrc 再垫一次
   const rc = `export PATH="${join(tmp, "shim")}:$PATH"\n`;
   for (const f of [".zshenv", ".zshrc", ".bashrc", ".profile"]) writeFileSync(join(home, f), rc);
@@ -212,6 +215,33 @@ async function agentSide(): Promise<void> {
   const listed = productionManager("takeover");
   expect((JSON.parse(listed.out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as { candidates?: unknown[] }).candidates, listed.out).toEqual([]);
   expect(productionManager("resume", "prodx", info.sessionId ?? "").out).toContain("属于沙箱");
+  // set-session：指到生产会话被拒（否则 restart 就续到生产对话）；指回自己的会话照常
+  const hijack = sandbox("manager", "set-session", "sbxt", PROD_SID);
+  expect(hijack.code, hijack.out).not.toBe(0);
+  expect(hijack.out).toContain("沙箱");
+  expect(sandbox("manager", "set-session", "sbxt", info.sessionId ?? "").code).toBe(0);
+  // 带尾空格的目录：规范化后交给 tmux（检查的与实际用的是同一个串），agent 落在 work/ 里
+  const spaced = sandbox("manager", "create", "sbxsp", `${join(root, "work")} `, "尾空格");
+  expect(spaced.out).toContain('"ok":true');
+  expect(sandbox("manager", "list").out).toContain(`"cwd":"${join(root, "work")}"`);
+  // 事后复核：目录存在但进不去（chmod 000）时 tmux 会回落到 $HOME——前置检查过得去，复核必须关掉窗口
+  const noperm = join(root, "work", "noperm");
+  mkdirSync(noperm);
+  chmodSync(noperm, 0o000);
+  try {
+    const r = Bun.spawnSync([BUN, "--no-env-file", "-e", `
+      const { tmuxRawStrict, tmuxRaw } = await import(${JSON.stringify(join(REPO, "src", "lib", "tmux-helper.ts"))});
+      try { await tmuxRawStrict(["new-window", "-t", "master:", "-n", "sbx-noperm", "-c", ${JSON.stringify(noperm)}]); console.log("through"); }
+      catch (e) { console.log("blocked: " + e.message); }
+      console.log("windows: " + (await tmuxRaw(["list-windows", "-t", "master", "-F", "#{window_name}"])).split("\\n").join(","));`],
+    { cwd: root, env: sandboxEnvOf(), stdout: "pipe", stderr: "pipe" });
+    const out = r.stdout.toString();
+    expect(out, r.stderr.toString()).toContain("已关掉");
+    expect(out).not.toContain("sbx-noperm");
+  } finally {
+    chmodSync(noperm, 0o755);
+  }
+  expect(sandbox("manager", "kill", "sbxsp").code).toBe(0);
   expect(sandbox("manager", "kill", "sbxt").code).toBe(0);
 }
 
@@ -357,6 +387,12 @@ describe("沙箱 bridge 无副作用", () => {
       const r = run([join(REPO, "src", entry)]);
       expect(r.code, `${entry}\n${r.out}`).not.toBe(0);
       expect(r.out, entry).toContain("不能在沙箱里跑");
+    }
+    // `bun -e 'await import(...)'` 时 argv[1] 为空，按入口名的那道拦不住：launcher / setup 的 main 自己再拦
+    for (const entry of ["launcher.ts", "setup.ts"]) {
+      const r = run(["-e", `await import(${JSON.stringify(join(REPO, "src", entry))});`]);
+      expect(r.code, `import ${entry}\n${r.out}`).not.toBe(0);
+      expect(r.out, entry).toContain("沙箱里不许跑");
     }
     expect(diff(before, snapshot(home))).toEqual([]);
     expect(readFileSync(shimLog, "utf8").split("\n").filter((c) => c.startsWith("launchctl")).length).toBe(launchctlBefore);

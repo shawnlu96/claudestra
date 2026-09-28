@@ -9,8 +9,10 @@ import { join } from "path";
 import {
   assertSandboxRuntime, canonicalPath, enforceSandboxBridgeEnv, enforceSandboxProcess, isSandbox, outboundAllowed, sandboxAgentDirProblem,
   sandboxBridgeEnvProblems, sandboxBridgeUrlProblem, sandboxDirProblems, sandboxStaticDirProblem, sandboxRootOf, SANDBOX_MARKER,
+  normalizeSandboxAgentDir, refuseSandboxDirInProduction,
 } from "../src/lib/sandbox.js";
-import { assertResumable } from "../src/lib/sandbox-sessions.js";
+import { assertResumable, assertSandboxSession } from "../src/lib/sandbox-sessions.js";
+import { cliWrapperScript } from "../src/lib/cli-install.js";
 import { runCodex } from "../src/lib/codex.js";
 import { writeClaudeSettings } from "../src/lib/session-recall.js";
 import { installRepoSkills } from "../src/lib/skills-install.js";
@@ -166,6 +168,9 @@ describe("沙箱 agent 的目录与 runtime", () => {
     expect(sandboxAgentDirProblem(`${root}/../elsewhere`, env)).not.toBeNull();
     expect(sandboxAgentDirProblem("work", env)).toContain("绝对路径");
     expect(sandboxAgentDirProblem("~/work", env)).toBeNull(); // HOME 指向沙箱根时 ~ 照常展开
+    expect(sandboxAgentDirProblem(`${join(root, "work")} `, env)).toContain("不存在"); // 不 trim：查的就是 tmux 收到的串
+    expect(normalizeSandboxAgentDir(` ${join(root, "work")} `, env)).toBe(join(root, "work"));
+    expect(normalizeSandboxAgentDir(" /x ", {})).toBe(" /x "); // 非沙箱原样
     expect(sandboxAgentDirProblem("~foo", env)).toContain("~user");
     expect(sandboxAgentDirProblem("/tmp/x", { ...ON })).toContain("CLAUDESTRA_SANDBOX_ROOT");
     expect(sandboxAgentDirProblem("/anywhere", {})).toBeNull();
@@ -174,6 +179,12 @@ describe("沙箱 agent 的目录与 runtime", () => {
     writeFileSync(join(root, SANDBOX_MARKER), "{}");
     expect(sandboxRootOf(join(root, "work", "deeper"))).toBe(canonicalPath(root));
     expect(sandboxRootOf(tmpdir())).toBeNull();
+  });
+  test("生产侧：create / cron-add 的目录在沙箱根下就拒绝；沙箱里不管", () => {
+    expect(() => refuseSandboxDirInProduction(join(root, "work"), "建 agent", {})).toThrow("在沙箱");
+    expect(() => refuseSandboxDirInProduction(tmpdir(), "建 agent", {})).not.toThrow();
+    expect(() => refuseSandboxDirInProduction("-", "建 cron 任务", {})).not.toThrow();
+    expect(() => refuseSandboxDirInProduction(join(root, "work"), "建 agent", env)).not.toThrow();
   });
   test("assertResumable：沙箱里一律拒绝；生产里目录属于沙箱就拒绝", () => {
     expect(() => assertResumable("00000000-0000-4000-8000-000000000000", join(root, "work"))).toThrow("属于沙箱");
@@ -253,6 +264,8 @@ describe("沙箱关掉的 API 与动作", () => {
       expect(() => assertCreatable("a", join(root, "work"), "codex")).toThrow("Claude Code");
       expect(() => assertCreatable("a", join(root, "work"), undefined)).not.toThrow();
       expect(() => assertCreatable("a", join(root, "work", "typo"), undefined)).toThrow("不存在");
+      expect(assertCreatable("a", `${join(root, "work")} `, undefined)).toBe(join(root, "work")); // 调用方拿到的是规范化后的
+      expect(() => assertSandboxSession("00000000-0000-4000-8000-000000000000")).toThrow("找不到会话");
     } finally {
       delete process.env.CLAUDESTRA_SANDBOX_ROOT;
     }
@@ -280,7 +293,15 @@ describe("沙箱关掉的 API 与动作", () => {
     expect(r.ok).toBe(false);
     expect(r.message).toContain("沙箱");
     await expect(writeClaudeSettings("/nonexistent/settings.json", {})).rejects.toThrow("沙箱里不许");
-    expect(() => installRepoSkills("/nonexistent", { apply: true })).toThrow("沙箱里不许");
+    expect(() => installRepoSkills("/nonexistent")).toThrow("沙箱里不许"); // manager 的调用都不传 apply（默认就是装）
+    expect(() => installRepoSkills("/nonexistent", { apply: false })).not.toThrow(); // doctor 的只读体检照常
+  });
+  test("全局 claudestra wrapper：带着沙箱环境敲它直接拒绝（不连生产 tmux / launchd）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sbx-wrap-"));
+    writeFileSync(join(dir, "claudestra"), cliWrapperScript("/opt/claudestra"));
+    const r = Bun.spawnSync(["bash", join(dir, "claudestra"), "ls"], { env: { PATH: "/usr/bin:/bin", CLAUDESTRA_SANDBOX: "1" }, stdout: "pipe", stderr: "pipe" });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("沙箱环境");
   });
   test("bridge 拉起的 manager：沙箱里带 --no-env-file，非沙箱命令行不变", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sbx-rm-"));

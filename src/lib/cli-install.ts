@@ -291,9 +291,10 @@ export function cliWrapperScript(repoRoot: string, bunPath = "bun"): string {
 #   2) 已在 tmux 嵌套，提示 + 退出
 #   3) 在 iTerm（且没 --plain）：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
 #   4) --iterm 且装了 iTerm：osascript 唤起 iTerm 新窗口跑 attach
-#   5) 其余（--plain / Terminal.app / ssh 等）：普通 tmux attach
-#      （-CC 在普通终端里只会吐控制协议文本；ssh 进来时唤起 iTerm 会开在远端桌面上）
+#   5) 其余（--plain / Terminal.app / ssh 等）：普通 tmux attach（-CC 在普通终端里只会吐控制协议文本；ssh 进来时唤起 iTerm 会开在远端桌面上）
 set -u
+# 沙箱环境（eval "$(bun run sandbox env)" 之后）里敲 claudestra 会连到生产 tmux / launchd：拒绝
+[ "\${CLAUDESTRA_SANDBOX:-}" = "1" ] && { echo "claudestra：当前 shell 带着沙箱环境（CLAUDESTRA_SANDBOX=1），生产命令拒绝执行；开个新 shell 再用" >&2; exit 1; }
 
 REPO=${JSON.stringify(repoRoot)}
 SOCK=${JSON.stringify(TMUX_SOCK)}

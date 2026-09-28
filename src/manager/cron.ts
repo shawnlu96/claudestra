@@ -10,6 +10,7 @@ import { KNOWN_EFFORT_LEVELS, isKnownEffort } from "../lib/claude-launch.js";
 import { readProjects } from "../lib/projects.js";
 import { loadJobs, saveJobs, parseCronExpression, nextCronTime, CRON_DEFAULT_EFFORT, type CronJob } from "../cron.js";
 import { output } from "./core.js";
+import { refuseSandboxDirInProduction } from "../lib/sandbox.js";
 
 // ============================================================
 // Cron 管理命令
@@ -25,6 +26,7 @@ async function checkCronProject(project: string | undefined): Promise<string | n
 }
 
 export async function cmdCronAdd(name: string, schedule: string, dir: string, prompt: string, reportChannelId?: string, targetAgent?: string, effort?: string, project?: string) {
+  refuseSandboxDirInProduction(dir, "建 cron 任务"); // 生产的定时 agent 不建在沙箱目录里（lib/sandbox.ts）
   // 验证 cron 表达式
   try {
     parseCronExpression(schedule);

@@ -101,7 +101,7 @@ import {
 } from "./lib/projects.js";
 import { isSandbox, refuseInSandbox, sandboxRootOf } from "./lib/sandbox.js";
 import { sandboxManagerRefusal } from "./lib/sandbox-env.js";
-import { assertResumable } from "./lib/sandbox-sessions.js";
+import { assertResumable, assertSandboxSession } from "./lib/sandbox-sessions.js";
 import { loadRegistry, migrateWorkerToAgent, saveRegistry, normalizeName, assertValidNewName, assertCreatable, formatAge, output, extractPermFlags, extractPurposeFlag, rejectFlagLikePositional, extractEffortFlag, extractModeFlag, extractModelFlag, extractBoolFlag, extractMultiFlag, extractStringFlag } from "./manager/core.js";
 import { runProjectCommand } from "./manager/projects.js";
 import { cmdCronAdd, cmdCronList, cmdCronEdit, cmdCronRemove, cmdCronToggle, cmdCronHistory } from "./manager/cron.js";
@@ -489,7 +489,7 @@ async function cmdCreate(
   runtimeFlag?: string,
   piBaseFlag?: string,
 ) {
-  assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱里另查目录与 runtime（manager/core.ts）
+  dir = assertCreatable(name, dir, runtimeFlag); // 名字合法；沙箱 / 生产各自的目录闸与 runtime 闸（manager/core.ts）
   // runtime 只决定「用哪个适配器」（启动命令 / 就绪判据 / registry 字段），
   // 其余（频道 / 窗口 / project / registry 形状）各运行时完全一致。
   let adapter: ManagedRuntimeAdapter;
@@ -3010,6 +3010,7 @@ switch (cmd) {
       output({ ok: false, error: `sessionId 形状非法: ${newSid}` });
       break;
     }
+    assertSandboxSession(newSid); // 沙箱：新会话必须属于沙箱根（否则 set-session + restart 就续到了生产会话）
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
     const info = reg.agents[tmuxName];
