@@ -7,6 +7,7 @@ import type { ActionKind } from "./collab-action";
 import { COLUMNS, dwellText, skippedColumns, type LineView, type Tr } from "./collab-model";
 import { Icon } from "./collab-icons";
 import s from "./collab.module.css";
+import v2 from "./collab-v2.module.css";
 
 const NCOL = COLUMNS.length;
 const pos = (i: number) => ((i + 0.5) / NCOL) * 100;
@@ -37,7 +38,8 @@ export function LineHeaderCols({ tr }: { tr: Tr }) {
   );
 }
 
-function stageIcon(l: LineView) {
+function stageIcon(l: LineView, reviewing: boolean) {
+  if (reviewing) return "shieldCheck" as const;
   if (l.attention === "problem") return "rotateCcw" as const;
   if (l.attention === "progress") return "zap" as const;
   return "hourglass" as const;
@@ -52,8 +54,13 @@ export function CollabLine(props: {
   selected: boolean;
   onOpen: () => void;
   tr: Tr;
+  /** 上次来之后变过（T12c）：标题前一个小圆点 */
+  changed?: boolean;
+  /** 审查员在跑（T12c，collab-reviewers.ts）：review 阶段已改写 stageLabel，其它阶段挂这个小标 */
+  reviewing?: boolean;
+  reviewerTag?: string | null;
 }) {
-  const { line: l, action, hot, hotFrom, selected, onOpen, tr } = props;
+  const { line: l, action, hot, hotFrom, selected, onOpen, tr, changed, reviewing = false, reviewerTag } = props;
   const col = l.column;
   const skip = skippedColumns(l.kind);
   const actLabel = l.attention === "problem" && l.stage === "fix" ? tr("返工 R{n}", { n: Math.max(1, l.round) }) : tr(ACT_LABEL[action.kind]);
@@ -68,17 +75,26 @@ export function CollabLine(props: {
     >
       <div className={s.info}>
         <div className={s.t1}>
+          {changed && <span className={v2.chg} title={tr("上次来之后有变化")} />}
           <span className={s.tid}>{l.id}</span>
           <span className={s.ttl}>{l.title}</span>
         </div>
         {l.goal && <div className={s.goal}>{l.goal}</div>}
         <div className={s.wait}>
           <span className={s.k}>
-            <Icon name={stageIcon(l)} size={12} />
+            <Icon name={stageIcon(l, reviewing && !reviewerTag)} size={12} />
             {l.stageLabel}
           </span>
           {l.dwellMs !== null && <span className={s.dw}>· {dwellText(l, tr)}</span>}
         </div>
+        {reviewerTag && (
+          <div className={s.wait}>
+            <span className={v2.rvTag}>
+              <span className={v2.rvLive} />
+              {reviewerTag}
+            </span>
+          </div>
+        )}
         {l.reason && <div className={s.why}>{l.reason}</div>}
       </div>
       <div className={s.track}>

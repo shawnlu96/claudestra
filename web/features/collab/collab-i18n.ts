@@ -53,6 +53,16 @@ const COLLAB_WORDS: Record<string, string> = {
   "重连中": "reconnecting",
   "验证": "Verify",
   "等开工": "Awaiting start",
+  "对抗式": "adversarial",
+  "在跑": "running",
+  "知道了": "Got it",
+  "播放": "Play",
+  "上一步": "Previous",
+  "下一步": "Next",
+  "建任务": "Task created",
+  "收起回放": "Close replay",
+  "回放进度": "Replay position",
+  "回放": "Replay",
 };
 
 export function useCollabT(): Tr {

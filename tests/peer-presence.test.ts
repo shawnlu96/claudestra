@@ -19,6 +19,16 @@ describe("在线 peer 列表：探测结果合并", () => {
     expect(off.remoteAgents?.length).toBe(1);
   });
 
+  test("token 被对方拒绝（401 / 403）：清掉对方开放的 agent，网络失败才保留", () => {
+    const on = mergeProbe(undefined, { ok: true, latencyMs: 42, agents: [{ name: "agent-a" }] }, T1);
+    for (const error of ["http 401", "http 403"]) {
+      const off = mergeProbe(on, { ok: false, error }, T2);
+      expect(off).toMatchObject({ online: false, error, lastOnlineAt: T1 });
+      expect(off.remoteAgents).toBeUndefined();
+    }
+    expect(mergeProbe(on, { ok: false, error: "http 500" }, T2).remoteAgents?.length).toBe(1);
+  });
+
   test("单向 peer（没有出站地址）：online=null，不算离线；来访时间保留", () => {
     const p = mergeProbe({ online: null, lastInboundAt: T1 }, null, T2);
     expect(p).toMatchObject({ online: null, lastInboundAt: T1, checkedAt: T2 });
@@ -28,6 +38,9 @@ describe("在线 peer 列表：探测结果合并", () => {
     expect(probeResultOf(401, { ok: false }, 10)).toEqual({ ok: false, error: "http 401" });
     expect(probeResultOf(200, null, 10)).toEqual({ ok: true, latencyMs: 10, agents: [] });
     expect(probeResultOf(200, { agents: [{ name: "x" }, { bad: 1 }, null] }, 10)).toEqual({ ok: true, latencyMs: 10, agents: [{ name: "x", status: undefined }] });
+    // busy 只收布尔值：老版本对方不返回就没有这个字段，别拿 status 冒充
+    const r = probeResultOf(200, { agents: [{ name: "a", status: "active", busy: true }, { name: "b", status: "active" }, { name: "c", busy: "yes" }] }, 10);
+    expect(r).toEqual({ ok: true, latencyMs: 10, agents: [{ name: "a", status: "active", busy: true }, { name: "b", status: "active" }, { name: "c", status: undefined }] });
   });
 
   test("fetch 错误归类：超时 / 被拒 / 其它原文截断", () => {

@@ -15,7 +15,7 @@ import { askPushDecision, askPushMessage, type AskPushDecision } from "../../lib
 import type { Ask } from "../../lib/ledger-asks.js";
 import type { Presence } from "../../lib/owner-presence.js";
 import { OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
-import type { PrincipalsFile } from "../../lib/principals.js";
+import { isOwnerPrincipal, tokenIdOf, type PrincipalsFile } from "../../lib/principals.js";
 import { deleteApnsDevice, deletePushSubscription, dismissSafe, listApnsDevices, listPushSubscriptions, type PushSubscriptionRow, setPushSubscriptionKey } from "../../lib/push-store.js";
 import { t as tr } from "../../lib/i18n.js";
 import { markdownToPlain } from "../../lib/plain-text.js";
@@ -62,12 +62,10 @@ const sumOutcomes = (xs: NoticeOutcome[]): NoticeOutcome => ({ sent: xs.reduce((
 export const OWNER_CHAT_ID = `api:${OWNER_PRINCIPAL_ID}`;
 const BODY_MAX = 180;
 
-/** owner 的网页聊天身份：owner:self 一定算；过渡期名为 web-ui 的老 token（旧 Next 前端用的那把）也算 */
+/** owner 的网页聊天身份：owner:self 一定算，其余按 lib/principals.ts isOwnerPrincipal（全仓唯一的 owner 定义） */
 export function ownerChatIds(file: PrincipalsFile): Set<string> {
   const ids = new Set([OWNER_CHAT_ID]);
-  for (const p of file.principals) {
-    if (p.name === "web-ui" && !p.disabled && !p.peer && p.id.startsWith("token:")) ids.add(`api:${p.id.slice("token:".length)}`);
-  }
+  for (const p of file.principals) if (isOwnerPrincipal(p)) ids.add(`api:${tokenIdOf(p)}`);
   return ids;
 }
 
