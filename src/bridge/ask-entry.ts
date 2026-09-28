@@ -10,7 +10,7 @@ import { canReadLedger, OWNER_PRINCIPAL_ID } from "../lib/devices.js";
 import { t } from "../lib/i18n.js";
 import { findAskByDiscordMessage, getAsk, listAsks, type Ask } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
-import { agentInScope, tokenIdOf, type Principal } from "../lib/principals.js";
+import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../lib/principals.js";
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
 import { answerTarget, askDb, askReadDb, commitAnswer, initAsks, type AsksDeps } from "./asks.js";
@@ -21,10 +21,10 @@ export function canSeeAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
 }
 
 /**
- * owner 本人的设备凭据（owner:self 这个 principal + 设备凭据）：答复以 owner 名义投给 agent，不能让集成 token、guest 冒充。
- * 不看 role——配对时关了终端（--no-terminal）的设备 role 会降成 external，但它仍是 owner 的设备（§4.7：canManage、非 peer、scope 含 *）
+ * owner 本人的设备凭据：lib/principals.ts isOwnerPrincipal（全仓唯一的 owner 定义）再收窄到 owner:self + 设备凭据——答复以 owner 名义
+ * 投给 agent，web-ui 这类集成 token 能看不能答。不看 role：配对时关了终端（--no-terminal）的设备 role 会降成 external，但它仍是 owner 的设备
  */
-export const isOwnerDevice = (p: Principal): boolean => p.id === OWNER_PRINCIPAL_ID && !!p.credential && !p.peer;
+export const isOwnerDevice = (p: Principal): boolean => isOwnerPrincipal(p) && p.id === OWNER_PRINCIPAL_ID && !!p.credential;
 
 /** 能作答：owner 本人的设备，且看得见这条 */
 export function canAnswerAsk(p: Principal, a: Pick<Ask, "fromAgent">): boolean {
@@ -90,7 +90,8 @@ async function redirectForbidden(p: Principal, a: Ask): Promise<Response | null>
   return forbidden(t(`${a.fromAgent} 已经不在，答复会改投 ${to.agentName}，这台设备的授权不含它`, `${a.fromAgent} is gone; the answer would go to ${to.agentName}, outside this device's scope`));
 }
 
-const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p), name: p.name || tokenIdOf(p) });
+/** 和 POST /agents/:name/messages 同一个 from：带 owner 标记，owner 答复里的 @ 委托标记才不会被中和（router.ts） */
+const apiFrom = (p: Principal) => ({ kind: "api" as const, tokenId: tokenIdOf(p), name: p.name || tokenIdOf(p), ...(isOwnerPrincipal(p) ? { owner: true as const } : {}) });
 
 /**
  * POST /agents/:name/messages 里的一行调用：消息里的 wire 行答的是这个 agent 的某条 ask → 当答复处理，返回响应；

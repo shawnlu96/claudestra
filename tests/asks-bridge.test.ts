@@ -436,6 +436,15 @@ describe("第二轮审查的复现", () => {
     expect(getAsk(openLedger(path), a.id)?.state).toBe("open");
   });
 
+  test("r3 P2-8 owner 作答带 owner 标记（@ 委托标记不被中和）；web-ui token 看得见、答不了（聊天照常投递）", async () => {
+    await reply();
+    await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: owner() });
+    expect(delivered[0].from).toMatchObject({ kind: "api", owner: true });
+    const webUi: Principal = { id: "token:tok_web", role: "owner", name: "web-ui", agents: ["*"], createdAt: at };
+    await reply();
+    expect(await answerFromChat({ agent: "agent-x", text: "[button:go]", principal: webUi })).toBeNull();
+  });
+
   test("r3 P2-1 派发者按频道认：它也被 kill、旧名被新 agent 占了 → 大总管；它只是改了名 → 投给改名后的它", async () => {
     const a = (await reply())!;
     const b = (await reply())!;
