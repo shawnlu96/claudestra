@@ -47,12 +47,14 @@ describe("/agents/:name/skill-settings 的 scope", () => {
 });
 
 describe("/skills/library 的 overrides", () => {
+  // 状态目录是整次 bun test 共用的（tests/preload.ts），别的测试文件写的 agent 设置也在里面：
+  // 只对本文件建的几个断言在不在，不断言整张表（"*" 覆盖所有非 master 的 agent，会带上它们）
   test("只报 scope 内的 agent", async () => {
-    const part: any = await (await call("GET", "/skills/library", PARTIAL)).json();
-    expect(Object.keys(part.overrides)).toEqual(["agent-worker"]);
-    const star: any = await (await call("GET", "/skills/library", STAR)).json();
-    expect(Object.keys(star.overrides).sort()).toEqual(["agent-other", "agent-worker"]);
-    const owner: any = await (await call("GET", "/skills/library", OWNER)).json();
-    expect(Object.keys(owner.overrides).sort()).toEqual(["agent-other", "agent-worker", "master"]);
+    const keys = async (p: Principal) => Object.keys(((await (await call("GET", "/skills/library", p)).json()) as any).overrides);
+    expect(await keys(PARTIAL)).toEqual(["agent-worker"]); // 只授权了 worker：别的文件建的 agent 也不该出现
+    const star = await keys(STAR);
+    expect(star).toEqual(expect.arrayContaining(["agent-other", "agent-worker"]));
+    expect(star).not.toContain("master");
+    expect(await keys(OWNER)).toEqual(expect.arrayContaining(["agent-other", "agent-worker", "master"]));
   });
 });
