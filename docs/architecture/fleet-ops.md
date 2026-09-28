@@ -46,4 +46,26 @@ Selection: explicit agents, `all`, `project`, plus AND-filters `walled` and `ctx
 - Web: badge next to the sidebar name (lucide snail / hourglass / ban), panel from Agent 管理 → 批量管理. Discord stats dashboard: plain-text tag (`LP→3:20am`, `撞墙中`, `LP 本周额度已用完`), display only.
 - Every run logs one line per agent to the bridge log (`🛰 [fleet] <runId> …`) and writes one project-level ledger note per affected project (who, when, action, per-agent results).
 
+## MCP tool (`fleet`)
+
+Agents that schedule other agents (the master and PMs) call the batch actions themselves through the channel-server tool `fleet` (`src/lib/fleet-tool.ts`, registered in `channel-server.ts`). It is a thin client over the same ws `fleet_state` / `fleet_run`; nothing about execution differs from the panel and the CLI.
+
+- `fleet({op:"state"})` — one line per agent the caller may act on: online / busy / walled (reset time, LP offered) / LP on (until when, allowance left) / context tokens (from the session usage, not the pane's ctx%).
+- `fleet({op:"run", action, select, dryRun?, text?})` — `action` is `lp_on` / `lp_off` / `lp_compact` / `compact` / `save_compact` / `text`; `select` takes `agents` / `all` / `project` plus the `walled` / `ctxOver` filters. **`dryRun` defaults to true** (only a literal `false` executes) and returns who would be acted on and who is skipped with why. `keep` is not accepted — compaction always uses `fleet.compactKeep`. `text` is at most 2000 characters, delivered through `deliver()` as a notification (no keys, no preemption) with the caller's name in the header.
+
+Who may call (`src/lib/fleet-caller.ts`, tests in `tests/fleet-caller.test.ts`). The bridge identifies the caller from the channel registered on that ws connection (`clients`), never from a field in the request; the tool sends none.
+
+| Connection | Result |
+|---|---|
+| control channel | master — every agent except the master itself |
+| registry agent listed in a project's ledger `pms` | PM — only agents in the projects it is PM of; `all` expands to those projects, naming another project fails |
+| registry agent listed in `config.json` `fleet.callers` | every agent except the master |
+| agent with `external` on | refused (its turn may have been started by a peer message) |
+| any other agent, executors included | refused: 只有大总管和 PM 能用 fleet |
+| registered channel not in the registry | refused |
+| unregistered connection with `via:"mcp"` | refused (a channel-server that failed to register must not fall into the CLI branch) |
+| unregistered connection without it | the CLI branch below — identity is self-declared, an anti-slip guard only |
+
+Through the tool the master is never a target (named → skipped with a reason; `includeMaster` → error): it is operated only by the owner from the panel or the CLI. The caller never acts on itself — it is mid-turn while calling, so naming itself with `compact` / `lp_compact` / `save_compact` fails the whole request, and any other way it gets selected puts it in `excluded` with the reason. Runs are logged and noted in the ledger with the caller's name as the actor and `mcp` as the channel.
+
 Out of scope: toggling LP automatically on wall / reset, and context-boundary auto-compaction (T36).

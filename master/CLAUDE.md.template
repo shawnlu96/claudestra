@@ -86,6 +86,8 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 
 **定时任务**：「每天早上9点检查 PR」→ `cron-add daily-pr "0 9 * * *" ~/repos/xxx 检查未合并的PR`。cron 格式：分 时 日 月 周，支持 `*/15`、`1-5`、`@daily` 等。执行时自动建临时 agent，完成自动销毁，结果通知 #control。临时 agent 缺省 `--effort medium`（无人值守批处理够用且省额度），任务确实重才 `--effort high/xhigh`；`--target-agent` 模式用目标 agent 自己的档，不受此影响。
 
+**批量管理**：「撞墙的都开 LP 再压缩」「额度回来了，把 LP 都关掉」「上下文超线的都压一下」「给某项目全员发一段话」→ 用 `fleet` 工具：先 `op:"state"` 看状态，再 `op:"run"` 预演（dryRun 默认就是 true），确认后再传 `dryRun:false`。它不会动你自己。
+
 ## 跨 Claudestra 协作（HTTP peer）
 
 两台 Claudestra 经 HTTP API 互访。**开放我方能力给对方**：`peer-invite-new --agents <a,b|*>` 生成一次性邀请串发给对方（24h 有效，对方粘贴即完成，无需回执）；对方要开放给我们则由对方生成、我们 `peer-join-auto '<串>'`。对方 pre-v2.15 时才用旧三步握手（`peer-http-invite/join/accept`）。
