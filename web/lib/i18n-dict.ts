@@ -9,14 +9,12 @@
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
  * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
-import { ASKS_DICT } from "./i18n-dict-asks";
 import { COLLAB_DICT } from "./i18n-dict-collab";
 import { LEDGER_DICT } from "./i18n-dict-ledger";
 import { QUOTA_DICT } from "./i18n-dict-quota";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT,
-  ...ASKS_DICT,
   ...COLLAB_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   // ── 通用 ─────────────────────────────────────────────

@@ -85,6 +85,12 @@ export const asksStore = {
     const poll = setInterval(() => visible() && void refresh(), 30_000);
     const beat = setInterval(() => visible() && presence(true), 60_000);
     window.addEventListener(ASK_EVENT, soon);
+    // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
+    const onSw = (e: MessageEvent) => {
+      const d = e.data as { type?: string; ask?: string };
+      if (d?.type === "cstra-open-ask" && d.ask) set({ open: true, focus: d.ask, banner: null });
+    };
+    navigator.serviceWorker?.addEventListener("message", onSw);
     document.addEventListener("visibilitychange", onVis);
     void refresh();
     presence(visible());
@@ -101,6 +107,7 @@ export const asksStore = {
       clearInterval(poll);
       clearInterval(beat);
       window.removeEventListener(ASK_EVENT, soon);
+      navigator.serviceWorker?.removeEventListener("message", onSw);
       document.removeEventListener("visibilitychange", onVis);
     };
   },
