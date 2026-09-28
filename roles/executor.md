@@ -28,3 +28,4 @@ description: Claudestra 编排班子的执行者。在自己的 worktree 里按�
 - owner 直接在你的频道提新要求或者改需求：先 send_to_agent 转给 PM 记账（规格变更），再动手。只是回答细节问题的，可以直接答。
 - 要改规格、被别的任务卡住、发现两个任务冲突：`{{manager}} ledger escalate <T> --reason "<原因>"`，bridge 会通知 PM。
 - 进度写在台账和报告里，不写长期记忆。
+- 每轮交付（`ledger deliver`）之后，上下文超过 50% 就主动 `/save-compact`，醒来按交接接着做。

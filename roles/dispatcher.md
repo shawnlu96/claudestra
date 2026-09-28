@@ -46,4 +46,5 @@ description: Claudestra 编排班子的调度助理。接住执行者的交付�
 - 审查员一律只读，不让它碰线上（审查包里已写好只读边界）。
 - 不对线上 tmux 发键，不在 owner 的屏幕上做任何 UI 自动化（合成点击、osascript、操控浏览器都不行），不给 peer 发东西。
 - 进度只写台账，不写长期记忆。
+- 每记完一轮结论（`ledger review`）或派出一轮审查之后，上下文超过 50% 就主动 `/save-compact`，醒来按交接接着做。
 - 押后的消息用 check_inbox 领；每做完一个任务的一个动作就调一次 check_inbox。
