@@ -6,7 +6,7 @@ import { createInterruptGate } from "../lib/interrupt-gate.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { interruptWindow } from "../lib/runtimes/window-ops.js";
-import { MASTER_SESSION, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
+import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
 import { emitEvent } from "./event-bus.js";
 import { probeTurnAt, resolveTurnWindow } from "./turn-probe.js";
 
@@ -16,7 +16,6 @@ export const interruptGate = createInterruptGate({
   resolve: (ch) => resolveTurnWindow(ch, controlChannelId()),
   probe: probeTurnAt,
   interrupt: interruptWindow,
-  escape: tmuxSendEscape,
   onPreempted: (agent, channelId) => {
     recordMetric("agent_interrupt", { channelId, agent, meta: { trigger: "preempt" } });
     // 让前端给被掐的回合标「已打断」(与手动停止同一事件形状)
@@ -29,7 +28,7 @@ export const interruptGate = createInterruptGate({
 /** 按 agent 名手动打断（API 端点）：大总管（"master" / "0"）不在 registry 的普通条目里，按 Claude Code 的 master:0 处理 */
 export async function interruptAgentByName(name: string, channelId: string): Promise<{ keys: readonly string[]; deduped?: true }> {
   const isMaster = name === "master" || name === "0";
-  const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就当 CC：打断仍按画面判，不会对空闲窗口发 C-c
+  const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就当 CC 发 C-c：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;
-  return interruptGate.manual(channelId, isMaster ? "master" : name, isMaster ? `${MASTER_SESSION}:0` : windowTarget(name), runtime);
+  return interruptGate.manual(channelId, isMaster ? `${MASTER_SESSION}:0` : windowTarget(name), runtime);
 }

@@ -318,10 +318,13 @@ export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
  * 「回合进行中」标记：老 TUI 的 "esc to interrupt"，或 spinner 行（行首字形 + 动词…）：
  *   `✽ Pondering… (2m 23s · ↓ 9.9k tokens)` / `· Cooking… (1h 2s)` / `✻ Concocting… (running Stop hook · 3s …)`；回合刚开始、首个 token 回来前（实测 0.6–2.1s）
  *   只有 `✽ Actioning…`、不带括号——这一支锁第 0 列且行尾就是「…」，空闲态的 `✻ Worked for…` / `✻ Waiting for…` 不带「…」。
+ * 任务 activeForm 以 ASCII「...」结尾时 CC 不再补「…」（`✻ Running tests... (2m 3s …)`），两种省略号都认；API 重试 / 限流时
+ * spinner 行换成 `✻ Repeated 529 Overloaded errors · Retrying in 38s · attempt 5/10` / `✻ Waiting for API response · will retry in 5s`，也算忙。
  * 锚定行首：空闲画面里工具输出的「⎿ Compiling… (12s)」不算。忙碌输入框可能渲染成 `❯\u00a0`，所以要先于 ❯ 判（paneLooksIdle）。
  * 见 tests/pane-main-turn.test.ts。
  */
-export const CC_BUSY_RE = /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*…\s*\([^)\n]*?(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b|^[·✢✳✶✻✽*] \S[^\n]*…[^\S\n]*$/im;
+export const CC_BUSY_RE =
+  /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*(?:…|\.\.\.)\s*\([^)\n]*?(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b|^[·✢✳✶✻✽*] \S[^\n]*(?:…|\.\.\.)[^\S\n]*$|^[·✢✳✶✻✽*] [^\n]*\b(?:retrying|will retry)\b/im;
 
 /** 剪掉 capture-pane 输出的尾部空行(v2.17.2 P0,peer 报告)。pane 比 TUI 实绘区
  *  高(窗口 resize 后 CC 未重绘底部)时,capture 会带出成片尾部空行——最多实测
@@ -1320,17 +1323,6 @@ export function hasChildInPsOutput(psOut: string, pid: number): boolean {
 /** 确保 tmux socket 目录存在 */
 export async function ensureSocketDir(): Promise<void> {
   await Bun.spawn(["mkdir", "-p", RUNTIME_DIR]).exited;
-}
-
-/**
- * v2.21.2+ pane 是否正显示 Claude Code 的「Compacting conversation…」进行态。
- * 只看尾部 12 行——spinner 行贴着输入框;更早的行可能是滚出去的旧内容。
- * 结束后 CC 打印的是「Compacted (ctrl+o to see full summary)」,不含 Compacting,
- * 天然不会误判成仍在压缩。
- */
-export function paneShowsCompacting(pane: string): boolean {
-  const tail = pane.split("\n").slice(-12).join("\n");
-  return /\bCompacting\b/i.test(tail);
 }
 
 /**

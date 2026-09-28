@@ -895,7 +895,7 @@ describe("childPidsInPsOutput", () => {
   });
 });
 
-import { paneShowsCompacting } from "../src/lib/tmux-helper.js";
+import { paneShowsCompacting } from "../src/lib/turn-state.js";
 
 describe("paneShowsCompacting(v2.21.2 压缩进行态)", () => {
   test("尾部 spinner 行 Compacting conversation… → true", () => {

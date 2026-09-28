@@ -29,22 +29,26 @@ export interface TurnState {
 
 /**
  * 主回合信号所在的区域，按输入框定位、不按固定尾部行数：底栏的后台 agent 行一多（80 列约 4 行、272 列约 6 行）
- * 就把 spinner 挤出「尾部 14 行」。above = 输入框上边框往上 8 行（spinner / 压缩行 / Tip），rest = 边框到底（❯ 行、页脚）。
+ * 就把 spinner 挤出「尾部 14 行」。above = 输入框上边框往上 12 行（spinner / 压缩行 / Tip / 任务列表最多 5 行 + 「… +N」
+ * + 排队消息预览），rest = 边框到底（❯ 行、页脚）。
  * 找不到输入框（窄窗口折行、弹窗盖住）退回尾部 14 行。
  */
 function turnZone(pane: string): { above: string; rest: string } {
   const lines = pane.replace(/\s+$/, "").split("\n");
   for (let i = lines.length - 1; i > 0; i--) {
     if (/^\s*❯/.test(lines[i]!) && /^\s*─{8,}/.test(lines[i - 1]!)) {
-      return { above: lines.slice(Math.max(0, i - 9), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n") };
+      return { above: lines.slice(Math.max(0, i - 13), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n") };
     }
   }
   return { above: lines.slice(-14).join("\n"), rest: "" };
 }
 
-/** 画面上是否在压缩上下文（「Compacting conversation…」在 spinner 位置） */
-function paneCompacting(pane: string): boolean {
-  return /\bCompacting\b/i.test(turnZone(pane).above);
+/**
+ * 画面上是否在压缩上下文：spinner 位置那一行是「✻ Compacting conversation…」。锚定 spinner 行形态——正文里提到 compacting
+ * 不算；结束后 CC 打印的是「Compacted (ctrl+o …)」，不会误判成仍在压缩。permission-watcher 置 compacting 也用它。
+ */
+export function paneShowsCompacting(pane: string): boolean {
+  return /^\s*[·✢✳✶✻✽*]\s+Compacting\b/im.test(turnZone(pane).above);
 }
 
 /** 只认主回合在跑：spinner（CC_BUSY_RE，锚定行首）、老 TUI 的 esc to interrupt、排队消息提示。见 tests/pane-main-turn.test.ts。 */
@@ -67,7 +71,7 @@ function mainTurn(i: TurnInput): MainTurn {
   const cc = controlFor(i.runtime).paneHeuristics;
   // 压缩先于 thinking 判：回合中途的自动压缩事件态还是 thinking，手动 /compact 到 watcher 置态之间事件态是 done——
   // 这两段只有画面知道；判成 busy 的话人类消息会 C-c 掉压缩
-  if (cc && i.pane !== null && paneCompacting(i.pane)) return "compacting";
+  if (cc && i.pane !== null && paneShowsCompacting(i.pane)) return "compacting";
   if (i.status === "thinking") return "busy";
   // Codex / Pi 的忙闲靠 hook 上报；它们的窗口套 CC 的屏幕正则会误命中（Pi 恒判忙），只看事件态
   if (!cc) return "idle";

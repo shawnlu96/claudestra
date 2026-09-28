@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { flushHeld } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
-import { agentMsgMustWait, paneLooksWorking, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
+import { agentMsgMustWait, paneLooksWorking, paneShowsCompacting, thinkingLooksStuck, turnState, type TurnInput } from "../src/lib/turn-state.js";
 
 const RULE = "─".repeat(80);
 const footer = (agentsBar: string[]) =>
@@ -162,6 +162,20 @@ describe("N7 对抗复核", () => {
     expect(thinkingLooksStuck(pane, "thinking", false)).toBe(false);
     const idle = ["✻ Worked for 46s · done 9:51 PM", "", footer(rows)].join("\n");
     expect(turnState(at({ pane: idle, status: "done" }))).toEqual({ main: "idle", bg: true });
+  });
+});
+
+describe("压缩画面（N7 对抗复验 P2-B / F）", () => {
+  const rows = ["  ⏺ main", ...Array.from({ length: 6 }, (_, k) => `  ◯ general-purpose  task ${k}   ${k + 10}s · ↓ 20.${k}k tokens`)];
+  test("底栏 6 个后台行时仍认得压缩（permission-watcher 置 compacting 也用这个判据）", () => {
+    const pane = ["⏺ x", "", "✻ Compacting conversation… (12s)", "", footer(rows)].join("\n");
+    expect(paneShowsCompacting(pane)).toBe(true);
+    expect(turnState(at({ pane, status: "done" })).main).toBe("compacting");
+  });
+  test("空闲画面正文里提到 compacting 不算（锚定 spinner 行）", () => {
+    const pane = ["  我们下一步要处理 Compacting 期间的消息押后。", "", "✻ Worked for 12s · done 6:31 PM", "", footer([])].join("\n");
+    expect(paneShowsCompacting(pane)).toBe(false);
+    expect(turnState(at({ pane, status: "done" })).main).toBe("idle");
   });
 });
 

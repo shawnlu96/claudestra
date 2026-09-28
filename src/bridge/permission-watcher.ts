@@ -17,7 +17,6 @@ import {
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
   detectDevChannelsModal,
-  paneShowsCompacting,
   paneCompactProgress,
   detectSwitchConfirmPrompt,
   effortDialogLevel,
@@ -41,7 +40,7 @@ import { emitEvent } from "./event-bus.js";
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { controlFor } from "../lib/runtimes/index.js";
-import { paneMainTurnBusy, thinkingLooksStuck } from "../lib/turn-state.js";
+import { paneMainTurnBusy, paneShowsCompacting, thinkingLooksStuck } from "../lib/turn-state.js";
 
 const POLL_INTERVAL_MS = 8_000;
 

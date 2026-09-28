@@ -205,7 +205,8 @@ async function handleModalInteraction(
       down: "Down",
     };
     const tmuxKey = keyMap[key] ?? key; // 数字键保持原样
-    await tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey]);
+    // Esc 走带双击护栏的 tmuxSendEscape：两次 Esc 挨得太近会打开 CC 的 Rewind 回溯菜单
+    await (tmuxKey === "Escape" ? tmuxSendEscape(targetWindow) : tmuxRaw(["send-keys", "-t", targetWindow, tmuxKey]));
     await Bun.sleep(1500);
     const pane = await tmuxCapture(targetWindow, 40);
     const options = parseModalOptions(pane);
@@ -465,7 +466,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         const listResult = await runManager("list");
         const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
         if (agent) {
-          const r = await interruptGate.manual(channelId, agent.name, `master:${agent.name}`, agent.runtime).catch((e: Error) => e);
+          const r = await interruptGate.manual(channelId, `master:${agent.name}`, agent.runtime).catch((e: Error) => e);
           if (r instanceof Error) return void (await interaction.reply(`❌ 发送打断键失败: ${r.message}`));
           const keys = r.keys;
           if (!keys.length) return void (await interaction.reply(r.deduped ? `⏳ ${agent.name} 刚被打断过` : `💤 ${agent.name} 当前空闲，无需打断`));
@@ -824,7 +825,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
           }
 
           console.log(`⚡ 打断 tmux window: ${targetWindow}`);
-          const r = await interruptGate.manual(targetChannelId, agentLabel, targetWindow, targetRuntime).catch((e: Error) => e);
+          const r = await interruptGate.manual(targetChannelId, targetWindow, targetRuntime).catch((e: Error) => e);
           if (r instanceof Error) {
             console.error(`⚡ tmux send-keys 失败: ${r.message}`);
             return void (await interaction.followUp({ content: `❌ tmux 发送打断键失败: ${r.message}`, ephemeral: true }).catch(() => {})); // 回执发不出无妨：错误已记日志

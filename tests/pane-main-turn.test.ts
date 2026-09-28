@@ -67,4 +67,28 @@ describe("paneMainTurnBusy", () => {
     expect(paneMainTurnBusy(idle)).toBe(false);
     expect(paneLooksWorking(idle)).toBe(true);
   });
+
+  test("API 重试 / 限流时 spinner 换成重试横幅 → 忙（CC 2.1.283 源码里的形态）", () => {
+    for (const row of [
+      "✻ Repeated 529 Overloaded errors · Retrying in 38s · attempt 5/10",
+      "✻ Weekly limit reached · Retrying in 2h 14m (resets 11pm) · attempt 1/10",
+      "✻ Waiting for API response · will retry in 5s · check your network",
+      "✻ No response from the API after 2m · retrying, waiting up to 5m · attempt 2/10",
+    ]) expect(paneMainTurnBusy(["⏺ 我先跑一下检查。", "", row, "", ...box].join("\n"))).toBe(true);
+  });
+  test("任务 activeForm 以 ASCII「...」结尾（CC 不再补「…」）→ 忙", () => {
+    for (const row of ["✻ Running tests... (2m 3s · ↓ 4.1k tokens)", "✢ 正在跑测试..."]) {
+      expect(paneMainTurnBusy(["⏺ 开跑。", "", row, "", ...box].join("\n"))).toBe(true);
+    }
+  });
+  test("任务列表满 5 行 +「… +N」+ 排队消息预览：spinner 在边框上方第 9 行，仍判忙（往上找 12 行）", () => {
+    const tasks = ["  ⎿  ✔ 读规格卡", "     ◼ 写 turn-state", "     ◻ 写 interrupt-gate", "     ◻ 接线 bridge", "     ◻ 补测试", "      … +3 pending"];
+    const pane = ["⏺ Bash(bun run check)", "", "✻ Pondering… (2m 3s · ↓ 4.1k tokens)", ...tasks, "  ❯ 顺便把测试也跑一下", "", ...box].join("\n");
+    expect(paneMainTurnBusy(pane)).toBe(true);
+  });
+  test("空闲收尾行不因新分支误判：Churned / Waiting for … background / Running 1 shell command…", () => {
+    const idle = ["✻ Churned for 1m 51s · done 7:41 PM", "✻ Waiting for 3 background agents to finish", "⏺ Running 1 shell command…", "", ...box].join("\n");
+    expect(paneMainTurnBusy(idle)).toBe(false);
+  });
 });
+

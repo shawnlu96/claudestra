@@ -26,7 +26,6 @@ function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number } 
       keys.push(k);
       return [k];
     },
-    escape: async () => void keys.push("Escape"),
     onPreempted: (agent) => void preempted.push(agent),
     sleep: async () => undefined,
     now: () => clock,
@@ -106,44 +105,56 @@ describe("preempt：人类消息抢占", () => {
 });
 
 describe("manual：停止按钮 / /interrupt / API", () => {
-  test("CC 主回合空闲：一个键都不发（空闲时连按两次 C-c 是退出键），也不占冷却", async () => {
-    const h = harness({ main: "idle" });
-    expect(await h.gate.manual("ch", "agent-a", "w", undefined)).toEqual({ keys: [] });
-    h.setMain("busy");
-    expect((await h.gate.manual("ch", "agent-a", "w", undefined)).keys).toEqual(["C-c"]);
+  test("人要停就发键，不看画面判据：判成空闲 / 认不出（API 重试行、新文案）也发 C-c", async () => {
+    for (const m of ["idle", "unknown", "busy"] as const) {
+      const h = harness({ main: m });
+      expect((await h.gate.manual("ch", "w", undefined)).keys).toEqual(["C-c"]);
+      expect(h.probes()).toBe(0);
+    }
   });
 
-  test("认不出画面（弹窗盖住 / 文案变了）：只发 Esc", async () => {
-    const h = harness({ main: "unknown" });
-    expect((await h.gate.manual("ch", "agent-a", "w", undefined)).keys).toEqual(["Escape"]);
-    expect(h.keys).toEqual(["Escape"]);
-  });
-
-  test("双击：第二下在冷却内去重，不发键", async () => {
+  test("双击：1.5s 内第二下去重，不发键（空闲 CC 连按两次 C-c 是退出键）", async () => {
     const h = harness();
-    const r = await Promise.all([h.gate.manual("ch", "a", "w", undefined), h.gate.manual("ch", "a", "w", undefined)]);
+    const r = await Promise.all([h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);
     expect(h.keys).toEqual(["C-c"]);
     expect(r.filter((x) => x.deduped).length).toBe(1);
+    h.advance(1_600);
+    expect((await h.gate.manual("ch", "w", undefined)).keys).toEqual(["C-c"]);
   });
 
-  test("刚被人类消息抢占过：手动打断也在同一个冷却里", async () => {
+  test("自动抢占之后 2s 点停止：不被 4s 抢占冷却吞掉，照发；1s 内才去重", async () => {
     const h = harness();
     await h.gate.preempt("ch", "agent-a");
     h.advance(1_000);
-    expect((await h.gate.manual("ch", "agent-a", "w", undefined)).deduped).toBe(true);
+    expect((await h.gate.manual("ch", "w", undefined)).deduped).toBe(true);
+    h.advance(1_000);
+    expect((await h.gate.manual("ch", "w", undefined)).keys).toEqual(["C-c"]);
+    expect(h.keys).toEqual(["C-c", "C-c"]);
+  });
+
+  test("刚手动停过：4s 内人类消息不再自动抢占", async () => {
+    const h = harness();
+    await h.gate.manual("ch", "w", undefined);
+    h.advance(2_000);
+    expect(await h.gate.preempt("ch", "agent-a")).toBe(false);
     expect(h.keys).toEqual(["C-c"]);
   });
 
-  test("Codex / Pi 交给运行时（不看 CC 画面）", async () => {
+  test("抢占 + 停止按钮 + API 三路同时到：只发一次键", async () => {
+    const h = harness({ probeDelayMs: 10 });
+    await Promise.all([h.gate.preempt("ch", "agent-a"), h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);
+    expect(h.keys).toEqual(["C-c"]);
+  });
+
+  test("Codex 交给运行时（它自己只在忙时发 Esc）", async () => {
     const h = harness({ main: "idle" });
-    expect((await h.gate.manual("ch", "a", "w", "codex")).keys).toEqual(["Escape"]);
-    expect(h.probes()).toBe(0);
+    expect((await h.gate.manual("ch", "w", "codex")).keys).toEqual(["Escape"]);
   });
 });
 
 function stubDeps(): InterruptGateDeps {
   return {
     resolve: async () => ({ win: "w" }), probe: async () => ({ main: "busy", bg: false }), interrupt: async () => ["C-c"],
-    escape: async () => undefined, onPreempted: () => undefined, sleep: async () => undefined,
+    onPreempted: () => undefined, sleep: async () => undefined,
   };
 }
