@@ -15,6 +15,8 @@ import type { Check } from "./doctor.js";
 import { resolveBridgePort } from "./bridge-url.js";
 import { readDotenvFileSync } from "./env-file.js";
 import { fetchRelayStatus, relayChecks } from "./doctor-relay.js";
+import { collectRelayWeb, relayWebCheck } from "./doctor-relay-web.js";
+import { readBuildInfo } from "./static-site.js";
 import { certVerdict, collectRemoteAccess, isWildcardBind, workingHttpsEntry, type RemoteAccessReport } from "./tailscale.js";
 
 const G = "手机访问";
@@ -120,7 +122,10 @@ export async function checkRemoteAccess(repoRoot: string): Promise<Check[]> {
     const rows = remoteAccessChecks(await collectRemoteAccess(readFrontendPort(repoRoot)), { enabled: !!st?.enabled, connected: !!st?.connected });
     // 顺序：前端（有问题时）→ 中继 → Tailscale …；bridge 不在跑（st 为 null）不出「中继」项，checkBridge 已经报了
     const at = rows[0]?.name === "前端（bridge 托管）" ? 1 : 0;
-    return [...rows.slice(0, at), ...(st ? relayChecks(st, G) : []), ...rows.slice(at)];
+    const web = st?.connected && st.base && env?.BRIDGE_STATIC_DIR
+      ? relayWebCheck(await collectRelayWeb(repoRoot, st.base, env.BRIDGE_STATIC_DIR, (d) => readBuildInfo(d)?.webCommit ?? null), st.base, G)
+      : null;
+    return [...rows.slice(0, at), ...(st ? relayChecks(st, G) : []), ...(web ? [web] : []), ...rows.slice(at)];
   } catch (e) {
     return [{ group: G, name: "探测", status: "warn", detail: `探测失败：${(e as Error).message}` }];
   }
