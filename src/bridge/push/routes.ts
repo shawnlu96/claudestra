@@ -4,14 +4,15 @@
  *   POST /push/subscriptions {subscription, userAgent, vapidKey?} · DELETE /push/subscriptions {endpoint}
  *   POST /push/apns {token, device?}           · DELETE /push/apns/:token
  *   GET  /unread → {counts}   POST /agents/:name/read → {ok}   GET /reads → {reads: {agent: isoTs}}
- * 全部只给 owner（canManage：owner 设备凭据 / 过渡期的全 scope token）——推送订阅与未读是 owner 一个人的状态。
+ * 只给 owner（canManage：owner 设备凭据 / 过渡期的全 scope token）——未读是 owner 一个人的状态。例外（T11b）：guest 等别的设备凭据
+ * 也能 GET /push/config 与订阅 / 退订 Web Push，订阅记成 guest、只收指派给自己的「待你处理」，退订只删得掉自己的（guestPush）。
  * 订阅的 endpoint 按 SSRF 规则先验（lib/push-endpoint.ts），中继那边还会再验一次。
  */
 import type { Database } from "bun:sqlite";
 import { canManage } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { pushEndpointProblem } from "../../lib/push-endpoint.js";
-import { deleteApnsDevice, deletePushSubscription, saveApnsDevice, savePushSubscription } from "../../lib/push-store.js";
+import { deleteApnsDevice, deletePushSubscription, saveApnsDevice, savePushSubscription, type PushSubscriber } from "../../lib/push-store.js";
 import { APNS_TOKEN_RE, asWebPushSubscription } from "../../lib/relay-protocol.js";
 import { markAgentRead, pruneUnread, readMarks, unreadCounts } from "../../lib/unread-store.js";
 import { apiJson, forbidden } from "../api-respond.js";
@@ -44,11 +45,12 @@ function mine(url: URL): boolean {
 export function createPushRoutes(d: PushRouteDeps): ExtensionHandler {
   return async (req, url, principal) => {
     if (!mine(url)) return null;
-    if (!canManage(principal)) return forbidden("push and unread endpoints require the owner");
+    if (!canManage(principal)) return guestPush(d, req, url, principal);
     const p = url.pathname;
     const m = req.method.toUpperCase();
+    const who: PushSubscriber = { audience: "owner", principal: principal.id, ...(principal.credential ? { credential: principal.credential } : {}) };
     if (p === `${PREFIX}/push/config` && m === "GET") return apiJson(200, d.sender.config());
-    if (p === `${PREFIX}/push/subscriptions` && m === "POST") return subscribe(d, req, await body(req));
+    if (p === `${PREFIX}/push/subscriptions` && m === "POST") return subscribe(d, req, await body(req), who);
     if (p === `${PREFIX}/push/subscriptions` && m === "DELETE") {
       const { endpoint } = await body(req);
       if (typeof endpoint !== "string" || !endpoint) return apiJson(400, { ok: false, error: '"endpoint" required' });
@@ -78,7 +80,25 @@ export function createPushRoutes(d: PushRouteDeps): ExtensionHandler {
   };
 }
 
-function subscribe(d: PushRouteDeps, req: Request, b: Record<string, unknown>): Response {
+/** 不是 owner 的设备凭据（guest、manage=false 的设备）：只能看配置、订阅 / 退订自己的 Web Push；peer 与没有设备凭据的 token 一律不行 */
+async function guestPush(d: PushRouteDeps, req: Request, url: URL, principal: Principal): Promise<Response> {
+  const p = url.pathname;
+  const m = req.method.toUpperCase();
+  const device = !!principal.credential && !principal.peer && !principal.disabled;
+  if (!device || !(p === `${PREFIX}/push/config` || p === `${PREFIX}/push/subscriptions`)) return forbidden("push and unread endpoints require the owner");
+  if (m === "GET" && p === `${PREFIX}/push/config`) return apiJson(200, d.sender.config());
+  if (m === "POST" && p === `${PREFIX}/push/subscriptions`) {
+    return subscribe(d, req, await body(req), { audience: "guest", principal: principal.id, credential: principal.credential });
+  }
+  if (m === "DELETE" && p === `${PREFIX}/push/subscriptions`) {
+    const { endpoint } = await body(req);
+    if (typeof endpoint !== "string" || !endpoint) return apiJson(400, { ok: false, error: '"endpoint" required' });
+    return apiJson(200, { ok: true, removed: deletePushSubscription(d.db, endpoint, principal.id) });
+  }
+  return apiJson(405, { ok: false, error: "method not allowed" });
+}
+
+function subscribe(d: PushRouteDeps, req: Request, b: Record<string, unknown>, who: PushSubscriber): Response {
   const sub = asWebPushSubscription(b.subscription);
   if (!sub) return apiJson(400, { ok: false, error: "subscription invalid (endpoint https + keys.p256dh/auth required)" });
   const problem = pushEndpointProblem(sub.endpoint);
@@ -87,7 +107,7 @@ function subscribe(d: PushRouteDeps, req: Request, b: Record<string, unknown>): 
   // 浏览器报的公钥只认本机签得了的；老前端不报就按此刻 config 给出去的那把记（记错了投递时会换路并改正）
   const known = d.sender.webPushKeys();
   const vapidKey = typeof b.vapidKey === "string" && known.includes(b.vapidKey) ? b.vapidKey : (d.sender.config().webPush?.vapidPublicKey ?? null);
-  savePushSubscription(d.db, sub, ua, vapidKey);
+  savePushSubscription(d.db, sub, ua, vapidKey, new Date(), who);
   return apiJson(200, { ok: true });
 }
 

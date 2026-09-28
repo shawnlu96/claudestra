@@ -6,6 +6,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { ASKS_REQUIRED_COLUMNS, migrateAsksV2 } from "./ledger-asks-schema.js";
 import type { EventKind, LedgerEvent, LedgerItem, LedgerTask } from "./ledger-stages.js";
 import { statePath } from "./paths.js";
 
@@ -102,7 +103,7 @@ type Migration = string | ((db: Database) => void);
  * 下标 i 把库从版本 i 升到 i+1。只许在末尾追加，不写死版本号：几条分支各自加一步时，谁后合并谁排在后面，
  * 版本号跟着 length 走就不会撞。单测用 LEDGER_MIGRATIONS[0] 造旧库，后面追加的步骤（ALTER TABLE 之类）才有完整的 v1 表可改。
  */
-export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks];
+export const LEDGER_MIGRATIONS: readonly Migration[] = [SCHEMA_V1, migrateAsks, migrateAsksV2];
 /** PRAGMA user_version 的最新值 = 迁移步数 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 
@@ -186,7 +187,7 @@ function migrate(db: Database): void {
 
 /** 迁移后必须在的表与列（缺一个就说明某一步静默失败了）：新加的迁移把自己的关键表 / 列补进来 */
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
-  asks: ["id", "project", "fromAgent", "source", "kind", "state", "options", "answer", "expiresAt", "extra"],
+  asks: ASKS_REQUIRED_COLUMNS,
 };
 
 /** 版本号说到了、表或列却不在（多语句 exec 吞了错、分支上撞过号）：报错，别让写入层带着残缺的库往下跑 */

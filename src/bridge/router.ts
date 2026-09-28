@@ -151,6 +151,8 @@ export interface Envelope {
     waitForIdle?: boolean;
     /** 这条 reply 建出的 / 这条答复所答的「待你处理」id（bridge/asks.ts）；出站 chat_message 事件带上，网页据此把气泡和 ask 对上 */
     askId?: string;
+    /** 这条 reply 建出的授权类 ask 的参数哈希（lib/ask-bind.ts）：随 reply 结果回给 agent，执行前 ledger ask-check 用 */
+    askHash?: string;
   };
 }
 

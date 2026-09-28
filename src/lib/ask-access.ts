@@ -1,0 +1,35 @@
+/**
+ * 「待你处理」谁能看、谁能答（docs 13 §4.7 + T11b 第 3 条）：全仓只有这一份，列表（local-api/asks.ts）、SSE（ledger-feed.ts）、
+ * 推送（push/dispatcher.ts）、作答（ask-entry.ts）都调它，T28a 复用。改口径只改这里，tests/ask-access.test.ts 的矩阵一起改。
+ * - 看：指给自己的（assignee = local:<本人 principal id>，guest 也算，不经过台账的门）；其余走 canReadLedger，大总管的另要 scope 含 master。
+ * - 答：assignee 本人，或 owner 本人（isOwnerPrincipal）且看得见。peer 一律不行（远端的人不能作答我方的 ask，T28 Q15）。
+ */
+import { canReadLedger } from "./devices.js";
+import type { Ask } from "./ledger-asks.js";
+import { agentInScope, isOwnerPrincipal, type Principal } from "./principals.js";
+
+type AskWho = Pick<Ask, "fromAgent" | "assignee">;
+
+/** 人的 assignee 写法（T8h cd914851 的 HUMAN_RE 同形）：local:<principalId> */
+export const humanAssignee = (principalId: string): string => `local:${principalId}`;
+
+/** 这条是不是指给这个凭据本人的 */
+export function isAskAssignee(p: Principal, a: Pick<Ask, "assignee">): boolean {
+  return !!a.assignee && !p.peer && !p.disabled && a.assignee === humanAssignee(p.id);
+}
+
+/** SSE ask 事件的 data（bridge/asks.ts publishAsk 带 fromAgent / assignee）→ 判定要的那两项；缺的按 null（只剩台账的门） */
+export function askWhoOf(data: unknown): AskWho {
+  const d = (data ?? {}) as Record<string, unknown>;
+  return { fromAgent: typeof d.fromAgent === "string" ? d.fromAgent : null, assignee: typeof d.assignee === "string" ? d.assignee : null };
+}
+
+export function canSeeAsk(p: Principal, a: AskWho): boolean {
+  if (isAskAssignee(p, a)) return true;
+  return canReadLedger(p) && (a.fromAgent !== "master" || agentInScope(p, "master"));
+}
+
+export function canAnswerAsk(p: Principal, a: AskWho): boolean {
+  if (isAskAssignee(p, a)) return true;
+  return isOwnerPrincipal(p) && canSeeAsk(p, a);
+}

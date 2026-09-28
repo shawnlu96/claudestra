@@ -6,7 +6,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { answerDiscordInteraction, answerFromCard, answerFromChat } from "../src/bridge/ask-entry.js";
 import { cancelStaleRuntimeAsks, noteRuntimeDialogs, openRuntimeAsk, permissionLabel, resetRuntimeAsksForTest, settleRuntimeAsk } from "../src/bridge/ask-runtime.js";
-import { deliverReplyWithAsk, ownerPresence, sweepExpired, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
+import { sweepExpired } from "../src/bridge/ask-expire.js";
+import { deliverReplyWithAsk } from "../src/bridge/ask-reply.js";
+import { ownerPresence, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleAsksApi } from "../src/bridge/local-api/asks.js";
