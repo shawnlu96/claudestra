@@ -25,4 +25,4 @@
 
 ## 推送
 
-只推「@ 我」：推送订阅目前只登记 owner 的设备，所以一期只有 @ owner 会推（点开直达 `/talk?room=`）；guest 在页面里靠 SSE `talk` 事件（只推给房间成员）。
+只推「@ 我」：推送订阅目前只登记 owner 的设备，所以一期只有 @ owner 会推（点开直达 `/talk?room=`）；guest 在页面里靠 SSE `talk` 事件（只推给房间成员）。guest 的推送要等二期把推送订阅改成按 principal 区分（[protocol.md](./protocol.md) §0）。
