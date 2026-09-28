@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterruptGate } from "../src/lib/interrupt-gate.js";
 import { paneShowsWallWait } from "../src/lib/quota-wall-text.js";
-import { paneMainTurnBusy, paneShowsApiRetry, paneShowsCompacting, turnState } from "../src/lib/turn-state.js";
+import { paneMainTurnBusy, paneShowsApiRetry, paneShowsCompacting, thinkingLooksStuck, turnState } from "../src/lib/turn-state.js";
 
 const fx = (f: string) => readFileSync(join(import.meta.dir, "fixtures/turn-zone", `${f}.txt`), "utf8");
 const B = "─".repeat(40);
@@ -104,8 +104,26 @@ describe("对照：真画面照旧判对", () => {
   test("草稿里有一条缩进横线（T35 实录 input-draft-rule）：仍按顶格边框找到输入框、判闲", () => {
     expect(turnState({ pane: fx("input-draft-rule"), status: "done" }).main).toBe("idle");
   });
-  test("老 TUI：页脚状态行里的 esc to interrupt 照旧算忙", () => {
-    const old = [...IDLE.slice(0, 9), "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt"].join("\n");
-    expect(paneMainTurnBusy(old)).toBe(true);
+  test("老 TUI：页脚里的 esc to interrupt 照旧算忙——带不带 ⏵⏵、窄窗口折行都一样", () => {
+    const head = IDLE.slice(0, 9);
+    expect(paneMainTurnBusy([...head, "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt"].join("\n"))).toBe(true);
+    expect(paneMainTurnBusy([...head, "  esc to interrupt"].join("\n"))).toBe(true);
+    expect(paneMainTurnBusy([...head, "  ⏵⏵ bypass permissions on · esc to", "  interrupt"].join("\n"))).toBe(true);
+  });
+  test("输入框上方贴进来一行缩进的「⏵⏵ … esc to interrupt」、草稿里写着 esc to interrupt：都不算忙（adv2 P2-3）", () => {
+    const pasted = ["⏺ 老版本页脚长这样：", "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt", ...IDLE].join("\n");
+    expect(paneMainTurnBusy(pasted)).toBe(false);
+    const draft = IDLE.map((l) => (l === "❯ " ? "❯ 页脚上的 esc to interrupt 是什么意思" : l)).join("\n");
+    expect(paneMainTurnBusy(draft)).toBe(false);
+  });
+});
+
+describe("thinking 反向对账只在顶格的真输入框在时才成立（adv2 P2-2）", () => {
+  test("权限框 / AskUserQuestion / 额度菜单里的「❯ 1.」不是输入框：事件态 thinking 也不判卡住", () => {
+    for (const f of ["modal-permission", "modal-auq", "menu-5-items"]) expect(thinkingLooksStuck(fx(f), "thinking", false)).toBe(false);
+  });
+  test("真输入框、主回合空闲、事件态 thinking → 判卡住；对话里贴了假输入框、底部是权限框 → 不判", () => {
+    expect(thinkingLooksStuck(IDLE.join("\n"), "thinking", false)).toBe(true);
+    expect(thinkingLooksStuck(inject(perm, /perm-probe\.txt$/, FAKES["空假框"]!), "thinking", false)).toBe(false);
   });
 });

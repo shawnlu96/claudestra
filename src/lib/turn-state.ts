@@ -33,14 +33,21 @@ export interface TurnState {
  * + 排队消息预览），rest = 边框到底（❯ 行、页脚）。真输入框的边框和 ❯ 都顶格（第 0 列），对话 / 工具输出里贴进来的
  * 输入框都有缩进，不能被当成输入框（同 T35 lp-state 的做法）。找不到输入框（窄窗口折行、弹窗盖住）退回尾部 14 行。
  */
-function turnZone(pane: string): { above: string; rest: string } {
+function turnZone(pane: string): { above: string; rest: string; box: boolean } {
   const lines = pane.replace(/\s+$/, "").split("\n");
   for (let i = lines.length - 1; i > 0; i--) {
-    if (/^❯/.test(lines[i]!) && /^─{8,}/.test(lines[i - 1]!)) {
-      return { above: lines.slice(Math.max(0, i - 13), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n") };
+    if (/^❯/.test(lines[i]!) && /^─{3,}/.test(lines[i - 1]!)) {
+      return { above: lines.slice(Math.max(0, i - 13), i - 1).join("\n"), rest: lines.slice(i - 1).join("\n"), box: true };
     }
   }
-  return { above: lines.slice(-14).join("\n"), rest: "" };
+  return { above: lines.slice(-14).join("\n"), rest: "", box: false };
+}
+
+/** 输入框下边框（❯ 之后第一条顶格横线）以下的页脚；草稿在两条边框之间，不算页脚 */
+function footerOf(rest: string): string {
+  const lines = rest.split("\n");
+  const end = lines.findIndex((l, i) => i > 0 && /^─{3,}/.test(l));
+  return end < 0 ? "" : lines.slice(end + 1).join("\n");
 }
 
 /** 顶格、spinner 字形开头的行：真 spinner / 压缩行 / 重试横幅都在第 0 列，对话和工具输出里的同样字样都有缩进 */
@@ -63,15 +70,16 @@ export function paneShowsApiRetry(pane: string): boolean {
 }
 
 /**
- * 只认主回合在跑：顶格的 spinner 行（CC_BUSY_RE）、老 TUI 页脚的 esc to interrupt、顶格的排队消息提示。见 tests/pane-main-turn.test.ts。
+ * 只认主回合在跑：顶格的 spinner 行（CC_BUSY_RE）、真输入框页脚里老 TUI 的 esc to interrupt、顶格的排队消息提示。见 tests/pane-main-turn.test.ts。
  * 不拿 CC_BUSY_RE 扫整段：它的「esc to cancel」会命中权限弹窗 / 额度菜单的「Esc to cancel」，贴进对话的忙画面也会命中，
  * 判成忙就会往空闲输入框或权限弹窗上发 C-c（后者等于替人拒了权限）。见 tests/turn-zone.test.ts。
  */
 export function paneMainTurnBusy(pane: string): boolean {
   const z = turnZone(pane);
   if (spinnerRows(z.above).some((l) => CC_BUSY_RE.test(l))) return true;
-  const rows = `${z.above}\n${z.rest}`.split("\n");
-  return rows.some((l) => /^❯ Press up to edit queued messages/.test(l) || (/^\s*⏵⏵/.test(l) && /esc to interrupt/i.test(l)));
+  if (`${z.above}\n${z.rest}`.split("\n").some((l) => /^❯ Press up to edit queued messages/.test(l))) return true;
+  // 老 TUI 的 esc to interrupt 在页脚（有没有 ⏵⏵、窄窗口折不折行都一样）；输入框上方贴进来的同样字样不算
+  return /esc\s+to\s+interrupt/i.test(footerOf(z.rest));
 }
 
 /**
@@ -119,9 +127,10 @@ export function agentMsgMustWait(s: TurnState): boolean {
 }
 
 /**
- * thinking 反向对账（permission-watcher）的单帧判据：事件态 thinking、CC 输入框在、主回合空闲、不是 bridge 经手的长 MCP 调用。
+ * thinking 反向对账（permission-watcher）的单帧判据：事件态 thinking、顶格的真输入框在、主回合空闲、不是 bridge 经手的长 MCP 调用。
  * 只剩后台在跑不豁免——否则事件态卡在 thinking，上面的 main 一直是 busy，押后闸又回到「后台在跑就押」。
+ * 权限框 / AskUserQuestion / 额度菜单里的「❯ 1.」不是输入框：认成输入框，弹窗开 2 分钟就会被收成 done。
  */
 export function thinkingLooksStuck(pane: string, status: TurnStatus, externallyBusy: boolean): boolean {
-  return status === "thinking" && /❯/.test(pane) && !paneMainTurnBusy(pane) && !externallyBusy;
+  return status === "thinking" && turnZone(pane).box && !paneMainTurnBusy(pane) && !externallyBusy;
 }
