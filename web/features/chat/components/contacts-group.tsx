@@ -14,7 +14,7 @@ import { UsersIcon } from "./external-badge";
 
 const ALL = "__all__";
 
-/** 在线点颜色：与会话列表同一套（黄 = 忙、绿 = 闲），连不上 / 不知道是灰 */
+/** 在线点颜色：连得上是绿，已知在忙是黄（与会话列表同一套）；连不上 / 不知道是灰。忙闲不知道时仍按连通性给绿，文字另写「—」 */
 export function presenceTone(online: boolean | null, busy?: boolean): string {
   if (online === true) return busy ? "bg-warning" : "bg-success";
   return online === false ? "bg-base-content/25" : "bg-base-content/15";
@@ -37,7 +37,7 @@ function AgentLine({ a, online }: { a: ContactAgent; online: boolean | null }) {
   const busyText = a.busy === true ? t("忙") : a.busy === false ? t("空闲") : "—";
   return (
     <li className="flex items-center gap-2 py-1 pl-7 pr-1.5 text-[12.5px]">
-      <span className={`size-1.5 shrink-0 rounded-full ${presenceTone(online && typeof a.busy === "boolean" ? true : null, a.busy)}`} />
+      <span className={`size-1.5 shrink-0 rounded-full ${presenceTone(online, a.busy)}`} />
       <span className="min-w-0 flex-1 truncate">{a.name.replace(/^agent-/, "")}</span>
       <span className="shrink-0 text-[11px] text-base-content/45">{busyText}</span>
     </li>
@@ -57,7 +57,11 @@ function PeerBlock({ c, collapsed, onToggle }: { c: PeerContact; collapsed: bool
       {!collapsed && (
         <ul>
           {c.agents.map((a) => <AgentLine key={a.name} a={a} online={c.online} />)}
-          {!c.agents.length && <li className="py-1 pl-7 text-[11.5px] text-base-content/40">{t("对方没有开放 agent 给你")}</li>}
+          {!c.agents.length && (
+            <li className="py-1 pl-[42px] pr-1.5 text-[11.5px] text-base-content/40">
+              {c.online === null ? t("单向连接：看不到对方开放了哪些 agent") : t("对方没有开放 agent 给你")}
+            </li>
+          )}
         </ul>
       )}
     </li>

@@ -14,6 +14,7 @@ export const CONTACTS_DICT: Record<string, string> = {
   "空闲": "idle",
   "本机": "local",
   "对方没有开放 agent 给你": "No agents shared with you",
+  "单向连接：看不到对方开放了哪些 agent": "One-way link: can't see which agents they share",
   "发送时让 {me} 去找 {who}，并把回复带回来": "On send, {me} will contact {who} and bring back the reply",
   "取消转达": "Cancel delegation",
   "{name} 已经停止，没法转达": "{name} has stopped, can't relay",
