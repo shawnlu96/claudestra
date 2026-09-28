@@ -48,7 +48,7 @@ export function canonicalAgentName(name: string): string {
   return name.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, "").trim().toLowerCase();
 }
 
-/** 去掉一层 agent- 前缀的规范名：scope 比对（principals.agentInScope）按它 */
+/** 去掉一层 agent- 前缀的规范名：scope 比对（principals.agentInScope）与撞名检查（canonicalTwinError）共用 */
 export const bareCanonicalName = (name: string): string => canonicalAgentName(name).replace(/^agent-/, "");
 
 /**
@@ -56,6 +56,17 @@ export const bareCanonicalName = (name: string): string => canonicalAgentName(na
  * 只认这个：老版本把 MASTER、全角等变体当普通名字落了盘，按宽判定认成大总管就把一条无害的旧数据升成大总管权限（T42-r2）。
  */
 export const isLiteralMaster = (entry: string): boolean => entry === "master" || entry === "agent-master";
+
+/**
+ * 新名字跟已有 agent 规范化后同名（cc 与全角 ｃｃ）：scope 与 guest 授权按规范名比，两个 agent 会共用授权，新建 / resume / 改名都拒。
+ * 名字本身已在 registry（重建、resume 已有的）不算撞。返回报错文案，没撞为 null。
+ */
+export function canonicalTwinError(name: string, existing: string[]): string | null {
+  if (existing.includes(name)) return null;
+  const want = bareCanonicalName(name);
+  const twin = existing.find((n) => bareCanonicalName(n) === want);
+  return twin ? `${name} 跟已有的 ${twin} 只差大小写 / 全角 / 不可见字符，授权会按同一个名字算，换个名字` : null;
+}
 
 /**
  * agent 名里不许出现的字符（manager 新建 / resume / 改名与台账的负责人校验共用这一份）：空白、shell 元字符、控制字符，
