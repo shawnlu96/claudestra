@@ -76,6 +76,40 @@ describe("review 阶段没有审查员", () => {
   });
 });
 
+describe("review 阶段审查已通过", () => {
+  const passed = (stageAt: number, passAt: number, extra: LedgerEvent[] = [], verdict = "pass") =>
+    entered("T1", "review", stageAt, [ev("T1", passAt, "review", { round: 1, verdict }), ...extra]);
+  test("pass 之后 31 分钟还在 review → 推 PM「审查已通过，推进 merge 或等拍板」，不推「派审查员」", () => {
+    const s = snap({ pms: [PM, DISPATCH], tasks: [passed(NOW - 60 * MIN, NOW - 31 * MIN)] });
+    expect(only(s, "review_no_reviewer")).toEqual([]);
+    const f = only(s, "review_passed_idle");
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ taskId: "T1", since: NOW - 31 * MIN, suggestion: "审查已通过，推进 merge 或等拍板", notify: PM });
+  });
+  test("pass 之后 PM 写 note 不重开计时（key 与 since 都跟着 pass 那条）", () => {
+    const f = only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - 40 * MIN, [ev("T1", NOW - 5 * MIN, "note")])] }), "review_passed_idle");
+    expect(f).toHaveLength(1);
+    expect(f[0].since).toBe(NOW - 40 * MIN);
+  });
+  test("边界：pass 恰好 30 分钟不报，多 1ms 报", () => {
+    expect(only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - TH.reviewPassedIdleMs)] }), "review_passed_idle")).toEqual([]);
+    expect(only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - TH.reviewPassedIdleMs - 1)] }), "review_passed_idle")).toHaveLength(1);
+  });
+  test("最后一条结论不是 pass（changes）→ 仍按「没有审查员」判；又有审查员在跑 → 都不报", () => {
+    const changes = passed(NOW - 60 * MIN, NOW - 25 * MIN, [], "changes");
+    expect(only(snap({ tasks: [changes] }), "review_passed_idle")).toEqual([]);
+    expect(only(snap({ tasks: [changes] }), "review_no_reviewer")).toHaveLength(1);
+    const running = snap({ tasks: [passed(NOW - 60 * MIN, NOW - 40 * MIN)], reviewers: [{ taskId: "t1", round: 1 }] });
+    expect(rules(running)).toEqual([]);
+  });
+  test("上一轮的 pass（进入本轮 review 之前）不算", () => {
+    const old = entered("T1", "review", NOW - 25 * MIN, [], {});
+    old.events.splice(1, 0, ev("T1", NOW - 90 * MIN, "review", { round: 1, verdict: "pass" }));
+    expect(only(snap({ tasks: [old] }), "review_passed_idle")).toEqual([]);
+    expect(only(snap({ tasks: [old] }), "review_no_reviewer")).toHaveLength(1);
+  });
+});
+
 describe("build / fix 执行者空闲", () => {
   const s = (lastWriteAt: number | null, over: Partial<AuditAgent> = {}, stageAt = NOW - 60 * MIN, extra: LedgerEvent[] = []) =>
     snap({ tasks: [entered("T1", "build", stageAt, extra)], agents: [agent(PM), agent(EXE, { lastWriteAt, ...over })] });
@@ -189,6 +223,15 @@ describe("merge / live 没推进", () => {
     expect(only(snap({ tasks: [{ ...merge, blockedBy: [] }] }), "ship_stalled")).toHaveLength(1);
     expect(only(snap({ tasks: [{ ...entered("T1", "live", NOW - 60 * MIN), blockedBy: ["T0"] }] }), "ship_stalled")).toHaveLength(1);
   });
+  test("merge 停滞从解冻 / 依赖放行时算起；live 不看这两个", () => {
+    const merge = entered("T1", "merge", NOW - 120 * MIN);
+    expect(only(snap({ tasks: [merge], unfrozenAt: NOW - 10 * MIN }), "ship_stalled")).toEqual([]);
+    expect(only(snap({ tasks: [merge], unfrozenAt: NOW - 31 * MIN }), "ship_stalled")[0]?.since).toBe(NOW - 31 * MIN);
+    expect(only(snap({ tasks: [{ ...merge, blockedBy: [], unblockedAt: NOW - 10 * MIN }] }), "ship_stalled")).toEqual([]);
+    expect(only(snap({ tasks: [{ ...merge, blockedBy: [], unblockedAt: NOW - 45 * MIN }] }), "ship_stalled")[0]?.since).toBe(NOW - 45 * MIN);
+    const live = { ...entered("T1", "live", NOW - 120 * MIN), unblockedAt: NOW - 10 * MIN };
+    expect(only(snap({ tasks: [live], unfrozenAt: NOW - 10 * MIN }), "ship_stalled")).toHaveLength(1);
+  });
   test("live 恰好 30 分钟不报，多 1ms 报", () => {
     expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.shipStallMs)] }), "ship_stalled")).toEqual([]);
     expect(only(snap({ tasks: [entered("T1", "live", NOW - TH.shipStallMs - 1)] }), "ship_stalled")).toHaveLength(1);
@@ -253,7 +296,7 @@ describe("ownerInbox 处理中太久", () => {
   test("registry 取不到 → 依赖它的规则全部进 skipped，原因一致", () => {
     const r = auditLedger(snap({ agents: null, reviewers: null, held: null, unavailable: { agents: "registry 读不了" } }), NOW);
     expect(r.skipped.map((x) => x.rule).sort()).toEqual(
-      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor", "review_no_reviewer", "task_agent_missing"]);
+      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor", "review_no_reviewer", "review_passed_idle", "task_agent_missing"]);
     expect(new Set(r.skipped.map((x) => x.reason))).toEqual(new Set(["registry 读不了"]));
     expect(auditLedger(snap(), NOW).skipped).toEqual([]);
   });
@@ -279,7 +322,7 @@ describe("收件人与去重 key", () => {
   test("什么都正常 → 没有异常，所有取到数的规则都算跑过", () => {
     const r = auditLedger(snap({ tasks: [entered("T1", "build", NOW - MIN)] }), NOW);
     expect(r.findings).toEqual([]);
-    expect(r.evaluated.length).toBe(9);
+    expect(r.evaluated.length).toBe(10);
     expect(rules(snap({ agents: [agent(PM)] }))).toEqual([]);
     expect(rules(snap())).toEqual(["orphan_executor"]); // 默认快照里的 agent-task-t1 没有任务
   });

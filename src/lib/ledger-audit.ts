@@ -13,6 +13,8 @@ const MIN = 60_000;
 export const AUDIT_THRESHOLDS = {
   /** review 阶段没有审查员在跑、也没有 note / review 事件 */
   reviewNoReviewerMs: 20 * MIN,
+  /** 本轮审查已 pass、任务还停在 review（等推 merge 或等拍板） */
+  reviewPassedIdleMs: 30 * MIN,
   /** build / fix 阶段执行者主回合空闲、会话不再写入 */
   executorIdleMs: 15 * MIN,
   /** 交付后阶段不在 review、也没有审查结论 */
@@ -32,7 +34,7 @@ export const AUDIT_THRESHOLDS = {
 } as const;
 
 const AUDIT_RULES = [
-  "review_no_reviewer", "executor_idle", "deliver_not_in_review", "pm_held",
+  "review_no_reviewer", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale",
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
@@ -86,6 +88,8 @@ export interface AuditSnapshot {
   reviewers: readonly { taskId: string; round: number | null }[] | null;
   /** 合并队列冻结中（meta.queueFrozen）：merge 停着是预期的 */
   queueFrozen?: boolean;
+  /** 最近一次解冻（unfreeze 事件）的时刻：merge 停滞从它之后算 */
+  unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
@@ -126,7 +130,8 @@ export function auditRecipient(rule: AuditRule, pms: readonly string[]): string 
 
 const mins = (ms: number) => `${Math.floor(ms / MIN)} 分钟`;
 
-type AuditTask = { task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[] };
+/** blockedBy = 依赖上还挡着它的前置任务；unblockedAt = 依赖最后一次放行的时刻（merge 停滞从它之后算） */
+type AuditTask = { task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null };
 
 interface TaskFacts extends AuditTask {
   /** 进入当前阶段的时刻；导入推断的近似时间 = null（不拿它判超时） */
@@ -149,7 +154,14 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
   const reviewing = new Set(reviewers.map((r) => r.taskId.toLowerCase()));
   for (const { task, events, stageSince } of ts) {
     if (reviewing.has(task.id.toLowerCase())) continue;
-    if (task.stage === "review" && stageSince !== null) {
+    const lastReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
+    if (lastReview?.data.verdict === "pass") {
+      // 审查已通过：该推 merge 或等 owner 拍板，不是再派审查员；从 pass 算起，PM 写 note 不重开
+      if (now - lastReview.ts > AUDIT_THRESHOLDS.reviewPassedIdleMs) {
+        emit({ rule: "review_passed_idle", taskId: task.id, since: lastReview.ts, keyParts: [task.id, `r${task.round}`, lastReview.seq],
+          detail: `${task.id} 第 ${task.round} 轮审查已通过 ${mins(now - lastReview.ts)}，还停在 review`, suggestion: "审查已通过，推进 merge 或等拍板" });
+      }
+    } else if (task.stage === "review" && stageSince !== null) {
       const since = Math.max(stageSince, lastOf(events, ["note", "review"], stageSince)?.ts ?? stageSince);
       if (now - since > AUDIT_THRESHOLDS.reviewNoReviewerMs) {
         emit({ rule: "review_no_reviewer", taskId: task.id, since, keyParts: [task.id, `r${task.round}`, stageSince],
@@ -181,12 +193,14 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
   }
 }
 
-function shipStalled(ts: readonly TaskFacts[], frozen: boolean, now: number, emit: Emit): void {
-  for (const { task, events, stageSince, blockedBy } of ts) {
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit): void {
+  for (const { task, events, stageSince, blockedBy, unblockedAt } of ts) {
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
     // merge 停着是预期的：合并队列冻结，或依赖上还在等前置任务上线（T8h：code 上线才算满足）
     if (task.stage === "merge" && (frozen || (blockedBy?.length ?? 0) > 0)) continue;
-    const since = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
+    // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
+    const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity) : -Infinity;
+    const since = Math.max(stageSince, cleared, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
     if (now - since <= AUDIT_THRESHOLDS.shipStallMs) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
     emit({ rule: "ship_stalled", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince],
@@ -276,8 +290,8 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
     reviewRules(ts, s.reviewers, now, emit);
-    evaluated.push("review_no_reviewer", "deliver_not_in_review");
-  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "deliver_not_in_review");
+    evaluated.push("review_no_reviewer", "review_passed_idle", "deliver_not_in_review");
+  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_passed_idle", "deliver_not_in_review");
   if (s.agents) {
     executorIdle(ts, agents, now, emit);
     registryRules(s, ts, agents, now, emit);
@@ -285,7 +299,7 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, s.queueFrozen === true, now, emit);
+  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit);
   evaluated.push("ship_stalled");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);

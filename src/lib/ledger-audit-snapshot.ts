@@ -7,9 +7,9 @@ import type { Database } from "bun:sqlite";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AuditAgent, AuditHeld, AuditInboxEntry, AuditSnapshot, MainTurn } from "./ledger-audit.js";
-import { blockedBy, depViews } from "./ledger-deps.js";
+import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
-import type { LedgerEvent } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
@@ -151,14 +151,44 @@ async function readAgents(src: SnapshotSources, want: ReadonlySet<string>): Prom
   return { list, agents };
 }
 
+/** 这条事件让任务进了哪个阶段：stage 事件的 to，或建任务时直接给的 stage */
+function enteredStage(e: LedgerEvent): Stage | undefined {
+  if (e.kind === "stage") return e.data.to as Stage;
+  if (e.kind === "task" && e.data.op === "new") return (e.data.patch as { stage?: Stage } | undefined)?.stage;
+  return undefined;
+}
+
+/**
+ * 依赖最后一次放行的时刻（已放行的边里取最晚）：PM 手动定的状态取边的 updatedAt，
+ * 推导的取前置任务最后一次进满足阶段的时刻。没有已放行的边 = null。
+ */
+function unblockedAt(taskId: string, deps: readonly DepView[], tasks: readonly LedgerTask[], byTarget: ReadonlyMap<string, LedgerEvent[]>): number | null {
+  const kindOf = new Map(tasks.map((t) => [t.id, t.kind]));
+  let at: number | null = null;
+  for (const d of deps) {
+    if (d.to !== taskId || d.effective !== "done") continue;
+    const kind = kindOf.get(d.from);
+    const satisfiedAt = (byTarget.get(d.from) ?? []).findLast((e) => {
+      const stage = enteredStage(e);
+      return !!kind && !!stage && isSatisfied({ kind, stage });
+    })?.ts;
+    const ts = d.state !== null ? d.updatedAt : satisfiedAt;
+    if (ts !== undefined && (at === null || ts > at)) at = ts;
+  }
+  return at;
+}
+
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const perProject = projects.map((project) => {
     const byTarget = new Map<string, LedgerEvent[]>();
     for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
     const all = listTasks(db, project);
     const deps = depViews(listDeps(db, project), all);
-    const tasks = all.map((task) => ({ task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from) }));
-    return { project, meta: getMeta(db, project), tasks };
+    const tasks = all.map((task) => ({
+      task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
+    }));
+    const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
+    return { project, meta: getMeta(db, project), tasks, unfrozenAt };
   });
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）和各项目 PM 名单（押后规则）
   const want = new Set<string>();
@@ -170,7 +200,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
-  return perProject.map(({ project, meta, tasks }) => {
+  return perProject.map(({ project, meta, tasks, unfrozenAt }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -187,6 +217,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       agents: reg?.agents ?? null,
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
+      unfrozenAt,
       held: held.value,
       ownerInbox: inbox.value,
       unavailable,

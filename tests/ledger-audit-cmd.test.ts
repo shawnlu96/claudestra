@@ -9,9 +9,9 @@ import type { Envelope } from "../src/bridge/router.js";
 import { projectsSlug } from "../src/lib/jsonl-cost.js";
 import { parseReviewDescription, runningReviewers } from "../src/lib/ledger-audit-reviewers.js";
 import { collectAuditSnapshots, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
-import { addDep } from "../src/lib/ledger-deps-write.js";
+import { addDep, setDep } from "../src/lib/ledger-deps-write.js";
 import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_MIGRATIONS, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
+import { createTask, moveStage, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -81,10 +81,30 @@ describe("取数", () => {
     addDep(db, owner, { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" });
     const blocked = (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1");
     expect(blocked?.blockedBy).toEqual(["T0"]);
+    expect(blocked?.unblockedAt).toBeNull();
     moveStage(db, owner, { taskId: "T0", from: "review", to: "merge" });
-    moveStage(db, owner, { taskId: "T0", from: "merge", to: "live" });
+    moveStage(db, { actor: "owner", now: 5_000 }, { taskId: "T0", from: "merge", to: "live" });
     const freed = (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1");
     expect(freed?.blockedBy).toEqual([]);
+    expect(freed?.unblockedAt).toBe(5_000); // 前置进 live 的那一刻
+  });
+
+  test("依赖放行时刻：PM 手动定 done 的边取边的更新时间", async () => {
+    const owner = { actor: "owner", now: 0 };
+    createTask(db, owner, { project: P, id: "T0", title: "前置", kind: "code", agent: EXE, pm: PM, stage: "build" });
+    const dep = addDep(db, owner, { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" }).row;
+    setDep(db, { actor: "owner", now: 7_000 }, { from: "T0", to: "T1", rev: dep?.rev ?? 1, patch: { state: "done" } });
+    const t1 = (await collectAuditSnapshots(db, [P], NOW, sources()))[0].tasks.find((t) => t.task.id === "T1");
+    expect(t1?.blockedBy).toEqual([]);
+    expect(t1?.unblockedAt).toBe(7_000);
+  });
+
+  test("解冻时刻取最后一条 unfreeze 事件；从没冻结过 = null", async () => {
+    expect((await collectAuditSnapshots(db, [P], NOW, sources()))[0].unfrozenAt).toBeNull();
+    setFrozen(db, { actor: "owner", now: 1_000 }, { project: P, frozen: true });
+    setFrozen(db, { actor: "owner", now: 2_000 }, { project: P, frozen: false });
+    const [s] = await collectAuditSnapshots(db, [P], NOW, sources());
+    expect([s.queueFrozen, s.unfrozenAt]).toEqual([false, 2_000]);
   });
 
   test("押后文件不存在 = 空；坏了 = null（规则不跑）", async () => {
