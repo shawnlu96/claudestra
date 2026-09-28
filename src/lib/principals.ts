@@ -19,6 +19,7 @@
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
 import { isMasterAgent } from "./registry.js";
+import { OWNER_PRINCIPAL_ID } from "./devices.js";
 import { timingSafeEqual } from "crypto";
 import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
 import { join } from "path";
@@ -219,6 +220,17 @@ export function agentInScope(p: Principal, agentName: string): boolean {
 export function terminalAllowed(p: Principal, agentName: string): boolean {
   if (!agentInScope(p, agentName)) return false;
   return p.role === "owner" || p.terminal === true;
+}
+
+/**
+ * 「owner 本人」的唯一定义（推送的 owner 身份表 push/dispatcher.ownerChatIds、@ 委托标记的来源判定 lib/delegate-marker.ts 共用）：
+ * owner 所有设备共用的 owner:self（受限设备的 role 会降成 external，所以按 id 认，不看 role）；
+ * 过渡期名为 web-ui 的老 token 也算——那是旧 Next 前端替 owner 自己的浏览器持有的凭据，推送一直按 owner 对待，
+ * 两处不一致会让同一个人推送照发、@ 却被中和。peer token 与停用的永远不算。
+ */
+export function isOwnerPrincipal(p: Pick<Principal, "id" | "name" | "disabled" | "peer">): boolean {
+  if (p.peer || p.disabled) return false;
+  return p.id === OWNER_PRINCIPAL_ID || (p.name === "web-ui" && p.id.startsWith("token:"));
 }
 
 /**
