@@ -1,6 +1,6 @@
 "use client";
 /**
- * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 完成检查单 → 最近 3 件事 → 审查 → 参与者 → 对它说 → PR。
+ * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 完成检查单 → 最近 3 件事 + 回放（T12c）→ 审查 → 参与者（含在跑的审查员）→ 对它说 → PR。
  * 桌面是首页右侧的面板；手机是全屏页，必须 portal 到 body（会话页在 transform 横滑容器里，web/CLAUDE.md PWA 第 4 条）。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
@@ -14,7 +14,10 @@ import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, typ
 import { Icon, type IconName } from "./collab-icons";
 import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { ChecklistSec } from "./collab-checklist";
+import { CollabReplay } from "./collab-replay-player";
+import type { RunningReviewer } from "./collab-reviewers";
 import { CollabSay } from "./collab-say";
+import v2 from "./collab-v2.module.css";
 import { useTaskDetail } from "./use-collab";
 import s from "./collab.module.css";
 
@@ -147,10 +150,34 @@ function ReviewSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
   );
 }
 
-function PeopleSec({ d, exec, action, tr }: { d: TaskDetail; exec: AgentSession | undefined; action: LineAction; tr: Tr }) {
+/** 在跑的审查员（PM 的后台子 agent，collab-reviewers.ts）：没有名字可言，写派它的 PM、第几轮、跑了多久 */
+function RunningReviewerRow({ r, now, tr }: { r: RunningReviewer; now: number; tr: Tr }) {
+  const bits = [r.round ? tr("第 {r} 轮", { r: r.round }) : "", r.adversarial ? tr("对抗式") : "", tr("{pm} 派出", { pm: r.pm }), tr("已跑 {d}", { d: fmtDuration(Math.max(0, now - r.startedAt), tr) })];
+  return (
+    <div className={s.pp}>
+      <span className={s.av}>
+        <Icon name="shieldCheck" size={14} />
+      </span>
+      <div>
+        <div className={s.n}>
+          {tr("审查员")}
+          <span className={v2.rvTag} style={{ marginLeft: 8 }}>
+            <span className={v2.rvLive} />
+            {tr("在跑")}
+          </span>
+        </div>
+        <div className={s.d}>{bits.filter(Boolean).join(" · ")}</div>
+      </div>
+    </div>
+  );
+}
+
+function PeopleSec(props: { d: TaskDetail; exec: AgentSession | undefined; action: LineAction; running: readonly RunningReviewer[]; now: number; tr: Tr }) {
+  const { d, exec, action, running, now, tr } = props;
   return (
     <Sec title={tr("参与者")}>
       <div className={s.ppl}>
+        {running.map((r) => <RunningReviewerRow key={r.id} r={r} now={now} tr={tr} />)}
         {participants(d).map((p) => (
           <div key={`${p.role}:${p.name}`} className={s.pp}>
             <span className={s.av}>
@@ -175,7 +202,8 @@ function PeopleSec({ d, exec, action, tr }: { d: TaskDetail; exec: AgentSession 
   );
 }
 
-function Body({ d, line, action, stream, tr }: { d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; tr: Tr }) {
+function Body(props: { d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr }) {
+  const { d, line, action, stream, running, now, tr } = props;
   const agents = useChatStore((st) => st.state.agents);
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
   const working = isWorking(stream, exec?.busy);
@@ -186,8 +214,9 @@ function Body({ d, line, action, stream, tr }: { d: TaskDetail; line: LineView; 
       <StagesSec d={d} line={line} tr={tr} />
       <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} />
+      <CollabReplay d={d} tr={tr} />
       <ReviewSec d={d} tr={tr} />
-      <PeopleSec d={d} exec={exec} action={action} tr={tr} />
+      <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} />
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">
@@ -216,6 +245,8 @@ export function CollabDetail(props: {
   line: LineView | null;
   action: (l: LineView) => LineAction;
   actions: ActionMap;
+  /** 这条任务上在跑的审查员（T12c） */
+  reviewers: readonly RunningReviewer[];
   onClose: () => void;
 }) {
   const { project, id, rev, now, ov, onClose } = props;
@@ -247,7 +278,8 @@ export function CollabDetail(props: {
         </button>
       </div>
       {load.status === "ok" && line ? (
-        <Body d={load.d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined} tr={tr} />
+        <Body d={load.d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined}
+          running={props.reviewers} now={now} tr={tr} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
       )}

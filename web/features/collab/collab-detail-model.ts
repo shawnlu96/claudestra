@@ -35,7 +35,7 @@ export interface Segment {
   state: "past" | "current" | "future";
 }
 
-export function stageSegments(d: Pick<TaskDetail, "task" | "timeline">): Segment[] {
+export function stageSegments(d: { task: Pick<LedgerTaskView, "stage" | "stageBefore">; timeline: readonly StageEntryView[] }): Segment[] {
   const cur = d.task.stage === "blocked" ? d.task.stageBefore ?? "build" : d.task.stage;
   const curIdx = SEGMENTS.findIndex((g) => g.includes(cur));
   return SEGMENTS.map((g, i) => {
