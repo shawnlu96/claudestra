@@ -132,17 +132,18 @@ describe("CodexQueueSink：after_interrupt 分支", () => {
     const queued: string[] = [];
     const typed: string[] = [];
     const logs: string[] = [];
+    const notices: { text: string; fyi?: true }[] = [];
     const s = new CodexQueueSink({
       source: "claudestra",
       getSessionId: () => "019e0000-0000-7000-8000-000000000001",
       heldThreadIds: async () => ["019e0000-0000-7000-8000-000000000001"],
       onSwitch: () => undefined,
       queue: async (_s, t) => (queued.push(t), { ok: true, out: "", err: "" }),
-      notify: async () => undefined,
+      notify: async (_c, text, fyi) => void notices.push({ text, fyi }),
       log: (l) => void logs.push(l),
       typeIn: typeIn ? async (t) => (typed.push(t), typeIn(t)) : undefined,
     });
-    return { s, queued, typed, logs };
+    return { s, queued, typed, logs, notices };
   }
 
   test("带 after_interrupt → 打字投递、不走 queue；这个标记不出现在 <channel> 属性里", async () => {
@@ -158,6 +159,9 @@ describe("CodexQueueSink：after_interrupt 分支", () => {
     await h.s.deliver("x", { after_interrupt: "true" });
     expect(h.queued.length).toBe(1);
     expect(h.logs.some((l) => l.includes("退回 codex queue"))).toBe(true);
+    // 消息其实排进了队列：提示只在本频道发（fyi），不走 reply——否则 bridge 当成 agent 答了这条（对抗式第 3 轮 P2-6）
+    expect(h.notices.length).toBe(1);
+    expect(h.notices[0].fyi).toBe(true);
   });
 
   test("没有标记 → 照常 queue，不碰 TUI", async () => {

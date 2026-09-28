@@ -5,17 +5,16 @@
  */
 import { recordMetric } from "../lib/metrics.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { matchStopWord } from "../lib/stop-words.js";
-import { MASTER_SESSION, windowTarget } from "../lib/tmux-helper.js";
+import { ownerStopOf } from "../lib/stop-words.js";
 import { preemptHeadline, stopHeadline } from "../lib/turn-cuts.js";
 import { stopTyping } from "./components.js";
 import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
 import type { PreemptResult } from "../lib/interrupt-gate.js";
-import { interruptGate } from "./interrupt-gate.js";
+import { interruptGate, lastAbortResult } from "./interrupt-gate.js";
 import type { Envelope } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
-import { turnCuts } from "./turn-cuts.js";
+import { agentWindow, turnCuts } from "./turn-cuts.js";
 
 const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 
@@ -33,10 +32,11 @@ const toolsAt = (agent: string, runtime: string | undefined) => inflightTools(ag
  * 人类 request 到达、投递之前调：目标主回合在跑就打断（CC / Codex；Pi steer 不打断），停字三种运行时都打断。
  * 真打断了（键发出、画面确认停下）才记 cut、加「这条消息打断了你」的抬头；「停」不管打没打断都记一条「停」类 cut
  * （压掉续做提醒、Autopilot 不推进），抬头照实写打断没打断。发键失败只记日志，消息照常投递。
+ * 停字和「解除叫停」只认 owner：外源（非 owner 的 API 用户）的「停」按普通消息处理，也解不开 owner 的「停」。
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<void> {
-  const stop = matchStopWord(env.content).stop;
-  turnCuts.noteHuman(channelId, stop);
+  const { owner, stop } = ownerStopOf(env);
+  if (owner) turnCuts.noteHuman(channelId, stop);
   const { runtime } = await resolveTurnWindow(channelId, controlChannelId());
   const tools = toolsAt(agent, runtime);
   const queuedBefore = stop && runtime === "codex" ? turnCuts.codexQueuedBefore(channelId) : [];
@@ -49,11 +49,13 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
   if (!r.fired && !stop) return;
   const cut = turnCuts.record({
     channelId, agent, runtime, cause: stop ? "stopword" : "preempt",
-    byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] },
+    byMessageId: env.meta.messageId, byName: senderName(env), tools: r.fired ? tools : { inflight: [] }, interrupted: r.fired,
   });
   if (!stop) return void (env.meta.interruptNote = preemptHeadline(cut));
-  // Pi 的中止靠扩展里的 abort()，发出去没有回执：如实写「已请求」
-  const outcome = r.fired ? (runtime === "pi" ? "requested" : "fired") : r.why === "not_busy" ? "not_busy" : "failed";
+  // Pi 的中止靠扩展里的 abort()：有回执 = 真停了，等不到回执如实写「已请求」；扩展回「本来就空闲」= 没有在跑的回合
+  const pi = runtime === "pi";
+  const outcome = r.fired ? (pi && lastAbortResult(channelId) !== "aborted" ? "requested" : "fired")
+    : r.why === "not_busy" || (pi && r.why === "no_keys") ? "not_busy" : "failed";
   env.meta.interruptNote = stopHeadline(cut, outcome, queuedBefore);
   console.log(`⏹ 停字${r.fired ? "打断" : `（没发键：${r.why}）`} ${agent}（${runtime ?? "claude-code"}）`);
 }
@@ -61,16 +63,16 @@ export async function preemptForHuman(env: Envelope, channelId: string, agent: s
 /**
  * 手动停止（Discord ⚡ 按钮 / /interrupt / API）：按运行时发键，真发出了就记一条「停」类 cut（不提醒续做）、
  * 记指标、停 typing，并把回合状态收尾成 done——被打断的 CC 回合不发 Stop hook，不收尾的话 web 黄点常驻、busy 补锁复活。
- * 发键出错原样抛给调用方回报；keys 为空 = 空闲 / 刚打断过，调用方各自回执。
+ * 发键出错原样抛给调用方回报；keys 为空 = 空闲 / 刚按过一次停，调用方各自回执。刚自动抢占过就等够最小间隔再发，不丢这次停。
  */
 export async function manualInterrupt(
   channelId: string, win: string, runtime: string | undefined, agent: string, trigger: "button" | "slash" | "api",
 ): Promise<{ keys: readonly string[]; deduped?: true }> {
   const tools = toolsAt(agent, runtime);
   const r = await interruptGate.manual(channelId, win, runtime);
-  // 空闲 / 1.5 秒内刚发过键（多半是抢占）也记：人按了停，续做提醒和 Autopilot 都该停下
-  turnCuts.record({ channelId, agent, runtime, cause: "manual", tools: r.keys.length ? tools : { inflight: [] } });
-  if (r.deduped) return r; // 刚发过键、新消息正在投：别把正在开始的回合收成 done
+  if (r.deduped) return r; // 刚按过一次停：那一次已经记过、收过尾
+  // 空闲也记：人按了停，续做提醒和 Autopilot 都该停下
+  turnCuts.record({ channelId, agent, runtime, cause: "manual", tools: r.keys.length ? tools : { inflight: [] }, interrupted: r.keys.length > 0 });
   if (r.keys.length) recordMetric("agent_interrupt", { channelId, agent, meta: { trigger } });
   stopTyping(channelId);
   clearSafetyTimer(channelId);
@@ -84,7 +86,7 @@ export async function interruptAgentByName(name: string, channelId: string): Pro
   const isMaster = name === "master" || name === "0";
   const regs = isMaster ? [] : await readRegistryAgents().catch(() => []); // 读不到就按 CC 的打断键发：人要停，宁可发
   const runtime = regs.find((a) => a.name === name)?.runtime;
-  return manualInterrupt(channelId, isMaster ? `${MASTER_SESSION}:0` : windowTarget(name), runtime, isMaster ? "master" : name, "api");
+  return manualInterrupt(channelId, agentWindow(name), runtime, isMaster ? "master" : name, "api");
 }
 
 /**

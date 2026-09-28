@@ -176,7 +176,7 @@ import { statePath } from "./lib/paths.js";
 import { controlFor, managedFor } from "./lib/runtimes/index.js";
 import { stopNeedsPaneRecheck } from "./lib/runtimes/window-ops.js";
 import { onCodexInterrupt, preemptForHuman } from "./bridge/preempt.js";
-import { setExtensionAbort } from "./bridge/interrupt-gate.js";
+import { noteRuntimeCaps, onAbortAck, setExtensionSocket } from "./bridge/interrupt-gate.js";
 import { isCutNotice, turnCuts } from "./bridge/turn-cuts.js";
 import { withInterruptNote } from "./lib/turn-cuts.js";
 import { createKeyedSerial } from "./lib/keyed-serial.js";
@@ -417,7 +417,7 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
-setExtensionAbort((ch) => !!clients.get(ch) && (clients.get(ch)!.ws.send(JSON.stringify({ type: "abort" })), true)); // Pi 的停：扩展里 abort()
+setExtensionSocket((ch) => clients.get(ch)?.ws); // Pi 的停：经 ws 请扩展 abort()，等回执（bridge/interrupt-gate.ts）
 
 
 /** agent→agent 消息现在要不要押着:只看主回合,只剩后台在跑不算,见 lib/turn-state.ts */
@@ -854,7 +854,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   try {
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true");
+    turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     // 入站消息镜像：srcKind(user=Discord 人类/api=Web 用户/local=agent/bridge)让 web 把他端用户发言实时画成气泡、
     // 排除 agent/bridge 注入；fromId(user_id)让 web 认出哪些是本人的其它来源(自己的 Discord 也靠右)
     const inData = { direction: "in", from: meta.user || "?", fromId: meta.user_id, srcKind: env.from.kind, text: env.content, threadId: env.meta.threadId };
@@ -1772,7 +1772,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         pid: typeof msg.pid === "number" ? msg.pid : undefined,
         ppid: typeof msg.ppid === "number" ? msg.ppid : undefined,
       });
-      turnCuts.setCodexTypeIn(msg.channelId, msg.typeIn === true); // Codex channel-server 会打字投递才对它抢占(老版本打断后消息会卡在 queue)
+      noteRuntimeCaps(msg.channelId, msg); // Codex 会打字投递才对它抢占(老版本打断后消息会卡在 queue)、Pi 扩展会中止才发 abort
       console.log(`📌 注册频道: ${msg.channelId} (共 ${clients.size} 个)`);
       ws.send(JSON.stringify({ type: "registered", channelId: msg.channelId }));
 
@@ -2253,6 +2253,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       break;
     }
 
+    case "abort_ack": onAbortAck(msg); break; // Pi 扩展的中止回执
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) turnCuts.rearmAfterInterrupt(msg.channelId); break; // 退回了 queue:下一条再打字
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "route_to_agent": {

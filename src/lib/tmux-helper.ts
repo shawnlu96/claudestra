@@ -204,7 +204,7 @@ export function tmuxInterrupt(target: string): void {
 const escFile = (key: string, ext: string) => join(RUNTIME_DIR, `esc-${key.replace(/[^\w.-]/g, "_")}.${ext}`);
 export const tmuxSendEscape = createEscGuard({
   windowId: async (t) => (await tmuxRaw(["list-panes", "-t", t, "-F", "#{window_id}"])).split("\n")[0] || null,
-  lock: (key) => acquireLock(escFile(key, "lock"), 5_000, 10_000),
+  lock: (key) => acquireLock(escFile(key, "lock"), 12_000, 5_000), // 等锁 > 过期：持锁进程崩了也等得到回收，不退化成不持锁发
   readShared: (key) => {
     try { return Number(readFileSync(escFile(key, "at"), "utf8")) || 0; } catch { return 0; /* 还没有人给这个窗口发过 Esc */ }
   },

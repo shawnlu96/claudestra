@@ -195,7 +195,8 @@ export interface RuntimeControl {
   interruptOnlyWhenBusy?: boolean;
   /**
    * 打断不靠按键、靠运行时里的扩展：Pi 的 C-c 只清空输入框（从不中止回合），真正的中止是扩展上下文的 abort()，
-   * bridge 经 ws 发 {type:"abort"} 给 Claudestra 扩展（src/pi/claudestra-extension.ts）。发出去就算「已请求」，没有回执。
+   * bridge 经 ws 发 {type:"abort", id} 给 Claudestra 扩展（src/pi/claudestra-extension.ts），扩展回 {type:"abort_ack", id, result}。
+   * 扩展在注册帧里声明 abort:true 才发（老扩展会默默忽略）；接线见 bridge/interrupt-gate.ts。
    */
   abortVia?: "extension";
 }

@@ -1,3 +1,5 @@
+import { isOwnerSource } from "./delegate-marker.js";
+
 /**
  * 「停」字识别：只认整句（去掉标点空白后不超过 8 个字）就是停字，或同一个停字叠用（停停停、stop stop）。
  * 句首停字后面接着说别的（「停！先别合」「Stop hook 为啥没触发」「等等，还有一个需求」）一律不算：那是一句话，交给 agent 自己判断，
@@ -29,4 +31,13 @@ export function matchStopWord(text: string): StopMatch {
   if (!norm || GO_ON_RE.test(norm)) return { stop: false };
   const bare = norm.replace(PUNCT, "");
   return { stop: !!bare && bare.length <= MAX_WHOLE && STOP_WORDS.some((w) => isRepeatOf(bare, w)) };
+}
+
+/**
+ * 一条人类消息是不是 owner 的「停」：停字（和它解除叫停的反面）只认 owner 本人（lib/delegate-marker.ts isOwnerSource）。
+ * 外源（非 owner 的 API 用户）发「停」按普通消息处理：否则他们能中止 owner 的活、挂住 Autopilot，或者随口一句话解除 owner 的「停」。
+ */
+export function ownerStopOf(env: { from: { kind: string; owner?: boolean; peer?: string }; content: string }): { owner: boolean; stop: boolean } {
+  const owner = isOwnerSource(env.from);
+  return { owner, stop: owner && matchStopWord(env.content).stop };
 }

@@ -5,7 +5,10 @@
 import { describe, expect, test } from "bun:test";
 import { TurnCuts } from "../src/bridge/turn-cuts.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { CUT_TTL_MS, inflightFrom, type CutEvent } from "../src/lib/turn-cuts.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CUT_TTL_MS, inflightFrom, stopHeadline, type CutEvent } from "../src/lib/turn-cuts.js";
 
 const T0 = Date.parse("2026-09-28T08:00:00Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -15,11 +18,12 @@ const start = (id: string, name: string, cmd: string, at = T0): CutEvent => ({
 });
 const tools = inflightFrom([start("t1", "Bash", DEPLOY)]);
 
-function book() {
+function book(opts: { path?: string; escAt?: () => number } = {}) {
   let now = T0;
-  const b = new TurnCuts(null, () => now);
+  const b = new TurnCuts(opts.path ?? null, () => now, async () => opts.escAt?.() ?? 0);
   return { b, tick: (ms: number) => void (now += ms), at: () => now };
 }
+const flush = () => new Promise((r) => setTimeout(r, 0)); // 会话记录打断标记的处理要先查一次 Esc 时刻（异步）
 const env = (id: string, text: string, from: Envelope["from"] = { kind: "api", name: "owner", tokenId: "owner" } as Envelope["from"], ts = ""): Envelope =>
   ({
     from, to: { kind: "local", channelId: "ch" } as Envelope["to"], intent: "request", content: text,
@@ -130,18 +134,33 @@ describe("「停」与 Autopilot（P2-8）", () => {
 
 describe("终端里自己按的打断（P1-1 第二条）", () => {
   const interrupted = (at: number) => ({ type: "turn_interrupted", ts: iso(at + 2_000), data: { ts: iso(at) }, chatId: "ch", agent: "a" });
-  test("bridge 没发过键 → 记一条「停」类 cut，Autopilot 让位", () => {
+  test("bridge 没发过键 → 记一条「停」类 cut，Autopilot 让位", async () => {
     const { b, at } = book();
     b.onEvent(interrupted(at()));
+    await flush();
     expect(b.get("ch")?.cause).toBe("terminal");
     expect(b.interruptHold("ch")).toBe("stopped");
   });
-  test("bridge 刚发过键 → 是自己的回声，不记", () => {
+  test("bridge 刚发过键 → 是自己的回声，不记", async () => {
     const { b, at, tick } = book();
     b.noteKeySent("ch", "preempt");
     tick(400);
     b.onEvent(interrupted(at()));
+    await flush();
     expect(b.get("ch")).toBeUndefined();
+  });
+  test("闸门外 bridge 发的 Esc（取消 AUQ、wedge 救回，都走 tmuxSendEscape）→ 不当成人在终端里叫停（对抗式第 3 轮 P2-9）", async () => {
+    let escAt = 0;
+    const { b, at, tick } = book({ escAt: () => escAt });
+    escAt = at();
+    tick(600);
+    b.onEvent(interrupted(at()));
+    await flush();
+    expect(b.get("ch")).toBeUndefined();
+    tick(60_000); // 很久以前发过的 Esc 不算
+    b.onEvent(interrupted(at()));
+    await flush();
+    expect(b.get("ch")?.cause).toBe("terminal");
   });
   test("回声判定用那一行写进会话记录的时间，不用 watcher 读到的时间", () => {
     const { b, at, tick } = book();
@@ -235,10 +254,65 @@ describe("Workflow 审查补充（#148 @a24b688）", () => {
     expect(c.lastDone?.summary).toBe(DEPLOY);
   });
 
-  test("停止按钮在抢占后 1.5 秒内按下（被去重、没发键）也记成停", () => {
+  test("停止按钮在抢占后马上按下也记成停", () => {
     const { b } = book();
     preempt(b, "m2");
     b.record({ channelId: "ch", agent: "a", cause: "manual", tools: { inflight: [] } });
     expect(b.get("ch")?.state).toBe("stopped");
+  });
+});
+
+describe("对抗式第 3 轮（@57b5354）", () => {
+  const stopCut = (b: TurnCuts, runtime?: string, interrupted?: boolean) =>
+    b.record({ channelId: "ch", agent: "a", runtime, cause: "stopword", tools: { inflight: [] }, ...(interrupted === undefined ? {} : { interrupted }) });
+
+  test("P2-3：「停」挡住 Autopilot 不设期限（2 小时、一天后仍然停着），owner 再开口才放行", () => {
+    const { b, tick } = book();
+    stopCut(b);
+    tick(CUT_TTL_MS * 4 + 1);
+    b.record({ channelId: "other", agent: "x", cause: "preempt", tools: { inflight: [] } }); // 触发一次清理
+    expect(b.interruptHold("ch")).toBe("stopped");
+    tick(24 * 3_600_000);
+    expect(b.interruptHold("ch")).toBe("stopped");
+    b.noteHuman("ch", false);
+    expect(b.interruptHold("ch")).toBeNull();
+  });
+
+  test("P2-3：「停」和「owner 又开口了」都落盘：bridge 重启后照旧", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "turn-cuts-")), "turn-cuts.json");
+    const a = book({ path });
+    stopCut(a.b);
+    expect(book({ path }).b.interruptHold("ch")).toBe("stopped");
+    a.b.noteHuman("ch", false);
+    expect(book({ path }).b.interruptHold("ch")).toBeNull();
+  });
+
+  test("P2-5：Codex 空闲时经 queue 投、马上开跑的那条不算「排在队列里」", () => {
+    const { b } = book();
+    b.setCodexTypeIn("ch", true);
+    b.noteDelivered(env("m1", "部署 X"), "ch", false, false);
+    b.noteDelivered(env("m2", "顺便把 Y 发布"), "ch", false, true);
+    expect(b.codexQueuedBefore("ch")).toEqual(["顺便把 Y 发布"]);
+  });
+
+  test("P2-5：Codex 停字没发出键（空闲 / 被拦）→ 下一条照常走 queue，不去打字", () => {
+    const { b } = book();
+    b.setCodexTypeIn("ch", true);
+    stopCut(b, "codex", false);
+    expect(b.takeAfterInterrupt("ch")).toBe(false);
+    stopCut(b, "codex", true);
+    expect(b.takeAfterInterrupt("ch")).toBe(true);
+  });
+
+  test("P1-B / P2-4：停字抬头列出这一轮里停之前还送来过的消息；没在跑时提醒可能是在回答问题", () => {
+    const { b, tick } = book();
+    b.noteDelivered(env("m1", "看下日志"), "ch");
+    tick(1_000);
+    b.noteDelivered(env("m2", "部署 Y"), "ch");
+    const cut = b.record({ channelId: "ch", agent: "a", runtime: "pi", cause: "stopword", byMessageId: "m3", tools: { inflight: [] } });
+    const h = stopHeadline(cut, "fired");
+    expect(h).toContain("「部署 Y」");
+    expect(h).toContain("先别照做");
+    expect(stopHeadline(cut, "not_busy")).toContain("在回答你刚问的问题");
   });
 });

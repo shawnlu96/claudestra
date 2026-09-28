@@ -11,6 +11,7 @@ type Main = TurnState["main"];
 function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; afterKey?: Main; allow?: boolean; noKeys?: boolean } = {}) {
   let clock = 1_790_000_000_000;
   const keys: string[] = [];
+  const keyAt: number[] = [];
   const preempted: string[] = [];
   let probes = 0;
   let main: Main = opts.main ?? "busy";
@@ -25,17 +26,18 @@ function harness(opts: { main?: Main; runtime?: string; probeDelayMs?: number; a
       if (opts.noKeys) return [];
       const k = rt === "codex" ? "Escape" : "C-c";
       keys.push(k);
+      keyAt.push(clock);
       main = opts.afterKey ?? "idle"; // 键起作用：主回合停下（afterKey 模拟焦点在浮层、键没起作用）
       return [k];
     },
     ...(opts.allow === undefined ? {} : { allow: () => opts.allow! }),
     onPreempted: (agent) => void preempted.push(agent),
-    sleep: async () => undefined,
+    sleep: async (ms) => void (clock += ms),
     now: () => clock,
   };
   const gate = createInterruptGate(deps, 4_000);
   return {
-    gate, keys, preempted,
+    gate, keys, keyAt, preempted,
     probes: () => probes,
     setMain: (m: Main) => void (main = m),
     advance: (ms: number) => void (clock += ms),
@@ -140,6 +142,14 @@ describe("preempt stop：停字", () => {
     expect(r.fired || r.why === "not_busy").toBe(true);
   });
 
+  test("抢占后马上说「停」：键落在插话那条开的回合上——离抢占的键至少 1.2s（收尾）+ 1.5s（最小间隔）", async () => {
+    const h = harness();
+    await h.gate.preempt("ch", "agent-a");
+    h.setMain("busy"); // 插话那条投出去、开了新一回合
+    expect((await h.gate.preempt("ch", "agent-a", { stop: true })).fired).toBe(true);
+    expect(h.keyAt[1] - h.keyAt[0]).toBeGreaterThanOrEqual(1_200 + 1_500);
+  });
+
   test("停字：画面忙 → 发键；本来空闲 → not_busy（调用方据此写「你刚才没有在跑的回合」）", async () => {
     const busy = harness();
     expect(await busy.gate.preempt("ch", "a", { stop: true })).toEqual({ fired: true });
@@ -186,7 +196,7 @@ describe("manual：停止按钮 / /interrupt / API", () => {
     }
   });
 
-  test("双击：1.5s 内第二下去重，不发键（空闲 CC 连按两次 C-c 是退出键）", async () => {
+  test("双击：1.5s 内第二下去重，不发键（两次键挨太近：CC 双 Esc 开 Rewind、Codex 双 Esc 回溯遮罩）", async () => {
     const h = harness();
     const r = await Promise.all([h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);
     expect(h.keys).toEqual(["C-c"]);
@@ -195,14 +205,12 @@ describe("manual：停止按钮 / /interrupt / API", () => {
     expect((await h.gate.manual("ch", "w", undefined)).keys).toEqual(["C-c"]);
   });
 
-  test("自动抢占之后 2s 点停止：不被 4s 抢占冷却吞掉，照发；1s 内才去重", async () => {
+  test("自动抢占之后马上点停止：不去重、不被 4s 抢占冷却吞掉，等够最小间隔照发（要停的是插话刚开的回合）", async () => {
     const h = harness();
     await h.gate.preempt("ch", "agent-a");
-    h.advance(1_000);
-    expect((await h.gate.manual("ch", "w", undefined)).deduped).toBe(true);
-    h.advance(1_000);
     expect((await h.gate.manual("ch", "w", undefined)).keys).toEqual(["C-c"]);
     expect(h.keys).toEqual(["C-c", "C-c"]);
+    expect(h.keyAt[1] - h.keyAt[0]).toBeGreaterThanOrEqual(1_200 + 1_500); // 插话那条投出去（收尾 1.2s）之后再过最小间隔
   });
 
   test("刚手动停过：4s 内人类消息不再自动抢占", async () => {
@@ -213,10 +221,12 @@ describe("manual：停止按钮 / /interrupt / API", () => {
     expect(h.keys).toEqual(["C-c"]);
   });
 
-  test("抢占 + 停止按钮 + API 三路同时到：只发一次键", async () => {
+  test("抢占 + 停止按钮 + API 三路同时到：抢占一下、停止一下（等插话投出去再隔够 1.5s），第二个停止去重", async () => {
     const h = harness({ probeDelayMs: 10 });
-    await Promise.all([h.gate.preempt("ch", "agent-a"), h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);
-    expect(h.keys).toEqual(["C-c"]);
+    const r = await Promise.all([h.gate.preempt("ch", "agent-a"), h.gate.manual("ch", "w", undefined), h.gate.manual("ch", "w", undefined)]);
+    expect(h.keys).toEqual(["C-c", "C-c"]);
+    expect(h.keyAt[1] - h.keyAt[0]).toBeGreaterThanOrEqual(1_200 + 1_500);
+    expect((r[2] as { deduped?: true }).deduped).toBe(true);
   });
 
   test("Codex 交给运行时（它自己只在忙时发 Esc）", async () => {

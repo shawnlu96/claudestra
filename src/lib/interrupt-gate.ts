@@ -35,8 +35,13 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
   const now = deps.now ?? Date.now;
   /** 频道 → 上一次真发出键的时刻（抢占和手动共用） */
   const lastKeyAt = new Map<string, number>();
+  /** 上一次发键是停止（手动）的频道：紧跟着的又一次停止去重，紧跟着抢占的停止照发 */
+  const lastManual = new Set<string>();
   const serial = createKeyedSerial();
   const sinceKey = (ch: string) => now() - (lastKeyAt.get(ch) ?? -Infinity);
+  // 「停」（停字 / 停止按钮）离上一次发键要隔多久：上一次是抢占的话，插话那条要等收尾一拍（SETTLE_MS）之后才投，
+  // 停的键得落在它开的回合上，不能落在两回合之间的空闲里
+  const gapAfter = (ch: string) => (lastManual.has(ch) ? MANUAL_GAP_MS : SETTLE_MS + MANUAL_GAP_MS);
 
   return {
     /**
@@ -52,7 +57,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
         const since = sinceKey(channelId);
         // 刚打断过（抢占或手动）：连发的补充消息不叠加打断；停字等够最小间隔再发
         if (!stop && since <= cooldownMs) return { fired: false, why: "cooldown" };
-        if (stop && since <= MANUAL_GAP_MS) await deps.sleep(MANUAL_GAP_MS - since + 50);
+        if (stop && since <= gapAfter(channelId)) await deps.sleep(gapAfter(channelId) - since + 50);
         const { win, runtime } = await deps.resolve(channelId);
         if (!win || (!stop && !controlFor(runtime).preemptOnHumanMessage)) return { fired: false, why: "not_allowed" };
         if (deps.allow && !deps.allow(channelId, runtime, stop)) return { fired: false, why: "not_allowed" };
@@ -60,6 +65,7 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
         if (main === "unknown" && !stop) console.warn(`⚠️ ${win} 忙闲判据失效（TUI 文案可能已变），跳过自动打断`);
         if (main !== "busy" && !(stop && main === "unknown")) return { fired: false, why: "not_busy" };
         lastKeyAt.set(channelId, now());
+        lastManual.delete(channelId);
         const keys = await deps.interrupt(win, runtime, channelId, "preempt");
         if (!keys.length) return { fired: false, why: "no_keys" };
         deps.onPreempted(agent, channelId);
@@ -75,13 +81,16 @@ export function createInterruptGate(deps: InterruptGateDeps, cooldownMs = 4_000)
 
     /**
      * 手动打断（停止按钮 / /interrupt / API）：人明确要停，不看画面判据，按运行时发键（Codex 自己只在忙时发 Esc）。
-     * 只受最小间隔约束：离上一次发键（含刚才的自动抢占）不足 MANUAL_GAP_MS 就去重。发键出错原样抛给调用方回报。
+     * 离上一次发键不足 MANUAL_GAP_MS：上一次也是停止（双击、按钮 + API 同时到）就去重；上一次是自动抢占就等够再发
+     * （和停字一样）——抢占后紧接着按停，要停的是插话刚开的那一回合，去重掉就一个键都没发。发键出错原样抛给调用方回报。
      */
     manual(channelId: string, win: string, runtime: string | undefined): Promise<{ keys: readonly string[]; deduped?: true }> {
       return serial(channelId, async () => {
-        if (sinceKey(channelId) <= MANUAL_GAP_MS) return { keys: [], deduped: true as const };
+        const since = sinceKey(channelId);
+        if (since <= MANUAL_GAP_MS && lastManual.has(channelId)) return { keys: [], deduped: true as const };
+        if (since <= gapAfter(channelId)) await deps.sleep(gapAfter(channelId) - since + 50);
         const keys = await deps.interrupt(win, runtime, channelId, "manual");
-        if (keys.length) lastKeyAt.set(channelId, now());
+        if (keys.length) lastKeyAt.set(channelId, now()), lastManual.add(channelId);
         return { keys };
       });
     },

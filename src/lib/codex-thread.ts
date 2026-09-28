@@ -168,8 +168,11 @@ export interface CodexQueueSinkDeps {
   onSwitch(sid: string): void;
   /** `codex queue --thread <sid> --message <text>` */
   queue(sid: string, text: string): Promise<CmdResult>;
-  /** 投不进去时告诉发消息的人（never silent） */
-  notify(chatId: string | undefined, text: string): Promise<void>;
+  /**
+   * 投不进去时告诉发消息的人（never silent，走 reply：带 wait 的 API 调用方据此收到结果）。
+   * fyi = 消息其实已经排进队列、只是晚点处理：只在本频道提示，不能走 reply（bridge 会当成 agent 答了这条、清掉补答挂账）
+   */
+  notify(chatId: string | undefined, text: string, fyi?: true): Promise<void>;
   log?(line: string): void;
   /**
    * 打断之后的第一条（bridge 在 meta.after_interrupt 标出）改成粘进 TUI 回车：Esc 之后 queue 会一直卡住（lib/codex-tui-submit.ts）。
@@ -242,10 +245,10 @@ export class CodexQueueSink implements InboundSink {
       if (typed && !typed.ok) {
         d.log?.(`⌨️ 打断后改打字投递没做成（${typed.why}），退回 codex queue`);
         d.onTypeInFailed?.();
-        await d.notify(chatId, TYPEIN_FAILED_NOTICE).catch((e) => d.log?.(`通知发送方失败（投递照常走 queue）: ${(e as Error).message}`));
+        await d.notify(chatId, TYPEIN_FAILED_NOTICE, true).catch((e) => d.log?.(`通知发送方失败（投递照常走 queue）: ${(e as Error).message}`));
       }
       if (typed?.ok) d.log?.(typed.unconfirmed ? "⚠️ 打断后已粘进 Codex 输入框，但没看到提交，需要人看一眼" : "⌨️ 打断后的消息已直接打进 Codex");
-      if (typed?.ok && typed.unconfirmed) await d.notify(chatId, TYPEIN_UNCONFIRMED_NOTICE).catch((e) => d.log?.(`通知发送方失败: ${(e as Error).message}`));
+      if (typed?.ok && typed.unconfirmed) await d.notify(chatId, TYPEIN_UNCONFIRMED_NOTICE, true).catch((e) => d.log?.(`通知发送方失败: ${(e as Error).message}`));
       const r: CmdResult = typed?.ok ? { ok: true, out: "", err: "" } : await d.queue(decision.sid, text);
       if (r.ok && preamble) this.preamblePending = undefined;
       if (!r.ok) {

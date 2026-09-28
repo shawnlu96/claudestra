@@ -52,6 +52,8 @@ export interface Cut {
   resumed?: boolean;
   /** 之前还没收尾的 cut（按先后，已摊平） */
   chain: Cut[];
+  /** 「停」类：owner 之后又说了别的话的时刻（有了它 Autopilot 才接着推进） */
+  goAt?: number;
 }
 
 /** event-bus 事件里用得到的部分 */
@@ -240,15 +242,21 @@ export type StopOutcome = "fired" | "requested" | "not_busy" | "failed";
  * 停字消息的抬头：不续做。fired = 已替你打断；requested = 已请运行时中止、没有回执（Pi）；not_busy = 本来就没有在跑的回合；
  * failed（键发了画面仍在忙 / 这个运行时这次不能由 bridge 打断）= 没能替你打断，请自己停下。
  * queuedBefore：停之前已经排进 Codex 队列、会在这条之后才送到的消息摘录——它们送到时别照做。
+ * 被打断的这一轮里、停之前还送来过的消息（cut.alsoPending：Pi steer 进去的、冷却期里的补充）也列出来：它们已经在上下文里，别照做。
+ * not_busy 时多半是在回答你刚问的问题（「要停止 X 吗」「停止」），提醒按回答处理。
  */
 export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBefore: readonly string[] = []): string {
   const what = outcome === "fired" && c ? `已替你打断（${doingText(c)}）`
     : outcome === "requested" ? "已请运行时中止当前回合（没有回执：如果还在跑，你自己马上停下）"
-    : outcome === "not_busy" ? "你刚才没有在跑的回合" : "bridge 没能替你打断，请你自己马上停下手上的事";
+    : outcome === "not_busy" ? "你刚才没有在跑的回合（如果这是在回答你刚问的问题，就按回答处理，不是叫停）"
+    : "bridge 没能替你打断，请你自己马上停下手上的事";
   const queued = queuedBefore.length
     ? `\n停之前还有 ${queuedBefore.length} 条消息排在队列里、会在这条之后送到（${queuedBefore.map((q) => `「${clip(norm(q), 30)}」`).join("、")}）：它们是停之前发的，送到时先别照做，问用户还要不要。`
     : "";
-  return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}]`;
+  const also = c?.alsoPending?.length
+    ? `\n这一轮里停之前还送来过 ${c.alsoPending.map((t) => `「${clip(norm(t.excerpt), 30)}」`).join("、")}：也是停之前发的，先别照做，问用户还要不要。`
+    : "";
+  return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}${also}]`;
 }
 
 /**
