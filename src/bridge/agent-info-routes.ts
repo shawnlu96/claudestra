@@ -80,12 +80,19 @@ function teamField(principal: Principal, r?: Pick<RegistryAgent, "parent" | "tas
   return { ...(parent ? { parent } : {}), ...(r.task ? { task: r.task } : {}) };
 }
 
+/** 上一次读台账任务是否失败：日志只在「正常 → 出错」和恢复时各打一次，库坏着时每次刷列表不重复报 */
+let ledgerFailing = false;
+
 /** 执行者行尾的阶段小标（docs 10-ledger §4；与 T4 的 task 字符串不同名）。台账读不了只是少了小标，列表照常出 */
 function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks">): Map<string, LedgerTaskRef> | null {
   try {
-    return io.ledgerTasks?.() ?? null;
+    const r = io.ledgerTasks?.() ?? null;
+    if (ledgerFailing) console.log("📒 GET /agents 读台账任务恢复");
+    ledgerFailing = false;
+    return r;
   } catch (e) {
-    console.error(`⚠️ GET /agents 读台账任务失败（这次列表不带 ledgerTask）: ${(e as Error).message}`);
+    if (!ledgerFailing) console.error(`⚠️ GET /agents 读台账任务失败（列表先不带 ledgerTask，恢复前不再重复报）: ${(e as Error).message}`);
+    ledgerFailing = true;
     return null;
   }
 }

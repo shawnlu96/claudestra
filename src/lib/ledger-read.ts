@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
 import { stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
-import { getMeta, LEDGER_PATH, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
+import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
 const READ_BUSY_TIMEOUT_MS = 200;
@@ -48,6 +48,8 @@ export class LedgerReader {
         db.close(); // 写者正在建表：这一轮当作没有，下一轮再开
         return null;
       }
+      // 库比代码新 = CLI 先升级了、bridge 还没重启：只读照样能读（迁移只追加），提醒一次该重启了；同一份文件只开一次，不会刷屏
+      if (v > LEDGER_SCHEMA_VERSION && id !== this.fileId) console.warn(`⚠️ 台账库版本 ${v} 比 bridge 的 ${LEDGER_SCHEMA_VERSION} 新：重启 bridge 以跟上新字段`);
     } catch (e) {
       db.close();
       throw e;

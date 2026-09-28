@@ -2,7 +2,7 @@
  * /api/v1/agents/:name/{info,external} 的鉴权与「共享中关闭须确认」分支（src/bridge/agent-info-routes.ts）。
  * registry / principals 用注入的假数据，runManager 用记录器——不碰真实状态文件，也不起 bridge。
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { agentListExtras, handleAgentInfoRoutes, type AgentInfoIo } from "../src/bridge/agent-info-routes";
 import type { Principal } from "../src/lib/principals";
 
@@ -214,10 +214,24 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     }
     expect(calls).toBe(1);
   });
-  test("读台账出错：列表照常出，只是不带 ledgerTask", async () => {
+  test("读台账出错：列表照常出，只是不带 ledgerTask；库坏着时反复刷列表只报一次，恢复再报一次", async () => {
     const broken = { ...io, ledgerTasks: () => { throw new Error("database is locked"); } };
-    const x = (await agentListExtras(owner, broken))("agent-t8c", { task: "T" });
-    expect(x.task).toBe("T");
-    expect(x.ledgerTask).toBeUndefined();
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const logs = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 3; i++) {
+        const x = (await agentListExtras(owner, broken))("agent-t8c", { task: "T" });
+        expect(x.task).toBe("T");
+        expect(x.ledgerTask).toBeUndefined();
+      }
+      expect(errors).toHaveBeenCalledTimes(1);
+      const ok = { ...io, ledgerTasks: () => new Map() };
+      await agentListExtras(owner, ok);
+      await agentListExtras(owner, ok);
+      expect(logs.mock.calls.filter((c) => String(c[0]).includes("恢复")).length).toBe(1);
+    } finally {
+      errors.mockRestore();
+      logs.mockRestore();
+    }
   });
 });

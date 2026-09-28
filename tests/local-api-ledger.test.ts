@@ -2,7 +2,7 @@
  * bridge/local-api/ledger.ts + bridge/ledger-feed.ts：台账读接口的权限矩阵、项目校验、视图、docs 路径穿越，
  * 以及 SSE 过滤（ledger 事件只给 canReadLedger）与懒启动的每秒轮询。库是临时目录里的真实文件。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import { handleLedgerApi, setLedgerApiProjectsForTest } from "../src/bridge/loca
 import { canReadLedger, effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import { taskMetrics } from "../src/lib/ledger-metrics.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { setMeta } from "../src/lib/ledger-write.js";
 import type { Principal } from "../src/lib/principals.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -64,6 +65,12 @@ async function get(path: string, p: Principal = OWNER, method = "GET"): Promise<
   const r = new Request(`http://bridge.local/api/v1${path}`, { method });
   return (await handleLocalApi(r, new URL(r.url), p))!;
 }
+/** 轮询 1s 一次：等到条件成立为止，最多 3s（CI 机器慢时一两百毫秒的余量不够） */
+async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond() && Date.now() < end) await Bun.sleep(50);
+}
+
 /** 绕过 URL 规范化，直接把原始路径交给 handler（`..` 在 new URL 里会先被折叠掉） */
 async function raw(path: string): Promise<Response> {
   return (await handleLedgerApi(new Request("http://bridge.local/"), path, OWNER))!;
@@ -106,6 +113,21 @@ describe("GET /ledger/:project", () => {
       closeLedger(dbPath);
     }
     expect(body.projectEvents.map((e: { kind: string }) => e.kind)).toEqual(["freeze", "meta"]);
+  });
+
+  test("schema 报库里的 user_version：库比代码新时如实报，并在打开时提醒一次", async () => {
+    const path = tempLedgerPath();
+    await runLedgerScript(path, `seedLedger(path);\nconst c = new Database(path);\nc.exec("PRAGMA user_version = 99");\nc.close();`);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    setLedgerFeedForTest({ path, emit: () => {} });
+    try {
+      for (let i = 0; i < 2; i++) expect(((await (await get("/ledger/p")).json()) as any).schema).toBe(99);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain("重启 bridge");
+    } finally {
+      warn.mockRestore();
+      setLedgerFeedForTest({ path: dbPath, emit: () => {} });
+    }
   });
 
   test("任务详情：全部事件 + 时间线；别的项目的任务 404", async () => {
@@ -165,6 +187,28 @@ describe("GET /ledger/:project/docs/<path>", () => {
     expect((await get("/ledger/p/docs/sub")).status).toBe(404);
   });
 
+  test("docsDir 被设成 / 、家目录、/tmp（傘形根）→ 404，不把整机的 .md / 图片放出去", async () => {
+    const sub = mkdtempSync("/tmp/ledger-umbrella-");
+    writeFileSync(join(sub, "a.md"), "真实存在");
+    const name = sub.slice("/tmp/".length);
+    const cases: [string, string, number][] = [
+      [sub, "a.md", 200], // 对照：同一个文件从正常 docsDir 读得到
+      ["/tmp", `${name}/a.md`, 404],
+      ["/private/tmp", `${name}/a.md`, 404],
+      ["/", `tmp/${name}/a.md`, 404],
+      [process.env.HOME!, "x.md", 404],
+    ];
+    for (const [dir, rel, status] of cases) {
+      const w = openLedger(dbPath);
+      try {
+        setMeta(w, { actor: "owner" }, { project: "empty", key: "docsDir", value: dir });
+      } finally {
+        closeLedger(dbPath);
+      }
+      expect([dir, (await get(`/ledger/empty/docs/${rel}`)).status]).toEqual([dir, status]);
+    }
+  });
+
   test("项目没设 docsDir → 404", async () => {
     expect((await get("/ledger/empty/docs/T8c.md")).status).toBe(404);
   });
@@ -189,7 +233,7 @@ describe("SSE：ledger 事件只给 canReadLedger；轮询在第一条能读的�
     });
     try {
       await runLedgerScript(path, `appendEvent(openLedger(path), { actor: "owner" }, { project: "p", target: "", kind: "note", text: "x" });`);
-      await Bun.sleep(1300);
+      await waitFor(() => MATRIX.every(([name, , ok]) => !ok || got.get(name)!.some((e) => e.type === "ledger")));
       for (const [name, , ok] of MATRIX) {
         const ledger = got.get(name)!.filter((e) => e.type === "ledger");
         expect(ledger.map((e) => e.data)).toEqual(ok ? [{ project: "p" }] : []);
@@ -208,11 +252,11 @@ describe("SSE：ledger 事件只给 canReadLedger；轮询在第一条能读的�
     try {
       for (const [, p, ok] of MATRIX) if (!ok) sseEventAllow(p);
       await runLedgerScript(path, `appendEvent(openLedger(path), { actor: "owner" }, { project: "p", target: "", kind: "note", text: "x" });`);
-      await Bun.sleep(1200);
+      await Bun.sleep(1500); // 等「没有」只能等满：轮询要是起了，1s 一轮早该发了
       expect(emitted).toEqual([]);
       sseEventAllow(OWNER); // 第一条能读的连接：先记游标，之后的写入才发
       await runLedgerScript(path, `appendEvent(openLedger(path), { actor: "owner" }, { project: "q", target: "", kind: "note", text: "y" });`);
-      await Bun.sleep(1200);
+      await waitFor(() => emitted.length > 0);
       expect(emitted).toEqual(["q"]);
     } finally {
       setLedgerFeedForTest({ path: dbPath, emit: () => {} });

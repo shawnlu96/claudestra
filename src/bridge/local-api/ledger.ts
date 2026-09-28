@@ -10,9 +10,9 @@ import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, resolve, sep } from "node:path";
 import { canReadLedger } from "../../lib/devices.js";
 import { PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../../lib/ledger-read.js";
-import { LEDGER_SCHEMA_VERSION, getMeta } from "../../lib/ledger-store.js";
+import { LEDGER_SCHEMA_VERSION, getMeta, schemaVersion } from "../../lib/ledger-store.js";
 import type { Principal } from "../../lib/principals.js";
-import { normalizeDir, PROJECTS_PATH, readProjects } from "../../lib/projects.js";
+import { isUmbrellaDir, normalizeDir, PROJECTS_PATH, readProjects } from "../../lib/projects.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { ledgerDb } from "../ledger-feed.js";
 
@@ -63,7 +63,8 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
     const meta = { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } };
     return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], projectEvents: [], now });
   }
-  return apiJson(200, { ok: true, project, exists: true, schema: LEDGER_SCHEMA_VERSION, projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), now });
+  // schema 报库里实际的版本：CLI 先升级、bridge 还没重启时它会比代码常量新（LedgerReader 打开时已记一次日志）
+  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), now });
 }
 
 /**
@@ -82,6 +83,8 @@ function serveDoc(docsDir: string | null, rawRel: string): Response {
     // docsDir 指向的目录不在了：对调用方就是没有文档
     return notFound("doc not found");
   }
+  // 纵深防御：meta 的写者身份是自报的（docs 10-ledger §2），docsDir 被设成 / 或家目录就等于整机的 .md / 图片可读
+  if (isUmbrellaDir(dir) || isUmbrellaDir(root)) return notFound("ledger has no docsDir");
   const inRoot = (p: string) => p.startsWith(root.endsWith(sep) ? root : root + sep);
   // 先按字面比一次：`..` 穿越在碰文件系统之前就拒，不给根外文件当「存不存在」的探针
   if (!inRoot(resolve(root, rel))) return forbidden("path escapes docsDir");
@@ -94,7 +97,13 @@ function serveDoc(docsDir: string | null, rawRel: string): Response {
   if (!inRoot(real)) return forbidden("path escapes docsDir");
   const type = DOC_TYPES[extname(real).toLowerCase()];
   if (!DOC_TYPES[extname(rel).toLowerCase()] || !type) return notFound("doc not found");
-  const st = statSync(real);
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(real);
+  } catch {
+    // realpath 之后文件恰好被删：和不存在一样
+    return notFound("doc not found");
+  }
   if (!st.isFile()) return notFound("doc not found");
   if (st.size > DOC_MAX_BYTES) return apiJson(413, { ok: false, error: "doc too large" });
   return new Response(Bun.file(real), { headers: { "Content-Type": type, "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store" } });
