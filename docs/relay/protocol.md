@@ -175,7 +175,7 @@ claudestra-relay-auth-v2
 
 ### 4.1 接收方验签（peer 路径，实例 MUST 做）
 
-中继看得见明文（本版没有端到端加密），所以「拿着 token 的中继或别的实例不能冒充发起方」靠这一步：
+中继看得见明文（本版没有端到端加密），所以「拿着 token 的中继或别的实例不能冒充发起方」靠这一步。**T25 修复前不成立**：路径模式会把 `Authorization` 原样转给 bridge，而 bridge 不看来源就收 Bearer；这一步也不核 token 是否签发给 `from`（见 [e2e-design.md](./e2e-design.md) §1）：
 
 1. `x-claudestra-key` 形状合法，且 `keyFingerprint(key) === from`；否则 `error bad_signature`。`from` 由中继按握手结果盖章，别的实例顶不了 A 的钥匙，中继虽能盖任意 `from` 却签不出 A 的签名。
 2. 按 `instance-key.ts` 的 canonical 验：`claudestra-req-v1\n<METHOD>\n<path>\n<ts>\n<sha256(body) hex>`，body 是完整请求正文的原始字节（流式正文先收齐再验——peer 路径的正文都是小 JSON）；偏差 ±300 秒。不过 → `bad_signature`。
@@ -308,9 +308,9 @@ IP 的取法与握手限流相同：`RELAY_TRUST_PROXY=1` 时取 `X-Forwarded-Fo
 
 中继**能**：看见帧内明文（含 token 与正文）；知道谁在线、谁调了谁、多大、多久、从哪个 IP 来；拒绝转发；替换 front 送出的任何内容（它就是 HTTPS 终点）。
 
-中继**不能**：冒充实例发 peer 请求（没有私钥，接收方验签）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
+中继**不能**：冒充实例发 peer 请求（没有私钥，接收方验签。**T25 修复前不成立**，原因见 §4.1 的注）；未经 B 列为联系人就替 A 敲 B 的门（除兑换邀请那一条限流路径）。
 
-明说的残余风险，留给下一版端到端加密：隧道里的 Web 流量（含会话 cookie）对中继可见；中继若能直连某台实例的 Web 端口（同机部署）就能绕过一切。缓解：不在跑 bridge 的机器上跑中继；Web 与 peer 入口默认只听本机。中继日志 MUST 只记信封：时间、from、to、id、方法、路径前缀、大小、状态、耗时；不记头与正文，不记 `/c/<code>` 的短码值。
+明说的残余风险（端到端加密的设计与分期见 [e2e-design.md](./e2e-design.md)）：隧道里的 Web 流量（含会话 cookie）对中继可见；中继若能直连某台实例的 Web 端口（同机部署）就能绕过一切。缓解：不在跑 bridge 的机器上跑中继；Web 与 peer 入口默认只听本机。中继日志 MUST 只记信封：时间、from、to、id、方法、路径前缀、大小、状态、耗时；不记头与正文，不记 `/c/<code>` 的短码值。
 
 ## 10. 测试向量
 
