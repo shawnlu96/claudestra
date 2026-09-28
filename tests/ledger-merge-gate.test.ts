@@ -240,3 +240,22 @@ describe("续派不被幂等键吞掉（判定只认最近一条 dispatch）", (
     expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
   });
 });
+
+describe("一次派审只算一次（dispatchKindFor）", () => {
+  test("同一次派审被两条 review 用到：第二条不算（说不清哪种审查员审的），--to merge 被拦", async () => {
+    ship("aaaa1111", "build");
+    await run("agent-disp", "dispatch", "T1", "--adversarial");
+    await run("agent-disp", ...verdict("changes"));
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+    expect(owesAdversarial(policy(), events(), round(), { verdict: "pass" })).toBe(true);
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).code).toBe("conflict");
+    // 记下这条套用旧派审的 pass：说不清是哪种审查员审的，归调度助理核对，不算还清
+    await run("agent-disp", ...verdict("pass"));
+    expect(owesAdversarial(policy(), events(), round())).toBe(true);
+    expect(handler()?.role).toBe("dispatcher");
+    expect(getTask(db, "T1")?.stage).toBe("review");
+    // 重新派对抗式、判通过才放行
+    await run("agent-disp", "dispatch", "T1", "--adversarial");
+    expect((await run("agent-disp", ...verdict("pass", "merge"))).task.stage).toBe("merge");
+  });
+});

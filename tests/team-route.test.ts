@@ -166,6 +166,8 @@ describe("routeEvents：外源文本、对抗式、找不到 PM", () => {
     recordReview(db, { actor: "agent-disp", now: 4 }, { taskId: "T1", reviewer: "regular", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     expect(route(cut, pol)).toEqual([]); // 调度助理自己记的，也不去告诉 PM「通过」
     team(null);
+    // 一次派审只算一次（ledger-handler.ts dispatchKindFor）：第二条常规结论要有自己的派审
+    appendEvent(db, owner(5), { project: "p", target: "T1", kind: "dispatch", data: { reviewer: "regular", round: 1, policy: "最后一轮对抗式" } });
     const cut2 = listEvents(db).at(-1)?.seq ?? 0;
     recordReview(db, owner(5), { taskId: "T1", reviewer: "regular", verdict: "pass", p0: 0, p1: 0, p2: 0 });
     const n = route(cut2, pol);

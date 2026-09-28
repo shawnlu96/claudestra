@@ -87,11 +87,13 @@ const deliveredBetween = (events: readonly LedgerEvent[], a: number, b: number):
 /**
  * 这条 review（第 round 轮、seq 之前的 head）是哪种审查员审的：取 seq 之前最近一次派审，它记的 round 与 head 都对得上、
  * 并且派审之后没有再交付过（交付不带 head 时说不清换没换代码，一律算换了），才算；否则 null（这一轮没派审，或者派审之后又交付了）。
+ * 一次派审只算一次：派审之后、这条 review 之前已有别的 review 也是 null——否则续派没记上时，下一条结论会套用上一位审查员的种类。
  * 种类取 dispatch.reviewer（代码写的）；review 的 reviewer 是自由文本，不作数。
  */
 function dispatchKindFor(events: readonly LedgerEvent[], seq: number, round: unknown): LastReview["kind"] {
   const d = events.findLast((e) => e.kind === "dispatch" && e.seq < seq);
   if (!d || d.data.round !== round || deliveredBetween(events, d.seq, seq).length) return null;
+  if (events.some((e) => e.kind === "review" && e.seq > d.seq && e.seq < seq)) return null;
   if (!sameHead(typeof d.data.head === "string" ? d.data.head : null, headAt(events, seq))) return null;
   return d.data.reviewer === "adversarial" ? "adversarial" : d.data.reviewer === "regular" ? "regular" : null;
 }
