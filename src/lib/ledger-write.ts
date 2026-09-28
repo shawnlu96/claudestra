@@ -34,7 +34,7 @@ import {
   type WriteCtx,
   type WriteResult,
 } from "./ledger-checks.js";
-import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Role, type Stage } from "./ledger-stages.js";
 import { checksAllClear } from "./ledger-probes.js";
 import { getItem, getMeta, LedgerError, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
@@ -175,12 +175,18 @@ function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<
 
 // ── 阶段 ──
 
-/** 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件 */
-function applyMove(db: Database, ctx: WriteCtx, task: LedgerTask, move: StageMove, primary: boolean, text = ""): { task: LedgerTask; event: LedgerEvent } {
+/**
+ * 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件。
+ * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）；
+ * 别的调用方传它就绕过了角色判定，tests/ledger-migrate.test.ts 查着只有那一处 import。
+ */
+export function applyMove(
+  db: Database, ctx: WriteCtx, task: LedgerTask, move: StageMove, primary: boolean, text = "", asRole?: Role,
+): { task: LedgerTask; event: LedgerEvent } {
   if (task.stage !== move.from) {
     throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 ${move.from}`, { stage: task.stage, rev: task.rev });
   }
-  const role = roleOf(ctx.actor, task, getMeta(db, task.project).pms);
+  const role = asRole ?? roleOf(ctx.actor, task, getMeta(db, task.project).pms);
   if (!role) throw new LedgerError("forbidden", `${ctx.actor} 不是任务 ${task.id} 的执行者，也不在项目 ${task.project} 的 PM 名单里`);
   const check = canTransition(task, move.to, role);
   if (!check.ok) throw new LedgerError(check.code === "forbidden" ? "forbidden" : "invalid", check.reason, { stage: task.stage });

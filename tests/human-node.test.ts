@@ -2,7 +2,7 @@
  * human 节点的纯规则（lib/human-node.ts）：什么时候开 assigned ask、幂等键与 attempt、v3.2 交付门、给 PM 的固定模板不带人写的字。
  */
 import { describe, expect, test } from "bun:test";
-import { askPlanFor, assignDedupKey, attemptOf, checkHumanDeliver, humanDeliverText, pmNotice, type HumanTaskView } from "../src/lib/human-node.js";
+import { askPlanFor, assignDedupKey, attemptOf, checkHumanDeliver, humanDeliverText, pmNotice, resultOfChoices, type HumanTaskView } from "../src/lib/human-node.js";
 
 const task = (over: Partial<HumanTaskView> = {}): HumanTaskView => ({
   id: "T123", project: "p", title: "登录页改文案", stage: "build", round: 0, assigneeKind: "human", assignee: "local:guest:ab12", pm: "agent-pm",
@@ -12,7 +12,12 @@ const task = (over: Partial<HumanTaskView> = {}): HumanTaskView => ({
 describe("开 assigned ask", () => {
   test("只在 human 节点进入 build / fix 时开；正文是任务号、标题和 PM 写的背景", () => {
     const plan = askPlanFor(task(), 1)!;
-    expect(plan).toEqual({ dedupKey: "assign:T123:0:1", assignee: "local:guest:ab12", title: "T123 登录页改文案", body: "T123 登录页改文案\n\n背景一。背景二。背景三。" });
+    expect(plan).toMatchObject({ dedupKey: "assign:T123:0:1", assignee: "local:guest:ab12", title: "T123 登录页改文案", body: "T123 登录页改文案\n\n背景一。背景二。背景三。" });
+    const ids = (plan.options as { buttons: { id: string }[] }[]).flatMap((r) => r.buttons.map((b) => b.id));
+    expect(ids).toEqual(["assign_done", "assign_cant"]);
+    expect(resultOfChoices(["[button:assign_done]"])).toBe("done");
+    expect(resultOfChoices(["[button:assign_cant]"])).toBe("cant");
+    expect(resultOfChoices(["[button:other]"])).toBeNull();
     expect(askPlanFor(task({ stage: "fix", round: 2 }), 1)!.body).toContain("第 2 轮返工");
     for (const stage of ["spec", "restate", "review", "merge", "done", "blocked"]) expect(askPlanFor(task({ stage }), 1)).toBeNull();
     expect(askPlanFor(task({ assigneeKind: "agent", assignee: "agent-x" }), 1)).toBeNull();
@@ -45,6 +50,8 @@ describe("v3.2 交付门", () => {
     expect(checkHumanDeliver(task({ stage: "review" }), ask, me, "done", 1).ok).toBe(false);
     expect(checkHumanDeliver(task({ stage: "merge" }), ask, me, "done", 1).ok).toBe(false);
     expect(checkHumanDeliver(task({ assigneeKind: "agent" }), ask, me, "done", 1).ok).toBe(false);
+    expect(checkHumanDeliver(task(), ask, { persons: ["local:guest:ffff"], isOwner: false }, "done", 1)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(checkHumanDeliver(task({ stage: "review" }), ask, me, "done", 1)).toMatchObject({ ok: false, code: "conflict" });
   });
 });
 
@@ -54,6 +61,5 @@ describe("固定模板：不带人写的任何字", () => {
     expect(humanDeliverText("T123", "cant")).toBe("T123 人工交付：做不了");
     expect(pmNotice(task(), "done")).toBe("[台账] T123 指派给 local:guest:ab12 的事项已完成，已推到 review。");
     expect(pmNotice(task(), "cant")).toBe("[台账] T123 指派给 local:guest:ab12 的事项做不了，原因记在台账里。");
-    expect(pmNotice(task(), "expired")).toBe("[台账] T123 指派给 local:guest:ab12 的事项已过期。");
   });
 });

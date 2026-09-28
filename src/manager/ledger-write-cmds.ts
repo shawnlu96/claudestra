@@ -5,6 +5,7 @@
 import { normalizePeerAgent } from "../lib/ledger-checks.js";
 import { parseExtraChecks, parseExtraRepo } from "../lib/ledger-probes.js";
 import { STAGES, TASK_KINDS, type Stage, type TaskKind } from "../lib/ledger-stages.js";
+import { reopenAssignment } from "../lib/ledger-human.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
   appendEvent,
@@ -27,7 +28,8 @@ const TASK_FLAGS: Record<string, string> = {
   title: "title", item: "itemId", agent: "agent", "assignee-kind": "assigneeKind", assignee: "assignee", pm: "pm", branch: "branch", pr: "pr", head: "headSHA", spec: "spec", model: "model",
 };
 const ITEM_VALUED = [...Object.keys(ITEM_FLAGS), "extra", "project", "dedup"];
-const TASK_VALUED = [...Object.keys(TASK_FLAGS), "extra", "dedup"];
+const TASK_VALUED = [...Object.keys(TASK_FLAGS), "extra", "brief", "dedup"];
+const BRIEF_MAX = 600;
 
 /** assignee 按类型归一：本机 agent → registry 键；peer_agent 的指纹转小写、agent 部分 NFKC + 小写；human 原样。格式由库校验 */
 function normalizeAssignee(v: string, kind: string | null): string | null {
@@ -132,10 +134,22 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   c.requireManager(project, "建任务");
   const kind = c.need("kind") as TaskKind;
   if (!TASK_KINDS.includes(kind)) throw new LedgerError("invalid", `--kind 只能是 ${TASK_KINDS.join(" / ")}`);
-  const fields = fieldsFrom(c, TASK_FLAGS);
+  const fields = withBrief(c, fieldsFrom(c, TASK_FLAGS), {});
   const r = createTask(c.db, c.ctx(), { ...fields, project, id: c.p.pos[1] ?? "", title: c.need("title"), kind } as never);
   const link = r.row.agent ? await linkRegistry(c, r.row.agent, r.row.title) : {};
   return { ok: true, task: r.row, duplicate: r.duplicate, ...link };
+}
+/**
+ * --brief：PM 给 human 节点写的几句背景，存 extra.brief，bridge 开指派 ask 时放进正文（规格卡原文不截取、不外发）。
+ * 空串 = 清掉；和 --extra 同给时并进 --extra，否则并进任务现有的 extra（setTask 整列替换 extra）。
+ */
+function withBrief(c: LedgerCli, fields: Record<string, unknown>, curExtra: Record<string, unknown>): Record<string, unknown> {
+  const raw = c.p.flags.brief;
+  if (raw === undefined) return fields;
+  const brief = raw.trim();
+  if (brief.length > BRIEF_MAX) throw new LedgerError("invalid", `--brief 最多 ${BRIEF_MAX} 字`);
+  const { brief: _old, ...rest } = (fields.extra as Record<string, unknown> | undefined) ?? curExtra;
+  return { ...fields, extra: brief ? { ...rest, brief } : rest };
 }
 
 /** 合并之后 PR / 分支 / head 就是完成检查单的依据，执行者不能再改（PM 纠错仍可） */
@@ -156,7 +170,7 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   }
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
-  const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: fieldsFrom(c, TASK_FLAGS, cur.assigneeKind) as never });
+  const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: withBrief(c, fieldsFrom(c, TASK_FLAGS, cur.assigneeKind), cur.extra) as never });
   // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent / --assignee 就再挂一次（幂等）
   const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined || c.p.flags.assignee !== undefined : r.row.agent !== cur.agent);
   return { ok: true, task: r.row, duplicate: r.duplicate, ...(relink ? await linkRegistry(c, r.row.agent as string, r.row.title) : {}) };
@@ -195,6 +209,12 @@ function review(c: LedgerCli): Result {
     path: c.p.flags.path, text: c.p.flags.text, move,
   });
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate };
+}
+
+/** human 节点的指派 ask 过期了、或 blocked 回到 build 而 round 没变：重开一条（角色与阶段由 ledger-human.ts 判） */
+function askReopen(c: LedgerCli): Result {
+  const r = reopenAssignment(c.db, c.ctx(), c.task(c.p.pos[1]).id);
+  return { ok: true, task: r.row, event: r.event, attempt: r.event.data.attempt, duplicate: r.duplicate };
 }
 
 /** decision / deploy / rollback：PM / master / owner；data 由各自的旗标组成（verify 在 ledger-verify.ts，由系统核对） */
@@ -245,16 +265,17 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
     valued: [...TASK_VALUED, "kind", "project"],
     usage:
       "task-new <id> --title <t> --kind code|investigate|ops [--item --agent | --assignee-kind agent|human|peer_agent " +
-      "--assignee <agent 名 | local:<principalId> | <fp>/<agent>>] [--pm --branch --pr --head --spec --model --extra]",
+      "--assignee <agent 名 | local:<principalId> | <fp>/<agent>>] [--pm --branch --pr --head --spec --model --extra --brief <给人的背景>]",
     run: taskNew,
   },
   "task-set": {
     valued: [...TASK_VALUED, "rev"],
-    usage: "task-set <id> --rev <n> [--title --item --agent | --assignee-kind --assignee] [--pm --branch --pr --head --spec --model --extra]",
+    usage: "task-set <id> --rev <n> [--title --item --agent | --assignee-kind --assignee] [--pm --branch --pr --head --spec --model --extra --brief]",
     run: taskSet,
   },
   stage: { valued: ["from", "to", "text", "dedup"], usage: "stage <task> --from <当前阶段> --to <阶段> [--text]（进 verified 用 ledger verify）", run: stage },
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
+  "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了 / blocked 回来 round 没变时重开一条）", run: askReopen },
   deliver: { valued: ["head", "evidence", "from", "text", "dedup"], usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text]", run: deliverCmd },
   review: {
     valued: ["reviewer", "verdict", "p0", "p1", "p2", "path", "text", "to", "dedup"],
