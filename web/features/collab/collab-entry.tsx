@@ -7,7 +7,7 @@
 import { useEffect } from "react";
 import { ApiError } from "@/lib/api/client";
 import { fetchLedger } from "@/lib/api/ledger";
-import { useT } from "@/lib/i18n";
+import { useCollabT } from "./collab-i18n";
 import { useChatNav } from "../chat/components/nav-context";
 import { cacheOverview, setLedgerAccess, useLedgerAccess } from "./collab-cache";
 import { Icon } from "./collab-icons";
@@ -39,7 +39,7 @@ function probe(project: string) {
 }
 
 export function CollabEntry({ projectId }: { projectId: string }) {
-  const t = useT();
+  const t = useCollabT();
   const nav = useChatNav();
   const cur = useCollabNav();
   const access = useLedgerAccess(projectId);

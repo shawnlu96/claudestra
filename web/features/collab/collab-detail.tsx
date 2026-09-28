@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { useT } from "@/lib/i18n";
+import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import type { AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-line";
@@ -216,7 +216,7 @@ export function CollabDetail(props: {
   onClose: () => void;
 }) {
   const { project, id, rev, now, ov, onClose } = props;
-  const tr = useT();
+  const tr = useCollabT();
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
   const close = useDetailHistory(narrow, id, onClose);

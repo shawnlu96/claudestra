@@ -4,7 +4,7 @@
  * 点一条线在右侧开详情（手机全屏，collab-detail.tsx），首页不被替换。
  */
 import { useMemo, useState } from "react";
-import { useT } from "@/lib/i18n";
+import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
@@ -124,7 +124,7 @@ function hotOf(lines: LineView[], adv: Advance | null): { id: string | null; fro
 }
 
 export function CollabView({ project }: { project: string }) {
-  const tr = useT();
+  const tr = useCollabT();
   const nav = useChatNav();
   const { task: openTask } = useCollabNav();
   const agents = useChatStore((st) => st.state.agents);
