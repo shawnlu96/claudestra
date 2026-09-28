@@ -12,6 +12,7 @@ import { reduceAction, type ActionMap } from "./collab-action";
 import { markLedgerForbidden } from "./collab-entry";
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
+import type { BridgeEvent } from "@/lib/chat/stream-shape";
 
 export type CollabLoad = { status: "loading" } | { status: "forbidden" } | { status: "error"; message: string } | { status: "ok"; ov: LedgerOverview };
 
@@ -36,7 +37,6 @@ export function useCollab(project: string) {
   const [offset, setOffset] = useState(cached?.offset ?? 0);
   const [clock, setClock] = useState(() => Date.now());
   const [actions, setActions] = useState<ActionMap>(() => new Map());
-  const [connected, setConnected] = useState(false);
   const [rev, setRev] = useState(0);
   const [advance, setAdvance] = useState<Advance | null>(null);
   const prevStages = useRef<Map<string, Stage> | null>(null);
@@ -70,15 +70,35 @@ export function useCollab(project: string) {
   }, [project]);
 
   useEffect(() => {
+    const seen = lastOverview.get(project)?.ov;
+    prevStages.current = seen ? new Map(seen.tasks.map((t) => [t.id, t.stage])) : null;
+    setAdvance(null);
+    // 先拉一次：事件流连不上（老 bridge / 限流）也有数据看；连上后 onOpen 再全量拉一次（会中止这一次）
+    void refetch();
+    const tick = setInterval(() => setClock(Date.now()), TICK_MS);
+    return () => {
+      clearInterval(tick);
+      inflight.current?.abort();
+    };
+  }, [project, refetch]);
+  const onAction = useCallback((e: BridgeEvent) => setActions((m) => reduceAction(m, e, Date.now())), []);
+  const connected = useCollabStream(project, refetch, onAction);
+
+  return { load, now: clock + offset, actions, connected, rev, advance, refetch };
+}
+
+/**
+ * 协作视图自己的一条 /events：连上（含重连）→ 全量重拉；本项目的 ledger 事件去抖后重拉；其余交给 onAction。
+ * 卸载、页面隐藏都断开，回前台再连；断线按 2s → 30s 退避重连。返回此刻连没连着。
+ */
+function useCollabStream(project: string, refetch: () => Promise<void>, onAction: (e: BridgeEvent) => void): boolean {
+  const [connected, setConnected] = useState(false);
+  useEffect(() => {
     let alive = true;
     let ctrl: AbortController | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let debounce: ReturnType<typeof setTimeout> | undefined;
     let backoff = RETRY_MIN_MS;
-    const seen = lastOverview.get(project)?.ov;
-    prevStages.current = seen ? new Map(seen.tasks.map((t) => [t.id, t.stage])) : null;
-    setAdvance(null);
-
     const disconnect = () => {
       clearTimeout(retry);
       ctrl?.abort();
@@ -104,31 +124,24 @@ export function useCollab(project: string) {
           void refetch();
         },
         onEvent: (e) => {
-          if (e.type === "ledger") {
-            if (e.data?.project !== project) return;
-            clearTimeout(debounce);
-            debounce = setTimeout(() => void refetch(), REFETCH_DEBOUNCE_MS);
-          } else setActions((m) => reduceAction(m, e, Date.now()));
+          if (e.type !== "ledger") return onAction(e);
+          if (e.data?.project !== project) return;
+          clearTimeout(debounce);
+          debounce = setTimeout(() => void refetch(), REFETCH_DEBOUNCE_MS);
         },
       }).then(lost, lost);
     };
     const onVisibility = () => (document.visibilityState === "hidden" ? disconnect() : connect());
-
-    if (document.visibilityState === "hidden") void refetch();
     connect();
     document.addEventListener("visibilitychange", onVisibility);
-    const tick = setInterval(() => setClock(Date.now()), TICK_MS);
     return () => {
       alive = false;
       clearTimeout(debounce);
-      clearInterval(tick);
       disconnect();
-      inflight.current?.abort();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [project, refetch]);
-
-  return { load, now: clock + offset, actions, connected, rev, advance, refetch };
+  }, [project, refetch, onAction]);
+  return connected;
 }
 
 export type DetailLoad = { status: "loading" } | { status: "error"; message: string } | { status: "ok"; d: TaskDetail };

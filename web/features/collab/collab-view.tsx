@@ -16,6 +16,9 @@ import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab, type Advance } from "./use-collab";
 import s from "./collab.module.css";
 
+/** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
+const closeTask = () => openCollabTask(null);
+
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
 function Headline({ v, tr, connected, now, projectName }: { v: HomeView; tr: Tr; connected: boolean; now: number; projectName: string }) {
@@ -188,7 +191,7 @@ export function CollabView({ project }: { project: string }) {
       </div>
       {openTask && ov && (
         <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={ov} line={view?.lines.find((l) => l.id === openTask) ?? null}
-          action={(l) => lineAction(l)} onClose={() => openCollabTask(null)} />
+          action={(l) => lineAction(l)} onClose={closeTask} />
       )}
     </div>
   );

@@ -7,6 +7,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { useChatStore } from "../chat/chat-store";
+import { useChatNav } from "../chat/components/nav-context";
 import type { AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-line";
 import { participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
@@ -198,6 +199,11 @@ export function CollabDetail(props: {
   const tr = useT();
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
+  const { showContent } = useChatNav();
+  // 手机上系统返回（左滑 / 返回键）回到会话列表时，全屏详情跟着收起，不留在列表上面
+  useEffect(() => {
+    if (narrow && !showContent) onClose();
+  }, [narrow, showContent, onClose]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
