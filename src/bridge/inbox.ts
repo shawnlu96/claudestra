@@ -71,9 +71,13 @@ const PAGE_CHARS = 12_000;
 /** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
 async function readPaged(d: InboxDeps, channelId: string, readId: string, page: number, now: number): Promise<Result> {
   const q = (d.held.get(channelId) ?? []).filter(isAgentMsg);
-  const it = q.find((i) => i.env.meta.threadId === readId) ?? q.find((i) => i.env.meta.messageId === readId);
+  const byMsg = q.filter((i) => i.env.meta.messageId === readId); // 兼容按 message_id 读；它会撞，撞了不猜
+  const it = q.find((i) => i.env.meta.threadId === readId) ?? (byMsg.length === 1 ? byMsg[0] : undefined);
+  if (!it && byMsg.length > 1) {
+    return { result: { n: 0, text: `message_id=${readId} 对应 ${byMsg.length} 条，请用 thread_id 读：${byMsg.map((i) => i.env.meta.threadId).join("、")}` } };
+  }
   if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
-  const messageId = it.env.meta.messageId;
+  const { messageId, threadId } = it.env.meta;
   if (!leaseActive(it, now)) {
     d.calls.touch(channelId, it.env.from.kind === "local" ? it.env.from.channelId : undefined);
     it.lease = { batchId: `inbox_${randomUUID()}`, at: now };
@@ -82,7 +86,7 @@ async function readPaged(d: InboxDeps, channelId: string, readId: string, page: 
   const text = await entryText(d, it, now);
   const pages = Math.max(1, Math.ceil(text.length / PAGE_CHARS));
   const p = Math.min(Math.max(1, Math.floor(page)), pages);
-  const next = p < pages ? `下一页 check_inbox({ read: "${messageId}", page: ${p + 1} })；` : "";
+  const next = p < pages ? `下一页 check_inbox({ read: "${threadId}", page: ${p + 1} })；` : "";
   const head = `[📬 message_id=${messageId} 第 ${p}/${pages} 页。${next}读完处理后调 check_inbox({ ack: "${it.lease!.batchId}" }) 确认。]`;
   return { result: { n: 1, text: `${head}\n\n${text.slice((p - 1) * PAGE_CHARS, p * PAGE_CHARS)}` } };
 }
